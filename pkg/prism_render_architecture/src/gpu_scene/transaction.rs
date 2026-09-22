@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use alloc::collections::BTreeMap;
 
 use super::{
     GeometryHandle, InstanceRecord, SceneBounds, SceneHandle, SceneMaterialHandle, SceneTransform,

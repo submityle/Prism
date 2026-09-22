@@ -1,6 +1,6 @@
 //! ECS-driven GPU frame graph contracts.
 
-use std::borrow::Cow;
+use alloc::borrow::Cow;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ResourceId(pub u32);

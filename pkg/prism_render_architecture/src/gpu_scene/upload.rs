@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use alloc::collections::BTreeSet;
 
 use super::{CpuRenderScene, DirtySceneSlot, InstanceRecord, SceneFieldMask, SceneTransform};
 

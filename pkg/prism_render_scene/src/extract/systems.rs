@@ -210,9 +210,11 @@ fn instance_record(extracted: &ExtractedSceneInstance, geometry: GeometryHandle)
             let half_extents = bounds.half_extents.to_array();
             SceneBounds {
                 center: bounds.center.to_array(),
-                radius: half_extents[0]
-                    .hypot(half_extents[1])
-                    .hypot(half_extents[2]),
+                radius: bevy_math::ops::sqrt(
+                    half_extents[0] * half_extents[0]
+                        + half_extents[1] * half_extents[1]
+                        + half_extents[2] * half_extents[2],
+                ),
                 half_extents,
                 _padding: 0.0,
             }

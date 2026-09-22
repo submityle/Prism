@@ -9,6 +9,8 @@
     reason = "Architecture modules are documented as they stabilize."
 )]
 
+extern crate alloc;
+
 pub mod abi;
 pub mod backend;
 pub mod capture;
