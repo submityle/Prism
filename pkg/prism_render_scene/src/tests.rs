@@ -1,8 +1,12 @@
 use bevy_app::App;
 use bevy_ecs::{entity::Entity, schedule::Schedule, world::FromWorld};
 use bevy_mesh::{Mesh, Mesh3d};
-use prism_render_architecture::gpu_scene::{
-    InstanceRecord, SceneOperation, SceneTransaction, SceneTransform, UploadBudget, UploadStrategy,
+use prism_render_architecture::{
+    abi::GenerationalHandle,
+    gpu_scene::{
+        InstanceRecord, SceneOperation, SceneTransaction, SceneTransform, UploadBudget,
+        UploadStrategy,
+    },
 };
 
 use crate::{
@@ -90,6 +94,27 @@ fn retired_geometry_gets_a_fresh_runtime_identity() {
     assert_eq!(scene.geometry_handle(mesh.id()), None);
     let second = scene.geometry_for_mesh(mesh.id());
     assert_ne!(first, second);
+}
+
+#[test]
+fn material_registry_requires_monotonic_generations() {
+    let mut scene = RenderGpuScene::new(8);
+    let first = GenerationalHandle {
+        index: 4,
+        generation: 1,
+    };
+    assert!(scene.register_material(first));
+    assert!(scene.material_is_current(first));
+    assert!(!scene.register_material(first));
+    assert!(scene.retire_material(first));
+    assert!(!scene.material_is_current(first));
+    assert!(!scene.register_material(first));
+    let second = GenerationalHandle {
+        index: 4,
+        generation: 2,
+    };
+    assert!(scene.register_material(second));
+    assert!(!scene.register_material(first));
 }
 
 #[test]

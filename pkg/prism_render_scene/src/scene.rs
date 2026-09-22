@@ -23,6 +23,7 @@ pub struct RenderGpuScene {
     entities: HashMap<Entity, SceneHandle>,
     geometry: HashMap<AssetId<Mesh>, GeometryHandle>,
     next_geometry_index: u32,
+    material_generations: HashMap<u32, (u32, bool)>,
 }
 
 impl Default for RenderGpuScene {
@@ -41,6 +42,7 @@ impl RenderGpuScene {
             entities: HashMap::new(),
             geometry: HashMap::new(),
             next_geometry_index: 1,
+            material_generations: HashMap::new(),
         }
     }
 
@@ -118,6 +120,43 @@ impl RenderGpuScene {
 
     pub fn geometry_handle(&self, mesh: AssetId<Mesh>) -> Option<GeometryHandle> {
         self.geometry.get(&mesh).copied()
+    }
+
+    /// Registers an externally-owned material row and rejects stale reuse.
+    pub fn register_material(
+        &mut self,
+        handle: prism_render_architecture::gpu_scene::SceneMaterialHandle,
+    ) -> bool {
+        if !handle.is_valid() || handle.index == 0 {
+            return false;
+        }
+        match self.material_generations.get(&handle.index) {
+            Some((generation, _)) if *generation >= handle.generation => false,
+            _ => {
+                self.material_generations
+                    .insert(handle.index, (handle.generation, true));
+                true
+            }
+        }
+    }
+
+    pub fn material_is_current(
+        &self,
+        handle: prism_render_architecture::gpu_scene::SceneMaterialHandle,
+    ) -> bool {
+        self.material_generations.get(&handle.index) == Some(&(handle.generation, true))
+    }
+
+    pub fn retire_material(
+        &mut self,
+        handle: prism_render_architecture::gpu_scene::SceneMaterialHandle,
+    ) -> bool {
+        if !self.material_is_current(handle) {
+            return false;
+        }
+        self.material_generations
+            .insert(handle.index, (handle.generation, false));
+        true
     }
 
     pub fn retire(
