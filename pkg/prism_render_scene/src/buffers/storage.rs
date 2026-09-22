@@ -65,6 +65,12 @@ impl GpuSceneBuffers {
         }
     }
 
+    pub(crate) fn rebuild_from_mirror(&mut self, mirror: &CpuRenderScene) {
+        for index in 0..mirror.capacity() as u32 {
+            self.write_slot(mirror, index);
+        }
+    }
+
     fn write_slot(&mut self, mirror: &CpuRenderScene, index: u32) {
         if let Some(row) = instance_row(mirror, index) {
             self.instances.grow_and_set(index, row.into());

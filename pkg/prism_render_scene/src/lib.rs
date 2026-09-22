@@ -22,3 +22,6 @@ pub use diagnostics::GpuSceneDiagnostics;
 pub use extract::{ExtractedSceneInstance, PrismGpuSceneEntity};
 pub use plugin::{GpuSceneMode, PrismGpuScenePlugin};
 pub use scene::RenderGpuScene;
+
+#[cfg(test)]
+mod tests;

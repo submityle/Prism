@@ -117,6 +117,16 @@ impl RenderGpuScene {
         &self.mirror
     }
 
+    /// Rebuilds all GPU tables from the authoritative CPU mirror after device
+    /// loss or backend recreation.
+    pub fn rebuild_gpu_buffers(&mut self, buffers: &mut GpuSceneBuffers) {
+        buffers.rebuild_from_mirror(&self.mirror);
+        self.buffer_version = self.buffer_version.wrapping_add(1).max(1);
+        self.snapshot.buffer_version = self.buffer_version;
+        self.snapshot.scene_epoch = self.mirror.scene_epoch();
+        self.snapshot.instance_count = self.mirror.live_count();
+    }
+
     pub(crate) fn reclaim_completed(
         &mut self,
         completed: prism_render_architecture::gpu_scene::GpuCompletionValue,
