@@ -3,12 +3,13 @@ use bevy_asset::embedded_asset;
 use bevy_ecs::schedule::IntoScheduleConfigs;
 use bevy_render::{
     renderer::{RenderGraph, RenderGraphSystems},
-    GpuResourceAppExt, Render, RenderApp, RenderSystems,
+    ExtractSchedule, GpuResourceAppExt, Render, RenderApp, RenderSystems,
 };
 
 use crate::{
     buffers::{write_gpu_scene_buffers, GpuSceneBuffers},
     completion::{reclaim_completed_handles, track_submission, GpuCompletionTracker},
+    extract::{apply_extracted_scene_changes, extract_scene_instances},
     scene::RenderGpuScene,
 };
 
@@ -26,9 +27,13 @@ impl Plugin for PrismGpuScenePlugin {
             .init_resource::<RenderGpuScene>()
             .init_gpu_resource::<GpuSceneBuffers>()
             .init_resource::<GpuCompletionTracker>()
+            .add_systems(ExtractSchedule, extract_scene_instances)
             .add_systems(
                 Render,
-                write_gpu_scene_buffers.in_set(RenderSystems::PrepareResourcesFlush),
+                (
+                    apply_extracted_scene_changes.in_set(RenderSystems::PrepareResources),
+                    write_gpu_scene_buffers.in_set(RenderSystems::PrepareResourcesFlush),
+                ),
             )
             .add_systems(
                 RenderGraph,

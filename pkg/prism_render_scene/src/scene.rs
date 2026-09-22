@@ -1,8 +1,9 @@
-use bevy_ecs::resource::Resource;
+use bevy_ecs::{entity::Entity, resource::Resource};
 use prism_render_architecture::gpu_scene::{
     CpuRenderScene, GpuSceneSnapshot, SceneApplyReport, SceneCapacityError, SceneHandle,
     SceneHandleAllocator, SceneHandleError, SceneTransaction,
 };
+use std::collections::HashMap;
 
 use crate::{buffers::GpuSceneBuffers, completion::GpuCompletionTracker};
 
@@ -15,6 +16,7 @@ pub struct RenderGpuScene {
     mirror: CpuRenderScene,
     snapshot: GpuSceneSnapshot,
     buffer_version: u32,
+    entities: HashMap<Entity, SceneHandle>,
 }
 
 impl Default for RenderGpuScene {
@@ -30,6 +32,7 @@ impl RenderGpuScene {
             mirror: CpuRenderScene::default(),
             snapshot: GpuSceneSnapshot::default(),
             buffer_version: 1,
+            entities: HashMap::new(),
         }
     }
 
@@ -53,6 +56,22 @@ impl RenderGpuScene {
             };
         }
         report
+    }
+
+    pub fn apply_entity_transaction(
+        &mut self,
+        buffers: &mut GpuSceneBuffers,
+        transaction: &SceneTransaction,
+    ) -> SceneApplyReport {
+        self.apply_transaction(buffers, transaction)
+    }
+
+    pub fn bind_entity(&mut self, entity: Entity, handle: SceneHandle) {
+        self.entities.insert(entity, handle);
+    }
+
+    pub fn remove_entity(&mut self, entity: Entity) -> Option<SceneHandle> {
+        self.entities.remove(&entity)
     }
 
     pub fn retire(
