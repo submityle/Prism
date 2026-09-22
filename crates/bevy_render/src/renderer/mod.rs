@@ -104,6 +104,7 @@ pub fn render_system(
         crate::gpu_readback::submit_readback_commands(world, &mut encoder);
 
         render_queue.submit([encoder.finish()]);
+        crate::gpu_scene::track_frame_submission(world);
     }
 
     {

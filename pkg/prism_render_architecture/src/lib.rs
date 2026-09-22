@@ -4,6 +4,10 @@
 //! frame graph describes GPU resource access and submission dependencies.
 
 #![forbid(unsafe_code)]
+#![expect(
+    missing_docs,
+    reason = "Architecture modules are documented as they stabilize."
+)]
 
 pub mod abi;
 pub mod backend;

@@ -62,6 +62,7 @@ pub mod extract_resource {
 pub mod globals;
 pub mod gpu_component_array_buffer;
 pub mod gpu_readback;
+pub mod gpu_scene;
 pub mod material_bind_groups;
 pub mod mesh;
 pub mod occlusion_culling;
@@ -414,6 +415,7 @@ impl Plugin for RenderPlugin {
             },
             StoragePlugin,
             GpuReadbackPlugin::default(),
+            gpu_scene::GpuScenePlugin,
             OcclusionCullingPlugin,
             SparseBufferPlugin,
             MaterialBindGroupPlugin,
