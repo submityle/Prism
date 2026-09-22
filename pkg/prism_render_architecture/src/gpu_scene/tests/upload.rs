@@ -35,3 +35,14 @@ fn planner_selects_sparse_contiguous_and_full_rewrite() {
         UploadStrategy::FullRewrite
     );
 }
+
+#[test]
+fn core_upload_reports_when_atomic_tables_exceed_budget() {
+    let planner = UploadPlanner::new(UploadBudget {
+        max_bytes_per_frame: 1,
+        ..UploadBudget::default()
+    });
+    let plan = planner.plan(16, &[dirty(1, SceneFieldMask::ALL)]);
+    assert!(plan.budget_exceeded);
+    assert!(plan.estimated_bytes > 1);
+}

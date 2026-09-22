@@ -123,6 +123,7 @@ pub struct UploadPlan {
     pub previous_transforms: TableUploadPlan,
     pub bounds: TableUploadPlan,
     pub estimated_bytes: u64,
+    pub budget_exceeded: bool,
     pub deferred_slots: Vec<u32>,
 }
 
@@ -172,13 +173,7 @@ impl UploadPlanner {
             + plan.current_transforms.estimated_bytes
             + plan.previous_transforms.estimated_bytes
             + plan.bounds.estimated_bytes;
-
-        if plan.estimated_bytes > self.budget.max_bytes_per_frame {
-            // Structural and identity updates are atomic and cannot be deferred.
-            // The implementation may defer lower-priority custom tables later;
-            // the core scene tables deliberately report the over-budget plan.
-            plan.deferred_slots = Vec::new();
-        }
+        plan.budget_exceeded = plan.estimated_bytes > self.budget.max_bytes_per_frame;
         plan
     }
 
