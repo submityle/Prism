@@ -9,6 +9,22 @@ use bevy_shader::Shader;
 
 use crate::buffers::GpuSceneBindGroup;
 
+#[derive(Resource, Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum GpuSceneDebugView {
+    #[default]
+    Shaded,
+    InstanceId,
+    GeometryId,
+    MaterialId,
+    Motion,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct GpuSceneOpaquePipelineKey {
+    pub mesh: MeshPipelineKey,
+    pub debug: GpuSceneDebugView,
+}
+
 #[derive(Resource)]
 pub(crate) struct GpuSceneOpaquePipeline {
     mesh_pipeline: MeshPipeline,
@@ -34,7 +50,7 @@ pub(crate) fn init_opaque_pipeline(
 }
 
 impl SpecializedMeshPipeline for GpuSceneOpaquePipeline {
-    type Key = MeshPipelineKey;
+    type Key = GpuSceneOpaquePipelineKey;
 
     fn specialize(
         &self,
@@ -42,6 +58,10 @@ impl SpecializedMeshPipeline for GpuSceneOpaquePipeline {
         layout: &MeshVertexBufferLayoutRef,
     ) -> Result<RenderPipelineDescriptor, SpecializedMeshPipelineError> {
         let mut shader_defs = Vec::new();
+        shader_defs.push(bevy_shader::ShaderDefVal::UInt(
+            "PRISM_DEBUG_VIEW".into(),
+            key.debug as u32,
+        ));
         if layout
             .0
             .get_attribute_compression()
@@ -54,7 +74,7 @@ impl SpecializedMeshPipeline for GpuSceneOpaquePipeline {
             .get_layout(&[Mesh::ATTRIBUTE_POSITION.at_shader_location(0)])?;
         let view = self
             .mesh_pipeline
-            .get_view_layout(MeshPipelineViewLayoutKey::from(key));
+            .get_view_layout(MeshPipelineViewLayoutKey::from(key.mesh));
         Ok(RenderPipelineDescriptor {
             label: Some("prism gpu scene opaque".into()),
             layout: vec![
@@ -73,15 +93,15 @@ impl SpecializedMeshPipeline for GpuSceneOpaquePipeline {
                 shader: self.shader.clone(),
                 shader_defs,
                 targets: vec![Some(ColorTargetState {
-                    format: key.target_format(),
+                    format: key.mesh.target_format(),
                     blend: None,
                     write_mask: ColorWrites::ALL,
                 })],
                 ..Default::default()
             }),
             primitive: PrimitiveState {
-                topology: key.primitive_topology(),
-                strip_index_format: key.strip_index_format(),
+                topology: key.mesh.primitive_topology(),
+                strip_index_format: key.mesh.strip_index_format(),
                 front_face: FrontFace::Ccw,
                 cull_mode: Some(Face::Back),
                 ..Default::default()
@@ -94,7 +114,7 @@ impl SpecializedMeshPipeline for GpuSceneOpaquePipeline {
                 bias: DepthBiasState::default(),
             }),
             multisample: MultisampleState {
-                count: key.msaa_samples(),
+                count: key.mesh.msaa_samples(),
                 ..Default::default()
             },
             ..Default::default()

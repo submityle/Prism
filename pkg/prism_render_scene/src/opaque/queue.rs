@@ -13,7 +13,10 @@ use bevy_render::{
     view::{ExtractedView, RenderVisibleEntities},
 };
 
-use super::{draw::DrawGpuSceneOpaque, pipeline::GpuSceneOpaquePipeline};
+use super::{
+    draw::DrawGpuSceneOpaque,
+    pipeline::{GpuSceneDebugView, GpuSceneOpaquePipeline, GpuSceneOpaquePipelineKey},
+};
 use crate::{GpuSceneDiagnostics, GpuSceneInstanceAddress, GpuSceneMode};
 
 #[expect(
@@ -24,6 +27,7 @@ pub(crate) fn queue_gpu_scene_opaque(
     mode: Res<GpuSceneMode>,
     pipeline_cache: Res<PipelineCache>,
     pipeline: Res<GpuSceneOpaquePipeline>,
+    debug_view: Res<GpuSceneDebugView>,
     mut pipelines: ResMut<SpecializedMeshPipelines<GpuSceneOpaquePipeline>>,
     draw_functions: Res<DrawFunctions<Opaque3d>>,
     mut phases: ResMut<ViewBinnedRenderPhases<Opaque3d>>,
@@ -71,6 +75,7 @@ pub(crate) fn queue_gpu_scene_opaque(
                 render_entity,
                 main_entity,
                 view_key,
+                *debug_view,
                 draw_function,
                 &pipeline_cache,
                 &pipeline,
@@ -93,6 +98,7 @@ pub(crate) fn queue_gpu_scene_opaque(
                 render_entity,
                 main_entity,
                 view_key,
+                *debug_view,
                 draw_function,
                 &pipeline_cache,
                 &pipeline,
@@ -120,6 +126,7 @@ fn queue_one(
     render_entity: Entity,
     main_entity: bevy_render::sync_world::MainEntity,
     view_key: MeshPipelineKey,
+    debug_view: GpuSceneDebugView,
     draw_function: bevy_material::labels::DrawFunctionId,
     pipeline_cache: &PipelineCache,
     pipeline: &GpuSceneOpaquePipeline,
@@ -146,7 +153,15 @@ fn queue_one(
             mesh.primitive_topology(),
             mesh.index_format(),
         );
-    let Ok(pipeline_id) = pipelines.specialize(pipeline_cache, pipeline, key, &mesh.layout) else {
+    let Ok(pipeline_id) = pipelines.specialize(
+        pipeline_cache,
+        pipeline,
+        GpuSceneOpaquePipelineKey {
+            mesh: key,
+            debug: debug_view,
+        },
+        &mesh.layout,
+    ) else {
         return false;
     };
     phase.add(

@@ -12,6 +12,7 @@ use bevy_render::{
 };
 
 use draw::DrawGpuSceneOpaque;
+pub use pipeline::GpuSceneDebugView;
 use pipeline::{init_opaque_pipeline, GpuSceneOpaquePipeline};
 use queue::queue_gpu_scene_opaque;
 
@@ -34,6 +35,7 @@ impl Plugin for PrismGpuSceneOpaquePlugin {
         };
         render_app
             .init_resource::<SpecializedMeshPipelines<GpuSceneOpaquePipeline>>()
+            .init_resource::<GpuSceneDebugView>()
             .add_render_command::<Opaque3d, DrawGpuSceneOpaque>()
             .add_systems(
                 RenderStartup,
