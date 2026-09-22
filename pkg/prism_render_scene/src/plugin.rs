@@ -3,13 +3,14 @@ use bevy_asset::embedded_asset;
 use bevy_ecs::schedule::IntoScheduleConfigs;
 use bevy_render::{
     renderer::{RenderGraph, RenderGraphSystems},
+    sync_world::SyncToRenderWorld,
     ExtractSchedule, GpuResourceAppExt, Render, RenderApp, RenderSystems,
 };
 
 use crate::{
     buffers::{write_gpu_scene_buffers, GpuSceneBuffers},
     completion::{reclaim_completed_handles, track_submission, GpuCompletionTracker},
-    extract::{apply_extracted_scene_changes, extract_scene_instances},
+    extract::{apply_extracted_scene_changes, extract_scene_instances, PrismGpuSceneEntity},
     scene::RenderGpuScene,
 };
 
@@ -18,6 +19,7 @@ pub struct PrismGpuScenePlugin;
 
 impl Plugin for PrismGpuScenePlugin {
     fn build(&self, app: &mut App) {
+        app.register_required_components::<PrismGpuSceneEntity, SyncToRenderWorld>();
         embedded_asset!(app, "shaders/gpu_scene.wesl");
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;

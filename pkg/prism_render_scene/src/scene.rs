@@ -74,6 +74,10 @@ impl RenderGpuScene {
         self.entities.remove(&entity)
     }
 
+    pub fn handle_for_entity(&self, entity: Entity) -> Option<SceneHandle> {
+        self.entities.get(&entity).copied()
+    }
+
     pub fn retire(
         &mut self,
         handle: SceneHandle,

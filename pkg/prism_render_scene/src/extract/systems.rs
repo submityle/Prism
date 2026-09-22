@@ -38,6 +38,7 @@ pub(crate) fn extract_scene_instances(
     >,
     mut removed: Extract<RemovedComponents<PrismGpuSceneEntity>>,
     render_entities: Extract<Query<RenderEntity>>,
+    mut extracted_instances: Query<&mut ExtractedSceneInstance>,
     mut commands: Commands,
 ) {
     for main_entity in removed.read() {
@@ -49,16 +50,20 @@ pub(crate) fn extract_scene_instances(
     }
 
     for (render_entity, transform, bounds, mesh) in &changed {
-        commands
-            .entity(render_entity)
-            .insert(ExtractedSceneInstance {
-                handle: None,
-                transform: *transform,
-                bounds: bounds.copied(),
-                mesh: mesh.clone(),
-                flags: 0,
-                render_layers: 1,
-            });
+        let update = ExtractedSceneInstance {
+            handle: None,
+            transform: *transform,
+            bounds: bounds.copied(),
+            mesh: mesh.clone(),
+            flags: 0,
+            render_layers: 1,
+        };
+        if let Ok(mut existing) = extracted_instances.get_mut(render_entity) {
+            let handle = existing.handle;
+            *existing = ExtractedSceneInstance { handle, ..update };
+        } else {
+            commands.entity(render_entity).insert(update);
+        }
     }
 }
 
@@ -119,18 +124,30 @@ pub(crate) fn apply_extracted_scene_changes(
         }
     }
 
-    for entity in removed.read() {
+    let removed_entities: Vec<_> = removed.read().collect();
+    let removed_handles: Vec<_> = removed_entities
+        .iter()
+        .filter_map(|&entity| {
+            scene
+                .handle_for_entity(entity)
+                .map(|handle| (entity, handle))
+        })
+        .collect();
+    for &(_, handle) in &removed_handles {
         // Removal happens after the component value is gone. The retained map
         // in `RenderGpuScene` provides the stable handle for retirement.
-        if let Some(handle) = scene.remove_entity(entity) {
-            transaction.push(SceneOperation::Destroy { handle });
-            let _ = scene.retire(handle, &completion);
-        }
+        transaction.push(SceneOperation::Destroy { handle });
     }
 
     let transaction = transaction.finish();
     if !transaction.operations.is_empty() {
-        scene.apply_entity_transaction(&mut buffers, &transaction);
+        let report = scene.apply_entity_transaction(&mut buffers, &transaction);
+        if report.errors.is_empty() {
+            for (entity, handle) in removed_handles {
+                scene.remove_entity(entity);
+                let _ = scene.retire(handle, &completion);
+            }
+        }
     }
 }
 
