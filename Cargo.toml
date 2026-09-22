@@ -17,6 +17,8 @@ resolver = "3"
 members = [
   # All of Bevy's official crates are within the `crates` folder!
   "crates/*",
+  # Prism's experimental next-generation rendering architecture.
+  "pkg/prism_render_architecture",
   # Several crates with macros have "compile fail" tests nested inside them, also known as UI
   # tests, that verify diagnostic output does not accidentally change.
   # TODO: Use a glob pattern once they are fixed in `dependabot-core`

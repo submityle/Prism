@@ -1,0 +1,11 @@
+[package]
+name = "prism_render_architecture"
+version = "0.1.0"
+edition = "2024"
+description = "Architecture contracts for Prism's Vulkan-first renderer"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lints]
+workspace = true
+
