@@ -38,9 +38,14 @@ impl PrismGpuScenePlugin {
 /// the legacy renderer-only path.
 #[derive(Resource, Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum GpuSceneMode {
+    /// Stops extraction/consumption and keeps the legacy renderer active.
     Disabled,
+    /// Enables the GPU Scene; installed consumers replace their legacy phase.
     #[default]
     Enabled,
+    /// Enables the same consumers while publishing CPU/GPU parity diagnostics.
+    /// Pixel A/B rendering is intentionally owned by tooling, not duplicated
+    /// into the production opaque phase.
     Compare,
 }
 
