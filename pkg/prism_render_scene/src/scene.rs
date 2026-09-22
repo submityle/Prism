@@ -7,7 +7,9 @@ use prism_render_architecture::gpu_scene::{
 };
 use std::collections::HashMap;
 
-use crate::{buffers::GpuSceneBuffers, completion::GpuCompletionTracker};
+use crate::{
+    buffers::GpuSceneBuffers, completion::GpuCompletionTracker, extract::ExtractedSceneInstance,
+};
 
 const DEFAULT_MAX_SCENE_SLOTS: u32 = 1 << 24;
 
@@ -82,6 +84,12 @@ impl RenderGpuScene {
 
     pub fn handle_for_entity(&self, entity: Entity) -> Option<SceneHandle> {
         self.entities.get(&entity).copied()
+    }
+
+    pub fn handle_from_component(&self, extracted: &ExtractedSceneInstance) -> Option<SceneHandle> {
+        extracted
+            .handle
+            .filter(|handle| self.mirror.get(*handle).is_some())
     }
 
     pub fn geometry_for_mesh(&mut self, mesh: AssetId<Mesh>) -> GeometryHandle {
