@@ -21,7 +21,7 @@ pub use buffers::{
 pub use completion::GpuCompletionTracker;
 pub use consumer::{GpuSceneBufferBindings, GpuSceneReader};
 pub use diagnostics::{GpuSceneDiagnostics, GpuSceneUploadSettings};
-pub use extract::{ExtractedSceneInstance, PrismGpuSceneEntity};
+pub use extract::{ExtractedSceneInstance, GpuSceneInstanceAddress, PrismGpuSceneEntity};
 pub use plugin::{GpuSceneMode, PrismGpuScenePlugin};
 pub use scene::RenderGpuScene;
 

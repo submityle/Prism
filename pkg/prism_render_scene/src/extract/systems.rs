@@ -14,7 +14,10 @@ use crate::{
     buffers::GpuSceneBuffers,
     completion::GpuCompletionTracker,
     diagnostics::{GpuSceneDiagnostics, GpuSceneUploadSettings},
-    extract::{lifecycle::destroy_removed_entities, ExtractedSceneInstance, PrismGpuSceneEntity},
+    extract::{
+        lifecycle::destroy_removed_entities, ExtractedSceneInstance, GpuSceneInstanceAddress,
+        PrismGpuSceneEntity,
+    },
     scene::RenderGpuScene,
 };
 
@@ -79,6 +82,7 @@ pub(crate) fn extract_scene_instances(
 }
 
 pub(crate) fn apply_extracted_scene_changes(
+    mut commands: Commands,
     mut changed: Query<(Entity, &mut ExtractedSceneInstance), Changed<ExtractedSceneInstance>>,
     mut removed: RemovedComponents<ExtractedSceneInstance>,
     mut scene: ResMut<RenderGpuScene>,
@@ -101,6 +105,9 @@ pub(crate) fn apply_extracted_scene_changes(
         // Disabled is a live kill switch, not a pause: drain removals and
         // retire any previously published handles while ignoring updates.
         let removed_entities: Vec<_> = removed.read().collect();
+        for &entity in &removed_entities {
+            commands.entity(entity).remove::<GpuSceneInstanceAddress>();
+        }
         destroy_removed_entities(
             &removed_entities,
             &mut scene,
@@ -172,6 +179,9 @@ pub(crate) fn apply_extracted_scene_changes(
     }
 
     let removed_entities: Vec<_> = removed.read().collect();
+    for &entity in &removed_entities {
+        commands.entity(entity).remove::<GpuSceneInstanceAddress>();
+    }
     let removed_handles: Vec<_> = removed_entities
         .iter()
         .filter_map(|&entity| {
@@ -213,6 +223,14 @@ pub(crate) fn apply_extracted_scene_changes(
         if report.errors.is_empty() {
             for (entity, handle) in new_bindings {
                 scene.bind_entity(entity, handle);
+            }
+            for (entity, extracted) in &changed {
+                if let Some(handle) = extracted.handle {
+                    commands.entity(entity).insert(GpuSceneInstanceAddress {
+                        index: handle.index,
+                        generation: handle.generation,
+                    });
+                }
             }
             for (entity, handle) in removed_handles {
                 scene.remove_entity(entity);

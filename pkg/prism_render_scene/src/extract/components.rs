@@ -30,3 +30,10 @@ pub struct ExtractedSceneInstance {
     pub flags: u32,
     pub render_layers: u32,
 }
+
+/// Stable GPU Scene address copied onto the synchronized render entity.
+#[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GpuSceneInstanceAddress {
+    pub index: u32,
+    pub generation: u32,
+}
