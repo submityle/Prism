@@ -8,6 +8,7 @@
 extern crate alloc;
 
 mod buffers;
+mod compare;
 mod completion;
 mod consumer;
 mod diagnostics;
@@ -19,6 +20,7 @@ mod scene;
 pub use buffers::{
     GpuSceneBuffers, RenderGpuSceneBounds, RenderGpuSceneInstance, RenderGpuSceneTransform,
 };
+pub use compare::GpuSceneParityDiagnostics;
 pub use completion::GpuCompletionTracker;
 pub use consumer::{GpuSceneBufferBindings, GpuSceneReader};
 pub use diagnostics::{GpuSceneDiagnostics, GpuSceneUploadSettings};

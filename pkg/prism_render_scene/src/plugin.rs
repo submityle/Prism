@@ -13,6 +13,7 @@ use crate::{
     buffers::{
         prepare_gpu_scene_bind_group, write_gpu_scene_buffers, GpuSceneBindGroup, GpuSceneBuffers,
     },
+    compare::{compare_scene_mirror, GpuSceneParityDiagnostics},
     completion::{reclaim_completed_handles, track_submission, GpuCompletionTracker},
     diagnostics::{GpuSceneDiagnostics, GpuSceneUploadSettings},
     extract::{
@@ -59,6 +60,7 @@ impl Plugin for PrismGpuScenePlugin {
         render_app
             .init_resource::<GpuSceneMode>()
             .init_resource::<GpuSceneDiagnostics>()
+            .init_resource::<GpuSceneParityDiagnostics>()
             .init_resource::<GpuSceneUploadSettings>()
             .init_resource::<crate::extract::lifecycle::ExtractionClock>()
             .init_resource::<RenderGpuScene>()
@@ -80,6 +82,9 @@ impl Plugin for PrismGpuScenePlugin {
                 Render,
                 (
                     apply_extracted_scene_changes.in_set(RenderSystems::PrepareResources),
+                    compare_scene_mirror
+                        .after(apply_extracted_scene_changes)
+                        .in_set(RenderSystems::PrepareResources),
                     write_gpu_scene_buffers.in_set(RenderSystems::PrepareResourcesFlush),
                     prepare_gpu_scene_bind_group
                         .after(write_gpu_scene_buffers)

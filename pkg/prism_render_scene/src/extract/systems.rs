@@ -272,7 +272,7 @@ fn instance_record(extracted: &ExtractedSceneInstance, geometry: GeometryHandle)
     }
 }
 
-fn scene_transform(transform: GlobalTransform) -> SceneTransform {
+pub(crate) fn scene_transform(transform: GlobalTransform) -> SceneTransform {
     let rows = Affine3::from(transform.affine()).to_transpose();
     SceneTransform {
         rows: rows.map(|row| row.to_array()),
