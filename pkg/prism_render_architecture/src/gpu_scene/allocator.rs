@@ -179,6 +179,17 @@ impl SceneHandleAllocator {
         Ok(())
     }
 
+    /// Immediately releases a handle that was allocated but never published
+    /// to any GPU submission.
+    pub fn cancel_allocation(&mut self, handle: SceneHandle) -> Result<(), SceneHandleError> {
+        self.validate_live(handle)?;
+        let slot = &mut self.slots[handle.index as usize];
+        slot.state = SlotState::Free;
+        self.free.push(handle.index);
+        self.live_count -= 1;
+        Ok(())
+    }
+
     /// Makes all slots whose GPU work has completed available for reuse.
     pub fn reclaim_completed(&mut self, completed: GpuCompletionValue) -> u32 {
         let mut reclaimed = 0;

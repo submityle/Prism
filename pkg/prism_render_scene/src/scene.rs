@@ -48,6 +48,10 @@ impl RenderGpuScene {
         self.allocator.allocate()
     }
 
+    pub fn cancel_allocation(&mut self, handle: SceneHandle) -> Result<(), SceneHandleError> {
+        self.allocator.cancel_allocation(handle)
+    }
+
     pub fn apply_transaction(
         &mut self,
         buffers: &mut GpuSceneBuffers,

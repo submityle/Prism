@@ -55,6 +55,15 @@ fn generation_overflow_permanently_exhausts_slot() {
 }
 
 #[test]
+fn unpublished_allocation_can_be_canceled_without_generation_change() {
+    let mut allocator = SceneHandleAllocator::new(2);
+    let handle = allocator.allocate().unwrap();
+    allocator.cancel_allocation(handle).unwrap();
+    let reused = allocator.allocate().unwrap();
+    assert_eq!(reused, handle);
+}
+
+#[test]
 fn million_randomized_operations_never_alias_live_handles() {
     let mut allocator = SceneHandleAllocator::new(4096);
     let mut live = Vec::new();

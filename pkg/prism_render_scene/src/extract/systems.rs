@@ -191,7 +191,7 @@ pub(crate) fn apply_extracted_scene_changes(
             }
         } else {
             for handle in allocated_handles {
-                let _ = scene.retire(handle, &completion);
+                let _ = scene.cancel_allocation(handle);
             }
         }
     }
