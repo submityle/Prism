@@ -955,6 +955,8 @@ fn build_visibility_graph(
 
 `FrameGraphCompile` 必须生成可打印的 pass DAG、资源版本、barrier、queue batch、transient heap 和峰值显存。TSR 只需 persistent history；VSM/Nanite 需要 persistent virtual pools；Lumen 还需要跨帧 cache。三类资源不能混用生命周期规则。
 
+当前 `pkg/prism_render_architecture/frame_graph` 已完成第一版可执行编译内核：显式资源生命周期、RAW/WAR/WAW 依赖、确定性拓扑序、资源版本、跨队列 barrier 标记、queue batch/wait、按实际使用区间进行 transient alias，并包含非法引用、环、读后写和别名测试。它不取代 ECS；ECS 仍负责构图与驱动。Vulkan command recorder、image subresource/layout 和真实 semaphore/timeline 翻译属于 Vulkan backend 接入阶段。
+
 在 Frame Graph v1 完成前，只允许移植独立 Compute kernel，不允许大规模翻译 UE RDG pass sequence。
 
 ### 25.3 Shader 方案升级为“构建期 Shader Package”，不在运行时兼容 UE
