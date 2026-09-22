@@ -9,7 +9,9 @@ use bevy_render::{
 };
 
 use crate::{
-    buffers::{write_gpu_scene_buffers, GpuSceneBuffers},
+    buffers::{
+        prepare_gpu_scene_bind_group, write_gpu_scene_buffers, GpuSceneBindGroup, GpuSceneBuffers,
+    },
     completion::{reclaim_completed_handles, track_submission, GpuCompletionTracker},
     diagnostics::GpuSceneDiagnostics,
     extract::{apply_extracted_scene_changes, extract_scene_instances, PrismGpuSceneEntity},
@@ -42,6 +44,7 @@ impl Plugin for PrismGpuScenePlugin {
             .init_resource::<GpuSceneDiagnostics>()
             .init_resource::<RenderGpuScene>()
             .init_gpu_resource::<GpuSceneBuffers>()
+            .init_gpu_resource::<GpuSceneBindGroup>()
             .init_resource::<GpuCompletionTracker>()
             .add_systems(ExtractSchedule, extract_scene_instances)
             .add_systems(
@@ -49,6 +52,7 @@ impl Plugin for PrismGpuScenePlugin {
                 (
                     apply_extracted_scene_changes.in_set(RenderSystems::PrepareResources),
                     write_gpu_scene_buffers.in_set(RenderSystems::PrepareResourcesFlush),
+                    prepare_gpu_scene_bind_group.in_set(RenderSystems::PrepareBindGroups),
                 ),
             )
             .add_systems(

@@ -7,7 +7,7 @@ use bevy_render::{
     renderer::{RenderDevice, RenderQueue},
 };
 
-use super::storage::GpuSceneBuffers;
+use super::{bindings::GpuSceneBindGroup, storage::GpuSceneBuffers};
 
 pub(crate) fn write_gpu_scene_buffers(
     mut buffers: ResMut<GpuSceneBuffers>,
@@ -61,6 +61,14 @@ pub(crate) fn write_gpu_scene_buffers(
         &mut bind_groups,
         &pipelines,
     );
+}
+
+pub(crate) fn prepare_gpu_scene_bind_group(
+    buffers: Res<GpuSceneBuffers>,
+    mut bindings: ResMut<GpuSceneBindGroup>,
+    device: Res<RenderDevice>,
+) {
+    bindings.prepare(&device, &buffers);
 }
 
 fn upload<T: AtomicPod>(

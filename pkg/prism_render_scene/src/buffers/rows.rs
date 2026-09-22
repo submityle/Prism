@@ -1,8 +1,11 @@
 use bevy_math::Vec4;
-use bevy_render::{impl_atomic_pod, render_resource::AtomicPod};
+use bevy_render::{
+    impl_atomic_pod,
+    render_resource::{AtomicPod, ShaderType},
+};
 use bytemuck::{Pod, Zeroable};
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Pod, Zeroable)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Pod, ShaderType, Zeroable)]
 #[repr(C)]
 pub struct RenderGpuSceneInstance {
     pub generation: u32,
@@ -17,7 +20,7 @@ pub struct RenderGpuSceneInstance {
 
 impl_atomic_pod!(RenderGpuSceneInstance, RenderGpuSceneInstanceBlob);
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Pod, ShaderType, Zeroable)]
 #[repr(C)]
 pub struct RenderGpuSceneTransform {
     pub row_0: Vec4,
@@ -27,7 +30,7 @@ pub struct RenderGpuSceneTransform {
 
 impl_atomic_pod!(RenderGpuSceneTransform, RenderGpuSceneTransformBlob);
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Pod, ShaderType, Zeroable)]
 #[repr(C)]
 pub struct RenderGpuSceneBounds {
     pub center_radius: Vec4,

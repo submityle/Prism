@@ -46,6 +46,15 @@ impl GpuSceneBuffers {
         self.bounds.buffer()
     }
 
+    pub(crate) fn binding_buffers(&self) -> Option<(&Buffer, &Buffer, &Buffer, &Buffer)> {
+        Some((
+            self.instances()?,
+            self.current_transforms()?,
+            self.previous_transforms()?,
+            self.bounds()?,
+        ))
+    }
+
     pub(crate) fn apply_dirty_slots(
         &mut self,
         mirror: &CpuRenderScene,
