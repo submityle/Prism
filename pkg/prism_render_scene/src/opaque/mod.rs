@@ -15,6 +15,10 @@ use draw::DrawGpuSceneOpaque;
 use pipeline::{init_opaque_pipeline, GpuSceneOpaquePipeline};
 use queue::queue_gpu_scene_opaque;
 
+/// Orders the Prism opaque replacement after Bevy's material queue.
+#[derive(bevy_ecs::schedule::SystemSet, Debug, Clone, Copy, Hash, PartialEq, Eq)]
+pub struct GpuSceneOpaqueQueue;
+
 /// Standard opaque mesh consumer backed by Prism's retained GPU Scene.
 pub struct PrismGpuSceneOpaquePlugin;
 
@@ -33,7 +37,10 @@ impl Plugin for PrismGpuSceneOpaquePlugin {
             )
             .add_systems(
                 Render,
-                queue_gpu_scene_opaque.in_set(RenderSystems::QueueMeshes),
+                queue_gpu_scene_opaque
+                    .in_set(RenderSystems::QueueMeshes)
+                    .in_set(GpuSceneOpaqueQueue)
+                    .after(bevy_pbr::queue_material_meshes),
             );
     }
 }

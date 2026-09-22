@@ -27,5 +27,8 @@ pub struct GpuSceneDiagnostics {
     pub bounds_upload: UploadStrategy,
     pub buffer_version: u32,
     pub buffer_rebuilds: u32,
+    pub opaque_visible: u32,
+    pub opaque_queued: u32,
+    pub opaque_skipped: u32,
     pub scene_epoch: u64,
 }

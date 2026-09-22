@@ -14,7 +14,7 @@ use bevy_render::{
 };
 
 use super::{draw::DrawGpuSceneOpaque, pipeline::GpuSceneOpaquePipeline};
-use crate::{GpuSceneInstanceAddress, GpuSceneMode};
+use crate::{GpuSceneDiagnostics, GpuSceneInstanceAddress, GpuSceneMode};
 
 #[expect(
     clippy::too_many_arguments,
@@ -35,7 +35,11 @@ pub(crate) fn queue_gpu_scene_opaque(
     scene_instances: Query<&GpuSceneInstanceAddress>,
     dirty: Res<DirtySpecializations>,
     mut previously_queued: Local<bevy_render::sync_world::MainEntityHashSet>,
+    mut diagnostics: ResMut<GpuSceneDiagnostics>,
 ) {
+    diagnostics.opaque_visible = 0;
+    diagnostics.opaque_queued = 0;
+    diagnostics.opaque_skipped = 0;
     if *mode == GpuSceneMode::Disabled {
         let queued: Vec<_> = previously_queued.drain().collect();
         for phase in phases.values_mut() {
@@ -61,6 +65,7 @@ pub(crate) fn queue_gpu_scene_opaque(
             previously_queued.remove(&main_entity);
         }
         for &(render_entity, main_entity) in &visible_meshes.entities_cpu_culling {
+            diagnostics.opaque_visible += 1;
             if queue_one(
                 phase,
                 render_entity,
@@ -76,9 +81,13 @@ pub(crate) fn queue_gpu_scene_opaque(
                 &scene_instances,
             ) {
                 previously_queued.insert(main_entity);
+                diagnostics.opaque_queued += 1;
+            } else {
+                diagnostics.opaque_skipped += 1;
             }
         }
         for (&main_entity, &render_entity) in &visible_meshes.entities_gpu_culling {
+            diagnostics.opaque_visible += 1;
             if queue_one(
                 phase,
                 render_entity,
@@ -94,6 +103,9 @@ pub(crate) fn queue_gpu_scene_opaque(
                 &scene_instances,
             ) {
                 previously_queued.insert(main_entity);
+                diagnostics.opaque_queued += 1;
+            } else {
+                diagnostics.opaque_skipped += 1;
             }
         }
     }
