@@ -247,4 +247,9 @@ impl SceneHandleAllocator {
         }
         Ok(())
     }
+
+    #[cfg(test)]
+    pub(crate) fn force_generation_for_test(&mut self, handle: SceneHandle, generation: u32) {
+        self.slots[handle.index as usize].generation = generation;
+    }
 }
