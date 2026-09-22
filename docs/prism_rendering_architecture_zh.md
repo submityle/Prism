@@ -1365,6 +1365,17 @@ available_budget
 
 这个切片能验证最关键的假设：稳定 GPU 索引和增量更新是否能无破坏地接入现有 batching。它不依赖虚拟阴影或 GI 完成。
 
+### 17.1 当前 `pkg/` 落地状态（2026-09-22）
+
+第一步已按“不修改 Bevy 源码”的约束落在两个独立 package：
+
+- `prism_render_architecture::gpu_scene`：分代句柄、GPU completion 延迟回收、原子事务、CPU authoritative mirror、previous transform 和上传规划；
+- `prism_render_scene`：opt-in ECS 提取、SoA GPU 表、共享 bind group、设备恢复、诊断、几何资产生命周期和 consumer API；
+- `PrismGpuSceneOpaquePlugin`：独立标准 opaque consumer，使用 scene index + generation 直接读取 GPU Scene，在 Shader 中拒绝 inactive/stale handle，不修改 `bevy_pbr`；
+- `GpuSceneMode::{Disabled, Enabled, Compare}`：Disabled 是实时 kill switch；Enabled/Compare 保留后续逐项 A/B 的入口。Opaque consumer 仍显式安装，避免在材质等价前静默替换 Bevy PBR。
+
+当前 opaque consumer 是“底座闭环”而不是 UE 同画质材质系统：它证明 Mesh draw 已经真实消费 GPU Scene，而不是继续通过 `MeshInputUniform` 获取 transform。完整 StandardMaterial/PBR、阴影、motion vector、skinning/morph、masked/transparent 将作为后续 consumer 依次接入统一 Material ABI。
+
 ## 18. 关键决策记录（ADR 候选）
 
 后续应为以下问题分别建立 ADR：
