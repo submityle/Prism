@@ -8,5 +8,6 @@ pub struct GpuSceneDiagnostics {
     pub destroyed: u32,
     pub updated_fields: u32,
     pub transaction_errors: u32,
+    pub allocation_failures: u32,
     pub scene_epoch: u64,
 }

@@ -101,6 +101,8 @@ pub(crate) fn apply_extracted_scene_changes(
     let mut transaction =
         SceneTransactionBuilder::for_producer(*frame_epoch, *sequence, EXTRACT_PRODUCER);
     let mut new_bindings = Vec::new();
+    let mut allocated_handles = Vec::new();
+    let mut allocation_failures = 0_u32;
 
     for (entity, mut extracted) in &mut changed {
         let handle = match extracted.handle {
@@ -109,9 +111,13 @@ pub(crate) fn apply_extracted_scene_changes(
                 Ok(handle) => {
                     extracted.handle = Some(handle);
                     new_bindings.push((entity, handle));
+                    allocated_handles.push(handle);
                     handle
                 }
-                Err(_) => continue,
+                Err(_) => {
+                    allocation_failures += 1;
+                    continue;
+                }
             },
         };
         let geometry = extracted
@@ -173,6 +179,7 @@ pub(crate) fn apply_extracted_scene_changes(
         diagnostics.destroyed = report.destroyed;
         diagnostics.updated_fields = report.updated;
         diagnostics.transaction_errors = report.errors.len() as u32;
+        diagnostics.allocation_failures = allocation_failures;
         diagnostics.scene_epoch = report.scene_epoch;
         if report.errors.is_empty() {
             for (entity, handle) in new_bindings {
@@ -180,6 +187,10 @@ pub(crate) fn apply_extracted_scene_changes(
             }
             for (entity, handle) in removed_handles {
                 scene.remove_entity(entity);
+                let _ = scene.retire(handle, &completion);
+            }
+        } else {
+            for handle in allocated_handles {
                 let _ = scene.retire(handle, &completion);
             }
         }
