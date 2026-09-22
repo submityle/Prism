@@ -15,6 +15,7 @@ use prism_render_architecture::{
 use crate::{
     buffers::GpuSceneBuffers,
     completion::GpuCompletionTracker,
+    diagnostics::GpuSceneDiagnostics,
     extract::{ExtractedSceneInstance, PrismGpuSceneEntity},
     scene::RenderGpuScene,
 };
@@ -74,9 +75,15 @@ pub(crate) fn apply_extracted_scene_changes(
     mut scene: ResMut<RenderGpuScene>,
     mut buffers: ResMut<GpuSceneBuffers>,
     completion: Res<GpuCompletionTracker>,
+    mode: Res<crate::GpuSceneMode>,
+    mut diagnostics: ResMut<GpuSceneDiagnostics>,
     mut frame_epoch: Local<u64>,
     mut sequence: Local<u64>,
 ) {
+    *diagnostics = GpuSceneDiagnostics::default();
+    if *mode == crate::GpuSceneMode::Disabled {
+        return;
+    }
     *frame_epoch += 1;
     *sequence += 1;
     let mut transaction =
@@ -142,6 +149,12 @@ pub(crate) fn apply_extracted_scene_changes(
     let transaction = transaction.finish();
     if !transaction.operations.is_empty() {
         let report = scene.apply_entity_transaction(&mut buffers, &transaction);
+        diagnostics.active_instances = scene.snapshot().instance_count;
+        diagnostics.created = report.created;
+        diagnostics.destroyed = report.destroyed;
+        diagnostics.updated_fields = report.updated;
+        diagnostics.transaction_errors = report.errors.len() as u32;
+        diagnostics.scene_epoch = report.scene_epoch;
         if report.errors.is_empty() {
             for (entity, handle) in removed_handles {
                 scene.remove_entity(entity);

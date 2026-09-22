@@ -9,6 +9,7 @@ extern crate alloc;
 
 mod buffers;
 mod completion;
+mod diagnostics;
 mod extract;
 mod plugin;
 mod scene;
@@ -17,6 +18,7 @@ pub use buffers::{
     GpuSceneBuffers, RenderGpuSceneBounds, RenderGpuSceneInstance, RenderGpuSceneTransform,
 };
 pub use completion::GpuCompletionTracker;
+pub use diagnostics::GpuSceneDiagnostics;
 pub use extract::{ExtractedSceneInstance, PrismGpuSceneEntity};
-pub use plugin::PrismGpuScenePlugin;
+pub use plugin::{GpuSceneMode, PrismGpuScenePlugin};
 pub use scene::RenderGpuScene;
