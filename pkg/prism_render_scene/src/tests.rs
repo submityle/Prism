@@ -1,11 +1,17 @@
 use bevy_app::App;
-use bevy_ecs::{entity::Entity, world::FromWorld};
-use bevy_mesh::Mesh;
+use bevy_ecs::{entity::Entity, schedule::Schedule, world::FromWorld};
+use bevy_mesh::{Mesh, Mesh3d};
 use prism_render_architecture::gpu_scene::{
     InstanceRecord, SceneOperation, SceneTransaction, SceneTransform, UploadBudget, UploadStrategy,
 };
 
-use crate::{buffers::GpuSceneBuffers, RenderGpuScene};
+use crate::{
+    buffers::GpuSceneBuffers,
+    completion::GpuCompletionTracker,
+    diagnostics::{GpuSceneDiagnostics, GpuSceneUploadSettings},
+    extract::{lifecycle::ExtractionClock, ExtractedSceneInstance, GpuSceneInstanceAddress},
+    GpuSceneMode, RenderGpuScene,
+};
 
 #[test]
 fn plugin_contract_types_can_be_initialized_without_touching_bevy_sources() {
@@ -115,4 +121,88 @@ fn transaction_publishes_upload_plan_and_budget_pressure() {
     // Slot zero is intentionally reserved, so the first live slot makes the
     // four full-table uploads cover two rows.
     assert_eq!(plan.estimated_bytes, 320);
+}
+
+fn gpu_scene_test_world() -> (bevy_ecs::world::World, Schedule) {
+    let mut world = bevy_ecs::world::World::new();
+    let buffers = GpuSceneBuffers::from_world(&mut world);
+    world.insert_resource(buffers);
+    world.insert_resource(RenderGpuScene::new(32));
+    world.insert_resource(GpuCompletionTracker::default());
+    world.insert_resource(GpuSceneMode::Enabled);
+    world.insert_resource(GpuSceneDiagnostics::default());
+    world.insert_resource(GpuSceneUploadSettings::default());
+    world.insert_resource(ExtractionClock::default());
+    let mut schedule = Schedule::default();
+    schedule.add_systems(crate::extract::apply_extracted_scene_changes);
+    (world, schedule)
+}
+
+fn extracted_instance() -> ExtractedSceneInstance {
+    ExtractedSceneInstance {
+        handle: None,
+        transform: bevy_transform::components::GlobalTransform::IDENTITY,
+        bounds: None,
+        mesh: Mesh3d::default(),
+        geometry: None,
+        material: Default::default(),
+        flags: 7,
+        render_layers: 1,
+    }
+}
+
+#[test]
+fn ecs_spawn_update_remove_and_mode_switch_are_transactional() {
+    let (mut world, mut schedule) = gpu_scene_test_world();
+    let entity = world.spawn(extracted_instance()).id();
+    schedule.run(&mut world);
+    let address = *world
+        .entity(entity)
+        .get::<GpuSceneInstanceAddress>()
+        .unwrap();
+    assert_eq!(
+        world.resource::<RenderGpuScene>().snapshot().instance_count,
+        1
+    );
+
+    world.clear_trackers();
+    world
+        .entity_mut(entity)
+        .get_mut::<ExtractedSceneInstance>()
+        .unwrap()
+        .transform = bevy_transform::components::GlobalTransform::from_xyz(3.0, 0.0, 0.0);
+    schedule.run(&mut world);
+    let scene = world.resource::<RenderGpuScene>();
+    let handle = scene.handle_for_entity(entity).unwrap();
+    let record = scene.mirror().get(handle).unwrap();
+    assert_eq!(record.current_transform.rows[0][3], 3.0);
+    assert_eq!(record.previous_transform.rows[0][3], 0.0);
+    assert_eq!(address.index, handle.index);
+
+    world.clear_trackers();
+    *world.resource_mut::<GpuSceneMode>() = GpuSceneMode::Disabled;
+    world.entity_mut(entity).remove::<ExtractedSceneInstance>();
+    schedule.run(&mut world);
+    assert!(world
+        .entity(entity)
+        .get::<GpuSceneInstanceAddress>()
+        .is_none());
+    assert_eq!(
+        world.resource::<RenderGpuScene>().snapshot().instance_count,
+        0
+    );
+
+    world.clear_trackers();
+    *world.resource_mut::<GpuSceneMode>() = GpuSceneMode::Enabled;
+    world.entity_mut(entity).insert(extracted_instance());
+    schedule.run(&mut world);
+    let replacement = *world
+        .entity(entity)
+        .get::<GpuSceneInstanceAddress>()
+        .unwrap();
+    assert_ne!(replacement.index, 0);
+    assert_eq!(
+        world.resource::<RenderGpuScene>().snapshot().instance_count,
+        1
+    );
 }
