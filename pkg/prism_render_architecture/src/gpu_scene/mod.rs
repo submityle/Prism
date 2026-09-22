@@ -3,15 +3,23 @@
 mod allocator;
 mod mirror;
 mod transaction;
+mod upload;
 
 pub use allocator::{
     GpuCompletionValue, SceneCapacityError, SceneHandleAllocator, SceneHandleError,
     SceneHandleStats,
 };
-pub use mirror::{CpuRenderScene, SceneApplyError, SceneApplyReport};
+pub use mirror::{
+    CpuRenderScene, DirtySceneSlot, SceneApplyError, SceneApplyReport, SceneFieldMask,
+};
 pub use transaction::{
     merge_transactions, MergeIssue, MergeIssueKind, MergeReport, SceneOperation, SceneTransaction,
     SceneTransactionBuilder,
+};
+pub use upload::{
+    bounds_row, current_transform_row, instance_row, previous_transform_row, GpuSceneBounds,
+    GpuSceneInstance, GpuSceneTransform, TableUploadPlan, UploadBudget, UploadPlan, UploadPlanner,
+    UploadStrategy,
 };
 
 use crate::abi::GenerationalHandle;

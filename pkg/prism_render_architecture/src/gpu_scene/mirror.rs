@@ -3,6 +3,39 @@ use std::collections::BTreeMap;
 
 use super::{InstanceRecord, SceneHandle, SceneOperation, SceneTransaction};
 
+/// Fields in the GPU scene that changed atomically for one slot.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SceneFieldMask(pub u16);
+
+impl SceneFieldMask {
+    pub const INSTANCE: Self = Self(1 << 0);
+    pub const CURRENT_TRANSFORM: Self = Self(1 << 1);
+    pub const PREVIOUS_TRANSFORM: Self = Self(1 << 2);
+    pub const BOUNDS: Self = Self(1 << 3);
+    pub const GENERATION: Self = Self(1 << 4);
+    pub const ALL: Self = Self(
+        Self::INSTANCE.0
+            | Self::CURRENT_TRANSFORM.0
+            | Self::PREVIOUS_TRANSFORM.0
+            | Self::BOUNDS.0
+            | Self::GENERATION.0,
+    );
+
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    pub fn insert(&mut self, other: Self) {
+        self.0 |= other.0;
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DirtySceneSlot {
+    pub handle: SceneHandle,
+    pub fields: SceneFieldMask,
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct CpuSceneSlot {
     generation: u32,
@@ -60,6 +93,7 @@ pub struct SceneApplyReport {
     pub updated: u32,
     pub errors: Vec<SceneApplyError>,
     pub scene_epoch: u64,
+    pub dirty_slots: Vec<DirtySceneSlot>,
 }
 
 /// Authoritative CPU mirror used for validation, upload planning, capture, and
@@ -103,6 +137,7 @@ impl CpuRenderScene {
             report.created = 0;
             report.destroyed = 0;
             report.updated = 0;
+            report.dirty_slots.clear();
             report.scene_epoch = self.scene_epoch;
             return report;
         }
@@ -173,12 +208,22 @@ impl CpuRenderScene {
                 };
                 self.live_count += 1;
                 report.created += 1;
+                mark_dirty(report, handle, SceneFieldMask::ALL);
             }
             SceneOperation::Destroy { .. } => {
                 self.validate_slot(handle)?;
                 self.slots[handle.index as usize].record = None;
                 self.live_count -= 1;
                 report.destroyed += 1;
+                mark_dirty(
+                    report,
+                    handle,
+                    SceneFieldMask(
+                        SceneFieldMask::INSTANCE.0
+                            | SceneFieldMask::BOUNDS.0
+                            | SceneFieldMask::GENERATION.0,
+                    ),
+                );
             }
             SceneOperation::SetTransform { current, .. } => {
                 let slot = self.validate_slot_mut(handle)?;
@@ -192,6 +237,13 @@ impl CpuRenderScene {
                     .expect("validated live scene slot")
                     .current_transform = current;
                 report.updated += 1;
+                mark_dirty(
+                    report,
+                    handle,
+                    SceneFieldMask(
+                        SceneFieldMask::CURRENT_TRANSFORM.0 | SceneFieldMask::PREVIOUS_TRANSFORM.0,
+                    ),
+                );
             }
             SceneOperation::SetBounds { bounds, .. } => {
                 self.validate_slot_mut(handle)?
@@ -200,6 +252,7 @@ impl CpuRenderScene {
                     .expect("validated live scene slot")
                     .bounds = bounds;
                 report.updated += 1;
+                mark_dirty(report, handle, SceneFieldMask::BOUNDS);
             }
             SceneOperation::SetGeometry { geometry, .. } => {
                 self.validate_slot_mut(handle)?
@@ -208,6 +261,7 @@ impl CpuRenderScene {
                     .expect("validated live scene slot")
                     .geometry = geometry;
                 report.updated += 1;
+                mark_dirty(report, handle, SceneFieldMask::INSTANCE);
             }
             SceneOperation::SetMaterial { material, .. } => {
                 self.validate_slot_mut(handle)?
@@ -216,6 +270,7 @@ impl CpuRenderScene {
                     .expect("validated live scene slot")
                     .material = material;
                 report.updated += 1;
+                mark_dirty(report, handle, SceneFieldMask::INSTANCE);
             }
             SceneOperation::SetFlags { mask, value, .. } => {
                 let record = self
@@ -225,6 +280,7 @@ impl CpuRenderScene {
                     .expect("validated live scene slot");
                 record.flags = (record.flags & !mask) | (value & mask);
                 report.updated += 1;
+                mark_dirty(report, handle, SceneFieldMask::INSTANCE);
             }
             SceneOperation::SetRenderLayers { render_layers, .. } => {
                 self.validate_slot_mut(handle)?
@@ -233,9 +289,15 @@ impl CpuRenderScene {
                     .expect("validated live scene slot")
                     .render_layers = render_layers;
                 report.updated += 1;
+                mark_dirty(report, handle, SceneFieldMask::INSTANCE);
             }
         }
         Ok(())
+    }
+
+    pub fn record_at(&self, index: u32) -> Option<(u32, Option<&InstanceRecord>)> {
+        let slot = self.slots.get(index as usize)?;
+        Some((slot.generation, slot.record.as_ref()))
     }
 
     fn validate_slot(&self, handle: SceneHandle) -> Result<&CpuSceneSlot, SceneApplyError> {
@@ -267,6 +329,18 @@ impl CpuRenderScene {
             return Err(SceneApplyError::MissingSlot(handle));
         }
         Ok(slot)
+    }
+}
+
+fn mark_dirty(report: &mut SceneApplyReport, handle: SceneHandle, fields: SceneFieldMask) {
+    if let Some(slot) = report
+        .dirty_slots
+        .iter_mut()
+        .find(|slot| slot.handle == handle)
+    {
+        slot.fields.insert(fields);
+    } else {
+        report.dirty_slots.push(DirtySceneSlot { handle, fields });
     }
 }
 
