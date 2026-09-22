@@ -1373,6 +1373,7 @@ available_budget
 - `prism_render_scene`：opt-in ECS 提取、SoA GPU 表、共享 bind group、设备恢复、诊断、几何资产生命周期和 consumer API；
 - `PrismGpuSceneOpaquePlugin`：独立标准 opaque consumer，使用 scene index + generation 直接读取 GPU Scene，在 Shader 中拒绝 inactive/stale handle，不修改 `bevy_pbr`；
 - `GpuSceneMode::{Disabled, Enabled, Compare}`：Disabled 是实时 kill switch；Enabled/Compare 保留逐项 A/B 的入口。Compare 输出 scene/queue/parity 诊断，不在同一 color/depth target 重复绘制两条路径；像素 A/B 由独立 view/capture 工具完成。Opaque consumer 仍显式安装，避免在材质等价前静默替换 Bevy PBR。
+- `benches/prism_gpu_scene`：固定 10 万实例、1% transform 更新的 Criterion 基准；2026-09-22 当前开发机首次 release 测量为 `596–775 µs`（中位估计 `682 µs`），用于后续回归对比，不作为跨机器绝对承诺。
 
 当前 opaque consumer 是“底座闭环”而不是 UE 同画质材质系统：它证明 Mesh draw 已经真实消费 GPU Scene，而不是继续通过 `MeshInputUniform` 获取 transform。完整 StandardMaterial/PBR、阴影、motion vector、skinning/morph、masked/transparent 将作为后续 consumer 依次接入统一 Material ABI。
 
