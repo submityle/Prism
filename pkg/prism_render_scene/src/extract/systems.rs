@@ -1,15 +1,12 @@
-use bevy_asset::AssetId;
 use bevy_camera::primitives::Aabb;
 use bevy_ecs::{lifecycle::RemovedComponents, prelude::*};
 use bevy_math::{Affine3, Affine3Ext as _};
 use bevy_mesh::Mesh3d;
 use bevy_render::{sync_world::RenderEntity, Extract};
 use bevy_transform::components::GlobalTransform;
-use prism_render_architecture::{
-    abi::GenerationalHandle,
-    gpu_scene::{
-        InstanceRecord, SceneBounds, SceneOperation, SceneTransactionBuilder, SceneTransform,
-    },
+use prism_render_architecture::gpu_scene::{
+    GeometryHandle, InstanceRecord, SceneBounds, SceneOperation, SceneTransactionBuilder,
+    SceneTransform,
 };
 
 use crate::{
@@ -25,7 +22,13 @@ const EXTRACT_PRODUCER: u32 = 1;
 pub(crate) fn extract_scene_instances(
     changed: Extract<
         Query<
-            (RenderEntity, &GlobalTransform, Option<&Aabb>, &Mesh3d),
+            (
+                RenderEntity,
+                &PrismGpuSceneEntity,
+                &GlobalTransform,
+                Option<&Aabb>,
+                &Mesh3d,
+            ),
             (
                 With<PrismGpuSceneEntity>,
                 Or<(
@@ -50,14 +53,20 @@ pub(crate) fn extract_scene_instances(
         }
     }
 
-    for (render_entity, transform, bounds, mesh) in &changed {
+    for (render_entity, config, transform, bounds, mesh) in &changed {
         let update = ExtractedSceneInstance {
             handle: None,
             transform: *transform,
             bounds: bounds.copied(),
             mesh: mesh.clone(),
-            flags: 0,
-            render_layers: 1,
+            geometry: config.geometry,
+            material: config.material,
+            flags: config.flags,
+            render_layers: if config.render_layers == 0 {
+                1
+            } else {
+                config.render_layers
+            },
         };
         if let Ok(mut existing) = extracted_instances.get_mut(render_entity) {
             let handle = existing.handle;
@@ -69,7 +78,6 @@ pub(crate) fn extract_scene_instances(
 }
 
 pub(crate) fn apply_extracted_scene_changes(
-    mut commands: Commands,
     mut changed: Query<(Entity, &mut ExtractedSceneInstance), Changed<ExtractedSceneInstance>>,
     mut removed: RemovedComponents<ExtractedSceneInstance>,
     mut scene: ResMut<RenderGpuScene>,
@@ -80,7 +88,11 @@ pub(crate) fn apply_extracted_scene_changes(
     mut frame_epoch: Local<u64>,
     mut sequence: Local<u64>,
 ) {
-    *diagnostics = GpuSceneDiagnostics::default();
+    *diagnostics = GpuSceneDiagnostics {
+        active_instances: scene.snapshot().instance_count,
+        scene_epoch: scene.snapshot().scene_epoch,
+        ..GpuSceneDiagnostics::default()
+    };
     if *mode == crate::GpuSceneMode::Disabled {
         return;
     }
@@ -88,6 +100,7 @@ pub(crate) fn apply_extracted_scene_changes(
     *sequence += 1;
     let mut transaction =
         SceneTransactionBuilder::for_producer(*frame_epoch, *sequence, EXTRACT_PRODUCER);
+    let mut new_bindings = Vec::new();
 
     for (entity, mut extracted) in &mut changed {
         let handle = match extracted.handle {
@@ -95,14 +108,16 @@ pub(crate) fn apply_extracted_scene_changes(
             None => match scene.allocate() {
                 Ok(handle) => {
                     extracted.handle = Some(handle);
-                    scene.bind_entity(entity, handle);
-                    commands.entity(entity).insert(extracted.clone());
+                    new_bindings.push((entity, handle));
                     handle
                 }
                 Err(_) => continue,
             },
         };
-        let record = instance_record(&extracted);
+        let geometry = extracted
+            .geometry
+            .unwrap_or_else(|| scene.geometry_for_mesh(extracted.mesh.id()));
+        let record = instance_record(&extracted, geometry);
         if scene.mirror().get(handle).is_some() {
             transaction
                 .push(SceneOperation::SetTransform {
@@ -116,6 +131,10 @@ pub(crate) fn apply_extracted_scene_changes(
                 .push(SceneOperation::SetGeometry {
                     handle,
                     geometry: record.geometry,
+                })
+                .push(SceneOperation::SetMaterial {
+                    handle,
+                    material: record.material,
                 })
                 .push(SceneOperation::SetFlags {
                     handle,
@@ -156,6 +175,9 @@ pub(crate) fn apply_extracted_scene_changes(
         diagnostics.transaction_errors = report.errors.len() as u32;
         diagnostics.scene_epoch = report.scene_epoch;
         if report.errors.is_empty() {
+            for (entity, handle) in new_bindings {
+                scene.bind_entity(entity, handle);
+            }
             for (entity, handle) in removed_handles {
                 scene.remove_entity(entity);
                 let _ = scene.retire(handle, &completion);
@@ -164,7 +186,7 @@ pub(crate) fn apply_extracted_scene_changes(
     }
 }
 
-fn instance_record(extracted: &ExtractedSceneInstance) -> InstanceRecord {
+fn instance_record(extracted: &ExtractedSceneInstance, geometry: GeometryHandle) -> InstanceRecord {
     let current_transform = scene_transform(extracted.transform);
     let bounds = extracted
         .bounds
@@ -183,8 +205,8 @@ fn instance_record(extracted: &ExtractedSceneInstance) -> InstanceRecord {
         current_transform,
         previous_transform: current_transform,
         bounds,
-        geometry: asset_handle(extracted.mesh.id()),
-        material: GenerationalHandle::INVALID,
+        geometry,
+        material: extracted.material,
         render_layers: extracted.render_layers,
         flags: extracted.flags,
     }
@@ -194,24 +216,5 @@ fn scene_transform(transform: GlobalTransform) -> SceneTransform {
     let rows = Affine3::from(transform.affine()).to_transpose();
     SceneTransform {
         rows: rows.map(|row| row.to_array()),
-    }
-}
-
-fn asset_handle<A: bevy_asset::Asset>(id: AssetId<A>) -> GenerationalHandle {
-    match id {
-        AssetId::Index { index, .. } => {
-            let bits = index.to_bits();
-            GenerationalHandle {
-                index: bits as u32,
-                generation: (bits >> 32) as u32,
-            }
-        }
-        AssetId::Uuid { uuid } => {
-            let (high, low) = uuid.as_u64_pair();
-            GenerationalHandle {
-                index: (low ^ (low >> 32)) as u32,
-                generation: (high ^ (high >> 32)) as u32,
-            }
-        }
     }
 }

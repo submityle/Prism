@@ -31,14 +31,18 @@ impl GpuCompletionTracker {
     pub fn completed_value(&self) -> GpuCompletionValue {
         GpuCompletionValue(self.completed.load(Ordering::Acquire))
     }
+
+    fn track(&self, queue: &RenderQueue) {
+        let value = self.submitted.fetch_add(1, Ordering::AcqRel) + 1;
+        let completed = Arc::clone(&self.completed);
+        queue.on_submitted_work_done(move || {
+            completed.fetch_max(value, Ordering::Release);
+        });
+    }
 }
 
 pub(crate) fn track_submission(tracker: Res<GpuCompletionTracker>, queue: Res<RenderQueue>) {
-    let value = tracker.submitted.fetch_add(1, Ordering::AcqRel) + 1;
-    let completed = Arc::clone(&tracker.completed);
-    queue.on_submitted_work_done(move || {
-        completed.fetch_max(value, Ordering::Release);
-    });
+    tracker.track(&queue);
 }
 
 pub(crate) fn reclaim_completed_handles(

@@ -1,7 +1,9 @@
+use bevy_asset::AssetId;
 use bevy_ecs::{entity::Entity, resource::Resource};
+use bevy_mesh::Mesh;
 use prism_render_architecture::gpu_scene::{
-    CpuRenderScene, GpuSceneSnapshot, SceneApplyReport, SceneCapacityError, SceneHandle,
-    SceneHandleAllocator, SceneHandleError, SceneTransaction,
+    CpuRenderScene, GeometryHandle, GpuSceneSnapshot, SceneApplyReport, SceneCapacityError,
+    SceneHandle, SceneHandleAllocator, SceneHandleError, SceneTransaction,
 };
 use std::collections::HashMap;
 
@@ -17,6 +19,8 @@ pub struct RenderGpuScene {
     snapshot: GpuSceneSnapshot,
     buffer_version: u32,
     entities: HashMap<Entity, SceneHandle>,
+    geometry: HashMap<AssetId<Mesh>, GeometryHandle>,
+    next_geometry_index: u32,
 }
 
 impl Default for RenderGpuScene {
@@ -33,6 +37,8 @@ impl RenderGpuScene {
             snapshot: GpuSceneSnapshot::default(),
             buffer_version: 1,
             entities: HashMap::new(),
+            geometry: HashMap::new(),
+            next_geometry_index: 1,
         }
     }
 
@@ -76,6 +82,22 @@ impl RenderGpuScene {
 
     pub fn handle_for_entity(&self, entity: Entity) -> Option<SceneHandle> {
         self.entities.get(&entity).copied()
+    }
+
+    pub fn geometry_for_mesh(&mut self, mesh: AssetId<Mesh>) -> GeometryHandle {
+        if let Some(handle) = self.geometry.get(&mesh) {
+            return *handle;
+        }
+        let handle = GeometryHandle {
+            index: self.next_geometry_index,
+            generation: 1,
+        };
+        self.next_geometry_index = self
+            .next_geometry_index
+            .checked_add(1)
+            .expect("GPU Scene geometry handle space exhausted");
+        self.geometry.insert(mesh, handle);
+        handle
     }
 
     pub fn retire(
