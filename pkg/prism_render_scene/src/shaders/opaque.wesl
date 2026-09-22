@@ -23,7 +23,12 @@ struct GpuSceneBounds { center_radius: vec4<f32>, half_extents: vec4<f32> }
 struct SceneAddress { index: u32, generation: u32 }
 var<immediate> scene_address: SceneAddress;
 
-struct Vertex { @location(0) position: vec3<f32> };
+struct Vertex {
+    @if(VERTEX_POSITIONS_COMPRESSED)
+    @location(0) compressed_position: vec4<f32>,
+    @else
+    @location(0) position: vec3<f32>,
+};
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -34,7 +39,16 @@ struct VertexOutput {
 fn vertex(vertex: Vertex) -> VertexOutput {
     let instance = scene_instances[scene_address.index];
     let valid = instance.active != 0u && instance.generation == scene_address.generation;
-    let position = vertex.position;
+    @if(VERTEX_POSITIONS_COMPRESSED) {
+        let bounds = scene_bounds[scene_address.index];
+        let position = bevy_render::utils::decompress_vertex_position(
+            vertex.compressed_position,
+            bounds.center_radius.xyz,
+            bounds.half_extents.xyz,
+        );
+    } @else {
+        let position = vertex.position;
+    }
     let world_from_local = affine3_to_square(
         scene_current_transforms[scene_address.index].world_from_local
     );

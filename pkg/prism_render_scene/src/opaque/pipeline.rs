@@ -2,7 +2,7 @@ use bevy_asset::{embedded_asset, load_embedded_asset, Handle};
 use bevy_core_pipeline::core_3d::CORE_3D_DEPTH_FORMAT;
 use bevy_ecs::prelude::*;
 use bevy_material::descriptor::BindGroupLayoutDescriptor;
-use bevy_mesh::{Mesh, MeshVertexBufferLayoutRef};
+use bevy_mesh::{Mesh, MeshAttributeCompressionFlags, MeshVertexBufferLayoutRef};
 use bevy_pbr::{MeshPipeline, MeshPipelineKey, MeshPipelineViewLayoutKey};
 use bevy_render::render_resource::*;
 use bevy_shader::Shader;
@@ -41,7 +41,14 @@ impl SpecializedMeshPipeline for GpuSceneOpaquePipeline {
         key: Self::Key,
         layout: &MeshVertexBufferLayoutRef,
     ) -> Result<RenderPipelineDescriptor, SpecializedMeshPipelineError> {
-        let shader_defs = Vec::new();
+        let mut shader_defs = Vec::new();
+        if layout
+            .0
+            .get_attribute_compression()
+            .contains(MeshAttributeCompressionFlags::COMPRESS_POSITION)
+        {
+            shader_defs.push("VERTEX_POSITIONS_COMPRESSED".into());
+        }
         let vertex_layout = layout
             .0
             .get_layout(&[Mesh::ATTRIBUTE_POSITION.at_shader_location(0)])?;
