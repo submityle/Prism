@@ -73,6 +73,20 @@ fn geometry_handles_are_stable_per_asset() {
 }
 
 #[test]
+fn retired_geometry_gets_a_fresh_runtime_identity() {
+    let mut scene = RenderGpuScene::new(8);
+    let mesh = bevy_asset::Assets::<Mesh>::default().add(Mesh::new(
+        bevy_mesh::PrimitiveTopology::TriangleList,
+        bevy_asset::RenderAssetUsages::default(),
+    ));
+    let first = scene.geometry_for_mesh(mesh.id());
+    assert_eq!(scene.retire_geometry(mesh.id()), Some(first));
+    assert_eq!(scene.geometry_handle(mesh.id()), None);
+    let second = scene.geometry_for_mesh(mesh.id());
+    assert_ne!(first, second);
+}
+
+#[test]
 fn transaction_publishes_upload_plan_and_budget_pressure() {
     let mut world = bevy_ecs::world::World::new();
     let mut buffers = GpuSceneBuffers::from_world(&mut world);

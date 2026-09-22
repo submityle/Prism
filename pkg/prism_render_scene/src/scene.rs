@@ -112,6 +112,14 @@ impl RenderGpuScene {
         handle
     }
 
+    pub fn retire_geometry(&mut self, mesh: AssetId<Mesh>) -> Option<GeometryHandle> {
+        self.geometry.remove(&mesh)
+    }
+
+    pub fn geometry_handle(&self, mesh: AssetId<Mesh>) -> Option<GeometryHandle> {
+        self.geometry.get(&mesh).copied()
+    }
+
     pub fn retire(
         &mut self,
         handle: SceneHandle,

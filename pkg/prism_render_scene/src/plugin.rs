@@ -15,7 +15,10 @@ use crate::{
     },
     completion::{reclaim_completed_handles, track_submission, GpuCompletionTracker},
     diagnostics::{GpuSceneDiagnostics, GpuSceneUploadSettings},
-    extract::{apply_extracted_scene_changes, extract_scene_instances, PrismGpuSceneEntity},
+    extract::{
+        apply_extracted_scene_changes, extract_scene_instances, retire_unused_geometry,
+        PrismGpuSceneEntity,
+    },
     scene::RenderGpuScene,
 };
 
@@ -52,6 +55,7 @@ impl Plugin for PrismGpuScenePlugin {
             .init_resource::<GpuSceneMode>()
             .init_resource::<GpuSceneDiagnostics>()
             .init_resource::<GpuSceneUploadSettings>()
+            .init_resource::<crate::extract::lifecycle::ExtractionClock>()
             .init_resource::<RenderGpuScene>()
             .init_resource::<GpuCompletionTracker>()
             .add_systems(
@@ -63,7 +67,10 @@ impl Plugin for PrismGpuScenePlugin {
                 )
                     .chain(),
             )
-            .add_systems(ExtractSchedule, extract_scene_instances)
+            .add_systems(
+                ExtractSchedule,
+                (extract_scene_instances, retire_unused_geometry),
+            )
             .add_systems(
                 Render,
                 (

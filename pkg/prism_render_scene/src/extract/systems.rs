@@ -9,21 +9,16 @@ use prism_render_architecture::gpu_scene::{
     SceneTransactionBuilder, SceneTransform,
 };
 
+use super::lifecycle::ExtractionClock;
 use crate::{
     buffers::GpuSceneBuffers,
     completion::GpuCompletionTracker,
     diagnostics::{GpuSceneDiagnostics, GpuSceneUploadSettings},
-    extract::{ExtractedSceneInstance, PrismGpuSceneEntity},
+    extract::{lifecycle::destroy_removed_entities, ExtractedSceneInstance, PrismGpuSceneEntity},
     scene::RenderGpuScene,
 };
 
 const EXTRACT_PRODUCER: u32 = 1;
-
-#[derive(Default)]
-pub(crate) struct ExtractionClock {
-    frame_epoch: u64,
-    sequence: u64,
-}
 
 pub(crate) fn extract_scene_instances(
     changed: Extract<
@@ -92,7 +87,7 @@ pub(crate) fn apply_extracted_scene_changes(
     mode: Res<crate::GpuSceneMode>,
     upload_settings: Res<GpuSceneUploadSettings>,
     mut diagnostics: ResMut<GpuSceneDiagnostics>,
-    mut clock: Local<ExtractionClock>,
+    mut clock: ResMut<ExtractionClock>,
 ) {
     *diagnostics = GpuSceneDiagnostics {
         active_instances: scene.snapshot().instance_count,
@@ -103,10 +98,20 @@ pub(crate) fn apply_extracted_scene_changes(
         ..GpuSceneDiagnostics::default()
     };
     if *mode == crate::GpuSceneMode::Disabled {
+        // Disabled is a live kill switch, not a pause: drain removals and
+        // retire any previously published handles while ignoring updates.
+        let removed_entities: Vec<_> = removed.read().collect();
+        destroy_removed_entities(
+            &removed_entities,
+            &mut scene,
+            &mut buffers,
+            &completion,
+            &mut diagnostics,
+            &mut clock,
+        );
         return;
     }
-    clock.frame_epoch += 1;
-    clock.sequence += 1;
+    clock.advance();
     let mut transaction =
         SceneTransactionBuilder::for_producer(clock.frame_epoch, clock.sequence, EXTRACT_PRODUCER);
     let mut new_bindings = Vec::new();
