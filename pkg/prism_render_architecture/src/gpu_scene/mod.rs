@@ -36,6 +36,8 @@ pub type SceneMaterialHandle = GenerationalHandle;
 pub struct SceneBounds {
     pub center: [f32; 3],
     pub radius: f32,
+    pub half_extents: [f32; 3],
+    pub _padding: f32,
 }
 
 /// A row-major affine 3×4 transform used by the architecture contract.

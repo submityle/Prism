@@ -7,6 +7,7 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use bevy_app::{App, Plugin};
+use bevy_asset::embedded_asset;
 use bevy_ecs::{prelude::*, world::FromWorld};
 use bevy_math::Vec4;
 use bytemuck::{Pod, Zeroable};
@@ -33,6 +34,7 @@ pub struct GpuScenePlugin;
 
 impl Plugin for GpuScenePlugin {
     fn build(&self, app: &mut App) {
+        embedded_asset!(app, "gpu_scene.wesl");
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
@@ -155,6 +157,7 @@ impl_atomic_pod!(RenderGpuSceneTransform, RenderGpuSceneTransformBlob);
 #[repr(C)]
 pub struct RenderGpuSceneBounds {
     pub center_radius: Vec4,
+    pub half_extents: Vec4,
 }
 
 impl_atomic_pod!(RenderGpuSceneBounds, RenderGpuSceneBoundsBlob);
@@ -244,6 +247,7 @@ impl GpuSceneBuffers {
                     index,
                     RenderGpuSceneBounds {
                         center_radius: Vec4::from_array(row.center_radius),
+                        half_extents: Vec4::from_array(row.half_extents),
                     },
                 );
             }
@@ -382,6 +386,6 @@ mod tests {
     fn gpu_scene_layouts_match_architecture_contract() {
         assert_eq!(size_of::<RenderGpuSceneInstance>(), 32);
         assert_eq!(size_of::<RenderGpuSceneTransform>(), 48);
-        assert_eq!(size_of::<RenderGpuSceneBounds>(), 16);
+        assert_eq!(size_of::<RenderGpuSceneBounds>(), 32);
     }
 }

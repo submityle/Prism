@@ -12,8 +12,8 @@ pub struct GpuSceneInstance {
     pub geometry_generation: u32,
     pub material_index: u32,
     pub material_generation: u32,
-    pub render_layers: u32,
     pub active: u32,
+    pub render_layers: u32,
 }
 
 impl GpuSceneInstance {
@@ -53,6 +53,7 @@ impl From<SceneTransform> for GpuSceneTransform {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct GpuSceneBounds {
     pub center_radius: [f32; 4],
+    pub half_extents: [f32; 4],
 }
 
 impl GpuSceneBounds {
@@ -66,6 +67,12 @@ impl GpuSceneBounds {
                 record.bounds.center[1],
                 record.bounds.center[2],
                 record.bounds.radius,
+            ],
+            half_extents: [
+                record.bounds.half_extents[0],
+                record.bounds.half_extents[1],
+                record.bounds.half_extents[2],
+                0.0,
             ],
         }
     }
@@ -158,7 +165,7 @@ impl UploadPlanner {
             instances: self.plan_table(scene_capacity, instances, 32),
             current_transforms: self.plan_table(scene_capacity, current, 48),
             previous_transforms: self.plan_table(scene_capacity, previous, 48),
-            bounds: self.plan_table(scene_capacity, bounds, 16),
+            bounds: self.plan_table(scene_capacity, bounds, 32),
             ..UploadPlan::default()
         };
         plan.estimated_bytes = plan.instances.estimated_bytes
@@ -285,7 +292,7 @@ mod tests {
     fn gpu_layouts_are_word_aligned_and_stable() {
         assert_eq!(size_of::<GpuSceneInstance>(), 32);
         assert_eq!(size_of::<GpuSceneTransform>(), 48);
-        assert_eq!(size_of::<GpuSceneBounds>(), 16);
+        assert_eq!(size_of::<GpuSceneBounds>(), 32);
         assert_eq!(align_of::<GpuSceneInstance>(), 4);
     }
 
@@ -320,7 +327,7 @@ mod tests {
             .collect();
         let plan = planner.plan(32, &dirty);
         assert_eq!(plan.bounds.strategy, UploadStrategy::FullRewrite);
-        assert_eq!(plan.bounds.estimated_bytes, 32 * 16);
+        assert_eq!(plan.bounds.estimated_bytes, 32 * 32);
     }
 
     #[test]
