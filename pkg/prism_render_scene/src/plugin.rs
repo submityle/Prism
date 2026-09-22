@@ -60,7 +60,9 @@ impl Plugin for PrismGpuScenePlugin {
                 (
                     apply_extracted_scene_changes.in_set(RenderSystems::PrepareResources),
                     write_gpu_scene_buffers.in_set(RenderSystems::PrepareResourcesFlush),
-                    prepare_gpu_scene_bind_group.in_set(RenderSystems::PrepareBindGroups),
+                    prepare_gpu_scene_bind_group
+                        .after(write_gpu_scene_buffers)
+                        .in_set(RenderSystems::PrepareBindGroups),
                 ),
             )
             .add_systems(
