@@ -21,6 +21,15 @@ use crate::{
 /// Installs the retained GPU Scene into Bevy's render sub-application.
 pub struct PrismGpuScenePlugin;
 
+impl PrismGpuScenePlugin {
+    /// Component bundle that opts a mesh into the retained scene and Bevy's
+    /// render-world synchronization without changing Bevy's required-component
+    /// registrations.
+    pub fn entity(config: PrismGpuSceneEntity) -> (PrismGpuSceneEntity, SyncToRenderWorld) {
+        (config, SyncToRenderWorld::default())
+    }
+}
+
 /// Controls whether opt-in entities use the retained GPU Scene or remain on
 /// the legacy renderer-only path.
 #[derive(Resource, Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -33,7 +42,6 @@ pub enum GpuSceneMode {
 
 impl Plugin for PrismGpuScenePlugin {
     fn build(&self, app: &mut App) {
-        app.register_required_components::<PrismGpuSceneEntity, SyncToRenderWorld>();
         embedded_asset!(app, "shaders/gpu_scene.wesl");
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
