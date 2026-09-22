@@ -24,6 +24,10 @@ pub struct PrismGpuSceneOpaquePlugin;
 
 impl Plugin for PrismGpuSceneOpaquePlugin {
     fn build(&self, app: &mut App) {
+        assert!(
+            app.is_plugin_added::<bevy_pbr::PbrPlugin>(),
+            "PrismGpuSceneOpaquePlugin must be added after Bevy PbrPlugin"
+        );
         pipeline::embed_opaque_shader(app);
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
