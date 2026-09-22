@@ -19,6 +19,12 @@ use crate::{
 
 const EXTRACT_PRODUCER: u32 = 1;
 
+#[derive(Default)]
+pub(crate) struct ExtractionClock {
+    frame_epoch: u64,
+    sequence: u64,
+}
+
 pub(crate) fn extract_scene_instances(
     changed: Extract<
         Query<
@@ -85,8 +91,7 @@ pub(crate) fn apply_extracted_scene_changes(
     completion: Res<GpuCompletionTracker>,
     mode: Res<crate::GpuSceneMode>,
     mut diagnostics: ResMut<GpuSceneDiagnostics>,
-    mut frame_epoch: Local<u64>,
-    mut sequence: Local<u64>,
+    mut clock: Local<ExtractionClock>,
 ) {
     *diagnostics = GpuSceneDiagnostics {
         active_instances: scene.snapshot().instance_count,
@@ -96,10 +101,10 @@ pub(crate) fn apply_extracted_scene_changes(
     if *mode == crate::GpuSceneMode::Disabled {
         return;
     }
-    *frame_epoch += 1;
-    *sequence += 1;
+    clock.frame_epoch += 1;
+    clock.sequence += 1;
     let mut transaction =
-        SceneTransactionBuilder::for_producer(*frame_epoch, *sequence, EXTRACT_PRODUCER);
+        SceneTransactionBuilder::for_producer(clock.frame_epoch, clock.sequence, EXTRACT_PRODUCER);
     let mut new_bindings = Vec::new();
     let mut allocated_handles = Vec::new();
     let mut allocation_failures = 0_u32;
