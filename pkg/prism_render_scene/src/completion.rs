@@ -32,12 +32,13 @@ impl GpuCompletionTracker {
         GpuCompletionValue(self.completed.load(Ordering::Acquire))
     }
 
-    fn track(&self, queue: &RenderQueue) {
+    pub fn track(&self, queue: &RenderQueue) -> GpuCompletionValue {
         let value = self.submitted.fetch_add(1, Ordering::AcqRel) + 1;
         let completed = Arc::clone(&self.completed);
         queue.on_submitted_work_done(move || {
             completed.fetch_max(value, Ordering::Release);
         });
+        GpuCompletionValue(value)
     }
 }
 
