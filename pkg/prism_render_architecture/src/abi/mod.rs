@@ -6,7 +6,7 @@ pub struct AbiVersion(pub u32);
 
 /// A stable, generational index shared across CPU and GPU code.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct GenerationalHandle {
     pub index: u32,
     pub generation: u32,
@@ -20,6 +20,12 @@ impl GenerationalHandle {
 
     pub const fn is_valid(self) -> bool {
         self.index != u32::MAX
+    }
+}
+
+impl Default for GenerationalHandle {
+    fn default() -> Self {
+        Self::INVALID
     }
 }
 
