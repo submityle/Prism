@@ -1,5 +1,6 @@
 use bevy_core_pipeline::core_3d::{Opaque3d, Opaque3dBatchSetKey, Opaque3dBinKey};
 use bevy_ecs::prelude::*;
+use bevy_ecs::system::SystemParam;
 use bevy_mesh::Mesh3d;
 use bevy_pbr::{MeshPipelineKey, RenderMeshInstances, ViewKeyCache};
 use bevy_render::{
@@ -13,21 +14,29 @@ use bevy_render::{
     view::{ExtractedView, RenderVisibleEntities},
 };
 
+use super::GpuSceneOpaqueEnabled;
 use super::{
     draw::DrawGpuSceneOpaque,
     pipeline::{GpuSceneDebugView, GpuSceneOpaquePipeline, GpuSceneOpaquePipelineKey},
 };
 use crate::{GpuSceneDiagnostics, GpuSceneInstanceAddress, GpuSceneMode};
 
+#[derive(SystemParam)]
+pub(crate) struct OpaqueQueueControl<'w> {
+    mode: Res<'w, GpuSceneMode>,
+    enabled: Res<'w, GpuSceneOpaqueEnabled>,
+    debug_view: Res<'w, GpuSceneDebugView>,
+    diagnostics: ResMut<'w, GpuSceneDiagnostics>,
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "Render queue joins view, mesh, pipeline, and scene state."
 )]
 pub(crate) fn queue_gpu_scene_opaque(
-    mode: Res<GpuSceneMode>,
+    mut control: OpaqueQueueControl,
     pipeline_cache: Res<PipelineCache>,
     pipeline: Res<GpuSceneOpaquePipeline>,
-    debug_view: Res<GpuSceneDebugView>,
     mut pipelines: ResMut<SpecializedMeshPipelines<GpuSceneOpaquePipeline>>,
     draw_functions: Res<DrawFunctions<Opaque3d>>,
     mut phases: ResMut<ViewBinnedRenderPhases<Opaque3d>>,
@@ -39,12 +48,11 @@ pub(crate) fn queue_gpu_scene_opaque(
     scene_instances: Query<&GpuSceneInstanceAddress>,
     dirty: Res<DirtySpecializations>,
     mut previously_queued: Local<bevy_render::sync_world::MainEntityHashSet>,
-    mut diagnostics: ResMut<GpuSceneDiagnostics>,
 ) {
-    diagnostics.opaque_visible = 0;
-    diagnostics.opaque_queued = 0;
-    diagnostics.opaque_skipped = 0;
-    if *mode == GpuSceneMode::Disabled {
+    control.diagnostics.opaque_visible = 0;
+    control.diagnostics.opaque_queued = 0;
+    control.diagnostics.opaque_skipped = 0;
+    if *control.mode == GpuSceneMode::Disabled || !control.enabled.0 {
         let queued: Vec<_> = previously_queued.drain().collect();
         for phase in phases.values_mut() {
             for &entity in &queued {
@@ -69,13 +77,13 @@ pub(crate) fn queue_gpu_scene_opaque(
             previously_queued.remove(&main_entity);
         }
         for &(render_entity, main_entity) in &visible_meshes.entities_cpu_culling {
-            diagnostics.opaque_visible += 1;
+            control.diagnostics.opaque_visible += 1;
             if queue_one(
                 phase,
                 render_entity,
                 main_entity,
                 view_key,
-                *debug_view,
+                *control.debug_view,
                 draw_function,
                 &pipeline_cache,
                 &pipeline,
@@ -86,19 +94,19 @@ pub(crate) fn queue_gpu_scene_opaque(
                 &scene_instances,
             ) {
                 previously_queued.insert(main_entity);
-                diagnostics.opaque_queued += 1;
+                control.diagnostics.opaque_queued += 1;
             } else {
-                diagnostics.opaque_skipped += 1;
+                control.diagnostics.opaque_skipped += 1;
             }
         }
         for (&main_entity, &render_entity) in &visible_meshes.entities_gpu_culling {
-            diagnostics.opaque_visible += 1;
+            control.diagnostics.opaque_visible += 1;
             if queue_one(
                 phase,
                 render_entity,
                 main_entity,
                 view_key,
-                *debug_view,
+                *control.debug_view,
                 draw_function,
                 &pipeline_cache,
                 &pipeline,
@@ -109,9 +117,9 @@ pub(crate) fn queue_gpu_scene_opaque(
                 &scene_instances,
             ) {
                 previously_queued.insert(main_entity);
-                diagnostics.opaque_queued += 1;
+                control.diagnostics.opaque_queued += 1;
             } else {
-                diagnostics.opaque_skipped += 1;
+                control.diagnostics.opaque_skipped += 1;
             }
         }
     }

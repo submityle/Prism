@@ -7,6 +7,7 @@ This package integrates the retained Prism GPU Scene with Bevy's render app with
 `GpuSceneMode::Compare` keeps the consumer enabled and exposes parity/queue counters through `GpuSceneDiagnostics`. It does not draw both paths into the same color target; visual A/B tooling should render separate views or captures so double depth/color writes cannot corrupt the comparison.
 
 Set the render-world `GpuSceneDebugView` resource to `InstanceId`, `GeometryId`, `MaterialId`, or `Motion` to inspect the retained tables directly.
+Set `GpuSceneOpaqueEnabled(false)` for a runtime fallback to the legacy Bevy PBR opaque path without disabling GPU Scene extraction for other consumers.
 
 The package owns ECS integration, sparse GPU buffers, submission completion tracking, diagnostics, and the stable shader ABI. Unreal Engine-derived code is not stored here.
 

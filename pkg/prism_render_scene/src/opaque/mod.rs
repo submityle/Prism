@@ -20,6 +20,16 @@ use queue::queue_gpu_scene_opaque;
 #[derive(bevy_ecs::schedule::SystemSet, Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub struct GpuSceneOpaqueQueue;
 
+/// Controls whether the experimental opaque consumer replaces Bevy PBR.
+#[derive(bevy_ecs::resource::Resource, Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GpuSceneOpaqueEnabled(pub bool);
+
+impl Default for GpuSceneOpaqueEnabled {
+    fn default() -> Self {
+        Self(true)
+    }
+}
+
 /// Standard opaque mesh consumer backed by Prism's retained GPU Scene.
 pub struct PrismGpuSceneOpaquePlugin;
 
@@ -36,6 +46,7 @@ impl Plugin for PrismGpuSceneOpaquePlugin {
         render_app
             .init_resource::<SpecializedMeshPipelines<GpuSceneOpaquePipeline>>()
             .init_resource::<GpuSceneDebugView>()
+            .init_resource::<GpuSceneOpaqueEnabled>()
             .add_render_command::<Opaque3d, DrawGpuSceneOpaque>()
             .add_systems(
                 RenderStartup,
