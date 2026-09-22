@@ -5,6 +5,9 @@ mod mirror;
 mod transaction;
 mod upload;
 
+#[cfg(test)]
+mod tests;
+
 pub use allocator::{
     GpuCompletionValue, SceneCapacityError, SceneHandleAllocator, SceneHandleError,
     SceneHandleStats,
