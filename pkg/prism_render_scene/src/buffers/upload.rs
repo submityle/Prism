@@ -23,6 +23,7 @@ pub(crate) fn write_gpu_scene_buffers(
         current_transforms,
         previous_transforms,
         bounds,
+        ..
     } = &mut *buffers;
 
     upload(

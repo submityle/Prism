@@ -5,7 +5,7 @@ use bevy_math::Vec4;
 use bevy_render::render_resource::{AtomicPod, AtomicSparseBufferVec, Buffer, BufferUsages};
 use prism_render_architecture::gpu_scene::{
     bounds_row, current_transform_row, instance_row, previous_transform_row, CpuRenderScene,
-    DirtySceneSlot,
+    DirtySceneSlot, UploadBudget, UploadPlan, UploadPlanner,
 };
 
 use super::rows::{RenderGpuSceneBounds, RenderGpuSceneInstance, RenderGpuSceneTransform};
@@ -16,6 +16,8 @@ pub struct GpuSceneBuffers {
     pub(crate) current_transforms: AtomicSparseBufferVec<RenderGpuSceneTransform>,
     pub(crate) previous_transforms: AtomicSparseBufferVec<RenderGpuSceneTransform>,
     pub(crate) bounds: AtomicSparseBufferVec<RenderGpuSceneBounds>,
+    upload_budget: UploadBudget,
+    last_upload_plan: UploadPlan,
 }
 
 impl FromWorld for GpuSceneBuffers {
@@ -25,6 +27,8 @@ impl FromWorld for GpuSceneBuffers {
             current_transforms: sparse_storage("prism gpu scene current transforms"),
             previous_transforms: sparse_storage("prism gpu scene previous transforms"),
             bounds: sparse_storage("prism gpu scene bounds"),
+            upload_budget: UploadBudget::default(),
+            last_upload_plan: UploadPlan::default(),
         }
     }
 }
@@ -60,12 +64,23 @@ impl GpuSceneBuffers {
         mirror: &CpuRenderScene,
         dirty_slots: &[DirtySceneSlot],
     ) {
+        self.last_upload_plan =
+            UploadPlanner::new(self.upload_budget).plan(mirror.capacity() as u32, dirty_slots);
         for dirty in dirty_slots {
             self.write_slot(mirror, dirty.handle.index);
         }
     }
 
+    pub(crate) fn set_upload_budget(&mut self, budget: UploadBudget) {
+        self.upload_budget = budget;
+    }
+
+    pub fn last_upload_plan(&self) -> &UploadPlan {
+        &self.last_upload_plan
+    }
+
     pub(crate) fn rebuild_from_mirror(&mut self, mirror: &CpuRenderScene) {
+        self.last_upload_plan = UploadPlan::default();
         for index in 0..mirror.capacity() as u32 {
             self.write_slot(mirror, index);
         }

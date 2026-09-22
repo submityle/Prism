@@ -2,7 +2,7 @@ use bevy_app::App;
 use bevy_ecs::{entity::Entity, world::FromWorld};
 use bevy_mesh::Mesh;
 use prism_render_architecture::gpu_scene::{
-    InstanceRecord, SceneOperation, SceneTransaction, SceneTransform,
+    InstanceRecord, SceneOperation, SceneTransaction, SceneTransform, UploadBudget, UploadStrategy,
 };
 
 use crate::{buffers::GpuSceneBuffers, RenderGpuScene};
@@ -70,4 +70,35 @@ fn geometry_handles_are_stable_per_asset() {
         scene.geometry_for_mesh(mesh.id()),
         scene.geometry_for_mesh(mesh.id())
     );
+}
+
+#[test]
+fn transaction_publishes_upload_plan_and_budget_pressure() {
+    let mut world = bevy_ecs::world::World::new();
+    let mut buffers = GpuSceneBuffers::from_world(&mut world);
+    buffers.set_upload_budget(UploadBudget {
+        max_bytes_per_frame: 1,
+        ..UploadBudget::default()
+    });
+    let mut scene = RenderGpuScene::new(8);
+    let handle = scene.allocate().unwrap();
+    let report = scene.apply_transaction(
+        &mut buffers,
+        &SceneTransaction {
+            frame_epoch: 1,
+            sequence: 1,
+            producer: 1,
+            operations: vec![SceneOperation::Create {
+                handle,
+                record: InstanceRecord::default(),
+            }],
+        },
+    );
+    assert!(report.errors.is_empty());
+    let plan = buffers.last_upload_plan();
+    assert!(plan.budget_exceeded);
+    assert_ne!(plan.instances.strategy, UploadStrategy::None);
+    // Slot zero is intentionally reserved, so the first live slot makes the
+    // four full-table uploads cover two rows.
+    assert_eq!(plan.estimated_bytes, 320);
 }

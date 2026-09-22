@@ -5,7 +5,7 @@ use bevy_ecs::{prelude::*, resource::Resource};
 use bevy_render::renderer::RenderQueue;
 use prism_render_architecture::gpu_scene::GpuCompletionValue;
 
-use crate::scene::RenderGpuScene;
+use crate::{diagnostics::GpuSceneDiagnostics, scene::RenderGpuScene};
 
 /// Tracks submitted and completed queue work without fixed frame delays.
 #[derive(Resource, Clone)]
@@ -49,6 +49,9 @@ pub(crate) fn track_submission(tracker: Res<GpuCompletionTracker>, queue: Res<Re
 pub(crate) fn reclaim_completed_handles(
     mut scene: ResMut<RenderGpuScene>,
     tracker: Res<GpuCompletionTracker>,
+    mut diagnostics: ResMut<GpuSceneDiagnostics>,
 ) {
-    scene.reclaim_completed(tracker.completed_value());
+    diagnostics.reclaimed_handles = diagnostics
+        .reclaimed_handles
+        .saturating_add(scene.reclaim_completed(tracker.completed_value()));
 }

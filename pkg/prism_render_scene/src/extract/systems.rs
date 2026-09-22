@@ -5,14 +5,14 @@ use bevy_mesh::Mesh3d;
 use bevy_render::{sync_world::RenderEntity, Extract};
 use bevy_transform::components::GlobalTransform;
 use prism_render_architecture::gpu_scene::{
-    GeometryHandle, InstanceRecord, SceneBounds, SceneOperation, SceneTransactionBuilder,
-    SceneTransform,
+    GeometryHandle, InstanceRecord, SceneApplyError, SceneBounds, SceneOperation,
+    SceneTransactionBuilder, SceneTransform,
 };
 
 use crate::{
     buffers::GpuSceneBuffers,
     completion::GpuCompletionTracker,
-    diagnostics::GpuSceneDiagnostics,
+    diagnostics::{GpuSceneDiagnostics, GpuSceneUploadSettings},
     extract::{ExtractedSceneInstance, PrismGpuSceneEntity},
     scene::RenderGpuScene,
 };
@@ -90,12 +90,16 @@ pub(crate) fn apply_extracted_scene_changes(
     mut buffers: ResMut<GpuSceneBuffers>,
     completion: Res<GpuCompletionTracker>,
     mode: Res<crate::GpuSceneMode>,
+    upload_settings: Res<GpuSceneUploadSettings>,
     mut diagnostics: ResMut<GpuSceneDiagnostics>,
     mut clock: Local<ExtractionClock>,
 ) {
     *diagnostics = GpuSceneDiagnostics {
         active_instances: scene.snapshot().instance_count,
         scene_epoch: scene.snapshot().scene_epoch,
+        buffer_version: scene.snapshot().buffer_version,
+        buffer_rebuilds: diagnostics.buffer_rebuilds,
+        reclaimed_handles: diagnostics.reclaimed_handles,
         ..GpuSceneDiagnostics::default()
     };
     if *mode == crate::GpuSceneMode::Disabled {
@@ -108,6 +112,7 @@ pub(crate) fn apply_extracted_scene_changes(
     let mut new_bindings = Vec::new();
     let mut allocated_handles = Vec::new();
     let mut allocation_failures = 0_u32;
+    buffers.set_upload_budget(upload_settings.budget);
 
     for (entity, mut extracted) in &mut changed {
         let handle = match extracted.handle {
@@ -177,14 +182,28 @@ pub(crate) fn apply_extracted_scene_changes(
     }
 
     let transaction = transaction.finish();
+    diagnostics.allocation_failures = allocation_failures;
     if !transaction.operations.is_empty() {
         let report = scene.apply_entity_transaction(&mut buffers, &transaction);
+        let upload = buffers.last_upload_plan();
         diagnostics.active_instances = scene.snapshot().instance_count;
         diagnostics.created = report.created;
         diagnostics.destroyed = report.destroyed;
         diagnostics.updated_fields = report.updated;
         diagnostics.transaction_errors = report.errors.len() as u32;
-        diagnostics.allocation_failures = allocation_failures;
+        diagnostics.stale_handles = report
+            .errors
+            .iter()
+            .filter(|error| matches!(error, SceneApplyError::StaleHandle { .. }))
+            .count() as u32;
+        diagnostics.dirty_slots = report.dirty_slots.len() as u32;
+        diagnostics.uploaded_bytes = upload.estimated_bytes;
+        diagnostics.upload_budget_exceeded = upload.budget_exceeded;
+        diagnostics.instance_upload = upload.instances.strategy;
+        diagnostics.current_transform_upload = upload.current_transforms.strategy;
+        diagnostics.previous_transform_upload = upload.previous_transforms.strategy;
+        diagnostics.bounds_upload = upload.bounds.strategy;
+        diagnostics.buffer_version = scene.snapshot().buffer_version;
         diagnostics.scene_epoch = report.scene_epoch;
         if report.errors.is_empty() {
             for (entity, handle) in new_bindings {

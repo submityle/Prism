@@ -125,6 +125,10 @@ impl RenderGpuScene {
         self.snapshot
     }
 
+    pub fn buffer_version(&self) -> u32 {
+        self.buffer_version
+    }
+
     pub fn mirror(&self) -> &CpuRenderScene {
         &self.mirror
     }

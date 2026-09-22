@@ -3,9 +3,10 @@ use bevy_asset::embedded_asset;
 use bevy_ecs::resource::Resource;
 use bevy_ecs::schedule::IntoScheduleConfigs;
 use bevy_render::{
+    init_gpu_resource,
     renderer::{RenderGraph, RenderGraphSystems},
     sync_world::SyncToRenderWorld,
-    ExtractSchedule, GpuResourceAppExt, Render, RenderApp, RenderSystems,
+    ExtractSchedule, Render, RenderApp, RenderStartup, RenderSystems,
 };
 
 use crate::{
@@ -13,7 +14,7 @@ use crate::{
         prepare_gpu_scene_bind_group, write_gpu_scene_buffers, GpuSceneBindGroup, GpuSceneBuffers,
     },
     completion::{reclaim_completed_handles, track_submission, GpuCompletionTracker},
-    diagnostics::GpuSceneDiagnostics,
+    diagnostics::{GpuSceneDiagnostics, GpuSceneUploadSettings},
     extract::{apply_extracted_scene_changes, extract_scene_instances, PrismGpuSceneEntity},
     scene::RenderGpuScene,
 };
@@ -50,10 +51,18 @@ impl Plugin for PrismGpuScenePlugin {
         render_app
             .init_resource::<GpuSceneMode>()
             .init_resource::<GpuSceneDiagnostics>()
+            .init_resource::<GpuSceneUploadSettings>()
             .init_resource::<RenderGpuScene>()
-            .init_gpu_resource::<GpuSceneBuffers>()
-            .init_gpu_resource::<GpuSceneBindGroup>()
             .init_resource::<GpuCompletionTracker>()
+            .add_systems(
+                RenderStartup,
+                (
+                    init_gpu_resource::<GpuSceneBuffers>,
+                    init_gpu_resource::<GpuSceneBindGroup>,
+                    rebuild_gpu_scene_after_device_startup,
+                )
+                    .chain(),
+            )
             .add_systems(ExtractSchedule, extract_scene_instances)
             .add_systems(
                 Render,
@@ -75,4 +84,14 @@ impl Plugin for PrismGpuScenePlugin {
                 ),
             );
     }
+}
+
+fn rebuild_gpu_scene_after_device_startup(
+    mut scene: bevy_ecs::prelude::ResMut<RenderGpuScene>,
+    mut buffers: bevy_ecs::prelude::ResMut<GpuSceneBuffers>,
+    mut diagnostics: bevy_ecs::prelude::ResMut<GpuSceneDiagnostics>,
+) {
+    scene.rebuild_gpu_buffers(&mut buffers);
+    diagnostics.buffer_version = scene.buffer_version();
+    diagnostics.buffer_rebuilds = diagnostics.buffer_rebuilds.saturating_add(1);
 }
