@@ -1,0 +1,43 @@
+use bevy_app::{App, Plugin};
+use bevy_asset::embedded_asset;
+use bevy_ecs::schedule::IntoScheduleConfigs;
+use bevy_render::{
+    renderer::{RenderGraph, RenderGraphSystems},
+    GpuResourceAppExt, Render, RenderApp, RenderSystems,
+};
+
+use crate::{
+    buffers::{write_gpu_scene_buffers, GpuSceneBuffers},
+    completion::{reclaim_completed_handles, track_submission, GpuCompletionTracker},
+    scene::RenderGpuScene,
+};
+
+/// Installs the retained GPU Scene into Bevy's render sub-application.
+pub struct PrismGpuScenePlugin;
+
+impl Plugin for PrismGpuScenePlugin {
+    fn build(&self, app: &mut App) {
+        embedded_asset!(app, "shaders/gpu_scene.wesl");
+        let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
+            return;
+        };
+
+        render_app
+            .init_resource::<RenderGpuScene>()
+            .init_gpu_resource::<GpuSceneBuffers>()
+            .init_resource::<GpuCompletionTracker>()
+            .add_systems(
+                Render,
+                write_gpu_scene_buffers.in_set(RenderSystems::PrepareResourcesFlush),
+            )
+            .add_systems(
+                RenderGraph,
+                (
+                    track_submission.in_set(RenderGraphSystems::Finish),
+                    reclaim_completed_handles
+                        .after(track_submission)
+                        .in_set(RenderGraphSystems::Finish),
+                ),
+            );
+    }
+}

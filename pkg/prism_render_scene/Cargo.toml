@@ -1,0 +1,21 @@
+[package]
+name = "prism_render_scene"
+version = "0.1.0"
+edition = "2024"
+description = "ECS and GPU integration for Prism's retained GPU scene"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+bevy_app = { path = "../../crates/bevy_app", version = "0.20.0-dev" }
+bevy_asset = { path = "../../crates/bevy_asset", version = "0.20.0-dev" }
+bevy_ecs = { path = "../../crates/bevy_ecs", version = "0.20.0-dev" }
+bevy_derive = { path = "../../crates/bevy_derive", version = "0.20.0-dev" }
+bevy_math = { path = "../../crates/bevy_math", version = "0.20.0-dev" }
+bevy_platform = { path = "../../crates/bevy_platform", version = "0.20.0-dev" }
+bevy_render = { path = "../../crates/bevy_render", version = "0.20.0-dev" }
+bytemuck = { version = "1.5", features = ["derive", "must_cast"] }
+prism_render_architecture = { path = "../prism_render_architecture" }
+
+[lints]
+workspace = true

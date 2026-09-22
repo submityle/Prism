@@ -78,8 +78,6 @@ bevy_platform = { path = "../bevy_platform", version = "0.20.0-dev", default-fea
   "serialize",
   "bytemuck",
 ] }
-prism_render_architecture = { path = "../../pkg/prism_render_architecture" }
-
 # rendering
 image = { version = "0.25.2", default-features = false }
 
