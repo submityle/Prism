@@ -225,5 +225,7 @@ pub struct PrismVisibilityDiagnostics {
     pub hzb_valid_histories: u32,
     pub hzb_previous_ready_views: u32,
     pub hzb_current_ready_views: u32,
+    pub hzb_previous_dispatches: u32,
+    pub hzb_current_dispatches: u32,
     pub hzb_late_retests: u32,
 }

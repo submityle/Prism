@@ -75,7 +75,7 @@ pub(crate) fn project_sphere_to_hzb(
 
 #[derive(Resource)]
 pub(crate) struct HzbVisibilityPipeline {
-    pipeline: CachedComputePipelineId,
+    pub(crate) pipeline: CachedComputePipelineId,
     layout: BindGroupLayoutDescriptor,
     bind_group_layout: BindGroupLayout,
 }
@@ -128,6 +128,10 @@ impl HzbVisibilityBuffers {
 
     pub(crate) fn bindings(&self) -> (&Buffer, &Buffer) {
         (&self.candidates, &self.stages)
+    }
+
+    pub(crate) fn capacity(&self) -> u32 {
+        self.capacity
     }
 }
 

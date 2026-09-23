@@ -8,6 +8,10 @@ use bevy_app::SubApp;
 use bevy_ecs::prelude::*;
 use bevy_platform::collections::{HashMap, HashSet};
 use bevy_render::view::RetainedViewEntity;
+use bevy_render::{
+    render_resource::{ComputePassDescriptor, PipelineCache},
+    renderer::RenderContext,
+};
 
 use super::runtime::UnifiedVisibilityState;
 
@@ -32,18 +36,49 @@ fn dispatch_previous_hzb(
     history: Option<bevy_render::renderer::ViewQuery<&PrismViewHzbHistory>>,
     bindings: Option<bevy_render::renderer::ViewQuery<&super::hzb_gpu::HzbVisibilityBindGroup>>,
     settings: Res<super::runtime::UnifiedVisibilitySettings>,
+    pipeline: Res<super::hzb_gpu::HzbVisibilityPipeline>,
+    pipeline_cache: Res<PipelineCache>,
+    buffers: Res<super::hzb_gpu::HzbVisibilityBuffers>,
+    mut ctx: RenderContext,
     mut diagnostics: ResMut<super::runtime::PrismVisibilityDiagnostics>,
 ) {
     let _conservative_policy = (
         settings.hzb_depth_bias.max(0.0),
         settings.hzb_fast_motion_threshold.max(0.0),
     );
-    if settings.hzb_occlusion
-        && bindings.is_some_and(|bindings| bindings.into_inner().bind_group.is_some())
-        && history.is_some_and(|history| history.into_inner().previous_valid)
-    {
-        diagnostics.hzb_previous_ready_views += 1;
+    let Some(history) = history else {
+        return;
+    };
+    let history = history.into_inner();
+    if !settings.hzb_occlusion || !history.previous_valid {
+        return;
     }
+    let Some(bind_group) = bindings
+        .and_then(|bindings| bindings.into_inner().bind_group.as_ref())
+    else {
+        return;
+    };
+    diagnostics.hzb_previous_ready_views += 1;
+    let Some(compute_pipeline) = pipeline_cache.get_compute_pipeline(pipeline.pipeline) else {
+        return;
+    };
+    let immediates = hzb_immediates(
+        buffers.capacity(),
+        history.mip_count,
+        0,
+        true,
+        settings.hzb_depth_bias,
+        settings.hzb_fast_motion_threshold,
+    );
+    let mut pass = ctx.command_encoder().begin_compute_pass(&ComputePassDescriptor {
+        label: Some("prism previous hzb visibility"),
+        timestamp_writes: None,
+    });
+    pass.set_pipeline(compute_pipeline);
+    pass.set_bind_group(0, bind_group, &[]);
+    pass.set_immediates(0, bytemuck::bytes_of(&immediates));
+    pass.dispatch_workgroups(buffers.capacity().div_ceil(64), 1, 1);
+    diagnostics.hzb_previous_dispatches += 1;
 }
 
 /// Scheduling seam for the current-frame retest. Missing current HZB keeps all
@@ -52,13 +87,72 @@ fn dispatch_current_hzb(
     history: Option<bevy_render::renderer::ViewQuery<&PrismViewHzbHistory>>,
     bindings: Option<bevy_render::renderer::ViewQuery<&super::hzb_gpu::HzbVisibilityBindGroup>>,
     settings: Res<super::runtime::UnifiedVisibilitySettings>,
+    pipeline: Res<super::hzb_gpu::HzbVisibilityPipeline>,
+    pipeline_cache: Res<PipelineCache>,
+    buffers: Res<super::hzb_gpu::HzbVisibilityBuffers>,
+    mut ctx: RenderContext,
     mut diagnostics: ResMut<super::runtime::PrismVisibilityDiagnostics>,
 ) {
-    if settings.hzb_occlusion
-        && history.is_some()
-        && bindings.is_some_and(|bindings| bindings.into_inner().bind_group.is_some())
-    {
-        diagnostics.hzb_current_ready_views += 1;
+    if !settings.hzb_occlusion {
+        return;
+    }
+    let (Some(history), Some(bind_group), Some(compute_pipeline)) = (
+        history,
+        bindings.and_then(|bindings| bindings.into_inner().bind_group.as_ref()),
+        pipeline_cache.get_compute_pipeline(pipeline.pipeline),
+    ) else {
+        return;
+    };
+    diagnostics.hzb_current_ready_views += 1;
+    let immediates = hzb_immediates(
+        buffers.capacity(),
+        history.into_inner().mip_count,
+        1,
+        true,
+        settings.hzb_depth_bias,
+        settings.hzb_fast_motion_threshold,
+    );
+    let mut pass = ctx.command_encoder().begin_compute_pass(&ComputePassDescriptor {
+        label: Some("prism current hzb visibility"),
+        timestamp_writes: None,
+    });
+    pass.set_pipeline(compute_pipeline);
+    pass.set_bind_group(0, bind_group, &[]);
+    pass.set_immediates(0, bytemuck::bytes_of(&immediates));
+    pass.dispatch_workgroups(buffers.capacity().div_ceil(64), 1, 1);
+    diagnostics.hzb_current_dispatches += 1;
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct HzbDispatch {
+    candidate_count: u32,
+    mip_count: u32,
+    output_start: u32,
+    phase: u32,
+    history_valid: u32,
+    camera_cut: u32,
+    depth_bias: f32,
+    fast_motion_threshold: f32,
+}
+
+fn hzb_immediates(
+    candidate_count: u32,
+    mip_count: u32,
+    phase: u32,
+    history_valid: bool,
+    depth_bias: f32,
+    fast_motion_threshold: f32,
+) -> HzbDispatch {
+    HzbDispatch {
+        candidate_count,
+        mip_count: mip_count.max(1),
+        output_start: 0,
+        phase,
+        history_valid: u32::from(history_valid),
+        camera_cut: 0,
+        depth_bias,
+        fast_motion_threshold,
     }
 }
 
