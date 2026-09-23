@@ -182,6 +182,7 @@ pub(crate) fn dispatch_unified_visibility(
     cache: Res<PipelineCache>,
     scene_bindings: Res<crate::buffers::GpuSceneBindGroup>,
     material_bindings: Res<crate::MaterialBindGroup>,
+    geometry_bindings: Res<crate::GeometryBindGroup>,
     output_bindings: Res<VisibilityComputeBindGroup>,
     buffers: Res<UnifiedVisibilityBuffers>,
     device: Res<RenderDevice>,
@@ -195,9 +196,15 @@ pub(crate) fn dispatch_unified_visibility(
         diagnostics.pipeline_not_ready = 1;
         return;
     };
-    let (Some(scene_bind_group), Some(material_bind_group), Some(output_bind_group)) = (
+    let (
+        Some(scene_bind_group),
+        Some(material_bind_group),
+        Some(geometry_bind_group),
+        Some(output_bind_group),
+    ) = (
         scene_bindings.bind_group.as_ref(),
         material_bindings.bind_group.as_ref(),
+        geometry_bindings.bind_group.as_ref(),
         output_bindings.bind_group.as_ref(),
     ) else {
         return;
@@ -214,7 +221,8 @@ pub(crate) fn dispatch_unified_visibility(
         pass.set_pipeline(compute_pipeline);
         pass.set_bind_group(0, scene_bind_group, &[]);
         pass.set_bind_group(1, material_bind_group, &[]);
-        pass.set_bind_group(2, output_bind_group, &[]);
+        pass.set_bind_group(2, geometry_bind_group, &[]);
+        pass.set_bind_group(3, output_bind_group, &[]);
         for (view_index, _) in state.views.iter().enumerate() {
             let output_start = (view_index as u32).saturating_mul(buffers.gpu_slots_per_view());
             let immediates = RenderVisibilityDispatch {

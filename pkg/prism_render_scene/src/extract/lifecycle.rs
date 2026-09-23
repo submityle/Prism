@@ -9,7 +9,7 @@ use prism_render_architecture::gpu_scene::{SceneOperation, SceneTransactionBuild
 
 use crate::{
     buffers::GpuSceneBuffers, completion::GpuCompletionTracker, diagnostics::GpuSceneDiagnostics,
-    scene::RenderGpuScene,
+    geometry::RenderGeometryRegistry, scene::RenderGpuScene,
 };
 
 const EXTRACT_PRODUCER: u32 = 1;
@@ -17,10 +17,12 @@ const EXTRACT_PRODUCER: u32 = 1;
 pub(crate) fn retire_unused_geometry(
     mut events: Extract<MessageReader<AssetEvent<bevy_mesh::Mesh>>>,
     mut scene: ResMut<RenderGpuScene>,
+    mut geometry: ResMut<RenderGeometryRegistry>,
 ) {
     for event in events.read() {
         if let AssetEvent::Unused { id } = event {
             scene.retire_geometry(*id);
+            geometry.retire(*id);
         }
     }
 }

@@ -23,6 +23,7 @@ pub struct RenderGpuScene {
     entities: HashMap<Entity, SceneHandle>,
     main_entities: HashMap<Entity, bevy_render::sync_world::MainEntity>,
     geometry: HashMap<AssetId<Mesh>, GeometryHandle>,
+    geometry_generations: HashMap<AssetId<Mesh>, u32>,
     next_geometry_index: u32,
     material_generations: HashMap<u32, (u32, bool)>,
 }
@@ -43,6 +44,7 @@ impl RenderGpuScene {
             entities: HashMap::new(),
             main_entities: HashMap::new(),
             geometry: HashMap::new(),
+            geometry_generations: HashMap::new(),
             next_geometry_index: 1,
             material_generations: HashMap::new(),
         }
@@ -127,9 +129,10 @@ impl RenderGpuScene {
         if let Some(handle) = self.geometry.get(&mesh) {
             return *handle;
         }
+        let generation = self.geometry_generations.get(&mesh).copied().unwrap_or(1);
         let handle = GeometryHandle {
             index: self.next_geometry_index,
-            generation: 1,
+            generation,
         };
         self.next_geometry_index = self
             .next_geometry_index
@@ -140,11 +143,20 @@ impl RenderGpuScene {
     }
 
     pub fn retire_geometry(&mut self, mesh: AssetId<Mesh>) -> Option<GeometryHandle> {
-        self.geometry.remove(&mesh)
+        let retired = self.geometry.remove(&mesh)?;
+        self.geometry_generations
+            .insert(mesh, retired.generation.saturating_add(1));
+        Some(retired)
     }
 
     pub fn geometry_handle(&self, mesh: AssetId<Mesh>) -> Option<GeometryHandle> {
         self.geometry.get(&mesh).copied()
+    }
+
+    pub(crate) fn geometry_assets(
+        &self,
+    ) -> impl Iterator<Item = (AssetId<Mesh>, GeometryHandle)> + '_ {
+        self.geometry.iter().map(|(asset, handle)| (*asset, *handle))
     }
 
     /// Registers an externally-owned material row and rejects stale reuse.

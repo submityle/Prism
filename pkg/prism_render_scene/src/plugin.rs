@@ -20,6 +20,10 @@ use crate::{
         apply_extracted_scene_changes, extract_scene_instances, retire_unused_geometry,
         PrismGpuSceneEntity,
     },
+    geometry::{
+        prepare_geometry_bind_group, sync_geometry_registry, upload_geometry_buffers,
+        GeometryBindGroup, RenderGeometryBuffers, RenderGeometryRegistry,
+    },
     scene::RenderGpuScene,
 };
 
@@ -68,6 +72,7 @@ impl Plugin for PrismGpuScenePlugin {
             .init_resource::<GpuSceneDiagnostics>()
             .init_resource::<GpuSceneParityDiagnostics>()
             .init_resource::<GpuSceneUploadSettings>()
+            .init_resource::<RenderGeometryRegistry>()
             .init_resource::<crate::extract::lifecycle::ExtractionClock>()
             .init_resource::<RenderGpuScene>()
             .init_resource::<GpuCompletionTracker>()
@@ -76,6 +81,8 @@ impl Plugin for PrismGpuScenePlugin {
                 (
                     init_gpu_resource::<GpuSceneBuffers>,
                     init_gpu_resource::<GpuSceneBindGroup>,
+                    init_gpu_resource::<RenderGeometryBuffers>,
+                    init_gpu_resource::<GeometryBindGroup>,
                     rebuild_gpu_scene_after_device_startup,
                 )
                     .chain(),
@@ -97,9 +104,18 @@ impl Plugin for PrismGpuScenePlugin {
                     compare_scene_mirror
                         .after(apply_extracted_scene_changes)
                         .in_set(RenderSystems::PrepareResources),
+                    sync_geometry_registry
+                        .after(apply_extracted_scene_changes)
+                        .in_set(RenderSystems::PrepareResources),
                     write_gpu_scene_buffers.in_set(RenderSystems::PrepareResourcesFlush),
+                    upload_geometry_buffers
+                        .after(sync_geometry_registry)
+                        .in_set(RenderSystems::PrepareResourcesFlush),
                     prepare_gpu_scene_bind_group
                         .after(write_gpu_scene_buffers)
+                        .in_set(RenderSystems::PrepareBindGroups),
+                    prepare_geometry_bind_group
+                        .after(upload_geometry_buffers)
                         .in_set(RenderSystems::PrepareBindGroups),
                 ),
             )

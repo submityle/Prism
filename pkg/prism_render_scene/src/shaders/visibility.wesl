@@ -23,6 +23,15 @@ struct SurfaceParameters {
     sheen: f32, subsurface: f32, index_of_refraction: f32, dispersion: f32,
 }
 struct MaterialTexture { index: u32, generation: u32, semantic: u32, sampler_index: u32 }
+struct GeometryHeader {
+    generation: u32, revision: u32, lod_offset: u32, lod_count: u32,
+    primitive_start: u32, primitive_count: u32, flags: u32, padding: u32,
+}
+struct GeometryLod {
+    element_count: u32, first_element: u32, base_vertex: i32, vertex_count: u32,
+    vertex_buffer_class: u32, index_buffer_class: u32, flags: u32, level: u32,
+    screen_error: f32, padding: vec3<u32>,
+}
 struct VisibilityView {
     clip_from_world: mat4x4<f32>, previous_clip_from_world: mat4x4<f32>,
     frustum_planes: array<vec4<f32>, 6>, world_position_lod_scale: vec4<f32>,
@@ -48,12 +57,14 @@ struct VisibilityIndirect { index_count: u32, instance_count: u32, first_index: 
 @group(1) @binding(0) var<storage, read> material_headers: array<MaterialHeader>;
 @group(1) @binding(1) var<storage, read> material_parameters: array<SurfaceParameters>;
 @group(1) @binding(2) var<storage, read> material_textures: array<MaterialTexture>;
-@group(2) @binding(0) var<storage, read> views: array<VisibilityView>;
-@group(2) @binding(1) var<storage, read_write> counters: array<VisibilityCounter>;
-@group(2) @binding(2) var<storage, read_write> work_items: array<VisibilityWorkItem>;
-@group(2) @binding(3) var<storage, read_write> ranges: array<VisibilityRange>;
-@group(2) @binding(4) var<storage, read_write> indirect: array<VisibilityIndirect>;
-@group(2) @binding(5) var<storage, read_write> overflow: array<atomic<u32>>;
+@group(2) @binding(0) var<storage, read> geometry_headers: array<GeometryHeader>;
+@group(2) @binding(1) var<storage, read> geometry_lods: array<GeometryLod>;
+@group(3) @binding(0) var<storage, read> views: array<VisibilityView>;
+@group(3) @binding(1) var<storage, read_write> counters: array<VisibilityCounter>;
+@group(3) @binding(2) var<storage, read_write> work_items: array<VisibilityWorkItem>;
+@group(3) @binding(3) var<storage, read_write> ranges: array<VisibilityRange>;
+@group(3) @binding(4) var<storage, read_write> indirect: array<VisibilityIndirect>;
+@group(3) @binding(5) var<storage, read_write> overflow: array<atomic<u32>>;
 
 struct VisibilityDispatch {
     view_index: u32, candidate_count: u32, output_start: u32, output_end: u32,
@@ -86,6 +97,34 @@ fn projected_lod(view: VisibilityView, sphere: vec4<f32>) -> u32 {
     return 5u;
 }
 
+fn resolve_geometry_lod(header: GeometryHeader, requested: u32) -> u32 {
+    var resolved = 0xffffffffu;
+    var resolved_level = 0u;
+    var fallback = 0xffffffffu;
+    for (var local = 0u; local < header.lod_count; local += 1u) {
+        let index = header.lod_offset + local;
+        if index >= arrayLength(&geometry_lods) { break; }
+        let lod = geometry_lods[index];
+        let resident = (lod.flags & 4u) != 0u;
+        if resident && (lod.flags & 8u) != 0u { fallback = index; }
+        if resident && lod.level <= requested
+            && (resolved == 0xffffffffu || resolved_level < lod.level) {
+            resolved = index;
+            resolved_level = lod.level;
+        }
+    }
+    return select(fallback, resolved, resolved != 0xffffffffu);
+}
+
+fn first_resident_geometry_lod(header: GeometryHeader) -> u32 {
+    for (var local = 0u; local < header.lod_count; local += 1u) {
+        let index = header.lod_offset + local;
+        if index >= arrayLength(&geometry_lods) { break; }
+        if (geometry_lods[index].flags & 4u) != 0u { return index; }
+    }
+    return 0xffffffffu;
+}
+
 @compute @workgroup_size(64)
 fn cull_instances(@builtin(global_invocation_id) id: vec3<u32>) {
     let candidate = id.x;
@@ -104,7 +143,19 @@ fn cull_instances(@builtin(global_invocation_id) id: vec3<u32>) {
         && requested.generation == instance.material_generation;
     let material_index = select(0u, requested_index, requested_valid);
     let material = material_headers[material_index];
-    if !scene_valid || !layer_visible || !frustum_visible {
+    let geometry_in_bounds = instance.geometry_index < arrayLength(&geometry_headers);
+    let geometry_index = select(0u, instance.geometry_index, geometry_in_bounds);
+    let geometry = geometry_headers[geometry_index];
+    let geometry_valid = geometry_in_bounds && (geometry.flags & 1u) != 0u
+        && geometry.generation == instance.geometry_generation;
+    let resolved_lod = resolve_geometry_lod(geometry, projected_lod(view, sphere));
+    let lod_index = select(
+        first_resident_geometry_lod(geometry),
+        resolved_lod,
+        resolved_lod != 0xffffffffu,
+    );
+    let lod_valid = geometry_valid && lod_index != 0xffffffffu;
+    if !scene_valid || !layer_visible || !frustum_visible || !lod_valid {
         atomicAdd(&counters[dispatch.view_index].rejected_count, 1u);
         return;
     }
@@ -119,8 +170,13 @@ fn cull_instances(@builtin(global_invocation_id) id: vec3<u32>) {
         candidate, instance.generation,
         instance.geometry_index, instance.geometry_generation,
         material_index, instance.material_generation,
-        projected_lod(view, sphere), pass_mask(material.render_class, instance.flags),
+        geometry_lods[lod_index].level, pass_mask(material.render_class, instance.flags),
         instance.geometry_index, material.render_class, vec2<u32>(0u),
     );
-    indirect[output] = VisibilityIndirect(0u, 1u, 0u, 0i, candidate);
+    let lod = geometry_lods[lod_index];
+    let indexed = (lod.flags & 2u) != 0u;
+    indirect[output] = VisibilityIndirect(
+        select(0u, lod.element_count, indexed),
+        1u, lod.first_element, lod.base_vertex, candidate,
+    );
 }

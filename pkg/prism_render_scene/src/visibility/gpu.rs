@@ -16,7 +16,7 @@ use bevy_render::{
 };
 use bevy_shader::Shader;
 
-use crate::{buffers::GpuSceneBindGroup, MaterialBindGroup};
+use crate::{buffers::GpuSceneBindGroup, GeometryBindGroup, MaterialBindGroup};
 
 use super::{
     buffers::UnifiedVisibilityBuffers,
@@ -41,6 +41,7 @@ pub(crate) fn init_visibility_compute_pipeline(
     cache: Res<PipelineCache>,
     scene: Res<GpuSceneBindGroup>,
     materials: Res<MaterialBindGroup>,
+    geometry: Res<GeometryBindGroup>,
     asset_server: Res<bevy_asset::AssetServer>,
 ) {
     let entries = BindGroupLayoutEntries::sequential(
@@ -63,6 +64,7 @@ pub(crate) fn init_visibility_compute_pipeline(
         layout: vec![
             scene.layout_descriptor.clone(),
             materials.layout_descriptor.clone(),
+            geometry.layout_descriptor.clone(),
             output_descriptor.clone(),
         ],
         immediate_size: 16,
