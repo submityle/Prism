@@ -1,6 +1,6 @@
 use bevy_ecs::{prelude::*, world::FromWorld};
 use bevy_render::{
-    render_resource::{Buffer, BufferUsages, RawBufferVec},
+    render_resource::{Buffer, BufferUsages, DrawIndexedIndirectArgs, RawBufferVec},
     renderer::{RenderDevice, RenderQueue},
 };
 
@@ -15,6 +15,7 @@ pub(crate) struct UnifiedVisibilityBuffers {
     ranges: RawBufferVec<RenderVisibilityRange>,
     gpu_work: RawBufferVec<RenderVisibilityWorkItem>,
     gpu_ranges: RawBufferVec<RenderVisibilityRange>,
+    indirect: RawBufferVec<DrawIndexedIndirectArgs>,
     counters: RawBufferVec<RenderVisibilityCounter>,
     overflow: RawBufferVec<u32>,
     gpu_work_capacity: usize,
@@ -41,12 +42,15 @@ impl FromWorld for UnifiedVisibilityBuffers {
         gpu_work.set_label(Some("prism visibility gpu parity work"));
         let mut gpu_ranges = RawBufferVec::new(BufferUsages::STORAGE | BufferUsages::COPY_SRC);
         gpu_ranges.set_label(Some("prism visibility gpu parity ranges"));
+        let mut indirect = RawBufferVec::new(BufferUsages::STORAGE | BufferUsages::INDIRECT);
+        indirect.set_label(Some("prism visibility indexed indirect"));
         Self {
             views,
             work,
             ranges,
             gpu_work,
             gpu_ranges,
+            indirect,
             counters,
             overflow,
             gpu_work_capacity: 0,
@@ -67,6 +71,7 @@ impl UnifiedVisibilityBuffers {
         self.work.clear();
         self.ranges.clear();
         self.gpu_ranges.clear();
+        self.indirect.clear();
         self.counters.clear();
         self.overflow.clear();
         self.views.extend(views);
@@ -85,6 +90,8 @@ impl UnifiedVisibilityBuffers {
                     }),
             );
         self.gpu_work_capacity = self.views.len().saturating_mul(gpu_slots_per_view as usize);
+        self.indirect
+            .extend((0..self.gpu_work_capacity).map(|_| DrawIndexedIndirectArgs::default()));
         self.counters
             .extend((0..self.views.len()).map(|_| RenderVisibilityCounter::default()));
         self.overflow.extend((0..self.views.len()).map(|_| 0));
@@ -96,6 +103,7 @@ impl UnifiedVisibilityBuffers {
         self.ranges.write_buffer(device, queue);
         self.gpu_work.reserve(self.gpu_work_capacity.max(1), device);
         self.gpu_ranges.write_buffer(device, queue);
+        self.indirect.write_buffer(device, queue);
         self.counters.write_buffer(device, queue);
         self.overflow.write_buffer(device, queue);
     }
@@ -116,12 +124,15 @@ impl UnifiedVisibilityBuffers {
         ))
     }
 
-    pub(crate) fn compute_buffers(&self) -> Option<(&Buffer, &Buffer, &Buffer, &Buffer, &Buffer)> {
+    pub(crate) fn compute_buffers(
+        &self,
+    ) -> Option<(&Buffer, &Buffer, &Buffer, &Buffer, &Buffer, &Buffer)> {
         Some((
             self.views.buffer()?,
             self.counters.buffer()?,
             self.gpu_work.buffer()?,
             self.gpu_ranges.buffer()?,
+            self.indirect.buffer()?,
             self.overflow.buffer()?,
         ))
     }
@@ -136,6 +147,10 @@ impl UnifiedVisibilityBuffers {
 
     pub(crate) fn parity_readback_buffers(&self) -> Option<(&Buffer, &Buffer)> {
         Some((self.counters.buffer()?, self.gpu_work.buffer()?))
+    }
+
+    pub(crate) fn indirect(&self) -> Option<&Buffer> {
+        self.indirect.buffer()
     }
 }
 
@@ -169,5 +184,6 @@ mod tests {
         assert_eq!(buffers.gpu_ranges.values()[1].start, 8);
         assert_eq!(buffers.gpu_work_capacity, 16);
         assert_eq!(buffers.gpu_slots_per_view(), 8);
+        assert_eq!(buffers.indirect.len(), 16);
     }
 }

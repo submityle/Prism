@@ -39,6 +39,7 @@ impl UnifiedVisibilityReader<'_> {
             views,
             work,
             ranges,
+            indexed_indirect: self.buffers.indirect()?,
             version: self.buffers.version(),
         })
     }
@@ -48,5 +49,6 @@ pub struct UnifiedVisibilityBufferBindings<'a> {
     pub views: &'a Buffer,
     pub work: &'a Buffer,
     pub ranges: &'a Buffer,
+    pub indexed_indirect: &'a Buffer,
     pub version: u32,
 }

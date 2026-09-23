@@ -39,6 +39,7 @@ struct VisibilityWorkItem {
 }
 struct VisibilityRange { view_index: u32, view_generation: u32, start: u32, count: u32 }
 struct VisibilityCounter { visible_count: atomic<u32>, rejected_count: atomic<u32>, overflow_count: atomic<u32>, padding: u32 }
+struct VisibilityIndirect { index_count: u32, instance_count: u32, first_index: u32, base_vertex: i32, first_instance: u32 }
 
 @group(0) @binding(0) var<storage, read> scene_instances: array<GpuSceneInstance>;
 @group(0) @binding(1) var<storage, read> scene_current_transforms: array<GpuSceneTransform>;
@@ -51,7 +52,8 @@ struct VisibilityCounter { visible_count: atomic<u32>, rejected_count: atomic<u3
 @group(2) @binding(1) var<storage, read_write> counters: array<VisibilityCounter>;
 @group(2) @binding(2) var<storage, read_write> work_items: array<VisibilityWorkItem>;
 @group(2) @binding(3) var<storage, read_write> ranges: array<VisibilityRange>;
-@group(2) @binding(4) var<storage, read_write> overflow: array<atomic<u32>>;
+@group(2) @binding(4) var<storage, read_write> indirect: array<VisibilityIndirect>;
+@group(2) @binding(5) var<storage, read_write> overflow: array<atomic<u32>>;
 
 struct VisibilityDispatch {
     view_index: u32, candidate_count: u32, output_start: u32, output_end: u32,
@@ -120,4 +122,5 @@ fn cull_instances(@builtin(global_invocation_id) id: vec3<u32>) {
         projected_lod(view, sphere), pass_mask(material.render_class, instance.flags),
         instance.geometry_index, material.render_class, vec2<u32>(0u),
     );
+    indirect[output] = VisibilityIndirect(0u, 1u, 0u, 0i, candidate);
 }
