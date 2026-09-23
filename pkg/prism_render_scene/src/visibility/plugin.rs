@@ -19,6 +19,7 @@ use super::{
         init_hzb_visibility_pipeline, inspect_hzb_visibility_pipeline, prepare_hzb_bind_groups,
         prepare_hzb_candidates, HzbVisibilityBuffers,
     },
+    hzb_late::{init_hzb_late_compact_pipeline, inspect_hzb_late_pipeline},
     readback::{
         collect_visibility_parity_readback, map_submitted_visibility_parity_readback,
         request_visibility_parity_readback, VisibilityParityReadback,
@@ -48,6 +49,7 @@ impl Plugin for PrismVisibilityPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "../shaders/visibility.wesl");
         embedded_asset!(app, "../shaders/hzb_visibility.wesl");
+        embedded_asset!(app, "../shaders/hzb_late_compact.wesl");
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
@@ -73,6 +75,7 @@ impl Plugin for PrismVisibilityPlugin {
                     init_gpu_resource::<HzbVisibilityBuffers>,
                     init_visibility_compute_pipeline,
                     init_hzb_visibility_pipeline,
+                    init_hzb_late_compact_pipeline,
                     rebuild_unified_visibility,
                 )
                     .chain(),
@@ -92,6 +95,7 @@ impl Plugin for PrismVisibilityPlugin {
                         .chain()
                         .in_set(RenderSystems::PrepareResources),
                     inspect_hzb_visibility_pipeline.in_set(RenderSystems::Prepare),
+                    inspect_hzb_late_pipeline.in_set(RenderSystems::Prepare),
                     prepare_hzb_candidates
                         .after(build_unified_visibility)
                         .in_set(RenderSystems::PrepareResources),

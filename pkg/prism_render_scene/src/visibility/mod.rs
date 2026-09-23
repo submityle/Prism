@@ -4,6 +4,7 @@ mod gpu;
 mod graph;
 mod hzb;
 mod hzb_gpu;
+mod hzb_late;
 mod plugin;
 mod readback;
 mod rows;
