@@ -7,6 +7,7 @@
 
 extern crate alloc;
 
+mod benchmark;
 mod culling;
 mod diagnostics;
 mod lod;
@@ -14,6 +15,9 @@ mod output;
 mod view;
 mod work;
 
+#[cfg(feature = "std")]
+pub use benchmark::benchmark_cpu_reference;
+pub use benchmark::VisibilityBenchmarkResult;
 pub use culling::{cull_view, CullReason, VisibilityInput};
 pub use diagnostics::VisibilityDiagnostics;
 pub use lod::{GeometryLod, GeometryLodChain, LodSelection};

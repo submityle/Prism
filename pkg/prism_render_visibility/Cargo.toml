@@ -6,6 +6,10 @@ description = "Unified multiview visibility and GPU work generation for Prism"
 license = "MIT OR Apache-2.0"
 publish = false
 
+[features]
+default = ["std"]
+std = []
+
 [dependencies]
 bytemuck = { version = "1.5", features = ["derive", "must_cast"] }
 prism_render_architecture = { path = "../prism_render_architecture" }
