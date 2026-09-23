@@ -25,9 +25,9 @@ pub(crate) fn install_hzb_schedule(app: &mut SubApp) {
     );
 }
 
-/// Scheduling seam for the early compute pipeline. The HZB binding and
-/// compaction kernel are installed in the next slice; this system deliberately
-/// reports only histories that are safe to consume.
+/// Scheduling seam for the early compute pipeline. It deliberately reports
+/// only histories that are safe to consume; the GPU test/compaction kernel is
+/// graduation-gated and therefore not counted as a dispatch yet.
 fn dispatch_previous_hzb(
     history: Option<bevy_render::renderer::ViewQuery<&PrismViewHzbHistory>>,
     settings: Res<super::runtime::UnifiedVisibilitySettings>,
@@ -40,19 +40,19 @@ fn dispatch_previous_hzb(
     if settings.hzb_occlusion
         && history.is_some_and(|history| history.into_inner().previous_valid)
     {
-        diagnostics.hzb_previous_dispatches += 1;
+        diagnostics.hzb_previous_ready_views += 1;
     }
 }
 
 /// Scheduling seam for the current-frame retest. Missing current HZB keeps all
-/// deferred candidates visible; it never turns absence into rejection.
+/// deferred candidates visible; readiness is not reported as a GPU dispatch.
 fn dispatch_current_hzb(
     history: Option<bevy_render::renderer::ViewQuery<&PrismViewHzbHistory>>,
     settings: Res<super::runtime::UnifiedVisibilitySettings>,
     mut diagnostics: ResMut<super::runtime::PrismVisibilityDiagnostics>,
 ) {
     if settings.hzb_occlusion && history.is_some() {
-        diagnostics.hzb_current_dispatches += 1;
+        diagnostics.hzb_current_ready_views += 1;
     }
 }
 
