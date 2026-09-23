@@ -73,6 +73,17 @@ fn sphere_visible(view: VisibilityView, sphere: vec4<f32>) -> bool {
     return true;
 }
 
+fn projected_lod(view: VisibilityView, sphere: vec4<f32>) -> u32 {
+    let distance = max(distance(view.world_position_lod_scale.xyz, sphere.xyz), 1.0e-4);
+    let projected_diameter = 2.0 * sphere.w * view.world_position_lod_scale.w / distance;
+    if projected_diameter >= 512.0 { return 0u; }
+    if projected_diameter >= 256.0 { return 1u; }
+    if projected_diameter >= 128.0 { return 2u; }
+    if projected_diameter >= 64.0 { return 3u; }
+    if projected_diameter >= 32.0 { return 4u; }
+    return 5u;
+}
+
 @compute @workgroup_size(64)
 fn cull_instances(@builtin(global_invocation_id) id: vec3<u32>) {
     let candidate = id.x;
@@ -81,7 +92,8 @@ fn cull_instances(@builtin(global_invocation_id) id: vec3<u32>) {
     let view = views[dispatch.view_index];
     let scene_valid = instance.is_active != 0u && instance.generation != 0u;
     let layer_visible = (instance.render_layers & view.layer_mask) != 0u;
-    let frustum_visible = sphere_visible(view, scene_bounds[candidate].center_radius);
+    let sphere = scene_bounds[candidate].center_radius;
+    let frustum_visible = sphere_visible(view, sphere);
     let material_in_bounds = instance.material_index < arrayLength(&material_headers);
     let requested_index = select(0u, instance.material_index, material_in_bounds);
     let requested = material_headers[requested_index];
@@ -105,7 +117,7 @@ fn cull_instances(@builtin(global_invocation_id) id: vec3<u32>) {
         candidate, instance.generation,
         instance.geometry_index, instance.geometry_generation,
         material_index, instance.material_generation,
-        0u, pass_mask(material.render_class, instance.flags),
+        projected_lod(view, sphere), pass_mask(material.render_class, instance.flags),
         instance.geometry_index, material.render_class, vec2<u32>(0u),
     );
 }
