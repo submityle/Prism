@@ -30,6 +30,15 @@ use super::{
 
 pub struct PrismVisibilityPlugin;
 
+fn detect_visibility_capabilities(
+    device: bevy_ecs::prelude::Res<bevy_render::renderer::RenderDevice>,
+    mut settings: bevy_ecs::prelude::ResMut<UnifiedVisibilitySettings>,
+) {
+    settings.indirect_first_instance = device
+        .features()
+        .contains(bevy_render::render_resource::WgpuFeatures::INDIRECT_FIRST_INSTANCE);
+}
+
 impl Plugin for PrismVisibilityPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "../shaders/visibility.wesl");
@@ -39,14 +48,6 @@ impl Plugin for PrismVisibilityPlugin {
         let compiled_graph = visibility_frame_graph()
             .compile()
             .expect("Prism visibility frame graph must be valid");
-        let indirect_first_instance = render_app
-            .world()
-            .get_resource::<bevy_render::renderer::RenderDevice>()
-            .is_some_and(|device| {
-                device
-                    .features()
-                    .contains(bevy_render::render_resource::WgpuFeatures::INDIRECT_FIRST_INSTANCE)
-            });
         render_app
             .init_resource::<UnifiedVisibilityEnabled>()
             .init_resource::<UnifiedVisibilitySettings>()
@@ -56,13 +57,10 @@ impl Plugin for PrismVisibilityPlugin {
             .insert_resource(VisibilityFrameGraph {
                 compiled: compiled_graph,
             })
-            .insert_resource(UnifiedVisibilitySettings {
-                indirect_first_instance,
-                ..Default::default()
-            })
             .add_systems(
                 RenderStartup,
                 (
+                    detect_visibility_capabilities,
                     init_gpu_resource::<UnifiedVisibilityBuffers>,
                     init_gpu_resource::<VisibilityComputeBindGroup>,
                     init_visibility_compute_pipeline,
