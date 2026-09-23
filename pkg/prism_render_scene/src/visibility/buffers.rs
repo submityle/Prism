@@ -38,13 +38,9 @@ impl FromWorld for UnifiedVisibilityBuffers {
     fn from_world(_: &mut World) -> Self {
         let mut views = RawBufferVec::new(BufferUsages::STORAGE);
         views.set_label(Some("prism visibility views"));
-        let mut work = RawBufferVec::new(
-            BufferUsages::STORAGE | BufferUsages::INDIRECT | BufferUsages::COPY_SRC,
-        );
+        let mut work = RawBufferVec::new(BufferUsages::STORAGE | BufferUsages::COPY_SRC);
         work.set_label(Some("prism visibility work"));
-        let mut ranges = RawBufferVec::new(
-            BufferUsages::STORAGE | BufferUsages::INDIRECT | BufferUsages::COPY_SRC,
-        );
+        let mut ranges = RawBufferVec::new(BufferUsages::STORAGE | BufferUsages::COPY_SRC);
         ranges.set_label(Some("prism visibility ranges"));
         let mut counters = RawBufferVec::new(BufferUsages::STORAGE | BufferUsages::COPY_SRC);
         counters.set_label(Some("prism visibility counters"));
