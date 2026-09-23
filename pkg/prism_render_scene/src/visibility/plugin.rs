@@ -14,7 +14,7 @@ use super::{
         VisibilityComputeBindGroup,
     },
     graph::visibility_frame_graph,
-    hzb::{inspect_hzb_history, prepare_hzb_history},
+    hzb::{inspect_hzb_history, install_hzb_schedule, prepare_hzb_history},
     readback::{
         collect_visibility_parity_readback, map_submitted_visibility_parity_readback,
         request_visibility_parity_readback, VisibilityParityReadback,
@@ -46,6 +46,7 @@ impl Plugin for PrismVisibilityPlugin {
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
+        install_hzb_schedule(render_app);
         let compiled_graph = visibility_frame_graph()
             .compile()
             .expect("Prism visibility frame graph must be valid");

@@ -1,9 +1,52 @@
 use bevy_core_pipeline::mip_generation::experimental::depth::ViewDepthPyramid;
+use bevy_core_pipeline::{
+    mip_generation::experimental::depth::early_downsample_depth,
+    prepass::node::{early_prepass, late_prepass},
+    schedule::Core3d,
+};
+use bevy_app::SubApp;
 use bevy_ecs::prelude::*;
 use bevy_platform::collections::{HashMap, HashSet};
 use bevy_render::view::RetainedViewEntity;
 
 use super::runtime::UnifiedVisibilityState;
+
+/// Schedules Prism's previous-HZB test before the early prepass and the
+/// current-HZB retest after the pyramid has been rebuilt from early depth.
+pub(crate) fn install_hzb_schedule(app: &mut SubApp) {
+    app.add_systems(
+        Core3d,
+        (
+            dispatch_previous_hzb.before(early_prepass),
+            dispatch_current_hzb
+                .after(early_downsample_depth)
+                .before(late_prepass),
+        ),
+    );
+}
+
+/// Scheduling seam for the early compute pipeline. The HZB binding and
+/// compaction kernel are installed in the next slice; this system deliberately
+/// reports only histories that are safe to consume.
+fn dispatch_previous_hzb(
+    history: Option<bevy_render::renderer::ViewQuery<&PrismViewHzbHistory>>,
+    mut diagnostics: ResMut<super::runtime::PrismVisibilityDiagnostics>,
+) {
+    if history.is_some_and(|history| history.into_inner().previous_valid) {
+        diagnostics.hzb_previous_dispatches += 1;
+    }
+}
+
+/// Scheduling seam for the current-frame retest. Missing current HZB keeps all
+/// deferred candidates visible; it never turns absence into rejection.
+fn dispatch_current_hzb(
+    history: Option<bevy_render::renderer::ViewQuery<&PrismViewHzbHistory>>,
+    mut diagnostics: ResMut<super::runtime::PrismVisibilityDiagnostics>,
+) {
+    if history.is_some() {
+        diagnostics.hzb_current_dispatches += 1;
+    }
+}
 
 /// Prism's temporal validity metadata for Bevy's persistent depth-pyramid
 /// texture. Bevy updates that same texture twice in the Core3d schedule: its

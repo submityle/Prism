@@ -213,4 +213,7 @@ pub struct PrismVisibilityDiagnostics {
     pub draw_bin_capacity: u32,
     pub hzb_views: u32,
     pub hzb_valid_histories: u32,
+    pub hzb_previous_dispatches: u32,
+    pub hzb_current_dispatches: u32,
+    pub hzb_late_retests: u32,
 }
