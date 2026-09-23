@@ -47,7 +47,10 @@ struct VisibilityWorkItem {
     sort_key_low: u32, sort_key_high: u32, padding: vec2<u32>,
 }
 struct VisibilityRange { view_index: u32, view_generation: u32, start: u32, count: u32 }
-struct VisibilityCounter { visible_count: atomic<u32>, rejected_count: atomic<u32>, overflow_count: atomic<u32>, padding: u32 }
+struct VisibilityCounter {
+    visible_count: atomic<u32>, rejected_count: atomic<u32>, overflow_count: atomic<u32>,
+    indexed_count: atomic<u32>, non_indexed_count: atomic<u32>, padding: vec3<u32>,
+}
 struct VisibilityIndirect { index_count: u32, instance_count: u32, first_index: u32, base_vertex: i32, first_instance: u32 }
 struct VisibilityNonIndexedIndirect { vertex_count: u32, instance_count: u32, first_vertex: u32, first_instance: u32 }
 
@@ -189,6 +192,8 @@ fn cull_instances(@builtin(global_invocation_id) id: vec3<u32>) {
         previous_lods[history_index] = lod.level;
     }
     let indexed = (lod.flags & 2u) != 0u;
+    if indexed { atomicAdd(&counters[dispatch.view_index].indexed_count, 1u); }
+    else { atomicAdd(&counters[dispatch.view_index].non_indexed_count, 1u); }
     indirect[output] = VisibilityIndirect(
         select(0u, lod.element_count, indexed),
         1u, lod.first_element, lod.base_vertex,

@@ -193,4 +193,7 @@ pub struct PrismVisibilityDiagnostics {
     pub parity_readback_failures: u64,
     pub parity_overflowed_views: u64,
     pub indirect_identity_fallbacks: u32,
+    pub gpu_indexed_commands: u64,
+    pub gpu_non_indexed_commands: u64,
+    pub parity_mismatched_command_counts: u64,
 }

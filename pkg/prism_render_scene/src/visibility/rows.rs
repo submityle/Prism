@@ -111,7 +111,9 @@ pub struct RenderVisibilityCounter {
     pub visible_count: u32,
     pub rejected_count: u32,
     pub overflow_count: u32,
-    pub _padding: u32,
+    pub indexed_count: u32,
+    pub non_indexed_count: u32,
+    pub _padding: [u32; 3],
 }
 impl_atomic_pod!(RenderVisibilityCounter, RenderVisibilityCounterBlob);
 
@@ -157,7 +159,7 @@ mod tests {
         assert_eq!(size_of::<RenderVisibilityView>(), 288);
         assert_eq!(size_of::<RenderVisibilityWorkItem>(), 48);
         assert_eq!(size_of::<RenderVisibilityRange>(), 16);
-        assert_eq!(size_of::<RenderVisibilityCounter>(), 16);
+        assert_eq!(size_of::<RenderVisibilityCounter>(), 32);
         assert_eq!(size_of::<RenderVisibilityDispatch>(), 32);
         assert_eq!(size_of::<RenderVisibilityIndirect>(), 20);
         assert_eq!(size_of::<RenderVisibilityNonIndexedIndirect>(), 16);

@@ -151,6 +151,12 @@ pub(crate) fn collect_visibility_parity_readback(
         if counter.overflow_count != 0 {
             diagnostics.parity_overflowed_views += 1;
         }
+        diagnostics.gpu_indexed_commands += counter.indexed_count as u64;
+        diagnostics.gpu_non_indexed_commands += counter.non_indexed_count as u64;
+        let bounded_visible = counter.visible_count.min(in_flight.pending.slots_per_view as u32);
+        if counter.indexed_count.saturating_add(counter.non_indexed_count) != bounded_visible {
+            diagnostics.parity_mismatched_command_counts += 1;
+        }
         let count = counter.visible_count.min(pending.slots_per_view as u32) as usize;
         let gpu_start = view_index * pending.slots_per_view;
         let gpu_end = gpu_start + count;
@@ -220,5 +226,16 @@ mod tests {
             false,
         ));
         assert!(!unordered_work_matches(&[work(7)], &[work(2)], false));
+    }
+
+    #[test]
+    fn command_counts_cover_bounded_visible_work() {
+        let counter = RenderVisibilityCounter {
+            visible_count: 7,
+            indexed_count: 4,
+            non_indexed_count: 3,
+            ..Default::default()
+        };
+        assert_eq!(counter.indexed_count + counter.non_indexed_count, counter.visible_count);
     }
 }
