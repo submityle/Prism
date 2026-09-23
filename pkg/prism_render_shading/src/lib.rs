@@ -10,6 +10,7 @@ extern crate alloc;
 
 mod classification;
 mod lighting;
+mod resolve;
 mod surface;
 mod visibility;
 
@@ -20,6 +21,10 @@ pub use classification::{
 pub use lighting::{
     evaluate_principled_direct, evaluate_toon_direct, linear_furnace_response, DirectLightSample,
     ShadingFrame, SurfaceSample,
+};
+pub use resolve::{
+    resolve_pixel, surface_sample_from_parameters, DirectionalLight, LightingEnvironment,
+    ResolveError, ResolveInput, ResolvedPixel,
 };
 pub use surface::{
     reconstruct_surface, GpuShadingPrimitive, GpuShadingVertex, SurfaceReconstructionError,
