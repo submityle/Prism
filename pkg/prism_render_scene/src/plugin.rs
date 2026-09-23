@@ -14,7 +14,7 @@ use crate::{
         prepare_gpu_scene_bind_group, write_gpu_scene_buffers, GpuSceneBindGroup, GpuSceneBuffers,
     },
     compare::{compare_scene_mirror, GpuSceneParityDiagnostics},
-    completion::{reclaim_completed_handles, track_submission, GpuCompletionTracker},
+    completion::{reclaim_completed_handles, GpuCompletionTracker},
     diagnostics::{GpuSceneDiagnostics, GpuSceneUploadSettings},
     extract::{
         apply_extracted_scene_changes, extract_scene_instances, retire_unused_geometry,
@@ -102,9 +102,7 @@ impl Plugin for PrismGpuScenePlugin {
             )
             .add_systems(
                 RenderGraph,
-                (reclaim_completed_handles
-                    .after(track_submission)
-                    .in_set(RenderGraphSystems::Finish),),
+                (reclaim_completed_handles.in_set(RenderGraphSystems::Finish),),
             );
     }
 }

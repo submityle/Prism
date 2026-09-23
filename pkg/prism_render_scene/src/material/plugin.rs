@@ -52,9 +52,7 @@ impl Plugin for PrismMaterialPlugin {
             RenderGraph,
             (
                 crate::completion::track_submission.in_set(RenderGraphSystems::Finish),
-                reclaim_completed_materials
-                    .after(crate::completion::track_submission)
-                    .in_set(RenderGraphSystems::Finish),
+                reclaim_completed_materials.in_set(RenderGraphSystems::Finish),
             ),
         );
     }
