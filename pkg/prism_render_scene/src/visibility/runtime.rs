@@ -166,6 +166,17 @@ impl UnifiedVisibilityState {
     pub fn retained_view(&self, handle: GenerationalHandle) -> Option<RetainedViewEntity> {
         self.retained_by_handle.get(&handle).copied()
     }
+
+    pub(crate) fn handle_for_retained(
+        &self,
+        retained: RetainedViewEntity,
+    ) -> Option<GenerationalHandle> {
+        self.handles.get(&retained).copied()
+    }
+
+    pub(crate) fn view_record(&self, handle: GenerationalHandle) -> Option<&GpuViewRecord> {
+        self.views.iter().find(|view| view.handle == handle)
+    }
 }
 
 #[derive(Resource, Clone, Copy, Debug, Default)]
@@ -200,4 +211,6 @@ pub struct PrismVisibilityDiagnostics {
     pub parity_mismatched_bin_counts: u64,
     pub draw_bins: u32,
     pub draw_bin_capacity: u32,
+    pub hzb_views: u32,
+    pub hzb_valid_histories: u32,
 }

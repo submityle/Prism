@@ -2,6 +2,7 @@ pub(crate) mod buffers;
 mod consumer;
 mod gpu;
 mod graph;
+mod hzb;
 mod plugin;
 mod readback;
 mod rows;

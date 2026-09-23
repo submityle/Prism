@@ -14,6 +14,7 @@ use super::{
         VisibilityComputeBindGroup,
     },
     graph::visibility_frame_graph,
+    hzb::{inspect_hzb_history, prepare_hzb_history},
     readback::{
         collect_visibility_parity_readback, map_submitted_visibility_parity_readback,
         request_visibility_parity_readback, VisibilityParityReadback,
@@ -79,6 +80,9 @@ impl Plugin for PrismVisibilityPlugin {
                         .after(upload_unified_visibility)
                         .after(crate::geometry::prepare_geometry_bind_group)
                         .in_set(RenderSystems::PrepareBindGroups),
+                    (prepare_hzb_history, inspect_hzb_history)
+                        .chain()
+                        .in_set(RenderSystems::PrepareResources),
                 ),
             );
         render_app.add_systems(
