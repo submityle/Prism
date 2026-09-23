@@ -31,7 +31,8 @@ pub use diagnostics::{GpuSceneDiagnostics, GpuSceneUploadSettings};
 pub use extract::{ExtractedSceneInstance, GpuSceneInstanceAddress, PrismGpuSceneEntity};
 pub use geometry::{
     build_shading_geometry, GeometryBindGroup, RenderGeometryRegistry, RenderShadingGeometry,
-    RenderShadingGeometryHeader, RenderShadingPrimitive, RenderShadingVertex,
+    RenderShadingGeometryBuffers, RenderShadingGeometryEntry, RenderShadingGeometryHeader,
+    RenderShadingGeometryRegistry, RenderShadingPrimitive, RenderShadingVertex,
     ShadingGeometryBuildError, SHADING_GEOMETRY_FLAG_ACTIVE, SHADING_GEOMETRY_FLAG_INVALID,
     SHADING_GEOMETRY_FLAG_MISSING_NORMAL, SHADING_GEOMETRY_FLAG_MISSING_UV,
 };

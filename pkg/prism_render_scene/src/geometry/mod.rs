@@ -3,6 +3,8 @@ mod buffers;
 pub(crate) mod rows;
 mod runtime;
 mod shading;
+mod shading_buffers;
+mod shading_registry;
 mod systems;
 
 pub use bindings::GeometryBindGroup;
@@ -14,6 +16,10 @@ pub use shading::{
     SHADING_GEOMETRY_FLAG_MISSING_NORMAL, SHADING_GEOMETRY_FLAG_MISSING_UV,
 };
 
+pub use shading_buffers::RenderShadingGeometryBuffers;
+pub use shading_registry::{RenderShadingGeometryEntry, RenderShadingGeometryRegistry};
+
 pub(crate) use bindings::prepare_geometry_bind_group;
 pub(crate) use buffers::RenderGeometryBuffers;
+
 pub(crate) use systems::{sync_geometry_registry, upload_geometry_buffers};
