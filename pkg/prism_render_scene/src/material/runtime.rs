@@ -41,15 +41,15 @@ impl RenderMaterialRegistry {
         id: AssetId<StandardMaterial>,
         material: &StandardMaterial,
     ) -> Result<GenerationalHandle, MaterialRegistryError> {
-        let handle = match self.assets.get(&id).copied() {
-            Some(handle) => handle,
+        let (handle, allocated) = match self.assets.get(&id).copied() {
+            Some(handle) => (handle, false),
             None => {
                 let handle = self
                     .registry
                     .allocate()
                     .map_err(|_| MaterialRegistryError::CapacityExceeded)?;
                 self.assets.insert(id, handle);
-                handle
+                (handle, true)
             }
         };
         let revision = self.revisions.get(&id).copied().unwrap_or(0) + 1;
@@ -63,7 +63,7 @@ impl RenderMaterialRegistry {
             )
         };
         if let Err(error) = self.registry.publish(record) {
-            if !self.revisions.contains_key(&id) {
+            if allocated {
                 self.assets.remove(&id);
                 let _ = self.registry.cancel_allocation(handle);
             }

@@ -71,9 +71,10 @@ pub(crate) fn invalidate_scene_materials(
         return;
     }
     for mut instance in &mut instances {
-        if instance
-            .material_asset
-            .is_some_and(|asset| runtime.dirty_assets.contains(&asset))
+        if instance.material == prism_render_material::FALLBACK_MATERIAL_HANDLE
+            && instance
+                .material_asset
+                .is_some_and(|asset| runtime.dirty_assets.contains(&asset))
         {
             instance.set_changed();
         }
