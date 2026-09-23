@@ -49,9 +49,7 @@ fn dispatch_previous_hzb(
     let Some((output_start, candidate_count)) = buffers.view_range(retained) else {
         return;
     };
-    let active_count = (0..candidate_count)
-        .filter(|index| buffers.is_active_slot(output_start + index))
-        .count() as u32;
+    let active_count = buffers.active_count_in_range(output_start, candidate_count);
     let _conservative_policy = (
         settings.hzb_depth_bias.max(0.0),
         settings.hzb_fast_motion_threshold.max(0.0),
@@ -110,9 +108,7 @@ fn dispatch_current_hzb(
     let Some((output_start, candidate_count)) = buffers.view_range(retained) else {
         return;
     };
-    let active_count = (0..candidate_count)
-        .filter(|index| buffers.is_active_slot(output_start + index))
-        .count() as u32;
+    let active_count = buffers.active_count_in_range(output_start, candidate_count);
     if !settings.hzb_occlusion {
         return;
     }

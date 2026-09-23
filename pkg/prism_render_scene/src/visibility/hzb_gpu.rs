@@ -153,9 +153,20 @@ impl HzbVisibilityBuffers {
         self.view_ranges.get(&retained).copied()
     }
 
-    pub(crate) fn is_active_slot(&self, slot: u32) -> bool {
-        self.active_slots.contains(&slot)
+    pub(crate) fn active_count_in_range(&self, start: u32, count: u32) -> u32 {
+        active_count_in_range(&self.active_slots, start, count)
     }
+}
+
+fn active_count_in_range(
+    active_slots: &bevy_platform::collections::HashSet<u32>,
+    start: u32,
+    count: u32,
+) -> u32 {
+    active_slots
+        .iter()
+        .filter(|slot| **slot >= start && **slot < start.saturating_add(count))
+        .count() as u32
 }
 
 #[expect(
@@ -329,7 +340,7 @@ pub(crate) fn init_hzb_visibility_pipeline(
 
 #[cfg(test)]
 mod tests {
-    use super::RenderHzbCullInput;
+    use super::{active_count_in_range, RenderHzbCullInput};
     use bevy_render::render_resource::ShaderType;
     use bevy_asset::{uuid::Uuid, AssetId};
     use bevy_shader::{Shader, ShaderCache, ShaderCacheSource};
@@ -382,5 +393,14 @@ mod tests {
         assert!(projected.nearest_depth > 0.5);
         assert!(projected.projected_velocity >= 5.0);
         assert!(projected.uv_min[0] < projected.uv_max[0]);
+    }
+
+    #[test]
+    fn active_counts_are_scoped_to_each_view_range() {
+        let mut active = bevy_platform::collections::HashSet::default();
+        active.extend([1, 3, 8, 9]);
+        assert_eq!(active_count_in_range(&active, 0, 4), 2);
+        assert_eq!(active_count_in_range(&active, 8, 4), 2);
+        assert_eq!(active_count_in_range(&active, 4, 4), 0);
     }
 }
