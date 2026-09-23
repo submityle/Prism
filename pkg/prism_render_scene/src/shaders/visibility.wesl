@@ -156,17 +156,13 @@ fn cull_instances(@builtin(global_invocation_id) id: vec3<u32>) {
     let geometry_valid = geometry_in_bounds && (geometry.flags & 1u) != 0u
         && geometry.generation == instance.geometry_generation;
     let history_index = dispatch.output_start + candidate;
-    let previous_lod = select(
-        0xffffffffu,
-        previous_lods[history_index],
-        history_index < dispatch.output_end && history_index < arrayLength(&previous_lods),
-    );
+    var previous_lod = 0xffffffffu;
+    if history_index < dispatch.output_end && history_index < arrayLength(&previous_lods) {
+        previous_lod = previous_lods[history_index];
+    }
     let resolved_lod = resolve_geometry_lod(geometry, projected_size(view, sphere), previous_lod);
-    let lod_index = select(
-        first_resident_geometry_lod(geometry),
-        resolved_lod,
-        resolved_lod != 0xffffffffu,
-    );
+    var lod_index = first_resident_geometry_lod(geometry);
+    if resolved_lod != 0xffffffffu { lod_index = resolved_lod; }
     let lod_valid = geometry_valid && lod_index != 0xffffffffu;
     if !scene_valid || !layer_visible || !frustum_visible || !lod_valid {
         atomicAdd(&counters[dispatch.view_index].rejected_count, 1u);
