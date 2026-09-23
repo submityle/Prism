@@ -2,6 +2,7 @@ use core::ops::{BitOr, BitOrAssign};
 use prism_render_architecture::abi::GenerationalHandle;
 
 pub const MATERIAL_ABI_VERSION: u32 = 1;
+pub const MAX_MATERIAL_TEXTURES: usize = 8;
 
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -194,5 +195,12 @@ impl MaterialRecord {
             material_epoch_low: epoch as u32,
             material_epoch_high: (epoch >> 32) as u32,
         }
+    }
+
+    pub fn fixed_texture_rows(&self) -> [GpuMaterialTexture; MAX_MATERIAL_TEXTURES] {
+        let mut rows = [GpuMaterialTexture::default(); MAX_MATERIAL_TEXTURES];
+        let count = self.textures.len().min(MAX_MATERIAL_TEXTURES);
+        rows[..count].copy_from_slice(&self.textures[..count]);
+        rows
     }
 }

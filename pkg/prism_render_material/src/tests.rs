@@ -98,3 +98,18 @@ fn standard_material_bridge_preserves_surface_classification() {
     assert_eq!(record.surface.alpha_cutoff, 0.37);
     assert!(record.features.contains(MaterialFeatureFlags::DOUBLE_SIDED));
 }
+
+#[test]
+fn registry_tracks_sparse_rows_and_rejects_texture_overflow() {
+    let mut registry = MaterialRegistry::new(8);
+    let handle = registry.allocate().unwrap();
+    let mut value = record(handle, 1);
+    value.textures = vec![GpuMaterialTexture::default(); MAX_MATERIAL_TEXTURES + 1];
+    assert!(matches!(
+        registry.publish(value),
+        Err(MaterialRegistryError::TooManyTextures { .. })
+    ));
+    registry.publish(record(handle, 1)).unwrap();
+    assert_eq!(registry.take_dirty(), vec![handle.index]);
+    assert!(registry.take_dirty().is_empty());
+}

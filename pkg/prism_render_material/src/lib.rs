@@ -22,7 +22,7 @@ pub use ir::{
 pub use record::{
     GpuMaterialHeader, GpuMaterialTexture, GpuSurfaceParameters, MaterialDomain,
     MaterialFeatureFlags, MaterialRecord, MaterialRenderClass, MaterialShadingModel,
-    MATERIAL_ABI_VERSION,
+    MATERIAL_ABI_VERSION, MAX_MATERIAL_TEXTURES,
 };
 pub use registry::{MaterialRegistry, MaterialRegistryError, MaterialSnapshot};
 pub use resources::{MaterialResourceHandle, MaterialResourceKind, MaterialResourceTable};

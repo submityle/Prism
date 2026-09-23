@@ -2,7 +2,7 @@ use crate::{
     GpuMaterialHeader, GpuMaterialTexture, GpuSurfaceParameters, MaterialCapacityError,
     MaterialHandleAllocator, MaterialHandleError, MaterialRecord,
 };
-use alloc::vec::Vec;
+use alloc::{collections::BTreeSet, vec::Vec};
 use prism_render_architecture::{abi::GenerationalHandle, gpu_scene::GpuCompletionValue};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -16,6 +16,7 @@ pub struct MaterialSnapshot {
 pub enum MaterialRegistryError {
     InvalidHandle(GenerationalHandle),
     StaleRevision { current: u32, incoming: u32 },
+    TooManyTextures { count: usize, maximum: usize },
 }
 
 #[derive(Clone)]
@@ -29,6 +30,7 @@ pub struct MaterialRegistry {
     slots: Vec<Option<Slot>>,
     epoch: u64,
     buffer_version: u32,
+    dirty: BTreeSet<u32>,
 }
 
 impl MaterialRegistry {
@@ -38,6 +40,7 @@ impl MaterialRegistry {
             slots: vec![None],
             epoch: 0,
             buffer_version: 1,
+            dirty: BTreeSet::new(),
         }
     }
     pub fn allocate(&mut self) -> Result<GenerationalHandle, MaterialCapacityError> {
@@ -46,6 +49,12 @@ impl MaterialRegistry {
     pub fn publish(&mut self, record: MaterialRecord) -> Result<(), MaterialRegistryError> {
         if !self.allocator.validate(record.handle) {
             return Err(MaterialRegistryError::InvalidHandle(record.handle));
+        }
+        if record.textures.len() > crate::MAX_MATERIAL_TEXTURES {
+            return Err(MaterialRegistryError::TooManyTextures {
+                count: record.textures.len(),
+                maximum: crate::MAX_MATERIAL_TEXTURES,
+            });
         }
         let index = record.handle.index as usize;
         self.slots
@@ -62,6 +71,7 @@ impl MaterialRegistry {
             revision: record.revision,
             record,
         });
+        self.dirty.insert(index as u32);
         self.epoch += 1;
         Ok(())
     }
@@ -81,6 +91,7 @@ impl MaterialRegistry {
         if let Some(slot) = self.slots.get_mut(handle.index as usize) {
             *slot = None;
         }
+        self.dirty.insert(handle.index);
         self.epoch += 1;
         Ok(())
     }
@@ -93,6 +104,18 @@ impl MaterialRegistry {
             active_materials: self.slots.iter().flatten().count() as u32,
             buffer_version: self.buffer_version,
         }
+    }
+    pub fn take_dirty(&mut self) -> Vec<u32> {
+        core::mem::take(&mut self.dirty).into_iter().collect()
+    }
+    pub fn record_at(&self, index: u32) -> Option<&MaterialRecord> {
+        self.slots
+            .get(index as usize)?
+            .as_ref()
+            .map(|slot| &slot.record)
+    }
+    pub fn capacity(&self) -> u32 {
+        self.slots.len() as u32
     }
     pub fn gpu_tables(
         &self,
