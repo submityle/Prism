@@ -37,6 +37,7 @@ pub(crate) fn build_unified_visibility(
 ) {
     state.views.clear();
     state.frame = VisibilityFrame::default();
+    state.begin_frame();
     *diagnostics = PrismVisibilityDiagnostics {
         buffer_version: buffers.version(),
         ..Default::default()
@@ -124,6 +125,7 @@ pub(crate) fn build_unified_visibility(
     diagnostics.work_items = state.frame.work_items.len() as u32;
     diagnostics.cpu_reference_frames = 1;
     state.commit_lods();
+    state.retire_missing_views();
     let ranges = state.frame.views.iter().map(|(view, output)| {
         RenderVisibilityRange::new(
             *view,

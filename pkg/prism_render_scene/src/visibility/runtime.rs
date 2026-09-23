@@ -36,6 +36,7 @@ pub(crate) struct UnifiedVisibilityState {
     previous_clip: HashMap<RetainedViewEntity, [[f32; 4]; 4]>,
     previous_positions: HashMap<RetainedViewEntity, [f32; 3]>,
     history_epochs: HashMap<RetainedViewEntity, u64>,
+    last_seen: HashMap<RetainedViewEntity, u64>,
     previous_lods: alloc::collections::BTreeMap<
         (
             GenerationalHandle,
@@ -48,6 +49,7 @@ pub(crate) struct UnifiedVisibilityState {
         prism_render_architecture::gpu_scene::SceneHandle,
     )>,
     next_view_index: u32,
+    frame_index: u64,
 }
 
 #[derive(Resource)]
@@ -56,7 +58,12 @@ pub(crate) struct VisibilityFrameGraph {
 }
 
 impl UnifiedVisibilityState {
+    pub fn begin_frame(&mut self) {
+        self.frame_index = self.frame_index.saturating_add(1);
+    }
+
     pub fn handle(&mut self, retained: RetainedViewEntity) -> GenerationalHandle {
+        self.last_seen.insert(retained, self.frame_index);
         *self.handles.entry(retained).or_insert_with(|| {
             self.next_view_index = self.next_view_index.saturating_add(1).max(1);
             GenerationalHandle {
@@ -122,6 +129,26 @@ impl UnifiedVisibilityState {
                 self.previous_lods
                     .insert((view, item.scene), item.lod_or_cluster as u16);
             }
+        }
+    }
+
+    pub fn retire_missing_views(&mut self) {
+        let current = self.frame_index;
+        let stale: Vec<_> = self
+            .last_seen
+            .iter()
+            .filter_map(|(view, seen)| (*seen != current).then_some(*view))
+            .collect();
+        for view in stale {
+            if let Some(handle) = self.handles.remove(&view) {
+                self.previous_lods
+                    .retain(|(candidate, _), _| *candidate != handle);
+                self.occluded.retain(|(candidate, _)| *candidate != handle);
+            }
+            self.previous_clip.remove(&view);
+            self.previous_positions.remove(&view);
+            self.history_epochs.remove(&view);
+            self.last_seen.remove(&view);
         }
     }
 }
