@@ -4,6 +4,7 @@ use bevy_render::{Render, RenderApp, RenderSystems};
 
 use super::{
     graph::shading_frame_graph,
+    resources::prepare_visibility_buffers,
     runtime::{
         prepare_shading_work, PrismShadingDiagnostics, PrismShadingSettings, ShadingFrameGraph,
     },
@@ -27,8 +28,11 @@ impl Plugin for PrismShadingPlugin {
             })
             .add_systems(
                 Render,
-                prepare_shading_work
-                    .after(super::super::visibility::systems::build_unified_visibility)
+                (
+                    prepare_shading_work
+                        .after(super::super::visibility::systems::build_unified_visibility),
+                    prepare_visibility_buffers,
+                )
                     .in_set(RenderSystems::PrepareResources),
             );
     }
