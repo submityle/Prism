@@ -25,7 +25,7 @@ pub(crate) fn install_hzb_schedule(app: &mut SubApp) {
             dispatch_current_hzb
                 .after(early_downsample_depth)
                 .before(late_prepass),
-            super::systems::dispatch_late_hzb_visibility
+            super::hzb_late::dispatch_hzb_late_compact
                 .after(dispatch_current_hzb)
                 .before(late_prepass),
         ),

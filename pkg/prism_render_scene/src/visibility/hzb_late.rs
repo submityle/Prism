@@ -12,7 +12,7 @@ use bevy_render::{
         BindGroup, BindGroupEntries, BindGroupLayout, BufferId, CachedComputePipelineId,
         ComputePipelineDescriptor, ShaderStages,
     },
-    renderer::RenderDevice,
+    renderer::{RenderContext, RenderDevice},
 };
 use bevy_shader::Shader;
 
@@ -114,6 +114,80 @@ pub(crate) fn prepare_hzb_late_bind_group(
         )),
     ));
     bindings.ids = Some(ids);
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct LateCompactDispatch {
+    candidate_count: u32,
+    stage_start: u32,
+    candidate_bin_start: u32,
+    bin_start: u32,
+    command_start: u32,
+    command_end: u32,
+    indirect_first_instance: u32,
+    _padding: u32,
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Late compaction consumes the per-view HZB, bin, and command contracts."
+)]
+pub(crate) fn dispatch_hzb_late_compact(
+    view: bevy_render::renderer::ViewQuery<&bevy_render::view::ExtractedView>,
+    settings: Res<super::runtime::UnifiedVisibilitySettings>,
+    state: Res<super::runtime::UnifiedVisibilityState>,
+    hzb: Res<super::hzb_gpu::HzbVisibilityBuffers>,
+    pipeline: Res<HzbLateCompactPipeline>,
+    cache: Res<bevy_render::render_resource::PipelineCache>,
+    bindings: Res<HzbLateCompactBindGroup>,
+    visibility: Res<super::buffers::UnifiedVisibilityBuffers>,
+    mut ctx: RenderContext,
+    mut diagnostics: ResMut<super::runtime::PrismVisibilityDiagnostics>,
+) {
+    if !settings.hzb_occlusion {
+        return;
+    }
+    let retained = view.into_inner().retained_view_entity;
+    let Some((stage_start, candidate_count)) = hzb.view_range(retained) else {
+        return;
+    };
+    let Some(view_bins) = state
+        .draw_bins
+        .iter()
+        .find(|bins| state.retained_view(bins.view) == Some(retained))
+    else {
+        return;
+    };
+    let (Some(compute_pipeline), Some(bind_group)) = (
+        cache.get_compute_pipeline(pipeline.pipeline),
+        bindings.bind_group.as_ref(),
+    ) else {
+        return;
+    };
+    let immediates = LateCompactDispatch {
+        candidate_count,
+        stage_start,
+        candidate_bin_start: view_bins.global_candidate_start,
+        bin_start: view_bins.global_bin_start,
+        command_start: view_bins.command_buffer_start,
+        command_end: view_bins
+            .command_buffer_start
+            .saturating_add(visibility.gpu_slots_per_view()),
+        indirect_first_instance: u32::from(settings.indirect_first_instance),
+        _padding: 0,
+    };
+    let mut pass = ctx.command_encoder().begin_compute_pass(
+        &bevy_render::render_resource::ComputePassDescriptor {
+            label: Some("prism late hzb command compaction"),
+            timestamp_writes: None,
+        },
+    );
+    pass.set_pipeline(compute_pipeline);
+    pass.set_bind_group(0, bind_group, &[]);
+    pass.set_immediates(0, bytemuck::bytes_of(&immediates));
+    pass.dispatch_workgroups(candidate_count.div_ceil(64), 1, 1);
+    diagnostics.hzb_late_visibility_dispatches += 1;
 }
 
 #[cfg(test)]

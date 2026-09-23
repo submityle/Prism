@@ -301,9 +301,6 @@ impl UnifiedVisibilityBuffers {
         ))
     }
 
-    pub(crate) fn inspect_late_buffers(&self) -> bool {
-        self.late_compute_buffers().is_some() && self.indirect_for(true).is_some()
-    }
 }
 
 #[cfg(test)]

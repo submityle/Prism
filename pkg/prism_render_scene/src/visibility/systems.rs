@@ -308,30 +308,6 @@ pub(crate) fn dispatch_unified_visibility(
     pending.push_encoder(encoder, "prism unified visibility");
 }
 
-/// Reserved seam for late indirect-command compaction after current-HZB
-/// classification. It deliberately remains disabled until independent late
-/// headers/counters exist; reusing early atomics would double counts.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Late visibility dispatch mirrors the validated main compute bindings."
-)]
-pub(crate) fn dispatch_late_hzb_visibility(
-    enabled: Res<UnifiedVisibilityEnabled>,
-    settings: Res<UnifiedVisibilitySettings>,
-    state: Res<UnifiedVisibilityState>,
-    buffers: Res<UnifiedVisibilityBuffers>,
-    mut diagnostics: ResMut<PrismVisibilityDiagnostics>,
-) {
-    if !enabled.0 || !settings.hzb_occlusion || state.views.is_empty() {
-        return;
-    }
-    debug_assert!(state.views.is_empty() || state.draw_bins.len() == state.views.len());
-    debug_assert!(buffers.inspect_late_buffers());
-    // A same-frame late path requires separate command/count buffers so it can
-    // merge without racing or double-incrementing early results.
-    diagnostics.hzb_late_visibility_deferred += state.views.len() as u32;
-}
-
 fn geometry_lods(
     scene: &prism_render_architecture::gpu_scene::CpuRenderScene,
     handles: &[prism_render_architecture::gpu_scene::SceneHandle],
