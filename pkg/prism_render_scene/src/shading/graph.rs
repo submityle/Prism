@@ -11,7 +11,12 @@ pub(crate) fn shading_frame_graph() -> GpuFrameGraphBuilder {
     let early_commands = resource(&mut graph, "early_commands", ResourceLifetime::Imported);
     let late_commands = resource(&mut graph, "late_commands", ResourceLifetime::Imported);
     let depth = resource(&mut graph, "main_depth", ResourceLifetime::Imported);
-    let visibility = resource(&mut graph, "visibility_buffer", ResourceLifetime::Transient);
+    let visibility_ids = resource(&mut graph, "visibility_ids", ResourceLifetime::Transient);
+    let visibility_metadata = resource(
+        &mut graph,
+        "visibility_metadata",
+        ResourceLifetime::Transient,
+    );
     let classification = resource(&mut graph, "material_classification", ResourceLifetime::Transient);
     let indirect_dispatch = resource(&mut graph, "shading_indirect_dispatch", ResourceLifetime::Transient);
     let scene_color = resource(&mut graph, "hdr_scene_color", ResourceLifetime::Imported);
@@ -26,7 +31,8 @@ pub(crate) fn shading_frame_graph() -> GpuFrameGraphBuilder {
             access(early_commands, AccessKind::IndirectRead),
             access(late_commands, AccessKind::IndirectRead),
             access(depth, AccessKind::DepthAttachment),
-            access(visibility, AccessKind::ColorAttachment),
+            access(visibility_ids, AccessKind::ColorAttachment),
+            access(visibility_metadata, AccessKind::ColorAttachment),
         ],
         depends_on: vec![],
     });
@@ -34,7 +40,8 @@ pub(crate) fn shading_frame_graph() -> GpuFrameGraphBuilder {
         name: "material_classification".into(),
         queue: QueueClass::Compute,
         accesses: vec![
-            access(visibility, AccessKind::StorageRead),
+            access(visibility_ids, AccessKind::StorageRead),
+            access(visibility_metadata, AccessKind::StorageRead),
             access(materials, AccessKind::StorageRead),
             access(classification, AccessKind::StorageWrite),
             access(indirect_dispatch, AccessKind::StorageWrite),
@@ -45,7 +52,8 @@ pub(crate) fn shading_frame_graph() -> GpuFrameGraphBuilder {
         name: "shading_resolve".into(),
         queue: QueueClass::Compute,
         accesses: vec![
-            access(visibility, AccessKind::StorageRead),
+            access(visibility_ids, AccessKind::StorageRead),
+            access(visibility_metadata, AccessKind::StorageRead),
             access(depth, AccessKind::SampledRead),
             access(scene, AccessKind::StorageRead),
             access(geometry, AccessKind::StorageRead),
@@ -89,6 +97,14 @@ mod tests {
         let compiled = graph.compile().unwrap();
         assert_eq!(compiled.execution_order.len(), 3);
         assert_eq!(graph.passes()[0].name, "visibility_raster");
+        assert_eq!(
+            graph
+                .resources()
+                .iter()
+                .filter(|resource| resource.name.starts_with("visibility_"))
+                .count(),
+            2
+        );
         assert_eq!(graph.passes()[1].depends_on, [prism_render_architecture::frame_graph::PassId(0)]);
         assert_eq!(graph.passes()[2].depends_on, [prism_render_architecture::frame_graph::PassId(1)]);
         assert!(compiled.barriers.iter().any(|barrier| barrier.queue_transfer));

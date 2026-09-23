@@ -21,6 +21,7 @@ pub use lighting::{
     ShadingFrame, SurfaceSample,
 };
 pub use visibility::{
-    encode_barycentrics, BarycentricError, VisibilityPixel, INVALID_VISIBILITY_ID,
+    encode_barycentrics, BarycentricError, VisibilityPixel, VisibilityPixelTargets,
+    INVALID_VISIBILITY_ID,
     VISIBILITY_BUFFER_ABI_VERSION,
 };

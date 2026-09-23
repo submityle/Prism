@@ -26,6 +26,18 @@ pub struct VisibilityPixel {
     pub coverage_and_flags: u32,
 }
 
+/// Physical render-target layout for one [`VisibilityPixel`].
+///
+/// The raster pass writes exactly two `Rgba32Uint` attachments. Keeping this
+/// representation explicit prevents the CPU ABI and GPU attachment contract
+/// from drifting apart as the resolve path evolves.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct VisibilityPixelTargets {
+    pub ids: [u32; 4],
+    pub metadata: [u32; 4],
+}
+
 impl VisibilityPixel {
     pub const INVALID: Self = Self {
         scene_index: INVALID_VISIBILITY_ID,
@@ -73,6 +85,36 @@ impl VisibilityPixel {
     pub const fn coverage(self) -> u8 {
         self.coverage_and_flags as u8
     }
+
+    pub const fn targets(self) -> VisibilityPixelTargets {
+        VisibilityPixelTargets {
+            ids: [
+                self.scene_index,
+                self.scene_generation,
+                self.primitive_id,
+                self.geometry_lod_or_cluster,
+            ],
+            metadata: [
+                self.material_index,
+                self.material_generation,
+                self.coverage_and_flags,
+                self.barycentrics_unorm16,
+            ],
+        }
+    }
+
+    pub const fn from_targets(targets: VisibilityPixelTargets) -> Self {
+        Self {
+            scene_index: targets.ids[0],
+            scene_generation: targets.ids[1],
+            primitive_id: targets.ids[2],
+            geometry_lod_or_cluster: targets.ids[3],
+            material_index: targets.metadata[0],
+            material_generation: targets.metadata[1],
+            coverage_and_flags: targets.metadata[2],
+            barycentrics_unorm16: targets.metadata[3],
+        }
+    }
 }
 
 pub fn encode_barycentrics(value: [f32; 3]) -> Result<u32, BarycentricError> {
@@ -97,8 +139,29 @@ mod tests {
     #[test]
     fn visibility_pixel_has_stable_32_byte_layout_and_invalid_sentinel() {
         assert_eq!(size_of::<VisibilityPixel>(), 32);
+        assert_eq!(size_of::<VisibilityPixelTargets>(), 32);
         assert!(!VisibilityPixel::INVALID.is_valid());
         assert_eq!(VisibilityPixel::INVALID.coverage(), 0);
+    }
+
+    #[test]
+    fn physical_targets_round_trip_the_cpu_abi() {
+        let pixel = VisibilityPixel::new(
+            GenerationalHandle {
+                index: 7,
+                generation: 3,
+            },
+            9,
+            2,
+            GenerationalHandle {
+                index: 4,
+                generation: 6,
+            },
+            [0.25, 0.5, 0.25],
+            0b1011,
+        )
+        .unwrap();
+        assert_eq!(VisibilityPixel::from_targets(pixel.targets()), pixel);
     }
 
     #[test]

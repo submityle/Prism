@@ -2,21 +2,17 @@ use bevy_ecs::prelude::*;
 use bevy_image::ToExtents;
 use bevy_render::{
     camera::ExtractedCamera,
-    render_resource::{
-        TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
-    },
+    render_resource::{TextureDescriptor, TextureDimension, TextureFormat, TextureUsages},
     renderer::RenderDevice,
     texture::{CachedTexture, TextureCache},
 };
 
 pub(crate) const VISIBILITY_ID_FORMAT: TextureFormat = TextureFormat::Rgba32Uint;
-pub(crate) const VISIBILITY_BARYCENTRIC_FORMAT: TextureFormat = TextureFormat::Rg16Unorm;
 
 #[derive(Component)]
 pub(crate) struct ViewVisibilityBuffer {
     ids: CachedTexture,
     metadata: CachedTexture,
-    barycentrics: CachedTexture,
     pub(crate) size: bevy_math::UVec2,
 }
 
@@ -26,13 +22,8 @@ impl ViewVisibilityBuffer {
     ) -> (
         &bevy_render::render_resource::TextureView,
         &bevy_render::render_resource::TextureView,
-        &bevy_render::render_resource::TextureView,
     ) {
-        (
-            &self.ids.default_view,
-            &self.metadata.default_view,
-            &self.barycentrics.default_view,
-        )
+        (&self.ids.default_view, &self.metadata.default_view)
     }
 }
 
@@ -72,21 +63,6 @@ pub(crate) fn prepare_visibility_buffers(
                 view_formats: &[],
             },
         );
-        let barycentrics = texture_cache.get(
-            &device,
-            TextureDescriptor {
-                label: Some("prism visibility barycentrics"),
-                size: size.to_extents(),
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: TextureDimension::D2,
-                format: VISIBILITY_BARYCENTRIC_FORMAT,
-                usage: TextureUsages::RENDER_ATTACHMENT
-                    | TextureUsages::TEXTURE_BINDING
-                    | TextureUsages::STORAGE_BINDING,
-                view_formats: &[],
-            },
-        );
         let metadata = texture_cache.get(
             &device,
             TextureDescriptor {
@@ -105,7 +81,6 @@ pub(crate) fn prepare_visibility_buffers(
         commands.entity(entity).insert(ViewVisibilityBuffer {
             ids,
             metadata,
-            barycentrics,
             size,
         });
     }
@@ -129,12 +104,10 @@ mod tests {
     }
 
     #[test]
-    fn formats_cover_full_generational_identity_and_compact_barycentrics() {
+    fn formats_cover_the_two_target_visibility_abi() {
         assert_eq!(VISIBILITY_ID_FORMAT, TextureFormat::Rgba32Uint);
-        assert_eq!(VISIBILITY_BARYCENTRIC_FORMAT, TextureFormat::Rg16Unorm);
         assert_eq!(VISIBILITY_ID_FORMAT.block_copy_size(None), Some(16));
-        assert_eq!(VISIBILITY_BARYCENTRIC_FORMAT.block_copy_size(None), Some(4));
-        assert_eq!(2 * 16 + 4, size_of::<prism_render_shading::VisibilityPixel>() + 4);
+        assert_eq!(2 * 16, size_of::<prism_render_shading::VisibilityPixel>());
     }
 
     #[test]

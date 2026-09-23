@@ -74,7 +74,6 @@ fn vertex(vertex: Vertex) -> VertexOutput {
 struct FragmentOutput {
     @location(0) ids: vec4<u32>,
     @location(1) metadata: vec4<u32>,
-    @location(2) barycentrics: vec2<f32>,
 };
 
 @fragment
@@ -94,8 +93,7 @@ fn fragment(
         in.material_index,
         in.material_generation,
         0xffu,
-        0u,
+        pack2x16unorm(clamp(barycentrics.xy, vec2(0.0), vec2(1.0))),
     );
-    out.barycentrics = clamp(barycentrics.xy, vec2(0.0), vec2(1.0));
     return out;
 }
