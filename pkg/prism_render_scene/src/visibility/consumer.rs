@@ -1,6 +1,7 @@
 use bevy_ecs::system::SystemParam;
 use bevy_render::render_resource::Buffer;
 use bevy_render::view::RetainedViewEntity;
+use prism_render_architecture::gpu_scene::GeometryHandle;
 use prism_render_visibility::{BufferRange, ViewHandle, VisibilityFrame};
 
 use super::{buffers::UnifiedVisibilityBuffers, runtime::UnifiedVisibilityState};
@@ -9,6 +10,7 @@ use super::{buffers::UnifiedVisibilityBuffers, runtime::UnifiedVisibilityState};
 pub struct UnifiedVisibilityReader<'w> {
     state: bevy_ecs::prelude::Res<'w, UnifiedVisibilityState>,
     buffers: bevy_ecs::prelude::Res<'w, UnifiedVisibilityBuffers>,
+    geometry: bevy_ecs::prelude::Res<'w, crate::RenderGeometryRegistry>,
 }
 
 impl UnifiedVisibilityReader<'_> {
@@ -44,6 +46,10 @@ impl UnifiedVisibilityReader<'_> {
             non_indexed_indirect,
             version: self.buffers.version(),
         })
+    }
+
+    pub fn geometry_buffer_classes(&self, geometry: GeometryHandle) -> Option<(u32, u32)> {
+        self.geometry.buffer_classes(geometry)
     }
 }
 

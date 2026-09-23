@@ -70,6 +70,11 @@ impl RenderGeometryRegistry {
         self.buffer_classes.insert(id, self.next_buffer_class);
         self.next_buffer_class
     }
+
+    pub fn buffer_classes(&self, handle: GeometryHandle) -> Option<(u32, u32)> {
+        self.record(handle)
+            .map(|record| (record.vertex_buffer_class, record.index_buffer_class))
+    }
 }
 
 #[cfg(test)]
