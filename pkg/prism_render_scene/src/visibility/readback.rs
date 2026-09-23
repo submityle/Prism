@@ -164,6 +164,7 @@ pub(crate) fn map_submitted_visibility_parity_readback(
 
 pub(crate) fn collect_visibility_parity_readback(
     readback: Res<VisibilityParityReadback>,
+    settings: Res<UnifiedVisibilitySettings>,
     mut diagnostics: ResMut<PrismVisibilityDiagnostics>,
 ) {
     let mut slot = readback.state.lock().unwrap();
@@ -255,6 +256,7 @@ pub(crate) fn collect_visibility_parity_readback(
     diagnostics.parity_matching_views += matching;
     diagnostics.parity_mismatched_views += mismatched;
     diagnostics.parity_frames += 1;
+    diagnostics.refresh_hzb_graduation(&settings);
     drop(mapped);
     pending.buffer.unmap();
     *slot = None;

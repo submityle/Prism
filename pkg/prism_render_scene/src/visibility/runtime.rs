@@ -222,6 +222,7 @@ pub struct PrismVisibilityDiagnostics {
     pub parity_mismatched_late_bin_counts: u64,
     pub hzb_late_visible_commands: u64,
     pub hzb_late_overflowed_bins: u64,
+    pub hzb_graduation_ready: bool,
     pub draw_bins: u32,
     pub draw_bin_capacity: u32,
     pub hzb_views: u32,
@@ -233,4 +234,49 @@ pub struct PrismVisibilityDiagnostics {
     pub hzb_late_retests: u32,
     pub hzb_candidates: u32,
     pub hzb_late_visibility_dispatches: u32,
+}
+
+impl PrismVisibilityDiagnostics {
+    pub fn refresh_hzb_graduation(&mut self, settings: &UnifiedVisibilitySettings) {
+        self.hzb_graduation_ready = hzb_graduation_ready(settings, self);
+    }
+}
+
+fn hzb_graduation_ready(
+    settings: &UnifiedVisibilitySettings,
+    diagnostics: &PrismVisibilityDiagnostics,
+) -> bool {
+    settings.hzb_occlusion
+        && settings.gpu_parity_readback
+        && diagnostics.parity_frames > 0
+        && diagnostics.parity_mismatched_views == 0
+        && diagnostics.parity_mismatched_command_counts == 0
+        && diagnostics.parity_mismatched_bin_counts == 0
+        && diagnostics.parity_mismatched_late_bin_counts == 0
+        && diagnostics.parity_readback_failures == 0
+        && diagnostics.parity_overflowed_views == 0
+        && diagnostics.hzb_late_overflowed_bins == 0
+}
+
+#[cfg(test)]
+mod diagnostics_tests {
+    use super::*;
+
+    #[test]
+    fn hzb_graduation_requires_runtime_parity_without_failures() {
+        let settings = UnifiedVisibilitySettings {
+            hzb_occlusion: true,
+            gpu_parity_readback: true,
+            ..Default::default()
+        };
+        let mut diagnostics = PrismVisibilityDiagnostics {
+            parity_frames: 1,
+            ..Default::default()
+        };
+        diagnostics.refresh_hzb_graduation(&settings);
+        assert!(diagnostics.hzb_graduation_ready);
+        diagnostics.parity_mismatched_late_bin_counts = 1;
+        diagnostics.refresh_hzb_graduation(&settings);
+        assert!(!diagnostics.hzb_graduation_ready);
+    }
 }
