@@ -84,7 +84,7 @@ struct DrawBinHeader {
 
 struct VisibilityDispatch {
     view_index: u32, candidate_count: u32, output_start: u32, output_end: u32,
-    indirect_first_instance: u32, bin_start: u32, candidate_bin_start: u32, padding: u32,
+    indirect_first_instance: u32, bin_start: u32, candidate_bin_start: u32, hzb_stage_start: u32,
 }
 var<immediate> dispatch: VisibilityDispatch;
 
@@ -183,7 +183,7 @@ fn cull_instances(@builtin(global_invocation_id) id: vec3<u32>) {
         atomicAdd(&counters[dispatch.view_index].rejected_count, 1u);
         return;
     }
-    let hzb_stage_index = dispatch.output_start + candidate;
+    let hzb_stage_index = dispatch.hzb_stage_start + candidate;
     let visibility_stages = select(
         1u,
         hzb_stages[hzb_stage_index],

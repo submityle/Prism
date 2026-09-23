@@ -241,6 +241,7 @@ pub(crate) fn dispatch_unified_visibility(
     material_bindings: Res<crate::MaterialBindGroup>,
     geometry_bindings: Res<crate::GeometryBindGroup>,
     output_bindings: Res<VisibilityComputeBindGroup>,
+    hzb_buffers: Res<super::hzb_gpu::HzbVisibilityBuffers>,
     buffers: Res<UnifiedVisibilityBuffers>,
     device: Res<RenderDevice>,
     mut pending: ResMut<PendingCommandBuffers>,
@@ -282,6 +283,10 @@ pub(crate) fn dispatch_unified_visibility(
         pass.set_bind_group(3, output_bind_group, &[]);
         for (view_index, _) in state.views.iter().enumerate() {
             let output_start = (view_index as u32).saturating_mul(buffers.gpu_slots_per_view());
+            let hzb_stage_start = state
+                .retained_view(state.views[view_index].handle)
+                .and_then(|retained| hzb_buffers.view_range(retained))
+                .map_or(0, |(start, _)| start);
             let immediates = RenderVisibilityDispatch {
                 view_index: view_index as u32,
                 candidate_count,
@@ -290,7 +295,7 @@ pub(crate) fn dispatch_unified_visibility(
                 indirect_first_instance: u32::from(settings.indirect_first_instance),
                 bin_start: state.draw_bins[view_index].global_bin_start,
                 candidate_bin_start: state.draw_bins[view_index].global_candidate_start,
-                _padding: 0,
+                hzb_stage_start,
             };
             pass.set_immediates(0, bytemuck::bytes_of(&immediates));
             pass.dispatch_workgroups(candidate_count.div_ceil(VISIBILITY_WORKGROUP_SIZE), 1, 1);

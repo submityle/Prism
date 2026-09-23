@@ -129,7 +129,7 @@ pub struct RenderVisibilityDispatch {
     pub indirect_first_instance: u32,
     pub bin_start: u32,
     pub candidate_bin_start: u32,
-    pub _padding: u32,
+    pub hzb_stage_start: u32,
 }
 impl_atomic_pod!(RenderVisibilityDispatch, RenderVisibilityDispatchBlob);
 
