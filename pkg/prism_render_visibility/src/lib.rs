@@ -8,6 +8,7 @@
 extern crate alloc;
 
 mod benchmark;
+mod binning;
 mod culling;
 mod diagnostics;
 mod lod;
@@ -18,6 +19,9 @@ mod work;
 #[cfg(feature = "std")]
 pub use benchmark::benchmark_cpu_reference;
 pub use benchmark::VisibilityBenchmarkResult;
+pub use binning::{
+    build_view_draw_bins, DrawBinCandidate, DrawBinKey, DrawBinRange, ViewDrawBins,
+};
 pub use culling::{cull_view, CullReason, VisibilityInput};
 pub use diagnostics::VisibilityDiagnostics;
 pub use lod::{GeometryLod, GeometryLodChain, LodSelection};
