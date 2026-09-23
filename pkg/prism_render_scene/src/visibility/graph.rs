@@ -53,8 +53,26 @@ pub(crate) fn visibility_frame_graph() -> GpuFrameGraphBuilder {
         size: 0,
         alignment: 16,
     });
-    graph.add_pass(PassDescriptor {
-        name: "unified_visibility".into(),
+    let previous_hzb = graph.add_resource(ResourceDescriptor {
+        name: "previous_hzb".into(),
+        lifetime: ResourceLifetime::Persistent,
+        size: 0,
+        alignment: 16,
+    });
+    let current_hzb = graph.add_resource(ResourceDescriptor {
+        name: "current_hzb".into(),
+        lifetime: ResourceLifetime::Persistent,
+        size: 0,
+        alignment: 16,
+    });
+    let late_candidates = graph.add_resource(ResourceDescriptor {
+        name: "visibility_late_candidates".into(),
+        lifetime: ResourceLifetime::Persistent,
+        size: 0,
+        alignment: 16,
+    });
+    let early = graph.add_pass(PassDescriptor {
+        name: "unified_visibility_previous_hzb".into(),
         queue: QueueClass::Compute,
         accesses: vec![
             ResourceAccess {
@@ -89,8 +107,47 @@ pub(crate) fn visibility_frame_graph() -> GpuFrameGraphBuilder {
                 resource: non_indexed_indirect,
                 kind: AccessKind::StorageWrite,
             },
+            ResourceAccess {
+                resource: previous_hzb,
+                kind: AccessKind::SampledRead,
+            },
+            ResourceAccess {
+                resource: late_candidates,
+                kind: AccessKind::StorageWrite,
+            },
         ],
         depends_on: vec![],
+    });
+    graph.add_pass(PassDescriptor {
+        name: "unified_visibility_current_hzb".into(),
+        queue: QueueClass::Compute,
+        accesses: vec![
+            ResourceAccess {
+                resource: current_hzb,
+                kind: AccessKind::SampledRead,
+            },
+            ResourceAccess {
+                resource: late_candidates,
+                kind: AccessKind::StorageRead,
+            },
+            ResourceAccess {
+                resource: work,
+                kind: AccessKind::StorageWrite,
+            },
+            ResourceAccess {
+                resource: ranges,
+                kind: AccessKind::StorageWrite,
+            },
+            ResourceAccess {
+                resource: indexed_indirect,
+                kind: AccessKind::StorageWrite,
+            },
+            ResourceAccess {
+                resource: non_indexed_indirect,
+                kind: AccessKind::StorageWrite,
+            },
+        ],
+        depends_on: vec![early],
     });
     graph
 }
@@ -103,7 +160,8 @@ mod tests {
     fn frame_graph_declares_visibility_hazards() {
         let graph = visibility_frame_graph();
         let compiled = graph.compile().unwrap();
-        assert_eq!(compiled.execution_order.len(), 1);
-        assert_eq!(graph.passes()[0].accesses.len(), 8);
+        assert_eq!(compiled.execution_order.len(), 2);
+        assert_eq!(graph.passes()[0].accesses.len(), 10);
+        assert_eq!(graph.passes()[1].depends_on[0].0, 0);
     }
 }
