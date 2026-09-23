@@ -109,20 +109,25 @@ impl RenderCommand<Opaque3d> for DrawGpuSceneIndirectBin {
                 pass.set_index_buffer(indices.buffer.slice(..), index_format);
                 pass.multi_draw_indexed_indirect(
                     indexed,
-                    (view_bins.global_candidate_start + bin.command_start) as u64
-                        * INDEXED_COMMAND_SIZE,
+                    indirect_command_index(view_bins, bin) as u64 * INDEXED_COMMAND_SIZE,
                     bin.command_capacity,
                 );
             }
             RenderMeshBufferInfo::NonIndexed => pass.multi_draw_indirect(
                 non_indexed,
-                (view_bins.global_candidate_start + bin.command_start) as u64
-                    * NON_INDEXED_COMMAND_SIZE,
+                indirect_command_index(view_bins, bin) as u64 * NON_INDEXED_COMMAND_SIZE,
                 bin.command_capacity,
             ),
         }
         RenderCommandResult::Success
     }
+}
+
+fn indirect_command_index(
+    bins: &prism_render_visibility::ViewDrawBins,
+    bin: &prism_render_visibility::DrawBinRange,
+) -> u32 {
+    bins.command_buffer_start.saturating_add(bin.command_start)
 }
 
 fn bin_indirect_is_safe(
@@ -133,4 +138,65 @@ fn bin_indirect_is_safe(
         .iter()
         .find(|bin| bin.representative_scene == handle)
         .is_some_and(|bin| bin.command_capacity > 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use prism_render_architecture::{
+        abi::GenerationalHandle,
+        geometry::GeometryPrimitiveKind,
+    };
+    use prism_render_visibility::{
+        build_view_draw_bins, DrawBinCandidate, DrawBinKey, RenderPassMask,
+    };
+
+    use super::indirect_command_index;
+
+    fn handle(index: u32) -> GenerationalHandle {
+        GenerationalHandle {
+            index,
+            generation: 1,
+        }
+    }
+
+    #[test]
+    fn multiview_commands_do_not_use_sparse_candidate_table_offsets() {
+        let key = DrawBinKey {
+            geometry: handle(2),
+            pipeline_class: 3,
+            vertex_buffer_class: 4,
+            index_buffer_class: 5,
+            indexed: true,
+            primitive_kind: GeometryPrimitiveKind::Indexed,
+            pass_mask: RenderPassMask::OPAQUE.0,
+        };
+        // Scene capacity is 16, but each view only owns two live command slots.
+        let mut first = build_view_draw_bins(
+            handle(10),
+            16,
+            [DrawBinCandidate {
+                scene: handle(1),
+                key,
+            }],
+        );
+        let mut second = build_view_draw_bins(
+            handle(11),
+            16,
+            [DrawBinCandidate {
+                scene: handle(9),
+                key,
+            }],
+        );
+        first.command_buffer_start = 0;
+        first.global_candidate_start = 0;
+        second.command_buffer_start = 2;
+        second.global_candidate_start = 16;
+
+        assert_eq!(indirect_command_index(&first, &first.bins[0]), 0);
+        assert_eq!(indirect_command_index(&second, &second.bins[0]), 2);
+        assert_ne!(
+            indirect_command_index(&second, &second.bins[0]),
+            second.global_candidate_start + second.bins[0].command_start
+        );
+    }
 }

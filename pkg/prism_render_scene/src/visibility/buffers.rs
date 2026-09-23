@@ -325,8 +325,10 @@ mod tests {
         );
         first.global_bin_start = 0;
         first.global_candidate_start = 0;
+        first.command_buffer_start = 0;
         second.global_bin_start = 1;
         second.global_candidate_start = 4;
+        second.command_buffer_start = 1;
         buffers.stage_draw_bins(&[first, second]);
         assert_eq!(buffers.draw_bin_headers().len(), 2);
         assert_eq!(buffers.candidate_bins.values().len(), 8);

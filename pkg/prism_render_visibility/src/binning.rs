@@ -36,6 +36,10 @@ pub struct ViewDrawBins {
     pub bins: Vec<DrawBinRange>,
     pub candidate_bins: Vec<u32>,
     pub command_count: u32,
+    /// First command slot owned by this view in the indirect command buffers.
+    /// This is independent from `global_candidate_start`: candidate lookup is
+    /// scene-capacity-strided, while commands are GPU-work-capacity-strided.
+    pub command_buffer_start: u32,
     pub global_bin_start: u32,
     pub global_candidate_start: u32,
 }
@@ -118,6 +122,7 @@ pub fn build_view_draw_bins(
         bins,
         candidate_bins,
         command_count: command_start,
+        command_buffer_start: 0,
         global_bin_start: 0,
         global_candidate_start: 0,
     }

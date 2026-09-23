@@ -61,6 +61,8 @@ pub(crate) fn build_unified_visibility(
     let handles = scene.mirror().live_handles();
     let geometry = geometry_lods(scene.mirror(), &handles, &geometries);
     let material_records = material_records(&materials, scene.mirror(), &handles);
+    let gpu_slots_per_view =
+        (handles.len() as u32).min(settings.gpu_parity_max_items_per_view);
     let previous_lods = state.previous_lods().clone();
     let occluded = state.occluded().clone();
 
@@ -138,6 +140,8 @@ pub(crate) fn build_unified_visibility(
             scene.mirror().capacity() as u32,
             candidates,
         );
+        bins.command_buffer_start = (state.draw_bins.len() as u32)
+            .saturating_mul(gpu_slots_per_view);
         bins.global_bin_start = state.draw_bins.iter().map(|view| view.bins.len() as u32).sum();
         bins.global_candidate_start = state
             .draw_bins
@@ -172,7 +176,7 @@ pub(crate) fn build_unified_visibility(
             .copied()
             .map(RenderVisibilityWorkItem::from),
         ranges,
-        (handles.len() as u32).min(settings.gpu_parity_max_items_per_view),
+        gpu_slots_per_view,
     );
     buffers.stage_draw_bins(&state.draw_bins);
 }
