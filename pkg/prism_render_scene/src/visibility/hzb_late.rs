@@ -16,6 +16,8 @@ use bevy_render::{
 };
 use bevy_shader::Shader;
 
+use crate::geometry::RenderGeometryBuffers;
+
 #[derive(Resource)]
 pub(crate) struct HzbLateCompactPipeline {
     pub(crate) pipeline: CachedComputePipelineId,
@@ -26,7 +28,7 @@ pub(crate) struct HzbLateCompactPipeline {
 #[derive(Resource, Default)]
 pub(crate) struct HzbLateCompactBindGroup {
     pub(crate) bind_group: Option<BindGroup>,
-    ids: Option<[BufferId; 5]>,
+    ids: Option<[BufferId; 7]>,
 }
 
 pub(crate) fn init_hzb_late_compact_pipeline(
@@ -43,6 +45,8 @@ pub(crate) fn init_hzb_late_compact_pipeline(
             storage_buffer::<super::rows::RenderDrawBinHeader>(false),
             storage_buffer::<super::rows::RenderVisibilityIndirect>(false),
             storage_buffer::<super::rows::RenderVisibilityNonIndexedIndirect>(false),
+            storage_buffer_read_only::<super::super::geometry::rows::RenderGeometryHeader>(false),
+            storage_buffer_read_only::<super::super::geometry::rows::RenderGeometryLod>(false),
         ),
     );
     let layout = BindGroupLayoutDescriptor::new("prism hzb late compact", &entries);
@@ -79,6 +83,7 @@ pub(crate) fn prepare_hzb_late_bind_group(
     pipeline: Res<HzbLateCompactPipeline>,
     hzb: Res<super::hzb_gpu::HzbVisibilityBuffers>,
     visibility: Res<super::buffers::UnifiedVisibilityBuffers>,
+    geometry_buffers: Res<RenderGeometryBuffers>,
     device: Res<RenderDevice>,
     mut bindings: ResMut<HzbLateCompactBindGroup>,
 ) {
@@ -92,12 +97,17 @@ pub(crate) fn prepare_hzb_late_bind_group(
         return;
     };
     let _ = late_counters;
+    let Some((geometry_headers, geometry_lods)) = geometry_buffers.buffers() else {
+        return;
+    };
     let ids = [
         stages.id(),
         candidate_bins.id(),
         late_bins.id(),
         late_indexed.id(),
         late_non_indexed.id(),
+        geometry_headers.id(),
+        geometry_lods.id(),
     ];
     if bindings.ids == Some(ids) {
         return;
@@ -111,6 +121,8 @@ pub(crate) fn prepare_hzb_late_bind_group(
             late_bins.as_entire_binding(),
             late_indexed.as_entire_binding(),
             late_non_indexed.as_entire_binding(),
+            geometry_headers.as_entire_binding(),
+            geometry_lods.as_entire_binding(),
         )),
     ));
     bindings.ids = Some(ids);
@@ -135,6 +147,7 @@ struct LateCompactDispatch {
 )]
 pub(crate) fn dispatch_hzb_late_compact(
     view: bevy_render::renderer::ViewQuery<&bevy_render::view::ExtractedView>,
+    enabled: Res<super::runtime::UnifiedVisibilityEnabled>,
     settings: Res<super::runtime::UnifiedVisibilitySettings>,
     state: Res<super::runtime::UnifiedVisibilityState>,
     hzb: Res<super::hzb_gpu::HzbVisibilityBuffers>,
@@ -145,7 +158,7 @@ pub(crate) fn dispatch_hzb_late_compact(
     mut ctx: RenderContext,
     mut diagnostics: ResMut<super::runtime::PrismVisibilityDiagnostics>,
 ) {
-    if !settings.hzb_occlusion {
+    if !enabled.0 || !settings.hzb_occlusion {
         return;
     }
     let retained = view.into_inner().retained_view_entity;

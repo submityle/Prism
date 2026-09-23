@@ -1,6 +1,6 @@
 mod bindings;
 mod buffers;
-mod rows;
+pub(crate) mod rows;
 mod runtime;
 mod systems;
 

@@ -34,7 +34,7 @@
 
 重写所有 Prism 集成层：场景提取、稳定句柄、资源生命周期、Render Graph Pass、Vulkan/WGPU 资源桥、材质 ABI、线程调度和公共 API。
 
-预计投入：12–16 名熟悉 Vulkan/UE Renderer/Rust 的工程师，约 24–34 个月达到广泛场景 UE 同等级画质；6–10 个月形成第一批高端画质成果，14–20 个月达到内部 Alpha。
+预计投入：12–16 名熟悉 Vulkan/UE Renderer/Rust 的工程师；按第 25 节复审后的正式口径，约 32–44 个月达到广泛场景 UE 5.8.2 同等级画质，8–12 个月形成第一批高端画质成果，18–26 个月达到内部 Alpha。24–34 个月仅保留为理想条件下的激进目标，不作为正式承诺。
 
 ## 2. 前提与边界
 
@@ -388,7 +388,9 @@ UE RDG pass sequence 被翻译为 Prism graph pass，不保留 UE RDG builder AP
 
 previous/current HZB 已完成 GPU classification 主体：work ABI 有 early/late stage mask；reverse-Z 判定、depth bias、快速运动保守扩张、camera cut/history epoch/mip invalidation 有独立可测试契约；GPU Scene bounds/current+previous transform 被投影为 per-view candidate，buffer 以 `view * scene_capacity + scene_slot` 分区并显式标记 active slot。每个 view 有独立 `ViewDepthPyramid` bind group，previous kernel 在 early prepass 前执行，current kernel 在 early downsample 后且 late prepass 前执行；统一 visibility shader 通过独立 `hzb_stage_start` 消费 stage mask。Prism 只使用 Bevy 的公开资源，不修改其源码；同一 texture 在这两个时点分别承载 previous/current 内容，复制 view handle 不等于复制 history。FrameGraph 同步声明 previous/current HZB 与 late candidate 的读写 hazard。
 
-尚未毕业的是 same-frame late command merge：现有 early bin header/count 是 atomic append 所有者，current-HZB 后若再次用同一 buffer compact 会双计数。代码因此保留 `hzb_late_visibility_deferred` 诊断，不伪装已执行；下一切片必须新增独立 late headers/counters/indirect streams，再做 bounded merge。`hzb_occlusion` 与 opaque indirect 继续默认关闭，真实 GPU image/parity/performance gate 通过后才允许生产启用。
+same-frame late command 已不再复用 early atomic：代码现有独立 late headers/counters/indexed/non-indexed streams，current-HZB 后按 per-view candidate/bin range dispatch，并从统一 Geometry ABI 解析 resident LOD，校验 generation、primitive class 和边界后生成完整 draw arguments；FrameGraph 声明也已拆出 late compact pass 及其 geometry/read-output/write hazard。
+
+尚未毕业的是 late stream 的消费与最终合并：prepass/opaque consumer 仍只消费 early stream，late counter/overflow/readback parity 尚未闭环，也没有真实 GPU 图像和快速相机验证。因此不得把“独立命令已生成”写成 two-phase HZB 已完成；`hzb_occlusion` 与 opaque indirect 继续默认关闭。下一切片应先定义 early/late 不重不漏的 consumer 合并契约，再将 late commands 接入 late prepass，并补齐异步 readback、overflow 和图像 parity。
 
 标准 opaque bootstrap 已从统一 work stream 取 opaque work，并绑定 Material ABI 三表；Bevy visibility list 只负责清理被移出的旧 phase item。该路径已验证 instance/material generation fallback，按 mesh layout 读取 world normal/UV，并消费 base color、emissive、metallic、roughness、reflectance、AO 形成最小 direct BRDF 骨架；相机向量来自真实 view uniform，法线采用逆转置矩阵以支持非均匀缩放。GPU indirect draw 的代码链路已经存在，但默认关闭并等待真实运行 parity；完整 clustered lights、IBL、阴影、纹理/法线、clearcoat/transmission、masked/NPR/custom 分类管线仍是下一层实现。
 
@@ -724,7 +726,7 @@ UE Path Tracer 中边界清楚的采样、MIS、材质和降噪算法可选择�
 
 退出：内部 Alpha/Beta 项目连续使用，重大缺陷和卡顿可诊断。
 
-### M7：UE 同等级发布门槛（第 24–34 月）
+### M7：UE 同等级发布门槛（激进目标第 24–34 月；正式计划第 32–44 月）
 
 - 全部对标场景 Q0/Q1 清零；
 - 专家/普通用户双盲 A/B；

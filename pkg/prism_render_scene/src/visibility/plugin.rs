@@ -20,8 +20,8 @@ use super::{
         prepare_hzb_candidates, HzbVisibilityBuffers,
     },
     hzb_late::{
-        init_hzb_late_compact_pipeline, inspect_hzb_late_pipeline,
-        prepare_hzb_late_bind_group, HzbLateCompactBindGroup,
+        init_hzb_late_compact_pipeline, inspect_hzb_late_pipeline, prepare_hzb_late_bind_group,
+        HzbLateCompactBindGroup,
     },
     readback::{
         collect_visibility_parity_readback, map_submitted_visibility_parity_readback,
@@ -110,6 +110,7 @@ impl Plugin for PrismVisibilityPlugin {
                     prepare_hzb_late_bind_group
                         .after(prepare_hzb_candidates)
                         .after(upload_unified_visibility)
+                        .after(crate::geometry::prepare_geometry_bind_group)
                         .in_set(RenderSystems::PrepareBindGroups),
                 ),
             );
