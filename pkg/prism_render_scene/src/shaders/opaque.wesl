@@ -2,6 +2,7 @@
 
 import bevy_pbr::render::{
     mesh_functions,
+    mesh_view_bindings::view,
     view_transformations::position_world_to_clip
 };
 import bevy_render::maths::affine3_to_square;
@@ -39,6 +40,17 @@ struct MaterialTexture { index: u32, generation: u32, semantic: u32, sampler_ind
 
 struct SceneAddress { index: u32, generation: u32 }
 var<immediate> scene_address: SceneAddress;
+
+fn inverse_transpose_3x3(value: mat3x3<f32>) -> mat3x3<f32> {
+    let x = cross(value[1], value[2]);
+    let y = cross(value[2], value[0]);
+    let z = cross(value[0], value[1]);
+    let determinant = dot(value[2], z);
+    if abs(determinant) <= 1.0e-8 {
+        return mat3x3<f32>(1.0);
+    }
+    return mat3x3<f32>(x, y, z) / determinant;
+}
 
 struct Vertex {
     @if(VERTEX_POSITIONS_COMPRESSED)
@@ -87,7 +99,17 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     );
     out.world_position = world_position;
     @if(VERTEX_NORMALS) {
-        out.world_normal = normalize((world_from_local * vec4(vertex.normal, 0.0)).xyz);
+        let linear_world_from_local = mat3x3<f32>(
+            world_from_local[0].xyz,
+            world_from_local[1].xyz,
+            world_from_local[2].xyz,
+        );
+        let transformed_normal = inverse_transpose_3x3(linear_world_from_local) * vertex.normal;
+        out.world_normal = select(
+            vec3<f32>(0.0, 1.0, 0.0),
+            normalize(transformed_normal),
+            dot(transformed_normal, transformed_normal) > 1.0e-12,
+        );
     } @else {
         out.world_normal = vec3<f32>(0.0, 1.0, 0.0);
     }
@@ -132,7 +154,8 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let surface = material_parameters[material_headers[in.material_index].parameter_offset];
     let N = normalize(in.world_normal);
     let L = normalize(vec3<f32>(0.4, 0.8, 0.3));
-    let V = normalize(-in.world_position);
+    let to_view = view.world_position - in.world_position;
+    let V = select(N, normalize(to_view), dot(to_view, to_view) > 1.0e-12);
     let H = normalize(L + V);
     let NdotL = max(dot(N, L), 0.0);
     let NdotH = max(dot(N, H), 0.0);

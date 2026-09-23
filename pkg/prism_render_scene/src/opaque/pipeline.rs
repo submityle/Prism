@@ -83,6 +83,8 @@ mod tests {
             "decompress_vertex_position",
         );
         let stubs = r#"
+struct TestView { world_position: vec3<f32> }
+var<private> view: TestView;
 fn affine3_to_square(value: mat3x4<f32>) -> mat4x4<f32> {
     return mat4x4<f32>(
         vec4<f32>(1.0, 0.0, 0.0, 0.0),
