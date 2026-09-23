@@ -6,6 +6,8 @@
 
 use alloc::collections::BTreeMap;
 
+use bevy_ecs::resource::Resource;
+
 use prism_render_architecture::abi::GenerationalHandle;
 
 use super::shading::RenderShadingGeometry;
@@ -19,7 +21,7 @@ pub struct RenderShadingGeometryEntry {
 }
 
 /// Sparse, generation-addressed registry of surface tables.
-#[derive(Debug, Default)]
+#[derive(Resource, Debug, Default)]
 pub struct RenderShadingGeometryRegistry {
     entries: BTreeMap<u32, RenderShadingGeometryEntry>,
     dirty: bool,
@@ -80,6 +82,17 @@ impl RenderShadingGeometryRegistry {
     /// Entries in ascending slot order, ready for deterministic packing.
     pub fn entries_for_upload(&self) -> impl Iterator<Item = &RenderShadingGeometryEntry> {
         self.entries.values()
+    }
+
+    /// Drops every slot whose index is no longer reported live by the scene,
+    /// e.g. after a geometry asset is retired. Dirties the registry when it
+    /// actually removes something so buffers repack exactly once.
+    pub fn retain_live(&mut self, is_live: impl Fn(u32) -> bool) {
+        let before = self.entries.len();
+        self.entries.retain(|index, _| is_live(*index));
+        if self.entries.len() != before {
+            self.dirty = true;
+        }
     }
 }
 

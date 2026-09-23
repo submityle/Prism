@@ -21,8 +21,10 @@ use crate::{
         PrismGpuSceneEntity,
     },
     geometry::{
-        prepare_geometry_bind_group, sync_geometry_registry, upload_geometry_buffers,
+        extract_shading_geometry, prepare_geometry_bind_group, sync_geometry_registry,
+        sync_shading_geometry_registry, upload_geometry_buffers, upload_shading_geometry_buffers,
         GeometryBindGroup, RenderGeometryBuffers, RenderGeometryRegistry,
+        RenderShadingGeometryBuffers, RenderShadingGeometryRegistry, ShadingGeometryStaging,
     },
     scene::RenderGpuScene,
 };
@@ -76,6 +78,8 @@ impl Plugin for PrismGpuScenePlugin {
             .init_resource::<GpuSceneParityDiagnostics>()
             .init_resource::<GpuSceneUploadSettings>()
             .init_resource::<RenderGeometryRegistry>()
+            .init_resource::<RenderShadingGeometryRegistry>()
+            .init_resource::<ShadingGeometryStaging>()
             .init_resource::<crate::extract::lifecycle::ExtractionClock>()
             .init_resource::<RenderGpuScene>()
             .init_resource::<GpuCompletionTracker>()
@@ -85,6 +89,7 @@ impl Plugin for PrismGpuScenePlugin {
                     init_gpu_resource::<GpuSceneBuffers>,
                     init_gpu_resource::<GpuSceneBindGroup>,
                     init_gpu_resource::<RenderGeometryBuffers>,
+                    init_gpu_resource::<RenderShadingGeometryBuffers>,
                     init_gpu_resource::<GeometryBindGroup>,
                     rebuild_gpu_scene_after_device_startup,
                 )
@@ -94,6 +99,7 @@ impl Plugin for PrismGpuScenePlugin {
                 ExtractSchedule,
                 (
                     extract_scene_instances,
+                    extract_shading_geometry,
                     crate::material::systems::invalidate_scene_materials
                         .after(crate::material::systems::extract_standard_materials)
                         .after(extract_scene_instances),
@@ -111,9 +117,15 @@ impl Plugin for PrismGpuScenePlugin {
                         .after(apply_extracted_scene_changes)
                         .before(crate::visibility::systems::build_unified_visibility)
                         .in_set(RenderSystems::PrepareResources),
+                    sync_shading_geometry_registry
+                        .after(apply_extracted_scene_changes)
+                        .in_set(RenderSystems::PrepareResources),
                     write_gpu_scene_buffers.in_set(RenderSystems::PrepareResourcesFlush),
                     upload_geometry_buffers
                         .after(sync_geometry_registry)
+                        .in_set(RenderSystems::PrepareResourcesFlush),
+                    upload_shading_geometry_buffers
+                        .after(sync_shading_geometry_registry)
                         .in_set(RenderSystems::PrepareResourcesFlush),
                     prepare_gpu_scene_bind_group
                         .after(write_gpu_scene_buffers)

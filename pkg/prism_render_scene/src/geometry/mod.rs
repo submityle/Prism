@@ -5,6 +5,7 @@ mod runtime;
 mod shading;
 mod shading_buffers;
 mod shading_registry;
+mod shading_systems;
 mod systems;
 
 pub use bindings::GeometryBindGroup;
@@ -22,4 +23,8 @@ pub use shading_registry::{RenderShadingGeometryEntry, RenderShadingGeometryRegi
 pub(crate) use bindings::prepare_geometry_bind_group;
 pub(crate) use buffers::RenderGeometryBuffers;
 
+pub(crate) use shading_systems::{
+    extract_shading_geometry, sync_shading_geometry_registry, upload_shading_geometry_buffers,
+    ShadingGeometryStaging,
+};
 pub(crate) use systems::{sync_geometry_registry, upload_geometry_buffers};
