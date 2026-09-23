@@ -11,3 +11,8 @@ Draw bins are deterministic and include geometry generation, resolved LOD,
 pipeline/material class, logical vertex/index buffer classes, topology, and pass
 mask. Candidate-table offsets and indirect-command offsets are separate because
 sparse scene capacity and live command capacity do not share the same stride.
+
+Two-phase occlusion uses explicit early-visible, late-retest, and late-visible
+stage bits. Its reverse-Z reference contract rejects only strictly proven
+occlusion; camera cuts, invalid history, unavailable mips, and rapid projected
+motion remain visible.

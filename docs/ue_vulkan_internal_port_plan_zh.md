@@ -386,6 +386,8 @@ UE RDG pass sequence 被翻译为 Prism graph pass，不保留 UE RDG builder AP
 
 这仍是 graduation-gated 路径，而不是“生产 GPU-driven 已毕业”：`INDIRECT_FIRST_INSTANCE` 在 `RenderStartup` 探测，`GpuSceneOpaqueIndirectEnabled` 默认关闭；只有应用显式 opt-in 且 capability 支持时才逐 bin 入队，否则按 visible work item 保留正确的 direct fallback。本轮遵循“不运行项目”的要求，没有真实 GPU image/performance parity，因此文档只声明代码闭环和静态验证，不声明画质/运行时等价。CPU deterministic reference 仍负责 bin construction、capacity planning 和 fallback，当前 Geometry adapter 仍是单 LOD；完全 GPU-native sort/prefix-sum、previous/current HZB、virtual geometry residency、visibility buffer 和完整 PBR/NPR/custom resolve 继续列为后续门槛。
 
+previous/current HZB 已完成第一组不可逆接口决策和调度骨架：work ABI 有 early/late stage mask；reverse-Z 判定、depth bias、快速运动保守扩张、camera cut/history epoch/mip invalidation 有独立可测试契约；Core3d seam 固定为 previous-HZB readiness 在 early prepass 前，current-HZB readiness 在 early downsample 后且 late prepass 前。Prism 复用 Bevy `ViewDepthPyramid` 的公开资源，但不修改其源码；同一 texture 在这两个时点分别承载 previous/current 内容，复制 view handle 不等于复制 history。FrameGraph 同步声明了 previous/current HZB 与 late candidate 的读写 hazard。`hzb_occlusion` 默认关闭，真实 texture bind group、GPU projection/sample kernel、late compact/merge 尚未编码，因此诊断字段明确叫 `ready_views` 而不是 dispatch count。
+
 标准 opaque bootstrap 已从统一 work stream 取 opaque work，并绑定 Material ABI 三表；Bevy visibility list 只负责清理被移出的旧 phase item。该路径已验证 instance/material generation fallback，按 mesh layout 读取 world normal/UV，并消费 base color、emissive、metallic、roughness、reflectance、AO 形成最小 direct BRDF 骨架；相机向量来自真实 view uniform，法线采用逆转置矩阵以支持非均匀缩放。GPU indirect draw 的代码链路已经存在，但默认关闭并等待真实运行 parity；完整 clustered lights、IBL、阴影、纹理/法线、clearcoat/transmission、masked/NPR/custom 分类管线仍是下一层实现。
 
 ## 9. TSR 移植包
