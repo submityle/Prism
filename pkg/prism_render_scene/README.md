@@ -11,7 +11,7 @@ Set `GpuSceneOpaqueEnabled(false)` for a runtime fallback to the legacy Bevy PBR
 
 Unified visibility builds deterministic per-view draw bins and bounded indexed/non-indexed indirect command streams. `GpuSceneOpaqueIndirectEnabled` is deliberately disabled by default: enable it only for runtime parity testing on devices that report `INDIRECT_FIRST_INSTANCE`. Otherwise the opaque queue keeps its per-visible-item direct path. Asynchronous diagnostics compare GPU work, command classes, and per-bin command counts without stalling the current frame.
 
-The HZB integration reuses Bevy's public persistent `ViewDepthPyramid`: before early depth it contains previous-frame data, and after early downsampling it contains current-frame data. Prism tracks epoch/mip validity and schedules both seams without cloning texture views as fake snapshots. `hzb_occlusion` remains disabled by default until the actual GPU sample/late-compaction kernels and runtime parity gate are complete.
+The HZB integration reuses Bevy's public persistent `ViewDepthPyramid`: before early depth it contains previous-frame data, and after early downsampling it contains current-frame data. Prism tracks epoch/mip validity, projects current/previous GPU Scene bounds into per-view candidates, dispatches both reverse-Z classifiers, and feeds their stage stream into visibility compaction. `hzb_occlusion` remains disabled by default: same-frame late indirect output still needs independent atomic headers/counters plus a bounded merge, followed by runtime parity.
 
 The package owns ECS integration, sparse GPU buffers, submission completion tracking, diagnostics, and the stable shader ABI. Unreal Engine-derived code is not stored here.
 

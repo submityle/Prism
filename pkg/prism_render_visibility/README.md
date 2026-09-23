@@ -16,3 +16,7 @@ Two-phase occlusion uses explicit early-visible, late-retest, and late-visible
 stage bits. Its reverse-Z reference contract rejects only strictly proven
 occlusion; camera cuts, invalid history, unavailable mips, and rapid projected
 motion remain visible.
+
+The render adapter stores HZB results in a separate per-view scene-slot stream.
+This prevents temporal classification from changing the stable work ABI and
+allows early and late command buffers to have independent atomic ownership.
