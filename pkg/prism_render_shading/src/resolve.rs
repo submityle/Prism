@@ -11,7 +11,8 @@ use prism_render_material::{GpuMaterialHeader, GpuSurfaceParameters};
 use crate::{
     classify_material_header, reconstruct_surface, ClassificationError, DirectLightSample,
     GpuShadingPrimitive, GpuShadingVertex, MaterialShadingClass, ShadingFrame, SurfaceReconstructionError,
-    SurfaceReconstructionFlags, SurfaceReconstructionInput, SurfaceSample, VisibilityPixel,
+    PunctualLight, SurfaceReconstructionFlags, SurfaceReconstructionInput, SurfaceSample,
+    VisibilityPixel,
 };
 
 /// One analytic directional light expressed in world space.
@@ -40,6 +41,8 @@ impl Default for DirectionalLight {
 pub struct LightingEnvironment<'a> {
     /// Analytic directional lights accumulated for every shading class.
     pub directional: &'a [DirectionalLight],
+    /// Punctual (point and spot) lights accumulated for every shading class.
+    pub punctual: &'a [PunctualLight],
     /// Constant ambient irradiance approximating unresolved indirect light.
     pub ambient: [f32; 3],
     /// Quantization band count used by the non-photoreal toon path.
@@ -50,6 +53,7 @@ impl Default for LightingEnvironment<'_> {
     fn default() -> Self {
         Self {
             directional: &[],
+            punctual: &[],
             ambient: [0.0; 3],
             toon_bands: 4,
         }
@@ -176,6 +180,14 @@ pub fn resolve_pixel(
                     ),
                 );
             }
+            for light in lights.punctual {
+                if let Some(sample) = light.sample(geometry.position) {
+                    accumulated = add(
+                        accumulated,
+                        crate::evaluate_toon_direct(lit_surface, frame, sample, lights.toon_bands),
+                    );
+                }
+            }
             add(add(accumulated, ambient_term(base_color, ambient_occlusion, lights.ambient, metallic)), emissive)
         }
         // Principled is the physically based base shared by the remaining
@@ -187,6 +199,14 @@ pub fn resolve_pixel(
                     accumulated,
                     crate::evaluate_principled_direct(lit_surface, frame, direct_sample(*light)),
                 );
+            }
+            for light in lights.punctual {
+                if let Some(sample) = light.sample(geometry.position) {
+                    accumulated = add(
+                        accumulated,
+                        crate::evaluate_principled_direct(lit_surface, frame, sample),
+                    );
+                }
             }
             add(add(accumulated, ambient_term(base_color, ambient_occlusion, lights.ambient, metallic)), emissive)
         }
@@ -325,7 +345,7 @@ mod tests {
         };
         let resolved = resolve_pixel(
             base_input(&primitives, &vertices, header, parameters),
-            LightingEnvironment { directional: &[light], ambient: [5.0; 3], toon_bands: 4 },
+            LightingEnvironment { directional: &[light], punctual: &[], ambient: [5.0; 3], toon_bands: 4 },
         )
         .unwrap();
         assert_eq!(resolved.shading_class, MaterialShadingClass::Unlit);
@@ -348,13 +368,13 @@ mod tests {
         };
         let one = resolve_pixel(
             base_input(&primitives, &vertices, header, parameters),
-            LightingEnvironment { directional: &[light], ambient: [0.0; 3], toon_bands: 4 },
+            LightingEnvironment { directional: &[light], punctual: &[], ambient: [0.0; 3], toon_bands: 4 },
         )
         .unwrap()
         .color;
         let two = resolve_pixel(
             base_input(&primitives, &vertices, header, parameters),
-            LightingEnvironment { directional: &[light, light], ambient: [0.0; 3], toon_bands: 4 },
+            LightingEnvironment { directional: &[light, light], punctual: &[], ambient: [0.0; 3], toon_bands: 4 },
         )
         .unwrap()
         .color;
@@ -404,7 +424,7 @@ mod tests {
         };
         let resolved = resolve_pixel(
             base_input(&primitives, &vertices, header, parameters),
-            LightingEnvironment { directional: &[light], ambient: [0.0; 3], toon_bands: 4 },
+            LightingEnvironment { directional: &[light], punctual: &[], ambient: [0.0; 3], toon_bands: 4 },
         )
         .unwrap();
         assert_eq!(resolved.shading_class, MaterialShadingClass::Npr);
@@ -412,5 +432,45 @@ mod tests {
         for channel in 0..3 {
             assert!((resolved.color[channel] - 1.0).abs() < 1.0e-4);
         }
+    }
+
+    #[test]
+    fn punctual_point_light_illuminates_and_respects_range() {
+        use crate::PunctualLight;
+        let (primitives, vertices) = unit_triangle();
+        let header = principled_header();
+        let parameters = GpuSurfaceParameters {
+            base_color: [0.8, 0.8, 0.8, 1.0],
+            perceptual_roughness: 0.6,
+            ..Default::default()
+        };
+        // The unit triangle sits on the z=0 plane; place the light above it so
+        // it faces the reconstructed geometry normal.
+        let lit = resolve_pixel(
+            base_input(&primitives, &vertices, header, parameters),
+            LightingEnvironment {
+                directional: &[],
+                punctual: &[PunctualLight::point([0.25, 0.25, 1.0], [5.0; 3], 0.0)],
+                ambient: [0.0; 3],
+                toon_bands: 4,
+            },
+        )
+        .unwrap();
+        assert!(lit.color.iter().all(|c| c.is_finite() && *c >= 0.0));
+        assert!(lit.color.iter().any(|c| *c > 0.0), "point light must add energy");
+
+        // A light whose range window closes before it reaches the surface adds
+        // nothing, so the resolved pixel collapses to the (zero) ambient term.
+        let dark = resolve_pixel(
+            base_input(&primitives, &vertices, header, parameters),
+            LightingEnvironment {
+                directional: &[],
+                punctual: &[PunctualLight::point([0.25, 0.25, 10.0], [5.0; 3], 1.0)],
+                ambient: [0.0; 3],
+                toon_bands: 4,
+            },
+        )
+        .unwrap();
+        assert_eq!(dark.color, [0.0; 3]);
     }
 }
