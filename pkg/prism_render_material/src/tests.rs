@@ -63,3 +63,38 @@ fn graph_normalization_removes_dead_nodes_and_classifies_npr() {
     assert_eq!(normalized.nodes.len(), 2);
     assert_eq!(normalized.render_class, MaterialRenderClass::NprOpaque);
 }
+
+#[cfg(feature = "bevy")]
+#[test]
+fn standard_material_bridge_preserves_surface_classification() {
+    struct Resolver;
+    impl StandardMaterialTextureResolver for Resolver {
+        fn resolve(
+            &mut self,
+            _: bevy_asset::AssetId<bevy_image::Image>,
+            semantic: TextureSemantic,
+        ) -> GpuMaterialTexture {
+            GpuMaterialTexture {
+                index: semantic as u32 + 1,
+                generation: 1,
+                semantic: semantic as u32,
+                sampler_index: 1,
+            }
+        }
+    }
+    let material = bevy_pbr::StandardMaterial {
+        alpha_mode: bevy_material::AlphaMode::Mask(0.37),
+        double_sided: true,
+        clearcoat: 0.5,
+        ..Default::default()
+    };
+    let handle = prism_render_architecture::abi::GenerationalHandle {
+        index: 2,
+        generation: 1,
+    };
+    let record = lower_standard_material(handle, 4, &material, &mut Resolver);
+    assert_eq!(record.render_class, MaterialRenderClass::MaskedTwoSided);
+    assert_eq!(record.shading_model, MaterialShadingModel::ClearCoat);
+    assert_eq!(record.surface.alpha_cutoff, 0.37);
+    assert!(record.features.contains(MaterialFeatureFlags::DOUBLE_SIDED));
+}

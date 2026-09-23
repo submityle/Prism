@@ -4,6 +4,8 @@
 
 extern crate alloc;
 
+#[cfg(feature = "bevy")]
+mod bevy_bridge;
 mod handle;
 mod ir;
 mod record;
@@ -11,6 +13,8 @@ mod registry;
 mod resources;
 mod validation;
 
+#[cfg(feature = "bevy")]
+pub use bevy_bridge::{lower_standard_material, StandardMaterialTextureResolver, TextureSemantic};
 pub use handle::{MaterialCapacityError, MaterialHandleAllocator, MaterialHandleError};
 pub use ir::{
     ClosureKind, MaterialGraph, MaterialNode, MaterialNodeId, MaterialValue, NormalizedMaterial,

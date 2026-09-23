@@ -10,5 +10,39 @@ publish = false
 bytemuck = { version = "1.5", features = ["derive", "must_cast"] }
 prism_render_architecture = { path = "../prism_render_architecture" }
 
+[features]
+bevy = [
+  "dep:bevy_asset",
+  "dep:bevy_color",
+  "dep:bevy_material",
+  "dep:bevy_pbr",
+  "dep:bevy_image",
+]
+
+[dependencies.bevy_asset]
+path = "../../crates/bevy_asset"
+version = "0.20.0-dev"
+optional = true
+
+[dependencies.bevy_color]
+path = "../../crates/bevy_color"
+version = "0.20.0-dev"
+optional = true
+
+[dependencies.bevy_material]
+path = "../../crates/bevy_material"
+version = "0.20.0-dev"
+optional = true
+
+[dependencies.bevy_pbr]
+path = "../../crates/bevy_pbr"
+version = "0.20.0-dev"
+optional = true
+
+[dependencies.bevy_image]
+path = "../../crates/bevy_image"
+version = "0.20.0-dev"
+optional = true
+
 [lints]
 workspace = true
