@@ -15,6 +15,7 @@ use bevy_render::{
     renderer::RenderDevice,
 };
 use bevy_render::render_resource::ShaderType;
+use bevy_math::{Mat4, Vec2, Vec3};
 use bevy_shader::Shader;
 
 #[repr(C)]
@@ -24,6 +25,43 @@ pub(crate) struct RenderHzbCullInput {
     pub uv_max: [f32; 2],
     pub nearest_depth: f32,
     pub projected_velocity: f32,
+}
+
+pub(crate) fn project_sphere_to_hzb(
+    clip_from_world: Mat4,
+    current_center: Vec3,
+    previous_center: Vec3,
+    radius: f32,
+    viewport: [u32; 4],
+) -> Option<RenderHzbCullInput> {
+    let current = clip_from_world * current_center.extend(1.0);
+    let previous = clip_from_world * previous_center.extend(1.0);
+    if current.w <= 1.0e-5 || !current.is_finite() || !previous.is_finite() {
+        return None;
+    }
+    let ndc = current.truncate() / current.w;
+    let previous_ndc = if previous.w > 1.0e-5 {
+        previous.truncate() / previous.w
+    } else {
+        ndc
+    };
+    let clip_radius = radius.abs() / current.w.abs().max(1.0e-5);
+    let uv = Vec3::new(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5, ndc.z);
+    let uv_radius = Vec3::new(clip_radius * 0.5, clip_radius * 0.5, clip_radius);
+    let viewport_scale = Vec3::new(viewport[2].max(1) as f32, viewport[3].max(1) as f32, 1.0);
+    Some(RenderHzbCullInput {
+        uv_min: (uv - uv_radius)
+            .truncate()
+            .clamp(Vec2::ZERO, Vec2::ONE)
+            .to_array(),
+        uv_max: (uv + uv_radius)
+            .truncate()
+            .clamp(Vec2::ZERO, Vec2::ONE)
+            .to_array(),
+        // Reverse-Z: the nearest point has the greater NDC depth.
+        nearest_depth: (uv.z + uv_radius.z).clamp(0.0, 1.0),
+        projected_velocity: ((ndc - previous_ndc) * viewport_scale).truncate().length(),
+    })
 }
 
 #[derive(Resource)]
@@ -83,6 +121,8 @@ pub(crate) fn inspect_hzb_visibility_pipeline(
     mut buffers: ResMut<HzbVisibilityBuffers>,
     device: Res<RenderDevice>,
 ) {
+    let _projector: fn(Mat4, Vec3, Vec3, f32, [u32; 4]) -> Option<RenderHzbCullInput> =
+        project_sphere_to_hzb;
     buffers.ensure_capacity(&device, 1);
     let _ = buffers.bindings();
     let _ = (&pipeline.layout, cache.get_compute_pipeline(pipeline.pipeline));
@@ -157,5 +197,20 @@ mod tests {
     #[test]
     fn hzb_rows_match_shader_layout() {
         assert_eq!(RenderHzbCullInput::min_size().get(), 24);
+    }
+
+    #[test]
+    fn sphere_projection_is_reverse_z_and_motion_conservative() {
+        let projected = super::project_sphere_to_hzb(
+            bevy_math::Mat4::IDENTITY,
+            bevy_math::Vec3::new(0.0, 0.0, 0.5),
+            bevy_math::Vec3::new(-0.1, 0.0, 0.5),
+            0.1,
+            [0, 0, 100, 100],
+        )
+        .unwrap();
+        assert!(projected.nearest_depth > 0.5);
+        assert!(projected.projected_velocity >= 5.0);
+        assert!(projected.uv_min[0] < projected.uv_max[0]);
     }
 }
