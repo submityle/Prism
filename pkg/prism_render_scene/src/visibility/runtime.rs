@@ -229,4 +229,5 @@ pub struct PrismVisibilityDiagnostics {
     pub hzb_current_dispatches: u32,
     pub hzb_late_retests: u32,
     pub hzb_candidates: u32,
+    pub hzb_late_visibility_deferred: u32,
 }
