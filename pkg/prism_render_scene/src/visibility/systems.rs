@@ -37,6 +37,7 @@ pub(crate) fn build_unified_visibility(
     settings: Res<UnifiedVisibilitySettings>,
     scene: Res<RenderGpuScene>,
     materials: Res<RenderMaterialRegistry>,
+    geometries: Res<crate::RenderGeometryRegistry>,
     mut state: ResMut<UnifiedVisibilityState>,
     mut buffers: ResMut<UnifiedVisibilityBuffers>,
     mut diagnostics: ResMut<PrismVisibilityDiagnostics>,
@@ -57,7 +58,7 @@ pub(crate) fn build_unified_visibility(
     debug_assert!(!frame_graph.compiled.execution_order.is_empty());
 
     let handles = scene.mirror().live_handles();
-    let geometry = geometry_lods(scene.mirror(), &handles);
+    let geometry = geometry_lods(scene.mirror(), &handles, &geometries);
     let material_records = material_records(&materials, scene.mirror(), &handles);
     let previous_lods = state.previous_lods().clone();
     let occluded = state.occluded().clone();
@@ -243,6 +244,7 @@ pub(crate) fn dispatch_unified_visibility(
 fn geometry_lods(
     scene: &prism_render_architecture::gpu_scene::CpuRenderScene,
     handles: &[prism_render_architecture::gpu_scene::SceneHandle],
+    registry: &crate::RenderGeometryRegistry,
 ) -> BTreeMap<prism_render_architecture::gpu_scene::GeometryHandle, GeometryLodChain> {
     handles
         .iter()
@@ -252,12 +254,21 @@ fn geometry_lods(
                 geometry,
                 GeometryLodChain {
                     geometry,
-                    lods: vec![GeometryLod {
-                        level: 0,
-                        screen_error: 0.0,
-                        resident: true,
-                        fallback: true,
-                    }],
+                    lods: registry.record(geometry).map_or_else(
+                        Vec::new,
+                        |record| {
+                            record
+                                .lods
+                                .iter()
+                                .map(|lod| GeometryLod {
+                                    level: lod.level as u16,
+                                    screen_error: lod.screen_error,
+                                    resident: lod.resident,
+                                    fallback: lod.fallback,
+                                })
+                                .collect()
+                        },
+                    ),
                 },
             )
         })
@@ -322,7 +333,22 @@ mod tests {
         });
         let handles = scene.live_handles();
         assert_eq!(handles, vec![handle]);
-        assert!(geometry_lods(&scene, &handles).contains_key(&geometry));
+        let mut geometries = crate::RenderGeometryRegistry::default();
+        geometries.upsert(
+            bevy_asset::AssetId::Uuid {
+                uuid: bevy_asset::uuid::Uuid::from_u128(7),
+            },
+            prism_render_architecture::geometry::GeometryRecord {
+                handle: geometry,
+                lods: vec![prism_render_architecture::geometry::GeometryLodRecord {
+                    resident: true,
+                    fallback: true,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        );
+        assert_eq!(geometry_lods(&scene, &handles, &geometries)[&geometry].lods.len(), 1);
 
         let materials = RenderMaterialRegistry::default();
         let table = material_records(&materials, &scene, &handles);

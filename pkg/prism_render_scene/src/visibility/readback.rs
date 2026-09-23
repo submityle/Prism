@@ -92,7 +92,7 @@ pub(crate) fn request_visibility_parity_readback(
         buffer: target,
         cpu_work,
         cpu_ranges,
-        compare_lod: false,
+        compare_lod: true,
         view_count: state.views.len(),
         slots_per_view: buffers.gpu_slots_per_view() as usize,
     }));
