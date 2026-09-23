@@ -13,6 +13,7 @@ mod completion;
 mod consumer;
 mod diagnostics;
 mod extract;
+mod material;
 mod opaque;
 mod plugin;
 mod scene;
@@ -25,6 +26,10 @@ pub use completion::GpuCompletionTracker;
 pub use consumer::{GpuSceneBufferBindings, GpuSceneReader};
 pub use diagnostics::{GpuSceneDiagnostics, GpuSceneUploadSettings};
 pub use extract::{ExtractedSceneInstance, GpuSceneInstanceAddress, PrismGpuSceneEntity};
+pub use material::{
+    MaterialBindGroup, MaterialBufferBindings, MaterialReader, PrismMaterialDiagnostics,
+    PrismMaterialPlugin,
+};
 pub use opaque::{GpuSceneDebugView, GpuSceneOpaqueEnabled, PrismGpuSceneOpaquePlugin};
 pub use plugin::{GpuSceneMode, PrismGpuScenePlugin};
 pub use scene::RenderGpuScene;

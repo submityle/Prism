@@ -110,6 +110,29 @@ fn registry_tracks_sparse_rows_and_rejects_texture_overflow() {
         Err(MaterialRegistryError::TooManyTextures { .. })
     ));
     registry.publish(record(handle, 1)).unwrap();
-    assert_eq!(registry.take_dirty(), vec![handle.index]);
+    assert_eq!(registry.take_dirty(), vec![0, handle.index]);
     assert!(registry.take_dirty().is_empty());
+}
+
+#[test]
+fn slot_zero_is_a_live_principled_fallback() {
+    let registry = MaterialRegistry::new(8);
+    let (headers, parameters, _) = registry.gpu_tables();
+    assert_eq!(headers[0].generation, 0);
+    assert_eq!(headers[0].active, 1);
+    assert_eq!(
+        headers[0].shading_model,
+        MaterialShadingModel::Principled as u32
+    );
+    assert_eq!(parameters[0], GpuSurfaceParameters::default());
+}
+
+#[test]
+fn gpu_material_rows_match_the_shader_abi() {
+    assert_eq!(size_of::<GpuMaterialHeader>(), 64);
+    assert_eq!(size_of::<GpuSurfaceParameters>(), 96);
+    assert_eq!(size_of::<GpuMaterialTexture>(), 16);
+    assert_eq!(size_of::<GpuMaterialHeader>() % 16, 0);
+    assert_eq!(size_of::<GpuSurfaceParameters>() % 16, 0);
+    assert_eq!(size_of::<GpuMaterialTexture>() % 16, 0);
 }

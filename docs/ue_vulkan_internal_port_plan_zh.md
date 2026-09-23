@@ -371,6 +371,17 @@ UE RDG pass sequence 被翻译为 Prism graph pass，不保留 UE RDG builder AP
 
 建立统一 `MaterialRecord`，供标准 raster、Meshlet、VSM、Lumen/Solari 和 Path Tracer 使用。`StandardMaterial` 只是用户资产格式，不再是所有内部模块的硬依赖。
 
+当前落地状态（2026-09-23）：
+
+- `pkg/prism_render_material` 已提供版本化 CPU/GPU ABI、分代句柄、revision/epoch、固定纹理语义表、PBR/NPR/custom closure IR、`StandardMaterial` lowering 和稀疏 dirty row；
+- `pkg/prism_render_scene::material` 已把资产事件接入 RenderApp，完成增量 sparse scatter upload、GPU completion 后回收、设备恢复重建、只读 consumer API、三表 bind group 和 shader 侧 generation 校验契约；
+- slot 0 是永久 fallback material。异步加载时实例使用该槽；删除或 stale generation 由消费 shader 校验后解析到该槽，不读已回收材质；
+- `MeshMaterial3d<StandardMaterial>` 会自动解析为 GPU Scene 的 material handle；`PrismGpuSceneEntity::material` 保留为显式 override，不再要求普通使用者手工分配句柄；
+- GPU Scene 与 Material Registry 仍保持两个所有权域：GPU Scene 只存 `(index, generation)`，不复制资产对象或 Bevy/UE 材质布局；
+- 本阶段不修改 `crates/` 下 Bevy 源码。后续 visibility、opaque、VSM、GI、ray/offline consumer 只依赖公开 ABI/bindings。
+
+这里的“完成 Material ABI”指身份、数据、上传、恢复与消费契约闭环，不等于 UE 同画质已经完成。当前 opaque consumer 仍需改为消费统一 visible work，并用该 ABI 执行完整 PBR/NPR resolve；纹理 descriptor residency、virtual texture 和离线高精度 closure 仍属于后续 consumer/virtual-resource 工作。
+
 ## 9. TSR 移植包
 
 ### 9.1 为什么先做

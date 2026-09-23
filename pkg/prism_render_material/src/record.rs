@@ -3,6 +3,10 @@ use prism_render_architecture::abi::GenerationalHandle;
 
 pub const MATERIAL_ABI_VERSION: u32 = 1;
 pub const MAX_MATERIAL_TEXTURES: usize = 8;
+pub const FALLBACK_MATERIAL_HANDLE: GenerationalHandle = GenerationalHandle {
+    index: 0,
+    generation: 0,
+};
 
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -154,6 +158,30 @@ pub struct GpuMaterialTexture {
     pub generation: u32,
     pub semantic: u32,
     pub sampler_index: u32,
+}
+
+pub fn inactive_material_header(generation: u32) -> GpuMaterialHeader {
+    GpuMaterialHeader {
+        generation,
+        custom_program: u32::MAX,
+        ..Default::default()
+    }
+}
+
+/// Slot zero is a permanent, generation-zero principled fallback. Consumers
+/// can safely use it while an asynchronously loaded material is unavailable.
+pub fn fallback_material_header(epoch: u64) -> GpuMaterialHeader {
+    GpuMaterialHeader {
+        generation: 0,
+        shading_model: MaterialShadingModel::Principled as u32,
+        render_class: MaterialRenderClass::Opaque as u32,
+        parameter_size: size_of::<GpuSurfaceParameters>() as u32,
+        custom_program: u32::MAX,
+        active: 1,
+        material_epoch_low: epoch as u32,
+        material_epoch_high: (epoch >> 32) as u32,
+        ..Default::default()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

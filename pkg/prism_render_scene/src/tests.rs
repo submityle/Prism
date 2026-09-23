@@ -158,6 +158,7 @@ fn gpu_scene_test_world() -> (bevy_ecs::world::World, Schedule) {
     world.insert_resource(GpuSceneDiagnostics::default());
     world.insert_resource(GpuSceneUploadSettings::default());
     world.insert_resource(ExtractionClock::default());
+    world.insert_resource(crate::material::runtime::RenderMaterialRegistry::default());
     let mut schedule = Schedule::default();
     schedule.add_systems(crate::extract::apply_extracted_scene_changes);
     (world, schedule)
@@ -171,6 +172,7 @@ fn extracted_instance() -> ExtractedSceneInstance {
         mesh: Mesh3d::default(),
         geometry: None,
         material: Default::default(),
+        material_asset: None,
         flags: 7,
         render_layers: 1,
     }

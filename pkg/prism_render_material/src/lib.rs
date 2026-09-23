@@ -20,9 +20,10 @@ pub use ir::{
     ClosureKind, MaterialGraph, MaterialNode, MaterialNodeId, MaterialValue, NormalizedMaterial,
 };
 pub use record::{
-    GpuMaterialHeader, GpuMaterialTexture, GpuSurfaceParameters, MaterialDomain,
-    MaterialFeatureFlags, MaterialRecord, MaterialRenderClass, MaterialShadingModel,
-    MATERIAL_ABI_VERSION, MAX_MATERIAL_TEXTURES,
+    fallback_material_header, inactive_material_header, GpuMaterialHeader, GpuMaterialTexture,
+    GpuSurfaceParameters, MaterialDomain, MaterialFeatureFlags, MaterialRecord,
+    MaterialRenderClass, MaterialShadingModel, FALLBACK_MATERIAL_HANDLE, MATERIAL_ABI_VERSION,
+    MAX_MATERIAL_TEXTURES,
 };
 pub use registry::{MaterialRegistry, MaterialRegistryError, MaterialSnapshot};
 pub use resources::{MaterialResourceHandle, MaterialResourceKind, MaterialResourceTable};

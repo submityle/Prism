@@ -80,6 +80,7 @@ mod tests {
             mesh: bevy_mesh::Mesh3d::default(),
             geometry: None,
             material: Default::default(),
+            material_asset: None,
             flags: 0,
             render_layers: 1,
         });

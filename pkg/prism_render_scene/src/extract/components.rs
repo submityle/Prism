@@ -1,6 +1,8 @@
+use bevy_asset::AssetId;
 use bevy_camera::primitives::Aabb;
 use bevy_ecs::component::Component;
 use bevy_mesh::Mesh3d;
+use bevy_pbr::StandardMaterial;
 use bevy_transform::components::GlobalTransform;
 use prism_render_architecture::gpu_scene::{GeometryHandle, SceneHandle, SceneMaterialHandle};
 
@@ -10,7 +12,8 @@ pub struct PrismGpuSceneEntity {
     /// Optional stable geometry override. When absent the mesh asset is
     /// assigned a stable runtime geometry handle.
     pub geometry: Option<GeometryHandle>,
-    /// Stable material reference consumed by future shading paths.
+    /// Optional stable material override. A non-zero value takes precedence
+    /// over `MeshMaterial3d<StandardMaterial>`.
     pub material: SceneMaterialHandle,
     /// Renderer-defined instance flags.
     pub flags: u32,
@@ -27,6 +30,7 @@ pub struct ExtractedSceneInstance {
     pub mesh: Mesh3d,
     pub geometry: Option<GeometryHandle>,
     pub material: SceneMaterialHandle,
+    pub material_asset: Option<AssetId<StandardMaterial>>,
     pub flags: u32,
     pub render_layers: u32,
 }

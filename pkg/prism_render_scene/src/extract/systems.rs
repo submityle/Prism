@@ -2,11 +2,12 @@ use bevy_camera::primitives::Aabb;
 use bevy_ecs::{lifecycle::RemovedComponents, prelude::*};
 use bevy_math::{Affine3, Affine3Ext as _};
 use bevy_mesh::Mesh3d;
+use bevy_pbr::{MeshMaterial3d, StandardMaterial};
 use bevy_render::{sync_world::RenderEntity, Extract};
 use bevy_transform::components::GlobalTransform;
 use prism_render_architecture::gpu_scene::{
-    GeometryHandle, InstanceRecord, SceneApplyError, SceneBounds, SceneOperation,
-    SceneTransactionBuilder, SceneTransform,
+    GeometryHandle, InstanceRecord, SceneApplyError, SceneBounds, SceneMaterialHandle,
+    SceneOperation, SceneTransactionBuilder, SceneTransform,
 };
 
 use super::lifecycle::ExtractionClock;
@@ -32,6 +33,7 @@ pub(crate) fn extract_scene_instances(
                 &GlobalTransform,
                 Option<&Aabb>,
                 &Mesh3d,
+                Option<&MeshMaterial3d<StandardMaterial>>,
             ),
             (
                 With<PrismGpuSceneEntity>,
@@ -40,6 +42,7 @@ pub(crate) fn extract_scene_instances(
                     Changed<GlobalTransform>,
                     Changed<Aabb>,
                     Changed<Mesh3d>,
+                    Changed<MeshMaterial3d<StandardMaterial>>,
                 )>,
             ),
         >,
@@ -57,7 +60,7 @@ pub(crate) fn extract_scene_instances(
         }
     }
 
-    for (render_entity, config, transform, bounds, mesh) in &changed {
+    for (render_entity, config, transform, bounds, mesh, material) in &changed {
         let update = ExtractedSceneInstance {
             handle: None,
             transform: *transform,
@@ -65,6 +68,7 @@ pub(crate) fn extract_scene_instances(
             mesh: mesh.clone(),
             geometry: config.geometry,
             material: config.material,
+            material_asset: material.map(|material| material.0.id()),
             flags: config.flags,
             render_layers: if config.render_layers == 0 {
                 1
@@ -92,6 +96,7 @@ pub(crate) fn apply_extracted_scene_changes(
     upload_settings: Res<GpuSceneUploadSettings>,
     mut diagnostics: ResMut<GpuSceneDiagnostics>,
     mut clock: ResMut<ExtractionClock>,
+    materials: Res<crate::material::runtime::RenderMaterialRegistry>,
 ) {
     *diagnostics = GpuSceneDiagnostics {
         active_instances: scene.snapshot().instance_count,
@@ -145,7 +150,15 @@ pub(crate) fn apply_extracted_scene_changes(
         let geometry = extracted
             .geometry
             .unwrap_or_else(|| scene.geometry_for_mesh(extracted.mesh.id()));
-        let record = instance_record(&extracted, geometry);
+        let material = if extracted.material != SceneMaterialHandle::default() {
+            extracted.material
+        } else {
+            extracted
+                .material_asset
+                .and_then(|asset| materials.material_handle(asset))
+                .unwrap_or(prism_render_material::FALLBACK_MATERIAL_HANDLE)
+        };
+        let record = instance_record(&extracted, geometry, material);
         if scene.mirror().get(handle).is_some() {
             transaction
                 .push(SceneOperation::SetTransform {
@@ -244,7 +257,11 @@ pub(crate) fn apply_extracted_scene_changes(
     }
 }
 
-fn instance_record(extracted: &ExtractedSceneInstance, geometry: GeometryHandle) -> InstanceRecord {
+fn instance_record(
+    extracted: &ExtractedSceneInstance,
+    geometry: GeometryHandle,
+    material: SceneMaterialHandle,
+) -> InstanceRecord {
     let current_transform = scene_transform(extracted.transform);
     let bounds = extracted
         .bounds
@@ -266,7 +283,7 @@ fn instance_record(extracted: &ExtractedSceneInstance, geometry: GeometryHandle)
         previous_transform: current_transform,
         bounds,
         geometry,
-        material: extracted.material,
+        material,
         render_layers: extracted.render_layers,
         flags: extracted.flags,
     }

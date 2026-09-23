@@ -52,6 +52,9 @@ pub enum GpuSceneMode {
 
 impl Plugin for PrismGpuScenePlugin {
     fn build(&self, app: &mut App) {
+        if !app.is_plugin_added::<crate::material::PrismMaterialPlugin>() {
+            app.add_plugins(crate::material::PrismMaterialPlugin);
+        }
         embedded_asset!(app, "shaders/gpu_scene.wesl");
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
@@ -76,7 +79,13 @@ impl Plugin for PrismGpuScenePlugin {
             )
             .add_systems(
                 ExtractSchedule,
-                (extract_scene_instances, retire_unused_geometry),
+                (
+                    extract_scene_instances,
+                    crate::material::systems::invalidate_scene_materials
+                        .after(crate::material::systems::extract_standard_materials)
+                        .after(extract_scene_instances),
+                    retire_unused_geometry,
+                ),
             )
             .add_systems(
                 Render,
