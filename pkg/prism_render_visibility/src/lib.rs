@@ -12,6 +12,7 @@ mod binning;
 mod culling;
 mod diagnostics;
 mod lod;
+mod occlusion;
 mod output;
 mod view;
 mod work;
@@ -26,6 +27,7 @@ pub use binning::{
 pub use culling::{cull_view, CullReason, VisibilityInput};
 pub use diagnostics::VisibilityDiagnostics;
 pub use lod::{GeometryLod, GeometryLodChain, LodSelection};
+pub use occlusion::{HzbPhase, HzbTest};
 pub use output::{BufferRange, ViewVisibilityOutput, VisibilityFrame};
 pub use view::{GpuViewRecord, HistoryPolicy, ViewFlags, ViewHandle};
 pub use work::{GpuRenderWorkItem, RenderPassMask, VisibilityStageMask, WorkSortKey};
