@@ -1,5 +1,6 @@
 mod graph;
 mod plugin;
+mod raster;
 mod resources;
 mod runtime;
 

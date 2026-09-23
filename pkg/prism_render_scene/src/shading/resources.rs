@@ -5,6 +5,7 @@ use bevy_render::{
     render_resource::{TextureDescriptor, TextureDimension, TextureFormat, TextureUsages},
     renderer::RenderDevice,
     texture::{CachedTexture, TextureCache},
+    view::Msaa,
 };
 
 pub(crate) const VISIBILITY_ID_FORMAT: TextureFormat = TextureFormat::Rgba32Uint;
@@ -17,7 +18,7 @@ pub(crate) struct ViewVisibilityBuffer {
 }
 
 impl ViewVisibilityBuffer {
-    pub(crate) fn texture_views(
+    pub(crate) fn attachments(
         &self,
     ) -> (
         &bevy_render::render_resource::TextureView,
@@ -32,10 +33,15 @@ pub(crate) fn prepare_visibility_buffers(
     settings: Res<super::runtime::PrismShadingSettings>,
     mut texture_cache: ResMut<TextureCache>,
     device: Res<RenderDevice>,
-    views: Query<(Entity, &ExtractedCamera, Option<&ViewVisibilityBuffer>)>,
+    views: Query<(
+        Entity,
+        &ExtractedCamera,
+        Option<&Msaa>,
+        Option<&ViewVisibilityBuffer>,
+    )>,
 ) {
-    for (entity, camera, existing) in &views {
-        if !settings.enable_visibility_buffer {
+    for (entity, camera, msaa, existing) in &views {
+        if !settings.enable_visibility_buffer || msaa.is_some_and(|value| value.samples() != 1) {
             if existing.is_some() {
                 commands.entity(entity).remove::<ViewVisibilityBuffer>();
             }
@@ -45,7 +51,6 @@ pub(crate) fn prepare_visibility_buffers(
             continue;
         };
         if existing.is_some_and(|buffer| buffer.size == size) {
-            let _ = existing.map(ViewVisibilityBuffer::texture_views);
             continue;
         }
         let ids = texture_cache.get(
@@ -117,8 +122,14 @@ mod tests {
         };
         let source = include_str!("../shaders/visibility_raster.wesl");
         let source = source[source.find("struct GpuSceneInstance").unwrap()..]
-            .replace("bevy_render::utils::decompress_vertex_position", "decompress_vertex_position")
-            .replace("@builtin(barycentric) barycentrics: vec3<f32>", "@location(5) barycentrics: vec3<f32>");
+            .replace(
+                "bevy_render::utils::decompress_vertex_position",
+                "decompress_vertex_position",
+            )
+            .replace(
+                "@builtin(barycentric) barycentrics: vec3<f32>",
+                "@location(5) barycentrics: vec3<f32>",
+            );
         let stubs = r#"
 fn affine3_to_square(value: mat3x4<f32>) -> mat4x4<f32> {
     return mat4x4<f32>(
@@ -134,7 +145,10 @@ fn decompress_vertex_position(position: vec4<f32>, center: vec3<f32>, half_exten
         let mut cache = ShaderCache::new((), load_source);
         cache.set_shader(
             shader_id,
-            Shader::from_wesl(format!("{stubs}{source}"), "shaders/prism_visibility_raster.wesl"),
+            Shader::from_wesl(
+                format!("{stubs}{source}"),
+                "shaders/prism_visibility_raster.wesl",
+            ),
         );
         cache
             .get(0, shader_id, &[])

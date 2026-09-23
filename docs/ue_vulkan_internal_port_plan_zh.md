@@ -392,6 +392,8 @@ same-frame late command 已不再复用 early atomic：代码现有独立 late h
 
 Two-phase HZB 已形成完整代码闭环：opaque indirect consumer 在 `hzb_occlusion` 开启时按 bin 依次消费互斥的 early/late streams；精确 stage mask 保证不重不漏，late counter、capacity、indexed/non-indexed 总数与 overflow 均进入异步 readback。CR 已消除一个关键调度竞争：统一 visibility compaction 从根 `RenderGraphSystems::Begin` 移入 per-view `Core3d`，顺序固定为 `previous-HZB → visibility compaction → early prepass → current-HZB → late compact`，并使用该视图的 retained identity 解析 output、bin 和 HZB offsets。这样 previous-HZB 的 deferred candidate 不会同时残留在 early stream，又在 late stream 重复绘制。这里的“完成”只指代码路径、静态契约和可观测性闭环；本轮按要求没有运行真实 GPU 项目，因此图像 parity、快速相机和性能门槛仍未取得证据。`hzb_occlusion` 与 opaque indirect 继续默认关闭，只有运行时验收通过后才毕业为生产路径。
 
+标准 Mesh Visibility Raster 已形成首个真实 graphics pass：独立 `Visibility3d` phase 在主 opaque pass 前写两个 `Rgba32Uint` target，ABI 覆盖 scene/material generational handle、primitive、LOD/cluster、coverage/flags 与 packed barycentrics。整数 attachment 以 invalid sentinel 清除，per-view queue 会剔除 stale/queue-failed entity；当前 direct fallback 消费统一 visibility 的 CPU reference work。ID buffer 固定 single-sample，MSAA view 会显式禁用该路径，未来以 TAA/TSR 抗锯齿。下一阶段仍是 GPU Material Classification、PBR/NPR compute resolve、HDR scene color 和 custom shading registry；在这些 consumer 与真实 Vulkan 图像/性能验收完成前，不声明 UE 画质等价。
+
 标准 opaque bootstrap 已从统一 work stream 取 opaque work，并绑定 Material ABI 三表；Bevy visibility list 只负责清理被移出的旧 phase item。该路径已验证 instance/material generation fallback，按 mesh layout 读取 world normal/UV，并消费 base color、emissive、metallic、roughness、reflectance、AO 形成最小 direct BRDF 骨架；相机向量来自真实 view uniform，法线采用逆转置矩阵以支持非均匀缩放。GPU indirect draw 的代码链路已经存在，但默认关闭并等待真实运行 parity；完整 clustered lights、IBL、阴影、纹理/法线、clearcoat/transmission、masked/NPR/custom 分类管线仍是下一层实现。
 
 ## 9. TSR 移植包
