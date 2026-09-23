@@ -2,11 +2,17 @@ use bevy_ecs::prelude::*;
 use bevy_image::ToExtents;
 use bevy_render::{
     camera::ExtractedCamera,
-    render_resource::{TextureDescriptor, TextureDimension, TextureFormat, TextureUsages},
+    render_resource::{
+        BindGroup, Buffer, BufferDescriptor, BufferUsages, TextureDescriptor, TextureDimension,
+        TextureFormat, TextureUsages,
+    },
     renderer::RenderDevice,
     texture::{CachedTexture, TextureCache},
     view::Msaa,
 };
+use prism_render_shading::{ShadingWorkItem, MAX_SHADING_CLASSES};
+
+use super::classification_gpu::{GpuShadingDispatchArgs, GpuShadingPixelClass};
 
 pub(crate) const VISIBILITY_ID_FORMAT: TextureFormat = TextureFormat::Rgba32Uint;
 
@@ -26,6 +32,99 @@ impl ViewVisibilityBuffer {
     ) {
         (&self.ids.default_view, &self.metadata.default_view)
     }
+}
+
+#[derive(Component)]
+pub(crate) struct ViewShadingBuffers {
+    pub(crate) pixel_classes: Buffer,
+    pub(crate) work_items: Buffer,
+    pub(crate) class_counts: Buffer,
+    pub(crate) class_offsets: Buffer,
+    pub(crate) class_cursors: Buffer,
+    pub(crate) dispatch_args: Buffer,
+    pub(crate) diagnostics: Buffer,
+    pub(crate) input_bind_group: Option<BindGroup>,
+    pub(crate) output_bind_group: Option<BindGroup>,
+    pub(crate) size: bevy_math::UVec2,
+    pub(crate) capacity: u32,
+}
+
+impl ViewShadingBuffers {
+    fn new(device: &RenderDevice, size: bevy_math::UVec2) -> Self {
+        let capacity = size.x.saturating_mul(size.y).max(1);
+        Self {
+            pixel_classes: storage_buffer::<GpuShadingPixelClass>(
+                device,
+                "prism pixel classes",
+                capacity,
+                false,
+            ),
+            work_items: storage_buffer::<ShadingWorkItem>(
+                device,
+                "prism shading work",
+                capacity,
+                false,
+            ),
+            class_counts: storage_buffer::<u32>(
+                device,
+                "prism class counts",
+                MAX_SHADING_CLASSES as u32,
+                false,
+            ),
+            class_offsets: storage_buffer::<u32>(
+                device,
+                "prism class offsets",
+                MAX_SHADING_CLASSES as u32,
+                false,
+            ),
+            class_cursors: storage_buffer::<u32>(
+                device,
+                "prism class cursors",
+                MAX_SHADING_CLASSES as u32,
+                false,
+            ),
+            dispatch_args: storage_buffer::<GpuShadingDispatchArgs>(
+                device,
+                "prism shading dispatch",
+                MAX_SHADING_CLASSES as u32,
+                true,
+            ),
+            diagnostics: storage_buffer::<u32>(device, "prism classification diagnostics", 4, true),
+            input_bind_group: None,
+            output_bind_group: None,
+            size,
+            capacity,
+        }
+    }
+
+    pub(crate) fn clear_transient_state(
+        &self,
+        encoder: &mut bevy_render::render_resource::CommandEncoder,
+    ) {
+        encoder.clear_buffer(&self.class_counts, 0, None);
+        encoder.clear_buffer(&self.class_offsets, 0, None);
+        encoder.clear_buffer(&self.class_cursors, 0, None);
+        encoder.clear_buffer(&self.dispatch_args, 0, None);
+        encoder.clear_buffer(&self.diagnostics, 0, None);
+    }
+}
+
+fn storage_buffer<T>(
+    device: &RenderDevice,
+    label: &'static str,
+    elements: u32,
+    indirect: bool,
+) -> Buffer {
+    let mut usage = BufferUsages::STORAGE | BufferUsages::COPY_DST;
+    if indirect {
+        usage |= BufferUsages::INDIRECT | BufferUsages::COPY_SRC;
+    }
+    device.create_buffer(&BufferDescriptor {
+        label: Some(label),
+        size: (elements.max(1) as u64).saturating_mul(size_of::<T>() as u64),
+        usage,
+        mapped_at_creation: false,
+    })
 }
 
 pub(crate) fn prepare_visibility_buffers(
@@ -88,6 +187,39 @@ pub(crate) fn prepare_visibility_buffers(
             metadata,
             size,
         });
+    }
+}
+
+pub(crate) fn prepare_shading_buffers(
+    mut commands: Commands,
+    settings: Res<super::runtime::PrismShadingSettings>,
+    device: Res<RenderDevice>,
+    views: Query<(
+        Entity,
+        &ExtractedCamera,
+        Option<&Msaa>,
+        Option<&ViewShadingBuffers>,
+    )>,
+) {
+    for (entity, camera, msaa, existing) in &views {
+        if !settings.enable_visibility_buffer || msaa.is_some_and(|value| value.samples() != 1) {
+            if existing.is_some() {
+                commands.entity(entity).remove::<ViewShadingBuffers>();
+            }
+            continue;
+        }
+        let Some(size) = camera.physical_viewport_size else {
+            if existing.is_some() {
+                commands.entity(entity).remove::<ViewShadingBuffers>();
+            }
+            continue;
+        };
+        if existing.is_some_and(|buffers| buffers.size == size) {
+            continue;
+        }
+        commands
+            .entity(entity)
+            .insert(ViewShadingBuffers::new(&device, size));
     }
 }
 

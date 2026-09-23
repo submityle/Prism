@@ -17,8 +17,41 @@ pub(crate) fn shading_frame_graph() -> GpuFrameGraphBuilder {
         "visibility_metadata",
         ResourceLifetime::Transient,
     );
-    let classification = resource(&mut graph, "material_classification", ResourceLifetime::Transient);
-    let indirect_dispatch = resource(&mut graph, "shading_indirect_dispatch", ResourceLifetime::Transient);
+    let pixel_classification = resource(
+        &mut graph,
+        "material_pixel_classification",
+        ResourceLifetime::Transient,
+    );
+    let shading_work = resource(
+        &mut graph,
+        "material_shading_work",
+        ResourceLifetime::Transient,
+    );
+    let class_counts = resource(
+        &mut graph,
+        "material_class_counts",
+        ResourceLifetime::Transient,
+    );
+    let class_offsets = resource(
+        &mut graph,
+        "material_class_offsets",
+        ResourceLifetime::Transient,
+    );
+    let class_cursors = resource(
+        &mut graph,
+        "material_class_cursors",
+        ResourceLifetime::Transient,
+    );
+    let classification_diagnostics = resource(
+        &mut graph,
+        "material_classification_diagnostics",
+        ResourceLifetime::Transient,
+    );
+    let indirect_dispatch = resource(
+        &mut graph,
+        "shading_indirect_dispatch",
+        ResourceLifetime::Transient,
+    );
     let scene_color = resource(&mut graph, "hdr_scene_color", ResourceLifetime::Imported);
 
     let raster = graph.add_pass(PassDescriptor {
@@ -37,16 +70,41 @@ pub(crate) fn shading_frame_graph() -> GpuFrameGraphBuilder {
         depends_on: vec![],
     });
     let classify = graph.add_pass(PassDescriptor {
-        name: "material_classification".into(),
+        name: "material_classification_count".into(),
         queue: QueueClass::Compute,
         accesses: vec![
-            access(visibility_ids, AccessKind::StorageRead),
-            access(visibility_metadata, AccessKind::StorageRead),
+            access(visibility_ids, AccessKind::SampledRead),
+            access(visibility_metadata, AccessKind::SampledRead),
             access(materials, AccessKind::StorageRead),
-            access(classification, AccessKind::StorageWrite),
-            access(indirect_dispatch, AccessKind::StorageWrite),
+            access(pixel_classification, AccessKind::StorageWrite),
+            access(class_counts, AccessKind::StorageWrite),
+            access(classification_diagnostics, AccessKind::StorageWrite),
         ],
         depends_on: vec![raster],
+    });
+    let prefix = graph.add_pass(PassDescriptor {
+        name: "material_classification_prefix".into(),
+        queue: QueueClass::Compute,
+        accesses: vec![
+            access(class_counts, AccessKind::StorageRead),
+            access(class_offsets, AccessKind::StorageWrite),
+            access(class_cursors, AccessKind::StorageWrite),
+            access(indirect_dispatch, AccessKind::StorageWrite),
+        ],
+        depends_on: vec![classify],
+    });
+    let scatter = graph.add_pass(PassDescriptor {
+        name: "material_classification_scatter".into(),
+        queue: QueueClass::Compute,
+        accesses: vec![
+            // Scatter also writes each accepted pixel's compact work index.
+            access(pixel_classification, AccessKind::StorageWrite),
+            access(class_offsets, AccessKind::StorageRead),
+            access(class_cursors, AccessKind::StorageWrite),
+            access(shading_work, AccessKind::StorageWrite),
+            access(classification_diagnostics, AccessKind::StorageWrite),
+        ],
+        depends_on: vec![prefix],
     });
     graph.add_pass(PassDescriptor {
         name: "shading_resolve".into(),
@@ -58,11 +116,11 @@ pub(crate) fn shading_frame_graph() -> GpuFrameGraphBuilder {
             access(scene, AccessKind::StorageRead),
             access(geometry, AccessKind::StorageRead),
             access(materials, AccessKind::StorageRead),
-            access(classification, AccessKind::StorageRead),
+            access(shading_work, AccessKind::StorageRead),
             access(indirect_dispatch, AccessKind::IndirectRead),
             access(scene_color, AccessKind::StorageWrite),
         ],
-        depends_on: vec![classify],
+        depends_on: vec![scatter],
     });
     graph
 }
@@ -95,7 +153,7 @@ mod tests {
     fn shading_graph_orders_raster_classification_and_resolve_hazards() {
         let graph = shading_frame_graph();
         let compiled = graph.compile().unwrap();
-        assert_eq!(compiled.execution_order.len(), 3);
+        assert_eq!(compiled.execution_order.len(), 5);
         assert_eq!(graph.passes()[0].name, "visibility_raster");
         assert_eq!(
             graph
@@ -105,8 +163,49 @@ mod tests {
                 .count(),
             2
         );
-        assert_eq!(graph.passes()[1].depends_on, [prism_render_architecture::frame_graph::PassId(0)]);
-        assert_eq!(graph.passes()[2].depends_on, [prism_render_architecture::frame_graph::PassId(1)]);
-        assert!(compiled.barriers.iter().any(|barrier| barrier.queue_transfer));
+        assert_eq!(
+            graph.passes()[1].depends_on,
+            [prism_render_architecture::frame_graph::PassId(0)]
+        );
+        assert_eq!(
+            graph.passes()[2].depends_on,
+            [prism_render_architecture::frame_graph::PassId(1)]
+        );
+        assert_eq!(
+            graph.passes()[3].depends_on,
+            [prism_render_architecture::frame_graph::PassId(2)]
+        );
+        assert_eq!(
+            graph.passes()[4].depends_on,
+            [prism_render_architecture::frame_graph::PassId(3)]
+        );
+        assert!(compiled
+            .barriers
+            .iter()
+            .any(|barrier| barrier.queue_transfer));
+        let resource = |name: &str| {
+            prism_render_architecture::frame_graph::ResourceId(
+                graph
+                    .resources()
+                    .iter()
+                    .position(|resource| resource.name == name)
+                    .unwrap() as u32,
+            )
+        };
+        let has_barrier = |name: &str, source: u32, destination: u32| {
+            compiled.barriers.iter().any(|barrier| {
+                barrier.resource == resource(name)
+                    && barrier.source == prism_render_architecture::frame_graph::PassId(source)
+                    && barrier.destination
+                        == prism_render_architecture::frame_graph::PassId(destination)
+            })
+        };
+        assert!(has_barrier("visibility_ids", 0, 1));
+        assert!(has_barrier("material_class_counts", 1, 2));
+        assert!(has_barrier("material_pixel_classification", 1, 3));
+        assert!(has_barrier("material_class_offsets", 2, 3));
+        assert!(has_barrier("material_class_cursors", 2, 3));
+        assert!(has_barrier("material_shading_work", 3, 4));
+        assert!(has_barrier("shading_indirect_dispatch", 2, 4));
     }
 }

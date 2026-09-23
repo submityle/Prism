@@ -51,7 +51,7 @@ pub(crate) fn prepare_shading_work(
     materials: Res<super::super::material::runtime::RenderMaterialRegistry>,
     mut diagnostics: ResMut<PrismShadingDiagnostics>,
 ) {
-    debug_assert_eq!(frame_graph.compiled.execution_order.len(), 3);
+    debug_assert_eq!(frame_graph.compiled.execution_order.len(), 5);
     *diagnostics = shading_diagnostics(
         &settings,
         diagnostics.native_barycentrics,
@@ -71,7 +71,8 @@ fn shading_diagnostics(
 ) -> PrismShadingDiagnostics {
     let mut diagnostics = PrismShadingDiagnostics {
         visibility_buffer_active: settings.enable_visibility_buffer,
-        compute_resolve_active: settings.enable_visibility_buffer && settings.enable_compute_resolve,
+        compute_resolve_active: settings.enable_visibility_buffer
+            && settings.enable_compute_resolve,
         native_barycentrics,
         ..Default::default()
     };
@@ -83,12 +84,14 @@ fn shading_diagnostics(
         };
         match classify_material_header(&header) {
             Ok(class) => {
-                diagnostics.classified_materials = diagnostics.classified_materials.saturating_add(1);
+                diagnostics.classified_materials =
+                    diagnostics.classified_materials.saturating_add(1);
                 diagnostics.class_counts[class.index()] =
                     diagnostics.class_counts[class.index()].saturating_add(1);
             }
             Err(_) => {
-                diagnostics.unsupported_materials = diagnostics.unsupported_materials.saturating_add(1);
+                diagnostics.unsupported_materials =
+                    diagnostics.unsupported_materials.saturating_add(1);
             }
         }
     }
@@ -109,7 +112,8 @@ mod tests {
         };
         let diagnostics = PrismShadingDiagnostics {
             visibility_buffer_active: settings.enable_visibility_buffer,
-            compute_resolve_active: settings.enable_visibility_buffer && settings.enable_compute_resolve,
+            compute_resolve_active: settings.enable_visibility_buffer
+                && settings.enable_compute_resolve,
             ..Default::default()
         };
         assert!(!diagnostics.compute_resolve_active);
@@ -133,8 +137,14 @@ mod tests {
 
         assert_eq!(diagnostics.visible_work_items, 4);
         assert_eq!(diagnostics.classified_materials, 2);
-        assert_eq!(diagnostics.class_counts[MaterialShadingClass::Principled.index()], 1);
-        assert_eq!(diagnostics.class_counts[MaterialShadingClass::Npr.index()], 1);
+        assert_eq!(
+            diagnostics.class_counts[MaterialShadingClass::Principled.index()],
+            1
+        );
+        assert_eq!(
+            diagnostics.class_counts[MaterialShadingClass::Npr.index()],
+            1
+        );
         assert_eq!(diagnostics.unsupported_materials, 1);
         assert_eq!(diagnostics.stale_materials, 1);
         assert!(diagnostics.native_barycentrics);

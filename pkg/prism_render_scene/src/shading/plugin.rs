@@ -3,16 +3,21 @@ use bevy_asset::embedded_asset;
 use bevy_ecs::schedule::IntoScheduleConfigs;
 use bevy_pbr::MeshPipelineSystems;
 use bevy_render::{
-    render_phase::AddRenderCommand, Render, RenderApp, RenderStartup, RenderSystems,
+    init_gpu_resource, render_phase::AddRenderCommand, Render, RenderApp, RenderStartup,
+    RenderSystems,
 };
 
 use super::{
+    classification_gpu::{
+        dispatch_material_classification, init_material_classification_pipeline,
+        prepare_material_classification_bind_groups,
+    },
     graph::shading_frame_graph,
     raster::{
         init_visibility_raster, queue_visibility_raster, visibility_raster_pass,
         DrawVisibilityRaster, Visibility3d, VisibilityRasterPipeline,
     },
-    resources::prepare_visibility_buffers,
+    resources::{prepare_shading_buffers, prepare_visibility_buffers},
     runtime::{
         detect_shading_capabilities, prepare_shading_work, PrismShadingDiagnostics,
         PrismShadingSettings, ShadingFrameGraph,
@@ -24,6 +29,7 @@ pub struct PrismShadingPlugin;
 impl Plugin for PrismShadingPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "../shaders/visibility_raster.wesl");
+        embedded_asset!(app, "../shaders/material_classification.wesl");
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
@@ -43,7 +49,11 @@ impl Plugin for PrismShadingPlugin {
             .add_systems(RenderStartup, detect_shading_capabilities)
             .add_systems(
                 RenderStartup,
-                init_visibility_raster.after(MeshPipelineSystems),
+                (
+                    init_visibility_raster.after(MeshPipelineSystems),
+                    init_material_classification_pipeline
+                        .after(init_gpu_resource::<crate::MaterialBindGroup>),
+                ),
             )
             .add_systems(
                 Render,
@@ -52,12 +62,20 @@ impl Plugin for PrismShadingPlugin {
                         .after(super::super::visibility::systems::build_unified_visibility)
                         .in_set(RenderSystems::PrepareResources),
                     prepare_visibility_buffers.in_set(RenderSystems::PrepareResources),
+                    prepare_shading_buffers.in_set(RenderSystems::PrepareResources),
+                    prepare_material_classification_bind_groups
+                        .in_set(RenderSystems::PrepareBindGroups),
                     queue_visibility_raster.in_set(RenderSystems::QueueMeshes),
                 ),
             );
         render_app.add_systems(
             bevy_core_pipeline::Core3d,
-            visibility_raster_pass.before(bevy_core_pipeline::Core3dSystems::MainPass),
+            (
+                visibility_raster_pass.before(bevy_core_pipeline::Core3dSystems::MainPass),
+                dispatch_material_classification
+                    .after(visibility_raster_pass)
+                    .before(bevy_core_pipeline::Core3dSystems::MainPass),
+            ),
         );
     }
 }

@@ -55,7 +55,9 @@ impl ShadingWorkPlan {
     ) -> Self {
         let mut classified: [Vec<ShadingWorkItem>; MAX_SHADING_CLASSES] = Default::default();
         for (pixel_index, pixel) in pixels {
-            if !pixel.is_valid() || classified.iter().map(Vec::len).sum::<usize>() >= capacity as usize {
+            if !pixel.is_valid()
+                || classified.iter().map(Vec::len).sum::<usize>() >= capacity as usize
+            {
                 continue;
             }
             let Some(header) = materials.get(pixel.material_index as usize) else {
@@ -96,6 +98,8 @@ pub fn classify_material_header(
             || x == MaterialRenderClass::OpaqueTwoSided as u32
             || x == MaterialRenderClass::Masked as u32
             || x == MaterialRenderClass::MaskedTwoSided as u32
+            || x == MaterialRenderClass::Hair as u32
+            || x == MaterialRenderClass::Water as u32
             || x == MaterialRenderClass::NprOpaque as u32
             || x == MaterialRenderClass::CustomOpaque as u32
     ) {
@@ -124,10 +128,19 @@ mod tests {
     #[test]
     fn classifies_every_supported_model_without_per_asset_permutations() {
         for (model, class) in [
-            (MaterialShadingModel::Principled, MaterialShadingClass::Principled),
+            (
+                MaterialShadingModel::Principled,
+                MaterialShadingClass::Principled,
+            ),
             (MaterialShadingModel::Unlit, MaterialShadingClass::Unlit),
-            (MaterialShadingModel::Subsurface, MaterialShadingClass::Subsurface),
-            (MaterialShadingModel::ClearCoat, MaterialShadingClass::ClearCoat),
+            (
+                MaterialShadingModel::Subsurface,
+                MaterialShadingClass::Subsurface,
+            ),
+            (
+                MaterialShadingModel::ClearCoat,
+                MaterialShadingClass::ClearCoat,
+            ),
             (MaterialShadingModel::Cloth, MaterialShadingClass::Cloth),
             (MaterialShadingModel::Hair, MaterialShadingClass::Hair),
             (MaterialShadingModel::Water, MaterialShadingClass::Water),
@@ -141,6 +154,27 @@ mod tests {
     }
 
     #[test]
+    fn hair_and_water_surface_render_classes_are_classifiable() {
+        for (model, render_class, expected) in [
+            (
+                MaterialShadingModel::Hair,
+                MaterialRenderClass::Hair,
+                MaterialShadingClass::Hair,
+            ),
+            (
+                MaterialShadingModel::Water,
+                MaterialRenderClass::Water,
+                MaterialShadingClass::Water,
+            ),
+        ] {
+            let mut header = fallback_material_header(1);
+            header.shading_model = model as u32;
+            header.render_class = render_class as u32;
+            assert_eq!(classify_material_header(&header), Ok(expected));
+        }
+    }
+
+    #[test]
     fn work_plan_is_class_contiguous_and_generation_safe() {
         let mut pbr = fallback_material_header(1);
         pbr.generation = 2;
@@ -150,7 +184,10 @@ mod tests {
         npr.render_class = MaterialRenderClass::NprOpaque as u32;
         let pixel = |material: GenerationalHandle| {
             super::super::VisibilityPixel::new(
-                GenerationalHandle { index: 1, generation: 1 },
+                GenerationalHandle {
+                    index: 1,
+                    generation: 1,
+                },
                 0,
                 0,
                 material,
@@ -161,9 +198,27 @@ mod tests {
         };
         let plan = ShadingWorkPlan::build(
             [
-                (9, pixel(GenerationalHandle { index: 1, generation: 4 })),
-                (3, pixel(GenerationalHandle { index: 0, generation: 2 })),
-                (7, pixel(GenerationalHandle { index: 1, generation: 3 })),
+                (
+                    9,
+                    pixel(GenerationalHandle {
+                        index: 1,
+                        generation: 4,
+                    }),
+                ),
+                (
+                    3,
+                    pixel(GenerationalHandle {
+                        index: 0,
+                        generation: 2,
+                    }),
+                ),
+                (
+                    7,
+                    pixel(GenerationalHandle {
+                        index: 1,
+                        generation: 3,
+                    }),
+                ),
             ],
             &[pbr, npr],
             8,
