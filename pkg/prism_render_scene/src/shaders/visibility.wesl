@@ -193,6 +193,12 @@ fn cull_instances(@builtin(global_invocation_id) id: vec3<u32>) {
         atomicAdd(&counters[dispatch.view_index].overflow_count, 1u);
         return;
     }
+    if draw_bins[bin_index].geometry_index != instance.geometry_index
+        || draw_bins[bin_index].geometry_generation != instance.geometry_generation {
+        atomicAdd(&counters[dispatch.view_index].overflow_count, 1u);
+        atomicStore(&overflow[dispatch.view_index], 1u);
+        return;
+    }
     let bin_local = atomicAdd(&draw_bins[bin_index].command_count, 1u);
     let output = dispatch.output_start + draw_bins[bin_index].command_start + bin_local;
     if bin_local >= draw_bins[bin_index].command_capacity {

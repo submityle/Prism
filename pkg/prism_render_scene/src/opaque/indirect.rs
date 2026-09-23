@@ -81,6 +81,9 @@ impl RenderCommand<Opaque3d> for DrawGpuSceneIndirectBin {
         let Some(bin) = view_bins.bins.iter().find(|bin| bin.representative_scene == handle) else {
             return RenderCommandResult::Skip;
         };
+        if bin.key.pass_mask & prism_render_visibility::RenderPassMask::OPAQUE.0 == 0 {
+            return RenderCommandResult::Skip;
+        }
         let meshes = meshes.into_inner();
         let instances = instances.into_inner();
         let allocator = allocator.into_inner();
