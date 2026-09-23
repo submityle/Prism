@@ -1,3 +1,4 @@
+mod graph;
 mod plugin;
 mod runtime;
 

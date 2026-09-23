@@ -29,12 +29,19 @@ pub struct PrismShadingDiagnostics {
     pub compute_resolve_active: bool,
 }
 
+#[derive(Resource)]
+pub(crate) struct ShadingFrameGraph {
+    pub(crate) compiled: prism_render_architecture::frame_graph::CompiledGpuFrameGraph,
+}
+
 pub(crate) fn prepare_shading_work(
     settings: Res<PrismShadingSettings>,
+    frame_graph: Res<ShadingFrameGraph>,
     visibility: Res<super::super::visibility::runtime::UnifiedVisibilityState>,
     materials: Res<super::super::material::runtime::RenderMaterialRegistry>,
     mut diagnostics: ResMut<PrismShadingDiagnostics>,
 ) {
+    debug_assert_eq!(frame_graph.compiled.execution_order.len(), 3);
     *diagnostics = shading_diagnostics(
         &settings,
         visibility.frame.work_items.iter().map(|work| {
