@@ -20,7 +20,7 @@ pub(crate) type DrawGpuSceneOpaque = (
     SetMeshViewEmptyBindGroup<1>,
     SetGpuSceneBindGroup<2>,
     SetMaterialBindGroup<3>,
-    DrawGpuSceneMesh,
+    super::indirect::DrawGpuSceneIndirectBin,
 );
 
 pub(crate) struct SetGpuSceneBindGroup<const I: usize>;
@@ -67,42 +67,28 @@ impl<const I: usize> RenderCommand<Opaque3d> for SetMaterialBindGroup<I> {
     }
 }
 
-pub(crate) struct DrawGpuSceneMesh;
-
-impl RenderCommand<Opaque3d> for DrawGpuSceneMesh {
-    type Param = (
-        SRes<RenderAssets<RenderMesh>>,
-        SRes<RenderMeshInstances>,
-        SRes<MeshAllocator>,
-    );
-    type ViewQuery = ();
-    type ItemQuery = &'static GpuSceneInstanceAddress;
-
-    fn render<'w>(
-        item: &Opaque3d,
-        _: (),
-        address: Option<ROQueryItem<'w, '_, Self::ItemQuery>>,
-        (meshes, instances, allocator): SystemParamItem<'w, '_, Self::Param>,
-        pass: &mut TrackedRenderPass<'w>,
-    ) -> RenderCommandResult {
+pub(super) fn draw_direct_mesh<'w>(
+    item: &Opaque3d,
+    address: Option<ROQueryItem<'w, '_, &'static GpuSceneInstanceAddress>>,
+    meshes: &'w RenderAssets<RenderMesh>,
+    instances: &'w RenderMeshInstances,
+    allocator: &'w MeshAllocator,
+    pass: &mut TrackedRenderPass<'w>,
+) -> RenderCommandResult {
         let Some(address) = address else {
             return RenderCommandResult::Skip;
         };
         let Some(mesh_id) = instances.mesh_asset_id(item.main_entity()) else {
             return RenderCommandResult::Skip;
         };
-        let Some(mesh) = meshes.into_inner().get(mesh_id) else {
+        let Some(mesh) = meshes.get(mesh_id) else {
             return RenderCommandResult::Skip;
         };
-        let allocator = allocator.into_inner();
         let Some(vertices) = allocator.mesh_vertex_slice(&mesh_id) else {
             return RenderCommandResult::Skip;
         };
-        pass.set_immediates(
-            0,
-            bytemuck::cast_slice(&[address.index, address.generation]),
-        );
         pass.set_vertex_buffer(0, vertices.buffer.slice(..));
+        let instances = address.index..address.index.saturating_add(1);
         match mesh.buffer_info {
             RenderMeshBufferInfo::Indexed {
                 index_format,
@@ -115,11 +101,10 @@ impl RenderCommand<Opaque3d> for DrawGpuSceneMesh {
                 pass.draw_indexed(
                     indices.range.start..indices.range.start + count,
                     vertices.range.start as i32,
-                    0..1,
+                    instances,
                 );
             }
-            RenderMeshBufferInfo::NonIndexed => pass.draw(vertices.range, 0..1),
+            RenderMeshBufferInfo::NonIndexed => pass.draw(vertices.range, instances),
         }
         RenderCommandResult::Success
-    }
 }

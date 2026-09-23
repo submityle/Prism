@@ -38,9 +38,6 @@ struct MaterialTexture { index: u32, generation: u32, semantic: u32, sampler_ind
 @group(3) @binding(1) var<storage, read> material_parameters: array<SurfaceParameters>;
 @group(3) @binding(2) var<storage, read> material_textures: array<MaterialTexture>;
 
-struct SceneAddress { index: u32, generation: u32 }
-var<immediate> scene_address: SceneAddress;
-
 fn inverse_transpose_3x3(value: mat3x3<f32>) -> mat3x3<f32> {
     let x = cross(value[1], value[2]);
     let y = cross(value[2], value[0]);
@@ -53,6 +50,7 @@ fn inverse_transpose_3x3(value: mat3x3<f32>) -> mat3x3<f32> {
 }
 
 struct Vertex {
+    @builtin(instance_index) instance_index: u32,
     @if(VERTEX_POSITIONS_COMPRESSED)
     @location(0) compressed_position: vec4<f32>,
     @else
@@ -75,10 +73,13 @@ struct VertexOutput {
 
 @vertex
 fn vertex(vertex: Vertex) -> VertexOutput {
-    let instance = scene_instances[scene_address.index];
-    let valid = instance.is_active != 0u && instance.generation == scene_address.generation;
+    let scene_index = vertex.instance_index;
+    let scene_in_bounds = scene_index < arrayLength(&scene_instances);
+    let safe_scene_index = select(0u, scene_index, scene_in_bounds);
+    let instance = scene_instances[safe_scene_index];
+    let valid = scene_in_bounds && instance.is_active != 0u && instance.generation != 0u;
     @if(VERTEX_POSITIONS_COMPRESSED) {
-        let bounds = scene_bounds[scene_address.index];
+        let bounds = scene_bounds[safe_scene_index];
         let position = bevy_render::utils::decompress_vertex_position(
             vertex.compressed_position,
             bounds.center_radius.xyz,
@@ -88,7 +89,7 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         let position = vertex.position;
     }
     let world_from_local = affine3_to_square(
-        scene_current_transforms[scene_address.index].world_from_local
+        scene_current_transforms[safe_scene_index].world_from_local
     );
     var out: VertexOutput;
     let world_position = (world_from_local * vec4(position, 1.0)).xyz;
@@ -128,15 +129,15 @@ fn vertex(vertex: Vertex) -> VertexOutput {
             && material_header.parameter_offset < arrayLength(&material_parameters),
     );
     let id_color = vec3<f32>(
-        f32((scene_address.index * 97u) & 255u),
-        f32((scene_address.index * 57u) & 255u),
-        f32((scene_address.index * 17u) & 255u),
+        f32((safe_scene_index * 97u) & 255u),
+        f32((safe_scene_index * 57u) & 255u),
+        f32((safe_scene_index * 17u) & 255u),
     ) / 255.0;
     @if(PRISM_DEBUG_VIEW_1) { out.debug_color = id_color; }
     @else if(PRISM_DEBUG_VIEW_2) { out.debug_color = vec3<f32>(f32(instance.geometry_index & 255u) / 255.0, 0.2, 0.8); }
     @else if(PRISM_DEBUG_VIEW_3) { out.debug_color = vec3<f32>(0.8, f32(instance.material_index & 255u) / 255.0, 0.2); }
     @else if(PRISM_DEBUG_VIEW_4) {
-        let previous = affine3_to_square(scene_previous_transforms[scene_address.index].world_from_local);
+        let previous = affine3_to_square(scene_previous_transforms[safe_scene_index].world_from_local);
         out.debug_color = abs((world_from_local[3] - previous[3]).xyz);
     } @else {
         let header = material_headers[out.material_index];

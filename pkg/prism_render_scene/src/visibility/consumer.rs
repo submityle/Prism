@@ -44,6 +44,7 @@ impl UnifiedVisibilityReader<'_> {
             ranges,
             indexed_indirect,
             non_indexed_indirect,
+            draw_bins: self.buffers.draw_bin_buffer()?,
             version: self.buffers.version(),
         })
     }
@@ -63,5 +64,6 @@ pub struct UnifiedVisibilityBufferBindings<'a> {
     pub ranges: &'a Buffer,
     pub indexed_indirect: &'a Buffer,
     pub non_indexed_indirect: &'a Buffer,
+    pub draw_bins: &'a Buffer,
     pub version: u32,
 }

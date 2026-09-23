@@ -1,4 +1,5 @@
 mod draw;
+mod indirect;
 mod pipeline;
 mod queue;
 
@@ -24,6 +25,15 @@ pub struct GpuSceneOpaqueQueue;
 #[derive(bevy_ecs::resource::Resource, Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GpuSceneOpaqueEnabled(pub bool);
 
+#[derive(bevy_ecs::resource::Resource, Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GpuSceneOpaqueIndirectEnabled(pub bool);
+
+impl Default for GpuSceneOpaqueIndirectEnabled {
+    fn default() -> Self {
+        Self(true)
+    }
+}
+
 impl Default for GpuSceneOpaqueEnabled {
     fn default() -> Self {
         Self(true)
@@ -47,6 +57,7 @@ impl Plugin for PrismGpuSceneOpaquePlugin {
             .init_resource::<SpecializedMeshPipelines<GpuSceneOpaquePipeline>>()
             .init_resource::<GpuSceneDebugView>()
             .init_resource::<GpuSceneOpaqueEnabled>()
+            .init_resource::<GpuSceneOpaqueIndirectEnabled>()
             .add_render_command::<Opaque3d, DrawGpuSceneOpaque>()
             .add_systems(
                 RenderStartup,

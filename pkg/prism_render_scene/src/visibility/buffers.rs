@@ -227,6 +227,10 @@ impl UnifiedVisibilityBuffers {
     pub(crate) fn indirect(&self) -> Option<(&Buffer, &Buffer)> {
         Some((self.indexed_indirect.buffer()?, self.non_indexed_indirect.buffer()?))
     }
+
+    pub(crate) fn draw_bin_buffer(&self) -> Option<&Buffer> {
+        self.bin_headers.buffer()
+    }
 }
 
 #[cfg(test)]

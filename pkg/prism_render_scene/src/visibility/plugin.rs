@@ -39,6 +39,14 @@ impl Plugin for PrismVisibilityPlugin {
         let compiled_graph = visibility_frame_graph()
             .compile()
             .expect("Prism visibility frame graph must be valid");
+        let indirect_first_instance = render_app
+            .world()
+            .get_resource::<bevy_render::renderer::RenderDevice>()
+            .is_some_and(|device| {
+                device
+                    .features()
+                    .contains(bevy_render::render_resource::WgpuFeatures::INDIRECT_FIRST_INSTANCE)
+            });
         render_app
             .init_resource::<UnifiedVisibilityEnabled>()
             .init_resource::<UnifiedVisibilitySettings>()
@@ -47,6 +55,10 @@ impl Plugin for PrismVisibilityPlugin {
             .init_resource::<VisibilityParityReadback>()
             .insert_resource(VisibilityFrameGraph {
                 compiled: compiled_graph,
+            })
+            .insert_resource(UnifiedVisibilitySettings {
+                indirect_first_instance,
+                ..Default::default()
             })
             .add_systems(
                 RenderStartup,

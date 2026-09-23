@@ -33,7 +33,10 @@ pub use material::{
     MaterialBindGroup, MaterialBufferBindings, MaterialReader, PrismMaterialDiagnostics,
     PrismMaterialPlugin,
 };
-pub use opaque::{GpuSceneDebugView, GpuSceneOpaqueEnabled, PrismGpuSceneOpaquePlugin};
+pub use opaque::{
+    GpuSceneDebugView, GpuSceneOpaqueEnabled, GpuSceneOpaqueIndirectEnabled,
+    PrismGpuSceneOpaquePlugin,
+};
 pub use plugin::{GpuSceneMode, PrismGpuScenePlugin};
 pub use scene::RenderGpuScene;
 pub use visibility::{

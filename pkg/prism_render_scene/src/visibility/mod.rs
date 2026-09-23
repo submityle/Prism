@@ -1,4 +1,4 @@
-mod buffers;
+pub(crate) mod buffers;
 mod consumer;
 mod gpu;
 mod graph;

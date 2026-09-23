@@ -187,7 +187,7 @@ impl SpecializedMeshPipeline for GpuSceneOpaquePipeline {
                 self.scene_layout.clone(),
                 self.material_layout.clone(),
             ],
-            immediate_size: 8,
+            immediate_size: 0,
             vertex: VertexState {
                 shader: self.shader.clone(),
                 shader_defs: shader_defs.clone(),
