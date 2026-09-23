@@ -44,7 +44,7 @@ struct VisibilityWorkItem {
     geometry_index: u32, geometry_generation: u32,
     material_index: u32, material_generation: u32,
     lod_or_cluster: u32, pass_mask: u32,
-    sort_key_low: u32, sort_key_high: u32, padding: vec2<u32>,
+    visibility_stages: u32, sort_key_low: u32, sort_key_high: u32, padding: u32,
 }
 struct VisibilityRange { view_index: u32, view_generation: u32, start: u32, count: u32 }
 struct VisibilityCounter {
@@ -218,7 +218,7 @@ fn cull_instances(@builtin(global_invocation_id) id: vec3<u32>) {
         instance.geometry_index, instance.geometry_generation,
         material_index, instance.material_generation,
         geometry_lods[lod_index].level, pass_mask(material.render_class, instance.flags),
-        instance.geometry_index, material.render_class, vec2<u32>(0u),
+        1u, instance.geometry_index, material.render_class, 0u,
     );
     let lod = geometry_lods[lod_index];
     if history_index < dispatch.output_end && history_index < arrayLength(&previous_lods) {

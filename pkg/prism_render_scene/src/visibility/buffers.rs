@@ -318,6 +318,7 @@ mod tests {
             [prism_render_visibility::DrawBinCandidate {
                 scene: GenerationalHandle { index: 1, generation: 1 },
                 key,
+                visibility_stages: prism_render_visibility::VisibilityStageMask::EARLY,
             }],
         );
         let mut second = prism_render_visibility::build_view_draw_bins(
@@ -326,6 +327,7 @@ mod tests {
             [prism_render_visibility::DrawBinCandidate {
                 scene: GenerationalHandle { index: 2, generation: 1 },
                 key,
+                visibility_stages: prism_render_visibility::VisibilityStageMask::EARLY,
             }],
         );
         first.global_bin_start = 0;

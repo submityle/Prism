@@ -60,9 +60,10 @@ pub struct RenderVisibilityWorkItem {
     pub material_generation: u32,
     pub lod_or_cluster: u32,
     pub pass_mask: u32,
+    pub visibility_stages: u32,
     pub sort_key_low: u32,
     pub sort_key_high: u32,
-    pub _padding: [u32; 2],
+    pub _padding: u32,
 }
 impl_atomic_pod!(RenderVisibilityWorkItem, RenderVisibilityWorkItemBlob);
 
@@ -77,9 +78,10 @@ impl From<GpuRenderWorkItem> for RenderVisibilityWorkItem {
             material_generation: item.material.generation,
             lod_or_cluster: item.lod_or_cluster,
             pass_mask: item.pass_mask.0,
+            visibility_stages: item.visibility_stages.0,
             sort_key_low: item.sort_key.0 as u32,
             sort_key_high: (item.sort_key.0 >> 32) as u32,
-            _padding: [0; 2],
+            _padding: 0,
         }
     }
 }

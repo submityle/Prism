@@ -134,6 +134,7 @@ fn visibility_frame_sorts_work_and_publishes_ranges() {
         },
         lod_or_cluster: 0,
         pass_mask: RenderPassMask::OPAQUE,
+        visibility_stages: VisibilityStageMask::EARLY,
         sort_key: WorkSortKey(key as u64),
     };
     frame.push_view(

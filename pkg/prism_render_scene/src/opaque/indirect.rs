@@ -178,6 +178,7 @@ mod tests {
             [DrawBinCandidate {
                 scene: handle(1),
                 key,
+                visibility_stages: prism_render_visibility::VisibilityStageMask::EARLY,
             }],
         );
         let mut second = build_view_draw_bins(
@@ -186,6 +187,7 @@ mod tests {
             [DrawBinCandidate {
                 scene: handle(9),
                 key,
+                visibility_stages: prism_render_visibility::VisibilityStageMask::EARLY,
             }],
         );
         first.command_buffer_start = 0;

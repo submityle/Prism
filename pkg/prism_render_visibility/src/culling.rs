@@ -1,6 +1,6 @@
 use crate::{
     GeometryLodChain, GpuRenderWorkItem, GpuViewRecord, RenderPassMask, VisibilityDiagnostics,
-    WorkSortKey,
+    VisibilityStageMask, WorkSortKey,
 };
 use alloc::{
     collections::{BTreeMap, BTreeSet},
@@ -102,6 +102,7 @@ pub fn cull_view(
             material: instance.material,
             lod_or_cluster: lod.level as u32,
             pass_mask,
+            visibility_stages: VisibilityStageMask::EARLY,
             sort_key: WorkSortKey::new(
                 pass_class(material.render_class),
                 material.shading_model as u8,

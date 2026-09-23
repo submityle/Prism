@@ -28,7 +28,7 @@ pub use diagnostics::VisibilityDiagnostics;
 pub use lod::{GeometryLod, GeometryLodChain, LodSelection};
 pub use output::{BufferRange, ViewVisibilityOutput, VisibilityFrame};
 pub use view::{GpuViewRecord, HistoryPolicy, ViewFlags, ViewHandle};
-pub use work::{GpuRenderWorkItem, RenderPassMask, WorkSortKey};
+pub use work::{GpuRenderWorkItem, RenderPassMask, VisibilityStageMask, WorkSortKey};
 
 #[cfg(test)]
 mod tests;

@@ -21,6 +21,7 @@ pub struct DrawBinKey {
 pub struct DrawBinCandidate {
     pub scene: SceneHandle,
     pub key: DrawBinKey,
+    pub visibility_stages: crate::VisibilityStageMask,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -29,6 +30,7 @@ pub struct DrawBinRange {
     pub command_start: u32,
     pub command_capacity: u32,
     pub representative_scene: SceneHandle,
+    pub visibility_stages: crate::VisibilityStageMask,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -95,16 +97,19 @@ pub fn build_view_draw_bins(
     scene_capacity: u32,
     candidates: impl IntoIterator<Item = DrawBinCandidate>,
 ) -> ViewDrawBins {
-    let mut grouped = BTreeMap::<DrawBinKey, Vec<SceneHandle>>::new();
+    let mut grouped = BTreeMap::<DrawBinKey, Vec<(SceneHandle, crate::VisibilityStageMask)>>::new();
     for candidate in candidates {
-        grouped.entry(candidate.key).or_default().push(candidate.scene);
+        grouped
+            .entry(candidate.key)
+            .or_default()
+            .push((candidate.scene, candidate.visibility_stages));
     }
     let mut bins = Vec::with_capacity(grouped.len());
     let mut candidate_bins = vec![u32::MAX; scene_capacity as usize];
     let mut command_start = 0_u32;
     for (key, scenes) in grouped {
         let bin_index = bins.len() as u32;
-        for scene in &scenes {
+        for (scene, _) in &scenes {
             if let Some(slot) = candidate_bins.get_mut(scene.index as usize) {
                 *slot = bin_index;
             }
@@ -114,7 +119,10 @@ pub fn build_view_draw_bins(
             key,
             command_start,
             command_capacity,
-            representative_scene: scenes[0],
+            representative_scene: scenes[0].0,
+            visibility_stages: crate::VisibilityStageMask(
+                scenes.iter().fold(0, |mask, (_, stages)| mask | stages.0),
+            ),
         });
         command_start = command_start.saturating_add(command_capacity);
     }
@@ -157,14 +165,17 @@ mod tests {
                 DrawBinCandidate {
                     scene: handle(5),
                     key: key(2),
+                    visibility_stages: crate::VisibilityStageMask::EARLY,
                 },
                 DrawBinCandidate {
                     scene: handle(1),
                     key: key(1),
+                    visibility_stages: crate::VisibilityStageMask::EARLY,
                 },
                 DrawBinCandidate {
                     scene: handle(3),
                     key: key(2),
+                    visibility_stages: crate::VisibilityStageMask::LATE_RETEST,
                 },
             ],
         );

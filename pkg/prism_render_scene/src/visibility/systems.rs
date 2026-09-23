@@ -206,6 +206,7 @@ fn draw_bin_candidate(
             primitive_kind: lod.primitive_kind,
             pass_mask: work.pass_mask.0,
         },
+        visibility_stages: work.visibility_stages,
     })
 }
 
@@ -423,6 +424,7 @@ mod tests {
             material: stale_material,
             lod_or_cluster: 0,
             pass_mask: prism_render_visibility::RenderPassMask::OPAQUE,
+            visibility_stages: prism_render_visibility::VisibilityStageMask::EARLY,
             sort_key: prism_render_visibility::WorkSortKey::default(),
         };
         let candidate = draw_bin_candidate(&work, &geometries, &table).unwrap();

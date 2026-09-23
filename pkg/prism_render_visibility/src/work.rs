@@ -14,6 +14,23 @@ impl RenderPassMask {
     pub const PICKING: Self = Self(1 << 6);
     pub const OFFLINE: Self = Self(1 << 7);
 }
+
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct VisibilityStageMask(pub u32);
+
+impl VisibilityStageMask {
+    /// Passed previous-frame HZB (or was conservatively retained).
+    pub const EARLY: Self = Self(1 << 0);
+    /// Must be retested against current-frame HZB after the early depth pass.
+    pub const LATE_RETEST: Self = Self(1 << 1);
+    /// Passed current-frame HZB or could not be rejected safely.
+    pub const LATE_VISIBLE: Self = Self(1 << 2);
+
+    pub const fn contains(self, flag: Self) -> bool {
+        self.0 & flag.0 == flag.0
+    }
+}
 impl BitOr for RenderPassMask {
     type Output = Self;
     fn bitor(self, rhs: Self) -> Self {
@@ -56,5 +73,6 @@ pub struct GpuRenderWorkItem {
     pub material: SceneMaterialHandle,
     pub lod_or_cluster: u32,
     pub pass_mask: RenderPassMask,
+    pub visibility_stages: VisibilityStageMask,
     pub sort_key: WorkSortKey,
 }
