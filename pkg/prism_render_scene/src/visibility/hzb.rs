@@ -36,6 +36,7 @@ pub(crate) fn install_hzb_schedule(app: &mut SubApp) {
 /// history is consumed, and the entire path remains graduation-gated.
 fn dispatch_previous_hzb(
     current_view: bevy_render::renderer::ViewQuery<&bevy_render::view::ExtractedView>,
+    enabled: Res<super::runtime::UnifiedVisibilityEnabled>,
     history: Option<bevy_render::renderer::ViewQuery<&PrismViewHzbHistory>>,
     bindings: Option<bevy_render::renderer::ViewQuery<&super::hzb_gpu::HzbVisibilityBindGroup>>,
     settings: Res<super::runtime::UnifiedVisibilitySettings>,
@@ -58,7 +59,7 @@ fn dispatch_previous_hzb(
         return;
     };
     let history = history.into_inner();
-    if !settings.hzb_occlusion || !history.previous_valid {
+    if !super::runtime::hzb_runtime_gate(*enabled, &settings) || !history.previous_valid {
         return;
     }
     let Some(bind_group) = bindings
@@ -95,6 +96,7 @@ fn dispatch_previous_hzb(
 /// Missing resources keep all deferred candidates visible.
 fn dispatch_current_hzb(
     current_view: bevy_render::renderer::ViewQuery<&bevy_render::view::ExtractedView>,
+    enabled: Res<super::runtime::UnifiedVisibilityEnabled>,
     history: Option<bevy_render::renderer::ViewQuery<&PrismViewHzbHistory>>,
     bindings: Option<bevy_render::renderer::ViewQuery<&super::hzb_gpu::HzbVisibilityBindGroup>>,
     settings: Res<super::runtime::UnifiedVisibilitySettings>,
@@ -109,7 +111,7 @@ fn dispatch_current_hzb(
         return;
     };
     let active_count = buffers.active_count_in_range(output_start, candidate_count);
-    if !settings.hzb_occlusion {
+    if !super::runtime::hzb_runtime_gate(*enabled, &settings) {
         return;
     }
     let (Some(history), Some(bind_group), Some(compute_pipeline)) = (

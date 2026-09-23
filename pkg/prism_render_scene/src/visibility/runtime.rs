@@ -258,6 +258,13 @@ fn hzb_graduation_ready(
         && diagnostics.hzb_late_overflowed_bins == 0
 }
 
+pub(crate) fn hzb_runtime_gate(
+    enabled: UnifiedVisibilityEnabled,
+    settings: &UnifiedVisibilitySettings,
+) -> bool {
+    enabled.0 && settings.hzb_occlusion && settings.indirect_first_instance
+}
+
 #[cfg(test)]
 mod diagnostics_tests {
     use super::*;
@@ -278,5 +285,18 @@ mod diagnostics_tests {
         diagnostics.parity_mismatched_late_bin_counts = 1;
         diagnostics.refresh_hzb_graduation(&settings);
         assert!(!diagnostics.hzb_graduation_ready);
+    }
+
+    #[test]
+    fn hzb_runtime_requires_visibility_occlusion_and_indirect_identity() {
+        let mut settings = UnifiedVisibilitySettings {
+            hzb_occlusion: true,
+            indirect_first_instance: true,
+            ..Default::default()
+        };
+        assert!(hzb_runtime_gate(UnifiedVisibilityEnabled(true), &settings));
+        settings.indirect_first_instance = false;
+        assert!(!hzb_runtime_gate(UnifiedVisibilityEnabled(true), &settings));
+        assert!(!hzb_runtime_gate(UnifiedVisibilityEnabled(false), &settings));
     }
 }

@@ -26,6 +26,7 @@ impl RenderCommand<Opaque3d> for DrawGpuSceneIndirectBin {
         SRes<MeshAllocator>,
         SRes<UnifiedVisibilityState>,
         SRes<super::GpuSceneOpaqueIndirectEnabled>,
+        SRes<crate::visibility::runtime::UnifiedVisibilityEnabled>,
         SRes<crate::visibility::runtime::UnifiedVisibilitySettings>,
         SRes<crate::visibility::buffers::UnifiedVisibilityBuffers>,
         SRes<RenderGpuScene>,
@@ -37,11 +38,17 @@ impl RenderCommand<Opaque3d> for DrawGpuSceneIndirectBin {
         item: &Opaque3d,
         view: ROQueryItem<'w, '_, Self::ViewQuery>,
         address: Option<ROQueryItem<'w, '_, Self::ItemQuery>>,
-        (meshes, instances, allocator, visibility, enabled, settings, buffers, scene): SystemParamItem<
-            'w,
-            '_,
-            Self::Param,
-        >,
+        (
+            meshes,
+            instances,
+            allocator,
+            visibility,
+            enabled,
+            visibility_enabled,
+            settings,
+            buffers,
+            scene,
+        ): SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
         let indirect_capable = enabled.0
@@ -104,7 +111,10 @@ impl RenderCommand<Opaque3d> for DrawGpuSceneIndirectBin {
                     return RenderCommandResult::Skip;
                 };
                 pass.set_index_buffer(indices.buffer.slice(..), index_format);
-                for late in indirect_streams(settings.hzb_occlusion) {
+                for late in indirect_streams(crate::visibility::runtime::hzb_runtime_gate(
+                    *visibility_enabled,
+                    &settings,
+                )) {
                     let Some((indexed, _)) = buffers.indirect_for(late) else {
                         return RenderCommandResult::Skip;
                     };
@@ -116,7 +126,10 @@ impl RenderCommand<Opaque3d> for DrawGpuSceneIndirectBin {
                 }
             }
             RenderMeshBufferInfo::NonIndexed => {
-                for late in indirect_streams(settings.hzb_occlusion) {
+                for late in indirect_streams(crate::visibility::runtime::hzb_runtime_gate(
+                    *visibility_enabled,
+                    &settings,
+                )) {
                     let Some((_, non_indexed)) = buffers.indirect_for(late) else {
                         return RenderCommandResult::Skip;
                     };

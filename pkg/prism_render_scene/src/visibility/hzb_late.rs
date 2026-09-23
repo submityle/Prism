@@ -160,7 +160,7 @@ pub(crate) fn dispatch_hzb_late_compact(
     mut ctx: RenderContext,
     mut diagnostics: ResMut<super::runtime::PrismVisibilityDiagnostics>,
 ) {
-    if !enabled.0 || !settings.hzb_occlusion {
+    if !super::runtime::hzb_runtime_gate(*enabled, &settings) {
         return;
     }
     let retained = view.into_inner().retained_view_entity;
