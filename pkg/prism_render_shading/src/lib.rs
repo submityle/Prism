@@ -9,6 +9,7 @@
 extern crate alloc;
 
 mod classification;
+mod environment;
 mod lighting;
 mod punctual;
 mod resolve;
@@ -18,6 +19,9 @@ mod visibility;
 pub use classification::{
     classify_material_header, ClassificationError, MaterialShadingClass, ShadingWorkItem,
     ShadingWorkPlan, MAX_SHADING_CLASSES,
+};
+pub use environment::{
+    env_brdf_approx, evaluate_image_based_light, ImageBasedLight, SphericalHarmonicsL2,
 };
 pub use lighting::{
     evaluate_principled_direct, evaluate_toon_direct, linear_furnace_response, DirectLightSample,

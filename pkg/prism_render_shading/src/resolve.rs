@@ -9,7 +9,8 @@
 use prism_render_material::{GpuMaterialHeader, GpuSurfaceParameters};
 
 use crate::{
-    classify_material_header, reconstruct_surface, ClassificationError, DirectLightSample,
+    classify_material_header, evaluate_image_based_light, reconstruct_surface, ClassificationError,
+    DirectLightSample, ImageBasedLight,
     GpuShadingPrimitive, GpuShadingVertex, MaterialShadingClass, ShadingFrame, SurfaceReconstructionError,
     PunctualLight, SurfaceReconstructionFlags, SurfaceReconstructionInput, SurfaceSample,
     VisibilityPixel,
@@ -43,6 +44,9 @@ pub struct LightingEnvironment<'a> {
     pub directional: &'a [DirectionalLight],
     /// Punctual (point and spot) lights accumulated for every shading class.
     pub punctual: &'a [PunctualLight],
+    /// Optional image-based light supplying the indirect term.  When present it
+    /// replaces the constant [`Self::ambient`] approximation.
+    pub image_based: Option<ImageBasedLight>,
     /// Constant ambient irradiance approximating unresolved indirect light.
     pub ambient: [f32; 3],
     /// Quantization band count used by the non-photoreal toon path.
@@ -54,6 +58,7 @@ impl Default for LightingEnvironment<'_> {
         Self {
             directional: &[],
             punctual: &[],
+            image_based: None,
             ambient: [0.0; 3],
             toon_bands: 4,
         }
@@ -164,6 +169,13 @@ pub fn resolve_pixel(
         ..surface
     };
 
+    // Indirect term: prefer the image-based light when the view supplies an
+    // environment probe, otherwise fall back to the constant ambient term.
+    let indirect = match lights.image_based {
+        Some(image_based) => evaluate_image_based_light(lit_surface, frame, &image_based),
+        None => ambient_term(base_color, ambient_occlusion, lights.ambient, metallic),
+    };
+
     let color = match shading_class {
         // Unlit surfaces bypass the lighting integrator entirely.
         MaterialShadingClass::Unlit => add(base_color, emissive),
@@ -188,7 +200,7 @@ pub fn resolve_pixel(
                     );
                 }
             }
-            add(add(accumulated, ambient_term(base_color, ambient_occlusion, lights.ambient, metallic)), emissive)
+            add(add(accumulated, indirect), emissive)
         }
         // Principled is the physically based base shared by the remaining
         // lit closures; specialized subsurface/cloth/hair lobes extend it later.
@@ -208,7 +220,7 @@ pub fn resolve_pixel(
                     );
                 }
             }
-            add(add(accumulated, ambient_term(base_color, ambient_occlusion, lights.ambient, metallic)), emissive)
+            add(add(accumulated, indirect), emissive)
         }
     };
 
@@ -345,7 +357,7 @@ mod tests {
         };
         let resolved = resolve_pixel(
             base_input(&primitives, &vertices, header, parameters),
-            LightingEnvironment { directional: &[light], punctual: &[], ambient: [5.0; 3], toon_bands: 4 },
+            LightingEnvironment { directional: &[light], punctual: &[], image_based: None, ambient: [5.0; 3], toon_bands: 4 },
         )
         .unwrap();
         assert_eq!(resolved.shading_class, MaterialShadingClass::Unlit);
@@ -368,13 +380,13 @@ mod tests {
         };
         let one = resolve_pixel(
             base_input(&primitives, &vertices, header, parameters),
-            LightingEnvironment { directional: &[light], punctual: &[], ambient: [0.0; 3], toon_bands: 4 },
+            LightingEnvironment { directional: &[light], punctual: &[], image_based: None, ambient: [0.0; 3], toon_bands: 4 },
         )
         .unwrap()
         .color;
         let two = resolve_pixel(
             base_input(&primitives, &vertices, header, parameters),
-            LightingEnvironment { directional: &[light, light], punctual: &[], ambient: [0.0; 3], toon_bands: 4 },
+            LightingEnvironment { directional: &[light, light], punctual: &[], image_based: None, ambient: [0.0; 3], toon_bands: 4 },
         )
         .unwrap()
         .color;
@@ -424,7 +436,7 @@ mod tests {
         };
         let resolved = resolve_pixel(
             base_input(&primitives, &vertices, header, parameters),
-            LightingEnvironment { directional: &[light], punctual: &[], ambient: [0.0; 3], toon_bands: 4 },
+            LightingEnvironment { directional: &[light], punctual: &[], image_based: None, ambient: [0.0; 3], toon_bands: 4 },
         )
         .unwrap();
         assert_eq!(resolved.shading_class, MaterialShadingClass::Npr);
@@ -451,6 +463,7 @@ mod tests {
             LightingEnvironment {
                 directional: &[],
                 punctual: &[PunctualLight::point([0.25, 0.25, 1.0], [5.0; 3], 0.0)],
+                image_based: None,
                 ambient: [0.0; 3],
                 toon_bands: 4,
             },
@@ -466,11 +479,53 @@ mod tests {
             LightingEnvironment {
                 directional: &[],
                 punctual: &[PunctualLight::point([0.25, 0.25, 10.0], [5.0; 3], 1.0)],
+                image_based: None,
                 ambient: [0.0; 3],
                 toon_bands: 4,
             },
         )
         .unwrap();
         assert_eq!(dark.color, [0.0; 3]);
+    }
+
+    #[test]
+    fn image_based_light_replaces_ambient_for_indirect_term() {
+        use crate::{ImageBasedLight, SphericalHarmonicsL2};
+        let (primitives, vertices) = unit_triangle();
+        let header = principled_header();
+        let parameters = GpuSurfaceParameters {
+            base_color: [0.8, 0.8, 0.8, 1.0],
+            metallic: 0.0,
+            perceptual_roughness: 1.0,
+            ambient_occlusion: 1.0,
+            ..Default::default()
+        };
+        // No direct lights: the resolved color is purely the indirect term, so a
+        // constant environment probe must brighten the surface above the unlit
+        // (zero-ambient, no-probe) baseline.
+        let dark = resolve_pixel(
+            base_input(&primitives, &vertices, header, parameters),
+            LightingEnvironment::default(),
+        )
+        .unwrap();
+        assert_eq!(dark.color, [0.0; 3]);
+
+        let probe = ImageBasedLight::new(SphericalHarmonicsL2::from_constant([0.5; 3]));
+        let lit = resolve_pixel(
+            base_input(&primitives, &vertices, header, parameters),
+            LightingEnvironment {
+                directional: &[],
+                punctual: &[],
+                image_based: Some(probe),
+                ambient: [0.0; 3],
+                toon_bands: 4,
+            },
+        )
+        .unwrap();
+        assert!(lit.color.iter().all(|c| c.is_finite() && *c > 0.0));
+        // A grey albedo under a 0.5 constant environment lands near albedo*env.
+        for channel in 0..3 {
+            assert!((0.3..0.5).contains(&lit.color[channel]), "channel {channel} = {}", lit.color[channel]);
+        }
     }
 }
