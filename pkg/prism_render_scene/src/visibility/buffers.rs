@@ -134,8 +134,8 @@ impl UnifiedVisibilityBuffers {
         }
     }
 
-    pub(crate) fn parity_counters(&self) -> Option<&Buffer> {
-        self.counters.buffer()
+    pub(crate) fn parity_readback_buffers(&self) -> Option<(&Buffer, &Buffer)> {
+        Some((self.counters.buffer()?, self.gpu_work.buffer()?))
     }
 }
 
