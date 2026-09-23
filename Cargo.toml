@@ -21,6 +21,7 @@ members = [
   "pkg/prism_render_architecture",
   "pkg/prism_render_material",
   "pkg/prism_render_scene",
+  "pkg/prism_render_shading",
   "pkg/prism_render_visibility",
   # Several crates with macros have "compile fail" tests nested inside them, also known as UI
   # tests, that verify diagnostic output does not accidentally change.

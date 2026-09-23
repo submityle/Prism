@@ -1,0 +1,15 @@
+[package]
+name = "prism_render_shading"
+version = "0.1.0"
+edition = "2024"
+description = "Visibility-buffer and material-classification contracts for Prism"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+bytemuck = { version = "1.5", features = ["derive", "must_cast"] }
+prism_render_architecture = { path = "../prism_render_architecture" }
+prism_render_material = { path = "../prism_render_material" }
+
+[lints]
+workspace = true
