@@ -14,11 +14,28 @@ struct GpuSceneInstance {
 }
 struct GpuSceneTransform { world_from_local: mat3x4<f32> }
 struct GpuSceneBounds { center_radius: vec4<f32>, half_extents: vec4<f32> }
+struct MaterialHeader {
+    generation: u32, revision: u32, shading_model: u32, render_class: u32,
+    feature_flags: u32, closure_mask: u32, parameter_offset: u32, parameter_size: u32,
+    texture_offset: u32, texture_count: u32, sampler_offset: u32, sampler_count: u32,
+    custom_program: u32, active: u32, material_epoch_low: u32, material_epoch_high: u32,
+}
+struct SurfaceParameters {
+    base_color: vec4<f32>, emissive: vec4<f32>,
+    metallic: f32, perceptual_roughness: f32, reflectance: f32, ambient_occlusion: f32,
+    normal_scale: f32, alpha_cutoff: f32, transmission: f32, thickness: f32,
+    clearcoat: f32, clearcoat_roughness: f32, anisotropy: f32, anisotropy_rotation: f32,
+    sheen: f32, subsurface: f32, index_of_refraction: f32, dispersion: f32,
+}
+struct MaterialTexture { index: u32, generation: u32, semantic: u32, sampler_index: u32 }
 
 @group(2) @binding(0) var<storage, read> scene_instances: array<GpuSceneInstance>;
 @group(2) @binding(1) var<storage, read> scene_current_transforms: array<GpuSceneTransform>;
 @group(2) @binding(2) var<storage, read> scene_previous_transforms: array<GpuSceneTransform>;
 @group(2) @binding(3) var<storage, read> scene_bounds: array<GpuSceneBounds>;
+@group(3) @binding(0) var<storage, read> material_headers: array<MaterialHeader>;
+@group(3) @binding(1) var<storage, read> material_parameters: array<SurfaceParameters>;
+@group(3) @binding(2) var<storage, read> material_textures: array<MaterialTexture>;
 
 struct SceneAddress { index: u32, generation: u32 }
 var<immediate> scene_address: SceneAddress;
@@ -34,6 +51,7 @@ struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) @interpolate(flat) valid: u32,
     @location(1) @interpolate(flat) debug_color: vec3<f32>,
+    @location(2) @interpolate(flat) material_index: u32,
 };
 
 @vertex
@@ -60,6 +78,12 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         valid,
     );
     out.valid = u32(valid);
+    let material_header = material_headers[instance.material_index];
+    out.material_index = select(
+        0u,
+        instance.material_index,
+        material_header.active != 0u && material_header.generation == instance.material_generation,
+    );
     let id_color = vec3<f32>(
         f32((scene_address.index * 97u) & 255u),
         f32((scene_address.index * 57u) & 255u),
@@ -71,7 +95,7 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     @else if(PRISM_DEBUG_VIEW == 4) {
         let previous = affine3_to_square(scene_previous_transforms[scene_address.index].world_from_local);
         out.debug_color = abs((world_from_local[3] - previous[3]).xyz);
-    } @else out.debug_color = vec3<f32>(0.8);
+    } @else out.debug_color = material_parameters[out.material_index].base_color.rgb;
     return out;
 }
 

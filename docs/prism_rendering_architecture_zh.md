@@ -1301,6 +1301,8 @@ available_budget
 
 当前进度（2026-09-23）：Material ABI 核心和 RenderApp 接入已经完成，包括版本化三表 ABI、`StandardMaterial` 自动映射、分代回收、稀疏上传、设备恢复、fallback slot、bind group、WESL generation 校验以及 GPU Scene material handle 自动关联。统一可见性的 RenderApp 基线也已接入：多视图稳定身份、camera cut/history epoch、frustum/layer/material/LOD 分类、稳定 work/range GPU buffer、FrameGraph 声明、设备恢复和 consumer API 已闭环。当前实现刻意标记为 CPU deterministic reference（诊断中的 `cpu_reference_frames`），尚未虚构 GPU compute 已完成；GPU compute culling/compaction/indirect、previous/current HZB early/late cull、visibility buffer 和 opaque PBR/NPR consumer 尚未达到本阶段退出条件，因此 Phase 2 仍为进行中。
 
+Opaque bootstrap 已改为按统一 visibility work stream 入队，而不是把 Bevy `RenderVisibleEntities` 当作绘制真值；后者仅用于删除旧 phase item。shader 同时绑定 Material ABI，并在 generation 不匹配时解析到 fallback slot。当前 shaded 模式读取 ABI base color，仍不是完整 direct/indirect lighting、IBL、shadow、normal/texture sampling 或 NPR resolve。
+
 ### Phase 3：虚拟几何流送（10–16 周）
 
 交付：

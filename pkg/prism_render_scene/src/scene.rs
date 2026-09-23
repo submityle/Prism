@@ -21,6 +21,7 @@ pub struct RenderGpuScene {
     snapshot: GpuSceneSnapshot,
     buffer_version: u32,
     entities: HashMap<Entity, SceneHandle>,
+    main_entities: HashMap<Entity, bevy_render::sync_world::MainEntity>,
     geometry: HashMap<AssetId<Mesh>, GeometryHandle>,
     next_geometry_index: u32,
     material_generations: HashMap<u32, (u32, bool)>,
@@ -40,6 +41,7 @@ impl RenderGpuScene {
             snapshot: GpuSceneSnapshot::default(),
             buffer_version: 1,
             entities: HashMap::new(),
+            main_entities: HashMap::new(),
             geometry: HashMap::new(),
             next_geometry_index: 1,
             material_generations: HashMap::new(),
@@ -80,16 +82,39 @@ impl RenderGpuScene {
         self.apply_transaction(buffers, transaction)
     }
 
-    pub fn bind_entity(&mut self, entity: Entity, handle: SceneHandle) {
+    pub fn bind_entity(
+        &mut self,
+        entity: Entity,
+        main_entity: bevy_render::sync_world::MainEntity,
+        handle: SceneHandle,
+    ) {
         self.entities.insert(entity, handle);
+        self.main_entities.insert(entity, main_entity);
     }
 
     pub fn remove_entity(&mut self, entity: Entity) -> Option<SceneHandle> {
+        self.main_entities.remove(&entity);
         self.entities.remove(&entity)
     }
 
     pub fn handle_for_entity(&self, entity: Entity) -> Option<SceneHandle> {
         self.entities.get(&entity).copied()
+    }
+
+    pub fn entity_binding_for_handle(
+        &self,
+        handle: SceneHandle,
+    ) -> Option<(Entity, bevy_render::sync_world::MainEntity)> {
+        self.entities.iter().find_map(|(entity, candidate)| {
+            (*candidate == handle)
+                .then(|| {
+                    self.main_entities
+                        .get(entity)
+                        .copied()
+                        .map(|main| (*entity, main))
+                })
+                .flatten()
+        })
     }
 
     pub fn handle_from_component(&self, extracted: &ExtractedSceneInstance) -> Option<SceneHandle> {

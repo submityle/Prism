@@ -384,6 +384,8 @@ UE RDG pass sequence 被翻译为 Prism graph pass，不保留 UE RDG builder AP
 
 统一可见性 RenderApp 基线已经落在 `pkg/prism_render_scene::visibility`：它从 GPU Scene、Material ABI 和 Bevy 多视图状态构建共享 work stream，维护 stable view handle、camera cut/history epoch、LOD hysteresis、overflow-safe capacity、诊断、GPU work/range buffer 和 FrameGraph 资源访问声明。当前执行后端仍是 CPU deterministic reference 并明确计入 `cpu_reference_frames`；`gpu_compute_dispatches` 保持 0，直到 GPU generation/layer/frustum/HZB/compaction/indirect kernel 真正接线。这样可先冻结 consumer ABI，同时避免把 CPU 上传误称为 GPU-driven。
 
+标准 opaque bootstrap 已从统一 work stream 取 opaque work，并绑定 Material ABI 三表；Bevy visibility list 只负责清理被移出的旧 phase item。该路径已验证 instance/material generation fallback 和 base-color 数据消费，但完整 PBR 光照、masked/NPR/custom 分类管线以及 GPU indirect draw 仍是下一层实现，不在文档中提前标为完成。
+
 ## 9. TSR 移植包
 
 ### 9.1 为什么先做

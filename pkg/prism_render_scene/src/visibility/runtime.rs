@@ -33,6 +33,7 @@ pub(crate) struct UnifiedVisibilityState {
     pub views: Vec<GpuViewRecord>,
     pub frame: VisibilityFrame,
     handles: HashMap<RetainedViewEntity, GenerationalHandle>,
+    retained_by_handle: HashMap<GenerationalHandle, RetainedViewEntity>,
     previous_clip: HashMap<RetainedViewEntity, [[f32; 4]; 4]>,
     previous_positions: HashMap<RetainedViewEntity, [f32; 3]>,
     history_epochs: HashMap<RetainedViewEntity, u64>,
@@ -64,13 +65,15 @@ impl UnifiedVisibilityState {
 
     pub fn handle(&mut self, retained: RetainedViewEntity) -> GenerationalHandle {
         self.last_seen.insert(retained, self.frame_index);
-        *self.handles.entry(retained).or_insert_with(|| {
+        let handle = *self.handles.entry(retained).or_insert_with(|| {
             self.next_view_index = self.next_view_index.saturating_add(1).max(1);
             GenerationalHandle {
                 index: self.next_view_index,
                 generation: 1,
             }
-        })
+        });
+        self.retained_by_handle.insert(handle, retained);
+        handle
     }
 
     pub fn previous(
@@ -141,6 +144,7 @@ impl UnifiedVisibilityState {
             .collect();
         for view in stale {
             if let Some(handle) = self.handles.remove(&view) {
+                self.retained_by_handle.remove(&handle);
                 self.previous_lods
                     .retain(|(candidate, _), _| *candidate != handle);
                 self.occluded.retain(|(candidate, _)| *candidate != handle);
@@ -150,6 +154,10 @@ impl UnifiedVisibilityState {
             self.history_epochs.remove(&view);
             self.last_seen.remove(&view);
         }
+    }
+
+    pub fn retained_view(&self, handle: GenerationalHandle) -> Option<RetainedViewEntity> {
+        self.retained_by_handle.get(&handle).copied()
     }
 }
 

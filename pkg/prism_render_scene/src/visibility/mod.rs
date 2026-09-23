@@ -3,7 +3,7 @@ mod consumer;
 mod graph;
 mod plugin;
 mod rows;
-mod runtime;
+pub(crate) mod runtime;
 mod systems;
 
 pub use consumer::UnifiedVisibilityReader;

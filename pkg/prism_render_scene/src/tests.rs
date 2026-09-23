@@ -22,7 +22,12 @@ fn plugin_contract_types_can_be_initialized_without_touching_bevy_sources() {
     let _app = App::new();
     let mut scene = RenderGpuScene::new(8);
     let handle = scene.allocate().unwrap();
-    scene.bind_entity(Entity::from_raw_u32(1).unwrap(), handle);
+    let entity = Entity::from_raw_u32(1).unwrap();
+    scene.bind_entity(
+        entity,
+        bevy_render::sync_world::MainEntity::from(entity),
+        handle,
+    );
     assert_eq!(
         scene.handle_for_entity(Entity::from_raw_u32(1).unwrap()),
         Some(handle)
@@ -118,6 +123,28 @@ fn material_registry_requires_monotonic_generations() {
 }
 
 #[test]
+fn reverse_scene_lookup_preserves_main_and_render_entity_identity() {
+    let mut scene = RenderGpuScene::new(8);
+    let render_entity = Entity::from_raw_u32(7).unwrap();
+    let main_entity = Entity::from_raw_u32(19).unwrap();
+    let handle = scene.allocate().unwrap();
+    scene.bind_entity(
+        render_entity,
+        bevy_render::sync_world::MainEntity::from(main_entity),
+        handle,
+    );
+    assert_eq!(
+        scene.entity_binding_for_handle(handle),
+        Some((
+            render_entity,
+            bevy_render::sync_world::MainEntity::from(main_entity)
+        ))
+    );
+    scene.remove_entity(render_entity);
+    assert_eq!(scene.entity_binding_for_handle(handle), None);
+}
+
+#[test]
 fn transaction_publishes_upload_plan_and_budget_pressure() {
     let mut world = bevy_ecs::world::World::new();
     let mut buffers = GpuSceneBuffers::from_world(&mut world);
@@ -166,6 +193,7 @@ fn gpu_scene_test_world() -> (bevy_ecs::world::World, Schedule) {
 
 fn extracted_instance() -> ExtractedSceneInstance {
     ExtractedSceneInstance {
+        main_entity: bevy_render::sync_world::MainEntity::from(Entity::PLACEHOLDER),
         handle: None,
         transform: bevy_transform::components::GlobalTransform::IDENTITY,
         bounds: None,

@@ -7,7 +7,7 @@ use bevy_pbr::{MeshPipeline, MeshPipelineKey, MeshPipelineViewLayoutKey};
 use bevy_render::render_resource::*;
 use bevy_shader::Shader;
 
-use crate::buffers::GpuSceneBindGroup;
+use crate::{buffers::GpuSceneBindGroup, MaterialBindGroup};
 
 #[derive(Resource, Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub enum GpuSceneDebugView {
@@ -29,6 +29,7 @@ pub(crate) struct GpuSceneOpaquePipelineKey {
 pub(crate) struct GpuSceneOpaquePipeline {
     mesh_pipeline: MeshPipeline,
     scene_layout: BindGroupLayoutDescriptor,
+    material_layout: BindGroupLayoutDescriptor,
     shader: Handle<Shader>,
 }
 
@@ -40,11 +41,13 @@ pub(crate) fn init_opaque_pipeline(
     mut commands: Commands,
     mesh_pipeline: Res<MeshPipeline>,
     scene_bindings: Res<GpuSceneBindGroup>,
+    material_bindings: Res<MaterialBindGroup>,
     asset_server: Res<bevy_asset::AssetServer>,
 ) {
     commands.insert_resource(GpuSceneOpaquePipeline {
         mesh_pipeline: mesh_pipeline.clone(),
         scene_layout: scene_bindings.layout_descriptor.clone(),
+        material_layout: material_bindings.layout_descriptor.clone(),
         shader: load_embedded_asset!(asset_server.as_ref(), "../shaders/opaque.wesl"),
     });
 }
@@ -81,6 +84,7 @@ impl SpecializedMeshPipeline for GpuSceneOpaquePipeline {
                 view.main_layout,
                 view.empty_layout,
                 self.scene_layout.clone(),
+                self.material_layout.clone(),
             ],
             immediate_size: 8,
             vertex: VertexState {

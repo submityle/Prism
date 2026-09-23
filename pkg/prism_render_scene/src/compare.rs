@@ -74,6 +74,7 @@ mod tests {
         world.insert_resource(RenderGpuScene::new(8));
         world.insert_resource(GpuSceneParityDiagnostics::default());
         world.spawn(ExtractedSceneInstance {
+            main_entity: bevy_render::sync_world::MainEntity::from(Entity::PLACEHOLDER),
             handle: None,
             transform: bevy_transform::components::GlobalTransform::IDENTITY,
             bounds: None,

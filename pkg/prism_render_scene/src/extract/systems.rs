@@ -28,6 +28,7 @@ pub(crate) fn extract_scene_instances(
     changed: Extract<
         Query<
             (
+                Entity,
                 RenderEntity,
                 &PrismGpuSceneEntity,
                 &GlobalTransform,
@@ -60,8 +61,10 @@ pub(crate) fn extract_scene_instances(
         }
     }
 
-    for (render_entity, config, transform, bounds, mesh, material) in &changed {
+    for (main_entity, render_entity, config, transform, bounds, mesh, material) in &changed {
+        let main_entity = bevy_render::sync_world::MainEntity::from(main_entity);
         let update = ExtractedSceneInstance {
+            main_entity,
             handle: None,
             transform: *transform,
             bounds: bounds.copied(),
@@ -235,7 +238,11 @@ pub(crate) fn apply_extracted_scene_changes(
         diagnostics.scene_epoch = report.scene_epoch;
         if report.errors.is_empty() {
             for (entity, handle) in new_bindings {
-                scene.bind_entity(entity, handle);
+                let main_entity = changed
+                    .get(entity)
+                    .map(|(_, extracted)| extracted.main_entity)
+                    .unwrap_or_else(|_| bevy_render::sync_world::MainEntity::from(entity));
+                scene.bind_entity(entity, main_entity, handle);
             }
             for (entity, extracted) in &changed {
                 if let Some(handle) = extracted.handle {

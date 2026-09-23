@@ -24,6 +24,7 @@ pub struct PrismGpuSceneEntity {
 /// Render-world copy of the scene fields required by the retained mirror.
 #[derive(Component, Clone, Debug)]
 pub struct ExtractedSceneInstance {
+    pub main_entity: bevy_render::sync_world::MainEntity,
     pub handle: Option<SceneHandle>,
     pub transform: GlobalTransform,
     pub bounds: Option<Aabb>,

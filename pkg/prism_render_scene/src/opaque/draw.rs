@@ -12,13 +12,14 @@ use bevy_render::{
     },
 };
 
-use crate::{buffers::GpuSceneBindGroup, GpuSceneInstanceAddress};
+use crate::{buffers::GpuSceneBindGroup, GpuSceneInstanceAddress, MaterialBindGroup};
 
 pub(crate) type DrawGpuSceneOpaque = (
     SetItemPipeline,
     SetMeshViewBindGroup<0>,
     SetMeshViewEmptyBindGroup<1>,
     SetGpuSceneBindGroup<2>,
+    SetMaterialBindGroup<3>,
     DrawGpuSceneMesh,
 );
 
@@ -26,6 +27,28 @@ pub(crate) struct SetGpuSceneBindGroup<const I: usize>;
 
 impl<const I: usize> RenderCommand<Opaque3d> for SetGpuSceneBindGroup<I> {
     type Param = SRes<GpuSceneBindGroup>;
+    type ViewQuery = ();
+    type ItemQuery = ();
+
+    fn render<'w>(
+        _: &Opaque3d,
+        _: (),
+        _: Option<()>,
+        bindings: SystemParamItem<'w, '_, Self::Param>,
+        pass: &mut TrackedRenderPass<'w>,
+    ) -> RenderCommandResult {
+        let Some(bind_group) = &bindings.into_inner().bind_group else {
+            return RenderCommandResult::Skip;
+        };
+        pass.set_bind_group(I, bind_group, &[]);
+        RenderCommandResult::Success
+    }
+}
+
+pub(crate) struct SetMaterialBindGroup<const I: usize>;
+
+impl<const I: usize> RenderCommand<Opaque3d> for SetMaterialBindGroup<I> {
+    type Param = SRes<MaterialBindGroup>;
     type ViewQuery = ();
     type ItemQuery = ();
 

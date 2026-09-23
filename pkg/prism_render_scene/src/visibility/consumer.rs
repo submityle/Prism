@@ -1,5 +1,6 @@
 use bevy_ecs::system::SystemParam;
 use bevy_render::render_resource::Buffer;
+use bevy_render::view::RetainedViewEntity;
 use prism_render_visibility::{BufferRange, ViewHandle, VisibilityFrame};
 
 use super::{buffers::UnifiedVisibilityBuffers, runtime::UnifiedVisibilityState};
@@ -21,6 +22,15 @@ impl UnifiedVisibilityReader<'_> {
             .views
             .get(&view)
             .map(|output| output.visible_instances)
+    }
+
+    pub fn view_handle(&self, retained: RetainedViewEntity) -> Option<ViewHandle> {
+        self.state
+            .frame
+            .views
+            .keys()
+            .copied()
+            .find(|handle| self.state.retained_view(*handle) == Some(retained))
     }
 
     pub fn buffers(&self) -> Option<UnifiedVisibilityBufferBindings<'_>> {

@@ -19,7 +19,10 @@ use super::{
     draw::DrawGpuSceneOpaque,
     pipeline::{GpuSceneDebugView, GpuSceneOpaquePipeline, GpuSceneOpaquePipelineKey},
 };
-use crate::{GpuSceneDiagnostics, GpuSceneInstanceAddress, GpuSceneMode};
+use crate::{
+    visibility::runtime::UnifiedVisibilityState, GpuSceneDiagnostics, GpuSceneInstanceAddress,
+    GpuSceneMode,
+};
 
 #[derive(SystemParam)]
 pub(crate) struct OpaqueQueueControl<'w> {
@@ -48,6 +51,8 @@ pub(crate) fn queue_gpu_scene_opaque(
     scene_instances: Query<&GpuSceneInstanceAddress>,
     dirty: Res<DirtySpecializations>,
     mut previously_queued: Local<bevy_render::sync_world::MainEntityHashSet>,
+    visibility: Res<UnifiedVisibilityState>,
+    scene: Res<crate::RenderGpuScene>,
 ) {
     control.diagnostics.opaque_visible = 0;
     control.diagnostics.opaque_queued = 0;
@@ -69,37 +74,32 @@ pub(crate) fn queue_gpu_scene_opaque(
         let Some(&view_key) = view_keys.get(&view.retained_view_entity) else {
             continue;
         };
-        let Some(visible_meshes) = visible.get::<Mesh3d>() else {
-            continue;
-        };
-        for &main_entity in dirty.iter_to_dequeue(view.retained_view_entity, visible_meshes) {
-            phase.remove(main_entity);
-            previously_queued.remove(&main_entity);
-        }
-        for &(render_entity, main_entity) in &visible_meshes.entities_cpu_culling {
-            control.diagnostics.opaque_visible += 1;
-            if queue_one(
-                phase,
-                render_entity,
-                main_entity,
-                view_key,
-                *control.debug_view,
-                draw_function,
-                &pipeline_cache,
-                &pipeline,
-                &mut pipelines,
-                &render_meshes,
-                &render_instances,
-                &mesh_allocator,
-                &scene_instances,
-            ) {
-                previously_queued.insert(main_entity);
-                control.diagnostics.opaque_queued += 1;
-            } else {
-                control.diagnostics.opaque_skipped += 1;
+        if let Some(visible_meshes) = visible.get::<Mesh3d>() {
+            for &main_entity in dirty.iter_to_dequeue(view.retained_view_entity, visible_meshes) {
+                phase.remove(main_entity);
+                previously_queued.remove(&main_entity);
             }
         }
-        for (&main_entity, &render_entity) in &visible_meshes.entities_gpu_culling {
+        let Some(unified) = visibility
+            .frame
+            .views
+            .iter()
+            .find(|(handle, _)| {
+                visibility.retained_view(**handle) == Some(view.retained_view_entity)
+            })
+            .map(|(_, output)| output.visible_instances)
+        else {
+            continue;
+        };
+        let unified_entities: Vec<_> = visibility.frame.work_items
+            [unified.start as usize..(unified.start + unified.count) as usize]
+            .iter()
+            .filter(|work| {
+                work.pass_mask.0 & prism_render_visibility::RenderPassMask::OPAQUE.0 != 0
+            })
+            .filter_map(|work| scene.entity_binding_for_handle(work.scene))
+            .collect();
+        for (render_entity, main_entity) in unified_entities {
             control.diagnostics.opaque_visible += 1;
             if queue_one(
                 phase,
