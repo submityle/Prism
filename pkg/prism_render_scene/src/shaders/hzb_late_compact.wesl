@@ -24,10 +24,14 @@ struct GeometryLod {
     vertex_buffer_class: u32, index_buffer_class: u32, flags: u32, level: u32,
     screen_error: f32, padding: vec3<u32>,
 }
+struct VisibilityCounter {
+    visible_count: atomic<u32>, rejected_count: atomic<u32>, overflow_count: atomic<u32>,
+    indexed_count: atomic<u32>, non_indexed_count: atomic<u32>, padding: vec3<u32>,
+}
 struct LateCompactDispatch {
     candidate_count: u32, stage_start: u32, candidate_bin_start: u32,
     bin_start: u32, command_start: u32, command_end: u32,
-    indirect_first_instance: u32, padding: u32,
+    indirect_first_instance: u32, counter_index: u32,
 }
 
 @group(0) @binding(0) var<storage, read> stages: array<u32>;
@@ -35,8 +39,9 @@ struct LateCompactDispatch {
 @group(0) @binding(2) var<storage, read_write> late_bins: array<DrawBinHeader>;
 @group(0) @binding(3) var<storage, read_write> late_indexed: array<VisibilityIndirect>;
 @group(0) @binding(4) var<storage, read_write> late_non_indexed: array<VisibilityNonIndexedIndirect>;
-@group(0) @binding(5) var<storage, read> geometry_headers: array<GeometryHeader>;
-@group(0) @binding(6) var<storage, read> geometry_lods: array<GeometryLod>;
+@group(0) @binding(5) var<storage, read_write> late_counters: array<VisibilityCounter>;
+@group(0) @binding(6) var<storage, read> geometry_headers: array<GeometryHeader>;
+@group(0) @binding(7) var<storage, read> geometry_lods: array<GeometryLod>;
 var<immediate> dispatch: LateCompactDispatch;
 
 @compute @workgroup_size(64)
@@ -72,11 +77,17 @@ fn compact_late_hzb(@builtin(global_invocation_id) id: vec3<u32>) {
     let indexed = (lod.flags & 2u) != 0u;
     if indexed != (bin.indexed != 0u) { return; }
     let local = atomicAdd(&late_bins[bin_index].command_count, 1u);
-    if local >= bin.command_capacity { return; }
+    if local >= bin.command_capacity {
+        atomicAdd(&late_counters[dispatch.counter_index].overflow_count, 1u);
+        return;
+    }
     let command = dispatch.command_start + late_bins[bin_index].command_start + local;
     if command >= dispatch.command_end
         || command >= arrayLength(&late_indexed)
-        || command >= arrayLength(&late_non_indexed) { return; }
+        || command >= arrayLength(&late_non_indexed) {
+        atomicAdd(&late_counters[dispatch.counter_index].overflow_count, 1u);
+        return;
+    }
     let instance = select(0u, candidate, dispatch.indirect_first_instance != 0u);
     late_indexed[command] = VisibilityIndirect(
         select(0u, lod.element_count, indexed),
@@ -86,4 +97,7 @@ fn compact_late_hzb(@builtin(global_invocation_id) id: vec3<u32>) {
         select(lod.element_count, 0u, indexed),
         1u, lod.first_element, instance,
     );
+    atomicAdd(&late_counters[dispatch.counter_index].visible_count, 1u);
+    if indexed { atomicAdd(&late_counters[dispatch.counter_index].indexed_count, 1u); }
+    else { atomicAdd(&late_counters[dispatch.counter_index].non_indexed_count, 1u); }
 }

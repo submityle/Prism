@@ -263,11 +263,15 @@ impl UnifiedVisibilityBuffers {
         }
     }
 
-    pub(crate) fn parity_readback_buffers(&self) -> Option<(&Buffer, &Buffer, &Buffer)> {
+    pub(crate) fn parity_readback_buffers(
+        &self,
+    ) -> Option<(&Buffer, &Buffer, &Buffer, &Buffer, &Buffer)> {
         Some((
             self.counters.buffer()?,
             self.gpu_work.buffer()?,
             self.bin_headers.buffer()?,
+            self.late_counters.buffer()?,
+            self.late_bin_headers.buffer()?,
         ))
     }
 

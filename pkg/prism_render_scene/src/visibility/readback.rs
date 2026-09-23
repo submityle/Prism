@@ -33,6 +33,8 @@ struct PendingReadback {
     view_count: usize,
     slots_per_view: usize,
     expected_bin_counts: Vec<u32>,
+    expected_late_bin_capacity: Vec<u32>,
+    view_handles: Vec<(u32, u32)>,
 }
 
 struct InFlightReadback {
@@ -57,7 +59,9 @@ pub(crate) fn request_visibility_parity_readback(
         diagnostics.parity_dropped_frames += u64::from(readback_state.is_some());
         return;
     }
-    let Some((counters, work, bin_headers)) = buffers.parity_readback_buffers() else {
+    let Some((counters, work, bin_headers, late_counters, late_bin_headers)) =
+        buffers.parity_readback_buffers()
+    else {
         return;
     };
     let counter_size = state.views.len() as u64 * size_of::<RenderVisibilityCounter>() as u64;
@@ -66,7 +70,7 @@ pub(crate) fn request_visibility_parity_readback(
         * size_of::<super::rows::RenderVisibilityWorkItem>() as u64;
     let bin_size = state.draw_bins.iter().map(|view| view.bins.len()).sum::<usize>() as u64
         * size_of::<RenderDrawBinHeader>() as u64;
-    let size = counter_size + work_size + bin_size;
+    let size = counter_size.saturating_mul(2) + work_size + bin_size.saturating_mul(2);
     let target = device.create_buffer(&BufferDescriptor {
         label: Some("prism visibility parity readback"),
         size,
@@ -84,6 +88,20 @@ pub(crate) fn request_visibility_parity_readback(
             0,
             &target,
             counter_size + work_size,
+            Some(bin_size),
+        );
+        encoder.copy_buffer_to_buffer(
+            late_counters,
+            0,
+            &target,
+            counter_size + work_size + bin_size,
+            Some(counter_size),
+        );
+        encoder.copy_buffer_to_buffer(
+            late_bin_headers,
+            0,
+            &target,
+            counter_size.saturating_mul(2) + work_size + bin_size,
             Some(bin_size),
         );
     }
@@ -111,6 +129,16 @@ pub(crate) fn request_visibility_parity_readback(
             .draw_bins
             .iter()
             .flat_map(|view| view.bins.iter().map(|bin| bin.command_capacity))
+            .collect(),
+        expected_late_bin_capacity: state
+            .draw_bins
+            .iter()
+            .flat_map(|view| view.bins.iter().map(|bin| bin.command_capacity))
+            .collect(),
+        view_handles: state
+            .views
+            .iter()
+            .map(|view| (view.handle.index, view.handle.generation))
             .collect(),
     }));
 }
@@ -172,9 +200,25 @@ pub(crate) fn collect_visibility_parity_readback(
         + pending.view_count
             * pending.slots_per_view
             * size_of::<super::rows::RenderVisibilityWorkItem>();
-    let gpu_bins: &[RenderDrawBinHeader] = bytemuck::cast_slice(&mapped[bin_bytes..]);
+    let one_bin_table_bytes = pending.expected_bin_counts.len() * size_of::<RenderDrawBinHeader>();
+    let gpu_bins: &[RenderDrawBinHeader] =
+        bytemuck::cast_slice(&mapped[bin_bytes..bin_bytes + one_bin_table_bytes]);
+    let late_counter_start = bin_bytes + one_bin_table_bytes;
+    let late_counter_end = late_counter_start + counter_bytes;
+    let late_counters: &[RenderVisibilityCounter] =
+        bytemuck::cast_slice(&mapped[late_counter_start..late_counter_end]);
+    let gpu_late_bins: &[RenderDrawBinHeader] = bytemuck::cast_slice(&mapped[late_counter_end..]);
     if !bin_counts_match(gpu_bins, &pending.expected_bin_counts) {
         diagnostics.parity_mismatched_bin_counts += 1;
+    }
+    let late_summary = summarize_late_bins(gpu_late_bins, &pending.expected_late_bin_capacity);
+    diagnostics.hzb_late_visible_commands += late_summary.visible_commands;
+    diagnostics.hzb_late_overflowed_bins += late_summary.overflowed_bins;
+    if !late_summary.valid {
+        diagnostics.parity_mismatched_late_bin_counts += 1;
+    }
+    if !late_counters_match_bins(late_counters, gpu_late_bins, &pending.view_handles) {
+        diagnostics.parity_mismatched_late_bin_counts += 1;
     }
     let mut matching = 0;
     let mut mismatched = 0;
@@ -225,6 +269,49 @@ fn bin_counts_match(gpu: &[RenderDrawBinHeader], expected: &[u32]) -> bool {
                 header.command_count == *expected
                     && header.command_count <= header.command_capacity
             })
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
+struct LateBinSummary {
+    visible_commands: u64,
+    overflowed_bins: u64,
+    valid: bool,
+}
+
+fn summarize_late_bins(gpu: &[RenderDrawBinHeader], capacities: &[u32]) -> LateBinSummary {
+    let mut summary = LateBinSummary {
+        valid: gpu.len() == capacities.len(),
+        ..Default::default()
+    };
+    for (header, capacity) in gpu.iter().zip(capacities) {
+        summary.visible_commands += u64::from(header.command_count.min(*capacity));
+        if header.command_count > *capacity || header.command_capacity != *capacity {
+            summary.overflowed_bins += 1;
+            summary.valid = false;
+        }
+    }
+    summary
+}
+
+fn late_counters_match_bins(
+    counters: &[RenderVisibilityCounter],
+    bins: &[RenderDrawBinHeader],
+    view_handles: &[(u32, u32)],
+) -> bool {
+    counters.len() == view_handles.len()
+        && counters.iter().zip(view_handles).all(|(counter, view)| {
+            let bin_count = bins
+                .iter()
+                .filter(|bin| bin.view_index == view.0 && bin.view_generation == view.1)
+                .map(|bin| bin.command_count.min(bin.command_capacity))
+                .sum::<u32>();
+            counter.visible_count == bin_count
+                && counter
+                    .indexed_count
+                    .saturating_add(counter.non_indexed_count)
+                    == counter.visible_count
+                && counter.overflow_count == 0
+        })
 }
 
 fn unordered_work_matches(
@@ -291,5 +378,71 @@ mod tests {
         assert!(bin_counts_match(&[header(2, 2), header(1, 3)], &[2, 1]));
         assert!(!bin_counts_match(&[header(3, 2)], &[3]));
         assert!(!bin_counts_match(&[header(1, 2)], &[2]));
+    }
+
+    #[test]
+    fn late_bin_readback_accepts_sparse_counts_and_rejects_overflow() {
+        let header = |count, capacity| RenderDrawBinHeader {
+            command_count: count,
+            command_capacity: capacity,
+            ..Default::default()
+        };
+        assert_eq!(
+            summarize_late_bins(&[header(0, 2), header(1, 3)], &[2, 3]),
+            LateBinSummary {
+                visible_commands: 1,
+                overflowed_bins: 0,
+                valid: true,
+            }
+        );
+        assert_eq!(
+            summarize_late_bins(&[header(4, 3)], &[3]),
+            LateBinSummary {
+                visible_commands: 3,
+                overflowed_bins: 1,
+                valid: false,
+            }
+        );
+    }
+
+    #[test]
+    fn late_counters_cover_their_view_bins() {
+        let bins = [
+            RenderDrawBinHeader {
+                view_index: 0,
+                command_count: 1,
+                command_capacity: 2,
+                ..Default::default()
+            },
+            RenderDrawBinHeader {
+                view_index: 1,
+                command_count: 2,
+                command_capacity: 2,
+                ..Default::default()
+            },
+        ];
+        let counters = [
+            RenderVisibilityCounter {
+                visible_count: 1,
+                indexed_count: 1,
+                ..Default::default()
+            },
+            RenderVisibilityCounter {
+                visible_count: 2,
+                non_indexed_count: 2,
+                ..Default::default()
+            },
+        ];
+        assert!(late_counters_match_bins(
+            &counters,
+            &bins,
+            &[(0, 0), (1, 0)]
+        ));
+        let invalid = [RenderVisibilityCounter {
+            visible_count: 3,
+            non_indexed_count: 3,
+            ..counters[1]
+        }];
+        assert!(!late_counters_match_bins(&invalid, &bins, &[(1, 0)]));
     }
 }

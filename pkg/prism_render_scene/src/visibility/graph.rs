@@ -59,6 +59,12 @@ pub(crate) fn visibility_frame_graph() -> GpuFrameGraphBuilder {
         size: 0,
         alignment: 16,
     });
+    let late_counters = graph.add_resource(ResourceDescriptor {
+        name: "visibility_late_counters".into(),
+        lifetime: ResourceLifetime::Persistent,
+        size: 0,
+        alignment: 16,
+    });
     let late_indexed_indirect = graph.add_resource(ResourceDescriptor {
         name: "visibility_late_indexed_indirect".into(),
         lifetime: ResourceLifetime::Persistent,
@@ -168,6 +174,10 @@ pub(crate) fn visibility_frame_graph() -> GpuFrameGraphBuilder {
                 kind: AccessKind::StorageWrite,
             },
             ResourceAccess {
+                resource: late_counters,
+                kind: AccessKind::StorageWrite,
+            },
+            ResourceAccess {
                 resource: late_indexed_indirect,
                 kind: AccessKind::StorageWrite,
             },
@@ -193,5 +203,6 @@ mod tests {
         assert_eq!(graph.passes()[0].accesses.len(), 10);
         assert_eq!(graph.passes()[1].depends_on[0].0, 0);
         assert_eq!(graph.passes()[2].depends_on[0].0, 1);
+        assert_eq!(graph.passes()[2].accesses.len(), 6);
     }
 }

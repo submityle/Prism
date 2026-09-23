@@ -28,7 +28,7 @@ pub(crate) struct HzbLateCompactPipeline {
 #[derive(Resource, Default)]
 pub(crate) struct HzbLateCompactBindGroup {
     pub(crate) bind_group: Option<BindGroup>,
-    ids: Option<[BufferId; 7]>,
+    ids: Option<[BufferId; 8]>,
 }
 
 pub(crate) fn init_hzb_late_compact_pipeline(
@@ -45,6 +45,7 @@ pub(crate) fn init_hzb_late_compact_pipeline(
             storage_buffer::<super::rows::RenderDrawBinHeader>(false),
             storage_buffer::<super::rows::RenderVisibilityIndirect>(false),
             storage_buffer::<super::rows::RenderVisibilityNonIndexedIndirect>(false),
+            storage_buffer::<super::rows::RenderVisibilityCounter>(false),
             storage_buffer_read_only::<super::super::geometry::rows::RenderGeometryHeader>(false),
             storage_buffer_read_only::<super::super::geometry::rows::RenderGeometryLod>(false),
         ),
@@ -96,7 +97,6 @@ pub(crate) fn prepare_hzb_late_bind_group(
     else {
         return;
     };
-    let _ = late_counters;
     let Some((geometry_headers, geometry_lods)) = geometry_buffers.buffers() else {
         return;
     };
@@ -106,6 +106,7 @@ pub(crate) fn prepare_hzb_late_bind_group(
         late_bins.id(),
         late_indexed.id(),
         late_non_indexed.id(),
+        late_counters.id(),
         geometry_headers.id(),
         geometry_lods.id(),
     ];
@@ -121,6 +122,7 @@ pub(crate) fn prepare_hzb_late_bind_group(
             late_bins.as_entire_binding(),
             late_indexed.as_entire_binding(),
             late_non_indexed.as_entire_binding(),
+            late_counters.as_entire_binding(),
             geometry_headers.as_entire_binding(),
             geometry_lods.as_entire_binding(),
         )),
@@ -138,7 +140,7 @@ struct LateCompactDispatch {
     command_start: u32,
     command_end: u32,
     indirect_first_instance: u32,
-    _padding: u32,
+    counter_index: u32,
 }
 
 #[expect(
@@ -172,6 +174,14 @@ pub(crate) fn dispatch_hzb_late_compact(
     else {
         return;
     };
+    let Some(counter_index) = state
+        .views
+        .iter()
+        .position(|view| state.retained_view(view.handle) == Some(retained))
+        .and_then(|index| u32::try_from(index).ok())
+    else {
+        return;
+    };
     let (Some(compute_pipeline), Some(bind_group)) = (
         cache.get_compute_pipeline(pipeline.pipeline),
         bindings.bind_group.as_ref(),
@@ -188,7 +198,7 @@ pub(crate) fn dispatch_hzb_late_compact(
             .command_buffer_start
             .saturating_add(visibility.gpu_slots_per_view()),
         indirect_first_instance: u32::from(settings.indirect_first_instance),
-        _padding: 0,
+        counter_index,
     };
     let mut pass = ctx.command_encoder().begin_compute_pass(
         &bevy_render::render_resource::ComputePassDescriptor {
