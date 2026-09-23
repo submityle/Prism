@@ -15,18 +15,39 @@ use bevy_render::{
 
 use super::runtime::UnifiedVisibilityState;
 
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+enum PrismHzbSystems {
+    PreviousClassify,
+    EarlyCompact,
+    CurrentClassify,
+    LateCompact,
+}
+
 /// Schedules Prism's previous-HZB test before the early prepass and the
 /// current-HZB retest after the pyramid has been rebuilt from early depth.
 pub(crate) fn install_hzb_schedule(app: &mut SubApp) {
+    app.configure_sets(
+        Core3d,
+        (
+            PrismHzbSystems::PreviousClassify,
+            PrismHzbSystems::EarlyCompact,
+        )
+            .chain()
+            .before(early_prepass),
+    );
     app.add_systems(
         Core3d,
         (
-            dispatch_previous_hzb.before(early_prepass),
+            dispatch_previous_hzb.in_set(PrismHzbSystems::PreviousClassify),
+            super::systems::dispatch_unified_visibility_for_view
+                .in_set(PrismHzbSystems::EarlyCompact),
             dispatch_current_hzb
+                .in_set(PrismHzbSystems::CurrentClassify)
                 .after(early_downsample_depth)
                 .before(late_prepass),
             super::hzb_late::dispatch_hzb_late_compact
-                .after(dispatch_current_hzb)
+                .in_set(PrismHzbSystems::LateCompact)
+                .after(PrismHzbSystems::CurrentClassify)
                 .before(late_prepass),
         ),
     );

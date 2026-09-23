@@ -33,8 +33,7 @@ use super::{
         UnifiedVisibilityState, VisibilityFrameGraph,
     },
     systems::{
-        build_unified_visibility, dispatch_unified_visibility, rebuild_unified_visibility,
-        upload_unified_visibility,
+        build_unified_visibility, rebuild_unified_visibility, upload_unified_visibility,
     },
 };
 
@@ -119,9 +118,6 @@ impl Plugin for PrismVisibilityPlugin {
             RenderGraph,
             (
                 collect_visibility_parity_readback.in_set(RenderGraphSystems::Begin),
-                dispatch_unified_visibility
-                    .after(collect_visibility_parity_readback)
-                    .in_set(RenderGraphSystems::Begin),
                 request_visibility_parity_readback
                     .after(camera_driver)
                     .in_set(RenderGraphSystems::Render),

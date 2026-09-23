@@ -3,9 +3,8 @@ use alloc::collections::BTreeMap;
 use bevy_camera::{primitives::Frustum, visibility::RenderLayers};
 use bevy_ecs::prelude::*;
 use bevy_render::{
-    render_resource::{CommandEncoderDescriptor, ComputePassDescriptor, PipelineCache},
-    renderer::PendingCommandBuffers,
-    renderer::{RenderDevice, RenderQueue},
+    render_resource::{ComputePassDescriptor, PipelineCache},
+    renderer::{RenderContext, RenderDevice, RenderQueue},
     view::ExtractedView,
 };
 use prism_render_visibility::{
@@ -230,7 +229,8 @@ pub(crate) fn rebuild_unified_visibility(
     clippy::too_many_arguments,
     reason = "Compute dispatch joins scene/material/output bindings and diagnostics."
 )]
-pub(crate) fn dispatch_unified_visibility(
+pub(crate) fn dispatch_unified_visibility_for_view(
+    current_view: bevy_render::renderer::ViewQuery<&ExtractedView>,
     enabled: Res<UnifiedVisibilityEnabled>,
     settings: Res<UnifiedVisibilitySettings>,
     scene: Res<RenderGpuScene>,
@@ -243,8 +243,7 @@ pub(crate) fn dispatch_unified_visibility(
     output_bindings: Res<VisibilityComputeBindGroup>,
     hzb_buffers: Res<super::hzb_gpu::HzbVisibilityBuffers>,
     buffers: Res<UnifiedVisibilityBuffers>,
-    device: Res<RenderDevice>,
-    mut pending: ResMut<PendingCommandBuffers>,
+    mut ctx: RenderContext,
     mut diagnostics: ResMut<PrismVisibilityDiagnostics>,
 ) {
     if !enabled.0 || state.views.is_empty() || scene.mirror().capacity() == 0 {
@@ -267,45 +266,64 @@ pub(crate) fn dispatch_unified_visibility(
     ) else {
         return;
     };
+    let retained = current_view.into_inner().retained_view_entity;
     let candidate_count = scene.mirror().capacity() as u32;
-    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+    let hzb_stage_start = hzb_buffers
+        .view_range(retained)
+        .map_or(0, |(start, _)| start);
+    let Some(immediates) = visibility_dispatch_for_view(
+        &state,
+        &buffers,
+        retained,
+        candidate_count,
+        settings.indirect_first_instance,
+        hzb_stage_start,
+    ) else {
+        return;
+    };
+    let mut pass = ctx.command_encoder().begin_compute_pass(&ComputePassDescriptor {
         label: Some("prism unified visibility"),
+        timestamp_writes: None,
     });
-    {
-        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-            label: Some("prism unified visibility"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(compute_pipeline);
-        pass.set_bind_group(0, scene_bind_group, &[]);
-        pass.set_bind_group(1, material_bind_group, &[]);
-        pass.set_bind_group(2, geometry_bind_group, &[]);
-        pass.set_bind_group(3, output_bind_group, &[]);
-        for (view_index, _) in state.views.iter().enumerate() {
-            let output_start = (view_index as u32).saturating_mul(buffers.gpu_slots_per_view());
-            let hzb_stage_start = state
-                .retained_view(state.views[view_index].handle)
-                .and_then(|retained| hzb_buffers.view_range(retained))
-                .map_or(0, |(start, _)| start);
-            let immediates = RenderVisibilityDispatch {
-                view_index: view_index as u32,
-                candidate_count,
-                output_start,
-                output_end: output_start.saturating_add(buffers.gpu_slots_per_view()),
-                indirect_first_instance: u32::from(settings.indirect_first_instance),
-                bin_start: state.draw_bins[view_index].global_bin_start,
-                candidate_bin_start: state.draw_bins[view_index].global_candidate_start,
-                hzb_stage_start,
-            };
-            pass.set_immediates(0, bytemuck::bytes_of(&immediates));
-            pass.dispatch_workgroups(candidate_count.div_ceil(VISIBILITY_WORKGROUP_SIZE), 1, 1);
-            diagnostics.gpu_compute_dispatches += 1;
-            diagnostics.gpu_candidates += candidate_count;
-            diagnostics.indirect_identity_fallbacks +=
-                u32::from(!settings.indirect_first_instance) * candidate_count;
-        }
-    }
-    pending.push_encoder(encoder, "prism unified visibility");
+    pass.set_pipeline(compute_pipeline);
+    pass.set_bind_group(0, scene_bind_group, &[]);
+    pass.set_bind_group(1, material_bind_group, &[]);
+    pass.set_bind_group(2, geometry_bind_group, &[]);
+    pass.set_bind_group(3, output_bind_group, &[]);
+    pass.set_immediates(0, bytemuck::bytes_of(&immediates));
+    pass.dispatch_workgroups(candidate_count.div_ceil(VISIBILITY_WORKGROUP_SIZE), 1, 1);
+    diagnostics.gpu_compute_dispatches += 1;
+    diagnostics.gpu_candidates += candidate_count;
+    diagnostics.indirect_identity_fallbacks +=
+        u32::from(!settings.indirect_first_instance) * candidate_count;
+}
+
+fn visibility_dispatch_for_view(
+    state: &UnifiedVisibilityState,
+    buffers: &UnifiedVisibilityBuffers,
+    retained: bevy_render::view::RetainedViewEntity,
+    candidate_count: u32,
+    indirect_first_instance: bool,
+    hzb_stage_start: u32,
+) -> Option<RenderVisibilityDispatch> {
+    let view_index = state
+        .views
+        .iter()
+        .position(|view| state.retained_view(view.handle) == Some(retained))?;
+    let view_bins = state.draw_bins.get(view_index)?;
+    let output_start = u32::try_from(view_index)
+        .ok()?
+        .saturating_mul(buffers.gpu_slots_per_view());
+    Some(RenderVisibilityDispatch {
+        view_index: u32::try_from(view_index).ok()?,
+        candidate_count,
+        output_start,
+        output_end: output_start.saturating_add(buffers.gpu_slots_per_view()),
+        indirect_first_instance: u32::from(indirect_first_instance),
+        bin_start: view_bins.global_bin_start,
+        candidate_bin_start: view_bins.global_candidate_start,
+        hzb_stage_start,
+    })
 }
 
 fn geometry_lods(
@@ -363,6 +381,7 @@ fn squared_distance(a: [f32; 3], b: [f32; 3]) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    use bevy_render::view::RetainedViewEntity;
     use prism_render_architecture::{
         abi::GenerationalHandle,
         gpu_scene::{InstanceRecord, SceneOperation, SceneTransaction},
@@ -435,5 +454,72 @@ mod tests {
         let candidate = draw_bin_candidate(&work, &geometries, &table).unwrap();
         assert_eq!(candidate.key.geometry, geometry);
         assert!(candidate.key.indexed);
+    }
+
+    #[test]
+    fn per_view_dispatch_uses_matching_multiview_partitions() {
+        let mut world = World::new();
+        let mut buffers = UnifiedVisibilityBuffers::from_world(&mut world);
+        buffers.stage(
+            [RenderVisibilityView::default(), RenderVisibilityView::default()],
+            [],
+            [],
+            8,
+        );
+        let first_retained = RetainedViewEntity::new(
+            bevy_render::sync_world::MainEntity::from(Entity::from_bits(1)),
+            None,
+            0,
+        );
+        let second_retained = RetainedViewEntity::new(
+            bevy_render::sync_world::MainEntity::from(Entity::from_bits(2)),
+            None,
+            0,
+        );
+        let mut state = UnifiedVisibilityState::default();
+        let first_handle = state.handle(first_retained);
+        let second_handle = state.handle(second_retained);
+        let test_view = |handle| GpuViewRecord {
+            handle,
+            clip_from_world: [[0.0; 4]; 4],
+            previous_clip_from_world: [[0.0; 4]; 4],
+            world_position: [0.0; 3],
+            lod_scale: 1.0,
+            viewport: [0, 0, 1, 1],
+            frustum_planes: [[0.0; 4]; 6],
+            layer_mask: 1,
+            flags: ViewFlags::REVERSE_Z,
+            history_epoch: 1,
+        };
+        state.views = vec![test_view(first_handle), test_view(second_handle)];
+        state.draw_bins = vec![
+            prism_render_visibility::ViewDrawBins {
+                global_bin_start: 3,
+                global_candidate_start: 40,
+                ..Default::default()
+            },
+            prism_render_visibility::ViewDrawBins {
+                global_bin_start: 7,
+                global_candidate_start: 80,
+                ..Default::default()
+            },
+        ];
+        let dispatch = visibility_dispatch_for_view(
+            &state,
+            &buffers,
+            second_retained,
+            64,
+            true,
+            128,
+        )
+        .unwrap();
+
+        assert_eq!(dispatch.view_index, 1);
+        assert_eq!(dispatch.output_start, 8);
+        assert_eq!(dispatch.output_end, 16);
+        assert_eq!(dispatch.bin_start, 7);
+        assert_eq!(dispatch.candidate_bin_start, 80);
+        assert_eq!(dispatch.indirect_first_instance, 1);
+        assert_eq!(dispatch.hzb_stage_start, 128);
     }
 }
