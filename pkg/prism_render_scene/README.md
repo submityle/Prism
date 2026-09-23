@@ -9,6 +9,8 @@ This package integrates the retained Prism GPU Scene with Bevy's render app with
 Set the render-world `GpuSceneDebugView` resource to `InstanceId`, `GeometryId`, `MaterialId`, or `Motion` to inspect the retained tables directly.
 Set `GpuSceneOpaqueEnabled(false)` for a runtime fallback to the legacy Bevy PBR opaque path without disabling GPU Scene extraction for other consumers.
 
+Unified visibility builds deterministic per-view draw bins and bounded indexed/non-indexed indirect command streams. `GpuSceneOpaqueIndirectEnabled` is deliberately disabled by default: enable it only for runtime parity testing on devices that report `INDIRECT_FIRST_INSTANCE`. Otherwise the opaque queue keeps its per-visible-item direct path. Asynchronous diagnostics compare GPU work, command classes, and per-bin command counts without stalling the current frame.
+
 The package owns ECS integration, sparse GPU buffers, submission completion tracking, diagnostics, and the stable shader ABI. Unreal Engine-derived code is not stored here.
 
 Opt a mesh into synchronization and the GPU Scene with:
