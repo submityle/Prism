@@ -390,7 +390,7 @@ previous/current HZB 已完成 GPU classification 主体：work ABI 有 early/la
 
 same-frame late command 已不再复用 early atomic：代码现有独立 late headers/counters/indexed/non-indexed streams，current-HZB 后按 per-view candidate/bin range dispatch，并从统一 Geometry ABI 解析 resident LOD，校验 generation、primitive class 和边界后生成完整 draw arguments；FrameGraph 声明也已拆出 late compact pass 及其 geometry/read-output/write hazard。
 
-尚未毕业的是 late stream 的消费：prepass/opaque consumer 仍只消费 early stream。early/late 已以精确 stage mask 分区，late counter、bin capacity、indexed/non-indexed 总数和 overflow 已进入异步 readback，但还没有真实 GPU 图像和快速相机验证。因此不得把“独立命令和 parity 已闭环”写成 two-phase HZB 已完成；`hzb_occlusion` 与 opaque indirect 继续默认关闭。下一切片应将 late commands 接入 late prepass，再完成图像 parity 和性能门槛。
+Two-phase HZB 已形成完整代码闭环：opaque indirect consumer 在 `hzb_occlusion` 开启时按 bin 依次消费互斥的 early/late streams；精确 stage mask 保证不重不漏，late counter、capacity、indexed/non-indexed 总数与 overflow 均进入异步 readback。这里的“完成”只指代码路径、静态契约和可观测性闭环；本轮按要求没有运行真实 GPU 项目，因此图像 parity、快速相机和性能门槛仍未取得证据。`hzb_occlusion` 与 opaque indirect 继续默认关闭，只有运行时验收通过后才毕业为生产路径。
 
 标准 opaque bootstrap 已从统一 work stream 取 opaque work，并绑定 Material ABI 三表；Bevy visibility list 只负责清理被移出的旧 phase item。该路径已验证 instance/material generation fallback，按 mesh layout 读取 world normal/UV，并消费 base color、emissive、metallic、roughness、reflectance、AO 形成最小 direct BRDF 骨架；相机向量来自真实 view uniform，法线采用逆转置矩阵以支持非均匀缩放。GPU indirect draw 的代码链路已经存在，但默认关闭并等待真实运行 parity；完整 clustered lights、IBL、阴影、纹理/法线、clearcoat/transmission、masked/NPR/custom 分类管线仍是下一层实现。
 

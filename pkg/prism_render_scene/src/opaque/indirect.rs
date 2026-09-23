@@ -97,9 +97,6 @@ impl RenderCommand<Opaque3d> for DrawGpuSceneIndirectBin {
         let Some(vertices) = allocator.mesh_vertex_slice(&mesh_id) else {
             return RenderCommandResult::Skip;
         };
-        let Some((indexed, non_indexed)) = buffers.indirect() else {
-            return RenderCommandResult::Skip;
-        };
         pass.set_vertex_buffer(0, vertices.buffer.slice(..));
         match mesh.buffer_info {
             RenderMeshBufferInfo::Indexed { index_format, .. } => {
@@ -107,20 +104,38 @@ impl RenderCommand<Opaque3d> for DrawGpuSceneIndirectBin {
                     return RenderCommandResult::Skip;
                 };
                 pass.set_index_buffer(indices.buffer.slice(..), index_format);
-                pass.multi_draw_indexed_indirect(
-                    indexed,
-                    indirect_command_index(view_bins, bin) as u64 * INDEXED_COMMAND_SIZE,
-                    bin.command_capacity,
-                );
+                for late in indirect_streams(settings.hzb_occlusion) {
+                    let Some((indexed, _)) = buffers.indirect_for(late) else {
+                        return RenderCommandResult::Skip;
+                    };
+                    pass.multi_draw_indexed_indirect(
+                        indexed,
+                        indirect_command_index(view_bins, bin) as u64 * INDEXED_COMMAND_SIZE,
+                        bin.command_capacity,
+                    );
+                }
             }
-            RenderMeshBufferInfo::NonIndexed => pass.multi_draw_indirect(
-                non_indexed,
-                indirect_command_index(view_bins, bin) as u64 * NON_INDEXED_COMMAND_SIZE,
-                bin.command_capacity,
-            ),
+            RenderMeshBufferInfo::NonIndexed => {
+                for late in indirect_streams(settings.hzb_occlusion) {
+                    let Some((_, non_indexed)) = buffers.indirect_for(late) else {
+                        return RenderCommandResult::Skip;
+                    };
+                    pass.multi_draw_indirect(
+                        non_indexed,
+                        indirect_command_index(view_bins, bin) as u64 * NON_INDEXED_COMMAND_SIZE,
+                        bin.command_capacity,
+                    );
+                }
+            }
         }
         RenderCommandResult::Success
     }
+}
+
+fn indirect_streams(hzb_occlusion: bool) -> impl Iterator<Item = bool> {
+    [false, true]
+        .into_iter()
+        .take(1 + usize::from(hzb_occlusion))
 }
 
 fn indirect_command_index(
@@ -150,7 +165,7 @@ mod tests {
         build_view_draw_bins, DrawBinCandidate, DrawBinKey, RenderPassMask,
     };
 
-    use super::indirect_command_index;
+    use super::{indirect_command_index, indirect_streams};
 
     fn handle(index: u32) -> GenerationalHandle {
         GenerationalHandle {
@@ -201,5 +216,11 @@ mod tests {
             indirect_command_index(&second, &second.bins[0]),
             second.global_candidate_start + second.bins[0].command_start
         );
+    }
+
+    #[test]
+    fn late_stream_is_consumed_only_when_two_phase_hzb_is_enabled() {
+        assert_eq!(indirect_streams(false).collect::<Vec<_>>(), [false]);
+        assert_eq!(indirect_streams(true).collect::<Vec<_>>(), [false, true]);
     }
 }
