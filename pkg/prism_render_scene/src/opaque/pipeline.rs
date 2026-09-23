@@ -23,6 +23,8 @@ pub enum GpuSceneDebugView {
 pub(crate) struct GpuSceneOpaquePipelineKey {
     pub mesh: MeshPipelineKey,
     pub debug: GpuSceneDebugView,
+    pub has_normals: bool,
+    pub has_uvs: bool,
 }
 
 #[derive(Resource)]
@@ -106,19 +108,31 @@ fn decompress_vertex_position(
         );
         for compressed in [false, true] {
             for debug_view in 0..=GpuSceneDebugView::Motion as u32 {
-                let mut defs = Vec::new();
-                for candidate in 1..=GpuSceneDebugView::Motion as u32 {
-                    defs.push(ShaderDefVal::Bool(
-                        format!("PRISM_DEBUG_VIEW_{candidate}").into(),
-                        debug_view == candidate,
-                    ));
+                for normals in [false, true] {
+                    for uvs in [false, true] {
+                        let mut defs = Vec::new();
+                        for candidate in 1..=GpuSceneDebugView::Motion as u32 {
+                            defs.push(ShaderDefVal::Bool(
+                                format!("PRISM_DEBUG_VIEW_{candidate}").into(),
+                                debug_view == candidate,
+                            ));
+                        }
+                        if compressed {
+                            defs.push("VERTEX_POSITIONS_COMPRESSED".into());
+                        }
+                        if normals {
+                            defs.push("VERTEX_NORMALS".into());
+                        }
+                        if uvs {
+                            defs.push("VERTEX_UVS".into());
+                        }
+                        cache
+                            .get(debug_view as usize, shader_id, &defs)
+                            .unwrap_or_else(|error| {
+                                panic!("opaque specialization failed: {error}")
+                            });
+                    }
                 }
-                if compressed {
-                    defs.push("VERTEX_POSITIONS_COMPRESSED".into());
-                }
-                cache
-                    .get(debug_view as usize, shader_id, &defs)
-                    .unwrap_or_else(|error| panic!("opaque specialization failed: {error}"));
             }
         }
     }
@@ -133,6 +147,12 @@ impl SpecializedMeshPipeline for GpuSceneOpaquePipeline {
         layout: &MeshVertexBufferLayoutRef,
     ) -> Result<RenderPipelineDescriptor, SpecializedMeshPipelineError> {
         let mut shader_defs = Vec::new();
+        if key.has_normals {
+            shader_defs.push("VERTEX_NORMALS".into());
+        }
+        if key.has_uvs {
+            shader_defs.push("VERTEX_UVS".into());
+        }
         for debug_view in 1..=GpuSceneDebugView::Motion as u32 {
             shader_defs.push(bevy_shader::ShaderDefVal::Bool(
                 format!("PRISM_DEBUG_VIEW_{debug_view}").into(),
@@ -146,9 +166,14 @@ impl SpecializedMeshPipeline for GpuSceneOpaquePipeline {
         {
             shader_defs.push("VERTEX_POSITIONS_COMPRESSED".into());
         }
-        let vertex_layout = layout
-            .0
-            .get_layout(&[Mesh::ATTRIBUTE_POSITION.at_shader_location(0)])?;
+        let mut attributes = vec![Mesh::ATTRIBUTE_POSITION.at_shader_location(0)];
+        if key.has_normals {
+            attributes.push(Mesh::ATTRIBUTE_NORMAL.at_shader_location(1));
+        }
+        if key.has_uvs {
+            attributes.push(Mesh::ATTRIBUTE_UV_0.at_shader_location(2));
+        }
+        let vertex_layout = layout.0.get_layout(&attributes)?;
         let view = self
             .mesh_pipeline
             .get_view_layout(MeshPipelineViewLayoutKey::from(key.mesh));

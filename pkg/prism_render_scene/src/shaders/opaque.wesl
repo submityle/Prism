@@ -45,6 +45,10 @@ struct Vertex {
     @location(0) compressed_position: vec4<f32>,
     @else
     @location(0) position: vec3<f32>,
+    @if(VERTEX_NORMALS)
+    @location(1) normal: vec3<f32>,
+    @if(VERTEX_UVS)
+    @location(2) uv: vec2<f32>,
 };
 
 struct VertexOutput {
@@ -52,6 +56,9 @@ struct VertexOutput {
     @location(0) @interpolate(flat) valid: u32,
     @location(1) @interpolate(flat) debug_color: vec3<f32>,
     @location(2) @interpolate(flat) material_index: u32,
+    @location(3) world_position: vec3<f32>,
+    @location(4) world_normal: vec3<f32>,
+    @location(5) uv: vec2<f32>,
 };
 
 @vertex
@@ -72,11 +79,20 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         scene_current_transforms[scene_address.index].world_from_local
     );
     var out: VertexOutput;
+    let world_position = (world_from_local * vec4(position, 1.0)).xyz;
     out.clip_position = select(
         vec4<f32>(2.0, 2.0, 2.0, 1.0),
-        position_world_to_clip((world_from_local * vec4(position, 1.0)).xyz),
+        position_world_to_clip(world_position),
         valid,
     );
+    out.world_position = world_position;
+    @if(VERTEX_NORMALS) {
+        out.world_normal = normalize((world_from_local * vec4(vertex.normal, 0.0)).xyz);
+    } @else {
+        out.world_normal = vec3<f32>(0.0, 1.0, 0.0);
+    }
+    @if(VERTEX_UVS) { out.uv = vertex.uv; }
+    @else { out.uv = vec2<f32>(0.0); }
     out.valid = u32(valid);
     let material_in_bounds = instance.material_index < arrayLength(&material_headers);
     let requested_material_index = select(0u, instance.material_index, material_in_bounds);
@@ -110,5 +126,20 @@ fn vertex(vertex: Vertex) -> VertexOutput {
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     if in.valid == 0u { discard; }
-    return vec4<f32>(in.debug_color, 1.0);
+    @if(PRISM_DEBUG_VIEW_1 || PRISM_DEBUG_VIEW_2 || PRISM_DEBUG_VIEW_3 || PRISM_DEBUG_VIEW_4) {
+        return vec4<f32>(in.debug_color, 1.0);
+    }
+    let surface = material_parameters[material_headers[in.material_index].parameter_offset];
+    let N = normalize(in.world_normal);
+    let L = normalize(vec3<f32>(0.4, 0.8, 0.3));
+    let V = normalize(-in.world_position);
+    let H = normalize(L + V);
+    let NdotL = max(dot(N, L), 0.0);
+    let NdotH = max(dot(N, H), 0.0);
+    let roughness = clamp(surface.perceptual_roughness, 0.045, 1.0);
+    let diffuse = surface.base_color.rgb * (1.0 - surface.metallic) * NdotL;
+    let f0 = mix(vec3<f32>(0.04 * surface.reflectance), surface.base_color.rgb, surface.metallic);
+    let specular = f0 * pow(NdotH, max(2.0 / (roughness * roughness) - 2.0, 1.0)) * NdotL;
+    let ambient = surface.base_color.rgb * 0.03 * surface.ambient_occlusion;
+    return vec4<f32>(ambient + diffuse + specular + surface.emissive.rgb, surface.base_color.a);
 }

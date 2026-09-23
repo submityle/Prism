@@ -1,7 +1,7 @@
 use bevy_core_pipeline::core_3d::{Opaque3d, Opaque3dBatchSetKey, Opaque3dBinKey};
 use bevy_ecs::prelude::*;
 use bevy_ecs::system::SystemParam;
-use bevy_mesh::Mesh3d;
+use bevy_mesh::{Mesh, Mesh3d};
 use bevy_pbr::{MeshPipelineKey, RenderMeshInstances, ViewKeyCache};
 use bevy_render::{
     camera::DirtySpecializations,
@@ -167,6 +167,8 @@ fn queue_one(
         GpuSceneOpaquePipelineKey {
             mesh: key,
             debug: debug_view,
+            has_normals: mesh.layout.0.contains(Mesh::ATTRIBUTE_NORMAL),
+            has_uvs: mesh.layout.0.contains(Mesh::ATTRIBUTE_UV_0),
         },
         &mesh.layout,
     ) else {
