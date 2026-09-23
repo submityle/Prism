@@ -1,18 +1,17 @@
 use bevy_core_pipeline::mip_generation::experimental::depth::ViewDepthPyramid;
 use bevy_ecs::prelude::*;
 use bevy_platform::collections::{HashMap, HashSet};
-use bevy_render::{render_resource::TextureView, view::RetainedViewEntity};
+use bevy_render::view::RetainedViewEntity;
 
 use super::runtime::UnifiedVisibilityState;
 
-/// Prism's temporal ownership metadata for Bevy's public depth-pyramid view.
-/// The texture itself remains backend-owned; consumers use this component to
-/// distinguish last-frame history from the current frame written later in the
-/// Core3d schedule.
+/// Prism's temporal validity metadata for Bevy's persistent depth-pyramid
+/// texture. Bevy updates that same texture twice in the Core3d schedule: its
+/// contents are previous-frame HZB before early downsample and current-frame
+/// HZB afterward. Prism therefore tracks epoch/mip validity, not a cloned
+/// `TextureView` (which would alias the same texture rather than snapshot it).
 #[derive(Component)]
 pub(crate) struct PrismViewHzbHistory {
-    previous: TextureView,
-    current: TextureView,
     mip_count: u32,
     history_epoch: u64,
     previous_valid: bool,
@@ -27,9 +26,7 @@ pub(crate) fn inspect_hzb_history(
     for history in &histories {
         diagnostics.hzb_views += 1;
         diagnostics.hzb_valid_histories += u32::from(history.previous_valid);
-        // Keep both texture identities and their epoch/mip contract live for
-        // the upcoming early/late bind groups.
-        let _ = (&history.previous, &history.current, history.mip_count, history.history_epoch);
+        let _ = (history.mip_count, history.history_epoch);
     }
 }
 
@@ -39,7 +36,6 @@ pub(crate) struct HzbHistoryCache {
 }
 
 struct CachedHzb {
-    texture: TextureView,
     mip_count: u32,
     history_epoch: u64,
 }
@@ -72,12 +68,7 @@ pub(crate) fn prepare_hzb_history(
                 flags,
             )
         });
-        let previous = cached
-            .map(|previous| previous.texture)
-            .unwrap_or_else(|| pyramid.all_mips.clone());
         commands.entity(entity).insert(PrismViewHzbHistory {
-            previous,
-            current: pyramid.all_mips.clone(),
             mip_count: pyramid.mip_count,
             history_epoch: current_epoch,
             previous_valid,
@@ -85,7 +76,6 @@ pub(crate) fn prepare_hzb_history(
         cache.views.insert(
             retained_view,
             CachedHzb {
-                texture: pyramid.all_mips.clone(),
                 mip_count: pyramid.mip_count,
                 history_epoch: current_epoch,
             },
