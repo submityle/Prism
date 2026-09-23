@@ -115,6 +115,16 @@ pub struct RenderVisibilityCounter {
 }
 impl_atomic_pod!(RenderVisibilityCounter, RenderVisibilityCounterBlob);
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Pod, ShaderType, Zeroable)]
+pub struct RenderVisibilityDispatch {
+    pub view_index: u32,
+    pub candidate_count: u32,
+    pub output_start: u32,
+    pub output_end: u32,
+}
+impl_atomic_pod!(RenderVisibilityDispatch, RenderVisibilityDispatchBlob);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,5 +135,6 @@ mod tests {
         assert_eq!(size_of::<RenderVisibilityWorkItem>(), 48);
         assert_eq!(size_of::<RenderVisibilityRange>(), 16);
         assert_eq!(size_of::<RenderVisibilityCounter>(), 16);
+        assert_eq!(size_of::<RenderVisibilityDispatch>(), 16);
     }
 }

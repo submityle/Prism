@@ -96,6 +96,7 @@ pub(crate) fn prepare_visibility_compute_bind_group(
 
 #[cfg(test)]
 mod tests {
+    use super::RenderVisibilityCounter;
     use bevy_asset::{uuid::Uuid, AssetId};
     use bevy_shader::{Shader, ShaderCache, ShaderCacheSource};
 
@@ -126,5 +127,31 @@ mod tests {
         cache
             .get(0, shader_id, &[])
             .unwrap_or_else(|error| panic!("visibility compute shader failed: {error}"));
+    }
+
+    #[test]
+    fn output_layout_matches_shader_access_modes() {
+        use bevy_material::bind_group_layout_entries::{
+            binding_types::storage_buffer, BindGroupLayoutEntries,
+        };
+        use bevy_render::render_resource::ShaderStages;
+        use bevy_render::render_resource::{BindingType, BufferBindingType};
+
+        let entries = BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                storage_buffer::<RenderVisibilityCounter>(false),
+                storage_buffer::<super::super::rows::RenderVisibilityWorkItem>(false),
+                storage_buffer::<super::super::rows::RenderVisibilityRange>(false),
+                storage_buffer::<u32>(false),
+            ),
+        );
+        assert!(entries.iter().all(|entry| matches!(
+            entry.ty,
+            BindingType::Buffer {
+                ty: BufferBindingType::Storage { read_only: false },
+                ..
+            }
+        )));
     }
 }

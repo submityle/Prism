@@ -19,7 +19,10 @@ use crate::{
     visibility::{
         buffers::UnifiedVisibilityBuffers,
         gpu::{VisibilityComputeBindGroup, VisibilityComputePipeline},
-        rows::{RenderVisibilityRange, RenderVisibilityView, RenderVisibilityWorkItem},
+        rows::{
+            RenderVisibilityDispatch, RenderVisibilityRange, RenderVisibilityView,
+            RenderVisibilityWorkItem,
+        },
         runtime::{
             PrismVisibilityDiagnostics, UnifiedVisibilityEnabled, UnifiedVisibilitySettings,
             UnifiedVisibilityState, VisibilityFrameGraph,
@@ -214,13 +217,13 @@ pub(crate) fn dispatch_unified_visibility(
         pass.set_bind_group(2, output_bind_group, &[]);
         for (view_index, _) in state.views.iter().enumerate() {
             let output_start = (view_index as u32).saturating_mul(buffers.gpu_slots_per_view());
-            let immediates = [
-                view_index as u32,
+            let immediates = RenderVisibilityDispatch {
+                view_index: view_index as u32,
                 candidate_count,
                 output_start,
-                output_start.saturating_add(buffers.gpu_slots_per_view()),
-            ];
-            pass.set_immediates(0, bytemuck::cast_slice(&immediates));
+                output_end: output_start.saturating_add(buffers.gpu_slots_per_view()),
+            };
+            pass.set_immediates(0, bytemuck::bytes_of(&immediates));
             pass.dispatch_workgroups(candidate_count.div_ceil(VISIBILITY_WORKGROUP_SIZE), 1, 1);
             diagnostics.gpu_compute_dispatches += 1;
             diagnostics.gpu_candidates += candidate_count;
