@@ -118,6 +118,9 @@ pub(crate) fn collect_visibility_parity_readback(
     let mut matching = 0;
     let mut mismatched = 0;
     for (view_index, counter) in counters.iter().enumerate() {
+        if counter.overflow_count != 0 {
+            diagnostics.parity_overflowed_views += 1;
+        }
         let count = counter.visible_count.min(in_flight.slots_per_view as u32) as usize;
         let gpu_start = view_index * in_flight.slots_per_view;
         let gpu_end = gpu_start + count;
@@ -125,7 +128,8 @@ pub(crate) fn collect_visibility_parity_readback(
         let cpu_start = cpu_range.start as usize;
         let cpu_end = cpu_start + cpu_range.count as usize;
         let same_count = counter.visible_count == cpu_range.count;
-        let same_work = same_count
+        let same_work = counter.overflow_count == 0
+            && same_count
             && unordered_work_matches(
                 &gpu_work[gpu_start..gpu_end],
                 &in_flight.cpu_work[cpu_start..cpu_end],

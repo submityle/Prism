@@ -189,4 +189,5 @@ pub struct PrismVisibilityDiagnostics {
     pub parity_mismatched_views: u64,
     pub parity_dropped_frames: u64,
     pub parity_readback_failures: u64,
+    pub parity_overflowed_views: u64,
 }
