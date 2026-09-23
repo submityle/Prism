@@ -3,6 +3,7 @@ mod consumer;
 mod gpu;
 mod graph;
 mod hzb;
+mod hzb_gpu;
 mod plugin;
 mod readback;
 mod rows;
