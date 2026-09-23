@@ -95,6 +95,7 @@ fn culling_validates_scene_lod_material_and_occlusion() {
             previous_lods: &previous,
             occluded: &occluded,
             capacity: 8,
+            previous_history_epoch: Some(1),
         },
     );
     assert_eq!(work.len(), 1);

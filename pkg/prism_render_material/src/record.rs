@@ -184,6 +184,21 @@ pub fn fallback_material_header(epoch: u64) -> GpuMaterialHeader {
     }
 }
 
+pub fn fallback_material_record(handle: GenerationalHandle, revision: u64) -> MaterialRecord {
+    MaterialRecord {
+        handle,
+        revision: revision as u32,
+        domain: MaterialDomain::Surface,
+        render_class: MaterialRenderClass::Opaque,
+        shading_model: MaterialShadingModel::Principled,
+        features: MaterialFeatureFlags::default(),
+        closure_mask: 1,
+        surface: GpuSurfaceParameters::default(),
+        textures: Vec::new(),
+        custom_program: None,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct MaterialRecord {
     pub handle: GenerationalHandle,

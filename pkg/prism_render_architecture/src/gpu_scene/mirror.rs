@@ -167,6 +167,19 @@ impl CpuRenderScene {
         self.slots.len()
     }
 
+    pub fn live_handles(&self) -> Vec<SceneHandle> {
+        self.slots
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| {
+                slot.record.map(|_| SceneHandle {
+                    index: index as u32,
+                    generation: slot.generation,
+                })
+            })
+            .collect()
+    }
+
     fn apply_operation(
         &mut self,
         operation: SceneOperation,

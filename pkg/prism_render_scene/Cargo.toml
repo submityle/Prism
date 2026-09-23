@@ -25,6 +25,7 @@ bevy_shader = { path = "../../crates/bevy_shader", version = "0.20.0-dev" }
 bytemuck = { version = "1.5", features = ["derive", "must_cast"] }
 prism_render_architecture = { path = "../prism_render_architecture" }
 prism_render_material = { path = "../prism_render_material", features = ["bevy"] }
+prism_render_visibility = { path = "../prism_render_visibility" }
 
 [lints]
 workspace = true

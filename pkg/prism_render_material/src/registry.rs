@@ -130,6 +130,11 @@ impl MaterialRegistry {
             .as_ref()
             .map(|slot| &slot.record)
     }
+    pub fn record_or_fallback(&self, handle: GenerationalHandle) -> MaterialRecord {
+        self.get(handle)
+            .cloned()
+            .unwrap_or_else(|| crate::fallback_material_record(handle, self.epoch))
+    }
     pub fn generation_at(&self, index: u32) -> Option<u32> {
         self.generations.get(index as usize).copied()
     }

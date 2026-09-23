@@ -382,6 +382,8 @@ UE RDG pass sequence 被翻译为 Prism graph pass，不保留 UE RDG builder AP
 
 这里的“完成 Material ABI”指身份、数据、上传、恢复与消费契约闭环，不等于 UE 同画质已经完成。当前 opaque consumer 仍需改为消费统一 visible work，并用该 ABI 执行完整 PBR/NPR resolve；纹理 descriptor residency、virtual texture 和离线高精度 closure 仍属于后续 consumer/virtual-resource 工作。
 
+统一可见性 RenderApp 基线已经落在 `pkg/prism_render_scene::visibility`：它从 GPU Scene、Material ABI 和 Bevy 多视图状态构建共享 work stream，维护 stable view handle、camera cut/history epoch、LOD hysteresis、overflow-safe capacity、诊断、GPU work/range buffer 和 FrameGraph 资源访问声明。当前执行后端仍是 CPU deterministic reference 并明确计入 `cpu_reference_frames`；`gpu_compute_dispatches` 保持 0，直到 GPU generation/layer/frustum/HZB/compaction/indirect kernel 真正接线。这样可先冻结 consumer ABI，同时避免把 CPU 上传误称为 GPU-driven。
+
 ## 9. TSR 移植包
 
 ### 9.1 为什么先做

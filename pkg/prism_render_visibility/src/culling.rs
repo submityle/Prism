@@ -19,6 +19,7 @@ pub struct VisibilityInput<'a> {
     pub previous_lods: &'a BTreeMap<(crate::ViewHandle, SceneHandle), u16>,
     pub occluded: &'a BTreeSet<(crate::ViewHandle, SceneHandle)>,
     pub capacity: u32,
+    pub previous_history_epoch: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -43,7 +44,7 @@ pub fn cull_view(
         ..Default::default()
     };
     let use_occlusion =
-        view.history_policy(Some(view.history_epoch)) == crate::HistoryPolicy::Reuse;
+        view.history_policy(input.previous_history_epoch) == crate::HistoryPolicy::Reuse;
     for &handle in input.handles {
         let Some(instance) = input.scene.get(handle) else {
             stats.stale_handles += 1;

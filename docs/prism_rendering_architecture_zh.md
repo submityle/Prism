@@ -1299,7 +1299,7 @@ available_budget
 
 退出条件：PBR/NPR 共享可见性；大量材质场景不退化为大量 draw call。
 
-当前进度（2026-09-23）：Material ABI 核心和 RenderApp 接入已经完成，包括版本化三表 ABI、`StandardMaterial` 自动映射、分代回收、稀疏上传、设备恢复、fallback slot、bind group、WESL generation 校验以及 GPU Scene material handle 自动关联。统一可见性的后端无关 CPU reference 也已建立，但 GPU compute culling/compaction/indirect、HZB early/late cull、visibility buffer 和 opaque PBR/NPR consumer 尚未达到本阶段退出条件，因此 Phase 2 仍为进行中。
+当前进度（2026-09-23）：Material ABI 核心和 RenderApp 接入已经完成，包括版本化三表 ABI、`StandardMaterial` 自动映射、分代回收、稀疏上传、设备恢复、fallback slot、bind group、WESL generation 校验以及 GPU Scene material handle 自动关联。统一可见性的 RenderApp 基线也已接入：多视图稳定身份、camera cut/history epoch、frustum/layer/material/LOD 分类、稳定 work/range GPU buffer、FrameGraph 声明、设备恢复和 consumer API 已闭环。当前实现刻意标记为 CPU deterministic reference（诊断中的 `cpu_reference_frames`），尚未虚构 GPU compute 已完成；GPU compute culling/compaction/indirect、previous/current HZB early/late cull、visibility buffer 和 opaque PBR/NPR consumer 尚未达到本阶段退出条件，因此 Phase 2 仍为进行中。
 
 ### Phase 3：虚拟几何流送（10–16 周）
 

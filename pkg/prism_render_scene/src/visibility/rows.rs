@@ -1,0 +1,118 @@
+use bevy_math::{Mat4, Vec4};
+use bevy_render::{
+    impl_atomic_pod,
+    render_resource::{AtomicPod, ShaderType},
+};
+use bytemuck::{Pod, Zeroable};
+use prism_render_architecture::abi::GenerationalHandle;
+use prism_render_visibility::{GpuRenderWorkItem, GpuViewRecord};
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Pod, ShaderType, Zeroable)]
+pub struct RenderVisibilityView {
+    pub clip_from_world: Mat4,
+    pub previous_clip_from_world: Mat4,
+    pub frustum_planes: [Vec4; 6],
+    pub world_position_lod_scale: Vec4,
+    pub viewport: [u32; 4],
+    pub handle_index: u32,
+    pub handle_generation: u32,
+    pub layer_mask: u32,
+    pub flags: u32,
+    pub history_epoch_low: u32,
+    pub history_epoch_high: u32,
+    pub _padding: [u32; 2],
+}
+impl_atomic_pod!(RenderVisibilityView, RenderVisibilityViewBlob);
+
+impl From<&GpuViewRecord> for RenderVisibilityView {
+    fn from(view: &GpuViewRecord) -> Self {
+        Self {
+            clip_from_world: Mat4::from_cols_array_2d(&view.clip_from_world),
+            previous_clip_from_world: Mat4::from_cols_array_2d(&view.previous_clip_from_world),
+            frustum_planes: view.frustum_planes.map(Vec4::from_array),
+            world_position_lod_scale: Vec4::new(
+                view.world_position[0],
+                view.world_position[1],
+                view.world_position[2],
+                view.lod_scale,
+            ),
+            viewport: view.viewport,
+            handle_index: view.handle.index,
+            handle_generation: view.handle.generation,
+            layer_mask: view.layer_mask,
+            flags: view.flags.0,
+            history_epoch_low: view.history_epoch as u32,
+            history_epoch_high: (view.history_epoch >> 32) as u32,
+            _padding: [0; 2],
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Pod, ShaderType, Zeroable)]
+pub struct RenderVisibilityWorkItem {
+    pub scene_index: u32,
+    pub scene_generation: u32,
+    pub geometry_index: u32,
+    pub geometry_generation: u32,
+    pub material_index: u32,
+    pub material_generation: u32,
+    pub lod_or_cluster: u32,
+    pub pass_mask: u32,
+    pub sort_key_low: u32,
+    pub sort_key_high: u32,
+    pub _padding: [u32; 2],
+}
+impl_atomic_pod!(RenderVisibilityWorkItem, RenderVisibilityWorkItemBlob);
+
+impl From<GpuRenderWorkItem> for RenderVisibilityWorkItem {
+    fn from(item: GpuRenderWorkItem) -> Self {
+        Self {
+            scene_index: item.scene.index,
+            scene_generation: item.scene.generation,
+            geometry_index: item.geometry.index,
+            geometry_generation: item.geometry.generation,
+            material_index: item.material.index,
+            material_generation: item.material.generation,
+            lod_or_cluster: item.lod_or_cluster,
+            pass_mask: item.pass_mask.0,
+            sort_key_low: item.sort_key.0 as u32,
+            sort_key_high: (item.sort_key.0 >> 32) as u32,
+            _padding: [0; 2],
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Pod, ShaderType, Zeroable)]
+pub struct RenderVisibilityRange {
+    pub view_index: u32,
+    pub view_generation: u32,
+    pub start: u32,
+    pub count: u32,
+}
+impl_atomic_pod!(RenderVisibilityRange, RenderVisibilityRangeBlob);
+
+impl RenderVisibilityRange {
+    pub fn new(view: GenerationalHandle, start: u32, count: u32) -> Self {
+        Self {
+            view_index: view.index,
+            view_generation: view.generation,
+            start,
+            count,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn layouts_match_visibility_shader_contract() {
+        assert_eq!(size_of::<RenderVisibilityView>(), 288);
+        assert_eq!(size_of::<RenderVisibilityWorkItem>(), 48);
+        assert_eq!(size_of::<RenderVisibilityRange>(), 16);
+    }
+}

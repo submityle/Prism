@@ -17,6 +17,7 @@ mod material;
 mod opaque;
 mod plugin;
 mod scene;
+mod visibility;
 
 pub use buffers::{
     GpuSceneBuffers, RenderGpuSceneBounds, RenderGpuSceneInstance, RenderGpuSceneTransform,
@@ -33,6 +34,10 @@ pub use material::{
 pub use opaque::{GpuSceneDebugView, GpuSceneOpaqueEnabled, PrismGpuSceneOpaquePlugin};
 pub use plugin::{GpuSceneMode, PrismGpuScenePlugin};
 pub use scene::RenderGpuScene;
+pub use visibility::{
+    PrismVisibilityDiagnostics, PrismVisibilityPlugin, UnifiedVisibilityEnabled,
+    UnifiedVisibilityReader,
+};
 
 #[cfg(test)]
 mod tests;
