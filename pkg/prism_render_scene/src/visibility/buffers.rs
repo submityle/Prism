@@ -116,8 +116,9 @@ impl UnifiedVisibilityBuffers {
         ))
     }
 
-    pub(crate) fn compute_buffers(&self) -> Option<(&Buffer, &Buffer, &Buffer, &Buffer)> {
+    pub(crate) fn compute_buffers(&self) -> Option<(&Buffer, &Buffer, &Buffer, &Buffer, &Buffer)> {
         Some((
+            self.views.buffer()?,
             self.counters.buffer()?,
             self.gpu_work.buffer()?,
             self.gpu_ranges.buffer()?,

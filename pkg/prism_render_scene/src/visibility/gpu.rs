@@ -1,7 +1,10 @@
 use bevy_asset::{load_embedded_asset, Handle};
 use bevy_ecs::prelude::*;
 use bevy_material::{
-    bind_group_layout_entries::{binding_types::storage_buffer, BindGroupLayoutEntries},
+    bind_group_layout_entries::{
+        binding_types::{storage_buffer, storage_buffer_read_only},
+        BindGroupLayoutEntries,
+    },
     descriptor::BindGroupLayoutDescriptor,
 };
 use bevy_render::{
@@ -15,7 +18,10 @@ use bevy_shader::Shader;
 
 use crate::{buffers::GpuSceneBindGroup, MaterialBindGroup};
 
-use super::{buffers::UnifiedVisibilityBuffers, rows::RenderVisibilityCounter};
+use super::{
+    buffers::UnifiedVisibilityBuffers,
+    rows::{RenderVisibilityCounter, RenderVisibilityView},
+};
 
 #[derive(Resource)]
 pub(crate) struct VisibilityComputePipeline {
@@ -26,7 +32,7 @@ pub(crate) struct VisibilityComputePipeline {
 #[derive(Resource, Default)]
 pub(crate) struct VisibilityComputeBindGroup {
     pub bind_group: Option<BindGroup>,
-    buffer_ids: Option<[BufferId; 4]>,
+    buffer_ids: Option<[BufferId; 5]>,
 }
 
 pub(crate) fn init_visibility_compute_pipeline(
@@ -40,6 +46,7 @@ pub(crate) fn init_visibility_compute_pipeline(
     let entries = BindGroupLayoutEntries::sequential(
         ShaderStages::COMPUTE,
         (
+            storage_buffer_read_only::<RenderVisibilityView>(false),
             storage_buffer::<RenderVisibilityCounter>(false),
             storage_buffer::<super::rows::RenderVisibilityWorkItem>(false),
             storage_buffer::<super::rows::RenderVisibilityRange>(false),
@@ -74,10 +81,16 @@ pub(crate) fn prepare_visibility_compute_bind_group(
     device: Res<RenderDevice>,
     mut bindings: ResMut<VisibilityComputeBindGroup>,
 ) {
-    let Some((counters, work, ranges, overflow)) = buffers.compute_buffers() else {
+    let Some((views, counters, work, ranges, overflow)) = buffers.compute_buffers() else {
         return;
     };
-    let ids = [counters.id(), work.id(), ranges.id(), overflow.id()];
+    let ids = [
+        views.id(),
+        counters.id(),
+        work.id(),
+        ranges.id(),
+        overflow.id(),
+    ];
     if bindings.buffer_ids == Some(ids) {
         return;
     }
@@ -85,6 +98,7 @@ pub(crate) fn prepare_visibility_compute_bind_group(
         "prism visibility output",
         &pipeline.output_layout,
         &BindGroupEntries::sequential((
+            views.as_entire_binding(),
             counters.as_entire_binding(),
             work.as_entire_binding(),
             ranges.as_entire_binding(),
@@ -96,7 +110,9 @@ pub(crate) fn prepare_visibility_compute_bind_group(
 
 #[cfg(test)]
 mod tests {
-    use super::RenderVisibilityCounter;
+    use super::{
+        storage_buffer, storage_buffer_read_only, RenderVisibilityCounter, RenderVisibilityView,
+    };
     use bevy_asset::{uuid::Uuid, AssetId};
     use bevy_shader::{Shader, ShaderCache, ShaderCacheSource};
 
@@ -131,22 +147,28 @@ mod tests {
 
     #[test]
     fn output_layout_matches_shader_access_modes() {
-        use bevy_material::bind_group_layout_entries::{
-            binding_types::storage_buffer, BindGroupLayoutEntries,
-        };
+        use bevy_material::bind_group_layout_entries::BindGroupLayoutEntries;
         use bevy_render::render_resource::ShaderStages;
         use bevy_render::render_resource::{BindingType, BufferBindingType};
 
         let entries = BindGroupLayoutEntries::sequential(
             ShaderStages::COMPUTE,
             (
+                storage_buffer_read_only::<RenderVisibilityView>(false),
                 storage_buffer::<RenderVisibilityCounter>(false),
                 storage_buffer::<super::super::rows::RenderVisibilityWorkItem>(false),
                 storage_buffer::<super::super::rows::RenderVisibilityRange>(false),
                 storage_buffer::<u32>(false),
             ),
         );
-        assert!(entries.iter().all(|entry| matches!(
+        assert!(matches!(
+            entries[0].ty,
+            BindingType::Buffer {
+                ty: BufferBindingType::Storage { read_only: true },
+                ..
+            }
+        ));
+        assert!(entries[1..].iter().all(|entry| matches!(
             entry.ty,
             BindingType::Buffer {
                 ty: BufferBindingType::Storage { read_only: false },
