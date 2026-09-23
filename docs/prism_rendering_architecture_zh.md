@@ -1307,7 +1307,7 @@ Two-phase HZB 已从纯契约推进到 GPU classification 路径：`VisibilitySt
 
 当前 CR 已把同帧 late 路径推进到独立命令生成：early 与 late 分别拥有 bin header/count 和 indexed/non-indexed indirect stream，current-HZB 后的 late kernel 会重新校验 geometry generation、resident LOD、indexed class 和 command bounds，再写入完整 draw arguments，不会复用 early atomic 或双计数。声明式 FrameGraph 也已把 `current_hzb → late_compact`、geometry read 与 late output hazards 分开建模。
 
-这仍不等于 two-phase HZB 已毕业：late stream 还没有接入 prepass/opaque consumer，early/late work 的互斥与合并语义还需 GPU readback 验证，late counter/overflow 诊断也尚未闭环。因此 `hzb_occlusion` 继续默认关闭；在真实 GPU 图像、命令 parity、快速相机与性能门槛通过前，不得启用生产路径。
+这仍不等于 two-phase HZB 已毕业：late stream 还没有接入 prepass/opaque consumer。early/late work 已用 `LATE_RETEST | LATE_VISIBLE` 的精确掩码保证所有权互斥，late counter、bin capacity、indexed/non-indexed 总数和 overflow 也已进入异步 readback；但真实 GPU 图像、快速相机与性能门槛尚未验证。因此 `hzb_occlusion` 继续默认关闭，在这些运行时门槛通过前不得启用生产路径。
 
 Opaque bootstrap 已改为按统一 visibility work stream 入队，而不是把 Bevy `RenderVisibleEntities` 当作绘制真值；后者仅用于删除旧 phase item。indirect gate 关闭或 capability 不足时，queue 仍逐 visible work item 入队，保证 direct fallback 不会错误地只绘制每个 bin 的代表实例。shader 同时绑定 Material ABI，并在 generation 不匹配时解析到 fallback slot。当前 shaded 模式已按 mesh layout 读取 world normal/UV，并消费 ABI base color、emissive、metallic、roughness、reflectance、AO，提供最小 direct BRDF 骨架；视线方向已读取实际 view world position，法线使用逆转置矩阵处理非均匀缩放并保护退化矩阵。这仍不是完整 clustered lights、IBL、shadow、normal/texture sampling、clearcoat/transmission 或 NPR resolve。
 
