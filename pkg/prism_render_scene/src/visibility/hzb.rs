@@ -30,9 +30,16 @@ pub(crate) fn install_hzb_schedule(app: &mut SubApp) {
 /// reports only histories that are safe to consume.
 fn dispatch_previous_hzb(
     history: Option<bevy_render::renderer::ViewQuery<&PrismViewHzbHistory>>,
+    settings: Res<super::runtime::UnifiedVisibilitySettings>,
     mut diagnostics: ResMut<super::runtime::PrismVisibilityDiagnostics>,
 ) {
-    if history.is_some_and(|history| history.into_inner().previous_valid) {
+    let _conservative_policy = (
+        settings.hzb_depth_bias.max(0.0),
+        settings.hzb_fast_motion_threshold.max(0.0),
+    );
+    if settings.hzb_occlusion
+        && history.is_some_and(|history| history.into_inner().previous_valid)
+    {
         diagnostics.hzb_previous_dispatches += 1;
     }
 }
@@ -41,9 +48,10 @@ fn dispatch_previous_hzb(
 /// deferred candidates visible; it never turns absence into rejection.
 fn dispatch_current_hzb(
     history: Option<bevy_render::renderer::ViewQuery<&PrismViewHzbHistory>>,
+    settings: Res<super::runtime::UnifiedVisibilitySettings>,
     mut diagnostics: ResMut<super::runtime::PrismVisibilityDiagnostics>,
 ) {
-    if history.is_some() {
+    if settings.hzb_occlusion && history.is_some() {
         diagnostics.hzb_current_dispatches += 1;
     }
 }

@@ -20,6 +20,13 @@ pub struct UnifiedVisibilitySettings {
     pub gpu_parity_max_items_per_view: u32,
     pub gpu_parity_readback: bool,
     pub indirect_first_instance: bool,
+    /// Keeps HZB rejection opt-in until the early/late compute consumers pass
+    /// runtime parity. Missing history always falls back to visible.
+    pub hzb_occlusion: bool,
+    /// Conservative reverse-Z depth bias in NDC units.
+    pub hzb_depth_bias: f32,
+    /// Projected motion above this value bypasses previous-HZB rejection.
+    pub hzb_fast_motion_threshold: f32,
 }
 
 impl Default for UnifiedVisibilitySettings {
@@ -30,6 +37,9 @@ impl Default for UnifiedVisibilitySettings {
             gpu_parity_max_items_per_view: 1 << 16,
             gpu_parity_readback: true,
             indirect_first_instance: false,
+            hzb_occlusion: false,
+            hzb_depth_bias: 0.001,
+            hzb_fast_motion_threshold: 0.05,
         }
     }
 }
