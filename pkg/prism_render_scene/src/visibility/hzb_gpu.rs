@@ -19,7 +19,15 @@ use bevy_math::{Mat4, Vec2, Vec3};
 use bevy_shader::Shader;
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, bevy_render::render_resource::ShaderType)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    bytemuck::Pod,
+    bytemuck::Zeroable,
+    bevy_render::render_resource::ShaderType,
+)]
 pub(crate) struct RenderHzbCullInput {
     pub uv_min: [f32; 2],
     pub uv_max: [f32; 2],
@@ -113,6 +121,70 @@ impl HzbVisibilityBuffers {
     pub(crate) fn bindings(&self) -> (&Buffer, &Buffer) {
         (&self.candidates, &self.stages)
     }
+}
+
+pub(crate) fn prepare_hzb_candidates(
+    scene: Res<crate::RenderGpuScene>,
+    state: Res<super::runtime::UnifiedVisibilityState>,
+    mut buffers: ResMut<HzbVisibilityBuffers>,
+    device: Res<RenderDevice>,
+    queue: Res<bevy_render::renderer::RenderQueue>,
+) {
+    let capacity = scene.mirror().capacity() as u32;
+    buffers.ensure_capacity(&device, capacity.max(1));
+    let Some(view) = state.views.first() else {
+        return;
+    };
+    let clip = Mat4::from_cols_array_2d(&view.clip_from_world);
+    let mut candidates = vec![RenderHzbCullInput::default(); capacity as usize];
+    for handle in scene.mirror().live_handles() {
+        let Some(record) = scene.mirror().get(handle) else {
+            continue;
+        };
+        let current_center = transform_point(record.current_transform, record.bounds.center);
+        let previous_center = transform_point(record.previous_transform, record.bounds.center);
+        if let Some(candidate) = project_sphere_to_hzb(
+            clip,
+            current_center,
+            previous_center,
+            record.bounds.radius,
+            view.viewport,
+        ) {
+            candidates[handle.index as usize] = candidate;
+        }
+    }
+    let (candidate_buffer, stage_buffer) = buffers.bindings();
+    if !candidates.is_empty() {
+        queue.write_buffer(candidate_buffer, 0, bytemuck::cast_slice(&candidates));
+        queue.write_buffer(
+            stage_buffer,
+            0,
+            bytemuck::cast_slice(&vec![
+                prism_render_visibility::VisibilityStageMask::EARLY.0;
+                candidates.len()
+            ]),
+        );
+    }
+}
+
+fn transform_point(
+    transform: prism_render_architecture::gpu_scene::SceneTransform,
+    point: [f32; 3],
+) -> Vec3 {
+    Vec3::new(
+        transform.rows[0][0] * point[0]
+            + transform.rows[0][1] * point[1]
+            + transform.rows[0][2] * point[2]
+            + transform.rows[0][3],
+        transform.rows[1][0] * point[0]
+            + transform.rows[1][1] * point[1]
+            + transform.rows[1][2] * point[2]
+            + transform.rows[1][3],
+        transform.rows[2][0] * point[0]
+            + transform.rows[2][1] * point[1]
+            + transform.rows[2][2] * point[2]
+            + transform.rows[2][3],
+    )
 }
 
 pub(crate) fn inspect_hzb_visibility_pipeline(

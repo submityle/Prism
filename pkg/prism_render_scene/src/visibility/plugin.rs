@@ -16,7 +16,8 @@ use super::{
     graph::visibility_frame_graph,
     hzb::{inspect_hzb_history, install_hzb_schedule, prepare_hzb_history},
     hzb_gpu::{
-        init_hzb_visibility_pipeline, inspect_hzb_visibility_pipeline, HzbVisibilityBuffers,
+        init_hzb_visibility_pipeline, inspect_hzb_visibility_pipeline, prepare_hzb_candidates,
+        HzbVisibilityBuffers,
     },
     readback::{
         collect_visibility_parity_readback, map_submitted_visibility_parity_readback,
@@ -91,6 +92,9 @@ impl Plugin for PrismVisibilityPlugin {
                         .chain()
                         .in_set(RenderSystems::PrepareResources),
                     inspect_hzb_visibility_pipeline.in_set(RenderSystems::Prepare),
+                    prepare_hzb_candidates
+                        .after(build_unified_visibility)
+                        .in_set(RenderSystems::PrepareResources),
                 ),
             );
         render_app.add_systems(
