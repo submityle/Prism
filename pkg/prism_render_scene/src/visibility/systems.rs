@@ -319,11 +319,14 @@ pub(crate) fn dispatch_late_hzb_visibility(
     enabled: Res<UnifiedVisibilityEnabled>,
     settings: Res<UnifiedVisibilitySettings>,
     state: Res<UnifiedVisibilityState>,
+    buffers: Res<UnifiedVisibilityBuffers>,
     mut diagnostics: ResMut<PrismVisibilityDiagnostics>,
 ) {
     if !enabled.0 || !settings.hzb_occlusion || state.views.is_empty() {
         return;
     }
+    debug_assert!(state.views.is_empty() || state.draw_bins.len() == state.views.len());
+    debug_assert!(buffers.inspect_late_buffers());
     // A same-frame late path requires separate command/count buffers so it can
     // merge without racing or double-incrementing early results.
     diagnostics.hzb_late_visibility_deferred += state.views.len() as u32;
