@@ -8,9 +8,13 @@ use bevy_material::{
     descriptor::BindGroupLayoutDescriptor,
 };
 use bevy_render::{
-    render_resource::{CachedComputePipelineId, ComputePipelineDescriptor, ShaderStages, TextureSampleType},
+    render_resource::{
+        Buffer, BufferDescriptor, BufferUsages, CachedComputePipelineId, ComputePipelineDescriptor,
+        ShaderStages, TextureSampleType,
+    },
     renderer::RenderDevice,
 };
+use bevy_render::render_resource::ShaderType;
 use bevy_shader::Shader;
 
 #[repr(C)]
@@ -28,10 +32,59 @@ pub(crate) struct HzbVisibilityPipeline {
     layout: BindGroupLayoutDescriptor,
 }
 
+#[derive(Resource)]
+pub(crate) struct HzbVisibilityBuffers {
+    candidates: Buffer,
+    stages: Buffer,
+    capacity: u32,
+}
+
+impl FromWorld for HzbVisibilityBuffers {
+    fn from_world(world: &mut World) -> Self {
+        let device = world.resource::<RenderDevice>();
+        Self::with_capacity(device, 1)
+    }
+}
+
+impl HzbVisibilityBuffers {
+    fn with_capacity(device: &RenderDevice, capacity: u32) -> Self {
+        let capacity = capacity.max(1);
+        Self {
+            candidates: device.create_buffer(&BufferDescriptor {
+                label: Some("prism hzb candidates"),
+                size: capacity as u64 * RenderHzbCullInput::min_size().get(),
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            stages: device.create_buffer(&BufferDescriptor {
+                label: Some("prism hzb stages"),
+                size: capacity as u64 * size_of::<u32>() as u64,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            }),
+            capacity,
+        }
+    }
+
+    pub(crate) fn ensure_capacity(&mut self, device: &RenderDevice, capacity: u32) {
+        if capacity > self.capacity {
+            *self = Self::with_capacity(device, capacity.next_power_of_two());
+        }
+    }
+
+    pub(crate) fn bindings(&self) -> (&Buffer, &Buffer) {
+        (&self.candidates, &self.stages)
+    }
+}
+
 pub(crate) fn inspect_hzb_visibility_pipeline(
     pipeline: Res<HzbVisibilityPipeline>,
     cache: Res<bevy_render::render_resource::PipelineCache>,
+    mut buffers: ResMut<HzbVisibilityBuffers>,
+    device: Res<RenderDevice>,
 ) {
+    buffers.ensure_capacity(&device, 1);
+    let _ = buffers.bindings();
     let _ = (&pipeline.layout, cache.get_compute_pipeline(pipeline.pipeline));
 }
 
@@ -67,6 +120,8 @@ pub(crate) fn init_hzb_visibility_pipeline(
 
 #[cfg(test)]
 mod tests {
+    use super::RenderHzbCullInput;
+    use bevy_render::render_resource::ShaderType;
     use bevy_asset::{uuid::Uuid, AssetId};
     use bevy_shader::{Shader, ShaderCache, ShaderCacheSource};
 
@@ -97,5 +152,10 @@ mod tests {
         cache
             .get(0, shader_id, &[])
             .unwrap_or_else(|error| panic!("HZB visibility shader failed: {error}"));
+    }
+
+    #[test]
+    fn hzb_rows_match_shader_layout() {
+        assert_eq!(RenderHzbCullInput::min_size().get(), 24);
     }
 }
