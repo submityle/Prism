@@ -46,6 +46,9 @@ fn dispatch_previous_hzb(
     let Some((output_start, candidate_count)) = buffers.view_range(retained) else {
         return;
     };
+    let active_count = (0..candidate_count)
+        .filter(|index| buffers.is_active_slot(output_start + index))
+        .count() as u32;
     let _conservative_policy = (
         settings.hzb_depth_bias.max(0.0),
         settings.hzb_fast_motion_threshold.max(0.0),
@@ -84,6 +87,7 @@ fn dispatch_previous_hzb(
     pass.set_immediates(0, bytemuck::bytes_of(&immediates));
     pass.dispatch_workgroups(candidate_count.div_ceil(64), 1, 1);
     diagnostics.hzb_previous_dispatches += 1;
+    diagnostics.hzb_candidates += active_count;
 }
 
 /// Runs the current-frame HZB retest after early depth has rebuilt the pyramid.
@@ -103,6 +107,9 @@ fn dispatch_current_hzb(
     let Some((output_start, candidate_count)) = buffers.view_range(retained) else {
         return;
     };
+    let active_count = (0..candidate_count)
+        .filter(|index| buffers.is_active_slot(output_start + index))
+        .count() as u32;
     if !settings.hzb_occlusion {
         return;
     }
@@ -132,6 +139,7 @@ fn dispatch_current_hzb(
     pass.set_immediates(0, bytemuck::bytes_of(&immediates));
     pass.dispatch_workgroups(candidate_count.div_ceil(64), 1, 1);
     diagnostics.hzb_current_dispatches += 1;
+    diagnostics.hzb_late_retests += active_count;
 }
 
 #[repr(C)]

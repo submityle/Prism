@@ -6,6 +6,8 @@ struct HzbCullInput {
     uv_max: vec2<f32>,
     nearest_depth: f32,
     projected_velocity: f32,
+    is_active: u32,
+    padding: u32,
 }
 
 struct HzbDispatch {
@@ -48,6 +50,10 @@ fn classify_hzb(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     let candidate = candidates[output];
+    if candidate.is_active == 0u {
+        stages[output] = 0u;
+        return;
+    }
     let pixel_size = max(
         abs(candidate.uv_max.x - candidate.uv_min.x) * f32(textureDimensions(hzb, 0).x),
         abs(candidate.uv_max.y - candidate.uv_min.y) * f32(textureDimensions(hzb, 0).y),

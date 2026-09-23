@@ -34,6 +34,8 @@ pub(crate) struct RenderHzbCullInput {
     pub uv_max: [f32; 2],
     pub nearest_depth: f32,
     pub projected_velocity: f32,
+    pub is_active: u32,
+    pub _padding: u32,
 }
 
 pub(crate) fn project_sphere_to_hzb(
@@ -71,6 +73,8 @@ pub(crate) fn project_sphere_to_hzb(
         // Reverse-Z: the nearest point has the greater NDC depth.
         nearest_depth: (uv.z + uv_radius.z).clamp(0.0, 1.0),
         projected_velocity: ((ndc - previous_ndc) * viewport_scale).truncate().length(),
+        is_active: 1,
+        _padding: 0,
     })
 }
 
@@ -96,6 +100,7 @@ pub(crate) struct HzbVisibilityBuffers {
         bevy_render::view::RetainedViewEntity,
         (u32, u32),
     >,
+    active_slots: bevy_platform::collections::HashSet<u32>,
 }
 
 impl FromWorld for HzbVisibilityBuffers {
@@ -123,14 +128,17 @@ impl HzbVisibilityBuffers {
             }),
             capacity,
             view_ranges: bevy_platform::collections::HashMap::default(),
+            active_slots: bevy_platform::collections::HashSet::default(),
         }
     }
 
     pub(crate) fn ensure_capacity(&mut self, device: &RenderDevice, capacity: u32) {
         if capacity > self.capacity {
             let view_ranges = core::mem::take(&mut self.view_ranges);
+            let active_slots = core::mem::take(&mut self.active_slots);
             *self = Self::with_capacity(device, capacity.next_power_of_two());
             self.view_ranges = view_ranges;
+            self.active_slots = active_slots;
         }
     }
 
@@ -143,6 +151,10 @@ impl HzbVisibilityBuffers {
         retained: bevy_render::view::RetainedViewEntity,
     ) -> Option<(u32, u32)> {
         self.view_ranges.get(&retained).copied()
+    }
+
+    pub(crate) fn is_active_slot(&self, slot: u32) -> bool {
+        self.active_slots.contains(&slot)
     }
 }
 
@@ -167,6 +179,7 @@ pub(crate) fn prepare_hzb_candidates(
     let mut candidates =
         vec![RenderHzbCullInput::default(); capacity.saturating_mul(view_count) as usize];
     buffers.view_ranges.clear();
+    buffers.active_slots.clear();
     for (view_index, view_record) in state.views.iter().enumerate() {
         let Some(retained) = state.retained_view(view_record.handle) else {
             continue;
@@ -192,6 +205,7 @@ pub(crate) fn prepare_hzb_candidates(
             ) {
                 let slot = view_index * capacity as usize + handle.index as usize;
                 candidates[slot] = candidate;
+                buffers.active_slots.insert(slot as u32);
             }
         }
     }
@@ -351,7 +365,7 @@ mod tests {
 
     #[test]
     fn hzb_rows_match_shader_layout() {
-        assert_eq!(RenderHzbCullInput::min_size().get(), 24);
+        assert_eq!(RenderHzbCullInput::min_size().get(), 32);
     }
 
     #[test]
