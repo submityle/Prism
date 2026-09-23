@@ -1,5 +1,6 @@
 use bevy_app::{App, Plugin};
 use bevy_asset::embedded_asset;
+use bevy_core_pipeline::schedule::camera_driver;
 use bevy_ecs::schedule::IntoScheduleConfigs;
 use bevy_render::{
     init_gpu_resource,
@@ -122,8 +123,8 @@ impl Plugin for PrismVisibilityPlugin {
                     .after(collect_visibility_parity_readback)
                     .in_set(RenderGraphSystems::Begin),
                 request_visibility_parity_readback
-                    .after(dispatch_unified_visibility)
-                    .in_set(RenderGraphSystems::Begin),
+                    .after(camera_driver)
+                    .in_set(RenderGraphSystems::Render),
                 map_submitted_visibility_parity_readback.in_set(RenderGraphSystems::Finish),
             ),
         );
