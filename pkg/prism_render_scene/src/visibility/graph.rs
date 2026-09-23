@@ -23,6 +23,12 @@ pub(crate) fn visibility_frame_graph() -> GpuFrameGraphBuilder {
         size: 0,
         alignment: 16,
     });
+    let geometry = graph.add_resource(ResourceDescriptor {
+        name: "geometry_lods".into(),
+        lifetime: ResourceLifetime::Imported,
+        size: 0,
+        alignment: 16,
+    });
     let work = graph.add_resource(ResourceDescriptor {
         name: "visibility_parity_work".into(),
         lifetime: ResourceLifetime::Persistent,
@@ -52,6 +58,10 @@ pub(crate) fn visibility_frame_graph() -> GpuFrameGraphBuilder {
                 kind: AccessKind::StorageRead,
             },
             ResourceAccess {
+                resource: geometry,
+                kind: AccessKind::StorageRead,
+            },
+            ResourceAccess {
                 resource: work,
                 kind: AccessKind::StorageWrite,
             },
@@ -74,6 +84,6 @@ mod tests {
         let graph = visibility_frame_graph();
         let compiled = graph.compile().unwrap();
         assert_eq!(compiled.execution_order.len(), 1);
-        assert_eq!(graph.passes()[0].accesses.len(), 5);
+        assert_eq!(graph.passes()[0].accesses.len(), 6);
     }
 }
