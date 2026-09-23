@@ -2,7 +2,7 @@ use bevy_ecs::prelude::*;
 use bevy_platform::collections::HashMap;
 use bevy_render::view::RetainedViewEntity;
 use prism_render_architecture::abi::GenerationalHandle;
-use prism_render_visibility::{GpuViewRecord, VisibilityFrame};
+use prism_render_visibility::{GpuViewRecord, ViewDrawBins, VisibilityFrame};
 
 #[derive(Resource, Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UnifiedVisibilityEnabled(pub bool);
@@ -38,6 +38,7 @@ impl Default for UnifiedVisibilitySettings {
 pub(crate) struct UnifiedVisibilityState {
     pub views: Vec<GpuViewRecord>,
     pub frame: VisibilityFrame,
+    pub draw_bins: Vec<ViewDrawBins>,
     handles: HashMap<RetainedViewEntity, GenerationalHandle>,
     retained_by_handle: HashMap<GenerationalHandle, RetainedViewEntity>,
     previous_clip: HashMap<RetainedViewEntity, [[f32; 4]; 4]>,
@@ -196,4 +197,6 @@ pub struct PrismVisibilityDiagnostics {
     pub gpu_indexed_commands: u64,
     pub gpu_non_indexed_commands: u64,
     pub parity_mismatched_command_counts: u64,
+    pub draw_bins: u32,
+    pub draw_bin_capacity: u32,
 }

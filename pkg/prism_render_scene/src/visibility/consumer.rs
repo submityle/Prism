@@ -2,7 +2,7 @@ use bevy_ecs::system::SystemParam;
 use bevy_render::render_resource::Buffer;
 use bevy_render::view::RetainedViewEntity;
 use prism_render_architecture::gpu_scene::GeometryHandle;
-use prism_render_visibility::{BufferRange, ViewHandle, VisibilityFrame};
+use prism_render_visibility::{BufferRange, ViewDrawBins, ViewHandle, VisibilityFrame};
 
 use super::{buffers::UnifiedVisibilityBuffers, runtime::UnifiedVisibilityState};
 
@@ -50,6 +50,10 @@ impl UnifiedVisibilityReader<'_> {
 
     pub fn geometry_buffer_classes(&self, geometry: GeometryHandle) -> Option<(u32, u32)> {
         self.geometry.buffer_classes(geometry)
+    }
+
+    pub fn draw_bins(&self, view: ViewHandle) -> Option<&ViewDrawBins> {
+        self.state.draw_bins.iter().find(|bins| bins.view == view)
     }
 }
 

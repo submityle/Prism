@@ -9,8 +9,8 @@ use bevy_render::{
     view::ExtractedView,
 };
 use prism_render_visibility::{
-    cull_view, GeometryLod, GeometryLodChain, GpuViewRecord, ViewFlags, VisibilityFrame,
-    VisibilityInput,
+    build_view_draw_bins, cull_view, DrawBinCandidate, DrawBinKey, GeometryLod,
+    GeometryLodChain, GpuViewRecord, ViewFlags, VisibilityFrame, VisibilityInput,
 };
 
 use crate::{
@@ -46,6 +46,7 @@ pub(crate) fn build_unified_visibility(
 ) {
     state.views.clear();
     state.frame = VisibilityFrame::default();
+    state.draw_bins.clear();
     state.begin_frame();
     *diagnostics = PrismVisibilityDiagnostics {
         buffer_version: buffers.version(),
@@ -126,6 +127,17 @@ pub(crate) fn build_unified_visibility(
         diagnostics.missing_material += stats.missing_material;
         diagnostics.overflows += u32::from(stats.overflowed);
         state.frame.push_view(handle, work, stats);
+        let output = state.frame.views[&handle].visible_instances;
+        let candidates: Vec<_> = state.frame.work_items
+            [output.start as usize..(output.start + output.count) as usize]
+            .iter()
+            .filter_map(|work| draw_bin_candidate(work, &geometries, &material_records))
+            .collect();
+        state.draw_bins.push(build_view_draw_bins(
+            handle,
+            scene.mirror().capacity() as u32,
+            candidates,
+        ));
         state.views.push(record);
         state.remember(retained, clip_array, position, record.history_epoch);
     }
@@ -133,6 +145,8 @@ pub(crate) fn build_unified_visibility(
     diagnostics.views = state.views.len() as u32;
     diagnostics.work_items = state.frame.work_items.len() as u32;
     diagnostics.cpu_reference_frames = 1;
+    diagnostics.draw_bins = state.draw_bins.iter().map(|view| view.bins.len() as u32).sum();
+    diagnostics.draw_bin_capacity = state.draw_bins.iter().map(|view| view.command_count).sum();
     state.commit_lods();
     state.retire_missing_views();
     let ranges = state.frame.views.iter().map(|(view, output)| {
@@ -153,6 +167,31 @@ pub(crate) fn build_unified_visibility(
         ranges,
         (handles.len() as u32).min(settings.gpu_parity_max_items_per_view),
     );
+}
+
+fn draw_bin_candidate(
+    work: &prism_render_visibility::GpuRenderWorkItem,
+    geometries: &crate::RenderGeometryRegistry,
+    materials: &BTreeMap<
+        prism_render_architecture::gpu_scene::SceneMaterialHandle,
+        prism_render_material::MaterialRecord,
+    >,
+) -> Option<DrawBinCandidate> {
+    let geometry = geometries.record(work.geometry)?;
+    let lod = geometry.resolve_lod(work.lod_or_cluster)?;
+    let material = materials.get(&work.material)?;
+    Some(DrawBinCandidate {
+        scene: work.scene,
+        key: DrawBinKey {
+            geometry: work.geometry,
+            pipeline_class: ((material.shading_model as u32) << 16)
+                | material.render_class as u32,
+            vertex_buffer_class: geometry.vertex_buffer_class,
+            index_buffer_class: geometry.index_buffer_class,
+            indexed: lod.primitive_kind
+                == prism_render_architecture::geometry::GeometryPrimitiveKind::Indexed,
+        },
+    })
 }
 
 pub(crate) fn upload_unified_visibility(
@@ -361,5 +400,16 @@ mod tests {
             table[&stale_material].render_class,
             prism_render_material::MaterialRenderClass::Opaque
         );
+        let work = prism_render_visibility::GpuRenderWorkItem {
+            scene: handle,
+            geometry,
+            material: stale_material,
+            lod_or_cluster: 0,
+            pass_mask: prism_render_visibility::RenderPassMask::OPAQUE,
+            sort_key: prism_render_visibility::WorkSortKey::default(),
+        };
+        let candidate = draw_bin_candidate(&work, &geometries, &table).unwrap();
+        assert_eq!(candidate.key.geometry, geometry);
+        assert!(candidate.key.indexed);
     }
 }
