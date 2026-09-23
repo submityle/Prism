@@ -133,6 +133,10 @@ impl UnifiedVisibilityBuffers {
             (self.gpu_work_capacity / self.views.len()) as u32
         }
     }
+
+    pub(crate) fn parity_counters(&self) -> Option<&Buffer> {
+        self.counters.buffer()
+    }
 }
 
 #[cfg(test)]

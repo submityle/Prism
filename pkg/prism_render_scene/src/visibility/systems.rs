@@ -150,7 +150,7 @@ pub(crate) fn build_unified_visibility(
             .copied()
             .map(RenderVisibilityWorkItem::from),
         ranges,
-        handles.len() as u32,
+        (handles.len() as u32).min(settings.gpu_parity_max_items_per_view),
     );
 }
 

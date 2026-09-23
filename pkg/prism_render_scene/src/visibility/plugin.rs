@@ -14,6 +14,10 @@ use super::{
         VisibilityComputeBindGroup,
     },
     graph::visibility_frame_graph,
+    readback::{
+        collect_visibility_parity_readback, request_visibility_parity_readback,
+        VisibilityParityReadback,
+    },
     runtime::{
         PrismVisibilityDiagnostics, UnifiedVisibilityEnabled, UnifiedVisibilitySettings,
         UnifiedVisibilityState, VisibilityFrameGraph,
@@ -40,6 +44,7 @@ impl Plugin for PrismVisibilityPlugin {
             .init_resource::<UnifiedVisibilitySettings>()
             .init_resource::<UnifiedVisibilityState>()
             .init_resource::<PrismVisibilityDiagnostics>()
+            .init_resource::<VisibilityParityReadback>()
             .insert_resource(VisibilityFrameGraph {
                 compiled: compiled_graph,
             })
@@ -67,7 +72,15 @@ impl Plugin for PrismVisibilityPlugin {
             );
         render_app.add_systems(
             RenderGraph,
-            dispatch_unified_visibility.in_set(RenderGraphSystems::Begin),
+            (
+                collect_visibility_parity_readback.in_set(RenderGraphSystems::Begin),
+                dispatch_unified_visibility
+                    .after(collect_visibility_parity_readback)
+                    .in_set(RenderGraphSystems::Begin),
+                request_visibility_parity_readback
+                    .after(dispatch_unified_visibility)
+                    .in_set(RenderGraphSystems::Begin),
+            ),
         );
     }
 }

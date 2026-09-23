@@ -3,6 +3,7 @@ mod consumer;
 mod gpu;
 mod graph;
 mod plugin;
+mod readback;
 mod rows;
 pub(crate) mod runtime;
 mod systems;

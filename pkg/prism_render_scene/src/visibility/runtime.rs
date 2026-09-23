@@ -17,6 +17,8 @@ impl Default for UnifiedVisibilityEnabled {
 pub struct UnifiedVisibilitySettings {
     pub max_work_items: u32,
     pub camera_cut_distance: f32,
+    pub gpu_parity_max_items_per_view: u32,
+    pub gpu_parity_readback: bool,
 }
 
 impl Default for UnifiedVisibilitySettings {
@@ -24,6 +26,8 @@ impl Default for UnifiedVisibilitySettings {
         Self {
             max_work_items: 1 << 20,
             camera_cut_distance: 100.0,
+            gpu_parity_max_items_per_view: 1 << 16,
+            gpu_parity_readback: true,
         }
     }
 }
@@ -180,4 +184,9 @@ pub struct PrismVisibilityDiagnostics {
     pub cpu_reference_frames: u32,
     pub gpu_candidates: u32,
     pub pipeline_not_ready: u32,
+    pub parity_frames: u64,
+    pub parity_matching_views: u64,
+    pub parity_mismatched_views: u64,
+    pub parity_dropped_frames: u64,
+    pub parity_readback_failures: u64,
 }
