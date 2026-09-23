@@ -133,11 +133,18 @@ pub(crate) fn build_unified_visibility(
             .iter()
             .filter_map(|work| draw_bin_candidate(work, &geometries, &material_records))
             .collect();
-        state.draw_bins.push(build_view_draw_bins(
+        let mut bins = build_view_draw_bins(
             handle,
             scene.mirror().capacity() as u32,
             candidates,
-        ));
+        );
+        bins.global_bin_start = state.draw_bins.iter().map(|view| view.bins.len() as u32).sum();
+        bins.global_candidate_start = state
+            .draw_bins
+            .iter()
+            .map(|view| view.candidate_bins.len() as u32)
+            .sum();
+        state.draw_bins.push(bins);
         state.views.push(record);
         state.remember(retained, clip_array, position, record.history_epoch);
     }
@@ -167,6 +174,7 @@ pub(crate) fn build_unified_visibility(
         ranges,
         (handles.len() as u32).min(settings.gpu_parity_max_items_per_view),
     );
+    buffers.stage_draw_bins(&state.draw_bins);
 }
 
 fn draw_bin_candidate(
@@ -272,7 +280,9 @@ pub(crate) fn dispatch_unified_visibility(
                 output_start,
                 output_end: output_start.saturating_add(buffers.gpu_slots_per_view()),
                 indirect_first_instance: u32::from(settings.indirect_first_instance),
-                _padding: [0; 3],
+                bin_start: state.draw_bins[view_index].global_bin_start,
+                candidate_bin_start: state.draw_bins[view_index].global_candidate_start,
+                _padding: 0,
             };
             pass.set_immediates(0, bytemuck::bytes_of(&immediates));
             pass.dispatch_workgroups(candidate_count.div_ceil(VISIBILITY_WORKGROUP_SIZE), 1, 1);

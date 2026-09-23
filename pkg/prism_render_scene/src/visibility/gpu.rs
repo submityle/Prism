@@ -32,7 +32,7 @@ pub(crate) struct VisibilityComputePipeline {
 #[derive(Resource, Default)]
 pub(crate) struct VisibilityComputeBindGroup {
     pub bind_group: Option<BindGroup>,
-    buffer_ids: Option<[BufferId; 8]>,
+    buffer_ids: Option<[BufferId; 10]>,
 }
 
 pub(crate) fn init_visibility_compute_pipeline(
@@ -54,7 +54,8 @@ pub(crate) fn init_visibility_compute_pipeline(
             storage_buffer::<super::rows::RenderVisibilityIndirect>(false),
             storage_buffer::<super::rows::RenderVisibilityNonIndexedIndirect>(false),
             storage_buffer::<u32>(false),
-            storage_buffer::<u32>(false),
+            storage_buffer::<super::rows::RenderDrawBinHeader>(false),
+            storage_buffer_read_only::<u32>(false),
         ),
     );
     let output_descriptor = BindGroupLayoutDescriptor::new("prism visibility output", &entries);
@@ -86,7 +87,7 @@ pub(crate) fn prepare_visibility_compute_bind_group(
     device: Res<RenderDevice>,
     mut bindings: ResMut<VisibilityComputeBindGroup>,
 ) {
-    let Some((views, counters, work, ranges, indexed, non_indexed, overflow, previous_lods)) = buffers.compute_buffers()
+    let Some((views, counters, work, ranges, indexed, non_indexed, overflow, previous_lods, bins, candidate_bins)) = buffers.compute_buffers()
     else {
         return;
     };
@@ -99,6 +100,8 @@ pub(crate) fn prepare_visibility_compute_bind_group(
         non_indexed.id(),
         overflow.id(),
         previous_lods.id(),
+        bins.id(),
+        candidate_bins.id(),
     ];
     if bindings.buffer_ids == Some(ids) {
         return;
@@ -115,6 +118,8 @@ pub(crate) fn prepare_visibility_compute_bind_group(
             non_indexed.as_entire_binding(),
             overflow.as_entire_binding(),
             previous_lods.as_entire_binding(),
+            bins.as_entire_binding(),
+            candidate_bins.as_entire_binding(),
         )),
     ));
     bindings.buffer_ids = Some(ids);
@@ -173,7 +178,8 @@ mod tests {
                 storage_buffer::<super::super::rows::RenderVisibilityIndirect>(false),
                 storage_buffer::<super::super::rows::RenderVisibilityNonIndexedIndirect>(false),
                 storage_buffer::<u32>(false),
-                storage_buffer::<u32>(false),
+                storage_buffer::<super::super::rows::RenderDrawBinHeader>(false),
+                storage_buffer_read_only::<u32>(false),
             ),
         );
         assert!(matches!(
@@ -183,12 +189,19 @@ mod tests {
                 ..
             }
         ));
-        assert!(entries[1..].iter().all(|entry| matches!(
+        assert!(entries[1..8].iter().all(|entry| matches!(
             entry.ty,
             BindingType::Buffer {
                 ty: BufferBindingType::Storage { read_only: false },
                 ..
             }
         )));
+        assert!(matches!(
+            entries[8].ty,
+            BindingType::Buffer {
+                ty: BufferBindingType::Storage { read_only: true },
+                ..
+            }
+        ));
     }
 }

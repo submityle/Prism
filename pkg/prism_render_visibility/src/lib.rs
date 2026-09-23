@@ -20,7 +20,8 @@ mod work;
 pub use benchmark::benchmark_cpu_reference;
 pub use benchmark::VisibilityBenchmarkResult;
 pub use binning::{
-    build_view_draw_bins, DrawBinCandidate, DrawBinKey, DrawBinRange, ViewDrawBins,
+    build_view_draw_bins, DrawBinCandidate, DrawBinKey, DrawBinRange, GpuDrawBinHeader,
+    ViewDrawBins, DRAW_BIN_HEADER_WORDS,
 };
 pub use culling::{cull_view, CullReason, VisibilityInput};
 pub use diagnostics::VisibilityDiagnostics;

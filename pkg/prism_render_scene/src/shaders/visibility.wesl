@@ -53,6 +53,12 @@ struct VisibilityCounter {
 }
 struct VisibilityIndirect { index_count: u32, instance_count: u32, first_index: u32, base_vertex: i32, first_instance: u32 }
 struct VisibilityNonIndexedIndirect { vertex_count: u32, instance_count: u32, first_vertex: u32, first_instance: u32 }
+struct DrawBinHeader {
+    geometry_index: u32, geometry_generation: u32, pipeline_class: u32,
+    vertex_buffer_class: u32, index_buffer_class: u32, indexed: u32,
+    command_start: u32, command_capacity: u32, command_count: atomic<u32>,
+    view_index: u32, view_generation: u32, padding: u32,
+}
 
 @group(0) @binding(0) var<storage, read> scene_instances: array<GpuSceneInstance>;
 @group(0) @binding(1) var<storage, read> scene_current_transforms: array<GpuSceneTransform>;
@@ -71,10 +77,12 @@ struct VisibilityNonIndexedIndirect { vertex_count: u32, instance_count: u32, fi
 @group(3) @binding(5) var<storage, read_write> non_indexed_indirect: array<VisibilityNonIndexedIndirect>;
 @group(3) @binding(6) var<storage, read_write> overflow: array<atomic<u32>>;
 @group(3) @binding(7) var<storage, read_write> previous_lods: array<u32>;
+@group(3) @binding(8) var<storage, read_write> draw_bins: array<DrawBinHeader>;
+@group(3) @binding(9) var<storage, read> candidate_bins: array<u32>;
 
 struct VisibilityDispatch {
     view_index: u32, candidate_count: u32, output_start: u32, output_end: u32,
-    indirect_first_instance: u32, padding: vec3<u32>,
+    indirect_first_instance: u32, bin_start: u32, candidate_bin_start: u32, padding: u32,
 }
 var<immediate> dispatch: VisibilityDispatch;
 
@@ -173,8 +181,25 @@ fn cull_instances(@builtin(global_invocation_id) id: vec3<u32>) {
         atomicAdd(&counters[dispatch.view_index].rejected_count, 1u);
         return;
     }
-    let local = atomicAdd(&counters[dispatch.view_index].visible_count, 1u);
-    let output = dispatch.output_start + local;
+    let candidate_bin_index = dispatch.candidate_bin_start + candidate;
+    if candidate_bin_index >= arrayLength(&candidate_bins) {
+        atomicAdd(&counters[dispatch.view_index].overflow_count, 1u);
+        return;
+    }
+    let local_bin_index = candidate_bins[candidate_bin_index];
+    let bin_index = dispatch.bin_start + local_bin_index;
+    if local_bin_index == 0xffffffffu || bin_index >= arrayLength(&draw_bins) {
+        atomicAdd(&counters[dispatch.view_index].overflow_count, 1u);
+        return;
+    }
+    let bin_local = atomicAdd(&draw_bins[bin_index].command_count, 1u);
+    let output = dispatch.output_start + draw_bins[bin_index].command_start + bin_local;
+    if bin_local >= draw_bins[bin_index].command_capacity {
+        atomicAdd(&counters[dispatch.view_index].overflow_count, 1u);
+        atomicStore(&overflow[dispatch.view_index], 1u);
+        return;
+    }
+    atomicAdd(&counters[dispatch.view_index].visible_count, 1u);
     if output >= dispatch.output_end || output >= arrayLength(&work_items) {
         atomicAdd(&counters[dispatch.view_index].overflow_count, 1u);
         atomicStore(&overflow[dispatch.view_index], 1u);

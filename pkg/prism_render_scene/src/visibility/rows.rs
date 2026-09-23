@@ -125,7 +125,9 @@ pub struct RenderVisibilityDispatch {
     pub output_start: u32,
     pub output_end: u32,
     pub indirect_first_instance: u32,
-    pub _padding: [u32; 3],
+    pub bin_start: u32,
+    pub candidate_bin_start: u32,
+    pub _padding: u32,
 }
 impl_atomic_pod!(RenderVisibilityDispatch, RenderVisibilityDispatchBlob);
 
@@ -150,6 +152,30 @@ pub struct RenderVisibilityNonIndexedIndirect {
 }
 impl_atomic_pod!(RenderVisibilityNonIndexedIndirect, RenderVisibilityNonIndexedIndirectBlob);
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Pod, ShaderType, Zeroable)]
+pub struct RenderDrawBinHeader {
+    pub geometry_index: u32,
+    pub geometry_generation: u32,
+    pub pipeline_class: u32,
+    pub vertex_buffer_class: u32,
+    pub index_buffer_class: u32,
+    pub indexed: u32,
+    pub command_start: u32,
+    pub command_capacity: u32,
+    pub command_count: u32,
+    pub view_index: u32,
+    pub view_generation: u32,
+    pub _padding: u32,
+}
+impl_atomic_pod!(RenderDrawBinHeader, RenderDrawBinHeaderBlob);
+
+impl From<prism_render_visibility::GpuDrawBinHeader> for RenderDrawBinHeader {
+    fn from(value: prism_render_visibility::GpuDrawBinHeader) -> Self {
+        bytemuck::cast(value)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,5 +189,6 @@ mod tests {
         assert_eq!(size_of::<RenderVisibilityDispatch>(), 32);
         assert_eq!(size_of::<RenderVisibilityIndirect>(), 20);
         assert_eq!(size_of::<RenderVisibilityNonIndexedIndirect>(), 16);
+        assert_eq!(size_of::<RenderDrawBinHeader>(), 48);
     }
 }

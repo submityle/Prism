@@ -30,6 +30,46 @@ pub struct ViewDrawBins {
     pub bins: Vec<DrawBinRange>,
     pub candidate_bins: Vec<u32>,
     pub command_count: u32,
+    pub global_bin_start: u32,
+    pub global_candidate_start: u32,
+}
+
+pub const DRAW_BIN_HEADER_WORDS: usize = 12;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuDrawBinHeader {
+    pub geometry_index: u32,
+    pub geometry_generation: u32,
+    pub pipeline_class: u32,
+    pub vertex_buffer_class: u32,
+    pub index_buffer_class: u32,
+    pub indexed: u32,
+    pub command_start: u32,
+    pub command_capacity: u32,
+    pub command_count: u32,
+    pub view_index: u32,
+    pub view_generation: u32,
+    pub _padding: u32,
+}
+
+impl GpuDrawBinHeader {
+    pub fn from_range(view: ViewHandle, range: DrawBinRange) -> Self {
+        Self {
+            geometry_index: range.key.geometry.index,
+            geometry_generation: range.key.geometry.generation,
+            pipeline_class: range.key.pipeline_class,
+            vertex_buffer_class: range.key.vertex_buffer_class,
+            index_buffer_class: range.key.index_buffer_class,
+            indexed: u32::from(range.key.indexed),
+            command_start: range.command_start,
+            command_capacity: range.command_capacity,
+            command_count: 0,
+            view_index: view.index,
+            view_generation: view.generation,
+            _padding: 0,
+        }
+    }
 }
 
 pub fn build_view_draw_bins(
@@ -64,6 +104,8 @@ pub fn build_view_draw_bins(
         bins,
         candidate_bins,
         command_count: command_start,
+        global_bin_start: 0,
+        global_candidate_start: 0,
     }
 }
 
@@ -112,5 +154,9 @@ mod tests {
         assert_eq!(bins.candidate_bins[1], 0);
         assert_eq!(bins.candidate_bins[3], 1);
         assert_eq!(bins.candidate_bins[5], 1);
+        let header = GpuDrawBinHeader::from_range(bins.view, bins.bins[1]);
+        assert_eq!(header.command_start, 1);
+        assert_eq!(header.command_capacity, 2);
+        assert_eq!(size_of::<GpuDrawBinHeader>(), DRAW_BIN_HEADER_WORDS * 4);
     }
 }
