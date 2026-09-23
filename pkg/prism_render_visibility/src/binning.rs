@@ -8,6 +8,7 @@ use prism_render_architecture::{
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct DrawBinKey {
     pub geometry: GeometryHandle,
+    pub lod_or_cluster: u32,
     pub pipeline_class: u32,
     pub vertex_buffer_class: u32,
     pub index_buffer_class: u32,
@@ -60,7 +61,7 @@ pub struct GpuDrawBinHeader {
     pub command_count: u32,
     pub view_index: u32,
     pub view_generation: u32,
-    pub _padding: u32,
+    pub lod_or_cluster: u32,
     pub primitive_kind: u32,
     pub _padding_tail: [u32; 3],
 }
@@ -79,7 +80,7 @@ impl GpuDrawBinHeader {
             command_count: 0,
             view_index: view.index,
             view_generation: view.generation,
-            _padding: 0,
+            lod_or_cluster: range.key.lod_or_cluster,
             primitive_kind: match range.key.primitive_kind {
                 GeometryPrimitiveKind::Indexed => 0,
                 GeometryPrimitiveKind::NonIndexed => 1,
@@ -141,6 +142,7 @@ mod tests {
     fn bins_are_deterministic_disjoint_and_cover_candidates() {
         let key = |geometry| DrawBinKey {
             geometry: handle(geometry),
+            lod_or_cluster: 0,
             pipeline_class: geometry,
             vertex_buffer_class: 1,
             index_buffer_class: 2,

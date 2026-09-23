@@ -57,7 +57,7 @@ struct DrawBinHeader {
     geometry_index: u32, geometry_generation: u32, pipeline_class: u32,
     vertex_buffer_class: u32, index_buffer_class: u32, indexed: u32,
     command_start: u32, command_capacity: u32, command_count: atomic<u32>,
-    view_index: u32, view_generation: u32, padding: u32,
+    view_index: u32, view_generation: u32, lod_or_cluster: u32,
     primitive_kind: u32, padding_tail: vec3<u32>,
 }
 
@@ -194,7 +194,8 @@ fn cull_instances(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     if draw_bins[bin_index].geometry_index != instance.geometry_index
-        || draw_bins[bin_index].geometry_generation != instance.geometry_generation {
+        || draw_bins[bin_index].geometry_generation != instance.geometry_generation
+        || draw_bins[bin_index].lod_or_cluster != geometry_lods[lod_index].level {
         atomicAdd(&counters[dispatch.view_index].overflow_count, 1u);
         atomicStore(&overflow[dispatch.view_index], 1u);
         return;

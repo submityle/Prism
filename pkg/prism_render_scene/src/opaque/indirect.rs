@@ -163,6 +163,7 @@ mod tests {
     fn multiview_commands_do_not_use_sparse_candidate_table_offsets() {
         let key = DrawBinKey {
             geometry: handle(2),
+            lod_or_cluster: 0,
             pipeline_class: 3,
             vertex_buffer_class: 4,
             index_buffer_class: 5,

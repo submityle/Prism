@@ -304,6 +304,7 @@ mod tests {
         let mut buffers = UnifiedVisibilityBuffers::from_world(&mut world);
         let key = prism_render_visibility::DrawBinKey {
             geometry: GenerationalHandle { index: 2, generation: 1 },
+            lod_or_cluster: 0,
             pipeline_class: 4,
             vertex_buffer_class: 5,
             index_buffer_class: 6,

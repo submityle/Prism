@@ -166,7 +166,7 @@ pub struct RenderDrawBinHeader {
     pub command_count: u32,
     pub view_index: u32,
     pub view_generation: u32,
-    pub _padding: u32,
+    pub lod_or_cluster: u32,
     pub primitive_kind: u32,
     pub _padding_tail: [u32; 3],
 }
