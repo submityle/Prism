@@ -9,11 +9,16 @@
 extern crate alloc;
 
 mod classification;
+mod lighting;
 mod visibility;
 
 pub use classification::{
     classify_material_header, ClassificationError, MaterialShadingClass, ShadingWorkItem,
     ShadingWorkPlan, MAX_SHADING_CLASSES,
+};
+pub use lighting::{
+    evaluate_principled_direct, evaluate_toon_direct, linear_furnace_response, DirectLightSample,
+    ShadingFrame, SurfaceSample,
 };
 pub use visibility::{
     encode_barycentrics, BarycentricError, VisibilityPixel, INVALID_VISIBILITY_ID,
