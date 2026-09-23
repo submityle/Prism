@@ -197,6 +197,7 @@ pub struct PrismVisibilityDiagnostics {
     pub gpu_indexed_commands: u64,
     pub gpu_non_indexed_commands: u64,
     pub parity_mismatched_command_counts: u64,
+    pub parity_mismatched_bin_counts: u64,
     pub draw_bins: u32,
     pub draw_bin_capacity: u32,
 }

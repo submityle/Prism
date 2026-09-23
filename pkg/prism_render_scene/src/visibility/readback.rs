@@ -11,7 +11,7 @@ use bevy_render::{
 
 use super::{
     buffers::UnifiedVisibilityBuffers,
-    rows::RenderVisibilityCounter,
+    rows::{RenderDrawBinHeader, RenderVisibilityCounter},
     runtime::{PrismVisibilityDiagnostics, UnifiedVisibilitySettings, UnifiedVisibilityState},
 };
 
@@ -32,6 +32,7 @@ struct PendingReadback {
     compare_lod: bool,
     view_count: usize,
     slots_per_view: usize,
+    expected_bin_counts: Vec<u32>,
 }
 
 struct InFlightReadback {
@@ -56,14 +57,16 @@ pub(crate) fn request_visibility_parity_readback(
         diagnostics.parity_dropped_frames += u64::from(readback_state.is_some());
         return;
     }
-    let Some((counters, work)) = buffers.parity_readback_buffers() else {
+    let Some((counters, work, bin_headers)) = buffers.parity_readback_buffers() else {
         return;
     };
     let counter_size = state.views.len() as u64 * size_of::<RenderVisibilityCounter>() as u64;
     let work_size = state.views.len() as u64
         * buffers.gpu_slots_per_view() as u64
         * size_of::<super::rows::RenderVisibilityWorkItem>() as u64;
-    let size = counter_size + work_size;
+    let bin_size = state.draw_bins.iter().map(|view| view.bins.len()).sum::<usize>() as u64
+        * size_of::<RenderDrawBinHeader>() as u64;
+    let size = counter_size + work_size + bin_size;
     let target = device.create_buffer(&BufferDescriptor {
         label: Some("prism visibility parity readback"),
         size,
@@ -75,6 +78,15 @@ pub(crate) fn request_visibility_parity_readback(
     });
     encoder.copy_buffer_to_buffer(counters, 0, &target, 0, Some(counter_size));
     encoder.copy_buffer_to_buffer(work, 0, &target, counter_size, Some(work_size));
+    if bin_size != 0 {
+        encoder.copy_buffer_to_buffer(
+            bin_headers,
+            0,
+            &target,
+            counter_size + work_size,
+            Some(bin_size),
+        );
+    }
     pending.push_encoder(encoder, "prism visibility parity readback");
     let cpu_work = state
         .frame
@@ -95,6 +107,11 @@ pub(crate) fn request_visibility_parity_readback(
         compare_lod: true,
         view_count: state.views.len(),
         slots_per_view: buffers.gpu_slots_per_view() as usize,
+        expected_bin_counts: state
+            .draw_bins
+            .iter()
+            .flat_map(|view| view.bins.iter().map(|bin| bin.command_capacity))
+            .collect(),
     }));
 }
 
@@ -144,7 +161,21 @@ pub(crate) fn collect_visibility_parity_readback(
     let counter_bytes = pending.view_count * size_of::<RenderVisibilityCounter>();
     let counters: &[RenderVisibilityCounter] = bytemuck::cast_slice(&mapped[..counter_bytes]);
     let gpu_work: &[super::rows::RenderVisibilityWorkItem] =
-        bytemuck::cast_slice(&mapped[counter_bytes..]);
+        bytemuck::cast_slice(
+            &mapped[counter_bytes
+                ..counter_bytes
+                    + pending.view_count
+                        * pending.slots_per_view
+                        * size_of::<super::rows::RenderVisibilityWorkItem>()],
+        );
+    let bin_bytes = counter_bytes
+        + pending.view_count
+            * pending.slots_per_view
+            * size_of::<super::rows::RenderVisibilityWorkItem>();
+    let gpu_bins: &[RenderDrawBinHeader] = bytemuck::cast_slice(&mapped[bin_bytes..]);
+    if !bin_counts_match(gpu_bins, &pending.expected_bin_counts) {
+        diagnostics.parity_mismatched_bin_counts += 1;
+    }
     let mut matching = 0;
     let mut mismatched = 0;
     for (view_index, counter) in counters.iter().enumerate() {
@@ -183,6 +214,17 @@ pub(crate) fn collect_visibility_parity_readback(
     drop(mapped);
     pending.buffer.unmap();
     *slot = None;
+}
+
+fn bin_counts_match(gpu: &[RenderDrawBinHeader], expected: &[u32]) -> bool {
+    gpu.len() == expected.len()
+        && gpu
+            .iter()
+            .zip(expected)
+            .all(|(header, expected)| {
+                header.command_count == *expected
+                    && header.command_count <= header.command_capacity
+            })
 }
 
 fn unordered_work_matches(
@@ -237,5 +279,17 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(counter.indexed_count + counter.non_indexed_count, counter.visible_count);
+    }
+
+    #[test]
+    fn bin_readback_requires_exact_bounded_counts() {
+        let header = |count, capacity| RenderDrawBinHeader {
+            command_count: count,
+            command_capacity: capacity,
+            ..Default::default()
+        };
+        assert!(bin_counts_match(&[header(2, 2), header(1, 3)], &[2, 1]));
+        assert!(!bin_counts_match(&[header(3, 2)], &[3]));
+        assert!(!bin_counts_match(&[header(1, 2)], &[2]));
     }
 }
