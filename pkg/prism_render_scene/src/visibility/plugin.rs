@@ -1,16 +1,27 @@
 use bevy_app::{App, Plugin};
 use bevy_asset::embedded_asset;
 use bevy_ecs::schedule::IntoScheduleConfigs;
-use bevy_render::{init_gpu_resource, Render, RenderApp, RenderStartup, RenderSystems};
+use bevy_render::{
+    init_gpu_resource,
+    renderer::{RenderGraph, RenderGraphSystems},
+    Render, RenderApp, RenderStartup, RenderSystems,
+};
 
 use super::{
     buffers::UnifiedVisibilityBuffers,
+    gpu::{
+        init_visibility_compute_pipeline, prepare_visibility_compute_bind_group,
+        VisibilityComputeBindGroup,
+    },
     graph::visibility_frame_graph,
     runtime::{
         PrismVisibilityDiagnostics, UnifiedVisibilityEnabled, UnifiedVisibilitySettings,
         UnifiedVisibilityState, VisibilityFrameGraph,
     },
-    systems::{build_unified_visibility, rebuild_unified_visibility, upload_unified_visibility},
+    systems::{
+        build_unified_visibility, dispatch_unified_visibility, rebuild_unified_visibility,
+        upload_unified_visibility,
+    },
 };
 
 pub struct PrismVisibilityPlugin;
@@ -36,6 +47,8 @@ impl Plugin for PrismVisibilityPlugin {
                 RenderStartup,
                 (
                     init_gpu_resource::<UnifiedVisibilityBuffers>,
+                    init_gpu_resource::<VisibilityComputeBindGroup>,
+                    init_visibility_compute_pipeline,
                     rebuild_unified_visibility,
                 )
                     .chain(),
@@ -47,7 +60,14 @@ impl Plugin for PrismVisibilityPlugin {
                     upload_unified_visibility
                         .after(build_unified_visibility)
                         .in_set(RenderSystems::PrepareResourcesFlush),
+                    prepare_visibility_compute_bind_group
+                        .after(upload_unified_visibility)
+                        .in_set(RenderSystems::PrepareBindGroups),
                 ),
             );
+        render_app.add_systems(
+            RenderGraph,
+            dispatch_unified_visibility.in_set(RenderGraphSystems::Begin),
+        );
     }
 }

@@ -178,4 +178,6 @@ pub struct PrismVisibilityDiagnostics {
     pub buffer_version: u32,
     pub gpu_compute_dispatches: u32,
     pub cpu_reference_frames: u32,
+    pub gpu_candidates: u32,
+    pub pipeline_not_ready: u32,
 }

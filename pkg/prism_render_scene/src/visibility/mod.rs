@@ -1,5 +1,6 @@
 mod buffers;
 mod consumer;
+mod gpu;
 mod graph;
 mod plugin;
 mod rows;

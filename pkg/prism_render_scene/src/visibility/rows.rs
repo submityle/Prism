@@ -105,6 +105,16 @@ impl RenderVisibilityRange {
     }
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Pod, ShaderType, Zeroable)]
+pub struct RenderVisibilityCounter {
+    pub visible_count: u32,
+    pub rejected_count: u32,
+    pub overflow_count: u32,
+    pub _padding: u32,
+}
+impl_atomic_pod!(RenderVisibilityCounter, RenderVisibilityCounterBlob);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,5 +124,6 @@ mod tests {
         assert_eq!(size_of::<RenderVisibilityView>(), 288);
         assert_eq!(size_of::<RenderVisibilityWorkItem>(), 48);
         assert_eq!(size_of::<RenderVisibilityRange>(), 16);
+        assert_eq!(size_of::<RenderVisibilityCounter>(), 16);
     }
 }

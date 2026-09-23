@@ -17,14 +17,20 @@ pub(crate) fn visibility_frame_graph() -> GpuFrameGraphBuilder {
         size: 0,
         alignment: 16,
     });
+    let materials = graph.add_resource(ResourceDescriptor {
+        name: "material_headers".into(),
+        lifetime: ResourceLifetime::Imported,
+        size: 0,
+        alignment: 16,
+    });
     let work = graph.add_resource(ResourceDescriptor {
-        name: "visible_work".into(),
+        name: "visibility_parity_work".into(),
         lifetime: ResourceLifetime::Persistent,
         size: 0,
         alignment: 16,
     });
     let ranges = graph.add_resource(ResourceDescriptor {
-        name: "visibility_ranges".into(),
+        name: "visibility_parity_ranges".into(),
         lifetime: ResourceLifetime::Persistent,
         size: 0,
         alignment: 16,
@@ -39,6 +45,10 @@ pub(crate) fn visibility_frame_graph() -> GpuFrameGraphBuilder {
             },
             ResourceAccess {
                 resource: views,
+                kind: AccessKind::StorageRead,
+            },
+            ResourceAccess {
+                resource: materials,
                 kind: AccessKind::StorageRead,
             },
             ResourceAccess {
@@ -64,6 +74,6 @@ mod tests {
         let graph = visibility_frame_graph();
         let compiled = graph.compile().unwrap();
         assert_eq!(compiled.execution_order.len(), 1);
-        assert_eq!(graph.passes()[0].accesses.len(), 4);
+        assert_eq!(graph.passes()[0].accesses.len(), 5);
     }
 }

@@ -3,6 +3,8 @@ use alloc::collections::BTreeMap;
 use bevy_camera::{primitives::Frustum, visibility::RenderLayers};
 use bevy_ecs::prelude::*;
 use bevy_render::{
+    render_resource::{CommandEncoderDescriptor, ComputePassDescriptor, PipelineCache},
+    renderer::PendingCommandBuffers,
     renderer::{RenderDevice, RenderQueue},
     view::ExtractedView,
 };
@@ -16,6 +18,7 @@ use crate::{
     scene::RenderGpuScene,
     visibility::{
         buffers::UnifiedVisibilityBuffers,
+        gpu::{VisibilityComputeBindGroup, VisibilityComputePipeline},
         rows::{RenderVisibilityRange, RenderVisibilityView, RenderVisibilityWorkItem},
         runtime::{
             PrismVisibilityDiagnostics, UnifiedVisibilityEnabled, UnifiedVisibilitySettings,
@@ -23,6 +26,8 @@ use crate::{
         },
     },
 };
+
+const VISIBILITY_WORKGROUP_SIZE: u32 = 64;
 
 pub(crate) fn build_unified_visibility(
     enabled: Res<UnifiedVisibilityEnabled>,
@@ -43,7 +48,7 @@ pub(crate) fn build_unified_visibility(
         ..Default::default()
     };
     if !enabled.0 {
-        buffers.stage([], [], []);
+        buffers.stage([], [], [], 0);
         return;
     }
     debug_assert!(!frame_graph.compiled.execution_order.is_empty());
@@ -142,6 +147,7 @@ pub(crate) fn build_unified_visibility(
             .copied()
             .map(RenderVisibilityWorkItem::from),
         ranges,
+        handles.len() as u32,
     );
 }
 
@@ -159,6 +165,68 @@ pub(crate) fn rebuild_unified_visibility(
 ) {
     buffers.reset_after_device_loss();
     diagnostics.buffer_version = buffers.version();
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Compute dispatch joins scene/material/output bindings and diagnostics."
+)]
+pub(crate) fn dispatch_unified_visibility(
+    enabled: Res<UnifiedVisibilityEnabled>,
+    scene: Res<RenderGpuScene>,
+    state: Res<UnifiedVisibilityState>,
+    pipeline: Res<VisibilityComputePipeline>,
+    cache: Res<PipelineCache>,
+    scene_bindings: Res<crate::buffers::GpuSceneBindGroup>,
+    material_bindings: Res<crate::MaterialBindGroup>,
+    output_bindings: Res<VisibilityComputeBindGroup>,
+    buffers: Res<UnifiedVisibilityBuffers>,
+    device: Res<RenderDevice>,
+    mut pending: ResMut<PendingCommandBuffers>,
+    mut diagnostics: ResMut<PrismVisibilityDiagnostics>,
+) {
+    if !enabled.0 || state.views.is_empty() || scene.mirror().capacity() == 0 {
+        return;
+    }
+    let Some(compute_pipeline) = cache.get_compute_pipeline(pipeline.pipeline) else {
+        diagnostics.pipeline_not_ready = 1;
+        return;
+    };
+    let (Some(scene_bind_group), Some(material_bind_group), Some(output_bind_group)) = (
+        scene_bindings.bind_group.as_ref(),
+        material_bindings.bind_group.as_ref(),
+        output_bindings.bind_group.as_ref(),
+    ) else {
+        return;
+    };
+    let candidate_count = scene.mirror().capacity() as u32;
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("prism unified visibility"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("prism unified visibility"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(compute_pipeline);
+        pass.set_bind_group(0, scene_bind_group, &[]);
+        pass.set_bind_group(1, material_bind_group, &[]);
+        pass.set_bind_group(2, output_bind_group, &[]);
+        for (view_index, _) in state.views.iter().enumerate() {
+            let output_start = (view_index as u32).saturating_mul(buffers.gpu_slots_per_view());
+            let immediates = [
+                view_index as u32,
+                candidate_count,
+                output_start,
+                output_start.saturating_add(buffers.gpu_slots_per_view()),
+            ];
+            pass.set_immediates(0, bytemuck::cast_slice(&immediates));
+            pass.dispatch_workgroups(candidate_count.div_ceil(VISIBILITY_WORKGROUP_SIZE), 1, 1);
+            diagnostics.gpu_compute_dispatches += 1;
+            diagnostics.gpu_candidates += candidate_count;
+        }
+    }
+    pending.push_encoder(encoder, "prism unified visibility");
 }
 
 fn geometry_lods(
