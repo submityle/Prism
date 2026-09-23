@@ -102,15 +102,9 @@ impl Plugin for PrismGpuScenePlugin {
             )
             .add_systems(
                 RenderGraph,
-                (
-                    track_submission.in_set(RenderGraphSystems::Finish),
-                    reclaim_completed_handles
-                        .after(track_submission)
-                        .in_set(RenderGraphSystems::Finish),
-                    crate::material::systems::reclaim_completed_materials
-                        .after(track_submission)
-                        .in_set(RenderGraphSystems::Finish),
-                ),
+                (reclaim_completed_handles
+                    .after(track_submission)
+                    .in_set(RenderGraphSystems::Finish),),
             );
     }
 }

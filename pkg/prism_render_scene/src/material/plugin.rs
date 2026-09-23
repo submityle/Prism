@@ -24,9 +24,6 @@ impl Plugin for PrismMaterialPlugin {
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
-        let owns_submission_tracking = !render_app
-            .world()
-            .contains_resource::<crate::completion::GpuCompletionTracker>();
         render_app
             .init_resource::<crate::completion::GpuCompletionTracker>()
             .init_resource::<RenderMaterialRegistry>()
@@ -51,16 +48,14 @@ impl Plugin for PrismMaterialPlugin {
                         .in_set(RenderSystems::PrepareBindGroups),
                 ),
             );
-        if owns_submission_tracking {
-            render_app.add_systems(
-                RenderGraph,
-                (
-                    crate::completion::track_submission.in_set(RenderGraphSystems::Finish),
-                    reclaim_completed_materials
-                        .after(crate::completion::track_submission)
-                        .in_set(RenderGraphSystems::Finish),
-                ),
-            );
-        }
+        render_app.add_systems(
+            RenderGraph,
+            (
+                crate::completion::track_submission.in_set(RenderGraphSystems::Finish),
+                reclaim_completed_materials
+                    .after(crate::completion::track_submission)
+                    .in_set(RenderGraphSystems::Finish),
+            ),
+        );
     }
 }
