@@ -65,6 +65,7 @@ struct VisibilityIndirect { index_count: u32, instance_count: u32, first_index: 
 @group(3) @binding(3) var<storage, read_write> ranges: array<VisibilityRange>;
 @group(3) @binding(4) var<storage, read_write> indirect: array<VisibilityIndirect>;
 @group(3) @binding(5) var<storage, read_write> overflow: array<atomic<u32>>;
+@group(3) @binding(6) var<storage, read_write> previous_lods: array<u32>;
 
 struct VisibilityDispatch {
     view_index: u32, candidate_count: u32, output_start: u32, output_end: u32,
@@ -87,20 +88,14 @@ fn sphere_visible(view: VisibilityView, sphere: vec4<f32>) -> bool {
     return true;
 }
 
-fn projected_lod(view: VisibilityView, sphere: vec4<f32>) -> u32 {
+fn projected_size(view: VisibilityView, sphere: vec4<f32>) -> f32 {
     let distance = max(distance(view.world_position_lod_scale.xyz, sphere.xyz), 1.0e-4);
-    let projected_diameter = 2.0 * sphere.w * view.world_position_lod_scale.w / distance;
-    if projected_diameter >= 512.0 { return 0u; }
-    if projected_diameter >= 256.0 { return 1u; }
-    if projected_diameter >= 128.0 { return 2u; }
-    if projected_diameter >= 64.0 { return 3u; }
-    if projected_diameter >= 32.0 { return 4u; }
-    return 5u;
+    return sphere.w * view.world_position_lod_scale.w / distance;
 }
 
-fn resolve_geometry_lod(header: GeometryHeader, requested: u32) -> u32 {
+fn resolve_geometry_lod(header: GeometryHeader, projected: f32, previous: u32) -> u32 {
     var resolved = 0xffffffffu;
-    var resolved_level = 0u;
+    var resolved_error = 3.402823e+38;
     var fallback = 0xffffffffu;
     for (var local = 0u; local < header.lod_count; local += 1u) {
         let index = header.lod_offset + local;
@@ -108,10 +103,21 @@ fn resolve_geometry_lod(header: GeometryHeader, requested: u32) -> u32 {
         let lod = geometry_lods[index];
         let resident = (lod.flags & 4u) != 0u;
         if resident && (lod.flags & 8u) != 0u { fallback = index; }
-        if resident && lod.level <= requested
-            && (resolved == 0xffffffffu || resolved_level < lod.level) {
+        let projected_error = lod.screen_error * projected;
+        if resident && projected_error <= 1.0 && projected_error < resolved_error {
             resolved = index;
-            resolved_level = lod.level;
+            resolved_error = projected_error;
+        }
+    }
+    if previous != 0xffffffffu {
+        for (var local = 0u; local < header.lod_count; local += 1u) {
+            let index = header.lod_offset + local;
+            if index >= arrayLength(&geometry_lods) { break; }
+            let lod = geometry_lods[index];
+            if lod.level == previous && (lod.flags & 4u) != 0u
+                && abs(lod.screen_error * projected - 1.0) < 0.15 {
+                return index;
+            }
         }
     }
     return select(fallback, resolved, resolved != 0xffffffffu);
@@ -149,7 +155,13 @@ fn cull_instances(@builtin(global_invocation_id) id: vec3<u32>) {
     let geometry = geometry_headers[geometry_index];
     let geometry_valid = geometry_in_bounds && (geometry.flags & 1u) != 0u
         && geometry.generation == instance.geometry_generation;
-    let resolved_lod = resolve_geometry_lod(geometry, projected_lod(view, sphere));
+    let history_index = dispatch.output_start + candidate;
+    let previous_lod = select(
+        0xffffffffu,
+        previous_lods[history_index],
+        history_index < dispatch.output_end && history_index < arrayLength(&previous_lods),
+    );
+    let resolved_lod = resolve_geometry_lod(geometry, projected_size(view, sphere), previous_lod);
     let lod_index = select(
         first_resident_geometry_lod(geometry),
         resolved_lod,
@@ -175,6 +187,9 @@ fn cull_instances(@builtin(global_invocation_id) id: vec3<u32>) {
         instance.geometry_index, material.render_class, vec2<u32>(0u),
     );
     let lod = geometry_lods[lod_index];
+    if history_index < dispatch.output_end && history_index < arrayLength(&previous_lods) {
+        previous_lods[history_index] = lod.level;
+    }
     let indexed = (lod.flags & 2u) != 0u;
     indirect[output] = VisibilityIndirect(
         select(0u, lod.element_count, indexed),

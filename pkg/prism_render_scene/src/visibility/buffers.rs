@@ -16,9 +16,12 @@ pub(crate) struct UnifiedVisibilityBuffers {
     gpu_work: RawBufferVec<RenderVisibilityWorkItem>,
     gpu_ranges: RawBufferVec<RenderVisibilityRange>,
     indirect: RawBufferVec<DrawIndexedIndirectArgs>,
+    previous_lods: RawBufferVec<u32>,
     counters: RawBufferVec<RenderVisibilityCounter>,
     overflow: RawBufferVec<u32>,
     gpu_work_capacity: usize,
+    history_slots_per_view: u32,
+    history_view_handles: Vec<(u32, u32)>,
     version: u32,
 }
 
@@ -44,6 +47,8 @@ impl FromWorld for UnifiedVisibilityBuffers {
         gpu_ranges.set_label(Some("prism visibility gpu parity ranges"));
         let mut indirect = RawBufferVec::new(BufferUsages::STORAGE | BufferUsages::INDIRECT);
         indirect.set_label(Some("prism visibility indexed indirect"));
+        let mut previous_lods = RawBufferVec::new(BufferUsages::STORAGE);
+        previous_lods.set_label(Some("prism visibility previous lods"));
         Self {
             views,
             work,
@@ -51,9 +56,12 @@ impl FromWorld for UnifiedVisibilityBuffers {
             gpu_work,
             gpu_ranges,
             indirect,
+            previous_lods,
             counters,
             overflow,
             gpu_work_capacity: 0,
+            history_slots_per_view: 0,
+            history_view_handles: Vec::new(),
             version: 1,
         }
     }
@@ -67,6 +75,13 @@ impl UnifiedVisibilityBuffers {
         ranges: impl IntoIterator<Item = RenderVisibilityRange>,
         gpu_slots_per_view: u32,
     ) {
+        let staged_views: Vec<_> = views.into_iter().collect();
+        let history_views: Vec<_> = staged_views
+            .iter()
+            .map(|view| (view.handle_index, view.handle_generation))
+            .collect();
+        let history_compatible = self.history_slots_per_view == gpu_slots_per_view
+            && self.history_view_handles == history_views;
         self.views.clear();
         self.work.clear();
         self.ranges.clear();
@@ -74,7 +89,7 @@ impl UnifiedVisibilityBuffers {
         self.indirect.clear();
         self.counters.clear();
         self.overflow.clear();
-        self.views.extend(views);
+        self.views.extend(staged_views);
         self.work.extend(work);
         self.ranges.extend(ranges);
         self.gpu_ranges
@@ -92,6 +107,17 @@ impl UnifiedVisibilityBuffers {
         self.gpu_work_capacity = self.views.len().saturating_mul(gpu_slots_per_view as usize);
         self.indirect
             .extend((0..self.gpu_work_capacity).map(|_| DrawIndexedIndirectArgs::default()));
+        if !history_compatible {
+            self.previous_lods.clear();
+        }
+        if self.previous_lods.len() < self.gpu_work_capacity {
+            self.previous_lods.extend(
+                (self.previous_lods.len()..self.gpu_work_capacity).map(|_| u32::MAX),
+            );
+        }
+        self.previous_lods.truncate(self.gpu_work_capacity);
+        self.history_slots_per_view = gpu_slots_per_view;
+        self.history_view_handles = history_views;
         self.counters
             .extend((0..self.views.len()).map(|_| RenderVisibilityCounter::default()));
         self.overflow.extend((0..self.views.len()).map(|_| 0));
@@ -104,12 +130,16 @@ impl UnifiedVisibilityBuffers {
         self.gpu_work.reserve(self.gpu_work_capacity.max(1), device);
         self.gpu_ranges.write_buffer(device, queue);
         self.indirect.write_buffer(device, queue);
+        self.previous_lods.write_buffer(device, queue);
         self.counters.write_buffer(device, queue);
         self.overflow.write_buffer(device, queue);
     }
 
     pub(crate) fn reset_after_device_loss(&mut self) {
         self.version = self.version.wrapping_add(1).max(1);
+        for lod in self.previous_lods.values_mut() {
+            *lod = u32::MAX;
+        }
     }
 
     pub fn version(&self) -> u32 {
@@ -126,7 +156,7 @@ impl UnifiedVisibilityBuffers {
 
     pub(crate) fn compute_buffers(
         &self,
-    ) -> Option<(&Buffer, &Buffer, &Buffer, &Buffer, &Buffer, &Buffer)> {
+    ) -> Option<(&Buffer, &Buffer, &Buffer, &Buffer, &Buffer, &Buffer, &Buffer)> {
         Some((
             self.views.buffer()?,
             self.counters.buffer()?,
@@ -134,6 +164,7 @@ impl UnifiedVisibilityBuffers {
             self.gpu_ranges.buffer()?,
             self.indirect.buffer()?,
             self.overflow.buffer()?,
+            self.previous_lods.buffer()?,
         ))
     }
 
@@ -185,5 +216,32 @@ mod tests {
         assert_eq!(buffers.gpu_work_capacity, 16);
         assert_eq!(buffers.gpu_slots_per_view(), 8);
         assert_eq!(buffers.indirect.len(), 16);
+        assert_eq!(buffers.previous_lods.len(), 16);
+    }
+
+    #[test]
+    fn lod_history_survives_stable_views_and_resets_on_identity_change() {
+        let mut world = World::new();
+        let mut buffers = UnifiedVisibilityBuffers::from_world(&mut world);
+        let view = RenderVisibilityView {
+            handle_index: 1,
+            handle_generation: 1,
+            ..Default::default()
+        };
+        buffers.stage([view], [], [], 4);
+        buffers.previous_lods.values_mut()[2] = 3;
+        buffers.stage([view], [], [], 4);
+        assert_eq!(buffers.previous_lods.values()[2], 3);
+
+        buffers.stage(
+            [RenderVisibilityView {
+                handle_generation: 2,
+                ..view
+            }],
+            [],
+            [],
+            4,
+        );
+        assert!(buffers.previous_lods.values().iter().all(|lod| *lod == u32::MAX));
     }
 }
