@@ -25,19 +25,23 @@ pub(crate) fn sync_geometry_registry(
     for (asset, handle) in assets {
         let Some(mesh) = meshes.get(asset) else { continue };
         let Some(vertices) = allocator.mesh_vertex_slice(&asset) else { continue };
+        let vertex_buffer_class = registry.buffer_class(vertices.buffer);
         let topology = mesh.primitive_topology();
-        let (primitive_kind, element_count, first_element, base_vertex) = match mesh.buffer_info {
+        let (primitive_kind, element_count, first_element, base_vertex, index_buffer_class) = match mesh.buffer_info {
             RenderMeshBufferInfo::Indexed { count, .. } => {
                 let Some(indices) = allocator.mesh_index_slice(&asset) else { continue };
-                (GeometryPrimitiveKind::Indexed, count, indices.range.start, vertices.range.start as i32)
+                let index_buffer_class = registry.buffer_class(indices.buffer);
+                (GeometryPrimitiveKind::Indexed, count, indices.range.start, vertices.range.start as i32, index_buffer_class)
             }
             RenderMeshBufferInfo::NonIndexed => {
-                (GeometryPrimitiveKind::NonIndexed, mesh.vertex_count, vertices.range.start, 0)
+                (GeometryPrimitiveKind::NonIndexed, mesh.vertex_count, vertices.range.start, 0, 0)
             }
         };
         let record = GeometryRecord {
             handle,
             revision: 1,
+            vertex_buffer_class,
+            index_buffer_class,
             primitive_start: 0,
             primitive_count: primitive_count(topology, element_count),
             lods: vec![GeometryLodRecord {
@@ -47,11 +51,10 @@ pub(crate) fn sync_geometry_registry(
                 first_element,
                 base_vertex,
                 vertex_count: mesh.vertex_count,
+                screen_error: 0.0,
                 resident: true,
                 fallback: true,
-                ..Default::default()
             }],
-            ..Default::default()
         };
         if registry.record(handle) != Some(&record) {
             registry.upsert(asset, record);

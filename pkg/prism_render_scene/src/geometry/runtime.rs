@@ -11,7 +11,8 @@ pub struct RenderGeometryRegistry {
     records: HashMap<u32, GeometryRecord>,
     assets: HashMap<AssetId<Mesh>, GeometryHandle>,
     dirty: Vec<u32>,
-    version: u32,
+    next_buffer_class: u32,
+    buffer_classes: HashMap<bevy_render::render_resource::BufferId, u32>,
 }
 
 impl RenderGeometryRegistry {
@@ -50,11 +51,24 @@ impl RenderGeometryRegistry {
     }
 
     pub fn version(&self) -> u32 {
-        self.version.max(1)
+        1
     }
 
     pub(crate) fn records_for_upload(&self) -> impl Iterator<Item = &GeometryRecord> {
         self.records.values()
+    }
+
+    pub(crate) fn buffer_class(
+        &mut self,
+        buffer: &bevy_render::render_resource::Buffer,
+    ) -> u32 {
+        let id = buffer.id();
+        if let Some(class) = self.buffer_classes.get(&id) {
+            return *class;
+        }
+        self.next_buffer_class = self.next_buffer_class.saturating_add(1).max(1);
+        self.buffer_classes.insert(id, self.next_buffer_class);
+        self.next_buffer_class
     }
 }
 
