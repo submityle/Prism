@@ -1,6 +1,6 @@
 //! Render-world rows for the compute-friendly surface reconstruction table.
 
-use bevy_mesh::{Indices, Mesh, PrimitiveTopology, VertexAttributeValues};
+use bevy_mesh::{Mesh, PrimitiveTopology, VertexAttributeValues};
 use bevy_render::{
     impl_atomic_pod,
     render_resource::{AtomicPod, ShaderType},
@@ -167,6 +167,7 @@ pub const SHADING_GEOMETRY_FLAG_INVALID: u32 = 1 << 3;
 mod tests {
     use super::*;
     use bevy_asset::RenderAssetUsages;
+    use bevy_mesh::Indices;
 
     #[test]
     fn rows_match_compute_surface_abi() {
