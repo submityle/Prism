@@ -156,6 +156,10 @@ impl HzbVisibilityBuffers {
     pub(crate) fn active_count_in_range(&self, start: u32, count: u32) -> u32 {
         active_count_in_range(&self.active_slots, start, count)
     }
+
+    fn clear_view_partition(&mut self) {
+        reset_view_partition(&mut self.view_ranges, &mut self.active_slots);
+    }
 }
 
 fn active_count_in_range(
@@ -167,6 +171,17 @@ fn active_count_in_range(
         .iter()
         .filter(|slot| **slot >= start && **slot < start.saturating_add(count))
         .count() as u32
+}
+
+fn reset_view_partition(
+    view_ranges: &mut bevy_platform::collections::HashMap<
+        bevy_render::view::RetainedViewEntity,
+        (u32, u32),
+    >,
+    active_slots: &mut bevy_platform::collections::HashSet<u32>,
+) {
+    view_ranges.clear();
+    active_slots.clear();
 }
 
 #[expect(
@@ -185,6 +200,7 @@ pub(crate) fn prepare_hzb_candidates(
     let view_count = state.views.len() as u32;
     buffers.ensure_capacity(&device, capacity.saturating_mul(view_count).max(1));
     if view_count == 0 {
+        buffers.clear_view_partition();
         return;
     }
     let mut candidates =
@@ -340,7 +356,7 @@ pub(crate) fn init_hzb_visibility_pipeline(
 
 #[cfg(test)]
 mod tests {
-    use super::{active_count_in_range, RenderHzbCullInput};
+    use super::{active_count_in_range, reset_view_partition, RenderHzbCullInput};
     use bevy_render::render_resource::ShaderType;
     use bevy_asset::{uuid::Uuid, AssetId};
     use bevy_shader::{Shader, ShaderCache, ShaderCacheSource};
@@ -402,5 +418,21 @@ mod tests {
         assert_eq!(active_count_in_range(&active, 0, 4), 2);
         assert_eq!(active_count_in_range(&active, 8, 4), 2);
         assert_eq!(active_count_in_range(&active, 4, 4), 0);
+    }
+
+    #[test]
+    fn empty_view_frames_clear_stale_partitions() {
+        let mut ranges = bevy_platform::collections::HashMap::default();
+        let retained = bevy_render::view::RetainedViewEntity::new(
+            bevy_render::sync_world::MainEntity::from(bevy_ecs::entity::Entity::from_bits(1)),
+            None,
+            0,
+        );
+        ranges.insert(retained, (0, 4));
+        let mut active = bevy_platform::collections::HashSet::default();
+        active.insert(1);
+        reset_view_partition(&mut ranges, &mut active);
+        assert!(ranges.is_empty());
+        assert!(active.is_empty());
     }
 }
