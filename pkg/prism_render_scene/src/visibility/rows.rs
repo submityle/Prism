@@ -122,6 +122,8 @@ pub struct RenderVisibilityDispatch {
     pub candidate_count: u32,
     pub output_start: u32,
     pub output_end: u32,
+    pub indirect_first_instance: u32,
+    pub _padding: [u32; 3],
 }
 impl_atomic_pod!(RenderVisibilityDispatch, RenderVisibilityDispatchBlob);
 
@@ -146,7 +148,7 @@ mod tests {
         assert_eq!(size_of::<RenderVisibilityWorkItem>(), 48);
         assert_eq!(size_of::<RenderVisibilityRange>(), 16);
         assert_eq!(size_of::<RenderVisibilityCounter>(), 16);
-        assert_eq!(size_of::<RenderVisibilityDispatch>(), 16);
+        assert_eq!(size_of::<RenderVisibilityDispatch>(), 32);
         assert_eq!(size_of::<RenderVisibilityIndirect>(), 20);
     }
 }

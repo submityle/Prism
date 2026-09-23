@@ -19,6 +19,7 @@ pub struct UnifiedVisibilitySettings {
     pub camera_cut_distance: f32,
     pub gpu_parity_max_items_per_view: u32,
     pub gpu_parity_readback: bool,
+    pub indirect_first_instance: bool,
 }
 
 impl Default for UnifiedVisibilitySettings {
@@ -28,6 +29,7 @@ impl Default for UnifiedVisibilitySettings {
             camera_cut_distance: 100.0,
             gpu_parity_max_items_per_view: 1 << 16,
             gpu_parity_readback: true,
+            indirect_first_instance: false,
         }
     }
 }
@@ -190,4 +192,5 @@ pub struct PrismVisibilityDiagnostics {
     pub parity_dropped_frames: u64,
     pub parity_readback_failures: u64,
     pub parity_overflowed_views: u64,
+    pub indirect_identity_fallbacks: u32,
 }

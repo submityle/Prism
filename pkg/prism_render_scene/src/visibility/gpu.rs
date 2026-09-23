@@ -67,7 +67,7 @@ pub(crate) fn init_visibility_compute_pipeline(
             geometry.layout_descriptor.clone(),
             output_descriptor.clone(),
         ],
-        immediate_size: 16,
+        immediate_size: 32,
         shader,
         entry_point: Some("cull_instances".into()),
         ..Default::default()

@@ -68,6 +68,7 @@ struct VisibilityIndirect { index_count: u32, instance_count: u32, first_index: 
 
 struct VisibilityDispatch {
     view_index: u32, candidate_count: u32, output_start: u32, output_end: u32,
+    indirect_first_instance: u32, padding: vec3<u32>,
 }
 var<immediate> dispatch: VisibilityDispatch;
 
@@ -177,6 +178,7 @@ fn cull_instances(@builtin(global_invocation_id) id: vec3<u32>) {
     let indexed = (lod.flags & 2u) != 0u;
     indirect[output] = VisibilityIndirect(
         select(0u, lod.element_count, indexed),
-        1u, lod.first_element, lod.base_vertex, candidate,
+        1u, lod.first_element, lod.base_vertex,
+        select(0u, candidate, dispatch.indirect_first_instance != 0u),
     );
 }

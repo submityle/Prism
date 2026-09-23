@@ -177,6 +177,7 @@ pub(crate) fn rebuild_unified_visibility(
 )]
 pub(crate) fn dispatch_unified_visibility(
     enabled: Res<UnifiedVisibilityEnabled>,
+    settings: Res<UnifiedVisibilitySettings>,
     scene: Res<RenderGpuScene>,
     state: Res<UnifiedVisibilityState>,
     pipeline: Res<VisibilityComputePipeline>,
@@ -231,11 +232,15 @@ pub(crate) fn dispatch_unified_visibility(
                 candidate_count,
                 output_start,
                 output_end: output_start.saturating_add(buffers.gpu_slots_per_view()),
+                indirect_first_instance: u32::from(settings.indirect_first_instance),
+                _padding: [0; 3],
             };
             pass.set_immediates(0, bytemuck::bytes_of(&immediates));
             pass.dispatch_workgroups(candidate_count.div_ceil(VISIBILITY_WORKGROUP_SIZE), 1, 1);
             diagnostics.gpu_compute_dispatches += 1;
             diagnostics.gpu_candidates += candidate_count;
+            diagnostics.indirect_identity_fallbacks +=
+                u32::from(!settings.indirect_first_instance) * candidate_count;
         }
     }
     pending.push_encoder(encoder, "prism unified visibility");
