@@ -33,15 +33,13 @@ impl GeometryLodChain {
             .lods
             .iter()
             .filter(|lod| lod.resident && lod.screen_error <= target)
-            .min_by(|a, b| a.screen_error.total_cmp(&b.screen_error));
+            .max_by(|a, b| a.screen_error.total_cmp(&b.screen_error));
         if let Some(previous) = previous
             && let Some(previous_lod) = self
                 .lods
                 .iter()
                 .find(|lod| lod.level == previous && lod.resident)
-            && selected.is_some_and(|next| {
-                (next.screen_error - previous_lod.screen_error).abs() < target * 0.15
-            })
+            && (previous_lod.screen_error - target).abs() < target * 0.15
         {
             selected = Some(previous_lod);
         }
@@ -56,5 +54,33 @@ impl GeometryLodChain {
                 level: lod.level,
                 used_fallback: lod.fallback,
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use prism_render_architecture::abi::GenerationalHandle;
+
+    fn chain() -> GeometryLodChain {
+        GeometryLodChain {
+            geometry: GenerationalHandle { index: 1, generation: 1 },
+            lods: vec![
+                GeometryLod { level: 0, screen_error: 0.1, resident: true, fallback: true },
+                GeometryLod { level: 1, screen_error: 0.5, resident: true, fallback: false },
+                GeometryLod { level: 2, screen_error: 1.0, resident: true, fallback: false },
+            ],
+        }
+    }
+
+    #[test]
+    fn selects_coarsest_lod_within_error_budget() {
+        assert_eq!(chain().select(1.0, 1.0, None).unwrap().level, 2);
+        assert_eq!(chain().select(4.0, 1.0, None).unwrap().level, 0);
+    }
+
+    #[test]
+    fn preserves_previous_lod_inside_hysteresis_band() {
+        assert_eq!(chain().select(1.9, 1.0, Some(1)).unwrap().level, 1);
     }
 }

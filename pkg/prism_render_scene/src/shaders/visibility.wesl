@@ -95,7 +95,7 @@ fn projected_size(view: VisibilityView, sphere: vec4<f32>) -> f32 {
 
 fn resolve_geometry_lod(header: GeometryHeader, projected: f32, previous: u32) -> u32 {
     var resolved = 0xffffffffu;
-    var resolved_error = 3.402823e+38;
+    var resolved_error = -1.0;
     var fallback = 0xffffffffu;
     for (var local = 0u; local < header.lod_count; local += 1u) {
         let index = header.lod_offset + local;
@@ -104,7 +104,7 @@ fn resolve_geometry_lod(header: GeometryHeader, projected: f32, previous: u32) -
         let resident = (lod.flags & 4u) != 0u;
         if resident && (lod.flags & 8u) != 0u { fallback = index; }
         let projected_error = lod.screen_error * projected;
-        if resident && projected_error <= 1.0 && projected_error < resolved_error {
+        if resident && projected_error <= 1.0 && projected_error > resolved_error {
             resolved = index;
             resolved_error = projected_error;
         }
