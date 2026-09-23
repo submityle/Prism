@@ -67,6 +67,7 @@ impl Plugin for PrismVisibilityPlugin {
                         .in_set(RenderSystems::PrepareResourcesFlush),
                     prepare_visibility_compute_bind_group
                         .after(upload_unified_visibility)
+                        .after(crate::geometry::prepare_geometry_bind_group)
                         .in_set(RenderSystems::PrepareBindGroups),
                 ),
             );

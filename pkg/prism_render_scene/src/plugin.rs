@@ -106,6 +106,7 @@ impl Plugin for PrismGpuScenePlugin {
                         .in_set(RenderSystems::PrepareResources),
                     sync_geometry_registry
                         .after(apply_extracted_scene_changes)
+                        .before(crate::visibility::systems::build_unified_visibility)
                         .in_set(RenderSystems::PrepareResources),
                     write_gpu_scene_buffers.in_set(RenderSystems::PrepareResourcesFlush),
                     upload_geometry_buffers

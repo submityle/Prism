@@ -6,7 +6,7 @@ use bevy_material::{
     descriptor::BindGroupLayoutDescriptor,
 };
 use bevy_render::{
-    render_resource::{BindGroup, BindGroupEntries, BufferId, ShaderStages},
+    render_resource::{BindGroup, BindGroupEntries, BindGroupLayout, BufferId, ShaderStages},
     renderer::RenderDevice,
 };
 
@@ -16,11 +16,13 @@ use super::{buffers::RenderGeometryBuffers, rows::*};
 pub struct GeometryBindGroup {
     pub(crate) bind_group: Option<BindGroup>,
     pub(crate) layout_descriptor: BindGroupLayoutDescriptor,
+    layout: BindGroupLayout,
     ids: Option<[BufferId; 2]>,
 }
 
 impl FromWorld for GeometryBindGroup {
-    fn from_world(_: &mut World) -> Self {
+    fn from_world(world: &mut World) -> Self {
+        let device = world.resource::<RenderDevice>();
         let entries = BindGroupLayoutEntries::sequential(
             ShaderStages::COMPUTE | ShaderStages::VERTEX | ShaderStages::FRAGMENT,
             (
@@ -31,6 +33,7 @@ impl FromWorld for GeometryBindGroup {
         Self {
             bind_group: None,
             layout_descriptor: BindGroupLayoutDescriptor::new("prism geometry ABI", &entries),
+            layout: device.create_bind_group_layout("prism geometry ABI", &entries),
             ids: None,
         }
     }
@@ -50,10 +53,7 @@ pub(crate) fn prepare_geometry_bind_group(
     }
     bindings.bind_group = Some(device.create_bind_group(
         "prism geometry ABI",
-        &device.create_bind_group_layout(
-            "prism geometry ABI",
-            &bindings.layout_descriptor.entries,
-        ),
+        &bindings.layout,
         &BindGroupEntries::sequential((
             headers.as_entire_binding(),
             lods.as_entire_binding(),

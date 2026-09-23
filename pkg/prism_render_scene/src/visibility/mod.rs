@@ -6,7 +6,7 @@ mod plugin;
 mod readback;
 mod rows;
 pub(crate) mod runtime;
-mod systems;
+pub(crate) mod systems;
 
 pub use consumer::UnifiedVisibilityReader;
 pub use plugin::PrismVisibilityPlugin;
