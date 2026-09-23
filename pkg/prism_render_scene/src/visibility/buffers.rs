@@ -251,6 +251,10 @@ impl UnifiedVisibilityBuffers {
         ))
     }
 
+    pub(crate) fn candidate_bin_buffer(&self) -> Option<&Buffer> {
+        self.candidate_bins.buffer()
+    }
+
     pub(crate) fn gpu_slots_per_view(&self) -> u32 {
         if self.views.is_empty() {
             0

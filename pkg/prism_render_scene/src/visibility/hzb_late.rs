@@ -9,7 +9,8 @@ use bevy_material::{
 };
 use bevy_render::{
     render_resource::{
-        CachedComputePipelineId, ComputePipelineDescriptor, ShaderStages,
+        BindGroup, BindGroupEntries, BindGroupLayout, BufferId, CachedComputePipelineId,
+        ComputePipelineDescriptor, ShaderStages,
     },
     renderer::RenderDevice,
 };
@@ -19,6 +20,13 @@ use bevy_shader::Shader;
 pub(crate) struct HzbLateCompactPipeline {
     pub(crate) pipeline: CachedComputePipelineId,
     layout: BindGroupLayoutDescriptor,
+    bind_group_layout: BindGroupLayout,
+}
+
+#[derive(Resource, Default)]
+pub(crate) struct HzbLateCompactBindGroup {
+    pub(crate) bind_group: Option<BindGroup>,
+    ids: Option<[BufferId; 5]>,
 }
 
 pub(crate) fn init_hzb_late_compact_pipeline(
@@ -38,7 +46,7 @@ pub(crate) fn init_hzb_late_compact_pipeline(
         ),
     );
     let layout = BindGroupLayoutDescriptor::new("prism hzb late compact", &entries);
-    let _ = device.create_bind_group_layout("prism hzb late compact", &entries);
+    let bind_group_layout = device.create_bind_group_layout("prism hzb late compact", &entries);
     let shader: Handle<Shader> =
         load_embedded_asset!(asset_server.as_ref(), "../shaders/hzb_late_compact.wesl");
     let pipeline = cache.queue_compute_pipeline(ComputePipelineDescriptor {
@@ -49,14 +57,63 @@ pub(crate) fn init_hzb_late_compact_pipeline(
         entry_point: Some("compact_late_hzb".into()),
         ..Default::default()
     });
-    commands.insert_resource(HzbLateCompactPipeline { pipeline, layout });
+    commands.insert_resource(HzbLateCompactPipeline {
+        pipeline,
+        layout,
+        bind_group_layout,
+    });
 }
 
 pub(crate) fn inspect_hzb_late_pipeline(
     pipeline: Res<HzbLateCompactPipeline>,
     cache: Res<bevy_render::render_resource::PipelineCache>,
 ) {
-    let _ = (&pipeline.layout, cache.get_compute_pipeline(pipeline.pipeline));
+    let _ = (
+        &pipeline.layout,
+        &pipeline.bind_group_layout,
+        cache.get_compute_pipeline(pipeline.pipeline),
+    );
+}
+
+pub(crate) fn prepare_hzb_late_bind_group(
+    pipeline: Res<HzbLateCompactPipeline>,
+    hzb: Res<super::hzb_gpu::HzbVisibilityBuffers>,
+    visibility: Res<super::buffers::UnifiedVisibilityBuffers>,
+    device: Res<RenderDevice>,
+    mut bindings: ResMut<HzbLateCompactBindGroup>,
+) {
+    let (_, stages) = hzb.bindings();
+    let Some(candidate_bins) = visibility.candidate_bin_buffer() else {
+        return;
+    };
+    let Some((late_counters, late_indexed, late_non_indexed, late_bins)) =
+        visibility.late_compute_buffers()
+    else {
+        return;
+    };
+    let _ = late_counters;
+    let ids = [
+        stages.id(),
+        candidate_bins.id(),
+        late_bins.id(),
+        late_indexed.id(),
+        late_non_indexed.id(),
+    ];
+    if bindings.ids == Some(ids) {
+        return;
+    }
+    bindings.bind_group = Some(device.create_bind_group(
+        "prism hzb late compact",
+        &pipeline.bind_group_layout,
+        &BindGroupEntries::sequential((
+            stages.as_entire_binding(),
+            candidate_bins.as_entire_binding(),
+            late_bins.as_entire_binding(),
+            late_indexed.as_entire_binding(),
+            late_non_indexed.as_entire_binding(),
+        )),
+    ));
+    bindings.ids = Some(ids);
 }
 
 #[cfg(test)]

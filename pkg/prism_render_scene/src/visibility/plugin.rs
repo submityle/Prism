@@ -19,7 +19,10 @@ use super::{
         init_hzb_visibility_pipeline, inspect_hzb_visibility_pipeline, prepare_hzb_bind_groups,
         prepare_hzb_candidates, HzbVisibilityBuffers,
     },
-    hzb_late::{init_hzb_late_compact_pipeline, inspect_hzb_late_pipeline},
+    hzb_late::{
+        init_hzb_late_compact_pipeline, inspect_hzb_late_pipeline,
+        prepare_hzb_late_bind_group, HzbLateCompactBindGroup,
+    },
     readback::{
         collect_visibility_parity_readback, map_submitted_visibility_parity_readback,
         request_visibility_parity_readback, VisibilityParityReadback,
@@ -63,6 +66,7 @@ impl Plugin for PrismVisibilityPlugin {
             .init_resource::<UnifiedVisibilityState>()
             .init_resource::<PrismVisibilityDiagnostics>()
             .init_resource::<VisibilityParityReadback>()
+            .init_resource::<HzbLateCompactBindGroup>()
             .insert_resource(VisibilityFrameGraph {
                 compiled: compiled_graph,
             })
@@ -102,6 +106,10 @@ impl Plugin for PrismVisibilityPlugin {
                     prepare_hzb_bind_groups
                         .after(prepare_hzb_candidates)
                         .after(prepare_hzb_history)
+                        .in_set(RenderSystems::PrepareBindGroups),
+                    prepare_hzb_late_bind_group
+                        .after(prepare_hzb_candidates)
+                        .after(upload_unified_visibility)
                         .in_set(RenderSystems::PrepareBindGroups),
                 ),
             );
