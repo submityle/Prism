@@ -301,6 +301,7 @@ mod tests {
             index_buffer_class: 6,
             indexed: true,
             primitive_kind: prism_render_architecture::geometry::GeometryPrimitiveKind::Indexed,
+            pass_mask: prism_render_visibility::RenderPassMask::OPAQUE.0,
         };
         let mut first = prism_render_visibility::build_view_draw_bins(
             GenerationalHandle { index: 10, generation: 1 },

@@ -13,6 +13,7 @@ pub struct DrawBinKey {
     pub index_buffer_class: u32,
     pub indexed: bool,
     pub primitive_kind: GeometryPrimitiveKind,
+    pub pass_mask: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -26,6 +27,7 @@ pub struct DrawBinRange {
     pub key: DrawBinKey,
     pub command_start: u32,
     pub command_capacity: u32,
+    pub representative_scene: SceneHandle,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -107,6 +109,7 @@ pub fn build_view_draw_bins(
             key,
             command_start,
             command_capacity,
+            representative_scene: scenes[0],
         });
         command_start = command_start.saturating_add(command_capacity);
     }
@@ -138,6 +141,7 @@ mod tests {
             index_buffer_class: 2,
             indexed: true,
             primitive_kind: GeometryPrimitiveKind::Indexed,
+            pass_mask: crate::RenderPassMask::OPAQUE.0,
         };
         let bins = build_view_draw_bins(
             handle(9),
@@ -166,6 +170,7 @@ mod tests {
         assert_eq!(bins.candidate_bins[1], 0);
         assert_eq!(bins.candidate_bins[3], 1);
         assert_eq!(bins.candidate_bins[5], 1);
+        assert_eq!(bins.bins[1].representative_scene, handle(5));
         let header = GpuDrawBinHeader::from_range(bins.view, bins.bins[1]);
         assert_eq!(header.command_start, 1);
         assert_eq!(header.command_capacity, 2);

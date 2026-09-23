@@ -91,16 +91,27 @@ pub(crate) fn queue_gpu_scene_opaque(
         else {
             continue;
         };
-        let unified_entities: Vec<_> = visibility.frame.work_items
-            [unified.start as usize..(unified.start + unified.count) as usize]
+        let Some(view_bins) = visibility
+            .draw_bins
             .iter()
-            .filter(|work| {
-                work.pass_mask.0 & prism_render_visibility::RenderPassMask::OPAQUE.0 != 0
+            .find(|bins| visibility.retained_view(bins.view) == Some(view.retained_view_entity))
+        else {
+            continue;
+        };
+        let opaque_bins: Vec<_> = view_bins
+            .bins
+            .iter()
+            .filter(|bin| {
+                bin.key.pass_mask & prism_render_visibility::RenderPassMask::OPAQUE.0 != 0
             })
-            .filter_map(|work| scene.entity_binding_for_handle(work.scene))
+            .filter_map(|bin| {
+                scene
+                    .entity_binding_for_handle(bin.representative_scene)
+                    .map(|entities| (entities, *bin))
+            })
             .collect();
-        for (render_entity, main_entity) in unified_entities {
-            control.diagnostics.opaque_visible += 1;
+        control.diagnostics.opaque_visible += unified.count;
+        for ((render_entity, main_entity), _) in opaque_bins {
             if queue_one(
                 phase,
                 render_entity,
