@@ -29,7 +29,12 @@ pub use completion::GpuCompletionTracker;
 pub use consumer::{GpuSceneBufferBindings, GpuSceneReader};
 pub use diagnostics::{GpuSceneDiagnostics, GpuSceneUploadSettings};
 pub use extract::{ExtractedSceneInstance, GpuSceneInstanceAddress, PrismGpuSceneEntity};
-pub use geometry::{GeometryBindGroup, RenderGeometryRegistry};
+pub use geometry::{
+    build_shading_geometry, GeometryBindGroup, RenderGeometryRegistry, RenderShadingGeometry,
+    RenderShadingGeometryHeader, RenderShadingPrimitive, RenderShadingVertex,
+    ShadingGeometryBuildError, SHADING_GEOMETRY_FLAG_ACTIVE, SHADING_GEOMETRY_FLAG_INVALID,
+    SHADING_GEOMETRY_FLAG_MISSING_NORMAL, SHADING_GEOMETRY_FLAG_MISSING_UV,
+};
 pub use material::{
     MaterialBindGroup, MaterialBufferBindings, MaterialReader, PrismMaterialDiagnostics,
     PrismMaterialPlugin,
