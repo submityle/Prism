@@ -25,14 +25,10 @@ pub struct GpuSceneOpaqueQueue;
 #[derive(bevy_ecs::resource::Resource, Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GpuSceneOpaqueEnabled(pub bool);
 
-#[derive(bevy_ecs::resource::Resource, Clone, Copy, Debug, Eq, PartialEq)]
+/// Opt-in production gate for the indirect opaque consumer. Capability
+/// support alone cannot prove runtime draw parity, so the default is disabled.
+#[derive(bevy_ecs::resource::Resource, Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct GpuSceneOpaqueIndirectEnabled(pub bool);
-
-impl Default for GpuSceneOpaqueIndirectEnabled {
-    fn default() -> Self {
-        Self(true)
-    }
-}
 
 impl Default for GpuSceneOpaqueEnabled {
     fn default() -> Self {
