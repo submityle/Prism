@@ -91,6 +91,10 @@ pub(crate) struct HzbVisibilityBuffers {
     candidates: Buffer,
     stages: Buffer,
     capacity: u32,
+    view_ranges: bevy_platform::collections::HashMap<
+        bevy_render::view::RetainedViewEntity,
+        (u32, u32),
+    >,
 }
 
 impl FromWorld for HzbVisibilityBuffers {
@@ -117,12 +121,15 @@ impl HzbVisibilityBuffers {
                 mapped_at_creation: false,
             }),
             capacity,
+            view_ranges: bevy_platform::collections::HashMap::default(),
         }
     }
 
     pub(crate) fn ensure_capacity(&mut self, device: &RenderDevice, capacity: u32) {
         if capacity > self.capacity {
+            let view_ranges = core::mem::take(&mut self.view_ranges);
             *self = Self::with_capacity(device, capacity.next_power_of_two());
+            self.view_ranges = view_ranges;
         }
     }
 
@@ -130,39 +137,59 @@ impl HzbVisibilityBuffers {
         (&self.candidates, &self.stages)
     }
 
-    pub(crate) fn capacity(&self) -> u32 {
-        self.capacity
+    pub(crate) fn view_range(
+        &self,
+        retained: bevy_render::view::RetainedViewEntity,
+    ) -> Option<(u32, u32)> {
+        self.view_ranges.get(&retained).copied()
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "HZB staging joins scene, per-view state, buffers, device, and queue."
+)]
 pub(crate) fn prepare_hzb_candidates(
     scene: Res<crate::RenderGpuScene>,
     state: Res<super::runtime::UnifiedVisibilityState>,
     mut buffers: ResMut<HzbVisibilityBuffers>,
     device: Res<RenderDevice>,
     queue: Res<bevy_render::renderer::RenderQueue>,
+    views: Query<&bevy_render::view::ExtractedView>,
 ) {
     let capacity = scene.mirror().capacity() as u32;
-    buffers.ensure_capacity(&device, capacity.max(1));
-    let Some(view) = state.views.first() else {
+    let view_count = state.views.len() as u32;
+    buffers.ensure_capacity(&device, capacity.saturating_mul(view_count).max(1));
+    if view_count == 0 {
         return;
-    };
-    let clip = Mat4::from_cols_array_2d(&view.clip_from_world);
-    let mut candidates = vec![RenderHzbCullInput::default(); capacity as usize];
-    for handle in scene.mirror().live_handles() {
-        let Some(record) = scene.mirror().get(handle) else {
+    }
+    let mut candidates =
+        vec![RenderHzbCullInput::default(); capacity.saturating_mul(view_count) as usize];
+    buffers.view_ranges.clear();
+    for (view_index, view_record) in state.views.iter().enumerate() {
+        let Some(retained) = state.retained_view(view_record.handle) else {
             continue;
         };
-        let current_center = transform_point(record.current_transform, record.bounds.center);
-        let previous_center = transform_point(record.previous_transform, record.bounds.center);
-        if let Some(candidate) = project_sphere_to_hzb(
-            clip,
-            current_center,
-            previous_center,
-            record.bounds.radius,
-            view.viewport,
-        ) {
-            candidates[handle.index as usize] = candidate;
+        buffers
+            .view_ranges
+            .insert(retained, (view_index as u32 * capacity, capacity));
+        let clip = Mat4::from_cols_array_2d(&view_record.clip_from_world);
+        for handle in scene.mirror().live_handles() {
+            let Some(record) = scene.mirror().get(handle) else {
+                continue;
+            };
+            let current_center = transform_point(record.current_transform, record.bounds.center);
+            let previous_center = transform_point(record.previous_transform, record.bounds.center);
+            if let Some(candidate) = project_sphere_to_hzb(
+                clip,
+                current_center,
+                previous_center,
+                record.bounds.radius,
+                view_record.viewport,
+            ) {
+                let slot = view_index * capacity as usize + handle.index as usize;
+                candidates[slot] = candidate;
+            }
         }
     }
     let (candidate_buffer, stage_buffer) = buffers.bindings();
@@ -177,6 +204,7 @@ pub(crate) fn prepare_hzb_candidates(
             ]),
         );
     }
+    debug_assert_eq!(views.iter().count(), state.views.len());
 }
 
 fn transform_point(

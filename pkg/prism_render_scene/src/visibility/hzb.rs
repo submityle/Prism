@@ -33,6 +33,7 @@ pub(crate) fn install_hzb_schedule(app: &mut SubApp) {
 /// only histories that are safe to consume; the GPU test/compaction kernel is
 /// graduation-gated and therefore not counted as a dispatch yet.
 fn dispatch_previous_hzb(
+    current_view: bevy_render::renderer::ViewQuery<&bevy_render::view::ExtractedView>,
     history: Option<bevy_render::renderer::ViewQuery<&PrismViewHzbHistory>>,
     bindings: Option<bevy_render::renderer::ViewQuery<&super::hzb_gpu::HzbVisibilityBindGroup>>,
     settings: Res<super::runtime::UnifiedVisibilitySettings>,
@@ -42,6 +43,10 @@ fn dispatch_previous_hzb(
     mut ctx: RenderContext,
     mut diagnostics: ResMut<super::runtime::PrismVisibilityDiagnostics>,
 ) {
+    let retained = current_view.into_inner().retained_view_entity;
+    let Some((output_start, candidate_count)) = buffers.view_range(retained) else {
+        return;
+    };
     let _conservative_policy = (
         settings.hzb_depth_bias.max(0.0),
         settings.hzb_fast_motion_threshold.max(0.0),
@@ -63,8 +68,9 @@ fn dispatch_previous_hzb(
         return;
     };
     let immediates = hzb_immediates(
-        buffers.capacity(),
+        candidate_count,
         history.mip_count,
+        output_start,
         0,
         true,
         settings.hzb_depth_bias,
@@ -77,13 +83,14 @@ fn dispatch_previous_hzb(
     pass.set_pipeline(compute_pipeline);
     pass.set_bind_group(0, bind_group, &[]);
     pass.set_immediates(0, bytemuck::bytes_of(&immediates));
-    pass.dispatch_workgroups(buffers.capacity().div_ceil(64), 1, 1);
+    pass.dispatch_workgroups(candidate_count.div_ceil(64), 1, 1);
     diagnostics.hzb_previous_dispatches += 1;
 }
 
 /// Scheduling seam for the current-frame retest. Missing current HZB keeps all
 /// deferred candidates visible; readiness is not reported as a GPU dispatch.
 fn dispatch_current_hzb(
+    current_view: bevy_render::renderer::ViewQuery<&bevy_render::view::ExtractedView>,
     history: Option<bevy_render::renderer::ViewQuery<&PrismViewHzbHistory>>,
     bindings: Option<bevy_render::renderer::ViewQuery<&super::hzb_gpu::HzbVisibilityBindGroup>>,
     settings: Res<super::runtime::UnifiedVisibilitySettings>,
@@ -93,6 +100,10 @@ fn dispatch_current_hzb(
     mut ctx: RenderContext,
     mut diagnostics: ResMut<super::runtime::PrismVisibilityDiagnostics>,
 ) {
+    let retained = current_view.into_inner().retained_view_entity;
+    let Some((output_start, candidate_count)) = buffers.view_range(retained) else {
+        return;
+    };
     if !settings.hzb_occlusion {
         return;
     }
@@ -105,8 +116,9 @@ fn dispatch_current_hzb(
     };
     diagnostics.hzb_current_ready_views += 1;
     let immediates = hzb_immediates(
-        buffers.capacity(),
+        candidate_count,
         history.into_inner().mip_count,
+        output_start,
         1,
         true,
         settings.hzb_depth_bias,
@@ -119,7 +131,7 @@ fn dispatch_current_hzb(
     pass.set_pipeline(compute_pipeline);
     pass.set_bind_group(0, bind_group, &[]);
     pass.set_immediates(0, bytemuck::bytes_of(&immediates));
-    pass.dispatch_workgroups(buffers.capacity().div_ceil(64), 1, 1);
+    pass.dispatch_workgroups(candidate_count.div_ceil(64), 1, 1);
     diagnostics.hzb_current_dispatches += 1;
 }
 
@@ -139,6 +151,7 @@ struct HzbDispatch {
 fn hzb_immediates(
     candidate_count: u32,
     mip_count: u32,
+    output_start: u32,
     phase: u32,
     history_valid: bool,
     depth_bias: f32,
@@ -147,7 +160,7 @@ fn hzb_immediates(
     HzbDispatch {
         candidate_count,
         mip_count: mip_count.max(1),
-        output_start: 0,
+        output_start,
         phase,
         history_valid: u32::from(history_valid),
         camera_cut: 0,
@@ -155,6 +168,7 @@ fn hzb_immediates(
         fast_motion_threshold,
     }
 }
+
 
 /// Prism's temporal validity metadata for Bevy's persistent depth-pyramid
 /// texture. Bevy updates that same texture twice in the Core3d schedule: its
