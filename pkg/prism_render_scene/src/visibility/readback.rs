@@ -82,6 +82,13 @@ pub(crate) fn request_visibility_parity_readback(
     });
     encoder.copy_buffer_to_buffer(counters, 0, &target, 0, Some(counter_size));
     encoder.copy_buffer_to_buffer(work, 0, &target, counter_size, Some(work_size));
+    encoder.copy_buffer_to_buffer(
+        late_counters,
+        0,
+        &target,
+        counter_size + work_size + bin_size,
+        Some(counter_size),
+    );
     if bin_size != 0 {
         encoder.copy_buffer_to_buffer(
             bin_headers,
@@ -89,13 +96,6 @@ pub(crate) fn request_visibility_parity_readback(
             &target,
             counter_size + work_size,
             Some(bin_size),
-        );
-        encoder.copy_buffer_to_buffer(
-            late_counters,
-            0,
-            &target,
-            counter_size + work_size + bin_size,
-            Some(counter_size),
         );
         encoder.copy_buffer_to_buffer(
             late_bin_headers,
@@ -300,16 +300,23 @@ fn late_counters_match_bins(
 ) -> bool {
     counters.len() == view_handles.len()
         && counters.iter().zip(view_handles).all(|(counter, view)| {
-            let bin_count = bins
+            let view_bins = bins
                 .iter()
-                .filter(|bin| bin.view_index == view.0 && bin.view_generation == view.1)
+                .filter(|bin| bin.view_index == view.0 && bin.view_generation == view.1);
+            let bin_count = view_bins.clone()
+                .map(|bin| bin.command_count.min(bin.command_capacity))
+                .sum::<u32>();
+            let indexed_count = view_bins.clone()
+                .filter(|bin| bin.indexed != 0)
+                .map(|bin| bin.command_count.min(bin.command_capacity))
+                .sum::<u32>();
+            let non_indexed_count = view_bins
+                .filter(|bin| bin.indexed == 0)
                 .map(|bin| bin.command_count.min(bin.command_capacity))
                 .sum::<u32>();
             counter.visible_count == bin_count
-                && counter
-                    .indexed_count
-                    .saturating_add(counter.non_indexed_count)
-                    == counter.visible_count
+                && counter.indexed_count == indexed_count
+                && counter.non_indexed_count == non_indexed_count
                 && counter.overflow_count == 0
         })
 }
@@ -410,12 +417,14 @@ mod tests {
         let bins = [
             RenderDrawBinHeader {
                 view_index: 0,
+                indexed: 1,
                 command_count: 1,
                 command_capacity: 2,
                 ..Default::default()
             },
             RenderDrawBinHeader {
                 view_index: 1,
+                indexed: 0,
                 command_count: 2,
                 command_capacity: 2,
                 ..Default::default()
