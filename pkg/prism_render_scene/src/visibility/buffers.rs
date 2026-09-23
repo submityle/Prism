@@ -192,6 +192,16 @@ impl UnifiedVisibilityBuffers {
         self.bin_headers.values()
     }
 
+    #[cfg(test)]
+    pub(crate) fn late_draw_bin_headers(&self) -> &[super::rows::RenderDrawBinHeader] {
+        self.late_bin_headers.values()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn late_counters(&self) -> &[RenderVisibilityCounter] {
+        self.late_counters.values()
+    }
+
     pub(crate) fn upload(&mut self, device: &RenderDevice, queue: &RenderQueue) {
         self.views.write_buffer(device, queue);
         self.work.write_buffer(device, queue);
@@ -407,5 +417,27 @@ mod tests {
         assert_eq!(buffers.candidate_bins.values().len(), 8);
         assert_eq!(buffers.candidate_bins.values()[1], 0);
         assert_eq!(buffers.candidate_bins.values()[6], 0);
+        assert_eq!(buffers.late_draw_bin_headers().len(), 2);
+        assert!(buffers
+            .late_draw_bin_headers()
+            .iter()
+            .all(|header| header.command_count == 0));
+    }
+
+    #[test]
+    fn staging_resets_one_late_counter_per_view() {
+        let mut world = World::new();
+        let mut buffers = UnifiedVisibilityBuffers::from_world(&mut world);
+        buffers.stage(
+            [RenderVisibilityView::default(), RenderVisibilityView::default()],
+            [],
+            [],
+            4,
+        );
+        assert_eq!(buffers.late_counters().len(), 2);
+        assert!(buffers
+            .late_counters()
+            .iter()
+            .all(|counter| *counter == RenderVisibilityCounter::default()));
     }
 }
