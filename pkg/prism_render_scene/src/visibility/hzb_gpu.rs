@@ -37,14 +37,15 @@ pub(crate) struct RenderHzbCullInput {
 }
 
 pub(crate) fn project_sphere_to_hzb(
-    clip_from_world: Mat4,
+    current_clip_from_world: Mat4,
+    previous_clip_from_world: Mat4,
     current_center: Vec3,
     previous_center: Vec3,
     radius: f32,
     viewport: [u32; 4],
 ) -> Option<RenderHzbCullInput> {
-    let current = clip_from_world * current_center.extend(1.0);
-    let previous = clip_from_world * previous_center.extend(1.0);
+    let current = current_clip_from_world * current_center.extend(1.0);
+    let previous = previous_clip_from_world * previous_center.extend(1.0);
     if current.w <= 1.0e-5 || !current.is_finite() || !previous.is_finite() {
         return None;
     }
@@ -173,7 +174,8 @@ pub(crate) fn prepare_hzb_candidates(
         buffers
             .view_ranges
             .insert(retained, (view_index as u32 * capacity, capacity));
-        let clip = Mat4::from_cols_array_2d(&view_record.clip_from_world);
+        let current_clip = Mat4::from_cols_array_2d(&view_record.clip_from_world);
+        let previous_clip = Mat4::from_cols_array_2d(&view_record.previous_clip_from_world);
         for handle in scene.mirror().live_handles() {
             let Some(record) = scene.mirror().get(handle) else {
                 continue;
@@ -181,7 +183,8 @@ pub(crate) fn prepare_hzb_candidates(
             let current_center = transform_point(record.current_transform, record.bounds.center);
             let previous_center = transform_point(record.previous_transform, record.bounds.center);
             if let Some(candidate) = project_sphere_to_hzb(
-                clip,
+                current_clip,
+                previous_clip,
                 current_center,
                 previous_center,
                 record.bounds.radius,
@@ -233,7 +236,7 @@ pub(crate) fn inspect_hzb_visibility_pipeline(
     mut buffers: ResMut<HzbVisibilityBuffers>,
     device: Res<RenderDevice>,
 ) {
-    let _projector: fn(Mat4, Vec3, Vec3, f32, [u32; 4]) -> Option<RenderHzbCullInput> =
+    let _projector: fn(Mat4, Mat4, Vec3, Vec3, f32, [u32; 4]) -> Option<RenderHzbCullInput> =
         project_sphere_to_hzb;
     buffers.ensure_capacity(&device, 1);
     let _ = buffers.bindings();
@@ -354,6 +357,7 @@ mod tests {
     #[test]
     fn sphere_projection_is_reverse_z_and_motion_conservative() {
         let projected = super::project_sphere_to_hzb(
+            bevy_math::Mat4::IDENTITY,
             bevy_math::Mat4::IDENTITY,
             bevy_math::Vec3::new(0.0, 0.0, 0.5),
             bevy_math::Vec3::new(-0.1, 0.0, 0.5),
