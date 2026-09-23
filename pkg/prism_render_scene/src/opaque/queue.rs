@@ -18,16 +18,19 @@ use super::GpuSceneOpaqueEnabled;
 use super::{
     draw::DrawGpuSceneOpaque,
     pipeline::{GpuSceneDebugView, GpuSceneOpaquePipeline, GpuSceneOpaquePipelineKey},
+    GpuSceneOpaqueIndirectEnabled,
 };
 use crate::{
-    visibility::runtime::UnifiedVisibilityState, GpuSceneDiagnostics, GpuSceneInstanceAddress,
-    GpuSceneMode,
+    visibility::runtime::{UnifiedVisibilitySettings, UnifiedVisibilityState}, GpuSceneDiagnostics,
+    GpuSceneInstanceAddress, GpuSceneMode,
 };
 
 #[derive(SystemParam)]
 pub(crate) struct OpaqueQueueControl<'w> {
     mode: Res<'w, GpuSceneMode>,
     enabled: Res<'w, GpuSceneOpaqueEnabled>,
+    indirect_enabled: Res<'w, GpuSceneOpaqueIndirectEnabled>,
+    visibility_settings: Res<'w, UnifiedVisibilitySettings>,
     debug_view: Res<'w, GpuSceneDebugView>,
     diagnostics: ResMut<'w, GpuSceneDiagnostics>,
 }
@@ -98,20 +101,15 @@ pub(crate) fn queue_gpu_scene_opaque(
         else {
             continue;
         };
-        let opaque_bins: Vec<_> = view_bins
-            .bins
-            .iter()
-            .filter(|bin| {
-                bin.key.pass_mask & prism_render_visibility::RenderPassMask::OPAQUE.0 != 0
-            })
-            .filter_map(|bin| {
-                scene
-                    .entity_binding_for_handle(bin.representative_scene)
-                    .map(|entities| (entities, *bin))
-            })
-            .collect();
+        let queue_entries = opaque_queue_entries(
+            &visibility,
+            &scene,
+            unified,
+            view_bins,
+            control.indirect_enabled.0 && control.visibility_settings.indirect_first_instance,
+        );
         control.diagnostics.opaque_visible += unified.count;
-        for ((render_entity, main_entity), _) in opaque_bins {
+        for (render_entity, main_entity) in queue_entries {
             if queue_one(
                 phase,
                 render_entity,
@@ -134,6 +132,33 @@ pub(crate) fn queue_gpu_scene_opaque(
             }
         }
     }
+}
+
+fn opaque_queue_entries(
+    visibility: &UnifiedVisibilityState,
+    scene: &crate::RenderGpuScene,
+    visible: prism_render_visibility::BufferRange,
+    bins: &prism_render_visibility::ViewDrawBins,
+    indirect: bool,
+) -> Vec<(Entity, bevy_render::sync_world::MainEntity)> {
+    if indirect {
+        return bins
+            .bins
+            .iter()
+            .filter(|bin| {
+                bin.key.pass_mask & prism_render_visibility::RenderPassMask::OPAQUE.0 != 0
+            })
+            .filter_map(|bin| scene.entity_binding_for_handle(bin.representative_scene))
+            .collect();
+    }
+    visibility.frame.work_items
+        [visible.start as usize..visible.start.saturating_add(visible.count) as usize]
+        .iter()
+        .filter(|work| {
+            work.pass_mask.0 & prism_render_visibility::RenderPassMask::OPAQUE.0 != 0
+        })
+        .filter_map(|work| scene.entity_binding_for_handle(work.scene))
+        .collect()
 }
 
 #[expect(
