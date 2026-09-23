@@ -58,6 +58,7 @@ struct DrawBinHeader {
     vertex_buffer_class: u32, index_buffer_class: u32, indexed: u32,
     command_start: u32, command_capacity: u32, command_count: atomic<u32>,
     view_index: u32, view_generation: u32, padding: u32,
+    primitive_kind: u32, padding_tail: vec3<u32>,
 }
 
 @group(0) @binding(0) var<storage, read> scene_instances: array<GpuSceneInstance>;

@@ -198,6 +198,7 @@ fn draw_bin_candidate(
             index_buffer_class: geometry.index_buffer_class,
             indexed: lod.primitive_kind
                 == prism_render_architecture::geometry::GeometryPrimitiveKind::Indexed,
+            primitive_kind: lod.primitive_kind,
         },
     })
 }

@@ -167,6 +167,8 @@ pub struct RenderDrawBinHeader {
     pub view_index: u32,
     pub view_generation: u32,
     pub _padding: u32,
+    pub primitive_kind: u32,
+    pub _padding_tail: [u32; 3],
 }
 impl_atomic_pod!(RenderDrawBinHeader, RenderDrawBinHeaderBlob);
 
@@ -189,6 +191,6 @@ mod tests {
         assert_eq!(size_of::<RenderVisibilityDispatch>(), 32);
         assert_eq!(size_of::<RenderVisibilityIndirect>(), 20);
         assert_eq!(size_of::<RenderVisibilityNonIndexedIndirect>(), 16);
-        assert_eq!(size_of::<RenderDrawBinHeader>(), 48);
+        assert_eq!(size_of::<RenderDrawBinHeader>(), 64);
     }
 }

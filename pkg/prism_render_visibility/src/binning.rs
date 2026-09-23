@@ -1,6 +1,9 @@
 use alloc::{collections::BTreeMap, vec::Vec};
 use crate::ViewHandle;
-use prism_render_architecture::gpu_scene::{GeometryHandle, SceneHandle};
+use prism_render_architecture::{
+    geometry::GeometryPrimitiveKind,
+    gpu_scene::{GeometryHandle, SceneHandle},
+};
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct DrawBinKey {
@@ -9,6 +12,7 @@ pub struct DrawBinKey {
     pub vertex_buffer_class: u32,
     pub index_buffer_class: u32,
     pub indexed: bool,
+    pub primitive_kind: GeometryPrimitiveKind,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -34,7 +38,7 @@ pub struct ViewDrawBins {
     pub global_candidate_start: u32,
 }
 
-pub const DRAW_BIN_HEADER_WORDS: usize = 12;
+pub const DRAW_BIN_HEADER_WORDS: usize = 16;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
@@ -51,6 +55,8 @@ pub struct GpuDrawBinHeader {
     pub view_index: u32,
     pub view_generation: u32,
     pub _padding: u32,
+    pub primitive_kind: u32,
+    pub _padding_tail: [u32; 3],
 }
 
 impl GpuDrawBinHeader {
@@ -68,6 +74,11 @@ impl GpuDrawBinHeader {
             view_index: view.index,
             view_generation: view.generation,
             _padding: 0,
+            primitive_kind: match range.key.primitive_kind {
+                GeometryPrimitiveKind::Indexed => 0,
+                GeometryPrimitiveKind::NonIndexed => 1,
+            },
+            _padding_tail: [0; 3],
         }
     }
 }
@@ -126,6 +137,7 @@ mod tests {
             vertex_buffer_class: 1,
             index_buffer_class: 2,
             indexed: true,
+            primitive_kind: GeometryPrimitiveKind::Indexed,
         };
         let bins = build_view_draw_bins(
             handle(9),

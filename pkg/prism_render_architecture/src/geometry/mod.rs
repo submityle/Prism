@@ -6,7 +6,7 @@ use crate::gpu_scene::GeometryHandle;
 pub const GEOMETRY_ABI_VERSION: u32 = 1;
 
 /// Logical primitive encoding. Physical buffers remain backend-owned.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub enum GeometryPrimitiveKind {
     #[default]
     Indexed,
