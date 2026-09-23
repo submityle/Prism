@@ -14,6 +14,7 @@ mod diagnostics;
 mod lod;
 mod occlusion;
 mod output;
+mod two_phase;
 mod view;
 mod work;
 
@@ -29,6 +30,7 @@ pub use diagnostics::VisibilityDiagnostics;
 pub use lod::{GeometryLod, GeometryLodChain, LodSelection};
 pub use occlusion::{HzbPhase, HzbTest};
 pub use output::{BufferRange, ViewVisibilityOutput, VisibilityFrame};
+pub use two_phase::{classify_early_hzb, resolve_current_hzb};
 pub use view::{GpuViewRecord, HistoryPolicy, ViewFlags, ViewHandle};
 pub use work::{GpuRenderWorkItem, RenderPassMask, VisibilityStageMask, WorkSortKey};
 
