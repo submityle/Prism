@@ -9,8 +9,9 @@ use bevy_material::{
 };
 use bevy_render::{
     render_resource::{
-        Buffer, BufferDescriptor, BufferUsages, CachedComputePipelineId, ComputePipelineDescriptor,
-        ShaderStages, TextureSampleType,
+        BindGroup, BindGroupEntries, BindGroupLayout, Buffer, BufferDescriptor, BufferId,
+        BufferUsages, CachedComputePipelineId, ComputePipelineDescriptor, ShaderStages,
+        TextureSampleType, TextureViewId,
     },
     renderer::RenderDevice,
 };
@@ -76,6 +77,13 @@ pub(crate) fn project_sphere_to_hzb(
 pub(crate) struct HzbVisibilityPipeline {
     pipeline: CachedComputePipelineId,
     layout: BindGroupLayoutDescriptor,
+    bind_group_layout: BindGroupLayout,
+}
+
+#[derive(Component, Default)]
+pub(crate) struct HzbVisibilityBindGroup {
+    pub(crate) bind_group: Option<BindGroup>,
+    ids: Option<(BufferId, TextureViewId, BufferId)>,
 }
 
 #[derive(Resource)]
@@ -197,7 +205,44 @@ pub(crate) fn inspect_hzb_visibility_pipeline(
         project_sphere_to_hzb;
     buffers.ensure_capacity(&device, 1);
     let _ = buffers.bindings();
-    let _ = (&pipeline.layout, cache.get_compute_pipeline(pipeline.pipeline));
+    let _ = (
+        &pipeline.layout,
+        &pipeline.bind_group_layout,
+        cache.get_compute_pipeline(pipeline.pipeline),
+    );
+}
+
+pub(crate) fn prepare_hzb_bind_groups(
+    mut commands: Commands,
+    pipeline: Res<HzbVisibilityPipeline>,
+    buffers: Res<HzbVisibilityBuffers>,
+    device: Res<RenderDevice>,
+    views: Query<(
+        Entity,
+        &bevy_core_pipeline::mip_generation::experimental::depth::ViewDepthPyramid,
+        Option<&HzbVisibilityBindGroup>,
+    )>,
+) {
+    let (candidates, stages) = buffers.bindings();
+    for (entity, pyramid, existing) in &views {
+        let ids = (candidates.id(), pyramid.all_mips.id(), stages.id());
+        if existing.is_some_and(|existing| existing.ids == Some(ids)) {
+            continue;
+        }
+        let bind_group = device.create_bind_group(
+            "prism hzb visibility",
+            &pipeline.bind_group_layout,
+            &BindGroupEntries::sequential((
+                candidates.as_entire_binding(),
+                &pyramid.all_mips,
+                stages.as_entire_binding(),
+            )),
+        );
+        commands.entity(entity).insert(HzbVisibilityBindGroup {
+            bind_group: Some(bind_group),
+            ids: Some(ids),
+        });
+    }
 }
 
 pub(crate) fn init_hzb_visibility_pipeline(
@@ -215,6 +260,7 @@ pub(crate) fn init_hzb_visibility_pipeline(
         ),
     );
     let layout = BindGroupLayoutDescriptor::new("prism hzb visibility", &entries);
+    let bind_group_layout = device.create_bind_group_layout("prism hzb visibility", &entries);
     let shader: Handle<Shader> =
         load_embedded_asset!(asset_server.as_ref(), "../shaders/hzb_visibility.wesl");
     let pipeline = cache.queue_compute_pipeline(ComputePipelineDescriptor {
@@ -225,9 +271,11 @@ pub(crate) fn init_hzb_visibility_pipeline(
         entry_point: Some("classify_hzb".into()),
         ..Default::default()
     });
-    // Force layout validation against the actual device during startup.
-    let _ = device.create_bind_group_layout("prism hzb visibility", &entries);
-    commands.insert_resource(HzbVisibilityPipeline { pipeline, layout });
+    commands.insert_resource(HzbVisibilityPipeline {
+        pipeline,
+        layout,
+        bind_group_layout,
+    });
 }
 
 #[cfg(test)]

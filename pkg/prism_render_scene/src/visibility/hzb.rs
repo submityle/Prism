@@ -30,6 +30,7 @@ pub(crate) fn install_hzb_schedule(app: &mut SubApp) {
 /// graduation-gated and therefore not counted as a dispatch yet.
 fn dispatch_previous_hzb(
     history: Option<bevy_render::renderer::ViewQuery<&PrismViewHzbHistory>>,
+    bindings: Option<bevy_render::renderer::ViewQuery<&super::hzb_gpu::HzbVisibilityBindGroup>>,
     settings: Res<super::runtime::UnifiedVisibilitySettings>,
     mut diagnostics: ResMut<super::runtime::PrismVisibilityDiagnostics>,
 ) {
@@ -38,6 +39,7 @@ fn dispatch_previous_hzb(
         settings.hzb_fast_motion_threshold.max(0.0),
     );
     if settings.hzb_occlusion
+        && bindings.is_some_and(|bindings| bindings.into_inner().bind_group.is_some())
         && history.is_some_and(|history| history.into_inner().previous_valid)
     {
         diagnostics.hzb_previous_ready_views += 1;
@@ -48,10 +50,14 @@ fn dispatch_previous_hzb(
 /// deferred candidates visible; readiness is not reported as a GPU dispatch.
 fn dispatch_current_hzb(
     history: Option<bevy_render::renderer::ViewQuery<&PrismViewHzbHistory>>,
+    bindings: Option<bevy_render::renderer::ViewQuery<&super::hzb_gpu::HzbVisibilityBindGroup>>,
     settings: Res<super::runtime::UnifiedVisibilitySettings>,
     mut diagnostics: ResMut<super::runtime::PrismVisibilityDiagnostics>,
 ) {
-    if settings.hzb_occlusion && history.is_some() {
+    if settings.hzb_occlusion
+        && history.is_some()
+        && bindings.is_some_and(|bindings| bindings.into_inner().bind_group.is_some())
+    {
         diagnostics.hzb_current_ready_views += 1;
     }
 }
