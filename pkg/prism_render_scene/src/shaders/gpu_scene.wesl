@@ -8,7 +8,7 @@ struct GpuSceneInstance {
     material_index: u32,
     material_generation: u32,
     render_layers: u32,
-    active: u32,
+    is_active: u32,
 }
 
 struct GpuSceneTransform {

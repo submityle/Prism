@@ -10,7 +10,7 @@ struct GpuSceneInstance {
     generation: u32, flags: u32,
     geometry_index: u32, geometry_generation: u32,
     material_index: u32, material_generation: u32,
-    render_layers: u32, active: u32,
+    render_layers: u32, is_active: u32,
 }
 struct GpuSceneTransform { world_from_local: mat3x4<f32> }
 struct GpuSceneBounds { center_radius: vec4<f32>, half_extents: vec4<f32> }
@@ -18,7 +18,7 @@ struct MaterialHeader {
     generation: u32, revision: u32, shading_model: u32, render_class: u32,
     feature_flags: u32, closure_mask: u32, parameter_offset: u32, parameter_size: u32,
     texture_offset: u32, texture_count: u32, sampler_offset: u32, sampler_count: u32,
-    custom_program: u32, active: u32, material_epoch_low: u32, material_epoch_high: u32,
+    custom_program: u32, is_active: u32, material_epoch_low: u32, material_epoch_high: u32,
 }
 struct SurfaceParameters {
     base_color: vec4<f32>, emissive: vec4<f32>,
@@ -57,7 +57,7 @@ struct VertexOutput {
 @vertex
 fn vertex(vertex: Vertex) -> VertexOutput {
     let instance = scene_instances[scene_address.index];
-    let valid = instance.active != 0u && instance.generation == scene_address.generation;
+    let valid = instance.is_active != 0u && instance.generation == scene_address.generation;
     @if(VERTEX_POSITIONS_COMPRESSED) {
         let bounds = scene_bounds[scene_address.index];
         let position = bevy_render::utils::decompress_vertex_position(
@@ -78,24 +78,32 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         valid,
     );
     out.valid = u32(valid);
-    let material_header = material_headers[instance.material_index];
+    let material_in_bounds = instance.material_index < arrayLength(&material_headers);
+    let requested_material_index = select(0u, instance.material_index, material_in_bounds);
+    let material_header = material_headers[requested_material_index];
     out.material_index = select(
         0u,
-        instance.material_index,
-        material_header.active != 0u && material_header.generation == instance.material_generation,
+        requested_material_index,
+        material_in_bounds
+            && material_header.is_active != 0u
+            && material_header.generation == instance.material_generation
+            && material_header.parameter_offset < arrayLength(&material_parameters),
     );
     let id_color = vec3<f32>(
         f32((scene_address.index * 97u) & 255u),
         f32((scene_address.index * 57u) & 255u),
         f32((scene_address.index * 17u) & 255u),
     ) / 255.0;
-    @if(PRISM_DEBUG_VIEW == 1) out.debug_color = id_color;
-    @else if(PRISM_DEBUG_VIEW == 2) out.debug_color = vec3<f32>(f32(instance.geometry_index & 255u) / 255.0, 0.2, 0.8);
-    @else if(PRISM_DEBUG_VIEW == 3) out.debug_color = vec3<f32>(0.8, f32(instance.material_index & 255u) / 255.0, 0.2);
-    @else if(PRISM_DEBUG_VIEW == 4) {
+    @if(PRISM_DEBUG_VIEW_1) { out.debug_color = id_color; }
+    @else if(PRISM_DEBUG_VIEW_2) { out.debug_color = vec3<f32>(f32(instance.geometry_index & 255u) / 255.0, 0.2, 0.8); }
+    @else if(PRISM_DEBUG_VIEW_3) { out.debug_color = vec3<f32>(0.8, f32(instance.material_index & 255u) / 255.0, 0.2); }
+    @else if(PRISM_DEBUG_VIEW_4) {
         let previous = affine3_to_square(scene_previous_transforms[scene_address.index].world_from_local);
         out.debug_color = abs((world_from_local[3] - previous[3]).xyz);
-    } @else out.debug_color = material_parameters[out.material_index].base_color.rgb;
+    } @else {
+        let header = material_headers[out.material_index];
+        out.debug_color = material_parameters[header.parameter_offset].base_color.rgb;
+    }
     return out;
 }
 

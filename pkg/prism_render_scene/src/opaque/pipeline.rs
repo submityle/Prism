@@ -52,6 +52,78 @@ pub(crate) fn init_opaque_pipeline(
     });
 }
 
+#[cfg(test)]
+mod tests {
+    use super::GpuSceneDebugView;
+    use bevy_asset::{uuid::Uuid, AssetId};
+    use bevy_shader::{Shader, ShaderCache, ShaderCacheSource, ShaderDefVal};
+
+    fn load_source(
+        _: &(),
+        source: ShaderCacheSource,
+        _: &bevy_shader::ValidateShader,
+    ) -> Result<String, bevy_shader::ShaderCacheError> {
+        match source {
+            ShaderCacheSource::Wgsl(source) => Ok(source),
+            ShaderCacheSource::SpirV(_) => unreachable!("opaque shader is WESL"),
+        }
+    }
+
+    #[test]
+    fn opaque_wesl_compiles_for_every_specialization() {
+        let shader_id = AssetId::Uuid {
+            uuid: Uuid::from_u128(0x5052_4953_4d4f_5041_5155_4553_4844_5201),
+        };
+        let mut cache = ShaderCache::new((), load_source);
+        let source = include_str!("../shaders/opaque.wesl");
+        let source = source[source.find("struct GpuSceneInstance").unwrap()..].replace(
+            "bevy_render::utils::decompress_vertex_position",
+            "decompress_vertex_position",
+        );
+        let stubs = r#"
+fn affine3_to_square(value: mat3x4<f32>) -> mat4x4<f32> {
+    return mat4x4<f32>(
+        vec4<f32>(1.0, 0.0, 0.0, 0.0),
+        vec4<f32>(0.0, 1.0, 0.0, 0.0),
+        vec4<f32>(0.0, 0.0, 1.0, 0.0),
+        vec4<f32>(0.0, 0.0, 0.0, 1.0),
+    );
+}
+fn position_world_to_clip(position: vec3<f32>) -> vec4<f32> {
+    return vec4<f32>(position, 1.0);
+}
+fn decompress_vertex_position(
+    position: vec4<f32>,
+    center: vec3<f32>,
+    half_extents: vec3<f32>,
+) -> vec3<f32> {
+    return position.xyz;
+}
+"#;
+        cache.set_shader(
+            shader_id,
+            Shader::from_wesl(format!("{stubs}{source}"), "shaders/prism_opaque.wesl"),
+        );
+        for compressed in [false, true] {
+            for debug_view in 0..=GpuSceneDebugView::Motion as u32 {
+                let mut defs = Vec::new();
+                for candidate in 1..=GpuSceneDebugView::Motion as u32 {
+                    defs.push(ShaderDefVal::Bool(
+                        format!("PRISM_DEBUG_VIEW_{candidate}").into(),
+                        debug_view == candidate,
+                    ));
+                }
+                if compressed {
+                    defs.push("VERTEX_POSITIONS_COMPRESSED".into());
+                }
+                cache
+                    .get(debug_view as usize, shader_id, &defs)
+                    .unwrap_or_else(|error| panic!("opaque specialization failed: {error}"));
+            }
+        }
+    }
+}
+
 impl SpecializedMeshPipeline for GpuSceneOpaquePipeline {
     type Key = GpuSceneOpaquePipelineKey;
 
@@ -61,10 +133,12 @@ impl SpecializedMeshPipeline for GpuSceneOpaquePipeline {
         layout: &MeshVertexBufferLayoutRef,
     ) -> Result<RenderPipelineDescriptor, SpecializedMeshPipelineError> {
         let mut shader_defs = Vec::new();
-        shader_defs.push(bevy_shader::ShaderDefVal::UInt(
-            "PRISM_DEBUG_VIEW".into(),
-            key.debug as u32,
-        ));
+        for debug_view in 1..=GpuSceneDebugView::Motion as u32 {
+            shader_defs.push(bevy_shader::ShaderDefVal::Bool(
+                format!("PRISM_DEBUG_VIEW_{debug_view}").into(),
+                key.debug as u32 == debug_view,
+            ));
+        }
         if layout
             .0
             .get_attribute_compression()

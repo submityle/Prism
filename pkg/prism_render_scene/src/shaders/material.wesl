@@ -12,7 +12,7 @@ struct PrismMaterialHeader {
     sampler_offset: u32,
     sampler_count: u32,
     custom_program: u32,
-    active: u32,
+    is_active: u32,
     material_epoch_low: u32,
     material_epoch_high: u32,
 }
@@ -49,7 +49,7 @@ fn prism_material_is_valid(
     header: PrismMaterialHeader,
     expected_generation: u32,
 ) -> bool {
-    return header.active != 0u && header.generation == expected_generation;
+    return header.is_active != 0u && header.generation == expected_generation;
 }
 
 fn prism_resolve_material_index(
