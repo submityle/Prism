@@ -1,6 +1,8 @@
 use bevy_ecs::{prelude::*, world::FromWorld};
 use bevy_render::{
-    render_resource::{Buffer, BufferUsages, DrawIndexedIndirectArgs, RawBufferVec},
+    render_resource::{
+        Buffer, BufferUsages, DrawIndexedIndirectArgs, DrawIndirectArgs, RawBufferVec,
+    },
     renderer::{RenderDevice, RenderQueue},
 };
 
@@ -15,7 +17,8 @@ pub(crate) struct UnifiedVisibilityBuffers {
     ranges: RawBufferVec<RenderVisibilityRange>,
     gpu_work: RawBufferVec<RenderVisibilityWorkItem>,
     gpu_ranges: RawBufferVec<RenderVisibilityRange>,
-    indirect: RawBufferVec<DrawIndexedIndirectArgs>,
+    indexed_indirect: RawBufferVec<DrawIndexedIndirectArgs>,
+    non_indexed_indirect: RawBufferVec<DrawIndirectArgs>,
     previous_lods: RawBufferVec<u32>,
     counters: RawBufferVec<RenderVisibilityCounter>,
     overflow: RawBufferVec<u32>,
@@ -45,8 +48,11 @@ impl FromWorld for UnifiedVisibilityBuffers {
         gpu_work.set_label(Some("prism visibility gpu parity work"));
         let mut gpu_ranges = RawBufferVec::new(BufferUsages::STORAGE | BufferUsages::COPY_SRC);
         gpu_ranges.set_label(Some("prism visibility gpu parity ranges"));
-        let mut indirect = RawBufferVec::new(BufferUsages::STORAGE | BufferUsages::INDIRECT);
-        indirect.set_label(Some("prism visibility indexed indirect"));
+        let mut indexed_indirect = RawBufferVec::new(BufferUsages::STORAGE | BufferUsages::INDIRECT);
+        indexed_indirect.set_label(Some("prism visibility indexed indirect"));
+        let mut non_indexed_indirect =
+            RawBufferVec::new(BufferUsages::STORAGE | BufferUsages::INDIRECT);
+        non_indexed_indirect.set_label(Some("prism visibility non-indexed indirect"));
         let mut previous_lods = RawBufferVec::new(BufferUsages::STORAGE);
         previous_lods.set_label(Some("prism visibility previous lods"));
         Self {
@@ -55,7 +61,8 @@ impl FromWorld for UnifiedVisibilityBuffers {
             ranges,
             gpu_work,
             gpu_ranges,
-            indirect,
+            indexed_indirect,
+            non_indexed_indirect,
             previous_lods,
             counters,
             overflow,
@@ -86,7 +93,8 @@ impl UnifiedVisibilityBuffers {
         self.work.clear();
         self.ranges.clear();
         self.gpu_ranges.clear();
-        self.indirect.clear();
+        self.indexed_indirect.clear();
+        self.non_indexed_indirect.clear();
         self.counters.clear();
         self.overflow.clear();
         self.views.extend(staged_views);
@@ -105,8 +113,10 @@ impl UnifiedVisibilityBuffers {
                     }),
             );
         self.gpu_work_capacity = self.views.len().saturating_mul(gpu_slots_per_view as usize);
-        self.indirect
+        self.indexed_indirect
             .extend((0..self.gpu_work_capacity).map(|_| DrawIndexedIndirectArgs::default()));
+        self.non_indexed_indirect
+            .extend((0..self.gpu_work_capacity).map(|_| DrawIndirectArgs::default()));
         if !history_compatible {
             self.previous_lods.clear();
         }
@@ -129,7 +139,8 @@ impl UnifiedVisibilityBuffers {
         self.ranges.write_buffer(device, queue);
         self.gpu_work.reserve(self.gpu_work_capacity.max(1), device);
         self.gpu_ranges.write_buffer(device, queue);
-        self.indirect.write_buffer(device, queue);
+        self.indexed_indirect.write_buffer(device, queue);
+        self.non_indexed_indirect.write_buffer(device, queue);
         self.previous_lods.write_buffer(device, queue);
         self.counters.write_buffer(device, queue);
         self.overflow.write_buffer(device, queue);
@@ -156,13 +167,14 @@ impl UnifiedVisibilityBuffers {
 
     pub(crate) fn compute_buffers(
         &self,
-    ) -> Option<(&Buffer, &Buffer, &Buffer, &Buffer, &Buffer, &Buffer, &Buffer)> {
+    ) -> Option<(&Buffer, &Buffer, &Buffer, &Buffer, &Buffer, &Buffer, &Buffer, &Buffer)> {
         Some((
             self.views.buffer()?,
             self.counters.buffer()?,
             self.gpu_work.buffer()?,
             self.gpu_ranges.buffer()?,
-            self.indirect.buffer()?,
+            self.indexed_indirect.buffer()?,
+            self.non_indexed_indirect.buffer()?,
             self.overflow.buffer()?,
             self.previous_lods.buffer()?,
         ))
@@ -180,8 +192,8 @@ impl UnifiedVisibilityBuffers {
         Some((self.counters.buffer()?, self.gpu_work.buffer()?))
     }
 
-    pub(crate) fn indirect(&self) -> Option<&Buffer> {
-        self.indirect.buffer()
+    pub(crate) fn indirect(&self) -> Option<(&Buffer, &Buffer)> {
+        Some((self.indexed_indirect.buffer()?, self.non_indexed_indirect.buffer()?))
     }
 }
 
@@ -215,7 +227,8 @@ mod tests {
         assert_eq!(buffers.gpu_ranges.values()[1].start, 8);
         assert_eq!(buffers.gpu_work_capacity, 16);
         assert_eq!(buffers.gpu_slots_per_view(), 8);
-        assert_eq!(buffers.indirect.len(), 16);
+        assert_eq!(buffers.indexed_indirect.len(), 16);
+        assert_eq!(buffers.non_indexed_indirect.len(), 16);
         assert_eq!(buffers.previous_lods.len(), 16);
     }
 

@@ -35,11 +35,13 @@ impl UnifiedVisibilityReader<'_> {
 
     pub fn buffers(&self) -> Option<UnifiedVisibilityBufferBindings<'_>> {
         let (views, work, ranges) = self.buffers.buffers()?;
+        let (indexed_indirect, non_indexed_indirect) = self.buffers.indirect()?;
         Some(UnifiedVisibilityBufferBindings {
             views,
             work,
             ranges,
-            indexed_indirect: self.buffers.indirect()?,
+            indexed_indirect,
+            non_indexed_indirect,
             version: self.buffers.version(),
         })
     }
@@ -50,5 +52,6 @@ pub struct UnifiedVisibilityBufferBindings<'a> {
     pub work: &'a Buffer,
     pub ranges: &'a Buffer,
     pub indexed_indirect: &'a Buffer,
+    pub non_indexed_indirect: &'a Buffer,
     pub version: u32,
 }

@@ -41,6 +41,18 @@ pub(crate) fn visibility_frame_graph() -> GpuFrameGraphBuilder {
         size: 0,
         alignment: 16,
     });
+    let indexed_indirect = graph.add_resource(ResourceDescriptor {
+        name: "visibility_indexed_indirect".into(),
+        lifetime: ResourceLifetime::Persistent,
+        size: 0,
+        alignment: 16,
+    });
+    let non_indexed_indirect = graph.add_resource(ResourceDescriptor {
+        name: "visibility_non_indexed_indirect".into(),
+        lifetime: ResourceLifetime::Persistent,
+        size: 0,
+        alignment: 16,
+    });
     graph.add_pass(PassDescriptor {
         name: "unified_visibility".into(),
         queue: QueueClass::Compute,
@@ -69,6 +81,14 @@ pub(crate) fn visibility_frame_graph() -> GpuFrameGraphBuilder {
                 resource: ranges,
                 kind: AccessKind::StorageWrite,
             },
+            ResourceAccess {
+                resource: indexed_indirect,
+                kind: AccessKind::StorageWrite,
+            },
+            ResourceAccess {
+                resource: non_indexed_indirect,
+                kind: AccessKind::StorageWrite,
+            },
         ],
         depends_on: vec![],
     });
@@ -84,6 +104,6 @@ mod tests {
         let graph = visibility_frame_graph();
         let compiled = graph.compile().unwrap();
         assert_eq!(compiled.execution_order.len(), 1);
-        assert_eq!(graph.passes()[0].accesses.len(), 6);
+        assert_eq!(graph.passes()[0].accesses.len(), 8);
     }
 }

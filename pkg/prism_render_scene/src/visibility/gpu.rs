@@ -32,7 +32,7 @@ pub(crate) struct VisibilityComputePipeline {
 #[derive(Resource, Default)]
 pub(crate) struct VisibilityComputeBindGroup {
     pub bind_group: Option<BindGroup>,
-    buffer_ids: Option<[BufferId; 7]>,
+    buffer_ids: Option<[BufferId; 8]>,
 }
 
 pub(crate) fn init_visibility_compute_pipeline(
@@ -52,6 +52,7 @@ pub(crate) fn init_visibility_compute_pipeline(
             storage_buffer::<super::rows::RenderVisibilityWorkItem>(false),
             storage_buffer::<super::rows::RenderVisibilityRange>(false),
             storage_buffer::<super::rows::RenderVisibilityIndirect>(false),
+            storage_buffer::<super::rows::RenderVisibilityNonIndexedIndirect>(false),
             storage_buffer::<u32>(false),
             storage_buffer::<u32>(false),
         ),
@@ -85,7 +86,7 @@ pub(crate) fn prepare_visibility_compute_bind_group(
     device: Res<RenderDevice>,
     mut bindings: ResMut<VisibilityComputeBindGroup>,
 ) {
-    let Some((views, counters, work, ranges, indirect, overflow, previous_lods)) = buffers.compute_buffers()
+    let Some((views, counters, work, ranges, indexed, non_indexed, overflow, previous_lods)) = buffers.compute_buffers()
     else {
         return;
     };
@@ -94,7 +95,8 @@ pub(crate) fn prepare_visibility_compute_bind_group(
         counters.id(),
         work.id(),
         ranges.id(),
-        indirect.id(),
+        indexed.id(),
+        non_indexed.id(),
         overflow.id(),
         previous_lods.id(),
     ];
@@ -109,7 +111,8 @@ pub(crate) fn prepare_visibility_compute_bind_group(
             counters.as_entire_binding(),
             work.as_entire_binding(),
             ranges.as_entire_binding(),
-            indirect.as_entire_binding(),
+            indexed.as_entire_binding(),
+            non_indexed.as_entire_binding(),
             overflow.as_entire_binding(),
             previous_lods.as_entire_binding(),
         )),
@@ -168,6 +171,7 @@ mod tests {
                 storage_buffer::<super::super::rows::RenderVisibilityWorkItem>(false),
                 storage_buffer::<super::super::rows::RenderVisibilityRange>(false),
                 storage_buffer::<super::super::rows::RenderVisibilityIndirect>(false),
+                storage_buffer::<super::super::rows::RenderVisibilityNonIndexedIndirect>(false),
                 storage_buffer::<u32>(false),
                 storage_buffer::<u32>(false),
             ),

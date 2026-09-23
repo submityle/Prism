@@ -49,6 +49,7 @@ struct VisibilityWorkItem {
 struct VisibilityRange { view_index: u32, view_generation: u32, start: u32, count: u32 }
 struct VisibilityCounter { visible_count: atomic<u32>, rejected_count: atomic<u32>, overflow_count: atomic<u32>, padding: u32 }
 struct VisibilityIndirect { index_count: u32, instance_count: u32, first_index: u32, base_vertex: i32, first_instance: u32 }
+struct VisibilityNonIndexedIndirect { vertex_count: u32, instance_count: u32, first_vertex: u32, first_instance: u32 }
 
 @group(0) @binding(0) var<storage, read> scene_instances: array<GpuSceneInstance>;
 @group(0) @binding(1) var<storage, read> scene_current_transforms: array<GpuSceneTransform>;
@@ -64,8 +65,9 @@ struct VisibilityIndirect { index_count: u32, instance_count: u32, first_index: 
 @group(3) @binding(2) var<storage, read_write> work_items: array<VisibilityWorkItem>;
 @group(3) @binding(3) var<storage, read_write> ranges: array<VisibilityRange>;
 @group(3) @binding(4) var<storage, read_write> indirect: array<VisibilityIndirect>;
-@group(3) @binding(5) var<storage, read_write> overflow: array<atomic<u32>>;
-@group(3) @binding(6) var<storage, read_write> previous_lods: array<u32>;
+@group(3) @binding(5) var<storage, read_write> non_indexed_indirect: array<VisibilityNonIndexedIndirect>;
+@group(3) @binding(6) var<storage, read_write> overflow: array<atomic<u32>>;
+@group(3) @binding(7) var<storage, read_write> previous_lods: array<u32>;
 
 struct VisibilityDispatch {
     view_index: u32, candidate_count: u32, output_start: u32, output_end: u32,
@@ -190,6 +192,11 @@ fn cull_instances(@builtin(global_invocation_id) id: vec3<u32>) {
     indirect[output] = VisibilityIndirect(
         select(0u, lod.element_count, indexed),
         1u, lod.first_element, lod.base_vertex,
+        select(0u, candidate, dispatch.indirect_first_instance != 0u),
+    );
+    non_indexed_indirect[output] = VisibilityNonIndexedIndirect(
+        select(lod.element_count, 0u, indexed),
+        1u, lod.first_element,
         select(0u, candidate, dispatch.indirect_first_instance != 0u),
     );
 }
