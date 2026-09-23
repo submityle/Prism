@@ -27,6 +27,16 @@ pub struct PrismShadingDiagnostics {
     pub unsupported_materials: u32,
     pub visibility_buffer_active: bool,
     pub compute_resolve_active: bool,
+    pub native_barycentrics: bool,
+}
+
+pub(crate) fn detect_shading_capabilities(
+    device: Res<bevy_render::renderer::RenderDevice>,
+    mut diagnostics: ResMut<PrismShadingDiagnostics>,
+) {
+    diagnostics.native_barycentrics = device
+        .features()
+        .contains(bevy_render::render_resource::WgpuFeatures::SHADER_BARYCENTRICS);
 }
 
 #[derive(Resource)]
@@ -44,6 +54,7 @@ pub(crate) fn prepare_shading_work(
     debug_assert_eq!(frame_graph.compiled.execution_order.len(), 3);
     *diagnostics = shading_diagnostics(
         &settings,
+        diagnostics.native_barycentrics,
         visibility.frame.work_items.iter().map(|work| {
             materials
                 .registry
@@ -55,11 +66,13 @@ pub(crate) fn prepare_shading_work(
 
 fn shading_diagnostics(
     settings: &PrismShadingSettings,
+    native_barycentrics: bool,
     materials: impl IntoIterator<Item = Option<prism_render_material::GpuMaterialHeader>>,
 ) -> PrismShadingDiagnostics {
     let mut diagnostics = PrismShadingDiagnostics {
         visibility_buffer_active: settings.enable_visibility_buffer,
         compute_resolve_active: settings.enable_visibility_buffer && settings.enable_compute_resolve,
+        native_barycentrics,
         ..Default::default()
     };
     for header in materials {
@@ -114,6 +127,7 @@ mod tests {
         transparent.render_class = prism_render_material::MaterialRenderClass::Transparent as u32;
         let diagnostics = shading_diagnostics(
             &PrismShadingSettings::default(),
+            true,
             [Some(principled), Some(npr), Some(transparent), None],
         );
 
@@ -123,5 +137,6 @@ mod tests {
         assert_eq!(diagnostics.class_counts[MaterialShadingClass::Npr.index()], 1);
         assert_eq!(diagnostics.unsupported_materials, 1);
         assert_eq!(diagnostics.stale_materials, 1);
+        assert!(diagnostics.native_barycentrics);
     }
 }

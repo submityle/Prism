@@ -1,12 +1,15 @@
 use bevy_app::{App, Plugin};
+use bevy_asset::embedded_asset;
 use bevy_ecs::schedule::IntoScheduleConfigs;
 use bevy_render::{Render, RenderApp, RenderSystems};
+use bevy_render::RenderStartup;
 
 use super::{
     graph::shading_frame_graph,
     resources::prepare_visibility_buffers,
     runtime::{
-        prepare_shading_work, PrismShadingDiagnostics, PrismShadingSettings, ShadingFrameGraph,
+        detect_shading_capabilities, prepare_shading_work, PrismShadingDiagnostics,
+        PrismShadingSettings, ShadingFrameGraph,
     },
 };
 
@@ -14,6 +17,7 @@ pub struct PrismShadingPlugin;
 
 impl Plugin for PrismShadingPlugin {
     fn build(&self, app: &mut App) {
+        embedded_asset!(app, "../shaders/visibility_raster.wesl");
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
@@ -26,6 +30,7 @@ impl Plugin for PrismShadingPlugin {
             .insert_resource(ShadingFrameGraph {
                 compiled: compiled_graph,
             })
+            .add_systems(RenderStartup, detect_shading_capabilities)
             .add_systems(
                 Render,
                 (
