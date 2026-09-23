@@ -40,14 +40,14 @@ fn conservative_occluder_depth(candidate: HzbCullInput, mip: u32) -> f32 {
 @compute @workgroup_size(64)
 fn classify_hzb(@builtin(global_invocation_id) id: vec3<u32>) {
     let index = id.x;
-    if index >= dispatch.candidate_count || index >= arrayLength(&candidates) {
+    if index >= dispatch.candidate_count {
         return;
     }
     let output = dispatch.output_start + index;
-    if output >= arrayLength(&stages) {
+    if output >= arrayLength(&candidates) || output >= arrayLength(&stages) {
         return;
     }
-    let candidate = candidates[index];
+    let candidate = candidates[output];
     let pixel_size = max(
         abs(candidate.uv_max.x - candidate.uv_min.x) * f32(textureDimensions(hzb, 0).x),
         abs(candidate.uv_max.y - candidate.uv_min.y) * f32(textureDimensions(hzb, 0).y),

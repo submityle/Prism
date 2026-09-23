@@ -29,9 +29,8 @@ pub(crate) fn install_hzb_schedule(app: &mut SubApp) {
     );
 }
 
-/// Scheduling seam for the early compute pipeline. It deliberately reports
-/// only histories that are safe to consume; the GPU test/compaction kernel is
-/// graduation-gated and therefore not counted as a dispatch yet.
+/// Runs the previous-frame HZB classifier before early depth. Only valid
+/// history is consumed, and the entire path remains graduation-gated.
 fn dispatch_previous_hzb(
     current_view: bevy_render::renderer::ViewQuery<&bevy_render::view::ExtractedView>,
     history: Option<bevy_render::renderer::ViewQuery<&PrismViewHzbHistory>>,
@@ -87,8 +86,8 @@ fn dispatch_previous_hzb(
     diagnostics.hzb_previous_dispatches += 1;
 }
 
-/// Scheduling seam for the current-frame retest. Missing current HZB keeps all
-/// deferred candidates visible; readiness is not reported as a GPU dispatch.
+/// Runs the current-frame HZB retest after early depth has rebuilt the pyramid.
+/// Missing resources keep all deferred candidates visible.
 fn dispatch_current_hzb(
     current_view: bevy_render::renderer::ViewQuery<&bevy_render::view::ExtractedView>,
     history: Option<bevy_render::renderer::ViewQuery<&PrismViewHzbHistory>>,
@@ -168,7 +167,6 @@ fn hzb_immediates(
         fast_motion_threshold,
     }
 }
-
 
 /// Prism's temporal validity metadata for Bevy's persistent depth-pyramid
 /// texture. Bevy updates that same texture twice in the Core3d schedule: its
