@@ -19,6 +19,7 @@ members = [
   "crates/*",
   # Prism's experimental next-generation rendering architecture.
   "pkg/prism_render_architecture",
+  "pkg/prism_render_material",
   "pkg/prism_render_scene",
   # Several crates with macros have "compile fail" tests nested inside them, also known as UI
   # tests, that verify diagnostic output does not accidentally change.

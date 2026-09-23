@@ -1,0 +1,14 @@
+[package]
+name = "prism_render_material"
+version = "0.1.0"
+edition = "2024"
+description = "Versioned material IR and runtime ABI for Prism"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+bytemuck = { version = "1.5", features = ["derive", "must_cast"] }
+prism_render_architecture = { path = "../prism_render_architecture" }
+
+[lints]
+workspace = true
