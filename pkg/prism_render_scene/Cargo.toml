@@ -14,8 +14,10 @@ bevy_derive = { path = "../../crates/bevy_derive", version = "0.20.0-dev" }
 bevy_math = { path = "../../crates/bevy_math", version = "0.20.0-dev" }
 bevy_material = { path = "../../crates/bevy_material", version = "0.20.0-dev" }
 bevy_image = { path = "../../crates/bevy_image", version = "0.20.0-dev" }
+bevy_light = { path = "../../crates/bevy_light", version = "0.20.0-dev" }
 bevy_mesh = { path = "../../crates/bevy_mesh", version = "0.20.0-dev" }
 bevy_camera = { path = "../../crates/bevy_camera", version = "0.20.0-dev" }
+bevy_color = { path = "../../crates/bevy_color", version = "0.20.0-dev" }
 bevy_core_pipeline = { path = "../../crates/bevy_core_pipeline", version = "0.20.0-dev" }
 bevy_pbr = { path = "../../crates/bevy_pbr", version = "0.20.0-dev" }
 bevy_platform = { path = "../../crates/bevy_platform", version = "0.20.0-dev" }

@@ -67,6 +67,9 @@ impl Plugin for PrismGpuScenePlugin {
         if !app.is_plugin_added::<crate::shading::PrismShadingPlugin>() {
             app.add_plugins(crate::shading::PrismShadingPlugin);
         }
+        if !app.is_plugin_added::<crate::lighting::PrismLightingPlugin>() {
+            app.add_plugins(crate::lighting::PrismLightingPlugin);
+        }
         embedded_asset!(app, "shaders/gpu_scene.wesl");
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;

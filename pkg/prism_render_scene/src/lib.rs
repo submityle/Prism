@@ -14,6 +14,7 @@ mod consumer;
 mod diagnostics;
 mod extract;
 mod geometry;
+mod lighting;
 mod material;
 mod opaque;
 mod plugin;
@@ -35,6 +36,10 @@ pub use geometry::{
     RenderShadingGeometryRegistry, RenderShadingPrimitive, RenderShadingVertex,
     ShadingGeometryBuildError, SHADING_GEOMETRY_FLAG_ACTIVE, SHADING_GEOMETRY_FLAG_INVALID,
     SHADING_GEOMETRY_FLAG_MISSING_NORMAL, SHADING_GEOMETRY_FLAG_MISSING_UV,
+};
+pub use lighting::{
+    ExtractedLights, GpuDirectionalLight, GpuLightEnvironment, GpuPunctualLight, LightBindGroup,
+    LightGpuBuffers, PrismLightingPlugin, LIGHT_ENVIRONMENT_FLAG_IMAGE_BASED,
 };
 pub use material::{
     MaterialBindGroup, MaterialBufferBindings, MaterialReader, PrismMaterialDiagnostics,
