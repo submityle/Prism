@@ -17,17 +17,26 @@ use super::{
 
 #[derive(Resource, Default)]
 pub(crate) struct VisibilityParityReadback {
-    in_flight: Mutex<Option<InFlightReadback>>,
+    state: Mutex<Option<ReadbackState>>,
 }
 
-struct InFlightReadback {
+enum ReadbackState {
+    CopyQueued(PendingReadback),
+    Mapping(InFlightReadback),
+}
+
+struct PendingReadback {
     buffer: Buffer,
-    receiver: Receiver<Result<(), bevy_render::render_resource::BufferAsyncError>>,
     cpu_work: Vec<super::rows::RenderVisibilityWorkItem>,
     cpu_ranges: Vec<prism_render_visibility::BufferRange>,
     compare_lod: bool,
     view_count: usize,
     slots_per_view: usize,
+}
+
+struct InFlightReadback {
+    pending: PendingReadback,
+    receiver: Receiver<Result<(), bevy_render::render_resource::BufferAsyncError>>,
 }
 
 pub(crate) fn request_visibility_parity_readback(
@@ -42,9 +51,9 @@ pub(crate) fn request_visibility_parity_readback(
     if !settings.gpu_parity_readback {
         return;
     }
-    let mut in_flight = readback.in_flight.lock().unwrap();
-    if state.views.is_empty() || in_flight.is_some() {
-        diagnostics.parity_dropped_frames += u64::from(in_flight.is_some());
+    let mut readback_state = readback.state.lock().unwrap();
+    if state.views.is_empty() || readback_state.is_some() {
+        diagnostics.parity_dropped_frames += u64::from(readback_state.is_some());
         return;
     }
     let Some((counters, work)) = buffers.parity_readback_buffers() else {
@@ -67,10 +76,6 @@ pub(crate) fn request_visibility_parity_readback(
     encoder.copy_buffer_to_buffer(counters, 0, &target, 0, Some(counter_size));
     encoder.copy_buffer_to_buffer(work, 0, &target, counter_size, Some(work_size));
     pending.push_encoder(encoder, "prism visibility parity readback");
-    let (sender, receiver) = mpsc::sync_channel(1);
-    device.map_buffer(&target.slice(..), MapMode::Read, move |result| {
-        let _ = sender.send(result);
-    });
     let cpu_work = state
         .frame
         .work_items
@@ -83,35 +88,60 @@ pub(crate) fn request_visibility_parity_readback(
         .iter()
         .map(|view| state.frame.views[&view.handle].visible_instances)
         .collect();
-    *in_flight = Some(InFlightReadback {
+    *readback_state = Some(ReadbackState::CopyQueued(PendingReadback {
         buffer: target,
-        receiver,
         cpu_work,
         cpu_ranges,
         compare_lod: false,
         view_count: state.views.len(),
         slots_per_view: buffers.gpu_slots_per_view() as usize,
+    }));
+}
+
+/// Starts mapping only after `RenderGraphSystems::Submit` has submitted the copy.
+pub(crate) fn map_submitted_visibility_parity_readback(
+    device: Res<RenderDevice>,
+    readback: Res<VisibilityParityReadback>,
+) {
+    let mut state = readback.state.lock().unwrap();
+    let Some(ReadbackState::CopyQueued(pending)) = state.take() else {
+        return;
+    };
+    let (sender, receiver) = mpsc::sync_channel(1);
+    device.map_buffer(&pending.buffer.slice(..), MapMode::Read, move |result| {
+        let _ = sender.send(result);
     });
+    *state = Some(ReadbackState::Mapping(InFlightReadback {
+        pending,
+        receiver,
+    }));
 }
 
 pub(crate) fn collect_visibility_parity_readback(
     readback: Res<VisibilityParityReadback>,
     mut diagnostics: ResMut<PrismVisibilityDiagnostics>,
 ) {
-    let mut slot = readback.in_flight.lock().unwrap();
-    let Some(in_flight) = slot.as_mut() else {
+    let mut slot = readback.state.lock().unwrap();
+    let Some(ReadbackState::Mapping(in_flight)) = slot.as_mut() else {
         return;
     };
-    let Ok(result) = in_flight.receiver.try_recv() else {
-        return;
+    let result = match in_flight.receiver.try_recv() {
+        Ok(result) => result,
+        Err(mpsc::TryRecvError::Empty) => return,
+        Err(mpsc::TryRecvError::Disconnected) => {
+            diagnostics.parity_readback_failures += 1;
+            *slot = None;
+            return;
+        }
     };
     if result.is_err() {
         diagnostics.parity_readback_failures += 1;
         *slot = None;
         return;
     }
-    let mapped = in_flight.buffer.slice(..).get_mapped_range().unwrap();
-    let counter_bytes = in_flight.view_count * size_of::<RenderVisibilityCounter>();
+    let pending = &in_flight.pending;
+    let mapped = pending.buffer.slice(..).get_mapped_range().unwrap();
+    let counter_bytes = pending.view_count * size_of::<RenderVisibilityCounter>();
     let counters: &[RenderVisibilityCounter] = bytemuck::cast_slice(&mapped[..counter_bytes]);
     let gpu_work: &[super::rows::RenderVisibilityWorkItem] =
         bytemuck::cast_slice(&mapped[counter_bytes..]);
@@ -121,10 +151,10 @@ pub(crate) fn collect_visibility_parity_readback(
         if counter.overflow_count != 0 {
             diagnostics.parity_overflowed_views += 1;
         }
-        let count = counter.visible_count.min(in_flight.slots_per_view as u32) as usize;
-        let gpu_start = view_index * in_flight.slots_per_view;
+        let count = counter.visible_count.min(pending.slots_per_view as u32) as usize;
+        let gpu_start = view_index * pending.slots_per_view;
         let gpu_end = gpu_start + count;
-        let cpu_range = in_flight.cpu_ranges[view_index];
+        let cpu_range = pending.cpu_ranges[view_index];
         let cpu_start = cpu_range.start as usize;
         let cpu_end = cpu_start + cpu_range.count as usize;
         let same_count = counter.visible_count == cpu_range.count;
@@ -132,8 +162,8 @@ pub(crate) fn collect_visibility_parity_readback(
             && same_count
             && unordered_work_matches(
                 &gpu_work[gpu_start..gpu_end],
-                &in_flight.cpu_work[cpu_start..cpu_end],
-                in_flight.compare_lod,
+                &pending.cpu_work[cpu_start..cpu_end],
+                pending.compare_lod,
             );
         if same_work {
             matching += 1;
@@ -145,7 +175,7 @@ pub(crate) fn collect_visibility_parity_readback(
     diagnostics.parity_mismatched_views += mismatched;
     diagnostics.parity_frames += 1;
     drop(mapped);
-    in_flight.buffer.unmap();
+    pending.buffer.unmap();
     *slot = None;
 }
 

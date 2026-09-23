@@ -15,8 +15,8 @@ use super::{
     },
     graph::visibility_frame_graph,
     readback::{
-        collect_visibility_parity_readback, request_visibility_parity_readback,
-        VisibilityParityReadback,
+        collect_visibility_parity_readback, map_submitted_visibility_parity_readback,
+        request_visibility_parity_readback, VisibilityParityReadback,
     },
     runtime::{
         PrismVisibilityDiagnostics, UnifiedVisibilityEnabled, UnifiedVisibilitySettings,
@@ -80,6 +80,7 @@ impl Plugin for PrismVisibilityPlugin {
                 request_visibility_parity_readback
                     .after(dispatch_unified_visibility)
                     .in_set(RenderGraphSystems::Begin),
+                map_submitted_visibility_parity_readback.in_set(RenderGraphSystems::Finish),
             ),
         );
     }
