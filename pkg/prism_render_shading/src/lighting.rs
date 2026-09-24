@@ -1,5 +1,7 @@
 use core::f32::consts::PI;
 
+use crate::vecmath::{add, dot, mix3, mul, mul_scalar, normalize_or, sub};
+
 const MIN_ROUGHNESS: f32 = 0.045;
 const MIN_N_DOT: f32 = 1.0e-5;
 
@@ -13,6 +15,10 @@ pub struct SurfaceSample {
     pub emissive: [f32; 3],
     pub clearcoat: f32,
     pub clearcoat_roughness: f32,
+    /// Sheen (fuzz) intensity driving the Cloth Charlie sheen lobe in `[0, 1]`.
+    pub sheen: f32,
+    /// Subsurface scattering weight driving Cloth/Subsurface diffusion in `[0, 1]`.
+    pub subsurface: f32,
 }
 
 impl Default for SurfaceSample {
@@ -26,6 +32,8 @@ impl Default for SurfaceSample {
             emissive: [0.0; 3],
             clearcoat: 0.0,
             clearcoat_roughness: 0.25,
+            sheen: 0.0,
+            subsurface: 0.0,
         }
     }
 }
@@ -176,39 +184,6 @@ fn fresnel_schlick(f0: [f32; 3], v_dot_h: f32) -> [f32; 3] {
     let squared = one_minus * one_minus;
     let factor = squared * squared * one_minus;
     add(f0, mul_scalar(sub([1.0; 3], f0), factor))
-}
-
-fn normalize_or(value: [f32; 3], fallback: [f32; 3]) -> [f32; 3] {
-    let length_squared = dot(value, value);
-    if length_squared > 1.0e-12 && length_squared.is_finite() {
-        mul_scalar(value, length_squared.sqrt().recip())
-    } else {
-        fallback
-    }
-}
-
-fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
-    a.into_iter().zip(b).map(|(a, b)| a * b).sum()
-}
-
-fn add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
-}
-
-fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-fn mul(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[0] * b[0], a[1] * b[1], a[2] * b[2]]
-}
-
-fn mul_scalar(value: [f32; 3], scalar: f32) -> [f32; 3] {
-    [value[0] * scalar, value[1] * scalar, value[2] * scalar]
-}
-
-fn mix3(a: [f32; 3], b: [f32; 3], factor: f32) -> [f32; 3] {
-    add(mul_scalar(a, 1.0 - factor), mul_scalar(b, factor))
 }
 
 #[cfg(test)]

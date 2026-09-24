@@ -36,6 +36,8 @@ struct SurfaceSample {
     emissive: vec3<f32>,
     clearcoat: f32,
     clearcoat_roughness: f32,
+    sheen: f32,
+    subsurface: f32,
 }
 
 // World-space shading basis. Mirrors `ShadingFrame` in `lighting.rs`.

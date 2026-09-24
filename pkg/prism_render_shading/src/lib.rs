@@ -9,17 +9,20 @@
 extern crate alloc;
 
 mod classification;
+mod cloth;
 mod environment;
 mod lighting;
 mod punctual;
 mod resolve;
 mod surface;
+mod vecmath;
 mod visibility;
 
 pub use classification::{
     classify_material_header, ClassificationError, MaterialShadingClass, ShadingWorkItem,
     ShadingWorkPlan, MAX_SHADING_CLASSES,
 };
+pub use cloth::evaluate_cloth_direct;
 pub use environment::{
     env_brdf_approx, evaluate_image_based_light, ImageBasedLight, SphericalHarmonicsL2,
 };

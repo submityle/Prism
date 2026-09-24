@@ -42,6 +42,9 @@ import prism_render_scene::shaders::brdf::{
     toon_direct,
     image_based,
 };
+import prism_render_scene::shaders::cloth::{
+    cloth_direct,
+};
 import prism_render_scene::shaders::lighting::{
     DirectionalLight,
     PunctualLight,
@@ -210,6 +213,36 @@ fn shade_toon(
     return accumulated + indirect + emissive;
 }
 
+// Cloth integrator: the fabric lobe over every analytic light, plus indirect
+// and emissive. Mirrors the CPU `MaterialShadingClass::Cloth` arm.
+fn shade_cloth(
+    lit: SurfaceSample,
+    frame: ShadingFrame,
+    world_position: vec3<f32>,
+    indirect: vec3<f32>,
+    emissive: vec3<f32>,
+    env: LightEnvironment,
+) -> vec3<f32> {
+    var accumulated = vec3<f32>(0.0);
+
+    let directional_total = min(env.directional_count, arrayLength(&directional_lights));
+    for (var i = 0u; i < directional_total; i = i + 1u) {
+        let sample = sample_directional_light(directional_lights[i]);
+        accumulated = accumulated + cloth_direct(lit, frame, to_direct_sample(sample));
+    }
+
+    let punctual_total = min(env.punctual_count, arrayLength(&punctual_lights));
+    for (var i = 0u; i < punctual_total; i = i + 1u) {
+        let sample = sample_punctual_light(punctual_lights[i], world_position);
+        if sample.valid == 0.0 {
+            continue;
+        }
+        accumulated = accumulated + cloth_direct(lit, frame, to_direct_sample(sample));
+    }
+
+    return accumulated + indirect + emissive;
+}
+
 @compute @workgroup_size(64)
 fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     let local = id.x;
@@ -331,6 +364,8 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     surface.emissive = parameters.emissive.xyz;
     surface.clearcoat = parameters.clearcoat;
     surface.clearcoat_roughness = parameters.clearcoat_roughness;
+    surface.sheen = parameters.sheen;
+    surface.subsurface = parameters.subsurface;
 
     var frame: ShadingFrame;
     frame.normal = geometry.normal;
@@ -369,7 +404,7 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
             color = shade_principled(lit, frame, geometry.position, indirect, emissive, env);
         }
         case SHADING_CLASS_CLOTH: {
-            color = shade_principled(lit, frame, geometry.position, indirect, emissive, env);
+            color = shade_cloth(lit, frame, geometry.position, indirect, emissive, env);
         }
         case SHADING_CLASS_HAIR: {
             color = shade_principled(lit, frame, geometry.position, indirect, emissive, env);

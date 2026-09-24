@@ -40,6 +40,7 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/visibility_raster.wesl");
         embedded_asset!(app, "../shaders/material_classification.wesl");
         embedded_asset!(app, "../shaders/brdf.wesl");
+        embedded_asset!(app, "../shaders/cloth.wesl");
         embedded_asset!(app, "../shaders/surface.wesl");
         embedded_asset!(app, "../shaders/shading_resolve.wesl");
         embedded_asset!(app, "../shaders/composite.wesl");

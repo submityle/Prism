@@ -121,6 +121,8 @@ pub fn surface_sample_from_parameters(parameters: &GpuSurfaceParameters) -> Surf
         ],
         clearcoat: parameters.clearcoat,
         clearcoat_roughness: parameters.clearcoat_roughness,
+        sheen: parameters.sheen,
+        subsurface: parameters.subsurface,
     }
 }
 
@@ -225,12 +227,33 @@ pub fn resolve_pixel(
         add(add(accumulated, indirect), emissive)
     };
 
+    // Integrates the cloth (fabric) lobe over every analytic light, then adds
+    // the shared indirect + emissive terms once.  Used by the Cloth class.
+    let shade_cloth = || {
+        let mut accumulated = [0.0; 3];
+        for light in lights.directional {
+            accumulated = add(
+                accumulated,
+                crate::evaluate_cloth_direct(lit_surface, frame, direct_sample(*light)),
+            );
+        }
+        for light in lights.punctual {
+            if let Some(sample) = light.sample(geometry.position) {
+                accumulated = add(
+                    accumulated,
+                    crate::evaluate_cloth_direct(lit_surface, frame, sample),
+                );
+            }
+        }
+        add(add(accumulated, indirect), emissive)
+    };
+
     // Every class is handled explicitly so this branch stays byte-for-byte in
     // step with the `switch` in `shading_resolve.wesl` (9 arms, no wildcard).
-    // Specialized lobes for Subsurface/ClearCoat/Cloth/Hair/Water will replace
-    // their `shade_principled()` fallbacks on both sides together; until then
-    // several arms deliberately share `shade_principled()`, so the lint that
-    // would collapse them is suppressed to preserve the 1:1 GPU switch mapping.
+    // Cloth now has its own dedicated lobe; the remaining specialized classes
+    // (Subsurface/ClearCoat/Hair/Water) still share `shade_principled()` until
+    // their lobes land, so the lint that would collapse those equal arms is
+    // suppressed to preserve the 1:1 GPU switch mapping.
     #[expect(
         clippy::match_same_arms,
         reason = "each class keeps its own arm to mirror the GPU `switch`; specialized lobes replace the shared fallback per class later"
@@ -242,7 +265,7 @@ pub fn resolve_pixel(
         MaterialShadingClass::Principled => shade_principled(),
         MaterialShadingClass::Subsurface => shade_principled(),
         MaterialShadingClass::ClearCoat => shade_principled(),
-        MaterialShadingClass::Cloth => shade_principled(),
+        MaterialShadingClass::Cloth => shade_cloth(),
         MaterialShadingClass::Hair => shade_principled(),
         MaterialShadingClass::Water => shade_principled(),
         MaterialShadingClass::Custom => shade_principled(),
