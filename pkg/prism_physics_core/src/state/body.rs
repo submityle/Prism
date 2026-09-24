@@ -5,7 +5,7 @@
 //! that is the form the solver and integrator consume directly, and because it
 //! represents an immovable body cleanly as a zero (infinite mass).
 
-use crate::collider::ColliderShape;
+use crate::collider::{ColliderHandle, ColliderShape, PhysicsMaterial};
 use glam::{Quat, Vec3};
 
 /// The simulation category of a body, which controls how it responds to
@@ -99,6 +99,11 @@ pub struct BodyDesc {
     pub linear_damping: f32,
     /// Angular velocity damping coefficient (per second).
     pub angular_damping: f32,
+    /// Optional shared collision shape handle. `None` means the body has no
+    /// collider and is skipped by collision detection.
+    pub collider: Option<ColliderHandle>,
+    /// Surface contact material used by the contact solver.
+    pub material: PhysicsMaterial,
 }
 
 impl BodyDesc {
@@ -156,6 +161,21 @@ impl BodyDesc {
         self.angular_damping = angular;
         self
     }
+
+    /// Attaches a shared collider shape handle and returns the modified
+    /// description.
+    #[must_use]
+    pub fn with_collider(mut self, collider: ColliderHandle) -> BodyDesc {
+        self.collider = Some(collider);
+        self
+    }
+
+    /// Sets the surface contact material and returns the modified description.
+    #[must_use]
+    pub fn with_material(mut self, material: PhysicsMaterial) -> BodyDesc {
+        self.material = material;
+        self
+    }
 }
 
 impl Default for BodyDesc {
@@ -169,6 +189,8 @@ impl Default for BodyDesc {
             mass_properties: MassProperties::zero(),
             linear_damping: 0.0,
             angular_damping: 0.0,
+            collider: None,
+            material: PhysicsMaterial::DEFAULT,
         }
     }
 }

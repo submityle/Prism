@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 glam = { version = "0.33.2", default-features = false }
+prism_physics_geometry = { path = "../prism_physics_geometry" }
 serde = { version = "1", default-features = false, features = [
   "derive",
 ], optional = true }
@@ -19,7 +20,7 @@ prism_physics_core = { path = ".", features = ["serialize"] }
 default = ["std"]
 std = ["glam/std"]
 # Enable serde (de)serialization of plain physics state data.
-serialize = ["dep:serde", "glam/serde"]
+serialize = ["dep:serde", "glam/serde", "prism_physics_geometry/serialize"]
 
 [lints]
 workspace = true

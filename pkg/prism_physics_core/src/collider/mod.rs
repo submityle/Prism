@@ -11,11 +11,16 @@
 use crate::state::body::MassProperties;
 use glam::Vec3;
 
+pub mod material;
+
+pub use material::PhysicsMaterial;
+
 /// A handle into a [`ShapeRegistry`].
 ///
 /// This is a plain index handle; shapes are immutable once inserted, so no
 /// generation counter is required for correctness in M0.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 pub struct ColliderHandle(pub u32);
 
 /// An analytic collision shape.

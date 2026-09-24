@@ -6,8 +6,10 @@
 //! a generation counter so that stale [`BodyHandle`]s are rejected after a slot
 //! is reused.
 
+use crate::collider::{ColliderHandle, PhysicsMaterial};
 use crate::state::body::{BodyDesc, BodyKind, MassProperties};
 use crate::state::handle::BodyHandle;
+use crate::state::view::BodySolverView;
 use glam::{Quat, Vec3};
 
 /// Structure-of-Arrays storage for rigid bodies.
@@ -19,10 +21,14 @@ use glam::{Quat, Vec3};
 pub struct BodyStorage {
     positions: Vec<Vec3>,
     orientations: Vec<Quat>,
+    prev_positions: Vec<Vec3>,
+    prev_orientations: Vec<Quat>,
     linear_velocities: Vec<Vec3>,
     angular_velocities: Vec<Vec3>,
     mass_props: Vec<MassProperties>,
     kinds: Vec<BodyKind>,
+    colliders: Vec<Option<ColliderHandle>>,
+    materials: Vec<PhysicsMaterial>,
     linear_damping: Vec<f32>,
     angular_damping: Vec<f32>,
     generations: Vec<u32>,
@@ -45,10 +51,14 @@ impl BodyStorage {
         BodyStorage {
             positions: Vec::with_capacity(capacity),
             orientations: Vec::with_capacity(capacity),
+            prev_positions: Vec::with_capacity(capacity),
+            prev_orientations: Vec::with_capacity(capacity),
             linear_velocities: Vec::with_capacity(capacity),
             angular_velocities: Vec::with_capacity(capacity),
             mass_props: Vec::with_capacity(capacity),
             kinds: Vec::with_capacity(capacity),
+            colliders: Vec::with_capacity(capacity),
+            materials: Vec::with_capacity(capacity),
             linear_damping: Vec::with_capacity(capacity),
             angular_damping: Vec::with_capacity(capacity),
             generations: Vec::with_capacity(capacity),
@@ -68,10 +78,14 @@ impl BodyStorage {
             let i = index as usize;
             self.positions[i] = desc.position;
             self.orientations[i] = desc.orientation;
+            self.prev_positions[i] = desc.position;
+            self.prev_orientations[i] = desc.orientation;
             self.linear_velocities[i] = desc.linear_velocity;
             self.angular_velocities[i] = desc.angular_velocity;
             self.mass_props[i] = desc.mass_properties;
             self.kinds[i] = desc.kind;
+            self.colliders[i] = desc.collider;
+            self.materials[i] = desc.material;
             self.linear_damping[i] = desc.linear_damping;
             self.angular_damping[i] = desc.angular_damping;
             self.active[i] = true;
@@ -80,10 +94,14 @@ impl BodyStorage {
             let index = self.positions.len() as u32;
             self.positions.push(desc.position);
             self.orientations.push(desc.orientation);
+            self.prev_positions.push(desc.position);
+            self.prev_orientations.push(desc.orientation);
             self.linear_velocities.push(desc.linear_velocity);
             self.angular_velocities.push(desc.angular_velocity);
             self.mass_props.push(desc.mass_properties);
             self.kinds.push(desc.kind);
+            self.colliders.push(desc.collider);
+            self.materials.push(desc.material);
             self.linear_damping.push(desc.linear_damping);
             self.angular_damping.push(desc.angular_damping);
             self.generations.push(0);
@@ -210,6 +228,110 @@ impl BodyStorage {
             .then(|| self.kinds[handle.index() as usize])
     }
 
+    /// Returns the previous-step position of the body, or `None` if the handle
+    /// is invalid.
+    ///
+    /// The previous-step columns are maintained by position-based solvers (such
+    /// as XPBD) that need the pre-integration pose to recover velocities.
+    #[must_use]
+    pub fn prev_position(&self, handle: BodyHandle) -> Option<Vec3> {
+        self.contains(handle)
+            .then(|| self.prev_positions[handle.index() as usize])
+    }
+
+    /// Sets the previous-step position of the body. Returns `true` on success.
+    pub fn set_prev_position(&mut self, handle: BodyHandle, value: Vec3) -> bool {
+        if self.contains(handle) {
+            self.prev_positions[handle.index() as usize] = value;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Returns the previous-step orientation of the body, or `None` if the
+    /// handle is invalid.
+    #[must_use]
+    pub fn prev_orientation(&self, handle: BodyHandle) -> Option<Quat> {
+        self.contains(handle)
+            .then(|| self.prev_orientations[handle.index() as usize])
+    }
+
+    /// Sets the previous-step orientation of the body. Returns `true` on
+    /// success.
+    pub fn set_prev_orientation(&mut self, handle: BodyHandle, value: Quat) -> bool {
+        if self.contains(handle) {
+            self.prev_orientations[handle.index() as usize] = value;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Returns the collider handle attached to the body, or `None` if the body
+    /// has no collider or the handle is invalid.
+    #[must_use]
+    pub fn collider(&self, handle: BodyHandle) -> Option<ColliderHandle> {
+        if self.contains(handle) {
+            self.colliders[handle.index() as usize]
+        } else {
+            None
+        }
+    }
+
+    /// Sets the collider handle attached to the body. Returns `true` on success.
+    pub fn set_collider(&mut self, handle: BodyHandle, collider: Option<ColliderHandle>) -> bool {
+        if self.contains(handle) {
+            self.colliders[handle.index() as usize] = collider;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Returns the contact material of the body, or `None` if the handle is
+    /// invalid.
+    #[must_use]
+    pub fn material(&self, handle: BodyHandle) -> Option<PhysicsMaterial> {
+        self.contains(handle)
+            .then(|| self.materials[handle.index() as usize])
+    }
+
+    /// Sets the contact material of the body. Returns `true` on success.
+    pub fn set_material(&mut self, handle: BodyHandle, material: PhysicsMaterial) -> bool {
+        if self.contains(handle) {
+            self.materials[handle.index() as usize] = material;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Returns a Structure-of-Arrays mutable view over the columns a
+    /// position-based solver consumes.
+    ///
+    /// The view borrows the hot columns (positions, orientations, their
+    /// previous-step copies, and velocities) mutably and the descriptive
+    /// columns (mass properties, kinds, colliders, materials, occupancy)
+    /// immutably. Solvers index every slice by the same slot index; use
+    /// [`BodySolverView::is_active`] to skip freed slots.
+    #[must_use]
+    pub fn solver_view_mut(&mut self) -> BodySolverView<'_> {
+        BodySolverView {
+            positions: &mut self.positions,
+            orientations: &mut self.orientations,
+            prev_positions: &mut self.prev_positions,
+            prev_orientations: &mut self.prev_orientations,
+            linear_velocities: &mut self.linear_velocities,
+            angular_velocities: &mut self.angular_velocities,
+            mass_props: &self.mass_props,
+            kinds: &self.kinds,
+            colliders: &self.colliders,
+            materials: &self.materials,
+            active: &self.active,
+        }
+    }
+
     /// Invokes `f` for every live dynamic body, giving mutable access to the
     /// `SoA` columns the integrator needs.
     ///
@@ -253,10 +375,14 @@ impl BodyStorage {
     pub fn columns_consistent(&self) -> bool {
         let n = self.positions.len();
         self.orientations.len() == n
+            && self.prev_positions.len() == n
+            && self.prev_orientations.len() == n
             && self.linear_velocities.len() == n
             && self.angular_velocities.len() == n
             && self.mass_props.len() == n
             && self.kinds.len() == n
+            && self.colliders.len() == n
+            && self.materials.len() == n
             && self.linear_damping.len() == n
             && self.angular_damping.len() == n
             && self.generations.len() == n

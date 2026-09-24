@@ -44,6 +44,7 @@ pub mod world;
 
 // Curated, prelude-style re-exports of the most commonly used public types.
 pub use backend::{CpuBackend, PhysicsBackend};
+pub use collider::material::PhysicsMaterial;
 pub use collider::{ColliderHandle, ColliderShape, ShapeRegistry};
 pub use config::WorldConfig;
 pub use constraint::{Constraint, ConstraintKind};
@@ -56,4 +57,5 @@ pub use solver::{IntegrateOnlySolver, Solver, SolverRegistry};
 pub use state::body::{BodyDesc, BodyKind, MassProperties};
 pub use state::handle::BodyHandle;
 pub use state::storage::BodyStorage;
+pub use state::view::BodySolverView;
 pub use world::PhysicsWorld;
