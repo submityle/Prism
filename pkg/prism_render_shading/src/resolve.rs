@@ -381,12 +381,36 @@ pub fn resolve_pixel(
         add(add(accumulated, indirect), emissive)
     };
 
+    // Integrates the two-layer clear-coat lobe over every analytic light, then
+    // adds the shared indirect + emissive terms once.  Used by the ClearCoat
+    // class; a smooth dielectric coat (independent `clearcoat_roughness`) sits
+    // over the principled base, and the base is gated by the coat Fresnel twice
+    // (double-pass `(1 - clearcoat * Fc)^2` transmission).
+    let shade_clearcoat = || {
+        let mut accumulated = [0.0; 3];
+        for light in lights.directional {
+            accumulated = add(
+                accumulated,
+                crate::evaluate_clearcoat_direct(lit_surface, frame, direct_sample(*light)),
+            );
+        }
+        for light in lights.punctual {
+            if let Some(sample) = light.sample(geometry.position) {
+                accumulated = add(
+                    accumulated,
+                    crate::evaluate_clearcoat_direct(lit_surface, frame, sample),
+                );
+            }
+        }
+        add(add(accumulated, indirect), emissive)
+    };
+
     // Every class is handled explicitly so this branch stays byte-for-byte in
     // step with the `switch` in `shading_resolve.wesl` (9 arms, no wildcard).
-    // Cloth, Subsurface, Hair and Water now have dedicated lobes; the
-    // remaining specialized class (ClearCoat) plus Custom still share
-    // `shade_principled()`, so the lint that would collapse those equal arms is
-    // suppressed to preserve the 1:1 GPU switch mapping.
+    // Subsurface, ClearCoat, Cloth, Hair and Water now have dedicated lobes;
+    // only Custom still shares `shade_principled()` with Principled, so the lint
+    // that would collapse those two equal arms is suppressed to preserve the
+    // 1:1 GPU switch mapping.
     #[expect(
         clippy::match_same_arms,
         reason = "each class keeps its own arm to mirror the GPU `switch`; specialized lobes replace the shared fallback per class later"
@@ -397,7 +421,7 @@ pub fn resolve_pixel(
         MaterialShadingClass::Npr => shade_toon(),
         MaterialShadingClass::Principled => shade_principled(),
         MaterialShadingClass::Subsurface => shade_subsurface(),
-        MaterialShadingClass::ClearCoat => shade_principled(),
+        MaterialShadingClass::ClearCoat => shade_clearcoat(),
         MaterialShadingClass::Cloth => shade_cloth(),
         MaterialShadingClass::Hair => shade_hair(),
         MaterialShadingClass::Water => shade_water(),

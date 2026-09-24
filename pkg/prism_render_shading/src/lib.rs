@@ -9,6 +9,7 @@
 extern crate alloc;
 
 mod classification;
+mod clearcoat;
 mod cloth;
 mod environment;
 mod hair;
@@ -28,6 +29,7 @@ pub use classification::{
     classify_material_header, ClassificationError, MaterialShadingClass, ShadingWorkItem,
     ShadingWorkPlan, MAX_SHADING_CLASSES,
 };
+pub use clearcoat::evaluate_clearcoat_direct;
 pub use cloth::evaluate_cloth_direct;
 pub use environment::{
     env_brdf_approx, evaluate_image_based_light, ImageBasedLight, SphericalHarmonicsL2,

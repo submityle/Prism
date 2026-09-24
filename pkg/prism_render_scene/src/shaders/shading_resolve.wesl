@@ -54,6 +54,9 @@ import prism_render_scene::shaders::hair::{
 import prism_render_scene::shaders::water::{
     water_direct,
 };
+import prism_render_scene::shaders::clearcoat::{
+    clearcoat_direct,
+};
 import prism_render_scene::shaders::lighting::{
     DirectionalLight,
     PunctualLight,
@@ -353,6 +356,34 @@ fn shade_water(
     return accumulated + indirect + emissive;
 }
 
+fn shade_clearcoat(
+    lit: SurfaceSample,
+    frame: ShadingFrame,
+    world_position: vec3<f32>,
+    indirect: vec3<f32>,
+    emissive: vec3<f32>,
+    env: LightEnvironment,
+) -> vec3<f32> {
+    var accumulated = vec3<f32>(0.0);
+
+    let directional_total = min(env.directional_count, arrayLength(&directional_lights));
+    for (var i = 0u; i < directional_total; i = i + 1u) {
+        let sample = sample_directional_light(directional_lights[i]);
+        accumulated = accumulated + clearcoat_direct(lit, frame, to_direct_sample(sample));
+    }
+
+    let punctual_total = min(env.punctual_count, arrayLength(&punctual_lights));
+    for (var i = 0u; i < punctual_total; i = i + 1u) {
+        let sample = sample_punctual_light(punctual_lights[i], world_position);
+        if sample.valid == 0.0 {
+            continue;
+        }
+        accumulated = accumulated + clearcoat_direct(lit, frame, to_direct_sample(sample));
+    }
+
+    return accumulated + indirect + emissive;
+}
+
 @compute @workgroup_size(64)
 fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     let local = id.x;
@@ -525,8 +556,8 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
         indirect = ambient_indirect(lit, env);
     }
 
-    // Explicit per-class dispatch. Subsurface/cloth/hair/water now run
-    // dedicated closures; clearcoat/custom still share the principled
+    // Explicit per-class dispatch. Subsurface/clearcoat/cloth/hair/water now
+    // run dedicated closures; only custom still shares the principled
     // integrator, and each keeps its own arm so a real closure drops in
     // independently.
     var color: vec3<f32>;
@@ -541,7 +572,7 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
             color = shade_subsurface(lit, frame, geometry.position, indirect, emissive, env);
         }
         case SHADING_CLASS_CLEARCOAT: {
-            color = shade_principled(lit, frame, geometry.position, indirect, emissive, env);
+            color = shade_clearcoat(lit, frame, geometry.position, indirect, emissive, env);
         }
         case SHADING_CLASS_CLOTH: {
             color = shade_cloth(lit, frame, geometry.position, indirect, emissive, env);
