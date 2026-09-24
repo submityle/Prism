@@ -4,6 +4,7 @@ mod graph;
 mod plugin;
 mod raster;
 mod resolve;
+mod shadow;
 mod resources;
 mod runtime;
 
