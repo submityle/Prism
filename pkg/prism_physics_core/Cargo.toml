@@ -28,3 +28,7 @@ parallel = ["std", "dep:rayon"]
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "scale_10k"
+harness = false
