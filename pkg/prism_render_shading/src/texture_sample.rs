@@ -237,6 +237,37 @@ pub fn fold_material_texel(
     sampled
 }
 
+/// One bound texture's sampled result: its [`TextureSemantic`] discriminant and
+/// the RGBA texel sampled at the surface UV.  On the GPU the texel comes from
+/// `textureSampleLevel(material_texture_heap[record.index], ...)`; the CPU
+/// golden accepts the already-sampled texel directly so the fold arithmetic is
+/// literally the same code path on both sides.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SampledTextureBinding {
+    /// `TextureSemantic` discriminant (`SEMANTIC_*`).
+    pub semantic: u32,
+    /// RGBA texel sampled at LOD 0 in the texture's native encoding (sRGB for
+    /// base-color/emissive, linear otherwise).
+    pub texel: [f32; 4],
+}
+
+/// Folds every bound texture over the authored factors in order, returning the
+/// modulated [`SampledMaterial`].  Seeds [`sampled_material_defaults`] then
+/// applies [`fold_material_texel`] for each binding using the shared
+/// `normal_scale`, mirroring the `texture_offset..texture_offset + texture_count`
+/// loop in `shading_resolve.wesl` iteration-for-iteration.
+#[must_use]
+pub fn sample_material(
+    params: &MaterialModulationParams,
+    bindings: &[SampledTextureBinding],
+) -> SampledMaterial {
+    let mut sampled = sampled_material_defaults(params);
+    for binding in bindings {
+        sampled = fold_material_texel(binding.semantic, binding.texel, params.normal_scale, sampled);
+    }
+    sampled
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

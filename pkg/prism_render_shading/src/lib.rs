@@ -43,8 +43,9 @@ pub use tangent::{
     apply_tangent_space_normal, orthonormal_basis, resolve_tangent_basis, TangentBasis,
 };
 pub use texture_sample::{
-    decode_tangent_normal, fold_material_texel, sampled_material_defaults, srgb_channel_to_linear,
-    srgb_to_linear, MaterialModulationParams, SampledMaterial, SEMANTIC_BASE_COLOR,
+    decode_tangent_normal, fold_material_texel, sample_material, sampled_material_defaults,
+    srgb_channel_to_linear, srgb_to_linear, MaterialModulationParams, SampledMaterial,
+    SampledTextureBinding, SEMANTIC_BASE_COLOR,
     SEMANTIC_CLEAR_COAT, SEMANTIC_CLEAR_COAT_NORMAL, SEMANTIC_CLEAR_COAT_ROUGHNESS,
     SEMANTIC_EMISSIVE, SEMANTIC_METALLIC_ROUGHNESS, SEMANTIC_NORMAL, SEMANTIC_OCCLUSION,
 };

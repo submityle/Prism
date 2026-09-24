@@ -9,11 +9,11 @@
 use prism_render_material::{GpuMaterialHeader, GpuSurfaceParameters};
 
 use crate::{
-    classify_material_header, evaluate_image_based_light, reconstruct_surface, ClassificationError,
-    DirectLightSample, ImageBasedLight,
-    GpuShadingPrimitive, GpuShadingVertex, MaterialShadingClass, ShadingFrame, SurfaceReconstructionError,
-    PunctualLight, SurfaceReconstructionFlags, SurfaceReconstructionInput, SurfaceSample,
-    VisibilityPixel,
+    apply_tangent_space_normal, classify_material_header, evaluate_image_based_light,
+    reconstruct_surface, sample_material, ClassificationError, DirectLightSample, GpuShadingPrimitive,
+    GpuShadingVertex, ImageBasedLight, MaterialModulationParams, MaterialShadingClass, PunctualLight,
+    SampledTextureBinding, ShadingFrame, SurfaceReconstructionError, SurfaceReconstructionFlags,
+    SurfaceReconstructionInput, SurfaceSample, TangentBasis, VisibilityPixel,
 };
 
 /// One analytic directional light expressed in world space.
@@ -77,6 +77,12 @@ pub struct ResolveInput<'a> {
     pub expected_geometry_generation: u32,
     pub header: GpuMaterialHeader,
     pub parameters: GpuSurfaceParameters,
+    /// Sampled texels for every texture the material binds, in the same
+    /// `texture_offset..texture_offset + texture_count` order the GPU heap
+    /// iterates.  Each entry carries its `TextureSemantic` and the RGBA texel
+    /// sampled at the interpolated surface UV; an empty slice shades from the
+    /// authored factors alone (the bindless heap's white/flat-normal defaults).
+    pub textures: &'a [SampledTextureBinding],
     /// World-space camera position used to derive the view vector.
     pub view_position: [f32; 3],
 }
@@ -129,6 +135,29 @@ pub fn surface_sample_from_parameters(parameters: &GpuSurfaceParameters) -> Surf
     }
 }
 
+/// Projects the stable GPU surface parameters onto the texture-modulation
+/// factors consumed by [`sample_material`].  Only the fields a texture can
+/// scale are carried; the rest of the surface (reflectance, sheen, subsurface,
+/// anisotropy, ...) is read straight from the parameters.  Mirrors
+/// `sampled_material_defaults`'s view of `PrismSurfaceParameters` in
+/// `material_sample.wesl`.
+fn modulation_params_from(parameters: &GpuSurfaceParameters) -> MaterialModulationParams {
+    MaterialModulationParams {
+        base_color: parameters.base_color,
+        emissive: [
+            parameters.emissive[0],
+            parameters.emissive[1],
+            parameters.emissive[2],
+        ],
+        metallic: parameters.metallic,
+        perceptual_roughness: parameters.perceptual_roughness,
+        ambient_occlusion: parameters.ambient_occlusion,
+        normal_scale: parameters.normal_scale,
+        clearcoat: parameters.clearcoat,
+        clearcoat_roughness: parameters.clearcoat_roughness,
+    }
+}
+
 /// Resolves one pixel into linear HDR scene color.
 ///
 /// Emissive and ambient are added exactly once; the per-light BSDF evaluations
@@ -158,14 +187,44 @@ pub fn resolve_pixel(
     )
     .map_err(ResolveError::Surface)?;
 
-    let surface = surface_sample_from_parameters(&input.parameters);
+    // Fold every bound texture over the authored factors *before* assembling
+    // the BSDF sample so the indirect/ambient terms below see texture-modulated
+    // base color, emissive and occlusion, exactly like the GPU resolve.
+    let modulation = modulation_params_from(&input.parameters);
+    let sampled = sample_material(&modulation, input.textures);
+
+    let mut surface = surface_sample_from_parameters(&input.parameters);
+    surface.base_color = sampled.base_color;
+    surface.metallic = sampled.metallic;
+    surface.perceptual_roughness = sampled.perceptual_roughness;
+    surface.ambient_occlusion = sampled.occlusion;
+    surface.emissive = sampled.emissive;
+    surface.clearcoat = sampled.clearcoat;
+    surface.clearcoat_roughness = sampled.clearcoat_roughness;
+
     let emissive = surface.emissive;
     let base_color = surface.base_color;
     let ambient_occlusion = surface.ambient_occlusion.clamp(0.0, 1.0);
     let metallic = surface.metallic.clamp(0.0, 1.0);
 
+    // A bound normal map rotates the tangent-space normal into world space
+    // against the reconstructed basis; otherwise the geometric normal stands.
+    let shading_normal = if sampled.has_normal_map {
+        apply_tangent_space_normal(
+            TangentBasis {
+                tangent: geometry.tangent,
+                bitangent: geometry.bitangent,
+                degenerate: false,
+            },
+            geometry.normal,
+            sampled.normal_tangent,
+        )
+    } else {
+        geometry.normal
+    };
+
     let frame = ShadingFrame {
-        normal: geometry.normal,
+        normal: shading_normal,
         view: normalize_or(sub(input.view_position, geometry.position), geometry.normal),
         tangent: geometry.tangent,
         bitangent: geometry.bitangent,
@@ -412,6 +471,7 @@ mod tests {
             expected_geometry_generation: 9,
             header,
             parameters,
+            textures: &[],
             view_position: [0.0, 0.0, 4.0],
         }
     }
@@ -603,5 +663,159 @@ mod tests {
         for channel in 0..3 {
             assert!((0.3..0.5).contains(&lit.color[channel]), "channel {channel} = {}", lit.color[channel]);
         }
+    }
+
+    #[test]
+    fn base_color_texture_srgb_decodes_and_modulates_unlit_output() {
+        use crate::{srgb_channel_to_linear, SEMANTIC_BASE_COLOR};
+        let (primitives, vertices) = unit_triangle();
+        let mut header = principled_header();
+        header.shading_model = MaterialShadingModel::Unlit as u32;
+        let parameters = GpuSurfaceParameters {
+            base_color: [0.2, 0.4, 0.6, 1.0],
+            emissive: [0.1, 0.0, 0.0, 0.0],
+            ..Default::default()
+        };
+        // A mid-grey sRGB base-color texel decodes to linear ~0.214 and scales
+        // the authored factor; the unlit path then adds emissive exactly once.
+        let textures = [SampledTextureBinding { semantic: SEMANTIC_BASE_COLOR, texel: [0.5, 0.5, 0.5, 1.0] }];
+        let input = ResolveInput {
+            textures: &textures,
+            ..base_input(&primitives, &vertices, header, parameters)
+        };
+        let resolved = resolve_pixel(
+            input,
+            LightingEnvironment { directional: &[], punctual: &[], image_based: None, ambient: [0.0; 3], toon_bands: 4 },
+        )
+        .unwrap();
+        let decoded = srgb_channel_to_linear(0.5);
+        let expected = [0.2 * decoded + 0.1, 0.4 * decoded, 0.6 * decoded];
+        for c in 0..3 {
+            assert!(
+                (resolved.color[c] - expected[c]).abs() < 1.0e-6,
+                "channel {c}: {} vs {}",
+                resolved.color[c],
+                expected[c]
+            );
+        }
+    }
+
+    #[test]
+    fn normal_map_reorients_shading_normal_and_changes_lit_output() {
+        use crate::SEMANTIC_NORMAL;
+        let (primitives, vertices) = unit_triangle();
+        let header = principled_header();
+        let parameters = GpuSurfaceParameters {
+            base_color: [0.8, 0.8, 0.8, 1.0],
+            metallic: 0.0,
+            perceptual_roughness: 0.5,
+            ..Default::default()
+        };
+        // Offset the light from the geometric normal so a tilt in the shading
+        // normal moves N.L (and therefore the lit response). The direction is
+        // already unit length (0.6^2 + 0.8^2 == 1).
+        let light = DirectionalLight { direction: [0.6, 0.0, 0.8], illuminance: [4.0; 3], visibility: 1.0 };
+        let flat = resolve_pixel(
+            base_input(&primitives, &vertices, header, parameters),
+            LightingEnvironment { directional: &[light], punctual: &[], image_based: None, ambient: [0.0; 3], toon_bands: 4 },
+        )
+        .unwrap()
+        .color;
+        // Tangent-space normal tilted toward +X (world +X here) via the R > 0.5
+        // channel; the resolve must rotate it into world space and shift N.L.
+        let textures = [SampledTextureBinding { semantic: SEMANTIC_NORMAL, texel: [0.9, 0.5, 0.85, 1.0] }];
+        let input = ResolveInput {
+            textures: &textures,
+            ..base_input(&primitives, &vertices, header, parameters)
+        };
+        let tilted = resolve_pixel(
+            input,
+            LightingEnvironment { directional: &[light], punctual: &[], image_based: None, ambient: [0.0; 3], toon_bands: 4 },
+        )
+        .unwrap()
+        .color;
+        assert!(
+            tilted.iter().zip(flat).any(|(a, b)| (a - b).abs() > 1.0e-4),
+            "normal map must change the lit output: {tilted:?} vs {flat:?}"
+        );
+        assert!(tilted.iter().all(|c| c.is_finite() && *c >= 0.0));
+    }
+
+    #[test]
+    fn metallic_roughness_texture_modulates_via_gltf_bg_channels() {
+        use crate::SEMANTIC_METALLIC_ROUGHNESS;
+        let (primitives, vertices) = unit_triangle();
+        let header = principled_header();
+        let parameters = GpuSurfaceParameters {
+            base_color: [0.8, 0.8, 0.8, 1.0],
+            metallic: 1.0,
+            perceptual_roughness: 1.0,
+            ..Default::default()
+        };
+        let untextured = resolve_pixel(
+            base_input(&primitives, &vertices, header, parameters),
+            LightingEnvironment { directional: &[DirectionalLight { direction: [0.0, 0.0, 1.0], illuminance: [4.0; 3], visibility: 1.0 }], punctual: &[], image_based: None, ambient: [0.0; 3], toon_bands: 4 },
+        )
+        .unwrap()
+        .color;
+        // glTF packs roughness in G and metalness in B; (G=0.25, B=0.5) must
+        // quarter the authored roughness and halve metalness, shifting the
+        // specular response away from the untextured baseline.
+        let textures = [SampledTextureBinding { semantic: SEMANTIC_METALLIC_ROUGHNESS, texel: [0.0, 0.25, 0.5, 1.0] }];
+        let input = ResolveInput {
+            textures: &textures,
+            ..base_input(&primitives, &vertices, header, parameters)
+        };
+        let textured = resolve_pixel(
+            input,
+            LightingEnvironment { directional: &[DirectionalLight { direction: [0.0, 0.0, 1.0], illuminance: [4.0; 3], visibility: 1.0 }], punctual: &[], image_based: None, ambient: [0.0; 3], toon_bands: 4 },
+        )
+        .unwrap()
+        .color;
+        assert!(
+            textured.iter().zip(untextured).any(|(a, b)| (a - b).abs() > 1.0e-4),
+            "metallic-roughness texture must change the output: {textured:?} vs {untextured:?}"
+        );
+        assert!(textured.iter().all(|c| c.is_finite() && *c >= 0.0));
+    }
+
+    #[test]
+    fn identity_texels_match_the_untextured_resolve_exactly() {
+        use crate::{SEMANTIC_BASE_COLOR, SEMANTIC_METALLIC_ROUGHNESS, SEMANTIC_OCCLUSION};
+        let (primitives, vertices) = unit_triangle();
+        let header = principled_header();
+        let parameters = GpuSurfaceParameters {
+            base_color: [0.6, 0.7, 0.8, 1.0],
+            metallic: 0.3,
+            perceptual_roughness: 0.4,
+            ambient_occlusion: 1.0,
+            ..Default::default()
+        };
+        let light = DirectionalLight { direction: [0.0, 0.0, 1.0], illuminance: [3.0; 3], visibility: 1.0 };
+        let untextured = resolve_pixel(
+            base_input(&primitives, &vertices, header, parameters),
+            LightingEnvironment { directional: &[light], punctual: &[], image_based: None, ambient: [0.5; 3], toon_bands: 4 },
+        )
+        .unwrap()
+        .color;
+        // White base color (sRGB 1 -> linear 1), unit metallic-roughness
+        // (G=B=1) and unit occlusion (R=1) are exact identities under the fold,
+        // so the resolve must reproduce the untextured path bit for bit.
+        let textures = [
+            SampledTextureBinding { semantic: SEMANTIC_BASE_COLOR, texel: [1.0, 1.0, 1.0, 1.0] },
+            SampledTextureBinding { semantic: SEMANTIC_METALLIC_ROUGHNESS, texel: [0.0, 1.0, 1.0, 0.0] },
+            SampledTextureBinding { semantic: SEMANTIC_OCCLUSION, texel: [1.0, 0.0, 0.0, 0.0] },
+        ];
+        let input = ResolveInput {
+            textures: &textures,
+            ..base_input(&primitives, &vertices, header, parameters)
+        };
+        let textured = resolve_pixel(
+            input,
+            LightingEnvironment { directional: &[light], punctual: &[], image_based: None, ambient: [0.5; 3], toon_bands: 4 },
+        )
+        .unwrap()
+        .color;
+        assert_eq!(textured, untextured, "identity texels must not perturb the resolve");
     }
 }

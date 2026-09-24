@@ -59,11 +59,26 @@ import prism_render_scene::shaders::lighting::{
 };
 import prism_render_scene::shaders::material::{
     PrismMaterialHeader,
+    PrismMaterialTexture,
     PrismSurfaceParameters,
 };
 import prism_render_scene::shaders::gpu_scene::{
     GpuSceneInstance,
 };
+import prism_render_scene::shaders::material_sample::{
+    sampled_material_defaults,
+    sample_texture_slot,
+    fold_material_texel,
+};
+import prism_render_scene::shaders::tangent::{
+    TangentBasis,
+    apply_tangent_space_normal,
+};
+
+// `material_sample` folds bindless textures through a `binding_array`, so this
+// merged module must enable the extension. WESL requires every `enable` to
+// follow all `import`s.
+enable wgpu_binding_array;
 
 // Sentinel packed into the visibility targets for uncovered pixels. Matches
 // `VisibilityPixel::is_valid` on the CPU side.
@@ -109,15 +124,6 @@ struct WorkItem {
 @group(1) @binding(0) var<storage, read> material_headers: array<PrismMaterialHeader>;
 @group(1) @binding(1) var<storage, read> material_parameters: array<PrismSurfaceParameters>;
 @group(1) @binding(2) var<storage, read> material_textures: array<PrismMaterialTexture>;
-
-// Local declaration of the material texture row so the material bind-group
-// layout binds identically without importing an unused symbol elsewhere.
-struct PrismMaterialTexture {
-    index: u32,
-    generation: u32,
-    semantic: u32,
-    sampler_index: u32,
-}
 
 // --- group 2: compacted worklist + scene/geometry tables ---
 @group(2) @binding(0) var<storage, read> work: array<WorkItem>;
@@ -388,16 +394,30 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let parameters = material_parameters[parameter_row];
 
+    // Fold every bound texture over the authored factors *before* assembling
+    // the BSDF sample, so the indirect/ambient terms below observe the
+    // texture-modulated base color, emissive and occlusion. Guarded twice: by
+    // the header's logical `texture_count` and by the physical table length.
+    // Mirrors `resolve_pixel`'s texture fold in the CPU golden arm-for-arm.
+    var sampled = sampled_material_defaults(parameters);
+    let tex_end = material_header.texture_offset + material_header.texture_count;
+    let tex_physical = arrayLength(&material_textures);
+    for (var i = material_header.texture_offset; i < tex_end && i < tex_physical; i = i + 1u) {
+        let record = material_textures[i];
+        let texel = sample_texture_slot(record, geometry.uv);
+        sampled = fold_material_texel(record, texel, parameters.normal_scale, sampled);
+    }
+
     // Assemble the analytic BSDF sample from the stable surface parameters.
     var surface: SurfaceSample;
-    surface.base_color = parameters.base_color.xyz;
-    surface.metallic = parameters.metallic;
-    surface.perceptual_roughness = parameters.perceptual_roughness;
+    surface.base_color = sampled.base_color;
+    surface.metallic = sampled.metallic;
+    surface.perceptual_roughness = sampled.perceptual_roughness;
     surface.reflectance = parameters.reflectance;
-    surface.ambient_occlusion = parameters.ambient_occlusion;
-    surface.emissive = parameters.emissive.xyz;
-    surface.clearcoat = parameters.clearcoat;
-    surface.clearcoat_roughness = parameters.clearcoat_roughness;
+    surface.ambient_occlusion = sampled.occlusion;
+    surface.emissive = sampled.emissive;
+    surface.clearcoat = sampled.clearcoat;
+    surface.clearcoat_roughness = sampled.clearcoat_roughness;
     surface.sheen = parameters.sheen;
     surface.subsurface = parameters.subsurface;
     surface.thickness = parameters.thickness;
@@ -405,7 +425,17 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     surface.anisotropy_rotation = parameters.anisotropy_rotation;
 
     var frame: ShadingFrame;
-    frame.normal = geometry.normal;
+    // A bound normal map rotates its tangent-space sample into world space
+    // against the interpolated basis; otherwise the geometric normal stands.
+    if sampled.has_normal_map {
+        var basis: TangentBasis;
+        basis.tangent = geometry.tangent;
+        basis.bitangent = geometry.bitangent;
+        basis.degenerate = false;
+        frame.normal = apply_tangent_space_normal(basis, geometry.normal, sampled.normal_tangent);
+    } else {
+        frame.normal = geometry.normal;
+    }
     frame.view = brdf_normalize_or(params.view_position.xyz - geometry.position, geometry.normal);
     frame.tangent = geometry.tangent;
     frame.bitangent = geometry.bitangent;
