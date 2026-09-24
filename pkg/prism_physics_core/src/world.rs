@@ -6,7 +6,9 @@
 
 use crate::collider::ShapeRegistry;
 use crate::config::WorldConfig;
+use crate::events::{ContactEventTracker, PhysicsEvent};
 use crate::joint::{JointDesc, JointHandle, JointStorage};
+use crate::pipeline::detect_contacts;
 use crate::state::body::BodyDesc;
 use crate::state::handle::BodyHandle;
 use crate::state::storage::BodyStorage;
@@ -23,6 +25,9 @@ pub struct PhysicsWorld {
     pub joints: JointStorage,
     /// Global simulation configuration.
     pub config: WorldConfig,
+    /// Frame-to-frame contact/trigger event tracker. Updated by
+    /// [`PhysicsWorld::drain_contact_events`].
+    pub contact_events: ContactEventTracker,
 }
 
 impl PhysicsWorld {
@@ -34,6 +39,7 @@ impl PhysicsWorld {
             shapes: ShapeRegistry::new(),
             joints: JointStorage::new(),
             config,
+            contact_events: ContactEventTracker::new(),
         }
     }
 
@@ -52,6 +58,25 @@ impl PhysicsWorld {
     /// Spawns a joint described by `desc`, returning its handle.
     pub fn spawn_joint(&mut self, desc: JointDesc) -> JointHandle {
         self.joints.insert(desc)
+    }
+
+    /// Detects the current contacts and diffs them against the previous call to
+    /// produce collision and trigger events.
+    ///
+    /// This should be called once per rendered/simulated frame, after the
+    /// solver has advanced the world, so that events reflect the settled poses.
+    /// Pairs where at least one body is a sensor
+    /// ([`BodyStorage::is_sensor`](crate::state::storage::BodyStorage::is_sensor))
+    /// yield trigger enter/exit events; all other pairs yield collision
+    /// start/end events. The returned events can be forwarded to an
+    /// [`ObserverRegistry`](crate::events::ObserverRegistry).
+    #[must_use]
+    pub fn drain_contact_events(&mut self) -> Vec<PhysicsEvent> {
+        let manifolds = detect_contacts(self);
+        let bodies = &self.bodies;
+        self.contact_events.record(&manifolds, |handle| {
+            bodies.is_sensor(handle).unwrap_or(false)
+        })
     }
 }
 

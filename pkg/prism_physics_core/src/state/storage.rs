@@ -29,6 +29,7 @@ pub struct BodyStorage {
     kinds: Vec<BodyKind>,
     colliders: Vec<Option<ColliderHandle>>,
     materials: Vec<PhysicsMaterial>,
+    is_sensor: Vec<bool>,
     linear_damping: Vec<f32>,
     angular_damping: Vec<f32>,
     generations: Vec<u32>,
@@ -59,6 +60,7 @@ impl BodyStorage {
             kinds: Vec::with_capacity(capacity),
             colliders: Vec::with_capacity(capacity),
             materials: Vec::with_capacity(capacity),
+            is_sensor: Vec::with_capacity(capacity),
             linear_damping: Vec::with_capacity(capacity),
             angular_damping: Vec::with_capacity(capacity),
             generations: Vec::with_capacity(capacity),
@@ -86,6 +88,7 @@ impl BodyStorage {
             self.kinds[i] = desc.kind;
             self.colliders[i] = desc.collider;
             self.materials[i] = desc.material;
+            self.is_sensor[i] = desc.is_sensor;
             self.linear_damping[i] = desc.linear_damping;
             self.angular_damping[i] = desc.angular_damping;
             self.active[i] = true;
@@ -102,6 +105,7 @@ impl BodyStorage {
             self.kinds.push(desc.kind);
             self.colliders.push(desc.collider);
             self.materials.push(desc.material);
+            self.is_sensor.push(desc.is_sensor);
             self.linear_damping.push(desc.linear_damping);
             self.angular_damping.push(desc.angular_damping);
             self.generations.push(0);
@@ -328,9 +332,32 @@ impl BodyStorage {
             kinds: &self.kinds,
             colliders: &self.colliders,
             materials: &self.materials,
+            is_sensor: &self.is_sensor,
             linear_damping: &self.linear_damping,
             angular_damping: &self.angular_damping,
             active: &self.active,
+        }
+    }
+
+    /// Returns whether the body is a sensor (trigger volume), or `None` if the
+    /// handle is invalid.
+    ///
+    /// A sensor participates in overlap detection and emits trigger events but
+    /// is skipped by the contact solver, so it never pushes other bodies.
+    #[must_use]
+    pub fn is_sensor(&self, handle: BodyHandle) -> Option<bool> {
+        self.contains(handle)
+            .then(|| self.is_sensor[handle.index() as usize])
+    }
+
+    /// Sets whether the body is a sensor (trigger volume). Returns `true` on
+    /// success.
+    pub fn set_sensor(&mut self, handle: BodyHandle, is_sensor: bool) -> bool {
+        if self.contains(handle) {
+            self.is_sensor[handle.index() as usize] = is_sensor;
+            true
+        } else {
+            false
         }
     }
 
@@ -400,6 +427,7 @@ impl BodyStorage {
             && self.kinds.len() == n
             && self.colliders.len() == n
             && self.materials.len() == n
+            && self.is_sensor.len() == n
             && self.linear_damping.len() == n
             && self.angular_damping.len() == n
             && self.generations.len() == n

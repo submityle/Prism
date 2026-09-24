@@ -104,6 +104,10 @@ pub struct BodyDesc {
     pub collider: Option<ColliderHandle>,
     /// Surface contact material used by the contact solver.
     pub material: PhysicsMaterial,
+    /// Marks the body as a non-solid sensor (trigger volume). Sensors take part
+    /// in overlap detection and emit trigger events, but the contact solver
+    /// never applies a physical response to or from them.
+    pub is_sensor: bool,
 }
 
 impl BodyDesc {
@@ -176,6 +180,17 @@ impl BodyDesc {
         self.material = material;
         self
     }
+
+    /// Marks the body as a sensor (trigger volume) and returns the modified
+    /// description.
+    ///
+    /// A sensor is reported by overlap queries and emits trigger enter/exit
+    /// events, but never receives or imparts a contact impulse.
+    #[must_use]
+    pub fn with_sensor(mut self, is_sensor: bool) -> BodyDesc {
+        self.is_sensor = is_sensor;
+        self
+    }
 }
 
 impl Default for BodyDesc {
@@ -191,6 +206,7 @@ impl Default for BodyDesc {
             angular_damping: 0.0,
             collider: None,
             material: PhysicsMaterial::DEFAULT,
+            is_sensor: false,
         }
     }
 }

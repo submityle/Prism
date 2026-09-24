@@ -37,6 +37,7 @@ pub mod config;
 pub mod constraint;
 pub mod driver;
 pub mod dynamics;
+pub mod events;
 pub mod island;
 pub mod joint;
 pub mod math;
@@ -55,6 +56,7 @@ pub use config::WorldConfig;
 pub use constraint::{Constraint, ConstraintKind};
 pub use driver::{CacheHandle, DriveMode, DriveOutcome, SimulationDriver};
 pub use dynamics::Integrator;
+pub use events::{ContactEventTracker, ContactPair, Observer, ObserverRegistry, PhysicsEvent};
 pub use island::{islands_from_pairs, IslandBuilder, IslandId, IslandSet};
 pub use joint::{
     AngleLimit, DistanceJoint, FixedJoint, Joint, JointAnchor, JointDesc, JointHandle, JointKind,

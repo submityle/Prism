@@ -87,6 +87,11 @@ impl ContactConstraint {
             if !view.is_dynamic(slot_a) && !view.is_dynamic(slot_b) {
                 continue;
             }
+            // Sensors (trigger volumes) participate in overlap detection and
+            // event generation only; they never receive a physical response.
+            if view.is_sensor(slot_a) || view.is_sensor(slot_b) {
+                continue;
+            }
 
             let material = PhysicsMaterial::combine(view.materials[slot_a], view.materials[slot_b]);
             let normal = manifold.normal;

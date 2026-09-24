@@ -40,6 +40,9 @@ pub struct BodySolverView<'a> {
     pub colliders: &'a [Option<ColliderHandle>],
     /// Contact material per body.
     pub materials: &'a [PhysicsMaterial],
+    /// Sensor (trigger-volume) flag per body. Sensors are skipped by the
+    /// contact solver so they never impart a physical response.
+    pub is_sensor: &'a [bool],
     /// Linear velocity damping coefficient per body (per second).
     pub linear_damping: &'a [f32],
     /// Angular velocity damping coefficient per body (per second).
@@ -65,5 +68,13 @@ impl BodySolverView<'_> {
     #[must_use]
     pub fn is_dynamic(&self, i: usize) -> bool {
         self.is_active(i) && self.kinds[i] == BodyKind::Dynamic
+    }
+
+    /// Returns `true` if slot `i` is a sensor (trigger volume).
+    ///
+    /// Out-of-range slots report `false`.
+    #[must_use]
+    pub fn is_sensor(&self, i: usize) -> bool {
+        self.is_sensor.get(i).copied().unwrap_or(false)
     }
 }
