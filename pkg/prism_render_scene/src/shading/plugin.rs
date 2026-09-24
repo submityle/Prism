@@ -3,14 +3,19 @@ use bevy_asset::embedded_asset;
 use bevy_ecs::schedule::IntoScheduleConfigs;
 use bevy_pbr::MeshPipelineSystems;
 use bevy_render::{
-    init_gpu_resource, render_phase::AddRenderCommand, Render, RenderApp, RenderStartup,
-    RenderSystems,
+    init_gpu_resource, GpuResourceAppExt, render_phase::AddRenderCommand, render_resource::SpecializedRenderPipelines,
+    Render, RenderApp, RenderStartup, RenderSystems,
 };
 
 use super::{
     classification_gpu::{
         dispatch_material_classification, init_material_classification_pipeline,
         prepare_material_classification_bind_groups,
+    },
+    composite::{
+        composite_shading, init_shading_composite_pipeline,
+        prepare_shading_composite_bind_groups, prepare_shading_composite_pipelines,
+        ShadingCompositePipeline,
     },
     resolve::{
         dispatch_shading_resolve, init_shading_resolve_pipeline,
@@ -37,6 +42,7 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/brdf.wesl");
         embedded_asset!(app, "../shaders/surface.wesl");
         embedded_asset!(app, "../shaders/shading_resolve.wesl");
+        embedded_asset!(app, "../shaders/composite.wesl");
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
@@ -47,6 +53,7 @@ impl Plugin for PrismShadingPlugin {
             .init_resource::<bevy_render::render_phase::ViewBinnedRenderPhases<Visibility3d>>()
             .init_resource::<bevy_render::render_phase::DrawFunctions<Visibility3d>>()
             .init_resource::<bevy_render::render_resource::SpecializedMeshPipelines<VisibilityRasterPipeline>>()
+            .init_gpu_resource::<SpecializedRenderPipelines<ShadingCompositePipeline>>()
             .init_resource::<PrismShadingSettings>()
             .init_resource::<PrismShadingDiagnostics>()
             .insert_resource(ShadingFrameGraph {
@@ -63,6 +70,7 @@ impl Plugin for PrismShadingPlugin {
                     init_shading_resolve_pipeline
                         .after(init_gpu_resource::<crate::MaterialBindGroup>)
                         .after(init_gpu_resource::<crate::LightBindGroup>),
+                    init_shading_composite_pipeline,
                 ),
             )
             .add_systems(
@@ -73,10 +81,15 @@ impl Plugin for PrismShadingPlugin {
                         .in_set(RenderSystems::PrepareResources),
                     prepare_visibility_buffers.in_set(RenderSystems::PrepareResources),
                     prepare_shading_buffers.in_set(RenderSystems::PrepareResources),
+                    prepare_shading_composite_pipelines
+                        .after(prepare_visibility_buffers)
+                        .in_set(RenderSystems::Prepare),
                     prepare_material_classification_bind_groups
                         .in_set(RenderSystems::PrepareBindGroups),
                     prepare_shading_resolve_bind_groups
                         .after(prepare_material_classification_bind_groups)
+                        .in_set(RenderSystems::PrepareBindGroups),
+                    prepare_shading_composite_bind_groups
                         .in_set(RenderSystems::PrepareBindGroups),
                     queue_visibility_raster.in_set(RenderSystems::QueueMeshes),
                 ),
@@ -91,6 +104,9 @@ impl Plugin for PrismShadingPlugin {
                 dispatch_shading_resolve
                     .after(dispatch_material_classification)
                     .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                composite_shading
+                    .after(bevy_core_pipeline::Core3dSystems::MainPass)
+                    .before(bevy_core_pipeline::Core3dSystems::PostProcess),
             ),
         );
     }

@@ -1,4 +1,5 @@
 mod classification_gpu;
+mod composite;
 mod graph;
 mod plugin;
 mod raster;
