@@ -19,6 +19,10 @@
 //! implemented from standard, publicly documented position-based-dynamics
 //! literature (Müller et al., "XPBD", 2016/2020).
 
+pub mod constraint;
 pub mod particle;
 
+pub use constraint::{
+    AttachmentConstraint, DistanceConstraint, ParticleConstraint, SoftConstraintKind,
+};
 pub use particle::{ParticleHandle, ParticleStorage};
