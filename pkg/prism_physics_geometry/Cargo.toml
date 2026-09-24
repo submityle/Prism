@@ -1,0 +1,25 @@
+[package]
+name = "prism_physics_geometry"
+version = "0.1.0"
+edition = "2024"
+description = "Geometry and broad-phase acceleration structures for Prism's physics engine (M0: AABB math and a dynamic BVH broad-phase). Contains no Unreal Engine source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+glam = { version = "0.33.2", default-features = false }
+serde = { version = "1", default-features = false, features = [
+  "derive",
+], optional = true }
+
+[dev-dependencies]
+prism_physics_geometry = { path = ".", features = ["serialize"] }
+
+[features]
+default = ["std"]
+std = ["glam/std"]
+# Enable serde (de)serialization of plain geometry data.
+serialize = ["dep:serde", "glam/serde"]
+
+[lints]
+workspace = true

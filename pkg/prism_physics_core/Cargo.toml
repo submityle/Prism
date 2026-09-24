@@ -1,0 +1,25 @@
+[package]
+name = "prism_physics_core"
+version = "0.1.0"
+edition = "2024"
+description = "Backend-neutral core kernel for Prism's next-generation physics engine (M0: math foundation, SoA state, reserved extension points). Contains no Unreal Engine source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+glam = { version = "0.33.2", default-features = false }
+serde = { version = "1", default-features = false, features = [
+  "derive",
+], optional = true }
+
+[dev-dependencies]
+prism_physics_core = { path = ".", features = ["serialize"] }
+
+[features]
+default = ["std"]
+std = ["glam/std"]
+# Enable serde (de)serialization of plain physics state data.
+serialize = ["dep:serde", "glam/serde"]
+
+[lints]
+workspace = true
