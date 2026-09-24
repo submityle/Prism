@@ -268,3 +268,38 @@ fn shading_resolve_wesl_compiles_and_resolves_all_imports() {
         panic!("shading_resolve.wesl failed to compile/resolve imports: {error}")
     });
 }
+/// Registers `material.wesl` under its canonical module path and compiles
+/// `material_sample.wesl`, forcing the importer to resolve the
+/// `prism_render_scene::shaders::material::{PrismMaterialHeader,
+/// PrismMaterialTexture, PrismSurfaceParameters}` import the bindless sampler
+/// depends on.  A green result proves the `enable wgpu_binding_array;`
+/// directive, the `binding_array<texture_2d<f32>>` / `binding_array<sampler>`
+/// declarations, the sRGB/normal decode helpers and the semantic `switch` all
+/// parse and type-check as WESL in lock-step with the CPU golden
+/// `prism_render_shading::texture_sample`.
+#[test]
+fn material_sample_wesl_compiles_and_resolves_material_import() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let material = shader_id(0x5052_4953_4d5f_4d41_5445_5249_414c_0009);
+    cache.set_shader(
+        material,
+        Shader::from_wesl(
+            include_str!("../../shaders/material.wesl"),
+            "embedded://prism_render_scene/shaders/material.wesl",
+        ),
+    );
+
+    let material_sample = shader_id(0x5052_4953_4d5f_4d54_5853_414d_5000_0001);
+    cache.set_shader(
+        material_sample,
+        Shader::from_wesl(
+            include_str!("../../shaders/material_sample.wesl"),
+            "embedded://prism_render_scene/shaders/material_sample.wesl",
+        ),
+    );
+
+    cache.get(0, material_sample, &[]).unwrap_or_else(|error| {
+        panic!("material_sample.wesl failed to compile/resolve material import: {error}")
+    });
+}
