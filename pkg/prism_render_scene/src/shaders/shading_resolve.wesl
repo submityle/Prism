@@ -45,6 +45,9 @@ import prism_render_scene::shaders::brdf::{
 import prism_render_scene::shaders::cloth::{
     cloth_direct,
 };
+import prism_render_scene::shaders::subsurface::{
+    subsurface_direct,
+};
 import prism_render_scene::shaders::lighting::{
     DirectionalLight,
     PunctualLight,
@@ -243,6 +246,37 @@ fn shade_cloth(
     return accumulated + indirect + emissive;
 }
 
+// Integrates the subsurface (SSS) lobe over every analytic light. Mirrors the
+// CPU `shade_subsurface` closure; the lobe accepts back-facing lights so
+// radiance can transmit through thin geometry.
+fn shade_subsurface(
+    lit: SurfaceSample,
+    frame: ShadingFrame,
+    world_position: vec3<f32>,
+    indirect: vec3<f32>,
+    emissive: vec3<f32>,
+    env: LightEnvironment,
+) -> vec3<f32> {
+    var accumulated = vec3<f32>(0.0);
+
+    let directional_total = min(env.directional_count, arrayLength(&directional_lights));
+    for (var i = 0u; i < directional_total; i = i + 1u) {
+        let sample = sample_directional_light(directional_lights[i]);
+        accumulated = accumulated + subsurface_direct(lit, frame, to_direct_sample(sample));
+    }
+
+    let punctual_total = min(env.punctual_count, arrayLength(&punctual_lights));
+    for (var i = 0u; i < punctual_total; i = i + 1u) {
+        let sample = sample_punctual_light(punctual_lights[i], world_position);
+        if sample.valid == 0.0 {
+            continue;
+        }
+        accumulated = accumulated + subsurface_direct(lit, frame, to_direct_sample(sample));
+    }
+
+    return accumulated + indirect + emissive;
+}
+
 @compute @workgroup_size(64)
 fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     let local = id.x;
@@ -366,6 +400,7 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     surface.clearcoat_roughness = parameters.clearcoat_roughness;
     surface.sheen = parameters.sheen;
     surface.subsurface = parameters.subsurface;
+    surface.thickness = parameters.thickness;
 
     var frame: ShadingFrame;
     frame.normal = geometry.normal;
@@ -398,7 +433,7 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
             color = surface.base_color + surface.emissive;
         }
         case SHADING_CLASS_SUBSURFACE: {
-            color = shade_principled(lit, frame, geometry.position, indirect, emissive, env);
+            color = shade_subsurface(lit, frame, geometry.position, indirect, emissive, env);
         }
         case SHADING_CLASS_CLEARCOAT: {
             color = shade_principled(lit, frame, geometry.position, indirect, emissive, env);

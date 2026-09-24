@@ -106,6 +106,46 @@ fn cloth_wesl_compiles_and_resolves_imports() {
 }
 
 
+/// Registers `lighting.wesl`, `brdf.wesl` and `subsurface.wesl` under their
+/// canonical module paths and compiles `subsurface.wesl`, forcing the importer
+/// to resolve the `prism_render_scene::shaders::{lighting, brdf}::{...}` imports
+/// the subsurface lobe depends on (including the reused GGX helpers).
+#[test]
+fn subsurface_wesl_compiles_and_resolves_imports() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let lighting = shader_id(0x5052_4953_4d5f_4c49_4748_5449_4e47_0004);
+    cache.set_shader(
+        lighting,
+        Shader::from_wesl(
+            include_str!("../../shaders/lighting.wesl"),
+            "embedded://prism_render_scene/shaders/lighting.wesl",
+        ),
+    );
+
+    let brdf = shader_id(0x5052_4953_4d5f_4252_4446_0000_0000_0004);
+    cache.set_shader(
+        brdf,
+        Shader::from_wesl(
+            include_str!("../../shaders/brdf.wesl"),
+            "embedded://prism_render_scene/shaders/brdf.wesl",
+        ),
+    );
+
+    let subsurface = shader_id(0x5052_4953_4d5f_5355_4253_0000_0000_0001);
+    cache.set_shader(
+        subsurface,
+        Shader::from_wesl(
+            include_str!("../../shaders/subsurface.wesl"),
+            "embedded://prism_render_scene/shaders/subsurface.wesl",
+        ),
+    );
+
+    cache.get(0, subsurface, &[]).unwrap_or_else(|error| {
+        panic!("subsurface.wesl failed to compile/resolve imports: {error}")
+    });
+}
+
 /// Compiles `surface.wesl` standalone.  It has no imports, so a green result
 /// proves the geometry-table ABI records, barycentric decode and
 /// vertex-interpolation math parse and type-check as WESL on their own.
@@ -137,7 +177,7 @@ fn shading_resolve_wesl_compiles_and_resolves_all_imports() {
 
     // Register each dependency under the byte-identical embedded module path
     // that `load_shader_library!` produces at runtime.
-    let deps: [(u128, &str, &str); 6] = [
+    let deps: [(u128, &str, &str); 7] = [
         (
             0x5052_4953_4d5f_5355_5246_4143_4500_0002,
             include_str!("../../shaders/surface.wesl"),
@@ -167,6 +207,11 @@ fn shading_resolve_wesl_compiles_and_resolves_all_imports() {
             0x5052_4953_4d5f_434c_4f54_4800_0000_0002,
             include_str!("../../shaders/cloth.wesl"),
             "embedded://prism_render_scene/shaders/cloth.wesl",
+        ),
+        (
+            0x5052_4953_4d5f_5355_4253_0000_0000_0002,
+            include_str!("../../shaders/subsurface.wesl"),
+            "embedded://prism_render_scene/shaders/subsurface.wesl",
         ),
     ];
     for (tag, source, path) in deps {

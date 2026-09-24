@@ -14,6 +14,7 @@ mod environment;
 mod lighting;
 mod punctual;
 mod resolve;
+mod subsurface;
 mod surface;
 mod vecmath;
 mod visibility;
@@ -35,6 +36,7 @@ pub use resolve::{
     resolve_pixel, surface_sample_from_parameters, DirectionalLight, LightingEnvironment,
     ResolveError, ResolveInput, ResolvedPixel,
 };
+pub use subsurface::evaluate_subsurface_direct;
 pub use surface::{
     reconstruct_surface, GpuShadingPrimitive, GpuShadingVertex, SurfaceReconstructionError,
     SurfaceReconstructionFlags, SurfaceReconstructionInput, SurfaceSampleGeometry,

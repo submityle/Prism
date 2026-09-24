@@ -19,6 +19,9 @@ pub struct SurfaceSample {
     pub sheen: f32,
     /// Subsurface scattering weight driving Cloth/Subsurface diffusion in `[0, 1]`.
     pub subsurface: f32,
+    /// Optical thickness in `[0, 1]` driving Subsurface back-transmission
+    /// (0 = paper-thin, full transmission; 1 = opaque, no transmission).
+    pub thickness: f32,
 }
 
 impl Default for SurfaceSample {
@@ -34,6 +37,7 @@ impl Default for SurfaceSample {
             clearcoat_roughness: 0.25,
             sheen: 0.0,
             subsurface: 0.0,
+            thickness: 0.0,
         }
     }
 }
@@ -166,20 +170,20 @@ pub fn linear_furnace_response(surface: SurfaceSample, samples: u32) -> [f32; 3]
     mul_scalar(sum, 1.0 / sample_count as f32)
 }
 
-fn distribution_ggx(n_dot_h: f32, alpha: f32) -> f32 {
+pub(crate) fn distribution_ggx(n_dot_h: f32, alpha: f32) -> f32 {
     let alpha_squared = alpha * alpha;
     let denominator = n_dot_h * n_dot_h * (alpha_squared - 1.0) + 1.0;
     alpha_squared / (PI * denominator * denominator).max(MIN_N_DOT)
 }
 
-fn visibility_smith_ggx_correlated(n_dot_v: f32, n_dot_l: f32, alpha: f32) -> f32 {
+pub(crate) fn visibility_smith_ggx_correlated(n_dot_v: f32, n_dot_l: f32, alpha: f32) -> f32 {
     let alpha_squared = alpha * alpha;
     let gv = n_dot_l * ((n_dot_v - n_dot_v * alpha_squared) * n_dot_v + alpha_squared).sqrt();
     let gl = n_dot_v * ((n_dot_l - n_dot_l * alpha_squared) * n_dot_l + alpha_squared).sqrt();
     0.5 / (gv + gl).max(MIN_N_DOT)
 }
 
-fn fresnel_schlick(f0: [f32; 3], v_dot_h: f32) -> [f32; 3] {
+pub(crate) fn fresnel_schlick(f0: [f32; 3], v_dot_h: f32) -> [f32; 3] {
     let one_minus = 1.0 - v_dot_h.clamp(0.0, 1.0);
     let squared = one_minus * one_minus;
     let factor = squared * squared * one_minus;

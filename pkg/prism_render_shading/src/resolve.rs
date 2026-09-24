@@ -123,6 +123,7 @@ pub fn surface_sample_from_parameters(parameters: &GpuSurfaceParameters) -> Surf
         clearcoat_roughness: parameters.clearcoat_roughness,
         sheen: parameters.sheen,
         subsurface: parameters.subsurface,
+        thickness: parameters.thickness,
     }
 }
 
@@ -248,10 +249,33 @@ pub fn resolve_pixel(
         add(add(accumulated, indirect), emissive)
     };
 
+    // Integrates the subsurface (SSS) lobe over every analytic light, then
+    // adds the shared indirect + emissive terms once.  Used by the Subsurface
+    // class; the lobe intentionally accepts back-facing lights so radiance can
+    // transmit through thin geometry.
+    let shade_subsurface = || {
+        let mut accumulated = [0.0; 3];
+        for light in lights.directional {
+            accumulated = add(
+                accumulated,
+                crate::evaluate_subsurface_direct(lit_surface, frame, direct_sample(*light)),
+            );
+        }
+        for light in lights.punctual {
+            if let Some(sample) = light.sample(geometry.position) {
+                accumulated = add(
+                    accumulated,
+                    crate::evaluate_subsurface_direct(lit_surface, frame, sample),
+                );
+            }
+        }
+        add(add(accumulated, indirect), emissive)
+    };
+
     // Every class is handled explicitly so this branch stays byte-for-byte in
     // step with the `switch` in `shading_resolve.wesl` (9 arms, no wildcard).
-    // Cloth now has its own dedicated lobe; the remaining specialized classes
-    // (Subsurface/ClearCoat/Hair/Water) still share `shade_principled()` until
+    // Cloth and Subsurface now have dedicated lobes; the remaining specialized
+    // classes (ClearCoat/Hair/Water) still share `shade_principled()` until
     // their lobes land, so the lint that would collapse those equal arms is
     // suppressed to preserve the 1:1 GPU switch mapping.
     #[expect(
@@ -263,7 +287,7 @@ pub fn resolve_pixel(
         MaterialShadingClass::Unlit => add(base_color, emissive),
         MaterialShadingClass::Npr => shade_toon(),
         MaterialShadingClass::Principled => shade_principled(),
-        MaterialShadingClass::Subsurface => shade_principled(),
+        MaterialShadingClass::Subsurface => shade_subsurface(),
         MaterialShadingClass::ClearCoat => shade_principled(),
         MaterialShadingClass::Cloth => shade_cloth(),
         MaterialShadingClass::Hair => shade_principled(),
