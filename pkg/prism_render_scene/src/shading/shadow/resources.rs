@@ -21,8 +21,8 @@ use bevy_ecs::{prelude::*, world::FromWorld};
 use bevy_render::{
     render_resource::{
         AddressMode, Buffer, BufferUsages, Extent3d, FilterMode, RawBufferVec, Sampler,
-        SamplerDescriptor, TextureAspect, TextureDescriptor, TextureDimension, TextureFormat,
-        TextureUsages, TextureView, TextureViewDescriptor, TextureViewDimension,
+        SamplerDescriptor, TextureAspect, TextureDescriptor, TextureDimension,
+        TextureFormat, TextureUsages, TextureView, TextureViewDescriptor, TextureViewDimension,
     },
     renderer::{RenderDevice, RenderQueue},
 };
@@ -31,6 +31,7 @@ use super::abi::{
     GpuDirectionalShadow, GpuPointShadow, GpuShadowGlobals, MAX_SHADOW_DIRECTIONALS,
     MAX_SHADOW_POINTS,
 };
+use super::pipeline::SHADOW_DEPTH_FORMAT;
 
 /// Texel format of every atlas layer.  A single-channel 32-bit float holds the
 /// full-precision NDC depth or normalized linear distance the shadow test
@@ -94,6 +95,13 @@ pub(crate) struct ShadowAtlas {
     config: ShadowAtlasConfig,
     view: TextureView,
     sampler: Sampler,
+    /// One single-layer `D2` view per array layer, used as the colour render
+    /// target when the depth pass fills that layer.  Index `layer` addresses
+    /// the same global layer the resolve pass samples through `view`.
+    layer_views: Vec<TextureView>,
+    /// Transient hardware depth-stencil target shared by every layer's depth
+    /// draw; cleared to `1.0` at the start of each pass and never sampled.
+    depth_view: TextureView,
 }
 
 impl FromWorld for ShadowAtlas {
@@ -146,10 +154,57 @@ impl ShadowAtlas {
             min_filter: FilterMode::Linear,
             ..Default::default()
         });
+        // One single-layer colour view per array layer so the depth pass can
+        // target a specific layer as a render attachment (array views cannot be
+        // bound as colour attachments directly).
+        let mut layer_views = Vec::with_capacity(config.max_layers as usize);
+        for layer in 0..config.max_layers {
+            layer_views.push(texture.create_view(&TextureViewDescriptor {
+                label: Some("prism shadow atlas layer"),
+                format: Some(SHADOW_ATLAS_FORMAT),
+                dimension: Some(TextureViewDimension::D2),
+                aspect: TextureAspect::All,
+                base_mip_level: 0,
+                mip_level_count: Some(1),
+                base_array_layer: layer,
+                array_layer_count: Some(1),
+                usage: None,
+            }));
+        }
+        // A single depth-stencil target reused for every layer's pass: shadow
+        // views are rendered one at a time, so one depth buffer at the shared
+        // resolution suffices and is cleared per pass.
+        let depth_texture = device.create_texture(&TextureDescriptor {
+            label: Some("prism shadow atlas depth"),
+            size: Extent3d {
+                width: config.resolution,
+                height: config.resolution,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: SHADOW_DEPTH_FORMAT,
+            usage: TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let depth_view = depth_texture.create_view(&TextureViewDescriptor {
+            label: Some("prism shadow atlas depth view"),
+            format: Some(SHADOW_DEPTH_FORMAT),
+            dimension: Some(TextureViewDimension::D2),
+            aspect: TextureAspect::All,
+            base_mip_level: 0,
+            mip_level_count: Some(1),
+            base_array_layer: 0,
+            array_layer_count: Some(1),
+            usage: None,
+        });
         Self {
             config,
             view,
             sampler,
+            layer_views,
+            depth_view,
         }
     }
 
@@ -172,6 +227,18 @@ impl ShadowAtlas {
     pub(crate) fn sampler(&self) -> &Sampler {
         &self.sampler
     }
+
+    /// The single-layer colour view for `layer`, the depth pass's render
+    /// target, or `None` if `layer` is outside the allocated range.
+    pub(crate) fn layer_view(&self, layer: u32) -> Option<&TextureView> {
+        self.layer_views.get(layer as usize)
+    }
+
+    /// The shared transient depth-stencil view every layer's depth draw tests
+    /// against.
+    pub(crate) fn depth_view(&self) -> &TextureView {
+        &self.depth_view
+    }
 }
 
 /// Per-frame CPU staging of the shadow records before they are packed into the
@@ -185,6 +252,11 @@ pub(crate) struct ExtractedShadows {
     pub points: Vec<GpuPointShadow>,
     /// The frame header: live slot counts and the shared atlas resolution.
     pub globals: GpuShadowGlobals,
+    /// One entry per atlas layer that must be filled this frame: which layer to
+    /// render into and the per-view matrix the depth pass binds.  Produced by
+    /// [`plan_shadow_depth_draws`](prism_render_shading::plan_shadow_depth_draws)
+    /// during extraction, consumed by the depth pass.
+    pub depth_draws: Vec<prism_render_shading::ShadowDepthDraw>,
 }
 
 /// The three storage buffers mirroring [`ExtractedShadows`] onto the GPU.

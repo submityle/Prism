@@ -36,9 +36,9 @@ use bevy_math::{ops, Mat4};
 use bevy_render::Extract;
 use bevy_transform::components::GlobalTransform;
 use prism_render_shading::{
-    allocate_shadow_atlas, compute_cascade_matrices, compute_cascade_splits, AtlasConfig,
-    CascadeMatrix, CascadeSplits, DirectionalShadowConfig, PointShadowConfig, ShadowKind,
-    ShadowRequest, MAX_CASCADE_COUNT,
+    allocate_shadow_atlas, compute_cascade_matrices, compute_cascade_splits, plan_shadow_depth_draws,
+    AtlasConfig, CascadeMatrix, CascadeSplits, DirectionalShadowConfig, PointShadowConfig,
+    ShadowKind, ShadowRequest, ShadowViewGeometry, MAX_CASCADE_COUNT,
 };
 
 use super::abi::{GpuDirectionalShadow, GpuPointShadow, GpuShadowGlobals};
@@ -50,6 +50,12 @@ use super::settings::PrismShadowSettings;
 /// the back-fill can still recover which caster a slot belongs to.  Directional
 /// lights are capped far below this, so the two id spaces never overlap.
 const POINT_LIGHT_ID_OFFSET: u32 = 1 << 16;
+
+/// Near clip of every point-light cube-face frustum.  The cube depth pass
+/// stores range-normalized linear distance, so this only sets where the
+/// projection's near plane sits; it is kept small and fixed so shadow acne near
+/// the emitter is governed by the reference bias, not a per-light near guess.
+const POINT_SHADOW_NEAR: f32 = 0.05;
 
 /// Importance assigned to every directional caster.  Directionals (sun/moon)
 /// are the dominant lighting contributor, so they must always claim their atlas
@@ -250,6 +256,7 @@ pub(crate) fn assemble_shadows(
 ) {
     extracted.directionals.clear();
     extracted.points.clear();
+    extracted.depth_draws.clear();
     extracted.globals = GpuShadowGlobals::default();
 
     let mut requests: Vec<ShadowRequest> =
@@ -304,6 +311,30 @@ pub(crate) fn assemble_shadows(
             ));
         }
     }
+
+    // Expand the same allocation the records were back-filled from into the
+    // flat per-layer depth-pass draw list.  The closure recovers each admitted
+    // caster from the shared point/directional id space (mirroring the back-fill
+    // above) and hands the planner the light-clip geometry for that view;
+    // directional slots emit one NDC cascade per layer, point slots six
+    // range-normalized cube faces.  Slot order (descending importance) and the
+    // resulting `layer` values match the records the resolve pass samples.
+    extracted.depth_draws = plan_shadow_depth_draws(&allocation, |light_id| {
+        if light_id >= POINT_LIGHT_ID_OFFSET {
+            let caster = &point_casters[(light_id - POINT_LIGHT_ID_OFFSET) as usize];
+            let far = caster.range.max(POINT_SHADOW_NEAR + 1.0e-4);
+            ShadowViewGeometry::Point {
+                position: caster.position,
+                near: POINT_SHADOW_NEAR,
+                far,
+            }
+        } else {
+            let caster = &dir_casters[light_id as usize];
+            ShadowViewGeometry::Directional {
+                cascades: caster.matrices,
+            }
+        }
+    });
 
     extracted.globals = GpuShadowGlobals {
         directional_count: extracted.directionals.len() as u32,
@@ -484,5 +515,73 @@ mod tests {
         assert_eq!(extracted.globals.directional_count, 0);
         assert_eq!(extracted.globals.point_count, 0);
         assert_eq!(extracted.globals.atlas_resolution, 2048);
+    }
+
+    #[test]
+    fn depth_draws_expand_every_admitted_layer_with_matching_modes() {
+        use prism_render_shading::ShadowDepthMode;
+
+        let fit = camera_fit(0.1, 200.0);
+        let dir = vec![directional_caster(&fit, 0)];
+        let points = vec![PointCaster {
+            light_index: 0,
+            position: [1.0, 2.0, 3.0],
+            range: 25.0,
+            importance: 1000.0,
+        }];
+        let atlas = ShadowAtlasConfig::new(32, 1024);
+        let mut extracted = ExtractedShadows::default();
+
+        assemble_shadows(&dir, &points, &atlas, &point_config(), &mut extracted);
+
+        // Four directional cascades plus six point cube faces.
+        assert_eq!(extracted.depth_draws.len(), 10);
+
+        // Every emitted draw targets a layer that also belongs to an emitted
+        // record, and the draw layers are all distinct.
+        let mut draw_layers: Vec<u32> =
+            extracted.depth_draws.iter().map(|draw| draw.layer).collect();
+        draw_layers.sort_unstable();
+        let mut deduped = draw_layers.clone();
+        deduped.dedup();
+        assert_eq!(draw_layers, deduped, "depth draw layers must be unique");
+
+        // Directional layers store NDC depth; point layers store distance.
+        let directional_base = extracted.directionals[0].base_layer;
+        let point_base = extracted.points[0].base_layer;
+        for draw in &extracted.depth_draws {
+            if draw.light_id >= POINT_LIGHT_ID_OFFSET {
+                assert_eq!(draw.view.mode, ShadowDepthMode::Distance);
+                assert!(draw.layer >= point_base && draw.layer < point_base + 6);
+                // Distance mode carries the emitter position and inverse range.
+                assert_eq!(&draw.view.light_position[0..3], &[1.0, 2.0, 3.0]);
+                assert!((draw.view.light_position[3] - (1.0 / 25.0)).abs() < 1.0e-6);
+            } else {
+                assert_eq!(draw.view.mode, ShadowDepthMode::Ndc);
+                assert!(draw.layer >= directional_base && draw.layer < directional_base + 4);
+                assert_eq!(draw.view.light_position, [0.0, 0.0, 0.0, 0.0]);
+            }
+        }
+    }
+
+    #[test]
+    fn depth_draws_are_cleared_when_no_casters_remain() {
+        let atlas = ShadowAtlasConfig::new(16, 1024);
+        let mut extracted = ExtractedShadows::default();
+        extracted
+            .depth_draws
+            .push(prism_render_shading::ShadowDepthDraw {
+                light_id: 7,
+                layer: 3,
+                view: prism_render_shading::ShadowDepthView {
+                    view_projection: [0.0; 16],
+                    light_position: [0.0; 4],
+                    mode: prism_render_shading::ShadowDepthMode::Ndc,
+                },
+            });
+
+        assemble_shadows(&[], &[], &atlas, &point_config(), &mut extracted);
+
+        assert!(extracted.depth_draws.is_empty());
     }
 }

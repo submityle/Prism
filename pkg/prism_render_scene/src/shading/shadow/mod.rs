@@ -22,7 +22,9 @@
 
 mod abi;
 mod bindings;
+mod depth_pass;
 mod extract;
+mod pipeline;
 mod resources;
 mod settings;
 mod systems;
@@ -32,6 +34,14 @@ pub(crate) use extract::extract_shadows;
 pub(crate) use resources::{
     ExtractedShadows, ShadowAtlas, ShadowAtlasConfig, ShadowGpuBuffers,
     DEFAULT_SHADOW_ATLAS_LAYERS, DEFAULT_SHADOW_ATLAS_RESOLUTION,
+};
+pub(crate) use depth_pass::{
+    prepare_shadow_depth_uniform, queue_shadow_depth, shadow_depth_pass, ShadowDepthDrawList,
+    ShadowDepthViewOffsets,
+};
+pub(crate) use pipeline::{
+    init_shadow_depth_pipeline, register_shadow_depth_shader, ShadowDepthPipeline,
+    ShadowDepthViewUniform,
 };
 pub(crate) use settings::PrismShadowSettings;
 pub(crate) use systems::{

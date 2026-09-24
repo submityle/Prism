@@ -22,10 +22,12 @@ use super::{
         prepare_shading_resolve_bind_groups,
     },
     shadow::{
-        ensure_shadow_atlas, extract_shadows, prepare_shadow_bind_group, rebuild_shadow_buffers,
-        write_shadow_buffers, ExtractedShadows, PrismShadowSettings, ShadowAtlas, ShadowAtlasConfig,
-        ShadowBindGroup, ShadowGpuBuffers, DEFAULT_SHADOW_ATLAS_LAYERS,
-        DEFAULT_SHADOW_ATLAS_RESOLUTION,
+        ensure_shadow_atlas, extract_shadows, init_shadow_depth_pipeline, prepare_shadow_bind_group,
+        prepare_shadow_depth_uniform, queue_shadow_depth, rebuild_shadow_buffers,
+        register_shadow_depth_shader, shadow_depth_pass, write_shadow_buffers, ExtractedShadows,
+        PrismShadowSettings, ShadowAtlas, ShadowAtlasConfig, ShadowBindGroup, ShadowDepthDrawList,
+        ShadowDepthPipeline, ShadowDepthViewOffsets, ShadowDepthViewUniform,
+        ShadowGpuBuffers, DEFAULT_SHADOW_ATLAS_LAYERS, DEFAULT_SHADOW_ATLAS_RESOLUTION,
     },
     graph::shading_frame_graph,
     raster::{
@@ -56,6 +58,7 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/surface.wesl");
         embedded_asset!(app, "../shaders/shading_resolve.wesl");
         embedded_asset!(app, "../shaders/composite.wesl");
+        register_shadow_depth_shader(app);
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
@@ -66,6 +69,9 @@ impl Plugin for PrismShadingPlugin {
             .init_resource::<bevy_render::render_phase::ViewBinnedRenderPhases<Visibility3d>>()
             .init_resource::<bevy_render::render_phase::DrawFunctions<Visibility3d>>()
             .init_resource::<bevy_render::render_resource::SpecializedMeshPipelines<VisibilityRasterPipeline>>()
+            .init_resource::<bevy_render::render_resource::SpecializedMeshPipelines<ShadowDepthPipeline>>()
+            .init_resource::<ShadowDepthDrawList>()
+            .init_resource::<ShadowDepthViewOffsets>()
             .init_gpu_resource::<SpecializedRenderPipelines<ShadingCompositePipeline>>()
             .init_resource::<PrismShadingSettings>()
             .init_resource::<PrismShadingDiagnostics>()
@@ -102,6 +108,14 @@ impl Plugin for PrismShadingPlugin {
                     .chain(),
             )
             .add_systems(
+                RenderStartup,
+                (
+                    init_shadow_depth_pipeline
+                        .after(init_gpu_resource::<crate::buffers::GpuSceneBindGroup>),
+                    init_gpu_resource::<ShadowDepthViewUniform>,
+                ),
+            )
+            .add_systems(
                 Render,
                 (
                     prepare_shading_work
@@ -126,12 +140,17 @@ impl Plugin for PrismShadingPlugin {
                     prepare_shading_composite_bind_groups
                         .in_set(RenderSystems::PrepareBindGroups),
                     queue_visibility_raster.in_set(RenderSystems::QueueMeshes),
+                    queue_shadow_depth.in_set(RenderSystems::QueueMeshes),
+                    prepare_shadow_depth_uniform
+                        .after(write_shadow_buffers)
+                        .in_set(RenderSystems::PrepareBindGroups),
                 ),
             )
             .add_systems(ExtractSchedule, extract_shadows);
         render_app.add_systems(
             bevy_core_pipeline::Core3d,
             (
+                shadow_depth_pass.before(visibility_raster_pass),
                 visibility_raster_pass.before(bevy_core_pipeline::Core3dSystems::MainPass),
                 dispatch_material_classification
                     .after(visibility_raster_pass)
