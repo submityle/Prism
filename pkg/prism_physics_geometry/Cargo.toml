@@ -14,6 +14,7 @@ serde = { version = "1", default-features = false, features = [
 
 [dev-dependencies]
 prism_physics_geometry = { path = ".", features = ["serialize"] }
+approx = "0.5"
 
 [features]
 default = ["std"]
