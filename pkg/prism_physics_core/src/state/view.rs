@@ -40,6 +40,10 @@ pub struct BodySolverView<'a> {
     pub colliders: &'a [Option<ColliderHandle>],
     /// Contact material per body.
     pub materials: &'a [PhysicsMaterial],
+    /// Linear velocity damping coefficient per body (per second).
+    pub linear_damping: &'a [f32],
+    /// Angular velocity damping coefficient per body (per second).
+    pub angular_damping: &'a [f32],
     /// Slot occupancy flags.
     pub active: &'a [bool],
 }

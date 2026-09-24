@@ -328,7 +328,24 @@ impl BodyStorage {
             kinds: &self.kinds,
             colliders: &self.colliders,
             materials: &self.materials,
+            linear_damping: &self.linear_damping,
+            angular_damping: &self.angular_damping,
             active: &self.active,
+        }
+    }
+
+    /// Returns the live [`BodyHandle`] occupying `slot`, or `None` when the slot
+    /// is empty or out of range.
+    ///
+    /// The narrow-phase pipeline addresses bodies by slot index (the same index
+    /// used by [`BodySolverView`]) and uses this to stamp contact manifolds with
+    /// stable handles.
+    #[must_use]
+    pub fn handle_at_slot(&self, slot: usize) -> Option<BodyHandle> {
+        if slot < self.active.len() && self.active[slot] {
+            Some(BodyHandle::new(slot as u32, self.generations[slot]))
+        } else {
+            None
         }
     }
 

@@ -6,6 +6,10 @@
 //! (bodies really fall under gravity). Later milestones add constraint-solving
 //! implementations behind the same trait.
 
+pub mod xpbd;
+
+pub use xpbd::{XpbdConfig, XpbdSolver};
+
 use crate::dynamics::Integrator;
 use crate::world::PhysicsWorld;
 use std::collections::HashMap;
