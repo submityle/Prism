@@ -42,8 +42,8 @@ pub use lighting::{
     LightGpuBuffers, PrismLightingPlugin, LIGHT_ENVIRONMENT_FLAG_IMAGE_BASED,
 };
 pub use material::{
-    MaterialBindGroup, MaterialBufferBindings, MaterialReader, PrismMaterialDiagnostics,
-    PrismMaterialPlugin,
+    BindlessHeapStats, BindlessSlot, BindlessTextureHeap, MaterialBindGroup,
+    MaterialBufferBindings, MaterialReader, PrismMaterialDiagnostics, PrismMaterialPlugin,
 };
 pub use opaque::{
     GpuSceneDebugView, GpuSceneOpaqueEnabled, GpuSceneOpaqueIndirectEnabled,

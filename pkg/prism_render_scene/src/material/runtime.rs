@@ -9,14 +9,22 @@ use prism_render_material::{
     TextureSemantic,
 };
 
+use super::texture_heap::{BindlessHeapStats, BindlessTextureHeap};
+
 #[derive(Resource)]
 pub(crate) struct RenderMaterialRegistry {
     pub registry: MaterialRegistry,
     pub assets: HashMap<AssetId<StandardMaterial>, GenerationalHandle>,
     pub revisions: HashMap<AssetId<StandardMaterial>, u32>,
     pub dirty_assets: HashSet<AssetId<StandardMaterial>>,
-    textures: HashMap<AssetId<Image>, GenerationalHandle>,
-    next_texture: u32,
+    /// Bounded bindless slot allocator backing every material texture.
+    textures: BindlessTextureHeap,
+    /// Set of images each published material currently holds a reference to, so
+    /// republishing or retiring a material releases exactly the slots it owned.
+    material_textures: HashMap<AssetId<StandardMaterial>, Vec<AssetId<Image>>>,
+    /// Scratch list the active [`TextureResolver`] pushes acquired images into
+    /// while lowering a single material. Drained by `publish_asset`.
+    pending_textures: Vec<AssetId<Image>>,
 }
 
 impl Default for RenderMaterialRegistry {
@@ -26,8 +34,9 @@ impl Default for RenderMaterialRegistry {
             assets: HashMap::default(),
             revisions: HashMap::default(),
             dirty_assets: HashSet::default(),
-            textures: HashMap::default(),
-            next_texture: 1,
+            textures: BindlessTextureHeap::default(),
+            material_textures: HashMap::default(),
+            pending_textures: Vec::new(),
         }
     }
 }
@@ -53,6 +62,9 @@ impl RenderMaterialRegistry {
             }
         };
         let revision = self.revisions.get(&id).copied().unwrap_or(0) + 1;
+        // Each `resolve` call during lowering acquires a bindless slot and
+        // records the image here so we can reconcile references afterwards.
+        self.pending_textures.clear();
         let record = {
             let mut resolver = self.texture_resolver();
             prism_render_material::lower_standard_material(
@@ -63,11 +75,24 @@ impl RenderMaterialRegistry {
             )
         };
         if let Err(error) = self.registry.publish(record) {
+            // Roll back the slots this attempt acquired so a failed publish
+            // never leaks references.
+            for image in core::mem::take(&mut self.pending_textures) {
+                self.textures.release(image);
+            }
             if allocated {
                 self.assets.remove(&id);
                 let _ = self.registry.cancel_allocation(handle);
             }
             return Err(error);
+        }
+        // Success: adopt the freshly acquired texture set and release the set the
+        // previous revision held. Acquiring before releasing keeps shared
+        // textures resident without a transient generation bump.
+        let new_set = core::mem::take(&mut self.pending_textures);
+        let previous = self.material_textures.insert(id, new_set).unwrap_or_default();
+        for image in previous {
+            self.textures.release(image);
         }
         self.revisions.insert(id, revision);
         self.dirty_assets.insert(id);
@@ -83,11 +108,28 @@ impl RenderMaterialRegistry {
         };
         self.registry.retire(handle, completion)?;
         self.revisions.remove(&id);
+        if let Some(images) = self.material_textures.remove(&id) {
+            for image in images {
+                self.textures.release(image);
+            }
+        }
         self.dirty_assets.insert(id);
         Ok(Some(handle))
     }
     pub fn texture_resolver(&mut self) -> TextureResolver<'_> {
         TextureResolver { registry: self }
+    }
+
+    /// Current bindless texture-heap occupancy, surfaced for diagnostics.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Folded into PrismMaterialDiagnostics by the upcoming bindless upload slice."
+        )
+    )]
+    pub fn texture_heap_stats(&self) -> BindlessHeapStats {
+        self.textures.stats()
     }
 }
 
@@ -96,19 +138,17 @@ pub(crate) struct TextureResolver<'a> {
 }
 impl StandardMaterialTextureResolver for TextureResolver<'_> {
     fn resolve(&mut self, image: AssetId<Image>, semantic: TextureSemantic) -> GpuMaterialTexture {
-        let handle = *self.registry.textures.entry(image).or_insert_with(|| {
-            let index = self.registry.next_texture;
-            self.registry.next_texture += 1;
-            GenerationalHandle {
-                index,
-                generation: 1,
-            }
-        });
+        // Acquire (or reference) the bindless slot and remember the image so the
+        // owning material releases exactly what it took on republish/retire.
+        let slot = self.registry.textures.acquire(image);
+        self.registry.pending_textures.push(image);
         GpuMaterialTexture {
-            index: handle.index,
-            generation: handle.generation,
+            index: slot.index,
+            generation: slot.generation,
             semantic: semantic as u32,
-            sampler_index: handle.index,
+            // Sampler binding-array wiring lands in a later slice; every texture
+            // shares the default sampler (index 0) until then.
+            sampler_index: 0,
         }
     }
 }

@@ -153,6 +153,76 @@ mod tests {
         assert_eq!(second.index, first.index);
         assert_ne!(second.generation, first.generation);
     }
+
+    #[test]
+    fn publishing_reference_counts_and_reconciles_material_textures() {
+        use bevy_asset::Handle;
+        use bevy_image::Image;
+
+        fn image_handle(tag: u128) -> Handle<Image> {
+            Handle::<Image>::from(bevy_asset::uuid::Uuid::from_u128(tag))
+        }
+
+        let base = image_handle(0xB0);
+        let normal = image_handle(0x0A);
+
+        let mut world = World::new();
+        let mut assets = Assets::<StandardMaterial>::default();
+        let handle = assets.add(StandardMaterial {
+            base_color_texture: Some(base.clone()),
+            normal_map_texture: Some(normal.clone()),
+            ..StandardMaterial::default()
+        });
+        let id = handle.id();
+        world.insert_resource(assets);
+        world.insert_resource(RenderMaterialRegistry::default());
+
+        // Initial publish acquires one slot per referenced image.
+        world.resource_scope(|world, mut runtime: Mut<RenderMaterialRegistry>| {
+            let materials = world.resource::<Assets<StandardMaterial>>();
+            runtime
+                .publish_asset(id, materials.get(id).unwrap())
+                .unwrap();
+        });
+        assert_eq!(
+            world
+                .resource::<RenderMaterialRegistry>()
+                .texture_heap_stats()
+                .live_images,
+            2
+        );
+
+        // Drop the normal map and republish: the stale reference is released so
+        // exactly one image stays resident, and the freed slot returns to the
+        // free list rather than leaking.
+        world.resource_mut::<Assets<StandardMaterial>>().get_mut(id).unwrap().normal_map_texture =
+            None;
+        world.resource_scope(|world, mut runtime: Mut<RenderMaterialRegistry>| {
+            let materials = world.resource::<Assets<StandardMaterial>>();
+            runtime
+                .publish_asset(id, materials.get(id).unwrap())
+                .unwrap();
+        });
+        let stats = world
+            .resource::<RenderMaterialRegistry>()
+            .texture_heap_stats();
+        assert_eq!(stats.live_images, 1, "the dropped normal map must be released");
+        assert_eq!(stats.free_slots, 1, "its slot must return to the free list");
+
+        // Retiring the material releases its remaining textures.
+        let completion = prism_render_architecture::gpu_scene::GpuCompletionValue(3);
+        world
+            .resource_mut::<RenderMaterialRegistry>()
+            .retire_asset(id, completion)
+            .unwrap();
+        assert_eq!(
+            world
+                .resource::<RenderMaterialRegistry>()
+                .texture_heap_stats()
+                .live_images,
+            0
+        );
+    }
 }
 
 pub(crate) fn stage_material_uploads(
