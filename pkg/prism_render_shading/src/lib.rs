@@ -36,10 +36,10 @@ pub use lighting::{
 };
 pub use punctual::PunctualLight;
 pub use shadow::{
-    apply_normal_offset, blocker_search, cascade_blend_weight, compute_cascade_splits,
+    apply_normal_offset, blocker_search, cascade_blend_weight, compute_cascade_matrices, compute_cascade_splits,
     cube_face_and_uv, evaluate_directional_shadow, evaluate_point_shadow, pcf_visibility,
     pcss_visibility, select_cascade, slope_scaled_depth_bias, transform_direction,
-    transform_point, BlockerSearch, CascadeSplits, DirectionalShadowConfig,
+    transform_point, BlockerSearch, CascadeMatrix, CascadeSplits, DirectionalShadowConfig,
     DirectionalShadowInput, Mat4, PcssConfig, PointShadowConfig, PointShadowInput,
     ShadowDepthSampler, ShadowFilter, MAX_CASCADE_COUNT,
 };
