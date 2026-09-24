@@ -47,6 +47,9 @@ pub struct BodySolverView<'a> {
     pub linear_damping: &'a [f32],
     /// Angular velocity damping coefficient per body (per second).
     pub angular_damping: &'a [f32],
+    /// Sleeping (deactivated) flag per body. A sleeping body is skipped by the
+    /// prediction and constraint phases until it is woken.
+    pub sleeping: &'a [bool],
     /// Slot occupancy flags.
     pub active: &'a [bool],
 }
@@ -68,6 +71,16 @@ impl BodySolverView<'_> {
     #[must_use]
     pub fn is_dynamic(&self, i: usize) -> bool {
         self.is_active(i) && self.kinds[i] == BodyKind::Dynamic
+    }
+
+    /// Returns `true` if slot `i` is a live dynamic body that is currently
+    /// awake (not sleeping).
+    ///
+    /// The solver uses this to skip sleeping bodies during prediction and
+    /// velocity recovery. Out-of-range slots report `false`.
+    #[must_use]
+    pub fn is_awake_dynamic(&self, i: usize) -> bool {
+        self.is_dynamic(i) && !self.sleeping.get(i).copied().unwrap_or(false)
     }
 
     /// Returns `true` if slot `i` is a sensor (trigger volume).

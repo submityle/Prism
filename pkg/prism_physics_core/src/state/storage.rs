@@ -32,6 +32,8 @@ pub struct BodyStorage {
     is_sensor: Vec<bool>,
     linear_damping: Vec<f32>,
     angular_damping: Vec<f32>,
+    sleeping: Vec<bool>,
+    sleep_timer: Vec<f32>,
     generations: Vec<u32>,
     active: Vec<bool>,
     free_list: Vec<u32>,
@@ -63,6 +65,8 @@ impl BodyStorage {
             is_sensor: Vec::with_capacity(capacity),
             linear_damping: Vec::with_capacity(capacity),
             angular_damping: Vec::with_capacity(capacity),
+            sleeping: Vec::with_capacity(capacity),
+            sleep_timer: Vec::with_capacity(capacity),
             generations: Vec::with_capacity(capacity),
             active: Vec::with_capacity(capacity),
             free_list: Vec::new(),
@@ -91,6 +95,8 @@ impl BodyStorage {
             self.is_sensor[i] = desc.is_sensor;
             self.linear_damping[i] = desc.linear_damping;
             self.angular_damping[i] = desc.angular_damping;
+            self.sleeping[i] = false;
+            self.sleep_timer[i] = 0.0;
             self.active[i] = true;
             BodyHandle::new(index, self.generations[i])
         } else {
@@ -108,6 +114,8 @@ impl BodyStorage {
             self.is_sensor.push(desc.is_sensor);
             self.linear_damping.push(desc.linear_damping);
             self.angular_damping.push(desc.angular_damping);
+            self.sleeping.push(false);
+            self.sleep_timer.push(0.0);
             self.generations.push(0);
             self.active.push(true);
             BodyHandle::new(index, 0)
@@ -335,6 +343,7 @@ impl BodyStorage {
             is_sensor: &self.is_sensor,
             linear_damping: &self.linear_damping,
             angular_damping: &self.angular_damping,
+            sleeping: &self.sleeping,
             active: &self.active,
         }
     }
@@ -358,6 +367,57 @@ impl BodyStorage {
             true
         } else {
             false
+        }
+    }
+
+    /// Returns whether the body is currently sleeping, or `None` if the handle
+    /// is invalid.
+    ///
+    /// A sleeping body is skipped by the solver's prediction and constraint
+    /// phases until it is woken. Newly inserted bodies always start awake.
+    #[must_use]
+    pub fn is_sleeping(&self, handle: BodyHandle) -> Option<bool> {
+        self.contains(handle)
+            .then(|| self.sleeping[handle.index() as usize])
+    }
+
+    /// Returns the accumulated idle time (seconds) for the body, or `None` if
+    /// the handle is invalid.
+    ///
+    /// The timer grows while the body stays below the sleep velocity thresholds
+    /// and resets to zero as soon as it moves faster than a threshold.
+    #[must_use]
+    pub fn sleep_timer(&self, handle: BodyHandle) -> Option<f32> {
+        self.contains(handle)
+            .then(|| self.sleep_timer[handle.index() as usize])
+    }
+
+    /// Wakes the body: clears its sleeping flag and resets its idle timer.
+    ///
+    /// Returns `true` on success, or `false` if the handle is stale or invalid.
+    /// This is the hook game code and command application call after teleporting
+    /// a body, changing its velocity, or applying an impulse.
+    pub fn wake(&mut self, handle: BodyHandle) -> bool {
+        if self.contains(handle) {
+            let i = handle.index() as usize;
+            self.sleeping[i] = false;
+            self.sleep_timer[i] = 0.0;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Wakes every live body, clearing all sleeping flags and idle timers.
+    ///
+    /// Useful after a global change (such as altering gravity) that could
+    /// invalidate the resting assumption for all sleeping bodies.
+    pub fn wake_all(&mut self) {
+        for i in 0..self.active.len() {
+            if self.active[i] {
+                self.sleeping[i] = false;
+                self.sleep_timer[i] = 0.0;
+            }
         }
     }
 
@@ -430,6 +490,8 @@ impl BodyStorage {
             && self.is_sensor.len() == n
             && self.linear_damping.len() == n
             && self.angular_damping.len() == n
+            && self.sleeping.len() == n
+            && self.sleep_timer.len() == n
             && self.generations.len() == n
             && self.active.len() == n
     }

@@ -1,5 +1,6 @@
 //! World-level simulation configuration.
 
+use crate::sleep::SleepConfig;
 use glam::Vec3;
 
 /// Global configuration for a [`PhysicsWorld`](crate::world::PhysicsWorld).
@@ -11,6 +12,8 @@ pub struct WorldConfig {
     /// Default number of solver sub-steps per full step. Clamped by callers to
     /// a sensible range (1..=8); the default is `4`.
     pub default_substeps: u32,
+    /// Sleeping (deactivation) thresholds and timing for dynamic bodies.
+    pub sleep: SleepConfig,
 }
 
 impl WorldConfig {
@@ -24,6 +27,7 @@ impl WorldConfig {
         WorldConfig {
             gravity,
             default_substeps: Self::DEFAULT_SUBSTEPS,
+            sleep: SleepConfig::default(),
         }
     }
 }
@@ -33,6 +37,7 @@ impl Default for WorldConfig {
         WorldConfig {
             gravity: Vec3::new(0.0, -9.81, 0.0),
             default_substeps: Self::DEFAULT_SUBSTEPS,
+            sleep: SleepConfig::default(),
         }
     }
 }
@@ -46,6 +51,7 @@ mod tests {
         let c = WorldConfig::default();
         assert_eq!(c.gravity, Vec3::new(0.0, -9.81, 0.0));
         assert_eq!(c.default_substeps, 4);
+        assert_eq!(c.sleep, SleepConfig::default());
     }
 
     #[test]
