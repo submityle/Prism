@@ -23,6 +23,7 @@ pub mod constraint;
 pub mod particle;
 
 pub use constraint::{
-    AttachmentConstraint, DistanceConstraint, ParticleConstraint, SoftConstraintKind,
+    AttachmentConstraint, BendingConstraint, DistanceConstraint, ParticleConstraint,
+    SoftConstraintKind, TetraVolumeConstraint,
 };
 pub use particle::{ParticleHandle, ParticleStorage};

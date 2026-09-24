@@ -25,10 +25,14 @@
 //! al., "XPBD: Position-Based Simulation of Compliant Constrained Dynamics".
 
 pub mod attachment;
+pub mod bending;
 pub mod distance;
+pub mod volume;
 
 pub use attachment::AttachmentConstraint;
+pub use bending::BendingConstraint;
 pub use distance::DistanceConstraint;
+pub use volume::TetraVolumeConstraint;
 
 use glam::Vec3;
 

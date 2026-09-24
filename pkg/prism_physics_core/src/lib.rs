@@ -80,7 +80,8 @@ pub use snapshot::hash::{hash_state, locate_divergence, StateHash};
 pub use snapshot::pose::{lerp_pose, BodyPose};
 pub use snapshot::StateSnapshot;
 pub use soft::constraint::{
-    AttachmentConstraint, DistanceConstraint, ParticleConstraint, SoftConstraintKind,
+    AttachmentConstraint, BendingConstraint, DistanceConstraint, ParticleConstraint,
+    SoftConstraintKind, TetraVolumeConstraint,
 };
 pub use soft::particle::{ParticleHandle, ParticleStorage};
 pub use solver::{IntegrateOnlySolver, Solver, SolverRegistry, XpbdConfig, XpbdSolver};
