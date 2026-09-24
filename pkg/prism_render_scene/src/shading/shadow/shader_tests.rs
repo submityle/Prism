@@ -57,3 +57,28 @@ fn shadow_wesl_compiles_standalone() {
         .get(0, shadow, &[])
         .unwrap_or_else(|error| panic!("shadow.wesl failed to compile: {error}"));
 }
+
+
+/// Compiles `shadow_depth.wesl` standalone — the depth-raster pass that fills
+/// the atlas `shadow.wesl` samples.  It has no imports, so a green result
+/// proves the per-view uniform, the GPU-scene instance / transform bindings,
+/// the inlined affine expansion, and both the NDC-depth and normalized-distance
+/// fragment paths parse and type-check as WESL on their own.  The atlas values
+/// it produces still need on-device validation for numerical parity.
+#[test]
+fn shadow_depth_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let shadow_depth = shader_id(0x5052_4953_4d5f_5348_4144_5750_0000_0001);
+    cache.set_shader(
+        shadow_depth,
+        Shader::from_wesl(
+            include_str!("../../shaders/shadow_depth.wesl"),
+            "embedded://prism_render_scene/shaders/shadow_depth.wesl",
+        ),
+    );
+
+    cache
+        .get(0, shadow_depth, &[])
+        .unwrap_or_else(|error| panic!("shadow_depth.wesl failed to compile: {error}"));
+}

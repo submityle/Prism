@@ -6,12 +6,19 @@
 //! and omnidirectional point-light cube distance maps) that the resolve pass
 //! multiplies into each light's contribution.
 //!
-//! This module currently owns the WESL compilation coverage for that shader.
-//! The GPU shadow-map render passes that fill the atlas (depth rasterization,
-//! directional CSM texel-snap stabilization, cube-face rendering, atlas budget
-//! allocation) and the resolve-side wiring that feeds these matrices and the
-//! atlas texture are built in later slices and require on-device validation for
-//! numerical parity against the CPU reference.
+//! This module owns the WESL compilation coverage for both the shadow-sampling
+//! shader (`shadow.wesl`) and the shadow-map depth-raster pass
+//! (`shadow_depth.wesl`) that fills the atlas.  The depth pass renders scene
+//! geometry from each shadow view (a directional cascade, a spot frustum, or a
+//! point-light cube face) and stores NDC depth or range-normalized distance in
+//! the atlas layer's `.r` channel.  Directional cascade matrices come from
+//! `prism_render_shading::shadow::csm`; atlas layer assignment comes from
+//! `prism_render_shading::shadow::atlas`.
+//!
+//! The device-side pipeline object construction, per-view uniform upload,
+//! draw submission per atlas layer, and the resolve-side wiring that binds the
+//! atlas texture and feeds these matrices are built in later slices and require
+//! on-device validation for numerical parity against the CPU reference.
 
 #[cfg(test)]
 mod shader_tests;
