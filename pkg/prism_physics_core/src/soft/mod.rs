@@ -20,11 +20,13 @@
 //! literature (Müller et al., "XPBD", 2016/2020).
 
 pub mod body;
+pub mod build;
 pub mod constraint;
 pub mod particle;
 pub mod solver;
 
 pub use body::SoftBody;
+pub use build::{Cloth, ClothGrid, Rope, RopeGrid, SoftBox, SoftBoxGrid};
 pub use constraint::{
     AttachmentConstraint, BendingConstraint, ConstraintSet, DistanceConstraint, ParticleConstraint,
     SoftConstraintKind, TetraVolumeConstraint,

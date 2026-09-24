@@ -80,6 +80,7 @@ pub use snapshot::hash::{hash_state, locate_divergence, StateHash};
 pub use snapshot::pose::{lerp_pose, BodyPose};
 pub use snapshot::StateSnapshot;
 pub use soft::body::SoftBody;
+pub use soft::build::{Cloth, ClothGrid, Rope, RopeGrid, SoftBox, SoftBoxGrid};
 pub use soft::constraint::{
     AttachmentConstraint, BendingConstraint, ConstraintSet, DistanceConstraint, ParticleConstraint,
     SoftConstraintKind, TetraVolumeConstraint,
