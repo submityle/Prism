@@ -21,7 +21,7 @@ prism_physics_geometry = { path = "../prism_physics_geometry" }
 default = ["std"]
 std = ["glam/std"]
 # Enable serde (de)serialization of plain physics state data.
-serialize = ["dep:serde", "glam/serde", "prism_physics_geometry/serialize"]
+serialize = ["dep:serde", "serde/alloc", "glam/serde", "prism_physics_geometry/serialize"]
 
 [lints]
 workspace = true
