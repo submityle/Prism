@@ -335,12 +335,35 @@ pub fn resolve_pixel(
         add(add(accumulated, indirect), emissive)
     };
 
+    // Integrates the hair (strand) lobe over every analytic light, then adds
+    // the shared indirect + emissive terms once.  Used by the Hair class; the
+    // lobe keeps a translucent diffuse so it intentionally survives backward
+    // grazing light rather than hard-cutting at `N.L = 0`.
+    let shade_hair = || {
+        let mut accumulated = [0.0; 3];
+        for light in lights.directional {
+            accumulated = add(
+                accumulated,
+                crate::evaluate_hair_direct(lit_surface, frame, direct_sample(*light)),
+            );
+        }
+        for light in lights.punctual {
+            if let Some(sample) = light.sample(geometry.position) {
+                accumulated = add(
+                    accumulated,
+                    crate::evaluate_hair_direct(lit_surface, frame, sample),
+                );
+            }
+        }
+        add(add(accumulated, indirect), emissive)
+    };
+
     // Every class is handled explicitly so this branch stays byte-for-byte in
     // step with the `switch` in `shading_resolve.wesl` (9 arms, no wildcard).
-    // Cloth and Subsurface now have dedicated lobes; the remaining specialized
-    // classes (ClearCoat/Hair/Water) still share `shade_principled()` until
-    // their lobes land, so the lint that would collapse those equal arms is
-    // suppressed to preserve the 1:1 GPU switch mapping.
+    // Cloth, Subsurface and Hair now have dedicated lobes; the remaining
+    // specialized classes (ClearCoat/Water) still share `shade_principled()`
+    // until their lobes land, so the lint that would collapse those equal arms
+    // is suppressed to preserve the 1:1 GPU switch mapping.
     #[expect(
         clippy::match_same_arms,
         reason = "each class keeps its own arm to mirror the GPU `switch`; specialized lobes replace the shared fallback per class later"
@@ -353,7 +376,7 @@ pub fn resolve_pixel(
         MaterialShadingClass::Subsurface => shade_subsurface(),
         MaterialShadingClass::ClearCoat => shade_principled(),
         MaterialShadingClass::Cloth => shade_cloth(),
-        MaterialShadingClass::Hair => shade_principled(),
+        MaterialShadingClass::Hair => shade_hair(),
         MaterialShadingClass::Water => shade_principled(),
         MaterialShadingClass::Custom => shade_principled(),
     };

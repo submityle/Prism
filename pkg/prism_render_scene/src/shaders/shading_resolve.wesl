@@ -48,6 +48,9 @@ import prism_render_scene::shaders::cloth::{
 import prism_render_scene::shaders::subsurface::{
     subsurface_direct,
 };
+import prism_render_scene::shaders::hair::{
+    hair_direct,
+};
 import prism_render_scene::shaders::lighting::{
     DirectionalLight,
     PunctualLight,
@@ -283,6 +286,38 @@ fn shade_subsurface(
     return accumulated + indirect + emissive;
 }
 
+// Integrates the hair (strand) lobe over every analytic light. Mirrors the CPU
+// `shade_hair` closure: the Kajiya-Kay diffuse survives backward grazing light
+// so the fibre keeps its translucent rim, while the two shifted Scheuermann
+// highlights ride the strand tangent. Emissive is folded back exactly once.
+fn shade_hair(
+    lit: SurfaceSample,
+    frame: ShadingFrame,
+    world_position: vec3<f32>,
+    indirect: vec3<f32>,
+    emissive: vec3<f32>,
+    env: LightEnvironment,
+) -> vec3<f32> {
+    var accumulated = vec3<f32>(0.0);
+
+    let directional_total = min(env.directional_count, arrayLength(&directional_lights));
+    for (var i = 0u; i < directional_total; i = i + 1u) {
+        let sample = sample_directional_light(directional_lights[i]);
+        accumulated = accumulated + hair_direct(lit, frame, to_direct_sample(sample));
+    }
+
+    let punctual_total = min(env.punctual_count, arrayLength(&punctual_lights));
+    for (var i = 0u; i < punctual_total; i = i + 1u) {
+        let sample = sample_punctual_light(punctual_lights[i], world_position);
+        if sample.valid == 0.0 {
+            continue;
+        }
+        accumulated = accumulated + hair_direct(lit, frame, to_direct_sample(sample));
+    }
+
+    return accumulated + indirect + emissive;
+}
+
 @compute @workgroup_size(64)
 fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     let local = id.x;
@@ -455,9 +490,9 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
         indirect = ambient_indirect(lit, env);
     }
 
-    // Explicit per-class dispatch. Specialized subsurface/clearcoat/cloth/hair/
-    // water lobes currently share the principled integrator; each keeps its own
-    // arm so a real closure can be dropped in without disturbing the others.
+    // Explicit per-class dispatch. Subsurface/cloth/hair now run dedicated
+    // closures; clearcoat/water/custom still share the principled integrator,
+    // and each keeps its own arm so a real closure drops in independently.
     var color: vec3<f32>;
     switch params.shading_class {
         case SHADING_CLASS_PRINCIPLED: {
@@ -476,7 +511,7 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
             color = shade_cloth(lit, frame, geometry.position, indirect, emissive, env);
         }
         case SHADING_CLASS_HAIR: {
-            color = shade_principled(lit, frame, geometry.position, indirect, emissive, env);
+            color = shade_hair(lit, frame, geometry.position, indirect, emissive, env);
         }
         case SHADING_CLASS_WATER: {
             color = shade_principled(lit, frame, geometry.position, indirect, emissive, env);

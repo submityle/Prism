@@ -199,6 +199,46 @@ fn surface_wesl_compiles_and_resolves_tangent_import() {
     });
 }
 
+/// Registers `lighting.wesl`, `brdf.wesl` and `hair.wesl` under their canonical
+/// module paths and compiles `hair.wesl`, forcing the importer to resolve the
+/// `prism_render_scene::shaders::{lighting, brdf}::{...}` imports the hair
+/// strand lobe depends on (`brdf_normalize_or` and `INV_PI`).
+#[test]
+fn hair_wesl_compiles_and_resolves_imports() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let lighting = shader_id(0x5052_4953_4d5f_4c49_4748_5449_4e47_0006);
+    cache.set_shader(
+        lighting,
+        Shader::from_wesl(
+            include_str!("../../shaders/lighting.wesl"),
+            "embedded://prism_render_scene/shaders/lighting.wesl",
+        ),
+    );
+
+    let brdf = shader_id(0x5052_4953_4d5f_4252_4446_0000_0000_0006);
+    cache.set_shader(
+        brdf,
+        Shader::from_wesl(
+            include_str!("../../shaders/brdf.wesl"),
+            "embedded://prism_render_scene/shaders/brdf.wesl",
+        ),
+    );
+
+    let hair = shader_id(0x5052_4953_4d5f_4841_4952_0000_0000_0001);
+    cache.set_shader(
+        hair,
+        Shader::from_wesl(
+            include_str!("../../shaders/hair.wesl"),
+            "embedded://prism_render_scene/shaders/hair.wesl",
+        ),
+    );
+
+    cache
+        .get(0, hair, &[])
+        .unwrap_or_else(|error| panic!("hair.wesl failed to compile/resolve imports: {error}"));
+}
+
 /// Registers the full dependency graph (`surface`, `brdf`, `lighting`,
 /// `material`, `gpu_scene`) under their canonical module paths and compiles
 /// `shading_resolve.wesl`, forcing every `import prism_render_scene::shaders::*`
@@ -209,7 +249,7 @@ fn shading_resolve_wesl_compiles_and_resolves_all_imports() {
 
     // Register each dependency under the byte-identical embedded module path
     // that `load_shader_library!` produces at runtime.
-    let deps: [(u128, &str, &str); 9] = [
+    let deps: [(u128, &str, &str); 10] = [
         (
             0x5052_4953_4d5f_5441_4e47_454e_5400_0002,
             include_str!("../../shaders/tangent.wesl"),
@@ -254,6 +294,11 @@ fn shading_resolve_wesl_compiles_and_resolves_all_imports() {
             0x5052_4953_4d5f_5355_4253_0000_0000_0002,
             include_str!("../../shaders/subsurface.wesl"),
             "embedded://prism_render_scene/shaders/subsurface.wesl",
+        ),
+        (
+            0x5052_4953_4d5f_4841_4952_0000_0000_0002,
+            include_str!("../../shaders/hair.wesl"),
+            "embedded://prism_render_scene/shaders/hair.wesl",
         ),
     ];
     for (tag, source, path) in deps {

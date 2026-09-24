@@ -11,6 +11,7 @@ extern crate alloc;
 mod classification;
 mod cloth;
 mod environment;
+mod hair;
 mod lighting;
 mod punctual;
 mod resolve;
@@ -30,6 +31,7 @@ pub use cloth::evaluate_cloth_direct;
 pub use environment::{
     env_brdf_approx, evaluate_image_based_light, ImageBasedLight, SphericalHarmonicsL2,
 };
+pub use hair::evaluate_hair_direct;
 pub use lighting::{
     evaluate_principled_direct, evaluate_toon_direct, linear_furnace_response, DirectLightSample,
     ShadingFrame, SurfaceSample,
