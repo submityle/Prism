@@ -12,6 +12,7 @@
 //!   body's pose and velocity, captured from a [`PhysicsWorld`].
 //! - [`buffer::TripleBuffer`] is the lock-free-ready three-slot transport that
 //!   hands snapshots from the physics writer to the render reader.
+//! - [`hash`] hashes a snapshot for online desync detection and localization.
 //!
 //! # Provenance
 //!
@@ -20,6 +21,7 @@
 //! documented real-time-simulation techniques implemented from scratch here.
 
 pub mod buffer;
+pub mod hash;
 pub mod pose;
 
 use crate::state::handle::BodyHandle;

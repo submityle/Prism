@@ -70,6 +70,7 @@ pub use math::transform::Isometry;
 pub use pipeline::detect_contacts;
 pub use query::{PointProjection, QueryFilter, RayHit, SweepHit};
 pub use snapshot::buffer::TripleBuffer;
+pub use snapshot::hash::{hash_state, locate_divergence, StateHash};
 pub use snapshot::pose::{lerp_pose, BodyPose};
 pub use snapshot::StateSnapshot;
 pub use solver::{IntegrateOnlySolver, Solver, SolverRegistry, XpbdConfig, XpbdSolver};
