@@ -146,12 +146,44 @@ fn subsurface_wesl_compiles_and_resolves_imports() {
     });
 }
 
-/// Compiles `surface.wesl` standalone.  It has no imports, so a green result
-/// proves the geometry-table ABI records, barycentric decode and
-/// vertex-interpolation math parse and type-check as WESL on their own.
+/// Compiles `tangent.wesl` standalone.  It has no imports, so a green result
+/// proves the tangent-basis reconstruction math (Duff orthonormal basis,
+/// Lengyel analytic tangent, authored re-orthonormalization) parses and
+/// type-checks as WESL on its own, in lock-step with the CPU golden reference.
 #[test]
-fn surface_wesl_compiles_standalone() {
+fn tangent_wesl_compiles_standalone() {
     let mut cache = ShaderCache::new((), load_source);
+
+    let tangent = shader_id(0x5052_4953_4d5f_5441_4e47_454e_5400_0001);
+    cache.set_shader(
+        tangent,
+        Shader::from_wesl(
+            include_str!("../../shaders/tangent.wesl"),
+            "embedded://prism_render_scene/shaders/tangent.wesl",
+        ),
+    );
+
+    cache
+        .get(0, tangent, &[])
+        .unwrap_or_else(|error| panic!("tangent.wesl failed to compile: {error}"));
+}
+
+/// Registers `tangent.wesl` under its canonical module path and compiles
+/// `surface.wesl`, forcing the importer to resolve the
+/// `prism_render_scene::shaders::tangent::{...}` import the geometry-table ABI,
+/// barycentric decode and vertex/tangent-frame interpolation depend on.
+#[test]
+fn surface_wesl_compiles_and_resolves_tangent_import() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let tangent = shader_id(0x5052_4953_4d5f_5441_4e47_454e_5400_0003);
+    cache.set_shader(
+        tangent,
+        Shader::from_wesl(
+            include_str!("../../shaders/tangent.wesl"),
+            "embedded://prism_render_scene/shaders/tangent.wesl",
+        ),
+    );
 
     let surface = shader_id(0x5052_4953_4d5f_5355_5246_4143_4500_0001);
     cache.set_shader(
@@ -162,9 +194,9 @@ fn surface_wesl_compiles_standalone() {
         ),
     );
 
-    cache
-        .get(0, surface, &[])
-        .unwrap_or_else(|error| panic!("surface.wesl failed to compile: {error}"));
+    cache.get(0, surface, &[]).unwrap_or_else(|error| {
+        panic!("surface.wesl failed to compile/resolve tangent import: {error}")
+    });
 }
 
 /// Registers the full dependency graph (`surface`, `brdf`, `lighting`,
@@ -177,7 +209,12 @@ fn shading_resolve_wesl_compiles_and_resolves_all_imports() {
 
     // Register each dependency under the byte-identical embedded module path
     // that `load_shader_library!` produces at runtime.
-    let deps: [(u128, &str, &str); 7] = [
+    let deps: [(u128, &str, &str); 8] = [
+        (
+            0x5052_4953_4d5f_5441_4e47_454e_5400_0002,
+            include_str!("../../shaders/tangent.wesl"),
+            "embedded://prism_render_scene/shaders/tangent.wesl",
+        ),
         (
             0x5052_4953_4d5f_5355_5246_4143_4500_0002,
             include_str!("../../shaders/surface.wesl"),

@@ -62,8 +62,10 @@ pub fn build_shading_geometry(
     };
     let normals = optional_float3(mesh, Mesh::ATTRIBUTE_NORMAL)?;
     let uvs = optional_float2(mesh, Mesh::ATTRIBUTE_UV_0)?;
+    let tangents = optional_float4(mesh, Mesh::ATTRIBUTE_TANGENT)?;
     if normals.is_some_and(|values| values.len() != positions.len())
         || uvs.is_some_and(|values| values.len() != positions.len())
+        || tangents.is_some_and(|values| values.len() != positions.len())
     {
         return Err(ShadingGeometryBuildError::MismatchedAttributeLength);
     }
@@ -74,6 +76,9 @@ pub fn build_shading_geometry(
     if uvs.is_none() {
         flags |= SHADING_GEOMETRY_FLAG_MISSING_UV;
     }
+    if tangents.is_none() {
+        flags |= SHADING_GEOMETRY_FLAG_MISSING_TANGENT;
+    }
     let vertices = positions
         .iter()
         .enumerate()
@@ -82,6 +87,7 @@ pub fn build_shading_geometry(
             _position_padding: 0.0,
             normal: normals.map_or([0.0; 3], |values| values[index]),
             _normal_padding: 0.0,
+            tangent: tangents.map_or([0.0, 0.0, 0.0, 1.0], |values| values[index]),
             uv: uvs.map_or([0.0; 2], |values| values[index]),
             flags,
             _padding: 0,
@@ -134,6 +140,20 @@ fn optional_float2<'a>(
     }
 }
 
+fn optional_float4<'a>(
+    mesh: &'a Mesh,
+    attribute: bevy_mesh::MeshVertexAttribute,
+) -> Result<Option<&'a Vec<[f32; 4]>>, ShadingGeometryBuildError> {
+    match mesh
+        .try_attribute_option(attribute)
+        .map_err(|_| ShadingGeometryBuildError::MismatchedAttributeLength)?
+    {
+        None => Ok(None),
+        Some(VertexAttributeValues::Float32x4(values)) => Ok(Some(values)),
+        Some(_) => Err(ShadingGeometryBuildError::MismatchedAttributeLength),
+    }
+}
+
 fn triangle_indices(
     topology: PrimitiveTopology,
     indices: &[usize],
@@ -162,6 +182,7 @@ pub const SHADING_GEOMETRY_FLAG_ACTIVE: u32 = 1 << 0;
 pub const SHADING_GEOMETRY_FLAG_MISSING_NORMAL: u32 = 1 << 1;
 pub const SHADING_GEOMETRY_FLAG_MISSING_UV: u32 = 1 << 2;
 pub const SHADING_GEOMETRY_FLAG_INVALID: u32 = 1 << 3;
+pub const SHADING_GEOMETRY_FLAG_MISSING_TANGENT: u32 = 1 << 4;
 
 #[cfg(test)]
 mod tests {
@@ -172,7 +193,7 @@ mod tests {
     #[test]
     fn rows_match_compute_surface_abi() {
         assert_eq!(size_of::<RenderShadingGeometryHeader>(), 32);
-        assert_eq!(size_of::<RenderShadingVertex>(), 48);
+        assert_eq!(size_of::<RenderShadingVertex>(), 64);
         assert_eq!(size_of::<RenderShadingPrimitive>(), 16);
     }
 
@@ -194,7 +215,8 @@ mod tests {
             vec![RenderShadingPrimitive {
                 indices: [0, 1, 2],
                 flags: SHADING_GEOMETRY_FLAG_MISSING_NORMAL
-                    | SHADING_GEOMETRY_FLAG_MISSING_UV,
+                    | SHADING_GEOMETRY_FLAG_MISSING_UV
+                    | SHADING_GEOMETRY_FLAG_MISSING_TANGENT,
             }]
         );
     }

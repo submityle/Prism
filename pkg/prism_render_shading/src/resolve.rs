@@ -357,6 +357,7 @@ mod tests {
             _position_padding: 0.0,
             normal: [0.0, 0.0, 1.0],
             _normal_padding: 0.0,
+            tangent: [1.0, 0.0, 0.0, 1.0],
             uv,
             flags: 0,
             _padding: 0,

@@ -16,6 +16,7 @@ mod punctual;
 mod resolve;
 mod subsurface;
 mod surface;
+mod tangent;
 mod vecmath;
 mod visibility;
 
@@ -37,6 +38,9 @@ pub use resolve::{
     ResolveError, ResolveInput, ResolvedPixel,
 };
 pub use subsurface::evaluate_subsurface_direct;
+pub use tangent::{
+    apply_tangent_space_normal, orthonormal_basis, resolve_tangent_basis, TangentBasis,
+};
 pub use surface::{
     reconstruct_surface, GpuShadingPrimitive, GpuShadingVertex, SurfaceReconstructionError,
     SurfaceReconstructionFlags, SurfaceReconstructionInput, SurfaceSampleGeometry,

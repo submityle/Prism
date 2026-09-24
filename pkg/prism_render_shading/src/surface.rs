@@ -15,6 +15,10 @@ pub struct GpuShadingVertex {
     pub _position_padding: f32,
     pub normal: [f32; 3],
     pub _normal_padding: f32,
+    /// Authored tangent frame: `xyz` is the tangent direction, `w` the
+    /// bitangent handedness sign.  An all-zero `xyz` marks a mesh with no
+    /// authored tangent, so the resolve derives one analytically.
+    pub tangent: [f32; 4],
     pub uv: [f32; 2],
     pub flags: u32,
     pub _padding: u32,
@@ -27,9 +31,11 @@ impl Default for GpuShadingVertex {
             _position_padding: 0.0,
             normal: [0.0, 1.0, 0.0],
             _normal_padding: 0.0,
+            tangent: [0.0, 0.0, 0.0, 1.0],
             uv: [0.0; 2],
             flags: SurfaceReconstructionFlags::MISSING_NORMAL.bits()
-                | SurfaceReconstructionFlags::MISSING_UV.bits(),
+                | SurfaceReconstructionFlags::MISSING_UV.bits()
+                | SurfaceReconstructionFlags::MISSING_TANGENT.bits(),
             _padding: 0,
         }
     }
@@ -57,6 +63,10 @@ pub struct SurfaceReconstructionInput {
 pub struct SurfaceSampleGeometry {
     pub position: [f32; 3],
     pub normal: [f32; 3],
+    /// Unit tangent orthogonal to `normal` (see [`crate::tangent`]).
+    pub tangent: [f32; 3],
+    /// Unit bitangent carrying the frame handedness.
+    pub bitangent: [f32; 3],
     pub uv: [f32; 2],
     pub flags: SurfaceReconstructionFlags,
 }
@@ -70,6 +80,8 @@ impl SurfaceReconstructionFlags {
     pub const MISSING_UV: Self = Self(1 << 1);
     pub const DEGENERATE_NORMAL: Self = Self(1 << 2);
     pub const INVALID_PRIMITIVE: Self = Self(1 << 3);
+    pub const MISSING_TANGENT: Self = Self(1 << 4);
+    pub const DEGENERATE_TANGENT: Self = Self(1 << 5);
 
     pub const fn bits(self) -> u32 {
         self.0
@@ -166,12 +178,49 @@ pub fn reconstruct_surface(
             }
         }
     };
+    // Reconstruct the tangent frame from the best available source: authored
+    // per-vertex tangents (interpolated), an analytic UV-gradient tangent, or
+    // a synthesized orthonormal basis.  Authored data is detected by a
+    // non-zero interpolated tangent direction so the check never depends on
+    // the geometry-flag bit layout.
+    let authored_tangent = interpolate4(va.tangent, vb.tangent, vc.tangent, weights);
+    let authored = if authored_tangent[0] * authored_tangent[0]
+        + authored_tangent[1] * authored_tangent[1]
+        + authored_tangent[2] * authored_tangent[2]
+        > 1.0e-12
+    {
+        Some(authored_tangent)
+    } else {
+        flags = flags | SurfaceReconstructionFlags::MISSING_TANGENT;
+        None
+    };
+    let basis = crate::tangent::resolve_tangent_basis(
+        normal,
+        authored,
+        [va.position, vb.position, vc.position],
+        [va.uv, vb.uv, vc.uv],
+    );
+    if basis.degenerate {
+        flags = flags | SurfaceReconstructionFlags::DEGENERATE_TANGENT;
+    }
+
     Ok(SurfaceSampleGeometry {
         position,
         normal,
+        tangent: basis.tangent,
+        bitangent: basis.bitangent,
         uv,
         flags,
     })
+}
+
+fn interpolate4(a: [f32; 4], b: [f32; 4], c: [f32; 4], weights: [f32; 3]) -> [f32; 4] {
+    [
+        a[0] * weights[0] + b[0] * weights[1] + c[0] * weights[2],
+        a[1] * weights[0] + b[1] * weights[1] + c[1] * weights[2],
+        a[2] * weights[0] + b[2] * weights[1] + c[2] * weights[2],
+        a[3] * weights[0] + b[3] * weights[1] + c[3] * weights[2],
+    ]
 }
 
 fn interpolate3(a: [f32; 3], b: [f32; 3], c: [f32; 3], weights: [f32; 3]) -> [f32; 3] {
@@ -231,6 +280,7 @@ mod tests {
                     _position_padding: 0.0,
                     normal: [0.0, 0.0, 1.0],
                     _normal_padding: 0.0,
+                    tangent: [1.0, 0.0, 0.0, 1.0],
                     uv: [0.0, 0.0],
                     flags: 0,
                     _padding: 0,
@@ -240,6 +290,7 @@ mod tests {
                     _position_padding: 0.0,
                     normal: [0.0, 0.0, 1.0],
                     _normal_padding: 0.0,
+                    tangent: [1.0, 0.0, 0.0, 1.0],
                     uv: [1.0, 0.0],
                     flags: 0,
                     _padding: 0,
@@ -249,6 +300,7 @@ mod tests {
                     _position_padding: 0.0,
                     normal: [0.0, 0.0, 1.0],
                     _normal_padding: 0.0,
+                    tangent: [1.0, 0.0, 0.0, 1.0],
                     uv: [0.0, 1.0],
                     flags: 0,
                     _padding: 0,
@@ -274,7 +326,7 @@ mod tests {
         assert_eq!(sample.position, [0.5, 0.25, 0.0]);
         assert_eq!(sample.uv, [0.5, 0.25]);
         assert_eq!(sample.normal, [0.0, 0.0, 1.0]);
-        assert_eq!(size_of::<GpuShadingVertex>(), 48);
+        assert_eq!(size_of::<GpuShadingVertex>(), 64);
         assert_eq!(size_of::<GpuShadingPrimitive>(), 16);
     }
 

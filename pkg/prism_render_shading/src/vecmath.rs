@@ -20,6 +20,15 @@ pub(crate) fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
 
+/// Cross product of two 3-vectors.
+pub(crate) fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
 /// Component-wise (Hadamard) product.
 pub(crate) fn mul(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[0] * b[0], a[1] * b[1], a[2] * b[2]]

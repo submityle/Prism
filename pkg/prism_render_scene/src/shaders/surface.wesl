@@ -12,18 +12,26 @@
 //! owns the pure interpolation math so it can be unit-compiled standalone and
 //! kept in lock-step with the CPU reference.
 
+import prism_render_scene::shaders::tangent::{
+    TangentBasis,
+    resolve_tangent_basis,
+};
+
 // Geometry-table header flags, mirroring the `SHADING_GEOMETRY_FLAG_*`
 // constants in `geometry/shading.rs`.
 const SHADING_GEOMETRY_FLAG_ACTIVE: u32 = 1u;
 const SHADING_GEOMETRY_FLAG_MISSING_NORMAL: u32 = 2u;
 const SHADING_GEOMETRY_FLAG_MISSING_UV: u32 = 4u;
 const SHADING_GEOMETRY_FLAG_INVALID: u32 = 8u;
+const SHADING_GEOMETRY_FLAG_MISSING_TANGENT: u32 = 16u;
 
 // Non-fatal reconstruction flags, mirroring `SurfaceReconstructionFlags`.
 const SURFACE_FLAG_MISSING_NORMAL: u32 = 1u;
 const SURFACE_FLAG_MISSING_UV: u32 = 2u;
 const SURFACE_FLAG_DEGENERATE_NORMAL: u32 = 4u;
 const SURFACE_FLAG_INVALID_PRIMITIVE: u32 = 8u;
+const SURFACE_FLAG_MISSING_TANGENT: u32 = 16u;
+const SURFACE_FLAG_DEGENERATE_TANGENT: u32 = 32u;
 
 // Geometry-table header addressed by a stable geometry index. Mirrors
 // `RenderShadingGeometryHeader` (32 bytes).
@@ -38,14 +46,19 @@ struct RenderShadingGeometryHeader {
     padding: u32,
 }
 
-// One vertex row (48 bytes). Mirrors `GpuShadingVertex`; the explicit padding
-// scalars keep the `vec3<f32>` members on their natural 16-byte alignment so
-// the std430 layout matches the Rust `#[repr(C)]` record exactly.
+// One vertex row (64 bytes). Mirrors `GpuShadingVertex`; the explicit padding
+// scalars keep the `vec3<f32>` members on their natural 16-byte alignment and
+// the authored `tangent` on its 16-byte `vec4` alignment (offset 32) so the
+// std430 layout matches the Rust `#[repr(C)]` record exactly.
 struct GpuShadingVertex {
     position: vec3<f32>,
     position_padding: f32,
     normal: vec3<f32>,
     normal_padding: f32,
+    // Authored tangent frame: `xyz` is the tangent, `w` the bitangent
+    // handedness sign. An all-zero `xyz` marks a mesh with no authored
+    // tangent, so the resolve derives one analytically.
+    tangent: vec4<f32>,
     uv: vec2<f32>,
     flags: u32,
     padding: u32,
@@ -62,6 +75,10 @@ struct GpuShadingPrimitive {
 struct SurfaceSampleGeometry {
     position: vec3<f32>,
     normal: vec3<f32>,
+    // Unit tangent orthogonal to `normal` (see `tangent.wesl`).
+    tangent: vec3<f32>,
+    // Unit bitangent carrying the frame handedness.
+    bitangent: vec3<f32>,
     uv: vec2<f32>,
     flags: u32,
 }
@@ -81,6 +98,10 @@ fn surface_interpolate3(a: vec3<f32>, b: vec3<f32>, c: vec3<f32>, weights: vec3<
 }
 
 fn surface_interpolate2(a: vec2<f32>, b: vec2<f32>, c: vec2<f32>, weights: vec3<f32>) -> vec2<f32> {
+    return a * weights.x + b * weights.y + c * weights.z;
+}
+
+fn surface_interpolate4(a: vec4<f32>, b: vec4<f32>, c: vec4<f32>, weights: vec3<f32>) -> vec4<f32> {
     return a * weights.x + b * weights.y + c * weights.z;
 }
 
@@ -131,6 +152,28 @@ fn interpolate_surface(
             result.normal = vec3<f32>(0.0, 1.0, 0.0);
         }
     }
+    // Reconstruct the tangent frame from the best available source:
+    // interpolated authored per-vertex tangents, an analytic UV-gradient
+    // tangent, or a synthesized orthonormal basis. Authored data is detected
+    // by a non-zero interpolated tangent direction so the check never depends
+    // on the geometry-flag bit layout (mirrors the CPU reference).
+    let authored_tangent = surface_interpolate4(va.tangent, vb.tangent, vc.tangent, weights);
+    let has_authored = dot(authored_tangent.xyz, authored_tangent.xyz) > 1.0e-12;
+    if !has_authored {
+        flags = flags | SURFACE_FLAG_MISSING_TANGENT;
+    }
+    let basis: TangentBasis = resolve_tangent_basis(
+        result.normal,
+        has_authored,
+        authored_tangent,
+        va.position, vb.position, vc.position,
+        va.uv, vb.uv, vc.uv,
+    );
+    if basis.degenerate {
+        flags = flags | SURFACE_FLAG_DEGENERATE_TANGENT;
+    }
+    result.tangent = basis.tangent;
+    result.bitangent = basis.bitangent;
     result.flags = flags;
     return result;
 }
