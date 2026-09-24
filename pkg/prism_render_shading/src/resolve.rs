@@ -124,6 +124,8 @@ pub fn surface_sample_from_parameters(parameters: &GpuSurfaceParameters) -> Surf
         sheen: parameters.sheen,
         subsurface: parameters.subsurface,
         thickness: parameters.thickness,
+        anisotropy: parameters.anisotropy,
+        anisotropy_rotation: parameters.anisotropy_rotation,
     }
 }
 
@@ -165,6 +167,8 @@ pub fn resolve_pixel(
     let frame = ShadingFrame {
         normal: geometry.normal,
         view: normalize_or(sub(input.view_position, geometry.position), geometry.normal),
+        tangent: geometry.tangent,
+        bitangent: geometry.bitangent,
     };
     // Per-light evaluation must not re-add self-illumination.
     let lit_surface = SurfaceSample {

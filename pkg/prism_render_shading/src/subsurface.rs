@@ -128,6 +128,8 @@ mod tests {
         ShadingFrame {
             normal: [0.0, 1.0, 0.0],
             view: [0.0, 1.0, 0.0],
+            tangent: [1.0, 0.0, 0.0],
+            bitangent: [0.0, 0.0, -1.0],
         }
     }
 

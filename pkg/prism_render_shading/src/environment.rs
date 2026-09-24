@@ -301,6 +301,8 @@ mod tests {
         let frame = ShadingFrame {
             normal: [0.0, 1.0, 0.0],
             view: [0.0, 1.0, 0.0],
+            tangent: [1.0, 0.0, 0.0],
+            bitangent: [0.0, 0.0, -1.0],
         };
         let value = evaluate_image_based_light(surface, frame, &light);
         // Rough non-reflective dielectric: diffuse dominates at albedo*radiance
@@ -343,6 +345,8 @@ mod tests {
         let frame = ShadingFrame {
             normal: [0.0, 1.0, 0.0],
             view: [0.0, 1.0, 0.0],
+            tangent: [1.0, 0.0, 0.0],
+            bitangent: [0.0, 0.0, -1.0],
         };
         let value = evaluate_image_based_light(surface, frame, &light);
         // A red environment seen by a metal reflects red, not green/blue.
@@ -362,6 +366,8 @@ mod tests {
         let frame = ShadingFrame {
             normal: [0.0, 1.0, 0.0],
             view: [0.0, 1.0, 0.0],
+            tangent: [1.0, 0.0, 0.0],
+            bitangent: [0.0, 0.0, -1.0],
         };
         let full = evaluate_image_based_light(make(1.0), frame, &light);
         let half = evaluate_image_based_light(make(0.5), frame, &light);

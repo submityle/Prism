@@ -118,6 +118,8 @@ mod tests {
         ShadingFrame {
             normal: [0.0, 1.0, 0.0],
             view: [0.0, 1.0, 0.0],
+            tangent: [1.0, 0.0, 0.0],
+            bitangent: [0.0, 0.0, -1.0],
         }
     }
 
@@ -197,6 +199,8 @@ mod tests {
         let grazing_frame = ShadingFrame {
             normal: [0.0, 1.0, 0.0],
             view: normalize_or([1.0, 0.2, 0.0], [0.0, 1.0, 0.0]),
+            tangent: [1.0, 0.0, 0.0],
+            bitangent: [0.0, 0.0, -1.0],
         };
         let grazing_light = DirectLightSample {
             direction: normalize_or([-1.0, 0.2, 0.0], [0.0, 1.0, 0.0]),

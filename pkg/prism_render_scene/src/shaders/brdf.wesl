@@ -20,9 +20,16 @@ import prism_render_scene::shaders::lighting::{
     env_brdf_approx,
 };
 
+import prism_render_scene::shaders::tangent::{
+    tangent_orthonormal_basis,
+};
+
 // Clamp floors mirroring `lighting.rs` (`MIN_ROUGHNESS`, `MIN_N_DOT`).
 const MIN_ROUGHNESS: f32 = 0.045;
 const MIN_N_DOT: f32 = 1.0e-5;
+// Per-axis GGX roughness floor keeping the anisotropic lobe finite even when
+// one axis approaches zero. Mirrors `MIN_ANISOTROPIC_ALPHA` in `lighting.rs`.
+const MIN_ANISOTROPIC_ALPHA: f32 = 1.0e-3;
 
 // Physically based surface parameters consumed by the analytic lobes. Mirrors
 // `SurfaceSample` in `lighting.rs`; emissive is carried separately so the
@@ -39,12 +46,21 @@ struct SurfaceSample {
     sheen: f32,
     subsurface: f32,
     thickness: f32,
+    // Signed anisotropy in [-1, 1]; positive elongates the highlight along the
+    // tangent, negative along the bitangent. Mirrors `SurfaceSample`.
+    anisotropy: f32,
+    // Rotation of the anisotropy axes around the normal, in radians.
+    anisotropy_rotation: f32,
 }
 
 // World-space shading basis. Mirrors `ShadingFrame` in `lighting.rs`.
 struct ShadingFrame {
     normal: vec3<f32>,
     view: vec3<f32>,
+    // Unit tangent (major anisotropy axis) orthogonal to `normal`.
+    tangent: vec3<f32>,
+    // Unit bitangent carrying the frame handedness.
+    bitangent: vec3<f32>,
 }
 
 // A single analytic light already reduced to a surface-relative sample.
@@ -89,6 +105,71 @@ fn vis_smith(n_dot_v: f32, n_dot_l: f32, alpha: f32) -> f32 {
     return 0.5 / max(gv + gl, MIN_N_DOT);
 }
 
+// Result of re-orthonormalizing + rotating the interpolated tangent frame.
+struct AnisotropicAxes {
+    tangent: vec3<f32>,
+    bitangent: vec3<f32>,
+}
+
+// Re-orthonormalizes the interpolated tangent frame against `normal` and
+// rotates it around the normal by `rotation` radians (UE `AnisotropyRotation`).
+// Mirrors `anisotropic_axes` in `lighting.rs`.
+fn anisotropic_axes(
+    normal: vec3<f32>,
+    basis_tangent: vec3<f32>,
+    basis_bitangent: vec3<f32>,
+    rotation: f32,
+) -> AnisotropicAxes {
+    let fallback = tangent_orthonormal_basis(normal);
+    let projected = basis_tangent - normal * dot(normal, basis_tangent);
+    let tangent0 = brdf_normalize_or(projected, fallback.tangent);
+    let handedness = select(1.0, -1.0, dot(cross(normal, tangent0), basis_bitangent) < 0.0);
+    let bitangent0 = cross(normal, tangent0) * handedness;
+    let cos_r = cos(rotation);
+    let sin_r = sin(rotation);
+    var axes: AnisotropicAxes;
+    axes.tangent = tangent0 * cos_r + bitangent0 * sin_r;
+    axes.bitangent = bitangent0 * cos_r - tangent0 * sin_r;
+    return axes;
+}
+
+// Anisotropic GGX/Trowbridge-Reitz distribution (UE `D_GGXaniso`). Reduces to
+// `distribution_ggx` when `ax == ay`. Mirrors `distribution_ggx_anisotropic`.
+fn distribution_ggx_anisotropic(
+    x_dot_h: f32,
+    y_dot_h: f32,
+    n_dot_h: f32,
+    ax: f32,
+    ay: f32,
+) -> f32 {
+    let dx = x_dot_h / ax;
+    let dy = y_dot_h / ay;
+    let d = dx * dx + dy * dy + n_dot_h * n_dot_h;
+    return 1.0 / max(PI * ax * ay * d * d, MIN_N_DOT);
+}
+
+// Height-correlated anisotropic Smith visibility (UE `Vis_SmithJointAniso`).
+// Reduces to `vis_smith` when `ax == ay`. Mirrors
+// `visibility_smith_ggx_anisotropic`.
+fn vis_smith_anisotropic(
+    x_dot_v: f32,
+    y_dot_v: f32,
+    x_dot_l: f32,
+    y_dot_l: f32,
+    n_dot_v: f32,
+    n_dot_l: f32,
+    ax: f32,
+    ay: f32,
+) -> f32 {
+    let ax_v = ax * x_dot_v;
+    let ay_v = ay * y_dot_v;
+    let lambda_v = n_dot_l * sqrt(ax_v * ax_v + ay_v * ay_v + n_dot_v * n_dot_v);
+    let ax_l = ax * x_dot_l;
+    let ay_l = ay * y_dot_l;
+    let lambda_l = n_dot_v * sqrt(ax_l * ax_l + ay_l * ay_l + n_dot_l * n_dot_l);
+    return 0.5 / max(lambda_v + lambda_l, MIN_N_DOT);
+}
+
 // Physically based direct lighting for one analytic light, including a
 // Kulla-Conty energy-compensation term and a clearcoat lobe. Mirrors
 // `evaluate_principled_direct`.
@@ -116,8 +197,27 @@ fn principled_direct(
     let f0_dielectric = 0.16 * reflectance * reflectance;
     let f0 = mix(vec3<f32>(f0_dielectric), surface.base_color, metallic);
     let f = fresnel_schlick(f0, v_dot_h);
-    let d = distribution_ggx(n_dot_h, alpha);
-    let g = vis_smith(n_dot_v, n_dot_l, alpha);
+
+    // Anisotropic axes: re-orthonormalize + rotate the interpolated tangent
+    // frame, then split `alpha` onto the two axes via Burley's aspect ratio.
+    // With `anisotropy == 0` the axes collapse to `alpha` and the anisotropic
+    // D/V reduce exactly to the isotropic GGX pair.
+    let axes = anisotropic_axes(n, frame.tangent, frame.bitangent, surface.anisotropy_rotation);
+    let anisotropy = clamp(surface.anisotropy, -1.0, 1.0);
+    let aspect = sqrt(1.0 - 0.9 * anisotropy);
+    let ax = max(alpha / aspect, MIN_ANISOTROPIC_ALPHA);
+    let ay = max(alpha * aspect, MIN_ANISOTROPIC_ALPHA);
+    let d = distribution_ggx_anisotropic(dot(axes.tangent, h), dot(axes.bitangent, h), n_dot_h, ax, ay);
+    let g = vis_smith_anisotropic(
+        dot(axes.tangent, v),
+        dot(axes.bitangent, v),
+        dot(axes.tangent, l),
+        dot(axes.bitangent, l),
+        n_dot_v,
+        n_dot_l,
+        ax,
+        ay,
+    );
     let single_scatter = f * (d * g);
 
     // Kulla-Conty-style bounded compensation returning energy lost to

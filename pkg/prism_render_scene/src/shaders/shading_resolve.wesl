@@ -401,10 +401,14 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     surface.sheen = parameters.sheen;
     surface.subsurface = parameters.subsurface;
     surface.thickness = parameters.thickness;
+    surface.anisotropy = parameters.anisotropy;
+    surface.anisotropy_rotation = parameters.anisotropy_rotation;
 
     var frame: ShadingFrame;
     frame.normal = geometry.normal;
     frame.view = brdf_normalize_or(params.view_position.xyz - geometry.position, geometry.normal);
+    frame.tangent = geometry.tangent;
+    frame.bitangent = geometry.bitangent;
 
     // Per-light evaluation runs against an emissive-free copy so accumulation
     // over many lights never multiplies self-illumination; emissive is folded
