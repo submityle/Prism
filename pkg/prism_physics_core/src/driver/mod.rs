@@ -8,6 +8,8 @@
 //! with a reserved mode returns an honest [`DriveOutcome::Unsupported`] result
 //! rather than panicking or pretending to do work.
 
+pub mod fixed_step;
+
 use crate::backend::PhysicsBackend;
 use crate::world::PhysicsWorld;
 

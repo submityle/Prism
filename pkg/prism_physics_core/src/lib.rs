@@ -57,6 +57,7 @@ pub use collider::{ColliderHandle, ColliderShape, ShapeRegistry};
 pub use command::{CommandQueue, PhysicsCommand};
 pub use config::WorldConfig;
 pub use constraint::{Constraint, ConstraintKind};
+pub use driver::fixed_step::{AdvanceReport, FixedStepPipeline};
 pub use driver::{CacheHandle, DriveMode, DriveOutcome, SimulationDriver};
 pub use dynamics::Integrator;
 pub use events::{ContactEventTracker, ContactPair, Observer, ObserverRegistry, PhysicsEvent};
