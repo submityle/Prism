@@ -15,6 +15,7 @@ serde = { version = "1", default-features = false, features = [
 
 [dev-dependencies]
 prism_physics_core = { path = ".", features = ["serialize"] }
+prism_physics_geometry = { path = "../prism_physics_geometry" }
 
 [features]
 default = ["std"]
