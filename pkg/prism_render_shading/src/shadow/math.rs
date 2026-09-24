@@ -7,6 +7,8 @@
 //! `mat4x4<f32>` memory layout and `glam::Mat4::to_cols_array`, so a matrix
 //! uploaded to the GPU and the one fed to this reference are byte-identical.
 
+use bevy_math::ops;
+
 /// Column-major 4x4 matrix: element `(row, col)` lives at index `col * 4 + row`.
 pub type Mat4 = [f32; 16];
 
@@ -116,6 +118,24 @@ pub fn orthographic_rh_01(
         -(top + bottom) * rcp_height,
         r * near,
         1.0,
+    ]
+}
+
+/// Right-handed perspective projection (column-major) into wgpu clip space with
+/// `z` in `[0, 1]`.  Mirrors `glam::Mat4::perspective_rh` so an uploaded
+/// projection and this reference are byte-identical.  `fov_y_radians` is the
+/// full vertical field of view; `aspect` is width / height.  Used for the
+/// point-light cube faces (a 90-degree, unit-aspect frustum per face) and spot
+/// cones of the shadow depth pass.
+pub fn perspective_rh_01(fov_y_radians: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
+    let h = ops::tan(fov_y_radians * 0.5).recip();
+    let w = h / aspect;
+    let r = far / (near - far);
+    [
+        w, 0.0, 0.0, 0.0, //
+        0.0, h, 0.0, 0.0, //
+        0.0, 0.0, r, -1.0, //
+        0.0, 0.0, r * near, 0.0,
     ]
 }
 

@@ -12,7 +12,7 @@
 
 use crate::shadow::bias::slope_scaled_depth_bias;
 use crate::shadow::filter::{pcf_visibility, ShadowDepthSampler};
-use crate::shadow::math::length3;
+use crate::shadow::math::{dot3, length3, mul, perspective_rh_01, Mat4};
 use crate::vecmath::sub;
 
 /// Standard cube-map face layer indices.
@@ -57,6 +57,80 @@ pub fn cube_face_and_uv(direction: [f32; 3]) -> (usize, [f32; 2]) {
     let u = 0.5 * (sc * inv_ma + 1.0);
     let v = 0.5 * (tc * inv_ma + 1.0);
     (face, [u.clamp(0.0, 1.0), v.clamp(0.0, 1.0)])
+}
+
+/// Per-face camera basis for the six cube-map faces, in `+X, -X, +Y, -Y, +Z,
+/// -Z` order.  `FACE_FORWARD[i]` is the direction that face looks along;
+/// `FACE_RIGHT[i]` (`s`) and `FACE_UP[i]` (`u`) are the camera right / up axes
+/// chosen so a point rasterized through the face projection lands at the exact
+/// framebuffer UV that [`cube_face_and_uv`] returns for the same world
+/// direction (`dot(dir, s) == sc`, `dot(dir, u) == -tc`).  This keeps the depth
+/// pass that *fills* each face byte-consistent with the sampler that reads it.
+const FACE_FORWARD: [[f32; 3]; 6] = [
+    [1.0, 0.0, 0.0],
+    [-1.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0],
+    [0.0, -1.0, 0.0],
+    [0.0, 0.0, 1.0],
+    [0.0, 0.0, -1.0],
+];
+const FACE_RIGHT: [[f32; 3]; 6] = [
+    [0.0, 0.0, -1.0],
+    [0.0, 0.0, 1.0],
+    [1.0, 0.0, 0.0],
+    [1.0, 0.0, 0.0],
+    [1.0, 0.0, 0.0],
+    [-1.0, 0.0, 0.0],
+];
+const FACE_UP: [[f32; 3]; 6] = [
+    [0.0, 1.0, 0.0],
+    [0.0, 1.0, 0.0],
+    [0.0, 0.0, -1.0],
+    [0.0, 0.0, 1.0],
+    [0.0, 1.0, 0.0],
+    [0.0, 1.0, 0.0],
+];
+
+/// Builds the six world -> light-clip matrices (one per cube-map face) that the
+/// shadow depth pass rasterizes point-light geometry through to fill the
+/// distance cube map.  Each face uses a 90-degree, unit-aspect right-handed
+/// perspective (`z` in `[0, 1]`) so adjacent faces meet exactly at their shared
+/// edge, and a camera basis matched to [`cube_face_and_uv`] so the framebuffer
+/// UV the depth pass writes to equals the UV the sampler later reads
+/// (`+X, -X, +Y, -Y, +Z, -Z` layer order).  `near`/`far` bound the frustum; the
+/// stored value is a range-normalized distance, so only `near`/`far` clipping
+/// (not the projected `z`) depends on them.
+pub fn cube_face_view_projections(light_position: [f32; 3], near: f32, far: f32) -> [Mat4; 6] {
+    let near = near.max(1.0e-4);
+    let far = far.max(near + 1.0e-4);
+    let proj = perspective_rh_01(core::f32::consts::FRAC_PI_2, 1.0, near, far);
+    let mut out = [[0.0_f32; 16]; 6];
+    for (face, slot) in out.iter_mut().enumerate() {
+        let s = FACE_RIGHT[face];
+        let u = FACE_UP[face];
+        let f = FACE_FORWARD[face];
+        // World -> eye view matrix: rows (s, u, -f), translation -(R * eye).
+        let view: Mat4 = [
+            s[0],
+            u[0],
+            -f[0],
+            0.0,
+            s[1],
+            u[1],
+            -f[1],
+            0.0,
+            s[2],
+            u[2],
+            -f[2],
+            0.0,
+            -dot3(s, light_position),
+            -dot3(u, light_position),
+            dot3(f, light_position),
+            1.0,
+        ];
+        *slot = mul(&proj, &view);
+    }
+    out
 }
 
 /// Bias/filter tunables for point-light shadows.
@@ -195,6 +269,46 @@ mod tests {
             ..far
         };
         assert!((evaluate_point_shadow(&cube, &near, &cfg) - 1.0).abs() < 1.0e-6);
+    }
+
+    /// The six cube-face projections rasterize a world direction to the exact
+    /// framebuffer UV that `cube_face_and_uv` returns for that direction, so the
+    /// depth pass that fills each face and the sampler that reads it agree by
+    /// construction.  wgpu maps NDC to the framebuffer with a vertical flip,
+    /// which is applied here before comparing.
+    #[test]
+    fn cube_face_projection_matches_cube_face_uv() {
+        use crate::shadow::math::transform_point;
+        let vps = cube_face_view_projections([0.0, 0.0, 0.0], 0.1, 100.0);
+        for dir in [
+            [0.9, 0.2, -0.1],
+            [-0.8, 0.1, 0.3],
+            [0.1, 0.95, 0.2],
+            [0.2, -0.9, -0.15],
+            [0.05, 0.2, 0.97],
+            [-0.1, 0.15, -0.92],
+            [1.0, 0.4, 0.4],
+            [-0.4, -1.0, 0.3],
+        ] {
+            let (face, uv) = cube_face_and_uv(dir);
+            let clip = transform_point(&vps[face], dir);
+            assert!(clip[3] > 0.0, "direction {dir:?} projects behind face {face}");
+            let inv_w = clip[3].recip();
+            let ndc = [clip[0] * inv_w, clip[1] * inv_w];
+            let fb_uv = [ndc[0] * 0.5 + 0.5, 0.5 - ndc[1] * 0.5];
+            assert!(
+                (fb_uv[0] - uv[0]).abs() < 1.0e-5,
+                "face {face} u {} vs cube {}",
+                fb_uv[0],
+                uv[0]
+            );
+            assert!(
+                (fb_uv[1] - uv[1]).abs() < 1.0e-5,
+                "face {face} v {} vs cube {}",
+                fb_uv[1],
+                uv[1]
+            );
+        }
     }
 
     /// A fragment beyond the light's range reads the far background (off-map)

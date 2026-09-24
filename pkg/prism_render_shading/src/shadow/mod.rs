@@ -12,6 +12,7 @@
 //! * [`filter`] - the [`ShadowDepthSampler`] abstraction plus PCF and PCSS.
 //! * [`directional`] - the directional (cascaded) shadow orchestrator.
 //! * [`point`] - the omnidirectional (cube distance map) shadow orchestrator.
+//! * [`depth_view`] - per-layer draw plan for the shadow-map depth pass.
 //!
 //! The GPU shadow-map render passes (depth rasterization into the atlas,
 //! directional CSM stabilization / texel snapping, cube-face rendering, and
@@ -23,6 +24,7 @@ pub mod atlas;
 pub mod bias;
 pub mod cascade;
 pub mod csm;
+pub mod depth_view;
 pub mod directional;
 pub mod filter;
 pub mod math;
@@ -37,6 +39,9 @@ pub use atlas::{
     POINT_LAYER_COUNT,
 };
 pub use csm::{compute_cascade_matrices, CascadeMatrix};
+pub use depth_view::{
+    plan_shadow_depth_draws, ShadowDepthDraw, ShadowDepthMode, ShadowDepthView, ShadowViewGeometry,
+};
 pub use directional::{
     evaluate_directional_shadow, DirectionalShadowConfig, DirectionalShadowInput, ShadowFilter,
 };
@@ -44,4 +49,7 @@ pub use filter::{
     blocker_search, pcf_visibility, pcss_visibility, BlockerSearch, PcssConfig, ShadowDepthSampler,
 };
 pub use math::{transform_direction, transform_point, Mat4};
-pub use point::{cube_face_and_uv, evaluate_point_shadow, PointShadowConfig, PointShadowInput};
+pub use point::{
+    cube_face_and_uv, cube_face_view_projections, evaluate_point_shadow, PointShadowConfig,
+    PointShadowInput,
+};
