@@ -16,10 +16,19 @@ use super::classification_gpu::{GpuShadingDispatchArgs, GpuShadingPixelClass};
 
 pub(crate) const VISIBILITY_ID_FORMAT: TextureFormat = TextureFormat::Rgba32Uint;
 
+/// Linear HDR radiance target written by the shading-resolve compute pass
+/// (`shading_resolve.wesl`) and later sampled by the composite/tonemap step.
+/// `Rgba16Float` matches the `texture_storage_2d<rgba16float, write>` binding
+/// in the shader and keeps enough range/precision for pre-exposure radiance.
+pub(crate) const SCENE_COLOR_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
+
 #[derive(Component)]
 pub(crate) struct ViewVisibilityBuffer {
     ids: CachedTexture,
     metadata: CachedTexture,
+    /// Linear HDR radiance the shading-resolve pass stores into and the
+    /// composite step samples from.
+    scene_color: CachedTexture,
     pub(crate) size: bevy_math::UVec2,
 }
 
@@ -31,6 +40,11 @@ impl ViewVisibilityBuffer {
         &bevy_render::render_resource::TextureView,
     ) {
         (&self.ids.default_view, &self.metadata.default_view)
+    }
+
+    /// Storage/sampling view of the linear HDR radiance target.
+    pub(crate) fn scene_color_view(&self) -> &bevy_render::render_resource::TextureView {
+        &self.scene_color.default_view
     }
 }
 
@@ -182,9 +196,25 @@ pub(crate) fn prepare_visibility_buffers(
                 view_formats: &[],
             },
         );
+        let scene_color = texture_cache.get(
+            &device,
+            TextureDescriptor {
+                label: Some("prism scene color (HDR)"),
+                size: size.to_extents(),
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: TextureDimension::D2,
+                format: SCENE_COLOR_FORMAT,
+                // STORAGE_BINDING: written by the resolve compute pass.
+                // TEXTURE_BINDING: sampled by the later composite/tonemap step.
+                usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+        );
         commands.entity(entity).insert(ViewVisibilityBuffer {
             ids,
             metadata,
+            scene_color,
             size,
         });
     }

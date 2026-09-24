@@ -12,6 +12,10 @@ use super::{
         dispatch_material_classification, init_material_classification_pipeline,
         prepare_material_classification_bind_groups,
     },
+    resolve::{
+        dispatch_shading_resolve, init_shading_resolve_pipeline,
+        prepare_shading_resolve_bind_groups,
+    },
     graph::shading_frame_graph,
     raster::{
         init_visibility_raster, queue_visibility_raster, visibility_raster_pass,
@@ -30,6 +34,9 @@ impl Plugin for PrismShadingPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "../shaders/visibility_raster.wesl");
         embedded_asset!(app, "../shaders/material_classification.wesl");
+        embedded_asset!(app, "../shaders/brdf.wesl");
+        embedded_asset!(app, "../shaders/surface.wesl");
+        embedded_asset!(app, "../shaders/shading_resolve.wesl");
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
@@ -53,6 +60,9 @@ impl Plugin for PrismShadingPlugin {
                     init_visibility_raster.after(MeshPipelineSystems),
                     init_material_classification_pipeline
                         .after(init_gpu_resource::<crate::MaterialBindGroup>),
+                    init_shading_resolve_pipeline
+                        .after(init_gpu_resource::<crate::MaterialBindGroup>)
+                        .after(init_gpu_resource::<crate::LightBindGroup>),
                 ),
             )
             .add_systems(
@@ -65,6 +75,9 @@ impl Plugin for PrismShadingPlugin {
                     prepare_shading_buffers.in_set(RenderSystems::PrepareResources),
                     prepare_material_classification_bind_groups
                         .in_set(RenderSystems::PrepareBindGroups),
+                    prepare_shading_resolve_bind_groups
+                        .after(prepare_material_classification_bind_groups)
+                        .in_set(RenderSystems::PrepareBindGroups),
                     queue_visibility_raster.in_set(RenderSystems::QueueMeshes),
                 ),
             );
@@ -74,6 +87,9 @@ impl Plugin for PrismShadingPlugin {
                 visibility_raster_pass.before(bevy_core_pipeline::Core3dSystems::MainPass),
                 dispatch_material_classification
                     .after(visibility_raster_pass)
+                    .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                dispatch_shading_resolve
+                    .after(dispatch_material_classification)
                     .before(bevy_core_pipeline::Core3dSystems::MainPass),
             ),
         );

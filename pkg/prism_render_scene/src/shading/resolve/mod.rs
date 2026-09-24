@@ -22,6 +22,13 @@
 //!   `brdf.wesl`, `lighting.wesl` and `shading_resolve.wesl`.
 
 mod abi;
+mod bind_groups;
+mod dispatch;
+mod pipeline;
 
 #[cfg(test)]
 mod shader_tests;
+
+pub(crate) use bind_groups::prepare_shading_resolve_bind_groups;
+pub(crate) use dispatch::dispatch_shading_resolve;
+pub(crate) use pipeline::init_shading_resolve_pipeline;
