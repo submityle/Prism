@@ -30,6 +30,7 @@ pub struct BodyStorage {
     colliders: Vec<Option<ColliderHandle>>,
     materials: Vec<PhysicsMaterial>,
     is_sensor: Vec<bool>,
+    ccd: Vec<bool>,
     linear_damping: Vec<f32>,
     angular_damping: Vec<f32>,
     sleeping: Vec<bool>,
@@ -63,6 +64,7 @@ impl BodyStorage {
             colliders: Vec::with_capacity(capacity),
             materials: Vec::with_capacity(capacity),
             is_sensor: Vec::with_capacity(capacity),
+            ccd: Vec::with_capacity(capacity),
             linear_damping: Vec::with_capacity(capacity),
             angular_damping: Vec::with_capacity(capacity),
             sleeping: Vec::with_capacity(capacity),
@@ -93,6 +95,7 @@ impl BodyStorage {
             self.colliders[i] = desc.collider;
             self.materials[i] = desc.material;
             self.is_sensor[i] = desc.is_sensor;
+            self.ccd[i] = desc.ccd;
             self.linear_damping[i] = desc.linear_damping;
             self.angular_damping[i] = desc.angular_damping;
             self.sleeping[i] = false;
@@ -112,6 +115,7 @@ impl BodyStorage {
             self.colliders.push(desc.collider);
             self.materials.push(desc.material);
             self.is_sensor.push(desc.is_sensor);
+            self.ccd.push(desc.ccd);
             self.linear_damping.push(desc.linear_damping);
             self.angular_damping.push(desc.angular_damping);
             self.sleeping.push(false);
@@ -371,6 +375,28 @@ impl BodyStorage {
         }
     }
 
+    /// Returns whether continuous collision detection is enabled for the body,
+    /// or `None` if the handle is invalid.
+    ///
+    /// CCD bodies are swept against the world each sub-step (see
+    /// [`crate::ccd`]) so that fast motion cannot tunnel through thin geometry.
+    #[must_use]
+    pub fn ccd(&self, handle: BodyHandle) -> Option<bool> {
+        self.contains(handle)
+            .then(|| self.ccd[handle.index() as usize])
+    }
+
+    /// Enables or disables continuous collision detection for the body. Returns
+    /// `true` on success.
+    pub fn set_ccd(&mut self, handle: BodyHandle, ccd: bool) -> bool {
+        if self.contains(handle) {
+            self.ccd[handle.index() as usize] = ccd;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Returns whether the body is currently sleeping, or `None` if the handle
     /// is invalid.
     ///
@@ -489,6 +515,7 @@ impl BodyStorage {
             && self.colliders.len() == n
             && self.materials.len() == n
             && self.is_sensor.len() == n
+            && self.ccd.len() == n
             && self.linear_damping.len() == n
             && self.angular_damping.len() == n
             && self.sleeping.len() == n

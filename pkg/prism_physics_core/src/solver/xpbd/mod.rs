@@ -83,6 +83,12 @@ impl XpbdSolver {
             integrate::predict(&mut view, gravity, h);
         }
 
+        // Phase 1.5: continuous collision detection. Sweep opt-in fast movers
+        // along their just-predicted displacement and clamp them to the first
+        // surface they would cross, so the discrete detection below can resolve
+        // the touch instead of letting them tunnel through thin geometry.
+        crate::ccd::resolve_ccd(world, h);
+
         // Phase 2: detect contacts at the predicted poses. This needs an
         // immutable borrow of the whole world, so it must run outside the
         // mutable solver view scopes.

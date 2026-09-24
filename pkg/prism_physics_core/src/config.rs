@@ -1,5 +1,6 @@
 //! World-level simulation configuration.
 
+use crate::ccd::CcdConfig;
 use crate::sleep::SleepConfig;
 use glam::Vec3;
 
@@ -14,6 +15,8 @@ pub struct WorldConfig {
     pub default_substeps: u32,
     /// Sleeping (deactivation) thresholds and timing for dynamic bodies.
     pub sleep: SleepConfig,
+    /// Continuous collision detection thresholds for fast-moving bodies.
+    pub ccd: CcdConfig,
 }
 
 impl WorldConfig {
@@ -28,6 +31,7 @@ impl WorldConfig {
             gravity,
             default_substeps: Self::DEFAULT_SUBSTEPS,
             sleep: SleepConfig::default(),
+            ccd: CcdConfig::default(),
         }
     }
 }
@@ -38,6 +42,7 @@ impl Default for WorldConfig {
             gravity: Vec3::new(0.0, -9.81, 0.0),
             default_substeps: Self::DEFAULT_SUBSTEPS,
             sleep: SleepConfig::default(),
+            ccd: CcdConfig::default(),
         }
     }
 }
@@ -52,6 +57,7 @@ mod tests {
         assert_eq!(c.gravity, Vec3::new(0.0, -9.81, 0.0));
         assert_eq!(c.default_substeps, 4);
         assert_eq!(c.sleep, SleepConfig::default());
+        assert_eq!(c.ccd, CcdConfig::default());
     }
 
     #[test]

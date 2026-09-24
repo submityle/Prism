@@ -108,6 +108,11 @@ pub struct BodyDesc {
     /// in overlap detection and emit trigger events, but the contact solver
     /// never applies a physical response to or from them.
     pub is_sensor: bool,
+    /// Enables continuous collision detection (CCD) for this body. A CCD body
+    /// that moves more than its own core radius in a single sub-step has its
+    /// swept motion tested against the world so it stops at the first surface
+    /// it would cross instead of tunnelling through thin geometry.
+    pub ccd: bool,
 }
 
 impl BodyDesc {
@@ -191,6 +196,18 @@ impl BodyDesc {
         self.is_sensor = is_sensor;
         self
     }
+
+    /// Enables or disables continuous collision detection for the body and
+    /// returns the modified description.
+    ///
+    /// CCD guards fast movers (bullets, thrown props) against tunnelling
+    /// through thin static geometry; it is opt-in because the extra swept test
+    /// is unnecessary for the slow-moving majority of bodies.
+    #[must_use]
+    pub fn with_ccd(mut self, ccd: bool) -> BodyDesc {
+        self.ccd = ccd;
+        self
+    }
 }
 
 impl Default for BodyDesc {
@@ -207,6 +224,7 @@ impl Default for BodyDesc {
             collider: None,
             material: PhysicsMaterial::DEFAULT,
             is_sensor: false,
+            ccd: false,
         }
     }
 }
