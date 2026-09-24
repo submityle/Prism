@@ -1,0 +1,38 @@
+//! Backend-neutral shadow evaluation core: the CPU golden references that
+//! compute the per-light `visibility` term consumed by the resolve pass.
+//!
+//! The module is deliberately split by concern so each piece stays a small,
+//! independently testable numerical twin of the future `shadow.wesl`:
+//!
+//! * [`math`] - column-major matrix / vector helpers for light-space projection.
+//! * [`cascade`] - PSSM split scheme and cascade selection for directional CSM.
+//! * [`bias`] - normal-offset and slope-scaled depth bias (acne / peter-panning).
+//! * [`filter`] - the [`ShadowDepthSampler`] abstraction plus PCF and PCSS.
+//! * [`directional`] - the directional (cascaded) shadow orchestrator.
+//! * [`point`] - the omnidirectional (cube distance map) shadow orchestrator.
+//!
+//! The GPU shadow-map render passes (depth rasterization into the atlas,
+//! directional CSM stabilization / texel snapping, cube-face rendering, and
+//! atlas allocation) and the resolve-side wiring that feeds these matrices and
+//! samplers are built in later slices and require on-device validation for
+//! numerical parity.
+
+pub mod bias;
+pub mod cascade;
+pub mod directional;
+pub mod filter;
+pub mod math;
+pub mod point;
+
+pub use bias::{apply_normal_offset, slope_scaled_depth_bias};
+pub use cascade::{
+    cascade_blend_weight, compute_cascade_splits, select_cascade, CascadeSplits, MAX_CASCADE_COUNT,
+};
+pub use directional::{
+    evaluate_directional_shadow, DirectionalShadowConfig, DirectionalShadowInput, ShadowFilter,
+};
+pub use filter::{
+    blocker_search, pcf_visibility, pcss_visibility, BlockerSearch, PcssConfig, ShadowDepthSampler,
+};
+pub use math::{transform_direction, transform_point, Mat4};
+pub use point::{cube_face_and_uv, evaluate_point_shadow, PointShadowConfig, PointShadowInput};
