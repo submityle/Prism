@@ -16,9 +16,12 @@
 //! light bind group makes.
 
 use bevy_ecs::{prelude::*, world::FromWorld};
-use bevy_material::bind_group_layout_entries::{
-    binding_types::{sampler, storage_buffer_read_only_sized, texture_2d_array},
-    BindGroupLayoutEntries,
+use bevy_material::{
+    bind_group_layout_entries::{
+        binding_types::{sampler, storage_buffer_read_only_sized, texture_2d_array},
+        BindGroupLayoutEntries,
+    },
+    descriptor::BindGroupLayoutDescriptor,
 };
 use bevy_render::{
     render_resource::{
@@ -39,6 +42,9 @@ use super::{
 pub(crate) struct ShadowBindGroup {
     /// The GPU layout the resolve pipeline is created against.
     pub layout: BindGroupLayout,
+    /// The reflected descriptor, cloned into the resolve pipeline's group-4
+    /// layout so the pipeline and this bind group can never drift apart.
+    pub layout_descriptor: BindGroupLayoutDescriptor,
     /// The most recently prepared bind group, once the atlas exists and the
     /// buffers have uploaded.
     pub bind_group: Option<BindGroup>,
@@ -69,8 +75,10 @@ impl FromWorld for ShadowBindGroup {
                 ),
             ),
         );
+        let layout_descriptor = BindGroupLayoutDescriptor::new("prism shadows", &entries);
         Self {
             layout: device.create_bind_group_layout("prism shadows", &entries),
+            layout_descriptor,
             bind_group: None,
             atlas_view_id: None,
             buffer_ids: None,

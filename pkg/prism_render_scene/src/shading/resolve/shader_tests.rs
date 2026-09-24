@@ -333,7 +333,7 @@ fn shading_resolve_wesl_compiles_and_resolves_all_imports() {
 
     // Register each dependency under the byte-identical embedded module path
     // that `load_shader_library!` produces at runtime.
-    let deps: [(u128, &str, &str); 12] = [
+    let deps: [(u128, &str, &str); 13] = [
         (
             0x5052_4953_4d5f_5441_4e47_454e_5400_0002,
             include_str!("../../shaders/tangent.wesl"),
@@ -393,6 +393,11 @@ fn shading_resolve_wesl_compiles_and_resolves_all_imports() {
             0x5052_4953_4d5f_434c_4541_5243_4f41_0002,
             include_str!("../../shaders/clearcoat.wesl"),
             "embedded://prism_render_scene/shaders/clearcoat.wesl",
+        ),
+        (
+            0x5052_4953_4d5f_5348_4144_4f57_0000_0002,
+            include_str!("../../shaders/shadow.wesl"),
+            "embedded://prism_render_scene/shaders/shadow.wesl",
         ),
     ];
     for (tag, source, path) in deps {

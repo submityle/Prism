@@ -12,6 +12,9 @@
 //!   tables the surface reconstruction walks.  Owned here.
 //! * **group 3** — the analytic light tables, reusing [`LightBindGroup`]'s
 //!   layout.
+//! * **group 4** — the shadow atlas + shadow tables, reusing
+//!   [`ShadowBindGroup`]'s layout so the resolve pass samples the exact atlas
+//!   the depth pass fills.
 //!
 //! Reusing the material/light *layout descriptors* (rather than re-declaring
 //! them) guarantees the resolve pipeline and those bind groups can never drift
@@ -36,6 +39,8 @@ use bevy_render::{
 use bevy_shader::Shader;
 
 use crate::{LightBindGroup, MaterialBindGroup};
+
+use super::super::shadow::ShadowBindGroup;
 
 use super::abi::GpuShadingResolveParams;
 use super::super::resources::SCENE_COLOR_FORMAT;
@@ -93,6 +98,7 @@ pub(crate) fn init_shading_resolve_pipeline(
     cache: Res<PipelineCache>,
     material_bindings: Res<MaterialBindGroup>,
     light_bindings: Res<LightBindGroup>,
+    shadow_bindings: Res<ShadowBindGroup>,
     asset_server: Res<bevy_asset::AssetServer>,
 ) {
     let view_entries = view_layout_entries();
@@ -112,6 +118,7 @@ pub(crate) fn init_shading_resolve_pipeline(
             material_bindings.layout_descriptor.clone(),
             scene_descriptor,
             light_bindings.layout_descriptor.clone(),
+            shadow_bindings.layout_descriptor.clone(),
         ],
         immediate_size: size_of::<GpuShadingResolveParams>() as u32,
         shader,

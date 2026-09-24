@@ -56,6 +56,7 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/material_sample.wesl");
         embedded_asset!(app, "../shaders/tangent.wesl");
         embedded_asset!(app, "../shaders/surface.wesl");
+        embedded_asset!(app, "../shaders/shadow.wesl");
         embedded_asset!(app, "../shaders/shading_resolve.wesl");
         embedded_asset!(app, "../shaders/composite.wesl");
         register_shadow_depth_shader(app);
@@ -94,7 +95,8 @@ impl Plugin for PrismShadingPlugin {
                         .after(init_gpu_resource::<crate::MaterialBindGroup>),
                     init_shading_resolve_pipeline
                         .after(init_gpu_resource::<crate::MaterialBindGroup>)
-                        .after(init_gpu_resource::<crate::LightBindGroup>),
+                        .after(init_gpu_resource::<crate::LightBindGroup>)
+                        .after(init_gpu_resource::<ShadowBindGroup>),
                     init_shading_composite_pipeline,
                 ),
             )

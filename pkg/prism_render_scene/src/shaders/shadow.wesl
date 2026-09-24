@@ -53,8 +53,8 @@ const SHADOW_FILTER_PCSS: u32 = 1u;
 // linear distance (point-light cube faces).  Filtered with a plain linear
 // sampler; the depth comparison is done manually in-shader to stay a
 // byte-for-byte twin of the CPU reference.
-@group(0) @binding(0) var shadow_atlas: texture_2d_array<f32>;
-@group(0) @binding(1) var shadow_atlas_sampler: sampler;
+@group(4) @binding(0) var shadow_atlas: texture_2d_array<f32>;
+@group(4) @binding(1) var shadow_atlas_sampler: sampler;
 
 // ---------------------------------------------------------------------------
 // math.rs
@@ -325,6 +325,9 @@ struct DirectionalShadowInput {
     light_view_projections: array<mat4x4<f32>, 4>,
     texel_world_sizes: array<f32, 4>,
     texel_uv_size: vec2<f32>,
+    // First atlas array layer of this light's cascade block; the cascade
+    // index is added on top so shared-atlas layouts address the right layer.
+    base_layer: u32,
 }
 
 // Projects the (normal-offset) surface point into `cascade`'s light clip
@@ -369,9 +372,9 @@ fn evaluate_single_cascade(input: DirectionalShadowInput, config: DirectionalSha
     let reference_depth = ndc.z - bias;
 
     if (config.filter_kind == SHADOW_FILTER_PCSS) {
-        return pcss_visibility(cascade, uv, reference_depth, input.texel_uv_size, config.pcss);
+        return pcss_visibility(input.base_layer + cascade, uv, reference_depth, input.texel_uv_size, config.pcss);
     }
-    return pcf_visibility(cascade, uv, reference_depth, input.texel_uv_size, config.pcf_radius);
+    return pcf_visibility(input.base_layer + cascade, uv, reference_depth, input.texel_uv_size, config.pcf_radius);
 }
 
 // Evaluates the directional-light visibility in `[0, 1]`.  1.0 means fully lit.
@@ -415,6 +418,8 @@ struct PointShadowInput {
     light_position: vec3<f32>,
     range: f32,
     n_dot_l: f32,
+    // First atlas array layer of this light's six-face cube block.
+    base_layer: u32,
 }
 
 // Selects the cube-map face (layer 0..6) and in-face UV in `[0, 1]^2` for a
@@ -485,7 +490,7 @@ fn evaluate_point_shadow(input: PointShadowInput, config: PointShadowConfig) -> 
     let cube = cube_face_and_uv(light_to_frag);
     let bias = slope_scaled_depth_bias(input.n_dot_l, config.const_bias, config.slope_bias, config.max_bias);
 
-    return pcf_visibility(cube.face, cube.uv, reference - bias, config.texel_uv_size, config.pcf_radius);
+    return pcf_visibility(input.base_layer + cube.face, cube.uv, reference - bias, config.texel_uv_size, config.pcf_radius);
 }
 
 // ---------------------------------------------------------------------------
@@ -514,6 +519,7 @@ fn shadow_selftest() {
     dir_input.light_view_projections = array<mat4x4<f32>, 4>(identity, identity, identity, identity);
     dir_input.texel_world_sizes = array<f32, 4>(0.01, 0.02, 0.04, 0.08);
     dir_input.texel_uv_size = vec2<f32>(1.0 / 2048.0, 1.0 / 2048.0);
+    dir_input.base_layer = 0u;
 
     var dir_config: DirectionalShadowConfig;
     dir_config.normal_offset_scale = 2.0;
@@ -532,6 +538,7 @@ fn shadow_selftest() {
     pt_input.light_position = vec3<f32>(0.0, 0.0, 0.0);
     pt_input.range = 100.0;
     pt_input.n_dot_l = 1.0;
+    pt_input.base_layer = 0u;
 
     var pt_config: PointShadowConfig;
     pt_config.const_bias = 0.001;
@@ -544,4 +551,201 @@ fn shadow_selftest() {
 
     shadow_selftest_out[0] = directional;
     shadow_selftest_out[1] = point;
+}
+
+
+// ===========================================================================
+// Resolve-pass integration: GPU shadow tables + per-light visibility helpers
+// ===========================================================================
+// The pieces above are the pure, standalone math twin of the CPU reference.
+// The declarations below wire that math into the shading-resolve pass: they
+// mirror the `#[repr(C)]` records in `shading/shadow/abi.rs` as `std430`
+// storage structs, bind the shadow tables on group 4 (alongside the atlas the
+// resolve pass already reserves there), and expose two helpers that scan the
+// tables by `light_index` and return the analytic visibility in `[0, 1]` the
+// resolve pass multiplies into each light's `DirectLightSample::visibility`.
+//
+// Byte layout: every struct uses `vec4<f32>` where the Rust record uses
+// `[f32; 4]` so the `std430` offsets match the `#[repr(C)]` offsets exactly
+// (a bare `array<f32, 4>` element stride would otherwise diverge).  The
+// offsets are asserted 16-byte aligned by `shadow/abi.rs`'s size tests.
+
+// Mirror of `GpuShadowGlobals` (16 bytes): live slot counts + atlas edge.
+struct GpuShadowGlobals {
+    directional_count: u32,
+    point_count: u32,
+    atlas_resolution: u32,
+    globals_padding: u32,
+}
+
+// Mirror of `GpuDirectionalShadow` (368 bytes).  `cascade_far` /
+// `texel_world_sizes` are `vec4<f32>` to pin the `std430` offsets to the Rust
+// `[f32; 4]` layout; the shader unpacks them back into `array<f32, 4>` below.
+struct GpuDirectionalShadow {
+    light_view_projections: array<mat4x4<f32>, 4>,
+    cascade_far: vec4<f32>,
+    texel_world_sizes: vec4<f32>,
+    texel_uv_size: vec2<f32>,
+    split_near: f32,
+    cascade_count: u32,
+    normal_offset_scale: f32,
+    const_depth_bias: f32,
+    slope_depth_bias: f32,
+    max_depth_bias: f32,
+    cascade_blend_fraction: f32,
+    filter_kind: u32,
+    pcf_radius: i32,
+    pcss_search_radius: i32,
+    pcss_light_size_uv: f32,
+    pcss_min_filter_radius: i32,
+    pcss_max_filter_radius: i32,
+    base_layer: u32,
+    light_index: u32,
+    enabled: u32,
+    directional_padding0: u32,
+    directional_padding1: u32,
+}
+
+// Mirror of `GpuPointShadow` (64 bytes).  `light_position` is a `vec3<f32>`
+// whose trailing scalar hole holds `range`, matching the Rust `[f32; 3]` + f32.
+struct GpuPointShadow {
+    light_position: vec3<f32>,
+    range: f32,
+    texel_uv_size: vec2<f32>,
+    const_bias: f32,
+    slope_bias: f32,
+    max_bias: f32,
+    pcf_radius: i32,
+    base_layer: u32,
+    light_index: u32,
+    enabled: u32,
+    point_padding0: u32,
+    point_padding1: u32,
+    point_padding2: u32,
+}
+
+// group 4 shares the atlas (bindings 0/1) with the shadow tables (2/3/4).
+@group(4) @binding(2) var<storage, read> directional_shadows: array<GpuDirectionalShadow>;
+@group(4) @binding(3) var<storage, read> point_shadows: array<GpuPointShadow>;
+@group(4) @binding(4) var<storage, read> shadow_globals: array<GpuShadowGlobals>;
+
+// Rebuilds the per-fragment `DirectionalShadowInput` from a table `record`,
+// unpacking the `vec4` split/texel columns into the `array<f32, 4>` the math
+// expects and threading the shared world-space fragment attributes through.
+fn build_directional_input(
+    record: GpuDirectionalShadow,
+    world_position: vec3<f32>,
+    world_normal: vec3<f32>,
+    n_dot_l: f32,
+    view_depth: f32,
+) -> DirectionalShadowInput {
+    var splits: CascadeSplits;
+    splits.near = record.split_near;
+    splits.distances = array<f32, 4>(
+        record.cascade_far.x,
+        record.cascade_far.y,
+        record.cascade_far.z,
+        record.cascade_far.w,
+    );
+    splits.count = record.cascade_count;
+
+    var input: DirectionalShadowInput;
+    input.world_position = world_position;
+    input.world_normal = world_normal;
+    input.n_dot_l = n_dot_l;
+    input.view_depth = view_depth;
+    input.splits = splits;
+    input.light_view_projections = record.light_view_projections;
+    input.texel_world_sizes = array<f32, 4>(
+        record.texel_world_sizes.x,
+        record.texel_world_sizes.y,
+        record.texel_world_sizes.z,
+        record.texel_world_sizes.w,
+    );
+    input.texel_uv_size = record.texel_uv_size;
+    input.base_layer = record.base_layer;
+    return input;
+}
+
+// Rebuilds the `DirectionalShadowConfig` (bias/blend/filter tunables) from a
+// table `record`, reassembling the nested `PcssConfig` from its flat scalars.
+fn build_directional_config(record: GpuDirectionalShadow) -> DirectionalShadowConfig {
+    var config: DirectionalShadowConfig;
+    config.normal_offset_scale = record.normal_offset_scale;
+    config.const_depth_bias = record.const_depth_bias;
+    config.slope_depth_bias = record.slope_depth_bias;
+    config.max_depth_bias = record.max_depth_bias;
+    config.cascade_blend_fraction = record.cascade_blend_fraction;
+    config.filter_kind = record.filter_kind;
+    config.pcf_radius = record.pcf_radius;
+    config.pcss = PcssConfig(
+        record.pcss_search_radius,
+        record.pcss_light_size_uv,
+        record.pcss_min_filter_radius,
+        record.pcss_max_filter_radius,
+    );
+    return config;
+}
+
+// Directional shadow visibility for the light at `light_index` in the light
+// buffer.  Scans the (small) directional shadow table for the enabled record
+// whose `light_index` matches, then evaluates the cascaded shadow.  Lights
+// without a shadow record stay fully lit (`SHADOW_LIT`).
+fn directional_shadow_visibility(
+    light_index: u32,
+    world_position: vec3<f32>,
+    world_normal: vec3<f32>,
+    n_dot_l: f32,
+    view_depth: f32,
+) -> f32 {
+    if (arrayLength(&shadow_globals) == 0u) {
+        return SHADOW_LIT;
+    }
+    let count = min(shadow_globals[0].directional_count, arrayLength(&directional_shadows));
+    for (var i = 0u; i < count; i = i + 1u) {
+        let record = directional_shadows[i];
+        if (record.enabled == 0u || record.light_index != light_index) {
+            continue;
+        }
+        let input = build_directional_input(record, world_position, world_normal, n_dot_l, view_depth);
+        let config = build_directional_config(record);
+        return evaluate_directional_shadow(input, config);
+    }
+    return SHADOW_LIT;
+}
+
+// Point shadow visibility for the punctual light at `light_index`.  Scans the
+// point shadow table for the enabled matching record and samples its cube
+// distance map; unmatched lights stay fully lit.
+fn point_shadow_visibility(
+    light_index: u32,
+    world_position: vec3<f32>,
+    n_dot_l: f32,
+) -> f32 {
+    if (arrayLength(&shadow_globals) == 0u) {
+        return SHADOW_LIT;
+    }
+    let count = min(shadow_globals[0].point_count, arrayLength(&point_shadows));
+    for (var i = 0u; i < count; i = i + 1u) {
+        let record = point_shadows[i];
+        if (record.enabled == 0u || record.light_index != light_index) {
+            continue;
+        }
+        var input: PointShadowInput;
+        input.world_position = world_position;
+        input.light_position = record.light_position;
+        input.range = record.range;
+        input.n_dot_l = n_dot_l;
+        input.base_layer = record.base_layer;
+
+        var config: PointShadowConfig;
+        config.const_bias = record.const_bias;
+        config.slope_bias = record.slope_bias;
+        config.max_bias = record.max_bias;
+        config.pcf_radius = record.pcf_radius;
+        config.texel_uv_size = record.texel_uv_size;
+
+        return evaluate_point_shadow(input, config);
+    }
+    return SHADOW_LIT;
 }

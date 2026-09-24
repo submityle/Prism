@@ -66,6 +66,10 @@ import prism_render_scene::shaders::lighting::{
     sample_directional_light,
     sample_punctual_light,
 };
+import prism_render_scene::shaders::shadow::{
+    directional_shadow_visibility,
+    point_shadow_visibility,
+};
 import prism_render_scene::shaders::material::{
     PrismMaterialHeader,
     PrismMaterialTexture,
@@ -160,6 +164,34 @@ fn to_direct_sample(sample: LightSample) -> DirectLightSample {
     return direct;
 }
 
+// Samples the directional light at `index` and folds its cascaded-shadow
+// visibility into the sample's `visibility` term.  `n_dot_l` (against the
+// world-space shading normal) drives the slope/normal-offset bias, and the
+// view depth is approximated by the camera-to-fragment distance so cascade
+// selection needs no view matrix here.  On-device parity of that cascade
+// choice still requires hardware verification.
+fn sample_directional_shadowed(index: u32, frame: ShadingFrame, world_position: vec3<f32>) -> LightSample {
+    var sample = sample_directional_light(directional_lights[index]);
+    let n_dot_l = max(dot(frame.normal, sample.direction), 0.0);
+    let view_depth = length(world_position - params.view_position.xyz);
+    let visibility = directional_shadow_visibility(index, world_position, frame.normal, n_dot_l, view_depth);
+    sample.visibility = sample.visibility * visibility;
+    return sample;
+}
+
+// Samples the punctual light at `index` and folds its cube-map shadow into the
+// visibility term.  Invalid samples (out of range / outside a spot cone) are
+// left untouched so the caller's `valid == 0.0` skip still fires.
+fn sample_punctual_shadowed(index: u32, frame: ShadingFrame, world_position: vec3<f32>) -> LightSample {
+    var sample = sample_punctual_light(punctual_lights[index], world_position);
+    if sample.valid != 0.0 {
+        let n_dot_l = max(dot(frame.normal, sample.direction), 0.0);
+        let visibility = point_shadow_visibility(index, world_position, n_dot_l);
+        sample.visibility = sample.visibility * visibility;
+    }
+    return sample;
+}
+
 // Constant-ambient indirect fallback used when no image-based probe is bound.
 // Mirrors `ambient_term` in the CPU reference: Lambertian albedo weighted by
 // occlusion and (1 - metallic).
@@ -184,13 +216,13 @@ fn shade_principled(
 
     let directional_total = min(env.directional_count, arrayLength(&directional_lights));
     for (var i = 0u; i < directional_total; i = i + 1u) {
-        let sample = sample_directional_light(directional_lights[i]);
+        let sample = sample_directional_shadowed(i, frame, world_position);
         accumulated = accumulated + principled_direct(lit, frame, to_direct_sample(sample));
     }
 
     let punctual_total = min(env.punctual_count, arrayLength(&punctual_lights));
     for (var i = 0u; i < punctual_total; i = i + 1u) {
-        let sample = sample_punctual_light(punctual_lights[i], world_position);
+        let sample = sample_punctual_shadowed(i, frame, world_position);
         if sample.valid == 0.0 {
             continue;
         }
@@ -215,13 +247,13 @@ fn shade_toon(
 
     let directional_total = min(env.directional_count, arrayLength(&directional_lights));
     for (var i = 0u; i < directional_total; i = i + 1u) {
-        let sample = sample_directional_light(directional_lights[i]);
+        let sample = sample_directional_shadowed(i, frame, world_position);
         accumulated = accumulated + toon_direct(lit, frame, to_direct_sample(sample), bands);
     }
 
     let punctual_total = min(env.punctual_count, arrayLength(&punctual_lights));
     for (var i = 0u; i < punctual_total; i = i + 1u) {
-        let sample = sample_punctual_light(punctual_lights[i], world_position);
+        let sample = sample_punctual_shadowed(i, frame, world_position);
         if sample.valid == 0.0 {
             continue;
         }
@@ -245,13 +277,13 @@ fn shade_cloth(
 
     let directional_total = min(env.directional_count, arrayLength(&directional_lights));
     for (var i = 0u; i < directional_total; i = i + 1u) {
-        let sample = sample_directional_light(directional_lights[i]);
+        let sample = sample_directional_shadowed(i, frame, world_position);
         accumulated = accumulated + cloth_direct(lit, frame, to_direct_sample(sample));
     }
 
     let punctual_total = min(env.punctual_count, arrayLength(&punctual_lights));
     for (var i = 0u; i < punctual_total; i = i + 1u) {
-        let sample = sample_punctual_light(punctual_lights[i], world_position);
+        let sample = sample_punctual_shadowed(i, frame, world_position);
         if sample.valid == 0.0 {
             continue;
         }
@@ -276,13 +308,13 @@ fn shade_subsurface(
 
     let directional_total = min(env.directional_count, arrayLength(&directional_lights));
     for (var i = 0u; i < directional_total; i = i + 1u) {
-        let sample = sample_directional_light(directional_lights[i]);
+        let sample = sample_directional_shadowed(i, frame, world_position);
         accumulated = accumulated + subsurface_direct(lit, frame, to_direct_sample(sample));
     }
 
     let punctual_total = min(env.punctual_count, arrayLength(&punctual_lights));
     for (var i = 0u; i < punctual_total; i = i + 1u) {
-        let sample = sample_punctual_light(punctual_lights[i], world_position);
+        let sample = sample_punctual_shadowed(i, frame, world_position);
         if sample.valid == 0.0 {
             continue;
         }
@@ -308,13 +340,13 @@ fn shade_hair(
 
     let directional_total = min(env.directional_count, arrayLength(&directional_lights));
     for (var i = 0u; i < directional_total; i = i + 1u) {
-        let sample = sample_directional_light(directional_lights[i]);
+        let sample = sample_directional_shadowed(i, frame, world_position);
         accumulated = accumulated + hair_direct(lit, frame, to_direct_sample(sample));
     }
 
     let punctual_total = min(env.punctual_count, arrayLength(&punctual_lights));
     for (var i = 0u; i < punctual_total; i = i + 1u) {
-        let sample = sample_punctual_light(punctual_lights[i], world_position);
+        let sample = sample_punctual_shadowed(i, frame, world_position);
         if sample.valid == 0.0 {
             continue;
         }
@@ -340,13 +372,13 @@ fn shade_water(
 
     let directional_total = min(env.directional_count, arrayLength(&directional_lights));
     for (var i = 0u; i < directional_total; i = i + 1u) {
-        let sample = sample_directional_light(directional_lights[i]);
+        let sample = sample_directional_shadowed(i, frame, world_position);
         accumulated = accumulated + water_direct(lit, frame, to_direct_sample(sample));
     }
 
     let punctual_total = min(env.punctual_count, arrayLength(&punctual_lights));
     for (var i = 0u; i < punctual_total; i = i + 1u) {
-        let sample = sample_punctual_light(punctual_lights[i], world_position);
+        let sample = sample_punctual_shadowed(i, frame, world_position);
         if sample.valid == 0.0 {
             continue;
         }
@@ -368,13 +400,13 @@ fn shade_clearcoat(
 
     let directional_total = min(env.directional_count, arrayLength(&directional_lights));
     for (var i = 0u; i < directional_total; i = i + 1u) {
-        let sample = sample_directional_light(directional_lights[i]);
+        let sample = sample_directional_shadowed(i, frame, world_position);
         accumulated = accumulated + clearcoat_direct(lit, frame, to_direct_sample(sample));
     }
 
     let punctual_total = min(env.punctual_count, arrayLength(&punctual_lights));
     for (var i = 0u; i < punctual_total; i = i + 1u) {
-        let sample = sample_punctual_light(punctual_lights[i], world_position);
+        let sample = sample_punctual_shadowed(i, frame, world_position);
         if sample.valid == 0.0 {
             continue;
         }
