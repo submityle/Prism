@@ -12,6 +12,7 @@ prism_physics_geometry = { path = "../prism_physics_geometry" }
 serde = { version = "1", default-features = false, features = [
   "derive",
 ], optional = true }
+rayon = { version = "1.12.0", optional = true }
 
 [dev-dependencies]
 prism_physics_core = { path = ".", features = ["serialize"] }
@@ -22,6 +23,8 @@ default = ["std"]
 std = ["glam/std"]
 # Enable serde (de)serialization of plain physics state data.
 serialize = ["dep:serde", "serde/alloc", "glam/serde", "prism_physics_geometry/serialize"]
+# Solve independent simulation islands across threads with rayon. Requires std.
+parallel = ["std", "dep:rayon"]
 
 [lints]
 workspace = true

@@ -78,10 +78,45 @@ pub fn recover_velocities(view: &mut BodySolverView<'_>, h: f32) {
         if !view.is_awake_dynamic(i) {
             continue;
         }
-        view.linear_velocities[i] = (view.positions[i] - view.prev_positions[i]) * inv_h;
-        view.angular_velocities[i] =
-            angular_velocity_from_delta(view.prev_orientations[i], view.orientations[i], inv_h);
+        recover_slot(view, i, inv_h);
     }
+}
+
+/// Recovers velocities for every awake dynamic body **except** the slots marked
+/// in `skip`.
+///
+/// The parallel island solver recovers velocities for island members inside its
+/// per-island scratch, so this pass fills in only the *free* awake dynamic
+/// bodies (those in no active island) using the exact same finite-difference
+/// formula as [`recover_velocities`]. A slot `i` is skipped when
+/// `skip.get(i) == Some(&true)`; the two passes together cover the same set of
+/// bodies as a single global [`recover_velocities`], bit for bit.
+#[cfg(feature = "parallel")]
+pub fn recover_velocities_excluding(view: &mut BodySolverView<'_>, h: f32, skip: &[bool]) {
+    if h <= 0.0 {
+        return;
+    }
+    let inv_h = 1.0 / h;
+    for i in 0..view.slot_count() {
+        if skip.get(i).copied().unwrap_or(false) {
+            continue;
+        }
+        if !view.is_awake_dynamic(i) {
+            continue;
+        }
+        recover_slot(view, i, inv_h);
+    }
+}
+
+/// Writes the finite-difference velocities for a single slot.
+///
+/// Shared by [`recover_velocities`] and its masked variant so both produce
+/// bit-identical results for any given body. The caller guarantees the slot is
+/// an awake dynamic body.
+fn recover_slot(view: &mut BodySolverView<'_>, i: usize, inv_h: f32) {
+    view.linear_velocities[i] = (view.positions[i] - view.prev_positions[i]) * inv_h;
+    view.angular_velocities[i] =
+        angular_velocity_from_delta(view.prev_orientations[i], view.orientations[i], inv_h);
 }
 
 /// Integrates an orientation quaternion by an angular velocity over `h`.

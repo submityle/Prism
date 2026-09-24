@@ -12,6 +12,7 @@
 //! - [`rigid`] — shared rigid-body impulse algebra.
 //! - [`integrate`] — pose prediction and velocity recovery.
 //! - [`island_solve`] — grouping of contacts/joints into independent islands.
+//! - [`parallel_solve`] — rayon-backed per-island solve (feature `parallel`).
 //! - [`contact_constraint`] — the position-level contact + static-friction solve.
 //! - [`velocity_solve`] — the velocity-level restitution + dynamic-friction solve.
 //! - [`sleep_solve`] — island sleeping so settled bodies stop costing time.
@@ -37,6 +38,8 @@ pub mod contact_constraint;
 pub mod integrate;
 pub mod island_solve;
 pub mod joint_constraint;
+#[cfg(feature = "parallel")]
+pub mod parallel_solve;
 pub mod rigid;
 pub mod sleep_solve;
 pub mod velocity_solve;
@@ -105,36 +108,64 @@ impl XpbdSolver {
             // island that still has an awake body. Only the returned active
             // islands are solved below.
             let active_islands = sleep_solve::classify_and_wake(&mut view, &islands, &sleep_config);
-            let iterations = self.config.position_iterations.max(1);
-            for _ in 0..iterations {
-                for &island in &active_islands {
-                    for &joint_index in islands.joints(island) {
-                        joint_constraint::solve_joint(&mut view, active[joint_index], h);
+            // Solve the active islands. With the `parallel` feature and the
+            // `parallel_islands` config flag both on, each island is solved in
+            // its own scratch across worker threads; otherwise the islands are
+            // solved in place one after another. Both paths are numerically
+            // identical because islands touch disjoint dynamic bodies.
+            #[cfg(feature = "parallel")]
+            let solved_in_parallel = if self.config.parallel_islands {
+                parallel_solve::solve_islands_parallel(
+                    &mut view,
+                    &islands,
+                    &active_islands,
+                    &constraints,
+                    &active,
+                    &self.config,
+                    h,
+                    true,
+                );
+                true
+            } else {
+                false
+            };
+            #[cfg(not(feature = "parallel"))]
+            let solved_in_parallel = false;
+
+            if !solved_in_parallel {
+                let iterations = self.config.position_iterations.max(1);
+                for _ in 0..iterations {
+                    for &island in &active_islands {
+                        for &joint_index in islands.joints(island) {
+                            joint_constraint::solve_joint(&mut view, active[joint_index], h);
+                        }
+                        contact_constraint::solve_positions_indexed(
+                            &mut view,
+                            &mut constraints,
+                            islands.contacts(island),
+                            &self.config,
+                            h,
+                        );
                     }
-                    contact_constraint::solve_positions_indexed(
+                }
+                // Velocity recovery from the net pose change is a per-body pass
+                // and stays global (it already skips sleeping bodies); the
+                // velocity-level solve is then applied per active island.
+                integrate::recover_velocities(&mut view, h);
+                for &island in &active_islands {
+                    velocity_solve::solve_indexed(
                         &mut view,
-                        &mut constraints,
+                        &constraints,
                         islands.contacts(island),
                         &self.config,
                         h,
                     );
                 }
             }
-            // Velocity recovery from the net pose change is a per-body pass and
-            // stays global (it already skips sleeping bodies); the velocity-level
-            // solve is then applied per active island.
-            integrate::recover_velocities(&mut view, h);
-            for &island in &active_islands {
-                velocity_solve::solve_indexed(
-                    &mut view,
-                    &constraints,
-                    islands.contacts(island),
-                    &self.config,
-                    h,
-                );
-            }
+
             // Advance idle timers for the solved islands and sleep the ones that
-            // have settled below the velocity thresholds long enough.
+            // have settled below the velocity thresholds long enough. This runs
+            // once for whichever solve path executed above.
             sleep_solve::update_after_solve(&mut view, &islands, &active_islands, &sleep_config, h);
         }
     }
@@ -385,5 +416,54 @@ mod tests {
             y > start_y,
             "woken box should rise, y = {y} start = {start_y}"
         );
+    }
+
+    /// The rayon-backed parallel island solve must produce byte-identical
+    /// results to the single-threaded island solve. Two separated stacks form
+    /// two islands and a lone box falls freely (a free body in no island), so
+    /// this exercises the gather/scatter path and the masked free-body
+    /// velocity recovery together.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn parallel_and_serial_solves_are_bit_identical() {
+        fn run(parallel_islands: bool) -> Vec<(Vec3, glam::Quat, Vec3, Vec3)> {
+            let mut world = world_with_ground();
+            let handles = [
+                spawn_box_at(&mut world, -40.0, 0.5),
+                spawn_box_at(&mut world, -40.0, 1.52),
+                spawn_box_at(&mut world, 40.0, 0.5),
+                spawn_box_at(&mut world, 40.0, 1.52),
+                spawn_box_at(&mut world, 0.0, 8.0),
+            ];
+            let config = XpbdConfig {
+                parallel_islands,
+                ..XpbdConfig::default()
+            };
+            let mut solver = XpbdSolver::with_config(config);
+            for _ in 0..30 {
+                solver.step(&mut world, 1.0 / 60.0, 4);
+            }
+            handles
+                .iter()
+                .map(|h| {
+                    (
+                        world.bodies.position(*h).unwrap(),
+                        world.bodies.orientation(*h).unwrap(),
+                        world.bodies.linear_velocity(*h).unwrap(),
+                        world.bodies.angular_velocity(*h).unwrap(),
+                    )
+                })
+                .collect()
+        }
+
+        let serial = run(false);
+        let parallel = run(true);
+        assert_eq!(serial.len(), parallel.len());
+        for (i, (s, p)) in serial.iter().zip(&parallel).enumerate() {
+            assert_eq!(s.0, p.0, "body {i} position diverged");
+            assert_eq!(s.1, p.1, "body {i} orientation diverged");
+            assert_eq!(s.2, p.2, "body {i} linear velocity diverged");
+            assert_eq!(s.3, p.3, "body {i} angular velocity diverged");
+        }
     }
 }

@@ -33,6 +33,14 @@ pub struct XpbdConfig {
     /// resolved as fully inelastic, which removes the residual bouncing that
     /// would otherwise keep a resting stack awake.
     pub restitution_threshold: f32,
+    /// Solve independent simulation islands across worker threads.
+    ///
+    /// This only takes effect when the crate is built with the `parallel`
+    /// feature; without it the solver always runs the single-threaded island
+    /// pass regardless of this flag. The parallel path is numerically
+    /// bit-identical to the serial path (islands touch disjoint dynamic
+    /// bodies), so toggling it never changes results, only throughput.
+    pub parallel_islands: bool,
 }
 
 impl XpbdConfig {
@@ -49,6 +57,7 @@ impl Default for XpbdConfig {
             position_iterations: Self::DEFAULT_POSITION_ITERATIONS,
             contact_compliance: 0.0,
             restitution_threshold: Self::DEFAULT_RESTITUTION_THRESHOLD,
+            parallel_islands: true,
         }
     }
 }
