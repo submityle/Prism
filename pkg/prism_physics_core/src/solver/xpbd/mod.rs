@@ -11,6 +11,7 @@
 //!
 //! - [`rigid`] — shared rigid-body impulse algebra.
 //! - [`integrate`] — pose prediction and velocity recovery.
+//! - [`island_solve`] — grouping of contacts/joints into independent islands.
 //! - [`contact_constraint`] — the position-level contact + static-friction solve.
 //! - [`velocity_solve`] — the velocity-level restitution + dynamic-friction solve.
 //! - [`config`] — the [`XpbdConfig`] tuning parameters.
@@ -33,13 +34,16 @@
 pub mod config;
 pub mod contact_constraint;
 pub mod integrate;
+pub mod island_solve;
 pub mod joint_constraint;
 pub mod rigid;
 pub mod velocity_solve;
 
 pub use config::XpbdConfig;
 pub use contact_constraint::ContactConstraint;
+pub use island_solve::SolveIslands;
 
+use crate::joint::Joint;
 use crate::pipeline::detect_contacts;
 use crate::solver::Solver;
 use crate::world::PhysicsWorld;
@@ -86,13 +90,40 @@ impl XpbdSolver {
             let PhysicsWorld { bodies, joints, .. } = world;
             let mut view = bodies.solver_view_mut();
             let mut constraints = ContactConstraint::build(&view, &manifolds);
+            // Collect the active joints once so they can be indexed per island.
+            let active: Vec<&Joint> = joints.active_joints().collect();
+            // Partition the constraints/joints into independent islands. Solving
+            // islands one after another is numerically identical to a single
+            // global Gauss-Seidel pass because islands touch disjoint dynamic
+            // bodies (statics are read-only separators).
+            let islands = SolveIslands::build(&view, &constraints, &active);
             let iterations = self.config.position_iterations.max(1);
             for _ in 0..iterations {
-                joint_constraint::solve_joints(&mut view, joints, h);
-                contact_constraint::solve_positions(&mut view, &mut constraints, &self.config, h);
+                for island in 0..islands.island_count() {
+                    for &joint_index in islands.joints(island) {
+                        joint_constraint::solve_joint(&mut view, active[joint_index], h);
+                    }
+                    contact_constraint::solve_positions_indexed(
+                        &mut view,
+                        &mut constraints,
+                        islands.contacts(island),
+                        &self.config,
+                        h,
+                    );
+                }
             }
+            // Velocity recovery from the net pose change is a per-body pass and
+            // stays global; the velocity-level solve is then applied per island.
             integrate::recover_velocities(&mut view, h);
-            velocity_solve::solve(&mut view, &constraints, &self.config, h);
+            for island in 0..islands.island_count() {
+                velocity_solve::solve_indexed(
+                    &mut view,
+                    &constraints,
+                    islands.contacts(island),
+                    &self.config,
+                    h,
+                );
+            }
         }
     }
 }
@@ -145,6 +176,21 @@ mod tests {
         let mp = shape.mass_properties(1.0);
         world.spawn(
             BodyDesc::dynamic_at(Vec3::new(0.0, y, 0.0))
+                .with_collider(cuboid)
+                .with_mass_properties(mp)
+                .with_material(PhysicsMaterial::DEFAULT),
+        )
+    }
+
+    /// Spawns a unit cube at horizontal offset `x` and height `y`.
+    fn spawn_box_at(world: &mut PhysicsWorld, x: f32, y: f32) -> crate::state::handle::BodyHandle {
+        let shape = ColliderShape::Cuboid {
+            half_extents: Vec3::splat(0.5),
+        };
+        let cuboid = world.shapes.insert(shape);
+        let mp = shape.mass_properties(1.0);
+        world.spawn(
+            BodyDesc::dynamic_at(Vec3::new(x, y, 0.0))
                 .with_collider(cuboid)
                 .with_mass_properties(mp)
                 .with_material(PhysicsMaterial::DEFAULT),
@@ -212,6 +258,52 @@ mod tests {
                 "lateral drift: {pos:?}"
             );
             assert!(vel.length() < 0.1, "stack should be at rest, v = {vel:?}");
+        }
+    }
+
+    /// Two identical two-box stacks placed far apart horizontally form two
+    /// separate islands (they share only the static ground). Solving both
+    /// together must match solving each stack alone, proving that per-island
+    /// solving is independent and equivalent to the global pass.
+    #[test]
+    fn separated_stacks_solve_independently() {
+        fn run(offsets: &[f32]) -> Vec<Vec3> {
+            let mut world = world_with_ground();
+            let mut handles = Vec::new();
+            for &x in offsets {
+                handles.push(spawn_box_at(&mut world, x, 0.5));
+                handles.push(spawn_box_at(&mut world, x, 1.52));
+            }
+            let mut solver = XpbdSolver::new();
+            for _ in 0..120 {
+                solver.step(&mut world, 1.0 / 60.0, 8);
+            }
+            handles
+                .iter()
+                .map(|h| world.bodies.position(*h).unwrap())
+                .collect()
+        }
+
+        let a_alone = run(&[-50.0]);
+        let b_alone = run(&[50.0]);
+        let both = run(&[-50.0, 50.0]);
+
+        assert_eq!(both.len(), 4);
+        for (i, want) in a_alone.iter().enumerate() {
+            assert!(
+                (both[i] - *want).length() < 1e-5,
+                "stack A body {i} diverged: {:?} vs {:?}",
+                both[i],
+                want
+            );
+        }
+        for (i, want) in b_alone.iter().enumerate() {
+            assert!(
+                (both[2 + i] - *want).length() < 1e-5,
+                "stack B body {i} diverged: {:?} vs {:?}",
+                both[2 + i],
+                want
+            );
         }
     }
 }

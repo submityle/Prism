@@ -52,9 +52,44 @@ pub fn solve(
     }
     let inv_h = 1.0 / h;
     for constraint in constraints {
-        for index in 0..constraint.point_count() {
-            solve_point(view, constraint, index, config, inv_h);
+        solve_constraint(view, constraint, config, inv_h);
+    }
+}
+
+/// Solves the velocity-level restitution and dynamic friction for the contact
+/// constraints named by `indices` (used by the per-island solver).
+///
+/// Each entry of `indices` is an index into `constraints`; out-of-range indices
+/// are ignored. Because islands touch disjoint sets of dynamic bodies, solving
+/// them one at a time here is numerically identical to a single global
+/// [`solve`] pass.
+pub fn solve_indexed(
+    view: &mut BodySolverView<'_>,
+    constraints: &[ContactConstraint],
+    indices: &[usize],
+    config: &XpbdConfig,
+    h: f32,
+) {
+    if h <= 0.0 {
+        return;
+    }
+    let inv_h = 1.0 / h;
+    for &i in indices {
+        if let Some(constraint) = constraints.get(i) {
+            solve_constraint(view, constraint, config, inv_h);
         }
+    }
+}
+
+/// Solves the velocity-level response for every point of a single constraint.
+fn solve_constraint(
+    view: &mut BodySolverView<'_>,
+    constraint: &ContactConstraint,
+    config: &XpbdConfig,
+    inv_h: f32,
+) {
+    for index in 0..constraint.point_count() {
+        solve_point(view, constraint, index, config, inv_h);
     }
 }
 

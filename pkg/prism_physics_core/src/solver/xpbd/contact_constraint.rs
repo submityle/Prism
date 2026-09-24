@@ -168,33 +168,76 @@ impl ContactConstraint {
 /// resolved with a compliant XPBD position update along the normal, and then a
 /// static-friction correction cancels the tangential drift of the anchors when
 /// it stays inside the Coulomb cone.
+/// Returns the compliant position-solve stiffness `alpha_tilde` for a
+/// sub-step of length `h`.
+fn contact_alpha_tilde(config: &XpbdConfig, h: f32) -> f32 {
+    if h > 0.0 {
+        config.contact_compliance / (h * h)
+    } else {
+        0.0
+    }
+}
+
+/// Runs one position-solve iteration over a single contact constraint.
+fn solve_constraint_positions(
+    view: &mut BodySolverView<'_>,
+    constraint: &mut ContactConstraint,
+    alpha_tilde: f32,
+) {
+    let slot_a = constraint.slot_a;
+    let slot_b = constraint.slot_b;
+    let normal = constraint.normal;
+    let friction = constraint.friction;
+    for index in 0..constraint.points.len() {
+        solve_point(
+            view,
+            constraint,
+            slot_a,
+            slot_b,
+            normal,
+            friction,
+            index,
+            alpha_tilde,
+        );
+    }
+}
+
+/// Runs one position-solve iteration over every contact constraint.
+///
+/// This is the global entry point used when islands are not in play; it applies
+/// the compliant normal + static-friction correction to each constraint in
+/// order. The per-island [`solve_positions_indexed`] variant restricts the pass
+/// to a subset of constraint indices.
 pub fn solve_positions(
     view: &mut BodySolverView<'_>,
     constraints: &mut [ContactConstraint],
     config: &XpbdConfig,
     h: f32,
 ) {
-    let alpha_tilde = if h > 0.0 {
-        config.contact_compliance / (h * h)
-    } else {
-        0.0
-    };
+    let alpha_tilde = contact_alpha_tilde(config, h);
     for constraint in constraints.iter_mut() {
-        let slot_a = constraint.slot_a;
-        let slot_b = constraint.slot_b;
-        let normal = constraint.normal;
-        let friction = constraint.friction;
-        for index in 0..constraint.points.len() {
-            solve_point(
-                view,
-                constraint,
-                slot_a,
-                slot_b,
-                normal,
-                friction,
-                index,
-                alpha_tilde,
-            );
+        solve_constraint_positions(view, constraint, alpha_tilde);
+    }
+}
+
+/// Runs one position-solve iteration over the contact constraints named by
+/// `indices` (used by the per-island solver).
+///
+/// Each entry of `indices` is an index into `constraints`; out-of-range
+/// indices are ignored. Solving disjoint islands through this entry point is
+/// numerically identical to a single global [`solve_positions`] pass because
+/// the islands touch disjoint sets of dynamic bodies.
+pub fn solve_positions_indexed(
+    view: &mut BodySolverView<'_>,
+    constraints: &mut [ContactConstraint],
+    indices: &[usize],
+    config: &XpbdConfig,
+    h: f32,
+) {
+    let alpha_tilde = contact_alpha_tilde(config, h);
+    for &i in indices {
+        if let Some(constraint) = constraints.get_mut(i) {
+            solve_constraint_positions(view, constraint, alpha_tilde);
         }
     }
 }

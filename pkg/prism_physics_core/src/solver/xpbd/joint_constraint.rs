@@ -49,6 +49,16 @@ pub fn solve_joints(view: &mut BodySolverView<'_>, joints: &JointStorage, h: f32
     }
 }
 
+/// Solves a single joint against the current poses in `view`.
+///
+/// This is the per-joint entry point the island solver uses; it applies one
+/// projection pass for the given joint, mirroring one iteration of
+/// [`solve_joints`]. Joints referencing an inactive slot, an out-of-range slot,
+/// or a pair with no dynamic body are skipped.
+pub fn solve_joint(view: &mut BodySolverView<'_>, joint: &Joint, h: f32) {
+    solve_one(view, joint, h);
+}
+
 /// Resolves a single joint's slots, guards them, and dispatches on its kind.
 fn solve_one(view: &mut BodySolverView<'_>, joint: &Joint, h: f32) {
     let slot_a = joint.anchor_a.body.index() as usize;
