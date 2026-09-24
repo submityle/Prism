@@ -48,8 +48,12 @@ pub struct BodySolverView<'a> {
     /// Angular velocity damping coefficient per body (per second).
     pub angular_damping: &'a [f32],
     /// Sleeping (deactivated) flag per body. A sleeping body is skipped by the
-    /// prediction and constraint phases until it is woken.
-    pub sleeping: &'a [bool],
+    /// prediction and constraint phases until it is woken. Mutable so the
+    /// solver can put settled islands to sleep and wake disturbed ones.
+    pub sleeping: &'a mut [bool],
+    /// Accumulated idle time per body (seconds), used to decide when a body may
+    /// sleep. Mutable so the solver can advance and reset it in place.
+    pub sleep_timers: &'a mut [f32],
     /// Slot occupancy flags.
     pub active: &'a [bool],
 }
@@ -89,5 +93,13 @@ impl BodySolverView<'_> {
     #[must_use]
     pub fn is_sensor(&self, i: usize) -> bool {
         self.is_sensor.get(i).copied().unwrap_or(false)
+    }
+
+    /// Returns `true` if slot `i` is currently sleeping.
+    ///
+    /// Out-of-range slots report `false`.
+    #[must_use]
+    pub fn is_sleeping_slot(&self, i: usize) -> bool {
+        self.sleeping.get(i).copied().unwrap_or(false)
     }
 }

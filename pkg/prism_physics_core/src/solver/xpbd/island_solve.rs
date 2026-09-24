@@ -34,6 +34,9 @@ use crate::state::view::BodySolverView;
 pub struct SolveIslands {
     contact_indices: Vec<Vec<usize>>,
     joint_indices: Vec<Vec<usize>>,
+    /// Sorted, de-duplicated dynamic body slots per island. Used by the sleep
+    /// bookkeeping to test and update every dynamic member of an island.
+    member_slots: Vec<Vec<usize>>,
 }
 
 impl SolveIslands {
@@ -77,10 +80,12 @@ impl SolveIslands {
         let mut bucket_of: Vec<Option<usize>> = vec![None; set.island_count()];
         let mut contact_indices: Vec<Vec<usize>> = Vec::new();
         let mut joint_indices: Vec<Vec<usize>> = Vec::new();
+        let mut member_slots: Vec<Vec<usize>> = Vec::new();
 
         let mut bucket_for = |island: IslandId,
                               contacts: &mut Vec<Vec<usize>>,
-                              jts: &mut Vec<Vec<usize>>|
+                              jts: &mut Vec<Vec<usize>>,
+                              members: &mut Vec<Vec<usize>>|
          -> usize {
             let raw = island.0 as usize;
             match bucket_of[raw] {
@@ -90,6 +95,7 @@ impl SolveIslands {
                     bucket_of[raw] = Some(b);
                     contacts.push(Vec::new());
                     jts.push(Vec::new());
+                    members.push(Vec::new());
                     b
                 }
             }
@@ -104,8 +110,15 @@ impl SolveIslands {
                 set.island_of(dynamic_slot),
                 &mut contact_indices,
                 &mut joint_indices,
+                &mut member_slots,
             );
             contact_indices[bucket].push(index);
+            push_dynamic_members(
+                view,
+                constraint.slot_a,
+                constraint.slot_b,
+                &mut member_slots[bucket],
+            );
         }
 
         for (index, joint) in joints.iter().enumerate() {
@@ -120,13 +133,21 @@ impl SolveIslands {
                 set.island_of(dynamic_slot),
                 &mut contact_indices,
                 &mut joint_indices,
+                &mut member_slots,
             );
             joint_indices[bucket].push(index);
+            push_dynamic_members(view, slot_a, slot_b, &mut member_slots[bucket]);
+        }
+
+        for members in &mut member_slots {
+            members.sort_unstable();
+            members.dedup();
         }
 
         SolveIslands {
             contact_indices,
             joint_indices,
+            member_slots,
         }
     }
 
@@ -157,6 +178,16 @@ impl SolveIslands {
     pub fn joints(&self, island: usize) -> &[usize] {
         self.joint_indices.get(island).map_or(&[], Vec::as_slice)
     }
+
+    /// Returns the sorted dynamic body slots belonging to `island`.
+    ///
+    /// Returns an empty slice when `island` is out of range. Static and
+    /// kinematic bodies are never members because they are read-only during the
+    /// solve and cannot sleep.
+    #[must_use]
+    pub fn members(&self, island: usize) -> &[usize] {
+        self.member_slots.get(island).map_or(&[], Vec::as_slice)
+    }
 }
 
 /// Extracts the two body slot indices a joint connects.
@@ -176,6 +207,24 @@ fn dynamic_slot_of(view: &BodySolverView<'_>, slot_a: usize, slot_b: usize) -> O
         Some(slot_b)
     } else {
         None
+    }
+}
+
+/// Pushes whichever of `slot_a`/`slot_b` are dynamic bodies into `members`.
+///
+/// Duplicates are tolerated here; the caller de-duplicates each island's member
+/// list once after all constraints and joints have been filed.
+fn push_dynamic_members(
+    view: &BodySolverView<'_>,
+    slot_a: usize,
+    slot_b: usize,
+    members: &mut Vec<usize>,
+) {
+    if view.is_dynamic(slot_a) {
+        members.push(slot_a);
+    }
+    if view.is_dynamic(slot_b) {
+        members.push(slot_b);
     }
 }
 
@@ -249,6 +298,23 @@ mod tests {
         let islands = partition(&[BodyKind::Dynamic; 3], &[(0, 1), (1, 2)]);
         assert_eq!(islands.island_count(), 1);
         assert_eq!(islands.contacts(0), &[0, 1]);
+        // All three dynamic bodies are members of the single island, listed once
+        // each in sorted order.
+        assert_eq!(islands.members(0), &[0, 1, 2]);
+    }
+
+    #[test]
+    fn members_exclude_static_bodies() {
+        // Two dynamic bodies each resting on a shared static ground form two
+        // islands; the static slot (0) is never a member of either.
+        let islands = partition(
+            &[BodyKind::Static, BodyKind::Dynamic, BodyKind::Dynamic],
+            &[(1, 0), (2, 0)],
+        );
+        assert_eq!(islands.island_count(), 2);
+        assert_eq!(islands.members(0), &[1]);
+        assert_eq!(islands.members(1), &[2]);
+        assert_eq!(islands.members(5), &[] as &[usize]);
     }
 
     #[test]

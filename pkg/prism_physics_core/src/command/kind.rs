@@ -84,7 +84,7 @@ impl PhysicsCommand {
     /// Returns `false` when the target handle is stale/invalid so the caller can
     /// account for dropped commands; this never panics.
     pub fn apply(&self, world: &mut PhysicsWorld) -> bool {
-        match *self {
+        let applied = match *self {
             PhysicsCommand::ApplyLinearImpulse { body, impulse } => {
                 let Some(mass) = world.bodies.mass_properties(body) else {
                     return false;
@@ -119,7 +119,14 @@ impl PhysicsCommand {
             PhysicsCommand::SetOrientation { body, orientation } => world
                 .bodies
                 .set_orientation(body, normalize_or_identity(orientation)),
+        };
+        // Any command that took effect disturbs its target, so wake it (and its
+        // island next sub-step). Waking a static/kinematic or stale handle is a
+        // harmless no-op.
+        if applied {
+            world.bodies.wake(self.body());
         }
+        applied
     }
 }
 

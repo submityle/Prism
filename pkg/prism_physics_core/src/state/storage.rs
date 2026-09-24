@@ -343,7 +343,8 @@ impl BodyStorage {
             is_sensor: &self.is_sensor,
             linear_damping: &self.linear_damping,
             angular_damping: &self.angular_damping,
-            sleeping: &self.sleeping,
+            sleeping: &mut self.sleeping,
+            sleep_timers: &mut self.sleep_timer,
             active: &self.active,
         }
     }

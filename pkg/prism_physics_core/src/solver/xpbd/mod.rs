@@ -14,6 +14,7 @@
 //! - [`island_solve`] — grouping of contacts/joints into independent islands.
 //! - [`contact_constraint`] — the position-level contact + static-friction solve.
 //! - [`velocity_solve`] — the velocity-level restitution + dynamic-friction solve.
+//! - [`sleep_solve`] — island sleeping so settled bodies stop costing time.
 //! - [`config`] — the [`XpbdConfig`] tuning parameters.
 //!
 //! # Small steps
@@ -37,6 +38,7 @@ pub mod integrate;
 pub mod island_solve;
 pub mod joint_constraint;
 pub mod rigid;
+pub mod sleep_solve;
 pub mod velocity_solve;
 
 pub use config::XpbdConfig;
@@ -85,6 +87,8 @@ impl XpbdSolver {
 
         // Phase 3: resolve positions, recover velocities, resolve velocities.
         {
+            // Copy the sleep policy out before splitting the world borrow.
+            let sleep_config = world.config.sleep;
             // Split-borrow the world so the joint storage stays readable while
             // the solver view mutably borrows only the body columns.
             let PhysicsWorld { bodies, joints, .. } = world;
@@ -97,9 +101,13 @@ impl XpbdSolver {
             // global Gauss-Seidel pass because islands touch disjoint dynamic
             // bodies (statics are read-only separators).
             let islands = SolveIslands::build(&view, &constraints, &active);
+            // Skip fully-asleep islands and wake the sleeping members of any
+            // island that still has an awake body. Only the returned active
+            // islands are solved below.
+            let active_islands = sleep_solve::classify_and_wake(&mut view, &islands, &sleep_config);
             let iterations = self.config.position_iterations.max(1);
             for _ in 0..iterations {
-                for island in 0..islands.island_count() {
+                for &island in &active_islands {
                     for &joint_index in islands.joints(island) {
                         joint_constraint::solve_joint(&mut view, active[joint_index], h);
                     }
@@ -113,9 +121,10 @@ impl XpbdSolver {
                 }
             }
             // Velocity recovery from the net pose change is a per-body pass and
-            // stays global; the velocity-level solve is then applied per island.
+            // stays global (it already skips sleeping bodies); the velocity-level
+            // solve is then applied per active island.
             integrate::recover_velocities(&mut view, h);
-            for island in 0..islands.island_count() {
+            for &island in &active_islands {
                 velocity_solve::solve_indexed(
                     &mut view,
                     &constraints,
@@ -124,6 +133,9 @@ impl XpbdSolver {
                     h,
                 );
             }
+            // Advance idle timers for the solved islands and sleep the ones that
+            // have settled below the velocity thresholds long enough.
+            sleep_solve::update_after_solve(&mut view, &islands, &active_islands, &sleep_config, h);
         }
     }
 }
@@ -305,5 +317,73 @@ mod tests {
                 want
             );
         }
+    }
+
+    #[test]
+    fn settled_stack_goes_to_sleep() {
+        let mut world = world_with_ground();
+        // A settled box on the ground forms a one-body island against the
+        // static plane; once it stops moving for the sleep dwell it must sleep.
+        let handle = spawn_box(&mut world, 1.2);
+        let mut solver = XpbdSolver::new();
+        // Two seconds is well past the settle time plus the default 0.5s dwell.
+        for _ in 0..120 {
+            solver.step(&mut world, 1.0 / 60.0, 8);
+        }
+        assert_eq!(
+            world.bodies.is_sleeping(handle),
+            Some(true),
+            "settled box should be asleep"
+        );
+        // A sleeping body neither drifts nor jitters: it holds its rest pose.
+        let y = world.bodies.position(handle).unwrap().y;
+        assert!((y - 0.5).abs() < 0.02, "sleeping box drifted to y = {y}");
+        for _ in 0..120 {
+            solver.step(&mut world, 1.0 / 60.0, 8);
+        }
+        assert_eq!(
+            world.bodies.is_sleeping(handle),
+            Some(true),
+            "box must stay asleep while undisturbed"
+        );
+        let y2 = world.bodies.position(handle).unwrap().y;
+        assert!((y2 - 0.5).abs() < 0.02, "sleeping box moved to y = {y2}");
+    }
+
+    #[test]
+    fn impulse_command_wakes_sleeping_box() {
+        use crate::command::kind::PhysicsCommand;
+
+        let mut world = world_with_ground();
+        let handle = spawn_box(&mut world, 1.2);
+        let mut solver = XpbdSolver::new();
+        for _ in 0..120 {
+            solver.step(&mut world, 1.0 / 60.0, 8);
+        }
+        assert_eq!(world.bodies.is_sleeping(handle), Some(true));
+
+        // Applying an impulse must wake the target immediately.
+        let applied = PhysicsCommand::ApplyLinearImpulse {
+            body: handle,
+            impulse: Vec3::new(0.0, 8.0, 0.0),
+        }
+        .apply(&mut world);
+        assert!(applied);
+        assert_eq!(
+            world.bodies.is_sleeping(handle),
+            Some(false),
+            "impulse should wake the sleeping box"
+        );
+
+        // The woken box actually responds to the impulse instead of staying put.
+        let start_y = world.bodies.position(handle).unwrap().y;
+        for _ in 0..10 {
+            solver.step(&mut world, 1.0 / 60.0, 8);
+        }
+        let y = world.bodies.position(handle).unwrap().y;
+        assert!(
+            y > start_y,
+            "woken box should rise, y = {y} start = {start_y}"
+        );
     }
 }

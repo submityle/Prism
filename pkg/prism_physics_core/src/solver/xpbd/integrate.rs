@@ -32,6 +32,12 @@ pub fn predict(view: &mut BodySolverView<'_>, gravity: Vec3, h: f32) {
         if !view.is_active(i) {
             continue;
         }
+        // Sleeping bodies are frozen: they neither advance nor have their
+        // previous pose re-stamped. The solver stamps the previous pose when it
+        // wakes them, so velocity recovery stays consistent.
+        if view.is_dynamic(i) && view.is_sleeping_slot(i) {
+            continue;
+        }
         view.prev_positions[i] = view.positions[i];
         view.prev_orientations[i] = view.orientations[i];
         if !view.is_dynamic(i) {
@@ -67,7 +73,9 @@ pub fn recover_velocities(view: &mut BodySolverView<'_>, h: f32) {
     }
     let inv_h = 1.0 / h;
     for i in 0..view.slot_count() {
-        if !view.is_dynamic(i) {
+        // Skip non-dynamic and sleeping bodies; a frozen body keeps its zeroed
+        // velocity instead of picking up a spurious finite-difference value.
+        if !view.is_awake_dynamic(i) {
             continue;
         }
         view.linear_velocities[i] = (view.positions[i] - view.prev_positions[i]) * inv_h;
