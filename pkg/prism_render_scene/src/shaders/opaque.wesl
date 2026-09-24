@@ -152,18 +152,14 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     @if(PRISM_DEBUG_VIEW_1 || PRISM_DEBUG_VIEW_2 || PRISM_DEBUG_VIEW_3 || PRISM_DEBUG_VIEW_4) {
         return vec4<f32>(in.debug_color, 1.0);
     }
+    // Honest fallback shading. The real lighting lives in the GPU shading resolve
+    // chain (visibility_raster -> material_classification -> shading_resolve ->
+    // composite); `composite.wesl` overwrites every *covered* view-target pixel
+    // with the resolved linear HDR radiance after this main pass has run. This
+    // forward path only remains authoritative when the visibility buffer is
+    // disabled (feature off, or MSAA != 1). It must therefore NOT invent lighting
+    // with a hard-coded light direction -- doing so would fight the resolve chain
+    // and mislead debugging. Emit unlit base color + emissive only.
     let surface = material_parameters[material_headers[in.material_index].parameter_offset];
-    let N = normalize(in.world_normal);
-    let L = normalize(vec3<f32>(0.4, 0.8, 0.3));
-    let to_view = view.world_position - in.world_position;
-    let V = select(N, normalize(to_view), dot(to_view, to_view) > 1.0e-12);
-    let H = normalize(L + V);
-    let NdotL = max(dot(N, L), 0.0);
-    let NdotH = max(dot(N, H), 0.0);
-    let roughness = clamp(surface.perceptual_roughness, 0.045, 1.0);
-    let diffuse = surface.base_color.rgb * (1.0 - surface.metallic) * NdotL;
-    let f0 = mix(vec3<f32>(0.04 * surface.reflectance), surface.base_color.rgb, surface.metallic);
-    let specular = f0 * pow(NdotH, max(2.0 / (roughness * roughness) - 2.0, 1.0)) * NdotL;
-    let ambient = surface.base_color.rgb * 0.03 * surface.ambient_occlusion;
-    return vec4<f32>(ambient + diffuse + specular + surface.emissive.rgb, surface.base_color.a);
+    return vec4<f32>(surface.base_color.rgb + surface.emissive.rgb, surface.base_color.a);
 }
