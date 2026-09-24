@@ -228,6 +228,40 @@ impl ParticleStorage {
     pub fn inverse_masses(&self) -> &[Real] {
         &self.inverse_masses
     }
+
+    /// Borrows every integration column at once so the substep integrator can
+    /// update positions, previous positions, and velocities together while
+    /// reading inverse masses.
+    ///
+    /// Returning all four columns from a single method sidesteps the borrow
+    /// checker's rule against several simultaneous `&mut self` calls, while
+    /// still exposing distinct field borrows.
+    #[must_use]
+    pub fn columns_mut(&mut self) -> ParticleColumnsMut<'_> {
+        ParticleColumnsMut {
+            positions: &mut self.positions,
+            prev_positions: &mut self.prev_positions,
+            velocities: &mut self.velocities,
+            inverse_masses: &self.inverse_masses,
+        }
+    }
+}
+
+/// A simultaneous borrow of every particle integration column.
+///
+/// Yielded by [`ParticleStorage::columns_mut`]. The three `&mut` columns and
+/// the shared inverse-mass column are all index-aligned and share the same
+/// length.
+#[derive(Debug)]
+pub struct ParticleColumnsMut<'a> {
+    /// Current positions (written by prediction and constraint projection).
+    pub positions: &'a mut [Vec3],
+    /// Positions at the start of the current substep (written by prediction).
+    pub prev_positions: &'a mut [Vec3],
+    /// Current velocities (written when finalizing the substep).
+    pub velocities: &'a mut [Vec3],
+    /// Inverse masses, index-aligned; `0` marks a pinned particle.
+    pub inverse_masses: &'a [Real],
 }
 
 #[cfg(test)]

@@ -27,11 +27,13 @@
 pub mod attachment;
 pub mod bending;
 pub mod distance;
+pub mod set;
 pub mod volume;
 
 pub use attachment::AttachmentConstraint;
 pub use bending::BendingConstraint;
 pub use distance::DistanceConstraint;
+pub use set::ConstraintSet;
 pub use volume::TetraVolumeConstraint;
 
 use glam::Vec3;
