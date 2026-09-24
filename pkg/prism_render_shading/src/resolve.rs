@@ -176,52 +176,76 @@ pub fn resolve_pixel(
         None => ambient_term(base_color, ambient_occlusion, lights.ambient, metallic),
     };
 
+    // Integrates the principled GGX lobe over every analytic light, then adds
+    // the shared indirect + emissive terms once.  Shared by the physically
+    // based classes (Principled and, until their specialized lobes land,
+    // Subsurface/ClearCoat/Cloth/Hair/Water/Custom).
+    let shade_principled = || {
+        let mut accumulated = [0.0; 3];
+        for light in lights.directional {
+            accumulated = add(
+                accumulated,
+                crate::evaluate_principled_direct(lit_surface, frame, direct_sample(*light)),
+            );
+        }
+        for light in lights.punctual {
+            if let Some(sample) = light.sample(geometry.position) {
+                accumulated = add(
+                    accumulated,
+                    crate::evaluate_principled_direct(lit_surface, frame, sample),
+                );
+            }
+        }
+        add(add(accumulated, indirect), emissive)
+    };
+
+    // Integrates the banded toon lobe over every analytic light, then adds the
+    // shared indirect + emissive terms once.  Used by the NPR class.
+    let shade_toon = || {
+        let mut accumulated = [0.0; 3];
+        for light in lights.directional {
+            accumulated = add(
+                accumulated,
+                crate::evaluate_toon_direct(
+                    lit_surface,
+                    frame,
+                    direct_sample(*light),
+                    lights.toon_bands,
+                ),
+            );
+        }
+        for light in lights.punctual {
+            if let Some(sample) = light.sample(geometry.position) {
+                accumulated = add(
+                    accumulated,
+                    crate::evaluate_toon_direct(lit_surface, frame, sample, lights.toon_bands),
+                );
+            }
+        }
+        add(add(accumulated, indirect), emissive)
+    };
+
+    // Every class is handled explicitly so this branch stays byte-for-byte in
+    // step with the `switch` in `shading_resolve.wesl` (9 arms, no wildcard).
+    // Specialized lobes for Subsurface/ClearCoat/Cloth/Hair/Water will replace
+    // their `shade_principled()` fallbacks on both sides together; until then
+    // several arms deliberately share `shade_principled()`, so the lint that
+    // would collapse them is suppressed to preserve the 1:1 GPU switch mapping.
+    #[expect(
+        clippy::match_same_arms,
+        reason = "each class keeps its own arm to mirror the GPU `switch`; specialized lobes replace the shared fallback per class later"
+    )]
     let color = match shading_class {
         // Unlit surfaces bypass the lighting integrator entirely.
         MaterialShadingClass::Unlit => add(base_color, emissive),
-        MaterialShadingClass::Npr => {
-            let mut accumulated = [0.0; 3];
-            for light in lights.directional {
-                accumulated = add(
-                    accumulated,
-                    crate::evaluate_toon_direct(
-                        lit_surface,
-                        frame,
-                        direct_sample(*light),
-                        lights.toon_bands,
-                    ),
-                );
-            }
-            for light in lights.punctual {
-                if let Some(sample) = light.sample(geometry.position) {
-                    accumulated = add(
-                        accumulated,
-                        crate::evaluate_toon_direct(lit_surface, frame, sample, lights.toon_bands),
-                    );
-                }
-            }
-            add(add(accumulated, indirect), emissive)
-        }
-        // Principled is the physically based base shared by the remaining
-        // lit closures; specialized subsurface/cloth/hair lobes extend it later.
-        _ => {
-            let mut accumulated = [0.0; 3];
-            for light in lights.directional {
-                accumulated = add(
-                    accumulated,
-                    crate::evaluate_principled_direct(lit_surface, frame, direct_sample(*light)),
-                );
-            }
-            for light in lights.punctual {
-                if let Some(sample) = light.sample(geometry.position) {
-                    accumulated = add(
-                        accumulated,
-                        crate::evaluate_principled_direct(lit_surface, frame, sample),
-                    );
-                }
-            }
-            add(add(accumulated, indirect), emissive)
-        }
+        MaterialShadingClass::Npr => shade_toon(),
+        MaterialShadingClass::Principled => shade_principled(),
+        MaterialShadingClass::Subsurface => shade_principled(),
+        MaterialShadingClass::ClearCoat => shade_principled(),
+        MaterialShadingClass::Cloth => shade_principled(),
+        MaterialShadingClass::Hair => shade_principled(),
+        MaterialShadingClass::Water => shade_principled(),
+        MaterialShadingClass::Custom => shade_principled(),
     };
 
     Ok(ResolvedPixel {
