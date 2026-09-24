@@ -7,6 +7,7 @@
 //! * [`math`] - column-major matrix / vector helpers for light-space projection.
 //! * [`cascade`] - PSSM split scheme and cascade selection for directional CSM.
 //! * [`csm`] - stabilized cascade light-matrix construction (frustum fit + snap).
+//! * [`atlas`] - shadow-atlas layer budgeting and contiguous-range allocation.
 //! * [`bias`] - normal-offset and slope-scaled depth bias (acne / peter-panning).
 //! * [`filter`] - the [`ShadowDepthSampler`] abstraction plus PCF and PCSS.
 //! * [`directional`] - the directional (cascaded) shadow orchestrator.
@@ -18,6 +19,7 @@
 //! samplers are built in later slices and require on-device validation for
 //! numerical parity.
 
+pub mod atlas;
 pub mod bias;
 pub mod cascade;
 pub mod csm;
@@ -29,6 +31,10 @@ pub mod point;
 pub use bias::{apply_normal_offset, slope_scaled_depth_bias};
 pub use cascade::{
     cascade_blend_weight, compute_cascade_splits, select_cascade, CascadeSplits, MAX_CASCADE_COUNT,
+};
+pub use atlas::{
+    allocate_shadow_atlas, AtlasAllocation, AtlasConfig, AtlasSlot, ShadowKind, ShadowRequest,
+    POINT_LAYER_COUNT,
 };
 pub use csm::{compute_cascade_matrices, CascadeMatrix};
 pub use directional::{
