@@ -20,5 +20,23 @@
 //! atlas texture and feeds these matrices are built in later slices and require
 //! on-device validation for numerical parity against the CPU reference.
 
+mod abi;
+mod bindings;
+mod extract;
+mod resources;
+mod settings;
+mod systems;
+
+pub(crate) use bindings::ShadowBindGroup;
+pub(crate) use extract::extract_shadows;
+pub(crate) use resources::{
+    ExtractedShadows, ShadowAtlas, ShadowAtlasConfig, ShadowGpuBuffers,
+    DEFAULT_SHADOW_ATLAS_LAYERS, DEFAULT_SHADOW_ATLAS_RESOLUTION,
+};
+pub(crate) use settings::PrismShadowSettings;
+pub(crate) use systems::{
+    ensure_shadow_atlas, prepare_shadow_bind_group, rebuild_shadow_buffers, write_shadow_buffers,
+};
+
 #[cfg(test)]
 mod shader_tests;

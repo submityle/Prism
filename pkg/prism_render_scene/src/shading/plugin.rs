@@ -3,8 +3,8 @@ use bevy_asset::embedded_asset;
 use bevy_ecs::schedule::IntoScheduleConfigs;
 use bevy_pbr::MeshPipelineSystems;
 use bevy_render::{
-    init_gpu_resource, GpuResourceAppExt, render_phase::AddRenderCommand, render_resource::SpecializedRenderPipelines,
-    Render, RenderApp, RenderStartup, RenderSystems,
+    init_gpu_resource, ExtractSchedule, GpuResourceAppExt, render_phase::AddRenderCommand,
+    render_resource::SpecializedRenderPipelines, Render, RenderApp, RenderStartup, RenderSystems,
 };
 
 use super::{
@@ -20,6 +20,12 @@ use super::{
     resolve::{
         dispatch_shading_resolve, init_shading_resolve_pipeline,
         prepare_shading_resolve_bind_groups,
+    },
+    shadow::{
+        ensure_shadow_atlas, extract_shadows, prepare_shadow_bind_group, rebuild_shadow_buffers,
+        write_shadow_buffers, ExtractedShadows, PrismShadowSettings, ShadowAtlas, ShadowAtlasConfig,
+        ShadowBindGroup, ShadowGpuBuffers, DEFAULT_SHADOW_ATLAS_LAYERS,
+        DEFAULT_SHADOW_ATLAS_RESOLUTION,
     },
     graph::shading_frame_graph,
     raster::{
@@ -63,6 +69,12 @@ impl Plugin for PrismShadingPlugin {
             .init_gpu_resource::<SpecializedRenderPipelines<ShadingCompositePipeline>>()
             .init_resource::<PrismShadingSettings>()
             .init_resource::<PrismShadingDiagnostics>()
+            .insert_resource(ShadowAtlasConfig::new(
+                DEFAULT_SHADOW_ATLAS_LAYERS,
+                DEFAULT_SHADOW_ATLAS_RESOLUTION,
+            ))
+            .init_resource::<ExtractedShadows>()
+            .init_resource::<PrismShadowSettings>()
             .insert_resource(ShadingFrameGraph {
                 compiled: compiled_graph,
             })
@@ -81,6 +93,15 @@ impl Plugin for PrismShadingPlugin {
                 ),
             )
             .add_systems(
+                RenderStartup,
+                (
+                    init_gpu_resource::<ShadowAtlas>,
+                    init_gpu_resource::<ShadowGpuBuffers>,
+                    init_gpu_resource::<ShadowBindGroup>,
+                )
+                    .chain(),
+            )
+            .add_systems(
                 Render,
                 (
                     prepare_shading_work
@@ -96,11 +117,18 @@ impl Plugin for PrismShadingPlugin {
                     prepare_shading_resolve_bind_groups
                         .after(prepare_material_classification_bind_groups)
                         .in_set(RenderSystems::PrepareBindGroups),
+                    ensure_shadow_atlas.in_set(RenderSystems::PrepareResources),
+                    rebuild_shadow_buffers.in_set(RenderSystems::PrepareResources),
+                    write_shadow_buffers.in_set(RenderSystems::PrepareResourcesFlush),
+                    prepare_shadow_bind_group
+                        .after(write_shadow_buffers)
+                        .in_set(RenderSystems::PrepareBindGroups),
                     prepare_shading_composite_bind_groups
                         .in_set(RenderSystems::PrepareBindGroups),
                     queue_visibility_raster.in_set(RenderSystems::QueueMeshes),
                 ),
-            );
+            )
+            .add_systems(ExtractSchedule, extract_shadows);
         render_app.add_systems(
             bevy_core_pipeline::Core3d,
             (
