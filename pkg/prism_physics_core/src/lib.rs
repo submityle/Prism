@@ -33,6 +33,7 @@
 pub mod backend;
 pub mod collide;
 pub mod collider;
+pub mod command;
 pub mod config;
 pub mod constraint;
 pub mod driver;
@@ -53,6 +54,7 @@ pub use backend::{CpuBackend, PhysicsBackend};
 pub use collide::{generate_contact, ContactManifold, ContactPoint, MAX_MANIFOLD_POINTS};
 pub use collider::material::PhysicsMaterial;
 pub use collider::{ColliderHandle, ColliderShape, ShapeRegistry};
+pub use command::{CommandQueue, PhysicsCommand};
 pub use config::WorldConfig;
 pub use constraint::{Constraint, ConstraintKind};
 pub use driver::{CacheHandle, DriveMode, DriveOutcome, SimulationDriver};
