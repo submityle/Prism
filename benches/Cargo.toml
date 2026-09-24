@@ -28,6 +28,8 @@ bevy_mesh = { path = "../crates/bevy_mesh" }
 bevy_asset = { path = "../crates/bevy_asset" }
 bevy_render = { path = "../crates/bevy_render" }
 prism_render_architecture = { path = "../pkg/prism_render_architecture" }
+prism_physics_core = { path = "../pkg/prism_physics_core" }
+prism_physics_geometry = { path = "../pkg/prism_physics_geometry" }
 bevy_scene = { path = "../crates/bevy_scene" }
 bevy_tasks = { path = "../crates/bevy_tasks" }
 bevy_transform = { path = "../crates/bevy_transform" }
@@ -101,6 +103,11 @@ harness = false
 [[bench]]
 name = "prism_gpu_scene"
 path = "benches/prism_gpu_scene/main.rs"
+harness = false
+
+[[bench]]
+name = "prism_physics"
+path = "benches/prism_physics/main.rs"
 harness = false
 
 [[bench]]
