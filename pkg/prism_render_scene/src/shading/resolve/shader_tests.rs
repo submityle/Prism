@@ -239,6 +239,47 @@ fn hair_wesl_compiles_and_resolves_imports() {
         .unwrap_or_else(|error| panic!("hair.wesl failed to compile/resolve imports: {error}"));
 }
 
+/// Registers `lighting.wesl`, `brdf.wesl` and `water.wesl` under their canonical
+/// module paths and compiles `water.wesl`, forcing the importer to resolve the
+/// `prism_render_scene::shaders::{lighting, brdf}::{...}` imports the single-
+/// layer water lobe depends on (`brdf_normalize_or`, `fresnel_schlick`,
+/// `distribution_ggx`, `vis_smith` and `INV_PI`).
+#[test]
+fn water_wesl_compiles_and_resolves_imports() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let lighting = shader_id(0x5052_4953_4d5f_4c49_4748_5449_4e47_0007);
+    cache.set_shader(
+        lighting,
+        Shader::from_wesl(
+            include_str!("../../shaders/lighting.wesl"),
+            "embedded://prism_render_scene/shaders/lighting.wesl",
+        ),
+    );
+
+    let brdf = shader_id(0x5052_4953_4d5f_4252_4446_0000_0000_0007);
+    cache.set_shader(
+        brdf,
+        Shader::from_wesl(
+            include_str!("../../shaders/brdf.wesl"),
+            "embedded://prism_render_scene/shaders/brdf.wesl",
+        ),
+    );
+
+    let water = shader_id(0x5052_4953_4d5f_5741_5445_5200_0000_0001);
+    cache.set_shader(
+        water,
+        Shader::from_wesl(
+            include_str!("../../shaders/water.wesl"),
+            "embedded://prism_render_scene/shaders/water.wesl",
+        ),
+    );
+
+    cache
+        .get(0, water, &[])
+        .unwrap_or_else(|error| panic!("water.wesl failed to compile/resolve imports: {error}"));
+}
+
 /// Registers the full dependency graph (`surface`, `brdf`, `lighting`,
 /// `material`, `gpu_scene`) under their canonical module paths and compiles
 /// `shading_resolve.wesl`, forcing every `import prism_render_scene::shaders::*`
@@ -249,7 +290,7 @@ fn shading_resolve_wesl_compiles_and_resolves_all_imports() {
 
     // Register each dependency under the byte-identical embedded module path
     // that `load_shader_library!` produces at runtime.
-    let deps: [(u128, &str, &str); 10] = [
+    let deps: [(u128, &str, &str); 11] = [
         (
             0x5052_4953_4d5f_5441_4e47_454e_5400_0002,
             include_str!("../../shaders/tangent.wesl"),
@@ -299,6 +340,11 @@ fn shading_resolve_wesl_compiles_and_resolves_all_imports() {
             0x5052_4953_4d5f_4841_4952_0000_0000_0002,
             include_str!("../../shaders/hair.wesl"),
             "embedded://prism_render_scene/shaders/hair.wesl",
+        ),
+        (
+            0x5052_4953_4d5f_5741_5445_5200_0000_0002,
+            include_str!("../../shaders/water.wesl"),
+            "embedded://prism_render_scene/shaders/water.wesl",
         ),
     ];
     for (tag, source, path) in deps {

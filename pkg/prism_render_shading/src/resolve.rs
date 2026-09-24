@@ -358,12 +358,35 @@ pub fn resolve_pixel(
         add(add(accumulated, indirect), emissive)
     };
 
+    // Integrates the single-layer water lobe over every analytic light, then
+    // adds the shared indirect + emissive terms once.  Used by the Water class;
+    // the Fresnel split routes energy between the surface glint and a
+    // Beer-Lambert-absorbed refracted body.
+    let shade_water = || {
+        let mut accumulated = [0.0; 3];
+        for light in lights.directional {
+            accumulated = add(
+                accumulated,
+                crate::evaluate_water_direct(lit_surface, frame, direct_sample(*light)),
+            );
+        }
+        for light in lights.punctual {
+            if let Some(sample) = light.sample(geometry.position) {
+                accumulated = add(
+                    accumulated,
+                    crate::evaluate_water_direct(lit_surface, frame, sample),
+                );
+            }
+        }
+        add(add(accumulated, indirect), emissive)
+    };
+
     // Every class is handled explicitly so this branch stays byte-for-byte in
     // step with the `switch` in `shading_resolve.wesl` (9 arms, no wildcard).
-    // Cloth, Subsurface and Hair now have dedicated lobes; the remaining
-    // specialized classes (ClearCoat/Water) still share `shade_principled()`
-    // until their lobes land, so the lint that would collapse those equal arms
-    // is suppressed to preserve the 1:1 GPU switch mapping.
+    // Cloth, Subsurface, Hair and Water now have dedicated lobes; the
+    // remaining specialized class (ClearCoat) plus Custom still share
+    // `shade_principled()`, so the lint that would collapse those equal arms is
+    // suppressed to preserve the 1:1 GPU switch mapping.
     #[expect(
         clippy::match_same_arms,
         reason = "each class keeps its own arm to mirror the GPU `switch`; specialized lobes replace the shared fallback per class later"
@@ -377,7 +400,7 @@ pub fn resolve_pixel(
         MaterialShadingClass::ClearCoat => shade_principled(),
         MaterialShadingClass::Cloth => shade_cloth(),
         MaterialShadingClass::Hair => shade_hair(),
-        MaterialShadingClass::Water => shade_principled(),
+        MaterialShadingClass::Water => shade_water(),
         MaterialShadingClass::Custom => shade_principled(),
     };
 

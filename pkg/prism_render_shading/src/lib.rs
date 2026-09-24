@@ -22,6 +22,7 @@ mod tangent;
 mod texture_sample;
 mod vecmath;
 mod visibility;
+mod water;
 
 pub use classification::{
     classify_material_header, ClassificationError, MaterialShadingClass, ShadingWorkItem,
@@ -53,6 +54,7 @@ pub use resolve::{
     ResolveError, ResolveInput, ResolvedPixel,
 };
 pub use subsurface::evaluate_subsurface_direct;
+pub use water::evaluate_water_direct;
 pub use tangent::{
     apply_tangent_space_normal, orthonormal_basis, resolve_tangent_basis, TangentBasis,
 };

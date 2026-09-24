@@ -43,6 +43,7 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/cloth.wesl");
         embedded_asset!(app, "../shaders/subsurface.wesl");
         embedded_asset!(app, "../shaders/hair.wesl");
+        embedded_asset!(app, "../shaders/water.wesl");
         embedded_asset!(app, "../shaders/material_sample.wesl");
         embedded_asset!(app, "../shaders/tangent.wesl");
         embedded_asset!(app, "../shaders/surface.wesl");
