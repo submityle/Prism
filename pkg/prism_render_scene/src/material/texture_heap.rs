@@ -160,6 +160,36 @@ impl BindlessTextureHeap {
         self.capacity
     }
 
+    /// Highest dynamic slot index ever allocated plus one (the high-water mark).
+    /// The bindless upload path only needs to materialise views for slots below
+    /// this bound; everything above is guaranteed to still be a reserved default.
+    pub const fn high_water(&self) -> u32 {
+        self.next
+    }
+
+    /// Iterates every currently resident `(slot_index, image)` pair so the
+    /// render-world upload system can place each live image's `TextureView` and
+    /// `Sampler` at its assigned bindless slot. Reserved slots (0/1/2) are never
+    /// yielded because they are owned by the default fallback textures, not by
+    /// any asset. Iteration order is unspecified.
+    pub fn iter_slots(&self) -> impl Iterator<Item = (u32, AssetId<Image>)> + '_ {
+        self.entries.iter().map(|(image, entry)| (entry.slot, *image))
+    }
+
+    /// Rebuilds the heap with a new total `capacity`, discarding all residency.
+    /// Used once at render startup to clamp the slot space to the device's
+    /// bindless binding-array limit so `acquire` can never hand out an index the
+    /// bound `binding_array` cannot address. Panics if any image is still
+    /// resident, because resizing under live references would silently
+    /// invalidate GPU material rows.
+    pub fn reset_with_capacity(&mut self, capacity: u32) {
+        assert!(
+            self.entries.is_empty(),
+            "bindless texture heap must be empty before its capacity is reconfigured"
+        );
+        *self = Self::new(capacity);
+    }
+
     /// Acquires the bindless slot for `image`, uploading a fresh slot on first
     /// use and reference counting subsequent uses. Returns [`BindlessSlot::WHITE`]
     /// and records an overflow when capacity is exhausted, so callers always get

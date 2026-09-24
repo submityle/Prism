@@ -2,6 +2,7 @@ use super::{
     bindings::MaterialBindGroup,
     buffers::MaterialGpuBuffers,
     runtime::{PrismMaterialDiagnostics, RenderMaterialRegistry},
+    texture_upload::MaterialTextureArrays,
 };
 use crate::completion::GpuCompletionTracker;
 use bevy_asset::AssetEvent;
@@ -61,6 +62,11 @@ pub(crate) fn extract_standard_materials(
     diagnostics.active = snapshot.active_materials;
     diagnostics.epoch = snapshot.epoch;
     diagnostics.buffer_version = snapshot.buffer_version;
+    let texture_stats = runtime.texture_heap_stats();
+    diagnostics.texture_slots_capacity = texture_stats.capacity;
+    diagnostics.texture_images_resident = texture_stats.live_images;
+    diagnostics.texture_overflow = texture_stats.overflow;
+    diagnostics.texture_slots_live = runtime.texture_high_water();
 }
 
 pub(crate) fn invalidate_scene_materials(
@@ -301,10 +307,25 @@ pub(crate) fn reclaim_completed_materials(
 pub(crate) fn prepare_material_bind_group(
     buffers: Res<MaterialGpuBuffers>,
     runtime: Res<RenderMaterialRegistry>,
+    arrays: Res<MaterialTextureArrays>,
     mut bindings: ResMut<MaterialBindGroup>,
     device: Res<RenderDevice>,
 ) {
-    bindings.prepare(&device, &buffers, &runtime);
+    bindings.prepare(&device, &buffers, &runtime, &arrays);
+}
+
+/// Clamps the bindless texture heap to the device-supported binding-array
+/// capacity before any material is published, so `acquire` can never hand out a
+/// slot the bound `binding_array` cannot address. Runs once at render startup
+/// and is a no-op on non-bindless devices, which keep the heap's default
+/// capacity for CPU-side bookkeeping only.
+pub(crate) fn configure_material_texture_capacity(
+    arrays: Res<MaterialTextureArrays>,
+    mut runtime: ResMut<RenderMaterialRegistry>,
+) {
+    if arrays.bindless() {
+        runtime.set_texture_capacity(arrays.capacity());
+    }
 }
 
 pub(crate) fn rebuild_material_buffers(

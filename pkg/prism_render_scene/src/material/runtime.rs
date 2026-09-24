@@ -120,16 +120,29 @@ impl RenderMaterialRegistry {
         TextureResolver { registry: self }
     }
 
-    /// Current bindless texture-heap occupancy, surfaced for diagnostics.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Folded into PrismMaterialDiagnostics by the upcoming bindless upload slice."
-        )
-    )]
+    /// Current bindless texture-heap occupancy, surfaced for diagnostics and
+    /// consumed by the bindless upload system when it sizes its slot arrays.
     pub fn texture_heap_stats(&self) -> BindlessHeapStats {
         self.textures.stats()
+    }
+
+    /// High-water bound of live bindless slots. The upload path only needs to
+    /// materialise `TextureView`s for slots below this value.
+    pub fn texture_high_water(&self) -> u32 {
+        self.textures.high_water()
+    }
+
+    /// Iterates the resident `(slot_index, image)` pairs so the upload system
+    /// can place each live image at its assigned bindless slot.
+    pub fn texture_slots(&self) -> impl Iterator<Item = (AssetId<Image>, u32)> + '_ {
+        self.textures.iter_slots().map(|(slot, image)| (image, slot))
+    }
+
+    /// Clamps the bindless slot space to `capacity` before any material is
+    /// published, so `acquire` can never hand out a slot the bound
+    /// `binding_array` cannot address. Only valid while the heap is empty.
+    pub fn set_texture_capacity(&mut self, capacity: u32) {
+        self.textures.reset_with_capacity(capacity);
     }
 }
 
@@ -146,9 +159,10 @@ impl StandardMaterialTextureResolver for TextureResolver<'_> {
             index: slot.index,
             generation: slot.generation,
             semantic: semantic as u32,
-            // Sampler binding-array wiring lands in a later slice; every texture
-            // shares the default sampler (index 0) until then.
-            sampler_index: 0,
+            // The sampler heap is bound in parallel with the texture heap, so a
+            // texture's sampler lives at the same bindless slot as the texture
+            // itself. Reserved slots 0/1/2 carry the default filtering sampler.
+            sampler_index: slot.index,
         }
     }
 }
@@ -166,4 +180,13 @@ pub struct PrismMaterialDiagnostics {
     pub epoch: u64,
     pub buffer_version: u32,
     pub buffer_rebuilds: u32,
+    /// High-water mark of live bindless texture slots (0 when non-bindless).
+    pub texture_slots_live: u32,
+    /// Total addressable bindless texture slots for the active device.
+    pub texture_slots_capacity: u32,
+    /// Distinct images currently resident in the bindless heap.
+    pub texture_images_resident: u32,
+    /// Cumulative bindless `acquire` calls that hit the capacity ceiling and
+    /// fell back to the white slot.
+    pub texture_overflow: u32,
 }
