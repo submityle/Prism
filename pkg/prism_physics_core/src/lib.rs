@@ -41,6 +41,7 @@ pub mod island;
 pub mod joint;
 pub mod math;
 pub mod pipeline;
+pub mod query;
 pub mod solver;
 pub mod state;
 pub mod world;
@@ -62,6 +63,7 @@ pub use joint::{
 pub use math::scalar::{approx_eq, Real, EPSILON, PI, TAU};
 pub use math::transform::Isometry;
 pub use pipeline::detect_contacts;
+pub use query::{PointProjection, QueryFilter, RayHit, SweepHit};
 pub use solver::{IntegrateOnlySolver, Solver, SolverRegistry, XpbdConfig, XpbdSolver};
 pub use state::body::{BodyDesc, BodyKind, MassProperties};
 pub use state::handle::BodyHandle;
