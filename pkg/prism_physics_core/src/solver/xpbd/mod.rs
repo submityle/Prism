@@ -33,6 +33,7 @@
 pub mod config;
 pub mod contact_constraint;
 pub mod integrate;
+pub mod joint_constraint;
 pub mod rigid;
 pub mod velocity_solve;
 
@@ -80,10 +81,14 @@ impl XpbdSolver {
 
         // Phase 3: resolve positions, recover velocities, resolve velocities.
         {
-            let mut view = world.bodies.solver_view_mut();
+            // Split-borrow the world so the joint storage stays readable while
+            // the solver view mutably borrows only the body columns.
+            let PhysicsWorld { bodies, joints, .. } = world;
+            let mut view = bodies.solver_view_mut();
             let mut constraints = ContactConstraint::build(&view, &manifolds);
             let iterations = self.config.position_iterations.max(1);
             for _ in 0..iterations {
+                joint_constraint::solve_joints(&mut view, joints, h);
                 contact_constraint::solve_positions(&mut view, &mut constraints, &self.config, h);
             }
             integrate::recover_velocities(&mut view, h);

@@ -11,6 +11,7 @@
 /// Handles are cheap to copy and compare. A handle is only valid while the
 /// generation stored in the target slot matches the handle's generation.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 pub struct BodyHandle {
     index: u32,
     generation: u32,

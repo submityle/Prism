@@ -38,6 +38,7 @@ pub mod constraint;
 pub mod driver;
 pub mod dynamics;
 pub mod island;
+pub mod joint;
 pub mod math;
 pub mod pipeline;
 pub mod solver;
@@ -54,6 +55,10 @@ pub use constraint::{Constraint, ConstraintKind};
 pub use driver::{CacheHandle, DriveMode, DriveOutcome, SimulationDriver};
 pub use dynamics::Integrator;
 pub use island::{islands_from_pairs, IslandBuilder, IslandId, IslandSet};
+pub use joint::{
+    AngleLimit, DistanceJoint, FixedJoint, Joint, JointAnchor, JointDesc, JointHandle, JointKind,
+    JointStorage, LinearLimit, Motor, MotorTarget, PrismaticJoint, RevoluteJoint, SphericalJoint,
+};
 pub use math::scalar::{approx_eq, Real, EPSILON, PI, TAU};
 pub use math::transform::Isometry;
 pub use pipeline::detect_contacts;

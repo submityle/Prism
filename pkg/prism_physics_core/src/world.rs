@@ -6,6 +6,7 @@
 
 use crate::collider::ShapeRegistry;
 use crate::config::WorldConfig;
+use crate::joint::{JointDesc, JointHandle, JointStorage};
 use crate::state::body::BodyDesc;
 use crate::state::handle::BodyHandle;
 use crate::state::storage::BodyStorage;
@@ -18,6 +19,8 @@ pub struct PhysicsWorld {
     pub bodies: BodyStorage,
     /// Registry of shared collider shapes.
     pub shapes: ShapeRegistry,
+    /// Storage for all joints binding pairs of bodies.
+    pub joints: JointStorage,
     /// Global simulation configuration.
     pub config: WorldConfig,
 }
@@ -29,6 +32,7 @@ impl PhysicsWorld {
         PhysicsWorld {
             bodies: BodyStorage::new(),
             shapes: ShapeRegistry::new(),
+            joints: JointStorage::new(),
             config,
         }
     }
@@ -43,6 +47,11 @@ impl PhysicsWorld {
     /// Spawns a body described by `desc`, returning its handle.
     pub fn spawn(&mut self, desc: BodyDesc) -> BodyHandle {
         self.bodies.insert(desc)
+    }
+
+    /// Spawns a joint described by `desc`, returning its handle.
+    pub fn spawn_joint(&mut self, desc: JointDesc) -> JointHandle {
+        self.joints.insert(desc)
     }
 }
 
