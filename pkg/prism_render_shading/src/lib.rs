@@ -9,6 +9,7 @@
 extern crate alloc;
 
 mod classification;
+mod cluster;
 mod clearcoat;
 mod cloth;
 mod environment;
@@ -29,6 +30,10 @@ pub use classification::{
     classify_material_header, ClassificationError, MaterialShadingClass, ShadingWorkItem,
     ShadingWorkPlan, MAX_SHADING_CLASSES,
 };
+pub use cluster::{
+    assign_lights_to_clusters, ClusterAabb, ClusterAssignmentConfig, ClusterBoundsBuilder,
+    ClusterGrid, ClusterLightAssignment,
+};
 pub use clearcoat::evaluate_clearcoat_direct;
 pub use cloth::evaluate_cloth_direct;
 pub use environment::{
@@ -45,7 +50,7 @@ pub use shadow::{
     compute_cascade_matrices, compute_cascade_splits, cube_face_and_uv,
     cube_face_view_projections, evaluate_directional_shadow, evaluate_point_shadow,
     pcf_visibility, pcss_visibility, plan_shadow_depth_draws, select_cascade,
-    evaluate_spot_shadow, slope_scaled_depth_bias, spot_view_projection, transform_direction,
+    evaluate_spot_shadow, invert, slope_scaled_depth_bias, spot_view_projection, transform_direction,
     transform_point, AtlasAllocation, AtlasConfig,
     AtlasSlot, BlockerSearch, CascadeMatrix, CascadeSplits, DirectionalShadowConfig,
     DirectionalShadowInput, Mat4, PcssConfig, PointShadowConfig, PointShadowInput, ShadowDepthDraw,

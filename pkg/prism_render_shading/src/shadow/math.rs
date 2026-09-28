@@ -170,6 +170,62 @@ pub(crate) fn normalize3(value: [f32; 3]) -> [f32; 3] {
     }
 }
 
+/// Inverts a column-major 4x4 matrix via cofactor expansion (the Mesa
+/// `gluInvertMatrix` scheme, which assumes exactly this OpenGL column-major
+/// storage).  Returns `None` when the matrix is singular (determinant `0`).
+///
+/// Used by the clustered light-culling reference to unproject froxel corners
+/// with an inverse projection; the arithmetic is plain multiply/add so a GPU
+/// twin fed the same inverse stays in step.
+pub fn invert(matrix: &Mat4) -> Option<Mat4> {
+    let m = matrix;
+    let mut inv = [0.0_f32; 16];
+
+    inv[0] = m[5] * m[10] * m[15] - m[5] * m[11] * m[14] - m[9] * m[6] * m[15]
+        + m[9] * m[7] * m[14] + m[13] * m[6] * m[11] - m[13] * m[7] * m[10];
+    inv[4] = -m[4] * m[10] * m[15] + m[4] * m[11] * m[14] + m[8] * m[6] * m[15]
+        - m[8] * m[7] * m[14] - m[12] * m[6] * m[11] + m[12] * m[7] * m[10];
+    inv[8] = m[4] * m[9] * m[15] - m[4] * m[11] * m[13] - m[8] * m[5] * m[15]
+        + m[8] * m[7] * m[13] + m[12] * m[5] * m[11] - m[12] * m[7] * m[9];
+    inv[12] = -m[4] * m[9] * m[14] + m[4] * m[10] * m[13] + m[8] * m[5] * m[14]
+        - m[8] * m[6] * m[13] - m[12] * m[5] * m[10] + m[12] * m[6] * m[9];
+    inv[1] = -m[1] * m[10] * m[15] + m[1] * m[11] * m[14] + m[9] * m[2] * m[15]
+        - m[9] * m[3] * m[14] - m[13] * m[2] * m[11] + m[13] * m[3] * m[10];
+    inv[5] = m[0] * m[10] * m[15] - m[0] * m[11] * m[14] - m[8] * m[2] * m[15]
+        + m[8] * m[3] * m[14] + m[12] * m[2] * m[11] - m[12] * m[3] * m[10];
+    inv[9] = -m[0] * m[9] * m[15] + m[0] * m[11] * m[13] + m[8] * m[1] * m[15]
+        - m[8] * m[3] * m[13] - m[12] * m[1] * m[11] + m[12] * m[3] * m[9];
+    inv[13] = m[0] * m[9] * m[14] - m[0] * m[10] * m[13] - m[8] * m[1] * m[14]
+        + m[8] * m[2] * m[13] + m[12] * m[1] * m[10] - m[12] * m[2] * m[9];
+    inv[2] = m[1] * m[6] * m[15] - m[1] * m[7] * m[14] - m[5] * m[2] * m[15]
+        + m[5] * m[3] * m[14] + m[13] * m[2] * m[7] - m[13] * m[3] * m[6];
+    inv[6] = -m[0] * m[6] * m[15] + m[0] * m[7] * m[14] + m[4] * m[2] * m[15]
+        - m[4] * m[3] * m[14] - m[12] * m[2] * m[7] + m[12] * m[3] * m[6];
+    inv[10] = m[0] * m[5] * m[15] - m[0] * m[7] * m[13] - m[4] * m[1] * m[15]
+        + m[4] * m[3] * m[13] + m[12] * m[1] * m[7] - m[12] * m[3] * m[5];
+    inv[14] = -m[0] * m[5] * m[14] + m[0] * m[6] * m[13] + m[4] * m[1] * m[14]
+        - m[4] * m[2] * m[13] - m[12] * m[1] * m[6] + m[12] * m[2] * m[5];
+    inv[3] = -m[1] * m[6] * m[11] + m[1] * m[7] * m[10] + m[5] * m[2] * m[11]
+        - m[5] * m[3] * m[10] - m[9] * m[2] * m[7] + m[9] * m[3] * m[6];
+    inv[7] = m[0] * m[6] * m[11] - m[0] * m[7] * m[10] - m[4] * m[2] * m[11]
+        + m[4] * m[3] * m[10] + m[8] * m[2] * m[7] - m[8] * m[3] * m[6];
+    inv[11] = -m[0] * m[5] * m[11] + m[0] * m[7] * m[9] + m[4] * m[1] * m[11]
+        - m[4] * m[3] * m[9] - m[8] * m[1] * m[7] + m[8] * m[3] * m[5];
+    inv[15] = m[0] * m[5] * m[10] - m[0] * m[6] * m[9] - m[4] * m[1] * m[10]
+        + m[4] * m[2] * m[9] + m[8] * m[1] * m[6] - m[8] * m[2] * m[5];
+
+    let det = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12];
+    if det == 0.0 || !det.is_finite() {
+        return None;
+    }
+    let inv_det = det.recip();
+    let mut out = [0.0_f32; 16];
+    for index in 0..16 {
+        out[index] = inv[index] * inv_det;
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,6 +250,29 @@ mod tests {
         assert_eq!(transform_direction(&m, [1.0, 0.0, 0.0]), [1.0, 0.0, 0.0]);
     }
 
+
+    /// `invert` must satisfy `M * inverse(M) == I` for a perspective matrix.
+    #[test]
+    fn invert_round_trips_a_perspective() {
+        let proj = perspective_rh_01(core::f32::consts::FRAC_PI_2, 16.0 / 9.0, 0.1, 100.0);
+        let inv = invert(&proj).expect("perspective is invertible");
+        let product = mul(&proj, &inv);
+        let expected = identity();
+        for index in 0..16 {
+            assert!(
+                (product[index] - expected[index]).abs() < 1.0e-4,
+                "element {index}: {} vs {}",
+                product[index],
+                expected[index]
+            );
+        }
+    }
+
+    /// A singular (all-zero) matrix has no inverse.
+    #[test]
+    fn invert_rejects_a_singular_matrix() {
+        assert!(invert(&[0.0; 16]).is_none());
+    }
 
     fn identity() -> Mat4 {
         let mut m = [0.0; 16];

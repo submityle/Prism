@@ -50,7 +50,7 @@ pub use directional::{
 pub use filter::{
     blocker_search, pcf_visibility, pcss_visibility, BlockerSearch, PcssConfig, ShadowDepthSampler,
 };
-pub use math::{transform_direction, transform_point, Mat4};
+pub use math::{invert, transform_direction, transform_point, Mat4};
 pub use point::{
     cube_face_and_uv, cube_face_view_projections, evaluate_point_shadow, PointShadowConfig,
     PointShadowInput,
