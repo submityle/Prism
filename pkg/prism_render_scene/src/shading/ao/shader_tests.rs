@@ -92,3 +92,27 @@ fn gtao_denoise_wesl_compiles_standalone() {
         .get(0, denoise, &[])
         .unwrap_or_else(|error| panic!("gtao_denoise.wesl failed to compile: {error}"));
 }
+
+
+/// Compiles `gtao_temporal.wesl` on its own.  The temporal accumulation is
+/// self-contained (no `import`s), so a green result proves the reprojection
+/// math, the variance-clip band helpers, the adaptive-weight knee, the
+/// immediate `GtaoTemporalConfig` block and the two storage-texture writes all
+/// parse and type-check exactly as the render world will build them.
+#[test]
+fn gtao_temporal_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let temporal = shader_id(0x5052_4953_4d5f_4741_4f5f_5445_4d50_0001);
+    cache.set_shader(
+        temporal,
+        Shader::from_wesl(
+            include_str!("../../shaders/gtao_temporal.wesl"),
+            "embedded://prism_render_scene/shaders/gtao_temporal.wesl",
+        ),
+    );
+
+    cache
+        .get(0, temporal, &[])
+        .unwrap_or_else(|error| panic!("gtao_temporal.wesl failed to compile: {error}"));
+}

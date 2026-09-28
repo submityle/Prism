@@ -50,6 +50,12 @@ pub(crate) struct ViewGtaoTextures {
     /// `ambient_occlusion`.
     raw_ambient_occlusion: CachedTexture,
     ambient_occlusion: CachedTexture,
+    /// Temporal-accumulation target. When GTAO temporal is enabled the
+    /// spatial denoise writes here and the temporal pass reads it, reprojects
+    /// last frame's history, and writes the blended result into
+    /// `ambient_occlusion` (which the resolve reads). Always allocated so the
+    /// binding wiring stays branch-free; unused when temporal is off.
+    denoised_ambient_occlusion: CachedTexture,
     pub(crate) size: bevy_math::UVec2,
 }
 
@@ -73,6 +79,12 @@ impl ViewGtaoTextures {
     /// Storage/sampling view of the ambient-visibility target.
     pub(crate) fn ambient_occlusion_view(&self) -> &TextureView {
         &self.ambient_occlusion.default_view
+    }
+
+    /// Storage/sampling view of the temporal-accumulation target the spatial
+    /// denoise writes (and the temporal pass reads) when GTAO temporal is on.
+    pub(crate) fn denoised_ambient_occlusion_view(&self) -> &TextureView {
+        &self.denoised_ambient_occlusion.default_view
     }
 }
 
@@ -170,11 +182,27 @@ pub(crate) fn prepare_gtao_textures(
             },
         );
 
+        let denoised_ambient_occlusion = texture_cache.get(
+            &device,
+            TextureDescriptor {
+                label: Some("prism GTAO denoised ambient occlusion"),
+                size: size.to_extents(),
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: TextureDimension::D2,
+                format: GTAO_AO_FORMAT,
+                // Written by the spatial denoise, read by the temporal pass.
+                usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+        );
+
         commands.entity(entity).insert(ViewGtaoTextures {
             linear_depth,
             view_normal,
             raw_ambient_occlusion,
             ambient_occlusion,
+            denoised_ambient_occlusion,
             size,
         });
     }

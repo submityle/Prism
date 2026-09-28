@@ -9,10 +9,11 @@ use bevy_render::{
 
 use super::{
     ao::{
-        gtao_compute_pass, gtao_denoise_pass, gtao_prepass_pass,
+        gtao_compute_pass, gtao_denoise_pass, gtao_prepass_pass, gtao_temporal_pass,
         init_gtao_denoise_pipeline, init_gtao_kernel_pipeline, init_gtao_prepass_pipeline,
-        prepare_gtao_denoise_bind_groups, prepare_gtao_kernel_bind_groups,
-        prepare_gtao_prepass_bind_groups, prepare_gtao_textures,
+        init_gtao_temporal_pipeline, prepare_gtao_denoise_bind_groups,
+        prepare_gtao_kernel_bind_groups, prepare_gtao_prepass_bind_groups,
+        prepare_gtao_temporal_bind_groups, prepare_gtao_temporal_textures, prepare_gtao_textures,
     },
     ssr::{
         init_ssr_color_mips_pipeline, init_ssr_composite_pipeline, init_ssr_hzb_pipeline,
@@ -96,6 +97,7 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/gtao_prepass.wesl");
         embedded_asset!(app, "../shaders/gtao.wesl");
         embedded_asset!(app, "../shaders/gtao_denoise.wesl");
+        embedded_asset!(app, "../shaders/gtao_temporal.wesl");
         embedded_asset!(app, "../shaders/ssr_prepass.wesl");
         embedded_asset!(app, "../shaders/ssr_hzb.wesl");
         embedded_asset!(app, "../shaders/ssr_repack.wesl");
@@ -166,6 +168,7 @@ impl Plugin for PrismShadingPlugin {
                         init_gtao_prepass_pipeline,
                         init_gtao_kernel_pipeline,
                         init_gtao_denoise_pipeline,
+                        init_gtao_temporal_pipeline,
                     ),
                     init_ssr_prepass_pipeline,
                     init_ssr_hzb_pipeline,
@@ -267,6 +270,12 @@ impl Plugin for PrismShadingPlugin {
                     prepare_gtao_denoise_bind_groups
                         .after(prepare_gtao_textures)
                         .in_set(RenderSystems::PrepareBindGroups),
+                    prepare_gtao_temporal_textures
+                        .after(prepare_gtao_textures)
+                        .in_set(RenderSystems::PrepareResources),
+                    prepare_gtao_temporal_bind_groups
+                        .after(prepare_gtao_temporal_textures)
+                        .in_set(RenderSystems::PrepareBindGroups),
                 ),
             )
             .add_systems(
@@ -347,6 +356,9 @@ impl Plugin for PrismShadingPlugin {
                         .before(dispatch_shading_resolve),
                     gtao_denoise_pass
                         .after(gtao_compute_pass)
+                        .before(dispatch_shading_resolve),
+                    gtao_temporal_pass
+                        .after(gtao_denoise_pass)
                         .before(dispatch_shading_resolve),
                 ),
                 ssr_prepass_pass

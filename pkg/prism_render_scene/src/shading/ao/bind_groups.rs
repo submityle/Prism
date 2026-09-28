@@ -22,6 +22,7 @@ use bevy_render::{
 use crate::{GpuSceneBuffers, RenderShadingGeometryBuffers};
 
 use super::super::resources::ViewVisibilityBuffer;
+use super::super::runtime::PrismShadingSettings;
 use super::pipeline::{GtaoDenoisePipeline, GtaoKernelPipeline, GtaoPrepassPipeline};
 use super::resources::ViewGtaoTextures;
 
@@ -141,9 +142,19 @@ pub(crate) fn prepare_gtao_denoise_bind_groups(
     mut commands: Commands,
     pipeline: Res<GtaoDenoisePipeline>,
     device: Res<RenderDevice>,
+    settings: Res<PrismShadingSettings>,
     views: Query<(Entity, &ViewGtaoTextures)>,
 ) {
     for (entity, textures) in &views {
+        // With temporal accumulation on, the denoise feeds the temporal pass via
+        // the dedicated `denoised_ambient_occlusion` target and the temporal
+        // pass writes the final `ambient_occlusion` the resolve reads. With it
+        // off, the denoise writes `ambient_occlusion` directly.
+        let denoise_out = if settings.enable_gtao_temporal {
+            textures.denoised_ambient_occlusion_view()
+        } else {
+            textures.ambient_occlusion_view()
+        };
         let view = device.create_bind_group(
             "prism GTAO denoise view",
             &pipeline.view_layout,
@@ -151,7 +162,7 @@ pub(crate) fn prepare_gtao_denoise_bind_groups(
                 textures.raw_ambient_occlusion_view(),
                 textures.linear_depth_view(),
                 textures.view_normal_view(),
-                textures.ambient_occlusion_view(),
+                denoise_out,
             )),
         );
         commands

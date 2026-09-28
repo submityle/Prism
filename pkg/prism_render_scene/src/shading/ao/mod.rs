@@ -29,6 +29,7 @@ mod bind_groups;
 mod dispatch;
 mod pipeline;
 mod resources;
+mod temporal;
 
 #[cfg(test)]
 mod shader_tests;
@@ -42,3 +43,7 @@ pub(crate) use pipeline::{
     init_gtao_denoise_pipeline, init_gtao_kernel_pipeline, init_gtao_prepass_pipeline,
 };
 pub(crate) use resources::{prepare_gtao_textures, ViewGtaoTextures};
+pub(crate) use temporal::{
+    gtao_temporal_pass, init_gtao_temporal_pipeline, prepare_gtao_temporal_bind_groups,
+    prepare_gtao_temporal_textures,
+};

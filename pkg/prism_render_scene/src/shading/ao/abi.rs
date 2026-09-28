@@ -136,6 +136,48 @@ impl GpuGtaoDenoiseConfig {
     }
 }
 
+/// Workgroup size (per axis) of the `gtao_temporal` compute entry point.
+///
+/// Must match `@workgroup_size(N, N, 1)` in `shaders/gtao_temporal.wesl`; the
+/// dispatch rounds the viewport up to a multiple of this on both axes.
+pub(crate) const GTAO_TEMPORAL_WORKGROUP_SIZE: u32 = 8;
+
+/// Immediate (push-constant) block consumed by `gtao_temporal.wesl`.
+///
+/// Mirrors the WGSL `GtaoTemporalConfig` field-for-field: the merged
+/// view-space -> previous-clip matrix (`clip_from_world_prev * world_from_view`,
+/// uploaded via [`glam::Mat4::to_cols_array`]) leads so its 64 bytes stay
+/// 16-byte aligned, followed by the reconstruct field-of-view tangents, the
+/// three golden temporal tunables, and the framebuffer extent plus the
+/// history-valid flag. 64 + 5*4 + 3*4 = 96 bytes total (a 16-byte multiple, so
+/// no trailing padding is needed). The tangents are derived exactly as
+/// [`prism_render_shading::ao::GtaoCamera::from_projection`] does
+/// (`tan_half_fov = 1 / |proj_diag|`) so the CPU golden and this GPU twin
+/// reconstruct identical view-space positions.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable, PartialEq)]
+pub(crate) struct GpuGtaoTemporalConfig {
+    /// Column-major `clip_from_world_prev * world_from_view`: view space ->
+    /// previous-frame clip space, for depth-based reprojection.
+    pub clip_prev_from_view: [f32; 16],
+    /// `1 / |proj[0][0]|`; scales NDC x into a view-space slope (reconstruct).
+    pub tan_half_fov_x: f32,
+    /// `1 / |proj[1][1]|`; scales NDC y into a view-space slope (reconstruct).
+    pub tan_half_fov_y: f32,
+    /// Fraction of the reprojected history kept when it agrees with the band.
+    pub history_weight: f32,
+    /// Floor the adaptive weight decays toward on a disocclusion.
+    pub min_history_weight: f32,
+    /// Stddev multiplier for the variance clip band (`mean +/- gamma*sigma`).
+    pub variance_gamma: f32,
+    /// Framebuffer width in pixels; invocations at or beyond it early-out.
+    pub width: u32,
+    /// Framebuffer height in pixels.
+    pub height: u32,
+    /// `1` when a previous frame is available (no resize / first frame), else `0`.
+    pub valid_history: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,5 +221,14 @@ mod tests {
         assert_eq!(config.slice_count, 1);
         assert_eq!(config.steps_per_slice, 1);
         assert_eq!(config.padding, 0);
+    }
+
+    #[test]
+    fn temporal_config_layout_matches_the_wgsl_config_struct() {
+        // 64-byte mat4x4 (16-byte aligned) + five f32 + three u32 = 96 bytes,
+        // a 16-byte multiple, 4-byte aligned; no trailing padding needed.
+        assert_eq!(size_of::<GpuGtaoTemporalConfig>(), 96);
+        assert_eq!(align_of::<GpuGtaoTemporalConfig>(), 4);
+        assert_eq!(GTAO_TEMPORAL_WORKGROUP_SIZE, 8);
     }
 }
