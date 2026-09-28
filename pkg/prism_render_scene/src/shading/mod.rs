@@ -1,6 +1,7 @@
 mod ao;
 mod classification_gpu;
 mod composite;
+mod exposure;
 mod graph;
 mod ibl;
 mod light_routing;

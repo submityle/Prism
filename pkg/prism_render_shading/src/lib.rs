@@ -14,6 +14,7 @@ mod cluster;
 mod clearcoat;
 mod cloth;
 mod environment;
+mod exposure;
 mod face_shadow;
 mod hair;
 mod light_routing;
@@ -54,6 +55,11 @@ pub use environment::{
     env_brdf_approx, evaluate_image_based_light, evaluate_image_based_light_specular,
     integrate_brdf, prefilter_radiance, project_cubemap_to_sh, CubemapFaces, DfgLut,
     ImageBasedLight, PrefilteredEnvMap, SpecularEnvironment, SphericalHarmonicsL2,
+};
+pub use exposure::{
+    average_luminance_from_histogram, ev100_from_average_luminance, exposure_from_ev100,
+    luminance, max_luminance_for_ev100, AutoExposureSettings, EyeAdaptation, HistogramPercentiles,
+    HistogramRange, PhysicalCamera, LUMINANCE_WEIGHTS, MAX_LUMINANCE_FACTOR, METER_CALIBRATION_K,
 };
 pub use hair::evaluate_hair_direct;
 pub use oit::{
