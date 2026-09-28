@@ -14,6 +14,7 @@ mod cluster;
 mod extract;
 mod plugin;
 mod probe;
+mod stylized_config;
 mod systems;
 
 #[cfg(test)]
@@ -34,3 +35,4 @@ pub use probe::{
     cubemap_faces_from_image, project_image_to_sh, EnvironmentProbeCache,
 };
 pub use plugin::PrismLightingPlugin;
+pub use stylized_config::StylizedLighting;

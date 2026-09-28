@@ -34,8 +34,11 @@ use bevy_transform::components::GlobalTransform;
 use core::f32::consts::{FRAC_PI_2, PI};
 use prism_render_shading::{PunctualLight, SphericalHarmonicsL2};
 
-use super::abi::{GpuDirectionalLight, GpuLightEnvironment, GpuPunctualLight};
+use super::abi::{
+    GpuDirectionalLight, GpuLightEnvironment, GpuPunctualLight, GpuStylizedParams,
+};
 use super::probe::EnvironmentProbeCache;
+use super::stylized_config::StylizedLighting;
 
 /// Reciprocal of the full sphere solid angle used to turn a punctual light's
 /// luminous power (lumens) into radiant intensity (candela).
@@ -96,6 +99,7 @@ fn scale_rgb(rgb: [f32; 3], scalar: f32) -> [f32; 3] {
 pub(crate) fn extract_lights(
     mut extracted: ResMut<ExtractedLights>,
     ambient: Extract<Option<Res<GlobalAmbientLight>>>,
+    stylized: Extract<Option<Res<StylizedLighting>>>,
     directionals: Extract<
         Query<(&DirectionalLight, &GlobalTransform, Option<&ViewVisibility>)>,
     >,
@@ -110,6 +114,13 @@ pub(crate) fn extract_lights(
     if let Some(ambient) = ambient.as_deref() {
         extracted.environment.ambient =
             scale_rgb(linear_rgb(ambient.color), ambient.brightness);
+    }
+
+    // Frame-global stylized (NPR) look control.  When the resource is absent
+    // the default `GpuStylizedParams` (legacy four-band toon) set by `clear()`
+    // above stands, so the stylized-shaded result is unchanged.
+    if let Some(stylized) = stylized.as_deref() {
+        apply_stylized(&mut extracted.environment, stylized);
     }
 
     // Image-based lighting: project the first readable environment probe into
@@ -219,6 +230,16 @@ fn extract_environment_probe(
     }
 }
 
+/// Copies the frame-global stylized look controls into the environment record
+/// the resolve pass reads.
+///
+/// Kept as a standalone helper so the extraction ordering (this must run
+/// *after* [`ExtractedLights::clear`] resets the environment to its default)
+/// stays unit-testable without the full `Extract` plumbing.
+fn apply_stylized(environment: &mut GpuLightEnvironment, config: &StylizedLighting) {
+    environment.stylized = GpuStylizedParams::from(config.params);
+}
+
 /// A light is contributing unless it carries an explicitly-hidden
 /// [`ViewVisibility`].
 fn is_hidden(visibility: Option<&ViewVisibility>) -> bool {
@@ -266,5 +287,40 @@ mod tests {
         lights.clear();
         assert!(lights.directionals.is_empty());
         assert_eq!(lights.environment.ambient, [0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn apply_stylized_uploads_config_params() {
+        use prism_render_shading::StylizedParams;
+
+        let mut environment = GpuLightEnvironment::default();
+        // Default environment carries the legacy four-band toon lobe.
+        assert_eq!(environment.stylized.bands, 4);
+
+        let config = StylizedLighting::from(StylizedParams::with_bands(6));
+        apply_stylized(&mut environment, &config);
+        assert_eq!(
+            environment.stylized,
+            GpuStylizedParams::from(StylizedParams::with_bands(6))
+        );
+        assert_eq!(environment.stylized.bands, 6);
+    }
+
+    #[test]
+    fn apply_stylized_runs_after_clear_ordering() {
+        use prism_render_shading::StylizedParams;
+
+        // Mirror the extraction ordering: clear() first (resets to default),
+        // then apply the stylized config, which must survive the reset.
+        let mut lights = ExtractedLights::default();
+        lights.environment.stylized = GpuStylizedParams::from(StylizedParams::with_bands(9));
+        lights.clear();
+        assert_eq!(lights.environment.stylized.bands, 4, "clear resets to default");
+
+        apply_stylized(
+            &mut lights.environment,
+            &StylizedLighting::from(StylizedParams::with_bands(7)),
+        );
+        assert_eq!(lights.environment.stylized.bands, 7);
     }
 }

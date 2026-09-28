@@ -42,7 +42,7 @@ pub use lighting::{
     cubemap_faces_from_image, project_image_to_sh, ClusterViewFit, EnvironmentProbeCache,
     ExtractedClusterView, ExtractedLights, GpuClusterGrid, GpuDirectionalLight,
     GpuLightEnvironment, GpuPunctualLight, LightBindGroup, LightGpuBuffers, PrismLightingPlugin,
-    LIGHT_ENVIRONMENT_FLAG_IMAGE_BASED,
+    StylizedLighting, LIGHT_ENVIRONMENT_FLAG_IMAGE_BASED,
 };
 pub use material::{
     BindlessHeapStats, BindlessSlot, BindlessTextureHeap, MaterialBindGroup,

@@ -23,6 +23,7 @@ use super::{
     },
     extract::{extract_lights, ExtractedLights},
     probe::EnvironmentProbeCache,
+    stylized_config::StylizedLighting,
     systems::{prepare_light_bind_group, rebuild_light_buffers, write_light_buffers},
 };
 
@@ -33,6 +34,10 @@ pub struct PrismLightingPlugin;
 impl Plugin for PrismLightingPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "../shaders/lighting.wesl");
+        // The stylized (NPR) look control lives in the main world; extraction
+        // reads it via `Extract`.  Its default is the legacy toon lobe, so
+        // registering it here is a behavioural no-op until an app mutates it.
+        app.init_resource::<StylizedLighting>();
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
