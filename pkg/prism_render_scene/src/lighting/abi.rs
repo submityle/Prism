@@ -12,7 +12,7 @@
 //! and attenuation encoding rather than re-deriving it here.
 
 use bytemuck::{Pod, Zeroable};
-use prism_render_shading::{DirectionalLight, PunctualLight, SphericalHarmonicsL2};
+use prism_render_shading::{DirectionalLight, PunctualLight, SphericalHarmonicsL2, StylizedParams};
 
 /// Flag bit: the environment carries a valid image-based (SH) probe and the
 /// resolve pass must use it for the indirect term instead of the constant
@@ -140,6 +140,87 @@ impl From<GpuPunctualLight> for PunctualLight {
     }
 }
 
+/// Stylized (non-photoreal / NPR) front-end controls mirroring
+/// [`prism_render_shading::StylizedParams`] onto the GPU.
+///
+/// The field order is chosen so each `vec3` tint sits at the start of a
+/// 16-byte row followed by its companion scalar, matching the WESL
+/// `StylizedParams` mirror in `lighting.wesl`.  It is a whole number of
+/// 16-byte rows (64 bytes) with no interior padding, so it is `Pod` and valid
+/// as either an `std430` storage member or an `std140` uniform member.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+pub struct GpuStylizedParams {
+    /// Cel quantization band count for the diffuse ramp (`>= 1`).
+    pub bands: u32,
+    /// Cosine wrap in `[0, 1]`; `0` is pure Lambert, `0.5` is half-Lambert.
+    pub wrap: f32,
+    /// Band-edge softness in `[0, 1]`; `0` gives hard ink-line steps.
+    pub ramp_softness: f32,
+    /// Stepped-shadow threshold in `[0, 1]`.
+    pub shadow_threshold: f32,
+    /// Half-width of the stylized shadow transition.
+    pub shadow_softness: f32,
+    /// Stylized specular intensity; `0` disables the highlight.
+    pub specular_intensity: f32,
+    /// Highlight cutoff applied to the sharpened `N.H` response.
+    pub specular_threshold: f32,
+    /// Half-width of the highlight edge.
+    pub specular_softness: f32,
+    /// Linear tint of the stylized highlight (row start; `w` = `rim_intensity`).
+    pub specular_color: [f32; 3],
+    /// Rim (edge) light intensity; `0` disables the rim.
+    pub rim_intensity: f32,
+    /// Linear tint of the rim light (row start; `w` = `rim_power`).
+    pub rim_color: [f32; 3],
+    /// Fresnel exponent controlling how tightly the rim hugs the silhouette.
+    pub rim_power: f32,
+}
+
+impl Default for GpuStylizedParams {
+    fn default() -> Self {
+        Self::from(StylizedParams::default())
+    }
+}
+
+impl From<StylizedParams> for GpuStylizedParams {
+    fn from(p: StylizedParams) -> Self {
+        Self {
+            bands: p.bands,
+            wrap: p.wrap,
+            ramp_softness: p.ramp_softness,
+            shadow_threshold: p.shadow_threshold,
+            shadow_softness: p.shadow_softness,
+            specular_intensity: p.specular_intensity,
+            specular_threshold: p.specular_threshold,
+            specular_softness: p.specular_softness,
+            specular_color: p.specular_color,
+            rim_intensity: p.rim_intensity,
+            rim_color: p.rim_color,
+            rim_power: p.rim_power,
+        }
+    }
+}
+
+impl From<GpuStylizedParams> for StylizedParams {
+    fn from(p: GpuStylizedParams) -> Self {
+        Self {
+            bands: p.bands,
+            wrap: p.wrap,
+            ramp_softness: p.ramp_softness,
+            shadow_threshold: p.shadow_threshold,
+            shadow_softness: p.shadow_softness,
+            specular_intensity: p.specular_intensity,
+            specular_threshold: p.specular_threshold,
+            specular_softness: p.specular_softness,
+            specular_color: p.specular_color,
+            rim_intensity: p.rim_intensity,
+            rim_power: p.rim_power,
+            rim_color: p.rim_color,
+        }
+    }
+}
+
 /// Frame-constant lighting environment shared by every shaded pixel.
 ///
 /// The nine `sh` rows store one L2 spherical-harmonic radiance coefficient each
@@ -157,12 +238,16 @@ pub struct GpuLightEnvironment {
     pub sh: [[f32; 4]; 9],
     /// Number of valid entries in the punctual light buffer.
     pub punctual_count: u32,
-    /// Quantization band count used by the non-photoreal toon path.
-    pub toon_bands: u32,
+    /// Reserved padding (formerly `toon_bands`; the stylized band count now
+    /// lives in `stylized.bands`).  Always zero.
+    pub _reserved0: u32,
     /// Reserved exposure scale (`1.0` = neutral) for a future exposure stage.
     pub exposure: f32,
     /// Bit flags; see `LIGHT_ENVIRONMENT_FLAG_*`.
     pub flags: u32,
+    /// Stylized (NPR) front-end controls consumed by the `Npr` resolve arm.
+    /// Its default reproduces the historical banded toon lobe.
+    pub stylized: GpuStylizedParams,
 }
 
 impl Default for GpuLightEnvironment {
@@ -172,9 +257,10 @@ impl Default for GpuLightEnvironment {
             directional_count: 0,
             sh: [[0.0; 4]; 9],
             punctual_count: 0,
-            toon_bands: 4,
+            _reserved0: 0,
             exposure: 1.0,
             flags: 0,
+            stylized: GpuStylizedParams::default(),
         }
     }
 }
@@ -212,13 +298,16 @@ mod tests {
     fn abi_sizes_and_alignments_are_std430_safe() {
         assert_eq!(size_of::<GpuDirectionalLight>(), 32);
         assert_eq!(size_of::<GpuPunctualLight>(), 64);
-        assert_eq!(size_of::<GpuLightEnvironment>(), 176);
+        assert_eq!(size_of::<GpuStylizedParams>(), 64);
+        assert_eq!(size_of::<GpuLightEnvironment>(), 240);
         assert_eq!(align_of::<GpuDirectionalLight>(), 4);
         assert_eq!(align_of::<GpuPunctualLight>(), 4);
+        assert_eq!(align_of::<GpuStylizedParams>(), 4);
         assert_eq!(align_of::<GpuLightEnvironment>(), 4);
         // Every record is a whole number of 16-byte GPU rows.
         assert_eq!(size_of::<GpuDirectionalLight>() % 16, 0);
         assert_eq!(size_of::<GpuPunctualLight>() % 16, 0);
+        assert_eq!(size_of::<GpuStylizedParams>() % 16, 0);
         assert_eq!(size_of::<GpuLightEnvironment>() % 16, 0);
     }
 
@@ -267,7 +356,7 @@ mod tests {
             ambient: [0.1, 0.2, 0.3],
             directional_count: 2,
             punctual_count: 7,
-            toon_bands: 5,
+            stylized: GpuStylizedParams::from(StylizedParams::with_bands(5)),
             ..Default::default()
         };
         assert!(!environment.has_image_based());
@@ -276,7 +365,7 @@ mod tests {
         assert_eq!(environment.spherical_harmonics(), probe);
         assert_eq!(environment.directional_count, 2);
         assert_eq!(environment.punctual_count, 7);
-        assert_eq!(environment.toon_bands, 5);
+        assert_eq!(environment.stylized.bands, 5);
     }
 
     #[test]
@@ -289,7 +378,8 @@ mod tests {
         assert_eq!(punctual.intensity, [0.0; 3]);
         let environment = GpuLightEnvironment::default();
         assert_eq!(environment.exposure, 1.0);
-        assert_eq!(environment.toon_bands, 4);
+        assert_eq!(environment.stylized.bands, 4);
+        assert_eq!(environment._reserved0, 0);
         assert_eq!(environment.flags, 0);
     }
 }

@@ -39,7 +39,7 @@ import prism_render_scene::shaders::brdf::{
     DirectLightSample,
     brdf_normalize_or,
     principled_direct,
-    toon_direct,
+    stylized_direct,
 };
 import prism_render_scene::shaders::cloth::{
     cloth_direct,
@@ -569,12 +569,12 @@ fn shade_toon(
     slice: ClusterSlice,
 ) -> vec3<f32> {
     var accumulated = vec3<f32>(0.0);
-    let bands = env.toon_bands;
+    let stylized = env.stylized;
 
     let directional_total = min(env.directional_count, arrayLength(&directional_lights));
     for (var i = 0u; i < directional_total; i = i + 1u) {
         let sample = sample_directional_shadowed(i, frame, world_position);
-        accumulated = accumulated + toon_direct(lit, frame, to_direct_sample(sample), bands);
+        accumulated = accumulated + stylized_direct(lit, frame, to_direct_sample(sample), stylized);
     }
 
     let punctual_total = min(env.punctual_count, arrayLength(&punctual_lights));
@@ -591,7 +591,7 @@ fn shade_toon(
         if sample.valid == 0.0 {
             continue;
         }
-        accumulated = accumulated + toon_direct(lit, frame, to_direct_sample(sample), bands);
+        accumulated = accumulated + stylized_direct(lit, frame, to_direct_sample(sample), stylized);
     }
 
     return accumulated + indirect + emissive;

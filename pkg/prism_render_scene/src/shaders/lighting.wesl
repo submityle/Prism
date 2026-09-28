@@ -58,6 +58,37 @@ struct PunctualLight {
     pad2: f32,
 }
 
+// Stylized (non-photoreal) front-end controls. Byte-for-byte mirror of
+// `GpuStylizedParams` in `lighting/abi.rs`: four 16-byte rows, each `vec3`
+// tint sharing its row with a trailing scalar. Consumed by `stylized_direct`
+// in `brdf.wesl`.
+struct StylizedParams {
+    // Cel quantization band count for the diffuse ramp (>= 1).
+    bands: u32,
+    // Cosine wrap in [0, 1]; 0 is pure Lambert, 0.5 is half-Lambert.
+    wrap: f32,
+    // Band-edge softness in [0, 1]; 0 gives hard ink-line steps.
+    ramp_softness: f32,
+    // Stepped-shadow threshold in [0, 1].
+    shadow_threshold: f32,
+    // Half-width of the stylized shadow transition.
+    shadow_softness: f32,
+    // Stylized specular intensity; 0 disables the highlight.
+    specular_intensity: f32,
+    // Highlight cutoff applied to the sharpened N.H response.
+    specular_threshold: f32,
+    // Half-width of the highlight edge.
+    specular_softness: f32,
+    // Linear tint of the stylized highlight (row start).
+    specular_color: vec3<f32>,
+    // Rim (edge) light intensity; 0 disables the rim.
+    rim_intensity: f32,
+    // Linear tint of the rim light (row start).
+    rim_color: vec3<f32>,
+    // Fresnel exponent controlling how tightly the rim hugs the silhouette.
+    rim_power: f32,
+}
+
 struct LightEnvironment {
     // Constant ambient radiance (linear).
     ambient: vec3<f32>,
@@ -67,12 +98,14 @@ struct LightEnvironment {
     sh: array<vec4<f32>, 9>,
     // Number of valid punctual lights.
     punctual_count: u32,
-    // Quantization bands for the toon path.
-    toon_bands: u32,
+    // Reserved padding (formerly toon_bands; band count now in stylized.bands).
+    reserved0: u32,
     // Reserved exposure scale (1.0 = neutral).
     exposure: f32,
     // Bit flags; see LIGHT_ENVIRONMENT_FLAG_*.
     flags: u32,
+    // Stylized (NPR) front-end controls consumed by the Npr resolve arm.
+    stylized: StylizedParams,
 }
 
 // The evaluated contribution of a single analytic light at a surface point.

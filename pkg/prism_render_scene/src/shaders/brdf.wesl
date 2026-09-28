@@ -15,6 +15,7 @@ import prism_render_scene::shaders::lighting::{
     PI,
     INV_PI,
     LightEnvironment,
+    StylizedParams,
     sh_radiance,
     sh_irradiance,
     env_brdf_approx,
@@ -30,6 +31,10 @@ const MIN_N_DOT: f32 = 1.0e-5;
 // Per-axis GGX roughness floor keeping the anisotropic lobe finite even when
 // one axis approaches zero. Mirrors `MIN_ANISOTROPIC_ALPHA` in `lighting.rs`.
 const MIN_ANISOTROPIC_ALPHA: f32 = 1.0e-3;
+// Stylized specular exponent range. Mirrors `MIN_SPECULAR_EXPONENT` /
+// `MAX_SPECULAR_EXPONENT` in `stylized.rs`.
+const MIN_STYLIZED_SPEC_EXPONENT: f32 = 2.0;
+const MAX_STYLIZED_SPEC_EXPONENT: f32 = 256.0;
 
 // Physically based surface parameters consumed by the analytic lobes. Mirrors
 // `SurfaceSample` in `lighting.rs`; emissive is carried separately so the
@@ -261,6 +266,108 @@ fn toon_direct(
     let diffuse = floor(max(dot(n, l), 0.0) * steps) / steps;
     return (surface.base_color * light.illuminance) * (diffuse * clamp(light.visibility, 0.0, 1.0))
         + surface.emissive;
+}
+
+// Scalar lerp matching the CPU `mix` helper (a + (b - a) * t) exactly, rather
+// than the WGSL builtin (e1 * (1 - e3) + e2 * e3), so the stylized front end
+// stays a bit-faithful twin of `stylized.rs`.
+fn stylized_mix(a: f32, b: f32, t: f32) -> f32 {
+    return a + (b - a) * t;
+}
+
+// Hermite smoothstep matching `stylized.rs`: a collapsed or inverted edge pair
+// degrades to a hard step at `edge0` (the WGSL builtin is undefined there).
+fn stylized_smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    if edge1 <= edge0 {
+        return select(1.0, 0.0, x < edge0);
+    }
+    let t = clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+
+// Re-shapes the cosine term into an optionally wrapped, quantized cel ramp.
+// Mirrors `stylized_ramp` in `stylized.rs`.
+fn stylized_ramp(n_dot_l: f32, bands: u32, wrap_in: f32, softness: f32) -> f32 {
+    let steps = f32(max(bands, 1u));
+    let wrap = clamp(wrap_in, 0.0, 1.0);
+    var lit: f32;
+    if wrap > 0.0 {
+        lit = clamp((n_dot_l + wrap) / (1.0 + wrap), 0.0, 1.0);
+    } else {
+        lit = max(n_dot_l, 0.0);
+    }
+    let scaled = lit * steps;
+    let level = floor(scaled);
+    let lower = level / steps;
+    if softness <= 0.0 {
+        return lower;
+    }
+    let frac = scaled - level;
+    let upper = min((level + 1.0) / steps, 1.0);
+    let half_window = clamp(softness * 0.5, 0.0, 0.5);
+    let t = stylized_smoothstep(0.5 - half_window, 0.5 + half_window, frac);
+    return stylized_mix(lower, upper, t);
+}
+
+// Re-shapes the analytic shadow visibility into a stylized step. Mirrors
+// `stylized_shadow` in `stylized.rs`.
+fn stylized_shadow(visibility: f32, threshold: f32, softness: f32) -> f32 {
+    let v = clamp(visibility, 0.0, 1.0);
+    if softness <= 0.0 {
+        if threshold <= 0.0 {
+            return v;
+        }
+        return select(0.0, 1.0, v >= threshold);
+    }
+    return stylized_smoothstep(threshold - softness, threshold + softness, v);
+}
+
+// Stylized (non-photoreal / NPR) front end for a single analytic light: cel
+// ramp diffuse + stepped shadow + thresholded specular blob + view Fresnel rim.
+// Byte-for-byte twin of `evaluate_stylized_direct` in `stylized.rs`; with the
+// default (legacy) params it reproduces `toon_direct` exactly.
+fn stylized_direct(
+    surface: SurfaceSample,
+    frame: ShadingFrame,
+    light: DirectLightSample,
+    params: StylizedParams,
+) -> vec3<f32> {
+    let n = brdf_normalize_or(frame.normal, vec3<f32>(0.0, 1.0, 0.0));
+    let v = brdf_normalize_or(frame.view, n);
+    let l = brdf_normalize_or(light.direction, n);
+
+    let n_dot_l = dot(n, l);
+    let lit_gate = max(n_dot_l, 0.0);
+    let shadow = stylized_shadow(light.visibility, params.shadow_threshold, params.shadow_softness);
+
+    let ramp = stylized_ramp(n_dot_l, params.bands, params.wrap, params.ramp_softness);
+    var color = (surface.base_color * light.illuminance) * (ramp * shadow);
+
+    if params.specular_intensity > 0.0 && lit_gate > 0.0 {
+        let h = brdf_normalize_or(v + l, n);
+        let n_dot_h = max(dot(n, h), 0.0);
+        let roughness = clamp(surface.perceptual_roughness, MIN_ROUGHNESS, 1.0);
+        let gloss = 1.0 - roughness;
+        let exponent = stylized_mix(MIN_STYLIZED_SPEC_EXPONENT, MAX_STYLIZED_SPEC_EXPONENT, gloss * gloss);
+        let raw = pow(n_dot_h, exponent);
+        let half_window = clamp(params.specular_softness * 0.5, 0.0, 0.5);
+        let blob = stylized_smoothstep(
+            params.specular_threshold - half_window,
+            params.specular_threshold + half_window,
+            raw,
+        );
+        let weight = params.specular_intensity * blob * lit_gate * shadow;
+        color = color + (params.specular_color * weight) * light.illuminance;
+    }
+
+    if params.rim_intensity > 0.0 && lit_gate > 0.0 {
+        let n_dot_v = max(dot(n, v), 0.0);
+        let rim = pow(max(1.0 - n_dot_v, 0.0), max(params.rim_power, 0.0));
+        let weight = params.rim_intensity * rim * lit_gate;
+        color = color + (params.rim_color * weight) * light.illuminance;
+    }
+
+    return color + surface.emissive;
 }
 
 // Split-sum image-based indirect term. Mirrors `evaluate_image_based_light`.
