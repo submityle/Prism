@@ -13,7 +13,7 @@ use crate::{
     reconstruct_surface, sample_material, ClassificationError, DirectLightSample, GpuShadingPrimitive,
     GpuShadingVertex, ImageBasedLight, MaterialModulationParams, MaterialShadingClass, PunctualLight,
     SampledTextureBinding, ShadingFrame, SurfaceReconstructionError, SurfaceReconstructionFlags,
-    SurfaceReconstructionInput, SurfaceSample, TangentBasis, VisibilityPixel,
+    SurfaceReconstructionInput, StylizedParams, SurfaceSample, TangentBasis, VisibilityPixel,
 };
 
 /// Identity `world_from_local` (row-major affine) used when an instance carries
@@ -119,8 +119,9 @@ pub struct LightingEnvironment<'a> {
     pub image_based: Option<ImageBasedLight>,
     /// Constant ambient irradiance approximating unresolved indirect light.
     pub ambient: [f32; 3],
-    /// Quantization band count used by the non-photoreal toon path.
-    pub toon_bands: u32,
+    /// Stylized (NPR) front-end controls used by the `MaterialShadingClass::Npr`
+    /// path. The default reproduces the historical four-band toon lobe.
+    pub stylized: StylizedParams,
 }
 
 impl Default for LightingEnvironment<'_> {
@@ -130,7 +131,7 @@ impl Default for LightingEnvironment<'_> {
             punctual: &[],
             image_based: None,
             ambient: [0.0; 3],
-            toon_bands: 4,
+            stylized: StylizedParams::with_bands(4),
         }
     }
 }
@@ -368,18 +369,20 @@ pub fn resolve_pixel(
         add(add(accumulated, indirect), emissive)
     };
 
-    // Integrates the banded toon lobe over every analytic light, then adds the
-    // shared indirect + emissive terms once.  Used by the NPR class.
+    // Integrates the stylized (NPR) front end over every analytic light, then
+    // adds the shared indirect + emissive terms once.  Used by the NPR class;
+    // `lights.stylized` selects the cel ramp / stepped shadow / stylized
+    // specular / rim response (its default reproduces the banded toon lobe).
     let shade_toon = || {
         let mut accumulated = [0.0; 3];
         for light in lights.directional {
             accumulated = add(
                 accumulated,
-                crate::evaluate_toon_direct(
+                crate::evaluate_stylized_direct(
                     lit_surface,
                     frame,
                     direct_sample(*light),
-                    lights.toon_bands,
+                    &lights.stylized,
                 ),
             );
         }
@@ -387,7 +390,7 @@ pub fn resolve_pixel(
             if let Some(sample) = light.sample(geometry.position) {
                 accumulated = add(
                     accumulated,
-                    crate::evaluate_toon_direct(lit_surface, frame, sample, lights.toon_bands),
+                    crate::evaluate_stylized_direct(lit_surface, frame, sample, &lights.stylized),
                 );
             }
         }
@@ -668,7 +671,7 @@ mod tests {
         };
         let resolved = resolve_pixel(
             base_input(&primitives, &vertices, header, parameters),
-            LightingEnvironment { directional: &[light], punctual: &[], image_based: None, ambient: [5.0; 3], toon_bands: 4 },
+            LightingEnvironment { directional: &[light], punctual: &[], image_based: None, ambient: [5.0; 3], stylized: StylizedParams::with_bands(4) },
         )
         .unwrap();
         assert_eq!(resolved.shading_class, MaterialShadingClass::Unlit);
@@ -691,13 +694,13 @@ mod tests {
         };
         let one = resolve_pixel(
             base_input(&primitives, &vertices, header, parameters),
-            LightingEnvironment { directional: &[light], punctual: &[], image_based: None, ambient: [0.0; 3], toon_bands: 4 },
+            LightingEnvironment { directional: &[light], punctual: &[], image_based: None, ambient: [0.0; 3], stylized: StylizedParams::with_bands(4) },
         )
         .unwrap()
         .color;
         let two = resolve_pixel(
             base_input(&primitives, &vertices, header, parameters),
-            LightingEnvironment { directional: &[light, light], punctual: &[], image_based: None, ambient: [0.0; 3], toon_bands: 4 },
+            LightingEnvironment { directional: &[light, light], punctual: &[], image_based: None, ambient: [0.0; 3], stylized: StylizedParams::with_bands(4) },
         )
         .unwrap()
         .color;
@@ -746,7 +749,7 @@ mod tests {
         };
         let resolved = resolve_pixel(
             base_input(&primitives, &vertices, header, parameters),
-            LightingEnvironment { directional: &[light], punctual: &[], image_based: None, ambient: [0.0; 3], toon_bands: 4 },
+            LightingEnvironment { directional: &[light], punctual: &[], image_based: None, ambient: [0.0; 3], stylized: StylizedParams::with_bands(4) },
         )
         .unwrap();
         assert_eq!(resolved.shading_class, MaterialShadingClass::Npr);
@@ -775,7 +778,7 @@ mod tests {
                 punctual: &[PunctualLight::point([0.25, 0.25, 1.0], [5.0; 3], 0.0)],
                 image_based: None,
                 ambient: [0.0; 3],
-                toon_bands: 4,
+                stylized: StylizedParams::with_bands(4),
             },
         )
         .unwrap();
@@ -791,7 +794,7 @@ mod tests {
                 punctual: &[PunctualLight::point([0.25, 0.25, 10.0], [5.0; 3], 1.0)],
                 image_based: None,
                 ambient: [0.0; 3],
-                toon_bands: 4,
+                stylized: StylizedParams::with_bands(4),
             },
         )
         .unwrap();
@@ -828,7 +831,7 @@ mod tests {
                 punctual: &[],
                 image_based: Some(probe),
                 ambient: [0.0; 3],
-                toon_bands: 4,
+                stylized: StylizedParams::with_bands(4),
             },
         )
         .unwrap();
@@ -859,7 +862,7 @@ mod tests {
         };
         let resolved = resolve_pixel(
             input,
-            LightingEnvironment { directional: &[], punctual: &[], image_based: None, ambient: [0.0; 3], toon_bands: 4 },
+            LightingEnvironment { directional: &[], punctual: &[], image_based: None, ambient: [0.0; 3], stylized: StylizedParams::with_bands(4) },
         )
         .unwrap();
         let decoded = srgb_channel_to_linear(0.5);
@@ -891,7 +894,7 @@ mod tests {
         let light = DirectionalLight { direction: [0.6, 0.0, 0.8], illuminance: [4.0; 3], visibility: 1.0 };
         let flat = resolve_pixel(
             base_input(&primitives, &vertices, header, parameters),
-            LightingEnvironment { directional: &[light], punctual: &[], image_based: None, ambient: [0.0; 3], toon_bands: 4 },
+            LightingEnvironment { directional: &[light], punctual: &[], image_based: None, ambient: [0.0; 3], stylized: StylizedParams::with_bands(4) },
         )
         .unwrap()
         .color;
@@ -904,7 +907,7 @@ mod tests {
         };
         let tilted = resolve_pixel(
             input,
-            LightingEnvironment { directional: &[light], punctual: &[], image_based: None, ambient: [0.0; 3], toon_bands: 4 },
+            LightingEnvironment { directional: &[light], punctual: &[], image_based: None, ambient: [0.0; 3], stylized: StylizedParams::with_bands(4) },
         )
         .unwrap()
         .color;
@@ -928,7 +931,7 @@ mod tests {
         };
         let untextured = resolve_pixel(
             base_input(&primitives, &vertices, header, parameters),
-            LightingEnvironment { directional: &[DirectionalLight { direction: [0.0, 0.0, 1.0], illuminance: [4.0; 3], visibility: 1.0 }], punctual: &[], image_based: None, ambient: [0.0; 3], toon_bands: 4 },
+            LightingEnvironment { directional: &[DirectionalLight { direction: [0.0, 0.0, 1.0], illuminance: [4.0; 3], visibility: 1.0 }], punctual: &[], image_based: None, ambient: [0.0; 3], stylized: StylizedParams::with_bands(4) },
         )
         .unwrap()
         .color;
@@ -942,7 +945,7 @@ mod tests {
         };
         let textured = resolve_pixel(
             input,
-            LightingEnvironment { directional: &[DirectionalLight { direction: [0.0, 0.0, 1.0], illuminance: [4.0; 3], visibility: 1.0 }], punctual: &[], image_based: None, ambient: [0.0; 3], toon_bands: 4 },
+            LightingEnvironment { directional: &[DirectionalLight { direction: [0.0, 0.0, 1.0], illuminance: [4.0; 3], visibility: 1.0 }], punctual: &[], image_based: None, ambient: [0.0; 3], stylized: StylizedParams::with_bands(4) },
         )
         .unwrap()
         .color;
@@ -968,7 +971,7 @@ mod tests {
         let light = DirectionalLight { direction: [0.0, 0.0, 1.0], illuminance: [3.0; 3], visibility: 1.0 };
         let untextured = resolve_pixel(
             base_input(&primitives, &vertices, header, parameters),
-            LightingEnvironment { directional: &[light], punctual: &[], image_based: None, ambient: [0.5; 3], toon_bands: 4 },
+            LightingEnvironment { directional: &[light], punctual: &[], image_based: None, ambient: [0.5; 3], stylized: StylizedParams::with_bands(4) },
         )
         .unwrap()
         .color;
@@ -986,7 +989,7 @@ mod tests {
         };
         let textured = resolve_pixel(
             input,
-            LightingEnvironment { directional: &[light], punctual: &[], image_based: None, ambient: [0.5; 3], toon_bands: 4 },
+            LightingEnvironment { directional: &[light], punctual: &[], image_based: None, ambient: [0.5; 3], stylized: StylizedParams::with_bands(4) },
         )
         .unwrap()
         .color;
@@ -1009,7 +1012,7 @@ mod tests {
             punctual: &[],
             image_based: None,
             ambient: [0.6; 3],
-            toon_bands: 4,
+            stylized: StylizedParams::with_bands(4),
         };
 
         let full = resolve_pixel(
@@ -1051,7 +1054,7 @@ mod tests {
             punctual: &[],
             image_based: None,
             ambient: [0.0; 3],
-            toon_bands: 4,
+            stylized: StylizedParams::with_bands(4),
         };
         let lit_full = resolve_pixel(
             ResolveInput { screen_space_ao: 1.0, ..base_input(&primitives, &vertices, header, parameters) },
@@ -1135,7 +1138,7 @@ mod tests {
                 punctual: &[base_light],
                 image_based: None,
                 ambient: [0.0; 3],
-                toon_bands: 4,
+                stylized: StylizedParams::with_bands(4),
             },
         )
         .unwrap()
@@ -1163,7 +1166,7 @@ mod tests {
                 punctual: &[shifted_light],
                 image_based: None,
                 ambient: [0.0; 3],
-                toon_bands: 4,
+                stylized: StylizedParams::with_bands(4),
             },
         )
         .unwrap()
@@ -1191,7 +1194,7 @@ mod tests {
                 punctual: &[base_light],
                 image_based: None,
                 ambient: [0.0; 3],
-                toon_bands: 4,
+                stylized: StylizedParams::with_bands(4),
             },
         )
         .unwrap()

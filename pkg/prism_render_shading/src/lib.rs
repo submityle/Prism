@@ -22,6 +22,7 @@ mod resolve;
 mod screen_space;
 mod shadow;
 mod subsurface;
+mod stylized;
 mod surface;
 mod taa;
 mod tangent;
@@ -55,7 +56,7 @@ pub use oit::{
     composite_transparency, oit_weight, OitAccumulation, OitFragment,
 };
 pub use lighting::{
-    evaluate_principled_direct, evaluate_toon_direct, linear_furnace_response, DirectLightSample,
+    evaluate_principled_direct, linear_furnace_response, DirectLightSample,
     ShadingFrame, SurfaceSample,
 };
 pub use punctual::PunctualLight;
@@ -95,6 +96,7 @@ pub use resolve::{
     ResolveError, ResolveInput, ResolvedPixel, IDENTITY_WORLD_FROM_LOCAL,
 };
 pub use subsurface::evaluate_subsurface_direct;
+pub use stylized::{evaluate_stylized_direct, evaluate_toon_direct, StylizedParams};
 pub use water::evaluate_water_direct;
 pub use tangent::{
     apply_tangent_space_normal, orthonormal_basis, resolve_tangent_basis, TangentBasis,

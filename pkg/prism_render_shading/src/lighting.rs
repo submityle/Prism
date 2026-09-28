@@ -154,25 +154,6 @@ pub fn evaluate_principled_direct(
     )
 }
 
-pub fn evaluate_toon_direct(
-    surface: SurfaceSample,
-    frame: ShadingFrame,
-    light: DirectLightSample,
-    bands: u32,
-) -> [f32; 3] {
-    let n = normalize_or(frame.normal, [0.0, 1.0, 0.0]);
-    let l = normalize_or(light.direction, n);
-    let steps = bands.max(1) as f32;
-    let diffuse = (dot(n, l).max(0.0) * steps).floor() / steps;
-    add(
-        mul_scalar(
-            mul(surface.base_color, light.illuminance),
-            diffuse * light.visibility.clamp(0.0, 1.0),
-        ),
-        surface.emissive,
-    )
-}
-
 /// Integrates a constant environment over a deterministic cosine hemisphere.
 /// It is used as a cheap white-furnace regression guard, not a production IBL.
 pub fn linear_furnace_response(surface: SurfaceSample, samples: u32) -> [f32; 3] {
@@ -364,22 +345,6 @@ mod tests {
                 assert!(response.into_iter().all(|channel| channel.is_finite() && channel <= 1.2));
             }
         }
-    }
-
-    #[test]
-    fn toon_and_pbr_share_light_visibility_contract() {
-        let lit = evaluate_toon_direct(SurfaceSample::default(), frame(), light(), 4);
-        let shadowed = evaluate_toon_direct(
-            SurfaceSample::default(),
-            frame(),
-            DirectLightSample {
-                visibility: 0.0,
-                ..light()
-            },
-            4,
-        );
-        assert!(lit[0] > 0.0);
-        assert_eq!(shadowed, [0.0; 3]);
     }
 
     #[test]
