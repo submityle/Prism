@@ -103,4 +103,8 @@ pub use state::body::{BodyDesc, BodyKind, MassProperties};
 pub use state::handle::BodyHandle;
 pub use state::storage::BodyStorage;
 pub use state::view::BodySolverView;
+pub use vbd::{
+    outer, SpringContribution, SpringElement, SpringSet, VbdBody, VbdConfig, VbdSolver,
+    VertexSystem,
+};
 pub use world::PhysicsWorld;
