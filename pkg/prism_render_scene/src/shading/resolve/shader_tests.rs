@@ -475,3 +475,27 @@ fn oit_wesl_compiles_standalone() {
         .get(0, oit, &[])
         .unwrap_or_else(|error| panic!("oit.wesl failed to compile: {error}"));
 }
+
+/// Compiles `gtao.wesl` standalone. It has no imports, so a green result
+/// proves the GTAO horizon search, the Jimenez 2016 closed-form slice integral,
+/// the view-space reconstruction/`uv_radius` helpers and the compute entry
+/// point (group-0 depth/normal textures + storage AO output, `var<immediate>`
+/// config) all parse and type-check as WESL on their own, in lock-step with the
+/// CPU golden in `prism_render_shading::ao`.
+#[test]
+fn gtao_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let gtao = shader_id(0x5052_4953_4d5f_4741_4f00_0000_0000_0001);
+    cache.set_shader(
+        gtao,
+        Shader::from_wesl(
+            include_str!("../../shaders/gtao.wesl"),
+            "embedded://prism_render_scene/shaders/gtao.wesl",
+        ),
+    );
+
+    cache
+        .get(0, gtao, &[])
+        .unwrap_or_else(|error| panic!("gtao.wesl failed to compile: {error}"));
+}

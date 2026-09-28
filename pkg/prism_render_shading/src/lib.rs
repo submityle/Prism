@@ -8,6 +8,7 @@
 
 extern crate alloc;
 
+mod ao;
 mod classification;
 mod cluster;
 mod clearcoat;
@@ -30,6 +31,9 @@ mod water;
 pub use classification::{
     classify_material_header, ClassificationError, MaterialShadingClass, ShadingWorkItem,
     ShadingWorkPlan, MAX_SHADING_CLASSES,
+};
+pub use ao::{
+    compute_gtao, gtao_pixel, GtaoBuffers, GtaoCamera, GtaoConfig,
 };
 pub use cluster::{
     assign_lights_to_clusters, ClusterAabb, ClusterAssignmentConfig, ClusterBoundsBuilder,
