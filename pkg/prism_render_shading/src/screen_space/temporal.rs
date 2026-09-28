@@ -31,13 +31,28 @@ use bevy_math::{Mat4, Vec2, Vec3, Vec4};
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SsrTemporalParams {
     /// Fraction of the reprojected history kept each frame when the sample is
-    /// valid.  Higher converges smoother but adds latency; `0.9` blends in
-    /// roughly a tenth of the current frame per step (a ~10-frame window).
+    /// valid *and* the history agrees with the current neighbourhood.  Higher
+    /// converges smoother but adds latency; `0.9` blends in roughly a tenth of
+    /// the current frame per step (a ~10-frame window).  This is the *upper*
+    /// bound: [`adaptive_history_weight`] pulls it down toward
+    /// [`Self::min_history_weight`] as the reprojected history is clipped.
     pub history_weight: f32,
     /// Symmetric expansion (in colour units) applied to the neighbourhood AABB
     /// before clipping history.  A small slack lets the clamp tolerate residual
     /// trace noise without letting stale reflections leak back in.
     pub clamp_expand: f32,
+    /// Standard-deviation multiplier for the variance clip box: the clamp box is
+    /// `mean ± variance_gamma·σ` of the 3x3 neighbourhood rather than its raw
+    /// min/max.  This is the AAA variance-clipping method (Salvi/Karis): the raw
+    /// min/max hugs single outlier taps and flickers, while `mean ± γσ` tracks
+    /// the neighbourhood distribution.  `1.25` is the usual TAA value.
+    pub variance_gamma: f32,
+    /// Floor the adaptive weight decays toward when the reprojected history sits
+    /// far outside the clip box (a disocclusion or a moving surface).  `0.5`
+    /// still smooths a little on a disocclusion while dropping most of the stale
+    /// history, trading a touch of noise for no visible ghost.  Clamped to
+    /// `[0, history_weight]`.
+    pub min_history_weight: f32,
 }
 
 impl Default for SsrTemporalParams {
@@ -45,6 +60,8 @@ impl Default for SsrTemporalParams {
         Self {
             history_weight: 0.9,
             clamp_expand: 0.0,
+            variance_gamma: 1.25,
+            min_history_weight: 0.5,
         }
     }
 }
@@ -95,12 +112,25 @@ pub fn reproject_prev_uv(
     ))
 }
 
+/// The result of clipping history to the neighbourhood box: the clamped colour
+/// plus the *overshoot* — how far outside the box the raw history sat, in box
+/// half-extents beyond the surface (`0` when already inside).  The overshoot is
+/// the disocclusion signal [`adaptive_history_weight`] uses to decay the blend.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClipResult {
+    /// History clamped onto (or left inside) the box surface.
+    pub clipped: Vec3,
+    /// `max_unit - 1` where `max_unit` is the largest per-axis distance from the
+    /// box centre in half-extents; `0` when the history is already inside.
+    pub overshoot: f32,
+}
+
 /// Clip `history` to the axis-aligned colour box `[box_min, box_max]` using the
-/// AABB-clip (Karis) method: rather than clamp each channel independently
-/// (which desaturates and clings to box faces), scale the ray from the box
-/// centre toward `history` so it just reaches the box surface.  History already
-/// inside the box is returned unchanged.
-pub fn clip_history_to_aabb(history: Vec3, box_min: Vec3, box_max: Vec3) -> Vec3 {
+/// AABB-clip (Karis) method — scale the ray from the box centre toward `history`
+/// so it just reaches the box surface — and report how far outside the box it
+/// began.  This is the primitive both [`clip_history_to_aabb`] and the adaptive
+/// accumulation build on.
+pub fn clip_history_to_aabb_ex(history: Vec3, box_min: Vec3, box_max: Vec3) -> ClipResult {
     let center = 0.5 * (box_max + box_min);
     // Guard against a degenerate (flat) neighbourhood collapsing the box.
     let extent = (0.5 * (box_max - box_min)).max(Vec3::splat(1.0e-5));
@@ -108,22 +138,78 @@ pub fn clip_history_to_aabb(history: Vec3, box_min: Vec3, box_max: Vec3) -> Vec3
     let units = dir / extent;
     let max_unit = units.x.abs().max(units.y.abs()).max(units.z.abs());
     if max_unit > 1.0 {
-        center + dir / max_unit
+        ClipResult {
+            clipped: center + dir / max_unit,
+            overshoot: max_unit - 1.0,
+        }
     } else {
-        history
+        ClipResult {
+            clipped: history,
+            overshoot: 0.0,
+        }
     }
+}
+
+/// Clip `history` to the axis-aligned colour box `[box_min, box_max]` using the
+/// AABB-clip (Karis) method: rather than clamp each channel independently
+/// (which desaturates and clings to box faces), scale the ray from the box
+/// centre toward `history` so it just reaches the box surface.  History already
+/// inside the box is returned unchanged.
+pub fn clip_history_to_aabb(history: Vec3, box_min: Vec3, box_max: Vec3) -> Vec3 {
+    clip_history_to_aabb_ex(history, box_min, box_max).clipped
+}
+
+/// Build the variance clip box `mean ± variance_gamma·σ` from the first two
+/// colour moments of the 3x3 neighbourhood (`mean` and `mean_sq`, the mean of
+/// per-channel squares).  This is AAA variance clipping (Salvi/Karis): unlike a
+/// raw min/max box that hugs a single outlier tap and flickers, the `mean ± γσ`
+/// box tracks the neighbourhood distribution, so it rejects stale history
+/// firmly in flat regions yet widens gracefully across noisy edges.
+///
+/// The variance is clamped to be non-negative before the square root to absorb
+/// the catastrophic cancellation `mean_sq - mean²` can suffer in float.
+pub fn variance_clip_box(mean: Vec3, mean_sq: Vec3, variance_gamma: f32) -> (Vec3, Vec3) {
+    let variance = (mean_sq - mean * mean).max(Vec3::ZERO);
+    let sigma = Vec3::new(variance.x.sqrt(), variance.y.sqrt(), variance.z.sqrt());
+    let half = sigma * variance_gamma.max(0.0);
+    (mean - half, mean + half)
+}
+
+/// Decay the blend weight from [`SsrTemporalParams::history_weight`] toward
+/// [`SsrTemporalParams::min_history_weight`] as the reprojected history is
+/// clipped further outside the neighbourhood box.
+///
+/// `overshoot` is [`ClipResult::overshoot`]: `0` when the history sat inside the
+/// box (a static, well-matched surface — keep the full weight for maximum
+/// denoising) rising toward and past `1` as the history disagrees (a
+/// disocclusion or a moving surface — shed history to kill the ghost).  The
+/// decay saturates at `overshoot == 1` (one full half-extent outside), a knee
+/// that reaches the floor quickly without a hard cliff.
+pub fn adaptive_history_weight(params: &SsrTemporalParams, overshoot: f32) -> f32 {
+    let base = params.history_weight.clamp(0.0, 1.0);
+    let floor = params.min_history_weight.clamp(0.0, base);
+    let t = overshoot.clamp(0.0, 1.0);
+    base + (floor - base) * t
 }
 
 /// Exponentially accumulate the current frame's resolved reflection
 /// (`current.rgb` radiance + `current.a` confidence) with the reprojected
 /// `history`, clipping the history colour to the current neighbourhood box
-/// `[box_min, box_max]` first.
+/// `[box_min, box_max]` first and adapting the blend weight to how far the
+/// history had to be clipped.
+///
+/// The caller passes the variance clip box from [`variance_clip_box`] (the
+/// shader gathers the same moments over its 3x3 neighbourhood).  History that
+/// lands inside the box keeps the full [`SsrTemporalParams::history_weight`] for
+/// maximum denoising; history dragged far outside decays toward
+/// [`SsrTemporalParams::min_history_weight`] via [`adaptive_history_weight`], so
+/// a disocclusion or a moving surface sheds its stale reflection instead of
+/// ghosting.
 ///
 /// When `valid` is false (a dropped reprojection: off-screen, disoccluded, or a
 /// background pixel) the history is discarded and the current frame is returned
-/// as-is, so temporal accumulation never ghosts across a surface change.  The
-/// confidence channel is blended by the same weight but is *not* clipped to the
-/// colour box (it is not a colour).
+/// as-is.  The confidence channel is blended by the same adaptive weight but is
+/// *not* clipped to the colour box (it is not a colour).
 pub fn accumulate_temporal(
     params: &SsrTemporalParams,
     current: Vec4,
@@ -136,13 +222,12 @@ pub fn accumulate_temporal(
         return current;
     }
     let expand = Vec3::splat(params.clamp_expand.max(0.0));
-    let clamped = clip_history_to_aabb(history.truncate(), box_min - expand, box_max + expand);
-    let w = params.history_weight.clamp(0.0, 1.0);
-    let rgb = current.truncate() * (1.0 - w) + clamped * w;
+    let clip = clip_history_to_aabb_ex(history.truncate(), box_min - expand, box_max + expand);
+    let w = adaptive_history_weight(params, clip.overshoot);
+    let rgb = current.truncate() * (1.0 - w) + clip.clipped * w;
     let conf = current.w * (1.0 - w) + history.w * w;
     rgb.extend(conf)
 }
-
 /// Grow a running colour AABB to include `sample`.  The trace's neighbourhood
 /// clamp seeds `min`/`max` from the current pixel then folds each 3x3 tap in;
 /// the golden exposes it so tests build the same box the shader gathers.
@@ -237,6 +322,8 @@ mod tests {
         let params = SsrTemporalParams {
             history_weight: 0.9,
             clamp_expand: 0.0,
+            variance_gamma: 1.25,
+            min_history_weight: 0.5,
         };
         let cur = Vec4::new(0.2, 0.2, 0.2, 1.0);
         // History far outside the neighbourhood box gets clipped before blend.
@@ -248,8 +335,77 @@ mod tests {
         // [min(cur,box), max(cur,box)], i.e. never near the raw 5.0.
         assert!(out.x <= 0.3 + 1.0e-4, "clamp must bound the blend: {out:?}");
         assert!(out.x >= 0.2 - 1.0e-4);
-        // Confidence EMA: 0.1*1.0 + 0.9*0.0 = 0.1.
-        assert!((out.w - 0.1).abs() < 1.0e-5, "confidence EMA: {out:?}");
+        // The history sat far outside the box, so the adaptive weight collapsed
+        // to the floor (0.5): confidence EMA = 0.5*1.0 + 0.5*0.0 = 0.5.
+        assert!((out.w - 0.5).abs() < 1.0e-5, "adaptive confidence EMA: {out:?}");
+    }
+
+    #[test]
+    fn history_inside_the_box_keeps_the_full_weight() {
+        let params = SsrTemporalParams::default();
+        let cur = Vec4::new(0.2, 0.2, 0.2, 1.0);
+        // History sits inside a wide box (overshoot 0) -> full history_weight.
+        let hist = Vec4::new(0.25, 0.25, 0.25, 0.0);
+        let out = accumulate_temporal(
+            &params,
+            cur,
+            hist,
+            Vec3::splat(0.0),
+            Vec3::splat(1.0),
+            true,
+        );
+        // Full weight 0.9: confidence EMA = 0.1*1.0 + 0.9*0.0 = 0.1.
+        assert!((out.w - 0.1).abs() < 1.0e-5, "full-weight confidence EMA: {out:?}");
+    }
+
+    #[test]
+    fn adaptive_weight_decays_from_base_to_floor_with_overshoot() {
+        let params = SsrTemporalParams::default();
+        // Inside the box -> base weight.
+        assert!((adaptive_history_weight(&params, 0.0) - 0.9).abs() < 1.0e-6);
+        // One half-extent outside -> saturates at the floor.
+        assert!((adaptive_history_weight(&params, 1.0) - 0.5).abs() < 1.0e-6);
+        // Beyond saturation stays at the floor (no undershoot).
+        assert!((adaptive_history_weight(&params, 4.0) - 0.5).abs() < 1.0e-6);
+        // Monotonic: partway between base and floor.
+        let mid = adaptive_history_weight(&params, 0.5);
+        assert!(mid < 0.9 && mid > 0.5, "midpoint must sit between: {mid}");
+    }
+
+    #[test]
+    fn variance_box_tracks_the_distribution_not_outliers() {
+        // Neighbourhood mean 0.5, per-channel variance 0.04 (sigma 0.2).
+        let mean = Vec3::splat(0.5);
+        let mean_sq = Vec3::splat(0.5 * 0.5 + 0.04);
+        let (mn, mx) = variance_clip_box(mean, mean_sq, 1.25);
+        // Box is mean ± 1.25*0.2 = 0.5 ± 0.25.
+        assert!((mn.x - 0.25).abs() < 1.0e-5, "box_min: {mn:?}");
+        assert!((mx.x - 0.75).abs() < 1.0e-5, "box_max: {mx:?}");
+    }
+
+    #[test]
+    fn variance_box_absorbs_negative_variance_from_cancellation() {
+        // mean_sq < mean² (float cancellation) must not NaN via sqrt of a
+        // negative: the box collapses to a point at the mean.
+        let mean = Vec3::splat(0.5);
+        let mean_sq = Vec3::splat(0.24);
+        let (mn, mx) = variance_clip_box(mean, mean_sq, 1.25);
+        assert!((mn - mean).length() < 1.0e-6 && (mx - mean).length() < 1.0e-6);
+    }
+
+    #[test]
+    fn clip_ex_reports_overshoot_outside_and_zero_inside() {
+        let inside = clip_history_to_aabb_ex(Vec3::splat(0.5), Vec3::ZERO, Vec3::ONE);
+        assert_eq!(inside.overshoot, 0.0);
+        // Centre 0.5, half-extent 0.5; history at 1.5 is one extent past +x face
+        // -> max_unit = (1.5-0.5)/0.5 = 2.0 -> overshoot 1.0.
+        let outside = clip_history_to_aabb_ex(
+            Vec3::new(1.5, 0.5, 0.5),
+            Vec3::ZERO,
+            Vec3::ONE,
+        );
+        assert!((outside.overshoot - 1.0).abs() < 1.0e-5, "{outside:?}");
+        assert!((outside.clipped.x - 1.0).abs() < 1.0e-5);
     }
 
     #[test]

@@ -47,8 +47,9 @@
 //! * [`temporal`] — the cross-frame accumulation pipeline, its persistent
 //!   per-view ping-pong history, per-view bind group and the `Core3d` node
 //!   that camera-reprojects the previous frame's accumulated reflection,
-//!   colour-box-clips it against ghosting and exponentially blends it with the
-//!   resolve, feeding the composite a temporally stable buffer.
+//!   variance-clips it against ghosting and blends it with the resolve under an
+//!   adaptive, disocclusion-aware weight, feeding the composite a temporally
+//!   stable buffer.
 //! * [`composite`] — the pipeline, per-view bind group and `Core3d` node that
 //!   fold that reflection output back over the shaded `scene_color` (reading
 //!   the untouched base from colour-pyramid level 0 to avoid storage-image

@@ -5,9 +5,15 @@
 //! handful of rays per pixel still leaves temporal shimmer as the camera moves.
 //! This stage is the GPU twin of
 //! [`prism_render_shading::screen_space::temporal`]: it reprojects last frame's
-//! accumulated reflection into the current pixel, clips it to the local colour
-//! box to reject ghosting, and exponentially blends it with the freshly
-//! resolved reflection, integrating many effective samples over time.
+//! accumulated reflection into the current pixel, clips it to the 3x3
+//! neighbourhood *variance* box (`mean ± γσ`, the AAA Salvi/Karis clip that
+//! rejects stale history without the flicker a raw min/max box suffers), then
+//! exponentially blends it with the freshly resolved reflection. The blend
+//! weight is *adaptive*: history that matches the neighbourhood keeps the full
+//! weight for maximum denoising, while history dragged far outside the box (a
+//! disocclusion or a moving surface) decays toward a floor so it sheds the
+//! stale reflection instead of ghosting — integrating many effective samples
+//! over time while staying responsive.
 //!
 //! Prism carries no per-pixel motion-vector G-buffer, so the reprojection is
 //! purely camera-driven: reconstruct each pixel's world position from its
@@ -29,7 +35,7 @@
 //! It reads one bind group (group 0, matching `shaders/ssr_temporal.wesl`):
 //!
 //! * `0` this frame's spatially resolved reflection (`textureLoad`ed, both as
-//!   the anchor colour and for the 3x3 neighbourhood box),
+//!   the anchor colour and for the 3x3 neighbourhood variance box),
 //! * `1` the full-resolution reverse-Z device depth (world reconstruction),
 //! * `2` the previous frame's accumulated reflection (sampled with a filtering
 //!   sampler so the reprojected UV bilinearly interpolates),

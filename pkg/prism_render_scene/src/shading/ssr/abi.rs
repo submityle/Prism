@@ -334,9 +334,9 @@ impl GpuSsrResolveParams {
 /// (world -> last frame's clip) — the framebuffer extent, the shared golden
 /// tunables (mirroring [`prism_render_shading::screen_space::SsrTemporalParams`]),
 /// and a `valid_history` flag the CPU sets to `0` on the first frame, a resize,
-/// or a camera cut so the shader falls back to the current frame. Three trailing
-/// `u32`s pad the block to 160 bytes, a multiple of the 16-byte immediate
-/// alignment the `mat4x4` fields force.
+/// or a camera cut so the shader falls back to the current frame. A single
+/// trailing `u32` pads the block to 160 bytes, a multiple of the 16-byte
+/// immediate alignment the `mat4x4` fields force.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq)]
 pub(crate) struct GpuSsrTemporalParams {
@@ -354,19 +354,20 @@ pub(crate) struct GpuSsrTemporalParams {
     pub clamp_expand: f32,
     /// `1` when a valid previous frame exists (no resize / camera cut), else `0`.
     pub valid_history: u32,
+    /// Standard-deviation multiplier for the variance clip box (`mean ± γσ`).
+    pub variance_gamma: f32,
+    /// Floor the adaptive blend weight decays toward on a disocclusion.
+    pub min_history_weight: f32,
     /// Padding to the 16-byte immediate alignment the `mat4x4` fields force.
     pub _pad0: u32,
-    /// Padding to the 16-byte immediate alignment the `mat4x4` fields force.
-    pub _pad1: u32,
-    /// Padding to the 16-byte immediate alignment the `mat4x4` fields force.
-    pub _pad2: u32,
 }
 
 impl GpuSsrTemporalParams {
     /// Builds the temporal params from the current inverse view-projection, the
     /// previous frame's view-projection and the framebuffer extent, folding in
     /// the golden [`prism_render_shading::screen_space::SsrTemporalParams`]
-    /// defaults (`history_weight = 0.9`, `clamp_expand = 0.0`). `valid_history`
+    /// defaults (`history_weight = 0.9`, `clamp_expand = 0.0`, `variance_gamma =
+    /// 1.25`, `min_history_weight = 0.5`). `valid_history`
     /// gates whether the shader trusts `clip_from_world_prev` at all. Both
     /// matrices upload column-major (via [`Mat4::to_cols_array`]) so the WGSL
     /// `mat4x4<f32>` multiplies agree byte-for-byte with the golden.
@@ -386,9 +387,9 @@ impl GpuSsrTemporalParams {
             history_weight: 0.9,
             clamp_expand: 0.0,
             valid_history: u32::from(valid_history),
+            variance_gamma: 1.25,
+            min_history_weight: 0.5,
             _pad0: 0,
-            _pad1: 0,
-            _pad2: 0,
         }
     }
 }
@@ -543,8 +544,9 @@ mod tests {
     #[test]
     fn temporal_params_match_the_shader_immediate_layout() {
         // Two mat4x4 (128) + two u32 extents (8) + two f32 tunables (8) + one
-        // u32 flag (4) + three u32 pads (12) fill 160 bytes, a multiple of the
-        // 16-byte immediate alignment the mat4x4 fields force on the struct.
+        // u32 flag (4) + two f32 adaptive tunables (8) + one u32 pad (4) fill 160
+        // bytes, a multiple of the 16-byte immediate alignment the mat4x4 fields
+        // force on the struct.
         assert_eq!(size_of::<GpuSsrTemporalParams>(), 160);
         assert_eq!(align_of::<GpuSsrTemporalParams>(), 4);
         let world_from_clip = Mat4::from_cols_array(&[
@@ -563,9 +565,9 @@ mod tests {
         assert_eq!(params.history_weight, 0.9);
         assert_eq!(params.clamp_expand, 0.0);
         assert_eq!(params.valid_history, 1);
+        assert_eq!(params.variance_gamma, 1.25);
+        assert_eq!(params.min_history_weight, 0.5);
         assert_eq!(params._pad0, 0);
-        assert_eq!(params._pad1, 0);
-        assert_eq!(params._pad2, 0);
         // The flag round-trips false -> 0.
         let invalid = GpuSsrTemporalParams::new(world_from_clip, clip_prev, 1, 1, false);
         assert_eq!(invalid.valid_history, 0);
