@@ -15,14 +15,15 @@
 //! stale reflection instead of ghosting — integrating many effective samples
 //! over time while staying responsive.
 //!
-//! Prism carries no per-pixel motion-vector G-buffer, so the reprojection is
-//! purely camera-driven: reconstruct each pixel's world position from its
-//! reverse-Z device depth and the inverse *current* view-projection, then
-//! project it through the *previous* frame's view-projection to find where the
-//! surface sat last frame. Off-screen, behind-camera, background and
+//! The resolve pass writes a per-pixel motion-vector G-buffer (`cur_uv -
+//! prev_uv`, folding in both camera *and* per-object motion), so the
+//! reprojection is a single add: `prev_uv = cur_uv - motion`. This tracks
+//! moving surfaces the old camera-only depth reprojection could not, without a
+//! previous-frame matrix. Off-screen (after the motion offset), background and
 //! flagged-invalid samples fall back to the current frame, so a camera cut or a
 //! resize degrades gracefully to the un-accumulated resolve rather than
-//! smearing.
+//! smearing. The `device_depth > 0` gate still restricts accumulation to real
+//! surfaces (the motion buffer is zero on pixels the resolve did not cover).
 //!
 //! History cannot live in the frame-transient [`TextureCache`] the other SSR
 //! targets use — that pool is recycled every frame — so this module keeps a
@@ -36,16 +37,17 @@
 //!
 //! * `0` this frame's spatially resolved reflection (`textureLoad`ed, both as
 //!   the anchor colour and for the 3x3 neighbourhood variance box),
-//! * `1` the full-resolution reverse-Z device depth (world reconstruction),
+//! * `1` the full-resolution reverse-Z device depth (the real-surface gate),
 //! * `2` the previous frame's accumulated reflection (sampled with a filtering
 //!   sampler so the reprojected UV bilinearly interpolates),
-//! * `3` that filtering sampler, and
-//! * `4` the write-only `rgba16float` accumulated-reflection output.
+//! * `3` that filtering sampler,
+//! * `4` the write-only `rgba16float` accumulated-reflection output, and
+//! * `5` the resolve's `rg16float` motion-vector G-buffer (`textureLoad`ed;
+//!   `prev_uv = cur_uv - motion`).
 //!
-//! The current inverse view-projection, previous view-projection, framebuffer
-//! extent, golden tunables and the history-validity flag travel in the
-//! [`GpuSsrTemporalParams`] immediate block. Runs after the reconstruct (its
-//! resolved input) and before the composite that now reads the accumulated
+//! The framebuffer extent, golden tunables and the history-validity flag travel
+//! in the [`GpuSsrTemporalParams`] immediate block. Runs after the reconstruct
+//! (its resolved input) and before the composite that now reads the accumulated
 //! buffer.
 
 use bevy_asset::{load_embedded_asset, Handle};
@@ -58,7 +60,7 @@ use bevy_material::{
     },
     descriptor::BindGroupLayoutDescriptor,
 };
-use bevy_math::{Mat4, UVec2};
+use bevy_math::UVec2;
 use bevy_platform::collections::{HashMap, HashSet};
 use bevy_render::{
     render_resource::{
@@ -74,6 +76,7 @@ use bevy_render::{
 use bevy_shader::Shader;
 
 use super::abi::{GpuSsrTemporalParams, SSR_WORKGROUP_SIZE};
+use super::super::resources::ViewVisibilityBuffer;
 use super::resources::{ViewSsrTextures, SSR_OUT_FORMAT};
 
 /// Compute pipeline, its owned group-0 layout, and the filtering sampler the
@@ -81,7 +84,7 @@ use super::resources::{ViewSsrTextures, SSR_OUT_FORMAT};
 #[derive(Resource)]
 pub(crate) struct SsrTemporalPipeline {
     /// `accumulate_ssr` compute entry point, specialized against the group-0
-    /// layout and the 160-byte [`GpuSsrTemporalParams`] immediate block.
+    /// layout and the 32-byte [`GpuSsrTemporalParams`] immediate block.
     accumulate: CachedComputePipelineId,
     /// group 0: resolved reflection + device depth reads, the filterable
     /// history + its sampler, and the write-only accumulated output.
@@ -94,8 +97,9 @@ pub(crate) struct SsrTemporalPipeline {
 /// group-0 layout mirroring `ssr_temporal.wesl`: two non-filterable float reads
 /// (the resolved reflection and device depth, both `textureLoad`ed), the
 /// *filterable* history + its filtering sampler (sampled at the reprojected UV),
-/// then the write-only `rgba16float` accumulated output.
-fn layout_entries() -> BindGroupLayoutEntries<5> {
+/// the write-only `rgba16float` accumulated output, and the non-filterable
+/// motion-vector G-buffer the reprojection adds back to reach last frame's UV.
+fn layout_entries() -> BindGroupLayoutEntries<6> {
     BindGroupLayoutEntries::sequential(
         ShaderStages::COMPUTE,
         (
@@ -104,6 +108,7 @@ fn layout_entries() -> BindGroupLayoutEntries<5> {
             texture_2d(TextureSampleType::Float { filterable: true }),
             sampler(SamplerBindingType::Filtering),
             texture_storage_2d(SSR_OUT_FORMAT, StorageTextureAccess::WriteOnly),
+            texture_2d(TextureSampleType::Float { filterable: false }),
         ),
     )
 }
@@ -153,8 +158,9 @@ pub(crate) fn init_ssr_temporal_pipeline(
 
 /// Per-view temporal state resolved each frame from the persistent ping-pong
 /// cache: the readable previous-frame history, the writable current-frame
-/// output (which the composite reads), the previous frame's view-projection for
-/// the reprojection, and whether that history is trustworthy this frame.
+/// output (which the composite reads), and whether that history is trustworthy
+/// this frame. The reprojection reads the motion-vector G-buffer, so no
+/// previous-frame matrix is carried here anymore.
 #[derive(Component)]
 pub(crate) struct ViewSsrTemporal {
     /// Previous frame's accumulated reflection, sampled at the reprojected UV.
@@ -162,9 +168,6 @@ pub(crate) struct ViewSsrTemporal {
     /// This frame's accumulated output. Written by the temporal pass (storage)
     /// and read by the composite (sampled) in place of the raw resolve.
     write_view: TextureView,
-    /// Previous frame's `clip_from_world`; reprojects a reconstructed world
-    /// position into last frame's clip space to find the history UV.
-    prev_clip_from_world: Mat4,
     /// `false` on the first frame, a resize, or a fresh allocation, so the
     /// shader ignores the (garbage) history and passes the resolve through.
     valid: bool,
@@ -194,9 +197,6 @@ struct CachedTemporal {
     /// Which slot holds the readable previous-frame output: `false` -> A,
     /// `true` -> B. Flipped every frame after the roles are handed out.
     parity: bool,
-    /// The `clip_from_world` used to render the slot currently readable, i.e.
-    /// the previous frame's view-projection.
-    prev_clip_from_world: Mat4,
 }
 
 /// The persistent per-view history cache, surviving across frames in a
@@ -235,8 +235,8 @@ fn create_history(device: &RenderDevice, size: UVec2) -> TextureView {
 /// Runs after `prepare_ssr_textures` so the viewport size is settled. A cache
 /// miss or a size change allocates a fresh pair and marks the history invalid
 /// (the shader passes the resolve through); a hit hands out last frame's write
-/// slot as the readable history and its previous view-projection for the
-/// reprojection. Views that lost their SSR textures drop their cache entry.
+/// slot as the readable history (the GPU reprojects it via the motion buffer).
+/// Views that lost their SSR textures drop their cache entry.
 pub(crate) fn prepare_ssr_temporal_textures(
     mut commands: Commands,
     device: Res<RenderDevice>,
@@ -254,11 +254,6 @@ pub(crate) fn prepare_ssr_temporal_textures(
         }
         retained.insert(retained_view);
 
-        // Current view-projection: the temporal pass inverts this for world
-        // reconstruction and stashes it as next frame's `prev_clip_from_world`.
-        let view_from_world = view.world_from_view.to_matrix().inverse();
-        let clip_from_world = view.clip_from_view * view_from_world;
-
         // Reuse the persistent pair only when its extent still matches; a resize
         // reallocates and drops the history to the (invalid) current frame.
         let reuse = cache
@@ -273,7 +268,6 @@ pub(crate) fn prepare_ssr_temporal_textures(
                     view_b: create_history(&device, size),
                     size,
                     parity: false,
-                    prev_clip_from_world: clip_from_world,
                 },
             );
         }
@@ -289,16 +283,13 @@ pub(crate) fn prepare_ssr_temporal_textures(
         } else {
             (cached.view_b.clone(), cached.view_a.clone())
         };
-        let prev_clip_from_world = cached.prev_clip_from_world;
 
-        // Next frame reads what we are about to write, rendered with this VP.
+        // Next frame reads what we are about to write this frame.
         cached.parity = !cached.parity;
-        cached.prev_clip_from_world = clip_from_world;
 
         commands.entity(entity).insert(ViewSsrTemporal {
             read_view,
             write_view,
-            prev_clip_from_world,
             valid: reuse,
         });
     }
@@ -321,9 +312,14 @@ pub(crate) fn prepare_ssr_temporal_bind_groups(
     mut commands: Commands,
     pipeline: Res<SsrTemporalPipeline>,
     device: Res<RenderDevice>,
-    views: Query<(Entity, &ViewSsrTextures, &ViewSsrTemporal)>,
+    views: Query<(
+        Entity,
+        &ViewSsrTextures,
+        &ViewSsrTemporal,
+        &ViewVisibilityBuffer,
+    )>,
 ) {
-    for (entity, textures, temporal) in &views {
+    for (entity, textures, temporal, visibility) in &views {
         let group = device.create_bind_group(
             "prism SSR temporal",
             &pipeline.layout,
@@ -333,6 +329,7 @@ pub(crate) fn prepare_ssr_temporal_bind_groups(
                 temporal.read_view(),
                 &pipeline.sampler,
                 temporal.write_view(),
+                visibility.motion_vectors_view(),
             )),
         );
         commands
@@ -353,7 +350,6 @@ pub(crate) fn ssr_temporal_pass(
         &ViewSsrTextures,
         &ViewSsrTemporalBindGroup,
         &ViewSsrTemporal,
-        &ExtractedView,
     )>,
     pipeline: Res<SsrTemporalPipeline>,
     cache: Res<PipelineCache>,
@@ -362,7 +358,7 @@ pub(crate) fn ssr_temporal_pass(
     if !settings.enable_ssr {
         return;
     }
-    let (textures, group, temporal, extracted) = view.into_inner();
+    let (textures, group, temporal) = view.into_inner();
 
     let Some(accumulate) = cache.get_compute_pipeline(pipeline.accumulate) else {
         return;
@@ -373,19 +369,9 @@ pub(crate) fn ssr_temporal_pass(
         return;
     }
 
-    // Inverse current view-projection reconstructs a pixel's world position
-    // from its reverse-Z device depth; the previous VP then reprojects it.
-    let view_from_world = extracted.world_from_view.to_matrix().inverse();
-    let clip_from_world = extracted.clip_from_view * view_from_world;
-    let world_from_clip = clip_from_world.inverse();
-
-    let params = GpuSsrTemporalParams::new(
-        world_from_clip,
-        temporal.prev_clip_from_world,
-        size.x,
-        size.y,
-        temporal.valid,
-    );
+    // The reprojection reads the resolve's motion-vector G-buffer on the GPU,
+    // so the params only carry the framebuffer extent and the history-valid flag.
+    let params = GpuSsrTemporalParams::new(size.x, size.y, temporal.valid);
 
     let workgroups_x = size.x.div_ceil(SSR_WORKGROUP_SIZE);
     let workgroups_y = size.y.div_ceil(SSR_WORKGROUP_SIZE);

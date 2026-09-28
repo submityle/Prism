@@ -8,21 +8,24 @@
 //! turning N frames of few-ray traces into one many-ray estimate for free.
 //!
 //! The hard part is finding "the same surface" last frame and rejecting stale
-//! history.  Prism is a visibility-buffer deferred renderer with no per-pixel
-//! motion-vector G-buffer, so this reprojects purely from camera motion: it
-//! reconstructs each pixel's world position from its reverse-Z device depth and
-//! the inverse current view-projection, then reprojects that world point
-//! through the *previous* frame's view-projection to recover the UV the surface
-//! occupied last frame.  Static geometry under a moving camera reprojects
-//! exactly; a disocclusion (or an off-screen reprojection) drops history and
-//! falls back to the current frame.  To suppress ghosting on the surfaces that
-//! do move, the reprojected history is clipped to the axis-aligned colour box
-//! of the current pixel's neighbourhood before the exponential blend.
+//! history.  Prism's resolve pass writes a per-pixel **motion-vector G-buffer**
+//! (see [`super::motion`]) that folds in *both* camera and per-object motion, so
+//! the preferred reprojection just adds that vector back to the current UV
+//! ([`reproject_prev_uv_motion`]) to recover where the surface sat last frame —
+//! no depth reconstruction and, crucially, no ghosting on animated or skinned
+//! geometry.  The older depth-only camera reprojection ([`reproject_prev_uv`],
+//! reconstruct world from reverse-Z depth + inverse current view-projection,
+//! then project through the previous view-projection) is kept as the
+//! backend-neutral reference for static scenes.  Either way a disocclusion (or
+//! an off-screen reprojection) drops history and falls back to the current
+//! frame, and the reprojected history is clipped to the axis-aligned colour box
+//! of the current pixel's neighbourhood before the exponential blend to suppress
+//! any residual ghosting.
 //!
 //! This module is the CPU golden; the `ssr_temporal.wesl` twin shares the same
-//! reprojection, neighbourhood-clip and accumulation math bit for bit.  Every
-//! transcendental (there are none here) would route through [`bevy_math::ops`]
-//! for cross-platform determinism.
+//! motion reprojection, neighbourhood-clip and accumulation math bit for bit.
+//! Every transcendental (there are none here) would route through
+//! [`bevy_math::ops`] for cross-platform determinism.
 
 use bevy_math::{Mat4, Vec2, Vec3, Vec4};
 
@@ -120,6 +123,25 @@ pub fn reproject_prev_uv(
         ndc_prev.x * 0.5 + 0.5,
         1.0 - (ndc_prev.y * 0.5 + 0.5),
     ))
+}
+
+/// Reproject a pixel's history UV directly from its **motion vector** — the
+/// screen-space displacement `current_uv - previous_uv` the resolve pass writes
+/// per covered pixel (see [`super::motion`]).  Because that vector already folds
+/// in *both* camera and per-object motion, adding it back recovers exactly where
+/// the surface sat last frame with no depth reconstruction and no ghosting on
+/// animated or skinned geometry — the reason a motion-vector G-buffer supersedes
+/// the depth-only camera reprojection in [`reproject_prev_uv`].
+///
+/// Returns [`None`] when the recovered UV lands outside `[0, 1]²` (an off-screen
+/// reprojection or a disocclusion), which the accumulation treats as a dropped
+/// sample and falls back to the current frame.
+pub fn reproject_prev_uv_motion(uv: Vec2, motion: Vec2) -> Option<Vec2> {
+    let prev = uv - motion;
+    if prev.x < 0.0 || prev.x > 1.0 || prev.y < 0.0 || prev.y > 1.0 {
+        return None;
+    }
+    Some(prev)
 }
 
 /// The result of clipping history to the neighbourhood box: the clamped colour
@@ -300,6 +322,27 @@ mod tests {
         // Any surface depth in (0,1]; reproject through the identical matrix.
         let prev = reproject_prev_uv(world_from_clip, cur, uv, 0.5).unwrap();
         assert!(approx(prev, uv), "identity reprojection must be a no-op: {prev:?}");
+    }
+
+    #[test]
+    fn motion_reprojection_subtracts_the_vector() {
+        // A zero motion vector (static surface under a static camera) keeps the
+        // pixel in place; a non-zero vector shifts the history UV by exactly its
+        // negative, following the surface back to last frame's position.
+        let uv = Vec2::new(0.4, 0.55);
+        assert!(approx(reproject_prev_uv_motion(uv, Vec2::ZERO).unwrap(), uv));
+        let motion = Vec2::new(0.05, -0.1);
+        let prev = reproject_prev_uv_motion(uv, motion).unwrap();
+        assert!(approx(prev, uv - motion), "motion reproject must be uv - motion: {prev:?}");
+    }
+
+    #[test]
+    fn motion_reprojection_drops_offscreen_history() {
+        // A vector that carries the lookup outside [0,1]^2 (an off-screen
+        // reprojection or a disocclusion) drops history to the current frame.
+        let uv = Vec2::new(0.02, 0.5);
+        assert!(reproject_prev_uv_motion(uv, Vec2::new(0.5, 0.0)).is_none());
+        assert!(reproject_prev_uv_motion(uv, Vec2::new(0.0, -0.9)).is_none());
     }
 
     #[test]

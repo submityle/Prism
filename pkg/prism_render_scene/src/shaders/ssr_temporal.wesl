@@ -1,28 +1,24 @@
 // Cross-frame temporal accumulation for screen-space reflections.
 //
-// GPU twin of `prism_render_shading::screen_space::temporal`. Prism has no
-// per-pixel motion-vector G-buffer, so history is reprojected purely from
-// camera motion: reconstruct each pixel's world position from its reverse-Z
-// device depth and the inverse current view-projection, reproject it through
-// the previous frame's view-projection to find last frame's UV, sample the
-// accumulated history there, clip it to the current 3x3 neighbourhood colour
-// box (to kill ghosting on moving surfaces), then exponentially blend. A
-// dropped reprojection (off-screen, disoccluded, background, or a flagged
-// history invalidation) falls back to the current frame.
+// GPU twin of `prism_render_shading::screen_space::temporal`. The resolve pass
+// writes a per-pixel motion-vector G-buffer (`cur_uv - prev_uv`, folding in
+// camera *and* per-object motion), so history is reprojected by simply adding
+// that vector back: `prev_uv = cur_uv - motion`. Sample the accumulated history
+// there, clip it to the current 3x3 neighbourhood colour box (to kill ghosting
+// on moving surfaces), then exponentially blend. A dropped reprojection
+// (off-screen after the motion offset, background, or a flagged history
+// invalidation) falls back to the current frame.
 //
 // Self-contained (no imports): group 0 is
-//   0 = ssr_resolved   (this frame's resolved reflection, textureLoad)
-//   1 = scene_depth     (reverse-Z device depth, textureLoad)
-//   2 = history         (previous accumulated reflection, sampled)
-//   3 = history_sampler (filtering)
-//   4 = temporal_out    (rgba16float storage, write)
+//   0 = ssr_resolved    (this frame's resolved reflection, textureLoad)
+//   1 = scene_depth      (reverse-Z device depth, textureLoad; surface gate)
+//   2 = history          (previous accumulated reflection, sampled)
+//   3 = history_sampler  (filtering)
+//   4 = temporal_out     (rgba16float storage, write)
+//   5 = motion_vectors   (rg16float screen-space motion, textureLoad)
 // with a `TemporalParams` immediate block.
 
 struct TemporalParams {
-    // inverse(current clip_from_world): NDC+depth -> world.
-    world_from_clip: mat4x4<f32>,
-    // previous frame's view-projection: world -> previous clip.
-    clip_from_world_prev: mat4x4<f32>,
     width: u32,
     height: u32,
     // fraction of reprojected history kept when the sample is valid.
@@ -44,15 +40,12 @@ struct TemporalParams {
 @group(0) @binding(2) var history: texture_2d<f32>;
 @group(0) @binding(3) var history_sampler: sampler;
 @group(0) @binding(4) var temporal_out: texture_storage_2d<rgba16float, write>;
+// Per-pixel screen-space motion (`cur_uv - prev_uv`) from the resolve pass; the
+// history lookup adds it back to reach last frame's UV. Zero on pixels the
+// resolve did not cover, which the `device_depth > 0` gate already excludes.
+@group(0) @binding(5) var motion_vectors: texture_2d<f32>;
 
 var<immediate> params: TemporalParams;
-
-// Reconstruct world position from a reverse-Z device depth at pixel-centre `uv`.
-fn reconstruct_world(uv: vec2<f32>, device_depth: f32) -> vec3<f32> {
-    let ndc = vec3<f32>(uv.x * 2.0 - 1.0, (1.0 - uv.y) * 2.0 - 1.0, device_depth);
-    let h = params.world_from_clip * vec4<f32>(ndc, 1.0);
-    return h.xyz / h.w;
-}
 
 // AABB-clip (Karis) returning both the clamped colour and the overshoot -- how
 // far outside the box the raw history began, in box half-extents past the
@@ -141,16 +134,14 @@ fn accumulate_ssr(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (params.valid_history != 0u && device_depth > 0.0) {
         let uv = (vec2<f32>(f32(gid.x), f32(gid.y)) + vec2<f32>(0.5))
             / vec2<f32>(f32(params.width), f32(params.height));
-        let world = reconstruct_world(uv, device_depth);
-        let clip_prev = params.clip_from_world_prev * vec4<f32>(world, 1.0);
-        if (clip_prev.w > 0.0) {
-            let ndc_prev = clip_prev.xyz / clip_prev.w;
-            if (ndc_prev.x >= -1.0 && ndc_prev.x <= 1.0
-                && ndc_prev.y >= -1.0 && ndc_prev.y <= 1.0) {
-                let prev_uv = vec2<f32>(
-                    ndc_prev.x * 0.5 + 0.5,
-                    1.0 - (ndc_prev.y * 0.5 + 0.5),
-                );
+        // Motion vector already folds in camera + object motion; add it back to
+        // find where this surface sat last frame (golden `reproject_prev_uv_motion`).
+        let motion = textureLoad(motion_vectors, coord, 0).xy;
+        let prev_uv = uv - motion;
+        // Drop history that reprojected off-screen (a disocclusion or an edge).
+        if (prev_uv.x >= 0.0 && prev_uv.x <= 1.0
+            && prev_uv.y >= 0.0 && prev_uv.y <= 1.0) {
+            {
                 let hist = textureSampleLevel(history, history_sampler, prev_uv, 0.0);
                 // Widen the clip box for a low-confidence current sample so a
                 // transient miss keeps the converged reflection instead of
