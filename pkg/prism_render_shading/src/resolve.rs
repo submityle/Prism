@@ -85,6 +85,11 @@ pub struct ResolveInput<'a> {
     pub textures: &'a [SampledTextureBinding],
     /// World-space camera position used to derive the view vector.
     pub view_position: [f32; 3],
+    /// Screen-space ambient visibility in `[0, 1]` (`1` = unoccluded) sampled
+    /// from the GTAO kernel's output for this pixel. It multiplies the
+    /// material's own occlusion so the indirect/ambient term is darkened in
+    /// creases the geometric AO catches. Views without GTAO pass `1.0`.
+    pub screen_space_ao: f32,
 }
 
 /// The linear HDR result of resolving one pixel plus its provenance.
@@ -204,7 +209,11 @@ pub fn resolve_pixel(
 
     let emissive = surface.emissive;
     let base_color = surface.base_color;
-    let ambient_occlusion = surface.ambient_occlusion.clamp(0.0, 1.0);
+    // Fold the screen-space GTAO visibility into the material occlusion so the
+    // indirect/ambient term (IBL or constant) is attenuated in geometric
+    // creases; both factors are clamped so the product stays in `[0, 1]`.
+    let ambient_occlusion =
+        (surface.ambient_occlusion * input.screen_space_ao).clamp(0.0, 1.0);
     let metallic = surface.metallic.clamp(0.0, 1.0);
 
     // A bound normal map rotates the tangent-space normal into world space
@@ -543,6 +552,7 @@ mod tests {
             parameters,
             textures: &[],
             view_position: [0.0, 0.0, 4.0],
+            screen_space_ao: 1.0,
         }
     }
 
@@ -887,5 +897,80 @@ mod tests {
         .unwrap()
         .color;
         assert_eq!(textured, untextured, "identity texels must not perturb the resolve");
+    }
+    #[test]
+    fn screen_space_ao_darkens_the_ambient_term_but_spares_direct_light() {
+        // A Lambertian surface lit only by constant ambient: halving the GTAO
+        // visibility must halve the resolved color (the ambient term is linear
+        // in occlusion), while a fully-lit direct-only surface is untouched.
+        let (primitives, vertices) = unit_triangle();
+        let header = principled_header();
+        let parameters = GpuSurfaceParameters {
+            base_color: [0.8, 0.8, 0.8, 1.0],
+            metallic: 0.0,
+            ..Default::default()
+        };
+        let ambient_only = LightingEnvironment {
+            directional: &[],
+            punctual: &[],
+            image_based: None,
+            ambient: [0.6; 3],
+            toon_bands: 4,
+        };
+
+        let full = resolve_pixel(
+            ResolveInput { screen_space_ao: 1.0, ..base_input(&primitives, &vertices, header, parameters) },
+            ambient_only,
+        )
+        .unwrap()
+        .color;
+        let half = resolve_pixel(
+            ResolveInput { screen_space_ao: 0.5, ..base_input(&primitives, &vertices, header, parameters) },
+            ambient_only,
+        )
+        .unwrap()
+        .color;
+        let occluded = resolve_pixel(
+            ResolveInput { screen_space_ao: 0.0, ..base_input(&primitives, &vertices, header, parameters) },
+            ambient_only,
+        )
+        .unwrap()
+        .color;
+
+        for c in 0..3 {
+            assert!(full[c] > 0.0, "ambient term must be positive: {full:?}");
+            assert!(
+                (half[c] - 0.5 * full[c]).abs() < 1.0e-6,
+                "GTAO must scale the ambient term linearly: {half:?} vs {full:?}",
+            );
+            assert!(
+                occluded[c].abs() < 1.0e-6,
+                "fully-occluded ambient must vanish: {occluded:?}",
+            );
+        }
+
+        // Direct light does not flow through occlusion, so a lit-only surface
+        // is identical regardless of the GTAO factor.
+        let light = DirectionalLight { direction: [0.0, 0.0, 1.0], illuminance: [4.0; 3], visibility: 1.0 };
+        let direct = LightingEnvironment {
+            directional: &[light],
+            punctual: &[],
+            image_based: None,
+            ambient: [0.0; 3],
+            toon_bands: 4,
+        };
+        let lit_full = resolve_pixel(
+            ResolveInput { screen_space_ao: 1.0, ..base_input(&primitives, &vertices, header, parameters) },
+            direct,
+        )
+        .unwrap()
+        .color;
+        let lit_occluded = resolve_pixel(
+            ResolveInput { screen_space_ao: 0.0, ..base_input(&primitives, &vertices, header, parameters) },
+            direct,
+        )
+        .unwrap()
+        .color;
+        assert_eq!(lit_full, lit_occluded, "GTAO must not touch direct lighting");
     }
 }

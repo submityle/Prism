@@ -18,10 +18,12 @@ use bevy_ecs::prelude::*;
 use bevy_render::{
     render_resource::{BindGroup, BindGroupEntries},
     renderer::RenderDevice,
+    texture::FallbackImage,
 };
 
 use crate::{GpuSceneBuffers, RenderShadingGeometryBuffers};
 
+use super::super::ao::ViewGtaoTextures;
 use super::super::resources::{ViewShadingBuffers, ViewVisibilityBuffer};
 use super::pipeline::ShadingResolvePipeline;
 
@@ -46,14 +48,20 @@ pub(crate) fn prepare_shading_resolve_bind_groups(
     device: Res<RenderDevice>,
     scene: Res<GpuSceneBuffers>,
     geometry: Res<RenderShadingGeometryBuffers>,
-    views: Query<(Entity, &ViewVisibilityBuffer, &ViewShadingBuffers)>,
+    fallback: Res<FallbackImage>,
+    views: Query<(
+        Entity,
+        &ViewVisibilityBuffer,
+        &ViewShadingBuffers,
+        Option<&ViewGtaoTextures>,
+    )>,
 ) {
     // Scene/geometry tables are shared across all views; if either has not
     // uploaded yet there is nothing to resolve, so clear any stale groups.
     let (Some(instances), Some((geo_headers, geo_vertices, geo_primitives))) =
         (scene.instances(), geometry.buffers())
     else {
-        for (entity, _, _) in &views {
+        for (entity, _, _, _) in &views {
             commands
                 .entity(entity)
                 .remove::<ViewResolveBindGroups>();
@@ -61,12 +69,23 @@ pub(crate) fn prepare_shading_resolve_bind_groups(
         return;
     };
 
-    for (entity, visibility, buffers) in &views {
+    for (entity, visibility, buffers, gtao) in &views {
         let (ids, metadata) = visibility.attachments();
+        // Bind the view's GTAO visibility when present, else a 1x1 white
+        // texture so the shader's multiply is a no-op (the dispatch also gates
+        // on the `gtao_enabled` flag, so the fallback is never actually read).
+        let ao_view = gtao.map_or(&fallback.d2.texture_view, |textures| {
+            textures.ambient_occlusion_view()
+        });
         let view = device.create_bind_group(
             "prism resolve view",
             &pipeline.view_layout,
-            &BindGroupEntries::sequential((ids, metadata, visibility.scene_color_view())),
+            &BindGroupEntries::sequential((
+                ids,
+                metadata,
+                visibility.scene_color_view(),
+                ao_view,
+            )),
         );
         let scene_group = device.create_bind_group(
             "prism resolve scene",

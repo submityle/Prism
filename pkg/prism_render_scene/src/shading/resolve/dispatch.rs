@@ -76,7 +76,7 @@ pub(crate) fn dispatch_shading_resolve(
         shading_class: 0,
         width: buffers.size.x,
         height: buffers.size.y,
-        _pad: 0,
+        gtao_enabled: u32::from(settings.enable_gtao),
         view_position: [translation.x, translation.y, translation.z, 0.0],
     };
     if params.width == 0 || params.height == 0 {

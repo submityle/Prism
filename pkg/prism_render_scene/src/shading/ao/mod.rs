@@ -36,4 +36,4 @@ mod shader_tests;
 pub(crate) use bind_groups::{prepare_gtao_kernel_bind_groups, prepare_gtao_prepass_bind_groups};
 pub(crate) use dispatch::{gtao_compute_pass, gtao_prepass_pass};
 pub(crate) use pipeline::{init_gtao_kernel_pipeline, init_gtao_prepass_pipeline};
-pub(crate) use resources::prepare_gtao_textures;
+pub(crate) use resources::{prepare_gtao_textures, ViewGtaoTextures};

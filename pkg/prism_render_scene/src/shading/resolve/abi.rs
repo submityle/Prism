@@ -30,8 +30,9 @@ pub(crate) struct GpuShadingResolveParams {
     pub width: u32,
     /// Framebuffer height in pixels.
     pub height: u32,
-    /// Padding to align the following `vec4<f32>` to 16 bytes.
-    pub _pad: u32,
+    /// `1` enables the GTAO occlusion multiply in the shader; `0` disables it.
+    /// Doubles as the 16-byte alignment word ahead of the `vec4<f32>`.
+    pub gtao_enabled: u32,
     /// World-space camera position; `w` is unused padding.
     pub view_position: [f32; 4],
 }

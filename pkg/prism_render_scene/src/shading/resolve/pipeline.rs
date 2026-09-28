@@ -61,15 +61,18 @@ pub(crate) struct ShadingResolvePipeline {
     pub(crate) scene_layout: BindGroupLayout,
 }
 
-/// Builds the group-0 layout entries: two `texture_2d<u32>` visibility inputs
-/// followed by the write-only `rgba16float` storage texture.
-fn view_layout_entries() -> BindGroupLayoutEntries<3> {
+/// Builds the group-0 layout entries: two `texture_2d<u32>` visibility inputs,
+/// the write-only `rgba16float` storage texture, and the sampled screen-space
+/// GTAO visibility texture (non-filterable float; a 1x1 white fallback is bound
+/// when GTAO is disabled).
+fn view_layout_entries() -> BindGroupLayoutEntries<4> {
     BindGroupLayoutEntries::sequential(
         ShaderStages::COMPUTE,
         (
             texture_2d(TextureSampleType::Uint),
             texture_2d(TextureSampleType::Uint),
             texture_storage_2d(SCENE_COLOR_FORMAT, StorageTextureAccess::WriteOnly),
+            texture_2d(TextureSampleType::Float { filterable: false }),
         ),
     )
 }

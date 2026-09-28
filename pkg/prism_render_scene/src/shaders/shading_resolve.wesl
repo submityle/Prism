@@ -116,7 +116,9 @@ struct ResolveParams {
     shading_class: u32,
     width: u32,
     height: u32,
-    pad: u32,
+    // `1` enables the screen-space GTAO multiply below; `0` leaves the
+    // material occlusion untouched (also the state of the 1x1 white fallback).
+    gtao_enabled: u32,
     view_position: vec4<f32>,
 }
 
@@ -133,6 +135,9 @@ struct WorkItem {
 @group(0) @binding(0) var visibility_ids: texture_2d<u32>;
 @group(0) @binding(1) var visibility_metadata: texture_2d<u32>;
 @group(0) @binding(2) var scene_color: texture_storage_2d<rgba16float, write>;
+// Screen-space GTAO visibility (1 = unoccluded) in `.x`; a 1x1 white fallback
+// is bound when GTAO is disabled so this multiply is a no-op.
+@group(0) @binding(3) var gtao_ao: texture_2d<f32>;
 
 // --- group 1: material tables (shared MaterialBindGroup layout) ---
 @group(1) @binding(0) var<storage, read> material_headers: array<PrismMaterialHeader>;
@@ -706,7 +711,15 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     surface.metallic = sampled.metallic;
     surface.perceptual_roughness = sampled.perceptual_roughness;
     surface.reflectance = parameters.reflectance;
-    surface.ambient_occlusion = sampled.occlusion;
+    // Fold the screen-space GTAO visibility into the material occlusion so the
+    // indirect/ambient term is darkened in geometric creases, mirroring
+    // `resolve_pixel` in the CPU golden. The fallback texture and the disabled
+    // flag both leave this a no-op (visibility 1).
+    var screen_space_ao = 1.0;
+    if params.gtao_enabled != 0u {
+        screen_space_ao = textureLoad(gtao_ao, coord, 0).x;
+    }
+    surface.ambient_occlusion = clamp(sampled.occlusion * screen_space_ao, 0.0, 1.0);
     surface.emissive = sampled.emissive;
     surface.clearcoat = sampled.clearcoat;
     surface.clearcoat_roughness = sampled.clearcoat_roughness;
