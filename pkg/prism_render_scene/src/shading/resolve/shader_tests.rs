@@ -327,13 +327,18 @@ fn clearcoat_wesl_compiles_and_resolves_imports() {
 /// `material`, `gpu_scene`) under their canonical module paths and compiles
 /// `shading_resolve.wesl`, forcing every `import prism_render_scene::shaders::*`
 /// to resolve exactly as it will in the render world.
+/// Byte-faithful copy of Bevy's `affine3_to_square` (transpose of the three
+/// affine rows plus a `[0,0,0,1]` bottom row), used only to satisfy the
+/// `bevy_render::maths` import while compiling `shading_resolve.wesl` off-GPU.
+const MATHS_STUB: &str = "fn affine3_to_square(affine: mat3x4<f32>) -> mat4x4<f32> {\n    return transpose(mat4x4<f32>(\n        affine[0],\n        affine[1],\n        affine[2],\n        vec4<f32>(0.0, 0.0, 0.0, 1.0),\n    ));\n}\n";
+
 #[test]
 fn shading_resolve_wesl_compiles_and_resolves_all_imports() {
     let mut cache = ShaderCache::new((), load_source);
 
     // Register each dependency under the byte-identical embedded module path
     // that `load_shader_library!` produces at runtime.
-    let deps: [(u128, &str, &str); 13] = [
+    let deps: [(u128, &str, &str); 14] = [
         (
             0x5052_4953_4d5f_5441_4e47_454e_5400_0002,
             include_str!("../../shaders/tangent.wesl"),
@@ -398,6 +403,17 @@ fn shading_resolve_wesl_compiles_and_resolves_all_imports() {
             0x5052_4953_4d5f_5348_4144_4f57_0000_0002,
             include_str!("../../shaders/shadow.wesl"),
             "embedded://prism_render_scene/shaders/shadow.wesl",
+        ),
+        // Minimal stand-in for Bevy's `bevy_render::maths`: the resolve shader
+        // imports `affine3_to_square` from it exactly like `opaque.wesl` and
+        // `visibility_raster.wesl` do at runtime. Bevy registers the real module
+        // in the render world; the sandbox test has no GPU/render app, so we
+        // register a byte-faithful copy of `affine3_to_square` under the same
+        // module path (`bevy_render::maths`) so the importer resolves it.
+        (
+            0x4245_5659_5f52_4e44_5f4d_4154_4853_0001,
+            MATHS_STUB,
+            "embedded://bevy_render/maths.wesl",
         ),
     ];
     for (tag, source, path) in deps {

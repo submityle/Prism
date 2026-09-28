@@ -81,6 +81,7 @@ import prism_render_scene::shaders::material::{
 };
 import prism_render_scene::shaders::gpu_scene::{
     GpuSceneInstance,
+    GpuSceneTransform,
 };
 import prism_render_scene::shaders::material_sample::{
     sampled_material_defaults,
@@ -91,6 +92,7 @@ import prism_render_scene::shaders::tangent::{
     TangentBasis,
     apply_tangent_space_normal,
 };
+import bevy_render::maths::affine3_to_square;
 
 // `material_sample` folds bindless textures through a `binding_array`, so this
 // merged module must enable the extension. WESL requires every `enable` to
@@ -183,6 +185,12 @@ struct WorkItem {
 @group(2) @binding(4) var<storage, read> geometry_headers: array<RenderShadingGeometryHeader>;
 @group(2) @binding(5) var<storage, read> geometry_vertices: array<GpuShadingVertex>;
 @group(2) @binding(6) var<storage, read> geometry_primitives: array<GpuShadingPrimitive>;
+// Per-instance affine `world_from_local` (indexed by `scene_index`), matching
+// `GpuSceneTransform` in `gpu_scene.wesl` and the transform buffer bound by the
+// visibility/opaque passes. The reconstructed local-space surface is lifted
+// into world space with it before any lighting, mirroring the CPU golden
+// `resolve_pixel`; guarded against a short/stale buffer below.
+@group(2) @binding(7) var<storage, read> scene_current_transforms: array<GpuSceneTransform>;
 
 // --- group 3: analytic lights (shared LightBindGroup layout) ---
 @group(3) @binding(0) var<storage, read> directional_lights: array<DirectionalLight>;
@@ -227,6 +235,22 @@ struct ClusterSlice {
     use_clusters: u32,
     offset: u32,
     count: u32,
+}
+
+// Inverse-transpose of a linear 3x3, carrying normals correctly under a
+// non-uniform scale. Copied verbatim from `opaque.wesl`/`visibility_raster.wesl`
+// (cofactor columns over the determinant); returns identity for a singular
+// matrix so a degenerate transform is a no-op. Mirrors the CPU golden
+// `resolve::normal_matrix`.
+fn inverse_transpose_3x3(value: mat3x3<f32>) -> mat3x3<f32> {
+    let x = cross(value[1], value[2]);
+    let y = cross(value[2], value[0]);
+    let z = cross(value[0], value[1]);
+    let determinant = dot(value[2], z);
+    if abs(determinant) <= 1.0e-8 {
+        return mat3x3<f32>(1.0);
+    }
+    return mat3x3<f32>(x, y, z) / determinant;
 }
 
 // Locates the froxel a fragment falls in and returns its light-index slice.
@@ -825,8 +849,30 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     let vertex_c = geometry_vertices[row_c];
 
     let weights = surface_decode_barycentrics(metadata.w);
-    let geometry: SurfaceSampleGeometry =
+    var geometry: SurfaceSampleGeometry =
         interpolate_surface(vertex_a, vertex_b, vertex_c, primitive.flags, weights);
+
+    // Lift the reconstructed *local-space* surface into world space with the
+    // instance's `world_from_local` before any lighting runs, mirroring the CPU
+    // golden `resolve_pixel`: the position by the full affine, the normal by its
+    // inverse-transpose (correct under a non-uniform scale) and the
+    // tangent/bitangent by the linear part. The UV stays local. Guarded against
+    // a short/stale transform buffer; the identity transform leaves every field
+    // untouched so an untransformed instance shades exactly as before.
+    if scene_index < arrayLength(&scene_current_transforms) {
+        let world_from_local =
+            affine3_to_square(scene_current_transforms[scene_index].world_from_local);
+        let linear = mat3x3<f32>(
+            world_from_local[0].xyz,
+            world_from_local[1].xyz,
+            world_from_local[2].xyz,
+        );
+        geometry.position = (world_from_local * vec4<f32>(geometry.position, 1.0)).xyz;
+        geometry.normal =
+            brdf_normalize_or(inverse_transpose_3x3(linear) * geometry.normal, geometry.normal);
+        geometry.tangent = brdf_normalize_or(linear * geometry.tangent, geometry.tangent);
+        geometry.bitangent = brdf_normalize_or(linear * geometry.bitangent, geometry.bitangent);
+    }
 
     // Resolve and generation-validate the material record.
     let material_index = metadata.x;

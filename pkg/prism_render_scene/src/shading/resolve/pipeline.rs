@@ -102,14 +102,17 @@ fn view_layout_entries() -> BindGroupLayoutEntries<10> {
     )
 }
 
-/// Builds the group-2 layout entries: seven read-only storage buffers
+/// Builds the group-2 layout entries: eight read-only storage buffers
 /// (work items, class offsets, class counts, scene instances, geometry
-/// headers/vertices/primitives).  `None` min-binding-size keeps the layout
-/// agnostic to the run-time array length; the shader guards every index.
-fn scene_layout_entries() -> BindGroupLayoutEntries<7> {
+/// headers/vertices/primitives, and the per-instance `world_from_local`
+/// transforms the resolve uses to lift local-space geometry into world space).
+/// `None` min-binding-size keeps the layout agnostic to the run-time array
+/// length; the shader guards every index.
+fn scene_layout_entries() -> BindGroupLayoutEntries<8> {
     BindGroupLayoutEntries::sequential(
         ShaderStages::COMPUTE,
         (
+            storage_buffer_read_only_sized(false, None),
             storage_buffer_read_only_sized(false, None),
             storage_buffer_read_only_sized(false, None),
             storage_buffer_read_only_sized(false, None),

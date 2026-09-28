@@ -64,8 +64,15 @@ pub(crate) fn prepare_shading_resolve_bind_groups(
 ) {
     // Scene/geometry tables are shared across all views; if either has not
     // uploaded yet there is nothing to resolve, so clear any stale groups.
-    let (Some(instances), Some((geo_headers, geo_vertices, geo_primitives))) =
-        (scene.instances(), geometry.buffers())
+    let (
+        Some(instances),
+        Some(current_transforms),
+        Some((geo_headers, geo_vertices, geo_primitives)),
+    ) = (
+        scene.instances(),
+        scene.current_transforms(),
+        geometry.buffers(),
+    )
     else {
         for (entity, _, _, _) in &views {
             commands
@@ -111,6 +118,9 @@ pub(crate) fn prepare_shading_resolve_bind_groups(
                 geo_headers.as_entire_binding(),
                 geo_vertices.as_entire_binding(),
                 geo_primitives.as_entire_binding(),
+                // 7: per-instance `world_from_local`, used to lift local-space
+                // geometry into world space before lighting.
+                current_transforms.as_entire_binding(),
             )),
         );
         commands.entity(entity).insert(ViewResolveBindGroups {
