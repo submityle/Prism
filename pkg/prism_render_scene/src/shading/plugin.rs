@@ -8,6 +8,7 @@ use bevy_render::{
 };
 
 use super::{
+    ao::prepare_gtao_textures,
     classification_gpu::{
         dispatch_material_classification, init_material_classification_pipeline,
         prepare_material_classification_bind_groups,
@@ -140,6 +141,9 @@ impl Plugin for PrismShadingPlugin {
                         .after(super::super::visibility::systems::build_unified_visibility)
                         .in_set(RenderSystems::PrepareResources),
                     prepare_visibility_buffers.in_set(RenderSystems::PrepareResources),
+                    prepare_gtao_textures
+                        .after(prepare_visibility_buffers)
+                        .in_set(RenderSystems::PrepareResources),
                     prepare_oit_targets
                         .after(prepare_visibility_buffers)
                         .in_set(RenderSystems::PrepareResources),

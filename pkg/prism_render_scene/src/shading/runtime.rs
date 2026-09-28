@@ -6,6 +6,10 @@ pub struct PrismShadingSettings {
     pub max_visible_pixels: u32,
     pub enable_visibility_buffer: bool,
     pub enable_compute_resolve: bool,
+    /// Enables the GTAO ambient-occlusion prepass + compute pass. Requires the
+    /// visibility buffer; the resolve stage multiplies indirect light by the
+    /// resulting per-pixel visibility.
+    pub enable_gtao: bool,
 }
 
 impl Default for PrismShadingSettings {
@@ -14,6 +18,7 @@ impl Default for PrismShadingSettings {
             max_visible_pixels: 3840 * 2160,
             enable_visibility_buffer: false,
             enable_compute_resolve: false,
+            enable_gtao: false,
         }
     }
 }
