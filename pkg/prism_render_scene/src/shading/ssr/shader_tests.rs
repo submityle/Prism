@@ -116,3 +116,38 @@ fn ssr_hzb_wesl_compiles_standalone() {
         .get(0, hzb, &[])
         .unwrap_or_else(|error| panic!("ssr_hzb.wesl failed to compile: {error}"));
 }
+
+/// Registers `material.wesl` under its canonical module path and compiles
+/// `ssr_repack.wesl`, forcing its `import prism_render_scene::shaders::material`
+/// to resolve exactly as it will in the render world. A green result proves the
+/// repack reads the covered pixel's material through the same
+/// `PrismMaterialHeader` / `PrismSurfaceParameters` tables the resolve stage
+/// uses, and that packing the biased normal plus roughness into the trace's
+/// `normal_roughness` output type-checks. `material.wesl` is self-contained (no
+/// intra-crate imports), so registering it alone satisfies the graph.
+#[test]
+fn ssr_repack_wesl_compiles_and_resolves_imports() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let material = shader_id(0x5052_4953_4d5f_5353_525f_4d41_5450_0001);
+    cache.set_shader(
+        material,
+        Shader::from_wesl(
+            include_str!("../../shaders/material.wesl"),
+            "embedded://prism_render_scene/shaders/material.wesl",
+        ),
+    );
+
+    let repack = shader_id(0x5052_4953_4d5f_5353_525f_5250_434b_0001);
+    cache.set_shader(
+        repack,
+        Shader::from_wesl(
+            include_str!("../../shaders/ssr_repack.wesl"),
+            "embedded://prism_render_scene/shaders/ssr_repack.wesl",
+        ),
+    );
+
+    cache.get(0, repack, &[]).unwrap_or_else(|error| {
+        panic!("ssr_repack.wesl failed to compile/resolve imports: {error}")
+    });
+}

@@ -100,6 +100,37 @@ impl GpuSsrHzbParams {
     }
 }
 
+/// Immediate (push-constant) block consumed by `ssr_repack.wesl`, the stage
+/// that folds the geometry prepass's signed view-space normal and the material
+/// roughness into the trace's `normal_roughness` input.
+///
+/// Mirrors the shader's `RepackParams`: the framebuffer extent plus two trailing
+/// `u32`s that pad the block to the 16-byte immediate alignment WGSL requires.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq)]
+pub(crate) struct GpuSsrRepackParams {
+    /// Framebuffer width in texels.
+    pub width: u32,
+    /// Framebuffer height in texels.
+    pub height: u32,
+    /// Padding to satisfy the 16-byte immediate alignment.
+    pub _pad0: u32,
+    /// Padding to satisfy the 16-byte immediate alignment.
+    pub _pad1: u32,
+}
+
+impl GpuSsrRepackParams {
+    /// Builds the repack params from the framebuffer extent.
+    pub(crate) fn new(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            _pad0: 0,
+            _pad1: 0,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,6 +156,19 @@ mod tests {
         assert_eq!(params.dst_height, 540);
         assert_eq!(params.src_width, 1920);
         assert_eq!(params.src_height, 1080);
+    }
+
+    #[test]
+    fn repack_params_match_the_shader_immediate_layout() {
+        // width/height/pad0/pad1 = 16 bytes, the WGSL immediate alignment, and
+        // the fields round-trip in declaration order.
+        assert_eq!(size_of::<GpuSsrRepackParams>(), 16);
+        assert_eq!(align_of::<GpuSsrRepackParams>(), 4);
+        let params = GpuSsrRepackParams::new(1920, 1080);
+        assert_eq!(params.width, 1920);
+        assert_eq!(params.height, 1080);
+        assert_eq!(params._pad0, 0);
+        assert_eq!(params._pad1, 0);
     }
 
     #[test]

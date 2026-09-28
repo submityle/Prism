@@ -23,15 +23,20 @@
 //! * [`dispatch`] — the `Core3d` node recording the prepass dispatch.
 //! * [`hzb`] — the Hi-Z pyramid build pipelines, per-level bind groups and the
 //!   `Core3d` node recording the copy + 2x2-max reductions.
+//! * [`repack`] — the material-roughness repack pipeline, per-view bind group
+//!   and the `Core3d` node that folds the prepass normal and each covered
+//!   pixel's material roughness into the trace's packed `normal_roughness`
+//!   input.
 //!
-//! The material-roughness repack, the trace and the resolve's consumption of
-//! the reflection buffer land in following slices.
+//! The trace and the resolve's consumption of the reflection buffer land in
+//! following slices.
 
 mod abi;
 mod bind_groups;
 mod dispatch;
 mod hzb;
 mod pipeline;
+mod repack;
 mod resources;
 
 #[cfg(test)]
@@ -40,5 +45,6 @@ mod shader_tests;
 pub(crate) use bind_groups::prepare_ssr_prepass_bind_groups;
 pub(crate) use dispatch::ssr_prepass_pass;
 pub(crate) use hzb::{init_ssr_hzb_pipeline, prepare_ssr_hzb_bind_groups, ssr_hzb_pass};
+pub(crate) use repack::{init_ssr_repack_pipeline, prepare_ssr_repack_bind_groups, ssr_repack_pass};
 pub(crate) use pipeline::init_ssr_prepass_pipeline;
 pub(crate) use resources::prepare_ssr_textures;

@@ -41,6 +41,13 @@ pub(crate) const SSR_DEPTH_FORMAT: TextureFormat = TextureFormat::R32Float;
 /// trace's `normal_roughness` input in a following slice.
 pub(crate) const SSR_NORMAL_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
 
+/// View-space normal (rgb, biased to `[0, 1]`) plus perceptual roughness (a),
+/// the single `normal_roughness` texture the trace samples. The repack folds the
+/// prepass's signed `view_normal` and the material roughness into this format so
+/// `ssr.wesl` can decode `nr.xyz * 2 - 1` for the normal and read `nr.w` for the
+/// roughness in one `textureLoad`.
+pub(crate) const SSR_NORMAL_ROUGHNESS_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
+
 /// Reverse-Z "nearest depth" Hi-Z pyramid climbed by the SSR march. Shares the
 /// full-precision `R32Float` device-depth encoding of [`SSR_DEPTH_FORMAT`] so a
 /// coarse cell's stored maximum compares directly against the per-pixel depth
@@ -55,6 +62,10 @@ pub(crate) const SSR_HZB_FORMAT: TextureFormat = TextureFormat::R32Float;
 pub(crate) struct ViewSsrTextures {
     scene_depth: CachedTexture,
     view_normal: CachedTexture,
+    /// Trace input packed by the repack: `rgb = view_normal * 0.5 + 0.5`,
+    /// `a = perceptual roughness`. Written by `ssr_repack.wesl`, sampled by the
+    /// trace.
+    normal_roughness: CachedTexture,
     /// Full mip-chain Hi-Z pyramid built from `scene_depth`. Level 0 is a copy
     /// of `scene_depth`; each coarser level is a 2x2 max-reduction of the one
     /// below (reverse-Z nearest), matching the CPU golden. Retained to keep the
@@ -80,6 +91,12 @@ impl ViewSsrTextures {
     /// Storage/sampling view of the view-space normal prepass target.
     pub(crate) fn view_normal_view(&self) -> &TextureView {
         &self.view_normal.default_view
+    }
+
+    /// Storage/sampling view of the packed `normal_roughness` trace input. The
+    /// repack writes it (storage) and the trace reads it (sampled).
+    pub(crate) fn normal_roughness_view(&self) -> &TextureView {
+        &self.normal_roughness.default_view
     }
 
     /// The full-precision reverse-Z device depth as a *sampled* view; the Hi-Z
@@ -205,6 +222,21 @@ pub(crate) fn prepare_ssr_textures(
             },
         );
 
+        let normal_roughness = texture_cache.get(
+            &device,
+            TextureDescriptor {
+                label: Some("prism SSR normal roughness"),
+                size: size.to_extents(),
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: TextureDimension::D2,
+                format: SSR_NORMAL_ROUGHNESS_FORMAT,
+                // Written by the repack, sampled by the trace.
+                usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+        );
+
         // Hi-Z pyramid: a full `1 + floor(log2(max_dim))` mip chain in the same
         // `R32Float` device-depth encoding. `STORAGE_BINDING` lets each build
         // pass write one level; `TEXTURE_BINDING` lets the reduce read the finer
@@ -242,6 +274,7 @@ pub(crate) fn prepare_ssr_textures(
         commands.entity(entity).insert(ViewSsrTextures {
             scene_depth,
             view_normal,
+            normal_roughness,
             hzb,
             hzb_mip_views,
             hzb_mip_count: mip_count,
@@ -261,6 +294,9 @@ mod tests {
         // signed channels, so a wide RGBA16F carries it.
         assert_eq!(SSR_DEPTH_FORMAT, TextureFormat::R32Float);
         assert_eq!(SSR_NORMAL_FORMAT, TextureFormat::Rgba16Float);
+        // The trace's single packed input shares the wide RGBA16F layout so it
+        // can carry the biased normal in rgb and roughness in a.
+        assert_eq!(SSR_NORMAL_ROUGHNESS_FORMAT, TextureFormat::Rgba16Float);
         // The pyramid shares the device-depth encoding so a coarse cell's
         // stored maximum compares directly against reconstructed depth.
         assert_eq!(SSR_HZB_FORMAT, TextureFormat::R32Float);
