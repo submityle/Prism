@@ -46,6 +46,7 @@ mod taa;
 mod tangent;
 mod tonemap;
 mod texture_sample;
+pub mod upscale;
 mod vecmath;
 mod vignette;
 mod visibility;
@@ -187,6 +188,12 @@ pub use shadow::{
     DirectionalShadowInput, Mat4, PcssConfig, PointShadowConfig, PointShadowInput, ShadowDepthDraw,
     ShadowDepthMode, ShadowDepthSampler, ShadowDepthView, ShadowFilter, ShadowKind, ShadowRequest,
     ShadowViewGeometry, SpotShadowConfig, SpotShadowInput, MAX_CASCADE_COUNT, POINT_LAYER_COUNT,
+};
+pub use shadow::{
+    camera_move_invalidates_pages, filter_page_radius, generate_page_requests, invalidate_casters,
+    Allocation, AllocatorStats, BudgetStats, CasterMovement, ClipmapConfig, ClipmapLevel,
+    FrameInput, FrameResult, Invalidation, PageRequestSet, PageTableStats, PhysicalPageAllocator,
+    Receiver, Residency, ShadowPageKey, VirtualPageTable, VirtualShadowMap, VirtualShadowSettings,
 };
 pub use resolve::{
     resolve_pixel, surface_sample_from_parameters, DirectionalLight, LightingEnvironment,

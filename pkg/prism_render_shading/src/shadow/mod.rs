@@ -14,6 +14,9 @@
 //! * [`point`] - the omnidirectional (cube distance map) shadow orchestrator.
 //! * [`spot`] - the cone-restricted (single perspective layer) shadow orchestrator.
 //! * [`depth_view`] - per-layer draw plan for the shadow-map depth pass.
+//! * [`virtual_sm`] - virtual shadow map (UE5-style) demand-paging golden: page
+//!   table, clipmap levels, LRU physical pool, request generation and caster
+//!   invalidation, plus a one-frame orchestrator.
 //!
 //! The GPU shadow-map render passes (depth rasterization into the atlas,
 //! directional CSM stabilization / texel snapping, cube-face rendering, and
@@ -31,6 +34,7 @@ pub mod filter;
 pub mod math;
 pub mod point;
 pub mod spot;
+pub mod virtual_sm;
 
 pub use bias::{apply_normal_offset, slope_scaled_depth_bias};
 pub use cascade::{
@@ -57,4 +61,10 @@ pub use point::{
 };
 pub use spot::{
     evaluate_spot_shadow, spot_view_projection, SpotShadowConfig, SpotShadowInput,
+};
+pub use virtual_sm::{
+    camera_move_invalidates_pages, filter_page_radius, generate_page_requests, invalidate_casters,
+    Allocation, AllocatorStats, BudgetStats, CasterMovement, ClipmapConfig, ClipmapLevel,
+    FrameInput, FrameResult, Invalidation, PageRequestSet, PageTableStats, PhysicalPageAllocator,
+    Receiver, Residency, ShadowPageKey, VirtualPageTable, VirtualShadowMap, VirtualShadowSettings,
 };
