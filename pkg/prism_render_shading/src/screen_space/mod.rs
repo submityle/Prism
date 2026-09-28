@@ -20,12 +20,16 @@
 //! * [`fade`] — edge/facing/roughness/distance confidence and the IBL blend.
 //! * [`temporal`] — cross-frame reprojection + neighbourhood-clip accumulation
 //!   that averages the resolve over time to kill the multi-ray boil.
+//! * [`motion`] — the per-pixel motion-vector G-buffer (`current_uv -
+//!   previous_uv`) that drives ghost-free temporal reprojection for both
+//!   camera and per-object motion.
 //!
 //! End to end, [`trace_screen_space_reflection`] runs the ray build and march
 //! and hands the raw hit to the confidence stage the resolve pass consumes.
 
 mod fade;
 mod march;
+mod motion;
 mod ray;
 mod reconstruct;
 mod sample;
@@ -37,6 +41,9 @@ pub use fade::{
 };
 pub use march::{
     march_hierarchical, DepthPyramid, SsrMarchConfig, SsrMarchResult,
+};
+pub use motion::{
+    motion_vector, project_world_to_screen, MotionSample,
 };
 pub use ray::{
     build_screen_ray, project_view_to_screen, reflect, reverse_z_perspective, ScreenRay,
