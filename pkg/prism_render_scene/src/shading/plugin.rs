@@ -13,6 +13,10 @@ use super::{
         init_gtao_prepass_pipeline, prepare_gtao_kernel_bind_groups,
         prepare_gtao_prepass_bind_groups, prepare_gtao_textures,
     },
+    ssr::{
+        init_ssr_hzb_pipeline, init_ssr_prepass_pipeline, prepare_ssr_hzb_bind_groups,
+        prepare_ssr_prepass_bind_groups, prepare_ssr_textures, ssr_hzb_pass, ssr_prepass_pass,
+    },
     ibl::{
         dfg_lut_precompute_pass, env_prefilter_precompute_pass, extract_ibl_source,
         init_brdf_lut_pipeline, init_dfg_lut_texture, init_env_prefilter_pipeline,
@@ -77,6 +81,8 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/shading_resolve.wesl");
         embedded_asset!(app, "../shaders/gtao_prepass.wesl");
         embedded_asset!(app, "../shaders/gtao.wesl");
+        embedded_asset!(app, "../shaders/ssr_prepass.wesl");
+        embedded_asset!(app, "../shaders/ssr_hzb.wesl");
         embedded_asset!(app, "../shaders/brdf_lut.wesl");
         embedded_asset!(app, "../shaders/env_prefilter.wesl");
         embedded_asset!(app, "../shaders/composite.wesl");
@@ -133,6 +139,8 @@ impl Plugin for PrismShadingPlugin {
                     init_oit_composite_pipeline,
                     init_gtao_prepass_pipeline,
                     init_gtao_kernel_pipeline,
+                    init_ssr_prepass_pipeline,
+                    init_ssr_hzb_pipeline,
                     init_dfg_lut_texture,
                     init_brdf_lut_pipeline,
                     init_prefiltered_env_map,
@@ -211,6 +219,20 @@ impl Plugin for PrismShadingPlugin {
             .add_systems(
                 Render,
                 (
+                    prepare_ssr_textures
+                        .after(prepare_visibility_buffers)
+                        .in_set(RenderSystems::PrepareResources),
+                    prepare_ssr_prepass_bind_groups
+                        .after(prepare_ssr_textures)
+                        .in_set(RenderSystems::PrepareBindGroups),
+                    prepare_ssr_hzb_bind_groups
+                        .after(prepare_ssr_textures)
+                        .in_set(RenderSystems::PrepareBindGroups),
+                ),
+            )
+            .add_systems(
+                Render,
+                (
                     prepare_dfg_lut_bind_group.in_set(RenderSystems::PrepareBindGroups),
                     prepare_env_prefilter_bind_groups
                         .in_set(RenderSystems::PrepareBindGroups),
@@ -230,6 +252,12 @@ impl Plugin for PrismShadingPlugin {
                     .before(dispatch_shading_resolve),
                 gtao_compute_pass
                     .after(gtao_prepass_pass)
+                    .before(dispatch_shading_resolve),
+                ssr_prepass_pass
+                    .after(visibility_raster_pass)
+                    .before(dispatch_shading_resolve),
+                ssr_hzb_pass
+                    .after(ssr_prepass_pass)
                     .before(dispatch_shading_resolve),
                 dfg_lut_precompute_pass.before(dispatch_shading_resolve),
                 env_prefilter_precompute_pass.before(dispatch_shading_resolve),

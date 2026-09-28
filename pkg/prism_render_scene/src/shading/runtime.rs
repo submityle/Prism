@@ -34,6 +34,11 @@ pub struct PrismShadingSettings {
     /// (clamped `>= 1`). More samples reduce speckle in glossy reflections
     /// at one-time cost; the convolution reruns only when the probe changes.
     pub ibl_prefilter_sample_count: u32,
+    /// Enables the screen-space reflection (SSR) geometry prepass. Requires the
+    /// visibility buffer; the prepass rebuilds the reverse-Z device depth and
+    /// view-space normal the SSR trace consumes (there is no G-buffer). Off by
+    /// default.
+    pub enable_ssr: bool,
 }
 
 impl Default for PrismShadingSettings {
@@ -51,6 +56,7 @@ impl Default for PrismShadingSettings {
             enable_ibl: false,
             ibl_dfg_sample_count: 1024,
             ibl_prefilter_sample_count: 256,
+            enable_ssr: false,
         }
     }
 }
