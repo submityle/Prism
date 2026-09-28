@@ -212,13 +212,14 @@ mod tests {
 
     fn matvec(m: &SymmetricMatrix, x: &[Real]) -> Vec<Real> {
         let n = m.dim();
-        let mut y = vec![0.0; n];
+        let mut y = Vec::with_capacity(n);
         for row in 0..n {
-            let mut acc = 0.0;
-            for col in 0..n {
-                acc += m.get(row, col) * x[col];
-            }
-            y[row] = acc;
+            let acc: Real = x
+                .iter()
+                .enumerate()
+                .map(|(col, &value)| m.get(row, col) * value)
+                .sum();
+            y.push(acc);
         }
         y
     }

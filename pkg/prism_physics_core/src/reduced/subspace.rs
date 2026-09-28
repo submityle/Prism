@@ -354,8 +354,8 @@ mod tests {
         for (i, mi) in modes.iter().enumerate() {
             for (j, mj) in modes.iter().enumerate() {
                 let mut dot = 0.0;
-                for v in 0..rest.len() {
-                    dot += masses[v] * mi.shape[v].dot(mj.shape[v]);
+                for ((&mass, si), sj) in masses.iter().zip(mi.shape.iter()).zip(mj.shape.iter()) {
+                    dot += mass * si.dot(*sj);
                 }
                 let expected = if i == j { 1.0 } else { 0.0 };
                 assert!((dot - expected).abs() < 1e-3, "U^T M U[{i}][{j}] = {dot}");
