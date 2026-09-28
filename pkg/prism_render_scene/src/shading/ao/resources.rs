@@ -46,6 +46,9 @@ pub(crate) const GTAO_AO_FORMAT: TextureFormat = TextureFormat::R32Float;
 pub(crate) struct ViewGtaoTextures {
     linear_depth: CachedTexture,
     view_normal: CachedTexture,
+    /// Raw kernel output, before the spatial denoise reads it into
+    /// `ambient_occlusion`.
+    raw_ambient_occlusion: CachedTexture,
     ambient_occlusion: CachedTexture,
     pub(crate) size: bevy_math::UVec2,
 }
@@ -59,6 +62,12 @@ impl ViewGtaoTextures {
     /// Storage/sampling view of the view-space normal prepass target.
     pub(crate) fn view_normal_view(&self) -> &TextureView {
         &self.view_normal.default_view
+    }
+
+    /// Storage/sampling view of the *raw* (pre-denoise) ambient-visibility
+    /// target the GTAO kernel writes and the spatial denoise reads.
+    pub(crate) fn raw_ambient_occlusion_view(&self) -> &TextureView {
+        &self.raw_ambient_occlusion.default_view
     }
 
     /// Storage/sampling view of the ambient-visibility target.
@@ -132,6 +141,20 @@ pub(crate) fn prepare_gtao_textures(
                 view_formats: &[],
             },
         );
+        let raw_ambient_occlusion = texture_cache.get(
+            &device,
+            TextureDescriptor {
+                label: Some("prism GTAO raw ambient occlusion"),
+                size: size.to_extents(),
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: TextureDimension::D2,
+                format: GTAO_AO_FORMAT,
+                // Written by the GTAO kernel, sampled by the spatial denoise.
+                usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+        );
         let ambient_occlusion = texture_cache.get(
             &device,
             TextureDescriptor {
@@ -141,7 +164,7 @@ pub(crate) fn prepare_gtao_textures(
                 sample_count: 1,
                 dimension: TextureDimension::D2,
                 format: GTAO_AO_FORMAT,
-                // Written by the GTAO kernel, sampled by the resolve stage.
+                // Written by the spatial denoise, sampled by the resolve stage.
                 usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             },
@@ -150,6 +173,7 @@ pub(crate) fn prepare_gtao_textures(
         commands.entity(entity).insert(ViewGtaoTextures {
             linear_depth,
             view_normal,
+            raw_ambient_occlusion,
             ambient_occlusion,
             size,
         });

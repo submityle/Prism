@@ -14,10 +14,13 @@ use bevy_render::{
 };
 
 use super::abi::{
-    GpuGtaoConfig, GpuGtaoPrepassParams, GTAO_KERNEL_WORKGROUP_SIZE, GTAO_PREPASS_WORKGROUP_SIZE,
+    GpuGtaoConfig, GpuGtaoDenoiseConfig, GpuGtaoPrepassParams, GTAO_DENOISE_WORKGROUP_SIZE,
+    GTAO_KERNEL_WORKGROUP_SIZE, GTAO_PREPASS_WORKGROUP_SIZE,
 };
-use super::bind_groups::{ViewGtaoKernelBindGroup, ViewGtaoPrepassBindGroups};
-use super::pipeline::{GtaoKernelPipeline, GtaoPrepassPipeline};
+use super::bind_groups::{
+    ViewGtaoDenoiseBindGroup, ViewGtaoKernelBindGroup, ViewGtaoPrepassBindGroups,
+};
+use super::pipeline::{GtaoDenoisePipeline, GtaoKernelPipeline, GtaoPrepassPipeline};
 use super::resources::ViewGtaoTextures;
 
 pub(crate) fn gtao_prepass_pass(
@@ -120,6 +123,56 @@ pub(crate) fn gtao_compute_pass(
             timestamp_writes: None,
         });
     pass.set_pipeline(kernel);
+    pass.set_bind_group(0, &group.view, &[]);
+    pass.set_immediates(0, bytemuck::bytes_of(&config));
+    pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
+}
+
+
+/// `Core3d` graph node recording the GTAO spatial-denoise dispatch.
+///
+/// Runs after [`gtao_compute_pass`] (so the raw ambient-visibility target is
+/// populated) and before the shading resolve that samples the denoised target.
+/// For each view with a resident [`ViewGtaoDenoiseBindGroup`] it uploads the
+/// bilateral tunables and dispatches one workgroup per 8x8 pixel tile.
+pub(crate) fn gtao_denoise_pass(
+    settings: Res<super::super::runtime::PrismShadingSettings>,
+    view: ViewQuery<(&ViewGtaoTextures, &ViewGtaoDenoiseBindGroup)>,
+    pipeline: Res<GtaoDenoisePipeline>,
+    cache: Res<PipelineCache>,
+    mut ctx: RenderContext,
+) {
+    if !settings.enable_gtao {
+        return;
+    }
+    let (textures, group) = view.into_inner();
+
+    let Some(denoise) = cache.get_compute_pipeline(pipeline.denoise) else {
+        return;
+    };
+
+    let size = textures.size;
+    if size.x == 0 || size.y == 0 {
+        return;
+    }
+
+    let config = GpuGtaoDenoiseConfig::new(
+        settings.gtao_denoise_radius,
+        settings.gtao_denoise_spatial_sigma,
+        settings.gtao_denoise_depth_sigma,
+        settings.gtao_denoise_normal_power,
+    );
+
+    let workgroups_x = size.x.div_ceil(GTAO_DENOISE_WORKGROUP_SIZE);
+    let workgroups_y = size.y.div_ceil(GTAO_DENOISE_WORKGROUP_SIZE);
+
+    let mut pass = ctx
+        .command_encoder()
+        .begin_compute_pass(&ComputePassDescriptor {
+            label: Some("prism GTAO denoise"),
+            timestamp_writes: None,
+        });
+    pass.set_pipeline(denoise);
     pass.set_bind_group(0, &group.view, &[]);
     pass.set_immediates(0, bytemuck::bytes_of(&config));
     pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);

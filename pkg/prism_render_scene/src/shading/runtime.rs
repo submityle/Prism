@@ -23,6 +23,17 @@ pub struct PrismShadingSettings {
     /// GTAO marched samples per side per slice (clamped `>= 1`). More steps
     /// catch thinner horizons.
     pub gtao_steps_per_slice: u32,
+    /// GTAO spatial-denoise bilateral kernel half-width in pixels (`0` disables
+    /// the blur). The denoise covers `(2 * radius + 1)^2` taps.
+    pub gtao_denoise_radius: u32,
+    /// GTAO denoise Gaussian spatial falloff in pixels; larger smooths harder.
+    pub gtao_denoise_spatial_sigma: f32,
+    /// GTAO denoise depth edge-stop tolerance as a fraction of the centre
+    /// pixel's view depth; smaller preserves silhouettes more aggressively.
+    pub gtao_denoise_depth_sigma: f32,
+    /// GTAO denoise normal edge-stop sharpness; higher rejects tilted
+    /// neighbours faster, preserving occlusion contrast along curved edges.
+    pub gtao_denoise_normal_power: f32,
     /// Enables image-based lighting: precomputes the split-sum environment
     /// BRDF ("DFG") table so the resolve stage can reconstruct specular
     /// reflectance from prefiltered radiance. Off by default.
@@ -61,6 +72,10 @@ impl Default for PrismShadingSettings {
             gtao_power: 1.0,
             gtao_slice_count: 4,
             gtao_steps_per_slice: 8,
+            gtao_denoise_radius: 2,
+            gtao_denoise_spatial_sigma: 2.0,
+            gtao_denoise_depth_sigma: 0.05,
+            gtao_denoise_normal_power: 8.0,
             enable_ibl: false,
             ibl_dfg_sample_count: 1024,
             ibl_prefilter_sample_count: 256,

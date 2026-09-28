@@ -69,3 +69,26 @@ fn gtao_prepass_wesl_compiles_and_resolves_imports() {
         panic!("gtao_prepass.wesl failed to compile/resolve imports: {error}")
     });
 }
+
+
+/// Compiles `gtao_denoise.wesl` on its own.  The spatial denoiser is
+/// self-contained (no `import`s), so a green result proves the bilateral
+/// kernel, the immediate `GtaoDenoiseConfig` block and the storage-texture
+/// write all parse and type-check exactly as the render world will build them.
+#[test]
+fn gtao_denoise_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let denoise = shader_id(0x5052_4953_4d5f_4741_4f5f_4445_4e4f_0001);
+    cache.set_shader(
+        denoise,
+        Shader::from_wesl(
+            include_str!("../../shaders/gtao_denoise.wesl"),
+            "embedded://prism_render_scene/shaders/gtao_denoise.wesl",
+        ),
+    );
+
+    cache
+        .get(0, denoise, &[])
+        .unwrap_or_else(|error| panic!("gtao_denoise.wesl failed to compile: {error}"));
+}

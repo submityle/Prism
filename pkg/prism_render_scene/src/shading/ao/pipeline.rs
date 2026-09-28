@@ -28,7 +28,7 @@ use bevy_render::{
 };
 use bevy_shader::Shader;
 
-use super::abi::{GpuGtaoConfig, GpuGtaoPrepassParams};
+use super::abi::{GpuGtaoConfig, GpuGtaoDenoiseConfig, GpuGtaoPrepassParams};
 use super::resources::{GTAO_AO_FORMAT, GTAO_DEPTH_FORMAT, GTAO_NORMAL_FORMAT};
 
 /// Compute pipeline and the two owned bind-group layouts for the GTAO prepass.
@@ -162,4 +162,67 @@ pub(crate) fn init_gtao_kernel_pipeline(
     });
 
     commands.insert_resource(GtaoKernelPipeline { kernel, view_layout });
+}
+
+
+/// Compute pipeline and the single owned bind-group layout for the GTAO spatial
+/// denoiser.
+///
+/// The denoiser (`shaders/gtao_denoise.wesl`) reads the raw ambient-visibility
+/// target the kernel produced plus the linear-depth and view-normal prepass
+/// targets (for edge stopping) and writes the denoised visibility the resolve
+/// samples, all through one bind group; its bilateral tunables arrive in the
+/// 16-byte immediate [`GpuGtaoDenoiseConfig`] block.
+#[derive(Resource)]
+pub(crate) struct GtaoDenoisePipeline {
+    /// `denoise_gtao` entry point, specialized against [`Self::view_layout`]
+    /// and the 16-byte immediate config block.
+    pub(crate) denoise: CachedComputePipelineId,
+    /// group 0: raw-AO + linear-depth + view-normal sampled inputs followed by
+    /// the write-only denoised-AO (`r32float`) storage output.
+    pub(crate) view_layout: BindGroupLayout,
+}
+
+/// group-0 layout for the denoiser: the raw ambient visibility, linear depth,
+/// and view normal as float-sampled textures, then the write-only denoised
+/// ambient-visibility storage texture.
+fn denoise_layout_entries() -> BindGroupLayoutEntries<4> {
+    BindGroupLayoutEntries::sequential(
+        ShaderStages::COMPUTE,
+        (
+            texture_2d(TextureSampleType::Float { filterable: false }),
+            texture_2d(TextureSampleType::Float { filterable: false }),
+            texture_2d(TextureSampleType::Float { filterable: false }),
+            texture_storage_2d(GTAO_AO_FORMAT, StorageTextureAccess::WriteOnly),
+        ),
+    )
+}
+
+/// `RenderStartup` initializer for [`GtaoDenoisePipeline`].
+pub(crate) fn init_gtao_denoise_pipeline(
+    mut commands: Commands,
+    device: Res<RenderDevice>,
+    cache: Res<PipelineCache>,
+    asset_server: Res<bevy_asset::AssetServer>,
+) {
+    let view_entries = denoise_layout_entries();
+    let view_descriptor = BindGroupLayoutDescriptor::new("prism GTAO denoise view", &view_entries);
+    let view_layout = device.create_bind_group_layout("prism GTAO denoise view", &view_entries);
+
+    let shader: Handle<Shader> =
+        load_embedded_asset!(asset_server.as_ref(), "../shaders/gtao_denoise.wesl");
+
+    let denoise = cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        label: Some("prism GTAO denoise".into()),
+        layout: vec![view_descriptor],
+        immediate_size: size_of::<GpuGtaoDenoiseConfig>() as u32,
+        shader,
+        entry_point: Some("denoise_gtao".into()),
+        ..Default::default()
+    });
+
+    commands.insert_resource(GtaoDenoisePipeline {
+        denoise,
+        view_layout,
+    });
 }

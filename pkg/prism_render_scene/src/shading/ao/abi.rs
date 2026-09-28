@@ -98,6 +98,44 @@ impl GpuGtaoConfig {
     }
 }
 
+/// Workgroup size (per axis) of the `gtao_denoise` compute entry point.
+///
+/// Must match `@workgroup_size(N, N, 1)` in `shaders/gtao_denoise.wesl`; the
+/// dispatch rounds the viewport up to a multiple of this on both axes.
+pub(crate) const GTAO_DENOISE_WORKGROUP_SIZE: u32 = 8;
+
+/// Immediate (push-constant) block consumed by `gtao_denoise.wesl`.
+///
+/// Mirrors the WGSL `GtaoDenoiseConfig` field-for-field: the kernel half-width
+/// plus the three edge-stop sigmas of
+/// [`prism_render_shading::ao::GtaoDenoiseConfig`], 16 bytes total (already a
+/// 16-byte multiple, so no trailing padding is needed).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable, PartialEq)]
+pub(crate) struct GpuGtaoDenoiseConfig {
+    /// Bilateral kernel half-width in pixels (`0` = passthrough identity).
+    pub radius: u32,
+    /// Gaussian spatial falloff in pixels; larger smooths harder.
+    pub spatial_sigma: f32,
+    /// Depth edge-stop tolerance as a fraction of the centre pixel's view depth.
+    pub depth_sigma: f32,
+    /// Normal edge-stop sharpness (`dot(n, n_c)` is raised to this power).
+    pub normal_power: f32,
+}
+
+impl GpuGtaoDenoiseConfig {
+    /// Builds the denoise config from the artist-facing tunables, mirroring the
+    /// golden `GtaoDenoiseConfig` defaults' domain.
+    pub fn new(radius: u32, spatial_sigma: f32, depth_sigma: f32, normal_power: f32) -> Self {
+        Self {
+            radius,
+            spatial_sigma,
+            depth_sigma,
+            normal_power,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,6 +154,19 @@ mod tests {
         assert_eq!(size_of::<GpuGtaoConfig>(), 32);
         assert_eq!(align_of::<GpuGtaoConfig>(), 4);
         assert_eq!(GTAO_KERNEL_WORKGROUP_SIZE, 8);
+    }
+
+    #[test]
+    fn denoise_config_layout_matches_the_wgsl_config_struct() {
+        // One u32 + three f32 = 16 bytes, 4-byte aligned; no trailing padding.
+        assert_eq!(size_of::<GpuGtaoDenoiseConfig>(), 16);
+        assert_eq!(align_of::<GpuGtaoDenoiseConfig>(), 4);
+        assert_eq!(GTAO_DENOISE_WORKGROUP_SIZE, 8);
+        let config = GpuGtaoDenoiseConfig::new(2, 2.0, 0.05, 8.0);
+        assert_eq!(config.radius, 2);
+        assert_eq!(config.spatial_sigma, 2.0);
+        assert_eq!(config.depth_sigma, 0.05);
+        assert_eq!(config.normal_power, 8.0);
     }
 
     #[test]

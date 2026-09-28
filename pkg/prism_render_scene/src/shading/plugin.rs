@@ -9,8 +9,9 @@ use bevy_render::{
 
 use super::{
     ao::{
-        gtao_compute_pass, gtao_prepass_pass, init_gtao_kernel_pipeline,
-        init_gtao_prepass_pipeline, prepare_gtao_kernel_bind_groups,
+        gtao_compute_pass, gtao_denoise_pass, gtao_prepass_pass,
+        init_gtao_denoise_pipeline, init_gtao_kernel_pipeline, init_gtao_prepass_pipeline,
+        prepare_gtao_denoise_bind_groups, prepare_gtao_kernel_bind_groups,
         prepare_gtao_prepass_bind_groups, prepare_gtao_textures,
     },
     ssr::{
@@ -94,6 +95,7 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/shading_resolve.wesl");
         embedded_asset!(app, "../shaders/gtao_prepass.wesl");
         embedded_asset!(app, "../shaders/gtao.wesl");
+        embedded_asset!(app, "../shaders/gtao_denoise.wesl");
         embedded_asset!(app, "../shaders/ssr_prepass.wesl");
         embedded_asset!(app, "../shaders/ssr_hzb.wesl");
         embedded_asset!(app, "../shaders/ssr_repack.wesl");
@@ -158,8 +160,13 @@ impl Plugin for PrismShadingPlugin {
                         .after(init_gpu_resource::<crate::ClusterBindGroup>),
                     init_shading_composite_pipeline,
                     init_oit_composite_pipeline,
-                    init_gtao_prepass_pipeline,
-                    init_gtao_kernel_pipeline,
+                    // Nested to keep this RenderStartup tuple within Bevy's
+                    // 20-element limit: prepass + horizon kernel + denoise.
+                    (
+                        init_gtao_prepass_pipeline,
+                        init_gtao_kernel_pipeline,
+                        init_gtao_denoise_pipeline,
+                    ),
                     init_ssr_prepass_pipeline,
                     init_ssr_hzb_pipeline,
                     init_ssr_repack_pipeline
@@ -253,9 +260,14 @@ impl Plugin for PrismShadingPlugin {
             )
             .add_systems(
                 Render,
-                prepare_gtao_kernel_bind_groups
-                    .after(prepare_gtao_textures)
-                    .in_set(RenderSystems::PrepareBindGroups),
+                (
+                    prepare_gtao_kernel_bind_groups
+                        .after(prepare_gtao_textures)
+                        .in_set(RenderSystems::PrepareBindGroups),
+                    prepare_gtao_denoise_bind_groups
+                        .after(prepare_gtao_textures)
+                        .in_set(RenderSystems::PrepareBindGroups),
+                ),
             )
             .add_systems(
                 Render,
@@ -323,12 +335,20 @@ impl Plugin for PrismShadingPlugin {
                 dispatch_material_classification
                     .after(visibility_raster_pass)
                     .before(bevy_core_pipeline::Core3dSystems::MainPass),
-                gtao_prepass_pass
-                    .after(visibility_raster_pass)
-                    .before(dispatch_shading_resolve),
-                gtao_compute_pass
-                    .after(gtao_prepass_pass)
-                    .before(dispatch_shading_resolve),
+                // Nested to keep the Core3d tuple within Bevy's 20-element
+                // limit: the three GTAO passes chain prepass -> horizon kernel
+                // -> spatial denoise, all feeding the shading resolve.
+                (
+                    gtao_prepass_pass
+                        .after(visibility_raster_pass)
+                        .before(dispatch_shading_resolve),
+                    gtao_compute_pass
+                        .after(gtao_prepass_pass)
+                        .before(dispatch_shading_resolve),
+                    gtao_denoise_pass
+                        .after(gtao_compute_pass)
+                        .before(dispatch_shading_resolve),
+                ),
                 ssr_prepass_pass
                     .after(visibility_raster_pass)
                     .before(dispatch_shading_resolve),

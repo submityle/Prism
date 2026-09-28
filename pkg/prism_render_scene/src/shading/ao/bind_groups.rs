@@ -22,7 +22,7 @@ use bevy_render::{
 use crate::{GpuSceneBuffers, RenderShadingGeometryBuffers};
 
 use super::super::resources::ViewVisibilityBuffer;
-use super::pipeline::{GtaoKernelPipeline, GtaoPrepassPipeline};
+use super::pipeline::{GtaoDenoisePipeline, GtaoKernelPipeline, GtaoPrepassPipeline};
 use super::resources::ViewGtaoTextures;
 
 /// The two pass-owned bind groups (group 0 + group 1) for one view's GTAO
@@ -114,11 +114,48 @@ pub(crate) fn prepare_gtao_kernel_bind_groups(
             &BindGroupEntries::sequential((
                 textures.linear_depth_view(),
                 textures.view_normal_view(),
-                textures.ambient_occlusion_view(),
+                textures.raw_ambient_occlusion_view(),
             )),
         );
         commands
             .entity(entity)
             .insert(ViewGtaoKernelBindGroup { view });
+    }
+}
+
+
+/// The single denoise bind group (group 0) for one view's GTAO spatial denoise
+/// pass: the raw ambient-visibility, linear-depth, and view-normal inputs and
+/// the denoised ambient-visibility output. Present only when the view has
+/// resident [`ViewGtaoTextures`].
+#[derive(Component)]
+pub(crate) struct ViewGtaoDenoiseBindGroup {
+    /// group 0: raw-AO + linear-depth + view-normal reads + denoised-AO write.
+    pub(crate) view: BindGroup,
+}
+
+/// `PrepareBindGroups` system building [`ViewGtaoDenoiseBindGroup`] for every
+/// view that has GTAO textures. Like the kernel it touches no scene tables, so
+/// it depends only on the per-view textures.
+pub(crate) fn prepare_gtao_denoise_bind_groups(
+    mut commands: Commands,
+    pipeline: Res<GtaoDenoisePipeline>,
+    device: Res<RenderDevice>,
+    views: Query<(Entity, &ViewGtaoTextures)>,
+) {
+    for (entity, textures) in &views {
+        let view = device.create_bind_group(
+            "prism GTAO denoise view",
+            &pipeline.view_layout,
+            &BindGroupEntries::sequential((
+                textures.raw_ambient_occlusion_view(),
+                textures.linear_depth_view(),
+                textures.view_normal_view(),
+                textures.ambient_occlusion_view(),
+            )),
+        );
+        commands
+            .entity(entity)
+            .insert(ViewGtaoDenoiseBindGroup { view });
     }
 }
