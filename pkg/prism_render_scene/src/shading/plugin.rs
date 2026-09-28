@@ -41,8 +41,8 @@ use super::{
         ShadingCompositePipeline,
     },
     resolve::{
-        dispatch_shading_resolve, init_shading_resolve_pipeline,
-        prepare_shading_resolve_bind_groups,
+        dispatch_shading_resolve, init_shading_resolve_pipeline, prepare_resolve_motion,
+        prepare_shading_resolve_bind_groups, ResolveMotionHistory,
     },
     transparent::{
         init_oit_composite_pipeline, init_oit_forward_pipeline, oit_composite,
@@ -123,6 +123,7 @@ impl Plugin for PrismShadingPlugin {
             .init_gpu_resource::<SpecializedRenderPipelines<OitCompositePipeline>>()
             .init_resource::<PrismShadingSettings>()
             .init_resource::<PrismShadingDiagnostics>()
+            .init_resource::<ResolveMotionHistory>()
             .insert_resource(ShadowAtlasConfig::new(
                 DEFAULT_SHADOW_ATLAS_LAYERS,
                 DEFAULT_SHADOW_ATLAS_RESOLUTION,
@@ -191,7 +192,18 @@ impl Plugin for PrismShadingPlugin {
                     prepare_shading_work
                         .after(super::super::visibility::systems::build_unified_visibility)
                         .in_set(RenderSystems::PrepareResources),
-                    prepare_visibility_buffers.in_set(RenderSystems::PrepareResources),
+                    // Visibility buffers plus the motion feed nested together
+                    // to keep the `add_systems` tuple within Bevy's 20-element
+                    // limit. Motion matrices + G-buffer must land in
+                    // PrepareResources (before PrepareBindGroups) so the resolve
+                    // bind group can bind every view's motion uniform, and after
+                    // the visibility buffers so the motion-vector texture exists.
+                    (
+                        prepare_visibility_buffers.in_set(RenderSystems::PrepareResources),
+                        prepare_resolve_motion
+                            .after(prepare_visibility_buffers)
+                            .in_set(RenderSystems::PrepareResources),
+                    ),
                     prepare_gtao_textures
                         .after(prepare_visibility_buffers)
                         .in_set(RenderSystems::PrepareResources),

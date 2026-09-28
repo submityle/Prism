@@ -29,6 +29,7 @@ use crate::{GpuSceneBuffers, RenderShadingGeometryBuffers};
 use super::super::ao::ViewGtaoTextures;
 use super::super::ibl::{DfgLutTexture, PrefilteredEnvironmentMap};
 use super::super::resources::{ViewShadingBuffers, ViewVisibilityBuffer};
+use super::motion::ViewMotionUniform;
 use super::pipeline::ShadingResolvePipeline;
 
 /// The two pass-owned bind groups (group 0 + group 2) for one view.
@@ -59,6 +60,7 @@ pub(crate) fn prepare_shading_resolve_bind_groups(
         Entity,
         &ViewVisibilityBuffer,
         &ViewShadingBuffers,
+        &ViewMotionUniform,
         Option<&ViewGtaoTextures>,
     )>,
 ) {
@@ -67,14 +69,16 @@ pub(crate) fn prepare_shading_resolve_bind_groups(
     let (
         Some(instances),
         Some(current_transforms),
+        Some(previous_transforms),
         Some((geo_headers, geo_vertices, geo_primitives)),
     ) = (
         scene.instances(),
         scene.current_transforms(),
+        scene.previous_transforms(),
         geometry.buffers(),
     )
     else {
-        for (entity, _, _, _) in &views {
+        for (entity, _, _, _, _) in &views {
             commands
                 .entity(entity)
                 .remove::<ViewResolveBindGroups>();
@@ -82,7 +86,7 @@ pub(crate) fn prepare_shading_resolve_bind_groups(
         return;
     };
 
-    for (entity, visibility, buffers, gtao) in &views {
+    for (entity, visibility, buffers, motion, gtao) in &views {
         let (ids, metadata) = visibility.attachments();
         // Bind the view's GTAO visibility when present, else a 1x1 white
         // texture so the shader's multiply is a no-op (the dispatch also gates
@@ -105,6 +109,10 @@ pub(crate) fn prepare_shading_resolve_bind_groups(
                 // 8-9: SSR energy-conservation exports written every pixel.
                 visibility.ssr_env_specular_view(),
                 visibility.ssr_spec_weight_view(),
+                // 10-11: motion-vector G-buffer + the current/previous
+                // view-projection uniform that projects it.
+                visibility.motion_vectors_view(),
+                motion.buffer.as_entire_binding(),
             )),
         );
         let scene_group = device.create_bind_group(
@@ -118,9 +126,12 @@ pub(crate) fn prepare_shading_resolve_bind_groups(
                 geo_headers.as_entire_binding(),
                 geo_vertices.as_entire_binding(),
                 geo_primitives.as_entire_binding(),
-                // 7: per-instance `world_from_local`, used to lift local-space
-                // geometry into world space before lighting.
+                // 7: per-instance current `world_from_local`, used to lift
+                // local-space geometry into world space before lighting.
                 current_transforms.as_entire_binding(),
+                // 8: matching previous-frame transforms, used only to place the
+                // surface in last frame's world space for the motion vector.
+                previous_transforms.as_entire_binding(),
             )),
         );
         commands.entity(entity).insert(ViewResolveBindGroups {

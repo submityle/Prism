@@ -22,6 +22,13 @@ pub(crate) const VISIBILITY_ID_FORMAT: TextureFormat = TextureFormat::Rgba32Uint
 /// in the shader and keeps enough range/precision for pre-exposure radiance.
 pub(crate) const SCENE_COLOR_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
 
+/// Per-pixel screen-space motion (`cur_uv - prev_uv`) written by the resolve
+/// pass and consumed by the SSR temporal accumulation (and, later, TAA).
+/// `Rg16Float` matches the `texture_storage_2d<rg16float, write>` binding in
+/// `shading_resolve.wesl`; two half-float channels are ample for a UV-space
+/// delta that is almost always a small fraction of the frame.
+pub(crate) const MOTION_VECTOR_FORMAT: TextureFormat = TextureFormat::Rg16Float;
+
 #[derive(Component)]
 pub(crate) struct ViewVisibilityBuffer {
     ids: CachedTexture,
@@ -37,6 +44,10 @@ pub(crate) struct ViewVisibilityBuffer {
     /// `(f0 * dfg.x + dfg.y) * occlusion` the resolve scaled that specular by,
     /// reused by the composite to weight the SSR reflection identically.
     ssr_spec_weight: CachedTexture,
+    /// Per-pixel screen-space motion vector (`cur_uv - prev_uv`) the resolve
+    /// pass writes for every covered pixel; consumed by the SSR temporal
+    /// reprojection to follow object + camera motion instead of ghosting.
+    motion_vectors: CachedTexture,
     pub(crate) size: bevy_math::UVec2,
 }
 
@@ -63,6 +74,11 @@ impl ViewVisibilityBuffer {
     /// Storage/sampling view of the SSR environment-BRDF weight export.
     pub(crate) fn ssr_spec_weight_view(&self) -> &bevy_render::render_resource::TextureView {
         &self.ssr_spec_weight.default_view
+    }
+
+    /// Storage/sampling view of the per-pixel motion-vector G-buffer.
+    pub(crate) fn motion_vectors_view(&self) -> &bevy_render::render_resource::TextureView {
+        &self.motion_vectors.default_view
     }
 }
 
@@ -259,12 +275,29 @@ pub(crate) fn prepare_visibility_buffers(
                 view_formats: &[],
             },
         );
+        // Motion-vector G-buffer, written every covered pixel by the resolve
+        // pass. STORAGE_BINDING: written by the resolve compute pass;
+        // TEXTURE_BINDING: sampled by the SSR temporal reprojection (and TAA).
+        let motion_vectors = texture_cache.get(
+            &device,
+            TextureDescriptor {
+                label: Some("prism motion vectors"),
+                size: size.to_extents(),
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: TextureDimension::D2,
+                format: MOTION_VECTOR_FORMAT,
+                usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+        );
         commands.entity(entity).insert(ViewVisibilityBuffer {
             ids,
             metadata,
             scene_color,
             ssr_env_specular,
             ssr_spec_weight,
+            motion_vectors,
             size,
         });
     }

@@ -30,7 +30,7 @@ use bevy_material::{
     bind_group_layout_entries::{
         binding_types::{
             sampler, storage_buffer_read_only_sized, texture_2d, texture_cube,
-            texture_storage_2d,
+            texture_storage_2d, uniform_buffer_sized,
         },
         BindGroupLayoutEntries,
     },
@@ -50,7 +50,7 @@ use crate::{ClusterBindGroup, LightBindGroup, MaterialBindGroup};
 use super::super::shadow::ShadowBindGroup;
 
 use super::abi::GpuShadingResolveParams;
-use super::super::resources::SCENE_COLOR_FORMAT;
+use super::super::resources::{MOTION_VECTOR_FORMAT, SCENE_COLOR_FORMAT};
 
 /// Compute pipeline and the two owned bind-group layouts for the resolve pass.
 #[derive(Resource)]
@@ -82,7 +82,11 @@ pub(crate) struct ShadingResolvePipeline {
 ///
 /// Entries 8-9 are the write-only SSR energy exports (`ssr_env_specular`,
 /// `ssr_spec_weight`); always bound because the pass runs regardless of SSR.
-fn view_layout_entries() -> BindGroupLayoutEntries<10> {
+///
+/// Entry 10 is the write-only `Rg16Float` motion-vector G-buffer and entry 11
+/// the 128-byte current/previous view-projection uniform that projects it; both
+/// always bound because the resolve writes a motion vector for every pixel.
+fn view_layout_entries() -> BindGroupLayoutEntries<12> {
     BindGroupLayoutEntries::sequential(
         ShaderStages::COMPUTE,
         (
@@ -98,20 +102,27 @@ fn view_layout_entries() -> BindGroupLayoutEntries<10> {
             // weight), write-only storage the SSR composite later samples.
             texture_storage_2d(SCENE_COLOR_FORMAT, StorageTextureAccess::WriteOnly),
             texture_storage_2d(SCENE_COLOR_FORMAT, StorageTextureAccess::WriteOnly),
+            // 10: motion-vector G-buffer (write-only rg16float).
+            texture_storage_2d(MOTION_VECTOR_FORMAT, StorageTextureAccess::WriteOnly),
+            // 11: current/previous view-projection uniform (128 bytes).
+            uniform_buffer_sized(false, None),
         ),
     )
 }
 
-/// Builds the group-2 layout entries: eight read-only storage buffers
-/// (work items, class offsets, class counts, scene instances, geometry
-/// headers/vertices/primitives, and the per-instance `world_from_local`
-/// transforms the resolve uses to lift local-space geometry into world space).
+/// Builds the group-2 layout entries: nine read-only storage buffers (work
+/// items, class offsets, class counts, scene instances, geometry
+/// headers/vertices/primitives, the per-instance current `world_from_local`
+/// transforms the resolve uses to lift local-space geometry into world space,
+/// and the matching *previous*-frame transforms used only to place that surface
+/// in last frame's world space for the motion vector).
 /// `None` min-binding-size keeps the layout agnostic to the run-time array
 /// length; the shader guards every index.
-fn scene_layout_entries() -> BindGroupLayoutEntries<8> {
+fn scene_layout_entries() -> BindGroupLayoutEntries<9> {
     BindGroupLayoutEntries::sequential(
         ShaderStages::COMPUTE,
         (
+            storage_buffer_read_only_sized(false, None),
             storage_buffer_read_only_sized(false, None),
             storage_buffer_read_only_sized(false, None),
             storage_buffer_read_only_sized(false, None),

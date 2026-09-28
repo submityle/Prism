@@ -144,6 +144,14 @@ struct WorkItem {
     flags: u32,
 }
 
+// Current + previous frame view-projection matrices for motion-vector output.
+// Mirrors `MotionMatrices` in `resolve/motion.rs` (128 bytes: two column-major
+// mat4x4<f32>).
+struct MotionMatrices {
+    clip_from_world: mat4x4<f32>,
+    previous_clip_from_world: mat4x4<f32>,
+}
+
 // --- group 0: visibility inputs + HDR output ---
 @group(0) @binding(0) var visibility_ids: texture_2d<u32>;
 @group(0) @binding(1) var visibility_metadata: texture_2d<u32>;
@@ -171,6 +179,17 @@ struct WorkItem {
 // Fresnel/DFG factor. Both are full-resolution rgba16float; .a is unused.
 @group(0) @binding(8) var ssr_env_specular: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(9) var ssr_spec_weight: texture_storage_2d<rgba16float, write>;
+// Per-pixel motion-vector G-buffer (rg16float): this frame's screen-space
+// displacement `cur_uv - prev_uv` in [0,1] UV, capturing *both* camera and
+// per-object motion (object motion enters through `scene_previous_transforms`).
+// Consumed by `ssr_temporal.wesl` (and later TAA) to reproject history along
+// true surface motion instead of camera-only reprojection, which kills the
+// ghosting dynamic geometry otherwise leaves in the accumulated reflection.
+@group(0) @binding(10) var motion_vectors: texture_storage_2d<rg16float, write>;
+// Current + previous view-projection used to project `world_cur`/`world_prev`
+// into clip space for the motion vector. A 128-byte uniform block (two mat4x4)
+// rather than the 32-byte `var<immediate>` push-constant, which has no room.
+@group(0) @binding(11) var<uniform> motion_matrices: MotionMatrices;
 
 // --- group 1: material tables (shared MaterialBindGroup layout) ---
 @group(1) @binding(0) var<storage, read> material_headers: array<PrismMaterialHeader>;
@@ -191,6 +210,11 @@ struct WorkItem {
 // into world space with it before any lighting, mirroring the CPU golden
 // `resolve_pixel`; guarded against a short/stale buffer below.
 @group(2) @binding(7) var<storage, read> scene_current_transforms: array<GpuSceneTransform>;
+// Per-instance affine `world_from_local` from the *previous* frame (same layout
+// and `scene_index` indexing as `scene_current_transforms`). Used only to place
+// the surface's local position in last frame's world space for the motion
+// vector; never touches shading. Guarded against a short/stale buffer below.
+@group(2) @binding(8) var<storage, read> scene_previous_transforms: array<GpuSceneTransform>;
 
 // --- group 3: analytic lights (shared LightBindGroup layout) ---
 @group(3) @binding(0) var<storage, read> directional_lights: array<DirectionalLight>;
@@ -251,6 +275,21 @@ fn inverse_transpose_3x3(value: mat3x3<f32>) -> mat3x3<f32> {
         return mat3x3<f32>(1.0);
     }
     return mat3x3<f32>(x, y, z) / determinant;
+}
+
+// Projects a world-space point through `clip_from_world` and returns the
+// reverse-Z, top-left screen UV in `.xy` with the clip-space `w` in `.z`. A
+// non-positive `w` (point behind the eye) is reported through `.z` so the
+// caller can drop the sample; the UV convention matches the golden
+// `project_world_to_screen` in `prism_render_shading::screen_space::motion` and
+// `ssr_temporal.wesl`: `(ndc.x * 0.5 + 0.5, ndc.y * -0.5 + 0.5)`.
+fn project_world_to_uv(clip_from_world: mat4x4<f32>, world: vec3<f32>) -> vec3<f32> {
+    let clip = clip_from_world * vec4<f32>(world, 1.0);
+    if clip.w <= 0.0 {
+        return vec3<f32>(0.0, 0.0, clip.w);
+    }
+    let ndc = clip.xyz / clip.w;
+    return vec3<f32>(ndc.x * 0.5 + 0.5, ndc.y * -0.5 + 0.5, clip.w);
 }
 
 // Locates the froxel a fragment falls in and returns its light-index slice.
@@ -859,6 +898,12 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     // tangent/bitangent by the linear part. The UV stays local. Guarded against
     // a short/stale transform buffer; the identity transform leaves every field
     // untouched so an untransformed instance shades exactly as before.
+    // Keep the reconstructed *local* position: the current transform overwrites
+    // `geometry.position` in place below, but the motion vector also needs the
+    // same local point placed in the *previous* frame's world space.
+    let local_position = geometry.position;
+    var world_cur = local_position;
+    var world_prev = local_position;
     if scene_index < arrayLength(&scene_current_transforms) {
         let world_from_local =
             affine3_to_square(scene_current_transforms[scene_index].world_from_local);
@@ -867,11 +912,23 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
             world_from_local[1].xyz,
             world_from_local[2].xyz,
         );
-        geometry.position = (world_from_local * vec4<f32>(geometry.position, 1.0)).xyz;
+        geometry.position = (world_from_local * vec4<f32>(local_position, 1.0)).xyz;
         geometry.normal =
             brdf_normalize_or(inverse_transpose_3x3(linear) * geometry.normal, geometry.normal);
         geometry.tangent = brdf_normalize_or(linear * geometry.tangent, geometry.tangent);
         geometry.bitangent = brdf_normalize_or(linear * geometry.bitangent, geometry.bitangent);
+        world_cur = geometry.position;
+        // Place the same local point in last frame's world space for the motion
+        // vector. Fall back to the current world position (zero object motion)
+        // when the previous-transform buffer is short/stale, so a freshly
+        // spawned instance never reprojects to garbage.
+        if scene_index < arrayLength(&scene_previous_transforms) {
+            let prev_from_local =
+                affine3_to_square(scene_previous_transforms[scene_index].world_from_local);
+            world_prev = (prev_from_local * vec4<f32>(local_position, 1.0)).xyz;
+        } else {
+            world_prev = world_cur;
+        }
     }
 
     // Resolve and generation-validate the material record.
@@ -1013,4 +1070,17 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     // SSR without double-counting energy (a miss leaves scene_color intact).
     textureStore(ssr_env_specular, coord, vec4<f32>(indirect_result.env_specular, 0.0));
     textureStore(ssr_spec_weight, coord, vec4<f32>(indirect_result.spec_weight, 0.0));
+
+    // Motion vector: this pixel's screen-space displacement between frames,
+    // `cur_uv - prev_uv`, capturing camera *and* per-object motion. Both ends
+    // are projected with their own frame's view-projection; a point that lands
+    // behind either eye (w <= 0) yields zero motion so the temporal reprojection
+    // simply falls back to the current sample instead of chasing garbage.
+    let cur = project_world_to_uv(motion_matrices.clip_from_world, world_cur);
+    let prev = project_world_to_uv(motion_matrices.previous_clip_from_world, world_prev);
+    var motion = vec2<f32>(0.0, 0.0);
+    if cur.z > 0.0 && prev.z > 0.0 {
+        motion = cur.xy - prev.xy;
+    }
+    textureStore(motion_vectors, coord, vec4<f32>(motion, 0.0, 0.0));
 }
