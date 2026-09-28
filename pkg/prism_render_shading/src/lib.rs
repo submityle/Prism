@@ -15,6 +15,7 @@ mod cloth;
 mod environment;
 mod hair;
 mod lighting;
+mod oit;
 mod punctual;
 mod resolve;
 mod shadow;
@@ -41,6 +42,9 @@ pub use environment::{
     ImageBasedLight, SphericalHarmonicsL2,
 };
 pub use hair::evaluate_hair_direct;
+pub use oit::{
+    composite_transparency, oit_weight, OitAccumulation, OitFragment,
+};
 pub use lighting::{
     evaluate_principled_direct, evaluate_toon_direct, linear_furnace_response, DirectLightSample,
     ShadingFrame, SurfaceSample,

@@ -452,3 +452,26 @@ fn material_sample_wesl_compiles_and_resolves_material_import() {
         panic!("material_sample.wesl failed to compile/resolve material import: {error}")
     });
 }
+
+/// Compiles `oit.wesl` standalone. It has no imports, so a green result
+/// proves the weighted-blended OIT math (McGuire & Bavoil 2013 eq. 10 depth
+/// weight, MRT accumulation and the fullscreen composite resolve) parses and
+/// type-checks as WESL on its own, in lock-step with the CPU golden in
+/// `prism_render_shading::oit`.
+#[test]
+fn oit_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let oit = shader_id(0x5052_4953_4d5f_4f49_5400_0000_0000_0001);
+    cache.set_shader(
+        oit,
+        Shader::from_wesl(
+            include_str!("../../shaders/oit.wesl"),
+            "embedded://prism_render_scene/shaders/oit.wesl",
+        ),
+    );
+
+    cache
+        .get(0, oit, &[])
+        .unwrap_or_else(|error| panic!("oit.wesl failed to compile: {error}"));
+}
