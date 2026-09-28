@@ -250,11 +250,10 @@ mod tests {
             [0.0, 0.0, -1.0],
         ] {
             let radiance = probe.radiance(direction);
-            for channel in 0..3 {
+            for (channel, &value) in radiance.iter().enumerate().take(3) {
                 assert!(
-                    (radiance[channel] - 1.0).abs() < 5.0e-2,
-                    "dir {direction:?} channel {channel}: {}",
-                    radiance[channel]
+                    (value - 1.0).abs() < 5.0e-2,
+                    "dir {direction:?} channel {channel}: {value}"
                 );
             }
         }

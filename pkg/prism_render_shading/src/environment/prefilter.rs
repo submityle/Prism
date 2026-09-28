@@ -315,9 +315,9 @@ mod tests {
                 let a = (i as f32) * 0.5;
                 let dir = [ops::cos(a), 0.2, ops::sin(a)];
                 let c = prefilter_radiance(&src, dir, roughness, 64);
-                for k in 0..3 {
-                    assert!(c[k].is_finite());
-                    assert!(c[k] >= -1.0e-6);
+                for &value in c.iter().take(3) {
+                    assert!(value.is_finite());
+                    assert!(value >= -1.0e-6);
                 }
             }
         }

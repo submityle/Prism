@@ -227,7 +227,7 @@ mod tests {
         // Weight stays within the finite f16-safe clamp range.
         for depth in [0.0_f32, 1.0, 50.0, 200.0, 1000.0, 5000.0] {
             let weight = oit_weight(depth, 1.0);
-            assert!(weight >= WEIGHT_MIN - 1.0e-6 && weight <= WEIGHT_MAX + 1.0e-6);
+            assert!((WEIGHT_MIN - 1.0e-6..=WEIGHT_MAX + 1.0e-6).contains(&weight));
             assert!(weight.is_finite());
         }
     }

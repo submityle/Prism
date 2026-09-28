@@ -226,11 +226,10 @@ mod tests {
         };
         let out = denoise_ssgi(&raw, buffers, SsgiDenoiseConfig::default());
         let center = out[4 * width + 4];
-        for c in 0..4 {
+        for (c, &value) in center.iter().enumerate().take(4) {
             assert!(
-                (center[c] - 0.5).abs() < 0.15,
-                "checkerboard channel {c} should average toward 0.5, got {}",
-                center[c]
+                (value - 0.5).abs() < 0.15,
+                "checkerboard channel {c} should average toward 0.5, got {value}"
             );
         }
     }

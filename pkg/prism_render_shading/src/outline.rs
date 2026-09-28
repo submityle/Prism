@@ -278,8 +278,7 @@ mod tests {
 
     #[test]
     fn id_edges_can_be_disabled() {
-        let mut p = OutlineParams::default();
-        p.id_edges = false;
+        let p = OutlineParams { id_edges: false, ..Default::default() };
         assert_eq!(outline_id_edge(7, [9, 9, 9, 9], p.id_edges), 0.0);
         assert_eq!(outline_id_edge(7, [9, 9, 9, 9], true), 1.0);
     }
@@ -380,8 +379,7 @@ mod tests {
 
     #[test]
     fn soft_edge_is_monotonic_across_the_terminator() {
-        let mut p = OutlineParams::default();
-        p.depth_softness = 0.2;
+        let p = OutlineParams { depth_softness: 0.2, ..Default::default() };
         let mut prev = -1.0f32;
         for i in 0..=20 {
             let rel = i as f32 / 20.0; // 0..1 relative jump
@@ -394,8 +392,7 @@ mod tests {
 
     #[test]
     fn hard_depth_edge_when_softness_zero() {
-        let mut p = OutlineParams::default();
-        p.depth_softness = 0.0;
+        let p = OutlineParams { depth_softness: 0.0, ..Default::default() };
         // Just below threshold => closed; just above => open.
         assert_eq!(outline_depth_edge(1.0, [1.049, 1.0, 1.0, 1.0], &p), 0.0);
         assert_eq!(outline_depth_edge(1.0, [1.051, 1.0, 1.0, 1.0], &p), 1.0);

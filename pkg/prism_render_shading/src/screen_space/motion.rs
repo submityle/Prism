@@ -87,7 +87,7 @@ mod tests {
     fn clip_from_world(eye_z: f32) -> Mat4 {
         let near = 0.1_f32;
         let far = 100.0_f32;
-        let f = 1.0 / (0.5_f32).tan();
+        let f = 1.0 / bevy_math::ops::tan(0.5_f32);
         let proj = Mat4::from_cols(
             Vec4::new(f, 0.0, 0.0, 0.0),
             Vec4::new(0.0, f, 0.0, 0.0),

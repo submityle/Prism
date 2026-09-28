@@ -867,12 +867,11 @@ mod tests {
         .unwrap();
         let decoded = srgb_channel_to_linear(0.5);
         let expected = [0.2 * decoded + 0.1, 0.4 * decoded, 0.6 * decoded];
-        for c in 0..3 {
+        for (c, &want) in expected.iter().enumerate().take(3) {
             assert!(
-                (resolved.color[c] - expected[c]).abs() < 1.0e-6,
-                "channel {c}: {} vs {}",
-                resolved.color[c],
-                expected[c]
+                (resolved.color[c] - want).abs() < 1.0e-6,
+                "channel {c}: {} vs {want}",
+                resolved.color[c]
             );
         }
     }
