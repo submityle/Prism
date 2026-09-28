@@ -263,6 +263,68 @@ impl GpuSsrCompositeParams {
     }
 }
 
+/// Immediate (push-constant) block consumed by `ssr_resolve.wesl`, the spatial
+/// reconstruction (bilateral resolve) that denoises the multi-ray trace.
+///
+/// Mirrors the shader's `ResolveParams`: the inverse projection
+/// (`view_from_clip`) used to reconstruct each tap's linear view-space depth
+/// for the depth bilateral term, the framebuffer extent, the neighbourhood
+/// half-`radius`, and the shared kernel tunables (mirroring the golden
+/// [`prism_render_shading::screen_space::SsrResolveParams`]) plus the roughness
+/// sigma-scale the GPU owns. A single trailing `u32` pads the block up to 96
+/// bytes, a multiple of the 16-byte immediate alignment the `mat4x4` field
+/// forces on the struct.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq)]
+pub(crate) struct GpuSsrResolveParams {
+    /// Clip -> view (inverse projection); reconstructs linear view-space depth.
+    pub view_from_clip: [f32; 16],
+    /// Framebuffer width in texels.
+    pub width: u32,
+    /// Framebuffer height in texels.
+    pub height: u32,
+    /// Neighbourhood half-width: the kernel spans `(2*radius+1)^2` taps.
+    pub radius: u32,
+    /// Gaussian sigma of the spatial term in pixels, before roughness scaling.
+    pub spatial_sigma: f32,
+    /// Exponent on `max(dot(n, n_centre), 0)`; larger rejects tilted neighbours.
+    pub normal_power: f32,
+    /// Relative depth tolerance (`exp(-|d - d0| / (sigma * max(|d0|, eps)))`).
+    pub depth_sigma: f32,
+    /// How strongly centre roughness widens the spatial sigma: the shader uses
+    /// `sigma * (0.5 + roughness_sigma_scale * roughness)` so a mirror keeps a
+    /// tight kernel and a rough surface a wide one.
+    pub roughness_sigma_scale: f32,
+    /// Padding to the 16-byte immediate alignment the `mat4x4` field forces.
+    pub _pad0: u32,
+}
+
+impl GpuSsrResolveParams {
+    /// Builds the resolve params from the inverse projection and framebuffer
+    /// extent, folding in the golden
+    /// [`prism_render_shading::screen_space::SsrResolveParams`] defaults
+    /// (`spatial_sigma = 2.0`, `normal_power = 8.0`, `depth_sigma = 0.05`) so
+    /// the GPU resolve agrees with the CPU reference. `radius = 2` gives the
+    /// 5x5 neighbourhood; `roughness_sigma_scale = 3.0` widens the kernel up to
+    /// ~3.5x its base for a fully rough surface. The matrix uploads column-major
+    /// (via [`Mat4::to_cols_array`]) so the WGSL `mat4x4<f32>` multiply matches
+    /// byte-for-byte.
+    pub(crate) fn new(view_from_clip: Mat4, width: u32, height: u32) -> Self {
+        Self {
+            view_from_clip: view_from_clip.to_cols_array(),
+            width,
+            height,
+            radius: 2,
+            // Golden `SsrResolveParams::default()`.
+            spatial_sigma: 2.0,
+            normal_power: 8.0,
+            depth_sigma: 0.05,
+            roughness_sigma_scale: 3.0,
+            _pad0: 0,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -383,5 +445,30 @@ mod tests {
         assert_eq!(params.height, 1080);
         assert_eq!(params._pad0, 0);
         assert_eq!(params._pad1, 0);
+    }
+
+    #[test]
+    fn resolve_params_match_the_shader_immediate_layout() {
+        // A mat4x4 (64) + three u32 extents (12) + four f32 tunables (16) + one
+        // u32 pad (4) fill 96 bytes, a multiple of the 16-byte immediate
+        // alignment the mat4x4 field forces on the struct.
+        assert_eq!(size_of::<GpuSsrResolveParams>(), 96);
+        assert_eq!(align_of::<GpuSsrResolveParams>(), 4);
+        let inv = Mat4::from_cols_array(&[
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
+        ]);
+        let params = GpuSsrResolveParams::new(inv, 1920, 1080);
+        // The matrix uploads column-major.
+        assert_eq!(params.view_from_clip, inv.to_cols_array());
+        assert_eq!(params.width, 1920);
+        assert_eq!(params.height, 1080);
+        // 5x5 neighbourhood and the golden `SsrResolveParams` defaults, plus the
+        // GPU-owned roughness sigma-scale.
+        assert_eq!(params.radius, 2);
+        assert_eq!(params.spatial_sigma, 2.0);
+        assert_eq!(params.normal_power, 8.0);
+        assert_eq!(params.depth_sigma, 0.05);
+        assert_eq!(params.roughness_sigma_scale, 3.0);
+        assert_eq!(params._pad0, 0);
     }
 }

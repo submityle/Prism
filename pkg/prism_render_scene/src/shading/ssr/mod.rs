@@ -40,6 +40,10 @@
 //!   reconstructed surface, marches the reverse-Z Hi-Z pyramid and samples the
 //!   roughness-selected colour-pyramid mip at the hit, writing reflected
 //!   radiance plus a blend confidence into the reflection output.
+//! * [`reconstruct`] — the spatial-reconstruction (bilateral resolve) pipeline,
+//!   its per-view bind group and the `Core3d` node that denoises the noisy
+//!   multi-ray trace with an edge-aware neighbourhood filter, writing the
+//!   resolved reflection the composite reads.
 //! * [`composite`] — the pipeline, per-view bind group and `Core3d` node that
 //!   fold that reflection output back over the shaded `scene_color` (reading
 //!   the untouched base from colour-pyramid level 0 to avoid storage-image
@@ -52,6 +56,7 @@ mod composite;
 mod dispatch;
 mod hzb;
 mod pipeline;
+mod reconstruct;
 mod repack;
 mod trace;
 mod resources;
@@ -69,6 +74,9 @@ pub(crate) use composite::{
     init_ssr_composite_pipeline, prepare_ssr_composite_bind_groups, ssr_composite_pass,
 };
 pub(crate) use trace::{init_ssr_trace_pipeline, prepare_ssr_trace_bind_groups, ssr_trace_pass};
+pub(crate) use reconstruct::{
+    init_ssr_reconstruct_pipeline, prepare_ssr_reconstruct_bind_groups, ssr_reconstruct_pass,
+};
 pub(crate) use repack::{init_ssr_repack_pipeline, prepare_ssr_repack_bind_groups, ssr_repack_pass};
 pub(crate) use pipeline::init_ssr_prepass_pipeline;
 pub(crate) use resources::prepare_ssr_textures;

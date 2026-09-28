@@ -17,7 +17,7 @@
 //! It reads one bind group (group 0, matching `shaders/ssr_composite.wesl`):
 //!
 //! * `0` colour-pyramid level 0 (the untouched shaded colour, `textureLoad`ed),
-//! * `1` the trace's reflection output (`textureLoad`ed), and
+//! * `1` the spatially resolved reflection output (`textureLoad`ed), and
 //! * `2` the write-only `rgba16float` `scene_color` blended in place.
 //!
 //! The framebuffer extent travels in the [`GpuSsrCompositeParams`] immediate
@@ -127,7 +127,7 @@ pub(crate) fn prepare_ssr_composite_bind_groups(
             &pipeline.layout,
             &BindGroupEntries::sequential((
                 color_l0,
-                textures.ssr_out_view(),
+                textures.ssr_resolved_view(),
                 visibility.scene_color_view(),
             )),
         );

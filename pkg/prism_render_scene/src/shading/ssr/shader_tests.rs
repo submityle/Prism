@@ -228,3 +228,28 @@ fn ssr_composite_wesl_compiles_standalone() {
         .get(0, composite, &[])
         .unwrap_or_else(|error| panic!("ssr_composite.wesl failed to compile: {error}"));
 }
+
+/// Compiles `ssr_resolve.wesl` standalone. The spatial reconstruction resolves
+/// the noisy multi-ray trace with an edge-aware neighbourhood filter, reading
+/// the trace output, packed `normal_roughness` and device depth and writing the
+/// denoised reflection the composite consumes. The kernel is self-contained (no
+/// intra-crate imports), so a green result also guards its immediate
+/// `ResolveParams` layout against drift from the 96-byte `GpuSsrResolveParams`
+/// contract (inverse projection + extent + kernel radius + bilateral tunables).
+#[test]
+fn ssr_resolve_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let resolve = shader_id(0x5052_4953_4d5f_5353_525f_434d_5053_0003);
+    cache.set_shader(
+        resolve,
+        Shader::from_wesl(
+            include_str!("../../shaders/ssr_resolve.wesl"),
+            "embedded://prism_render_scene/shaders/ssr_resolve.wesl",
+        ),
+    );
+
+    cache
+        .get(0, resolve, &[])
+        .unwrap_or_else(|error| panic!("ssr_resolve.wesl failed to compile: {error}"));
+}

@@ -16,11 +16,13 @@ use super::{
     ssr::{
         init_ssr_color_mips_pipeline, init_ssr_composite_pipeline, init_ssr_hzb_pipeline,
         init_ssr_prepass_pipeline, init_ssr_repack_pipeline, init_ssr_trace_pipeline,
+        init_ssr_reconstruct_pipeline,
         prepare_ssr_color_mips_bind_groups, prepare_ssr_composite_bind_groups,
         prepare_ssr_hzb_bind_groups, prepare_ssr_prepass_bind_groups,
+        prepare_ssr_reconstruct_bind_groups,
         prepare_ssr_repack_bind_groups, prepare_ssr_textures, prepare_ssr_trace_bind_groups,
-        ssr_color_mips_pass, ssr_composite_pass, ssr_hzb_pass, ssr_prepass_pass, ssr_repack_pass,
-        ssr_trace_pass,
+        ssr_color_mips_pass, ssr_composite_pass, ssr_hzb_pass, ssr_prepass_pass, ssr_reconstruct_pass,
+        ssr_repack_pass, ssr_trace_pass,
     },
     ibl::{
         dfg_lut_precompute_pass, env_prefilter_precompute_pass, extract_ibl_source,
@@ -91,6 +93,7 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/ssr_repack.wesl");
         embedded_asset!(app, "../shaders/ssr_color_mips.wesl");
         embedded_asset!(app, "../shaders/ssr.wesl");
+        embedded_asset!(app, "../shaders/ssr_resolve.wesl");
         embedded_asset!(app, "../shaders/ssr_composite.wesl");
         embedded_asset!(app, "../shaders/brdf_lut.wesl");
         embedded_asset!(app, "../shaders/env_prefilter.wesl");
@@ -154,6 +157,7 @@ impl Plugin for PrismShadingPlugin {
                         .after(init_gpu_resource::<crate::MaterialBindGroup>),
                     init_ssr_color_mips_pipeline,
                     init_ssr_trace_pipeline,
+                    init_ssr_reconstruct_pipeline,
                     init_ssr_composite_pipeline,
                     init_dfg_lut_texture,
                     init_brdf_lut_pipeline,
@@ -251,6 +255,9 @@ impl Plugin for PrismShadingPlugin {
                     prepare_ssr_trace_bind_groups
                         .after(prepare_ssr_textures)
                         .in_set(RenderSystems::PrepareBindGroups),
+                    prepare_ssr_reconstruct_bind_groups
+                        .after(prepare_ssr_textures)
+                        .in_set(RenderSystems::PrepareBindGroups),
                     prepare_ssr_composite_bind_groups
                         .after(prepare_ssr_textures)
                         .in_set(RenderSystems::PrepareBindGroups),
@@ -301,8 +308,11 @@ impl Plugin for PrismShadingPlugin {
                     .after(ssr_hzb_pass)
                     .after(ssr_repack_pass)
                     .before(bevy_core_pipeline::Core3dSystems::MainPass),
-                ssr_composite_pass
+                ssr_reconstruct_pass
                     .after(ssr_trace_pass)
+                    .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                ssr_composite_pass
+                    .after(ssr_reconstruct_pass)
                     .before(bevy_core_pipeline::Core3dSystems::MainPass),
                 composite_shading
                     .after(bevy_core_pipeline::Core3dSystems::MainPass)

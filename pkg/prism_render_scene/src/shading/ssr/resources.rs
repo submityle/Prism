@@ -105,6 +105,11 @@ pub(crate) struct ViewSsrTextures {
     /// Reflection output written by the trace (`rgb` radiance, `a` confidence)
     /// and consumed by the composite. Single mip, full resolution.
     ssr_out: CachedTexture,
+    /// Spatially reconstructed reflection written by the resolve pass
+    /// (`ssr_resolve.wesl`): the bilateral-denoised twin of `ssr_out` the
+    /// composite reads instead of the raw noisy trace. Same single-mip,
+    /// full-resolution wide-HDR layout as `ssr_out`.
+    ssr_resolved: CachedTexture,
     pub(crate) size: bevy_math::UVec2,
 }
 
@@ -180,9 +185,15 @@ impl ViewSsrTextures {
     }
 
     /// Storage/sampling view of the trace's reflection output. The trace writes
-    /// it (storage) and the composite reads it (sampled).
+    /// it (storage) and the spatial reconstruction reads it (sampled).
     pub(crate) fn ssr_out_view(&self) -> &TextureView {
         &self.ssr_out.default_view
+    }
+
+    /// Storage/sampling view of the spatially reconstructed reflection. The
+    /// resolve pass writes it (storage) and the composite reads it (sampled).
+    pub(crate) fn ssr_resolved_view(&self) -> &TextureView {
+        &self.ssr_resolved.default_view
     }
 }
 
@@ -373,6 +384,23 @@ pub(crate) fn prepare_ssr_textures(
             },
         );
 
+        // Spatially reconstructed reflection: same single-mip, full-resolution
+        // wide-HDR layout as `ssr_out`. The resolve pass writes it (storage) and
+        // the composite reads it (sampled) in place of the noisy trace.
+        let ssr_resolved = texture_cache.get(
+            &device,
+            TextureDescriptor {
+                label: Some("prism SSR resolved reflection"),
+                size: size.to_extents(),
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: TextureDimension::D2,
+                format: SSR_OUT_FORMAT,
+                usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+        );
+
         commands.entity(entity).insert(ViewSsrTextures {
             scene_depth,
             view_normal,
@@ -384,6 +412,7 @@ pub(crate) fn prepare_ssr_textures(
             color_mip_views,
             color_mip_count: mip_count,
             ssr_out,
+            ssr_resolved,
             size,
         });
     }
