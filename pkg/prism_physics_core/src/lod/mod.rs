@@ -7,10 +7,22 @@
 //! from a focus point, scaling their solver iteration budget so distant
 //! objects cost less without popping.
 //!
-//! This module is populated by milestone M7.
+//! The controllers live in single-concept files:
+//!
+//! * [`config`] — [`LodConfig`], a serialisable bundle that builds both.
+//! * [`temporal`] — the CFL-based [`TemporalController`].
+//! * [`spatial`] — the distance-based [`SpatialController`].
 //!
 //! # Provenance
 //!
 //! This module contains **no Unreal Engine source or derived code**. CFL-based
 //! adaptive substepping and distance-based spatial LOD are standard, publicly
 //! documented real-time-simulation techniques.
+
+pub mod config;
+pub mod spatial;
+pub mod temporal;
+
+pub use config::LodConfig;
+pub use spatial::SpatialController;
+pub use temporal::TemporalController;

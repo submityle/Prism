@@ -8,7 +8,13 @@
 //! rest-shape mass and stiffness matrices via a generalised symmetric
 //! eigenproblem, then integrated with a decoupled implicit scheme.
 //!
-//! This module is populated by milestone M7.
+//! The pipeline is split into single-concept files:
+//!
+//! * [`modes`] — a trig-free symmetric (Jacobi) eigensolver.
+//! * [`config`] — [`ReducedConfig`] tunables (mode count, damping, substeps).
+//! * [`subspace`] — assembling the stiffness/mass matrices and extracting the
+//!   truncated modal basis as a [`ReducedModel`].
+//! * [`integrate`] — the decoupled backward-Euler [`ReducedState`] stepper.
 //!
 //! # Provenance
 //!
@@ -17,3 +23,13 @@
 //! implicit integration are implemented from standard, publicly documented
 //! numerical-methods and computer-graphics literature (Pentland & Williams
 //! 1989; Golub & Van Loan).
+
+pub mod config;
+pub mod integrate;
+pub mod modes;
+pub mod subspace;
+
+pub use config::ReducedConfig;
+pub use integrate::ReducedState;
+pub use modes::{SymmetricEigen, SymmetricMatrix};
+pub use subspace::{ReducedMode, ReducedModel};

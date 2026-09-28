@@ -81,10 +81,14 @@ pub use joint::{
     AngleLimit, DistanceJoint, FixedJoint, Joint, JointAnchor, JointDesc, JointHandle, JointKind,
     JointStorage, LinearLimit, Motor, MotorTarget, PrismaticJoint, RevoluteJoint, SphericalJoint,
 };
+pub use lod::{LodConfig, SpatialController, TemporalController};
 pub use math::scalar::{approx_eq, Real, EPSILON, PI, TAU};
 pub use math::transform::Isometry;
 pub use pipeline::detect_contacts;
 pub use query::{PointProjection, QueryFilter, RayHit, SweepHit};
+pub use reduced::{
+    ReducedConfig, ReducedMode, ReducedModel, ReducedState, SymmetricEigen, SymmetricMatrix,
+};
 pub use sleep::SleepConfig;
 pub use snapshot::buffer::TripleBuffer;
 pub use snapshot::hash::{hash_state, locate_divergence, StateHash};
