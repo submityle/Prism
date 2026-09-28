@@ -13,6 +13,7 @@
 //! the arithmetic of the `gtao.wesl` compute twin, so it is the CPU golden the
 //! shader is validated against on machines without a GPU.
 
+mod denoise;
 mod integral;
 mod reconstruct;
 
@@ -21,6 +22,7 @@ use bevy_math::ops;
 use crate::vecmath::{dot, mul_scalar, normalize_or, sub};
 use integral::{combine_horizon, distance_weight, slice_visibility};
 
+pub use denoise::{denoise_gtao, denoise_gtao_pixel, GtaoDenoiseConfig};
 pub use reconstruct::GtaoCamera;
 
 /// Read-only view over the depth/normal prepass GTAO samples.
