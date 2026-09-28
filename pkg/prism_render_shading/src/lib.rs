@@ -23,6 +23,7 @@ mod screen_space;
 mod shadow;
 mod subsurface;
 mod surface;
+mod taa;
 mod tangent;
 mod texture_sample;
 mod vecmath;
@@ -70,6 +71,10 @@ pub use screen_space::{
     ScreenSpaceReflection,
     SsrCamera, SsrConfidenceParams, SsrMarchConfig, SsrMarchResult, SsrResolveParams,
     variance_clip_box, ClipResult, SsrResolveSample, SsrTemporalParams, SsrTraceSample,
+};
+pub use taa::{
+    halton, resolve_taa, rgb_to_ycocg, taa_jitter, tonemap_weight, ycocg_to_rgb,
+    DEFAULT_TAA_JITTER_LEN, TaaParams,
 };
 pub use shadow::{
     allocate_shadow_atlas, apply_normal_offset, blocker_search, cascade_blend_weight,
