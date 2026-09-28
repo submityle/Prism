@@ -13,6 +13,8 @@
 //!
 //! * [`ray`] — reflect the view ray and project it to a screen-space ray.
 //! * [`march`] — hierarchical (Hi-Z) depth-pyramid ray march.
+//! * [`sample`] — deterministic GGX importance sampling (Hammersley + NDF/
+//!   visibility) for the multi-ray rough-reflection lobe.
 //! * [`fade`] — edge/facing/roughness/distance confidence and the IBL blend.
 //!
 //! End to end, [`trace_screen_space_reflection`] runs the ray build and march
@@ -21,6 +23,7 @@
 mod fade;
 mod march;
 mod ray;
+mod sample;
 
 pub use fade::{
     blend_specular, distance_fade, edge_fade, facing_fade, reflection_mip, roughness_fade,
@@ -32,6 +35,9 @@ pub use march::{
 pub use ray::{
     build_screen_ray, project_view_to_screen, reflect, reverse_z_perspective, ScreenRay,
     ScreenSample, SsrCamera,
+};
+pub use sample::{
+    ggx_ndf, hammersley, importance_sample_ggx, radical_inverse_vdc, smith_ggx_visibility,
 };
 
 use bevy_math::Vec3;
