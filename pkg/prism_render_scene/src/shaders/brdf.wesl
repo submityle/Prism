@@ -370,6 +370,47 @@ fn stylized_direct(
     return color + surface.emissive;
 }
 
+// --- SDF face shadow (stylized NPR) -----------------------------------------
+// Backend twin of `face_shadow.rs`: drives an anime face terminator from a
+// baked SDF map plus the light's azimuth in the head frame, instead of the
+// geometric N.L / shadow map. Returns a [0,1] visibility that feeds the
+// `visibility` input of `stylized_direct` (through `stylized_shadow`).
+
+// Projects `light_dir` onto the head's horizontal plane (removing the `up`
+// component so head tilt is handled) and returns (forward_cos, right_cos).
+// Mirrors `face_shadow_light_cosines`.
+fn face_shadow_light_cosines(
+    face_forward: vec3<f32>,
+    face_right: vec3<f32>,
+    face_up: vec3<f32>,
+    light_dir: vec3<f32>,
+) -> vec2<f32> {
+    let up = brdf_normalize_or(face_up, vec3<f32>(0.0, 1.0, 0.0));
+    let l = brdf_normalize_or(light_dir, face_forward);
+    let planar = l - up * dot(l, up);
+    let forward = brdf_normalize_or(face_forward, vec3<f32>(0.0, 0.0, 1.0));
+    let l_h = brdf_normalize_or(planar, forward);
+    let right = brdf_normalize_or(face_right, vec3<f32>(1.0, 0.0, 0.0));
+    return vec2<f32>(dot(l_h, forward), dot(l_h, right));
+}
+
+// UV-mirror decision: the map is authored for the light on the character's
+// right (right_cos >= 0) and mirrored across u for the left. Mirrors
+// `face_shadow_flip_u`.
+fn face_shadow_flip_u(right_cos: f32) -> bool {
+    return right_cos < 0.0;
+}
+
+// Turns the resolved SDF sample + forward cosine into a [0,1] visibility.
+// Threshold is (1 - forward_cos)/2; `stylized_smoothstep` shares the collapsed
+// edge semantics of the CPU reference. Mirrors `evaluate_face_shadow`.
+fn evaluate_face_shadow(sdf: f32, forward_cos: f32, softness: f32) -> f32 {
+    let threshold = (1.0 - clamp(forward_cos, -1.0, 1.0)) * 0.5;
+    let sample = clamp(sdf, 0.0, 1.0);
+    let half_window = clamp(softness, 0.0, 0.5);
+    return stylized_smoothstep(threshold - half_window, threshold + half_window, sample);
+}
+
 // Split-sum image-based indirect term. Mirrors `evaluate_image_based_light`.
 // The GPU probe carries no independent intensity, so intensity is 1.0. Probe
 // reconstruction can ring negative, so both halves clamp to non-negative before

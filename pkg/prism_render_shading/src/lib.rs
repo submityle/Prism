@@ -14,9 +14,11 @@ mod cluster;
 mod clearcoat;
 mod cloth;
 mod environment;
+mod face_shadow;
 mod hair;
 mod lighting;
 mod oit;
+mod outline;
 mod punctual;
 mod resolve;
 mod screen_space;
@@ -98,6 +100,14 @@ pub use resolve::{
 };
 pub use subsurface::evaluate_subsurface_direct;
 pub use stylized::{evaluate_stylized_direct, evaluate_toon_direct, StylizedParams};
+pub use face_shadow::{
+    evaluate_face_shadow, face_shadow_flip_u, face_shadow_light_cosines, FaceFrame,
+    FaceShadowParams,
+};
+pub use outline::{
+    evaluate_outline, outline_depth_edge, outline_id_edge, outline_normal_edge, OutlineGeometry,
+    OutlineParams,
+};
 pub use water::evaluate_water_direct;
 pub use tangent::{
     apply_tangent_space_normal, orthonormal_basis, resolve_tangent_basis, TangentBasis,
