@@ -1,9 +1,10 @@
 //! Device-side shadow resources: the depth atlas array texture and the storage
 //! buffers that mirror the per-frame [`ExtractedShadows`] onto the GPU.
 //!
-//! Three parallel storage buffers back the resolve pass's shadow bind group: a
-//! directional-shadow array, a point-shadow array, and a single-element globals
-//! record carrying the live slot counts and the shared atlas resolution.  They
+//! Four parallel storage buffers back the resolve pass's shadow bind group: a
+//! directional-shadow array, a point-shadow array, a spot-shadow array, and a
+//! single-element globals record carrying the live slot counts and the shared
+//! atlas resolution.  They
 //! are packed from [`ExtractedShadows`] every frame; empty arrays are padded
 //! with one disabled element so the storage bindings are never zero-sized and
 //! the shader's `enabled == 0` early-out keeps unlit scenes correct.
@@ -28,8 +29,8 @@ use bevy_render::{
 };
 
 use super::abi::{
-    GpuDirectionalShadow, GpuPointShadow, GpuShadowGlobals, MAX_SHADOW_DIRECTIONALS,
-    MAX_SHADOW_POINTS,
+    GpuDirectionalShadow, GpuPointShadow, GpuShadowGlobals, GpuSpotShadow,
+    MAX_SHADOW_DIRECTIONALS, MAX_SHADOW_POINTS, MAX_SHADOW_SPOTS,
 };
 use super::pipeline::SHADOW_DEPTH_FORMAT;
 
@@ -250,6 +251,8 @@ pub(crate) struct ExtractedShadows {
     pub directionals: Vec<GpuDirectionalShadow>,
     /// One record per shadow-casting point light this frame.
     pub points: Vec<GpuPointShadow>,
+    /// One record per shadow-casting spot light this frame.
+    pub spots: Vec<GpuSpotShadow>,
     /// The frame header: live slot counts and the shared atlas resolution.
     pub globals: GpuShadowGlobals,
     /// One entry per atlas layer that must be filled this frame: which layer to
@@ -264,6 +267,7 @@ pub(crate) struct ExtractedShadows {
 pub(crate) struct ShadowGpuBuffers {
     directionals: RawBufferVec<GpuDirectionalShadow>,
     points: RawBufferVec<GpuPointShadow>,
+    spots: RawBufferVec<GpuSpotShadow>,
     globals: RawBufferVec<GpuShadowGlobals>,
     version: u32,
 }
@@ -274,11 +278,14 @@ impl FromWorld for ShadowGpuBuffers {
         directionals.set_label(Some("prism directional shadows"));
         let mut points = RawBufferVec::new(BufferUsages::STORAGE);
         points.set_label(Some("prism point shadows"));
+        let mut spots = RawBufferVec::new(BufferUsages::STORAGE);
+        spots.set_label(Some("prism spot shadows"));
         let mut globals = RawBufferVec::new(BufferUsages::STORAGE);
         globals.set_label(Some("prism shadow globals"));
         Self {
             directionals,
             points,
+            spots,
             globals,
             version: 1,
         }
@@ -292,20 +299,25 @@ impl ShadowGpuBuffers {
     pub(crate) fn rebuild(&mut self, shadows: &ExtractedShadows) {
         self.directionals.clear();
         self.points.clear();
+        self.spots.clear();
         self.globals.clear();
 
         let directional_len = shadows.directionals.len().min(MAX_SHADOW_DIRECTIONALS);
         let point_len = shadows.points.len().min(MAX_SHADOW_POINTS);
+        let spot_len = shadows.spots.len().min(MAX_SHADOW_SPOTS);
         self.directionals
             .extend(shadows.directionals[..directional_len].iter().copied());
         self.points
             .extend(shadows.points[..point_len].iter().copied());
+        self.spots
+            .extend(shadows.spots[..spot_len].iter().copied());
 
         // Keep the header counts authoritative against the clamped arrays so the
         // shader never reads past a populated slot even if extraction overfills.
         let mut globals = shadows.globals;
         globals.directional_count = globals.directional_count.min(directional_len as u32);
         globals.point_count = globals.point_count.min(point_len as u32);
+        globals.spot_count = globals.spot_count.min(spot_len as u32);
         self.globals.push(globals);
 
         self.version = self.version.wrapping_add(1).max(1);
@@ -321,11 +333,15 @@ impl ShadowGpuBuffers {
         if self.points.is_empty() {
             self.points.push(GpuPointShadow::default());
         }
+        if self.spots.is_empty() {
+            self.spots.push(GpuSpotShadow::default());
+        }
         if self.globals.is_empty() {
             self.globals.push(GpuShadowGlobals::default());
         }
         self.directionals.write_buffer(device, queue);
         self.points.write_buffer(device, queue);
+        self.spots.write_buffer(device, queue);
         self.globals.write_buffer(device, queue);
     }
 
@@ -334,11 +350,12 @@ impl ShadowGpuBuffers {
         self.version
     }
 
-    /// The three storage buffers once they have been uploaded at least once.
-    pub(crate) fn buffers(&self) -> Option<(&Buffer, &Buffer, &Buffer)> {
+    /// The four storage buffers once they have been uploaded at least once.
+    pub(crate) fn buffers(&self) -> Option<(&Buffer, &Buffer, &Buffer, &Buffer)> {
         Some((
             self.directionals.buffer()?,
             self.points.buffer()?,
+            self.spots.buffer()?,
             self.globals.buffer()?,
         ))
     }
@@ -369,15 +386,19 @@ mod tests {
         shadows.directionals.push(GpuDirectionalShadow::default());
         shadows.points.push(GpuPointShadow::default());
         shadows.points.push(GpuPointShadow::default());
+        shadows.spots.push(GpuSpotShadow::default());
         shadows.globals.directional_count = 1;
         shadows.globals.point_count = 2;
+        shadows.globals.spot_count = 1;
         shadows.globals.atlas_resolution = 1024;
         buffers.rebuild(&shadows);
 
         assert_eq!(buffers.directionals.values().len(), 1);
         assert_eq!(buffers.points.values().len(), 2);
+        assert_eq!(buffers.spots.values().len(), 1);
         assert_eq!(buffers.globals.values().len(), 1);
         assert_eq!(buffers.globals.values()[0].point_count, 2);
+        assert_eq!(buffers.globals.values()[0].spot_count, 1);
         assert_eq!(buffers.globals.values()[0].atlas_resolution, 1024);
     }
 

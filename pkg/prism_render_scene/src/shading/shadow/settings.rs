@@ -15,7 +15,9 @@
 //! twin were validated against.
 
 use bevy_ecs::prelude::Resource;
-use prism_render_shading::{DirectionalShadowConfig, PointShadowConfig, ShadowFilter};
+use prism_render_shading::{
+    DirectionalShadowConfig, PointShadowConfig, ShadowFilter, SpotShadowConfig,
+};
 
 /// Global shadow-quality settings consumed by the shadow extraction pass.
 #[derive(Resource, Clone, Copy, Debug, PartialEq)]
@@ -37,6 +39,11 @@ pub(crate) struct PrismShadowSettings {
     /// `texel_uv_size` is a placeholder here and is overwritten with the live
     /// atlas texel size during extraction.
     pub point: PointShadowConfig,
+    /// Bias/filter tunables shared by every spot-light shadow map.  Its
+    /// `texel_uv_size` / `texel_world_size` are derived per light from the live
+    /// atlas resolution and cone geometry during extraction, so only the
+    /// bias/filter fields here are authoritative.
+    pub spot: SpotShadowConfig,
 }
 
 impl Default for PrismShadowSettings {
@@ -61,6 +68,13 @@ impl Default for PrismShadowSettings {
                 // Overwritten with `ShadowAtlasConfig::texel_uv_size()` during
                 // extraction once the live atlas resolution is known.
                 texel_uv_size: [0.0, 0.0],
+            },
+            spot: SpotShadowConfig {
+                normal_offset_scale: 2.0,
+                const_depth_bias: 0.0005,
+                slope_depth_bias: 0.002,
+                max_depth_bias: 0.02,
+                filter: ShadowFilter::Pcf { radius: 2 },
             },
         }
     }

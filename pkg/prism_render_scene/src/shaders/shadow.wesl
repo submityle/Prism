@@ -494,6 +494,82 @@ fn evaluate_point_shadow(input: PointShadowInput, config: PointShadowConfig) -> 
 }
 
 // ---------------------------------------------------------------------------
+// spot.rs
+// ---------------------------------------------------------------------------
+
+// Bias/filter tunables for a spot-light shadow, mirroring `SpotShadowConfig`.
+// Reuses the directional `SHADOW_FILTER_*` selectors and `PcssConfig`.
+struct SpotShadowConfig {
+    normal_offset_scale: f32,
+    const_depth_bias: f32,
+    slope_depth_bias: f32,
+    max_depth_bias: f32,
+    // SHADOW_FILTER_PCF or SHADOW_FILTER_PCSS.
+    filter_kind: u32,
+    // PCF box half-extent (used when filter_kind == PCF).
+    pcf_radius: i32,
+    // PCSS parameters (used when filter_kind == PCSS).
+    pcss: PcssConfig,
+}
+
+// Per-fragment and per-light inputs for a spot shadow, mirroring
+// `SpotShadowInput`.  A spot has a single perspective map on one atlas `layer`.
+struct SpotShadowInput {
+    world_position: vec3<f32>,
+    world_normal: vec3<f32>,
+    n_dot_l: f32,
+    light_view_projection: mat4x4<f32>,
+    texel_world_size: f32,
+    texel_uv_size: vec2<f32>,
+    layer: u32,
+}
+
+// WESL twin of `evaluate_spot_shadow`: offsets the surface point along its
+// normal, projects it through the spot's single perspective matrix, applies the
+// slope-scaled depth bias, and filters the stored NDC depth on `layer`.  A spot
+// is perspective (`w == -z_eye`), so `w <= 0` means the point is at or behind
+// the light plane and stays lit; points outside the mapped [0, 1] UV / depth
+// region also fall back to `SHADOW_LIT`.
+fn evaluate_spot_shadow(input: SpotShadowInput, config: SpotShadowConfig) -> f32 {
+    let offset_position = apply_normal_offset(
+        input.world_position,
+        input.world_normal,
+        input.texel_world_size,
+        config.normal_offset_scale,
+        input.n_dot_l,
+    );
+
+    let clip = transform_point(input.light_view_projection, offset_position);
+    if (clip.w <= 0.0) {
+        return SHADOW_LIT;
+    }
+    let inv_w = 1.0 / clip.w;
+    let ndc = clip.xyz * inv_w;
+
+    // wgpu NDC: x,y in [-1, 1], z in [0, 1]; map to shadow UV with flipped V.
+    let uv = vec2<f32>(ndc.x * 0.5 + 0.5, ndc.y * -0.5 + 0.5);
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+        return SHADOW_LIT;
+    }
+    if (ndc.z < 0.0 || ndc.z > 1.0) {
+        return SHADOW_LIT;
+    }
+
+    let bias = slope_scaled_depth_bias(
+        input.n_dot_l,
+        config.const_depth_bias,
+        config.slope_depth_bias,
+        config.max_depth_bias,
+    );
+    let reference_depth = ndc.z - bias;
+
+    if (config.filter_kind == SHADOW_FILTER_PCSS) {
+        return pcss_visibility(input.layer, uv, reference_depth, input.texel_uv_size, config.pcss);
+    }
+    return pcf_visibility(input.layer, uv, reference_depth, input.texel_uv_size, config.pcf_radius);
+}
+
+// ---------------------------------------------------------------------------
 // Standalone compilation self-test entry point
 // ---------------------------------------------------------------------------
 // This module is a shared library with no draw entry point of its own; the
@@ -549,8 +625,29 @@ fn shadow_selftest() {
 
     let point = evaluate_point_shadow(pt_input, pt_config);
 
+    var spot_input: SpotShadowInput;
+    spot_input.world_position = vec3<f32>(0.0, 0.0, 5.0);
+    spot_input.world_normal = vec3<f32>(0.0, 0.0, 1.0);
+    spot_input.n_dot_l = 1.0;
+    spot_input.light_view_projection = identity;
+    spot_input.texel_world_size = 0.01;
+    spot_input.texel_uv_size = vec2<f32>(1.0 / 1024.0, 1.0 / 1024.0);
+    spot_input.layer = 0u;
+
+    var spot_config: SpotShadowConfig;
+    spot_config.normal_offset_scale = 2.0;
+    spot_config.const_depth_bias = 0.0005;
+    spot_config.slope_depth_bias = 0.002;
+    spot_config.max_depth_bias = 0.02;
+    spot_config.filter_kind = SHADOW_FILTER_PCF;
+    spot_config.pcf_radius = 2;
+    spot_config.pcss = PcssConfig(2, 0.01, 1, 8);
+
+    let spot = evaluate_spot_shadow(spot_input, spot_config);
+
     shadow_selftest_out[0] = directional;
     shadow_selftest_out[1] = point;
+    shadow_selftest_out[2] = spot;
 }
 
 
@@ -561,7 +658,7 @@ fn shadow_selftest() {
 // The declarations below wire that math into the shading-resolve pass: they
 // mirror the `#[repr(C)]` records in `shading/shadow/abi.rs` as `std430`
 // storage structs, bind the shadow tables on group 4 (alongside the atlas the
-// resolve pass already reserves there), and expose two helpers that scan the
+// resolve pass already reserves there), and expose three helpers that scan the
 // tables by `light_index` and return the analytic visibility in `[0, 1]` the
 // resolve pass multiplies into each light's `DirectLightSample::visibility`.
 //
@@ -575,7 +672,7 @@ struct GpuShadowGlobals {
     directional_count: u32,
     point_count: u32,
     atlas_resolution: u32,
-    globals_padding: u32,
+    spot_count: u32,
 }
 
 // Mirror of `GpuDirectionalShadow` (368 bytes).  `cascade_far` /
@@ -624,10 +721,33 @@ struct GpuPointShadow {
     point_padding2: u32,
 }
 
-// group 4 shares the atlas (bindings 0/1) with the shadow tables (2/3/4).
+// group 4 shares the atlas (bindings 0/1) with the shadow tables (2/3/4/5).
+// Mirror of `GpuSpotShadow` (128 bytes).  `light_view_projection` is the single
+// perspective `world -> light-clip` matrix; `texel_uv_size` is a `vec2<f32>` to
+// pin the `std430` offsets to the Rust `[f32; 2]` layout.
+struct GpuSpotShadow {
+    light_view_projection: mat4x4<f32>,
+    texel_uv_size: vec2<f32>,
+    normal_offset_scale: f32,
+    texel_world_size: f32,
+    const_depth_bias: f32,
+    slope_depth_bias: f32,
+    max_depth_bias: f32,
+    filter_kind: u32,
+    pcf_radius: i32,
+    pcss_search_radius: i32,
+    pcss_light_size_uv: f32,
+    pcss_min_filter_radius: i32,
+    pcss_max_filter_radius: i32,
+    base_layer: u32,
+    light_index: u32,
+    enabled: u32,
+}
+
 @group(4) @binding(2) var<storage, read> directional_shadows: array<GpuDirectionalShadow>;
 @group(4) @binding(3) var<storage, read> point_shadows: array<GpuPointShadow>;
 @group(4) @binding(4) var<storage, read> shadow_globals: array<GpuShadowGlobals>;
+@group(4) @binding(5) var<storage, read> spot_shadows: array<GpuSpotShadow>;
 
 // Rebuilds the per-fragment `DirectionalShadowInput` from a table `record`,
 // unpacking the `vec4` split/texel columns into the `array<f32, 4>` the math
@@ -746,6 +866,54 @@ fn point_shadow_visibility(
         config.texel_uv_size = record.texel_uv_size;
 
         return evaluate_point_shadow(input, config);
+    }
+    return SHADOW_LIT;
+}
+
+// Spot shadow visibility for the punctual light at `light_index`.  Scans the
+// spot shadow table for the enabled matching record, rebuilds the reference
+// `SpotShadowInput` / `SpotShadowConfig` from its flat scalars and evaluates the
+// single perspective map; unmatched lights stay fully lit (`SHADOW_LIT`).
+fn spot_shadow_visibility(
+    light_index: u32,
+    world_position: vec3<f32>,
+    world_normal: vec3<f32>,
+    n_dot_l: f32,
+) -> f32 {
+    if (arrayLength(&shadow_globals) == 0u) {
+        return SHADOW_LIT;
+    }
+    let count = min(shadow_globals[0].spot_count, arrayLength(&spot_shadows));
+    for (var i = 0u; i < count; i = i + 1u) {
+        let record = spot_shadows[i];
+        if (record.enabled == 0u || record.light_index != light_index) {
+            continue;
+        }
+
+        var input: SpotShadowInput;
+        input.world_position = world_position;
+        input.world_normal = world_normal;
+        input.n_dot_l = n_dot_l;
+        input.light_view_projection = record.light_view_projection;
+        input.texel_world_size = record.texel_world_size;
+        input.texel_uv_size = record.texel_uv_size;
+        input.layer = record.base_layer;
+
+        var config: SpotShadowConfig;
+        config.normal_offset_scale = record.normal_offset_scale;
+        config.const_depth_bias = record.const_depth_bias;
+        config.slope_depth_bias = record.slope_depth_bias;
+        config.max_depth_bias = record.max_depth_bias;
+        config.filter_kind = record.filter_kind;
+        config.pcf_radius = record.pcf_radius;
+        config.pcss = PcssConfig(
+            record.pcss_search_radius,
+            record.pcss_light_size_uv,
+            record.pcss_min_filter_radius,
+            record.pcss_max_filter_radius,
+        );
+
+        return evaluate_spot_shadow(input, config);
     }
     return SHADOW_LIT;
 }

@@ -8,9 +8,10 @@
 //! * binding 1 — the linear `sampler` used for its manual depth comparison,
 //! * binding 2 — the directional-shadow storage array,
 //! * binding 3 — the point-shadow storage array,
-//! * binding 4 — the single-element shadow globals record.
+//! * binding 4 — the single-element shadow globals record,
+//! * binding 5 — the spot-shadow storage array.
 //!
-//! The three buffers are read-only storage (not uniforms) so their `std430`
+//! The four buffers are read-only storage (not uniforms) so their `std430`
 //! layout matches the CPU-side `#[repr(C)]` records exactly, side-stepping the
 //! `std140` padding rules a uniform block would impose — the same choice the
 //! light bind group makes.
@@ -33,7 +34,7 @@ use bevy_render::{
 use core::num::NonZero;
 
 use super::{
-    abi::{GpuDirectionalShadow, GpuPointShadow, GpuShadowGlobals},
+    abi::{GpuDirectionalShadow, GpuPointShadow, GpuShadowGlobals, GpuSpotShadow},
     resources::{ShadowAtlas, ShadowGpuBuffers},
 };
 
@@ -49,7 +50,7 @@ pub(crate) struct ShadowBindGroup {
     /// buffers have uploaded.
     pub bind_group: Option<BindGroup>,
     atlas_view_id: Option<TextureViewId>,
-    buffer_ids: Option<[BufferId; 3]>,
+    buffer_ids: Option<[BufferId; 4]>,
     buffer_version: u32,
 }
 
@@ -72,6 +73,10 @@ impl FromWorld for ShadowBindGroup {
                 storage_buffer_read_only_sized(
                     false,
                     NonZero::new(size_of::<GpuShadowGlobals>() as u64),
+                ),
+                storage_buffer_read_only_sized(
+                    false,
+                    NonZero::new(size_of::<GpuSpotShadow>() as u64),
                 ),
             ),
         );
@@ -97,12 +102,12 @@ impl ShadowBindGroup {
         atlas: &ShadowAtlas,
         buffers: &ShadowGpuBuffers,
     ) {
-        let Some((directionals, points, globals)) = buffers.buffers() else {
+        let Some((directionals, points, spots, globals)) = buffers.buffers() else {
             return;
         };
         let atlas_view = atlas.view();
         let atlas_view_id = atlas_view.id();
-        let ids = [directionals.id(), points.id(), globals.id()];
+        let ids = [directionals.id(), points.id(), spots.id(), globals.id()];
         let version = buffers.version();
         if self.atlas_view_id == Some(atlas_view_id)
             && self.buffer_ids == Some(ids)
@@ -119,6 +124,7 @@ impl ShadowBindGroup {
                 directionals.as_entire_binding(),
                 points.as_entire_binding(),
                 globals.as_entire_binding(),
+                spots.as_entire_binding(),
             )),
         ));
         self.atlas_view_id = Some(atlas_view_id);

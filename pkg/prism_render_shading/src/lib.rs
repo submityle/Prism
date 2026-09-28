@@ -45,11 +45,12 @@ pub use shadow::{
     compute_cascade_matrices, compute_cascade_splits, cube_face_and_uv,
     cube_face_view_projections, evaluate_directional_shadow, evaluate_point_shadow,
     pcf_visibility, pcss_visibility, plan_shadow_depth_draws, select_cascade,
-    slope_scaled_depth_bias, transform_direction, transform_point, AtlasAllocation, AtlasConfig,
+    evaluate_spot_shadow, slope_scaled_depth_bias, spot_view_projection, transform_direction,
+    transform_point, AtlasAllocation, AtlasConfig,
     AtlasSlot, BlockerSearch, CascadeMatrix, CascadeSplits, DirectionalShadowConfig,
     DirectionalShadowInput, Mat4, PcssConfig, PointShadowConfig, PointShadowInput, ShadowDepthDraw,
     ShadowDepthMode, ShadowDepthSampler, ShadowDepthView, ShadowFilter, ShadowKind, ShadowRequest,
-    ShadowViewGeometry, MAX_CASCADE_COUNT, POINT_LAYER_COUNT,
+    ShadowViewGeometry, SpotShadowConfig, SpotShadowInput, MAX_CASCADE_COUNT, POINT_LAYER_COUNT,
 };
 pub use resolve::{
     resolve_pixel, surface_sample_from_parameters, DirectionalLight, LightingEnvironment,

@@ -31,17 +31,18 @@
 use bevy_camera::visibility::ViewVisibility;
 use bevy_camera::{Camera, Projection};
 use bevy_ecs::prelude::*;
-use bevy_light::{DirectionalLight, PointLight};
+use bevy_light::{DirectionalLight, PointLight, SpotLight};
 use bevy_math::{ops, Mat4};
 use bevy_render::Extract;
 use bevy_transform::components::GlobalTransform;
 use prism_render_shading::{
     allocate_shadow_atlas, compute_cascade_matrices, compute_cascade_splits, plan_shadow_depth_draws,
-    AtlasConfig, CascadeMatrix, CascadeSplits, DirectionalShadowConfig, PointShadowConfig,
-    ShadowKind, ShadowRequest, ShadowViewGeometry, MAX_CASCADE_COUNT,
+    spot_view_projection, AtlasConfig, CascadeMatrix, CascadeSplits, DirectionalShadowConfig,
+    PointShadowConfig, ShadowKind, ShadowRequest, ShadowViewGeometry, SpotShadowConfig,
+    MAX_CASCADE_COUNT,
 };
 
-use super::abi::{GpuDirectionalShadow, GpuPointShadow, GpuShadowGlobals};
+use super::abi::{GpuDirectionalShadow, GpuPointShadow, GpuShadowGlobals, GpuSpotShadow};
 use super::resources::{ExtractedShadows, ShadowAtlasConfig};
 use super::settings::PrismShadowSettings;
 
@@ -56,6 +57,17 @@ const POINT_LIGHT_ID_OFFSET: u32 = 1 << 16;
 /// projection's near plane sits; it is kept small and fixed so shadow acne near
 /// the emitter is governed by the reference bias, not a per-light near guess.
 const POINT_SHADOW_NEAR: f32 = 0.05;
+
+/// Atlas request-id offset separating spot-light ids from point and directional
+/// ones in the shared [`allocate_shadow_atlas`] ranking.  Point ids start at
+/// `1 << 16` and spots at `1 << 17`, so the three id spaces never overlap while
+/// a single allocation ranks all shadow kinds together.
+const SPOT_LIGHT_ID_OFFSET: u32 = 1 << 17;
+
+/// Near clip of every spot-light perspective frustum.  Overridden per light by
+/// the `SpotLight::shadow_map_near_z` when it is larger, so this only floors the
+/// near plane away from zero to keep the projection well-conditioned.
+const SPOT_SHADOW_NEAR: f32 = 0.05;
 
 /// Importance assigned to every directional caster.  Directionals (sun/moon)
 /// are the dominant lighting contributor, so they must always claim their atlas
@@ -108,6 +120,22 @@ pub(crate) struct PointCaster {
     importance: f32,
 }
 
+/// A visible, shadow-casting spot light resolved into its perspective map.
+pub(crate) struct SpotCaster {
+    /// Index of the modulated light in the punctual buffer (visible point count
+    /// plus this spot's position among the visible spots).
+    light_index: u32,
+    /// Column-major world -> light-clip matrix for the spot cone.
+    view_projection: [f32; 16],
+    /// World size of one shadow texel at the cone's far plane (drives the
+    /// normal-offset magnitude for this map's resolution).
+    texel_world_size: f32,
+    /// Bias/filter tunables baked into the emitted record.
+    config: SpotShadowConfig,
+    /// Relative priority for atlas allocation (brighter lights win slots).
+    importance: f32,
+}
+
 /// A finite perspective camera resolved for cascade fitting.
 struct CameraFit {
     /// Column-major inverse of the finite `clip_from_world` matrix.
@@ -126,6 +154,7 @@ pub(crate) fn extract_shadows(
     cameras: Extract<Query<(&Camera, &GlobalTransform, &Projection)>>,
     directionals: Extract<Query<(&DirectionalLight, &GlobalTransform, Option<&ViewVisibility>)>>,
     points: Extract<Query<(&PointLight, &GlobalTransform, Option<&ViewVisibility>)>>,
+    spots: Extract<Query<(&SpotLight, &GlobalTransform, Option<&ViewVisibility>)>>,
 ) {
     let cascade_count = (settings.cascade_count.clamp(1, MAX_CASCADE_COUNT as u32)) as usize;
 
@@ -193,9 +222,51 @@ pub(crate) fn extract_shadows(
         });
     }
 
+    // Spot lights follow the point lights in the punctual buffer, so a spot's
+    // `light_index` is the count of visible point lights plus its own position
+    // among the visible spots.  `point_index` holds that visible-point count.
+    let visible_point_count = point_index;
+    let mut spot_casters: Vec<SpotCaster> = Vec::new();
+    let mut spot_serial = 0u32;
+    let resolution = atlas_config.resolution.max(1) as f32;
+    for (light, transform, visibility) in &spots {
+        if is_hidden(visibility) {
+            continue;
+        }
+        let index = visible_point_count + spot_serial;
+        spot_serial += 1;
+        if !light.shadow_maps_enabled {
+            continue;
+        }
+        let position = transform.translation();
+        let forward = transform.forward();
+        let near = SPOT_SHADOW_NEAR.max(light.shadow_map_near_z);
+        let far = light.range.max(near + 1.0e-4);
+        let view_projection = spot_view_projection(
+            [position.x, position.y, position.z],
+            [forward.x, forward.y, forward.z],
+            light.outer_angle,
+            near,
+            far,
+        );
+        // Worst-case texel footprint at the cone's far plane: the frustum is
+        // `2 * far * tan(outer_angle)` wide there, split across `resolution`
+        // texels.  This scales the reference normal offset with the map's
+        // effective resolution just as the directional path does per cascade.
+        let texel_world_size = 2.0 * far * ops::tan(light.outer_angle) / resolution;
+        spot_casters.push(SpotCaster {
+            light_index: index,
+            view_projection,
+            texel_world_size,
+            config: settings.spot,
+            importance: light.intensity.max(0.0),
+        });
+    }
+
     assemble_shadows(
         &dir_casters,
         &point_casters,
+        &spot_casters,
         &atlas_config,
         &settings.point,
         &mut extracted,
@@ -250,17 +321,19 @@ fn select_primary_camera(
 pub(crate) fn assemble_shadows(
     dir_casters: &[DirectionalCaster],
     point_casters: &[PointCaster],
+    spot_casters: &[SpotCaster],
     atlas_config: &ShadowAtlasConfig,
     point_config_base: &PointShadowConfig,
     extracted: &mut ExtractedShadows,
 ) {
     extracted.directionals.clear();
     extracted.points.clear();
+    extracted.spots.clear();
     extracted.depth_draws.clear();
     extracted.globals = GpuShadowGlobals::default();
 
     let mut requests: Vec<ShadowRequest> =
-        Vec::with_capacity(dir_casters.len() + point_casters.len());
+        Vec::with_capacity(dir_casters.len() + point_casters.len() + spot_casters.len());
     for (index, caster) in dir_casters.iter().enumerate() {
         let cascades = (caster.splits.count.clamp(1, MAX_CASCADE_COUNT)) as u32;
         requests.push(ShadowRequest {
@@ -273,6 +346,13 @@ pub(crate) fn assemble_shadows(
         requests.push(ShadowRequest {
             light_id: POINT_LIGHT_ID_OFFSET + index as u32,
             kind: ShadowKind::Point,
+            importance: caster.importance,
+        });
+    }
+    for (index, caster) in spot_casters.iter().enumerate() {
+        requests.push(ShadowRequest {
+            light_id: SPOT_LIGHT_ID_OFFSET + index as u32,
+            kind: ShadowKind::Spot,
             importance: caster.importance,
         });
     }
@@ -290,7 +370,17 @@ pub(crate) fn assemble_shadows(
     };
 
     for slot in &allocation.slots {
-        if slot.light_id >= POINT_LIGHT_ID_OFFSET {
+        if slot.light_id >= SPOT_LIGHT_ID_OFFSET {
+            let caster = &spot_casters[(slot.light_id - SPOT_LIGHT_ID_OFFSET) as usize];
+            extracted.spots.push(GpuSpotShadow::from_reference(
+                caster.view_projection,
+                &caster.config,
+                caster.texel_world_size,
+                texel_uv_size,
+                slot.base_layer,
+                caster.light_index,
+            ));
+        } else if slot.light_id >= POINT_LIGHT_ID_OFFSET {
             let caster = &point_casters[(slot.light_id - POINT_LIGHT_ID_OFFSET) as usize];
             extracted.points.push(GpuPointShadow::from_reference(
                 caster.position,
@@ -320,7 +410,12 @@ pub(crate) fn assemble_shadows(
     // range-normalized cube faces.  Slot order (descending importance) and the
     // resulting `layer` values match the records the resolve pass samples.
     extracted.depth_draws = plan_shadow_depth_draws(&allocation, |light_id| {
-        if light_id >= POINT_LIGHT_ID_OFFSET {
+        if light_id >= SPOT_LIGHT_ID_OFFSET {
+            let caster = &spot_casters[(light_id - SPOT_LIGHT_ID_OFFSET) as usize];
+            ShadowViewGeometry::Spot {
+                view_projection: caster.view_projection,
+            }
+        } else if light_id >= POINT_LIGHT_ID_OFFSET {
             let caster = &point_casters[(light_id - POINT_LIGHT_ID_OFFSET) as usize];
             let far = caster.range.max(POINT_SHADOW_NEAR + 1.0e-4);
             ShadowViewGeometry::Point {
@@ -340,7 +435,7 @@ pub(crate) fn assemble_shadows(
         directional_count: extracted.directionals.len() as u32,
         point_count: extracted.points.len() as u32,
         atlas_resolution: atlas_config.resolution,
-        _padding: 0,
+        spot_count: extracted.spots.len() as u32,
     };
 }
 
@@ -374,6 +469,34 @@ mod tests {
             max_bias: 0.02,
             pcf_radius: 1,
             texel_uv_size: [0.0, 0.0],
+        }
+    }
+
+    fn spot_config() -> SpotShadowConfig {
+        SpotShadowConfig {
+            normal_offset_scale: 2.0,
+            const_depth_bias: 0.0005,
+            slope_depth_bias: 0.002,
+            max_depth_bias: 0.02,
+            filter: ShadowFilter::Pcf { radius: 2 },
+        }
+    }
+
+    fn spot_caster(light_index: u32, importance: f32) -> SpotCaster {
+        // A spot at the origin aiming down -Z with a 30 degree outer half-angle.
+        let view_projection = spot_view_projection(
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, -1.0],
+            core::f32::consts::FRAC_PI_6,
+            SPOT_SHADOW_NEAR,
+            40.0,
+        );
+        SpotCaster {
+            light_index,
+            view_projection,
+            texel_world_size: 0.01,
+            config: spot_config(),
+            importance,
         }
     }
 
@@ -419,7 +542,7 @@ mod tests {
         let atlas = ShadowAtlasConfig::new(16, 1024);
         let mut extracted = ExtractedShadows::default();
 
-        assemble_shadows(&dir, &points, &atlas, &point_config(), &mut extracted);
+        assemble_shadows(&dir, &points, &[], &atlas, &point_config(), &mut extracted);
 
         assert_eq!(extracted.directionals.len(), 1);
         assert_eq!(extracted.points.len(), 1);
@@ -449,7 +572,7 @@ mod tests {
         let atlas = ShadowAtlasConfig::new(6, 512);
         let mut extracted = ExtractedShadows::default();
 
-        assemble_shadows(&dir, &points, &atlas, &point_config(), &mut extracted);
+        assemble_shadows(&dir, &points, &[], &atlas, &point_config(), &mut extracted);
 
         assert_eq!(extracted.directionals.len(), 1);
         assert_eq!(extracted.points.len(), 0);
@@ -478,7 +601,7 @@ mod tests {
         let atlas = ShadowAtlasConfig::new(32, 1024);
         let mut extracted = ExtractedShadows::default();
 
-        assemble_shadows(&dir, &points, &atlas, &point_config(), &mut extracted);
+        assemble_shadows(&dir, &points, &[], &atlas, &point_config(), &mut extracted);
 
         assert_eq!(extracted.directionals.len(), 2);
         assert_eq!(extracted.points.len(), 2);
@@ -508,7 +631,7 @@ mod tests {
         let mut extracted = ExtractedShadows::default();
         extracted.directionals.push(GpuDirectionalShadow::default());
 
-        assemble_shadows(&[], &[], &atlas, &point_config(), &mut extracted);
+        assemble_shadows(&[], &[], &[], &atlas, &point_config(), &mut extracted);
 
         assert!(extracted.directionals.is_empty());
         assert!(extracted.points.is_empty());
@@ -532,7 +655,7 @@ mod tests {
         let atlas = ShadowAtlasConfig::new(32, 1024);
         let mut extracted = ExtractedShadows::default();
 
-        assemble_shadows(&dir, &points, &atlas, &point_config(), &mut extracted);
+        assemble_shadows(&dir, &points, &[], &atlas, &point_config(), &mut extracted);
 
         // Four directional cascades plus six point cube faces.
         assert_eq!(extracted.depth_draws.len(), 10);
@@ -580,8 +703,81 @@ mod tests {
                 },
             });
 
-        assemble_shadows(&[], &[], &atlas, &point_config(), &mut extracted);
+        assemble_shadows(&[], &[], &[], &atlas, &point_config(), &mut extracted);
 
         assert!(extracted.depth_draws.is_empty());
+    }
+
+    #[test]
+    fn assembles_a_spot_after_points_on_a_distinct_layer() {
+        // One point light (six cube faces) plus one shadow-casting spot (one
+        // perspective layer): the spot record must land after the point in the
+        // punctual id space, carry the live atlas texel size, and occupy an
+        // atlas layer disjoint from the point's cube block.
+        let points = vec![PointCaster {
+            light_index: 0,
+            position: [1.0, 2.0, 3.0],
+            range: 25.0,
+            importance: 10.0,
+        }];
+        let spots = vec![spot_caster(1, 1000.0)];
+        let atlas = ShadowAtlasConfig::new(16, 1024);
+        let mut extracted = ExtractedShadows::default();
+
+        assemble_shadows(&[], &points, &spots, &atlas, &point_config(), &mut extracted);
+
+        assert_eq!(extracted.spots.len(), 1);
+        assert_eq!(extracted.globals.spot_count, 1);
+        assert_eq!(extracted.globals.point_count, 1);
+        let spot = extracted.spots[0];
+        assert_eq!(spot.enabled, 1);
+        // The spot sits behind the single point light in the punctual buffer.
+        assert_eq!(spot.light_index, 1);
+        // It inherits the live atlas texel size, not a config placeholder.
+        assert_eq!(spot.texel_uv_size, [1.0 / 1024.0, 1.0 / 1024.0]);
+        assert_eq!(spot.filter_kind, 0);
+        assert_eq!(spot.pcf_radius, 2);
+
+        // The spot's single layer must not overlap the point's six cube faces.
+        let point_base = extracted.points[0].base_layer;
+        assert!(spot.base_layer < point_base || spot.base_layer >= point_base + 6);
+
+        // Exactly one depth draw targets the spot's layer, in NDC mode with no
+        // emitter position (perspective depth, not a distance cube).
+        let spot_draws: Vec<_> = extracted
+            .depth_draws
+            .iter()
+            .filter(|draw| draw.light_id >= SPOT_LIGHT_ID_OFFSET)
+            .collect();
+        assert_eq!(spot_draws.len(), 1);
+        assert_eq!(spot_draws[0].layer, spot.base_layer);
+        assert_eq!(
+            spot_draws[0].view.mode,
+            prism_render_shading::ShadowDepthMode::Ndc
+        );
+        assert_eq!(spot_draws[0].view.light_position, [0.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn spot_indices_survive_importance_reordering() {
+        // Two spots admitted brightest-first still report their original
+        // punctual-buffer indices on distinct layers.
+        let spots = vec![spot_caster(0, 5.0), spot_caster(1, 500.0)];
+        let atlas = ShadowAtlasConfig::new(16, 512);
+        let mut extracted = ExtractedShadows::default();
+
+        assemble_shadows(&[], &[], &spots, &atlas, &point_config(), &mut extracted);
+
+        assert_eq!(extracted.spots.len(), 2);
+        let mut indices: Vec<u32> =
+            extracted.spots.iter().map(|record| record.light_index).collect();
+        indices.sort_unstable();
+        assert_eq!(indices, vec![0, 1]);
+
+        let mut layers: Vec<u32> =
+            extracted.spots.iter().map(|record| record.base_layer).collect();
+        layers.sort_unstable();
+        layers.dedup();
+        assert_eq!(layers.len(), 2, "each spot needs its own atlas layer");
     }
 }

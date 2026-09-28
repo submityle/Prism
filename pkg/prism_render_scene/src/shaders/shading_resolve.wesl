@@ -69,6 +69,7 @@ import prism_render_scene::shaders::lighting::{
 import prism_render_scene::shaders::shadow::{
     directional_shadow_visibility,
     point_shadow_visibility,
+    spot_shadow_visibility,
 };
 import prism_render_scene::shaders::material::{
     PrismMaterialHeader,
@@ -179,14 +180,22 @@ fn sample_directional_shadowed(index: u32, frame: ShadingFrame, world_position: 
     return sample;
 }
 
-// Samples the punctual light at `index` and folds its cube-map shadow into the
-// visibility term.  Invalid samples (out of range / outside a spot cone) are
-// left untouched so the caller's `valid == 0.0` skip still fires.
+// Samples the punctual light at `index` and folds its shadow into the
+// visibility term.  Spot lights (non-zero `spot_scale`) sample their single
+// perspective map; point lights sample the distance cube map.  Invalid samples
+// (out of range / outside a spot cone) are left untouched so the caller's
+// `valid == 0.0` skip still fires.
 fn sample_punctual_shadowed(index: u32, frame: ShadingFrame, world_position: vec3<f32>) -> LightSample {
-    var sample = sample_punctual_light(punctual_lights[index], world_position);
+    let light = punctual_lights[index];
+    var sample = sample_punctual_light(light, world_position);
     if sample.valid != 0.0 {
         let n_dot_l = max(dot(frame.normal, sample.direction), 0.0);
-        let visibility = point_shadow_visibility(index, world_position, n_dot_l);
+        var visibility = 1.0;
+        if light.spot_scale != 0.0 {
+            visibility = spot_shadow_visibility(index, world_position, frame.normal, n_dot_l);
+        } else {
+            visibility = point_shadow_visibility(index, world_position, n_dot_l);
+        }
         sample.visibility = sample.visibility * visibility;
     }
     return sample;

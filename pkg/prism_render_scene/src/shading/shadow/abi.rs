@@ -20,7 +20,7 @@
 use bytemuck::{Pod, Zeroable};
 use prism_render_shading::{
     CascadeMatrix, CascadeSplits, DirectionalShadowConfig, PcssConfig, PointShadowConfig,
-    ShadowFilter, MAX_CASCADE_COUNT,
+    ShadowFilter, SpotShadowConfig, MAX_CASCADE_COUNT,
 };
 
 /// Maximum number of shadow-casting directional lights the resolve pass tracks
@@ -32,6 +32,11 @@ pub(crate) const MAX_SHADOW_DIRECTIONALS: usize = 4;
 /// consumes six atlas layers (its cube faces), so this is bounded by the atlas
 /// layer budget in practice.
 pub(crate) const MAX_SHADOW_POINTS: usize = 16;
+
+/// Maximum number of shadow-casting spot lights tracked per frame.  Each spot
+/// consumes a single atlas layer (one perspective map), so the cap is generous
+/// relative to the point-light budget.
+pub(crate) const MAX_SHADOW_SPOTS: usize = 8;
 
 /// Directional filter selector: fixed-radius percentage-closer filtering.
 /// Matches `SHADOW_FILTER_PCF` in `shaders/shadow.wesl`.
@@ -53,8 +58,8 @@ pub(crate) struct GpuShadowGlobals {
     pub point_count: u32,
     /// Edge resolution (texels) of each square atlas layer.
     pub atlas_resolution: u32,
-    /// Padding to a 16-byte boundary; always zero.
-    pub _padding: u32,
+    /// Number of populated entries in the spot shadow array.
+    pub spot_count: u32,
 }
 
 /// One shadow-casting directional light's GPU parameters.
@@ -277,10 +282,123 @@ impl GpuPointShadow {
     }
 }
 
+/// One shadow-casting spot light's GPU parameters.
+///
+/// A spot light needs a single perspective shadow map, so unlike
+/// [`GpuPointShadow`] it stores one `world -> light-clip` matrix and occupies
+/// one atlas layer at `base_layer`.  `light_index` links this record to the
+/// punctual light it modulates (a spot lives in the punctual buffer with a
+/// non-zero `spot_scale`).  The scalar block mirrors [`SpotShadowConfig`] and
+/// reuses the directional `SHADOW_FILTER_*` selectors.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+pub(crate) struct GpuSpotShadow {
+    /// Column-major world -> light-clip matrix for the spot's perspective map.
+    pub light_view_projection: [f32; 16],
+    /// `UV` size of one shadow texel (`1 / resolution`) for filtering.
+    pub texel_uv_size: [f32; 2],
+    /// Normal-offset scale in multiples of one texel's world size.
+    pub normal_offset_scale: f32,
+    /// World size of one shadow texel (drives the normal-offset magnitude).
+    pub texel_world_size: f32,
+    /// Constant depth bias in normalized shadow-depth units.
+    pub const_depth_bias: f32,
+    /// Slope-scaled depth-bias coefficient.
+    pub slope_depth_bias: f32,
+    /// Maximum total depth bias (bounds peter-panning).
+    pub max_depth_bias: f32,
+    /// Soft-shadow filter selector (`SHADOW_FILTER_PCF` / `SHADOW_FILTER_PCSS`).
+    pub filter_kind: u32,
+    /// Box `PCF` half-extent in texels (used when `filter_kind` is `PCF`).
+    pub pcf_radius: i32,
+    /// `PCSS` blocker-search half-extent in texels.
+    pub pcss_search_radius: i32,
+    /// `PCSS` emitter size in `UV` units (larger softens the penumbra).
+    pub pcss_light_size_uv: f32,
+    /// `PCSS` minimum variable-`PCF` radius in texels.
+    pub pcss_min_filter_radius: i32,
+    /// `PCSS` maximum variable-`PCF` radius in texels.
+    pub pcss_max_filter_radius: i32,
+    /// Atlas array layer holding this spot's perspective map.
+    pub base_layer: u32,
+    /// Index of the modulated light in the punctual light buffer.
+    pub light_index: u32,
+    /// `1` when this slot casts shadows, `0` when it is inert padding.
+    pub enabled: u32,
+}
+
+impl Default for GpuSpotShadow {
+    fn default() -> Self {
+        Self {
+            light_view_projection: [0.0; 16],
+            texel_uv_size: [1.0, 1.0],
+            normal_offset_scale: 0.0,
+            texel_world_size: 0.0,
+            const_depth_bias: 0.0,
+            slope_depth_bias: 0.0,
+            max_depth_bias: 0.0,
+            filter_kind: SHADOW_FILTER_PCF,
+            pcf_radius: 1,
+            pcss_search_radius: 0,
+            pcss_light_size_uv: 0.0,
+            pcss_min_filter_radius: 0,
+            pcss_max_filter_radius: 0,
+            base_layer: 0,
+            light_index: 0,
+            enabled: 0,
+        }
+    }
+}
+
+impl GpuSpotShadow {
+    /// Packs the reference spot-shadow config and its `world -> light-clip`
+    /// matrix into the GPU record for the light at `light_index`, whose map
+    /// occupies atlas layer `base_layer`.  `texel_world_size` scales the normal
+    /// offset; `texel_uv_size` is `1 / resolution` of the atlas layer.
+    pub(crate) fn from_reference(
+        light_view_projection: [f32; 16],
+        config: &SpotShadowConfig,
+        texel_world_size: f32,
+        texel_uv_size: [f32; 2],
+        base_layer: u32,
+        light_index: u32,
+    ) -> Self {
+        let (filter_kind, pcf_radius, pcss) = match config.filter {
+            ShadowFilter::Pcf { radius } => (SHADOW_FILTER_PCF, radius, None),
+            ShadowFilter::Pcss(cfg) => (SHADOW_FILTER_PCSS, cfg.min_filter_radius.max(1), Some(cfg)),
+        };
+        let pcss = pcss.unwrap_or(PcssConfig {
+            search_radius: 0,
+            light_size_uv: 0.0,
+            min_filter_radius: 0,
+            max_filter_radius: 0,
+        });
+
+        Self {
+            light_view_projection,
+            texel_uv_size,
+            normal_offset_scale: config.normal_offset_scale,
+            texel_world_size,
+            const_depth_bias: config.const_depth_bias,
+            slope_depth_bias: config.slope_depth_bias,
+            max_depth_bias: config.max_depth_bias,
+            filter_kind,
+            pcf_radius,
+            pcss_search_radius: pcss.search_radius,
+            pcss_light_size_uv: pcss.light_size_uv,
+            pcss_min_filter_radius: pcss.min_filter_radius,
+            pcss_max_filter_radius: pcss.max_filter_radius,
+            base_layer,
+            light_index,
+            enabled: 1,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use prism_render_shading::{compute_cascade_splits, CascadeMatrix};
+    use prism_render_shading::{compute_cascade_splits, spot_view_projection, CascadeMatrix, SpotShadowConfig};
 
     #[test]
     fn shadow_records_are_16_byte_aligned_and_sized() {
@@ -289,9 +407,11 @@ mod tests {
         assert_eq!(size_of::<GpuShadowGlobals>(), 16);
         assert_eq!(size_of::<GpuDirectionalShadow>() % 16, 0);
         assert_eq!(size_of::<GpuPointShadow>() % 16, 0);
+        assert_eq!(size_of::<GpuSpotShadow>() % 16, 0);
         assert_eq!(align_of::<GpuShadowGlobals>(), 4);
         assert_eq!(align_of::<GpuDirectionalShadow>(), 4);
         assert_eq!(align_of::<GpuPointShadow>(), 4);
+        assert_eq!(align_of::<GpuSpotShadow>(), 4);
     }
 
     #[test]
@@ -382,8 +502,66 @@ mod tests {
     }
 
     #[test]
+    fn spot_shadow_config_round_trips_through_the_gpu_record() {
+        let vp = spot_view_projection(
+            [1.0, 2.0, 3.0],
+            [0.0, 0.0, -1.0],
+            std::f32::consts::FRAC_PI_4,
+            0.1,
+            40.0,
+        );
+        let config = SpotShadowConfig {
+            normal_offset_scale: 1.5,
+            const_depth_bias: 0.0008,
+            slope_depth_bias: 0.003,
+            max_depth_bias: 0.02,
+            filter: ShadowFilter::Pcss(PcssConfig {
+                search_radius: 3,
+                light_size_uv: 0.03,
+                min_filter_radius: 2,
+                max_filter_radius: 12,
+            }),
+        };
+
+        let gpu = GpuSpotShadow::from_reference(vp, &config, 0.05, [1.0 / 256.0, 1.0 / 256.0], 5, 11);
+
+        assert_eq!(gpu.light_view_projection, vp);
+        assert_eq!(gpu.filter_kind, SHADOW_FILTER_PCSS);
+        assert_eq!(gpu.pcss_search_radius, 3);
+        assert_eq!(gpu.pcss_light_size_uv, 0.03);
+        assert_eq!(gpu.pcss_min_filter_radius, 2);
+        assert_eq!(gpu.pcss_max_filter_radius, 12);
+        // The PCF fallback radius takes the PCSS floor.
+        assert_eq!(gpu.pcf_radius, 2);
+        assert_eq!(gpu.normal_offset_scale, 1.5);
+        assert_eq!(gpu.texel_world_size, 0.05);
+        assert_eq!(gpu.texel_uv_size, [1.0 / 256.0, 1.0 / 256.0]);
+        assert_eq!(gpu.base_layer, 5);
+        assert_eq!(gpu.light_index, 11);
+        assert_eq!(gpu.enabled, 1);
+    }
+
+    #[test]
+    fn spot_pcf_config_leaves_pcss_block_zeroed() {
+        let config = SpotShadowConfig {
+            normal_offset_scale: 1.0,
+            const_depth_bias: 0.0005,
+            slope_depth_bias: 0.0,
+            max_depth_bias: 0.01,
+            filter: ShadowFilter::Pcf { radius: 3 },
+        };
+        let gpu =
+            GpuSpotShadow::from_reference([0.0; 16], &config, 0.0, [1.0, 1.0], 0, 0);
+        assert_eq!(gpu.filter_kind, SHADOW_FILTER_PCF);
+        assert_eq!(gpu.pcf_radius, 3);
+        assert_eq!(gpu.pcss_search_radius, 0);
+        assert_eq!(gpu.pcss_light_size_uv, 0.0);
+    }
+
+    #[test]
     fn default_slots_are_disabled_so_the_shader_skips_them() {
         assert_eq!(GpuDirectionalShadow::default().enabled, 0);
         assert_eq!(GpuPointShadow::default().enabled, 0);
+        assert_eq!(GpuSpotShadow::default().enabled, 0);
     }
 }
