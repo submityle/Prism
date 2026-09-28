@@ -113,6 +113,9 @@ pub(crate) fn prepare_shading_resolve_bind_groups(
                 // view-projection uniform that projects it.
                 visibility.motion_vectors_view(),
                 motion.buffer.as_entire_binding(),
+                // 12-13: screen-space GI exports (pre-albedo ambient + albedo).
+                visibility.ssgi_ambient_view(),
+                visibility.ssgi_albedo_view(),
             )),
         );
         let scene_group = device.create_bind_group(

@@ -48,6 +48,15 @@ pub(crate) struct ViewVisibilityBuffer {
     /// pass writes for every covered pixel; consumed by the SSR temporal
     /// reprojection to follow object + camera motion instead of ghosting.
     motion_vectors: CachedTexture,
+    /// Screen-space GI export: the pre-albedo diffuse *irradiance* the resolve
+    /// evaluated per pixel. The SSGI hemisphere gather blends missed rays
+    /// toward this so indirect light degrades to the IBL/SH ambient instead of
+    /// to black.
+    ssgi_ambient: CachedTexture,
+    /// Screen-space GI export: the Lambertian albedo (`base_color *
+    /// (1 - metallic)`) the SSGI composite multiplies the gathered pre-albedo
+    /// radiance by before blending it over the IBL diffuse under confidence.
+    ssgi_albedo: CachedTexture,
     pub(crate) size: bevy_math::UVec2,
 }
 
@@ -79,6 +88,16 @@ impl ViewVisibilityBuffer {
     /// Storage/sampling view of the per-pixel motion-vector G-buffer.
     pub(crate) fn motion_vectors_view(&self) -> &bevy_render::render_resource::TextureView {
         &self.motion_vectors.default_view
+    }
+
+    /// Storage/sampling view of the SSGI pre-albedo ambient-irradiance export.
+    pub(crate) fn ssgi_ambient_view(&self) -> &bevy_render::render_resource::TextureView {
+        &self.ssgi_ambient.default_view
+    }
+
+    /// Storage/sampling view of the SSGI Lambertian-albedo export.
+    pub(crate) fn ssgi_albedo_view(&self) -> &bevy_render::render_resource::TextureView {
+        &self.ssgi_albedo.default_view
     }
 }
 
@@ -291,6 +310,37 @@ pub(crate) fn prepare_visibility_buffers(
                 view_formats: &[],
             },
         );
+        // Screen-space GI exports written alongside `scene_color` by the
+        // resolve pass. STORAGE_BINDING: written by the resolve compute pass;
+        // TEXTURE_BINDING: sampled by the SSGI trace (ambient) and composite
+        // (albedo). Allocated unconditionally so the resolve bind group is
+        // always valid; the SSGI pass reads them only when GI is active.
+        let ssgi_ambient = texture_cache.get(
+            &device,
+            TextureDescriptor {
+                label: Some("prism SSGI ambient export"),
+                size: size.to_extents(),
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: TextureDimension::D2,
+                format: SCENE_COLOR_FORMAT,
+                usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+        );
+        let ssgi_albedo = texture_cache.get(
+            &device,
+            TextureDescriptor {
+                label: Some("prism SSGI albedo export"),
+                size: size.to_extents(),
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: TextureDimension::D2,
+                format: SCENE_COLOR_FORMAT,
+                usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+        );
         commands.entity(entity).insert(ViewVisibilityBuffer {
             ids,
             metadata,
@@ -298,6 +348,8 @@ pub(crate) fn prepare_visibility_buffers(
             ssr_env_specular,
             ssr_spec_weight,
             motion_vectors,
+            ssgi_ambient,
+            ssgi_albedo,
             size,
         });
     }

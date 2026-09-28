@@ -190,6 +190,14 @@ struct MotionMatrices {
 // into clip space for the motion vector. A 128-byte uniform block (two mat4x4)
 // rather than the 32-byte `var<immediate>` push-constant, which has no room.
 @group(0) @binding(11) var<uniform> motion_matrices: MotionMatrices;
+// Screen-space GI exports written every covered pixel, consumed by the SSGI
+// trace + composite. ssgi_ambient = the pre-albedo diffuse *irradiance* the
+// hemisphere gather blends misses toward (so SSGI never darkens the ambient).
+// ssgi_albedo = the Lambertian albedo (`base_color * (1 - metallic)`) the
+// composite multiplies the pre-albedo SSGI radiance by before blending it over
+// the IBL diffuse under the pass's confidence.
+@group(0) @binding(12) var ssgi_ambient: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(13) var ssgi_albedo: texture_storage_2d<rgba16float, write>;
 
 // --- group 1: material tables (shared MaterialBindGroup layout) ---
 @group(1) @binding(0) var<storage, read> material_headers: array<PrismMaterialHeader>;
@@ -400,6 +408,13 @@ struct IndirectResult {
     total: vec3<f32>,
     env_specular: vec3<f32>,
     spec_weight: vec3<f32>,
+    // Pre-albedo diffuse *irradiance* term (the diffuse half of `total` divided
+    // out by the surface albedo), exported so screen-space GI can gather over
+    // the same ambient a missed ray would otherwise receive and the composite
+    // can subtract the IBL diffuse before substituting the SSGI bounce. Holds
+    // `env.ambient * occlusion` for the constant path and
+    // `irradiance * INV_PI * occlusion` for the image-based paths.
+    ambient_irradiance: vec3<f32>,
 }
 
 // Grazing-angle F0 for the surface, shared by every indirect path.
@@ -431,6 +446,10 @@ fn ambient_indirect(surface: SurfaceSample, frame: ShadingFrame, env: LightEnvir
     out.total = diffuse;
     out.env_specular = vec3<f32>(0.0);
     out.spec_weight = spec_weight;
+    // Pre-albedo ambient the SSGI gather blends misses toward: `env.ambient`
+    // weighted by occlusion (the `diffuse_weight`/base_color that make up the
+    // albedo are re-applied at composite, so they are left out here).
+    out.ambient_irradiance = env.ambient * occlusion;
     return out;
 }
 
@@ -460,6 +479,10 @@ fn image_based_sh(surface: SurfaceSample, frame: ShadingFrame, env: LightEnviron
     out.total = diffuse * occlusion + env_specular;
     out.env_specular = env_specular;
     out.spec_weight = spec_weight;
+    // Pre-albedo ambient: the cosine-convolved SH irradiance over PI, occluded.
+    // `diffuse = base_color * diffuse_weight * irradiance * INV_PI`, so dividing
+    // the albedo back out leaves `irradiance * INV_PI` (times occlusion).
+    out.ambient_irradiance = irradiance * INV_PI * occlusion;
     return out;
 }
 
@@ -514,6 +537,8 @@ fn image_based_prefiltered(
     out.total = diffuse * occlusion + env_specular;
     out.env_specular = env_specular;
     out.spec_weight = spec_weight;
+    // Pre-albedo ambient: identical diffuse lobe to the SH path.
+    out.ambient_irradiance = irradiance * INV_PI * occlusion;
     return out;
 }
 
@@ -1083,4 +1108,16 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
         motion = cur.xy - prev.xy;
     }
     textureStore(motion_vectors, coord, vec4<f32>(motion, 0.0, 0.0));
+
+    // Screen-space GI exports. The albedo is the diffuse Lambertian reflectance
+    // (`base_color * (1 - metallic)`), and `ambient_irradiance` is the diffuse
+    // half of the indirect term with that albedo divided out, so their product
+    // reconstructs exactly the IBL diffuse folded into `scene_color`. The SSGI
+    // trace gathers over `ssgi_ambient`; the composite multiplies its result by
+    // `ssgi_albedo` and blends it over `ssgi_albedo * ssgi_ambient` under the
+    // per-pixel confidence, leaving covered pixels energy-consistent on a miss.
+    let ssgi_diffuse_weight = 1.0 - clamp(lit.metallic, 0.0, 1.0);
+    let ssgi_lambert_albedo = lit.base_color * ssgi_diffuse_weight;
+    textureStore(ssgi_albedo, coord, vec4<f32>(ssgi_lambert_albedo, 0.0));
+    textureStore(ssgi_ambient, coord, vec4<f32>(indirect_result.ambient_irradiance, 0.0));
 }

@@ -86,7 +86,10 @@ pub(crate) struct ShadingResolvePipeline {
 /// Entry 10 is the write-only `Rg16Float` motion-vector G-buffer and entry 11
 /// the 128-byte current/previous view-projection uniform that projects it; both
 /// always bound because the resolve writes a motion vector for every pixel.
-fn view_layout_entries() -> BindGroupLayoutEntries<12> {
+///
+/// Entries 12-13 are the write-only SSGI exports (`ssgi_ambient`,
+/// `ssgi_albedo`); always bound because the resolve writes them every pixel.
+fn view_layout_entries() -> BindGroupLayoutEntries<14> {
     BindGroupLayoutEntries::sequential(
         ShaderStages::COMPUTE,
         (
@@ -106,6 +109,11 @@ fn view_layout_entries() -> BindGroupLayoutEntries<12> {
             texture_storage_2d(MOTION_VECTOR_FORMAT, StorageTextureAccess::WriteOnly),
             // 11: current/previous view-projection uniform (128 bytes).
             uniform_buffer_sized(false, None),
+            // 12-13: screen-space GI exports (pre-albedo ambient irradiance +
+            // Lambertian albedo), write-only storage the SSGI trace/composite
+            // sample; always bound because the resolve writes them every pixel.
+            texture_storage_2d(SCENE_COLOR_FORMAT, StorageTextureAccess::WriteOnly),
+            texture_storage_2d(SCENE_COLOR_FORMAT, StorageTextureAccess::WriteOnly),
         ),
     )
 }
