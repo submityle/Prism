@@ -25,13 +25,16 @@ mod film_grain;
 mod gamut_map;
 mod hair;
 mod halftone;
+mod hatching;
 mod kuwahara;
 mod lens_flare;
 mod light_routing;
 mod lighting;
 mod motion_blur;
 mod oit;
+mod ordered_dither;
 mod outline;
+mod posterize;
 mod punctual;
 mod resolve;
 mod screen_space;
@@ -99,6 +102,19 @@ pub use halftone::{
 pub use kuwahara::{
     apply_kuwahara, luminance as kuwahara_luminance, region_luma_variance, region_mean,
     select_min_variance, KuwaharaParams, KUWAHARA_LUMA_WEIGHTS,
+};
+pub use hatching::{
+    apply_hatching, hatch_coverage, line_coverage, luminance as hatching_luminance,
+    rotate2d as hatching_rotate2d, HatchingParams, HATCHING_LUMA_WEIGHTS,
+};
+pub use ordered_dither::{
+    apply_ordered_dither, bayer4x4_threshold, quantize as ordered_dither_quantize,
+    OrderedDitherParams, ORDERED_DITHER_BAYER_4X4,
+};
+pub use posterize::{
+    apply_posterize, luminance as posterize_luminance, quantize as posterize_quantize,
+    quantize_luma_preserving, quantize_rgb, PosterizeParams, POSTERIZE_LUMA_EPS,
+    POSTERIZE_LUMA_WEIGHTS,
 };
 pub use motion_blur::{
     clamp_velocity, cone, cylinder, neighbor_max, sample_weight, shutter_velocity,
