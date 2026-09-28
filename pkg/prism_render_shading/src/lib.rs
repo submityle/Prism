@@ -10,6 +10,8 @@ extern crate alloc;
 
 mod ao;
 mod bloom;
+mod cas;
+mod chromatic_aberration;
 mod classification;
 mod cluster;
 mod clearcoat;
@@ -19,6 +21,7 @@ mod dof;
 mod environment;
 mod exposure;
 mod face_shadow;
+mod film_grain;
 mod hair;
 mod light_routing;
 mod lighting;
@@ -37,6 +40,7 @@ mod tangent;
 mod tonemap;
 mod texture_sample;
 mod vecmath;
+mod vignette;
 mod visibility;
 mod volumetrics;
 mod water;
@@ -53,6 +57,24 @@ pub use ao::{
 pub use bloom::{
     combine, downsample_13tap, karis_average_weight, luminance as bloom_luminance,
     mip_blend_weights, prefilter, upsample_tent, BloomParams, BLOOM_LUMINANCE_WEIGHTS,
+};
+pub use cas::{
+    apply_cas, cas_amplitude, cas_blend_channel, cas_sharpen, cas_weight, max3, min3,
+    soft_max_channel, soft_min_channel, CasParams, Neighborhood,
+};
+pub use chromatic_aberration::{
+    apply_chromatic_aberration, channel_uv, combine_channels, radial_offset, sample_offsets,
+    spectral_lut, spectral_offset, ChromaticAberrationParams, CHROMATIC_ABERRATION_CHANNELS,
+    CHROMATIC_ABERRATION_EPSILON,
+};
+pub use film_grain::{
+    apply_grain, grain, grain_fract, grain_lerp, grain_luminance_weight, hash12,
+    luminance as film_grain_luminance, smoothstep as film_grain_smoothstep, FilmGrainParams,
+    FILM_GRAIN_LUMA_WEIGHTS,
+};
+pub use vignette::{
+    apply_vignette, apply_vignette_params, artistic_falloff, natural_falloff, natural_vignette,
+    vignette_factor, vignette_smoothstep, VignetteParams,
 };
 pub use motion_blur::{
     clamp_velocity, cone, cylinder, neighbor_max, sample_weight, shutter_velocity,
