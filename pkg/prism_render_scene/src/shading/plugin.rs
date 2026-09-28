@@ -25,6 +25,9 @@ use super::{
         ssr_color_mips_pass, ssr_composite_pass, ssr_hzb_pass, ssr_prepass_pass, ssr_reconstruct_pass,
         ssr_repack_pass, ssr_temporal_pass, ssr_trace_pass,
     },
+    taa::{
+        init_taa_resolve_pipeline, prepare_taa_bind_groups, prepare_taa_textures, taa_resolve_pass,
+    },
     ibl::{
         dfg_lut_precompute_pass, env_prefilter_precompute_pass, extract_ibl_source,
         init_brdf_lut_pipeline, init_dfg_lut_texture, init_env_prefilter_pipeline,
@@ -98,6 +101,7 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/ssr_resolve.wesl");
         embedded_asset!(app, "../shaders/ssr_temporal.wesl");
         embedded_asset!(app, "../shaders/ssr_composite.wesl");
+        embedded_asset!(app, "../shaders/taa_resolve.wesl");
         embedded_asset!(app, "../shaders/brdf_lut.wesl");
         embedded_asset!(app, "../shaders/env_prefilter.wesl");
         embedded_asset!(app, "../shaders/composite.wesl");
@@ -163,7 +167,9 @@ impl Plugin for PrismShadingPlugin {
                     init_ssr_trace_pipeline,
                     init_ssr_reconstruct_pipeline,
                     init_ssr_temporal_pipeline,
-                    init_ssr_composite_pipeline,
+                    // Nested to keep this RenderStartup tuple within Bevy's
+                    // 20-element limit.
+                    (init_ssr_composite_pipeline, init_taa_resolve_pipeline),
                     init_dfg_lut_texture,
                     init_brdf_lut_pipeline,
                     init_prefiltered_env_map,
@@ -283,6 +289,12 @@ impl Plugin for PrismShadingPlugin {
                     prepare_ssr_composite_bind_groups
                         .after(prepare_ssr_textures)
                         .in_set(RenderSystems::PrepareBindGroups),
+                    prepare_taa_textures
+                        .after(prepare_visibility_buffers)
+                        .in_set(RenderSystems::PrepareResources),
+                    prepare_taa_bind_groups
+                        .after(prepare_taa_textures)
+                        .in_set(RenderSystems::PrepareBindGroups),
                 ),
             )
             .add_systems(
@@ -336,9 +348,17 @@ impl Plugin for PrismShadingPlugin {
                 ssr_temporal_pass
                     .after(ssr_reconstruct_pass)
                     .before(bevy_core_pipeline::Core3dSystems::MainPass),
-                ssr_composite_pass
-                    .after(ssr_temporal_pass)
-                    .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                // Nested to keep the Core3d tuple within Bevy's 20-element
+                // limit: the SSR composite folds reflections into scene_color,
+                // then TAA resolves that composited buffer before the main pass.
+                (
+                    ssr_composite_pass
+                        .after(ssr_temporal_pass)
+                        .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                    taa_resolve_pass
+                        .after(ssr_composite_pass)
+                        .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                ),
                 composite_shading
                     .after(bevy_core_pipeline::Core3dSystems::MainPass)
                     .before(bevy_core_pipeline::Core3dSystems::PostProcess),

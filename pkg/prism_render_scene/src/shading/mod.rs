@@ -8,6 +8,7 @@ mod raster;
 mod resolve;
 mod shadow;
 mod ssr;
+mod taa;
 mod transparent;
 mod resources;
 mod runtime;

@@ -39,6 +39,14 @@ pub struct PrismShadingSettings {
     /// view-space normal the SSR trace consumes (there is no G-buffer). Off by
     /// default.
     pub enable_ssr: bool,
+    /// Enables the temporal anti-aliasing (TAA) resolve compute pass. Requires
+    /// the visibility buffer (for the composited `scene_color` and the
+    /// motion-vector G-buffer); the pass motion-reprojects and YCoCg-variance
+    /// blends the previous frame into the current one. Off by default. With no
+    /// camera jitter yet injected it is a conservative temporal denoise on a
+    /// static camera and a mild smoother under motion; the sub-pixel jitter
+    /// that turns it into full supersampling lands in a follow-up.
+    pub enable_taa: bool,
 }
 
 impl Default for PrismShadingSettings {
@@ -57,6 +65,7 @@ impl Default for PrismShadingSettings {
             ibl_dfg_sample_count: 1024,
             ibl_prefilter_sample_count: 256,
             enable_ssr: false,
+            enable_taa: false,
         }
     }
 }

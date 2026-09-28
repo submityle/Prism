@@ -45,20 +45,34 @@ pub(crate) fn prepare_shading_composite_bind_groups(
     pipeline: Res<ShadingCompositePipeline>,
     pipeline_cache: Res<PipelineCache>,
     device: Res<RenderDevice>,
-    views: Query<(Entity, Option<&ViewVisibilityBuffer>), With<ExtractedView>>,
+    views: Query<
+        (
+            Entity,
+            Option<&ViewVisibilityBuffer>,
+            Option<&super::super::taa::ViewTaa>,
+        ),
+        With<ExtractedView>,
+    >,
 ) {
     let layout = pipeline_cache.get_bind_group_layout(&pipeline.layout);
-    for (entity, visibility) in &views {
+    for (entity, visibility, taa) in &views {
         let Some(visibility) = visibility else {
             commands.entity(entity).remove::<ViewCompositeBindGroup>();
             continue;
         };
         let (ids, metadata) = visibility.attachments();
+        // When TAA resolved this frame it wrote the anti-aliased result into its
+        // ping-pong write slot; composite reads that in place of the raw
+        // `scene_color` so the presented image is the temporally resolved one.
+        let scene_color = match taa {
+            Some(taa) => taa.write_view(),
+            None => visibility.scene_color_view(),
+        };
         let bind_group = device.create_bind_group(
             "prism composite",
             &layout,
             // Order mirrors `composite.wesl`: scene_color(0), ids(1), metadata(2).
-            &BindGroupEntries::sequential((visibility.scene_color_view(), ids, metadata)),
+            &BindGroupEntries::sequential((scene_color, ids, metadata)),
         );
         commands
             .entity(entity)
