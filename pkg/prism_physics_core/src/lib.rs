@@ -76,6 +76,11 @@ pub use driver::fixed_step::{AdvanceReport, FixedStepPipeline};
 pub use driver::{CacheHandle, DriveMode, DriveOutcome, SimulationDriver};
 pub use dynamics::Integrator;
 pub use events::{ContactEventTracker, ContactPair, Observer, ObserverRegistry, PhysicsEvent};
+pub use fluid::{
+    advect, clamp_to_fluid_domain, grid_to_particle as fluid_grid_to_particle,
+    max_fluid_divergence, particle_to_grid as fluid_particle_to_grid, project, CellType,
+    FluidConfig, FluidSolver, MacGrid, MarkerParticles, TransferMode,
+};
 pub use island::{islands_from_pairs, IslandBuilder, IslandId, IslandSet};
 pub use joint::{
     AngleLimit, DistanceJoint, FixedJoint, Joint, JointAnchor, JointDesc, JointHandle, JointKind,
@@ -84,8 +89,16 @@ pub use joint::{
 pub use lod::{LodConfig, SpatialController, TemporalController};
 pub use math::scalar::{approx_eq, Real, EPSILON, PI, TAU};
 pub use math::transform::Isometry;
+pub use mpm::{
+    apply_grid_boundary, clamp_particles, cofactor, corotated_pf, corotated_piola,
+    grid_to_particle as mpm_grid_to_particle, hardening_factor,
+    particle_to_grid as mpm_particle_to_grid, polar_rotation, snow_return_mapping, svd3,
+    symmetric_eigen, BoundaryCondition, Grid, MaterialPoints, MpmConfig, MpmMaterial, MpmSolver,
+    PlasticUpdate, QuadraticWeights, SnowPlasticity, Svd3,
+};
 pub use pipeline::detect_contacts;
 pub use query::{PointProjection, QueryFilter, RayHit, SweepHit};
+pub use reconstruct::{triangulate, ScalarField, SurfaceMesh};
 pub use reduced::{
     ReducedConfig, ReducedMode, ReducedModel, ReducedState, SymmetricEigen, SymmetricMatrix,
 };

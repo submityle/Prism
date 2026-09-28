@@ -16,3 +16,26 @@
 //! grid, PIC/FLIP/APIC transfers, and pressure projection are implemented from
 //! standard, publicly documented computational-fluid-dynamics literature
 //! (Bridson, "Fluid Simulation for Computer Graphics"; Zhu & Bridson 2005).
+
+//! # Layout
+//!
+//! - [`config`] — solver parameters and the PIC/FLIP/APIC transfer mode.
+//! - [`mac_grid`] — the staggered MAC velocity grid and cell classification.
+//! - [`particle`] — the marker-particle Structure-of-Arrays store.
+//! - [`transfer`] — P2G / G2P transfers and RK2 advection.
+//! - [`pressure`] — the divergence-free pressure projection.
+//! - [`solver`] — the single-step driver.
+
+pub mod config;
+pub mod mac_grid;
+pub mod particle;
+pub mod pressure;
+pub mod solver;
+pub mod transfer;
+
+pub use config::{FluidConfig, TransferMode};
+pub use mac_grid::{CellType, MacGrid};
+pub use particle::MarkerParticles;
+pub use pressure::{max_fluid_divergence, project};
+pub use solver::FluidSolver;
+pub use transfer::{advect, clamp_to_fluid_domain, grid_to_particle, particle_to_grid};
