@@ -78,18 +78,32 @@ fn vertex(@builtin(vertex_index) vertex_index: u32) -> FullscreenVertexOutput {
     return out;
 }
 
-// group 0: the WBOIT targets plus the resolved opaque scene colour, all read by
-// integer textureLoad for a 1:1 pixel composite.
+// The source colour the composite pass emits so that fixed-function
+// SrcAlpha/OneMinusSrcAlpha blending over the view target reproduces
+// oit_resolve exactly, without the pass sampling the opaque background.
+// Returns rgb = normalised average colour, a = coverage (= 1 - revealage).
+// Mirrors OitAccumulation::composite_source on the CPU.
+fn oit_composite_source(accum: vec4<f32>, revealage: f32) -> vec4<f32> {
+    let normaliser = max(accum.a, OIT_ACCUM_EPSILON);
+    let average = accum.rgb / normaliser;
+    let reveal = clamp(revealage, 0.0, 1.0);
+    return vec4<f32>(average, 1.0 - reveal);
+}
+
+// group 0: the two WBOIT targets the transparent forward pass wrote, read by
+// integer textureLoad for a 1:1 pixel composite. The opaque background is the
+// bound view target and is combined by fixed-function blending, not sampled.
 @group(0) @binding(0) var oit_accum: texture_2d<f32>;
 @group(0) @binding(1) var oit_revealage: texture_2d<f32>;
-@group(0) @binding(2) var scene_color: texture_2d<f32>;
 
+// Fullscreen composite: emit the blend source (average colour + coverage) so
+// the pipeline SrcAlpha/OneMinusSrcAlpha blend lays transparency over the
+// already-composited opaque view target. Pixels with no transparent coverage
+// emit coverage 0 and leave the target untouched.
 @fragment
 fn composite(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let coord = vec2<i32>(in.position.xy);
     let accum = textureLoad(oit_accum, coord, 0);
     let revealage = textureLoad(oit_revealage, coord, 0).r;
-    let background = textureLoad(scene_color, coord, 0).rgb;
-    let resolved = oit_resolve(accum, revealage, background);
-    return vec4<f32>(resolved, 1.0);
+    return oit_composite_source(accum, revealage);
 }

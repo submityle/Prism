@@ -127,6 +127,27 @@ impl OitAccumulation {
             average[2] * coverage + background[2] * reveal,
         ]
     }
+
+    /// The source colour the hardware-blended composite pass emits so that
+    /// `SrcAlpha`/`OneMinusSrcAlpha` blending over the opaque background
+    /// reproduces [`resolve`](Self::resolve) exactly, without the pass having
+    /// to sample the background itself.
+    ///
+    /// Returns `[average_r, average_g, average_b, coverage]` where
+    /// `coverage = 1 - revealage`.  Fixed-function blending then computes
+    /// `out = src.rgb * src.a + dst * (1 - src.a) = average * coverage +
+    /// background * revealage`, which is byte-for-byte the arithmetic in
+    /// [`resolve`](Self::resolve).
+    pub fn composite_source(&self) -> [f32; 4] {
+        let normaliser = self.accum[3].max(ACCUM_EPSILON);
+        let reveal = self.revealage.clamp(0.0, 1.0);
+        [
+            self.accum[0] / normaliser,
+            self.accum[1] / normaliser,
+            self.accum[2] / normaliser,
+            1.0 - reveal,
+        ]
+    }
 }
 
 /// Convenience: accumulates a slice of fragments and resolves them over a
@@ -232,5 +253,44 @@ mod tests {
             [0.1, 0.2, 0.3],
         );
         assert!(approx(result, [0.1, 0.2, 0.3], 1.0e-5), "{result:?}");
+    }
+
+    #[test]
+    fn composite_source_matches_resolve_under_fixed_function_blend() {
+        // The GPU composites transparency with fixed-function
+        // SrcAlpha/OneMinusSrcAlpha blending over the view target instead of
+        // sampling the background in the shader.  Emulate that blend and prove
+        // it reproduces resolve() bit-for-bit for several stacks/backgrounds.
+        let stacks: [&[OitFragment]; 3] = [
+            &[],
+            &[OitFragment::new([0.9, 0.1, 0.2], 0.4, 3.0)],
+            &[
+                OitFragment::new([0.9, 0.1, 0.2], 0.4, 3.0),
+                OitFragment::new([0.1, 0.8, 0.3], 0.6, 9.0),
+                OitFragment::new([0.2, 0.2, 0.9], 0.5, 30.0),
+            ],
+        ];
+        for background in [[0.05, 0.05, 0.05], [0.2, 0.4, 0.6], [0.0, 0.0, 0.0]] {
+            for fragments in stacks {
+                let mut acc = OitAccumulation::CLEAR;
+                for &fragment in fragments {
+                    acc.accumulate(fragment);
+                }
+                let src = acc.composite_source();
+                let coverage = src[3];
+                // out = src.rgb * src.a + dst * (1 - src.a)
+                let blended = [
+                    src[0] * coverage + background[0] * (1.0 - coverage),
+                    src[1] * coverage + background[1] * (1.0 - coverage),
+                    src[2] * coverage + background[2] * (1.0 - coverage),
+                ];
+                let resolved = acc.resolve(background);
+                assert!(
+                    approx(blended, resolved, 1.0e-6),
+                    "blend {blended:?} != resolve {resolved:?}"
+                );
+                assert!((0.0..=1.0).contains(&coverage), "coverage {coverage} out of range");
+            }
+        }
     }
 }

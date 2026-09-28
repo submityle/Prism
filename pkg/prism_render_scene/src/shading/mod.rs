@@ -5,6 +5,7 @@ mod plugin;
 mod raster;
 mod resolve;
 mod shadow;
+mod transparent;
 mod resources;
 mod runtime;
 

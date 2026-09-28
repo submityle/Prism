@@ -21,6 +21,11 @@ use super::{
         dispatch_shading_resolve, init_shading_resolve_pipeline,
         prepare_shading_resolve_bind_groups,
     },
+    transparent::{
+        clear_oit_targets, init_oit_composite_pipeline, oit_composite,
+        prepare_oit_composite_bind_groups, prepare_oit_composite_pipelines, prepare_oit_targets,
+        OitCompositePipeline,
+    },
     shadow::{
         ensure_shadow_atlas, extract_shadows, init_shadow_depth_pipeline, prepare_shadow_bind_group,
         prepare_shadow_depth_uniform, queue_shadow_depth, rebuild_shadow_buffers,
@@ -59,6 +64,7 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/shadow.wesl");
         embedded_asset!(app, "../shaders/shading_resolve.wesl");
         embedded_asset!(app, "../shaders/composite.wesl");
+        embedded_asset!(app, "../shaders/oit.wesl");
         register_shadow_depth_shader(app);
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
@@ -74,6 +80,7 @@ impl Plugin for PrismShadingPlugin {
             .init_resource::<ShadowDepthDrawList>()
             .init_resource::<ShadowDepthViewOffsets>()
             .init_gpu_resource::<SpecializedRenderPipelines<ShadingCompositePipeline>>()
+            .init_gpu_resource::<SpecializedRenderPipelines<OitCompositePipeline>>()
             .init_resource::<PrismShadingSettings>()
             .init_resource::<PrismShadingDiagnostics>()
             .insert_resource(ShadowAtlasConfig::new(
@@ -99,6 +106,7 @@ impl Plugin for PrismShadingPlugin {
                         .after(init_gpu_resource::<ShadowBindGroup>)
                         .after(init_gpu_resource::<crate::ClusterBindGroup>),
                     init_shading_composite_pipeline,
+                    init_oit_composite_pipeline,
                 ),
             )
             .add_systems(
@@ -125,9 +133,15 @@ impl Plugin for PrismShadingPlugin {
                         .after(super::super::visibility::systems::build_unified_visibility)
                         .in_set(RenderSystems::PrepareResources),
                     prepare_visibility_buffers.in_set(RenderSystems::PrepareResources),
+                    prepare_oit_targets
+                        .after(prepare_visibility_buffers)
+                        .in_set(RenderSystems::PrepareResources),
                     prepare_shading_buffers.in_set(RenderSystems::PrepareResources),
                     prepare_shading_composite_pipelines
                         .after(prepare_visibility_buffers)
+                        .in_set(RenderSystems::Prepare),
+                    prepare_oit_composite_pipelines
+                        .after(prepare_oit_targets)
                         .in_set(RenderSystems::Prepare),
                     prepare_material_classification_bind_groups
                         .in_set(RenderSystems::PrepareBindGroups),
@@ -141,6 +155,8 @@ impl Plugin for PrismShadingPlugin {
                         .after(write_shadow_buffers)
                         .in_set(RenderSystems::PrepareBindGroups),
                     prepare_shading_composite_bind_groups
+                        .in_set(RenderSystems::PrepareBindGroups),
+                    prepare_oit_composite_bind_groups
                         .in_set(RenderSystems::PrepareBindGroups),
                     queue_visibility_raster.in_set(RenderSystems::QueueMeshes),
                     queue_shadow_depth.in_set(RenderSystems::QueueMeshes),
@@ -163,6 +179,12 @@ impl Plugin for PrismShadingPlugin {
                     .before(bevy_core_pipeline::Core3dSystems::MainPass),
                 composite_shading
                     .after(bevy_core_pipeline::Core3dSystems::MainPass)
+                    .before(bevy_core_pipeline::Core3dSystems::PostProcess),
+                clear_oit_targets
+                    .after(dispatch_shading_resolve)
+                    .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                oit_composite
+                    .after(composite_shading)
                     .before(bevy_core_pipeline::Core3dSystems::PostProcess),
             ),
         );
