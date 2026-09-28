@@ -13,6 +13,10 @@ use super::{
         init_gtao_prepass_pipeline, prepare_gtao_kernel_bind_groups,
         prepare_gtao_prepass_bind_groups, prepare_gtao_textures,
     },
+    ibl::{
+        dfg_lut_precompute_pass, init_brdf_lut_pipeline, init_dfg_lut_texture,
+        prepare_dfg_lut_bind_group,
+    },
     classification_gpu::{
         dispatch_material_classification, init_material_classification_pipeline,
         prepare_material_classification_bind_groups,
@@ -71,6 +75,7 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/shading_resolve.wesl");
         embedded_asset!(app, "../shaders/gtao_prepass.wesl");
         embedded_asset!(app, "../shaders/gtao.wesl");
+        embedded_asset!(app, "../shaders/brdf_lut.wesl");
         embedded_asset!(app, "../shaders/composite.wesl");
         embedded_asset!(app, "../shaders/oit.wesl");
         embedded_asset!(app, "../shaders/transparent.wesl");
@@ -123,6 +128,8 @@ impl Plugin for PrismShadingPlugin {
                     init_oit_composite_pipeline,
                     init_gtao_prepass_pipeline,
                     init_gtao_kernel_pipeline,
+                    init_dfg_lut_texture,
+                    init_brdf_lut_pipeline,
                 ),
             )
             .add_systems(
@@ -194,6 +201,10 @@ impl Plugin for PrismShadingPlugin {
                     .after(prepare_gtao_textures)
                     .in_set(RenderSystems::PrepareBindGroups),
             )
+            .add_systems(
+                Render,
+                prepare_dfg_lut_bind_group.in_set(RenderSystems::PrepareBindGroups),
+            )
             .add_systems(ExtractSchedule, extract_shadows);
         render_app.add_systems(
             bevy_core_pipeline::Core3d,
@@ -209,6 +220,7 @@ impl Plugin for PrismShadingPlugin {
                 gtao_compute_pass
                     .after(gtao_prepass_pass)
                     .before(dispatch_shading_resolve),
+                dfg_lut_precompute_pass.before(dispatch_shading_resolve),
                 dispatch_shading_resolve
                     .after(dispatch_material_classification)
                     .before(bevy_core_pipeline::Core3dSystems::MainPass),

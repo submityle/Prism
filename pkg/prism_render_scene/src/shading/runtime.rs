@@ -23,6 +23,13 @@ pub struct PrismShadingSettings {
     /// GTAO marched samples per side per slice (clamped `>= 1`). More steps
     /// catch thinner horizons.
     pub gtao_steps_per_slice: u32,
+    /// Enables image-based lighting: precomputes the split-sum environment
+    /// BRDF ("DFG") table so the resolve stage can reconstruct specular
+    /// reflectance from prefiltered radiance. Off by default.
+    pub enable_ibl: bool,
+    /// GGX importance samples integrated per DFG-table texel (clamped `>= 1`).
+    /// More samples reduce the table's high-roughness noise at one-time cost.
+    pub ibl_dfg_sample_count: u32,
 }
 
 impl Default for PrismShadingSettings {
@@ -37,6 +44,8 @@ impl Default for PrismShadingSettings {
             gtao_power: 1.0,
             gtao_slice_count: 4,
             gtao_steps_per_slice: 8,
+            enable_ibl: false,
+            ibl_dfg_sample_count: 1024,
         }
     }
 }
