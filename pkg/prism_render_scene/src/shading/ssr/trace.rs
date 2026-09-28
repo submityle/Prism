@@ -49,12 +49,21 @@ use bevy_shader::Shader;
 use super::abi::{GpuSsrConfig, SSR_WORKGROUP_SIZE};
 use super::resources::{ViewSsrTextures, SSR_OUT_FORMAT};
 
+/// GGX importance-sampled reflection rays traced per pixel.
+///
+/// Smooth surfaces collapse every sample onto the mirror direction, so this is
+/// effectively a single ray there; rougher surfaces spread the samples across
+/// the GGX lobe. Eight balances lobe coverage against the per-ray hierarchical
+/// march cost ahead of the spatial-reconstruction stage that will let the count
+/// drop again.
+const SSR_SAMPLE_COUNT: u32 = 8;
+
 /// Compute pipeline, its owned group-0 layout, and the filtering sampler the
 /// trace reads the colour pyramid through.
 #[derive(Resource)]
 pub(crate) struct SsrTracePipeline {
     /// `trace_ssr` compute entry point, specialized against the group-0 layout
-    /// and the 176-byte [`GpuSsrConfig`] immediate block.
+    /// and the 192-byte [`GpuSsrConfig`] immediate block.
     trace: CachedComputePipelineId,
     /// group 0: Hi-Z + depth + `normal_roughness` reads, colour pyramid + its
     /// sampler, and the write-only reflection output.
@@ -213,6 +222,7 @@ pub(crate) fn ssr_trace_pass(
         max_distance,
         size,
         color_max_mip,
+        SSR_SAMPLE_COUNT,
     );
 
     let workgroups_x = size.x.div_ceil(SSR_WORKGROUP_SIZE);

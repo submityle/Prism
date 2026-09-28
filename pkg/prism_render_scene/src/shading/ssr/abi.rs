@@ -143,9 +143,10 @@ impl GpuSsrRepackParams {
 /// full-resolution framebuffer extent.
 ///
 /// The two `mat4x4<f32>` fields (64 B each, offsets 0 and 64) precede the
-/// scalars; `screen_size` (a `vec2<f32>`) lands at offset 168, already 8-byte
-/// aligned, and the block ends at 176 bytes — a multiple of the 16-byte
-/// immediate alignment WGSL requires, so no trailing pad is needed.
+/// scalars; `screen_size` (a `vec2<f32>`) lands at offset 168 and
+/// `sample_count` at offset 176. The trailing `_pad0..2` round the block up to
+/// 192 bytes, a multiple of the 16-byte immediate alignment the `mat4x4`
+/// fields force on the struct.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq)]
 pub(crate) struct GpuSsrConfig {
@@ -175,15 +176,29 @@ pub(crate) struct GpuSsrConfig {
     pub color_max_mip: f32,
     /// Full-resolution framebuffer extent in texels.
     pub screen_size: [f32; 2],
+    /// Number of GGX importance-sampled reflection rays traced per pixel.
+    ///
+    /// `1` degenerates to a single mirror ray (the smooth-surface case);
+    /// higher counts sample the GGX lobe for rougher reflections. The
+    /// [`prism_render_shading::screen_space`] Hammersley sequence drives the
+    /// same directions on the CPU golden so both stay reproducible.
+    pub sample_count: u32,
+    /// Padding to the 16-byte immediate alignment (the `mat4x4` fields force a
+    /// 16-byte struct alignment, rounding the block up from 180 to 192 bytes).
+    pub _pad0: u32,
+    /// Padding to the 16-byte immediate alignment.
+    pub _pad1: u32,
+    /// Padding to the 16-byte immediate alignment.
+    pub _pad2: u32,
 }
 
 impl GpuSsrConfig {
     /// Builds the trace config from the view matrices and framebuffer extent,
     /// folding in the golden `SsrConfidenceParams`/`SsrMarchConfig` defaults from
     /// [`prism_render_shading::screen_space`] so the GPU march agrees with the
-    /// CPU reference. Both matrices upload column-major (via
-    /// [`Mat4::to_cols_array`]) so the WGSL `mat4x4<f32>` multiply matches
-    /// byte-for-byte.
+    /// CPU reference. `sample_count` is clamped to at least one ray. Both
+    /// matrices upload column-major (via [`Mat4::to_cols_array`]) so the WGSL
+    /// `mat4x4<f32>` multiply matches byte-for-byte.
     pub(crate) fn from_view(
         clip_from_view: Mat4,
         view_from_clip: Mat4,
@@ -191,6 +206,7 @@ impl GpuSsrConfig {
         max_distance: f32,
         screen_size: bevy_math::UVec2,
         color_max_mip: f32,
+        sample_count: u32,
     ) -> Self {
         Self {
             clip_from_view: clip_from_view.to_cols_array(),
@@ -208,6 +224,10 @@ impl GpuSsrConfig {
             most_detailed_mip: 0,
             color_max_mip: color_max_mip.max(0.0),
             screen_size: [screen_size.x as f32, screen_size.y as f32],
+            sample_count: sample_count.max(1),
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
         }
     }
 }
@@ -304,10 +324,11 @@ mod tests {
 
     #[test]
     fn config_matches_the_shader_immediate_layout() {
-        // Two mat4x4 (128) + ten scalars (40) + a vec2<f32> (8) = 176 bytes,
-        // already a multiple of the 16-byte immediate alignment (screen_size
-        // lands 8-byte aligned at offset 168), so no trailing pad is needed.
-        assert_eq!(size_of::<GpuSsrConfig>(), 176);
+        // Two mat4x4 (128) + ten scalars (40) + a vec2<f32> (8) fill 176 bytes;
+        // sample_count (offset 176) plus three u32 pads round the block up to
+        // 192 bytes, a multiple of the 16-byte immediate alignment the mat4x4
+        // fields force on the struct.
+        assert_eq!(size_of::<GpuSsrConfig>(), 192);
         assert_eq!(align_of::<GpuSsrConfig>(), 4);
     }
 
@@ -321,7 +342,7 @@ mod tests {
             31.0, 32.0,
         ]);
         let config =
-            GpuSsrConfig::from_view(clip, inv, 0.5, 100.0, bevy_math::UVec2::new(1920, 1080), 7.0);
+            GpuSsrConfig::from_view(clip, inv, 0.5, 100.0, bevy_math::UVec2::new(1920, 1080), 7.0, 8);
         assert_eq!(config.clip_from_view, clip.to_cols_array());
         assert_eq!(config.view_from_clip, inv.to_cols_array());
         assert_eq!(config.near, 0.5);
@@ -336,6 +357,19 @@ mod tests {
         assert_eq!(config.most_detailed_mip, 0);
         assert_eq!(config.color_max_mip, 7.0);
         assert_eq!(config.screen_size, [1920.0, 1080.0]);
+        assert_eq!(config.sample_count, 8);
+        // sample_count is clamped to at least one ray so a zero request still
+        // traces the mirror direction rather than dividing by an empty weight.
+        let single = GpuSsrConfig::from_view(
+            clip,
+            inv,
+            0.5,
+            100.0,
+            bevy_math::UVec2::new(1920, 1080),
+            7.0,
+            0,
+        );
+        assert_eq!(single.sample_count, 1);
     }
 
     #[test]

@@ -35,6 +35,8 @@ struct SsrConfig {
     color_max_mip: f32,
     // Full-resolution framebuffer extent in texels.
     screen_size: vec2<f32>,
+    // Number of GGX importance-sampled reflection rays traced per pixel.
+    sample_count: u32,
 }
 
 // Reverse-Z "nearest depth" pyramid (per-cell max device depth over its mips).
@@ -67,6 +69,67 @@ fn smoothstep_ref(edge0: f32, edge1: f32, x: f32) -> f32 {
 // Reflect an incident direction about a unit normal.
 fn reflect_ref(incident: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
     return incident - 2.0 * dot(incident, normal) * normal;
+}
+
+const PI: f32 = 3.1415926535897932;
+
+// Van der Corput radical inverse in base 2 (golden `radical_inverse_vdc`).
+// WGSL has no rotate builtin, so the 16-bit swap is spelled with explicit
+// shifts; the remaining bit-pair reversals match the CPU twin exactly.
+fn radical_inverse_vdc(bits_in: u32) -> f32 {
+    var bits = (bits_in << 16u) | (bits_in >> 16u);
+    bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);
+    bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xCCCCCCCCu) >> 2u);
+    bits = ((bits & 0x0F0F0F0Fu) << 4u) | ((bits & 0xF0F0F0F0u) >> 4u);
+    bits = ((bits & 0x00FF00FFu) << 8u) | ((bits & 0xFF00FF00u) >> 8u);
+    return f32(bits) * 2.3283064365386963e-10; // 1 / 2^32
+}
+
+// The i-th point of the n-point Hammersley set (golden `hammersley`).
+fn hammersley(i: u32, n: u32) -> vec2<f32> {
+    let x = select(f32(i) / f32(n), 0.0, n == 0u);
+    return vec2<f32>(x, radical_inverse_vdc(i));
+}
+
+struct Basis {
+    tangent: vec3<f32>,
+    bitangent: vec3<f32>,
+}
+
+// Duff et al. (2017) branch-light orthonormal basis (golden
+// `orthonormal_basis`); z axis is the unit normal.
+fn orthonormal_basis(normal: vec3<f32>) -> Basis {
+    let sign = select(-1.0, 1.0, normal.z >= 0.0);
+    let a = -1.0 / (sign + normal.z);
+    let b = normal.x * normal.y * a;
+    var basis: Basis;
+    basis.tangent = vec3<f32>(1.0 + sign * normal.x * normal.x * a, sign * b, -sign * normal.x);
+    basis.bitangent = vec3<f32>(b, sign + normal.y * normal.y * a, -normal.y);
+    return basis;
+}
+
+// GGX half-vector importance sample around `normal` (golden
+// `importance_sample_ggx`); returns a unit vector in the hemisphere.
+fn importance_sample_ggx(xi: vec2<f32>, roughness: f32, normal: vec3<f32>) -> vec3<f32> {
+    let alpha = max(roughness * roughness, 1.0e-4);
+    let phi = 2.0 * PI * xi.x;
+    let cos_theta = sqrt(max((1.0 - xi.y) / (1.0 + (alpha * alpha - 1.0) * xi.y), 0.0));
+    let sin_theta = sqrt(max(1.0 - cos_theta * cos_theta, 0.0));
+    let h_tangent = vec3<f32>(sin_theta * cos(phi), sin_theta * sin(phi), cos_theta);
+    let n = normalize(normal);
+    let basis = orthonormal_basis(n);
+    return normalize(basis.tangent * h_tangent.x + basis.bitangent * h_tangent.y + n * h_tangent.z);
+}
+
+// Smith GGX height-correlated visibility term (golden `smith_ggx_visibility`).
+fn smith_ggx_visibility(n_dot_v: f32, n_dot_l: f32, roughness: f32) -> f32 {
+    let alpha = max(roughness * roughness, 1.0e-4);
+    let a2 = alpha * alpha;
+    let nv = max(n_dot_v, 1.0e-4);
+    let nl = max(n_dot_l, 1.0e-4);
+    let lambda_v = nl * sqrt(nv * nv * (1.0 - a2) + a2);
+    let lambda_l = nv * sqrt(nl * nl * (1.0 - a2) + a2);
+    return 0.5 / max(lambda_v + lambda_l, 1.0e-8);
 }
 
 // Fade toward 0 near any screen border (golden `edge_fade`).
@@ -252,6 +315,64 @@ fn march_hierarchical(
     return result;
 }
 
+struct RayHit {
+    reflected: vec3<f32>,
+    confidence: f32,
+}
+
+// March one reflected ray and fold the confidence fades (golden
+// `trace_confidence`). `reflection` is the outgoing (view-space) direction;
+// `incident` is the view ray used by the facing fade. A miss or an early clip
+// returns zero radiance and zero confidence so the caller drops the sample.
+fn trace_reflection(
+    position_view: vec3<f32>,
+    incident: vec3<f32>,
+    reflection: vec3<f32>,
+    roughness: f32,
+) -> RayHit {
+    var out: RayHit;
+    out.reflected = vec3<f32>(0.0);
+    out.confidence = 0.0;
+
+    // Build the screen-space ray, clipping the far endpoint to the near plane.
+    var travel = max(config.max_distance, 1.0e-3);
+    var end_view = position_view + reflection * travel;
+    let plane = -config.near;
+    if end_view.z > plane {
+        let denom = reflection.z;
+        if abs(denom) <= 1.0e-6 {
+            return out;
+        }
+        let clipped = (plane - position_view.z) / denom;
+        if clipped <= 1.0e-4 {
+            return out;
+        }
+        travel = clipped;
+    }
+    let clipped_fraction = clamp(travel / max(config.max_distance, 1.0e-3), 1.0e-4, 1.0);
+    end_view = position_view + reflection * travel;
+
+    let start = project_view(position_view);
+    let end = project_view(end_view);
+    if start.clip_w <= 0.0 || end.clip_w <= 0.0 {
+        return out;
+    }
+
+    let march = march_hierarchical(start.uv, start.device_depth, end.uv, end.device_depth);
+    if march.hit {
+        let travel_norm = clamp(march.travel * clipped_fraction, 0.0, 1.0);
+        let edge = edge_fade(march.uv, config.edge_fade_start);
+        let facing = facing_fade(reflection, incident);
+        let rough = roughness_fade(roughness, config.full_roughness, config.max_roughness);
+        let dist = distance_fade(travel_norm, config.distance_fade_start);
+        out.confidence = saturate(edge * facing * rough * dist);
+
+        let lod = reflection_mip(roughness, config.color_max_mip);
+        out.reflected = textureSampleLevel(prev_color, prev_sampler, march.uv, lod).rgb;
+    }
+    return out;
+}
+
 @compute @workgroup_size(8, 8)
 fn trace_ssr(@builtin(global_invocation_id) id: vec3<u32>) {
     let pixel = vec2<i32>(id.xy);
@@ -274,50 +395,47 @@ fn trace_ssr(@builtin(global_invocation_id) id: vec3<u32>) {
 
     let position_view = reconstruct_view_position(uv, device_depth);
     let incident = normalize(position_view);
-    let reflection = normalize(reflect_ref(incident, normal_view));
+    // View direction points from the surface back toward the camera at origin.
+    let view_dir = -incident;
+    let n_dot_v = max(dot(normal_view, view_dir), 1.0e-4);
 
-    // Build the screen-space ray, clipping the far endpoint to the near plane.
-    var travel = max(config.max_distance, 1.0e-3);
-    var end_view = position_view + reflection * travel;
-    let plane = -config.near;
-    if end_view.z > plane {
-        let denom = reflection.z;
-        if abs(denom) <= 1.0e-6 {
-            textureStore(ssr_out, pixel, vec4<f32>(0.0, 0.0, 0.0, 0.0));
-            return;
+    // Sample the GGX specular lobe with a fixed Hammersley set (deterministic,
+    // matching the CPU golden), BRDF-weight each reflected hit and average.
+    // Smooth surfaces collapse every half-vector onto the normal, so this stays
+    // a single mirror ray there.
+    let sample_count = max(config.sample_count, 1u);
+    var color_accum = vec3<f32>(0.0);
+    var confidence_accum = 0.0;
+    var weight_sum = 0.0;
+
+    for (var i = 0u; i < sample_count; i = i + 1u) {
+        let xi = hammersley(i, sample_count);
+        let h = importance_sample_ggx(xi, roughness, normal_view);
+        let l = normalize(reflect_ref(incident, h));
+        let n_dot_l = dot(normal_view, l);
+        if n_dot_l <= 0.0 {
+            continue;
         }
-        let clipped = (plane - position_view.z) / denom;
-        if clipped <= 1.0e-4 {
-            textureStore(ssr_out, pixel, vec4<f32>(0.0, 0.0, 0.0, 0.0));
-            return;
+        let n_dot_h = max(dot(normal_view, h), 1.0e-4);
+        let v_dot_h = max(dot(view_dir, h), 1.0e-4);
+        // GGX importance-sampling weight: 4 * V * NoL * VoH / NoH (the D and the
+        // sampling pdf cancel, leaving the Smith visibility and geometry terms).
+        let vis = smith_ggx_visibility(n_dot_v, n_dot_l, roughness);
+        let weight = 4.0 * vis * n_dot_l * v_dot_h / n_dot_h;
+        if weight <= 0.0 {
+            continue;
         }
-        travel = clipped;
-    }
-    let clipped_fraction = clamp(travel / max(config.max_distance, 1.0e-3), 1.0e-4, 1.0);
-    end_view = position_view + reflection * travel;
-
-    let start = project_view(position_view);
-    let end = project_view(end_view);
-    if start.clip_w <= 0.0 || end.clip_w <= 0.0 {
-        textureStore(ssr_out, pixel, vec4<f32>(0.0, 0.0, 0.0, 0.0));
-        return;
+        let hit = trace_reflection(position_view, incident, l, roughness);
+        color_accum = color_accum + hit.reflected * weight;
+        confidence_accum = confidence_accum + hit.confidence * weight;
+        weight_sum = weight_sum + weight;
     }
 
-    let march = march_hierarchical(start.uv, start.device_depth, end.uv, end.device_depth);
-
-    // Confidence fades (golden `trace_confidence`).
-    var confidence = 0.0;
     var reflected = vec3<f32>(0.0);
-    if march.hit {
-        let travel_norm = clamp(march.travel * clipped_fraction, 0.0, 1.0);
-        let edge = edge_fade(march.uv, config.edge_fade_start);
-        let facing = facing_fade(reflection, incident);
-        let rough = roughness_fade(roughness, config.full_roughness, config.max_roughness);
-        let dist = distance_fade(travel_norm, config.distance_fade_start);
-        confidence = saturate(edge * facing * rough * dist);
-
-        let lod = reflection_mip(roughness, config.color_max_mip);
-        reflected = textureSampleLevel(prev_color, prev_sampler, march.uv, lod).rgb;
+    var confidence = 0.0;
+    if weight_sum > 0.0 {
+        reflected = color_accum / weight_sum;
+        confidence = saturate(confidence_accum / weight_sum);
     }
 
     textureStore(ssr_out, pixel, vec4<f32>(reflected, confidence));
