@@ -15,6 +15,8 @@
 //! * [`march`] — hierarchical (Hi-Z) depth-pyramid ray march.
 //! * [`sample`] — deterministic GGX importance sampling (Hammersley + NDF/
 //!   visibility) for the multi-ray rough-reflection lobe.
+//! * [`reconstruct`] — edge-aware spatial resolve that denoises the multi-ray
+//!   trace with a normal/depth/confidence bilateral kernel.
 //! * [`fade`] — edge/facing/roughness/distance confidence and the IBL blend.
 //!
 //! End to end, [`trace_screen_space_reflection`] runs the ray build and march
@@ -23,6 +25,7 @@
 mod fade;
 mod march;
 mod ray;
+mod reconstruct;
 mod sample;
 
 pub use fade::{
@@ -35,6 +38,9 @@ pub use march::{
 pub use ray::{
     build_screen_ray, project_view_to_screen, reflect, reverse_z_perspective, ScreenRay,
     ScreenSample, SsrCamera,
+};
+pub use reconstruct::{
+    resolve_geometry_weight, resolve_reflection, SsrResolveParams, SsrResolveSample,
 };
 pub use sample::{
     ggx_ndf, hammersley, importance_sample_ggx, radical_inverse_vdc, smith_ggx_visibility,

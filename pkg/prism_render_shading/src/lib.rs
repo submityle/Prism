@@ -58,11 +58,12 @@ pub use lighting::{
 pub use punctual::PunctualLight;
 pub use screen_space::{
     blend_specular, build_screen_ray, distance_fade, edge_fade, facing_fade, ggx_ndf, hammersley,
-    importance_sample_ggx, march_hierarchical, project_view_to_screen,
-    radical_inverse_vdc, reflect, reflection_mip, reverse_z_perspective, roughness_fade,
-    smith_ggx_visibility, smoothstep, trace_confidence, trace_screen_space_reflection,
-    DepthPyramid, ScreenRay, ScreenSample, ScreenSpaceReflection, SsrCamera, SsrConfidenceParams,
-    SsrMarchConfig, SsrMarchResult, SsrTraceSample,
+    importance_sample_ggx, march_hierarchical, project_view_to_screen, radical_inverse_vdc,
+    reflect, reflection_mip, resolve_geometry_weight, resolve_reflection, reverse_z_perspective,
+    roughness_fade, smith_ggx_visibility, smoothstep, trace_confidence,
+    trace_screen_space_reflection, DepthPyramid, ScreenRay, ScreenSample, ScreenSpaceReflection,
+    SsrCamera, SsrConfidenceParams, SsrMarchConfig, SsrMarchResult, SsrResolveParams,
+    SsrResolveSample, SsrTraceSample,
 };
 pub use shadow::{
     allocate_shadow_atlas, apply_normal_offset, blocker_search, cascade_blend_weight,
