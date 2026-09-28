@@ -30,6 +30,10 @@ pub struct PrismShadingSettings {
     /// GGX importance samples integrated per DFG-table texel (clamped `>= 1`).
     /// More samples reduce the table's high-roughness noise at one-time cost.
     pub ibl_dfg_sample_count: u32,
+    /// GGX importance samples convolved per prefiltered-radiance texel
+    /// (clamped `>= 1`). More samples reduce speckle in glossy reflections
+    /// at one-time cost; the convolution reruns only when the probe changes.
+    pub ibl_prefilter_sample_count: u32,
 }
 
 impl Default for PrismShadingSettings {
@@ -46,6 +50,7 @@ impl Default for PrismShadingSettings {
             gtao_steps_per_slice: 8,
             enable_ibl: false,
             ibl_dfg_sample_count: 1024,
+            ibl_prefilter_sample_count: 256,
         }
     }
 }

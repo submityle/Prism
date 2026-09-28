@@ -14,8 +14,10 @@ use super::{
         prepare_gtao_prepass_bind_groups, prepare_gtao_textures,
     },
     ibl::{
-        dfg_lut_precompute_pass, init_brdf_lut_pipeline, init_dfg_lut_texture,
-        prepare_dfg_lut_bind_group,
+        dfg_lut_precompute_pass, env_prefilter_precompute_pass, extract_ibl_source,
+        init_brdf_lut_pipeline, init_dfg_lut_texture, init_env_prefilter_pipeline,
+        init_prefiltered_env_map, prepare_dfg_lut_bind_group,
+        prepare_env_prefilter_bind_groups, EnvPrefilterBindGroups, ExtractedIblSource,
     },
     classification_gpu::{
         dispatch_material_classification, init_material_classification_pipeline,
@@ -76,6 +78,7 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/gtao_prepass.wesl");
         embedded_asset!(app, "../shaders/gtao.wesl");
         embedded_asset!(app, "../shaders/brdf_lut.wesl");
+        embedded_asset!(app, "../shaders/env_prefilter.wesl");
         embedded_asset!(app, "../shaders/composite.wesl");
         embedded_asset!(app, "../shaders/oit.wesl");
         embedded_asset!(app, "../shaders/transparent.wesl");
@@ -106,6 +109,8 @@ impl Plugin for PrismShadingPlugin {
             ))
             .init_resource::<ExtractedShadows>()
             .init_resource::<PrismShadowSettings>()
+            .init_resource::<ExtractedIblSource>()
+            .init_resource::<EnvPrefilterBindGroups>()
             .insert_resource(ShadingFrameGraph {
                 compiled: compiled_graph,
             })
@@ -130,6 +135,8 @@ impl Plugin for PrismShadingPlugin {
                     init_gtao_kernel_pipeline,
                     init_dfg_lut_texture,
                     init_brdf_lut_pipeline,
+                    init_prefiltered_env_map,
+                    init_env_prefilter_pipeline,
                 ),
             )
             .add_systems(
@@ -203,9 +210,13 @@ impl Plugin for PrismShadingPlugin {
             )
             .add_systems(
                 Render,
-                prepare_dfg_lut_bind_group.in_set(RenderSystems::PrepareBindGroups),
+                (
+                    prepare_dfg_lut_bind_group.in_set(RenderSystems::PrepareBindGroups),
+                    prepare_env_prefilter_bind_groups
+                        .in_set(RenderSystems::PrepareBindGroups),
+                ),
             )
-            .add_systems(ExtractSchedule, extract_shadows);
+            .add_systems(ExtractSchedule, (extract_shadows, extract_ibl_source));
         render_app.add_systems(
             bevy_core_pipeline::Core3d,
             (
@@ -221,6 +232,7 @@ impl Plugin for PrismShadingPlugin {
                     .after(gtao_prepass_pass)
                     .before(dispatch_shading_resolve),
                 dfg_lut_precompute_pass.before(dispatch_shading_resolve),
+                env_prefilter_precompute_pass.before(dispatch_shading_resolve),
                 dispatch_shading_resolve
                     .after(dispatch_material_classification)
                     .before(bevy_core_pipeline::Core3dSystems::MainPass),
