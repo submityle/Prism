@@ -7,6 +7,7 @@ mod plugin;
 mod raster;
 mod resolve;
 mod shadow;
+mod ssgi;
 mod ssr;
 mod taa;
 mod transparent;
