@@ -24,6 +24,8 @@ mod face_shadow;
 mod film_grain;
 mod gamut_map;
 mod hair;
+mod halftone;
+mod kuwahara;
 mod lens_flare;
 mod light_routing;
 mod lighting;
@@ -89,6 +91,15 @@ pub use lens_flare::{
     smoothstep as lens_flare_smoothstep, threshold_prefilter, vignette_weight, LensFlareParams,
     LENS_FLARE_CENTER, LENS_FLARE_LUMINANCE_WEIGHTS,
 };
+pub use halftone::{
+    apply_halftone, cell_coord, dot_coverage, dot_radius_from_tone,
+    luminance as halftone_luminance, rotate2d, smoothstep as halftone_smoothstep, HalftoneParams,
+    HALFTONE_LUMA_WEIGHTS, HALFTONE_MAX_DOT_RADIUS,
+};
+pub use kuwahara::{
+    apply_kuwahara, luminance as kuwahara_luminance, region_luma_variance, region_mean,
+    select_min_variance, KuwaharaParams, KUWAHARA_LUMA_WEIGHTS,
+};
 pub use motion_blur::{
     clamp_velocity, cone, cylinder, neighbor_max, sample_weight, shutter_velocity,
     soft_depth_compare, tile_max, velocity_length, MotionBlurParams,
@@ -130,6 +141,7 @@ pub use punctual::PunctualLight;
 pub use screen_space::{
     accumulate_temporal, adaptive_history_weight, blend_specular, build_hemisphere_ray,
     build_screen_ray, clip_history_to_aabb, clip_history_to_aabb_ex, cosine_sample_direction,
+    denoise_ssgi, denoise_ssgi_pixel,
     distance_fade, edge_fade, expand_bounds, facing_fade, gather_indirect_diffuse, ggx_ndf,
     hammersley, importance_sample_ggx,
     march_hierarchical, motion_vector, project_view_to_screen, project_world_to_screen,
@@ -139,7 +151,8 @@ pub use screen_space::{
     reverse_z_perspective,
     roughness_fade, smith_ggx_visibility, smoothstep, trace_confidence,
     trace_indirect_ray, trace_screen_space_reflection, DepthPyramid, MotionSample, ScreenRay,
-    ScreenSample, ScreenSpaceReflection, SsgiGather, SsgiParams, SsgiRaySample,
+    ScreenSample, ScreenSpaceReflection, SsgiDenoiseBuffers, SsgiDenoiseConfig, SsgiGather,
+    SsgiParams, SsgiRaySample,
     SsrCamera, SsrConfidenceParams, SsrMarchConfig, SsrMarchResult, SsrResolveParams,
     variance_clip_box, ClipResult, SsrResolveSample, SsrTemporalParams, SsrTraceSample,
 };
