@@ -6,6 +6,7 @@ mod exposure;
 mod graph;
 mod ibl;
 mod light_routing;
+mod motion_blur;
 mod outline;
 mod plugin;
 mod raster;
