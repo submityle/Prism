@@ -18,6 +18,8 @@
 //! * [`reconstruct`] — edge-aware spatial resolve that denoises the multi-ray
 //!   trace with a normal/depth/confidence bilateral kernel.
 //! * [`fade`] — edge/facing/roughness/distance confidence and the IBL blend.
+//! * [`temporal`] — cross-frame reprojection + neighbourhood-clip accumulation
+//!   that averages the resolve over time to kill the multi-ray boil.
 //!
 //! End to end, [`trace_screen_space_reflection`] runs the ray build and march
 //! and hands the raw hit to the confidence stage the resolve pass consumes.
@@ -27,6 +29,7 @@ mod march;
 mod ray;
 mod reconstruct;
 mod sample;
+mod temporal;
 
 pub use fade::{
     blend_specular, distance_fade, edge_fade, facing_fade, reflection_mip, roughness_fade,
@@ -44,6 +47,9 @@ pub use reconstruct::{
 };
 pub use sample::{
     ggx_ndf, hammersley, importance_sample_ggx, radical_inverse_vdc, smith_ggx_visibility,
+};
+pub use temporal::{
+    accumulate_temporal, clip_history_to_aabb, expand_bounds, reproject_prev_uv, SsrTemporalParams,
 };
 
 use bevy_math::Vec3;
