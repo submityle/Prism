@@ -24,7 +24,10 @@
 use bevy_asset::{load_embedded_asset, AssetServer, Handle};
 use bevy_ecs::prelude::*;
 use bevy_material::{
-    bind_group_layout_entries::{binding_types::texture_2d, BindGroupLayoutEntries},
+    bind_group_layout_entries::{
+        binding_types::{storage_buffer_read_only_sized, texture_2d},
+        BindGroupLayoutEntries,
+    },
     descriptor::{
         BindGroupLayoutDescriptor, FragmentState, RenderPipelineDescriptor, VertexState,
     },
@@ -57,7 +60,8 @@ pub(crate) struct ShadingCompositeKey {
 #[derive(Resource)]
 pub(crate) struct ShadingCompositePipeline {
     /// group 0: `scene_color` (float) + `visibility_ids`/`visibility_metadata`
-    /// (uint), all sampled by integer `textureLoad`.  Stored as a descriptor so
+    /// (uint), all sampled by integer `textureLoad`, then the exposure-state
+    /// storage buffer (read-only) the fragment multiplies radiance by.  Stored as a descriptor so
     /// the concrete [`BindGroupLayout`](bevy_render::render_resource::BindGroupLayout)
     /// is resolved from the [`PipelineCache`] and can never drift from the
     /// pipeline it feeds.
@@ -73,16 +77,19 @@ pub(crate) struct ShadingCompositePipeline {
 #[derive(Component)]
 pub(crate) struct ViewCompositePipelineId(pub(crate) CachedRenderPipelineId);
 
-/// group-0 layout: the three resolve outputs, all fragment-visible textures.
-/// `scene_color` is a non-filterable float texture (integer `textureLoad`, no
-/// sampler); the two visibility targets are `u32` textures.
-fn composite_layout_entries() -> BindGroupLayoutEntries<3> {
+/// group-0 layout: the three resolve outputs (all fragment-visible textures)
+/// then the persistent exposure state. `scene_color` is a non-filterable float
+/// texture (integer `textureLoad`, no sampler); the two visibility targets are
+/// `u32` textures; the exposure state is a read-only storage buffer holding the
+/// eye-adaptation multiplier the fragment applies to radiance.
+fn composite_layout_entries() -> BindGroupLayoutEntries<4> {
     BindGroupLayoutEntries::sequential(
         ShaderStages::FRAGMENT,
         (
             texture_2d(TextureSampleType::Float { filterable: false }),
             texture_2d(TextureSampleType::Uint),
             texture_2d(TextureSampleType::Uint),
+            storage_buffer_read_only_sized(false, None),
         ),
     )
 }

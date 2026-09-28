@@ -10,10 +10,13 @@
 //! linear radiance into the view target; uncovered pixels are `discard`ed so
 //! the main pass' clear/background survives untouched.
 //!
-//! No tonemapping happens here: the value written is linear HDR radiance in the
-//! view target's working space, exactly what the downstream tonemapping node
-//! expects.  Keeping tonemapping in Bevy's node avoids double-mapping and lets
-//! the camera's configured tonemapper/exposure apply uniformly.
+//! The only shading applied here is the *pre-exposure* multiply: the resolved
+//! radiance is scaled by the eye-adaptation `adapted_exposure` the auto-exposure
+//! resolve pass wrote (a stationary `1.0` when auto-exposure is disabled).  No
+//! tonemapping happens here: the value written is linear pre-exposed HDR
+//! radiance in the view target's working space, exactly what the downstream
+//! tonemapping node expects.  Keeping tonemapping in Bevy's node avoids
+//! double-mapping and lets the camera's configured tonemapper apply uniformly.
 
 // Sentinel packed into the visibility targets for uncovered pixels. Matches
 // `VisibilityPixel::is_valid` on the CPU side and `VISIBILITY_BACKGROUND` in
@@ -46,6 +49,19 @@ fn vertex(@builtin(vertex_index) vertex_index: u32) -> FullscreenVertexOutput {
 @group(0) @binding(1) var visibility_ids: texture_2d<u32>;
 @group(0) @binding(2) var visibility_metadata: texture_2d<u32>;
 
+// Persistent per-view exposure state written by the auto-exposure resolve pass
+// (`exposure.wesl`). `adapted_exposure` is the eye-adaptation multiplier applied
+// to radiance before it reaches Bevy's tonemapping node; it stays a stationary
+// `1.0` when auto-exposure is disabled, so the multiply is a no-op then. The
+// three trailing fields mirror `ExposureState` in `exposure.wesl` byte-for-byte.
+struct ExposureState {
+    adapted_exposure: f32,
+    adapted_luminance: f32,
+    average_luminance: f32,
+    _pad0: f32,
+}
+@group(0) @binding(3) var<storage, read> exposure_state: ExposureState;
+
 @fragment
 fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let coord = vec2<i32>(in.position.xy);
@@ -57,7 +73,9 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     if ids.x == VISIBILITY_BACKGROUND || metadata.x == VISIBILITY_BACKGROUND {
         discard;
     }
-    // Linear HDR radiance; Bevy's tonemapping node maps it to the display.
-    let radiance = textureLoad(scene_color, coord, 0).rgb;
+    // Linear HDR radiance, pre-exposed by the eye-adaptation multiplier; Bevy's
+    // tonemapping node maps it to the display. When auto-exposure is disabled
+    // the multiplier is a stationary `1.0`, so this is a straight copy.
+    let radiance = textureLoad(scene_color, coord, 0).rgb * exposure_state.adapted_exposure;
     return vec4<f32>(radiance, 1.0);
 }

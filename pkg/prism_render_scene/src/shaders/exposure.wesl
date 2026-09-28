@@ -189,25 +189,129 @@ fn eye_adaptation_adapt(
     return current + (target_luminance - current) * factor;
 }
 
-// Minimal entry so the module type-checks as a standalone compute kernel under
-// the WESL compile test; the real auto-exposure passes wire histogram/adaptation
-// storage bindings later.
-@compute @workgroup_size(64, 1, 1)
-fn exposure_probe(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let min_log2 = -10.0;
-    let max_log2 = 12.0;
+// --- GPU passes ---
+//
+// Two compute entry points drive the auto-exposure loop; both reuse the pure
+// maths above so the CPU golden and the on-device kernel stay bit-aligned.
+// Following the SSGI-composite precedent the module declares the two passes'
+// distinct group-0 resources at overlapping binding slots — each entry only
+// touches a consistent subset, so per-entry-point validation accepts the
+// module even though the slots differ between passes.
 
-    var bins: array<u32, 64>;
-    for (var i = 0u; i < 64u; i = i + 1u) {
-        bins[i] = gid.x + i;
+const EXPOSURE_BIN_COUNT: u32 = 64u;
+
+// Immediate block for `build_histogram`. Mirrors `GpuExposureHistogramConfig`
+// (the histogram log2 window then the framebuffer extent).
+struct HistogramParams {
+    min_log2: f32,
+    max_log2: f32,
+    width: u32,
+    height: u32,
+}
+
+var<immediate> histogram_params: HistogramParams;
+
+// group 0 for the histogram build: the resolved HDR scene colour (read) and
+// the 64-bin log-luminance histogram (atomically accumulated).
+@group(0) @binding(0) var histogram_scene_color: texture_2d<f32>;
+@group(0) @binding(1) var<storage, read_write> histogram_bins: array<atomic<u32>, EXPOSURE_BIN_COUNT>;
+
+// One invocation per pixel: bin the pixel's Rec.709 luminance into the shared
+// log-luminance histogram. The per-pixel coverage guard drops the ragged tile
+// edge so out-of-bounds texels never bias the metering.
+@compute @workgroup_size(8, 8, 1)
+fn build_histogram(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (id.x >= histogram_params.width || id.y >= histogram_params.height) {
+        return;
+    }
+    let coord = vec2<i32>(i32(id.x), i32(id.y));
+    let rgb = textureLoad(histogram_scene_color, coord, 0).rgb;
+    let lum = exposure_luminance(rgb);
+    let bin = histogram_luminance_to_bin(
+        lum,
+        histogram_params.min_log2,
+        histogram_params.max_log2,
+        EXPOSURE_BIN_COUNT,
+    );
+    atomicAdd(&histogram_bins[bin], 1u);
+}
+
+// Immediate block for `resolve_exposure`. Mirrors `GpuExposureResolveConfig`
+// (the histogram window, the percentile trim, the auto-exposure clamp/comp and
+// the eye-adaptation speeds + frame delta).
+struct ResolveParams {
+    min_log2: f32,
+    max_log2: f32,
+    low_percent: f32,
+    high_percent: f32,
+    min_ev100: f32,
+    max_ev100: f32,
+    compensation_stops: f32,
+    speed_up: f32,
+    speed_down: f32,
+    delta_seconds: f32,
+    _pad0: f32,
+    _pad1: f32,
+}
+
+var<immediate> resolve_params: ResolveParams;
+
+// Persistent per-view exposure state, carried across frames so eye adaptation
+// integrates. `adapted_exposure` is the multiplier the composite applies;
+// `adapted_luminance` is the smoothed metered luminance the next frame eases
+// from; `average_luminance` is the raw metered value (diagnostic).
+struct ExposureState {
+    adapted_exposure: f32,
+    adapted_luminance: f32,
+    average_luminance: f32,
+    _pad0: f32,
+}
+
+// group 0 for the resolve: the histogram (read to reduce, then zeroed for the
+// next frame) and the persistent exposure state (read the prior adaptation,
+// write the new multiplier).
+@group(0) @binding(0) var<storage, read_write> resolve_bins: array<u32, EXPOSURE_BIN_COUNT>;
+@group(0) @binding(1) var<storage, read_write> resolve_state: ExposureState;
+
+// Single invocation: reduce the histogram to a percentile-trimmed average
+// luminance, ease the persistent eye-adaptation state toward it, resolve the
+// clamped/compensated exposure multiplier, and zero the histogram so the next
+// frame accumulates from empty.
+@compute @workgroup_size(1, 1, 1)
+fn resolve_exposure() {
+    var bins: array<u32, EXPOSURE_BIN_COUNT>;
+    for (var i = 0u; i < EXPOSURE_BIN_COUNT; i = i + 1u) {
+        bins[i] = resolve_bins[i];
     }
 
-    let lum = exposure_luminance(vec3<f32>(0.2, 0.5, 0.3));
-    let bin = histogram_luminance_to_bin(lum, min_log2, max_log2, 64u);
-    let avg = histogram_average_luminance(&bins, 64u, min_log2, max_log2, 0.5, 0.1);
-    let ev_cam = ev100_from_physical(16.0, 1.0 / 125.0, 100.0);
-    let exposure = auto_exposure_resolve_exposure(avg, -8.0, 16.0, 0.0);
-    let adapted = eye_adaptation_adapt(1.0, avg, 0.016, 3.0, 1.0);
+    let average = histogram_average_luminance(
+        &bins,
+        EXPOSURE_BIN_COUNT,
+        resolve_params.min_log2,
+        resolve_params.max_log2,
+        resolve_params.low_percent,
+        resolve_params.high_percent,
+    );
 
-    _ = bin + u32(lum + avg + ev_cam + exposure + adapted);
+    let adapted_luminance = eye_adaptation_adapt(
+        resolve_state.adapted_luminance,
+        average,
+        resolve_params.delta_seconds,
+        resolve_params.speed_up,
+        resolve_params.speed_down,
+    );
+    let exposure = auto_exposure_resolve_exposure(
+        adapted_luminance,
+        resolve_params.min_ev100,
+        resolve_params.max_ev100,
+        resolve_params.compensation_stops,
+    );
+
+    resolve_state.adapted_exposure = exposure;
+    resolve_state.adapted_luminance = adapted_luminance;
+    resolve_state.average_luminance = average;
+
+    for (var j = 0u; j < EXPOSURE_BIN_COUNT; j = j + 1u) {
+        resolve_bins[j] = 0u;
+    }
 }

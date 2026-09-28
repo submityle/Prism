@@ -89,6 +89,13 @@ pub struct PrismShadingSettings {
     /// confidence distance-fade tapers the tail so an over-long ray never
     /// hard-cuts.
     pub ssgi_max_distance: f32,
+    /// Enables the histogram auto-exposure + eye-adaptation compute passes.
+    /// Requires the visibility buffer (it meters the resolved HDR `scene_color`).
+    /// The per-view exposure state buffer is always created and always bound by
+    /// the composite, so when this is `false` the composite multiplies by a
+    /// stationary `1.0` and the metering/adaptation passes are skipped. Off by
+    /// default.
+    pub enable_exposure: bool,
 }
 
 impl Default for PrismShadingSettings {
@@ -119,6 +126,7 @@ impl Default for PrismShadingSettings {
             enable_ssgi: false,
             ssgi_sample_count: 8,
             ssgi_max_distance: 8.0,
+            enable_exposure: false,
         }
     }
 }

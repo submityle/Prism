@@ -51,6 +51,11 @@ use super::{
         prepare_shading_composite_bind_groups, prepare_shading_composite_pipelines,
         ShadingCompositePipeline,
     },
+    exposure::{
+        exposure_average_pass, exposure_histogram_pass, init_exposure_average_pipeline,
+        init_exposure_histogram_pipeline, prepare_exposure_average_bind_groups,
+        prepare_exposure_buffers, prepare_exposure_histogram_bind_groups,
+    },
     resolve::{
         dispatch_shading_resolve, init_shading_resolve_pipeline, prepare_resolve_motion,
         prepare_shading_resolve_bind_groups, ResolveMotionHistory,
@@ -116,6 +121,7 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/taa_resolve.wesl");
         embedded_asset!(app, "../shaders/brdf_lut.wesl");
         embedded_asset!(app, "../shaders/env_prefilter.wesl");
+        embedded_asset!(app, "../shaders/exposure.wesl");
         embedded_asset!(app, "../shaders/composite.wesl");
         embedded_asset!(app, "../shaders/oit.wesl");
         embedded_asset!(app, "../shaders/transparent.wesl");
@@ -195,6 +201,8 @@ impl Plugin for PrismShadingPlugin {
                         init_taa_resolve_pipeline,
                         init_ssgi_trace_pipeline,
                         init_ssgi_composite_pipeline,
+                        init_exposure_histogram_pipeline,
+                        init_exposure_average_pipeline,
                     ),
                     init_dfg_lut_texture,
                     init_brdf_lut_pipeline,
@@ -341,6 +349,19 @@ impl Plugin for PrismShadingPlugin {
                     prepare_taa_bind_groups
                         .after(prepare_taa_textures)
                         .in_set(RenderSystems::PrepareBindGroups),
+                    // Auto-exposure: the persistent state + histogram buffers
+                    // land in PrepareResources (after the visibility buffers so
+                    // the `scene_color` they meter exists), then both exposure
+                    // bind groups build in PrepareBindGroups off those buffers.
+                    prepare_exposure_buffers
+                        .after(prepare_visibility_buffers)
+                        .in_set(RenderSystems::PrepareResources),
+                    prepare_exposure_histogram_bind_groups
+                        .after(prepare_exposure_buffers)
+                        .in_set(RenderSystems::PrepareBindGroups),
+                    prepare_exposure_average_bind_groups
+                        .after(prepare_exposure_buffers)
+                        .in_set(RenderSystems::PrepareBindGroups),
                 ),
             )
             .add_systems(
@@ -438,6 +459,20 @@ impl Plugin for PrismShadingPlugin {
                     taa_resolve_pass
                         .after(ssr_composite_pass)
                         .after(ssgi_composite_pass)
+                        .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                ),
+                // Nested to keep the Core3d tuple within Bevy's 20-element
+                // limit: auto-exposure meters the fully composited HDR
+                // scene_color (after SSR/SSGI composite and TAA resolve), then a
+                // single-invocation resolve writes the eye-adaptation multiplier
+                // the composite applies, all before the main pass.
+                (
+                    exposure_histogram_pass
+                        .after(ssgi_composite_pass)
+                        .after(taa_resolve_pass)
+                        .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                    exposure_average_pass
+                        .after(exposure_histogram_pass)
                         .before(bevy_core_pipeline::Core3dSystems::MainPass),
                 ),
                 composite_shading

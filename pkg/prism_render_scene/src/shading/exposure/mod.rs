@@ -19,5 +19,19 @@
 //! each with its first live consumer so no committed ABI is dead, matching the
 //! SSR / SSGI / volumetrics precedent.
 
+mod abi;
+mod average;
+mod histogram;
+mod resources;
+
 #[cfg(test)]
 mod shader_tests;
+
+pub(crate) use average::{
+    exposure_average_pass, init_exposure_average_pipeline, prepare_exposure_average_bind_groups,
+};
+pub(crate) use histogram::{
+    exposure_histogram_pass, init_exposure_histogram_pipeline,
+    prepare_exposure_histogram_bind_groups,
+};
+pub(crate) use resources::{prepare_exposure_buffers, ViewExposureBuffers};

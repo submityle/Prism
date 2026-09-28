@@ -7,7 +7,11 @@
 //!   pass wrote (sampled as a non-filterable float texture),
 //! * binding 1 — `visibility_ids`, and
 //! * binding 2 — `visibility_metadata`, both integer targets the fragment
-//!   shader reads to distinguish covered pixels from the background sentinel.
+//!   shader reads to distinguish covered pixels from the background sentinel,
+//!   and
+//! * binding 3 — the persistent per-view exposure state (read-only storage),
+//!   whose `adapted_exposure` multiplier the fragment applies to the radiance
+//!   before writing it out (a stationary `1.0` when auto-exposure is disabled).
 //!
 //! The entry order here is byte-identical to the `@group(0) @binding(N)`
 //! declarations in `shaders/composite.wesl`, and the layout is fetched from the
@@ -26,6 +30,7 @@ use bevy_render::{
     view::ExtractedView,
 };
 
+use super::super::exposure::ViewExposureBuffers;
 use super::super::resources::ViewVisibilityBuffer;
 use super::pipeline::ShadingCompositePipeline;
 
@@ -50,13 +55,22 @@ pub(crate) fn prepare_shading_composite_bind_groups(
             Entity,
             Option<&ViewVisibilityBuffer>,
             Option<&super::super::taa::ViewTaa>,
+            Option<&ViewExposureBuffers>,
         ),
         With<ExtractedView>,
     >,
 ) {
     let layout = pipeline_cache.get_bind_group_layout(&pipeline.layout);
-    for (entity, visibility, taa) in &views {
+    for (entity, visibility, taa, exposure) in &views {
         let Some(visibility) = visibility else {
+            commands.entity(entity).remove::<ViewCompositeBindGroup>();
+            continue;
+        };
+        // The exposure state buffer is created for every view with a resident
+        // visibility buffer and a known viewport; if it has not landed yet (a
+        // view still without an extent on its first frame) there is nothing to
+        // composite this frame, so drop any stale bind group and wait.
+        let Some(exposure) = exposure else {
             commands.entity(entity).remove::<ViewCompositeBindGroup>();
             continue;
         };
@@ -71,8 +85,14 @@ pub(crate) fn prepare_shading_composite_bind_groups(
         let bind_group = device.create_bind_group(
             "prism composite",
             &layout,
-            // Order mirrors `composite.wesl`: scene_color(0), ids(1), metadata(2).
-            &BindGroupEntries::sequential((scene_color, ids, metadata)),
+            // Order mirrors `composite.wesl`: scene_color(0), ids(1),
+            // metadata(2), exposure_state(3).
+            &BindGroupEntries::sequential((
+                scene_color,
+                ids,
+                metadata,
+                exposure.state_buffer().as_entire_binding(),
+            )),
         );
         commands
             .entity(entity)
