@@ -16,6 +16,76 @@ use crate::{
     SurfaceReconstructionInput, SurfaceSample, TangentBasis, VisibilityPixel,
 };
 
+/// Identity `world_from_local` (row-major affine) used when an instance carries
+/// no transform; lifting a local-space surface through it is a no-op.
+pub const IDENTITY_WORLD_FROM_LOCAL: [[f32; 4]; 3] =
+    [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]];
+
+/// Transforms a point by a row-major affine `world_from_local` (three rows of
+/// `[m0, m1, m2, translation]`).
+fn affine_transform_point(m: &[[f32; 4]; 3], p: [f32; 3]) -> [f32; 3] {
+    [
+        m[0][0] * p[0] + m[0][1] * p[1] + m[0][2] * p[2] + m[0][3],
+        m[1][0] * p[0] + m[1][1] * p[1] + m[1][2] * p[2] + m[1][3],
+        m[2][0] * p[0] + m[2][1] * p[1] + m[2][2] * p[2] + m[2][3],
+    ]
+}
+
+/// Row-major linear (upper-left 3x3) part of an affine `world_from_local`.
+fn linear_part(m: &[[f32; 4]; 3]) -> [[f32; 3]; 3] {
+    [
+        [m[0][0], m[0][1], m[0][2]],
+        [m[1][0], m[1][1], m[1][2]],
+        [m[2][0], m[2][1], m[2][2]],
+    ]
+}
+
+/// Multiplies a row-major 3x3 by a column vector.
+fn mat3_mul(m: &[[f32; 3]; 3], v: [f32; 3]) -> [f32; 3] {
+    [
+        m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2],
+        m[1][0] * v[0] + m[1][1] * v[1] + m[1][2] * v[2],
+        m[2][0] * v[0] + m[2][1] * v[1] + m[2][2] * v[2],
+    ]
+}
+
+fn cross3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+/// Inverse-transpose of the linear part, carrying normals correctly under a
+/// non-uniform scale.  Mirrors `inverse_transpose_3x3` in the WESL shaders
+/// (cofactor columns over the determinant, indexed column-major); returns the
+/// identity for a singular matrix so a degenerate transform is a no-op.  The
+/// result is stored row-major so [`mat3_mul`] reproduces the WESL `matrix * n`.
+fn normal_matrix(m: &[[f32; 4]; 3]) -> [[f32; 3]; 3] {
+    let l = linear_part(m);
+    let c0 = [l[0][0], l[1][0], l[2][0]];
+    let c1 = [l[0][1], l[1][1], l[2][1]];
+    let c2 = [l[0][2], l[1][2], l[2][2]];
+    let x = cross3(c1, c2);
+    let y = cross3(c2, c0);
+    let z = cross3(c0, c1);
+    let det = dot3(c2, z);
+    if det.abs() <= 1.0e-8 {
+        return [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    }
+    let inv = 1.0 / det;
+    [
+        [x[0] * inv, y[0] * inv, z[0] * inv],
+        [x[1] * inv, y[1] * inv, z[1] * inv],
+        [x[2] * inv, y[2] * inv, z[2] * inv],
+    ]
+}
+
 /// One analytic directional light expressed in world space.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DirectionalLight {
@@ -90,6 +160,13 @@ pub struct ResolveInput<'a> {
     /// material's own occlusion so the indirect/ambient term is darkened in
     /// creases the geometric AO catches. Views without GTAO pass `1.0`.
     pub screen_space_ao: f32,
+    /// Row-major affine `world_from_local` (three rows of `[m, m, m, translation]`)
+    /// for this pixel's instance, matching `GpuSceneTransform.world_from_local`
+    /// (`mat3x4`).  The reconstructed local-space surface is lifted into world
+    /// space with it before any lighting so a translated/rotated/scaled instance
+    /// shades at its true position; the WESL resolve applies the byte-identical
+    /// `affine3_to_square` transform read from `scene_current_transforms`.
+    pub world_from_local: [[f32; 4]; 3],
 }
 
 /// The linear HDR result of resolving one pixel plus its provenance.
@@ -191,6 +268,23 @@ pub fn resolve_pixel(
         input.vertices,
     )
     .map_err(ResolveError::Surface)?;
+
+    // Lift the reconstructed *local-space* surface into world space with the
+    // instance's `world_from_local` before any lighting runs: the position by
+    // the full affine, the normal by its inverse-transpose (correct under a
+    // non-uniform scale), and the tangent/bitangent by the linear part.  The
+    // WESL resolve performs the byte-identical transform from
+    // `scene_current_transforms`; the default identity leaves all of it
+    // untouched, so every existing golden stays bit-for-bit stable.
+    let mut geometry = geometry;
+    let world_from_local = input.world_from_local;
+    geometry.position = affine_transform_point(&world_from_local, geometry.position);
+    let normal_basis = normal_matrix(&world_from_local);
+    geometry.normal = normalize_or(mat3_mul(&normal_basis, geometry.normal), geometry.normal);
+    let linear = linear_part(&world_from_local);
+    geometry.tangent = normalize_or(mat3_mul(&linear, geometry.tangent), geometry.tangent);
+    geometry.bitangent =
+        normalize_or(mat3_mul(&linear, geometry.bitangent), geometry.bitangent);
 
     // Fold every bound texture over the authored factors *before* assembling
     // the BSDF sample so the indirect/ambient terms below see texture-modulated
@@ -553,6 +647,7 @@ mod tests {
             textures: &[],
             view_position: [0.0, 0.0, 4.0],
             screen_space_ao: 1.0,
+            world_from_local: IDENTITY_WORLD_FROM_LOCAL,
         }
     }
 
@@ -973,4 +1068,150 @@ mod tests {
         .color;
         assert_eq!(lit_full, lit_occluded, "GTAO must not touch direct lighting");
     }
+
+    #[test]
+    fn world_from_local_transforms_position_normal_and_lifts_lighting() {
+        // A pure translation shifts the point and leaves a normal untouched.
+        let translate = [
+            [1.0, 0.0, 0.0, 2.0],
+            [0.0, 1.0, 0.0, -3.0],
+            [0.0, 0.0, 1.0, 5.0],
+        ];
+        assert_eq!(
+            affine_transform_point(&translate, [1.0, 1.0, 1.0]),
+            [3.0, -2.0, 6.0]
+        );
+
+        // A 90-degree rotation about +Z carries the +X normal onto +Y; the
+        // inverse-transpose of a rotation is the rotation itself.
+        let rot_z = [
+            [0.0, -1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+        ];
+        let rotated = mat3_mul(&normal_matrix(&rot_z), [1.0, 0.0, 0.0]);
+        assert!((rotated[0]).abs() < 1.0e-6);
+        assert!((rotated[1] - 1.0).abs() < 1.0e-6);
+        assert!((rotated[2]).abs() < 1.0e-6);
+
+        // A non-uniform scale must shrink the normal along the stretched axis
+        // (inverse-transpose), the opposite of how a tangent scales.
+        let scale_x = [
+            [2.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+        ];
+        let scaled_normal = mat3_mul(&normal_matrix(&scale_x), [1.0, 0.0, 0.0]);
+        assert!((scaled_normal[0] - 0.5).abs() < 1.0e-6);
+        let scaled_tangent = mat3_mul(&linear_part(&scale_x), [1.0, 0.0, 0.0]);
+        assert!((scaled_tangent[0] - 2.0).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn world_from_local_lighting_is_translation_invariant() {
+        // Translating the instance together with the point light and the camera
+        // by the same offset must reproduce the identity-transform shading
+        // exactly: the resolve lights at the *world* position, so a rigid shift
+        // of the whole configuration cancels out.
+        let (primitives, vertices) = unit_triangle();
+        let header = principled_header();
+        let parameters = GpuSurfaceParameters {
+            base_color: [0.8, 0.7, 0.6, 1.0],
+            metallic: 0.2,
+            perceptual_roughness: 0.5,
+            ..Default::default()
+        };
+        let offset = [4.0, -2.0, 7.0];
+
+        let base_light = PunctualLight {
+            position: [0.0, 0.0, 3.0],
+            intensity: [12.0; 3],
+            visibility: 1.0,
+            ..Default::default()
+        };
+        let baseline = resolve_pixel(
+            base_input(&primitives, &vertices, header, parameters),
+            LightingEnvironment {
+                directional: &[],
+                punctual: &[base_light],
+                image_based: None,
+                ambient: [0.0; 3],
+                toon_bands: 4,
+            },
+        )
+        .unwrap()
+        .color;
+
+        let shifted_light = PunctualLight {
+            position: [offset[0], offset[1], 3.0 + offset[2]],
+            ..base_light
+        };
+        let mut shifted = base_input(&primitives, &vertices, header, parameters);
+        shifted.world_from_local = [
+            [1.0, 0.0, 0.0, offset[0]],
+            [0.0, 1.0, 0.0, offset[1]],
+            [0.0, 0.0, 1.0, offset[2]],
+        ];
+        shifted.view_position = [
+            baseline_view(&primitives, &vertices, header, parameters)[0] + offset[0],
+            baseline_view(&primitives, &vertices, header, parameters)[1] + offset[1],
+            baseline_view(&primitives, &vertices, header, parameters)[2] + offset[2],
+        ];
+        let moved = resolve_pixel(
+            shifted,
+            LightingEnvironment {
+                directional: &[],
+                punctual: &[shifted_light],
+                image_based: None,
+                ambient: [0.0; 3],
+                toon_bands: 4,
+            },
+        )
+        .unwrap()
+        .color;
+
+        for (a, b) in moved.iter().zip(baseline) {
+            assert!(
+                (a - b).abs() < 1.0e-4,
+                "translated instance+light+camera must match identity: {moved:?} vs {baseline:?}"
+            );
+        }
+
+        // Moving *only* the instance (light and camera fixed) must change the
+        // shading, proving the transform actually reaches the lighting position.
+        let mut only_instance = base_input(&primitives, &vertices, header, parameters);
+        only_instance.world_from_local = [
+            [1.0, 0.0, 0.0, offset[0]],
+            [0.0, 1.0, 0.0, offset[1]],
+            [0.0, 0.0, 1.0, offset[2]],
+        ];
+        let drifted = resolve_pixel(
+            only_instance,
+            LightingEnvironment {
+                directional: &[],
+                punctual: &[base_light],
+                image_based: None,
+                ambient: [0.0; 3],
+                toon_bands: 4,
+            },
+        )
+        .unwrap()
+        .color;
+        assert!(
+            drifted.iter().zip(baseline).any(|(a, b)| (a - b).abs() > 1.0e-4),
+            "translating only the instance must change the lit output"
+        );
+    }
+
+    fn baseline_view(
+        _primitives: &[GpuShadingPrimitive],
+        _vertices: &[GpuShadingVertex],
+        _header: GpuMaterialHeader,
+        _parameters: GpuSurfaceParameters,
+    ) -> [f32; 3] {
+        // Mirror the camera position `base_input` bakes in so the invariance
+        // test shifts by the exact same origin.
+        [0.0, 0.0, 4.0]
+    }
+
 }

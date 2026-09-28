@@ -82,7 +82,7 @@ pub use shadow::{
 };
 pub use resolve::{
     resolve_pixel, surface_sample_from_parameters, DirectionalLight, LightingEnvironment,
-    ResolveError, ResolveInput, ResolvedPixel,
+    ResolveError, ResolveInput, ResolvedPixel, IDENTITY_WORLD_FROM_LOCAL,
 };
 pub use subsurface::evaluate_subsurface_direct;
 pub use water::evaluate_water_direct;
