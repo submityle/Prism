@@ -35,8 +35,9 @@ pub use classification::{
     ShadingWorkPlan, MAX_SHADING_CLASSES,
 };
 pub use ao::{
-    compute_gtao, denoise_gtao, denoise_gtao_pixel, gtao_pixel, GtaoBuffers, GtaoCamera,
-    GtaoConfig, GtaoDenoiseConfig,
+    accumulate_ao, accumulate_moment, clip_history, compute_gtao, denoise_gtao, denoise_gtao_pixel,
+    gtao_adaptive_history_weight, gtao_pixel, reproject_prev_uv_gtao, variance_clip_band,
+    GtaoBuffers, GtaoCamera, GtaoClipResult, GtaoConfig, GtaoDenoiseConfig, GtaoTemporalParams,
 };
 pub use cluster::{
     assign_lights_to_clusters, ClusterAabb, ClusterAssignmentConfig, ClusterBoundsBuilder,

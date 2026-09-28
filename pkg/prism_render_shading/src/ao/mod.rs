@@ -16,6 +16,7 @@
 mod denoise;
 mod integral;
 mod reconstruct;
+mod temporal;
 
 use bevy_math::ops;
 
@@ -24,6 +25,10 @@ use integral::{combine_horizon, distance_weight, slice_visibility};
 
 pub use denoise::{denoise_gtao, denoise_gtao_pixel, GtaoDenoiseConfig};
 pub use reconstruct::GtaoCamera;
+pub use temporal::{
+    accumulate_ao, accumulate_moment, clip_history, gtao_adaptive_history_weight,
+    reproject_prev_uv_gtao, variance_clip_band, GtaoClipResult, GtaoTemporalParams,
+};
 
 /// Read-only view over the depth/normal prepass GTAO samples.
 ///
