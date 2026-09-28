@@ -45,7 +45,7 @@ use bevy_render::{
 };
 
 use super::runtime::RenderMaterialRegistry;
-use super::texture_heap::{BLACK_SLOT, FIRST_DYNAMIC_SLOT, FLAT_NORMAL_SLOT, WHITE_SLOT};
+use super::texture_heap::{BLACK_SLOT, FIRST_DYNAMIC_SLOT, FLAT_NORMAL_SLOT};
 
 /// Hard ceiling on the bindless slot count, independent of device limits. Keeps
 /// the arrays (and the layout's `count`) bounded on GPUs that advertise very
@@ -227,7 +227,8 @@ impl MaterialTextureArrays {
         let index = match slot {
             FLAT_NORMAL_SLOT => 1,
             BLACK_SLOT => 2,
-            WHITE_SLOT => 0,
+            // WHITE_SLOT and every other slot (including the dynamic tail) fall
+            // back to opaque white in reserved view 0.
             _ => 0,
         };
         &self.reserved_views[index]

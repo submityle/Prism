@@ -58,9 +58,7 @@ pub fn cubemap_faces_from_image(image: &Image) -> Option<CubemapFaces> {
     if !is_square_cubemap(image) {
         return None;
     }
-    if image.data.is_none() {
-        return None;
-    }
+    image.data.as_ref()?;
     let size = image.texture_descriptor.size.width;
     if size > MAX_PROJECTION_SIZE {
         return None;

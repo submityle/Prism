@@ -184,10 +184,6 @@ fn reset_view_partition(
     active_slots.clear();
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "HZB staging joins scene, per-view state, buffers, device, and queue."
-)]
 pub(crate) fn prepare_hzb_candidates(
     scene: Res<crate::RenderGpuScene>,
     state: Res<super::runtime::UnifiedVisibilityState>,
