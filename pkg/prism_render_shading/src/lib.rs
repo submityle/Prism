@@ -20,6 +20,7 @@ mod face_shadow;
 mod hair;
 mod light_routing;
 mod lighting;
+mod motion_blur;
 mod oit;
 mod outline;
 mod punctual;
@@ -50,6 +51,10 @@ pub use ao::{
 pub use bloom::{
     combine, downsample_13tap, karis_average_weight, luminance as bloom_luminance,
     mip_blend_weights, prefilter, upsample_tent, BloomParams, BLOOM_LUMINANCE_WEIGHTS,
+};
+pub use motion_blur::{
+    clamp_velocity, cone, cylinder, neighbor_max, sample_weight, shutter_velocity,
+    soft_depth_compare, tile_max, velocity_length, MotionBlurParams,
 };
 pub use cluster::{
     assign_lights_to_clusters, ClusterAabb, ClusterAssignmentConfig, ClusterBoundsBuilder,
