@@ -23,10 +23,13 @@
 //! * [`dispatch`] — the `Core3d` node recording the prepass dispatch.
 //! * [`hzb`] — the Hi-Z pyramid build pipelines, per-level bind groups and the
 //!   `Core3d` node recording the copy + 2x2-max reductions.
-//! * [`repack`] — the material-roughness repack pipeline, per-view bind group
-//!   and the `Core3d` node that folds the prepass normal and each covered
-//!   pixel's material roughness into the trace's packed `normal_roughness`
-//!   input.
+//! * [`repack`] — the material-roughness repack pipeline, its per-view and
+//!   scene-table bind groups, and the `Core3d` node that reconstructs each
+//!   covered pixel's interpolated UV from the visibility buffer, samples the
+//!   metallic-roughness texture through the shared bindless heap
+//!   (`material_sample`), and folds the prepass view-normal plus that
+//!   texture-modulated roughness into the trace's packed `normal_roughness`
+//!   input — all on the current frame in this single pass.
 //!
 //! The trace and the resolve's consumption of the reflection buffer land in
 //! following slices.

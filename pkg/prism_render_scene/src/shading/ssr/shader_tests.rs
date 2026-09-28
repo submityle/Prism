@@ -117,26 +117,53 @@ fn ssr_hzb_wesl_compiles_standalone() {
         .unwrap_or_else(|error| panic!("ssr_hzb.wesl failed to compile: {error}"));
 }
 
-/// Registers `material.wesl` under its canonical module path and compiles
-/// `ssr_repack.wesl`, forcing its `import prism_render_scene::shaders::material`
-/// to resolve exactly as it will in the render world. A green result proves the
-/// repack reads the covered pixel's material through the same
-/// `PrismMaterialHeader` / `PrismSurfaceParameters` tables the resolve stage
-/// uses, and that packing the biased normal plus roughness into the trace's
-/// `normal_roughness` output type-checks. `material.wesl` is self-contained (no
-/// intra-crate imports), so registering it alone satisfies the graph.
+/// Registers the full import closure `ssr_repack.wesl` now pulls in and
+/// compiles it, forcing every `import prism_render_scene::shaders::*` to
+/// resolve exactly as it will in the render world. The repack no longer
+/// reads only the authored `perceptual_roughness`: it reconstructs the
+/// covered pixel's interpolated UV from the visibility buffer (walking the
+/// same `surface.wesl` scene -> geometry -> primitive -> vertex tables the
+/// resolve uses) and samples the metallic-roughness texture through the
+/// shared bindless heap via `material_sample.wesl`. A green result proves
+/// that whole graph -- `material`, `tangent`, `surface`, `gpu_scene` and
+/// `material_sample` (which itself `enable`s `wgpu_binding_array` and imports
+/// `material`) -- parses, type-checks and links, and that packing the biased
+/// view normal plus the texture-modulated roughness into the trace's
+/// `normal_roughness` output is well-formed.
 #[test]
 fn ssr_repack_wesl_compiles_and_resolves_imports() {
     let mut cache = ShaderCache::new((), load_source);
 
-    let material = shader_id(0x5052_4953_4d5f_5353_525f_4d41_5450_0001);
-    cache.set_shader(
-        material,
-        Shader::from_wesl(
+    let deps: [(u128, &str, &str); 5] = [
+        (
+            0x5052_4953_4d5f_5353_525f_4d41_5450_0002,
             include_str!("../../shaders/material.wesl"),
             "embedded://prism_render_scene/shaders/material.wesl",
         ),
-    );
+        (
+            0x5052_4953_4d5f_5353_525f_5441_4e47_0002,
+            include_str!("../../shaders/tangent.wesl"),
+            "embedded://prism_render_scene/shaders/tangent.wesl",
+        ),
+        (
+            0x5052_4953_4d5f_5353_525f_5355_5246_0002,
+            include_str!("../../shaders/surface.wesl"),
+            "embedded://prism_render_scene/shaders/surface.wesl",
+        ),
+        (
+            0x5052_4953_4d5f_5353_525f_5343_4e45_0002,
+            include_str!("../../shaders/gpu_scene.wesl"),
+            "embedded://prism_render_scene/shaders/gpu_scene.wesl",
+        ),
+        (
+            0x5052_4953_4d5f_5353_525f_4d53_4d50_0001,
+            include_str!("../../shaders/material_sample.wesl"),
+            "embedded://prism_render_scene/shaders/material_sample.wesl",
+        ),
+    ];
+    for (tag, source, path) in deps {
+        cache.set_shader(shader_id(tag), Shader::from_wesl(source, path));
+    }
 
     let repack = shader_id(0x5052_4953_4d5f_5353_525f_5250_434b_0001);
     cache.set_shader(
