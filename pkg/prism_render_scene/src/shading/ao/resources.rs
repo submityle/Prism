@@ -52,13 +52,11 @@ pub(crate) struct ViewGtaoTextures {
 
 impl ViewGtaoTextures {
     /// Storage/sampling view of the linear view-depth prepass target.
-    #[expect(dead_code, reason = "read by the GTAO compute bind groups in a following slice")]
     pub(crate) fn linear_depth_view(&self) -> &TextureView {
         &self.linear_depth.default_view
     }
 
     /// Storage/sampling view of the view-space normal prepass target.
-    #[expect(dead_code, reason = "read by the GTAO compute bind groups in a following slice")]
     pub(crate) fn view_normal_view(&self) -> &TextureView {
         &self.view_normal.default_view
     }

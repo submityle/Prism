@@ -8,7 +8,10 @@ use bevy_render::{
 };
 
 use super::{
-    ao::prepare_gtao_textures,
+    ao::{
+        gtao_prepass_pass, init_gtao_prepass_pipeline, prepare_gtao_prepass_bind_groups,
+        prepare_gtao_textures,
+    },
     classification_gpu::{
         dispatch_material_classification, init_material_classification_pipeline,
         prepare_material_classification_bind_groups,
@@ -65,6 +68,7 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/surface.wesl");
         embedded_asset!(app, "../shaders/shadow.wesl");
         embedded_asset!(app, "../shaders/shading_resolve.wesl");
+        embedded_asset!(app, "../shaders/gtao_prepass.wesl");
         embedded_asset!(app, "../shaders/composite.wesl");
         embedded_asset!(app, "../shaders/oit.wesl");
         embedded_asset!(app, "../shaders/transparent.wesl");
@@ -115,6 +119,7 @@ impl Plugin for PrismShadingPlugin {
                         .after(init_gpu_resource::<crate::ClusterBindGroup>),
                     init_shading_composite_pipeline,
                     init_oit_composite_pipeline,
+                    init_gtao_prepass_pipeline,
                 ),
             )
             .add_systems(
@@ -159,6 +164,9 @@ impl Plugin for PrismShadingPlugin {
                     prepare_shading_resolve_bind_groups
                         .after(prepare_material_classification_bind_groups)
                         .in_set(RenderSystems::PrepareBindGroups),
+                    prepare_gtao_prepass_bind_groups
+                        .after(prepare_gtao_textures)
+                        .in_set(RenderSystems::PrepareBindGroups),
                     ensure_shadow_atlas.in_set(RenderSystems::PrepareResources),
                     rebuild_shadow_buffers.in_set(RenderSystems::PrepareResources),
                     write_shadow_buffers.in_set(RenderSystems::PrepareResourcesFlush),
@@ -186,6 +194,9 @@ impl Plugin for PrismShadingPlugin {
                 dispatch_material_classification
                     .after(visibility_raster_pass)
                     .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                gtao_prepass_pass
+                    .after(visibility_raster_pass)
+                    .before(dispatch_shading_resolve),
                 dispatch_shading_resolve
                     .after(dispatch_material_classification)
                     .before(bevy_core_pipeline::Core3dSystems::MainPass),
