@@ -25,7 +25,8 @@ use crate::{ClusterBindGroup, LightBindGroup, MaterialBindGroup};
 use super::super::shadow::ShadowBindGroup;
 
 use super::super::classification_gpu::GpuShadingDispatchArgs;
-use super::abi::GpuShadingResolveParams;
+use super::super::ibl::EnvPrefilterBindGroups;
+use super::abi::{GpuShadingResolveParams, RESOLVE_FLAG_GTAO, RESOLVE_FLAG_IBL_SPECULAR};
 use super::bind_groups::ViewResolveBindGroups;
 use super::pipeline::ShadingResolvePipeline;
 use super::super::resources::ViewShadingBuffers;
@@ -48,6 +49,7 @@ pub(crate) fn dispatch_shading_resolve(
     light_bindings: Res<LightBindGroup>,
     shadow_bindings: Res<ShadowBindGroup>,
     cluster_bindings: Res<ClusterBindGroup>,
+    prefilter_bind_groups: Res<EnvPrefilterBindGroups>,
     pipeline: Res<ShadingResolvePipeline>,
     cache: Res<PipelineCache>,
     mut ctx: RenderContext,
@@ -72,11 +74,23 @@ pub(crate) fn dispatch_shading_resolve(
     };
 
     let translation = extracted.world_from_view.translation();
+    // Pack the feature bits the resolve shader ANDs against. The prefiltered
+    // specular path is enabled only when the prefilter pass has bind groups
+    // built for a resident probe source; otherwise the shader falls back to the
+    // low-frequency SH-radiance specular so an IBL scene without a specular map
+    // still shades.
+    let mut flags = 0u32;
+    if settings.enable_gtao {
+        flags |= RESOLVE_FLAG_GTAO;
+    }
+    if prefilter_bind_groups.source.is_some() {
+        flags |= RESOLVE_FLAG_IBL_SPECULAR;
+    }
     let mut params = GpuShadingResolveParams {
         shading_class: 0,
         width: buffers.size.x,
         height: buffers.size.y,
-        gtao_enabled: u32::from(settings.enable_gtao),
+        flags,
         view_position: [translation.x, translation.y, translation.z, 0.0],
     };
     if params.width == 0 || params.height == 0 {

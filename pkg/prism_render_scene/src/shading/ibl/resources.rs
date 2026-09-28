@@ -96,7 +96,6 @@ impl DfgLutTexture {
     }
 
     /// The linear clamp-to-edge sampler the resolve stage reads the table with.
-    #[expect(dead_code, reason = "consumed by the resolve slice that follows")]
     pub(crate) fn sampler(&self) -> &Sampler {
         &self.sampler
     }
@@ -216,13 +215,11 @@ impl PrefilteredEnvironmentMap {
 
     /// The cube-dimension sampling view spanning every mip, bound by the
     /// resolve stage.
-    #[expect(dead_code, reason = "consumed by the resolve slice that follows")]
     pub(crate) fn cube_view(&self) -> &TextureView {
         &self.cube_view
     }
 
     /// The trilinear clamp-to-edge sampler the resolve reads the cube with.
-    #[expect(dead_code, reason = "consumed by the resolve slice that follows")]
     pub(crate) fn sampler(&self) -> &Sampler {
         &self.sampler
     }

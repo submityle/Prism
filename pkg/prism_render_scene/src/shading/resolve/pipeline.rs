@@ -28,7 +28,10 @@ use bevy_asset::{load_embedded_asset, Handle};
 use bevy_ecs::prelude::*;
 use bevy_material::{
     bind_group_layout_entries::{
-        binding_types::{storage_buffer_read_only_sized, texture_2d, texture_storage_2d},
+        binding_types::{
+            sampler, storage_buffer_read_only_sized, texture_2d, texture_cube,
+            texture_storage_2d,
+        },
         BindGroupLayoutEntries,
     },
     descriptor::BindGroupLayoutDescriptor,
@@ -36,7 +39,7 @@ use bevy_material::{
 use bevy_render::{
     render_resource::{
         BindGroupLayout, CachedComputePipelineId, ComputePipelineDescriptor, PipelineCache,
-        ShaderStages, StorageTextureAccess, TextureSampleType,
+        SamplerBindingType, ShaderStages, StorageTextureAccess, TextureSampleType,
     },
     renderer::RenderDevice,
 };
@@ -61,11 +64,22 @@ pub(crate) struct ShadingResolvePipeline {
     pub(crate) scene_layout: BindGroupLayout,
 }
 
-/// Builds the group-0 layout entries: two `texture_2d<u32>` visibility inputs,
-/// the write-only `rgba16float` storage texture, and the sampled screen-space
-/// GTAO visibility texture (non-filterable float; a 1x1 white fallback is bound
-/// when GTAO is disabled).
-fn view_layout_entries() -> BindGroupLayoutEntries<4> {
+/// Builds the group-0 layout entries:
+///
+/// 0. `texture_2d<u32>` visibility ids,
+/// 1. `texture_2d<u32>` visibility metadata,
+/// 2. write-only `rgba16float` storage texture (the HDR output),
+/// 3. the sampled screen-space GTAO visibility texture (non-filterable float; a
+///    1x1 white fallback is bound when GTAO is disabled),
+/// 4. the GGX-prefiltered environment radiance cube (filterable float),
+/// 5. its trilinear clamp `sampler` (filtering),
+/// 6. the split-sum DFG table (filterable float), plus
+/// 7. its linear clamp `sampler` (filtering).
+///
+/// Entries 4-7 are always bound (the global IBL textures are resident from
+/// `RenderStartup`); the `RESOLVE_FLAG_IBL_SPECULAR` immediate bit gates whether
+/// the shader actually samples them.
+fn view_layout_entries() -> BindGroupLayoutEntries<8> {
     BindGroupLayoutEntries::sequential(
         ShaderStages::COMPUTE,
         (
@@ -73,6 +87,10 @@ fn view_layout_entries() -> BindGroupLayoutEntries<4> {
             texture_2d(TextureSampleType::Uint),
             texture_storage_2d(SCENE_COLOR_FORMAT, StorageTextureAccess::WriteOnly),
             texture_2d(TextureSampleType::Float { filterable: false }),
+            texture_cube(TextureSampleType::Float { filterable: true }),
+            sampler(SamplerBindingType::Filtering),
+            texture_2d(TextureSampleType::Float { filterable: true }),
+            sampler(SamplerBindingType::Filtering),
         ),
     )
 }

@@ -4,8 +4,10 @@
 //! shared [`MaterialBindGroup`]/[`LightBindGroup`] resources, so this stage only
 //! builds the two pass-owned groups:
 //!
-//! * **group 0** — the two visibility textures plus the HDR storage-texture
-//!   output, all sourced from the view's [`ViewVisibilityBuffer`].
+//! * **group 0** — the two visibility textures, the HDR storage-texture output
+//!   and the screen-space GTAO input (all sourced from the view), plus the two
+//!   global IBL tables: the prefiltered environment cube and the DFG lookup
+//!   table with their samplers.
 //! * **group 2** — the per-view compacted worklist ([`ViewShadingBuffers`])
 //!   spliced together with the render-world scene-instance and
 //!   shading-geometry tables.
@@ -24,6 +26,7 @@ use bevy_render::{
 use crate::{GpuSceneBuffers, RenderShadingGeometryBuffers};
 
 use super::super::ao::ViewGtaoTextures;
+use super::super::ibl::{DfgLutTexture, PrefilteredEnvironmentMap};
 use super::super::resources::{ViewShadingBuffers, ViewVisibilityBuffer};
 use super::pipeline::ShadingResolvePipeline;
 
@@ -49,6 +52,8 @@ pub(crate) fn prepare_shading_resolve_bind_groups(
     scene: Res<GpuSceneBuffers>,
     geometry: Res<RenderShadingGeometryBuffers>,
     fallback: Res<FallbackImage>,
+    prefiltered_env: Res<PrefilteredEnvironmentMap>,
+    dfg_lut: Res<DfgLutTexture>,
     views: Query<(
         Entity,
         &ViewVisibilityBuffer,
@@ -73,7 +78,7 @@ pub(crate) fn prepare_shading_resolve_bind_groups(
         let (ids, metadata) = visibility.attachments();
         // Bind the view's GTAO visibility when present, else a 1x1 white
         // texture so the shader's multiply is a no-op (the dispatch also gates
-        // on the `gtao_enabled` flag, so the fallback is never actually read).
+        // on the `RESOLVE_FLAG_GTAO` bit, so the fallback is never actually read).
         let ao_view = gtao.map_or(&fallback.d2.texture_view, |textures| {
             textures.ambient_occlusion_view()
         });
@@ -85,6 +90,10 @@ pub(crate) fn prepare_shading_resolve_bind_groups(
                 metadata,
                 visibility.scene_color_view(),
                 ao_view,
+                prefiltered_env.cube_view(),
+                prefiltered_env.sampler(),
+                dfg_lut.view(),
+                dfg_lut.sampler(),
             )),
         );
         let scene_group = device.create_bind_group(

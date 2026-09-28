@@ -62,9 +62,11 @@ import prism_render_scene::shaders::lighting::{
     PunctualLight,
     LightEnvironment,
     LightSample,
+    INV_PI,
     environment_has_image_based,
     sample_directional_light,
     sample_punctual_light,
+    sh_irradiance,
 };
 import prism_render_scene::shaders::shadow::{
     directional_shadow_visibility,
@@ -116,11 +118,19 @@ struct ResolveParams {
     shading_class: u32,
     width: u32,
     height: u32,
-    // `1` enables the screen-space GTAO multiply below; `0` leaves the
-    // material occlusion untouched (also the state of the 1x1 white fallback).
-    gtao_enabled: u32,
+    // Packed feature bits; see the `RESOLVE_FLAG_*` masks. Bit 0 folds the
+    // screen-space GTAO multiply below; bit 1 selects the prefiltered
+    // image-based specular path over the low-frequency SH-radiance fallback.
+    flags: u32,
     view_position: vec4<f32>,
 }
+
+// `ResolveParams.flags` masks, mirroring `RESOLVE_FLAG_*` in `resolve/abi.rs`.
+// Bit 0 gates the screen-space GTAO fold; bit 1 signals that the prefiltered
+// environment cube plus DFG table are resident so the resolve can sample the
+// real specular reflection instead of the SH-radiance approximation.
+const RESOLVE_FLAG_GTAO: u32 = 1u;
+const RESOLVE_FLAG_IBL_SPECULAR: u32 = 2u;
 
 // One compacted work item. Mirrors `ShadingWorkItem` (16 bytes) and the
 // `WorkItem` produced by `material_classification.wesl`.
@@ -138,6 +148,17 @@ struct WorkItem {
 // Screen-space GTAO visibility (1 = unoccluded) in `.x`; a 1x1 white fallback
 // is bound when GTAO is disabled so this multiply is a no-op.
 @group(0) @binding(3) var gtao_ao: texture_2d<f32>;
+// GGX-prefiltered environment radiance cube (one mip per roughness level) plus
+// its trilinear clamp sampler. Sampled along the reflection vector at a
+// roughness-selected LOD when `RESOLVE_FLAG_IBL_SPECULAR` is set. When no probe
+// is resident the global fallback cube is bound and the flag stays clear, so
+// these are never read on that path.
+@group(0) @binding(4) var prefiltered_env: texture_cube<f32>;
+@group(0) @binding(5) var prefiltered_sampler: sampler;
+// Split-sum environment BRDF ("DFG") table indexed by `(n_dot_v, roughness)`
+// in `.xy` = `(scale, bias)`, plus its linear clamp sampler.
+@group(0) @binding(6) var dfg_lut: texture_2d<f32>;
+@group(0) @binding(7) var dfg_sampler: sampler;
 
 // --- group 1: material tables (shared MaterialBindGroup layout) ---
 @group(1) @binding(0) var<storage, read> material_headers: array<PrismMaterialHeader>;
@@ -300,6 +321,55 @@ fn ambient_indirect(surface: SurfaceSample, env: LightEnvironment) -> vec3<f32> 
     let occlusion = clamp(surface.ambient_occlusion, 0.0, 1.0);
     let diffuse = 1.0 - clamp(surface.metallic, 0.0, 1.0);
     return surface.base_color * env.ambient * (occlusion * diffuse);
+}
+
+// Prefiltered image-based indirect term. Mirrors the CPU golden
+// `evaluate_image_based_light_specular`: the diffuse half is the SH-irradiance
+// Lambertian lobe (identical to `image_based` in `brdf.wesl`), while the
+// specular half samples the GGX-prefiltered radiance cube along the reflection
+// vector at a roughness-selected mip (`lod = roughness * (mip_count - 1)`) and
+// weights it by the integrated DFG table (`F0 * scale + bias`). This replaces
+// the low-frequency `sh_radiance` specular approximation so glossy surfaces
+// read a sharp mip and rough surfaces read a pre-blurred one. Bound only when
+// `RESOLVE_FLAG_IBL_SPECULAR` guarantees both textures are resident; the GPU
+// probe carries no independent intensity, so intensity is 1.0 as in the SH
+// path, and both halves clamp to non-negative to match the golden guards.
+fn image_based_prefiltered(
+    surface: SurfaceSample,
+    frame: ShadingFrame,
+    env: LightEnvironment,
+) -> vec3<f32> {
+    let normal = brdf_normalize_or(frame.normal, vec3<f32>(0.0, 1.0, 0.0));
+    let view = brdf_normalize_or(frame.view, normal);
+    let n_dot_v = max(dot(normal, view), 1.0e-4);
+
+    let metallic = clamp(surface.metallic, 0.0, 1.0);
+    let roughness = clamp(surface.perceptual_roughness, 0.0, 1.0);
+    let occlusion = clamp(surface.ambient_occlusion, 0.0, 1.0);
+    let reflectance = clamp(surface.reflectance, 0.0, 1.0);
+    let f0_dielectric = 0.16 * reflectance * reflectance;
+    let f0 = mix(vec3<f32>(f0_dielectric), surface.base_color, metallic);
+
+    // Diffuse: Lambertian albedo lit by cosine-convolved SH irradiance.
+    let irradiance = max(sh_irradiance(env, normal), vec3<f32>(0.0));
+    let diffuse_weight = 1.0 - metallic;
+    let diffuse = surface.base_color * diffuse_weight * irradiance * INV_PI;
+
+    // Specular: sample the prefiltered cube at the roughness LOD, then weight by
+    // the integrated split-sum DFG term. `textureNumLevels` returns the mip
+    // count baked into the bound cube view so the LOD scale never drifts from
+    // `PREFILTERED_ENV_MIP_COUNT`.
+    let reflection = reflect(-view, normal);
+    let mip_max = f32(max(textureNumLevels(prefiltered_env), 1u) - 1u);
+    let lod = roughness * mip_max;
+    let prefiltered = max(
+        textureSampleLevel(prefiltered_env, prefiltered_sampler, reflection, lod).rgb,
+        vec3<f32>(0.0),
+    );
+    let dfg = textureSampleLevel(dfg_lut, dfg_sampler, vec2<f32>(n_dot_v, roughness), 0.0).xy;
+    let specular = prefiltered * (f0 * dfg.x + dfg.y);
+
+    return (diffuse + specular) * occlusion;
 }
 
 // Physically based integrator shared by every lit closure. Accumulates the
@@ -716,7 +786,7 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     // `resolve_pixel` in the CPU golden. The fallback texture and the disabled
     // flag both leave this a no-op (visibility 1).
     var screen_space_ao = 1.0;
-    if params.gtao_enabled != 0u {
+    if (params.flags & RESOLVE_FLAG_GTAO) != 0u {
         screen_space_ao = textureLoad(gtao_ao, coord, 0).x;
     }
     surface.ambient_occlusion = clamp(sampled.occlusion * screen_space_ao, 0.0, 1.0);
@@ -755,7 +825,14 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     let env = light_env[0];
     var indirect: vec3<f32>;
     if environment_has_image_based(env) {
-        indirect = image_based(lit, frame, env);
+        // A resident prefiltered cube + DFG table takes the real split-sum
+        // specular path; otherwise fall back to the low-frequency SH-radiance
+        // approximation carried by `brdf.wesl::image_based`.
+        if (params.flags & RESOLVE_FLAG_IBL_SPECULAR) != 0u {
+            indirect = image_based_prefiltered(lit, frame, env);
+        } else {
+            indirect = image_based(lit, frame, env);
+        }
     } else {
         indirect = ambient_indirect(lit, env);
     }

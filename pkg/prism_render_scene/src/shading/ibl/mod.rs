@@ -24,7 +24,9 @@
 //! * [`extract`] — mirrors the active probe's radiance source into the
 //!   render world for the prefilter pass.
 //!
-//! The resolve's consumption of both tables arrives in the following slice.
+//! The shading resolve binds both tables into its view bind group and
+//! samples the prefiltered cube (at a roughness-selected mip) weighted by the
+//! DFG term for the real split-sum specular reflection.
 
 mod abi;
 mod bind_groups;
@@ -41,4 +43,6 @@ pub(crate) use bind_groups::EnvPrefilterBindGroups;
 pub(crate) use dispatch::{dfg_lut_precompute_pass, env_prefilter_precompute_pass};
 pub(crate) use extract::{extract_ibl_source, ExtractedIblSource};
 pub(crate) use pipeline::{init_brdf_lut_pipeline, init_env_prefilter_pipeline};
-pub(crate) use resources::{init_dfg_lut_texture, init_prefiltered_env_map};
+pub(crate) use resources::{
+    init_dfg_lut_texture, init_prefiltered_env_map, DfgLutTexture, PrefilteredEnvironmentMap,
+};

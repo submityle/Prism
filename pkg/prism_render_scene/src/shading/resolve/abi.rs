@@ -30,12 +30,23 @@ pub(crate) struct GpuShadingResolveParams {
     pub width: u32,
     /// Framebuffer height in pixels.
     pub height: u32,
-    /// `1` enables the GTAO occlusion multiply in the shader; `0` disables it.
-    /// Doubles as the 16-byte alignment word ahead of the `vec4<f32>`.
-    pub gtao_enabled: u32,
+    /// Packed feature bits; see [`RESOLVE_FLAG_GTAO`] and
+    /// [`RESOLVE_FLAG_IBL_SPECULAR`].  Doubles as the 16-byte alignment word
+    /// ahead of the `vec4<f32>`.
+    pub flags: u32,
     /// World-space camera position; `w` is unused padding.
     pub view_position: [f32; 4],
 }
+
+/// `flags` bit selecting the screen-space GTAO occlusion multiply in the
+/// resolve shader.  Mirrors `RESOLVE_FLAG_GTAO` in `shading_resolve.wesl`.
+pub(crate) const RESOLVE_FLAG_GTAO: u32 = 1 << 0;
+
+/// `flags` bit signalling that the prefiltered environment cube and the DFG
+/// table are resident, so the resolve samples the real split-sum specular
+/// reflection instead of the low-frequency SH-radiance fallback.  Mirrors
+/// `RESOLVE_FLAG_IBL_SPECULAR` in `shading_resolve.wesl`.
+pub(crate) const RESOLVE_FLAG_IBL_SPECULAR: u32 = 1 << 1;
 
 #[cfg(test)]
 mod tests {
@@ -48,5 +59,14 @@ mod tests {
         assert_eq!(size_of::<GpuShadingResolveParams>(), 32);
         assert_eq!(align_of::<GpuShadingResolveParams>(), 4);
         assert_eq!(RESOLVE_WORKGROUP_SIZE, 64);
+    }
+
+    #[test]
+    fn resolve_feature_flags_are_distinct_single_bits() {
+        // The shader ANDs `flags` with each mask independently, so they must be
+        // disjoint powers of two.
+        assert_eq!(RESOLVE_FLAG_GTAO, 1);
+        assert_eq!(RESOLVE_FLAG_IBL_SPECULAR, 2);
+        assert_eq!(RESOLVE_FLAG_GTAO & RESOLVE_FLAG_IBL_SPECULAR, 0);
     }
 }
