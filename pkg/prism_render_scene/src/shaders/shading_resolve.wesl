@@ -40,7 +40,6 @@ import prism_render_scene::shaders::brdf::{
     brdf_normalize_or,
     principled_direct,
     toon_direct,
-    image_based,
 };
 import prism_render_scene::shaders::cloth::{
     cloth_direct,
@@ -67,6 +66,8 @@ import prism_render_scene::shaders::lighting::{
     sample_directional_light,
     sample_punctual_light,
     sh_irradiance,
+    sh_radiance,
+    env_brdf_approx,
 };
 import prism_render_scene::shaders::shadow::{
     directional_shadow_visibility,
@@ -159,6 +160,15 @@ struct WorkItem {
 // in `.xy` = `(scale, bias)`, plus its linear clamp sampler.
 @group(0) @binding(6) var dfg_lut: texture_2d<f32>;
 @group(0) @binding(7) var dfg_sampler: sampler;
+// SSR energy-conservation exports (always bound; written every covered pixel).
+// ssr_env_specular = the IBL specular radiance this resolve folded into
+// scene_color at this pixel, so the SSR composite can subtract it before
+// substituting the screen-space reflection. ssr_spec_weight = the split-sum
+// environment-BRDF weight (f0 * dfg.x + dfg.y) * occlusion used for that
+// specular, so the composite weights the SSR reflection by the identical
+// Fresnel/DFG factor. Both are full-resolution rgba16float; .a is unused.
+@group(0) @binding(8) var ssr_env_specular: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(9) var ssr_spec_weight: texture_storage_2d<rgba16float, write>;
 
 // --- group 1: material tables (shared MaterialBindGroup layout) ---
 @group(1) @binding(0) var<storage, read> material_headers: array<PrismMaterialHeader>;
@@ -317,10 +327,77 @@ fn sample_punctual_shadowed(index: u32, frame: ShadingFrame, world_position: vec
 // Constant-ambient indirect fallback used when no image-based probe is bound.
 // Mirrors `ambient_term` in the CPU reference: Lambertian albedo weighted by
 // occlusion and (1 - metallic).
-fn ambient_indirect(surface: SurfaceSample, env: LightEnvironment) -> vec3<f32> {
+// Split indirect result shared by every ambient/image-based path so the SSR
+// composite can conserve energy. total = the full indirect radiance folded
+// into scene_color (diffuse + specular). env_specular = the specular half
+// alone, which the composite subtracts before substituting the screen-space
+// reflection. spec_weight = the environment-BRDF factor (f0 * dfg + bias) *
+// occlusion the composite reuses to weight the SSR reflection identically.
+struct IndirectResult {
+    total: vec3<f32>,
+    env_specular: vec3<f32>,
+    spec_weight: vec3<f32>,
+}
+
+// Grazing-angle F0 for the surface, shared by every indirect path.
+fn indirect_f0(surface: SurfaceSample) -> vec3<f32> {
+    let metallic = clamp(surface.metallic, 0.0, 1.0);
+    let reflectance = clamp(surface.reflectance, 0.0, 1.0);
+    let f0_dielectric = 0.16 * reflectance * reflectance;
+    return mix(vec3<f32>(f0_dielectric), surface.base_color, metallic);
+}
+
+// Constant-ambient indirect fallback used when no image-based probe is bound.
+// Mirrors ambient_term in the CPU reference: Lambertian albedo weighted by
+// occlusion and (1 - metallic). Carries no environment specular, but still
+// exports the analytic environment-BRDF weight so the SSR composite can add a
+// Fresnel-correct screen-space reflection even without a probe.
+fn ambient_indirect(surface: SurfaceSample, frame: ShadingFrame, env: LightEnvironment) -> IndirectResult {
     let occlusion = clamp(surface.ambient_occlusion, 0.0, 1.0);
-    let diffuse = 1.0 - clamp(surface.metallic, 0.0, 1.0);
-    return surface.base_color * env.ambient * (occlusion * diffuse);
+    let diffuse_weight = 1.0 - clamp(surface.metallic, 0.0, 1.0);
+    let diffuse = surface.base_color * env.ambient * (occlusion * diffuse_weight);
+
+    let normal = brdf_normalize_or(frame.normal, vec3<f32>(0.0, 1.0, 0.0));
+    let view = brdf_normalize_or(frame.view, normal);
+    let n_dot_v = max(dot(normal, view), 1.0e-4);
+    let roughness = clamp(surface.perceptual_roughness, 0.0, 1.0);
+    let dfg = env_brdf_approx(n_dot_v, roughness);
+    let spec_weight = (indirect_f0(surface) * dfg.x + dfg.y) * occlusion;
+
+    var out: IndirectResult;
+    out.total = diffuse;
+    out.env_specular = vec3<f32>(0.0);
+    out.spec_weight = spec_weight;
+    return out;
+}
+
+// Low-frequency SH-radiance image-based path (used when the prefiltered cube
+// and DFG table are not resident). Mirrors brdf.wesl::image_based, but returns
+// the diffuse+specular split so the SSR composite can replace the SH specular
+// with the screen-space reflection under the same environment-BRDF weight.
+fn image_based_sh(surface: SurfaceSample, frame: ShadingFrame, env: LightEnvironment) -> IndirectResult {
+    let normal = brdf_normalize_or(frame.normal, vec3<f32>(0.0, 1.0, 0.0));
+    let view = brdf_normalize_or(frame.view, normal);
+    let n_dot_v = max(dot(normal, view), 1.0e-4);
+    let roughness = clamp(surface.perceptual_roughness, 0.0, 1.0);
+    let occlusion = clamp(surface.ambient_occlusion, 0.0, 1.0);
+    let f0 = indirect_f0(surface);
+
+    let irradiance = max(sh_irradiance(env, normal), vec3<f32>(0.0));
+    let diffuse_weight = 1.0 - clamp(surface.metallic, 0.0, 1.0);
+    let diffuse = surface.base_color * diffuse_weight * irradiance * INV_PI;
+
+    let reflection = reflect(-view, normal);
+    let prefiltered = max(sh_radiance(env, reflection), vec3<f32>(0.0));
+    let dfg = env_brdf_approx(n_dot_v, roughness);
+    let spec_weight = (f0 * dfg.x + dfg.y) * occlusion;
+    let env_specular = prefiltered * spec_weight;
+
+    var out: IndirectResult;
+    out.total = diffuse * occlusion + env_specular;
+    out.env_specular = env_specular;
+    out.spec_weight = spec_weight;
+    return out;
 }
 
 // Prefiltered image-based indirect term. Mirrors the CPU golden
@@ -338,7 +415,7 @@ fn image_based_prefiltered(
     surface: SurfaceSample,
     frame: ShadingFrame,
     env: LightEnvironment,
-) -> vec3<f32> {
+) -> IndirectResult {
     let normal = brdf_normalize_or(frame.normal, vec3<f32>(0.0, 1.0, 0.0));
     let view = brdf_normalize_or(frame.view, normal);
     let n_dot_v = max(dot(normal, view), 1.0e-4);
@@ -367,9 +444,14 @@ fn image_based_prefiltered(
         vec3<f32>(0.0),
     );
     let dfg = textureSampleLevel(dfg_lut, dfg_sampler, vec2<f32>(n_dot_v, roughness), 0.0).xy;
-    let specular = prefiltered * (f0 * dfg.x + dfg.y);
+    let spec_weight = (f0 * dfg.x + dfg.y) * occlusion;
+    let env_specular = prefiltered * spec_weight;
 
-    return (diffuse + specular) * occlusion;
+    var out: IndirectResult;
+    out.total = diffuse * occlusion + env_specular;
+    out.env_specular = env_specular;
+    out.spec_weight = spec_weight;
+    return out;
 }
 
 // Physically based integrator shared by every lit closure. Accumulates the
@@ -823,19 +905,20 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     lit.emissive = vec3<f32>(0.0);
 
     let env = light_env[0];
-    var indirect: vec3<f32>;
+    var indirect_result: IndirectResult;
     if environment_has_image_based(env) {
         // A resident prefiltered cube + DFG table takes the real split-sum
         // specular path; otherwise fall back to the low-frequency SH-radiance
-        // approximation carried by `brdf.wesl::image_based`.
+        // approximation (image_based_sh, a local twin of brdf.wesl::image_based).
         if (params.flags & RESOLVE_FLAG_IBL_SPECULAR) != 0u {
-            indirect = image_based_prefiltered(lit, frame, env);
+            indirect_result = image_based_prefiltered(lit, frame, env);
         } else {
-            indirect = image_based(lit, frame, env);
+            indirect_result = image_based_sh(lit, frame, env);
         }
     } else {
-        indirect = ambient_indirect(lit, env);
+        indirect_result = ambient_indirect(lit, frame, env);
     }
+    let indirect = indirect_result.total;
 
     // Explicit per-class dispatch. Subsurface/clearcoat/cloth/hair/water now
     // run dedicated closures; only custom still shares the principled
@@ -877,4 +960,11 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 
     textureStore(scene_color, coord, vec4<f32>(color, 1.0));
+    // SSR energy-conservation exports: the IBL specular this pixel already
+    // received and the environment-BRDF weight it was scaled by. The SSR
+    // composite subtracts env_specular and re-adds the screen-space
+    // reflection under spec_weight, so a confident hit swaps IBL specular for
+    // SSR without double-counting energy (a miss leaves scene_color intact).
+    textureStore(ssr_env_specular, coord, vec4<f32>(indirect_result.env_specular, 0.0));
+    textureStore(ssr_spec_weight, coord, vec4<f32>(indirect_result.spec_weight, 0.0));
 }

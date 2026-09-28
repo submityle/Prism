@@ -5,9 +5,10 @@
 //! builds the two pass-owned groups:
 //!
 //! * **group 0** — the two visibility textures, the HDR storage-texture output
-//!   and the screen-space GTAO input (all sourced from the view), plus the two
-//!   global IBL tables: the prefiltered environment cube and the DFG lookup
-//!   table with their samplers.
+//!   and the screen-space GTAO input (all sourced from the view), the two
+//!   global IBL tables (the prefiltered environment cube and the DFG lookup
+//!   table with their samplers), and the two write-only SSR energy-export
+//!   targets (`ssr_env_specular`, `ssr_spec_weight`) the SSR composite reads.
 //! * **group 2** — the per-view compacted worklist ([`ViewShadingBuffers`])
 //!   spliced together with the render-world scene-instance and
 //!   shading-geometry tables.
@@ -94,6 +95,9 @@ pub(crate) fn prepare_shading_resolve_bind_groups(
                 prefiltered_env.sampler(),
                 dfg_lut.view(),
                 dfg_lut.sampler(),
+                // 8-9: SSR energy-conservation exports written every pixel.
+                visibility.ssr_env_specular_view(),
+                visibility.ssr_spec_weight_view(),
             )),
         );
         let scene_group = device.create_bind_group(

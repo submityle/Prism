@@ -29,6 +29,14 @@ pub(crate) struct ViewVisibilityBuffer {
     /// Linear HDR radiance the shading-resolve pass stores into and the
     /// composite step samples from.
     scene_color: CachedTexture,
+    /// SSR energy-conservation export: the IBL specular radiance the resolve
+    /// folded into `scene_color` per pixel, so the SSR composite can subtract
+    /// it before substituting the screen-space reflection.
+    ssr_env_specular: CachedTexture,
+    /// SSR energy-conservation export: the split-sum environment-BRDF weight
+    /// `(f0 * dfg.x + dfg.y) * occlusion` the resolve scaled that specular by,
+    /// reused by the composite to weight the SSR reflection identically.
+    ssr_spec_weight: CachedTexture,
     pub(crate) size: bevy_math::UVec2,
 }
 
@@ -45,6 +53,16 @@ impl ViewVisibilityBuffer {
     /// Storage/sampling view of the linear HDR radiance target.
     pub(crate) fn scene_color_view(&self) -> &bevy_render::render_resource::TextureView {
         &self.scene_color.default_view
+    }
+
+    /// Storage/sampling view of the SSR IBL-specular export.
+    pub(crate) fn ssr_env_specular_view(&self) -> &bevy_render::render_resource::TextureView {
+        &self.ssr_env_specular.default_view
+    }
+
+    /// Storage/sampling view of the SSR environment-BRDF weight export.
+    pub(crate) fn ssr_spec_weight_view(&self) -> &bevy_render::render_resource::TextureView {
+        &self.ssr_spec_weight.default_view
     }
 }
 
@@ -211,10 +229,42 @@ pub(crate) fn prepare_visibility_buffers(
                 view_formats: &[],
             },
         );
+        // SSR energy-conservation exports written alongside `scene_color` by
+        // the resolve pass. Allocated unconditionally so the resolve bind
+        // group is always valid (the pass runs even when SSR is disabled); the
+        // SSR composite reads them only when reflections are active.
+        let ssr_env_specular = texture_cache.get(
+            &device,
+            TextureDescriptor {
+                label: Some("prism SSR env specular export"),
+                size: size.to_extents(),
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: TextureDimension::D2,
+                format: SCENE_COLOR_FORMAT,
+                usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+        );
+        let ssr_spec_weight = texture_cache.get(
+            &device,
+            TextureDescriptor {
+                label: Some("prism SSR spec weight export"),
+                size: size.to_extents(),
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: TextureDimension::D2,
+                format: SCENE_COLOR_FORMAT,
+                usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+        );
         commands.entity(entity).insert(ViewVisibilityBuffer {
             ids,
             metadata,
             scene_color,
+            ssr_env_specular,
+            ssr_spec_weight,
             size,
         });
     }

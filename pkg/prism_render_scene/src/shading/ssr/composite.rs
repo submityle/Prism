@@ -64,13 +64,17 @@ pub(crate) struct SsrCompositePipeline {
 /// group-0 layout mirroring `ssr_composite.wesl`: two non-filterable float reads
 /// (the colour-pyramid level-0 copy and the reflection output, both
 /// `textureLoad`ed) then the write-only `rgba16float` `scene_color` output.
-fn layout_entries() -> BindGroupLayoutEntries<3> {
+fn layout_entries() -> BindGroupLayoutEntries<5> {
     BindGroupLayoutEntries::sequential(
         ShaderStages::COMPUTE,
         (
             texture_2d(TextureSampleType::Float { filterable: false }),
             texture_2d(TextureSampleType::Float { filterable: false }),
             texture_storage_2d(SCENE_COLOR_FORMAT, StorageTextureAccess::WriteOnly),
+            // 3-4: the resolve's SSR energy exports (IBL specular + env-BRDF
+            // weight), sampled to keep the reflection energy-conserving.
+            texture_2d(TextureSampleType::Float { filterable: false }),
+            texture_2d(TextureSampleType::Float { filterable: false }),
         ),
     )
 }
@@ -144,6 +148,8 @@ pub(crate) fn prepare_ssr_composite_bind_groups(
                 color_l0,
                 reflection,
                 visibility.scene_color_view(),
+                visibility.ssr_env_specular_view(),
+                visibility.ssr_spec_weight_view(),
             )),
         );
         commands

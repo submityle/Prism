@@ -79,7 +79,10 @@ pub(crate) struct ShadingResolvePipeline {
 /// Entries 4-7 are always bound (the global IBL textures are resident from
 /// `RenderStartup`); the `RESOLVE_FLAG_IBL_SPECULAR` immediate bit gates whether
 /// the shader actually samples them.
-fn view_layout_entries() -> BindGroupLayoutEntries<8> {
+///
+/// Entries 8-9 are the write-only SSR energy exports (`ssr_env_specular`,
+/// `ssr_spec_weight`); always bound because the pass runs regardless of SSR.
+fn view_layout_entries() -> BindGroupLayoutEntries<10> {
     BindGroupLayoutEntries::sequential(
         ShaderStages::COMPUTE,
         (
@@ -91,6 +94,10 @@ fn view_layout_entries() -> BindGroupLayoutEntries<8> {
             sampler(SamplerBindingType::Filtering),
             texture_2d(TextureSampleType::Float { filterable: true }),
             sampler(SamplerBindingType::Filtering),
+            // 8-9: SSR energy-conservation exports (IBL specular + env-BRDF
+            // weight), write-only storage the SSR composite later samples.
+            texture_storage_2d(SCENE_COLOR_FORMAT, StorageTextureAccess::WriteOnly),
+            texture_storage_2d(SCENE_COLOR_FORMAT, StorageTextureAccess::WriteOnly),
         ),
     )
 }
