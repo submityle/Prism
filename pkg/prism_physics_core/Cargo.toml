@@ -36,3 +36,7 @@ harness = false
 [[bench]]
 name = "cloth_scale"
 harness = false
+
+[[bench]]
+name = "cache_replay"
+harness = false
