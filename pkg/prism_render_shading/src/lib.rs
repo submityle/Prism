@@ -22,7 +22,9 @@ mod environment;
 mod exposure;
 mod face_shadow;
 mod film_grain;
+mod gamut_map;
 mod hair;
+mod lens_flare;
 mod light_routing;
 mod lighting;
 mod motion_blur;
@@ -75,6 +77,17 @@ pub use film_grain::{
 pub use vignette::{
     apply_vignette, apply_vignette_params, artistic_falloff, natural_falloff, natural_vignette,
     vignette_factor, vignette_smoothstep, VignetteParams,
+};
+pub use gamut_map::{
+    achromatic, apply_gamut_compress, clamp01 as gamut_clamp01, compress_distance,
+    distance_from_achromatic, luminance as gamut_map_luminance, max_channel, min_channel,
+    GamutMapParams, GAMUT_MAP_LUMA_WEIGHTS,
+};
+pub use lens_flare::{
+    accumulate_ghosts, apply_lens_flare, chromatic_ghost_offset, ghost_uv, halo_uv,
+    luminance as lens_flare_luminance, mix3 as lens_flare_mix3, radial_weight,
+    smoothstep as lens_flare_smoothstep, threshold_prefilter, vignette_weight, LensFlareParams,
+    LENS_FLARE_CENTER, LENS_FLARE_LUMINANCE_WEIGHTS,
 };
 pub use motion_blur::{
     clamp_velocity, cone, cylinder, neighbor_max, sample_weight, shutter_velocity,
