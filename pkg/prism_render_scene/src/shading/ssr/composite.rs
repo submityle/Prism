@@ -17,7 +17,9 @@
 //! It reads one bind group (group 0, matching `shaders/ssr_composite.wesl`):
 //!
 //! * `0` colour-pyramid level 0 (the untouched shaded colour, `textureLoad`ed),
-//! * `1` the spatially resolved reflection output (`textureLoad`ed), and
+//! * `1` the reflection output (`textureLoad`ed) — the temporally accumulated
+//!   buffer when temporal accumulation is active, else the raw spatial resolve,
+//!   and
 //! * `2` the write-only `rgba16float` `scene_color` blended in place.
 //!
 //! The framebuffer extent travels in the [`GpuSsrCompositeParams`] immediate
@@ -46,6 +48,7 @@ use bevy_shader::Shader;
 use super::super::resources::{ViewVisibilityBuffer, SCENE_COLOR_FORMAT};
 use super::abi::{GpuSsrCompositeParams, SSR_WORKGROUP_SIZE};
 use super::resources::ViewSsrTextures;
+use super::temporal::ViewSsrTemporal;
 
 /// Compute pipeline and its owned group-0 layout for the SSR composite.
 #[derive(Resource)]
@@ -107,27 +110,39 @@ pub(crate) struct ViewSsrCompositeBindGroup {
 
 /// `PrepareBindGroups` system building [`ViewSsrCompositeBindGroup`] for every
 /// view that has both a visibility buffer (for `scene_color`) and resident SSR
-/// textures (the colour pyramid + reflection output). Clears any stale group
-/// when the colour pyramid has no level 0 to lift the base colour from.
+/// textures (the colour pyramid + reflection output). Reads the temporally
+/// accumulated reflection when a [`ViewSsrTemporal`] is present, else the raw
+/// spatial resolve. Clears any stale group when the colour pyramid has no level
+/// 0 to lift the base colour from.
 pub(crate) fn prepare_ssr_composite_bind_groups(
     mut commands: Commands,
     pipeline: Res<SsrCompositePipeline>,
     device: Res<RenderDevice>,
-    views: Query<(Entity, &ViewVisibilityBuffer, &ViewSsrTextures)>,
+    views: Query<(
+        Entity,
+        &ViewVisibilityBuffer,
+        &ViewSsrTextures,
+        Option<&ViewSsrTemporal>,
+    )>,
 ) {
-    for (entity, visibility, textures) in &views {
+    for (entity, visibility, textures, temporal) in &views {
         let Some(color_l0) = textures.color_mip_view(0) else {
             commands
                 .entity(entity)
                 .remove::<ViewSsrCompositeBindGroup>();
             continue;
         };
+        // With temporal accumulation the composite reads the stabilised
+        // history output; otherwise it folds in the raw spatial resolve.
+        let reflection = temporal
+            .map(ViewSsrTemporal::write_view)
+            .unwrap_or_else(|| textures.ssr_resolved_view());
         let group = device.create_bind_group(
             "prism SSR composite",
             &pipeline.layout,
             &BindGroupEntries::sequential((
                 color_l0,
-                textures.ssr_resolved_view(),
+                reflection,
                 visibility.scene_color_view(),
             )),
         );

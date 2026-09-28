@@ -44,6 +44,11 @@
 //!   its per-view bind group and the `Core3d` node that denoises the noisy
 //!   multi-ray trace with an edge-aware neighbourhood filter, writing the
 //!   resolved reflection the composite reads.
+//! * [`temporal`] — the cross-frame accumulation pipeline, its persistent
+//!   per-view ping-pong history, per-view bind group and the `Core3d` node
+//!   that camera-reprojects the previous frame's accumulated reflection,
+//!   colour-box-clips it against ghosting and exponentially blends it with the
+//!   resolve, feeding the composite a temporally stable buffer.
 //! * [`composite`] — the pipeline, per-view bind group and `Core3d` node that
 //!   fold that reflection output back over the shaded `scene_color` (reading
 //!   the untouched base from colour-pyramid level 0 to avoid storage-image
@@ -57,6 +62,7 @@ mod dispatch;
 mod hzb;
 mod pipeline;
 mod reconstruct;
+mod temporal;
 mod repack;
 mod trace;
 mod resources;
@@ -76,6 +82,10 @@ pub(crate) use composite::{
 pub(crate) use trace::{init_ssr_trace_pipeline, prepare_ssr_trace_bind_groups, ssr_trace_pass};
 pub(crate) use reconstruct::{
     init_ssr_reconstruct_pipeline, prepare_ssr_reconstruct_bind_groups, ssr_reconstruct_pass,
+};
+pub(crate) use temporal::{
+    init_ssr_temporal_pipeline, prepare_ssr_temporal_bind_groups, prepare_ssr_temporal_textures,
+    ssr_temporal_pass,
 };
 pub(crate) use repack::{init_ssr_repack_pipeline, prepare_ssr_repack_bind_groups, ssr_repack_pass};
 pub(crate) use pipeline::init_ssr_prepass_pipeline;

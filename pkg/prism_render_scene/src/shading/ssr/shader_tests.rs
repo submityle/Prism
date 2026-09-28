@@ -253,3 +253,30 @@ fn ssr_resolve_wesl_compiles_standalone() {
         .get(0, resolve, &[])
         .unwrap_or_else(|error| panic!("ssr_resolve.wesl failed to compile: {error}"));
 }
+
+/// Compiles `ssr_temporal.wesl` standalone. The cross-frame accumulation
+/// reprojects the previous frame's reflection purely from camera motion
+/// (reconstructing world position from reverse-Z depth and the inverse current
+/// view-projection, then projecting through the previous view-projection),
+/// colour-box-clips the sampled history and exponentially blends it with the
+/// resolve. The kernel is self-contained (no intra-crate imports), so a green
+/// result also guards its immediate `TemporalParams` layout against drift from
+/// the 160-byte `GpuSsrTemporalParams` contract (two matrices + extent + golden
+/// tunables + validity flag).
+#[test]
+fn ssr_temporal_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let temporal = shader_id(0x5052_4953_4d5f_5353_525f_434d_5053_0004);
+    cache.set_shader(
+        temporal,
+        Shader::from_wesl(
+            include_str!("../../shaders/ssr_temporal.wesl"),
+            "embedded://prism_render_scene/shaders/ssr_temporal.wesl",
+        ),
+    );
+
+    cache
+        .get(0, temporal, &[])
+        .unwrap_or_else(|error| panic!("ssr_temporal.wesl failed to compile: {error}"));
+}
