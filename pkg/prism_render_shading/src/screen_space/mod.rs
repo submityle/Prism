@@ -18,6 +18,8 @@
 //! * [`reconstruct`] — edge-aware spatial resolve that denoises the multi-ray
 //!   trace with a normal/depth/confidence bilateral kernel.
 //! * [`fade`] — edge/facing/roughness/distance confidence and the IBL blend.
+//! * [`gi`] — screen-space *indirect diffuse* (SSGI): cosine-weighted
+//!   hemisphere gather over the same depth pyramid for one colour-bleed bounce.
 //! * [`temporal`] — cross-frame reprojection + neighbourhood-clip accumulation
 //!   that averages the resolve over time to kill the multi-ray boil.
 //! * [`motion`] — the per-pixel motion-vector G-buffer (`current_uv -
@@ -28,6 +30,7 @@
 //! and hands the raw hit to the confidence stage the resolve pass consumes.
 
 mod fade;
+mod gi;
 mod march;
 mod motion;
 mod ray;
@@ -38,6 +41,10 @@ mod temporal;
 pub use fade::{
     blend_specular, distance_fade, edge_fade, facing_fade, reflection_mip, roughness_fade,
     smoothstep, trace_confidence, SsrConfidenceParams, SsrTraceSample,
+};
+pub use gi::{
+    build_hemisphere_ray, cosine_sample_direction, gather_indirect_diffuse, trace_indirect_ray,
+    SsgiGather, SsgiParams, SsgiRaySample,
 };
 pub use march::{
     march_hierarchical, DepthPyramid, SsrMarchConfig, SsrMarchResult,
