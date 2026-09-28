@@ -35,7 +35,8 @@ struct TemporalParams {
     variance_gamma: f32,
     // floor the adaptive weight decays toward on a disocclusion.
     min_history_weight: f32,
-    _pad0: u32,
+    // clip-box widening for a low-confidence current sample (transient miss).
+    confidence_relax: f32,
 }
 
 @group(0) @binding(0) var ssr_resolved: texture_2d<f32>;
@@ -128,8 +129,11 @@ fn accumulate_ssr(@builtin(global_invocation_id) gid: vec3<u32>) {
     let mean = sum / count;
     let mean_sq = sum_sq / count;
     let expand = vec3<f32>(max(params.clamp_expand, 0.0));
-    let box_min = variance_box_min(mean, mean_sq, params.variance_gamma) - expand;
-    let box_max = variance_box_max(mean, mean_sq, params.variance_gamma) + expand;
+    // Raw variance box; the confidence relaxation and the expand slack are
+    // applied per-sample inside the valid-history branch (matches the golden
+    // `accumulate_temporal` order: relax first, then expand, then clip).
+    let raw_box_min = variance_box_min(mean, mean_sq, params.variance_gamma);
+    let raw_box_max = variance_box_max(mean, mean_sq, params.variance_gamma);
 
     var out = current;
 
@@ -148,6 +152,16 @@ fn accumulate_ssr(@builtin(global_invocation_id) gid: vec3<u32>) {
                     1.0 - (ndc_prev.y * 0.5 + 0.5),
                 );
                 let hist = textureSampleLevel(history, history_sampler, prev_uv, 0.0);
+                // Widen the clip box for a low-confidence current sample so a
+                // transient miss keeps the converged reflection instead of
+                // clipping it to a momentarily black pixel.  Relax the raw box
+                // around its centre, then apply the expand slack (golden order).
+                let relax_scale = 1.0
+                    + (1.0 - clamp(current.a, 0.0, 1.0)) * max(params.confidence_relax, 0.0);
+                let box_center = 0.5 * (raw_box_max + raw_box_min);
+                let box_half = 0.5 * (raw_box_max - raw_box_min) * relax_scale;
+                let box_min = box_center - box_half - expand;
+                let box_max = box_center + box_half + expand;
                 let clip = clip_to_aabb_ex(hist.rgb, box_min, box_max);
                 // Decay the blend toward the floor as the history is clipped
                 // further out (a disocclusion or a moving surface) so it sheds

@@ -53,6 +53,15 @@ pub struct SsrTemporalParams {
     /// history, trading a touch of noise for no visible ghost.  Clamped to
     /// `[0, history_weight]`.
     pub min_history_weight: f32,
+    /// How much to relax (scale up) the clip box when the *current* sample is a
+    /// low-confidence miss.  SSR misses are often transient — a ray that ran out
+    /// of budget or got skipped by the HZB one frame reappears the next — so a
+    /// hard variance clip against a momentarily black pixel would discard the
+    /// converged reflection and make it pop.  The box half-extent is scaled by
+    /// `1 + (1 - confidence)·confidence_relax`, so a confident hit clips tightly
+    /// (responsive) while a full miss widens the box and preserves history.
+    /// `0` disables the relaxation.
+    pub confidence_relax: f32,
 }
 
 impl Default for SsrTemporalParams {
@@ -62,6 +71,7 @@ impl Default for SsrTemporalParams {
             clamp_expand: 0.0,
             variance_gamma: 1.25,
             min_history_weight: 0.5,
+            confidence_relax: 4.0,
         }
     }
 }
@@ -192,6 +202,24 @@ pub fn adaptive_history_weight(params: &SsrTemporalParams, overshoot: f32) -> f3
     base + (floor - base) * t
 }
 
+/// Scale the neighbourhood clip box around its centre by
+/// `1 + (1 - confidence)·relax`, widening it as the current sample loses
+/// confidence.  A confident hit (`confidence == 1`) leaves the box untouched
+/// for a responsive, tight clip; a full miss (`confidence == 0`) inflates it by
+/// `1 + relax`, so a transient SSR miss keeps the converged history instead of
+/// clipping it to a momentarily black pixel and popping.
+pub fn relax_box_for_confidence(
+    box_min: Vec3,
+    box_max: Vec3,
+    confidence: f32,
+    relax: f32,
+) -> (Vec3, Vec3) {
+    let center = 0.5 * (box_max + box_min);
+    let half = 0.5 * (box_max - box_min);
+    let scale = 1.0 + (1.0 - confidence.clamp(0.0, 1.0)) * relax.max(0.0);
+    (center - half * scale, center + half * scale)
+}
+
 /// Exponentially accumulate the current frame's resolved reflection
 /// (`current.rgb` radiance + `current.a` confidence) with the reprojected
 /// `history`, clipping the history colour to the current neighbourhood box
@@ -199,9 +227,12 @@ pub fn adaptive_history_weight(params: &SsrTemporalParams, overshoot: f32) -> f3
 /// history had to be clipped.
 ///
 /// The caller passes the variance clip box from [`variance_clip_box`] (the
-/// shader gathers the same moments over its 3x3 neighbourhood).  History that
-/// lands inside the box keeps the full [`SsrTemporalParams::history_weight`] for
-/// maximum denoising; history dragged far outside decays toward
+/// shader gathers the same moments over its 3x3 neighbourhood).  The box is
+/// first relaxed by [`relax_box_for_confidence`] so a low-confidence current
+/// sample (a transient SSR miss) keeps its converged history rather than
+/// clipping it to a momentarily black pixel.  History that lands inside the box
+/// keeps the full [`SsrTemporalParams::history_weight`] for maximum denoising;
+/// history dragged far outside decays toward
 /// [`SsrTemporalParams::min_history_weight`] via [`adaptive_history_weight`], so
 /// a disocclusion or a moving surface sheds its stale reflection instead of
 /// ghosting.
@@ -221,6 +252,10 @@ pub fn accumulate_temporal(
     if !valid {
         return current;
     }
+    // Widen the clip box for a low-confidence current sample so a transient miss
+    // preserves the converged reflection instead of clipping it away.
+    let (box_min, box_max) =
+        relax_box_for_confidence(box_min, box_max, current.w, params.confidence_relax);
     let expand = Vec3::splat(params.clamp_expand.max(0.0));
     let clip = clip_history_to_aabb_ex(history.truncate(), box_min - expand, box_max + expand);
     let w = adaptive_history_weight(params, clip.overshoot);
@@ -324,6 +359,7 @@ mod tests {
             clamp_expand: 0.0,
             variance_gamma: 1.25,
             min_history_weight: 0.5,
+            confidence_relax: 4.0,
         };
         let cur = Vec4::new(0.2, 0.2, 0.2, 1.0);
         // History far outside the neighbourhood box gets clipped before blend.
@@ -393,6 +429,71 @@ mod tests {
         assert!((mn - mean).length() < 1.0e-6 && (mx - mean).length() < 1.0e-6);
     }
 
+    #[test]
+    fn confidence_relax_widens_the_box_for_a_miss_only() {
+        // Confident (1.0): box unchanged.
+        let (mn, mx) = relax_box_for_confidence(Vec3::splat(0.4), Vec3::splat(0.6), 1.0, 4.0);
+        assert!((mn.x - 0.4).abs() < 1.0e-6 && (mx.x - 0.6).abs() < 1.0e-6);
+        // Full miss (0.0) with relax 4.0: half-extent 0.1 scales x5 to 0.5.
+        let (mn, mx) = relax_box_for_confidence(Vec3::splat(0.4), Vec3::splat(0.6), 0.0, 4.0);
+        assert!((mn.x - 0.0).abs() < 1.0e-5, "widened box_min: {mn:?}");
+        assert!((mx.x - 1.0).abs() < 1.0e-5, "widened box_max: {mx:?}");
+    }
+
+    #[test]
+    fn a_low_confidence_miss_preserves_converged_history() {
+        // Current frame is a near-black, zero-confidence miss with a tight,
+        // near-black neighbourhood (all rays missed this frame).  A hard
+        // variance clip would drag the converged history down to the black box
+        // face; the confidence relaxation widens the box so more of the history
+        // survives the blend.  The golden assertion is comparative: with the
+        // relaxation on, strictly more history must come through than with it
+        // disabled (`confidence_relax = 0`), and the result must stay bounded by
+        // the relaxed box face (no unclipped ghost leaks in).
+        let cur = Vec4::new(0.0, 0.0, 0.0, 0.0);
+        let hist = Vec4::new(0.6, 0.6, 0.6, 0.95);
+        let box_min = Vec3::splat(0.0);
+        let box_max = Vec3::splat(0.05);
+
+        let relaxed = SsrTemporalParams::default();
+        let rigid = SsrTemporalParams {
+            confidence_relax: 0.0,
+            ..SsrTemporalParams::default()
+        };
+        let out_relaxed = accumulate_temporal(&relaxed, cur, hist, box_min, box_max, true);
+        let out_rigid = accumulate_temporal(&rigid, cur, hist, box_min, box_max, true);
+
+        // The relaxed box preserves strictly more of the converged reflection.
+        assert!(
+            out_relaxed.x > out_rigid.x + 1.0e-3,
+            "relaxation must preserve more history: relaxed {out_relaxed:?} vs rigid {out_rigid:?}"
+        );
+        // ...but the clip still bounds it: the relaxed box half-extent is
+        // 0.025·5 = 0.125 around centre 0.025, so the clamped history tops out
+        // at the 0.15 box face and the half-weight blend cannot exceed it.
+        assert!(
+            out_relaxed.x <= 0.15 + 1.0e-4,
+            "relaxed clip must still bound the history: {out_relaxed:?}"
+        );
+    }
+
+    #[test]
+    fn a_confident_hit_still_clips_stale_history() {
+        let params = SsrTemporalParams::default();
+        // Confident current hit: no relaxation, so a wildly different history is
+        // clipped to the tight neighbourhood box (no ghost leaks in).
+        let cur = Vec4::new(0.2, 0.2, 0.2, 1.0);
+        let hist = Vec4::new(5.0, 5.0, 5.0, 1.0);
+        let out = accumulate_temporal(
+            &params,
+            cur,
+            hist,
+            Vec3::splat(0.1),
+            Vec3::splat(0.3),
+            true,
+        );
+        assert!(out.x <= 0.3 + 1.0e-4, "confident hit must still clamp: {out:?}");
+    }
     #[test]
     fn clip_ex_reports_overshoot_outside_and_zero_inside() {
         let inside = clip_history_to_aabb_ex(Vec3::splat(0.5), Vec3::ZERO, Vec3::ONE);

@@ -50,7 +50,8 @@ pub use sample::{
 };
 pub use temporal::{
     accumulate_temporal, adaptive_history_weight, clip_history_to_aabb, clip_history_to_aabb_ex,
-    expand_bounds, reproject_prev_uv, variance_clip_box, ClipResult, SsrTemporalParams,
+    expand_bounds, relax_box_for_confidence, reproject_prev_uv, variance_clip_box, ClipResult,
+    SsrTemporalParams,
 };
 
 use bevy_math::Vec3;
