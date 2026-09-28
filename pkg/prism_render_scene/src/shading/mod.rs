@@ -1,7 +1,9 @@
 mod ao;
 mod bloom;
 mod classification_gpu;
+mod color_grade;
 mod composite;
+mod dof;
 mod exposure;
 mod graph;
 mod ibl;

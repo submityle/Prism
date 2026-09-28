@@ -14,6 +14,8 @@ mod classification;
 mod cluster;
 mod clearcoat;
 mod cloth;
+mod color_grade;
+mod dof;
 mod environment;
 mod exposure;
 mod face_shadow;
@@ -62,6 +64,15 @@ pub use cluster::{
 };
 pub use clearcoat::evaluate_clearcoat_direct;
 pub use cloth::evaluate_cloth_direct;
+pub use color_grade::{
+    apply_color_grade, color_saturation, contrast, lift_gamma_gain, lin_to_lms, lms_to_lin, luma,
+    offset, standard_illuminant_y, white_balance, ColorGradeParams, COLOR_GRADE_LUMA_WEIGHTS,
+    D65_LMS,
+};
+pub use dof::{
+    aperture_diameter, apply_dof, bokeh_weight, circle_of_confusion, coc_to_pixels,
+    dof_blend_factor, far_field_coc, near_field_coc, signed_coc, DofCamera, DofParams,
+};
 pub use environment::{
     env_brdf_approx, evaluate_image_based_light, evaluate_image_based_light_specular,
     integrate_brdf, prefilter_radiance, project_cubemap_to_sh, CubemapFaces, DfgLut,
