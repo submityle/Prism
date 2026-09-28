@@ -2,7 +2,7 @@
 //!
 //! Transparent geometry cannot live in the visibility buffer (one opaque
 //! surface per pixel), so it is drawn in a separate forward pass that
-//! accumulates into two MRT targets with McGuire & Bavoil blending (JCGT 2013),
+//! accumulates into two MRT targets with `McGuire` & Bavoil blending (JCGT 2013),
 //! then composited over the resolved opaque scene. The math layer is the golden
 //! `prism_render_shading::oit` with its GPU twin `shaders/oit.wesl`.
 //!

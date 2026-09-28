@@ -7,7 +7,7 @@
 //! primary controls — a von Kries white balance, ASC CDL lift/gamma/gain, a
 //! contrast expansion about middle grey and a luma-preserving saturation — in a
 //! fixed order, *before* the display tone-map curve so hue shifts stay stable
-//! across the dynamic range (the DaVinci / ACES workflow).
+//! across the dynamic range (the `DaVinci` / ACES workflow).
 //!
 //! Colour grading is a shared post-processing base, not a peer of the PBR/NPR
 //! shading fronts: every illumination model — physically based or stylized —

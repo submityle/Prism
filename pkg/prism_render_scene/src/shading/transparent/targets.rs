@@ -2,7 +2,7 @@
 //!
 //! Transparent geometry cannot live in the visibility buffer (one opaque
 //! surface per pixel), so it is drawn in a forward pass that accumulates into
-//! two MRT targets with McGuire & Bavoil blending (JCGT 2013):
+//! two MRT targets with `McGuire` & Bavoil blending (JCGT 2013):
 //!
 //! * [`OIT_ACCUM_FORMAT`] (`Rgba16Float`) - additive: weighted premultiplied
 //!   colour in `rgb`, summed weighted alpha in `a`;
