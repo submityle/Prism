@@ -62,7 +62,6 @@ impl ViewGtaoTextures {
     }
 
     /// Storage/sampling view of the ambient-visibility target.
-    #[expect(dead_code, reason = "read by the GTAO compute bind groups in a following slice")]
     pub(crate) fn ambient_occlusion_view(&self) -> &TextureView {
         &self.ambient_occlusion.default_view
     }

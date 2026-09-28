@@ -28,8 +28,8 @@ use bevy_render::{
 };
 use bevy_shader::Shader;
 
-use super::abi::GpuGtaoPrepassParams;
-use super::resources::{GTAO_DEPTH_FORMAT, GTAO_NORMAL_FORMAT};
+use super::abi::{GpuGtaoConfig, GpuGtaoPrepassParams};
+use super::resources::{GTAO_AO_FORMAT, GTAO_DEPTH_FORMAT, GTAO_NORMAL_FORMAT};
 
 /// Compute pipeline and the two owned bind-group layouts for the GTAO prepass.
 #[derive(Resource)]
@@ -105,4 +105,61 @@ pub(crate) fn init_gtao_prepass_pipeline(
         view_layout,
         scene_layout,
     });
+}
+
+
+/// Compute pipeline and the single owned bind-group layout for the GTAO kernel.
+///
+/// The kernel (`shaders/gtao.wesl`) reads the two view-space geometry targets
+/// produced by the prepass and writes ambient visibility, all through one bind
+/// group; its projection/horizon tunables arrive in the 32-byte immediate
+/// [`GpuGtaoConfig`] block.
+#[derive(Resource)]
+pub(crate) struct GtaoKernelPipeline {
+    /// `compute_gtao` entry point, specialized against [`Self::view_layout`]
+    /// and the 32-byte immediate config block.
+    pub(crate) kernel: CachedComputePipelineId,
+    /// group 0: linear-depth + view-normal sampled inputs followed by the
+    /// write-only ambient-visibility (`r32float`) storage output.
+    pub(crate) view_layout: BindGroupLayout,
+}
+
+/// group-0 layout for the kernel: the linear-depth and view-normal targets as
+/// float-sampled textures, then the write-only ambient-visibility storage
+/// texture.
+fn kernel_layout_entries() -> BindGroupLayoutEntries<3> {
+    BindGroupLayoutEntries::sequential(
+        ShaderStages::COMPUTE,
+        (
+            texture_2d(TextureSampleType::Float { filterable: false }),
+            texture_2d(TextureSampleType::Float { filterable: false }),
+            texture_storage_2d(GTAO_AO_FORMAT, StorageTextureAccess::WriteOnly),
+        ),
+    )
+}
+
+/// `RenderStartup` initializer for [`GtaoKernelPipeline`].
+pub(crate) fn init_gtao_kernel_pipeline(
+    mut commands: Commands,
+    device: Res<RenderDevice>,
+    cache: Res<PipelineCache>,
+    asset_server: Res<bevy_asset::AssetServer>,
+) {
+    let view_entries = kernel_layout_entries();
+    let view_descriptor = BindGroupLayoutDescriptor::new("prism GTAO kernel view", &view_entries);
+    let view_layout = device.create_bind_group_layout("prism GTAO kernel view", &view_entries);
+
+    let shader: Handle<Shader> =
+        load_embedded_asset!(asset_server.as_ref(), "../shaders/gtao.wesl");
+
+    let kernel = cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        label: Some("prism GTAO kernel".into()),
+        layout: vec![view_descriptor],
+        immediate_size: size_of::<GpuGtaoConfig>() as u32,
+        shader,
+        entry_point: Some("compute_gtao".into()),
+        ..Default::default()
+    });
+
+    commands.insert_resource(GtaoKernelPipeline { kernel, view_layout });
 }

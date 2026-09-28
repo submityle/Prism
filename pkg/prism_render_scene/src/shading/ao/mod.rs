@@ -20,8 +20,9 @@
 //! * [`bind_groups`] — per-view prepass bind-group construction.
 //! * [`dispatch`] — the `Core3d` node recording the prepass dispatch.
 //!
-//! The GTAO kernel pipeline and the resolve's consumption of the AO texture
-//! land in following slices.
+//! * The kernel pipeline/bind-group/dispatch live alongside the prepass in
+//!   [`pipeline`], [`bind_groups`], and [`dispatch`]. The resolve's
+//!   consumption of the AO texture lands in a following slice.
 
 mod abi;
 mod bind_groups;
@@ -32,7 +33,7 @@ mod resources;
 #[cfg(test)]
 mod shader_tests;
 
-pub(crate) use bind_groups::prepare_gtao_prepass_bind_groups;
-pub(crate) use dispatch::gtao_prepass_pass;
-pub(crate) use pipeline::init_gtao_prepass_pipeline;
+pub(crate) use bind_groups::{prepare_gtao_kernel_bind_groups, prepare_gtao_prepass_bind_groups};
+pub(crate) use dispatch::{gtao_compute_pass, gtao_prepass_pass};
+pub(crate) use pipeline::{init_gtao_kernel_pipeline, init_gtao_prepass_pipeline};
 pub(crate) use resources::prepare_gtao_textures;

@@ -9,8 +9,9 @@ use bevy_render::{
 
 use super::{
     ao::{
-        gtao_prepass_pass, init_gtao_prepass_pipeline, prepare_gtao_prepass_bind_groups,
-        prepare_gtao_textures,
+        gtao_compute_pass, gtao_prepass_pass, init_gtao_kernel_pipeline,
+        init_gtao_prepass_pipeline, prepare_gtao_kernel_bind_groups,
+        prepare_gtao_prepass_bind_groups, prepare_gtao_textures,
     },
     classification_gpu::{
         dispatch_material_classification, init_material_classification_pipeline,
@@ -69,6 +70,7 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/shadow.wesl");
         embedded_asset!(app, "../shaders/shading_resolve.wesl");
         embedded_asset!(app, "../shaders/gtao_prepass.wesl");
+        embedded_asset!(app, "../shaders/gtao.wesl");
         embedded_asset!(app, "../shaders/composite.wesl");
         embedded_asset!(app, "../shaders/oit.wesl");
         embedded_asset!(app, "../shaders/transparent.wesl");
@@ -120,6 +122,7 @@ impl Plugin for PrismShadingPlugin {
                     init_shading_composite_pipeline,
                     init_oit_composite_pipeline,
                     init_gtao_prepass_pipeline,
+                    init_gtao_kernel_pipeline,
                 ),
             )
             .add_systems(
@@ -185,6 +188,12 @@ impl Plugin for PrismShadingPlugin {
                         .in_set(RenderSystems::PrepareBindGroups),
                 ),
             )
+            .add_systems(
+                Render,
+                prepare_gtao_kernel_bind_groups
+                    .after(prepare_gtao_textures)
+                    .in_set(RenderSystems::PrepareBindGroups),
+            )
             .add_systems(ExtractSchedule, extract_shadows);
         render_app.add_systems(
             bevy_core_pipeline::Core3d,
@@ -196,6 +205,9 @@ impl Plugin for PrismShadingPlugin {
                     .before(bevy_core_pipeline::Core3dSystems::MainPass),
                 gtao_prepass_pass
                     .after(visibility_raster_pass)
+                    .before(dispatch_shading_resolve),
+                gtao_compute_pass
+                    .after(gtao_prepass_pass)
                     .before(dispatch_shading_resolve),
                 dispatch_shading_resolve
                     .after(dispatch_material_classification)

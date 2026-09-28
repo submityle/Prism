@@ -10,6 +10,19 @@ pub struct PrismShadingSettings {
     /// visibility buffer; the resolve stage multiplies indirect light by the
     /// resulting per-pixel visibility.
     pub enable_gtao: bool,
+    /// GTAO sampling radius in world units; larger gathers more distant
+    /// occluders. Clamped to a small positive minimum by the kernel.
+    pub gtao_world_radius: f32,
+    /// Fraction of the radius (`0..=1`) at which GTAO distance falloff begins.
+    pub gtao_falloff: f32,
+    /// GTAO occlusion contrast exponent; `> 1` darkens contact shadows.
+    pub gtao_power: f32,
+    /// GTAO slice directions swept per pixel (clamped `>= 1`). More slices
+    /// reduce banding at proportional cost.
+    pub gtao_slice_count: u32,
+    /// GTAO marched samples per side per slice (clamped `>= 1`). More steps
+    /// catch thinner horizons.
+    pub gtao_steps_per_slice: u32,
 }
 
 impl Default for PrismShadingSettings {
@@ -19,6 +32,11 @@ impl Default for PrismShadingSettings {
             enable_visibility_buffer: false,
             enable_compute_resolve: false,
             enable_gtao: false,
+            gtao_world_radius: 1.0,
+            gtao_falloff: 0.6,
+            gtao_power: 1.0,
+            gtao_slice_count: 4,
+            gtao_steps_per_slice: 8,
         }
     }
 }
