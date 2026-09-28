@@ -12,6 +12,7 @@ mod ssgi;
 mod ssr;
 mod taa;
 mod transparent;
+mod volumetrics;
 mod resources;
 mod runtime;
 

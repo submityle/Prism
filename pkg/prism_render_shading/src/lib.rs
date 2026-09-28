@@ -31,6 +31,7 @@ mod tangent;
 mod texture_sample;
 mod vecmath;
 mod visibility;
+mod volumetrics;
 mod water;
 
 pub use classification::{
@@ -127,4 +128,8 @@ pub use visibility::{
     encode_barycentrics, BarycentricError, VisibilityPixel, VisibilityPixelTargets,
     INVALID_VISIBILITY_ID,
     VISIBILITY_BUFFER_ABI_VERSION,
+};
+pub use volumetrics::{
+    froxel_source, henyey_greenstein, in_scatter, integrate_froxel_column, integrate_slice,
+    transmittance, Froxel, MediumSample, VolumetricIntegration,
 };
