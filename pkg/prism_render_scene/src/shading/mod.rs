@@ -2,6 +2,7 @@ mod ao;
 mod classification_gpu;
 mod composite;
 mod graph;
+mod ibl;
 mod plugin;
 mod raster;
 mod resolve;

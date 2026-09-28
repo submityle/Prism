@@ -42,8 +42,8 @@ pub use cluster::{
 pub use clearcoat::evaluate_clearcoat_direct;
 pub use cloth::evaluate_cloth_direct;
 pub use environment::{
-    env_brdf_approx, evaluate_image_based_light, project_cubemap_to_sh, CubemapFaces,
-    ImageBasedLight, SphericalHarmonicsL2,
+    env_brdf_approx, evaluate_image_based_light, integrate_brdf, project_cubemap_to_sh,
+    CubemapFaces, DfgLut, ImageBasedLight, SphericalHarmonicsL2,
 };
 pub use hair::evaluate_hair_direct;
 pub use oit::{
