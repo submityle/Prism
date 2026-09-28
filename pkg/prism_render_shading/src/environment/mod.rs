@@ -242,6 +242,79 @@ pub fn evaluate_image_based_light(
     ]
 }
 
+/// A high-frequency specular environment: a GGX-prefiltered radiance mip chain
+/// paired with the split-sum environment-BRDF ("DFG") lookup table.
+///
+/// Passing this to [`evaluate_image_based_light_specular`] replaces the
+/// low-frequency SH-radiance specular hack with the real prefiltered map
+/// sampled at the roughness-selected mip and the integrated DFG term, matching
+/// the GPU resolve path once Slice C binds the precomputed textures.
+#[derive(Clone, Copy, Debug)]
+pub struct SpecularEnvironment<'a> {
+    /// GGX-prefiltered environment radiance, one cube per roughness mip.
+    pub prefiltered: &'a PrefilteredEnvMap,
+    /// Integrated split-sum environment BRDF, indexed by `(n_dot_v, roughness)`.
+    pub dfg: &'a DfgLut,
+}
+
+/// Evaluates the indirect contribution using a prefiltered specular source.
+///
+/// The diffuse half is identical to [`evaluate_image_based_light`] (SH
+/// irradiance scaled by albedo and occlusion).  The specular half samples the
+/// prefiltered radiance mip chain along the reflection vector at the surface
+/// roughness and weights it by the integrated DFG table (`F0 * scale + bias`),
+/// so glossy reflections read a sharp mip and rough reflections read a
+/// pre-blurred one.  Emissive is intentionally excluded so the resolve pass can
+/// add it exactly once.
+pub fn evaluate_image_based_light_specular(
+    surface: SurfaceSample,
+    frame: ShadingFrame,
+    light: &ImageBasedLight,
+    specular_env: &SpecularEnvironment<'_>,
+) -> [f32; 3] {
+    let normal = normalize_or(frame.normal, [0.0, 1.0, 0.0]);
+    let view = normalize_or(frame.view, normal);
+    let n_dot_v = dot(normal, view).max(1.0e-4);
+
+    let metallic = surface.metallic.clamp(0.0, 1.0);
+    let roughness = surface.perceptual_roughness.clamp(0.0, 1.0);
+    let occlusion = surface.ambient_occlusion.clamp(0.0, 1.0);
+    let reflectance = surface.reflectance.clamp(0.0, 1.0);
+    let f0_dielectric = 0.16 * reflectance * reflectance;
+    let f0 = [
+        mix(f0_dielectric, surface.base_color[0], metallic),
+        mix(f0_dielectric, surface.base_color[1], metallic),
+        mix(f0_dielectric, surface.base_color[2], metallic),
+    ];
+
+    // Diffuse: Lambertian albedo lit by cosine-convolved irradiance.
+    let irradiance = light.radiance.irradiance(normal);
+    let diffuse_weight = 1.0 - metallic;
+    let inverse_pi = core::f32::consts::FRAC_1_PI;
+    let diffuse = [
+        surface.base_color[0] * diffuse_weight * irradiance[0] * inverse_pi,
+        surface.base_color[1] * diffuse_weight * irradiance[1] * inverse_pi,
+        surface.base_color[2] * diffuse_weight * irradiance[2] * inverse_pi,
+    ];
+
+    // Specular: prefiltered radiance sampled at the roughness-selected mip,
+    // weighted by the integrated DFG table (F0 * scale + bias).
+    let reflection = reflect(mul_scalar(view, -1.0), normal);
+    let prefiltered = specular_env.prefiltered.sample(reflection, roughness);
+    let dfg = specular_env.dfg.sample(n_dot_v, roughness);
+    let specular = [
+        prefiltered[0] * (f0[0] * dfg[0] + dfg[1]),
+        prefiltered[1] * (f0[1] * dfg[0] + dfg[1]),
+        prefiltered[2] * (f0[2] * dfg[0] + dfg[1]),
+    ];
+
+    [
+        (diffuse[0] + specular[0]) * occlusion * light.intensity,
+        (diffuse[1] + specular[1]) * occlusion * light.intensity,
+        (diffuse[2] + specular[2]) * occlusion * light.intensity,
+    ]
+}
+
 fn reflect(incident: [f32; 3], normal: [f32; 3]) -> [f32; 3] {
     let d = 2.0 * dot(incident, normal);
     [
@@ -382,5 +455,119 @@ mod tests {
         for channel in 0..3 {
             assert!((half[channel] - full[channel] * 0.5).abs() < 1.0e-5);
         }
+    }
+
+    fn constant_cube(size: u32, color: [f32; 3]) -> CubemapFaces {
+        let face = alloc::vec![color; (size as usize) * (size as usize)];
+        CubemapFaces::new(size, core::array::from_fn(|_| face.clone())).unwrap()
+    }
+
+    fn surface_for_specular(roughness: f32, metallic: f32) -> SurfaceSample {
+        SurfaceSample {
+            base_color: [0.9, 0.8, 0.7],
+            perceptual_roughness: roughness,
+            metallic,
+            reflectance: 0.5,
+            ambient_occlusion: 1.0,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn prefiltered_specular_matches_analytic_on_constant_environment() {
+        // A constant environment: the prefiltered map is constant at every mip
+        // and the DFG LUT tracks the analytic fit, so the prefiltered specular
+        // path must land close to the analytic `evaluate_image_based_light`.
+        let color = [0.4, 0.5, 0.6];
+        let probe = SphericalHarmonicsL2::from_constant(color);
+        let light = ImageBasedLight::new(probe);
+        let cube = constant_cube(8, color);
+        let prefiltered = PrefilteredEnvMap::generate(&cube, 5, 8, 64).unwrap();
+        let dfg = DfgLut::generate(64, 256).unwrap();
+        let env = SpecularEnvironment {
+            prefiltered: &prefiltered,
+            dfg: &dfg,
+        };
+        let frame = ShadingFrame {
+            normal: [0.0, 1.0, 0.0],
+            view: [0.0, 1.0, 0.0],
+            tangent: [1.0, 0.0, 0.0],
+            bitangent: [0.0, 0.0, -1.0],
+        };
+        for roughness in [0.1, 0.4, 0.7, 1.0] {
+            let surface = surface_for_specular(roughness, 0.3);
+            let analytic = evaluate_image_based_light(surface, frame, &light);
+            let real = evaluate_image_based_light_specular(surface, frame, &light, &env);
+            // The DFG LUT and analytic fit differ slightly; require the same
+            // ballpark rather than bit equality.
+            assert!(approx(analytic, real, 0.05), "r={roughness} {analytic:?} vs {real:?}");
+        }
+    }
+
+    #[test]
+    fn prefiltered_specular_reflects_the_bright_face() {
+        // Only +X is bright. A mirror metal looking along -X reflects toward +X
+        // and must pick up that radiance; looking along +X reflects to -X (dark).
+        let mut colors = [[0.0f32; 3]; 6];
+        colors[0] = [6.0, 6.0, 6.0]; // +X
+        let cube = CubemapFaces::new(
+            16,
+            core::array::from_fn(|i| alloc::vec![colors[i]; 16 * 16]),
+        )
+        .unwrap();
+        let prefiltered = PrefilteredEnvMap::generate(&cube, 6, 16, 128).unwrap();
+        let dfg = DfgLut::generate(64, 128).unwrap();
+        let env = SpecularEnvironment {
+            prefiltered: &prefiltered,
+            dfg: &dfg,
+        };
+        let light = ImageBasedLight::new(SphericalHarmonicsL2::ZERO);
+        let mirror = surface_for_specular(0.02, 1.0);
+        // View looking along -X: reflection about +X normal points to +X.
+        let toward = ShadingFrame {
+            normal: [1.0, 0.0, 0.0],
+            view: [1.0, 0.0, 0.0],
+            tangent: [0.0, 1.0, 0.0],
+            bitangent: [0.0, 0.0, 1.0],
+        };
+        let away = ShadingFrame {
+            normal: [-1.0, 0.0, 0.0],
+            view: [-1.0, 0.0, 0.0],
+            tangent: [0.0, 1.0, 0.0],
+            bitangent: [0.0, 0.0, 1.0],
+        };
+        let hit = evaluate_image_based_light_specular(mirror, toward, &light, &env);
+        let miss = evaluate_image_based_light_specular(mirror, away, &light, &env);
+        assert!(hit[0] > miss[0] + 1.0, "hit={hit:?} miss={miss:?}");
+        assert!(hit.iter().all(|c| c.is_finite() && *c >= 0.0));
+    }
+
+    #[test]
+    fn rougher_specular_blurs_the_bright_face_highlight() {
+        // A sharp mirror sees the bright +X face at full strength; a rough
+        // surface averages it with dark neighbours, dimming the peak.
+        let mut colors = [[0.0f32; 3]; 6];
+        colors[0] = [8.0, 8.0, 8.0];
+        let cube = CubemapFaces::new(
+            16,
+            core::array::from_fn(|i| alloc::vec![colors[i]; 16 * 16]),
+        )
+        .unwrap();
+        let prefiltered = PrefilteredEnvMap::generate(&cube, 6, 16, 256).unwrap();
+        let dfg = DfgLut::generate(64, 128).unwrap();
+        let env = SpecularEnvironment {
+            prefiltered: &prefiltered,
+            dfg: &dfg,
+        };
+        let light = ImageBasedLight::new(SphericalHarmonicsL2::ZERO);
+        let frame = ShadingFrame {
+            normal: [1.0, 0.0, 0.0],
+            view: [1.0, 0.0, 0.0],
+            tangent: [0.0, 1.0, 0.0],
+            bitangent: [0.0, 0.0, 1.0],
+        };
+        let sharp = evaluate_image_based_light_specular(surface_for_specular(0.05, 1.0), frame, &light, &env);
+        let rough = evaluate_image_based_light_specular(surface_for_specular(0.9, 1.0), frame, &light, &env);
+        assert!(rough[0] < sharp[0], "sharp={sharp:?} rough={rough:?}");
     }
 }
