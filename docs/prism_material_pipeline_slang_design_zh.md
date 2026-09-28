@@ -2,11 +2,12 @@
 
 > 状态：架构提案（Draft，允许破坏性重构）
 > 面向版本：Bevy/Prism 下一代渲染底座
-> Shader 工具链：**Slang**（唯一 shader 语言，替换现有 WESL）
-> 后端策略：**Vulkan 优先**（VK 先写代码，架构后端中立，后续扩 Metal/D3D12/WebGPU/主机/移动）
+> Shader 工具链：**Slang**（唯一 shader 语言，替换现有 WESL）—— 跨平台的**着色器语言层**抽象，当前最大缺口
+> 运行时后端：**wgpu**（已在用，经 Bevy）—— 跨平台的**运行时 API 层**抽象，Metal/Vulkan/D3D12/WebGPU 全覆盖
+> 后端策略修订（2026-09-29）：原"Vulkan 优先"的**真实目标是跨平台**，非原生 VK 本身。裸 Vulkan 在苹果/Web 上反而是跨平台短板，故运行时跨平台交由 wgpu、着色器跨平台交由 Slang。详见 §0.5
 > 本文依据：对 `pkg/` 下渲染 crate 的静态阅读 + 架构讨论收敛结论；未运行示例/测试/基准
 > 关联文档：`docs/prism_rendering_architecture_zh.md`（较早 draft，本文在其之上收敛材质/管线/子系统/Slang 决策）
-> 最后更新：2026-09-28
+> 最后更新：2026-09-29
 
 ---
 
@@ -15,7 +16,7 @@
 ### 目标（硬约束）
 
 - 同一引擎**同时**是顶级 AAA 的 PBR / NPR / 混合 / 自定义引擎；四者皆一等公民，无谁是底座、无谁是补丁。赛道由具体项目/场景选择，不由引擎替用户选。
-- 后端中立，**Vulkan 优先**（先出 SPIR-V/VK，架构须能无痛扩到 Metal/D3D12/WebGPU/主机/移动）。
+- **跨平台**（硬目标）：运行时经 **wgpu** 覆盖 Metal/Vulkan/D3D12/WebGPU/主机/移动；着色器经 **Slang** 一份源码编到 WGSL/SPIR-V/DXIL/Metal/CPU。原文"Vulkan 优先"修订为此目标，见 §0.5。
 - 吃满高级特性：GI/RT、虚拟阴影（VSM）、虚拟几何、时序上采样、动态光照、粒子、透明、毛发、布料、体积。
 
 ### 非目标（主动不做，避免撞墙）
@@ -23,6 +24,26 @@
 - 不做完整无界 Substrate（性能重、撞弱平台、对"混合"无用——混合靠逐像素多材质，不靠单材质无限瓣）。
 - 不追求 RT 里对 NPR 的物理正确（NPR 在次级光线里本就是降级的，见 §10）。
 - 不追求"物理外观一致"的 PBR/NPR 统一（这是错误目标，见 §4）。
+
+---
+
+## 0.5 后端策略修订：跨平台的正确拆法（2026-09-29）
+
+原文写"Vulkan 优先"，事后澄清：**真实意图是跨平台，Vulkan 只是当时误选的载体**。裸 Vulkan 并非天然跨平台——苹果平台无原生 VK（只能靠 MoltenVK 转译，功能是子集），Web 平台 VK 完全覆盖不到。以原生 VK 作跨平台地基，反而把苹果/Web 变成短板。
+
+**跨平台需要两层各自独立的抽象，Prism 一层已经有了：**
+
+| 抽象层 | 作用 | 正解 | Prism 现状 |
+|---|---|---|---|
+| **运行时 API 层** | 统一 Metal/VK/D3D12/WebGPU | **wgpu** | ✅ 已在用（Bevy→wgpu），Metal/VK/DX12/**Web** 天然全覆盖，比裸 VK 更跨平台 |
+| **着色器语言层** | 一份 shader 编到各后端 | **Slang** | ❌ 卡在 **WESL**，无 slangc、0 个 `.slang`——**这才是真正的跨平台缺口** |
+
+**修订结论**：
+
+- 运行时跨平台**已由 wgpu 达成**，不需要、也不应该为原生 VK 折腾（那是跨平台的倒退）。
+- 真正缺的跨平台能力在**着色器语言层**：WESL 绑得死、目标面窄；Slang 才是"一份代码编全平台"。
+- 因此本文所有"Vulkan 优先/VK 先"应读作 **"wgpu（已有运行时）+ Slang（待补语言层）"**。原生 Vulkan 后端从"地基前提"降级为"可选高配特化路径"（仅当需要 wgpu 覆盖不到的能力时才做）。
+- 开发机是 Apple Silicon macOS，Metal（经 wgpu）本就在跑，且能就地测 Metal + Web 两条跨平台线——是验证跨平台最合适的机器，而非障碍。
 
 ---
 
@@ -69,7 +90,7 @@
 | 硬需求 | Slang 的对应能力 | 对 WESL 的优势 |
 |---|---|---|
 | 闭包 IR 要能被延迟 pass **和** RT hit shader 共用 | `interface` + 泛型（关联类型），一份 closure 定义两处实例化 | WESL 无接口/泛型，只能宏拼或复制 |
-| 后端中立、VK 优先 | 同一份源码 → SPIR-V(先) / DXIL / Metal / WGSL / CPU | WESL 经 naga，目标面窄、RT 支持弱 |
+| 后端中立、**真跨平台**（含苹果/Web） | 同一份源码 → WGSL / SPIR-V / DXIL / Metal / CPU（配合 wgpu 落地全平台） | WESL 经 naga，目标面窄、RT 支持弱 |
 | CPU golden reference 不漂移 | Slang **CPU/C++ host target**，从**同一份 shader**生成 CPU 参考 | 现在 CPU 参考是独立 Rust(`resolve.rs`)，靠人肉对齐，必漂 |
 | specialization 排列编译 | **link-time specialization** + 类型参数 + link-time 常量 | WESL 靠预处理宏，组合爆炸难管 |
 
@@ -84,7 +105,7 @@
 ### 2.3 构建集成
 
 - 新 crate `prism_render_slang`（或 `prism_shader`）：封装 slangc 调用、reflection→Rust codegen、variant 缓存。
-- 构建期：`.slang` → SPIR-V（VK）+ CPU host lib（golden ref）+ reflection json → Rust `build.rs` 生成 ABI 绑定。
+- 构建期：`.slang` → **WGSL（wgpu 主目标）/ SPIR-V** + CPU host lib（golden ref）+ reflection json → Rust `build.rs` 生成 ABI 绑定。（运行时走 wgpu，故 WGSL 是首要产物；SPIR-V/Metal 由 wgpu 或未来原生后端消费。）
 - `.wesl` 现有 shader（`pkg/prism_render_scene/src/shaders/*.wesl`）**分批迁移**，不一次性推倒。迁移期两者并存，新 closure 一律 Slang。
 
 ### 2.4 迁移成本（诚实）
@@ -220,10 +241,12 @@ fallback:              strand 高配, card 基线; RT 反射里毛发用 proxy �
 
 ## 8. 后端抽象（破坏性重构）
 
+> 修订（2026-09-29）：跨平台的**运行时抽象已由 wgpu 提供**（Bevy 现状）。本节的"后端注册表 + capability"是在 wgpu 之上的能力查询层，**不是**要绕开 wgpu 自己写多后端。原生 Vulkan 后端从"优先"降为"可选高配特化路径"（仅当需要 wgpu 覆盖不到的能力时才做），不再是地基前提。见 §0.5。
+
 - 删 `BackendMode{VulkanFirst,WgpuCompatibility}` 二值枚举 → **后端注册表 + capability 查询**。
 - 保留并扩展 `VulkanTier{Core13,MeshShader,RayQuery,Full}`，泛化成跨后端 capability bits（mesh shader / ray query / bindless / wave ops …）。
 - **fallback 矩阵**：每个高级特性声明所需 capability + 降级路径（无 RT → SSR/SSGI；无 mesh shader → 传统 index draw；无 bindless → 描述符表）。
-- Slang 同源多目标（§2.1）让"VK 先，后面 Metal/D3D12/WebGPU"从"重写 shader"变成"加编译目标 + 补 capability 分支"。
+- Slang 同源多目标（§2.1）让"一份 shader、多平台"从"重写 shader"变成"加编译目标 + 补 capability 分支"；运行时由 wgpu 落到 Metal/VK/D3D12/WebGPU/Web。
 
 ---
 
@@ -246,7 +269,7 @@ fallback:              strand 高配, card 基线; RT 反射里毛发用 proxy �
 - **NPR 一等公民无成熟范式**：PBR 侧有 UE/业界抄作业，**NPR 一等前端这条基本得自己趟**——这是全设计风险最高、参考最少的部分（顶级二次元 NPR 大作多为自研或魔改引擎，不用 UE 招牌管线）。
 - **Slang 迁移是真成本**：一套 shader 构建子系统 + CPU 对齐改造。收益（RT 共用 closure、多目标、CPU 参考不漂移、reflection 生成 ABI）大于成本，但成本要认。
 - **strand 毛发是 AAA 最重特性之一**：card 基线务实、strand 高配可选，别一上来就 strand。
-- **真正的落地风险不在材质模型**（业界已收敛），而在**还不存在的 Vulkan 后端 + vis-buffer 基底**。
+- **真正的落地风险不在材质模型**（业界已收敛），也不在运行时后端（**wgpu 已提供跨平台运行时**），而在 **① 尚未落地的 Slang 工具链**（当前仍在堆 WESL，是最大出血点）**+ ② 还不存在的 vis-buffer 基底**。修订前误判为"Vulkan 后端"，实为 Slang 工具链 + vis-buffer。
 
 ### 与 UE 的关系（定位参考）
 
@@ -256,16 +279,17 @@ fallback:              strand 高配, card 基线; RT 反射里毛发用 proxy �
 
 ---
 
-## 11. 落地路线图（VK 优先，每步可编译+测试绿）
+## 11. 落地路线图（跨平台 = wgpu + Slang，每步可编译+测试绿）
 
 **破除分析瘫痪的关键：先一条极薄端到端竖切，让竖切反过来钉死 ABI。**
+**修订（2026-09-29）：竖切跑在 wgpu 上（Metal/Web 就地可测），不等原生 Vulkan；Slang 主编 WGSL 目标喂 wgpu。**
 
-1. **建 `prism_render_slang`**：slangc + reflection codegen + variant 缓存跑通（先编一个 über closure 到 SPIR-V + CPU target，对齐）。
-2. **极薄竖切**：真·Vulkan → 蒙皮(支柱四地基) → vis-buffer → material id → **一个 PBR 延迟着色 + 一个 NPR forward 着色**，点亮光照/阴影**数据服务最小版**（一盏方向光 + 一张 VSM）。
+1. **建 `prism_render_slang`**：slangc + reflection codegen + variant 缓存跑通（先编一个 über closure 到 **WGSL + CPU target**，对齐）。**当前第一优先——止住 WESL 继续新增。**
+2. **极薄竖切**：wgpu → 蒙皮(支柱四地基) → vis-buffer → material id → **一个 PBR 延迟着色 + 一个 NPR forward 着色**，点亮光照/阴影**数据服务最小版**（一盏方向光 + 一张 VSM）。
 3. **材质 ABI 破坏性重构**（§9 第 1–3 步），用竖切验证正交轴 + specialization。
 4. **粒子子系统**：优先，因为它带起 reactive mask（§5 最该早做的基底）。
 5. **`prism_render_npr` 骨架**：描边（material id 边界白送）+ ramp + `evaluate_stylized_direct`。
-6. **frame graph 装配节点**，最后逐节点 Vulkan 实装。
+6. **frame graph 装配节点**，逐节点在 wgpu 上实装（原生 Vulkan 特化后置，仅在需要 wgpu 覆盖不到的能力时才做）。
 7. 毛发(card)/布料/froxel 体积按 §6.2 优先级跟进；水/植被/贴花后置。
 
 ---

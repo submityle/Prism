@@ -2,7 +2,7 @@
 name = "prism_render_architecture"
 version = "0.1.0"
 edition = "2024"
-description = "Architecture contracts for Prism's Vulkan-first renderer"
+description = "Architecture contracts for Prism's cross-platform renderer (wgpu runtime + Slang shaders)"
 license = "MIT OR Apache-2.0"
 publish = false
 
