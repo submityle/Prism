@@ -34,7 +34,9 @@ import prism_render_scene::shaders::surface::{
 };
 import prism_render_scene::shaders::gpu_scene::{
     GpuSceneInstance,
+    GpuSceneTransform,
 };
+import prism_render_scene::shaders::scene_transform::scene_apply_current_transform;
 
 // Sentinel packed into the visibility targets for uncovered pixels. Matches
 // `VisibilityPixel::is_valid` on the CPU side and `shading_resolve.wesl`.
@@ -67,6 +69,14 @@ struct PrepassParams {
 @group(1) @binding(1) var<storage, read> geometry_headers: array<RenderShadingGeometryHeader>;
 @group(1) @binding(2) var<storage, read> geometry_vertices: array<GpuShadingVertex>;
 @group(1) @binding(3) var<storage, read> geometry_primitives: array<GpuShadingPrimitive>;
+// Per-instance affine `world_from_local` (indexed by `scene_index`), matching
+// `GpuSceneTransform` in `gpu_scene.wesl` and the transform buffer the resolve
+// binds. The reconstructed surface is stored *local* space, so the prepass must
+// lift it into world space with this transform before the `view_from_world`
+// multiply below, otherwise a translated/rotated/scaled instance reflects (and
+// reads depth) from the wrong place. Guarded against a short/stale buffer: the
+// identity path leaves an untransformed instance exactly as before.
+@group(1) @binding(4) var<storage, read> scene_current_transforms: array<GpuSceneTransform>;
 
 var<immediate> params: PrepassParams;
 
@@ -134,7 +144,20 @@ fn reconstruct_surface(coord: vec2<i32>, geometry: ptr<function, SurfaceSampleGe
     let vertex_c = geometry_vertices[row_c];
 
     let weights = surface_decode_barycentrics(metadata.w);
-    *geometry = interpolate_surface(vertex_a, vertex_b, vertex_c, primitive.flags, weights);
+    let local_geometry =
+        interpolate_surface(vertex_a, vertex_b, vertex_c, primitive.flags, weights);
+
+    // Lift the *local-space* reconstruction into world space with the instance's
+    // `world_from_local`, mirroring `shading_resolve.wesl` so the depth/normal
+    // SSR marches against are the identical world-space surface the resolve
+    // shades. Falls back to the untransformed sample when the transform buffer
+    // is short/stale.
+    if scene_index < arrayLength(&scene_current_transforms) {
+        *geometry = scene_apply_current_transform(
+            scene_current_transforms[scene_index], local_geometry);
+    } else {
+        *geometry = local_geometry;
+    }
     return true;
 }
 
@@ -154,8 +177,8 @@ fn ssr_prepass(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
 
-    // World -> view. Vertices are stored world-space (the resolve stage feeds
-    // `geometry.position` straight into world-space lighting), so a single
+    // World -> view. `reconstruct_surface` already lifted the local-space
+    // reconstruction into world space with the instance transform, so a single
     // `view_from_world` multiply lands us in the RH, camera-at-origin,
     // looking-down-`-Z` frame the trace reconstructs against.
     let view_pos = params.view_from_world * vec4<f32>(geometry.position, 1.0);

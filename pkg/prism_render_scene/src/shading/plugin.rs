@@ -85,6 +85,7 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/material_sample.wesl");
         embedded_asset!(app, "../shaders/tangent.wesl");
         embedded_asset!(app, "../shaders/surface.wesl");
+        embedded_asset!(app, "../shaders/scene_transform.wesl");
         embedded_asset!(app, "../shaders/shadow.wesl");
         embedded_asset!(app, "../shaders/shading_resolve.wesl");
         embedded_asset!(app, "../shaders/gtao_prepass.wesl");

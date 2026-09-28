@@ -7,7 +7,9 @@
 //!   view-normal targets written, sourced from the view's
 //!   [`ViewVisibilityBuffer`] and [`ViewSsrTextures`].
 //! * **group 1** — the shared render-world scene-instance and shading-geometry
-//!   tables the surface reconstruction walks.
+//!   tables the surface reconstruction walks, plus the per-instance current
+//!   `world_from_local` transforms that lift the reconstructed local-space
+//!   surface into world space.
 //!
 //! The component is removed unless every upstream buffer/texture is resident,
 //! so [`super::dispatch`] can treat a present [`ViewSsrPrepassBindGroups`] as
@@ -31,7 +33,7 @@ use super::resources::ViewSsrTextures;
 pub(crate) struct ViewSsrPrepassBindGroups {
     /// group 0: visibility ids/metadata + device-depth/view-normal outputs.
     pub(crate) view: BindGroup,
-    /// group 1: scene instances + geometry tables.
+    /// group 1: scene instances + geometry tables + current transforms.
     pub(crate) scene: BindGroup,
 }
 
@@ -48,9 +50,15 @@ pub(crate) fn prepare_ssr_prepass_bind_groups(
 ) {
     // Scene/geometry tables are shared across all views; without them there is
     // nothing to reconstruct, so drop any stale groups.
-    let (Some(instances), Some((geo_headers, geo_vertices, geo_primitives))) =
-        (scene.instances(), geometry.buffers())
-    else {
+    let (
+        Some(instances),
+        Some(current_transforms),
+        Some((geo_headers, geo_vertices, geo_primitives)),
+    ) = (
+        scene.instances(),
+        scene.current_transforms(),
+        geometry.buffers(),
+    ) else {
         for (entity, _, _) in &views {
             commands
                 .entity(entity)
@@ -79,6 +87,7 @@ pub(crate) fn prepare_ssr_prepass_bind_groups(
                 geo_headers.as_entire_binding(),
                 geo_vertices.as_entire_binding(),
                 geo_primitives.as_entire_binding(),
+                current_transforms.as_entire_binding(),
             )),
         );
         commands.entity(entity).insert(ViewSsrPrepassBindGroups {

@@ -48,8 +48,9 @@ fn ssr_wesl_compiles_standalone() {
         .unwrap_or_else(|error| panic!("ssr.wesl failed to compile: {error}"));
 }
 
-/// Registers `tangent.wesl`, `surface.wesl` and `gpu_scene.wesl` under their
-/// canonical module paths and compiles `ssr_prepass.wesl`, forcing every
+/// Registers `tangent.wesl`, `surface.wesl`, `gpu_scene.wesl` and
+/// `scene_transform.wesl` under their canonical module paths and compiles
+/// `ssr_prepass.wesl`, forcing every
 /// `import prism_render_scene::shaders::*` to resolve exactly as it will in the
 /// render world. A green result proves the SSR prepass decodes the visibility
 /// buffer through the identical `surface.wesl` helpers the GTAO prepass and the
@@ -58,7 +59,7 @@ fn ssr_wesl_compiles_standalone() {
 fn ssr_prepass_wesl_compiles_and_resolves_imports() {
     let mut cache = ShaderCache::new((), load_source);
 
-    let deps: [(u128, &str, &str); 3] = [
+    let deps: [(u128, &str, &str); 4] = [
         (
             0x5052_4953_4d5f_5353_525f_5441_4e47_0001,
             include_str!("../../shaders/tangent.wesl"),
@@ -73,6 +74,11 @@ fn ssr_prepass_wesl_compiles_and_resolves_imports() {
             0x5052_4953_4d5f_5353_525f_5343_4e45_0001,
             include_str!("../../shaders/gpu_scene.wesl"),
             "embedded://prism_render_scene/shaders/gpu_scene.wesl",
+        ),
+        (
+            0x5052_4953_4d5f_5353_525f_5343_5446_0001,
+            include_str!("../../shaders/scene_transform.wesl"),
+            "embedded://prism_render_scene/shaders/scene_transform.wesl",
         ),
     ];
     for (tag, source, path) in deps {

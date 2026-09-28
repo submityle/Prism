@@ -6,10 +6,12 @@
 //!   reverse-Z device-depth and view-normal targets written. Owned here because
 //!   it is unique to this pass.
 //! * **group 1** — the scene-instance and shading-geometry tables the surface
-//!   reconstruction walks. A strict subset of the resolve pass's scene group
-//!   (no worklist), declared here with matching `None` min-binding-sizes so the
-//!   shader's own generation/bounds guards remain the sole gate. Identical in
-//!   shape to the GTAO prepass's scene group.
+//!   reconstruction walks, plus the per-instance current `world_from_local`
+//!   transforms that lift the reconstructed local-space surface into world
+//!   space. A subset of the resolve pass's scene group (no worklist, no
+//!   previous-frame transforms), declared here with matching `None`
+//!   min-binding-sizes so the shader's own generation/bounds guards remain the
+//!   sole gate.
 
 use bevy_asset::{load_embedded_asset, Handle};
 use bevy_ecs::prelude::*;
@@ -60,12 +62,15 @@ fn view_layout_entries() -> BindGroupLayoutEntries<4> {
     )
 }
 
-/// group-1 layout: four read-only storage buffers (scene instances, geometry
-/// headers, geometry vertices, geometry primitives).
-fn scene_layout_entries() -> BindGroupLayoutEntries<4> {
+/// group-1 layout: five read-only storage buffers (scene instances, geometry
+/// headers, geometry vertices, geometry primitives, then the per-instance
+/// current `world_from_local` transforms used to lift the reconstructed
+/// local-space surface into world space).
+fn scene_layout_entries() -> BindGroupLayoutEntries<5> {
     BindGroupLayoutEntries::sequential(
         ShaderStages::COMPUTE,
         (
+            storage_buffer_read_only_sized(false, None),
             storage_buffer_read_only_sized(false, None),
             storage_buffer_read_only_sized(false, None),
             storage_buffer_read_only_sized(false, None),
