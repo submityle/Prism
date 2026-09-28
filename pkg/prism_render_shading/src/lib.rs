@@ -19,6 +19,7 @@ mod lighting;
 mod oit;
 mod punctual;
 mod resolve;
+mod screen_space;
 mod shadow;
 mod subsurface;
 mod surface;
@@ -55,6 +56,14 @@ pub use lighting::{
     ShadingFrame, SurfaceSample,
 };
 pub use punctual::PunctualLight;
+pub use screen_space::{
+    blend_specular, build_screen_ray, distance_fade, edge_fade, facing_fade,
+    march_hierarchical, project_view_to_screen, reflect, reflection_mip,
+    reverse_z_perspective, roughness_fade, smoothstep, trace_confidence,
+    trace_screen_space_reflection, DepthPyramid, ScreenRay, ScreenSample,
+    ScreenSpaceReflection, SsrCamera, SsrConfidenceParams, SsrMarchConfig,
+    SsrMarchResult, SsrTraceSample,
+};
 pub use shadow::{
     allocate_shadow_atlas, apply_normal_offset, blocker_search, cascade_blend_weight,
     compute_cascade_matrices, compute_cascade_splits, cube_face_and_uv,
