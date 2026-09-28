@@ -193,9 +193,11 @@ fn ssr_repack_wesl_compiles_and_resolves_imports() {
     });
 }
 
-/// Compiles `ssr_color_mips.wesl`, proving both colour-history build entry
+/// Compiles `ssr_color_mips.wesl`, proving all three colour-pyramid build entry
 /// points parse and type-check as they will in the render world:
-/// `ssr_color_copy` lifts the resolve's `scene_color` into history level 0, and
+/// `ssr_color_copy` lifts the resolve's `scene_color` into pyramid level 0,
+/// `ssr_color_reduce_karis` writes the first coarser level as a Karis
+/// luma-weighted 2x2 average (firefly suppression at the source mip), and
 /// `ssr_color_reduce` writes each coarser level as the 2x2 box average of the
 /// finer one. The kernel is self-contained (no intra-crate imports), so a green
 /// result also guards its immediate `MipParams` layout against drift from the

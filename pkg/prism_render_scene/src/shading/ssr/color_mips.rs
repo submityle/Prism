@@ -48,12 +48,16 @@ use super::abi::{GpuSsrHzbParams, SSR_WORKGROUP_SIZE};
 use super::resources::{ViewSsrTextures, SSR_COLOR_FORMAT};
 use super::super::resources::ViewVisibilityBuffer;
 
-/// The two mip-build pipelines and the bind-group layout they share.
+/// The three mip-build pipelines and the bind-group layout they share.
 #[derive(Resource)]
 pub(crate) struct SsrColorMipsPipeline {
     /// `ssr_color_copy`: lifts `scene_color` into pyramid level 0.
     copy: CachedComputePipelineId,
-    /// `ssr_color_reduce`: 2x2 box average of the finer level into a coarser one.
+    /// `ssr_color_reduce_karis`: Karis luma-weighted 2x2 average for the first
+    /// coarser level (mip 0 -> mip 1), suppressing fireflies at their source.
+    reduce_karis: CachedComputePipelineId,
+    /// `ssr_color_reduce`: 2x2 box average of the finer level into a coarser one
+    /// (used for every level beyond the first).
     reduce: CachedComputePipelineId,
     /// Shared layout: sampled source mip (binding 0) + `rgba16float` storage
     /// destination mip (binding 1).
@@ -95,6 +99,14 @@ pub(crate) fn init_ssr_color_mips_pipeline(
         entry_point: Some("ssr_color_copy".into()),
         ..Default::default()
     });
+    let reduce_karis = cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        label: Some("prism SSR colour reduce (Karis)".into()),
+        layout: vec![descriptor.clone()],
+        immediate_size: params_size,
+        shader: shader.clone(),
+        entry_point: Some("ssr_color_reduce_karis".into()),
+        ..Default::default()
+    });
     let reduce = cache.queue_compute_pipeline(ComputePipelineDescriptor {
         label: Some("prism SSR colour reduce".into()),
         layout: vec![descriptor],
@@ -106,6 +118,7 @@ pub(crate) fn init_ssr_color_mips_pipeline(
 
     commands.insert_resource(SsrColorMipsPipeline {
         copy,
+        reduce_karis,
         reduce,
         layout,
     });
@@ -189,8 +202,9 @@ pub(crate) fn ssr_color_mips_pass(
     }
     let (textures, groups) = view.into_inner();
 
-    let (Some(copy), Some(reduce)) = (
+    let (Some(copy), Some(reduce_karis), Some(reduce)) = (
         cache.get_compute_pipeline(pipeline.copy),
+        cache.get_compute_pipeline(pipeline.reduce_karis),
         cache.get_compute_pipeline(pipeline.reduce),
     ) else {
         return;
@@ -219,7 +233,15 @@ pub(crate) fn ssr_color_mips_pass(
                 label: Some("prism SSR colour mip level"),
                 timestamp_writes: None,
             });
-        pass.set_pipeline(if level == 0 { copy } else { reduce });
+        // Level 0 is a straight copy; the first reduce (mip 0 -> mip 1) uses
+        // the firefly-suppressing Karis weighting; coarser levels use the
+        // energy-preserving box average.
+        let mip_pipeline = match level {
+            0 => copy,
+            1 => reduce_karis,
+            _ => reduce,
+        };
+        pass.set_pipeline(mip_pipeline);
         pass.set_bind_group(0, bind_group, &[]);
         pass.set_immediates(0, bytemuck::bytes_of(&params));
         pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
