@@ -16,6 +16,7 @@ mod cloth;
 mod environment;
 mod face_shadow;
 mod hair;
+mod light_routing;
 mod lighting;
 mod oit;
 mod outline;
@@ -104,6 +105,10 @@ pub use stylized::{evaluate_stylized_direct, evaluate_toon_direct, StylizedParam
 pub use face_shadow::{
     evaluate_face_shadow, face_shadow_flip_u, face_shadow_light_cosines, FaceFrame,
     FaceShadowParams,
+};
+pub use light_routing::{
+    cull_lights_by_channel, LightLayerMask, LightRouting, LightingChannelMask, MAX_LIGHTING_CHANNELS,
+    MAX_LIGHT_LAYERS,
 };
 pub use outline::{
     evaluate_outline, outline_depth_edge, outline_id_edge, outline_normal_edge, OutlineGeometry,

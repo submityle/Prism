@@ -3,6 +3,7 @@ mod classification_gpu;
 mod composite;
 mod graph;
 mod ibl;
+mod light_routing;
 mod outline;
 mod plugin;
 mod raster;
