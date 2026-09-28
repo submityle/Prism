@@ -15,6 +15,10 @@
 //! * **group 4** — the shadow atlas + shadow tables, reusing
 //!   [`ShadowBindGroup`]'s layout so the resolve pass samples the exact atlas
 //!   the depth pass fills.
+//! * **group 5** — the clustered-light tables, reusing [`ClusterBindGroup`]'s
+//!   layout so each fragment iterates only the punctual lights assigned to its
+//!   froxel instead of the whole scene.  Falls back to the full light list when
+//!   a neutral single-cluster grid is bound.
 //!
 //! Reusing the material/light *layout descriptors* (rather than re-declaring
 //! them) guarantees the resolve pipeline and those bind groups can never drift
@@ -38,7 +42,7 @@ use bevy_render::{
 };
 use bevy_shader::Shader;
 
-use crate::{LightBindGroup, MaterialBindGroup};
+use crate::{ClusterBindGroup, LightBindGroup, MaterialBindGroup};
 
 use super::super::shadow::ShadowBindGroup;
 
@@ -99,6 +103,7 @@ pub(crate) fn init_shading_resolve_pipeline(
     material_bindings: Res<MaterialBindGroup>,
     light_bindings: Res<LightBindGroup>,
     shadow_bindings: Res<ShadowBindGroup>,
+    cluster_bindings: Res<ClusterBindGroup>,
     asset_server: Res<bevy_asset::AssetServer>,
 ) {
     let view_entries = view_layout_entries();
@@ -119,6 +124,7 @@ pub(crate) fn init_shading_resolve_pipeline(
             scene_descriptor,
             light_bindings.layout_descriptor.clone(),
             shadow_bindings.layout_descriptor.clone(),
+            cluster_bindings.layout_descriptor.clone(),
         ],
         immediate_size: size_of::<GpuShadingResolveParams>() as u32,
         shader,

@@ -38,8 +38,10 @@ pub use geometry::{
     SHADING_GEOMETRY_FLAG_MISSING_NORMAL, SHADING_GEOMETRY_FLAG_MISSING_UV,
 };
 pub use lighting::{
-    ExtractedLights, GpuDirectionalLight, GpuLightEnvironment, GpuPunctualLight, LightBindGroup,
-    LightGpuBuffers, PrismLightingPlugin, LIGHT_ENVIRONMENT_FLAG_IMAGE_BASED,
+    build_cluster_data, ClusterBindGroup, ClusterConfig, ClusterCpuData, ClusterGpuBuffers,
+    ClusterViewFit, ExtractedClusterView, ExtractedLights, GpuClusterGrid, GpuDirectionalLight,
+    GpuLightEnvironment, GpuPunctualLight, LightBindGroup, LightGpuBuffers, PrismLightingPlugin,
+    LIGHT_ENVIRONMENT_FLAG_IMAGE_BASED,
 };
 pub use material::{
     BindlessHeapStats, BindlessSlot, BindlessTextureHeap, MaterialBindGroup,

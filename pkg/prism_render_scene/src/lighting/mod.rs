@@ -10,6 +10,7 @@
 mod abi;
 mod bindings;
 mod buffers;
+mod cluster;
 mod extract;
 mod plugin;
 mod systems;
@@ -22,6 +23,10 @@ pub use abi::{
     LIGHT_ENVIRONMENT_FLAG_IMAGE_BASED,
 };
 pub use bindings::LightBindGroup;
+pub use cluster::{
+    build_cluster_data, ClusterBindGroup, ClusterConfig, ClusterCpuData, ClusterGpuBuffers,
+    ClusterViewFit, ExtractedClusterView, GpuClusterGrid,
+};
 pub use buffers::LightGpuBuffers;
 pub use extract::ExtractedLights;
 pub use plugin::PrismLightingPlugin;

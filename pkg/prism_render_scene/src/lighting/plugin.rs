@@ -16,6 +16,11 @@ use bevy_render::{
 use super::{
     bindings::LightBindGroup,
     buffers::LightGpuBuffers,
+    cluster::{
+        extract_cluster_view, prepare_cluster_bind_group, rebuild_cluster_buffers,
+        write_cluster_buffers, ClusterBindGroup, ClusterConfig, ClusterGpuBuffers,
+        ExtractedClusterView,
+    },
     extract::{extract_lights, ExtractedLights},
     systems::{prepare_light_bind_group, rebuild_light_buffers, write_light_buffers},
 };
@@ -32,15 +37,19 @@ impl Plugin for PrismLightingPlugin {
         };
         render_app
             .init_resource::<ExtractedLights>()
+            .init_resource::<ExtractedClusterView>()
+            .init_resource::<ClusterConfig>()
             .add_systems(
                 RenderStartup,
                 (
                     init_gpu_resource::<LightGpuBuffers>,
                     init_gpu_resource::<LightBindGroup>,
+                    init_gpu_resource::<ClusterGpuBuffers>,
+                    init_gpu_resource::<ClusterBindGroup>,
                 )
                     .chain(),
             )
-            .add_systems(ExtractSchedule, extract_lights)
+            .add_systems(ExtractSchedule, (extract_lights, extract_cluster_view))
             .add_systems(
                 Render,
                 (
@@ -48,6 +57,13 @@ impl Plugin for PrismLightingPlugin {
                     write_light_buffers.in_set(RenderSystems::PrepareResourcesFlush),
                     prepare_light_bind_group
                         .after(write_light_buffers)
+                        .in_set(RenderSystems::PrepareBindGroups),
+                    // The clustered tables build from the same extracted lights
+                    // and share the resolve pass's prepare lifecycle.
+                    rebuild_cluster_buffers.in_set(RenderSystems::PrepareResources),
+                    write_cluster_buffers.in_set(RenderSystems::PrepareResourcesFlush),
+                    prepare_cluster_bind_group
+                        .after(write_cluster_buffers)
                         .in_set(RenderSystems::PrepareBindGroups),
                 ),
             );

@@ -96,7 +96,8 @@ impl Plugin for PrismShadingPlugin {
                     init_shading_resolve_pipeline
                         .after(init_gpu_resource::<crate::MaterialBindGroup>)
                         .after(init_gpu_resource::<crate::LightBindGroup>)
-                        .after(init_gpu_resource::<ShadowBindGroup>),
+                        .after(init_gpu_resource::<ShadowBindGroup>)
+                        .after(init_gpu_resource::<crate::ClusterBindGroup>),
                     init_shading_composite_pipeline,
                 ),
             )

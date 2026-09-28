@@ -20,7 +20,7 @@ use bevy_render::{
 
 use prism_render_shading::MAX_SHADING_CLASSES;
 
-use crate::{LightBindGroup, MaterialBindGroup};
+use crate::{ClusterBindGroup, LightBindGroup, MaterialBindGroup};
 
 use super::super::shadow::ShadowBindGroup;
 
@@ -47,6 +47,7 @@ pub(crate) fn dispatch_shading_resolve(
     material_bindings: Res<MaterialBindGroup>,
     light_bindings: Res<LightBindGroup>,
     shadow_bindings: Res<ShadowBindGroup>,
+    cluster_bindings: Res<ClusterBindGroup>,
     pipeline: Res<ShadingResolvePipeline>,
     cache: Res<PipelineCache>,
     mut ctx: RenderContext,
@@ -58,10 +59,11 @@ pub(crate) fn dispatch_shading_resolve(
 
     // Every bind group must be resident: the two pass-owned ones plus the
     // shared material/light groups the classification stage also depends on.
-    let (Some(materials_group), Some(lights_group), Some(shadow_group)) = (
+    let (Some(materials_group), Some(lights_group), Some(shadow_group), Some(cluster_group)) = (
         material_bindings.bind_group.as_ref(),
         light_bindings.bind_group.as_ref(),
         shadow_bindings.bind_group.as_ref(),
+        cluster_bindings.bind_group.as_ref(),
     ) else {
         return;
     };
@@ -93,6 +95,7 @@ pub(crate) fn dispatch_shading_resolve(
     pass.set_bind_group(2, &groups.scene, &[]);
     pass.set_bind_group(3, lights_group, &[]);
     pass.set_bind_group(4, shadow_group, &[]);
+    pass.set_bind_group(5, cluster_group, &[]);
 
     let stride = size_of::<GpuShadingDispatchArgs>() as u64;
     for class in 0..MAX_SHADING_CLASSES as u32 {

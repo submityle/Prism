@@ -153,6 +153,93 @@ struct WorkItem {
 @group(3) @binding(1) var<storage, read> punctual_lights: array<PunctualLight>;
 @group(3) @binding(2) var<storage, read> light_env: array<LightEnvironment>;
 
+// --- group 5: clustered-light tables (shared ClusterBindGroup layout) ---
+//
+// Mirrors `GpuClusterGrid` (`lighting/cluster/abi.rs`, 128 bytes) with scalar
+// fields so the std430 layout matches the `#[repr(C)]` record byte-for-byte.
+// `cluster_offsets[c]` is the `[offset, count]` slice into `cluster_indices`
+// for cluster `c`; each index addresses `punctual_lights` in extraction order.
+struct ClusterGrid {
+    dim_x: u32,
+    dim_y: u32,
+    dim_z: u32,
+    cluster_count: u32,
+    tile_x: u32,
+    tile_y: u32,
+    screen_x: u32,
+    screen_y: u32,
+    near: f32,
+    far: f32,
+    depth_scale: f32,
+    depth_bias: f32,
+    max_lights_per_cluster: u32,
+    pad0: u32,
+    pad1: u32,
+    pad2: u32,
+    view_from_world: mat4x4<f32>,
+}
+
+@group(5) @binding(0) var<storage, read> cluster_grid: array<ClusterGrid>;
+@group(5) @binding(1) var<storage, read> cluster_offsets: array<vec2<u32>>;
+@group(5) @binding(2) var<storage, read> cluster_indices: array<u32>;
+
+// The resolved per-fragment punctual-light iteration range. When
+// `use_clusters` is 0 the integrators fall back to scanning every punctual
+// light (the neutral single-cluster grid, or a non-perspective view); otherwise
+// they walk `cluster_indices[offset .. offset + count]`.
+struct ClusterSlice {
+    use_clusters: u32,
+    offset: u32,
+    count: u32,
+}
+
+// Locates the froxel a fragment falls in and returns its light-index slice.
+//
+// Mirrors the CPU golden addressing exactly: `ClusterGrid::xy_tile` (floor of
+// pixel / tile, clamped), `z_slice` (the precomputed `depth_scale/bias` log,
+// identical to `GpuClusterGrid::depth_slice`), and `linear_index`
+// (`x + dim_x * (y + dim_y * z)`, x fastest).  A grid with no per-cluster
+// capacity (the neutral fallback) reports `use_clusters = 0`.
+fn resolve_cluster_slice(world_position: vec3<f32>, px: u32, py: u32) -> ClusterSlice {
+    var slice: ClusterSlice;
+    slice.use_clusters = 0u;
+    slice.offset = 0u;
+    slice.count = 0u;
+
+    if arrayLength(&cluster_grid) == 0u {
+        return slice;
+    }
+    let grid = cluster_grid[0];
+    // The neutral single-cluster fallback carries no capacity; scan all lights.
+    if grid.max_lights_per_cluster == 0u || grid.cluster_count <= 1u {
+        return slice;
+    }
+    if grid.dim_x == 0u || grid.dim_y == 0u || grid.dim_z == 0u {
+        return slice;
+    }
+
+    let tile_x = max(grid.tile_x, 1u);
+    let tile_y = max(grid.tile_y, 1u);
+    let cx = min(px / tile_x, grid.dim_x - 1u);
+    let cy = min(py / tile_y, grid.dim_y - 1u);
+
+    let view_pos = grid.view_from_world * vec4<f32>(world_position, 1.0);
+    let depth = max(-view_pos.z, grid.near);
+    let raw = grid.depth_scale * log(depth) + grid.depth_bias;
+    let cz = min(u32(max(raw, 0.0)), grid.dim_z - 1u);
+
+    let cluster = cx + grid.dim_x * (cy + grid.dim_y * cz);
+    if cluster >= arrayLength(&cluster_offsets) || cluster >= grid.cluster_count {
+        return slice;
+    }
+
+    let oc = cluster_offsets[cluster];
+    slice.use_clusters = 1u;
+    slice.offset = oc.x;
+    slice.count = oc.y;
+    return slice;
+}
+
 var<immediate> params: ResolveParams;
 
 // Converts a `LightSample` (lighting.wesl) into the reduced `DirectLightSample`
@@ -220,6 +307,7 @@ fn shade_principled(
     indirect: vec3<f32>,
     emissive: vec3<f32>,
     env: LightEnvironment,
+    slice: ClusterSlice,
 ) -> vec3<f32> {
     var accumulated = vec3<f32>(0.0);
 
@@ -230,8 +318,16 @@ fn shade_principled(
     }
 
     let punctual_total = min(env.punctual_count, arrayLength(&punctual_lights));
-    for (var i = 0u; i < punctual_total; i = i + 1u) {
-        let sample = sample_punctual_shadowed(i, frame, world_position);
+    let punctual_loop = select(punctual_total, slice.count, slice.use_clusters != 0u);
+    for (var s = 0u; s < punctual_loop; s = s + 1u) {
+        var punctual_i = s;
+        if slice.use_clusters != 0u {
+            let idx_pos = slice.offset + s;
+            if idx_pos >= arrayLength(&cluster_indices) { break; }
+            punctual_i = cluster_indices[idx_pos];
+        }
+        if punctual_i >= arrayLength(&punctual_lights) { continue; }
+        let sample = sample_punctual_shadowed(punctual_i, frame, world_position);
         if sample.valid == 0.0 {
             continue;
         }
@@ -250,6 +346,7 @@ fn shade_toon(
     indirect: vec3<f32>,
     emissive: vec3<f32>,
     env: LightEnvironment,
+    slice: ClusterSlice,
 ) -> vec3<f32> {
     var accumulated = vec3<f32>(0.0);
     let bands = env.toon_bands;
@@ -261,8 +358,16 @@ fn shade_toon(
     }
 
     let punctual_total = min(env.punctual_count, arrayLength(&punctual_lights));
-    for (var i = 0u; i < punctual_total; i = i + 1u) {
-        let sample = sample_punctual_shadowed(i, frame, world_position);
+    let punctual_loop = select(punctual_total, slice.count, slice.use_clusters != 0u);
+    for (var s = 0u; s < punctual_loop; s = s + 1u) {
+        var punctual_i = s;
+        if slice.use_clusters != 0u {
+            let idx_pos = slice.offset + s;
+            if idx_pos >= arrayLength(&cluster_indices) { break; }
+            punctual_i = cluster_indices[idx_pos];
+        }
+        if punctual_i >= arrayLength(&punctual_lights) { continue; }
+        let sample = sample_punctual_shadowed(punctual_i, frame, world_position);
         if sample.valid == 0.0 {
             continue;
         }
@@ -281,6 +386,7 @@ fn shade_cloth(
     indirect: vec3<f32>,
     emissive: vec3<f32>,
     env: LightEnvironment,
+    slice: ClusterSlice,
 ) -> vec3<f32> {
     var accumulated = vec3<f32>(0.0);
 
@@ -291,8 +397,16 @@ fn shade_cloth(
     }
 
     let punctual_total = min(env.punctual_count, arrayLength(&punctual_lights));
-    for (var i = 0u; i < punctual_total; i = i + 1u) {
-        let sample = sample_punctual_shadowed(i, frame, world_position);
+    let punctual_loop = select(punctual_total, slice.count, slice.use_clusters != 0u);
+    for (var s = 0u; s < punctual_loop; s = s + 1u) {
+        var punctual_i = s;
+        if slice.use_clusters != 0u {
+            let idx_pos = slice.offset + s;
+            if idx_pos >= arrayLength(&cluster_indices) { break; }
+            punctual_i = cluster_indices[idx_pos];
+        }
+        if punctual_i >= arrayLength(&punctual_lights) { continue; }
+        let sample = sample_punctual_shadowed(punctual_i, frame, world_position);
         if sample.valid == 0.0 {
             continue;
         }
@@ -312,6 +426,7 @@ fn shade_subsurface(
     indirect: vec3<f32>,
     emissive: vec3<f32>,
     env: LightEnvironment,
+    slice: ClusterSlice,
 ) -> vec3<f32> {
     var accumulated = vec3<f32>(0.0);
 
@@ -322,8 +437,16 @@ fn shade_subsurface(
     }
 
     let punctual_total = min(env.punctual_count, arrayLength(&punctual_lights));
-    for (var i = 0u; i < punctual_total; i = i + 1u) {
-        let sample = sample_punctual_shadowed(i, frame, world_position);
+    let punctual_loop = select(punctual_total, slice.count, slice.use_clusters != 0u);
+    for (var s = 0u; s < punctual_loop; s = s + 1u) {
+        var punctual_i = s;
+        if slice.use_clusters != 0u {
+            let idx_pos = slice.offset + s;
+            if idx_pos >= arrayLength(&cluster_indices) { break; }
+            punctual_i = cluster_indices[idx_pos];
+        }
+        if punctual_i >= arrayLength(&punctual_lights) { continue; }
+        let sample = sample_punctual_shadowed(punctual_i, frame, world_position);
         if sample.valid == 0.0 {
             continue;
         }
@@ -344,6 +467,7 @@ fn shade_hair(
     indirect: vec3<f32>,
     emissive: vec3<f32>,
     env: LightEnvironment,
+    slice: ClusterSlice,
 ) -> vec3<f32> {
     var accumulated = vec3<f32>(0.0);
 
@@ -354,8 +478,16 @@ fn shade_hair(
     }
 
     let punctual_total = min(env.punctual_count, arrayLength(&punctual_lights));
-    for (var i = 0u; i < punctual_total; i = i + 1u) {
-        let sample = sample_punctual_shadowed(i, frame, world_position);
+    let punctual_loop = select(punctual_total, slice.count, slice.use_clusters != 0u);
+    for (var s = 0u; s < punctual_loop; s = s + 1u) {
+        var punctual_i = s;
+        if slice.use_clusters != 0u {
+            let idx_pos = slice.offset + s;
+            if idx_pos >= arrayLength(&cluster_indices) { break; }
+            punctual_i = cluster_indices[idx_pos];
+        }
+        if punctual_i >= arrayLength(&punctual_lights) { continue; }
+        let sample = sample_punctual_shadowed(punctual_i, frame, world_position);
         if sample.valid == 0.0 {
             continue;
         }
@@ -376,6 +508,7 @@ fn shade_water(
     indirect: vec3<f32>,
     emissive: vec3<f32>,
     env: LightEnvironment,
+    slice: ClusterSlice,
 ) -> vec3<f32> {
     var accumulated = vec3<f32>(0.0);
 
@@ -386,8 +519,16 @@ fn shade_water(
     }
 
     let punctual_total = min(env.punctual_count, arrayLength(&punctual_lights));
-    for (var i = 0u; i < punctual_total; i = i + 1u) {
-        let sample = sample_punctual_shadowed(i, frame, world_position);
+    let punctual_loop = select(punctual_total, slice.count, slice.use_clusters != 0u);
+    for (var s = 0u; s < punctual_loop; s = s + 1u) {
+        var punctual_i = s;
+        if slice.use_clusters != 0u {
+            let idx_pos = slice.offset + s;
+            if idx_pos >= arrayLength(&cluster_indices) { break; }
+            punctual_i = cluster_indices[idx_pos];
+        }
+        if punctual_i >= arrayLength(&punctual_lights) { continue; }
+        let sample = sample_punctual_shadowed(punctual_i, frame, world_position);
         if sample.valid == 0.0 {
             continue;
         }
@@ -404,6 +545,7 @@ fn shade_clearcoat(
     indirect: vec3<f32>,
     emissive: vec3<f32>,
     env: LightEnvironment,
+    slice: ClusterSlice,
 ) -> vec3<f32> {
     var accumulated = vec3<f32>(0.0);
 
@@ -414,8 +556,16 @@ fn shade_clearcoat(
     }
 
     let punctual_total = min(env.punctual_count, arrayLength(&punctual_lights));
-    for (var i = 0u; i < punctual_total; i = i + 1u) {
-        let sample = sample_punctual_shadowed(i, frame, world_position);
+    let punctual_loop = select(punctual_total, slice.count, slice.use_clusters != 0u);
+    for (var s = 0u; s < punctual_loop; s = s + 1u) {
+        var punctual_i = s;
+        if slice.use_clusters != 0u {
+            let idx_pos = slice.offset + s;
+            if idx_pos >= arrayLength(&cluster_indices) { break; }
+            punctual_i = cluster_indices[idx_pos];
+        }
+        if punctual_i >= arrayLength(&punctual_lights) { continue; }
+        let sample = sample_punctual_shadowed(punctual_i, frame, world_position);
         if sample.valid == 0.0 {
             continue;
         }
@@ -601,37 +751,38 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     // run dedicated closures; only custom still shares the principled
     // integrator, and each keeps its own arm so a real closure drops in
     // independently.
+    let slice = resolve_cluster_slice(geometry.position, u32(coord.x), u32(coord.y));
     var color: vec3<f32>;
     switch params.shading_class {
         case SHADING_CLASS_PRINCIPLED: {
-            color = shade_principled(lit, frame, geometry.position, indirect, emissive, env);
+            color = shade_principled(lit, frame, geometry.position, indirect, emissive, env, slice);
         }
         case SHADING_CLASS_UNLIT: {
             color = surface.base_color + surface.emissive;
         }
         case SHADING_CLASS_SUBSURFACE: {
-            color = shade_subsurface(lit, frame, geometry.position, indirect, emissive, env);
+            color = shade_subsurface(lit, frame, geometry.position, indirect, emissive, env, slice);
         }
         case SHADING_CLASS_CLEARCOAT: {
-            color = shade_clearcoat(lit, frame, geometry.position, indirect, emissive, env);
+            color = shade_clearcoat(lit, frame, geometry.position, indirect, emissive, env, slice);
         }
         case SHADING_CLASS_CLOTH: {
-            color = shade_cloth(lit, frame, geometry.position, indirect, emissive, env);
+            color = shade_cloth(lit, frame, geometry.position, indirect, emissive, env, slice);
         }
         case SHADING_CLASS_HAIR: {
-            color = shade_hair(lit, frame, geometry.position, indirect, emissive, env);
+            color = shade_hair(lit, frame, geometry.position, indirect, emissive, env, slice);
         }
         case SHADING_CLASS_WATER: {
-            color = shade_water(lit, frame, geometry.position, indirect, emissive, env);
+            color = shade_water(lit, frame, geometry.position, indirect, emissive, env, slice);
         }
         case SHADING_CLASS_NPR: {
-            color = shade_toon(lit, frame, geometry.position, indirect, emissive, env);
+            color = shade_toon(lit, frame, geometry.position, indirect, emissive, env, slice);
         }
         case SHADING_CLASS_CUSTOM: {
-            color = shade_principled(lit, frame, geometry.position, indirect, emissive, env);
+            color = shade_principled(lit, frame, geometry.position, indirect, emissive, env, slice);
         }
         default: {
-            color = shade_principled(lit, frame, geometry.position, indirect, emissive, env);
+            color = shade_principled(lit, frame, geometry.position, indirect, emissive, env, slice);
         }
     }
 
