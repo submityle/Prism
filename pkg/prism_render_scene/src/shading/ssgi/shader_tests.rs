@@ -49,3 +49,27 @@ fn ssgi_wesl_compiles_standalone() {
         .get(0, ssgi, &[])
         .unwrap_or_else(|error| panic!("ssgi.wesl failed to compile: {error}"));
 }
+
+/// Compiles `ssgi_composite.wesl`, proving the two composite entry points parse
+/// and type-check exactly as they will in the render world: `ssgi_copy_base`
+/// lifts `scene_color` into the scratch base, and `ssgi_composite` folds the
+/// gather over that base under the resolve's albedo/ambient exports. A green
+/// result also guards the shared `CompositeParams` immediate layout against
+/// drift.
+#[test]
+fn ssgi_composite_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let composite = shader_id(0x5052_4953_4d5f_5353_4749_5f43_4d50_0001);
+    cache.set_shader(
+        composite,
+        Shader::from_wesl(
+            include_str!("../../shaders/ssgi_composite.wesl"),
+            "embedded://prism_render_scene/shaders/ssgi_composite.wesl",
+        ),
+    );
+
+    cache
+        .get(0, composite, &[])
+        .unwrap_or_else(|error| panic!("ssgi_composite.wesl failed to compile: {error}"));
+}

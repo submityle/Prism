@@ -27,6 +27,11 @@ use super::{
         ssr_color_mips_pass, ssr_composite_pass, ssr_hzb_pass, ssr_prepass_pass, ssr_reconstruct_pass,
         ssr_repack_pass, ssr_temporal_pass, ssr_trace_pass,
     },
+    ssgi::{
+        init_ssgi_composite_pipeline, init_ssgi_trace_pipeline,
+        prepare_ssgi_composite_bind_groups, prepare_ssgi_textures,
+        prepare_ssgi_trace_bind_groups, ssgi_composite_pass, ssgi_trace_pass,
+    },
     taa::{
         init_taa_resolve_pipeline, prepare_taa_bind_groups, prepare_taa_jitter,
         prepare_taa_textures, taa_resolve_pass,
@@ -106,6 +111,8 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/ssr_resolve.wesl");
         embedded_asset!(app, "../shaders/ssr_temporal.wesl");
         embedded_asset!(app, "../shaders/ssr_composite.wesl");
+        embedded_asset!(app, "../shaders/ssgi.wesl");
+        embedded_asset!(app, "../shaders/ssgi_composite.wesl");
         embedded_asset!(app, "../shaders/taa_resolve.wesl");
         embedded_asset!(app, "../shaders/brdf_lut.wesl");
         embedded_asset!(app, "../shaders/env_prefilter.wesl");
@@ -180,7 +187,15 @@ impl Plugin for PrismShadingPlugin {
                     init_ssr_temporal_pipeline,
                     // Nested to keep this RenderStartup tuple within Bevy's
                     // 20-element limit.
-                    (init_ssr_composite_pipeline, init_taa_resolve_pipeline),
+                    // Nested with the SSGI trace + composite initializers to
+                    // keep this RenderStartup tuple within Bevy's 20-element
+                    // limit.
+                    (
+                        init_ssr_composite_pipeline,
+                        init_taa_resolve_pipeline,
+                        init_ssgi_trace_pipeline,
+                        init_ssgi_composite_pipeline,
+                    ),
                     init_dfg_lut_texture,
                     init_brdf_lut_pipeline,
                     init_prefiltered_env_map,
@@ -311,6 +326,15 @@ impl Plugin for PrismShadingPlugin {
                     prepare_ssr_composite_bind_groups
                         .after(prepare_ssr_textures)
                         .in_set(RenderSystems::PrepareBindGroups),
+                    prepare_ssgi_textures
+                        .after(prepare_ssr_textures)
+                        .in_set(RenderSystems::PrepareResources),
+                    prepare_ssgi_trace_bind_groups
+                        .after(prepare_ssgi_textures)
+                        .in_set(RenderSystems::PrepareBindGroups),
+                    prepare_ssgi_composite_bind_groups
+                        .after(prepare_ssgi_textures)
+                        .in_set(RenderSystems::PrepareBindGroups),
                     prepare_taa_textures
                         .after(prepare_visibility_buffers)
                         .in_set(RenderSystems::PrepareResources),
@@ -392,12 +416,28 @@ impl Plugin for PrismShadingPlugin {
                 // Nested to keep the Core3d tuple within Bevy's 20-element
                 // limit: the SSR composite folds reflections into scene_color,
                 // then TAA resolves that composited buffer before the main pass.
+                // Nested to keep the Core3d tuple within Bevy's 20-element
+                // limit: the SSR composite folds reflections into scene_color,
+                // then the SSGI gather traces indirect diffuse off the same
+                // rebuilt inputs and its composite substitutes that gather for
+                // the resolve's flat ambient (reading the SSR-composited base),
+                // before TAA resolves the fully composited buffer.
                 (
                     ssr_composite_pass
                         .after(ssr_temporal_pass)
                         .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                    ssgi_trace_pass
+                        .after(ssr_color_mips_pass)
+                        .after(ssr_hzb_pass)
+                        .after(ssr_repack_pass)
+                        .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                    ssgi_composite_pass
+                        .after(ssr_composite_pass)
+                        .after(ssgi_trace_pass)
+                        .before(bevy_core_pipeline::Core3dSystems::MainPass),
                     taa_resolve_pass
                         .after(ssr_composite_pass)
+                        .after(ssgi_composite_pass)
                         .before(bevy_core_pipeline::Core3dSystems::MainPass),
                 ),
                 composite_shading

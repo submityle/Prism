@@ -91,4 +91,4 @@ pub(crate) use temporal::{
 };
 pub(crate) use repack::{init_ssr_repack_pipeline, prepare_ssr_repack_bind_groups, ssr_repack_pass};
 pub(crate) use pipeline::init_ssr_prepass_pipeline;
-pub(crate) use resources::prepare_ssr_textures;
+pub(crate) use resources::{prepare_ssr_textures, ViewSsrTextures};

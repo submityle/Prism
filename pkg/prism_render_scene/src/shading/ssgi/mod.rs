@@ -10,15 +10,35 @@
 //! gather augments the ambient term without introducing energy discontinuities.
 //!
 //! Because SSGI reuses SSR's rebuilt inputs, the additional plumbing is a
-//! single compute pass; it lands across cohesive slices matching the rest of
-//! the shading pipeline:
+//! trace plus a two-pass composite; it lands across cohesive files matching the
+//! rest of the shading pipeline:
 //!
-//! * *(following slices)* — the shared `SsgiConfig` immediate ABI, the per-view
-//!   output target, the trace pipeline and bind group, the `Core3d` dispatch
-//!   node, and the resolve consumption that blends the pre-albedo indirect
-//!   radiance over the pure IBL/SH ambient under the pass's confidence. The ABI
-//!   struct lands with that first live consumer so no committed ABI is dead,
-//!   matching the SSR precedent.
+//! * [`abi`] — the [`abi::GpuSsgiConfig`] gather immediate and the
+//!   [`abi::GpuSsgiCompositeParams`] composite immediate shared with the SSGI
+//!   shaders.
+//! * [`resources`] — the per-view [`resources::ViewSsgiTextures`] (the gather
+//!   output plus the scratch base copy) and their viewport-sized allocator.
+//! * [`trace`] — the diffuse-hemisphere gather pipeline, its per-view bind
+//!   group and the `Core3d` node that marches the reverse-Z Hi-Z pyramid and
+//!   samples the current-frame colour at each hit, writing the pre-albedo mean
+//!   indirect radiance plus a blend confidence.
+//! * [`composite`] — the copy + fold pipelines, per-view bind groups and the
+//!   `Core3d` node that lifts the SSR-composited `scene_color` into the scratch
+//!   base and folds the gather in under an energy-conserving substitution of
+//!   the resolve's flat ambient.
+
+mod abi;
+mod composite;
+mod resources;
+mod trace;
 
 #[cfg(test)]
 mod shader_tests;
+
+pub(crate) use composite::{
+    init_ssgi_composite_pipeline, prepare_ssgi_composite_bind_groups, ssgi_composite_pass,
+};
+pub(crate) use resources::prepare_ssgi_textures;
+pub(crate) use trace::{
+    init_ssgi_trace_pipeline, prepare_ssgi_trace_bind_groups, ssgi_trace_pass,
+};

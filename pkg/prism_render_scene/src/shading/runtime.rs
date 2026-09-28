@@ -73,6 +73,22 @@ pub struct PrismShadingSettings {
     /// static camera and a mild smoother under motion; the sub-pixel jitter
     /// that turns it into full supersampling lands in a follow-up.
     pub enable_taa: bool,
+    /// Enables the screen-space global illumination (SSGI) gather. Requires the
+    /// visibility buffer and SSR (it reuses SSR's rebuilt reverse-Z Hi-Z pyramid,
+    /// packed `normal_roughness` and current-frame colour pyramid); the gather
+    /// casts cosine-weighted hemisphere rays that pick up one indirect diffuse
+    /// bounce of on-screen radiance, blended over the resolve's IBL/SH ambient
+    /// under a confidence. Off by default.
+    pub enable_ssgi: bool,
+    /// Cosine-weighted hemisphere rays cast per pixel by the SSGI gather
+    /// (clamped `>= 1`). More rays reduce the gather's noise at a linear march
+    /// cost ahead of the dedicated denoise stage.
+    pub ssgi_sample_count: u32,
+    /// View-space march length (view units) for each SSGI hemisphere ray. A
+    /// fixed budget keeps the gather bounded independent of scene scale; the
+    /// confidence distance-fade tapers the tail so an over-long ray never
+    /// hard-cuts.
+    pub ssgi_max_distance: f32,
 }
 
 impl Default for PrismShadingSettings {
@@ -100,6 +116,9 @@ impl Default for PrismShadingSettings {
             ibl_prefilter_sample_count: 256,
             enable_ssr: false,
             enable_taa: false,
+            enable_ssgi: false,
+            ssgi_sample_count: 8,
+            ssgi_max_distance: 8.0,
         }
     }
 }
