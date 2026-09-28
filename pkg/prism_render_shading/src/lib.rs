@@ -141,7 +141,6 @@ pub use punctual::PunctualLight;
 pub use screen_space::{
     accumulate_temporal, adaptive_history_weight, blend_specular, build_hemisphere_ray,
     build_screen_ray, clip_history_to_aabb, clip_history_to_aabb_ex, cosine_sample_direction,
-    denoise_ssgi, denoise_ssgi_pixel,
     distance_fade, edge_fade, expand_bounds, facing_fade, gather_indirect_diffuse, ggx_ndf,
     hammersley, importance_sample_ggx,
     march_hierarchical, motion_vector, project_view_to_screen, project_world_to_screen,
@@ -151,8 +150,7 @@ pub use screen_space::{
     reverse_z_perspective,
     roughness_fade, smith_ggx_visibility, smoothstep, trace_confidence,
     trace_indirect_ray, trace_screen_space_reflection, DepthPyramid, MotionSample, ScreenRay,
-    ScreenSample, ScreenSpaceReflection, SsgiDenoiseBuffers, SsgiDenoiseConfig, SsgiGather,
-    SsgiParams, SsgiRaySample,
+    ScreenSample, ScreenSpaceReflection, SsgiGather, SsgiParams, SsgiRaySample,
     SsrCamera, SsrConfidenceParams, SsrMarchConfig, SsrMarchResult, SsrResolveParams,
     variance_clip_box, ClipResult, SsrResolveSample, SsrTemporalParams, SsrTraceSample,
 };
