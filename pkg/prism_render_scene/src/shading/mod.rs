@@ -1,4 +1,5 @@
 mod ao;
+mod bloom;
 mod classification_gpu;
 mod composite;
 mod exposure;
@@ -13,6 +14,7 @@ mod shadow;
 mod ssgi;
 mod ssr;
 mod taa;
+mod tonemap;
 mod transparent;
 mod volumetrics;
 mod resources;

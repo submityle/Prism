@@ -9,6 +9,7 @@
 extern crate alloc;
 
 mod ao;
+mod bloom;
 mod classification;
 mod cluster;
 mod clearcoat;
@@ -30,6 +31,7 @@ mod stylized;
 mod surface;
 mod taa;
 mod tangent;
+mod tonemap;
 mod texture_sample;
 mod vecmath;
 mod visibility;
@@ -44,6 +46,10 @@ pub use ao::{
     accumulate_ao, accumulate_moment, clip_history, compute_gtao, denoise_gtao, denoise_gtao_pixel,
     gtao_adaptive_history_weight, gtao_pixel, reproject_prev_uv_gtao, variance_clip_band,
     GtaoBuffers, GtaoCamera, GtaoClipResult, GtaoConfig, GtaoDenoiseConfig, GtaoTemporalParams,
+};
+pub use bloom::{
+    combine, downsample_13tap, karis_average_weight, luminance as bloom_luminance,
+    mip_blend_weights, prefilter, upsample_tent, BloomParams, BLOOM_LUMINANCE_WEIGHTS,
 };
 pub use cluster::{
     assign_lights_to_clusters, ClusterAabb, ClusterAssignmentConfig, ClusterBoundsBuilder,
@@ -123,6 +129,12 @@ pub use outline::{
 pub use water::evaluate_water_direct;
 pub use tangent::{
     apply_tangent_space_normal, orthonormal_basis, resolve_tangent_basis, TangentBasis,
+};
+pub use tonemap::{
+    apply_tonemap, tonemap_aces_fitted, tonemap_aces_narkowicz, tonemap_agx,
+    tonemap_agx_with_look, tonemap_reinhard, tonemap_reinhard_extended, AgxLook, TonemapOperator,
+    TonemapParams, ACES_INPUT_MATRIX, ACES_OUTPUT_MATRIX, AGX_INPUT_MATRIX, AGX_MAX_EV, AGX_MIN_EV,
+    AGX_OUTPUT_MATRIX,
 };
 pub use texture_sample::{
     decode_tangent_normal, fold_material_texel, sample_material, sampled_material_defaults,
