@@ -163,7 +163,13 @@ pub(crate) fn exposure_histogram_pass(
         return;
     }
 
-    let config = GpuExposureHistogramConfig::from_view(HistogramRange::default(), size);
+    let config = GpuExposureHistogramConfig::from_view(
+        HistogramRange {
+            min_log2_luminance: settings.exposure_histogram_min_log2,
+            max_log2_luminance: settings.exposure_histogram_max_log2,
+        },
+        size,
+    );
 
     let workgroups_x = size.x.div_ceil(EXPOSURE_HISTOGRAM_WORKGROUP_SIZE);
     let workgroups_y = size.y.div_ceil(EXPOSURE_HISTOGRAM_WORKGROUP_SIZE);

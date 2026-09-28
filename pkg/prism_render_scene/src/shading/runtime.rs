@@ -110,6 +110,34 @@ pub struct PrismShadingSettings {
     /// Tent-upsample spread radius (`0..=1`); widens the halo without changing
     /// its total energy.
     pub bloom_radius: f32,
+    /// Lowest EV100 the auto-exposure metering may settle to (bright-scene
+    /// clamp). Fed to the resolve pass's [`AutoExposureSettings`].
+    pub exposure_min_ev100: f32,
+    /// Highest EV100 the auto-exposure metering may settle to (dark-scene
+    /// clamp).
+    pub exposure_max_ev100: f32,
+    /// Exposure compensation in stops added to the metered EV100 (positive
+    /// darkens, photographic convention).
+    pub exposure_compensation_stops: f32,
+    /// Eye-adaptation speed when brightening (target brighter than current), in
+    /// 1/seconds. Higher adapts faster.
+    pub exposure_speed_up: f32,
+    /// Eye-adaptation speed when darkening (target darker than current), in
+    /// 1/seconds. Higher adapts faster.
+    pub exposure_speed_down: f32,
+    /// Lowest log2 luminance the metering histogram resolves (bin 0's lower
+    /// edge). Shared by the histogram build and the resolve reduction; they
+    /// must agree or bin mapping is wrong.
+    pub exposure_histogram_min_log2: f32,
+    /// Highest log2 luminance the metering histogram resolves (last bin's upper
+    /// edge).
+    pub exposure_histogram_max_log2: f32,
+    /// Fraction of the darkest pixels discarded before averaging, in `[0, 1)`
+    /// (rejects dark background).
+    pub exposure_low_percent: f32,
+    /// Fraction of the brightest pixels discarded before averaging, in `[0, 1)`
+    /// (rejects pinprick highlights).
+    pub exposure_high_percent: f32,
 }
 
 impl Default for PrismShadingSettings {
@@ -146,6 +174,15 @@ impl Default for PrismShadingSettings {
             bloom_knee: 0.5,
             bloom_intensity: 0.04,
             bloom_radius: 1.0,
+            exposure_min_ev100: -8.0,
+            exposure_max_ev100: 16.0,
+            exposure_compensation_stops: 0.0,
+            exposure_speed_up: 3.0,
+            exposure_speed_down: 1.0,
+            exposure_histogram_min_log2: -10.0,
+            exposure_histogram_max_log2: 12.0,
+            exposure_low_percent: 0.5,
+            exposure_high_percent: 0.1,
         }
     }
 }

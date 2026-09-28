@@ -172,10 +172,23 @@ pub(crate) fn exposure_average_pass(
     *last = Some(now);
 
     let config = GpuExposureResolveConfig::new(
-        HistogramRange::default(),
-        HistogramPercentiles::default(),
-        AutoExposureSettings::default(),
-        EyeAdaptation::default(),
+        HistogramRange {
+            min_log2_luminance: settings.exposure_histogram_min_log2,
+            max_log2_luminance: settings.exposure_histogram_max_log2,
+        },
+        HistogramPercentiles {
+            low: settings.exposure_low_percent,
+            high: settings.exposure_high_percent,
+        },
+        AutoExposureSettings {
+            min_ev100: settings.exposure_min_ev100,
+            max_ev100: settings.exposure_max_ev100,
+            compensation_stops: settings.exposure_compensation_stops,
+        },
+        EyeAdaptation {
+            speed_up: settings.exposure_speed_up,
+            speed_down: settings.exposure_speed_down,
+        },
         delta_seconds,
     );
 
