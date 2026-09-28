@@ -50,8 +50,15 @@ import prism_render_scene::shaders::surface::{
 };
 import prism_render_scene::shaders::gpu_scene::{
     GpuSceneInstance,
+    GpuSceneTransform,
+};
+import prism_render_scene::shaders::scene_transform::scene_apply_current_transform;
+import prism_render_scene::shaders::tangent::{
+    TangentBasis,
+    apply_tangent_space_normal,
 };
 import prism_render_scene::shaders::material_sample::{
+    SampledMaterial,
     sampled_material_defaults,
     sample_texture_slot,
     fold_material_texel,
@@ -73,10 +80,22 @@ const VISIBILITY_BACKGROUND: u32 = 0xffffffffu;
 // it alone.
 const SEMANTIC_METALLIC_ROUGHNESS: u32 = 2u;
 
+// Tangent-space normal-map semantic (`decode_tangent_normal` in
+// `material_sample.wesl` unpacks the RGB into the tangent-space normal, sets
+// `has_normal_map`). Folded alongside the roughness so the trace marches
+// against the same normal-mapped surface the resolve shades, not the raw
+// geometric normal.
+const SEMANTIC_NORMAL: u32 = 3u;
+
 // Immediate (push-constant) block. Mirrors `GpuSsrRepackParams` in
-// `shading/ssr/abi.rs` (16 bytes: the framebuffer extent plus two padding
-// scalars to satisfy the 16-byte immediate alignment).
+// `shading/ssr/abi.rs` (80 bytes: the `view_from_world` matrix, the framebuffer
+// extent, plus two padding scalars to satisfy the 16-byte immediate alignment).
 struct RepackParams {
+    // World -> view (rigid, camera-at-origin, looking down `-Z`). A normal-mapped
+    // world-space normal is rotated into the view frame with this before it is
+    // encoded, matching the frame `ssr_prepass.wesl` writes for the geometric
+    // normal.
+    view_from_world: mat4x4<f32>,
     width: u32,
     height: u32,
     pad0: u32,
@@ -108,43 +127,62 @@ struct RepackParams {
 @group(2) @binding(1) var<storage, read> geometry_headers: array<RenderShadingGeometryHeader>;
 @group(2) @binding(2) var<storage, read> geometry_vertices: array<GpuShadingVertex>;
 @group(2) @binding(3) var<storage, read> geometry_primitives: array<GpuShadingPrimitive>;
+// Per-instance affine `world_from_local` (indexed by `scene_index`), matching
+// `GpuSceneTransform` in `gpu_scene.wesl` and the buffer the prepass/resolve
+// bind. The reconstructed vertices are *local* space, so a normal-mapped normal
+// must be built against the world-space interpolated basis; the identity path
+// leaves an untransformed instance exactly as before.
+@group(2) @binding(4) var<storage, read> scene_current_transforms: array<GpuSceneTransform>;
 
 var<immediate> params: RepackParams;
 
-// Reconstructs the interpolated surface UV for a covered pixel from the
-// visibility ids/metadata, walking the same scene -> geometry -> primitive ->
-// vertex chain as `shading_resolve.wesl` and guarding every table read twice
+// World-space surface reconstruction for a covered pixel plus a validity flag
+// (WESL has no `Option`). `valid == false` leaves `geometry` untouched.
+struct ReconstructedSurface {
+    geometry: SurfaceSampleGeometry,
+    valid: bool,
+}
+
+// Reconstructs the interpolated *world-space* surface for a covered pixel from
+// the visibility ids/metadata, walking the same scene -> geometry -> primitive
+// -> vertex chain as `shading_resolve.wesl` and guarding every table read twice
 // (against the owning header's logical count and the physical `arrayLength`).
-// Returns `vec3(uv, 1.0)` on success or `vec3(0)` (`.z == 0`) whenever any guard
-// rejects the sample, so the caller can fall back to the authored roughness.
-fn reconstruct_uv(ids: vec4<u32>, metadata: vec4<u32>) -> vec3<f32> {
+// The interpolated vertices are local space, so the owning instance's
+// `world_from_local` is applied (mirroring the prepass/resolve) before the basis
+// is used for normal-map perturbation. `valid == false` whenever any guard
+// rejects the sample, so the caller falls back to the authored roughness and
+// the prepass geometric normal.
+fn reconstruct_geometry(ids: vec4<u32>, metadata: vec4<u32>) -> ReconstructedSurface {
+    var out: ReconstructedSurface;
+    out.valid = false;
+
     // ids = [scene_index, scene_generation, primitive_index, geometry_lod].
     let scene_index = ids.x;
     if scene_index >= arrayLength(&scene_instances) {
-        return vec3<f32>(0.0);
+        return out;
     }
     let instance = scene_instances[scene_index];
     if instance.is_active == 0u || instance.generation != ids.y {
-        return vec3<f32>(0.0);
+        return out;
     }
     let geometry_index = instance.geometry_index;
     if geometry_index >= arrayLength(&geometry_headers) {
-        return vec3<f32>(0.0);
+        return out;
     }
     let header = geometry_headers[geometry_index];
     if (header.flags & SHADING_GEOMETRY_FLAG_ACTIVE) == 0u {
-        return vec3<f32>(0.0);
+        return out;
     }
     if header.generation != instance.geometry_generation {
-        return vec3<f32>(0.0);
+        return out;
     }
     let primitive_index = ids.z;
     if primitive_index >= header.primitive_count {
-        return vec3<f32>(0.0);
+        return out;
     }
     let primitive_row = header.primitive_offset + primitive_index;
     if primitive_row >= arrayLength(&geometry_primitives) {
-        return vec3<f32>(0.0);
+        return out;
     }
     let primitive = geometry_primitives[primitive_row];
     let index_a = primitive.indices[0];
@@ -153,22 +191,34 @@ fn reconstruct_uv(ids: vec4<u32>, metadata: vec4<u32>) -> vec3<f32> {
     if index_a >= header.vertex_count
         || index_b >= header.vertex_count
         || index_c >= header.vertex_count {
-        return vec3<f32>(0.0);
+        return out;
     }
     let row_a = header.vertex_offset + index_a;
     let row_b = header.vertex_offset + index_b;
     let row_c = header.vertex_offset + index_c;
     let vertex_len = arrayLength(&geometry_vertices);
     if row_a >= vertex_len || row_b >= vertex_len || row_c >= vertex_len {
-        return vec3<f32>(0.0);
+        return out;
     }
     let vertex_a = geometry_vertices[row_a];
     let vertex_b = geometry_vertices[row_b];
     let vertex_c = geometry_vertices[row_c];
     let weights = surface_decode_barycentrics(metadata.w);
-    let geometry: SurfaceSampleGeometry =
+    let local_geometry =
         interpolate_surface(vertex_a, vertex_b, vertex_c, primitive.flags, weights);
-    return vec3<f32>(geometry.uv, 1.0);
+
+    // Lift the local-space reconstruction into world space with the instance
+    // transform (falling back to the untransformed sample for a short/stale
+    // buffer), so the tangent basis matches the world-space normal the resolve
+    // perturbs.
+    if scene_index < arrayLength(&scene_current_transforms) {
+        out.geometry = scene_apply_current_transform(
+            scene_current_transforms[scene_index], local_geometry);
+    } else {
+        out.geometry = local_geometry;
+    }
+    out.valid = true;
+    return out;
 }
 
 // Perceptual roughness for one covered pixel: the authored parameter modulated
@@ -180,41 +230,84 @@ fn reconstruct_uv(ids: vec4<u32>, metadata: vec4<u32>) -> vec3<f32> {
 // valid but the UV cannot be reconstructed, the authored roughness stands (no
 // texture modulation), matching the pre-upgrade base-parameter behaviour.
 // `metadata.x` is the material index, `metadata.y` the expected generation.
-fn resolve_roughness(ids: vec4<u32>, metadata: vec4<u32>) -> f32 {
+// The trace's `normal_roughness` inputs for one covered pixel: the
+// texture-modulated perceptual roughness plus (when a normal map is bound) the
+// world-space normal-mapped normal, mirroring `shading_resolve.wesl`.
+struct RepackSample {
+    // Perceptual roughness to pack, already clamped. `1.0` (fully rough, which
+    // drives the trace's `roughness_fade` and thus SSR confidence to zero) is
+    // the fallback whenever a material generation/bounds guard rejects the
+    // sample, so a stale or absent material reflects nothing.
+    roughness: f32,
+    // World-space shading normal after normal-map perturbation. Only meaningful
+    // when `normal_overridden`.
+    world_normal: vec3<f32>,
+    // `true` when a normal map was folded against a valid reconstructed basis,
+    // so the caller replaces the prepass geometric normal with `world_normal`
+    // (rotated into view space). `false` keeps the prepass view normal.
+    normal_overridden: bool,
+}
+
+// Folds the metallic-roughness *and* normal textures for one covered pixel over
+// the authored parameters, exactly like the resolve's texture fold, then (if a
+// normal map is bound) rotates its tangent-space sample into world space against
+// the reconstructed interpolated basis. The other semantics the resolve folds
+// do not affect the trace's `normal_roughness` inputs and are skipped so the
+// repack stays a lightweight two-fetch pass. Folding is skipped when the UV
+// could not be reconstructed, so a degenerate primitive falls back to the
+// authored roughness (and the prepass normal) rather than sampling at a garbage
+// UV. `metadata.x` is the material index, `metadata.y` the expected generation.
+fn repack_sample(ids: vec4<u32>, metadata: vec4<u32>) -> RepackSample {
+    var out: RepackSample;
+    out.roughness = 1.0;
+    out.world_normal = vec3<f32>(0.0, 0.0, 1.0);
+    out.normal_overridden = false;
+
     let material_index = metadata.x;
     if material_index >= arrayLength(&material_headers) {
-        return 1.0;
+        return out;
     }
     let material_header = material_headers[material_index];
     if material_header.is_active == 0u || material_header.generation != metadata.y {
-        return 1.0;
+        return out;
     }
     let parameter_row = material_header.parameter_offset;
     if parameter_row >= arrayLength(&material_parameters) {
-        return 1.0;
+        return out;
     }
     let parameters = material_parameters[parameter_row];
 
-    // Seed from the authored factors, then fold the metallic-roughness texture
-    // (if any) over the authored roughness exactly like the resolve's texture
-    // fold. Skips folding when the UV could not be reconstructed so a degenerate
-    // primitive falls back to the authored roughness rather than sampling at a
-    // garbage UV.
     var sampled = sampled_material_defaults(parameters);
-    let uv_sample = reconstruct_uv(ids, metadata);
-    if uv_sample.z > 0.5 {
-        let uv = uv_sample.xy;
+    let recon = reconstruct_geometry(ids, metadata);
+    if recon.valid {
+        let uv = recon.geometry.uv;
         let tex_end = material_header.texture_offset + material_header.texture_count;
         let tex_physical = arrayLength(&material_textures);
         for (var i = material_header.texture_offset; i < tex_end && i < tex_physical; i = i + 1u) {
             let record = material_textures[i];
-            if record.semantic == SEMANTIC_METALLIC_ROUGHNESS {
+            if record.semantic == SEMANTIC_METALLIC_ROUGHNESS
+                || record.semantic == SEMANTIC_NORMAL {
                 let texel = sample_texture_slot(record, uv);
                 sampled = fold_material_texel(record, texel, parameters.normal_scale, sampled);
             }
         }
+
+        // A bound normal map rotates its tangent-space sample into world space
+        // against the interpolated basis, exactly as `shading_resolve.wesl`
+        // does; the geometry (and thus the basis) is already world space from
+        // `scene_apply_current_transform`.
+        if sampled.has_normal_map {
+            var basis: TangentBasis;
+            basis.tangent = recon.geometry.tangent;
+            basis.bitangent = recon.geometry.bitangent;
+            basis.degenerate = false;
+            out.world_normal = apply_tangent_space_normal(
+                basis, recon.geometry.normal, sampled.normal_tangent);
+            out.normal_overridden = true;
+        }
     }
-    return clamp(sampled.perceptual_roughness, 0.0, 1.0);
+    out.roughness = clamp(sampled.perceptual_roughness, 0.0, 1.0);
+    return out;
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -234,12 +327,18 @@ fn ssr_repack(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
 
-    // The prepass already reconstructed and normalized the signed view-space
-    // normal; re-encode it into the trace's [0, 1] convention. Roughness comes
-    // from the material's metallic-roughness texture at the reconstructed UV.
-    let view_normal = textureLoad(view_normal_in, coord, 0).xyz;
-    let roughness = resolve_roughness(ids, metadata);
+    let sample = repack_sample(ids, metadata);
+
+    // Default to the prepass view-space geometric normal; when a normal map was
+    // folded, rotate the world-space normal-mapped normal into the view frame
+    // instead so the trace marches against the same surface the resolve shades.
+    // `view_from_world` is rigid, so the rotated normal stays unit.
+    var view_normal = textureLoad(view_normal_in, coord, 0).xyz;
+    if sample.normal_overridden {
+        let view_dir = (params.view_from_world * vec4<f32>(sample.world_normal, 0.0)).xyz;
+        view_normal = normalize(view_dir);
+    }
 
     let encoded_normal = view_normal * 0.5 + vec3<f32>(0.5);
-    textureStore(normal_roughness_out, coord, vec4<f32>(encoded_normal, roughness));
+    textureStore(normal_roughness_out, coord, vec4<f32>(encoded_normal, sample.roughness));
 }

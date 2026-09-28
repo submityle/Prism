@@ -2,14 +2,17 @@
 //! `Core3d` dispatch node.
 //!
 //! The trace samples a single `normal_roughness` texture, but the geometry
-//! prepass can only reconstruct the signed view-space normal - it has no
-//! material bind group, so it cannot fetch roughness. This stage sits between
-//! them: it re-reads the prepass normal, reconstructs the covered pixel's
-//! interpolated UV from the visibility buffer (walking the same scene/geometry
-//! tables the resolve does), samples the material's metallic-roughness texture
-//! through the shared bindless heap, and packs `rgb = normal * 0.5 + 0.5`,
-//! `a = texture-modulated perceptual roughness` into the trace's input, via
-//! `shaders/ssr_repack.wesl`.
+//! prepass can only reconstruct the signed view-space *geometric* normal - it
+//! has no material bind group, so it cannot fetch roughness or apply the normal
+//! map. This stage sits between them: it re-reads the prepass normal,
+//! reconstructs the covered pixel's interpolated world-space surface from the
+//! visibility buffer (walking the same scene/geometry tables the resolve does),
+//! samples the material's metallic-roughness *and* normal textures through the
+//! shared bindless heap, rotates a bound normal map into world space against the
+//! interpolated basis and back into the view frame (exactly like the resolve),
+//! and packs `rgb = normal * 0.5 + 0.5`, `a = texture-modulated perceptual
+//! roughness` into the trace's input, via `shaders/ssr_repack.wesl`. The trace
+//! therefore marches against the same normal-mapped surface the resolve shades.
 //!
 //! It reads three bind groups:
 //!
@@ -23,9 +26,11 @@
 //!   kernel now declares the header + parameter + texture-record bindings and
 //!   the heap arrays (via `material_sample.wesl`); the layout carries no more.
 //! * **group 2** - the scene-instance and shading-geometry tables the surface
-//!   reconstruction walks to recover the interpolated UV. Owned here (a
-//!   four-buffer subset of the resolve's group 2, which also carries the
-//!   per-class worklist the repack does not need).
+//!   reconstruction walks to recover the interpolated UV, plus the per-instance
+//!   current `world_from_local` transforms that lift the reconstructed
+//!   local-space surface into world space for the normal-map basis. Owned here
+//!   (a subset of the resolve's group 2, which also carries the per-class
+//!   worklist the repack does not need).
 
 use bevy_asset::{load_embedded_asset, Handle};
 use bevy_ecs::prelude::*;
@@ -43,6 +48,7 @@ use bevy_render::{
         StorageTextureAccess, TextureSampleType,
     },
     renderer::{RenderContext, RenderDevice, ViewQuery},
+    view::ExtractedView,
 };
 use bevy_shader::Shader;
 
@@ -59,13 +65,14 @@ use super::resources::{ViewSsrTextures, SSR_NORMAL_ROUGHNESS_FORMAT};
 pub(crate) struct SsrRepackPipeline {
     /// `ssr_repack` compute entry point, specialized against the group-0 layout,
     /// the reused material layout, the owned group-2 scene/geometry layout and
-    /// the 16-byte immediate block.
+    /// the 80-byte immediate block (the `view_from_world` matrix + extent).
     repack: CachedComputePipelineId,
     /// group 0: visibility ids/metadata + prepass view-normal read, packed
     /// `normal_roughness` written.
     view_layout: BindGroupLayout,
-    /// group 2: scene-instance + shading-geometry tables (four read-only
-    /// storage buffers) walked to recover the interpolated UV.
+    /// group 2: scene-instance + shading-geometry tables plus the per-instance
+    /// current transforms (five read-only storage buffers) walked to recover the
+    /// interpolated UV and world-space normal-map basis.
     scene_layout: BindGroupLayout,
 }
 
@@ -84,15 +91,18 @@ fn view_layout_entries() -> BindGroupLayoutEntries<4> {
     )
 }
 
-/// group-2 layout: four read-only storage buffers (scene instances, then the
-/// geometry headers/vertices/primitives). `None` min-binding-size keeps the
-/// layout agnostic to the run-time array length; the shader guards every index.
-/// A four-buffer subset of the resolve's seven-buffer group 2 (the repack needs
-/// no worklist).
-fn scene_layout_entries() -> BindGroupLayoutEntries<4> {
+/// group-2 layout: five read-only storage buffers (scene instances, the
+/// geometry headers/vertices/primitives, then the per-instance current
+/// `world_from_local` transforms used to lift the reconstructed local-space
+/// surface into world space for the normal-map basis). `None` min-binding-size
+/// keeps the layout agnostic to the run-time array length; the shader guards
+/// every index. A subset of the resolve's group 2 (the repack needs no worklist
+/// and no previous-frame transforms).
+fn scene_layout_entries() -> BindGroupLayoutEntries<5> {
     BindGroupLayoutEntries::sequential(
         ShaderStages::COMPUTE,
         (
+            storage_buffer_read_only_sized(false, None),
             storage_buffer_read_only_sized(false, None),
             storage_buffer_read_only_sized(false, None),
             storage_buffer_read_only_sized(false, None),
@@ -167,9 +177,15 @@ pub(crate) fn prepare_ssr_repack_bind_groups(
 ) {
     // Scene/geometry tables are shared across all views; without them there is
     // no UV to reconstruct, so clear any stale group and skip this frame.
-    let (Some(instances), Some((geo_headers, geo_vertices, geo_primitives))) =
-        (scene.instances(), geometry.buffers())
-    else {
+    let (
+        Some(instances),
+        Some(current_transforms),
+        Some((geo_headers, geo_vertices, geo_primitives)),
+    ) = (
+        scene.instances(),
+        scene.current_transforms(),
+        geometry.buffers(),
+    ) else {
         for (entity, _, _) in &views {
             commands.entity(entity).remove::<ViewSsrRepackBindGroup>();
         }
@@ -196,6 +212,7 @@ pub(crate) fn prepare_ssr_repack_bind_groups(
                 geo_headers.as_entire_binding(),
                 geo_vertices.as_entire_binding(),
                 geo_primitives.as_entire_binding(),
+                current_transforms.as_entire_binding(),
             )),
         );
         commands.entity(entity).insert(ViewSsrRepackBindGroup {
@@ -214,7 +231,7 @@ pub(crate) fn prepare_ssr_repack_bind_groups(
 /// tile.
 pub(crate) fn ssr_repack_pass(
     settings: Res<super::super::runtime::PrismShadingSettings>,
-    view: ViewQuery<(&ViewSsrTextures, &ViewSsrRepackBindGroup)>,
+    view: ViewQuery<(&ViewSsrTextures, &ViewSsrRepackBindGroup, &ExtractedView)>,
     material_bindings: Res<MaterialBindGroup>,
     pipeline: Res<SsrRepackPipeline>,
     cache: Res<PipelineCache>,
@@ -223,7 +240,7 @@ pub(crate) fn ssr_repack_pass(
     if !settings.enable_ssr {
         return;
     }
-    let (textures, group) = view.into_inner();
+    let (textures, group, extracted) = view.into_inner();
 
     // The shared material bind group must be resident; without the material
     // tables there is no roughness to fold in.
@@ -239,7 +256,11 @@ pub(crate) fn ssr_repack_pass(
         return;
     }
 
-    let params = GpuSsrRepackParams::new(size.x, size.y);
+    // Same world->view transform the prepass used, so a normal-mapped world-space
+    // normal lands in the identical camera-at-origin frame as the geometric
+    // normal the prepass wrote.
+    let view_from_world = extracted.world_from_view.to_matrix().inverse();
+    let params = GpuSsrRepackParams::new(view_from_world, size.x, size.y);
     let workgroups_x = size.x.div_ceil(SSR_WORKGROUP_SIZE);
     let workgroups_y = size.y.div_ceil(SSR_WORKGROUP_SIZE);
 

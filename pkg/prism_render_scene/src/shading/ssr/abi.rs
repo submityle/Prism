@@ -105,10 +105,16 @@ impl GpuSsrHzbParams {
 /// roughness into the trace's `normal_roughness` input.
 ///
 /// Mirrors the shader's `RepackParams`: the framebuffer extent plus two trailing
-/// `u32`s that pad the block to the 16-byte immediate alignment WGSL requires.
+/// `u32`s that pad the block to the 16-byte immediate alignment WGSL requires,
+/// preceded by the `view_from_world` matrix used to rotate a normal-mapped
+/// normal into the view frame.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq)]
 pub(crate) struct GpuSsrRepackParams {
+    /// World -> view (rigid, camera-at-origin, looking down `-Z`), uploaded
+    /// column-major. Rotates a normal-mapped world-space normal into the view
+    /// frame so it matches the geometric normal the prepass wrote.
+    pub view_from_world: [f32; 16],
     /// Framebuffer width in texels.
     pub width: u32,
     /// Framebuffer height in texels.
@@ -120,9 +126,12 @@ pub(crate) struct GpuSsrRepackParams {
 }
 
 impl GpuSsrRepackParams {
-    /// Builds the repack params from the framebuffer extent.
-    pub(crate) fn new(width: u32, height: u32) -> Self {
+    /// Builds the repack params from the world->view transform and framebuffer
+    /// extent. The matrix uploads column-major (via [`Mat4::to_cols_array`]) so
+    /// the WGSL `mat4x4<f32>` multiply agrees byte-for-byte.
+    pub(crate) fn new(view_from_world: Mat4, width: u32, height: u32) -> Self {
         Self {
+            view_from_world: view_from_world.to_cols_array(),
             width,
             height,
             _pad0: 0,
@@ -408,11 +417,15 @@ mod tests {
 
     #[test]
     fn repack_params_match_the_shader_immediate_layout() {
-        // width/height/pad0/pad1 = 16 bytes, the WGSL immediate alignment, and
-        // the fields round-trip in declaration order.
-        assert_eq!(size_of::<GpuSsrRepackParams>(), 16);
+        // view_from_world (64) + width/height/pad0/pad1 (16) = 80 bytes, and the
+        // fields round-trip in declaration order with the matrix column-major.
+        assert_eq!(size_of::<GpuSsrRepackParams>(), 80);
         assert_eq!(align_of::<GpuSsrRepackParams>(), 4);
-        let params = GpuSsrRepackParams::new(1920, 1080);
+        let view = Mat4::from_cols_array(&[
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
+        ]);
+        let params = GpuSsrRepackParams::new(view, 1920, 1080);
+        assert_eq!(params.view_from_world, view.to_cols_array());
         assert_eq!(params.width, 1920);
         assert_eq!(params.height, 1080);
         assert_eq!(params._pad0, 0);

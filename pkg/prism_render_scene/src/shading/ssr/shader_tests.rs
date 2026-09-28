@@ -129,18 +129,21 @@ fn ssr_hzb_wesl_compiles_standalone() {
 /// reads only the authored `perceptual_roughness`: it reconstructs the
 /// covered pixel's interpolated UV from the visibility buffer (walking the
 /// same `surface.wesl` scene -> geometry -> primitive -> vertex tables the
-/// resolve uses) and samples the metallic-roughness texture through the
-/// shared bindless heap via `material_sample.wesl`. A green result proves
-/// that whole graph -- `material`, `tangent`, `surface`, `gpu_scene` and
-/// `material_sample` (which itself `enable`s `wgpu_binding_array` and imports
-/// `material`) -- parses, type-checks and links, and that packing the biased
-/// view normal plus the texture-modulated roughness into the trace's
-/// `normal_roughness` output is well-formed.
+/// resolve uses) and samples the metallic-roughness *and* normal textures
+/// through the shared bindless heap via `material_sample.wesl`, rotating a
+/// bound normal map into world space against the interpolated basis (via
+/// `scene_transform.wesl` + `tangent.wesl`) and back into the view frame. A
+/// green result proves that whole graph -- `material`, `tangent`, `surface`,
+/// `gpu_scene`, `scene_transform` and `material_sample` (which itself
+/// `enable`s `wgpu_binding_array` and imports `material`) -- parses,
+/// type-checks and links, and that packing the normal-mapped view normal plus
+/// the texture-modulated roughness into the trace's `normal_roughness` output
+/// is well-formed.
 #[test]
 fn ssr_repack_wesl_compiles_and_resolves_imports() {
     let mut cache = ShaderCache::new((), load_source);
 
-    let deps: [(u128, &str, &str); 5] = [
+    let deps: [(u128, &str, &str); 6] = [
         (
             0x5052_4953_4d5f_5353_525f_4d41_5450_0002,
             include_str!("../../shaders/material.wesl"),
@@ -160,6 +163,11 @@ fn ssr_repack_wesl_compiles_and_resolves_imports() {
             0x5052_4953_4d5f_5353_525f_5343_4e45_0002,
             include_str!("../../shaders/gpu_scene.wesl"),
             "embedded://prism_render_scene/shaders/gpu_scene.wesl",
+        ),
+        (
+            0x5052_4953_4d5f_5353_525f_5343_5446_0002,
+            include_str!("../../shaders/scene_transform.wesl"),
+            "embedded://prism_render_scene/shaders/scene_transform.wesl",
         ),
         (
             0x5052_4953_4d5f_5353_525f_4d53_4d50_0001,
