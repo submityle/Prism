@@ -30,16 +30,30 @@
 //!   (`material_sample`), and folds the prepass view-normal plus that
 //!   texture-modulated roughness into the trace's packed `normal_roughness`
 //!   input — all on the current frame in this single pass.
+//! * [`color_mips`] — the copy + 2x2-average mip-build pipelines, per-level bind
+//!   groups and the `Core3d` node that builds the current-frame scene-colour
+//!   pyramid (level 0 = `scene_color`, coarser levels = box-filtered pre-blur)
+//!   the trace samples for reflected radiance, run after the resolve.
 //!
-//! The trace and the resolve's consumption of the reflection buffer land in
-//! following slices.
+//! * [`trace`] — the screen-space reflection march pipeline, its per-view
+//!   bind group and the `Core3d` node that reflects the view ray off each
+//!   reconstructed surface, marches the reverse-Z Hi-Z pyramid and samples the
+//!   roughness-selected colour-pyramid mip at the hit, writing reflected
+//!   radiance plus a blend confidence into the reflection output.
+//! * [`composite`] — the pipeline, per-view bind group and `Core3d` node that
+//!   fold that reflection output back over the shaded `scene_color` (reading
+//!   the untouched base from colour-pyramid level 0 to avoid storage-image
+//!   read/write aliasing) before the main pass presents it.
 
 mod abi;
 mod bind_groups;
+mod color_mips;
+mod composite;
 mod dispatch;
 mod hzb;
 mod pipeline;
 mod repack;
+mod trace;
 mod resources;
 
 #[cfg(test)]
@@ -48,6 +62,13 @@ mod shader_tests;
 pub(crate) use bind_groups::prepare_ssr_prepass_bind_groups;
 pub(crate) use dispatch::ssr_prepass_pass;
 pub(crate) use hzb::{init_ssr_hzb_pipeline, prepare_ssr_hzb_bind_groups, ssr_hzb_pass};
+pub(crate) use color_mips::{
+    init_ssr_color_mips_pipeline, prepare_ssr_color_mips_bind_groups, ssr_color_mips_pass,
+};
+pub(crate) use composite::{
+    init_ssr_composite_pipeline, prepare_ssr_composite_bind_groups, ssr_composite_pass,
+};
+pub(crate) use trace::{init_ssr_trace_pipeline, prepare_ssr_trace_bind_groups, ssr_trace_pass};
 pub(crate) use repack::{init_ssr_repack_pipeline, prepare_ssr_repack_bind_groups, ssr_repack_pass};
 pub(crate) use pipeline::init_ssr_prepass_pipeline;
 pub(crate) use resources::prepare_ssr_textures;

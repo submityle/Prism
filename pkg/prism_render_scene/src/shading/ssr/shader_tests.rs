@@ -178,3 +178,53 @@ fn ssr_repack_wesl_compiles_and_resolves_imports() {
         panic!("ssr_repack.wesl failed to compile/resolve imports: {error}")
     });
 }
+
+/// Compiles `ssr_color_mips.wesl`, proving both colour-history build entry
+/// points parse and type-check as they will in the render world:
+/// `ssr_color_copy` lifts the resolve's `scene_color` into history level 0, and
+/// `ssr_color_reduce` writes each coarser level as the 2x2 box average of the
+/// finer one. The kernel is self-contained (no intra-crate imports), so a green
+/// result also guards its immediate `MipParams` layout against drift from the
+/// shared `GpuSsrHzbParams` destination-then-source extent contract.
+#[test]
+fn ssr_color_mips_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let color_mips = shader_id(0x5052_4953_4d5f_5353_525f_434d_5053_0001);
+    cache.set_shader(
+        color_mips,
+        Shader::from_wesl(
+            include_str!("../../shaders/ssr_color_mips.wesl"),
+            "embedded://prism_render_scene/shaders/ssr_color_mips.wesl",
+        ),
+    );
+
+    cache
+        .get(0, color_mips, &[])
+        .unwrap_or_else(|error| panic!("ssr_color_mips.wesl failed to compile: {error}"));
+}
+
+/// Compiles `ssr_composite.wesl` standalone. The composite blends the trace's
+/// reflection output over the shaded `scene_color`, reading the untouched base
+/// from colour-pyramid level 0 (a copy of `scene_color`) so the write-only
+/// `rgba16float` storage output never aliases a read. The kernel is
+/// self-contained (no intra-crate imports), so a green result also guards its
+/// immediate `CompositeParams` layout against drift from the shared 16-byte
+/// `GpuSsrCompositeParams` extent contract.
+#[test]
+fn ssr_composite_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let composite = shader_id(0x5052_4953_4d5f_5353_525f_434d_5053_0002);
+    cache.set_shader(
+        composite,
+        Shader::from_wesl(
+            include_str!("../../shaders/ssr_composite.wesl"),
+            "embedded://prism_render_scene/shaders/ssr_composite.wesl",
+        ),
+    );
+
+    cache
+        .get(0, composite, &[])
+        .unwrap_or_else(|error| panic!("ssr_composite.wesl failed to compile: {error}"));
+}

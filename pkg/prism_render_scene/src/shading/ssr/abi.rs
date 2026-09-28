@@ -131,6 +131,118 @@ impl GpuSsrRepackParams {
     }
 }
 
+/// Immediate (push-constant) block consumed by `ssr.wesl`'s `trace_ssr` entry
+/// point — the screen-space march itself.
+///
+/// Mirrors the shader's `SsrConfig`: the reverse-Z projection (`clip_from_view`)
+/// and its inverse (`view_from_clip`) used to project the reflected ray and
+/// reconstruct view positions, the near-plane/march tunables, the confidence
+/// fades (mirroring the golden `SsrConfidenceParams`) and march limits
+/// (mirroring `SsrMarchConfig`), plus the finest colour mip and the pyramid's
+/// top mip index used to pick the roughness-selected reflection blur, and the
+/// full-resolution framebuffer extent.
+///
+/// The two `mat4x4<f32>` fields (64 B each, offsets 0 and 64) precede the
+/// scalars; `screen_size` (a `vec2<f32>`) lands at offset 168, already 8-byte
+/// aligned, and the block ends at 176 bytes — a multiple of the 16-byte
+/// immediate alignment WGSL requires, so no trailing pad is needed.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq)]
+pub(crate) struct GpuSsrConfig {
+    /// View -> clip (reverse-Z perspective); projects the marched ray.
+    pub clip_from_view: [f32; 16],
+    /// Clip -> view (inverse projection); reconstructs view-space positions.
+    pub view_from_clip: [f32; 16],
+    /// Positive near-plane distance in front of the camera along `-Z`.
+    pub near: f32,
+    /// View-space march length the reflected ray is extended along.
+    pub max_distance: f32,
+    /// Device-depth thin-surface tolerance for accepting a hit.
+    pub thickness: f32,
+    /// Hard iteration cap for the hierarchical march.
+    pub max_iterations: u32,
+    /// UV border margin where the edge fade begins ramping.
+    pub edge_fade_start: f32,
+    /// Perceptual roughness below which SSR is fully trusted.
+    pub full_roughness: f32,
+    /// Perceptual roughness at/above which SSR is fully replaced by IBL.
+    pub max_roughness: f32,
+    /// Normalized travel where the distance fade begins ramping.
+    pub distance_fade_start: f32,
+    /// Finest Hi-Z mip the march refines down to (usually 0).
+    pub most_detailed_mip: u32,
+    /// Top colour-pyramid mip index (`color_mip_count - 1`), the roughest blur.
+    pub color_max_mip: f32,
+    /// Full-resolution framebuffer extent in texels.
+    pub screen_size: [f32; 2],
+}
+
+impl GpuSsrConfig {
+    /// Builds the trace config from the view matrices and framebuffer extent,
+    /// folding in the golden `SsrConfidenceParams`/`SsrMarchConfig` defaults from
+    /// [`prism_render_shading::screen_space`] so the GPU march agrees with the
+    /// CPU reference. Both matrices upload column-major (via
+    /// [`Mat4::to_cols_array`]) so the WGSL `mat4x4<f32>` multiply matches
+    /// byte-for-byte.
+    pub(crate) fn from_view(
+        clip_from_view: Mat4,
+        view_from_clip: Mat4,
+        near: f32,
+        max_distance: f32,
+        screen_size: bevy_math::UVec2,
+        color_max_mip: f32,
+    ) -> Self {
+        Self {
+            clip_from_view: clip_from_view.to_cols_array(),
+            view_from_clip: view_from_clip.to_cols_array(),
+            near,
+            max_distance,
+            // Golden `SsrMarchConfig::default()`.
+            thickness: 0.02,
+            max_iterations: 128,
+            // Golden `SsrConfidenceParams::default()`.
+            edge_fade_start: 0.1,
+            full_roughness: 0.2,
+            max_roughness: 0.6,
+            distance_fade_start: 0.7,
+            most_detailed_mip: 0,
+            color_max_mip: color_max_mip.max(0.0),
+            screen_size: [screen_size.x as f32, screen_size.y as f32],
+        }
+    }
+}
+
+/// Immediate (push-constant) block consumed by `ssr_composite.wesl`, the stage
+/// that blends the trace's reflection buffer over the shaded `scene_color`.
+///
+/// Mirrors the shader's `CompositeParams`: the framebuffer extent plus two
+/// trailing `u32`s padding the block to the 16-byte immediate alignment WGSL
+/// requires (identical shape to [`GpuSsrRepackParams`]).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq)]
+pub(crate) struct GpuSsrCompositeParams {
+    /// Framebuffer width in texels.
+    pub width: u32,
+    /// Framebuffer height in texels.
+    pub height: u32,
+    /// Padding to satisfy the 16-byte immediate alignment.
+    pub _pad0: u32,
+    /// Padding to satisfy the 16-byte immediate alignment.
+    pub _pad1: u32,
+}
+
+impl GpuSsrCompositeParams {
+    /// Builds the composite params from the framebuffer extent.
+    pub(crate) fn new(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            _pad0: 0,
+            _pad1: 0,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,5 +300,54 @@ mod tests {
         assert_eq!(params.clip_from_view, clip.to_cols_array());
         assert_eq!(params.width, 1920);
         assert_eq!(params.height, 1080);
+    }
+
+    #[test]
+    fn config_matches_the_shader_immediate_layout() {
+        // Two mat4x4 (128) + ten scalars (40) + a vec2<f32> (8) = 176 bytes,
+        // already a multiple of the 16-byte immediate alignment (screen_size
+        // lands 8-byte aligned at offset 168), so no trailing pad is needed.
+        assert_eq!(size_of::<GpuSsrConfig>(), 176);
+        assert_eq!(align_of::<GpuSsrConfig>(), 4);
+    }
+
+    #[test]
+    fn config_folds_in_the_golden_defaults_and_uploads_matrices_column_major() {
+        let clip = Mat4::from_cols_array(&[
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
+        ]);
+        let inv = Mat4::from_cols_array(&[
+            17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0, 24.0, 25.0, 26.0, 27.0, 28.0, 29.0, 30.0,
+            31.0, 32.0,
+        ]);
+        let config =
+            GpuSsrConfig::from_view(clip, inv, 0.5, 100.0, bevy_math::UVec2::new(1920, 1080), 7.0);
+        assert_eq!(config.clip_from_view, clip.to_cols_array());
+        assert_eq!(config.view_from_clip, inv.to_cols_array());
+        assert_eq!(config.near, 0.5);
+        assert_eq!(config.max_distance, 100.0);
+        // Golden `SsrMarchConfig`/`SsrConfidenceParams` defaults.
+        assert_eq!(config.thickness, 0.02);
+        assert_eq!(config.max_iterations, 128);
+        assert_eq!(config.edge_fade_start, 0.1);
+        assert_eq!(config.full_roughness, 0.2);
+        assert_eq!(config.max_roughness, 0.6);
+        assert_eq!(config.distance_fade_start, 0.7);
+        assert_eq!(config.most_detailed_mip, 0);
+        assert_eq!(config.color_max_mip, 7.0);
+        assert_eq!(config.screen_size, [1920.0, 1080.0]);
+    }
+
+    #[test]
+    fn composite_params_match_the_shader_immediate_layout() {
+        // width/height/pad0/pad1 = 16 bytes, the WGSL immediate alignment, and
+        // the fields round-trip in declaration order.
+        assert_eq!(size_of::<GpuSsrCompositeParams>(), 16);
+        assert_eq!(align_of::<GpuSsrCompositeParams>(), 4);
+        let params = GpuSsrCompositeParams::new(1920, 1080);
+        assert_eq!(params.width, 1920);
+        assert_eq!(params.height, 1080);
+        assert_eq!(params._pad0, 0);
+        assert_eq!(params._pad1, 0);
     }
 }

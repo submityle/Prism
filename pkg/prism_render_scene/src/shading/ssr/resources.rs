@@ -56,6 +56,16 @@ pub(crate) const SSR_NORMAL_ROUGHNESS_FORMAT: TextureFormat = TextureFormat::Rgb
 /// one, mirroring the CPU golden pyramid the shader twin marches.
 pub(crate) const SSR_HZB_FORMAT: TextureFormat = TextureFormat::R32Float;
 
+/// Current-frame scene-colour mip pyramid sampled by the trace. Matches the
+/// resolve's [`super::super::resources::SCENE_COLOR_FORMAT`] byte for byte so
+/// level 0 is a loss-free copy of the shaded HDR radiance and the coarser
+/// box-filtered levels carry the pre-blurred reflection rougher surfaces read.
+pub(crate) const SSR_COLOR_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
+/// Reflection buffer the trace writes (`rgb` = reflected radiance, `a` = blend
+/// confidence) and the composite blends over the shaded scene colour. Wide HDR
+/// so the reflected radiance keeps its range up to the composite.
+pub(crate) const SSR_OUT_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
+
 /// The two per-view SSR prepass textures, present only while SSR is enabled and
 /// the viewport size is known.
 #[derive(Component)]
@@ -79,6 +89,22 @@ pub(crate) struct ViewSsrTextures {
     hzb_mip_views: Vec<TextureView>,
     /// Number of pyramid levels (including level 0), i.e. `hzb_mip_views.len()`.
     hzb_mip_count: u32,
+    /// Current-frame scene-colour mip pyramid the trace samples for reflected
+    /// radiance. Level 0 is a 1:1 copy of the resolve's `scene_color`; each
+    /// coarser level is its 2x2 box average, built every frame *after* the
+    /// resolve by [`super::color_mips`]. Purely intra-frame (a [`TextureCache`]
+    /// transient, recycled next frame) — the trace reads the current frame's
+    /// own colour, never a reprojected previous frame, so no cross-frame
+    /// history, motion vectors, or reprojection matrices are involved.
+    color: CachedTexture,
+    /// One single-mip view per colour-pyramid level (the copy/reduce write
+    /// target for its level and the reduce source for the next).
+    color_mip_views: Vec<TextureView>,
+    /// Number of colour-pyramid levels (including level 0).
+    color_mip_count: u32,
+    /// Reflection output written by the trace (`rgb` radiance, `a` confidence)
+    /// and consumed by the composite. Single mip, full resolution.
+    ssr_out: CachedTexture,
     pub(crate) size: bevy_math::UVec2,
 }
 
@@ -108,10 +134,6 @@ impl ViewSsrTextures {
 
     /// Multi-mip sampling view spanning the whole Hi-Z pyramid, bound by the
     /// trace so `textureLoad(hzb, cell, level)` climbs every level.
-    #[expect(
-        dead_code,
-        reason = "bound by the SSR trace bind group in the trace slice"
-    )]
     pub(crate) fn hzb_view(&self) -> &TextureView {
         &self.hzb.default_view
     }
@@ -130,6 +152,37 @@ impl ViewSsrTextures {
     /// the standard `wgpu` mip dimension the allocated texture actually holds.
     pub(crate) fn hzb_mip_size(&self, mip: u32) -> bevy_math::UVec2 {
         mip_size(self.size, mip)
+    }
+
+    /// All-mip sampling view of the current-frame colour pyramid, bound by the
+    /// trace so `textureSampleLevel(color, sampler, uv, mip)` climbs every
+    /// level for the roughness-selected reflection blur.
+    pub(crate) fn color_sampled_view(&self) -> &TextureView {
+        &self.color.default_view
+    }
+
+    /// Single-mip view of colour-pyramid level `mip`, or `None` when out of
+    /// range. `color_mip_view(0)` is the copy target; coarser levels are reduce
+    /// targets (and, one finer, the reduce source).
+    pub(crate) fn color_mip_view(&self, mip: u32) -> Option<&TextureView> {
+        self.color_mip_views.get(mip as usize)
+    }
+
+    /// Number of colour-pyramid levels, including level 0.
+    pub(crate) fn color_mip_count(&self) -> u32 {
+        self.color_mip_count
+    }
+
+    /// Texel extent of colour-pyramid level `mip` (`max(size >> mip, 1)` per
+    /// axis), matching the allocated texture's mip dimension.
+    pub(crate) fn color_mip_size(&self, mip: u32) -> bevy_math::UVec2 {
+        mip_size(self.size, mip)
+    }
+
+    /// Storage/sampling view of the trace's reflection output. The trace writes
+    /// it (storage) and the composite reads it (sampled).
+    pub(crate) fn ssr_out_view(&self) -> &TextureView {
+        &self.ssr_out.default_view
     }
 }
 
@@ -271,6 +324,55 @@ pub(crate) fn prepare_ssr_textures(
             })
             .collect();
 
+        // Current-frame scene-colour pyramid: a full `R16g16b16a16Float` mip
+        // chain matching the resolve's `scene_color`. `STORAGE_BINDING` lets the
+        // colour-mip build write each level; `TEXTURE_BINDING` lets the reduce
+        // read the finer level and the trace climb every level. It is a
+        // frame-transient (`TextureCache`) target — the trace samples the
+        // current frame's own colour, never a reprojected previous frame.
+        let color = texture_cache.get(
+            &device,
+            TextureDescriptor {
+                label: Some("prism SSR colour pyramid"),
+                size: size.to_extents(),
+                mip_level_count: mip_count,
+                sample_count: 1,
+                dimension: TextureDimension::D2,
+                format: SSR_COLOR_FORMAT,
+                usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+        );
+        let color_mip_views = (0..mip_count)
+            .map(|mip| {
+                color.texture.create_view(&TextureViewDescriptor {
+                    label: Some("prism SSR colour mip view"),
+                    dimension: Some(TextureViewDimension::D2),
+                    base_mip_level: mip,
+                    mip_level_count: Some(1),
+                    base_array_layer: 0,
+                    array_layer_count: Some(1),
+                    ..Default::default()
+                })
+            })
+            .collect();
+
+        // Reflection output: single-mip, full-resolution wide HDR. The trace
+        // writes it (storage) and the composite reads it (sampled).
+        let ssr_out = texture_cache.get(
+            &device,
+            TextureDescriptor {
+                label: Some("prism SSR reflection output"),
+                size: size.to_extents(),
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: TextureDimension::D2,
+                format: SSR_OUT_FORMAT,
+                usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+        );
+
         commands.entity(entity).insert(ViewSsrTextures {
             scene_depth,
             view_normal,
@@ -278,6 +380,10 @@ pub(crate) fn prepare_ssr_textures(
             hzb,
             hzb_mip_views,
             hzb_mip_count: mip_count,
+            color,
+            color_mip_views,
+            color_mip_count: mip_count,
+            ssr_out,
             size,
         });
     }
