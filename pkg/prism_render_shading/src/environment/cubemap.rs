@@ -44,15 +44,84 @@ impl CubemapFaces {
         }
         Some(Self { size, faces })
     }
+
+    /// Bilinearly samples the linear radiance along a world-space `direction`.
+    ///
+    /// The direction's major axis selects the cube face; the remaining two
+    /// components give the in-face `[-1, 1]` coordinate, and the four
+    /// surrounding texels are blended with clamp-to-edge behaviour (per-face,
+    /// matching a GPU cube sampler within a face).  A zero/degenerate direction
+    /// falls back to `+Y`.
+    pub fn sample(&self, direction: [f32; 3]) -> [f32; 3] {
+        let (face, u, v) = direction_to_face_uv(direction);
+        let size = self.size;
+        if size == 0 {
+            return [0.0; 3];
+        }
+        let max_index = (size - 1) as i32;
+        // Map [-1, 1] to texel-centre space [0, size - 1].
+        let fx = ((u * 0.5 + 0.5) * (size as f32) - 0.5).clamp(0.0, max_index as f32);
+        let fy = ((v * 0.5 + 0.5) * (size as f32) - 0.5).clamp(0.0, max_index as f32);
+        let x0 = fx.floor() as i32;
+        let y0 = fy.floor() as i32;
+        let x1 = (x0 + 1).min(max_index);
+        let y1 = (y0 + 1).min(max_index);
+        let tx = fx - (x0 as f32);
+        let ty = fy - (y0 as f32);
+        let texels = &self.faces[face];
+        let at = |x: i32, y: i32| texels[(y as u32 * size + x as u32) as usize];
+        let c00 = at(x0, y0);
+        let c10 = at(x1, y0);
+        let c01 = at(x0, y1);
+        let c11 = at(x1, y1);
+        let lerp = |a: [f32; 3], b: [f32; 3], t: f32| {
+            [
+                a[0] + (b[0] - a[0]) * t,
+                a[1] + (b[1] - a[1]) * t,
+                a[2] + (b[2] - a[2]) * t,
+            ]
+        };
+        lerp(lerp(c00, c10, tx), lerp(c01, c11, tx), ty)
+    }
+}
+
+/// Inverse of [`face_direction`]: maps a world-space `direction` to the cube
+/// face index and in-face `[-1, 1]` coordinate that sampled it.
+fn direction_to_face_uv(direction: [f32; 3]) -> (usize, f32, f32) {
+    let [x, y, z] = direction;
+    let ax = x.abs();
+    let ay = y.abs();
+    let az = z.abs();
+    if ax >= ay && ax >= az && ax > 0.0 {
+        if x > 0.0 {
+            (0, -z / ax, -y / ax) // +X: [1, -v, -u]
+        } else {
+            (1, z / ax, -y / ax) // -X: [-1, -v, u]
+        }
+    } else if ay >= ax && ay >= az && ay > 0.0 {
+        if y > 0.0 {
+            (2, x / ay, z / ay) // +Y: [u, 1, v]
+        } else {
+            (3, x / ay, -z / ay) // -Y: [u, -1, -v]
+        }
+    } else if az > 0.0 {
+        if z > 0.0 {
+            (4, x / az, -y / az) // +Z: [u, -v, 1]
+        } else {
+            (5, -x / az, -y / az) // -Z: [-u, -v, -1]
+        }
+    } else {
+        (2, 0.0, 0.0) // Degenerate: look up (+Y centre).
+    }
 }
 
 /// The six cube faces in array-layer order.
-const FACE_COUNT: usize = 6;
+pub(super) const FACE_COUNT: usize = 6;
 
 /// Maps a face index plus in-face coordinates `(u, v)` in `[-1, 1]` to the
 /// world-space direction sampled by that texel.  The mapping matches the wgpu
 /// cube convention so a baked probe lines up with the GPU sampler.
-fn face_direction(face: usize, u: f32, v: f32) -> [f32; 3] {
+pub(super) fn face_direction(face: usize, u: f32, v: f32) -> [f32; 3] {
     match face {
         0 => [1.0, -v, -u],  // +X
         1 => [-1.0, -v, u],  // -X
@@ -230,5 +299,72 @@ mod tests {
         ];
         assert!(CubemapFaces::new(2, faces).is_none());
         assert!(CubemapFaces::new(0, core::array::from_fn(|_| Vec::new())).is_none());
+    }
+
+    #[test]
+    fn direction_to_face_uv_inverts_face_direction() {
+        // For each face and a grid of interior (u, v), the direction produced
+        // by `face_direction` must resolve back to the same face and (u, v).
+        for face in 0..FACE_COUNT {
+            for &u in &[-0.7f32, -0.2, 0.0, 0.3, 0.8] {
+                for &v in &[-0.6f32, -0.1, 0.0, 0.4, 0.9] {
+                    let dir = face_direction(face, u, v);
+                    let (rf, ru, rv) = direction_to_face_uv(dir);
+                    assert_eq!(rf, face, "face {face} u {u} v {v} -> {rf}");
+                    assert!((ru - u).abs() < 1.0e-5, "u {u} -> {ru}");
+                    assert!((rv - v).abs() < 1.0e-5, "v {v} -> {rv}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn degenerate_direction_falls_back_to_plus_y() {
+        let (face, u, v) = direction_to_face_uv([0.0, 0.0, 0.0]);
+        assert_eq!(face, 2);
+        assert_eq!((u, v), (0.0, 0.0));
+    }
+
+    #[test]
+    fn sample_of_constant_cube_is_constant() {
+        let cube = constant_faces(8, [0.25, 0.5, 0.75]);
+        for dir in [
+            [1.0, 0.2, -0.1],
+            [-0.3, 1.0, 0.4],
+            [0.1, -0.2, 1.0],
+            [-1.0, 0.0, 0.0],
+        ] {
+            let c = cube.sample(dir);
+            assert!((c[0] - 0.25).abs() < 1.0e-6);
+            assert!((c[1] - 0.5).abs() < 1.0e-6);
+            assert!((c[2] - 0.75).abs() < 1.0e-6);
+        }
+    }
+
+    #[test]
+    fn sample_selects_the_major_axis_face() {
+        // Distinct flat colour per face; sampling straight down each axis must
+        // return that face's colour.
+        let colors = [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 1.0],
+            [1.0, 0.0, 1.0],
+        ];
+        let faces = core::array::from_fn(|i| vec![colors[i]; 4 * 4]);
+        let cube = CubemapFaces::new(4, faces).unwrap();
+        let axes = [
+            ([1.0, 0.0, 0.0], 0),
+            ([-1.0, 0.0, 0.0], 1),
+            ([0.0, 1.0, 0.0], 2),
+            ([0.0, -1.0, 0.0], 3),
+            ([0.0, 0.0, 1.0], 4),
+            ([0.0, 0.0, -1.0], 5),
+        ];
+        for (dir, face) in axes {
+            assert_eq!(cube.sample(dir), colors[face], "dir {dir:?}");
+        }
     }
 }

@@ -22,8 +22,11 @@ use crate::{ShadingFrame, SurfaceSample};
 
 mod brdf_lut;
 mod cubemap;
+mod prefilter;
+mod sampling;
 pub use brdf_lut::{integrate_brdf, DfgLut};
 pub use cubemap::{project_cubemap_to_sh, CubemapFaces};
+pub use prefilter::{prefilter_radiance, PrefilteredEnvMap};
 
 /// `2 * sqrt(pi)`, the projection weight of a constant function onto the SH DC
 /// band.  A constant radiance `c` therefore stores `c * SQRT_PI_4` in band 0.

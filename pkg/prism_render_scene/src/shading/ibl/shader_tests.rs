@@ -45,3 +45,24 @@ fn brdf_lut_wesl_compiles_standalone() {
         .get(0, lut, &[])
         .unwrap_or_else(|error| panic!("brdf_lut.wesl failed to compile: {error}"));
 }
+
+/// Compiles `env_prefilter.wesl`, proving the GGX prefiltered environment
+/// radiance kernel parses and type-checks exactly as it will in the render
+/// world (cube sampler in, prefiltered face array out).
+#[test]
+fn env_prefilter_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let prefilter = shader_id(0x5052_4953_4d5f_4942_4c5f_5052_4546_0001);
+    cache.set_shader(
+        prefilter,
+        Shader::from_wesl(
+            include_str!("../../shaders/env_prefilter.wesl"),
+            "embedded://prism_render_scene/shaders/env_prefilter.wesl",
+        ),
+    );
+
+    cache
+        .get(0, prefilter, &[])
+        .unwrap_or_else(|error| panic!("env_prefilter.wesl failed to compile: {error}"));
+}
