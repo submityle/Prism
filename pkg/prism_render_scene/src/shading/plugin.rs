@@ -22,9 +22,10 @@ use super::{
         prepare_shading_resolve_bind_groups,
     },
     transparent::{
-        clear_oit_targets, init_oit_composite_pipeline, oit_composite,
+        init_oit_composite_pipeline, init_oit_forward_pipeline, oit_composite,
         prepare_oit_composite_bind_groups, prepare_oit_composite_pipelines, prepare_oit_targets,
-        OitCompositePipeline,
+        queue_transparent_oit, transparent_forward_pass, DrawTransparentOit, OitCompositePipeline,
+        OitForwardPipeline, TransparentOit3d,
     },
     shadow::{
         ensure_shadow_atlas, extract_shadows, init_shadow_depth_pipeline, prepare_shadow_bind_group,
@@ -65,6 +66,7 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/shading_resolve.wesl");
         embedded_asset!(app, "../shaders/composite.wesl");
         embedded_asset!(app, "../shaders/oit.wesl");
+        embedded_asset!(app, "../shaders/transparent.wesl");
         register_shadow_depth_shader(app);
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
@@ -76,6 +78,9 @@ impl Plugin for PrismShadingPlugin {
             .init_resource::<bevy_render::render_phase::ViewBinnedRenderPhases<Visibility3d>>()
             .init_resource::<bevy_render::render_phase::DrawFunctions<Visibility3d>>()
             .init_resource::<bevy_render::render_resource::SpecializedMeshPipelines<VisibilityRasterPipeline>>()
+            .init_resource::<bevy_render::render_phase::ViewBinnedRenderPhases<TransparentOit3d>>()
+            .init_resource::<bevy_render::render_phase::DrawFunctions<TransparentOit3d>>()
+            .init_resource::<bevy_render::render_resource::SpecializedMeshPipelines<OitForwardPipeline>>()
             .init_resource::<bevy_render::render_resource::SpecializedMeshPipelines<ShadowDepthPipeline>>()
             .init_resource::<ShadowDepthDrawList>()
             .init_resource::<ShadowDepthViewOffsets>()
@@ -93,11 +98,13 @@ impl Plugin for PrismShadingPlugin {
                 compiled: compiled_graph,
             })
             .add_render_command::<Visibility3d, DrawVisibilityRaster>()
+            .add_render_command::<TransparentOit3d, DrawTransparentOit>()
             .add_systems(RenderStartup, detect_shading_capabilities)
             .add_systems(
                 RenderStartup,
                 (
                     init_visibility_raster.after(MeshPipelineSystems),
+                    init_oit_forward_pipeline.after(MeshPipelineSystems),
                     init_material_classification_pipeline
                         .after(init_gpu_resource::<crate::MaterialBindGroup>),
                     init_shading_resolve_pipeline
@@ -159,6 +166,7 @@ impl Plugin for PrismShadingPlugin {
                     prepare_oit_composite_bind_groups
                         .in_set(RenderSystems::PrepareBindGroups),
                     queue_visibility_raster.in_set(RenderSystems::QueueMeshes),
+                    queue_transparent_oit.in_set(RenderSystems::QueueMeshes),
                     queue_shadow_depth.in_set(RenderSystems::QueueMeshes),
                     prepare_shadow_depth_uniform
                         .after(write_shadow_buffers)
@@ -180,7 +188,7 @@ impl Plugin for PrismShadingPlugin {
                 composite_shading
                     .after(bevy_core_pipeline::Core3dSystems::MainPass)
                     .before(bevy_core_pipeline::Core3dSystems::PostProcess),
-                clear_oit_targets
+                transparent_forward_pass
                     .after(dispatch_shading_resolve)
                     .before(bevy_core_pipeline::Core3dSystems::MainPass),
                 oit_composite
