@@ -96,6 +96,20 @@ pub struct PrismShadingSettings {
     /// stationary `1.0` and the metering/adaptation passes are skipped. Off by
     /// default.
     pub enable_exposure: bool,
+    /// Enables the physically based bloom pass. When `false` the whole
+    /// dual-filter pyramid (allocation, prefilter/downsample/upsample and the
+    /// combine back into `scene_color`) is skipped. Off by default.
+    pub enable_bloom: bool,
+    /// Luminance above which a pixel starts to bloom (pre-exposed HDR units).
+    pub bloom_threshold: f32,
+    /// Soft-threshold knee width around `bloom_threshold` (`>= 0`; `0` is a
+    /// hard cutoff). Widens the roll-off so bright features fade in smoothly.
+    pub bloom_knee: f32,
+    /// Blend weight of the accumulated bloom over the scene in the combine.
+    pub bloom_intensity: f32,
+    /// Tent-upsample spread radius (`0..=1`); widens the halo without changing
+    /// its total energy.
+    pub bloom_radius: f32,
 }
 
 impl Default for PrismShadingSettings {
@@ -127,6 +141,11 @@ impl Default for PrismShadingSettings {
             ssgi_sample_count: 8,
             ssgi_max_distance: 8.0,
             enable_exposure: false,
+            enable_bloom: false,
+            bloom_threshold: 1.0,
+            bloom_knee: 0.5,
+            bloom_intensity: 0.04,
+            bloom_radius: 1.0,
         }
     }
 }

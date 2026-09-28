@@ -16,5 +16,16 @@
 //! combine into the post chain — each with its first live consumer so no
 //! committed ABI is dead, matching the SSR / SSGI / exposure precedent.
 
+mod abi;
+mod bind_groups;
+mod passes;
+mod pipeline;
+mod resources;
+
 #[cfg(test)]
 mod shader_tests;
+
+pub(crate) use bind_groups::prepare_bloom_bind_groups;
+pub(crate) use passes::bloom_pass;
+pub(crate) use pipeline::init_bloom_pipelines;
+pub(crate) use resources::prepare_bloom_textures;

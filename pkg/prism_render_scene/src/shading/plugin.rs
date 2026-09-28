@@ -56,6 +56,9 @@ use super::{
         init_exposure_histogram_pipeline, prepare_exposure_average_bind_groups,
         prepare_exposure_buffers, prepare_exposure_histogram_bind_groups,
     },
+    bloom::{
+        bloom_pass, init_bloom_pipelines, prepare_bloom_bind_groups, prepare_bloom_textures,
+    },
     resolve::{
         dispatch_shading_resolve, init_shading_resolve_pipeline, prepare_resolve_motion,
         prepare_shading_resolve_bind_groups, ResolveMotionHistory,
@@ -122,6 +125,7 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/brdf_lut.wesl");
         embedded_asset!(app, "../shaders/env_prefilter.wesl");
         embedded_asset!(app, "../shaders/exposure.wesl");
+        embedded_asset!(app, "../shaders/bloom.wesl");
         embedded_asset!(app, "../shaders/composite.wesl");
         embedded_asset!(app, "../shaders/oit.wesl");
         embedded_asset!(app, "../shaders/transparent.wesl");
@@ -203,6 +207,7 @@ impl Plugin for PrismShadingPlugin {
                         init_ssgi_composite_pipeline,
                         init_exposure_histogram_pipeline,
                         init_exposure_average_pipeline,
+                        init_bloom_pipelines,
                     ),
                     init_dfg_lut_texture,
                     init_brdf_lut_pipeline,
@@ -362,6 +367,15 @@ impl Plugin for PrismShadingPlugin {
                     prepare_exposure_average_bind_groups
                         .after(prepare_exposure_buffers)
                         .in_set(RenderSystems::PrepareBindGroups),
+                    // Bloom: the pyramid allocates in PrepareResources (after
+                    // the visibility buffers so `scene_color` exists), then its
+                    // bind groups build in PrepareBindGroups off those targets.
+                    prepare_bloom_textures
+                        .after(prepare_visibility_buffers)
+                        .in_set(RenderSystems::PrepareResources),
+                    prepare_bloom_bind_groups
+                        .after(prepare_bloom_textures)
+                        .in_set(RenderSystems::PrepareBindGroups),
                 ),
             )
             .add_systems(
@@ -473,6 +487,12 @@ impl Plugin for PrismShadingPlugin {
                         .before(bevy_core_pipeline::Core3dSystems::MainPass),
                     exposure_average_pass
                         .after(exposure_histogram_pass)
+                        .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                    // Bloom scatters glow from the metered HDR scene_color after
+                    // the exposure resolve (so metering saw the clean scene) and
+                    // before the main pass composites it.
+                    bloom_pass
+                        .after(exposure_average_pass)
                         .before(bevy_core_pipeline::Core3dSystems::MainPass),
                 ),
                 composite_shading
