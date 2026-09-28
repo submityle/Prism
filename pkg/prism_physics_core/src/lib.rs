@@ -41,16 +41,22 @@ pub mod constraint;
 pub mod driver;
 pub mod dynamics;
 pub mod events;
+pub mod fluid;
 pub mod island;
 pub mod joint;
+pub mod lod;
 pub mod math;
+pub mod mpm;
 pub mod pipeline;
 pub mod query;
+pub mod reconstruct;
+pub mod reduced;
 pub mod sleep;
 pub mod snapshot;
 pub mod soft;
 pub mod solver;
 pub mod state;
+pub mod vbd;
 pub mod world;
 
 // Curated, prelude-style re-exports of the most commonly used public types.
