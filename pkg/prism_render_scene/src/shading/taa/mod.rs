@@ -12,6 +12,8 @@
 //! Following the rest of the shading pipeline, the plumbing lands as cohesive
 //! files:
 //!
+//! * [`jitter`] — the `PrepareViews` system stamping the per-frame Halton
+//!   sub-pixel camera offset onto each view's `TemporalJitter`.
 //! * [`abi`] — the immediate block shared with `taa_resolve.wesl`.
 //! * [`resources`] — the persistent per-view ping-pong history pair and the
 //!   [`ViewTaa`] the resolve reads/writes each frame.
@@ -23,6 +25,7 @@
 mod abi;
 mod bind_groups;
 mod dispatch;
+mod jitter;
 mod pipeline;
 mod resources;
 
@@ -31,5 +34,6 @@ mod shader_tests;
 
 pub(crate) use bind_groups::prepare_taa_bind_groups;
 pub(crate) use dispatch::taa_resolve_pass;
+pub(crate) use jitter::prepare_taa_jitter;
 pub(crate) use pipeline::init_taa_resolve_pipeline;
 pub(crate) use resources::{prepare_taa_textures, ViewTaa};

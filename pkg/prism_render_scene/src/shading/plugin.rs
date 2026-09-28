@@ -26,7 +26,8 @@ use super::{
         ssr_repack_pass, ssr_temporal_pass, ssr_trace_pass,
     },
     taa::{
-        init_taa_resolve_pipeline, prepare_taa_bind_groups, prepare_taa_textures, taa_resolve_pass,
+        init_taa_resolve_pipeline, prepare_taa_bind_groups, prepare_taa_jitter,
+        prepare_taa_textures, taa_resolve_pass,
     },
     ibl::{
         dfg_lut_precompute_pass, env_prefilter_precompute_pass, extract_ibl_source,
@@ -306,6 +307,14 @@ impl Plugin for PrismShadingPlugin {
                 ),
             )
             .add_systems(ExtractSchedule, (extract_shadows, extract_ibl_source));
+        // Camera jitter must land before `prepare_view_uniforms` bakes the
+        // projection; `PrepareViews` is ordered ahead of that `PrepareResources`
+        // system, so a standalone registration keeps the ordering explicit
+        // without inflating an existing tuple past Bevy's 20-element limit.
+        render_app.add_systems(
+            Render,
+            prepare_taa_jitter.in_set(RenderSystems::PrepareViews),
+        );
         render_app.add_systems(
             bevy_core_pipeline::Core3d,
             (
