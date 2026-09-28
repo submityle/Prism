@@ -31,6 +31,7 @@
 #![forbid(unsafe_code)]
 
 pub mod backend;
+pub mod cache;
 pub mod ccd;
 pub mod collide;
 pub mod collider;
@@ -54,6 +55,10 @@ pub mod world;
 
 // Curated, prelude-style re-exports of the most commonly used public types.
 pub use backend::{CpuBackend, PhysicsBackend};
+pub use cache::{
+    trajectory_hash, BakeConfig, Baker, CacheTrack, FrameRecord, GoldenDigest, PhysicsCache,
+    PlaybackConfig, Player, PositionQuantizer,
+};
 pub use ccd::CcdConfig;
 pub use collide::{generate_contact, ContactManifold, ContactPoint, MAX_MANIFOLD_POINTS};
 pub use collider::material::PhysicsMaterial;
