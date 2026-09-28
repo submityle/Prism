@@ -13,6 +13,7 @@ mod buffers;
 mod cluster;
 mod extract;
 mod plugin;
+mod probe;
 mod systems;
 
 #[cfg(test)]
@@ -29,4 +30,7 @@ pub use cluster::{
 };
 pub use buffers::LightGpuBuffers;
 pub use extract::ExtractedLights;
+pub use probe::{
+    cubemap_faces_from_image, project_image_to_sh, EnvironmentProbeCache,
+};
 pub use plugin::PrismLightingPlugin;

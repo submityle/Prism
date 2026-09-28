@@ -22,6 +22,7 @@ use super::{
         ExtractedClusterView,
     },
     extract::{extract_lights, ExtractedLights},
+    probe::EnvironmentProbeCache,
     systems::{prepare_light_bind_group, rebuild_light_buffers, write_light_buffers},
 };
 
@@ -37,6 +38,7 @@ impl Plugin for PrismLightingPlugin {
         };
         render_app
             .init_resource::<ExtractedLights>()
+            .init_resource::<EnvironmentProbeCache>()
             .init_resource::<ExtractedClusterView>()
             .init_resource::<ClusterConfig>()
             .add_systems(

@@ -20,17 +20,22 @@
 //!   approximation of Bevy's `cd/m^2` ambient term onto the reference's flat
 //!   ambient input, which the resolve pass folds into the indirect term.
 
+use bevy_asset::Assets;
 use bevy_color::{Color, ColorToComponents};
 use bevy_ecs::prelude::*;
-use bevy_light::{DirectionalLight, GlobalAmbientLight, PointLight, SpotLight};
+use bevy_image::Image;
+use bevy_light::{
+    DirectionalLight, EnvironmentMapLight, GlobalAmbientLight, PointLight, SpotLight,
+};
 use bevy_math::ops;
 use bevy_camera::visibility::ViewVisibility;
 use bevy_render::Extract;
 use bevy_transform::components::GlobalTransform;
 use core::f32::consts::{FRAC_PI_2, PI};
-use prism_render_shading::PunctualLight;
+use prism_render_shading::{PunctualLight, SphericalHarmonicsL2};
 
 use super::abi::{GpuDirectionalLight, GpuLightEnvironment, GpuPunctualLight};
+use super::probe::EnvironmentProbeCache;
 
 /// Reciprocal of the full sphere solid angle used to turn a punctual light's
 /// luminous power (lumens) into radiant intensity (candela).
@@ -96,6 +101,9 @@ pub(crate) fn extract_lights(
     >,
     points: Extract<Query<(&PointLight, &GlobalTransform, Option<&ViewVisibility>)>>,
     spots: Extract<Query<(&SpotLight, &GlobalTransform, Option<&ViewVisibility>)>>,
+    environment_maps: Extract<Query<(&EnvironmentMapLight, Option<&ViewVisibility>)>>,
+    images: Extract<Res<Assets<Image>>>,
+    mut probe_cache: ResMut<EnvironmentProbeCache>,
 ) {
     extracted.clear();
 
@@ -103,6 +111,17 @@ pub(crate) fn extract_lights(
         extracted.environment.ambient =
             scale_rgb(linear_rgb(ambient.color), ambient.brightness);
     }
+
+    // Image-based lighting: project the first readable environment probe into
+    // the SH radiance vector the resolve pass prefers over the flat ambient
+    // term.  Compressed or unreadable maps leave `has_image_based` false so the
+    // ambient fallback above still applies.
+    extract_environment_probe(
+        &mut extracted.environment,
+        &environment_maps,
+        &images,
+        &mut probe_cache,
+    );
 
     for (light, transform, visibility) in &directionals {
         if is_hidden(visibility) {
@@ -158,6 +177,46 @@ pub(crate) fn extract_lights(
     }
 
     extracted.sync_counts();
+}
+
+/// Scales every SH coefficient of a probe by `intensity`.
+fn scale_probe(probe: &mut SphericalHarmonicsL2, intensity: f32) {
+    for coefficient in probe.coefficients.iter_mut() {
+        coefficient[0] *= intensity;
+        coefficient[1] *= intensity;
+        coefficient[2] *= intensity;
+    }
+}
+
+/// Projects the first visible, CPU-readable [`EnvironmentMapLight`] into
+/// `environment` as an SH radiance probe scaled by the light's intensity.
+///
+/// The `specular_map` base mip is the raw radiance environment, so it is the
+/// source the golden probe expects; the diffuse map is already pre-convolved.
+/// Maps that cannot be projected (missing, compressed, non-cube) are skipped so
+/// a later readable probe can still win, and the ambient fallback stands if
+/// none qualify.
+fn extract_environment_probe(
+    environment: &mut GpuLightEnvironment,
+    environment_maps: &Query<(&EnvironmentMapLight, Option<&ViewVisibility>)>,
+    images: &Assets<Image>,
+    probe_cache: &mut EnvironmentProbeCache,
+) {
+    for (map, visibility) in environment_maps {
+        if is_hidden(visibility) {
+            continue;
+        }
+        let handle = &map.specular_map;
+        let Some(image) = images.get(handle) else {
+            continue;
+        };
+        let Some(mut probe) = probe_cache.get_or_project(handle.id(), image) else {
+            continue;
+        };
+        scale_probe(&mut probe, map.intensity);
+        environment.set_spherical_harmonics(&probe);
+        return;
+    }
 }
 
 /// A light is contributing unless it carries an explicitly-hidden

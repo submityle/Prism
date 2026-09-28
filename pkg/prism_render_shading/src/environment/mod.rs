@@ -20,6 +20,9 @@ use bevy_math::ops;
 
 use crate::{ShadingFrame, SurfaceSample};
 
+mod cubemap;
+pub use cubemap::{project_cubemap_to_sh, CubemapFaces};
+
 /// `2 * sqrt(pi)`, the projection weight of a constant function onto the SH DC
 /// band.  A constant radiance `c` therefore stores `c * SQRT_PI_4` in band 0.
 const SQRT_PI_4: f32 = 3.5449077;
