@@ -6,6 +6,7 @@ extern crate alloc;
 
 #[cfg(feature = "bevy")]
 mod bevy_bridge;
+mod axis;
 mod handle;
 mod ir;
 mod record;
@@ -16,13 +17,15 @@ mod validation;
 #[cfg(feature = "bevy")]
 pub use bevy_bridge::{lower_standard_material, StandardMaterialTextureResolver, TextureSemantic};
 pub use handle::{MaterialCapacityError, MaterialHandleAllocator, MaterialHandleError};
+pub use axis::{Illumination, SpecializationId};
 pub use ir::{
     ClosureKind, MaterialGraph, MaterialNode, MaterialNodeId, MaterialValue, NormalizedMaterial,
+    MAX_CLOSURE_SLAB_DEPTH,
 };
 pub use record::{
     fallback_material_header, fallback_material_record, inactive_material_header,
     GpuMaterialHeader, GpuMaterialTexture, GpuSurfaceParameters, MaterialDomain,
-    MaterialFeatureFlags, MaterialRecord, MaterialRenderClass, MaterialShadingModel,
+    MaterialFeatureFlags, MaterialRecord, MaterialRenderClass,
     FALLBACK_MATERIAL_HANDLE, MATERIAL_ABI_VERSION, MAX_MATERIAL_TEXTURES,
 };
 pub use registry::{MaterialRegistry, MaterialRegistryError, MaterialSnapshot};

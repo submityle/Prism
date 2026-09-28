@@ -1,7 +1,7 @@
 struct PrismMaterialHeader {
     generation: u32,
     revision: u32,
-    shading_model: u32,
+    illumination: u32,
     render_class: u32,
     feature_flags: u32,
     closure_mask: u32,
@@ -15,6 +15,10 @@ struct PrismMaterialHeader {
     is_active: u32,
     material_epoch_low: u32,
     material_epoch_high: u32,
+    closure_graph_offset: u32,
+    specialization_low: u32,
+    specialization_high: u32,
+    reserved: u32,
 }
 
 struct PrismSurfaceParameters {

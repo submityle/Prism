@@ -92,7 +92,7 @@ mod tests {
     use bevy_asset::Assets;
     use bevy_ecs::world::World;
     use bevy_pbr::StandardMaterial;
-    use prism_render_material::{MaterialShadingModel, FALLBACK_MATERIAL_HANDLE};
+    use prism_render_material::{Illumination, FALLBACK_MATERIAL_HANDLE};
 
     use super::*;
 
@@ -126,8 +126,8 @@ mod tests {
                 .registry
                 .get(first)
                 .unwrap()
-                .shading_model,
-            MaterialShadingModel::Principled
+                .illumination,
+            Illumination::Lit
         );
 
         let completion = prism_render_architecture::gpu_scene::GpuCompletionValue(7);

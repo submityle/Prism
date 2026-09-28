@@ -6,8 +6,8 @@ use bevy_pbr::StandardMaterial;
 use prism_render_architecture::abi::GenerationalHandle;
 
 use crate::{
-    GpuMaterialTexture, GpuSurfaceParameters, MaterialDomain, MaterialFeatureFlags, MaterialRecord,
-    MaterialRenderClass, MaterialShadingModel,
+    GpuMaterialTexture, GpuSurfaceParameters, Illumination, MaterialDomain, MaterialFeatureFlags,
+    MaterialRecord, MaterialRenderClass,
 };
 
 #[repr(u32)]
@@ -116,12 +116,12 @@ pub fn lower_standard_material(
         revision,
         domain: MaterialDomain::Surface,
         render_class,
-        shading_model: if material.unlit {
-            MaterialShadingModel::Unlit
-        } else if material.clearcoat > 0.0 {
-            MaterialShadingModel::ClearCoat
+        // Style axis is orthogonal to the closure graph: clearcoat is a lobe
+        // (carried by `closure_mask`), not an illumination.
+        illumination: if material.unlit {
+            Illumination::Unlit
         } else {
-            MaterialShadingModel::Principled
+            Illumination::Lit
         },
         features,
         closure_mask: closure_mask(material),

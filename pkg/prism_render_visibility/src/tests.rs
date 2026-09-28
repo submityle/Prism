@@ -26,7 +26,7 @@ fn material(handle: GenerationalHandle) -> MaterialRecord {
         revision: 1,
         domain: MaterialDomain::Surface,
         render_class: MaterialRenderClass::Opaque,
-        shading_model: MaterialShadingModel::Principled,
+        illumination: Illumination::Lit,
         features: Default::default(),
         closure_mask: 1,
         surface: Default::default(),

@@ -105,7 +105,7 @@ pub fn cull_view(
             visibility_stages: VisibilityStageMask::EARLY,
             sort_key: WorkSortKey::new(
                 pass_class(material.render_class),
-                material.shading_model as u8,
+                material.illumination as u8,
                 material.render_class as u8,
                 instance.geometry.index as u16,
                 depth_bucket(distance),
@@ -137,10 +137,7 @@ fn depth_bucket(distance: f32) -> u16 {
 }
 fn pass_class(class: MaterialRenderClass) -> u8 {
     match class {
-        MaterialRenderClass::Opaque
-        | MaterialRenderClass::OpaqueTwoSided
-        | MaterialRenderClass::NprOpaque
-        | MaterialRenderClass::CustomOpaque => 0,
+        MaterialRenderClass::Opaque | MaterialRenderClass::OpaqueTwoSided => 0,
         MaterialRenderClass::Masked | MaterialRenderClass::MaskedTwoSided => 1,
         _ => 2,
     }

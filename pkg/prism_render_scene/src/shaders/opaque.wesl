@@ -16,10 +16,11 @@ struct GpuSceneInstance {
 struct GpuSceneTransform { world_from_local: mat3x4<f32> }
 struct GpuSceneBounds { center_radius: vec4<f32>, half_extents: vec4<f32> }
 struct MaterialHeader {
-    generation: u32, revision: u32, shading_model: u32, render_class: u32,
+    generation: u32, revision: u32, illumination: u32, render_class: u32,
     feature_flags: u32, closure_mask: u32, parameter_offset: u32, parameter_size: u32,
     texture_offset: u32, texture_count: u32, sampler_offset: u32, sampler_count: u32,
     custom_program: u32, is_active: u32, material_epoch_low: u32, material_epoch_high: u32,
+    closure_graph_offset: u32, specialization_low: u32, specialization_high: u32, reserved: u32,
 }
 struct SurfaceParameters {
     base_color: vec4<f32>, emissive: vec4<f32>,

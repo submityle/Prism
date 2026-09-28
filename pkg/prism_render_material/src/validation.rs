@@ -8,6 +8,12 @@ pub enum MaterialValidationError {
     MissingNode(MaterialNodeId),
     Cycle(MaterialNodeId),
     EmptyClosure(MaterialNodeId),
+    /// The `Layer`/`Mix` closure slab exceeded the bounded depth (design §3.2).
+    ClosureSlabTooDeep {
+        node: MaterialNodeId,
+        depth: u32,
+        max: u32,
+    },
 }
 
 impl fmt::Display for MaterialValidationError {

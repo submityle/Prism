@@ -1,13 +1,16 @@
+use crate::axis::{Illumination, SpecializationId};
 use core::ops::{BitOr, BitOrAssign};
 use prism_render_architecture::abi::GenerationalHandle;
 
-pub const MATERIAL_ABI_VERSION: u32 = 1;
+pub const MATERIAL_ABI_VERSION: u32 = 2;
 pub const MAX_MATERIAL_TEXTURES: usize = 8;
 pub const FALLBACK_MATERIAL_HANDLE: GenerationalHandle = GenerationalHandle {
     index: 0,
     generation: 0,
 };
 
+/// The material domain axis. Orthogonal to `Illumination` and to the closure
+/// graph; decides which pipeline family consumes the material.
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum MaterialDomain {
@@ -18,6 +21,12 @@ pub enum MaterialDomain {
     PostProcess,
 }
 
+/// The blend / raster family axis.
+///
+/// This intentionally no longer carries `Npr*` / `Custom*` variants: those were
+/// the Cartesian product of `blend × illumination` flattened into one enum.
+/// Style now lives on the orthogonal [`Illumination`] axis, so a stylized
+/// opaque material is simply `render_class = Opaque, illumination = Stylized`.
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum MaterialRenderClass {
@@ -33,25 +42,6 @@ pub enum MaterialRenderClass {
     Hair,
     Water,
     Decal,
-    NprOpaque,
-    NprTransparent,
-    CustomOpaque,
-    CustomTransparent,
-}
-
-#[repr(u32)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum MaterialShadingModel {
-    #[default]
-    Principled,
-    Unlit,
-    Subsurface,
-    ClearCoat,
-    Cloth,
-    Hair,
-    Water,
-    Npr,
-    Custom,
 }
 
 #[repr(transparent)]
@@ -82,12 +72,17 @@ impl BitOrAssign for MaterialFeatureFlags {
     }
 }
 
+/// GPU-visible material header. The former `shading_model` field is gone;
+/// style is carried by `illumination`, and the compiled permutation identity is
+/// carried by `specialization_low`/`specialization_high` (a split
+/// [`SpecializationId`]). `closure_graph_offset` points at the serialized
+/// closure IR for RT/deferred consumption.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuMaterialHeader {
     pub generation: u32,
     pub revision: u32,
-    pub shading_model: u32,
+    pub illumination: u32,
     pub render_class: u32,
     pub feature_flags: u32,
     pub closure_mask: u32,
@@ -101,6 +96,17 @@ pub struct GpuMaterialHeader {
     pub active: u32,
     pub material_epoch_low: u32,
     pub material_epoch_high: u32,
+    pub closure_graph_offset: u32,
+    pub specialization_low: u32,
+    pub specialization_high: u32,
+    pub _pad: u32,
+}
+
+impl GpuMaterialHeader {
+    /// Recover the packed specialization key.
+    pub const fn specialization(&self) -> SpecializationId {
+        SpecializationId(((self.specialization_high as u64) << 32) | self.specialization_low as u64)
+    }
 }
 
 #[repr(C)]
@@ -171,15 +177,19 @@ pub fn inactive_material_header(generation: u32) -> GpuMaterialHeader {
 /// Slot zero is a permanent, generation-zero principled fallback. Consumers
 /// can safely use it while an asynchronously loaded material is unavailable.
 pub fn fallback_material_header(epoch: u64) -> GpuMaterialHeader {
+    let spec = SpecializationId::new(Illumination::Lit, 1, MaterialRenderClass::Opaque as u32);
     GpuMaterialHeader {
         generation: 0,
-        shading_model: MaterialShadingModel::Principled as u32,
+        illumination: Illumination::Lit as u32,
         render_class: MaterialRenderClass::Opaque as u32,
+        closure_mask: 1,
         parameter_size: size_of::<GpuSurfaceParameters>() as u32,
         custom_program: u32::MAX,
         active: 1,
         material_epoch_low: epoch as u32,
         material_epoch_high: (epoch >> 32) as u32,
+        specialization_low: spec.low(),
+        specialization_high: spec.high(),
         ..Default::default()
     }
 }
@@ -190,7 +200,7 @@ pub fn fallback_material_record(handle: GenerationalHandle, revision: u64) -> Ma
         revision: revision as u32,
         domain: MaterialDomain::Surface,
         render_class: MaterialRenderClass::Opaque,
-        shading_model: MaterialShadingModel::Principled,
+        illumination: Illumination::Lit,
         features: MaterialFeatureFlags::default(),
         closure_mask: 1,
         surface: GpuSurfaceParameters::default(),
@@ -205,7 +215,7 @@ pub struct MaterialRecord {
     pub revision: u32,
     pub domain: MaterialDomain,
     pub render_class: MaterialRenderClass,
-    pub shading_model: MaterialShadingModel,
+    pub illumination: Illumination,
     pub features: MaterialFeatureFlags,
     pub closure_mask: u32,
     pub surface: GpuSurfaceParameters,
@@ -214,16 +224,23 @@ pub struct MaterialRecord {
 }
 
 impl MaterialRecord {
+    /// The deterministic specialization identity for this record's axes.
+    pub fn specialization(&self) -> SpecializationId {
+        SpecializationId::new(self.illumination, self.closure_mask, self.render_class as u32)
+    }
+
     pub fn header(
         &self,
         parameter_offset: u32,
         texture_offset: u32,
+        closure_graph_offset: u32,
         epoch: u64,
     ) -> GpuMaterialHeader {
+        let spec = self.specialization();
         GpuMaterialHeader {
             generation: self.handle.generation,
             revision: self.revision,
-            shading_model: self.shading_model as u32,
+            illumination: self.illumination as u32,
             render_class: self.render_class as u32,
             feature_flags: self.features.0,
             closure_mask: self.closure_mask,
@@ -237,6 +254,10 @@ impl MaterialRecord {
             active: 1,
             material_epoch_low: epoch as u32,
             material_epoch_high: (epoch >> 32) as u32,
+            closure_graph_offset,
+            specialization_low: spec.low(),
+            specialization_high: spec.high(),
+            _pad: 0,
         }
     }
 

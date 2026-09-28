@@ -34,6 +34,21 @@ pub struct PrismShadingSettings {
     /// GTAO denoise normal edge-stop sharpness; higher rejects tilted
     /// neighbours faster, preserving occlusion contrast along curved edges.
     pub gtao_denoise_normal_power: f32,
+    /// Enables the GTAO temporal accumulation pass. Requires `enable_gtao`;
+    /// the pass reprojects last frame's converged AO through the previous
+    /// frame's camera transform, variance-clips it to the current
+    /// neighbourhood, and exponentially blends the fresh estimate to kill the
+    /// under-motion boil. Off by default.
+    pub enable_gtao_temporal: bool,
+    /// Fraction of the reprojected GTAO history kept when it agrees with the
+    /// current neighbourhood (`0..=1`); higher integrates more frames.
+    pub gtao_temporal_history_weight: f32,
+    /// Floor the GTAO temporal blend weight decays toward on a disocclusion
+    /// (`0..=history_weight`); higher keeps a touch of smoothing through it.
+    pub gtao_temporal_min_history_weight: f32,
+    /// Stddev multiplier for the GTAO temporal variance clip band
+    /// (`mean ± gamma·σ`); higher accepts more history before rejecting it.
+    pub gtao_temporal_variance_gamma: f32,
     /// Enables image-based lighting: precomputes the split-sum environment
     /// BRDF ("DFG") table so the resolve stage can reconstruct specular
     /// reflectance from prefiltered radiance. Off by default.
@@ -76,6 +91,10 @@ impl Default for PrismShadingSettings {
             gtao_denoise_spatial_sigma: 2.0,
             gtao_denoise_depth_sigma: 0.05,
             gtao_denoise_normal_power: 8.0,
+            enable_gtao_temporal: false,
+            gtao_temporal_history_weight: 0.9,
+            gtao_temporal_min_history_weight: 0.0,
+            gtao_temporal_variance_gamma: 1.0,
             enable_ibl: false,
             ibl_dfg_sample_count: 1024,
             ibl_prefilter_sample_count: 256,
@@ -126,7 +145,7 @@ pub(crate) fn prepare_shading_work(
             materials
                 .registry
                 .get(work.material)
-                .map(|record| record.header(0, 0, 0))
+                .map(|record| record.header(0, 0, 0, 0))
         }),
     );
 }
@@ -192,8 +211,7 @@ mod tests {
         let mut principled = prism_render_material::fallback_material_header(1);
         principled.generation = 2;
         let mut npr = prism_render_material::fallback_material_header(1);
-        npr.shading_model = prism_render_material::MaterialShadingModel::Npr as u32;
-        npr.render_class = prism_render_material::MaterialRenderClass::NprOpaque as u32;
+        npr.illumination = prism_render_material::Illumination::Stylized as u32;
         let mut transparent = prism_render_material::fallback_material_header(1);
         transparent.render_class = prism_render_material::MaterialRenderClass::Transparent as u32;
         let diagnostics = shading_diagnostics(

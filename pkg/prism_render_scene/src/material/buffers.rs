@@ -64,6 +64,9 @@ impl MaterialGpuBuffers {
                     MaterialHeaderRow(record.header(
                         index,
                         index * MAX_MATERIAL_TEXTURES as u32,
+                        // No serialized closure-graph blob buffer yet; RT/deferred
+                        // consumers fall back to the packed axes until it lands.
+                        0,
                         runtime.registry.snapshot().epoch,
                     )),
                 );
@@ -117,7 +120,7 @@ impl MaterialGpuBuffers {
 mod tests {
     use bevy_ecs::world::{FromWorld, World};
     use prism_render_architecture::gpu_scene::GpuCompletionValue;
-    use prism_render_material::{MaterialRenderClass, MaterialShadingModel};
+    use prism_render_material::{Illumination, MaterialRenderClass};
 
     use super::*;
 
@@ -134,7 +137,7 @@ mod tests {
                 revision: 1,
                 domain: prism_render_material::MaterialDomain::Surface,
                 render_class: MaterialRenderClass::Opaque,
-                shading_model: MaterialShadingModel::Principled,
+                illumination: Illumination::Lit,
                 features: Default::default(),
                 closure_mask: 1,
                 surface: GpuSurfaceParameters::default(),

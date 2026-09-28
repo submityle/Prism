@@ -11,7 +11,7 @@ fn record(
         revision,
         domain: MaterialDomain::Surface,
         render_class: MaterialRenderClass::Opaque,
-        shading_model: MaterialShadingModel::Principled,
+        illumination: Illumination::Lit,
         features: MaterialFeatureFlags::default(),
         closure_mask: 1,
         surface: GpuSurfaceParameters::default(),
@@ -61,7 +61,51 @@ fn graph_normalization_removes_dead_nodes_and_classifies_npr() {
     };
     let normalized = graph.normalize().unwrap();
     assert_eq!(normalized.nodes.len(), 2);
-    assert_eq!(normalized.render_class, MaterialRenderClass::NprOpaque);
+    // NPR is now the orthogonal `Stylized` illumination axis, not a render
+    // class flattened into the blend family.
+    assert_eq!(normalized.render_class, MaterialRenderClass::Opaque);
+    assert_eq!(normalized.illumination, Illumination::Stylized);
+    assert_eq!(
+        normalized.specialization_id,
+        SpecializationId::new(Illumination::Stylized, normalized.closure_mask, MaterialRenderClass::Opaque as u32)
+    );
+}
+
+#[test]
+fn graph_normalization_rejects_over_deep_closure_slab() {
+    use alloc::collections::BTreeMap;
+    // Build a chain of Layer nodes deeper than MAX_CLOSURE_SLAB_DEPTH.
+    let leaf = MaterialNodeId(0);
+    let mut nodes = BTreeMap::from([(
+        leaf,
+        MaterialNode::Closure {
+            kind: ClosureKind::Diffuse,
+            inputs: vec![MaterialNodeId(100)],
+        },
+    )]);
+    nodes.insert(MaterialNodeId(100), MaterialNode::Constant(MaterialValue::Scalar(1.0)));
+    let mut prev = leaf;
+    let mut last = leaf;
+    for i in 1..=(MAX_CLOSURE_SLAB_DEPTH + 1) {
+        let id = MaterialNodeId(1000 + i);
+        nodes.insert(
+            id,
+            MaterialNode::Closure {
+                kind: ClosureKind::Layer,
+                inputs: vec![prev],
+            },
+        );
+        prev = id;
+        last = id;
+    }
+    let graph = MaterialGraph {
+        nodes,
+        output: Some(last),
+    };
+    assert!(matches!(
+        graph.normalize(),
+        Err(MaterialValidationError::ClosureSlabTooDeep { .. })
+    ));
 }
 
 #[cfg(feature = "bevy")]
@@ -94,7 +138,10 @@ fn standard_material_bridge_preserves_surface_classification() {
     };
     let record = lower_standard_material(handle, 4, &material, &mut Resolver);
     assert_eq!(record.render_class, MaterialRenderClass::MaskedTwoSided);
-    assert_eq!(record.shading_model, MaterialShadingModel::ClearCoat);
+    // Clearcoat is a closure lobe, not a shading model: illumination stays Lit
+    // and the clearcoat closure bit is set.
+    assert_eq!(record.illumination, Illumination::Lit);
+    assert_ne!(record.closure_mask & (1 << ClosureKind::ClearCoat as u32), 0);
     assert_eq!(record.surface.alpha_cutoff, 0.37);
     assert!(record.features.contains(MaterialFeatureFlags::DOUBLE_SIDED));
 }
@@ -120,16 +167,13 @@ fn slot_zero_is_a_live_principled_fallback() {
     let (headers, parameters, _) = registry.gpu_tables();
     assert_eq!(headers[0].generation, 0);
     assert_eq!(headers[0].active, 1);
-    assert_eq!(
-        headers[0].shading_model,
-        MaterialShadingModel::Principled as u32
-    );
+    assert_eq!(headers[0].illumination, Illumination::Lit as u32);
     assert_eq!(parameters[0], GpuSurfaceParameters::default());
 }
 
 #[test]
 fn gpu_material_rows_match_the_shader_abi() {
-    assert_eq!(size_of::<GpuMaterialHeader>(), 64);
+    assert_eq!(size_of::<GpuMaterialHeader>(), 80);
     assert_eq!(size_of::<GpuSurfaceParameters>(), 96);
     assert_eq!(size_of::<GpuMaterialTexture>(), 16);
     assert_eq!(size_of::<GpuMaterialHeader>() % 16, 0);

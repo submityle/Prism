@@ -584,7 +584,7 @@ mod tests {
     use super::*;
     use crate::{encode_barycentrics, MaterialShadingClass};
     use prism_render_material::{
-        fallback_material_header, GpuMaterialHeader, MaterialRenderClass, MaterialShadingModel,
+        fallback_material_header, GpuMaterialHeader, Illumination, MaterialRenderClass,
     };
 
     fn unit_triangle() -> ([GpuShadingPrimitive; 1], [GpuShadingVertex; 3]) {
@@ -626,7 +626,7 @@ mod tests {
         header.generation = 4;
         header.active = 1;
         header.render_class = MaterialRenderClass::Opaque as u32;
-        header.shading_model = MaterialShadingModel::Principled as u32;
+        header.illumination = Illumination::Lit as u32;
         header
     }
 
@@ -655,7 +655,7 @@ mod tests {
     fn unlit_bypasses_lighting_and_returns_base_plus_emissive() {
         let (primitives, vertices) = unit_triangle();
         let mut header = principled_header();
-        header.shading_model = MaterialShadingModel::Unlit as u32;
+        header.illumination = Illumination::Unlit as u32;
         let parameters = GpuSurfaceParameters {
             base_color: [0.2, 0.4, 0.6, 1.0],
             emissive: [0.1, 0.0, 0.0, 0.0],
@@ -734,8 +734,7 @@ mod tests {
     fn npr_uses_quantized_toon_response() {
         let (primitives, vertices) = unit_triangle();
         let mut header = principled_header();
-        header.shading_model = MaterialShadingModel::Npr as u32;
-        header.render_class = MaterialRenderClass::NprOpaque as u32;
+        header.illumination = Illumination::Stylized as u32;
         let parameters = GpuSurfaceParameters {
             base_color: [1.0, 1.0, 1.0, 1.0],
             ..Default::default()
@@ -845,7 +844,7 @@ mod tests {
         use crate::{srgb_channel_to_linear, SEMANTIC_BASE_COLOR};
         let (primitives, vertices) = unit_triangle();
         let mut header = principled_header();
-        header.shading_model = MaterialShadingModel::Unlit as u32;
+        header.illumination = Illumination::Unlit as u32;
         let parameters = GpuSurfaceParameters {
             base_color: [0.2, 0.4, 0.6, 1.0],
             emissive: [0.1, 0.0, 0.0, 0.0],

@@ -11,10 +11,11 @@ struct ClassificationParams {
 }
 
 struct MaterialHeader {
-    generation: u32, revision: u32, shading_model: u32, render_class: u32,
+    generation: u32, revision: u32, illumination: u32, render_class: u32,
     feature_flags: u32, closure_mask: u32, parameter_offset: u32, parameter_size: u32,
     texture_offset: u32, texture_count: u32, sampler_offset: u32, sampler_count: u32,
     custom_program: u32, is_active: u32, material_epoch_low: u32, material_epoch_high: u32,
+    closure_graph_offset: u32, specialization_low: u32, specialization_high: u32, reserved: u32,
 }
 
 struct PixelClass {
@@ -44,14 +45,59 @@ struct WorkItem {
 
 var<immediate> params: ClassificationParams;
 
+// Closure-kind bit positions (see `ir::ClosureKind`).
+const CLOSURE_CLEARCOAT: u32 = 3u;
+const CLOSURE_SHEEN: u32 = 4u;
+const CLOSURE_SUBSURFACE: u32 = 5u;
+const CLOSURE_HAIR: u32 = 8u;
+
+// MaterialShadingClass discriminants (see `classification::MaterialShadingClass`).
+const CLASS_PRINCIPLED: u32 = 0u;
+const CLASS_UNLIT: u32 = 1u;
+const CLASS_SUBSURFACE: u32 = 2u;
+const CLASS_CLEARCOAT: u32 = 3u;
+const CLASS_CLOTH: u32 = 4u;
+const CLASS_HAIR: u32 = 5u;
+const CLASS_WATER: u32 = 6u;
+const CLASS_NPR: u32 = 7u;
+const CLASS_CUSTOM: u32 = 8u;
+
+fn has_closure(mask: u32, bit: u32) -> bool {
+    return (mask & (1u << bit)) != 0u;
+}
+
+// Project a Lit surface's closure graph onto a coherent bucket, matching the
+// CPU `lit_class_from_closures` derivation exactly.
+fn lit_class_from_closures(mask: u32) -> u32 {
+    if has_closure(mask, CLOSURE_HAIR) { return CLASS_HAIR; }
+    if has_closure(mask, CLOSURE_SUBSURFACE) { return CLASS_SUBSURFACE; }
+    if has_closure(mask, CLOSURE_CLEARCOAT) { return CLASS_CLEARCOAT; }
+    if has_closure(mask, CLOSURE_SHEEN) { return CLASS_CLOTH; }
+    return CLASS_PRINCIPLED;
+}
+
 fn material_class(header: MaterialHeader) -> u32 {
-    // Surface-compatible MaterialRenderClass values. Transparent, additive,
-    // transmissive and volume materials stay on forward/specialized paths.
+    // Surface-compatible MaterialRenderClass values: Opaque, OpaqueTwoSided,
+    // Masked, MaskedTwoSided, Hair, Water. Transparent/additive/transmissive/
+    // volume/decal materials stay on forward/specialized paths. The former
+    // Npr*/Custom* render classes are gone; style is the illumination axis now.
     let surface = header.render_class == 0u || header.render_class == 1u
         || header.render_class == 2u || header.render_class == 3u
-        || header.render_class == 8u || header.render_class == 9u
-        || header.render_class == 11u || header.render_class == 13u;
-    return select(0xffffffffu, header.shading_model, header.is_active != 0u && surface);
+        || header.render_class == 8u || header.render_class == 9u;
+    if header.is_active == 0u || !surface {
+        return 0xffffffffu;
+    }
+    // Dedicated subsystem render classes bind their bucket directly.
+    if header.render_class == 9u { return CLASS_WATER; }
+    if header.render_class == 8u { return CLASS_HAIR; }
+    // Illumination axis (Lit=0, Stylized=1, Unlit=2, Custom=3).
+    switch header.illumination {
+        case 2u: { return CLASS_UNLIT; }
+        case 1u: { return CLASS_NPR; }
+        case 3u: { return CLASS_CUSTOM; }
+        case 0u: { return lit_class_from_closures(header.closure_mask); }
+        default: { return 0xffffffffu; }
+    }
 }
 
 @compute @workgroup_size(64)

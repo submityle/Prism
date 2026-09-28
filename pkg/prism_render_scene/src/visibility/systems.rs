@@ -196,7 +196,7 @@ fn draw_bin_candidate(
         key: DrawBinKey {
             geometry: work.geometry,
             lod_or_cluster: lod.level,
-            pipeline_class: ((material.shading_model as u32) << 16)
+            pipeline_class: ((material.illumination as u32) << 16)
                 | material.render_class as u32,
             vertex_buffer_class: geometry.vertex_buffer_class,
             index_buffer_class: geometry.index_buffer_class,

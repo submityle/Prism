@@ -1,8 +1,14 @@
 use alloc::vec::Vec;
-use prism_render_material::{GpuMaterialHeader, MaterialRenderClass, MaterialShadingModel};
+use prism_render_material::{ClosureKind, GpuMaterialHeader, Illumination, MaterialRenderClass};
 
 pub const MAX_SHADING_CLASSES: usize = 9;
 
+/// The runtime shading bucket a pixel is binned into for the deferred/compute
+/// shading pass. This is a *derived* projection of the orthogonal material axes
+/// (`illumination` + `closure_mask` + `render_class`), not a stored field: the
+/// material ABI no longer carries a single `shading_model`. Keeping the 9-way
+/// enum lets the shading pass stay wavefront-coherent while the material side
+/// stays fully orthogonal.
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub enum MaterialShadingClass {
@@ -28,7 +34,7 @@ impl MaterialShadingClass {
 pub enum ClassificationError {
     Inactive,
     NonSurfaceClass,
-    UnsupportedShadingModel(u32),
+    UnsupportedIllumination(u32),
 }
 
 #[repr(C)]
@@ -86,12 +92,37 @@ impl ShadingWorkPlan {
     }
 }
 
+/// True when a closure bit is present in the packed mask.
+fn has_closure(mask: u32, kind: ClosureKind) -> bool {
+    mask & (1 << kind as u32) != 0
+}
+
+/// Project a `Lit` surface's closure graph onto a coherent shading bucket. The
+/// dominant physically-based closure wins; a plain metal/dielectric surface is
+/// `Principled`. This mirrors the old per-model buckets without forcing the
+/// material author to pick one exclusive model.
+fn lit_class_from_closures(closure_mask: u32) -> MaterialShadingClass {
+    if has_closure(closure_mask, ClosureKind::Hair) {
+        MaterialShadingClass::Hair
+    } else if has_closure(closure_mask, ClosureKind::Subsurface) {
+        MaterialShadingClass::Subsurface
+    } else if has_closure(closure_mask, ClosureKind::ClearCoat) {
+        MaterialShadingClass::ClearCoat
+    } else if has_closure(closure_mask, ClosureKind::Sheen) {
+        MaterialShadingClass::Cloth
+    } else {
+        MaterialShadingClass::Principled
+    }
+}
+
 pub fn classify_material_header(
     header: &GpuMaterialHeader,
 ) -> Result<MaterialShadingClass, ClassificationError> {
     if header.active == 0 {
         return Err(ClassificationError::Inactive);
     }
+    // Surface-domain blend families only. `Npr*`/`Custom*` no longer exist as
+    // render classes; style lives on the illumination axis instead.
     if !matches!(
         header.render_class,
         x if x == MaterialRenderClass::Opaque as u32
@@ -100,22 +131,27 @@ pub fn classify_material_header(
             || x == MaterialRenderClass::MaskedTwoSided as u32
             || x == MaterialRenderClass::Hair as u32
             || x == MaterialRenderClass::Water as u32
-            || x == MaterialRenderClass::NprOpaque as u32
-            || x == MaterialRenderClass::CustomOpaque as u32
     ) {
         return Err(ClassificationError::NonSurfaceClass);
     }
-    match header.shading_model {
-        x if x == MaterialShadingModel::Principled as u32 => Ok(MaterialShadingClass::Principled),
-        x if x == MaterialShadingModel::Unlit as u32 => Ok(MaterialShadingClass::Unlit),
-        x if x == MaterialShadingModel::Subsurface as u32 => Ok(MaterialShadingClass::Subsurface),
-        x if x == MaterialShadingModel::ClearCoat as u32 => Ok(MaterialShadingClass::ClearCoat),
-        x if x == MaterialShadingModel::Cloth as u32 => Ok(MaterialShadingClass::Cloth),
-        x if x == MaterialShadingModel::Hair as u32 => Ok(MaterialShadingClass::Hair),
-        x if x == MaterialShadingModel::Water as u32 => Ok(MaterialShadingClass::Water),
-        x if x == MaterialShadingModel::Npr as u32 => Ok(MaterialShadingClass::Npr),
-        x if x == MaterialShadingModel::Custom as u32 => Ok(MaterialShadingClass::Custom),
-        other => Err(ClassificationError::UnsupportedShadingModel(other)),
+
+    // Dedicated subsystem render classes bind their bucket directly, regardless
+    // of the illumination axis (a stylized water shader is still water work).
+    if header.render_class == MaterialRenderClass::Water as u32 {
+        return Ok(MaterialShadingClass::Water);
+    }
+    if header.render_class == MaterialRenderClass::Hair as u32 {
+        return Ok(MaterialShadingClass::Hair);
+    }
+
+    match Illumination::from_u32(header.illumination) {
+        Some(Illumination::Unlit) => Ok(MaterialShadingClass::Unlit),
+        Some(Illumination::Stylized) => Ok(MaterialShadingClass::Npr),
+        Some(Illumination::Custom) => Ok(MaterialShadingClass::Custom),
+        Some(Illumination::Lit) => Ok(lit_class_from_closures(header.closure_mask)),
+        None => Err(ClassificationError::UnsupportedIllumination(
+            header.illumination,
+        )),
     }
 }
 
@@ -125,50 +161,62 @@ mod tests {
     use prism_render_architecture::abi::GenerationalHandle;
     use prism_render_material::fallback_material_header;
 
+    /// Set the illumination axis on a header, mirroring how the material
+    /// registry emits it.
+    fn with_illumination(mut header: GpuMaterialHeader, illum: Illumination) -> GpuMaterialHeader {
+        header.illumination = illum as u32;
+        header
+    }
+
+    /// Set a single closure bit (the "dominant" physically-based closure).
+    fn with_closure(mut header: GpuMaterialHeader, kind: ClosureKind) -> GpuMaterialHeader {
+        header.closure_mask = 1 << kind as u32;
+        header
+    }
+
     #[test]
-    fn classifies_every_supported_model_without_per_asset_permutations() {
-        for (model, class) in [
-            (
-                MaterialShadingModel::Principled,
-                MaterialShadingClass::Principled,
-            ),
-            (MaterialShadingModel::Unlit, MaterialShadingClass::Unlit),
-            (
-                MaterialShadingModel::Subsurface,
-                MaterialShadingClass::Subsurface,
-            ),
-            (
-                MaterialShadingModel::ClearCoat,
-                MaterialShadingClass::ClearCoat,
-            ),
-            (MaterialShadingModel::Cloth, MaterialShadingClass::Cloth),
-            (MaterialShadingModel::Hair, MaterialShadingClass::Hair),
-            (MaterialShadingModel::Water, MaterialShadingClass::Water),
-            (MaterialShadingModel::Npr, MaterialShadingClass::Npr),
-            (MaterialShadingModel::Custom, MaterialShadingClass::Custom),
+    fn illumination_axis_maps_to_style_buckets_without_per_asset_permutations() {
+        let base = fallback_material_header(1);
+        assert_eq!(
+            classify_material_header(&with_illumination(base, Illumination::Unlit)),
+            Ok(MaterialShadingClass::Unlit)
+        );
+        assert_eq!(
+            classify_material_header(&with_illumination(base, Illumination::Stylized)),
+            Ok(MaterialShadingClass::Npr)
+        );
+        assert_eq!(
+            classify_material_header(&with_illumination(base, Illumination::Custom)),
+            Ok(MaterialShadingClass::Custom)
+        );
+    }
+
+    #[test]
+    fn lit_surfaces_derive_their_bucket_from_the_dominant_closure() {
+        let base = with_illumination(fallback_material_header(1), Illumination::Lit);
+        for (kind, expected) in [
+            (ClosureKind::Diffuse, MaterialShadingClass::Principled),
+            (ClosureKind::Conductor, MaterialShadingClass::Principled),
+            (ClosureKind::Subsurface, MaterialShadingClass::Subsurface),
+            (ClosureKind::ClearCoat, MaterialShadingClass::ClearCoat),
+            (ClosureKind::Sheen, MaterialShadingClass::Cloth),
+            (ClosureKind::Hair, MaterialShadingClass::Hair),
         ] {
-            let mut header = fallback_material_header(1);
-            header.shading_model = model as u32;
-            assert_eq!(classify_material_header(&header), Ok(class));
+            assert_eq!(
+                classify_material_header(&with_closure(base, kind)),
+                Ok(expected),
+                "closure {kind:?} should classify as {expected:?}"
+            );
         }
     }
 
     #[test]
-    fn hair_and_water_surface_render_classes_are_classifiable() {
-        for (model, render_class, expected) in [
-            (
-                MaterialShadingModel::Hair,
-                MaterialRenderClass::Hair,
-                MaterialShadingClass::Hair,
-            ),
-            (
-                MaterialShadingModel::Water,
-                MaterialRenderClass::Water,
-                MaterialShadingClass::Water,
-            ),
+    fn hair_and_water_render_classes_bind_their_bucket_directly() {
+        for (render_class, expected) in [
+            (MaterialRenderClass::Hair, MaterialShadingClass::Hair),
+            (MaterialRenderClass::Water, MaterialShadingClass::Water),
         ] {
             let mut header = fallback_material_header(1);
-            header.shading_model = model as u32;
             header.render_class = render_class as u32;
             assert_eq!(classify_material_header(&header), Ok(expected));
         }
@@ -180,8 +228,7 @@ mod tests {
         pbr.generation = 2;
         let mut npr = fallback_material_header(1);
         npr.generation = 4;
-        npr.shading_model = MaterialShadingModel::Npr as u32;
-        npr.render_class = MaterialRenderClass::NprOpaque as u32;
+        npr.illumination = Illumination::Stylized as u32;
         let pixel = |material: GenerationalHandle| {
             super::super::VisibilityPixel::new(
                 GenerationalHandle {
