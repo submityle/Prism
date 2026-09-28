@@ -31,6 +31,7 @@
 
 mod fade;
 mod gi;
+mod gi_denoise;
 mod march;
 mod motion;
 mod ray;
@@ -45,6 +46,9 @@ pub use fade::{
 pub use gi::{
     build_hemisphere_ray, cosine_sample_direction, gather_indirect_diffuse, trace_indirect_ray,
     SsgiGather, SsgiParams, SsgiRaySample,
+};
+pub use gi_denoise::{
+    denoise_ssgi, denoise_ssgi_pixel, SsgiDenoiseBuffers, SsgiDenoiseConfig,
 };
 pub use march::{
     march_hierarchical, DepthPyramid, SsrMarchConfig, SsrMarchResult,

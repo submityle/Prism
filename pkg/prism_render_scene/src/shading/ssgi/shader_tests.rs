@@ -73,3 +73,27 @@ fn ssgi_composite_wesl_compiles_standalone() {
         .get(0, composite, &[])
         .unwrap_or_else(|error| panic!("ssgi_composite.wesl failed to compile: {error}"));
 }
+
+/// Compiles `ssgi_denoise.wesl`, proving the edge-aware spatial SSGI denoiser
+/// (the GPU twin of `prism_render_shading::screen_space::denoise_ssgi`) parses
+/// and type-checks exactly as it will in the render world: raw SSGI, linear
+/// view depth and view-space normal in; the joint bilateral blur out. A green
+/// result also guards the shared `SsgiDenoiseConfig` immediate layout against
+/// drift.
+#[test]
+fn ssgi_denoise_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let denoise = shader_id(0x5052_4953_4d5f_5353_4749_5f44_4e53_0001);
+    cache.set_shader(
+        denoise,
+        Shader::from_wesl(
+            include_str!("../../shaders/ssgi_denoise.wesl"),
+            "embedded://prism_render_scene/shaders/ssgi_denoise.wesl",
+        ),
+    );
+
+    cache
+        .get(0, denoise, &[])
+        .unwrap_or_else(|error| panic!("ssgi_denoise.wesl failed to compile: {error}"));
+}

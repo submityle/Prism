@@ -166,7 +166,7 @@ pub(crate) fn prepare_ssgi_composite_bind_groups(
             &pipeline.fold_layout,
             &BindGroupEntries::sequential((
                 textures.gi_base_view(),
-                textures.ssgi_out_view(),
+                textures.ssgi_denoised_view(),
                 visibility.scene_color_view(),
                 visibility.ssgi_albedo_view(),
                 visibility.ssgi_ambient_view(),

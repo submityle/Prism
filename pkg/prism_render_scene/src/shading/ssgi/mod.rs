@@ -18,6 +18,9 @@
 //!   shaders.
 //! * [`resources`] — the per-view [`resources::ViewSsgiTextures`] (the gather
 //!   output plus the scratch base copy) and their viewport-sized allocator.
+//! * [`denoise`] — the edge-aware spatial denoise pipeline, its per-view bind
+//!   group and the `Core3d` node that runs the joint bilateral blur between the
+//!   trace and the composite.
 //! * [`trace`] — the diffuse-hemisphere gather pipeline, its per-view bind
 //!   group and the `Core3d` node that marches the reverse-Z Hi-Z pyramid and
 //!   samples the current-frame colour at each hit, writing the pre-albedo mean
@@ -29,6 +32,7 @@
 
 mod abi;
 mod composite;
+mod denoise;
 mod resources;
 mod trace;
 
@@ -37,6 +41,9 @@ mod shader_tests;
 
 pub(crate) use composite::{
     init_ssgi_composite_pipeline, prepare_ssgi_composite_bind_groups, ssgi_composite_pass,
+};
+pub(crate) use denoise::{
+    init_ssgi_denoise_pipeline, prepare_ssgi_denoise_bind_groups, ssgi_denoise_pass,
 };
 pub(crate) use resources::prepare_ssgi_textures;
 pub(crate) use trace::{

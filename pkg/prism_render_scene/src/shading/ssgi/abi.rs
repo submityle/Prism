@@ -131,6 +131,67 @@ impl GpuSsgiCompositeParams {
     }
 }
 
+/// Immediate (push-constant) block consumed by `ssgi_denoise.wesl`'s
+/// `denoise_ssgi` entry point.
+///
+/// Mirrors the shader's `SsgiDenoiseConfig`: the inverse reverse-Z projection
+/// and framebuffer extent (used to reconstruct the linear view depth each
+/// edge-stop compares from the SSR subsystem's device depth) plus the golden
+/// [`prism_render_shading::screen_space::SsgiDenoiseConfig`] tunables — the
+/// bilateral kernel half-width and the spatial / depth / normal sigmas.
+///
+/// `view_from_clip` leads so the `mat4x4` lands on its 16-byte alignment; the
+/// `vec2<f32>` extent follows on its 8-byte alignment, then the four tunables,
+/// and two trailing `u32` pads round the block up to the 16-byte immediate
+/// alignment the `mat4x4` forces (96 bytes).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq)]
+pub(crate) struct GpuSsgiDenoiseConfig {
+    /// Clip -> view (inverse projection), reconstructs the view-space position
+    /// whose `-z` is the linear depth the edge stop compares.
+    pub view_from_clip: [f32; 16],
+    /// Full-resolution framebuffer extent in texels.
+    pub screen_size: [f32; 2],
+    /// Bilateral kernel half-width in pixels (`(2 * radius + 1)^2` taps).
+    pub radius: u32,
+    /// Spatial Gaussian sigma in pixels.
+    pub spatial_sigma: f32,
+    /// Relative depth stop sigma (scaled by the centre depth in the shader).
+    pub depth_sigma: f32,
+    /// Normal stop exponent applied to `max(dot(n_c, n_s), 0)`.
+    pub normal_power: f32,
+    /// Padding to the 16-byte immediate alignment.
+    pub _pad0: u32,
+    /// Padding to the 16-byte immediate alignment.
+    pub _pad1: u32,
+}
+
+impl GpuSsgiDenoiseConfig {
+    /// Builds the denoise config from the inverse projection, framebuffer
+    /// extent and the golden bilateral tunables. `view_from_clip` uploads
+    /// column-major (via [`Mat4::to_cols_array`]) so the WGSL `mat4x4<f32>`
+    /// multiply agrees with the trace's reconstruction byte-for-byte.
+    pub(crate) fn from_view(
+        view_from_clip: Mat4,
+        screen_size: UVec2,
+        radius: u32,
+        spatial_sigma: f32,
+        depth_sigma: f32,
+        normal_power: f32,
+    ) -> Self {
+        Self {
+            view_from_clip: view_from_clip.to_cols_array(),
+            screen_size: [screen_size.x as f32, screen_size.y as f32],
+            radius,
+            spatial_sigma,
+            depth_sigma,
+            normal_power,
+            _pad0: 0,
+            _pad1: 0,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,5 +258,30 @@ mod tests {
     #[test]
     fn workgroup_edge_matches_the_shader() {
         assert_eq!(SSGI_WORKGROUP_SIZE, 8);
+    }
+
+    #[test]
+    fn denoise_config_matches_the_shader_immediate_layout() {
+        // A mat4x4 (64) + a vec2<f32> (8) + four scalars (16) fill 88 bytes; two
+        // u32 pads round the block up to 96 bytes, a multiple of the 16-byte
+        // immediate alignment the mat4x4 forces on the struct.
+        assert_eq!(size_of::<GpuSsgiDenoiseConfig>(), 96);
+        assert_eq!(align_of::<GpuSsgiDenoiseConfig>(), 4);
+        let config = GpuSsgiDenoiseConfig::from_view(
+            Mat4::from_cols_array(&[
+                1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0,
+                16.0,
+            ]),
+            UVec2::new(1920, 1080),
+            2,
+            2.0,
+            0.05,
+            8.0,
+        );
+        assert_eq!(config.screen_size, [1920.0, 1080.0]);
+        assert_eq!(config.radius, 2);
+        assert_eq!(config.spatial_sigma, 2.0);
+        assert_eq!(config.depth_sigma, 0.05);
+        assert_eq!(config.normal_power, 8.0);
     }
 }

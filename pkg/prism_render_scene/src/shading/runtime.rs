@@ -89,6 +89,23 @@ pub struct PrismShadingSettings {
     /// confidence distance-fade tapers the tail so an over-long ray never
     /// hard-cuts.
     pub ssgi_max_distance: f32,
+    /// Bilateral SSGI denoise kernel half-width in pixels: each output pixel is
+    /// a weighted average of its `(2 * radius + 1)^2` neighbours. Larger radii
+    /// smooth more Monte-Carlo noise at a quadratic tap cost. Mirrors the golden
+    /// `SsgiDenoiseConfig::radius`.
+    pub ssgi_denoise_radius: u32,
+    /// Spatial Gaussian sigma (pixels) for the SSGI denoise: how quickly a
+    /// neighbour's spatial weight falls off with distance from the centre.
+    pub ssgi_denoise_spatial_sigma: f32,
+    /// Relative depth edge-stop sigma for the SSGI denoise, scaled by the centre
+    /// pixel's linear view depth so the stop stays perspective-correct. Smaller
+    /// values hug depth discontinuities tighter (less bleed across seams).
+    pub ssgi_denoise_depth_sigma: f32,
+    /// Normal edge-stop exponent for the SSGI denoise, applied to
+    /// `max(dot(n_centre, n_sample), 0)`. Higher powers reject off-normal
+    /// neighbours more aggressively, keeping indirect radiance from creeping
+    /// across creases.
+    pub ssgi_denoise_normal_power: f32,
     /// Enables the histogram auto-exposure + eye-adaptation compute passes.
     /// Requires the visibility buffer (it meters the resolved HDR `scene_color`).
     /// The per-view exposure state buffer is always created and always bound by
@@ -168,6 +185,11 @@ impl Default for PrismShadingSettings {
             enable_ssgi: false,
             ssgi_sample_count: 8,
             ssgi_max_distance: 8.0,
+            // Mirror the golden `SsgiDenoiseConfig::default()` bilateral tunables.
+            ssgi_denoise_radius: 2,
+            ssgi_denoise_spatial_sigma: 2.0,
+            ssgi_denoise_depth_sigma: 0.05,
+            ssgi_denoise_normal_power: 8.0,
             enable_exposure: false,
             enable_bloom: false,
             bloom_threshold: 1.0,

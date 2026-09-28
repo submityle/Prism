@@ -28,9 +28,10 @@ use super::{
         ssr_repack_pass, ssr_temporal_pass, ssr_trace_pass,
     },
     ssgi::{
-        init_ssgi_composite_pipeline, init_ssgi_trace_pipeline,
-        prepare_ssgi_composite_bind_groups, prepare_ssgi_textures,
-        prepare_ssgi_trace_bind_groups, ssgi_composite_pass, ssgi_trace_pass,
+        init_ssgi_composite_pipeline, init_ssgi_denoise_pipeline, init_ssgi_trace_pipeline,
+        prepare_ssgi_composite_bind_groups, prepare_ssgi_denoise_bind_groups,
+        prepare_ssgi_textures, prepare_ssgi_trace_bind_groups, ssgi_composite_pass,
+        ssgi_denoise_pass, ssgi_trace_pass,
     },
     taa::{
         init_taa_resolve_pipeline, prepare_taa_bind_groups, prepare_taa_jitter,
@@ -120,6 +121,7 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/ssr_temporal.wesl");
         embedded_asset!(app, "../shaders/ssr_composite.wesl");
         embedded_asset!(app, "../shaders/ssgi.wesl");
+        embedded_asset!(app, "../shaders/ssgi_denoise.wesl");
         embedded_asset!(app, "../shaders/ssgi_composite.wesl");
         embedded_asset!(app, "../shaders/taa_resolve.wesl");
         embedded_asset!(app, "../shaders/brdf_lut.wesl");
@@ -204,6 +206,7 @@ impl Plugin for PrismShadingPlugin {
                         init_ssr_composite_pipeline,
                         init_taa_resolve_pipeline,
                         init_ssgi_trace_pipeline,
+                        init_ssgi_denoise_pipeline,
                         init_ssgi_composite_pipeline,
                         init_exposure_histogram_pipeline,
                         init_exposure_average_pipeline,
@@ -342,12 +345,19 @@ impl Plugin for PrismShadingPlugin {
                     prepare_ssgi_textures
                         .after(prepare_ssr_textures)
                         .in_set(RenderSystems::PrepareResources),
-                    prepare_ssgi_trace_bind_groups
-                        .after(prepare_ssgi_textures)
-                        .in_set(RenderSystems::PrepareBindGroups),
-                    prepare_ssgi_composite_bind_groups
-                        .after(prepare_ssgi_textures)
-                        .in_set(RenderSystems::PrepareBindGroups),
+                    // Nested to keep this Render tuple within Bevy's 20-element
+                    // limit; all three still order after `prepare_ssgi_textures`.
+                    (
+                        prepare_ssgi_trace_bind_groups
+                            .after(prepare_ssgi_textures)
+                            .in_set(RenderSystems::PrepareBindGroups),
+                        prepare_ssgi_denoise_bind_groups
+                            .after(prepare_ssgi_textures)
+                            .in_set(RenderSystems::PrepareBindGroups),
+                        prepare_ssgi_composite_bind_groups
+                            .after(prepare_ssgi_textures)
+                            .in_set(RenderSystems::PrepareBindGroups),
+                    ),
                     prepare_taa_textures
                         .after(prepare_visibility_buffers)
                         .in_set(RenderSystems::PrepareResources),
@@ -466,9 +476,13 @@ impl Plugin for PrismShadingPlugin {
                         .after(ssr_hzb_pass)
                         .after(ssr_repack_pass)
                         .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                    ssgi_denoise_pass
+                        .after(ssgi_trace_pass)
+                        .before(bevy_core_pipeline::Core3dSystems::MainPass),
                     ssgi_composite_pass
                         .after(ssr_composite_pass)
                         .after(ssgi_trace_pass)
+                        .after(ssgi_denoise_pass)
                         .before(bevy_core_pipeline::Core3dSystems::MainPass),
                     taa_resolve_pass
                         .after(ssr_composite_pass)

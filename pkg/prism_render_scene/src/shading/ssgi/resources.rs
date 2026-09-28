@@ -46,6 +46,15 @@ pub(crate) const SSGI_OUT_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
 /// read/write aliasing hazard.
 pub(crate) const SSGI_BASE_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
 
+/// Edge-aware spatially denoised diffuse-GI buffer. The trace writes the raw,
+/// grainy gather into `ssgi_out`; the denoise pass reads it (plus the device
+/// depth and view normal for edge stopping) and writes the smoothed result
+/// here, which the composite then folds over the ambient. A distinct target is
+/// mandatory because `rgba16float` is not read-write storage-capable, so the
+/// blur cannot run in place on `ssgi_out`. Same wide-HDR encoding as the raw
+/// gather.
+pub(crate) const SSGI_DENOISED_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
+
 /// The two per-view SSGI targets, present only while SSGI is enabled and the
 /// viewport size is known.
 #[derive(Component)]
@@ -57,6 +66,9 @@ pub(crate) struct ViewSsgiTextures {
     /// composited `scene_color`) and read back by the fold pass. Single mip,
     /// full resolution.
     gi_base: CachedTexture,
+    /// Edge-aware denoised gather written by the denoise pass and read by the
+    /// composite. Single mip, full resolution.
+    ssgi_denoised: CachedTexture,
     pub(crate) size: bevy_math::UVec2,
 }
 
@@ -71,6 +83,12 @@ impl ViewSsgiTextures {
     /// writes it (storage) and the fold pass reads it (`textureLoad`).
     pub(crate) fn gi_base_view(&self) -> &TextureView {
         &self.gi_base.default_view
+    }
+
+    /// Storage/sampling view of the denoised gather. The denoise pass writes it
+    /// (storage) and the composite reads it (`textureLoad`).
+    pub(crate) fn ssgi_denoised_view(&self) -> &TextureView {
+        &self.ssgi_denoised.default_view
     }
 }
 
@@ -143,10 +161,25 @@ pub(crate) fn prepare_ssgi_textures(
                 view_formats: &[],
             },
         );
+        let ssgi_denoised = texture_cache.get(
+            &device,
+            TextureDescriptor {
+                label: Some("prism SSGI denoised"),
+                size: size.to_extents(),
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: TextureDimension::D2,
+                format: SSGI_DENOISED_FORMAT,
+                // Written by the denoise pass, sampled by the composite.
+                usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+        );
 
         commands.entity(entity).insert(ViewSsgiTextures {
             ssgi_out,
             gi_base,
+            ssgi_denoised,
             size,
         });
     }
@@ -164,5 +197,8 @@ mod tests {
         assert_eq!(SSGI_OUT_FORMAT, TextureFormat::Rgba16Float);
         assert_eq!(SSGI_BASE_FORMAT, TextureFormat::Rgba16Float);
         assert_eq!(SSGI_BASE_FORMAT, super::super::super::resources::SCENE_COLOR_FORMAT);
+        // The denoised gather shares the raw gather's wide-HDR encoding.
+        assert_eq!(SSGI_DENOISED_FORMAT, TextureFormat::Rgba16Float);
+        assert_eq!(SSGI_DENOISED_FORMAT, SSGI_OUT_FORMAT);
     }
 }
