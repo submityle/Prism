@@ -4,7 +4,7 @@
 //! (see `docs/prism_material_pipeline_slang_design_zh.md` §3). A material is
 //! now described by independent axes:
 //!
-//! * `domain`        — Surface / Decal / Volume / PostProcess (see `record.rs`)
+//! * `domain`        — Surface / Decal / Volume / `PostProcess` (see `record.rs`)
 //! * `closure graph` — *what* the BSDF looks like (`ir::ClosureGraph`)
 //! * `illumination`  — *how* shared lighting data is interpreted (this module)
 //! * `blend`         — the `MaterialRenderClass` family

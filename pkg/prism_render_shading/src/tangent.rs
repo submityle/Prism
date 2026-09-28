@@ -6,7 +6,7 @@
 //! matching Unreal's derived-tangent policy:
 //!
 //! 1. **Authored tangents** interpolated from the vertex table (produced by a
-//!    MikkTSpace pass at import time), re-orthonormalized against the shaded
+//!    `MikkTSpace` pass at import time), re-orthonormalized against the shaded
 //!    normal so the basis stays orthogonal after interpolation.
 //! 2. **Analytic tangents** derived from the triangle's position/UV gradients
 //!    (Lengyel's method) when the mesh carries no authored tangent attribute.

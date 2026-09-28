@@ -4,7 +4,7 @@
 //! A visibility-buffer deferred renderer can only store one opaque surface per
 //! pixel, so transparent geometry is composited in a separate forward pass.
 //! Sorting every transparent triangle per pixel is impractical on the GPU, so
-//! Prism uses McGuire & Bavoil's weighted-blended OIT ("Weighted Blended
+//! Prism uses `McGuire` & Bavoil's weighted-blended OIT ("Weighted Blended
 //! Order-Independent Transparency", JCGT 2013): each fragment is accumulated
 //! with a depth-derived weight into two render targets, and a final pass
 //! normalises the accumulation and composites it over the opaque background.
@@ -43,7 +43,7 @@ const WEIGHT_MAX: f32 = 3.0e3;
 /// Guards the average-colour division when nothing has been accumulated.
 const ACCUM_EPSILON: f32 = 1.0e-5;
 
-/// Depth-based fragment weight from McGuire & Bavoil (2013), equation 10.
+/// Depth-based fragment weight from `McGuire` & Bavoil (2013), equation 10.
 ///
 /// Nearer fragments (smaller `view_depth`) receive a larger weight so they
 /// dominate the blend, approximating a front-to-back sort without ordering.

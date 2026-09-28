@@ -1,8 +1,8 @@
 //! Backend-neutral cube-map -> spherical-harmonic projection.
 //!
 //! An environment probe stored as six cube-map faces is convolved into the
-//! order-two SH radiance basis consumed by [SphericalHarmonicsL2]. The
-//! projection mirrors AMD's CubeMapGen / Unreal's environment-capture baking:
+//! order-two SH radiance basis consumed by [`SphericalHarmonicsL2`]. The
+//! projection mirrors AMD's `CubeMapGen` / Unreal's environment-capture baking:
 //! every texel is turned into a world-space direction, weighted by the exact
 //! solid angle it subtends, and accumulated into the SH radiance vector.
 //!
@@ -133,7 +133,7 @@ pub(super) fn face_direction(face: usize, u: f32, v: f32) -> [f32; 3] {
 }
 
 /// Signed area of the spherical rectangle spanning `[0, s] x [0, t]` on the
-/// projected cube face (the analytic primitive AMD CubeMapGen differences to
+/// projected cube face (the analytic primitive AMD `CubeMapGen` differences to
 /// recover per-texel solid angles).
 fn area_element(s: f32, t: f32) -> f32 {
     ops::atan2(s * t, ops::sqrt(s * s + t * t + 1.0))
@@ -149,7 +149,7 @@ fn texel_solid_angle(u0: f32, u1: f32, v0: f32, v1: f32) -> f32 {
 ///
 /// Each texel contributes its radiance weighted by the exact solid angle it
 /// covers, so the accumulated probe integrates the full sphere: a constant
-/// radiance cube collapses to [SphericalHarmonicsL2::from_constant], and the
+/// radiance cube collapses to [`SphericalHarmonicsL2::from_constant`], and the
 /// summed weights equal `4*pi`.
 pub fn project_cubemap_to_sh(faces: &CubemapFaces) -> SphericalHarmonicsL2 {
     let mut probe = SphericalHarmonicsL2::ZERO;
