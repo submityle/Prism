@@ -666,3 +666,50 @@ fn stylized_hair_wesl_compiles_and_resolves_imports() {
         panic!("stylized_hair.wesl failed to compile/resolve imports: {error}")
     });
 }
+
+/// Registers `lighting.wesl`, `brdf.wesl` and `hair_chiang.wesl` under their
+/// canonical module paths and compiles `hair_chiang.wesl`, forcing the importer
+/// to resolve the `prism_render_scene::shaders::brdf::{...}` imports the Chiang
+/// near-field front end depends on (`SurfaceSample`, `ShadingFrame`,
+/// `DirectLightSample` and `brdf_normalize_or`; `brdf.wesl` in turn imports
+/// `lighting.wesl` for `INV_PI`). A green result proves the energy-conserving
+/// close-up hair kernel — the color-to-`sigma_a` absorption fit, the
+/// Beer-Lambert cortex transmittance, the R/TT/TRT cuticle lobes and the
+/// hollow-core medulla forward-scatter fill — parses, resolves its imports and
+/// type-checks as WESL, in lock-step with the CPU golden
+/// `prism_render_shading::hair_chiang::evaluate_hair_chiang_direct`.
+#[test]
+fn hair_chiang_wesl_compiles_and_resolves_imports() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let lighting = shader_id(0x5052_4953_4d5f_4c49_4748_5449_4e47_0009);
+    cache.set_shader(
+        lighting,
+        Shader::from_wesl(
+            include_str!("../../shaders/lighting.wesl"),
+            "embedded://prism_render_scene/shaders/lighting.wesl",
+        ),
+    );
+
+    let brdf = shader_id(0x5052_4953_4d5f_4252_4446_0000_0000_0009);
+    cache.set_shader(
+        brdf,
+        Shader::from_wesl(
+            include_str!("../../shaders/brdf.wesl"),
+            "embedded://prism_render_scene/shaders/brdf.wesl",
+        ),
+    );
+
+    let hair_chiang = shader_id(0x5052_4953_4d5f_4841_4952_5f43_4849_0001);
+    cache.set_shader(
+        hair_chiang,
+        Shader::from_wesl(
+            include_str!("../../shaders/hair_chiang.wesl"),
+            "embedded://prism_render_scene/shaders/hair_chiang.wesl",
+        ),
+    );
+
+    cache.get(0, hair_chiang, &[]).unwrap_or_else(|error| {
+        panic!("hair_chiang.wesl failed to compile/resolve imports: {error}")
+    });
+}
