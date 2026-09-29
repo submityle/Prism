@@ -157,3 +157,376 @@ fn pass_mask(class: MaterialRenderClass, flags: u32, view: crate::ViewFlags) -> 
     }
     mask
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{GeometryLod, HistoryPolicy, ViewFlags};
+    use prism_render_architecture::abi::GenerationalHandle;
+    use prism_render_architecture::gpu_scene::{
+        CpuRenderScene, InstanceRecord, SceneBounds, SceneOperation, SceneTransaction,
+    };
+    use prism_render_material::{
+        Illumination, MaterialDomain, MaterialRecord, MaterialRenderClass,
+    };
+
+    fn handle(index: u32) -> GenerationalHandle {
+        GenerationalHandle {
+            index,
+            generation: 1,
+        }
+    }
+
+    fn view() -> GpuViewRecord {
+        GpuViewRecord {
+            handle: handle(1),
+            clip_from_world: [[0.0; 4]; 4],
+            previous_clip_from_world: [[0.0; 4]; 4],
+            world_position: [0.0, 0.0, -10.0],
+            lod_scale: 1.0,
+            viewport: [0, 0, 1920, 1080],
+            // All planes evaluate to `1.0 >= -radius`, i.e. always inside.
+            frustum_planes: [[0.0, 0.0, 0.0, 1.0]; 6],
+            layer_mask: 1,
+            flags: ViewFlags::REVERSE_Z,
+            history_epoch: 1,
+        }
+    }
+
+    fn instance(geometry: GenerationalHandle, material: GenerationalHandle) -> InstanceRecord {
+        InstanceRecord {
+            bounds: SceneBounds {
+                center: [0.0; 3],
+                radius: 1.0,
+                half_extents: [1.0; 3],
+                _padding: 0.0,
+            },
+            geometry,
+            material,
+            render_layers: 1,
+            ..Default::default()
+        }
+    }
+
+    fn scene_with(scene_handle: GenerationalHandle, record: InstanceRecord) -> CpuRenderScene {
+        let mut scene = CpuRenderScene::default();
+        scene.apply(&SceneTransaction {
+            frame_epoch: 1,
+            sequence: 1,
+            producer: 1,
+            operations: vec![SceneOperation::Create {
+                handle: scene_handle,
+                record,
+            }],
+        });
+        scene
+    }
+
+    fn material(material_handle: GenerationalHandle) -> MaterialRecord {
+        MaterialRecord {
+            handle: material_handle,
+            revision: 1,
+            domain: MaterialDomain::Surface,
+            render_class: MaterialRenderClass::Opaque,
+            illumination: Illumination::Lit,
+            features: Default::default(),
+            closure_mask: 1,
+            surface: Default::default(),
+            textures: Vec::new(),
+            custom_program: None,
+        }
+    }
+
+    fn lod_chain(geometry: GenerationalHandle, resident: bool, fallback: bool) -> GeometryLodChain {
+        GeometryLodChain {
+            geometry,
+            lods: vec![GeometryLod {
+                level: 0,
+                screen_error: 0.01,
+                resident,
+                fallback,
+            }],
+        }
+    }
+
+    #[test]
+    fn stale_layer_and_frustum_rejections_are_counted_separately() {
+        let geometry = handle(1);
+        let material_handle = handle(1);
+        let materials = BTreeMap::from([(material_handle, material(material_handle))]);
+        let geometry_map = BTreeMap::from([(geometry, lod_chain(geometry, true, true))]);
+        let previous = BTreeMap::new();
+        let occluded = BTreeSet::new();
+
+        // Stale: the handle is not present in the scene at all.
+        let empty_scene = CpuRenderScene::default();
+        let (work, stats) = cull_view(
+            &view(),
+            VisibilityInput {
+                scene: &empty_scene,
+                handles: &[handle(1)],
+                geometry: &geometry_map,
+                materials: &materials,
+                previous_lods: &previous,
+                occluded: &occluded,
+                capacity: 8,
+                previous_history_epoch: Some(1),
+            },
+        );
+        assert!(work.is_empty());
+        assert_eq!(stats.stale_handles, 1);
+        assert_eq!(stats.input_instances, 1);
+
+        // Layer mask: the instance shares no bit with the view layer mask.
+        let mut rec = instance(geometry, material_handle);
+        rec.render_layers = 0b10;
+        let scene = scene_with(handle(1), rec);
+        let (_, stats) = cull_view(
+            &view(),
+            VisibilityInput {
+                scene: &scene,
+                handles: &[handle(1)],
+                geometry: &geometry_map,
+                materials: &materials,
+                previous_lods: &previous,
+                occluded: &occluded,
+                capacity: 8,
+                previous_history_epoch: Some(1),
+            },
+        );
+        assert_eq!(stats.layer_rejected, 1);
+        assert_eq!(stats.visible_instances, 0);
+
+        // Frustum: place the center far outside a half-space plane.
+        let mut culling_view = view();
+        culling_view.frustum_planes[0] = [1.0, 0.0, 0.0, 0.0];
+        let mut rec = instance(geometry, material_handle);
+        rec.bounds.center = [-100.0, 0.0, 0.0];
+        let scene = scene_with(handle(1), rec);
+        let (_, stats) = cull_view(
+            &culling_view,
+            VisibilityInput {
+                scene: &scene,
+                handles: &[handle(1)],
+                geometry: &geometry_map,
+                materials: &materials,
+                previous_lods: &previous,
+                occluded: &occluded,
+                capacity: 8,
+                previous_history_epoch: Some(1),
+            },
+        );
+        assert_eq!(stats.frustum_rejected, 1);
+    }
+
+    #[test]
+    fn occlusion_is_only_applied_when_history_is_reused() {
+        let geometry = handle(1);
+        let material_handle = handle(1);
+        let scene = scene_with(handle(1), instance(geometry, material_handle));
+        let geometry_map = BTreeMap::from([(geometry, lod_chain(geometry, true, true))]);
+        let materials = BTreeMap::from([(material_handle, material(material_handle))]);
+        let previous = BTreeMap::new();
+        let occluded = BTreeSet::from([(view().handle, handle(1))]);
+
+        // Reused history (matching epoch, no camera cut) honours occlusion.
+        assert_eq!(view().history_policy(Some(1)), HistoryPolicy::Reuse);
+        let (work, stats) = cull_view(
+            &view(),
+            VisibilityInput {
+                scene: &scene,
+                handles: &[handle(1)],
+                geometry: &geometry_map,
+                materials: &materials,
+                previous_lods: &previous,
+                occluded: &occluded,
+                capacity: 8,
+                previous_history_epoch: Some(1),
+            },
+        );
+        assert!(work.is_empty());
+        assert_eq!(stats.occlusion_rejected, 1);
+
+        // A reset history (missing previous epoch) ignores the occlusion set.
+        let (work, stats) = cull_view(
+            &view(),
+            VisibilityInput {
+                scene: &scene,
+                handles: &[handle(1)],
+                geometry: &geometry_map,
+                materials: &materials,
+                previous_lods: &previous,
+                occluded: &occluded,
+                capacity: 8,
+                previous_history_epoch: None,
+            },
+        );
+        assert_eq!(stats.occlusion_rejected, 0);
+        assert_eq!(work.len(), 1);
+    }
+
+    #[test]
+    fn missing_geometry_material_and_unavailable_lod_are_handled() {
+        let geometry = handle(1);
+        let material_handle = handle(1);
+        let scene = scene_with(handle(1), instance(geometry, material_handle));
+        let previous = BTreeMap::new();
+        let occluded = BTreeSet::new();
+
+        // Missing geometry entry.
+        let empty_geometry = BTreeMap::new();
+        let materials = BTreeMap::from([(material_handle, material(material_handle))]);
+        let (_, stats) = cull_view(
+            &view(),
+            VisibilityInput {
+                scene: &scene,
+                handles: &[handle(1)],
+                geometry: &empty_geometry,
+                materials: &materials,
+                previous_lods: &previous,
+                occluded: &occluded,
+                capacity: 8,
+                previous_history_epoch: Some(1),
+            },
+        );
+        assert_eq!(stats.missing_geometry, 1);
+
+        // Missing material entry.
+        let geometry_map = BTreeMap::from([(geometry, lod_chain(geometry, true, true))]);
+        let empty_materials = BTreeMap::new();
+        let (_, stats) = cull_view(
+            &view(),
+            VisibilityInput {
+                scene: &scene,
+                handles: &[handle(1)],
+                geometry: &geometry_map,
+                materials: &empty_materials,
+                previous_lods: &previous,
+                occluded: &occluded,
+                capacity: 8,
+                previous_history_epoch: Some(1),
+            },
+        );
+        assert_eq!(stats.missing_material, 1);
+
+        // Unavailable LOD: no resident level and no fallback -> select fails
+        // and the instance is charged to the missing-geometry counter.
+        let no_lod = BTreeMap::from([(geometry, lod_chain(geometry, false, false))]);
+        let (_, stats) = cull_view(
+            &view(),
+            VisibilityInput {
+                scene: &scene,
+                handles: &[handle(1)],
+                geometry: &no_lod,
+                materials: &materials,
+                previous_lods: &previous,
+                occluded: &occluded,
+                capacity: 8,
+                previous_history_epoch: Some(1),
+            },
+        );
+        assert_eq!(stats.missing_geometry, 1);
+    }
+
+    #[test]
+    fn capacity_limit_sets_overflow_and_stops_emitting_work() {
+        let geometry = handle(1);
+        let material_handle = handle(1);
+        let scene = scene_with(handle(1), instance(geometry, material_handle));
+        let geometry_map = BTreeMap::from([(geometry, lod_chain(geometry, true, true))]);
+        let materials = BTreeMap::from([(material_handle, material(material_handle))]);
+        let previous = BTreeMap::new();
+        let occluded = BTreeSet::new();
+
+        let (work, stats) = cull_view(
+            &view(),
+            VisibilityInput {
+                scene: &scene,
+                handles: &[handle(1)],
+                geometry: &geometry_map,
+                materials: &materials,
+                previous_lods: &previous,
+                occluded: &occluded,
+                capacity: 0,
+                previous_history_epoch: Some(1),
+            },
+        );
+        assert!(work.is_empty());
+        assert!(stats.overflowed);
+        assert_eq!(stats.visible_instances, 0);
+    }
+
+    #[test]
+    fn visible_instance_emits_offline_pass_only_when_view_is_offline() {
+        let geometry = handle(1);
+        let material_handle = handle(1);
+        let scene = scene_with(handle(1), instance(geometry, material_handle));
+        let geometry_map = BTreeMap::from([(geometry, lod_chain(geometry, true, true))]);
+        let materials = BTreeMap::from([(material_handle, material(material_handle))]);
+        let previous = BTreeMap::new();
+        let occluded = BTreeSet::new();
+
+        // Online view: no OFFLINE bit, but opaque + shadow are present.
+        let (work, stats) = cull_view(
+            &view(),
+            VisibilityInput {
+                scene: &scene,
+                handles: &[handle(1)],
+                geometry: &geometry_map,
+                materials: &materials,
+                previous_lods: &previous,
+                occluded: &occluded,
+                capacity: 8,
+                previous_history_epoch: Some(1),
+            },
+        );
+        assert_eq!(work.len(), 1);
+        assert_eq!(stats.visible_instances, 1);
+        assert_eq!(work[0].pass_mask.0 & RenderPassMask::OFFLINE.0, 0);
+        assert_ne!(work[0].pass_mask.0 & RenderPassMask::OPAQUE.0, 0);
+        assert_ne!(work[0].pass_mask.0 & RenderPassMask::SHADOW.0, 0);
+        assert_eq!(stats.shadow_casters, 1);
+        assert_eq!(stats.material_bins, 1);
+
+        // Offline view: the OFFLINE pass is added to every emitted work item.
+        let mut offline = view();
+        offline.flags |= ViewFlags::OFFLINE;
+        let (work, _) = cull_view(
+            &offline,
+            VisibilityInput {
+                scene: &scene,
+                handles: &[handle(1)],
+                geometry: &geometry_map,
+                materials: &materials,
+                previous_lods: &previous,
+                occluded: &occluded,
+                capacity: 8,
+                previous_history_epoch: Some(1),
+            },
+        );
+        assert_ne!(work[0].pass_mask.0 & RenderPassMask::OFFLINE.0, 0);
+    }
+
+    #[test]
+    fn cull_reason_variants_are_distinct_and_copyable() {
+        let reasons = [
+            CullReason::StaleHandle,
+            CullReason::LayerMask,
+            CullReason::Frustum,
+            CullReason::Occluded,
+            CullReason::MissingGeometry,
+            CullReason::MissingMaterial,
+            CullReason::LodUnavailable,
+            CullReason::Overflow,
+        ];
+        // Copy semantics: comparing a value with its copy holds.
+        let copied = reasons[0];
+        assert_eq!(copied, CullReason::StaleHandle);
+        // Every listed variant is pairwise distinct.
+        for (i, a) in reasons.iter().enumerate() {
+            for (j, b) in reasons.iter().enumerate() {
+                assert_eq!(i == j, a == b);
+            }
+        }
+    }
+}
