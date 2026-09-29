@@ -58,10 +58,8 @@ impl FromWorld for MaterialBindGroup {
         // `GpuSurfaceParameters` array. The minimum binding size is therefore a
         // single word; shaders decode `parameter_size` words at each material's
         // `parameter_offset` using its `lobe_mask`.
-        let parameter = storage_buffer_read_only_sized(
-            false,
-            NonZero::new(size_of::<u32>() as u64),
-        );
+        let parameter =
+            storage_buffer_read_only_sized(false, NonZero::new(size_of::<u32>() as u64));
         let texture = storage_buffer_read_only_sized(
             false,
             NonZero::new(size_of::<GpuMaterialTexture>() as u64),

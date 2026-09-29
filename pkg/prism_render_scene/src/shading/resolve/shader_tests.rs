@@ -64,7 +64,6 @@ fn brdf_wesl_compiles_and_resolves_lighting_import() {
         .unwrap_or_else(|error| panic!("brdf.wesl failed to compile/resolve imports: {error}"));
 }
 
-
 /// Registers `lighting.wesl`, `brdf.wesl` and `cloth.wesl` under their canonical
 /// module paths and compiles `cloth.wesl`, forcing the importer to resolve the
 /// `prism_render_scene::shaders::{lighting, brdf}::{...}` imports the cloth lobe
@@ -104,7 +103,6 @@ fn cloth_wesl_compiles_and_resolves_imports() {
         .get(0, cloth, &[])
         .unwrap_or_else(|error| panic!("cloth.wesl failed to compile/resolve imports: {error}"));
 }
-
 
 /// Registers `lighting.wesl`, `brdf.wesl` and `subsurface.wesl` under their
 /// canonical module paths and compiles `subsurface.wesl`, forcing the importer
@@ -316,11 +314,9 @@ fn clearcoat_wesl_compiles_and_resolves_imports() {
         ),
     );
 
-    cache
-        .get(0, clearcoat, &[])
-        .unwrap_or_else(|error| {
-            panic!("clearcoat.wesl failed to compile/resolve imports: {error}")
-        });
+    cache.get(0, clearcoat, &[]).unwrap_or_else(|error| {
+        panic!("clearcoat.wesl failed to compile/resolve imports: {error}")
+    });
 }
 
 /// Registers the full dependency graph (`surface`, `brdf`, `lighting`,

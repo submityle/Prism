@@ -264,7 +264,7 @@ mod tests {
         let b = heap.alloc(8);
         let c = heap.alloc(8);
         let _guard = heap.alloc(4); // keep the tail pinned so holes stay interior
-        // Free out of order; the three 8-word runs must merge into one 24 hole.
+                                    // Free out of order; the three 8-word runs must merge into one 24 hole.
         heap.free(b, 8);
         heap.free(a, 8);
         heap.free(c, 8);

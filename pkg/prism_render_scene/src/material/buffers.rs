@@ -74,12 +74,7 @@ impl MaterialGpuBuffers {
     /// Free the heap run currently recorded for `index`, if any, and clear its
     /// slot. Returns the freed word count so callers can keep buffer stats.
     fn release_parameters(&mut self, index: u32) {
-        if let Some((offset, len)) = self
-            .allocs
-            .get(index as usize)
-            .copied()
-            .flatten()
-        {
+        if let Some((offset, len)) = self.allocs.get(index as usize).copied().flatten() {
             self.heap.free(offset, len);
             self.allocs[index as usize] = None;
         }
@@ -167,8 +162,8 @@ impl MaterialGpuBuffers {
             }
         }
         let fixed_bytes = dirty.len() as u64
-            * (size_of::<GpuMaterialHeader>() + MAX_MATERIAL_TEXTURES * size_of::<GpuMaterialTexture>())
-                as u64;
+            * (size_of::<GpuMaterialHeader>()
+                + MAX_MATERIAL_TEXTURES * size_of::<GpuMaterialTexture>()) as u64;
         (dirty.len() as u32, fixed_bytes + parameter_bytes)
     }
 }

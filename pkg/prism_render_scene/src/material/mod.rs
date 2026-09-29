@@ -1,7 +1,7 @@
 mod bindings;
 mod buffers;
-mod parameter_heap;
 mod consumer;
+mod parameter_heap;
 mod plugin;
 pub(crate) mod runtime;
 pub(crate) mod systems;
