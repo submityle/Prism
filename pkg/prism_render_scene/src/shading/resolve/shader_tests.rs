@@ -862,3 +862,44 @@ fn cloth_sim_wesl_compiles_standalone() {
         .get(0, cloth_sim, &[])
         .unwrap_or_else(|error| panic!("cloth_sim.wesl failed to compile: {error}"));
 }
+
+/// Compiles the GPU cloth body/self-collision kernel module standalone, so a
+/// regression in `cloth_collision.wesl` (a bad binding, entry name, or `WGSL`
+/// construct) fails the build even though the sandbox never dispatches it.
+#[test]
+fn cloth_collision_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let cloth_collision = shader_id(0x5052_4953_4d5f_434c_4f54_485f_434f_4c01);
+    cache.set_shader(
+        cloth_collision,
+        Shader::from_wesl(
+            include_str!("../../shaders/cloth_collision.wesl"),
+            "embedded://prism_render_scene/shaders/cloth_collision.wesl",
+        ),
+    );
+
+    cache
+        .get(0, cloth_collision, &[])
+        .unwrap_or_else(|error| panic!("cloth_collision.wesl failed to compile: {error}"));
+}
+
+/// Compiles the GPU render-mesh embedding kernel module standalone, guarding
+/// `cloth_embed.wesl` against binding / entry-name / `WGSL` regressions.
+#[test]
+fn cloth_embed_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let cloth_embed = shader_id(0x5052_4953_4d5f_434c_4f54_485f_454d_4201);
+    cache.set_shader(
+        cloth_embed,
+        Shader::from_wesl(
+            include_str!("../../shaders/cloth_embed.wesl"),
+            "embedded://prism_render_scene/shaders/cloth_embed.wesl",
+        ),
+    );
+
+    cache
+        .get(0, cloth_embed, &[])
+        .unwrap_or_else(|error| panic!("cloth_embed.wesl failed to compile: {error}"));
+}
