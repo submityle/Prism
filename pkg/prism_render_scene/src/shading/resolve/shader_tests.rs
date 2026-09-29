@@ -620,3 +620,49 @@ fn hair_interp_wesl_compiles_standalone() {
         .get(0, hair_interp, &[])
         .unwrap_or_else(|error| panic!("hair_interp.wesl failed to compile: {error}"));
 }
+
+/// Registers `lighting.wesl`, `brdf.wesl` and `stylized_hair.wesl` under their
+/// canonical module paths and compiles `stylized_hair.wesl`, forcing the
+/// importer to resolve the `prism_render_scene::shaders::brdf::{...}` imports
+/// the NPR front end depends on (`SurfaceSample`, `ShadingFrame`,
+/// `DirectLightSample` and `brdf_normalize_or`; `brdf.wesl` in turn imports
+/// `lighting.wesl`). A green result proves the stylized (angel-ring) hair
+/// shading kernel — the wrapped cel diffuse ramp, the two shifted thresholded
+/// `Kajiya-Kay` highlight bands and the unshadowed Fresnel rim — parses,
+/// resolves its imports and type-checks as WESL, in lock-step with the CPU
+/// golden `prism_render_shading::stylized_hair::evaluate_stylized_hair_direct`.
+#[test]
+fn stylized_hair_wesl_compiles_and_resolves_imports() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let lighting = shader_id(0x5052_4953_4d5f_4c49_4748_5449_4e47_0009);
+    cache.set_shader(
+        lighting,
+        Shader::from_wesl(
+            include_str!("../../shaders/lighting.wesl"),
+            "embedded://prism_render_scene/shaders/lighting.wesl",
+        ),
+    );
+
+    let brdf = shader_id(0x5052_4953_4d5f_4252_4446_0000_0000_0009);
+    cache.set_shader(
+        brdf,
+        Shader::from_wesl(
+            include_str!("../../shaders/brdf.wesl"),
+            "embedded://prism_render_scene/shaders/brdf.wesl",
+        ),
+    );
+
+    let stylized_hair = shader_id(0x5052_4953_4d5f_4841_4952_5f4e_5052_0001);
+    cache.set_shader(
+        stylized_hair,
+        Shader::from_wesl(
+            include_str!("../../shaders/stylized_hair.wesl"),
+            "embedded://prism_render_scene/shaders/stylized_hair.wesl",
+        ),
+    );
+
+    cache.get(0, stylized_hair, &[]).unwrap_or_else(|error| {
+        panic!("stylized_hair.wesl failed to compile/resolve imports: {error}")
+    });
+}
