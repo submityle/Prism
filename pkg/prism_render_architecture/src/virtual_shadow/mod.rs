@@ -6,10 +6,13 @@
 //! receiver. Physical page storage and the depth raster live in the backend.
 //!
 //! * [`clipmap`] — directional-light clipmap level and page selection.
+//! * [`residency`] — page residency table and per-frame request coalescing.
 
 pub mod clipmap;
+pub mod residency;
 
 pub use clipmap::{ClipmapConfig, MAX_CLIP_LEVELS};
+pub use residency::{ShadowRequestBatch, ShadowResidencyTable};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ShadowPageKey {
