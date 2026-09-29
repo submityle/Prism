@@ -373,6 +373,11 @@ fallback:              strand 高配, card 基线; RT 反射里毛发用 proxy �
 - **自定义前端槽**：项目注入 `illumination=Custom`，走自定义 WESL closure + 自定义 pass。
 - **混合 = 逐像素 material id + tile 分类路由**：GPU 把像素按 material id 分 tile，路由到对应前端。因共享光/影/GI 而连贯——这是"管线级混合"的具体机制，也是它比"各前端各算高级特性"优越的地方。
 
+**落地锚点（对齐 committed 代码）**："逐像素 material id + tile 分类路由"不是设想，已两侧落地——
+- **CPU 分桶**：`prism_render_shading/src/classification.rs` 的 `classify_material_header` 把每个材质头投影到 9 值 `MaterialShadingClass`（Water/Hair 由 `render_class` 直绑；Unlit/Npr(=Stylized)/Custom 由 `illumination` 定；其余 Lit 由主导 closure 经 `lit_class_from_closures` 投影 Hair/Subsurface/ClearCoat/Cloth/Principled），`ShadingWorkPlan::build` 据此把像素分成 `ShadingWorkItem` bin（同桶同 permutation，wavefront 一致）。
+- **GPU 路由**：`prism_render_scene/src/shaders/shading_resolve.wesl` 里 9 个 `SHADING_CLASS_*`(PRINCIPLED=0 … CUSTOM=8) 常量 + `switch params.shading_class` 的 9 条 case，分派到 `shade_principled`/`shade_toon`(NPR)/`shade_subsurface`/`shade_clearcoat`/`shade_cloth`/`shade_hair`/`shade_water` 等前端着色函数——**同一 resolve pass、同一套光/影/GI 输入，仅着色分支按桶切换**，这正是「管线级混合」优于「各前端各建一套高级特性」之处。
+- **描边白送**：NPR 前端的 material-id 边界描边直接消费 vis-buffer 的 id（`outline.rs::outline_id_edge`，§9 第 4 项），无需额外 id pass。
+
 ---
 
 ## 8. 后端抽象（破坏性重构）
