@@ -41,7 +41,9 @@ pub mod dynamics;
 pub mod embed;
 pub mod lod;
 pub mod pipeline;
+pub mod pressure;
 pub mod sleep;
+pub mod wind;
 
 use alloc::vec::Vec;
 
