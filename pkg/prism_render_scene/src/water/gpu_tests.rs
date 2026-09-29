@@ -665,3 +665,380 @@ fn foam_advect_gpu_matches_cpu_golden() {
         i += 1;
     }
 }
+
+// ===========================================================================
+// PBF density-constraint solve parity (`water_pbf_density_solve`, water_pbf.wesl)
+// ===========================================================================
+
+use prism_render_architecture::water::pbf::{self, NeighborContribution, PbfGrid, PbfParams};
+use prism_render_architecture::water::Vec3;
+
+use super::abi::GpuPbfParams;
+
+/// Compiles `water_pbf.wesl` and returns its `Wgsl` translation.
+///
+/// Mirrors [`compile_surface_wgsl`] but streams the standalone `PBF` module
+/// (its own `@group(0)` resource set) through the render world's shader cache,
+/// so the parity test dispatches the exact `Wgsl` the engine would.
+fn compile_pbf_wgsl() -> String {
+    let mut cache = ShaderCache::new((), keep_wgsl);
+    let id = AssetId::Uuid {
+        uuid: Uuid::from_u128(0x5052_4953_4d5f_5741_5445_5250_4246_0002),
+    };
+    cache.set_shader(
+        id,
+        Shader::from_wesl(
+            include_str!("../shaders/water_pbf.wesl"),
+            "embedded://prism_render_scene/shaders/water_pbf.wesl",
+        ),
+    );
+    let module = cache
+        .get(0, id, &[])
+        .unwrap_or_else(|error| panic!("water_pbf.wesl failed to compile: {error}"));
+    (*module).clone()
+}
+
+/// Builds a deterministic, non-trivial `PBF` particle set inside a 4x4x4 grid.
+///
+/// A dense 3x3x3 block (spacing well under the smoothing radius, so it is
+/// compressed and yields a non-zero constraint), a second offset cluster that
+/// straddles a cell boundary (so cross-cell neighbour gathering is exercised),
+/// and two isolated particles in far cells (no neighbours, so the pass-through
+/// path is covered) drive every branch of the solve. The `w` lane carries a
+/// distinct per-particle payload that must survive the projection untouched.
+fn build_pbf_particles() -> (Vec<Vec3>, Vec<f32>) {
+    let mut positions = Vec::new();
+    // Dense compressed block centred at (1.5, 1.5, 1.5), spacing 0.35 m.
+    let mut i = 0;
+    while i < 3 {
+        let mut j = 0;
+        while j < 3 {
+            let mut k = 0;
+            while k < 3 {
+                positions.push(Vec3::new(
+                    1.5 - 0.35 + i as f32 * 0.35,
+                    1.5 - 0.35 + j as f32 * 0.35,
+                    1.5 - 0.35 + k as f32 * 0.35,
+                ));
+                k += 1;
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    // Offset 2x2x2 cluster straddling the (2, .., ..) cell boundary.
+    let mut i = 0;
+    while i < 2 {
+        let mut j = 0;
+        while j < 2 {
+            let mut k = 0;
+            while k < 2 {
+                positions.push(Vec3::new(
+                    2.35 + i as f32 * 0.3,
+                    1.55 + j as f32 * 0.3,
+                    1.55 + k as f32 * 0.3,
+                ));
+                k += 1;
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    // Two isolated particles in far corners (no neighbours -> pass-through).
+    positions.push(Vec3::new(0.5, 0.5, 0.5));
+    positions.push(Vec3::new(3.5, 3.5, 3.5));
+
+    let carried: Vec<f32> = (0..positions.len()).map(|n| n as f32 + 0.5).collect();
+    (positions, carried)
+}
+
+/// Packs `bin_particles` output into the shader's single `hash` storage buffer.
+///
+/// Layout mirrors `water_pbf.wesl`: `hash[2*c]` = start offset (into the index
+/// region) of cell `c`, `hash[2*c + 1]` = its particle count, and the index
+/// region (`hash[2*cell_count + start + s]`) lists the binned particle indices
+/// in cell-major, ascending-index order.
+fn build_pbf_hash(grid: PbfGrid, positions: &[Vec3]) -> Vec<u32> {
+    let bins = pbf::bin_particles(grid, positions);
+    let cell_count = grid.cell_count();
+    let mut hash = vec![0u32; 2 * cell_count];
+    let mut index_region: Vec<u32> = Vec::new();
+    let mut flat = 0;
+    while flat < cell_count {
+        let cell = &bins.cells[flat];
+        hash[2 * flat] = index_region.len() as u32;
+        hash[2 * flat + 1] = cell.len() as u32;
+        for &particle in cell {
+            index_region.push(particle);
+        }
+        flat += 1;
+    }
+    hash.extend_from_slice(&index_region);
+    hash
+}
+
+/// `CPU` golden twin of `water_pbf_density_solve`.
+///
+/// Reproduces the shader exactly: every `lambda` is pre-computed from the frozen
+/// input (the shader re-derives `lambda_j` on demand from the same frozen
+/// buffer, so a pre-pass is numerically identical), then each particle's
+/// position correction is accumulated over the neighbourhood in the same
+/// cell-major, ascending-index order the shader walks. The `w` lane is carried
+/// through unchanged.
+fn pbf_golden(
+    positions: &[Vec3],
+    carried: &[f32],
+    grid: PbfGrid,
+    params: PbfParams,
+) -> Vec<[f32; 4]> {
+    let h = params.smoothing_radius;
+    let rest = params.rest_density;
+    let mass = params.particle_mass;
+    let eps = params.relaxation_epsilon;
+    let bins = pbf::bin_particles(grid, positions);
+
+    let lambdas: Vec<f32> = (0..positions.len())
+        .map(|i| {
+            let neighbors = pbf::gather_neighbors(grid, &bins, positions, i as u32);
+            let mut density = pbf::poly6(0.0, h);
+            let mut grad_sum = Vec3::ZERO;
+            let mut grad_sq_sum = 0.0_f32;
+            for &j in &neighbors {
+                let r_vec = positions[i].sub(positions[j as usize]);
+                let r2 = r_vec.length_squared();
+                density += pbf::poly6(r2, h);
+                let grad = pbf::spiky_gradient(r_vec, h);
+                grad_sum = grad_sum.add(grad);
+                grad_sq_sum += grad.length_squared();
+            }
+            density *= mass.max(0.0);
+            pbf::constraint_lambda(density, rest, grad_sum, grad_sq_sum, eps)
+        })
+        .collect();
+
+    (0..positions.len())
+        .map(|i| {
+            let neighbors = pbf::gather_neighbors(grid, &bins, positions, i as u32);
+            let contribs: Vec<NeighborContribution> = neighbors
+                .iter()
+                .map(|&j| {
+                    let r_vec = positions[i].sub(positions[j as usize]);
+                    let r2 = r_vec.length_squared();
+                    NeighborContribution {
+                        lambda_j: lambdas[j as usize],
+                        scorr: pbf::artificial_pressure(r2, params),
+                        gradient: pbf::spiky_gradient(r_vec, h),
+                    }
+                })
+                .collect();
+            let delta = pbf::position_correction(lambdas[i], rest, &contribs);
+            let p = positions[i].add(delta);
+            [p.x, p.y, p.z, carried[i]]
+        })
+        .collect()
+}
+
+/// Dispatches one `water_pbf_density_solve` on device and reads `positions_out`.
+///
+/// The bind group is built from the pipeline's reflected `group(0)` layout so
+/// the four bindings line up with the shader's declaration order:
+/// `positions_in`, `positions_out`, `hash`, `params`. The dispatch covers one
+/// invocation per particle (`ceil(count / 64)` workgroups of 64).
+fn dispatch_pbf(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    wgsl: &str,
+    entry: &str,
+    positions_in: &[[f32; 4]],
+    hash: &[u32],
+    params: &GpuPbfParams,
+) -> Vec<[f32; 4]> {
+    let count = positions_in.len();
+    let vec4_bytes = size_of_val(positions_in) as u64;
+
+    let module = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("water_pbf_parity"),
+        source: ShaderSource::Wgsl(wgsl.into()),
+    });
+    let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("water_pbf_density_solve_parity"),
+        layout: None,
+        module: &module,
+        entry_point: Some(entry),
+        compilation_options: PipelineCompilationOptions::default(),
+        cache: None,
+    });
+
+    let pos_in = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("pbf_positions_in"),
+        contents: bytemuck::cast_slice(positions_in),
+        usage: BufferUsages::STORAGE,
+    });
+    let pos_out = device.create_buffer(&BufferDescriptor {
+        label: Some("pbf_positions_out"),
+        size: vec4_bytes,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let hash_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("pbf_hash"),
+        contents: bytemuck::cast_slice(hash),
+        usage: BufferUsages::STORAGE,
+    });
+    let param_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("pbf_params"),
+        contents: bytemuck::bytes_of(params),
+        usage: BufferUsages::UNIFORM,
+    });
+
+    let layout = pipeline.get_bind_group_layout(0);
+    let bind_group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("pbf_group0"),
+        layout: &layout,
+        entries: &[
+            BindGroupEntry {
+                binding: 0,
+                resource: pos_in.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 1,
+                resource: pos_out.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 2,
+                resource: hash_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 3,
+                resource: param_buf.as_entire_binding(),
+            },
+        ],
+    });
+
+    let out_stage = device.create_buffer(&BufferDescriptor {
+        label: Some("pbf_out_stage"),
+        size: vec4_bytes,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("pbf_parity_encoder"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("pbf_parity_pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups((count as u32).div_ceil(64), 1, 1);
+    }
+    encoder.copy_buffer_to_buffer(&pos_out, 0, &out_stage, 0, vec4_bytes);
+    queue.submit([encoder.finish()]);
+
+    out_stage.slice(..).map_async(MapMode::Read, |_| {});
+    device
+        .poll(PollType::wait_indefinitely())
+        .expect("device poll should complete the submitted work");
+
+    let view = out_stage
+        .slice(..)
+        .get_mapped_range()
+        .expect("mapped readback range should be available after poll");
+    let values: Vec<[f32; 4]> = bytemuck::cast_slice::<u8, [f32; 4]>(&view).to_vec();
+    drop(view);
+    out_stage.unmap();
+    values
+}
+
+/// One on-device `PBF` density solve must match the `CPU` golden within
+/// `float32` rounding.
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice must reach the test log on hosts without a wgpu adapter"
+)]
+fn pbf_density_solve_gpu_matches_cpu_golden() {
+    let Some((device, queue)) = try_solver_device() else {
+        eprintln!(
+            "pbf_density_solve_gpu_matches_cpu_golden: no wgpu adapter, skipping on-device parity"
+        );
+        return;
+    };
+
+    let cell_size = 1.0_f32;
+    let grid = PbfGrid {
+        origin: Vec3::ZERO,
+        cell_size,
+        nx: 4,
+        ny: 4,
+        nz: 4,
+    };
+    let cpu_params = PbfParams {
+        rest_density: 20.0,
+        particle_mass: 1.0,
+        smoothing_radius: cell_size,
+        relaxation_epsilon: 0.01,
+        artificial_pressure_k: 0.1,
+        artificial_pressure_n: 4,
+        artificial_pressure_delta_q: 0.2,
+        solver_iterations: 1,
+    };
+
+    let (positions, carried) = build_pbf_particles();
+    let count = positions.len();
+    let golden = pbf_golden(&positions, &carried, grid, cpu_params);
+
+    let positions_in: Vec<[f32; 4]> = positions
+        .iter()
+        .zip(&carried)
+        .map(|(p, &w)| [p.x, p.y, p.z, w])
+        .collect();
+    let hash = build_pbf_hash(grid, &positions);
+
+    let params = GpuPbfParams {
+        grid_origin: [grid.origin.x, grid.origin.y, grid.origin.z],
+        cell_size,
+        rest_density: cpu_params.rest_density,
+        particle_mass: cpu_params.particle_mass,
+        smoothing_radius: cpu_params.smoothing_radius,
+        relaxation_epsilon: cpu_params.relaxation_epsilon,
+        artificial_pressure_k: cpu_params.artificial_pressure_k,
+        artificial_pressure_delta_q: cpu_params.artificial_pressure_delta_q,
+        artificial_pressure_n: cpu_params.artificial_pressure_n,
+        particle_count: count as u32,
+        grid_nx: grid.nx,
+        grid_ny: grid.ny,
+        grid_nz: grid.nz,
+        _pad: 0,
+    };
+
+    let wgsl = compile_pbf_wgsl();
+    let entry = find_entry_point(&wgsl, "pbf_density_solve");
+    let gpu = dispatch_pbf(
+        &device,
+        &queue,
+        &wgsl,
+        &entry,
+        &positions_in,
+        &hash,
+        &params,
+    );
+
+    assert_eq!(gpu.len(), golden.len(), "particle count mismatch");
+    let mut i = 0;
+    while i < golden.len() {
+        let dx = (gpu[i][0] - golden[i][0]).abs();
+        let dy = (gpu[i][1] - golden[i][1]).abs();
+        let dz = (gpu[i][2] - golden[i][2]).abs();
+        let dw = (gpu[i][3] - golden[i][3]).abs();
+        assert!(
+            dx < PARITY_EPS && dy < PARITY_EPS && dz < PARITY_EPS && dw < PARITY_EPS,
+            "particle {i}: gpu={:?} cpu={:?} |d|=({dx}, {dy}, {dz}, {dw})",
+            gpu[i],
+            golden[i],
+        );
+        i += 1;
+    }
+}
