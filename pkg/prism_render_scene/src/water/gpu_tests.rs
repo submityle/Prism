@@ -4600,3 +4600,430 @@ fn flip_g2p_gpu_matches_cpu_golden() {
         p += 1;
     }
 }
+
+// ===========================================================================
+// Kernel 14: water_surface_reconstruct (screen-space FLIP surface) — the
+// `van der Laan` bilateral depth smooth + view-space normal reconstruction
+// half of the surface path in `water_flip.wesl`. One invocation per pixel; it
+// writes `(normal.xyz, smoothed_depth)` into an `rgba16float` storage texture.
+// ===========================================================================
+
+use super::abi::GpuFlipSurfaceParams;
+
+/// Sentinel depth marking a pixel with no splatted fluid; mirrors
+/// `FLIP_DEPTH_FAR` in `water_flip.wesl`.
+const FLIP_DEPTH_FAR: f32 = 1.0e30;
+/// `f16` write path tolerance: `rgba16float` storage carries ~10 mantissa bits,
+/// so unit normals and small depths quantise to ~5e-4; the bilateral `exp`
+/// weights (Metal `exp` versus `bevy_math::ops::exp`) cancel under
+/// normalisation, leaving quantisation as the dominant term. `4e-3` bounds it.
+const RECON_EPS: f32 = 4.0e-3;
+
+/// Builds a deterministic screen tile for the surface reconstruction parity:
+/// a smooth splatted-depth ramp in `1.0..~1.34 m` punched through with a few
+/// background pixels (no fluid). The vertical stripe at `x == 15` exercises the
+/// background return, the neighbour `continue` inside the bilateral window, and
+/// the right/up neighbour fall-back when a differencing neighbour is
+/// background; the far corner adds an edge background so the `x`/`y` edge
+/// fall-backs read a `>= FLIP_DEPTH_FAR` neighbour too. Returns the packed
+/// per-pixel `(surface_depth, surface_thickness)` fields.
+fn surface_reconstruct_field(width: u32, height: u32) -> (Vec<f32>, Vec<f32>) {
+    let n = (width * height) as usize;
+    let mut depth = vec![0.0_f32; n];
+    let mut thickness = vec![0.0_f32; n];
+    let mut y = 0u32;
+    while y < height {
+        let mut x = 0u32;
+        while x < width {
+            let idx = (y * width + x) as usize;
+            let background = x == 15 || (x == 5 && y == 2) || (x == width - 1 && y == height - 1);
+            if background {
+                depth[idx] = FLIP_DEPTH_FAR;
+                thickness[idx] = 0.0;
+            } else {
+                depth[idx] = 1.0 + 0.01 * (x as f32) + 0.005 * (y as f32);
+                thickness[idx] = 0.5 + 0.01 * (x as f32);
+            }
+            x += 1;
+        }
+        y += 1;
+    }
+    (depth, thickness)
+}
+
+/// `CPU` golden for `water_surface_reconstruct`: a line-for-line replica of the
+/// shader. Background pixels emit the flat `(0, 0, 1, FLIP_DEPTH_FAR)` default;
+/// every other pixel bilaterally smooths the depth (spatial Gaussian times a
+/// range Gaussian on the depth delta, background samples skipped), reconstructs
+/// the view-space normal from the smoothed depth's screen-space finite
+/// differences (`van der Laan`), normalises, and faces the camera. The `exp` is
+/// the crate's `libm`-backed [`bevy_math::ops::exp`], matching the shader's raw
+/// `exp` closely enough that the normalised smooth lands well inside
+/// [`RECON_EPS`].
+fn surface_reconstruct_golden(
+    depth: &[f32],
+    _thickness: &[f32],
+    params: &GpuFlipSurfaceParams,
+) -> Vec<[f32; 4]> {
+    let width = params.resolution[0];
+    let height = params.resolution[1];
+    let eps = 1.0e-6_f32;
+    let radius = params.filter_radius.clamp(0, 8);
+    let spatial = params.spatial_sigma2.max(eps);
+    let range = params.range_sigma2.max(eps);
+    let half_res = [width as f32 * 0.5, height as f32 * 0.5];
+    let mut out = vec![[0.0_f32; 4]; (width * height) as usize];
+
+    let mut gy = 0u32;
+    while gy < height {
+        let mut gx = 0u32;
+        while gx < width {
+            let center_idx = (gy * width + gx) as usize;
+            let center_depth = depth[center_idx];
+            if center_depth >= FLIP_DEPTH_FAR {
+                out[center_idx] = [0.0, 0.0, 1.0, FLIP_DEPTH_FAR];
+                gx += 1;
+                continue;
+            }
+
+            let cxi = gx as i32;
+            let cyi = gy as i32;
+            let mut depth_sum = 0.0_f32;
+            let mut weight_sum = 0.0_f32;
+            let mut dy = -radius;
+            while dy <= radius {
+                let mut dx = -radius;
+                while dx <= radius {
+                    let sx = cxi + dx;
+                    let sy = cyi + dy;
+                    if sx < 0 || sy < 0 || sx >= width as i32 || sy >= height as i32 {
+                        dx += 1;
+                        continue;
+                    }
+                    let sample_depth = depth[(sy as u32 * width + sx as u32) as usize];
+                    if sample_depth >= FLIP_DEPTH_FAR {
+                        dx += 1;
+                        continue;
+                    }
+                    let spatial_d = (dx * dx + dy * dy) as f32;
+                    let range_d = sample_depth - center_depth;
+                    let sw = bevy_math::ops::exp(-spatial_d / spatial)
+                        * bevy_math::ops::exp(-(range_d * range_d) / range);
+                    depth_sum += sample_depth * sw;
+                    weight_sum += sw;
+                    dx += 1;
+                }
+                dy += 1;
+            }
+            let mut smoothed = center_depth;
+            if weight_sum > eps {
+                smoothed = depth_sum / weight_sum;
+            }
+
+            let cx = gx as f32 + 0.5;
+            let cy = gy as f32 + 0.5;
+            let view_position = |px: f32, py: f32, d: f32| -> [f32; 3] {
+                let scale = params.pixel_world_scale * d;
+                [(px - half_res[0]) * scale, (py - half_res[1]) * scale, d]
+            };
+            let center_pos = view_position(cx, cy, smoothed);
+
+            let mut depth_r = smoothed;
+            if cxi + 1 < width as i32 {
+                let d = depth[center_idx + 1];
+                if d < FLIP_DEPTH_FAR {
+                    depth_r = d;
+                }
+            }
+            let mut depth_u = smoothed;
+            if cyi + 1 < height as i32 {
+                let d = depth[((gy + 1) * width + gx) as usize];
+                if d < FLIP_DEPTH_FAR {
+                    depth_u = d;
+                }
+            }
+            let pos_r = view_position(cx + 1.0, cy, depth_r);
+            let pos_u = view_position(cx, cy + 1.0, depth_u);
+            let ddx = [
+                pos_r[0] - center_pos[0],
+                pos_r[1] - center_pos[1],
+                pos_r[2] - center_pos[2],
+            ];
+            let ddy = [
+                pos_u[0] - center_pos[0],
+                pos_u[1] - center_pos[1],
+                pos_u[2] - center_pos[2],
+            ];
+            let mut normal = [
+                ddx[1] * ddy[2] - ddx[2] * ddy[1],
+                ddx[2] * ddy[0] - ddx[0] * ddy[2],
+                ddx[0] * ddy[1] - ddx[1] * ddy[0],
+            ];
+            let len_sq = normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2];
+            if len_sq > eps {
+                let inv_len = len_sq.sqrt();
+                normal = [
+                    normal[0] / inv_len,
+                    normal[1] / inv_len,
+                    normal[2] / inv_len,
+                ];
+            } else {
+                normal = [0.0, 0.0, 1.0];
+            }
+            if normal[2] < 0.0 {
+                normal = [-normal[0], -normal[1], -normal[2]];
+            }
+            // Coverage `select` in the shader is a no-op (`depth_out == smoothed`).
+            out[center_idx] = [normal[0], normal[1], normal[2], smoothed];
+            gx += 1;
+        }
+        gy += 1;
+    }
+    out
+}
+
+/// Dispatches one `water_surface_reconstruct` on device and reads back the
+/// decoded `rgba16float` surface texture as packed `(nx, ny, nz, depth)` texels.
+///
+/// The kernel only touches `group(0)` bindings `5..=8`, so the bind group is
+/// built straight from the pipeline's reflected auto layout (sparse bindings,
+/// same as the `P2G`/`G2P` paths). `width == 32` makes the `rgba16float` row
+/// `32 * 8 == 256` bytes, already `256`-aligned, so the read-back needs no row
+/// padding.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one linear dispatch-and-readback keeps the parity path auditable"
+)]
+fn dispatch_surface_reconstruct(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    wgsl: &str,
+    entry: &str,
+    depth: &[f32],
+    thickness: &[f32],
+    params: &GpuFlipSurfaceParams,
+) -> Vec<[f32; 4]> {
+    let width = params.resolution[0];
+    let height = params.resolution[1];
+
+    let module = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("water_flip_surface_reconstruct_parity"),
+        source: ShaderSource::Wgsl(wgsl.into()),
+    });
+    let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("water_surface_reconstruct_parity"),
+        layout: None,
+        module: &module,
+        entry_point: Some(entry),
+        compilation_options: PipelineCompilationOptions::default(),
+        cache: None,
+    });
+    let layout = pipeline.get_bind_group_layout(0);
+
+    let depth_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("surface_depth"),
+        contents: bytemuck::cast_slice(depth),
+        usage: BufferUsages::STORAGE,
+    });
+    let thickness_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("surface_thickness"),
+        contents: bytemuck::cast_slice(thickness),
+        usage: BufferUsages::STORAGE,
+    });
+    let params_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("surface_params"),
+        contents: bytemuck::bytes_of(params),
+        usage: BufferUsages::UNIFORM,
+    });
+    let out_tex = device.create_texture(&TextureDescriptor {
+        label: Some("surface_normal_tex"),
+        size: Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: TextureFormat::Rgba16Float,
+        usage: TextureUsages::STORAGE_BINDING | TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let out_view = out_tex.create_view(&TextureViewDescriptor::default());
+
+    let bind_group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("surface_reconstruct_bind_group"),
+        layout: &layout,
+        entries: &[
+            BindGroupEntry {
+                binding: 5,
+                resource: depth_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 6,
+                resource: thickness_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 7,
+                resource: BindingResource::TextureView(&out_view),
+            },
+            BindGroupEntry {
+                binding: 8,
+                resource: params_buf.as_entire_binding(),
+            },
+        ],
+    });
+
+    let row_bytes = width * 8;
+    let tex_bytes = u64::from(row_bytes * height);
+    let tex_stage = device.create_buffer(&BufferDescriptor {
+        label: Some("surface_tex_stage"),
+        size: tex_bytes,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("surface_reconstruct_parity_encoder"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("surface_reconstruct_parity_pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        // One extra workgroup per axis exercises the in-kernel bounds guard.
+        pass.dispatch_workgroups(width.div_ceil(8) + 1, height.div_ceil(8) + 1, 1);
+    }
+    encoder.copy_texture_to_buffer(
+        TexelCopyTextureInfo {
+            texture: &out_tex,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: TextureAspect::All,
+        },
+        TexelCopyBufferInfo {
+            buffer: &tex_stage,
+            layout: TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row_bytes),
+                rows_per_image: Some(height),
+            },
+        },
+        Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit([encoder.finish()]);
+
+    tex_stage.slice(..).map_async(MapMode::Read, |_| {});
+    device
+        .poll(PollType::wait_indefinitely())
+        .expect("device poll should complete the submitted work");
+
+    let tex_view = tex_stage
+        .slice(..)
+        .get_mapped_range()
+        .expect("mapped surface texture should be available after poll");
+    let halves = bytemuck::cast_slice::<u8, u16>(&tex_view).to_vec();
+    drop(tex_view);
+    tex_stage.unmap();
+
+    halves
+        .chunks_exact(4)
+        .map(|texel| {
+            [
+                f16_bits_to_f32(texel[0]),
+                f16_bits_to_f32(texel[1]),
+                f16_bits_to_f32(texel[2]),
+                f16_bits_to_f32(texel[3]),
+            ]
+        })
+        .collect()
+}
+
+/// Real-device parity for `water_surface_reconstruct`: reconstruct a screen
+/// tile of splatted fluid depth on device and match the decoded
+/// `rgba16float` `(normal.xyz, smoothed_depth)` texels to the golden. Fluid
+/// pixels compare all four lanes within [`RECON_EPS`]; background pixels compare
+/// the flat `(0, 0, 1)` normal and assert the depth saturates to the `f16`
+/// ceiling (the `FLIP_DEPTH_FAR` sentinel exceeds the `f16` range, so the
+/// driver clamps it to the largest finite `f16`, 65504).
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice must reach the test log on hosts without a wgpu adapter"
+)]
+fn surface_reconstruct_gpu_matches_cpu_golden() {
+    let Some((device, queue)) = try_solver_device() else {
+        eprintln!(
+            "surface_reconstruct_gpu_matches_cpu_golden: no wgpu adapter, skipping on-device parity"
+        );
+        return;
+    };
+
+    let width = 32u32;
+    let height = 8u32;
+    let params = GpuFlipSurfaceParams {
+        resolution: [width, height],
+        filter_radius: 2,
+        spatial_sigma2: 4.0,
+        range_sigma2: 0.5,
+        pixel_world_scale: 0.01,
+        _pad: [0, 0],
+    };
+
+    let (depth, thickness) = surface_reconstruct_field(width, height);
+    let golden = surface_reconstruct_golden(&depth, &thickness, &params);
+
+    let wgsl = compile_flip_wgsl();
+    let entry = find_entry_point(&wgsl, "water_surface_reconstruct");
+    let gpu =
+        dispatch_surface_reconstruct(&device, &queue, &wgsl, &entry, &depth, &thickness, &params);
+
+    assert_eq!(gpu.len(), golden.len(), "surface texel count mismatch");
+
+    let mut i = 0usize;
+    while i < golden.len() {
+        let g = gpu[i];
+        let c = golden[i];
+        if c[3] >= FLIP_DEPTH_FAR {
+            // Background: flat default normal, saturated far depth.
+            let mut k = 0usize;
+            while k < 3 {
+                let d = (g[k] - c[k]).abs();
+                assert!(
+                    d < RECON_EPS,
+                    "bg texel {i} normal[{k}]: gpu={} cpu={} |d|={d}",
+                    g[k],
+                    c[k],
+                );
+                k += 1;
+            }
+            // The `FLIP_DEPTH_FAR` (1e30) write exceeds the `f16` range; the
+            // driver either saturates to the largest finite `f16` (65504) or
+            // overflows to `inf` (decoded to `f32::MAX`). Both clear this bar.
+            assert!(
+                g[3] >= 65504.0,
+                "bg texel {i} depth must saturate to the f16 ceiling, got {}",
+                g[3],
+            );
+        } else {
+            let mut k = 0usize;
+            while k < 4 {
+                let d = (g[k] - c[k]).abs();
+                assert!(
+                    d < RECON_EPS,
+                    "texel {i} lane[{k}]: gpu={} cpu={} |d|={d}",
+                    g[k],
+                    c[k],
+                );
+                k += 1;
+            }
+        }
+        i += 1;
+    }
+}
