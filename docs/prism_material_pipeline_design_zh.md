@@ -398,6 +398,8 @@ fallback:              strand 高配, card 基线; RT 反射里毛发用 proxy �
 
 **结论**：`raw_vulkan_init` 必须被关进"明确非可移植、明确无 CPU golden 覆盖"的小笼子，单独配 GPU-only 抓帧 diff 的验证策略，**不得当通用兜底污染主线**。要不要为某个 raw-VK 特性付这笔"双失"代价，取决于它是否为核心野心——**大多数野心效果是 compute，落在第一桶，根本用不到这个逃生舱**。
 
+**实装现状（对齐 committed 代码，勿误读为已接线）**：第三桶 `raw_vulkan_init` / hal 注入路径在 Prism 的 `pkg/prism_render_architecture/src/backend/` 里**零代码**——`capability.rs::Capability` 只枚举第一、二桶的 6 个能力位（`Compute` baseline + 5 个类型化 wgpu 扩展：`BindlessDescriptors`/`IndirectDrawCount`/`MeshShading`/`RayQuery`/`RayTracingPipeline`），**没有 SPARSE/TILED、SHADING_RATE/VRS、WORK_GRAPH 的能力位，也没有 `as_hal`/`create_device_from_hal`/`AdditionalVulkanFeatures` 任何 hal 下探**（实测 `git grep raw_vulkan|as_hal|create_device_from_hal|AdditionalVulkan pkg/` 零命中）。即：能力协商层已 committed 落地的是**第一、二桶**（baseline + 类型化扩展 fallback，§9 第 5 项）；第三桶是**记录在案但刻意不实装**的逃生舱设计——仅当某个 raw-VK 野心真的立项时才经 Bevy/wgpu 上游 hal 回调接入，届时须同时接受「丢跨平台 + 丢 CPU golden」并单配抓帧 diff 验证。当前无此需求，故 backend crate 不含任何 hal 代码，符合「大多数野心是 compute、用不到逃生舱」的判断。
+
 ---
 
 ## 9. 代码层破坏性重构清单（可编译可测每步）
