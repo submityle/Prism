@@ -86,28 +86,67 @@ fn gamut_map_apply(rgb: vec3<f32>, params: GamutMapParams) -> vec3<f32> {
     return rgb + (compressed - rgb) * t;
 }
 
-// Minimal entry so the module type-checks as a standalone compute kernel under
-// the WESL compile test; the real gamut-map pass wires the HDR target and the
-// params uniform later. References every function so none drifts unused.
-@compute @workgroup_size(64, 1, 1)
-fn gamut_map_probe(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let seed = f32(gid.x) * 0.01;
-    let rgb = vec3<f32>(1.4 + seed, 0.5, -0.2);
+// Immediate (push-constant) block: the golden per-channel `threshold`/`limit`
+// and the reserved `power` exponent packed into `vec4` lanes (WGSL gives `vec4`
+// a 16-byte alignment, so packing the scalars into the free `w` lane avoids the
+// implicit padding a bare `vec3` would force), plus the framebuffer extent and a
+// device-only global `scale`. Mirrors the Rust `GpuGamutMapParams` field-for-
+// field (48 bytes).
+struct GpuGamutMapParams {
+    // xyz = per-channel distance threshold (the working gamut), w = the reserved
+    // perceptual power exponent.
+    threshold_power: vec4<f32>,
+    // xyz = per-channel asymptotic limit (the gamut boundary target), w = the
+    // device-only global scale in [0, 1].
+    limit_scale: vec4<f32>,
+    // Full-resolution framebuffer extent in texels.
+    screen_size: vec2<u32>,
+    // Explicit tail padding so the block is a multiple of 16 bytes.
+    _pad: vec2<u32>,
+}
 
-    let lum = gamut_map_luminance(rgb);
-    let mx = gamut_map_max_channel(rgb);
-    let mn = gamut_map_min_channel(rgb);
-    let ac = gamut_map_achromatic(rgb);
-    let dist = gamut_map_distance_from_achromatic(rgb, ac);
-    let cd = gamut_map_compress_distance(dist.z, 0.6, 1.0);
-    let cl = gamut_map_clamp01(seed);
+// The pre-exposed, resolved linear HDR scene colour this pass maps.
+@group(0) @binding(0) var gamut_map_scene_color: texture_2d<f32>;
+// The compressed HDR output; copied back over `scene_color` after the dispatch.
+@group(0) @binding(1) var gamut_map_out: texture_storage_2d<rgba16float, write>;
 
+var<immediate> gamut_map_immediate: GpuGamutMapParams;
+
+// Repack the immediate block into the golden `GamutMapParams` the maths twin
+// consumes, so the on-device evaluation is arm-for-arm identical to the CPU
+// reference. `enabled` is hard-set to 1: the dispatch only runs when the host
+// enabled the pass, and the device-only `scale` (applied on top) is the sole
+// non-golden control that fades the compression back toward the input.
+fn gamut_map_params_from_immediate() -> GamutMapParams {
     var params: GamutMapParams;
-    params.threshold = vec3<f32>(0.6, 0.6, 0.6);
-    params.limit = vec3<f32>(1.0, 1.0, 1.0);
-    params.power = 1.0;
+    params.threshold = gamut_map_immediate.threshold_power.xyz;
+    params.limit = gamut_map_immediate.limit_scale.xyz;
+    params.power = gamut_map_immediate.threshold_power.w;
     params.enabled = 1u;
-    let mapped = gamut_map_apply(rgb, params);
+    return params;
+}
 
-    _ = lum + mx + mn + ac + dist.x + cd + cl + mapped.x + params.power;
+// One invocation per pixel. Evaluates the golden gamut compression on the linear
+// HDR radiance, fades it toward identity by the global `scale` and writes the
+// compressed HDR texel (alpha preserved). Compression runs in the scene-referred
+// linear domain, exactly like the golden.
+@compute @workgroup_size(8, 8, 1)
+fn gamut_map_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let width = i32(gamut_map_immediate.screen_size.x);
+    let height = i32(gamut_map_immediate.screen_size.y);
+    let pc = vec2<i32>(i32(gid.x), i32(gid.y));
+    if (pc.x >= width || pc.y >= height) {
+        return;
+    }
+
+    let sample = textureLoad(gamut_map_scene_color, pc, 0);
+
+    let params = gamut_map_params_from_immediate();
+    let mapped = gamut_map_apply(sample.rgb, params);
+    // Fade the compression toward identity (the input) by the global scale;
+    // scale = 1 is the exact golden map, scale = 0 disables the effect per-pixel.
+    let scale = clamp(gamut_map_immediate.limit_scale.w, 0.0, 1.0);
+    let out_rgb = sample.rgb + (mapped - sample.rgb) * scale;
+
+    textureStore(gamut_map_out, pc, vec4<f32>(out_rgb, sample.a));
 }

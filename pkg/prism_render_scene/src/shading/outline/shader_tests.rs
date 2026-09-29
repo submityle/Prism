@@ -50,3 +50,15 @@ fn outline_wesl_compiles_standalone() {
         .get(0, outline, &[])
         .unwrap_or_else(|error| panic!("outline.wesl failed to compile: {error}"));
 }
+
+/// Guards the Rust immediate-block ABI against drift from the WESL struct: the
+/// single `GpuOutlineParams` block is the 112-byte matrix-led block matching
+/// `outline.wesl`'s one `var<immediate>` global, and the workgroup constant
+/// matches `@workgroup_size(8, 8, 1)`.
+#[test]
+fn outline_abi_matches_the_shader_layout() {
+    use super::abi::{GpuOutlineParams, OUTLINE_WORKGROUP_SIZE};
+    assert_eq!(size_of::<GpuOutlineParams>(), 112);
+    assert_eq!(align_of::<GpuOutlineParams>(), 4);
+    assert_eq!(OUTLINE_WORKGROUP_SIZE, 8);
+}

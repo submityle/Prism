@@ -50,3 +50,15 @@ fn cas_wesl_compiles_standalone() {
         .get(0, cas, &[])
         .unwrap_or_else(|error| panic!("cas.wesl failed to compile: {error}"));
 }
+
+/// Guards the Rust immediate-block ABI against drift from the WESL struct: the
+/// single `GpuCasParams` block is the 16-byte `vec2<u32>`-led block matching
+/// `cas.wesl`'s one `var<immediate>` global, and the workgroup constant matches
+/// `@workgroup_size(8, 8, 1)`.
+#[test]
+fn cas_abi_matches_the_shader_layout() {
+    use super::abi::{GpuCasParams, CAS_WORKGROUP_SIZE};
+    assert_eq!(size_of::<GpuCasParams>(), 16);
+    assert_eq!(align_of::<GpuCasParams>(), 4);
+    assert_eq!(CAS_WORKGROUP_SIZE, 8);
+}

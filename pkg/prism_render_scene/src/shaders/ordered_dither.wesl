@@ -57,22 +57,58 @@ fn ordered_dither_apply(scene: vec3<f32>, px: u32, py: u32, params: OrderedDithe
     return select(scene, mixed, params.enabled != 0u);
 }
 
-// Minimal entry so the module type-checks as a standalone compute kernel under
-// the WESL compile test; the real dither pass wires the target and the params
-// uniform later. References every helper once so none drifts unused.
-@compute @workgroup_size(64, 1, 1)
-fn ordered_dither_probe(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let seed = f32(gid.x) * 0.01;
-    let scene = vec3<f32>(0.15 + seed, 0.4, 0.85);
+// Immediate (push-constant) block: the framebuffer extent (leading for its
+// 8-byte alignment, and used to bounds-check each invocation) followed by the
+// golden `levels` palette size and `strength` blend weight. Mirrors the Rust
+// `GpuOrderedDitherParams` field-for-field (16 bytes, no implicit padding).
+struct GpuOrderedDitherParams {
+    // Full-resolution framebuffer extent in texels.
+    screen_size: vec2<u32>,
+    // Number of discrete quantisation steps per channel (golden `levels`).
+    levels: u32,
+    // Blend weight of the dithered result over the input (golden `strength`).
+    strength: f32,
+}
 
-    let t = ordered_dither_bayer4x4_threshold(gid.x, gid.y);
-    let q = ordered_dither_quantize(scene.x + seed, 4u);
+// The pre-exposed, resolved linear HDR scene colour this pass dithers.
+@group(0) @binding(0) var ordered_dither_scene_color: texture_2d<f32>;
+// The dithered HDR output; copied back over `scene_color` after the dispatch.
+@group(0) @binding(1) var ordered_dither_out: texture_storage_2d<rgba16float, write>;
 
+var<immediate> ordered_dither_immediate: GpuOrderedDitherParams;
+
+// Repack the immediate block into the golden `OrderedDitherParams` the maths
+// twin consumes, so the on-device evaluation is arm-for-arm identical to the
+// CPU reference. `enabled` is hard-set to 1: the dispatch only runs when the
+// host enabled the pass.
+fn ordered_dither_params_from_immediate() -> OrderedDitherParams {
     var params: OrderedDitherParams;
-    params.levels = 4u;
-    params.strength = 1.0;
-    params.enabled = 0u;
-    let out = ordered_dither_apply(scene, gid.x, gid.y, params);
+    params.levels = ordered_dither_immediate.levels;
+    params.strength = ordered_dither_immediate.strength;
+    params.enabled = 1u;
+    return params;
+}
 
-    _ = t + q + out.x + f32(params.levels) + params.strength;
+// One invocation per pixel. Evaluates the golden ordered dither on the linear
+// HDR radiance, indexing the Bayer matrix by the integer pixel coordinates
+// (`gid.xy`) exactly as the CPU golden takes `px` / `py`, and writes the
+// dithered HDR texel (alpha preserved). Runs in the scene-referred linear
+// domain to match the current pre-tonemap post chain, exactly like the golden.
+@compute @workgroup_size(8, 8, 1)
+fn ordered_dither_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let width = i32(ordered_dither_immediate.screen_size.x);
+    let height = i32(ordered_dither_immediate.screen_size.y);
+    let pc = vec2<i32>(i32(gid.x), i32(gid.y));
+    if (pc.x >= width || pc.y >= height) {
+        return;
+    }
+
+    let sample = textureLoad(ordered_dither_scene_color, pc, 0);
+
+    let params = ordered_dither_params_from_immediate();
+    // The Bayer matrix is indexed by the unsigned pixel coordinates so the
+    // dither pattern tiles every 4 texels, matching the CPU golden's px / py.
+    let dithered = ordered_dither_apply(sample.rgb, gid.x, gid.y, params);
+
+    textureStore(ordered_dither_out, pc, vec4<f32>(dithered, sample.a));
 }

@@ -51,3 +51,15 @@ fn hatching_wesl_compiles_standalone() {
         .get(0, hatching, &[])
         .unwrap_or_else(|error| panic!("hatching.wesl failed to compile: {error}"));
 }
+
+/// Guards the Rust immediate-block ABI against drift from the WESL struct: the
+/// single `GpuHatchingParams` block is the 48-byte extent-led block matching
+/// `hatching.wesl`'s one `var<immediate>` global, and the workgroup constant
+/// matches `@workgroup_size(8, 8, 1)`.
+#[test]
+fn hatching_abi_matches_the_shader_layout() {
+    use super::abi::{GpuHatchingParams, HATCHING_WORKGROUP_SIZE};
+    assert_eq!(size_of::<GpuHatchingParams>(), 48);
+    assert_eq!(align_of::<GpuHatchingParams>(), 4);
+    assert_eq!(HATCHING_WORKGROUP_SIZE, 8);
+}

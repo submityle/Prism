@@ -18,5 +18,18 @@
 //! dead, matching the SSR / SSGI / exposure / bloom / colour-grade / gamut-map
 //! precedent.
 
+mod abi;
+mod bind_groups;
+mod dispatch;
+mod pipeline;
+mod resources;
+mod settings;
+
+pub(crate) use bind_groups::prepare_posterize_bind_groups;
+pub(crate) use dispatch::posterize_pass;
+pub(crate) use pipeline::init_posterize_pipeline;
+pub(crate) use resources::prepare_posterize_textures;
+pub(crate) use settings::PrismPosterizeSettings;
+
 #[cfg(test)]
 mod shader_tests;

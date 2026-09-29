@@ -14,5 +14,18 @@
 //! its insertion into the post chain — each with its first live consumer so no
 //! committed ABI is dead, matching the color-grade / vignette precedent.
 
+mod abi;
+mod bind_groups;
+mod dispatch;
+mod pipeline;
+mod resources;
+mod settings;
+
+pub(crate) use bind_groups::prepare_halftone_bind_groups;
+pub(crate) use dispatch::halftone_pass;
+pub(crate) use pipeline::init_halftone_pipeline;
+pub(crate) use resources::prepare_halftone_textures;
+pub(crate) use settings::PrismHalftoneSettings;
+
 #[cfg(test)]
 mod shader_tests;

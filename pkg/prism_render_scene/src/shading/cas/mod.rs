@@ -15,5 +15,18 @@
 //! its first live consumer so no committed ABI is dead, matching the
 //! `SSR` / `SSGI` / exposure / bloom precedent.
 
+mod abi;
+mod bind_groups;
+mod dispatch;
+mod pipeline;
+mod resources;
+mod settings;
+
+pub(crate) use bind_groups::prepare_cas_bind_groups;
+pub(crate) use dispatch::cas_pass;
+pub(crate) use pipeline::init_cas_pipeline;
+pub(crate) use resources::prepare_cas_textures;
+pub(crate) use settings::PrismCasSettings;
+
 #[cfg(test)]
 mod shader_tests;

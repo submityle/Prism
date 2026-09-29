@@ -128,38 +128,144 @@ struct LensFlareParams {
     distortion: f32,
 }
 
-// Minimal entry so the module type-checks as a standalone compute kernel under
-// the WESL compile test; the real flare pass wires the HDR target and the
-// params uniform later. References every helper once so none drifts unused.
-@compute @workgroup_size(64, 1, 1)
-fn lens_flare_probe(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let seed = f32(gid.x) * 0.01;
-    let rgb = vec3<f32>(0.15 + seed, 0.4, 0.85);
-    let uv = vec2<f32>(0.2 + seed, 0.7);
+// ---------------------------------------------------------------------------
+// Device wiring: full-screen compute pass over the pre-exposed HDR scene colour.
+// ---------------------------------------------------------------------------
 
-    let lum = lens_flare_luminance(rgb);
-    let ss = lens_flare_smoothstep(0.0, 1.0, 0.5 + seed);
-    let mixed = lens_flare_mix(rgb, vec3<f32>(1.0, 0.5, 0.25), 0.5);
-    let pf = lens_flare_threshold_prefilter(rgb, 0.2);
-    let guv = lens_flare_ghost_uv(uv, 1.0, 0.6);
-    let huv = lens_flare_halo_uv(uv, 0.2);
-    let rw = lens_flare_radial_weight(uv);
-    let vw = lens_flare_vignette_weight(uv, 0.5);
-    let cro = lens_flare_chromatic_ghost_offset(uv, 0.3, 0u);
+// Immediate (push-constant) block driving the flare pass. Mirrors the Rust
+// `GpuLensFlareParams` byte-for-byte: the framebuffer extent leads (8-byte
+// aligned vec2<u32>), then the six golden `LensFlareParams` artist scalars.
+struct GpuLensFlareParams {
+    // Full-resolution framebuffer extent in texels.
+    screen_size: vec2<u32>,
+    // Number of ghost discs (golden `ghost_count`); the GPU twin caps the
+    // fan-out at four taps and masks beyond this count.
+    ghost_count: u32,
+    // Composite blend weight over the scene (golden `intensity`).
+    intensity: f32,
+    // Bright-tail luminance threshold (golden `threshold`).
+    threshold: f32,
+    // Ghost chain spacing toward the centre (golden `dispersal`).
+    dispersal: f32,
+    // Halo ring radial offset (golden `halo_width`).
+    halo_width: f32,
+    // Per-channel chromatic dispersion (golden `distortion`).
+    distortion: f32,
+}
 
-    let colors = array<vec3<f32>, 4>(pf, mixed, rgb, vec3<f32>(0.1, 0.2, 0.3));
-    let weights = array<f32, 4>(rw, vw, 0.25, 0.125);
-    let acc = lens_flare_accumulate_ghosts(colors, weights);
-    let composited = lens_flare_apply(rgb, acc, 0.0);
+// The pre-exposed, resolved linear HDR scene colour this pass reads.
+@group(0) @binding(0) var lens_flare_scene_color: texture_2d<f32>;
+// The flared HDR output; copied back over `scene_color` after the dispatch.
+@group(0) @binding(1) var lens_flare_out: texture_storage_2d<rgba16float, write>;
 
+var<immediate> lens_flare_params: GpuLensFlareParams;
+
+// Repack the immediate block into the golden `LensFlareParams` the maths twin
+// consumes, so the on-device evaluation is arm-for-arm identical to the CPU
+// reference.
+fn lens_flare_params_from_immediate() -> LensFlareParams {
     var params: LensFlareParams;
-    params.intensity = 0.0;
-    params.threshold = 0.0;
-    params.ghost_count = 0u;
-    params.dispersal = 0.0;
-    params.halo_width = 0.0;
-    params.distortion = 0.0;
+    params.intensity = lens_flare_params.intensity;
+    params.threshold = lens_flare_params.threshold;
+    params.ghost_count = lens_flare_params.ghost_count;
+    params.dispersal = lens_flare_params.dispersal;
+    params.halo_width = lens_flare_params.halo_width;
+    params.distortion = lens_flare_params.distortion;
+    return params;
+}
 
-    _ = lum + ss + mixed.x + pf.x + guv.x + huv.x + rw + vw + cro.x
-        + acc.x + composited.x + f32(params.ghost_count) + params.intensity;
+// Manual bilinear read of the scene colour at a normalised uv. The scene colour
+// is bound non-filterable (the ghost/halo taps land at fractional uv, so the
+// four-texel blend is done by hand with the golden `lens_flare_mix` lerp rather
+// than a hardware sampler). Out-of-frame taps clamp to the edge texel.
+fn lens_flare_sample(uv: vec2<f32>, size: vec2<u32>) -> vec3<f32> {
+    let dims = vec2<f32>(f32(size.x), f32(size.y));
+    let coord = uv * dims - vec2<f32>(0.5, 0.5);
+    let base = floor(coord);
+    let frac = coord - base;
+    let max_x = i32(size.x) - 1;
+    let max_y = i32(size.y) - 1;
+    let x0 = clamp(i32(base.x), 0, max_x);
+    let y0 = clamp(i32(base.y), 0, max_y);
+    let x1 = clamp(i32(base.x) + 1, 0, max_x);
+    let y1 = clamp(i32(base.y) + 1, 0, max_y);
+    let c00 = textureLoad(lens_flare_scene_color, vec2<i32>(x0, y0), 0).rgb;
+    let c10 = textureLoad(lens_flare_scene_color, vec2<i32>(x1, y0), 0).rgb;
+    let c01 = textureLoad(lens_flare_scene_color, vec2<i32>(x0, y1), 0).rgb;
+    let c11 = textureLoad(lens_flare_scene_color, vec2<i32>(x1, y1), 0).rgb;
+    let top = lens_flare_mix(c00, c10, frac.x);
+    let bottom = lens_flare_mix(c01, c11, frac.x);
+    return lens_flare_mix(top, bottom, frac.y);
+}
+
+// Sample one ghost tap with per-channel chromatic dispersion: red/green/blue are
+// each read at their own radial micro-offset (golden `chromatic_ghost_offset`),
+// so the disc fringes red/blue like real lens dispersion. distortion == 0
+// collapses all three offsets to `guv`.
+fn lens_flare_sample_dispersed(guv: vec2<f32>, distortion: f32, size: vec2<u32>) -> vec3<f32> {
+    let r_uv = lens_flare_chromatic_ghost_offset(guv, distortion, 0u);
+    let g_uv = lens_flare_chromatic_ghost_offset(guv, distortion, 1u);
+    let b_uv = lens_flare_chromatic_ghost_offset(guv, distortion, 2u);
+    let r = lens_flare_sample(r_uv, size).r;
+    let g = lens_flare_sample(g_uv, size).g;
+    let b = lens_flare_sample(b_uv, size).b;
+    return vec3<f32>(r, g, b);
+}
+
+// One invocation per pixel. Isolates the bright tail of the scene colour along
+// the four-tap ghost chain and the halo ring (each threshold-prefiltered and
+// radially weighted exactly like the golden), accumulates them with the golden
+// weighted sum and composites the flare additively over the scene by the artist
+// intensity. Alpha is preserved. Runs in the scene-referred linear HDR domain,
+// before the display tone-map curve, exactly like the golden.
+@compute @workgroup_size(8, 8, 1)
+fn lens_flare_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let size = lens_flare_params.screen_size;
+    let width = i32(size.x);
+    let height = i32(size.y);
+    let pc = vec2<i32>(i32(gid.x), i32(gid.y));
+    if (pc.x >= width || pc.y >= height) {
+        return;
+    }
+
+    let scene = textureLoad(lens_flare_scene_color, pc, 0);
+    let params = lens_flare_params_from_immediate();
+
+    let dims = vec2<f32>(f32(size.x), f32(size.y));
+    let uv = (vec2<f32>(f32(pc.x), f32(pc.y)) + vec2<f32>(0.5, 0.5)) / dims;
+
+    // Four-tap ghost chain: each disc is the bright tail sampled a `dispersal`
+    // step deeper toward the optical centre, weighted by the radial falloff and
+    // masked off past `ghost_count`. Fixed fan-out matching the GPU twin form of
+    // `lens_flare_accumulate_ghosts`.
+    var colors = array<vec3<f32>, 4>(
+        vec3<f32>(0.0, 0.0, 0.0),
+        vec3<f32>(0.0, 0.0, 0.0),
+        vec3<f32>(0.0, 0.0, 0.0),
+        vec3<f32>(0.0, 0.0, 0.0),
+    );
+    var weights = array<f32, 4>(0.0, 0.0, 0.0, 0.0);
+    for (var i = 0u; i < 4u; i = i + 1u) {
+        let guv = lens_flare_ghost_uv(uv, f32(i), params.dispersal);
+        let sampled = lens_flare_sample_dispersed(guv, params.distortion, size);
+        colors[i] = lens_flare_threshold_prefilter(sampled, params.threshold);
+        let ghost_mask = select(0.0, 1.0, i < params.ghost_count);
+        weights[i] = lens_flare_radial_weight(guv) * ghost_mask;
+    }
+    var flare = lens_flare_accumulate_ghosts(colors, weights);
+
+    // Halo ring: one bright-tail tap a fixed `halo_width` along the centre-facing
+    // unit vector, radially weighted like the ghosts.
+    let huv = lens_flare_halo_uv(uv, params.halo_width);
+    let halo_sample = lens_flare_sample(huv, size);
+    let halo_bright = lens_flare_threshold_prefilter(halo_sample, params.threshold);
+    flare = flare + halo_bright * lens_flare_radial_weight(huv);
+
+    // Vignette-fade the accumulated flare toward the frame edge before the
+    // additive composite so the artefacts never clip hard at the border (golden
+    // `vignette_weight`, full-strength radial edge darkening).
+    flare = flare * lens_flare_vignette_weight(uv, 1.0);
+
+    let out_rgb = lens_flare_apply(scene.rgb, flare, params.intensity);
+    textureStore(lens_flare_out, pc, vec4<f32>(out_rgb, scene.a));
 }

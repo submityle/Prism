@@ -83,29 +83,74 @@ fn halftone_apply(
     return mix(bg, fg, coverage);
 }
 
-// Minimal entry so the module type-checks as a standalone compute kernel under
-// the WESL compile test; the real halftone pass wires the HDR target and the
-// params uniform later. References every helper with fixed literal inputs.
-@compute @workgroup_size(64, 1, 1)
-fn halftone_probe(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let seed = f32(gid.x) * 0.001;
-    let scene = vec3<f32>(0.2 + seed, 0.5, 0.9);
-    let pos = vec2<f32>(8.0, 5.0);
+// ---------------------------------------------------------------------------
+// Device wiring: full-screen compute pass over the resolved HDR scene colour.
+// ---------------------------------------------------------------------------
+//
+// display-referred, stylized NPR filter (manga screentone). It conceptually
+// belongs after the display tone-map curve, but the current Prism chain defers
+// tone-mapping to a Bevy node after the MainPass, so every pre-MainPass consumer
+// (this one included) runs on linear HDR radiance. Placed as a pre-MainPass
+// linear consumer for chain consistency; may be repositioned once tone-map
+// ownership is decided.
+
+// Immediate (push-constant) block driving the halftone pass. Mirrors the Rust
+// GpuHalftoneParams byte-for-byte: the framebuffer extent leads (vec2<u32>,
+// 8-byte aligned), then the golden cell_size / angle scalars, the enable flag
+// and an explicit tail pad so the block is a multiple of 8 bytes (24), matching
+// the WGSL struct alignment the vec2<u32> forces.
+struct GpuHalftoneParams {
+    // Full-resolution framebuffer extent in texels.
+    screen_size: vec2<u32>,
+    // Side length of a screen cell, in pixels.
+    cell_size: f32,
+    // Rotation of the dot lattice, in radians.
+    angle: f32,
+    // Master enable; 0 passes the scene through (identity).
+    enabled: u32,
+    // Explicit tail pad so the block is a multiple of 8 bytes.
+    _pad: u32,
+}
+
+// The resolved linear HDR scene colour this pass reads (textureLoad-ed per
+// pixel).
+@group(0) @binding(0) var halftone_scene_color: texture_2d<f32>;
+// The stylized HDR output; copied back over scene_color after the dispatch.
+@group(0) @binding(1) var halftone_out: texture_storage_2d<rgba16float, write>;
+
+var<immediate> halftone_params: GpuHalftoneParams;
+
+// One invocation per pixel. Uses the pixel coordinate directly as the golden
+// screen_pos (the dot lattice is measured in pixels), composites the ink
+// (black) over paper (white) by the golden tone-driven dot coverage and writes
+// the result. Disabled pixels pass the scene through. Alpha is preserved. Runs
+// on the resolved HDR radiance, exactly like the golden.
+@compute @workgroup_size(8, 8, 1)
+fn halftone_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let width = i32(halftone_params.screen_size.x);
+    let height = i32(halftone_params.screen_size.y);
+    let pc = vec2<i32>(i32(gid.x), i32(gid.y));
+    if (pc.x >= width || pc.y >= height) {
+        return;
+    }
+
+    let scene = textureLoad(halftone_scene_color, pc, 0);
+
+    // Pixel coordinate is the golden screen_pos (cells are measured in pixels).
+    let screen_pos = vec2<f32>(f32(pc.x), f32(pc.y));
+
+    // Repack the immediate block into the golden HalftoneParams so the
+    // on-device evaluation is arm-for-arm identical to the CPU reference.
+    var params: HalftoneParams;
+    params.cell_size = halftone_params.cell_size;
+    params.angle = halftone_params.angle;
+    params.enabled = halftone_params.enabled;
+
+    // Ink over paper: black dots on a white ground, matching the golden fg/bg.
     let fg = vec3<f32>(0.0, 0.0, 0.0);
     let bg = vec3<f32>(1.0, 1.0, 1.0);
 
-    let luma = halftone_luminance(scene);
-    let rot = halftone_rotate2d(pos, 0.7853981633974483);
-    let local = halftone_cell_coord(rot, 10.0);
-    let radius = halftone_dot_radius_from_tone(luma);
-    let ss = halftone_smoothstep(0.0, 1.0, 0.5);
-    let cov = halftone_dot_coverage(length(local), radius * 10.0, 1.0);
+    let result = halftone_apply(scene.rgb, screen_pos, params, fg, bg);
 
-    var params: HalftoneParams;
-    params.cell_size = 10.0;
-    params.angle = 0.7853981633974483;
-    params.enabled = 1u;
-    let out = halftone_apply(scene, pos, params, fg, bg);
-
-    _ = luma + rot.x + local.x + radius + ss + cov + out.x;
+    textureStore(halftone_out, pc, vec4<f32>(result, scene.a));
 }

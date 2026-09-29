@@ -71,26 +71,55 @@ fn posterize_apply(rgb: vec3<f32>, params: PosterizeParams) -> vec3<f32> {
     return rgb + (base - rgb) * t;
 }
 
-// Minimal entry so the module type-checks as a standalone compute kernel under
-// the WESL compile test; the real posterize pass wires the HDR target and the
-// params uniform later. References every function so none drifts unused.
-@compute @workgroup_size(64, 1, 1)
-fn posterize_probe(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let seed = f32(gid.x) * 0.01;
-    let rgb = vec3<f32>(0.2 + seed, 0.55, 0.85);
+// --- Real full-screen compute entry -------------------------------------------
+// One invocation per output pixel: `textureLoad` the pre-exposed linear `HDR`
+// `scene_color` texel, run it through the golden `posterize_apply`, and write
+// the banded `rgb` to `posterize_out` with the source alpha preserved.
+//
+// Posterize is display-referred in spirit but is applied here in the
+// scene-referred linear domain before the display tone-map curve, consistent
+// with the current pipeline (tone-mapping is deferred to a post-`MainPass`
+// node); it may be repositioned once tone-map ownership is decided.
 
-    let lum = posterize_luminance(rgb);
-    let q = posterize_quantize(rgb.x, 4.0);
-    let qr = posterize_quantize_rgb(rgb, 4.0);
-    let ql = posterize_quantize_luma_preserving(rgb, 4.0);
+// Immediate (push-constant) block; mirrors `abi::GpuPosterizeParams`
+// byte-for-byte: `vec2<u32>` extent at offset 0, the three `f32` controls, the
+// two `u32` flags and a `u32` tail pad. 32 bytes.
+struct GpuPosterizeParams {
+    screen_size: vec2<u32>,
+    levels: f32,
+    luma_levels: f32,
+    strength: f32,
+    use_luma: u32,
+    enabled: u32,
+    _pad: u32,
+}
+
+var<immediate> posterize_params: GpuPosterizeParams;
+
+@group(0) @binding(0) var scene_color: texture_2d<f32>;
+@group(0) @binding(1) var posterize_out: texture_storage_2d<rgba16float, write>;
+
+// Workgroup size (per axis) of `posterize_main`; mirrors
+// `abi::POSTERIZE_WORKGROUP_SIZE`.
+const POSTERIZE_WG: u32 = 8u;
+
+@compute @workgroup_size(8, 8, 1)
+fn posterize_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= posterize_params.screen_size.x || gid.y >= posterize_params.screen_size.y) {
+        return;
+    }
+
+    let coord = vec2<i32>(i32(gid.x), i32(gid.y));
+    let texel = textureLoad(scene_color, coord, 0);
 
     var params: PosterizeParams;
-    params.levels = 4.0;
-    params.luma_levels = 4.0;
-    params.strength = 1.0;
-    params.use_luma = 0u;
-    params.enabled = 1u;
-    let mapped = posterize_apply(rgb, params);
+    params.levels = posterize_params.levels;
+    params.luma_levels = posterize_params.luma_levels;
+    params.strength = posterize_params.strength;
+    params.use_luma = posterize_params.use_luma;
+    params.enabled = posterize_params.enabled;
+    let rgb = posterize_apply(texel.rgb, params);
 
-    _ = lum + q + qr.x + ql.x + mapped.x + params.strength + f32(params.use_luma);
+    _ = POSTERIZE_WG;
+    textureStore(posterize_out, coord, vec4<f32>(rgb, texel.a));
 }

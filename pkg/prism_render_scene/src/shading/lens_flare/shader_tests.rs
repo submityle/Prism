@@ -52,3 +52,15 @@ fn lens_flare_wesl_compiles_standalone() {
         .get(0, lens_flare, &[])
         .unwrap_or_else(|error| panic!("lens_flare.wesl failed to compile: {error}"));
 }
+
+/// Guards the Rust immediate-block ABI against drift from the WESL struct: the
+/// single `GpuLensFlareParams` block is the 32-byte extent-led block matching
+/// `lens_flare.wesl`'s one `var<immediate>` global, and the workgroup constant
+/// matches `@workgroup_size(8, 8, 1)`.
+#[test]
+fn lens_flare_abi_matches_the_shader_layout() {
+    use super::abi::{GpuLensFlareParams, LENS_FLARE_WORKGROUP_SIZE};
+    assert_eq!(size_of::<GpuLensFlareParams>(), 32);
+    assert_eq!(align_of::<GpuLensFlareParams>(), 4);
+    assert_eq!(LENS_FLARE_WORKGROUP_SIZE, 8);
+}

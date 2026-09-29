@@ -83,42 +83,122 @@ fn kuwahara_apply(region_means: array<vec3<f32>, 4>, region_vars: array<f32, 4>,
     return select(selected, center, use_center);
 }
 
-// Minimal entry so the module type-checks as a standalone compute kernel under
-// the WESL compile test; the real Kuwahara pass wires the source target and the
-// params uniform later. References every helper so none drifts unused, using
-// fixed literal inputs.
-@compute @workgroup_size(64, 1, 1)
-fn kuwahara_probe(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let seed = f32(gid.x) * 0.01;
-    let center = vec3<f32>(0.15 + seed, 0.4, 0.85);
+// ---------------------------------------------------------------------------
+// Device wiring: full-screen compute pass over the resolved HDR scene colour.
+// ---------------------------------------------------------------------------
+//
+// display-referred, stylized NPR filter (edge-preserving painterly smoothing).
+// It conceptually belongs after the display tone-map curve, but the current
+// Prism chain defers tone-mapping to a Bevy node after the MainPass, so every
+// pre-MainPass consumer (this one included) runs on linear HDR radiance. Placed
+// as a pre-MainPass linear consumer for chain consistency; may be
+// repositioned once tone-map ownership is decided.
 
-    let samples = array<vec3<f32>, 4>(
-        vec3<f32>(0.0, 0.0, 0.0),
-        vec3<f32>(1.0, 1.0, 1.0),
-        vec3<f32>(0.2, 0.3, 0.4),
-        vec3<f32>(0.5, 0.5, 0.5),
-    );
-    let count = 4u;
+// Immediate (push-constant) block driving the Kuwahara pass. Mirrors the Rust
+// GpuKuwaharaParams byte-for-byte: the framebuffer extent leads (vec2<u32> for
+// its 8-byte alignment), then the golden radius and the master enable flag
+// (enabled stored as u32 for uniform layout). 2 * 4 + 2 * 4 = 16 bytes, a
+// multiple of 16 with no implicit padding.
+struct GpuKuwaharaParams {
+    // Full-resolution framebuffer extent in texels.
+    screen_size: vec2<u32>,
+    // Neighbourhood radius r; each quadrant is (r + 1) x (r + 1).
+    radius: u32,
+    // Master enable; 0 passes the centre pixel through (identity).
+    enabled: u32,
+}
 
-    let lum = kuwahara_luminance(center);
-    let mean = kuwahara_region_mean(samples, count);
-    let variance = kuwahara_region_luma_variance(samples, count, mean);
+// The resolved linear HDR scene colour this pass filters (textureLoad-ed per
+// pixel across the four overlapping quadrants).
+@group(0) @binding(0) var kuwahara_scene_color: texture_2d<f32>;
+// The stylized HDR output; copied back over scene_color after the dispatch.
+@group(0) @binding(1) var kuwahara_out: texture_storage_2d<rgba16float, write>;
 
-    let region_means = array<vec3<f32>, 4>(
-        vec3<f32>(0.2, 0.3, 0.4),
-        vec3<f32>(0.9, 0.1, 0.0),
-        vec3<f32>(0.5, 0.5, 0.5),
-        vec3<f32>(0.1, 0.7, 0.2),
-    );
-    let region_vars = array<f32, 4>(0.8, 0.05, 0.6, 0.3);
-    let quads = 4u;
+var<immediate> kuwahara_params: GpuKuwaharaParams;
 
-    let selected = kuwahara_select_min_variance(region_means, region_vars, quads);
+// RGB mean of one overlapping quadrant of the (r + 1) x (r + 1) block anchored
+// at the centre. (ox, oy) are the quadrant's per-axis directions (+/-1); the
+// scan walks dx, dy in 0..=radius so the centre pixel (dx == dy == 0) is shared
+// by all four quadrants, matching the CPU golden's overlapping quadrants. Edge
+// texels are clamped to the frame. Inlines the golden region_mean (sum / len)
+// over the full quadrant, which the fixed four-slot kuwahara_region_mean helper
+// cannot size for radius > 1.
+fn kuwahara_quadrant_mean(pc: vec2<i32>, ox: i32, oy: i32, radius: i32, width: i32, height: i32) -> vec3<f32> {
+    var sum = vec3<f32>(0.0, 0.0, 0.0);
+    var count = 0.0;
+    for (var dy = 0; dy <= radius; dy = dy + 1) {
+        for (var dx = 0; dx <= radius; dx = dx + 1) {
+            let sx = clamp(pc.x + ox * dx, 0, width - 1);
+            let sy = clamp(pc.y + oy * dy, 0, height - 1);
+            sum = sum + textureLoad(kuwahara_scene_color, vec2<i32>(sx, sy), 0).rgb;
+            count = count + 1.0;
+        }
+    }
+    // A quadrant always has at least the centre pixel, so count >= 1.
+    return sum / max(count, 1.0);
+}
 
+// Mean squared deviation of the quadrant's luminance about mean's luminance.
+// Inlines the golden region_luma_variance (sum of squared deviations / len,
+// with the len < 2 guard returning 0) over the full (r + 1) x (r + 1) quadrant.
+fn kuwahara_quadrant_variance(pc: vec2<i32>, ox: i32, oy: i32, radius: i32, width: i32, height: i32, mean: vec3<f32>) -> f32 {
+    let mean_luma = kuwahara_luminance(mean);
+    var acc = 0.0;
+    var count = 0.0;
+    for (var dy = 0; dy <= radius; dy = dy + 1) {
+        for (var dx = 0; dx <= radius; dx = dx + 1) {
+            let sx = clamp(pc.x + ox * dx, 0, width - 1);
+            let sy = clamp(pc.y + oy * dy, 0, height - 1);
+            let d = kuwahara_luminance(textureLoad(kuwahara_scene_color, vec2<i32>(sx, sy), 0).rgb) - mean_luma;
+            acc = acc + d * d;
+            count = count + 1.0;
+        }
+    }
+    // Empty or single-sample quadrant has no spread (golden len < 2 guard).
+    return select(acc / max(count, 1.0), 0.0, count < 2.0);
+}
+
+// One invocation per pixel. Splits the neighbourhood into the four overlapping
+// quadrants (top-left, top-right, bottom-left, bottom-right), computes each
+// quadrant's RGB mean and luminance variance, then writes the mean of the
+// lowest-variance quadrant via the golden selection (disabled or degenerate
+// pixels pass through). Alpha is preserved. Runs on the resolved HDR radiance,
+// exactly like the golden.
+@compute @workgroup_size(8, 8, 1)
+fn kuwahara_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let width = i32(kuwahara_params.screen_size.x);
+    let height = i32(kuwahara_params.screen_size.y);
+    let pc = vec2<i32>(i32(gid.x), i32(gid.y));
+    if (pc.x >= width || pc.y >= height) {
+        return;
+    }
+
+    let center = textureLoad(kuwahara_scene_color, pc, 0);
+
+    // Repack the immediate block into the golden KuwaharaParams so the on-device
+    // evaluation is arm-for-arm identical to the CPU reference.
     var params: KuwaharaParams;
-    params.radius = 2u;
-    params.enabled = 1u;
-    let applied = kuwahara_apply(region_means, region_vars, quads, center, params.enabled != 0u);
+    params.radius = kuwahara_params.radius;
+    params.enabled = kuwahara_params.enabled;
+    let radius = i32(params.radius);
 
-    _ = lum + mean.x + variance + selected.x + applied.x + f32(params.radius);
+    // Four overlapping quadrants sharing the centre pixel; (ox, oy) picks the
+    // per-axis direction. Order matches the CPU golden: TL, TR, BL, BR (a strict
+    // < in the selection keeps the first minimum on ties).
+    let m0 = kuwahara_quadrant_mean(pc, -1, -1, radius, width, height);
+    let m1 = kuwahara_quadrant_mean(pc, 1, -1, radius, width, height);
+    let m2 = kuwahara_quadrant_mean(pc, -1, 1, radius, width, height);
+    let m3 = kuwahara_quadrant_mean(pc, 1, 1, radius, width, height);
+
+    let v0 = kuwahara_quadrant_variance(pc, -1, -1, radius, width, height, m0);
+    let v1 = kuwahara_quadrant_variance(pc, 1, -1, radius, width, height, m1);
+    let v2 = kuwahara_quadrant_variance(pc, -1, 1, radius, width, height, m2);
+    let v3 = kuwahara_quadrant_variance(pc, 1, 1, radius, width, height, m3);
+
+    let region_means = array<vec3<f32>, 4>(m0, m1, m2, m3);
+    let region_vars = array<f32, 4>(v0, v1, v2, v3);
+
+    let result = kuwahara_apply(region_means, region_vars, 4u, center.rgb, params.enabled != 0u);
+
+    textureStore(kuwahara_out, pc, vec4<f32>(result, center.a));
 }

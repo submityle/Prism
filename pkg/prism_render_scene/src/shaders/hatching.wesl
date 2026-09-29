@@ -121,46 +121,84 @@ fn hatching_apply(
     return select(hatched, scene, !enabled);
 }
 
-// Minimal entry so the module type-checks as a standalone compute kernel under
-// the WESL compile test; the real hatching pass wires the scene target and the
-// params uniform later. References every helper so none drifts unused, using
-// fixed literal inputs (angles PI/4, -PI/4, 0; thresholds 0.75/0.5/0.25).
-@compute @workgroup_size(64, 1, 1)
-fn hatching_probe(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let seed = f32(gid.x) * 0.01;
-    let scene = vec3<f32>(0.15 + seed, 0.4, 0.85);
-    let screen_pos = vec2<f32>(0.13 + seed, 0.27);
+// ---------------------------------------------------------------------------
+// Device wiring: full-screen compute pass over the resolved HDR scene colour.
+// ---------------------------------------------------------------------------
+//
+// display-referred, stylized NPR filter (ink cross-hatching). It conceptually
+// belongs after the display tone-map curve, but the current Prism chain defers
+// tone-mapping to a Bevy node after the MainPass, so every pre-MainPass consumer
+// (this one included) runs on linear HDR radiance. Placed as a pre-MainPass
+// linear consumer for chain consistency; may be repositioned once tone-map
+// ownership is decided.
 
-    let ss = hatching_smoothstep(0.15, 0.17, 0.16);
-    let lum = hatching_luminance(scene);
-    let rot = hatching_rotate2d(screen_pos, 0.7853981633974483);
-    let line = hatching_line_coverage(rot, 40.0, 0.15);
-    let cov = hatching_hatch_coverage(
-        lum, screen_pos,
-        0.7853981633974483, -0.7853981633974483, 0.0,
-        0.75, 0.5, 0.25,
-        40.0, 0.15,
+// Immediate (push-constant) block driving the hatching pass. Mirrors the Rust
+// GpuHatchingParams byte-for-byte: the framebuffer extent leads (vec2<u32>,
+// 8-byte aligned), then the eight golden scalars, the enable flag and an
+// explicit tail pad so the block is a multiple of 8 bytes (48), matching the
+// WGSL struct alignment the vec2<u32> forces.
+struct GpuHatchingParams {
+    // Full-resolution framebuffer extent in texels.
+    screen_size: vec2<u32>,
+    // Stripe frequency (periods across the normalized screen).
+    frequency: f32,
+    // Stroke half-width in fractional-period units.
+    thickness: f32,
+    // The three stroke directions (radians), added darkest-last.
+    angle0: f32,
+    angle1: f32,
+    angle2: f32,
+    // Descending luminance tiers at which each stroke set switches on.
+    threshold0: f32,
+    threshold1: f32,
+    threshold2: f32,
+    // Master enable; 0 passes the scene through (identity).
+    enabled: u32,
+    // Explicit tail pad so the block is a multiple of 8 bytes.
+    _pad: u32,
+}
+
+// The resolved linear HDR scene colour this pass reads (textureLoad-ed per
+// pixel).
+@group(0) @binding(0) var hatching_scene_color: texture_2d<f32>;
+// The stylized HDR output; copied back over scene_color after the dispatch.
+@group(0) @binding(1) var hatching_out: texture_storage_2d<rgba16float, write>;
+
+var<immediate> hatching_params: GpuHatchingParams;
+
+// One invocation per pixel. Maps the pixel to a normalized [0, 1] screen
+// coordinate (so the golden stripe frequency spans the frame), composites the
+// ink (black) over paper (white) by the golden coverage ramp and writes the
+// result. Disabled pixels pass the scene through. Alpha is preserved. Runs on
+// the resolved HDR radiance, exactly like the golden.
+@compute @workgroup_size(8, 8, 1)
+fn hatching_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let width = i32(hatching_params.screen_size.x);
+    let height = i32(hatching_params.screen_size.y);
+    let pc = vec2<i32>(i32(gid.x), i32(gid.y));
+    if (pc.x >= width || pc.y >= height) {
+        return;
+    }
+
+    let scene = textureLoad(hatching_scene_color, pc, 0);
+
+    // Normalized [0, 1] screen coordinate so the golden frequency spans the
+    // frame (the golden screen_pos is a normalized UV, not a pixel coord).
+    let screen_pos = vec2<f32>(
+        f32(pc.x) / f32(max(width, 1)),
+        f32(pc.y) / f32(max(height, 1)),
     );
 
-    var params: HatchingParams;
-    params.angle0 = 0.7853981633974483;
-    params.angle1 = -0.7853981633974483;
-    params.angle2 = 0.0;
-    params.threshold0 = 0.75;
-    params.threshold1 = 0.5;
-    params.threshold2 = 0.25;
-    params.frequency = 40.0;
-    params.thickness = 0.15;
-    params.enabled = 1u;
-
+    // Ink over paper: black strokes on a white ground, matching the golden fg/bg.
     let fg = vec3<f32>(0.0, 0.0, 0.0);
     let bg = vec3<f32>(1.0, 1.0, 1.0);
-    let applied = hatching_apply(
-        scene, screen_pos, params.enabled != 0u, fg, bg,
-        params.angle0, params.angle1, params.angle2,
-        params.threshold0, params.threshold1, params.threshold2,
-        params.frequency, params.thickness,
+
+    let result = hatching_apply(
+        scene.rgb, screen_pos, hatching_params.enabled != 0u, fg, bg,
+        hatching_params.angle0, hatching_params.angle1, hatching_params.angle2,
+        hatching_params.threshold0, hatching_params.threshold1, hatching_params.threshold2,
+        hatching_params.frequency, hatching_params.thickness,
     );
 
-    _ = ss + lum + rot.x + line + cov + applied.x;
+    textureStore(hatching_out, pc, vec4<f32>(result, scene.a));
 }

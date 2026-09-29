@@ -16,5 +16,18 @@
 //! with its first live consumer so no committed ABI is dead, matching the
 //! color-grade / SSR / SSGI / exposure / bloom precedent.
 
+mod abi;
+mod bind_groups;
+mod dispatch;
+mod pipeline;
+mod resources;
+mod settings;
+
+pub(crate) use bind_groups::prepare_kuwahara_bind_groups;
+pub(crate) use dispatch::kuwahara_pass;
+pub(crate) use pipeline::init_kuwahara_pipeline;
+pub(crate) use resources::prepare_kuwahara_textures;
+pub(crate) use settings::PrismKuwaharaSettings;
+
 #[cfg(test)]
 mod shader_tests;

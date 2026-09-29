@@ -51,3 +51,15 @@ fn kuwahara_wesl_compiles_standalone() {
         .get(0, kuwahara, &[])
         .unwrap_or_else(|error| panic!("kuwahara.wesl failed to compile: {error}"));
 }
+
+/// Guards the Rust immediate-block ABI against drift from the WESL struct: the
+/// single `GpuKuwaharaParams` block is the 16-byte extent-led block matching
+/// `kuwahara.wesl`'s one `var<immediate>` global, and the workgroup constant
+/// matches `@workgroup_size(8, 8, 1)`.
+#[test]
+fn kuwahara_abi_matches_the_shader_layout() {
+    use super::abi::{GpuKuwaharaParams, KUWAHARA_WORKGROUP_SIZE};
+    assert_eq!(size_of::<GpuKuwaharaParams>(), 16);
+    assert_eq!(align_of::<GpuKuwaharaParams>(), 4);
+    assert_eq!(KUWAHARA_WORKGROUP_SIZE, 8);
+}

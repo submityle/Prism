@@ -51,3 +51,15 @@ fn posterize_wesl_compiles_standalone() {
         .get(0, posterize, &[])
         .unwrap_or_else(|error| panic!("posterize.wesl failed to compile: {error}"));
 }
+
+/// Guards the Rust immediate-block ABI against drift from the WESL struct: the
+/// single `GpuPosterizeParams` block is the 32-byte `vec2<u32>`-led block
+/// matching `posterize.wesl`'s one `var<immediate>` global, and the workgroup
+/// constant matches `@workgroup_size(8, 8, 1)`.
+#[test]
+fn posterize_abi_matches_the_shader_layout() {
+    use super::abi::{GpuPosterizeParams, POSTERIZE_WORKGROUP_SIZE};
+    assert_eq!(size_of::<GpuPosterizeParams>(), 32);
+    assert_eq!(align_of::<GpuPosterizeParams>(), 4);
+    assert_eq!(POSTERIZE_WORKGROUP_SIZE, 8);
+}

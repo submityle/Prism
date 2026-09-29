@@ -50,3 +50,15 @@ fn halftone_wesl_compiles_standalone() {
         .get(0, halftone, &[])
         .unwrap_or_else(|error| panic!("halftone.wesl failed to compile: {error}"));
 }
+
+/// Guards the Rust immediate-block ABI against drift from the WESL struct: the
+/// single `GpuHalftoneParams` block is the 24-byte extent-led block matching
+/// `halftone.wesl`'s one `var<immediate>` global, and the workgroup constant
+/// matches `@workgroup_size(8, 8, 1)`.
+#[test]
+fn halftone_abi_matches_the_shader_layout() {
+    use super::abi::{GpuHalftoneParams, HALFTONE_WORKGROUP_SIZE};
+    assert_eq!(size_of::<GpuHalftoneParams>(), 24);
+    assert_eq!(align_of::<GpuHalftoneParams>(), 4);
+    assert_eq!(HALFTONE_WORKGROUP_SIZE, 8);
+}

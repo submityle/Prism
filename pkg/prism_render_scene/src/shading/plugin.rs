@@ -62,6 +62,42 @@ use super::{
         film_grain_pass, init_film_grain_pipeline, prepare_film_grain_bind_groups,
         prepare_film_grain_textures, PrismFilmGrainSettings,
     },
+    cas::{
+        cas_pass, init_cas_pipeline, prepare_cas_bind_groups, prepare_cas_textures,
+        PrismCasSettings,
+    },
+    posterize::{
+        init_posterize_pipeline, posterize_pass, prepare_posterize_bind_groups,
+        prepare_posterize_textures, PrismPosterizeSettings,
+    },
+    gamut_map::{
+        gamut_map_pass, init_gamut_map_pipeline, prepare_gamut_map_bind_groups,
+        prepare_gamut_map_textures, PrismGamutMapSettings,
+    },
+    ordered_dither::{
+        init_ordered_dither_pipeline, ordered_dither_pass, prepare_ordered_dither_bind_groups,
+        prepare_ordered_dither_textures, PrismOrderedDitherSettings,
+    },
+    lens_flare::{
+        init_lens_flare_pipeline, lens_flare_pass, prepare_lens_flare_bind_groups,
+        prepare_lens_flare_textures, PrismLensFlareSettings,
+    },
+    outline::{
+        init_outline_pipeline, outline_pass, prepare_outline_bind_groups,
+        prepare_outline_textures, PrismOutlineSettings,
+    },
+    kuwahara::{
+        init_kuwahara_pipeline, kuwahara_pass, prepare_kuwahara_bind_groups,
+        prepare_kuwahara_textures, PrismKuwaharaSettings,
+    },
+    hatching::{
+        hatching_pass, init_hatching_pipeline, prepare_hatching_bind_groups,
+        prepare_hatching_textures, PrismHatchingSettings,
+    },
+    halftone::{
+        halftone_pass, init_halftone_pipeline, prepare_halftone_bind_groups,
+        prepare_halftone_textures, PrismHalftoneSettings,
+    },
     motion_blur::{
         init_motion_blur_pipeline, motion_blur_pass, prepare_motion_blur_bind_groups,
         prepare_motion_blur_textures, PrismMotionBlurSettings,
@@ -171,6 +207,15 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/vignette.wesl");
         embedded_asset!(app, "../shaders/color_grade.wesl");
         embedded_asset!(app, "../shaders/film_grain.wesl");
+        embedded_asset!(app, "../shaders/cas.wesl");
+        embedded_asset!(app, "../shaders/posterize.wesl");
+        embedded_asset!(app, "../shaders/gamut_map.wesl");
+        embedded_asset!(app, "../shaders/ordered_dither.wesl");
+        embedded_asset!(app, "../shaders/lens_flare.wesl");
+        embedded_asset!(app, "../shaders/outline.wesl");
+        embedded_asset!(app, "../shaders/kuwahara.wesl");
+        embedded_asset!(app, "../shaders/hatching.wesl");
+        embedded_asset!(app, "../shaders/halftone.wesl");
         embedded_asset!(app, "../shaders/brdf_lut.wesl");
         embedded_asset!(app, "../shaders/env_prefilter.wesl");
         embedded_asset!(app, "../shaders/exposure.wesl");
@@ -220,6 +265,15 @@ impl Plugin for PrismShadingPlugin {
             .init_resource::<PrismVignetteSettings>()
             .init_resource::<PrismColorGradeSettings>()
             .init_resource::<PrismFilmGrainSettings>()
+            .init_resource::<PrismCasSettings>()
+            .init_resource::<PrismPosterizeSettings>()
+            .init_resource::<PrismGamutMapSettings>()
+            .init_resource::<PrismOrderedDitherSettings>()
+            .init_resource::<PrismLensFlareSettings>()
+            .init_resource::<PrismOutlineSettings>()
+            .init_resource::<PrismKuwaharaSettings>()
+            .init_resource::<PrismHatchingSettings>()
+            .init_resource::<PrismHalftoneSettings>()
             .insert_resource(ShadingFrameGraph {
                 compiled: compiled_graph,
             })
@@ -279,6 +333,20 @@ impl Plugin for PrismShadingPlugin {
                         init_vignette_pipeline,
                         init_color_grade_pipeline,
                         init_film_grain_pipeline,
+                    ),
+                    // Nested to keep this RenderStartup tuple within Bevy's
+                    // 20-element limit: the nine additional post-process
+                    // (display-referred + stylized NPR) pipeline initializers.
+                    (
+                        init_cas_pipeline,
+                        init_posterize_pipeline,
+                        init_gamut_map_pipeline,
+                        init_ordered_dither_pipeline,
+                        init_lens_flare_pipeline,
+                        init_outline_pipeline,
+                        init_kuwahara_pipeline,
+                        init_hatching_pipeline,
+                        init_halftone_pipeline,
                     ),
                     init_dfg_lut_texture,
                     init_brdf_lut_pipeline,
@@ -547,6 +615,73 @@ impl Plugin for PrismShadingPlugin {
                         .in_set(RenderSystems::PrepareBindGroups),
                 ),
             )
+            // The nine additional post-process subsystems (display-referred
+            // finishing + stylized NPR). Kept in their own `add_systems` call so
+            // the eighteen prepare systems stay within Bevy's 20-element tuple
+            // limit. Each allocates its scene_color-sized target after the
+            // resident visibility set is known; outline additionally reads the
+            // SSR geometry-prepass depth + normal G-buffer, so it also orders
+            // after prepare_ssr_textures.
+            .add_systems(
+                Render,
+                (
+                    prepare_cas_textures
+                        .after(prepare_visibility_buffers)
+                        .in_set(RenderSystems::PrepareResources),
+                    prepare_cas_bind_groups
+                        .after(prepare_cas_textures)
+                        .in_set(RenderSystems::PrepareBindGroups),
+                    prepare_posterize_textures
+                        .after(prepare_visibility_buffers)
+                        .in_set(RenderSystems::PrepareResources),
+                    prepare_posterize_bind_groups
+                        .after(prepare_posterize_textures)
+                        .in_set(RenderSystems::PrepareBindGroups),
+                    prepare_gamut_map_textures
+                        .after(prepare_visibility_buffers)
+                        .in_set(RenderSystems::PrepareResources),
+                    prepare_gamut_map_bind_groups
+                        .after(prepare_gamut_map_textures)
+                        .in_set(RenderSystems::PrepareBindGroups),
+                    prepare_ordered_dither_textures
+                        .after(prepare_visibility_buffers)
+                        .in_set(RenderSystems::PrepareResources),
+                    prepare_ordered_dither_bind_groups
+                        .after(prepare_ordered_dither_textures)
+                        .in_set(RenderSystems::PrepareBindGroups),
+                    prepare_lens_flare_textures
+                        .after(prepare_visibility_buffers)
+                        .in_set(RenderSystems::PrepareResources),
+                    prepare_lens_flare_bind_groups
+                        .after(prepare_lens_flare_textures)
+                        .in_set(RenderSystems::PrepareBindGroups),
+                    prepare_outline_textures
+                        .after(prepare_ssr_textures)
+                        .after(prepare_visibility_buffers)
+                        .in_set(RenderSystems::PrepareResources),
+                    prepare_outline_bind_groups
+                        .after(prepare_outline_textures)
+                        .in_set(RenderSystems::PrepareBindGroups),
+                    prepare_kuwahara_textures
+                        .after(prepare_visibility_buffers)
+                        .in_set(RenderSystems::PrepareResources),
+                    prepare_kuwahara_bind_groups
+                        .after(prepare_kuwahara_textures)
+                        .in_set(RenderSystems::PrepareBindGroups),
+                    prepare_hatching_textures
+                        .after(prepare_visibility_buffers)
+                        .in_set(RenderSystems::PrepareResources),
+                    prepare_hatching_bind_groups
+                        .after(prepare_hatching_textures)
+                        .in_set(RenderSystems::PrepareBindGroups),
+                    prepare_halftone_textures
+                        .after(prepare_visibility_buffers)
+                        .in_set(RenderSystems::PrepareResources),
+                    prepare_halftone_bind_groups
+                        .after(prepare_halftone_textures)
+                        .in_set(RenderSystems::PrepareBindGroups),
+                ),
+            )
             .add_systems(
                 ExtractSchedule,
                 (extract_shadows, extract_ibl_source, extract_vsm_primary_light),
@@ -724,6 +859,45 @@ impl Plugin for PrismShadingPlugin {
                         .after(motion_blur_pass)
                         .before(bevy_core_pipeline::Core3dSystems::MainPass),
                 ),
+            ),
+        );
+        // The nine additional post-process passes (display-referred finishing +
+        // stylized NPR). The primary Core3d tuple is already at Bevy's
+        // 20-element limit, so these live in their own `add_systems` call and
+        // chain off `film_grain_pass` (the previous last pre-MainPass
+        // scene_color writer). Every pass copies its result back into
+        // scene_color, so they are serialised into a single linear chain to
+        // keep the copy-backs from racing, all before the main pass composites.
+        render_app.add_systems(
+            bevy_core_pipeline::Core3d,
+            (
+                kuwahara_pass
+                    .after(film_grain_pass)
+                    .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                hatching_pass
+                    .after(kuwahara_pass)
+                    .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                halftone_pass
+                    .after(hatching_pass)
+                    .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                outline_pass
+                    .after(halftone_pass)
+                    .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                lens_flare_pass
+                    .after(outline_pass)
+                    .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                gamut_map_pass
+                    .after(lens_flare_pass)
+                    .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                ordered_dither_pass
+                    .after(gamut_map_pass)
+                    .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                cas_pass
+                    .after(ordered_dither_pass)
+                    .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                posterize_pass
+                    .after(cas_pass)
+                    .before(bevy_core_pipeline::Core3dSystems::MainPass),
             ),
         );
     }
