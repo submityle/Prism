@@ -1428,3 +1428,437 @@ fn flip_pressure_solve_gpu_matches_cpu_golden() {
         c += 1;
     }
 }
+
+// ===========================================================================
+// Ocean `Gerstner` displacement (water_ocean.wesl :: water_gerstner_displace)
+// ===========================================================================
+//
+// This block closes the on-device gap for the art-directable near-field ocean
+// pass. Unlike the buffer-only `SWE`/`PBF`/`FLIP` kernels above, the `Gerstner`
+// kernel writes two `rgba32float` storage textures (world displacement and the
+// closed-form surface normal), so the parity path here creates real storage
+// textures, dispatches the pass, copies both back through
+// `copy_texture_to_buffer`, and compares every texel against a `CPU` golden that
+// replays the exact shader math. The one deliberate divergence from the
+// `prism_render_architecture` ocean reference is trigonometry: that crate forbids
+// `libm` and uses hand-rolled `sin`/`cos` polynomials, whereas the `WGSL` kernel
+// emits the device's native `sin`/`cos`. To stay byte-close to the hardware we
+// evaluate the golden with `bevy_math::ops::sin`/`cos` (the crate's `libm`-backed,
+// determinism-approved trig), which tracks the `GPU` intrinsics to well inside
+// [`PARITY_EPS`]. Wave arguments are kept moderate so neither
+// implementation's range reduction dominates the tolerance.
+
+use super::abi::{GpuGerstnerWave, GpuWaterGerstnerParams};
+use wgpu::{
+    BindingResource, Extent3d, TexelCopyBufferInfo, TexelCopyBufferLayout, TexelCopyTextureInfo,
+    TextureAspect, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
+    TextureViewDescriptor,
+};
+
+/// Gravitational acceleration used by the deep-water dispersion; mirrors
+/// `WATER_GRAVITY` in `water_ocean.wesl`.
+const WATER_GRAVITY: f32 = 9.81;
+/// `2*PI`; mirrors `WATER_TWO_PI` in `water_ocean.wesl` (rounds to the same
+/// `f32` as the shader literal).
+const WATER_TWO_PI: f32 = core::f32::consts::TAU;
+/// Squared-length floor guarding the direction normalize and the normal
+/// normalize; mirrors `WATER_EPS_LEN_SQ` in `water_ocean.wesl`.
+const WATER_EPS_LEN_SQ: f32 = 1.0e-12;
+
+/// Compiles `water_ocean.wesl` and returns its `Wgsl` translation.
+fn compile_ocean_wgsl() -> String {
+    let mut cache = ShaderCache::new((), keep_wgsl);
+    let id = AssetId::Uuid {
+        uuid: Uuid::from_u128(0x5052_4953_4d5f_5741_5445_524f_434e_0002),
+    };
+    cache.set_shader(
+        id,
+        Shader::from_wesl(
+            include_str!("../shaders/water_ocean.wesl"),
+            "embedded://prism_render_scene/shaders/water_ocean.wesl",
+        ),
+    );
+    let module = cache
+        .get(0, id, &[])
+        .unwrap_or_else(|error| panic!("water_ocean.wesl failed to compile: {error}"));
+    (*module).clone()
+}
+
+/// Host mirror of `water_dispersion`: deep-water `omega(k) = sqrt(g*k)`,
+/// `0` for non-positive `k`.
+fn ocean_dispersion(k: f32) -> f32 {
+    if k <= 0.0 {
+        0.0
+    } else {
+        (WATER_GRAVITY * k).sqrt()
+    }
+}
+
+/// `CPU` golden twin of `water_gerstner_displace`.
+///
+/// Replays the shader arithmetic texel-for-texel with `std` `sin`/`cos` and
+/// returns the two flat `rgba32float` fields (`total*4` lanes each): the world
+/// displacement `(Dx, base+Dy, Dz, 0)` and the closed-form normal `(nx, ny, nz,
+/// 0)`, in texel order `n = y*N + x`.
+fn gerstner_golden(
+    waves: &[GpuGerstnerWave],
+    params: &GpuWaterGerstnerParams,
+) -> (Vec<f32>, Vec<f32>) {
+    let n = params.grid_size;
+    let inv_n = 1.0_f32 / (n as f32).max(1.0);
+    let cell = params.patch_size * inv_n;
+    let total = (n * n) as usize;
+    let mut disp_out = vec![0.0_f32; total * 4];
+    let mut norm_out = vec![0.0_f32; total * 4];
+
+    let mut gy = 0u32;
+    while gy < n {
+        let mut gx = 0u32;
+        while gx < n {
+            let rest_x = gx as f32 * cell;
+            let rest_z = gy as f32 * cell;
+            let mut disp = [0.0_f32, 0.0, 0.0];
+            let mut nrm = [0.0_f32, 1.0, 0.0];
+
+            let mut i = 0u32;
+            while i < params.wave_count {
+                let w = waves[i as usize];
+                i += 1;
+                if w.wavelength <= 0.0 {
+                    continue;
+                }
+                let dir_len_sq = w.dir_x * w.dir_x + w.dir_z * w.dir_z;
+                if dir_len_sq <= WATER_EPS_LEN_SQ {
+                    continue;
+                }
+                let inv_dir_len = 1.0_f32 / dir_len_sq.sqrt();
+                let dx = w.dir_x * inv_dir_len;
+                let dz = w.dir_z * inv_dir_len;
+
+                let k = WATER_TWO_PI / w.wavelength;
+                let omega = w.speed * ocean_dispersion(k);
+                let theta = k * (dx * rest_x + dz * rest_z) - omega * params.time + w.phase;
+                let c = bevy_math::ops::cos(theta);
+                let s = bevy_math::ops::sin(theta);
+
+                let qa = w.steepness * w.amplitude;
+                disp[0] += qa * dx * c;
+                disp[2] += qa * dz * c;
+                disp[1] += w.amplitude * s;
+
+                let wa = k * w.amplitude;
+                nrm[0] -= dx * wa * c;
+                nrm[2] -= dz * wa * c;
+                nrm[1] -= w.steepness * wa * s;
+            }
+
+            let mut normal = [0.0_f32, 1.0, 0.0];
+            let dot = nrm[0] * nrm[0] + nrm[1] * nrm[1] + nrm[2] * nrm[2];
+            if dot > WATER_EPS_LEN_SQ {
+                let inv = 1.0_f32 / dot.sqrt();
+                normal = [nrm[0] * inv, nrm[1] * inv, nrm[2] * inv];
+            }
+
+            let base = ((gy * n + gx) * 4) as usize;
+            disp_out[base] = disp[0];
+            disp_out[base + 1] = params.base_level + disp[1];
+            disp_out[base + 2] = disp[2];
+            disp_out[base + 3] = 0.0;
+            norm_out[base] = normal[0];
+            norm_out[base + 1] = normal[1];
+            norm_out[base + 2] = normal[2];
+            norm_out[base + 3] = 0.0;
+
+            gx += 1;
+        }
+        gy += 1;
+    }
+
+    (disp_out, norm_out)
+}
+
+/// Dispatches one `water_gerstner_displace` pass on device and reads back the
+/// displacement and normal textures as flat `rgba32float` lanes.
+///
+/// The `group(0)` layout is reflected straight off the pipeline, so bindings
+/// `5` (waves), `6` (params uniform), `7` (displacement texture) and `8`
+/// (normal texture) match the shader declaration order exactly. `N` is chosen so
+/// `row_bytes == N*16` is `256`-aligned and the readback rows are dense.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one linear dispatch-and-readback over two storage textures keeps the parity path auditable"
+)]
+fn dispatch_gerstner(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    wgsl: &str,
+    entry: &str,
+    waves: &[GpuGerstnerWave],
+    params: &GpuWaterGerstnerParams,
+) -> (Vec<f32>, Vec<f32>) {
+    let n = params.grid_size;
+
+    let module = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("water_ocean_parity"),
+        source: ShaderSource::Wgsl(wgsl.into()),
+    });
+    let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("water_gerstner_displace_parity"),
+        layout: None,
+        module: &module,
+        entry_point: Some(entry),
+        compilation_options: PipelineCompilationOptions::default(),
+        cache: None,
+    });
+
+    let wave_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("gerstner_waves"),
+        contents: bytemuck::cast_slice(waves),
+        usage: BufferUsages::STORAGE,
+    });
+    let params_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("gerstner_params"),
+        contents: bytemuck::bytes_of(params),
+        usage: BufferUsages::UNIFORM,
+    });
+
+    let extent = Extent3d {
+        width: n,
+        height: n,
+        depth_or_array_layers: 1,
+    };
+    let disp_tex = device.create_texture(&TextureDescriptor {
+        label: Some("gerstner_displacement_out"),
+        size: extent,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: TextureFormat::Rgba32Float,
+        usage: TextureUsages::STORAGE_BINDING | TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let norm_tex = device.create_texture(&TextureDescriptor {
+        label: Some("gerstner_normal_out"),
+        size: extent,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: TextureFormat::Rgba32Float,
+        usage: TextureUsages::STORAGE_BINDING | TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let disp_view = disp_tex.create_view(&TextureViewDescriptor::default());
+    let norm_view = norm_tex.create_view(&TextureViewDescriptor::default());
+
+    let layout = pipeline.get_bind_group_layout(0);
+    let bind_group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("gerstner_bind_group"),
+        layout: &layout,
+        entries: &[
+            BindGroupEntry {
+                binding: 5,
+                resource: wave_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 6,
+                resource: params_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 7,
+                resource: BindingResource::TextureView(&disp_view),
+            },
+            BindGroupEntry {
+                binding: 8,
+                resource: BindingResource::TextureView(&norm_view),
+            },
+        ],
+    });
+
+    let row_bytes = n * 16;
+    let readback_size = u64::from(row_bytes * n);
+    let disp_readback = device.create_buffer(&BufferDescriptor {
+        label: Some("gerstner_disp_readback"),
+        size: readback_size,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let norm_readback = device.create_buffer(&BufferDescriptor {
+        label: Some("gerstner_norm_readback"),
+        size: readback_size,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("gerstner_parity_encoder"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("gerstner_parity_pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        let groups = n.div_ceil(8);
+        pass.dispatch_workgroups(groups, groups, 1);
+    }
+    for (tex, readback) in [(&disp_tex, &disp_readback), (&norm_tex, &norm_readback)] {
+        encoder.copy_texture_to_buffer(
+            TexelCopyTextureInfo {
+                texture: tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: TextureAspect::All,
+            },
+            TexelCopyBufferInfo {
+                buffer: readback,
+                layout: TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row_bytes),
+                    rows_per_image: Some(n),
+                },
+            },
+            extent,
+        );
+    }
+    queue.submit([encoder.finish()]);
+
+    disp_readback.slice(..).map_async(MapMode::Read, |_| {});
+    norm_readback.slice(..).map_async(MapMode::Read, |_| {});
+    device
+        .poll(PollType::wait_indefinitely())
+        .expect("device poll should complete the submitted work");
+
+    let disp_out = {
+        let view = disp_readback
+            .slice(..)
+            .get_mapped_range()
+            .expect("mapped displacement readback should be available after poll");
+        let floats = bytemuck::cast_slice::<u8, f32>(&view).to_vec();
+        drop(view);
+        disp_readback.unmap();
+        floats
+    };
+    let norm_out = {
+        let view = norm_readback
+            .slice(..)
+            .get_mapped_range()
+            .expect("mapped normal readback should be available after poll");
+        let floats = bytemuck::cast_slice::<u8, f32>(&view).to_vec();
+        drop(view);
+        norm_readback.unmap();
+        floats
+    };
+
+    (disp_out, norm_out)
+}
+
+/// Real-device parity for `water_gerstner_displace`: superpose a fixed set of
+/// wave trains on device and match both output textures against the `CPU`
+/// golden. Includes a zero-wavelength wave and a zero-direction wave to cover
+/// both `continue` guards.
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice must reach the test log on hosts without a wgpu adapter"
+)]
+fn gerstner_displace_gpu_matches_cpu_golden() {
+    let Some((device, queue)) = try_solver_device() else {
+        eprintln!(
+            "gerstner_displace_gpu_matches_cpu_golden: no wgpu adapter, skipping on-device parity"
+        );
+        return;
+    };
+
+    let grid_size = 16u32;
+    let waves = [
+        GpuGerstnerWave {
+            dir_x: 1.0,
+            dir_z: 0.0,
+            amplitude: 0.4,
+            wavelength: 16.0,
+            steepness: 0.4,
+            speed: 1.0,
+            phase: 0.0,
+            _pad: 0.0,
+        },
+        GpuGerstnerWave {
+            dir_x: 0.6,
+            dir_z: 0.8,
+            amplitude: 0.25,
+            wavelength: 10.0,
+            steepness: 0.3,
+            speed: 1.0,
+            phase: 0.7,
+            _pad: 0.0,
+        },
+        GpuGerstnerWave {
+            dir_x: -1.0,
+            dir_z: 1.0,
+            amplitude: 0.15,
+            wavelength: 8.0,
+            steepness: 0.25,
+            speed: 1.0,
+            phase: 1.3,
+            _pad: 0.0,
+        },
+        // Zero wavelength -> exercises the first `continue` guard.
+        GpuGerstnerWave {
+            dir_x: 1.0,
+            dir_z: 0.0,
+            amplitude: 0.1,
+            wavelength: 0.0,
+            steepness: 0.1,
+            speed: 1.0,
+            phase: 0.25,
+            _pad: 0.0,
+        },
+        // Zero direction -> exercises the direction-normalize `continue` guard.
+        GpuGerstnerWave {
+            dir_x: 0.0,
+            dir_z: 0.0,
+            amplitude: 0.1,
+            wavelength: 6.0,
+            steepness: 0.1,
+            speed: 1.0,
+            phase: 0.5,
+            _pad: 0.0,
+        },
+    ];
+    let params = GpuWaterGerstnerParams {
+        grid_size,
+        patch_size: 16.0,
+        time: 1.5,
+        wave_count: waves.len() as u32,
+        base_level: 1.0,
+        _pad: [0, 0, 0],
+    };
+
+    let (golden_disp, golden_norm) = gerstner_golden(&waves, &params);
+
+    let wgsl = compile_ocean_wgsl();
+    let entry = find_entry_point(&wgsl, "gerstner_displace");
+    let (gpu_disp, gpu_norm) = dispatch_gerstner(&device, &queue, &wgsl, &entry, &waves, &params);
+
+    assert_eq!(gpu_disp.len(), golden_disp.len(), "displacement lane count");
+    assert_eq!(gpu_norm.len(), golden_norm.len(), "normal lane count");
+
+    let mut i = 0;
+    while i < golden_disp.len() {
+        let dd = (gpu_disp[i] - golden_disp[i]).abs();
+        assert!(
+            dd < PARITY_EPS,
+            "displacement lane {i}: gpu={} cpu={} |d|={dd}",
+            gpu_disp[i],
+            golden_disp[i],
+        );
+        let dn = (gpu_norm[i] - golden_norm[i]).abs();
+        assert!(
+            dn < PARITY_EPS,
+            "normal lane {i}: gpu={} cpu={} |d|={dn}",
+            gpu_norm[i],
+            golden_norm[i],
+        );
+        i += 1;
+    }
+}
