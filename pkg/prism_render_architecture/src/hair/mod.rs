@@ -82,6 +82,7 @@ pub mod sdf_collision;
 pub mod self_collision;
 pub mod self_collision_grid;
 pub mod self_collision_jacobi;
+pub mod self_collision_pass_buffers;
 pub mod shadow_buffers;
 pub mod sim_pass_buffers;
 pub mod sleep;
