@@ -44,6 +44,7 @@ pub mod lod;
 pub mod pipeline;
 pub mod pressure;
 pub mod sleep;
+pub mod vbd;
 pub mod wind;
 
 use alloc::vec::Vec;
