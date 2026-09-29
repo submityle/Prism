@@ -31,6 +31,8 @@
 use alloc::vec::Vec;
 
 use super::asset::FabricMaterial;
+use super::bending::{apply_bending, build_dihedral_bending, BendingConstraint};
+use super::ccd::{resolve_ccd, CcdParams};
 use super::collision::{
     apply_backstop, resolve_backstops, resolve_body_collisions, resolve_self_collision, Backstop,
     BodyCollider,
@@ -43,8 +45,9 @@ use super::embed::{embed_render_mesh, BarycentricBinding};
 use super::lod::{cloth_deformation_request, resolve_cloth_lod, ClothLodThresholds};
 use super::pressure::{apply_pressure, PressureParams};
 use super::sleep::{max_kinetic_indicator, should_simulate, SleepParams, SleepState, SleepTracker};
+use super::tearing::{apply_plasticity, apply_tearing, PlasticParams, TearingParams};
 use super::wind::{apply_aero_forces, AeroParams, WindField};
-use super::{ClothLodTier, ClothParticle, ClothPiece, ConstraintGraph, Vec3};
+use super::{ClothLodTier, ClothParticle, ClothPiece, Compliance, ConstraintGraph, Vec3};
 use crate::deformation::schedule::DeformationRequest;
 
 /// Self-collision settings for a garment.
@@ -127,6 +130,21 @@ pub struct Garment {
     pub sleep_params: SleepParams,
     /// Whether the sleep gate runs; when `false` the garment always simulates.
     pub sleep_enabled: bool,
+    /// Dihedral bending hinges projected each substep after the distance solve;
+    /// empty disables bending. Built from the triangulation by
+    /// [`Garment::build_bending`] or supplied directly with
+    /// [`Garment::set_bending`].
+    pub bending: Vec<BendingConstraint>,
+    /// Continuous-collision sweep parameters applied once per frame against the
+    /// body colliders using the frame-start positions, so a fast particle cannot
+    /// tunnel through a thin collider between substeps.
+    pub ccd: CcdParams,
+    /// Whether the continuous-collision sweep runs; `false` by default so the
+    /// per-substep projection alone governs collision unless CCD is requested.
+    pub ccd_enabled: bool,
+    /// Frame-start position snapshot reused as the CCD sweep origin; kept as a
+    /// field to avoid a per-frame allocation.
+    prev_positions: Vec<Vec3>,
 }
 
 /// Projects one position out of every body collider, then behind every
@@ -167,6 +185,10 @@ impl Garment {
             sleep: SleepTracker::new(),
             sleep_params: SleepParams::default(),
             sleep_enabled: false,
+            bending: Vec::new(),
+            ccd: CcdParams::default(),
+            ccd_enabled: false,
+            prev_positions: Vec::new(),
         }
     }
 
@@ -203,6 +225,14 @@ impl Garment {
                 return;
             }
         }
+        // Snapshot frame-start positions so the continuous-collision sweep can
+        // reconstruct each particle's swept segment after the solve. Done before
+        // any force or projection touches the positions.
+        if self.ccd_enabled {
+            self.prev_positions.clear();
+            self.prev_positions
+                .extend(self.particles.iter().map(|p| p.position));
+        }
         // Aerodynamic wind is a pre-solve velocity impulse, so the substep
         // prediction integrates it. A calm field (the default) adds nothing and
         // an empty triangulation makes the pass a no-op.
@@ -218,6 +248,20 @@ impl Garment {
         solve_cloth_with_collision(&mut self.particles, &self.graph, self.solver, dt, |p| {
             project_colliders(p.position, colliders, backstops)
         });
+        // Dihedral bending is projected after the distance solve as a lower-
+        // frequency relaxation pass. The substep timestep keeps the XPBD
+        // compliance scaling consistent with the distance solve; an empty hinge
+        // set makes this a no-op.
+        if !self.bending.is_empty() {
+            let substeps = self.solver.substeps.max(1);
+            let dt_sub = dt / substeps as f32;
+            // Give bending authority comparable to the distance solve by running
+            // it for the same total iteration budget (substeps * iterations),
+            // since it is a single decoupled pass rather than interleaved per
+            // substep.
+            let passes = substeps * self.solver.iterations.max(1);
+            apply_bending(&mut self.particles, &self.bending, passes, dt_sub);
+        }
         // Pressure (volume) is a per-frame positional projection over the closed
         // sim mesh, applied after the distance solve like self-collision. It is
         // opt-in (only inflatable garments carry a target volume); per-frame is
@@ -237,6 +281,18 @@ impl Garment {
         // re-project so a frame never ends inside a collider.
         resolve_body_collisions(&mut self.particles, &self.colliders);
         resolve_backstops(&mut self.particles, &self.backstops);
+        // Continuous collision: sweep frame-start -> current against the body
+        // colliders and snap any tunnelling particle back to the surface. Runs
+        // last so it corrects the fully resolved end-of-frame positions.
+        if self.ccd_enabled {
+            resolve_ccd(
+                &mut self.particles,
+                &self.prev_positions,
+                &self.colliders,
+                self.ccd,
+                dt,
+            );
+        }
     }
 
     /// Advances the garment only when `tier` simulates. A
@@ -285,6 +341,53 @@ impl Garment {
     /// passes and never panic.
     pub fn set_triangles(&mut self, triangles: Vec<[u32; 3]>) {
         self.triangles = triangles;
+    }
+
+    /// Replaces the dihedral bending hinge set directly.
+    pub fn set_bending(&mut self, bending: Vec<BendingConstraint>) {
+        self.bending = bending;
+    }
+
+    /// Builds dihedral bending hinges from the current triangulation and rest
+    /// pose (the current particle positions are the flat-rest reference) at the
+    /// given bending `compliance`, and installs them. Requires a triangulation
+    /// ([`Garment::set_triangles`]); with none set this clears the hinge set.
+    pub fn build_bending(&mut self, compliance: Compliance) {
+        let positions = extract_positions(&self.particles);
+        self.bending = build_dihedral_bending(&positions, &self.triangles, compliance);
+    }
+
+    /// Enables the continuous-collision sweep with the given parameters. The
+    /// sweep runs once per frame after the solve, against the body colliders,
+    /// preventing fast particles from tunnelling through thin proxies.
+    pub fn enable_ccd(&mut self, params: CcdParams) {
+        self.ccd = params;
+        self.ccd_enabled = true;
+    }
+
+    /// Disables the continuous-collision sweep.
+    pub fn disable_ccd(&mut self) {
+        self.ccd_enabled = false;
+    }
+
+    /// Tears every over-stretched two-sided fabric edge (tensile strain above
+    /// `params.break_strain`) from the constraint graph and re-colors the
+    /// remaining edges so the next step stays parallel-safe. Returns the number
+    /// of edges torn; when none tear the coloring is left untouched.
+    pub fn tear(&mut self, params: TearingParams) -> usize {
+        let torn = apply_tearing(&mut self.graph.constraints, &self.particles, params);
+        if torn > 0 {
+            let recolored = color_constraints(&self.graph.constraints);
+            self.graph = recolored;
+        }
+        torn
+    }
+
+    /// Applies plastic rest-length creep to edges stretched past
+    /// `params.yield_strain`, capturing permanent wrinkles and sag. Topology is
+    /// unchanged, so no re-coloring is needed.
+    pub fn relax_plastic(&mut self, params: PlasticParams) {
+        apply_plasticity(&mut self.graph.constraints, &self.particles, params);
     }
 
     /// Configures the steady wind field and aerodynamic coefficients. Requires a
@@ -836,5 +939,163 @@ mod tests {
         assert!(garment
             .deformation_request(piece, 0.9, thresholds, 10)
             .is_some());
+    }
+
+    #[test]
+    fn bending_hinges_build_and_step_stays_finite() {
+        let (grid, positions) = drape_grid(5, 5, 0.2);
+        let material = FabricMaterial::default();
+        let mut garment = build_grid_garment(grid, &positions, &material, stiff_solver());
+        garment.set_triangles(grid_triangles(grid));
+        garment.build_bending(Compliance(0.0));
+        // Interior edges of a 5x5 grid produce a non-empty hinge set.
+        assert!(!garment.bending.is_empty());
+        for c in 0..grid.cols as usize {
+            garment.pin(c);
+        }
+        for _ in 0..40 {
+            garment.step(1.0 / 60.0);
+        }
+        assert_finite(&garment.particles);
+    }
+
+    #[test]
+    fn bending_resists_out_of_plane_fold() {
+        // A horizontal cantilever pinned along its first row folds down under
+        // gravity. Bending resists *curvature*, so the stiff sheet stays far
+        // flatter than an identical sheet with no hinges. The physical signature
+        // of that is a much lower total bending energy over the same hinge set;
+        // the free-edge height is *not* a valid proxy here, because a flatter
+        // sheet rotates like a rigid plate about the pin and its tip actually
+        // sweeps lower than a floppy sheet that buckles and bunches up.
+        let (grid, positions) = drape_grid(6, 3, 0.2);
+        let material = FabricMaterial::default();
+        let tris = grid_triangles(grid);
+
+        // The floppy sheet carries the identical triangulation (so aerodynamics
+        // and self state match) but no bending hinges; the stiff sheet adds
+        // perfectly stiff hinges built from the same rest pose.
+        let mut floppy = build_grid_garment(grid, &positions, &material, stiff_solver());
+        floppy.set_triangles(tris.clone());
+        let mut stiff = build_grid_garment(grid, &positions, &material, stiff_solver());
+        stiff.set_triangles(tris);
+        stiff.build_bending(Compliance(0.0));
+        // A 6x3 interior produces a non-empty hinge stencil to measure against.
+        assert!(!stiff.bending.is_empty());
+
+        for c in 0..grid.cols as usize {
+            floppy.pin(c);
+            stiff.pin(c);
+        }
+        for _ in 0..30 {
+            floppy.step(1.0 / 60.0);
+            stiff.step(1.0 / 60.0);
+        }
+
+        // Evaluate the same hinge stencils on both configurations. Curvature
+        // (bending energy) is the direct measure of how much each sheet folded.
+        let stiff_bend: f32 = stiff
+            .bending
+            .iter()
+            .map(|h| h.energy(&stiff.particles))
+            .sum();
+        let floppy_bend: f32 = stiff
+            .bending
+            .iter()
+            .map(|h| h.energy(&floppy.particles))
+            .sum();
+
+        // The stiff sheet must be dramatically flatter: at least an order of
+        // magnitude less bending energy than the un-hinged sheet.
+        assert!(
+            floppy_bend > 1e-3,
+            "floppy sheet should have curled measurably: {floppy_bend}"
+        );
+        assert!(
+            stiff_bend < floppy_bend * 0.1,
+            "stiff bending energy {stiff_bend} should be far below floppy {floppy_bend}"
+        );
+        assert_finite(&stiff.particles);
+        assert_finite(&floppy.particles);
+    }
+
+    #[test]
+    fn ccd_keeps_a_fast_sheet_above_the_floor() {
+        let (grid, positions) = drape_grid(3, 3, 0.2);
+        let material = FabricMaterial::default();
+        let mut garment = build_grid_garment(grid, &positions, &material, stiff_solver());
+        // A ground plane just below the sheet, and CCD enabled.
+        garment.colliders.push(BodyCollider::HalfSpace {
+            normal: Vec3::new(0.0, 1.0, 0.0),
+            offset: -0.05,
+        });
+        garment.enable_ccd(CcdParams {
+            skin: 0.001,
+            restitution: 0.0,
+            enabled: true,
+        });
+        for _ in 0..60 {
+            garment.step(1.0 / 60.0);
+        }
+        // No particle sinks below the floor.
+        for p in &garment.particles {
+            assert!(p.position.y >= -0.05 - 1e-3, "y = {}", p.position.y);
+        }
+        assert_finite(&garment.particles);
+    }
+
+    #[test]
+    fn tearing_removes_edges_and_recolors() {
+        let (grid, positions) = drape_grid(6, 2, 0.2);
+        let material = FabricMaterial::default();
+        let mut garment = build_grid_garment(grid, &positions, &material, stiff_solver());
+        garment.pin(0);
+        garment.pin(1);
+        let before = garment.graph.constraint_count();
+        // Pull the free tip far away so several edges exceed the break strain.
+        let tip = grid.index(grid.rows - 1, 0) as usize;
+        garment.particles[tip].position = Vec3::new(0.0, -5.0, 0.0);
+        let torn = garment.tear(TearingParams { break_strain: 0.5 });
+        assert!(torn > 0);
+        assert_eq!(garment.graph.constraint_count(), before - torn);
+        // The recolored graph is still steppable and finite.
+        for _ in 0..20 {
+            garment.step(1.0 / 60.0);
+        }
+        assert_finite(&garment.particles);
+    }
+
+    #[test]
+    fn plasticity_relaxes_an_over_stretched_edge() {
+        let (grid, positions) = drape_grid(2, 2, 1.0);
+        let material = FabricMaterial::default();
+        let mut garment = build_grid_garment(grid, &positions, &material, stiff_solver());
+        // Stretch the whole sheet along X by moving the second column far out.
+        garment.particles[1].position = Vec3::new(3.0, 0.0, 0.0);
+        garment.particles[3].position = Vec3::new(3.0, 0.0, 1.0);
+        // Find a horizontal structural edge (0-1) rest length before/after.
+        let rest_before = garment
+            .graph
+            .constraints
+            .iter()
+            .find(|c| (c.a == 0 && c.b == 1) || (c.a == 1 && c.b == 0))
+            .map(|c| c.rest_length)
+            .expect("edge 0-1 exists");
+        garment.relax_plastic(PlasticParams {
+            yield_strain: 0.1,
+            creep: 0.5,
+            max_strain: 10.0,
+        });
+        let rest_after = garment
+            .graph
+            .constraints
+            .iter()
+            .find(|c| (c.a == 0 && c.b == 1) || (c.a == 1 && c.b == 0))
+            .map(|c| c.rest_length)
+            .expect("edge 0-1 exists");
+        assert!(
+            rest_after > rest_before + 1e-4,
+            "rest should creep up: {rest_before} -> {rest_after}"
+        );
     }
 }
