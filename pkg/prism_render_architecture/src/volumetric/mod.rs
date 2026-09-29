@@ -72,11 +72,14 @@
 //! them (the sandbox has no `GPU`); the `CPU`-verifiable pure functions and
 //! scheduling are the verification target.
 
+pub mod avsm;
 pub mod budget;
 pub mod cloud_lod;
 pub mod math;
 pub mod modeling;
 pub mod noise;
+pub mod reference;
+pub mod scatter;
 pub mod temporal;
 pub mod weather;
 
