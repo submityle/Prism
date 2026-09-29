@@ -841,6 +841,7 @@ struct VcRaymarchParams {
     sigma_t: f32,
     albedo: f32,
     phase_g: f32,
+    powder_strength: f32,
 }
 
 var<immediate> vc_raymarch_params: VcRaymarchParams;
@@ -915,7 +916,18 @@ fn volumetric_raymarch(@builtin(global_invocation_id) gid: vec3<u32>) {
             if (sigma_t > VC_EPS) {
                 integral = (1.0 - seg_trans) / sigma_t;
             }
-            scattered = scattered + transmittance * light * sigma_s * phase * integral;
+            // Nubis `powder` dark-edge modulation keyed on the view-ray
+            // optical depth accumulated up to this segment (mirrors
+            // `raymarch::march` -> `integrate_segment`'s `powder_factor`).
+            var powder_factor = 1.0;
+            if (vc_raymarch_params.powder_strength > 0.0) {
+                powder_factor = vc_lerp(
+                    1.0,
+                    vc_powder(optical_depth, 1.0),
+                    vc_raymarch_params.powder_strength,
+                );
+            }
+            scattered = scattered + transmittance * light * sigma_s * phase * integral * powder_factor;
             transmittance = vc_saturate(transmittance * seg_trans);
             optical_depth = optical_depth + seg_optical;
         }
