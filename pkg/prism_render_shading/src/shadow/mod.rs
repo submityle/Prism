@@ -66,5 +66,6 @@ pub use virtual_sm::{
     camera_move_invalidates_pages, filter_page_radius, generate_page_requests, invalidate_casters,
     Allocation, AllocatorStats, BudgetStats, CasterMovement, ClipmapConfig, ClipmapLevel,
     FrameInput, FrameResult, Invalidation, PageRequestSet, PageTableStats, PhysicalPageAllocator,
-    Receiver, Residency, ShadowPageKey, VirtualPageTable, VirtualShadowMap, VirtualShadowSettings,
+    Receiver, ReceiverProjection, Residency, ShadowPageKey, VirtualPageTable, VirtualShadowMap,
+    VirtualShadowSettings, generate_receiver, reconstruct_world_position,
 };

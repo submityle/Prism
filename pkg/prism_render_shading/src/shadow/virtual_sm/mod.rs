@@ -33,6 +33,7 @@ pub mod allocator;
 pub mod clipmap;
 pub mod invalidation;
 pub mod page_table;
+pub mod receiver_gen;
 pub mod request;
 
 use alloc::collections::BTreeSet;
@@ -48,6 +49,7 @@ pub use invalidation::{
 pub use page_table::{
     key_from_order, page_order, PageOrder, PageTableStats, Residency, VirtualPageTable,
 };
+pub use receiver_gen::{generate_receiver, reconstruct_world_position, ReceiverProjection};
 pub use request::{filter_page_radius, generate_page_requests, PageRequestSet, Receiver};
 
 // Re-export the architecture contracts so callers use one canonical type.
