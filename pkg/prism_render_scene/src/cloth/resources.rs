@@ -32,9 +32,12 @@ pub(crate) struct ClothGpuPiece {
     /// bind groups that reference them; the dispatch node binds through the
     /// bind groups and never reads this field directly, so it is an
     /// intentionally unread `RAII` handle.
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "resident `wgpu` buffer handles kept alive purely as an `RAII` owner; the dispatch node binds through the derived bind groups and never reads this field directly"
+    )]
     pub(crate) buffers: ClothPieceGpuBuffers,
-    /// The five group-0 bind groups, one per shader-interface layout.
+    /// The seven group-0 bind groups, one per shader-interface layout.
     pub(crate) bind_groups: ClothPieceBindGroups,
     /// The ordered dispatch schedule in exact golden record order.
     pub(crate) dispatches: Vec<PlannedDispatch>,

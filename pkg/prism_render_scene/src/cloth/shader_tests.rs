@@ -47,9 +47,9 @@ fn cloth_aerodynamics_snapshot_wesl_compiles_standalone() {
         ),
     );
 
-    cache
-        .get(0, snapshot, &[])
-        .unwrap_or_else(|error| panic!("cloth_aerodynamics_snapshot.wesl failed to compile: {error}"));
+    cache.get(0, snapshot, &[]).unwrap_or_else(|error| {
+        panic!("cloth_aerodynamics_snapshot.wesl failed to compile: {error}")
+    });
 }
 
 /// Compiles `cloth_aerodynamics.wesl`, proving the per-vertex gather kernel (the
