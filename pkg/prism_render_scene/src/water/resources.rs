@@ -13,11 +13,6 @@
 //! node a genuine no-op rather than a fake solve. Until a main-world author
 //! populates it, the vector stays empty and the pass is honestly skipped.
 
-#![allow(
-    dead_code,
-    reason = "the resident water body, its RAII buffer handle and the `WaterGpuBody::new` constructor are consumed by the main-world extract/prepare author that populates `WaterGpuBodies`; that stage lands in a later slice, so until then the buffers field is an intentionally unread handle and the constructor is the documented single entry an author will call"
-)]
-
 use bevy_ecs::resource::Resource;
 
 use prism_render_architecture::water::gpu::pipeline::PlannedDispatch;
@@ -38,6 +33,13 @@ pub(crate) struct WaterGpuBody {
     /// long as the bind groups that reference them; the dispatch node binds
     /// through the bind groups and never reads this field directly, so it is an
     /// intentionally unread `RAII` handle.
+    #[expect(
+        dead_code,
+        reason = "an RAII handle held only to keep the wgpu buffers and \
+                  textures alive as long as the bind groups that reference \
+                  them; the dispatch node binds through the bind groups and \
+                  never reads this field directly"
+    )]
     pub(crate) buffers: WaterBodyGpuBuffers,
     /// The twelve bind groups, one per shader-interface layout.
     pub(crate) bind_groups: WaterBodyBindGroups,

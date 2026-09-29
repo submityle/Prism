@@ -21,14 +21,25 @@
 //!   the `size_of` contract tests that pin each record to the golden buffer
 //!   strides so a layout drift fails the build.
 //!
-//! The remaining slices add the pipeline table (keyed by `WaterKernel`), the
-//! per-body resident bind groups, the `Core3d` graph node that records the
-//! dispatches in solver order, and the plugin that embeds the shaders and
-//! installs the pipelines and graph node.
+//! * [`pipeline`] - the pipeline table (keyed by `WaterKernel`) and the twelve
+//!   bind-group layouts, built once at `RenderStartup`.
+//! * [`bind_groups`] - one body's resident device buffers, storage / sampled
+//!   textures and twelve bind groups.
+//! * [`resources`] and [`dispatch`] - the resident render-world body set and
+//!   the `Core3d` graph node that records the dispatches in solver order.
+//! * [`body`], [`extract`] and [`prepare`] - the main-world author chain: the
+//!   [`WaterBody`](body::WaterBody) component, its per-frame render-world
+//!   snapshot, and the systems that mirror bodies into the render world and
+//!   turn each into a resident `GPU` body with its ordered dispatch schedule.
+//! * [`plugin`] - the plugin that embeds the shaders, installs the pipelines,
+//!   the author chain and the graph node.
 
 mod abi;
 mod bind_groups;
+mod body;
 mod dispatch;
+mod extract;
 mod pipeline;
 pub(crate) mod plugin;
+mod prepare;
 mod resources;

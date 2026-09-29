@@ -34,7 +34,7 @@
 
 #![allow(
     dead_code,
-    reason = "the per-body water buffer set, its storage/sampled textures and its twelve bind groups are consumed by the Core3d dispatch slice and the plugin that land in the following slices; the device-free buffer-plan sizing is exercised by the contract tests below"
+    reason = "the per-body buffer set, its storage/sampled textures and its twelve bind groups are now built by the prepare author and recorded by the Core3d dispatch node; the only unread item left is the device-free `WaterBufferPlan` sizing view, which exists to pin the scene-side storage clamps against the golden `WaterPersistentBufferSet` in the contract tests below"
 )]
 
 use bevy_render::{

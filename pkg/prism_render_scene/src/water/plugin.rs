@@ -13,26 +13,37 @@
 //! * It builds the sixteen pipelines and twelve bind-group layouts once at
 //!   `RenderStartup`, inserting the shared
 //!   [`WaterComputePipelines`](super::pipeline::WaterComputePipelines) resource.
-//! * It installs the [`WaterGpuBodies`](super::resources::WaterGpuBodies) render
-//!   resource (empty by default) and schedules the
+//! * It installs the [`WaterGpuBodies`](super::resources::WaterGpuBodies) and
+//!   [`ExtractedWater`](super::body::ExtractedWater) render resources (empty by
+//!   default) and schedules the
 //!   [`dispatch_water`](super::dispatch::dispatch_water) compute node into the
 //!   `Core3d` graph before the main pass, matching every other Prism compute
 //!   pass.
+//! * It runs the full end-to-end loop each frame:
+//!   [`extract_water_bodies`](super::extract::extract_water_bodies) in
+//!   [`ExtractSchedule`] snapshots the main-world
+//!   [`WaterBody`](super::body::WaterBody)s into `ExtractedWater`, then
+//!   [`prepare_water_bodies`](super::prepare::prepare_water_bodies) in
+//!   [`RenderSystems::PrepareResources`] expands each body's golden dispatch
+//!   schedule, allocates its resident buffers and twelve bind groups and pushes
+//!   the resident body the dispatch node records.
 //!
-//! When no water body is resident every stage is an honest no-op: the resident
-//! set is empty and the dispatch node records nothing (it never fabricates a
-//! solve). The pipelines still build and the shaders still validate, so this
-//! plugin is the real, load-bearing wiring for the device-side solver rather
-//! than a placeholder. Unlike cloth, water carries no main-world extract/prepare
-//! author yet, so [`WaterGpuBodies`] stays default-empty until one lands.
+//! When no water body is spawned every stage is an honest no-op: the extracted
+//! set is empty, the prepare stage builds no body and the dispatch node records
+//! nothing (it never fabricates a solve). The pipelines still build and the
+//! shaders still validate, so this plugin is the real, load-bearing wiring for
+//! the device-side solver rather than a placeholder.
 
 use bevy_app::{App, Plugin};
 use bevy_asset::embedded_asset;
 use bevy_ecs::schedule::IntoScheduleConfigs;
-use bevy_render::{RenderApp, RenderStartup};
+use bevy_render::{ExtractSchedule, Render, RenderApp, RenderStartup, RenderSystems};
 
+use super::body::ExtractedWater;
 use super::dispatch::dispatch_water;
+use super::extract::extract_water_bodies;
 use super::pipeline::init_water_compute_pipelines;
+use super::prepare::prepare_water_bodies;
 use super::resources::WaterGpuBodies;
 
 /// Installs the `GPU` water compute subsystem into an app.
@@ -58,13 +69,26 @@ impl Plugin for WaterPlugin {
         };
 
         render_app
-            // Default-empty: an author-side extract stage would rebuild the
-            // resident bodies each frame; an empty set makes `dispatch_water` a
-            // genuine no-op rather than a fabricated solve.
+            // Default-empty: the extract stage rebuilds the resident bodies
+            // each frame from the extracted bodies; an empty set makes
+            // `dispatch_water` a genuine no-op rather than a fabricated solve.
             .init_resource::<WaterGpuBodies>()
+            // Default-empty snapshot the extract stage refills every frame.
+            .init_resource::<ExtractedWater>()
             // Build the sixteen pipelines + twelve layouts once, then insert the
-            // shared `WaterComputePipelines` resource the dispatch stage reads.
+            // shared `WaterComputePipelines` resource the prepare and dispatch
+            // stages read.
             .add_systems(RenderStartup, init_water_compute_pipelines)
+            // Snapshot the main-world water bodies into the render world each
+            // frame.
+            .add_systems(ExtractSchedule, extract_water_bodies)
+            // Turn each extracted body into a resident `GPU` body before the
+            // dispatch node records the solve, in the standard
+            // `PrepareResources` set every other Prism compute prepare uses.
+            .add_systems(
+                Render,
+                prepare_water_bodies.in_set(RenderSystems::PrepareResources),
+            )
             // Record the solve in the `Core3d` graph before the main pass, the
             // same ordering every other Prism compute pass uses.
             .add_systems(

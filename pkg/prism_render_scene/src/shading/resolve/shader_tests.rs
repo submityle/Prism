@@ -936,6 +936,36 @@ fn hair_binding_metrics_wesl_compiles_standalone() {
         .unwrap_or_else(|error| panic!("hair_binding_metrics.wesl failed to compile: {error}"));
 }
 
+/// Compiles the hair groom-global density-LOD importance fold compute twin
+/// standalone. A green result proves the final density-LOD step — folding each
+/// render strand's blended `(length, curvature, authored)` triple into a single
+/// normalized `[0, 1]` importance via max-normalization, weighted blend and
+/// weight-sum renormalization — parses and type-checks as WESL through the
+/// render-world `ShaderCache` / `wesl` pipeline, in lock-step with the
+/// per-element body of the CPU golden
+/// `prism_render_architecture::hair::decimation::compute_importance` (the
+/// `weight_sum <= 0` short-circuit, the `max > 0` normalization guards, the
+/// `clamp(authored, 0, 1)` readout and the `clamp(blended / weight_sum, 0, 1)`
+/// result). Together with `hair_guide_metrics` and `hair_binding_metrics` this
+/// closes the density-LOD GPU twin path up to the CPU-only ranking sort.
+#[test]
+fn hair_importance_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let hair_importance = shader_id(0x5052_4953_4d5f_4841_4952_5f49_4d50_0001);
+    cache.set_shader(
+        hair_importance,
+        Shader::from_wesl(
+            include_str!("../../shaders/hair_importance.wesl"),
+            "embedded://prism_render_scene/shaders/hair_importance.wesl",
+        ),
+    );
+
+    cache
+        .get(0, hair_importance, &[])
+        .unwrap_or_else(|error| panic!("hair_importance.wesl failed to compile: {error}"));
+}
+
 /// Registers `lighting.wesl`, `brdf.wesl` and `stylized_hair.wesl` under their
 /// canonical module paths and compiles `stylized_hair.wesl`, forcing the
 /// importer to resolve the `prism_render_scene::shaders::brdf::{...}` imports
