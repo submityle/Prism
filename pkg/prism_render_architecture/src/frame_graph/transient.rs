@@ -253,10 +253,18 @@ impl TransientAllocation {
                 .flatten()
                 .map_or(0, |region| region.offset);
             for (position, &first) in group.iter().enumerate() {
+                // A zero-byte region owns no memory and cannot corrupt a peer,
+                // so it is never an unsafe alias regardless of lifetime overlap.
+                if self.region_bytes(first) == 0 {
+                    continue;
+                }
                 let Some(first_life) = self.lifetime_of(first) else {
                     continue;
                 };
                 for &second in &group[position + 1..] {
+                    if self.region_bytes(second) == 0 {
+                        continue;
+                    }
                     let Some(second_life) = self.lifetime_of(second) else {
                         continue;
                     };
@@ -271,6 +279,14 @@ impl TransientAllocation {
             }
         }
         Ok(())
+    }
+
+    fn region_bytes(&self, resource: ResourceId) -> u64 {
+        self.regions
+            .get(resource.0 as usize)
+            .copied()
+            .flatten()
+            .map_or(0, |region| region.size)
     }
 
     fn lifetime_of(&self, resource: ResourceId) -> Option<Range<u32>> {
@@ -304,10 +320,20 @@ fn compute_lifetimes(
 
 /// Partitions the assigned resources into alias groups keyed by heap offset,
 /// ascending by offset and, within a group, by `ResourceId`.
+///
+/// Zero-byte regions are excluded: a region that owns no bytes occupies the
+/// range `offset..offset` (empty), so it can never overlap another region in
+/// memory and aliasing it is a no-op. Topology-only graphs that model resources
+/// with `size == 0` therefore pile every such resource onto offset 0 without it
+/// being a real alias, and grouping them there would raise a spurious
+/// [`AliasOverlap`] between resources whose lifetimes legitimately coincide.
 fn group_by_offset(regions: &[Option<TransientRegion>]) -> Vec<Vec<ResourceId>> {
     let mut by_offset: BTreeMap<u64, Vec<ResourceId>> = BTreeMap::new();
     for (index, region) in regions.iter().enumerate() {
         if let Some(region) = region {
+            if region.size == 0 {
+                continue;
+            }
             by_offset
                 .entry(region.offset)
                 .or_default()
@@ -375,6 +401,25 @@ mod tests {
         // do not overlap — the boundary case the first-fit reuse rule allows.
         assert!(!ranges_overlap(&(0..1), &(1..2)));
         assert!(ranges_overlap(&(0..2), &(1..3)));
+    }
+
+    #[test]
+    fn zero_sized_transients_never_alias_even_when_lifetimes_overlap() {
+        // Topology-only graphs model transients with size 0 (byte budgets are
+        // resolved later at runtime). Every such resource lands on offset 0, but
+        // an empty region owns no memory and cannot corrupt a peer, so two
+        // overlapping zero-byte resources must not be grouped or flagged.
+        let regions = vec![region(0, 0, 16), region(0, 0, 16)];
+        assert!(group_by_offset(&regions).is_empty());
+
+        let plan = TransientAllocation {
+            heap_bytes: 0,
+            regions,
+            lifetimes: vec![Some(0..5), Some(0..5)],
+            alias_groups: group_by_offset(&[region(0, 0, 16), region(0, 0, 16)]),
+            individual_bytes: 0,
+        };
+        assert_eq!(plan.validate_alias_safety(), Ok(()));
     }
 
     #[test]
