@@ -219,6 +219,39 @@ fn resolve_layer_pair(
     particles[outer].position = p_outer.add(dir.scale(penetration * (w_outer / w_sum)));
 }
 
+/// Accumulates an area-weighted outward vertex normal for every particle from a
+/// triangle mesh, writing one [`Vec3`] per particle into `out` (resized and
+/// cleared first so index `i` is particle `i`'s normal).
+///
+/// Each face contributes its unnormalized cross product `(p1 - p0) x (p2 - p0)`
+/// — whose magnitude is twice the triangle area — to each of its three
+/// vertices, so larger faces weigh more and the per-vertex sum is the standard
+/// area-weighted normal. Every vertex normal is normalized at the end; a vertex
+/// touched by no face (or by only degenerate faces) is left at zero, which the
+/// coupling pass reads as "no preferred side" and resolves radially. Winding is
+/// assumed consistent (counter-clockwise seen from outside) so the normals face
+/// outward, matching the pressure pass. Out-of-range indices are skipped and
+/// never panic, so a truncated triangle set is safe.
+pub fn accumulate_vertex_normals(positions: &[Vec3], triangles: &[[u32; 3]], out: &mut Vec<Vec3>) {
+    out.clear();
+    out.resize(positions.len(), Vec3::ZERO);
+    for tri in triangles {
+        let (i0, i1, i2) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
+        if i0 >= positions.len() || i1 >= positions.len() || i2 >= positions.len() {
+            continue;
+        }
+        let face = positions[i1]
+            .sub(positions[i0])
+            .cross(positions[i2].sub(positions[i0]));
+        out[i0] = out[i0].add(face);
+        out[i1] = out[i1].add(face);
+        out[i2] = out[i2].add(face);
+    }
+    for normal in out.iter_mut() {
+        *normal = normal.normalize_or_zero();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -411,5 +444,47 @@ mod tests {
         for (pa, pb) in a.iter().zip(b.iter()) {
             assert!(pa.position.distance(pb.position) < 1e-9);
         }
+    }
+
+    #[test]
+    fn vertex_normals_of_a_flat_sheet_point_up() {
+        // Two triangles tiling a unit quad in the y = 0 plane, wound CCW seen
+        // from +y, must give every touched vertex a +y unit normal.
+        let positions = alloc::vec![
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 1.0),
+            Vec3::new(0.0, 0.0, 1.0),
+        ];
+        // Wound counter-clockwise seen from +y so the right-hand normal is +y.
+        let triangles = alloc::vec![[0u32, 2, 1], [0, 3, 2]];
+        let mut normals: Vec<Vec3> = Vec::new();
+        accumulate_vertex_normals(&positions, &triangles, &mut normals);
+        assert_eq!(normals.len(), 4);
+        for n in &normals {
+            assert!((n.x).abs() < 1e-6, "normal not vertical: {n:?}");
+            assert!((n.z).abs() < 1e-6, "normal not vertical: {n:?}");
+            assert!((n.y - 1.0).abs() < 1e-6, "normal not +y unit: {n:?}");
+        }
+    }
+
+    #[test]
+    fn vertex_normals_skip_out_of_range_and_leave_untouched_zero() {
+        // An out-of-range face is skipped (no panic) and a vertex no face
+        // touches stays zero, which the coupling pass reads as "no side".
+        let positions = alloc::vec![
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(5.0, 0.0, 5.0),
+        ];
+        // First face wound for a +y normal; second indexes vertex 9 (absent).
+        let triangles = alloc::vec![[0u32, 2, 1], [0, 2, 9]];
+        let mut normals: Vec<Vec3> = Vec::new();
+        accumulate_vertex_normals(&positions, &triangles, &mut normals);
+        assert_eq!(normals.len(), 4);
+        assert!((normals[0].y - 1.0).abs() < 1e-6);
+        // Vertex 3 is touched by no valid face -> left at zero.
+        assert!(normals[3].length_squared() < 1e-12);
     }
 }

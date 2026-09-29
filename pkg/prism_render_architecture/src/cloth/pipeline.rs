@@ -42,6 +42,7 @@ use super::constraints::{
 };
 use super::dynamics::{extract_positions, solve_cloth_with_collision, SolverParams};
 use super::embed::{embed_render_mesh, BarycentricBinding};
+use super::layers::{accumulate_vertex_normals, resolve_layer_coupling, LayerParams};
 use super::lod::{cloth_deformation_request, resolve_cloth_lod, ClothLodThresholds};
 use super::painted::{
     apply_painted_backstop, blend_to_skin, clamp_max_distance, drive_toward_anim, AnimDriveParams,
@@ -145,6 +146,16 @@ pub struct Garment {
     pub vbd: VbdParams,
     /// Self-collision settings applied once per frame after the solve.
     pub self_collision: SelfCollisionParams,
+    /// Per-particle layer number for multi-layer garment coupling (design
+    /// §6.7), parallel to `particles`; empty disables the inter-layer pass. Lower
+    /// numbers are inner layers. Requires a triangulation so per-vertex outward
+    /// normals can orient the stacking order.
+    pub layer_of: Vec<u32>,
+    /// Inter-layer coupling tuning used when `layer_of` is non-empty.
+    pub layers: LayerParams,
+    /// Scratch outward-normal buffer for the layer pass, kept to avoid a
+    /// per-frame allocation.
+    layer_normals: Vec<Vec3>,
     /// Sim-mesh triangulation driving the wind and pressure passes; empty
     /// disables both (each iterates faces).
     pub triangles: Vec<[u32; 3]>,
@@ -231,6 +242,9 @@ impl Garment {
             solver_kind: ClothSolverKind::Xpbd,
             vbd: VbdParams::default(),
             self_collision: SelfCollisionParams::default(),
+            layer_of: Vec::new(),
+            layers: LayerParams::default(),
+            layer_normals: Vec::new(),
             triangles: Vec::new(),
             wind: WindField::default(),
             aero: AeroParams::default(),
@@ -386,6 +400,23 @@ impl Garment {
                     self.self_collision.thickness,
                 );
             }
+        }
+        // Multi-layer coupling (design §6.7): when the garment carries per-
+        // particle layer numbers, keep stacked layers (shirt under jacket,
+        // lining under skirt) from interpenetrating and preserve their stacking
+        // order. Only cross-layer pairs interact; intra-layer contacts are the
+        // self-collision pass above. The outward vertex normals recomputed from
+        // the deformed mesh orient each contact so the outer layer ends up on
+        // the outward side.
+        if !self.layer_of.is_empty() && !self.triangles.is_empty() {
+            let positions = extract_positions(&self.particles);
+            accumulate_vertex_normals(&positions, &self.triangles, &mut self.layer_normals);
+            resolve_layer_coupling(
+                &mut self.particles,
+                &self.layer_of,
+                &self.layer_normals,
+                self.layers,
+            );
         }
         // Self-collision or pressure can push a particle back into a body;
         // re-project so a frame never ends inside a collider, damping the
@@ -934,6 +965,79 @@ mod tests {
             max_delta > 1.0e-4,
             "VBD and XPBD produced identical poses; the VBD path was not taken"
         );
+    }
+
+    #[test]
+    fn layer_coupling_lifts_outer_layer_to_the_outward_side() {
+        // Two stacked triangle layers: an inner sheet pinned in the y = 0 plane
+        // and an outer sheet parked just above it, well inside the separation
+        // band. Tagging the particles with layer numbers must lift the outer
+        // sheet clear along the inner's outward (+y) normal; without the tags
+        // the outer sheet stays sunk against the inner.
+        let no_gravity = SolverParams {
+            substeps: 2,
+            iterations: 1,
+            gravity: Vec3::ZERO,
+            damping: 0.0,
+            strain_limit: 0.0,
+        };
+        let build = || {
+            // Inner layer (0,1,2) pinned at y = 0; outer layer (3,4,5) free,
+            // 1 mm above — inside the 0.05 band.
+            let inner_y = 0.0;
+            let outer_y = 0.001;
+            let mk = |x: f32, y: f32, z: f32, inv: f32| ClothParticle::new(Vec3::new(x, y, z), inv);
+            let particles = alloc::vec![
+                mk(0.0, inner_y, 0.0, 0.0),
+                mk(1.0, inner_y, 0.0, 0.0),
+                mk(0.0, inner_y, 1.0, 0.0),
+                mk(0.0, outer_y, 0.0, 1.0),
+                mk(1.0, outer_y, 0.0, 1.0),
+                mk(0.0, outer_y, 1.0, 1.0),
+            ];
+            let mut g = Garment::new(particles, ConstraintGraph::default(), no_gravity);
+            // Wind both layers CCW seen from +y so the inner sheet's outward
+            // normal points up toward the outer layer it must push clear.
+            g.set_triangles(alloc::vec![[0, 2, 1], [3, 5, 4]]);
+            g.layers = LayerParams {
+                thickness: 0.05,
+                cell_size: 0.05,
+            };
+            g
+        };
+
+        // Without layer numbers the outer sheet stays sunk.
+        let mut off = build();
+        assert!(off.layer_of.is_empty());
+        off.step(1.0 / 60.0);
+        for i in 3..6 {
+            assert!(
+                off.particles[i].position.y < 0.02,
+                "no layer tags but outer vertex {i} moved: {:?}",
+                off.particles[i].position
+            );
+        }
+
+        // With layer numbers the outer sheet is lifted clear of the inner.
+        let mut on = build();
+        on.layer_of = alloc::vec![0, 0, 0, 1, 1, 1];
+        on.step(1.0 / 60.0);
+        for i in 3..6 {
+            assert!(
+                on.particles[i].position.y >= 0.05 - 1.0e-3,
+                "outer vertex {i} not lifted to the band: {:?}",
+                on.particles[i].position
+            );
+        }
+        // Inner (pinned) sheet must not have moved.
+        for i in 0..3 {
+            assert!(
+                on.particles[i].position.y.abs() < 1.0e-6,
+                "pinned inner vertex {i} drifted: {:?}",
+                on.particles[i].position
+            );
+        }
+        assert_finite(&on.particles);
     }
 
     #[test]
