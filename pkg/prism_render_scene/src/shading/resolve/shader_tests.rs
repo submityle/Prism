@@ -701,6 +701,33 @@ fn hair_frames_wesl_compiles_standalone() {
         .unwrap_or_else(|error| panic!("hair_frames.wesl failed to compile: {error}"));
 }
 
+/// Registers and compiles `hair_wind.wesl` standalone. A green result proves
+/// the GPU wind-field pre-pass kernel — the `normalize_or_zero` direction
+/// guard, the `round_away` half-away-from-zero range reduction, the `fma`
+/// Horner `sin_turns` mirroring the CPU `mul_add` chain, the gust phase mixing
+/// position and time through `GUST_SWIRL`, the phase-shifted per-axis flutter,
+/// the pinned-particle skip and the semi-implicit `acceleration * dt^2`
+/// displacement with its non-positive / non-finite `dt` guards — parses and
+/// type-checks as WESL on its own, in lock-step with the CPU golden in
+/// `prism_render_architecture::hair::wind::apply_wind`.
+#[test]
+fn hair_wind_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let hair_wind = shader_id(0x5052_4953_4d5f_4841_4952_5f57_4e44_0001);
+    cache.set_shader(
+        hair_wind,
+        Shader::from_wesl(
+            include_str!("../../shaders/hair_wind.wesl"),
+            "embedded://prism_render_scene/shaders/hair_wind.wesl",
+        ),
+    );
+
+    cache
+        .get(0, hair_wind, &[])
+        .unwrap_or_else(|error| panic!("hair_wind.wesl failed to compile: {error}"));
+}
+
 /// Registers `lighting.wesl`, `brdf.wesl` and `stylized_hair.wesl` under their
 /// canonical module paths and compiles `stylized_hair.wesl`, forcing the
 /// importer to resolve the `prism_render_scene::shaders::brdf::{...}` imports
