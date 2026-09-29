@@ -63,6 +63,7 @@ pub mod decimation;
 pub mod deep_opacity_layout;
 pub mod deep_transmittance;
 pub mod density_lod;
+pub mod dual_scattering;
 pub mod dynamics;
 pub mod frame_barriers;
 pub mod frame_bind_plan;
