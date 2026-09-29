@@ -542,3 +542,30 @@ fn hair_sim_wesl_compiles_standalone() {
         .get(0, hair_sim, &[])
         .unwrap_or_else(|error| panic!("hair_sim.wesl failed to compile: {error}"));
 }
+
+/// Compiles `hair_raster.wesl` standalone. It has no imports, so a green result
+/// proves the GPU compute software hair rasterizer — the two vis-buffer entry
+/// points (`hair_raster_depth` atomicMin nearest-depth scatter and
+/// `hair_raster_resolve` id/coverage publish), the analytic capsule sub-pixel
+/// coverage, the point-to-segment distance helper and the group-0 storage
+/// segment/vis-buffer bindings plus the `var<immediate>` `HairRasterParamsGpu`
+/// (mirroring the CPU `HairSoftRasterAbi`) all parse and type-check as WESL on
+/// their own, in lock-step with the CPU classifier/binner in
+/// `prism_render_architecture::hair::raster`.
+#[test]
+fn hair_raster_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let hair_raster = shader_id(0x5052_4953_4d5f_4841_4952_5f52_5354_0001);
+    cache.set_shader(
+        hair_raster,
+        Shader::from_wesl(
+            include_str!("../../shaders/hair_raster.wesl"),
+            "embedded://prism_render_scene/shaders/hair_raster.wesl",
+        ),
+    );
+
+    cache
+        .get(0, hair_raster, &[])
+        .unwrap_or_else(|error| panic!("hair_raster.wesl failed to compile: {error}"));
+}
