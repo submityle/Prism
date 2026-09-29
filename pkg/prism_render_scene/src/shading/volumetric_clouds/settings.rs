@@ -110,6 +110,15 @@ pub(crate) struct PrismVolumetricCloudsSettings {
     pub backward_g: f32,
     /// Forward/backward lobe blend weight `[0, 1]`.
     pub lobe_blend: f32,
+    /// `Draine` forward-peak shape parameter `alpha >= 0` for the dual-lobe
+    /// resolve. `0` collapses the forward lobe to `HG` (factory-neutral, the
+    /// phase reduces to the pure dual-lobe `HG`); larger values sharpen the
+    /// forward `Mie` peak for a crisper silver lining / glory.
+    pub draine_alpha: f32,
+    /// Forward-lobe `Draine` mix weight `[0, 1]`. `1` selects the sharp
+    /// pure-`Draine` peak, `0` the softer pure-`HG` forward lobe. Only takes
+    /// effect once `draine_alpha > 0`.
+    pub draine_weight: f32,
 
     /// Light-space shadow-march step in world units.
     pub shadow_step: f32,
@@ -166,6 +175,12 @@ impl Default for PrismVolumetricCloudsSettings {
             forward_g: 0.8,
             backward_g: -0.3,
             lobe_blend: 0.5,
+            // Opt-in Mie sharpening: alpha=0 keeps factory clouds on the pure
+            // dual-lobe HG golden; the Draine peak is fully wired and live once
+            // set. Forward mix defaults to the sharp pure-Draine peak so the
+            // effect is immediate when alpha is raised.
+            draine_alpha: 0.0,
+            draine_weight: 1.0,
 
             shadow_step: 16.0,
             shadow_density_scale: 1.0,
@@ -274,6 +289,8 @@ impl PrismVolumetricCloudsSettings {
             lobe_blend: self.lobe_blend,
             albedo: self.albedo,
             cos_theta,
+            draine_alpha: self.draine_alpha,
+            draine_weight: self.draine_weight,
         }
     }
 
@@ -354,6 +371,19 @@ mod tests {
         };
         assert_eq!(powdered.raymarch_params(lowres).powder_strength, 0.75);
         assert_eq!(rm.powder_strength, 0.0);
+        // The Draine forward-peak knobs are live tunables reaching the resolve
+        // immediate verbatim; factory-neutral alpha stays at 0.
+        let sr = s.scatter_resolve_params(lowres, 0.5);
+        assert_eq!(sr.draine_alpha, 0.0);
+        assert_eq!(sr.draine_weight, 1.0);
+        let draine = PrismVolumetricCloudsSettings {
+            draine_alpha: 1.5,
+            draine_weight: 0.75,
+            ..Default::default()
+        };
+        let sr2 = draine.scatter_resolve_params(lowres, 0.5);
+        assert_eq!(sr2.draine_alpha, 1.5);
+        assert_eq!(sr2.draine_weight, 0.75);
         let up = s.upsample_params(UVec2::new(1920, 1080), lowres, 7);
         assert_eq!(up.frame_index, 7);
         assert_eq!([up.lowres_w, up.lowres_h], [lowres.x, lowres.y]);

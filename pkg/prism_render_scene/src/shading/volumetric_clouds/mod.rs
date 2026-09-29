@@ -22,11 +22,14 @@
 //! * `volumetric_raymarch` — adaptive-step, empty-space-skipping march that
 //!   folds in the Nubis `vc_powder` dark-edge term (keyed on the accumulated
 //!   view-ray optical depth, mirroring `raymarch::integrate_segment`).
-//! * `volumetric_scatter_resolve` — dual-lobe HG phase + multiple-scattering
-//!   LUT energy-gain fold-in (the octave sum is pre-baked into the LUT above,
-//!   so this pass samples that gain rather than re-summing octaves;
-//!   `vc_hg_draine_phase` is defined in the shader math library but is not yet
-//!   wired into any on-device entry point).
+//! * `volumetric_scatter_resolve` — dual-lobe HG + Draine phase
+//!   (`vc_dual_lobe_draine_phase`: a soft `HG` backward lobe plus an
+//!   `HG-Draine` `Mie` forward lobe, mirroring `scatter::dual_lobe_draine_phase`
+//!   and consuming `vc_draine_phase` / `vc_hg_draine_phase`) + multiple-
+//!   scattering LUT energy-gain fold-in (the octave sum is pre-baked into the
+//!   LUT above, so this pass samples that gain rather than re-summing octaves).
+//!   With `draine_alpha = 0` the forward lobe collapses to `HG` and the phase
+//!   reduces exactly to the pure dual-lobe `HG`.
 //! * `volumetric_shadow_march` — light-space cloud-shadow / AVSM march.
 //! * `volumetric_upsample` — temporal reprojection + history-clamp upsample.
 //!

@@ -45,7 +45,7 @@ use prism_render_architecture::volumetric::math::{Vec2, Vec3};
 use prism_render_architecture::volumetric::multiscatter::MultiScatterLut;
 use prism_render_architecture::volumetric::raymarch::{adaptive_step, RaymarchConfig};
 use prism_render_architecture::volumetric::scatter::{
-    dual_lobe_phase, hg_phase, powder, OctaveParams,
+    dual_lobe_draine_phase, hg_phase, powder, OctaveParams,
 };
 use prism_render_architecture::volumetric::shadow::shadow_transmittance;
 use prism_render_architecture::volumetric::temporal::{
@@ -2039,6 +2039,10 @@ fn scatter_resolve_gpu_matches_cpu_golden() {
         lobe_blend: 0.7,
         albedo: 0.7,
         cos_theta: 0.25,
+        // Non-zero Draine forward-peak knobs so the on-device parity actually
+        // exercises the HG-Draine forward lobe (not just the alpha=0 HG path).
+        draine_alpha: 1.5,
+        draine_weight: 0.75,
     };
 
     // Deterministic exact-`float32` single-scatter radiance in `[0, 1]`; the
@@ -2326,10 +2330,12 @@ fn scatter_resolve_gpu_matches_cpu_golden() {
     readback.unmap();
 
     // Constant phase and constant cos/albedo `LUT` indices for every pixel.
-    let phase = dual_lobe_phase(
+    let phase = dual_lobe_draine_phase(
         params.cos_theta,
         params.forward_g,
         params.backward_g,
+        params.draine_alpha,
+        params.draine_weight,
         params.lobe_blend,
     );
     let phase_gain = phase * 4.0 * core::f32::consts::PI;

@@ -258,7 +258,7 @@ pub(crate) struct GpuRaymarchParams {
 }
 
 /// Push constants for `volumetric_scatter_resolve`. Byte-compatible with
-/// `VcScatterResolveParams` (ten 4-byte scalars = `40` bytes).
+/// `VcScatterResolveParams` (twelve 4-byte scalars = `48` bytes).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq)]
 pub(crate) struct GpuScatterResolveParams {
@@ -282,6 +282,12 @@ pub(crate) struct GpuScatterResolveParams {
     pub albedo: f32,
     /// View-to-light cosine `cos(theta)` for the phase evaluation.
     pub cos_theta: f32,
+    /// `Draine` forward-peak shape parameter `alpha >= 0`; `0` reduces the
+    /// forward lobe to `HG` and the phase to the pure dual-lobe `HG`.
+    pub draine_alpha: f32,
+    /// Forward-lobe `Draine` mix weight `[0, 1]`; `1` selects the sharp
+    /// pure-`Draine` peak, `0` the softer pure-`HG` forward lobe.
+    pub draine_weight: f32,
 }
 
 /// Push constants for `volumetric_shadow_march`. Byte-compatible with
@@ -422,10 +428,10 @@ mod tests {
         assert_eq!(align_of::<GpuRaymarchParams>(), 4);
     }
 
-    /// `volumetric_scatter_resolve`: ten 4-byte scalars.
+    /// `volumetric_scatter_resolve`: twelve 4-byte scalars.
     #[test]
     fn scatter_resolve_params_size() {
-        assert_eq!(size_of::<GpuScatterResolveParams>(), 40);
+        assert_eq!(size_of::<GpuScatterResolveParams>(), 48);
         assert_eq!(align_of::<GpuScatterResolveParams>(), 4);
     }
 

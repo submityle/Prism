@@ -21,8 +21,8 @@
 //     low-res view march with empty-space skip + early-out, mirroring
 //     `raymarch::{adaptive_step, integrate_segment, march}`.
 //   * `volumetric_scatter_resolve`   (@workgroup_size(8,8,1)) — folds the
-//     multi-scatter LUT + dual-lobe phase into the march result, mirroring
-//     `scatter::{dual_lobe_phase, octave_scatter}`.
+//     multi-scatter LUT + dual-lobe HG+Draine phase into the march result,
+//     mirroring `scatter::{dual_lobe_draine_phase, octave_scatter}`.
 //   * `volumetric_shadow_march`      (@workgroup_size(8,8,1)) — light-space
 //     cloud-shadow / AVSM march, mirroring `shadow::{accumulate_shadow,
 //     shadow_transmittance}`.
@@ -437,6 +437,22 @@ fn vc_hg_draine_phase(cos_theta: f32, g_hg: f32, g_draine: f32, alpha: f32, hg_w
     let hg = vc_hg_phase(cos_theta, g_hg);
     let draine = vc_draine_phase(cos_theta, g_draine, alpha);
     return vc_lerp(draine, hg, vc_saturate(hg_weight));
+}
+
+// `scatter::dual_lobe_draine_phase`: soft HG backward lobe + HG-Draine Mie
+// forward lobe (single forward eccentricity), mixed by `blend`. `alpha = 0`
+// collapses the forward lobe to HG and the whole phase to `vc_dual_lobe_phase`.
+fn vc_dual_lobe_draine_phase(
+    cos_theta: f32,
+    g_forward: f32,
+    g_backward: f32,
+    alpha: f32,
+    draine_weight: f32,
+    blend: f32,
+) -> f32 {
+    let backward = vc_hg_phase(cos_theta, g_backward);
+    let forward = vc_hg_draine_phase(cos_theta, g_forward, g_forward, alpha, 1.0 - vc_saturate(draine_weight));
+    return vc_lerp(backward, forward, vc_saturate(blend));
 }
 
 // `scatter::powder`.
@@ -953,6 +969,8 @@ struct VcScatterResolveParams {
     lobe_blend: f32,
     albedo: f32,
     cos_theta: f32,
+    draine_alpha: f32,
+    draine_weight: f32,
 }
 
 var<immediate> vc_resolve_params: VcScatterResolveParams;
@@ -984,11 +1002,13 @@ fn volumetric_scatter_resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
     let transmittance = lowres.w;
     // Optical depth recovered from the surviving transmittance (`-ln T`).
     let optical_depth = -log(max(transmittance, VC_EPS));
-    // Dual-lobe phase weighting + multi-scatter energy gain fold-in.
-    let phase = vc_dual_lobe_phase(
+    // Dual-lobe HG + Draine phase weighting + multi-scatter energy gain fold-in.
+    let phase = vc_dual_lobe_draine_phase(
         vc_resolve_params.cos_theta,
         vc_resolve_params.forward_g,
         vc_resolve_params.backward_g,
+        vc_resolve_params.draine_alpha,
+        vc_resolve_params.draine_weight,
         vc_resolve_params.lobe_blend,
     );
     let gain = vc_sr_lut_sample(vc_resolve_params.cos_theta, optical_depth, vc_resolve_params.albedo);
