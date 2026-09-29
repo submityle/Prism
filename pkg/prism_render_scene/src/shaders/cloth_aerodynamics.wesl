@@ -159,5 +159,10 @@ fn cloth_aerodynamics(@builtin(global_invocation_id) gid: vec3<u32>) {
         );
         accum = accum + force * (1.0 / 3.0);
     }
-    velocities[v] = vec4<f32>(velocities[v].xyz + accum * inv_mass * dt, velocities[v].w);
+    // 与 arch 黄金 `accumulate_aero_gather` 逐位对齐：黄金按 `accum.scale(inverse_mass * dt)`
+    // 先把两个标量相乘、再缩放向量。浮点乘法不满足结合律，若此处写成
+    // `accum * inv_mass * dt`（即 `(accum * inv_mass) * dt`）会与黄金产生 1 ULP
+    // 偏差、破坏 CPU/GPU 逐位 parity；故先算标量积 `inv_mass * dt` 再缩放向量。
+    let mass_dt = inv_mass * dt;
+    velocities[v] = vec4<f32>(velocities[v].xyz + accum * mass_dt, velocities[v].w);
 }
