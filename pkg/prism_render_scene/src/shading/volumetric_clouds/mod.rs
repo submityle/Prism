@@ -50,6 +50,7 @@
 
 mod abi;
 mod pipeline;
+mod resources;
 mod settings;
 
 #[cfg(test)]
