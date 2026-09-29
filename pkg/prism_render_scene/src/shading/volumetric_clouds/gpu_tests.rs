@@ -42,12 +42,18 @@ use wgpu::{
 use prism_render_architecture::volumetric::math::{Vec2, Vec3};
 use prism_render_architecture::volumetric::multiscatter::MultiScatterLut;
 use prism_render_architecture::volumetric::scatter::OctaveParams;
+use prism_render_architecture::volumetric::temporal::{
+    active_pixel, clamp_history, variance_clip, UpscaleMode,
+};
 use prism_render_architecture::volumetric::weather::{advect_semi_lagrangian, WeatherField};
 use prism_render_architecture::volumetric::{
     modeling, noise, CloudKind, WeatherMapHandle, WeatherSample,
 };
 
-use super::abi::{GpuModelingParams, GpuMsLutParams, GpuNoiseBakeParams, GpuWeatherAdvectParams};
+use super::abi::{
+    GpuModelingParams, GpuMsLutParams, GpuNoiseBakeParams, GpuUpsampleParams,
+    GpuWeatherAdvectParams,
+};
 
 /// Absolute per-voxel tolerance for the `GPU`-versus-`CPU` comparison.
 ///
@@ -1304,5 +1310,382 @@ fn weather_advect_gpu_matches_cpu_golden() {
         checked,
         WIDTH * HEIGHT,
         "every weather cell must be compared"
+    );
+}
+
+/// One on-device temporal upsample / history-rectification step must match the
+/// `CPU` golden twin to within `fp16` storage rounding.
+///
+/// The `volumetric_upsample` kernel reconstructs each full-resolution pixel
+/// from its low-resolution ray-march sample and reprojected history: freshly
+/// active pixels ([`active_pixel`]) take the current sample directly, while the
+/// rest run the anti-ghosting path — a variance box clip ([`variance_clip`]), a
+/// neighbourhood [`clamp_history`], then a fixed one-half blend toward the
+/// current sample. Every operation is `min`/`max`/`clamp`/`lerp` arithmetic in
+/// `float32` with no `exp`/`pow`, and both inputs upload as exact `rgba32float`,
+/// so the sole divergence is the final `rgba16float` store. `QuarterRes` mode at
+/// this frame index leaves three quarters of the grid on the reconstruction
+/// path and one quarter fresh, exercising both branches.
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice must reach the test log on hosts without an immediate-data adapter"
+)]
+fn upsample_gpu_matches_cpu_golden() {
+    let Some((device, queue)) = try_cloud_device() else {
+        eprintln!(
+            "upsample_gpu_matches_cpu_golden: no immediate-data wgpu adapter, skipping on-device parity"
+        );
+        return;
+    };
+
+    // Screen width is a multiple of 32 so the `rgba16float` output row
+    // (8 bytes/texel) meets the 256-byte copy alignment; both screen extents are
+    // multiples of the (8, 8, 1) workgroup so no invocation is masked.
+    const SCREEN_W: u32 = 32;
+    const SCREEN_H: u32 = 8;
+    const LOWRES_W: u32 = 16;
+    const LOWRES_H: u32 = 4;
+    const OUT_BYTES_PER_TEXEL: u32 = 8;
+
+    let params = GpuUpsampleParams {
+        screen_w: SCREEN_W,
+        screen_h: SCREEN_H,
+        lowres_w: LOWRES_W,
+        lowres_h: LOWRES_H,
+        // QuarterRes (discriminant 2 in both the `WESL` switch and the `CPU`
+        // `active_pixel`); frame 1 leaves the `x`-odd / `y`-even quarter fresh.
+        frame_index: 1,
+        mode: 2,
+        variance_gamma: 1.0,
+    };
+    let cpu_mode = UpscaleMode::QuarterRes;
+
+    // Deterministic exact-`float32` low-resolution and history channels the
+    // `CPU` golden re-derives verbatim; all values lie in `[0, 1]`.
+    fn lowres_at(x: u32, y: u32) -> [f32; 4] {
+        [
+            ((x * 5 + y * 3) % 11) as f32 / 10.0,
+            ((x * 7 + y * 2) % 9) as f32 / 8.0,
+            ((x * 2 + y * 13) % 7) as f32 / 6.0,
+            ((x * 3 + y * 5) % 13) as f32 / 12.0,
+        ]
+    }
+    fn history_at(x: u32, y: u32) -> [f32; 4] {
+        [
+            ((x * 11 + y * 4) % 13) as f32 / 12.0,
+            ((x * 3 + y * 9) % 7) as f32 / 6.0,
+            ((x * 6 + y * 5) % 5) as f32 / 4.0,
+            ((x * 8 + y * 2) % 9) as f32 / 8.0,
+        ]
+    }
+
+    // Upload buffers, dense `rgba32float`.
+    let lowres_count = (LOWRES_W * LOWRES_H) as usize;
+    let mut lowres_data = vec![0.0f32; lowres_count * 4];
+    let mut ly = 0u32;
+    while ly < LOWRES_H {
+        let mut lx = 0u32;
+        while lx < LOWRES_W {
+            let m = (ly * LOWRES_W + lx) as usize;
+            let v = lowres_at(lx, ly);
+            lowres_data[4 * m..4 * m + 4].copy_from_slice(&v);
+            lx += 1;
+        }
+        ly += 1;
+    }
+    let screen_count = (SCREEN_W * SCREEN_H) as usize;
+    let mut history_data = vec![0.0f32; screen_count * 4];
+    let mut y = 0u32;
+    while y < SCREEN_H {
+        let mut x = 0u32;
+        while x < SCREEN_W {
+            let m = (y * SCREEN_W + x) as usize;
+            let v = history_at(x, y);
+            history_data[4 * m..4 * m + 4].copy_from_slice(&v);
+            x += 1;
+        }
+        y += 1;
+    }
+
+    let wgsl = compile_clouds_wgsl();
+    let entry = find_entry_point(&wgsl, "upsample");
+    let module = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("volumetric_upsample_parity"),
+        source: ShaderSource::Wgsl(wgsl.as_str().into()),
+    });
+
+    // Explicit `@group(0)` layout mirroring the upsample kernel: binding 15 =
+    // low-res sample input, 16 = history input, 17 = write-only `rgba16float`
+    // output. The pipeline layout's immediate range spans the full
+    // `GpuUpsampleParams` block (auto layout misreflects the immediate size on
+    // this driver).
+    let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+        label: Some("vc_upsample_bind_group_layout"),
+        entries: &[
+            BindGroupLayoutEntry {
+                binding: 15,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Texture {
+                    sample_type: TextureSampleType::Float { filterable: false },
+                    view_dimension: TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            BindGroupLayoutEntry {
+                binding: 16,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Texture {
+                    sample_type: TextureSampleType::Float { filterable: false },
+                    view_dimension: TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            BindGroupLayoutEntry {
+                binding: 17,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::StorageTexture {
+                    access: StorageTextureAccess::WriteOnly,
+                    format: TextureFormat::Rgba16Float,
+                    view_dimension: TextureViewDimension::D2,
+                },
+                count: None,
+            },
+        ],
+    });
+    let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+        label: Some("vc_upsample_pipeline_layout"),
+        bind_group_layouts: &[Some(&bind_group_layout)],
+        immediate_size: size_of::<GpuUpsampleParams>() as u32,
+    });
+    let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("volumetric_upsample_parity"),
+        layout: Some(&pipeline_layout),
+        module: &module,
+        entry_point: Some(&entry),
+        compilation_options: PipelineCompilationOptions::default(),
+        cache: None,
+    });
+
+    let lowres_tex = device.create_texture(&TextureDescriptor {
+        label: Some("vc_us_lowres_in"),
+        size: Extent3d {
+            width: LOWRES_W,
+            height: LOWRES_H,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: TextureFormat::Rgba32Float,
+        usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let history_tex = device.create_texture(&TextureDescriptor {
+        label: Some("vc_us_history_in"),
+        size: Extent3d {
+            width: SCREEN_W,
+            height: SCREEN_H,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: TextureFormat::Rgba32Float,
+        usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let out_tex = device.create_texture(&TextureDescriptor {
+        label: Some("vc_us_out"),
+        size: Extent3d {
+            width: SCREEN_W,
+            height: SCREEN_H,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: TextureFormat::Rgba16Float,
+        usage: TextureUsages::STORAGE_BINDING | TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+
+    queue.write_texture(
+        TexelCopyTextureInfo {
+            texture: &lowres_tex,
+            mip_level: 0,
+            origin: Origin3d::ZERO,
+            aspect: TextureAspect::All,
+        },
+        bytemuck::cast_slice(&lowres_data),
+        TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(LOWRES_W * 16),
+            rows_per_image: Some(LOWRES_H),
+        },
+        Extent3d {
+            width: LOWRES_W,
+            height: LOWRES_H,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.write_texture(
+        TexelCopyTextureInfo {
+            texture: &history_tex,
+            mip_level: 0,
+            origin: Origin3d::ZERO,
+            aspect: TextureAspect::All,
+        },
+        bytemuck::cast_slice(&history_data),
+        TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(SCREEN_W * 16),
+            rows_per_image: Some(SCREEN_H),
+        },
+        Extent3d {
+            width: SCREEN_W,
+            height: SCREEN_H,
+            depth_or_array_layers: 1,
+        },
+    );
+
+    let lowres_view = lowres_tex.create_view(&TextureViewDescriptor::default());
+    let history_view = history_tex.create_view(&TextureViewDescriptor::default());
+    let out_view = out_tex.create_view(&TextureViewDescriptor::default());
+    let bind_group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("vc_upsample_bind_group"),
+        layout: &bind_group_layout,
+        entries: &[
+            BindGroupEntry {
+                binding: 15,
+                resource: BindingResource::TextureView(&lowres_view),
+            },
+            BindGroupEntry {
+                binding: 16,
+                resource: BindingResource::TextureView(&history_view),
+            },
+            BindGroupEntry {
+                binding: 17,
+                resource: BindingResource::TextureView(&out_view),
+            },
+        ],
+    });
+
+    let row_bytes = SCREEN_W * OUT_BYTES_PER_TEXEL;
+    let readback_size = u64::from(row_bytes * SCREEN_H);
+    let readback = device.create_buffer(&BufferDescriptor {
+        label: Some("vc_upsample_readback"),
+        size: readback_size,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("vc_upsample_parity_encoder"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("vc_upsample_parity_pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.set_immediates(0, bytemuck::bytes_of(&params));
+        pass.dispatch_workgroups(SCREEN_W / 8, SCREEN_H / 8, 1);
+    }
+    encoder.copy_texture_to_buffer(
+        TexelCopyTextureInfo {
+            texture: &out_tex,
+            mip_level: 0,
+            origin: Origin3d::ZERO,
+            aspect: TextureAspect::All,
+        },
+        TexelCopyBufferInfo {
+            buffer: &readback,
+            layout: TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row_bytes),
+                rows_per_image: Some(SCREEN_H),
+            },
+        },
+        Extent3d {
+            width: SCREEN_W,
+            height: SCREEN_H,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit([encoder.finish()]);
+
+    readback.slice(..).map_async(MapMode::Read, |_| {});
+    device
+        .poll(PollType::wait_indefinitely())
+        .expect("device poll should complete the submitted work");
+
+    let view = readback
+        .slice(..)
+        .get_mapped_range()
+        .expect("mapped readback range should be available after poll");
+    let halves: Vec<u16> = bytemuck::cast_slice::<u8, u16>(&view).to_vec();
+    drop(view);
+    readback.unmap();
+
+    // Row is dense (row_bytes == SCREEN_W * 8), so pixel (x, y) maps to texel
+    // n = y*SCREEN_W + x with channel c at half-word 4*n + c.
+    let mut checked = 0u32;
+    let mut y = 0u32;
+    while y < SCREEN_H {
+        let mut x = 0u32;
+        while x < SCREEN_W {
+            let n = (y * SCREEN_W + x) as usize;
+            let gpu = [
+                f16_to_f32(halves[4 * n]),
+                f16_to_f32(halves[4 * n + 1]),
+                f16_to_f32(halves[4 * n + 2]),
+                f16_to_f32(halves[4 * n + 3]),
+            ];
+
+            // Reproduce the kernel: integer low-res address, then the fresh /
+            // reconstruction split.
+            let lx = (x * LOWRES_W / SCREEN_W.max(1)).min(LOWRES_W - 1);
+            let ly2 = (y * LOWRES_H / SCREEN_H.max(1)).min(LOWRES_H - 1);
+            let current = lowres_at(lx, ly2);
+            let history = history_at(x, y);
+            let cpu = if active_pixel(params.frame_index, x, y, cpu_mode) {
+                current
+            } else {
+                let mean = current[0];
+                let sd = (current[0] - history[0]).abs();
+                let clipped = variance_clip(history[0], mean, sd, params.variance_gamma);
+                let clamped = clamp_history(
+                    clipped,
+                    current[0].min(history[0]),
+                    current[0].max(history[0]),
+                );
+                let blended = clamped + (current[0] - clamped) * 0.5;
+                [blended, blended, blended, current[3]]
+            };
+
+            let mut c = 0usize;
+            while c < 4 {
+                let d = (gpu[c] - cpu[c]).abs();
+                assert!(
+                    d < PARITY_EPS,
+                    "pixel ({x}, {y}) channel {c}: gpu={} cpu={} |d|={d}",
+                    gpu[c],
+                    cpu[c],
+                );
+                c += 1;
+            }
+            checked += 1;
+            x += 1;
+        }
+        y += 1;
+    }
+    assert_eq!(
+        checked,
+        SCREEN_W * SCREEN_H,
+        "every full-resolution pixel must be compared"
     );
 }
