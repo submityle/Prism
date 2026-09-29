@@ -279,12 +279,12 @@ specialization_id: u64   // 由上面轴的合法排列特化产出
 |---|---|---|---|---|
 | **motion vector** | `screen_space/motion.rs`、`screen_space/temporal.rs` | `motion_vector`/`MotionSample`/`project_world_to_screen`；`reproject_prev_uv_motion(uv, motion)`（相机+逐物体运动统一重投影） | ✅ 已落地 | UE velocity G-buffer |
 | **TAA / 时序上采样** | `taa/{jitter,resolve}.rs`、`upscale/{history,robust,reproject}.rs` | `taa_jitter`/`halton`/`resolve_taa`（YCoCg 邻域裁剪 + tonemap 权重）；`HistoryLock`/`update_lock`/`clip_history_neighbourhood`/`disocclusion_history_weight`（history lock 遇 disocclusion 融化 + 薄特征保护） | ✅ 已落地（FSR2 式） | FSR2 / UE TSR |
-| **reactive / stencil mask** | —— | 粒子/透明/NPR/毛发要标"别被 TAA 吃掉"的响应权重，喂给 `resolve_taa`/`disocclusion_history_weight` 做逐像素放宽 | ⏳ **未落地（真出血点）**：motion+history-lock 的地基已有，缺的是**把 reactive 权重接进 resolve 的那一步** + 粒子/透明写 mask 的生产端 | FSR2 reactive mask / UE responsive AA |
+| **reactive / stencil mask** | 生产端：`transparency/routing.rs`（`writes_reactive_mask`）、`particle/shading.rs`（`reactive_mask`/`temporally_unstable`）、`motion/mod.rs`（`MotionSample.reactive`）；消费端：`taa/` | 粒子/透明/NPR/毛发标"别被 TAA 吃掉"的响应权重，喂给 `resolve_taa`/`disocclusion_history_weight` 做逐像素放宽 | 🟡 **生产端已落地、消费端待接**：透明路由/粒子着色/motion 均已产出 reactive 权重字段，**仍缺把该权重读进 `taa/` resolve 的那一步**（`taa/` 目录内暂无 reactive 引用） | FSR2 reactive mask / UE responsive AA |
 | **OIT** | `oit.rs` | `OitFragment`/`oit_weight(view_depth, alpha)`/`OitAccumulation`/`composite_transparency`（Weighted-Blended OIT，深度加权） | ✅ 已落地（WBOIT，公共设施非子系统） | McGuire-Bavoil WBOIT |
 | **RT / SS 去噪** | `screen_space/gi_denoise.rs`、`ao/{temporal,denoise}.rs` | `denoise_ssgi`/`SsgiDenoiseConfig`/`denoise_ssgi_pixel`；`reproject_prev_uv_gtao` | ✅ SS 侧已落地（RT 去噪共享此器，NPR 单独调参见 §4.2 B 类） | 时空联合去噪 |
 | **能力分层 / fallback** | `prism_render_architecture/src/backend/` | 见 §8 三档协商 + fallback 矩阵 | ✅ 已落地 | UE RHI feature level |
 
-**为什么这些必须"解一次"**：motion/OIT/去噪/TAA history 都是**逐像素跨前端共享的时序或合成资源**，任一前端各造一份就会算法漂移 + 显存翻倍 + 互相打架（尤其 TAA×粒子/透明）。**当前真·出血点收敛为 reactive mask 的接线**——motion 与 FSR2 式 history-lock 地基都已落地，缺的只是把 reactive 权重接进 `resolve_taa`/`disocclusion_history_weight` 的那一小步 + 粒子/透明子系统写 mask 的生产端（§11 粒子竖切会逼出这条线）。OIT/去噪已是可复用公共设施，不得被误建成并列子系统。
+**为什么这些必须"解一次"**：motion/OIT/去噪/TAA history 都是**逐像素跨前端共享的时序或合成资源**，任一前端各造一份就会算法漂移 + 显存翻倍 + 互相打架（尤其 TAA×粒子/透明）。**当前真·出血点进一步收敛为 reactive mask 的消费端接线**——motion、FSR2 式 history-lock、以及透明/粒子/motion 的 reactive **生产端**均已落地，缺的只剩把已产出的 reactive 权重读进 `taa/` resolve（`resolve_taa`/`disocclusion_history_weight`）的那一小步（§11 粒子竖切收尾会逼出这条线）。OIT/去噪已是可复用公共设施，不得被误建成并列子系统。
 
 ---
 
@@ -396,7 +396,7 @@ fallback:              strand 高配, card 基线; RT 反射里毛发用 proxy �
 - **NPR 一等公民无成熟范式**：PBR 侧有 UE/业界抄作业，**NPR 一等前端这条基本得自己趟**——这是全设计风险最高、参考最少的部分（顶级二次元 NPR 大作多为自研或魔改引擎，不用 UE 招牌管线）。
 - **已放弃 Slang（2026-09-29 定案，见 §2）**：其唯一独占价值（shader/CPU-golden 单源）建立在"存在需长期对齐的真实 CPU 路径"上，而实测 CPU 参考只是测试脚手架、漂移面很小；成本却是一整套 shader 构建子系统 + 联网装 slangc（本机装不上）。收益/成本倒挂，直接砍掉。着色器维持 WESL，跨平台交 wgpu。将来若 compute 核心 shader/CPU 孪生真的维护痛，再评估（且 Slang 非唯一选项）。
 - **strand 毛发是 AAA 最重特性之一**：card 基线务实、strand 高配可选，别一上来就 strand。
-- **真正的 blocker 不在材质模型**（业界已收敛），也不在运行时后端（**wgpu 已提供跨平台运行时**），也不在着色器语言（**WESL 已够，Slang 已放弃**，见 §2）。真·出血点是 **① 大量效果仍是桩、未上 frame graph（功能层面的最大出血点）+ ② vis-buffer 基底只完成了 CPU 决策层，GPU 光栅后端未落地**。`virtual_geometry` 已从早期 22 行 stub 演进为 ~1968 行、10 文件的 CPU 侧决策层（cull/lod/page_table/raster_path/pipeline/hierarchy/bins/page_request/frame，确定性、后端无关、可单测），但**物理页存储、vis-buffer 软/硬光栅、流式 I/O 仍在 backend 待建**（见 mod.rs 边界声明）。历史上先误判为"Vulkan 后端"、再误判为"Slang 工具链"，实为**桩接管线 + vis-buffer GPU 后端**。
+- **真正的 blocker 不在材质模型**（业界已收敛），也不在运行时后端（**wgpu 已提供跨平台运行时**），也不在着色器语言（**WESL 已够，Slang 已放弃**，见 §2）。真·出血点已随并发施工收敛为两条：**① vis-buffer 基底只完成了 CPU 决策层，GPU 光栅后端未落地（功能层面最大出血点）+ ② reactive mask 消费端未接进 TAA resolve**。原先「大量效果仍是桩、未上 frame graph」已大幅缓解——outline/halftone/kuwahara/hatching/ssgi/world_space_gi/virtual_shadow 等已成全套 Core3d dispatch 节点上图（见 §11 第 1 步）。`virtual_geometry` 已从早期 22 行 stub 演进为 ~1968 行、10 文件的 CPU 侧决策层（cull/lod/page_table/raster_path/pipeline/hierarchy/bins/page_request/frame，确定性、后端无关、可单测），但**物理页存储、vis-buffer 软/硬光栅、流式 I/O 仍在 backend 待建**（见 mod.rs 边界声明）。历史上先误判为"Vulkan 后端"、再误判为"Slang 工具链"，实为**桩接管线 + vis-buffer GPU 后端**。
 
 ### 与 UE 的关系（定位参考）
 
@@ -412,7 +412,7 @@ fallback:              strand 高配, card 基线; RT 反射里毛发用 proxy �
 **跨平台策略（2026-09-29 定案）：竖切跑在 wgpu 上（Metal/Web 就地可测），不等原生 Vulkan；着色器用 WESL（经 naga 编各后端）。已放弃 Slang（§2）。**
 **优先级：真·第一优先是把已有桩效果接上 frame graph（0 行新语言层依赖）+ 补 vis-buffer 的 GPU 光栅后端（CPU 决策层 `virtual_geometry` 已落地 ~1968 行，缺物理页存储/软硬光栅/流式 I/O），不是任何 shader 语言工作。**
 
-1. **桩接管线（第一优先，纯 WESL）**：把已有桩效果接成活管线，**outline 先行**（消费端 composite 已活、零新基建、ROI 最高）——抄 SSR 先例：params ABI → per-view line target → compute pipeline → Core3d node → composite mix。之后 light_routing → halftone/kuwahara。
+1. **（大部已完成）桩接管线（纯 WESL）**：把桩效果接成活管线——**outline 已落地**（`pkg/prism_render_scene/src/shading/outline/`：abi/settings/pipeline/bind_groups/resources/dispatch 共 ~767 行，Core3d compute pass 消费 vis-buffer + SSR 深度/法线，输出拷回 `scene_color`）；**halftone/kuwahara/hatching 亦已落地**（各自成 abi/pipeline/dispatch/settings 全套 Core3d 节点）。**剩余**：`light_routing` 目前只有 `mod.rs`（数据服务逻辑 + WESL + 测试），尚未包装成独立 Core3d dispatch 节点——若需作为可视 pass 呈现则补一个 dispatch，否则维持数据服务被上层消费即可。
 2. **极薄竖切**：wgpu → 蒙皮(支柱四地基) → vis-buffer → material id → **一个 PBR 延迟着色 + 一个 NPR forward 着色**，点亮光照/阴影**数据服务最小版**（一盏方向光 + 一张 VSM）。
 3. **材质 ABI 破坏性重构**（§9 第 1–3 步），用竖切验证正交轴 + specialization；ABI 用手写 `#[repr(C)]` + 哈希版本 + 对齐测试。
 4. **粒子子系统**：优先，因为它带起 reactive mask（§5 最该早做的基底）。
