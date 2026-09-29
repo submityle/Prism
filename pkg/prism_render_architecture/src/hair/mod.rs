@@ -56,6 +56,7 @@ pub mod analysis_buffers;
 pub mod analysis_dispatch;
 pub mod analysis_pass_layout;
 pub mod analysis_readback;
+pub mod async_pipeline;
 pub mod binding;
 pub mod collision;
 pub mod decimation;
