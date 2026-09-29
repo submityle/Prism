@@ -56,6 +56,9 @@ mod resources;
 mod settings;
 
 #[cfg(test)]
+mod gpu_tests;
+
+#[cfg(test)]
 mod shader_tests;
 
 pub(crate) use bind_groups::{
