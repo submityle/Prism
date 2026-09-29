@@ -1,5 +1,7 @@
 //! Material IR, runtime records, and closure contracts.
 
+pub mod resolve;
+
 use crate::{abi::GenerationalHandle, shader_package::ShaderPackageId};
 
 pub type MaterialHandle = GenerationalHandle;
