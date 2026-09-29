@@ -64,6 +64,7 @@ pub mod gpu_buffers;
 pub mod gpu_dispatch;
 pub mod groom;
 pub mod groom_import;
+pub mod import_buffers;
 pub mod interp_buffers;
 pub mod interpolation;
 pub mod lod;
