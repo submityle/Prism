@@ -1,8 +1,9 @@
 use core::fmt;
 
+use super::transient::TransientAllocation;
 use super::{
     AccessKind, Barrier, PassDescriptor, PassId, QueueBatch, ResourceDescriptor, ResourceId,
-    ResourceLifetime, ResourceVersion,
+    ResourceVersion,
 };
 
 mod schedule;
@@ -31,6 +32,10 @@ pub struct CompiledGpuFrameGraph {
     pub transient_offsets: Vec<Option<u64>>,
     pub submission_count: u32,
     pub transient_bytes: u64,
+    /// Validated, aliased transient-heap allocation plan (see
+    /// [`TransientAllocation`]). `transient_offsets` / `transient_bytes` are
+    /// derived views of this plan, kept for existing consumers.
+    pub transient: TransientAllocation,
 }
 
 impl CompiledGpuFrameGraph {
@@ -43,16 +48,16 @@ impl CompiledGpuFrameGraph {
         let execution_order = topological_order(&dependencies)?;
         let (resource_versions, barriers) = hazards(passes, &execution_order);
         let queue_batches = queue_batches(passes, &execution_order, &dependencies);
-        let (transient_offsets, transient_bytes) =
-            transient_layout(resources, passes, &execution_order);
+        let transient = TransientAllocation::plan(resources, passes, &execution_order);
         Ok(Self {
             execution_order,
             resource_versions,
             barriers,
             submission_count: queue_batches.len() as u32,
             queue_batches,
-            transient_offsets,
-            transient_bytes,
+            transient_offsets: transient.offsets(),
+            transient_bytes: transient.heap_bytes(),
+            transient,
         })
     }
 }
@@ -130,51 +135,4 @@ fn hazards(passes: &[PassDescriptor], order: &[PassId]) -> (Vec<ResourceVersion>
         }
     }
     (versions, barriers)
-}
-
-fn transient_layout(
-    resources: &[ResourceDescriptor],
-    passes: &[PassDescriptor],
-    order: &[PassId],
-) -> (Vec<Option<u64>>, u64) {
-    let mut lifetimes = vec![None::<(u32, u32)>; resources.len()];
-    for (position, &pass_id) in order.iter().enumerate() {
-        for access in &passes[pass_id.0 as usize].accesses {
-            let life = &mut lifetimes[access.resource.0 as usize];
-            *life = Some(
-                life.map_or((position as u32, position as u32), |(first, _)| {
-                    (first, position as u32)
-                }),
-            );
-        }
-    }
-    let mut cursor = 0_u64;
-    let mut offsets = vec![None; resources.len()];
-    let mut blocks: Vec<(u64, u64, u32)> = Vec::new();
-    let mut pending: Vec<_> = resources
-        .iter()
-        .enumerate()
-        .filter_map(|(index, resource)| {
-            (resource.lifetime == ResourceLifetime::Transient)
-                .then(|| lifetimes[index].map(|life| (index, life)))
-                .flatten()
-        })
-        .collect();
-    pending.sort_by_key(|(index, (first, _))| (*first, *index));
-    for (index, (first, last)) in pending {
-        let resource = &resources[index];
-        let alignment = resource.alignment.max(1);
-        if let Some(block) = blocks.iter_mut().find(|(offset, size, available_after)| {
-            *available_after < first && *size >= resource.size && *offset % alignment == 0
-        }) {
-            offsets[index] = Some(block.0);
-            block.2 = last;
-        } else {
-            cursor = cursor.div_ceil(alignment) * alignment;
-            offsets[index] = Some(cursor);
-            blocks.push((cursor, resource.size, last));
-            cursor += resource.size;
-        }
-    }
-    (offsets, cursor)
 }
