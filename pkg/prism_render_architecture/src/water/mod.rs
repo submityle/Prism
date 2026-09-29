@@ -56,6 +56,7 @@ pub mod coupling_frame;
 pub mod dispersion;
 pub mod flip;
 pub mod foam;
+pub mod gpu;
 pub mod kernels;
 pub mod ocean_lod;
 pub mod optics;
