@@ -155,7 +155,7 @@ specialization_id: u64   // 由上面轴的合法排列特化产出
 
 **动机（未变）**：旧 `GpuSurfaceParameters` 是 18 字段胖结构，每像素无差别携带 clearcoat/sheen/subsurface/transmission 等它可能永远用不到的瓣——既是性能坑（每像素都为不存在的瓣付带宽/寄存器），又是建模谎言（暗示每个面都有全部瓣）。ABI v4 把它拆成 **OpenPBR 锚定的紧凑 über 核心 + 按瓣可选 blob**，只为真正存在的瓣付代价。
 
-**`GpuMaterialHeader`（`#[repr(C)]` + `bytemuck::Pod`，21 个 u32 字段）**：旧 `shading_model` 字段已删除，风格由 `illumination` 承载，编译期 permutation 身份由 `specialization_low`/`specialization_high`（切分的 `SpecializationId`）承载。关键字段：
+**`GpuMaterialHeader`（`#[repr(C)]` + `bytemuck::Pod`，20 个 u32 字段）**：旧 `shading_model` 字段已删除，风格由 `illumination` 承载，编译期 permutation 身份由 `specialization_low`/`specialization_high`（切分的 `SpecializationId`）承载。关键字段：
 
 - `parameter_offset`：**变长字堆里本材质打包 surface block 的 u32 字地址**（不再是定长 `GpuSurfaceParameters` 数组的元素下标）——因为块是变长的，场景只打包 über 核心 + 存在的瓣。
 - `parameter_size`：该块字节长度 = `(12 + present_lobes*4) * 4`（`packed_size_bytes()`）。
