@@ -5,13 +5,25 @@
 > Prism 基线：当前工作区 `0.20.0-dev`  
 > UE 源码位置：<https://github.com/EpicGames/UnrealEngine>（仅远程访问，不拉入 Prism 工作区）  
 > 已核对远程基线：`release` 当前为 UE 5.8.2，commit `16d75d84714512edfb744e1fd0a59e9c74d57873`  
-> 目标平台：现代桌面 Vulkan 1.3  
+> 目标平台：**跨平台**（wgpu 后端：macOS/iOS = Metal、Linux/Windows = Vulkan、Windows = DX12、Web = WebGPU）；开发主力机为 macOS（Metal）  
 > 发布范围：内部自用  
 > 质量目标：锁定 UE 基准版本后，在约定场景中达到 UE 同等级画质
 
+## 0. 方向修正（2026-09-29）
+
+> **本文原以"Vulkan 优先 / Vulkan 专用后端"为主线，现更正为"跨平台优先"。**
+>
+> 起因：早期规划误以为 macOS 原生支持 Vulkan，因此把 Vulkan 当作首要目标后端。事实是 **macOS 没有原生 Vulkan**，只能经 MoltenVK 在 Metal 之上翻译，性能与可维护性都不宜作为主路径。真正的需求是**跨平台**：一套代码在 macOS(Metal)、Linux/Windows(Vulkan)、Windows(DX12)、Web(WebGPU) 上都能跑。
+>
+> 因此当前采用的底座是 **单一 `wgpu + WESL` 层**：对上提供统一 API 与单一着色语言，对下由 wgpu 映射到各平台原生后端。这也与代码里"放弃 Slang、删除 `prism_render_slang`、回归 wgpu + WESL 单语言层"的实际实现方向一致。
+>
+> 阅读下文时请按此口径理解：凡提到 "Vulkan 专用后端 / Vulkan advanced layer / 目标 Vulkan 能力 / Vulkan 1.3 Driver" 之处，均应视为**"wgpu 的其中一个后端(Vulkan)在支持该能力的桌面平台上的表现"**，而非全局主路径；Metal / DX12 / WebGPU 是同等公民。第 7 章"Vulkan 与 Shader 策略"以及所有绑定 Vulkan 扩展的能力档，均需在后续复审中改写为 wgpu 能力档（`wgpu::Features` / `Limits` + WESL）表述。
+>
+> **对"真实 GPU parity 尚未走通"的影响**：当前开发机是 macOS，GPU 后端为 Metal(经 wgpu)。此前把运行证据措辞成 "Vulkan runtime dispatch" 并不适用于本机；应改为后端中立的"在当前平台 wgpu 原生后端(macOS 即 Metal)上运行真实 GPU 图像/性能验证"。**已核实（2026-09-29 实测）**：本机（Apple M2，10 核 GPU，Metal Supported）经 `wgpu 30` 能成功枚举 Metal adapter 并 `request_device` 成功（`adapter_count=1 / DEFAULT_OK / DEVICE_OK`），即**真实 GPU（Metal）验证在硬件与运行时层面已具备**。此前"无 GPU、只能停留在 CPU golden"的限制来源是 **agent 执行沙盒屏蔽了 GPU/Metal 设备访问**（沙盒内 `adapter_count=0`、`no_adapter_backends: METAL`），**并非机器或平台缺少 Vulkan/Metal**。因此后续真实 GPU 图像/性能 parity 验证的口径为：在**沙盒外（普通终端 / 已授权的非沙盒执行）**跑图即可，各子系统不再被"无 GPU"前提锁死在 CPU golden 层；沙盒内的 CI/自动化仍只能做 CPU golden + 单元测试 + WESL 编译层验证。
+
 ## 1. 结论
 
-整体方案采用“**Prism 主架构 + UE 算法实现移植 + Vulkan 专用后端**”，而不是把 Unreal Renderer、RDG、RHI、UObject 和 SceneProxy 整体搬入 Prism。
+整体方案采用“**Prism 主架构 + UE 算法实现移植 + 跨平台 wgpu + WESL 后端**”（原文的"Vulkan 专用后端"按第 0 章修正为"wgpu 的多后端之一，Vulkan 仅覆盖支持它的桌面平台"），而不是把 Unreal Renderer、RDG、RHI、UObject 和 SceneProxy 整体搬入 Prism。
 
 保留 Prism 的：
 
