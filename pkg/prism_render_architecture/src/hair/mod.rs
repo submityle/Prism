@@ -68,6 +68,7 @@ pub mod import_buffers;
 pub mod interp_buffers;
 pub mod interpolation;
 pub mod lod;
+pub mod lod_dither_buffers;
 pub mod mesh_shell;
 pub mod raster;
 pub mod ribbon;
