@@ -52,6 +52,7 @@
 //! references, never reimplements, the shared deformation budget, the material
 //! closures, and the transparency routing.
 
+pub mod analysis_buffers;
 pub mod analysis_dispatch;
 pub mod binding;
 pub mod collision;
