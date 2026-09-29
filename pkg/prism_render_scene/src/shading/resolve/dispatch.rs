@@ -110,6 +110,11 @@ pub(crate) fn dispatch_shading_resolve(
     pass.set_bind_group(3, lights_group, &[]);
     pass.set_bind_group(4, shadow_group, &[]);
     pass.set_bind_group(5, cluster_group, &[]);
+    // group 6: virtual-shadow-map sample bindings. Always bound (the
+    // pipeline layout includes group 6); real when the feature is on for
+    // this view, else the pass-owned fallbacks with the uniform's `enable`
+    // bit clear so the shader stays on the cascaded-shadow path.
+    pass.set_bind_group(6, &groups.vsm, &[]);
 
     let stride = size_of::<GpuShadingDispatchArgs>() as u64;
     for class in 0..MAX_SHADING_CLASSES as u32 {

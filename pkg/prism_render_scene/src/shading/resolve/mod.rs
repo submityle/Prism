@@ -33,6 +33,9 @@ mod pipeline;
 mod shader_tests;
 
 pub(crate) use bind_groups::prepare_shading_resolve_bind_groups;
+
+pub(crate) use bind_groups::ViewResolveVsmPageTable;
 pub(crate) use motion::{prepare_resolve_motion, ResolveMotionHistory};
 pub(crate) use dispatch::dispatch_shading_resolve;
 pub(crate) use pipeline::init_shading_resolve_pipeline;
+

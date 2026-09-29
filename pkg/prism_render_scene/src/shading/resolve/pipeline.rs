@@ -38,8 +38,12 @@ use bevy_material::{
 };
 use bevy_render::{
     render_resource::{
-        BindGroupLayout, CachedComputePipelineId, ComputePipelineDescriptor, PipelineCache,
-        SamplerBindingType, ShaderStages, StorageTextureAccess, TextureSampleType,
+        AddressMode, BindGroupLayout, Buffer, BufferInitDescriptor, BufferUsages,
+        CachedComputePipelineId, ComputePipelineDescriptor, Extent3d, FilterMode,
+        MipmapFilterMode, PipelineCache,
+        Sampler, SamplerBindingType, SamplerDescriptor, ShaderStages, StorageTextureAccess,
+        TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages,
+        TextureView, TextureViewDescriptor,
     },
     renderer::RenderDevice,
 };
@@ -62,6 +66,23 @@ pub(crate) struct ShadingResolvePipeline {
     pub(crate) view_layout: BindGroupLayout,
     /// group 2: compacted worklist + scene/geometry tables.
     pub(crate) scene_layout: BindGroupLayout,
+    /// group 6: virtual-shadow-map page table + physical atlas + sampler +
+    /// [`GpuVsmResolveParams`](super::abi::GpuVsmResolveParams) uniform, sampled
+    /// by the inline `sample_virtual_shadow` twin in `shading_resolve.wesl`.
+    pub(crate) vsm_layout: BindGroupLayout,
+    /// Non-filtering (nearest, clamp) sampler for the `R32Float` physical atlas.
+    ///
+    /// The atlas stores raw NDC depth and the twin compares it manually, so it
+    /// binds a `NonFiltering` sampler rather than depending on the optional
+    /// `FLOAT32_FILTERABLE` device feature a linear `R32Float` sampler needs.
+    pub(crate) vsm_sampler: Sampler,
+    /// Fallback page-table storage buffer bound when a view has no resident VSM
+    /// page table (feature off, or the upload bridge has not run yet).  Filled
+    /// with the `VSM_PAGE_UNMAPPED` sentinel so a stray read is a clean miss.
+    pub(crate) vsm_dummy_page_table: Buffer,
+    /// Fallback 1x1 `R32Float` atlas view bound when a view has no physical
+    /// atlas; format-matched to the real atlas so the bind group is always valid.
+    pub(crate) vsm_dummy_atlas: TextureView,
 }
 
 /// Builds the group-0 layout entries:
@@ -143,6 +164,29 @@ fn scene_layout_entries() -> BindGroupLayoutEntries<9> {
     )
 }
 
+/// Builds the group-6 layout entries for the virtual-shadow-map sample:
+///
+/// 0. the flat virtual->physical page table (`array<u32>`, read-only storage),
+/// 1. the physical page atlas depth texture (non-filterable `f32`; the twin
+///    compares depth manually, so it never needs a filtering sample), plus
+/// 2. its `NonFiltering` (nearest/clamp) sampler, and
+/// 3. the [`GpuVsmResolveParams`](super::abi::GpuVsmResolveParams) uniform
+///    carrying the clipmap/atlas geometry, the enable switch and the light basis.
+///
+/// `None` min-binding-size keeps the layout agnostic to the page table's
+/// run-time length; the shader guards the slot index against the resident window.
+fn vsm_layout_entries() -> BindGroupLayoutEntries<4> {
+    BindGroupLayoutEntries::sequential(
+        ShaderStages::COMPUTE,
+        (
+            storage_buffer_read_only_sized(false, None),
+            texture_2d(TextureSampleType::Float { filterable: false }),
+            sampler(SamplerBindingType::NonFiltering),
+            uniform_buffer_sized(false, None),
+        ),
+    )
+}
+
 /// `RenderStartup` initializer.  Must run after both [`MaterialBindGroup`] and
 /// [`LightBindGroup`] exist so their reflected layout descriptors are available
 /// to clone into the pipeline's layout list.
@@ -158,10 +202,54 @@ pub(crate) fn init_shading_resolve_pipeline(
 ) {
     let view_entries = view_layout_entries();
     let scene_entries = scene_layout_entries();
+    let vsm_entries = vsm_layout_entries();
     let view_descriptor = BindGroupLayoutDescriptor::new("prism resolve view", &view_entries);
     let scene_descriptor = BindGroupLayoutDescriptor::new("prism resolve scene", &scene_entries);
+    let vsm_descriptor = BindGroupLayoutDescriptor::new("prism resolve vsm", &vsm_entries);
     let view_layout = device.create_bind_group_layout("prism resolve view", &view_entries);
     let scene_layout = device.create_bind_group_layout("prism resolve scene", &scene_entries);
+    let vsm_layout = device.create_bind_group_layout("prism resolve vsm", &vsm_entries);
+
+    // Fallback VSM resources bound when a view has no resident page table /
+    // physical atlas (feature off, or the upload bridge / raster fill has not
+    // produced them yet). They are real, format-correct objects so the bind
+    // group is always valid; the shader only samples them when the uniform's
+    // `enable` bit is set, which the bind-group builder clears unless both the
+    // real page table and atlas are present.
+    let vsm_sampler = device.create_sampler(&SamplerDescriptor {
+        label: Some("prism resolve vsm atlas sampler"),
+        address_mode_u: AddressMode::ClampToEdge,
+        address_mode_v: AddressMode::ClampToEdge,
+        address_mode_w: AddressMode::ClampToEdge,
+        mag_filter: FilterMode::Nearest,
+        min_filter: FilterMode::Nearest,
+        mipmap_filter: MipmapFilterMode::Nearest,
+        ..Default::default()
+    });
+    // Four `VSM_PAGE_UNMAPPED` sentinels: any accidental slot read is a clean
+    // page miss rather than an out-of-bounds physical index.
+    let unmapped = [u32::MAX; 4];
+    let vsm_dummy_page_table = device.create_buffer_with_data(&BufferInitDescriptor {
+        label: Some("prism resolve vsm dummy page table"),
+        contents: bytemuck::cast_slice(&unmapped),
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+    });
+    let dummy_atlas = device.create_texture(&TextureDescriptor {
+        label: Some("prism resolve vsm dummy atlas"),
+        size: Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        // Format-matched to `ViewVsmPhysicalAtlas`'s `R32Float` depth texture.
+        format: TextureFormat::R32Float,
+        usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let vsm_dummy_atlas = dummy_atlas.create_view(&TextureViewDescriptor::default());
 
     let shader: Handle<Shader> =
         load_embedded_asset!(asset_server.as_ref(), "../shaders/shading_resolve.wesl");
@@ -175,6 +263,8 @@ pub(crate) fn init_shading_resolve_pipeline(
             light_bindings.layout_descriptor.clone(),
             shadow_bindings.layout_descriptor.clone(),
             cluster_bindings.layout_descriptor.clone(),
+            // group 6: virtual-shadow-map sample bindings.
+            vsm_descriptor,
         ],
         immediate_size: size_of::<GpuShadingResolveParams>() as u32,
         shader,
@@ -186,5 +276,9 @@ pub(crate) fn init_shading_resolve_pipeline(
         resolve,
         view_layout,
         scene_layout,
+        vsm_layout,
+        vsm_sampler,
+        vsm_dummy_page_table,
+        vsm_dummy_atlas,
     });
 }

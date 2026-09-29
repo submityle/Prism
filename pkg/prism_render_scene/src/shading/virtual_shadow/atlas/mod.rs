@@ -36,6 +36,38 @@
 )]
 mod resources;
 
+// Caster depth raster fill (Slice A): the pass that rasterizes shadow casters
+// into each resident physical page's atlas tile. Every symbol these modules
+// expose is `pub(crate)` and is consumed only by the parent slice's plugin /
+// render-graph wiring (out of scope for this module).
+//
+// `abi`, `bind_groups`, and `projection` are pure leaf modules whose items are
+// referenced transitively by the re-exported `dispatch` / `pipeline` / `raster`
+// surface (and by their own unit tests), so they are live in every build and
+// need no guard. `dispatch`, `pipeline`, and `raster` additionally carry private
+// records / helpers with no in-crate consumer until the parent wiring schedules
+// them, so those three keep a module-level `dead_code` guard. **Remove each guard
+// when the parent wiring lands** -- the expectation then goes unfulfilled and
+// flags the now-stale guard.
+mod abi;
+mod bind_groups;
+#[expect(
+    dead_code,
+    reason = "caster-depth feeder systems + render-graph node; scheduled by the parent VSM raster wiring slice added separately. Remove when that wiring lands"
+)]
+mod dispatch;
+#[expect(
+    dead_code,
+    reason = "caster-depth device pipeline + per-page uniform buffer; initialised by the parent VSM raster wiring slice added separately. Remove when that wiring lands"
+)]
+mod pipeline;
+mod projection;
+#[expect(
+    dead_code,
+    reason = "caster-depth data records + per-view components + transient targets; inserted / consumed by the parent VSM raster wiring slice added separately. Remove when that wiring lands"
+)]
+mod raster;
+
 #[cfg(test)]
 mod shader_tests;
 
@@ -45,4 +77,34 @@ mod shader_tests;
 pub(crate) use resources::{
     atlas_tile_origin, physical_pages_per_edge, prepare_vsm_physical_atlas, ViewVsmPhysicalAtlas,
     VsmPhysicalAtlasCache,
+};
+
+// The caster-depth pass's public surface for the parent wiring slice: the shader
+// / pipeline init hooks, the three feeder systems, the render-graph node, and the
+// resources / per-view components the parent inserts and schedules. Unused until
+// `virtual_shadow/mod.rs` re-exports them (out of scope here); remove the guard
+// when that wiring lands.
+#[expect(
+    unused_imports,
+    reason = "caster-depth public surface re-exported by the parent VSM raster wiring slice added separately; remove when that wiring lands"
+)]
+pub(crate) use dispatch::{
+    prepare_vsm_caster_depth_targets, prepare_vsm_caster_depth_views, queue_vsm_caster_depth,
+    vsm_caster_depth_pass,
+};
+#[expect(
+    unused_imports,
+    reason = "caster-depth public surface re-exported by the parent VSM raster wiring slice added separately; remove when that wiring lands"
+)]
+pub(crate) use pipeline::{
+    init_vsm_caster_depth_pipeline, register_vsm_caster_depth_shader, VsmCasterDepthPipeline,
+    VsmCasterDepthPipelineKey, VsmCasterDepthViewUniform,
+};
+#[expect(
+    unused_imports,
+    reason = "caster-depth public surface re-exported by the parent VSM raster wiring slice added separately; remove when that wiring lands"
+)]
+pub(crate) use raster::{
+    ViewVsmCasterDepth, ViewVsmCasterPages, VsmCasterDepthDrawList, VsmCasterDepthTargets,
+    VsmCasterPage,
 };

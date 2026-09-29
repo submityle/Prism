@@ -124,7 +124,7 @@ impl VsmPageRequestBufferCache {
                 size: byte_size,
                 // COPY_DST so the dispatch can `clear_buffer` it to zero each
                 // frame before the receivers accumulate requests with atomicOr.
-                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
             });
             self.buffers.insert(

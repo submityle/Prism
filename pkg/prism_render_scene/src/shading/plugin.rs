@@ -46,14 +46,15 @@ use super::{
         prepare_taa_textures, taa_resolve_pass,
     },
     virtual_shadow::{
-        collect_vsm_page_readback, extract_vsm_primary_light, init_vsm_page_mark_pipeline,
+        bridge_vsm_view_resources, collect_vsm_page_readback, extract_vsm_primary_light,
+        init_vsm_page_mark_pipeline,
         init_vsm_receiver_gen_pipeline, map_submitted_vsm_page_readback,
         prepare_vsm_page_mark_bind_groups, prepare_vsm_page_requests,
         prepare_vsm_receiver_gen_bind_groups, prepare_vsm_receiver_resources,
         request_vsm_page_readback, vsm_mark_pages_pass, vsm_receiver_gen_pass,
         prepare_vsm_physical_atlas, PrismVirtualShadowSettings, VirtualShadowMapDriver,
         VsmPageRequestBufferCache, VsmPageRequestReadback, VsmPageTableBufferCache,
-        VsmPhysicalAtlasCache, VsmPrimaryLight, VsmReceiverBufferCache,
+        VsmBridgeCache, VsmPhysicalAtlasCache, VsmPrimaryLight, VsmReceiverBufferCache,
     },
     chromatic_aberration::{
         chromatic_aberration_pass, init_chromatic_aberration_pipeline,
@@ -279,6 +280,7 @@ impl Plugin for PrismShadingPlugin {
             .init_resource::<VirtualShadowMapDriver>()
             .init_resource::<VsmPageTableBufferCache>()
             .init_resource::<VsmPageRequestReadback>()
+            .init_resource::<VsmBridgeCache>()
             .init_resource::<PrismMotionBlurSettings>()
             .init_resource::<PrismVolumetricsSettings>()
             .init_resource::<VolumetricsTextureCache>()
@@ -967,11 +969,30 @@ impl Plugin for PrismShadingPlugin {
         render_app.add_systems(
             RenderGraph,
             (
-                collect_vsm_page_readback.in_set(RenderGraphSystems::Begin),
                 request_vsm_page_readback
                     .after(camera_driver)
                     .in_set(RenderGraphSystems::Render),
                 map_submitted_vsm_page_readback.in_set(RenderGraphSystems::Finish),
+            ),
+        );
+
+        // Consume the previous frame's page-request readback and drive residency
+        // in `PrepareResources` -- one phase *before* the resolve sampler / atlas
+        // caster-depth bind groups build in `PrepareBindGroups` -- so the driven
+        // page table is visible to its consumers the *same* frame it is produced.
+        // `collect` records each view's outputs into `VsmBridgeCache`; the same-set
+        // `bridge_vsm_view_resources` (ordered after it) re-attaches them as the
+        // resolve/atlas-visible components, and the `PrepareResourcesFlush` sync
+        // point applies those inserts before `PrepareBindGroups`. This keeps only
+        // the readback's own unavoidable one-frame copy latency (mark on frame N,
+        // resident on frame N+1) with no extra bridge frame on top.
+        render_app.add_systems(
+            Render,
+            (
+                collect_vsm_page_readback.in_set(RenderSystems::PrepareResources),
+                bridge_vsm_view_resources
+                    .in_set(RenderSystems::PrepareResources)
+                    .after(collect_vsm_page_readback),
             ),
         );
 

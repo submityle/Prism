@@ -42,15 +42,13 @@
 mod abi;
 mod atlas;
 mod bind_groups;
+mod bridge;
 mod dispatch;
 mod extract;
 mod page_mark;
+mod page_table;
 mod pipeline;
 mod resources;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "VSM settings' clipmap / contract accessors are consumed by the device-side wiring slice added separately")
-)]
 mod settings;
 
 #[cfg(test)]
@@ -86,3 +84,10 @@ pub(crate) use page_mark::{
     init_vsm_page_mark_pipeline, prepare_vsm_page_mark_bind_groups, prepare_vsm_page_requests,
     vsm_mark_pages_pass, VsmPageRequestBufferCache,
 };
+
+pub(crate) use page_table::{
+    collect_vsm_page_readback, map_submitted_vsm_page_readback, request_vsm_page_readback,
+    VirtualShadowMapDriver, VsmPageRequestReadback, VsmPageTableBufferCache,
+};
+
+pub(crate) use bridge::{bridge_vsm_view_resources, VsmBridgeCache};
