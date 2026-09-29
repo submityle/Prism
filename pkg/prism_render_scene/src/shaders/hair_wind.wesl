@@ -1,8 +1,10 @@
 //! GPU wind-field pre-pass kernel for guide-strand dynamics.
 //!
 //! Compute twin of the CPU golden reference
-//! `prism_render_architecture::hair::wind::apply_wind`. The sandbox has no GPU,
-//! so this shader is validated by naga compilation only (see `shader_tests`);
+//! `prism_render_architecture::hair::wind::apply_wind`. A `GPU` is now available,
+//! so this shader is compile- and type-checked through the same render-world
+//! `ShaderCache` / `wesl` pipeline the runtime uses (see `shader_tests`), with
+//! on-device dispatch/perf calibration still awaiting real hardware;
 //! it is the external-force stage that runs *before* the persistent GPU-driven
 //! XPBD sim ([`hair_sim`], design §8) each frame, nudging every free particle
 //! by the wind displacement so the constraint solve reads it back as injected

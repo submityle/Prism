@@ -22,8 +22,10 @@
 //! identical frames. An unbound binding (`triangle == HAIR_ROOT_UNBOUND`), an
 //! out-of-range triangle or vertex index, and a zero-area deformed face all
 //! resolve to the identity frame so a malformed binding never panics and never
-//! poisons a neighbour. The sandbox has no GPU, so this shader is validated by
-//! naga compilation only (see `shader_tests`).
+//! poisons a neighbour. A `GPU` is now available, so this shader
+//! is compile- and type-checked through the same render-world `ShaderCache` /
+//! `wesl` pipeline the runtime uses (see `shader_tests`), with on-device
+//! dispatch/perf calibration still awaiting real hardware.
 
 /// Sentinel triangle index meaning "this root could not be bound". Mirrors the
 /// CPU `binding::UNBOUND` (`u32::MAX`).

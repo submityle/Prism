@@ -24,8 +24,10 @@
 //! clamp(blend, 0, 1)`. At `blend == 0` every strand survives; at `blend == 1`
 //! none do (the unit hash is always `< 1`). The 64-bit `splitmix64` finalizer is
 //! emulated with a `vec2<u32>` because baseline WGSL is 32-bit, identical to the
-//! interpolation kernel. The sandbox has no GPU, so this shader is validated by
-//! naga compilation only (see `shader_tests`).
+//! interpolation kernel. A `GPU` is now available, so this shader
+//! is compile- and type-checked through the same render-world `ShaderCache` /
+//! `wesl` pipeline the runtime uses (see `shader_tests`), with on-device
+//! dispatch/perf calibration still awaiting real hardware.
 
 /// Cross-fade dither parameters. `blend` runs `0..=1` (fully finer tier → fully
 /// coarser proxy); `seed` salts the per-strand hash so distinct grooms dissolve

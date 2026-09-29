@@ -21,9 +21,11 @@
 //! (`triangle == HAIR_ROOT_UNBOUND`) so a root is never dropped and indices stay
 //! aligned with the caller's strand array. The closest-point test is the
 //! standard Ericson Voronoi-region clamp, so a projection that falls outside the
-//! triangle lands on the nearest edge or vertex instead of off the face. The
-//! sandbox has no GPU, so this shader is validated by naga compilation only (see
-//! `shader_tests`).
+//! triangle lands on the nearest edge or vertex instead of off the face. A
+//! `GPU` is now available, so this shader is compile- and type-checked through
+//! the same render-world `ShaderCache` / `wesl` pipeline the runtime uses (see
+//! `shader_tests`), with on-device dispatch/perf calibration still awaiting
+//! real hardware.
 
 /// Sentinel triangle index meaning "this root could not be bound". Mirrors the
 /// CPU `binding::UNBOUND` (`u32::MAX`).

@@ -2,9 +2,11 @@
 //!
 //! Compute twin of the CPU golden reference
 //! `prism_render_architecture::hair::mesh_shell::build_from_sections` (the
-//! shared core behind `build_shell` / `build_shell_tapered`). The sandbox has
-//! no GPU, so this shader is validated by naga compilation only (see
-//! `shader_tests`); it is the GPU-driven *shell meshing* stage (design §10.4)
+//! shared core behind `build_shell` / `build_shell_tapered`). A `GPU` is now
+//! available, so this shader is compile- and type-checked through the same
+//! render-world `ShaderCache` / `wesl` pipeline the runtime uses (see
+//! `shader_tests`), with on-device dispatch/perf calibration still awaiting
+//! real hardware; it is the GPU-driven *shell meshing* stage (design §10.4)
 //! that collapses a too-distant render strand onto a low triangle-count solid
 //! tube, mirroring `UE5` Groom mesh LODs and comparable `AMD` `TressFX`
 //! /`NVIDIA` `HairWorks` proxy meshes at the algorithm level without reusing

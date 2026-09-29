@@ -1,9 +1,11 @@
 //! GPU coherent per-vertex strand frame kernel: rotation-minimizing transport.
 //!
 //! Compute twin of the CPU golden reference
-//! `prism_render_architecture::hair::frames::build_strand_frames`. The sandbox
-//! has no GPU, so this shader is validated by naga compilation only (see
-//! `shader_tests`); it is the GPU-driven *frame transport* stage (design §10.4)
+//! `prism_render_architecture::hair::frames::build_strand_frames`. A `GPU` is now
+//! available, so this shader is compile- and type-checked through the same
+//! render-world `ShaderCache` / `wesl` pipeline the runtime uses (see
+//! `shader_tests`), with on-device dispatch/perf calibration still awaiting
+//! real hardware; it is the GPU-driven *frame transport* stage (design §10.4)
 //! that hands every downstream width/anisotropy consumer — the ribbon
 //! ([`hair_ribbon`]) and shell ([`hair_mesh_shell`]) meshers plus anisotropic
 //! shading — a stable orthonormal basis at every control point, mirroring the

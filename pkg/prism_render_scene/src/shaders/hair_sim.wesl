@@ -1,9 +1,11 @@
 //! GPU guide-strand XPBD simulation kernel (shared, style-agnostic base).
 //!
 //! Compute twin of the CPU golden reference
-//! `prism_render_architecture::hair::dynamics::simulate_guides`. The sandbox
-//! has no GPU, so this shader is validated by naga compilation only (see
-//! `shader_tests`); it is the persistent GPU-driven sim stage (design §8) that
+//! `prism_render_architecture::hair::dynamics::simulate_guides`. A `GPU` is now
+//! available, so this shader is compile- and type-checked through the same
+//! render-world `ShaderCache` / `wesl` pipeline the runtime uses (see
+//! `shader_tests`), with on-device dispatch/perf calibration still awaiting
+//! real hardware; it is the persistent GPU-driven sim stage (design §8) that
 //! advances a groom's sparse *guide* strands so the many render strands can be
 //! interpolated from them.
 //!

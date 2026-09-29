@@ -1,9 +1,11 @@
 //! GPU strand-to-ribbon meshing kernel: the `Cards` LOD proxy geometry stage.
 //!
 //! Compute twin of the CPU golden reference
-//! `prism_render_architecture::hair::ribbon::build_ribbon`. The sandbox has no
-//! GPU, so this shader is validated by naga compilation only (see
-//! `shader_tests`); it is the GPU-driven *card meshing* stage (design §10.4)
+//! `prism_render_architecture::hair::ribbon::build_ribbon`. A `GPU` is now
+//! available, so this shader is compile- and type-checked through the same
+//! render-world `ShaderCache` / `wesl` pipeline the runtime uses (see
+//! `shader_tests`), with on-device dispatch/perf calibration still awaiting
+//! real hardware; it is the GPU-driven *card meshing* stage (design §10.4)
 //! that swaps a too-thin / too-distant render strand for a flat quad strip
 //! following its centerline, mirroring `UE5` Groom card LODs and `AMD` `TressFX`
 //! /`NVIDIA` `HairWorks` proxy strips at the algorithm level without reusing

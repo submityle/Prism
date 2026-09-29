@@ -21,8 +21,10 @@
 //! identical positions. Pinned particles (skinned roots, `inverse_mass <= 0`)
 //! never move, an empty primitive set or zero iterations is a no-op, and a
 //! particle on a zero-gradient spot escapes along a fixed `+Y` axis rather than
-//! producing a NaN direction. The sandbox has no GPU, so this shader is
-//! validated by naga compilation only (see `shader_tests`).
+//! producing a NaN direction. A `GPU` is now available, so this shader is
+//! compile- and type-checked through the same render-world `ShaderCache` /
+//! `wesl` pipeline the runtime uses (see `shader_tests`), with on-device
+//! dispatch/perf calibration still awaiting real hardware.
 
 /// Squared-length epsilon: vectors shorter than its square root are treated as
 /// zero-length. Mirrors the CPU `sdf_collision::EPS_LEN_SQ`.
