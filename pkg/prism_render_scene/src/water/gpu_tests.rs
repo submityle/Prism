@@ -1053,6 +1053,9 @@ const FLIP_FIXED_SCALE: f32 = 65536.0;
 const FLIP_FIXED_LIMIT: f32 = 30000.0;
 /// "Effectively zero" threshold shared with the shader's mass/count guards.
 const FLIP_EPS: f32 = 1.0e-6;
+/// `APIC` affine inertia inverse `D⁻¹` factor `3 / dx²` mirrored from
+/// `water_flip.wesl` (scaled by `inv_dx²` at use in `G2P`).
+const FLIP_APIC_INV_D: f32 = 3.0;
 
 /// Compiles `water_flip.wesl` and returns its `Wgsl` translation.
 fn compile_flip_wgsl() -> String {
@@ -4167,5 +4170,433 @@ fn flip_p2g_gpu_matches_cpu_golden() {
             lane += 1;
         }
         cell += 1;
+    }
+}
+
+// ===========================================================================
+// FLIP/APIC grid-to-particle gather (water_flip.wesl :: water_flip_g2p)
+// ===========================================================================
+//
+// This block closes the on-device gap for stage 3 of the `FLIP`/`APIC` loop:
+// the projected grid velocity is gathered back to each particle, the `FLIP`
+// (velocity-delta) and `PIC` (absolute) updates are blended, and the `APIC`
+// affine matrix is rebuilt from `Σ w·v_proj⊗offset·D⁻¹`. The single
+// incompressibility correction `v -= ∇p` is applied per node here from the
+// converged `pressure_in`. The kernel reads the scatter atomics (binding 1) and
+// the pressure field (binding 2), reads+writes the particles (binding 0), and
+// reads the params (binding 4), so the reflected auto layout carries bindings
+// 0, 1, 2, and 4.
+
+/// Host mirror of `flip_pressure_gradient`: central-difference gradient of
+/// `pressure_in`, with out-of-grid neighbours reusing the cell's own pressure
+/// (the Neumann wall that yields a zero one-sided gradient).
+fn flip_pressure_gradient(
+    pressure_in: &[f32],
+    dim: [u32; 3],
+    inv_dx: f32,
+    i: i32,
+    j: i32,
+    k: i32,
+    cell: usize,
+) -> [f32; 3] {
+    let p_here = pressure_in[cell];
+    let axes = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+    let mut g = [0.0_f32; 3];
+    let mut a = 0usize;
+    while a < 3 {
+        let o = axes[a];
+        let mut p_pos = p_here;
+        if flip_in_bounds(i + o[0], j + o[1], k + o[2], dim) {
+            p_pos = pressure_in[flip_cell_index(
+                (i + o[0]) as u32,
+                (j + o[1]) as u32,
+                (k + o[2]) as u32,
+                dim,
+            ) as usize];
+        }
+        let mut p_neg = p_here;
+        if flip_in_bounds(i - o[0], j - o[1], k - o[2], dim) {
+            p_neg = pressure_in[flip_cell_index(
+                (i - o[0]) as u32,
+                (j - o[1]) as u32,
+                (k - o[2]) as u32,
+                dim,
+            ) as usize];
+        }
+        g[a] = (p_pos - p_neg) * (0.5 * inv_dx);
+        a += 1;
+    }
+    g
+}
+
+/// `CPU` golden twin of `water_flip_g2p`.
+///
+/// Reproduces the kernel line-for-line for every live particle: form the eight
+/// trilinear weights, gather the decoded grid velocity `v_grid` and the
+/// projected velocity `v_proj = v_grid - ∇p`, accumulate the `PIC` velocity, the
+/// `FLIP` delta (`-∇p`), and the `APIC` affine outer product, then blend
+/// `(1 - alpha)·PIC + alpha·(vel + delta)` and rebuild the affine rows scaled by
+/// `D⁻¹ = 3 / dx²`. Inactive particles (`pos.w <= 0.5`) pass through unchanged.
+fn flip_g2p_golden(
+    particles: &[GpuFlipParticle],
+    scatter: &[u32],
+    pressure_in: &[f32],
+    params: &GpuFlipSimParams,
+) -> Vec<GpuFlipParticle> {
+    let dim = [params.dim[0], params.dim[1], params.dim[2]];
+    let origin = Vec3::new(params.origin[0], params.origin[1], params.origin[2]);
+    let dx = params.dx;
+    let inv_dx = params.inv_dx;
+    let inv_d = FLIP_APIC_INV_D * inv_dx * inv_dx;
+    let alpha = params.flip_blend.clamp(0.0, 1.0);
+    let use_affine = params.use_affine != 0;
+
+    let mut out = particles.to_vec();
+    let mut p = 0usize;
+    while p < params.particle_count as usize {
+        let particle = particles[p];
+        if particle.pos[3] <= 0.5 {
+            p += 1;
+            continue;
+        }
+        let pos = Vec3::new(particle.pos[0], particle.pos[1], particle.pos[2]);
+        let vel = Vec3::new(particle.vel[0], particle.vel[1], particle.vel[2]);
+        let local = pos.sub(origin).scale(inv_dx);
+        let base_i = local.x.floor() as i32;
+        let base_j = local.y.floor() as i32;
+        let base_k = local.z.floor() as i32;
+        let weights = trilinear_weights(
+            local.x - local.x.floor(),
+            local.y - local.y.floor(),
+            local.z - local.z.floor(),
+        );
+
+        let mut pic = Vec3::new(0.0, 0.0, 0.0);
+        let mut delta = Vec3::new(0.0, 0.0, 0.0);
+        let mut c0 = Vec3::new(0.0, 0.0, 0.0);
+        let mut c1 = Vec3::new(0.0, 0.0, 0.0);
+        let mut c2 = Vec3::new(0.0, 0.0, 0.0);
+
+        let mut corner = 0usize;
+        let mut cz = 0i32;
+        while cz < 2 {
+            let mut cy = 0i32;
+            while cy < 2 {
+                let mut cx = 0i32;
+                while cx < 2 {
+                    let w = weights[corner];
+                    corner += 1;
+                    let ci = base_i + cx;
+                    let cj = base_j + cy;
+                    let ck = base_k + cz;
+                    cx += 1;
+                    if !flip_in_bounds(ci, cj, ck, dim) || w <= 0.0 {
+                        continue;
+                    }
+                    let cell = flip_cell_index(ci as u32, cj as u32, ck as u32, dim) as usize;
+                    let v_cell = flip_cell_velocity(scatter, cell);
+                    let v_grid = Vec3::new(v_cell[0], v_cell[1], v_cell[2]);
+                    let grad_arr =
+                        flip_pressure_gradient(pressure_in, dim, inv_dx, ci, cj, ck, cell);
+                    let grad = Vec3::new(grad_arr[0], grad_arr[1], grad_arr[2]);
+                    let v_proj = v_grid.sub(grad);
+                    pic = pic.add(v_proj.scale(w));
+                    delta = delta.sub(grad.scale(w));
+                    let node = Vec3::new(
+                        origin.x + (ci as f32 + 0.5) * dx,
+                        origin.y + (cj as f32 + 0.5) * dx,
+                        origin.z + (ck as f32 + 0.5) * dx,
+                    );
+                    let offset = node.sub(pos);
+                    c0 = c0.add(offset.scale(v_proj.x * w));
+                    c1 = c1.add(offset.scale(v_proj.y * w));
+                    c2 = c2.add(offset.scale(v_proj.z * w));
+                }
+                cy += 1;
+            }
+            cz += 1;
+        }
+
+        let flip_vel = vel.add(delta);
+        // (1 - alpha)·PIC + alpha·FLIP, mirroring the CPU `blend_flip_pic`.
+        let blended = pic.scale(1.0 - alpha).add(flip_vel.scale(alpha));
+        let mut result = particle;
+        result.vel = [blended.x, blended.y, blended.z, particle.vel[3]];
+        if use_affine {
+            let r0 = c0.scale(inv_d);
+            let r1 = c1.scale(inv_d);
+            let r2 = c2.scale(inv_d);
+            result.c0 = [r0.x, r0.y, r0.z, particle.c0[3]];
+            result.c1 = [r1.x, r1.y, r1.z, particle.c1[3]];
+            result.c2 = [r2.x, r2.y, r2.z, particle.c2[3]];
+        } else {
+            result.c0 = [0.0, 0.0, 0.0, particle.c0[3]];
+            result.c1 = [0.0, 0.0, 0.0, particle.c1[3]];
+            result.c2 = [0.0, 0.0, 0.0, particle.c2[3]];
+        }
+        out[p] = result;
+        p += 1;
+    }
+    out
+}
+
+/// Dispatches one `water_flip_g2p` gather on device and reads back the updated
+/// particle buffer.
+///
+/// The bind group is built from the pipeline's reflected `group(0)` layout,
+/// which — because `G2P` touches the particles, the scatter atomics, the
+/// pressure field, and the params — contains exactly bindings 0, 1, 2, and 4.
+fn dispatch_flip_g2p(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    wgsl: &str,
+    entry: &str,
+    particles: &[GpuFlipParticle],
+    scatter: &[u32],
+    pressure_in: &[f32],
+    params: &GpuFlipSimParams,
+) -> Vec<GpuFlipParticle> {
+    let module = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("water_flip"),
+        source: ShaderSource::Wgsl(wgsl.into()),
+    });
+    let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("flip_g2p_pipeline"),
+        layout: None,
+        module: &module,
+        entry_point: Some(entry),
+        compilation_options: PipelineCompilationOptions::default(),
+        cache: None,
+    });
+
+    let particle_bytes = size_of_val(particles) as u64;
+    let particle_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("flip_particles"),
+        contents: bytemuck::cast_slice(particles),
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+    });
+    let scatter_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("flip_scatter"),
+        contents: bytemuck::cast_slice(scatter),
+        usage: BufferUsages::STORAGE,
+    });
+    let pressure_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("flip_pressure_in"),
+        contents: bytemuck::cast_slice(pressure_in),
+        usage: BufferUsages::STORAGE,
+    });
+    let param_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("flip_params"),
+        contents: bytemuck::bytes_of(params),
+        usage: BufferUsages::UNIFORM,
+    });
+
+    let layout = pipeline.get_bind_group_layout(0);
+    let bind_group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("flip_g2p_group0"),
+        layout: &layout,
+        entries: &[
+            BindGroupEntry {
+                binding: 0,
+                resource: particle_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 1,
+                resource: scatter_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 2,
+                resource: pressure_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 4,
+                resource: param_buf.as_entire_binding(),
+            },
+        ],
+    });
+
+    let out_stage = device.create_buffer(&BufferDescriptor {
+        label: Some("flip_g2p_stage"),
+        size: particle_bytes,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("flip_g2p_encoder"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("flip_g2p_pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(params.particle_count.div_ceil(64), 1, 1);
+    }
+    encoder.copy_buffer_to_buffer(&particle_buf, 0, &out_stage, 0, particle_bytes);
+    queue.submit([encoder.finish()]);
+
+    out_stage.slice(..).map_async(MapMode::Read, |_| {});
+    device
+        .poll(PollType::wait_indefinitely())
+        .expect("device poll should complete the submitted work");
+    let view = out_stage
+        .slice(..)
+        .get_mapped_range()
+        .expect("mapped readback range should be available after poll");
+    let values: Vec<GpuFlipParticle> = bytemuck::cast_slice::<u8, GpuFlipParticle>(&view).to_vec();
+    drop(view);
+    out_stage.unmap();
+    values
+}
+
+/// One on-device `G2P` gather must match the `CPU` golden particle update.
+///
+/// The scatter grid is packed with dyadic momentum/mass so the decoded cell
+/// velocities are exact, and a dyadic pressure ramp drives a non-trivial
+/// gradient (hence a real `v -= ∇p` correction and `FLIP` delta). The particle
+/// set mixes an interior particle, a boundary particle whose corners straddle
+/// the grid edge (Neumann gradient + skipped corners), an `APIC`-affine
+/// particle whose rebuilt affine rows must match, and an inactive particle that
+/// must pass through untouched. The blend is set mid-range (`alpha = 0.5`) so
+/// both the `PIC` and `FLIP` paths contribute.
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice must reach the test log on hosts without a wgpu adapter"
+)]
+fn flip_g2p_gpu_matches_cpu_golden() {
+    let Some((device, queue)) = try_solver_device() else {
+        eprintln!("flip_g2p_gpu_matches_cpu_golden: no wgpu adapter, skipping on-device parity");
+        return;
+    };
+
+    let dim = [4u32, 4u32, 4u32];
+    let total = (dim[0] * dim[1] * dim[2]) as usize;
+    let dx = 1.0_f32;
+    let inv_dx = 1.0_f32;
+
+    // Pack every cell with a dyadic velocity so the decoded field is exact.
+    let mut scatter = vec![0u32; total * 4];
+    let mut k = 0u32;
+    while k < dim[2] {
+        let mut j = 0u32;
+        while j < dim[1] {
+            let mut i = 0u32;
+            while i < dim[0] {
+                let cell = flip_cell_index(i, j, k, dim) as usize;
+                let base = cell * 4;
+                let mass = 2.0_f32;
+                let vx = i as f32 * 0.25;
+                let vy = j as f32 * 0.5;
+                let vz = k as f32 * 0.25;
+                scatter[base] = flip_encode_fixed(mass * vx);
+                scatter[base + 1] = flip_encode_fixed(mass * vy);
+                scatter[base + 2] = flip_encode_fixed(mass * vz);
+                scatter[base + 3] = flip_encode_fixed(mass);
+                i += 1;
+            }
+            j += 1;
+        }
+        k += 1;
+    }
+
+    let pressure_in: Vec<f32> = (0..total).map(|c| c as f32 * 0.25).collect();
+
+    let particles = [
+        GpuFlipParticle {
+            pos: [1.25, 1.5, 1.75, 1.0],
+            vel: [0.5, -0.25, 0.75, 0.0],
+            c0: [0.0, 0.0, 0.0, 0.0],
+            c1: [0.0, 0.0, 0.0, 0.0],
+            c2: [0.0, 0.0, 0.0, 0.0],
+        },
+        GpuFlipParticle {
+            pos: [3.5, 3.25, 3.75, 1.0],
+            vel: [-0.5, 0.5, -0.25, 0.0],
+            c0: [0.0, 0.0, 0.0, 0.0],
+            c1: [0.0, 0.0, 0.0, 0.0],
+            c2: [0.0, 0.0, 0.0, 0.0],
+        },
+        GpuFlipParticle {
+            pos: [1.5, 2.5, 1.5, 1.0],
+            vel: [0.25, 0.25, 0.25, 0.0],
+            c0: [0.5, 0.0, 0.0, 0.0],
+            c1: [0.0, 0.25, 0.0, 0.0],
+            c2: [0.0, 0.0, 0.5, 0.0],
+        },
+        GpuFlipParticle {
+            pos: [0.5, 0.5, 0.5, 0.0],
+            vel: [9.0, 9.0, 9.0, 9.0],
+            c0: [9.0, 9.0, 9.0, 9.0],
+            c1: [9.0, 9.0, 9.0, 9.0],
+            c2: [9.0, 9.0, 9.0, 9.0],
+        },
+    ];
+
+    let params = GpuFlipSimParams {
+        origin: [0.0, 0.0, 0.0, 0.0],
+        dim: [dim[0], dim[1], dim[2], 0],
+        dx,
+        inv_dx,
+        flip_blend: 0.5,
+        particle_mass: 2.0,
+        jacobi_omega: 0.0,
+        use_affine: 1,
+        particle_count: particles.len() as u32,
+        cell_count: total as u32,
+    };
+
+    let golden = flip_g2p_golden(&particles, &scatter, &pressure_in, &params);
+
+    let wgsl = compile_flip_wgsl();
+    let entry = find_entry_point(&wgsl, "water_flip_g2p");
+    let gpu = dispatch_flip_g2p(
+        &device,
+        &queue,
+        &wgsl,
+        &entry,
+        &particles,
+        &scatter,
+        &pressure_in,
+        &params,
+    );
+
+    assert_eq!(gpu.len(), golden.len(), "particle count mismatch");
+    let mut p = 0usize;
+    while p < golden.len() {
+        let g = gpu[p];
+        let c = golden[p];
+        let mut lane = 0usize;
+        while lane < 3 {
+            let vd = (g.vel[lane] - c.vel[lane]).abs();
+            assert!(
+                vd < PARITY_EPS,
+                "particle {p} vel[{lane}]: gpu vs cpu |d|={vd}"
+            );
+            let d0 = (g.c0[lane] - c.c0[lane]).abs();
+            assert!(
+                d0 < PARITY_EPS,
+                "particle {p} c0[{lane}]: gpu vs cpu |d|={d0}"
+            );
+            let d1 = (g.c1[lane] - c.c1[lane]).abs();
+            assert!(
+                d1 < PARITY_EPS,
+                "particle {p} c1[{lane}]: gpu vs cpu |d|={d1}"
+            );
+            let d2 = (g.c2[lane] - c.c2[lane]).abs();
+            assert!(
+                d2 < PARITY_EPS,
+                "particle {p} c2[{lane}]: gpu vs cpu |d|={d2}"
+            );
+            let pd = (g.pos[lane] - c.pos[lane]).abs();
+            assert!(
+                pd < WATER_EPS,
+                "particle {p} pos[{lane}] must be unchanged |d|={pd}"
+            );
+            lane += 1;
+        }
+        p += 1;
     }
 }
