@@ -202,12 +202,6 @@ impl VsmCasterDepthTargets {
         self.depth_view = Some(depth_view);
     }
 
-    /// Atlas edge length (in texels) the current transient depth buffer was
-    /// built for; `0` until the first [`ensure`](Self::ensure).
-    pub(crate) fn atlas_edge(&self) -> u32 {
-        self.atlas_edge
-    }
-
     /// The transient depth attachment view, once [`ensure`](Self::ensure) has run.
     pub(crate) fn depth_view(&self) -> Option<&TextureView> {
         self.depth_view.as_ref()

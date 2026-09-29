@@ -80,6 +80,16 @@ pub(crate) use atlas::{
     VsmPhysicalAtlasCache,
 };
 
+// Caster-depth raster fill: the pass that rasterises shadow casters into every
+// resident physical-atlas tile so `vsm_sample.wesl` has real occluder depth to
+// read. Consumed by the plugin's render-graph / schedule wiring below.
+pub(crate) use atlas::{
+    init_vsm_caster_depth_pipeline, prepare_vsm_caster_depth_targets,
+    prepare_vsm_caster_depth_views, queue_vsm_caster_depth, register_vsm_caster_depth_shader,
+    vsm_caster_depth_pass, VsmCasterDepthDrawList, VsmCasterDepthPipeline, VsmCasterDepthTargets,
+    VsmCasterDepthViewUniform,
+};
+
 pub(crate) use page_mark::{
     init_vsm_page_mark_pipeline, prepare_vsm_page_mark_bind_groups, prepare_vsm_page_requests,
     vsm_mark_pages_pass, VsmPageRequestBufferCache,

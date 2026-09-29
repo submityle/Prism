@@ -47,7 +47,7 @@ use super::{
     },
     virtual_shadow::{
         bridge_vsm_view_resources, collect_vsm_page_readback, extract_vsm_primary_light,
-        init_vsm_page_mark_pipeline,
+        init_vsm_caster_depth_pipeline, init_vsm_page_mark_pipeline,
         init_vsm_receiver_gen_pipeline, map_submitted_vsm_page_readback,
         prepare_vsm_page_mark_bind_groups, prepare_vsm_page_requests,
         prepare_vsm_receiver_gen_bind_groups, prepare_vsm_receiver_resources,
@@ -55,6 +55,10 @@ use super::{
         prepare_vsm_physical_atlas, PrismVirtualShadowSettings, VirtualShadowMapDriver,
         VsmPageRequestBufferCache, VsmPageRequestReadback, VsmPageTableBufferCache,
         VsmBridgeCache, VsmPhysicalAtlasCache, VsmPrimaryLight, VsmReceiverBufferCache,
+        prepare_vsm_caster_depth_targets, prepare_vsm_caster_depth_views,
+        queue_vsm_caster_depth, register_vsm_caster_depth_shader, vsm_caster_depth_pass,
+        VsmCasterDepthDrawList, VsmCasterDepthPipeline, VsmCasterDepthTargets,
+        VsmCasterDepthViewUniform,
     },
     chromatic_aberration::{
         chromatic_aberration_pass, init_chromatic_aberration_pipeline,
@@ -242,6 +246,7 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/oit.wesl");
         embedded_asset!(app, "../shaders/transparent.wesl");
         register_shadow_depth_shader(app);
+        register_vsm_caster_depth_shader(app);
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
@@ -281,6 +286,10 @@ impl Plugin for PrismShadingPlugin {
             .init_resource::<VsmPageTableBufferCache>()
             .init_resource::<VsmPageRequestReadback>()
             .init_resource::<VsmBridgeCache>()
+            .init_resource::<VsmCasterDepthDrawList>()
+            .init_resource::<VsmCasterDepthTargets>()
+            .init_resource::<bevy_render::render_resource::SpecializedMeshPipelines<VsmCasterDepthPipeline>>()
+            .init_resource::<VsmCasterDepthViewUniform>()
             .init_resource::<PrismMotionBlurSettings>()
             .init_resource::<PrismVolumetricsSettings>()
             .init_resource::<VolumetricsTextureCache>()
@@ -351,6 +360,7 @@ impl Plugin for PrismShadingPlugin {
                         init_bloom_pipelines,
                         init_vsm_receiver_gen_pipeline,
                         init_vsm_page_mark_pipeline,
+                        init_vsm_caster_depth_pipeline,
                         init_motion_blur_pipeline,
                         init_volumetrics_pipeline,
                         init_dof_pipeline,
@@ -449,7 +459,12 @@ impl Plugin for PrismShadingPlugin {
                         .in_set(RenderSystems::PrepareBindGroups),
                     queue_visibility_raster.in_set(RenderSystems::QueueMeshes),
                     queue_transparent_oit.in_set(RenderSystems::QueueMeshes),
-                    queue_shadow_depth.in_set(RenderSystems::QueueMeshes),
+                    // Nested to keep this Render tuple within Bevy's 20-element
+                    // limit: both shadow draw-list builders run in QueueMeshes.
+                    (
+                        queue_shadow_depth.in_set(RenderSystems::QueueMeshes),
+                        queue_vsm_caster_depth.in_set(RenderSystems::QueueMeshes),
+                    ),
                     prepare_shadow_depth_uniform
                         .after(write_shadow_buffers)
                         .in_set(RenderSystems::PrepareBindGroups),
@@ -577,6 +592,14 @@ impl Plugin for PrismShadingPlugin {
                         prepare_vsm_physical_atlas
                             .after(prepare_vsm_receiver_resources)
                             .in_set(RenderSystems::PrepareResources),
+                        // Caster-depth targets size off vsm_settings + device
+                        // (no per-view input), so they build in PrepareResources;
+                        // the per-view caster views then build in
+                        // PrepareBindGroups off the bridge's ViewVsmCasterPages.
+                        prepare_vsm_caster_depth_targets
+                            .in_set(RenderSystems::PrepareResources),
+                        prepare_vsm_caster_depth_views
+                            .in_set(RenderSystems::PrepareBindGroups),
                     ),
                 ),
             )
@@ -913,6 +936,12 @@ impl Plugin for PrismShadingPlugin {
                         .before(bevy_core_pipeline::Core3dSystems::MainPass),
                     vsm_mark_pages_pass
                         .after(vsm_receiver_gen_pass)
+                        .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                    // Caster-depth raster fills the physical atlas pages after
+                    // page-mark decides residency, before the main pass samples
+                    // the VSM in the shading model.
+                    vsm_caster_depth_pass
+                        .after(vsm_mark_pages_pass)
                         .before(bevy_core_pipeline::Core3dSystems::MainPass),
                     // Froxel fog is self-contained (its own per-view volumes),
                     // so it only needs to finish before the main pass composites.

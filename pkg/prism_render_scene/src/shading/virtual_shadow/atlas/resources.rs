@@ -25,7 +25,7 @@ use bevy_math::UVec2;
 use bevy_platform::collections::{HashMap, HashSet};
 use bevy_render::{
     render_resource::{
-        AddressMode, Extent3d, FilterMode, Sampler, SamplerDescriptor, Texture, TextureDescriptor,
+        Extent3d, Texture, TextureDescriptor,
         TextureDimension, TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
     },
     renderer::RenderDevice,
@@ -87,16 +87,11 @@ pub(crate) fn atlas_tile_origin(
 /// [`ViewVsmReceivers`] marking a shaded 3D view).
 #[derive(Component)]
 pub(crate) struct ViewVsmPhysicalAtlas {
-    /// The `R32Float` atlas depth texture; its `.r` channel stores resident
-    /// pages' NDC depth. Kept for the shadow-depth draw that renders into its
-    /// tiles as a `RENDER_ATTACHMENT`.
-    texture: Texture,
-    /// Sampling view of [`Self::texture`] bound at `physical_atlas` (binding 1)
-    /// in `shaders/vsm_sample.wesl`.
+    /// Sampling view of the `R32Float` atlas depth texture bound at
+    /// `physical_atlas` (binding 1) in `shaders/vsm_sample.wesl`; its `.r`
+    /// channel stores resident pages' NDC depth. The texture itself lives in
+    /// [`VsmPhysicalAtlasCache`], which owns it across frames.
     view: TextureView,
-    /// Linear clamp sampler bound at `physical_sampler` (binding 2); the shader
-    /// compares depth manually after sampling.
-    sampler: Sampler,
     /// Physical page budget the atlas backs (`physical_pages` immediate field).
     physical_pages: u32,
     /// Physical pages along one atlas edge (`physical_pages_per_edge` immediate
@@ -105,20 +100,9 @@ pub(crate) struct ViewVsmPhysicalAtlas {
 }
 
 impl ViewVsmPhysicalAtlas {
-    /// The atlas depth texture itself, for the shadow-depth draw that renders
-    /// into its page tiles as a render attachment.
-    pub(crate) fn atlas_texture(&self) -> &Texture {
-        &self.texture
-    }
-
     /// Sampling view of the atlas depth texture (`vsm_sample.wesl` binding 1).
     pub(crate) fn atlas_view(&self) -> &TextureView {
         &self.view
-    }
-
-    /// The linear clamp sampler (`vsm_sample.wesl` binding 2).
-    pub(crate) fn sampler(&self) -> &Sampler {
-        &self.sampler
     }
 
     /// The physical page budget the atlas backs.
@@ -142,41 +126,21 @@ struct CachedAtlas {
 }
 
 /// Render-world cache of each view's persistent physical page atlas, keyed by
-/// its stable [`RetainedViewEntity`], plus the shared filtering sampler.
+/// its stable [`RetainedViewEntity`].
 ///
 /// A view that persists across frames with an unchanged atlas edge reuses the
 /// same texture; a retune rebuilds it and a vanished view is dropped so
-/// textures never leak. The sampler is edge-independent, so it is created once
-/// and shared by every view.
+/// textures never leak.
 #[derive(Resource, Default)]
 pub(crate) struct VsmPhysicalAtlasCache {
     atlases: HashMap<RetainedViewEntity, CachedAtlas>,
-    sampler: Option<Sampler>,
 }
 
 impl VsmPhysicalAtlasCache {
     /// Drops every cached atlas (used when the feature is disabled or no light
-    /// drives the subsystem, so nothing lingers resident). The shared sampler
-    /// is cheap and left in place.
+    /// drives the subsystem, so nothing lingers resident).
     fn clear(&mut self) {
         self.atlases.clear();
-    }
-
-    /// Returns the shared linear clamp sampler, creating it on first use.
-    fn sampler(&mut self, device: &RenderDevice) -> Sampler {
-        self.sampler
-            .get_or_insert_with(|| {
-                device.create_sampler(&SamplerDescriptor {
-                    label: Some("prism VSM physical atlas sampler"),
-                    address_mode_u: AddressMode::ClampToEdge,
-                    address_mode_v: AddressMode::ClampToEdge,
-                    address_mode_w: AddressMode::ClampToEdge,
-                    mag_filter: FilterMode::Linear,
-                    min_filter: FilterMode::Linear,
-                    ..Default::default()
-                })
-            })
-            .clone()
     }
 
     /// Returns the cached atlas view for `retained`, (re)allocating the texture
@@ -267,17 +231,13 @@ pub(crate) fn prepare_vsm_physical_atlas(
     let pages_per_edge = physical_pages_per_edge(physical_pages);
     let edge_texels = pages_per_edge.saturating_mul(page_size).max(1);
 
-    let sampler = cache.sampler(&device);
-
     let mut seen: HashSet<RetainedViewEntity> = HashSet::default();
     for (entity, view, _receivers) in &views {
         let retained = view.retained_view_entity;
-        let (texture, atlas_view) = cache.get_or_create(&device, retained, edge_texels);
+        let (_texture, atlas_view) = cache.get_or_create(&device, retained, edge_texels);
 
         commands.entity(entity).insert(ViewVsmPhysicalAtlas {
-            texture,
             view: atlas_view,
-            sampler: sampler.clone(),
             physical_pages,
             physical_pages_per_edge: pages_per_edge,
         });
