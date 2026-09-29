@@ -44,6 +44,8 @@ mod pipeline;
 pub(crate) mod plugin;
 mod prepare;
 mod resources;
+#[cfg(test)]
+mod shader_tests;
 
 /// The high-level water authoring presets and the water body component they
 /// build, re-exported so a game can spawn an ocean, `FLIP`/`PBF` pool, or
