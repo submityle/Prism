@@ -35,6 +35,7 @@
 //! closures, and the transparency (OIT) routing.
 
 pub mod asset;
+pub mod bending;
 pub mod collision;
 pub mod constraints;
 pub mod dynamics;
