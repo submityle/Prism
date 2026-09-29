@@ -26,3 +26,4 @@
 //! shader `struct`s and the golden buffer sizing.
 
 mod abi;
+mod pipeline;

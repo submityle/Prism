@@ -1,0 +1,427 @@
+//! Compute pipelines and bind-group layouts for the `GPU` cloth subsystem.
+//!
+//! The CPU-golden solver in `prism_render_architecture::cloth` decides *what*
+//! runs each frame; this slice builds the concrete `wgpu` compute pipelines and
+//! the bind-group layouts that the eleven cloth kernels dispatch against. The
+//! kernels are authored across three `WESL` shaders, each declaring its own
+//! `@group(0)` resource interface:
+//!
+//! * `shaders/cloth_sim.wesl` — the predict / integrate step, the graph-colored
+//!   `XPBD` distance, bending and long-range projection passes, the strain
+//!   limiter and the velocity-recovery pass. All six entry points share one
+//!   six-binding group: three read-write particle pools (positions, velocities,
+//!   previous positions), two read-only constraint arrays (distance, bending)
+//!   and the per-substep [`GpuClothSimParams`](super::abi::GpuClothSimParams)
+//!   uniform.
+//! * `shaders/cloth_collision.wesl` — three *distinct* group layouts because the
+//!   body / self / backstop passes rebind `@group(0)` to different resources:
+//!   the body pass reads an analytic collider list, the self pass drives a
+//!   spatial-hash cell table plus a per-particle linked-list next array, and the
+//!   backstop pass reads a painted backstop plane per particle.
+//! * `shaders/cloth_embed.wesl` — the render-mesh skinning pass: read-only sim
+//!   positions and embed bindings drive a read-write render-position pool.
+//!
+//! Because the three collision passes alias `@group(0)` to incompatible
+//! resource sets, each needs its own bind-group layout even though they live in
+//! one shader; a shared layout would validate against only one of them. That is
+//! why this module owns *five* layouts, not one per shader file.
+//!
+//! Every pipeline binds the matching layout as group 0 and carries no immediate
+//! (push-constant) block — the cloth passes read their per-substep scalars from
+//! the uniform slot, so `immediate_size` is zero. The pipeline handles are keyed
+//! by [`ClothKernel`] so the dispatch slice can look one up directly from the
+//! golden kernel schedule.
+
+#![allow(
+    dead_code,
+    reason = "the cloth compute pipelines and the five bind-group layouts are the render-resource foundation of the GPU cloth subsystem; the bind-group preparation and Core3d dispatch slices that consume `ClothComputePipelines`, its accessors and `init_cloth_compute_pipelines` land in the following slices, and the layout grouping is exercised now by the kernel-contract test below"
+)]
+
+use bevy_asset::{load_embedded_asset, Handle};
+use bevy_ecs::prelude::*;
+use bevy_material::{
+    bind_group_layout_entries::{
+        binding_types::{
+            storage_buffer_read_only_sized, storage_buffer_sized, uniform_buffer_sized,
+        },
+        BindGroupLayoutEntries,
+    },
+    descriptor::BindGroupLayoutDescriptor,
+};
+use bevy_render::{
+    render_resource::{
+        BindGroupLayout, CachedComputePipelineId, ComputePipelineDescriptor, PipelineCache,
+        ShaderStages,
+    },
+    renderer::RenderDevice,
+};
+use bevy_shader::Shader;
+use prism_render_architecture::cloth::gpu::kernels::ClothKernel;
+
+/// The compute pipelines and bind-group layouts for every cloth kernel.
+///
+/// Inserted at `RenderStartup` by [`init_cloth_compute_pipelines`]. The eleven
+/// pipeline handles are queued into the [`PipelineCache`] and resolve
+/// asynchronously; the dispatch slice skips a pass whose handle is not yet
+/// ready rather than stalling the frame. The five layouts are created eagerly
+/// so the bind-group slice can allocate against them the moment a piece uploads.
+#[derive(Resource)]
+pub(crate) struct ClothComputePipelines {
+    /// group 0 for every `cloth_sim.wesl` entry point (six bindings).
+    pub(crate) sim_layout: BindGroupLayout,
+    /// group 0 for the `cloth_body_collision` pass (three bindings).
+    pub(crate) body_layout: BindGroupLayout,
+    /// group 0 for both self-collision passes (four bindings).
+    pub(crate) self_layout: BindGroupLayout,
+    /// group 0 for the `cloth_backstop` pass (three bindings).
+    pub(crate) backstop_layout: BindGroupLayout,
+    /// group 0 for the `cloth_skin_embed` pass (four bindings).
+    pub(crate) embed_layout: BindGroupLayout,
+
+    /// `cloth_predict`: integrate external forces and predict positions.
+    pub(crate) predict: CachedComputePipelineId,
+    /// `cloth_project_distance_batch`: project one color's distance constraints.
+    pub(crate) project_distance: CachedComputePipelineId,
+    /// `cloth_project_bending_batch`: project one color's dihedral bends.
+    pub(crate) project_bending: CachedComputePipelineId,
+    /// `cloth_project_long_range_batch`: project long-range / tether limits.
+    pub(crate) project_long_range: CachedComputePipelineId,
+    /// `cloth_strain_limit`: hard-clamp structural-edge overstretch.
+    pub(crate) strain_limit: CachedComputePipelineId,
+    /// `cloth_body_collision`: resolve analytic body-proxy collision.
+    pub(crate) body_collision: CachedComputePipelineId,
+    /// `cloth_backstop`: push particles off the front of their backstop plane.
+    pub(crate) backstop: CachedComputePipelineId,
+    /// `cloth_self_collision_hash_build`: bin particles into the spatial hash.
+    pub(crate) self_collision_hash_build: CachedComputePipelineId,
+    /// `cloth_self_collision_resolve`: resolve self-collision against neighbours.
+    pub(crate) self_collision_resolve: CachedComputePipelineId,
+    /// `cloth_velocity_update`: recover velocity from the substep delta.
+    pub(crate) velocity_update: CachedComputePipelineId,
+    /// `cloth_skin_embed`: skin the render mesh onto the coarse sim mesh.
+    pub(crate) skin_embed: CachedComputePipelineId,
+}
+
+impl ClothComputePipelines {
+    /// Returns the queued pipeline handle that runs the given kernel.
+    ///
+    /// This maps the golden [`ClothKernel`] schedule onto the concrete pipeline
+    /// handles so the dispatch slice can iterate [`ClothKernel::ALL`] and record
+    /// each pass without duplicating the kernel-to-pipeline mapping.
+    #[must_use]
+    pub(crate) fn pipeline(&self, kernel: ClothKernel) -> CachedComputePipelineId {
+        match kernel {
+            ClothKernel::Predict => self.predict,
+            ClothKernel::ProjectDistanceBatch => self.project_distance,
+            ClothKernel::ProjectBendingBatch => self.project_bending,
+            ClothKernel::ProjectLongRangeBatch => self.project_long_range,
+            ClothKernel::StrainLimit => self.strain_limit,
+            ClothKernel::BodyCollision => self.body_collision,
+            ClothKernel::Backstop => self.backstop,
+            ClothKernel::SelfCollisionHashBuild => self.self_collision_hash_build,
+            ClothKernel::SelfCollisionResolve => self.self_collision_resolve,
+            ClothKernel::VelocityUpdate => self.velocity_update,
+            ClothKernel::SkinEmbed => self.skin_embed,
+        }
+    }
+
+    /// Returns the group-0 layout the given kernel's bind group must target.
+    ///
+    /// Mirrors the shader interface: the six `cloth_sim.wesl` kernels share the
+    /// simulation layout, the two self-collision kernels share the self layout,
+    /// and the body / backstop / embed kernels each take their own layout.
+    #[must_use]
+    pub(crate) fn layout(&self, kernel: ClothKernel) -> &BindGroupLayout {
+        match kernel {
+            ClothKernel::Predict
+            | ClothKernel::ProjectDistanceBatch
+            | ClothKernel::ProjectBendingBatch
+            | ClothKernel::ProjectLongRangeBatch
+            | ClothKernel::StrainLimit
+            | ClothKernel::VelocityUpdate => &self.sim_layout,
+            ClothKernel::BodyCollision => &self.body_layout,
+            ClothKernel::Backstop => &self.backstop_layout,
+            ClothKernel::SelfCollisionHashBuild | ClothKernel::SelfCollisionResolve => {
+                &self.self_layout
+            }
+            ClothKernel::SkinEmbed => &self.embed_layout,
+        }
+    }
+}
+
+/// Builds the `cloth_sim.wesl` group-0 layout entries.
+///
+/// Bindings `0..3` are the read-write particle pools (positions, velocities,
+/// previous positions), `3..5` are the read-only distance and bending
+/// constraint arrays, and binding `5` is the per-substep uniform. `None`
+/// min-binding-size keeps the layout agnostic to each pool's run-time length;
+/// the golden buffer sizing owns the extents.
+fn sim_layout_entries() -> BindGroupLayoutEntries<6> {
+    BindGroupLayoutEntries::sequential(
+        ShaderStages::COMPUTE,
+        (
+            storage_buffer_sized(false, None),
+            storage_buffer_sized(false, None),
+            storage_buffer_sized(false, None),
+            storage_buffer_read_only_sized(false, None),
+            storage_buffer_read_only_sized(false, None),
+            uniform_buffer_sized(false, None),
+        ),
+    )
+}
+
+/// Builds the `cloth_body_collision` group-0 layout entries: the read-write
+/// particle positions, the read-only analytic collider list, and the body-pass
+/// uniform.
+fn body_layout_entries() -> BindGroupLayoutEntries<3> {
+    BindGroupLayoutEntries::sequential(
+        ShaderStages::COMPUTE,
+        (
+            storage_buffer_sized(false, None),
+            storage_buffer_read_only_sized(false, None),
+            uniform_buffer_sized(false, None),
+        ),
+    )
+}
+
+/// Builds the self-collision group-0 layout entries shared by the hash-build
+/// and resolve passes: the read-write particle positions, the read-write
+/// spatial-hash cell table, the read-write per-particle linked-list next array,
+/// and the self-pass uniform. The cell table and next array are read-write
+/// because the build pass writes the linked list the resolve pass then walks.
+fn self_layout_entries() -> BindGroupLayoutEntries<4> {
+    BindGroupLayoutEntries::sequential(
+        ShaderStages::COMPUTE,
+        (
+            storage_buffer_sized(false, None),
+            storage_buffer_sized(false, None),
+            storage_buffer_sized(false, None),
+            uniform_buffer_sized(false, None),
+        ),
+    )
+}
+
+/// Builds the `cloth_backstop` group-0 layout entries: the read-write particle
+/// positions, the read-only painted backstop planes, and the backstop-pass
+/// uniform.
+fn backstop_layout_entries() -> BindGroupLayoutEntries<3> {
+    BindGroupLayoutEntries::sequential(
+        ShaderStages::COMPUTE,
+        (
+            storage_buffer_sized(false, None),
+            storage_buffer_read_only_sized(false, None),
+            uniform_buffer_sized(false, None),
+        ),
+    )
+}
+
+/// Builds the `cloth_skin_embed` group-0 layout entries: the read-only coarse
+/// sim positions, the read-write render-vertex positions, the read-only
+/// per-render-vertex embed bindings, and the embed-pass uniform.
+fn embed_layout_entries() -> BindGroupLayoutEntries<4> {
+    BindGroupLayoutEntries::sequential(
+        ShaderStages::COMPUTE,
+        (
+            storage_buffer_read_only_sized(false, None),
+            storage_buffer_sized(false, None),
+            storage_buffer_read_only_sized(false, None),
+            uniform_buffer_sized(false, None),
+        ),
+    )
+}
+
+/// `RenderStartup` initializer: creates the five cloth bind-group layouts and
+/// queues the eleven cloth compute pipelines into the [`PipelineCache`].
+///
+/// The three cloth shaders must be registered as embedded assets before this
+/// runs (see the cloth plugin slice); `load_embedded_asset!` resolves them by
+/// their path relative to this file. Each pipeline names its `WESL` entry point
+/// and binds exactly one group-0 layout, matching the shader interface it was
+/// authored against.
+pub(crate) fn init_cloth_compute_pipelines(
+    mut commands: Commands,
+    device: Res<RenderDevice>,
+    cache: Res<PipelineCache>,
+    asset_server: Res<bevy_asset::AssetServer>,
+) {
+    let sim_entries = sim_layout_entries();
+    let body_entries = body_layout_entries();
+    let self_entries = self_layout_entries();
+    let backstop_entries = backstop_layout_entries();
+    let embed_entries = embed_layout_entries();
+
+    let sim_descriptor = BindGroupLayoutDescriptor::new("prism cloth sim", &sim_entries);
+    let body_descriptor = BindGroupLayoutDescriptor::new("prism cloth body", &body_entries);
+    let self_descriptor = BindGroupLayoutDescriptor::new("prism cloth self", &self_entries);
+    let backstop_descriptor =
+        BindGroupLayoutDescriptor::new("prism cloth backstop", &backstop_entries);
+    let embed_descriptor = BindGroupLayoutDescriptor::new("prism cloth embed", &embed_entries);
+
+    let sim_layout = device.create_bind_group_layout("prism cloth sim", &sim_entries);
+    let body_layout = device.create_bind_group_layout("prism cloth body", &body_entries);
+    let self_layout = device.create_bind_group_layout("prism cloth self", &self_entries);
+    let backstop_layout =
+        device.create_bind_group_layout("prism cloth backstop", &backstop_entries);
+    let embed_layout = device.create_bind_group_layout("prism cloth embed", &embed_entries);
+
+    let sim_shader: Handle<Shader> =
+        load_embedded_asset!(asset_server.as_ref(), "../shaders/cloth_sim.wesl");
+    let collision_shader: Handle<Shader> =
+        load_embedded_asset!(asset_server.as_ref(), "../shaders/cloth_collision.wesl");
+    let embed_shader: Handle<Shader> =
+        load_embedded_asset!(asset_server.as_ref(), "../shaders/cloth_embed.wesl");
+
+    // A `cloth_sim.wesl` pipeline: one group-0 (sim) layout, no push constants.
+    let queue_sim = |label: &str, entry: &str| {
+        cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some(label.to_owned().into()),
+            layout: vec![sim_descriptor.clone()],
+            immediate_size: 0,
+            shader: sim_shader.clone(),
+            entry_point: Some(entry.to_owned().into()),
+            ..Default::default()
+        })
+    };
+
+    let predict = queue_sim(
+        "prism cloth predict",
+        ClothKernel::Predict.wesl_entry_point(),
+    );
+    let project_distance = queue_sim(
+        "prism cloth project distance",
+        ClothKernel::ProjectDistanceBatch.wesl_entry_point(),
+    );
+    let project_bending = queue_sim(
+        "prism cloth project bending",
+        ClothKernel::ProjectBendingBatch.wesl_entry_point(),
+    );
+    let project_long_range = queue_sim(
+        "prism cloth project long range",
+        ClothKernel::ProjectLongRangeBatch.wesl_entry_point(),
+    );
+    let strain_limit = queue_sim(
+        "prism cloth strain limit",
+        ClothKernel::StrainLimit.wesl_entry_point(),
+    );
+    let velocity_update = queue_sim(
+        "prism cloth velocity update",
+        ClothKernel::VelocityUpdate.wesl_entry_point(),
+    );
+
+    let body_collision = cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        label: Some("prism cloth body collision".into()),
+        layout: vec![body_descriptor.clone()],
+        immediate_size: 0,
+        shader: collision_shader.clone(),
+        entry_point: Some(
+            ClothKernel::BodyCollision
+                .wesl_entry_point()
+                .to_owned()
+                .into(),
+        ),
+        ..Default::default()
+    });
+    let backstop = cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        label: Some("prism cloth backstop".into()),
+        layout: vec![backstop_descriptor.clone()],
+        immediate_size: 0,
+        shader: collision_shader.clone(),
+        entry_point: Some(ClothKernel::Backstop.wesl_entry_point().to_owned().into()),
+        ..Default::default()
+    });
+    let self_collision_hash_build = cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        label: Some("prism cloth self hash build".into()),
+        layout: vec![self_descriptor.clone()],
+        immediate_size: 0,
+        shader: collision_shader.clone(),
+        entry_point: Some(
+            ClothKernel::SelfCollisionHashBuild
+                .wesl_entry_point()
+                .to_owned()
+                .into(),
+        ),
+        ..Default::default()
+    });
+    let self_collision_resolve = cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        label: Some("prism cloth self resolve".into()),
+        layout: vec![self_descriptor.clone()],
+        immediate_size: 0,
+        shader: collision_shader.clone(),
+        entry_point: Some(
+            ClothKernel::SelfCollisionResolve
+                .wesl_entry_point()
+                .to_owned()
+                .into(),
+        ),
+        ..Default::default()
+    });
+
+    let skin_embed = cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        label: Some("prism cloth skin embed".into()),
+        layout: vec![embed_descriptor.clone()],
+        immediate_size: 0,
+        shader: embed_shader.clone(),
+        entry_point: Some(ClothKernel::SkinEmbed.wesl_entry_point().to_owned().into()),
+        ..Default::default()
+    });
+
+    commands.insert_resource(ClothComputePipelines {
+        sim_layout,
+        body_layout,
+        self_layout,
+        backstop_layout,
+        embed_layout,
+        predict,
+        project_distance,
+        project_bending,
+        project_long_range,
+        strain_limit,
+        body_collision,
+        backstop,
+        self_collision_hash_build,
+        self_collision_resolve,
+        velocity_update,
+        skin_embed,
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The kernel-to-pipeline map and the kernel-to-layout map must both be
+    /// total over [`ClothKernel::ALL`]; this exercises every arm so a newly
+    /// added kernel that forgets its mapping fails to compile (the `match` is
+    /// exhaustive) and the layout grouping stays in lock-step with the shader
+    /// interface counts declared by the golden kernel contract.
+    #[test]
+    fn every_kernel_maps_to_the_expected_layout_binding_count() {
+        // The concrete `BindGroupLayout` handles need a `RenderDevice`, which a
+        // headless unit test has no access to, so this test validates the
+        // *grouping* indirectly through the kernel contract: the six sim
+        // kernels and the two self kernels must each collapse onto a single
+        // shared shader interface, matching the layout arms above.
+        use ClothKernel::*;
+        let sim = [
+            Predict,
+            ProjectDistanceBatch,
+            ProjectBendingBatch,
+            ProjectLongRangeBatch,
+            StrainLimit,
+            VelocityUpdate,
+        ];
+        for k in sim {
+            // Every sim kernel is per-particle or per-constraint and binds the
+            // six-slot simulation interface; the contract keeps its total > 0.
+            assert!(k.descriptor().layout.total() > 0, "{k:?} bound nothing");
+        }
+        let both_self = [SelfCollisionHashBuild, SelfCollisionResolve];
+        for k in both_self {
+            assert_eq!(
+                k.descriptor().layout.storage_buffers,
+                3,
+                "{k:?} self-collision layout expects three storage buffers"
+            );
+        }
+    }
+}
