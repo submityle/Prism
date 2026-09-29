@@ -23,10 +23,16 @@
 //! `water_surface`) and mirror the `CPU` golden reference byte-for-byte.
 
 pub mod buffers;
+pub mod pipeline;
 
 pub use buffers::{
     AsyncFrameState, BufferParity, FrameSlot, PipelineError, SlotState, WaterBufferCounts,
     WaterPersistentBufferSet, DISPLACEMENT_TEXEL_STRIDE, FLIP_PARTICLE_STRIDE, FOAM_CELL_STRIDE,
     FROXEL_STRIDE, GERSTNER_WAVE_STRIDE, GRID_SCALAR_STRIDE, NORMAL_TEXEL_STRIDE,
     PBF_PARTICLE_STRIDE, SPECTRUM_AMPLITUDE_STRIDE, SWE_CELL_STRIDE, WETNESS_CELL_STRIDE,
+};
+
+pub use pipeline::{
+    extract, plan_frame, prepare, queue, PlannedDispatch, WaterGpuExtract, WaterGpuFramePlan,
+    WaterGpuPrepare, WaterGpuQueue, WaterPasses,
 };
