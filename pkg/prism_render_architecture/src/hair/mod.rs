@@ -65,6 +65,7 @@ pub mod deep_transmittance;
 pub mod density_lod;
 pub mod dynamics;
 pub mod frame_barriers;
+pub mod frame_bind_plan;
 pub mod frame_budget;
 pub mod frame_pass_layout;
 pub mod frame_resource_map;
