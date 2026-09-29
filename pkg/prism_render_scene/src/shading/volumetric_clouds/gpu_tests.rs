@@ -40,9 +40,11 @@ use wgpu::{
 };
 
 use prism_render_architecture::volumetric::math::ln_approx;
+use prism_render_architecture::volumetric::math::{exp_approx, saturate};
 use prism_render_architecture::volumetric::math::{Vec2, Vec3};
 use prism_render_architecture::volumetric::multiscatter::MultiScatterLut;
-use prism_render_architecture::volumetric::scatter::{dual_lobe_phase, OctaveParams};
+use prism_render_architecture::volumetric::raymarch::{adaptive_step, RaymarchConfig};
+use prism_render_architecture::volumetric::scatter::{dual_lobe_phase, hg_phase, OctaveParams};
 use prism_render_architecture::volumetric::shadow::shadow_transmittance;
 use prism_render_architecture::volumetric::temporal::{
     active_pixel, clamp_history, variance_clip, UpscaleMode,
@@ -53,8 +55,8 @@ use prism_render_architecture::volumetric::{
 };
 
 use super::abi::{
-    GpuModelingParams, GpuMsLutParams, GpuNoiseBakeParams, GpuScatterResolveParams,
-    GpuShadowMarchParams, GpuUpsampleParams, GpuWeatherAdvectParams,
+    GpuModelingParams, GpuMsLutParams, GpuNoiseBakeParams, GpuRaymarchParams,
+    GpuScatterResolveParams, GpuShadowMarchParams, GpuUpsampleParams, GpuWeatherAdvectParams,
 };
 
 /// Absolute per-voxel tolerance for the `GPU`-versus-`CPU` comparison.
@@ -2361,6 +2363,419 @@ fn scatter_resolve_gpu_matches_cpu_golden() {
             let gain = lut_gain(ic, id, ia);
             let resolved = single * (1.0 + gain) * phase_gain;
             let cpu = [resolved, resolved, resolved, transmittance];
+
+            let mut c = 0usize;
+            while c < 4 {
+                let dch = (gpu[c] - cpu[c]).abs();
+                assert!(
+                    dch < PARITY_EPS,
+                    "texel ({x}, {y}) channel {c}: gpu={} cpu={} |d|={dch}",
+                    gpu[c],
+                    cpu[c],
+                );
+                c += 1;
+            }
+            checked += 1;
+            x += 1;
+        }
+        y += 1;
+    }
+    assert_eq!(
+        checked,
+        SCREEN_W * SCREEN_H,
+        "every screen texel must be compared"
+    );
+}
+
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice must reach the test log on hosts without an immediate-data adapter"
+)]
+fn raymarch_gpu_matches_cpu_golden() {
+    let Some((device, queue)) = try_cloud_device() else {
+        eprintln!(
+            "raymarch_gpu_matches_cpu_golden: no immediate-data wgpu adapter, skipping on-device parity"
+        );
+        return;
+    };
+
+    // Screen width is a multiple of 32 so the `rgba16float` output row
+    // (8 bytes/texel) meets the 256-byte copy alignment; both screen extents are
+    // multiples of the (8, 8, 1) workgroup so no invocation is masked. The
+    // density cache is sized to the screen (`GRID_X == SCREEN_W`,
+    // `GRID_Y == SCREEN_H`) because the kernel indexes the density texture by
+    // the raw tile `(gid.x, gid.y)` with no rescale.
+    const SCREEN_W: u32 = 32;
+    const SCREEN_H: u32 = 8;
+    const GRID_X: u32 = 32;
+    const GRID_Y: u32 = 8;
+    const GRID_Z: u32 = 4;
+    const OUT_BYTES_PER_TEXEL: u32 = 8;
+    const VC_EPS: f32 = 1.0e-6;
+
+    // The step lengths are in normalised column units (`distance == 1`). Steps
+    // stay >= `min_step` so the walk terminates in a handful of iterations, the
+    // accumulated optical depth keeps `transmittance` far above the cutoff (so
+    // both sides march the identical, transcendental-free step sequence), and
+    // the only `GPU`-vs-`CPU` gap is native `exp` versus the crate `exp_approx`.
+    let params = GpuRaymarchParams {
+        screen_w: SCREEN_W,
+        screen_h: SCREEN_H,
+        grid_x: GRID_X,
+        grid_y: GRID_Y,
+        grid_z: GRID_Z,
+        base_step: 0.25,
+        max_step: 0.34,
+        min_step: 0.13,
+        density_threshold: 0.3,
+        transmittance_cutoff: 0.001,
+        max_steps: 64,
+        sigma_t: 0.8,
+        albedo: 0.6,
+        phase_g: 0.2,
+    };
+
+    // Deterministic exact-`float32` density volume (`.x` channel) mixing empty
+    // and in-cloud samples across the marched depth slices.
+    fn density_at(x: u32, y: u32, z: u32) -> f32 {
+        ((x * 5 + y * 3 + z * 7) % 10) as f32 / 10.0
+    }
+    // Deterministic light visibility (`.x` channel) the kernel saturates.
+    fn shadow_at(x: u32, y: u32) -> f32 {
+        ((x * 2 + y * 3) % 9) as f32 / 9.0
+    }
+
+    // Fill the 3D density cache. Layout: width = x, height = y,
+    // depth-or-array = z; linear index `z*GRID_Y*GRID_X + y*GRID_X + x`.
+    let voxel_count = (GRID_X * GRID_Y * GRID_Z) as usize;
+    let mut density_data = vec![0.0f32; voxel_count * 4];
+    let mut z = 0u32;
+    while z < GRID_Z {
+        let mut y = 0u32;
+        while y < GRID_Y {
+            let mut x = 0u32;
+            while x < GRID_X {
+                let n = (z * GRID_Y * GRID_X + y * GRID_X + x) as usize;
+                density_data[4 * n] = density_at(x, y, z);
+                x += 1;
+            }
+            y += 1;
+        }
+        z += 1;
+    }
+
+    // Fill the 2D shadow input (`.x` channel).
+    let pixel_count = (SCREEN_W * SCREEN_H) as usize;
+    let mut shadow_data = vec![0.0f32; pixel_count * 4];
+    let mut y = 0u32;
+    while y < SCREEN_H {
+        let mut x = 0u32;
+        while x < SCREEN_W {
+            let n = (y * SCREEN_W + x) as usize;
+            shadow_data[4 * n] = shadow_at(x, y);
+            x += 1;
+        }
+        y += 1;
+    }
+
+    let wgsl = compile_clouds_wgsl();
+    let entry = find_entry_point(&wgsl, "raymarch");
+    let module = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("volumetric_raymarch_parity"),
+        source: ShaderSource::Wgsl(wgsl.as_str().into()),
+    });
+
+    // Explicit `@group(0)` layout mirroring the ray-march kernel: binding 7 =
+    // density cache (`texture_3d<f32>`), 8 = light-space shadow visibility
+    // (`texture_2d<f32>`), 9 = write-only `rgba16float` scatter output. The
+    // pipeline layout's immediate range spans the full `GpuRaymarchParams` block
+    // (auto layout misreflects the immediate size on this driver).
+    let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+        label: Some("vc_raymarch_bind_group_layout"),
+        entries: &[
+            BindGroupLayoutEntry {
+                binding: 7,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Texture {
+                    sample_type: TextureSampleType::Float { filterable: false },
+                    view_dimension: TextureViewDimension::D3,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            BindGroupLayoutEntry {
+                binding: 8,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Texture {
+                    sample_type: TextureSampleType::Float { filterable: false },
+                    view_dimension: TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            BindGroupLayoutEntry {
+                binding: 9,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::StorageTexture {
+                    access: StorageTextureAccess::WriteOnly,
+                    format: TextureFormat::Rgba16Float,
+                    view_dimension: TextureViewDimension::D2,
+                },
+                count: None,
+            },
+        ],
+    });
+    let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+        label: Some("vc_raymarch_pipeline_layout"),
+        bind_group_layouts: &[Some(&bind_group_layout)],
+        immediate_size: size_of::<GpuRaymarchParams>() as u32,
+    });
+    let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("volumetric_raymarch_parity"),
+        layout: Some(&pipeline_layout),
+        module: &module,
+        entry_point: Some(&entry),
+        compilation_options: PipelineCompilationOptions::default(),
+        cache: None,
+    });
+
+    let density_tex = device.create_texture(&TextureDescriptor {
+        label: Some("vc_rm_density_in"),
+        size: Extent3d {
+            width: GRID_X,
+            height: GRID_Y,
+            depth_or_array_layers: GRID_Z,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D3,
+        format: TextureFormat::Rgba32Float,
+        usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let shadow_tex = device.create_texture(&TextureDescriptor {
+        label: Some("vc_rm_shadow_in"),
+        size: Extent3d {
+            width: SCREEN_W,
+            height: SCREEN_H,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: TextureFormat::Rgba32Float,
+        usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let out_tex = device.create_texture(&TextureDescriptor {
+        label: Some("vc_rm_scatter_out"),
+        size: Extent3d {
+            width: SCREEN_W,
+            height: SCREEN_H,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: TextureFormat::Rgba16Float,
+        usage: TextureUsages::STORAGE_BINDING | TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+
+    queue.write_texture(
+        TexelCopyTextureInfo {
+            texture: &density_tex,
+            mip_level: 0,
+            origin: Origin3d::ZERO,
+            aspect: TextureAspect::All,
+        },
+        bytemuck::cast_slice(&density_data),
+        TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(GRID_X * 16),
+            rows_per_image: Some(GRID_Y),
+        },
+        Extent3d {
+            width: GRID_X,
+            height: GRID_Y,
+            depth_or_array_layers: GRID_Z,
+        },
+    );
+    queue.write_texture(
+        TexelCopyTextureInfo {
+            texture: &shadow_tex,
+            mip_level: 0,
+            origin: Origin3d::ZERO,
+            aspect: TextureAspect::All,
+        },
+        bytemuck::cast_slice(&shadow_data),
+        TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(SCREEN_W * 16),
+            rows_per_image: Some(SCREEN_H),
+        },
+        Extent3d {
+            width: SCREEN_W,
+            height: SCREEN_H,
+            depth_or_array_layers: 1,
+        },
+    );
+
+    let density_view = density_tex.create_view(&TextureViewDescriptor::default());
+    let shadow_view = shadow_tex.create_view(&TextureViewDescriptor::default());
+    let out_view = out_tex.create_view(&TextureViewDescriptor::default());
+    let bind_group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("vc_raymarch_bind_group"),
+        layout: &bind_group_layout,
+        entries: &[
+            BindGroupEntry {
+                binding: 7,
+                resource: BindingResource::TextureView(&density_view),
+            },
+            BindGroupEntry {
+                binding: 8,
+                resource: BindingResource::TextureView(&shadow_view),
+            },
+            BindGroupEntry {
+                binding: 9,
+                resource: BindingResource::TextureView(&out_view),
+            },
+        ],
+    });
+
+    let row_bytes = SCREEN_W * OUT_BYTES_PER_TEXEL;
+    let readback_size = u64::from(row_bytes * SCREEN_H);
+    let readback = device.create_buffer(&BufferDescriptor {
+        label: Some("vc_raymarch_readback"),
+        size: readback_size,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("vc_raymarch_parity_encoder"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("vc_raymarch_parity_pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.set_immediates(0, bytemuck::bytes_of(&params));
+        pass.dispatch_workgroups(SCREEN_W / 8, SCREEN_H / 8, 1);
+    }
+    encoder.copy_texture_to_buffer(
+        TexelCopyTextureInfo {
+            texture: &out_tex,
+            mip_level: 0,
+            origin: Origin3d::ZERO,
+            aspect: TextureAspect::All,
+        },
+        TexelCopyBufferInfo {
+            buffer: &readback,
+            layout: TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row_bytes),
+                rows_per_image: Some(SCREEN_H),
+            },
+        },
+        Extent3d {
+            width: SCREEN_W,
+            height: SCREEN_H,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit([encoder.finish()]);
+
+    readback.slice(..).map_async(MapMode::Read, |_| {});
+    device
+        .poll(PollType::wait_indefinitely())
+        .expect("device poll should complete the submitted work");
+
+    let view = readback
+        .slice(..)
+        .get_mapped_range()
+        .expect("mapped readback range should be available after poll");
+    let halves: Vec<u16> = bytemuck::cast_slice::<u8, u16>(&view).to_vec();
+    drop(view);
+    readback.unmap();
+
+    // Constant forward-peak phase (`cos_theta == 1`) shared by every column.
+    let phase = hg_phase(1.0, params.phase_g);
+    let sigma_t_base = params.sigma_t.max(0.0);
+    let sigma_s_base = sigma_t_base * saturate(params.albedo);
+    let cfg = RaymarchConfig {
+        base_step: params.base_step,
+        max_step: params.max_step,
+        min_step: params.min_step,
+        density_threshold: params.density_threshold,
+        transmittance_cutoff: params.transmittance_cutoff,
+        max_steps: params.max_steps,
+    };
+
+    // Row is dense (row_bytes == SCREEN_W * 8), so texel (x, y) maps to
+    // n = y*SCREEN_W + x with channel c at half-word 4*n + c.
+    let mut checked = 0u32;
+    let mut y = 0u32;
+    while y < SCREEN_H {
+        let mut x = 0u32;
+        while x < SCREEN_W {
+            let n = (y * SCREEN_W + x) as usize;
+            let gpu = [
+                f16_to_f32(halves[4 * n]),
+                f16_to_f32(halves[4 * n + 1]),
+                f16_to_f32(halves[4 * n + 2]),
+                f16_to_f32(halves[4 * n + 3]),
+            ];
+
+            // Reproduce the kernel march verbatim: the step sequence is
+            // transcendental-free (so bit-identical to the `GPU`), and the
+            // analytic homogeneous-segment integral folds the shadow visibility,
+            // scattering coefficient and phase into the accumulated radiance.
+            let shadow_light = saturate(shadow_at(x, y));
+            let distance = 1.0f32;
+            let mut t = 0.0f32;
+            let mut transmittance = 1.0f32;
+            let mut scattered = 0.0f32;
+            let mut steps = 0u32;
+            loop {
+                if t >= distance || steps >= params.max_steps {
+                    break;
+                }
+                if transmittance < params.transmittance_cutoff {
+                    break;
+                }
+                let gz = params.grid_z.max(1);
+                let z = ((saturate(t) * gz as f32) as u32).min(gz - 1);
+                let density = density_at(x, y, z);
+                let in_cloud = density >= params.density_threshold;
+                let mut step = adaptive_step(density, in_cloud, cfg);
+                let remaining = distance - t;
+                if step > remaining {
+                    step = remaining;
+                }
+                if step <= VC_EPS {
+                    break;
+                }
+                if in_cloud {
+                    let sigma_t = sigma_t_base * density;
+                    let sigma_s = sigma_s_base * density;
+                    let seg_optical = sigma_t * step;
+                    let seg_trans = exp_approx(-seg_optical);
+                    let integral = if sigma_t > VC_EPS {
+                        (1.0 - seg_trans) / sigma_t
+                    } else {
+                        step
+                    };
+                    scattered += transmittance * shadow_light * sigma_s * phase * integral;
+                    transmittance = saturate(transmittance * seg_trans);
+                }
+                steps += 1;
+                t += step;
+            }
+            let cpu = [scattered, scattered, scattered, transmittance];
 
             let mut c = 0usize;
             while c < 4 {
