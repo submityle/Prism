@@ -34,6 +34,7 @@
 //! reimplements, the shared deformation budget, the material `cloth` shading
 //! closures, and the transparency (OIT) routing.
 
+pub mod aero_gather;
 pub mod asset;
 pub mod bending;
 pub mod ccd;

@@ -262,7 +262,7 @@ fn hash_to_unit(seed: u32) -> f32 {
 /// A zero (or negative) turbulence yields [`Vec3::ZERO`]; otherwise the three
 /// indices are combined with the classic spatial-hash primes and hashed once
 /// per axis, so each triangle gets a stable, index-derived jitter direction.
-fn turbulence_offset(indices: [u32; 3], turbulence: f32) -> Vec3 {
+pub(super) fn turbulence_offset(indices: [u32; 3], turbulence: f32) -> Vec3 {
     if turbulence <= 0.0 {
         return Vec3::ZERO;
     }
