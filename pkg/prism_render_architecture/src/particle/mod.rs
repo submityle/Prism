@@ -46,6 +46,7 @@
 //! of scope for this `CPU`-verifiable contract layer and are documented as
 //! "pending the GPU backend" where the contract signatures anticipate them.
 
+pub mod alpha_erosion;
 pub mod atlas_packing;
 pub mod attributes;
 pub mod audio_spectrum;
@@ -62,6 +63,7 @@ pub mod constraints;
 pub mod curl_noise;
 pub mod curves;
 pub mod decal;
+pub mod depth_of_field;
 pub mod determinism;
 pub mod draw_pass_buffers;
 pub mod dual_backend;
@@ -79,6 +81,7 @@ pub mod gpu_dispatch;
 pub mod gpu_layout;
 pub mod gpu_timer_query;
 pub mod graph;
+pub mod heat_distortion;
 pub mod indirect_dispatch;
 pub mod indirect_draw;
 pub mod instancing;
@@ -91,6 +94,7 @@ pub mod motion_vectors;
 pub mod noise;
 pub mod occlusion;
 pub mod oit;
+pub mod orientation_basis;
 pub mod perf_budget;
 pub mod pipeline_layout;
 pub mod platform;
@@ -121,6 +125,7 @@ pub mod stages;
 pub mod stats_overlay;
 pub mod suballocator;
 pub mod subframe_spawn;
+pub mod temporal_dither;
 pub mod time_control;
 pub mod uv_animation;
 pub mod validation;
