@@ -230,6 +230,53 @@ pub struct PrismShadingDiagnostics {
     pub visibility_buffer_active: bool,
     pub compute_resolve_active: bool,
     pub native_barycentrics: bool,
+    /// GPU-observed classification fault counters read back one frame late from
+    /// the per-view `diagnostics` buffer the `classify_count` / `scatter_work`
+    /// passes populate. Distinct from the CPU-mirror `stale_materials` /
+    /// `unsupported_materials` (which count registry work items, not shaded
+    /// pixels); this is the ground truth of what the device actually classified.
+    pub gpu_classification: GpuClassificationCounters,
+}
+
+/// GPU-observed material-classification fault counters, decoded from the
+/// per-view `diagnostics` storage buffer (`shaders/material_classification.wesl`).
+///
+/// Slot semantics (atomic counters, per shaded pixel):
+/// - `background_pixels`: uncovered / no-geometry pixels (`diagnostics[0]`); a
+///   normal, non-error condition kept for coverage accounting.
+/// - `stale_pixels`: pixels whose material index was out of range, or whose
+///   material was inactive / had a mismatched generation (`diagnostics[1]`).
+/// - `unsupported_pixels`: pixels whose material resolved to a shading class
+///   outside the supported range (`diagnostics[2]`).
+/// - `overflow_pixels`: pixels dropped because the compacted work list exceeded
+///   its capacity during scatter (`diagnostics[3]`).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GpuClassificationCounters {
+    pub background_pixels: u32,
+    pub stale_pixels: u32,
+    pub unsupported_pixels: u32,
+    pub overflow_pixels: u32,
+}
+
+impl GpuClassificationCounters {
+    /// Saturating element-wise sum, used to aggregate multiple views' counters
+    /// into the single global [`PrismShadingDiagnostics`] resource.
+    pub fn saturating_add(self, other: Self) -> Self {
+        Self {
+            background_pixels: self.background_pixels.saturating_add(other.background_pixels),
+            stale_pixels: self.stale_pixels.saturating_add(other.stale_pixels),
+            unsupported_pixels: self
+                .unsupported_pixels
+                .saturating_add(other.unsupported_pixels),
+            overflow_pixels: self.overflow_pixels.saturating_add(other.overflow_pixels),
+        }
+    }
+
+    /// True when the device reported a real fault (stale material, unsupported
+    /// shading class, or work-list overflow). Background pixels are not faults.
+    pub fn has_faults(self) -> bool {
+        self.stale_pixels != 0 || self.unsupported_pixels != 0 || self.overflow_pixels != 0
+    }
 }
 
 pub(crate) fn detect_shading_capabilities(
@@ -254,6 +301,10 @@ pub(crate) fn prepare_shading_work(
     mut diagnostics: ResMut<PrismShadingDiagnostics>,
 ) {
     debug_assert_eq!(frame_graph.compiled.execution_order.len(), 5);
+    // The GPU-observed counters are owned by the classification readback bridge
+    // (populated at RenderGraph `Begin`); preserve them across this full-struct
+    // CPU recompute so the one-frame-late device data is not clobbered.
+    let gpu_classification = diagnostics.gpu_classification;
     *diagnostics = shading_diagnostics(
         &settings,
         diagnostics.native_barycentrics,
@@ -264,6 +315,7 @@ pub(crate) fn prepare_shading_work(
                 .map(|record| record.header(0, 0, 0, 0))
         }),
     );
+    diagnostics.gpu_classification = gpu_classification;
 }
 
 fn shading_diagnostics(

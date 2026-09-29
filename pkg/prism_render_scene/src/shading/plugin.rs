@@ -2,9 +2,11 @@ use bevy_app::{App, Plugin};
 use bevy_asset::embedded_asset;
 use bevy_ecs::schedule::IntoScheduleConfigs;
 use bevy_pbr::MeshPipelineSystems;
+use bevy_core_pipeline::schedule::camera_driver;
 use bevy_render::{
     init_gpu_resource, ExtractSchedule, GpuResourceAppExt, render_phase::AddRenderCommand,
-    render_resource::SpecializedRenderPipelines, Render, RenderApp, RenderStartup, RenderSystems,
+    render_resource::SpecializedRenderPipelines, renderer::{RenderGraph, RenderGraphSystems},
+    Render, RenderApp, RenderStartup, RenderSystems,
 };
 
 use super::{
@@ -44,11 +46,13 @@ use super::{
         prepare_taa_textures, taa_resolve_pass,
     },
     virtual_shadow::{
-        extract_vsm_primary_light, init_vsm_page_mark_pipeline,
-        init_vsm_receiver_gen_pipeline, prepare_vsm_page_mark_bind_groups,
-        prepare_vsm_page_requests, prepare_vsm_receiver_gen_bind_groups,
-        prepare_vsm_receiver_resources, vsm_mark_pages_pass, vsm_receiver_gen_pass,
-        prepare_vsm_physical_atlas, PrismVirtualShadowSettings, VsmPageRequestBufferCache,
+        collect_vsm_page_readback, extract_vsm_primary_light, init_vsm_page_mark_pipeline,
+        init_vsm_receiver_gen_pipeline, map_submitted_vsm_page_readback,
+        prepare_vsm_page_mark_bind_groups, prepare_vsm_page_requests,
+        prepare_vsm_receiver_gen_bind_groups, prepare_vsm_receiver_resources,
+        request_vsm_page_readback, vsm_mark_pages_pass, vsm_receiver_gen_pass,
+        prepare_vsm_physical_atlas, PrismVirtualShadowSettings, VirtualShadowMapDriver,
+        VsmPageRequestBufferCache, VsmPageRequestReadback, VsmPageTableBufferCache,
         VsmPhysicalAtlasCache, VsmPrimaryLight, VsmReceiverBufferCache,
     },
     chromatic_aberration::{
@@ -126,6 +130,10 @@ use super::{
     classification_gpu::{
         dispatch_material_classification, init_material_classification_pipeline,
         prepare_material_classification_bind_groups,
+    },
+    classification_readback::{
+        collect_classification_readback, map_submitted_classification_readback,
+        request_classification_readback, ClassificationDiagnosticsReadback,
     },
     composite::{
         composite_shading, init_shading_composite_pipeline,
@@ -253,6 +261,7 @@ impl Plugin for PrismShadingPlugin {
             .init_gpu_resource::<SpecializedRenderPipelines<OitCompositePipeline>>()
             .init_resource::<PrismShadingSettings>()
             .init_resource::<PrismShadingDiagnostics>()
+            .init_resource::<ClassificationDiagnosticsReadback>()
             .init_resource::<ResolveMotionHistory>()
             .insert_resource(ShadowAtlasConfig::new(
                 DEFAULT_SHADOW_ATLAS_LAYERS,
@@ -267,6 +276,9 @@ impl Plugin for PrismShadingPlugin {
             .init_resource::<VsmReceiverBufferCache>()
             .init_resource::<VsmPageRequestBufferCache>()
             .init_resource::<VsmPhysicalAtlasCache>()
+            .init_resource::<VirtualShadowMapDriver>()
+            .init_resource::<VsmPageTableBufferCache>()
+            .init_resource::<VsmPageRequestReadback>()
             .init_resource::<PrismMotionBlurSettings>()
             .init_resource::<PrismVolumetricsSettings>()
             .init_resource::<VolumetricsTextureCache>()
@@ -945,6 +957,36 @@ impl Plugin for PrismShadingPlugin {
                 posterize_pass
                     .after(cas_pass)
                     .before(bevy_core_pipeline::Core3dSystems::MainPass),
+            ),
+        );
+
+        // Virtual-shadow-map page-table upload bridge: read the GPU page-mark
+        // request bitmap back one frame late, drive the golden allocator and
+        // upload the resulting virtual->physical page table. Mirrors the
+        // visibility parity readback's three-stage RenderGraph state machine.
+        render_app.add_systems(
+            RenderGraph,
+            (
+                collect_vsm_page_readback.in_set(RenderGraphSystems::Begin),
+                request_vsm_page_readback
+                    .after(camera_driver)
+                    .in_set(RenderGraphSystems::Render),
+                map_submitted_vsm_page_readback.in_set(RenderGraphSystems::Finish),
+            ),
+        );
+
+        // Material-classification diagnostics readback: copy the per-view GPU
+        // fault counters (background / stale / unsupported / overflow) back one
+        // frame late and fold the aggregate into `PrismShadingDiagnostics` so
+        // the classify/scatter passes' device-side accounting is CPU-observable.
+        render_app.add_systems(
+            RenderGraph,
+            (
+                collect_classification_readback.in_set(RenderGraphSystems::Begin),
+                request_classification_readback
+                    .after(camera_driver)
+                    .in_set(RenderGraphSystems::Render),
+                map_submitted_classification_readback.in_set(RenderGraphSystems::Finish),
             ),
         );
     }

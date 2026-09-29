@@ -3,6 +3,7 @@ mod bloom;
 mod cas;
 mod chromatic_aberration;
 mod classification_gpu;
+mod classification_readback;
 mod color_grade;
 mod composite;
 mod dof;
