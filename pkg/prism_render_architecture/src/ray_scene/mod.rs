@@ -15,6 +15,9 @@
 //! - [`footprint`] — ray-cone [`RayFootprint`] and texture-`LOD` (mip) math.
 //! - [`bvh`] — software `BVH`: primitive bounds, binned-`SAH` build, and the
 //!   flattened [`LinearBvhNode`] layout the `GPU` builder mirrors.
+//! - [`tlas`] — two-level acceleration: a top-level `BVH` over affine
+//!   [`tlas::Instance`]s of a shared `BLAS` pool, with object-space ray
+//!   transform and cross-instance nearest-hit pruning.
 //! - [`traversal`] — [`Ray`]/`BVH` slab + Möller–Trumbore intersection with
 //!   closest-hit and any-hit walks (the `GPU` traversal kernel's golden ref).
 
@@ -22,6 +25,7 @@ pub mod acceleration;
 pub mod backend;
 pub mod bvh;
 pub mod footprint;
+pub mod tlas;
 pub mod traversal;
 
 pub use acceleration::{
@@ -34,4 +38,5 @@ pub use backend::{
 };
 pub use footprint::{log2_linear, RayFootprint};
 pub use bvh::{Aabb, Axis, Bvh, BvhBuildConfig, LinearBvhNode, Triangle};
+pub use tlas::{Affine3, Instance, Tlas, TlasHit};
 pub use traversal::{Hit, Ray};

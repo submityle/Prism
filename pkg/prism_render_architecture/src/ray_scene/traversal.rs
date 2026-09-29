@@ -92,6 +92,18 @@ impl Ray {
             self.origin[2] + t * self.direction[2],
         ]
     }
+
+    /// Slab test against `bounds`, clipped to `[t_lo, t_hi]`.
+    ///
+    /// Returns the entry/exit `t` interval in which the ray is inside the box,
+    /// or `None` when it never enters within that range. Public so the
+    /// top-level acceleration structure ([`super::tlas::Tlas`]) prunes its nodes
+    /// with exactly the reciprocal-slab math the `BVH` walk uses internally,
+    /// reusing the precomputed `inv_direction`.
+    #[must_use]
+    pub fn aabb_interval(&self, bounds: &Aabb, t_lo: f32, t_hi: f32) -> Option<(f32, f32)> {
+        slab_interval(self.origin, self.inv_direction, bounds, t_lo, t_hi)
+    }
 }
 
 /// A ray/primitive intersection.
