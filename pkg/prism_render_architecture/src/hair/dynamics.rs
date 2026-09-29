@@ -5,8 +5,9 @@
 //! 1). This module advances one guide strand with an Extended Position Based
 //! Dynamics (XPBD) solver, mirroring the local/global shape constraints of
 //! `TressFX`-class strand dynamics at the algorithm level without reusing any
-//! of its code, and without collisions (the first shipping tier per the design
-//! §6 downgrade matrix: *guide XPBD, no collisions*).
+//! of its code. Collision against analytic body proxies is optional (see
+//! [`super::collision`]): the collision-free solve is the cheap base tier, and
+//! passing colliders enables the head/neck/shoulder projection on top.
 //!
 //! Each guide is a poly-line of [`StrandParticle`]s. The root particle is
 //! *pinned* (`inverse_mass == 0`) so it rides the skinned scalp instead of
@@ -33,6 +34,14 @@
 //! outputs, so results can be golden-tested by hand. This module only *solves*;
 //! charging the solved vertices against the shared deformation budget is
 //! [`super::lod::hair_deformation_request`]'s job, not duplicated here.
+//!
+//! Collision against analytic body proxies is optional and layered on top of
+//! the constraint solve: pass a slice of [`Collider`]s to push free particles
+//! out of the head/neck/shoulder proxies after each constraint sweep, or pass
+//! `&[]` for the collision-free base tier (design §6.2). The projection lives
+//! in [`super::collision`].
+
+use super::collision::{resolve_strand_collisions, Collider};
 
 /// A minimal 3-component vector for strand math.
 ///
@@ -212,7 +221,9 @@ const EPS_LEN: f32 = 1.0e-12;
 /// particle `i` and `i + 1`; `goal_positions[i]` is particle `i`'s global
 /// target pose. Both companion slices are read defensively with `get`, so a
 /// short or empty slice simply disables the corresponding constraint for the
-/// missing indices instead of panicking.
+/// missing indices instead of panicking. `colliders` are projected once per
+/// substep after the constraint sweeps; pass `&[]` to run the collision-free
+/// base tier.
 ///
 /// The call is a no-op when there is nothing to advance: an empty strand, zero
 /// substeps, or a non-positive `dt`. Pinned particles are left exactly where
@@ -221,6 +232,7 @@ pub fn simulate_strand(
     particles: &mut [StrandParticle],
     rest_lengths: &[f32],
     goal_positions: &[Vec3],
+    colliders: &[Collider],
     params: XpbdParams,
 ) {
     if particles.is_empty() || params.substeps == 0 || params.dt <= 0.0 || !params.dt.is_finite() {
@@ -248,6 +260,9 @@ pub fn simulate_strand(
             solve_global(particles, goal_positions, global_stiffness);
             solve_lra(particles, rest_lengths, lra_stiffness);
         }
+        // Collision is projected once per substep, after the constraint sweeps,
+        // so hair settles against the body without fighting the shape solve.
+        resolve_strand_collisions(particles, colliders);
     }
 }
 
@@ -409,14 +424,16 @@ fn solve_lra(particles: &mut [StrandParticle], rest_lengths: &[f32], stiffness: 
 /// the strands occupy consecutive ranges in that order (the same
 /// offset-slicing discipline used by the geometry binning pass in
 /// [`crate::virtual_geometry`]). Each strand is solved with
-/// [`simulate_strand`] over its own sub-slice. A `strand_lengths` entry that
-/// would run past the end of `particles` stops the walk, so malformed layouts
-/// truncate deterministically instead of panicking.
+/// [`simulate_strand`] over its own sub-slice, sharing the same `colliders`
+/// across every strand. A `strand_lengths` entry that would run past the end
+/// of `particles` stops the walk, so malformed layouts truncate
+/// deterministically instead of panicking.
 pub fn simulate_guides(
     particles: &mut [StrandParticle],
     strand_lengths: &[usize],
     rest_lengths: &[Vec3Len],
     goal_positions: &[Vec3],
+    colliders: &[Collider],
     params: XpbdParams,
 ) {
     let mut offset = 0usize;
@@ -430,7 +447,7 @@ pub fn simulate_guides(
         let strand = &mut particles[offset..end];
         let rest = rest_lengths.get(offset..end).unwrap_or(&[]);
         let goal = goal_positions.get(offset..end).unwrap_or(&[]);
-        simulate_strand(strand, rest, goal, params);
+        simulate_strand(strand, rest, goal, colliders, params);
         offset = end;
     }
 }
@@ -487,7 +504,7 @@ mod tests {
         ];
         let rest = [1.0, 0.0];
         for _ in 0..20 {
-            simulate_strand(&mut particles, &rest, &[], params());
+            simulate_strand(&mut particles, &rest, &[], &[], params());
         }
         let root = particles[0].position;
         assert!((root.x - 1.0).abs() < EPS);
@@ -500,7 +517,7 @@ mod tests {
         let mut particles = vec![StrandParticle::free(Vec3::ZERO)];
         let start = particles[0].position.y;
         for _ in 0..10 {
-            simulate_strand(&mut particles, &[], &[], params());
+            simulate_strand(&mut particles, &[], &[], &[], params());
         }
         // Gravity points down (-y), so the particle must descend.
         assert!(particles[0].position.y < start - EPS);
@@ -524,7 +541,7 @@ mod tests {
         // momentum, so this reads the converged rest state directly.
         p.substeps = 1;
         p.iterations = 40;
-        simulate_strand(&mut particles, &rest, &[], p);
+        simulate_strand(&mut particles, &rest, &[], &[], p);
         let e0 = particles[1].position.sub(particles[0].position).length();
         let e1 = particles[2].position.sub(particles[1].position).length();
         assert!((e0 - 1.0).abs() < EPS, "edge0 = {e0}");
@@ -541,7 +558,7 @@ mod tests {
         let mut p = params();
         p.gravity = Vec3::ZERO;
         p.global_stiffness = 1.0;
-        simulate_strand(&mut particles, &[], &goals, p);
+        simulate_strand(&mut particles, &[], &goals, &[], p);
         let tip = particles[1].position;
         assert!((tip.x - 0.0).abs() < EPS);
         assert!((tip.y + 5.0).abs() < EPS);
@@ -562,7 +579,7 @@ mod tests {
         p.local_stiffness = 1.0;
         p.iterations = 1;
         p.substeps = 1;
-        simulate_strand(&mut particles, &[], &[], p);
+        simulate_strand(&mut particles, &[], &[], &[], p);
         // Midpoint of the two pinned neighbors is the origin.
         assert!(particles[1].position.y.abs() < EPS);
         assert!(particles[1].position.x.abs() < EPS);
@@ -593,8 +610,8 @@ mod tests {
         let mut a = build();
         let mut b = build();
         for _ in 0..5 {
-            simulate_strand(&mut a, &rest, &goals, p);
-            simulate_strand(&mut b, &rest, &goals, p);
+            simulate_strand(&mut a, &rest, &goals, &[], p);
+            simulate_strand(&mut b, &rest, &goals, &[], p);
         }
         for (pa, pb) in a.iter().zip(b.iter()) {
             assert_eq!(pa.position.x.to_bits(), pb.position.x.to_bits());
@@ -607,12 +624,12 @@ mod tests {
     fn degenerate_inputs_do_not_panic() {
         // Empty strand.
         let mut empty: Vec<StrandParticle> = Vec::new();
-        simulate_strand(&mut empty, &[], &[], params());
+        simulate_strand(&mut empty, &[], &[], &[], params());
         assert!(empty.is_empty());
 
         // Single particle with empty companions.
         let mut one = vec![StrandParticle::free(Vec3::ZERO)];
-        simulate_strand(&mut one, &[], &[], params());
+        simulate_strand(&mut one, &[], &[], &[], params());
 
         // Zero substeps / non-positive dt are no-ops.
         let mut two = vec![
@@ -622,11 +639,11 @@ mod tests {
         let before = two[1].position.y;
         let mut p = params();
         p.substeps = 0;
-        simulate_strand(&mut two, &[1.0, 0.0], &[], p);
+        simulate_strand(&mut two, &[1.0, 0.0], &[], &[], p);
         assert!((two[1].position.y - before).abs() < EPS);
         p.substeps = 2;
         p.dt = 0.0;
-        simulate_strand(&mut two, &[1.0, 0.0], &[], p);
+        simulate_strand(&mut two, &[1.0, 0.0], &[], &[], p);
         assert!((two[1].position.y - before).abs() < EPS);
     }
 
@@ -651,7 +668,7 @@ mod tests {
         let mut p = params();
         p.gravity = Vec3::ZERO;
         p.global_stiffness = 1.0;
-        simulate_guides(&mut particles, &lengths, &rest, &goals, p);
+        simulate_guides(&mut particles, &lengths, &rest, &goals, &[], p);
         assert!((particles[1].position.y + 1.0).abs() < EPS);
         assert!((particles[3].position.y - 9.0).abs() < EPS);
         // Roots stayed pinned.
@@ -684,7 +701,7 @@ mod tests {
         p.global_stiffness = 5.0;
         p.local_stiffness = -2.0;
         p.damping = 9.0;
-        simulate_strand(&mut particles, &[], &goals, p);
+        simulate_strand(&mut particles, &[], &goals, &[], p);
         assert!((particles[1].position.y + 3.0).abs() < EPS);
     }
 
@@ -706,7 +723,7 @@ mod tests {
             StrandParticle::pinned(Vec3::ZERO),
             StrandParticle::free(Vec3::new(5.0, 0.0, 0.0)),
         ];
-        simulate_strand(&mut over, &[1.0, 0.0], &[], p);
+        simulate_strand(&mut over, &[1.0, 0.0], &[], &[], p);
         assert!((over[1].position.x - 1.0).abs() < EPS);
         assert!(over[1].position.y.abs() < EPS);
         assert!(over[1].position.z.abs() < EPS);
@@ -716,8 +733,55 @@ mod tests {
             StrandParticle::pinned(Vec3::ZERO),
             StrandParticle::free(Vec3::new(0.5, 0.0, 0.0)),
         ];
-        simulate_strand(&mut inside, &[1.0, 0.0], &[], p);
+        simulate_strand(&mut inside, &[1.0, 0.0], &[], &[], p);
         assert!((inside[1].position.x - 0.5).abs() < EPS);
+    }
+
+    #[test]
+    fn collider_keeps_strand_out_of_body_sphere() {
+        // A free particle just below a scalp-sized sphere is dragged into it by
+        // gravity; the collider must project it back onto the surface each step.
+        let mut particles = vec![
+            StrandParticle::pinned(Vec3::new(0.0, 2.0, 0.0)),
+            StrandParticle::free(Vec3::new(0.0, 1.05, 0.0)),
+        ];
+        let rest = [1.0, 0.0];
+        let sphere = Collider::Sphere {
+            center: Vec3::ZERO,
+            radius: 1.0,
+        };
+        let mut p = params();
+        p.gravity = Vec3::new(0.0, -9.81, 0.0);
+        p.dt = 0.1;
+        p.substeps = 4;
+        simulate_strand(&mut particles, &rest, &[], &[sphere], p);
+        // The free particle can never end up inside the sphere.
+        let r = particles[1].position.length();
+        assert!(r >= 1.0 - 1.0e-4, "particle penetrated collider: r = {r}");
+    }
+
+    #[test]
+    fn empty_colliders_match_collision_free_solve() {
+        // Passing no colliders must be bit-identical to the base tier.
+        let make = || {
+            vec![
+                StrandParticle::pinned(Vec3::ZERO),
+                StrandParticle::free(Vec3::new(1.0, 0.0, 0.0)),
+                StrandParticle::free(Vec3::new(2.0, 0.0, 0.0)),
+            ]
+        };
+        let mut a = make();
+        let mut b = make();
+        let rest = [1.0, 1.0, 0.0];
+        let mut p = params();
+        p.gravity = Vec3::new(0.0, -9.81, 0.0);
+        p.dt = 0.05;
+        p.substeps = 3;
+        simulate_strand(&mut a, &rest, &[], &[], p);
+        simulate_strand(&mut b, &rest, &[], &[], p);
+        for (pa, pb) in a.iter().zip(b.iter()) {
+            assert_eq!(pa.position, pb.position);
+        }
     }
 
     #[test]

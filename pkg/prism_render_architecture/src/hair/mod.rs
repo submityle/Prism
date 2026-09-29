@@ -10,11 +10,14 @@
 //!    interpolated into many *render* strands, so simulation cost stays bounded
 //!    while visual density scales; see [`interpolation`].
 //! 2. **Strand dynamics** — guides are advanced by an XPBD-style solver
-//!    (edge-length plus local/global shape constraints); see [`dynamics`]. The
+//!    (edge-length plus local/global shape constraints); see [`dynamics`], with
+//!    optional projection out of analytic body proxies; see [`collision`]. The
 //!    per-frame vertex work is arbitrated by [`crate::deformation::schedule`];
 //!    this subsystem only emits requests, it does not own the budget.
 //! 3. **LOD** — a ladder from full strands to decimated strands to camera
 //!    cards to a static mesh shell, selected by screen coverage; see [`lod`].
+//!    Tier switches are cross-faded with a deterministic per-strand dither so
+//!    they never pop; see [`transition`].
 //! 4. **Rasterization** — thin strands are drawn in a compute/visibility pass
 //!    (sub-pixel software raster) rather than the hardware triangle path; see
 //!    [`raster`].
@@ -29,11 +32,13 @@
 //! references, never reimplements, the shared deformation budget, the material
 //! closures, and the transparency routing.
 
+pub mod collision;
 pub mod deep_transmittance;
 pub mod dynamics;
 pub mod interpolation;
 pub mod lod;
 pub mod raster;
+pub mod transition;
 
 use crate::deformation::DeformationHandle;
 

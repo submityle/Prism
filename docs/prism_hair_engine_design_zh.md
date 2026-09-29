@@ -68,8 +68,8 @@ fallback:
 | 阶段 | 内容 | 对标 | 代码落点 |
 |---|---|---|---|
 | 1. 导入/插值 | guide→render strand 插值（丛聚/卷曲/frizz/随机化） | UE5 Groom | **已落** `hair/interpolation.rs` |
-| 2. Strand 动力学 | guide 的 XPBD sim（边长 + 局部/全局形状约束 + LRA；碰撞待接） | TressFX | **已落** `hair/dynamics.rs`（→ `deformation::schedule`）|
-| 3. LOD | 覆盖度选档 + 连续减股，禁硬切换 | UE5/HairWorks | **已落** `hair/lod.rs` |
+| 2. Strand 动力学 | guide 的 XPBD sim（边长 + 局部/全局形状约束 + LRA + 代理体碰撞可选） | TressFX | **已落** `hair/dynamics.rs`（→ `deformation::schedule`）+ `hair/collision.rs`（sphere/capsule 代理体）|
+| 3. LOD | 覆盖度选档 + 连续减股 + 跨档 dither 过渡，禁硬切换 | UE5/HairWorks | **已落** `hair/lod.rs` + `hair/transition.rs`（跨档 crossfade + per-strand dither）|
 | 4. 光栅 | 发丝亚像素 compute 软光栅进 visibility | UE5 Groom / TressFX | **已落** `hair/raster.rs`（挂 `virtual_geometry` 软光栅桶）|
 | 5. 着色 | HairPbr 闭包（Chiang/Marschner）+ dual-scattering（见 §7）| 影视 BSDF | `material` 的 `HairPbr` closure（不在 hair 内重写）|
 | 6. 透射/自阴影 | deep opacity map / voxel 透射 | UE5/TressFX | **已落** `hair/deep_transmittance.rs`（共享阴影服务）|
@@ -166,7 +166,7 @@ fallback:
 4. **（已完成）发丝光栅** `hair/raster.rs`：亚像素软光栅桶（沿用 `virtual_geometry/bins.rs` 范式），挂 compute 软光栅路径进 visibility；确定性，单测绿。
 5. **（已完成）deep transmittance** `hair/deep_transmittance.rs`：deep opacity 分层透射 + voxel 近似 + 分桶，接共享阴影/OIT；确定性 CPU golden，单测绿。
 6. **着色分叉**（材质侧）：`HairPbr`（Marschner/Chiang + Zinke dual-scattering）+ `prism_render_npr` 风格化毛发响应。
-7. **碰撞与连续 LOD 过渡**：SDF/自碰撞、跨档 dither/alpha 过渡消 pop。
+7. **（已完成）碰撞与连续 LOD 过渡** `hair/collision.rs` + `hair/transition.rs`：sphere/capsule 代理体碰撞（每子步约束后投影，pinned 不动，空集 no-op）集成进 `dynamics.rs`；`resolve_hair_lod_transition` 在阈值过渡带内计算相邻档 blend + `strand_survives_dither` 确定性 per-strand screen-door 抖动淡入淡出消 pop（尊重 `native_form` 钳制）；确定性 CPU golden，单测绿。SDF/自碰撞属同项更重档，后续在此基础分层。
 8. **高级项**：风场、VBD 高保真插槽、GPU 持久化 + 异步流水线、休眠、fiber-level 特写着色、RT 代理。
 
 **优先级**：先 card 基线打通端到端（务实），strand 高配随光栅/透射逐步点亮；每步 wgpu 可编译 + 单测绿。
