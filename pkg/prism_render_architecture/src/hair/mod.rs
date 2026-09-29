@@ -63,6 +63,7 @@ pub mod deep_opacity_layout;
 pub mod deep_transmittance;
 pub mod density_lod;
 pub mod dynamics;
+pub mod frame_schedule;
 pub mod frames;
 pub mod gpu_buffers;
 pub mod gpu_dispatch;
