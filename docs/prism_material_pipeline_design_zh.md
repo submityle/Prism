@@ -83,7 +83,7 @@
 
 ## 2. 决策记录：为什么放弃 Slang（本版核心变更）
 
-> **结论（2026-09-29 定案）**：**不引入 Slang**。着色器层维持 WESL（经 naga → WGSL/SPIR-V/Metal/DXIL），跨平台交由 wgpu 运行时层。已有的 `prism_render_slang`（885 行）、`prism_render_slang_abi`（1166 行）两个 crate **搁置/冻结**（当前无任何其他 crate 依赖它们——实测 `grep` 零引用），不在关键路径上，建议后续从 workspace 摘除或标 `#[deprecated]`，避免误导为"在用"。
+> **结论（2026-09-29 定案）**：**不引入 Slang**。着色器层维持 WESL（经 naga → WGSL/SPIR-V/Metal/DXIL），跨平台交由 wgpu 运行时层。曾有的 `prism_render_slang`（885 行）、`prism_render_slang_abi`（1166 行）两个 crate **已删除**（commit `211f15988`，删除前实测零外部依赖）；文档命名与注释残留也已在 commit `abb661911` 清理完毕，当前全仓 `rg -i slang` 仅命中本决策记录（§2）。
 
 ### 2.1 曾经的四条理由，逐条失效
 
@@ -276,7 +276,7 @@ fallback:              strand 高配, card 基线; RT 反射里毛发用 proxy �
 3. `pkg/prism_render_shading/src/classification.rs`：`MaterialShadingClass` 固定 9 桶 → 按 `specialization_id`/tile 动态分桶；`classify_material_header` 重写。
 4. `pkg/prism_render_shading/src/resolve.rs`：`evaluate_toon_direct` 从"一个特例分支"提升为 `ILightResponse(Stylized)` 实现；扩描边/ramp/SDF 面阴影/rim/post（现在几乎是空的）。
 5. `pkg/prism_physics_*/.../backend/mod.rs`：`BackendMode` → 后端注册表 + capability。
-6. **搁置/摘除 `prism_render_slang` + `prism_render_slang_abi`**（共 ~2051 行，实测零外部依赖）：从 workspace `members` 移除或标 `#[deprecated]`，避免误导为在用。放弃 Slang（见 §2）。
+6. **（已完成）删除 `prism_render_slang` + `prism_render_slang_abi`**（commit `211f15988`，共 ~2051 行，删除前零外部依赖）。放弃 Slang（见 §2）。
 7. 新 crate `prism_render_npr`：NPR 前端 ABI 骨架 + `evaluate_stylized_direct` + 屏幕空间描边（着色 WESL，CPU 参考按需手写 Rust golden）。
 8. 着色器继续用 **WESL**；ABI 用手写 `#[repr(C)]` + 哈希版本 + 对齐测试兜漂移（§2.4）。不做 `.slang` 迁移。
 
@@ -310,7 +310,7 @@ fallback:              strand 高配, card 基线; RT 反射里毛发用 proxy �
 4. **粒子子系统**：优先，因为它带起 reactive mask（§5 最该早做的基底）。
 5. **`prism_render_npr` 骨架**：描边（material id 边界白送）+ ramp + `evaluate_stylized_direct`；着色 WESL，CPU golden 按需手写。
 6. **frame graph 装配节点**，逐节点在 wgpu 上实装（原生 Vulkan 特化后置，仅在需要 wgpu 覆盖不到的能力时才做）。
-7. **清理 Slang 残留**：把 `prism_render_slang` / `prism_render_slang_abi` 从 workspace `members` 摘除或标 `#[deprecated]`（实测零外部依赖），消除"在用"误导（§2 / §9.6）。
+7. **（已完成）清理 Slang 残留**：两 crate 已于 commit `211f15988` 从 workspace 删除；文档命名/注释残留已于 commit `abb661911` 清理，`rg -i slang` 现仅命中 §2 决策记录（§2 / §9.6）。
 8. 毛发(card)/布料/froxel 体积按 §6.2 优先级跟进；水/植被/贴花后置。
 
 ---
