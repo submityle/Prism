@@ -51,3 +51,17 @@ fn chromatic_aberration_wesl_compiles_standalone() {
         .get(0, chromatic_aberration, &[])
         .unwrap_or_else(|error| panic!("chromatic_aberration.wesl failed to compile: {error}"));
 }
+
+
+/// Guards the Rust immediate-block ABI against drift from the WESL struct: the
+/// aberration block is a tight 24 bytes (`vec2<f32>` centre + intensity +
+/// samples + `vec2<u32>` extent) matching `chromatic_aberration.wesl`'s single
+/// `var<immediate>` global, and the workgroup constant matches
+/// `@workgroup_size(8, 8, 1)`.
+#[test]
+fn chromatic_aberration_abi_matches_the_shader_layout() {
+    use super::abi::{GpuChromaticAberrationParams, CHROMATIC_ABERRATION_WORKGROUP_SIZE};
+    assert_eq!(size_of::<GpuChromaticAberrationParams>(), 24);
+    assert_eq!(align_of::<GpuChromaticAberrationParams>(), 4);
+    assert_eq!(CHROMATIC_ABERRATION_WORKGROUP_SIZE, 8);
+}

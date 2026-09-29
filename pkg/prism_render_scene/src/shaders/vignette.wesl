@@ -99,32 +99,75 @@ fn vignette_apply_params(rgb: vec3<f32>, uv: vec2<f32>, params: VignetteParams) 
     return vignette_apply(rgb, vignette_factor(uv, params));
 }
 
-// Minimal entry so the module type-checks as a standalone compute kernel under
-// the WESL compile test; the real vignette pass wires the HDR target and the
-// params uniform later. References every function so none drifts unused.
-@compute @workgroup_size(64, 1, 1)
-fn vignette_probe(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let seed = f32(gid.x) * 0.001;
-    let uv = vec2<f32>(0.25 + seed, 0.75);
-    let rgb = vec3<f32>(0.2, 0.5, 0.9);
+// ---------------------------------------------------------------------------
+// Device wiring: full-screen compute pass over the pre-exposed HDR scene colour.
+// ---------------------------------------------------------------------------
 
-    let nat = vignette_natural(0.8);
-    let natf = vignette_natural_falloff(uv, 1.5);
-    let ss = vignette_smoothstep(0.0, 1.0, 0.5);
-    let art = vignette_artistic_falloff(uv, vec2<f32>(0.5, 0.5), 1.0, 0.5, 1.0, 1.0);
-    let ap = vignette_apply(rgb, natf);
+// Immediate (push-constant) block driving the vignette pass. Mirrors the Rust
+// `GpuVignetteParams` byte-for-byte: the framebuffer extent and the artist
+// controls (the golden `VignetteParams` fields) plus a global `scale` in [0, 1]
+// that fades the whole effect (scale = 1 reproduces the golden exactly).
+struct GpuVignetteParams {
+    center: vec2<f32>,
+    screen_size: vec2<u32>,
+    intensity: f32,
+    smoothness: f32,
+    feather: f32,
+    roundness: f32,
+    aspect_ratio: f32,
+    focal_ratio: f32,
+    mode: u32,
+    scale: f32,
+}
 
+// The pre-exposed, resolved linear HDR scene colour this pass darkens.
+@group(0) @binding(0) var vignette_scene_color: texture_2d<f32>;
+// The darkened HDR output; copied back over `scene_color` after the dispatch.
+@group(0) @binding(1) var vignette_out: texture_storage_2d<rgba16float, write>;
+
+var<immediate> vignette_params: GpuVignetteParams;
+
+// Repack the immediate block into the golden `VignetteParams` the maths twin
+// consumes, so the on-device evaluation is arm-for-arm identical to the CPU
+// reference (`scale` is applied on top and is the only non-golden control).
+fn vignette_params_from_immediate() -> VignetteParams {
     var params: VignetteParams;
-    params.center = vec2<f32>(0.5, 0.5);
-    params.intensity = 0.0;
-    params.smoothness = 0.5;
-    params.feather = 0.0;
-    params.roundness = 1.0;
-    params.aspect_ratio = 1.0;
-    params.focal_ratio = 1.0;
-    params.mode = 1u;
-    let vf = vignette_factor(uv, params);
-    let full = vignette_apply_params(rgb, uv, params);
+    params.center = vignette_params.center;
+    params.intensity = vignette_params.intensity;
+    params.smoothness = vignette_params.smoothness;
+    params.feather = vignette_params.feather;
+    params.roundness = vignette_params.roundness;
+    params.aspect_ratio = vignette_params.aspect_ratio;
+    params.focal_ratio = vignette_params.focal_ratio;
+    params.mode = vignette_params.mode;
+    return params;
+}
 
-    _ = nat + natf + ss + art + ap.x + vf + full.x;
+// One invocation per pixel. Reconstructs the pixel-centre uv, evaluates the
+// golden vignette factor, fades it toward identity by `scale`, multiplies the
+// scene radiance and writes the darkened HDR texel (alpha preserved).
+@compute @workgroup_size(8, 8, 1)
+fn vignette_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let width = i32(vignette_params.screen_size.x);
+    let height = i32(vignette_params.screen_size.y);
+    let pc = vec2<i32>(i32(gid.x), i32(gid.y));
+    if (pc.x >= width || pc.y >= height) {
+        return;
+    }
+
+    let uv = vec2<f32>(
+        (f32(gid.x) + 0.5) / f32(vignette_params.screen_size.x),
+        (f32(gid.y) + 0.5) / f32(vignette_params.screen_size.y),
+    );
+
+    let sample = textureLoad(vignette_scene_color, pc, 0);
+
+    let params = vignette_params_from_immediate();
+    let factor = vignette_factor(uv, params);
+    // Fade the darkening toward identity (1.0) by the global scale; scale = 1
+    // is the exact golden factor, scale = 0 disables the effect per-pixel.
+    let scaled = mix(1.0, factor, clamp(vignette_params.scale, 0.0, 1.0));
+
+    let out_rgb = vignette_apply(sample.rgb, scaled);
+    textureStore(vignette_out, pc, vec4<f32>(out_rgb, sample.a));
 }

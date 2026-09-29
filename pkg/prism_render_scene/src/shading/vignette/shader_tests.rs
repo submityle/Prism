@@ -50,3 +50,15 @@ fn vignette_wesl_compiles_standalone() {
         .get(0, vignette, &[])
         .unwrap_or_else(|error| panic!("vignette.wesl failed to compile: {error}"));
 }
+
+/// Guards the Rust immediate-block ABI against drift from the WESL struct:
+/// the single `GpuVignetteParams` block is the 48-byte `vec2`-led block
+/// matching `vignette.wesl`'s one `var<immediate>` global, and the workgroup
+/// constant matches `@workgroup_size(8, 8, 1)`.
+#[test]
+fn vignette_abi_matches_the_shader_layout() {
+    use super::abi::{GpuVignetteParams, VIGNETTE_WORKGROUP_SIZE};
+    assert_eq!(size_of::<GpuVignetteParams>(), 48);
+    assert_eq!(align_of::<GpuVignetteParams>(), 4);
+    assert_eq!(VIGNETTE_WORKGROUP_SIZE, 8);
+}

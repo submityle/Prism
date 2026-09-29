@@ -45,6 +45,11 @@ use super::{
         PrismVirtualShadowSettings, VsmPageRequestBufferCache, VsmPrimaryLight,
         VsmReceiverBufferCache,
     },
+    chromatic_aberration::{
+        chromatic_aberration_pass, init_chromatic_aberration_pipeline,
+        prepare_chromatic_aberration_bind_groups, prepare_chromatic_aberration_textures,
+        PrismChromaticAberrationSettings,
+    },
     dof::{
         dof_pass, init_dof_pipeline, prepare_dof_bind_groups, prepare_dof_textures,
         PrismDofSettings,
@@ -52,6 +57,10 @@ use super::{
     motion_blur::{
         init_motion_blur_pipeline, motion_blur_pass, prepare_motion_blur_bind_groups,
         prepare_motion_blur_textures, PrismMotionBlurSettings,
+    },
+    vignette::{
+        init_vignette_pipeline, prepare_vignette_bind_groups, prepare_vignette_textures,
+        vignette_pass, PrismVignetteSettings,
     },
     volumetrics::{
         init_volumetrics_pipeline, prepare_volumetrics_bind_groups,
@@ -150,6 +159,8 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/motion_blur.wesl");
         embedded_asset!(app, "../shaders/volumetrics.wesl");
         embedded_asset!(app, "../shaders/dof.wesl");
+        embedded_asset!(app, "../shaders/chromatic_aberration.wesl");
+        embedded_asset!(app, "../shaders/vignette.wesl");
         embedded_asset!(app, "../shaders/brdf_lut.wesl");
         embedded_asset!(app, "../shaders/env_prefilter.wesl");
         embedded_asset!(app, "../shaders/exposure.wesl");
@@ -195,6 +206,8 @@ impl Plugin for PrismShadingPlugin {
             .init_resource::<PrismVolumetricsSettings>()
             .init_resource::<VolumetricsTextureCache>()
             .init_resource::<PrismDofSettings>()
+            .init_resource::<PrismChromaticAberrationSettings>()
+            .init_resource::<PrismVignetteSettings>()
             .insert_resource(ShadingFrameGraph {
                 compiled: compiled_graph,
             })
@@ -250,6 +263,8 @@ impl Plugin for PrismShadingPlugin {
                         init_motion_blur_pipeline,
                         init_volumetrics_pipeline,
                         init_dof_pipeline,
+                        init_chromatic_aberration_pipeline,
+                        init_vignette_pipeline,
                     ),
                     init_dfg_lut_texture,
                     init_brdf_lut_pipeline,
@@ -486,6 +501,22 @@ impl Plugin for PrismShadingPlugin {
                     prepare_dof_bind_groups
                         .after(prepare_dof_textures)
                         .in_set(RenderSystems::PrepareBindGroups),
+                    // Chromatic aberration and vignette are pure scene_color
+                    // post-effects; both allocate after the resident set is
+                    // known, mirroring the DoF preparation ordering.
+                    prepare_chromatic_aberration_textures
+                        .after(prepare_ssr_textures)
+                        .after(prepare_visibility_buffers)
+                        .in_set(RenderSystems::PrepareResources),
+                    prepare_chromatic_aberration_bind_groups
+                        .after(prepare_chromatic_aberration_textures)
+                        .in_set(RenderSystems::PrepareBindGroups),
+                    prepare_vignette_textures
+                        .after(prepare_visibility_buffers)
+                        .in_set(RenderSystems::PrepareResources),
+                    prepare_vignette_bind_groups
+                        .after(prepare_vignette_textures)
+                        .in_set(RenderSystems::PrepareBindGroups),
                 ),
             )
             .add_systems(
@@ -616,6 +647,16 @@ impl Plugin for PrismShadingPlugin {
                     // three scene_color copy-backs never race.
                     dof_pass
                         .after(volumetrics_pass)
+                        .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                    // Chromatic aberration then vignette close the pre-MainPass
+                    // scene_color chain: CA fringes the defocused image after
+                    // DoF, vignette darkens its edges last. Serialised after the
+                    // prior writer so the scene_color copy-backs never race.
+                    chromatic_aberration_pass
+                        .after(dof_pass)
+                        .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                    vignette_pass
+                        .after(chromatic_aberration_pass)
                         .before(bevy_core_pipeline::Core3dSystems::MainPass),
                 ),
                 composite_shading

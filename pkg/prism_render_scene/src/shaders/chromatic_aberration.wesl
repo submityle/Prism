@@ -33,6 +33,7 @@ struct ChromaticAberrationParams {
     center: vec2<f32>,
     intensity: f32,
     samples: u32,
+    screen_size: vec2<u32>,
 }
 
 // Radial direction and distance of `uv` from the aberration `center`. At (or
@@ -105,30 +106,70 @@ fn chromatic_aberration_apply(uv: vec2<f32>, center: vec2<f32>, intensity: f32) 
     return out;
 }
 
-// Minimal entry so the module type-checks as a standalone compute kernel under
-// the WESL compile test; the real aberration pass wires the resolved target and
-// the params uniform later. References every function so none drifts unused.
-@compute @workgroup_size(64, 1, 1)
-fn chromatic_aberration_probe(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let seed = f32(gid.x) * 0.01;
-    let uv = vec2<f32>(0.8 + seed, 0.2);
+// Group-0 resources for the real aberration pass.
+// binding 0 = the resolved HDR scene colour (filterable, sampled with the
+//             linear-clamp sampler below);
+// binding 1 = the linear-clamp sampler for the three per-channel fetches;
+// binding 2 = the write-only aberrated output (SCENE_COLOR_FORMAT / rgba16float),
+//             copied back over scene_color by the dispatch.
+@group(0) @binding(0) var chromatic_aberration_scene_color: texture_2d<f32>;
+@group(0) @binding(1) var chromatic_aberration_linear_sampler: sampler;
+@group(0) @binding(2) var chromatic_aberration_out: texture_storage_2d<rgba16float, write>;
 
-    var params: ChromaticAberrationParams;
-    params.center = vec2<f32>(0.5, 0.5);
-    params.intensity = 0.2;
-    params.samples = 3u;
+// Immediate (push-constant) block; mirrors the Rust GpuChromaticAberrationParams
+// byte-for-byte (center, intensity, samples, screen_size).
+var<immediate> chromatic_aberration_params: ChromaticAberrationParams;
 
-    let radial = chromatic_aberration_radial(uv, params.center);
-    let offsets = chromatic_aberration_sample_offsets(radial.dist, params.intensity);
-    let one_channel = chromatic_aberration_channel_uv(uv, radial.dir, radial.dist, params.intensity, 0u);
-    let lut = chromatic_aberration_spectral_lut(0.5);
-    let spec = chromatic_aberration_spectral_offset(radial.dist, params.intensity, 0.5);
-    let samples = chromatic_aberration_apply(uv, params.center, params.intensity);
-    let combined = chromatic_aberration_combine(
-        vec3<f32>(samples.red.x, 0.0, 0.0),
-        vec3<f32>(0.0, samples.green.y, 0.0),
-        vec3<f32>(0.0, 0.0, samples.blue.y),
+// Full-screen lateral chromatic aberration: one invocation per pixel. Rebuilds
+// the pixel's uv, asks the CPU-golden twin for the three radially split
+// per-channel sample coordinates, fetches the resolved scene colour at each with
+// a trilinear (bilinear + explicit LOD 0) clamp sampler, recombines each channel
+// from its own tap and writes the fringed pixel. The green (centre) tap is the
+// unshifted uv, so its alpha carries the source coverage unchanged. At the
+// aberration centre, or with intensity 0, the three taps collapse to the same
+// uv and the pass is the identity.
+@compute @workgroup_size(8, 8, 1)
+fn chromatic_aberration_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if gid.x >= chromatic_aberration_params.screen_size.x
+        || gid.y >= chromatic_aberration_params.screen_size.y {
+        return;
+    }
+
+    let screen = vec2<f32>(
+        f32(chromatic_aberration_params.screen_size.x),
+        f32(chromatic_aberration_params.screen_size.y),
+    );
+    let uv = (vec2<f32>(f32(gid.x), f32(gid.y)) + vec2<f32>(0.5, 0.5)) / screen;
+
+    let samples = chromatic_aberration_apply(
+        uv,
+        chromatic_aberration_params.center,
+        chromatic_aberration_params.intensity,
     );
 
-    _ = radial.dir.x + offsets.x + one_channel.x + lut.x + spec + combined.x + f32(params.samples);
+    let red = textureSampleLevel(
+        chromatic_aberration_scene_color,
+        chromatic_aberration_linear_sampler,
+        samples.red,
+        0.0,
+    );
+    let green = textureSampleLevel(
+        chromatic_aberration_scene_color,
+        chromatic_aberration_linear_sampler,
+        samples.green,
+        0.0,
+    );
+    let blue = textureSampleLevel(
+        chromatic_aberration_scene_color,
+        chromatic_aberration_linear_sampler,
+        samples.blue,
+        0.0,
+    );
+
+    let combined = chromatic_aberration_combine(red.rgb, green.rgb, blue.rgb);
+    textureStore(
+        chromatic_aberration_out,
+        vec2<i32>(i32(gid.x), i32(gid.y)),
+        vec4<f32>(combined, green.a),
+    );
 }
