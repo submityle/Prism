@@ -15,15 +15,18 @@
 //!   velocity-scaled prefetch.
 //! * [`page_table`] — page residency bookkeeping and budget-driven eviction.
 //! * [`raster_path`] — software-vs-hardware raster path classification.
+//! * [`pipeline`] — per-cluster composition of the decisions above.
 
 pub mod cull;
 pub mod lod;
 pub mod page_table;
+pub mod pipeline;
 pub mod raster_path;
 
 pub use cull::{cluster_cull, CullVerdict, Frustum, OcclusionProbe, Plane};
 pub use lod::{select_lod, LodLevel, LodProjection, LodSelection};
 pub use page_table::{GeometryPageTable, PageEntry, PageResidency};
+pub use pipeline::{ClusterDecision, ClusterRequest, ViewCullContext};
 pub use raster_path::{select_raster_path, ClusterRasterStats, RasterCapability};
 
 /// Version of the virtual-geometry contracts in this module.

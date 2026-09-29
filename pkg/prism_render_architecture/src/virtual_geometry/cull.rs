@@ -101,11 +101,12 @@ impl OcclusionProbe {
 }
 
 /// Outcome of culling one cluster.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum CullVerdict {
     /// Passes frustum and occlusion; submit it.
     Visible,
     /// Outside the view frustum.
+    #[default]
     FrustumCulled,
     /// Inside the frustum but fully hidden by a nearer occluder.
     OcclusionCulled,
