@@ -40,6 +40,8 @@ pub mod constraints;
 pub mod dynamics;
 pub mod embed;
 pub mod lod;
+pub mod pipeline;
+pub mod sleep;
 
 use alloc::vec::Vec;
 
