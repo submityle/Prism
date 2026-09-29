@@ -1440,3 +1440,32 @@ fn hair_self_collision_wesl_compiles_standalone() {
         .get(0, hair_self_collision, &[])
         .unwrap_or_else(|error| panic!("hair_self_collision.wesl failed to compile: {error}"));
 }
+
+/// Compiles the hair VBD strand-solver compute twin standalone. It has no
+/// imports, so a green result proves the `simulate_strand_vbd` entry point —
+/// one invocation per guide strand running semi-implicit substeps whose
+/// Gauss-Seidel vertex sweeps take one exact per-vertex Newton step against an
+/// inertia + stretch + bending 3x3 Hessian (cofactor-inverted), then projecting
+/// out of the analytic body colliders — parses and type-checks as WESL through
+/// the render-world `ShaderCache` / `wesl` pipeline, in lock-step with the CPU
+/// golden `prism_render_architecture::hair::solver::simulate_strand_vbd`. The
+/// particle layout (`xyz` position, `w` inverse mass) matches the shared
+/// `hair_sim` state so a groom can switch between the XPBD and VBD solver slots
+/// without repacking.
+#[test]
+fn hair_vbd_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let hair_vbd = shader_id(0x5052_4953_4d5f_4841_4952_5f56_425f_0001);
+    cache.set_shader(
+        hair_vbd,
+        Shader::from_wesl(
+            include_str!("../../shaders/hair_vbd.wesl"),
+            "embedded://prism_render_scene/shaders/hair_vbd.wesl",
+        ),
+    );
+
+    cache
+        .get(0, hair_vbd, &[])
+        .unwrap_or_else(|error| panic!("hair_vbd.wesl failed to compile: {error}"));
+}
