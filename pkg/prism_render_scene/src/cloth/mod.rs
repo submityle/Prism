@@ -17,13 +17,18 @@
 //! * [`abi`] - `#[repr(C)]` host records shared with the cloth shaders, plus
 //!   the `size_of` contract tests that pin each record to the golden buffer
 //!   strides so a layout drift fails the build.
+//! * [`pipeline`] - the eleven compute pipelines and the five group-0
+//!   bind-group layouts, keyed by `ClothKernel` so the dispatch slice looks each
+//!   pass up directly from the golden schedule.
+//! * [`bind_groups`] - per-piece resident buffer allocation (sized by the golden
+//!   buffer contract) and the five bind groups those pipelines dispatch against.
 //!
-//! Later slices add the render-resource pipeline, per-piece bind-group
-//! preparation and the `Core3d` graph node that records the dispatches in the
+//! The remaining slice adds the `Core3d` graph node that records the dispatches
+//! in the
 //! [`ClothKernel`](prism_render_architecture::cloth::gpu::kernels::ClothKernel)
-//! order. Keeping the ABI as its own verified slice means those slices bind
-//! against a layout that is already proven byte-for-byte against both the
-//! shader `struct`s and the golden buffer sizing.
+//! order, plus the plugin that embeds the shaders and installs the pipelines and
+//! graph node.
 
 mod abi;
+mod bind_groups;
 mod pipeline;
