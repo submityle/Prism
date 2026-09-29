@@ -50,6 +50,9 @@
 // intermediate state keeps the crate compiling and its gates green.
 pub mod breaking;
 pub mod budget;
+pub mod caustics;
+pub mod coupling;
+pub mod dispersion;
 pub mod flip;
 pub mod foam;
 pub mod ocean_lod;
@@ -57,6 +60,8 @@ pub mod pbf;
 pub mod reconstruct;
 pub mod spectrum;
 pub mod swe;
+pub mod transition;
+pub mod underwater;
 pub mod waterline;
 pub mod wetness;
 
