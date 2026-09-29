@@ -221,9 +221,23 @@ specialization_id: u64   // 由上面轴的合法排列特化产出
 
 **核心原则：共享的是数据/加速结构，不是响应。** "一致"的正确定义 = **同一批授权光源驱动，外观按各自风格解读**（NPR 本就该长得不一样），不是物理外观相同。
 
-### 4.1 基底共享（算一次）
+### 4.1 基底共享（算一次，全前端消费）
 
-光源 SoA + cluster 剔光 / VSM 深度页 / RT 阴影·反射结果 / GI·IBL·GTAO irradiance / BVH。
+**核心：这些是与「响应风格无关」的数据/加速结构，PBR/NPR/混合/自定义前端都读同一份，各自解读（§4.2）。** 下表钉到已落地的 `pkg/prism_render_shading/src/` 模块（非纸面），对齐 UE 的 clustered-forward+ / VSM clipmap / Lumen 世界空间 GI 形态：
+
+| 基底服务 | 落地模块 | 关键类型 / 契约 | 对标 |
+|---|---|---|---|
+| **光源 SoA** | scene 侧光源缓冲 | 光源打包为 SoA，cluster/RT/GI 共用同一份索引空间 | UE `FLightSceneInfo` SoA |
+| **Cluster 剔光（froxel）** | `cluster/{grid,assign,bounds}.rs` | `ClusterGrid`（`[x,y,z]` 维度 + `z_slice` 对数深度切片 + `linear_index`）；`assign_lights_to_clusters(grid, view_from_world, projection, lights, cfg)` → `ClusterLightAssignment{offsets_and_counts, light_indices}`（每 froxel `[offset,count]` 表 + 扁平升序光索引）；`ClusterAssignmentConfig{max_lights_per_cluster=256, intensity_cutoff=0.01}` | UE clustered-forward+ 光剔 |
+| **VSM 深度页** | `shadow/virtual_sm/{clipmap,page_table,allocator,invalidation,request,slot,receiver_gen}.rs` | `VirtualShadowMap` 帧驱动 `drive_frame(FrameInput{light,camera_light_space,receivers,caster_movements})` → `FrameResult{resident,to_render,evicted,invalidation,budget,windows}`；`ClipmapConfig` 分级、`VirtualPageTable` 驻留、`PhysicalPageAllocator` 预算驱逐；`BudgetStats`(requested/hits/misses/allocations/evictions/over_budget/hit_rate)。**相机移动只做 clipmap window 快照、绝不失效页**；caster 移动脏其扫过的页 | UE5 VSM（clipmap + 页驻留 + 预算裁剪） |
+| **世界空间 GI（辐照缓存）** | `gi/world_space/{probe_placement,probe_interpolation,octahedral,radiance_cache}.rs` | 探针放置 + `InterpolationConfig`/`ProbeNeighbor` 邻域插值 + 八面体编码 + `radiance_cache` | Lumen 世界空间辐射缓存/探针 |
+| **屏幕空间 GI（fallback）** | `screen_space/gi.rs` | `SsgiParams` / `build_hemisphere_ray` / `gather_indirect_diffuse` → `SsgiGather`；无 RT/探针不足时的降级路径 | Lumen SSGI 兜底 |
+| **RT 阴影·反射结果** | `screen_space/*`（SS 兜底）+ RT 桶（§8.1） | RT closure 着色可 CPU golden、traversal/BVH 不可（§8.1 三桶） | UE Lumen/RT 反射 |
+| **IBL / 环境** | `environment/{cubemap,prefilter,brdf_lut}.rs` | 预滤环境 + split-sum BRDF LUT | UE 反射捕获 + split-sum |
+| **AO** | `ao/{mod,temporal,denoise}.rs` | 空间 AO + 时序累积 + 去噪 | GTAO/时序 AO |
+| **光通道 / light layer 路由** | `light_routing.rs` | `LightingChannelMask` / `LightLayerMask` / `LightRouting::contributes_to_layer` / `cull_lights_by_channel`——**这是 NPR 「分层打光」的共享地基**（§4.2 C 类专属响应的底座） | UE lighting channels |
+
+**为什么这样拆算一次**：光剔（froxel）、阴影页驻留、GI 辐照、IBL、AO 全是**视图/场景函数、与像素着色风格无关**——算一次喂所有前端最省。风格差异只发生在「怎么响应这些数据」（§4.2），不在「数据本身」。VSM 的「相机动不失效页」「按 receiver 请求 + 预算驱逐」是把阴影带宽与场景规模解耦的关键，NPR 硬阴影同样白嫖这份页缓存（只是采样时换阈值/染色）。
 
 ### 4.2 各前端响应分家（A/B/C 三类）
 
