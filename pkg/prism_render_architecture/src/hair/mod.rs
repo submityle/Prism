@@ -6,7 +6,9 @@
 //! `HairWorks`, and film-grade Chiang/Marschner shading) at the algorithm level,
 //! without reusing any of their code:
 //!
-//! 1. **Import & interpolation** — a small set of simulated *guide* strands is
+//! 1. **Import & interpolation** — authored guides are first normalized on
+//!    import to a uniform, arc-length-resampled control-point layout (see
+//!    [`groom_import`]); a small set of simulated *guide* strands is then
 //!    interpolated into many *render* strands, so simulation cost stays bounded
 //!    while visual density scales; see [`interpolation`].
 //! 2. **Strand dynamics** — guides are advanced by an XPBD-style solver
@@ -48,6 +50,7 @@ pub mod deep_opacity_layout;
 pub mod deep_transmittance;
 pub mod dynamics;
 pub mod groom;
+pub mod groom_import;
 pub mod interpolation;
 pub mod lod;
 pub mod raster;
