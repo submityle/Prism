@@ -40,6 +40,7 @@ use super::collision::{
 use super::constraints::{
     build_grid_constraints, color_constraints, ClothGrid, GridConstraintParams,
 };
+use super::coupling::{resolve_two_way_coupling, CouplingBody};
 use super::dynamics::{extract_positions, solve_cloth_with_collision, SolverParams};
 use super::embed::{embed_render_mesh, BarycentricBinding};
 use super::layers::{accumulate_vertex_normals, resolve_layer_coupling, LayerParams};
@@ -156,6 +157,13 @@ pub struct Garment {
     /// Scratch outward-normal buffer for the layer pass, kept to avoid a
     /// per-frame allocation.
     layer_normals: Vec<Vec3>,
+    /// Movable rigid proxies that couple *both ways* with the cloth (design
+    /// §6.10): the cloth is pushed out of each body and the body is displaced
+    /// and accumulates a reaction impulse in return. Empty disables the pass.
+    /// The authoritative rigid integrator lives in the physics kernel, which is
+    /// expected to consume and clear each body's `reaction_impulse` per frame;
+    /// this pass only contributes the render-side half of the contact.
+    pub coupling_bodies: Vec<CouplingBody>,
     /// Sim-mesh triangulation driving the wind and pressure passes; empty
     /// disables both (each iterates faces).
     pub triangles: Vec<[u32; 3]>,
@@ -245,6 +253,7 @@ impl Garment {
             layer_of: Vec::new(),
             layers: LayerParams::default(),
             layer_normals: Vec::new(),
+            coupling_bodies: Vec::new(),
             triangles: Vec::new(),
             wind: WindField::default(),
             aero: AeroParams::default(),
@@ -448,6 +457,16 @@ impl Garment {
         // positional word before the painted authority passes.
         if self.self_ccd.enabled {
             resolve_self_ccd(&mut self.particles, &self.prev_positions, self.self_ccd, dt);
+        }
+        // Two-way rigid coupling (design §6.10): unlike the one-way body
+        // reprojection above, a movable proxy resting on the cloth is dented in
+        // and displaced back out, splitting each contact by inverse mass and
+        // banking the reaction impulse for the physics kernel to integrate. Runs
+        // after the one-way body/CCD passes so it sees the settled cloth and is
+        // the final positional word before the painted authority passes. Empty
+        // `coupling_bodies` disables it at zero cost.
+        if !self.coupling_bodies.is_empty() {
+            resolve_two_way_coupling(&mut self.particles, &mut self.coupling_bodies, dt);
         }
         // Painted post-solve passes steer the fully resolved positions toward
         // the skinned pose: cap the drift, push out of the backstop cushion, and
@@ -1037,6 +1056,67 @@ mod tests {
                 on.particles[i].position
             );
         }
+        assert_finite(&on.particles);
+    }
+
+    #[test]
+    fn two_way_coupling_displaces_a_light_body_and_banks_a_reaction() {
+        // A single pinned cloth particle sits inside a light, movable rigid
+        // proxy. The one-way body pass never touches `coupling_bodies`, so the
+        // two-way pass must fully displace the (infinite-mass) proxy off the
+        // pinned vertex and bank the Newton reaction the physics kernel reads.
+        let no_gravity = SolverParams {
+            substeps: 1,
+            iterations: 1,
+            gravity: Vec3::ZERO,
+            damping: 0.0,
+            strain_limit: 0.0,
+        };
+        let build = || {
+            // One vertex pinned at the origin, no fabric constraints.
+            let particles = alloc::vec![ClothParticle::new(Vec3::ZERO, 0.0)];
+            Garment::new(particles, ConstraintGraph::default(), no_gravity)
+        };
+
+        // Without any coupling body the vertex stays put and nothing reacts.
+        let mut off = build();
+        assert!(off.coupling_bodies.is_empty());
+        off.step(1.0 / 60.0);
+        assert!(off.particles[0].position.distance(Vec3::ZERO) < 1.0e-9);
+
+        // A movable sphere overlapping the pinned vertex: the vertex is
+        // infinite-mass so it can not move, the whole push-out lands on the
+        // body, and the body records a reaction opposing the cloth.
+        let mut on = build();
+        on.coupling_bodies = alloc::vec![CouplingBody::new(
+            BodyCollider::Sphere {
+                center: Vec3::new(0.5, 0.0, 0.0),
+                radius: 1.0,
+            },
+            1.0,
+        )];
+        on.step(1.0 / 60.0);
+        // Pinned vertex never moves.
+        assert!(
+            on.particles[0].position.distance(Vec3::ZERO) < 1.0e-9,
+            "pinned vertex drifted: {:?}",
+            on.particles[0].position
+        );
+        // The proxy is pushed the full 0.5 m along +x, clear of the vertex.
+        let BodyCollider::Sphere { center, .. } = on.coupling_bodies[0].collider else {
+            panic!("collider shape changed");
+        };
+        assert!(
+            (center.x - 1.0).abs() < 1.0e-5 && center.y.abs() < 1.0e-9 && center.z.abs() < 1.0e-9,
+            "body not displaced clear: {center:?}"
+        );
+        // The banked reaction drives the body the same way it was displaced
+        // (+x): the physics kernel integrates this to move the proxy.
+        assert!(
+            on.coupling_bodies[0].reaction_impulse.x > 1.0e-6,
+            "no reaction impulse banked: {:?}",
+            on.coupling_bodies[0].reaction_impulse
+        );
         assert_finite(&on.particles);
     }
 
