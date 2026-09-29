@@ -46,6 +46,7 @@ pub mod gpu;
 pub mod layers;
 pub mod lod;
 pub mod painted;
+pub mod panel;
 pub mod pipeline;
 pub mod pressure;
 pub mod sleep;
