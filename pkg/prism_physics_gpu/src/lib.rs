@@ -1,8 +1,9 @@
 //! Optional `wgpu` compute backend for Prism's next-generation physics engine.
 //!
 //! This crate is milestone `M5`: it moves the mass-parallel stages of the
-//! simulation (broad-phase neighbour finding and the position-based constraint
-//! solver) onto the `GPU` through `wgpu` compute pipelines, targeting the
+//! simulation (broad-phase neighbour finding, the position-based constraint
+//! solver, and the `FLIP`/`APIC` fluid particle-grid transfer) onto the `GPU`
+//! through `wgpu` compute pipelines, targeting the
 //! hundred-thousand-to-million particle regime that the pure `CPU` reference in
 //! [`prism_physics_core`] cannot reach in real time.
 //!
@@ -20,7 +21,11 @@
 //! integer-exact: its candidate-pair set matches the twin bit-for-bit. The
 //! `XPBD` solver is floating-point: `GPU` reassociation (fused multiply-add,
 //! differing division and square-root rounding) perturbs the low bits, so its
-//! parity is verified within a tight tolerance rather than byte-for-byte.
+//! parity is verified within a tight tolerance rather than byte-for-byte. The
+//! `FLIP`/`APIC` fluid transfer sits between the two: its fixed-point momentum
+//! and weight accumulators are integer-exact and order-independent, and only
+//! the final per-face division and trilinear gather are floating point, so its
+//! transfer round-trip is likewise checked within a tight tolerance.
 //!
 //! # Provenance
 //!
@@ -39,10 +44,15 @@
 pub mod broadphase;
 pub mod buffer;
 pub mod context;
+pub mod fluid;
 pub mod xpbd;
 
 pub use broadphase::{cpu_broadphase, BroadphaseConfig, BroadphaseError, CandidatePair, Particle};
 pub use context::GpuContext;
+pub use fluid::{
+    grid_to_particle, particle_to_grid, CellType, FluidConfig, FluidError, FluidParticles,
+    GoldenGrid, GpuFluidSolver, GridDims, TransferMode,
+};
 pub use xpbd::{
     cpu_solve, Colouring, DistanceConstraint, GpuXpbdSolver, ParticleState, XpbdConfig, XpbdError,
 };

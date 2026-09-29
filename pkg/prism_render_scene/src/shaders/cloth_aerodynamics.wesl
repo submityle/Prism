@@ -47,19 +47,19 @@ struct GpuClothAeroParams {
 }
 
 /// 世界坐标 + inverse mass（`.w`），只读。
-@binding(0) var<storage, read> positions: array<vec4<f32>>;
+@group(0) @binding(0) var<storage, read> positions: array<vec4<f32>>;
 /// 顶点速度，本 pass 把气动冲量累加写回（读自身、不读作面速度）。
-@binding(1) var<storage, read_write> velocities: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read_write> velocities: array<vec4<f32>>;
 /// 帧初速度快照，只读；面相对风速一律取自这里以保证确定性。
-@binding(2) var<storage, read> velocity_snapshot: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> velocity_snapshot: array<vec4<f32>>;
 /// 三角顶点索引，扁平存储（每三角 3 个 `u32`）。
-@binding(3) var<storage, read> triangles: array<u32>;
+@group(0) @binding(3) var<storage, read> triangles: array<u32>;
 /// `CSR` 行偏移，长度 `vertex_count + 1`。
-@binding(4) var<storage, read> csr_offsets: array<u32>;
+@group(0) @binding(4) var<storage, read> csr_offsets: array<u32>;
 /// `CSR` 邻接项，存三角形索引。
-@binding(5) var<storage, read> csr_entries: array<u32>;
+@group(0) @binding(5) var<storage, read> csr_entries: array<u32>;
 /// 气动力全局参数。
-@binding(6) var<uniform> aero_params: GpuClothAeroParams;
+@group(0) @binding(6) var<uniform> aero_params: GpuClothAeroParams;
 
 /// 把 32 位种子雪崩混合成 `[-1, 1]` 区间内的单位标量。
 ///

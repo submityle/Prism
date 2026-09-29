@@ -38,11 +38,11 @@ struct GpuClothAeroParams {
 }
 
 /// 当前速度缓冲，只读源（`.w` 为载荷位，原样搬运）。
-@binding(0) var<storage, read> velocities: array<vec4<f32>>;
+@group(0) @binding(0) var<storage, read> velocities: array<vec4<f32>>;
 /// 速度快照目标，本 pass 写入、气动 gather pass 只读。
-@binding(1) var<storage, read_write> velocity_snapshot: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read_write> velocity_snapshot: array<vec4<f32>>;
 /// 气动力全局参数（本 pass 仅取 `vertex_count`）。
-@binding(2) var<uniform> aero_params: GpuClothAeroParams;
+@group(0) @binding(2) var<uniform> aero_params: GpuClothAeroParams;
 
 /// 把当前速度原样冻结成只读快照，供气动力 gather 无数据竞争地读取面速度。
 ///
