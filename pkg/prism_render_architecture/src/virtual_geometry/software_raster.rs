@@ -22,18 +22,28 @@
 //! ```
 //!
 //! Depth uses **reversed-Z**: input depth is in `[0, 1]` with `1.0` nearest.
-//! [`encode_depth`] maps it so nearer surfaces produce a *larger* key, which
-//! lets the whole `u64` be composited with a single `max` comparison. A cleared
-//! pixel is `0` (the farthest possible key), so the first covering triangle
-//! always wins over the clear value.
+//! [`encode_depth`] takes the raw IEEE bit pattern of that depth
+//! (`bitcast<u32>(z)` in the compute twin), which is monotonic for
+//! non-negative floats, so nearer surfaces produce a *larger* key and the
+//! whole `u64` composites with a single `max` comparison. A cleared pixel is
+//! `0` (the farthest possible key), so the first covering triangle always wins
+//! over the clear value.
+//!
+//! The payload sub-divides into `(cluster_id << 7) | triangle_id`
+//! ([`pack_cluster_triangle`], [`cluster_of`], [`triangle_of`]): 7 low bits for
+//! the per-cluster triangle index (at most 128 triangles per cluster) and the
+//! high bits for the cluster id, matching the shipping meshlet raster layout so
+//! this reference and the GPU twin decode identical ids.
 //!
 //! # Coverage and watertightness
 //!
 //! Coverage uses the signed edge function with a strict top-left fill rule so
 //! that a shared edge between two adjacent triangles is owned by exactly one of
-//! them: no double-covered pixels, no cracks. Depth is interpolated with
-//! screen-space-linear barycentrics, matching a hardware depth buffer for the
-//! NDC depth values fed in here.
+//! them: no double-covered pixels, no cracks. This is the watertight end state
+//! the shipping compute shader still tracks as a TODO, so this reference pins
+//! the correct behavior the twin is validated against. Depth is interpolated
+//! with screen-space-linear barycentrics, matching a hardware depth buffer for
+//! the NDC depth values fed in here.
 
 /// Screen-space vertex fed to the rasterizer.
 ///
@@ -76,13 +86,47 @@ pub const fn vis_payload(packed: u64) -> u32 {
 
 /// Encodes reversed-Z depth in `[0, 1]` into a compositing key.
 ///
-/// The input is clamped to `[0, 1]`; `1.0` (nearest) maps to `u32::MAX` and
-/// `0.0` (farthest) maps to `0`. An `f64` intermediate avoids the precision
-/// loss of scaling near `u32::MAX` in `f32`.
+/// This mirrors the shipping GPU contract exactly: the depth is the raw IEEE
+/// bit pattern of the reversed-Z NDC depth (`bitcast<u32>(z)` in the compute
+/// twin). For non-negative floats the bit pattern is monotonic, so `1.0`
+/// (nearest) yields the largest key and `0.0` (farthest) yields `0`, which is
+/// also the cleared value. The input is clamped to `[0, 1]` so a stray
+/// negative depth (sign bit set) can never masquerade as the nearest surface.
 #[must_use]
 pub fn encode_depth(depth: f32) -> u32 {
-    let clamped = f64::from(depth.clamp(0.0, 1.0));
-    (clamped * f64::from(u32::MAX)) as u32
+    depth.clamp(0.0, 1.0).to_bits()
+}
+
+/// Number of low bits of a vis-buffer payload reserved for the triangle id.
+///
+/// A cluster holds at most 128 triangles (one per rasterizer thread), so 7
+/// bits address every triangle and the remaining high bits carry the cluster
+/// id. This matches the shipping `packed_ids = (cluster_id << 7) | triangle_id`
+/// layout so the CPU reference and GPU twin agree bit-for-bit.
+pub const CLUSTER_TRIANGLE_BITS: u32 = 7;
+
+/// Mask selecting the triangle-id field of a packed payload.
+const TRIANGLE_ID_MASK: u32 = (1 << CLUSTER_TRIANGLE_BITS) - 1;
+
+/// Packs a cluster id and triangle id into one vis-buffer payload.
+///
+/// The triangle id is masked to [`CLUSTER_TRIANGLE_BITS`] bits; callers must
+/// keep `triangle_id < 128`. The cluster id occupies the high bits.
+#[must_use]
+pub const fn pack_cluster_triangle(cluster_id: u32, triangle_id: u32) -> u32 {
+    (cluster_id << CLUSTER_TRIANGLE_BITS) | (triangle_id & TRIANGLE_ID_MASK)
+}
+
+/// Extracts the cluster id from a packed payload.
+#[must_use]
+pub const fn cluster_of(payload: u32) -> u32 {
+    payload >> CLUSTER_TRIANGLE_BITS
+}
+
+/// Extracts the triangle id from a packed payload.
+#[must_use]
+pub const fn triangle_of(payload: u32) -> u32 {
+    payload & TRIANGLE_ID_MASK
 }
 
 /// Signed edge function of point `p` against the directed edge `a -> b`.
@@ -294,13 +338,29 @@ mod tests {
     }
 
     #[test]
+    fn cluster_triangle_payload_round_trips() {
+        // Mirrors the shipping `(cluster_id << 7) | triangle_id` layout.
+        let payload = pack_cluster_triangle(0x0012_3456, 127);
+        assert_eq!(cluster_of(payload), 0x0012_3456);
+        assert_eq!(triangle_of(payload), 127);
+        // Triangle field is exactly 7 bits, cluster occupies the rest.
+        assert_eq!(pack_cluster_triangle(1, 0), 1 << CLUSTER_TRIANGLE_BITS);
+        assert_eq!(triangle_of(pack_cluster_triangle(0, 0x7F)), 0x7F);
+    }
+
+    #[test]
     fn nearer_reversed_z_packs_larger() {
         // depth 1.0 is nearest -> largest key -> largest word.
         let near = pack_vis(encode_depth(1.0), 0);
         let far = pack_vis(encode_depth(0.0), u32::MAX);
         assert!(near > far, "nearest surface must dominate the composite");
-        assert_eq!(encode_depth(1.0), u32::MAX);
+        // Matches bitcast<u32>(reversed-Z NDC depth) in the GPU twin.
+        assert_eq!(encode_depth(1.0), 1.0f32.to_bits());
         assert_eq!(encode_depth(0.0), 0);
+        // Monotonic across the visible range: nearer depth -> larger key.
+        assert!(encode_depth(0.75) > encode_depth(0.25));
+        // Out-of-range negative depth cannot masquerade as nearest.
+        assert_eq!(encode_depth(-1.0), 0);
     }
 
     #[test]
