@@ -60,6 +60,9 @@ pub mod fluid;
 pub mod graph;
 pub mod lod;
 pub mod modules;
+pub mod motion_vectors;
+pub mod perf_budget;
+pub mod platform;
 pub mod pool;
 pub mod raytrace;
 pub mod renderers;
@@ -69,6 +72,7 @@ pub mod simulation;
 pub mod sort_cull;
 pub mod stability;
 pub mod stages;
+pub mod validation;
 
 #[cfg(test)]
 mod integration_tests;
