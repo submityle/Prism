@@ -244,3 +244,12 @@ pub use volumetrics::{
     froxel_source, henyey_greenstein, in_scatter, integrate_froxel_column, integrate_slice,
     transmittance, Froxel, MediumSample, VolumetricIntegration,
 };
+
+pub mod gi;
+pub use gi::world_space::{
+    bilinear_weights, blend_sh, cell_to_key, dir_to_oct, evaluate_irradiance,
+    interpolate_irradiance, oct_to_dir, probe_bilinear_coords, probe_center_pixel, probe_coord,
+    probe_count, probe_grid_dims, probe_index, probe_pixel_rect, resolve_weights,
+    similarity_weight, world_to_cell, InterpolationConfig, PixelRect, ProbeNeighbor, RadianceCell,
+    ShL1Rgb,
+};
