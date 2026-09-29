@@ -143,16 +143,92 @@ impl PolygonPanel {
     /// identical output.
     #[must_use]
     pub fn build(&self, material: FabricMaterial) -> PolygonPanelMesh {
-        let triangles = self.triangulate();
-        let particles = self.lumped_particles(&triangles, material);
-        let constraints = weave_constraints(&self.boundary, &triangles, &particles, material);
-        let panel = Panel::new(self.id, 0, self.vertex_count() as u32);
+        self.build_refined(material, 0)
+    }
+
+    /// Triangulates the outline, densifies its interior by `subdivisions`
+    /// uniform 1->4 midpoint-subdivision levels, and weaves the densified mesh
+    /// into a solver-ready membrane.
+    ///
+    /// Boundary-only ear clipping fans a large panel into a few oversized
+    /// triangles, which under-resolves the drape and starves the aerodynamic /
+    /// self-collision passes of surface samples. Each refinement level splits
+    /// every triangle into four by its edge midpoints, so `subdivisions = k`
+    /// multiplies the triangle count by `4^k` and roughly halves every edge
+    /// length per level, giving the interior real resolution while the outline
+    /// shape is preserved exactly (a boundary edge's midpoint stays on that
+    /// straight segment). Midpoints shared by two triangles are welded to a
+    /// single interior vertex, so the refined mesh stays watertight and
+    /// manifold. `subdivisions = 0` reproduces the boundary-only triangulation.
+    ///
+    /// The build is a pure function of the panel, material and level, so calling
+    /// it twice yields identical output.
+    #[must_use]
+    pub fn build_refined(&self, material: FabricMaterial, subdivisions: u32) -> PolygonPanelMesh {
+        let (points, triangles) = self.triangulate_refined(subdivisions);
+        let particles = self.lumped_particles(&points, &triangles, material);
+        let constraints = weave_constraints(&points, &triangles, &particles, material);
+        let panel = Panel::new(self.id, 0, points.len() as u32);
         PolygonPanelMesh {
             particles,
             constraints,
             triangles,
             panel,
         }
+    }
+
+    /// Ear-clips the outline, then applies `subdivisions` uniform 1->4 midpoint
+    /// refinement levels, returning the densified panel-local `[warp, weft]`
+    /// vertex list and the conforming CCW triangle list over it.
+    ///
+    /// The first [`vertex_count`](Self::vertex_count) entries are the original
+    /// outline corners in `boundary` order (so a seam or pin that references a
+    /// boundary vertex survives refinement unchanged); the generated interior
+    /// midpoints follow, appended in a deterministic scan order. `subdivisions
+    /// = 0` returns the raw ear-clipped triangulation over the untouched
+    /// boundary.
+    #[must_use]
+    pub fn triangulate_refined(&self, subdivisions: u32) -> (Vec<[f32; 2]>, Vec<[u32; 3]>) {
+        let mut points = self.boundary.clone();
+        let mut triangles = ear_clip(&points);
+        for _ in 0..subdivisions {
+            triangles = subdivide_once(&mut points, &triangles);
+        }
+        (points, triangles)
+    }
+
+    /// Chooses the smallest uniform subdivision level whose longest resulting
+    /// triangle edge is at or below `target_edge_length` world units, capped at
+    /// `max_levels` so a tiny target can never explode the mesh.
+    ///
+    /// Each level roughly halves every edge, so the count is derived by halving
+    /// the longest base-triangulation edge until it meets the target (an integer
+    /// loop, never a transcendental `log`). A non-positive or already-satisfied
+    /// target returns `0`.
+    #[must_use]
+    pub fn subdivisions_for_edge_length(&self, target_edge_length: f32, max_levels: u32) -> u32 {
+        if !(target_edge_length > 0.0) {
+            return 0;
+        }
+        let triangles = self.triangulate();
+        let mut longest = 0.0_f32;
+        for tri in &triangles {
+            for e in 0..3 {
+                let a = tri[e] as usize;
+                let b = tri[(e + 1) % 3] as usize;
+                let pa = self.position_3d(self.boundary[a]);
+                let pb = self.position_3d(self.boundary[b]);
+                longest = longest.max(pa.distance(pb));
+            }
+        }
+
+        let mut level = 0;
+        let mut edge = longest;
+        while edge > target_edge_length && level < max_levels {
+            edge *= 0.5;
+            level += 1;
+        }
+        level
     }
 
     /// Builds the sim particles, distributing fabric mass by lumping a third of
@@ -163,15 +239,16 @@ impl PolygonPanel {
     /// never pinned here; pins are an authoring concern layered on afterwards.
     fn lumped_particles(
         &self,
+        points: &[[f32; 2]],
         triangles: &[[u32; 3]],
         material: FabricMaterial,
     ) -> Vec<ClothParticle> {
         let density = material.sanitized().density;
-        let count = self.boundary.len();
+        let count = points.len();
         let mut mass = alloc::vec![0.0_f32; count];
 
         for tri in triangles {
-            let area = triangle_area_2d(&self.boundary, *tri);
+            let area = triangle_area_2d(points, *tri);
             let share = density * area / 3.0;
             for &vi in tri {
                 if let Some(slot) = mass.get_mut(vi as usize) {
@@ -184,7 +261,7 @@ impl PolygonPanel {
             .map(|i| {
                 let m = mass[i].max(MIN_MASS);
                 let inverse_mass = 1.0 / m;
-                ClothParticle::new(self.position_3d(self.boundary[i]), inverse_mass)
+                ClothParticle::new(self.position_3d(points[i]), inverse_mass)
             })
             .collect()
     }
@@ -341,6 +418,58 @@ fn ear_clip(points: &[[f32; 2]]) -> Vec<[u32; 3]> {
         triangles.push([ring[0] as u32, ring[1] as u32, ring[2] as u32]);
     }
     triangles
+}
+
+/// Applies one uniform 1->4 midpoint subdivision level to `triangles`.
+///
+/// Every triangle is split into four by the midpoints of its three edges:
+/// three corner children and one central (medial) child, all wound
+/// counter-clockwise like their parent. Edge midpoints are appended to
+/// `points` and cached by their ascending index pair, so an edge shared by two
+/// triangles is split at exactly one common vertex and the refined mesh stays
+/// watertight and manifold. Uses only midpoint averaging (no transcendental),
+/// so the pass is bit-reproducible.
+fn subdivide_once(points: &mut Vec<[f32; 2]>, triangles: &[[u32; 3]]) -> Vec<[u32; 3]> {
+    let mut midpoints: BTreeMap<(u32, u32), u32> = BTreeMap::new();
+    let mut refined = Vec::with_capacity(triangles.len() * 4);
+    for tri in triangles {
+        let [a, b, c] = *tri;
+        let ab = edge_midpoint(points, &mut midpoints, a, b);
+        let bc = edge_midpoint(points, &mut midpoints, b, c);
+        let ca = edge_midpoint(points, &mut midpoints, c, a);
+        // Three corner children then the central medial child; each preserves
+        // the parent's CCW winding.
+        refined.push([a, ab, ca]);
+        refined.push([b, bc, ab]);
+        refined.push([c, ca, bc]);
+        refined.push([ab, bc, ca]);
+    }
+    refined
+}
+
+/// Returns the index of the midpoint of edge `(a, b)`, creating and appending
+/// it to `points` on first use and reusing the cached vertex thereafter.
+///
+/// The cache key is the ascending index pair, so the two triangles across a
+/// shared edge always resolve to the same midpoint regardless of the local
+/// winding they enumerate the edge in — the guarantee that keeps subdivision
+/// conforming (no T-junctions) and the vertex set free of duplicates.
+fn edge_midpoint(
+    points: &mut Vec<[f32; 2]>,
+    midpoints: &mut BTreeMap<(u32, u32), u32>,
+    a: u32,
+    b: u32,
+) -> u32 {
+    let key = if a < b { (a, b) } else { (b, a) };
+    if let Some(&existing) = midpoints.get(&key) {
+        return existing;
+    }
+    let pa = points[a as usize];
+    let pb = points[b as usize];
+    let index = points.len() as u32;
+    points.push([0.5 * (pa[0] + pb[0]), 0.5 * (pa[1] + pb[1])]);
+    midpoints.insert(key, index);
+    index
 }
 
 /// Classifies a structural edge as warp- or weft-aligned from its panel-local
@@ -513,6 +642,157 @@ mod tests {
 
     fn unit_square_ccw() -> Vec<[f32; 2]> {
         alloc::vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]
+    }
+
+    /// Longest triangle edge length (world space) over a densified mesh, for
+    /// the target-edge-length assertions.
+    fn longest_edge(panel: &PolygonPanel, points: &[[f32; 2]], tris: &[[u32; 3]]) -> f32 {
+        let mut longest = 0.0_f32;
+        for tri in tris {
+            for e in 0..3 {
+                let a = tri[e] as usize;
+                let b = tri[(e + 1) % 3] as usize;
+                let pa = panel.position_3d(points[a]);
+                let pb = panel.position_3d(points[b]);
+                longest = longest.max(pa.distance(pb));
+            }
+        }
+        longest
+    }
+
+    /// Asserts a triangle mesh is edge-manifold: every undirected edge is shared
+    /// by at most two triangles (boundary edges once, interior edges twice).
+    fn assert_edge_manifold(tris: &[[u32; 3]]) {
+        let mut edge_uses: BTreeMap<(u32, u32), u32> = BTreeMap::new();
+        for tri in tris {
+            for e in 0..3 {
+                let a = tri[e];
+                let b = tri[(e + 1) % 3];
+                let key = if a < b { (a, b) } else { (b, a) };
+                *edge_uses.entry(key).or_default() += 1;
+            }
+        }
+        assert!(
+            edge_uses.values().all(|&n| n == 1 || n == 2),
+            "a densified edge is shared by more than two triangles (non-manifold)"
+        );
+        // A refined disk keeps at least one interior (twice-shared) edge.
+        assert!(edge_uses.values().any(|&n| n == 2));
+    }
+
+    #[test]
+    fn one_level_quadruples_triangles() {
+        let panel = flat_panel(unit_square_ccw());
+        let base = panel.triangulate().len();
+        let (_, tris) = panel.triangulate_refined(1);
+        assert_eq!(tris.len(), base * 4);
+        let (_, tris2) = panel.triangulate_refined(2);
+        assert_eq!(tris2.len(), base * 16);
+    }
+
+    #[test]
+    fn refinement_preserves_boundary_vertices() {
+        let panel = flat_panel(unit_square_ccw());
+        let (points, _) = panel.triangulate_refined(2);
+        // The original corners stay first, in outline order, untouched.
+        for (i, corner) in panel.boundary.iter().enumerate() {
+            assert!((points[i][0] - corner[0]).abs() < EPS);
+            assert!((points[i][1] - corner[1]).abs() < EPS);
+        }
+        // Interior midpoints were appended, growing the vertex set.
+        assert!(points.len() > panel.boundary.len());
+    }
+
+    #[test]
+    fn refinement_conserves_area() {
+        let panel = flat_panel(unit_square_ccw());
+        for level in 0..=3 {
+            let (points, tris) = panel.triangulate_refined(level);
+            let area = triangulated_area(&points, &tris);
+            assert!(
+                (area - 1.0).abs() < EPS,
+                "level {level} did not tile the unit square (area = {area})"
+            );
+        }
+    }
+
+    #[test]
+    fn refined_mesh_is_watertight_and_manifold() {
+        let panel = flat_panel(unit_square_ccw());
+        let (_, tris) = panel.triangulate_refined(3);
+        assert_edge_manifold(&tris);
+    }
+
+    #[test]
+    fn refined_triangles_are_all_ccw() {
+        let panel = flat_panel(unit_square_ccw());
+        let (points, tris) = panel.triangulate_refined(2);
+        for tri in &tris {
+            let corners = [
+                points[tri[0] as usize],
+                points[tri[1] as usize],
+                points[tri[2] as usize],
+            ];
+            assert!(
+                signed_area_2d(&corners) > TWICE_AREA_EPS,
+                "a refined child triangle flipped winding"
+            );
+        }
+    }
+
+    #[test]
+    fn refined_masses_are_finite_and_positive() {
+        let panel = flat_panel(unit_square_ccw());
+        let mesh = panel.build_refined(FabricMaterial::default(), 3);
+        assert!(mesh.particles.len() > 4);
+        for particle in &mesh.particles {
+            assert!(particle.inverse_mass.is_finite());
+            assert!(particle.inverse_mass > 0.0);
+        }
+    }
+
+    #[test]
+    fn refined_constraint_graph_grows_with_resolution() {
+        let panel = flat_panel(unit_square_ccw());
+        let coarse = panel.build_refined(FabricMaterial::default(), 0);
+        let fine = panel.build_refined(FabricMaterial::default(), 2);
+        assert!(fine.constraints.len() > coarse.constraints.len());
+        assert!(count_kind(&fine.constraints, ConstraintKind::Bend) > 0);
+        // Rest lengths stay finite and non-degenerate after refinement.
+        for c in &fine.constraints {
+            assert!(c.rest_length.is_finite());
+            assert!(c.rest_length > 0.0);
+        }
+    }
+
+    #[test]
+    fn build_refined_is_deterministic() {
+        let panel = flat_panel(unit_square_ccw());
+        let a = panel.build_refined(FabricMaterial::default(), 3);
+        let b = panel.build_refined(FabricMaterial::default(), 3);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn subdivisions_for_edge_length_meets_target() {
+        let panel = flat_panel(unit_square_ccw());
+        // The unit square's ear-clip diagonal is sqrt(2) ~= 1.414 world units.
+        let target = 0.3;
+        let levels = panel.subdivisions_for_edge_length(target, 8);
+        assert!(levels > 0);
+        let (points, tris) = panel.triangulate_refined(levels);
+        assert!(longest_edge(&panel, &points, &tris) <= target + EPS);
+    }
+
+    #[test]
+    fn subdivisions_for_edge_length_respects_cap_and_noop() {
+        let panel = flat_panel(unit_square_ccw());
+        // Non-positive target and an already-satisfied target both refine nothing.
+        assert_eq!(panel.subdivisions_for_edge_length(0.0, 8), 0);
+        assert_eq!(panel.subdivisions_for_edge_length(-1.0, 8), 0);
+        assert_eq!(panel.subdivisions_for_edge_length(100.0, 8), 0);
+        // A tiny target is clamped to the level cap rather than exploding.
+        assert_eq!(panel.subdivisions_for_edge_length(1.0e-6, 3), 3);
     }
 
     #[test]
