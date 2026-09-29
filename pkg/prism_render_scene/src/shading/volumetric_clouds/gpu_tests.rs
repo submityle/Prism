@@ -40,9 +40,11 @@ use wgpu::{
 };
 
 use prism_render_architecture::volumetric::math::Vec3;
+use prism_render_architecture::volumetric::multiscatter::MultiScatterLut;
+use prism_render_architecture::volumetric::scatter::OctaveParams;
 use prism_render_architecture::volumetric::{modeling, noise, CloudKind};
 
-use super::abi::{GpuModelingParams, GpuNoiseBakeParams};
+use super::abi::{GpuModelingParams, GpuMsLutParams, GpuNoiseBakeParams};
 
 /// Absolute per-voxel tolerance for the `GPU`-versus-`CPU` comparison.
 ///
@@ -739,5 +741,244 @@ fn modeling_gpu_matches_cpu_golden() {
         checked,
         DIM_X * DIM_Y * DIM_Z,
         "every voxel must be compared"
+    );
+}
+
+/// Absolute per-cell tolerance for the multi-scatter `LUT` `GPU`-vs-`CPU`
+/// comparison.
+///
+/// Unlike the noise and modeling kernels, the energy-gain kernel is *not* a
+/// byte-identical twin: its optical-depth ramp is `1 - exp(-depth)`, and by
+/// design the `WESL` uses the native `exp` while the `CPU` reference uses the
+/// zero-dependency polynomial [`prism_render_architecture::volumetric::math::exp_approx`].
+/// Every other term (the `sqrt`-based diffusion reflectance, the integer-power
+/// octave decay, and the pure-`sqrt` `HG` phase ratio) is bit-for-bit shared,
+/// so the only divergence is that documented `exp` approximation gap (bounded
+/// well under `1.0e-3` over `depth in [0, 8]`) plus the final `fp16` store.
+/// This margin covers both with room to spare.
+const MS_PARITY_EPS: f32 = 3.0e-3;
+
+/// One on-device multi-scatter energy-gain `LUT` bake must match the `CPU`
+/// golden twin within the `exp`-approximation gap.
+///
+/// The `volumetric_multiscatter_lut_bake` kernel is the isolated, input-free
+/// numeric kernel that pre-integrates the Wrenninge octave energy gain into a
+/// 3D table (cos-zenith outer, optical-depth middle, albedo inner). This binds
+/// the real compute pipeline, bakes the table on-device, reads back the
+/// `rgba16float` `.x` gain, and compares every cell against the shipping `CPU`
+/// [`MultiScatterLut::build_energy_gain`] — the same reference the render world
+/// samples — reconstructing each cell's axis coordinates with the table's own
+/// `lerp(min, max, i / (dim - 1))` rule.
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice must reach the test log on hosts without an immediate-data adapter"
+)]
+fn multiscatter_lut_gpu_matches_cpu_golden() {
+    let Some((device, queue)) = try_cloud_device() else {
+        eprintln!(
+            "multiscatter_lut_gpu_matches_cpu_golden: no immediate-data wgpu adapter, skipping on-device parity"
+        );
+        return;
+    };
+
+    // cos axis is a multiple of 32 so the `rgba16float` row (8 bytes/texel) meets
+    // the 256-byte copy alignment; every axis is a multiple of the (4, 4, 4)
+    // workgroup so no invocation is masked.
+    const DIM_COS: u32 = 32;
+    const DIM_DEPTH: u32 = 8;
+    const DIM_ALBEDO: u32 = 8;
+    const BYTES_PER_TEXEL: u32 = 8;
+    // Mirrors `VC_MAX_OPTICAL_DEPTH` / `DEFAULT_MAX_OPTICAL_DEPTH`: the middle
+    // axis spans `[0, 8]`.
+    const MAX_OPTICAL_DEPTH: f32 = 8.0;
+
+    let params = GpuMsLutParams {
+        dim_cos: DIM_COS,
+        dim_depth: DIM_DEPTH,
+        dim_albedo: DIM_ALBEDO,
+        attenuation: 0.6,
+        contribution: 0.7,
+        eccentricity: 0.8,
+        octave_count: 4,
+    };
+
+    // The `CPU` golden table filled by the exact shipping code path.
+    let octave = OctaveParams {
+        attenuation: params.attenuation,
+        contribution: params.contribution,
+        eccentricity_attenuation: params.eccentricity,
+        octave_count: params.octave_count,
+    };
+    let lut = MultiScatterLut::build_energy_gain(
+        [DIM_COS as usize, DIM_DEPTH as usize, DIM_ALBEDO as usize],
+        octave,
+    );
+
+    // The kernel's axis reconstruction: `lerp(min, max, i / (dim - 1))`, or the
+    // minimum when the axis has a single cell.
+    fn axis_value(min: f32, max: f32, dim: u32, i: u32) -> f32 {
+        if dim <= 1 {
+            min
+        } else {
+            min + (max - min) * (i as f32 / (dim - 1) as f32)
+        }
+    }
+
+    let wgsl = compile_clouds_wgsl();
+    let entry = find_entry_point(&wgsl, "multiscatter_lut_bake");
+    let module = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("volumetric_multiscatter_lut_parity"),
+        source: ShaderSource::Wgsl(wgsl.as_str().into()),
+    });
+
+    // Explicit `@group(0)` layout: binding 6 = the write-only `rgba16float`
+    // energy-gain volume; the pipeline layout's immediate range spans the full
+    // `GpuMsLutParams` block (auto layout misreflects the immediate size on this
+    // driver).
+    let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+        label: Some("vc_mslut_bind_group_layout"),
+        entries: &[BindGroupLayoutEntry {
+            binding: 6,
+            visibility: ShaderStages::COMPUTE,
+            ty: BindingType::StorageTexture {
+                access: StorageTextureAccess::WriteOnly,
+                format: TextureFormat::Rgba16Float,
+                view_dimension: TextureViewDimension::D3,
+            },
+            count: None,
+        }],
+    });
+    let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+        label: Some("vc_mslut_pipeline_layout"),
+        bind_group_layouts: &[Some(&bind_group_layout)],
+        immediate_size: size_of::<GpuMsLutParams>() as u32,
+    });
+    let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("volumetric_multiscatter_lut_parity"),
+        layout: Some(&pipeline_layout),
+        module: &module,
+        entry_point: Some(&entry),
+        compilation_options: PipelineCompilationOptions::default(),
+        cache: None,
+    });
+
+    let lut_tex = device.create_texture(&TextureDescriptor {
+        label: Some("vc_mslut_out"),
+        size: Extent3d {
+            width: DIM_COS,
+            height: DIM_DEPTH,
+            depth_or_array_layers: DIM_ALBEDO,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D3,
+        format: TextureFormat::Rgba16Float,
+        usage: TextureUsages::STORAGE_BINDING | TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let lut_view = lut_tex.create_view(&TextureViewDescriptor::default());
+    let bind_group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("vc_mslut_bind_group"),
+        layout: &bind_group_layout,
+        entries: &[BindGroupEntry {
+            binding: 6,
+            resource: BindingResource::TextureView(&lut_view),
+        }],
+    });
+
+    let row_bytes = DIM_COS * BYTES_PER_TEXEL;
+    let readback_size = u64::from(row_bytes * DIM_DEPTH * DIM_ALBEDO);
+    let readback = device.create_buffer(&BufferDescriptor {
+        label: Some("vc_mslut_readback"),
+        size: readback_size,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("vc_mslut_parity_encoder"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("vc_mslut_parity_pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.set_immediates(0, bytemuck::bytes_of(&params));
+        pass.dispatch_workgroups(DIM_COS / 4, DIM_DEPTH / 4, DIM_ALBEDO / 4);
+    }
+    encoder.copy_texture_to_buffer(
+        TexelCopyTextureInfo {
+            texture: &lut_tex,
+            mip_level: 0,
+            origin: Origin3d::ZERO,
+            aspect: TextureAspect::All,
+        },
+        TexelCopyBufferInfo {
+            buffer: &readback,
+            layout: TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row_bytes),
+                rows_per_image: Some(DIM_DEPTH),
+            },
+        },
+        Extent3d {
+            width: DIM_COS,
+            height: DIM_DEPTH,
+            depth_or_array_layers: DIM_ALBEDO,
+        },
+    );
+    queue.submit([encoder.finish()]);
+
+    readback.slice(..).map_async(MapMode::Read, |_| {});
+    device
+        .poll(PollType::wait_indefinitely())
+        .expect("device poll should complete the submitted work");
+
+    let view = readback
+        .slice(..)
+        .get_mapped_range()
+        .expect("mapped readback range should be available after poll");
+    let halves: Vec<u16> = bytemuck::cast_slice::<u8, u16>(&view).to_vec();
+    drop(view);
+    readback.unmap();
+
+    // Row is dense (row_bytes == DIM_COS * 8), so cell (ic, id, ia) at
+    // (gid.x, gid.y, gid.z) maps to texel n = ia*DEPTH*COS + id*COS + ic and the
+    // gain is stored in the `.x` channel (half-word 4*n).
+    let mut checked = 0u32;
+    let mut ia = 0u32;
+    while ia < DIM_ALBEDO {
+        let albedo = axis_value(0.0, 1.0, DIM_ALBEDO, ia);
+        let mut id = 0u32;
+        while id < DIM_DEPTH {
+            let depth = axis_value(0.0, MAX_OPTICAL_DEPTH, DIM_DEPTH, id);
+            let mut ic = 0u32;
+            while ic < DIM_COS {
+                let cos = axis_value(-1.0, 1.0, DIM_COS, ic);
+                let n = (ia * DIM_DEPTH * DIM_COS + id * DIM_COS + ic) as usize;
+                let gpu_gain = f16_to_f32(halves[4 * n]);
+                // Sampling at the exact cell coordinate returns that cell's
+                // stored value (the trilinear fraction is zero to within f32).
+                let cpu_gain = lut.sample(cos, depth, albedo);
+
+                let d = (gpu_gain - cpu_gain).abs();
+                assert!(
+                    d < MS_PARITY_EPS,
+                    "cell (cos {ic}, depth {id}, albedo {ia}): gpu={gpu_gain} cpu={cpu_gain} |d|={d}",
+                );
+                checked += 1;
+                ic += 1;
+            }
+            id += 1;
+        }
+        ia += 1;
+    }
+    assert_eq!(
+        checked,
+        DIM_COS * DIM_DEPTH * DIM_ALBEDO,
+        "every LUT cell must be compared"
     );
 }
