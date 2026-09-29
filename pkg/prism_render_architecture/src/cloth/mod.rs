@@ -57,6 +57,7 @@ pub mod sleep;
 pub mod tearing;
 pub mod vbd;
 pub mod virtual_particles;
+pub mod virtual_particles_jacobi;
 pub mod wind;
 
 use alloc::vec::Vec;

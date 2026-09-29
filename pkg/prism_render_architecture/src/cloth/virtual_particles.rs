@@ -188,14 +188,14 @@ pub fn generate_virtual_particles(
 /// virtual particles: their single active vertex is `i`, their sample position
 /// is `position[i]`, and a correction scatters entirely back onto `i`.
 #[derive(Clone, Copy)]
-struct Sample {
-    verts: [u32; 3],
-    weights: [f32; 3],
+pub(crate) struct Sample {
+    pub(crate) verts: [u32; 3],
+    pub(crate) weights: [f32; 3],
 }
 
 impl Sample {
     /// The real-particle sample for vertex `index`.
-    fn real(index: u32) -> Self {
+    pub(crate) fn real(index: u32) -> Self {
         Self {
             verts: [index, index, index],
             weights: [1.0, 0.0, 0.0],
@@ -203,7 +203,7 @@ impl Sample {
     }
 
     /// The virtual-particle sample for `virtual`.
-    fn virtual_particle(vp: VirtualParticle) -> Self {
+    pub(crate) fn virtual_particle(vp: VirtualParticle) -> Self {
         Self {
             verts: vp.verts,
             weights: vp.weights,
@@ -211,7 +211,7 @@ impl Sample {
     }
 
     /// The live world position `Σ weights[k] * position[verts[k]]`.
-    fn position(&self, particles: &[ClothParticle]) -> Vec3 {
+    pub(crate) fn position(&self, particles: &[ClothParticle]) -> Vec3 {
         let mut pos = Vec3::ZERO;
         for k in 0..3 {
             let w = self.weights[k];
@@ -229,7 +229,7 @@ impl Sample {
     /// the sample by `dP` costs the least energy when each vertex `k` moves by
     /// `(weights[k] * inverse_mass / eff) * dP`, and the resulting sample
     /// displacement is exactly `dP` (see [`Sample::scatter`]).
-    fn inverse_mass_eff(&self, particles: &[ClothParticle]) -> f32 {
+    pub(crate) fn inverse_mass_eff(&self, particles: &[ClothParticle]) -> f32 {
         let mut eff = 0.0f32;
         for k in 0..3 {
             let w = self.weights[k];
@@ -274,7 +274,7 @@ impl Sample {
 /// Kept local to this module (the sibling [`collision`](super::collision) cell
 /// helper is private) so the virtual-particle hash bins identically to the
 /// point-to-point tier.
-fn cell_of(pos: Vec3, cell_size: f32) -> (i32, i32, i32) {
+pub(crate) fn cell_of(pos: Vec3, cell_size: f32) -> (i32, i32, i32) {
     let inv = 1.0 / cell_size;
     (
         (pos.x * inv).floor() as i32,
@@ -290,7 +290,7 @@ fn cell_of(pos: Vec3, cell_size: f32) -> (i32, i32, i32) {
 /// spatial hash would otherwise fight the mesh's own topology. Only the active
 /// vertices (weight `> 0`) participate, so a real particle `[i, i, i]` with
 /// weights `[1, 0, 0]` counts as touching just vertex `i`.
-fn shares_active_vertex(a: &Sample, b: &Sample) -> bool {
+pub(crate) fn shares_active_vertex(a: &Sample, b: &Sample) -> bool {
     for ka in 0..3 {
         if a.weights[ka] <= 0.0 {
             continue;
@@ -309,7 +309,7 @@ fn shares_active_vertex(a: &Sample, b: &Sample) -> bool {
 
 /// Which sample pairs a virtual-particle self-collision sweep resolves.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum PairScope {
+pub(crate) enum PairScope {
     /// Every pair, including real-vertex versus real-vertex, so the sweep is a
     /// self-contained self-collision tier.
     All,
