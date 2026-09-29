@@ -49,6 +49,7 @@
 // module lands (see the water engine design doc, roadmap M0-M9); every
 // intermediate state keeps the crate compiling and its gates green.
 pub mod budget;
+pub mod spectrum;
 
 use crate::deformation::DeformationHandle;
 
@@ -69,6 +70,76 @@ pub const EPS: f32 = 1e-6;
 /// Standard gravitational acceleration (m/s^2), the dispersion constant for
 /// deep-water gravity waves and the shallow-water restoring force.
 pub const GRAVITY: f32 = 9.81;
+
+/// The mathematical constant pi, needed for spectral phase and Gerstner math.
+pub const PI: f32 = core::f32::consts::PI;
+
+/// Two pi, the phase period used by [`sin_approx`] / [`cos_approx`] range
+/// reduction.
+pub const TWO_PI: f32 = 2.0 * core::f32::consts::PI;
+
+/// Half pi, used to derive cosine from sine.
+pub const FRAC_PI_2: f32 = core::f32::consts::FRAC_PI_2;
+
+/// Hand-rolled `exp` for the water subsystem, since the workspace determinism
+/// policy allows only `sqrt` among the float intrinsics and forbids
+/// [`f32::exp`]. Uses the limit identity `exp(x) = (1 + x/2^12)^(2^12)`
+/// evaluated by twelve squarings — pure add/multiply arithmetic.
+///
+/// The result is non-negative for every finite input and monotonically
+/// increasing in `x` (for `x > -4096`), which is exactly what the spectral
+/// energy, `Beer-Lambert` extinction, foam decay, and drying laws rely on. It
+/// is an approximation, not a bit-exact `exp`; the base is clamped so an
+/// extreme negative argument saturates to `0` instead of going negative.
+#[must_use]
+pub fn exp_approx(x: f32) -> f32 {
+    // 2^12 = 4096 squaring steps: large enough for smoothness across the
+    // arguments the spectra/extinction terms produce, cheap enough to inline.
+    let mut base = 1.0 + x / 4096.0;
+    if base < 0.0 {
+        base = 0.0;
+    }
+    let mut i = 0;
+    while i < 12 {
+        base *= base;
+        i += 1;
+    }
+    base
+}
+
+/// Reduces an angle to the range `[-PI, PI]` by subtracting the nearest whole
+/// multiple of `2*PI`, so [`sin_approx`] / [`cos_approx`] stay accurate and
+/// exactly periodic for large phases. Uses only multiply/round/subtract.
+#[must_use]
+fn wrap_pi(x: f32) -> f32 {
+    let k = (x / TWO_PI).round();
+    x - k * TWO_PI
+}
+
+/// Hand-rolled `sin` for spectral phase advance and `Gerstner` trains, since
+/// [`f32::sin`] is forbidden by the determinism policy. The angle is reduced to
+/// `[-PI, PI]`, folded into `[-PI/2, PI/2]` by the sine symmetry
+/// `sin(PI - x) = sin(x)`, then evaluated with the seventh-order Taylor
+/// polynomial (error below `2e-4` on that interval). Exactly periodic and
+/// bounded to roughly `[-1, 1]`.
+#[must_use]
+pub fn sin_approx(x: f32) -> f32 {
+    let mut r = wrap_pi(x);
+    if r > FRAC_PI_2 {
+        r = PI - r;
+    } else if r < -FRAC_PI_2 {
+        r = -PI - r;
+    }
+    let x2 = r * r;
+    // r - r^3/6 + r^5/120 - r^7/5040, Horner form.
+    r * (1.0 + x2 * (-1.0 / 6.0 + x2 * (1.0 / 120.0 + x2 * (-1.0 / 5040.0))))
+}
+
+/// Hand-rolled `cos` via `cos(x) = sin(x + PI/2)`; see [`sin_approx`].
+#[must_use]
+pub fn cos_approx(x: f32) -> f32 {
+    sin_approx(x + FRAC_PI_2)
+}
 
 /// A hand-rolled two-component vector for height-field, spectral, and foam math.
 ///
@@ -570,6 +641,45 @@ mod tests {
             ] {
                 assert!(frontend.shared_base().contains(service));
             }
+        }
+    }
+
+    #[test]
+    fn exp_approx_is_nonnegative_and_monotonic() {
+        assert!((exp_approx(0.0) - 1.0).abs() < 1e-3);
+        // Monotonic increasing across a wide range.
+        let mut prev = exp_approx(-8.0);
+        let mut t = -8.0;
+        while t <= 4.0 {
+            let cur = exp_approx(t);
+            assert!(cur >= prev - EPS);
+            assert!(cur >= 0.0);
+            prev = cur;
+            t += 0.25;
+        }
+        // Reasonable accuracy near zero (e^1 ~= 2.718).
+        assert!((exp_approx(1.0) - core::f32::consts::E).abs() < 0.05);
+        // Extreme negative saturates to zero, never negative.
+        assert!(exp_approx(-1.0e4) >= 0.0);
+    }
+
+    #[test]
+    fn sin_cos_are_bounded_periodic_and_accurate() {
+        // Bounded and accurate at the cardinal angles.
+        assert!(sin_approx(0.0).abs() < 1e-3);
+        assert!((sin_approx(FRAC_PI_2) - 1.0).abs() < 1e-3);
+        assert!((cos_approx(0.0) - 1.0).abs() < 1e-3);
+        assert!(cos_approx(FRAC_PI_2).abs() < 1e-3);
+        // Periodicity: sin(x) == sin(x + 2*PI) after range reduction.
+        let x = 0.9;
+        assert!((sin_approx(x) - sin_approx(x + TWO_PI * 5.0)).abs() < 1e-3);
+        // Pythagorean identity holds approximately everywhere.
+        let mut t = -10.0;
+        while t <= 10.0 {
+            let s = sin_approx(t);
+            let c = cos_approx(t);
+            assert!((s * s + c * c - 1.0).abs() < 2e-2);
+            t += 0.3;
         }
     }
 
