@@ -109,6 +109,55 @@ impl TriangleGradients {
     pub fn depth_from_edges(&self, w: [f32; 3]) -> f32 {
         self.vertices_z[0] * w[0] + self.vertices_z[1] * w[1] + self.vertices_z[2] * w[2]
     }
+
+    /// Per-row coverage interval `[k_lo, k_hi]` in `+x` step units, or `None`.
+    ///
+    /// The shipping compute twin, when a row is wide enough
+    /// (`subgroupAny(max_x - min_x > 4)`), stops testing every pixel and instead
+    /// solves the three edge inequalities for the row to get one contiguous
+    /// `[x0, x1]` span, then walks only that span. This method pins the closed
+    /// form of that span as a CPU reference.
+    ///
+    /// `w_row` is the edge-function triple
+    /// `(edge(v1, v2, p0), edge(v2, v0, p0), edge(v0, v1, p0))` sampled at the
+    /// row's first candidate pixel center `p0`; `steps` is the number of `+x`
+    /// unit steps to the last candidate (so the row spans `k in 0..=steps`, i.e.
+    /// `steps + 1` pixels). Because each edge is affine, its value at step `k` is
+    /// `w_row[i] + k * self.w_x[i]`, and the covered set `all(w_i >= 0)` is the
+    /// intersection of three half-lines — a single interval. The returned bounds
+    /// are clamped to `[0, steps]`; `None` means the row is not covered.
+    ///
+    /// # Numerical note
+    ///
+    /// Coverage uses inclusive `w_i >= 0` (not the top-left tie-break of
+    /// [`super::software_raster`]); at generic pixel centers no edge value is
+    /// exactly zero, so the interval matches a per-pixel `all(w_i >= 0)` scan
+    /// bit-for-bit. Exact-on-edge ties are resolved by the twin's per-pixel guard
+    /// and are outside this closed form's scope.
+    #[must_use]
+    pub fn row_span(&self, w_row: [f32; 3], steps: u32) -> Option<(u32, u32)> {
+        let steps_f = steps as f32;
+        let mut lo = 0.0f32;
+        let mut hi = steps_f;
+        for (&g, &w0) in self.w_x.iter().zip(w_row.iter()) {
+            if g > 0.0 {
+                // w0 + k*g >= 0  =>  k >= -w0/g
+                lo = lo.max(-w0 / g);
+            } else if g < 0.0 {
+                // w0 + k*g >= 0  =>  k <= -w0/g
+                hi = hi.min(-w0 / g);
+            } else if w0 < 0.0 {
+                // Edge is constant along the row and already outside.
+                return None;
+            }
+        }
+        let k_lo = lo.ceil();
+        let k_hi = hi.floor();
+        if k_lo > k_hi || k_hi < 0.0 || k_lo > steps_f {
+            return None;
+        }
+        Some((k_lo.max(0.0) as u32, k_hi.min(steps_f) as u32))
+    }
 }
 
 #[cfg(test)]
@@ -202,5 +251,80 @@ mod tests {
         // The gradient reproduces the recomputed plane step for integer coords.
         assert_eq!(z_dx - z0, g.z_x);
         assert_eq!(z_dy - z0, g.z_y);
+    }
+
+    #[test]
+    fn row_span_matches_per_pixel_scan_and_is_contiguous() {
+        // Generic-position integer vertices: no pixel center lands exactly on an
+        // edge, so the closed-form interval and a per-pixel `all(w_i >= 0)` scan
+        // agree with no float tie-breaking ambiguity.
+        let v0 = sv(1.0, 1.0, 0.2);
+        let v1 = sv(20.0, 3.0, 0.6);
+        let v2 = sv(4.0, 18.0, 0.9);
+        let g = TriangleGradients::new(v0, v1, v2).unwrap();
+        // Sanity: this winding is front-facing.
+        assert!(g.double_area > 0.0);
+
+        const WIDTH: u32 = 24;
+        let steps = WIDTH - 1;
+        for y in 0..24u32 {
+            let cy = y as f32 + 0.5;
+            // Edge triple at the first candidate pixel center (x = 0).
+            let p0 = [0.5, cy];
+            let w_row = [
+                edge(v1.pos, v2.pos, p0),
+                edge(v2.pos, v0.pos, p0),
+                edge(v0.pos, v1.pos, p0),
+            ];
+
+            // Brute-force per-pixel coverage over the same row (inclusive w >= 0).
+            let mut covered = Vec::new();
+            for k in 0..=steps {
+                let p = [k as f32 + 0.5, cy];
+                let w = [
+                    edge(v1.pos, v2.pos, p),
+                    edge(v2.pos, v0.pos, p),
+                    edge(v0.pos, v1.pos, p),
+                ];
+                if w[0] >= 0.0 && w[1] >= 0.0 && w[2] >= 0.0 {
+                    covered.push(k);
+                }
+            }
+
+            match g.row_span(w_row, steps) {
+                None => {
+                    assert!(covered.is_empty(), "row y={y}: closed form empty but scan covered {covered:?}");
+                }
+                Some((k_lo, k_hi)) => {
+                    assert!(!covered.is_empty(), "row y={y}: closed form span but scan empty");
+                    assert_eq!(k_lo, *covered.first().unwrap(), "row y={y}: lo bound mismatch");
+                    assert_eq!(k_hi, *covered.last().unwrap(), "row y={y}: hi bound mismatch");
+                    // The covered set must be exactly the contiguous run [k_lo, k_hi].
+                    let expected: Vec<u32> = (k_lo..=k_hi).collect();
+                    assert_eq!(covered, expected, "row y={y}: coverage not contiguous");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn row_span_clamps_to_the_step_range() {
+        // A large triangle so an interior row is fully covered; the span must be
+        // clamped to [0, steps] rather than running past the candidate range.
+        let v0 = sv(-100.0, -100.0, 0.1);
+        let v1 = sv(300.0, -100.0, 0.5);
+        let v2 = sv(-100.0, 300.0, 0.9);
+        let g = TriangleGradients::new(v0, v1, v2).unwrap();
+        let cy = 8.5;
+        let p0 = [0.5, cy];
+        let w_row = [
+            edge(v1.pos, v2.pos, p0),
+            edge(v2.pos, v0.pos, p0),
+            edge(v0.pos, v1.pos, p0),
+        ];
+        let steps = 15u32;
+        let (k_lo, k_hi) = g.row_span(w_row, steps).unwrap();
+        assert_eq!(k_lo, 0, "fully covered row must start at step 0");
+        assert_eq!(k_hi, steps, "span must be clamped to the last step");
     }
 }
