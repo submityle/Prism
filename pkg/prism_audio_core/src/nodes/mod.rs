@@ -17,14 +17,23 @@
 //! Insert-style effect processors live in the [`effects`] submodule:
 //! [`ParametricEqNode`], [`DelayNode`], the `tanh` [`WaveshaperNode`], and the
 //! LFO-modulated [`ChorusNode`], [`FlangerNode`], and [`PhaserNode`].
+//!
+//! Level-dependent processors live in the [`dynamics`] submodule:
+//! [`CompressorNode`], [`LimiterNode`], [`ExpanderGateNode`], and the
+//! side-chain [`DuckingNode`].
 
 pub mod biquad;
+pub mod dynamics;
 pub mod effects;
 pub mod gain;
 pub mod mix;
 pub mod pan;
 
 pub use biquad::{BiquadKind, BiquadNode};
+pub use dynamics::{
+    CompressorNode, CompressorParams, DetectionMode, DuckingNode, DuckingParams, ExpanderGateNode,
+    GateParams, LimiterNode, LimiterParams,
+};
 pub use effects::{
     ChorusNode, ChorusParams, DelayNode, EqBand, FlangerNode, FlangerParams, Oversample,
     ParametricEqNode, PhaserNode, PhaserParams, WaveshaperNode,

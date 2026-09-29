@@ -122,6 +122,17 @@ impl<'a> ProcessIo<'a> {
     pub fn io(&mut self, ip: usize, op: usize) -> (&AudioBuffer, &mut AudioBuffer) {
         (&self.inputs[ip], &mut self.outputs[op])
     }
+
+    /// Simultaneous access to *all* input ports and *all* output ports.
+    ///
+    /// This is the shape side-chain nodes need: a ducker, for instance, reads
+    /// its key on input port 1 while transforming input port 0 into output
+    /// port 0. [`io`](Self::io) only exposes a single input/output pair, so
+    /// multi-input effects use this split borrow instead.
+    #[inline]
+    pub fn split(&mut self) -> (&[AudioBuffer], &mut [AudioBuffer]) {
+        (self.inputs, self.outputs)
+    }
 }
 
 /// A single processing unit in the [`AudioGraph`].
