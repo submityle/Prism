@@ -56,6 +56,7 @@ pub mod self_ccd;
 pub mod sleep;
 pub mod tearing;
 pub mod vbd;
+pub mod virtual_particles;
 pub mod wind;
 
 use alloc::vec::Vec;
