@@ -39,9 +39,10 @@ use wgpu::{
     TextureViewDimension,
 };
 
+use prism_render_architecture::volumetric::math::ln_approx;
 use prism_render_architecture::volumetric::math::{Vec2, Vec3};
 use prism_render_architecture::volumetric::multiscatter::MultiScatterLut;
-use prism_render_architecture::volumetric::scatter::OctaveParams;
+use prism_render_architecture::volumetric::scatter::{dual_lobe_phase, OctaveParams};
 use prism_render_architecture::volumetric::shadow::shadow_transmittance;
 use prism_render_architecture::volumetric::temporal::{
     active_pixel, clamp_history, variance_clip, UpscaleMode,
@@ -52,8 +53,8 @@ use prism_render_architecture::volumetric::{
 };
 
 use super::abi::{
-    GpuModelingParams, GpuMsLutParams, GpuNoiseBakeParams, GpuShadowMarchParams, GpuUpsampleParams,
-    GpuWeatherAdvectParams,
+    GpuModelingParams, GpuMsLutParams, GpuNoiseBakeParams, GpuScatterResolveParams,
+    GpuShadowMarchParams, GpuUpsampleParams, GpuWeatherAdvectParams,
 };
 
 /// Absolute per-voxel tolerance for the `GPU`-versus-`CPU` comparison.
@@ -1988,5 +1989,398 @@ fn shadow_march_gpu_matches_cpu_golden() {
         checked,
         SHADOW_W * SHADOW_H,
         "every shadow texel must be compared"
+    );
+}
+
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice must reach the test log on hosts without an immediate-data adapter"
+)]
+fn scatter_resolve_gpu_matches_cpu_golden() {
+    let Some((device, queue)) = try_cloud_device() else {
+        eprintln!(
+            "scatter_resolve_gpu_matches_cpu_golden: no immediate-data wgpu adapter, skipping on-device parity"
+        );
+        return;
+    };
+
+    // Screen width is a multiple of 32 so the `rgba16float` output row
+    // (8 bytes/texel) meets the 256-byte copy alignment; both screen extents are
+    // multiples of the (8, 8, 1) workgroup so no invocation is masked.
+    const SCREEN_W: u32 = 32;
+    const SCREEN_H: u32 = 8;
+    // Multi-scatter `LUT` axis resolutions. `LUT_DEPTH == VC_MAX_OPTICAL_DEPTH`
+    // makes the depth-axis fraction times the dimension equal the optical depth
+    // itself, so the nearest depth bin is `floor(optical_depth)` and the native
+    // `log` versus `ln_approx` gap (~1e-6) never flips a bin.
+    const LUT_COS: u32 = 4;
+    const LUT_DEPTH: u32 = 8;
+    const LUT_ALBEDO: u32 = 4;
+    const OUT_BYTES_PER_TEXEL: u32 = 8;
+    const MAX_OPTICAL_DEPTH: f32 = 8.0;
+    const VC_EPS: f32 = 1.0e-6;
+
+    // Fixed phase and `LUT`-lookup scalars. `cos_theta` and `albedo` land in the
+    // middle of a bin (`fc = 0.625 -> ic = 2`, `fa = 0.7 -> ia = 2`) so their
+    // nearest indices are deterministic on both sides with no boundary ambiguity.
+    let params = GpuScatterResolveParams {
+        screen_w: SCREEN_W,
+        screen_h: SCREEN_H,
+        lut_cos: LUT_COS,
+        lut_depth: LUT_DEPTH,
+        lut_albedo: LUT_ALBEDO,
+        forward_g: 0.6,
+        backward_g: -0.3,
+        lobe_blend: 0.7,
+        albedo: 0.7,
+        cos_theta: 0.25,
+    };
+
+    // Deterministic exact-`float32` single-scatter radiance in `[0, 1]`; the
+    // kernel reads this from the `.x` channel of the low-res input.
+    fn single_at(x: u32, y: u32) -> f32 {
+        ((x * 3 + y * 7) % 13) as f32 / 13.0
+    }
+    // Per-pixel transmittance chosen so `-log(T) ~= bin + 0.5` with
+    // `bin = (x + y) % LUT_DEPTH`, parking the recovered optical depth in the
+    // middle of a depth bin.
+    fn transmittance_at(x: u32, y: u32) -> f32 {
+        let bin = ((x + y) % LUT_DEPTH) as f32;
+        (-(bin + 0.5)).exp()
+    }
+    // Deterministic multi-scatter energy-gain `LUT` in `[0, 1]`; the CPU golden
+    // re-derives the identical nearest cell.
+    fn lut_gain(ic: u32, id: u32, ia: u32) -> f32 {
+        ((ic * 5 + id * 3 + ia * 2) % 7) as f32 / 7.0
+    }
+    // `multiscatter::axis_fraction` mirror: `saturate((v - mn) / span)`.
+    let axis_fraction = |value: f32, mn: f32, mx: f32| -> f32 {
+        let span = mx - mn;
+        if span.abs() < VC_EPS {
+            0.0
+        } else {
+            ((value - mn) / span).clamp(0.0, 1.0)
+        }
+    };
+
+    // Fill the low-res input (`.x` = single scatter, `.w` = transmittance).
+    let pixel_count = (SCREEN_W * SCREEN_H) as usize;
+    let mut lowres_data = vec![0.0f32; pixel_count * 4];
+    let mut y = 0u32;
+    while y < SCREEN_H {
+        let mut x = 0u32;
+        while x < SCREEN_W {
+            let n = (y * SCREEN_W + x) as usize;
+            lowres_data[4 * n] = single_at(x, y);
+            lowres_data[4 * n + 3] = transmittance_at(x, y);
+            x += 1;
+        }
+        y += 1;
+    }
+
+    // Fill the 3D `LUT` (`.x` = gain). Layout: width = cos, height = depth,
+    // depth-or-array = albedo; linear index `ia*(dd*dc) + id*dc + ic`.
+    let lut_count = (LUT_COS * LUT_DEPTH * LUT_ALBEDO) as usize;
+    let mut lut_data = vec![0.0f32; lut_count * 4];
+    let mut ia = 0u32;
+    while ia < LUT_ALBEDO {
+        let mut id = 0u32;
+        while id < LUT_DEPTH {
+            let mut ic = 0u32;
+            while ic < LUT_COS {
+                let li = (ia * (LUT_DEPTH * LUT_COS) + id * LUT_COS + ic) as usize;
+                lut_data[4 * li] = lut_gain(ic, id, ia);
+                ic += 1;
+            }
+            id += 1;
+        }
+        ia += 1;
+    }
+
+    let wgsl = compile_clouds_wgsl();
+    let entry = find_entry_point(&wgsl, "scatter_resolve");
+    let module = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("volumetric_scatter_resolve_parity"),
+        source: ShaderSource::Wgsl(wgsl.as_str().into()),
+    });
+
+    // Explicit `@group(0)` layout mirroring the scatter-resolve kernel: binding
+    // 10 = low-res input (`texture_2d<f32>`), 11 = multi-scatter `LUT`
+    // (`texture_3d<f32>`), 12 = write-only `rgba16float` resolve output. The
+    // pipeline layout's immediate range spans the full `GpuScatterResolveParams`
+    // block (auto layout misreflects the immediate size on this driver).
+    let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+        label: Some("vc_scatter_resolve_bind_group_layout"),
+        entries: &[
+            BindGroupLayoutEntry {
+                binding: 10,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Texture {
+                    sample_type: TextureSampleType::Float { filterable: false },
+                    view_dimension: TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            BindGroupLayoutEntry {
+                binding: 11,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Texture {
+                    sample_type: TextureSampleType::Float { filterable: false },
+                    view_dimension: TextureViewDimension::D3,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            BindGroupLayoutEntry {
+                binding: 12,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::StorageTexture {
+                    access: StorageTextureAccess::WriteOnly,
+                    format: TextureFormat::Rgba16Float,
+                    view_dimension: TextureViewDimension::D2,
+                },
+                count: None,
+            },
+        ],
+    });
+    let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+        label: Some("vc_scatter_resolve_pipeline_layout"),
+        bind_group_layouts: &[Some(&bind_group_layout)],
+        immediate_size: size_of::<GpuScatterResolveParams>() as u32,
+    });
+    let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("volumetric_scatter_resolve_parity"),
+        layout: Some(&pipeline_layout),
+        module: &module,
+        entry_point: Some(&entry),
+        compilation_options: PipelineCompilationOptions::default(),
+        cache: None,
+    });
+
+    let lowres_tex = device.create_texture(&TextureDescriptor {
+        label: Some("vc_sr_lowres_in"),
+        size: Extent3d {
+            width: SCREEN_W,
+            height: SCREEN_H,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: TextureFormat::Rgba32Float,
+        usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let lut_tex = device.create_texture(&TextureDescriptor {
+        label: Some("vc_sr_lut_in"),
+        size: Extent3d {
+            width: LUT_COS,
+            height: LUT_DEPTH,
+            depth_or_array_layers: LUT_ALBEDO,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D3,
+        format: TextureFormat::Rgba32Float,
+        usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let out_tex = device.create_texture(&TextureDescriptor {
+        label: Some("vc_sr_out"),
+        size: Extent3d {
+            width: SCREEN_W,
+            height: SCREEN_H,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: TextureFormat::Rgba16Float,
+        usage: TextureUsages::STORAGE_BINDING | TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+
+    queue.write_texture(
+        TexelCopyTextureInfo {
+            texture: &lowres_tex,
+            mip_level: 0,
+            origin: Origin3d::ZERO,
+            aspect: TextureAspect::All,
+        },
+        bytemuck::cast_slice(&lowres_data),
+        TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(SCREEN_W * 16),
+            rows_per_image: Some(SCREEN_H),
+        },
+        Extent3d {
+            width: SCREEN_W,
+            height: SCREEN_H,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.write_texture(
+        TexelCopyTextureInfo {
+            texture: &lut_tex,
+            mip_level: 0,
+            origin: Origin3d::ZERO,
+            aspect: TextureAspect::All,
+        },
+        bytemuck::cast_slice(&lut_data),
+        TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(LUT_COS * 16),
+            rows_per_image: Some(LUT_DEPTH),
+        },
+        Extent3d {
+            width: LUT_COS,
+            height: LUT_DEPTH,
+            depth_or_array_layers: LUT_ALBEDO,
+        },
+    );
+
+    let lowres_view = lowres_tex.create_view(&TextureViewDescriptor::default());
+    let lut_view = lut_tex.create_view(&TextureViewDescriptor::default());
+    let out_view = out_tex.create_view(&TextureViewDescriptor::default());
+    let bind_group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("vc_scatter_resolve_bind_group"),
+        layout: &bind_group_layout,
+        entries: &[
+            BindGroupEntry {
+                binding: 10,
+                resource: BindingResource::TextureView(&lowres_view),
+            },
+            BindGroupEntry {
+                binding: 11,
+                resource: BindingResource::TextureView(&lut_view),
+            },
+            BindGroupEntry {
+                binding: 12,
+                resource: BindingResource::TextureView(&out_view),
+            },
+        ],
+    });
+
+    let row_bytes = SCREEN_W * OUT_BYTES_PER_TEXEL;
+    let readback_size = u64::from(row_bytes * SCREEN_H);
+    let readback = device.create_buffer(&BufferDescriptor {
+        label: Some("vc_scatter_resolve_readback"),
+        size: readback_size,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("vc_scatter_resolve_parity_encoder"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("vc_scatter_resolve_parity_pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.set_immediates(0, bytemuck::bytes_of(&params));
+        pass.dispatch_workgroups(SCREEN_W / 8, SCREEN_H / 8, 1);
+    }
+    encoder.copy_texture_to_buffer(
+        TexelCopyTextureInfo {
+            texture: &out_tex,
+            mip_level: 0,
+            origin: Origin3d::ZERO,
+            aspect: TextureAspect::All,
+        },
+        TexelCopyBufferInfo {
+            buffer: &readback,
+            layout: TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row_bytes),
+                rows_per_image: Some(SCREEN_H),
+            },
+        },
+        Extent3d {
+            width: SCREEN_W,
+            height: SCREEN_H,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit([encoder.finish()]);
+
+    readback.slice(..).map_async(MapMode::Read, |_| {});
+    device
+        .poll(PollType::wait_indefinitely())
+        .expect("device poll should complete the submitted work");
+
+    let view = readback
+        .slice(..)
+        .get_mapped_range()
+        .expect("mapped readback range should be available after poll");
+    let halves: Vec<u16> = bytemuck::cast_slice::<u8, u16>(&view).to_vec();
+    drop(view);
+    readback.unmap();
+
+    // Constant phase and constant cos/albedo `LUT` indices for every pixel.
+    let phase = dual_lobe_phase(
+        params.cos_theta,
+        params.forward_g,
+        params.backward_g,
+        params.lobe_blend,
+    );
+    let phase_gain = phase * 4.0 * core::f32::consts::PI;
+    let fc = axis_fraction(params.cos_theta, -1.0, 1.0);
+    let fa = axis_fraction(params.albedo, 0.0, 1.0);
+    let ic = ((fc * LUT_COS as f32) as u32).min(LUT_COS - 1);
+    let ia = ((fa * LUT_ALBEDO as f32) as u32).min(LUT_ALBEDO - 1);
+
+    // Row is dense (row_bytes == SCREEN_W * 8), so texel (x, y) maps to
+    // n = y*SCREEN_W + x with channel c at half-word 4*n + c.
+    let mut checked = 0u32;
+    let mut y = 0u32;
+    while y < SCREEN_H {
+        let mut x = 0u32;
+        while x < SCREEN_W {
+            let n = (y * SCREEN_W + x) as usize;
+            let gpu = [
+                f16_to_f32(halves[4 * n]),
+                f16_to_f32(halves[4 * n + 1]),
+                f16_to_f32(halves[4 * n + 2]),
+                f16_to_f32(halves[4 * n + 3]),
+            ];
+
+            // Reproduce the kernel: recover optical depth (`-ln T`) via the crate
+            // `ln_approx`, take the nearest depth bin, fold the multi-scatter
+            // gain into the single-scatter radiance weighted by the dual-lobe
+            // phase.
+            let single = single_at(x, y);
+            let transmittance = transmittance_at(x, y);
+            let optical_depth = -ln_approx(transmittance.max(VC_EPS));
+            let fd = axis_fraction(optical_depth, 0.0, MAX_OPTICAL_DEPTH);
+            let id = ((fd * LUT_DEPTH as f32) as u32).min(LUT_DEPTH - 1);
+            let gain = lut_gain(ic, id, ia);
+            let resolved = single * (1.0 + gain) * phase_gain;
+            let cpu = [resolved, resolved, resolved, transmittance];
+
+            let mut c = 0usize;
+            while c < 4 {
+                let dch = (gpu[c] - cpu[c]).abs();
+                assert!(
+                    dch < PARITY_EPS,
+                    "texel ({x}, {y}) channel {c}: gpu={} cpu={} |d|={dch}",
+                    gpu[c],
+                    cpu[c],
+                );
+                c += 1;
+            }
+            checked += 1;
+            x += 1;
+        }
+        y += 1;
+    }
+    assert_eq!(
+        checked,
+        SCREEN_W * SCREEN_H,
+        "every screen texel must be compared"
     );
 }
