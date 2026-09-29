@@ -31,7 +31,9 @@
 //!    they never pop; see [`transition`].
 //! 4. **Rasterization** — thin strands are drawn in a compute/visibility pass
 //!    (sub-pixel software raster) rather than the hardware triangle path; see
-//!    [`raster`].
+//!    [`raster`]. The per-vertex rotation-minimizing frames that give each
+//!    strand its ribbon/card width and coherent anisotropic shading tangent
+//!    are built by [`frames`].
 //! 5. **Shading** — a physically based hair BSDF (Chiang / Marschner) with a
 //!    dual-scattering multiple-scattering approximation, expressed through the
 //!    material system's `HairPbr` closure rather than reimplemented here.
@@ -49,6 +51,7 @@ pub mod collision;
 pub mod deep_opacity_layout;
 pub mod deep_transmittance;
 pub mod dynamics;
+pub mod frames;
 pub mod groom;
 pub mod groom_import;
 pub mod interpolation;
