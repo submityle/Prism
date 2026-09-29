@@ -20,7 +20,11 @@
 //! * `volumetric_modeling` — coverage/type/height gradient + erosion compose.
 //! * `volumetric_multiscatter_lut_bake` — multiple-scattering energy LUT bake.
 //! * `volumetric_raymarch` — adaptive-step, empty-space-skipping march.
-//! * `volumetric_scatter_resolve` — HG double-lobe + powder + octave resolve.
+//! * `volumetric_scatter_resolve` — dual-lobe HG phase + multiple-scattering
+//!   LUT energy-gain fold-in (the octave sum is pre-baked into the LUT above,
+//!   so this pass samples that gain rather than re-summing octaves; `vc_powder`
+//!   and `vc_hg_draine_phase` are defined in the shader math library but are
+//!   not yet wired into any on-device entry point).
 //! * `volumetric_shadow_march` — light-space cloud-shadow / AVSM march.
 //! * `volumetric_upsample` — temporal reprojection + history-clamp upsample.
 //!
