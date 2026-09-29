@@ -22,6 +22,7 @@ mod plugin;
 mod scene;
 mod shading;
 mod visibility;
+mod water;
 
 pub use buffers::{
     GpuSceneBuffers, RenderGpuSceneBounds, RenderGpuSceneInstance, RenderGpuSceneTransform,
