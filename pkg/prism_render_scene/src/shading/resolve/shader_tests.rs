@@ -795,3 +795,46 @@ fn hair_kajiya_wesl_compiles_and_resolves_imports() {
         panic!("hair_kajiya.wesl failed to compile/resolve imports: {error}")
     });
 }
+
+/// Ensures the advanced cloth twin `cloth_advanced.wesl` — energy-conserving
+/// `Charlie` sheen, `Ashikhmin`-`Shirley` woven warp/weft anisotropy, thin
+/// double-sided transmission, multiple-scattering compensation, thin-film
+/// interference and a tension-driven wrinkle blend — parses, resolves its
+/// `prism_render_scene::shaders::{lighting, brdf}::{...}` imports and
+/// type-checks as WESL, in lock-step with the CPU golden
+/// `prism_render_shading::cloth_advanced::evaluate_cloth_advanced_direct`.
+#[test]
+fn cloth_advanced_wesl_compiles_and_resolves_imports() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let lighting = shader_id(0x5052_4953_4d5f_434c_4f54_485f_4144_1001);
+    cache.set_shader(
+        lighting,
+        Shader::from_wesl(
+            include_str!("../../shaders/lighting.wesl"),
+            "embedded://prism_render_scene/shaders/lighting.wesl",
+        ),
+    );
+
+    let brdf = shader_id(0x5052_4953_4d5f_434c_4f54_485f_4144_2001);
+    cache.set_shader(
+        brdf,
+        Shader::from_wesl(
+            include_str!("../../shaders/brdf.wesl"),
+            "embedded://prism_render_scene/shaders/brdf.wesl",
+        ),
+    );
+
+    let cloth_advanced = shader_id(0x5052_4953_4d5f_434c_4f54_485f_4144_0001);
+    cache.set_shader(
+        cloth_advanced,
+        Shader::from_wesl(
+            include_str!("../../shaders/cloth_advanced.wesl"),
+            "embedded://prism_render_scene/shaders/cloth_advanced.wesl",
+        ),
+    );
+
+    cache.get(0, cloth_advanced, &[]).unwrap_or_else(|error| {
+        panic!("cloth_advanced.wesl failed to compile/resolve imports: {error}")
+    });
+}
