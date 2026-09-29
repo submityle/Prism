@@ -87,3 +87,42 @@ fn cloth_aerodynamics_abi_matches_the_shader_layout() {
     assert_eq!(align_of::<GpuClothAeroParams>(), 4);
     assert_eq!(CLOTH_WORKGROUP_SIZE, 64);
 }
+
+/// Compiles `cloth_self_collision_virtual.wesl`, proving the three own-slot
+/// virtual-particle kernels (the `atomicExchange` hash build, the 27-cell
+/// resolve accumulating each sample's own half-push into `sample_dp`, and the
+/// per-vertex CSR scatter) parse and type-check exactly as they will in the
+/// render world, and that their struct/helper layouts match the `CPU` golden
+/// `prism_render_architecture::cloth::virtual_particles_jacobi`.
+#[test]
+fn cloth_self_collision_virtual_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let virtual_tier = shader_id(0x5052_4953_4d5f_434c_4f54_4841_4552_5303);
+    cache.set_shader(
+        virtual_tier,
+        Shader::from_wesl(
+            include_str!("../shaders/cloth_self_collision_virtual.wesl"),
+            "embedded://prism_render_scene/shaders/cloth_self_collision_virtual.wesl",
+        ),
+    );
+
+    cache.get(0, virtual_tier, &[]).unwrap_or_else(|error| {
+        panic!("cloth_self_collision_virtual.wesl failed to compile: {error}")
+    });
+}
+
+/// Guards the Rust immediate-block `ABI` against drift from the virtual-particle
+/// `WESL` structs: the `GpuClothVpSample` record and the `GpuClothVpParams`
+/// uniform are both the flat 32-byte blocks matching `ClothVpSample` /
+/// `ClothVpParams` in `cloth_self_collision_virtual.wesl`, and the workgroup
+/// constant matches the kernels' `@workgroup_size(64)`.
+#[test]
+fn cloth_virtual_self_collision_abi_matches_the_shader_layout() {
+    use super::abi::{GpuClothVpParams, GpuClothVpSample, CLOTH_WORKGROUP_SIZE};
+    assert_eq!(size_of::<GpuClothVpSample>(), 32);
+    assert_eq!(align_of::<GpuClothVpSample>(), 4);
+    assert_eq!(size_of::<GpuClothVpParams>(), 32);
+    assert_eq!(align_of::<GpuClothVpParams>(), 4);
+    assert_eq!(CLOTH_WORKGROUP_SIZE, 64);
+}

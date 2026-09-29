@@ -282,6 +282,61 @@ pub(crate) struct GpuClothAeroParams {
     pub particle_count: u32,
 }
 
+/// One virtual-particle-tier self-collision sample, byte-compatible with
+/// `ClothVpSample` in `cloth_self_collision_virtual.wesl`. A real vertex `i`
+/// is encoded as `verts = (i, i, i)`, `weights = (1, 0, 0)`; a virtual
+/// particle carries its triangle's three corner indices and barycentric
+/// weights. The two trailing pads keep the flat 32-byte `std430` record stride
+/// so the reals-then-virtuals sample array packs without gaps.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq)]
+pub(crate) struct GpuClothVpSample {
+    /// First active vertex index.
+    pub v0: u32,
+    /// Second active vertex index.
+    pub v1: u32,
+    /// Third active vertex index.
+    pub v2: u32,
+    /// Barycentric weight for `v0`.
+    pub w0: f32,
+    /// Barycentric weight for `v1`.
+    pub w1: f32,
+    /// Barycentric weight for `v2`.
+    pub w2: f32,
+    /// Trailing pad word; never read.
+    pub _pad0: f32,
+    /// Trailing pad word; never read.
+    pub _pad1: f32,
+}
+
+/// Virtual-particle self-collision dispatch uniform. Byte-compatible with
+/// `ClothVpParams` in `cloth_self_collision_virtual.wesl`: four counts fill the
+/// first 16-byte row, then the cell size, the thickness, the augment-mode flag
+/// and a trailing pad fill the second, so the whole block is one 32-byte
+/// uniform stride mirroring the `CPU` golden `virtual_particles_jacobi` inputs.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq)]
+pub(crate) struct GpuClothVpParams {
+    /// Total sample count (reals + in-range virtuals), bounding the
+    /// hash/resolve dispatches.
+    pub sample_count: u32,
+    /// Number of real particles; samples `< real_count` are real vertices.
+    pub real_count: u32,
+    /// Number of real vertices, bounding the scatter dispatch.
+    pub vertex_count: u32,
+    /// Number of hash buckets in the cell table (the cell-hash modulus).
+    pub table_size: u32,
+    /// Uniform grid cell edge, world units.
+    pub cell_size: f32,
+    /// Separation distance below which a sample pair is pushed apart.
+    pub thickness: f32,
+    /// When non-zero, real-vs-real pairs are skipped (augment mode); zero
+    /// resolves every pair (self-contained tier). Mirrors the `CPU` `PairScope`.
+    pub virtual_only: u32,
+    /// Trailing pad so the block is a flat 32-byte uniform; never read.
+    pub _pad: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -373,6 +428,28 @@ mod tests {
     fn aero_params_is_uniform_stride() {
         assert_eq!(size_of::<GpuClothAeroParams>(), 32);
         assert_eq!(size_of::<GpuClothAeroParams>() % 16, 0);
+    }
+
+    /// The virtual-particle sample record is a flat 32-byte `std430` stride:
+    /// three vertex indices, three barycentric weights and two trailing pads,
+    /// matching `ClothVpSample` in `cloth_self_collision_virtual.wesl`. Pin the
+    /// size so a field drift fails the build rather than silently misaligning
+    /// the reals-then-virtuals sample array.
+    #[test]
+    fn vp_sample_is_std430_stride() {
+        assert_eq!(size_of::<GpuClothVpSample>(), 32);
+        assert_eq!(align_of::<GpuClothVpSample>(), 4);
+    }
+
+    /// The virtual-particle dispatch uniform is exactly two 16-byte `WGSL`
+    /// uniform rows: four counts in the first, then the cell size, the
+    /// thickness, the augment flag and a pad in the second. Pin the 32-byte
+    /// stride against drift from `ClothVpParams`.
+    #[test]
+    fn vp_params_is_uniform_stride() {
+        assert_eq!(size_of::<GpuClothVpParams>(), 32);
+        assert_eq!(size_of::<GpuClothVpParams>() % 16, 0);
+        assert_eq!(align_of::<GpuClothVpParams>(), 4);
     }
 
     /// The collider discriminants match the shader's `CLOTH_COLLIDER_*` order.
