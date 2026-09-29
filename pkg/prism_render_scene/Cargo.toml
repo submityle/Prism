@@ -31,5 +31,10 @@ prism_render_material = { path = "../prism_render_material", features = ["bevy"]
 prism_render_shading = { path = "../prism_render_shading" }
 prism_render_visibility = { path = "../prism_render_visibility" }
 
+[dev-dependencies]
+# Real-device GPU parity tests bind the water compute kernels on the same
+# `wgpu` 30 the render world uses; feature-unified with `bevy_render`.
+wgpu = { version = "30", default-features = false, features = ["wgsl", "metal"] }
+
 [lints]
 workspace = true

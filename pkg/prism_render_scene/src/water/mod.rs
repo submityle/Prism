@@ -45,6 +45,8 @@ pub(crate) mod plugin;
 mod prepare;
 mod resources;
 #[cfg(test)]
+mod gpu_tests;
+#[cfg(test)]
 mod shader_tests;
 
 /// The high-level water authoring presets and the water body component they
