@@ -81,6 +81,7 @@ pub mod optional_pass_dispatch;
 pub mod optional_pass_layout;
 pub mod pass_layout;
 pub mod pass_params;
+pub mod pipeline_layout;
 pub mod raster;
 pub mod ribbon;
 pub mod rt_proxy;
