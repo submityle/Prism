@@ -273,10 +273,18 @@ specialization_id: u64   // 由上面轴的合法排列特化产出
 
 ## 5. 支柱三：跨切面基底（解一次，全前端共享）
 
-- **motion vector + reactive/stencil mask**：粒子/透明/NPR/毛发**全和 TAA 打架**，这是**最该早做**的基底。粒子子系统会逼你先把它立起来（§11）。
-- **OIT**：透明 + 粒子 + 毛发共同消费的公共设施（**不是**并列子系统）。
-- **RT 去噪**：共享去噪器，每前端调参（NPR 见 §4.2 B 类）。
-- **能力分层 / fallback**：见 §8。
+**这些是"多个前端/子系统都要，但谁都不该各造一份"的公共设施。** 下表钉到已落地 `pkg/prism_render_shading/src/` 模块并诚实标注落地/待建，对齐 FSR2/UE 的对应形态：
+
+| 基底设施 | 落地模块 | 关键符号 / 契约 | 状态 | 对标 |
+|---|---|---|---|---|
+| **motion vector** | `screen_space/motion.rs`、`screen_space/temporal.rs` | `motion_vector`/`MotionSample`/`project_world_to_screen`；`reproject_prev_uv_motion(uv, motion)`（相机+逐物体运动统一重投影） | ✅ 已落地 | UE velocity G-buffer |
+| **TAA / 时序上采样** | `taa/{jitter,resolve}.rs`、`upscale/{history,robust,reproject}.rs` | `taa_jitter`/`halton`/`resolve_taa`（YCoCg 邻域裁剪 + tonemap 权重）；`HistoryLock`/`update_lock`/`clip_history_neighbourhood`/`disocclusion_history_weight`（history lock 遇 disocclusion 融化 + 薄特征保护） | ✅ 已落地（FSR2 式） | FSR2 / UE TSR |
+| **reactive / stencil mask** | —— | 粒子/透明/NPR/毛发要标"别被 TAA 吃掉"的响应权重，喂给 `resolve_taa`/`disocclusion_history_weight` 做逐像素放宽 | ⏳ **未落地（真出血点）**：motion+history-lock 的地基已有，缺的是**把 reactive 权重接进 resolve 的那一步** + 粒子/透明写 mask 的生产端 | FSR2 reactive mask / UE responsive AA |
+| **OIT** | `oit.rs` | `OitFragment`/`oit_weight(view_depth, alpha)`/`OitAccumulation`/`composite_transparency`（Weighted-Blended OIT，深度加权） | ✅ 已落地（WBOIT，公共设施非子系统） | McGuire-Bavoil WBOIT |
+| **RT / SS 去噪** | `screen_space/gi_denoise.rs`、`ao/{temporal,denoise}.rs` | `denoise_ssgi`/`SsgiDenoiseConfig`/`denoise_ssgi_pixel`；`reproject_prev_uv_gtao` | ✅ SS 侧已落地（RT 去噪共享此器，NPR 单独调参见 §4.2 B 类） | 时空联合去噪 |
+| **能力分层 / fallback** | `prism_render_architecture/src/backend/` | 见 §8 三档协商 + fallback 矩阵 | ✅ 已落地 | UE RHI feature level |
+
+**为什么这些必须"解一次"**：motion/OIT/去噪/TAA history 都是**逐像素跨前端共享的时序或合成资源**，任一前端各造一份就会算法漂移 + 显存翻倍 + 互相打架（尤其 TAA×粒子/透明）。**当前真·出血点收敛为 reactive mask 的接线**——motion 与 FSR2 式 history-lock 地基都已落地，缺的只是把 reactive 权重接进 `resolve_taa`/`disocclusion_history_weight` 的那一小步 + 粒子/透明子系统写 mask 的生产端（§11 粒子竖切会逼出这条线）。OIT/去噪已是可复用公共设施，不得被误建成并列子系统。
 
 ---
 
