@@ -7,7 +7,7 @@
 > 跨平台结论（2026-09-29 定案）：跨平台**只需一层**——运行时层 wgpu 已达成；着色器层维持 WESL，**不再引入 Slang 作为独立语言层**。原"Vulkan 优先"的真实目标是跨平台，已由 wgpu 满足。详见 §0.5 / §2。
 > 本文依据：对 `pkg/` 下渲染 crate 的静态阅读（`wc -l` 实测）+ 架构讨论收敛结论；未运行示例/测试/基准
 > 关联文档：`docs/prism_rendering_architecture_zh.md`（较早 draft，本文在其之上收敛材质/管线/子系统决策）
-> 最后更新：2026-09-29（本版核心变更：放弃 Slang，收敛到 wgpu + WESL 单语言层）
+> 最后更新：2026-09-29（本版新增：§12 顶级产品对标矩阵、§13 PBR / §14 NPR / §15 混合 三线 AAA 次世代高级特性清单、§16 性能/效果/易用性权衡总表；上版核心变更：放弃 Slang，收敛到 wgpu + WESL 单语言层）
 
 ---
 
@@ -312,6 +312,115 @@ fallback:              strand 高配, card 基线; RT 反射里毛发用 proxy �
 6. **frame graph 装配节点**，逐节点在 wgpu 上实装（原生 Vulkan 特化后置，仅在需要 wgpu 覆盖不到的能力时才做）。
 7. **（已完成）清理 Slang 残留**：两 crate 已于 commit `211f15988` 从 workspace 删除；文档命名/注释残留已于 commit `abb661911` 清理，`rg -i slang` 现仅命中 §2 决策记录（§2 / §9.6）。
 8. 毛发(card)/布料/froxel 体积按 §6.2 优先级跟进；水/植被/贴花后置。
+
+---
+
+## 12. 顶级产品对标矩阵（借鉴算法/形态，不抄代码）
+
+> 三条赛道各有其"抄作业对象"。PBR 侧业界已收敛、可大量对标 UE5/主机大作；NPR 侧参考分散在二次元与影视风格化各家自研引擎；混合侧对标"风格化 PBR"与影视混合管线。**只借鉴公开算法与形态，不本地拉取任何产品源码。**
+
+| 能力域 | PBR 对标（借什么） | NPR 对标（借什么） | 混合 / 风格化对标 |
+|---|---|---|---|
+| 虚拟几何 | UE5 **Nanite**：cluster DAG LOD + 软光栅微三角 + vis-buffer | 同基底复用（NPR 也吃 vis-buffer，material id 边界白送描边） | Fortnite（风格化外观 + 全 Nanite） |
+| 全局光照 | UE5 **Lumen**（SDF/mesh-card 软件 RT + 硬件 RT 混合 + surface cache + 屏幕探针）、**RTXGI/DDGI** 探针 | miHoYo：GI 只收不发做**风格化底光**（防能量爆炸） | Fortnite/Valorant：风格化材质吃真 GI |
+| 多光源 / 采样 | NVIDIA **ReSTIR DI/GI**（RTXDI）、**NRD**（ReBLUR/ReLAX）去噪 | NPR: **light layer 分层打光** + 主光方向驱动 | 混合场景同一 ReSTIR 预算共享 |
+| 阴影 | UE5 **VSM**（虚拟页 + clipmap）、RT 阴影 | miHoYo/HoYo：**SDF 面部阴影**（独立数据、方向阈值）+ 阈值硬阴影染色 | 共享 VSM 深度页，响应分家 |
+| 材质分层 | UE5 **Substrate**（无界 slab）→ 本引擎收敛成**有界 slab** | Arc Sys **Guilty Gear Xrd**：ID map + 顶点色控制、手编法线 | 风格化 PBR = über 少瓣 + Stylized illumination |
+| 描边 | —（PBR 通常无描边） | Arc Sys：**inverted-hull 背面挤出**（顶点色控宽度）；miHoYo：屏幕空间深度/法线边 + material id 边；Borderlands：墨线 | 混合按物体开关描边 |
+| 高光 | OpenPBR/UE über-BSDF | miHoYo/Arc：**天使环各向异性高光带**（与真实切线解耦）、MatCap、阶梯 Blinn | Team Fortress 2（Valve 论文：view-dependent + light-warp ramp + rim） |
+| 后处理风格 | ACES tonemap + 物理 bloom/DoF/motion blur | Spider-Verse：**halftone/Ben-Day 点**、色差、墨线；Okami：水墨/宣纸；Kuwahara 油画 | Arcane（Fortiche）：3D 上叠 2D 手绘 FX |
+| 时间步进 | TSR/DLSS/FSR/XeSS 连续时序 | Spider-Verse/Arcane：**降帧步进（on 2s/3s）**风格化 | 混合可逐物体设步进节拍 |
+| 上采样 | UE5 **TSR** / DLSS / FSR2 / XeSS | 复用同一时序上采样（NPR 需 reactive mask 保锐利分段） | 同基底 |
+| 参考渲染 | RED Engine **Cyberpunk RT Overdrive**（ReSTIR GI 路径追踪 + NRD）、离线路径追踪对拍 | — | — |
+
+**借鉴纪律**：PBR 线"抄作业"到位即达 AAA；NPR 线**没有一套现成招牌管线**（顶级二次元多为自研/魔改），本设计把散落各家的算法收进"共享基底 + Stylized 前端响应"范式，这是最大增量也是最高风险（见 §10）。
+
+---
+
+## 13. PBR 前端 AAA 次世代高级特性清单（含性能 / 效果取舍）
+
+> 前端 = 延迟 PBR（承载虚拟几何/RT/GI/VSM）。以下均挂 §1 共享基底，前端只取数据、叠响应。
+
+1. **虚拟几何（Nanite 级）**：cluster DAG 连续 LOD + 软件光栅（compute 画微三角，避硬件光栅小三角浪费）+ vis-buffer 延迟着色。**性能**：几何吞吐与屏幕像素解耦，海量 instance 近似常数级；代价是软光栅 compute 占用 + vis-buffer 带宽。**效果**：零 LOD 突变、亿级三角。落 `virtual_geometry`（当前仅 stub，§11 真·出血点）。
+2. **Lumen 式混合 GI**：近场 SDF/mesh-card 软件 RT + 有硬件 RT 时切硬件；surface cache 缓存表面辐照度；屏幕空间探针 final gather。**性能**：surface cache + 探针把每像素多次弹射摊薄到缓存更新；**效果**：动态间接光/软反射，无需烘焙。无 RT 平台降级 SSGI/SSR + 探针。落 §4.1 基底 + 前端 final gather。
+3. **ReSTIR DI/GI**：储层时空重采样，几千动态光 + GI 一次积分。`lighting/mod.rs` 已有 `ReservoirBudget`，culling clustered 已就位（commit `d7dfa5fc1`）可接候选层。**性能**：把"每像素遍历所有光"降到"重采样少量储层"；**效果**：多光源无偏低方差。
+4. **虚拟阴影 VSM**：16k 虚拟页 + directional clipmap，只渲驻留页。`virtual_shadow` 已有 residency loop（集成测试绿）。**性能**：只画可见页；**效果**：接触硬阴影到远景一致密度。
+5. **有界 Substrate slab**：über-BSDF 一等 + 封顶 3–4 瓣的 layer/mix（§3.2）。**性能**：封顶避免无界 Substrate 的 shader 爆炸与弱平台撞墙；**效果**：清漆/车漆/多层皮肤够用。
+6. **次表面散射 SSS**：预积分皮肤（Penner）+ 可分离 SSS（Jimenez）/ Burley 归一化扩散。**性能**：屏幕空间可分离卷积 << 真体积；**效果**：皮肤/蜡/玉。属 über 瓣，非子系统（§6.2 档 3）。
+7. **RT / SSR 反射**：有 RT 走硬件反射 + NRD 去噪；否则 SSR + 屏外探针兜底。**效果**：镜面/湿地/金属。
+8. **体积雾 + froxel + 体积云**：froxel 光照体（compute 可移植桶，§8.1）。**性能**：froxel 分辨率可调；**效果**：光轴/大气/云层。
+9. **时序上采样**：TSR/DLSS/FSR2/XeSS，配 motion vector + reactive mask（§5，最该早做的基底）。**性能**：内部低分辨率 + 时序重建；**效果**：4K 级清晰度。
+10. **路径追踪参考模式**：ReSTIR GI + NRD 的离线对拍模式（对标 Cyberpunk RT Overdrive），用于校准实时管线偏差。RT 桶（§8.1），不可 CPU golden。
+
+---
+
+## 14. NPR 前端 AAA 次世代高级特性清单（顶级二次元 / 风格化）
+
+> 前端 = NPR 风格化前端（描边/ramp/SDF 面阴影/风格化高光/rim/风格化 post）。核心立场：**NPR 是 illumination=Stylized 轴 + 专属通道**，不是独立管线；与 PBR 共享几何/光照数据/VSM/GI，只在"怎么解读光照数据"处分家（§4）。
+
+### 14.1 着色（对标 miHoYo / Arc System Works / Valve TF2）
+
+1. **Ramp 量化漫反射**：per-material shadow ramp 贴图（明→暗分段），NdotL 采样 ramp 而非积分。**性能**：一次贴图采样 << BRDF 积分；**效果**：干净二分/三分调子（原神/星穹铁道）。
+2. **SDF 面部阴影**：独立单通道 SDF 图存"该像素在光转到某角度时进阴影"的阈值，主光方位角驱动——解决传统法线阴影在脸上"脏"的老问题。**独立数据源叠加**（§4.2 C 类专属通道）。**效果**：鼻侧/刘海阴影随光平滑扫过，永远干净。
+3. **风格化高光（天使环）**：各向异性高光带**可与真实切线解耦**，手动摆位做发丝"天使环"；MatCap 补金属/宝石；阶梯化 Blinn。**效果**：二次元发/眼高光。
+4. **Rim / fresnel 边光**：视角驱动描亮轮廓，可按光方向偏置。**效果**：角色与背景分离。
+5. **手编法线 + 顶点色控制**（对标 Guilty Gear Xrd）：平滑法线稳定描边与高光走向；顶点色/ID map 驱动描边宽度、区域高光开关、"假"高光摆位。**效果**：手绘级可控性。
+
+### 14.2 描边（对标 Arc Sys / miHoYo / Borderlands）
+
+6. **Inverted-hull 背面挤出**：沿法线外扩背面成描边壳，顶点色控每处宽度、随距离/FOV 补偿。**性能**：一趟额外 draw；**效果**：稳定粗描边（卡通/格斗）。
+7. **屏幕空间边缘检测**：深度 + 法线 + **vis-buffer material id 边界（白送）** 提边。**性能**：一趟后处理 compute；**效果**：内部结构线、材质分界线。
+8. **混合描边**：外轮廓走 inverted-hull、内部线走屏幕空间，二者互补。
+
+### 14.3 风格化后处理（对标 Spider-Verse / Arcane / Okami）
+
+9. **Halftone / Ben-Day 点 / 网点**：按亮度控点密度做印刷风阴影（蜘蛛侠）。
+10. **降帧步进（on 2s/3s）**：角色动画/特效按 12/8 fps 步进，与 60fps 背景混排（蜘蛛侠/Arcane 影视感）。**实现**：逐物体设步进节拍，需 motion vector 特判防 TAA 抹掉。
+11. **Kuwahara / 油画滤镜**：保边匀色做手绘油画感。
+12. **墨线 / 笔刷 / 水墨**（Okami 宣纸、Borderlands 墨线）：沿边缘叠笔刷 alpha、纸纹叠加。
+13. **风格化 bloom / 色差 / 分级**：夸张辉光 + 边缘色散 + 风格化 LUT。
+
+### 14.4 NPR 性能 / 效果总纲
+
+- **省**：ramp/SDF/描边多为一次贴图采样或一趟后处理，**比物理积分更省**；NPR 天然是"廉价但要美术精调"。
+- **贵在带宽与美术管线**：SDF 面图、ID map、per-material ramp 是额外资产；顶点色/手编法线需 DCC 侧配套。
+- **与 TAA/上采样的固有摩擦**（§5）：锐利分段与步进动画和时序累积打架，必须 reactive mask 保护——这是 NPR 上时序管线的头号坑。
+
+---
+
+## 15. 混合前端高级特性（管线级混合，非叠加各算）
+
+> 混合的价值在**管线级**：同一帧不同像素/物体走不同前端，却共享同一套光/影/GI/RT——所以风格切换处不断裂。这是"各前端各自重算高级特性"给不了的。
+
+1. **逐像素 material id + tile 分类路由**（§7）：GPU 把像素按 material id 分 tile，路由到延迟 PBR / forward+ / NPR / 自定义前端。**性能**：tile 分类 + 前端 specialization，避免全屏跑所有前端。
+2. **共享 GI / 阴影跨风格连贯**：NPR 角色与 PBR 场景吃**同一份** Lumen 间接光 + VSM 阴影 → 卡通角色落在写实场景里阴影方向/底光一致，不"贴纸感"。
+3. **选择性 NPR**：写实世界里对特定角色/道具开 Stylized，其余 PBR（对标影视混合、卡通角色进实景）。
+4. **风格化 PBR 中间态**（对标 Fortnite / Valorant / Overwatch / Sea of Thieves）：über-BSDF 少瓣 + `illumination=Stylized` 的 ramp/rim 轻叠加 + 真 GI/Nanite/Lumen——既非纯物理也非纯 toon，是产量最大的商业中间带。本架构天然覆盖（正交轴自由组合）。
+5. **影视级混合**（对标 Spider-Verse/Arcane）：3D 基底 + 2D 手绘 FX/线 + 降帧步进，逐物体调节拍。
+
+**为什么管线级混合优于单独管线**：单独管线会让 NPR/PBR 各自重造 GI、阴影、RT、上采样——没一条能到 AAA 且风格接缝断裂。共享基底 + 前端分叉是"四者皆顶级 + 可混合 + 多平台"的唯一解（§1 一句话）。
+
+---
+
+## 16. 性能 / 效果 / 易用性权衡总表
+
+| 特性 | 桶（§8.1） | 性能要点 | 效果上限 | 易用性 / 风险 |
+|---|---|---|---|---|
+| 虚拟几何 Nanite | compute-可移植 | 几何与像素解耦；软光栅 + vis-buffer 带宽 | 亿级三角、零 LOD pop | 需重写 `virtual_geometry`（现 stub），最大出血点 |
+| Lumen 混合 GI | compute + RT | surface cache 摊薄弹射；RT 加速可选 | 动态无烘焙 GI | 高复杂度；无 RT 降级 SSGI |
+| ReSTIR DI/GI | compute + RT | 储层重采样代替全光遍历 | 千级动态光低方差 | 需去噪配套；基底已就位 |
+| VSM | compute-可移植 | 只渲驻留页 | 全程一致密度阴影 | residency 已落 |
+| 有界 slab | shader 特化 | 封顶防 variant 爆炸 | 清漆/车漆/多层皮 | 封顶是刻意取舍（vs UE 无界） |
+| SSS | compute-可移植 | 屏幕空间可分离卷积 | 皮肤/蜡/玉 | über 瓣，非子系统 |
+| 体积雾/云 | compute-可移植 | froxel 分辨率可调 | 光轴/大气/云 | froxel 内存 |
+| 时序上采样 | compute-可移植 | 低分辨率内部渲染 | 4K 级 | 依赖 motion+reactive mask |
+| NPR ramp/SDF/描边 | compute-可移植 | 贴图采样/单趟后处理，**比 PBR 省** | 顶级二次元 | 美术资产 + DCC 管线成本高；无成熟范式（最高风险） |
+| 降帧步进/halftone/墨线 | compute-可移植 | 后处理开销小 | 影视风格化 | 与 TAA 摩擦，需 reactive mask |
+| 混合 tile 路由 | compute-可移植 | tile 分类 + 前端特化 | 风格无缝共存 | 依赖 material id 基底 |
+| RT 反射/路径追踪参考 | RT | 硬件 BVH；Metal RT 弱 | 物理镜面/离线对拍 | 跨平台部分覆盖，不可 CPU golden |
+| SPARSE/VRS/work graph | raw-VK-only | 平台特化收益 | 特定场景增益 | **双失**（无跨平台 + 无 CPU golden），关小笼子（§8.1） |
+
+**总原则**：野心效果绝大多数落 compute-可移植桶（跨平台 + 可 CPU golden 对拍），RT 桶部分可测，raw-VK 桶严格隔离。NPR 整体比 PBR 省算力但吃美术管线；混合的开销主要在 tile 路由与前端特化，换来风格接缝连贯——这是三线皆 AAA 的性价比最优点。
 
 ---
 

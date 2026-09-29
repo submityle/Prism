@@ -89,10 +89,10 @@ fallback:
 
 ## 5. PBR / NPR / 自定义 / 混合 分叉响应
 
-- **PBR**：Chiang/Marschner R/TT/TRT 三分量 + dual-scattering 多重散射（浅色/金发必需），各向异性沿切线。
-- **NPR**：风格化各向异性高光带（可多条）+ ramp + 阴影偏移，高光位置**可与真实切线解耦**（天使环/发环风格），描边复用 vis-buffer 的 material id 边界。
+- **PBR**（对标 UE5 Groom、film-grade Chiang/Marschner）：R/TT/TRT 三分量 + dual-scattering 多重散射（浅色/金发必需），各向异性沿切线；deep opacity map 自阴影 + 有 RT 时走硬件光线自阴影。
+- **NPR**（对标 miHoYo 原神/星穹铁道发丝、Arc Sys Guilty Gear Xrd）：风格化各向异性高光带（可多条）+ ramp + 阴影偏移，高光位置**可与真实切线解耦**（天使环/发环风格）；描边复用 vis-buffer 的 material id 边界（`native_form=Cards` 的卡片发同样吃 material id 描边）；per-strand 或 per-card 顶点色控高光/阴影段。
 - **自定义**：项目注入 `illumination=Custom` 的 WESL closure。
-- **混合**：同一 groom 甚至可按 material id 分 tile 路由到不同前端（因共享光/影/GI 而连贯）。
+- **混合**：同一 groom 甚至可按 material id 分 tile 路由到不同前端（因共享光/影/GI 而连贯）；写实场景里的卡通角色发与 PBR 世界吃同一份 GI/阴影，不断裂。
 
 这四者共享 §1 的全部基底（同一份 strand 几何、sim、LOD、透射），**只在着色响应处分家**——所以四者都能享受发丝级几何与自阴影，不是各做各的。
 
