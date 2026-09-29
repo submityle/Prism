@@ -17,9 +17,11 @@
 //! pure integer/enum bookkeeping, so the wiring table is a deterministic,
 //! `CPU`-testable function of a kernel tag.
 //!
-//! **Not machine-verified.** The sandbox has no `GPU`; these bindings are the
-//! contract the render-graph backend will resolve to real resources once it
-//! lands.
+//! **Compile-verified twin, resource resolution still to wire.** The `WESL`
+//! twin (`shaders/volumetric_clouds.wesl`, compile-verified by
+//! `prism_render_scene::shading::volumetric_clouds`) declares the kernels these
+//! bindings describe; the contract here is what the render-graph backend will
+//! resolve to real shared-service resources once the dispatch pass is wired.
 
 use super::super::SharedBaseServices;
 use super::kernels::VolumetricKernel;

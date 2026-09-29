@@ -21,9 +21,12 @@
 //! handles and does no allocation itself; the backend consumes the byte counts
 //! to make the real allocations.
 //!
-//! **Not machine-verified.** The sandbox has no `GPU`; the strides below are
-//! the `std430`-aligned design targets the `WESL` kernels anticipate and must
-//! be re-checked against the real backend layout once it lands.
+//! **Compile-verified twin, layout still to confirm on device.** The strides
+//! below are the `std430`-aligned targets the `WESL` twin
+//! (`shaders/volumetric_clouds.wesl`, compile-verified by
+//! `prism_render_scene::shading::volumetric_clouds`) is written against; they
+//! are sound by construction but must still be re-checked against the real
+//! backend buffer layout once the dispatch pass allocates and binds them.
 
 use alloc::vec::Vec;
 

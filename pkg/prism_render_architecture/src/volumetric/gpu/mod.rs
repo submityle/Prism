@@ -33,10 +33,14 @@
 //! `CPU`-testable. The numerical passes themselves are authored in `WESL` and
 //! mirror the `CPU` golden reference.
 //!
-//! **Not machine-verified.** The sandbox has no `GPU` and no `WESL` compiler,
-//! so nothing below is validated against a real backend; the workgroup tiles,
-//! buffer strides and bindings are design targets to be re-tuned once the
-//! backend lands.
+//! **Compile-verified twin, dispatch/perf still to wire.** The numerical passes
+//! are authored in `shaders/volumetric_clouds.wesl` and compile + type-check
+//! through the render-world `ShaderCache` / `wesl` pipeline (verified by
+//! `prism_render_scene::shading::volumetric_clouds`), and every kernel
+//! entry-point name here is pinned against a live `@compute fn` in that twin.
+//! What still awaits the device is the render-graph dispatch recording and the
+//! on-hardware calibration of the workgroup tiles and buffer strides — those
+//! remain design targets to re-profile once the backend records them.
 
 pub mod buffers;
 pub mod kernels;

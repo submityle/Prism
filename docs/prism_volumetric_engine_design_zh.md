@@ -436,7 +436,7 @@ volumetric/
 - **多次散射保真 vs 成本**：真多次散射太贵 → powder + octave 近似；影视级留 RT/路径追踪对拍桶。
 - **与大气服务边界**：严禁重写大气散射，只采样 LUT；若大气服务未就绪需给临时 LUT stub。
 - **确定性/网络**：云为表现层，默认不参与网络裁决；需确定性时固定种子+固定步长+固定重投影模式。
-- **沙盒验证边界**：GPU 路径无法本机验证 → 仅承诺 CPU 纯函数正确性，GPU 部分标注未验证，真机补齐。
+- **GPU 验证边界（v2 更新：本机已有 GPU）**：CPU 纯函数正确性由 §16 单测全覆盖；GPU 侧 8 个 `@compute` 内核落在 `pkg/prism_render_scene/src/shaders/volumetric_clouds.wesl`，并经 `prism_render_scene::shading::volumetric_clouds` 走渲染世界同一条 `ShaderCache`/`wesl` 编译管线**编译+类型检查通过**（内核名与 `gpu::kernels` 契约逐一钉死）。**尚待真机补齐**：渲染图 dispatch 录制、共享服务资源绑定解析、workgroup tile/buffer stride 的硬件 profile 校准（上述编译验证不含 on-device 执行与性能实测）。
 
 ---
 
