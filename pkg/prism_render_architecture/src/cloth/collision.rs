@@ -8,6 +8,10 @@
 //!    half-space) fitted to the skinned skeleton. Each cloth particle inside a
 //!    proxy is projected to its surface. This is the cheap, always-on base that
 //!    catches "cloth through the body" the way the strand solver does for hair.
+//!    A particle pushed to a proxy's surface also has its tangential slip
+//!    across the frame damped by the fabric's Coulomb friction, so silk and
+//!    wool slide differently over the same body (see
+//!    [`resolve_body_collisions_with_friction`]).
 //! 2. **Backstops** — per-particle one-sided planes anchored to the skinned
 //!    pose. A backstop keeps its particle from sinking more than an authored
 //!    distance behind the body, which is how painted backstop constraints stop
@@ -189,6 +193,127 @@ pub fn resolve_body_collisions(particles: &mut [ClothParticle], colliders: &[Bod
     }
 }
 
+/// Numerical floor below which a tangential slide is treated as zero, so a
+/// friction correction is never normalised from a ~0-length vector. Shared by
+/// the body-collision and self-collision friction passes.
+const EPS_FRICTION: f32 = 1e-12;
+
+/// Returns `mu` clamped to `0..=1`, mapping any non-finite input to `0` so a
+/// mis-authored coefficient can never inject a `NaN` into a friction pass.
+#[must_use]
+fn sanitize_friction(mu: f32) -> f32 {
+    if mu.is_finite() {
+        mu.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+/// Returns `pos` after applying position-level Coulomb friction against a
+/// contact whose outward unit `normal` and normal-correction magnitude
+/// `normal_push` are known.
+///
+/// This is the XPBD tangential-friction projection (Macklin et al. 2014,
+/// "Unified Particle Physics for Real-Time Applications"): the particle's
+/// tangential slide over the frame (`Dx_t`, i.e. `pos - prev` with its normal
+/// component removed) is cancelled entirely inside the static-friction cone
+/// (`||Dx_t|| <= mu * ||Dx_n||`) and otherwise shrunk by exactly
+/// `mu * ||Dx_n||`, leaving its direction unchanged. `mu` is the combined
+/// friction coefficient and `normal_push` is `||Dx_n||`, the depth the particle
+/// was pushed out along `normal`.
+///
+/// A non-positive `mu`, a non-positive `normal_push`, or a tangential slide at
+/// or below [`EPS_FRICTION`] leaves `pos` untouched, so a frictionless material
+/// or a purely normal contact is a no-op and no `NaN` is produced. `normal` is
+/// assumed unit length; the callers normalise it before calling.
+#[must_use]
+pub fn apply_coulomb_friction(
+    pos: Vec3,
+    prev: Vec3,
+    normal: Vec3,
+    normal_push: f32,
+    mu: f32,
+) -> Vec3 {
+    if mu <= 0.0 || normal_push <= 0.0 {
+        return pos;
+    }
+    let delta = pos.sub(prev);
+    let normal_amount = delta.dot(normal);
+    let tangent = delta.sub(normal.scale(normal_amount));
+    let tan_len_sq = tangent.length_squared();
+    if tan_len_sq <= EPS_FRICTION {
+        return pos;
+    }
+    let tan_len = tan_len_sq.sqrt();
+    // `scale` is `min(mu * ||Dx_n|| / ||Dx_t||, 1)`: it saturates at 1 inside
+    // the static cone (full cancellation) and is `< 1` in the dynamic regime
+    // (shrink the slide by `mu * ||Dx_n||`).
+    let scale = (mu * normal_push / tan_len).min(1.0);
+    pos.sub(tangent.scale(scale))
+}
+
+/// Projects every free particle out of every body collider like
+/// [`resolve_body_collisions`], then applies position-level Coulomb friction
+/// after each collider push so cloth grips the body instead of sliding
+/// frictionlessly (design gap: `FabricMaterial::friction` was previously
+/// unconsumed by any collision pass).
+///
+/// For each collider the outward unit normal and push-out depth come straight
+/// from the projection displacement (`projected - before`); friction then rubs
+/// the particle's tangential slide since its frame-start position
+/// `prev_positions[i]` against that contact via [`apply_coulomb_friction`]. Body
+/// proxies are infinitely massive, so the whole tangential correction lands on
+/// the particle. `friction` is the material coefficient, clamped to `0..=1`; a
+/// value of `0` reproduces [`resolve_body_collisions`] exactly.
+///
+/// Particles are visited in index order and colliders in slice order, matching
+/// [`resolve_body_collisions`], so the cost stays `O(particles * colliders)`
+/// with no hidden inner loop. Pinned particles never move, an empty collider
+/// slice is a no-op, and a `prev_positions` slice shorter than `particles`
+/// falls back to no tangential slide (hence no friction) for the missing
+/// indices rather than panicking.
+pub fn resolve_body_collisions_with_friction(
+    particles: &mut [ClothParticle],
+    prev_positions: &[Vec3],
+    colliders: &[BodyCollider],
+    friction: f32,
+) {
+    if colliders.is_empty() {
+        return;
+    }
+    let mu = sanitize_friction(friction);
+    if mu <= 0.0 {
+        resolve_body_collisions(particles, colliders);
+        return;
+    }
+    for (index, particle) in particles.iter_mut().enumerate() {
+        if particle.is_pinned() {
+            continue;
+        }
+        // Frame-start position for this particle; the current position (no
+        // tangential slide, hence no friction) is the safe fallback when the
+        // snapshot is missing.
+        let prev = prev_positions
+            .get(index)
+            .copied()
+            .unwrap_or(particle.position);
+        for collider in colliders {
+            let before = particle.position;
+            let projected = collider.project(before);
+            let correction = projected.sub(before);
+            let push_sq = correction.length_squared();
+            if push_sq <= EPS_LEN_SQ {
+                // Already outside this collider: no contact, no friction.
+                particle.position = projected;
+                continue;
+            }
+            let push = push_sq.sqrt();
+            let normal = correction.scale(1.0 / push);
+            particle.position = apply_coulomb_friction(projected, prev, normal, push, mu);
+        }
+    }
+}
+
 /// A per-particle backstop plane anchored to the skinned pose.
 ///
 /// A backstop is a one-sided constraint: the particle may move freely in front
@@ -362,6 +487,140 @@ fn resolve_pair(
     let move_b = penetration * (wb / w_sum);
     particles[ai].position = pa.add(dir.scale(move_a));
     particles[bi].position = pb.add(dir.scale(move_b));
+}
+
+/// Resolves self-collision like [`resolve_self_collision`], but rubs the
+/// tangential slide of every separated pair with position-level Coulomb
+/// friction so stacked cloth layers grip instead of shearing freely.
+///
+/// The spatial hash, traversal order, and inverse-mass-weighted normal push are
+/// identical to [`resolve_self_collision`]; friction is layered on inside
+/// [`resolve_pair_with_friction`] using each partner's frame-start position from
+/// `prev_positions`. `friction` is clamped to `0..=1`; a value of `0` delegates
+/// straight to [`resolve_self_collision`]. A non-positive `cell_size` or
+/// `thickness`, or fewer than two particles, is a no-op, and a short
+/// `prev_positions` slice degrades to no friction for the missing indices.
+pub fn resolve_self_collision_with_friction(
+    particles: &mut [ClothParticle],
+    prev_positions: &[Vec3],
+    cell_size: f32,
+    thickness: f32,
+    friction: f32,
+) {
+    if cell_size <= 0.0 || thickness <= 0.0 || particles.len() < 2 {
+        return;
+    }
+    let mu = sanitize_friction(friction);
+    if mu <= 0.0 {
+        resolve_self_collision(particles, cell_size, thickness);
+        return;
+    }
+
+    let mut grid: BTreeMap<(i32, i32, i32), Vec<u32>> = BTreeMap::new();
+    for (index, particle) in particles.iter().enumerate() {
+        let cell = cell_of(particle.position, cell_size);
+        grid.entry(cell).or_default().push(index as u32);
+    }
+
+    let thickness_sq = thickness * thickness;
+    for (&cell, bucket) in &grid {
+        for &a in bucket {
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        let neighbor = (cell.0 + dx, cell.1 + dy, cell.2 + dz);
+                        let Some(nbucket) = grid.get(&neighbor) else {
+                            continue;
+                        };
+                        for &b in nbucket {
+                            if b <= a {
+                                continue;
+                            }
+                            resolve_pair_with_friction(
+                                particles,
+                                prev_positions,
+                                a as usize,
+                                b as usize,
+                                thickness,
+                                thickness_sq,
+                                mu,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Separates the pair `(ai, bi)` like [`resolve_pair`], then removes the
+/// friction-limited part of their relative tangential slide.
+///
+/// The normal push (`dir`, `penetration`) is computed exactly as in
+/// [`resolve_pair`]. Friction then acts on the relative frame slide
+/// `(sep_a - prev_a) - (sep_b - prev_b)` projected onto the contact tangent
+/// plane: the removed amount is `min(mu * penetration / ||Dx_t||, 1) * Dx_t`,
+/// split between the partners by inverse mass so a pinned partner never moves
+/// and the heavier partner moves less. Reads and writes go through distinct
+/// indices, so there is no aliasing; a coincident pair or a below-threshold
+/// slide falls back to the plain normal separation without producing `NaN`.
+fn resolve_pair_with_friction(
+    particles: &mut [ClothParticle],
+    prev_positions: &[Vec3],
+    ai: usize,
+    bi: usize,
+    thickness: f32,
+    thickness_sq: f32,
+    mu: f32,
+) {
+    let pa = particles[ai].position;
+    let pb = particles[bi].position;
+    let delta = pb.sub(pa);
+    let dist_sq = delta.length_squared();
+    if dist_sq >= thickness_sq {
+        return;
+    }
+
+    let wa = particles[ai].inverse_mass.max(0.0);
+    let wb = particles[bi].inverse_mass.max(0.0);
+    let w_sum = wa + wb;
+    if w_sum <= 0.0 {
+        return;
+    }
+
+    let (dir, penetration) = if dist_sq <= EPS_LEN_SQ {
+        (Vec3::new(1.0, 0.0, 0.0), thickness)
+    } else {
+        let dist = dist_sq.sqrt();
+        (delta.scale(1.0 / dist), thickness - dist)
+    };
+
+    // Normal separation, inverse-mass weighted (identical to `resolve_pair`).
+    let move_a = -penetration * (wa / w_sum);
+    let move_b = penetration * (wb / w_sum);
+    let sep_a = pa.add(dir.scale(move_a));
+    let sep_b = pb.add(dir.scale(move_b));
+
+    // Relative tangential slide since frame start. `dir` is the contact normal
+    // and `penetration` is the pair's normal-correction magnitude `||Dx_n||`.
+    let prev_a = prev_positions.get(ai).copied().unwrap_or(pa);
+    let prev_b = prev_positions.get(bi).copied().unwrap_or(pb);
+    let rel = sep_a.sub(prev_a).sub(sep_b.sub(prev_b));
+    let normal_amount = rel.dot(dir);
+    let tangent = rel.sub(dir.scale(normal_amount));
+    let tan_len_sq = tangent.length_squared();
+    if tan_len_sq <= EPS_FRICTION {
+        particles[ai].position = sep_a;
+        particles[bi].position = sep_b;
+        return;
+    }
+    let tan_len = tan_len_sq.sqrt();
+    let scale = (mu * penetration / tan_len).min(1.0);
+    let corr = tangent.scale(scale);
+    // Split the relative tangential correction by inverse mass so the change in
+    // `(a - b)` relative slide equals `-corr`.
+    particles[ai].position = sep_a.sub(corr.scale(wa / w_sum));
+    particles[bi].position = sep_b.add(corr.scale(wb / w_sum));
 }
 
 #[cfg(test)]
@@ -561,6 +820,118 @@ mod tests {
         assert_eq!(a[1].position, b[1].position);
     }
 
+    /// A ground-plane collider: feasible region `y >= 0`, outward normal `+Y`.
+    fn floor() -> BodyCollider {
+        BodyCollider::HalfSpace {
+            normal: Vec3::new(0.0, 1.0, 0.0),
+            offset: 0.0,
+        }
+    }
+
+    #[test]
+    fn friction_zero_is_identical_to_frictionless() {
+        // mu = 0 with a frame-start reference must match the plain frictionless
+        // pass exactly: the particle lands on the floor with no tangential damp.
+        let colliders = [floor()];
+        let prev = [Vec3::new(0.0, 1.0, 0.0)];
+        let mut with = [free_at(1.0, -0.2, 0.0)];
+        resolve_body_collisions_with_friction(&mut with, &prev, &colliders, 0.0);
+        approx_eq(with[0].position, Vec3::new(1.0, 0.0, 0.0));
+
+        let mut without = [free_at(1.0, -0.2, 0.0)];
+        resolve_body_collisions(&mut without, &colliders);
+        approx_eq(without[0].position, with[0].position);
+    }
+
+    #[test]
+    fn friction_static_sticks_when_slip_below_cone() {
+        // Depth 0.5, tangential slip 0.1 < mu * depth = 0.5, so the slip is
+        // removed entirely and the particle sticks at its tangential origin.
+        let colliders = [floor()];
+        let prev = [Vec3::new(0.0, 1.0, 0.0)];
+        let mut particles = [free_at(0.1, -0.5, 0.0)];
+        resolve_body_collisions_with_friction(&mut particles, &prev, &colliders, 1.0);
+        approx_eq(particles[0].position, Vec3::new(0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn friction_dynamic_decays_tangential_linearly() {
+        // Depth 0.2, tangential slip 1.0 > mu * depth for these mu, so the
+        // removed slip is exactly mu * 0.2 and x = 1 - mu * 0.2, linear in mu.
+        let colliders = [floor()];
+        let prev = [Vec3::new(0.0, 1.0, 0.0)];
+        for (mu, want_x) in [(0.25_f32, 0.95_f32), (0.5, 0.9), (1.0, 0.8)] {
+            let mut particles = [free_at(1.0, -0.2, 0.0)];
+            resolve_body_collisions_with_friction(&mut particles, &prev, &colliders, mu);
+            approx_eq(particles[0].position, Vec3::new(want_x, 0.0, 0.0));
+        }
+    }
+
+    #[test]
+    fn friction_larger_mu_slides_less() {
+        // Strictly monotone: more friction removes more tangential slip, so the
+        // surviving x-slide strictly decreases as mu grows.
+        let colliders = [floor()];
+        let prev = [Vec3::new(0.0, 1.0, 0.0)];
+        let mut last_x = f32::INFINITY;
+        for mu in [0.0_f32, 0.1, 0.2, 0.3, 0.4] {
+            let mut particles = [free_at(1.0, -0.2, 0.0)];
+            resolve_body_collisions_with_friction(&mut particles, &prev, &colliders, mu);
+            let x = particles[0].position.x;
+            assert!(x < last_x, "mu {mu}: x {x} not < {last_x}");
+            last_x = x;
+        }
+    }
+
+    #[test]
+    fn friction_skips_particles_without_penetration() {
+        // A particle already above the floor is never projected, so there is no
+        // contact and no tangential damp regardless of mu.
+        let colliders = [floor()];
+        let prev = [Vec3::new(0.0, 1.0, 0.0)];
+        let mut particles = [free_at(2.0, 5.0, 0.0)];
+        resolve_body_collisions_with_friction(&mut particles, &prev, &colliders, 1.0);
+        approx_eq(particles[0].position, Vec3::new(2.0, 5.0, 0.0));
+    }
+
+    #[test]
+    fn friction_handles_pinned_and_short_prev() {
+        // Index 0 is pinned and never moves. Index 1 has no matching prev entry
+        // (prev has length 1), so it takes the frictionless `None` branch.
+        let colliders = [floor()];
+        let prev = [Vec3::new(0.0, 1.0, 0.0)];
+        let mut particles = [
+            ClothParticle::pinned(Vec3::new(1.0, -0.2, 0.0)),
+            free_at(1.0, -0.2, 0.0),
+        ];
+        resolve_body_collisions_with_friction(&mut particles, &prev, &colliders, 1.0);
+        assert_eq!(particles[0].position, Vec3::new(1.0, -0.2, 0.0));
+        approx_eq(particles[1].position, Vec3::new(1.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn friction_nan_coefficient_is_treated_as_frictionless() {
+        // A NaN mu clamps to 0 (frictionless) and never leaks a NaN into a
+        // position.
+        let colliders = [floor()];
+        let prev = [Vec3::new(0.0, 1.0, 0.0)];
+        let mut particles = [free_at(1.0, -0.2, 0.0)];
+        resolve_body_collisions_with_friction(&mut particles, &prev, &colliders, f32::NAN);
+        approx_eq(particles[0].position, Vec3::new(1.0, 0.0, 0.0));
+        assert!(particles[0].position.x.is_finite());
+    }
+
+    #[test]
+    fn friction_is_deterministic() {
+        let colliders = [floor()];
+        let prev = [Vec3::new(0.0, 1.0, 0.0)];
+        let mut a = [free_at(1.0, -0.2, 0.0)];
+        let mut b = [free_at(1.0, -0.2, 0.0)];
+        resolve_body_collisions_with_friction(&mut a, &prev, &colliders, 0.4);
+        resolve_body_collisions_with_friction(&mut b, &prev, &colliders, 0.4);
+        assert_eq!(a[0].position, b[0].position);
+    }
+
     #[test]
     fn backstop_pushes_particle_behind_limit_back() {
         // Outward normal +Y, origin at y = 0, may sink 1 unit behind => limit
@@ -719,5 +1090,138 @@ mod tests {
         resolve_self_collision(&mut particles, 0.5, 0.5);
         let sep = particles[1].position.distance(particles[0].position);
         assert!((sep - 0.5).abs() < TOL, "separation {sep}");
+    }
+
+    // ----- Coulomb friction (body collision) -----
+
+    #[test]
+    fn body_friction_zero_mu_leaves_tangential_slide_untouched() {
+        // Penetrating particle that slid +X: with mu = 0 only the normal push
+        // applies, so x is preserved (pure `resolve_body_collisions` behaviour).
+        let mut particles = [free_at(1.0, -0.5, 0.0)];
+        let prev = [Vec3::new(0.0, 0.0, 0.0)];
+        resolve_body_collisions_with_friction(&mut particles, &prev, &[floor()], 0.0);
+        approx_eq(particles[0].position, Vec3::new(1.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn body_friction_static_cone_locks_small_slide() {
+        // Slide 0.3, push-out depth 0.5, mu = 1 => 0.3 <= 1.0 * 0.5, so the
+        // whole tangential slide is cancelled: the particle locks at x = 0.
+        let mut particles = [free_at(0.3, -0.5, 0.0)];
+        let prev = [Vec3::new(0.0, 0.0, 0.0)];
+        resolve_body_collisions_with_friction(&mut particles, &prev, &[floor()], 1.0);
+        approx_eq(particles[0].position, Vec3::new(0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn body_friction_dynamic_shrinks_slide_by_mu_times_depth() {
+        // Slide 1.0, depth 0.5, mu = 0.25 => remove mu*depth = 0.125, leaving
+        // x = 0.875 with the slide direction unchanged.
+        let mut particles = [free_at(1.0, -0.5, 0.0)];
+        let prev = [Vec3::new(0.0, 0.0, 0.0)];
+        resolve_body_collisions_with_friction(&mut particles, &prev, &[floor()], 0.25);
+        approx_eq(particles[0].position, Vec3::new(0.875, 0.0, 0.0));
+    }
+
+    #[test]
+    fn body_friction_mu_one_grips_harder_than_half() {
+        let prev = [Vec3::new(0.0, 0.0, 0.0)];
+        let mut half = [free_at(1.0, -0.5, 0.0)];
+        let mut full = [free_at(1.0, -0.5, 0.0)];
+        resolve_body_collisions_with_friction(&mut half, &prev, &[floor()], 0.5);
+        resolve_body_collisions_with_friction(&mut full, &prev, &[floor()], 1.0);
+        // Stronger friction leaves less residual tangential travel.
+        assert!(full[0].position.x < half[0].position.x);
+        assert!(half[0].position.x < 1.0);
+    }
+
+    #[test]
+    fn body_friction_skips_pinned_particle() {
+        let mut particles = [ClothParticle::pinned(Vec3::new(0.5, -0.5, 0.0))];
+        let prev = [Vec3::new(0.0, 0.0, 0.0)];
+        resolve_body_collisions_with_friction(&mut particles, &prev, &[floor()], 1.0);
+        assert_eq!(particles[0].position, Vec3::new(0.5, -0.5, 0.0));
+    }
+
+    #[test]
+    fn body_friction_no_contact_leaves_particle_free() {
+        // Particle above the plane: no push-out, so no friction even at mu = 1.
+        let mut particles = [free_at(2.0, 3.0, 0.0)];
+        let prev = [Vec3::new(0.0, 3.0, 0.0)];
+        resolve_body_collisions_with_friction(&mut particles, &prev, &[floor()], 1.0);
+        approx_eq(particles[0].position, Vec3::new(2.0, 3.0, 0.0));
+    }
+
+    #[test]
+    fn body_friction_missing_prev_slice_is_no_friction_not_panic() {
+        // Empty prev slice => fallback prev = current position => zero slide, so
+        // only the normal push applies and nothing panics.
+        let mut particles = [free_at(1.0, -0.5, 0.0)];
+        resolve_body_collisions_with_friction(&mut particles, &[], &[floor()], 1.0);
+        approx_eq(particles[0].position, Vec3::new(1.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn body_friction_is_finite_for_coincident_center_projection() {
+        // Particle at a sphere centre escapes along +Y; friction must stay
+        // finite even though the tangential slide degenerates.
+        let sphere = BodyCollider::Sphere {
+            center: Vec3::new(0.0, 0.0, 0.0),
+            radius: 0.5,
+        };
+        let mut particles = [free_at(0.0, 0.0, 0.0)];
+        let prev = [Vec3::new(0.1, 0.0, 0.0)];
+        resolve_body_collisions_with_friction(&mut particles, &prev, &[sphere], 1.0);
+        let p = particles[0].position;
+        assert!(p.x.is_finite() && p.y.is_finite() && p.z.is_finite());
+    }
+
+    // ----- Coulomb friction (self collision) -----
+
+    #[test]
+    fn self_friction_zero_mu_matches_plain_separation() {
+        // Pinned + free at distance 0.4, thickness 1.0: mu = 0 reproduces the
+        // plain separation (free partner reaches separation 1.0 in X).
+        let mut particles = [ClothParticle::pinned(Vec3::ZERO), free_at(0.4, 0.0, 0.0)];
+        let prev = [Vec3::ZERO, Vec3::new(0.4, -0.5, 0.0)];
+        resolve_self_collision_with_friction(&mut particles, &prev, 1.0, 1.0, 0.0);
+        approx_eq(particles[1].position, Vec3::new(1.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn self_friction_static_cone_locks_relative_slide() {
+        // Penetration 0.6, tangential slide 0.5 (in Y): mu = 1 => 0.5 <= 0.6,
+        // so the free partner's slide is fully cancelled back to y = -0.5.
+        let mut particles = [ClothParticle::pinned(Vec3::ZERO), free_at(0.4, 0.0, 0.0)];
+        let prev = [Vec3::ZERO, Vec3::new(0.4, -0.5, 0.0)];
+        resolve_self_collision_with_friction(&mut particles, &prev, 1.0, 1.0, 1.0);
+        approx_eq(particles[0].position, Vec3::ZERO);
+        approx_eq(particles[1].position, Vec3::new(1.0, -0.5, 0.0));
+    }
+
+    #[test]
+    fn self_friction_dynamic_removes_mu_times_penetration() {
+        // mu*penetration = 0.5 * 0.6 = 0.3 removed from the 0.5 slide, leaving
+        // the free partner at y = -0.3.
+        let mut particles = [ClothParticle::pinned(Vec3::ZERO), free_at(0.4, 0.0, 0.0)];
+        let prev = [Vec3::ZERO, Vec3::new(0.4, -0.5, 0.0)];
+        resolve_self_collision_with_friction(&mut particles, &prev, 1.0, 1.0, 0.5);
+        approx_eq(particles[1].position, Vec3::new(1.0, -0.3, 0.0));
+    }
+
+    #[test]
+    fn self_friction_is_deterministic() {
+        let build = || {
+            let mut p = [ClothParticle::pinned(Vec3::ZERO), free_at(0.4, 0.05, 0.0)];
+            let prev = [Vec3::ZERO, Vec3::new(0.4, -0.5, 0.1)];
+            resolve_self_collision_with_friction(&mut p, &prev, 1.0, 1.0, 0.7);
+            p
+        };
+        let a = build();
+        let b = build();
+        for (pa, pb) in a.iter().zip(b.iter()) {
+            assert_eq!(pa.position, pb.position);
+        }
     }
 }

@@ -19,7 +19,7 @@
 //! deterministic (particles in index order, colliders in slice order, the
 //! earliest valid hit wins).
 
-use super::collision::{closest_point_on_segment, BodyCollider};
+use super::collision::{apply_coulomb_friction, closest_point_on_segment, BodyCollider};
 use super::{ClothParticle, Vec3, EPS_LEN_SQ};
 
 /// Numerical floor for treating a scalar coefficient as zero when classifying a
@@ -302,6 +302,17 @@ fn collider_toi(collider: BodyCollider, prev: Vec3, curr: Vec3) -> Option<f32> {
 /// shorter than `particles` are all handled without panicking, and a
 /// (near) zero `dt` leaves velocities untouched.
 ///
+/// After the normal velocity is reflected the particle's tangential slide
+/// across the swept segment is damped by Coulomb friction against the contact
+/// (Macklin et al. 2014): the tangential part of `placed - prev` is cancelled
+/// inside the static cone (`||Dx_t|| <= mu * ||Dx_n||`) and shrunk by
+/// `mu * ||Dx_n||` in the dynamic regime, where `||Dx_n||` is the depth the TOI
+/// snap pushed the particle out along the outward normal. `friction` is the
+/// fabric's `FabricMaterial::friction` coefficient, clamped to `0..=1` with a
+/// non-finite value treated as `0`; `0` reproduces the frictionless bounce
+/// exactly. The body proxy is infinitely massive, so the whole tangential
+/// correction lands on the particle.
+///
 /// Cost is `O(particles * colliders)`; visiting order is deterministic.
 pub fn resolve_ccd(
     particles: &mut [ClothParticle],
@@ -309,11 +320,19 @@ pub fn resolve_ccd(
     colliders: &[BodyCollider],
     params: CcdParams,
     dt: f32,
+    friction: f32,
 ) {
     if !params.enabled || colliders.is_empty() {
         return;
     }
     let params = params.sanitized();
+    // Clamp the friction coefficient to `[0, 1]`; a non-finite value is treated
+    // as frictionless so an unsanitised material can never inject a `NaN`.
+    let mu = if friction.is_finite() {
+        friction.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     let inv_dt = if dt.abs() <= EPS_COEF { 0.0 } else { 1.0 / dt };
     let count = particles.len().min(prev_positions.len());
     for i in 0..count {
@@ -357,7 +376,11 @@ pub fn resolve_ccd(
                     let reflected = v.sub(n.scale((1.0 + params.restitution) * vn));
                     particle.velocity = reflected;
                 }
-                placed
+                // Damp the tangential slide against the contact. The push-out
+                // depth along the outward normal is the friction normal
+                // magnitude `||Dx_n||`; a non-positive depth is a no-op.
+                let push = placed.sub(curr).dot(n);
+                apply_coulomb_friction(placed, prev, n, push, mu)
             }
             None => surface,
         };
@@ -470,7 +493,7 @@ mod tests {
             restitution: 0.0,
             enabled: true,
         };
-        resolve_ccd(&mut particles, &prev, &colliders, params, 1.0 / 60.0);
+        resolve_ccd(&mut particles, &prev, &colliders, params, 1.0 / 60.0, 0.0);
         // The particle ends in front of the plane at the skin offset, not below.
         assert!(particles[0].position.y >= 0.0);
         assert!((particles[0].position.y - 0.01).abs() < 1e-4);
@@ -491,9 +514,70 @@ mod tests {
             restitution: 1.0,
             enabled: true,
         };
-        resolve_ccd(&mut particles, &prev, &colliders, params, 1.0 / 60.0);
+        resolve_ccd(&mut particles, &prev, &colliders, params, 1.0 / 60.0, 0.0);
         // A perfect bounce flips the normal velocity to point away from the wall.
         assert!(particles[0].velocity.y > 0.0);
+    }
+
+    /// Fixture: a particle sweeping diagonally from `(0, 1, 0)` to `(2, -1, 0)`
+    /// crosses the plane `y >= 0` at `t = 0.5`, is snapped to `(1, 0, 0)` with
+    /// push-out depth `1` and a tangential slide of length `1` along `+X`; the
+    /// friction-adjusted `x` is therefore `1 - min(mu, 1)`.
+    fn diagonal_plane_hit(mu: f32) -> ClothParticle {
+        let mut particles = [free_particle(Vec3::new(2.0, -1.0, 0.0))];
+        let prev = [Vec3::new(0.0, 1.0, 0.0)];
+        let colliders = [BodyCollider::HalfSpace {
+            normal: Vec3::new(0.0, 1.0, 0.0),
+            offset: 0.0,
+        }];
+        let params = CcdParams {
+            skin: 0.0,
+            restitution: 0.0,
+            enabled: true,
+        };
+        resolve_ccd(&mut particles, &prev, &colliders, params, 1.0 / 60.0, mu);
+        particles[0]
+    }
+
+    #[test]
+    fn resolve_ccd_zero_friction_keeps_tangential_slide() {
+        // mu = 0 must reproduce the frictionless snap: the full tangential
+        // slide survives, so x stays at 1.
+        let hit = diagonal_plane_hit(0.0);
+        assert!(
+            (hit.position.x - 1.0).abs() < 1e-6,
+            "x = {}",
+            hit.position.x
+        );
+        assert!(hit.position.y.abs() < 1e-6, "y = {}", hit.position.y);
+    }
+
+    #[test]
+    fn resolve_ccd_dynamic_friction_shrinks_slide_by_mu() {
+        // Dynamic regime: x = 1 - mu * push / ||slide|| = 1 - 0.5.
+        let hit = diagonal_plane_hit(0.5);
+        assert!(
+            (hit.position.x - 0.5).abs() < 1e-6,
+            "x = {}",
+            hit.position.x
+        );
+    }
+
+    #[test]
+    fn resolve_ccd_full_friction_locks_tangential_slide() {
+        // mu = 1 saturates the static cone here (mu * push == ||slide||), so the
+        // whole tangential slide is cancelled and x collapses to 0.
+        let hit = diagonal_plane_hit(1.0);
+        assert!(hit.position.x.abs() < 1e-6, "x = {}", hit.position.x);
+    }
+
+    #[test]
+    fn resolve_ccd_more_friction_slides_less() {
+        // Strictly monotone: heavier friction leaves less residual tangential
+        // travel along +X.
+        let low = diagonal_plane_hit(0.25);
+        let high = diagonal_plane_hit(0.75);
+        assert!(high.position.x < low.position.x);
     }
 
     #[test]
@@ -510,11 +594,12 @@ mod tests {
             &colliders,
             CcdParams::default(),
             1.0 / 60.0,
+            0.0,
         );
         assert!((pinned[0].position.y - (-5.0)).abs() < 1e-6);
 
         let mut free = [free_particle(Vec3::new(0.0, -5.0, 0.0))];
-        resolve_ccd(&mut free, &prev, &[], CcdParams::default(), 1.0 / 60.0);
+        resolve_ccd(&mut free, &prev, &[], CcdParams::default(), 1.0 / 60.0, 0.0);
         assert!((free[0].position.y - (-5.0)).abs() < 1e-6);
     }
 
@@ -536,7 +621,14 @@ mod tests {
                     radius: 0.5,
                 },
             ];
-            resolve_ccd(&mut p, &prev, &colliders, CcdParams::default(), 1.0 / 60.0);
+            resolve_ccd(
+                &mut p,
+                &prev,
+                &colliders,
+                CcdParams::default(),
+                1.0 / 60.0,
+                0.0,
+            );
             p
         };
         let a = build();

@@ -34,8 +34,8 @@ use super::asset::{FabricMaterial, PaintedConstraint};
 use super::bending::{apply_bending, build_dihedral_bending, BendingConstraint};
 use super::ccd::{resolve_ccd, CcdParams};
 use super::collision::{
-    apply_backstop, resolve_backstops, resolve_body_collisions, resolve_self_collision, Backstop,
-    BodyCollider,
+    apply_backstop, resolve_backstops, resolve_body_collisions_with_friction,
+    resolve_self_collision_with_friction, Backstop, BodyCollider,
 };
 use super::constraints::{
     build_grid_constraints, color_constraints, ClothGrid, GridConstraintParams,
@@ -111,6 +111,14 @@ pub struct Garment {
     pub colliders: Vec<BodyCollider>,
     /// Backstop planes applied every substep.
     pub backstops: Vec<Backstop>,
+    /// Cloth-side Coulomb friction coefficient (`mu`, in `0..=1`) applied by the
+    /// body-collision pass to damp a particle's tangential slip across the frame
+    /// against the contact. `0` is frictionless (the historical behaviour);
+    /// higher values make the garment grip the body more (silk versus wool).
+    /// Populated from [`FabricMaterial::friction`] by [`build_grid_garment`];
+    /// `Garment::new` leaves it `0` so hand-built garments stay frictionless
+    /// until set.
+    pub friction: f32,
     /// XPBD solver parameters.
     pub solver: SolverParams,
     /// Self-collision settings applied once per frame after the solve.
@@ -190,6 +198,7 @@ impl Garment {
             bindings: Vec::new(),
             colliders: Vec::new(),
             backstops: Vec::new(),
+            friction: 0.0,
             solver,
             self_collision: SelfCollisionParams::default(),
             triangles: Vec::new(),
@@ -242,14 +251,14 @@ impl Garment {
                 return;
             }
         }
-        // Snapshot frame-start positions so the continuous-collision sweep can
-        // reconstruct each particle's swept segment after the solve. Done before
-        // any force or projection touches the positions.
-        if self.ccd_enabled {
-            self.prev_positions.clear();
-            self.prev_positions
-                .extend(self.particles.iter().map(|p| p.position));
-        }
+        // Snapshot frame-start positions before any force or projection touches
+        // them. This is the reference both the body-collision friction pass and
+        // the continuous-collision sweep measure tangential motion against, so it
+        // is taken unconditionally (friction is always live even when CCD is
+        // off).
+        self.prev_positions.clear();
+        self.prev_positions
+            .extend(self.particles.iter().map(|p| p.position));
         // Aerodynamic wind is a pre-solve velocity impulse, so the substep
         // prediction integrates it. A calm field (the default) adds nothing and
         // an empty triangulation makes the pass a no-op.
@@ -301,15 +310,28 @@ impl Garment {
             apply_pressure(&mut self.particles, &self.triangles, pressure, dt);
         }
         if self.self_collision.enabled {
-            resolve_self_collision(
+            // Self-collision separates interpenetrating layers along their
+            // contact normal, then damps the relative tangential slide since the
+            // frame start with the fabric's Coulomb friction so stacked layers
+            // grip instead of shearing freely.
+            resolve_self_collision_with_friction(
                 &mut self.particles,
+                &self.prev_positions,
                 self.self_collision.cell_size,
                 self.self_collision.thickness,
+                self.friction,
             );
         }
         // Self-collision or pressure can push a particle back into a body;
-        // re-project so a frame never ends inside a collider.
-        resolve_body_collisions(&mut self.particles, &self.colliders);
+        // re-project so a frame never ends inside a collider, damping the
+        // tangential slip accumulated since the frame start with the fabric's
+        // Coulomb friction.
+        resolve_body_collisions_with_friction(
+            &mut self.particles,
+            &self.prev_positions,
+            &self.colliders,
+            self.friction,
+        );
         resolve_backstops(&mut self.particles, &self.backstops);
         // Continuous collision: sweep frame-start -> current against the body
         // colliders and snap any tunnelling particle back to the surface. Runs
@@ -321,6 +343,7 @@ impl Garment {
                 &self.colliders,
                 self.ccd,
                 dt,
+                self.friction,
             );
         }
         // Painted post-solve passes steer the fully resolved positions toward
@@ -528,7 +551,12 @@ pub fn build_grid_garment(
     };
     let constraints = build_grid_constraints(grid, positions, params);
     let graph = color_constraints(&constraints);
-    Garment::new(particles, graph, solver)
+    let mut garment = Garment::new(particles, graph, solver);
+    // Carry the fabric's sanitised friction (clamped to `0..=1`) into the
+    // body-collision pass so an authored silk/wool coefficient actually reaches
+    // the solver.
+    garment.friction = material.sanitized().friction;
+    garment
 }
 
 #[cfg(test)]

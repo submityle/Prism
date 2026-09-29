@@ -32,8 +32,17 @@
 //!
 //! ## Binding budget
 //!
-//! `cloth_body_collision` honours the 2-storage + 1-uniform contract
-//! (`positions`, `colliders`, `params`). Per-particle painted backstops
+//! `cloth_body_collision` now uses a 3-storage + 1-uniform layout
+//! (`positions`, `colliders`, `prev_positions`, `params`): the `prev_positions`
+//! buffer (binding 3) supplies the frame-start reference the tangential Coulomb
+//! friction pass measures slip against, matching the CPU
+//! `resolve_body_collisions_with_friction`. NOTE: the host descriptor
+//! `ClothKernel::BodyCollision` in `prism_render_architecture::cloth::gpu::kernels`
+//! still declares `storage_buffers: 2` and `GpuClothBodyParams` still lacks a
+//! `friction` field; wiring binding 3 and the `friction` uniform on the host is
+//! a required follow-up (those files are outside this change's scope). Until
+//! then the host leaves `friction` zero, so the `GPU` pass stays frictionless
+//! and bit-parity with the CPU zero-friction path. Per-particle painted backstops
 //! (`collision::apply_backstop`) run as their own `ClothKernel::Backstop`
 //! dispatch (`cloth_backstop` below) on a matching 2-storage + 1-uniform layout
 //! (`positions`, `backstops`, `params`), so they are a real bit-parity kernel
@@ -109,6 +118,13 @@ struct ClothBodyParams {
     particle_count: u32,
     /// Number of colliders every free particle is projected against, in order.
     collider_count: u32,
+    /// Cloth-side Coulomb friction coefficient (`mu`, clamped to `0..=1` on
+    /// read). Mirrors the CPU `resolve_body_collisions_with_friction` `friction`
+    /// argument sourced from `FabricMaterial::friction`. A host that has not yet
+    /// wired friction leaves this zero, which is exactly frictionless.
+    friction: f32,
+    /// Trailing pad word so the record keeps a flat 16-byte stride.
+    pad: f32,
 }
 
 /// Uniform parameters for the self-collision hash build and resolve dispatches.
@@ -135,6 +151,9 @@ struct ClothSelfParams {
 @group(0) @binding(1) var<storage, read> colliders: array<ClothCollider>;
 // Body-collision dispatch bounds.
 @group(0) @binding(2) var<uniform> body_params: ClothBodyParams;
+// Frame-start positions (`xyz`; `w` ignored) the friction pass measures each
+// particle's tangential slip against. Mirrors the CPU `prev_positions` slice.
+@group(0) @binding(3) var<storage, read> body_prev_positions: array<vec4<f32>>;
 
 /// Projects `pos` out to the surface of the sphere `(center, radius)`. Mirrors
 /// the CPU `project_out_of_sphere`: a non-positive radius or an exterior point
@@ -203,9 +222,56 @@ fn cloth_project_collider(col: ClothCollider, pos: vec3<f32>) -> vec3<f32> {
     return cloth_project_out_of_half_space(pos, a, col.radius);
 }
 
+/// Removes up to `friction * depth` of tangential slip from a projected
+/// particle. Bit-parity mirror of the CPU `damp_tangential_slip`: given the
+/// frame-start position `prev`, the post-projection position `projected`, and
+/// the collision `correction` (`projected - pre_projection`, whose length is the
+/// penetration depth and whose direction is the outward contact normal), it
+/// splits the frame displacement `projected - prev` against that normal and
+/// shortens the tangential part by `min(||tangential||, friction * depth)`.
+/// Static friction (slip `<= friction * depth`) sticks; dynamic friction caps
+/// the removed slip linearly. A non-positive `friction`, a (near) zero depth, or
+/// a (near) zero tangential slip returns `projected` untouched, and every
+/// normalisation divides by a magnitude already checked against
+/// `CLOTH_COL_EPS_LEN_SQ`, so the result is always finite.
+fn cloth_damp_tangential_slip(
+    prev: vec3<f32>,
+    projected: vec3<f32>,
+    correction: vec3<f32>,
+    friction: f32,
+) -> vec3<f32> {
+    if friction <= 0.0 {
+        return projected;
+    }
+    let depth_sq = dot(correction, correction);
+    if depth_sq <= CLOTH_COL_EPS_LEN_SQ {
+        return projected;
+    }
+    let depth = sqrt(depth_sq);
+    let normal = correction * (1.0 / depth);
+    let disp = projected - prev;
+    let normal_amount = dot(disp, normal);
+    let tangential = disp - normal * normal_amount;
+    let tan_sq = dot(tangential, tangential);
+    if tan_sq <= CLOTH_COL_EPS_LEN_SQ {
+        return projected;
+    }
+    let tan_len = sqrt(tan_sq);
+    let max_removed = friction * depth;
+    var removed = max_removed;
+    if tan_len <= max_removed {
+        removed = tan_len;
+    }
+    let tan_dir = tangential * (1.0 / tan_len);
+    return projected - tan_dir * removed;
+}
+
 /// Body-collision stage: one invocation per particle projects a free particle
-/// out of every collider in order. Mirrors the CPU `resolve_body_collisions`
-/// (pinned particles are skipped; an empty collider set is a no-op).
+/// out of every collider in order, then damps its tangential slip against the
+/// contact with Coulomb friction. Mirrors the CPU
+/// `resolve_body_collisions_with_friction` (pinned particles are skipped; an
+/// empty collider set is a no-op; `friction` is clamped to `0..=1` and `0` is
+/// exactly frictionless).
 @compute @workgroup_size(64)
 fn cloth_body_collision(@builtin(global_invocation_id) gid: vec3<u32>) {
     let p = gid.x;
@@ -216,10 +282,17 @@ fn cloth_body_collision(@builtin(global_invocation_id) gid: vec3<u32>) {
     if body_positions[p].w <= 0.0 {
         return;
     }
-    var pos = body_positions[p].xyz;
+    let mu = clamp(body_params.friction, 0.0, 1.0);
+    let before = body_positions[p].xyz;
+    var pos = before;
     for (var i = 0u; i < body_params.collider_count; i = i + 1u) {
         pos = cloth_project_collider(colliders[i], pos);
     }
+    // Net correction from the projection: length = penetration depth removed,
+    // direction = contact normal. Damp the frame's tangential slip against it.
+    let correction = pos - before;
+    let prev = body_prev_positions[p].xyz;
+    pos = cloth_damp_tangential_slip(prev, pos, correction, mu);
     body_positions[p] = vec4<f32>(pos, body_positions[p].w);
 }
 
