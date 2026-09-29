@@ -40,6 +40,7 @@ pub mod view_family;
 pub mod virtual_geometry;
 pub mod virtual_resource;
 pub mod virtual_shadow;
+pub mod volumetric;
 pub mod water;
 pub mod work_graph;
 pub mod world;
