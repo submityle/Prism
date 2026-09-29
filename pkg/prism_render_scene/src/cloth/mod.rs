@@ -34,5 +34,6 @@ mod bind_groups;
 mod dispatch;
 mod pack;
 mod pipeline;
+mod solve_plan;
 pub(crate) mod plugin;
 mod resources;

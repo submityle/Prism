@@ -19,11 +19,6 @@
 //! long-range color's slice past the whole distance section. Bending hinges
 //! pack into their own buffer.
 
-#![allow(
-    dead_code,
-    reason = "the packing entry points bridge the architecture-layer upload plans into the abi records the prepare/extract slice uploads; that consumer lands in the next slice, and the packing contract is already pinned by the unit tests below"
-)]
-
 use prism_render_architecture::cloth::bending::BendingConstraint;
 use prism_render_architecture::cloth::gpu::upload::{BendingUploadPlan, ConstraintUploadPlan};
 use prism_render_architecture::cloth::Constraint;
