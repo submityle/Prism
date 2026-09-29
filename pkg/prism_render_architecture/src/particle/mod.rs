@@ -57,6 +57,7 @@ pub mod emitter;
 pub mod events;
 pub mod feedback;
 pub mod fluid;
+pub mod frame_pipeline;
 pub mod graph;
 pub mod lod;
 pub mod modules;
@@ -73,6 +74,7 @@ pub mod sort_cull;
 pub mod stability;
 pub mod stages;
 pub mod validation;
+pub mod volumetrics;
 
 #[cfg(test)]
 mod integration_tests;
