@@ -34,10 +34,11 @@ use alloc::vec::Vec;
 use super::{ClothParticle, Compliance, Constraint, Vec3, EPS_LEN_SQ};
 
 /// Which cloth solver a piece uses.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub enum ClothSolverKind {
     /// Position-based XPBD (see [`super::dynamics::solve_cloth`]). The cheap
     /// default: fast, stable, good enough for soft and medium drape.
+    #[default]
     Xpbd,
     /// Vertex Block Descent (see [`solve_cloth_vbd`]). The high-fidelity path
     /// for stiff fabrics that XPBD would leave rubbery.

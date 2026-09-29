@@ -51,6 +51,7 @@ use super::pressure::{apply_pressure, PressureParams};
 use super::self_ccd::{resolve_self_ccd, SelfCcdParams};
 use super::sleep::{max_kinetic_indicator, should_simulate, SleepParams, SleepState, SleepTracker};
 use super::tearing::{apply_plasticity, apply_tearing, PlasticParams, TearingParams};
+use super::vbd::{solve_cloth_vbd, ClothSolverKind, VbdParams};
 use super::virtual_particles::{
     generate_virtual_particles, resolve_self_collision_virtual_augment, VirtualParticlePattern,
 };
@@ -131,6 +132,17 @@ pub struct Garment {
     pub friction: f32,
     /// XPBD solver parameters.
     pub solver: SolverParams,
+    /// Which solver the frame step dispatches to (design §6.1 multi-solver
+    /// slot). `ClothSolverKind::Xpbd` is the cheap default; stiff or
+    /// large-deformation fabrics can be routed to `ClothSolverKind::Vbd` for an
+    /// unconditionally stable, non-rubbery drape. The per-substep collider
+    /// projection is XPBD-only; the VBD path relies on the post-solve body,
+    /// backstop, and CCD passes for collision, matching how self-collision and
+    /// pressure are already resolved after the solve.
+    pub solver_kind: ClothSolverKind,
+    /// Vertex Block Descent parameters used when `Garment::solver_kind` is
+    /// `ClothSolverKind::Vbd`; ignored on the XPBD path.
+    pub vbd: VbdParams,
     /// Self-collision settings applied once per frame after the solve.
     pub self_collision: SelfCollisionParams,
     /// Sim-mesh triangulation driving the wind and pressure passes; empty
@@ -216,6 +228,8 @@ impl Garment {
             backstops: Vec::new(),
             friction: 0.0,
             solver,
+            solver_kind: ClothSolverKind::Xpbd,
+            vbd: VbdParams::default(),
             self_collision: SelfCollisionParams::default(),
             triangles: Vec::new(),
             wind: WindField::default(),
@@ -299,11 +313,26 @@ impl Garment {
                 dt,
             );
         }
-        let colliders = &self.colliders;
-        let backstops = &self.backstops;
-        solve_cloth_with_collision(&mut self.particles, &self.graph, self.solver, dt, |p| {
-            project_colliders(p.position, colliders, backstops)
-        });
+        // Multi-solver slot (design §6.1): XPBD is the cheap default and folds
+        // the collider projection into every substep; VBD is the high-fidelity
+        // path for stiff fabrics XPBD would leave rubbery, and leans on the
+        // post-solve body/backstop/CCD passes for collision.
+        match self.solver_kind {
+            ClothSolverKind::Xpbd => {
+                let colliders = &self.colliders;
+                let backstops = &self.backstops;
+                solve_cloth_with_collision(
+                    &mut self.particles,
+                    &self.graph,
+                    self.solver,
+                    dt,
+                    |p| project_colliders(p.position, colliders, backstops),
+                );
+            }
+            ClothSolverKind::Vbd => {
+                solve_cloth_vbd(&mut self.particles, &self.graph.constraints, self.vbd, dt);
+            }
+        }
         // Dihedral bending is projected after the distance solve as a lower-
         // frequency relaxation pass. The substep timestep keeps the XPBD
         // compliance scaling consistent with the distance solve; an empty hinge
@@ -838,6 +867,73 @@ mod tests {
             );
         }
         assert_finite(&on.particles);
+    }
+
+    #[test]
+    fn vbd_solver_path_drapes_and_holds_pins() {
+        // The multi-solver slot (design §6.1) must actually dispatch to VBD when
+        // asked: a curtain routed onto the VBD path keeps its pinned top row and
+        // lets the free rows fall under gravity, staying finite throughout.
+        let (grid, positions) = drape_grid(4, 4, 0.25);
+        let material = FabricMaterial::default();
+        let mut garment = build_grid_garment(grid, &positions, &material, stiff_solver());
+        garment.solver_kind = ClothSolverKind::Vbd;
+        for c in 0..4 {
+            garment.pin(c);
+        }
+        let start_low = garment.particles[12].position.y;
+        for _ in 0..60 {
+            garment.step(1.0 / 60.0);
+        }
+        assert_finite(&garment.particles);
+        for c in 0..4 {
+            assert!(
+                garment.particles[c].position.y.abs() < 1.0e-4,
+                "VBD let a pinned vertex {c} drift: {:?}",
+                garment.particles[c].position
+            );
+        }
+        assert!(
+            garment.particles[12].position.y < start_low - 0.01,
+            "VBD curtain did not fall under gravity: {} -> {}",
+            start_low,
+            garment.particles[12].position.y
+        );
+    }
+
+    #[test]
+    fn vbd_and_xpbd_are_independent_paths() {
+        // Selecting VBD must not silently fall back to XPBD: the two solvers
+        // relax a stiff curtain differently, so the settled poses must differ.
+        let stiff = FabricMaterial {
+            warp_stiffness: 5.0e3,
+            weft_stiffness: 5.0e3,
+            ..FabricMaterial::default()
+        };
+        let build = |kind: ClothSolverKind| {
+            let (grid, positions) = drape_grid(4, 4, 0.25);
+            let mut g = build_grid_garment(grid, &positions, &stiff, stiff_solver());
+            g.solver_kind = kind;
+            for c in 0..4 {
+                g.pin(c);
+            }
+            for _ in 0..30 {
+                g.step(1.0 / 60.0);
+            }
+            g
+        };
+        let xpbd = build(ClothSolverKind::Xpbd);
+        let vbd = build(ClothSolverKind::Vbd);
+        assert_finite(&xpbd.particles);
+        assert_finite(&vbd.particles);
+        let mut max_delta = 0.0_f32;
+        for (a, b) in xpbd.particles.iter().zip(vbd.particles.iter()) {
+            max_delta = max_delta.max(a.position.distance(b.position));
+        }
+        assert!(
+            max_delta > 1.0e-4,
+            "VBD and XPBD produced identical poses; the VBD path was not taken"
+        );
     }
 
     #[test]
