@@ -2607,13 +2607,22 @@ fn f16_bits_to_f32(bits: u16) -> f32 {
     let mant = f32::from(bits & 0x03ff);
     if exp == 0 {
         // Subnormal (or zero when mant == 0): no implicit leading one.
-        sign * (mant / 1024.0) * 2.0_f32.powi(-14)
+        sign * (mant / 1024.0) * exp2i(-14)
     } else if exp == 0x1f {
         // Inf/NaN: the wetness data never reaches this, map to a large finite.
         sign * f32::MAX
     } else {
-        sign * (1.0 + mant / 1024.0) * 2.0_f32.powi(exp - 15)
+        sign * (1.0 + mant / 1024.0) * exp2i(exp - 15)
     }
+}
+
+/// Bit-exact `2^n` for the `f16` decode path (integer exponents in the normal
+/// `f32` range map straight onto the IEEE 754 exponent field). Avoids the
+/// disallowed `f32::powi` while staying exact for the `n in [-14, 15]` the
+/// decoder ever passes.
+fn exp2i(n: i32) -> f32 {
+    let biased = u32::try_from(n + 127).unwrap_or(0);
+    f32::from_bits(biased << 23)
 }
 
 /// Projects the GPU wetness scalars onto the architecture `WetnessParams` used
@@ -2968,5 +2977,364 @@ fn wetness_step_gpu_matches_cpu_golden() {
             tex_gold[j],
         );
         j += 1;
+    }
+}
+
+// ===========================================================================
+// Kernel 7: water_underwater_volume (Grid3d, 4x4x4) — twin of the froxel volume
+// math in `underwater.rs` (Beer-Lambert colour shift, Henyey-Greenstein phase,
+// bounded multiple scatter, god-ray in-scatter).
+// ===========================================================================
+
+use prism_render_architecture::water::underwater;
+
+use super::abi::GpuWaterUnderwaterParams;
+
+/// `froxel` grid width; a multiple of 32 keeps the `rgba16float` read-back row
+/// (8 bytes/texel) an exact 256-byte multiple, so each copied slice is dense.
+const UNDERWATER_W: u32 = 32;
+/// `froxel` grid height.
+const UNDERWATER_H: u32 = 4;
+/// `froxel` grid depth (slice count).
+const UNDERWATER_D: u32 = 4;
+
+/// Deterministic, transcendental-free per-column surface-light field sampled by
+/// the god-ray and single-scatter terms.
+fn underwater_surface_field(width: u32, height: u32) -> Vec<f32> {
+    let mut field = Vec::with_capacity((width * height) as usize);
+    let mut y = 0u32;
+    while y < height {
+        let mut x = 0u32;
+        while x < width {
+            let v = ((x * 3 + y * 7) % 13) as f32 / 12.0;
+            field.push(v);
+            x += 1;
+        }
+        y += 1;
+    }
+    field
+}
+
+/// `CPU` golden for the underwater froxel volume, packed as `(inscatter.rgb,
+/// avg_transmittance)` per froxel in `(z, y, x)` image-row order to match the
+/// `copy_texture_to_buffer` layout.
+fn underwater_golden(params: &GpuWaterUnderwaterParams, surface: &[f32]) -> Vec<f32> {
+    let thickness = params.slice_thickness.max(0.0);
+    let phase = underwater::henyey_greenstein(params.sun_cos, params.phase_g);
+    let albedo_clamped = params.scatter_albedo.clamp(0.0, 1.0);
+    let mut out = Vec::with_capacity((params.width * params.height * params.depth * 4) as usize);
+    let mut z = 0u32;
+    while z < params.depth {
+        let depth = (z as f32 + 0.5) * thickness;
+        let tr = underwater::beer_lambert_transmittance(params.extinction[0], depth);
+        let tg = underwater::beer_lambert_transmittance(params.extinction[1], depth);
+        let tb = underwater::beer_lambert_transmittance(params.extinction[2], depth);
+        let shifted = [
+            params.base_color[0].max(0.0) * tr,
+            params.base_color[1].max(0.0) * tg,
+            params.base_color[2].max(0.0) * tb,
+        ];
+        let avg_t = (tr + tg + tb) / 3.0;
+        let mut y = 0u32;
+        while y < params.height {
+            let mut x = 0u32;
+            while x < params.width {
+                let light = surface[(y * params.width + x) as usize];
+                let single = light.max(0.0) * phase * albedo_clamped;
+                let boosted = underwater::multiple_scatter_boost(single, params.scatter_albedo);
+                let gr = underwater::godray_inscatter(
+                    light,
+                    params.scatter_albedo,
+                    params.extinction[1],
+                    depth,
+                );
+                let inscatter = [
+                    (shifted[0] * boosted + shifted[0] * gr).max(0.0),
+                    (shifted[1] * boosted + shifted[1] * gr).max(0.0),
+                    (shifted[2] * boosted + shifted[2] * gr).max(0.0),
+                ];
+                out.push(inscatter[0]);
+                out.push(inscatter[1]);
+                out.push(inscatter[2]);
+                out.push(avg_t);
+                x += 1;
+            }
+            y += 1;
+        }
+        z += 1;
+    }
+    out
+}
+
+/// Dispatches `water_underwater_volume` on device and reads back the decoded
+/// `rgba16float` 3D scattering/transmittance volume.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the parity harness sets up an explicit layout, an input light texture, a 3D storage texture, and the volume read-back in one place"
+)]
+fn dispatch_underwater(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    wgsl: &str,
+    entry: &str,
+    params: &GpuWaterUnderwaterParams,
+    surface: &[f32],
+) -> Vec<f32> {
+    let module = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("water_render_fx_underwater_parity"),
+        source: ShaderSource::Wgsl(wgsl.into()),
+    });
+    let empty_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+        label: Some("water_underwater_empty_layout"),
+        entries: &[],
+    });
+    let group2_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+        label: Some("water_underwater_layout"),
+        entries: &[
+            BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            BindGroupLayoutEntry {
+                binding: 1,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::StorageTexture {
+                    access: StorageTextureAccess::WriteOnly,
+                    format: TextureFormat::Rgba16Float,
+                    view_dimension: TextureViewDimension::D3,
+                },
+                count: None,
+            },
+            BindGroupLayoutEntry {
+                binding: 2,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Texture {
+                    sample_type: TextureSampleType::Float { filterable: false },
+                    view_dimension: TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+        ],
+    });
+    let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+        label: Some("water_underwater_pipeline_layout"),
+        bind_group_layouts: &[
+            Some(&empty_layout),
+            Some(&empty_layout),
+            Some(&group2_layout),
+        ],
+        immediate_size: 0,
+    });
+    let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("water_underwater_volume_parity"),
+        layout: Some(&pipeline_layout),
+        module: &module,
+        entry_point: Some(entry),
+        compilation_options: PipelineCompilationOptions::default(),
+        cache: None,
+    });
+
+    let params_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("underwater_params"),
+        contents: bytemuck::bytes_of(params),
+        usage: BufferUsages::UNIFORM,
+    });
+    let light_tex = device.create_texture(&TextureDescriptor {
+        label: Some("underwater_surface_light"),
+        size: Extent3d {
+            width: params.width,
+            height: params.height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: TextureFormat::R32Float,
+        usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        TexelCopyTextureInfo {
+            texture: &light_tex,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: TextureAspect::All,
+        },
+        bytemuck::cast_slice(surface),
+        TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(params.width * 4),
+            rows_per_image: Some(params.height),
+        },
+        Extent3d {
+            width: params.width,
+            height: params.height,
+            depth_or_array_layers: 1,
+        },
+    );
+    let light_view = light_tex.create_view(&TextureViewDescriptor::default());
+    let out_tex = device.create_texture(&TextureDescriptor {
+        label: Some("underwater_out"),
+        size: Extent3d {
+            width: params.width,
+            height: params.height,
+            depth_or_array_layers: params.depth,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D3,
+        format: TextureFormat::Rgba16Float,
+        usage: TextureUsages::STORAGE_BINDING | TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let out_view = out_tex.create_view(&TextureViewDescriptor::default());
+
+    let empty_group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("underwater_empty_group"),
+        layout: &empty_layout,
+        entries: &[],
+    });
+    let bind_group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("underwater_bind_group"),
+        layout: &group2_layout,
+        entries: &[
+            BindGroupEntry {
+                binding: 0,
+                resource: params_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 1,
+                resource: BindingResource::TextureView(&out_view),
+            },
+            BindGroupEntry {
+                binding: 2,
+                resource: BindingResource::TextureView(&light_view),
+            },
+        ],
+    });
+
+    let row_bytes = params.width * 8;
+    let tex_bytes = u64::from(row_bytes * params.height * params.depth);
+    let stage = device.create_buffer(&BufferDescriptor {
+        label: Some("underwater_stage"),
+        size: tex_bytes,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("underwater_parity_encoder"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("underwater_parity_pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &empty_group, &[]);
+        pass.set_bind_group(1, &empty_group, &[]);
+        pass.set_bind_group(2, &bind_group, &[]);
+        // One extra workgroup per axis exercises the in-kernel bounds guard.
+        pass.dispatch_workgroups(
+            params.width.div_ceil(4) + 1,
+            params.height.div_ceil(4) + 1,
+            params.depth.div_ceil(4) + 1,
+        );
+    }
+    encoder.copy_texture_to_buffer(
+        TexelCopyTextureInfo {
+            texture: &out_tex,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: TextureAspect::All,
+        },
+        TexelCopyBufferInfo {
+            buffer: &stage,
+            layout: TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row_bytes),
+                rows_per_image: Some(params.height),
+            },
+        },
+        Extent3d {
+            width: params.width,
+            height: params.height,
+            depth_or_array_layers: params.depth,
+        },
+    );
+    queue.submit([encoder.finish()]);
+
+    stage.slice(..).map_async(MapMode::Read, |_| {});
+    device
+        .poll(PollType::wait_indefinitely())
+        .expect("device poll should complete the submitted work");
+
+    let view = stage
+        .slice(..)
+        .get_mapped_range()
+        .expect("mapped underwater volume should be available after poll");
+    let halves = bytemuck::cast_slice::<u8, u16>(&view).to_vec();
+    drop(view);
+    stage.unmap();
+    halves.iter().map(|&h| f16_bits_to_f32(h)).collect()
+}
+
+/// Real-device parity for `water_underwater_volume`: build the froxel
+/// scattering/transmittance volume on device and match the decoded
+/// `rgba16float` output lane-for-lane against the `CPU` golden.
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice must reach the test log on hosts without a wgpu adapter"
+)]
+fn underwater_volume_gpu_matches_cpu_golden() {
+    let Some((device, queue)) = try_solver_device() else {
+        eprintln!(
+            "underwater_volume_gpu_matches_cpu_golden: no wgpu adapter, skipping on-device parity"
+        );
+        return;
+    };
+
+    let params = GpuWaterUnderwaterParams {
+        extinction: [0.8, 0.35, 0.15],
+        slice_thickness: 0.5,
+        base_color: [0.9, 0.85, 0.8],
+        phase_g: 0.4,
+        sun_cos: 0.7,
+        scatter_albedo: 0.6,
+        width: UNDERWATER_W,
+        height: UNDERWATER_H,
+        depth: UNDERWATER_D,
+        _pad0: 0,
+        _pad1: 0,
+        _pad2: 0,
+    };
+    let surface = underwater_surface_field(params.width, params.height);
+
+    let golden = underwater_golden(&params, &surface);
+
+    let wgsl = compile_render_fx_wgsl();
+    let entry = find_entry_point(&wgsl, "underwater_volume");
+    let gpu = dispatch_underwater(&device, &queue, &wgsl, &entry, &params, &surface);
+
+    assert_eq!(gpu.len(), golden.len(), "underwater texel lane count");
+
+    let mut i = 0;
+    while i < golden.len() {
+        let d = (gpu[i] - golden[i]).abs();
+        assert!(
+            d < PARITY_EPS,
+            "underwater lane {i}: gpu={} cpu={} |d|={d}",
+            gpu[i],
+            golden[i],
+        );
+        i += 1;
     }
 }
