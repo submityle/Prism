@@ -34,18 +34,137 @@
 
 use alloc::vec::Vec;
 
+use super::breaking::BreakingSample;
 use super::budget::{plan_water, WaterJobKind, WaterJobRequest, WaterSolvePlan};
 use super::caustics::{select_caustics, CausticsMethod, CausticsThresholds};
+use super::coupling_frame::{plan_coupling_frame, CouplingFramePlan, CouplingInputs};
 use super::flip::{select_pressure_solver, PressureSolver, PressureSolverThresholds};
 use super::ocean_lod::{bin_ocean_patches, OceanClipmapConfig, OceanClipmapPlan};
+use super::optics::{plan_optics, OpticsInputs, OpticsPlan};
+use super::profile::WaterSimProfile;
 use super::reconstruct::{
     select_reconstruction, ReconstructionContext, ReconstructionMethod, ReconstructionThresholds,
 };
+use super::shoreline::{plan_shoreline, ShorelineInputs, ShorelinePlan};
+use super::simulation::{plan_sim, SimInputs, SimStepPlan};
+use super::surface_fx::{plan_surface_fx, SurfaceFxInputs, SurfaceFxPlan};
 use super::transition::{solver_blend_weights, SolverBlendWeights, TransitionBands};
+use super::underwater::RgbColor;
+use super::wetness::SurfaceMoisture;
 use super::{
-    ShadingFrontend, SharedBaseServices, SolverKind, WaterBody, WaterBodyHandle, WaterBudget,
+    ShadingFrontend, SharedBaseServices, SolverKind, Vec3, WaterBody, WaterBodyHandle, WaterBudget,
     WaterKind,
 };
+
+/// The live, per-frame dynamic state sampled from the running water solve that
+/// the sim, surface, shoreline, optics, and coupling planners consume.
+///
+/// The renderer fills this each frame from the previous step's fields (crest
+/// steepness and folding for breaking, local flow for foam decay, view geometry
+/// for optics, submerged volume for coupling). Every field is a plain scalar or
+/// `Copy` sub-record so the sample threads through the pipeline without heap
+/// traffic; [`WaterDynamics::default`] is the quiescent state (no motion, no
+/// breaking, no coupling) used for spectral bodies and tests.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WaterDynamics {
+    /// Frame duration in seconds, shared by the sim and coupling schedules.
+    pub frame_dt: f32,
+    /// Grid cell size `dx` in meters; `0` asks the pipeline to derive it from
+    /// the body's domain extent and grid resolution.
+    pub cell_size: f32,
+    /// `SWE` local maximum signal speed `|u| + sqrt(g*h)` in m/s.
+    pub max_signal_speed: f32,
+    /// Frame minimum surface Jacobian (choppy-displacement fold measure).
+    pub min_jacobian: f32,
+    /// Breaking metrics (steepness, Jacobian, curvature) at the crest sample.
+    pub breaking: BreakingSample,
+    /// Surface tangent (crest flow direction) for the spray jet.
+    pub crest_tangent: Vec3,
+    /// Surface normal (upward jet direction) for the spray jet.
+    pub surface_normal: Vec3,
+    /// Local surface flow speed driving foam decay.
+    pub flow_speed: f32,
+    /// World height of the shoreline surface sample, in meters.
+    pub sample_y: f32,
+    /// World height of the local water surface, in meters.
+    pub water_surface_y: f32,
+    /// Total water column depth at the shoreline sample, in meters.
+    pub water_depth: f32,
+    /// Distance of the shoreline sample above the waterline, in meters.
+    pub dist_above_water: f32,
+    /// Moisture state carried in from the previous frame.
+    pub moisture: SurfaceMoisture,
+    /// Normalized rain drive for wetting and puddle fill.
+    pub rain_rate: f32,
+    /// Sine of the incidence angle at the water interface (optics).
+    pub sin_incidence: f32,
+    /// View-ray depth through the medium, in meters (optics).
+    pub view_depth: f32,
+    /// Surface `RGB` color prior to depth attenuation (optics).
+    pub surface_color: RgbColor,
+    /// Incident surface light intensity (optics).
+    pub surface_light: f32,
+    /// Cosine of the scattering angle for the phase function (optics).
+    pub cos_scatter: f32,
+    /// Length of the light shaft used for godray inscatter (optics).
+    pub shaft_length: f32,
+    /// Number of two-way coupling field queries requested this frame.
+    pub coupling_query_count: u32,
+    /// Fastest relative body/fluid speed this frame, for coupling scheduling.
+    pub max_rel_speed: f32,
+    /// Volume of the coupled body currently below the surface.
+    pub submerged_volume: f32,
+    /// Total volume of the coupled body.
+    pub total_volume: f32,
+    /// Cross-sectional area presented to the flow, for coupling drag.
+    pub cross_section: f32,
+    /// Relative body/fluid speed used to evaluate coupling drag.
+    pub rel_speed: f32,
+}
+
+impl Default for WaterDynamics {
+    fn default() -> Self {
+        Self {
+            frame_dt: 0.0,
+            cell_size: 0.0,
+            max_signal_speed: 0.0,
+            min_jacobian: 1.0,
+            breaking: BreakingSample {
+                steepness: 0.0,
+                jacobian: 1.0,
+                curvature: 0.0,
+            },
+            crest_tangent: Vec3::ZERO,
+            surface_normal: Vec3::new(0.0, 1.0, 0.0),
+            flow_speed: 0.0,
+            sample_y: 0.0,
+            water_surface_y: 0.0,
+            water_depth: 0.0,
+            dist_above_water: 0.0,
+            moisture: SurfaceMoisture {
+                wetness: 0.0,
+                puddle_depth: 0.0,
+            },
+            rain_rate: 0.0,
+            sin_incidence: 0.0,
+            view_depth: 0.0,
+            surface_color: RgbColor {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+            },
+            surface_light: 0.0,
+            cos_scatter: 1.0,
+            shaft_length: 0.0,
+            coupling_query_count: 0,
+            max_rel_speed: 0.0,
+            submerged_volume: 0.0,
+            total_volume: 0.0,
+            cross_section: 0.0,
+            rel_speed: 0.0,
+        }
+    }
+}
 
 /// The per-frame view- and budget-dependent inputs for one water body that are
 /// not part of its static [`WaterBody`] description.
@@ -63,6 +182,9 @@ pub struct WaterViewSample {
     /// Live particle count for a volumetric (`PBF` / `FLIP`) domain; `0` for
     /// height-field and spectral bodies.
     pub particle_count: u32,
+    /// Live per-frame dynamic state feeding the sim, surface, shoreline, optics,
+    /// and coupling planners.
+    pub dynamics: WaterDynamics,
 }
 
 impl Default for WaterViewSample {
@@ -71,6 +193,7 @@ impl Default for WaterViewSample {
             camera_distance: 0.0,
             quality_bias: 0.0,
             particle_count: 0,
+            dynamics: WaterDynamics::default(),
         }
     }
 }
@@ -118,6 +241,14 @@ pub struct WaterExtract {
     /// Foam-advection cells for a body that produces foam (ocean / surface):
     /// `grid_resolution` squared. Zero for volumetric bodies.
     pub foam_cell_count: u32,
+    /// Aggregate per-body planner tuning, forwarded verbatim from the body.
+    pub profile: WaterSimProfile,
+    /// Live per-frame dynamic state forwarded verbatim from the view sample.
+    pub dynamics: WaterDynamics,
+    /// Resolved grid cell size `dx` in meters: the dynamics value when the
+    /// renderer supplies one, otherwise derived from the domain extent and grid
+    /// resolution so the sim / coupling schedules never divide by zero.
+    pub cell_size: f32,
 }
 
 /// Shared per-frame thresholds and layouts every body is resolved against.
@@ -179,6 +310,16 @@ pub struct WaterPrepare {
     /// Foam-advection work units charged against the foam quota; `0` for bodies
     /// that produce no foam.
     pub foam_cost: u32,
+    /// Per-frame solver-stepping schedule (sub-steps, stable dt, folding).
+    pub sim: SimStepPlan,
+    /// Breaking / foam / crest-spray surface-effect plan for the sample.
+    pub surface_fx: SurfaceFxPlan,
+    /// Waterline transition and surface-wetness plan for the shoreline sample.
+    pub shoreline: ShorelinePlan,
+    /// Spectral refraction / extinction / scattering optics plan.
+    pub optics: OpticsPlan,
+    /// Two-way rigid-body coupling forces and read-back schedule.
+    pub coupling: CouplingFramePlan,
 }
 
 /// The arbitrated, dispatch-ready result for a frame.
@@ -237,6 +378,13 @@ pub fn extract(body: &WaterBody, sample: WaterViewSample) -> WaterExtract {
         WaterKind::Ocean | WaterKind::Surface => sq,
         WaterKind::Volume => 0,
     };
+    let cell_size = if sample.dynamics.cell_size > super::EPS {
+        sample.dynamics.cell_size
+    } else {
+        let span = body.domain_half_extent.x.abs() * 2.0;
+        let res = body.grid_resolution.max(1) as f32;
+        (span / res).max(super::EPS)
+    };
     WaterExtract {
         body: body.handle,
         kind: body.kind,
@@ -248,6 +396,9 @@ pub fn extract(body: &WaterBody, sample: WaterViewSample) -> WaterExtract {
         solver_cell_count,
         displacement_vertex_count,
         foam_cell_count,
+        profile: body.profile,
+        dynamics: sample.dynamics,
+        cell_size,
     }
 }
 
@@ -305,6 +456,63 @@ pub fn prepare(extract: WaterExtract, config: &WaterFrameConfig) -> WaterPrepare
     };
     let foam_cost = extract.foam_cell_count;
 
+    let dynamics = extract.dynamics;
+    let sim = plan_sim(
+        extract.profile.sim,
+        SimInputs {
+            solver: extract.solver,
+            frame_dt: dynamics.frame_dt,
+            cell_size: extract.cell_size,
+            max_signal_speed: dynamics.max_signal_speed,
+            min_jacobian: dynamics.min_jacobian,
+        },
+    );
+    let surface_fx = plan_surface_fx(
+        extract.profile.surface_fx,
+        SurfaceFxInputs {
+            sample: dynamics.breaking,
+            tangent: dynamics.crest_tangent,
+            normal: dynamics.surface_normal,
+            flow_speed: dynamics.flow_speed,
+        },
+    );
+    let shoreline = plan_shoreline(
+        extract.profile.shoreline,
+        ShorelineInputs {
+            sample_y: dynamics.sample_y,
+            water_surface_y: dynamics.water_surface_y,
+            water_depth: dynamics.water_depth,
+            dist_above_water: dynamics.dist_above_water,
+            moisture: dynamics.moisture,
+            rain_rate: dynamics.rain_rate,
+            dt: dynamics.frame_dt,
+        },
+    );
+    let optics = plan_optics(
+        extract.profile.optics,
+        OpticsInputs {
+            sin_incidence: dynamics.sin_incidence,
+            view_depth: dynamics.view_depth,
+            surface_color: dynamics.surface_color,
+            surface_light: dynamics.surface_light,
+            cos_scatter: dynamics.cos_scatter,
+            shaft_length: dynamics.shaft_length,
+        },
+    );
+    let coupling = plan_coupling_frame(
+        extract.profile.coupling,
+        CouplingInputs {
+            query_count: dynamics.coupling_query_count,
+            max_rel_speed: dynamics.max_rel_speed,
+            frame_dt: dynamics.frame_dt,
+            cell_size: extract.cell_size,
+            submerged_volume: dynamics.submerged_volume,
+            total_volume: dynamics.total_volume,
+            cross_section: dynamics.cross_section,
+            rel_speed: dynamics.rel_speed,
+        },
+    );
+
     WaterPrepare {
         body: extract.body,
         kind: extract.kind,
@@ -320,6 +528,11 @@ pub fn prepare(extract: WaterExtract, config: &WaterFrameConfig) -> WaterPrepare
         reconstruct_cost,
         displacement_cost,
         foam_cost,
+        sim,
+        surface_fx,
+        shoreline,
+        optics,
+        coupling,
     }
 }
 
@@ -377,6 +590,22 @@ fn push_requests(prepare: &WaterPrepare, requests: &mut Vec<WaterJobRequest>) {
             handle: prepare.body,
             kind: WaterJobKind::FoamAdvect,
             cost: prepare.foam_cost,
+            priority,
+        });
+    }
+    if prepare.surface_fx.spray.count > 0 {
+        requests.push(WaterJobRequest {
+            handle: prepare.body,
+            kind: WaterJobKind::SprayEmit,
+            cost: prepare.surface_fx.spray.count,
+            priority,
+        });
+    }
+    if prepare.coupling.plan.readback_batch > 0 {
+        requests.push(WaterJobRequest {
+            handle: prepare.body,
+            kind: WaterJobKind::Coupling,
+            cost: prepare.coupling.plan.readback_batch,
             priority,
         });
     }
@@ -481,6 +710,8 @@ mod tests {
         reconstruct_cells_per_frame: 1_000_000,
         displacement_vertices_per_frame: 1_000_000,
         foam_cells_per_frame: 1_000_000,
+        spray_bursts_per_frame: 1_000_000,
+        coupling_queries_per_frame: 1_000_000,
     };
 
     fn body(handle: u32, kind: WaterKind, solver: SolverKind) -> WaterBody {
@@ -492,8 +723,9 @@ mod tests {
             deformation: DeformationHandle(handle),
             grid_resolution: 16,
             cascade_count: 4,
-            domain_half_extent: super::super::Vec3::new(10.0, 10.0, 10.0),
+            domain_half_extent: Vec3::new(10.0, 10.0, 10.0),
             still_water_level: 0.0,
+            profile: WaterSimProfile::physical_water(),
         }
     }
 
@@ -502,6 +734,7 @@ mod tests {
             camera_distance: distance,
             quality_bias: 0.0,
             particle_count: particles,
+            dynamics: WaterDynamics::default(),
         }
     }
 
@@ -654,6 +887,8 @@ mod tests {
             reconstruct_cells_per_frame: 1,
             displacement_vertices_per_frame: 1,
             foam_cells_per_frame: 1,
+            spray_bursts_per_frame: 1,
+            coupling_queries_per_frame: 1,
         };
         let a = prepare(
             extract(
@@ -729,5 +964,119 @@ mod tests {
         assert!(plan.prepares.is_empty());
         assert_eq!(plan.queue.plan.scheduled_count(), 0);
         assert!(plan.queue.clipmap.is_empty());
+    }
+
+    fn sample_with_dynamics(distance: f32, dynamics: WaterDynamics) -> WaterViewSample {
+        WaterViewSample {
+            camera_distance: distance,
+            quality_bias: 0.0,
+            particle_count: 0,
+            dynamics,
+        }
+    }
+
+    #[test]
+    fn quiescent_dynamics_emit_no_spray_or_coupling_jobs() {
+        // The default dynamics describe calm, uncoupled water, so the integrated
+        // surface-effect and coupling planners must not enqueue any work.
+        let calm = prepare(
+            extract(
+                &body(0, WaterKind::Surface, SolverKind::ShallowWater),
+                sample(5.0, 0),
+            ),
+            &CONFIG,
+        );
+        let q = queue(&[calm], BUDGET, CONFIG.clipmap);
+        assert_eq!(q.plan.count_of_kind(WaterJobKind::SprayEmit), 0);
+        assert_eq!(q.plan.count_of_kind(WaterJobKind::Coupling), 0);
+    }
+
+    #[test]
+    fn queue_emits_spray_job_for_breaking_crest() {
+        // A steep, folded, high-curvature crest classifies as breaking and must
+        // schedule a crest-spray emission burst.
+        let dynamics = WaterDynamics {
+            breaking: BreakingSample {
+                steepness: 3.0,
+                jacobian: -0.5,
+                curvature: 8.0,
+            },
+            crest_tangent: Vec3::new(1.0, 0.0, 0.0),
+            flow_speed: 1.0,
+            ..WaterDynamics::default()
+        };
+        let breaking = prepare(
+            extract(
+                &body(4, WaterKind::Surface, SolverKind::ShallowWater),
+                sample_with_dynamics(5.0, dynamics),
+            ),
+            &CONFIG,
+        );
+        assert!(breaking.surface_fx.spray.count > 0);
+        let q = queue(&[breaking], BUDGET, CONFIG.clipmap);
+        assert_eq!(q.plan.count_of_kind(WaterJobKind::SprayEmit), 1);
+        assert_eq!(
+            q.plan.handles_of_kind(WaterJobKind::SprayEmit).first(),
+            Some(&WaterBodyHandle(4))
+        );
+    }
+
+    #[test]
+    fn queue_emits_coupling_job_when_queries_requested() {
+        // Pending two-way coupling queries drive a read-back batch, which must
+        // surface as a coupling job bounded by the profile read-back cap.
+        let dynamics = WaterDynamics {
+            coupling_query_count: 4,
+            frame_dt: 1.0 / 60.0,
+            submerged_volume: 0.5,
+            total_volume: 1.0,
+            cross_section: 0.25,
+            rel_speed: 2.0,
+            max_rel_speed: 2.0,
+            ..WaterDynamics::default()
+        };
+        let coupled = prepare(
+            extract(
+                &body(6, WaterKind::Volume, SolverKind::Pbf),
+                sample_with_dynamics(5.0, dynamics),
+            ),
+            &CONFIG,
+        );
+        assert!(coupled.coupling.plan.readback_batch > 0);
+        let q = queue(&[coupled], BUDGET, CONFIG.clipmap);
+        assert_eq!(q.plan.count_of_kind(WaterJobKind::Coupling), 1);
+        assert_eq!(
+            q.plan.handles_of_kind(WaterJobKind::Coupling).first(),
+            Some(&WaterBodyHandle(6))
+        );
+    }
+
+    #[test]
+    fn prepare_planner_outputs_are_deterministic() {
+        // The five integrated planner outputs are pure functions of the extract,
+        // so preparing the same body twice yields byte-identical plans.
+        let dynamics = WaterDynamics {
+            breaking: BreakingSample {
+                steepness: 2.0,
+                jacobian: -0.2,
+                curvature: 6.0,
+            },
+            crest_tangent: Vec3::new(1.0, 0.0, 0.0),
+            flow_speed: 1.5,
+            frame_dt: 1.0 / 60.0,
+            max_signal_speed: 5.0,
+            coupling_query_count: 3,
+            total_volume: 1.0,
+            submerged_volume: 0.4,
+            ..WaterDynamics::default()
+        };
+        let b = body(2, WaterKind::Surface, SolverKind::ShallowWater);
+        let first = prepare(extract(&b, sample_with_dynamics(8.0, dynamics)), &CONFIG);
+        let second = prepare(extract(&b, sample_with_dynamics(8.0, dynamics)), &CONFIG);
+        assert_eq!(first.sim, second.sim);
+        assert_eq!(first.surface_fx, second.surface_fx);
+        assert_eq!(first.shoreline, second.shoreline);
+        assert_eq!(first.optics, second.optics);
+        assert_eq!(first.coupling, second.coupling);
     }
 }

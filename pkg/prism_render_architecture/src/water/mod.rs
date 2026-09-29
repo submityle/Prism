@@ -565,6 +565,9 @@ pub struct WaterBody {
     pub domain_half_extent: Vec3,
     /// Still-water reference level (world Y), the height the surface relaxes to.
     pub still_water_level: f32,
+    /// Aggregate per-frame simulation/shading tuning fed to the per-frame
+    /// planners (`sim`, `surface_fx`, `shoreline`, `optics`, `coupling`).
+    pub profile: profile::WaterSimProfile,
 }
 
 /// Per-frame caps arbitrated by [`budget::plan_water`], the water analogue of
@@ -580,6 +583,10 @@ pub struct WaterBudget {
     pub displacement_vertices_per_frame: u32,
     /// Foam-advection cells stepped per frame.
     pub foam_cells_per_frame: u32,
+    /// Crest-spray emission bursts admitted per frame.
+    pub spray_bursts_per_frame: u32,
+    /// Two-way coupling field read-back queries admitted per frame.
+    pub coupling_queries_per_frame: u32,
 }
 
 #[cfg(test)]

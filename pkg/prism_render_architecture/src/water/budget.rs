@@ -37,6 +37,12 @@ pub enum WaterJobKind {
     /// Foam-density advection. Charged against
     /// [`WaterBudget::foam_cells_per_frame`].
     FoamAdvect,
+    /// Crest-spray particle emission burst. Charged against
+    /// [`WaterBudget::spray_bursts_per_frame`].
+    SprayEmit,
+    /// Two-way coupling field read-back query. Charged against
+    /// [`WaterBudget::coupling_queries_per_frame`].
+    Coupling,
 }
 
 impl WaterJobKind {
@@ -48,6 +54,8 @@ impl WaterJobKind {
             WaterJobKind::Reconstruct => 1,
             WaterJobKind::Displacement => 2,
             WaterJobKind::FoamAdvect => 3,
+            WaterJobKind::SprayEmit => 4,
+            WaterJobKind::Coupling => 5,
         }
     }
 
@@ -59,6 +67,8 @@ impl WaterJobKind {
             WaterJobKind::Reconstruct => budget.reconstruct_cells_per_frame,
             WaterJobKind::Displacement => budget.displacement_vertices_per_frame,
             WaterJobKind::FoamAdvect => budget.foam_cells_per_frame,
+            WaterJobKind::SprayEmit => budget.spray_bursts_per_frame,
+            WaterJobKind::Coupling => budget.coupling_queries_per_frame,
         }
     }
 }
@@ -91,6 +101,10 @@ pub struct WaterSolvePlan {
     pub displacement_used: u32,
     /// Foam-advection cells charged this frame.
     pub foam_used: u32,
+    /// Crest-spray emission bursts charged this frame.
+    pub spray_used: u32,
+    /// Two-way coupling read-back queries charged this frame.
+    pub coupling_used: u32,
 }
 
 impl WaterSolvePlan {
@@ -124,6 +138,8 @@ impl WaterSolvePlan {
             WaterJobKind::Reconstruct => self.reconstruct_used,
             WaterJobKind::Displacement => self.displacement_used,
             WaterJobKind::FoamAdvect => self.foam_used,
+            WaterJobKind::SprayEmit => self.spray_used,
+            WaterJobKind::Coupling => self.coupling_used,
         }
     }
 
@@ -138,6 +154,10 @@ impl WaterSolvePlan {
                 self.displacement_used = self.displacement_used.saturating_add(cost);
             }
             WaterJobKind::FoamAdvect => self.foam_used = self.foam_used.saturating_add(cost),
+            WaterJobKind::SprayEmit => self.spray_used = self.spray_used.saturating_add(cost),
+            WaterJobKind::Coupling => {
+                self.coupling_used = self.coupling_used.saturating_add(cost);
+            }
         }
     }
 }
@@ -170,7 +190,7 @@ pub fn plan_water(requests: &[WaterJobRequest], budget: WaterBudget) -> WaterSol
 
     let mut plan = WaterSolvePlan::default();
     // One quota state per job kind, indexed by `WaterJobKind::order`.
-    let mut quotas = [QuotaState::default(); 4];
+    let mut quotas = [QuotaState::default(); 6];
 
     for request in ordered {
         let state = &mut quotas[request.kind.order() as usize];
@@ -209,6 +229,8 @@ mod tests {
         reconstruct_cells_per_frame: 1000,
         displacement_vertices_per_frame: 1000,
         foam_cells_per_frame: 1000,
+        spray_bursts_per_frame: 1000,
+        coupling_queries_per_frame: 1000,
     };
 
     #[test]
@@ -318,6 +340,51 @@ mod tests {
         assert_eq!(plan.scheduled_count(), 0);
         assert_eq!(plan.steps_used, 0);
         assert!(plan.deferred.is_empty());
+    }
+
+    #[test]
+    fn spray_and_coupling_quotas_are_independent() {
+        // Saturating spray must not block coupling read-back, and each new kind
+        // charges its own running total.
+        let requests = [
+            req(1, WaterJobKind::SprayEmit, 900, 10),
+            req(2, WaterJobKind::SprayEmit, 900, 9),
+            req(3, WaterJobKind::Coupling, 900, 8),
+        ];
+        let plan = plan_water(&requests, BUDGET);
+        assert_eq!(plan.count_of_kind(WaterJobKind::SprayEmit), 1);
+        assert_eq!(plan.count_of_kind(WaterJobKind::Coupling), 1);
+        assert_eq!(plan.deferred.len(), 1);
+        assert_eq!(plan.deferred[0].handle, WaterBodyHandle(2));
+        assert_eq!(plan.spray_used, 900);
+        assert_eq!(plan.coupling_used, 900);
+        assert_eq!(plan.used_of_kind(WaterJobKind::SprayEmit), 900);
+        assert_eq!(plan.used_of_kind(WaterJobKind::Coupling), 900);
+    }
+
+    #[test]
+    fn all_six_kinds_order_breaks_full_ties() {
+        let requests = [
+            req(1, WaterJobKind::Coupling, 1, 5),
+            req(1, WaterJobKind::SprayEmit, 1, 5),
+            req(1, WaterJobKind::FoamAdvect, 1, 5),
+            req(1, WaterJobKind::SolveStep, 1, 5),
+            req(1, WaterJobKind::Displacement, 1, 5),
+            req(1, WaterJobKind::Reconstruct, 1, 5),
+        ];
+        let plan = plan_water(&requests, BUDGET);
+        let kinds: Vec<WaterJobKind> = plan.scheduled.iter().map(|j| j.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                WaterJobKind::SolveStep,
+                WaterJobKind::Reconstruct,
+                WaterJobKind::Displacement,
+                WaterJobKind::FoamAdvect,
+                WaterJobKind::SprayEmit,
+                WaterJobKind::Coupling,
+            ]
+        );
     }
 
     #[test]
