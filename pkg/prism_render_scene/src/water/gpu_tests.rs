@@ -419,3 +419,249 @@ fn swe_step_gpu_matches_cpu_golden() {
         i += 1;
     }
 }
+
+// ===========================================================================
+// Foam advection + decay parity (`water_foam_advect`, water_surface.wesl)
+// ===========================================================================
+
+use prism_render_architecture::water::foam::{self, FoamConfig};
+
+use super::abi::GpuWaterFoamParams;
+
+/// Builds a deterministic, non-trivial foam field plus its surface flow and
+/// this step's reactive sources.
+///
+/// A raised algebraic coverage bump, a sheared velocity field (so the
+/// semi-Lagrangian backtrace lands on fractional cell coordinates and exercises
+/// the bilinear resample), and two additive sources drive every branch of the
+/// step: advection, flow-aware decay, source injection, and the `0..=1` clamp.
+/// No transcendental inputs are used; the only nonlinearity is the shared
+/// polynomial `exp_approx`, identical on both paths.
+fn build_initial_foam(nx: usize, nz: usize) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
+    let n = nx * nz;
+    let mut density = vec![0.0_f32; n];
+    let mut u = vec![0.0_f32; n];
+    let mut v = vec![0.0_f32; n];
+    let cx = (nx as f32 - 1.0) * 0.5;
+    let cz = (nz as f32 - 1.0) * 0.5;
+    let mut z = 0;
+    while z < nz {
+        let mut x = 0;
+        while x < nx {
+            let i = z * nx + x;
+            let fx = x as f32 - cx;
+            let fz = z as f32 - cz;
+            let r2 = fx * fx + fz * fz;
+            let bump = (1.0 - r2 * 0.03).max(0.0);
+            density[i] = 0.15 + 0.7 * bump;
+            u[i] = 0.3 + 0.05 * fx;
+            v[i] = -0.2 + 0.04 * fz;
+            x += 1;
+        }
+        z += 1;
+    }
+    let mut sources = vec![0.0_f32; n];
+    sources[(nz / 2) * nx + (nx / 2)] = 0.4;
+    sources[(nz / 4) * nx + (nx / 4)] = 0.25;
+    (density, u, v, sources)
+}
+
+/// Dispatches one `water_foam_advect` step on device and reads back the field.
+///
+/// The kernel declares its resources on `@group(1)`, so the bind group is built
+/// from the pipeline's reflected `group(1)` layout and set at binding index `1`
+/// (the auto-derived `group(0)` is empty and referenced by nothing, so it needs
+/// no bind group). The six bindings match the shader's declaration order:
+/// `foam_in`, `foam_u`, `foam_v`, `foam_sources`, `foam_out`, `foam_params`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one linear dispatch-and-readback keeps the parity path auditable"
+)]
+fn dispatch_foam(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    wgsl: &str,
+    entry: &str,
+    cfg: FoamConfig,
+    density: &[f32],
+    u: &[f32],
+    v: &[f32],
+    sources: &[f32],
+    params: &GpuWaterFoamParams,
+) -> Vec<f32> {
+    let n = cfg.cell_count();
+    let scalar_bytes = (n * size_of::<f32>()) as u64;
+
+    let module = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("water_surface_parity"),
+        source: ShaderSource::Wgsl(wgsl.into()),
+    });
+    let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("water_foam_advect_parity"),
+        layout: None,
+        module: &module,
+        entry_point: Some(entry),
+        compilation_options: PipelineCompilationOptions::default(),
+        cache: None,
+    });
+
+    let storage_read = BufferUsages::STORAGE;
+    let storage_out = BufferUsages::STORAGE | BufferUsages::COPY_SRC;
+    let foam_in = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("foam_in"),
+        contents: bytemuck::cast_slice(density),
+        usage: storage_read,
+    });
+    let foam_u = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("foam_u"),
+        contents: bytemuck::cast_slice(u),
+        usage: storage_read,
+    });
+    let foam_v = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("foam_v"),
+        contents: bytemuck::cast_slice(v),
+        usage: storage_read,
+    });
+    let foam_sources = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("foam_sources"),
+        contents: bytemuck::cast_slice(sources),
+        usage: storage_read,
+    });
+    let foam_out = device.create_buffer(&BufferDescriptor {
+        label: Some("foam_out"),
+        size: scalar_bytes,
+        usage: storage_out,
+        mapped_at_creation: false,
+    });
+    let param_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("foam_params"),
+        contents: bytemuck::bytes_of(params),
+        usage: BufferUsages::UNIFORM,
+    });
+
+    let layout = pipeline.get_bind_group_layout(1);
+    let bind_group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("water_foam_advect_bind_group"),
+        layout: &layout,
+        entries: &[
+            BindGroupEntry {
+                binding: 0,
+                resource: foam_in.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 1,
+                resource: foam_u.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 2,
+                resource: foam_v.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 3,
+                resource: foam_sources.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 4,
+                resource: foam_out.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 5,
+                resource: param_buf.as_entire_binding(),
+            },
+        ],
+    });
+
+    let out_stage = device.create_buffer(&BufferDescriptor {
+        label: Some("foam_out_stage"),
+        size: scalar_bytes,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("foam_parity_encoder"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("foam_parity_pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(1, &bind_group, &[]);
+        pass.dispatch_workgroups(cfg.nx.div_ceil(8), cfg.nz.div_ceil(8), 1);
+    }
+    encoder.copy_buffer_to_buffer(&foam_out, 0, &out_stage, 0, scalar_bytes);
+    queue.submit([encoder.finish()]);
+
+    out_stage.slice(..).map_async(MapMode::Read, |_| {});
+    device
+        .poll(PollType::wait_indefinitely())
+        .expect("device poll should complete the submitted work");
+
+    let view = out_stage
+        .slice(..)
+        .get_mapped_range()
+        .expect("mapped readback range should be available after poll");
+    let values: Vec<f32> = bytemuck::cast_slice::<u8, f32>(&view).to_vec();
+    drop(view);
+    out_stage.unmap();
+    values
+}
+
+/// One on-device foam step must match the `CPU` golden within `float32` rounding.
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice must reach the test log on hosts without a wgpu adapter"
+)]
+fn foam_advect_gpu_matches_cpu_golden() {
+    let Some((device, queue)) = try_solver_device() else {
+        eprintln!("foam_advect_gpu_matches_cpu_golden: no wgpu adapter, skipping on-device parity");
+        return;
+    };
+
+    const NX: usize = 16;
+    const NZ: usize = 16;
+    let cfg = FoamConfig {
+        nx: NX as u32,
+        nz: NZ as u32,
+        dx: 0.5,
+        base_decay: 0.8,
+        persistence_floor: 0.1,
+        reference_speed: 2.0,
+    };
+    let dt = 0.1_f32;
+
+    let (density, u, v, sources) = build_initial_foam(NX, NZ);
+    let golden = foam::step_foam(&density, &u, &v, &sources, cfg, dt);
+
+    let params = GpuWaterFoamParams {
+        nx: cfg.nx,
+        nz: cfg.nz,
+        dx: cfg.dx,
+        dt,
+        base_decay: cfg.base_decay,
+        persistence_floor: cfg.persistence_floor,
+        reference_speed: cfg.reference_speed,
+        _pad: 0,
+    };
+
+    let wgsl = compile_surface_wgsl();
+    let entry = find_entry_point(&wgsl, "foam_advect");
+    let gpu = dispatch_foam(
+        &device, &queue, &wgsl, &entry, cfg, &density, &u, &v, &sources, &params,
+    );
+
+    assert_eq!(gpu.len(), golden.len(), "cell count mismatch");
+    let mut i = 0;
+    while i < golden.len() {
+        let d = (gpu[i] - golden[i]).abs();
+        assert!(
+            d < PARITY_EPS,
+            "cell {i}: gpu={} cpu={} |d|={d}",
+            gpu[i],
+            golden[i],
+        );
+        i += 1;
+    }
+}
