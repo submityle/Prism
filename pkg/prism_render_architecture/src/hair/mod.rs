@@ -20,7 +20,9 @@
 //!    come to rest are gated out of simulation by a hysteretic sleep test
 //!    (see [`sleep`]) so a crowd never charges the budget for still hair.
 //!    The per-frame vertex work is arbitrated by [`crate::deformation::schedule`];
-//!    this subsystem only emits requests, it does not own the budget.
+//!    this subsystem only emits requests, it does not own the budget. The
+//!    fixed per-frame ordering of these passes (wind, guide solve, body and
+//!    self-collision) is encoded once by [`groom::step_groom`].
 //! 3. **LOD** — a ladder from full strands to decimated strands to camera
 //!    cards to a static mesh shell, selected by screen coverage; see [`lod`].
 //!    Tier switches are cross-faded with a deterministic per-strand dither so
@@ -42,6 +44,7 @@
 pub mod collision;
 pub mod deep_transmittance;
 pub mod dynamics;
+pub mod groom;
 pub mod interpolation;
 pub mod lod;
 pub mod raster;
