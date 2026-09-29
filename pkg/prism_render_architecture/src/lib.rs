@@ -29,6 +29,7 @@ pub mod material;
 pub mod memory;
 pub mod motion;
 pub mod paging;
+pub mod particle;
 pub mod quality;
 pub mod ray_scene;
 pub mod shader_package;
