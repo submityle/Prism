@@ -41,7 +41,11 @@ pub(crate) mod plugin;
 mod prepare;
 mod resources;
 #[cfg(test)]
+mod aero_gpu_tests;
+#[cfg(test)]
 mod aero_parity;
 #[cfg(test)]
 mod shader_tests;
+#[cfg(test)]
+mod sim_gpu_tests;
 mod solve_plan;
