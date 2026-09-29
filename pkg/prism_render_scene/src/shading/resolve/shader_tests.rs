@@ -807,6 +807,31 @@ fn hair_root_bind_wesl_compiles_standalone() {
         .unwrap_or_else(|error| panic!("hair_root_bind.wesl failed to compile: {error}"));
 }
 
+/// Registers and compiles `hair_lod_dither.wesl` standalone. A green result
+/// proves the GPU per-strand LOD cross-fade dither mask — the `vec2<u32>`
+/// `splitmix64` 64-bit finalizer shared with the interpolation kernel, the
+/// `hash_to_unit` top-24-bit mantissa, and the `hash >= clamp(blend, 0, 1)`
+/// keep test — parses and type-checks as WESL on its own, in lock-step with the
+/// CPU golden in
+/// `prism_render_architecture::hair::transition::strand_survives_dither`.
+#[test]
+fn hair_lod_dither_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let hair_dither = shader_id(0x5052_4953_4d5f_4841_4952_5f44_5448_0001);
+    cache.set_shader(
+        hair_dither,
+        Shader::from_wesl(
+            include_str!("../../shaders/hair_lod_dither.wesl"),
+            "embedded://prism_render_scene/shaders/hair_lod_dither.wesl",
+        ),
+    );
+
+    cache
+        .get(0, hair_dither, &[])
+        .unwrap_or_else(|error| panic!("hair_lod_dither.wesl failed to compile: {error}"));
+}
+
 /// Registers `lighting.wesl`, `brdf.wesl` and `stylized_hair.wesl` under their
 /// canonical module paths and compiles `stylized_hair.wesl`, forcing the
 /// importer to resolve the `prism_render_scene::shaders::brdf::{...}` imports
