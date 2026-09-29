@@ -220,6 +220,7 @@ fn carving_holes_only_raises_transmittance() {
         density_threshold: 1.0e-4,
         transmittance_cutoff: 0.0,
         max_steps: 1000,
+        powder_strength: 0.0,
     };
     let phase = hg_phase(0.2, 0.5);
     let base_fn = |_t: f32| 0.5_f32;

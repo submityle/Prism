@@ -23,6 +23,7 @@
 //! shared [`super::math::exp_approx`].
 
 use super::math::{clamp, exp_approx, lerp, saturate, EPS};
+use super::scatter::powder;
 
 /// Tunable thresholds controlling the adaptive `raymarch`.
 ///
@@ -44,6 +45,12 @@ pub struct RaymarchConfig {
     pub transmittance_cutoff: f32,
     /// Hard cap on marching steps so the walk always terminates.
     pub max_steps: u32,
+    /// Nubis `powder` dark-edge intensity in `[0, 1]`. `0` disables the term
+    /// (in-scatter is unmodulated); `1` applies the full
+    /// `1 - exp(-2 * view_optical_depth)` darkening near cloud edges. Values
+    /// are clamped, so the modulation always lives in `[0, 1]` and can only
+    /// remove energy (never amplify or blow out).
+    pub powder_strength: f32,
 }
 
 impl Default for RaymarchConfig {
@@ -55,6 +62,7 @@ impl Default for RaymarchConfig {
             density_threshold: 1.0e-3,
             transmittance_cutoff: 1.0e-2,
             max_steps: 256,
+            powder_strength: 0.0,
         }
     }
 }
@@ -129,8 +137,10 @@ pub fn should_early_terminate(transmittance: f32, cfg: RaymarchConfig) -> bool {
 /// are clamped to zero and `light_transmittance` is saturated, so the update
 /// never amplifies energy or produces `NaN`. The scattered contribution uses
 /// the analytic segment integral `sigma_s * (1 - exp(-sigma_t*step))/sigma_t`,
-/// degrading to `sigma_s * step` as `sigma_t` approaches zero. `steps_taken` is
-/// incremented by one.
+/// degrading to `sigma_s * step` as `sigma_t` approaches zero. `powder_factor`
+/// is the Nubis dark-edge modulation for this segment (`1` = no darkening); it
+/// is saturated into `[0, 1]` so it can only remove in-scattered energy, never
+/// amplify it. `steps_taken` is incremented by one.
 pub fn integrate_segment(
     state: &mut RaymarchState,
     sigma_t: f32,
@@ -138,12 +148,14 @@ pub fn integrate_segment(
     phase: f32,
     step: f32,
     light_transmittance: f32,
+    powder_factor: f32,
 ) {
     let sigma_t = if sigma_t > 0.0 { sigma_t } else { 0.0 };
     let sigma_s = if sigma_s > 0.0 { sigma_s } else { 0.0 };
     let phase = if phase > 0.0 { phase } else { 0.0 };
     let step = if step > 0.0 { step } else { 0.0 };
     let light = saturate(light_transmittance);
+    let powder_factor = saturate(powder_factor);
 
     let seg_optical = sigma_t * step;
     let seg_trans = exp_approx(-seg_optical);
@@ -154,7 +166,7 @@ pub fn integrate_segment(
     } else {
         step
     };
-    state.scattered += state.transmittance * light * sigma_s * phase * integral;
+    state.scattered += state.transmittance * light * sigma_s * phase * integral * powder_factor;
     state.transmittance = saturate(state.transmittance * seg_trans);
     state.optical_depth += seg_optical;
     state.steps_taken += 1;
@@ -207,7 +219,23 @@ where
         if in_cloud {
             let (sigma_t, sigma_s) = sigma_fn(density);
             let light = light_fn(t + step * 0.5);
-            integrate_segment(&mut state, sigma_t, sigma_s, phase, step, light);
+            // `state.optical_depth` here is the density accumulated along the
+            // view ray up to (not including) this segment, exactly the
+            // `density_along_view` the Nubis `powder` curve consumes.
+            let powder_factor = if cfg.powder_strength > 0.0 {
+                lerp(1.0, powder(state.optical_depth, 1.0), cfg.powder_strength)
+            } else {
+                1.0
+            };
+            integrate_segment(
+                &mut state,
+                sigma_t,
+                sigma_s,
+                phase,
+                step,
+                light,
+                powder_factor,
+            );
         } else {
             // Empty space: no medium to scatter, only advance and count a step.
             state.steps_taken += 1;
@@ -279,7 +307,7 @@ mod tests {
         let mut state = RaymarchState::new();
         let mut prev = state.transmittance;
         for _ in 0..64 {
-            integrate_segment(&mut state, 0.05, 0.02, 0.3, 2.0, 0.8);
+            integrate_segment(&mut state, 0.05, 0.02, 0.3, 2.0, 0.8, 1.0);
             assert!((0.0..=1.0).contains(&state.transmittance));
             assert!(state.transmittance <= prev + EPS);
             assert!(state.scattered >= 0.0 && state.scattered.is_finite());
@@ -335,10 +363,10 @@ mod tests {
         assert_eq!(n.steps_taken, 0);
         // Negative / huge coefficients and out-of-range light are clamped.
         let mut s = RaymarchState::new();
-        integrate_segment(&mut s, -1.0, -1.0, -1.0, -1.0, 5.0);
+        integrate_segment(&mut s, -1.0, -1.0, -1.0, -1.0, 5.0, 1.0);
         assert_eq!(s.transmittance, 1.0);
         assert_eq!(s.scattered, 0.0);
-        integrate_segment(&mut s, 1.0e6, 1.0e6, 10.0, 10.0, 2.0);
+        integrate_segment(&mut s, 1.0e6, 1.0e6, 10.0, 10.0, 2.0, 1.0);
         assert!((0.0..=1.0).contains(&s.transmittance));
         assert!(s.scattered.is_finite());
         // Inverted step bounds still terminate and clamp.
@@ -349,5 +377,52 @@ mod tests {
         };
         let step = adaptive_step(0.5, true, bad);
         assert!(step.is_finite());
+    }
+
+    #[test]
+    fn powder_darkens_dense_march_and_stays_energy_bounded() {
+        // A dense uniform column with fine, non-adaptive steps so both marches
+        // walk the identical step sequence; the only difference is the Nubis
+        // `powder` modulation. Powder can only remove in-scattered energy, so
+        // enabling it must not increase `scattered` and must keep it finite and
+        // bounded, while leaving `transmittance` (pure extinction) untouched.
+        let base = RaymarchConfig {
+            base_step: 0.5,
+            max_step: 0.5,
+            min_step: 0.5,
+            density_threshold: 1.0e-4,
+            transmittance_cutoff: 0.0,
+            max_steps: 64,
+            powder_strength: 0.0,
+        };
+        let powdered = RaymarchConfig {
+            powder_strength: 1.0,
+            ..base
+        };
+        let density_fn = |_t: f32| 0.6_f32;
+        let sigma_fn = |d: f32| (0.4 * d, 0.3 * d);
+        let phase = 0.3;
+        let light_fn = |_t: f32| 0.9_f32;
+
+        let m0 = march(density_fn, sigma_fn, phase, light_fn, 16.0, base);
+        let m1 = march(density_fn, sigma_fn, phase, light_fn, 16.0, powdered);
+
+        assert!(m1.scattered.is_finite());
+        assert!(m1.scattered >= 0.0);
+        // Dark-edge modulation strictly removes energy on a lit dense column.
+        assert!(
+            m1.scattered < m0.scattered,
+            "powder must darken: powdered={} plain={}",
+            m1.scattered,
+            m0.scattered
+        );
+        // Extinction (transmittance) and marched geometry are unaffected.
+        assert_eq!(m0.transmittance.to_bits(), m1.transmittance.to_bits());
+        assert_eq!(m0.optical_depth.to_bits(), m1.optical_depth.to_bits());
+        assert_eq!(m0.steps_taken, m1.steps_taken);
+
+        // Deterministic: identical inputs reproduce bit-identical radiance.
+        let m1b = march(density_fn, sigma_fn, phase, light_fn, 16.0, powdered);
+        assert_eq!(m1.scattered.to_bits(), m1b.scattered.to_bits());
     }
 }
