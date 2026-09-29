@@ -13,13 +13,18 @@
 //!   (low/high-pass, band-pass, notch, peaking, shelving).
 //! - [`pan::StereoPanNode`] — equal-power mono-to-stereo panner.
 //! - [`mix::SumNode`] — explicit N-input summing node (a bus mixer primitive).
+//!
+//! Insert-style effect processors (parametric EQ, and the rest of the M1
+//! effect family) live in the [`effects`] submodule.
 
 pub mod biquad;
+pub mod effects;
 pub mod gain;
 pub mod mix;
 pub mod pan;
 
 pub use biquad::{BiquadKind, BiquadNode};
+pub use effects::{EqBand, ParametricEqNode};
 pub use gain::GainNode;
 pub use mix::SumNode;
 pub use pan::StereoPanNode;
