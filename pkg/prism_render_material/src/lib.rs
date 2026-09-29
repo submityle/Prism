@@ -4,20 +4,21 @@
 
 extern crate alloc;
 
+mod axis;
 #[cfg(feature = "bevy")]
 mod bevy_bridge;
-mod axis;
 mod handle;
 mod ir;
 mod record;
 mod registry;
 mod resources;
+mod surface;
 mod validation;
 
+pub use axis::{Illumination, SpecializationId};
 #[cfg(feature = "bevy")]
 pub use bevy_bridge::{lower_standard_material, StandardMaterialTextureResolver, TextureSemantic};
 pub use handle::{MaterialCapacityError, MaterialHandleAllocator, MaterialHandleError};
-pub use axis::{Illumination, SpecializationId};
 pub use ir::{
     ClosureKind, MaterialGraph, MaterialNode, MaterialNodeId, MaterialValue, NormalizedMaterial,
     MAX_CLOSURE_SLAB_DEPTH,
@@ -25,11 +26,16 @@ pub use ir::{
 pub use record::{
     fallback_material_header, fallback_material_record, inactive_material_header,
     GpuMaterialHeader, GpuMaterialTexture, GpuSurfaceParameters, MaterialDomain,
-    MaterialFeatureFlags, MaterialRecord, MaterialRenderClass,
-    FALLBACK_MATERIAL_HANDLE, MATERIAL_ABI_VERSION, MAX_MATERIAL_TEXTURES,
+    MaterialFeatureFlags, MaterialRecord, MaterialRenderClass, FALLBACK_MATERIAL_HANDLE,
+    MATERIAL_ABI_VERSION, MAX_MATERIAL_TEXTURES,
 };
 pub use registry::{MaterialRegistry, MaterialRegistryError, MaterialSnapshot};
 pub use resources::{MaterialResourceHandle, MaterialResourceKind, MaterialResourceTable};
+pub use surface::{
+    GpuAnisotropyLobe, GpuClearCoatLobe, GpuEmissionLobe, GpuSheenLobe, GpuSubsurfaceLobe,
+    GpuSurfaceCore, GpuTransmissionLobe, LobeMask, SurfaceParameterBlock, SurfaceUnpackError,
+    SURFACE_CORE_WORDS, SURFACE_LOBE_WORDS,
+};
 pub use validation::{validate_graph, MaterialValidationError};
 
 #[cfg(test)]

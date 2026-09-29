@@ -1,8 +1,10 @@
 use crate::axis::{Illumination, SpecializationId};
+use crate::ir::ClosureKind;
+use crate::surface::{LobeMask, SurfaceParameterBlock};
 use core::ops::{BitOr, BitOrAssign};
 use prism_render_architecture::abi::GenerationalHandle;
 
-pub const MATERIAL_ABI_VERSION: u32 = 2;
+pub const MATERIAL_ABI_VERSION: u32 = 3;
 pub const MAX_MATERIAL_TEXTURES: usize = 8;
 pub const FALLBACK_MATERIAL_HANDLE: GenerationalHandle = GenerationalHandle {
     index: 0,
@@ -99,7 +101,11 @@ pub struct GpuMaterialHeader {
     pub closure_graph_offset: u32,
     pub specialization_low: u32,
     pub specialization_high: u32,
-    pub _pad: u32,
+    /// Which optional über-BSDF lobes this material carries
+    /// ([`LobeMask`](crate::LobeMask) bits). Drives packed-parameter decode
+    /// once the variable-length parameter heap lands; today the scene still
+    /// writes the full decoded row and this is advisory.
+    pub lobe_mask: u32,
 }
 
 impl GpuMaterialHeader {
@@ -226,7 +232,51 @@ pub struct MaterialRecord {
 impl MaterialRecord {
     /// The deterministic specialization identity for this record's axes.
     pub fn specialization(&self) -> SpecializationId {
-        SpecializationId::new(self.illumination, self.closure_mask, self.render_class as u32)
+        SpecializationId::new(
+            self.illumination,
+            self.closure_mask,
+            self.render_class as u32,
+        )
+    }
+
+    /// Which optional über-BSDF lobes this record carries.
+    ///
+    /// Lobes with a dedicated closure kind (emission, clearcoat, sheen,
+    /// subsurface, transmission) are driven by `closure_mask`; anisotropy has
+    /// no closure kind of its own, so it is derived from a non-zero authored
+    /// anisotropy amount. This is the mask serialized into the packed
+    /// parameter block and mirrored into [`GpuMaterialHeader::lobe_mask`].
+    pub fn lobe_mask(&self) -> LobeMask {
+        let has = |kind: ClosureKind| self.closure_mask & (1 << kind as u32) != 0;
+        let mut mask = LobeMask::default();
+        if has(ClosureKind::Emission) || self.features.contains(MaterialFeatureFlags::EMISSIVE) {
+            mask = mask.union(LobeMask::EMISSION);
+        }
+        if has(ClosureKind::ClearCoat) {
+            mask = mask.union(LobeMask::CLEARCOAT);
+        }
+        if has(ClosureKind::Sheen) {
+            mask = mask.union(LobeMask::SHEEN);
+        }
+        if has(ClosureKind::Subsurface) {
+            mask = mask.union(LobeMask::SUBSURFACE);
+        }
+        if has(ClosureKind::Transmission)
+            || self.features.contains(MaterialFeatureFlags::TRANSMISSION)
+        {
+            mask = mask.union(LobeMask::TRANSMISSION);
+        }
+        if self.surface.anisotropy != 0.0 || self.surface.anisotropy_rotation != 0.0 {
+            mask = mask.union(LobeMask::ANISOTROPY);
+        }
+        mask
+    }
+
+    /// The compact core-plus-present-lobes view of this record's surface
+    /// (design doc §3.3). [`SurfaceParameterBlock::pack`] serializes only the
+    /// live lobes, so a plain dielectric costs 12 words instead of 24.
+    pub fn packed_parameters(&self) -> SurfaceParameterBlock {
+        SurfaceParameterBlock::from_full(&self.surface, self.lobe_mask())
     }
 
     pub fn header(
@@ -257,7 +307,7 @@ impl MaterialRecord {
             closure_graph_offset,
             specialization_low: spec.low(),
             specialization_high: spec.high(),
-            _pad: 0,
+            lobe_mask: self.lobe_mask().bits(),
         }
     }
 

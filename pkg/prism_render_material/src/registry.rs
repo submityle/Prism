@@ -154,12 +154,9 @@ impl MaterialRegistry {
         headers[0] = crate::fallback_material_header(self.epoch);
         for (index, slot) in self.slots.iter().enumerate() {
             if let Some(slot) = slot {
-                headers[index] = slot.record.header(
-                    index as u32,
-                    textures.len() as u32,
-                    0,
-                    self.epoch,
-                );
+                headers[index] =
+                    slot.record
+                        .header(index as u32, textures.len() as u32, 0, self.epoch);
                 parameters[index] = slot.record.surface;
                 textures.extend_from_slice(&slot.record.textures);
             }

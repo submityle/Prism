@@ -67,7 +67,11 @@ fn graph_normalization_removes_dead_nodes_and_classifies_npr() {
     assert_eq!(normalized.illumination, Illumination::Stylized);
     assert_eq!(
         normalized.specialization_id,
-        SpecializationId::new(Illumination::Stylized, normalized.closure_mask, MaterialRenderClass::Opaque as u32)
+        SpecializationId::new(
+            Illumination::Stylized,
+            normalized.closure_mask,
+            MaterialRenderClass::Opaque as u32
+        )
     );
 }
 
@@ -83,7 +87,10 @@ fn graph_normalization_rejects_over_deep_closure_slab() {
             inputs: vec![MaterialNodeId(100)],
         },
     )]);
-    nodes.insert(MaterialNodeId(100), MaterialNode::Constant(MaterialValue::Scalar(1.0)));
+    nodes.insert(
+        MaterialNodeId(100),
+        MaterialNode::Constant(MaterialValue::Scalar(1.0)),
+    );
     let mut prev = leaf;
     let mut last = leaf;
     for i in 1..=(MAX_CLOSURE_SLAB_DEPTH + 1) {
@@ -141,7 +148,10 @@ fn standard_material_bridge_preserves_surface_classification() {
     // Clearcoat is a closure lobe, not a shading model: illumination stays Lit
     // and the clearcoat closure bit is set.
     assert_eq!(record.illumination, Illumination::Lit);
-    assert_ne!(record.closure_mask & (1 << ClosureKind::ClearCoat as u32), 0);
+    assert_ne!(
+        record.closure_mask & (1 << ClosureKind::ClearCoat as u32),
+        0
+    );
     assert_eq!(record.surface.alpha_cutoff, 0.37);
     assert!(record.features.contains(MaterialFeatureFlags::DOUBLE_SIDED));
 }
