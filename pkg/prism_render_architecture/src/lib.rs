@@ -21,6 +21,7 @@ pub mod display;
 pub mod frame_graph;
 pub mod geometry;
 pub mod gpu_scene;
+pub mod hair;
 pub mod history;
 pub mod lighting;
 pub mod material;
