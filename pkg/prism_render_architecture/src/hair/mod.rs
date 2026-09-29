@@ -10,7 +10,9 @@
 //!    interpolated into many *render* strands, so simulation cost stays bounded
 //!    while visual density scales; see [`interpolation`].
 //! 2. **Strand dynamics** — guides are advanced by an XPBD-style solver
-//!    (edge-length plus local/global shape constraints); see [`dynamics`], with
+//!    (edge-length plus local/global shape constraints); see [`dynamics`],
+//!    with a Vertex Block Descent high-fidelity solver available for stiff
+//!    styling (braids, gel-set hair) via [`solver`], with
 //!    optional projection out of analytic body proxies (see [`collision`])
 //!    and an optional ambient wind field (see [`wind`]). Grooms that have
 //!    come to rest are gated out of simulation by a hysteretic sleep test
@@ -43,6 +45,7 @@ pub mod lod;
 pub mod raster;
 pub mod rt_proxy;
 pub mod sleep;
+pub mod solver;
 pub mod transition;
 pub mod wind;
 
