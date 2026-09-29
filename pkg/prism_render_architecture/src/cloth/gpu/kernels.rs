@@ -158,6 +158,10 @@ pub enum ClothKernel {
     StrainLimit,
     /// Resolve body-proxy collision (sphere / capsule / plane) per particle.
     BodyCollision,
+    /// Push each particle onto the front side of its painted backstop plane,
+    /// so a garment cannot sink more than an authored distance behind the
+    /// skinned body. Per particle; a piece with no painted backstops skips it.
+    Backstop,
     /// Build the self-collision spatial hash: bin each particle into its grid
     /// cell and write the cell/entry buffers the resolve pass reads.
     SelfCollisionHashBuild,
@@ -174,13 +178,14 @@ pub enum ClothKernel {
 impl ClothKernel {
     /// Every kernel, in a stable solver order, for descriptor-table iteration
     /// and exhaustiveness tests.
-    pub const ALL: [ClothKernel; 10] = [
+    pub const ALL: [ClothKernel; 11] = [
         ClothKernel::Predict,
         ClothKernel::ProjectDistanceBatch,
         ClothKernel::ProjectBendingBatch,
         ClothKernel::ProjectLongRangeBatch,
         ClothKernel::StrainLimit,
         ClothKernel::BodyCollision,
+        ClothKernel::Backstop,
         ClothKernel::SelfCollisionHashBuild,
         ClothKernel::SelfCollisionResolve,
         ClothKernel::VelocityUpdate,
@@ -198,6 +203,7 @@ impl ClothKernel {
             ClothKernel::ProjectLongRangeBatch => "cloth_project_long_range_batch",
             ClothKernel::StrainLimit => "cloth_strain_limit",
             ClothKernel::BodyCollision => "cloth_body_collision",
+            ClothKernel::Backstop => "cloth_backstop",
             ClothKernel::SelfCollisionHashBuild => "cloth_self_collision_hash_build",
             ClothKernel::SelfCollisionResolve => "cloth_self_collision_resolve",
             ClothKernel::VelocityUpdate => "cloth_velocity_update",
@@ -257,18 +263,19 @@ impl ClothKernel {
                 WorkgroupSize { x: 64, y: 1, z: 1 },
                 DispatchDomain::ConstraintBatch,
             ),
-            ClothKernel::StrainLimit | ClothKernel::VelocityUpdate | ClothKernel::BodyCollision => {
-                (
-                    BindGroupLayout {
-                        storage_buffers: 2,
-                        uniform_buffers: 1,
-                        storage_textures: 0,
-                        sampled_textures: 0,
-                    },
-                    WorkgroupSize { x: 64, y: 1, z: 1 },
-                    DispatchDomain::Particle,
-                )
-            }
+            ClothKernel::StrainLimit
+            | ClothKernel::VelocityUpdate
+            | ClothKernel::BodyCollision
+            | ClothKernel::Backstop => (
+                BindGroupLayout {
+                    storage_buffers: 2,
+                    uniform_buffers: 1,
+                    storage_textures: 0,
+                    sampled_textures: 0,
+                },
+                WorkgroupSize { x: 64, y: 1, z: 1 },
+                DispatchDomain::Particle,
+            ),
             ClothKernel::SelfCollisionHashBuild => (
                 BindGroupLayout {
                     storage_buffers: 3,

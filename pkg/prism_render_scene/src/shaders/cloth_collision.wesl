@@ -6,9 +6,9 @@
 //! These are the `ClothKernel::BodyCollision`, `ClothKernel::SelfCollisionHashBuild`
 //! and `ClothKernel::SelfCollisionResolve` dispatches; the stable `WESL` entry
 //! point names emitted by `prism_render_architecture::cloth::gpu::kernels` are
-//! `cloth_body_collision`, `cloth_self_collision_hash_build` and
-//! `cloth_self_collision_resolve`, matched byte-for-byte by the entry points
-//! below. Their bind-group layouts differ from the solver kernels in
+//! `cloth_body_collision`, `cloth_self_collision_hash_build`,
+//! `cloth_self_collision_resolve` and `cloth_backstop`, matched byte-for-byte by
+//! the entry points below. Their bind-group layouts differ from the solver kernels in
 //! `cloth_sim.wesl`, which is why they live in this sibling module.
 //!
 //! The sandbox has no `GPU`, so this shader is validated by naga compilation
@@ -33,9 +33,11 @@
 //! ## Binding budget
 //!
 //! `cloth_body_collision` honours the 2-storage + 1-uniform contract
-//! (`positions`, `colliders`, `params`); per-particle backstops
-//! (`collision::apply_backstop`) need their own buffer and are therefore left as
-//! a host-side / future-kernel pass rather than fabricated into this budget.
+//! (`positions`, `colliders`, `params`). Per-particle painted backstops
+//! (`collision::apply_backstop`) run as their own `ClothKernel::Backstop`
+//! dispatch (`cloth_backstop` below) on a matching 2-storage + 1-uniform layout
+//! (`positions`, `backstops`, `params`), so they are a real bit-parity kernel
+//! rather than being fabricated into the body-collision budget.
 //! `cloth_self_collision_hash_build` / `_resolve` honour the 3-storage +
 //! 1-uniform contract (`positions`, `cell_table`, `particle_next`, `params`).
 
@@ -354,4 +356,85 @@ fn cloth_self_collision_resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     self_positions[p] = vec4<f32>(pos_self + delta_sum, self_positions[p].w);
+}
+
+// ---------------------------------------------------------------------------
+// Painted backstop (`cloth_backstop`)
+// ---------------------------------------------------------------------------
+
+/// One painted-backstop plane. A bit-parity twin of the CPU golden
+/// `prism_render_architecture::cloth::collision::Backstop`, packed into two
+/// 16-byte `std430` slots so the record stride matches the host `BACKSTOP_STRIDE`
+/// (32 bytes): slot 0 is `origin.xyz` plus the scalar `distance`, slot 1 is
+/// `normal.xyz` plus one pad word.
+struct ClothBackstop {
+    /// Anchor point on the skinned surface (`x`).
+    ox: f32,
+    /// Anchor `y`.
+    oy: f32,
+    /// Anchor `z`.
+    oz: f32,
+    /// How far behind `origin` (along `-normal`) the particle may travel before
+    /// it is pushed back onto the limiting plane.
+    distance: f32,
+    /// Outward plane normal (need not be unit) `x`.
+    nx: f32,
+    /// Normal `y`.
+    ny: f32,
+    /// Normal `z`.
+    nz: f32,
+    /// Trailing pad word so the record occupies exactly two `vec4` slots.
+    pad: f32,
+}
+
+/// Uniform parameters for the backstop dispatch.
+struct ClothBackstopParams {
+    /// Number of particles (and paired backstop records) the pass runs over.
+    particle_count: u32,
+}
+
+// Particle state: `xyz` = world position, `w` = inverse mass (`<= 0` = pinned).
+@group(0) @binding(0) var<storage, read_write> backstop_positions: array<vec4<f32>>;
+// `backstops[i]` constrains particle `i`.
+@group(0) @binding(1) var<storage, read> backstops: array<ClothBackstop>;
+// Backstop dispatch bounds.
+@group(0) @binding(2) var<uniform> backstop_params: ClothBackstopParams;
+
+/// Clamps `pos` to the front side of one backstop plane. Bit-parity mirror of
+/// the CPU `apply_backstop`: a (near) zero normal is inert (no defined plane),
+/// and a particle at signed distance `s < -distance` is pushed forward along
+/// the unit normal onto the limiting plane; otherwise `pos` is untouched.
+fn cloth_apply_backstop(pos: vec3<f32>, b: ClothBackstop) -> vec3<f32> {
+    let normal = vec3<f32>(b.nx, b.ny, b.nz);
+    let len_sq = dot(normal, normal);
+    if len_sq <= CLOTH_COL_EPS_LEN_SQ {
+        return pos;
+    }
+    let n = normal * inverseSqrt(len_sq);
+    let origin = vec3<f32>(b.ox, b.oy, b.oz);
+    let s = dot(n, pos - origin);
+    let min_s = -b.distance;
+    if s < min_s {
+        return pos + n * (min_s - s);
+    }
+    return pos;
+}
+
+/// Backstop stage: one invocation per particle pushes a free particle onto the
+/// front side of its painted backstop plane. Mirrors the CPU
+/// `resolve_backstops` (pinned particles are skipped; the pass is a no-op when
+/// no backstop records are resident).
+@compute @workgroup_size(64)
+fn cloth_backstop(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let p = gid.x;
+    if p >= backstop_params.particle_count {
+        return;
+    }
+    // Pinned particles (inverse mass `<= 0`) never move.
+    if backstop_positions[p].w <= 0.0 {
+        return;
+    }
+    let pos = backstop_positions[p].xyz;
+    let clamped = cloth_apply_backstop(pos, backstops[p]);
+    backstop_positions[p] = vec4<f32>(clamped, backstop_positions[p].w);
 }

@@ -46,6 +46,16 @@ pub const HASH_CELL_STRIDE: u32 = 8;
 /// the shader agree.
 pub const EMBED_STRIDE: u32 = 32;
 
+/// The byte size of one packed painted-backstop record, padded to the 32-byte
+/// `std430` stride.
+///
+/// Mirrors the CPU golden `super::super::collision::Backstop`: an anchor
+/// `origin: Vec3`, an outward plane `normal: Vec3`, and a scalar `distance:
+/// f32` — seven 4-byte words. The `WESL` twin `cloth_backstop` packs them as
+/// two 16-byte-aligned `vec4` slots (`origin.xyz + distance`, `normal.xyz +
+/// pad`), so the host allocation and the shader agree on a 32-byte stride.
+pub const BACKSTOP_STRIDE: u32 = 32;
+
 /// The resident element counts that size every persistent cloth buffer for one
 /// piece.
 ///
@@ -64,6 +74,9 @@ pub struct BufferCounts {
     pub hash_cells: u32,
     /// Number of render-mesh vertices bound to the sim mesh by embedding.
     pub render_vertices: u32,
+    /// Number of painted-backstop records (one per constrained particle). A
+    /// piece with no painted backstops leaves this zero and skips the pass.
+    pub backstops: u32,
 }
 
 /// The persistent, device-resident buffer set for one cloth piece.
@@ -135,6 +148,12 @@ impl PersistentBufferSet {
         self.counts.render_vertices.saturating_mul(EMBED_STRIDE)
     }
 
+    /// Bytes for the painted-backstop record buffer.
+    #[must_use]
+    pub fn backstop_bytes(self) -> u32 {
+        self.counts.backstops.saturating_mul(BACKSTOP_STRIDE)
+    }
+
     /// Total resident bytes for every persistent buffer, counting the position
     /// buffer twice for double-buffering. Saturating.
     #[must_use]
@@ -147,6 +166,7 @@ impl PersistentBufferSet {
             .saturating_add(self.hash_cell_bytes())
             .saturating_add(self.hash_entry_bytes())
             .saturating_add(self.embed_bytes())
+            .saturating_add(self.backstop_bytes())
     }
 
     /// Returns `true` when the set has at least one particle and one
@@ -400,6 +420,7 @@ mod tests {
             constraints: 400,
             hash_cells: 64,
             render_vertices: 500,
+            backstops: 100,
         }
     }
 
@@ -414,7 +435,8 @@ mod tests {
             + set.constraint_bytes()
             + set.hash_cell_bytes()
             + set.hash_entry_bytes()
-            + set.embed_bytes();
+            + set.embed_bytes()
+            + set.backstop_bytes();
         assert_eq!(set.total_bytes(), expected);
     }
 
@@ -425,6 +447,7 @@ mod tests {
             constraints: u32::MAX,
             hash_cells: u32::MAX,
             render_vertices: u32::MAX,
+            backstops: u32::MAX,
         });
         assert_eq!(set.total_bytes(), u32::MAX);
     }

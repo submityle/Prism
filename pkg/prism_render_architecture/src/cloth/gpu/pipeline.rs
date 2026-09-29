@@ -44,6 +44,8 @@ pub struct ClothGpuExtract {
     pub self_collision: bool,
     /// Whether the render-mesh skin embedding runs this frame.
     pub embed: bool,
+    /// Whether the painted-backstop projection runs this frame.
+    pub backstop: bool,
 }
 
 /// One fully sized compute dispatch in the recorded schedule.
@@ -66,8 +68,11 @@ pub struct PlannedDispatch {
 ///
 /// Built by [`prepare`]. The dispatches are in exact record order: for every
 /// substep, predict → distance colors → bending colors → long-range colors →
-/// strain limit → body collision → (optional) self-collision build+resolve →
-/// velocity update; then, once per frame, the (optional) skin embed.
+/// strain limit → (optional) self-collision build+resolve → body collision →
+/// (optional) backstop → velocity update; then, once per frame, the (optional)
+/// skin embed. Self-collision precedes the body/backstop re-projection so the
+/// collider and backstop passes hold the final positional authority, matching
+/// the CPU golden `ClothPipeline::step` tail order.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClothGpuPrepare {
     /// The resident buffer set sizing for the piece.
@@ -128,6 +133,7 @@ pub fn extract(
     iterations: u32,
     self_collision: bool,
     embed: bool,
+    backstop: bool,
 ) -> ClothGpuExtract {
     ClothGpuExtract {
         counts,
@@ -138,6 +144,7 @@ pub fn extract(
         iterations: iterations.max(1),
         self_collision,
         embed,
+        backstop,
     }
 }
 
@@ -220,13 +227,15 @@ pub fn prepare(extract: &ClothGpuExtract) -> ClothGpuPrepare {
         }
 
         push_particle(&mut dispatches, ClothKernel::StrainLimit, particles, group);
-        push_particle(
-            &mut dispatches,
-            ClothKernel::BodyCollision,
-            particles,
-            group,
-        );
 
+        // Self-collision runs before the body/backstop re-projection so the
+        // latter has the final positional authority. This mirrors the CPU
+        // golden `ClothPipeline::step` tail order
+        // (`resolve_self_collision` -> `resolve_body_collisions` ->
+        // `resolve_backstops`), whose comment guarantees "a frame never ends
+        // inside a collider": self-collision can shove a particle back into the
+        // body, so the collider and backstop passes must be the last positional
+        // corrections before the velocity update.
         if extract.self_collision {
             let hash = hash_grid_group_size();
             push_particle(
@@ -241,6 +250,16 @@ pub fn prepare(extract: &ClothGpuExtract) -> ClothGpuPrepare {
                 particles,
                 group,
             );
+        }
+
+        push_particle(
+            &mut dispatches,
+            ClothKernel::BodyCollision,
+            particles,
+            group,
+        );
+        if extract.backstop {
+            push_particle(&mut dispatches, ClothKernel::Backstop, particles, group);
         }
 
         push_particle(
@@ -335,6 +354,7 @@ mod tests {
             constraints: 300,
             hash_cells: 64,
             render_vertices: 260,
+            backstops: 130,
         }
     }
 
@@ -346,6 +366,7 @@ mod tests {
             vec![40],
             2,
             1,
+            true,
             true,
             true,
         )
@@ -360,6 +381,7 @@ mod tests {
             Vec::new(),
             0,
             0,
+            false,
             false,
             false,
         );
@@ -414,6 +436,7 @@ mod tests {
             1,
             false,
             false,
+            false,
         );
         let plan = prepare(&e);
         let has_distance = plan
@@ -434,6 +457,7 @@ mod tests {
             1,
             false,
             false,
+            false,
         );
         let plan = prepare(&e);
         assert!(!plan.dispatches.iter().any(|d| {
@@ -447,6 +471,86 @@ mod tests {
     }
 
     #[test]
+    fn backstop_pass_follows_body_collision_when_enabled() {
+        let e = sample_extract();
+        let plan = prepare(&e);
+        // Every backstop dispatch is immediately preceded by a body-collision
+        // dispatch in the same substep, matching the CPU golden post-collision
+        // ordering.
+        let mut saw_backstop = false;
+        for pair in plan.dispatches.windows(2) {
+            if pair[1].kernel == ClothKernel::Backstop {
+                saw_backstop = true;
+                assert_eq!(pair[0].kernel, ClothKernel::BodyCollision);
+            }
+        }
+        assert!(saw_backstop, "backstop dispatch was not emitted");
+        // Two substeps enable it, so two backstop dispatches are recorded.
+        let backstops = plan
+            .dispatches
+            .iter()
+            .filter(|d| d.kernel == ClothKernel::Backstop)
+            .count();
+        assert_eq!(backstops, 2);
+    }
+
+    #[test]
+    fn self_collision_resolve_precedes_body_reprojection() {
+        // The CPU golden `ClothPipeline::step` runs `resolve_self_collision`
+        // before `resolve_body_collisions` / `resolve_backstops` so the collider
+        // and backstop passes have the final positional authority and a frame
+        // never ends inside a collider. The GPU schedule must preserve that
+        // per-substep ordering: within each substep the self-collision resolve
+        // dispatch appears before the body-collision dispatch.
+        let e = sample_extract();
+        let plan = prepare(&e);
+        let first_self = plan
+            .dispatches
+            .iter()
+            .position(|d| d.kernel == ClothKernel::SelfCollisionResolve)
+            .expect("self-collision resolve dispatch was not emitted");
+        let first_body = plan
+            .dispatches
+            .iter()
+            .position(|d| d.kernel == ClothKernel::BodyCollision)
+            .expect("body-collision dispatch was not emitted");
+        assert!(
+            first_self < first_body,
+            "self-collision resolve ({first_self}) must precede body collision ({first_body})"
+        );
+        // The hash build always precedes its own resolve.
+        let first_hash = plan
+            .dispatches
+            .iter()
+            .position(|d| d.kernel == ClothKernel::SelfCollisionHashBuild)
+            .expect("self-collision hash build dispatch was not emitted");
+        assert!(
+            first_hash < first_self,
+            "hash build ({first_hash}) must precede resolve ({first_self})"
+        );
+    }
+
+    #[test]
+    fn disabling_backstop_drops_its_pass() {
+        let e = extract(
+            sample_counts(),
+            vec![50],
+            Vec::new(),
+            Vec::new(),
+            1,
+            1,
+            false,
+            false,
+            false,
+        );
+        let plan = prepare(&e);
+        assert!(!plan
+            .dispatches
+            .iter()
+            .any(|d| d.kernel == ClothKernel::Backstop));
+    }
+
+    #[test]
     fn iterations_multiply_projection_dispatches() {
         let e = extract(
             sample_counts(),
@@ -455,6 +559,7 @@ mod tests {
             Vec::new(),
             1,
             3,
+            false,
             false,
             false,
         );
