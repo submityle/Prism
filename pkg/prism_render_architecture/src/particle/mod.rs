@@ -47,6 +47,7 @@
 //! "pending the GPU backend" where the contract signatures anticipate them.
 
 pub mod attributes;
+pub mod audio_spectrum;
 pub mod authoring;
 pub mod boids;
 pub mod collision;
@@ -69,9 +70,11 @@ pub mod noise;
 pub mod oit;
 pub mod perf_budget;
 pub mod platform;
+pub mod point_cache;
 pub mod pool;
 pub mod raytrace;
 pub mod renderers;
+pub mod sdf;
 pub mod shading;
 pub mod sim_space;
 pub mod simulation;
