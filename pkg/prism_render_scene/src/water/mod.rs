@@ -35,6 +35,7 @@
 //!   the author chain and the graph node.
 
 mod abi;
+mod authoring;
 mod bind_groups;
 mod body;
 mod dispatch;
@@ -43,3 +44,8 @@ mod pipeline;
 pub(crate) mod plugin;
 mod prepare;
 mod resources;
+
+/// The high-level ocean authoring preset and the water body component it
+/// builds, re-exported so a game can spawn an ocean with one call.
+pub use authoring::OceanPreset;
+pub use body::WaterBody;

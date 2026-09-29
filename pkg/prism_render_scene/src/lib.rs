@@ -40,8 +40,8 @@ pub use geometry::{
     SHADING_GEOMETRY_FLAG_MISSING_NORMAL, SHADING_GEOMETRY_FLAG_MISSING_UV,
 };
 pub use lighting::{
-    build_cluster_data, ClusterBindGroup, ClusterConfig, ClusterCpuData, ClusterGpuBuffers,
-    cubemap_faces_from_image, project_image_to_sh, ClusterViewFit, EnvironmentProbeCache,
+    build_cluster_data, cubemap_faces_from_image, project_image_to_sh, ClusterBindGroup,
+    ClusterConfig, ClusterCpuData, ClusterGpuBuffers, ClusterViewFit, EnvironmentProbeCache,
     ExtractedClusterView, ExtractedLights, GpuClusterGrid, GpuDirectionalLight,
     GpuLightEnvironment, GpuPunctualLight, LightBindGroup, LightGpuBuffers, PrismLightingPlugin,
     StylizedLighting, LIGHT_ENVIRONMENT_FLAG_IMAGE_BASED,
@@ -62,6 +62,7 @@ pub use visibility::{
     PrismVisibilityDiagnostics, PrismVisibilityPlugin, UnifiedVisibilityEnabled,
     UnifiedVisibilityReader,
 };
+pub use water::{OceanPreset, WaterBody};
 
 #[cfg(test)]
 mod tests;

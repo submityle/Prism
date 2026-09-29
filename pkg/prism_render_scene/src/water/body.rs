@@ -49,7 +49,7 @@ use super::bind_groups::{WaterBodyUpload, WaterSurfaceExtent, WaterVolumeExtent}
 /// it produces an empty schedule and contributes no resident body — an honest
 /// no-op rather than a fabricated solve.
 #[derive(Component, Clone, Debug, Default, PartialEq)]
-pub(crate) struct WaterBody {
+pub struct WaterBody {
     // -- Ocean: spectral IFFT + analytic Gerstner --------------------------
     /// Initial `Tessendorf` spectrum amplitudes `h0` (`array<vec2<f32>>`).
     pub(crate) spectrum_h0: Vec<[f32; 2]>,
