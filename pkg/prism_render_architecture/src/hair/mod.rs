@@ -35,13 +35,16 @@
 //!    material system's `HairPbr` closure rather than reimplemented here.
 //! 6. **Transmittance & shadows** — deep opacity maps / order-independent
 //!    transparency for self-shadowing and blending, routed through the
-//!    transparency subsystem's `HairVisibility` path; see [`deep_transmittance`].
+//!    transparency subsystem's `HairVisibility` path; see [`deep_transmittance`],
+//!    with the cross-texel packing into an upload-ready slab handled by
+//!    [`deep_opacity_layout`].
 //!
 //! This module owns the geometry, LOD, and simulation-binding contracts. It
 //! references, never reimplements, the shared deformation budget, the material
 //! closures, and the transparency routing.
 
 pub mod collision;
+pub mod deep_opacity_layout;
 pub mod deep_transmittance;
 pub mod dynamics;
 pub mod groom;
