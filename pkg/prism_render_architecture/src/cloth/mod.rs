@@ -47,6 +47,7 @@ pub mod layers;
 pub mod lod;
 pub mod painted;
 pub mod panel;
+pub mod polygon_panel;
 pub mod pipeline;
 pub mod pressure;
 pub mod sleep;
