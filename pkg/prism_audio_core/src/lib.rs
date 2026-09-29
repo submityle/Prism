@@ -10,6 +10,8 @@
 //!
 //! - [`math`] holds the sample scalar, decibel/linear conversions, denormal
 //!   flushing, and equal-power helpers.
+//! - [`modulation`] holds control-rate sources ([`modulation::Lfo`]) that drive
+//!   time-varying parameters for chorus/flanger/phaser and beyond.
 //! - [`buffer`] holds the planar [`buffer::AudioBuffer`] block storage and the
 //!   [`buffer::ChannelLayout`] descriptor.
 //! - [`param`] holds sample-accurate parameter smoothing ([`param::Smoothed`])
@@ -48,6 +50,7 @@ extern crate alloc;
 pub mod buffer;
 pub mod graph;
 pub mod math;
+pub mod modulation;
 pub mod nodes;
 pub mod param;
 pub mod time;
@@ -55,5 +58,6 @@ pub mod time;
 pub use buffer::{AudioBuffer, ChannelLayout};
 pub use graph::{AudioGraph, AudioNode, NodeId, PortRef, ProcessIo, RenderContext};
 pub use math::{Sample, db_to_linear, linear_to_db};
+pub use modulation::{Lfo, LfoWaveform};
 pub use param::{Ramp, Smoothed};
 pub use time::{TimeSignature, Transport};

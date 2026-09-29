@@ -15,7 +15,8 @@
 //! - [`mix::SumNode`] — explicit N-input summing node (a bus mixer primitive).
 //!
 //! Insert-style effect processors live in the [`effects`] submodule:
-//! [`ParametricEqNode`], [`DelayNode`], and the `tanh` [`WaveshaperNode`].
+//! [`ParametricEqNode`], [`DelayNode`], the `tanh` [`WaveshaperNode`], and the
+//! LFO-modulated [`ChorusNode`], [`FlangerNode`], and [`PhaserNode`].
 
 pub mod biquad;
 pub mod effects;
@@ -24,7 +25,10 @@ pub mod mix;
 pub mod pan;
 
 pub use biquad::{BiquadKind, BiquadNode};
-pub use effects::{DelayNode, EqBand, Oversample, ParametricEqNode, WaveshaperNode};
+pub use effects::{
+    ChorusNode, ChorusParams, DelayNode, EqBand, FlangerNode, FlangerParams, Oversample,
+    ParametricEqNode, PhaserNode, PhaserParams, WaveshaperNode,
+};
 pub use gain::GainNode;
 pub use mix::SumNode;
 pub use pan::StereoPanNode;

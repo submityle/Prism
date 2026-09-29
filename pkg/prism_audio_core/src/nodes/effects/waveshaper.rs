@@ -345,13 +345,12 @@ impl AudioNode for WaveshaperNode {
 
         let mut committed: Option<(Smoothed, Smoothed, Smoothed, Smoothed)> = None;
 
-        for ch in 0..channels {
+        for (ch, state) in states.iter_mut().enumerate().take(channels) {
             let mut drive = drive0;
             let mut gain = gain0;
             let mut wet = wet0;
             let mut dry = dry0;
 
-            let state = &mut states[ch];
             let src = input.channel(ch);
             let dst = output.channel_mut(ch);
 

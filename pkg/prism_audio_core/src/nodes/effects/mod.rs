@@ -15,11 +15,23 @@
 //!   mix (the echo / slap-back / modulated-delay primitive).
 //! - [`waveshaper::WaveshaperNode`] — `tanh` soft-clip saturation with optional
 //!   2x/4x band-limiting oversampling.
+//! - [`chorus::ChorusNode`] — multi-voice LFO-modulated delay ensemble (no
+//!   feedback) for shimmering thickening.
+//! - [`flanger::FlangerNode`] — single short LFO-swept delay with feedback for
+//!   the classic sweeping comb / "jet" effect.
+//! - [`phaser::PhaserNode`] — cascaded first-order all-pass stages swept by an
+//!   LFO to drag notches through the spectrum.
 
+pub mod chorus;
 pub mod delay;
+pub mod flanger;
 pub mod parametric_eq;
+pub mod phaser;
 pub mod waveshaper;
 
+pub use chorus::{ChorusNode, ChorusParams};
 pub use delay::DelayNode;
+pub use flanger::{FlangerNode, FlangerParams};
 pub use parametric_eq::{EqBand, ParametricEqNode};
+pub use phaser::{PhaserNode, PhaserParams};
 pub use waveshaper::{Oversample, WaveshaperNode};
