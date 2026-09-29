@@ -45,6 +45,10 @@ use super::{
         PrismVirtualShadowSettings, VsmPageRequestBufferCache, VsmPrimaryLight,
         VsmReceiverBufferCache,
     },
+    dof::{
+        dof_pass, init_dof_pipeline, prepare_dof_bind_groups, prepare_dof_textures,
+        PrismDofSettings,
+    },
     motion_blur::{
         init_motion_blur_pipeline, motion_blur_pass, prepare_motion_blur_bind_groups,
         prepare_motion_blur_textures, PrismMotionBlurSettings,
@@ -145,6 +149,7 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/vsm_page_mark.wesl");
         embedded_asset!(app, "../shaders/motion_blur.wesl");
         embedded_asset!(app, "../shaders/volumetrics.wesl");
+        embedded_asset!(app, "../shaders/dof.wesl");
         embedded_asset!(app, "../shaders/brdf_lut.wesl");
         embedded_asset!(app, "../shaders/env_prefilter.wesl");
         embedded_asset!(app, "../shaders/exposure.wesl");
@@ -189,6 +194,7 @@ impl Plugin for PrismShadingPlugin {
             .init_resource::<PrismMotionBlurSettings>()
             .init_resource::<PrismVolumetricsSettings>()
             .init_resource::<VolumetricsTextureCache>()
+            .init_resource::<PrismDofSettings>()
             .insert_resource(ShadingFrameGraph {
                 compiled: compiled_graph,
             })
@@ -243,6 +249,7 @@ impl Plugin for PrismShadingPlugin {
                         init_vsm_page_mark_pipeline,
                         init_motion_blur_pipeline,
                         init_volumetrics_pipeline,
+                        init_dof_pipeline,
                     ),
                     init_dfg_lut_texture,
                     init_brdf_lut_pipeline,
@@ -469,6 +476,16 @@ impl Plugin for PrismShadingPlugin {
                     prepare_volumetrics_bind_groups
                         .after(prepare_volumetrics_resources)
                         .in_set(RenderSystems::PrepareBindGroups),
+                    // DoF reads the SSR geometry-prepass depth and the resolved
+                    // scene_color, exactly like motion blur, so it allocates and
+                    // binds after both are resident.
+                    prepare_dof_textures
+                        .after(prepare_ssr_textures)
+                        .after(prepare_visibility_buffers)
+                        .in_set(RenderSystems::PrepareResources),
+                    prepare_dof_bind_groups
+                        .after(prepare_dof_textures)
+                        .in_set(RenderSystems::PrepareBindGroups),
                 ),
             )
             .add_systems(
@@ -592,6 +609,14 @@ impl Plugin for PrismShadingPlugin {
                     motion_blur_pass
                         .after(bloom_pass)
                         .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                    // DoF is the final pre-MainPass scene_color writer: it
+                    // defocuses the fogged, motion-blurred HDR image (fog applies
+                    // after motion blur, DoF after fog) before the composite
+                    // reads scene_color. Serialised after volumetrics so the
+                    // three scene_color copy-backs never race.
+                    dof_pass
+                        .after(volumetrics_pass)
+                        .before(bevy_core_pipeline::Core3dSystems::MainPass),
                 ),
                 composite_shading
                     .after(bevy_core_pipeline::Core3dSystems::MainPass)
@@ -616,7 +641,9 @@ impl Plugin for PrismShadingPlugin {
                         .before(bevy_core_pipeline::Core3dSystems::MainPass),
                     // Froxel fog is self-contained (its own per-view volumes),
                     // so it only needs to finish before the main pass composites.
-                    volumetrics_pass.before(bevy_core_pipeline::Core3dSystems::MainPass),
+                    volumetrics_pass
+                        .after(motion_blur_pass)
+                        .before(bevy_core_pipeline::Core3dSystems::MainPass),
                 ),
             ),
         );

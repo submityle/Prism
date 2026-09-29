@@ -50,3 +50,19 @@ fn dof_wesl_compiles_standalone() {
         .get(0, dof, &[])
         .unwrap_or_else(|error| panic!("dof.wesl failed to compile: {error}"));
 }
+
+/// Guards the Rust immediate-block ABI against drift from the WESL structs:
+/// the CoC block is the 112-byte mat4x4-led block and the gather/composite
+/// blocks are tight 16-byte blocks, matching `dof.wesl`'s three `var<immediate>`
+/// globals, and the workgroup constant matches `@workgroup_size(8, 8, 1)`.
+#[test]
+fn dof_abi_matches_the_shader_layout() {
+    use super::abi::{
+        GpuDofCocParams, GpuDofCompositeParams, GpuDofGatherParams, DOF_WORKGROUP_SIZE,
+    };
+    assert_eq!(size_of::<GpuDofCocParams>(), 112);
+    assert_eq!(align_of::<GpuDofCocParams>(), 4);
+    assert_eq!(size_of::<GpuDofGatherParams>(), 16);
+    assert_eq!(size_of::<GpuDofCompositeParams>(), 16);
+    assert_eq!(DOF_WORKGROUP_SIZE, 8);
+}
