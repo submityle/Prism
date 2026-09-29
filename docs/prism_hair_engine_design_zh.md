@@ -166,12 +166,13 @@ fallback:
 4. **（已完成）发丝光栅** `hair/raster.rs`：亚像素软光栅桶（沿用 `virtual_geometry/bins.rs` 范式），挂 compute 软光栅路径进 visibility；确定性，单测绿。
 5. **（已完成）deep transmittance** `hair/deep_transmittance.rs`：deep opacity 分层透射 + voxel 近似 + 分桶，接共享阴影/OIT；确定性 CPU golden，单测绿。
 6. **着色分叉**（材质侧）：`HairPbr`（Marschner/Chiang + Zinke dual-scattering）+ `prism_render_npr` 风格化毛发响应。
-7. **（已完成）碰撞与连续 LOD 过渡** `hair/collision.rs` + `hair/transition.rs`：sphere/capsule 代理体碰撞（每子步约束后投影，pinned 不动，空集 no-op）集成进 `dynamics.rs`；`resolve_hair_lod_transition` 在阈值过渡带内计算相邻档 blend + `strand_survives_dither` 确定性 per-strand screen-door 抖动淡入淡出消 pop（尊重 `native_form` 钳制）；确定性 CPU golden，单测绿。SDF/自碰撞属同项更重档，后续在此基础分层。
+7. **（已完成）碰撞与连续 LOD 过渡** `hair/collision.rs` + `hair/transition.rs`：sphere/capsule 代理体碰撞（每子步约束后投影，pinned 不动，空集 no-op）集成进 `dynamics.rs`；`resolve_hair_lod_transition` 在阈值过渡带内计算相邻档 blend + `strand_survives_dither` 确定性 per-strand screen-door 抖动淡入淡出消 pop（尊重 `native_form` 钳制）；确定性 CPU golden，单测绿。自碰撞近似已在此基础分层落地（见 item8 `self_collision`）；SDF 碰撞属同项更重档，后续可续。
 8. **高级项（逐条落地中）**：
    - **（已完成）风场耦合** `hair/wind.rs`：`WindField`（方向/风速 + gust 脉动 + per-axis flutter 湍流）→ `wind_acceleration` / `apply_wind`（free 粒子加 accel·dt² 位移，pinned 跳过，dt<=0 no-op），手写 Taylor `sin_turns`；确定性单测绿（对应 §6.3）。
    - **（已完成）休眠 / 激活门控** `hair/sleep.rs`：`groom_motion_energy`（Σ 隐式速度平方）+ `SleepThresholds`/`GroomSleepState` 迟滞门（wake 优先、quiet 连续帧累积到 `frames_to_sleep` 才睡、dead band 保持、NaN 保持唤醒）；`should_simulate` 供调度层跳过静止 groom；确定性单测绿（对应 §6.9 / §8 休眠不占预算）。
    - **（已完成）RT 反射代理策略** `hair/rt_proxy.rs`：`RtReflectionRole{FullStrands,Proxy,Excluded}` + `RtProxyPolicy{min_coverage_for_proxy,allow_strands_in_rt}` → `resolve_rt_role(tier,coverage,policy)`（覆盖度门下排除；strand 档默认降级 proxy，仅 opt-in 才 trace 真发；card/mesh 本身即 proxy）；确定性单测绿（对应 §7 RT 侧 / §8 RT 反射行：高配 proxy 参与、基线/兜底排除）。BVH 构建与 traversal 属非可移植 RT 后端桶，本模块只裁决注册哪种表示。
    - **（已完成）多求解器插槽（VBD 高保真）** `hair/solver.rs`：`HairSolverKind{Xpbd,Vbd}` + `SolverSelection.choose(stretch_stiffness)`（刚度过阈才路由 VBD，非有限值回落 XPBD）；`simulate_strand_vbd` 为逐顶点块下降（Vertex Block Descent）——每子步预测惯性目标后按 Gauss-Seidel 序对每个自由顶点做一次针对其惯性+拉伸+弯曲 3x3 Hessian 的精确 Newton 步（PSD 投影的弹簧 Hessian、手写 3x3 cofactor 求逆带奇异守卫），刚造型（辫子/发胶）不软塌；pinned 固定、空/单点/dt<=0 no-op、碰撞复用 `hair/collision.rs`、越界与奇异全 NaN 安全；确定性单测绿（含越刚越不拉伸差分对照）（对应 §6.7）。
+   - **（已完成）近似 strand 自碰撞** `hair/self_collision.rs`：`SelfCollisionParams{particle_radius,stiffness,cell_size}` + `resolve_self_collision(particles,params)`——用确定性有序 `BTreeMap` 均匀空间哈希把粒子按整数网格分桶，每粒子只与其自身及 27 邻格内 `j>i` 候选（gather+sort_unstable 定序）做球体软斥（min_sep=2r，按 inverse_mass 分权推开，pinned 权 0 不动，coincident/both-pinned/非有限跳过），把全对 O(n^2) 降到局部密度级；standalone per-frame 后处理服务（类比 `collision.rs`，不接进 substep）；空/坏参 no-op、越界与 NaN 全安全；确定性单测绿（对应 §6.2 自碰撞近似 / §8 sim 高配行）。
    - **（跨子系统，hair 侧只留契约）**：GPU 持久化 + 异步流水线（物理 §11/§12，属调度/`gpu_scene`）、fiber-level 特写着色（材质系统 / `prism_render_npr`）。
 
 **优先级**：先 card 基线打通端到端（务实），strand 高配随光栅/透射逐步点亮；每步 wgpu 可编译 + 单测绿。
