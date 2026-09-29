@@ -76,9 +76,11 @@ pub mod shading;
 pub mod sim_space;
 pub mod simulation;
 pub mod sort_cull;
+pub mod spline;
 pub mod stability;
 pub mod stages;
 pub mod validation;
+pub mod vector_field;
 pub mod volumetrics;
 
 #[cfg(test)]
