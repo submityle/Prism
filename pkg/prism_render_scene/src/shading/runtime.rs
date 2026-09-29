@@ -79,6 +79,16 @@ pub struct PrismShadingSettings {
     /// casts cosine-weighted hemisphere rays that pick up one indirect diffuse
     /// bounce of on-screen radiance, blended over the resolve's IBL/SH ambient
     /// under a confidence. Off by default.
+    /// Enables the UE5-style virtual-shadow-map receiver-generation pass: a
+    /// compute pass that reads the camera device depth (currently the SSR
+    /// geometry prepass's `R32Float` reverse-Z `scene_depth`, so it also
+    /// requires `enable_ssr` until a shared depth prepass is factored out),
+    /// reconstructs each pixel's world position, projects it onto the primary
+    /// directional light's clipmap plane and writes a per-pixel
+    /// `VsmReceiver` the downstream page-request / allocation / sample stages
+    /// consume. Off by default; the page-mark, allocation and sample stages
+    /// land in follow-up slices and require on-device parity validation.
+    pub enable_virtual_shadow: bool,
     pub enable_ssgi: bool,
     /// Cosine-weighted hemisphere rays cast per pixel by the SSGI gather
     /// (clamped `>= 1`). More rays reduce the gather's noise at a linear march
@@ -182,6 +192,7 @@ impl Default for PrismShadingSettings {
             ibl_prefilter_sample_count: 256,
             enable_ssr: false,
             enable_taa: false,
+            enable_virtual_shadow: false,
             enable_ssgi: false,
             ssgi_sample_count: 8,
             ssgi_max_distance: 8.0,

@@ -37,12 +37,17 @@
 
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "VSM ABI is consumed by the device-side wiring slice added separately")
+    expect(dead_code, reason = "VSM ABI's page-mark / sample blocks are consumed by the device-side wiring slice added separately")
 )]
 mod abi;
+mod bind_groups;
+mod dispatch;
+mod extract;
+mod pipeline;
+mod resources;
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "VSM settings resource is consumed by the device-side wiring slice added separately")
+    expect(dead_code, reason = "VSM settings' clipmap / contract accessors are consumed by the device-side wiring slice added separately")
 )]
 mod settings;
 
@@ -51,15 +56,17 @@ mod shader_tests;
 
 #[expect(
     unused_imports,
-    reason = "re-exported for the device-side VSM wiring slice added separately"
+    reason = "re-exported for the device-side VSM page-mark / sample wiring slice added separately"
 )]
 pub(crate) use abi::{
     window_slot_count, GpuVsmPageMarkParams, GpuVsmReceiver, GpuVsmReceiverGenParams,
     GpuVsmSampleParams,
     VSM_PAGE_MARK_WORKGROUP_SIZE, VSM_PAGE_UNMAPPED, VSM_SAMPLE_WORKGROUP_SIZE,
 };
-#[expect(
-    unused_imports,
-    reason = "re-exported for the device-side VSM wiring slice added separately"
-)]
+
+pub(crate) use bind_groups::prepare_vsm_receiver_gen_bind_groups;
+pub(crate) use dispatch::vsm_receiver_gen_pass;
+pub(crate) use extract::{extract_vsm_primary_light, VsmPrimaryLight};
+pub(crate) use pipeline::init_vsm_receiver_gen_pipeline;
+pub(crate) use resources::{prepare_vsm_receiver_resources, VsmReceiverBufferCache};
 pub(crate) use settings::PrismVirtualShadowSettings;

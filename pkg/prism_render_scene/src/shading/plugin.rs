@@ -37,6 +37,12 @@ use super::{
         init_taa_resolve_pipeline, prepare_taa_bind_groups, prepare_taa_jitter,
         prepare_taa_textures, taa_resolve_pass,
     },
+    virtual_shadow::{
+        extract_vsm_primary_light, init_vsm_receiver_gen_pipeline,
+        prepare_vsm_receiver_gen_bind_groups, prepare_vsm_receiver_resources,
+        vsm_receiver_gen_pass, PrismVirtualShadowSettings, VsmPrimaryLight,
+        VsmReceiverBufferCache,
+    },
     ibl::{
         dfg_lut_precompute_pass, env_prefilter_precompute_pass, extract_ibl_source,
         init_brdf_lut_pipeline, init_dfg_lut_texture, init_env_prefilter_pipeline,
@@ -124,6 +130,7 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/ssgi_denoise.wesl");
         embedded_asset!(app, "../shaders/ssgi_composite.wesl");
         embedded_asset!(app, "../shaders/taa_resolve.wesl");
+        embedded_asset!(app, "../shaders/vsm_receiver_gen.wesl");
         embedded_asset!(app, "../shaders/brdf_lut.wesl");
         embedded_asset!(app, "../shaders/env_prefilter.wesl");
         embedded_asset!(app, "../shaders/exposure.wesl");
@@ -161,6 +168,9 @@ impl Plugin for PrismShadingPlugin {
             .init_resource::<PrismShadowSettings>()
             .init_resource::<ExtractedIblSource>()
             .init_resource::<EnvPrefilterBindGroups>()
+            .init_resource::<VsmPrimaryLight>()
+            .init_resource::<PrismVirtualShadowSettings>()
+            .init_resource::<VsmReceiverBufferCache>()
             .insert_resource(ShadingFrameGraph {
                 compiled: compiled_graph,
             })
@@ -211,6 +221,7 @@ impl Plugin for PrismShadingPlugin {
                         init_exposure_histogram_pipeline,
                         init_exposure_average_pipeline,
                         init_bloom_pipelines,
+                        init_vsm_receiver_gen_pipeline,
                     ),
                     init_dfg_lut_texture,
                     init_brdf_lut_pipeline,
@@ -386,6 +397,19 @@ impl Plugin for PrismShadingPlugin {
                     prepare_bloom_bind_groups
                         .after(prepare_bloom_textures)
                         .in_set(RenderSystems::PrepareBindGroups),
+                    // Nested to keep this Render tuple within Bevy's 20-element
+                    // limit: the VSM receiver-gen params + persistent receiver
+                    // buffer land in PrepareResources (after the SSR depth
+                    // prepass whose `scene_depth` the pass unprojects), then its
+                    // group-0 bind group builds in PrepareBindGroups.
+                    (
+                        prepare_vsm_receiver_resources
+                            .after(prepare_ssr_textures)
+                            .in_set(RenderSystems::PrepareResources),
+                        prepare_vsm_receiver_gen_bind_groups
+                            .after(prepare_vsm_receiver_resources)
+                            .in_set(RenderSystems::PrepareBindGroups),
+                    ),
                 ),
             )
             .add_systems(
@@ -396,7 +420,10 @@ impl Plugin for PrismShadingPlugin {
                         .in_set(RenderSystems::PrepareBindGroups),
                 ),
             )
-            .add_systems(ExtractSchedule, (extract_shadows, extract_ibl_source));
+            .add_systems(
+                ExtractSchedule,
+                (extract_shadows, extract_ibl_source, extract_vsm_primary_light),
+            );
         // Camera jitter must land before `prepare_view_uniforms` bakes the
         // projection; `PrepareViews` is ordered ahead of that `PrepareResources`
         // system, so a standalone registration keeps the ordering explicit
@@ -518,6 +545,12 @@ impl Plugin for PrismShadingPlugin {
                 oit_composite
                     .after(composite_shading)
                     .before(bevy_core_pipeline::Core3dSystems::PostProcess),
+                // Receiver generation reads the SSR geometry prepass depth and
+                // fills the per-view receiver buffer before the main pass; a
+                // later slice consumes it for page requests + sampling.
+                vsm_receiver_gen_pass
+                    .after(ssr_prepass_pass)
+                    .before(bevy_core_pipeline::Core3dSystems::MainPass),
             ),
         );
     }

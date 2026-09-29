@@ -26,6 +26,10 @@ pub(crate) const VSM_PAGE_MARK_WORKGROUP_SIZE: u32 = 64;
 /// (`@workgroup_size(8, 8, 1)`).
 pub(crate) const VSM_SAMPLE_WORKGROUP_SIZE: u32 = 8;
 
+/// Edge of `vsm_receiver_gen.wesl`'s `vsm_generate_receivers` workgroup tile
+/// (`@workgroup_size(8, 8, 1)`): one screen pixel per invocation.
+pub(crate) const VSM_RECEIVER_GEN_WORKGROUP_SIZE: u32 = 8;
+
 /// Sentinel physical-page index for a virtual page that is not resident this
 /// frame, matching the WESL `VSM_PAGE_UNMAPPED` (`0xffffffffu`).  It is the GPU
 /// twin of [`prism_render_shading::VirtualPageTable::get`] returning `None`.

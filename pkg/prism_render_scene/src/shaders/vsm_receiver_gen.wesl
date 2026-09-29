@@ -20,7 +20,7 @@
 //     clip level in the downstream page-mark pass.
 //
 // Self-contained (no imports); group 0 is
-//   0 = depth      (camera depth buffer, non-linear device depth)
+//   0 = depth      (camera device depth, R32Float, non-linear reverse-Z)
 //   1 = receivers  (output receiver records, storage read/write)
 //   2 = params     (inverse view-projection + light basis + camera, uniform)
 
@@ -51,7 +51,7 @@ struct VsmReceiverGenParams {
     viewport_height: u32,
 }
 
-@group(0) @binding(0) var depth: texture_depth_2d;
+@group(0) @binding(0) var depth: texture_2d<f32>;
 @group(0) @binding(1) var<storage, read_write> receivers: array<VsmReceiver>;
 @group(0) @binding(2) var<uniform> params: VsmReceiverGenParams;
 
@@ -88,7 +88,7 @@ fn vsm_generate_receivers(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dims = vec2<f32>(f32(params.viewport_width), f32(params.viewport_height));
     let uv = (vec2<f32>(f32(gid.x), f32(gid.y)) + vec2<f32>(0.5, 0.5)) / dims;
 
-    let ndc_depth = textureLoad(depth, coord, 0);
+    let ndc_depth = textureLoad(depth, coord, 0).x;
     let world = vsm_reconstruct_world(uv, ndc_depth);
     let receiver = vsm_project_receiver(world);
 
