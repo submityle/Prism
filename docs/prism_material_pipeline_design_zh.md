@@ -408,6 +408,10 @@ fallback:              strand 高配, card 基线; RT 反射里毛发用 proxy �
 6. **（已完成）删除 `prism_render_slang` + `prism_render_slang_abi`**（commit `211f15988`，共 ~2051 行，删除前零外部依赖）。放弃 Slang（见 §2）。
 7. **（口径修正）NPR 前端已就地落在 `prism_render_shading`**：原计划的独立 crate `prism_render_npr` 被就地实现取代——`evaluate_stylized_direct`（ramp/stepped shadow/stylized specular/rim）、`outline.rs`（material-id/深度/法线三路描边）、`face_shadow.rs`（SDF 面阴影）均已在着色 crate 内落地并配 CPU golden；着色 WESL、ABI 手写 `#[repr(C)]`（§2.4）。抽取为独立 `prism_render_npr` crate 降级为可选后续项（当前不做，避免与在建 NPR 着色工作冲突）。
 8. 着色器继续用 **WESL**；ABI 用手写 `#[repr(C)]` + 哈希版本 + 对齐测试兜漂移（§2.4）。不做 `.slang` 迁移。
+9. **（待建 · backend lane，非材质 ABI 重构）** `pkg/prism_render_architecture/src/virtual_geometry/`：CPU 决策层 10 文件已 committed（cull/lod/page_table/raster_path/pipeline/hierarchy/bins/page_request/frame + mod，确定性、后端无关、可单测）；`mod.rs` 边界声明明确「GPU vis-buffer 软/硬光栅、物理页存储、流式 I/O 均在 backend 待建」。这是当前功能层最大出血点，需 GPU 环境落地 + 抓帧 diff 验证（本沙盒无 GPU 不可验），归渲染后端子系统 lane 推进。
+10. **（待建 · TAA/上采样 lane，接线项）** reactive mask 消费端未接进 `pkg/prism_render_scene/src/shading/taa/` resolve：生产端已落地（transparency/particle/motion 各自标注 reactive 写入），但实测 `rg reactive taa/` 零命中——history 锁定尚未按 mask 收紧、粒子/透明高频区仍走全局时序权重。属 TAA/时序上采样 lane 的接线收口，非材质 ABI 重构。
+
+> **重构收敛状态（2026-09-29）**：材质 / ABI / 后端 / Slang / NPR 侧的破坏性重构（第 1–8 项）已**全部完成并 committed**（逐条经 committed 代码复核，见各项内联证据）。剩余第 9–10 项为**跨 lane 的 GPU 后端落地 / 接线收口**，由对应子系统 agent 在其 lane 推进；本材质设计文档只如实登记状态，不越界代改并发 agent 的后端代码。
 
 ---
 
