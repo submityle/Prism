@@ -36,9 +36,9 @@ use bevy_render::{
     render_asset::RenderAssets,
     render_resource::{
         AddressMode, Extent3d, FilterMode, MipmapFilterMode, Sampler, SamplerDescriptor, Texture,
-        TextureDataOrder,
-        TextureDescriptor, TextureDimension, TextureFormat, TextureUsages, TextureView,
-        TextureViewDescriptor, TextureViewId, WgpuFeatures, WgpuSampler, WgpuTextureView,
+        TextureDataOrder, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
+        TextureView, TextureViewDescriptor, TextureViewId, WgpuFeatures, WgpuSampler,
+        WgpuTextureView,
     },
     renderer::{RenderAdapterInfo, RenderDevice, RenderQueue},
     texture::GpuImage,
@@ -151,7 +151,12 @@ impl FromWorld for MaterialTextureArrays {
         };
 
         let reserved_textures = [
-            create_solid_texture(&device, &queue, "prism_bindless_white", [255, 255, 255, 255]),
+            create_solid_texture(
+                &device,
+                &queue,
+                "prism_bindless_white",
+                [255, 255, 255, 255],
+            ),
             create_solid_texture(
                 &device,
                 &queue,
@@ -194,7 +199,9 @@ impl FromWorld for MaterialTextureArrays {
         };
         if bindless {
             for slot in 0..capacity {
-                arrays.views.push(arrays.reserved_view_for_slot(slot).clone());
+                arrays
+                    .views
+                    .push(arrays.reserved_view_for_slot(slot).clone());
                 arrays.samplers.push(arrays.default_sampler.clone());
             }
             arrays.fingerprint = arrays.views.iter().map(TextureView::id).collect();
@@ -239,7 +246,11 @@ impl MaterialTextureArrays {
     /// [`GpuImage`] keep their fallback so the shader always samples something
     /// valid. Bumps [`version`](Self::version) only when the resolved view set
     /// changes. A no-op on non-bindless devices.
-    pub(crate) fn compose(&mut self, runtime: &RenderMaterialRegistry, images: &RenderAssets<GpuImage>) {
+    pub(crate) fn compose(
+        &mut self,
+        runtime: &RenderMaterialRegistry,
+        images: &RenderAssets<GpuImage>,
+    ) {
         if !self.bindless {
             return;
         }

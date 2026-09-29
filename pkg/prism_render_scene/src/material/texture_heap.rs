@@ -173,7 +173,9 @@ impl BindlessTextureHeap {
     /// yielded because they are owned by the default fallback textures, not by
     /// any asset. Iteration order is unspecified.
     pub fn iter_slots(&self) -> impl Iterator<Item = (u32, AssetId<Image>)> + '_ {
-        self.entries.iter().map(|(image, entry)| (entry.slot, *image))
+        self.entries
+            .iter()
+            .map(|(image, entry)| (entry.slot, *image))
     }
 
     /// Rebuilds the heap with a new total `capacity`, discarding all residency.
@@ -215,7 +217,10 @@ impl BindlessTextureHeap {
                 refcount: 1,
             },
         );
-        BindlessSlot { index: slot, generation }
+        BindlessSlot {
+            index: slot,
+            generation,
+        }
     }
 
     /// Drops one reference to `image`. When the last reference is released the

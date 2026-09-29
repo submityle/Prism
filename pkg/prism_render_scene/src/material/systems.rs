@@ -201,8 +201,11 @@ mod tests {
         // Drop the normal map and republish: the stale reference is released so
         // exactly one image stays resident, and the freed slot returns to the
         // free list rather than leaking.
-        world.resource_mut::<Assets<StandardMaterial>>().get_mut(id).unwrap().normal_map_texture =
-            None;
+        world
+            .resource_mut::<Assets<StandardMaterial>>()
+            .get_mut(id)
+            .unwrap()
+            .normal_map_texture = None;
         world.resource_scope(|world, mut runtime: Mut<RenderMaterialRegistry>| {
             let materials = world.resource::<Assets<StandardMaterial>>();
             runtime
@@ -212,7 +215,10 @@ mod tests {
         let stats = world
             .resource::<RenderMaterialRegistry>()
             .texture_heap_stats();
-        assert_eq!(stats.live_images, 1, "the dropped normal map must be released");
+        assert_eq!(
+            stats.live_images, 1,
+            "the dropped normal map must be released"
+        );
         assert_eq!(stats.free_slots, 1, "its slot must return to the free list");
 
         // Retiring the material releases its remaining textures.

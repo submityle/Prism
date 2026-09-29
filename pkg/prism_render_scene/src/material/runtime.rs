@@ -90,7 +90,10 @@ impl RenderMaterialRegistry {
         // previous revision held. Acquiring before releasing keeps shared
         // textures resident without a transient generation bump.
         let new_set = core::mem::take(&mut self.pending_textures);
-        let previous = self.material_textures.insert(id, new_set).unwrap_or_default();
+        let previous = self
+            .material_textures
+            .insert(id, new_set)
+            .unwrap_or_default();
         for image in previous {
             self.textures.release(image);
         }
@@ -135,7 +138,9 @@ impl RenderMaterialRegistry {
     /// Iterates the resident `(slot_index, image)` pairs so the upload system
     /// can place each live image at its assigned bindless slot.
     pub fn texture_slots(&self) -> impl Iterator<Item = (AssetId<Image>, u32)> + '_ {
-        self.textures.iter_slots().map(|(slot, image)| (image, slot))
+        self.textures
+            .iter_slots()
+            .map(|(slot, image)| (image, slot))
     }
 
     /// Clamps the bindless slot space to `capacity` before any material is
