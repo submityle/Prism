@@ -51,6 +51,7 @@
 pub mod budget;
 pub mod ocean_lod;
 pub mod spectrum;
+pub mod swe;
 
 use crate::deformation::DeformationHandle;
 
