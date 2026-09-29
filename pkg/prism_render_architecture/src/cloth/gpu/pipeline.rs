@@ -46,6 +46,10 @@ pub struct ClothGpuExtract {
     pub embed: bool,
     /// Whether the painted-backstop projection runs this frame.
     pub backstop: bool,
+    /// Whether the aerodynamic (wind drag + lift) pre-pass runs this frame.
+    /// Enabled only when the piece carries a triangle topology and an active
+    /// wind field; the pass is a per-vertex gather scheduled after predict.
+    pub aerodynamics: bool,
 }
 
 /// The per-color addressing window a graph-colored projection dispatch writes.
@@ -162,6 +166,7 @@ pub fn extract(
     self_collision: bool,
     embed: bool,
     backstop: bool,
+    aerodynamics: bool,
 ) -> ClothGpuExtract {
     ClothGpuExtract {
         counts,
@@ -173,6 +178,7 @@ pub fn extract(
         self_collision,
         embed,
         backstop,
+        aerodynamics,
     }
 }
 
@@ -250,6 +256,15 @@ pub fn prepare(extract: &ClothGpuExtract) -> ClothGpuPrepare {
 
     for _ in 0..extract.substeps {
         push_particle(&mut dispatches, ClothKernel::Predict, particles, group);
+
+        // Aerodynamics is a per-vertex gather pre-pass: it reads the just-
+        // predicted velocities and accumulates each incident triangle's wind
+        // force, so it must run after predict and before the constraint
+        // projection that consumes the aerodynamically-updated velocities.
+        // Mirrors the `CPU` golden `cloth::aero_gather::accumulate_aero_gather`.
+        if extract.aerodynamics {
+            push_particle(&mut dispatches, ClothKernel::Aerodynamics, particles, group);
+        }
 
         for _ in 0..extract.iterations {
             push_projection(
@@ -429,6 +444,7 @@ mod tests {
             true,
             true,
             true,
+            true,
         )
     }
 
@@ -441,6 +457,7 @@ mod tests {
             Vec::new(),
             0,
             0,
+            false,
             false,
             false,
             false,
@@ -570,6 +587,7 @@ mod tests {
             false,
             false,
             false,
+            false,
         );
         let plan = prepare(&e);
         let has_distance = plan
@@ -588,6 +606,7 @@ mod tests {
             Vec::new(),
             1,
             1,
+            false,
             false,
             false,
             false,
@@ -675,6 +694,7 @@ mod tests {
             false,
             false,
             false,
+            false,
         );
         let plan = prepare(&e);
         assert!(!plan
@@ -692,6 +712,7 @@ mod tests {
             Vec::new(),
             1,
             3,
+            false,
             false,
             false,
             false,
@@ -732,5 +753,76 @@ mod tests {
     fn empty_frame_plan_is_zeroed() {
         let plan = plan_frame(Vec::new());
         assert_eq!(plan.queue, super::ClothGpuQueue::default());
+    }
+
+    #[test]
+    fn aerodynamics_runs_once_per_substep_between_predict_and_projection() {
+        // sample_extract enables aerodynamics with two substeps.
+        let e = sample_extract();
+        assert!(e.aerodynamics);
+        assert_eq!(e.substeps, 2);
+        let plan = prepare(&e);
+
+        // One aerodynamics dispatch per substep.
+        let aero = plan
+            .dispatches
+            .iter()
+            .filter(|d| d.kernel == ClothKernel::Aerodynamics)
+            .count();
+        assert_eq!(aero, usize::try_from(e.substeps).unwrap());
+
+        // Every aerodynamics dispatch is a per-particle pass (no color/batch).
+        for d in plan
+            .dispatches
+            .iter()
+            .filter(|d| d.kernel == ClothKernel::Aerodynamics)
+        {
+            assert_eq!(d.color, None);
+            assert_eq!(d.batch, None);
+        }
+
+        // Within the first substep the order is predict -> aerodynamics ->
+        // first distance projection.
+        let predict = plan
+            .dispatches
+            .iter()
+            .position(|d| d.kernel == ClothKernel::Predict)
+            .expect("a predict dispatch");
+        let aero_pos = plan
+            .dispatches
+            .iter()
+            .position(|d| d.kernel == ClothKernel::Aerodynamics)
+            .expect("an aerodynamics dispatch");
+        let distance = plan
+            .dispatches
+            .iter()
+            .position(|d| d.kernel == ClothKernel::ProjectDistanceBatch)
+            .expect("a distance projection dispatch");
+        assert!(
+            predict < aero_pos && aero_pos < distance,
+            "expected predict ({predict}) < aerodynamics ({aero_pos}) < distance ({distance})"
+        );
+    }
+
+    #[test]
+    fn disabling_aerodynamics_drops_its_pass() {
+        let e = extract(
+            sample_counts(),
+            vec![50],
+            Vec::new(),
+            Vec::new(),
+            1,
+            1,
+            false,
+            false,
+            false,
+            false,
+        );
+        assert!(!e.aerodynamics);
+        let plan = prepare(&e);
+        assert!(!plan
+            .dispatches
+            .iter()
+            .any(|d| d.kernel == ClothKernel::Aerodynamics));
     }
 }

@@ -146,6 +146,13 @@ pub enum ClothKernel {
     /// Predict positions: damp velocity, apply gravity and wind, integrate.
     /// Pinned particles are skipped by the shader on its inverse-mass test.
     Predict,
+    /// Accumulate the per-triangle aerodynamic (drag + lift) force as a
+    /// race-free per-vertex *gather*: one thread per vertex sums a third of the
+    /// wind force of each incident triangle from a frozen velocity snapshot, so
+    /// every velocity is written by exactly one thread with no scatter atomics.
+    /// Mirrors the `CPU` golden [`super::super::aero_gather::accumulate_aero_gather`];
+    /// runs as an aero pre-pass after predict and before constraint projection.
+    Aerodynamics,
     /// Project one graph color's distance constraints (`XPBD` compliance),
     /// parallel within the color and serial across colors. Sized per color.
     ProjectDistanceBatch,
@@ -178,8 +185,9 @@ pub enum ClothKernel {
 impl ClothKernel {
     /// Every kernel, in a stable solver order, for descriptor-table iteration
     /// and exhaustiveness tests.
-    pub const ALL: [ClothKernel; 11] = [
+    pub const ALL: [ClothKernel; 12] = [
         ClothKernel::Predict,
+        ClothKernel::Aerodynamics,
         ClothKernel::ProjectDistanceBatch,
         ClothKernel::ProjectBendingBatch,
         ClothKernel::ProjectLongRangeBatch,
@@ -198,6 +206,7 @@ impl ClothKernel {
     pub fn wesl_entry_point(self) -> &'static str {
         match self {
             ClothKernel::Predict => "cloth_predict",
+            ClothKernel::Aerodynamics => "cloth_aerodynamics",
             ClothKernel::ProjectDistanceBatch => "cloth_project_distance_batch",
             ClothKernel::ProjectBendingBatch => "cloth_project_bending_batch",
             ClothKernel::ProjectLongRangeBatch => "cloth_project_long_range_batch",
@@ -237,6 +246,21 @@ impl ClothKernel {
     #[must_use]
     pub fn descriptor(self) -> KernelDescriptor {
         let (layout, workgroup, domain) = match self {
+            ClothKernel::Aerodynamics => (
+                // Position, velocity and inverse-mass storage, the triangle
+                // topology buffer and the two `CSR` vertex->triangle adjacency
+                // buffers (offsets + entries), plus the wind/aero/dt uniform
+                // block. One thread per vertex gathers its incident faces, so
+                // no writable texture and no scatter buffer are needed.
+                BindGroupLayout {
+                    storage_buffers: 6,
+                    uniform_buffers: 1,
+                    storage_textures: 0,
+                    sampled_textures: 0,
+                },
+                WorkgroupSize { x: 64, y: 1, z: 1 },
+                DispatchDomain::Particle,
+            ),
             ClothKernel::Predict => (
                 // Position, velocity and inverse-mass storage plus the
                 // per-substep uniform block; the sampled texture is the
