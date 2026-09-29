@@ -49,6 +49,7 @@
 pub mod emitter;
 pub mod pool;
 pub mod simulation;
+pub mod sort_cull;
 pub mod stages;
 
 /// Squared-length threshold below which a vector is treated as zero, so
