@@ -1,5 +1,7 @@
 //! Content-specific transparency strategies.
 
+pub mod routing;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TransparencyPath {
     Sorted,
