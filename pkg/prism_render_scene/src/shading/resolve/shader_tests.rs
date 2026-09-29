@@ -713,3 +713,44 @@ fn hair_chiang_wesl_compiles_and_resolves_imports() {
         panic!("hair_chiang.wesl failed to compile/resolve imports: {error}")
     });
 }
+
+/// Ensures the fibre-level fur/hair BSDF twin `hair_fiber.wesl` — the Yan et al.
+/// dual-cylinder model with three cuticle lobes (R/TT/TRT) plus two medulla
+/// scattered lobes (`TTs`/`TRTs`) shaped by a Henyey-Greenstein phase function —
+/// parses, resolves its imports and type-checks as WESL, in lock-step with the
+/// CPU golden `prism_render_shading::hair_fiber::evaluate_hair_fiber_direct`.
+#[test]
+fn hair_fiber_wesl_compiles_and_resolves_imports() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let lighting = shader_id(0x5052_4953_4d5f_4c49_4748_5449_4e47_0009);
+    cache.set_shader(
+        lighting,
+        Shader::from_wesl(
+            include_str!("../../shaders/lighting.wesl"),
+            "embedded://prism_render_scene/shaders/lighting.wesl",
+        ),
+    );
+
+    let brdf = shader_id(0x5052_4953_4d5f_4252_4446_0000_0000_0009);
+    cache.set_shader(
+        brdf,
+        Shader::from_wesl(
+            include_str!("../../shaders/brdf.wesl"),
+            "embedded://prism_render_scene/shaders/brdf.wesl",
+        ),
+    );
+
+    let hair_fiber = shader_id(0x5052_4953_4d5f_4841_4952_5f46_4942_0001);
+    cache.set_shader(
+        hair_fiber,
+        Shader::from_wesl(
+            include_str!("../../shaders/hair_fiber.wesl"),
+            "embedded://prism_render_scene/shaders/hair_fiber.wesl",
+        ),
+    );
+
+    cache.get(0, hair_fiber, &[]).unwrap_or_else(|error| {
+        panic!("hair_fiber.wesl failed to compile/resolve imports: {error}")
+    });
+}
