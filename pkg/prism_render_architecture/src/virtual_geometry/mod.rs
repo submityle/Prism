@@ -16,14 +16,17 @@
 //! * [`page_table`] — page residency bookkeeping and budget-driven eviction.
 //! * [`raster_path`] — software-vs-hardware raster path classification.
 //! * [`pipeline`] — per-cluster composition of the decisions above.
+//! * [`hierarchy`] — screen-space-error cut selection over the cluster DAG.
 
 pub mod cull;
+pub mod hierarchy;
 pub mod lod;
 pub mod page_table;
 pub mod pipeline;
 pub mod raster_path;
 
 pub use cull::{cluster_cull, CullVerdict, Frustum, OcclusionProbe, Plane};
+pub use hierarchy::{ClusterHierarchy, ClusterNode, CutCluster};
 pub use lod::{select_lod, LodLevel, LodProjection, LodSelection};
 pub use page_table::{GeometryPageTable, PageEntry, PageResidency};
 pub use pipeline::{ClusterDecision, ClusterRequest, ViewCullContext};
