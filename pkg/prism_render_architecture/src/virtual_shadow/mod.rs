@@ -9,14 +9,17 @@
 //! * [`residency`] — page residency table and per-frame request coalescing.
 //! * [`coverage`] — light-space receiver footprints to overlapped clip pages.
 //! * [`light_space`] — world-space bounds projected onto the light plane.
+//! * [`frame`] — per-frame world-space casters to coalesced clip-page requests.
 
 pub mod clipmap;
 pub mod coverage;
+pub mod frame;
 pub mod light_space;
 pub mod residency;
 
 pub use clipmap::{ClipmapConfig, MAX_CLIP_LEVELS};
 pub use coverage::mark_receiver_footprint;
+pub use frame::{plan_shadow_frame, ShadowCaster, ShadowFramePlan};
 pub use light_space::DirectionalLightBasis;
 pub use residency::{ShadowRequestBatch, ShadowResidencyTable};
 
