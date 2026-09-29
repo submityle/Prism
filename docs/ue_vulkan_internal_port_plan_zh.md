@@ -86,30 +86,38 @@ Remote UE source
 
 当前会话不下载、不 clone、不 archive UE 仓库。若未来需要编译 UE 派生代码，应由内部 CI 在隔离、受控的工作区读取授权源，生成的产物通过 manifest 接入 Prism；不得复制到公开工作区。
 
-### 2.3 目标 Vulkan 能力
+### 2.3 目标 GPU 能力（wgpu 能力映射表）
 
-最低档建议锁定：
+> 按第 0 章修正，能力档以 **wgpu 抽象**为准。下表把原「目标 Vulkan 扩展」逐条映射到 `wgpu::Features` / `wgpu::Limits` / downlevel 能力。Vulkan 只是 wgpu 的桌面后端之一，Metal / DX12 / WebGPU 为同等公民；无直接映射者标注降级路径或「不适用（跨平台层不提供）」。以下 `wgpu::Features` 名称基于本仓库锁定的 `wgpu 30`。
 
-- Vulkan 1.3；
-- `VK_KHR_dynamic_rendering`；
-- `VK_KHR_synchronization2`；
-- `VK_KHR_timeline_semaphore`；
-- descriptor indexing；
-- buffer device address；
-- draw indirect count；
-- shader subgroup；
-- 16-bit storage/arithmetic（按 Shader 需求）；
-- scalar block layout。
+最低档建议锁定（原 Vulkan 目标 → wgpu 能力）：
 
-高端档增加：
+| 原 Vulkan 目标 | wgpu 能力映射 | 说明 / 降级路径 |
+| --- | --- | --- |
+| Vulkan 1.3 | 不适用（无版本枚举） | wgpu 通过 adapter/backend 抽象自动选择后端，跨平台层不锁 API 版本 |
+| `VK_KHR_dynamic_rendering` | 不适用（wgpu 抽象内部处理） | wgpu 的 `RenderPass` 已封装等价语义，应用层无需该扩展 |
+| `VK_KHR_synchronization2` | 不适用（wgpu 自动同步） | 由 wgpu-hal 内部使用；应用层不显式管理 barrier |
+| `VK_KHR_timeline_semaphore` | wgpu 未直接暴露 | 降级路径为 queue submit 顺序 + `Queue::on_submitted_work_done` 回调 |
+| descriptor indexing | `Features::TEXTURE_BINDING_ARRAY` / `Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING` / `Features::PARTIALLY_BOUND_BINDING_ARRAY` | 组合提供 bindless / 非一致索引能力 |
+| buffer device address | wgpu 未直接暴露 | 降级路径为 storage buffer 绑定 + bindless 索引；仅光追 AS 内部按需使用 |
+| draw indirect count | `Features::MULTI_DRAW_INDIRECT_COUNT` | GPU-driven 间接绘制计数 |
+| draw indirect first instance | `Features::INDIRECT_FIRST_INSTANCE` | GPU-driven 首实例偏移 |
+| shader subgroup | `Features::SUBGROUP` | wgpu 30 提供 subgroup 内建；`Features::SUBGROUP_BARRIER` 按需 |
+| 16-bit storage/arithmetic | `Features::SHADER_F16`（算术）；16-bit 存储为 wgpu 对应能力（待核） | 按 Shader 需求启用 |
+| scalar block layout | 不适用（wgpu 使用自身布局规则） | WESL/WGSL 布局由 wgpu 规范约束，见第 8.3 节 ABI |
+| barycentrics（原 UE 依赖） | `Features::SHADER_BARYCENTRICS` | 供重心插值/Visibility 相关算法使用 |
 
-- `VK_KHR_acceleration_structure`；
-- `VK_KHR_ray_query`；
-- `VK_EXT_mesh_shader`；
-- 可选 sparse residency；
-- NVIDIA/AMD 厂商扩展只可存在于 adapter 层。
+高端档增加（原 Vulkan 目标 → wgpu 能力）：
 
-首批认证硬件建议：NVIDIA RTX 30/40/50 与 AMD RDNA2/3/4。Intel、移动 Vulkan 和旧 GPU 延后，不作为首版发布阻断项。
+| 原 Vulkan 目标 | wgpu 能力映射 | 说明 / 降级路径 |
+| --- | --- | --- |
+| `VK_KHR_acceleration_structure` | `Features::EXPERIMENTAL_RAY_TRACING_ACCELERATION_STRUCTURE` | wgpu 30 实验特性 |
+| `VK_KHR_ray_query` | `Features::EXPERIMENTAL_RAY_QUERY` | wgpu 30 实验特性 |
+| `VK_EXT_mesh_shader` | wgpu 未直接暴露（截至 `wgpu 30` 无稳定 mesh shader 特性） | 降级路径为 compute meshlet culling + `Features::MULTI_DRAW_INDIRECT_COUNT` 间接绘制 |
+| 可选 sparse residency | 不适用（跨平台层不提供） | 需要时经 wgpu-hal 后端专用路径单独评估 |
+| NVIDIA/AMD 厂商扩展 | 不适用（跨平台层不提供） | 只能存在于 wgpu-hal adapter 层，不进入高层 API |
+
+首批认证硬件建议：NVIDIA RTX 30/40/50 与 AMD RDNA2/3/4（Vulkan/DX12 后端）、Apple M 系列（Metal 后端）。Intel、移动后端和旧 GPU 延后，不作为首版发布阻断项。
 
 ## 3. UE 远程源码访问方式
 
@@ -192,9 +200,9 @@ Unified GPU Scene
              │                       │                      │
              └───────────────────────┴──────────────────────┘
                                      ▼
-                  Vulkan Advanced Device/Resource Layer
+                   单一 wgpu + WESL 抽象层
                                      ▼
-                         Vulkan 1.3 Driver / GPU
+             wgpu 后端 Driver / GPU（Vulkan/Metal/DX12/WebGPU）
 ```
 
 原则：UE-derived kernel 永远不能直接读取 ECS 或控制 Render World；它只能读取 Prism 定义的稳定 GPU ABI。Prism 负责资源和生命周期，UE 算法负责指定 Pass 内的计算。
@@ -267,47 +275,48 @@ Public control/CVar
 
 ## 7. Vulkan 与 Shader 策略
 
-### 7.1 两层后端
+### 7.1 单一 wgpu 能力分层
 
-保持 wgpu 管理普通路径，在能力不够时使用 Vulkan advanced layer：
+按第 0 章修正，不再维护独立的 `VulkanAdvancedPath`：统一走 **单一 `wgpu + WESL` 层**，高级能力通过 `wgpu::Features` / `wgpu::Limits` 按 adapter 实测启用，而非直接调用某后端的原生 API/扩展。
 
 ```text
-RenderDevice API
-├─ WgpuDevicePath
+RenderDevice API（单一 wgpu 层）
+├─ 基础能力（全后端保证）
 │  ├─ 普通 Buffer/Texture/Pipeline
 │  ├─ 标准 Render/Compute Pass
 │  └─ 兼容和调试路径
-└─ VulkanAdvancedPath
-   ├─ HLSL SPIR-V pipeline
-   ├─ Ray Query/AS
-   ├─ Mesh Shader
-   ├─ Device Address
-   ├─ Sparse resources（可选）
-   └─ 细粒度同步/alias（确有需要时）
+└─ 可选能力（按 `wgpu::Features` 实测启用）
+   ├─ WESL → 各后端着色（原 HLSL SPIR-V pipeline）
+   ├─ Ray Query/AS：`EXPERIMENTAL_RAY_QUERY` / `EXPERIMENTAL_RAY_TRACING_ACCELERATION_STRUCTURE`
+   ├─ Mesh Shader：wgpu 未直接暴露，降级为 compute meshlet culling + 间接绘制
+   ├─ Bindless：`TEXTURE_BINDING_ARRAY` / `PARTIALLY_BOUND_BINDING_ARRAY` 等
+   ├─ Device Address：wgpu 未直接暴露，降级为 storage buffer + bindless 索引
+   ├─ Sparse residency：不适用（跨平台层不提供）
+   └─ 细粒度同步/alias：wgpu 自动同步，不在应用层显式管理
 ```
 
-先尝试经 wgpu 创建 SPIR-V pipeline。当前仓库 `Shader::from_spirv` 和 `PipelineCache` 已有 SPIR-V feature 路径，可作为入口；Raw Vulkan 仅用于 wgpu 未暴露或语义不足的能力。
+优先经 wgpu + WESL 创建管线。当前仓库 `Shader` 与 `PipelineCache` 路径可作为入口；wgpu 未暴露或语义不足的能力按上表标注降级路径，不再退回手写原生 Vulkan。
 
 ### 7.2 资源所有权
 
-禁止 wgpu 和 Raw Vulkan 在不知情的情况下同时操作资源。每个资源必须属于以下一种模式：
+单一 wgpu 层下所有 GPU 资源统一为 **wgpu 所有**，不再存在 wgpu 与原生后端并行操作同一资源的情况：
 
-- `WgpuOwned`：只通过 wgpu 使用；
-- `VulkanOwned`：只通过 advanced layer 使用；
-- `Interop`：拥有显式状态机、queue family、layout、timeline value 和释放规则。
+- `WgpuOwned`：所有资源的唯一模式，生命周期与状态由 wgpu 管理；
+- 原「`VulkanOwned` / `Interop`」模式取消：跨平台层不提供绕过 wgpu 的后端私有资源互操作；
+- 若个别后端确需专用能力，只能在 wgpu-hal adapter 层评估，且必须以 wgpu 抽象重新暴露，不进入业务 Shader/Pass。
 
-Interop 资源在图中声明 acquire/release pass；禁止在业务 Shader 模块中手写所有权转换。
+同步与 layout 转换由 wgpu 自动处理；禁止在业务 Shader 模块中手写所有权/屏障转换。
 
 ### 7.3 HLSL 管线
 
 建议实现离线/增量编译工具，而不是运行时完整模拟 UE ShaderCompileWorker：
 
 ```text
-Licensed HLSL/USH subset
+Licensed HLSL/USH subset（仅取算法语义）
 → controlled preprocessor/include map
 → permutation manifest
-→ DXC (Vulkan target environment)
-→ SPIR-V validation/optimization
+→ 翻译/重写为 WESL（单一着色语言）
+→ WESL 编译层校验（各后端由 wgpu 下译：Vulkan→SPIR-V、Metal→MSL、DX12→DXIL、Web→WGSL）
 → reflection extraction
 → Prism binding ABI validation
 → signed internal shader package
@@ -319,7 +328,7 @@ Licensed HLSL/USH subset
 - DX layout/scalar layout；
 - row-major/column-major 矩阵约定；
 - bool、half、结构体 padding；
-- register/space 到 set/binding 映射；
+- binding/group 映射（WESL/wgpu 约定，替代 register/space→set/binding）；
 - push constants 与 uniform buffer；
 - bindless descriptor arrays；
 - wave/subgroup 大小假设；
