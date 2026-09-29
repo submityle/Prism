@@ -39,9 +39,13 @@ pub const DISPLACEMENT_TEXEL_STRIDE: u32 = 16;
 /// `w` folding/whitecap weight). Matches the normal storage texture.
 pub const NORMAL_TEXEL_STRIDE: u32 = 16;
 
-/// Byte stride of one analytic `Gerstner` wave record, padded to the 16-byte
-/// `std430` stride the wave-train storage buffer uses.
-pub const GERSTNER_WAVE_STRIDE: u32 = 16;
+/// Byte stride of one analytic `Gerstner` wave record: eight `f32` lanes
+/// (`dir_x`, `dir_z`, amplitude, wavelength, steepness, speed, phase and a
+/// pad lane) packed as two `vec4<f32>` rows, matching the `WESL`
+/// `GerstnerWave` `struct` byte-for-byte (2 x 16 = 32 bytes). A single
+/// `vec4<f32>` (16 bytes) cannot carry all seven meaningful wave scalars, so
+/// sizing the wave-train buffer at 16 bytes under-allocated it by half.
+pub const GERSTNER_WAVE_STRIDE: u32 = 32;
 
 /// Byte stride of one Shallow-Water grid cell: a `vec4<f32>` packing the water
 /// height, the two horizontal velocity components and a flux/terrain lane, at
@@ -495,7 +499,7 @@ impl AsyncFrameState {
 mod tests {
     use super::{
         AsyncFrameState, BufferParity, PipelineError, SlotState, WaterBufferCounts,
-        WaterPersistentBufferSet, FLIP_PARTICLE_STRIDE, PBF_PARTICLE_STRIDE,
+        WaterPersistentBufferSet, FLIP_PARTICLE_STRIDE, GERSTNER_WAVE_STRIDE, PBF_PARTICLE_STRIDE,
         SPECTRUM_AMPLITUDE_STRIDE,
     };
 
@@ -518,6 +522,21 @@ mod tests {
     fn flip_particle_stride_matches_wesl_golden() {
         // Five vec4<f32> lanes: pos+flag, vel, and three APIC affine rows.
         assert_eq!(FLIP_PARTICLE_STRIDE, 5 * 16);
+    }
+
+    #[test]
+    fn gerstner_wave_stride_matches_wesl_golden() {
+        // Eight f32 lanes (dir_x, dir_z, amplitude, wavelength, steepness,
+        // speed, phase, pad) = two vec4<f32> rows, matching the WESL
+        // `GerstnerWave` struct. Pins the stride so a drift back to 16 bytes
+        // (which would under-allocate the wave-train buffer by half and read
+        // past its end on the GPU) fails the build.
+        assert_eq!(GERSTNER_WAVE_STRIDE, 8 * 4);
+        let set = WaterPersistentBufferSet::new(counts());
+        assert_eq!(
+            set.gerstner_bytes(),
+            counts().gerstner_waves * GERSTNER_WAVE_STRIDE
+        );
     }
 
     #[test]
