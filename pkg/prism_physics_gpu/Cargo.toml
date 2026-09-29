@@ -1,0 +1,23 @@
+[package]
+name = "prism_physics_gpu"
+version = "0.1.0"
+edition = "2024"
+description = "Optional wgpu compute backend for Prism's next-generation physics engine (M5: GPU broad-phase, XPBD projection, fluid, MPM). Every kernel is validated cell-for-cell against a CPU golden twin in prism_physics_core. Contains no Unreal Engine source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_physics_core = { path = "../prism_physics_core" }
+glam = { version = "0.33.2", default-features = false, features = ["std"] }
+wgpu = { version = "30", default-features = false, features = ["wgsl", "metal"] }
+bytemuck = { version = "1.5", features = ["derive"] }
+futures-lite = "2"
+
+[dev-dependencies]
+prism_physics_gpu = { path = "." }
+
+[features]
+default = []
+
+[lints]
+workspace = true

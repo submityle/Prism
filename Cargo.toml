@@ -26,6 +26,7 @@ members = [
   # Prism experimental next-generation physics engine.
   "pkg/prism_physics_core",
   "pkg/prism_physics_geometry",
+  "pkg/prism_physics_gpu",
   # Prism experimental next-generation audio engine.
   "pkg/prism_audio_core",
   # Several crates with macros have "compile fail" tests nested inside them, also known as UI
