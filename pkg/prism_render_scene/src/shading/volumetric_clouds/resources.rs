@@ -144,6 +144,26 @@ impl VolumetricCloudDomain {
     pub(crate) fn parity(&self) -> u32 {
         self.frame & 1
     }
+
+    /// The 3D density-cache / noise-volume dispatch extent (voxels).
+    pub(crate) fn density_dim(&self) -> UVec3 {
+        self.density_dim
+    }
+
+    /// The 2D weather-map dispatch extent (texels).
+    pub(crate) fn weather_dim(&self) -> UVec2 {
+        self.weather_dim
+    }
+
+    /// The 3D multiple-scatter `LUT` dispatch extent (cells).
+    pub(crate) fn mslut_dim(&self) -> UVec3 {
+        self.mslut_dim
+    }
+
+    /// The 2D light-space cloud-shadow dispatch extent (texels).
+    pub(crate) fn shadow_dim(&self) -> UVec2 {
+        self.shadow_dim
+    }
 }
 
 /// The per-view resident screen-space cloud targets, cached per

@@ -130,6 +130,12 @@ use super::{
         prepare_volumetrics_resources, volumetrics_pass, PrismVolumetricsSettings,
         VolumetricsTextureCache,
     },
+    volumetric_clouds::{
+        dispatch_volumetric_clouds, init_volumetric_cloud_pipelines,
+        prepare_volumetric_cloud_domain, prepare_volumetric_cloud_domain_bind_groups,
+        prepare_volumetric_cloud_view_bind_groups, prepare_volumetric_cloud_views,
+        PrismVolumetricCloudsSettings, VolumetricCloudViewCache,
+    },
     ibl::{
         dfg_lut_precompute_pass, env_prefilter_precompute_pass, extract_ibl_source,
         init_brdf_lut_pipeline, init_dfg_lut_texture, init_env_prefilter_pipeline,
@@ -228,6 +234,7 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/vsm_page_mark.wesl");
         embedded_asset!(app, "../shaders/motion_blur.wesl");
         embedded_asset!(app, "../shaders/volumetrics.wesl");
+        embedded_asset!(app, "../shaders/volumetric_clouds.wesl");
         embedded_asset!(app, "../shaders/dof.wesl");
         embedded_asset!(app, "../shaders/chromatic_aberration.wesl");
         embedded_asset!(app, "../shaders/vignette.wesl");
@@ -297,6 +304,8 @@ impl Plugin for PrismShadingPlugin {
             .init_resource::<PrismMotionBlurSettings>()
             .init_resource::<PrismVolumetricsSettings>()
             .init_resource::<VolumetricsTextureCache>()
+            .init_resource::<PrismVolumetricCloudsSettings>()
+            .init_resource::<VolumetricCloudViewCache>()
             .init_resource::<PrismDofSettings>()
             .init_resource::<PrismChromaticAberrationSettings>()
             .init_resource::<PrismVignetteSettings>()
@@ -411,6 +420,31 @@ impl Plugin for PrismShadingPlugin {
                     init_shadow_depth_pipeline
                         .after(init_gpu_resource::<crate::buffers::GpuSceneBindGroup>),
                     init_gpu_resource::<ShadowDepthViewUniform>,
+                ),
+            )
+            // Volumetric-cloud compute pipelines. Kept in their own
+            // `add_systems` call so the eight-kernel initializer never forces the
+            // already-full RenderStartup tuple past Bevy's 20-element limit.
+            .add_systems(RenderStartup, init_volumetric_cloud_pipelines)
+            // Volumetric-cloud domain + per-view resource and bind-group
+            // preparation. Self-contained (its own resident textures + view
+            // cache, gated on the opt-in settings), so it lives in its own
+            // `add_systems` call rather than crowding an already-full Render
+            // tuple. The domain textures allocate first, the per-view low-res
+            // targets after (they read the domain's frame parity), then the
+            // domain bind groups and finally the per-view bind groups.
+            .add_systems(
+                Render,
+                (
+                    prepare_volumetric_cloud_domain.in_set(RenderSystems::PrepareResources),
+                    prepare_volumetric_cloud_views
+                        .after(prepare_volumetric_cloud_domain)
+                        .in_set(RenderSystems::PrepareResources),
+                    prepare_volumetric_cloud_domain_bind_groups
+                        .in_set(RenderSystems::PrepareBindGroups),
+                    prepare_volumetric_cloud_view_bind_groups
+                        .after(prepare_volumetric_cloud_domain_bind_groups)
+                        .in_set(RenderSystems::PrepareBindGroups),
                 ),
             )
             .add_systems(
@@ -1023,6 +1057,20 @@ impl Plugin for PrismShadingPlugin {
                     .after(cas_pass)
                     .before(bevy_core_pipeline::Core3dSystems::MainPass),
             ),
+        );
+
+        // Volumetric-cloud compute solve. A self-contained device node: it
+        // records the eight cloud kernels (five view-independent domain passes
+        // once, three per-view passes per sized view) into its own compute
+        // passes, writing only its resident cloud targets -- it never touches
+        // scene_color, so it needs no serialisation with the post-process
+        // copy-back chain and only has to finish before the main pass so the
+        // resident cloud output is available to sample. No-ops while the clouds
+        // are disabled or any kernel is still compiling. Its own `add_systems`
+        // call keeps the primary Core3d tuple within Bevy's 20-element limit.
+        render_app.add_systems(
+            bevy_core_pipeline::Core3d,
+            dispatch_volumetric_clouds.before(bevy_core_pipeline::Core3dSystems::MainPass),
         );
 
         // Virtual-shadow-map page-table upload bridge: read the GPU page-mark

@@ -50,9 +50,20 @@
 
 mod abi;
 mod bind_groups;
+mod dispatch;
 mod pipeline;
 mod resources;
 mod settings;
 
 #[cfg(test)]
 mod shader_tests;
+
+pub(crate) use bind_groups::{
+    prepare_volumetric_cloud_domain_bind_groups, prepare_volumetric_cloud_view_bind_groups,
+};
+pub(crate) use dispatch::dispatch_volumetric_clouds;
+pub(crate) use pipeline::init_volumetric_cloud_pipelines;
+pub(crate) use resources::{
+    prepare_volumetric_cloud_domain, prepare_volumetric_cloud_views, VolumetricCloudViewCache,
+};
+pub(crate) use settings::PrismVolumetricCloudsSettings;
