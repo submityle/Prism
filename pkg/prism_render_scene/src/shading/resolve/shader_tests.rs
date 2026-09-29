@@ -754,6 +754,32 @@ fn hair_sdf_collision_wesl_compiles_standalone() {
         .unwrap_or_else(|error| panic!("hair_sdf_collision.wesl failed to compile: {error}"));
 }
 
+/// Registers and compiles `hair_root_skinning.wesl` standalone. A green result
+/// proves the GPU groom-root skinning resolve — the packed barycentric+height
+/// mesh binding, the flat `u32` triangle index reads with their out-of-range
+/// degrade-to-identity guards, the zero-area face rejection, the
+/// `f32::EPSILON`-guarded `normalize_or` mirror and the right-handed
+/// tangent/normal/bitangent re-orthonormalization — parses and type-checks as
+/// WESL on its own, in lock-step with the CPU golden in
+/// `prism_render_architecture::hair::binding::resolve_root_frames`.
+#[test]
+fn hair_root_skinning_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let hair_root = shader_id(0x5052_4953_4d5f_4841_4952_5f52_534b_0001);
+    cache.set_shader(
+        hair_root,
+        Shader::from_wesl(
+            include_str!("../../shaders/hair_root_skinning.wesl"),
+            "embedded://prism_render_scene/shaders/hair_root_skinning.wesl",
+        ),
+    );
+
+    cache
+        .get(0, hair_root, &[])
+        .unwrap_or_else(|error| panic!("hair_root_skinning.wesl failed to compile: {error}"));
+}
+
 /// Registers `lighting.wesl`, `brdf.wesl` and `stylized_hair.wesl` under their
 /// canonical module paths and compiles `stylized_hair.wesl`, forcing the
 /// importer to resolve the `prism_render_scene::shaders::brdf::{...}` imports
