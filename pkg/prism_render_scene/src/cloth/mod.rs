@@ -32,8 +32,11 @@
 mod abi;
 mod bind_groups;
 mod dispatch;
+mod extract;
+mod garment;
 mod pack;
 mod pipeline;
-mod solve_plan;
 pub(crate) mod plugin;
+mod prepare;
 mod resources;
+mod solve_plan;

@@ -23,11 +23,6 @@
 //! params) are derived here too, so the device stage and the dispatch node get
 //! their initial scalars from one documented place.
 
-#![allow(
-    dead_code,
-    reason = "the solve plan and its uniform fields are consumed by the device buffer-creation and extract slice that lands next; the plan's packing, counts, gating and uniform derivation are already pinned by the unit tests below"
-)]
-
 use prism_render_architecture::cloth::bending::BendingConstraint;
 use prism_render_architecture::cloth::gpu::buffers::BufferCounts;
 use prism_render_architecture::cloth::gpu::pipeline::{extract, prepare, PlannedDispatch};

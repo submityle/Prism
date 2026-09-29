@@ -29,9 +29,9 @@ pub(crate) struct ClothGpuPiece {
     /// The resident buffer set backing every bind group of this piece.
     ///
     /// Held purely to keep the `wgpu` buffer handles alive for as long as the
-    /// bind groups that reference them; the dispatch node never reads it
-    /// directly, and the extract slice that constructs pieces is not landed
-    /// yet, so it is legitimately unread today.
+    /// bind groups that reference them; the dispatch node binds through the
+    /// bind groups and never reads this field directly, so it is an
+    /// intentionally unread `RAII` handle.
     #[allow(dead_code)]
     pub(crate) buffers: ClothPieceGpuBuffers,
     /// The five group-0 bind groups, one per shader-interface layout.
@@ -45,7 +45,6 @@ impl ClothGpuPiece {
     /// schedule. Kept explicit (rather than a struct literal at the call site)
     /// so the extract stage constructs pieces through one documented entry.
     #[must_use]
-    #[allow(dead_code)]
     pub(crate) fn new(
         buffers: ClothPieceGpuBuffers,
         bind_groups: ClothPieceBindGroups,
