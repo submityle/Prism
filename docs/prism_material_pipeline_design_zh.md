@@ -42,7 +42,7 @@
 
 - 运行时跨平台**已由 wgpu 达成**，不需要、也不应该为原生 VK 折腾（那是跨平台的倒退）。
 - 着色器层**维持 WESL**：WESL 经 naga 已能落 WGSL/SPIR-V/Metal/DXIL，wgpu 在各后端消费——"一份代码编全平台"这条**现有链路已经具备**，无需再叠一层 Slang。曾把 WESL 判为"跨平台缺口"，复评后认定该缺口**本不存在**（naga 已补齐目标面；RT 也吃 WGSL）。详见 §2 决策记录。
-- 因此本文所有"Vulkan 优先/VK 先"应读作 **"wgpu（已有运行时）+ WESL（已有语言层）"**。**不存在独立的原生 Vulkan 后端**——只有一个 wgpu 后端；超出 `WebGPU` baseline 的能力（bindless / mesh shader / ray query / 多重间接 count / RT）都是 **opt-in 的 wgpu 扩展 feature**（wgpu 内部映射到底层 Vulkan/Metal/D3D12 扩展）。adapter 报告支持哪些 feature，device 启用请求的子集，上层特性声明所需 capability；adapter 给不出的 capability 走 **fallback**，而不是切后端。
+- 因此本文所有"Vulkan 优先/VK 先"应读作 **"wgpu（已有运行时）+ WESL（已有语言层）"**。**不存在独立的原生 Vulkan 后端**——只有一个 wgpu 后端；超出 `WebGPU` baseline 的能力（bindless / mesh shader / ray query / 多重间接 count / RT）都是 **opt-in 的 wgpu 扩展 feature**（wgpu 内部映射到底层 Vulkan/Metal/D3D12 扩展）。adapter 报告支持哪些 feature，device 启用请求的子集，上层特性声明所需 capability。**能力协商是三档，不是二档**：① wgpu baseline（全平台）；② wgpu 类型化扩展 feature（`wgpu/vulkan` 等映射到底层 VK/Metal/D3D12 扩展，adapter 给不出则走 **fallback**，绝不切后端）；③ **`raw_vulkan_init` HAL 逃生舱**——对 wgpu 连类型化 feature 都没暴露的裸 VK 扩展，Bevy 上游 `raw_vulkan_init`（`crates/bevy_render` `raw_vulkan_init = ["wgpu/vulkan"]`）经 `wgpu::hal::vulkan::Instance::init_with_callback` + `Adapter::open_with_callback` → `create_device_from_hal` 注入 instance/device 创建回调，在**同一个 wgpu 设备**上启用额外 VK 扩展（能力记进 `AdditionalVulkanFeatures`，用时 `adapter.as_hal::<Vulkan>()` 下探裸句柄）。这**不是第二个原生后端**，也不是通用兜底——它是 Vulkan-only、丢跨平台+丢 CPU golden 的最窄一条路，非 VK 平台（Metal/Web）直接 fallback 回普通 wgpu。三桶判据与"什么该跌进逃生舱"见 §8.1。
 - 开发机是 Apple Silicon macOS，Metal（经 wgpu）本就在跑，且能就地测 Metal + Web 两条跨平台线——是验证跨平台最合适的机器，而非障碍。
 
 ---
