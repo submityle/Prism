@@ -5,7 +5,7 @@
 > **空间与内容一等公民**：几何驱动空间化与 Event 驱动内容模型同为一等公民；程序化合成（Patch）、调制（Modulation）与母带合规（LUFS/True-Peak/HDR）三者贯通，可达顶级次世代 AAA 质量。
 > 本文档为设计规格与落地实现的权威规范；采用纯经典 DSP 路线，不含任何 AI/ML 内容，不含任何 UE/Unity/Godot/Wwise/FMOD 源码或衍生代码。
 
-- 版本: v0.5（基础层已落地编码：`pkg/prism_audio_core`；本版新增次世代执行与声学层：编译图执行模型（拓扑计划/缓冲活跃度分配/就地别名/PDC）、并行 DSP 图调度（Job 化/确定性并行/岛屿划分）、GPU 加速几何声学（共享渲染器 BVH 的声线与路径追踪）、性能自适应治理与音频 LOD、心理声学虚拟化与声源聚类、时间伸缩变调与重采样质量分级；扩展了参考映射、扩展点、路线图与术语表。v0.4 前序：程序化内容图 Patch、调制系统、多普勒/锥形/Spread/Focus/多位置、遮挡与障碍区分、Aux 发送与环境、HDR 音频、Bank/流式/内存、输入捕获、平台空间后端、虚拟语音行为、Profiler 与可视化调试）
+- 版本: v0.6（基础层已落地编码：`pkg/prism_audio_core`；本版新增内容生产与跨模态层：对白与本地化（程序化对白/语言 Bank/字幕同步/viseme 口型）、触感与跨模态输出（音频同源触感/触感总线/DualSense·双马达后端）、程序化环境音景（Soundscape 调色板与散布）、实时授权与远程工具 API（WAAPI 式远程遥测+白名单写命令/live tuning/授权热重载），并为 §16 增补头部追踪双耳、§28 增补属性/模糊测试。v0.5 前序：编译图执行模型（拓扑计划/缓冲活跃度分配/就地别名/PDC）、并行 DSP 图调度（Job 化/确定性并行/岛屿划分）、GPU 加速几何声学（共享渲染器 BVH 的声线与路径追踪）、性能自适应治理与音频 LOD、心理声学虚拟化与声源聚类、时间伸缩变调与重采样质量分级；扩展了参考映射、扩展点、路线图与术语表。v0.4 前序：程序化内容图 Patch、调制系统、多普勒/锥形/Spread/Focus/多位置、遮挡与障碍区分、Aux 发送与环境、HDR 音频、Bank/流式/内存、输入捕获、平台空间后端、虚拟语音行为、Profiler 与可视化调试）
 - 范围: 一步到位（统一渲染图 / 采样精确调度 / 程序化 Patch / 调制 / 几何声学 / Event+RTPC 编排 / 交互音乐 / LUFS+HDR 母带 / 平台空间输出）
 - 适用引擎: Prism / Bevy ECS 生态
 - 关键依赖: bevy_ecs（并行 ECS）、bevy_math（glam SIMD + `ops` 确定性标量数学）、bevy_tasks（资产解码/烘焙任务）、bevy_asset（音频资产与 Bank）、bevy_transform（听者/声源位姿）、bevy_a11y（无障碍）、cpal/AudioWorklet（设备后端，前端 crate）
@@ -49,11 +49,15 @@
 32. 性能自适应治理与音频 LOD（CPU 预算驱动质量缩放）
 33. 心理声学虚拟化与声源聚类（掩蔽感知剔除 / 对象床限制）
 34. 时间伸缩与变调 / 重采样质量分级（与多普勒解耦）
-35. Crate 拆分与落地形态
-36. 路线图
-37. 关键扩展点清单
-38. 开放问题
-39. 术语表
+35. 对白与本地化（Dialogue / Localization / 字幕 / 口型）
+36. 触感与跨模态输出（Haptics / Motion / 手柄反馈）
+37. 程序化环境音景（Soundscape / 程序化 Ambience）
+38. 实时授权与远程工具 API（Live Authoring / WAAPI 式 / 热调）
+39. Crate 拆分与落地形态
+40. 路线图
+41. 关键扩展点清单
+42. 开放问题
+43. 术语表
 
 ---
 
@@ -125,6 +129,12 @@
 | **游戏引擎 LOD / Wwise 语音上限（闭环化）** | CPU 预算驱动质量档与音频 LOD 自适应 | §32 治理器 |
 | **心理声学掩蔽 / Atmos 对象床上限** | 掩蔽感知虚拟化 + 邻近声源聚类归并 | §33 感知层 |
 | **相位声码器 / WSOLA / 多相 sinc** | 变调不变速 / 变速不变调 / 重采样质量分级 | §34 时间伸缩 |
+
+| **FMOD Programmer Instrument / Wwise External Sources·Dialogue Event** | 运行时程序化选择对白媒体、语言变体、决策树命中 | §35 对白 |
+| **本地化字幕轨 / viseme 口型时间线** | 字幕同步与口型/表情驱动数据（不占 RT） | §35 对白 |
+| **Wwise Motion / PS5 DualSense·Tempest Haptics** | 音频同源触感、触感总线、宽频/双马达可插拔后端 | §36 触感 |
+| **UE5 Soundscape** | 环境状态调色板 + 程序化 one-shot 散布，低重复环境床 | §37 音景 |
+| **Wwise Authoring API (WAAPI) / FMOD Live Update** | 远程只读遥测 + 白名单写命令 + 实时调参与授权热重载 | §38 授权 |
 
 **次世代差异化**（相对单一中间件的组合优势）：
 - 空间传播复用 `prism_physics` 的射线/几何查询做遮挡与反射，**声学与物理共享同一场景表示**，避免重复维护碰撞体。
@@ -339,6 +349,7 @@
 规划：
 
 - **HRTF 双耳渲染**：分块卷积 HRIR（按方位/仰角插值），近场效应与 ITD/ILD，可加载自定义 HRTF 数据集。
+- **头部追踪双耳（Head-tracked Binaural）**（对齐 Meta XR Audio / Steam Audio 头追）：XR/VR 下以低延迟头追姿态旋转 Ambisonic 场或重选 HRIR 方位，头动到声像更新走短前瞻路径，避免"声像黏在头上"；姿态更新经命令环下发，RT 侧插值平滑。
 - **Ambisonics**：FOA/HOA 场景总线，声源编码进 Ambisonic 域，最终按输出布局解码（双耳/多声道）。约定采用 **AmbiX（ACN 通道序 + SN3D 归一化）**，与主流工具链兼容。已在 `ChannelLayout::AmbisonicFoa` 预留，HOA 阶数可扩展。
 - **对象音频 / Atmos**：对象元数据（位置/大小）输出到支持的床（7.1.4）或下混到扬声器/耳机。
 - **平台空间后端**（`Panner`/输出适配可插拔）：耳机（内建 HRTF）、立体声、5.1/7.1；并可桥接平台原生空间 API——**Windows Sonic / Spatial Sound**、**索尼 Tempest 3D**、**杜比 Atmos**、**Meta XR Audio**——由 `prism_audio_device` 侦测并选择解码路径。
@@ -503,6 +514,7 @@ Panner 可插拔（`Panner` trait），对齐 Unity Spatializer / Ambisonic Deco
 - **clippy 零告警**：遵守工作区严格 lints（`missing_docs`、`disallowed-methods` 确定性数学、`allow_attributes_without_reason` 等）。
 - **离线 golden 渲染**：FileSink 渲染参考波形，回归对拍。
 - **provenance**：无 UE/Unity/Godot/Wwise/FMOD 源码或衍生代码，所有 DSP 出自公开标准知识（RBJ cookbook、BS.1770、等功率声像、AmbiX/ACN-SN3D、FDN 等）。
+- **属性/模糊测试**：对节点输入（NaN/inf/denormal、极端块长、参数边界）做属性与模糊测试，验证 RT 契约（不 panic、输出有界、denormal 被 flush），发布构建保持 panic-free（错误经 `Result` 上抛而非 unwrap）。
 
 ---
 
@@ -515,7 +527,7 @@ Panner 可插拔（`Panner` trait），对齐 Unity Spatializer / Ambisonic Deco
 - **就地处理（In-place）与别名优化**：当某节点的某输出端仅被单一消费者读取、且节点声明 `can_process_in_place()`，编译器让其输入/输出复用同一缓冲槽，省去一次 copy。别名安全性在编译期校验（禁止把仍被其他步读取的缓冲就地覆写）。
 - **求和与发送内联**：同一输入端的多入边求和、以及 Aux 发送的加权累加，被编译成计划内的 `AddScaled` 指令序列（复用 `AudioBuffer::add_scaled`），而非运行时遍历边表。
 - **延迟对齐（PDC）**：编译期沿计划累计各节点 `latency_frames()`，对并行路径插入整数样本延迟补偿（Plugin Delay Compensation），保证多路汇合相位对齐——这是母带链与并行发送正确性的前提。
-- **热交换**：新计划在任务线程编译完成后经命令环交付，RT 在块边界原子切换计划指针；旧计划连同其缓冲池进 epoch 回收（§37 无锁模型引用的策略），RT 线程从不 drop。
+- **热交换**：新计划在任务线程编译完成后经命令环交付，RT 在块边界原子切换计划指针；旧计划连同其缓冲池进 epoch 回收（§21 无锁模型的回收策略），RT 线程从不 drop。
 
 `ExecPlan` 是纯数据（`Copy`/`Send` 的索引与指令），可序列化用于离线 golden 对拍：相同图编译出**逐字节一致**的计划，是确定性验收（§28）的基石。
 
@@ -558,7 +570,7 @@ Panner 可插拔（`Panner` trait），对齐 Unity Spatializer / Ambisonic Deco
 
 对标主机/移动"稳帧"诉求，Resonance 内建**运行时质量治理器（QualityGovernor）**，在 CPU 预算内动态缩放质量，避免爆音/欠载——借鉴 Wwise 的语音上限/虚拟语音与游戏引擎的 LOD 思想，但做成**闭环自适应**：
 
-- **CPU 预算闭环**：遥测环（§37）回传每块的渲染耗时占预算比。治理器据此在**块边界**（非 RT 热路径内决策）升/降质量档，滞回（hysteresis）避免抖动。
+- **CPU 预算闭环**：遥测环（§21）回传每块的渲染耗时占预算比。治理器据此在**块边界**（非 RT 热路径内决策）升/降质量档，滞回（hysteresis）避免抖动。
 - **音频 LOD 维度**（按声源优先级 + 距离 + 感知重要度分级）：
   - **过采样档**：波形整形/非线性效果（§9 waveshaper）的抗混叠过采样从 4x→2x→1x 随预算下调。
   - **混响质量**：卷积分块 FFT 尺寸、FDN 延迟线数、早反射条数分级；远处/次要声源用更廉价的混响或共享混响返回。
@@ -607,14 +619,70 @@ Panner 可插拔（`Panner` trait），对齐 Unity Spatializer / Ambisonic Deco
 
 ---
 
-## 35. Crate 拆分与落地形态
+## 35. 对白与本地化（Dialogue / Localization / 字幕 / 口型）
+
+规划 crate `prism_audio_authoring`（对齐 FMOD Programmer Instrument / Wwise External Sources + Dialogue Event / 通用本地化管线）：
+
+- **程序化对白（运行时选择媒体）**：对白不预烘进逻辑，而由**对白解析器**在运行时按键值（角色 / 情绪 / 语言 / 变体 id）选择媒体后注入语音（对齐 FMOD Programmer Sound 与 Wwise External Sources）。游戏只发"说这句台词"的语义 Event，解析→取流→播放全在链路下游完成。
+- **对白决策树（Dialogue Event）**：Wwise 式——按一组 State/Switch（谁在说、在哪、什么心情）沿决策树命中具体台词或随机变体，支持"通用回退"路径，避免缺变体时静默。
+- **语言 Bank 热切换**：本地化媒体按语言分包（`voice_en`/`voice_zh`/…），切语言只换语音 Bank，逻辑与时间线不变；未加载语言回退默认并遥测告警。
+- **字幕/说明文字同步（Caption Sync）**：媒体携带时间码字幕轨（或外部字幕资产），播放头驱动字幕事件经遥测环（§21）上抛给 UI，支持逐句/逐词高亮与无障碍全字幕（联动 §23）。
+- **口型/表情驱动（Viseme / Lip-sync）**：viseme/音素时间线与能量包络随资产附带或离线分析导出，运行时经遥测环喂给动画系统，**不占 RT 预算**；无预烘数据时用 §26 `SpectrumNode`/包络跟随做粗略张口降级。
+- **对白优先级与闪避**：对白总线作为 §13 HDR/ducking 的 sidechain 键，说话自动压低音乐/环境；对白语音高优先级，§25 虚拟化最后淘汰。
+- **RT 边界**：解析/查表/取流在任务线程完成，RT 只播已就绪语音；缺失媒体输出静音并告警，不阻塞、不 panic。
+
+---
+
+## 36. 触感与跨模态输出（Haptics / Motion / 手柄反馈）
+
+规划（归入 `prism_audio_device` 输出适配层，对齐 Wwise Motion / PS5 DualSense·Tempest Haptics / 通用手柄 rumble）：
+
+- **音频同源触感**：把音频信号（或其低频/包络）转成触感波形——声音与触感**同源**，天然逐样本同步（对齐 Wwise Motion 把声音渲染到"运动设备"），免去另做一套振动曲线。
+- **触感总线（Haptic Bus）**：统一图（§5）里一条并行输出总线，声源可像 Aux 发送（§17）一样按增益发往触感总线；总线走独立带通/整流/包络链后交 `HapticBackend`。
+- **`HapticBackend`（可插拔 trait）**：
+  - **宽频高保真**（DualSense / Tempest 式）：直接吃触感波形（低采样率重采样），表达细腻纹理。
+  - **双马达 rumble**（通用手柄）：信号分低/高频包络分别驱动左右（低/高频）马达。
+  - **无设备**：静默回退。
+- **跨模态对齐**：触感与声音共享 §8 播放头与 §29 PDC，保证"看到—听到—摸到"同一样本时刻对齐；设备固有延迟由后端上报并补偿。
+- **空间触感**：按声源方向/距离（§15）加权左右强度，做方向性冲击（左侧爆炸→左马达更强）。
+- **预算与降级**：触感受 §32 治理器预算约束，低档旁路；触感生成**纯旁路**，不回灌音频路径。
+
+---
+
+## 37. 程序化环境音景（Soundscape / 程序化 Ambience）
+
+规划（对齐 UE5 Soundscape / 通用程序化环境系统）：
+
+- **音景状态（Soundscape State）**：由环境上下文（生物群系 / 天气 / 时段 / 室内外，来自 gameplay 与 §17 Reverb Zone）激活一组**调色板（Palette）**。
+- **调色板 / 元素（Palette / Color Point）**：每个元素定义一个环境声（鸟鸣/风/滴水/远处交通）及其**播放规则**——触发概率、间隔分布、随机音高/增益、空间散布半径、并发上限、昼夜权重。
+- **程序化调度**：调度器复用 §8 时钟 + 种子 RNG，在听者周围**程序化散布 one-shot**，形成永不循环、低重复感的环境床，替代"一段环境 loop 干听"。
+- **几何/遮挡联动**：散布点经 §14 遮挡/障碍与 §17 房间归属过滤（室内不放室外鸟鸣），发送量随 §15 距离曲线。
+- **确定性**：调度用种子 RNG（§24），同种子 + 同状态序列可复现，便于 golden 对拍与网络一致。
+- **预算内自适应**：并发环境元素数受 §32/§33 治理（聚类/掩蔽剔除），远处密集元素聚合为床。
+
+---
+
+## 38. 实时授权与远程工具 API（Live Authoring / WAAPI 式 / 热调）
+
+规划（对齐 Wwise Authoring API (WAAPI) / FMOD Studio Live Update / 通用远程调试）：
+
+- **远程工具通道（`AuthoringTransport`）**：编辑器/外部工具经本地 socket（或进程内通道）连到运行引擎，**只读遥测**（语音清单/总线电平/CPU/事件时间线，来自 §26 遥测环）+ **白名单写命令**（改参数/触发 Event/切 State/换 snapshot），命令经 §21 命令环下发，绝不直接触碰 RT 内存。
+- **实时调参（Live Tuning）**：运行时调 RTPC/总线增益/衰减曲线/混响参数并**即时听到**（对齐 FMOD Live Update），满意后回写授权资产；改动经 §7 平滑，无爆音。
+- **授权数据热重载**：Event/Container/Bank/Patch 经 `bevy_asset` 热重载——任务线程重编译受影响子图/Patch 成新 `ExecPlan`（§29），RT 块边界原子热交换（§30），无需重启。
+- **远程 Profiler 连接**：Profiler 面板（§26）可连本地或远端设备（主机/移动真机）会话，录制/回放；能力探测决定带宽与采样率。
+- **安全边界**：远程通道鉴权 + 命令白名单，默认仅开发构建启用，发布构建整体编译剔除，收敛攻击面。
+- **契约**：远程写与游戏代码走同一命令环，故**远程改动与代码改动语义一致、可确定性回放**。
+
+---
+
+## 39. Crate 拆分与落地形态
 
 | Crate | 层 | 内容 | 状态 |
 |---|---|---|---|
 | `pkg/prism_audio_core` | L1+L2 | math/buffer/param/time/graph + nodes | ✅ 基础层已落地 |
 | `pkg/prism_audio_spatial` | L3 | 几何传播/HRTF/Ambisonics/panner/多普勒/平台后端桥 | 规划 |
-| `pkg/prism_audio_authoring` | L3 | Event/Container/State/Switch/RTPC/Patch 编译/Modulation/交互音乐/Bank | 规划 |
-| `pkg/prism_audio_device` | L3 | cpal/worklet/FileSink/输入捕获 | 规划 |
+| `pkg/prism_audio_authoring` | L3 | Event/Container/State/Switch/RTPC/Patch 编译/Modulation/交互音乐/Bank/对白与本地化/音景 | 规划 |
+| `pkg/prism_audio_device` | L3 | cpal/worklet/FileSink/输入捕获/触感后端/远程授权通道 | 规划 |
 | `crates/bevy_audio` | L4 | ECS 前端（改接命令通道，保留兼容 API） | 规划改造 |
 
 **并行开发拆分**（写集不相交，可 fan-out 给并行 agent）：
@@ -629,23 +697,27 @@ Panner 可插拔（`Panner` trait），对齐 Unity Spatializer / Ambisonic Deco
 - scheduler（采样精确调度器 + 命名时钟）
 - 无锁环（command/telemetry ring、voice pool、epoch 回收）
 - 剖析（meter/spectrum/capture + 面板）
+- dialogue（对白解析/本地化/语言 Bank/字幕/viseme）
+- haptics（触感总线/`HapticBackend`/双马达/宽频）
+- soundscape（程序化音景调色板与散布调度）
+- tooling（远程授权 API/live update/远程 profiler）
 
 ---
 
-## 36. 路线图
+## 40. 路线图
 
 - **M0 内核（已完成）**：math/buffer/param/time/graph + 首发 4 节点，31 测试（27 单测 + 4 doctest），双构建，零告警，已 commit。
 - **M1 效果与动态**：EQ/delay/waveshaper/调制延迟 + compressor/limiter/gate/ducking + reverb（FDN/convolver）。
 - **M2 声源与调度**：sample player/oscillator/noise/streaming/generator + 采样精确调度器 + 命名时钟 + 语音池与虚拟语音行为。
 - **M3 ECS 桥与设备**：命令/遥测环 + epoch 回收 + cpal/worklet/FileSink/输入捕获 + `bevy_audio` 前端改造（兼容 API）。
 - **M4 空间**：遮挡/障碍/透射/衍射/反射 + 距离塑形（衰减/锥形/spread/focus/doppler/多位置）+ HRTF/Ambisonics + Rooms&Portals + Aux 发送 + 平台空间后端桥。
-- **M5 编排、Patch 与音乐**：Event/Container/State/Switch/RTPC + Patch 编译器与合成原语 + Modulation（LFO/包络/控制总线）+ 交互音乐（段/过渡/stinger）+ Bank/流式。
-- **M6 母带、合规与剖析**：LUFS 归一 + true-peak limiter + HDR 窗口 + snapshot + 无障碍 + Profiler/频谱/计量面板。
+- **M5 编排、Patch 与音乐**：Event/Container/State/Switch/RTPC + Patch 编译器与合成原语 + Modulation（LFO/包络/控制总线）+ 交互音乐（段/过渡/stinger）+ Bank/流式 + 对白与本地化解析（§35）+ 程序化音景（§37）。
+- **M6 母带、合规、剖析与工具**：LUFS 归一 + true-peak limiter + HDR 窗口 + snapshot + 无障碍 + Profiler/频谱/计量面板 + 触感与跨模态输出（§36）+ 实时授权与远程工具 API（§38）。
 - **M7 次世代执行与声学**（横切增强，随 M1-M6 演进落地）：编译图 ExecPlan + 缓冲活跃度分配 + PDC（§29）；岛屿划分与 Job 化确定性并行调度（§30）；复用渲染器 GPU BVH 的声学声线/路径后端与烘焙（§31）；CPU 预算闭环治理器与音频 LOD（§32）；掩蔽感知虚拟化与声源聚类（§33）；`Resampler`/`TimeStretcher` 质量分级（§34）。每项均带确定性/golden 对拍验收。
 
 ---
 
-## 37. 关键扩展点清单
+## 41. 关键扩展点清单
 
 | 扩展点 | trait | 用途 |
 |---|---|---|
@@ -661,10 +733,14 @@ Panner 可插拔（`Panner` trait），对齐 Unity Spatializer / Ambisonic Deco
 | 重采样器 | `Resampler` | 线性/多相 sinc/高阶 sinc 质量分级 |
 | 时间伸缩 | `TimeStretcher` | WSOLA/相位声码器（变调不变速） |
 | 质量治理 | `QualityGovernor` | CPU 预算闭环的音频 LOD 策略 |
+| 对白解析 | `DialogueResolver` | 运行时按键值/语言/决策树选媒体 |
+| 触感后端 | `HapticBackend` | 宽频（DualSense）/双马达/运动设备 |
+| 音景调色板 | `SoundscapePalette` | 程序化环境散布规则与调度 |
+| 授权通道 | `AuthoringTransport` | 远程只读遥测 + 白名单写命令 |
 
 ---
 
-## 38. 开放问题
+## 42. 开放问题
 
 - 图/资源交换的旧对象回收策略：延迟队列 vs 引用计数 vs epoch（当前倾向 epoch）。
 - HOA 阶数与 CPU 预算的默认档位。
@@ -673,10 +749,14 @@ Panner 可插拔（`Panner` trait），对齐 Unity Spatializer / Ambisonic Deco
 - 声学材质与视觉材质资产的字段合并范围。
 - Patch 嵌套深度上限与编译展开的内存上界。
 - 平台空间后端的能力探测与优雅降级策略。
+- 触感设备能力差异（宽频 vs 双马达）的统一波形抽象与降级映射。
+- 对白媒体运行时选择的查表命中与流式预取延迟预算。
+- 远程授权通道在发布构建的启用/鉴权策略与命令白名单粒度。
+- 程序化音景元素密度与 §33 聚类阈值的默认档位。
 
 ---
 
-## 39. 术语表
+## 43. 术语表
 
 - **RT-safe**：实时安全，指音频回调线程可执行（零分配/锁/阻塞/panic）。
 - **block / 块**：一次处理的定长样本帧数。
@@ -710,3 +790,9 @@ Panner 可插拔（`Panner` trait），对齐 Unity Spatializer / Ambisonic Deco
 - **声源聚类（Source Clustering）**：把邻近相近的多个声源动态归并为少量代表性虚拟源。
 - **WSOLA / 相位声码器**：变速不变调 / 变调不变速的时域/频域时间伸缩算法。
 - **多相 FIR（Polyphase）**：高效任意比率重采样的滤波器组结构。
+- **Programmer Sound / 程序化对白**：运行时按键值选择媒体注入语音的对白机制（FMOD/Wwise 式）。
+- **Viseme / 口型**：与音素对应的口型帧，用于唇形/表情动画驱动。
+- **Caption Sync / 字幕同步**：由播放头驱动、随媒体时间码上抛的字幕事件。
+- **Haptics / 触感**：与音频同源生成的振动/力反馈输出（手柄/运动设备）。
+- **Soundscape / 音景**：由环境状态驱动、程序化散布 one-shot 形成的低重复环境声床。
+- **WAAPI / 授权 API**：远程连接运行引擎做只读遥测与白名单写命令的工具协议范式。

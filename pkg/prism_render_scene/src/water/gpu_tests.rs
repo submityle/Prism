@@ -2264,3 +2264,312 @@ fn caustics_project_gpu_matches_cpu_golden() {
         i += 1;
     }
 }
+
+// ===========================================================================
+// Kernel: water_coupling_readback (render_fx, 64) — on-device parity.
+// ===========================================================================
+//
+// The two-way coupling read-back packs per-body buoyancy, quadratic drag,
+// added-mass reaction, and the momentum write-back fraction, and it caps the
+// batch at `min(query_count, max_readback)` so the pass never reads the whole
+// field back. Every term is plain arithmetic (products, a `v*v`, a clamped
+// ratio) with no transcendental, so the `CPU` golden calls the architecture
+// reference functions verbatim and the readback matches to `float32` rounding.
+//
+// The kernel binds its resources at `@group(4)`, so the parity path builds an
+// explicit pipeline layout whose groups `0..=3` are empty and group `4` carries
+// the query buffer, the read-back buffer, and the parameter uniform. Lanes past
+// the batch cap never write, so the read-back slots beyond `batch` keep their
+// pre-seeded sentinel — direct evidence the bound is honoured on device.
+
+use super::abi::{GpuWaterCouplingParams, GpuWaterCouplingQuery};
+use prism_render_architecture::water::coupling::{
+    added_mass, buoyancy_force, drag_force, source_writeback_fraction,
+};
+
+/// Sentinel written into every read-back slot before dispatch; lanes past the
+/// batch cap must still read back as this untouched value.
+const COUPLING_SENTINEL: f32 = -1.0;
+
+/// Builds a deterministic, transcendental-free set of coupling queries that
+/// covers the write-back branches: a zero total volume (inert), a body more
+/// than fully submerged (fraction clamps to one), and a zero relative speed
+/// (drag vanishes), alongside a spread of partial submersions.
+fn coupling_queries(count: u32) -> Vec<GpuWaterCouplingQuery> {
+    let mut queries = Vec::with_capacity(count as usize);
+    let mut i = 0u32;
+    while i < count {
+        let f = i as f32;
+        let (submerged, total) = if i.is_multiple_of(20) {
+            // Zero total volume -> the write-back fraction stays inert.
+            (0.0, 0.0)
+        } else if i % 20 == 1 {
+            // Over-submerged -> the fraction saturates at one.
+            (5.0, 2.0)
+        } else {
+            (0.15 * f + 0.2, 3.0 + 0.02 * f)
+        };
+        queries.push(GpuWaterCouplingQuery {
+            submerged_volume: submerged,
+            total_volume: total,
+            cross_section: 0.5 + 0.01 * f,
+            // Every fifth body is at rest so its drag term vanishes.
+            rel_speed: if i.is_multiple_of(5) {
+                0.0
+            } else {
+                0.1 * f + 0.3
+            },
+        });
+        i += 1;
+    }
+    queries
+}
+
+/// `CPU` golden twin of `water_coupling_readback`.
+///
+/// Packs `[buoyancy, drag, added_mass, writeback]` for every lane below the
+/// batch cap `min(query_count, max_readback)` using the architecture reference
+/// functions, and leaves the tail lanes at [`COUPLING_SENTINEL`] exactly like
+/// the kernel, which returns before touching them.
+fn coupling_golden(params: &GpuWaterCouplingParams, queries: &[GpuWaterCouplingQuery]) -> Vec<f32> {
+    let count = params.query_count as usize;
+    let batch = params.query_count.min(params.max_readback) as usize;
+    let mut out = vec![COUPLING_SENTINEL; count * 4];
+    let mut i = 0usize;
+    while i < batch {
+        let q = queries[i];
+        let base = i * 4;
+        out[base] = buoyancy_force(params.fluid_density, q.submerged_volume, params.gravity);
+        out[base + 1] = drag_force(
+            params.drag_coeff,
+            params.fluid_density,
+            q.cross_section,
+            q.rel_speed,
+        );
+        out[base + 2] = added_mass(
+            params.added_mass_coeff,
+            params.fluid_density,
+            q.submerged_volume,
+        );
+        out[base + 3] = source_writeback_fraction(q.submerged_volume, q.total_volume);
+        i += 1;
+    }
+    out
+}
+
+/// Dispatches one `water_coupling_readback` pass on device and reads back the
+/// packed `vec4` result lanes as flat `f32`s.
+///
+/// The kernel lives at `@group(4)`, so an explicit pipeline layout is built with
+/// empty layouts for groups `0..=3` and the real query/read-back/params layout
+/// at group `4`. The read-back storage buffer is pre-seeded with
+/// [`COUPLING_SENTINEL`] so the tail past the batch cap is observable.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one explicit-group-4 dispatch-and-readback over the coupling buffers keeps the parity path auditable"
+)]
+fn dispatch_coupling(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    wgsl: &str,
+    entry: &str,
+    params: &GpuWaterCouplingParams,
+    queries: &[GpuWaterCouplingQuery],
+) -> Vec<f32> {
+    let count = params.query_count as usize;
+
+    let module = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("water_render_fx_coupling_parity"),
+        source: ShaderSource::Wgsl(wgsl.into()),
+    });
+    let empty_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+        label: Some("water_coupling_empty_layout"),
+        entries: &[],
+    });
+    let group4_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+        label: Some("water_coupling_layout"),
+        entries: &[
+            BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            BindGroupLayoutEntry {
+                binding: 1,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            BindGroupLayoutEntry {
+                binding: 2,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    });
+    let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+        label: Some("water_coupling_pipeline_layout"),
+        bind_group_layouts: &[
+            Some(&empty_layout),
+            Some(&empty_layout),
+            Some(&empty_layout),
+            Some(&empty_layout),
+            Some(&group4_layout),
+        ],
+        immediate_size: 0,
+    });
+    let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("water_coupling_readback_parity"),
+        layout: Some(&pipeline_layout),
+        module: &module,
+        entry_point: Some(entry),
+        compilation_options: PipelineCompilationOptions::default(),
+        cache: None,
+    });
+
+    let queries_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("coupling_queries"),
+        contents: bytemuck::cast_slice(queries),
+        usage: BufferUsages::STORAGE,
+    });
+    let sentinel = vec![COUPLING_SENTINEL; count * 4];
+    let readback_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("coupling_readback"),
+        contents: bytemuck::cast_slice(&sentinel),
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+    });
+    let params_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("coupling_params"),
+        contents: bytemuck::bytes_of(params),
+        usage: BufferUsages::UNIFORM,
+    });
+
+    let empty_group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("coupling_empty_group"),
+        layout: &empty_layout,
+        entries: &[],
+    });
+    let bind_group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("coupling_bind_group"),
+        layout: &group4_layout,
+        entries: &[
+            BindGroupEntry {
+                binding: 0,
+                resource: queries_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 1,
+                resource: readback_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 2,
+                resource: params_buf.as_entire_binding(),
+            },
+        ],
+    });
+
+    let out_bytes = (count * 16) as u64;
+    let stage = device.create_buffer(&BufferDescriptor {
+        label: Some("coupling_stage"),
+        size: out_bytes,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("coupling_parity_encoder"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("coupling_parity_pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &empty_group, &[]);
+        pass.set_bind_group(1, &empty_group, &[]);
+        pass.set_bind_group(2, &empty_group, &[]);
+        pass.set_bind_group(3, &empty_group, &[]);
+        pass.set_bind_group(4, &bind_group, &[]);
+        pass.dispatch_workgroups((count as u32).div_ceil(64), 1, 1);
+    }
+    encoder.copy_buffer_to_buffer(&readback_buf, 0, &stage, 0, out_bytes);
+    queue.submit([encoder.finish()]);
+
+    stage.slice(..).map_async(MapMode::Read, |_| {});
+    device
+        .poll(PollType::wait_indefinitely())
+        .expect("device poll should complete the submitted work");
+
+    let view = stage
+        .slice(..)
+        .get_mapped_range()
+        .expect("mapped coupling readback should be available after poll");
+    let floats = bytemuck::cast_slice::<u8, f32>(&view).to_vec();
+    drop(view);
+    stage.unmap();
+    floats
+}
+
+/// Real-device parity for `water_coupling_readback`: pack the coupling forces
+/// for a batch-capped set of `100` queries (cap `80`) on device and match the
+/// `vec4` read-back lane-for-lane against the `CPU` golden, including the
+/// untouched sentinel tail past the cap.
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice must reach the test log on hosts without a wgpu adapter"
+)]
+fn coupling_readback_gpu_matches_cpu_golden() {
+    let Some((device, queue)) = try_solver_device() else {
+        eprintln!(
+            "coupling_readback_gpu_matches_cpu_golden: no wgpu adapter, skipping on-device parity"
+        );
+        return;
+    };
+
+    let params = GpuWaterCouplingParams {
+        fluid_density: 1.0,
+        drag_coeff: 1.2,
+        added_mass_coeff: 0.5,
+        gravity: 9.81,
+        query_count: 100,
+        max_readback: 80,
+        _pad0: 0,
+        _pad1: 0,
+    };
+    let queries = coupling_queries(params.query_count);
+
+    let golden = coupling_golden(&params, &queries);
+
+    let wgsl = compile_render_fx_wgsl();
+    let entry = find_entry_point(&wgsl, "coupling_readback");
+    let gpu = dispatch_coupling(&device, &queue, &wgsl, &entry, &params, &queries);
+
+    assert_eq!(gpu.len(), golden.len(), "coupling lane count");
+
+    let mut i = 0;
+    while i < golden.len() {
+        let d = (gpu[i] - golden[i]).abs();
+        assert!(
+            d < PARITY_EPS,
+            "coupling lane {i}: gpu={} cpu={} |d|={d}",
+            gpu[i],
+            golden[i],
+        );
+        i += 1;
+    }
+}
