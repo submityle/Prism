@@ -621,6 +621,31 @@ fn hair_interp_wesl_compiles_standalone() {
         .unwrap_or_else(|error| panic!("hair_interp.wesl failed to compile: {error}"));
 }
 
+/// Compiles `hair_ribbon.wesl` standalone. It has no imports, so a green result
+/// proves the GPU strand-to-ribbon card-meshing kernel — the two-pass arc
+/// length accumulation driving `v`, the `+/-bitangent*radius` edge expansion,
+/// the even-spacing zero-length fallback and the `vertex_offset`-biased
+/// two-triangle-per-segment index emission — parses and type-checks as WESL on
+/// its own, in lock-step with the CPU golden in
+/// `prism_render_architecture::hair::ribbon::build_ribbon`.
+#[test]
+fn hair_ribbon_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let hair_ribbon = shader_id(0x5052_4953_4d5f_4841_4952_5f52_424e_0001);
+    cache.set_shader(
+        hair_ribbon,
+        Shader::from_wesl(
+            include_str!("../../shaders/hair_ribbon.wesl"),
+            "embedded://prism_render_scene/shaders/hair_ribbon.wesl",
+        ),
+    );
+
+    cache
+        .get(0, hair_ribbon, &[])
+        .unwrap_or_else(|error| panic!("hair_ribbon.wesl failed to compile: {error}"));
+}
+
 /// Registers `lighting.wesl`, `brdf.wesl` and `stylized_hair.wesl` under their
 /// canonical module paths and compiles `stylized_hair.wesl`, forcing the
 /// importer to resolve the `prism_render_scene::shaders::brdf::{...}` imports
