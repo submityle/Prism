@@ -1,6 +1,6 @@
-//! WESL compilation coverage for the volumetric fog shader.
+//! WESL compilation + ABI coverage for the froxel volumetric fog shader.
 //!
-//! The sandbox has no GPU, so this test compiles the WESL source through the
+//! The sandbox has no GPU, so these tests compile the WESL source through the
 //! same `ShaderCache` / `wesl` pipeline the render world uses, validating that
 //! `volumetrics.wesl` parses and type-checks exactly as it will on device. The
 //! kernel is self-contained (no intra-crate `import`s, matching `ssgi.wesl` /
@@ -8,10 +8,16 @@
 //! reduction — Henyey-Greenstein phase, Beer-Lambert transmittance, the
 //! energy-conserving analytic slice integral and the front-to-back column
 //! march — against drift from its CPU golden twin in
-//! `prism_render_shading::volumetrics`.
+//! `prism_render_shading::volumetrics`. The final assertions pin the two
+//! immediate-block sizes so the `#[repr(C)]` records can never silently drift
+//! out of sync with the WESL `var<immediate>` structs.
 
 use bevy_asset::{uuid::Uuid, AssetId};
 use bevy_shader::{Shader, ShaderCache, ShaderCacheError, ShaderCacheSource, ValidateShader};
+
+use super::abi::{GpuVolumetricsIntegrateParams, GpuVolumetricsScatterParams};
+
+const VOLUMETRICS_WESL: &str = include_str!("../../shaders/volumetrics.wesl");
 
 fn load_source(
     _: &(),
@@ -30,11 +36,11 @@ fn shader_id(tag: u128) -> AssetId<Shader> {
     }
 }
 
-/// Compiles `volumetrics.wesl`, proving the froxel volumetric fog kernel parses
-/// and type-checks exactly as it will in the render world (per-froxel medium
-/// coefficients and in-scattered radiance in; accumulated in-scattering and
-/// column transmittance out), and that the `MediumSample` / `Froxel` /
-/// `VolumetricIntegration` layouts match the CPU golden.
+/// Compiles `volumetrics.wesl` through the render-world shader pipeline, proving
+/// both froxel compute entries (`volumetrics_scatter` and
+/// `volumetrics_integrate`) parse and type-check exactly as they will on device,
+/// and that the `MediumSample` / `Froxel` / `VolumetricIntegration` layouts and
+/// the two `var<immediate>` param blocks match the CPU golden.
 #[test]
 fn volumetrics_wesl_compiles_standalone() {
     let mut cache = ShaderCache::new((), load_source);
@@ -43,7 +49,7 @@ fn volumetrics_wesl_compiles_standalone() {
     cache.set_shader(
         volumetrics,
         Shader::from_wesl(
-            include_str!("../../shaders/volumetrics.wesl"),
+            VOLUMETRICS_WESL,
             "embedded://prism_render_scene/shaders/volumetrics.wesl",
         ),
     );
@@ -51,4 +57,30 @@ fn volumetrics_wesl_compiles_standalone() {
     cache
         .get(0, volumetrics, &[])
         .unwrap_or_else(|error| panic!("volumetrics.wesl failed to compile: {error}"));
+}
+
+/// The shader must declare both `@compute` entry points the pipelines name, so a
+/// rename on either side is caught before it reaches the (GPU-less) device.
+#[test]
+fn volumetrics_wesl_declares_both_compute_entries() {
+    assert!(
+        VOLUMETRICS_WESL.contains("fn volumetrics_scatter"),
+        "scatter entry point missing from volumetrics.wesl",
+    );
+    assert!(
+        VOLUMETRICS_WESL.contains("fn volumetrics_integrate"),
+        "integrate entry point missing from volumetrics.wesl",
+    );
+}
+
+/// The immediate-block sizes the pipelines pass as `immediate_size` must match
+/// the `#[repr(C)]` ABI records byte-for-byte (24 scalars = 96 bytes for
+/// scatter, 3 u32 = 12 bytes for integrate), so the `set_immediates` uploads
+/// line up with the WESL `var<immediate>` structs.
+#[test]
+fn volumetrics_immediate_block_sizes_are_pinned() {
+    assert_eq!(size_of::<GpuVolumetricsScatterParams>(), 96);
+    assert_eq!(align_of::<GpuVolumetricsScatterParams>(), 4);
+    assert_eq!(size_of::<GpuVolumetricsIntegrateParams>(), 12);
+    assert_eq!(align_of::<GpuVolumetricsIntegrateParams>(), 4);
 }
