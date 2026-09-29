@@ -594,3 +594,29 @@ fn hair_transmittance_wesl_compiles_standalone() {
         .get(0, hair_transmittance, &[])
         .unwrap_or_else(|error| panic!("hair_transmittance.wesl failed to compile: {error}"));
 }
+
+/// Compiles `hair_interp.wesl` standalone. It has no imports, so a green result
+/// proves the GPU guide-to-render interpolation kernel — the `splitmix64` hash
+/// emulated over `vec2<u32>` 64-bit words, the range-reduced `sin_turns` curl,
+/// the weighted blend, length jitter, clump pull and per-point position jitter,
+/// the per-guide `guide_ranges` slicing into the flat `guide_points` buffer and
+/// the `var<immediate>` `HairInterpParams` — parses and type-checks as WESL on
+/// its own, in lock-step with the CPU golden in
+/// `prism_render_architecture::hair::interpolation`.
+#[test]
+fn hair_interp_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let hair_interp = shader_id(0x5052_4953_4d5f_4841_4952_5f49_4e54_0001);
+    cache.set_shader(
+        hair_interp,
+        Shader::from_wesl(
+            include_str!("../../shaders/hair_interp.wesl"),
+            "embedded://prism_render_scene/shaders/hair_interp.wesl",
+        ),
+    );
+
+    cache
+        .get(0, hair_interp, &[])
+        .unwrap_or_else(|error| panic!("hair_interp.wesl failed to compile: {error}"));
+}
