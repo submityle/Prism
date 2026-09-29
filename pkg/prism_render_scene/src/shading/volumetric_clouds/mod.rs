@@ -49,6 +49,7 @@
 //! that embeds the shader and installs the pipelines and graph node.
 
 mod abi;
+mod bind_groups;
 mod pipeline;
 mod resources;
 mod settings;
