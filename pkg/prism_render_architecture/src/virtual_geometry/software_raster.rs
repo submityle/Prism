@@ -322,6 +322,50 @@ fn clamp_ceil(value: f32, limit: u32) -> u32 {
     ceiled.min(limit)
 }
 
+/// Maximum triangles a single cluster may hold.
+///
+/// The payload reserves [`CLUSTER_TRIANGLE_BITS`] bits for the triangle index,
+/// so triangle ids past this count would alias earlier triangles. Cluster build
+/// guarantees this bound (one triangle per rasterizer thread); the reference
+/// enforces it so a malformed cluster surfaces instead of silently aliasing.
+pub const MAX_CLUSTER_TRIANGLES: usize = 1 << CLUSTER_TRIANGLE_BITS;
+
+/// Rasterizes an indexed cluster into `buffer`, mirroring the GPU dispatch.
+///
+/// This is the cluster-granularity companion to [`rasterize_triangle`]: it is
+/// the CPU reference a per-cluster compute dispatch is diffed against. Each
+/// entry of `triangles` is a triple of indices into `vertices`; triangle `i`
+/// writes the payload [`pack_cluster_triangle`]`(cluster_id, i)`, so the
+/// vis-buffer decodes back to the same cluster/triangle ids the twin produces.
+///
+/// Triangles are processed in order with nearest-depth compositing, identical
+/// to issuing each through [`rasterize_triangle`]. A triple that indexes past
+/// `vertices` is skipped rather than panicking, so a malformed index list is
+/// inert. Only the first [`MAX_CLUSTER_TRIANGLES`] triangles are rasterized;
+/// any beyond that would alias triangle ids and are dropped.
+pub fn rasterize_cluster(
+    buffer: &mut VisBuffer,
+    vertices: &[ScreenVertex],
+    triangles: &[[u32; 3]],
+    cluster_id: u32,
+    cull_back: bool,
+) {
+    let count = triangles.len().min(MAX_CLUSTER_TRIANGLES);
+    for (triangle_id, tri) in triangles[..count].iter().enumerate() {
+        let [i0, i1, i2] = *tri;
+        let (Some(&v0), Some(&v1), Some(&v2)) = (
+            vertices.get(i0 as usize),
+            vertices.get(i1 as usize),
+            vertices.get(i2 as usize),
+        ) else {
+            // Out-of-range index: skip this triangle, never index out of bounds.
+            continue;
+        };
+        let payload = pack_cluster_triangle(cluster_id, triangle_id as u32);
+        rasterize_triangle(buffer, [v0, v1, v2], payload, cull_back);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -483,10 +527,64 @@ mod tests {
         rasterize_triangle(&mut buffer, tri, 1, false);
         let key = vis_depth(buffer.at(3, 3));
         let expected = encode_depth((0.9 + 0.6 + 0.3) / 3.0);
-        // f32 barycentric accumulation and the f32 vertex-mean round
-        // slightly differently before the u32::MAX-scaled encode, so allow
-        // a sub-ULP-of-f32-depth tolerance across the full 32-bit range.
+        // f32 barycentric accumulation and the f32 vertex-mean round to
+        // slightly different bit patterns, so compare the depth keys within a
+        // few ULPs rather than exactly.
         let diff = key.abs_diff(expected);
-        assert!(diff <= 1024, "centroid depth key {key} vs expected {expected}");
+        assert!(diff <= 16, "centroid depth key {key} vs expected {expected}");
+    }
+
+    #[test]
+    fn cluster_writes_per_triangle_payloads() {
+        // A two-triangle cluster: each covered pixel decodes to the shared
+        // cluster id and its own triangle id.
+        let verts = [
+            sv(0.5, 0.5, 0.5),
+            sv(6.5, 0.5, 0.5),
+            sv(0.5, 6.5, 0.5),
+            sv(9.5, 9.5, 0.5),
+        ];
+        // Triangle 0 near the origin, triangle 1 near the far corner.
+        let tris = [[0, 1, 2], [3, 1, 2]];
+        let mut buffer = VisBuffer::new(10, 10);
+        rasterize_cluster(&mut buffer, &verts, &tris, 42, false);
+        // Pixel (0,0) is strictly inside triangle 0 only.
+        let p0 = vis_payload(buffer.at(0, 0));
+        assert_eq!(cluster_of(p0), 42);
+        assert_eq!(triangle_of(p0), 0);
+    }
+
+    #[test]
+    fn cluster_matches_individual_triangle_dispatch() {
+        // Rasterizing a cluster equals issuing each triangle by hand with the
+        // packed cluster/triangle payload, in order.
+        let verts = [
+            sv(0.0, 0.0, 0.4),
+            sv(8.0, 0.0, 0.4),
+            sv(8.0, 8.0, 0.4),
+            sv(0.0, 8.0, 0.4),
+        ];
+        let tris = [[0, 1, 2], [0, 2, 3]];
+
+        let mut via_cluster = VisBuffer::new(8, 8);
+        rasterize_cluster(&mut via_cluster, &verts, &tris, 7, false);
+
+        let mut by_hand = VisBuffer::new(8, 8);
+        for (i, t) in tris.iter().enumerate() {
+            let tri = [verts[t[0] as usize], verts[t[1] as usize], verts[t[2] as usize]];
+            rasterize_triangle(&mut by_hand, tri, pack_cluster_triangle(7, i as u32), false);
+        }
+        assert_eq!(via_cluster.pixels(), by_hand.pixels());
+    }
+
+    #[test]
+    fn cluster_skips_out_of_range_indices_without_panic() {
+        let verts = [sv(0.0, 0.0, 0.5), sv(4.0, 0.0, 0.5), sv(0.0, 4.0, 0.5)];
+        // Second triple references a vertex that does not exist.
+        let tris = [[0, 1, 2], [0, 1, 99]];
+        let mut buffer = VisBuffer::new(4, 4);
+        rasterize_cluster(&mut buffer, &verts, &tris, 1, false);
+        // Triangle 0 still rasterized; the bad triple was skipped.
+        assert_eq!(triangle_of(vis_payload(buffer.at(0, 0))), 0);
     }
 }
