@@ -207,7 +207,12 @@ impl PolygonPanel {
     /// target returns `0`.
     #[must_use]
     pub fn subdivisions_for_edge_length(&self, target_edge_length: f32, max_levels: u32) -> u32 {
-        if !(target_edge_length > 0.0) {
+        // Reject non-positive *and* NaN targets (a NaN compares `!Greater`), so
+        // an ill-posed target degrades to "no subdivision" rather than looping.
+        if !matches!(
+            target_edge_length.partial_cmp(&0.0),
+            Some(core::cmp::Ordering::Greater)
+        ) {
             return 0;
         }
         let triangles = self.triangulate();
