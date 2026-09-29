@@ -12,16 +12,23 @@
 //!
 //! # Portability
 //!
-//! The shipping meshlet raster packs a 64-bit depth/payload key into an
-//! `r64uint` storage-texture atomic (`textureAtomicMax`), which Metal does not
-//! support. This twin instead composites the 32-bit reversed-Z depth key
-//! through [`atomicMax`](https://www.w3.org/TR/WGSL/#atomic-rmw) on a plain
-//! `atomic<u32>` storage buffer, the portable core-`WGSL` subset every backend
-//! implements, so it runs unmodified on Metal, Vulkan, and DX12. Carrying the
-//! full 64-bit payload key (the `r64uint` extension path) is the documented
-//! follow-up. The depth-only twin is still a faithful test of the coverage
-//! rule, the winding swap, the top-left fill, and the reversed-Z depth encode,
-//! which are the parts the CPU reference pins.
+//! The shipping meshlet raster packs a 64-bit `(depth << 32) | payload` key
+//! into a storage-texture atomic. Two twins cover the two portability tiers:
+//!
+//! * [`GpuSoftwareRaster`] composites only the 32-bit reversed-Z depth key
+//!   through [`atomicMax`](https://www.w3.org/TR/WGSL/#atomic-rmw) on a plain
+//!   `atomic<u32>` storage buffer, the portable core-`WGSL` subset every
+//!   backend implements, so it runs unmodified on Metal, Vulkan, and DX12 with
+//!   no optional feature. It is a faithful test of the coverage rule, the
+//!   winding swap, the top-left fill, and the reversed-Z depth encode.
+//! * [`GpuPayloadRaster`] composites the full 64-bit `(depth << 32) | payload`
+//!   word through a single `atomic<u64>` `atomicMax`, reproducing the shipping
+//!   visibility word bit-for-bit (nearest depth wins and records the winning
+//!   payload for free). It uses a `storage`-buffer 64-bit atomic rather than an
+//!   `r64uint` storage-texture atomic, so it runs anywhere the `SHADER_INT64`
+//!   and `SHADER_INT64_ATOMIC_MIN_MAX` features are present - including Metal on
+//!   Apple silicon - and [`GpuPayloadRaster::new`] returns [`None`] where they
+//!   are not, so callers skip gracefully.
 //!
 //! # Correctness model
 //!
@@ -43,7 +50,9 @@
 #![forbid(unsafe_code)]
 
 pub mod context;
+pub mod payload_raster;
 pub mod raster;
 
 pub use context::{block_on, GpuContext};
+pub use payload_raster::GpuPayloadRaster;
 pub use raster::{GpuSoftwareRaster, RasterError};
