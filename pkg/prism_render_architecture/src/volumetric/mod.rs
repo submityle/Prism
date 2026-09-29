@@ -91,6 +91,9 @@ pub mod storm;
 pub mod temporal;
 pub mod weather;
 
+#[cfg(test)]
+mod integration_tests;
+
 // The remaining design-doc section 14 modules (noise, modeling, weather,
 // raymarch, scatter, multiscatter, avsm, cloud_lod, temporal, shadow,
 // atmosphere, spectral, storm, coupling, fog, reference) plus the cross-module
