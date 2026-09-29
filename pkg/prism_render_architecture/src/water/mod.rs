@@ -49,6 +49,7 @@
 // module lands (see the water engine design doc, roadmap M0-M9); every
 // intermediate state keeps the crate compiling and its gates green.
 pub mod budget;
+pub mod ocean_lod;
 pub mod spectrum;
 
 use crate::deformation::DeformationHandle;
