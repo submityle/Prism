@@ -253,9 +253,21 @@ specialization_id: u64   // 由上面轴的合法排列特化产出
 - **B 类必须认**：RT×NPR 是"数据喂风格化响应"，不是物理追 NPR，换任何设计绕不掉。
 - **NPR 专属通道**（SDF 面阴影 / shadow ramp / light layer）挂基底，**只 NPR 前端消费**。
 
-### 4.3 WESL/WGSL 表达
+### 4.3 WESL/WGSL 表达（钉到已落地着色器）
 
-`ILightResponse.shade(ShadingCtx, LightSample, Closure)` 在 WESL 里落成一组按前端选择的着色函数（Lit/Stylized 各一份），经 `import` 共享同一份光源/阴影数据结构。前端切换 = 换着色函数（编译期特化或运行时分支），光照数据零改动。
+抽象的 `ILightResponse.shade(ctx, LightSample, Closure)` 在 WESL 里**不是一个 trait，而是"共享数据 import + 按 shading class 分派响应函数"**。下表钉到 `pkg/prism_render_scene/src/shaders/` 现存文件（非纸面），与 Rust 侧 `prism_render_shading` 一一对孪生（CPU golden 逐像素对齐）：
+
+| 层 | WESL 落地 | 关键符号 | 消费方 | Rust 孪生 |
+|---|---|---|---|---|
+| **共享光源/阴影数据** | `lighting.wesl` | `LightSample`/`sample_directional_light`/`sample_punctual_light`/`sh_irradiance`/`env_brdf_approx` | 全前端 | `lighting.rs`/`punctual.rs` |
+| **共享 surface/frame 桥** | `surface.wesl`/`brdf.wesl`/`material_unpack.wesl` | `SurfaceSample`/`ShadingFrame`/`DirectLightSample`/`to_direct_sample` | 全前端 | `surface.rs`/`resolve.rs` |
+| **A 类响应·PBR** | `brdf.wesl` | `principled_direct`（+ GGX/anisotropic/fresnel/vis-smith） | Principled/Subsurface/ClearCoat/Cloth/Hair/Water 桶 | `resolve.rs`/`punctual.rs` |
+| **A 类响应·NPR** | `brdf.wesl` | `stylized_direct`/`stylized_ramp`/`stylized_shadow`/`toon_direct`（legacy 兼容） | NPR 桶 | `stylized.rs`(`evaluate_stylized_direct`) |
+| **C 类·描边（NPR 专属）** | `outline.wesl` | `outline_id_edge`/`outline_depth_edge`/`outline_normal_edge`/`evaluate_outline` + `outline_main`(@compute 8×8) | NPR 前端独占 | `outline.rs` |
+| **C 类·光分层地基** | `light_routing.wesl` | `channel_mask_affects`/`light_routing_contributes_to_layer`/`cull_lights_by_channel_word`（`MAX_LIGHTING_CHANNELS=8`/`MAX_LIGHT_LAYERS=4`） | NPR 分层打光 + 全前端剔光 | `light_routing.rs` |
+| **分派器** | `shading_resolve.wesl` | `switch params.shading_class`（9 arm，`SHADING_CLASS_PRINCIPLED..CUSTOM`）；`class_counts`/`class_offsets` 按桶分 bin（wavefront 一致） | —— | `classification.rs`(`classify_material_header`/`ShadingWorkPlan`) |
+
+**前端切换 = 换 `switch` arm 里的响应函数，光源/阴影/surface 数据结构零改动**：`shading_resolve.wesl` 的每个 class arm 对同一份 `to_direct_sample(sample)`（来自共享 `lighting.wesl`）分别喂 `principled_direct`（PBR arm）或 `stylized_direct`（NPR arm）。9 值 `SHADING_CLASS_*` 常量是 §9-item3 正交轴派生投影的 WESL 端镜像，`class_offsets/class_counts` 保证同桶像素同 permutation（对齐 UE wavefront/tile 分类着色）。NPR 专属通道（`outline.wesl`/`light_routing.wesl` 分层）挂在共享基底上、只被 NPR arm 消费——正是 §4.2 C 类"各自专属"的着色器实体。
 
 ---
 
