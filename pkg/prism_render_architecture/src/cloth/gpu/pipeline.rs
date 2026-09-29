@@ -50,6 +50,14 @@ pub struct ClothGpuExtract {
     /// Enabled only when the piece carries a triangle topology and an active
     /// wind field; the pass is a per-vertex gather scheduled after predict.
     pub aerodynamics: bool,
+    /// Whether the post-iteration strain limiter runs this frame.
+    ///
+    /// Gated by the piece's `strain_limit`: the CPU golden `solve_cloth`
+    /// runs `apply_strain_limit` only when `strain_limit > 0.0`, so a
+    /// non-positive limit must drop the pass entirely rather than clamp every
+    /// over-stretched edge to its rest length (which a `1 + 0` max-scale would
+    /// otherwise do), diverging from the golden.
+    pub strain: bool,
 }
 
 /// The per-color addressing window a graph-colored projection dispatch writes.
@@ -167,6 +175,7 @@ pub fn extract(
     embed: bool,
     backstop: bool,
     aerodynamics: bool,
+    strain: bool,
 ) -> ClothGpuExtract {
     ClothGpuExtract {
         counts,
@@ -179,6 +188,7 @@ pub fn extract(
         embed,
         backstop,
         aerodynamics,
+        strain,
     }
 }
 
@@ -308,12 +318,19 @@ pub fn prepare(extract: &ClothGpuExtract) -> ClothGpuPrepare {
         // this pass over `particles` would silently skip the tail structural
         // constraints and leave them unclamped, diverging from the CPU golden
         // `apply_strain_limit`, which sweeps the whole structural set.
-        push_particle(
-            &mut dispatches,
-            ClothKernel::StrainLimit,
-            extract.counts.constraints,
-            group,
-        );
+        //
+        // Gated on `extract.strain`: the golden `solve_cloth` skips
+        // `apply_strain_limit` entirely for a non-positive `strain_limit`,
+        // so a disabled limiter must emit no dispatch rather than clamp every
+        // over-stretched edge to rest (a `1 + 0` max-scale clamps aggressively).
+        if extract.strain {
+            push_particle(
+                &mut dispatches,
+                ClothKernel::StrainLimit,
+                extract.counts.constraints,
+                group,
+            );
+        }
 
         // Self-collision runs before the body/backstop re-projection so the
         // latter has the final positional authority. This mirrors the CPU
@@ -457,6 +474,7 @@ mod tests {
             true,
             true,
             true,
+            true,
         )
     }
 
@@ -469,6 +487,7 @@ mod tests {
             Vec::new(),
             0,
             0,
+            false,
             false,
             false,
             false,
@@ -531,6 +550,27 @@ mod tests {
             );
             assert_eq!(d.color, None);
         }
+    }
+
+    #[test]
+    fn disabling_strain_drops_its_pass() {
+        // The CPU golden `solve_cloth` runs `apply_strain_limit` only when
+        // `strain_limit > 0.0`; a non-positive limit skips it entirely. The
+        // planner mirrors that by gating the pass on `extract.strain`, so a
+        // disabled limiter must emit no `StrainLimit` dispatch — otherwise the
+        // `1 + 0` max-scale would clamp every over-stretched edge to rest and
+        // diverge from the golden. `sample_extract` enables strain, so flip it
+        // off here.
+        let mut e = sample_extract();
+        e.strain = false;
+        let plan = prepare(&e);
+        assert!(
+            !plan
+                .dispatches
+                .iter()
+                .any(|d| d.kernel == ClothKernel::StrainLimit),
+            "a disabled strain limiter must emit no dispatch"
+        );
     }
 
     #[test]
@@ -604,6 +644,7 @@ mod tests {
             false,
             false,
             false,
+            false,
         );
         let plan = prepare(&e);
         let has_distance = plan
@@ -622,6 +663,7 @@ mod tests {
             Vec::new(),
             1,
             1,
+            false,
             false,
             false,
             false,
@@ -711,6 +753,7 @@ mod tests {
             false,
             false,
             false,
+            false,
         );
         let plan = prepare(&e);
         assert!(!plan
@@ -728,6 +771,7 @@ mod tests {
             Vec::new(),
             1,
             3,
+            false,
             false,
             false,
             false,
@@ -835,6 +879,7 @@ mod tests {
             Vec::new(),
             1,
             1,
+            false,
             false,
             false,
             false,

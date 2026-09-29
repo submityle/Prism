@@ -177,6 +177,12 @@ pub(crate) fn build_solve_plan(input: &ClothSolveInput<'_>) -> ClothSolvePlan {
     let has_turbulence = input.wind_turbulence > 0.0;
     let aerodynamics =
         (has_wind || has_turbulence) && !input.triangles.is_empty() && particle_count > 0;
+
+    // The strain limiter mirrors the CPU golden `solve_cloth`, which runs
+    // `apply_strain_limit` only when `strain_limit > 0.0`. A non-positive
+    // limit must drop the pass so the plan does not clamp every over-stretched
+    // edge to rest (a `1 + 0` max-scale) and diverge from the golden.
+    let strain = input.strain_limit > 0.0;
     let (csr_offsets, csr_entries) = if aerodynamics {
         // The gather walks one `CSR` row per vertex, so the adjacency is sized
         // to the particle count; disabled aerodynamics keeps both rows empty.
@@ -197,6 +203,7 @@ pub(crate) fn build_solve_plan(input: &ClothSolveInput<'_>) -> ClothSolvePlan {
         embed,
         backstop,
         aerodynamics,
+        strain,
     );
     let prepared = prepare(&plan);
 
