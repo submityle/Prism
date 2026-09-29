@@ -54,6 +54,8 @@ pub mod foam;
 pub mod ocean_lod;
 pub mod spectrum;
 pub mod swe;
+pub mod waterline;
+pub mod wetness;
 
 use crate::deformation::DeformationHandle;
 
