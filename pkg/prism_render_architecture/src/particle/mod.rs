@@ -47,6 +47,7 @@
 //! "pending the GPU backend" where the contract signatures anticipate them.
 
 pub mod emitter;
+pub mod lod;
 pub mod pool;
 pub mod simulation;
 pub mod sort_cull;
