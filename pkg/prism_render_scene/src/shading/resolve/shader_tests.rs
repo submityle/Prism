@@ -754,3 +754,44 @@ fn hair_fiber_wesl_compiles_and_resolves_imports() {
         panic!("hair_fiber.wesl failed to compile/resolve imports: {error}")
     });
 }
+
+/// Ensures the Kajiya-Kay strand-highlight twin `hair_kajiya.wesl` — the cheap
+/// real-time fallback front end with one anisotropic `sin(T, L)` diffuse term
+/// and one shifted anisotropic specular term about the strand tangent — parses,
+/// resolves its imports and type-checks as WESL, in lock-step with the CPU
+/// golden `prism_render_shading::hair_kajiya::evaluate_hair_kajiya_direct`.
+#[test]
+fn hair_kajiya_wesl_compiles_and_resolves_imports() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let lighting = shader_id(0x5052_4953_4d5f_4c49_4748_5449_4e47_000a);
+    cache.set_shader(
+        lighting,
+        Shader::from_wesl(
+            include_str!("../../shaders/lighting.wesl"),
+            "embedded://prism_render_scene/shaders/lighting.wesl",
+        ),
+    );
+
+    let brdf = shader_id(0x5052_4953_4d5f_4252_4446_0000_0000_000a);
+    cache.set_shader(
+        brdf,
+        Shader::from_wesl(
+            include_str!("../../shaders/brdf.wesl"),
+            "embedded://prism_render_scene/shaders/brdf.wesl",
+        ),
+    );
+
+    let hair_kajiya = shader_id(0x5052_4953_4d5f_4841_4952_5f4b_4159_0001);
+    cache.set_shader(
+        hair_kajiya,
+        Shader::from_wesl(
+            include_str!("../../shaders/hair_kajiya.wesl"),
+            "embedded://prism_render_scene/shaders/hair_kajiya.wesl",
+        ),
+    );
+
+    cache.get(0, hair_kajiya, &[]).unwrap_or_else(|error| {
+        panic!("hair_kajiya.wesl failed to compile/resolve imports: {error}")
+    });
+}
