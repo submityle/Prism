@@ -838,3 +838,27 @@ fn cloth_advanced_wesl_compiles_and_resolves_imports() {
         panic!("cloth_advanced.wesl failed to compile/resolve imports: {error}")
     });
 }
+
+/// Compiles `cloth_sim.wesl` on its own, asserting the GPU-driven XPBD cloth
+/// solver kernels — `cloth_predict`, `cloth_project_distance`,
+/// `cloth_project_long_range`, `cloth_strain_limit` and
+/// `cloth_velocity_update` — parse and type-check as WESL, in lock-step with
+/// the CPU golden
+/// `prism_render_architecture::cloth::dynamics::solve_cloth_with_collision`.
+#[test]
+fn cloth_sim_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let cloth_sim = shader_id(0x5052_4953_4d5f_434c_4f54_485f_5349_4d01);
+    cache.set_shader(
+        cloth_sim,
+        Shader::from_wesl(
+            include_str!("../../shaders/cloth_sim.wesl"),
+            "embedded://prism_render_scene/shaders/cloth_sim.wesl",
+        ),
+    );
+
+    cache
+        .get(0, cloth_sim, &[])
+        .unwrap_or_else(|error| panic!("cloth_sim.wesl failed to compile: {error}"));
+}
