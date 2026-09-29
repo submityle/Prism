@@ -149,11 +149,33 @@ specialization_id: u64   // 由上面轴的合法排列特化产出
 - **`normalize()` 必须改**：现在它把闭包压成单 `shading_model`（`ir.rs` 里 `if kind==Npr { shading_model = Npr }`）——**这是把正交信息毁掉的元凶**。新 `normalize` 产出 `ClosureGraph`（保留多瓣结构）+ `illumination` 轴 + `specialization_id`，**不再塌缩**。
 - **毛发是真例外**：`ClosureKind::Hair` = 专用重 closure（Marschner/Chiang R/TT/TRT + dual-scattering），**不是** über 的瓣。NPR 头发 = `illumination=Stylized` 下的各向异性高光带（可与物理切线解耦，做"天使环"），是另一条 closure 实现。见 §6.3。
 
-### 3.3 GPU 数据结构（拆胖结构）
+### 3.3 GPU 数据结构：ABI v4 变长打包堆（对标 UE Substrate 每像素预算裁剪）
 
-- `GpuSurfaceParameters`（18 字段胖结构，每像素全带）拆成 **über 核心参数（紧凑）+ 按瓣可选 blob**。specialization variant 决定读哪些 blob，不再无脑塞 18 字段。
-- `GpuMaterialHeader`：`shading_model` 字段删除；新增 `illumination`、`closure_graph_offset`、`specialization_id`。`closure_mask` 保留（RT/分类用）。
-- 这些结构**手写 `#[repr(C)]`**，但由**结构哈希驱动 `MATERIAL_ABI_VERSION`** + CI 对齐测试兜漂移（改结构 → 哈希变 → 版本自动 bump → 测试红）。不引入反射生成器（见 §2）。
+> 本节据实描述已落地代码：`pkg/prism_render_material/src/record.rs`（`MATERIAL_ABI_VERSION = 4`）+ `surface.rs` + WESL 孪生 `pkg/prism_render_scene/src/shaders/material_unpack.wesl`。设计动机（拆胖结构）保留，但形态已从"定长数组下标 + 定长 blob"演进为**变长字堆 + LobeMask 解码**。
+
+**动机（未变）**：旧 `GpuSurfaceParameters` 是 18 字段胖结构，每像素无差别携带 clearcoat/sheen/subsurface/transmission 等它可能永远用不到的瓣——既是性能坑（每像素都为不存在的瓣付带宽/寄存器），又是建模谎言（暗示每个面都有全部瓣）。ABI v4 把它拆成 **OpenPBR 锚定的紧凑 über 核心 + 按瓣可选 blob**，只为真正存在的瓣付代价。
+
+**`GpuMaterialHeader`（`#[repr(C)]` + `bytemuck::Pod`，21 个 u32 字段）**：旧 `shading_model` 字段已删除，风格由 `illumination` 承载，编译期 permutation 身份由 `specialization_low`/`specialization_high`（切分的 `SpecializationId`）承载。关键字段：
+
+- `parameter_offset`：**变长字堆里本材质打包 surface block 的 u32 字地址**（不再是定长 `GpuSurfaceParameters` 数组的元素下标）——因为块是变长的，场景只打包 über 核心 + 存在的瓣。
+- `parameter_size`：该块字节长度 = `(12 + present_lobes*4) * 4`（`packed_size_bytes()`）。
+- `lobe_mask`：本材质携带哪些可选 über 瓣（`LobeMask` 位），驱动打包参数解码——shader 在 `parameter_offset` 读 `parameter_size/4` 个字，用此 mask 把核心+存在瓣展开回完整 surface。
+- `closure_graph_offset`：指向序列化闭包 IR，供 RT/延迟消费；`closure_mask` 保留（RT/分类用）。
+- 其余：generation/revision/illumination/render_class/feature_flags/texture_offset/texture_count/sampler_offset/sampler_count/custom_program/active/material_epoch_{low,high}；`specialization()` 由 low|high 重组回 u64。
+
+**变长打包核心（`surface.rs`）**：
+
+- `SURFACE_CORE_WORDS = 12`：`GpuSurfaceCore`（base_color[4]/metallic/perceptual_roughness/reflectance/ambient_occlusion/normal_scale/alpha_cutoff + 2 pad），每个 lit/stylized/unlit 面都带的 OpenPBR 基座，**不含** clearcoat/sheen/subsurface/transmission/anisotropy。
+- `SURFACE_LOBE_WORDS = 4`：每个瓣 blob 统一 16 字节量子，打包/解包按每个 set bit 定步长。
+- `LobeMask`（6 个瓣，`COUNT = 6`）：`EMISSION=1<<0` / `CLEARCOAT=1<<1` / `ANISOTROPY=1<<2` / `SHEEN=1<<3` / `SUBSURFACE=1<<4` / `TRANSMISSION=1<<5`。瓣结构分别为 `GpuEmissionLobe`(emissive[4]) / `GpuClearCoatLobe` / `GpuAnisotropyLobe` / `GpuSheenLobe` / `GpuSubsurfaceLobe` / `GpuTransmissionLobe`(transmission/thickness/ior/dispersion)。
+- `SurfaceParameterBlock::pack()`：先写 12 字核心，再**按 canonical 低位优先顺序只写存在的瓣**；`unpack(lobe_mask, words)` 逆向读回，缺席瓣解码为各自中性 `Default`（如 IOR 回到 1.5，绝不泄漏陈旧字段）。`packed_len_words() = CORE + present*LOBE`。
+- **示例**：纯电介质（无瓣）= 12 字，而非旧的 24 字（18 字段 f32 对齐）。
+
+**WESL 孪生（字节精确镜像）**：`material_unpack.wesl::prism_unpack_surface` 是 `SurfaceParameterBlock::unpack` 的字节精确 GPU 镜像——同样的核心 12 字 + canonical 低位优先瓣顺序。CPU 打包 / GPU 解包必须逐字节一致，否则材质错读。
+
+**漂移守护（未变）**：结构手写 `#[repr(C)]`，由 `MATERIAL_ABI_VERSION`（当前 = 4）+ 对齐测试兜漂移（改结构 → 版本 bump → 测试红）。不引入反射生成器（见 §2）。回归测试已覆盖：`size_of::<GpuSurfaceCore>() == SURFACE_CORE_WORDS*4`、逐瓣子集 round-trip、错误长度 `unpack` 拒绝（`SurfaceUnpackError::WrongLength`）。
+
+**与 §3.4 的连接**：§3.4 的 `specialization_id` 打包（illumination `0..8` / closure_mask `8..40` / render_class `40..48`）落进本结构的 `specialization_{low,high}`；`closure_mask`（哪些 closure 瓣存在）与 `lobe_mask`（哪些 über 瓣 blob 被打包）配合，GPU 侧据此选 permutation 并只读存在的瓣 blob。
 
 ### 3.4 有界 slab 闭包图：对标 UE5 Substrate 的深化规格
 
