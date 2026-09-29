@@ -49,6 +49,7 @@ pub mod lod;
 pub mod painted;
 pub mod panel;
 pub mod pipeline;
+pub mod polygon_garment;
 pub mod polygon_panel;
 pub mod pressure;
 pub mod self_ccd;
