@@ -1,7 +1,7 @@
 //! Orthogonal material style axes.
 //!
 //! These replace the former mutually-exclusive `MaterialShadingModel` enum
-//! (see `docs/prism_material_pipeline_slang_design_zh.md` §3). A material is
+//! (see `docs/prism_material_pipeline_design_zh.md` §3). A material is
 //! now described by independent axes:
 //!
 //! * `domain`        — Surface / Decal / Volume / `PostProcess` (see `record.rs`)
@@ -11,7 +11,7 @@
 //!
 //! The legal permutation of these axes is condensed into a
 //! [`SpecializationId`], the stable key that classification buckets on today
-//! and that the Slang link-time specialization pipeline will key on later.
+//! and that the WESL specialization pipeline keys on later.
 
 /// The *style* axis: how a surface interprets the shared lighting data.
 ///
@@ -30,7 +30,7 @@ pub enum Illumination {
     Stylized,
     /// Emissive-only; ignores scene lighting entirely.
     Unlit,
-    /// Project-injected custom light response (custom Slang closure + pass).
+    /// Project-injected custom light response (custom WESL closure + pass).
     Custom,
 }
 
@@ -50,7 +50,7 @@ impl Illumination {
 /// Deterministic identity of one compiled shader permutation.
 ///
 /// Packs the legal combination of orthogonal axes so classification, the GPU
-/// work-plan binning, and the future Slang link-time specialization all share
+/// work-plan binning, and the WESL specialization pipeline all share
 /// one stable key.
 ///
 /// Bit layout (LSB → MSB):
