@@ -73,8 +73,11 @@
 //! scheduling are the verification target.
 
 pub mod budget;
+pub mod cloud_lod;
 pub mod math;
 pub mod modeling;
+pub mod noise;
+pub mod temporal;
 
 // The remaining design-doc section 14 modules (noise, modeling, weather,
 // raymarch, scatter, multiscatter, avsm, cloud_lod, temporal, shadow,
