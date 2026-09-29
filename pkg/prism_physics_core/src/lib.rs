@@ -39,6 +39,7 @@ pub mod command;
 pub mod config;
 pub mod constraint;
 pub mod driver;
+pub mod dsl;
 pub mod dynamics;
 pub mod events;
 pub mod fluid;
@@ -74,6 +75,12 @@ pub use config::WorldConfig;
 pub use constraint::{Constraint, ConstraintKind};
 pub use driver::fixed_step::{AdvanceReport, FixedStepPipeline};
 pub use driver::{CacheHandle, DriveMode, DriveOutcome, SimulationDriver};
+pub use dsl::{
+    compile_constraint, compile_expr, eval as dsl_eval, parse_constraint, parse_expression,
+    tokenize, BinOp, BuiltinFn, CompiledConstraint, ConstraintDecl, DslConstraint, DslError,
+    Environment, Expr, HotReloadRegistry, OpCode, ParamSpec, ParamValue, ParameterStore, Program,
+    SpannedToken, Token, VarBinding, VarKind,
+};
 pub use dynamics::Integrator;
 pub use events::{ContactEventTracker, ContactPair, Observer, ObserverRegistry, PhysicsEvent};
 pub use fluid::{
