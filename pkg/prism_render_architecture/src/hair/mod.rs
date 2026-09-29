@@ -73,6 +73,7 @@ pub mod ribbon;
 pub mod rt_proxy;
 pub mod sdf_collision;
 pub mod self_collision;
+pub mod shadow_buffers;
 pub mod sleep;
 pub mod solver;
 pub mod transition;
