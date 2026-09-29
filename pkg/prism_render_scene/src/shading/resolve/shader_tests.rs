@@ -903,3 +903,138 @@ fn cloth_embed_wesl_compiles_standalone() {
         .get(0, cloth_embed, &[])
         .unwrap_or_else(|error| panic!("cloth_embed.wesl failed to compile: {error}"));
 }
+
+/// Compiles `water_ocean.wesl` standalone. It has no imports, so a green result
+/// proves the two GPU ocean-field compute entry points — `water_spectrum_ifft`
+/// (Hermitian spectrum phase advance `h(k,t)=h0·e^{iωt}+conj(h0(−k))·e^{−iωt}`
+/// with dispersion `ω=√(gk)`, direct inverse transform, choppy displacement,
+/// slope normal and fold `Jacobian`) and `water_gerstner_displace` (multi-wave
+/// `Gerstner` trochoidal displacement with the closed-form `GPU` Gems normal) —
+/// parse and type-check as WESL, in lock-step with the CPU golden in
+/// `prism_render_architecture::water::spectrum`.
+#[test]
+fn water_ocean_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let water_ocean = shader_id(0x5052_4953_4d5f_5741_5445_525f_4f43_4e01);
+    cache.set_shader(
+        water_ocean,
+        Shader::from_wesl(
+            include_str!("../../shaders/water_ocean.wesl"),
+            "embedded://prism_render_scene/shaders/water_ocean.wesl",
+        ),
+    );
+
+    cache
+        .get(0, water_ocean, &[])
+        .unwrap_or_else(|error| panic!("water_ocean.wesl failed to compile: {error}"));
+}
+
+/// Compiles `water_surface.wesl` standalone. It has no imports, so a green
+/// result proves the three GPU shallow-water/surface compute entry points —
+/// `water_swe_step` (conservative flux divergence, `CFL`-clamped timestep,
+/// upwind self-advection, source injection), `water_foam_advect`
+/// (semi-Lagrangian foam backtrace with bilinear resample and flow-aware
+/// exponential decay) and `water_waterline_mask` (signed submersion depth,
+/// soft transition band, shallow shoreline band) — parse and type-check as
+/// WESL, in lock-step with the CPU goldens in
+/// `prism_render_architecture::water::{swe, foam, waterline}`.
+#[test]
+fn water_surface_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let water_surface = shader_id(0x5052_4953_4d5f_5741_5445_525f_5346_4301);
+    cache.set_shader(
+        water_surface,
+        Shader::from_wesl(
+            include_str!("../../shaders/water_surface.wesl"),
+            "embedded://prism_render_scene/shaders/water_surface.wesl",
+        ),
+    );
+
+    cache
+        .get(0, water_surface, &[])
+        .unwrap_or_else(|error| panic!("water_surface.wesl failed to compile: {error}"));
+}
+
+/// Compiles `water_pbf.wesl` standalone. It has no imports, so a green result
+/// proves the two GPU position-based-fluids compute entry points —
+/// `water_pbf_density_solve` (spatial-hash 27-cell neighborhood, `Poly6`
+/// density, `XPBD` lambda, `Spiky`-gradient position correction with the
+/// `Macklin` artificial-pressure term) and `water_spray_emit` (breaking-source
+/// classification and jet spawn with a summing `atomic` counter) — parse and
+/// type-check as WESL, in lock-step with the CPU goldens in
+/// `prism_render_architecture::water::{pbf, surface_fx}`.
+#[test]
+fn water_pbf_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let water_pbf = shader_id(0x5052_4953_4d5f_5741_5445_525f_5042_4601);
+    cache.set_shader(
+        water_pbf,
+        Shader::from_wesl(
+            include_str!("../../shaders/water_pbf.wesl"),
+            "embedded://prism_render_scene/shaders/water_pbf.wesl",
+        ),
+    );
+
+    cache
+        .get(0, water_pbf, &[])
+        .unwrap_or_else(|error| panic!("water_pbf.wesl failed to compile: {error}"));
+}
+
+/// Compiles `water_flip.wesl` standalone. It has no imports, so a green result
+/// proves the four GPU `FLIP`/`APIC` compute entry points — `water_flip_p2g`
+/// (two's-complement fixed-point `atomicAdd` momentum/mass scatter),
+/// `water_flip_pressure_solve` (damped `Jacobi` pressure iteration toward a
+/// divergence-free field), `water_flip_g2p` (grid-to-particle gather with the
+/// projected velocity correction) and `water_surface_reconstruct` (screen-space
+/// / anisotropic surface field) — parse and type-check as WESL, in lock-step
+/// with the CPU goldens in `prism_render_architecture::water::{flip,
+/// reconstruct}`.
+#[test]
+fn water_flip_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let water_flip = shader_id(0x5052_4953_4d5f_5741_5445_525f_464c_5001);
+    cache.set_shader(
+        water_flip,
+        Shader::from_wesl(
+            include_str!("../../shaders/water_flip.wesl"),
+            "embedded://prism_render_scene/shaders/water_flip.wesl",
+        ),
+    );
+
+    cache
+        .get(0, water_flip, &[])
+        .unwrap_or_else(|error| panic!("water_flip.wesl failed to compile: {error}"));
+}
+
+/// Compiles `water_render_fx.wesl` standalone. It has no imports, so a green
+/// result proves the five GPU water render-effect compute entry points —
+/// `water_caustics_project` (refraction `Jacobian` focus gain plus photon
+/// splat), `water_dispersion_refract` (`Cauchy` `IOR` per-`RGB`-wavelength
+/// refraction), `water_underwater_volume` (per-froxel `Beer-Lambert` extinction
+/// with `Henyey-Greenstein` phase and god-ray in-scatter), `water_wetness_step`
+/// (exponential wet/dry envelope, puddle integration, capillary band) and
+/// `water_coupling_readback` (bounded buoyancy/drag/added-mass readback) —
+/// parse and type-check as WESL, in lock-step with the CPU goldens in
+/// `prism_render_architecture::water::{caustics, dispersion, underwater,
+/// wetness, coupling}`.
+#[test]
+fn water_render_fx_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let water_render_fx = shader_id(0x5052_4953_4d5f_5741_5445_525f_4658_0001);
+    cache.set_shader(
+        water_render_fx,
+        Shader::from_wesl(
+            include_str!("../../shaders/water_render_fx.wesl"),
+            "embedded://prism_render_scene/shaders/water_render_fx.wesl",
+        ),
+    );
+
+    cache
+        .get(0, water_render_fx, &[])
+        .unwrap_or_else(|error| panic!("water_render_fx.wesl failed to compile: {error}"));
+}
