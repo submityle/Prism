@@ -42,6 +42,7 @@ use wgpu::{
 use prism_render_architecture::volumetric::math::{Vec2, Vec3};
 use prism_render_architecture::volumetric::multiscatter::MultiScatterLut;
 use prism_render_architecture::volumetric::scatter::OctaveParams;
+use prism_render_architecture::volumetric::shadow::shadow_transmittance;
 use prism_render_architecture::volumetric::temporal::{
     active_pixel, clamp_history, variance_clip, UpscaleMode,
 };
@@ -51,7 +52,7 @@ use prism_render_architecture::volumetric::{
 };
 
 use super::abi::{
-    GpuModelingParams, GpuMsLutParams, GpuNoiseBakeParams, GpuUpsampleParams,
+    GpuModelingParams, GpuMsLutParams, GpuNoiseBakeParams, GpuShadowMarchParams, GpuUpsampleParams,
     GpuWeatherAdvectParams,
 };
 
@@ -1687,5 +1688,305 @@ fn upsample_gpu_matches_cpu_golden() {
         checked,
         SCREEN_W * SCREEN_H,
         "every full-resolution pixel must be compared"
+    );
+}
+
+/// On-device parity for the `volumetric_shadow_march` kernel.
+///
+/// Each light-space shadow texel maps to a density-cache column and marches
+/// every depth slice toward the light, accumulating optical depth
+/// `sum(max(density, 0) * density_scale * step)` before converting it to
+/// Beer-Lambert survival ([`shadow_transmittance`]). The optical-depth output
+/// channel is exact `float32` on both sides (only the `rgba16float` store
+/// rounds), while the transmittance channel routes through the `CPU`
+/// `exp_approx`; native `GPU` `exp` and that approximation agree to a few
+/// `1e-6`, so the shared [`PARITY_EPS`] absorbs both the approximation gap and
+/// the store quantization for the modest optical depths exercised here.
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice must reach the test log on hosts without an immediate-data adapter"
+)]
+fn shadow_march_gpu_matches_cpu_golden() {
+    let Some((device, queue)) = try_cloud_device() else {
+        eprintln!(
+            "shadow_march_gpu_matches_cpu_golden: no immediate-data wgpu adapter, skipping on-device parity"
+        );
+        return;
+    };
+
+    // Shadow width is a multiple of 32 so the `rgba16float` output row
+    // (8 bytes/texel) meets the 256-byte copy alignment; both shadow extents are
+    // multiples of the (8, 8, 1) workgroup so no invocation is masked.
+    const SHADOW_W: u32 = 32;
+    const SHADOW_H: u32 = 8;
+    const GRID_X: u32 = 16;
+    const GRID_Y: u32 = 4;
+    const GRID_Z: u32 = 6;
+    const OUT_BYTES_PER_TEXEL: u32 = 8;
+
+    // `step` and `density_scale` keep the accumulated optical depth inside
+    // `[0, ~0.45]`: the transmittance never saturates to zero and the
+    // `rgba16float` quantization of both output channels stays under tolerance.
+    let params = GpuShadowMarchParams {
+        shadow_w: SHADOW_W,
+        shadow_h: SHADOW_H,
+        grid_x: GRID_X,
+        grid_y: GRID_Y,
+        grid_z: GRID_Z,
+        step: 0.15,
+        density_scale: 0.5,
+    };
+
+    // Deterministic exact-`float32` density volume the `CPU` golden re-derives
+    // verbatim; the `.x` channel is the extinction the kernel reads.
+    fn density_at(x: u32, y: u32, z: u32) -> f32 {
+        ((x * 7 + y * 5 + z * 3) % 11) as f32 / 10.0
+    }
+
+    let voxel_count = (GRID_X * GRID_Y * GRID_Z) as usize;
+    let mut density_data = vec![0.0f32; voxel_count * 4];
+    let mut z = 0u32;
+    while z < GRID_Z {
+        let mut y = 0u32;
+        while y < GRID_Y {
+            let mut x = 0u32;
+            while x < GRID_X {
+                let n = (z * GRID_Y * GRID_X + y * GRID_X + x) as usize;
+                density_data[4 * n] = density_at(x, y, z);
+                x += 1;
+            }
+            y += 1;
+        }
+        z += 1;
+    }
+
+    let wgsl = compile_clouds_wgsl();
+    let entry = find_entry_point(&wgsl, "shadow_march");
+    let module = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("volumetric_shadow_march_parity"),
+        source: ShaderSource::Wgsl(wgsl.as_str().into()),
+    });
+
+    // Explicit `@group(0)` layout mirroring the shadow-march kernel: binding 13
+    // = density-cache input (`texture_3d<f32>`), 14 = write-only `rgba16float`
+    // shadow output. The pipeline layout's immediate range spans the full
+    // `GpuShadowMarchParams` block (auto layout misreflects the immediate size
+    // on this driver).
+    let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+        label: Some("vc_shadow_march_bind_group_layout"),
+        entries: &[
+            BindGroupLayoutEntry {
+                binding: 13,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Texture {
+                    sample_type: TextureSampleType::Float { filterable: false },
+                    view_dimension: TextureViewDimension::D3,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            BindGroupLayoutEntry {
+                binding: 14,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::StorageTexture {
+                    access: StorageTextureAccess::WriteOnly,
+                    format: TextureFormat::Rgba16Float,
+                    view_dimension: TextureViewDimension::D2,
+                },
+                count: None,
+            },
+        ],
+    });
+    let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+        label: Some("vc_shadow_march_pipeline_layout"),
+        bind_group_layouts: &[Some(&bind_group_layout)],
+        immediate_size: size_of::<GpuShadowMarchParams>() as u32,
+    });
+    let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("volumetric_shadow_march_parity"),
+        layout: Some(&pipeline_layout),
+        module: &module,
+        entry_point: Some(&entry),
+        compilation_options: PipelineCompilationOptions::default(),
+        cache: None,
+    });
+
+    let density_tex = device.create_texture(&TextureDescriptor {
+        label: Some("vc_sm_density_in"),
+        size: Extent3d {
+            width: GRID_X,
+            height: GRID_Y,
+            depth_or_array_layers: GRID_Z,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D3,
+        format: TextureFormat::Rgba32Float,
+        usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let out_tex = device.create_texture(&TextureDescriptor {
+        label: Some("vc_sm_shadow_out"),
+        size: Extent3d {
+            width: SHADOW_W,
+            height: SHADOW_H,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: TextureFormat::Rgba16Float,
+        usage: TextureUsages::STORAGE_BINDING | TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+
+    queue.write_texture(
+        TexelCopyTextureInfo {
+            texture: &density_tex,
+            mip_level: 0,
+            origin: Origin3d::ZERO,
+            aspect: TextureAspect::All,
+        },
+        bytemuck::cast_slice(&density_data),
+        TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(GRID_X * 16),
+            rows_per_image: Some(GRID_Y),
+        },
+        Extent3d {
+            width: GRID_X,
+            height: GRID_Y,
+            depth_or_array_layers: GRID_Z,
+        },
+    );
+
+    let density_view = density_tex.create_view(&TextureViewDescriptor::default());
+    let out_view = out_tex.create_view(&TextureViewDescriptor::default());
+    let bind_group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("vc_shadow_march_bind_group"),
+        layout: &bind_group_layout,
+        entries: &[
+            BindGroupEntry {
+                binding: 13,
+                resource: BindingResource::TextureView(&density_view),
+            },
+            BindGroupEntry {
+                binding: 14,
+                resource: BindingResource::TextureView(&out_view),
+            },
+        ],
+    });
+
+    let row_bytes = SHADOW_W * OUT_BYTES_PER_TEXEL;
+    let readback_size = u64::from(row_bytes * SHADOW_H);
+    let readback = device.create_buffer(&BufferDescriptor {
+        label: Some("vc_shadow_march_readback"),
+        size: readback_size,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("vc_shadow_march_parity_encoder"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("vc_shadow_march_parity_pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.set_immediates(0, bytemuck::bytes_of(&params));
+        pass.dispatch_workgroups(SHADOW_W / 8, SHADOW_H / 8, 1);
+    }
+    encoder.copy_texture_to_buffer(
+        TexelCopyTextureInfo {
+            texture: &out_tex,
+            mip_level: 0,
+            origin: Origin3d::ZERO,
+            aspect: TextureAspect::All,
+        },
+        TexelCopyBufferInfo {
+            buffer: &readback,
+            layout: TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row_bytes),
+                rows_per_image: Some(SHADOW_H),
+            },
+        },
+        Extent3d {
+            width: SHADOW_W,
+            height: SHADOW_H,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit([encoder.finish()]);
+
+    readback.slice(..).map_async(MapMode::Read, |_| {});
+    device
+        .poll(PollType::wait_indefinitely())
+        .expect("device poll should complete the submitted work");
+
+    let view = readback
+        .slice(..)
+        .get_mapped_range()
+        .expect("mapped readback range should be available after poll");
+    let halves: Vec<u16> = bytemuck::cast_slice::<u8, u16>(&view).to_vec();
+    drop(view);
+    readback.unmap();
+
+    // Row is dense (row_bytes == SHADOW_W * 8), so texel (x, y) maps to
+    // n = y*SHADOW_W + x with channel c at half-word 4*n + c.
+    let mut checked = 0u32;
+    let mut y = 0u32;
+    while y < SHADOW_H {
+        let mut x = 0u32;
+        while x < SHADOW_W {
+            let n = (y * SHADOW_W + x) as usize;
+            let gpu = [
+                f16_to_f32(halves[4 * n]),
+                f16_to_f32(halves[4 * n + 1]),
+                f16_to_f32(halves[4 * n + 2]),
+                f16_to_f32(halves[4 * n + 3]),
+            ];
+
+            // Reproduce the kernel: integer column address, then the depth-slice
+            // optical-depth accumulation with the same per-sample grouping
+            // (`(max(d, 0) * scale) * step`).
+            let cx = (x * GRID_X / SHADOW_W.max(1)).min(GRID_X - 1);
+            let cy = (y * GRID_Y / SHADOW_H.max(1)).min(GRID_Y - 1);
+            let step = params.step.max(0.0);
+            let scale = params.density_scale.max(0.0);
+            let mut optical_depth = 0.0f32;
+            let mut z = 0u32;
+            while z < GRID_Z {
+                let sample = density_at(cx, cy, z).max(0.0) * scale;
+                optical_depth += sample * step;
+                z += 1;
+            }
+            let transmittance = shadow_transmittance(optical_depth);
+            let cpu = [transmittance, optical_depth, 0.0, 1.0];
+
+            let mut c = 0usize;
+            while c < 4 {
+                let dch = (gpu[c] - cpu[c]).abs();
+                assert!(
+                    dch < PARITY_EPS,
+                    "texel ({x}, {y}) channel {c}: gpu={} cpu={} |d|={dch}",
+                    gpu[c],
+                    cpu[c],
+                );
+                c += 1;
+            }
+            checked += 1;
+            x += 1;
+        }
+        y += 1;
+    }
+    assert_eq!(
+        checked,
+        SHADOW_W * SHADOW_H,
+        "every shadow texel must be compared"
     );
 }
