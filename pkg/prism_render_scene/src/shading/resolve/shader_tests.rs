@@ -780,6 +780,33 @@ fn hair_root_skinning_wesl_compiles_standalone() {
         .unwrap_or_else(|error| panic!("hair_root_skinning.wesl failed to compile: {error}"));
 }
 
+/// Registers and compiles `hair_root_bind.wesl` standalone. A green result
+/// proves the GPU import-time groom-root binding projection — the brute-force
+/// closest-triangle scan with its first-strict-minimum tie-break, the Ericson
+/// Voronoi-region `closest_point_on_triangle` clamp (all vertex/edge/face
+/// branches with their `EPS_LEN_SQ`-guarded denominators), the signed-height
+/// projection onto the `f32::EPSILON`-guarded face normal, the out-of-range
+/// vertex-index skip and the unbound-sentinel fallback — parses and type-checks
+/// as WESL on its own, in lock-step with the CPU golden in
+/// `prism_render_architecture::hair::binding::bind_roots`.
+#[test]
+fn hair_root_bind_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let hair_bind = shader_id(0x5052_4953_4d5f_4841_4952_5f42_4e44_0001);
+    cache.set_shader(
+        hair_bind,
+        Shader::from_wesl(
+            include_str!("../../shaders/hair_root_bind.wesl"),
+            "embedded://prism_render_scene/shaders/hair_root_bind.wesl",
+        ),
+    );
+
+    cache
+        .get(0, hair_bind, &[])
+        .unwrap_or_else(|error| panic!("hair_root_bind.wesl failed to compile: {error}"));
+}
+
 /// Registers `lighting.wesl`, `brdf.wesl` and `stylized_hair.wesl` under their
 /// canonical module paths and compiles `stylized_hair.wesl`, forcing the
 /// importer to resolve the `prism_render_scene::shaders::brdf::{...}` imports
