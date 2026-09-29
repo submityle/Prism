@@ -42,6 +42,7 @@ pub mod constraints;
 pub mod coupling;
 pub mod dynamics;
 pub mod embed;
+pub mod gpu;
 pub mod layers;
 pub mod lod;
 pub mod painted;
