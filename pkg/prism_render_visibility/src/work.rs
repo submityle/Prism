@@ -90,3 +90,68 @@ pub struct GpuRenderWorkItem {
     pub visibility_stages: VisibilityStageMask,
     pub sort_key: WorkSortKey,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_pass_mask_union_and_membership() {
+        let mut mask = RenderPassMask::OPAQUE | RenderPassMask::SHADOW;
+        mask |= RenderPassMask::GI;
+        assert_ne!(mask.0 & RenderPassMask::OPAQUE.0, 0);
+        assert_ne!(mask.0 & RenderPassMask::SHADOW.0, 0);
+        assert_ne!(mask.0 & RenderPassMask::GI.0, 0);
+        // A pass that was never added is absent from the union.
+        assert_eq!(mask.0 & RenderPassMask::OFFLINE.0, 0);
+        // Every pass constant occupies a distinct single bit.
+        assert_eq!(RenderPassMask::OPAQUE.0 & RenderPassMask::MASKED.0, 0);
+        assert_eq!(RenderPassMask::default().0, 0);
+    }
+
+    #[test]
+    fn visibility_stage_mask_contains_respects_multi_bit_queries() {
+        let stages = VisibilityStageMask::EARLY | VisibilityStageMask::LATE_VISIBLE;
+        assert!(stages.contains(VisibilityStageMask::EARLY));
+        assert!(stages.contains(VisibilityStageMask::LATE_VISIBLE));
+        // `contains` requires all queried bits to be present.
+        assert!(!stages.contains(VisibilityStageMask::EARLY | VisibilityStageMask::LATE_RETEST));
+        // The full set trivially contains any of its subsets.
+        assert!(stages.contains(stages));
+        assert!(stages.contains(VisibilityStageMask::default()));
+    }
+
+    #[test]
+    fn sort_key_orders_primarily_by_pass_class() {
+        // A higher pass class must sort after a lower one regardless of the
+        // lower-priority fields, which encode into less significant bits.
+        let opaque = WorkSortKey::new(0, 255, 255, u16::MAX, u16::MAX);
+        let transparent = WorkSortKey::new(2, 0, 0, 0, 0);
+        assert!(opaque < transparent);
+
+        // Within one pass class, the pipeline class dominates the material.
+        let a = WorkSortKey::new(1, 1, 255, 255, 255);
+        let b = WorkSortKey::new(1, 2, 0, 0, 0);
+        assert!(a < b);
+    }
+
+    #[test]
+    fn sort_key_depth_bucket_breaks_ties_and_is_deterministic() {
+        // With every higher field held equal, the depth bucket is the tie
+        // breaker and preserves near-to-far ordering.
+        let near = WorkSortKey::new(0, 0, 0, 7, 10);
+        let far = WorkSortKey::new(0, 0, 0, 7, 900);
+        assert!(near < far);
+
+        // The encoding is a pure function of its inputs: same inputs, same key.
+        assert_eq!(
+            WorkSortKey::new(1, 2, 3, 4, 5),
+            WorkSortKey::new(1, 2, 3, 4, 5)
+        );
+        // Distinct geometry pages produce distinct keys when all else is equal.
+        assert_ne!(
+            WorkSortKey::new(0, 0, 0, 1, 0),
+            WorkSortKey::new(0, 0, 0, 2, 0)
+        );
+    }
+}
