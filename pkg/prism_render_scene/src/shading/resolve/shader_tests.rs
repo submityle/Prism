@@ -673,6 +673,34 @@ fn hair_mesh_shell_wesl_compiles_standalone() {
         .unwrap_or_else(|error| panic!("hair_mesh_shell.wesl failed to compile: {error}"));
 }
 
+/// Registers and compiles `hair_frames.wesl` standalone. A green result proves
+/// the GPU coherent per-vertex strand-frame kernel — the double-reflection
+/// rotation-minimizing transport (Wang et al. 2008) walked root-to-tip per
+/// strand, the `normalize_or` degeneracy guard, the cardinal-axis
+/// `orthonormal_reference` seed, the two `reflect_plane` transport steps with
+/// their `c > EPSILON` coincident-point guards, the forward-difference
+/// `strand_tangent`, the re-orthonormalization against the next tangent and the
+/// right-handed `tangent x normal` bitangent — parses and type-checks as WESL
+/// on its own, in lock-step with the CPU golden in
+/// `prism_render_architecture::hair::frames::build_strand_frames`.
+#[test]
+fn hair_frames_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let hair_frames = shader_id(0x5052_4953_4d5f_4841_4952_5f46_524d_0001);
+    cache.set_shader(
+        hair_frames,
+        Shader::from_wesl(
+            include_str!("../../shaders/hair_frames.wesl"),
+            "embedded://prism_render_scene/shaders/hair_frames.wesl",
+        ),
+    );
+
+    cache
+        .get(0, hair_frames, &[])
+        .unwrap_or_else(|error| panic!("hair_frames.wesl failed to compile: {error}"));
+}
+
 /// Registers `lighting.wesl`, `brdf.wesl` and `stylized_hair.wesl` under their
 /// canonical module paths and compiles `stylized_hair.wesl`, forcing the
 /// importer to resolve the `prism_render_scene::shaders::brdf::{...}` imports
