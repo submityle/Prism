@@ -67,12 +67,12 @@ fallback:
 
 | 阶段 | 内容 | 对标 | 代码落点 |
 |---|---|---|---|
-| 1. 导入/插值 | guide→render strand 插值（丛聚/卷曲/frizz/随机化） | UE5 Groom | 规划 `hair/interpolation.rs` |
-| 2. Strand 动力学 | guide 的 XPBD sim（边长 + 局部/全局形状约束 + 碰撞） | TressFX | 规划 `hair/dynamics.rs`（→ `deformation::schedule`）|
+| 1. 导入/插值 | guide→render strand 插值（丛聚/卷曲/frizz/随机化） | UE5 Groom | **已落** `hair/interpolation.rs` |
+| 2. Strand 动力学 | guide 的 XPBD sim（边长 + 局部/全局形状约束 + LRA；碰撞待接） | TressFX | **已落** `hair/dynamics.rs`（→ `deformation::schedule`）|
 | 3. LOD | 覆盖度选档 + 连续减股，禁硬切换 | UE5/HairWorks | **已落** `hair/lod.rs` |
-| 4. 光栅 | 发丝亚像素 compute 软光栅进 visibility | UE5 Groom / TressFX | 规划 `hair/raster.rs`（挂 `virtual_geometry` 软光栅桶）|
+| 4. 光栅 | 发丝亚像素 compute 软光栅进 visibility | UE5 Groom / TressFX | **已落** `hair/raster.rs`（挂 `virtual_geometry` 软光栅桶）|
 | 5. 着色 | HairPbr 闭包（Chiang/Marschner）+ dual-scattering（见 §7）| 影视 BSDF | `material` 的 `HairPbr` closure（不在 hair 内重写）|
-| 6. 透射/自阴影 | deep opacity map / voxel 透射 | UE5/TressFX | 规划 `hair/deep_transmittance.rs`（共享阴影服务）|
+| 6. 透射/自阴影 | deep opacity map / voxel 透射 | UE5/TressFX | **已落** `hair/deep_transmittance.rs`（共享阴影服务）|
 | 7. 透明合成 | OIT，走 `HairVisibility` 路径 | TressFX PPLL | **已落** `transparency::routing`（`TransparentKind::Hair`）|
 
 **关键边界**：着色（阶段 5）走材质系统的 `HairPbr` closure，透明（阶段 7）走共享 OIT——毛发模块**不重写**着色与透明，只产几何、形变与透射。sim/LOD/光栅落"compute 可移植"桶，可 CPU golden。
@@ -161,10 +161,10 @@ fallback:
 ## 10. 落地路线图
 
 1. **（已完成）子系统骨架**：`hair/mod.rs` 核心类型（含 `native_form`）+ `hair/lod.rs` LOD 阶梯/分桶/形变绑定/钳制（commit 已落，单测绿）。
-2. **strand 动力学** `hair/dynamics.rs`：guide XPBD（边长 + 局部/全局形状约束 + LRA），先无碰撞，接 `deformation::schedule`；确定性 CPU golden。
-3. **插值** `hair/interpolation.rs`：guide→render 丛聚/卷曲/frizz/随机化，与 LOD 抽稀联动。
-4. **发丝光栅** `hair/raster.rs`：亚像素软光栅桶，挂 `virtual_geometry` compute 软光栅路径，进 visibility。
-5. **deep transmittance** `hair/deep_transmittance.rs`：自阴影透射服务，接共享阴影/OIT。
+2. **（已完成）strand 动力学** `hair/dynamics.rs`：guide XPBD（边长 + 局部/全局形状约束 + LRA/tether），先无碰撞，接 `deformation::schedule`；确定性 CPU golden，单测绿。
+3. **（已完成）插值** `hair/interpolation.rs`：guide→render 丛聚/卷曲/frizz/随机化，与 LOD 抽稀联动；确定性 CPU golden，单测绿。
+4. **（已完成）发丝光栅** `hair/raster.rs`：亚像素软光栅桶（沿用 `virtual_geometry/bins.rs` 范式），挂 compute 软光栅路径进 visibility；确定性，单测绿。
+5. **（已完成）deep transmittance** `hair/deep_transmittance.rs`：deep opacity 分层透射 + voxel 近似 + 分桶，接共享阴影/OIT；确定性 CPU golden，单测绿。
 6. **着色分叉**（材质侧）：`HairPbr`（Marschner/Chiang + Zinke dual-scattering）+ `prism_render_npr` 风格化毛发响应。
 7. **碰撞与连续 LOD 过渡**：SDF/自碰撞、跨档 dither/alpha 过渡消 pop。
 8. **高级项**：风场、VBD 高保真插槽、GPU 持久化 + 异步流水线、休眠、fiber-level 特写着色、RT 代理。
