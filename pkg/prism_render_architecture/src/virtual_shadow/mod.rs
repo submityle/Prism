@@ -8,13 +8,16 @@
 //! * [`clipmap`] — directional-light clipmap level and page selection.
 //! * [`residency`] — page residency table and per-frame request coalescing.
 //! * [`coverage`] — light-space receiver footprints to overlapped clip pages.
+//! * [`light_space`] — world-space bounds projected onto the light plane.
 
 pub mod clipmap;
 pub mod coverage;
+pub mod light_space;
 pub mod residency;
 
 pub use clipmap::{ClipmapConfig, MAX_CLIP_LEVELS};
 pub use coverage::mark_receiver_footprint;
+pub use light_space::DirectionalLightBasis;
 pub use residency::{ShadowRequestBatch, ShadowResidencyTable};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
