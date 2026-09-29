@@ -321,7 +321,7 @@ specialization_id: u64   // 由上面轴的合法排列特化产出
 - **渲染侧子系统各自自持 sim**：`prism_render_architecture/src/` 下 `cloth/`（`dynamics.rs::solve_cloth`+`vbd.rs`+`ccd.rs`+`tearing.rs`+`pressure.rs`+`collision.rs`+`sleep.rs`+`lod.rs`）、`hair/`（§6.3 的 XPBD/VBD solver）、`particle/`（`simulation.rs`+`emitter.rs`+`stages.rs`）、`water/`（`flip.rs`+`pbf.rs`+`swe.rs`+`spectrum.rs`）、`volumetric/`（`raymarch.rs`+`avsm.rs`+`multiscatter.rs`）都**就地实现了自己的求解器**，并未调用 physics_core。
 - **设计意图 vs 现状的裂缝**：`cloth/coupling.rs` 的注释明确「authoritative rigid-body integrator lives in `prism_physics_core`，render-side module must not reimplement the solver」——即**意图**是 physics_core 当权威刚体/软体积分器、渲染侧只做接触的渲染半边。但**现状**是渲染侧自持了完整 sim，physics_core 未接线，形成两套并行模拟栈。**这是一条真实的待收敛重构线（非本文档 lane 可独改，须由 physics/architecture owner agent 决策接线方向）**。
 
-**因此子系统边界的准确表述是**：每个一等子系统（布料/毛发/粒子/液体/体积）当前**自持几何生产 + sim + 特殊渲染**三件套（§6.2 判据据此成立）；physics_core 是**平行的权威模拟核候选**，其与渲染侧的接线（复用 vs 保持渲染侧轻量代理 + physics_core 当权威）是**未定案的架构决策**，不应在设计文档里预先断言为「已共享」。§6.3“共享基底 + 分叉响应”仍成立，但那讲的是**渲染响应侧**（PBR/NPR 分家、跨切面服务共享），**不等于 sim 核已统一**。
+**因此子系统边界的准确表述是**：每个一等子系统（粒子/毛发/布料/体积/水）当前**自持几何生产 + sim + 特殊渲染**三件套（§6.2 判据据此成立）；physics_core 是**平行的权威模拟核候选**，其与渲染侧的接线（复用 vs 保持渲染侧轻量代理 + physics_core 当权威）是**未定案的架构决策**，不应在设计文档里预先断言为「已共享」。§6.3“共享基底 + 分叉响应”仍成立，但那讲的是**渲染响应侧**（PBR/NPR 分家、跨切面服务共享），**不等于 sim 核已统一**。
 
 ### 6.2 子系统注册表（四档，钉死）
 
