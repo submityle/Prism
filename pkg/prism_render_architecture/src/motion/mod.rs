@@ -37,6 +37,7 @@
 //! signatures anticipate them.
 
 pub mod dilation;
+pub mod disocclusion;
 pub mod encode;
 pub mod reproject;
 
