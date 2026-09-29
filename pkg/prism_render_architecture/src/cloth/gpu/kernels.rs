@@ -247,13 +247,16 @@ impl ClothKernel {
     pub fn descriptor(self) -> KernelDescriptor {
         let (layout, workgroup, domain) = match self {
             ClothKernel::Aerodynamics => (
-                // Position, velocity and inverse-mass storage, the triangle
-                // topology buffer and the two `CSR` vertex->triangle adjacency
-                // buffers (offsets + entries), plus the wind/aero/dt uniform
-                // block. One thread per vertex gathers its incident faces, so
-                // no writable texture and no scatter buffer are needed.
+                // Read-write position and velocity pools (the inverse mass is
+                // packed into `positions.w`, exactly like every other cloth
+                // pass, so it needs no separate buffer), the read-only triangle
+                // topology buffer and the two read-only `CSR` vertex->triangle
+                // adjacency buffers (offsets + entries), plus the wind/aero/dt
+                // uniform block. One thread per vertex gathers its incident
+                // faces, so no writable texture and no scatter buffer are
+                // needed.
                 BindGroupLayout {
-                    storage_buffers: 6,
+                    storage_buffers: 5,
                     uniform_buffers: 1,
                     storage_textures: 0,
                     sampled_textures: 0,
