@@ -80,3 +80,27 @@ fn vsm_sample_wesl_compiles_standalone() {
         .get(0, sample, &[])
         .unwrap_or_else(|error| panic!("vsm_sample.wesl failed to compile: {error}"));
 }
+
+/// Compiles `vsm_receiver_gen.wesl` standalone.  It has no imports, so a green
+/// result proves the depth unprojection (Bevy y-down UV -> NDC, inverse
+/// view-projection multiply, perspective divide) and the clipmap-plane
+/// projection (light-basis dot products + camera view distance) that mirror the
+/// golden receiver_gen parse and type-check on their own, and that the receiver
+/// output struct matches the `vsm_page_mark` `VsmReceiver` it feeds.
+#[test]
+fn vsm_receiver_gen_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let receiver_gen = shader_id(0x5052_4953_4d5f_5653_4d5f_5247_454e_0001);
+    cache.set_shader(
+        receiver_gen,
+        Shader::from_wesl(
+            include_str!("../../shaders/vsm_receiver_gen.wesl"),
+            "embedded://prism_render_scene/shaders/vsm_receiver_gen.wesl",
+        ),
+    );
+
+    cache
+        .get(0, receiver_gen, &[])
+        .unwrap_or_else(|error| panic!("vsm_receiver_gen.wesl failed to compile: {error}"));
+}
