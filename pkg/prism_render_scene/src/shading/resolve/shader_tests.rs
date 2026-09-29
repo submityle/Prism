@@ -728,6 +728,32 @@ fn hair_wind_wesl_compiles_standalone() {
         .unwrap_or_else(|error| panic!("hair_wind.wesl failed to compile: {error}"));
 }
 
+/// Registers and compiles `hair_sdf_collision.wesl` standalone. A green result
+/// proves the GPU SDF body-collision post-pass — the packed
+/// sphere/capsule/half-space/box primitive distances, the union min-reduction,
+/// the central-difference field gradient with its `normalize_or_zero` guard,
+/// and the per-iteration push-out relaxation (with the flat-field `+Y` escape,
+/// the NaN self-inequality guard and the pinned-particle skip) — parses and
+/// type-checks as WESL on its own, in lock-step with the CPU golden in
+/// `prism_render_architecture::hair::sdf_collision::resolve_sdf_collisions`.
+#[test]
+fn hair_sdf_collision_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let hair_sdf = shader_id(0x5052_4953_4d5f_4841_4952_5f53_4446_0001);
+    cache.set_shader(
+        hair_sdf,
+        Shader::from_wesl(
+            include_str!("../../shaders/hair_sdf_collision.wesl"),
+            "embedded://prism_render_scene/shaders/hair_sdf_collision.wesl",
+        ),
+    );
+
+    cache
+        .get(0, hair_sdf, &[])
+        .unwrap_or_else(|error| panic!("hair_sdf_collision.wesl failed to compile: {error}"));
+}
+
 /// Registers `lighting.wesl`, `brdf.wesl` and `stylized_hair.wesl` under their
 /// canonical module paths and compiles `stylized_hair.wesl`, forcing the
 /// importer to resolve the `prism_render_scene::shaders::brdf::{...}` imports
