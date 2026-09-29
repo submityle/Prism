@@ -25,6 +25,7 @@
 //! known.
 
 use super::lod::LodProjection;
+use super::page_table::GeometryPageTable;
 use super::{cull::Frustum, GeometryPageKey};
 use crate::gpu_scene::SceneBounds;
 use alloc::vec::Vec;
@@ -168,6 +169,44 @@ impl ClusterHierarchy {
         projection: LodProjection,
         target_error_pixels: f32,
     ) -> Vec<CutCluster> {
+        self.walk_cut(view_origin, frustum, projection, target_error_pixels, None)
+    }
+
+    /// Selects the cut and, in the same walk, records a streaming request for
+    /// every drawn cluster's page into `table`, stamped with `frame`.
+    ///
+    /// The request priority is the cluster's projected screen coverage
+    /// (`radius * focal / distance`) so the residency budget favours the pages
+    /// covering the most pixels; it is compared in squared form to stay
+    /// square-root-free, which preserves the ordering because all terms are
+    /// non-negative. A culled or refined-through node records nothing, so the
+    /// table tracks exactly the visible working set the cut will raster.
+    pub fn select_cut_streaming(
+        &self,
+        view_origin: [f32; 3],
+        frustum: &Frustum,
+        projection: LodProjection,
+        target_error_pixels: f32,
+        table: &mut GeometryPageTable,
+        frame: u64,
+    ) -> Vec<CutCluster> {
+        self.walk_cut(
+            view_origin,
+            frustum,
+            projection,
+            target_error_pixels,
+            Some((table, frame)),
+        )
+    }
+
+    fn walk_cut(
+        &self,
+        view_origin: [f32; 3],
+        frustum: &Frustum,
+        projection: LodProjection,
+        target_error_pixels: f32,
+        mut streaming: Option<(&mut GeometryPageTable, u64)>,
+    ) -> Vec<CutCluster> {
         let mut cut = Vec::new();
         if !self.is_well_formed() {
             return cut;
@@ -192,6 +231,10 @@ impl ClusterHierarchy {
             {
                 // Coarsest acceptable simplification (or the finest available
                 // at a leaf): draw it and stop refining this branch.
+                if let Some((table, frame)) = streaming.as_mut() {
+                    let priority = coverage_priority(&node.bounds, view_origin, projection);
+                    table.request(node.page, priority, *frame);
+                }
                 cut.push(CutCluster {
                     node: index,
                     page: node.page,
@@ -229,6 +272,25 @@ fn fits_budget(
     let projected = self_error.max(0.0) * projection.focal_length_pixels;
     // projected <= budget * distance  <=>  projected^2 <= budget^2 * distance^2
     projected * projected <= budget * budget * distance_sq
+}
+
+/// Squared projected screen coverage of `bounds` at the camera, used as a
+/// streaming priority. The true coverage is `radius * focal / distance`; the
+/// squared form `radius^2 * focal^2 / distance_sq` keeps the layer
+/// square-root-free and preserves ordering because every term is non-negative.
+/// A camera resting on the center yields the maximum priority so an enveloping
+/// cluster is never starved.
+fn coverage_priority(
+    bounds: &SceneBounds,
+    view_origin: [f32; 3],
+    projection: LodProjection,
+) -> f32 {
+    let dx = bounds.center[0] - view_origin[0];
+    let dy = bounds.center[1] - view_origin[1];
+    let dz = bounds.center[2] - view_origin[2];
+    let distance_sq = (dx * dx + dy * dy + dz * dz).max(f32::EPSILON);
+    let extent = bounds.radius.max(0.0) * projection.focal_length_pixels;
+    extent * extent / distance_sq
 }
 
 #[cfg(test)]
@@ -320,6 +382,38 @@ mod tests {
         let projection = LodProjection::from_focal_length_pixels(1000.0);
         let cut = h.select_cut([0.0, 0.0, 0.0], &wide_frustum(), projection, 4.0);
         assert!(cut.is_empty());
+    }
+
+    #[test]
+    fn streaming_variant_requests_only_drawn_pages() {
+        use super::super::page_table::{GeometryPageTable, PageResidency};
+        let h = two_level_hierarchy();
+        let projection = LodProjection::from_focal_length_pixels(1000.0);
+        let mut table = GeometryPageTable::new();
+        // Tight budget refines past the root to both leaves.
+        let cut = h.select_cut_streaming(
+            [0.0, 0.0, 0.0],
+            &wide_frustum(),
+            projection,
+            4.0,
+            &mut table,
+            9,
+        );
+        assert_eq!(cut.len(), 2);
+        // Exactly the two drawn leaf pages are requested; the root is not.
+        assert_eq!(table.len(), 2);
+        assert_eq!(
+            table.residency(GeometryPageKey::new(0, 1)),
+            PageResidency::Requested
+        );
+        assert_eq!(
+            table.residency(GeometryPageKey::new(0, 2)),
+            PageResidency::Requested
+        );
+        assert_eq!(
+            table.residency(GeometryPageKey::new(0, 0)),
+            PageResidency::Unloaded
+        );
     }
 
     #[test]
