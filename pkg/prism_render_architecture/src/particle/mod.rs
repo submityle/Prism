@@ -62,6 +62,7 @@ pub mod graph;
 pub mod lod;
 pub mod modules;
 pub mod motion_vectors;
+pub mod oit;
 pub mod perf_budget;
 pub mod platform;
 pub mod pool;
