@@ -80,13 +80,17 @@ impl MaterialResolveBins {
         }
     }
 
-    /// Mutable handle to the bucket backing a given execution path.
-    fn bucket_mut(&mut self, path: MaterialExecutionPath) -> &mut Vec<u32> {
+    /// Appends a record reference to the bucket backing `path`.
+    ///
+    /// Callers that already know a record's [`MaterialExecutionPath`] — such as
+    /// the [`MaterialRegistry`](super::registry::MaterialRegistry) classifier —
+    /// use this to route directly without re-inspecting the record.
+    pub fn push(&mut self, path: MaterialExecutionPath, record: u32) {
         match path {
-            MaterialExecutionPath::FixedPbr => &mut self.fixed_pbr,
-            MaterialExecutionPath::FixedNpr => &mut self.fixed_npr,
-            MaterialExecutionPath::ClosureTable => &mut self.closure_table,
-            MaterialExecutionPath::DiagnosticFallback => &mut self.diagnostic_fallback,
+            MaterialExecutionPath::FixedPbr => self.fixed_pbr.push(record),
+            MaterialExecutionPath::FixedNpr => self.fixed_npr.push(record),
+            MaterialExecutionPath::ClosureTable => self.closure_table.push(record),
+            MaterialExecutionPath::DiagnosticFallback => self.diagnostic_fallback.push(record),
         }
     }
 }
@@ -119,7 +123,7 @@ pub fn bin_visible_materials(visible: &[u32], records: &[MaterialRecord]) -> Mat
         let Some(record) = records.get(index as usize) else {
             continue;
         };
-        bins.bucket_mut(record.execution).push(index);
+        bins.push(record.execution, index);
     }
     bins
 }
