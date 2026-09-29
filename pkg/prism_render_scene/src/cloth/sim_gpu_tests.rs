@@ -48,12 +48,16 @@ use wgpu::{
     ShaderSource, ShaderStages,
 };
 
+use prism_render_architecture::cloth::bending::{
+    build_dihedral_bending, project_bending, BendingConstraint,
+};
 use prism_render_architecture::cloth::constraints::{
     build_grid_constraints, color_constraints, ClothGrid, GridConstraintParams,
 };
 use prism_render_architecture::cloth::dynamics::{solve_cloth, SolverParams};
 use prism_render_architecture::cloth::gpu::kernels::ClothKernel;
-use prism_render_architecture::cloth::{ClothParticle, Vec3};
+use prism_render_architecture::cloth::gpu::upload::color_bending;
+use prism_render_architecture::cloth::{ClothParticle, Compliance, Vec3};
 
 use super::abi::{GpuClothBendingConstraint, GpuClothConstraint};
 use super::solve_plan::{build_solve_plan, ClothSolveInput};
@@ -555,6 +559,248 @@ fn sim_gpu_matches_cpu_golden() {
             v[0], v[1], v[2], g.velocity.x, g.velocity.y, g.velocity.z
         );
         // velocities.w 载荷位必须原样保留。
+        assert_eq!(
+            v[3].to_bits(),
+            ((i as f32) + 0.5).to_bits(),
+            "vertex {i}: velocities.w payload was mutated"
+        );
+    }
+}
+
+/// 为 `rows × cols` 行主序网格生成两三角/格的三角化（顺时针一致缠绕）。
+///
+/// 索引 `r * cols + c`。每个内部格 `(r, c)`（`r < rows-1`、`c < cols-1`）切成
+/// `[i00, i10, i11]` 与 `[i00, i11, i01]` 两片；相邻格共享的内部边正是
+/// [`build_dihedral_bending`] 要收集的二面角铰链所在。
+fn build_grid_triangles(rows: u32, cols: u32) -> Vec<[u32; 3]> {
+    let mut triangles = Vec::new();
+    for r in 0..rows.saturating_sub(1) {
+        for c in 0..cols.saturating_sub(1) {
+            let i00 = r * cols + c;
+            let i01 = r * cols + c + 1;
+            let i10 = (r + 1) * cols + c;
+            let i11 = (r + 1) * cols + c + 1;
+            triangles.push([i00, i10, i11]);
+            triangles.push([i00, i11, i01]);
+        }
+    }
+    triangles
+}
+
+/// 一块 `rows × cols` 布料的**折叠**初值，外加与之对应的**平坦静止位形**。
+///
+/// 返回 `(particles, rest_positions)`：`rest_positions` 是完全共面（`z = 0`）的
+/// 静止网格，交给 [`build_dihedral_bending`] 算铰链权重 ⇒ 平坦静止的弯曲测度
+/// `S = 0`；`particles` 则把每个顶点沿 `z` 抬起一个位置相关的折量，使初始 `S ≠ 0`，
+/// 从而弯曲投影内核有真实的非零修正可算（否则整条弯曲路径退化成 no-op，测不出
+/// 任何东西）。顶行 `r == 0` pin 住，其余自由粒子带轻微初速以压满 predict 分支。
+fn build_folded_grid(rows: u32, cols: u32) -> (Vec<ClothParticle>, Vec<Vec3>) {
+    let mut particles = Vec::with_capacity((rows * cols) as usize);
+    let mut rest = Vec::with_capacity((rows * cols) as usize);
+    for r in 0..rows {
+        for c in 0..cols {
+            let px = c as f32 * 0.1 - (cols as f32) * 0.05;
+            let py = 0.5 - r as f32 * 0.1;
+            rest.push(Vec3::new(px, py, 0.0));
+
+            // 位置相关的出平面折量：沿列一个正弦褶皱，沿行一个更缓的起伏，叠加成
+            // 一个非平凡且确定的折叠面。幅度远小于边长，弯曲能量温和但非零。
+            let fold_z = sin(c as f32 * 0.8) * 0.03 + sin(r as f32 * 0.6) * 0.02;
+            let inv_mass = if r == 0 {
+                0.0
+            } else {
+                0.8 + ((r * 7 + c * 13) % 5) as f32 * 0.1
+            };
+            let mut p = ClothParticle::new(Vec3::new(px, py, fold_z), inv_mass);
+            if !p.is_pinned() {
+                p.velocity = Vec3::new(
+                    cos(c as f32 * 0.05) * 0.03,
+                    sin(r as f32 * 0.04) * 0.02,
+                    cos((r + c) as f32 * 0.03) * 0.02,
+                );
+            }
+            particles.push(p);
+        }
+    }
+    (particles, rest)
+}
+
+/// 二面角弯曲**专属黄金**：忠实复刻 GPU 计划在一帧内对弯曲铰链的推进算术序。
+///
+/// 场景 GPU 计划把每个 substep 展平成 `predict → 距离颜色 → 弯曲颜色 → long-range
+/// 颜色 → 应变 → 碰撞 → 速度`（见 `architecture::cloth::gpu::pipeline::prepare`）。
+/// 本工况只喂弯曲铰链、不放任何距离约束，故计划坍缩为
+/// `predict → 弯曲颜色（× iterations）→ 速度`。这里的 predict / 速度回收逐字段镜像
+/// [`solve_cloth_with_collision`](prism_render_architecture::cloth::dynamics)，弯曲
+/// 修正则调用权威原语 [`project_bending`]——CPU 与 WESL 是两套独立实现的同一
+/// XPBD 弯曲能量投影，因此这是真对拍而非自证。
+///
+/// `colored` 必须已是 [`color_bending`] 的按颜色连续重排：同色铰链八个粒子槽两两
+/// 不交 ⇒ 色内投影可交换、原地 Gauss-Seidel 等价于 GPU 的色内 Jacobi；颜色之间
+/// CPU 顺扫与 GPU 顺序 dispatch 都读上一色的写结果 ⇒ 算术序逐色对齐。
+fn solve_bending_golden(
+    particles: &mut [ClothParticle],
+    colored: &[BendingConstraint],
+    params: &SolverParams,
+    dt: f32,
+) {
+    if dt <= 0.0 || particles.is_empty() {
+        return;
+    }
+    let substeps = params.substeps.max(1);
+    let iterations = params.iterations.max(1);
+    let dt_sub = dt / substeps as f32;
+    let retain = (1.0 - params.damping).clamp(0.0, 1.0);
+    let gravity_step = params.gravity.scale(dt_sub);
+
+    for _ in 0..substeps {
+        // 1. predict：阻尼速度 + 重力，积分位置。pin 粒子不动。
+        let mut previous: Vec<Vec3> = Vec::with_capacity(particles.len());
+        for particle in particles.iter_mut() {
+            previous.push(particle.position);
+            if particle.is_pinned() {
+                continue;
+            }
+            particle.velocity = particle.velocity.scale(retain).add(gravity_step);
+            particle.position = particle.position.add(particle.velocity.scale(dt_sub));
+        }
+
+        // 2. 逐迭代、逐颜色投影弯曲铰链（色内互不相干，原地即 Jacobi）。
+        for _ in 0..iterations {
+            for hinge in colored {
+                project_bending(particles, *hinge, dt_sub);
+            }
+        }
+
+        // 3. 从位移增量回收速度。pin 粒子速度清零。
+        for (particle, &prev) in particles.iter_mut().zip(previous.iter()) {
+            if particle.is_pinned() {
+                particle.velocity = Vec3::ZERO;
+                continue;
+            }
+            particle.velocity = particle.position.sub(prev).scale(1.0 / dt_sub);
+        }
+    }
+}
+
+/// 二面角弯曲投影内核 `cloth_project_bending_batch` 在真机上按整条 dispatch 计划
+/// 重放后，必须与弯曲专属黄金 [`solve_bending_golden`] 逐顶点落在 `float32` 容差内
+/// （位置与速度同拍）。这补上 sim 核心四内核之外的第五个逐颜色内核覆盖。
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志"
+)]
+fn bending_gpu_matches_cpu_golden() {
+    let Some((device, queue)) = try_solver_device() else {
+        eprintln!(
+            "bending_gpu_matches_cpu_golden: no wgpu adapter with IMMEDIATES support, \
+             skipping on-device parity"
+        );
+        return;
+    };
+
+    const ROWS: u32 = 7;
+    const COLS: u32 = 5;
+    let (particles, rest) = build_folded_grid(ROWS, COLS);
+    let count = particles.len();
+
+    // 从**平坦静止位形**建刚性二面角铰链：静止 `S = 0`，折叠初值 `S ≠ 0`。
+    let triangles = build_grid_triangles(ROWS, COLS);
+    let hinges = build_dihedral_bending(&rest, &triangles, Compliance::RIGID);
+    assert!(!hinges.is_empty(), "折叠网格三角化应产出至少一条内部边铰链");
+
+    // 求解参数：CPU 与 GPU 完全对齐。solve/plan 内部按 dt = 1/60 推进。
+    let params = SolverParams {
+        substeps: 2,
+        iterations: 1,
+        gravity: Vec3::new(0.0, -9.81, 0.0),
+        damping: 0.02,
+        strain_limit: 0.0,
+    };
+
+    // --- CPU 黄金：按 color_bending 的颜色序在副本上推进一帧 ---
+    let colored = color_bending(&hinges).bending;
+    let mut golden = particles.clone();
+    solve_bending_golden(&mut golden, &colored, &params, 1.0 / 60.0);
+
+    // --- host 上传口径：positions.w = inverse mass；velocities.w 塞可辨识载荷位 ---
+    let positions: Vec<[f32; 4]> = particles
+        .iter()
+        .map(|p| [p.position.x, p.position.y, p.position.z, p.inverse_mass])
+        .collect();
+    let velocities: Vec<[f32; 4]> = particles
+        .iter()
+        .enumerate()
+        .map(|(i, p)| [p.velocity.x, p.velocity.y, p.velocity.z, (i as f32) + 0.5])
+        .collect();
+
+    // --- GPU 计划：走权威 build_solve_plan（无距离约束 ⇒ 计划只含 predict / 弯曲
+    // 颜色 / 应变(空,no-op) / 速度）---
+    let input = ClothSolveInput {
+        positions: &positions,
+        velocities: &velocities,
+        constraints: &[],
+        bending: &hinges,
+        triangles: &[],
+        wind_velocity: [0.0, 0.0, 0.0],
+        wind_turbulence: 0.0,
+        aero_drag: 0.0,
+        aero_lift: 0.0,
+        colliders: &[],
+        backstops: &[],
+        embed_bindings: &[],
+        render_vertex_count: 0,
+        hash_cell_count: 0,
+        gravity: [0.0, -9.81, 0.0],
+        dt: 1.0 / 60.0,
+        substeps: 2,
+        iterations: 1,
+        damping: 0.02,
+        strain_limit: 0.0,
+        self_thickness: 0.0,
+        self_cell_size: 0.0,
+    };
+    let plan = build_solve_plan(&input);
+    assert!(!plan.bending.is_empty(), "计划应打包非空的弯曲缓冲");
+
+    let wgsl = compile_wgsl(
+        include_str!("../shaders/cloth_sim.wesl"),
+        "embedded://prism_render_scene/shaders/cloth_sim.wesl",
+        0x434c_4f54_485f_4245_4e44_5f50_4152_5401,
+    );
+
+    let (gpu_positions, gpu_velocities) =
+        replay_sim_on_gpu(&device, &queue, &wgsl, &positions, &velocities, &plan);
+
+    assert_eq!(gpu_positions.len(), count, "position readback length");
+    assert_eq!(gpu_velocities.len(), count, "velocity readback length");
+
+    for (i, g) in golden.iter().enumerate() {
+        let p = gpu_positions[i];
+        let px = (p[0] - g.position.x).abs();
+        let py = (p[1] - g.position.y).abs();
+        let pz = (p[2] - g.position.z).abs();
+        assert!(
+            px <= PARITY_EPS && py <= PARITY_EPS && pz <= PARITY_EPS,
+            "vertex {i}: GPU position ({}, {}, {}) drifted from golden ({}, {}, {}) beyond {PARITY_EPS}",
+            p[0], p[1], p[2], g.position.x, g.position.y, g.position.z
+        );
+        assert_eq!(
+            p[3].to_bits(),
+            g.inverse_mass.to_bits(),
+            "vertex {i}: positions.w (inverse mass) was mutated"
+        );
+
+        let v = gpu_velocities[i];
+        let vx = (v[0] - g.velocity.x).abs();
+        let vy = (v[1] - g.velocity.y).abs();
+        let vz = (v[2] - g.velocity.z).abs();
+        assert!(
+            vx <= PARITY_EPS && vy <= PARITY_EPS && vz <= PARITY_EPS,
+            "vertex {i}: GPU velocity ({}, {}, {}) drifted from golden ({}, {}, {}) beyond {PARITY_EPS}",
+            v[0], v[1], v[2], g.velocity.x, g.velocity.y, g.velocity.z
+        );
         assert_eq!(
             v[3].to_bits(),
             ((i as f32) + 0.5).to_bits(),
