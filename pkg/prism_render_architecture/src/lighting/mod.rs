@@ -1,5 +1,7 @@
 //! Unified lighting, GI, reflection, and stochastic-light contracts.
 
+pub mod culling;
+
 use crate::ray_scene::TraceBackend;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
