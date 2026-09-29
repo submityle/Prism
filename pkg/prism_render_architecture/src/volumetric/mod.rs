@@ -53,6 +53,10 @@
 //! - [`fog`] — unified volumetric fog / contrail sources / froxel injection.
 //! - [`reference`] — delta/ratio-tracking single-scatter / transmittance
 //!   reference truth for offline calibration (deterministic, verifiable).
+//! - [`gpu`] — `GPU`/`WESL` dispatch scaffolding (milestone M8): the
+//!   compute-kernel contract, persistent device-buffer sizing, the async frame
+//!   pipeline plan and the shared-service wiring — pure integer bookkeeping,
+//!   not machine-verified.
 //!
 //! **Frontend orthogonality.** The `PBR`, `NPR`, custom, and hybrid frontends
 //! diverge *only* in their lighting response (see [`ShadingFrontend`]). Every
@@ -78,6 +82,7 @@ pub mod budget;
 pub mod cloud_lod;
 pub mod coupling;
 pub mod fog;
+pub mod gpu;
 pub mod math;
 pub mod modeling;
 pub mod multiscatter;
