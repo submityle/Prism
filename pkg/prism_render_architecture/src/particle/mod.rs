@@ -55,6 +55,7 @@ pub mod collision;
 pub mod compression;
 pub mod constraints;
 pub mod curves;
+pub mod decal;
 pub mod determinism;
 pub mod dual_backend;
 pub mod emitter;
@@ -91,7 +92,9 @@ pub mod stability;
 pub mod stages;
 pub mod validation;
 pub mod vector_field;
+pub mod volume_march;
 pub mod volumetrics;
+pub mod worley;
 
 #[cfg(test)]
 mod integration_tests;
