@@ -3594,3 +3594,255 @@ fn waterline_mask_gpu_matches_cpu_golden() {
         i += 1;
     }
 }
+
+// ===========================================================================
+// Crest-spray emitter parity (`water_spray_emit`, water_pbf.wesl)
+// ===========================================================================
+
+use super::abi::{GpuSprayParams, GpuSprayParticle, GpuSpraySource, GpuSpraySpawnHeader};
+use prism_render_architecture::water::breaking::{self, BreakingCriteria, BreakingSample};
+
+/// Deterministic crest-spray candidates covering every classifier branch:
+/// a calm sample (no spray), a steep-but-unfolded crest (cresting, still no
+/// spray), a folded-Jacobian breaker, and a high-intensity breaker, then the
+/// same four repeated with rotated launch frames so the velocity blend and the
+/// atomic counter accumulate across slots.
+fn build_spray_sources(count: u32) -> Vec<GpuSpraySource> {
+    let mut sources = Vec::with_capacity(count as usize);
+    let mut i = 0u32;
+    while i < count {
+        let phase = i % 4;
+        let f = i as f32;
+        // Rotate the launch frame slightly per slot; both vectors stay well
+        // above the length floor so the shared normalize is non-degenerate.
+        let tangent = [1.0 + 0.05 * f, 0.1, 0.2 + 0.01 * f];
+        let normal = [0.1, 1.0 + 0.03 * f, 0.05];
+        let (steepness, jacobian, curvature) = match phase {
+            // Calm: below every threshold.
+            0 => (0.2, 1.0, 0.4),
+            // Cresting: steep past threshold, Jacobian healthy, low curvature.
+            1 => (1.4, 1.0, 0.5),
+            // Breaking by fold: Jacobian at/under the fold threshold.
+            2 => (0.6, 0.05, 0.8),
+            // Breaking by intensity: steep and sharply curved.
+            _ => (2.6, 0.6, 4.2),
+        };
+        sources.push(GpuSpraySource {
+            position: [f, 0.5 * f, -f],
+            steepness,
+            tangent,
+            jacobian,
+            normal,
+            curvature,
+        });
+        i += 1;
+    }
+    sources
+}
+
+/// `CPU` golden for the spray emitter: the accumulated spawn counter plus one
+/// planned burst per source slot, in slot order.
+fn spray_golden(
+    sources: &[GpuSpraySource],
+    params: &GpuSprayParams,
+) -> (u32, Vec<GpuSprayParticle>) {
+    let criteria = BreakingCriteria {
+        steepness_threshold: params.steepness_threshold,
+        jacobian_fold_threshold: params.jacobian_fold_threshold,
+        curvature_threshold: params.curvature_threshold,
+        breaking_intensity: params.breaking_intensity,
+    };
+    let mut counter = 0u32;
+    let mut out = Vec::with_capacity(sources.len());
+    for src in sources {
+        let sample = BreakingSample {
+            steepness: src.steepness,
+            jacobian: src.jacobian,
+            curvature: src.curvature,
+        };
+        let tangent = Vec3::new(src.tangent[0], src.tangent[1], src.tangent[2]);
+        let normal = Vec3::new(src.normal[0], src.normal[1], src.normal[2]);
+        let emission = breaking::plan_spray(
+            sample,
+            criteria,
+            tangent,
+            normal,
+            params.jet_speed,
+            params.max_spray_count,
+        );
+        counter += emission.count;
+        out.push(GpuSprayParticle {
+            position: src.position,
+            count: emission.count,
+            velocity: [
+                emission.velocity.x,
+                emission.velocity.y,
+                emission.velocity.z,
+            ],
+            _pad: 0,
+        });
+    }
+    (counter, out)
+}
+
+/// Dispatches one `water_spray_emit` pass and reads back the spawn buffer.
+///
+/// All resources live on `@group(0)`. The spawn buffer is uploaded zeroed and
+/// laid out as a 16-byte `atomic` counter header (the `vec3` in the burst
+/// record forces the array to start at offset 16) followed by one 32-byte burst
+/// record per source slot, matching `SpraySpawn` in the shader.
+fn dispatch_spray(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    wgsl: &str,
+    entry: &str,
+    sources: &[GpuSpraySource],
+    params: &GpuSprayParams,
+) -> (u32, Vec<GpuSprayParticle>) {
+    let n = sources.len();
+    let header_bytes = size_of::<GpuSpraySpawnHeader>();
+    let record_bytes = size_of::<GpuSprayParticle>();
+    let spawn_bytes = (header_bytes + n * record_bytes) as u64;
+
+    let module = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("water_pbf_spray_parity"),
+        source: ShaderSource::Wgsl(wgsl.into()),
+    });
+    let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("water_spray_emit_parity"),
+        layout: None,
+        module: &module,
+        entry_point: Some(entry),
+        compilation_options: PipelineCompilationOptions::default(),
+        cache: None,
+    });
+
+    let source_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("spray_sources"),
+        contents: bytemuck::cast_slice(sources),
+        usage: BufferUsages::STORAGE,
+    });
+    let spawn_init = vec![0u8; spawn_bytes as usize];
+    let spawn_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("spray_spawn"),
+        contents: &spawn_init,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+    });
+    let param_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("spray_params"),
+        contents: bytemuck::bytes_of(params),
+        usage: BufferUsages::UNIFORM,
+    });
+
+    let layout = pipeline.get_bind_group_layout(0);
+    let bind_group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("water_spray_emit_bind_group"),
+        layout: &layout,
+        entries: &[
+            BindGroupEntry {
+                binding: 0,
+                resource: source_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 1,
+                resource: spawn_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 2,
+                resource: param_buf.as_entire_binding(),
+            },
+        ],
+    });
+
+    let stage = device.create_buffer(&BufferDescriptor {
+        label: Some("spray_spawn_stage"),
+        size: spawn_bytes,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("spray_parity_encoder"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("spray_parity_pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(params.source_count.div_ceil(64), 1, 1);
+    }
+    encoder.copy_buffer_to_buffer(&spawn_buf, 0, &stage, 0, spawn_bytes);
+    queue.submit([encoder.finish()]);
+
+    stage.slice(..).map_async(MapMode::Read, |_| {});
+    device
+        .poll(PollType::wait_indefinitely())
+        .expect("device poll should complete the submitted work");
+
+    let view = stage
+        .slice(..)
+        .get_mapped_range()
+        .expect("mapped readback range should be available after poll");
+    let header: GpuSpraySpawnHeader = *bytemuck::from_bytes(&view[..header_bytes]);
+    let records: Vec<GpuSprayParticle> =
+        bytemuck::cast_slice::<u8, GpuSprayParticle>(&view[header_bytes..]).to_vec();
+    drop(view);
+    stage.unmap();
+    (header.counter, records)
+}
+
+/// One on-device spray emission must match the `CPU` golden: identical spawn
+/// counts and positions, and launch velocities within `float32` rounding.
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice must reach the test log on hosts without a wgpu adapter"
+)]
+fn spray_emit_gpu_matches_cpu_golden() {
+    let Some((device, queue)) = try_solver_device() else {
+        eprintln!("spray_emit_gpu_matches_cpu_golden: no wgpu adapter, skipping on-device parity");
+        return;
+    };
+
+    const COUNT: u32 = 40;
+    let params = GpuSprayParams {
+        steepness_threshold: 1.0,
+        jacobian_fold_threshold: 0.2,
+        curvature_threshold: 2.0,
+        breaking_intensity: 0.5,
+        jet_speed: 3.0,
+        source_count: COUNT,
+        spawn_capacity: COUNT,
+        max_spray_count: 32,
+    };
+    let sources = build_spray_sources(COUNT);
+    let (golden_counter, golden) = spray_golden(&sources, &params);
+
+    let wgsl = compile_pbf_wgsl();
+    let entry = find_entry_point(&wgsl, "spray_emit");
+    let (gpu_counter, gpu) = dispatch_spray(&device, &queue, &wgsl, &entry, &sources, &params);
+
+    assert_eq!(gpu.len(), golden.len(), "spawn record count mismatch");
+    assert_eq!(
+        gpu_counter, golden_counter,
+        "atomic spawn counter mismatch: gpu={gpu_counter} cpu={golden_counter}"
+    );
+    let mut i = 0;
+    while i < golden.len() {
+        assert_eq!(
+            gpu[i].count, golden[i].count,
+            "slot {i}: spawn count mismatch"
+        );
+        let mut c = 0;
+        while c < 3 {
+            let pd = (gpu[i].position[c] - golden[i].position[c]).abs();
+            assert!(pd < WATER_EPS, "slot {i} pos[{c}]: gpu vs cpu |d|={pd}");
+            let vd = (gpu[i].velocity[c] - golden[i].velocity[c]).abs();
+            assert!(vd < PARITY_EPS, "slot {i} vel[{c}]: gpu vs cpu |d|={vd}");
+            c += 1;
+        }
+        i += 1;
+    }
+}
