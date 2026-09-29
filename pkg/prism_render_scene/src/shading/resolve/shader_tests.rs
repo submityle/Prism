@@ -832,6 +832,31 @@ fn hair_lod_dither_wesl_compiles_standalone() {
         .unwrap_or_else(|error| panic!("hair_lod_dither.wesl failed to compile: {error}"));
 }
 
+/// Compiles the hair arc-length resampling compute twin standalone. A green
+/// result proves the per-strand groom-import resampler — the two-pass total
+/// arc length plus incremental segment-cursor reparameterization, with the
+/// `len == 1` and zero-length degenerate branches — parses and type-checks as
+/// WESL through the render-world `ShaderCache` / `wesl` pipeline, in lock-step
+/// with the CPU golden
+/// `prism_render_architecture::hair::groom_import::resample_strand`.
+#[test]
+fn hair_resample_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let hair_resample = shader_id(0x5052_4953_4d5f_4841_4952_5f52_534d_0001);
+    cache.set_shader(
+        hair_resample,
+        Shader::from_wesl(
+            include_str!("../../shaders/hair_resample.wesl"),
+            "embedded://prism_render_scene/shaders/hair_resample.wesl",
+        ),
+    );
+
+    cache
+        .get(0, hair_resample, &[])
+        .unwrap_or_else(|error| panic!("hair_resample.wesl failed to compile: {error}"));
+}
+
 /// Registers `lighting.wesl`, `brdf.wesl` and `stylized_hair.wesl` under their
 /// canonical module paths and compiles `stylized_hair.wesl`, forcing the
 /// importer to resolve the `prism_render_scene::shaders::brdf::{...}` imports
