@@ -40,6 +40,16 @@
 //! is exact), so the composited depth key is bit-exact too. The parity test
 //! exploits this to assert texel-for-texel equality rather than a tolerance.
 //!
+//! # Physical page table
+//!
+//! Beyond the rasterizer, [`GpuPageTable`] is the on-device twin of the
+//! physical page pool's key-to-slot lookup: it binary-searches the sorted
+//! resident `(key, slot)` table the CPU golden
+//! [`PagePool`](prism_render_architecture::paging::PagePool) exports, one
+//! thread per query, and is validated slot-for-slot against
+//! [`PagePool::slot_of`](prism_render_architecture::paging::PagePool::slot_of).
+//! It uses only portable integer WGSL, so it needs no optional feature.
+//!
 //! # Safety
 //!
 //! The crate forbids `unsafe`; it relies solely on the safe `wgpu` and
@@ -50,9 +60,11 @@
 #![forbid(unsafe_code)]
 
 pub mod context;
+pub mod page_pool;
 pub mod payload_raster;
 pub mod raster;
 
 pub use context::{block_on, GpuContext};
+pub use page_pool::{GpuPageTable, ResolveError};
 pub use payload_raster::GpuPayloadRaster;
 pub use raster::{GpuSoftwareRaster, RasterError};

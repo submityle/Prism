@@ -17,6 +17,10 @@
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
+pub mod page_pool;
+
+pub use page_pool::{PagePool, PagePoolError, UNMAPPED_SLOT};
+
 /// Lifecycle state of a tracked page.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum PageResidency {
