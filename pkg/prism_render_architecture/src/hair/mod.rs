@@ -60,6 +60,7 @@ pub mod deep_transmittance;
 pub mod density_lod;
 pub mod dynamics;
 pub mod frames;
+pub mod gpu_buffers;
 pub mod gpu_dispatch;
 pub mod groom;
 pub mod groom_import;
