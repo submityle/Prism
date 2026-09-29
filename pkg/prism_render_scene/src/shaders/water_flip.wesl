@@ -362,9 +362,9 @@ fn water_flip_pressure_solve(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Jacobi update of ∇²p = divergence with the Poisson stencil, then damp
     // toward the previous estimate for a guaranteed-convergent sweep.
     let dx2 = flip_params.dx * flip_params.dx;
-    let target = (p_sum - dx2 * divergence) / count;
+    let relaxed = (p_sum - dx2 * divergence) / count;
     let omega = clamp(flip_params.jacobi_omega, 0.0, 1.0);
-    pressure_out[cell] = mix(pressure_in[cell], target, omega);
+    pressure_out[cell] = mix(pressure_in[cell], relaxed, omega);
 }
 
 /// Central-difference pressure gradient at `(i, j, k)` using `pressure_in`;
