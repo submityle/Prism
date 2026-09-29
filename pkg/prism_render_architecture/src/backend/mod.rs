@@ -1,15 +1,25 @@
-//! Single-owner `GPU` backend contracts.
+//! Single-backend `GPU` contracts.
 //!
-//! Prism runs exactly one `GPU` backend at a time — a `Vulkan`-first path or a
-//! portable `wgpu` compatibility path — and that backend is the sole owner of
-//! resource creation, command recording, and submission. This module owns the
-//! deterministic, device-free contracts around that ownership:
+//! Prism runs on exactly one backend: the portable **wgpu** runtime, which
+//! itself covers Metal, `Vulkan`, `D3D12`, and `WebGPU`. There is no second,
+//! "native" backend to escalate to. Everything the renderer needs is expressed
+//! as wgpu capabilities: the guaranteed `WebGPU` baseline plus opt-in wgpu
+//! extension features (bindless, mesh shading, ray query, multi-draw indirect
+//! count, ray tracing). wgpu maps those extensions onto the underlying
+//! `Vulkan`/`Metal`/`D3D12` extensions; capabilities an adapter cannot provide
+//! are simply unavailable and drive a fallback path, not a backend switch.
 //!
-//! * [`capability`] — the [`Capability`] bitset, per-[`VulkanTier`] capability
-//!   mapping, and [`FeatureRequirement`] validation that reports exactly which
-//!   capabilities a tier is missing.
-//! * [`selection`] — [`select_backend`], the policy that picks a
-//!   [`BackendMode`] from what the platform offers and what features demand.
+//! This module owns the deterministic, device-free contracts around that single
+//! backend:
+//!
+//! * [`capability`] — the [`Capability`] bitset, the [`CapabilitySet`] set math,
+//!   the always-present [`CapabilitySet::WEBGPU_BASELINE`], and
+//!   [`FeatureRequirement`] validation that reports exactly which capabilities a
+//!   feature is missing.
+//! * [`negotiation`] — [`negotiate_features`], which intersects the capabilities
+//!   an adapter advertises with the extension features the app requests and
+//!   yields the [`EnabledFeatures`] the device will run with, plus the requested
+//!   extensions the adapter could not provide.
 //! * [`fake`] — a `CPU`-testable [`FakeBackend`] implementation of
 //!   [`RenderBackend`].
 //!
@@ -19,54 +29,28 @@
 
 pub mod capability;
 pub mod fake;
-pub mod selection;
+pub mod negotiation;
 
 pub use capability::{Capability, CapabilitySet, FeatureRequirement, MissingCapabilities};
 pub use fake::FakeBackend;
-pub use selection::{select_backend, BackendAvailability, BackendSelection, SelectionError};
-
-/// Selects one independently owned backend. Resources never cross modes
-/// without an explicit interop implementation.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum BackendMode {
-    VulkanFirst,
-    WgpuCompatibility,
-}
-
-/// `Vulkan` capability tiers consumed by higher-level render features.
-///
-/// The [`Ord`] derivation ranks tiers by breadth in the common case, but
-/// feature gating must go through [`VulkanTier::capabilities`] rather than tier
-/// ordering: `MeshShader` and `RayQuery` are siblings, not a linear scale.
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum VulkanTier {
-    #[default]
-    Core13,
-    MeshShader,
-    RayQuery,
-    Full,
-}
+pub use negotiation::{negotiate_features, EnabledFeatures};
 
 /// The sole owner of resource creation, command recording, and submission.
 ///
-/// Capability queries have default implementations in terms of [`Self::tier`],
-/// so implementors only supply mode, tier, and shutdown. Device-facing methods
-/// (resource creation, command recording, submission) are pending the GPU
-/// backend.
+/// There is only one backend (wgpu), so there is no backend identity to report;
+/// an implementation is characterized purely by the [`CapabilitySet`] its
+/// negotiated device runs with. Capability gating has a default implementation
+/// in terms of [`Self::capabilities`], so implementors only supply the enabled
+/// capabilities and shutdown. Device-facing methods (resource creation, command
+/// recording, submission) are pending the GPU backend.
 pub trait RenderBackend {
-    /// The mode this backend implements.
-    fn mode(&self) -> BackendMode;
-
-    /// The capability tier this backend guarantees.
-    fn tier(&self) -> VulkanTier;
+    /// The capability set the negotiated device runs with.
+    ///
+    /// Always a superset of [`CapabilitySet::WEBGPU_BASELINE`].
+    fn capabilities(&self) -> CapabilitySet;
 
     /// Blocks until the `GPU` is idle so resources can be torn down safely.
     fn wait_idle_for_shutdown(&mut self);
-
-    /// The capability set this backend provides, derived from its tier.
-    fn capabilities(&self) -> CapabilitySet {
-        self.tier().capabilities()
-    }
 
     /// Whether this backend satisfies `requirement`.
     fn supports(&self, requirement: FeatureRequirement) -> bool {
@@ -79,37 +63,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tier_default_is_core13() {
-        assert_eq!(VulkanTier::default(), VulkanTier::Core13);
+    fn baseline_backend_supports_only_baseline_features() {
+        let backend = FakeBackend::baseline();
+        assert_eq!(backend.capabilities(), CapabilitySet::WEBGPU_BASELINE);
+
+        let needs_compute = FeatureRequirement::new(CapabilitySet::EMPTY.with(Capability::Compute));
+        assert!(backend.supports(needs_compute));
+
+        let needs_mesh =
+            FeatureRequirement::new(CapabilitySet::EMPTY.with(Capability::MeshShading));
+        assert!(!backend.supports(needs_mesh));
     }
 
     #[test]
-    fn end_to_end_negotiation() {
-        // Platform offers a mesh-shader Vulkan device and a baseline wgpu path.
-        let avail = BackendAvailability {
-            vulkan_tier: Some(VulkanTier::MeshShader),
-            wgpu_capabilities: CapabilitySet::from_slice(&[
-                Capability::Compute,
-                Capability::BindlessDescriptors,
-                Capability::IndirectDrawCount,
-            ]),
-        };
+    fn end_to_end_negotiation_then_backend() {
+        // The adapter advertises mesh shading among its extensions; the app asks
+        // for it. Negotiation enables it and the backend then honors the need.
+        let adapter = CapabilitySet::WEBGPU_BASELINE
+            .with(Capability::BindlessDescriptors)
+            .with(Capability::MeshShading);
+        let requested = CapabilitySet::EMPTY.with(Capability::MeshShading);
+
+        let enabled = negotiate_features(adapter, requested);
+        assert!(enabled.unavailable().is_empty());
+
+        let mut backend = FakeBackend::new(enabled.enabled());
         let needs_mesh =
             FeatureRequirement::new(CapabilitySet::EMPTY.with(Capability::MeshShading));
-        let sel = select_backend(BackendMode::VulkanFirst, avail, needs_mesh).unwrap();
-        assert_eq!(sel.mode, BackendMode::VulkanFirst);
-
-        // Build the chosen backend and confirm it honors the same requirement.
-        let mut backend = FakeBackend::new(sel.mode, VulkanTier::MeshShader);
         assert!(backend.supports(needs_mesh));
-        assert_eq!(backend.capabilities(), sel.capabilities);
         backend.wait_idle_for_shutdown();
         assert!(backend.is_shut_down());
     }
 
     #[test]
     fn missing_capability_is_reported_exactly() {
-        let backend = FakeBackend::new(BackendMode::VulkanFirst, VulkanTier::Core13);
+        let backend = FakeBackend::baseline();
         let needs_ray = FeatureRequirement::new(CapabilitySet::EMPTY.with(Capability::RayQuery));
         assert!(!backend.supports(needs_ray));
         let missing = needs_ray.validate(backend.capabilities()).unwrap_err();
@@ -117,5 +105,16 @@ mod tests {
             missing.missing,
             CapabilitySet::EMPTY.with(Capability::RayQuery)
         );
+    }
+
+    #[test]
+    fn usable_through_trait_object() {
+        let mut backend = FakeBackend::with_all_extensions();
+        let dyn_backend: &mut dyn RenderBackend = &mut backend;
+        assert!(dyn_backend
+            .capabilities()
+            .contains(Capability::RayTracingPipeline));
+        dyn_backend.wait_idle_for_shutdown();
+        assert!(backend.is_shut_down());
     }
 }

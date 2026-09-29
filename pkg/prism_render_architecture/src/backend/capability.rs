@@ -1,38 +1,49 @@
-//! `GPU` capability gating for `Vulkan` tiers.
+//! `GPU` capability gating over wgpu features.
 //!
-//! Higher-level render features declare the `GPU` capabilities they need — mesh
-//! shading, ray queries, indirect draw-count, and so on. A concrete backend
-//! advertises a [`VulkanTier`], and each tier maps to the fixed
-//! [`CapabilitySet`] it guarantees. This module owns that mapping and the
-//! validation that answers one question deterministically: does this tier
-//! satisfy a feature's requirements, and if not, exactly which capabilities are
-//! missing?
+//! Prism runs on a single portable **wgpu** backend. Beyond the guaranteed
+//! `WebGPU` baseline, extra capabilities — bindless descriptor arrays, mesh
+//! shading, ray queries, multi-draw indirect count, and so on — are opt-in
+//! **wgpu features** (many are native-only extensions that wgpu maps onto the
+//! underlying `Vulkan`/`Metal`/`D3D12` extensions). An adapter advertises which
+//! features it supports, the device enables the subset the app requests, and
+//! higher-level render features declare the capabilities they need.
+//!
+//! This module owns the deterministic, device-free contract: a small bitset of
+//! capabilities, the `WebGPU` baseline that is always present, and the
+//! [`FeatureRequirement`] validation that answers one question — does an enabled
+//! feature set satisfy a render feature's needs, and if not, exactly which
+//! capabilities are missing?
 //!
 //! Capabilities are a small `u32` bitset, so set math is exact and cheap and the
-//! whole layer is `GPU`-independent. Actual device-feature queries against a
-//! live `Vulkan` physical device are pending the GPU backend; here we model the
-//! tier-to-capability contract the renderer is written against.
+//! whole layer is `GPU`-independent. Actual feature queries against a live wgpu
+//! adapter/device are pending the GPU backend; here we model the
+//! feature-to-capability contract the renderer is written against.
 
-use super::VulkanTier;
-
-/// A single `GPU` capability the renderer can depend on.
+/// A single `GPU` capability the renderer can depend on, expressed as a wgpu
+/// feature.
 ///
 /// Each capability occupies one bit in a [`CapabilitySet`]. The discriminants
 /// are the bit indices and are stable, so serialized sets stay comparable.
+/// [`Capability::Compute`] is part of the `WebGPU` baseline (see
+/// [`CapabilitySet::WEBGPU_BASELINE`]); the rest are opt-in wgpu extension
+/// features whose availability varies by adapter.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[repr(u8)]
 pub enum Capability {
-    /// Compute shaders and storage buffers: the universal baseline.
+    /// Compute shaders and storage buffers: the universal `WebGPU` baseline.
     Compute = 0,
-    /// Bindless descriptor indexing of large descriptor arrays.
+    /// Bindless descriptor indexing of large texture arrays
+    /// (wgpu `TEXTURE_BINDING_ARRAY` + non-uniform indexing).
     BindlessDescriptors = 1,
-    /// `vkCmdDrawIndirectCount`-style `GPU`-driven draw submission.
+    /// `GPU`-driven multi-draw indirect with a device count buffer
+    /// (wgpu `MULTI_DRAW_INDIRECT_COUNT`).
     IndirectDrawCount = 2,
-    /// Mesh and task shaders (the `MeshShader` tier).
+    /// Mesh and task shaders (wgpu `EXPERIMENTAL_MESH_SHADER`).
     MeshShading = 3,
-    /// Inline ray queries from any shader stage (the `RayQuery` tier).
+    /// Inline ray queries from any shader stage (wgpu `EXPERIMENTAL_RAY_QUERY`).
     RayQuery = 4,
-    /// Full ray-tracing pipelines with shader binding tables.
+    /// Ray-tracing acceleration structures / pipelines
+    /// (wgpu `EXPERIMENTAL_RAY_TRACING_ACCELERATION_STRUCTURE`).
     RayTracingPipeline = 5,
 }
 
@@ -52,6 +63,13 @@ impl Capability {
     pub const fn bit(self) -> u32 {
         1u32 << (self as u8)
     }
+
+    /// Whether this capability is an opt-in wgpu extension feature rather than
+    /// part of the guaranteed `WebGPU` baseline.
+    #[must_use]
+    pub const fn is_extension(self) -> bool {
+        !matches!(self, Self::Compute)
+    }
 }
 
 /// An exact set of [`Capability`] flags backed by a `u32` bitmask.
@@ -61,6 +79,12 @@ pub struct CapabilitySet(u32);
 impl CapabilitySet {
     /// The empty set.
     pub const EMPTY: Self = Self(0);
+
+    /// The capabilities every wgpu device guarantees without any extension.
+    ///
+    /// A negotiated device always has at least these enabled, regardless of
+    /// which extension features the adapter supports.
+    pub const WEBGPU_BASELINE: Self = Self(Capability::Compute.bit());
 
     /// Builds a set from a slice of capabilities.
     #[must_use]
@@ -160,8 +184,8 @@ impl FeatureRequirement {
     /// Validates `available` against this requirement.
     ///
     /// Returns [`Ok`] when every required capability is present, otherwise
-    /// [`Err`] carrying the exact set of missing capabilities.
-    pub const fn validate(self, available: CapabilitySet) -> Result<(), MissingCapabilities> {
+    /// [`Err`] carrying exactly the capabilities that are missing.
+    pub fn validate(self, available: CapabilitySet) -> Result<(), MissingCapabilities> {
         let missing = available.missing_from(self.required);
         if missing.is_empty() {
             Ok(())
@@ -171,44 +195,12 @@ impl FeatureRequirement {
     }
 }
 
-/// A feature's requirement was not met; carries the shortfall.
+/// The shortfall when a feature's requirement was not met; carries the missing
+/// capabilities.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct MissingCapabilities {
-    /// Capabilities the feature needs that the backend does not provide.
+    /// Capabilities the feature needs that the enabled feature set lacks.
     pub missing: CapabilitySet,
-}
-
-impl VulkanTier {
-    /// The capability set every backend at this tier guarantees.
-    ///
-    /// * `Core13` — the universal baseline: compute, bindless, indirect count.
-    /// * `MeshShader` — baseline plus mesh/task shading.
-    /// * `RayQuery` — baseline plus inline ray queries.
-    /// * `Full` — baseline plus mesh shading, ray queries, and ray-tracing
-    ///   pipelines.
-    #[must_use]
-    pub const fn capabilities(self) -> CapabilitySet {
-        let baseline = CapabilitySet::from_slice(&[
-            Capability::Compute,
-            Capability::BindlessDescriptors,
-            Capability::IndirectDrawCount,
-        ]);
-        match self {
-            Self::Core13 => baseline,
-            Self::MeshShader => baseline.with(Capability::MeshShading),
-            Self::RayQuery => baseline.with(Capability::RayQuery),
-            Self::Full => baseline
-                .with(Capability::MeshShading)
-                .with(Capability::RayQuery)
-                .with(Capability::RayTracingPipeline),
-        }
-    }
-
-    /// Returns `true` when this tier satisfies `requirement`.
-    #[must_use]
-    pub const fn satisfies(self, requirement: FeatureRequirement) -> bool {
-        requirement.validate(self.capabilities()).is_ok()
-    }
 }
 
 #[cfg(test)]
@@ -228,6 +220,20 @@ mod tests {
     }
 
     #[test]
+    fn only_compute_is_baseline() {
+        assert!(!Capability::Compute.is_extension());
+        for cap in Capability::ALL {
+            if cap != Capability::Compute {
+                assert!(cap.is_extension(), "{cap:?} should be an extension");
+            }
+        }
+        assert_eq!(
+            CapabilitySet::WEBGPU_BASELINE,
+            CapabilitySet::EMPTY.with(Capability::Compute)
+        );
+    }
+
+    #[test]
     fn set_membership_and_math() {
         let s = CapabilitySet::from_slice(&[Capability::Compute, Capability::RayQuery]);
         assert!(s.contains(Capability::Compute));
@@ -243,62 +249,40 @@ mod tests {
     }
 
     #[test]
-    fn tier_capability_gating() {
-        assert!(VulkanTier::Core13
-            .capabilities()
-            .contains(Capability::Compute));
-        assert!(!VulkanTier::Core13
-            .capabilities()
-            .contains(Capability::MeshShading));
-        assert!(VulkanTier::MeshShader
-            .capabilities()
-            .contains(Capability::MeshShading));
-        assert!(!VulkanTier::MeshShader
-            .capabilities()
-            .contains(Capability::RayQuery));
-        assert!(VulkanTier::RayQuery
-            .capabilities()
-            .contains(Capability::RayQuery));
-        assert!(VulkanTier::Full
-            .capabilities()
-            .contains(Capability::RayTracingPipeline));
-        assert!(VulkanTier::Full
-            .capabilities()
-            .contains(Capability::MeshShading));
-    }
-
-    #[test]
     fn validate_reports_exact_missing_set() {
         let needs_mesh_and_ray = FeatureRequirement::new(CapabilitySet::from_slice(&[
             Capability::MeshShading,
             Capability::RayQuery,
         ]));
-        // Core13 is missing both.
+        // Baseline is missing both.
         let err = needs_mesh_and_ray
-            .validate(VulkanTier::Core13.capabilities())
+            .validate(CapabilitySet::WEBGPU_BASELINE)
             .unwrap_err();
         assert!(err.missing.contains(Capability::MeshShading));
         assert!(err.missing.contains(Capability::RayQuery));
         assert_eq!(err.missing.len(), 2);
 
-        // MeshShader tier still misses ray query.
+        // Baseline plus mesh shading still misses ray query.
         let err = needs_mesh_and_ray
-            .validate(VulkanTier::MeshShader.capabilities())
+            .validate(CapabilitySet::WEBGPU_BASELINE.with(Capability::MeshShading))
             .unwrap_err();
         assert_eq!(err.missing, CapabilitySet::EMPTY.with(Capability::RayQuery));
 
-        // Full tier satisfies everything.
+        // Enabling both satisfies the requirement.
         assert!(needs_mesh_and_ray
-            .validate(VulkanTier::Full.capabilities())
+            .validate(
+                CapabilitySet::WEBGPU_BASELINE
+                    .with(Capability::MeshShading)
+                    .with(Capability::RayQuery)
+            )
             .is_ok());
-        assert!(VulkanTier::Full.satisfies(needs_mesh_and_ray));
     }
 
     #[test]
     fn empty_requirement_is_always_satisfied() {
         let none = FeatureRequirement::default();
         assert!(none.validate(CapabilitySet::EMPTY).is_ok());
-        assert!(VulkanTier::Core13.satisfies(none));
+        assert!(none.validate(CapabilitySet::WEBGPU_BASELINE).is_ok());
     }
 
     #[test]
@@ -307,8 +291,8 @@ mod tests {
             Capability::MeshShading,
             Capability::RayTracingPipeline,
         ]));
-        let a = req.validate(VulkanTier::Core13.capabilities());
-        let b = req.validate(VulkanTier::Core13.capabilities());
+        let a = req.validate(CapabilitySet::WEBGPU_BASELINE);
+        let b = req.validate(CapabilitySet::WEBGPU_BASELINE);
         assert_eq!(a, b);
     }
 }

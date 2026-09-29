@@ -42,7 +42,7 @@
 
 - 运行时跨平台**已由 wgpu 达成**，不需要、也不应该为原生 VK 折腾（那是跨平台的倒退）。
 - 着色器层**维持 WESL**：WESL 经 naga 已能落 WGSL/SPIR-V/Metal/DXIL，wgpu 在各后端消费——"一份代码编全平台"这条**现有链路已经具备**，无需再叠一层 Slang。曾把 WESL 判为"跨平台缺口"，复评后认定该缺口**本不存在**（naga 已补齐目标面；RT 也吃 WGSL）。详见 §2 决策记录。
-- 因此本文所有"Vulkan 优先/VK 先"应读作 **"wgpu（已有运行时）+ WESL（已有语言层）"**。原生 Vulkan 后端从"地基前提"降级为"可选高配特化路径"（仅当需要 wgpu 覆盖不到的能力时才做）。
+- 因此本文所有"Vulkan 优先/VK 先"应读作 **"wgpu（已有运行时）+ WESL（已有语言层）"**。**不存在独立的原生 Vulkan 后端**——只有一个 wgpu 后端；超出 `WebGPU` baseline 的能力（bindless / mesh shader / ray query / 多重间接 count / RT）都是 **opt-in 的 wgpu 扩展 feature**（wgpu 内部映射到底层 Vulkan/Metal/D3D12 扩展）。adapter 报告支持哪些 feature，device 启用请求的子集，上层特性声明所需 capability；adapter 给不出的 capability 走 **fallback**，而不是切后端。
 - 开发机是 Apple Silicon macOS，Metal（经 wgpu）本就在跑，且能就地测 Metal + Web 两条跨平台线——是验证跨平台最合适的机器，而非障碍。
 
 ---
@@ -246,16 +246,16 @@ fallback:              strand 高配, card 基线; RT 反射里毛发用 proxy �
 
 ## 8. 后端抽象（破坏性重构）
 
-> 修订（2026-09-29）：跨平台的**运行时抽象已由 wgpu 提供**（Bevy 现状）。本节的"后端注册表 + capability"是在 wgpu 之上的能力查询层，**不是**要绕开 wgpu 自己写多后端。原生 Vulkan 后端从"优先"降为"可选高配特化路径"（仅当需要 wgpu 覆盖不到的能力时才做），不再是地基前提。见 §0.5。
+> 修订（2026-09-29 定案）：跨平台的**运行时抽象已由 wgpu 提供**（Bevy 现状）。本节是在 wgpu 之上的**能力协商层**，**不是**要绕开 wgpu 自己写多后端，也**不存在第二个原生 Vulkan 后端可供升级**。收敛为**单一 wgpu 后端**：能力 = `WebGPU` baseline + 按需启用的 wgpu 扩展 feature；给不出的能力走 fallback，绝不切后端。见 §0.5。
 
-- 删 `BackendMode{VulkanFirst,WgpuCompatibility}` 二值枚举 → **后端注册表 + capability 查询**。
-- 保留并扩展 `VulkanTier{Core13,MeshShader,RayQuery,Full}`，泛化成跨后端 capability bits（mesh shader / ray query / bindless / wave ops …）。
+- 删 `BackendMode{VulkanFirst,WgpuCompatibility}` 二值枚举、删 `BackendId{Wgpu,NativeVulkan}` 两后端模型、删 `VulkanTier/BackendTier` 分级 → **单 wgpu 后端 + wgpu 扩展 feature 协商**。
+- 能力用 `Capability` 位集表达（`Compute`=baseline，其余 `BindlessDescriptors/IndirectDrawCount/MeshShading/RayQuery/RayTracingPipeline` 皆为 opt-in 扩展 feature，文档标注对应 wgpu feature 名，如 `EXPERIMENTAL_MESH_SHADER`）。`negotiate_features(adapter_supported, requested)` 产出 `EnabledFeatures{enabled, unavailable}`：`enabled = WEBGPU_BASELINE ∪ (adapter ∩ requested)`，`unavailable = requested − adapter`（请求了但 adapter 不支持的扩展，驱动 fallback）。
 - **fallback 矩阵**：每个高级特性声明所需 capability + 降级路径（无 RT → SSR/SSGI；无 mesh shader → 传统 index draw；无 bindless → 描述符表）。
 - "一份 shader、多平台"由 **WESL → naga** 达成（一份 WESL 编到 WGSL/SPIR-V/Metal/DXIL）；跨平台差异收敛为"补 capability 分支"，运行时由 wgpu 落到 Metal/VK/D3D12/WebGPU/Web。
 
 ### 8.1 可测性三桶边界（2026-09-29）
 
-`raw_vulkan_init`（下沉 raw VK HAL 的逃生舱）**不是"补齐特性"的万能补丁**——它用**两个设计承诺换一个平台特性**：跌进这条路的特性同时丢掉「跨平台」（裸 VK 在 Mac/Web 没有）和「CPU golden 可测」（写不出同源 CPU 参考）。据此把高级特性分三桶：
+`raw_vulkan_init`（Bevy 上游 feature）本质是**在同一个 wgpu 设备上、经 wgpu 的 Vulkan HAL 回调启用 wgpu 类型化 feature 未暴露的额外 VK 扩展**——它**不是第二个后端**，非 Vulkan 平台（Metal/Web）直接 fallback 回普通 wgpu。它是"扩展注入路径而非独立后端"，且是这套扩展协商里最窄、最危险的一条：**不是"补齐特性"的万能补丁**——它用**两个设计承诺换一个平台特性**：跌进这条路的特性同时丢掉「跨平台」（裸 VK 在 Mac/Web 没有）和「CPU golden 可测」（写不出同源 CPU 参考）。据此把高级特性分三桶：
 
 | 桶 | 覆盖路径 | 跨平台 | CPU golden 可测（测试脚手架） |
 |---|---|---|---|
@@ -275,7 +275,7 @@ fallback:              strand 高配, card 基线; RT 反射里毛发用 proxy �
 2. `pkg/prism_render_material/src/ir.rs`：`normalize()` 停止塌缩成单 `shading_model`，产出 `ClosureGraph`+`illumination`+`specialization_id`；`Layer/Mix` 加封顶校验。
 3. `pkg/prism_render_shading/src/classification.rs`：`MaterialShadingClass` 固定 9 桶 → 按 `specialization_id`/tile 动态分桶；`classify_material_header` 重写。
 4. `pkg/prism_render_shading/src/resolve.rs`：`evaluate_toon_direct` 从"一个特例分支"提升为 `ILightResponse(Stylized)` 实现；扩描边/ramp/SDF 面阴影/rim/post（现在几乎是空的）。
-5. `pkg/prism_physics_*/.../backend/mod.rs`：`BackendMode` → 后端注册表 + capability。
+5. **（已完成）** `pkg/prism_render_architecture/src/backend/`：删两后端模型（`BackendId::NativeVulkan`/`BackendTier`/`registry`），收敛为单一 wgpu 后端——`capability.rs`（`Capability` 位集 + `WEBGPU_BASELINE` + `FeatureRequirement`）、`negotiation.rs`（`negotiate_features` → `EnabledFeatures`）、`fake.rs`（`FakeBackend` 仅持有 `enabled` capability 集）、`RenderBackend` trait 仅留 `capabilities()`/`supports()`/`wait_idle_for_shutdown()`。
 6. **（已完成）删除 `prism_render_slang` + `prism_render_slang_abi`**（commit `211f15988`，共 ~2051 行，删除前零外部依赖）。放弃 Slang（见 §2）。
 7. 新 crate `prism_render_npr`：NPR 前端 ABI 骨架 + `evaluate_stylized_direct` + 屏幕空间描边（着色 WESL，CPU 参考按需手写 Rust golden）。
 8. 着色器继续用 **WESL**；ABI 用手写 `#[repr(C)]` + 哈希版本 + 对齐测试兜漂移（§2.4）。不做 `.slang` 迁移。
@@ -309,7 +309,7 @@ fallback:              strand 高配, card 基线; RT 反射里毛发用 proxy �
 3. **材质 ABI 破坏性重构**（§9 第 1–3 步），用竖切验证正交轴 + specialization；ABI 用手写 `#[repr(C)]` + 哈希版本 + 对齐测试。
 4. **粒子子系统**：优先，因为它带起 reactive mask（§5 最该早做的基底）。
 5. **`prism_render_npr` 骨架**：描边（material id 边界白送）+ ramp + `evaluate_stylized_direct`；着色 WESL，CPU golden 按需手写。
-6. **frame graph 装配节点**，逐节点在 wgpu 上实装（原生 Vulkan 特化后置，仅在需要 wgpu 覆盖不到的能力时才做）。
+6. **frame graph 装配节点**，逐节点在 wgpu 上实装（超 baseline 能力经 wgpu 扩展 feature 按需启用，adapter 给不出则走 fallback；无独立原生后端）。
 7. **（已完成）清理 Slang 残留**：两 crate 已于 commit `211f15988` 从 workspace 删除；文档命名/注释残留已于 commit `abb661911` 清理，`rg -i slang` 现仅命中 §2 决策记录（§2 / §9.6）。
 8. 毛发(card)/布料/froxel 体积按 §6.2 优先级跟进；水/植被/贴花后置。
 
