@@ -271,14 +271,14 @@ mod tests {
     fn corners_are_symmetric_about_centerline() {
         let (points, frames) = straight_strand();
         let mesh = build_shell(&points, &frames, 0.15, 0.15);
-        for i in 0..points.len() {
+        for (i, p) in points.iter().enumerate() {
             // Corner 0 and corner 2 are diagonally opposite, as are 1 and 3.
             let c0 = mesh.positions[4 * i];
             let c2 = mesh.positions[4 * i + 2];
-            assert!(close_v((c0 + c2).scale(0.5), points[i]), "0/2 not centered");
+            assert!(close_v((c0 + c2).scale(0.5), *p), "0/2 not centered");
             let c1 = mesh.positions[4 * i + 1];
             let c3 = mesh.positions[4 * i + 3];
-            assert!(close_v((c1 + c3).scale(0.5), points[i]), "1/3 not centered");
+            assert!(close_v((c1 + c3).scale(0.5), *p), "1/3 not centered");
         }
     }
 

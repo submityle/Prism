@@ -195,11 +195,11 @@ mod tests {
         let (points, frames) = straight_strand();
         let radii = [0.2_f32; 4];
         let mesh = build_ribbon(&points, &frames, &radii);
-        for i in 0..points.len() {
+        for (i, p) in points.iter().enumerate() {
             let left = mesh.positions[2 * i];
             let right = mesh.positions[2 * i + 1];
             let mid = (left + right).scale(0.5);
-            assert!(close_v(mid, points[i]), "edge midpoint off centerline");
+            assert!(close_v(mid, *p), "edge midpoint off centerline");
             assert!(close((right - left).length(), 0.4), "width != 2*radius");
         }
     }
