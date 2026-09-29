@@ -2573,3 +2573,400 @@ fn coupling_readback_gpu_matches_cpu_golden() {
         i += 1;
     }
 }
+
+// ===========================================================================
+// Kernel 6: water_wetness_step (Surface, 8x8) — twin of `wetness::step_moisture`
+// plus the `wet_albedo_scale`/`capillary_height`/`is_puddle` shading helpers.
+// ===========================================================================
+
+use super::abi::GpuWaterWetnessParams;
+use prism_render_architecture::water::wetness::{self, SurfaceMoisture, WetnessParams};
+
+/// Field width in cells; a multiple of 32 keeps the `rgba16float` read-back row
+/// (four channels x 2 bytes = 8 bytes/texel) an exact 256-byte multiple, so the
+/// copied texture is dense with no per-row padding.
+const WETNESS_W: u32 = 32;
+/// Field height in cells.
+const WETNESS_H: u32 = 8;
+/// Tight tolerance for the `f32` state read-back: the shared `exp_approx` is a
+/// bit-identical squaring twin, so only a possible fused multiply-add in the
+/// puddle integration can drift, and that stays within one ulp.
+const WETNESS_STATE_EPS: f32 = 2.0e-5;
+
+/// Decodes an IEEE 754 binary16 bit pattern into `f32` for the `rgba16float`
+/// output texture read-back. The wetness outputs are all finite and in `0..=1`
+/// (albedo, capillary, wetness, flag), so the normal path dominates; the
+/// subnormal and zero cases are handled for completeness.
+fn f16_bits_to_f32(bits: u16) -> f32 {
+    let sign = if bits & 0x8000 != 0 {
+        -1.0_f32
+    } else {
+        1.0_f32
+    };
+    let exp = i32::from((bits >> 10) & 0x1f);
+    let mant = f32::from(bits & 0x03ff);
+    if exp == 0 {
+        // Subnormal (or zero when mant == 0): no implicit leading one.
+        sign * (mant / 1024.0) * 2.0_f32.powi(-14)
+    } else if exp == 0x1f {
+        // Inf/NaN: the wetness data never reaches this, map to a large finite.
+        sign * f32::MAX
+    } else {
+        sign * (1.0 + mant / 1024.0) * 2.0_f32.powi(exp - 15)
+    }
+}
+
+/// Projects the GPU wetness scalars onto the architecture `WetnessParams` used
+/// by the golden reference.
+fn wetness_arch_params(p: &GpuWaterWetnessParams) -> WetnessParams {
+    WetnessParams {
+        max_capillary_height: p.max_capillary_height,
+        absorb_rate: p.absorb_rate,
+        dry_rate: p.dry_rate,
+        darkening_strength: p.darkening_strength,
+        puddle_threshold: p.puddle_threshold,
+    }
+}
+
+/// Builds a deterministic, transcendental-free per-cell moisture field that
+/// spreads the initial wetness across `0..=1` and seeds a range of puddle
+/// depths straddling the puddle threshold.
+fn wetness_state_field(count: usize) -> Vec<f32> {
+    let mut field = Vec::with_capacity(count * 2);
+    let mut i = 0usize;
+    while i < count {
+        let w0 = ((i % 11) as f32) / 10.0;
+        let p0 = ((i % 7) as f32) * 0.005;
+        field.push(w0);
+        field.push(p0);
+        i += 1;
+    }
+    field
+}
+
+/// `CPU` golden for the wetness step. Returns the packed next state
+/// (`wetness`, `puddle_depth` per cell) and the packed output texels (`albedo`,
+/// `capillary`, `wetness`, `flag` per cell) in row-major cell order.
+fn wetness_golden(params: &GpuWaterWetnessParams, field: &[f32]) -> (Vec<f32>, Vec<f32>) {
+    let arch = wetness_arch_params(params);
+    let contact = params.water_contact != 0;
+    let count = (params.width * params.height) as usize;
+    let mut state = Vec::with_capacity(count * 2);
+    let mut tex = Vec::with_capacity(count * 4);
+    let mut idx = 0usize;
+    while idx < count {
+        let init = SurfaceMoisture {
+            wetness: field[idx * 2],
+            puddle_depth: field[idx * 2 + 1],
+        };
+        let next = wetness::step_moisture(
+            init,
+            arch,
+            contact,
+            params.rain_rate,
+            params.drain_rate,
+            params.dt,
+        );
+        let albedo = wetness::wet_albedo_scale(next.wetness, arch);
+        let capillary = wetness::capillary_height(next.wetness, params.dist_above_water, arch);
+        let flag = if wetness::is_puddle(next.puddle_depth, arch) {
+            1.0
+        } else {
+            0.0
+        };
+        state.push(next.wetness);
+        state.push(next.puddle_depth);
+        tex.push(albedo);
+        tex.push(capillary);
+        tex.push(next.wetness);
+        tex.push(flag);
+        idx += 1;
+    }
+    (state, tex)
+}
+
+/// Dispatches `water_wetness_step` on device and reads back both the `f32`
+/// storage state and the decoded `rgba16float` output texture.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the parity harness sets up an explicit layout, a storage texture, and two read-backs in one place"
+)]
+fn dispatch_wetness(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    wgsl: &str,
+    entry: &str,
+    params: &GpuWaterWetnessParams,
+    field: &[f32],
+) -> (Vec<f32>, Vec<f32>) {
+    let count = (params.width * params.height) as usize;
+
+    let module = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("water_render_fx_wetness_parity"),
+        source: ShaderSource::Wgsl(wgsl.into()),
+    });
+    let empty_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+        label: Some("water_wetness_empty_layout"),
+        entries: &[],
+    });
+    let group3_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+        label: Some("water_wetness_layout"),
+        entries: &[
+            BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            BindGroupLayoutEntry {
+                binding: 1,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            BindGroupLayoutEntry {
+                binding: 2,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::StorageTexture {
+                    access: StorageTextureAccess::WriteOnly,
+                    format: TextureFormat::Rgba16Float,
+                    view_dimension: TextureViewDimension::D2,
+                },
+                count: None,
+            },
+        ],
+    });
+    let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+        label: Some("water_wetness_pipeline_layout"),
+        bind_group_layouts: &[
+            Some(&empty_layout),
+            Some(&empty_layout),
+            Some(&empty_layout),
+            Some(&group3_layout),
+        ],
+        immediate_size: 0,
+    });
+    let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("water_wetness_step_parity"),
+        layout: Some(&pipeline_layout),
+        module: &module,
+        entry_point: Some(entry),
+        compilation_options: PipelineCompilationOptions::default(),
+        cache: None,
+    });
+
+    let state_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("wetness_state"),
+        contents: bytemuck::cast_slice(field),
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+    });
+    let params_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("wetness_params"),
+        contents: bytemuck::bytes_of(params),
+        usage: BufferUsages::UNIFORM,
+    });
+    let out_tex = device.create_texture(&TextureDescriptor {
+        label: Some("wetness_out"),
+        size: Extent3d {
+            width: params.width,
+            height: params.height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: TextureFormat::Rgba16Float,
+        usage: TextureUsages::STORAGE_BINDING | TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let out_view = out_tex.create_view(&TextureViewDescriptor::default());
+
+    let empty_group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("wetness_empty_group"),
+        layout: &empty_layout,
+        entries: &[],
+    });
+    let bind_group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("wetness_bind_group"),
+        layout: &group3_layout,
+        entries: &[
+            BindGroupEntry {
+                binding: 0,
+                resource: state_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 1,
+                resource: params_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 2,
+                resource: BindingResource::TextureView(&out_view),
+            },
+        ],
+    });
+
+    let state_bytes = (count * 8) as u64;
+    let state_stage = device.create_buffer(&BufferDescriptor {
+        label: Some("wetness_state_stage"),
+        size: state_bytes,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let row_bytes = params.width * 8;
+    let tex_bytes = u64::from(row_bytes * params.height);
+    let tex_stage = device.create_buffer(&BufferDescriptor {
+        label: Some("wetness_tex_stage"),
+        size: tex_bytes,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("wetness_parity_encoder"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("wetness_parity_pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &empty_group, &[]);
+        pass.set_bind_group(1, &empty_group, &[]);
+        pass.set_bind_group(2, &empty_group, &[]);
+        pass.set_bind_group(3, &bind_group, &[]);
+        // One extra workgroup per axis exercises the in-kernel bounds guard.
+        pass.dispatch_workgroups(
+            params.width.div_ceil(8) + 1,
+            params.height.div_ceil(8) + 1,
+            1,
+        );
+    }
+    encoder.copy_buffer_to_buffer(&state_buf, 0, &state_stage, 0, state_bytes);
+    encoder.copy_texture_to_buffer(
+        TexelCopyTextureInfo {
+            texture: &out_tex,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: TextureAspect::All,
+        },
+        TexelCopyBufferInfo {
+            buffer: &tex_stage,
+            layout: TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row_bytes),
+                rows_per_image: Some(params.height),
+            },
+        },
+        Extent3d {
+            width: params.width,
+            height: params.height,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit([encoder.finish()]);
+
+    state_stage.slice(..).map_async(MapMode::Read, |_| {});
+    tex_stage.slice(..).map_async(MapMode::Read, |_| {});
+    device
+        .poll(PollType::wait_indefinitely())
+        .expect("device poll should complete the submitted work");
+
+    let state_view = state_stage
+        .slice(..)
+        .get_mapped_range()
+        .expect("mapped wetness state should be available after poll");
+    let state = bytemuck::cast_slice::<u8, f32>(&state_view).to_vec();
+    drop(state_view);
+    state_stage.unmap();
+
+    let tex_view = tex_stage
+        .slice(..)
+        .get_mapped_range()
+        .expect("mapped wetness texture should be available after poll");
+    let halves = bytemuck::cast_slice::<u8, u16>(&tex_view).to_vec();
+    drop(tex_view);
+    tex_stage.unmap();
+    let tex: Vec<f32> = halves.iter().map(|&h| f16_bits_to_f32(h)).collect();
+
+    (state, tex)
+}
+
+/// Real-device parity for `water_wetness_step`: advance a spread of per-cell
+/// moisture states through the rain-wetting branch on device and match the
+/// `f32` state read-back tightly, plus the decoded `rgba16float` output texture
+/// (albedo darkening, capillary band, wetness, puddle flag) to the golden.
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice must reach the test log on hosts without a wgpu adapter"
+)]
+fn wetness_step_gpu_matches_cpu_golden() {
+    let Some((device, queue)) = try_solver_device() else {
+        eprintln!(
+            "wetness_step_gpu_matches_cpu_golden: no wgpu adapter, skipping on-device parity"
+        );
+        return;
+    };
+
+    let params = GpuWaterWetnessParams {
+        max_capillary_height: 0.5,
+        absorb_rate: 2.0,
+        dry_rate: 0.5,
+        darkening_strength: 0.4,
+        puddle_threshold: 0.02,
+        rain_rate: 0.3,
+        drain_rate: 0.1,
+        dt: 0.05,
+        dist_above_water: 0.1,
+        water_contact: 0,
+        width: WETNESS_W,
+        height: WETNESS_H,
+    };
+    let count = (params.width * params.height) as usize;
+    let field = wetness_state_field(count);
+
+    let (state_gold, tex_gold) = wetness_golden(&params, &field);
+
+    let wgsl = compile_render_fx_wgsl();
+    let entry = find_entry_point(&wgsl, "wetness_step");
+    let (state_gpu, tex_gpu) = dispatch_wetness(&device, &queue, &wgsl, &entry, &params, &field);
+
+    assert_eq!(
+        state_gpu.len(),
+        state_gold.len(),
+        "wetness state lane count"
+    );
+    assert_eq!(tex_gpu.len(), tex_gold.len(), "wetness texel lane count");
+
+    let mut i = 0;
+    while i < state_gold.len() {
+        let d = (state_gpu[i] - state_gold[i]).abs();
+        assert!(
+            d < WETNESS_STATE_EPS,
+            "wetness state lane {i}: gpu={} cpu={} |d|={d}",
+            state_gpu[i],
+            state_gold[i],
+        );
+        i += 1;
+    }
+
+    let mut j = 0;
+    while j < tex_gold.len() {
+        let d = (tex_gpu[j] - tex_gold[j]).abs();
+        assert!(
+            d < PARITY_EPS,
+            "wetness texel lane {j}: gpu={} cpu={} |d|={d}",
+            tex_gpu[j],
+            tex_gold[j],
+        );
+        j += 1;
+    }
+}
