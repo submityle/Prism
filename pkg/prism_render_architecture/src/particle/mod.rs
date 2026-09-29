@@ -46,9 +46,13 @@
 //! of scope for this `CPU`-verifiable contract layer and are documented as
 //! "pending the GPU backend" where the contract signatures anticipate them.
 
+pub mod attributes;
 pub mod emitter;
+pub mod events;
+pub mod graph;
 pub mod lod;
 pub mod pool;
+pub mod renderers;
 pub mod shading;
 pub mod simulation;
 pub mod sort_cull;
