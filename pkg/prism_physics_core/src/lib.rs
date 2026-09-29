@@ -43,6 +43,7 @@ pub mod dsl;
 pub mod dynamics;
 pub mod events;
 pub mod fluid;
+pub mod fracture;
 pub mod island;
 pub mod joint;
 pub mod lod;
@@ -87,6 +88,11 @@ pub use fluid::{
     advect, clamp_to_fluid_domain, grid_to_particle as fluid_grid_to_particle,
     max_fluid_divergence, particle_to_grid as fluid_particle_to_grid, project, CellType,
     FluidConfig, FluidSolver, MacGrid, MarkerParticles, TransferMode,
+};
+pub use fracture::{
+    fracture_aabb, fracture_convex, scatter_impact, scatter_uniform, shatter_box,
+    shatter_box_impact, ConvexPolyhedron, DeterministicRng, FractureConfig, Fragment,
+    MassProperties as FractureMassProperties, Plane as FracturePlane,
 };
 pub use island::{islands_from_pairs, IslandBuilder, IslandId, IslandSet};
 pub use joint::{
