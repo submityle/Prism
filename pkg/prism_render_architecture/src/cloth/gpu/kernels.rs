@@ -146,12 +146,27 @@ pub enum ClothKernel {
     /// Predict positions: damp velocity, apply gravity and wind, integrate.
     /// Pinned particles are skipped by the shader on its inverse-mass test.
     Predict,
+    /// Freeze the current per-vertex velocities into a read-only snapshot the
+    /// [`ClothKernel::Aerodynamics`] gather then reads. One thread per vertex
+    /// copies its own `velocities[v]` into `velocity_snapshot[v]`, so the copy
+    /// touches a single element per invocation and is race-free. Without this
+    /// frozen input the gather would read neighbour velocities that sibling
+    /// invocations are concurrently overwriting — a data race that also breaks
+    /// bit-parity with the `CPU` golden's frozen snapshot. Runs immediately
+    /// before [`ClothKernel::Aerodynamics`].
+    AerodynamicsSnapshot,
     /// Accumulate the per-triangle aerodynamic (drag + lift) force as a
     /// race-free per-vertex *gather*: one thread per vertex sums a third of the
-    /// wind force of each incident triangle from a frozen velocity snapshot, so
-    /// every velocity is written by exactly one thread with no scatter atomics.
-    /// Mirrors the `CPU` golden [`super::super::aero_gather::accumulate_aero_gather`];
-    /// runs as an aero pre-pass after predict and before constraint projection.
+    /// wind force of each incident triangle from the frozen
+    /// [`ClothKernel::AerodynamicsSnapshot`] velocity buffer, then adds
+    /// `sum * inverse_mass * dt` to its own `velocities[v]` — so every velocity
+    /// is written by exactly one thread with no scatter atomics and the read
+    /// state is a race-free Jacobi input. Mirrors the `CPU` golden
+    /// [`super::super::aero_gather::accumulate_aero_gather`]. Wind is a
+    /// pre-solve velocity impulse, so it runs once per frame **before** the
+    /// substep loop (matching the `CPU` `ClothPipeline::step`, whose
+    /// aerodynamic impulse precedes the predictor); the following predict then
+    /// integrates the wind-modified velocity into position.
     Aerodynamics,
     /// Project one graph color's distance constraints (`XPBD` compliance),
     /// parallel within the color and serial across colors. Sized per color.
@@ -185,8 +200,9 @@ pub enum ClothKernel {
 impl ClothKernel {
     /// Every kernel, in a stable solver order, for descriptor-table iteration
     /// and exhaustiveness tests.
-    pub const ALL: [ClothKernel; 12] = [
+    pub const ALL: [ClothKernel; 13] = [
         ClothKernel::Predict,
+        ClothKernel::AerodynamicsSnapshot,
         ClothKernel::Aerodynamics,
         ClothKernel::ProjectDistanceBatch,
         ClothKernel::ProjectBendingBatch,
@@ -206,6 +222,7 @@ impl ClothKernel {
     pub fn wesl_entry_point(self) -> &'static str {
         match self {
             ClothKernel::Predict => "cloth_predict",
+            ClothKernel::AerodynamicsSnapshot => "cloth_aerodynamics_snapshot",
             ClothKernel::Aerodynamics => "cloth_aerodynamics",
             ClothKernel::ProjectDistanceBatch => "cloth_project_distance_batch",
             ClothKernel::ProjectBendingBatch => "cloth_project_bending_batch",
@@ -246,17 +263,34 @@ impl ClothKernel {
     #[must_use]
     pub fn descriptor(self) -> KernelDescriptor {
         let (layout, workgroup, domain) = match self {
+            ClothKernel::AerodynamicsSnapshot => (
+                // The read-only source velocity pool and the read-write
+                // snapshot pool it is copied into, plus the uniform block whose
+                // vertex count bounds the copy. One thread per vertex copies a
+                // single element, so no topology, texture or scatter buffer is
+                // needed.
+                BindGroupLayout {
+                    storage_buffers: 2,
+                    uniform_buffers: 1,
+                    storage_textures: 0,
+                    sampled_textures: 0,
+                },
+                WorkgroupSize { x: 64, y: 1, z: 1 },
+                DispatchDomain::Particle,
+            ),
             ClothKernel::Aerodynamics => (
-                // Read-write position and velocity pools (the inverse mass is
-                // packed into `positions.w`, exactly like every other cloth
-                // pass, so it needs no separate buffer), the read-only triangle
+                // The read-only position pool (its `.w` carries the inverse
+                // mass, exactly like every other cloth pass, so it needs no
+                // separate buffer), the read-write velocity pool the gather
+                // increments, the read-only frozen velocity snapshot the face
+                // relative-wind is measured against, the read-only triangle
                 // topology buffer and the two read-only `CSR` vertex->triangle
                 // adjacency buffers (offsets + entries), plus the wind/aero/dt
                 // uniform block. One thread per vertex gathers its incident
                 // faces, so no writable texture and no scatter buffer are
                 // needed.
                 BindGroupLayout {
-                    storage_buffers: 5,
+                    storage_buffers: 6,
                     uniform_buffers: 1,
                     storage_textures: 0,
                     sampled_textures: 0,

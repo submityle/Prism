@@ -254,17 +254,29 @@ pub fn prepare(extract: &ClothGpuExtract) -> ClothGpuPrepare {
         .copied()
         .fold(0u32, u32::saturating_add);
 
+    // Aerodynamic wind is a per-frame pre-solve velocity impulse, mirroring the
+    // `CPU` golden `ClothPipeline::step` whose `apply_aero_forces` runs once
+    // before the substep loop with the full frame `dt`. The snapshot pass first
+    // freezes the frame-start velocities; the gather pass then adds each free
+    // vertex's incident wind force to its own velocity, reading face velocities
+    // from that frozen snapshot so the update is a race-free Jacobi step and is
+    // bit-faithful to the golden. The following predictor integrates the
+    // wind-modified velocity into position, which is why the impulse must land
+    // *before* predict: running it afterwards would leave the position already
+    // integrated from the pre-wind velocity and the increment discarded by the
+    // substep's velocity-recovery pass, making the whole pass a silent no-op.
+    if extract.aerodynamics {
+        push_particle(
+            &mut dispatches,
+            ClothKernel::AerodynamicsSnapshot,
+            particles,
+            group,
+        );
+        push_particle(&mut dispatches, ClothKernel::Aerodynamics, particles, group);
+    }
+
     for _ in 0..extract.substeps {
         push_particle(&mut dispatches, ClothKernel::Predict, particles, group);
-
-        // Aerodynamics is a per-vertex gather pre-pass: it reads the just-
-        // predicted velocities and accumulates each incident triangle's wind
-        // force, so it must run after predict and before the constraint
-        // projection that consumes the aerodynamically-updated velocities.
-        // Mirrors the `CPU` golden `cloth::aero_gather::accumulate_aero_gather`.
-        if extract.aerodynamics {
-            push_particle(&mut dispatches, ClothKernel::Aerodynamics, particles, group);
-        }
 
         for _ in 0..extract.iterations {
             push_projection(
@@ -469,9 +481,13 @@ mod tests {
     #[test]
     fn schedule_is_in_solver_order_per_substep() {
         let e = sample_extract();
+        assert!(e.aerodynamics);
         let plan = prepare(&e);
-        // First dispatch of the frame is a predict pass.
-        assert_eq!(plan.dispatches[0].kernel, ClothKernel::Predict);
+        // The sample enables wind, so the frame opens with the per-frame aero
+        // pre-pass (snapshot then gather); the first predictor follows it.
+        assert_eq!(plan.dispatches[0].kernel, ClothKernel::AerodynamicsSnapshot);
+        assert_eq!(plan.dispatches[1].kernel, ClothKernel::Aerodynamics);
+        assert_eq!(plan.dispatches[2].kernel, ClothKernel::Predict);
         // The last dispatch of the frame is the once-per-frame embed.
         assert_eq!(
             plan.dispatches.last().unwrap().kernel,
@@ -756,51 +772,57 @@ mod tests {
     }
 
     #[test]
-    fn aerodynamics_runs_once_per_substep_between_predict_and_projection() {
+    fn aerodynamics_runs_once_per_frame_before_the_substep_loop() {
         // sample_extract enables aerodynamics with two substeps.
         let e = sample_extract();
         assert!(e.aerodynamics);
         assert_eq!(e.substeps, 2);
         let plan = prepare(&e);
 
-        // One aerodynamics dispatch per substep.
+        // Exactly one snapshot and one gather dispatch for the whole frame,
+        // regardless of substep count: wind is a per-frame pre-solve impulse.
+        let snapshot = plan
+            .dispatches
+            .iter()
+            .filter(|d| d.kernel == ClothKernel::AerodynamicsSnapshot)
+            .count();
         let aero = plan
             .dispatches
             .iter()
             .filter(|d| d.kernel == ClothKernel::Aerodynamics)
             .count();
-        assert_eq!(aero, usize::try_from(e.substeps).unwrap());
+        assert_eq!(snapshot, 1);
+        assert_eq!(aero, 1);
 
-        // Every aerodynamics dispatch is a per-particle pass (no color/batch).
-        for d in plan
-            .dispatches
-            .iter()
-            .filter(|d| d.kernel == ClothKernel::Aerodynamics)
-        {
+        // Both aero passes are per-particle (no color/batch).
+        for d in plan.dispatches.iter().filter(|d| {
+            d.kernel == ClothKernel::AerodynamicsSnapshot || d.kernel == ClothKernel::Aerodynamics
+        }) {
             assert_eq!(d.color, None);
             assert_eq!(d.batch, None);
         }
 
-        // Within the first substep the order is predict -> aerodynamics ->
-        // first distance projection.
-        let predict = plan
+        // Order: snapshot -> gather -> the first (and every) predict, so the
+        // wind impulse lands before the integrator that carries it into
+        // position.
+        let snapshot_pos = plan
             .dispatches
             .iter()
-            .position(|d| d.kernel == ClothKernel::Predict)
-            .expect("a predict dispatch");
+            .position(|d| d.kernel == ClothKernel::AerodynamicsSnapshot)
+            .expect("a snapshot dispatch");
         let aero_pos = plan
             .dispatches
             .iter()
             .position(|d| d.kernel == ClothKernel::Aerodynamics)
             .expect("an aerodynamics dispatch");
-        let distance = plan
+        let first_predict = plan
             .dispatches
             .iter()
-            .position(|d| d.kernel == ClothKernel::ProjectDistanceBatch)
-            .expect("a distance projection dispatch");
+            .position(|d| d.kernel == ClothKernel::Predict)
+            .expect("a predict dispatch");
         assert!(
-            predict < aero_pos && aero_pos < distance,
-            "expected predict ({predict}) < aerodynamics ({aero_pos}) < distance ({distance})"
+            snapshot_pos < aero_pos && aero_pos < first_predict,
+            "expected snapshot ({snapshot_pos}) < aerodynamics ({aero_pos}) < first predict ({first_predict})"
         );
     }
 

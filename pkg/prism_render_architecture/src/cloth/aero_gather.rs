@@ -143,6 +143,25 @@ impl VertexTriangleAdjacency {
         let end = self.offsets[vertex + 1] as usize;
         &self.entries[start..end]
     }
+
+    /// The raw `CSR` start offsets, one per vertex plus a trailing total.
+    ///
+    /// Length is `vertex_count + 1` and the values are non-decreasing, so the
+    /// triangles incident to vertex `v` occupy `entries()[offsets()[v] ..
+    /// offsets()[v + 1]]`. Exposed so a `GPU` per-vertex gather kernel can
+    /// upload the same flattened adjacency the `CPU` gather walks, keeping the
+    /// device pass byte-for-byte faithful to the golden reference.
+    #[must_use]
+    pub fn offsets(&self) -> &[u32] {
+        &self.offsets
+    }
+
+    /// The flattened, per-vertex-contiguous triangle indices (ascending within
+    /// each vertex's run) the `offsets` slice windows into.
+    #[must_use]
+    pub fn entries(&self) -> &[u32] {
+        &self.entries
+    }
 }
 
 /// Applies the aerodynamic force to `particles` by a race-free per-vertex
