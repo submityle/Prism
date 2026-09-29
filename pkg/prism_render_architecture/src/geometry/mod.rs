@@ -2,7 +2,13 @@
 
 use crate::gpu_scene::GeometryHandle;
 
-/// Version of the initial geometry table ABI.
+pub mod residency;
+pub mod table;
+
+pub use residency::{LodResidencyPolicy, ResidencyPlan};
+pub use table::{check_abi, CullBatchEntry, GeometryAbiError, GeometryLookupError, GeometryTable};
+
+/// Version of the initial geometry table `ABI`.
 pub const GEOMETRY_ABI_VERSION: u32 = 1;
 
 /// Logical primitive encoding. Physical buffers remain backend-owned.
