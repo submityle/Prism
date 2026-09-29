@@ -24,7 +24,12 @@
 //!   and flicker.
 //!
 //! Mirrored bit-for-bit by the `taa_resolve.wesl` GPU twin; every operation is
-//! plain arithmetic so CPU and GPU agree exactly.
+//! plain arithmetic so CPU and GPU agree exactly. The `reactive` history-cut
+//! term (below) is the golden reference for the consumption end of the
+//! `PackedMasks.reactive()` channel; the GPU twin mirrors it once the reactive
+//! mask is bound into the resolve (the producer wires the per-pixel mask into
+//! the velocity G-buffer), so today's `reactive == 0` shipping path stays
+//! byte-identical.
 
 use bevy_math::Vec3;
 
@@ -87,12 +92,21 @@ pub fn tonemap_weight(luma: f32) -> f32 {
 /// reprojection) the history is ignored and the current colour passes straight
 /// through, so a camera cut degrades to the un-accumulated — still jittered but
 /// un-smeared — frame rather than ghosting.
+///
+/// `reactive` in `[0, 1]` is the per-pixel reactive mask (FSR2 / UE responsive
+/// AA): the fraction by which the trusted `history_blend` is *cut* for this
+/// pixel. `0` leaves the blend untouched; `1` drops the history entirely so a
+/// fast, temporally unstable surface (particles, translucency, NPR sharp
+/// segmentation / reduced-rate stepping) resolves to the current frame instead
+/// of smearing. It is the consumption end of the `PackedMasks.reactive()`
+/// channel packed by `prism_render_architecture::motion::encode`.
 pub fn resolve_taa(
     current_rgb: Vec3,
     history_rgb: Vec3,
     neighbourhood: &[Vec3; 9],
     params: &TaaParams,
     history_valid: bool,
+    reactive: f32,
 ) -> Vec3 {
     if !history_valid {
         return current_rgb;
@@ -116,10 +130,16 @@ pub fn resolve_taa(
     let (box_min, box_max) = variance_clip_box(mean, mean_sq, params.variance_gamma);
     let clipped = clip_history_to_aabb(history, box_min, box_max);
 
+    // Reactive mask cuts the trusted history fraction for this pixel: a fully
+    // reactive surface (particles / translucency / stepped NPR) keeps no
+    // history and resolves to the current frame, so temporally unstable
+    // signals do not smear through the accumulation.
+    let effective_blend = params.history_blend * (1.0 - reactive.clamp(0.0, 1.0));
+
     // Luminance (YCoCg `.x`) feedback weighting: down-weight the brighter
     // contributor so a firefly cannot flicker the accumulation.
-    let weight_current = (1.0 - params.history_blend) * tonemap_weight(current.x);
-    let weight_history = params.history_blend * tonemap_weight(clipped.x);
+    let weight_current = (1.0 - effective_blend) * tonemap_weight(current.x);
+    let weight_history = effective_blend * tonemap_weight(clipped.x);
     let total = weight_current + weight_history;
     let blended = if total > 0.0 {
         (current * weight_current + clipped * weight_history) / total
@@ -162,8 +182,12 @@ mod tests {
             &[current; 9],
             &TaaParams::default(),
             false,
+            0.0,
         );
-        assert!(approx(out, current), "invalid history must yield the current frame");
+        assert!(
+            approx(out, current),
+            "invalid history must yield the current frame"
+        );
     }
 
     #[test]
@@ -172,8 +196,11 @@ mod tests {
         // history to the mean (== current), so the blend is a no-op regardless
         // of the feedback weight.
         let colour = Vec3::new(0.4, 0.55, 0.2);
-        let out = resolve_taa(colour, colour, &[colour; 9], &TaaParams::default(), true);
-        assert!(approx(out, colour), "a still image must be a TAA fixed point: {out:?}");
+        let out = resolve_taa(colour, colour, &[colour; 9], &TaaParams::default(), true, 0.0);
+        assert!(
+            approx(out, colour),
+            "a still image must be a TAA fixed point: {out:?}"
+        );
     }
 
     #[test]
@@ -184,7 +211,7 @@ mod tests {
         let current = Vec3::new(0.2, 0.2, 0.2);
         let neighbourhood = [current; 9];
         let stale = Vec3::new(1.0, 0.0, 0.0);
-        let out = resolve_taa(current, stale, &neighbourhood, &TaaParams::default(), true);
+        let out = resolve_taa(current, stale, &neighbourhood, &TaaParams::default(), true, 0.0);
         // With a zero-variance neighbourhood the clip pins history to `current`,
         // so the output must equal the current colour (no red bleed-through);
         // allow a small epsilon for the YCoCg clamp round trip.
@@ -212,14 +239,72 @@ mod tests {
             Vec3::new(0.14, 0.14, 0.14),
         ];
         let bright = Vec3::new(0.6, 0.6, 0.6);
-        let out = resolve_taa(current, bright, &neighbourhood, &TaaParams::default(), true);
+        let out = resolve_taa(current, bright, &neighbourhood, &TaaParams::default(), true, 0.0);
         // Output luma should not exceed the clipped-history luma, and the bright
         // sample must be reined in below a plain 0.9 feedback of the raw history.
-        assert!(out.x < bright.x, "bright history must be weighted down: {out:?}");
+        assert!(
+            out.x < bright.x,
+            "bright history must be weighted down: {out:?}"
+        );
         // Grey stays grey (chroma-free) through the YCoCg round trip.
         assert!(
             (out.x - out.y).abs() < 1e-4 && (out.y - out.z).abs() < 1e-4,
             "grey input must stay grey: {out:?}"
         );
+    }
+    #[test]
+    fn full_reactive_mask_drops_history() {
+        // A fully reactive pixel (particles / translucency) keeps no history, so
+        // even with a valid, wildly different history the resolve returns the
+        // current frame instead of smearing the stale colour through.
+        let current = Vec3::new(0.2, 0.5, 0.7);
+        let history = Vec3::new(0.9, 0.1, 0.3);
+        let neighbourhood = [current; 9];
+        let out = resolve_taa(current, history, &neighbourhood, &TaaParams::default(), true, 1.0);
+        assert!(
+            approx(out, current),
+            "reactive == 1 must yield the current frame: {out:?}"
+        );
+    }
+
+    #[test]
+    fn reactive_mask_monotonically_reduces_history_influence() {
+        // As the reactive mask rises, less history is kept, so the resolved
+        // colour must move monotonically from the accumulated blend toward the
+        // current frame. Use a neighbourhood whose variance box admits history.
+        let current = Vec3::new(0.1, 0.1, 0.1);
+        let neighbourhood = [
+            Vec3::new(0.05, 0.05, 0.05),
+            Vec3::new(0.15, 0.15, 0.15),
+            Vec3::new(0.1, 0.1, 0.1),
+            Vec3::new(0.12, 0.12, 0.12),
+            current,
+            Vec3::new(0.08, 0.08, 0.08),
+            Vec3::new(0.2, 0.2, 0.2),
+            Vec3::new(0.06, 0.06, 0.06),
+            Vec3::new(0.14, 0.14, 0.14),
+        ];
+        let history = Vec3::new(0.18, 0.18, 0.18);
+        let params = TaaParams::default();
+        let mut prev_gap = f32::INFINITY;
+        for step in 0..=4 {
+            let reactive = step as f32 * 0.25;
+            let out = resolve_taa(current, history, &neighbourhood, &params, true, reactive);
+            let gap = (out - current).abs().max_element();
+            assert!(
+                gap <= prev_gap + 1e-6,
+                "rising reactive must not increase history influence: reactive={reactive} gap={gap} prev={prev_gap}"
+            );
+            prev_gap = gap;
+        }
+        // The endpoints bracket the behaviour: no reactive keeps some history,
+        // full reactive collapses to the current frame.
+        let zero = resolve_taa(current, history, &neighbourhood, &params, true, 0.0);
+        let one = resolve_taa(current, history, &neighbourhood, &params, true, 1.0);
+        assert!(
+            (zero - current).abs().max_element() > (one - current).abs().max_element(),
+            "reactive == 0 must keep more history than reactive == 1"
+        );
+        assert!(approx(one, current), "reactive == 1 collapses to current: {one:?}");
     }
 }
