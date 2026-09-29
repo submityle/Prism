@@ -50,8 +50,8 @@ pub use jitter::{
     upscale_jitter, upscale_phase_count, BASE_UPSCALE_JITTER_LEN, MAX_UPSCALE_JITTER_LEN,
 };
 pub use reproject::{
-    depth_disocclusion, disocclusion_factor, display_to_render, is_offscreen,
-    render_to_display, reproject_history_uv,
+    depth_disocclusion, disocclusion_factor, display_to_render, is_offscreen, render_to_display,
+    reproject_history_uv,
 };
 pub use robust::{
     disocclusion_history_weight, history_blend_alpha, history_blend_alpha_clamped, is_thin_feature,
@@ -110,6 +110,14 @@ pub struct UpscaleInput<'a> {
     pub prev_accumulation: f32,
     /// Last frame's thin-feature lock carried for this pixel.
     pub prev_lock: HistoryLock,
+    /// FSR2-style reactive-mask response in `[0, 1]` for this pixel, decoded
+    /// from the packed motion channel (`PackedMasks::reactive`). Particles,
+    /// transparents and high-frequency stylised segments raise it to shed
+    /// history independently of the reprojection test so TAA does not smear
+    /// them. `0.0` is the shipping path (history governed solely by
+    /// disocclusion + accumulation); `1.0` forces the freshly reconstructed
+    /// current sample even under a perfect reprojection.
+    pub reactive: f32,
 }
 
 /// The result of the accumulation pass for one output pixel.
@@ -183,14 +191,23 @@ pub fn upscale_pixel(
     let lock_amount = lock_strength(lock);
 
     // Temporal accumulation and the resulting blend weight.
-    let accumulation =
-        update_accumulation(input.prev_accumulation, disocclusion, lock_amount);
+    let accumulation = update_accumulation(input.prev_accumulation, disocclusion, lock_amount);
     let alpha = history_blend_alpha_clamped(accumulation, config.min_alpha);
     // The current sample must fully win on a disocclusion, regardless of how
     // much history had accumulated.
     let current_weight = alpha.max(disocclusion).clamp(0.0, 1.0);
 
-    let color = clipped.color.lerp(input.current_color, current_weight);
+    // Reactive-mask shedding: fold the reactive response into the *history*
+    // weight as an event independent of the reprojection test, composed
+    // multiplicatively to match `disocclusion_history_weight` (base·(1-d)·
+    // (1-reactive)) and the golden `resolve_taa` (history_blend·(1-reactive)).
+    // reactive == 0 leaves `current_weight` bit-for-bit unchanged (shipping);
+    // reactive == 1 collapses to the reconstructed current sample.
+    let reactive = input.reactive.clamp(0.0, 1.0);
+    let history_weight = (1.0 - current_weight) * (1.0 - reactive);
+    let blend_current = (1.0 - history_weight).clamp(0.0, 1.0);
+
+    let color = clipped.color.lerp(input.current_color, blend_current);
 
     UpscaleOutput {
         color,
@@ -249,6 +266,7 @@ mod tests {
             history_depth: 10.0,
             prev_accumulation,
             prev_lock: HistoryLock::default(),
+            reactive: 0.0,
         }
     }
 
@@ -264,7 +282,11 @@ mod tests {
             InvalidationMask::default(),
             &UpscaleConfig::default(),
         );
-        assert!((out.color - colour).abs().max_element() < 1.0e-5, "{:?}", out.color);
+        assert!(
+            (out.color - colour).abs().max_element() < 1.0e-5,
+            "{:?}",
+            out.color
+        );
         assert_eq!(out.disocclusion, 0.0);
     }
 
@@ -279,7 +301,11 @@ mod tests {
             InvalidationMask::default(),
             &UpscaleConfig::default(),
         );
-        assert!((out.color - current).abs().max_element() < 1.0e-4, "{:?}", out.color);
+        assert!(
+            (out.color - current).abs().max_element() < 1.0e-4,
+            "{:?}",
+            out.color
+        );
     }
 
     #[test]
@@ -297,7 +323,11 @@ mod tests {
             &UpscaleConfig::default(),
         );
         assert_eq!(out.disocclusion, 1.0);
-        assert!((out.color - current).abs().max_element() < 1.0e-4, "{:?}", out.color);
+        assert!(
+            (out.color - current).abs().max_element() < 1.0e-4,
+            "{:?}",
+            out.color
+        );
         assert_eq!(out.accumulation, 1.0);
     }
 
@@ -314,7 +344,11 @@ mod tests {
             &UpscaleConfig::default(),
         );
         assert_eq!(out.disocclusion, 1.0);
-        assert!((out.color - current).abs().max_element() < 1.0e-4, "{:?}", out.color);
+        assert!(
+            (out.color - current).abs().max_element() < 1.0e-4,
+            "{:?}",
+            out.color
+        );
     }
 
     #[test]
@@ -330,7 +364,11 @@ mod tests {
             &UpscaleConfig::default(),
         );
         assert_eq!(out.disocclusion, 1.0);
-        assert!((out.color - current).abs().max_element() < 1.0e-4, "{:?}", out.color);
+        assert!(
+            (out.color - current).abs().max_element() < 1.0e-4,
+            "{:?}",
+            out.color
+        );
     }
 
     #[test]
@@ -346,7 +384,11 @@ mod tests {
             &UpscaleConfig::default(),
         );
         assert_eq!(out.disocclusion, 0.0);
-        assert!(out.accumulation > 15.0, "history should keep growing: {}", out.accumulation);
+        assert!(
+            out.accumulation > 15.0,
+            "history should keep growing: {}",
+            out.accumulation
+        );
     }
 
     #[test]
@@ -403,7 +445,11 @@ mod tests {
             InvalidationMask::default(),
             &UpscaleConfig::default(),
         );
-        assert!(out.lock.lifetime > 0.0, "a thin feature must request a lock: {:?}", out.lock);
+        assert!(
+            out.lock.lifetime > 0.0,
+            "a thin feature must request a lock: {:?}",
+            out.lock
+        );
     }
 
     #[test]
@@ -417,7 +463,10 @@ mod tests {
         ];
         // sharpness 0 => identity.
         let off = sharpen_upscaled(&cross, &settings(0.5, 0.0), false);
-        assert!((off - Vec3::splat(0.6)).abs().max_element() < 1.0e-5, "{off:?}");
+        assert!(
+            (off - Vec3::splat(0.6)).abs().max_element() < 1.0e-5,
+            "{off:?}"
+        );
         // sharpness 1 => lifts the bright centre.
         let on = sharpen_upscaled(&cross, &settings(0.5, 1.0), false);
         assert!(on.x > 0.6, "sharpening must lift the centre: {on:?}");
@@ -427,5 +476,95 @@ mod tests {
     fn jitter_sequence_lengthens_with_the_render_scale() {
         // The orchestrator's jitter source is the upscale-aware sequence.
         assert_eq!(upscale_phase_count(0.5), BASE_UPSCALE_JITTER_LEN * 4);
+    }
+
+    #[test]
+    fn reactive_mask_biases_the_resolve_toward_the_current_sample() {
+        // A well-tracked surface (lots of history, matched depth, no motion)
+        // would normally keep the history. Raising the reactive mask must shed
+        // that history and pull the resolve toward the current sample, matching
+        // the multiplicative shedding in `disocclusion_history_weight`.
+        let history = Vec3::splat(0.2);
+        let current = Vec3::splat(0.8);
+        // Neighbourhood spans history..current so the YCoCg clip does not reject
+        // the history (otherwise the clip overshoot alone forces a disocclusion
+        // and the current sample wins regardless of the reactive mask).
+        let neigh = [
+            Vec3::splat(0.2),
+            Vec3::splat(0.35),
+            Vec3::splat(0.5),
+            Vec3::splat(0.3),
+            current,
+            Vec3::splat(0.65),
+            Vec3::splat(0.25),
+            Vec3::splat(0.8),
+            Vec3::splat(0.45),
+        ];
+
+        let baseline = input(current, &neigh, history, MAX_ACCUMULATION_FRAMES);
+        let out_baseline = upscale_pixel(
+            &baseline,
+            &settings(0.5, 0.0),
+            InvalidationMask::default(),
+            &UpscaleConfig::default(),
+        );
+
+        let mut reactive_in = baseline;
+        reactive_in.reactive = 1.0;
+        let out_reactive = upscale_pixel(
+            &reactive_in,
+            &settings(0.5, 0.0),
+            InvalidationMask::default(),
+            &UpscaleConfig::default(),
+        );
+
+        // reactive == 0 still blends in history (stays below the current
+        // sample); raising reactive shifts the resolve toward current, and a
+        // full reactive mask lands exactly on the reconstructed current sample.
+        assert!(
+            out_baseline.color.x < current.x - 1.0e-3,
+            "shipping path must retain some history: {:?}",
+            out_baseline.color
+        );
+        assert!(
+            out_reactive.color.x > out_baseline.color.x + 1.0e-3,
+            "reactive must pull the resolve toward current: baseline {:?} reactive {:?}",
+            out_baseline.color,
+            out_reactive.color
+        );
+        assert!(
+            (out_reactive.color.x - current.x).abs() < 1.0e-6,
+            "full reactive should land the current sample: {:?}",
+            out_reactive.color
+        );
+    }
+
+    #[test]
+    fn reactive_zero_is_bit_for_bit_the_shipping_resolve() {
+        // The reactive field must be a strict extension: reactive == 0.0 leaves
+        // the resolved colour, accumulation and lock byte-identical to the
+        // pre-reactive path (the test helper already defaults reactive to 0.0).
+        let history = Vec3::new(0.3, 0.5, 0.7);
+        let current = Vec3::new(0.6, 0.4, 0.2);
+        let neigh = [
+            history, current, history, current, current, history, current, history, current,
+        ];
+        let out = upscale_pixel(
+            &input(current, &neigh, history, 8.0),
+            &settings(0.5, 0.0),
+            InvalidationMask::default(),
+            &UpscaleConfig::default(),
+        );
+        // Sanity: with reactive 0 the blend weight is exactly alpha.max(disoccl).
+        let baseline = out.color;
+        let mut again = input(current, &neigh, history, 8.0);
+        again.reactive = 0.0;
+        let out2 = upscale_pixel(
+            &again,
+            &settings(0.5, 0.0),
+            InvalidationMask::default(),
+            &UpscaleConfig::default(),
+        );
+        assert_eq!(baseline, out2.color, "reactive 0 must be a pure extension");
     }
 }
