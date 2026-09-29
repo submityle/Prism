@@ -1411,3 +1411,32 @@ fn water_render_fx_wesl_compiles_standalone() {
         .get(0, water_render_fx, &[])
         .unwrap_or_else(|error| panic!("water_render_fx.wesl failed to compile: {error}"));
 }
+
+/// Compiles the hair self-collision compute twin standalone. It has no imports,
+/// so a green result proves both entry points — `accumulate_self_collision`
+/// (per-particle Jacobi correction gathered from the CSR uniform grid built by
+/// `hair::self_collision_grid`, over the 27 surrounding cells via binary search)
+/// and `apply_self_collision` (in-place correction add) — parse and type-check
+/// as WESL through the render-world `ShaderCache` / `wesl` pipeline, in
+/// lock-step with the CPU golden
+/// `prism_render_architecture::hair::self_collision_jacobi`
+/// (`accumulate_jacobi_corrections` / `apply_corrections`). The particle layout
+/// (`xyz` position, `w` inverse mass) matches the shared `hair_sim` state so no
+/// repacking is needed between simulation and this post-pass.
+#[test]
+fn hair_self_collision_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let hair_self_collision = shader_id(0x5052_4953_4d5f_4841_4952_5f53_435f_0001);
+    cache.set_shader(
+        hair_self_collision,
+        Shader::from_wesl(
+            include_str!("../../shaders/hair_self_collision.wesl"),
+            "embedded://prism_render_scene/shaders/hair_self_collision.wesl",
+        ),
+    );
+
+    cache
+        .get(0, hair_self_collision, &[])
+        .unwrap_or_else(|error| panic!("hair_self_collision.wesl failed to compile: {error}"));
+}
