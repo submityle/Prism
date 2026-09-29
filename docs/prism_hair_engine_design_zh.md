@@ -91,7 +91,7 @@ fallback:
 
 ## 5. PBR / NPR / 自定义 / 混合 分叉响应
 
-- **PBR**（对标 UE5 Groom、film-grade）：R/TT/TRT 三分量 + dual-scattering 多重散射，各向异性沿切线；deep opacity map 自阴影，有 RT 时走硬件光线自阴影（详见 §7）。
+- **PBR**（对标 UE5 Groom、film-grade）：R/TT/TRT 三分量 + dual-scattering 多重散射，各向异性沿切线；deep opacity map 自阴影，有 RT 时走硬件光线自阴影（详见 §7）。**（已实现）** 物理 Marschner R/TT/TRT + Zinke dual-scattering closure 落 `prism_render_shading::hair` + `hair.wesl` twin（§10 item6）。
 - **NPR**（对标 miHoYo / Arc Sys）：风格化各向异性高光带（可多条）+ ramp + 阴影偏移，高光位置**可与真实切线解耦**（天使环/发环风格）；描边复用 vis-buffer 的 material id 边界（`native_form=Cards` 的卡片发同样吃 material id 描边）；per-strand 或 per-card 顶点色控高光/阴影段。
 - **自定义**：项目注入 `illumination=Custom` 的 WESL closure。
 - **混合**：同一 groom 可按 material id 分 tile 路由到不同前端（因共享光/影/GI 而连贯）；写实场景里的卡通角色发与 PBR 世界吃同一份 GI/阴影，不断裂。
@@ -165,7 +165,7 @@ fallback:
 3. **（已完成）插值** `hair/interpolation.rs`：guide→render 丛聚/卷曲/frizz/随机化，与 LOD 抽稀联动；确定性 CPU golden，单测绿。
 4. **（已完成）发丝光栅** `hair/raster.rs`：亚像素软光栅桶（沿用 `virtual_geometry/bins.rs` 范式），挂 compute 软光栅路径进 visibility；确定性，单测绿。
 5. **（已完成）deep transmittance** `hair/deep_transmittance.rs`：deep opacity 分层透射 + voxel 近似 + 分桶，接共享阴影/OIT；确定性 CPU golden，单测绿。
-6. **着色分叉**（材质侧）：`HairPbr`（Marschner/Chiang + Zinke dual-scattering）+ `prism_render_npr` 风格化毛发响应。
+6. **着色分叉**（材质侧）：**（PBR 侧已完成）** `prism_render_shading::hair`（CPU golden）+ `prism_render_scene/src/shaders/hair.wesl`（GPU twin）落地物理 **Marschner R/TT/TRT**（Karis 能量守恒实时式，UE 算法授权借鉴）+ **Zinke dual-scattering** 多重散射填充（浅色/金发通透不发死）：R 白色主高光 + TT 背光透射 rim + TRT 彩色次高光 + 逐 lobe 纵向 Gaussian/cuticle-tilt/Fresnel/吸收着色；纵向宽度随 `perceptual_roughness`，emissive 只加一次；6 个确定性 golden 单测绿 + WESL naga 编译绿。待续：Chiang 近眼吸收/髓质高配、fiber-level 特写、`prism_render_npr` 风格化毛发响应。
 7. **（已完成）碰撞与连续 LOD 过渡** `hair/collision.rs` + `hair/transition.rs`：sphere/capsule 代理体碰撞（每子步约束后投影，pinned 不动，空集 no-op）集成进 `dynamics.rs`；`resolve_hair_lod_transition` 在阈值过渡带内计算相邻档 blend + `strand_survives_dither` 确定性 per-strand screen-door 抖动淡入淡出消 pop（尊重 `native_form` 钳制）；确定性 CPU golden，单测绿。自碰撞近似与 SDF 碰撞均已在此基础分层落地（见 item8 `self_collision` / `sdf_collision`）。
 8. **高级项（逐条落地中）**：
    - **（已完成）风场耦合** `hair/wind.rs`：`WindField`（方向/风速 + gust 脉动 + per-axis flutter 湍流）→ `wind_acceleration` / `apply_wind`（free 粒子加 accel·dt² 位移，pinned 跳过，dt<=0 no-op），手写 Taylor `sin_turns`；确定性单测绿（对应 §6.3）。
