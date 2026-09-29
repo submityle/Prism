@@ -1,9 +1,11 @@
 //! End-to-end cloth pipeline integration.
 //!
 //! This module wires the sibling cloth modules into one runnable garment:
-//! asset material → constraint graph ([`super::constraints`]) → XPBD dynamics
-//! ([`super::dynamics`]) → collision resolution ([`super::collision`]) →
-//! render-mesh embedding ([`super::embed`]), gated by the LOD ladder
+//! sleep gating ([`super::sleep`]) → aerodynamic wind impulse ([`super::wind`])
+//! → XPBD dynamics ([`super::dynamics`]) → pressure/volume projection
+//! ([`super::pressure`]) → collision resolution ([`super::collision`]) →
+//! render-mesh embedding ([`super::embed`]), built from an asset material and a
+//! constraint graph ([`super::constraints`]), gated by the LOD ladder
 //! ([`super::lod`]) and metered through the shared deformation budget
 //! ([`crate::deformation::schedule`]).
 //!
@@ -39,6 +41,9 @@ use super::constraints::{
 use super::dynamics::{extract_positions, solve_cloth_with_collision, SolverParams};
 use super::embed::{embed_render_mesh, BarycentricBinding};
 use super::lod::{cloth_deformation_request, resolve_cloth_lod, ClothLodThresholds};
+use super::pressure::{apply_pressure, PressureParams};
+use super::sleep::{max_kinetic_indicator, should_simulate, SleepParams, SleepState, SleepTracker};
+use super::wind::{apply_aero_forces, AeroParams, WindField};
 use super::{ClothLodTier, ClothParticle, ClothPiece, ConstraintGraph, Vec3};
 use crate::deformation::schedule::DeformationRequest;
 
@@ -103,6 +108,25 @@ pub struct Garment {
     pub solver: SolverParams,
     /// Self-collision settings applied once per frame after the solve.
     pub self_collision: SelfCollisionParams,
+    /// Sim-mesh triangulation driving the wind and pressure passes; empty
+    /// disables both (each iterates faces).
+    pub triangles: Vec<[u32; 3]>,
+    /// Steady wind field applied as a pre-solve aerodynamic impulse; a calm
+    /// default (zero velocity) adds no force.
+    pub wind: WindField,
+    /// Aerodynamic drag/lift coefficients paired with [`Garment::wind`]; a zero
+    /// default adds no force.
+    pub aero: AeroParams,
+    /// Optional pressure (volume) target; [`None`] disables the pressure pass so
+    /// only inflatable garments (down jackets, balloons) pay for it.
+    pub pressure: Option<PressureParams>,
+    /// Sleep/activation state machine, advanced each simulated frame when
+    /// [`Garment::sleep_enabled`] is set.
+    pub sleep: SleepTracker,
+    /// Hysteresis parameters for the sleep gate.
+    pub sleep_params: SleepParams,
+    /// Whether the sleep gate runs; when `false` the garment always simulates.
+    pub sleep_enabled: bool,
 }
 
 /// Projects one position out of every body collider, then behind every
@@ -136,6 +160,13 @@ impl Garment {
             backstops: Vec::new(),
             solver,
             self_collision: SelfCollisionParams::default(),
+            triangles: Vec::new(),
+            wind: WindField::default(),
+            aero: AeroParams::default(),
+            pressure: None,
+            sleep: SleepTracker::new(),
+            sleep_params: SleepParams::default(),
+            sleep_enabled: false,
         }
     }
 
@@ -163,11 +194,38 @@ impl Garment {
         if dt <= 0.0 || self.particles.is_empty() {
             return;
         }
+        // Sleep gating: a rested garment skips the whole solve and stays out of
+        // the deformation budget until its motion crosses the wake threshold.
+        if self.sleep_enabled {
+            let indicator = max_kinetic_indicator(&self.particles);
+            let state = self.sleep.update(indicator, self.sleep_params);
+            if !should_simulate(state) {
+                return;
+            }
+        }
+        // Aerodynamic wind is a pre-solve velocity impulse, so the substep
+        // prediction integrates it. A calm field (the default) adds nothing and
+        // an empty triangulation makes the pass a no-op.
+        apply_aero_forces(
+            &mut self.particles,
+            &self.triangles,
+            &self.wind,
+            self.aero,
+            dt,
+        );
         let colliders = &self.colliders;
         let backstops = &self.backstops;
         solve_cloth_with_collision(&mut self.particles, &self.graph, self.solver, dt, |p| {
             project_colliders(p.position, colliders, backstops)
         });
+        // Pressure (volume) is a per-frame positional projection over the closed
+        // sim mesh, applied after the distance solve like self-collision. It is
+        // opt-in (only inflatable garments carry a target volume); per-frame is
+        // the real-time simplification, per-substep is a future high-fidelity
+        // slot.
+        if let Some(pressure) = self.pressure {
+            apply_pressure(&mut self.particles, &self.triangles, pressure, dt);
+        }
         if self.self_collision.enabled {
             resolve_self_collision(
                 &mut self.particles,
@@ -175,8 +233,8 @@ impl Garment {
                 self.self_collision.thickness,
             );
         }
-        // Self-collision can push a particle back into a body; re-project so a
-        // frame never ends inside a collider.
+        // Self-collision or pressure can push a particle back into a body;
+        // re-project so a frame never ends inside a collider.
         resolve_body_collisions(&mut self.particles, &self.colliders);
         resolve_backstops(&mut self.particles, &self.backstops);
     }
@@ -212,8 +270,65 @@ impl Garment {
         thresholds: ClothLodThresholds,
         priority: u32,
     ) -> Option<DeformationRequest> {
+        // A sleeping garment reserves no budget (design §8), so it emits no
+        // request even when its coverage would otherwise simulate.
+        if self.sleep_enabled && self.sleep.state.is_sleeping() {
+            return None;
+        }
         let decision = resolve_cloth_lod(piece, coverage, thresholds);
         cloth_deformation_request(piece, decision, priority)
+    }
+
+    /// Sets the closed sim-mesh triangulation used by the wind and pressure
+    /// passes. Faces should wind counter-clockwise seen from outside so the
+    /// pressure volume reads positive; out-of-range indices are skipped by the
+    /// passes and never panic.
+    pub fn set_triangles(&mut self, triangles: Vec<[u32; 3]>) {
+        self.triangles = triangles;
+    }
+
+    /// Configures the steady wind field and aerodynamic coefficients. Requires a
+    /// triangulation ([`Garment::set_triangles`]) to have any visible effect.
+    pub fn set_wind(&mut self, wind: WindField, aero: AeroParams) {
+        self.wind = wind;
+        self.aero = aero;
+    }
+
+    /// Enables pressure (volume preservation / inflation) with the given target
+    /// parameters. Requires a triangulation to have any effect.
+    pub fn set_pressure(&mut self, params: PressureParams) {
+        self.pressure = Some(params);
+    }
+
+    /// Disables the pressure pass.
+    pub fn clear_pressure(&mut self) {
+        self.pressure = None;
+    }
+
+    /// Turns on the sleep gate with the given hysteresis parameters, starting
+    /// awake. A gated garment that comes to rest stops solving and stops
+    /// charging the deformation budget until it is disturbed.
+    pub fn enable_sleep(&mut self, params: SleepParams) {
+        self.sleep_enabled = true;
+        self.sleep_params = params;
+        self.sleep = SleepTracker::new();
+    }
+
+    /// Turns the sleep gate off; the garment then always simulates.
+    pub fn disable_sleep(&mut self) {
+        self.sleep_enabled = false;
+    }
+
+    /// Forces the garment awake (after a teleport or an external hit) so the
+    /// next [`Garment::step`] simulates and the dwell timer restarts.
+    pub fn wake(&mut self) {
+        self.sleep.wake_on_disturbance();
+    }
+
+    /// The current sleep state; [`SleepState::Awake`] whenever the gate is off.
+    #[must_use]
+    pub fn sleep_state(&self) -> SleepState {
+        self.sleep.state
     }
 }
 
@@ -261,7 +376,8 @@ mod tests {
     use crate::cloth::asset::FabricMaterial;
     use crate::cloth::embed::bind_render_vertex;
     use crate::cloth::lod::ClothLodThresholds;
-    use crate::cloth::ClothPieceHandle;
+    use crate::cloth::pressure::mesh_volume;
+    use crate::cloth::{ClothPieceHandle, Compliance};
     use crate::deformation::DeformationHandle;
 
     fn drape_grid(rows: u32, cols: u32, spacing: f32) -> (ClothGrid, Vec<Vec3>) {
@@ -546,5 +662,179 @@ mod tests {
             garment.step(1.0 / 60.0);
         }
         assert_finite(&garment.particles);
+    }
+
+    /// Builds the two-triangles-per-cell triangulation of a row-major grid.
+    fn grid_triangles(grid: ClothGrid) -> Vec<[u32; 3]> {
+        let mut tris: Vec<[u32; 3]> = Vec::new();
+        for r in 0..grid.rows.saturating_sub(1) {
+            for c in 0..grid.cols.saturating_sub(1) {
+                let a = grid.index(r, c);
+                let b = grid.index(r, c + 1);
+                let d = grid.index(r + 1, c);
+                let e = grid.index(r + 1, c + 1);
+                tris.push([a, b, d]);
+                tris.push([b, e, d]);
+            }
+        }
+        tris
+    }
+
+    #[test]
+    fn wind_pushes_cloth_downwind() {
+        let (grid, positions) = drape_grid(4, 4, 0.25);
+        let material = FabricMaterial::default();
+        let mut calm = build_grid_garment(grid, &positions, &material, stiff_solver());
+        let mut windy = build_grid_garment(grid, &positions, &material, stiff_solver());
+        // Pin the top row on both so only the free rows can drift.
+        for c in 0..grid.cols as usize {
+            calm.pin(c);
+            windy.pin(c);
+        }
+        windy.set_triangles(grid_triangles(grid));
+        // Equal drag and lift make the aerodynamic force track the relative wind
+        // itself, so a strong +z wind pushes the sheet downwind regardless of
+        // the exact draped orientation.
+        windy.set_wind(
+            WindField::new(Vec3::new(0.0, 0.0, 20.0), 0.0),
+            AeroParams::new(3.0, 3.0),
+        );
+        for _ in 0..60 {
+            calm.step(1.0 / 60.0);
+            windy.step(1.0 / 60.0);
+        }
+        // A free bottom particle is displaced well past the calm (gravity-only)
+        // run once the wind is doing work on it.
+        let idx = grid.index(3, 3) as usize;
+        let drift = windy.particles[idx]
+            .position
+            .distance(calm.particles[idx].position);
+        assert!(drift > 0.05, "wind drift too small: {drift}");
+        assert!(
+            windy.particles[idx].position.z > calm.particles[idx].position.z + 0.01,
+            "windy z {} vs calm z {}",
+            windy.particles[idx].position.z,
+            calm.particles[idx].position.z
+        );
+        assert_finite(&windy.particles);
+    }
+
+    #[test]
+    fn calm_wind_and_empty_triangulation_change_nothing() {
+        let (grid, positions) = drape_grid(3, 3, 0.3);
+        let material = FabricMaterial::default();
+        let mut a = build_grid_garment(grid, &positions, &material, stiff_solver());
+        let mut b = build_grid_garment(grid, &positions, &material, stiff_solver());
+        a.pin(0);
+        b.pin(0);
+        // b carries a wind field but no triangulation, so the pass is inert.
+        b.set_wind(
+            WindField::new(Vec3::new(5.0, 0.0, 0.0), 0.5),
+            AeroParams::new(1.0, 1.0),
+        );
+        for _ in 0..30 {
+            a.step(1.0 / 60.0);
+            b.step(1.0 / 60.0);
+        }
+        for (pa, pb) in a.particles.iter().zip(b.particles.iter()) {
+            assert!(pa.position.distance(pb.position) < 1.0e-9);
+        }
+    }
+
+    #[test]
+    fn pressure_inflates_a_closed_mesh() {
+        // A unit cube shell with outward-wound faces (rest volume 1).
+        let positions = vec![
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(1.0, 1.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(1.0, 0.0, 1.0),
+            Vec3::new(1.0, 1.0, 1.0),
+            Vec3::new(0.0, 1.0, 1.0),
+        ];
+        let triangles: Vec<[u32; 3]> = vec![
+            [0, 2, 1],
+            [0, 3, 2],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [3, 6, 2],
+            [3, 7, 6],
+            [0, 4, 7],
+            [0, 7, 3],
+            [1, 2, 6],
+            [1, 6, 5],
+        ];
+        let mut particles: Vec<ClothParticle> = Vec::new();
+        for pos in &positions {
+            particles.push(ClothParticle::new(*pos, 1.0));
+        }
+        // Zero gravity so the only motion is the pressure projection.
+        let solver = SolverParams {
+            substeps: 1,
+            iterations: 1,
+            gravity: Vec3::ZERO,
+            damping: 0.0,
+            strain_limit: 0.1,
+        };
+        let mut garment = Garment::new(particles, ConstraintGraph::default(), solver);
+        garment.set_triangles(triangles.clone());
+        let start = mesh_volume(&extract_positions(&garment.particles), &triangles);
+        // Target twice the rest volume: the shell should inflate toward it.
+        garment.set_pressure(PressureParams::new(start, 2.0, Compliance::RIGID));
+        for _ in 0..30 {
+            garment.step(1.0 / 60.0);
+        }
+        let end = mesh_volume(&extract_positions(&garment.particles), &triangles);
+        assert!(end > start + 0.1, "start {start} end {end}");
+        assert_finite(&garment.particles);
+    }
+
+    #[test]
+    fn sleep_gate_halts_rested_cloth_and_wakes_on_disturbance() {
+        let (grid, positions) = drape_grid(3, 3, 0.3);
+        let material = FabricMaterial::default();
+        let mut garment = build_grid_garment(grid, &positions, &material, stiff_solver());
+        // Pin every particle so the garment has no simulated motion at all.
+        for i in 0..grid.particle_count() as usize {
+            garment.pin(i);
+        }
+        let params = SleepParams {
+            linear_threshold: 1.0e-4,
+            frames_to_sleep: 3,
+            wake_threshold: 1.0e-2,
+        };
+        garment.enable_sleep(params);
+        assert_eq!(garment.sleep_state(), SleepState::Awake);
+        // After the dwell of quiet frames the garment sleeps.
+        for _ in 0..5 {
+            garment.step(1.0 / 60.0);
+        }
+        assert_eq!(garment.sleep_state(), SleepState::Sleeping);
+        // A sleeping garment reserves no deformation budget.
+        let piece = ClothPiece {
+            handle: ClothPieceHandle(1),
+            sim_vertex_count: grid.particle_count(),
+            render_vertex_count: 9,
+            constraint_count: 10,
+            deformation: DeformationHandle(0),
+            native_form: ClothLodTier::FullSim,
+        };
+        let thresholds = ClothLodThresholds {
+            reduced_sim_below: 0.25,
+            skinned_below: 0.05,
+        };
+        assert!(garment
+            .deformation_request(piece, 0.9, thresholds, 10)
+            .is_none());
+        // Waking re-activates it and restores its budget request.
+        garment.wake();
+        assert_eq!(garment.sleep_state(), SleepState::Awake);
+        assert!(garment
+            .deformation_request(piece, 0.9, thresholds, 10)
+            .is_some());
     }
 }
