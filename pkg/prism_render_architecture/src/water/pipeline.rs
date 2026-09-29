@@ -45,6 +45,7 @@ use super::profile::WaterSimProfile;
 use super::reconstruct::{
     select_reconstruction, ReconstructionContext, ReconstructionMethod, ReconstructionThresholds,
 };
+use super::shading::{plan_shading, SurfaceShadingInputs, WaterShadingResponse};
 use super::shoreline::{plan_shoreline, ShorelineInputs, ShorelinePlan};
 use super::simulation::{plan_sim, SimInputs, SimStepPlan};
 use super::surface_fx::{plan_surface_fx, SurfaceFxInputs, SurfaceFxPlan};
@@ -120,6 +121,12 @@ pub struct WaterDynamics {
     pub cross_section: f32,
     /// Relative body/fluid speed used to evaluate coupling drag.
     pub rel_speed: f32,
+    /// Resolved specular highlight intensity from the lighting pass, in
+    /// `0..=1`, fed to the shading frontends (design §5).
+    pub specular_intensity: f32,
+    /// Resolved caustic coverage from the caustics pass, in `0..=1`, fed to the
+    /// shading frontends (design §5).
+    pub caustic_intensity: f32,
 }
 
 impl Default for WaterDynamics {
@@ -162,6 +169,8 @@ impl Default for WaterDynamics {
             total_volume: 0.0,
             cross_section: 0.0,
             rel_speed: 0.0,
+            specular_intensity: 0.0,
+            caustic_intensity: 0.0,
         }
     }
 }
@@ -320,6 +329,9 @@ pub struct WaterPrepare {
     pub optics: OpticsPlan,
     /// Two-way rigid-body coupling forces and read-back schedule.
     pub coupling: CouplingFramePlan,
+    /// Four-frontend lighting-response fork result for this body (design §5).
+    /// The frontends diverge only here; every other field is frontend-agnostic.
+    pub shading: WaterShadingResponse,
 }
 
 /// The arbitrated, dispatch-ready result for a frame.
@@ -513,6 +525,34 @@ pub fn prepare(extract: WaterExtract, config: &WaterFrameConfig) -> WaterPrepare
         },
     );
 
+    // §5 four-frontend lighting-response fork. Geometry, simulation, and the
+    // shared advanced base above are frontend-agnostic; only this dispatch
+    // diverges. `quality_bias` (already clamped to `0..=1`) doubles as the SSR
+    // hit confidence and the RT budget availability the PBR tier walks: a
+    // higher quality budget both trusts screen-space hits and affords ray
+    // tracing, so the two share the one normalized knob until the renderer
+    // supplies distinct signals.
+    let cos_view = (1.0 - dynamics.sin_incidence * dynamics.sin_incidence)
+        .max(0.0)
+        .sqrt();
+    let shading = plan_shading(
+        extract.frontend,
+        extract.profile.shading,
+        SurfaceShadingInputs {
+            cos_view,
+            ior: extract.profile.optics.cauchy_a,
+            jacobian: dynamics.min_jacobian,
+            water_color: dynamics.surface_color,
+            specular_intensity: dynamics.specular_intensity,
+            caustic_intensity: dynamics.caustic_intensity,
+            flow_speed: dynamics.flow_speed,
+            depth: dynamics.water_depth,
+            dist_to_shore: dynamics.dist_above_water,
+            ssr_confidence: extract.quality_bias,
+            ray_budget: extract.quality_bias,
+        },
+    );
+
     WaterPrepare {
         body: extract.body,
         kind: extract.kind,
@@ -533,6 +573,7 @@ pub fn prepare(extract: WaterExtract, config: &WaterFrameConfig) -> WaterPrepare
         shoreline,
         optics,
         coupling,
+        shading,
     }
 }
 
@@ -1078,5 +1119,61 @@ mod tests {
         assert_eq!(first.shoreline, second.shoreline);
         assert_eq!(first.optics, second.optics);
         assert_eq!(first.coupling, second.coupling);
+        assert_eq!(first.shading, second.shading);
+    }
+
+    #[test]
+    fn prepare_shading_matches_frontend() {
+        // The prepared shading response variant tracks the body's frontend, and
+        // nothing else changes: geometry/simulation/base stay frontend-agnostic.
+        let mut b = body(3, WaterKind::Surface, SolverKind::ShallowWater);
+        let sample = sample(8.0, 0);
+
+        b.frontend = ShadingFrontend::Pbr;
+        assert!(matches!(
+            prepare(extract(&b, sample), &CONFIG).shading,
+            WaterShadingResponse::Pbr(_)
+        ));
+
+        b.frontend = ShadingFrontend::Npr;
+        assert!(matches!(
+            prepare(extract(&b, sample), &CONFIG).shading,
+            WaterShadingResponse::Npr(_)
+        ));
+
+        b.frontend = ShadingFrontend::Custom;
+        assert!(matches!(
+            prepare(extract(&b, sample), &CONFIG).shading,
+            WaterShadingResponse::Custom(_)
+        ));
+
+        b.frontend = ShadingFrontend::Hybrid;
+        assert!(matches!(
+            prepare(extract(&b, sample), &CONFIG).shading,
+            WaterShadingResponse::Hybrid(_)
+        ));
+    }
+
+    #[test]
+    fn prepare_feeds_optics_ior_and_dynamics_into_shading() {
+        // The PBR response derives F0 from the profile's Cauchy A (the IOR) and
+        // reads the live dynamics through, proving the fork is wired to the
+        // frame flow rather than a fabricated constant.
+        let b = body(4, WaterKind::Surface, SolverKind::ShallowWater);
+        let dynamics = WaterDynamics {
+            min_jacobian: 0.0,
+            specular_intensity: 0.9,
+            caustic_intensity: 0.4,
+            ..WaterDynamics::default()
+        };
+        let WaterShadingResponse::Pbr(pbr) =
+            prepare(extract(&b, sample_with_dynamics(8.0, dynamics)), &CONFIG).shading
+        else {
+            panic!("default body frontend is PBR");
+        };
+        let expected_f0 = super::super::shading::pbr::f0_from_ior(b.profile.optics.cauchy_a);
+        assert!((pbr.f0 - expected_f0).abs() < super::super::EPS);
+        // A fully folded Jacobian drives the micro-surface foam mask to full.
+        assert!((pbr.foam_mask - 1.0).abs() < super::super::EPS);
     }
 }

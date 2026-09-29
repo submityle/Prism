@@ -18,6 +18,7 @@ use super::coupling_frame::CouplingProfile;
 use super::foam::FoamConfig;
 use super::optics::OpticsProfile;
 use super::pbf::PbfParams;
+use super::shading::ShadingProfile;
 use super::shoreline::ShorelineProfile;
 use super::simulation::SimProfile;
 use super::spectrum::{SpectrumKind, SpectrumParams};
@@ -44,6 +45,8 @@ pub struct WaterSimProfile {
     pub optics: OpticsProfile,
     /// Two-way rigid-body coupling (buoyancy, drag, added mass, sub-steps).
     pub coupling: CouplingProfile,
+    /// Four-frontend lighting-response fork tuning (`PBR`/`NPR`/hybrid/custom).
+    pub shading: ShadingProfile,
 }
 
 impl WaterSimProfile {
@@ -132,6 +135,7 @@ impl WaterSimProfile {
                 max_substeps: 16,
                 max_readback: 32,
             },
+            shading: ShadingProfile::physical_water(),
         }
     }
 }

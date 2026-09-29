@@ -63,6 +63,7 @@ pub mod pbf;
 pub mod pipeline;
 pub mod profile;
 pub mod reconstruct;
+pub mod shading;
 pub mod shoreline;
 pub mod simulation;
 pub mod spectrum;
