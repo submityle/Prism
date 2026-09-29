@@ -33,6 +33,7 @@ pub mod deep_transmittance;
 pub mod dynamics;
 pub mod interpolation;
 pub mod lod;
+pub mod raster;
 
 use crate::deformation::DeformationHandle;
 
