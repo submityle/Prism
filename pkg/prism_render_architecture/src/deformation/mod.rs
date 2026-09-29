@@ -13,6 +13,7 @@ pub enum DeformationKind {
     VertexAnimation,
     Hair,
     Particle,
+    Water,
 }
 
 #[derive(Clone, Copy, Debug, Default)]

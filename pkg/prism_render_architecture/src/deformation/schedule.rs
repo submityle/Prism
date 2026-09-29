@@ -228,6 +228,29 @@ mod tests {
     }
 
     #[test]
+    fn water_deformation_participates_like_any_other_kind() {
+        // The water subsystem writes its displacement / height field into the
+        // shared deformation cache, so `DeformationKind::Water` must schedule
+        // through the same arbiter as skinning, cloth, hair, and particles.
+        let requests = [
+            request(1, DeformationKind::Skinning, 400, 5, false),
+            request(2, DeformationKind::Water, 400, 9, true),
+            request(3, DeformationKind::Water, 400, 7, false),
+        ];
+        let plan = plan_deformations(&requests, BUDGET);
+        // Priority order 2 (400) -> 3 (400) -> 1 would overflow (1200 > 1000).
+        assert_eq!(plan.scheduled_count(), 2);
+        assert_eq!(plan.count_of_kind(DeformationKind::Water), 2);
+        assert_eq!(
+            plan.handles_of_kind(DeformationKind::Water),
+            [DeformationHandle(2), DeformationHandle(3)]
+        );
+        // The highest-priority water job also claimed the single refit slot.
+        assert_eq!(plan.refits_used, 1);
+        assert_eq!(plan.deferred, [DeformationHandle(1)]);
+    }
+
+    #[test]
     fn per_kind_dispatch_preserves_order() {
         let requests = [
             request(1, DeformationKind::Skinning, 100, 8, false),
