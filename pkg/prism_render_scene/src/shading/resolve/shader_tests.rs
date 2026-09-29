@@ -909,6 +909,33 @@ fn hair_guide_metrics_wesl_compiles_standalone() {
         .unwrap_or_else(|error| panic!("hair_guide_metrics.wesl failed to compile: {error}"));
 }
 
+/// Compiles the hair per-binding density-LOD metric blend compute twin
+/// standalone. A green result proves the widest fan-out in the density-LOD
+/// path — each render strand inheriting the weight-blended `(length,
+/// curvature, authored)` triple of its up-to-four skinning guides — parses
+/// and type-checks as WESL through the render-world `ShaderCache` / `wesl`
+/// pipeline, in lock-step with the per-binding blend loop of the CPU golden
+/// `prism_render_architecture::hair::density_lod::binding_importances`
+/// (the `weight > 0 && idx < guide_count` guard and index-order `weight *
+/// metric` accumulation before the groom-global `compute_importance` fold).
+#[test]
+fn hair_binding_metrics_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let hair_binding_metrics = shader_id(0x5052_4953_4d5f_4841_4952_5f42_4d54_0001);
+    cache.set_shader(
+        hair_binding_metrics,
+        Shader::from_wesl(
+            include_str!("../../shaders/hair_binding_metrics.wesl"),
+            "embedded://prism_render_scene/shaders/hair_binding_metrics.wesl",
+        ),
+    );
+
+    cache
+        .get(0, hair_binding_metrics, &[])
+        .unwrap_or_else(|error| panic!("hair_binding_metrics.wesl failed to compile: {error}"));
+}
+
 /// Registers `lighting.wesl`, `brdf.wesl` and `stylized_hair.wesl` under their
 /// canonical module paths and compiles `stylized_hair.wesl`, forcing the
 /// importer to resolve the `prism_render_scene::shaders::brdf::{...}` imports
