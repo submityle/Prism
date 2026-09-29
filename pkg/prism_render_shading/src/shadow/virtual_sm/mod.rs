@@ -197,23 +197,85 @@ impl VirtualShadowMap {
     /// Rendered pages are promoted to resident before returning (a synchronous
     /// render), so the following frame sees them as hits.
     pub fn drive_frame(&mut self, input: FrameInput<'_>) -> FrameResult {
-        self.frame += 1;
-        let frame = self.frame;
-
-        // Camera translation never invalidates cached pages: world-space page
-        // addressing keeps a static caster's page identity stable as the camera
-        // pans, so its depth is reused.  A camera *cut* would drop the whole
-        // cache; `camera_move_invalidates_pages` encodes that this frame's move
-        // does not, so this reset stays dormant under the reuse rule.
-        if input.camera_moved && camera_move_invalidates_pages() {
-            self.table = VirtualPageTable::new();
-            self.allocator = PhysicalPageAllocator::new(self.allocator.capacity());
-        }
+        let frame = self.begin_frame(input.camera_moved);
 
         let requests = generate_page_requests(&self.clipmap, input.light, input.receivers);
 
+        self.resolve_requests(
+            frame,
+            input.light,
+            input.camera_light_space,
+            &requests.keys,
+            input.caster_movements,
+        )
+    }
+
+    /// Drives one frame from a pre-computed request-key set instead of from
+    /// per-pixel receivers.
+    ///
+    /// This is the entry the GPU-driven pipeline uses: the `vsm_page_mark`
+    /// compute pass marks the requested resident-window slots on the GPU, that
+    /// bitmap is read back, decoded into the requested [`ShadowPageKey`]s, and
+    /// handed here.  It shares the exact residency, invalidation and LRU core
+    /// with [`Self::drive_frame`] -- only the request-generation front end
+    /// differs (GPU page-mark vs. the golden `generate_page_requests`), so both
+    /// paths make identical paging decisions for the same request set.
+    ///
+    /// `request_keys` may contain duplicates or arrive in any order; the core
+    /// is order-independent and idempotent per key within a frame.
+    pub fn drive_frame_with_requests(
+        &mut self,
+        light: u32,
+        camera_light_space: Vec2,
+        camera_moved: bool,
+        request_keys: &[ShadowPageKey],
+        caster_movements: &[CasterMovement],
+    ) -> FrameResult {
+        let frame = self.begin_frame(camera_moved);
+        self.resolve_requests(
+            frame,
+            light,
+            camera_light_space,
+            request_keys,
+            caster_movements,
+        )
+    }
+
+    /// Advances the frame counter and applies the camera-cut reset, returning
+    /// the new frame index.
+    ///
+    /// Camera translation never invalidates cached pages: world-space page
+    /// addressing keeps a static caster's page identity stable as the camera
+    /// pans, so its depth is reused.  A camera *cut* would drop the whole
+    /// cache; `camera_move_invalidates_pages` encodes that this frame's move
+    /// does not, so this reset stays dormant under the reuse rule.
+    fn begin_frame(&mut self, camera_moved: bool) -> u64 {
+        self.frame += 1;
+        if camera_moved && camera_move_invalidates_pages() {
+            self.table = VirtualPageTable::new();
+            self.allocator = PhysicalPageAllocator::new(self.allocator.capacity());
+        }
+        self.frame
+    }
+
+    /// Residency, invalidation and LRU core shared by both request front ends.
+    ///
+    /// Makes `request_keys` resident under the physical budget, applying caster
+    /// invalidation for the touched levels, and reports what was reused,
+    /// (re-)rendered and evicted plus the camera-snapped resident window of
+    /// every touched level.  Rendered pages are promoted to resident before
+    /// returning (a synchronous render), so the following frame sees them as
+    /// hits.
+    fn resolve_requests(
+        &mut self,
+        frame: u64,
+        light: u32,
+        camera_light_space: Vec2,
+        request_keys: &[ShadowPageKey],
+        caster_movements: &[CasterMovement],
+    ) -> FrameResult {
         // Levels actually touched this frame bound the invalidation work.
-        let mut levels: Vec<u16> = requests.keys.iter().map(|k| k.level).collect();
+        let mut levels: Vec<u16> = request_keys.iter().map(|k| k.level).collect();
         levels.sort_unstable();
         levels.dedup();
 
@@ -221,11 +283,10 @@ impl VirtualShadowMap {
         // is where `camera_light_space` drives window snapping.
         let windows: Vec<ClipmapLevel> = levels
             .iter()
-            .map(|&level| self.clipmap.build_level(level, input.camera_light_space))
+            .map(|&level| self.clipmap.build_level(level, camera_light_space))
             .collect();
 
-        let invalidation =
-            invalidate_casters(&self.clipmap, input.light, input.caster_movements, &levels);
+        let invalidation = invalidate_casters(&self.clipmap, light, caster_movements, &levels);
         let invalid_set: BTreeSet<PageOrder> =
             invalidation.pages.iter().map(page_order).collect();
 
@@ -235,8 +296,14 @@ impl VirtualShadowMap {
         let mut to_render = Vec::new();
         let mut evicted = BTreeSet::new();
         let mut unserved = 0usize;
+        // A GPU-marked request set can repeat a slot; only resolve each unique
+        // key once so the hit/miss accounting matches the golden receiver path.
+        let mut handled: BTreeSet<PageOrder> = BTreeSet::new();
 
-        for key in &requests.keys {
+        for key in request_keys {
+            if !handled.insert(page_order(key)) {
+                continue;
+            }
             let dirty = invalid_set.contains(&page_order(key));
             if !dirty
                 && let Some(_physical) = self.table.query(key, frame)
@@ -263,19 +330,28 @@ impl VirtualShadowMap {
             self.table.mark_resident(key, frame);
         }
 
+        // Emit resident/to_render in canonical key order (evicted already is),
+        // so the result is independent of the request set's arrival order. The
+        // GPU page-mark readback yields slots in an implementation-defined scan
+        // order, and this keeps its FrameResult byte-identical to the golden
+        // receiver path for the same working set.
+        resident.sort_by_key(page_order);
+        to_render.sort_by_key(page_order);
+
         let stats_after = self.allocator.stats();
+        let requested = handled.len();
         let capacity = self.allocator.capacity() as usize;
         let evicted: Vec<ShadowPageKey> = evicted.into_iter().map(key_from_order).collect();
 
         let budget = BudgetStats {
-            requested: requests.keys.len(),
+            requested,
             hits: resident.len(),
             misses: to_render.len(),
             allocations: (stats_after.allocations - stats_before.allocations) as usize,
             evictions: (stats_after.evictions - stats_before.evictions) as usize,
             physical_capacity: self.allocator.capacity(),
             physical_live: self.allocator.live_pages(),
-            over_budget: requests.keys.len().saturating_sub(capacity),
+            over_budget: requested.saturating_sub(capacity),
             unserved,
         };
 
@@ -498,5 +574,47 @@ mod tests {
         });
         assert_eq!(moved.budget.hits, 1);
         assert!(moved.evicted.is_empty());
+    }
+
+    /// The GPU-driven `drive_frame_with_requests` and the golden receiver
+    /// `drive_frame` share the same residency/LRU core, so feeding one the
+    /// exact request-key set the other derives from receivers must yield an
+    /// identical `FrameResult` -- proving the two front ends make the same
+    /// paging decisions.
+    #[test]
+    fn gpu_request_path_matches_the_receiver_path() {
+        let receivers = [
+            receiver(0.0, 0.0),
+            receiver(50.0, 0.0),
+            receiver(0.0, 50.0),
+            receiver(-40.0, 30.0),
+        ];
+        let camera = Vec2::new(3.0, -5.0);
+
+        // Reference: the golden receiver path on a fresh driver.
+        let mut golden = driver(64);
+        let golden_result = golden.drive_frame(FrameInput {
+            light: 0,
+            camera_light_space: camera,
+            camera_moved: false,
+            receivers: &receivers,
+            caster_movements: &[],
+        });
+
+        // The same request keys the golden path would have generated, then
+        // perturbed with duplicates and reordering to exercise the
+        // dedup/idempotency contract of the GPU entry.
+        let requests = generate_page_requests(golden.clipmap(), 0, &receivers);
+        let mut keys = requests.keys.clone();
+        if let Some(first) = keys.first().copied() {
+            keys.push(first); // duplicate slot, as a GPU bitmap may repeat.
+        }
+        keys.reverse(); // arbitrary order; the core is order-independent.
+
+        let mut gpu = driver(64);
+        let gpu_result = gpu.drive_frame_with_requests(0, camera, false, &keys, &[]);
+
+        assert_eq!(gpu_result, golden_result);
+        assert_eq!(gpu_result.budget.requested, requests.keys.len());
     }
 }
