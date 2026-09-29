@@ -14,6 +14,7 @@ extern crate alloc;
 pub mod abi;
 pub mod backend;
 pub mod capture;
+pub mod cloth;
 pub mod deformation;
 pub mod descriptor_heap;
 pub mod diagnostics;
