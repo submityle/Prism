@@ -19,9 +19,11 @@
 //! * [`hierarchy`] — screen-space-error cut selection over the cluster DAG.
 //! * [`bins`] — GPU-driven raster bin assignment for a selected cut.
 //! * [`page_request`] — per-frame page-request coalescing across clusters.
+//! * [`frame`] — per-frame composition into one virtual-geometry draw plan.
 
 pub mod bins;
 pub mod cull;
+pub mod frame;
 pub mod hierarchy;
 pub mod lod;
 pub mod page_request;
@@ -31,6 +33,7 @@ pub mod raster_path;
 
 pub use bins::{bin_cut, RasterBins};
 pub use cull::{cluster_cull, CullVerdict, Frustum, OcclusionProbe, Plane};
+pub use frame::{plan_frame, FrameView, GeometryFramePlan, RasterConfig};
 pub use hierarchy::{ClusterHierarchy, ClusterNode, CutCluster};
 pub use lod::{select_lod, LodLevel, LodProjection, LodSelection};
 pub use page_request::PageRequestBatch;

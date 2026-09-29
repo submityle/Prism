@@ -280,7 +280,7 @@ fn fits_budget(
 /// square-root-free and preserves ordering because every term is non-negative.
 /// A camera resting on the center yields the maximum priority so an enveloping
 /// cluster is never starved.
-fn coverage_priority(
+pub(super) fn coverage_priority(
     bounds: &SceneBounds,
     view_origin: [f32; 3],
     projection: LodProjection,
