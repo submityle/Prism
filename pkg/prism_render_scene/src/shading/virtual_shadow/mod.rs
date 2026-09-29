@@ -43,6 +43,7 @@ mod abi;
 mod bind_groups;
 mod dispatch;
 mod extract;
+mod page_mark;
 mod pipeline;
 mod resources;
 #[cfg_attr(
@@ -70,3 +71,8 @@ pub(crate) use extract::{extract_vsm_primary_light, VsmPrimaryLight};
 pub(crate) use pipeline::init_vsm_receiver_gen_pipeline;
 pub(crate) use resources::{prepare_vsm_receiver_resources, VsmReceiverBufferCache};
 pub(crate) use settings::PrismVirtualShadowSettings;
+
+pub(crate) use page_mark::{
+    init_vsm_page_mark_pipeline, prepare_vsm_page_mark_bind_groups, prepare_vsm_page_requests,
+    vsm_mark_pages_pass, VsmPageRequestBufferCache,
+};

@@ -38,9 +38,11 @@ use super::{
         prepare_taa_textures, taa_resolve_pass,
     },
     virtual_shadow::{
-        extract_vsm_primary_light, init_vsm_receiver_gen_pipeline,
-        prepare_vsm_receiver_gen_bind_groups, prepare_vsm_receiver_resources,
-        vsm_receiver_gen_pass, PrismVirtualShadowSettings, VsmPrimaryLight,
+        extract_vsm_primary_light, init_vsm_page_mark_pipeline,
+        init_vsm_receiver_gen_pipeline, prepare_vsm_page_mark_bind_groups,
+        prepare_vsm_page_requests, prepare_vsm_receiver_gen_bind_groups,
+        prepare_vsm_receiver_resources, vsm_mark_pages_pass, vsm_receiver_gen_pass,
+        PrismVirtualShadowSettings, VsmPageRequestBufferCache, VsmPrimaryLight,
         VsmReceiverBufferCache,
     },
     ibl::{
@@ -131,6 +133,7 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/ssgi_composite.wesl");
         embedded_asset!(app, "../shaders/taa_resolve.wesl");
         embedded_asset!(app, "../shaders/vsm_receiver_gen.wesl");
+        embedded_asset!(app, "../shaders/vsm_page_mark.wesl");
         embedded_asset!(app, "../shaders/brdf_lut.wesl");
         embedded_asset!(app, "../shaders/env_prefilter.wesl");
         embedded_asset!(app, "../shaders/exposure.wesl");
@@ -171,6 +174,7 @@ impl Plugin for PrismShadingPlugin {
             .init_resource::<VsmPrimaryLight>()
             .init_resource::<PrismVirtualShadowSettings>()
             .init_resource::<VsmReceiverBufferCache>()
+            .init_resource::<VsmPageRequestBufferCache>()
             .insert_resource(ShadingFrameGraph {
                 compiled: compiled_graph,
             })
@@ -222,6 +226,7 @@ impl Plugin for PrismShadingPlugin {
                         init_exposure_average_pipeline,
                         init_bloom_pipelines,
                         init_vsm_receiver_gen_pipeline,
+                        init_vsm_page_mark_pipeline,
                     ),
                     init_dfg_lut_texture,
                     init_brdf_lut_pipeline,
@@ -409,6 +414,15 @@ impl Plugin for PrismShadingPlugin {
                         prepare_vsm_receiver_gen_bind_groups
                             .after(prepare_vsm_receiver_resources)
                             .in_set(RenderSystems::PrepareBindGroups),
+                        // Page-mark: request-bitmap + immediate block build in
+                        // PrepareResources after the receivers exist, then the
+                        // group-0 bind group in PrepareBindGroups.
+                        prepare_vsm_page_requests
+                            .after(prepare_vsm_receiver_resources)
+                            .in_set(RenderSystems::PrepareResources),
+                        prepare_vsm_page_mark_bind_groups
+                            .after(prepare_vsm_page_requests)
+                            .in_set(RenderSystems::PrepareBindGroups),
                     ),
                 ),
             )
@@ -545,12 +559,19 @@ impl Plugin for PrismShadingPlugin {
                 oit_composite
                     .after(composite_shading)
                     .before(bevy_core_pipeline::Core3dSystems::PostProcess),
-                // Receiver generation reads the SSR geometry prepass depth and
-                // fills the per-view receiver buffer before the main pass; a
-                // later slice consumes it for page requests + sampling.
-                vsm_receiver_gen_pass
-                    .after(ssr_prepass_pass)
-                    .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                // Nested to keep the Core3d tuple within Bevy's 20-element
+                // limit: receiver generation reads the SSR geometry prepass
+                // depth and fills the per-view receiver buffer, then page-mark
+                // marks the resident-window request bitmap from those receivers,
+                // both before the main pass.
+                (
+                    vsm_receiver_gen_pass
+                        .after(ssr_prepass_pass)
+                        .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                    vsm_mark_pages_pass
+                        .after(vsm_receiver_gen_pass)
+                        .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                ),
             ),
         );
     }

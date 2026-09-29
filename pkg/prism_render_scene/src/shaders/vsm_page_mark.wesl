@@ -159,8 +159,16 @@ fn vsm_window_slot(level: u32, world_page: vec2<i32>) -> i32 {
 }
 
 @compute @workgroup_size(64, 1, 1)
-fn vsm_mark_pages(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let index = gid.x;
+fn vsm_mark_pages(
+    @builtin(global_invocation_id) gid: vec3<u32>,
+    @builtin(num_workgroups) num_workgroups: vec3<u32>,
+) {
+    // The receiver buffer holds one entry per screen pixel, so at 4K it far
+    // overruns the 65535 single-dimension workgroup limit. The dispatch lays the
+    // 64-wide workgroups out in a near-square 2D grid; linearise back to the flat
+    // receiver index here (row stride = workgroups-along-x * 64). The bounds
+    // check below drops the tail invocations the padding grid adds.
+    let index = gid.y * (num_workgroups.x * 64u) + gid.x;
     if (index >= params.receiver_count) {
         return;
     }
