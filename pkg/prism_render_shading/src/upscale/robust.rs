@@ -12,7 +12,9 @@
 //! * **Disocclusion fallback** — [`disocclusion_history_weight`] sheds history
 //!   weight as the reprojection is invalidated (off-screen, depth mismatch, or a
 //!   large neighbourhood-clip overshoot), collapsing to the freshly
-//!   reconstructed sample on a full disocclusion.
+//!   reconstructed sample on a full disocclusion. It also folds in the FSR2-style
+//!   **reactive mask** so particles, transparents and high-frequency stylised
+//!   segments can shed history independently of any reprojection failure.
 //! * **Temporal accumulation** — [`update_accumulation`] grows a per-pixel
 //!   confidence (clamped at [`MAX_ACCUMULATION_FRAMES`]) that reduces the
 //!   current sample's blend weight the longer a surface has been stably tracked,
@@ -96,18 +98,28 @@ pub fn is_thin_feature(
     thin_feature_strength(center_luma, min_luma, max_luma, contrast_threshold) > 0.5
 }
 
-/// The history weight after disocclusion fallback: `base_weight · (1 -
-/// disocclusion)`.
+/// The history weight after disocclusion fallback and reactive shedding:
+/// `base_weight · (1 - disocclusion) · (1 - reactive)`.
 ///
 /// `disocclusion` in `[0, 1]` is the fused signal from
 /// [`super::reproject::disocclusion_factor`] (optionally maxed with the
 /// neighbourhood-clip overshoot). A fully disoccluded pixel (`1`) drops the
 /// history entirely and the accumulation falls back to the reconstructed
 /// current sample; a fully consistent pixel (`0`) keeps the full `base_weight`.
+///
+/// `reactive` in `[0, 1]` is the FSR2-style reactive-mask response decoded from
+/// the packed motion channel (`PackedMasks::reactive`): particles, transparents
+/// and high-frequency stylised segments raise it to say "do not let TAA smear
+/// me". It sheds history as an event *independent* of the reprojection test —
+/// composed multiplicatively so the two signals never cancel — matching the
+/// golden-standard `resolve_taa` weight (`history_blend · (1 - reactive)`). A
+/// fully reactive pixel (`1`) drops history even when perfectly reprojected;
+/// `reactive == 0` is bit-for-bit the shipping disocclusion-only path.
 #[must_use]
-pub fn disocclusion_history_weight(base_weight: f32, disocclusion: f32) -> f32 {
+pub fn disocclusion_history_weight(base_weight: f32, disocclusion: f32, reactive: f32) -> f32 {
     let d = disocclusion.clamp(0.0, 1.0);
-    base_weight.clamp(0.0, 1.0) * (1.0 - d)
+    let r = reactive.clamp(0.0, 1.0);
+    base_weight.clamp(0.0, 1.0) * (1.0 - d) * (1.0 - r)
 }
 
 /// Advance the per-pixel temporal accumulation count one frame.
@@ -160,7 +172,10 @@ mod tests {
         n[0] = Vec3::splat(0.1);
         n[8] = Vec3::splat(0.9);
         let (lo, hi) = neighbourhood_luma_range(&n);
-        assert!((lo - 0.1).abs() < 1.0e-6 && (hi - 0.9).abs() < 1.0e-6, "{lo} {hi}");
+        assert!(
+            (lo - 0.1).abs() < 1.0e-6 && (hi - 0.9).abs() < 1.0e-6,
+            "{lo} {hi}"
+        );
     }
 
     #[test]
@@ -194,15 +209,46 @@ mod tests {
     fn mid_range_centre_is_not_a_feature() {
         // Centre in the middle of the range => extremeness 0.
         let s = thin_feature_strength(0.5, 0.0, 1.0, 0.1);
-        assert!(s < 1.0e-6, "a mid-range pixel is not a thin feature, got {s}");
+        assert!(
+            s < 1.0e-6,
+            "a mid-range pixel is not a thin feature, got {s}"
+        );
         assert!(!is_thin_feature(0.5, 0.0, 1.0, 0.1));
     }
 
     #[test]
     fn disocclusion_weight_sheds_history() {
-        assert!((disocclusion_history_weight(0.9, 0.0) - 0.9).abs() < 1.0e-6);
-        assert_eq!(disocclusion_history_weight(0.9, 1.0), 0.0);
-        assert!((disocclusion_history_weight(0.8, 0.5) - 0.4).abs() < 1.0e-6);
+        // reactive == 0.0 is the shipping disocclusion-only path, unchanged.
+        assert!((disocclusion_history_weight(0.9, 0.0, 0.0) - 0.9).abs() < 1.0e-6);
+        assert_eq!(disocclusion_history_weight(0.9, 1.0, 0.0), 0.0);
+        assert!((disocclusion_history_weight(0.8, 0.5, 0.0) - 0.4).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn full_reactive_mask_drops_history_even_when_reprojected() {
+        // Perfect reprojection (d = 0) but a fully reactive pixel keeps nothing.
+        assert_eq!(disocclusion_history_weight(0.9, 0.0, 1.0), 0.0);
+    }
+
+    #[test]
+    fn reactive_composes_multiplicatively_with_disocclusion() {
+        // base 0.8, half disoccluded, half reactive: 0.8 * 0.5 * 0.5 = 0.2.
+        let w = disocclusion_history_weight(0.8, 0.5, 0.5);
+        assert!((w - 0.2).abs() < 1.0e-6, "got {w}");
+    }
+
+    #[test]
+    fn reactive_monotonically_reduces_history_weight() {
+        // With a fixed base and disocclusion, more reactive can only shed more.
+        let base = 0.9;
+        let d = 0.25;
+        let mut prev = disocclusion_history_weight(base, d, 0.0);
+        for step in 1..=8 {
+            let r = step as f32 / 8.0;
+            let w = disocclusion_history_weight(base, d, r);
+            assert!(w <= prev + 1.0e-6, "reactive {r} raised weight: {w} > {prev}");
+            prev = w;
+        }
     }
 
     #[test]
@@ -217,7 +263,10 @@ mod tests {
     #[test]
     fn full_disocclusion_resets_accumulation() {
         let acc = update_accumulation(12.0, 1.0, 0.0);
-        assert_eq!(acc, 1.0, "a full disocclusion keeps only the current sample");
+        assert_eq!(
+            acc, 1.0,
+            "a full disocclusion keeps only the current sample"
+        );
     }
 
     #[test]
@@ -243,9 +292,15 @@ mod tests {
         // floor above that (here 0.1) must bind and hold the response open.
         let floor = 0.1;
         let unclamped = history_blend_alpha(MAX_ACCUMULATION_FRAMES);
-        assert!(unclamped < floor, "test floor must exceed unclamped alpha, got {unclamped}");
+        assert!(
+            unclamped < floor,
+            "test floor must exceed unclamped alpha, got {unclamped}"
+        );
         let a = history_blend_alpha_clamped(MAX_ACCUMULATION_FRAMES, floor);
-        assert!((a - floor).abs() < 1.0e-6, "alpha should hit the floor, got {a}");
+        assert!(
+            (a - floor).abs() < 1.0e-6,
+            "alpha should hit the floor, got {a}"
+        );
         // When the unclamped value already exceeds the floor it wins unchanged.
         assert!((history_blend_alpha_clamped(0.0, floor) - 1.0).abs() < 1.0e-6);
     }
