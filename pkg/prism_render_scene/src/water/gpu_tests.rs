@@ -1862,3 +1862,405 @@ fn gerstner_displace_gpu_matches_cpu_golden() {
         i += 1;
     }
 }
+
+// ===========================================================================
+// Kernel: water_caustics_project (render_fx, 8x8) — on-device parity.
+// ===========================================================================
+//
+// The caustics projection has no transcendental functions on its path: the
+// refracted-ray Jacobian is built from central finite differences of the
+// offset field, the focus gain is `min(1/|jacobian|, max_gain)`, and the photon
+// term is `count * power / (PI * r^2)`. That lets the `CPU` golden call the
+// architecture reference functions [`project_caustic_intensity`] and
+// [`photon_splat_density`] verbatim, so a green run is byte-level evidence that
+// the ported kernel matches its reference to `float32` rounding.
+//
+// Binding 3 is a sampled `texture_2d<f32>` read through `textureLoad`, backed by
+// a non-filterable `Rgba32Float` texture, so the pass is built with an explicit
+// bind group + pipeline layout that pins `Float { filterable: false }`; auto
+// layout would reflect a filterable sample type and fail bind-group validation.
+
+use super::abi::GpuWaterCausticsParams;
+use prism_render_architecture::water::caustics::{photon_splat_density, project_caustic_intensity};
+use wgpu::{
+    BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, BufferBindingType,
+    PipelineLayoutDescriptor, ShaderStages, StorageTextureAccess, TextureSampleType,
+    TextureViewDimension,
+};
+
+/// Finite-difference floor; mirrors `WATER_EPS` in `water_render_fx.wesl`.
+const WATER_EPS: f32 = 1.0e-6;
+
+/// Compiles `water_render_fx.wesl` and returns its `Wgsl` translation.
+fn compile_render_fx_wgsl() -> String {
+    let mut cache = ShaderCache::new((), keep_wgsl);
+    let id = AssetId::Uuid {
+        uuid: Uuid::from_u128(0x5052_4953_4d5f_5741_5445_5246_5800_0001),
+    };
+    cache.set_shader(
+        id,
+        Shader::from_wesl(
+            include_str!("../shaders/water_render_fx.wesl"),
+            "embedded://prism_render_scene/shaders/water_render_fx.wesl",
+        ),
+    );
+    let module = cache
+        .get(0, id, &[])
+        .unwrap_or_else(|error| panic!("water_render_fx.wesl failed to compile: {error}"));
+    (*module).clone()
+}
+
+/// Builds a smooth, transcendental-free refracted-ray offset field and a
+/// photon-count field (including zero counts) for the caustics parity inputs.
+///
+/// Offsets are packed `rgba32float` (`width*height*4` lanes, `.zw = 0`); the
+/// polynomial warp gives a non-trivial spatially varying Jacobian without any
+/// `sin`/`cos`. Photon counts cycle through `0..=4` so the zero-count path is
+/// exercised.
+fn caustics_inputs(width: u32, height: u32) -> (Vec<f32>, Vec<u32>) {
+    let total = (width * height) as usize;
+    let mut offsets = vec![0.0_f32; total * 4];
+    let mut photons = vec![0_u32; total];
+    let inv_w = 1.0_f32 / width as f32;
+    let inv_h = 1.0_f32 / height as f32;
+    let mut y = 0u32;
+    while y < height {
+        let mut x = 0u32;
+        while x < width {
+            let fx = x as f32 * inv_w;
+            let fy = y as f32 * inv_h;
+            let base = ((y * width + x) * 4) as usize;
+            offsets[base] = 0.05 * fx - 0.03 * fy + 0.02 * fx * fy;
+            offsets[base + 1] = -0.04 * fx * fx + 0.06 * fy;
+            let idx = (y * width + x) as usize;
+            photons[idx] = (x * 7 + y * 13) % 5;
+            x += 1;
+        }
+        y += 1;
+    }
+    (offsets, photons)
+}
+
+/// `CPU` golden twin of `water_caustics_project`.
+///
+/// Replays the shader per texel: the refracted-ray Jacobian from central finite
+/// differences of the offset field (clamped at the borders exactly like the
+/// kernel), the Jacobian focus gain projected onto the incident irradiance, plus
+/// the photon splat-density term, floored at zero. The projection and photon
+/// terms call the architecture golden functions directly, so the only host
+/// arithmetic is the finite-difference stencil the shader also runs.
+fn caustics_golden(params: &GpuWaterCausticsParams, offsets: &[f32], photons: &[u32]) -> Vec<f32> {
+    let w = params.width;
+    let h = params.height;
+    let total = (w * h) as usize;
+    let mut out = vec![0.0_f32; total];
+    let fd_step = params.texel_size.max(WATER_EPS) * 2.0;
+
+    let sample = |x: i32, y: i32| -> (f32, f32) {
+        let base = ((y as u32 * w + x as u32) * 4) as usize;
+        (offsets[base], offsets[base + 1])
+    };
+
+    let mut gy = 0u32;
+    while gy < h {
+        let mut gx = 0u32;
+        while gx < w {
+            let x = gx as i32;
+            let y = gy as i32;
+            let xm = (x - 1).max(0);
+            let ym = (y - 1).max(0);
+            let xp = (x + 1).min(w as i32 - 1);
+            let yp = (y + 1).min(h as i32 - 1);
+            let (oxp_x, oxp_y) = sample(xp, y);
+            let (oxm_x, oxm_y) = sample(xm, y);
+            let (oyp_x, oyp_y) = sample(x, yp);
+            let (oym_x, oym_y) = sample(x, ym);
+            let dudx = 1.0 + (oxp_x - oxm_x) / fd_step;
+            let dvdx = (oxp_y - oxm_y) / fd_step;
+            let dudy = (oyp_x - oym_x) / fd_step;
+            let dvdy = 1.0 + (oyp_y - oym_y) / fd_step;
+            let jacobian = dudx * dvdy - dvdx * dudy;
+            let projected = project_caustic_intensity(params.incident, jacobian, params.max_gain);
+            let idx = (gy * w + gx) as usize;
+            let photon_term =
+                photon_splat_density(photons[idx], params.photon_power, params.splat_radius);
+            out[idx] = (projected + photon_term).max(0.0);
+            gx += 1;
+        }
+        gy += 1;
+    }
+
+    out
+}
+
+/// Dispatches one `water_caustics_project` pass on device and reads back the
+/// single-channel `r32float` caustic irradiance target as flat lanes.
+///
+/// Uses an explicit `@group(0)` layout so binding 3 (the `Rgba32Float` offset
+/// field, read via `textureLoad`) is pinned to a non-filterable sample type.
+/// `width` is chosen so the `r32float` readback row (`width*4`) is `256`-aligned
+/// and dense.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one explicit-layout dispatch-and-readback over the caustics target keeps the parity path auditable"
+)]
+fn dispatch_caustics(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    wgsl: &str,
+    entry: &str,
+    params: &GpuWaterCausticsParams,
+    offsets: &[f32],
+    photons: &[u32],
+) -> Vec<f32> {
+    let width = params.width;
+    let height = params.height;
+
+    let module = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("water_render_fx_parity"),
+        source: ShaderSource::Wgsl(wgsl.into()),
+    });
+    let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+        label: Some("water_caustics_layout"),
+        entries: &[
+            BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            BindGroupLayoutEntry {
+                binding: 1,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            BindGroupLayoutEntry {
+                binding: 2,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::StorageTexture {
+                    access: StorageTextureAccess::WriteOnly,
+                    format: TextureFormat::R32Float,
+                    view_dimension: TextureViewDimension::D2,
+                },
+                count: None,
+            },
+            BindGroupLayoutEntry {
+                binding: 3,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Texture {
+                    sample_type: TextureSampleType::Float { filterable: false },
+                    view_dimension: TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+        ],
+    });
+    let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+        label: Some("water_caustics_pipeline_layout"),
+        bind_group_layouts: &[Some(&bind_group_layout)],
+        immediate_size: 0,
+    });
+    let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("water_caustics_project_parity"),
+        layout: Some(&pipeline_layout),
+        module: &module,
+        entry_point: Some(entry),
+        compilation_options: PipelineCompilationOptions::default(),
+        cache: None,
+    });
+
+    let photon_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("caustics_photon_counts"),
+        contents: bytemuck::cast_slice(photons),
+        usage: BufferUsages::STORAGE,
+    });
+    let params_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("caustics_params"),
+        contents: bytemuck::bytes_of(params),
+        usage: BufferUsages::UNIFORM,
+    });
+
+    let extent = Extent3d {
+        width,
+        height,
+        depth_or_array_layers: 1,
+    };
+    let offsets_tex = device.create_texture(&TextureDescriptor {
+        label: Some("caustics_offsets"),
+        size: extent,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: TextureFormat::Rgba32Float,
+        usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    // `write_texture` has no 256-byte row-alignment requirement, so the dense
+    // `rgba32float` offset field uploads as-is.
+    queue.write_texture(
+        TexelCopyTextureInfo {
+            texture: &offsets_tex,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: TextureAspect::All,
+        },
+        bytemuck::cast_slice(offsets),
+        TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(width * 16),
+            rows_per_image: Some(height),
+        },
+        extent,
+    );
+    let out_tex = device.create_texture(&TextureDescriptor {
+        label: Some("caustics_out"),
+        size: extent,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: TextureFormat::R32Float,
+        usage: TextureUsages::STORAGE_BINDING | TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let offsets_view = offsets_tex.create_view(&TextureViewDescriptor::default());
+    let out_view = out_tex.create_view(&TextureViewDescriptor::default());
+
+    let bind_group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("caustics_bind_group"),
+        layout: &bind_group_layout,
+        entries: &[
+            BindGroupEntry {
+                binding: 0,
+                resource: photon_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 1,
+                resource: params_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 2,
+                resource: BindingResource::TextureView(&out_view),
+            },
+            BindGroupEntry {
+                binding: 3,
+                resource: BindingResource::TextureView(&offsets_view),
+            },
+        ],
+    });
+
+    let row_bytes = width * 4;
+    let readback_size = u64::from(row_bytes * height);
+    let readback = device.create_buffer(&BufferDescriptor {
+        label: Some("caustics_readback"),
+        size: readback_size,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("caustics_parity_encoder"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("caustics_parity_pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(8), 1);
+    }
+    encoder.copy_texture_to_buffer(
+        TexelCopyTextureInfo {
+            texture: &out_tex,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: TextureAspect::All,
+        },
+        TexelCopyBufferInfo {
+            buffer: &readback,
+            layout: TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row_bytes),
+                rows_per_image: Some(height),
+            },
+        },
+        extent,
+    );
+    queue.submit([encoder.finish()]);
+
+    readback.slice(..).map_async(MapMode::Read, |_| {});
+    device
+        .poll(PollType::wait_indefinitely())
+        .expect("device poll should complete the submitted work");
+
+    let view = readback
+        .slice(..)
+        .get_mapped_range()
+        .expect("mapped caustics readback should be available after poll");
+    let floats = bytemuck::cast_slice::<u8, f32>(&view).to_vec();
+    drop(view);
+    readback.unmap();
+    floats
+}
+
+/// Real-device parity for `water_caustics_project`: project one caustics frame
+/// over a `64x16` receiver grid on device and match the `r32float` irradiance
+/// target texel-for-texel against the `CPU` golden built from the architecture
+/// reference functions.
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice must reach the test log on hosts without a wgpu adapter"
+)]
+fn caustics_project_gpu_matches_cpu_golden() {
+    let Some((device, queue)) = try_solver_device() else {
+        eprintln!(
+            "caustics_project_gpu_matches_cpu_golden: no wgpu adapter, skipping on-device parity"
+        );
+        return;
+    };
+
+    let width = 64u32;
+    let height = 16u32;
+    let params = GpuWaterCausticsParams {
+        incident: 1.0,
+        max_gain: 1.5,
+        photon_power: 0.5,
+        splat_radius: 0.25,
+        texel_size: 0.05,
+        width,
+        height,
+        _pad: 0,
+    };
+    let (offsets, photons) = caustics_inputs(width, height);
+
+    let golden = caustics_golden(&params, &offsets, &photons);
+
+    let wgsl = compile_render_fx_wgsl();
+    let entry = find_entry_point(&wgsl, "caustics_project");
+    let gpu = dispatch_caustics(&device, &queue, &wgsl, &entry, &params, &offsets, &photons);
+
+    assert_eq!(gpu.len(), golden.len(), "caustics lane count");
+
+    let mut i = 0;
+    while i < golden.len() {
+        let d = (gpu[i] - golden[i]).abs();
+        assert!(
+            d < PARITY_EPS,
+            "caustics texel {i}: gpu={} cpu={} |d|={d}",
+            gpu[i],
+            golden[i],
+        );
+        i += 1;
+    }
+}
