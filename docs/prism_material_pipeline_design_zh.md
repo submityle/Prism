@@ -155,6 +155,44 @@ specialization_id: u64   // 由上面轴的合法排列特化产出
 - `GpuMaterialHeader`：`shading_model` 字段删除；新增 `illumination`、`closure_graph_offset`、`specialization_id`。`closure_mask` 保留（RT/分类用）。
 - 这些结构**手写 `#[repr(C)]`**，但由**结构哈希驱动 `MATERIAL_ABI_VERSION`** + CI 对齐测试兜漂移（改结构 → 哈希变 → 版本自动 bump → 测试红）。不引入反射生成器（见 §2）。
 
+### 3.4 有界 slab 闭包图：对标 UE5 Substrate 的深化规格
+
+本节把 §3.2 的"有界 slab"从口号钉成可实现规格，直接映射到已落地的 `pkg/prism_render_material/src/ir.rs` / `axis.rs`（非纸面设计，代码已在）。
+
+**数据模型**：材质是一张 `MaterialGraph`（DAG，节点 `MaterialNode`），`normalize()` 编译成 `NormalizedMaterial{ closure_mask, illumination, specialization_id, .. }`。闭包由三类节点组成：
+
+- `MaterialNode::Closure{kind: ClosureKind, inputs}` —— 单个 BSDF 瓣 / slab。
+- `ClosureKind::Mix` —— **水平混合**（coverage/weight 在两个子闭包间 lerp），对标 Substrate *Horizontal Mix*。用于"锈斑覆盖金属"、"泥点盖车漆"这类同一像素多材质按面积占比混合。
+- `ClosureKind::Layer` —— **垂直镀层**（coat-over-base，按能量守恒把透射 throughput 传给底层），对标 Substrate *Vertical Layer / coat*。用于清漆、薄膜、湿膜、脏污叠层。
+
+**`ClosureKind` 14 值 → `closure_mask` 位分配**（`closure_mask |= 1 << (kind as u32)`，`#[repr(u32)]` 判别式即位号；`specialization_id` 里 `closure_mask` 占 bit `8..40`）：
+
+| bit | ClosureKind | 归属 | 说明 |
+|---|---|---|---|
+| 0 | Diffuse | über 瓣 | 朗伯/OpenPBR base |
+| 1 | Conductor | über 瓣 | 金属 GGX |
+| 2 | Dielectric | über 瓣 | 电介质镜面 |
+| 3 | ClearCoat | über 瓣 | 车漆清漆（可由 Layer 承载，亦保留瓣位） |
+| 4 | Sheen | über 瓣 | 布料绒毛边缘 |
+| 5 | Subsurface | über 瓣 | 皮肤/蜡/叶片 SSS |
+| 6 | Transmission | über 瓣 | 玻璃/透射 |
+| 7 | Emission | über 瓣 | 自发光 |
+| 8 | Hair | **专用重 closure** | Marschner/Chiang R/TT/TRT + dual-scatter，**不进 slab**（见 §6.3） |
+| 9 | Volume | 域闭包 | 参与介质 |
+| 10 | Npr | 风格标记 | 推 `illumination=Stylized`（正交轴，非塌缩） |
+| 11 | Custom | 风格标记 | 推 `illumination=Custom` |
+| 12 | Mix | 混合算子 | 水平，计入 slab 深度 |
+| 13 | Layer | 混合算子 | 垂直，计入 slab 深度 |
+
+- **über-BSDF = 单 slab 的多瓣参数化**（bit 0–7 的组合），对标 OpenPBR surface / Substrate 单 slab。metallic/roughness/anisotropy 是它的参数，不占独立 slab 深度。
+- **只有 `Mix`/`Layer` 计入 slab 深度**。`slab_depth()` 在 DAG 上做记忆化最长链求解，`> MAX_CLOSURE_SLAB_DEPTH(=4)` → `MaterialValidationError`，永不进入无界 Substrate 树。
+
+**封顶 4 的取舍（对齐"性能/稳定优先"）**：UE5 Substrate 是无界 slab 树 + 运行时 slab 预算裁剪；我们取其 slab 语义与 Mix/Layer 算子，但**编译期封顶 depth=4**。4 层足以覆盖 AAA 主力场景（base + clearcoat 车漆、湿表面镀膜、薄膜干涉、2–3 层污渍/锈蚀叠加）。以"拒绝无界"换取：固定每像素寄存器预算、permutation 可静态特化、着色器无递归、VGPR 占用可预测——即 objective 的性能与稳定性硬约束。需要第 5 层的极端资产按"降一层近似 + 美术告警"处理，不放开上限。
+
+**`specialization_id` 打包**（`axis.rs`，LSB→MSB）：bit `0..8`=illumination、`8..40`=closure_mask、`40..48`=render_class(blend/domain 族)。`low()/high()` 切成两个 `u32` 落进 `GpuMaterialHeader`，GPU 侧据此选 permutation 与读哪些瓣 blob（§3.3）。
+
+**normalize 不变式**（回归测试守）：① 单输出锥；② slab 深度 ≤ 4；③ `illumination` 由 `Npr`/`Custom` closure 推出正交轴值而**非**塌缩成单 model；④ 改任一 GPU 结构 → 哈希变 → `MATERIAL_ABI_VERSION` bump → 对齐测试红（§3.3）。
+
 ---
 
 ## 4. 支柱二：光照/阴影 数据服务 + 各前端响应（比材质更关键）
