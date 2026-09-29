@@ -39,6 +39,7 @@ pub mod bending;
 pub mod ccd;
 pub mod collision;
 pub mod constraints;
+pub mod coupling;
 pub mod dynamics;
 pub mod embed;
 pub mod layers;
