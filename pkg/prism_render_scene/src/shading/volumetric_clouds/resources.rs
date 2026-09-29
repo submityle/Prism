@@ -28,11 +28,6 @@
 //! the temporal upsample read the previous frame while writing the next without
 //! a hazard.
 
-#![allow(
-    dead_code,
-    reason = "the resident volumetric-cloud domain textures and per-view targets are the render-resource foundation the bind-group and Core3d dispatch slices consume; those slices land next, and the parity/sizing bookkeeping is exercised now by the tests below"
-)]
-
 use bevy_ecs::prelude::*;
 use bevy_math::{UVec2, UVec3};
 use bevy_platform::collections::{HashMap, HashSet};
@@ -138,11 +133,6 @@ impl VolumetricCloudDomain {
     /// The light-space `AVSM` cloud-shadow map.
     pub(crate) fn shadow_map(&self) -> &TextureView {
         &self.shadow_map
-    }
-
-    /// The current frame's double-buffer parity index (`0` or `1`).
-    pub(crate) fn parity(&self) -> u32 {
-        self.frame & 1
     }
 
     /// The 3D density-cache / noise-volume dispatch extent (voxels).

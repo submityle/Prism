@@ -31,11 +31,6 @@
 //!   for these packed scalar / `rgba16f` / `RGBA8` records equals the packed
 //!   `#[repr(C)]` size.
 
-#![allow(
-    dead_code,
-    reason = "the volumetric-cloud GPU ABI records and shader-mirror constants are the verified layout foundation of this subsystem; the pipeline / bind-group / dispatch slices that consume them land in the following slices, and the `size_of` contract tests exercise every record now"
-)]
-
 use bytemuck::{Pod, Zeroable};
 
 /// Voxel-brick tile edge of every per-voxel volumetric compute entry point.
@@ -43,6 +38,7 @@ use bytemuck::{Pod, Zeroable};
 /// (`volumetric_noise_bake`, `volumetric_modeling`,
 /// `volumetric_multiscatter_lut_bake`) and the `4x4x4` brick the architecture
 /// crate's `gpu::kernels` contract launches those 3D dispatches with.
+#[cfg(test)]
 pub(crate) const VC_VOXEL_BRICK: u32 = 4;
 
 /// Planar tile edge of every per-texel / per-pixel volumetric compute entry
@@ -52,6 +48,7 @@ pub(crate) const VC_VOXEL_BRICK: u32 = 4;
 /// `volumetric_shadow_march`, `volumetric_upsample`) and the `8x8x1` tile the
 /// architecture crate's `gpu::kernels` contract launches those 2D dispatches
 /// with.
+#[cfg(test)]
 pub(crate) const VC_SCREEN_TILE: u32 = 8;
 
 // ===========================================================================

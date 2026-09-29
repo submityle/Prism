@@ -30,11 +30,6 @@
 //! resources already resolved, so the advection and temporal upsample read the
 //! previous frame while writing the next without a hazard.
 
-#![allow(
-    dead_code,
-    reason = "the two volumetric-cloud bind-group homes and their `group(kernel)` accessors are the render-resource foundation the Core3d dispatch slice consumes to record the eight per-kernel dispatches; that slice lands next, while the prepare systems that build and attach the bind groups run now"
-)]
-
 use bevy_ecs::prelude::*;
 use bevy_render::{
     render_resource::{BindGroup, BindGroupEntries},

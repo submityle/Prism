@@ -16,11 +16,6 @@
 //! keeping the clouds opt-in without coupling to `runtime.rs`. A game can
 //! overwrite the resource to retune globally without touching any pass code.
 
-#![allow(
-    dead_code,
-    reason = "the volumetric-cloud settings resource and its eight `*_params` immediate-block constructors are the frame-constant foundation the resource / bind-group / dispatch slices consume; those slices land next, and the sizing forwarding is exercised now by the tests below"
-)]
-
 use bevy_ecs::prelude::Resource;
 use bevy_math::{UVec2, UVec3};
 

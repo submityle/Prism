@@ -25,11 +25,6 @@
 //! texture is the `rgba16float` [`VC_STORAGE_FORMAT`], matching the shader's
 //! `texture_storage_2d/3d<rgba16float, write>` declarations.
 
-#![allow(
-    dead_code,
-    reason = "the eight volumetric-cloud compute pipelines and their owned `@group(0)` layouts are the render-resource foundation of the GPU cloud subsystem; the resident-resource, bind-group and Core3d dispatch slices that consume `VolumetricCloudPipelines`, its `pipeline`/`layout` accessors and `init_volumetric_cloud_pipelines` land in the following slices, and the kernel-index ordering is exercised now by the contract test below"
-)]
-
 use bevy_asset::{load_embedded_asset, Handle};
 use bevy_ecs::prelude::*;
 use bevy_material::{
