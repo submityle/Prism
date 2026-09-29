@@ -49,6 +49,7 @@
 //! that embeds the shader and installs the pipelines and graph node.
 
 mod abi;
+mod pipeline;
 
 #[cfg(test)]
 mod shader_tests;
