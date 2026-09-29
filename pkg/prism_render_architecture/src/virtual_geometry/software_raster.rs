@@ -196,7 +196,7 @@ pub const fn triangle_of(payload: u32) -> u32 {
 /// clockwise in this y-down space) triangle edge.
 #[must_use]
 #[inline]
-fn edge(a: [f32; 2], b: [f32; 2], p: [f32; 2]) -> f32 {
+pub(crate) fn edge(a: [f32; 2], b: [f32; 2], p: [f32; 2]) -> f32 {
     (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])
 }
 

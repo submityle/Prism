@@ -18,6 +18,8 @@
 //! * [`software_raster`] — deterministic vis-buffer triangle rasterizer, with a
 //!   world-to-screen projection layer for full-path GPU-twin parity
 //!   (CPU golden standard for the GPU compute path).
+//! * [`raster_gradients`] — per-triangle edge/depth gradient setup mirroring the
+//!   twin's incremental scanline walk (validated against the recompute path).
 //! * [`pipeline`] — per-cluster composition of the decisions above.
 //! * [`hierarchy`] — screen-space-error cut selection over the cluster DAG.
 //! * [`bins`] — GPU-driven raster bin assignment for a selected cut.
@@ -32,6 +34,7 @@ pub mod lod;
 pub mod page_request;
 pub mod page_table;
 pub mod pipeline;
+pub mod raster_gradients;
 pub mod raster_path;
 pub mod software_raster;
 
@@ -43,6 +46,7 @@ pub use lod::{select_lod, LodLevel, LodProjection, LodSelection};
 pub use page_request::PageRequestBatch;
 pub use page_table::{GeometryPageTable, PageEntry, PageResidency};
 pub use pipeline::{ClusterDecision, ClusterRequest, ViewCullContext};
+pub use raster_gradients::TriangleGradients;
 pub use raster_path::{select_raster_path, ClusterRasterStats, RasterCapability};
 pub use software_raster::{
     cluster_of, encode_depth, pack_cluster_triangle, pack_vis, project_vertex,
