@@ -10,79 +10,20 @@
 //! a single deterministic pass. The batch is GPU-independent and reusable across
 //! frames via [`clear`](PageRequestBatch::clear).
 
-use super::page_table::GeometryPageTable;
 use super::GeometryPageKey;
-use alloc::collections::BTreeMap;
 
-/// Accumulates page references for one frame, deduplicated by page key.
+/// Per-frame coalescing of cluster page requests keyed on [`GeometryPageKey`].
 ///
-/// Entries are keyed on [`GeometryPageKey`], whose ordering gives the batch a
-/// deterministic iteration and flush order independent of the cut's visit
-/// order. Recording the same page more than once keeps the maximum priority.
-#[derive(Clone, Debug, Default)]
-pub struct PageRequestBatch {
-    priorities: BTreeMap<GeometryPageKey, f32>,
-}
-
-impl PageRequestBatch {
-    /// Builds an empty batch.
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            priorities: BTreeMap::new(),
-        }
-    }
-
-    /// Records one cluster's reference to `key` at screen-importance `priority`.
-    ///
-    /// If the page was already referenced this frame, the higher priority wins
-    /// so a page pulled by any high-coverage cluster streams in with that
-    /// urgency regardless of visit order.
-    pub fn record(&mut self, key: GeometryPageKey, priority: f32) {
-        let slot = self.priorities.entry(key).or_insert(priority);
-        if *slot < priority {
-            *slot = priority;
-        }
-    }
-
-    /// Number of distinct pages referenced this frame.
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.priorities.len()
-    }
-
-    /// Returns `true` when no page has been referenced.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.priorities.is_empty()
-    }
-
-    /// Highest priority recorded for `key`, or `None` if it was never referenced.
-    #[must_use]
-    pub fn priority(&self, key: GeometryPageKey) -> Option<f32> {
-        self.priorities.get(&key).copied()
-    }
-
-    /// Issues one request per unique page to `table`, tagged with `frame`.
-    ///
-    /// Iteration follows [`GeometryPageKey`] order, so the table sees a stable
-    /// request sequence every frame. The batch is left intact; call
-    /// [`clear`](Self::clear) to reuse it for the next frame.
-    pub fn flush(&self, table: &mut GeometryPageTable, frame: u64) {
-        for (&key, &priority) in &self.priorities {
-            table.request(key, priority, frame);
-        }
-    }
-
-    /// Drops every recorded reference so the batch can be reused next frame.
-    pub fn clear(&mut self) {
-        self.priorities.clear();
-    }
-}
+/// This is the shared [`crate::paging::RequestBatch`] instantiated on the
+/// geometry page key: it collapses a cut's many references to the same page
+/// into one request at the highest screen-importance priority seen, then
+/// flushes them to a [`super::page_table::GeometryPageTable`] in one stable,
+/// key-ordered pass.
+pub type PageRequestBatch = crate::paging::RequestBatch<GeometryPageKey>;
 
 #[cfg(test)]
 mod tests {
-    use super::super::page_table::PageResidency;
+    use super::super::page_table::{GeometryPageTable, PageResidency};
     use super::*;
 
     fn key(page: u32) -> GeometryPageKey {
