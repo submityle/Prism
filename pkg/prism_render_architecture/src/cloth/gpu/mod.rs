@@ -16,6 +16,9 @@
 //! * [`pipeline`] — the Extract → Prepare → Queue frame plan that expands the
 //!   substep loop and graph-color batching into a flat, ordered, budget-able
 //!   dispatch schedule.
+//! * [`upload`] — the class-separated constraint packing that turns an
+//!   authored constraint list into the per-class per-color counts and
+//!   contiguous by-color buffer layout the dispatch schedule addresses.
 //!
 //! Everything here is pure integer bookkeeping with no `GPU` handles, no floats
 //! and no wall clock, so the whole `GPU` schedule is deterministic and
@@ -25,6 +28,7 @@
 pub mod buffers;
 pub mod kernels;
 pub mod pipeline;
+pub mod upload;
 
 pub use buffers::{
     AsyncFrameState, BufferCounts, BufferParity, FrameSlot, PersistentBufferSet, PipelineError,
@@ -38,3 +42,4 @@ pub use pipeline::{
     extract, plan_frame, prepare, queue, ClothGpuExtract, ClothGpuFramePlan, ClothGpuPrepare,
     ClothGpuQueue, PlannedDispatch,
 };
+pub use upload::{color_bending, plan_constraint_upload, BendingUploadPlan, ConstraintUploadPlan};
