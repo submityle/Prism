@@ -3846,3 +3846,326 @@ fn spray_emit_gpu_matches_cpu_golden() {
         i += 1;
     }
 }
+
+// ===========================================================================
+// FLIP/APIC particle-to-grid scatter (water_flip.wesl :: water_flip_p2g)
+// ===========================================================================
+//
+// This block closes the on-device gap for stage 1 of the `FLIP`/`APIC` loop:
+// the mass-weighted, trilinearly blended `APIC` momentum splat from particles
+// onto the staggered `MAC` grid's four fixed-point atomics per cell
+// (`[momentum_x, momentum_y, momentum_z, mass]`). The kernel touches only
+// `group(0)` bindings 0 (particles), 1 (scatter atomics), and 4 (params), so
+// the reflected auto layout carries exactly those three entries.
+
+use super::abi::GpuFlipParticle;
+use prism_render_architecture::water::flip::{apic_velocity, trilinear_weights};
+
+/// `CPU` golden twin of `water_flip_p2g`.
+///
+/// Reproduces the kernel line-for-line: per live particle it forms the local
+/// grid coordinate, the eight trilinear corner weights (the shared golden
+/// [`trilinear_weights`]), and the per-corner `APIC` node velocity (the shared
+/// golden [`apic_velocity`]), then scatters `node_vel * (mass * w)` and
+/// `mass * w` into the eight surrounding cells. Every corner contribution is
+/// encoded to the signed fixed-point domain and summed in the exact wrapping
+/// two's-complement `u32` arithmetic the on-device `atomicAdd` uses, so the
+/// packed scatter buffers agree bit-for-bit before decode. Out-of-grid corners
+/// and non-positive weights are skipped exactly as the shader does.
+fn flip_p2g_golden(particles: &[GpuFlipParticle], params: &GpuFlipSimParams) -> Vec<u32> {
+    let dim = [params.dim[0], params.dim[1], params.dim[2]];
+    let total = (dim[0] * dim[1] * dim[2]) as usize;
+    let mut scatter = vec![0u32; total * 4];
+    let mass = params.particle_mass.max(0.0);
+    if mass <= FLIP_EPS {
+        return scatter;
+    }
+    let origin = Vec3::new(params.origin[0], params.origin[1], params.origin[2]);
+    let affine = f32::from(params.use_affine != 0);
+    let dx = params.dx;
+
+    let mut p = 0usize;
+    while p < params.particle_count as usize {
+        let particle = particles[p];
+        p += 1;
+        if particle.pos[3] <= 0.5 {
+            continue;
+        }
+        let pos = Vec3::new(particle.pos[0], particle.pos[1], particle.pos[2]);
+        let vel = Vec3::new(particle.vel[0], particle.vel[1], particle.vel[2]);
+        let rows = [
+            Vec3::new(particle.c0[0], particle.c0[1], particle.c0[2]).scale(affine),
+            Vec3::new(particle.c1[0], particle.c1[1], particle.c1[2]).scale(affine),
+            Vec3::new(particle.c2[0], particle.c2[1], particle.c2[2]).scale(affine),
+        ];
+        let local = pos.sub(origin).scale(params.inv_dx);
+        let base_i = local.x.floor() as i32;
+        let base_j = local.y.floor() as i32;
+        let base_k = local.z.floor() as i32;
+        let weights = trilinear_weights(
+            local.x - local.x.floor(),
+            local.y - local.y.floor(),
+            local.z - local.z.floor(),
+        );
+        let mut corner = 0usize;
+        let mut cz = 0i32;
+        while cz < 2 {
+            let mut cy = 0i32;
+            while cy < 2 {
+                let mut cx = 0i32;
+                while cx < 2 {
+                    let w = weights[corner];
+                    corner += 1;
+                    let ci = base_i + cx;
+                    let cj = base_j + cy;
+                    let ck = base_k + cz;
+                    cx += 1;
+                    if !flip_in_bounds(ci, cj, ck, dim) {
+                        continue;
+                    }
+                    if w <= 0.0 {
+                        continue;
+                    }
+                    let node = Vec3::new(
+                        origin.x + (ci as f32 + 0.5) * dx,
+                        origin.y + (cj as f32 + 0.5) * dx,
+                        origin.z + (ck as f32 + 0.5) * dx,
+                    );
+                    let offset = node.sub(pos);
+                    let node_vel = apic_velocity(vel, rows, offset);
+                    let contribution = node_vel.scale(mass * w);
+                    let cell = flip_cell_index(ci as u32, cj as u32, ck as u32, dim) as usize;
+                    let acc = cell * 4;
+                    scatter[acc] = scatter[acc].wrapping_add(flip_encode_fixed(contribution.x));
+                    scatter[acc + 1] =
+                        scatter[acc + 1].wrapping_add(flip_encode_fixed(contribution.y));
+                    scatter[acc + 2] =
+                        scatter[acc + 2].wrapping_add(flip_encode_fixed(contribution.z));
+                    scatter[acc + 3] = scatter[acc + 3].wrapping_add(flip_encode_fixed(mass * w));
+                }
+                cy += 1;
+            }
+            cz += 1;
+        }
+    }
+    scatter
+}
+
+/// Dispatches one `water_flip_p2g` scatter on device and reads back the raw
+/// fixed-point grid accumulators.
+///
+/// The bind group is built from the pipeline's reflected `group(0)` layout,
+/// which — because the `P2G` kernel touches only the particles, the scatter
+/// atomics, and the parameter block — contains exactly bindings 0, 1, and 4.
+fn dispatch_flip_p2g(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    wgsl: &str,
+    entry: &str,
+    particles: &[GpuFlipParticle],
+    cell_count: usize,
+    params: &GpuFlipSimParams,
+) -> Vec<u32> {
+    let module = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("water_flip"),
+        source: ShaderSource::Wgsl(wgsl.into()),
+    });
+    let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("flip_p2g_pipeline"),
+        layout: None,
+        module: &module,
+        entry_point: Some(entry),
+        compilation_options: PipelineCompilationOptions::default(),
+        cache: None,
+    });
+
+    let particle_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("flip_particles"),
+        contents: bytemuck::cast_slice(particles),
+        usage: BufferUsages::STORAGE,
+    });
+    let scatter_len = cell_count * 4;
+    let scatter_zero = vec![0u32; scatter_len];
+    let scatter_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("flip_scatter"),
+        contents: bytemuck::cast_slice(&scatter_zero),
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+    });
+    let param_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("flip_params"),
+        contents: bytemuck::bytes_of(params),
+        usage: BufferUsages::UNIFORM,
+    });
+
+    let layout = pipeline.get_bind_group_layout(0);
+    let bind_group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("flip_p2g_group0"),
+        layout: &layout,
+        entries: &[
+            BindGroupEntry {
+                binding: 0,
+                resource: particle_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 1,
+                resource: scatter_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 4,
+                resource: param_buf.as_entire_binding(),
+            },
+        ],
+    });
+
+    let out_bytes = (scatter_len * size_of::<u32>()) as u64;
+    let out_stage = device.create_buffer(&BufferDescriptor {
+        label: Some("flip_p2g_stage"),
+        size: out_bytes,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("flip_p2g_encoder"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("flip_p2g_pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(params.particle_count.div_ceil(64), 1, 1);
+    }
+    encoder.copy_buffer_to_buffer(&scatter_buf, 0, &out_stage, 0, out_bytes);
+    queue.submit([encoder.finish()]);
+
+    out_stage.slice(..).map_async(MapMode::Read, |_| {});
+    device
+        .poll(PollType::wait_indefinitely())
+        .expect("device poll should complete the submitted work");
+    let view = out_stage
+        .slice(..)
+        .get_mapped_range()
+        .expect("mapped readback range should be available after poll");
+    let values: Vec<u32> = bytemuck::cast_slice::<u8, u32>(&view).to_vec();
+    drop(view);
+    out_stage.unmap();
+    values
+}
+
+/// One on-device `P2G` scatter must match the `CPU` golden after decode.
+///
+/// The scene mixes an interior particle whose eight corners are all in-bounds,
+/// a boundary particle straddling the grid edge (some corners skipped by the
+/// bounds guard), two particles sharing one cell (order-independent atomic
+/// accumulation), an `APIC`-affine particle (non-zero `C_p` rows), and an
+/// inactive particle (`pos.w <= 0.5`) that must contribute nothing. All
+/// positions, velocities, affine rows, mass, and cell size are dyadic so the
+/// fixed-point round is tie-free and the decoded momentum/mass agree to
+/// `float32` rounding.
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice must reach the test log on hosts without a wgpu adapter"
+)]
+fn flip_p2g_gpu_matches_cpu_golden() {
+    let Some((device, queue)) = try_solver_device() else {
+        eprintln!("flip_p2g_gpu_matches_cpu_golden: no wgpu adapter, skipping on-device parity");
+        return;
+    };
+
+    let dim = [4u32, 4u32, 4u32];
+    let cell_count = (dim[0] * dim[1] * dim[2]) as usize;
+    let dx = 1.0_f32;
+    let inv_dx = 1.0_f32;
+
+    let particles = [
+        // Interior particle: all eight corners inside the grid.
+        GpuFlipParticle {
+            pos: [1.25, 1.5, 1.75, 1.0],
+            vel: [0.5, -0.25, 0.75, 0.0],
+            c0: [0.0, 0.0, 0.0, 0.0],
+            c1: [0.0, 0.0, 0.0, 0.0],
+            c2: [0.0, 0.0, 0.0, 0.0],
+        },
+        // Boundary particle near the max corner: several corners fall outside.
+        GpuFlipParticle {
+            pos: [3.5, 3.25, 3.75, 1.0],
+            vel: [-0.5, 0.5, -0.25, 0.0],
+            c0: [0.0, 0.0, 0.0, 0.0],
+            c1: [0.0, 0.0, 0.0, 0.0],
+            c2: [0.0, 0.0, 0.0, 0.0],
+        },
+        // Two particles in the same cell exercise order-independent atomics.
+        GpuFlipParticle {
+            pos: [2.25, 2.25, 2.25, 1.0],
+            vel: [1.0, 0.0, 0.0, 0.0],
+            c0: [0.0, 0.0, 0.0, 0.0],
+            c1: [0.0, 0.0, 0.0, 0.0],
+            c2: [0.0, 0.0, 0.0, 0.0],
+        },
+        GpuFlipParticle {
+            pos: [2.75, 2.75, 2.75, 1.0],
+            vel: [0.0, 1.0, 0.0, 0.0],
+            c0: [0.0, 0.0, 0.0, 0.0],
+            c1: [0.0, 0.0, 0.0, 0.0],
+            c2: [0.0, 0.0, 0.0, 0.0],
+        },
+        // APIC-affine particle: non-zero C_p rows tilt the node velocity.
+        GpuFlipParticle {
+            pos: [1.5, 2.5, 1.5, 1.0],
+            vel: [0.25, 0.25, 0.25, 0.0],
+            c0: [0.5, 0.0, 0.0, 0.0],
+            c1: [0.0, 0.25, 0.0, 0.0],
+            c2: [0.0, 0.0, 0.5, 0.0],
+        },
+        // Inactive particle (pos.w <= 0.5) must not contribute.
+        GpuFlipParticle {
+            pos: [0.5, 0.5, 0.5, 0.0],
+            vel: [9.0, 9.0, 9.0, 0.0],
+            c0: [9.0, 9.0, 9.0, 0.0],
+            c1: [9.0, 9.0, 9.0, 0.0],
+            c2: [9.0, 9.0, 9.0, 0.0],
+        },
+    ];
+
+    let params = GpuFlipSimParams {
+        origin: [0.0, 0.0, 0.0, 0.0],
+        dim: [dim[0], dim[1], dim[2], 0],
+        dx,
+        inv_dx,
+        flip_blend: 0.0,
+        particle_mass: 2.0,
+        jacobi_omega: 0.0,
+        use_affine: 1,
+        particle_count: particles.len() as u32,
+        cell_count: cell_count as u32,
+    };
+
+    let golden = flip_p2g_golden(&particles, &params);
+
+    let wgsl = compile_flip_wgsl();
+    let entry = find_entry_point(&wgsl, "water_flip_p2g");
+    let gpu = dispatch_flip_p2g(
+        &device, &queue, &wgsl, &entry, &particles, cell_count, &params,
+    );
+
+    assert_eq!(gpu.len(), golden.len(), "scatter length mismatch");
+    let mut cell = 0usize;
+    while cell < cell_count {
+        let base = cell * 4;
+        let mut lane = 0usize;
+        while lane < 4 {
+            let g = flip_decode_fixed(gpu[base + lane]);
+            let c = flip_decode_fixed(golden[base + lane]);
+            let d = (g - c).abs();
+            assert!(
+                d < PARITY_EPS,
+                "cell {cell} lane {lane}: gpu={g} cpu={c} |d|={d}"
+            );
+            lane += 1;
+        }
+        cell += 1;
+    }
+}
