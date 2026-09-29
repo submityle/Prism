@@ -27,3 +27,4 @@
 //! installs the pipelines and graph node.
 
 mod abi;
+mod pipeline;
