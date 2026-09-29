@@ -98,6 +98,11 @@ pub(crate) struct PrismVolumetricCloudsSettings {
     pub albedo: f32,
     /// Primary Henyey-Greenstein anisotropy `g`.
     pub phase_g: f32,
+    /// Nubis `powder` dark-edge intensity `[0, 1]`. `0` disables the term
+    /// (in-scatter unmodulated); higher values darken dense cloud edges via
+    /// `raymarch`'s `1 - exp(-2 * view_optical_depth)` curve. Clamped in the
+    /// march, so it can only remove energy, never amplify.
+    pub powder_strength: f32,
 
     /// Forward HG lobe anisotropy for the dual-lobe resolve.
     pub forward_g: f32,
@@ -154,6 +159,9 @@ impl Default for PrismVolumetricCloudsSettings {
             sigma_t: 0.1,
             albedo: 0.9,
             phase_g: 0.2,
+            // Opt-in stylization: off by default so factory clouds are
+            // physically neutral; the term is fully wired and live once set.
+            powder_strength: 0.0,
 
             forward_g: 0.8,
             backward_g: -0.3,
@@ -244,6 +252,7 @@ impl PrismVolumetricCloudsSettings {
             sigma_t: self.sigma_t,
             albedo: self.albedo,
             phase_g: self.phase_g,
+            powder_strength: self.powder_strength,
         }
     }
 
@@ -337,6 +346,14 @@ mod tests {
         let lowres = s.lowres_size(UVec2::new(1920, 1080));
         let rm = s.raymarch_params(lowres);
         assert_eq!([rm.screen_w, rm.screen_h], [lowres.x, lowres.y]);
+        // The powder knob is a live tunable, not a hard-coded constant: a
+        // retuned setting must reach the raymarch immediate verbatim.
+        let powdered = PrismVolumetricCloudsSettings {
+            powder_strength: 0.75,
+            ..Default::default()
+        };
+        assert_eq!(powdered.raymarch_params(lowres).powder_strength, 0.75);
+        assert_eq!(rm.powder_strength, 0.0);
         let up = s.upsample_params(UVec2::new(1920, 1080), lowres, 7);
         assert_eq!(up.frame_index, 7);
         assert_eq!([up.lowres_w, up.lowres_h], [lowres.x, lowres.y]);
