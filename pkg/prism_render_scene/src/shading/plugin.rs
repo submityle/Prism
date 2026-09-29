@@ -48,8 +48,8 @@ use super::{
         init_vsm_receiver_gen_pipeline, prepare_vsm_page_mark_bind_groups,
         prepare_vsm_page_requests, prepare_vsm_receiver_gen_bind_groups,
         prepare_vsm_receiver_resources, vsm_mark_pages_pass, vsm_receiver_gen_pass,
-        PrismVirtualShadowSettings, VsmPageRequestBufferCache, VsmPrimaryLight,
-        VsmReceiverBufferCache,
+        prepare_vsm_physical_atlas, PrismVirtualShadowSettings, VsmPageRequestBufferCache,
+        VsmPhysicalAtlasCache, VsmPrimaryLight, VsmReceiverBufferCache,
     },
     chromatic_aberration::{
         chromatic_aberration_pass, init_chromatic_aberration_pipeline,
@@ -266,6 +266,7 @@ impl Plugin for PrismShadingPlugin {
             .init_resource::<PrismVirtualShadowSettings>()
             .init_resource::<VsmReceiverBufferCache>()
             .init_resource::<VsmPageRequestBufferCache>()
+            .init_resource::<VsmPhysicalAtlasCache>()
             .init_resource::<PrismMotionBlurSettings>()
             .init_resource::<PrismVolumetricsSettings>()
             .init_resource::<VolumetricsTextureCache>()
@@ -555,6 +556,13 @@ impl Plugin for PrismShadingPlugin {
                         prepare_vsm_page_mark_bind_groups
                             .after(prepare_vsm_page_requests)
                             .in_set(RenderSystems::PrepareBindGroups),
+                        // Physical page atlas: the resident-page depth texture
+                        // the raster fill writes and vsm_sample.wesl reads.
+                        // Needs the per-view ViewVsmReceivers marker resources
+                        // produces, so it runs after them in PrepareResources.
+                        prepare_vsm_physical_atlas
+                            .after(prepare_vsm_receiver_resources)
+                            .in_set(RenderSystems::PrepareResources),
                     ),
                 ),
             )

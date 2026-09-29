@@ -40,6 +40,7 @@
     expect(dead_code, reason = "VSM ABI's page-mark / sample blocks are consumed by the device-side wiring slice added separately")
 )]
 mod abi;
+mod atlas;
 mod bind_groups;
 mod dispatch;
 mod extract;
@@ -71,6 +72,15 @@ pub(crate) use extract::{extract_vsm_primary_light, VsmPrimaryLight};
 pub(crate) use pipeline::init_vsm_receiver_gen_pipeline;
 pub(crate) use resources::{prepare_vsm_receiver_resources, VsmReceiverBufferCache};
 pub(crate) use settings::PrismVirtualShadowSettings;
+
+#[expect(
+    unused_imports,
+    reason = "physical-atlas resource re-exported for the VSM raster / resolve wiring slice added separately"
+)]
+pub(crate) use atlas::{
+    atlas_tile_origin, physical_pages_per_edge, prepare_vsm_physical_atlas, ViewVsmPhysicalAtlas,
+    VsmPhysicalAtlasCache,
+};
 
 pub(crate) use page_mark::{
     init_vsm_page_mark_pipeline, prepare_vsm_page_mark_bind_groups, prepare_vsm_page_requests,
