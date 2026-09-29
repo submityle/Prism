@@ -66,6 +66,7 @@ pub mod density_lod;
 pub mod dynamics;
 pub mod frame_barriers;
 pub mod frame_pass_layout;
+pub mod frame_resource_map;
 pub mod frame_schedule;
 pub mod frames;
 pub mod gpu_buffers;
