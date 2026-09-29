@@ -164,3 +164,113 @@ impl MaterialRegistry {
         (headers, parameters, textures)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        GpuSurfaceParameters, Illumination, MaterialDomain, MaterialFeatureFlags,
+        MaterialRenderClass,
+    };
+
+    fn record(handle: GenerationalHandle, revision: u32) -> MaterialRecord {
+        MaterialRecord {
+            handle,
+            revision,
+            domain: MaterialDomain::Surface,
+            render_class: MaterialRenderClass::Opaque,
+            illumination: Illumination::Lit,
+            features: MaterialFeatureFlags::default(),
+            closure_mask: 1,
+            surface: GpuSurfaceParameters::default(),
+            textures: Vec::new(),
+            custom_program: None,
+        }
+    }
+
+    #[test]
+    fn publish_rejects_unallocated_handle() {
+        let mut registry = MaterialRegistry::new(8);
+        let rogue = GenerationalHandle::new(4, 1);
+        assert_eq!(
+            registry.publish(record(rogue, 1)),
+            Err(MaterialRegistryError::InvalidHandle(rogue))
+        );
+    }
+
+    #[test]
+    fn publish_rejects_stale_revision() {
+        let mut registry = MaterialRegistry::new(8);
+        let handle = registry.allocate().unwrap();
+        registry.publish(record(handle, 5)).unwrap();
+        // A revision less than or equal to the live one is a stale write.
+        assert_eq!(
+            registry.publish(record(handle, 5)),
+            Err(MaterialRegistryError::StaleRevision {
+                current: 5,
+                incoming: 5,
+            })
+        );
+        // A strictly newer revision supersedes the slot.
+        registry.publish(record(handle, 6)).unwrap();
+        assert_eq!(registry.get(handle).unwrap().revision, 6);
+    }
+
+    #[test]
+    fn get_is_filtered_by_generation() {
+        let mut registry = MaterialRegistry::new(8);
+        let handle = registry.allocate().unwrap();
+        registry.publish(record(handle, 1)).unwrap();
+        let stale = handle.with_generation(handle.generation.wrapping_add(1));
+        assert!(registry.get(stale).is_none());
+        assert!(registry.get(handle).is_some());
+    }
+
+    #[test]
+    fn retire_clears_the_slot() {
+        let mut registry = MaterialRegistry::new(8);
+        let handle = registry.allocate().unwrap();
+        registry.publish(record(handle, 1)).unwrap();
+        registry.retire(handle, GpuCompletionValue(1)).unwrap();
+        assert!(registry.get(handle).is_none());
+        assert!(registry.record_at(handle.index).is_none());
+    }
+
+    #[test]
+    fn record_or_fallback_returns_fallback_for_unknown_handle() {
+        let registry = MaterialRegistry::new(8);
+        let unknown = GenerationalHandle::new(5, 2);
+        let value = registry.record_or_fallback(unknown);
+        assert_eq!(value.handle, unknown);
+        assert_eq!(value.illumination, Illumination::Lit);
+        assert_eq!(value.closure_mask, 1);
+    }
+
+    #[test]
+    fn generation_and_epoch_track_publishes() {
+        let mut registry = MaterialRegistry::new(8);
+        let before = registry.snapshot().epoch;
+        let handle = registry.allocate().unwrap();
+        registry.publish(record(handle, 1)).unwrap();
+        assert_eq!(
+            registry.generation_at(handle.index),
+            Some(handle.generation)
+        );
+        let after = registry.snapshot();
+        assert!(after.epoch > before);
+        assert_eq!(after.active_materials, 1);
+    }
+
+    #[test]
+    fn mark_all_dirty_bumps_buffer_version_and_redirties_rows() {
+        let mut registry = MaterialRegistry::new(8);
+        let handle = registry.allocate().unwrap();
+        registry.publish(record(handle, 1)).unwrap();
+        let version_before = registry.snapshot().buffer_version;
+        let _ = registry.take_dirty();
+        assert!(registry.take_dirty().is_empty());
+        registry.mark_all_dirty();
+        assert!(registry.snapshot().buffer_version > version_before);
+        assert!(registry.take_dirty().contains(&handle.index));
+    }
+}

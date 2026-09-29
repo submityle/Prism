@@ -99,3 +99,66 @@ impl SpecializationId {
         (self.0 >> 32) as u32
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn illumination_from_u32_covers_all_valid_values() {
+        assert_eq!(Illumination::from_u32(0), Some(Illumination::Lit));
+        assert_eq!(Illumination::from_u32(1), Some(Illumination::Stylized));
+        assert_eq!(Illumination::from_u32(2), Some(Illumination::Unlit));
+        assert_eq!(Illumination::from_u32(3), Some(Illumination::Custom));
+    }
+
+    #[test]
+    fn illumination_from_u32_rejects_out_of_range() {
+        assert_eq!(Illumination::from_u32(4), None);
+        assert_eq!(Illumination::from_u32(u32::MAX), None);
+    }
+
+    #[test]
+    fn illumination_default_is_lit() {
+        assert_eq!(Illumination::default(), Illumination::Lit);
+    }
+
+    #[test]
+    fn specialization_id_default_is_zero() {
+        assert_eq!(SpecializationId::default(), SpecializationId(0));
+    }
+
+    #[test]
+    fn specialization_id_round_trips_each_axis() {
+        // Distinct non-overlapping bit patterns in each field prove the packing
+        // masks and shifts do not bleed into neighbouring axes.
+        let closure_mask = 0xABCD_1234_u32;
+        let render_class = 0x5A_u32;
+        let id = SpecializationId::new(Illumination::Custom, closure_mask, render_class);
+        assert_eq!(id.illumination(), Some(Illumination::Custom));
+        assert_eq!(id.illumination_bits(), Illumination::Custom as u32);
+        assert_eq!(id.closure_mask(), closure_mask);
+        assert_eq!(id.render_class_bits(), render_class);
+    }
+
+    #[test]
+    fn specialization_id_masks_render_class_to_eight_bits() {
+        // Only the low eight bits of the render class survive the packing.
+        let id = SpecializationId::new(Illumination::Lit, 0, 0x1FF);
+        assert_eq!(id.render_class_bits(), 0xFF);
+    }
+
+    #[test]
+    fn specialization_id_low_high_split_reconstructs_key() {
+        let id = SpecializationId::new(Illumination::Stylized, 0xFFFF_FFFF, 0x7F);
+        let rebuilt = (u64::from(id.high()) << 32) | u64::from(id.low());
+        assert_eq!(SpecializationId(rebuilt), id);
+    }
+
+    #[test]
+    fn specialization_id_is_deterministic() {
+        let a = SpecializationId::new(Illumination::Unlit, 42, 3);
+        let b = SpecializationId::new(Illumination::Unlit, 42, 3);
+        assert_eq!(a, b);
+    }
+}

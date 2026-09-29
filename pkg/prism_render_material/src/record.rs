@@ -332,3 +332,114 @@ impl MaterialRecord {
         rows
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn closure_bit(kind: ClosureKind) -> u32 {
+        1 << kind as u32
+    }
+
+    fn record(handle: GenerationalHandle, closure_mask: u32, textures: usize) -> MaterialRecord {
+        MaterialRecord {
+            handle,
+            revision: 3,
+            domain: MaterialDomain::Surface,
+            render_class: MaterialRenderClass::Opaque,
+            illumination: Illumination::Lit,
+            features: MaterialFeatureFlags::default(),
+            closure_mask,
+            surface: GpuSurfaceParameters::default(),
+            textures: vec![GpuMaterialTexture::default(); textures],
+            custom_program: None,
+        }
+    }
+
+    #[test]
+    fn feature_flags_union_and_contains() {
+        let mut flags = MaterialFeatureFlags::default();
+        assert!(!flags.contains(MaterialFeatureFlags::EMISSIVE));
+        flags |= MaterialFeatureFlags::EMISSIVE;
+        let combined = flags | MaterialFeatureFlags::DOUBLE_SIDED;
+        assert!(combined.contains(MaterialFeatureFlags::EMISSIVE));
+        assert!(combined.contains(MaterialFeatureFlags::DOUBLE_SIDED));
+        assert!(!combined.contains(MaterialFeatureFlags::TRANSMISSION));
+    }
+
+    #[test]
+    fn lobe_mask_is_derived_from_closure_bits_and_anisotropy() {
+        let handle = GenerationalHandle::new(1, 1);
+        let mut value = record(handle, closure_bit(ClosureKind::Emission), 0);
+        value.surface.anisotropy = 0.5;
+        let mask = value.lobe_mask();
+        assert!(mask.contains(LobeMask::EMISSION));
+        assert!(mask.contains(LobeMask::ANISOTROPY));
+        assert!(!mask.contains(LobeMask::SHEEN));
+    }
+
+    #[test]
+    fn emissive_feature_flag_alone_marks_the_emission_lobe() {
+        let handle = GenerationalHandle::new(1, 1);
+        let mut value = record(handle, 0, 0);
+        value.features |= MaterialFeatureFlags::EMISSIVE;
+        assert!(value.lobe_mask().contains(LobeMask::EMISSION));
+    }
+
+    #[test]
+    fn header_packs_specialization_and_counts() {
+        let handle = GenerationalHandle::new(2, 7);
+        let value = record(handle, closure_bit(ClosureKind::ClearCoat), 2);
+        let epoch = 0x1_0000_0002_u64;
+        let header = value.header(64, 128, 256, epoch);
+        assert_eq!(header.active, 1);
+        assert_eq!(header.generation, 7);
+        assert_eq!(header.texture_count, 2);
+        assert_eq!(header.parameter_offset, 64);
+        assert_eq!(header.texture_offset, 128);
+        assert_eq!(header.closure_graph_offset, 256);
+        assert_eq!(header.custom_program, u32::MAX);
+        // The split epoch and specialization key survive the round trip.
+        let rebuilt_epoch =
+            (u64::from(header.material_epoch_high) << 32) | u64::from(header.material_epoch_low);
+        assert_eq!(rebuilt_epoch, epoch);
+        assert_eq!(header.specialization(), value.specialization());
+    }
+
+    #[test]
+    fn fixed_texture_rows_truncate_without_panicking() {
+        let handle = GenerationalHandle::new(3, 1);
+        let value = record(handle, 0, MAX_MATERIAL_TEXTURES + 3);
+        let rows = value.fixed_texture_rows();
+        assert_eq!(rows.len(), MAX_MATERIAL_TEXTURES);
+    }
+
+    #[test]
+    fn fallback_record_is_a_lit_principled_surface() {
+        let handle = GenerationalHandle::new(0, 0);
+        let value = fallback_material_record(handle, 42);
+        assert_eq!(value.revision, 42);
+        assert_eq!(value.domain, MaterialDomain::Surface);
+        assert_eq!(value.illumination, Illumination::Lit);
+        assert_eq!(value.render_class, MaterialRenderClass::Opaque);
+        assert_eq!(value.closure_mask, 1);
+        assert!(value.textures.is_empty());
+    }
+
+    #[test]
+    fn inactive_header_is_generation_tagged_and_dormant() {
+        let header = inactive_material_header(5);
+        assert_eq!(header.generation, 5);
+        assert_eq!(header.active, 0);
+        assert_eq!(header.custom_program, u32::MAX);
+    }
+
+    #[test]
+    fn fallback_header_specialization_matches_axes() {
+        let header = fallback_material_header(9);
+        let expected =
+            SpecializationId::new(Illumination::Lit, 1, MaterialRenderClass::Opaque as u32);
+        assert_eq!(header.specialization(), expected);
+        assert_eq!(header.active, 1);
+    }
+}

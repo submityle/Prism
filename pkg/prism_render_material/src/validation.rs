@@ -66,3 +66,104 @@ fn visit(
     visited.insert(id);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::{ClosureKind, MaterialValue};
+    use alloc::collections::BTreeMap;
+
+    fn node_id(raw: u32) -> MaterialNodeId {
+        MaterialNodeId(raw)
+    }
+
+    #[test]
+    fn missing_output_is_rejected() {
+        let graph = MaterialGraph::default();
+        assert_eq!(
+            validate_graph(&graph),
+            Err(MaterialValidationError::MissingOutput)
+        );
+    }
+
+    #[test]
+    fn dangling_output_reports_missing_node() {
+        let output = node_id(9);
+        let graph = MaterialGraph {
+            nodes: BTreeMap::new(),
+            output: Some(output),
+        };
+        assert_eq!(
+            validate_graph(&graph),
+            Err(MaterialValidationError::MissingNode(output))
+        );
+    }
+
+    #[test]
+    fn self_referential_node_is_a_cycle() {
+        let output = node_id(0);
+        let graph = MaterialGraph {
+            nodes: BTreeMap::from([(output, MaterialNode::Multiply(output, output))]),
+            output: Some(output),
+        };
+        assert_eq!(
+            validate_graph(&graph),
+            Err(MaterialValidationError::Cycle(output))
+        );
+    }
+
+    #[test]
+    fn mutually_recursive_nodes_are_a_cycle() {
+        let a = node_id(0);
+        let b = node_id(1);
+        let graph = MaterialGraph {
+            nodes: BTreeMap::from([(a, MaterialNode::Add(b, b)), (b, MaterialNode::Add(a, a))]),
+            output: Some(a),
+        };
+        assert!(matches!(
+            validate_graph(&graph),
+            Err(MaterialValidationError::Cycle(_))
+        ));
+    }
+
+    #[test]
+    fn closure_without_inputs_is_rejected() {
+        let output = node_id(0);
+        let graph = MaterialGraph {
+            nodes: BTreeMap::from([(
+                output,
+                MaterialNode::Closure {
+                    kind: ClosureKind::Diffuse,
+                    inputs: Vec::new(),
+                },
+            )]),
+            output: Some(output),
+        };
+        assert_eq!(
+            validate_graph(&graph),
+            Err(MaterialValidationError::EmptyClosure(output))
+        );
+    }
+
+    #[test]
+    fn acyclic_graph_with_shared_subtree_validates_once() {
+        let leaf = node_id(0);
+        let output = node_id(1);
+        // The leaf is referenced twice; the `visited` set must keep the walk
+        // total instead of re-flagging the shared node as a cycle.
+        let graph = MaterialGraph {
+            nodes: BTreeMap::from([
+                (leaf, MaterialNode::Constant(MaterialValue::Scalar(1.0))),
+                (
+                    output,
+                    MaterialNode::Closure {
+                        kind: ClosureKind::Diffuse,
+                        inputs: vec![leaf, leaf],
+                    },
+                ),
+            ]),
+            output: Some(output),
+        };
+        assert_eq!(validate_graph(&graph), Ok(()));
+    }
+}
