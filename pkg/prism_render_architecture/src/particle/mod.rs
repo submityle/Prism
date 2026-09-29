@@ -47,11 +47,17 @@
 //! "pending the GPU backend" where the contract signatures anticipate them.
 
 pub mod attributes;
+pub mod compression;
+pub mod determinism;
+pub mod dual_backend;
 pub mod emitter;
 pub mod events;
+pub mod feedback;
 pub mod graph;
 pub mod lod;
+pub mod modules;
 pub mod pool;
+pub mod raytrace;
 pub mod renderers;
 pub mod shading;
 pub mod simulation;
