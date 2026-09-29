@@ -1,0 +1,36 @@
+[package]
+name = "prism_audio_core"
+version = "0.1.0"
+edition = "2024"
+description = "Backend-neutral real-time DSP kernel for Prism's next-generation audio engine (unified render graph, sample-accurate scheduling, allocation-free block processing). Contains no Unreal Engine, Unity, Godot, Wwise, or FMOD source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+# Deterministic, cross-platform scalar transcendental functions (sin/cos/exp/
+# log). Using these instead of `f32`'s intrinsics keeps DSP coefficient math
+# bit-reproducible across targets, which the workspace lints enforce.
+bevy_math = { path = "../../crates/bevy_math", default-features = false, features = [
+  "nostd-libm",
+] }
+# `f64` rounding for the sample-accurate transport (musical bar boundaries).
+# `bevy_math::ops` only covers `f32`; `libm` gives the `f64` primitives a
+# deterministic, no_std-friendly implementation.
+libm = { version = "0.2", default-features = false }
+serde = { version = "1", default-features = false, features = [
+  "derive",
+], optional = true }
+
+[dev-dependencies]
+prism_audio_core = { path = ".", features = ["serialize"] }
+
+[features]
+default = ["std"]
+# Enables std-backed facilities (heap graph compilation, thread-friendly types).
+# The real-time hot path (`AudioGraph::process`) is allocation-free regardless.
+std = ["bevy_math/std"]
+# Enables serde (de)serialization of plain, non-real-time description data.
+serialize = ["dep:serde"]
+
+[lints]
+workspace = true
