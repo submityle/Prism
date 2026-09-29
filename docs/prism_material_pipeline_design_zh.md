@@ -315,7 +315,13 @@ specialization_id: u64   // 由上面轴的合法排列特化产出
 | **降阶模态软体** | `reduced/{modes,subspace,integrate}`（~1k 行） | 低频振动模态子空间 `u=U·q`，千自由度→个位数 | M7 | 海量廉价软体 | 模态/子空间动力学 |
 | **公共层** | `collide`/`collider`/`constraint`/`dynamics/integrator`/`pipeline`/`driver`/`island`/`sleep`/`state`/`snapshot`/`cache`/`query`/`lod`/`command`/`events`/`config` | 接触/碰撞/积分/管线/快照/LOD/命令流——各求解器共享 | —— | 全部 | Chaos 求解框架 |
 
-**含义修正**：§6.1 图里“布料/毛发/粒子 sim”不是三个独立待建盒子——它们**共享 `prism_physics_core` 这一个已落地统一模拟核**（soft/XPBD 覆盖布料+毛发 guide、fluid 覆盖液体、mpm 覆盖颗粒/雪沙、vbd/reduced 覆盖高级软体）。子系统边界不在“各造 sim”，而在**各自的几何生产 + 特殊渲染**（毛发 strand/card 渲染、液体表面重建 `reconstruct/`、粒子条带）。这正是 §6.3“共享基底 + 分叉响应”在**模拟侧**的体现：sim 核共享、渲染前端分家。
+**含义修正（2026-09-29 复核代码后校准，勿再误读为「已共享」）**：上表准确描述 `prism_physics_core` 这一 ~24k 行**独立统一模拟核**的内部结构，但必须诚实指出当前 committed 代码里的**两栈并存 + 未接线**现状——
+
+- **实测依赖图**：`prism_render_architecture/Cargo.toml` **不依赖** `prism_physics_core`（`rg prism_physics_core pkg/prism_render_architecture/Cargo.toml` 无命中）；全仓仅 workspace 根 `Cargo.toml` 与 `benches/Cargo.toml` 引用它。即 physics_core 目前**尚未被渲染管线消费**。
+- **渲染侧子系统各自自持 sim**：`prism_render_architecture/src/` 下 `cloth/`（`dynamics.rs::solve_cloth`+`vbd.rs`+`ccd.rs`+`tearing.rs`+`pressure.rs`+`collision.rs`+`sleep.rs`+`lod.rs`）、`hair/`（§6.3 的 XPBD/VBD solver）、`particle/`（`simulation.rs`+`emitter.rs`+`stages.rs`）、`water/`（`flip.rs`+`pbf.rs`+`swe.rs`+`spectrum.rs`）、`volumetric/`（`raymarch.rs`+`avsm.rs`+`multiscatter.rs`）都**就地实现了自己的求解器**，并未调用 physics_core。
+- **设计意图 vs 现状的裂缝**：`cloth/coupling.rs` 的注释明确「authoritative rigid-body integrator lives in `prism_physics_core`，render-side module must not reimplement the solver」——即**意图**是 physics_core 当权威刚体/软体积分器、渲染侧只做接触的渲染半边。但**现状**是渲染侧自持了完整 sim，physics_core 未接线，形成两套并行模拟栈。**这是一条真实的待收敛重构线（非本文档 lane 可独改，须由 physics/architecture owner agent 决策接线方向）**。
+
+**因此子系统边界的准确表述是**：每个一等子系统（布料/毛发/粒子/液体/体积）当前**自持几何生产 + sim + 特殊渲染**三件套（§6.2 判据据此成立）；physics_core 是**平行的权威模拟核候选**，其与渲染侧的接线（复用 vs 保持渲染侧轻量代理 + physics_core 当权威）是**未定案的架构决策**，不应在设计文档里预先断言为「已共享」。§6.3“共享基底 + 分叉响应”仍成立，但那讲的是**渲染响应侧**（PBR/NPR 分家、跨切面服务共享），**不等于 sim 核已统一**。
 
 ### 6.2 子系统注册表（四档，钉死）
 
@@ -351,7 +357,7 @@ fallback:              strand 高配, card 基线; RT 反射里毛发用 proxy �
 | **PBR 响应（真分家）** | `prism_render_shading/src/hair_chiang.rs`、`hair_kajiya.rs`、`hair_fiber.rs`、`hair.rs` | `evaluate_hair_chiang_direct`（Chiang R/TT/TRT + dual-scattering）、`evaluate_hair_kajiya_direct`（Kajiya-Kay 廉价路径）、`evaluate_hair_fiber_direct`（fiber-level）、`evaluate_hair_direct`（统一入口，配 CPU golden） | Chiang(Disney) / Marschner / Kajiya-Kay |
 | **NPR 响应（真分家）** | `prism_render_shading/src/stylized_hair.rs` | `StylizedHairParams`/`evaluate_stylized_hair_direct`（风格化各向异性高光带 + ramp + 可与切线解耦的阴影偏移＝天使环） | miHoYo / Arc System Works 毛发 |
 
-**注意共享分界**：毛发 sim 落在 `prism_render_architecture/src/hair/`（子系统私有几何+动力学），而 §6.1 已定案软体统一模拟核在 `prism_physics_core`——毛发的 strand XPBD/VBD 是**子系统就地实现**（strand 拓扑特化、self/SDF 碰撞、休眠），与 physics_core 的通用 soft/XPBD 是「同族算法、不同落点」：通用软体（布料/绳）复用 physics_core，毛发因 strand 特化 + deep-opacity/软光栅耦合而自持 sim。这条边界须在 §6.2 判据下保持一致（子系统 = 自己的几何+sim+特殊渲染）。
+**注意共享分界（对齐 §6.1 校准后的现状）**：毛发 sim 落在 `prism_render_architecture/src/hair/`（子系统私有几何+动力学，`solver.rs` 自持 XPBD/VBD），与 `prism_physics_core` 的通用 soft/XPBD 是「同族算法、不同落点」。**关键澄清**：如 §6.1 复核所述，渲染侧子系统（含毛发）当前**均自持 sim、未接线 physics_core**（`prism_render_architecture` 不依赖该 crate）；physics_core 是平行的权威模拟核候选。毛发因 strand 拓扑特化 + deep-opacity/软光栅深度耦合，即便将来接线也很可能**保持子系统就地 sim**（strand 特化远离通用软体）。这条边界在 §6.2 判据下自洽（子系统 = 自己的几何+sim+特殊渲染）。
 
 **所有一等子系统内部都应长这个样**（共享基底 + PBR/NPR 分叉响应 + 连续 LOD + 软/硬光栅路由 + 共享跨切面服务）——毛发是已落地的同构样板，布料/粒子/液体/体积按此范式对齐，架构一致性拉满。
 
