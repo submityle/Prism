@@ -25,18 +25,13 @@
 //!
 //! ## Binding stride note (`EMBED_STRIDE`)
 //!
-//! The host constant `prism_render_architecture::cloth::gpu::buffers::EMBED_STRIDE`
-//! is `16` and its doc comment describes the embed record as "a sim-triangle
-//! index plus three barycentric f32 weights" — i.e. only `1x u32 + 3x f32`
-//! (16 bytes). That description is a stale simplification: it cannot hold the
-//! full CPU golden `BarycentricBinding`, which carries `tri: [u32; 3]`
-//! (three host indices), `bary: (f32, f32, f32)` (three weights), and
-//! `normal_offset: f32` — seven 4-byte words = 28 bytes minimum. Because 28B
-//! conflicts with the 16B `EMBED_STRIDE`, the GPU-side binding here uses a
-//! **32-byte std430 stride**: seven useful `u32`/`f32` words plus one padding
-//! word rounded up to a 16-byte-aligned power-of-two stride. `EMBED_STRIDE`
-//! must be reconciled to `32` on the host before this kernel is dispatched for
-//! real.
+//! The full CPU golden `BarycentricBinding` carries `tri: [u32; 3]` (three host
+//! indices), `bary: (f32, f32, f32)` (three weights), and `normal_offset: f32`
+//! — seven 4-byte words = 28 bytes, which rounds up to a **32-byte std430
+//! stride** (seven useful `u32`/`f32` words plus one padding word). The host
+//! constant `prism_render_architecture::cloth::gpu::buffers::EMBED_STRIDE` is
+//! `32` to match, so the host allocation and the `ClothEmbedBinding` struct
+//! below agree byte-for-byte.
 
 /// Squared-length floor below which a vector is treated as zero, so
 /// normalization never divides by ~0. Mirrors the CPU `EPS_LEN_SQ` shared by

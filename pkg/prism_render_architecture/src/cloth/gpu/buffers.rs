@@ -33,9 +33,18 @@ pub const CONSTRAINT_STRIDE: u32 = 16;
 /// occupant count, two `u32`), padded to 8 bytes.
 pub const HASH_CELL_STRIDE: u32 = 8;
 
-/// The byte size of one render-mesh embed record (a sim-triangle index plus
-/// three barycentric `f32` weights), padded to the 16-byte `std430` stride.
-pub const EMBED_STRIDE: u32 = 16;
+/// The byte size of one render-mesh embed record, padded to the 32-byte
+/// `std430` stride.
+///
+/// Mirrors the CPU golden `super::super::embed::BarycentricBinding`: three host
+/// sim-triangle indices (`tri: [u32; 3]`), three barycentric weights
+/// (`bary: (f32, f32, f32)`), and a signed face-normal offset
+/// (`normal_offset: f32`) that restores garment thickness — seven 4-byte words
+/// (28 bytes) rounded up to the next 16-byte-aligned `std430` stride. The GPU
+/// twin `cloth_embed.wesl` binds the record at exactly this stride (a matching
+/// `ClothEmbedBinding` with one trailing pad word), so the host allocation and
+/// the shader agree.
+pub const EMBED_STRIDE: u32 = 32;
 
 /// The resident element counts that size every persistent cloth buffer for one
 /// piece.
