@@ -28,7 +28,8 @@
 //! 3. **LOD** — a ladder from full strands to decimated strands to camera
 //!    cards to a static mesh shell, selected by screen coverage; see [`lod`].
 //!    Tier switches are cross-faded with a deterministic per-strand dither so
-//!    they never pop; see [`transition`].
+//!    they never pop; see [`transition`]. The camera-card tier's flat proxy
+//!    ribbon geometry is meshed from the strand frames by [`ribbon`].
 //! 4. **Rasterization** — thin strands are drawn in a compute/visibility pass
 //!    (sub-pixel software raster) rather than the hardware triangle path; see
 //!    [`raster`]. The per-vertex rotation-minimizing frames that give each
@@ -57,6 +58,7 @@ pub mod groom_import;
 pub mod interpolation;
 pub mod lod;
 pub mod raster;
+pub mod ribbon;
 pub mod rt_proxy;
 pub mod sdf_collision;
 pub mod self_collision;
