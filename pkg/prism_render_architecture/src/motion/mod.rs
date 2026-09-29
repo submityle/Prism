@@ -40,6 +40,7 @@ pub mod dilation;
 pub mod disocclusion;
 pub mod encode;
 pub mod reproject;
+pub mod tiles;
 
 /// Squared-length threshold below which a vector is treated as zero, so
 /// normalization never divides by (near) zero and never propagates `NaN`.
