@@ -66,6 +66,67 @@ impl ScreenVertex {
     }
 }
 
+/// Projects a world-space vertex through a clip matrix into a [`ScreenVertex`].
+///
+/// This mirrors the shipping meshlet software-raster vertex path exactly, so
+/// the CPU reference covers the full transform and not just the screen-space
+/// fill. The GPU twin's per-vertex projection stage is diffed against this:
+///
+/// ```text
+/// clip  = clip_from_world * vec4(world, 1)   // column-major, WGSL `m * v`
+/// ndc   = clip.xyz / clip.w                  // perspective divide
+/// uv    = ndc.xy * vec2(0.5, -0.5) + 0.5     // ndc_to_uv
+/// pos   = uv * viewport                      // viewport = (width, height)
+/// depth = ndc.z                              // reversed-Z, 1.0 nearest
+/// ```
+///
+/// `clip_from_world` is stored **column-major** to match a WGSL
+/// `mat4x4<f32>`: `clip_from_world[c]` is column `c`, so the product is
+/// `clip[r] = sum over c of clip_from_world[c][r] * world_h[c]`. The result is
+/// stored as `ScreenVertex.pos` in y-down pixel space, ready to feed
+/// [`rasterize_triangle`] and [`rasterize_cluster`] directly.
+///
+/// Returns `None` when the vertex is on or behind the camera plane
+/// (`clip.w <= 0`), where the perspective divide is undefined. The shipping
+/// shader relies on upstream near-plane culling to exclude these; the reference
+/// makes that precondition explicit instead of emitting a garbage projection.
+#[must_use]
+pub fn project_vertex(
+    clip_from_world: &[[f32; 4]; 4],
+    world_pos: [f32; 3],
+    viewport: [f32; 2],
+) -> Option<ScreenVertex> {
+    let world_h = [world_pos[0], world_pos[1], world_pos[2], 1.0];
+    // Column-major matrix-vector product, matching WGSL `clip_from_world * v`.
+    let clip = [
+        clip_from_world[0][0] * world_h[0]
+            + clip_from_world[1][0] * world_h[1]
+            + clip_from_world[2][0] * world_h[2]
+            + clip_from_world[3][0] * world_h[3],
+        clip_from_world[0][1] * world_h[0]
+            + clip_from_world[1][1] * world_h[1]
+            + clip_from_world[2][1] * world_h[2]
+            + clip_from_world[3][1] * world_h[3],
+        clip_from_world[0][2] * world_h[0]
+            + clip_from_world[1][2] * world_h[1]
+            + clip_from_world[2][2] * world_h[2]
+            + clip_from_world[3][2] * world_h[3],
+        clip_from_world[0][3] * world_h[0]
+            + clip_from_world[1][3] * world_h[1]
+            + clip_from_world[2][3] * world_h[2]
+            + clip_from_world[3][3] * world_h[3],
+    ];
+    if clip[3] <= 0.0 {
+        return None;
+    }
+    let inv_w = 1.0 / clip[3];
+    let ndc = [clip[0] * inv_w, clip[1] * inv_w, clip[2] * inv_w];
+    // `ndc_to_uv`: flips y so uv is y-down, then scales into the viewport.
+    let u = ndc[0] * 0.5 + 0.5;
+    let v = ndc[1] * -0.5 + 0.5;
+    Some(ScreenVertex::new([u * viewport[0], v * viewport[1]], ndc[2]))
+}
+
 /// Packs a depth key and payload into one vis-buffer word.
 #[must_use]
 pub const fn pack_vis(depth_key: u32, payload: u32) -> u64 {
@@ -586,5 +647,93 @@ mod tests {
         rasterize_cluster(&mut buffer, &verts, &tris, 1, false);
         // Triangle 0 still rasterized; the bad triple was skipped.
         assert_eq!(triangle_of(vis_payload(buffer.at(0, 0))), 0);
+    }
+
+    /// Column-major identity: world xyz passes straight to ndc, then to the
+    /// viewport center for the origin.
+    #[test]
+    fn project_identity_maps_origin_to_viewport_center() {
+        let identity = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        let v = project_vertex(&identity, [0.0, 0.0, 0.5], [200.0, 100.0]).unwrap();
+        assert_eq!(v.pos, [100.0, 50.0]);
+        assert_eq!(v.depth, 0.5);
+    }
+
+    /// `ndc_to_uv` flips y: the NDC top (`+1`) lands at the top pixel row
+    /// (`y == 0`) and the NDC bottom (`-1`) at the last row.
+    #[test]
+    fn project_flips_y_for_screen_space() {
+        let identity = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        let top = project_vertex(&identity, [0.0, 1.0, 0.0], [200.0, 100.0]).unwrap();
+        let bottom = project_vertex(&identity, [0.0, -1.0, 0.0], [200.0, 100.0]).unwrap();
+        assert_eq!(top.pos[1], 0.0);
+        assert_eq!(bottom.pos[1], 100.0);
+    }
+
+    /// A homogeneous `w != 1` proves the perspective divide runs: raw clip.x is
+    /// `2` but the divide by `w == 2` puts the vertex on the right screen edge.
+    #[test]
+    fn project_applies_perspective_divide() {
+        let mut m = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        // Constant homogeneous w of 2 regardless of world position.
+        m[3][3] = 2.0;
+        let v = project_vertex(&m, [2.0, 0.0, 0.0], [200.0, 100.0]).unwrap();
+        // ndc.x = 2 / 2 = 1 -> u = 1 -> right edge; not off-screen at x = 4.
+        assert_eq!(v.pos[0], 200.0);
+    }
+
+    /// A vertex with `w <= 0` is on or behind the camera plane; the divide is
+    /// undefined, so the reference rejects it rather than projecting garbage.
+    #[test]
+    fn project_rejects_non_positive_w() {
+        // Row 3 all zero -> clip.w == 0 for every input.
+        let degenerate = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0],
+        ];
+        assert!(project_vertex(&degenerate, [0.0, 0.0, 0.5], [8.0, 8.0]).is_none());
+    }
+
+    /// End-to-end: projecting three world vertices and rasterizing the cluster
+    /// covers the full transform-plus-fill path the GPU twin is diffed against.
+    #[test]
+    fn project_then_rasterize_covers_full_path() {
+        let identity = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        let viewport = [8.0, 8.0];
+        // A triangle straddling the viewport center in NDC space.
+        let world = [[-0.5, -0.5, 0.5], [0.5, -0.5, 0.5], [0.0, 0.5, 0.5]];
+        let verts: Vec<ScreenVertex> = world
+            .iter()
+            .map(|&w| project_vertex(&identity, w, viewport).unwrap())
+            .collect();
+        let mut buffer = VisBuffer::new(8, 8);
+        rasterize_cluster(&mut buffer, &verts, &[[0, 1, 2]], 3, false);
+        // The center pixel is inside the triangle and decodes to cluster 3 / tri 0.
+        let center = buffer.at(4, 4);
+        assert_ne!(center, 0, "center pixel must be covered by the projected triangle");
+        assert_eq!(cluster_of(vis_payload(center)), 3);
+        assert_eq!(triangle_of(vis_payload(center)), 0);
     }
 }
