@@ -52,7 +52,8 @@ use prism_render_architecture::cloth::bending::{
     build_dihedral_bending, project_bending, BendingConstraint,
 };
 use prism_render_architecture::cloth::constraints::{
-    build_grid_constraints, color_constraints, ClothGrid, GridConstraintParams,
+    build_grid_constraints, build_lra_constraints, build_tether_constraints, color_constraints,
+    AnchorLeash, ClothGrid, GridConstraintParams,
 };
 use prism_render_architecture::cloth::dynamics::{solve_cloth, SolverParams};
 use prism_render_architecture::cloth::gpu::kernels::ClothKernel;
@@ -768,6 +769,194 @@ fn bending_gpu_matches_cpu_golden() {
         include_str!("../shaders/cloth_sim.wesl"),
         "embedded://prism_render_scene/shaders/cloth_sim.wesl",
         0x434c_4f54_485f_4245_4e44_5f50_4152_5401,
+    );
+
+    let (gpu_positions, gpu_velocities) =
+        replay_sim_on_gpu(&device, &queue, &wgsl, &positions, &velocities, &plan);
+
+    assert_eq!(gpu_positions.len(), count, "position readback length");
+    assert_eq!(gpu_velocities.len(), count, "velocity readback length");
+
+    for (i, g) in golden.iter().enumerate() {
+        let p = gpu_positions[i];
+        let px = (p[0] - g.position.x).abs();
+        let py = (p[1] - g.position.y).abs();
+        let pz = (p[2] - g.position.z).abs();
+        assert!(
+            px <= PARITY_EPS && py <= PARITY_EPS && pz <= PARITY_EPS,
+            "vertex {i}: GPU position ({}, {}, {}) drifted from golden ({}, {}, {}) beyond {PARITY_EPS}",
+            p[0], p[1], p[2], g.position.x, g.position.y, g.position.z
+        );
+        assert_eq!(
+            p[3].to_bits(),
+            g.inverse_mass.to_bits(),
+            "vertex {i}: positions.w (inverse mass) was mutated"
+        );
+
+        let v = gpu_velocities[i];
+        let vx = (v[0] - g.velocity.x).abs();
+        let vy = (v[1] - g.velocity.y).abs();
+        let vz = (v[2] - g.velocity.z).abs();
+        assert!(
+            vx <= PARITY_EPS && vy <= PARITY_EPS && vz <= PARITY_EPS,
+            "vertex {i}: GPU velocity ({}, {}, {}) drifted from golden ({}, {}, {}) beyond {PARITY_EPS}",
+            v[0], v[1], v[2], g.velocity.x, g.velocity.y, g.velocity.z
+        );
+        assert_eq!(
+            v[3].to_bits(),
+            ((i as f32) + 0.5).to_bits(),
+            "vertex {i}: velocities.w payload was mutated"
+        );
+    }
+}
+
+/// 长程/系绳（LRA / tether）单侧约束在 `rows × cols` 悬挂网格上的一组叶索。
+///
+/// 每个自由粒子沿列系到其所在列的第 0 行 pin 锚点：偶数列走 `ConstraintKind::Lra`
+/// 且 `max_distance` 收得极紧（`0.04 m` 远小于实际垂距 ⇒ 每次迭代都过伸 ⇒ 单侧分支
+/// **激活拉回**），奇数列走 `ConstraintKind::Tether` 且 `max_distance` 放得极松
+/// （`10 m` ⇒ 恒松弛 ⇒ 单侧分支 **早退 no-op**）。两支合起来同时压满
+/// `cloth_project_long_range_batch` 的「过伸投影」与「松弛跳过」两条路径，并覆盖
+/// LRA 与 tether 两种 kind 都归入长程类的打包。
+///
+/// 返回的约束顺序（先全部 LRA、再全部 tether）即上传前的作者序：
+/// [`plan_constraint_upload`](prism_render_architecture::cloth::gpu::upload) 按
+/// sidedness 分区时保序，两条路径（GPU 与黄金）都用同一序喂
+/// [`color_constraints`] ⇒ 着色完全一致。
+fn build_leash_constraints(
+    rows: u32,
+    cols: u32,
+) -> Vec<prism_render_architecture::cloth::Constraint> {
+    let mut lra_leashes: Vec<AnchorLeash> = Vec::new();
+    let mut tether_leashes: Vec<AnchorLeash> = Vec::new();
+    for r in 1..rows {
+        for c in 0..cols {
+            let particle = r * cols + c;
+            let anchor = c; // 同列第 0 行的 pin 锚点。
+            if c % 2 == 0 {
+                lra_leashes.push(AnchorLeash {
+                    particle,
+                    anchor,
+                    max_distance: 0.04,
+                });
+            } else {
+                tether_leashes.push(AnchorLeash {
+                    particle,
+                    anchor,
+                    max_distance: 10.0,
+                });
+            }
+        }
+    }
+    let mut constraints = build_lra_constraints(&lra_leashes);
+    constraints.extend(build_tether_constraints(&tether_leashes));
+    constraints
+}
+
+/// 长程/系绳投影内核 `cloth_project_long_range_batch` 在真机上按整条 dispatch 计划
+/// 重放后，必须与架构层黄金 [`solve_cloth`] 逐顶点落在 `float32` 容差内（位置与速度
+/// 同拍）。这补上 sim 逐颜色内核族的第六个内核——单侧约束——的真机覆盖。
+///
+/// 之所以能直接用 [`solve_cloth`] 当黄金（而非像弯曲那样另写专属黄金）：长程/系绳
+/// 是 `ConstraintKind::Lra` / `ConstraintKind::Tether` 的普通距离约束，
+/// `solve_cloth` 内部就走权威 `project_distance`（含 `is_one_sided() && error <= 0`
+/// 早退分支）逐颜色投影；本工况**只喂**长程约束、无 stretch/shear/bend，故 GPU 的
+/// 每-substep 展平序 `predict → 距离色(空) → 弯曲色(空) → 长程色 → 应变(仅 stretch,
+/// no-op) → 速度` 与 `solve_cloth` 的 `predict → 全色 → 应变 → 速度` 逐算术对齐。
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志"
+)]
+fn long_range_gpu_matches_cpu_golden() {
+    let Some((device, queue)) = try_solver_device() else {
+        eprintln!(
+            "long_range_gpu_matches_cpu_golden: no wgpu adapter with IMMEDIATES support, \
+             skipping on-device parity"
+        );
+        return;
+    };
+
+    const ROWS: u32 = 8;
+    const COLS: u32 = 6;
+    let particles = build_hanging_grid(ROWS, COLS);
+    let count = particles.len();
+
+    // 只喂单侧长程/系绳约束（无任何双侧距离约束 ⇒ 计划只含 predict / 长程色 /
+    // 应变(空,no-op) / 速度）。
+    let constraints = build_leash_constraints(ROWS, COLS);
+    assert!(!constraints.is_empty(), "悬挂网格应产出至少一条长程叶索");
+
+    // 求解参数：CPU 与 GPU 完全对齐。solve_cloth 内部固定 dt = 1/60。
+    let params = SolverParams {
+        substeps: 2,
+        iterations: 1,
+        gravity: Vec3::new(0.0, -9.81, 0.0),
+        damping: 0.02,
+        strain_limit: 0.0,
+    };
+
+    // --- CPU 黄金：按 color_constraints 的颜色序在副本上推进一帧 ---
+    let mut golden = particles.clone();
+    let graph = color_constraints(&constraints);
+    solve_cloth(&mut golden, &graph, params);
+
+    // --- host 上传口径：positions.w = inverse mass；velocities.w 塞可辨识载荷位 ---
+    let positions: Vec<[f32; 4]> = particles
+        .iter()
+        .map(|p| [p.position.x, p.position.y, p.position.z, p.inverse_mass])
+        .collect();
+    let velocities: Vec<[f32; 4]> = particles
+        .iter()
+        .enumerate()
+        .map(|(i, p)| [p.velocity.x, p.velocity.y, p.velocity.z, (i as f32) + 0.5])
+        .collect();
+
+    // --- GPU 计划：走权威 build_solve_plan（与黄金同参、同约束、同着色）---
+    let input = ClothSolveInput {
+        positions: &positions,
+        velocities: &velocities,
+        constraints: &constraints,
+        bending: &[],
+        triangles: &[],
+        wind_velocity: [0.0, 0.0, 0.0],
+        wind_turbulence: 0.0,
+        aero_drag: 0.0,
+        aero_lift: 0.0,
+        colliders: &[],
+        backstops: &[],
+        embed_bindings: &[],
+        render_vertex_count: 0,
+        hash_cell_count: 0,
+        gravity: [0.0, -9.81, 0.0],
+        dt: 1.0 / 60.0,
+        substeps: 2,
+        iterations: 1,
+        damping: 0.02,
+        strain_limit: 0.0,
+        self_thickness: 0.0,
+        self_cell_size: 0.0,
+    };
+    let plan = build_solve_plan(&input);
+    assert!(!plan.constraints.is_empty(), "计划应打包非空的长程约束缓冲");
+    assert!(
+        plan.dispatches
+            .iter()
+            .any(|d| d.kernel == ClothKernel::ProjectLongRangeBatch),
+        "计划应调度至少一个长程投影内核"
+    );
+    assert!(
+        !plan
+            .dispatches
+            .iter()
+            .any(|d| d.kernel == ClothKernel::ProjectDistanceBatch),
+        "纯长程工况不应调度双侧距离内核"
+    );
+
+    let wgsl = compile_wgsl(
+        include_str!("../shaders/cloth_sim.wesl"),
+        "embedded://prism_render_scene/shaders/cloth_sim.wesl",
+        0x434c_4f54_485f_4c52_415f_5041_5254_5401,
     );
 
     let (gpu_positions, gpu_velocities) =
