@@ -14,6 +14,7 @@
 //!    with a Vertex Block Descent high-fidelity solver available for stiff
 //!    styling (braids, gel-set hair) via [`solver`], with
 //!    optional projection out of analytic body proxies (see [`collision`])
+//!    or a tighter signed-distance body field (see [`sdf_collision`]),
 //!    plus an approximate strand-vs-strand pass (see [`self_collision`])
 //!    and an optional ambient wind field (see [`wind`]). Grooms that have
 //!    come to rest are gated out of simulation by a hysteretic sleep test
@@ -45,6 +46,7 @@ pub mod interpolation;
 pub mod lod;
 pub mod raster;
 pub mod rt_proxy;
+pub mod sdf_collision;
 pub mod self_collision;
 pub mod sleep;
 pub mod solver;
