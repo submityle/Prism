@@ -59,6 +59,29 @@ impl HairLodTier {
     pub fn is_strand_based(self) -> bool {
         matches!(self, HairLodTier::Strands | HairLodTier::ReducedStrands)
     }
+
+    /// Coarseness rank: `0` is the finest (full strands), `3` the coarsest
+    /// (mesh shell). Used to clamp a coverage-selected tier so a groom never
+    /// renders finer than the geometry it was actually authored with.
+    #[must_use]
+    pub fn coarseness(self) -> u8 {
+        match self {
+            HairLodTier::Strands => 0,
+            HairLodTier::ReducedStrands => 1,
+            HairLodTier::Cards => 2,
+            HairLodTier::Mesh => 3,
+        }
+    }
+
+    /// Returns whichever of the two tiers is coarser (higher coarseness rank).
+    #[must_use]
+    pub fn coarser_of(self, other: HairLodTier) -> HairLodTier {
+        if other.coarseness() > self.coarseness() {
+            other
+        } else {
+            self
+        }
+    }
 }
 
 /// Authoring description of one hair group at its finest LOD.
@@ -74,4 +97,13 @@ pub struct HairGroup {
     pub segments_per_strand: u32,
     /// Deformation-cache entry that strand dynamics writes into.
     pub deformation: DeformationHandle,
+    /// The finest representation this groom actually has geometry for.
+    ///
+    /// A strand-authored groom sets [`HairLodTier::Strands`] and uses the full
+    /// ladder. A stylized / NPR groom authored directly as hair cards (common
+    /// for anime hair, where cards are the *native* look, not a degraded proxy)
+    /// sets [`HairLodTier::Cards`], so LOD never promotes it to strands it does
+    /// not own. This is an authoring (geometry) choice, orthogonal to the
+    /// PBR/NPR shading response, so both styles honor it identically.
+    pub native_form: HairLodTier,
 }

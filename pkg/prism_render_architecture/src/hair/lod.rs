@@ -68,13 +68,18 @@ pub fn select_hair_lod_tier(coverage: f32, thresholds: HairLodThresholds) -> Hai
 /// Full strands keep the authored counts; reduced strands decimate to a quarter
 /// of the strands with half the control points (never below one); card and mesh
 /// proxies keep no per-strand geometry.
+///
+/// The coverage-selected tier is clamped to be no finer than the group's
+/// [`HairGroup::native_form`], so a card-authored (for example NPR/anime) groom
+/// is never promoted to strands it does not own, no matter how much screen it
+/// covers.
 #[must_use]
 pub fn resolve_hair_lod(
     group: HairGroup,
     coverage: f32,
     thresholds: HairLodThresholds,
 ) -> HairLodDecision {
-    let tier = select_hair_lod_tier(coverage, thresholds);
+    let tier = select_hair_lod_tier(coverage, thresholds).coarser_of(group.native_form);
     let (render_strands, segments_per_strand) = match tier {
         HairLodTier::Strands => (group.max_render_strands, group.segments_per_strand),
         HairLodTier::ReducedStrands => (
@@ -229,6 +234,14 @@ mod tests {
             max_render_strands: 40_000,
             segments_per_strand: 8,
             deformation: DeformationHandle(handle),
+            native_form: HairLodTier::Strands,
+        }
+    }
+
+    fn card_authored_group(handle: u32) -> HairGroup {
+        HairGroup {
+            native_form: HairLodTier::Cards,
+            ..group(handle)
         }
     }
 
@@ -312,5 +325,46 @@ mod tests {
         let plan = bin_hair_lod(&[], &[], THRESHOLDS);
         assert!(plan.is_empty());
         assert_eq!(plan.total(), 0);
+    }
+
+    #[test]
+    fn card_authored_groom_is_never_promoted_to_strands() {
+        // Full screen coverage would otherwise select strands, but a groom
+        // authored as cards (NPR/anime look) has no strand geometry and must
+        // stay at cards regardless of how close the camera is.
+        let decision = resolve_hair_lod(card_authored_group(0), 0.99, THRESHOLDS);
+        assert_eq!(decision.tier, HairLodTier::Cards);
+        assert_eq!(decision.render_strands, 0);
+        assert_eq!(decision.segments_per_strand, 0);
+    }
+
+    #[test]
+    fn card_authored_groom_still_coarsens_with_distance() {
+        // Native form clamps the finest tier, but distance may still drop a
+        // card groom to the mesh shell.
+        let decision = resolve_hair_lod(card_authored_group(0), 0.0, THRESHOLDS);
+        assert_eq!(decision.tier, HairLodTier::Mesh);
+    }
+
+    #[test]
+    fn card_authored_groom_emits_no_deformation_request() {
+        let decision = resolve_hair_lod(card_authored_group(0), 0.99, THRESHOLDS);
+        assert!(hair_deformation_request(card_authored_group(0), decision, 1).is_none());
+    }
+
+    #[test]
+    fn coarser_of_returns_the_higher_rank_tier() {
+        assert_eq!(
+            HairLodTier::Strands.coarser_of(HairLodTier::Cards),
+            HairLodTier::Cards
+        );
+        assert_eq!(
+            HairLodTier::Cards.coarser_of(HairLodTier::Strands),
+            HairLodTier::Cards
+        );
+        assert_eq!(
+            HairLodTier::Mesh.coarser_of(HairLodTier::Strands),
+            HairLodTier::Mesh
+        );
     }
 }

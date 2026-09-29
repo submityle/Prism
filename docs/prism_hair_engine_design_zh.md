@@ -81,8 +81,9 @@ fallback:
 - **连续过渡**：阶梯内再叠加连续 strand 抽稀/宽度补偿（strand 变稀时增宽保覆盖），跨档用 dither/alpha 过渡避免 pop（本轮先落离散阶梯，连续过渡随光栅一并做）。
 - **覆盖度驱动**：输入为屏幕覆盖度 `0..=1`（调用方投影得出），本层是纯确定性分类、无投影/超越函数——契合"compute 可移植 + CPU golden 可测"桶（材质设计 §8.1）。
 - **sim 只在 strand 档**：`Cards`/`Mesh` 不发形变请求（`hair_deformation_request` 返回 `None`），彻底省掉远处 sim 成本。
+- **原生形态钳制（消 PBR 偏见）**：阶梯默认把 strands 当"顶级"、cards/mesh 当"降级"，但对 NPR/二次元 groom，**卡片本身就是授权的原生外观，不是降级**。`HairGroup::native_form` 声明该 groom 最细可用的几何表示：strand-authored 用 `Strands` 走全阶梯；卡片授权用 `Cards`。`resolve_hair_lod` 用 `tier.coarser_of(native_form)` 把覆盖度选出的档钳制成"不比授权更细"——满屏也不会把卡片 groom 提升到它根本没有的 strands，但距离拉远仍可继续降到 mesh。这是**授权几何选择，与 PBR/NPR 着色响应正交**，两种风格同等遵循。
 
-**已落**：`select_hair_lod_tier` / `resolve_hair_lod` / `bin_hair_lod`（按档分桶，越界跳过不 panic，保输入序）/ `hair_deformation_request`（strand 档→ `DeformationKind::Hair`，`vertex_count = render_strands × segments`，`needs_blas_refit=true`）。
+**已落**：`select_hair_lod_tier` / `resolve_hair_lod`（含 `native_form` 钳制）/ `bin_hair_lod`（按档分桶，越界跳过不 panic，保输入序）/ `hair_deformation_request`（strand 档→ `DeformationKind::Hair`，`vertex_count = render_strands × segments`，`needs_blas_refit=true`）。
 
 ---
 
@@ -114,7 +115,7 @@ fallback:
 
 ## 7. 可测性
 
-毛发 sim / LOD / 光栅落"compute 可移植"桶（材质设计 §8.1）：数组进数组出，可写手写 Rust CPU golden 逐值对数。当前 `hair/lod.rs` 已有 9 个确定性单测（阈值分档、抽稀因子、代理档丢几何、strand 档发形变请求、分桶保序、越界跳过、空输入）。着色 BSDF 的 closure 可 golden；RT traversal 不可（驱动 BVH）——与全引擎三桶边界一致。
+毛发 sim / LOD / 光栅落"compute 可移植"桶（材质设计 §8.1）：数组进数组出，可写手写 Rust CPU golden 逐值对数。当前 `hair/lod.rs` 已有 13 个确定性单测（阈值分档、抽稀因子、代理档丢几何、strand 档发形变请求、分桶保序、越界跳过、空输入、`native_form` 卡片钳制、`coarser_of` 秩比较）。着色 BSDF 的 closure 可 golden；RT traversal 不可（驱动 BVH）——与全引擎三桶边界一致。
 
 ---
 
