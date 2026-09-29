@@ -40,6 +40,7 @@ struct PrismSurfaceParameters {
     subsurface: f32,
     index_of_refraction: f32,
     dispersion: f32,
+    face_softness: f32,
 }
 
 struct PrismMaterialTexture {

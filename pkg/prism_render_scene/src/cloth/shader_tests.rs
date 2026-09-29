@@ -5,7 +5,7 @@
 //! uses, validating that `cloth_aerodynamics_snapshot.wesl` and
 //! `cloth_aerodynamics.wesl` parse and type-check exactly as they will on
 //! device. Both kernels are self-contained (no intra-crate `import`s, matching
-//! `face_shadow.wesl`), so a green result also guards the aerodynamics maths —
+//! `ssgi.wesl` / `bloom.wesl`), so a green result also guards the aerodynamics maths —
 //! the per-triangle drag/lift split, the `1/3` face-force distribution, the
 //! integer turbulence hash and the frozen-snapshot gather — against drift from
 //! its `CPU` golden twin in `prism_render_architecture::cloth::aero_gather`.

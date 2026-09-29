@@ -39,6 +39,7 @@ const SEMANTIC_OCCLUSION: u32 = 4u;
 const SEMANTIC_CLEAR_COAT: u32 = 5u;
 const SEMANTIC_CLEAR_COAT_ROUGHNESS: u32 = 6u;
 const SEMANTIC_CLEAR_COAT_NORMAL: u32 = 7u;
+const SEMANTIC_FACE_SDF: u32 = 8u;
 
 // Squared-length floor for a decoded normal before it collapses to +Z. Mirrors
 // `NORMAL_EPSILON` on the CPU golden and `normalize_or` across the reference.

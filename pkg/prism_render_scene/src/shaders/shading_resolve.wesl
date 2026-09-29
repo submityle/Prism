@@ -40,6 +40,9 @@ import prism_render_scene::shaders::brdf::{
     brdf_normalize_or,
     principled_direct,
     stylized_direct,
+    face_shadow_light_cosines,
+    face_shadow_flip_u,
+    evaluate_face_shadow,
 };
 import prism_render_scene::shaders::cloth::{
     cloth_direct,
@@ -117,6 +120,14 @@ const SHADING_CLASS_HAIR: u32 = 5u;
 const SHADING_CLASS_WATER: u32 = 6u;
 const SHADING_CLASS_NPR: u32 = 7u;
 const SHADING_CLASS_CUSTOM: u32 = 8u;
+
+// Semantic tag (mirrors `material_sample.wesl`) marking the baked face
+// shadow SDF map so the toon integrator can find it by scanning the
+// material's texture rows.
+const SEMANTIC_FACE_SDF: u32 = 8u;
+// `GpuMaterialHeader.feature_flags` bit (mirrors
+// `MaterialFeatureFlags::FACE_SHADOW`, 1 << 6) gating the face-shadow lobe.
+const MATERIAL_FEATURE_FACE_SHADOW: u32 = 64u;
 
 // Immediate (push-constant) block. Mirrors `GpuShadingResolveParams` in
 // `shading/resolve/abi.rs` (32 bytes; the trailing vec4 is 16-byte aligned).
@@ -209,11 +220,11 @@ struct MotionMatrices {
 // See opaque.wesl: gather a material's packed block out of the shared u32 heap
 // and expand it, returning the neutral surface if the declared range overruns.
 fn load_surface_parameters(word_offset: u32, lobe_mask: u32) -> PrismSurfaceParameters {
-    let n = min(prism_packed_word_count(lobe_mask), 36u);
+    let n = min(prism_packed_word_count(lobe_mask), 40u);
     if word_offset + n > arrayLength(&material_parameters) {
         return prism_neutral_surface();
     }
-    var words: array<u32, 36>;
+    var words: array<u32, 40>;
     for (var i = 0u; i < n; i = i + 1u) {
         words[i] = material_parameters[word_offset + i];
     }
@@ -240,6 +251,14 @@ fn load_surface_parameters(word_offset: u32, lobe_mask: u32) -> PrismSurfacePara
 // the surface's local position in last frame's world space for the motion
 // vector; never touches shading. Guarded against a short/stale buffer below.
 @group(2) @binding(8) var<storage, read> scene_previous_transforms: array<GpuSceneTransform>;
+// Light-routing channel-gated visibility mask: one `u32` per 32-light cluster
+// word, written by the light-routing cull pass (`light_routing.wesl`). Bit `i`
+// of word `w` is 1 when punctual light `w * 32 + i` survives the receiving
+// primitive's Lighting Channels gate. A view without the opt-in routing
+// subsystem binds a pipeline-owned all-ones dummy, so every light stays
+// visible and shading is byte-for-byte unchanged. Indices past the mask's
+// length are treated as visible (fewer routing records than scene lights).
+@group(2) @binding(9) var<storage, read> visible_lights: array<u32>;
 
 // --- group 3: analytic lights (shared LightBindGroup layout) ---
 @group(3) @binding(0) var<storage, read> directional_lights: array<DirectionalLight>;
@@ -631,6 +650,18 @@ fn sample_directional_shadowed(index: u32, frame: ShadingFrame, world_position: 
 fn sample_punctual_shadowed(index: u32, frame: ShadingFrame, world_position: vec3<f32>) -> LightSample {
     let light = punctual_lights[index];
     var sample = sample_punctual_light(light, world_position);
+    // Lighting Channels gate: drop the light when the routing cull cleared its
+    // visibility bit for the receiving primitive. `sample` is built first and
+    // its `valid` flag cleared (rather than hand-constructing a `LightSample`)
+    // so the gate composes with every other punctual path. Words past the
+    // mask's length are treated as visible, so a disabled subsystem (all-ones
+    // dummy) or fewer routing records than lights never changes shading.
+    let routing_word = index / 32u;
+    if routing_word < arrayLength(&visible_lights)
+        && ((visible_lights[routing_word] >> (index % 32u)) & 1u) == 0u {
+        sample.valid = 0.0;
+        return sample;
+    }
     if sample.valid != 0.0 {
         let n_dot_l = max(dot(frame.normal, sample.direction), 0.0);
         var visibility = 1.0;
@@ -831,6 +862,53 @@ fn shade_principled(
     return accumulated + indirect + emissive;
 }
 
+// Head-frame face-shadow inputs threaded into the toon integrator. `active`
+// `enabled` gates the whole feature; the (forward, right, up) axes are the
+// world-space local X/Y/Z (see the transform block in the entry point), and
+// `tex_offset`/`tex_count`/`uv` locate the baked SDF map row in the shared
+// material texture table.
+struct FaceShadow {
+    enabled: u32,
+    softness: f32,
+    forward: vec3<f32>,
+    right: vec3<f32>,
+    up: vec3<f32>,
+    tex_offset: u32,
+    tex_count: u32,
+    uv: vec2<f32>,
+}
+
+// Neutral value: the feature is off and the axes are the canonical head frame,
+// so any accidental evaluation degrades to a fully lit face.
+fn face_shadow_disabled() -> FaceShadow {
+    var f: FaceShadow;
+    f.enabled = 0u;
+    f.softness = 0.1;
+    f.forward = vec3<f32>(0.0, 0.0, 1.0);
+    f.right = vec3<f32>(1.0, 0.0, 0.0);
+    f.up = vec3<f32>(0.0, 1.0, 0.0);
+    f.tex_offset = 0u;
+    f.tex_count = 0u;
+    f.uv = vec2<f32>(0.0, 0.0);
+    return f;
+}
+
+// Scans the material's texture rows for the `SEMANTIC_FACE_SDF` map and returns
+// its `.x` channel at `uv`. Returns 1.0 (fully lit) when no such row is bound,
+// so a mis-authored material never darkens the face. Mirrors the resolve
+// texture-fold loop's bounds (logical count + physical table length).
+fn face_shadow_sample_sdf(tex_offset: u32, tex_count: u32, uv: vec2<f32>) -> f32 {
+    let tex_end = tex_offset + tex_count;
+    let tex_physical = arrayLength(&material_textures);
+    for (var i = tex_offset; i < tex_end && i < tex_physical; i = i + 1u) {
+        let record = material_textures[i];
+        if record.semantic == SEMANTIC_FACE_SDF {
+            return sample_texture_slot(record, uv).x;
+        }
+    }
+    return 1.0;
+}
+
 // Non-photoreal integrator: the quantized toon lobe over every analytic light,
 // plus indirect and emissive. Mirrors the CPU `MaterialShadingClass::Npr` arm.
 fn shade_toon(
@@ -841,13 +919,29 @@ fn shade_toon(
     emissive: vec3<f32>,
     env: LightEnvironment,
     slice: ClusterSlice,
+    face: FaceShadow,
 ) -> vec3<f32> {
     var accumulated = vec3<f32>(0.0);
     let stylized = env.stylized;
 
     let directional_total = min(env.directional_count, arrayLength(&directional_lights));
     for (var i = 0u; i < directional_total; i = i + 1u) {
-        let sample = sample_directional_shadowed(i, frame, world_position);
+        var sample = sample_directional_shadowed(i, frame, world_position);
+        // Stylized face shadow: the key (index 0) directional light drives a
+        // baked SDF map in the head frame instead of the geometric N.L. The map
+        // is authored for the light on the character's right and mirrored across
+        // u for the left; the forward cosine sets the SDF threshold. This
+        // multiplies the shadow visibility so it composes with cascaded/virtual
+        // shadow occlusion already folded into `sample.visibility`.
+        if face.enabled != 0u && i == 0u {
+            let cosines = face_shadow_light_cosines(face.forward, face.right, face.up, sample.direction);
+            var uv = face.uv;
+            if face_shadow_flip_u(cosines.y) {
+                uv = vec2<f32>(1.0 - uv.x, uv.y);
+            }
+            let sdf = face_shadow_sample_sdf(face.tex_offset, face.tex_count, uv);
+            sample.visibility = sample.visibility * evaluate_face_shadow(sdf, cosines.x, face.softness);
+        }
         accumulated = accumulated + stylized_direct(lit, frame, to_direct_sample(sample), stylized);
     }
 
@@ -1178,6 +1272,12 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     let local_position = geometry.position;
     var world_cur = local_position;
     var world_prev = local_position;
+    // Head frame for the optional face-shadow lobe: the instance's world-space
+    // local X/Y/Z axes (columns 0/1/2 of the linear part below). Defaults to the
+    // identity frame so an untransformed instance still resolves a sane frame.
+    var face_right = vec3<f32>(1.0, 0.0, 0.0);
+    var face_up = vec3<f32>(0.0, 1.0, 0.0);
+    var face_forward = vec3<f32>(0.0, 0.0, 1.0);
     if scene_index < arrayLength(&scene_current_transforms) {
         let world_from_local =
             affine3_to_square(scene_current_transforms[scene_index].world_from_local);
@@ -1186,6 +1286,9 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
             world_from_local[1].xyz,
             world_from_local[2].xyz,
         );
+        face_right = brdf_normalize_or(linear[0], face_right);
+        face_up = brdf_normalize_or(linear[1], face_up);
+        face_forward = brdf_normalize_or(linear[2], face_forward);
         geometry.position = (world_from_local * vec4<f32>(local_position, 1.0)).xyz;
         geometry.normal =
             brdf_normalize_or(inverse_transpose_3x3(linear) * geometry.normal, geometry.normal);
@@ -1214,7 +1317,7 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     if material_header.is_active == 0u || material_header.generation != metadata.y {
         return;
     }
-    let parameter_words = min(prism_packed_word_count(material_header.lobe_mask), 36u);
+    let parameter_words = min(prism_packed_word_count(material_header.lobe_mask), 40u);
     if material_header.parameter_offset + parameter_words > arrayLength(&material_parameters) {
         return;
     }
@@ -1326,7 +1429,18 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
             color = shade_water(lit, frame, geometry.position, indirect, emissive, env, slice);
         }
         case SHADING_CLASS_NPR: {
-            color = shade_toon(lit, frame, geometry.position, indirect, emissive, env, slice);
+            var face = face_shadow_disabled();
+            if (material_header.feature_flags & MATERIAL_FEATURE_FACE_SHADOW) != 0u {
+                face.enabled = 1u;
+                face.softness = parameters.face_softness;
+                face.forward = face_forward;
+                face.right = face_right;
+                face.up = face_up;
+                face.tex_offset = material_header.texture_offset;
+                face.tex_count = material_header.texture_count;
+                face.uv = geometry.uv;
+            }
+            color = shade_toon(lit, frame, geometry.position, indirect, emissive, env, slice, face);
         }
         case SHADING_CLASS_CUSTOM: {
             color = shade_principled(lit, frame, geometry.position, indirect, emissive, env, slice);
