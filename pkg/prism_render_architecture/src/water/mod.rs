@@ -52,6 +52,7 @@ pub mod breaking;
 pub mod budget;
 pub mod foam;
 pub mod ocean_lod;
+pub mod pbf;
 pub mod spectrum;
 pub mod swe;
 pub mod waterline;
