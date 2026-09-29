@@ -54,6 +54,9 @@ pub mod simulation;
 pub mod sort_cull;
 pub mod stages;
 
+#[cfg(test)]
+mod integration_tests;
+
 /// Squared-length threshold below which a vector is treated as zero, so
 /// normalization and force accumulation never divide by (near) zero and never
 /// propagate `NaN`. Matches the sibling cloth/hair subsystems.
