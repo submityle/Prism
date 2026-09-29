@@ -1,6 +1,6 @@
 //! High-level ocean authoring presets.
 //!
-//! [`body::WaterBody`](super::body::WaterBody) is the low-level `#[repr(C)]`
+//! [`WaterBody`](crate::water::body::WaterBody) is the low-level `#[repr(C)]`
 //! mirror the shaders read directly: filling it by hand means drawing an entire
 //! `Tessendorf` initial spectrum, packing an analytic `Gerstner` train and
 //! wiring every count, extent and pass flag. That is the right contract for the
@@ -9,7 +9,7 @@
 //! turns a small, art-directable [`OceanPreset`] into a fully live body,
 //! mirroring the one-line ocean/lake/river actors of `UE5` Water and `Crest`.
 //!
-//! The flagship [`WaterBody::ocean`](super::body::WaterBody::ocean) preset is
+//! The flagship [`WaterBody::ocean`](crate::water::body::WaterBody::ocean) preset is
 //! not a stub: it draws the deterministic initial spectrum from the
 //! dependency-free architecture core
 //! ([`build_initial_spectrum`](prism_render_architecture::water::initial_spectrum::build_initial_spectrum)),
@@ -29,9 +29,9 @@ use prism_render_architecture::water::initial_spectrum::build_initial_spectrum;
 use prism_render_architecture::water::spectrum::{SpectrumKind, SpectrumParams};
 use prism_render_architecture::water::Vec2;
 
-use super::abi::{GpuGerstnerWave, GpuWaterGerstnerParams, GpuWaterSpectrumParams};
-use super::bind_groups::WaterSurfaceExtent;
-use super::body::WaterBody;
+use crate::water::abi::{GpuGerstnerWave, GpuWaterGerstnerParams, GpuWaterSpectrumParams};
+use crate::water::bind_groups::WaterSurfaceExtent;
+use crate::water::body::WaterBody;
 
 /// Standard gravity `g` (m/s^2), shared with the architecture spectral core.
 const GRAVITY: f32 = 9.806_65;

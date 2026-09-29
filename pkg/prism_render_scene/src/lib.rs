@@ -62,7 +62,7 @@ pub use visibility::{
     PrismVisibilityDiagnostics, PrismVisibilityPlugin, UnifiedVisibilityEnabled,
     UnifiedVisibilityReader,
 };
-pub use water::{OceanPreset, WaterBody};
+pub use water::{FlipPoolPreset, OceanPreset, PbfPoolPreset, ShallowWaterPreset, WaterBody};
 
 #[cfg(test)]
 mod tests;

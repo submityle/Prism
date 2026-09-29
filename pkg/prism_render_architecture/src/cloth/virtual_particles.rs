@@ -307,6 +307,61 @@ fn shares_active_vertex(a: &Sample, b: &Sample) -> bool {
     false
 }
 
+/// Which sample pairs a virtual-particle self-collision sweep resolves.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PairScope {
+    /// Every pair, including real-vertex versus real-vertex, so the sweep is a
+    /// self-contained self-collision tier.
+    All,
+    /// Only pairs where at least one sample is a virtual particle, so the sweep
+    /// augments an existing point-to-point pass without re-resolving (and thereby
+    /// stripping the friction from) its real-vertex pairs.
+    VirtualOnly,
+}
+
+/// Runs the full virtual-particle self-collision tier (see [`resolve_core`]).
+///
+/// This resolves every sample pair — real-vertex versus real-vertex included —
+/// so with an empty `virtuals` slice it reduces exactly to the point-to-point
+/// [`resolve_self_collision`](super::collision::resolve_self_collision), and
+/// with virtual particles it additionally catches vertices tunnelling through
+/// triangle interiors. Use this when the virtual tier is the *only*
+/// self-collision pass; use [`resolve_self_collision_virtual_augment`] to layer
+/// it on top of the friction point-to-point pass.
+pub fn resolve_self_collision_virtual(
+    particles: &mut [ClothParticle],
+    virtuals: &[VirtualParticle],
+    cell_size: f32,
+    thickness: f32,
+) {
+    resolve_core(particles, virtuals, cell_size, thickness, PairScope::All);
+}
+
+/// Augments an existing point-to-point self-collision pass with virtual
+/// particles, resolving only pairs where at least one sample is virtual.
+///
+/// The friction point-to-point tier
+/// ([`resolve_self_collision_with_friction`](super::collision::resolve_self_collision_with_friction))
+/// already separates and rubs real-vertex pairs, so re-resolving them here would
+/// undo their tangential friction. This pass therefore skips real-vertex versus
+/// real-vertex pairs and adds only the vertex-versus-face and face-versus-face
+/// coverage the point tier cannot see (design §6.2). An empty `virtuals` slice
+/// is a no-op.
+pub fn resolve_self_collision_virtual_augment(
+    particles: &mut [ClothParticle],
+    virtuals: &[VirtualParticle],
+    cell_size: f32,
+    thickness: f32,
+) {
+    resolve_core(
+        particles,
+        virtuals,
+        cell_size,
+        thickness,
+        PairScope::VirtualOnly,
+    );
+}
+
 /// Resolves cloth self-collision with `NvCloth`-style virtual particles.
 ///
 /// Real particles (`0..particles.len()`) and the supplied `virtuals` are folded
@@ -326,11 +381,12 @@ fn shares_active_vertex(a: &Sample, b: &Sample) -> bool {
 /// two samples, is a no-op. With an empty `virtuals` slice this reduces exactly
 /// to the point-to-point
 /// [`resolve_self_collision`](super::collision::resolve_self_collision).
-pub fn resolve_self_collision_virtual(
+fn resolve_core(
     particles: &mut [ClothParticle],
     virtuals: &[VirtualParticle],
     cell_size: f32,
     thickness: f32,
+    scope: PairScope,
 ) {
     if cell_size <= 0.0 || thickness <= 0.0 {
         return;
@@ -377,11 +433,19 @@ pub fn resolve_self_collision_virtual(
                             if b <= a {
                                 continue;
                             }
+                            let bi = b as usize;
+                            if scope == PairScope::VirtualOnly && ai < real_count && bi < real_count
+                            {
+                                // Both samples are real vertices; the friction
+                                // point-to-point tier already resolved this
+                                // pair, so the augment sweep skips it.
+                                continue;
+                            }
                             resolve_sample_pair(
                                 particles,
                                 &samples,
                                 ai,
-                                b as usize,
+                                bi,
                                 thickness,
                                 thickness_sq,
                             );
@@ -647,6 +711,42 @@ mod tests {
         for i in 0..2 {
             assert_eq!(virt[i].position, plain[i].position);
         }
+    }
+
+    #[test]
+    fn augment_skips_real_real_but_catches_face_penetration() {
+        // Triangle 0,1,2 with an intruder (3) above its centroid, plus a bare
+        // pair of near-coincident free vertices (4,5) that belong to no
+        // triangle. The augment sweep must push the intruder out (real-vs-face)
+        // yet leave the bare real-vs-real pair to the point-to-point tier.
+        let base = [
+            particle(0.0, 0.0, 0.0, 1.0),
+            particle(4.0, 0.0, 0.0, 1.0),
+            particle(0.0, 4.0, 0.0, 1.0),
+            particle(4.0 / 3.0, 4.0 / 3.0, 0.05, 1.0),
+            particle(10.0, 10.0, 10.0, 1.0),
+            particle(10.03, 10.0, 10.0, 1.0),
+        ];
+        let mut particles = base;
+        let virtuals =
+            generate_virtual_particles(&[[0, 1, 2]], &VirtualParticlePattern::nvcloth_default());
+        resolve_self_collision_virtual_augment(&mut particles, &virtuals, 1.0, 0.2);
+
+        // Face penetration resolved: the intruder is pushed out along +z.
+        assert!(particles[3].position.z > base[3].position.z + 1e-4);
+        // The bare real-vertex pair is untouched by the augment sweep.
+        assert_eq!(particles[4].position, base[4].position);
+        assert_eq!(particles[5].position, base[5].position);
+    }
+
+    #[test]
+    fn augment_with_empty_virtuals_is_a_full_noop() {
+        // No virtual particles means no pair involves a virtual sample, so the
+        // augment sweep must not touch even a colliding real-vertex pair.
+        let base = [particle(0.0, 0.0, 0.0, 1.0), particle(0.05, 0.0, 0.0, 1.0)];
+        let mut particles = base;
+        resolve_self_collision_virtual_augment(&mut particles, &[], 1.0, 0.2);
+        assert_eq!(particles, base);
     }
 
     #[test]

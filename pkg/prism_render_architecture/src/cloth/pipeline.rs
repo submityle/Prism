@@ -51,6 +51,9 @@ use super::pressure::{apply_pressure, PressureParams};
 use super::self_ccd::{resolve_self_ccd, SelfCcdParams};
 use super::sleep::{max_kinetic_indicator, should_simulate, SleepParams, SleepState, SleepTracker};
 use super::tearing::{apply_plasticity, apply_tearing, PlasticParams, TearingParams};
+use super::virtual_particles::{
+    generate_virtual_particles, resolve_self_collision_virtual_augment, VirtualParticlePattern,
+};
 use super::wind::{apply_aero_forces, AeroParams, WindField};
 use super::{ClothLodTier, ClothParticle, ClothPiece, Compliance, ConstraintGraph, Vec3};
 use crate::deformation::schedule::DeformationRequest;
@@ -70,6 +73,10 @@ pub struct SelfCollisionParams {
     pub thickness: f32,
     /// Whether self-collision runs this frame.
     pub enabled: bool,
+    /// Whether the NvCloth-style virtual-particle augmentation runs after the
+    /// point-to-point pass, closing the vertex-through-face blind spot on the
+    /// garment's triangle set.
+    pub virtual_particles: bool,
 }
 
 impl Default for SelfCollisionParams {
@@ -78,6 +85,7 @@ impl Default for SelfCollisionParams {
             cell_size: 0.1,
             thickness: 0.05,
             enabled: false,
+            virtual_particles: false,
         }
     }
 }
@@ -90,6 +98,7 @@ impl SelfCollisionParams {
             cell_size,
             thickness,
             enabled: true,
+            virtual_particles: false,
         }
     }
 }
@@ -329,6 +338,25 @@ impl Garment {
                 self.self_collision.thickness,
                 self.friction,
             );
+            // NvCloth-style virtual-particle augmentation: the point-to-point
+            // pass above only sees vertex-vertex proximity, so a vertex driving
+            // straight through the interior of a triangle face slips past it.
+            // Seed barycentric samples across every garment triangle and run a
+            // virtual-only separation pass (real-real pairs are skipped so the
+            // friction pass keeps its tangential authority) to catch those
+            // vertex-through-face folds.
+            if self.self_collision.virtual_particles && !self.triangles.is_empty() {
+                let virtuals = generate_virtual_particles(
+                    &self.triangles,
+                    &VirtualParticlePattern::nvcloth_default(),
+                );
+                resolve_self_collision_virtual_augment(
+                    &mut self.particles,
+                    &virtuals,
+                    self.self_collision.cell_size,
+                    self.self_collision.thickness,
+                );
+            }
         }
         // Self-collision or pressure can push a particle back into a body;
         // re-project so a frame never ends inside a collider, damping the
@@ -749,6 +777,67 @@ mod tests {
             .distance(garment.particles[1].position);
         assert!(sep >= 0.05 - 1.0e-3, "layers not separated: {sep}");
         assert_finite(&garment.particles);
+    }
+
+    #[test]
+    fn virtual_particles_close_vertex_through_face_in_step() {
+        // Point-to-point self-collision only sees vertex-vertex proximity, so a
+        // vertex sitting just under the interior of a triangle face slips past.
+        // With the virtual-particle augmentation the barycentric samples seeded
+        // across the face push the intruder back out; without it the intruder
+        // stays inside the thickness band.
+        let no_gravity = SolverParams {
+            substeps: 4,
+            iterations: 2,
+            gravity: Vec3::ZERO,
+            damping: 0.0,
+            strain_limit: 0.0,
+        };
+        // A single triangle pinned in the y = 0 plane and one free intruder
+        // parked just beneath the face centroid, well inside the 0.05 band.
+        let build = || {
+            let mut a = ClothParticle::new(Vec3::new(0.0, 0.0, 0.0), 0.0);
+            let mut b = ClothParticle::new(Vec3::new(1.0, 0.0, 0.0), 0.0);
+            let mut c = ClothParticle::new(Vec3::new(0.0, 0.0, 1.0), 0.0);
+            a.velocity = Vec3::ZERO;
+            b.velocity = Vec3::ZERO;
+            c.velocity = Vec3::ZERO;
+            let intruder = ClothParticle::new(Vec3::new(1.0 / 3.0, -0.01, 1.0 / 3.0), 1.0);
+            let particles = alloc::vec![a, b, c, intruder];
+            let mut g = Garment::new(particles, ConstraintGraph::default(), no_gravity);
+            g.set_triangles(alloc::vec![[0, 1, 2]]);
+            g.self_collision = SelfCollisionParams::new(0.1, 0.05);
+            g
+        };
+
+        // Augmentation off: the intruder stays buried under the face.
+        let mut off = build();
+        assert!(!off.self_collision.virtual_particles);
+        off.step(1.0 / 60.0);
+        let off_depth = off.particles[3].position.y;
+        assert!(
+            off_depth < 0.02,
+            "without virtual particles the face penetration should persist, y = {off_depth}"
+        );
+
+        // Augmentation on: the intruder is separated to the thickness band.
+        let mut on = build();
+        on.self_collision.virtual_particles = true;
+        on.step(1.0 / 60.0);
+        let on_depth = on.particles[3].position.y.abs();
+        assert!(
+            on_depth >= 0.05 - 1.0e-3,
+            "virtual particles must push the intruder clear of the face, |y| = {on_depth}"
+        );
+        // The pinned face vertices must not have moved.
+        for i in 0..3 {
+            assert!(
+                on.particles[i].position.y.abs() < 1.0e-6,
+                "pinned face vertex {i} drifted: {:?}",
+                on.particles[i].position
+            );
+        }
+        assert_finite(&on.particles);
     }
 
     #[test]

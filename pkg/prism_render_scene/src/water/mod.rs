@@ -45,7 +45,8 @@ pub(crate) mod plugin;
 mod prepare;
 mod resources;
 
-/// The high-level ocean authoring preset and the water body component it
-/// builds, re-exported so a game can spawn an ocean with one call.
-pub use authoring::OceanPreset;
+/// The high-level water authoring presets and the water body component they
+/// build, re-exported so a game can spawn an ocean, `FLIP`/`PBF` pool, or
+/// shallow-water pond with one call.
+pub use authoring::{FlipPoolPreset, OceanPreset, PbfPoolPreset, ShallowWaterPreset};
 pub use body::WaterBody;
