@@ -39,30 +39,20 @@
 mod abi;
 mod settings;
 
-// The pipelines, history resources, bind groups and dispatch are the live
-// consumers of the ABI and settings, but their own only non-test consumer is
-// the shading plugin's `RenderStartup` / `Prepare` / `Core3d` wiring, landing
-// in a later slice; until it lands the whole subsystem is `dead_code`-allowed
-// rather than deleted. Remove these guards when the plugin wiring lands.
-#[expect(dead_code, reason = "compute pipelines whose only non-test consumer is the graph wiring landing in a later slice")]
-mod pipeline;
-#[expect(dead_code, reason = "history resources whose only non-test consumer is the graph wiring landing in a later slice")]
-mod resources;
-#[expect(dead_code, reason = "bind groups whose only non-test consumer is the graph wiring landing in a later slice")]
+// The pipelines, history resources, bind groups and dispatch are wired into the
+// shading plugin's `RenderStartup` / `PrepareResources` / `PrepareBindGroups` /
+// `Core3d` schedules (see `super::plugin`), and `ViewUpscale::upscale_out_view`
+// feeds the composite bind group, so the whole subsystem now has live non-test
+// consumers.
 mod bind_groups;
-#[expect(dead_code, reason = "dispatch scheduling whose only non-test consumer is the graph wiring landing in a later slice")]
 mod dispatch;
+mod pipeline;
+mod resources;
 
 #[cfg(test)]
 mod shader_tests;
 
-#[expect(unused_imports, reason = "re-exported for the shading plugin's graph wiring landing in a later slice")]
 pub(crate) use bind_groups::prepare_upscale_bind_groups;
-#[expect(unused_imports, reason = "re-exported for the shading plugin's graph wiring landing in a later slice")]
 pub(crate) use dispatch::upscale_pass;
-#[expect(unused_imports, reason = "re-exported for the shading plugin's graph wiring landing in a later slice")]
 pub(crate) use pipeline::init_upscale_pipeline;
-#[expect(unused_imports, reason = "re-exported for the shading plugin's graph wiring landing in a later slice")]
 pub(crate) use resources::{prepare_upscale_textures, ViewUpscale};
-#[expect(unused_imports, reason = "re-exported for the shading plugin's graph wiring landing in a later slice")]
-pub(crate) use settings::UpscaleSettings;

@@ -84,10 +84,18 @@ pub(crate) fn upscale_pass(
     // golden tunables and the history-valid flag. This self-contained slice
     // feeds an empty `invalidation_events` (no camera-cut event source is wired
     // yet); the graph integration routes the real event mask here.
+    // Native-resolution wired path: the scene is drawn at the display extent
+    // (see `prepare_upscale_textures`), so the reconstruction resolves 1:1 at
+    // `render_scale = 1.0` (TAAU/DLAA at 100%). Pin the scale here so the
+    // shader's scale-derived Lanczos kernel footprint stays native regardless
+    // of the resource's configured `render_scale`; the sub-resolution
+    // (`render_scale < 1`) draw path is a GPU-validation-gated follow-up.
+    let mut native = settings.to_upscale_settings();
+    native.render_scale = 1.0;
     let reconstruct_params = GpuUpscaleReconstructParams::new(
         upscale.render_extent(),
         upscale.display_extent(),
-        &settings.to_upscale_settings(),
+        &native,
         &settings.config,
         InvalidationMask::default(),
         upscale.valid(),

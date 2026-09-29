@@ -141,7 +141,14 @@ impl ViewUpscale {
     }
 
     /// The `upscale_out` GPU texture, for the downstream blit to the display
-    /// target.
+    /// target. The native-resolution wired path composites `upscale_out_view`
+    /// directly (display and render extents match), so the blit only exists on
+    /// the sub-resolution (`render_scale < 1`) follow-up, which is
+    /// GPU-validation-gated.
+    #[expect(
+        dead_code,
+        reason = "reserved for the sub-resolution blit to the display target (GPU-validation-gated follow-up)"
+    )]
     pub(crate) fn upscale_out_texture(&self) -> &Texture {
         &self.upscale_out_texture
     }
@@ -226,17 +233,6 @@ fn create_output(device: &RenderDevice, size: UVec2) -> (Texture, TextureView) {
     (texture, view)
 }
 
-/// The low-resolution render (draw) extent for a `display` output at
-/// `render_scale`: `ceil(display * render_scale)`, clamped to at least `1x1` so
-/// a degenerate scale still allocates a valid target.
-fn render_extent(display: UVec2, render_scale: f32) -> UVec2 {
-    let scale = render_scale.clamp(f32::MIN_POSITIVE, 1.0);
-    UVec2::new(
-        ((display.x as f32) * scale).ceil().max(1.0) as u32,
-        ((display.y as f32) * scale).ceil().max(1.0) as u32,
-    )
-}
-
 /// `PrepareResources` system resolving [`ViewUpscale`] for every view with a
 /// resident [`ViewVisibilityBuffer`] and [`ViewSsrTextures`] while the
 /// [`UpscaleSettings`] resource is present, (re)allocating the three persistent
@@ -261,7 +257,7 @@ pub(crate) fn prepare_upscale_textures(
     )>,
     mut cache: Local<UpscaleHistoryCache>,
 ) {
-    let Some(settings) = settings else {
+    if settings.is_none() {
         // No settings resource: the feature is not wired this run. Drop any
         // stale per-view state and history so the textures free.
         for (entity, ..) in &views {
@@ -269,7 +265,7 @@ pub(crate) fn prepare_upscale_textures(
         }
         cache.views.clear();
         return;
-    };
+    }
 
     let mut retained = HashSet::<RetainedViewEntity>::new();
     for (entity, view, msaa, visibility, ssr) in &views {
@@ -289,7 +285,14 @@ pub(crate) fn prepare_upscale_textures(
             cache.views.remove(&retained_view);
             continue;
         }
-        let render_size = render_extent(display_size, settings.render_scale);
+        // The reconstruction reads `scene_color` (allocated at the display
+        // extent) as its `render_color`, so with a native-resolution draw the
+        // render extent equals the display extent and the resolve is 1:1.
+        // Driving `render_scale < 1` would require scaling the whole
+        // visibility/compute chain and remapping the composite coverage test to
+        // the render grid — a GPU-validation-gated follow-up — so the wired path
+        // pins the render extent to the display extent here.
+        let render_size = display_size;
         retained.insert(retained_view);
 
         // Reuse the persistent slots only when both extents still match; any

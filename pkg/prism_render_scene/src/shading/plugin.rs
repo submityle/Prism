@@ -45,6 +45,10 @@ use super::{
         init_taa_resolve_pipeline, prepare_taa_bind_groups, prepare_taa_jitter,
         prepare_taa_textures, taa_resolve_pass,
     },
+    upscale::{
+        init_upscale_pipeline, prepare_upscale_bind_groups, prepare_upscale_textures,
+        upscale_pass,
+    },
     virtual_shadow::{
         bridge_vsm_view_resources, collect_vsm_page_readback, extract_vsm_primary_light,
         init_vsm_caster_depth_pipeline, init_vsm_page_mark_pipeline,
@@ -384,6 +388,7 @@ impl Plugin for PrismShadingPlugin {
                         init_kuwahara_pipeline,
                         init_hatching_pipeline,
                         init_halftone_pipeline,
+                        init_upscale_pipeline,
                     ),
                     init_dfg_lut_texture,
                     init_brdf_lut_pipeline,
@@ -536,12 +541,30 @@ impl Plugin for PrismShadingPlugin {
                             .after(prepare_ssgi_textures)
                             .in_set(RenderSystems::PrepareBindGroups),
                     ),
-                    prepare_taa_textures
-                        .after(prepare_visibility_buffers)
-                        .in_set(RenderSystems::PrepareResources),
-                    prepare_taa_bind_groups
-                        .after(prepare_taa_textures)
-                        .in_set(RenderSystems::PrepareBindGroups),
+                    // Nested to keep this Render tuple within Bevy's 20-element
+                    // limit: TAA resolve targets/bind groups plus the temporal
+                    // upscale (native-resolution TAAU + RCAS). The upscale
+                    // reconstruction reads the resolved `scene_color` and the
+                    // SSR device depth, so it orders after both the visibility
+                    // buffers and the SSR textures; the per-view `ViewUpscale`
+                    // it inserts in PrepareResources is visible to the composite
+                    // bind group (PrepareBindGroups), which then composites
+                    // `upscale_out` in place of the raw scene colour.
+                    (
+                        prepare_taa_textures
+                            .after(prepare_visibility_buffers)
+                            .in_set(RenderSystems::PrepareResources),
+                        prepare_taa_bind_groups
+                            .after(prepare_taa_textures)
+                            .in_set(RenderSystems::PrepareBindGroups),
+                        prepare_upscale_textures
+                            .after(prepare_visibility_buffers)
+                            .after(prepare_ssr_textures)
+                            .in_set(RenderSystems::PrepareResources),
+                        prepare_upscale_bind_groups
+                            .after(prepare_upscale_textures)
+                            .in_set(RenderSystems::PrepareBindGroups),
+                    ),
                     // Auto-exposure: the persistent state + histogram buffers
                     // land in PrepareResources (after the visibility buffers so
                     // the `scene_color` they meter exists), then both exposure
@@ -915,6 +938,17 @@ impl Plugin for PrismShadingPlugin {
                     film_grain_pass
                         .after(color_grade_pass)
                         .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                    // Temporal upscale is the final scene_color consumer: it
+                    // reconstructs the fully post-processed HDR image onto the
+                    // display grid (native-resolution TAAU) and RCAS-sharpens the
+                    // result into `upscale_out`, which the composite reads in
+                    // place of the raw scene_color. Ordered after the last
+                    // scene_color writer (film grain) and before the composite.
+                    // Opt-in: a no-op unless the `UpscaleSettings` resource is
+                    // present, so the default renderer is unchanged.
+                    upscale_pass
+                        .after(film_grain_pass)
+                        .before(composite_shading),
                 ),
                 composite_shading
                     .after(bevy_core_pipeline::Core3dSystems::MainPass)

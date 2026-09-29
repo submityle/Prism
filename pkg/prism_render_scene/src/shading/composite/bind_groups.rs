@@ -55,13 +55,14 @@ pub(crate) fn prepare_shading_composite_bind_groups(
             Entity,
             Option<&ViewVisibilityBuffer>,
             Option<&super::super::taa::ViewTaa>,
+            Option<&super::super::upscale::ViewUpscale>,
             Option<&ViewExposureBuffers>,
         ),
         With<ExtractedView>,
     >,
 ) {
     let layout = pipeline_cache.get_bind_group_layout(&pipeline.layout);
-    for (entity, visibility, taa, exposure) in &views {
+    for (entity, visibility, taa, upscale, exposure) in &views {
         let Some(visibility) = visibility else {
             commands.entity(entity).remove::<ViewCompositeBindGroup>();
             continue;
@@ -75,12 +76,21 @@ pub(crate) fn prepare_shading_composite_bind_groups(
             continue;
         };
         let (ids, metadata) = visibility.attachments();
-        // When TAA resolved this frame it wrote the anti-aliased result into its
-        // ping-pong write slot; composite reads that in place of the raw
-        // `scene_color` so the presented image is the temporally resolved one.
-        let scene_color = match taa {
-            Some(taa) => taa.write_view(),
-            None => visibility.scene_color_view(),
+        // Scene-colour source priority: temporal-upscale output > TAA resolve >
+        // raw resolve. When the native-resolution upscale ran this frame it
+        // wrote the reconstructed + RCAS-sharpened display image into
+        // `upscale_out`; on the native path its extent equals the display
+        // extent, so `ids`/`metadata` (also display-resolution) still index it
+        // 1:1 and the composite shader is unchanged. Otherwise, when TAA
+        // resolved it wrote the anti-aliased result into its ping-pong write
+        // slot. Falling back to the raw `scene_color` the resolve pass wrote.
+        // (Upscale and TAA are mutually redundant temporal resolves; if both
+        // are wired the upscale output wins and TAA's work is merely wasted,
+        // never incorrect.)
+        let scene_color = match (upscale, taa) {
+            (Some(upscale), _) => upscale.upscale_out_view(),
+            (None, Some(taa)) => taa.write_view(),
+            (None, None) => visibility.scene_color_view(),
         };
         let bind_group = device.create_bind_group(
             "prism composite",
