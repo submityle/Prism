@@ -179,7 +179,7 @@ fallback:
 5. **碰撞** `cloth/collision.rs`：身体代理体 + 自碰撞（空间哈希/虚拟粒子/CCD）+ backstop。
 6. **嵌入** `cloth/embed.rs`：render mesh 重心坐标/蒙皮嵌入。
 7. **着色分叉**（材质侧）：cloth sheen/fuzz closure（Charlie → Estevez-Kulla）+ 薄透射 + `prism_render_npr` 风格化响应。
-8. **高级项**：空气动力学/风场、绘制约束（backstop/max-dist/blend）、多层耦合、张力褶皱、GPU 持久化 + 异步流水线、撕裂/塑性（可选）。
+8. **高级项**（§6 十二项）：**CPU 算法层已落**（每项真实现 + 确定性单测，仅 `sqrt`）——多求解器插槽 `cloth/dynamics.rs`+`cloth/vbd.rs`（XPBD 基线 / VBD 高保真）、自碰撞 + CCD `cloth/collision.rs`+`cloth/ccd.rs`、空气动力学 / 风场 `cloth/wind.rs`、strain limiting `cloth/dynamics.rs`、绘制约束（backstop/max-distance/blend-weight/anim-drive）`cloth/painted.rs`、多层服装耦合 `cloth/layers.rs`（§6.7 跨层最小分离保叠放次序）、两向刚体耦合 `cloth/coupling.rs`（§6.10 质量加权接触 + 反作用冲量，重求解在物理内核）、撕裂 / 塑性 `cloth/tearing.rs`、压力约束 `cloth/pressure.rs`、休眠 / 激活 `cloth/sleep.rs`、子步 substepping + compliance `cloth/dynamics.rs`；端到端集成于 `cloth/pipeline.rs` `Garment::step`。张力褶皱法线属材质 closure 侧（§7.6，不在本 crate）；GPU 持久化 + 异步流水线待渲染后端接入（本 crate 只产几何 / 形变请求）。
 
 **优先级**：先落骨架 + `cloth/lod.rs`（最低冲突、与毛发对称、`Cloth` 枚举已备），XPBD 动力学与自碰撞随物理内核对齐逐步点亮；每步 wgpu 可编译 + 单测绿。
 
