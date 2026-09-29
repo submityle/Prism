@@ -39,12 +39,15 @@ use wgpu::{
     TextureViewDimension,
 };
 
-use prism_render_architecture::volumetric::math::Vec3;
+use prism_render_architecture::volumetric::math::{Vec2, Vec3};
 use prism_render_architecture::volumetric::multiscatter::MultiScatterLut;
 use prism_render_architecture::volumetric::scatter::OctaveParams;
-use prism_render_architecture::volumetric::{modeling, noise, CloudKind};
+use prism_render_architecture::volumetric::weather::{advect_semi_lagrangian, WeatherField};
+use prism_render_architecture::volumetric::{
+    modeling, noise, CloudKind, WeatherMapHandle, WeatherSample,
+};
 
-use super::abi::{GpuModelingParams, GpuMsLutParams, GpuNoiseBakeParams};
+use super::abi::{GpuModelingParams, GpuMsLutParams, GpuNoiseBakeParams, GpuWeatherAdvectParams};
 
 /// Absolute per-voxel tolerance for the `GPU`-versus-`CPU` comparison.
 ///
@@ -980,5 +983,326 @@ fn multiscatter_lut_gpu_matches_cpu_golden() {
         checked,
         DIM_COS * DIM_DEPTH * DIM_ALBEDO,
         "every LUT cell must be compared"
+    );
+}
+
+/// One on-device semi-Lagrangian weather-advect step must match the `CPU`
+/// golden twin to within `fp16` storage rounding.
+///
+/// The `volumetric_weather_advect` kernel back-traces every weather cell along
+/// the wind and resamples the previous field with clamp-to-edge bilinear taps,
+/// the on-device mirror of [`advect_semi_lagrangian`] +
+/// [`WeatherField::sample_bilinear`]. Both paths run the identical clamp /
+/// truncate / `min` / `mix` arithmetic in `float32` with no `exp`/`pow`
+/// anywhere, and the input map is uploaded as exact `rgba32float`, so the sole
+/// divergence is the final `rgba16float` store. The chosen wind makes the
+/// left-edge departure cells clamp (exercising clamp-to-edge) while the
+/// fractional offsets exercise the four-tap bilinear blend on every channel
+/// (coverage / type / precipitation / wind-disturbance).
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice must reach the test log on hosts without an immediate-data adapter"
+)]
+fn weather_advect_gpu_matches_cpu_golden() {
+    let Some((device, queue)) = try_cloud_device() else {
+        eprintln!(
+            "weather_advect_gpu_matches_cpu_golden: no immediate-data wgpu adapter, skipping on-device parity"
+        );
+        return;
+    };
+
+    // Width is a multiple of 32 so the `rgba16float` output row (8 bytes/texel)
+    // meets the 256-byte copy alignment; both extents are multiples of the
+    // (8, 8, 1) workgroup so no invocation is masked.
+    const WIDTH: u32 = 32;
+    const HEIGHT: u32 = 8;
+    const OUT_BYTES_PER_TEXEL: u32 = 8;
+
+    let params = GpuWeatherAdvectParams {
+        width: WIDTH,
+        height: HEIGHT,
+        // Non-integer wind: the negative x back-traces the left columns past the
+        // edge (clamp-to-edge path), and the fractional magnitudes land every
+        // departure point between cells (four-tap bilinear path).
+        wind_x: 1.5,
+        wind_y: -0.75,
+        dt: 1.0,
+    };
+
+    // Deterministic per-cell weather channels the `CPU` golden re-derives
+    // verbatim; every value already lies in `[0, 1]` so `from_rgba`'s saturate
+    // is the identity and both sides see the same exact `float32` input.
+    fn coverage_at(x: u32, y: u32) -> f32 {
+        ((x * 5 + y * 3) % 11) as f32 / 10.0
+    }
+    fn cloud_type_at(x: u32, y: u32) -> f32 {
+        ((x * 7 + y * 2) % 9) as f32 / 8.0
+    }
+    fn precip_at(x: u32, y: u32) -> f32 {
+        ((x * 2 + y * 13) % 7) as f32 / 6.0
+    }
+    fn wind_at(x: u32, y: u32) -> f32 {
+        ((x * 3 + y * 5) % 13) as f32 / 12.0
+    }
+
+    // Exact-`float32` source map, uploaded to the input texture and mirrored
+    // into the `CPU` `WeatherField` so both paths resample identical cells.
+    let cell_count = (WIDTH * HEIGHT) as usize;
+    let mut src_data = vec![0.0f32; cell_count * 4];
+    let mut y = 0u32;
+    while y < HEIGHT {
+        let mut x = 0u32;
+        while x < WIDTH {
+            let (r, g, b, a) = (
+                coverage_at(x, y),
+                cloud_type_at(x, y),
+                precip_at(x, y),
+                wind_at(x, y),
+            );
+            let m = (y * WIDTH + x) as usize;
+            src_data[4 * m] = r;
+            src_data[4 * m + 1] = g;
+            src_data[4 * m + 2] = b;
+            src_data[4 * m + 3] = a;
+            x += 1;
+        }
+        y += 1;
+    }
+    // `from_cells` fills row-major (`y * WIDTH + x`), matching the upload order.
+    let field = {
+        let mut ordered = Vec::with_capacity(cell_count);
+        let mut y = 0u32;
+        while y < HEIGHT {
+            let mut x = 0u32;
+            while x < WIDTH {
+                ordered.push(WeatherSample::from_rgba(
+                    coverage_at(x, y),
+                    cloud_type_at(x, y),
+                    precip_at(x, y),
+                    wind_at(x, y),
+                ));
+                x += 1;
+            }
+            y += 1;
+        }
+        WeatherField::from_cells(WeatherMapHandle(1), WIDTH, HEIGHT, ordered)
+            .expect("cell count matches width * height")
+    };
+    let advected =
+        advect_semi_lagrangian(&field, Vec2::new(params.wind_x, params.wind_y), params.dt);
+
+    let wgsl = compile_clouds_wgsl();
+    let entry = find_entry_point(&wgsl, "weather_advect");
+    let module = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("volumetric_weather_advect_parity"),
+        source: ShaderSource::Wgsl(wgsl.as_str().into()),
+    });
+
+    // Explicit `@group(0)` layout mirroring the advect kernel: binding 0 = the
+    // sampled `texture_2d<f32>` source map, binding 1 = the write-only
+    // `rgba16float` destination. The pipeline layout's immediate range spans the
+    // full `GpuWeatherAdvectParams` block (auto layout misreflects the immediate
+    // size on this driver).
+    let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+        label: Some("vc_advect_bind_group_layout"),
+        entries: &[
+            BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Texture {
+                    sample_type: TextureSampleType::Float { filterable: false },
+                    view_dimension: TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            BindGroupLayoutEntry {
+                binding: 1,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::StorageTexture {
+                    access: StorageTextureAccess::WriteOnly,
+                    format: TextureFormat::Rgba16Float,
+                    view_dimension: TextureViewDimension::D2,
+                },
+                count: None,
+            },
+        ],
+    });
+    let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+        label: Some("vc_advect_pipeline_layout"),
+        bind_group_layouts: &[Some(&bind_group_layout)],
+        immediate_size: size_of::<GpuWeatherAdvectParams>() as u32,
+    });
+    let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("volumetric_weather_advect_parity"),
+        layout: Some(&pipeline_layout),
+        module: &module,
+        entry_point: Some(&entry),
+        compilation_options: PipelineCompilationOptions::default(),
+        cache: None,
+    });
+
+    let src_tex = device.create_texture(&TextureDescriptor {
+        label: Some("vc_weather_src"),
+        size: Extent3d {
+            width: WIDTH,
+            height: HEIGHT,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: TextureFormat::Rgba32Float,
+        usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let dst_tex = device.create_texture(&TextureDescriptor {
+        label: Some("vc_weather_dst"),
+        size: Extent3d {
+            width: WIDTH,
+            height: HEIGHT,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: TextureFormat::Rgba16Float,
+        usage: TextureUsages::STORAGE_BINDING | TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+
+    // `write_texture` has no 256-byte row-alignment requirement, so the dense
+    // `rgba32float` source uploads as-is.
+    queue.write_texture(
+        TexelCopyTextureInfo {
+            texture: &src_tex,
+            mip_level: 0,
+            origin: Origin3d::ZERO,
+            aspect: TextureAspect::All,
+        },
+        bytemuck::cast_slice(&src_data),
+        TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(WIDTH * 16),
+            rows_per_image: Some(HEIGHT),
+        },
+        Extent3d {
+            width: WIDTH,
+            height: HEIGHT,
+            depth_or_array_layers: 1,
+        },
+    );
+
+    let src_view = src_tex.create_view(&TextureViewDescriptor::default());
+    let dst_view = dst_tex.create_view(&TextureViewDescriptor::default());
+    let bind_group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("vc_advect_bind_group"),
+        layout: &bind_group_layout,
+        entries: &[
+            BindGroupEntry {
+                binding: 0,
+                resource: BindingResource::TextureView(&src_view),
+            },
+            BindGroupEntry {
+                binding: 1,
+                resource: BindingResource::TextureView(&dst_view),
+            },
+        ],
+    });
+
+    let row_bytes = WIDTH * OUT_BYTES_PER_TEXEL;
+    let readback_size = u64::from(row_bytes * HEIGHT);
+    let readback = device.create_buffer(&BufferDescriptor {
+        label: Some("vc_advect_readback"),
+        size: readback_size,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("vc_advect_parity_encoder"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("vc_advect_parity_pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.set_immediates(0, bytemuck::bytes_of(&params));
+        pass.dispatch_workgroups(WIDTH / 8, HEIGHT / 8, 1);
+    }
+    encoder.copy_texture_to_buffer(
+        TexelCopyTextureInfo {
+            texture: &dst_tex,
+            mip_level: 0,
+            origin: Origin3d::ZERO,
+            aspect: TextureAspect::All,
+        },
+        TexelCopyBufferInfo {
+            buffer: &readback,
+            layout: TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row_bytes),
+                rows_per_image: Some(HEIGHT),
+            },
+        },
+        Extent3d {
+            width: WIDTH,
+            height: HEIGHT,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit([encoder.finish()]);
+
+    readback.slice(..).map_async(MapMode::Read, |_| {});
+    device
+        .poll(PollType::wait_indefinitely())
+        .expect("device poll should complete the submitted work");
+
+    let view = readback
+        .slice(..)
+        .get_mapped_range()
+        .expect("mapped readback range should be available after poll");
+    let halves: Vec<u16> = bytemuck::cast_slice::<u8, u16>(&view).to_vec();
+    drop(view);
+    readback.unmap();
+
+    // Row is dense (row_bytes == WIDTH * 8), so cell (x, y) maps to texel
+    // n = y*WIDTH + x with channel c at half-word 4*n + c.
+    let mut checked = 0u32;
+    let mut y = 0u32;
+    while y < HEIGHT {
+        let mut x = 0u32;
+        while x < WIDTH {
+            let n = (y * WIDTH + x) as usize;
+            let gpu = [
+                f16_to_f32(halves[4 * n]),
+                f16_to_f32(halves[4 * n + 1]),
+                f16_to_f32(halves[4 * n + 2]),
+                f16_to_f32(halves[4 * n + 3]),
+            ];
+            let cpu = advected.get(x, y).to_rgba();
+            let mut c = 0usize;
+            while c < 4 {
+                let d = (gpu[c] - cpu[c]).abs();
+                assert!(
+                    d < PARITY_EPS,
+                    "cell ({x}, {y}) channel {c}: gpu={} cpu={} |d|={d}",
+                    gpu[c],
+                    cpu[c],
+                );
+                c += 1;
+            }
+            checked += 1;
+            x += 1;
+        }
+        y += 1;
+    }
+    assert_eq!(
+        checked,
+        WIDTH * HEIGHT,
+        "every weather cell must be compared"
     );
 }
