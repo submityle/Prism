@@ -273,204 +273,10 @@ impl Bvh {
     /// bounds; the builder never panics on pathological input.
     #[must_use]
     pub fn build_with(triangles: &[Triangle], config: BvhBuildConfig) -> Self {
-        if triangles.is_empty() {
-            return Self {
-                nodes: Vec::new(),
-                primitives: Vec::new(),
-            };
-        }
-        let bins = config.sah_bins.max(1);
-        let max_leaf = config.max_leaf_primitives.max(1);
-
-        let mut refs: Vec<PrimRef> = triangles
-            .iter()
-            .enumerate()
-            .map(|(index, tri)| {
-                let bounds = tri.bounds();
-                PrimRef {
-                    bounds,
-                    centroid: bounds.centroid(),
-                    index,
-                }
-            })
-            .collect();
-
-        // Depth-first build into an explicit node arena so the emitted order is
-        // exactly the traversal order (first child immediately follows parent).
-        let mut nodes: Vec<LinearBvhNode> = Vec::with_capacity(2 * triangles.len());
-        let mut ordered: Vec<Triangle> = Vec::with_capacity(triangles.len());
-        Self::build_recursive(
-            &mut refs,
-            triangles,
-            &mut nodes,
-            &mut ordered,
-            max_leaf,
-            bins,
-            f64::from(config.traversal_cost),
-        );
-
-        Self {
-            nodes,
-            primitives: ordered,
-        }
-    }
-
-    /// Recursively partitions `refs[..]`, appending nodes depth-first and the
-    /// reordered primitives into `ordered`. Returns the arena index of the
-    /// subtree root it emitted.
-    fn build_recursive(
-        refs: &mut [PrimRef],
-        triangles: &[Triangle],
-        nodes: &mut Vec<LinearBvhNode>,
-        ordered: &mut Vec<Triangle>,
-        max_leaf: usize,
-        bins: usize,
-        traversal_cost: f64,
-    ) -> u32 {
-        let node_bounds = refs
-            .iter()
-            .fold(Aabb::empty(), |acc, r| acc.union(&r.bounds));
-
-        let make_leaf = |nodes: &mut Vec<LinearBvhNode>, ordered: &mut Vec<Triangle>| -> u32 {
-            let first = ordered.len() as u32;
-            for r in refs.iter() {
-                ordered.push(triangles[r.index]);
-            }
-            let node_index = nodes.len() as u32;
-            nodes.push(LinearBvhNode {
-                bounds: node_bounds,
-                first_primitive: first,
-                second_child: 0,
-                primitive_count: refs.len() as u16,
-                axis: 0,
-            });
-            node_index
-        };
-
-        if refs.len() <= max_leaf {
-            return make_leaf(nodes, ordered);
-        }
-
-        // Partition on the axis with the widest *centroid* spread. A flat
-        // centroid box means all primitives share a center: fall back to a leaf.
-        let centroid_bounds = refs
-            .iter()
-            .fold(Aabb::empty(), |acc, r| acc.enclose(r.centroid));
-        let axis = centroid_bounds.max_extent_axis();
-        let axis_min = centroid_bounds.min[axis];
-        let axis_max = centroid_bounds.max[axis];
-        // A degenerate (flat) centroid box means all centers coincide on this
-        // axis; no partition helps, so emit a leaf.
-        if axis_max <= axis_min {
-            return make_leaf(nodes, ordered);
-        }
-
-        // Bin primitives by centroid position along `axis`, then evaluate the
-        // SAH cost of splitting after each bin boundary.
-        let scale = bins as f32 / (axis_max - axis_min);
-        let mut bin_counts = vec![0usize; bins];
-        let mut bin_bounds = vec![Aabb::empty(); bins];
-        for r in refs.iter() {
-            let mut b = ((r.centroid[axis] - axis_min) * scale) as isize;
-            if b < 0 {
-                b = 0;
-            }
-            if b as usize >= bins {
-                b = bins as isize - 1;
-            }
-            let b = b as usize;
-            bin_counts[b] += 1;
-            bin_bounds[b] = bin_bounds[b].union(&r.bounds);
-        }
-
-        // Forward/backward sweeps give, for each candidate split after bin `i`,
-        // the count and bounds of each side in O(bins).
-        let splits = bins - 1;
-        let mut left_area = vec![0f64; splits];
-        let mut left_count = vec![0usize; splits];
-        let mut acc_bounds = Aabb::empty();
-        let mut acc_count = 0usize;
-        for i in 0..splits {
-            acc_bounds = acc_bounds.union(&bin_bounds[i]);
-            acc_count += bin_counts[i];
-            left_area[i] = f64::from(acc_bounds.surface_area());
-            left_count[i] = acc_count;
-        }
-        let mut right_area = vec![0f64; splits];
-        let mut right_count = vec![0usize; splits];
-        acc_bounds = Aabb::empty();
-        acc_count = 0;
-        for i in (0..splits).rev() {
-            acc_bounds = acc_bounds.union(&bin_bounds[i + 1]);
-            acc_count += bin_counts[i + 1];
-            right_area[i] = f64::from(acc_bounds.surface_area());
-            right_count[i] = acc_count;
-        }
-
-        let parent_area = f64::from(node_bounds.surface_area());
-        let inv_parent_area = if parent_area > 0.0 {
-            1.0 / parent_area
-        } else {
-            0.0
-        };
-        let leaf_cost = refs.len() as f64;
-        let mut best_cost = f64::INFINITY;
-        let mut best_split = usize::MAX;
-        for i in 0..splits {
-            if left_count[i] == 0 || right_count[i] == 0 {
-                continue;
-            }
-            let cost = traversal_cost
-                + (left_area[i] * left_count[i] as f64 + right_area[i] * right_count[i] as f64)
-                    * inv_parent_area;
-            if cost < best_cost {
-                best_cost = cost;
-                best_split = i;
-            }
-        }
-
-        // Make a leaf when the SAH cannot beat it, but only if the leaf fits the
-        // u16 primitive-count field. An oversized cluster is always split (below,
-        // via the binned partition or the median fallback) so it never overflows.
-        let leaf_is_legal = refs.len() <= u16::MAX as usize;
-        if leaf_is_legal && (best_split == usize::MAX || best_cost >= leaf_cost) {
-            return make_leaf(nodes, ordered);
-        }
-
-        // Partition `refs` in place: everything whose centroid bin is `<= split`
-        // goes left. `partition_point`-style stable-ish partition via swapping.
-        let split_bin = best_split;
-        let mut mid = partition_refs(refs, axis, axis_min, scale, bins, split_bin);
-        // Degenerate partition (all on one side) — fall back to a median split so
-        // we still make progress and never recurse forever.
-        if mid == 0 || mid == refs.len() {
-            refs.sort_by(|a, b| {
-                a.centroid[axis]
-                    .partial_cmp(&b.centroid[axis])
-                    .unwrap_or(core::cmp::Ordering::Equal)
-            });
-            mid = refs.len() / 2;
-        }
-
-        // Reserve this interior node's slot, emit first child (immediately
-        // after), then the second child, and patch the offset.
-        let node_index = nodes.len();
-        nodes.push(LinearBvhNode {
-            bounds: node_bounds,
-            first_primitive: 0,
-            second_child: 0,
-            primitive_count: 0,
-            axis: axis as u8,
-        });
-        let (left, right) = refs.split_at_mut(mid);
-        let _first_child = Self::build_recursive(
-            left, triangles, nodes, ordered, max_leaf, bins, traversal_cost,
-        );
-        let second_child = Self::build_recursive(
-            right, triangles, nodes, ordered, max_leaf, bins, traversal_cost,
-        );
-        nodes[node_index].second_child = second_child;
-        node_index as u32
+        let bounds: Vec<Aabb> = triangles.iter().map(Triangle::bounds).collect();
+        let (nodes, order) = build_linear_bvh(&bounds, config);
+        let primitives = order.iter().map(|&i| triangles[i as usize]).collect();
+        Self { nodes, primitives }
     }
 
     /// Number of nodes in the flattened hierarchy.
@@ -539,6 +345,199 @@ fn partition_refs(
     }
     i
 }
+
+/// Builds a flattened `BVH` over arbitrary `bounds`, returning the depth-first
+/// [`LinearBvhNode`] array and, for each leaf slot, the *original* index into
+/// `bounds` (so callers reorder their own payloads — triangles for a `BLAS`,
+/// instances for a `TLAS` — the same way).
+///
+/// Empty input yields empty outputs. This is the single `SAH` build shared by
+/// [`Bvh::build_with`] and the top-level acceleration structure.
+#[must_use]
+pub fn build_linear_bvh(bounds: &[Aabb], config: BvhBuildConfig) -> (Vec<LinearBvhNode>, Vec<u32>) {
+    if bounds.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    let bins = config.sah_bins.max(1);
+    let max_leaf = config.max_leaf_primitives.max(1);
+
+    let mut refs: Vec<PrimRef> = bounds
+        .iter()
+        .enumerate()
+        .map(|(index, b)| PrimRef {
+            bounds: *b,
+            centroid: b.centroid(),
+            index,
+        })
+        .collect();
+
+    // Depth-first build into an explicit node arena so the emitted order is
+    // exactly the traversal order (first child immediately follows parent).
+    let mut nodes: Vec<LinearBvhNode> = Vec::with_capacity(2 * bounds.len());
+    let mut order: Vec<u32> = Vec::with_capacity(bounds.len());
+    build_recursive(
+        &mut refs,
+        &mut nodes,
+        &mut order,
+        max_leaf,
+        bins,
+        f64::from(config.traversal_cost),
+    );
+    (nodes, order)
+}
+
+/// Recursively partitions `refs[..]`, appending nodes depth-first and the
+/// reordered original indices into `order`. Returns the arena index of the
+/// subtree root it emitted.
+fn build_recursive(
+    refs: &mut [PrimRef],
+    nodes: &mut Vec<LinearBvhNode>,
+    order: &mut Vec<u32>,
+    max_leaf: usize,
+    bins: usize,
+    traversal_cost: f64,
+) -> u32 {
+    let node_bounds = refs
+        .iter()
+        .fold(Aabb::empty(), |acc, r| acc.union(&r.bounds));
+
+    let make_leaf = |nodes: &mut Vec<LinearBvhNode>, order: &mut Vec<u32>| -> u32 {
+        let first = order.len() as u32;
+        for r in refs.iter() {
+            order.push(r.index as u32);
+        }
+        let node_index = nodes.len() as u32;
+        nodes.push(LinearBvhNode {
+            bounds: node_bounds,
+            first_primitive: first,
+            second_child: 0,
+            primitive_count: refs.len() as u16,
+            axis: 0,
+        });
+        node_index
+    };
+
+    if refs.len() <= max_leaf {
+        return make_leaf(nodes, order);
+    }
+
+    // Partition on the axis with the widest *centroid* spread.
+    let centroid_bounds = refs
+        .iter()
+        .fold(Aabb::empty(), |acc, r| acc.enclose(r.centroid));
+    let axis = centroid_bounds.max_extent_axis();
+    let axis_min = centroid_bounds.min[axis];
+    let axis_max = centroid_bounds.max[axis];
+    // A degenerate (flat) centroid box means all centers coincide on this axis;
+    // no partition helps, so emit a leaf.
+    if axis_max <= axis_min {
+        return make_leaf(nodes, order);
+    }
+
+    // Bin primitives by centroid position along `axis`, then evaluate the SAH
+    // cost of splitting after each bin boundary.
+    let scale = bins as f32 / (axis_max - axis_min);
+    let mut bin_counts = vec![0usize; bins];
+    let mut bin_bounds = vec![Aabb::empty(); bins];
+    for r in refs.iter() {
+        let mut b = ((r.centroid[axis] - axis_min) * scale) as isize;
+        if b < 0 {
+            b = 0;
+        }
+        if b as usize >= bins {
+            b = bins as isize - 1;
+        }
+        let b = b as usize;
+        bin_counts[b] += 1;
+        bin_bounds[b] = bin_bounds[b].union(&r.bounds);
+    }
+
+    // Forward/backward sweeps give, for each candidate split after bin `i`, the
+    // count and bounds of each side in O(bins).
+    let splits = bins - 1;
+    let mut left_area = vec![0f64; splits];
+    let mut left_count = vec![0usize; splits];
+    let mut acc_bounds = Aabb::empty();
+    let mut acc_count = 0usize;
+    for i in 0..splits {
+        acc_bounds = acc_bounds.union(&bin_bounds[i]);
+        acc_count += bin_counts[i];
+        left_area[i] = f64::from(acc_bounds.surface_area());
+        left_count[i] = acc_count;
+    }
+    let mut right_area = vec![0f64; splits];
+    let mut right_count = vec![0usize; splits];
+    acc_bounds = Aabb::empty();
+    acc_count = 0;
+    for i in (0..splits).rev() {
+        acc_bounds = acc_bounds.union(&bin_bounds[i + 1]);
+        acc_count += bin_counts[i + 1];
+        right_area[i] = f64::from(acc_bounds.surface_area());
+        right_count[i] = acc_count;
+    }
+
+    let parent_area = f64::from(node_bounds.surface_area());
+    let inv_parent_area = if parent_area > 0.0 {
+        1.0 / parent_area
+    } else {
+        0.0
+    };
+    let leaf_cost = refs.len() as f64;
+    let mut best_cost = f64::INFINITY;
+    let mut best_split = usize::MAX;
+    for i in 0..splits {
+        if left_count[i] == 0 || right_count[i] == 0 {
+            continue;
+        }
+        let cost = traversal_cost
+            + (left_area[i] * left_count[i] as f64 + right_area[i] * right_count[i] as f64)
+                * inv_parent_area;
+        if cost < best_cost {
+            best_cost = cost;
+            best_split = i;
+        }
+    }
+
+    // Make a leaf when the SAH cannot beat it, but only if the leaf fits the
+    // u16 primitive-count field. An oversized cluster is always split (below,
+    // via the binned partition or the median fallback) so it never overflows.
+    let leaf_is_legal = refs.len() <= u16::MAX as usize;
+    if leaf_is_legal && (best_split == usize::MAX || best_cost >= leaf_cost) {
+        return make_leaf(nodes, order);
+    }
+
+    // Partition `refs` in place: everything whose centroid bin is `<= split`
+    // goes left.
+    let split_bin = best_split;
+    let mut mid = partition_refs(refs, axis, axis_min, scale, bins, split_bin);
+    // Degenerate partition (all on one side) — fall back to a median split so we
+    // still make progress and never recurse forever.
+    if mid == 0 || mid == refs.len() {
+        refs.sort_by(|a, b| {
+            a.centroid[axis]
+                .partial_cmp(&b.centroid[axis])
+                .unwrap_or(core::cmp::Ordering::Equal)
+        });
+        mid = refs.len() / 2;
+    }
+
+    // Reserve this interior node's slot, emit first child (immediately after),
+    // then the second child, and patch the offset.
+    let node_index = nodes.len();
+    nodes.push(LinearBvhNode {
+        bounds: node_bounds,
+        first_primitive: 0,
+        second_child: 0,
+        primitive_count: 0,
+        axis: axis as u8,
+    });
+    let (left, right) = refs.split_at_mut(mid);
+    let _first_child = build_recursive(left, nodes, order, max_leaf, bins, traversal_cost);
+    let second_child = build_recursive(right, nodes, order, max_leaf, bins, traversal_cost);
+    nodes[node_index].second_child = second_child;
+    node_index as u32
+}
+
 
 #[cfg(test)]
 mod tests {
