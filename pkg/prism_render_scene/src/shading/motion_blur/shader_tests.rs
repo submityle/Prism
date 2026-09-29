@@ -50,3 +50,21 @@ fn motion_blur_wesl_compiles_standalone() {
         .get(0, motion_blur, &[])
         .unwrap_or_else(|error| panic!("motion_blur.wesl failed to compile: {error}"));
 }
+
+/// The immediate block the three passes share is exactly the size and alignment
+/// `motion_blur.wesl`'s `MotionBlurParams` struct expects, and the tile /
+/// workgroup constants match the shader's `@workgroup_size` and tile stride.
+/// A drift here would silently mis-upload the push-constant block on device even
+/// though the shader still compiles, so the compile test above cannot catch it.
+#[test]
+fn motion_blur_abi_matches_the_shader_layout() {
+    use super::abi::{MotionBlurParams, MOTION_BLUR_TILE_SIZE, MOTION_BLUR_WORKGROUP_SIZE};
+
+    // mat4x4 (64) + six u32 (24) + three f32 (12) + three u32 pads (12) = 112,
+    // a multiple of the 16-byte immediate alignment the matrix forces.
+    assert_eq!(size_of::<MotionBlurParams>(), 112);
+    assert_eq!(align_of::<MotionBlurParams>(), 4);
+    // Tiles are 16 texels square; every entry runs at @workgroup_size(8, 8, 1).
+    assert_eq!(MOTION_BLUR_TILE_SIZE, 16);
+    assert_eq!(MOTION_BLUR_WORKGROUP_SIZE, 8);
+}
