@@ -48,6 +48,7 @@
 
 pub mod emitter;
 pub mod pool;
+pub mod simulation;
 
 /// Squared-length threshold below which a vector is treated as zero, so
 /// normalization and force accumulation never divide by (near) zero and never
