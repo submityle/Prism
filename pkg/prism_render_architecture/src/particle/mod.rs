@@ -49,6 +49,7 @@
 pub mod emitter;
 pub mod lod;
 pub mod pool;
+pub mod shading;
 pub mod simulation;
 pub mod sort_cull;
 pub mod stages;
