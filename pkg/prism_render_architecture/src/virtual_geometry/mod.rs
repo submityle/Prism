@@ -10,15 +10,18 @@
 //!
 //! The three concerns are split into focused submodules:
 //!
+//! * [`cull`] — frustum and occlusion cluster culling.
 //! * [`lod`] — screen-space-error LOD selection with hysteresis and
 //!   velocity-scaled prefetch.
 //! * [`page_table`] — page residency bookkeeping and budget-driven eviction.
 //! * [`raster_path`] — software-vs-hardware raster path classification.
 
+pub mod cull;
 pub mod lod;
 pub mod page_table;
 pub mod raster_path;
 
+pub use cull::{cluster_cull, CullVerdict, Frustum, OcclusionProbe, Plane};
 pub use lod::{select_lod, LodLevel, LodProjection, LodSelection};
 pub use page_table::{GeometryPageTable, PageEntry, PageResidency};
 pub use raster_path::{select_raster_path, ClusterRasterStats, RasterCapability};
