@@ -33,4 +33,5 @@ mod abi;
 mod bind_groups;
 mod dispatch;
 mod pipeline;
+pub(crate) mod plugin;
 mod resources;
