@@ -36,8 +36,7 @@ use bevy_render::{
 };
 use bytemuck::Pod;
 use prism_render_architecture::cloth::gpu::buffers::{
-    BufferCounts, PersistentBufferSet, BACKSTOP_STRIDE, CONSTRAINT_STRIDE, EMBED_STRIDE,
-    HASH_CELL_STRIDE, PARTICLE_VEC_STRIDE,
+    BufferCounts, PersistentBufferSet, HASH_CELL_STRIDE, PARTICLE_VEC_STRIDE,
 };
 
 use super::abi::{
@@ -444,6 +443,10 @@ fn clamp_storage(bytes: u32) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use prism_render_architecture::cloth::gpu::buffers::{
+        BACKSTOP_STRIDE, CONSTRAINT_STRIDE, EMBED_STRIDE,
+    };
+
     use super::*;
 
     fn counts() -> BufferCounts {
