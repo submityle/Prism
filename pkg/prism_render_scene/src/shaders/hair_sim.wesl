@@ -16,7 +16,14 @@
 //! 1. edge-length (compliant distance, `alpha = compliance / dt_sub^2`),
 //! 2. local shape (discrete-Laplacian bending toward the neighbour midpoint),
 //! 3. global shape (pull toward the authored goal pose),
-//! 4. long-range attachment (one-sided tether to the strand root).
+//! 4. long-range attachment (one-sided tether to the strand root),
+//!
+//! then, once per substep after the constraint sweeps, projects every free
+//! particle out of the analytic body colliders (spheres / capsules fitted to
+//! the head, neck and shoulders) so hair settles against the body without
+//! fighting the shape solve. This mirrors the CPU golden ordering exactly:
+//! `simulate_strand` runs `resolve_strand_collisions` at the tail of each
+//! substep (design §6.2, §7).
 //!
 //! Buffer layout: every particle is a `vec4<f32>` whose `xyz` is the world
 //! position and whose `w` is the inverse mass (`0` = pinned root riding the
@@ -31,6 +38,10 @@
 /// CPU `EPS_LEN`).
 const HAIR_EPS_LEN: f32 = 1.0e-12;
 
+/// Squared-length epsilon for the collider projection. Mirrors the CPU
+/// `collision::EPS_LEN_SQ` so both stages agree on what "degenerate" means.
+const HAIR_EPS_LEN_SQ: f32 = 1.0e-24;
+
 /// Global XPBD parameters shared by every strand in the dispatch. Mirrors the
 /// CPU `XpbdParams` plus the strand count that bounds the dispatch.
 struct HairXpbdParams {
@@ -44,6 +55,7 @@ struct HairXpbdParams {
     substeps: u32,
     iterations: u32,
     strand_count: u32,
+    collider_count: u32,
 }
 
 /// Flat layout descriptor for one guide strand.
@@ -52,6 +64,17 @@ struct HairStrand {
     particle_count: u32,
     rest_offset: u32,
     goal_offset: u32,
+}
+
+/// Analytic collision proxy. Mirrors the CPU `collision::Collider` enum packed
+/// into two `vec4`s so the storage layout is a clean 32-byte stride:
+/// `center_a.xyz` is the sphere center (or capsule endpoint `a`), `center_a.w`
+/// is the inflation radius, `end_b.xyz` is the capsule endpoint `b` (unused for
+/// a sphere) and `end_b.w` is the kind flag (`< 0.5` = sphere, otherwise
+/// capsule).
+struct HairCollider {
+    center_a: vec4<f32>,
+    end_b: vec4<f32>,
 }
 
 // Particle state: `xyz` = position, `w` = inverse mass (0 = pinned).
@@ -64,6 +87,8 @@ struct HairStrand {
 @group(0) @binding(3) var<storage, read> rest_lengths: array<f32>;
 // Per-strand flat offsets.
 @group(0) @binding(4) var<storage, read> strands: array<HairStrand>;
+// Analytic body colliders applied after every substep's constraint sweeps.
+@group(0) @binding(5) var<storage, read> colliders: array<HairCollider>;
 
 var<immediate> params: HairXpbdParams;
 
@@ -171,6 +196,73 @@ fn hair_solve_lra(off: u32, count: u32, rest_off: u32, stiffness: f32) {
     }
 }
 
+// Pushes `point` out to the surface of the sphere `(center, radius)`. Mirrors
+// CPU `collision::push_out_sphere`: a non-positive radius or an exterior point
+// is returned unchanged, a point coincident with the center escapes along `+Y`
+// (a deterministic non-NaN fallback), and otherwise the point lands exactly on
+// the surface along the radial direction.
+fn hair_push_out_sphere(center: vec3<f32>, radius: f32, point: vec3<f32>) -> vec3<f32> {
+    if radius <= 0.0 {
+        return point;
+    }
+    let delta = point - center;
+    let dist_sq = dot(delta, delta);
+    if dist_sq >= radius * radius {
+        return point;
+    }
+    if dist_sq <= HAIR_EPS_LEN_SQ {
+        return center + vec3<f32>(0.0, radius, 0.0);
+    }
+    // Mirror CPU `normalize_or_zero` (multiply by reciprocal length) then scale
+    // by the radius, in the same operation order so the twin stays bit-faithful.
+    let dir = delta * (1.0 / sqrt(dist_sq));
+    return center + dir * radius;
+}
+
+// Returns the point on segment `a`..`b` closest to `point`. Mirrors CPU
+// `collision::closest_point_on_segment`; a zero-length segment returns `a`.
+fn hair_closest_point_on_segment(a: vec3<f32>, b: vec3<f32>, point: vec3<f32>) -> vec3<f32> {
+    let ab = b - a;
+    let len_sq = dot(ab, ab);
+    if len_sq <= HAIR_EPS_LEN_SQ {
+        return a;
+    }
+    let t = clamp(dot(point - a, ab) / len_sq, 0.0, 1.0);
+    return a + ab * t;
+}
+
+// Projects `point` out of one analytic collider. Mirrors CPU `Collider::push_out`:
+// a capsule reduces to a sphere centered on the closest segment point.
+fn hair_push_out_collider(collider: HairCollider, point: vec3<f32>) -> vec3<f32> {
+    let radius = collider.center_a.w;
+    if collider.end_b.w < 0.5 {
+        return hair_push_out_sphere(collider.center_a.xyz, radius, point);
+    }
+    let closest = hair_closest_point_on_segment(collider.center_a.xyz, collider.end_b.xyz, point);
+    return hair_push_out_sphere(closest, radius, point);
+}
+
+// Projects every free particle of the strand out of every collider, in order.
+// Mirrors CPU `resolve_strand_collisions`: pinned particles are never moved, an
+// empty collider set is a no-op, and colliders are applied in array order so
+// the last one to push wins for a given particle (deterministic).
+fn hair_resolve_collisions(off: u32, count: u32) {
+    if params.collider_count == 0u {
+        return;
+    }
+    for (var i = 0u; i < count; i = i + 1u) {
+        let p = off + i;
+        if positions[p].w <= 0.0 {
+            continue;
+        }
+        var pos = positions[p].xyz;
+        for (var c = 0u; c < params.collider_count; c = c + 1u) {
+            pos = hair_push_out_collider(colliders[c], pos);
+        }
+        positions[p] = vec4<f32>(pos, positions[p].w);
+    }
+}
+
 @compute @workgroup_size(64)
 fn simulate_guides(@builtin(global_invocation_id) gid: vec3<u32>) {
     let s = gid.x;
@@ -211,5 +303,8 @@ fn simulate_guides(@builtin(global_invocation_id) gid: vec3<u32>) {
             hair_solve_global(off, count, goal_off, global_stiffness);
             hair_solve_lra(off, count, rest_off, lra_stiffness);
         }
+        // Project free particles out of the body colliders once per substep,
+        // after the constraint sweeps (mirrors CPU `resolve_strand_collisions`).
+        hair_resolve_collisions(off, count);
     }
 }
