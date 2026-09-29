@@ -15,6 +15,8 @@
 //!   velocity-scaled prefetch.
 //! * [`page_table`] — page residency bookkeeping and budget-driven eviction.
 //! * [`raster_path`] — software-vs-hardware raster path classification.
+//! * [`software_raster`] — deterministic vis-buffer triangle rasterizer
+//!   (CPU golden standard for the GPU compute path).
 //! * [`pipeline`] — per-cluster composition of the decisions above.
 //! * [`hierarchy`] — screen-space-error cut selection over the cluster DAG.
 //! * [`bins`] — GPU-driven raster bin assignment for a selected cut.
@@ -30,6 +32,7 @@ pub mod page_request;
 pub mod page_table;
 pub mod pipeline;
 pub mod raster_path;
+pub mod software_raster;
 
 pub use bins::{bin_cut, RasterBins};
 pub use cull::{cluster_cull, CullVerdict, Frustum, OcclusionProbe, Plane};
@@ -40,6 +43,10 @@ pub use page_request::PageRequestBatch;
 pub use page_table::{GeometryPageTable, PageEntry, PageResidency};
 pub use pipeline::{ClusterDecision, ClusterRequest, ViewCullContext};
 pub use raster_path::{select_raster_path, ClusterRasterStats, RasterCapability};
+pub use software_raster::{
+    encode_depth, pack_vis, rasterize_triangle, vis_depth, vis_payload, ScreenVertex,
+    VisBuffer,
+};
 
 /// Version of the virtual-geometry contracts in this module.
 pub const VIRTUAL_GEOMETRY_VERSION: u32 = 1;
