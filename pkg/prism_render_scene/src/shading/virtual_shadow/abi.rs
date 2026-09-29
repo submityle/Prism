@@ -16,7 +16,7 @@
 //! pin the sizes and offsets against drift.
 
 use bytemuck::{Pod, Zeroable};
-use prism_render_shading::{ClipmapConfig, Receiver};
+use prism_render_shading::{ClipmapConfig, Receiver, ReceiverProjection};
 
 /// Workgroup size of `vsm_page_mark.wesl`'s `vsm_mark_pages` entry: one
 /// receiver per invocation along X (`@workgroup_size(64, 1, 1)`).
@@ -53,6 +53,74 @@ impl GpuVsmReceiver {
             light_space_xy: [receiver.light_space_xy.x, receiver.light_space_xy.y],
             view_distance: receiver.view_distance,
             filter_radius_texels: receiver.filter_radius_texels,
+        }
+    }
+}
+
+/// Uniform block for `vsm_receiver_gen.wesl`: the camera inverse
+/// view-projection used to unproject depth, the light's orthonormal clipmap
+/// basis, the camera world position (view-distance origin) and the receiver
+/// filter footprint.  Laid out to match the shader's `VsmReceiverGenParams`
+/// std140 uniform exactly: the `mat4x4` occupies bytes 0..64 and each following
+/// `vec3` lands on a 16-byte boundary (64, 80, 96) with its trailing scalar
+/// filling the fourth column, so the plain `#[repr(C)]` scalar packing below is
+/// byte-for-byte with std140 without any explicit padding.  112 bytes total.
+///
+/// Unlike the page-mark / sample params (which ride in the push-constant
+/// immediate block), this record is 112 bytes with a `mat4x4`, so it is uploaded
+/// through a uniform buffer instead; see `resources.rs`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub(crate) struct GpuVsmReceiverGenParams {
+    /// Column-major inverse view-projection (bytes 0..64), byte-identical to the
+    /// matrix the CPU golden `reconstruct_world_position` unprojects with.
+    pub inverse_view_proj: [f32; 16],
+    /// Right axis of the light's clipmap plane (unit, perpendicular to the light).
+    pub light_right: [f32; 3],
+    /// Soft-shadow filter kernel half-width in shadow texels (fills the fourth
+    /// column of `light_right`'s 16-byte std140 slot).
+    pub filter_radius_texels: f32,
+    /// Up axis of the light's clipmap plane (unit, perpendicular to the light).
+    pub light_up: [f32; 3],
+    /// Framebuffer width in pixels (fills `light_up`'s fourth std140 column).
+    pub viewport_width: u32,
+    /// Camera world position; a receiver's view distance is measured from here.
+    pub camera_world: [f32; 3],
+    /// Framebuffer height in pixels (fills `camera_world`'s fourth std140 column).
+    pub viewport_height: u32,
+}
+
+impl GpuVsmReceiverGenParams {
+    /// Builds the receiver-generation uniform from the camera inverse
+    /// view-projection, the light-space [`ReceiverProjection`] basis and the
+    /// framebuffer size.  The filter radius is clamped to `>= 0` so a degenerate
+    /// setting can never widen the footprint the wrong way, matching the golden
+    /// [`ReceiverProjection::project`].
+    pub(crate) fn new(
+        inverse_view_proj: [f32; 16],
+        projection: &ReceiverProjection,
+        viewport: [u32; 2],
+    ) -> Self {
+        Self {
+            inverse_view_proj,
+            light_right: [
+                projection.light_right.x,
+                projection.light_right.y,
+                projection.light_right.z,
+            ],
+            filter_radius_texels: projection.filter_radius_texels.max(0.0),
+            light_up: [
+                projection.light_up.x,
+                projection.light_up.y,
+                projection.light_up.z,
+            ],
+            viewport_width: viewport[0],
+            camera_world: [
+                projection.camera_world.x,
+                projection.camera_world.y,
+                projection.camera_world.z,
+            ],
+            viewport_height: viewport[1],
         }
     }
 }
@@ -187,7 +255,8 @@ pub(crate) fn window_slot_count(clipmap: &ClipmapConfig) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy_math::Vec2;
+    use core::mem::offset_of;
+    use bevy_math::{Vec2, Vec3};
 
     fn clipmap() -> ClipmapConfig {
         ClipmapConfig {
@@ -248,6 +317,57 @@ mod tests {
         assert_eq!(params.camera_y, -3.0);
         assert_eq!(params.pad0, 0);
         assert_eq!(params.pad1, 0);
+    }
+
+    #[test]
+    fn receiver_gen_params_layout_matches_the_wesl_std140_uniform() {
+        // mat4 (64B) + three vec3+scalar rows (48B) = 112B, std140-compatible.
+        assert_eq!(size_of::<GpuVsmReceiverGenParams>(), 112);
+        assert_eq!(align_of::<GpuVsmReceiverGenParams>(), 4);
+        // Each vec3 must start on its std140 16-byte boundary and its trailing
+        // scalar must fill the fourth column, or the GPU would read the matrix
+        // and basis shifted.
+        assert_eq!(offset_of!(GpuVsmReceiverGenParams, inverse_view_proj), 0);
+        assert_eq!(offset_of!(GpuVsmReceiverGenParams, light_right), 64);
+        assert_eq!(offset_of!(GpuVsmReceiverGenParams, filter_radius_texels), 76);
+        assert_eq!(offset_of!(GpuVsmReceiverGenParams, light_up), 80);
+        assert_eq!(offset_of!(GpuVsmReceiverGenParams, viewport_width), 92);
+        assert_eq!(offset_of!(GpuVsmReceiverGenParams, camera_world), 96);
+        assert_eq!(offset_of!(GpuVsmReceiverGenParams, viewport_height), 108);
+    }
+
+    #[test]
+    fn receiver_gen_params_builder_copies_matrix_basis_and_viewport() {
+        let inv = [
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
+        ];
+        let projection = ReceiverProjection {
+            light_right: Vec3::new(1.0, 0.0, 0.0),
+            light_up: Vec3::new(0.0, 0.0, 1.0),
+            camera_world: Vec3::new(4.0, 3.0, 10.0),
+            filter_radius_texels: 2.5,
+        };
+        let params = GpuVsmReceiverGenParams::new(inv, &projection, [1920, 1080]);
+        assert_eq!(params.inverse_view_proj, inv);
+        assert_eq!(params.light_right, [1.0, 0.0, 0.0]);
+        assert_eq!(params.light_up, [0.0, 0.0, 1.0]);
+        assert_eq!(params.camera_world, [4.0, 3.0, 10.0]);
+        assert_eq!(params.filter_radius_texels, 2.5);
+        assert_eq!(params.viewport_width, 1920);
+        assert_eq!(params.viewport_height, 1080);
+    }
+
+    #[test]
+    fn receiver_gen_params_clamp_negative_filter_radius() {
+        let projection = ReceiverProjection {
+            light_right: Vec3::X,
+            light_up: Vec3::Z,
+            camera_world: Vec3::ZERO,
+            filter_radius_texels: -4.0,
+        };
+        let params = GpuVsmReceiverGenParams::new([0.0; 16], &projection, [8, 8]);
+        // A negative footprint would shrink pages below their receiver; clamp it.
+        assert_eq!(params.filter_radius_texels, 0.0);
     }
 
     #[test]

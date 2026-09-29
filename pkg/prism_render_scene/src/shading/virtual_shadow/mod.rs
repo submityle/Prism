@@ -54,7 +54,8 @@ mod shader_tests;
     reason = "re-exported for the device-side VSM wiring slice added separately"
 )]
 pub(crate) use abi::{
-    window_slot_count, GpuVsmPageMarkParams, GpuVsmReceiver, GpuVsmSampleParams,
+    window_slot_count, GpuVsmPageMarkParams, GpuVsmReceiver, GpuVsmReceiverGenParams,
+    GpuVsmSampleParams,
     VSM_PAGE_MARK_WORKGROUP_SIZE, VSM_PAGE_UNMAPPED, VSM_SAMPLE_WORKGROUP_SIZE,
 };
 #[expect(
