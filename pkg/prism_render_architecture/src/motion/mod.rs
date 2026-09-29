@@ -36,6 +36,7 @@
 //! layer and are documented as "pending the GPU backend" where the contract
 //! signatures anticipate them.
 
+pub mod encode;
 pub mod reproject;
 
 /// Squared-length threshold below which a vector is treated as zero, so
