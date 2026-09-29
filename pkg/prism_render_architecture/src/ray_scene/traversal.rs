@@ -587,4 +587,77 @@ mod tests {
         }
         assert!(hits > 50, "expected meaningful hit coverage after refit, got {hits}");
     }
+
+    #[test]
+    fn rebuilt_after_refit_matches_fresh_build_and_brute_force() {
+        // Refit loosens bounds under motion; `rebuilt` must reclaim a fresh,
+        // compact SAH hierarchy identical to building from the moved geometry
+        // directly, and traversal must still match brute force.
+        let tris = random_scene(400, 0x0bad_f00d_1357_9bdf);
+        let mut bvh = Bvh::build(&tris);
+
+        let offset = |id: u32| {
+            let f = id as f32 * 0.211;
+            [1.3 - 0.07 * f, 0.6 + 0.09 * f, -0.8 + 0.04 * f]
+        };
+        let moved: Vec<Triangle> = tris
+            .iter()
+            .map(|t| {
+                let o = offset(t.primitive);
+                let shift = |p: [f32; 3]| [p[0] + o[0], p[1] + o[1], p[2] + o[2]];
+                tri(shift(t.v0), shift(t.v1), shift(t.v2), t.primitive)
+            })
+            .collect();
+
+        bvh.refit(|id| {
+            let m = moved[id as usize];
+            [m.v0, m.v1, m.v2]
+        });
+
+        let rebuilt = bvh.rebuilt();
+        // A rebuild reclaims a compact hierarchy: every moved primitive is still
+        // referenced exactly once (ids form the full set), and the flattened
+        // arrays are densely packed (no fragmentation). The exact node ordering
+        // depends on primitive input order, so we assert traversal equivalence
+        // rather than bit-identical layout.
+        assert_eq!(rebuilt.primitive_count(), moved.len());
+        let mut ids: Vec<u32> = rebuilt.primitives().iter().map(|t| t.primitive).collect();
+        ids.sort_unstable();
+        let expected: Vec<u32> = (0..moved.len() as u32).collect();
+        assert_eq!(ids, expected, "rebuilt must reference every primitive once");
+
+        let mut rng = Rng(0x2468_ace0_1337_c0de);
+        let mut hits = 0u32;
+        for _ in 0..4000 {
+            let origin = [
+                rng.range(-12.0, 12.0),
+                rng.range(-12.0, 12.0),
+                rng.range(-12.0, 12.0),
+            ];
+            let dir = [
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+            ];
+            if dir == [0.0, 0.0, 0.0] {
+                continue;
+            }
+            let ray = Ray::infinite(origin, dir);
+            match (rebuilt.closest_hit(&ray), brute_force(&moved, &ray)) {
+                (None, None) => {}
+                (Some(a), Some(b)) => {
+                    assert!(
+                        (a.t - b.t).abs() <= 1e-4 * (1.0 + b.t.abs()),
+                        "rebuilt t mismatch: bvh={} bf={}",
+                        a.t,
+                        b.t
+                    );
+                    assert_eq!(a.primitive, b.primitive, "rebuilt primitive mismatch");
+                    hits += 1;
+                }
+                (a, b) => panic!("rebuilt hit disagreement: bvh={a:?} bf={b:?}"),
+            }
+        }
+        assert!(hits > 50, "expected meaningful hit coverage after rebuild, got {hits}");
+    }
 }

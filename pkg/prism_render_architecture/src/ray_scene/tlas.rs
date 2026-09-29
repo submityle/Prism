@@ -401,6 +401,22 @@ impl Tlas {
         }
     }
 
+    /// Rebuilds a fresh, maximally compact top-level hierarchy from the current
+    /// (possibly refit-moved) instance transforms, over the same `blases` pool.
+    ///
+    /// This is the executor for
+    /// [`AccelerationUpdate::Rebuild`](super::acceleration::AccelerationUpdate::Rebuild)
+    /// and, because the flattened top-level array is contiguous by construction
+    /// with no inter-node fragmentation, also for
+    /// [`AccelerationUpdate::BuildAndCompact`](super::acceleration::AccelerationUpdate::BuildAndCompact):
+    /// the rebuild *is* the compaction. Use this after instance motion has
+    /// loosened refit bounds enough that the policy escalates from
+    /// [`refit`](Self::refit) to a rebuild.
+    #[must_use]
+    pub fn rebuilt(&self, blases: &[Bvh]) -> Tlas {
+        Tlas::build(&self.instances, blases)
+    }
+
     /// Nearest intersection along the world-space `ray`, or `None`.
     ///
     /// `blases` must be the same pool passed to [`Tlas::build`]. Walks the
@@ -901,6 +917,57 @@ mod tests {
                 let refit_hit = tlas.closest_hit(&ray, &blases);
                 let ref_hit = rebuilt.closest_hit(&ray, &blases);
                 match (refit_hit, ref_hit) {
+                    (None, None) => {}
+                    (Some(a), Some(b)) => {
+                        assert_eq!(a.instance_id, b.instance_id, "instance mismatch");
+                        assert_eq!(a.primitive, b.primitive, "primitive mismatch");
+                        assert!(approx(a.t, b.t, 1e-4), "t {} != {}", a.t, b.t);
+                    }
+                    (a, b) => panic!("existence mismatch: {a:?} vs {b:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rebuilt_matches_traversal_and_preserves_instance_set() {
+        // `rebuilt` reclaims a compact TLAS from the current instance transforms.
+        // It must trace identically to the live TLAS (same geometry) and keep
+        // every instance (ids form the full set), though node ordering may differ.
+        let blases = vec![sample_blas()];
+        let mut rng = Rng::new(0xC0FF_EE42);
+        for _ in 0..20 {
+            let n = 1 + (rng.next_u32() % 10) as usize;
+            let start: Vec<Instance> = (0..n)
+                .map(|id| Instance::new(random_affine(&mut rng), 0, id as u32).unwrap())
+                .collect();
+            let mut tlas = Tlas::build(&start, &blases);
+
+            // Move instances, refit, then rebuild from the refit state.
+            let moved: Vec<Affine3> = (0..n).map(|_| random_affine(&mut rng)).collect();
+            tlas.refit(|id| moved[id as usize], &blases);
+            let rebuilt = tlas.rebuilt(&blases);
+
+            assert_eq!(rebuilt.instances().len(), n);
+            let mut ids: Vec<u32> =
+                rebuilt.instances().iter().map(Instance::instance_id).collect();
+            ids.sort_unstable();
+            let expected: Vec<u32> = (0..n as u32).collect();
+            assert_eq!(ids, expected, "rebuilt must keep every instance once");
+
+            for _ in 0..200 {
+                let origin = [
+                    rng.range(-10.0, 10.0),
+                    rng.range(-10.0, 10.0),
+                    rng.range(-10.0, 10.0),
+                ];
+                let dir = [
+                    rng.range(-1.0, 1.0),
+                    rng.range(-1.0, 1.0),
+                    rng.range(-1.0, 1.0),
+                ];
+                let ray = Ray::infinite(origin, dir);
+                match (tlas.closest_hit(&ray, &blases), rebuilt.closest_hit(&ray, &blases)) {
                     (None, None) => {}
                     (Some(a), Some(b)) => {
                         assert_eq!(a.instance_id, b.instance_id, "instance mismatch");

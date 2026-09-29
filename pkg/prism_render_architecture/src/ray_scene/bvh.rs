@@ -353,6 +353,23 @@ impl Bvh {
             self.nodes[i].bounds = bounds;
         }
     }
+
+    /// Rebuilds a fresh, maximally compact hierarchy from the current (possibly
+    /// refit-moved) primitives.
+    ///
+    /// This is the executor for
+    /// [`AccelerationUpdate::Rebuild`](super::acceleration::AccelerationUpdate::Rebuild)
+    /// and, because a flattened linear `BVH` is contiguous by construction with
+    /// no inter-node fragmentation, also for
+    /// [`AccelerationUpdate::BuildAndCompact`](super::acceleration::AccelerationUpdate::BuildAndCompact):
+    /// the rebuild *is* the compaction — the resulting node and primitive arrays
+    /// are densely packed with tight `SAH`-optimal bounds. Use this after motion
+    /// has loosened refit bounds enough that the policy escalates from
+    /// [`refit`](Self::refit) to a rebuild.
+    #[must_use]
+    pub fn rebuilt(&self) -> Bvh {
+        Bvh::build(&self.primitives)
+    }
 }
 
 /// Partitions `refs` so all primitives whose centroid falls in bin `<= split_bin`
