@@ -327,4 +327,72 @@ mod tests {
         assert_eq!(k_lo, 0, "fully covered row must start at step 0");
         assert_eq!(k_hi, steps, "span must be clamped to the last step");
     }
+
+    #[test]
+    fn span_walk_depth_matches_recompute_bit_for_bit() {
+        // The compute twin's inner loop walks only the `row_span` interval while
+        // stepping the depth plane by `z_x` per column (`z += z_x`) instead of
+        // recomputing the barycentric depth at each pixel. This pins that fast
+        // path against the per-pixel recompute. Dyadic coordinates keep every
+        // operation exact: `double_area = 256 = 2^8`, so `vertices_z` and `z_x`
+        // are exactly representable and the walk is bit-for-bit, not approximate.
+        let v0 = sv(0.0, 0.0, 0.25);
+        let v1 = sv(16.0, 0.0, 0.5);
+        let v2 = sv(0.0, 16.0, 0.75);
+        let g = TriangleGradients::new(v0, v1, v2).unwrap();
+        assert_eq!(g.double_area, 256.0, "chosen so vertices_z/z_x are dyadic-exact");
+
+        const WIDTH: u32 = 18;
+        let steps = WIDTH - 1;
+        let mut rows_tested = 0u32;
+        for y in 0..16u32 {
+            let cy = y as f32 + 0.5;
+            let p0 = [0.5, cy];
+            let w_row = [
+                edge(v1.pos, v2.pos, p0),
+                edge(v2.pos, v0.pos, p0),
+                edge(v0.pos, v1.pos, p0),
+            ];
+            let Some((k_lo, k_hi)) = g.row_span(w_row, steps) else {
+                continue;
+            };
+            rows_tested += 1;
+
+            // Depth at the row's origin pixel (x = 0); the closed-form plane is
+            // defined for every column, covered or not.
+            let z_base = g.depth_from_edges(w_row);
+            for k in k_lo..=k_hi {
+                // Incremental fast path: base plane stepped `k` columns by z_x.
+                let z_incremental = z_base + (k as f32) * g.z_x;
+
+                // Recompute path A: edge triple stepped, then dot(vertices_z, .).
+                let w_k = [
+                    w_row[0] + (k as f32) * g.w_x[0],
+                    w_row[1] + (k as f32) * g.w_x[1],
+                    w_row[2] + (k as f32) * g.w_x[2],
+                ];
+                let z_recompute = g.depth_from_edges(w_k);
+
+                // Recompute path B: edge functions sampled directly at the pixel
+                // center, exactly as `software_raster` does per pixel.
+                let p = [k as f32 + 0.5, cy];
+                let w_pixel = [
+                    edge(v1.pos, v2.pos, p),
+                    edge(v2.pos, v0.pos, p),
+                    edge(v0.pos, v1.pos, p),
+                ];
+                let z_pixel = g.depth_from_edges(w_pixel);
+
+                assert_eq!(
+                    z_incremental, z_recompute,
+                    "row y={y} step k={k}: z_x walk must equal edge-recompute"
+                );
+                assert_eq!(
+                    z_recompute, z_pixel,
+                    "row y={y} step k={k}: stepped edges must equal per-pixel sample"
+                );
+            }
+        }
+        assert!(rows_tested >= 4, "expected several covered rows, got {rows_tested}");
+    }
 }
