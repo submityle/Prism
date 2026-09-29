@@ -17,7 +17,9 @@
 //! * [`raster_path`] — software-vs-hardware raster path classification.
 //! * [`pipeline`] — per-cluster composition of the decisions above.
 //! * [`hierarchy`] — screen-space-error cut selection over the cluster DAG.
+//! * [`bins`] — GPU-driven raster bin assignment for a selected cut.
 
+pub mod bins;
 pub mod cull;
 pub mod hierarchy;
 pub mod lod;
@@ -25,6 +27,7 @@ pub mod page_table;
 pub mod pipeline;
 pub mod raster_path;
 
+pub use bins::{bin_cut, RasterBins};
 pub use cull::{cluster_cull, CullVerdict, Frustum, OcclusionProbe, Plane};
 pub use hierarchy::{ClusterHierarchy, ClusterNode, CutCluster};
 pub use lod::{select_lod, LodLevel, LodProjection, LodSelection};
