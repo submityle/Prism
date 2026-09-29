@@ -45,6 +45,15 @@ use super::{
         PrismVirtualShadowSettings, VsmPageRequestBufferCache, VsmPrimaryLight,
         VsmReceiverBufferCache,
     },
+    motion_blur::{
+        init_motion_blur_pipeline, motion_blur_pass, prepare_motion_blur_bind_groups,
+        prepare_motion_blur_textures, PrismMotionBlurSettings,
+    },
+    volumetrics::{
+        init_volumetrics_pipeline, prepare_volumetrics_bind_groups,
+        prepare_volumetrics_resources, volumetrics_pass, PrismVolumetricsSettings,
+        VolumetricsTextureCache,
+    },
     ibl::{
         dfg_lut_precompute_pass, env_prefilter_precompute_pass, extract_ibl_source,
         init_brdf_lut_pipeline, init_dfg_lut_texture, init_env_prefilter_pipeline,
@@ -134,6 +143,8 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/taa_resolve.wesl");
         embedded_asset!(app, "../shaders/vsm_receiver_gen.wesl");
         embedded_asset!(app, "../shaders/vsm_page_mark.wesl");
+        embedded_asset!(app, "../shaders/motion_blur.wesl");
+        embedded_asset!(app, "../shaders/volumetrics.wesl");
         embedded_asset!(app, "../shaders/brdf_lut.wesl");
         embedded_asset!(app, "../shaders/env_prefilter.wesl");
         embedded_asset!(app, "../shaders/exposure.wesl");
@@ -175,6 +186,9 @@ impl Plugin for PrismShadingPlugin {
             .init_resource::<PrismVirtualShadowSettings>()
             .init_resource::<VsmReceiverBufferCache>()
             .init_resource::<VsmPageRequestBufferCache>()
+            .init_resource::<PrismMotionBlurSettings>()
+            .init_resource::<PrismVolumetricsSettings>()
+            .init_resource::<VolumetricsTextureCache>()
             .insert_resource(ShadingFrameGraph {
                 compiled: compiled_graph,
             })
@@ -227,6 +241,8 @@ impl Plugin for PrismShadingPlugin {
                         init_bloom_pipelines,
                         init_vsm_receiver_gen_pipeline,
                         init_vsm_page_mark_pipeline,
+                        init_motion_blur_pipeline,
+                        init_volumetrics_pipeline,
                     ),
                     init_dfg_lut_texture,
                     init_brdf_lut_pipeline,
@@ -434,6 +450,27 @@ impl Plugin for PrismShadingPlugin {
                         .in_set(RenderSystems::PrepareBindGroups),
                 ),
             )
+            // Motion blur + froxel fog resource/bind-group preparation. Kept in
+            // their own `add_systems` call so neither is forced into an already
+            // full Render tuple past Bevy's 20-element limit. Motion blur reads
+            // the resolved velocity G-buffer + SSR depth, so its textures order
+            // after both; fog owns its per-view volumes and has no cross-input.
+            .add_systems(
+                Render,
+                (
+                    prepare_motion_blur_textures
+                        .after(prepare_ssr_textures)
+                        .after(prepare_visibility_buffers)
+                        .in_set(RenderSystems::PrepareResources),
+                    prepare_motion_blur_bind_groups
+                        .after(prepare_motion_blur_textures)
+                        .in_set(RenderSystems::PrepareBindGroups),
+                    prepare_volumetrics_resources.in_set(RenderSystems::PrepareResources),
+                    prepare_volumetrics_bind_groups
+                        .after(prepare_volumetrics_resources)
+                        .in_set(RenderSystems::PrepareBindGroups),
+                ),
+            )
             .add_systems(
                 ExtractSchedule,
                 (extract_shadows, extract_ibl_source, extract_vsm_primary_light),
@@ -549,6 +586,12 @@ impl Plugin for PrismShadingPlugin {
                     bloom_pass
                         .after(exposure_average_pass)
                         .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                    // Motion blur reconstructs the shutter streak from the
+                    // velocity G-buffer after bloom has scattered its glow,
+                    // still before the main pass composites.
+                    motion_blur_pass
+                        .after(bloom_pass)
+                        .before(bevy_core_pipeline::Core3dSystems::MainPass),
                 ),
                 composite_shading
                     .after(bevy_core_pipeline::Core3dSystems::MainPass)
@@ -571,6 +614,9 @@ impl Plugin for PrismShadingPlugin {
                     vsm_mark_pages_pass
                         .after(vsm_receiver_gen_pass)
                         .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                    // Froxel fog is self-contained (its own per-view volumes),
+                    // so it only needs to finish before the main pass composites.
+                    volumetrics_pass.before(bevy_core_pipeline::Core3dSystems::MainPass),
                 ),
             ),
         );
