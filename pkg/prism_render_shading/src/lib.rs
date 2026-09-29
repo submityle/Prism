@@ -26,6 +26,7 @@ mod gamut_map;
 mod hair;
 mod hair_chiang;
 mod hair_fiber;
+mod hair_kajiya;
 mod halftone;
 mod hatching;
 mod kuwahara;
@@ -152,6 +153,7 @@ pub use exposure::{
 pub use hair::evaluate_hair_direct;
 pub use hair_chiang::{HairChiangParams, evaluate_hair_chiang_direct};
 pub use hair_fiber::{HairFiberParams, evaluate_hair_fiber_direct};
+pub use hair_kajiya::{HairKajiyaParams, evaluate_hair_kajiya_direct};
 pub use oit::{
     composite_transparency, oit_weight, OitAccumulation, OitFragment,
 };
