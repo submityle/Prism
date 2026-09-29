@@ -61,7 +61,7 @@
                                         │
    ┌────────────────────────────────────┼────────────────────────────────────┐
    │              共 享 G P U - d r i v e n  基 底 (算一次, 全前端消费)          │
-   │  支柱四: 可变形几何/模拟(蒙皮父级 → 布料/毛发/粒子 sim) → gpu_scene       │
+   │  支柱四: 可变形几何/模拟(蒙皮父级 → 布料/毛发/粒子/体积/水 sim) → gpu_scene │
    │  → 可见性(vis-buffer / virtual_geometry) → material id                   │
    │  支柱二: 光照/阴影"数据"服务(光源SoA+cluster / VSM页 / RT阴影反射 /       │
    │          GI·IBL·GTAO irradiance / BVH)  ——只出数据, 不出响应             │
