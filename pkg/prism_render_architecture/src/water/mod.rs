@@ -48,7 +48,9 @@
 // The full module list is completed incrementally as each solver/render
 // module lands (see the water engine design doc, roadmap M0-M9); every
 // intermediate state keeps the crate compiling and its gates green.
+pub mod breaking;
 pub mod budget;
+pub mod foam;
 pub mod ocean_lod;
 pub mod spectrum;
 pub mod swe;
