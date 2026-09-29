@@ -303,6 +303,20 @@ specialization_id: u64   // 由上面轴的合法排列特化产出
 
 落 `prism_physics_core / prism_physics_geometry`。**任何角色都要蒙皮**，所以这是 wgpu 竖切（§11）绕不过的第一个真子系统。
 
+**`prism_physics_core` 现状远超“一句 XPBD”（已落地 ~24k 行，milestone 化）**——它就是“可变形几何/模拟阶段”的实体，下表钉到真实模块树 + 里程碑注释，对齐 UE Chaos / Houdini / 前沿论文：
+
+| 求解器 / 子模块 | 落地模块 | 方法 | 里程碑 | 覆盖形变类 | 对标 |
+|---|---|---|---|---|---|
+| **统一软体 / 布料 / 绳 / 毛发** | `soft/{body,build,constraint,particle,solver}`（~3.1k 行）+ `solver/xpbd` | substep XPBD，“一切=粒子+约束”：布料=三角网、绳/毛发=1D 约束链 | M4 | 布料·毛发 guide·绳 | UE Chaos Cloth / PBD |
+| **刚体** | `solver/xpbd/{rigid,contact_constraint,joint_constraint,island_solve,sleep_solve,velocity_solve,parallel_solve}`（~3.6k 行）+ `island`/`sleep`/`joint`/`ccd` | 子步位置动力学 + 顺应接触/静摩擦 + island 并行 + CCD sweep | M-rigid | 刚体角色/道具 | PhysX/Chaos rigid |
+| **VBD 软体** | `vbd/{body,element,solver,system}`（~1k 行） | Vertex Block Descent（Chen 2024 SIGGRAPH），块坐标下降解隐式欧拉能量，**无条件稳定** | M7 | 高刚度软体/厚布 | 前沿 VBD |
+| **MLS-MPM** | `mpm/{constitutive,grid,svd,transfer,weights,particle,solver,expf}`（~1.9k 行） | 物质点 P2G/G2P + 本构（弹/塑/雪/沙），SVD 形变梯度 | M5.5 | 雪·沙·泥·可碎 | Disney/Houdini MPM |
+| **FLIP/APIC 液体** | `fluid/{mac_grid,pressure,transfer,particle,solver}`（~1.7k 行） | MAC 交错网格 + 压力泊松投影 + 标记粒子平流（自由表面） | M5.5 | 液体（液体引擎子系统底座） | FLIP/APIC 流体 |
+| **降阶模态软体** | `reduced/{modes,subspace,integrate}`（~1k 行） | 低频振动模态子空间 `u=U·q`，千自由度→个位数 | M7 | 海量廉价软体 | 模态/子空间动力学 |
+| **公共层** | `collide`/`collider`/`constraint`/`dynamics/integrator`/`pipeline`/`driver`/`island`/`sleep`/`state`/`snapshot`/`cache`/`query`/`lod`/`command`/`events`/`config` | 接触/碰撞/积分/管线/快照/LOD/命令流——各求解器共享 | —— | 全部 | Chaos 求解框架 |
+
+**含义修正**：§6.1 图里“布料/毛发/粒子 sim”不是三个独立待建盒子——它们**共享 `prism_physics_core` 这一个已落地统一模拟核**（soft/XPBD 覆盖布料+毛发 guide、fluid 覆盖液体、mpm 覆盖颗粒/雪沙、vbd/reduced 覆盖高级软体）。子系统边界不在“各造 sim”，而在**各自的几何生产 + 特殊渲染**（毛发 strand/card 渲染、液体表面重建 `reconstruct/`、粒子条带）。这正是 §6.3“共享基底 + 分叉响应”在**模拟侧**的体现：sim 核共享、渲染前端分家。
+
 ### 6.2 子系统注册表（四档，钉死）
 
 | 档 | 成员 | 判据 | 落地优先级 |
