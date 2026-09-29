@@ -68,11 +68,18 @@ struct HairVbdParams {
     collider_count: u32,
 }
 
-/// Flat layout descriptor for one guide strand.
+/// Flat layout descriptor for one guide strand. Byte-identical to the
+/// `hair_sim.wesl` descriptor (four `u32`, std430 stride 16) so the SAME
+/// strands storage buffer feeds either solver twin — swapping the XPBD slot for
+/// the VBD slot rebinds only the kernel, not the descriptor upload. `goal_offset`
+/// is unused by VBD (it derives inertial targets from the implicit velocity each
+/// substep rather than from a per-strand goal-pose array) and is retained solely
+/// to keep the descriptor ABI shared.
 struct HairStrand {
     particle_offset: u32,
     particle_count: u32,
     rest_offset: u32,
+    goal_offset: u32,
 }
 
 /// Analytic collision proxy. Mirrors the CPU `collision::Collider` enum packed

@@ -87,6 +87,7 @@ pub mod sim_pass_buffers;
 pub mod sleep;
 pub mod solver;
 pub mod transition;
+pub mod vbd_pass_buffers;
 pub mod wind;
 
 use crate::deformation::DeformationHandle;
