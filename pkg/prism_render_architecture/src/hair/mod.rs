@@ -54,6 +54,7 @@
 
 pub mod binding;
 pub mod collision;
+pub mod decimation;
 pub mod deep_opacity_layout;
 pub mod deep_transmittance;
 pub mod dynamics;
@@ -62,6 +63,7 @@ pub mod groom;
 pub mod groom_import;
 pub mod interpolation;
 pub mod lod;
+pub mod mesh_shell;
 pub mod raster;
 pub mod ribbon;
 pub mod rt_proxy;
