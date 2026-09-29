@@ -226,7 +226,18 @@ pub fn prepare(extract: &ClothGpuExtract) -> ClothGpuPrepare {
             );
         }
 
-        push_particle(&mut dispatches, ClothKernel::StrainLimit, particles, group);
+        // The strain limiter clamps every structural (stretch) edge, so it is
+        // sized by the constraint count — not the particle count. A grid has
+        // roughly twice as many structural edges as particles, so dispatching
+        // this pass over `particles` would silently skip the tail structural
+        // constraints and leave them unclamped, diverging from the CPU golden
+        // `apply_strain_limit`, which sweeps the whole structural set.
+        push_particle(
+            &mut dispatches,
+            ClothKernel::StrainLimit,
+            extract.counts.constraints,
+            group,
+        );
 
         // Self-collision runs before the body/backstop re-projection so the
         // latter has the final positional authority. This mirrors the CPU
@@ -407,6 +418,37 @@ mod tests {
             .filter(|d| d.kernel == ClothKernel::SkinEmbed)
             .count();
         assert_eq!(embeds, 1);
+    }
+
+    #[test]
+    fn strain_limit_is_sized_by_the_constraint_count() {
+        // Regression: the strain limiter must cover every structural edge, so
+        // its workgroup count is derived from `counts.constraints` (300 here),
+        // never from `counts.particles` (130). Sizing it by particles would
+        // launch only `ceil(130/64) = 3` groups and skip the tail structural
+        // constraints; sizing it by constraints launches `ceil(300/64) = 5`.
+        let e = sample_extract();
+        let plan = prepare(&e);
+        let strain: Vec<&PlannedDispatch> = plan
+            .dispatches
+            .iter()
+            .filter(|d| d.kernel == ClothKernel::StrainLimit)
+            .collect();
+        // One per substep, two substeps.
+        assert_eq!(strain.len(), 2);
+        let group = super::particle_group_size();
+        let expected = super::linear_group_count(e.counts.constraints, group);
+        assert_eq!(
+            expected, 5,
+            "sample has 300 constraints over a 64-lane tile"
+        );
+        for d in strain {
+            assert_eq!(
+                d.groups, expected,
+                "strain limit must be sized by the constraint count, not particles"
+            );
+            assert_eq!(d.color, None);
+        }
     }
 
     #[test]

@@ -126,6 +126,24 @@ struct ClothBendingConstraint {
 // Per-substep scalars (gravity, dt, retain, strain scale, counts).
 @group(0) @binding(5) var<uniform> params: ClothSimParams;
 
+// Per-dispatch color batch: the projection passes are recorded once per graph
+// color (see `prism_render_architecture::cloth::gpu::pipeline::prepare`). The
+// host lays each constraint / bending class out color-contiguously in its
+// buffer and, for each color, sets `base` to that color's first element index
+// and `count` to how many elements it spans. A projection invocation therefore
+// addresses `buffer[base + local]` for `local < count`, so a single resident
+// buffer serves every color without a per-color rebind, and only the current
+// color's constraints are touched — preserving the parallel-within-a-color /
+// serial-across-colors Gauss-Seidel ordering the solver depends on. The
+// per-particle passes ignore this block (their `immediate_size` is zero).
+struct ClothColorBatch {
+    // First element index of this color inside its resident buffer.
+    base: u32,
+    // Number of elements this color spans.
+    count: u32,
+}
+var<immediate> batch: ClothColorBatch;
+
 /// Effective inverse mass: `<= 0` (pinned) reads as `0`, mirroring the CPU
 /// `inverse_mass` helper.
 fn cloth_inverse_mass(w: f32) -> f32 {
@@ -157,10 +175,11 @@ fn cloth_predict(@builtin(global_invocation_id) gid: vec3<u32>) {
 /// `project_distance` without the one-sided early-out.
 @compute @workgroup_size(64)
 fn cloth_project_distance_batch(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let c = gid.x;
-    if c >= params.constraint_count {
+    let local = gid.x;
+    if local >= batch.count {
         return;
     }
+    let c = batch.base + local;
     let con = constraints[c];
     if con.a == con.b {
         return;
@@ -199,10 +218,11 @@ fn cloth_project_distance_batch(@builtin(global_invocation_id) gid: vec3<u32>) {
 /// toward flat.
 @compute @workgroup_size(64)
 fn cloth_project_bending_batch(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let h = gid.x;
-    if h >= params.bending_count {
+    let local = gid.x;
+    if local >= batch.count {
         return;
     }
+    let h = batch.base + local;
     let hinge = bending_constraints[h];
     let idx = array<u32, 4>(hinge.v0, hinge.v1, hinge.v2, hinge.v3);
     let wgt = array<f32, 4>(hinge.w0, hinge.w1, hinge.w2, hinge.w3);
@@ -247,10 +267,11 @@ fn cloth_project_bending_batch(@builtin(global_invocation_id) gid: vec3<u32>) {
 /// `project_distance` with `is_one_sided` — only pulls when over-extended.
 @compute @workgroup_size(64)
 fn cloth_project_long_range_batch(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let c = gid.x;
-    if c >= params.constraint_count {
+    let local = gid.x;
+    if local >= batch.count {
         return;
     }
+    let c = batch.base + local;
     let con = constraints[c];
     if con.a == con.b {
         return;

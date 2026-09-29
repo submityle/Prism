@@ -26,11 +26,13 @@
 //! one shader; a shared layout would validate against only one of them. That is
 //! why this module owns *five* layouts, not one per shader file.
 //!
-//! Every pipeline binds the matching layout as group 0 and carries no immediate
-//! (push-constant) block — the cloth passes read their per-substep scalars from
-//! the uniform slot, so `immediate_size` is zero. The pipeline handles are keyed
-//! by [`ClothKernel`] so the dispatch slice can look one up directly from the
-//! golden kernel schedule.
+//! Every pipeline binds the matching layout as group 0. The cloth passes read
+//! their per-substep scalars from the uniform slot, but the three color-serial
+//! projection kernels also address a single per-color constraint slice through
+//! a small `ClothColorBatch { base, count }` immediate (push-constant) block,
+//! so those three pipelines declare an 8-byte `immediate_size`; every other
+//! pipeline declares zero. The pipeline handles are keyed by [`ClothKernel`] so
+//! the dispatch slice can look one up directly from the golden kernel schedule.
 
 #![allow(
     dead_code,
@@ -271,41 +273,58 @@ pub(crate) fn init_cloth_compute_pipelines(
     let embed_shader: Handle<Shader> =
         load_embedded_asset!(asset_server.as_ref(), "../shaders/cloth_embed.wesl");
 
-    // A `cloth_sim.wesl` pipeline: one group-0 (sim) layout, no push constants.
-    let queue_sim = |label: &str, entry: &str| {
+    // A `cloth_sim.wesl` pipeline: one group-0 (sim) layout. The three
+    // color-serial projection kernels (`distance`/`bending`/`long_range`)
+    // address a single per-color slice of their constraint buffer through a
+    // `var<immediate> batch: ClothColorBatch { base, count }` push constant,
+    // so those pipelines reserve `size_of::<[u32; 2]>()` == 8 bytes of
+    // immediate storage. The per-particle kernels (`predict`/`strain_limit`/
+    // `velocity_update`) never read `batch`; naga prunes the unused immediate
+    // from their entry points, so they declare `immediate_size == 0`.
+    let queue_sim = |label: &str, entry: &str, immediate_size: u32| {
         cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some(label.to_owned().into()),
             layout: vec![sim_descriptor.clone()],
-            immediate_size: 0,
+            immediate_size,
             shader: sim_shader.clone(),
             entry_point: Some(entry.to_owned().into()),
             ..Default::default()
         })
     };
 
+    // Byte size of the `ClothColorBatch { base: u32, count: u32 }` immediate
+    // block declared in `cloth_sim.wesl`; shared by the color-serial kernels.
+    const CLOTH_COLOR_BATCH_SIZE: u32 = size_of::<[u32; 2]>() as u32;
+
     let predict = queue_sim(
         "prism cloth predict",
         ClothKernel::Predict.wesl_entry_point(),
+        0,
     );
     let project_distance = queue_sim(
         "prism cloth project distance",
         ClothKernel::ProjectDistanceBatch.wesl_entry_point(),
+        CLOTH_COLOR_BATCH_SIZE,
     );
     let project_bending = queue_sim(
         "prism cloth project bending",
         ClothKernel::ProjectBendingBatch.wesl_entry_point(),
+        CLOTH_COLOR_BATCH_SIZE,
     );
     let project_long_range = queue_sim(
         "prism cloth project long range",
         ClothKernel::ProjectLongRangeBatch.wesl_entry_point(),
+        CLOTH_COLOR_BATCH_SIZE,
     );
     let strain_limit = queue_sim(
         "prism cloth strain limit",
         ClothKernel::StrainLimit.wesl_entry_point(),
+        0,
     );
     let velocity_update = queue_sim(
         "prism cloth velocity update",
         ClothKernel::VelocityUpdate.wesl_entry_point(),
+        0,
     );
 
     let body_collision = cache.queue_compute_pipeline(ComputePipelineDescriptor {
