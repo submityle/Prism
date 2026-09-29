@@ -50,6 +50,7 @@
 
 mod abi;
 mod pipeline;
+mod settings;
 
 #[cfg(test)]
 mod shader_tests;
