@@ -41,6 +41,7 @@ pub mod collision;
 pub mod constraints;
 pub mod dynamics;
 pub mod embed;
+pub mod layers;
 pub mod lod;
 pub mod painted;
 pub mod pipeline;
