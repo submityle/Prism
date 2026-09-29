@@ -70,6 +70,7 @@ pub mod interpolation;
 pub mod lod;
 pub mod lod_dither_buffers;
 pub mod mesh_shell;
+pub mod pass_layout;
 pub mod raster;
 pub mod ribbon;
 pub mod rt_proxy;

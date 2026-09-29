@@ -90,6 +90,24 @@ pub enum HairComputePass {
 }
 
 impl HairComputePass {
+    /// Every hair compute pass, in canonical pipeline order (import, then the
+    /// per-frame simulate/resolve passes, then the self-shadow build). Its
+    /// length equals the number of `WESL` twins and lets callers enumerate the
+    /// full pass set — e.g. to build a bind-group layout per pass — without
+    /// hand-listing variants.
+    pub const ALL: [HairComputePass; 10] = [
+        Self::RootBind,
+        Self::Resample,
+        Self::RootSkinning,
+        Self::Wind,
+        Self::GuideSim,
+        Self::SdfCollision,
+        Self::Interpolate,
+        Self::LodDither,
+        Self::Transmittance,
+        Self::DeepOpacity,
+    ];
+
     /// The `WESL` kernel entry-point name (without the `.wesl` extension), the
     /// same base name as its file in `prism_render_scene/src/shaders/`.
     #[must_use]
@@ -354,6 +372,40 @@ mod tests {
         }
         for pass in shadow_passes() {
             assert_eq!(pass.stage(), HairPipelineStage::Shadow);
+        }
+    }
+
+    #[test]
+    fn all_covers_every_pass_in_phase_order() {
+        // `ALL` is exactly the import passes, then the per-frame passes, then the
+        // shadow passes, concatenated in run order — a single canonical spine the
+        // bind-group planner can walk without re-deriving phase order.
+        let mut spine = Vec::new();
+        spine.extend_from_slice(&import_passes());
+        spine.extend_from_slice(&per_frame_passes());
+        spine.extend_from_slice(&shadow_passes());
+        assert_eq!(HairComputePass::ALL.to_vec(), spine);
+
+        // Every variant appears exactly once (no dupes, no omissions). We assert
+        // presence of each named variant so adding a pass without extending `ALL`
+        // fails the build's exhaustiveness here too.
+        assert_eq!(HairComputePass::ALL.len(), 10);
+        for pass in [
+            HairComputePass::RootBind,
+            HairComputePass::Resample,
+            HairComputePass::RootSkinning,
+            HairComputePass::Wind,
+            HairComputePass::GuideSim,
+            HairComputePass::SdfCollision,
+            HairComputePass::Interpolate,
+            HairComputePass::LodDither,
+            HairComputePass::Transmittance,
+            HairComputePass::DeepOpacity,
+        ] {
+            assert_eq!(
+                HairComputePass::ALL.iter().filter(|&&p| p == pass).count(),
+                1
+            );
         }
     }
 
