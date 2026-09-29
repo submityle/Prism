@@ -24,7 +24,11 @@
 //!    The per-frame vertex work is arbitrated by [`crate::deformation::schedule`];
 //!    this subsystem only emits requests, it does not own the budget. The
 //!    fixed per-frame ordering of these passes (wind, guide solve, body and
-//!    self-collision) is encoded once by [`groom::step_groom`].
+//!    self-collision) is encoded once by [`groom::step_groom`]. Each guide's
+//!    root particle is pinned to the skinned scalp: [`binding`] attaches every
+//!    root to its closest scalp triangle at import and reconstructs the root
+//!    world transform from the deformed mesh each frame, so the hair rides the
+//!    head instead of floating.
 //! 3. **LOD** — a ladder from full strands to decimated strands to camera
 //!    cards to a static mesh shell, selected by screen coverage; see [`lod`].
 //!    Tier switches are cross-faded with a deterministic per-strand dither so
@@ -48,6 +52,7 @@
 //! references, never reimplements, the shared deformation budget, the material
 //! closures, and the transparency routing.
 
+pub mod binding;
 pub mod collision;
 pub mod deep_opacity_layout;
 pub mod deep_transmittance;
