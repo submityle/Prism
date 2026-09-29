@@ -21,9 +21,11 @@
 //! pass code.
 
 use bevy_ecs::prelude::Resource;
-use bevy_math::UVec3;
+use bevy_math::{Mat4, UVec2, UVec3};
 
-use super::abi::{GpuVolumetricsIntegrateParams, GpuVolumetricsScatterParams};
+use super::abi::{
+    GpuVolumetricsApplyParams, GpuVolumetricsIntegrateParams, GpuVolumetricsScatterParams,
+};
 
 /// Global froxel volumetric-fog settings consumed by the fog compute passes.
 ///
@@ -125,6 +127,25 @@ impl PrismVolumetricsSettings {
     /// these tunables. Clamps live in [`GpuVolumetricsIntegrateParams::new`].
     pub(crate) fn integrate_params(&self) -> GpuVolumetricsIntegrateParams {
         GpuVolumetricsIntegrateParams::new(self.grid)
+    }
+
+    /// Builds the apply-pass immediate block from the view's inverse projection
+    /// and framebuffer extent plus these tunables' grid + depth range + slice
+    /// power, so the apply pass inverts the exact slice distribution the scatter
+    /// pass built. Clamps live in [`GpuVolumetricsApplyParams::new`].
+    pub(crate) fn apply_params(
+        &self,
+        view_from_clip: Mat4,
+        screen_size: UVec2,
+    ) -> GpuVolumetricsApplyParams {
+        GpuVolumetricsApplyParams::new(
+            view_from_clip,
+            screen_size,
+            self.grid,
+            self.near_plane,
+            self.far_plane,
+            self.depth_power,
+        )
     }
 }
 

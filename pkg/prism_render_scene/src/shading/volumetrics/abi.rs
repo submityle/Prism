@@ -18,6 +18,7 @@
 //! match the WESL immediate blocks with no implicit padding. The layout unit
 //! tests below pin the sizes against drift.
 
+use bevy_math::{Mat4, UVec2};
 use bytemuck::{Pod, Zeroable};
 
 /// Edge of the scatter pass workgroup cube, matching the shader's
@@ -27,6 +28,10 @@ pub(crate) const VOLUMETRICS_SCATTER_WORKGROUP_SIZE: u32 = 4;
 /// Edge of the integrate pass workgroup tile, matching the shader's
 /// `@workgroup_size(8, 8, 1)`: one froxel *column* (all Z slices) per invocation.
 pub(crate) const VOLUMETRICS_INTEGRATE_WORKGROUP_SIZE: u32 = 8;
+
+/// Edge of the apply pass workgroup tile, matching the shader's
+/// `@workgroup_size(8, 8, 1)`: one screen pixel per invocation.
+pub(crate) const VOLUMETRICS_APPLY_WORKGROUP_SIZE: u32 = 8;
 
 /// Scatter-pass immediate block: the froxel grid dimensions, the view-space
 /// depth range the grid is fitted to, the homogeneous medium coefficients, the
@@ -99,7 +104,10 @@ impl GpuVolumetricsScatterParams {
     /// the reconstructed frustum half-tangents. Every extent is forced to at
     /// least `1` and the depth power to at least `1.0` so the shader never
     /// divides by zero or inverts the slice distribution.
-    #[expect(clippy::too_many_arguments, reason = "flat mirror of the WESL immediate block")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "flat mirror of the WESL immediate block"
+    )]
     pub(crate) fn new(
         grid: [u32; 3],
         near_plane: f32,
@@ -169,6 +177,73 @@ impl GpuVolumetricsIntegrateParams {
     }
 }
 
+/// Apply-pass immediate block: the inverse projection the composite unprojects
+/// reverse-Z device depth with, the framebuffer extent, the froxel grid and the
+/// grid's view-space depth range + slice-distribution power (so the pass inverts
+/// the exact `slice_depth(frac) = near * (far/near)^(frac^power)` mapping the
+/// scatter pass used to place each froxel).
+///
+/// The leading `mat4x4<f32>` forces the struct to a multiple of the 16-byte
+/// immediate alignment WGSL requires: 64 (matrix) + 5 * 4 (five `u32`) + 3 * 4
+/// (three `f32`) = 96 bytes, already 16-byte aligned with no trailing padding.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable, PartialEq)]
+pub(crate) struct GpuVolumetricsApplyParams {
+    /// Clip -> view (inverse projection); reconstructs the view-space position
+    /// (and thus the forward view distance) from screen uv + reverse-Z device
+    /// depth. Uploaded column-major via [`Mat4::to_cols_array`].
+    pub view_from_clip: [f32; 16],
+    /// Full-resolution framebuffer width in texels.
+    pub screen_width: u32,
+    /// Full-resolution framebuffer height in texels.
+    pub screen_height: u32,
+    /// Froxel grid width.
+    pub grid_x: u32,
+    /// Froxel grid height.
+    pub grid_y: u32,
+    /// Froxel grid depth (the Z axis the froxel frac coordinate indexes).
+    pub grid_z: u32,
+    /// Near plane of the froxel grid in view-space units (matches scatter).
+    pub near_plane: f32,
+    /// Far plane of the froxel grid in view-space units (matches scatter).
+    pub far_plane: f32,
+    /// Exponential slice-distribution power (matches scatter); the apply pass
+    /// inverts `frac^power` when it maps a view distance back to a froxel Z.
+    pub depth_power: f32,
+}
+
+impl GpuVolumetricsApplyParams {
+    /// Builds the apply params from the inverse projection, the framebuffer
+    /// extent, the froxel grid and the grid's view-space depth range + power.
+    ///
+    /// The matrix is uploaded column-major (via [`Mat4::to_cols_array`]) so the
+    /// WGSL `mat4x4<f32>` multiply agrees byte-for-byte; the grid extents floor
+    /// to `1`, the near/far are ordered strictly positive and the power floors
+    /// to `1.0`, mirroring the scatter constructor so the froxel-Z inversion can
+    /// never divide by zero or invert a degenerate slice distribution.
+    pub(crate) fn new(
+        view_from_clip: Mat4,
+        screen_size: UVec2,
+        grid: [u32; 3],
+        near_plane: f32,
+        far_plane: f32,
+        depth_power: f32,
+    ) -> Self {
+        let near = near_plane.max(1.0e-4);
+        let far = far_plane.max(near + 1.0e-4);
+        Self {
+            view_from_clip: view_from_clip.to_cols_array(),
+            screen_width: screen_size.x,
+            screen_height: screen_size.y,
+            grid_x: grid[0].max(1),
+            grid_y: grid[1].max(1),
+            grid_z: grid[2].max(1),
+            near_plane: near,
+            far_plane: far,
+            depth_power: depth_power.max(1.0),
+        }
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,6 +252,7 @@ mod tests {
     fn workgroup_sizes_match_the_shader() {
         assert_eq!(VOLUMETRICS_SCATTER_WORKGROUP_SIZE, 4);
         assert_eq!(VOLUMETRICS_INTEGRATE_WORKGROUP_SIZE, 8);
+        assert_eq!(VOLUMETRICS_APPLY_WORKGROUP_SIZE, 8);
     }
 
     #[test]
@@ -258,5 +334,47 @@ mod tests {
 
         let clamped = GpuVolumetricsIntegrateParams::new([0, 0, 0]);
         assert_eq!((clamped.grid_x, clamped.grid_y, clamped.grid_z), (1, 1, 1));
+    }
+
+    #[test]
+    fn apply_params_layout_matches_the_wesl_immediate_block() {
+        // A mat4x4 (64) + five u32 extents/grid (20) + three f32 depth range +
+        // power (12) fill 96 bytes, a multiple of the 16-byte immediate
+        // alignment the leading mat4x4 forces on the struct.
+        assert_eq!(size_of::<GpuVolumetricsApplyParams>(), 96);
+        assert_eq!(align_of::<GpuVolumetricsApplyParams>(), 4);
+
+        let inv = Mat4::from_cols_array(&[
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
+        ]);
+        let params = GpuVolumetricsApplyParams::new(
+            inv,
+            UVec2::new(1920, 1080),
+            [160, 90, 64],
+            0.1,
+            64.0,
+            2.0,
+        );
+        // Matrix uploaded column-major, byte-identical to the source.
+        assert_eq!(params.view_from_clip, inv.to_cols_array());
+        assert_eq!((params.screen_width, params.screen_height), (1920, 1080));
+        assert_eq!((params.grid_x, params.grid_y, params.grid_z), (160, 90, 64));
+        assert_eq!(params.near_plane, 0.1);
+        assert_eq!(params.far_plane, 64.0);
+        assert_eq!(params.depth_power, 2.0);
+    }
+
+    #[test]
+    fn apply_params_clamp_degenerate_inputs() {
+        let params =
+            GpuVolumetricsApplyParams::new(Mat4::IDENTITY, UVec2::ZERO, [0, 0, 0], -1.0, -5.0, 0.1);
+        // Grid extents floor to 1 so the froxel-Z inversion never divides by a
+        // zero grid depth.
+        assert_eq!((params.grid_x, params.grid_y, params.grid_z), (1, 1, 1));
+        // Near/far stay ordered and strictly positive so log(far/near) is finite.
+        assert!(params.near_plane > 0.0);
+        assert!(params.far_plane > params.near_plane);
+        // Power never inverts the slice distribution.
+        assert_eq!(params.depth_power, 1.0);
     }
 }

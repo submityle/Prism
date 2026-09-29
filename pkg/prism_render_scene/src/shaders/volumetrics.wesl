@@ -11,7 +11,7 @@
 // media correctly occlude farther media. This is the Frostbite / UE
 // "Volumetric Fog" scattering integration.
 //
-// Two chained compute entries realise the AAA froxel-fog pipeline over a
+// Three chained compute entries realise the AAA froxel-fog pipeline over a
 // view-frustum-fitted 3D grid (the CPU golden's `Froxel` column, unrolled onto
 // the GPU):
 //
@@ -26,8 +26,15 @@
 //     `integrate_froxel_column`, writing the running camera-to-slice
 //     accumulated in-scattering and transmittance into two more storage volumes
 //     so a later composite can sample the fog at any froxel depth.
+//   * `volumetrics_apply` (@workgroup_size(8,8,1), one screen pixel per
+//     invocation) reconstructs each pixel's view-space depth from the scene
+//     depth + inverse projection, inverts the exponential slice distribution
+//     to a froxel Z, trilinearly samples the integrated in-scattering +
+//     transmittance volumes and composites `scene * transmittance + inscatter`
+//     into the `fog_applied` target that the dispatch blits back over
+//     `scene_color`.
 //
-// The scatter and integrate entries reuse `@group(0)` binding slots with
+// The three entries reuse `@group(0)` binding slots with
 // different types (each is a distinct pipeline with its own layout), mirroring
 // the two-entry `exposure.wesl` precedent. Self-contained (no intra-crate
 // `import`s, matching ssgi.wesl / outline.wesl) so the WESL compile test can
@@ -333,4 +340,111 @@ fn volumetrics_integrate(@builtin(global_invocation_id) gid: vec3<u32>) {
         textureStore(integrated_scattering_out, coord, vec4<f32>(accum, 1.0));
         textureStore(integrated_transmittance_out, coord, vec4<f32>(trans, 1.0));
     }
+}
+
+// ---------------------------------------------------------------------------
+// Apply pass: composite the integrated froxel fog back over the lit scene.
+// ---------------------------------------------------------------------------
+//
+// One invocation per screen pixel. Reconstructs the pixel's view-space
+// position from the scene depth, inverts the scatter pass's exponential slice
+// distribution to find the froxel Z the surface sits at, trilinearly samples
+// the camera-to-surface accumulated in-scattering + transmittance volumes and
+// folds them over the lit colour with the standard Frostbite / UE front
+// composite `background * transmittance + in_scattering`. The result is written
+// to a dedicated full-res target (never scene_color in place) that the dispatch
+// blits back over scene_color so the downstream composite sees the fog.
+
+// Byte-for-byte twin of `GpuVolumetricsApplyParams`: a leading `mat4x4<f32>`
+// (the inverse projection) then five `u32` extents/grid and three `f32` depth
+// range + power scalars, 96 bytes with no trailing padding.
+struct VolumetricsApplyParams {
+    view_from_clip: mat4x4<f32>,
+    screen_width: u32,
+    screen_height: u32,
+    grid_x: u32,
+    grid_y: u32,
+    grid_z: u32,
+    near_plane: f32,
+    far_plane: f32,
+    depth_power: f32,
+}
+
+var<immediate> apply_params: VolumetricsApplyParams;
+
+// group 0 (apply):
+//   0 = scene_depth              (reverse-Z device depth, textureLoad-ed)
+//   1 = integrated_scattering    (texture_3d, trilinearly sampled)
+//   2 = integrated_transmittance (texture_3d, trilinearly sampled)
+//   3 = linear sampler           (trilinear froxel fetch)
+//   4 = scene_color              (lit HDR colour, textureLoad-ed)
+//   5 = fog_applied              (write-only composite output)
+@group(0) @binding(0) var apply_scene_depth: texture_2d<f32>;
+@group(0) @binding(1) var apply_integrated_scattering: texture_3d<f32>;
+@group(0) @binding(2) var apply_integrated_transmittance: texture_3d<f32>;
+@group(0) @binding(3) var apply_linear_sampler: sampler;
+@group(0) @binding(4) var apply_scene_color: texture_2d<f32>;
+@group(0) @binding(5) var apply_fog_out: texture_storage_2d<rgba16float, write>;
+
+// Reconstruct a view-space position from screen uv + reverse-Z device depth via
+// the inverse projection (mirrors ssgi.wesl `reconstruct_view_position`).
+fn volumetrics_reconstruct_view_position(uv: vec2<f32>, device_depth: f32) -> vec3<f32> {
+    let ndc = vec3<f32>(uv.x * 2.0 - 1.0, (1.0 - uv.y) * 2.0 - 1.0, device_depth);
+    let clip = vec4<f32>(ndc, 1.0);
+    let view = apply_params.view_from_clip * clip;
+    return view.xyz / view.w;
+}
+
+// Inverse of `volumetrics_slice_depth`: map a forward view distance back to its
+// froxel Z frac coordinate. `slice_depth(frac) = near * (far/near)^(frac^power)`
+// inverts to `frac = ( log(d/near) / log(far/near) )^(1/power)`, clamped [0, 1].
+fn volumetrics_depth_to_froxel_frac(d: f32, near: f32, far: f32, power: f32) -> f32 {
+    let ratio = max(far / near, 1.0 + 1.0e-6);
+    let t = clamp(log(max(d, near) / near) / log(ratio), 0.0, 1.0);
+    return clamp(pow(t, 1.0 / max(power, 1.0)), 0.0, 1.0);
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn volumetrics_apply(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let screen = vec2<u32>(apply_params.screen_width, apply_params.screen_height);
+    if (gid.x >= screen.x || gid.y >= screen.y) {
+        return;
+    }
+    let pixel = vec2<i32>(i32(gid.x), i32(gid.y));
+    let scene = textureLoad(apply_scene_color, pixel, 0);
+    let device_depth = textureLoad(apply_scene_depth, pixel, 0).x;
+
+    // Reverse-Z: device_depth == 0 is the far plane / sky. There is no surface
+    // in the fog volume to composite against, so pass the lit colour through
+    // unchanged (transmittance 1, in-scattering 0).
+    if (device_depth == 0.0) {
+        textureStore(apply_fog_out, pixel, scene);
+        return;
+    }
+
+    let uv = (vec2<f32>(f32(gid.x), f32(gid.y)) + vec2<f32>(0.5, 0.5))
+        / vec2<f32>(f32(screen.x), f32(screen.y));
+    let view_pos = volumetrics_reconstruct_view_position(uv, device_depth);
+    // View space is -Z forward; the forward view distance is the negated z.
+    let d = max(-view_pos.z, apply_params.near_plane);
+    let frac = volumetrics_depth_to_froxel_frac(
+        d,
+        apply_params.near_plane,
+        apply_params.far_plane,
+        apply_params.depth_power,
+    );
+
+    // Froxel XY frac == screen uv (the scatter pass filled froxel (x, y) from
+    // the same screen-tile centre); Z frac from the inverted slice distribution.
+    let sample_uvw = vec3<f32>(uv.x, uv.y, frac);
+    let inscatter =
+        textureSampleLevel(apply_integrated_scattering, apply_linear_sampler, sample_uvw, 0.0).rgb;
+    let transmittance =
+        textureSampleLevel(apply_integrated_transmittance, apply_linear_sampler, sample_uvw, 0.0).rgb;
+
+    // Standard front composite: the lit background attenuated by the
+    // camera-to-surface transmittance plus the accumulated in-scattering. The
+    // alpha is carried through untouched.
+    let out_rgb = scene.rgb * transmittance + inscatter;
+    textureStore(apply_fog_out, pixel, vec4<f32>(out_rgb, scene.a));
 }

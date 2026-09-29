@@ -15,7 +15,9 @@
 use bevy_asset::{uuid::Uuid, AssetId};
 use bevy_shader::{Shader, ShaderCache, ShaderCacheError, ShaderCacheSource, ValidateShader};
 
-use super::abi::{GpuVolumetricsIntegrateParams, GpuVolumetricsScatterParams};
+use super::abi::{
+    GpuVolumetricsApplyParams, GpuVolumetricsIntegrateParams, GpuVolumetricsScatterParams,
+};
 
 const VOLUMETRICS_WESL: &str = include_str!("../../shaders/volumetrics.wesl");
 
@@ -59,10 +61,10 @@ fn volumetrics_wesl_compiles_standalone() {
         .unwrap_or_else(|error| panic!("volumetrics.wesl failed to compile: {error}"));
 }
 
-/// The shader must declare both `@compute` entry points the pipelines name, so a
-/// rename on either side is caught before it reaches the (GPU-less) device.
+/// The shader must declare all three `@compute` entry points the pipelines name,
+/// so a rename on either side is caught before it reaches the (GPU-less) device.
 #[test]
-fn volumetrics_wesl_declares_both_compute_entries() {
+fn volumetrics_wesl_declares_all_compute_entries() {
     assert!(
         VOLUMETRICS_WESL.contains("fn volumetrics_scatter"),
         "scatter entry point missing from volumetrics.wesl",
@@ -70,6 +72,10 @@ fn volumetrics_wesl_declares_both_compute_entries() {
     assert!(
         VOLUMETRICS_WESL.contains("fn volumetrics_integrate"),
         "integrate entry point missing from volumetrics.wesl",
+    );
+    assert!(
+        VOLUMETRICS_WESL.contains("fn volumetrics_apply"),
+        "apply entry point missing from volumetrics.wesl",
     );
 }
 
@@ -83,4 +89,6 @@ fn volumetrics_immediate_block_sizes_are_pinned() {
     assert_eq!(align_of::<GpuVolumetricsScatterParams>(), 4);
     assert_eq!(size_of::<GpuVolumetricsIntegrateParams>(), 12);
     assert_eq!(align_of::<GpuVolumetricsIntegrateParams>(), 4);
+    assert_eq!(size_of::<GpuVolumetricsApplyParams>(), 96);
+    assert_eq!(align_of::<GpuVolumetricsApplyParams>(), 4);
 }

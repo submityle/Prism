@@ -24,14 +24,14 @@
 //!   resource: the enable flag and the medium/grid/light tunables the passes
 //!   read (self-owned, since there is no architecture contract for fog).
 //! * [`abi`] — the two immediate blocks shared with `volumetrics.wesl`.
-//! * [`pipeline`] — the scatter + integrate compute pipelines and their owned
-//!   group-0 layouts.
+//! * [`pipeline`] — the scatter + integrate + apply compute pipelines and their
+//!   owned group-0 layouts (plus the apply pass's linear-clamp sampler).
 //! * [`resources`] — the persistent per-view froxel storage volumes (cached by
 //!   [`bevy_render::view::RetainedViewEntity`]) and the per-frame immediate
 //!   blocks, resolved into [`resources::ViewVolumetrics`].
 //! * [`bind_groups`] — the per-view scatter + integrate bind groups.
-//! * [`dispatch`] — the `Core3d` scheduling-system pass recording both
-//!   dispatches.
+//! * [`dispatch`] — the `Core3d` scheduling-system pass recording the scatter ->
+//!   integrate -> apply dispatches and the copy-back over `scene_color`.
 
 mod abi;
 mod bind_groups;
