@@ -8,6 +8,7 @@
 extern crate alloc;
 
 mod buffers;
+mod cloth;
 mod compare;
 mod completion;
 mod consumer;
