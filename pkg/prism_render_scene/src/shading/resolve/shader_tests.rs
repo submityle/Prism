@@ -569,3 +569,28 @@ fn hair_raster_wesl_compiles_standalone() {
         .get(0, hair_raster, &[])
         .unwrap_or_else(|error| panic!("hair_raster.wesl failed to compile: {error}"));
 }
+
+/// Compiles `hair_transmittance.wesl` standalone. It has no imports, so a green
+/// result proves the GPU strand self-shadow transmittance kernel — the voxel
+/// density scatter, the running `product(1 - sigma)` alpha-composite over a
+/// fixed per-invocation voxel slab, the per-texel `ranges` slicing into the
+/// flat `samples` buffer and the `var<immediate>` `HairTransmittanceParams` —
+/// parses and type-checks as WESL on its own, in lock-step with the voxel path
+/// of the CPU golden in `prism_render_architecture::hair::deep_transmittance`.
+#[test]
+fn hair_transmittance_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let hair_transmittance = shader_id(0x5052_4953_4d5f_4841_4952_5f54_5241_0001);
+    cache.set_shader(
+        hair_transmittance,
+        Shader::from_wesl(
+            include_str!("../../shaders/hair_transmittance.wesl"),
+            "embedded://prism_render_scene/shaders/hair_transmittance.wesl",
+        ),
+    );
+
+    cache
+        .get(0, hair_transmittance, &[])
+        .unwrap_or_else(|error| panic!("hair_transmittance.wesl failed to compile: {error}"));
+}
