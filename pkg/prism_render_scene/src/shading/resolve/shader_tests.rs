@@ -516,3 +516,29 @@ fn gtao_wesl_compiles_standalone() {
         .get(0, gtao, &[])
         .unwrap_or_else(|error| panic!("gtao.wesl failed to compile: {error}"));
 }
+
+/// Compiles `hair_sim.wesl` standalone. It has no imports, so a green result
+/// proves the GPU guide-strand XPBD sim compute entry point
+/// (`@compute @workgroup_size(64)` with group-0 storage particle/prev/goal/
+/// rest-length/strand buffers and a `var<immediate>` `HairXpbdParams`), the
+/// four constraint families (edge-length / local bending / global goal /
+/// long-range attachment) and the substep×iteration Gauss-Seidel schedule all
+/// parse and type-check as WESL on their own, in lock-step with the CPU golden
+/// in `prism_render_architecture::hair::dynamics::simulate_guides`.
+#[test]
+fn hair_sim_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let hair_sim = shader_id(0x5052_4953_4d5f_4841_4952_5f53_494d_0001);
+    cache.set_shader(
+        hair_sim,
+        Shader::from_wesl(
+            include_str!("../../shaders/hair_sim.wesl"),
+            "embedded://prism_render_scene/shaders/hair_sim.wesl",
+        ),
+    );
+
+    cache
+        .get(0, hair_sim, &[])
+        .unwrap_or_else(|error| panic!("hair_sim.wesl failed to compile: {error}"));
+}

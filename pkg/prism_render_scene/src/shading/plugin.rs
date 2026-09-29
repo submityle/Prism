@@ -33,6 +33,12 @@ use super::{
         prepare_ssgi_textures, prepare_ssgi_trace_bind_groups, ssgi_composite_pass,
         ssgi_denoise_pass, ssgi_trace_pass,
     },
+    world_space_gi::{
+        init_world_space_gi_composite_pipeline, init_world_space_gi_pipeline,
+        prepare_world_space_gi_bind_groups, prepare_world_space_gi_composite_bind_groups,
+        prepare_world_space_gi_textures, world_space_gi_composite_pass, world_space_gi_pass,
+        PrismWorldSpaceGiSettings,
+    },
     taa::{
         init_taa_resolve_pipeline, prepare_taa_bind_groups, prepare_taa_jitter,
         prepare_taa_textures, taa_resolve_pass,
@@ -197,6 +203,9 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/ssgi.wesl");
         embedded_asset!(app, "../shaders/ssgi_denoise.wesl");
         embedded_asset!(app, "../shaders/ssgi_composite.wesl");
+        embedded_asset!(app, "../shaders/world_space_gi_probe_update.wesl");
+        embedded_asset!(app, "../shaders/world_space_gi_resolve.wesl");
+        embedded_asset!(app, "../shaders/world_space_gi_composite.wesl");
         embedded_asset!(app, "../shaders/taa_resolve.wesl");
         embedded_asset!(app, "../shaders/vsm_receiver_gen.wesl");
         embedded_asset!(app, "../shaders/vsm_page_mark.wesl");
@@ -274,6 +283,7 @@ impl Plugin for PrismShadingPlugin {
             .init_resource::<PrismKuwaharaSettings>()
             .init_resource::<PrismHatchingSettings>()
             .init_resource::<PrismHalftoneSettings>()
+            .init_resource::<PrismWorldSpaceGiSettings>()
             .insert_resource(ShadingFrameGraph {
                 compiled: compiled_graph,
             })
@@ -333,6 +343,8 @@ impl Plugin for PrismShadingPlugin {
                         init_vignette_pipeline,
                         init_color_grade_pipeline,
                         init_film_grain_pipeline,
+                        init_world_space_gi_pipeline,
+                        init_world_space_gi_composite_pipeline,
                     ),
                     // Nested to keep this RenderStartup tuple within Bevy's
                     // 20-element limit: the nine additional post-process
@@ -683,6 +695,21 @@ impl Plugin for PrismShadingPlugin {
                 ),
             )
             .add_systems(
+                Render,
+                (
+                    prepare_world_space_gi_textures
+                        .after(prepare_ssr_textures)
+                        .after(prepare_visibility_buffers)
+                        .in_set(RenderSystems::PrepareResources),
+                    prepare_world_space_gi_bind_groups
+                        .after(prepare_world_space_gi_textures)
+                        .in_set(RenderSystems::PrepareBindGroups),
+                    prepare_world_space_gi_composite_bind_groups
+                        .after(prepare_world_space_gi_bind_groups)
+                        .in_set(RenderSystems::PrepareBindGroups),
+                ),
+            )
+            .add_systems(
                 ExtractSchedule,
                 (extract_shadows, extract_ibl_source, extract_vsm_primary_light),
             );
@@ -773,9 +800,21 @@ impl Plugin for PrismShadingPlugin {
                         .after(ssgi_trace_pass)
                         .after(ssgi_denoise_pass)
                         .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                    // World-space GI gathers screen probes off the fully
+                    // SSR/SSGI-composited scene_color, then its own composite
+                    // folds the indirect diffuse back in (energy-conserving
+                    // ambient substitution) before TAA resolves the buffer.
+                    world_space_gi_pass
+                        .after(ssgi_composite_pass)
+                        .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                    world_space_gi_composite_pass
+                        .after(world_space_gi_pass)
+                        .after(ssgi_composite_pass)
+                        .before(bevy_core_pipeline::Core3dSystems::MainPass),
                     taa_resolve_pass
                         .after(ssr_composite_pass)
                         .after(ssgi_composite_pass)
+                        .after(world_space_gi_composite_pass)
                         .before(bevy_core_pipeline::Core3dSystems::MainPass),
                 ),
                 // Nested to keep the Core3d tuple within Bevy's 20-element

@@ -34,6 +34,7 @@ mod upscale;
 mod vignette;
 mod virtual_shadow;
 mod volumetrics;
+mod world_space_gi;
 mod resources;
 mod runtime;
 
