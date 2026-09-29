@@ -221,7 +221,7 @@ pub(crate) struct GpuMsLutParams {
 }
 
 /// Push constants for `volumetric_raymarch`. Byte-compatible with
-/// `VcRaymarchParams` (fourteen 4-byte scalars = `56` bytes).
+/// `VcRaymarchParams` (fifteen 4-byte scalars = `60` bytes).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq)]
 pub(crate) struct GpuRaymarchParams {
@@ -253,6 +253,8 @@ pub(crate) struct GpuRaymarchParams {
     pub albedo: f32,
     /// Henyey-Greenstein phase eccentricity `g`.
     pub phase_g: f32,
+    /// Nubis `powder` dark-edge intensity `[0, 1]`; `0` disables the term.
+    pub powder_strength: f32,
 }
 
 /// Push constants for `volumetric_scatter_resolve`. Byte-compatible with
@@ -413,10 +415,10 @@ mod tests {
         assert_eq!(align_of::<GpuMsLutParams>(), 4);
     }
 
-    /// `volumetric_raymarch`: fourteen 4-byte scalars.
+    /// `volumetric_raymarch`: fifteen 4-byte scalars.
     #[test]
     fn raymarch_params_size() {
-        assert_eq!(size_of::<GpuRaymarchParams>(), 56);
+        assert_eq!(size_of::<GpuRaymarchParams>(), 60);
         assert_eq!(align_of::<GpuRaymarchParams>(), 4);
     }
 

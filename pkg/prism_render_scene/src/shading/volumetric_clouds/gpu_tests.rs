@@ -40,11 +40,13 @@ use wgpu::{
 };
 
 use prism_render_architecture::volumetric::math::ln_approx;
-use prism_render_architecture::volumetric::math::{exp_approx, saturate};
+use prism_render_architecture::volumetric::math::{exp_approx, lerp, saturate};
 use prism_render_architecture::volumetric::math::{Vec2, Vec3};
 use prism_render_architecture::volumetric::multiscatter::MultiScatterLut;
 use prism_render_architecture::volumetric::raymarch::{adaptive_step, RaymarchConfig};
-use prism_render_architecture::volumetric::scatter::{dual_lobe_phase, hg_phase, OctaveParams};
+use prism_render_architecture::volumetric::scatter::{
+    dual_lobe_phase, hg_phase, powder, OctaveParams,
+};
 use prism_render_architecture::volumetric::shadow::shadow_transmittance;
 use prism_render_architecture::volumetric::temporal::{
     active_pixel, clamp_history, variance_clip, UpscaleMode,
@@ -2434,6 +2436,9 @@ fn raymarch_gpu_matches_cpu_golden() {
         sigma_t: 0.8,
         albedo: 0.6,
         phase_g: 0.2,
+        // 端到端验证 Nubis powder 暗边项：置非零，令 GPU 走 powder 分支，
+        // 下方 CPU 金标循环镜像同一 powder 调制以对拍着色器实现。
+        powder_strength: 0.75,
     };
 
     // Deterministic exact-`float32` density volume (`.x` channel) mixing empty
@@ -2713,6 +2718,8 @@ fn raymarch_gpu_matches_cpu_golden() {
         density_threshold: params.density_threshold,
         transmittance_cutoff: params.transmittance_cutoff,
         max_steps: params.max_steps,
+        // 与 GPU 推入的 powder_strength 保持一致，使 CPU 金标与着色器同走 powder 分支。
+        powder_strength: params.powder_strength,
     };
 
     // Row is dense (row_bytes == SCREEN_W * 8), so texel (x, y) maps to
@@ -2739,6 +2746,9 @@ fn raymarch_gpu_matches_cpu_golden() {
             let mut t = 0.0f32;
             let mut transmittance = 1.0f32;
             let mut scattered = 0.0f32;
+            // View-ray optical depth accumulated before the current segment,
+            // feeding the Nubis `powder` curve exactly as the shader does.
+            let mut optical_depth = 0.0f32;
             let mut steps = 0u32;
             loop {
                 if t >= distance || steps >= params.max_steps {
@@ -2769,8 +2779,18 @@ fn raymarch_gpu_matches_cpu_golden() {
                     } else {
                         step
                     };
-                    scattered += transmittance * shadow_light * sigma_s * phase * integral;
+                    // Mirror `raymarch::march`: powder is keyed on the
+                    // optical depth accumulated up to (not including) this
+                    // segment, then modulates only the in-scattered energy.
+                    let powder_factor = if params.powder_strength > 0.0 {
+                        lerp(1.0, powder(optical_depth, 1.0), params.powder_strength)
+                    } else {
+                        1.0
+                    };
+                    scattered +=
+                        transmittance * shadow_light * sigma_s * phase * integral * powder_factor;
                     transmittance = saturate(transmittance * seg_trans);
+                    optical_depth += seg_optical;
                 }
                 steps += 1;
                 t += step;
