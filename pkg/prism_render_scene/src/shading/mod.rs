@@ -34,6 +34,7 @@ mod transparent;
 mod upscale;
 mod vignette;
 mod virtual_shadow;
+mod volumetric_clouds;
 mod volumetrics;
 mod world_space_gi;
 mod resources;
