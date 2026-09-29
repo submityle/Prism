@@ -46,10 +46,12 @@
 //! of scope for this `CPU`-verifiable contract layer and are documented as
 //! "pending the GPU backend" where the contract signatures anticipate them.
 
+pub mod atlas_packing;
 pub mod attributes;
 pub mod audio_spectrum;
 pub mod authoring;
 pub mod boids;
+pub mod bounds;
 pub mod camera;
 pub mod collision;
 pub mod compression;
@@ -81,6 +83,7 @@ pub mod mesh_renderer;
 pub mod modules;
 pub mod motion_vectors;
 pub mod noise;
+pub mod occlusion;
 pub mod oit;
 pub mod perf_budget;
 pub mod pipeline_layout;
@@ -101,6 +104,7 @@ pub mod sim_space;
 pub mod simulation;
 pub mod sort_cull;
 pub mod sort_pass_buffers;
+pub mod spatial_hash;
 pub mod spawn_pass_buffers;
 pub mod spline;
 pub mod sprite_stretch;
