@@ -50,6 +50,16 @@
 //! [`PagePool::slot_of`](prism_render_architecture::paging::PagePool::slot_of).
 //! It uses only portable integer WGSL, so it needs no optional feature.
 //!
+//! # Physical page storage
+//!
+//! One layer below the table, [`GpuPageStorage`] is the on-device twin of the
+//! physical page-data placement: it scatters streamed page payloads into their
+//! pool slots and gathers single words back out, mirroring
+//! [`PageStorage`](prism_render_architecture::paging::PageStorage) word-for-word.
+//! Together the two twins cover the streaming path end to end - resolve a page
+//! key to a slot, then place and read that slot's data. It too uses only
+//! portable integer WGSL and needs no optional feature.
+//!
 //! # Safety
 //!
 //! The crate forbids `unsafe`; it relies solely on the safe `wgpu` and
@@ -61,10 +71,12 @@
 
 pub mod context;
 pub mod page_pool;
+pub mod page_storage;
 pub mod payload_raster;
 pub mod raster;
 
 pub use context::{block_on, GpuContext};
 pub use page_pool::{GpuPageTable, ResolveError};
+pub use page_storage::GpuPageStorage;
 pub use payload_raster::GpuPayloadRaster;
 pub use raster::{GpuSoftwareRaster, RasterError};

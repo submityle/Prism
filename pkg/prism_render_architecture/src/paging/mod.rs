@@ -18,8 +18,10 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 pub mod page_pool;
+pub mod page_storage;
 
 pub use page_pool::{PagePool, PagePoolError, UNMAPPED_SLOT};
+pub use page_storage::{PageStorage, PageStorageError};
 
 /// Lifecycle state of a tracked page.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
