@@ -12,6 +12,8 @@
 //! Unreal Engine source or derived code.
 
 mod layout;
+mod pressure;
 mod solver;
 
+pub use pressure::GpuPressureSolver;
 pub use solver::GpuFluidSolver;
