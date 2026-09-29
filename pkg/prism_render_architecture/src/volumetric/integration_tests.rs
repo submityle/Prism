@@ -17,6 +17,11 @@
 //!   light-visibility function for the march.
 //! - `multiscatter`, `fog`, `atmosphere`: energy stays bounded when composed
 //!   with the ray-march result.
+//! - `reference` -> `multiscatter`: the Monte-Carlo single-scatter oracle and
+//!   the closed form agree, and folding the LUT energy gain into the resolve
+//!   composition `single * (1 + gain)` only ever adds bounded energy (never
+//!   removes it, never more than doubles it) and stays monotone in optical
+//!   depth and albedo.
 //! - `cloud_lod`, `temporal`, `budget`: scheduling and selection are
 //!   deterministic and stay within their declared limits.
 //!
@@ -29,11 +34,12 @@ use super::budget::{plan_volumetric, VolumetricJobKind, VolumetricJobRequest};
 use super::cloud_lod::{bin_by_distance, select_lod, CloudLodThresholds};
 use super::coupling::{apply_carve, density_delta, CarveBrush};
 use super::fog::{fog_transmittance, height_fog_density, HeightFogParams};
-use super::math::saturate;
+use super::math::{saturate, EPS};
 use super::modeling::compose_from_modeling;
 use super::multiscatter::MultiScatterLut;
 use super::noise::{perlin_worley, worley_fbm};
 use super::raymarch::{march, RaymarchConfig};
+use super::reference::{analytic_single_scatter, single_scatter_reference};
 use super::scatter::{hg_phase, octave_scatter, OctaveParams};
 use super::temporal::{active_pixel, clamp_history, UpscaleMode};
 use super::weather::{WeatherField, WindField};
@@ -308,6 +314,95 @@ fn multiscatter_lut_never_amplifies_and_octaves_decay() {
             "octave energy grew: {sigma_s} > {prev}"
         );
         prev = sigma_s;
+    }
+}
+
+#[test]
+fn reference_single_scatter_matches_multiscatter_composition_bounded() {
+    // Shared LUT and octave-derived forward anisotropy, so the phase used for
+    // the reference oracle is the same lobe the multi-scatter table is built
+    // around.
+    let lut = MultiScatterLut::build_energy_gain([16, 16, 16], OctaveParams::DEFAULT);
+    let (_ss0, _st0, g) = octave_scatter(1.0, 1.0, 0.7, 0, OctaveParams::DEFAULT);
+    let cos = 0.5_f32;
+    let phase_value = hg_phase(cos, g);
+    let phase = |_t: f32| phase_value;
+    // Unit extinction keeps optical_depth == distance, so the LUT depth axis
+    // lines up exactly with the reference march length.
+    let sigma_t = 1.0_f32;
+    let light = 1.0_f32;
+
+    // (1) reference oracle self-consistency: the Monte-Carlo single-scatter
+    //     estimator converges to the closed form for the octave phase.
+    for &(albedo, distance, seed) in &[
+        (0.4_f32, 2.0_f32, 11_u32),
+        (0.8, 4.0, 4242),
+        (1.0, 6.0, 909),
+    ] {
+        let sigma_s = albedo * sigma_t;
+        let analytic = analytic_single_scatter(sigma_t, sigma_s, phase_value, light, distance);
+        let mc = single_scatter_reference(sigma_t, sigma_s, light, phase, distance, seed, 40_000);
+        assert!(analytic > 0.0, "analytic single scatter should be positive");
+        assert!(
+            (mc - analytic).abs() < 0.02,
+            "reference MC did not track closed form: {mc} vs {analytic}"
+        );
+
+        // (2) bounded parity: folding the LUT gain into the resolve composition
+        //     `single * (1 + gain)` only ever adds energy (gain >= 0) and never
+        //     more than doubles it (gain <= 1). This is the design-doc section 5
+        //     "reference vs multiscatter error is bounded" obligation.
+        let optical_depth = sigma_t * distance;
+        let gain = lut.sample(cos, optical_depth, albedo);
+        assert!(
+            (0.0..=1.0).contains(&gain),
+            "LUT gain escaped [0,1]: {gain}"
+        );
+        let resolved = analytic * (1.0 + gain);
+        assert!(
+            resolved >= analytic - EPS,
+            "multiscatter removed energy: {resolved} < {analytic}"
+        );
+        assert!(
+            resolved <= 2.0 * analytic + EPS,
+            "multiscatter amplified past 2x single scatter: {resolved} > {}",
+            2.0 * analytic
+        );
+    }
+
+    // (3) monotone in optical depth: at fixed albedo, a longer march raises
+    //     both the single-scatter integral and the LUT gain, so the composed
+    //     radiance is non-decreasing.
+    let albedo = 0.7_f32;
+    let sigma_s = albedo * sigma_t;
+    let mut prev = f32::NEG_INFINITY;
+    for &distance in &[0.5_f32, 1.0, 2.0, 4.0, 7.0] {
+        let analytic = analytic_single_scatter(sigma_t, sigma_s, phase_value, light, distance);
+        let gain = lut.sample(cos, sigma_t * distance, albedo);
+        let resolved = analytic * (1.0 + gain);
+        assert!(
+            resolved >= prev - EPS,
+            "composed radiance dropped with optical depth: {resolved} < {prev}"
+        );
+        prev = resolved;
+    }
+
+    // (4) monotone in albedo: at fixed march length, a brighter medium raises
+    //     both the single-scatter coefficient and the LUT gain, so the composed
+    //     radiance is non-decreasing.
+    let distance = 3.0_f32;
+    let optical_depth = sigma_t * distance;
+    let mut prev = f32::NEG_INFINITY;
+    for &albedo in &[0.1_f32, 0.3, 0.6, 0.85, 1.0] {
+        let sigma_s = albedo * sigma_t;
+        let analytic = analytic_single_scatter(sigma_t, sigma_s, phase_value, light, distance);
+        let gain = lut.sample(cos, optical_depth, albedo);
+        let resolved = analytic * (1.0 + gain);
+        assert!(
+            resolved >= prev - EPS,
+            "composed radiance dropped with albedo: {resolved} < {prev}"
+        );
+        prev = resolved;
     }
 }
 
