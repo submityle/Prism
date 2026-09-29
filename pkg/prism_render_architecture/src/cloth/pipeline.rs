@@ -48,6 +48,7 @@ use super::painted::{
     SkinnedAnchor,
 };
 use super::pressure::{apply_pressure, PressureParams};
+use super::self_ccd::{resolve_self_ccd, SelfCcdParams};
 use super::sleep::{max_kinetic_indicator, should_simulate, SleepParams, SleepState, SleepTracker};
 use super::tearing::{apply_plasticity, apply_tearing, PlasticParams, TearingParams};
 use super::wind::{apply_aero_forces, AeroParams, WindField};
@@ -154,6 +155,12 @@ pub struct Garment {
     /// Whether the continuous-collision sweep runs; `false` by default so the
     /// per-substep projection alone governs collision unless CCD is requested.
     pub ccd_enabled: bool,
+    /// Continuous *self*-collision (cloth-vs-cloth) sweep parameters applied
+    /// once per frame against the frame-start positions, so a fast fold cannot
+    /// tunnel one cloth layer through another between substeps. Disabled by
+    /// default (see [`SelfCcdParams`]); the discrete self-collision tier governs
+    /// unless this is switched on.
+    pub self_ccd: SelfCcdParams,
     /// Frame-start position snapshot reused as the CCD sweep origin; kept as a
     /// field to avoid a per-frame allocation.
     prev_positions: Vec<Vec3>,
@@ -211,6 +218,7 @@ impl Garment {
             bending: Vec::new(),
             ccd: CcdParams::default(),
             ccd_enabled: false,
+            self_ccd: SelfCcdParams::default(),
             prev_positions: Vec::new(),
             painted: Vec::new(),
             anchors: Vec::new(),
@@ -346,6 +354,13 @@ impl Garment {
                 self.friction,
             );
         }
+        // Continuous self-collision: sweep frame-start -> current for every
+        // cloth particle pair and clamp any tunnelling fold to its time-of-impact
+        // contact. Runs after the body sweep so cloth-cloth contacts are the last
+        // positional word before the painted authority passes.
+        if self.self_ccd.enabled {
+            resolve_self_ccd(&mut self.particles, &self.prev_positions, self.self_ccd, dt);
+        }
         // Painted post-solve passes steer the fully resolved positions toward
         // the skinned pose: cap the drift, push out of the backstop cushion, and
         // finally blend sim toward skin. Run last so nothing overrides the
@@ -430,6 +445,23 @@ impl Garment {
     /// Disables the continuous-collision sweep.
     pub fn disable_ccd(&mut self) {
         self.ccd_enabled = false;
+    }
+
+    /// Enables the continuous *self*-collision sweep with the given parameters.
+    /// The sweep runs once per frame after the body sweep and clamps any pair of
+    /// cloth particles that would tunnel through each other to their
+    /// time-of-impact contact. `params.enabled` is forced on so the sweep is
+    /// live immediately.
+    pub fn enable_self_ccd(&mut self, params: SelfCcdParams) {
+        self.self_ccd = SelfCcdParams {
+            enabled: true,
+            ..params
+        };
+    }
+
+    /// Disables the continuous self-collision sweep.
+    pub fn disable_self_ccd(&mut self) {
+        self.self_ccd.enabled = false;
     }
 
     /// Installs per-particle painted simulation weights and their skinned
@@ -716,6 +748,52 @@ mod tests {
             .position
             .distance(garment.particles[1].position);
         assert!(sep >= 0.05 - 1.0e-3, "layers not separated: {sep}");
+        assert_finite(&garment.particles);
+    }
+
+    #[test]
+    fn self_ccd_arrests_a_high_speed_pass_through_in_step() {
+        // Two unconstrained particles fired at each other fast enough to swap
+        // sides in a single frame: without continuous self-collision the
+        // discrete end-of-frame pass sees them already separated and misses the
+        // crossing. `enable_self_ccd` must catch the swept crossing and clamp
+        // them to a thickness-separated contact.
+        let solver = SolverParams {
+            substeps: 4,
+            iterations: 1,
+            gravity: Vec3::ZERO,
+            damping: 0.0,
+            strain_limit: 0.0,
+        };
+        let mut a = ClothParticle::new(Vec3::new(-0.5, 0.0, 0.0), 1.0);
+        a.velocity = Vec3::new(60.0, 0.0, 0.0);
+        let mut b = ClothParticle::new(Vec3::new(0.5, 0.0, 0.0), 1.0);
+        b.velocity = Vec3::new(-60.0, 0.0, 0.0);
+        let particles = alloc::vec![a, b];
+
+        // Reference run without self-CCD: they tunnel and swap sides.
+        let mut plain = Garment::new(particles.clone(), ConstraintGraph::default(), solver);
+        plain.step(1.0 / 60.0);
+        assert!(
+            plain.particles[0].position.x > plain.particles[1].position.x,
+            "reference run should tunnel (0 ends right of 1) so the CCD case is meaningful"
+        );
+
+        // Guarded run: the sweep arrests the crossing.
+        let mut garment = Garment::new(particles, ConstraintGraph::default(), solver);
+        garment.enable_self_ccd(SelfCcdParams::new(0.2, 0.1));
+        garment.step(1.0 / 60.0);
+        let sep = garment.particles[0]
+            .position
+            .distance(garment.particles[1].position);
+        assert!(
+            sep >= 0.1 - 1.0e-3,
+            "self-CCD did not keep the layers apart: {sep}"
+        );
+        assert!(
+            garment.particles[0].position.x <= garment.particles[1].position.x + 1.0e-3,
+            "self-CCD let particle 0 tunnel past particle 1"
+        );
         assert_finite(&garment.particles);
     }
 

@@ -966,6 +966,34 @@ fn hair_importance_wesl_compiles_standalone() {
         .unwrap_or_else(|error| panic!("hair_importance.wesl failed to compile: {error}"));
 }
 
+/// Compiles the hair per-particle motion-energy map compute twin standalone. A
+/// green result proves the sleep-gate proxy — mapping each particle's implicit
+/// velocity `position - prev_position` to its squared length `dot(v, v)`, the
+/// per-element body summed host-side into a groom's motion energy — parses and
+/// type-checks as WESL through the render-world `ShaderCache` / `wesl` pipeline,
+/// in lock-step with the per-particle body of the CPU golden
+/// `prism_render_architecture::hair::sleep::groom_motion_energy` (its
+/// `particle_speed_squared` map, with pinned particles contributing `0`). The
+/// particle layout matches the shared `hair_sim` state so no repacking is needed
+/// between simulation and this proxy.
+#[test]
+fn hair_motion_energy_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let hair_motion_energy = shader_id(0x5052_4953_4d5f_4841_4952_5f4d_4f5f_0001);
+    cache.set_shader(
+        hair_motion_energy,
+        Shader::from_wesl(
+            include_str!("../../shaders/hair_motion_energy.wesl"),
+            "embedded://prism_render_scene/shaders/hair_motion_energy.wesl",
+        ),
+    );
+
+    cache
+        .get(0, hair_motion_energy, &[])
+        .unwrap_or_else(|error| panic!("hair_motion_energy.wesl failed to compile: {error}"));
+}
+
 /// Registers `lighting.wesl`, `brdf.wesl` and `stylized_hair.wesl` under their
 /// canonical module paths and compiles `stylized_hair.wesl`, forcing the
 /// importer to resolve the `prism_render_scene::shaders::brdf::{...}` imports
