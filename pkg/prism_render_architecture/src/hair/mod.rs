@@ -57,6 +57,7 @@ pub mod collision;
 pub mod decimation;
 pub mod deep_opacity_layout;
 pub mod deep_transmittance;
+pub mod density_lod;
 pub mod dynamics;
 pub mod frames;
 pub mod groom;
