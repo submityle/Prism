@@ -8,26 +8,28 @@
 //!
 //! 1. **Import & interpolation** — a small set of simulated *guide* strands is
 //!    interpolated into many *render* strands, so simulation cost stays bounded
-//!    while visual density scales.
+//!    while visual density scales; see [`interpolation`].
 //! 2. **Strand dynamics** — guides are advanced by an XPBD-style solver
-//!    (edge-length plus local/global shape constraints). The per-frame vertex
-//!    work is arbitrated by [`crate::deformation::schedule`]; this subsystem
-//!    only emits requests, it does not own the budget.
+//!    (edge-length plus local/global shape constraints); see [`dynamics`]. The
+//!    per-frame vertex work is arbitrated by [`crate::deformation::schedule`];
+//!    this subsystem only emits requests, it does not own the budget.
 //! 3. **LOD** — a ladder from full strands to decimated strands to camera
 //!    cards to a static mesh shell, selected by screen coverage; see [`lod`].
 //! 4. **Rasterization** — thin strands are drawn in a compute/visibility pass
-//!    (sub-pixel software raster) rather than the hardware triangle path.
+//!    (sub-pixel software raster) rather than the hardware triangle path; see
+//!    [`raster`].
 //! 5. **Shading** — a physically based hair BSDF (Chiang / Marschner) with a
 //!    dual-scattering multiple-scattering approximation, expressed through the
 //!    material system's `HairPbr` closure rather than reimplemented here.
 //! 6. **Transmittance & shadows** — deep opacity maps / order-independent
 //!    transparency for self-shadowing and blending, routed through the
-//!    transparency subsystem's `HairVisibility` path.
+//!    transparency subsystem's `HairVisibility` path; see [`deep_transmittance`].
 //!
 //! This module owns the geometry, LOD, and simulation-binding contracts. It
 //! references, never reimplements, the shared deformation budget, the material
 //! closures, and the transparency routing.
 
+pub mod deep_transmittance;
 pub mod lod;
 
 use crate::deformation::DeformationHandle;
