@@ -15,7 +15,8 @@
 //!   velocity-scaled prefetch.
 //! * [`page_table`] — page residency bookkeeping and budget-driven eviction.
 //! * [`raster_path`] — software-vs-hardware raster path classification.
-//! * [`software_raster`] — deterministic vis-buffer triangle rasterizer
+//! * [`software_raster`] — deterministic vis-buffer triangle rasterizer, with a
+//!   world-to-screen projection layer for full-path GPU-twin parity
 //!   (CPU golden standard for the GPU compute path).
 //! * [`pipeline`] — per-cluster composition of the decisions above.
 //! * [`hierarchy`] — screen-space-error cut selection over the cluster DAG.
@@ -44,9 +45,9 @@ pub use page_table::{GeometryPageTable, PageEntry, PageResidency};
 pub use pipeline::{ClusterDecision, ClusterRequest, ViewCullContext};
 pub use raster_path::{select_raster_path, ClusterRasterStats, RasterCapability};
 pub use software_raster::{
-    cluster_of, encode_depth, pack_cluster_triangle, pack_vis, rasterize_cluster,
-    rasterize_triangle, triangle_of, vis_depth, vis_payload, ScreenVertex, VisBuffer,
-    CLUSTER_TRIANGLE_BITS, MAX_CLUSTER_TRIANGLES,
+    cluster_of, encode_depth, pack_cluster_triangle, pack_vis, project_vertex,
+    rasterize_cluster, rasterize_triangle, triangle_of, vis_depth, vis_payload,
+    ScreenVertex, VisBuffer, CLUSTER_TRIANGLE_BITS, MAX_CLUSTER_TRIANGLES,
 };
 
 /// Version of the virtual-geometry contracts in this module.
