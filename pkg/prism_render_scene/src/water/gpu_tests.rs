@@ -3338,3 +3338,259 @@ fn underwater_volume_gpu_matches_cpu_golden() {
         i += 1;
     }
 }
+
+// ===========================================================================
+// Waterline mask parity (`water_waterline_mask`, water_surface.wesl)
+// ===========================================================================
+
+use super::abi::GpuWaterWaterlineParams;
+use prism_render_architecture::water::waterline::{self, WaterlineParams};
+
+/// The waterline mask is pure subtraction / division / clamp, so the on-device
+/// result is bit-for-bit `float32` arithmetic against the `CPU` golden; a
+/// micro tolerance only guards against a stray fused multiply-add.
+const WATERLINE_EPS: f32 = 1.0e-6;
+
+/// Deterministic waterline sample field: per-cell sample world height, local
+/// water-surface height, and total water depth (row-major, `nx * nz`).
+///
+/// The sample sweeps from above the surface down through it into submersion so
+/// the soft-transition ramp is covered on both saturated ends and the linear
+/// interior, while the total depth spans a dry margin (`0`) up to deep water so
+/// the shoreline band rises, saturates, and switches fully off.
+fn build_waterline_field(nx: u32, nz: u32) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    let n = (nx * nz) as usize;
+    let mut sample_y = Vec::with_capacity(n);
+    let mut surface_y = Vec::with_capacity(n);
+    let mut depth = Vec::with_capacity(n);
+    let mut z = 0u32;
+    while z < nz {
+        let mut x = 0u32;
+        while x < nx {
+            let fx = x as f32;
+            let fz = z as f32;
+            // Surface tilts gently across the grid.
+            let s = 5.0 + 0.05 * fz;
+            // Sample height sweeps roughly +1 .. -1 m around the surface.
+            let sweep = ((fx * 3.0 + fz) % 20.0) / 10.0;
+            sample_y.push(s + 1.0 - sweep);
+            surface_y.push(s);
+            // Total water depth: dry margin up through deep water.
+            depth.push(((fx + fz * 2.0) % 13.0) / 6.0);
+            x += 1;
+        }
+        z += 1;
+    }
+    (sample_y, surface_y, depth)
+}
+
+/// `CPU` golden for the waterline mask, packed `(weight, band, underwater,
+/// submersion_depth)` per cell in row-major order to match `waterline_out`.
+fn waterline_golden(
+    sample_y: &[f32],
+    surface_y: &[f32],
+    water_depth: &[f32],
+    params: WaterlineParams,
+) -> Vec<f32> {
+    let mut out = Vec::with_capacity(sample_y.len() * 4);
+    let mut i = 0;
+    while i < sample_y.len() {
+        let depth = waterline::submersion_depth(sample_y[i], surface_y[i]);
+        let underwater = if waterline::is_underwater(sample_y[i], surface_y[i]) {
+            1.0
+        } else {
+            0.0
+        };
+        let weight = waterline::waterline_weight(sample_y[i], surface_y[i], params);
+        let band = waterline::shoreline_band(sample_y[i], surface_y[i], water_depth[i], params);
+        out.push(weight);
+        out.push(band);
+        out.push(underwater);
+        out.push(depth);
+        i += 1;
+    }
+    out
+}
+
+/// Dispatches one `water_waterline_mask` pass and reads back the packed mask.
+///
+/// The kernel declares its resources on `@group(2)` (the surface module's
+/// `swe`/`foam` passes own `group(0)`/`group(1)`, unreferenced by this entry
+/// point), so the bind group is built from the pipeline's reflected `group(2)`
+/// layout and set at binding index `2`. The five bindings match the shader's
+/// declaration order: three read-only sample buffers, the packed `vec4` output,
+/// and the uniform params.
+fn dispatch_waterline(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    wgsl: &str,
+    entry: &str,
+    sample_y: &[f32],
+    surface_y: &[f32],
+    water_depth: &[f32],
+    params: &GpuWaterWaterlineParams,
+) -> Vec<f32> {
+    let n = sample_y.len();
+    let out_bytes = (n * 4 * size_of::<f32>()) as u64;
+
+    let module = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("water_surface_waterline_parity"),
+        source: ShaderSource::Wgsl(wgsl.into()),
+    });
+    let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("water_waterline_mask_parity"),
+        layout: None,
+        module: &module,
+        entry_point: Some(entry),
+        compilation_options: PipelineCompilationOptions::default(),
+        cache: None,
+    });
+
+    let storage_read = BufferUsages::STORAGE;
+    let sample_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("waterline_sample_y"),
+        contents: bytemuck::cast_slice(sample_y),
+        usage: storage_read,
+    });
+    let surface_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("waterline_surface_y"),
+        contents: bytemuck::cast_slice(surface_y),
+        usage: storage_read,
+    });
+    let depth_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("waterline_depth"),
+        contents: bytemuck::cast_slice(water_depth),
+        usage: storage_read,
+    });
+    let out_buf = device.create_buffer(&BufferDescriptor {
+        label: Some("waterline_out"),
+        size: out_bytes,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let param_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("waterline_params"),
+        contents: bytemuck::bytes_of(params),
+        usage: BufferUsages::UNIFORM,
+    });
+    let layout = pipeline.get_bind_group_layout(2);
+    let bind_group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("water_waterline_mask_bind_group"),
+        layout: &layout,
+        entries: &[
+            BindGroupEntry {
+                binding: 0,
+                resource: sample_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 1,
+                resource: surface_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 2,
+                resource: depth_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 3,
+                resource: out_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 4,
+                resource: param_buf.as_entire_binding(),
+            },
+        ],
+    });
+
+    let out_stage = device.create_buffer(&BufferDescriptor {
+        label: Some("waterline_out_stage"),
+        size: out_bytes,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("waterline_parity_encoder"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("waterline_parity_pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(2, &bind_group, &[]);
+        pass.dispatch_workgroups(params.nx.div_ceil(8), params.nz.div_ceil(8), 1);
+    }
+    encoder.copy_buffer_to_buffer(&out_buf, 0, &out_stage, 0, out_bytes);
+    queue.submit([encoder.finish()]);
+
+    out_stage.slice(..).map_async(MapMode::Read, |_| {});
+    device
+        .poll(PollType::wait_indefinitely())
+        .expect("device poll should complete the submitted work");
+
+    let view = out_stage
+        .slice(..)
+        .get_mapped_range()
+        .expect("mapped readback range should be available after poll");
+    let values: Vec<f32> = bytemuck::cast_slice::<u8, f32>(&view).to_vec();
+    drop(view);
+    out_stage.unmap();
+    values
+}
+
+/// One on-device waterline mask must match the `CPU` golden bit-for-bit.
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice must reach the test log on hosts without a wgpu adapter"
+)]
+fn waterline_mask_gpu_matches_cpu_golden() {
+    let Some((device, queue)) = try_solver_device() else {
+        eprintln!(
+            "waterline_mask_gpu_matches_cpu_golden: no wgpu adapter, skipping on-device parity"
+        );
+        return;
+    };
+
+    const NX: u32 = 24;
+    const NZ: u32 = 20;
+    let params = WaterlineParams {
+        transition_half_width: 0.35,
+        shoreline_depth: 1.5,
+    };
+    let (sample_y, surface_y, water_depth) = build_waterline_field(NX, NZ);
+    let golden = waterline_golden(&sample_y, &surface_y, &water_depth, params);
+
+    let gpu_params = GpuWaterWaterlineParams {
+        nx: NX,
+        nz: NZ,
+        transition_half_width: params.transition_half_width,
+        shoreline_depth: params.shoreline_depth,
+    };
+
+    let wgsl = compile_surface_wgsl();
+    let entry = find_entry_point(&wgsl, "waterline_mask");
+    let gpu = dispatch_waterline(
+        &device,
+        &queue,
+        &wgsl,
+        &entry,
+        &sample_y,
+        &surface_y,
+        &water_depth,
+        &gpu_params,
+    );
+
+    assert_eq!(gpu.len(), golden.len(), "packed mask length mismatch");
+    let mut i = 0;
+    while i < golden.len() {
+        let d = (gpu[i] - golden[i]).abs();
+        assert!(
+            d < WATERLINE_EPS,
+            "lane {i}: gpu={} cpu={} |d|={d}",
+            gpu[i],
+            golden[i],
+        );
+        i += 1;
+    }
+}
