@@ -50,3 +50,15 @@ fn film_grain_wesl_compiles_standalone() {
         .get(0, film_grain, &[])
         .unwrap_or_else(|error| panic!("film_grain.wesl failed to compile: {error}"));
 }
+
+/// Guards the Rust immediate-block ABI against drift from the WESL struct: the
+/// single `GpuFilmGrainParams` block is the 32-byte `vec2`-led block matching
+/// `film_grain.wesl`'s one `var<immediate>` global, and the workgroup constant
+/// matches `@workgroup_size(8, 8, 1)`.
+#[test]
+fn film_grain_abi_matches_the_shader_layout() {
+    use super::abi::{GpuFilmGrainParams, FILM_GRAIN_WORKGROUP_SIZE};
+    assert_eq!(size_of::<GpuFilmGrainParams>(), 32);
+    assert_eq!(align_of::<GpuFilmGrainParams>(), 4);
+    assert_eq!(FILM_GRAIN_WORKGROUP_SIZE, 8);
+}

@@ -50,9 +50,17 @@ use super::{
         prepare_chromatic_aberration_bind_groups, prepare_chromatic_aberration_textures,
         PrismChromaticAberrationSettings,
     },
+    color_grade::{
+        color_grade_pass, init_color_grade_pipeline, prepare_color_grade_bind_groups,
+        prepare_color_grade_textures, PrismColorGradeSettings,
+    },
     dof::{
         dof_pass, init_dof_pipeline, prepare_dof_bind_groups, prepare_dof_textures,
         PrismDofSettings,
+    },
+    film_grain::{
+        film_grain_pass, init_film_grain_pipeline, prepare_film_grain_bind_groups,
+        prepare_film_grain_textures, PrismFilmGrainSettings,
     },
     motion_blur::{
         init_motion_blur_pipeline, motion_blur_pass, prepare_motion_blur_bind_groups,
@@ -161,6 +169,8 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/dof.wesl");
         embedded_asset!(app, "../shaders/chromatic_aberration.wesl");
         embedded_asset!(app, "../shaders/vignette.wesl");
+        embedded_asset!(app, "../shaders/color_grade.wesl");
+        embedded_asset!(app, "../shaders/film_grain.wesl");
         embedded_asset!(app, "../shaders/brdf_lut.wesl");
         embedded_asset!(app, "../shaders/env_prefilter.wesl");
         embedded_asset!(app, "../shaders/exposure.wesl");
@@ -208,6 +218,8 @@ impl Plugin for PrismShadingPlugin {
             .init_resource::<PrismDofSettings>()
             .init_resource::<PrismChromaticAberrationSettings>()
             .init_resource::<PrismVignetteSettings>()
+            .init_resource::<PrismColorGradeSettings>()
+            .init_resource::<PrismFilmGrainSettings>()
             .insert_resource(ShadingFrameGraph {
                 compiled: compiled_graph,
             })
@@ -265,6 +277,8 @@ impl Plugin for PrismShadingPlugin {
                         init_dof_pipeline,
                         init_chromatic_aberration_pipeline,
                         init_vignette_pipeline,
+                        init_color_grade_pipeline,
+                        init_film_grain_pipeline,
                     ),
                     init_dfg_lut_texture,
                     init_brdf_lut_pipeline,
@@ -517,6 +531,20 @@ impl Plugin for PrismShadingPlugin {
                     prepare_vignette_bind_groups
                         .after(prepare_vignette_textures)
                         .in_set(RenderSystems::PrepareBindGroups),
+                    // Colour grade then film grain close the pre-MainPass
+                    // scene_color chain; both are visibility-only allocations.
+                    prepare_color_grade_textures
+                        .after(prepare_visibility_buffers)
+                        .in_set(RenderSystems::PrepareResources),
+                    prepare_color_grade_bind_groups
+                        .after(prepare_color_grade_textures)
+                        .in_set(RenderSystems::PrepareBindGroups),
+                    prepare_film_grain_textures
+                        .after(prepare_visibility_buffers)
+                        .in_set(RenderSystems::PrepareResources),
+                    prepare_film_grain_bind_groups
+                        .after(prepare_film_grain_textures)
+                        .in_set(RenderSystems::PrepareBindGroups),
                 ),
             )
             .add_systems(
@@ -657,6 +685,16 @@ impl Plugin for PrismShadingPlugin {
                         .before(bevy_core_pipeline::Core3dSystems::MainPass),
                     vignette_pass
                         .after(chromatic_aberration_pass)
+                        .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                    // Colour grade regrades the finished HDR image after
+                    // vignette, then film grain adds sensor grain last. Both
+                    // serialised after the prior writer so the scene_color
+                    // copy-backs never race, before the main pass composites.
+                    color_grade_pass
+                        .after(vignette_pass)
+                        .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                    film_grain_pass
+                        .after(color_grade_pass)
                         .before(bevy_core_pipeline::Core3dSystems::MainPass),
                 ),
                 composite_shading

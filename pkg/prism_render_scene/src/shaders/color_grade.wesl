@@ -124,34 +124,76 @@ fn color_grade_apply(rgb: vec3<f32>, params: ColorGradeParams) -> vec3<f32> {
     return color_grade_saturation(c, params.saturation);
 }
 
-// Minimal entry so the module type-checks as a standalone compute kernel under
-// the WESL compile test; the real grade pass wires the HDR target and the
-// params uniform later. References every function so none drifts unused.
-@compute @workgroup_size(64, 1, 1)
-fn color_grade_probe(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let seed = f32(gid.x) * 0.01;
-    let rgb = vec3<f32>(0.15 + seed, 0.4, 0.85);
+// ---------------------------------------------------------------------------
+// Device wiring: full-screen compute pass over the pre-exposed HDR scene colour.
+// ---------------------------------------------------------------------------
 
-    let lum = color_grade_luma(rgb);
-    let siy = color_grade_standard_illuminant_y(0.31271);
-    let lms = color_grade_lin_to_lms(rgb);
-    let lin = color_grade_lms_to_lin(lms);
-    let wb = color_grade_white_balance(rgb, 0.2, -0.1);
-    let lgg = color_grade_lift_gamma_gain(rgb, vec3<f32>(0.02, 0.0, 0.0), vec3<f32>(1.1, 1.0, 0.9), vec3<f32>(1.05, 1.0, 0.95));
-    let sat = color_grade_saturation(rgb, 0.8);
-    let con = color_grade_contrast(rgb, 1.2, 0.18);
-    let off = color_grade_offset(rgb, vec3<f32>(0.1, -0.1, 0.05));
+// Immediate (push-constant) block driving the grade pass. Mirrors the Rust
+// `GpuColorGradeParams` byte-for-byte. The golden `ColorGradeParams` fields are
+// packed into the free `w`/`z` lanes of four `vec4`s to respect WGSL's 16-byte
+// `vec3`/`vec4` alignment without implicit padding: the three CDL wheels carry
+// the three scalar white-balance/contrast knobs in their `w` lane, and the
+// fourth vec4 carries pivot / saturation / the device-only global `scale`
+// (scale = 1 reproduces the golden grade, scale = 0 is identity per pixel).
+struct GpuColorGradeParams {
+    // xyz = ASC CDL lift (offset), w = white-balance temperature.
+    lift_temp: vec4<f32>,
+    // xyz = ASC CDL gamma (power), w = white-balance tint.
+    gamma_tint: vec4<f32>,
+    // xyz = ASC CDL gain (slope), w = contrast.
+    gain_contrast: vec4<f32>,
+    // x = contrast pivot, y = saturation, z = global scale, w = unused pad.
+    pivot_sat_scale: vec4<f32>,
+    // Full-resolution framebuffer extent in texels.
+    screen_size: vec2<u32>,
+    // Explicit tail padding so the block is a multiple of 16 bytes.
+    _pad: vec2<u32>,
+}
 
+// The pre-exposed, resolved linear HDR scene colour this pass grades.
+@group(0) @binding(0) var color_grade_scene_color: texture_2d<f32>;
+// The graded HDR output; copied back over `scene_color` after the dispatch.
+@group(0) @binding(1) var color_grade_out: texture_storage_2d<rgba16float, write>;
+
+var<immediate> color_grade_params: GpuColorGradeParams;
+
+// Repack the immediate block into the golden `ColorGradeParams` the maths twin
+// consumes, so the on-device evaluation is arm-for-arm identical to the CPU
+// reference (`scale` is applied on top and is the only non-golden control).
+fn color_grade_params_from_immediate() -> ColorGradeParams {
     var params: ColorGradeParams;
-    params.lift = vec3<f32>(0.0, 0.0, 0.0);
-    params.gamma = vec3<f32>(1.0, 1.0, 1.0);
-    params.gain = vec3<f32>(1.0, 1.0, 1.0);
-    params.temperature = 0.0;
-    params.tint = 0.0;
-    params.contrast = 1.0;
-    params.pivot = 0.18;
-    params.saturation = 1.0;
-    let graded = color_grade_apply(rgb, params);
+    params.lift = color_grade_params.lift_temp.xyz;
+    params.gamma = color_grade_params.gamma_tint.xyz;
+    params.gain = color_grade_params.gain_contrast.xyz;
+    params.temperature = color_grade_params.lift_temp.w;
+    params.tint = color_grade_params.gamma_tint.w;
+    params.contrast = color_grade_params.gain_contrast.w;
+    params.pivot = color_grade_params.pivot_sat_scale.x;
+    params.saturation = color_grade_params.pivot_sat_scale.y;
+    return params;
+}
 
-    _ = lum + siy + lin.x + lms.x + wb.x + lgg.x + sat.x + con.x + off.x + graded.x;
+// One invocation per pixel. Evaluates the golden grade on the linear HDR
+// radiance, fades it toward identity by the global `scale` and writes the graded
+// HDR texel (alpha preserved). Grading runs in the scene-referred linear domain,
+// before the display tone-map curve, exactly like the golden.
+@compute @workgroup_size(8, 8, 1)
+fn color_grade_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let width = i32(color_grade_params.screen_size.x);
+    let height = i32(color_grade_params.screen_size.y);
+    let pc = vec2<i32>(i32(gid.x), i32(gid.y));
+    if (pc.x >= width || pc.y >= height) {
+        return;
+    }
+
+    let sample = textureLoad(color_grade_scene_color, pc, 0);
+
+    let params = color_grade_params_from_immediate();
+    let graded = color_grade_apply(sample.rgb, params);
+    // Fade the grade toward identity (the input) by the global scale; scale = 1
+    // is the exact golden grade, scale = 0 disables the effect per-pixel.
+    let scale = clamp(color_grade_params.pivot_sat_scale.z, 0.0, 1.0);
+    let out_rgb = sample.rgb + (graded - sample.rgb) * scale;
+
+    textureStore(color_grade_out, pc, vec4<f32>(out_rgb, sample.a));
 }

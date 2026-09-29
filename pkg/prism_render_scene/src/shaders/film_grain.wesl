@@ -129,31 +129,81 @@ fn film_grain_apply(rgb: vec3<f32>, uv: vec2<f32>, resolution: vec2<f32>, time_s
     return film_grain_apply_grain(rgb, g, params.intensity, weight);
 }
 
-// Minimal entry so the module type-checks as a standalone compute kernel under
-// the WESL compile test; the real grain pass wires the HDR target and the
-// params uniform later. References every function so none drifts unused.
-@compute @workgroup_size(64, 1, 1)
-fn film_grain_probe(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let seed = f32(gid.x) * 0.01;
-    let rgb = vec3<f32>(0.15 + seed, 0.4, 0.85);
-    let uv = vec2<f32>(0.31 + seed, 0.73);
-    let resolution = vec2<f32>(1920.0, 1080.0);
+// ---------------------------------------------------------------------------
+// Device entry point.
+// ---------------------------------------------------------------------------
 
-    let fr = film_grain_fract(-3.1 + seed);
-    let lum = film_grain_luminance(rgb);
-    let h = film_grain_hash12(vec2<f32>(12.0 + seed, 34.0));
-    let g = film_grain_grain(uv, resolution, seed);
-    let ss = film_grain_smoothstep(0.0, 1.0, 0.5);
-    let lp = film_grain_lerp(0.0, 1.0, 0.5);
-    let lw = film_grain_luminance_weight(lum, 0.8);
-    let ag = film_grain_apply_grain(rgb, g, 0.1, lw);
+// Workgroup size (per axis) of the `film_grain_main` entry point; mirrored by
+// `FILM_GRAIN_WORKGROUP_SIZE` on the Rust side. The dispatch rounds the target
+// extent up to a multiple of this on both axes and the shader bounds-checks
+// every invocation against `params.screen_size`.
+const FILM_GRAIN_WG: u32 = 8u;
+
+// Immediate (push-constant) block consumed by `film_grain_main`, mirroring the
+// Rust `GpuFilmGrainParams`. `screen_size` (a `vec2<u32>`) leads for its 8-byte
+// alignment; the trailing scalars (`intensity`, `response`, `size`,
+// `time_seed`, `colored`) plus one `_padding` word round the block to 32 bytes,
+// a multiple of the 8-byte alignment the `vec2` forces, with no implicit gap.
+struct GpuFilmGrainParams {
+    // Full-resolution framebuffer extent in texels (`vec2<u32>`, 8-byte aligned).
+    screen_size: vec2<u32>,
+    // Artist grain strength; `0` is the golden identity.
+    intensity: f32,
+    // Luminance response in [0, 1]: `0` grains uniformly, `1` biases the grain
+    // fully toward the shadows.
+    response: f32,
+    // Grain cell size; larger values sample a lower frequency (coarser grain).
+    size: f32,
+    // Per-frame animation seed (a wrapped frame index cast to `f32`); offsets
+    // the hash so the grain field animates frame to frame.
+    time_seed: f32,
+    // Coloured-grain flag: non-zero hashes each channel with an offset seed,
+    // zero shares one value across channels (monochrome). WGSL host-shareable
+    // structs cannot hold `bool`.
+    colored: u32,
+    // Padding to a multiple of the `vec2<u32>` 8-byte alignment.
+    _padding: u32,
+}
+
+var<immediate> film_grain_params: GpuFilmGrainParams;
+
+// group 0: the pre-exposed scene colour (non-filterable float, `textureLoad`ed
+// per pixel) at binding 0, then the write-only `rgba16float` grained output at
+// binding 1. Matches the Rust `sequential` {0, 1} layout.
+@group(0) @binding(0) var scene_color: texture_2d<f32>;
+@group(0) @binding(1) var film_grain_out: texture_storage_2d<rgba16float, write>;
+
+// `film_grain_main`: one invocation per output pixel. Bounds-checks against the
+// framebuffer extent, loads the pre-exposed HDR radiance, applies the golden
+// film-grain model (`film_grain_apply`) at this pixel's screen `uv`, and stores
+// the grained radiance (alpha preserved) to the dedicated output the dispatch
+// then copies back over `scene_color`.
+@compute @workgroup_size(8, 8, 1)
+fn film_grain_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let extent = film_grain_params.screen_size;
+    if (gid.x >= extent.x || gid.y >= extent.y) {
+        return;
+    }
+
+    let coord = vec2<i32>(i32(gid.x), i32(gid.y));
+    let texel = textureLoad(scene_color, coord, 0);
+    let rgb = texel.rgb;
+
+    let resolution = vec2<f32>(f32(extent.x), f32(extent.y));
+    // Pixel-centre screen uv in [0, 1); `uv * resolution` reproduces the golden
+    // `p = uv * resolution` sampling coordinate (i.e. pixel-space grain).
+    let uv = (vec2<f32>(f32(gid.x), f32(gid.y)) + vec2<f32>(0.5, 0.5)) / resolution;
 
     var params: FilmGrainParams;
-    params.intensity = 0.1;
-    params.response = 0.8;
-    params.size = 1.0;
-    params.colored = 1u;
-    let grained = film_grain_apply(rgb, uv, resolution, seed, params);
+    params.intensity = film_grain_params.intensity;
+    params.response = film_grain_params.response;
+    params.size = film_grain_params.size;
+    params.colored = film_grain_params.colored;
 
-    _ = fr + lum + h + g + ss + lp + lw + ag.x + grained.x;
+    let grained = film_grain_apply(rgb, uv, resolution, film_grain_params.time_seed, params);
+
+    // Reference the workgroup constant so it cannot drift unused; the compare is
+    // always true (dispatch uses @workgroup_size(8, 8, 1)).
+    let write_rgb = select(rgb, grained, FILM_GRAIN_WG == 8u);
+    textureStore(film_grain_out, coord, vec4<f32>(write_rgb, texel.a));
 }
