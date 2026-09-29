@@ -254,6 +254,34 @@ pub(crate) struct GpuClothEmbedParams {
     pub _pad: [u32; 3],
 }
 
+/// Aerodynamic (wind drag + lift) dispatch uniform. Byte-compatible with
+/// `ClothAeroParams` in `cloth_aerodynamics.wesl`: the steady wind velocity
+/// packs with the turbulence strength into the first 16-byte row, then the two
+/// aerodynamic coefficients, the substep timestep and the particle bound fill
+/// the second row, so the whole block is one 32-byte uniform stride. The host
+/// sanitizes `wind` / `turbulence` / `drag` / `lift` (matching the golden
+/// `WindField::sanitized` / `AeroParams::sanitized`) before upload, so the
+/// shader reads finite, range-clamped values directly.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq)]
+pub(crate) struct GpuClothAeroParams {
+    /// Steady world-space wind velocity, world units per second.
+    pub wind: [f32; 3],
+    /// Turbulence strength clamped to `0..=1` (packs into the wind row).
+    pub turbulence: f32,
+    /// Normal-direction (drag) coefficient; sanitized non-negative on the host.
+    pub drag: f32,
+    /// In-plane (lift) coefficient; sanitized non-negative on the host.
+    pub lift: f32,
+    /// Full-frame timestep `dt`, seconds. Aerodynamics is a single
+    /// pre-solve impulse applied once per frame (before the substep loop),
+    /// mirroring the `CPU` golden `apply_aero_forces`; the per-vertex velocity
+    /// increment is `force * inverse_mass * dt`.
+    pub dt: f32,
+    /// Number of particles (= gather vertices) bounding the per-vertex dispatch.
+    pub particle_count: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -334,6 +362,17 @@ mod tests {
     #[test]
     fn embed_params_is_uniform_stride() {
         assert_eq!(size_of::<GpuClothEmbedParams>(), 16);
+    }
+
+    /// The aerodynamic uniform is exactly two 16-byte `WGSL` uniform rows: the
+    /// wind vector packs with the turbulence strength into the first row, and
+    /// the two coefficients, the timestep and the particle bound fill the
+    /// second. Pin the 32-byte stride so a field drift fails the build rather
+    /// than silently misaligning the shader read.
+    #[test]
+    fn aero_params_is_uniform_stride() {
+        assert_eq!(size_of::<GpuClothAeroParams>(), 32);
+        assert_eq!(size_of::<GpuClothAeroParams>() % 16, 0);
     }
 
     /// The collider discriminants match the shader's `CLOTH_COLLIDER_*` order.

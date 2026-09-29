@@ -40,6 +40,18 @@ pub(crate) struct ClothGarment {
     pub(crate) constraints: Vec<Constraint>,
     /// Authored dihedral bending hinges.
     pub(crate) bending: Vec<BendingConstraint>,
+    /// Sim-mesh triangles (three particle indices each) describing the surface
+    /// the aerodynamic gather pass integrates wind over. Empty disables the
+    /// aerodynamic passes for this garment.
+    pub(crate) triangles: Vec<[u32; 3]>,
+    /// Steady world-space wind velocity, world units per second.
+    pub(crate) wind_velocity: [f32; 3],
+    /// Per-triangle turbulence strength; `0` disables the jitter.
+    pub(crate) wind_turbulence: f32,
+    /// Normal-direction (drag) aerodynamic coefficient.
+    pub(crate) aero_drag: f32,
+    /// In-plane (lift) aerodynamic coefficient.
+    pub(crate) aero_lift: f32,
     /// Analytic body-collision proxies.
     pub(crate) colliders: Vec<GpuClothCollider>,
     /// Painted backstop planes, one per constrained particle.
@@ -78,6 +90,11 @@ impl ClothGarment {
             velocities: &self.velocities,
             constraints: &self.constraints,
             bending: &self.bending,
+            triangles: &self.triangles,
+            wind_velocity: self.wind_velocity,
+            wind_turbulence: self.wind_turbulence,
+            aero_drag: self.aero_drag,
+            aero_lift: self.aero_lift,
             colliders: &self.colliders,
             backstops: &self.backstops,
             embed_bindings: &self.embed_bindings,

@@ -3,12 +3,13 @@
 //! This plugin wires the three cohesive halves of the module into a running
 //! app:
 //!
-//! * It embeds the three `WESL` compute shaders
-//!   (`cloth_sim.wesl`, `cloth_collision.wesl`, `cloth_embed.wesl`) so
+//! * It embeds the five `WESL` compute shaders
+//!   (`cloth_sim.wesl`, `cloth_collision.wesl`, `cloth_embed.wesl`,
+//!   `cloth_aerodynamics_snapshot.wesl`, `cloth_aerodynamics.wesl`) so
 //!   [`init_cloth_compute_pipelines`](super::pipeline::init_cloth_compute_pipelines)
 //!   can load them by their stable asset paths and `naga` validates them the
 //!   moment the render app boots.
-//! * It builds the eleven pipelines and five bind-group layouts once at
+//! * It builds the thirteen pipelines and seven bind-group layouts once at
 //!   `RenderStartup`, inserting the shared
 //!   [`ClothComputePipelines`](super::pipeline::ClothComputePipelines) resource.
 //! * It installs the [`ClothGpuPieces`](super::resources::ClothGpuPieces) and
@@ -53,12 +54,14 @@ pub(crate) struct ClothPlugin;
 
 impl Plugin for ClothPlugin {
     fn build(&self, app: &mut App) {
-        // Embed the three compute shaders next to this module so the pipeline
+        // Embed the five compute shaders next to this module so the pipeline
         // init system can load them by their stable `../shaders/*.wesl` asset
         // paths regardless of the working directory.
         embedded_asset!(app, "../shaders/cloth_sim.wesl");
         embedded_asset!(app, "../shaders/cloth_collision.wesl");
         embedded_asset!(app, "../shaders/cloth_embed.wesl");
+        embedded_asset!(app, "../shaders/cloth_aerodynamics_snapshot.wesl");
+        embedded_asset!(app, "../shaders/cloth_aerodynamics.wesl");
 
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
@@ -71,7 +74,7 @@ impl Plugin for ClothPlugin {
             .init_resource::<ClothGpuPieces>()
             // Default-empty snapshot the extract stage refills every frame.
             .init_resource::<ExtractedCloth>()
-            // Build the eleven pipelines + five layouts once, then insert the
+            // Build the thirteen pipelines + seven layouts once, then insert the
             // shared `ClothComputePipelines` resource the prepare and dispatch
             // stages read.
             .add_systems(RenderStartup, init_cloth_compute_pipelines)

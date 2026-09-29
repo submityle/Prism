@@ -2,8 +2,8 @@
 //!
 //! The CPU-golden solver in `prism_render_architecture::cloth` decides *what*
 //! runs each frame; this slice builds the concrete `wgpu` compute pipelines and
-//! the bind-group layouts that the eleven cloth kernels dispatch against. The
-//! kernels are authored across three `WESL` shaders, each declaring its own
+//! the bind-group layouts that the thirteen cloth kernels dispatch against. The
+//! kernels are authored across five `WESL` shaders, each declaring its own
 //! `@group(0)` resource interface:
 //!
 //! * `shaders/cloth_sim.wesl` — the predict / integrate step, the graph-colored
@@ -24,7 +24,9 @@
 //! Because the three collision passes alias `@group(0)` to incompatible
 //! resource sets, each needs its own bind-group layout even though they live in
 //! one shader; a shared layout would validate against only one of them. That is
-//! why this module owns *five* layouts, not one per shader file.
+//! why this module owns *seven* layouts, not one per shader file. The two
+//! aerodynamic passes add two more: the snapshot pass and the gather pass each
+//! rebind `@group(0)` to their own resource set.
 //!
 //! Every pipeline binds the matching layout as group 0. The cloth passes read
 //! their per-substep scalars from the uniform slot, but the three color-serial
@@ -36,7 +38,7 @@
 
 #![allow(
     dead_code,
-    reason = "the cloth compute pipelines and the five bind-group layouts are the render-resource foundation of the GPU cloth subsystem; the bind-group preparation and Core3d dispatch slices that consume `ClothComputePipelines`, its accessors and `init_cloth_compute_pipelines` land in the following slices, and the layout grouping is exercised now by the kernel-contract test below"
+    reason = "the cloth compute pipelines and the seven bind-group layouts are the render-resource foundation of the GPU cloth subsystem; the bind-group preparation and Core3d dispatch slices that consume `ClothComputePipelines`, its accessors and `init_cloth_compute_pipelines` land in the following slices, and the layout grouping is exercised now by the kernel-contract test below"
 )]
 
 use bevy_asset::{load_embedded_asset, Handle};
@@ -62,10 +64,10 @@ use prism_render_architecture::cloth::gpu::kernels::ClothKernel;
 
 /// The compute pipelines and bind-group layouts for every cloth kernel.
 ///
-/// Inserted at `RenderStartup` by [`init_cloth_compute_pipelines`]. The eleven
+/// Inserted at `RenderStartup` by [`init_cloth_compute_pipelines`]. The thirteen
 /// pipeline handles are queued into the [`PipelineCache`] and resolve
 /// asynchronously; the dispatch slice skips a pass whose handle is not yet
-/// ready rather than stalling the frame. The five layouts are created eagerly
+/// ready rather than stalling the frame. The seven layouts are created eagerly
 /// so the bind-group slice can allocate against them the moment a piece uploads.
 #[derive(Resource)]
 pub(crate) struct ClothComputePipelines {
@@ -79,6 +81,10 @@ pub(crate) struct ClothComputePipelines {
     pub(crate) backstop_layout: BindGroupLayout,
     /// group 0 for the `cloth_skin_embed` pass (four bindings).
     pub(crate) embed_layout: BindGroupLayout,
+    /// group 0 for the `cloth_aerodynamics_snapshot` pass (three bindings).
+    pub(crate) aero_snapshot_layout: BindGroupLayout,
+    /// group 0 for the `cloth_aerodynamics` gather pass (seven bindings).
+    pub(crate) aero_layout: BindGroupLayout,
 
     /// `cloth_predict`: integrate external forces and predict positions.
     pub(crate) predict: CachedComputePipelineId,
@@ -102,6 +108,11 @@ pub(crate) struct ClothComputePipelines {
     pub(crate) velocity_update: CachedComputePipelineId,
     /// `cloth_skin_embed`: skin the render mesh onto the coarse sim mesh.
     pub(crate) skin_embed: CachedComputePipelineId,
+    /// `cloth_aerodynamics_snapshot`: freeze this frame's start-of-frame
+    /// velocities so the gather reads a race-free field.
+    pub(crate) aerodynamics_snapshot: CachedComputePipelineId,
+    /// `cloth_aerodynamics`: gather per-triangle wind force onto each vertex.
+    pub(crate) aerodynamics: CachedComputePipelineId,
 }
 
 impl ClothComputePipelines {
@@ -124,6 +135,8 @@ impl ClothComputePipelines {
             ClothKernel::SelfCollisionResolve => self.self_collision_resolve,
             ClothKernel::VelocityUpdate => self.velocity_update,
             ClothKernel::SkinEmbed => self.skin_embed,
+            ClothKernel::AerodynamicsSnapshot => self.aerodynamics_snapshot,
+            ClothKernel::Aerodynamics => self.aerodynamics,
         }
     }
 
@@ -147,6 +160,8 @@ impl ClothComputePipelines {
                 &self.self_layout
             }
             ClothKernel::SkinEmbed => &self.embed_layout,
+            ClothKernel::AerodynamicsSnapshot => &self.aero_snapshot_layout,
+            ClothKernel::Aerodynamics => &self.aero_layout,
         }
     }
 }
@@ -232,10 +247,49 @@ fn embed_layout_entries() -> BindGroupLayoutEntries<4> {
     )
 }
 
-/// `RenderStartup` initializer: creates the five cloth bind-group layouts and
-/// queues the eleven cloth compute pipelines into the [`PipelineCache`].
+/// Builds the `cloth_aerodynamics_snapshot` group-0 layout entries: the
+/// read-only start-of-frame velocities, the read-write velocity snapshot the
+/// pass fills, and the aerodynamic uniform. Freezing the velocity field into a
+/// dedicated snapshot buffer is what makes the following gather race-free: every
+/// triangle reads the same start-of-frame face velocity regardless of the order
+/// the vertex threads run in.
+fn aero_snapshot_layout_entries() -> BindGroupLayoutEntries<3> {
+    BindGroupLayoutEntries::sequential(
+        ShaderStages::COMPUTE,
+        (
+            storage_buffer_read_only_sized(false, None),
+            storage_buffer_sized(false, None),
+            uniform_buffer_sized(false, None),
+        ),
+    )
+}
+
+/// Builds the `cloth_aerodynamics` gather group-0 layout entries. Binding `0`
+/// is the read-only particle positions (`.w` carries inverse mass), `1` the
+/// read-write velocities the impulse accumulates into, `2` the read-only
+/// velocity snapshot, `3` the read-only flat triangle index buffer
+/// (`array<u32>`, three per face), `4`/`5` the read-only `CSR`
+/// vertex->triangle offsets and entries the gather walks, and `6` the
+/// aerodynamic uniform.
+fn aero_layout_entries() -> BindGroupLayoutEntries<7> {
+    BindGroupLayoutEntries::sequential(
+        ShaderStages::COMPUTE,
+        (
+            storage_buffer_read_only_sized(false, None),
+            storage_buffer_sized(false, None),
+            storage_buffer_read_only_sized(false, None),
+            storage_buffer_read_only_sized(false, None),
+            storage_buffer_read_only_sized(false, None),
+            storage_buffer_read_only_sized(false, None),
+            uniform_buffer_sized(false, None),
+        ),
+    )
+}
+
+/// `RenderStartup` initializer: creates the seven cloth bind-group layouts and
+/// queues the thirteen cloth compute pipelines into the [`PipelineCache`].
 ///
-/// The three cloth shaders must be registered as embedded assets before this
+/// The five cloth shaders must be registered as embedded assets before this
 /// runs (see the cloth plugin slice); `load_embedded_asset!` resolves them by
 /// their path relative to this file. Each pipeline names its `WESL` entry point
 /// and binds exactly one group-0 layout, matching the shader interface it was
@@ -251,6 +305,8 @@ pub(crate) fn init_cloth_compute_pipelines(
     let self_entries = self_layout_entries();
     let backstop_entries = backstop_layout_entries();
     let embed_entries = embed_layout_entries();
+    let aero_snapshot_entries = aero_snapshot_layout_entries();
+    let aero_entries = aero_layout_entries();
 
     let sim_descriptor = BindGroupLayoutDescriptor::new("prism cloth sim", &sim_entries);
     let body_descriptor = BindGroupLayoutDescriptor::new("prism cloth body", &body_entries);
@@ -258,6 +314,9 @@ pub(crate) fn init_cloth_compute_pipelines(
     let backstop_descriptor =
         BindGroupLayoutDescriptor::new("prism cloth backstop", &backstop_entries);
     let embed_descriptor = BindGroupLayoutDescriptor::new("prism cloth embed", &embed_entries);
+    let aero_snapshot_descriptor =
+        BindGroupLayoutDescriptor::new("prism cloth aero snapshot", &aero_snapshot_entries);
+    let aero_descriptor = BindGroupLayoutDescriptor::new("prism cloth aero", &aero_entries);
 
     let sim_layout = device.create_bind_group_layout("prism cloth sim", &sim_entries);
     let body_layout = device.create_bind_group_layout("prism cloth body", &body_entries);
@@ -265,6 +324,9 @@ pub(crate) fn init_cloth_compute_pipelines(
     let backstop_layout =
         device.create_bind_group_layout("prism cloth backstop", &backstop_entries);
     let embed_layout = device.create_bind_group_layout("prism cloth embed", &embed_entries);
+    let aero_snapshot_layout =
+        device.create_bind_group_layout("prism cloth aero snapshot", &aero_snapshot_entries);
+    let aero_layout = device.create_bind_group_layout("prism cloth aero", &aero_entries);
 
     let sim_shader: Handle<Shader> =
         load_embedded_asset!(asset_server.as_ref(), "../shaders/cloth_sim.wesl");
@@ -272,6 +334,12 @@ pub(crate) fn init_cloth_compute_pipelines(
         load_embedded_asset!(asset_server.as_ref(), "../shaders/cloth_collision.wesl");
     let embed_shader: Handle<Shader> =
         load_embedded_asset!(asset_server.as_ref(), "../shaders/cloth_embed.wesl");
+    let aero_snapshot_shader: Handle<Shader> = load_embedded_asset!(
+        asset_server.as_ref(),
+        "../shaders/cloth_aerodynamics_snapshot.wesl"
+    );
+    let aero_shader: Handle<Shader> =
+        load_embedded_asset!(asset_server.as_ref(), "../shaders/cloth_aerodynamics.wesl");
 
     // A `cloth_sim.wesl` pipeline: one group-0 (sim) layout. The three
     // color-serial projection kernels (`distance`/`bending`/`long_range`)
@@ -384,6 +452,35 @@ pub(crate) fn init_cloth_compute_pipelines(
         ..Default::default()
     });
 
+    // The two aerodynamic passes run once per frame before the substep loop and
+    // never read the color-batch immediate, so both declare `immediate_size: 0`.
+    let aerodynamics_snapshot = cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        label: Some("prism cloth aero snapshot".into()),
+        layout: vec![aero_snapshot_descriptor.clone()],
+        immediate_size: 0,
+        shader: aero_snapshot_shader.clone(),
+        entry_point: Some(
+            ClothKernel::AerodynamicsSnapshot
+                .wesl_entry_point()
+                .to_owned()
+                .into(),
+        ),
+        ..Default::default()
+    });
+    let aerodynamics = cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        label: Some("prism cloth aero".into()),
+        layout: vec![aero_descriptor.clone()],
+        immediate_size: 0,
+        shader: aero_shader.clone(),
+        entry_point: Some(
+            ClothKernel::Aerodynamics
+                .wesl_entry_point()
+                .to_owned()
+                .into(),
+        ),
+        ..Default::default()
+    });
+
     commands.insert_resource(ClothComputePipelines {
         sim_layout,
         body_layout,
@@ -401,6 +498,10 @@ pub(crate) fn init_cloth_compute_pipelines(
         self_collision_resolve,
         velocity_update,
         skin_embed,
+        aero_snapshot_layout,
+        aero_layout,
+        aerodynamics_snapshot,
+        aerodynamics,
     });
 }
 
@@ -442,5 +543,14 @@ mod tests {
                 "{k:?} self-collision layout expects three storage buffers"
             );
         }
+        // The snapshot pass binds two storage buffers (source velocities plus
+        // the snapshot it fills) and the gather binds six (positions,
+        // velocities, snapshot, triangles and the two `CSR` adjacency arrays);
+        // both add one uniform. These counts must match the seven- and
+        // three-binding layouts built above.
+        assert_eq!(AerodynamicsSnapshot.descriptor().layout.storage_buffers, 2);
+        assert_eq!(AerodynamicsSnapshot.descriptor().layout.uniform_buffers, 1);
+        assert_eq!(Aerodynamics.descriptor().layout.storage_buffers, 6);
+        assert_eq!(Aerodynamics.descriptor().layout.uniform_buffers, 1);
     }
 }

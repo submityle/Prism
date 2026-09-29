@@ -23,16 +23,18 @@
 //! params) are derived here too, so the device stage and the dispatch node get
 //! their initial scalars from one documented place.
 
+use prism_render_architecture::cloth::aero_gather::VertexTriangleAdjacency;
 use prism_render_architecture::cloth::bending::BendingConstraint;
 use prism_render_architecture::cloth::gpu::buffers::BufferCounts;
 use prism_render_architecture::cloth::gpu::pipeline::{extract, prepare, PlannedDispatch};
 use prism_render_architecture::cloth::gpu::upload::{color_bending, plan_constraint_upload};
-use prism_render_architecture::cloth::Constraint;
+use prism_render_architecture::cloth::wind::{AeroParams, WindField};
+use prism_render_architecture::cloth::{Constraint, Vec3};
 
 use super::abi::{
-    GpuClothBackstop, GpuClothBackstopParams, GpuClothBendingConstraint, GpuClothBodyParams,
-    GpuClothCollider, GpuClothConstraint, GpuClothEmbedBinding, GpuClothEmbedParams,
-    GpuClothSelfParams, GpuClothSimParams,
+    GpuClothAeroParams, GpuClothBackstop, GpuClothBackstopParams, GpuClothBendingConstraint,
+    GpuClothBodyParams, GpuClothCollider, GpuClothConstraint, GpuClothEmbedBinding,
+    GpuClothEmbedParams, GpuClothSelfParams, GpuClothSimParams,
 };
 use super::pack::{pack_bending, pack_constraints};
 
@@ -52,6 +54,17 @@ pub(crate) struct ClothSolveInput<'a> {
     pub(crate) constraints: &'a [Constraint],
     /// Authored dihedral bending hinges.
     pub(crate) bending: &'a [BendingConstraint],
+    /// Sim-mesh triangles (three particle indices each) the aerodynamic gather
+    /// integrates wind over; empty disables the aerodynamic passes.
+    pub(crate) triangles: &'a [[u32; 3]],
+    /// Steady world-space wind velocity, world units per second.
+    pub(crate) wind_velocity: [f32; 3],
+    /// Per-triangle turbulence strength; `0` disables the jitter.
+    pub(crate) wind_turbulence: f32,
+    /// Normal-direction (drag) aerodynamic coefficient.
+    pub(crate) aero_drag: f32,
+    /// In-plane (lift) aerodynamic coefficient.
+    pub(crate) aero_lift: f32,
     /// Analytic body-collision proxies.
     pub(crate) colliders: &'a [GpuClothCollider],
     /// Painted backstop planes, one per constrained particle.
@@ -85,14 +98,24 @@ pub(crate) struct ClothSolveInput<'a> {
 ///
 /// The `constraints` slice is the shared distance-then-long-range buffer
 /// content; `bending` is the independent bending buffer content; `dispatches`
-/// is the flat ordered schedule; and the five params structs are the initial
-/// per-pass uniforms. The device stage turns the byte slices into buffers and
-/// the dispatch node records `dispatches` in order.
+/// is the flat ordered schedule; and the six params structs (the per-substep
+/// sim uniform, the body / self / backstop / embed uniforms, and the
+/// aerodynamic uniform) are the initial per-pass uniforms. The device stage
+/// turns the byte slices into buffers and the dispatch node records
+/// `dispatches` in order.
 pub(crate) struct ClothSolvePlan {
     /// Packed distance-then-long-range constraint buffer content.
     pub(crate) constraints: Vec<GpuClothConstraint>,
     /// Packed bending buffer content.
     pub(crate) bending: Vec<GpuClothBendingConstraint>,
+    /// Flattened `CSR` vertex->triangle offsets (length `particles + 1`) the
+    /// aerodynamic gather kernel walks; empty when aerodynamics is disabled.
+    pub(crate) csr_offsets: Vec<u32>,
+    /// Flattened `CSR` vertex->triangle entries (triangle indices) the gather
+    /// reads; empty when aerodynamics is disabled.
+    pub(crate) csr_entries: Vec<u32>,
+    /// Aerodynamic dispatch uniform (wind, coefficients, full-frame dt, bound).
+    pub(crate) aero_params: GpuClothAeroParams,
     /// Resident buffer element counts for this piece.
     pub(crate) counts: BufferCounts,
     /// The flat, ordered dispatch schedule in golden record order.
@@ -147,6 +170,22 @@ pub(crate) fn build_solve_plan(input: &ClothSolveInput<'_>) -> ClothSolvePlan {
     let embed = input.render_vertex_count > 0 && !input.embed_bindings.is_empty();
     let backstop = !input.backstops.is_empty();
 
+    // Aerodynamics needs a driving wind (steady or turbulent) *and* a triangle
+    // topology to integrate that wind over; with neither there is no force to
+    // apply, so both passes stay off and the `CSR` adjacency is never built.
+    let has_wind = input.wind_velocity.iter().any(|c| c.abs() > 0.0);
+    let has_turbulence = input.wind_turbulence > 0.0;
+    let aerodynamics =
+        (has_wind || has_turbulence) && !input.triangles.is_empty() && particle_count > 0;
+    let (csr_offsets, csr_entries) = if aerodynamics {
+        // The gather walks one `CSR` row per vertex, so the adjacency is sized
+        // to the particle count; disabled aerodynamics keeps both rows empty.
+        let adjacency = VertexTriangleAdjacency::build(particle_count as usize, input.triangles);
+        (adjacency.offsets().to_vec(), adjacency.entries().to_vec())
+    } else {
+        (Vec::new(), Vec::new())
+    };
+
     let plan = extract(
         counts,
         constraint_plan.distance_colors.clone(),
@@ -157,6 +196,7 @@ pub(crate) fn build_solve_plan(input: &ClothSolveInput<'_>) -> ClothSolvePlan {
         self_collision,
         embed,
         backstop,
+        aerodynamics,
     );
     let prepared = prepare(&plan);
 
@@ -198,9 +238,38 @@ pub(crate) fn build_solve_plan(input: &ClothSolveInput<'_>) -> ClothSolvePlan {
         _pad: [0; 3],
     };
 
+    // Sanitize the aerodynamic scalars on the host through the architecture
+    // layer's own `WindField::sanitized`/`AeroParams::sanitized` (the single
+    // golden source): every wind component is finite-forced (`NaN` -> `0`),
+    // turbulence is clamped to `0..=1`, and drag/lift are clamped non-negative.
+    // The `WESL` kernels only guard drag/lift with `max(x, 0)`, so the host must
+    // supply already-clean wind and turbulence to keep the `CPU`/`GPU` results
+    // bit-parallel.
+    let wind = WindField::new(
+        Vec3::new(
+            input.wind_velocity[0],
+            input.wind_velocity[1],
+            input.wind_velocity[2],
+        ),
+        input.wind_turbulence,
+    )
+    .sanitized();
+    let aero = AeroParams::new(input.aero_drag, input.aero_lift).sanitized();
+    let aero_params = GpuClothAeroParams {
+        wind: [wind.velocity.x, wind.velocity.y, wind.velocity.z],
+        turbulence: wind.turbulence,
+        drag: aero.drag,
+        lift: aero.lift,
+        dt: input.dt,
+        particle_count,
+    };
+
     ClothSolvePlan {
         constraints: packed_constraints,
         bending: packed_bending,
+        csr_offsets,
+        csr_entries,
+        aero_params,
         counts,
         dispatches: prepared.dispatches,
         sim_params,
@@ -228,6 +297,11 @@ mod tests {
             velocities,
             constraints,
             bending: &[],
+            triangles: &[],
+            wind_velocity: [0.0, 0.0, 0.0],
+            wind_turbulence: 0.0,
+            aero_drag: 0.0,
+            aero_lift: 0.0,
             colliders: &[],
             backstops: &[],
             embed_bindings: &[],
@@ -353,6 +427,11 @@ mod tests {
             velocities: &[],
             constraints: &[],
             bending: &[],
+            triangles: &[],
+            wind_velocity: [0.0, 0.0, 0.0],
+            wind_turbulence: 0.0,
+            aero_drag: 0.0,
+            aero_lift: 0.0,
             colliders: &[],
             backstops: &[],
             embed_bindings: &[],
@@ -373,5 +452,116 @@ mod tests {
         assert_eq!(plan.counts.particles, 0);
         // No particles and no constraints: the schedule records no work.
         assert!(plan.dispatches.is_empty());
+    }
+
+    #[test]
+    fn aerodynamics_turns_on_with_wind_and_triangles() {
+        let positions = [
+            [0.0, 0.0, 0.0, 1.0],
+            [1.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0, 1.0],
+        ];
+        let velocities = [[0.0; 4]; 3];
+        let constraints = [edge(0, 1, ConstraintKind::Stretch)];
+        let triangles = [[0u32, 1, 2]];
+        let mut input = quad_input(&positions, &velocities, &constraints);
+        input.triangles = &triangles;
+        input.wind_velocity = [3.0, 0.0, 0.0];
+        input.aero_drag = 1.0;
+        input.aero_lift = 0.5;
+        let plan = build_solve_plan(&input);
+        // The gather adjacency is built: one `CSR` row per particle plus the
+        // trailing sentinel, and one entry per (triangle, vertex) incidence.
+        assert_eq!(plan.csr_offsets.len(), positions.len() + 1);
+        assert_eq!(plan.csr_entries.len(), triangles.len() * 3);
+        // Both aerodynamic passes are scheduled, snapshot before the gather.
+        let has = |k: ClothKernel| plan.dispatches.iter().any(|d| d.kernel == k);
+        assert!(has(ClothKernel::AerodynamicsSnapshot));
+        assert!(has(ClothKernel::Aerodynamics));
+        // The uniform carries the sanitized scalars and the full-frame `dt`.
+        assert!((plan.aero_params.wind[0] - 3.0).abs() <= 1e-6);
+        assert!((plan.aero_params.drag - 1.0).abs() <= 1e-6);
+        assert!((plan.aero_params.lift - 0.5).abs() <= 1e-6);
+        assert!((plan.aero_params.dt - input.dt).abs() <= 1e-7);
+        assert_eq!(plan.aero_params.particle_count, positions.len() as u32);
+    }
+
+    #[test]
+    fn turbulence_alone_enables_aerodynamics() {
+        let positions = [
+            [0.0, 0.0, 0.0, 1.0],
+            [1.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0, 1.0],
+        ];
+        let velocities = [[0.0; 4]; 3];
+        let constraints = [edge(0, 1, ConstraintKind::Stretch)];
+        let triangles = [[0u32, 1, 2]];
+        let mut input = quad_input(&positions, &velocities, &constraints);
+        input.triangles = &triangles;
+        // No steady wind, only turbulence — still a driving force.
+        input.wind_turbulence = 0.5;
+        let plan = build_solve_plan(&input);
+        assert!(!plan.csr_offsets.is_empty());
+        let has = |k: ClothKernel| plan.dispatches.iter().any(|d| d.kernel == k);
+        assert!(has(ClothKernel::Aerodynamics));
+        assert!((plan.aero_params.turbulence - 0.5).abs() <= 1e-6);
+    }
+
+    #[test]
+    fn aerodynamics_stays_off_without_a_driver_or_triangles() {
+        let positions = [
+            [0.0, 0.0, 0.0, 1.0],
+            [1.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0, 1.0],
+        ];
+        let velocities = [[0.0; 4]; 3];
+        let constraints = [edge(0, 1, ConstraintKind::Stretch)];
+        let triangles = [[0u32, 1, 2]];
+
+        // Triangles present but no wind and no turbulence: nothing to integrate.
+        let mut no_wind = quad_input(&positions, &velocities, &constraints);
+        no_wind.triangles = &triangles;
+        let plan = build_solve_plan(&no_wind);
+        assert!(plan.csr_offsets.is_empty());
+        assert!(plan.csr_entries.is_empty());
+        let has = |k: ClothKernel| plan.dispatches.iter().any(|d| d.kernel == k);
+        assert!(!has(ClothKernel::AerodynamicsSnapshot));
+        assert!(!has(ClothKernel::Aerodynamics));
+
+        // Wind present but no triangle topology: no faces to gather over.
+        let mut no_tris = quad_input(&positions, &velocities, &constraints);
+        no_tris.wind_velocity = [5.0, 0.0, 0.0];
+        let plan = build_solve_plan(&no_tris);
+        assert!(plan.csr_offsets.is_empty());
+        assert!(!plan
+            .dispatches
+            .iter()
+            .any(|d| d.kernel == ClothKernel::Aerodynamics));
+    }
+
+    #[test]
+    fn aero_scalars_are_sanitized_like_the_architecture_layer() {
+        let positions = [
+            [0.0, 0.0, 0.0, 1.0],
+            [1.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0, 1.0],
+        ];
+        let velocities = [[0.0; 4]; 3];
+        let constraints = [edge(0, 1, ConstraintKind::Stretch)];
+        let triangles = [[0u32, 1, 2]];
+        let mut input = quad_input(&positions, &velocities, &constraints);
+        input.triangles = &triangles;
+        // Poisoned inputs: a NaN wind component, out-of-range turbulence and a
+        // negative drag must all be cleaned before reaching the uniform.
+        input.wind_velocity = [f32::NAN, 2.0, 0.0];
+        input.wind_turbulence = 5.0;
+        input.aero_drag = -1.0;
+        input.aero_lift = f32::NAN;
+        let plan = build_solve_plan(&input);
+        assert!((plan.aero_params.wind[0] - 0.0).abs() <= 1e-6);
+        assert!((plan.aero_params.wind[1] - 2.0).abs() <= 1e-6);
+        assert!((plan.aero_params.turbulence - 1.0).abs() <= 1e-6);
+        assert!((plan.aero_params.drag - 0.0).abs() <= 1e-6);
+        assert!((plan.aero_params.lift - 0.0).abs() <= 1e-6);
     }
 }

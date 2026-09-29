@@ -9,7 +9,8 @@
 //! `bevy`-render half that turns that schedule into real `wgpu` compute
 //! dispatches against the sibling `WESL` shaders
 //! (`shaders/cloth_sim.wesl`, `shaders/cloth_collision.wesl`,
-//! `shaders/cloth_embed.wesl`), which are already naga-validated.
+//! `shaders/cloth_embed.wesl`, `shaders/cloth_aerodynamics_snapshot.wesl`,
+//! `shaders/cloth_aerodynamics.wesl`), which are already naga-validated.
 //!
 //! The subsystem is split into cohesive files rather than one large module,
 //! mirroring the layout of the other compute passes under `shading/`:
@@ -17,11 +18,11 @@
 //! * [`abi`] - `#[repr(C)]` host records shared with the cloth shaders, plus
 //!   the `size_of` contract tests that pin each record to the golden buffer
 //!   strides so a layout drift fails the build.
-//! * [`pipeline`] - the eleven compute pipelines and the five group-0
+//! * [`pipeline`] - the thirteen compute pipelines and the seven group-0
 //!   bind-group layouts, keyed by `ClothKernel` so the dispatch slice looks each
 //!   pass up directly from the golden schedule.
 //! * [`bind_groups`] - per-piece resident buffer allocation (sized by the golden
-//!   buffer contract) and the five bind groups those pipelines dispatch against.
+//!   buffer contract) and the seven bind groups those pipelines dispatch against.
 //!
 //! The remaining slice adds the `Core3d` graph node that records the dispatches
 //! in the
@@ -39,4 +40,6 @@ mod pipeline;
 pub(crate) mod plugin;
 mod prepare;
 mod resources;
+#[cfg(test)]
+mod shader_tests;
 mod solve_plan;

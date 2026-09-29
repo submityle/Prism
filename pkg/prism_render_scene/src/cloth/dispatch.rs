@@ -9,7 +9,7 @@
 //! walk that list, bind the matching group, push the per-color immediate for
 //! the three projection kernels, and launch the recorded workgroup count.
 //!
-//! Readiness is all-or-nothing: if any of the eleven pipelines is still
+//! Readiness is all-or-nothing: if any of the thirteen pipelines is still
 //! compiling this frame the node records nothing, rather than running a partial
 //! solve that would leave the cloth in a half-stepped, non-deterministic state.
 
@@ -25,7 +25,7 @@ use super::bind_groups::ClothPieceBindGroups;
 use super::pipeline::ClothComputePipelines;
 use super::resources::ClothGpuPieces;
 
-/// Which of the five group-0 bind groups a kernel dispatches against.
+/// Which of the seven group-0 bind groups a kernel dispatches against.
 ///
 /// Mirrors [`ClothComputePipelines::layout`](super::pipeline::ClothComputePipelines::layout):
 /// the six `cloth_sim.wesl` kernels share the simulation group, the two
@@ -45,6 +45,10 @@ enum ClothBindSlot {
     Backstop,
     /// The render-mesh skin-embed kernel.
     Embed,
+    /// The aerodynamic velocity-snapshot kernel.
+    AeroSnapshot,
+    /// The aerodynamic per-vertex wind gather kernel.
+    Aero,
 }
 
 /// Maps a golden [`ClothKernel`] to the bind-group slot its dispatch targets.
@@ -67,6 +71,8 @@ fn bind_slot_for(kernel: ClothKernel) -> ClothBindSlot {
         }
         ClothKernel::Backstop => ClothBindSlot::Backstop,
         ClothKernel::SkinEmbed => ClothBindSlot::Embed,
+        ClothKernel::AerodynamicsSnapshot => ClothBindSlot::AeroSnapshot,
+        ClothKernel::Aerodynamics => ClothBindSlot::Aero,
     }
 }
 
@@ -82,6 +88,8 @@ fn bind_group_for<'a>(
         ClothBindSlot::SelfCollision => &groups.self_collision,
         ClothBindSlot::Backstop => &groups.backstop,
         ClothBindSlot::Embed => &groups.embed,
+        ClothBindSlot::AeroSnapshot => &groups.aero_snapshot,
+        ClothBindSlot::Aero => &groups.aero,
     }
 }
 
@@ -101,7 +109,7 @@ pub(crate) fn dispatch_cloth(
 
     // All-or-nothing readiness: bail before opening a pass if any kernel is
     // still compiling, so a frame never records a partial (non-deterministic)
-    // solve. Every piece shares these eleven pipelines.
+    // solve. Every piece shares these thirteen pipelines.
     for kernel in ClothKernel::ALL {
         if cache
             .get_compute_pipeline(pipelines.pipeline(kernel))
@@ -176,6 +184,14 @@ mod tests {
             ClothBindSlot::Backstop
         );
         assert_eq!(bind_slot_for(ClothKernel::SkinEmbed), ClothBindSlot::Embed);
+        assert_eq!(
+            bind_slot_for(ClothKernel::AerodynamicsSnapshot),
+            ClothBindSlot::AeroSnapshot
+        );
+        assert_eq!(
+            bind_slot_for(ClothKernel::Aerodynamics),
+            ClothBindSlot::Aero
+        );
     }
 
     #[test]

@@ -1,10 +1,11 @@
 //! Per-piece `GPU` buffer allocation and bind-group assembly for the cloth
 //! subsystem.
 //!
-//! [`super::pipeline`] built the eleven compute pipelines and the five group-0
-//! layouts once at startup; this slice turns one cloth piece's CPU-golden solver
-//! state into the resident device buffers those pipelines read and write, and
-//! wires them into the five bind groups the dispatch slice records against.
+//! [`super::pipeline`] built the thirteen compute pipelines and the seven
+//! group-0 layouts once at startup; this slice turns one cloth piece's
+//! CPU-golden solver state into the resident device buffers those pipelines read
+//! and write, and wires them into the seven bind groups the dispatch slice
+//! records against.
 //!
 //! The buffer set mirrors the golden sizing contract in
 //! [`prism_render_architecture::cloth::gpu::buffers`]: three particle pools
@@ -25,7 +26,7 @@
 
 #![allow(
     dead_code,
-    reason = "the per-piece cloth buffer set and its five bind groups are consumed by the Core3d dispatch slice and the plugin that lands next; the device-free buffer-plan sizing is exercised by the contract tests below"
+    reason = "the per-piece cloth buffer set and its seven bind groups are consumed by the Core3d dispatch slice and the plugin that lands next; the device-free buffer-plan sizing is exercised by the contract tests below"
 )]
 
 use bevy_render::{
@@ -40,9 +41,9 @@ use prism_render_architecture::cloth::gpu::buffers::{
 };
 
 use super::abi::{
-    GpuClothBackstop, GpuClothBackstopParams, GpuClothBendingConstraint, GpuClothBodyParams,
-    GpuClothCollider, GpuClothConstraint, GpuClothEmbedBinding, GpuClothEmbedParams,
-    GpuClothSelfParams, GpuClothSimParams,
+    GpuClothAeroParams, GpuClothBackstop, GpuClothBackstopParams, GpuClothBendingConstraint,
+    GpuClothBodyParams, GpuClothCollider, GpuClothConstraint, GpuClothEmbedBinding,
+    GpuClothEmbedParams, GpuClothSelfParams, GpuClothSimParams,
 };
 use super::pipeline::ClothComputePipelines;
 
@@ -85,6 +86,17 @@ pub(crate) struct ClothPieceUpload<'a> {
     /// Render-vertex embed bindings driving the skinning pass; empty when the
     /// piece renders its sim mesh directly.
     pub(crate) embed_bindings: &'a [GpuClothEmbedBinding],
+    /// Sim-mesh triangles as a flat `[u32; 3]` index list the aerodynamic
+    /// gather integrates wind over; empty disables the two aerodynamic passes.
+    pub(crate) triangles: &'a [[u32; 3]],
+    /// Flattened `CSR` vertex->triangle offsets (length `particles + 1`) the
+    /// gather walks; empty when aerodynamics is disabled.
+    pub(crate) csr_offsets: &'a [u32],
+    /// Flattened `CSR` vertex->triangle entries the gather reads; empty when
+    /// aerodynamics is disabled.
+    pub(crate) csr_entries: &'a [u32],
+    /// Aerodynamic dispatch uniform (wind, coefficients, full-frame dt, bound).
+    pub(crate) aero_params: GpuClothAeroParams,
     /// Number of render-mesh vertices (sizes the embed output position pool).
     pub(crate) render_vertex_count: u32,
     /// Number of self-collision hash cells (sizes the cell-header table).
@@ -112,6 +124,10 @@ pub(crate) struct ClothPieceGpuBuffers {
     pub(crate) positions: Buffer,
     /// Particle velocities (read-write).
     pub(crate) velocities: Buffer,
+    /// Start-of-frame velocity snapshot (read-write) the aerodynamic gather
+    /// measures each triangle's relative wind against; freezing it makes the
+    /// gather order-independent.
+    pub(crate) velocity_snapshot: Buffer,
     /// Pre-substep position snapshot (read-write) driving velocity recovery.
     pub(crate) prev_positions: Buffer,
     /// Packed distance constraints (read-only).
@@ -130,6 +146,12 @@ pub(crate) struct ClothPieceGpuBuffers {
     pub(crate) render_positions: Buffer,
     /// Render-vertex embed bindings (read-only).
     pub(crate) embed_bindings: Buffer,
+    /// Flat `[u32; 3]` sim-mesh triangle index list (read-only).
+    pub(crate) triangles: Buffer,
+    /// Flattened `CSR` vertex->triangle offsets (read-only).
+    pub(crate) csr_offsets: Buffer,
+    /// Flattened `CSR` vertex->triangle entries (read-only).
+    pub(crate) csr_entries: Buffer,
     /// `cloth_sim.wesl` per-substep uniform.
     pub(crate) sim_params: Buffer,
     /// Body-collision pass uniform.
@@ -140,6 +162,8 @@ pub(crate) struct ClothPieceGpuBuffers {
     pub(crate) backstop_params: Buffer,
     /// Skin-embed pass uniform.
     pub(crate) embed_params: Buffer,
+    /// Aerodynamic pass uniform (shared by the snapshot and gather passes).
+    pub(crate) aero_params: Buffer,
 }
 
 impl ClothPieceGpuBuffers {
@@ -156,6 +180,14 @@ impl ClothPieceGpuBuffers {
         // first frame's velocity-recovery pass reads a coherent delta of zero.
         let prev_positions =
             readable_storage(device, "prism cloth prev positions", upload.positions);
+        // The aerodynamic snapshot pass overwrites this fully each frame before
+        // the gather reads it, so it starts zeroed and is sized to the particle
+        // pool (one `vec4<f32>` velocity per particle).
+        let velocity_snapshot = zeroed_storage(
+            device,
+            "prism cloth velocity snapshot",
+            u64::from(upload.positions.len() as u32) * u64::from(PARTICLE_VEC_STRIDE),
+        );
 
         let constraints = read_only_storage(device, "prism cloth constraints", upload.constraints);
         let bending = read_only_storage(device, "prism cloth bending", upload.bending);
@@ -163,6 +195,13 @@ impl ClothPieceGpuBuffers {
         let backstops = read_only_storage(device, "prism cloth backstops", upload.backstops);
         let embed_bindings =
             read_only_storage(device, "prism cloth embed bindings", upload.embed_bindings);
+        // The flat `[u32; 3]` triangle list and the two `CSR` adjacency arrays
+        // feed the aerodynamic gather; each is a plain read-only `u32` upload
+        // (`[u32; 3]` packs to three contiguous `u32`s, matching the shader's
+        // `array<u32>` view indexed by `t * 3 + k`).
+        let triangles = read_only_storage(device, "prism cloth triangles", upload.triangles);
+        let csr_offsets = read_only_storage(device, "prism cloth csr offsets", upload.csr_offsets);
+        let csr_entries = read_only_storage(device, "prism cloth csr entries", upload.csr_entries);
 
         // The hash table and the per-particle `next` links are produced by the
         // build pass every frame, so they start zeroed rather than uploaded.
@@ -193,10 +232,12 @@ impl ClothPieceGpuBuffers {
             &upload.backstop_params,
         );
         let embed_params = uniform(device, "prism cloth embed params", &upload.embed_params);
+        let aero_params = uniform(device, "prism cloth aero params", &upload.aero_params);
 
         Self {
             positions,
             velocities,
+            velocity_snapshot,
             prev_positions,
             constraints,
             bending,
@@ -206,16 +247,20 @@ impl ClothPieceGpuBuffers {
             backstops,
             render_positions,
             embed_bindings,
+            triangles,
+            csr_offsets,
+            csr_entries,
             sim_params,
             body_params,
             self_params,
             backstop_params,
             embed_params,
+            aero_params,
         }
     }
 }
 
-/// The five group-0 bind groups one piece dispatches against.
+/// The seven group-0 bind groups one piece dispatches against.
 ///
 /// Present only once its backing [`ClothPieceGpuBuffers`] exists; the dispatch
 /// node treats a present set as "safe to record". Each group's entry order
@@ -231,10 +276,14 @@ pub(crate) struct ClothPieceBindGroups {
     pub(crate) backstop: BindGroup,
     /// group 0 for the `cloth_skin_embed` pass.
     pub(crate) embed: BindGroup,
+    /// group 0 for the `cloth_aerodynamics_snapshot` pass.
+    pub(crate) aero_snapshot: BindGroup,
+    /// group 0 for the `cloth_aerodynamics` gather pass.
+    pub(crate) aero: BindGroup,
 }
 
 impl ClothPieceBindGroups {
-    /// Builds the five bind groups binding `buffers` against the shared
+    /// Builds the seven bind groups binding `buffers` against the shared
     /// pipeline layouts.
     ///
     /// The `positions` buffer is bound read-write by the sim / body / self /
@@ -296,12 +345,41 @@ impl ClothPieceBindGroups {
                 buffers.embed_params.as_entire_binding(),
             )),
         );
+        // The snapshot pass reads the live velocities and writes the frozen
+        // snapshot; binding order matches `cloth_aerodynamics_snapshot.wesl`.
+        let aero_snapshot = device.create_bind_group(
+            "prism cloth aero snapshot",
+            &pipelines.aero_snapshot_layout,
+            &BindGroupEntries::sequential((
+                buffers.velocities.as_entire_binding(),
+                buffers.velocity_snapshot.as_entire_binding(),
+                buffers.aero_params.as_entire_binding(),
+            )),
+        );
+        // The gather reads positions / snapshot / topology and accumulates the
+        // wind impulse into the live velocities; binding order matches
+        // `cloth_aerodynamics.wesl`.
+        let aero = device.create_bind_group(
+            "prism cloth aero",
+            &pipelines.aero_layout,
+            &BindGroupEntries::sequential((
+                buffers.positions.as_entire_binding(),
+                buffers.velocities.as_entire_binding(),
+                buffers.velocity_snapshot.as_entire_binding(),
+                buffers.triangles.as_entire_binding(),
+                buffers.csr_offsets.as_entire_binding(),
+                buffers.csr_entries.as_entire_binding(),
+                buffers.aero_params.as_entire_binding(),
+            )),
+        );
         Self {
             sim,
             body,
             self_collision,
             backstop,
             embed,
+            aero_snapshot,
+            aero,
         }
     }
 }

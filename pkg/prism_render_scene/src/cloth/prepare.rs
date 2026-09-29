@@ -6,7 +6,7 @@
 //! [`ClothGpuPiece`]. It is the device half of the prepare stage: the
 //! device-free [`build_solve_plan`] does all the packing, coloring, counting and
 //! scheduling, and this system only allocates the `wgpu` buffers, builds the
-//! five bind groups and records the resident piece plus its golden dispatch
+//! seven bind groups and records the resident piece plus its golden dispatch
 //! schedule.
 //!
 //! Pieces are rebuilt every frame from scratch (clear-then-refill), matching the
@@ -27,7 +27,7 @@ use super::solve_plan::build_solve_plan;
 /// Rebuilds the resident `GPU` cloth pieces from the extracted garments.
 ///
 /// Clears the existing pieces and, for every extracted garment, builds its
-/// device-free solve plan, allocates the resident buffers, builds the five bind
+/// device-free solve plan, allocates the resident buffers, builds the seven bind
 /// groups and pushes the resulting [`ClothGpuPiece`] with its golden dispatch
 /// schedule. Garments whose plan has no particles are skipped so the dispatch
 /// node never records an empty solve.
@@ -64,6 +64,10 @@ pub(crate) fn prepare_cloth_pieces(
             colliders: input.colliders,
             backstops: input.backstops,
             embed_bindings: input.embed_bindings,
+            triangles: input.triangles,
+            csr_offsets: &plan.csr_offsets,
+            csr_entries: &plan.csr_entries,
+            aero_params: plan.aero_params,
             render_vertex_count: plan.counts.render_vertices,
             hash_cell_count: plan.counts.hash_cells,
             sim_params: plan.sim_params,
