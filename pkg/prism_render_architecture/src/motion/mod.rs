@@ -36,6 +36,7 @@
 //! layer and are documented as "pending the GPU backend" where the contract
 //! signatures anticipate them.
 
+pub mod dilation;
 pub mod encode;
 pub mod reproject;
 
