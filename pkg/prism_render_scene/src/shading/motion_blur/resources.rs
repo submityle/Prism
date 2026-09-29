@@ -78,6 +78,12 @@ impl ViewMotionBlur {
     pub(crate) fn blur_out_view(&self) -> &TextureView {
         &self.blur_out.default_view
     }
+
+    /// The blurred-output GPU texture itself, for the `copy_texture_to_texture`
+    /// that writes it back over `scene_color`.
+    pub(crate) fn blur_out_texture(&self) -> &bevy_render::render_resource::Texture {
+        &self.blur_out.texture
+    }
 }
 
 /// Tile-grid extent for a framebuffer of `size`: `ceil(dim / tile)` per axis,
@@ -177,7 +183,10 @@ pub(crate) fn prepare_motion_blur_textures(
                 sample_count: 1,
                 dimension: TextureDimension::D2,
                 format: SCENE_COLOR_FORMAT,
-                usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+                // STORAGE_BINDING: written by `reconstruct`. COPY_SRC: copied
+                // back over `scene_color` after the chain so the downstream
+                // composite reads the blurred image.
+                usage: TextureUsages::STORAGE_BINDING | TextureUsages::COPY_SRC,
                 view_formats: &[],
             },
         );

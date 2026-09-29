@@ -17,7 +17,10 @@
 
 use bevy_ecs::prelude::*;
 use bevy_render::{
-    render_resource::{ComputePassDescriptor, PipelineCache},
+    render_resource::{
+        ComputePassDescriptor, Extent3d, Origin3d, PipelineCache, TexelCopyTextureInfo,
+        TextureAspect,
+    },
     renderer::{RenderContext, ViewQuery},
     view::ExtractedView,
 };
@@ -25,6 +28,7 @@ use bevy_render::{
 use super::abi::{MotionBlurParams, MOTION_BLUR_WORKGROUP_SIZE};
 use super::bind_groups::ViewMotionBlurBindGroups;
 use super::pipeline::MotionBlurPipeline;
+use super::super::resources::ViewVisibilityBuffer;
 use super::resources::ViewMotionBlur;
 use super::settings::PrismMotionBlurSettings;
 
@@ -32,7 +36,12 @@ use super::settings::PrismMotionBlurSettings;
 /// for every view whose motion-blur textures and bind groups are resident.
 pub(crate) fn motion_blur_pass(
     settings: Res<PrismMotionBlurSettings>,
-    view: ViewQuery<(&ViewMotionBlur, &ViewMotionBlurBindGroups, &ExtractedView)>,
+    view: ViewQuery<(
+        &ViewMotionBlur,
+        &ViewMotionBlurBindGroups,
+        &ViewVisibilityBuffer,
+        &ExtractedView,
+    )>,
     pipeline: Res<MotionBlurPipeline>,
     cache: Res<PipelineCache>,
     mut ctx: RenderContext,
@@ -40,7 +49,7 @@ pub(crate) fn motion_blur_pass(
     if !settings.enabled {
         return;
     }
-    let (motion_blur, groups, extracted) = view.into_inner();
+    let (motion_blur, groups, visibility, extracted) = view.into_inner();
 
     // All three pipelines must be resident before any pass runs; the chain is
     // meaningless with a missing link.
@@ -109,4 +118,30 @@ pub(crate) fn motion_blur_pass(
         pass.set_immediates(0, immediates);
         pass.dispatch_workgroups(pixel_groups_x, pixel_groups_y, 1);
     }
+
+    // Copy the blurred result back over scene_color so the downstream composite
+    // (which samples scene_color, not blur_out) reads the motion-blurred image.
+    // Reconstruction cannot write scene_color in place: it gathers neighbouring
+    // scene_color texels along each velocity vector, so it ping-pongs into a
+    // dedicated target and then blits back. Same extent + same format
+    // (SCENE_COLOR_FORMAT), single mip/layer.
+    encoder.copy_texture_to_texture(
+        TexelCopyTextureInfo {
+            texture: motion_blur.blur_out_texture(),
+            mip_level: 0,
+            origin: Origin3d::ZERO,
+            aspect: TextureAspect::All,
+        },
+        TexelCopyTextureInfo {
+            texture: visibility.scene_color_texture(),
+            mip_level: 0,
+            origin: Origin3d::ZERO,
+            aspect: TextureAspect::All,
+        },
+        Extent3d {
+            width: size.x,
+            height: size.y,
+            depth_or_array_layers: 1,
+        },
+    );
 }

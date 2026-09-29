@@ -75,6 +75,13 @@ impl ViewVisibilityBuffer {
         &self.scene_color.default_view
     }
 
+    /// The `scene_color` GPU texture itself, for a full-surface
+    /// `copy_texture_to_texture` (an opt-in ping-pong post-process writes its
+    /// result back in place here).
+    pub(crate) fn scene_color_texture(&self) -> &bevy_render::render_resource::Texture {
+        &self.scene_color.texture
+    }
+
     /// Storage/sampling view of the SSR IBL-specular export.
     pub(crate) fn ssr_env_specular_view(&self) -> &bevy_render::render_resource::TextureView {
         &self.ssr_env_specular.default_view
@@ -260,7 +267,12 @@ pub(crate) fn prepare_visibility_buffers(
                 format: SCENE_COLOR_FORMAT,
                 // STORAGE_BINDING: written by the resolve compute pass.
                 // TEXTURE_BINDING: sampled by the later composite/tonemap step.
-                usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+                // COPY_DST: an opt-in ping-pong post-process (motion blur)
+                // copies its full-resolution result back over scene_color so the
+                // downstream composite reads the processed image.
+                usage: TextureUsages::STORAGE_BINDING
+                    | TextureUsages::TEXTURE_BINDING
+                    | TextureUsages::COPY_DST,
                 view_formats: &[],
             },
         );
