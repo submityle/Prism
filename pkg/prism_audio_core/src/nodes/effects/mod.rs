@@ -11,7 +11,15 @@
 //!
 //! - [`parametric_eq::ParametricEqNode`] — multi-band parametric EQ built by
 //!   cascading reusable [`Biquad`](crate::nodes::biquad::Biquad) sections.
+//! - [`delay::DelayNode`] — fractional delay line with feedback and wet/dry
+//!   mix (the echo / slap-back / modulated-delay primitive).
+//! - [`waveshaper::WaveshaperNode`] — `tanh` soft-clip saturation with optional
+//!   2x/4x band-limiting oversampling.
 
+pub mod delay;
 pub mod parametric_eq;
+pub mod waveshaper;
 
+pub use delay::DelayNode;
 pub use parametric_eq::{EqBand, ParametricEqNode};
+pub use waveshaper::{Oversample, WaveshaperNode};
