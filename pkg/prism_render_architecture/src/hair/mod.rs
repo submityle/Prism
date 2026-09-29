@@ -11,8 +11,11 @@
 //!    while visual density scales; see [`interpolation`].
 //! 2. **Strand dynamics** — guides are advanced by an XPBD-style solver
 //!    (edge-length plus local/global shape constraints); see [`dynamics`], with
-//!    optional projection out of analytic body proxies; see [`collision`]. The
-//!    per-frame vertex work is arbitrated by [`crate::deformation::schedule`];
+//!    optional projection out of analytic body proxies (see [`collision`])
+//!    and an optional ambient wind field (see [`wind`]). Grooms that have
+//!    come to rest are gated out of simulation by a hysteretic sleep test
+//!    (see [`sleep`]) so a crowd never charges the budget for still hair.
+//!    The per-frame vertex work is arbitrated by [`crate::deformation::schedule`];
 //!    this subsystem only emits requests, it does not own the budget.
 //! 3. **LOD** — a ladder from full strands to decimated strands to camera
 //!    cards to a static mesh shell, selected by screen coverage; see [`lod`].
@@ -38,7 +41,9 @@ pub mod dynamics;
 pub mod interpolation;
 pub mod lod;
 pub mod raster;
+pub mod sleep;
 pub mod transition;
+pub mod wind;
 
 use crate::deformation::DeformationHandle;
 
