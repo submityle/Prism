@@ -238,6 +238,33 @@ pub fn decimate_bindings_importance(
     }
 }
 
+/// Default jitter strength for the geometry-free nested decimation path.
+///
+/// With uniform importance the per-strand priority is `jitter * (hash - 0.5)`,
+/// so any positive jitter yields a fully hash-driven ranking; `1.0` keeps the
+/// spread in its natural `[-0.5, 0.5]` range.
+pub const DEFAULT_DECIMATION_JITTER: f32 = 1.0;
+
+/// Geometry-free, pop-free strand decimation — a drop-in upgrade over the
+/// stride sample formerly used by [`super::interpolation::decimate_bindings`].
+///
+/// Ranks bindings purely by a per-strand hash of their `seed` (uniform
+/// importance), producing a nested decimation order whose every prefix is a
+/// valid kept set. Unlike a stride sample it never swaps which strands survive
+/// as the target count slides, so continuous density LOD stays pop-free at
+/// *any* count — not only counts that share integer factors. `out` is cleared
+/// first; a proxy tier (count `0`) yields an empty list and a count at or above
+/// the input length keeps every binding in order. Use
+/// [`decimate_bindings_importance`] instead when strand geometry is available
+/// and importance weighting is wanted.
+pub fn decimate_bindings_nested(
+    bindings: &[RenderStrandBinding],
+    decision: &HairLodDecision,
+    out: &mut Vec<RenderStrandBinding>,
+) {
+    decimate_bindings_importance(bindings, &[], DEFAULT_DECIMATION_JITTER, decision, out);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -445,5 +472,63 @@ mod tests {
         let mut bout = Vec::new();
         decimate_bindings_importance(&bindings, &[], 0.2, &d, &mut bout);
         assert!(bout.is_empty());
+    }
+
+    #[test]
+    fn nested_geometry_free_decimation_is_pop_free_and_deterministic() {
+        let bindings: Vec<RenderStrandBinding> = (0..40u32).map(binding).collect();
+
+        // Keep 7 then 13: with a stride sample these survivor sets would not
+        // nest (40/7 = 5, 40/13 = 3), so the groom would pop. The nested path
+        // must keep the 7 as a strict subset of the 13.
+        let mut low = Vec::new();
+        decimate_bindings_nested(
+            &bindings,
+            &strand_decision(HairLodTier::ReducedStrands, 7),
+            &mut low,
+        );
+        let mut high = Vec::new();
+        decimate_bindings_nested(
+            &bindings,
+            &strand_decision(HairLodTier::ReducedStrands, 13),
+            &mut high,
+        );
+        assert_eq!(low.len(), 7);
+        assert_eq!(high.len(), 13);
+        let high_seeds: Vec<u32> = high.iter().map(|b| b.seed).collect();
+        for kept in &low {
+            assert!(high_seeds.contains(&kept.seed), "kept set must nest");
+        }
+        // Emitted in ascending original order for coherent downstream work.
+        for w in high.windows(2) {
+            assert!(w[0].seed < w[1].seed);
+        }
+        // Determinism across passes.
+        let mut again = Vec::new();
+        decimate_bindings_nested(
+            &bindings,
+            &strand_decision(HairLodTier::ReducedStrands, 7),
+            &mut again,
+        );
+        let a: Vec<u32> = low.iter().map(|b| b.seed).collect();
+        let b: Vec<u32> = again.iter().map(|b| b.seed).collect();
+        assert_eq!(a, b);
+        // Proxy tier empties; count at/above length keeps all in order.
+        let mut proxy = Vec::new();
+        decimate_bindings_nested(
+            &bindings,
+            &strand_decision(HairLodTier::Cards, 0),
+            &mut proxy,
+        );
+        assert!(proxy.is_empty());
+        let mut all = Vec::new();
+        decimate_bindings_nested(
+            &bindings,
+            &strand_decision(HairLodTier::Strands, 999),
+            &mut all,
+        );
+        assert_eq!(all.len(), 40);
+        assert_eq!(all[0].seed, 0);
+        assert_eq!(all[39].seed, 39);
     }
 }

@@ -455,34 +455,24 @@ pub fn resolved_render_count(decision: &HairLodDecision) -> u32 {
 
 /// Thins a render-strand binding list down to a resolved LOD's strand count.
 ///
-/// The kept count is [`resolved_render_count`]. Selection is a deterministic,
-/// order-preserving stride sample (`stride = len / target`), the same integer
-/// decimation the LOD tiers use, so a groom drops the *same* render strands
-/// every frame and never pops. `out` is cleared first; a `0` count (proxy tier)
-/// yields an empty list, and a count at or above the input length copies every
-/// binding in order.
+/// The kept count is [`resolved_render_count`]. Selection delegates to
+/// [`super::decimation::decimate_bindings_nested`], a deterministic,
+/// order-preserving **nested** decimation: the strands kept at a low count are
+/// always a subset of those kept at a higher count, so a groom drops the *same*
+/// render strands every frame and never pops — at *any* target count, not only
+/// counts sharing integer factors (the failure mode of the old stride sample).
+/// `out` is cleared first; a `0` count (proxy tier) yields an empty list, and a
+/// count at or above the input length copies every binding in order. When
+/// strand geometry is available, prefer
+/// [`super::decimation::decimate_bindings_importance`] for importance-weighted
+/// survival (long, curly, or artist-prioritized strands persist to the lowest
+/// counts).
 pub fn decimate_bindings(
     bindings: &[RenderStrandBinding],
     decision: &HairLodDecision,
     out: &mut Vec<RenderStrandBinding>,
 ) {
-    out.clear();
-    let target = resolved_render_count(decision) as usize;
-    if target == 0 || bindings.is_empty() {
-        return;
-    }
-    if target >= bindings.len() {
-        out.extend_from_slice(bindings);
-        return;
-    }
-    let stride = bindings.len() / target;
-    for k in 0..target {
-        let index = k * stride;
-        // `index = k*stride < target*stride <= len`, so it always stays in range.
-        if let Some(&binding) = bindings.get(index) {
-            out.push(binding);
-        }
-    }
+    super::decimation::decimate_bindings_nested(bindings, decision, out);
 }
 
 #[cfg(test)]
@@ -639,9 +629,10 @@ mod tests {
         let mut out = Vec::new();
         decimate_bindings(&bindings, &decision, &mut out);
         assert_eq!(out.len(), 10);
-        // Stride sample: 0, 4, 8, ... 36 — preserved input order.
-        for (k, kept) in out.iter().enumerate() {
-            assert_eq!(kept.seed, (k as u32) * 4);
+        // Kept strands are emitted in ascending original order (coherent
+        // downstream processing), not necessarily contiguous.
+        for w in out.windows(2) {
+            assert!(w[0].seed < w[1].seed);
         }
         // Determinism: a second pass yields the identical selection.
         let mut again = Vec::new();
@@ -649,6 +640,20 @@ mod tests {
         let seeds_a: Vec<u32> = out.iter().map(|b| b.seed).collect();
         let seeds_b: Vec<u32> = again.iter().map(|b| b.seed).collect();
         assert_eq!(seeds_a, seeds_b);
+        // Pop-free nesting: the 10 kept strands are a strict subset of the 20
+        // kept at the next-higher count. A stride sample (40/10=4 vs 40/20=2)
+        // would swap survivors here and pop.
+        let mut higher = Vec::new();
+        decimate_bindings(
+            &bindings,
+            &strand_decision(HairLodTier::ReducedStrands, 20),
+            &mut higher,
+        );
+        assert_eq!(higher.len(), 20);
+        let higher_seeds: Vec<u32> = higher.iter().map(|b| b.seed).collect();
+        for kept in &out {
+            assert!(higher_seeds.contains(&kept.seed), "kept set must nest");
+        }
     }
 
     #[test]
