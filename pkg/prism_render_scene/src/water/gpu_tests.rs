@@ -1042,3 +1042,389 @@ fn pbf_density_solve_gpu_matches_cpu_golden() {
         i += 1;
     }
 }
+
+use super::abi::GpuFlipSimParams;
+
+/// Fixed-point domain constants mirrored from `water_flip.wesl` so the host can
+/// pack the momentum/mass scatter buffer with the exact bit pattern the kernel
+/// decodes. Kept private to this parity block.
+const FLIP_FIXED_SCALE: f32 = 65536.0;
+/// Clamp bound preventing the signed accumulator from overflowing `i32`.
+const FLIP_FIXED_LIMIT: f32 = 30000.0;
+/// "Effectively zero" threshold shared with the shader's mass/count guards.
+const FLIP_EPS: f32 = 1.0e-6;
+
+/// Compiles `water_flip.wesl` and returns its `Wgsl` translation.
+fn compile_flip_wgsl() -> String {
+    let mut cache = ShaderCache::new((), keep_wgsl);
+    let id = AssetId::Uuid {
+        uuid: Uuid::from_u128(0x5052_4953_4d5f_5741_5445_5246_4c50_0002),
+    };
+    cache.set_shader(
+        id,
+        Shader::from_wesl(
+            include_str!("../shaders/water_flip.wesl"),
+            "embedded://prism_render_scene/shaders/water_flip.wesl",
+        ),
+    );
+    let module = cache
+        .get(0, id, &[])
+        .unwrap_or_else(|error| panic!("water_flip.wesl failed to compile: {error}"));
+    (*module).clone()
+}
+
+/// Host mirror of `flip_encode_fixed`: clamp, scale, round, reinterpret as
+/// `u32`. All parity inputs are chosen dyadic so `round` never lands on a tie,
+/// keeping `WGSL` (ties-to-even) and Rust (ties-away) byte-identical here.
+fn flip_encode_fixed(value: f32) -> u32 {
+    let clamped = value.clamp(-FLIP_FIXED_LIMIT, FLIP_FIXED_LIMIT);
+    ((clamped * FLIP_FIXED_SCALE).round() as i32) as u32
+}
+
+/// Host mirror of `flip_decode_fixed`.
+fn flip_decode_fixed(bits: u32) -> f32 {
+    (bits as i32) as f32 / FLIP_FIXED_SCALE
+}
+
+/// Host mirror of `flip_cell_index` (x fastest, then y, then z).
+fn flip_cell_index(i: u32, j: u32, k: u32, dim: [u32; 3]) -> u32 {
+    (k * dim[1] + j) * dim[0] + i
+}
+
+/// Host mirror of `flip_in_bounds`.
+fn flip_in_bounds(i: i32, j: i32, k: i32, dim: [u32; 3]) -> bool {
+    i >= 0 && j >= 0 && k >= 0 && i < dim[0] as i32 && j < dim[1] as i32 && k < dim[2] as i32
+}
+
+/// Host mirror of `flip_cell_velocity`: decodes `momentum / mass` (or zero for a
+/// massless air cell) plus the mass in `w`.
+fn flip_cell_velocity(scatter: &[u32], cell: usize) -> [f32; 4] {
+    let base = cell * 4;
+    let mass = flip_decode_fixed(scatter[base + 3]);
+    if mass <= FLIP_EPS {
+        return [0.0, 0.0, 0.0, 0.0];
+    }
+    let mx = flip_decode_fixed(scatter[base]);
+    let my = flip_decode_fixed(scatter[base + 1]);
+    let mz = flip_decode_fixed(scatter[base + 2]);
+    [mx / mass, my / mass, mz / mass, mass]
+}
+
+/// Host mirror of `flip_neighbor_velocity`: out-of-grid neighbours read as a
+/// zero-velocity solid wall (the Neumann boundary the projection assumes).
+fn flip_neighbor_velocity(
+    scatter: &[u32],
+    dim: [u32; 3],
+    base: [i32; 3],
+    off: [i32; 3],
+) -> [f32; 3] {
+    let ni = base[0] + off[0];
+    let nj = base[1] + off[1];
+    let nk = base[2] + off[2];
+    if !flip_in_bounds(ni, nj, nk, dim) {
+        return [0.0, 0.0, 0.0];
+    }
+    let v = flip_cell_velocity(
+        scatter,
+        flip_cell_index(ni as u32, nj as u32, nk as u32, dim) as usize,
+    );
+    [v[0], v[1], v[2]]
+}
+
+/// `CPU` golden twin of `water_flip_pressure_solve`.
+///
+/// Reproduces the kernel line-for-line: skip massless air cells (writing zero),
+/// measure the central-difference divergence of the frozen cell-centered
+/// velocity field, sum in-bounds neighbour pressures with a Neumann count, then
+/// damp the `Jacobi` relaxation toward the previous estimate. Every cell is
+/// walked in the same x-fastest order the dispatch covers.
+fn flip_pressure_golden(
+    scatter: &[u32],
+    pressure_in: &[f32],
+    dim: [u32; 3],
+    dx: f32,
+    inv_dx: f32,
+    jacobi_omega: f32,
+) -> Vec<f32> {
+    let total = (dim[0] * dim[1] * dim[2]) as usize;
+    let cell_count = total as u32;
+    let mut out = vec![0.0_f32; total];
+    let offsets = [
+        [1, 0, 0],
+        [-1, 0, 0],
+        [0, 1, 0],
+        [0, -1, 0],
+        [0, 0, 1],
+        [0, 0, -1],
+    ];
+    let mut k = 0i32;
+    while (k as u32) < dim[2] {
+        let mut j = 0i32;
+        while (j as u32) < dim[1] {
+            let mut i = 0i32;
+            while (i as u32) < dim[0] {
+                let cell = flip_cell_index(i as u32, j as u32, k as u32, dim);
+                if cell < cell_count {
+                    let here = flip_cell_velocity(scatter, cell as usize);
+                    if here[3] <= FLIP_EPS {
+                        out[cell as usize] = 0.0;
+                    } else {
+                        let base = [i, j, k];
+                        let vx_pos = flip_neighbor_velocity(scatter, dim, base, [1, 0, 0])[0];
+                        let vx_neg = flip_neighbor_velocity(scatter, dim, base, [-1, 0, 0])[0];
+                        let vy_pos = flip_neighbor_velocity(scatter, dim, base, [0, 1, 0])[1];
+                        let vy_neg = flip_neighbor_velocity(scatter, dim, base, [0, -1, 0])[1];
+                        let vz_pos = flip_neighbor_velocity(scatter, dim, base, [0, 0, 1])[2];
+                        let vz_neg = flip_neighbor_velocity(scatter, dim, base, [0, 0, -1])[2];
+                        let divergence =
+                            ((vx_pos - vx_neg) + (vy_pos - vy_neg) + (vz_pos - vz_neg))
+                                * (0.5 * inv_dx);
+                        let mut p_sum = 0.0_f32;
+                        let mut count = 0.0_f32;
+                        for off in offsets {
+                            let ni = i + off[0];
+                            let nj = j + off[1];
+                            let nk = k + off[2];
+                            if !flip_in_bounds(ni, nj, nk, dim) {
+                                continue;
+                            }
+                            p_sum += pressure_in
+                                [flip_cell_index(ni as u32, nj as u32, nk as u32, dim) as usize];
+                            count += 1.0;
+                        }
+                        if count <= FLIP_EPS {
+                            out[cell as usize] = 0.0;
+                        } else {
+                            let dx2 = dx * dx;
+                            let relaxed = (p_sum - dx2 * divergence) / count;
+                            let omega = jacobi_omega.clamp(0.0, 1.0);
+                            out[cell as usize] =
+                                pressure_in[cell as usize] * (1.0 - omega) + relaxed * omega;
+                        }
+                    }
+                }
+                i += 1;
+            }
+            j += 1;
+        }
+        k += 1;
+    }
+    out
+}
+
+/// Dispatches one `water_flip_pressure_solve` sweep on device and reads back the
+/// relaxed pressure field.
+///
+/// The bind group is built from the pipeline's reflected `group(0)` layout,
+/// which — because the pressure kernel touches only the scatter, both pressure
+/// buffers, and the parameter block — contains exactly bindings `1..=4`.
+fn dispatch_flip_pressure(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    wgsl: &str,
+    entry: &str,
+    scatter: &[u32],
+    pressure_in: &[f32],
+    params: &GpuFlipSimParams,
+) -> Vec<f32> {
+    let module = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("water_flip"),
+        source: ShaderSource::Wgsl(wgsl.into()),
+    });
+    let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("flip_pressure_pipeline"),
+        layout: None,
+        module: &module,
+        entry_point: Some(entry),
+        compilation_options: PipelineCompilationOptions::default(),
+        cache: None,
+    });
+
+    let scatter_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("flip_scatter"),
+        contents: bytemuck::cast_slice(scatter),
+        usage: BufferUsages::STORAGE,
+    });
+    let pressure_in_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("flip_pressure_in"),
+        contents: bytemuck::cast_slice(pressure_in),
+        usage: BufferUsages::STORAGE,
+    });
+    let out_bytes = size_of_val(pressure_in) as u64;
+    let pressure_out_buf = device.create_buffer(&BufferDescriptor {
+        label: Some("flip_pressure_out"),
+        size: out_bytes,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let param_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("flip_params"),
+        contents: bytemuck::bytes_of(params),
+        usage: BufferUsages::UNIFORM,
+    });
+
+    let layout = pipeline.get_bind_group_layout(0);
+    let bind_group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("flip_group0"),
+        layout: &layout,
+        entries: &[
+            BindGroupEntry {
+                binding: 1,
+                resource: scatter_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 2,
+                resource: pressure_in_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 3,
+                resource: pressure_out_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 4,
+                resource: param_buf.as_entire_binding(),
+            },
+        ],
+    });
+
+    let out_stage = device.create_buffer(&BufferDescriptor {
+        label: Some("flip_out_stage"),
+        size: out_bytes,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("flip_parity_encoder"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("flip_parity_pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(
+            params.dim[0].div_ceil(4),
+            params.dim[1].div_ceil(4),
+            params.dim[2].div_ceil(4),
+        );
+    }
+    encoder.copy_buffer_to_buffer(&pressure_out_buf, 0, &out_stage, 0, out_bytes);
+    queue.submit([encoder.finish()]);
+
+    out_stage.slice(..).map_async(MapMode::Read, |_| {});
+    device
+        .poll(PollType::wait_indefinitely())
+        .expect("device poll should complete the submitted work");
+    let view = out_stage
+        .slice(..)
+        .get_mapped_range()
+        .expect("mapped readback range should be available after poll");
+    let values: Vec<f32> = bytemuck::cast_slice::<u8, f32>(&view).to_vec();
+    drop(view);
+    out_stage.unmap();
+    values
+}
+
+/// One on-device damped-`Jacobi` pressure sweep must match the `CPU` golden.
+///
+/// The 4x4x4 scene mixes a fully interior fluid block (all six neighbours
+/// in-bounds), a boundary corner cell (three out-of-grid neighbours exercising
+/// the Neumann count), and an isolated fluid cell whose in-bounds neighbours are
+/// air (zero-velocity read + reduced neighbour pressure sum). Air cells verify
+/// the early-out zero write. All momenta/masses are dyadic so the fixed-point
+/// round is tie-free and the two paths agree to `float32` rounding.
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice must reach the test log on hosts without a wgpu adapter"
+)]
+fn flip_pressure_solve_gpu_matches_cpu_golden() {
+    let Some((device, queue)) = try_solver_device() else {
+        eprintln!(
+            "flip_pressure_solve_gpu_matches_cpu_golden: no wgpu adapter, skipping on-device parity"
+        );
+        return;
+    };
+
+    let dim = [4u32, 4u32, 4u32];
+    let total = (dim[0] * dim[1] * dim[2]) as usize;
+    let dx = 1.0_f32;
+    let inv_dx = 1.0_f32;
+    let jacobi_omega = 0.5_f32;
+
+    let is_fluid = |i: u32, j: u32, k: u32| -> bool {
+        (i == 0 && j == 0 && k == 0)
+            || (i == 3 && j == 3 && k == 3)
+            || ((1..=2).contains(&i) && (1..=2).contains(&j) && (1..=2).contains(&k))
+    };
+
+    let mut scatter = vec![0u32; total * 4];
+    let mut k = 0u32;
+    while k < dim[2] {
+        let mut j = 0u32;
+        while j < dim[1] {
+            let mut i = 0u32;
+            while i < dim[0] {
+                if is_fluid(i, j, k) {
+                    let cell = flip_cell_index(i, j, k, dim) as usize;
+                    let base = cell * 4;
+                    let mass = 2.0_f32;
+                    let vx = i as f32 * 0.5;
+                    let vy = j as f32 * 0.5;
+                    let vz = k as f32 * 0.5;
+                    scatter[base] = flip_encode_fixed(mass * vx);
+                    scatter[base + 1] = flip_encode_fixed(mass * vy);
+                    scatter[base + 2] = flip_encode_fixed(mass * vz);
+                    scatter[base + 3] = flip_encode_fixed(mass);
+                }
+                i += 1;
+            }
+            j += 1;
+        }
+        k += 1;
+    }
+
+    let pressure_in: Vec<f32> = (0..total).map(|c| c as f32 * 0.25).collect();
+
+    let params = GpuFlipSimParams {
+        origin: [0.0, 0.0, 0.0, 0.0],
+        dim: [dim[0], dim[1], dim[2], 0],
+        dx,
+        inv_dx,
+        flip_blend: 0.0,
+        particle_mass: 0.0,
+        jacobi_omega,
+        use_affine: 0,
+        particle_count: 0,
+        cell_count: total as u32,
+    };
+
+    let golden = flip_pressure_golden(&scatter, &pressure_in, dim, dx, inv_dx, jacobi_omega);
+
+    let wgsl = compile_flip_wgsl();
+    let entry = find_entry_point(&wgsl, "flip_pressure_solve");
+    let gpu = dispatch_flip_pressure(
+        &device,
+        &queue,
+        &wgsl,
+        &entry,
+        &scatter,
+        &pressure_in,
+        &params,
+    );
+
+    assert_eq!(gpu.len(), golden.len(), "cell count mismatch");
+    let mut c = 0;
+    while c < golden.len() {
+        let d = (gpu[c] - golden[c]).abs();
+        assert!(
+            d < PARITY_EPS,
+            "cell {c}: gpu={} cpu={} |d|={d}",
+            gpu[c],
+            golden[c],
+        );
+        c += 1;
+    }
+}
