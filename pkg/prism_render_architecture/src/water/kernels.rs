@@ -170,12 +170,24 @@ pub enum WaterKernel {
     CausticsProject,
     /// Advect and decay the foam coverage field (semi-Lagrangian).
     FoamAdvect,
+    /// Append crest-spray particles into the `Ember` particle pool.
+    SprayEmit,
+    /// Advance the per-cell surface wetness/moisture field one step.
+    WetnessStep,
+    /// Rasterize the soft waterline transition mask (above/below water).
+    WaterlineMask,
+    /// Screen-space spectral refraction with per-channel (`RGB`) `IOR` offsets.
+    DispersionRefract,
+    /// Accumulate underwater volumetric single-scatter into the froxel volume.
+    UnderwaterVolume,
+    /// Read back bounded two-way coupling field queries from the `GPU`.
+    CouplingReadback,
 }
 
 impl WaterKernel {
     /// Every kernel, in a stable order, for descriptor-table iteration and
     /// exhaustiveness tests.
-    pub const ALL: [WaterKernel; 10] = [
+    pub const ALL: [WaterKernel; 16] = [
         WaterKernel::SpectrumIfft,
         WaterKernel::GerstnerDisplace,
         WaterKernel::SweStep,
@@ -186,6 +198,12 @@ impl WaterKernel {
         WaterKernel::SurfaceReconstruct,
         WaterKernel::CausticsProject,
         WaterKernel::FoamAdvect,
+        WaterKernel::SprayEmit,
+        WaterKernel::WetnessStep,
+        WaterKernel::WaterlineMask,
+        WaterKernel::DispersionRefract,
+        WaterKernel::UnderwaterVolume,
+        WaterKernel::CouplingReadback,
     ];
 
     /// The stable `WESL` entry-point name the shader codegen emits for this
@@ -206,6 +224,12 @@ impl WaterKernel {
             WaterKernel::SurfaceReconstruct => "water_surface_reconstruct",
             WaterKernel::CausticsProject => "water_caustics_project",
             WaterKernel::FoamAdvect => "water_foam_advect",
+            WaterKernel::SprayEmit => "water_spray_emit",
+            WaterKernel::WetnessStep => "water_wetness_step",
+            WaterKernel::WaterlineMask => "water_waterline_mask",
+            WaterKernel::DispersionRefract => "water_dispersion_refract",
+            WaterKernel::UnderwaterVolume => "water_underwater_volume",
+            WaterKernel::CouplingReadback => "water_coupling_readback",
         }
     }
 
@@ -298,6 +322,56 @@ impl WaterKernel {
                 },
                 WorkgroupSize { x: 8, y: 8, z: 1 },
                 DispatchDomain::Grid2d,
+            ),
+            WaterKernel::SprayEmit | WaterKernel::CouplingReadback => (
+                BindGroupLayout {
+                    storage_buffers: 2,
+                    uniform_buffers: 1,
+                    storage_textures: 0,
+                    sampled_textures: 0,
+                },
+                WorkgroupSize { x: 64, y: 1, z: 1 },
+                DispatchDomain::Particle,
+            ),
+            WaterKernel::WetnessStep => (
+                BindGroupLayout {
+                    storage_buffers: 1,
+                    uniform_buffers: 1,
+                    storage_textures: 1,
+                    sampled_textures: 0,
+                },
+                WorkgroupSize { x: 8, y: 8, z: 1 },
+                DispatchDomain::Grid2d,
+            ),
+            WaterKernel::WaterlineMask => (
+                BindGroupLayout {
+                    storage_buffers: 0,
+                    uniform_buffers: 1,
+                    storage_textures: 1,
+                    sampled_textures: 1,
+                },
+                WorkgroupSize { x: 8, y: 8, z: 1 },
+                DispatchDomain::Screen,
+            ),
+            WaterKernel::DispersionRefract => (
+                BindGroupLayout {
+                    storage_buffers: 0,
+                    uniform_buffers: 1,
+                    storage_textures: 1,
+                    sampled_textures: 2,
+                },
+                WorkgroupSize { x: 8, y: 8, z: 1 },
+                DispatchDomain::Screen,
+            ),
+            WaterKernel::UnderwaterVolume => (
+                BindGroupLayout {
+                    storage_buffers: 0,
+                    uniform_buffers: 1,
+                    storage_textures: 1,
+                    sampled_textures: 1,
+                },
+                WorkgroupSize { x: 4, y: 4, z: 4 },
+                DispatchDomain::Grid3d,
             ),
         };
         KernelDescriptor {
