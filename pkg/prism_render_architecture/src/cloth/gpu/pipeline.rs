@@ -48,6 +48,30 @@ pub struct ClothGpuExtract {
     pub backstop: bool,
 }
 
+/// The per-color addressing window a graph-colored projection dispatch writes.
+///
+/// The three color-serial projection kernels
+/// (`ProjectDistanceBatch`/`ProjectBendingBatch`/`ProjectLongRangeBatch`) each
+/// process a single graph color of their constraint class per dispatch. The GPU
+/// backend addresses that color as the contiguous slice
+/// `buffer[base .. base + count]` of the class's constraint buffer, pushing
+/// `base`/`count` as the `ClothColorBatch` immediate before the dispatch. The
+/// offsets are computed here — in the float-free golden plan — so the render
+/// backend is a dumb executor and the layout contract is unit-tested.
+///
+/// The layout contract the extract must honor: distance and long-range
+/// constraints share one `constraints` buffer laid out as
+/// `[all distance colors ..., all long-range colors ...]`, so a long-range
+/// color's `base` is offset past the total distance-constraint count. Bending
+/// constraints live in their own buffer, so their `base` starts at zero.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct ColorBatch {
+    /// First element index of this color's slice within its constraint buffer.
+    pub base: u32,
+    /// Number of constraints in this color's slice.
+    pub count: u32,
+}
+
 /// One fully sized compute dispatch in the recorded schedule.
 ///
 /// `groups` is the number of workgroups to launch, already divided from the
@@ -62,6 +86,10 @@ pub struct PlannedDispatch {
     pub groups: u32,
     /// The graph color this dispatch belongs to, for the projection passes.
     pub color: Option<u32>,
+    /// The per-color addressing window for a projection dispatch, pushed as the
+    /// `ClothColorBatch` immediate. `None` for the per-particle passes, which
+    /// address their whole domain from the uniform counts.
+    pub batch: Option<ColorBatch>,
 }
 
 /// The expanded, ordered dispatch schedule for one cloth piece.
@@ -155,17 +183,24 @@ fn push_projection(
     kernel: ClothKernel,
     colors: &[u32],
     group_size: u32,
+    class_base: u32,
 ) {
+    // `base` walks the constraint buffer as colors are laid out end to end, so
+    // color `i` addresses `[base .. base + colors[i]]`. It advances by every
+    // color's count — including empty (skipped) colors, which add zero — so the
+    // running offset always matches the host's contiguous per-color layout.
+    let mut base = class_base;
     for (index, &count) in colors.iter().enumerate() {
         let groups = linear_group_count(count, group_size);
-        if groups == 0 {
-            continue;
+        if groups != 0 {
+            dispatches.push(PlannedDispatch {
+                kernel,
+                groups,
+                color: Some(index as u32),
+                batch: Some(ColorBatch { base, count }),
+            });
         }
-        dispatches.push(PlannedDispatch {
-            kernel,
-            groups,
-            color: Some(index as u32),
-        });
+        base = base.saturating_add(count);
     }
 }
 
@@ -185,6 +220,7 @@ fn push_particle(
         kernel,
         groups,
         color: None,
+        batch: None,
     });
 }
 
@@ -201,6 +237,16 @@ pub fn prepare(extract: &ClothGpuExtract) -> ClothGpuPrepare {
     let mut dispatches: Vec<PlannedDispatch> = Vec::new();
     let group = particle_group_size();
     let particles = extract.counts.particles;
+    // Distance and long-range constraints share the `constraints` buffer, laid
+    // out as all distance colors first, then all long-range colors. A
+    // long-range color therefore addresses past the whole distance section, so
+    // its color slices start at this offset. Bending has its own buffer (base
+    // zero). Saturating so a pathological count can never wrap the offset.
+    let distance_total = extract
+        .distance_colors
+        .iter()
+        .copied()
+        .fold(0u32, u32::saturating_add);
 
     for _ in 0..extract.substeps {
         push_particle(&mut dispatches, ClothKernel::Predict, particles, group);
@@ -211,18 +257,21 @@ pub fn prepare(extract: &ClothGpuExtract) -> ClothGpuPrepare {
                 ClothKernel::ProjectDistanceBatch,
                 &extract.distance_colors,
                 group,
+                0,
             );
             push_projection(
                 &mut dispatches,
                 ClothKernel::ProjectBendingBatch,
                 &extract.bending_colors,
                 group,
+                0,
             );
             push_projection(
                 &mut dispatches,
                 ClothKernel::ProjectLongRangeBatch,
                 &extract.long_range_colors,
                 group,
+                distance_total,
             );
         }
 
@@ -465,6 +514,48 @@ mod tests {
         // Colors are recorded in order 0,1 within a substep.
         assert_eq!(distance[0].color, Some(0));
         assert_eq!(distance[1].color, Some(1));
+    }
+
+    #[test]
+    fn projection_batches_carry_the_per_color_buffer_window() {
+        // sample_extract lays out distance colors [100, 80], long_range [40],
+        // bending [60]. Distance and long-range share one buffer laid out as
+        // [distance..., long_range...], so distance color 0 starts at 0, color
+        // 1 at 100, and the single long-range color starts past the whole
+        // distance section (100 + 80 = 180). Bending owns its own buffer, so it
+        // starts at 0.
+        let e = sample_extract();
+        let plan = prepare(&e);
+
+        let first_of = |kernel: ClothKernel, color: u32| -> super::ColorBatch {
+            plan.dispatches
+                .iter()
+                .find(|d| d.kernel == kernel && d.color == Some(color))
+                .and_then(|d| d.batch)
+                .expect("projection dispatch must carry a color batch")
+        };
+
+        let d0 = first_of(ClothKernel::ProjectDistanceBatch, 0);
+        assert_eq!(d0.base, 0);
+        assert_eq!(d0.count, 100);
+        let d1 = first_of(ClothKernel::ProjectDistanceBatch, 1);
+        assert_eq!(d1.base, 100);
+        assert_eq!(d1.count, 80);
+
+        let lr0 = first_of(ClothKernel::ProjectLongRangeBatch, 0);
+        assert_eq!(lr0.base, 180, "long range starts past the distance section");
+        assert_eq!(lr0.count, 40);
+
+        let b0 = first_of(ClothKernel::ProjectBendingBatch, 0);
+        assert_eq!(b0.base, 0, "bending owns its own buffer");
+        assert_eq!(b0.count, 60);
+
+        // Per-particle passes never carry a color batch.
+        for d in &plan.dispatches {
+            if d.color.is_none() {
+                assert!(d.batch.is_none());
+            }
+        }
     }
 
     #[test]
