@@ -36,13 +36,13 @@ pub mod point;
 pub mod spot;
 pub mod virtual_sm;
 
-pub use bias::{apply_normal_offset, slope_scaled_depth_bias};
-pub use cascade::{
-    cascade_blend_weight, compute_cascade_splits, select_cascade, CascadeSplits, MAX_CASCADE_COUNT,
-};
 pub use atlas::{
     allocate_shadow_atlas, AtlasAllocation, AtlasConfig, AtlasSlot, ShadowKind, ShadowRequest,
     POINT_LAYER_COUNT,
+};
+pub use bias::{apply_normal_offset, slope_scaled_depth_bias};
+pub use cascade::{
+    cascade_blend_weight, compute_cascade_splits, select_cascade, CascadeSplits, MAX_CASCADE_COUNT,
 };
 pub use csm::{compute_cascade_matrices, CascadeMatrix};
 pub use depth_view::{
@@ -59,13 +59,12 @@ pub use point::{
     cube_face_and_uv, cube_face_view_projections, evaluate_point_shadow, PointShadowConfig,
     PointShadowInput,
 };
-pub use spot::{
-    evaluate_spot_shadow, spot_view_projection, SpotShadowConfig, SpotShadowInput,
-};
+pub use spot::{evaluate_spot_shadow, spot_view_projection, SpotShadowConfig, SpotShadowInput};
 pub use virtual_sm::{
-    camera_move_invalidates_pages, filter_page_radius, generate_page_requests, invalidate_casters,
-    Allocation, AllocatorStats, BudgetStats, CasterMovement, ClipmapConfig, ClipmapLevel,
-    FrameInput, FrameResult, Invalidation, PageRequestSet, PageTableStats, PhysicalPageAllocator,
-    Receiver, ReceiverProjection, Residency, ShadowPageKey, VirtualPageTable, VirtualShadowMap,
-    VirtualShadowSettings, generate_receiver, reconstruct_world_position,
+    camera_move_invalidates_pages, decode_window_slot, filter_page_radius, generate_page_requests,
+    generate_receiver, invalidate_casters, reconstruct_world_position, slot_to_page_key,
+    window_slot, window_slot_count, window_slots_per_level, Allocation, AllocatorStats, BudgetStats,
+    CasterMovement, ClipmapConfig, ClipmapLevel, FrameInput, FrameResult, Invalidation,
+    PageRequestSet, PageTableStats, PhysicalPageAllocator, Receiver, ReceiverProjection, Residency,
+    ShadowPageKey, VirtualPageTable, VirtualShadowMap, VirtualShadowSettings,
 };

@@ -35,6 +35,7 @@ pub mod invalidation;
 pub mod page_table;
 pub mod receiver_gen;
 pub mod request;
+pub mod slot;
 
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
@@ -51,6 +52,9 @@ pub use page_table::{
 };
 pub use receiver_gen::{generate_receiver, reconstruct_world_position, ReceiverProjection};
 pub use request::{filter_page_radius, generate_page_requests, PageRequestSet, Receiver};
+pub use slot::{
+    decode_window_slot, slot_to_page_key, window_slot, window_slot_count, window_slots_per_level,
+};
 
 // Re-export the architecture contracts so callers use one canonical type.
 pub use prism_render_architecture::virtual_shadow::{ShadowPageKey, VirtualShadowSettings};
@@ -287,8 +291,7 @@ impl VirtualShadowMap {
             .collect();
 
         let invalidation = invalidate_casters(&self.clipmap, light, caster_movements, &levels);
-        let invalid_set: BTreeSet<PageOrder> =
-            invalidation.pages.iter().map(page_order).collect();
+        let invalid_set: BTreeSet<PageOrder> = invalidation.pages.iter().map(page_order).collect();
 
         let stats_before = self.allocator.stats();
 
@@ -305,9 +308,7 @@ impl VirtualShadowMap {
                 continue;
             }
             let dirty = invalid_set.contains(&page_order(key));
-            if !dirty
-                && let Some(_physical) = self.table.query(key, frame)
-            {
+            if !dirty && let Some(_physical) = self.table.query(key, frame) {
                 self.allocator.touch(key, frame);
                 resident.push(*key);
                 continue;
