@@ -106,6 +106,48 @@ impl StormState {
         let target = pyrocumulus_buoyancy(energy);
         self.pyrocumulus = saturate(lerp(self.pyrocumulus, target, pyro_rate));
     }
+
+    /// Composite vertical density weight of the storm cloud *body* at a
+    /// normalized band `height_fraction` (`0` at the cloud base, `1` at the
+    /// tropopause).
+    ///
+    /// This is the seam that folds the state machine's evolving fields back
+    /// through this module's own authored curves into a single `0..=1` weight
+    /// the modelling / ray-march density field multiplies the deep-convective
+    /// `Cumulonimbus` column by. It unions the spreading [`anvil_profile`]
+    /// (driven by [`StormState::anvil_spread`]) with the [`overshooting_bump`]
+    /// dome (driven by [`StormState::overshooting_top`], reinforced by the
+    /// [`StormState::pyrocumulus`] plume) via a probabilistic OR
+    /// `a + b - a*b`, so two overlapping contributions never sum past one.
+    ///
+    /// The result is bounded to `0..=1` and monotonically non-decreasing in
+    /// every driving field (each factor is monotone and the union has
+    /// non-negative partials for inputs in `0..=1`), so a maturing storm only
+    /// ever adds vertical development, never removes it.
+    #[must_use]
+    pub fn vertical_profile(self, height_fraction: f32) -> f32 {
+        let anvil = anvil_profile(height_fraction, self.anvil_spread);
+        // The pyrocumulus plume reinforces the overshooting dome's prominence
+        // without letting the combined drive escape 0..=1.
+        let dome_drive =
+            saturate(self.overshooting_top + self.pyrocumulus * (1.0 - self.overshooting_top));
+        let dome = overshooting_bump(height_fraction, dome_drive);
+        saturate(anvil + dome - anvil * dome)
+    }
+
+    /// `virga` precipitation-veil density beneath the storm base at a
+    /// normalized `veil_fraction` (`1` at the cloud base, `0` at the trailing
+    /// tip).
+    ///
+    /// Scales the authored [`virga_fade`] curve by the current
+    /// [`StormState::virga`] veil strength, so a young storm (no veil) yields
+    /// zero and a mature storm trails a fading precipitation curtain. Bounded
+    /// to `0..=1` and monotonically non-decreasing in both the veil strength
+    /// and the height fraction.
+    #[must_use]
+    pub fn virga_veil(self, veil_fraction: f32) -> f32 {
+        saturate(self.virga * virga_fade(veil_fraction))
+    }
 }
 
 /// `anvil` density weight at a normalized `height_fraction` for a given spread.
@@ -299,5 +341,76 @@ mod tests {
             b.advance_storm(0.1, energy);
         }
         assert_eq!(a, b, "storm advance is not deterministic");
+    }
+
+    #[test]
+    fn vertical_profile_stays_bounded_and_grows_with_maturity() {
+        // A young cell (barely developed) versus a mature cell driven hard.
+        let mut young = StormState::default();
+        young.advance_storm(0.1, 0.7);
+        let mut mature = StormState::default();
+        for _ in 0..80 {
+            mature.advance_storm(0.1, 0.95);
+        }
+
+        let mut h = 0.0_f32;
+        while h <= 1.0 {
+            let wy = young.vertical_profile(h);
+            let wm = mature.vertical_profile(h);
+            assert!(
+                (0.0..=1.0).contains(&wy),
+                "young profile out of range at {h}"
+            );
+            assert!(
+                (0.0..=1.0).contains(&wm),
+                "mature profile out of range at {h}"
+            );
+            // A more developed storm never has *less* vertical development at
+            // any height than a younger one (monotone in the driving fields).
+            assert!(
+                wm + EPS >= wy,
+                "mature profile weaker than young at {h}: {wm} < {wy}"
+            );
+            h += 0.05;
+        }
+        // A calm (zeroed) cell contributes no vertical development anywhere.
+        let calm = StormState::default();
+        assert!(calm.vertical_profile(0.5).abs() < EPS);
+        // Out-of-band heights saturate instead of panicking.
+        assert!((0.0..=1.0).contains(&mature.vertical_profile(-2.0)));
+        assert!((0.0..=1.0).contains(&mature.vertical_profile(3.0)));
+    }
+
+    #[test]
+    fn virga_veil_scales_with_veil_strength_and_fades_to_the_tip() {
+        let mut storm = StormState::default();
+        for _ in 0..80 {
+            storm.advance_storm(0.1, 0.9);
+        }
+        assert!(
+            storm.virga > 0.0,
+            "a mature storm should trail a virga veil"
+        );
+
+        // Densest at the base (fraction 1), fading to nothing at the tip (0).
+        let base = storm.virga_veil(1.0);
+        let tip = storm.virga_veil(0.0);
+        assert!(base + EPS >= tip, "veil should be densest at the base");
+        assert!(tip.abs() < EPS, "veil should vanish at the trailing tip");
+
+        // Monotone in the height fraction and always bounded.
+        let mut prev = 0.0_f32;
+        let mut f = 0.0_f32;
+        while f <= 1.0 {
+            let v = storm.virga_veil(f);
+            assert!((0.0..=1.0).contains(&v), "virga veil out of range at {f}");
+            assert!(v + EPS >= prev, "virga veil not monotonic at {f}");
+            prev = v;
+            f += 0.05;
+        }
+
+        // No veil strength means no precipitation curtain regardless of height.
+        let calm = StormState::default();
+        assert!(calm.virga_veil(1.0).abs() < EPS);
     }
 }

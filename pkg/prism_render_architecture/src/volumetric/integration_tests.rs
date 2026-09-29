@@ -22,6 +22,10 @@
 //!   composition `single * (1 + gain)` only ever adds bounded energy (never
 //!   removes it, never more than doubles it) and stays monotone in optical
 //!   depth and albedo.
+//! - `storm` -> `modeling`: the cumulonimbus vertical-development state
+//!   machine folds through its own anvil/overshoot curves into a `0..=1`
+//!   weight that only ever *adds* vertical development to the base height
+//!   gradient, staying bounded and growing with storm maturity.
 //! - `cloud_lod`, `temporal`, `budget`: scheduling and selection are
 //!   deterministic and stay within their declared limits.
 //!
@@ -35,12 +39,13 @@ use super::cloud_lod::{bin_by_distance, select_lod, CloudLodThresholds};
 use super::coupling::{apply_carve, density_delta, CarveBrush};
 use super::fog::{fog_transmittance, height_fog_density, HeightFogParams};
 use super::math::{saturate, EPS};
-use super::modeling::compose_from_modeling;
+use super::modeling::{compose_from_modeling, height_gradient};
 use super::multiscatter::MultiScatterLut;
 use super::noise::{perlin_worley, worley_fbm};
 use super::raymarch::{march, RaymarchConfig};
 use super::reference::{analytic_single_scatter, single_scatter_reference};
 use super::scatter::{hg_phase, octave_scatter, OctaveParams};
+use super::storm::{gravity_wave, StormState};
 use super::temporal::{active_pixel, clamp_history, UpscaleMode};
 use super::weather::{WeatherField, WindField};
 use super::{
@@ -403,6 +408,75 @@ fn reference_single_scatter_matches_multiscatter_composition_bounded() {
             "composed radiance dropped with albedo: {resolved} < {prev}"
         );
         prev = resolved;
+    }
+}
+
+#[test]
+fn storm_vertical_development_modulates_cumulonimbus_density_bounded() {
+    // A barely-developed cell versus one driven hard to maturity.
+    let mut young = StormState::default();
+    young.advance_storm(0.1, 0.7);
+    let mut mature = StormState::default();
+    for _ in 0..80 {
+        mature.advance_storm(0.1, 0.95);
+    }
+
+    let mut h = 0.0_f32;
+    while h <= 1.0 {
+        // Base deep-convective column from the modelling height gradient.
+        let base = height_gradient(h, CloudKind::Cumulonimbus);
+        assert!((0.0..=1.0).contains(&base));
+
+        // The storm state machine adds vertical development through its own
+        // authored curves; union it with the base so density stays bounded.
+        let young_dev = young.vertical_profile(h);
+        let mature_dev = mature.vertical_profile(h);
+        let young_density = saturate(base + young_dev - base * young_dev);
+        let mature_density = saturate(base + mature_dev - base * mature_dev);
+
+        assert!(
+            (0.0..=1.0).contains(&young_density),
+            "young storm density out of range at {h}"
+        );
+        assert!(
+            (0.0..=1.0).contains(&mature_density),
+            "mature storm density out of range at {h}"
+        );
+        // Storm development only ever raises density above the bare column.
+        assert!(
+            young_density + EPS >= base,
+            "storm removed column density at {h}"
+        );
+        // A more mature storm never has less development than a younger one.
+        assert!(
+            mature_density + EPS >= young_density,
+            "mature storm weaker than young at {h}: {mature_density} < {young_density}"
+        );
+        h += 0.05;
+    }
+
+    // The trailing virga veil is a bounded precipitation curtain beneath the
+    // base that only appears once the storm has matured.
+    assert!(
+        young.virga_veil(1.0) <= mature.virga_veil(1.0) + EPS,
+        "virga veil should not shrink as the storm matures"
+    );
+    let mut f = 0.0_f32;
+    while f <= 1.0 {
+        assert!((0.0..=1.0).contains(&mature.virga_veil(f)));
+        f += 0.1;
+    }
+
+    // The stable-layer gravity-wave ripple stays bounded for the mature cell's
+    // evolving phase across a horizontal sweep (lateral anvil undulation).
+    let mut x = -8.0_f32;
+    while x <= 8.0 {
+        let ripple = gravity_wave(mature.gravity_wave_phase, x);
+        assert!(
+            ripple.abs() <= 1.0 + 1.0e-4,
+            "gravity wave unbounded: {ripple}"
+        );
+        x += 0.5;
     }
 }
 
