@@ -274,10 +274,10 @@ fallback:              strand 高配, card 基线; RT 反射里毛发用 proxy �
 1. `pkg/prism_render_material/src/record.rs`：删 `MaterialShadingModel`；`MaterialRenderClass` 删 `Npr*/Custom*`；`GpuMaterialHeader` 去 `shading_model`、加 `illumination`/`closure_graph_offset`/`specialization_id`；`GpuSurfaceParameters` 拆核心+瓣 blob。
 2. `pkg/prism_render_material/src/ir.rs`：`normalize()` 停止塌缩成单 `shading_model`，产出 `ClosureGraph`+`illumination`+`specialization_id`；`Layer/Mix` 加封顶校验。
 3. `pkg/prism_render_shading/src/classification.rs`：`MaterialShadingClass` 固定 9 桶 → 按 `specialization_id`/tile 动态分桶；`classify_material_header` 重写。
-4. `pkg/prism_render_shading/src/resolve.rs`：`evaluate_toon_direct` 从"一个特例分支"提升为 `ILightResponse(Stylized)` 实现；扩描边/ramp/SDF 面阴影/rim/post（现在几乎是空的）。
+4. **（已完成）** `pkg/prism_render_shading/src/resolve.rs`：`evaluate_toon_direct` 已从"一个特例分支"提升为 `ILightResponse(Stylized)`（`evaluate_stylized_direct`，旧 toon 作为 `StylizedParams::legacy_toon` 兼容层）；描边/ramp/SDF 面阴影/rim 分别落到 `stylized.rs`（`evaluate_stylized_direct`）、`outline.rs`（`outline_id_edge`/`outline_depth_edge`/`outline_normal_edge`/`evaluate_outline`）、`face_shadow.rs`（`face_shadow_light_cosines`/`evaluate_face_shadow`）。
 5. **（已完成）** `pkg/prism_render_architecture/src/backend/`：删两后端模型（`BackendId::NativeVulkan`/`BackendTier`/`registry`），收敛为单一 wgpu 后端——`capability.rs`（`Capability` 位集 + `WEBGPU_BASELINE` + `FeatureRequirement`）、`negotiation.rs`（`negotiate_features` → `EnabledFeatures`）、`fake.rs`（`FakeBackend` 仅持有 `enabled` capability 集）、`RenderBackend` trait 仅留 `capabilities()`/`supports()`/`wait_idle_for_shutdown()`。
 6. **（已完成）删除 `prism_render_slang` + `prism_render_slang_abi`**（commit `211f15988`，共 ~2051 行，删除前零外部依赖）。放弃 Slang（见 §2）。
-7. 新 crate `prism_render_npr`：NPR 前端 ABI 骨架 + `evaluate_stylized_direct` + 屏幕空间描边（着色 WESL，CPU 参考按需手写 Rust golden）。
+7. **（口径修正）NPR 前端已就地落在 `prism_render_shading`**：原计划的独立 crate `prism_render_npr` 被就地实现取代——`evaluate_stylized_direct`（ramp/stepped shadow/stylized specular/rim）、`outline.rs`（material-id/深度/法线三路描边）、`face_shadow.rs`（SDF 面阴影）均已在着色 crate 内落地并配 CPU golden；着色 WESL、ABI 手写 `#[repr(C)]`（§2.4）。抽取为独立 `prism_render_npr` crate 降级为可选后续项（当前不做，避免与在建 NPR 着色工作冲突）。
 8. 着色器继续用 **WESL**；ABI 用手写 `#[repr(C)]` + 哈希版本 + 对齐测试兜漂移（§2.4）。不做 `.slang` 迁移。
 
 ---
@@ -308,7 +308,7 @@ fallback:              strand 高配, card 基线; RT 反射里毛发用 proxy �
 2. **极薄竖切**：wgpu → 蒙皮(支柱四地基) → vis-buffer → material id → **一个 PBR 延迟着色 + 一个 NPR forward 着色**，点亮光照/阴影**数据服务最小版**（一盏方向光 + 一张 VSM）。
 3. **材质 ABI 破坏性重构**（§9 第 1–3 步），用竖切验证正交轴 + specialization；ABI 用手写 `#[repr(C)]` + 哈希版本 + 对齐测试。
 4. **粒子子系统**：优先，因为它带起 reactive mask（§5 最该早做的基底）。
-5. **`prism_render_npr` 骨架**：描边（material id 边界白送）+ ramp + `evaluate_stylized_direct`；着色 WESL，CPU golden 按需手写。
+5. **NPR 前端（已就地落在 `prism_render_shading`）**：描边（material id 边界白送，`outline.rs`）+ ramp/rim/SDF 面阴影（`stylized.rs`/`face_shadow.rs`）+ `evaluate_stylized_direct`；着色 WESL，CPU golden 已随附。独立 `prism_render_npr` crate 抽取为可选后续项，非阻塞。
 6. **frame graph 装配节点**，逐节点在 wgpu 上实装（超 baseline 能力经 wgpu 扩展 feature 按需启用，adapter 给不出则走 fallback；无独立原生后端）。
 7. **（已完成）清理 Slang 残留**：两 crate 已于 commit `211f15988` 从 workspace 删除；文档命名/注释残留已于 commit `abb661911` 清理，`rg -i slang` 现仅命中 §2 决策记录（§2 / §9.6）。
 8. 毛发(card)/布料/froxel 体积按 §6.2 优先级跟进；水/植被/贴花后置。
