@@ -41,6 +41,7 @@
 //   6 = history_meta   (previous accumulation .r + lock lifetime .g, textureLoad)
 //   7 = color_out      (rgba16float storage; the resolved display colour)
 //   8 = meta_out       (rgba16float storage; new accumulation .r + lock .g)
+//   9 = depth_out     (r32float storage; this frame's depth for next-frame history)
 // with an `UpscaleReconstructParams` immediate block.
 
 const PI: f32 = 3.14159265358979323846;
@@ -85,6 +86,7 @@ struct UpscaleReconstructParams {
 @group(0) @binding(6) var history_meta: texture_2d<f32>;
 @group(0) @binding(7) var color_out: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(8) var meta_out: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(9) var depth_out: texture_storage_2d<r32float, write>;
 
 var<immediate> params: UpscaleReconstructParams;
 
@@ -378,4 +380,9 @@ fn upscale_reconstruct(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     textureStore(color_out, display_coord, vec4<f32>(color, 1.0));
     textureStore(meta_out, display_coord, vec4<f32>(accumulation, lock, 0.0, 0.0));
+    // Persist this display pixel's depth (nearest render texel) so next
+    // frame's reprojection has a display-resolution history depth to test
+    // against. Written here rather than in a separate pass because the
+    // reconstruction already resolved the nearest render-grid depth.
+    textureStore(depth_out, display_coord, vec4<f32>(current_depth, 0.0, 0.0, 0.0));
 }

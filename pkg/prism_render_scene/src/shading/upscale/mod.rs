@@ -31,43 +31,38 @@
 //!   mirror of the architecture [`prism_render_architecture::temporal_upscale`]
 //!   contract that drives both passes.
 //!
-//! The remaining slices (the persistent display-resolution history, the two
-//! compute pipelines and their bind groups, and the `Core3d` graph nodes) land
-//! with their first live consumer, so the committed ABI is never dead. This
-//! module is the interconnect point the later graph wiring reads from.
+//! The persistent display-resolution history, the two compute pipelines and
+//! their bind groups, and the `Core3d` graph scheduling live alongside in
+//! [`pipeline`], [`resources`], [`bind_groups`] and [`dispatch`]; the shading
+//! plugin's graph wiring reads the re-exports below.
 
-// The ABI and settings are the committed contract the later graph wiring reads
-// from; until that slice lands their only consumers are the layout / mapping
-// unit tests, so the definitions are `dead_code`-allowed rather than deleted.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "committed GPU ABI whose only non-test consumer is the graph wiring landing in a later slice"
-    )
-)]
 mod abi;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "committed settings resource whose only non-test consumer is the graph wiring landing in a later slice"
-    )
-)]
 mod settings;
+
+// The pipelines, history resources, bind groups and dispatch are the live
+// consumers of the ABI and settings, but their own only non-test consumer is
+// the shading plugin's `RenderStartup` / `Prepare` / `Core3d` wiring, landing
+// in a later slice; until it lands the whole subsystem is `dead_code`-allowed
+// rather than deleted. Remove these guards when the plugin wiring lands.
+#[expect(dead_code, reason = "compute pipelines whose only non-test consumer is the graph wiring landing in a later slice")]
+mod pipeline;
+#[expect(dead_code, reason = "history resources whose only non-test consumer is the graph wiring landing in a later slice")]
+mod resources;
+#[expect(dead_code, reason = "bind groups whose only non-test consumer is the graph wiring landing in a later slice")]
+mod bind_groups;
+#[expect(dead_code, reason = "dispatch scheduling whose only non-test consumer is the graph wiring landing in a later slice")]
+mod dispatch;
 
 #[cfg(test)]
 mod shader_tests;
 
-#[expect(
-    unused_imports,
-    reason = "re-exported for the graph wiring landing in a later slice"
-)]
-pub(crate) use abi::{
-    GpuUpscaleRcasParams, GpuUpscaleReconstructParams, UPSCALE_WORKGROUP_SIZE,
-};
-#[expect(
-    unused_imports,
-    reason = "re-exported for the graph wiring landing in a later slice"
-)]
+#[expect(unused_imports, reason = "re-exported for the shading plugin's graph wiring landing in a later slice")]
+pub(crate) use bind_groups::prepare_upscale_bind_groups;
+#[expect(unused_imports, reason = "re-exported for the shading plugin's graph wiring landing in a later slice")]
+pub(crate) use dispatch::upscale_pass;
+#[expect(unused_imports, reason = "re-exported for the shading plugin's graph wiring landing in a later slice")]
+pub(crate) use pipeline::init_upscale_pipeline;
+#[expect(unused_imports, reason = "re-exported for the shading plugin's graph wiring landing in a later slice")]
+pub(crate) use resources::{prepare_upscale_textures, ViewUpscale};
+#[expect(unused_imports, reason = "re-exported for the shading plugin's graph wiring landing in a later slice")]
 pub(crate) use settings::UpscaleSettings;
