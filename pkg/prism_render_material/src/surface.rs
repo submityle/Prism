@@ -117,6 +117,21 @@ pub struct GpuTransmissionLobe {
     pub dispersion: f32,
 }
 
+/// Face-shadow lobe: stylized SDF-driven directional face shading (anime/toon).
+///
+/// The lobe carries only the terminator softness; the SDF map itself is a
+/// bindless texture bound through the `SEMANTIC_FACE_SDF` slot, and the
+/// per-instance orientation used to flip/threshold the SDF comes from the
+/// instance world matrix at shade time (no extra per-instance ABI).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuFaceLobe {
+    pub softness: f32,
+    pub _pad0: f32,
+    pub _pad1: f32,
+    pub _pad2: f32,
+}
+
 /// Bitset recording which optional lobes a surface carries.
 ///
 /// The bit order is the canonical serialization order used by
@@ -132,10 +147,11 @@ impl LobeMask {
     pub const SHEEN: Self = Self(1 << 3);
     pub const SUBSURFACE: Self = Self(1 << 4);
     pub const TRANSMISSION: Self = Self(1 << 5);
+    pub const FACE: Self = Self(1 << 6);
 
     /// Number of distinct lobe bits defined; also the number of iterations of
     /// [`Self::iter_present`] over a fully populated mask.
-    pub const COUNT: u32 = 6;
+    pub const COUNT: u32 = 7;
 
     /// Raw bits.
     pub const fn bits(self) -> u32 {
@@ -171,6 +187,7 @@ impl LobeMask {
             Self::SHEEN,
             Self::SUBSURFACE,
             Self::TRANSMISSION,
+            Self::FACE,
         ]
     }
 }
@@ -191,6 +208,7 @@ pub struct SurfaceParameterBlock {
     pub sheen: GpuSheenLobe,
     pub subsurface: GpuSubsurfaceLobe,
     pub transmission: GpuTransmissionLobe,
+    pub face: GpuFaceLobe,
 }
 
 /// Reasons an [`SurfaceParameterBlock::unpack`] can fail.
@@ -264,6 +282,12 @@ impl SurfaceParameterBlock {
                 index_of_refraction: params.index_of_refraction,
                 dispersion: params.dispersion,
             },
+            face: GpuFaceLobe {
+                softness: params.face_softness,
+                _pad0: 0.0,
+                _pad1: 0.0,
+                _pad2: 0.0,
+            },
         }
     }
 
@@ -305,6 +329,9 @@ impl SurfaceParameterBlock {
             full.index_of_refraction = self.transmission.index_of_refraction;
             full.dispersion = self.transmission.dispersion;
         }
+        if self.lobe_mask.contains(LobeMask::FACE) {
+            full.face_softness = self.face.softness;
+        }
         full
     }
 
@@ -329,6 +356,7 @@ impl SurfaceParameterBlock {
             LobeMask::TRANSMISSION => {
                 bytemuck::cast_slice(core::slice::from_ref(&self.transmission))
             }
+            LobeMask::FACE => bytemuck::cast_slice(core::slice::from_ref(&self.face)),
             _ => &[],
         }
     }
@@ -375,6 +403,7 @@ impl SurfaceParameterBlock {
                 LobeMask::SHEEN => block.sheen = *bytemuck::from_bytes(slice),
                 LobeMask::SUBSURFACE => block.subsurface = *bytemuck::from_bytes(slice),
                 LobeMask::TRANSMISSION => block.transmission = *bytemuck::from_bytes(slice),
+                LobeMask::FACE => block.face = *bytemuck::from_bytes(slice),
                 _ => {}
             }
             cursor += SURFACE_LOBE_WORDS;
@@ -407,6 +436,10 @@ mod tests {
             subsurface: 0.65,
             index_of_refraction: 1.33,
             dispersion: 0.05,
+            face_softness: 0.25,
+            _pad_face0: 0.0,
+            _pad_face1: 0.0,
+            _pad_face2: 0.0,
         }
     }
 
@@ -420,6 +453,7 @@ mod tests {
         assert_eq!(size_of::<GpuSheenLobe>(), SURFACE_LOBE_WORDS * 4);
         assert_eq!(size_of::<GpuSubsurfaceLobe>(), SURFACE_LOBE_WORDS * 4);
         assert_eq!(size_of::<GpuTransmissionLobe>(), SURFACE_LOBE_WORDS * 4);
+        assert_eq!(size_of::<GpuFaceLobe>(), SURFACE_LOBE_WORDS * 4);
     }
 
     #[test]

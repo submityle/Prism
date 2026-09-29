@@ -21,7 +21,17 @@ pub enum TextureSemantic {
     ClearCoat,
     ClearCoatRoughness,
     ClearCoatNormal,
+    /// Baked signed-distance-field face-shadow map (stylized NPR). Sampled by
+    /// `shading_resolve.wesl::shade_toon` with a light-azimuth-driven U mirror
+    /// (`SEMANTIC_FACE_SDF` in `material_sample.wesl`). Its `as u32`
+    /// discriminant is the shared [`crate::FACE_SHADOW_SDF_SEMANTIC`].
+    FaceShadowSdf,
 }
+
+// The enum discriminants are the ABI semantic bytes; keep `FaceShadowSdf`
+// pinned to the crate-wide constant its non-bevy producer and every shader
+// consumer share.
+const _: () = assert!(TextureSemantic::FaceShadowSdf as u32 == crate::FACE_SHADOW_SDF_SEMANTIC);
 
 pub trait StandardMaterialTextureResolver {
     fn resolve(&mut self, image: AssetId<Image>, semantic: TextureSemantic) -> GpuMaterialTexture;

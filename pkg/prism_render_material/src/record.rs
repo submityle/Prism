@@ -57,6 +57,7 @@ impl MaterialFeatureFlags {
     pub const NORMAL_MAP: Self = Self(1 << 3);
     pub const EMISSIVE: Self = Self(1 << 4);
     pub const COMPLEX_CLOSURE: Self = Self(1 << 5);
+    pub const FACE_SHADOW: Self = Self(1 << 6);
     pub const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
     }
@@ -146,6 +147,12 @@ pub struct GpuSurfaceParameters {
     pub subsurface: f32,
     pub index_of_refraction: f32,
     pub dispersion: f32,
+    /// Stylized face-shadow terminator softness (FACE lobe). Padding keeps the
+    /// fat authoring view 16-byte aligned; only `face_softness` is packed.
+    pub face_softness: f32,
+    pub _pad_face0: f32,
+    pub _pad_face1: f32,
+    pub _pad_face2: f32,
 }
 
 impl Default for GpuSurfaceParameters {
@@ -169,6 +176,10 @@ impl Default for GpuSurfaceParameters {
             subsurface: 0.0,
             index_of_refraction: 1.5,
             dispersion: 0.0,
+            face_softness: 0.1,
+            _pad_face0: 0.0,
+            _pad_face1: 0.0,
+            _pad_face2: 0.0,
         }
     }
 }
@@ -282,6 +293,9 @@ impl MaterialRecord {
         }
         if self.surface.anisotropy != 0.0 || self.surface.anisotropy_rotation != 0.0 {
             mask = mask.union(LobeMask::ANISOTROPY);
+        }
+        if self.features.contains(MaterialFeatureFlags::FACE_SHADOW) {
+            mask = mask.union(LobeMask::FACE);
         }
         mask
     }

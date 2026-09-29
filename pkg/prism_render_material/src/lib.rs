@@ -4,6 +4,7 @@
 
 extern crate alloc;
 
+mod authoring;
 mod axis;
 #[cfg(feature = "bevy")]
 mod bevy_bridge;
@@ -15,6 +16,7 @@ mod resources;
 mod surface;
 mod validation;
 
+pub use authoring::FACE_SHADOW_SDF_SEMANTIC;
 pub use axis::{Illumination, SpecializationId};
 #[cfg(feature = "bevy")]
 pub use bevy_bridge::{lower_standard_material, StandardMaterialTextureResolver, TextureSemantic};
