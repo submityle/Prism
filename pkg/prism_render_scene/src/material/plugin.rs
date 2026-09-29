@@ -23,6 +23,9 @@ pub struct PrismMaterialPlugin;
 impl Plugin for PrismMaterialPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "../shaders/material.wesl");
+        // Variable-length surface parameter word-heap decode (ABI v4), imported by
+        // every material consumer (opaque/transparent/visibility/shading_resolve/ssr_repack).
+        embedded_asset!(app, "../shaders/material_unpack.wesl");
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };

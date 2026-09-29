@@ -4,7 +4,7 @@ use crate::surface::{LobeMask, SurfaceParameterBlock};
 use core::ops::{BitOr, BitOrAssign};
 use prism_render_architecture::abi::GenerationalHandle;
 
-pub const MATERIAL_ABI_VERSION: u32 = 3;
+pub const MATERIAL_ABI_VERSION: u32 = 4;
 pub const MAX_MATERIAL_TEXTURES: usize = 8;
 pub const FALLBACK_MATERIAL_HANDLE: GenerationalHandle = GenerationalHandle {
     index: 0,
@@ -88,7 +88,15 @@ pub struct GpuMaterialHeader {
     pub render_class: u32,
     pub feature_flags: u32,
     pub closure_mask: u32,
+    /// Word offset of this material's packed surface block inside the shared
+    /// variable-length parameter word heap (ABI v4). No longer an element
+    /// index into a fixed-stride `GpuSurfaceParameters` array: the scene packs
+    /// only the über-BSDF core plus the live lobes (see [`crate::
+    /// SurfaceParameterBlock`]), so blocks are variable width and this is a
+    /// `u32`-word address decoded with `lobe_mask`.
     pub parameter_offset: u32,
+    /// Byte length of the packed surface block at `parameter_offset`
+    /// (`packed_size_bytes()` = `(12 + present_lobes*4) * 4`).
     pub parameter_size: u32,
     pub texture_offset: u32,
     pub texture_count: u32,
@@ -102,9 +110,11 @@ pub struct GpuMaterialHeader {
     pub specialization_low: u32,
     pub specialization_high: u32,
     /// Which optional über-BSDF lobes this material carries
-    /// ([`LobeMask`](crate::LobeMask) bits). Drives packed-parameter decode
-    /// once the variable-length parameter heap lands; today the scene still
-    /// writes the full decoded row and this is advisory.
+    /// ([`LobeMask`](crate::LobeMask) bits). Drives packed-parameter decode:
+    /// shaders read `parameter_size / 4` words at `parameter_offset` and
+    /// expand the core + present lobes back to a full surface using this mask
+    /// (`material_unpack.wesl::prism_unpack_surface`, the byte-exact twin of
+    /// [`crate::SurfaceParameterBlock::unpack`]).
     pub lobe_mask: u32,
 }
 
@@ -189,7 +199,11 @@ pub fn fallback_material_header(epoch: u64) -> GpuMaterialHeader {
         illumination: Illumination::Lit as u32,
         render_class: MaterialRenderClass::Opaque as u32,
         closure_mask: 1,
-        parameter_size: size_of::<GpuSurfaceParameters>() as u32,
+        parameter_size: SurfaceParameterBlock::from_full(
+            &GpuSurfaceParameters::default(),
+            LobeMask::default(),
+        )
+        .packed_size_bytes() as u32,
         custom_program: u32::MAX,
         active: 1,
         material_epoch_low: epoch as u32,
@@ -295,7 +309,7 @@ impl MaterialRecord {
             feature_flags: self.features.0,
             closure_mask: self.closure_mask,
             parameter_offset,
-            parameter_size: size_of::<GpuSurfaceParameters>() as u32,
+            parameter_size: self.packed_parameters().packed_size_bytes() as u32,
             texture_offset,
             texture_count: self.textures.len() as u32,
             sampler_offset: texture_offset,

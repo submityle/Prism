@@ -15,7 +15,7 @@ struct MaterialHeader {
     feature_flags: u32, closure_mask: u32, parameter_offset: u32, parameter_size: u32,
     texture_offset: u32, texture_count: u32, sampler_offset: u32, sampler_count: u32,
     custom_program: u32, is_active: u32, material_epoch_low: u32, material_epoch_high: u32,
-    closure_graph_offset: u32, specialization_low: u32, specialization_high: u32, reserved: u32,
+    closure_graph_offset: u32, specialization_low: u32, specialization_high: u32, lobe_mask: u32,
 }
 
 struct PixelClass {

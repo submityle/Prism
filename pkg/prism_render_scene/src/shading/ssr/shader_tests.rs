@@ -143,11 +143,16 @@ fn ssr_hzb_wesl_compiles_standalone() {
 fn ssr_repack_wesl_compiles_and_resolves_imports() {
     let mut cache = ShaderCache::new((), load_source);
 
-    let deps: [(u128, &str, &str); 6] = [
+    let deps: [(u128, &str, &str); 7] = [
         (
             0x5052_4953_4d5f_5353_525f_4d41_5450_0002,
             include_str!("../../shaders/material.wesl"),
             "embedded://prism_render_scene/shaders/material.wesl",
+        ),
+        (
+            0x5052_4953_4d5f_5353_525f_554e_5041_0002,
+            include_str!("../../shaders/material_unpack.wesl"),
+            "embedded://prism_render_scene/shaders/material_unpack.wesl",
         ),
         (
             0x5052_4953_4d5f_5353_525f_5441_4e47_0002,

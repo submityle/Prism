@@ -39,6 +39,9 @@ import prism_render_scene::shaders::material::{
     PrismMaterialTexture,
     PrismSurfaceParameters,
 };
+import prism_render_scene::shaders::material_unpack::{
+    prism_unpack_surface, prism_packed_word_count, prism_neutral_surface
+};
 import prism_render_scene::shaders::surface::{
     RenderShadingGeometryHeader,
     GpuShadingVertex,
@@ -116,7 +119,21 @@ struct RepackParams {
 // byte-for-byte with the resolve. Bindings 3/4 are declared by
 // `material_sample.wesl` (imported above).
 @group(1) @binding(0) var<storage, read> material_headers: array<PrismMaterialHeader>;
-@group(1) @binding(1) var<storage, read> material_parameters: array<PrismSurfaceParameters>;
+@group(1) @binding(1) var<storage, read> material_parameters: array<u32>;
+
+// See opaque.wesl: gather a material's packed block out of the shared u32 heap
+// and expand it, returning the neutral surface if the declared range overruns.
+fn load_surface_parameters(word_offset: u32, lobe_mask: u32) -> PrismSurfaceParameters {
+    let n = min(prism_packed_word_count(lobe_mask), 36u);
+    if word_offset + n > arrayLength(&material_parameters) {
+        return prism_neutral_surface();
+    }
+    var words: array<u32, 36>;
+    for (var i = 0u; i < n; i = i + 1u) {
+        words[i] = material_parameters[word_offset + i];
+    }
+    return prism_unpack_surface(words, lobe_mask);
+}
 @group(1) @binding(2) var<storage, read> material_textures: array<PrismMaterialTexture>;
 
 // --- group 2: scene-instance + shading-geometry tables (owned by this pass) ---
@@ -271,11 +288,11 @@ fn repack_sample(ids: vec4<u32>, metadata: vec4<u32>) -> RepackSample {
     if material_header.is_active == 0u || material_header.generation != metadata.y {
         return out;
     }
-    let parameter_row = material_header.parameter_offset;
-    if parameter_row >= arrayLength(&material_parameters) {
+    let parameter_words = min(prism_packed_word_count(material_header.lobe_mask), 36u);
+    if material_header.parameter_offset + parameter_words > arrayLength(&material_parameters) {
         return out;
     }
-    let parameters = material_parameters[parameter_row];
+    let parameters = load_surface_parameters(material_header.parameter_offset, material_header.lobe_mask);
 
     var sampled = sampled_material_defaults(parameters);
     let recon = reconstruct_geometry(ids, metadata);

@@ -6,6 +6,10 @@ import bevy_pbr::render::{
     view_transformations::position_world_to_clip
 };
 import bevy_render::maths::affine3_to_square;
+import prism_render_scene::shaders::material::PrismSurfaceParameters;
+import prism_render_scene::shaders::material_unpack::{
+    prism_unpack_surface, prism_packed_word_count, prism_neutral_surface
+};
 
 struct GpuSceneInstance {
     generation: u32, flags: u32,
@@ -20,14 +24,7 @@ struct MaterialHeader {
     feature_flags: u32, closure_mask: u32, parameter_offset: u32, parameter_size: u32,
     texture_offset: u32, texture_count: u32, sampler_offset: u32, sampler_count: u32,
     custom_program: u32, is_active: u32, material_epoch_low: u32, material_epoch_high: u32,
-    closure_graph_offset: u32, specialization_low: u32, specialization_high: u32, reserved: u32,
-}
-struct SurfaceParameters {
-    base_color: vec4<f32>, emissive: vec4<f32>,
-    metallic: f32, perceptual_roughness: f32, reflectance: f32, ambient_occlusion: f32,
-    normal_scale: f32, alpha_cutoff: f32, transmission: f32, thickness: f32,
-    clearcoat: f32, clearcoat_roughness: f32, anisotropy: f32, anisotropy_rotation: f32,
-    sheen: f32, subsurface: f32, index_of_refraction: f32, dispersion: f32,
+    closure_graph_offset: u32, specialization_low: u32, specialization_high: u32, lobe_mask: u32,
 }
 struct MaterialTexture { index: u32, generation: u32, semantic: u32, sampler_index: u32 }
 
@@ -36,8 +33,23 @@ struct MaterialTexture { index: u32, generation: u32, semantic: u32, sampler_ind
 @group(2) @binding(2) var<storage, read> scene_previous_transforms: array<GpuSceneTransform>;
 @group(2) @binding(3) var<storage, read> scene_bounds: array<GpuSceneBounds>;
 @group(3) @binding(0) var<storage, read> material_headers: array<MaterialHeader>;
-@group(3) @binding(1) var<storage, read> material_parameters: array<SurfaceParameters>;
+@group(3) @binding(1) var<storage, read> material_parameters: array<u32>;
 @group(3) @binding(2) var<storage, read> material_textures: array<MaterialTexture>;
+
+// Gather a material's variable-length packed block out of the shared u32 heap and
+// expand it to a full surface. A declared range that overruns the bound heap
+// decodes to the neutral surface, so callers never index out of bounds.
+fn load_surface_parameters(word_offset: u32, lobe_mask: u32) -> PrismSurfaceParameters {
+    let n = min(prism_packed_word_count(lobe_mask), 36u);
+    if word_offset + n > arrayLength(&material_parameters) {
+        return prism_neutral_surface();
+    }
+    var words: array<u32, 36>;
+    for (var i = 0u; i < n; i = i + 1u) {
+        words[i] = material_parameters[word_offset + i];
+    }
+    return prism_unpack_surface(words, lobe_mask);
+}
 
 fn inverse_transpose_3x3(value: mat3x3<f32>) -> mat3x3<f32> {
     let x = cross(value[1], value[2]);
@@ -126,8 +138,7 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         requested_material_index,
         material_in_bounds
             && material_header.is_active != 0u
-            && material_header.generation == instance.material_generation
-            && material_header.parameter_offset < arrayLength(&material_parameters),
+            && material_header.generation == instance.material_generation,
     );
     let id_color = vec3<f32>(
         f32((safe_scene_index * 97u) & 255u),
@@ -142,7 +153,7 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         out.debug_color = abs((world_from_local[3] - previous[3]).xyz);
     } @else {
         let header = material_headers[out.material_index];
-        out.debug_color = material_parameters[header.parameter_offset].base_color.rgb;
+        out.debug_color = load_surface_parameters(header.parameter_offset, header.lobe_mask).base_color.rgb;
     }
     return out;
 }
@@ -161,6 +172,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // disabled (feature off, or MSAA != 1). It must therefore NOT invent lighting
     // with a hard-coded light direction -- doing so would fight the resolve chain
     // and mislead debugging. Emit unlit base color + emissive only.
-    let surface = material_parameters[material_headers[in.material_index].parameter_offset];
+    let material_header = material_headers[in.material_index];
+    let surface = load_surface_parameters(material_header.parameter_offset, material_header.lobe_mask);
     return vec4<f32>(surface.base_color.rgb + surface.emissive.rgb, surface.base_color.a);
 }

@@ -29,6 +29,10 @@ import bevy_pbr::render::{
 };
 import bevy_render::maths::affine3_to_square;
 import prism_render_scene::shaders::oit::{OitTargets, oit_accumulate};
+import prism_render_scene::shaders::material::PrismSurfaceParameters;
+import prism_render_scene::shaders::material_unpack::{
+    prism_unpack_surface, prism_packed_word_count, prism_neutral_surface
+};
 
 struct GpuSceneInstance {
     generation: u32, flags: u32,
@@ -43,14 +47,7 @@ struct MaterialHeader {
     feature_flags: u32, closure_mask: u32, parameter_offset: u32, parameter_size: u32,
     texture_offset: u32, texture_count: u32, sampler_offset: u32, sampler_count: u32,
     custom_program: u32, is_active: u32, material_epoch_low: u32, material_epoch_high: u32,
-    closure_graph_offset: u32, specialization_low: u32, specialization_high: u32, reserved: u32,
-}
-struct SurfaceParameters {
-    base_color: vec4<f32>, emissive: vec4<f32>,
-    metallic: f32, perceptual_roughness: f32, reflectance: f32, ambient_occlusion: f32,
-    normal_scale: f32, alpha_cutoff: f32, transmission: f32, thickness: f32,
-    clearcoat: f32, clearcoat_roughness: f32, anisotropy: f32, anisotropy_rotation: f32,
-    sheen: f32, subsurface: f32, index_of_refraction: f32, dispersion: f32,
+    closure_graph_offset: u32, specialization_low: u32, specialization_high: u32, lobe_mask: u32,
 }
 struct MaterialTexture { index: u32, generation: u32, semantic: u32, sampler_index: u32 }
 
@@ -59,8 +56,22 @@ struct MaterialTexture { index: u32, generation: u32, semantic: u32, sampler_ind
 @group(2) @binding(2) var<storage, read> scene_previous_transforms: array<GpuSceneTransform>;
 @group(2) @binding(3) var<storage, read> scene_bounds: array<GpuSceneBounds>;
 @group(3) @binding(0) var<storage, read> material_headers: array<MaterialHeader>;
-@group(3) @binding(1) var<storage, read> material_parameters: array<SurfaceParameters>;
+@group(3) @binding(1) var<storage, read> material_parameters: array<u32>;
 @group(3) @binding(2) var<storage, read> material_textures: array<MaterialTexture>;
+
+// See opaque.wesl: gather a material's packed block out of the shared u32 heap
+// and expand it, returning the neutral surface if the declared range overruns.
+fn load_surface_parameters(word_offset: u32, lobe_mask: u32) -> PrismSurfaceParameters {
+    let n = min(prism_packed_word_count(lobe_mask), 36u);
+    if word_offset + n > arrayLength(&material_parameters) {
+        return prism_neutral_surface();
+    }
+    var words: array<u32, 36>;
+    for (var i = 0u; i < n; i = i + 1u) {
+        words[i] = material_parameters[word_offset + i];
+    }
+    return prism_unpack_surface(words, lobe_mask);
+}
 
 struct Vertex {
     @builtin(instance_index) instance_index: u32,
@@ -138,7 +149,8 @@ fn fragment(in: VertexOutput) -> FragmentOutput {
     // Honest unlit baseline: base colour + emissive, straight (non-premultiplied)
     // linear RGB. The alpha drives coverage. oit_accumulate premultiplies and
     // applies the depth weight, matching the golden bit-for-bit.
-    let surface = material_parameters[material_headers[in.material_index].parameter_offset];
+    let material_header = material_headers[in.material_index];
+    let surface = load_surface_parameters(material_header.parameter_offset, material_header.lobe_mask);
     let color = surface.base_color.rgb + surface.emissive.rgb;
     let alpha = clamp(surface.base_color.a, 0.0, 1.0);
     let targets: OitTargets = oit_accumulate(color, alpha, in.view_depth);

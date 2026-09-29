@@ -18,7 +18,7 @@ struct PrismMaterialHeader {
     closure_graph_offset: u32,
     specialization_low: u32,
     specialization_high: u32,
-    reserved: u32,
+    lobe_mask: u32,
 }
 
 struct PrismSurfaceParameters {

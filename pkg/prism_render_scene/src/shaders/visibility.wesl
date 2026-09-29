@@ -14,14 +14,7 @@ struct MaterialHeader {
     feature_flags: u32, closure_mask: u32, parameter_offset: u32, parameter_size: u32,
     texture_offset: u32, texture_count: u32, sampler_offset: u32, sampler_count: u32,
     custom_program: u32, is_active: u32, material_epoch_low: u32, material_epoch_high: u32,
-    closure_graph_offset: u32, specialization_low: u32, specialization_high: u32, reserved: u32,
-}
-struct SurfaceParameters {
-    base_color: vec4<f32>, emissive: vec4<f32>,
-    metallic: f32, perceptual_roughness: f32, reflectance: f32, ambient_occlusion: f32,
-    normal_scale: f32, alpha_cutoff: f32, transmission: f32, thickness: f32,
-    clearcoat: f32, clearcoat_roughness: f32, anisotropy: f32, anisotropy_rotation: f32,
-    sheen: f32, subsurface: f32, index_of_refraction: f32, dispersion: f32,
+    closure_graph_offset: u32, specialization_low: u32, specialization_high: u32, lobe_mask: u32,
 }
 struct MaterialTexture { index: u32, generation: u32, semantic: u32, sampler_index: u32 }
 struct GeometryHeader {
@@ -67,7 +60,7 @@ struct DrawBinHeader {
 @group(0) @binding(2) var<storage, read> scene_previous_transforms: array<GpuSceneTransform>;
 @group(0) @binding(3) var<storage, read> scene_bounds: array<GpuSceneBounds>;
 @group(1) @binding(0) var<storage, read> material_headers: array<MaterialHeader>;
-@group(1) @binding(1) var<storage, read> material_parameters: array<SurfaceParameters>;
+@group(1) @binding(1) var<storage, read> material_parameters: array<u32>;
 @group(1) @binding(2) var<storage, read> material_textures: array<MaterialTexture>;
 @group(2) @binding(0) var<storage, read> geometry_headers: array<GeometryHeader>;
 @group(2) @binding(1) var<storage, read> geometry_lods: array<GeometryLod>;

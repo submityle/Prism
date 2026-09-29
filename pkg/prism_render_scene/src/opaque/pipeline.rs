@@ -54,92 +54,6 @@ pub(crate) fn init_opaque_pipeline(
     });
 }
 
-#[cfg(test)]
-mod tests {
-    use super::GpuSceneDebugView;
-    use bevy_asset::{uuid::Uuid, AssetId};
-    use bevy_shader::{Shader, ShaderCache, ShaderCacheSource, ShaderDefVal};
-
-    fn load_source(
-        _: &(),
-        source: ShaderCacheSource,
-        _: &bevy_shader::ValidateShader,
-    ) -> Result<String, bevy_shader::ShaderCacheError> {
-        match source {
-            ShaderCacheSource::Wgsl(source) => Ok(source),
-            ShaderCacheSource::SpirV(_) => unreachable!("opaque shader is WESL"),
-        }
-    }
-
-    #[test]
-    fn opaque_wesl_compiles_for_every_specialization() {
-        let shader_id = AssetId::Uuid {
-            uuid: Uuid::from_u128(0x5052_4953_4d4f_5041_5155_4553_4844_5201),
-        };
-        let mut cache = ShaderCache::new((), load_source);
-        let source = include_str!("../shaders/opaque.wesl");
-        let source = source[source.find("struct GpuSceneInstance").unwrap()..].replace(
-            "bevy_render::utils::decompress_vertex_position",
-            "decompress_vertex_position",
-        );
-        let stubs = r#"
-struct TestView { world_position: vec3<f32> }
-var<private> view: TestView;
-fn affine3_to_square(value: mat3x4<f32>) -> mat4x4<f32> {
-    return mat4x4<f32>(
-        vec4<f32>(1.0, 0.0, 0.0, 0.0),
-        vec4<f32>(0.0, 1.0, 0.0, 0.0),
-        vec4<f32>(0.0, 0.0, 1.0, 0.0),
-        vec4<f32>(0.0, 0.0, 0.0, 1.0),
-    );
-}
-fn position_world_to_clip(position: vec3<f32>) -> vec4<f32> {
-    return vec4<f32>(position, 1.0);
-}
-fn decompress_vertex_position(
-    position: vec4<f32>,
-    center: vec3<f32>,
-    half_extents: vec3<f32>,
-) -> vec3<f32> {
-    return position.xyz;
-}
-"#;
-        cache.set_shader(
-            shader_id,
-            Shader::from_wesl(format!("{stubs}{source}"), "shaders/prism_opaque.wesl"),
-        );
-        for compressed in [false, true] {
-            for debug_view in 0..=GpuSceneDebugView::Motion as u32 {
-                for normals in [false, true] {
-                    for uvs in [false, true] {
-                        let mut defs = Vec::new();
-                        for candidate in 1..=GpuSceneDebugView::Motion as u32 {
-                            defs.push(ShaderDefVal::Bool(
-                                format!("PRISM_DEBUG_VIEW_{candidate}").into(),
-                                debug_view == candidate,
-                            ));
-                        }
-                        if compressed {
-                            defs.push("VERTEX_POSITIONS_COMPRESSED".into());
-                        }
-                        if normals {
-                            defs.push("VERTEX_NORMALS".into());
-                        }
-                        if uvs {
-                            defs.push("VERTEX_UVS".into());
-                        }
-                        cache
-                            .get(debug_view as usize, shader_id, &defs)
-                            .unwrap_or_else(|error| {
-                                panic!("opaque specialization failed: {error}")
-                            });
-                    }
-                }
-            }
-        }
-    }
-}
-
 impl SpecializedMeshPipeline for GpuSceneOpaquePipeline {
     type Key = GpuSceneOpaquePipelineKey;
 
@@ -224,5 +138,113 @@ impl SpecializedMeshPipeline for GpuSceneOpaquePipeline {
             },
             ..Default::default()
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GpuSceneDebugView;
+    use bevy_asset::{uuid::Uuid, AssetId};
+    use bevy_shader::{Shader, ShaderCache, ShaderCacheSource, ShaderDefVal};
+
+    fn load_source(
+        _: &(),
+        source: ShaderCacheSource,
+        _: &bevy_shader::ValidateShader,
+    ) -> Result<String, bevy_shader::ShaderCacheError> {
+        match source {
+            ShaderCacheSource::Wgsl(source) => Ok(source),
+            ShaderCacheSource::SpirV(_) => unreachable!("opaque shader is WESL"),
+        }
+    }
+
+    #[test]
+    fn opaque_wesl_compiles_for_every_specialization() {
+        let shader_id = AssetId::Uuid {
+            uuid: Uuid::from_u128(0x5052_4953_4d4f_5041_5155_4553_4844_5201),
+        };
+        let mut cache = ShaderCache::new((), load_source);
+        let source = include_str!("../shaders/opaque.wesl");
+        let source = source[source.find("struct GpuSceneInstance").unwrap()..].replace(
+            "bevy_render::utils::decompress_vertex_position",
+            "decompress_vertex_position",
+        );
+        // `opaque.wesl` now pulls its surface parameters through the shared
+        // variable-length word-heap decode (`material_unpack.wesl`) instead of an
+        // inline struct. The specialization test slices the shader from its first
+        // `struct` (dropping every `import`), so provide the imported surface type
+        // plus the *real* unpack functions here: this keeps the compile honest and
+        // free of a hand-written twin. The bevy stubs below remain unchanged.
+        let unpack = include_str!("../shaders/material_unpack.wesl");
+        let unpack = &unpack[unpack
+            .find("const PRISM_LOBE_EMISSION")
+            .expect("material_unpack.wesl must define PRISM_LOBE_EMISSION")..];
+        let surface_type = r#"
+struct PrismSurfaceParameters {
+    base_color: vec4<f32>, emissive: vec4<f32>,
+    metallic: f32, perceptual_roughness: f32, reflectance: f32, ambient_occlusion: f32,
+    normal_scale: f32, alpha_cutoff: f32, transmission: f32, thickness: f32,
+    clearcoat: f32, clearcoat_roughness: f32, anisotropy: f32, anisotropy_rotation: f32,
+    sheen: f32, subsurface: f32, index_of_refraction: f32, dispersion: f32,
+}
+"#;
+        let stubs = r#"
+struct TestView { world_position: vec3<f32> }
+var<private> view: TestView;
+fn affine3_to_square(value: mat3x4<f32>) -> mat4x4<f32> {
+    return mat4x4<f32>(
+        vec4<f32>(1.0, 0.0, 0.0, 0.0),
+        vec4<f32>(0.0, 1.0, 0.0, 0.0),
+        vec4<f32>(0.0, 0.0, 1.0, 0.0),
+        vec4<f32>(0.0, 0.0, 0.0, 1.0),
+    );
+}
+fn position_world_to_clip(position: vec3<f32>) -> vec4<f32> {
+    return vec4<f32>(position, 1.0);
+}
+fn decompress_vertex_position(
+    position: vec4<f32>,
+    center: vec3<f32>,
+    half_extents: vec3<f32>,
+) -> vec3<f32> {
+    return position.xyz;
+}
+"#;
+        cache.set_shader(
+            shader_id,
+            Shader::from_wesl(
+                format!("{stubs}{surface_type}{unpack}\n{source}"),
+                "shaders/prism_opaque.wesl",
+            ),
+        );
+        for compressed in [false, true] {
+            for debug_view in 0..=GpuSceneDebugView::Motion as u32 {
+                for normals in [false, true] {
+                    for uvs in [false, true] {
+                        let mut defs = Vec::new();
+                        for candidate in 1..=GpuSceneDebugView::Motion as u32 {
+                            defs.push(ShaderDefVal::Bool(
+                                format!("PRISM_DEBUG_VIEW_{candidate}").into(),
+                                debug_view == candidate,
+                            ));
+                        }
+                        if compressed {
+                            defs.push("VERTEX_POSITIONS_COMPRESSED".into());
+                        }
+                        if normals {
+                            defs.push("VERTEX_NORMALS".into());
+                        }
+                        if uvs {
+                            defs.push("VERTEX_UVS".into());
+                        }
+                        cache
+                            .get(debug_view as usize, shader_id, &defs)
+                            .unwrap_or_else(|error| {
+                                panic!("opaque specialization failed: {error}")
+                            });
+                    }
+                }
+            }
+        }
     }
 }

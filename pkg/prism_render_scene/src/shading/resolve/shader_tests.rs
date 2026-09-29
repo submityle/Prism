@@ -338,7 +338,7 @@ fn shading_resolve_wesl_compiles_and_resolves_all_imports() {
 
     // Register each dependency under the byte-identical embedded module path
     // that `load_shader_library!` produces at runtime.
-    let deps: [(u128, &str, &str); 14] = [
+    let deps: [(u128, &str, &str); 15] = [
         (
             0x5052_4953_4d5f_5441_4e47_454e_5400_0002,
             include_str!("../../shaders/tangent.wesl"),
@@ -368,6 +368,11 @@ fn shading_resolve_wesl_compiles_and_resolves_all_imports() {
             0x5052_4953_4d5f_4d41_5445_5249_414c_0002,
             include_str!("../../shaders/material.wesl"),
             "embedded://prism_render_scene/shaders/material.wesl",
+        ),
+        (
+            0x5052_4953_4d5f_5245_534f_554e_5041_0002,
+            include_str!("../../shaders/material_unpack.wesl"),
+            "embedded://prism_render_scene/shaders/material_unpack.wesl",
         ),
         (
             0x5052_4953_4d5f_5343_454e_4500_0000_0002,
@@ -470,7 +475,7 @@ fn material_sample_wesl_compiles_and_resolves_material_import() {
 }
 
 /// Compiles `oit.wesl` standalone. It has no imports, so a green result
-/// proves the weighted-blended OIT math (McGuire & Bavoil 2013 eq. 10 depth
+/// proves the weighted-blended OIT math (`McGuire` & Bavoil 2013 eq. 10 depth
 /// weight, MRT accumulation and the fullscreen composite resolve) parses and
 /// type-checks as WESL on its own, in lock-step with the CPU golden in
 /// `prism_render_shading::oit`.

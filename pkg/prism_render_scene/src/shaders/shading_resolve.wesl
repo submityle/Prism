@@ -79,6 +79,9 @@ import prism_render_scene::shaders::material::{
     PrismMaterialTexture,
     PrismSurfaceParameters,
 };
+import prism_render_scene::shaders::material_unpack::{
+    prism_unpack_surface, prism_packed_word_count, prism_neutral_surface
+};
 import prism_render_scene::shaders::gpu_scene::{
     GpuSceneInstance,
     GpuSceneTransform,
@@ -201,7 +204,21 @@ struct MotionMatrices {
 
 // --- group 1: material tables (shared MaterialBindGroup layout) ---
 @group(1) @binding(0) var<storage, read> material_headers: array<PrismMaterialHeader>;
-@group(1) @binding(1) var<storage, read> material_parameters: array<PrismSurfaceParameters>;
+@group(1) @binding(1) var<storage, read> material_parameters: array<u32>;
+
+// See opaque.wesl: gather a material's packed block out of the shared u32 heap
+// and expand it, returning the neutral surface if the declared range overruns.
+fn load_surface_parameters(word_offset: u32, lobe_mask: u32) -> PrismSurfaceParameters {
+    let n = min(prism_packed_word_count(lobe_mask), 36u);
+    if word_offset + n > arrayLength(&material_parameters) {
+        return prism_neutral_surface();
+    }
+    var words: array<u32, 36>;
+    for (var i = 0u; i < n; i = i + 1u) {
+        words[i] = material_parameters[word_offset + i];
+    }
+    return prism_unpack_surface(words, lobe_mask);
+}
 @group(1) @binding(2) var<storage, read> material_textures: array<PrismMaterialTexture>;
 
 // --- group 2: compacted worklist + scene/geometry tables ---
@@ -965,11 +982,11 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     if material_header.is_active == 0u || material_header.generation != metadata.y {
         return;
     }
-    let parameter_row = material_header.parameter_offset;
-    if parameter_row >= arrayLength(&material_parameters) {
+    let parameter_words = min(prism_packed_word_count(material_header.lobe_mask), 36u);
+    if material_header.parameter_offset + parameter_words > arrayLength(&material_parameters) {
         return;
     }
-    let parameters = material_parameters[parameter_row];
+    let parameters = load_surface_parameters(material_header.parameter_offset, material_header.lobe_mask);
 
     // Fold every bound texture over the authored factors *before* assembling
     // the BSDF sample, so the indirect/ambient terms below observe the

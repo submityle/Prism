@@ -14,7 +14,7 @@ use bevy_render::{
     renderer::RenderDevice,
 };
 use core::num::NonZero;
-use prism_render_material::{GpuMaterialHeader, GpuMaterialTexture, GpuSurfaceParameters};
+use prism_render_material::{GpuMaterialHeader, GpuMaterialTexture};
 
 use super::{
     buffers::MaterialGpuBuffers, runtime::RenderMaterialRegistry,
@@ -53,9 +53,14 @@ impl FromWorld for MaterialBindGroup {
             false,
             NonZero::new(size_of::<GpuMaterialHeader>() as u64),
         );
+        // The parameter table is now a flat `u32` word heap holding
+        // variable-length packed surface blocks (ABI v4), not a fixed-stride
+        // `GpuSurfaceParameters` array. The minimum binding size is therefore a
+        // single word; shaders decode `parameter_size` words at each material's
+        // `parameter_offset` using its `lobe_mask`.
         let parameter = storage_buffer_read_only_sized(
             false,
-            NonZero::new(size_of::<GpuSurfaceParameters>() as u64),
+            NonZero::new(size_of::<u32>() as u64),
         );
         let texture = storage_buffer_read_only_sized(
             false,

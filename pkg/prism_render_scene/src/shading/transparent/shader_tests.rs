@@ -33,6 +33,23 @@ fn transparent_wesl_compiles_for_every_specialization() {
         "bevy_render::utils::decompress_vertex_position",
         "decompress_vertex_position",
     );
+    // `transparent.wesl` decodes surface parameters through the shared
+    // variable-length word-heap (`material_unpack.wesl`). The test slices from the
+    // first `struct` (dropping imports), so inject the imported surface type plus
+    // the *real* unpack functions rather than a hand-written twin.
+    let unpack = include_str!("../../shaders/material_unpack.wesl");
+    let unpack = &unpack[unpack
+        .find("const PRISM_LOBE_EMISSION")
+        .expect("material_unpack.wesl must define PRISM_LOBE_EMISSION")..];
+    let surface_type = r#"
+struct PrismSurfaceParameters {
+    base_color: vec4<f32>, emissive: vec4<f32>,
+    metallic: f32, perceptual_roughness: f32, reflectance: f32, ambient_occlusion: f32,
+    normal_scale: f32, alpha_cutoff: f32, transmission: f32, thickness: f32,
+    clearcoat: f32, clearcoat_roughness: f32, anisotropy: f32, anisotropy_rotation: f32,
+    sheen: f32, subsurface: f32, index_of_refraction: f32, dispersion: f32,
+}
+"#;
     let stubs = r#"
 struct TestView { world_position: vec3<f32> }
 var<private> view: TestView;
@@ -71,7 +88,7 @@ fn oit_accumulate(color: vec3<f32>, alpha: f32, view_depth: f32) -> OitTargets {
     cache.set_shader(
         shader_id,
         Shader::from_wesl(
-            format!("{stubs}{source}"),
+            format!("{stubs}{surface_type}{unpack}\n{source}"),
             "shaders/prism_transparent.wesl",
         ),
     );
