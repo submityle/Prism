@@ -46,6 +46,8 @@
 //! of scope for this `CPU`-verifiable contract layer and are documented as
 //! "pending the GPU backend" where the contract signatures anticipate them.
 
+pub mod pool;
+
 /// Squared-length threshold below which a vector is treated as zero, so
 /// normalization and force accumulation never divide by (near) zero and never
 /// propagate `NaN`. Matches the sibling cloth/hair subsystems.
