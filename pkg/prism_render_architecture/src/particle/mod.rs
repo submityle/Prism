@@ -66,6 +66,7 @@ pub mod fluid;
 pub mod forces;
 pub mod frame_pipeline;
 pub mod gi_probe;
+pub mod gpu_layout;
 pub mod graph;
 pub mod indirect_draw;
 pub mod light_clustered;
