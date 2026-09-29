@@ -167,7 +167,11 @@ fallback:
 5. **（已完成）deep transmittance** `hair/deep_transmittance.rs`：deep opacity 分层透射 + voxel 近似 + 分桶，接共享阴影/OIT；确定性 CPU golden，单测绿。
 6. **着色分叉**（材质侧）：`HairPbr`（Marschner/Chiang + Zinke dual-scattering）+ `prism_render_npr` 风格化毛发响应。
 7. **（已完成）碰撞与连续 LOD 过渡** `hair/collision.rs` + `hair/transition.rs`：sphere/capsule 代理体碰撞（每子步约束后投影，pinned 不动，空集 no-op）集成进 `dynamics.rs`；`resolve_hair_lod_transition` 在阈值过渡带内计算相邻档 blend + `strand_survives_dither` 确定性 per-strand screen-door 抖动淡入淡出消 pop（尊重 `native_form` 钳制）；确定性 CPU golden，单测绿。SDF/自碰撞属同项更重档，后续在此基础分层。
-8. **高级项**：风场、VBD 高保真插槽、GPU 持久化 + 异步流水线、休眠、fiber-level 特写着色、RT 代理。
+8. **高级项（逐条落地中）**：
+   - **（已完成）风场耦合** `hair/wind.rs`：`WindField`（方向/风速 + gust 脉动 + per-axis flutter 湍流）→ `wind_acceleration` / `apply_wind`（free 粒子加 accel·dt² 位移，pinned 跳过，dt<=0 no-op），手写 Taylor `sin_turns`；确定性单测绿（对应 §6.3）。
+   - **（已完成）休眠 / 激活门控** `hair/sleep.rs`：`groom_motion_energy`（Σ 隐式速度平方）+ `SleepThresholds`/`GroomSleepState` 迟滞门（wake 优先、quiet 连续帧累积到 `frames_to_sleep` 才睡、dead band 保持、NaN 保持唤醒）；`should_simulate` 供调度层跳过静止 groom；确定性单测绿（对应 §6.9 / §8 休眠不占预算）。
+   - **（已完成）RT 反射代理策略** `hair/rt_proxy.rs`：`RtReflectionRole{FullStrands,Proxy,Excluded}` + `RtProxyPolicy{min_coverage_for_proxy,allow_strands_in_rt}` → `resolve_rt_role(tier,coverage,policy)`（覆盖度门下排除；strand 档默认降级 proxy，仅 opt-in 才 trace 真发；card/mesh 本身即 proxy）；确定性单测绿（对应 §7 RT 侧 / §8 RT 反射行：高配 proxy 参与、基线/兜底排除）。BVH 构建与 traversal 属非可移植 RT 后端桶，本模块只裁决注册哪种表示。
+   - **（跨子系统，hair 侧只留契约）**：VBD 高保真求解插槽（物理 §4 多求解器）、GPU 持久化 + 异步流水线（物理 §11/§12，属调度/`gpu_scene`）、fiber-level 特写着色（材质系统 / `prism_render_npr`）。
 
 **优先级**：先 card 基线打通端到端（务实），strand 高配随光栅/透射逐步点亮；每步 wgpu 可编译 + 单测绿。
 

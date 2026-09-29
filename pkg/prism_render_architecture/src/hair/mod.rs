@@ -41,6 +41,7 @@ pub mod dynamics;
 pub mod interpolation;
 pub mod lod;
 pub mod raster;
+pub mod rt_proxy;
 pub mod sleep;
 pub mod transition;
 pub mod wind;
