@@ -75,11 +75,17 @@
 pub mod avsm;
 pub mod budget;
 pub mod cloud_lod;
+pub mod coupling;
+pub mod fog;
 pub mod math;
 pub mod modeling;
+pub mod multiscatter;
 pub mod noise;
+pub mod raymarch;
 pub mod reference;
 pub mod scatter;
+pub mod shadow;
+pub mod storm;
 pub mod temporal;
 pub mod weather;
 
