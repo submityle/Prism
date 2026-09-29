@@ -328,7 +328,7 @@ specialization_id: u64   // 由上面轴的合法排列特化产出
 
 **判据**：需要自己的「几何+sim+特殊渲染(透射/OIT/RT代理)」才是子系统；只是着色变化 → closure；大家都消费 → 基底服务。**布料要拆**：sim 是子系统、sheen 是 über 一个瓣。
 
-### 6.3 毛发 mini 支柱（子系统内部同构范例）
+### 6.3 毛发 mini 支柱（子系统内部同构范例，已落地为 7.3k 行毛发引擎）
 
 ```
 共享基底(PBR/NPR 都吃): strand几何(连续LOD→card, 禁硬切换) + guide-strand sim
@@ -338,7 +338,22 @@ specialization_id: u64   // 由上面轴的合法排列特化产出
 fallback:              strand 高配, card 基线; RT 反射里毛发用 proxy 或排除
 ```
 
-**所有一等子系统内部都长这个样**（共享基底 + PBR/NPR 分叉响应），架构一致性拉满。
+**这不是纸面 mini 支柱**——它已落地为 `pkg/prism_render_architecture/src/hair/`（19 模块、~7320 行的毛发子系统）+ `pkg/prism_render_shading/src/hair*.rs`（4 套响应模型），恰好逐条印证「共享基底 + PBR/NPR 分叉响应」这套子系统同构范式。下表把范式钉到 committed 代码，对齐 UE Groom / Chiang-Marschner / Deep Opacity Maps：
+
+| 范式层 | 落地模块 | 关键符号 / 契约 | 对标 |
+|---|---|---|---|
+| **模拟（子系统私有 sim）** | `hair/solver.rs`、`hair/dynamics.rs`、`hair/self_collision.rs`、`hair/sdf_collision.rs`、`hair/collision.rs`、`hair/wind.rs`、`hair/sleep.rs` | `HairSolverKind{Xpbd,Vbd}` + `SolverSelection::choose`（按 authored stretch stiffness 单阈值择解：软/中走 XPBD、硬定型走 VBD）；`simulate_strand_vbd`；SDF/解析碰撞 `push_out_of_field`/`resolve_strand_collisions`；`WindField`/`apply_wind`；`GroomSleepState`（motion-energy 阈值休眠省算） | UE Chaos 毛发 XPBD + VBD 定型 / Houdini Vellum |
+| **几何生产（连续 LOD，禁硬切换）** | `hair/lod.rs`、`hair/transition.rs`、`hair/interpolation.rs`、`hair/ribbon.rs`、`hair/frames.rs` | `HairLodTier{Strands→ReducedStrands→Cards→Mesh}`（`is_strand_based`/`coarseness`/`coarser_of`）；`HairLodTransition`（`is_cross_fading`/`proxy_alpha` 交叉淡入，杜绝 LOD 跳变）；guide→render `interpolation`；`RibbonMesh` card/ribbon 生成；`build_strand_frames`（RMF 相干帧供 ribbon 定向） | UE Groom guide→strand 插值 + card LOD |
+| **光栅路由（软/硬分派）** | `hair/raster.rs` | `HairRasterPath{SubpixelSoftware,ThickHardware,Culled}`（细 strand 走 compute 软光栅解析累进 vis-buffer 覆盖、近粗 strand/card 走硬件三角、背面/亚可见/零长剔除）；`DEFAULT_HAIR_SOFTWARE_WIDTH_PX`/`DEFAULT_HAIR_MIN_COVERAGE` | UE Nanite 毛发软光栅 / vis-buffer |
+| **共享自阴影服务** | `hair/deep_transmittance.rs`、`hair/deep_opacity_layout.rs` | `build_deep_opacity`/`DeepOpacityLayers`/`sample_transmittance`；`DeepOpacityMap`/`build_deep_opacity_map`/`map_transmittance`（分层深度不透明累积，PBR/NPR 前端共吃同一透射服务，不各造一份） | UE Deep Opacity Maps / Yuksel-Keyser |
+| **RT 代理策略** | `hair/rt_proxy.rs` | `RtReflectionRole`/`RtProxyPolicy`（`participates_in_rt`/`traces_strands`：RT 反射里毛发按 proxy 或排除，兑现 §10「RT×毛发降级」） | UE RT 毛发 proxy |
+| **导入 / 分组** | `hair/groom.rs`、`hair/groom_import.rs`、`hair/mod.rs` | `step_groom`/`GroomStepConfig` 每帧驱动；`HairGroupHandle`；groom 资产导入 | UE Groom asset |
+| **PBR 响应（真分家）** | `prism_render_shading/src/hair_chiang.rs`、`hair_kajiya.rs`、`hair_fiber.rs`、`hair.rs` | `evaluate_hair_chiang_direct`（Chiang R/TT/TRT + dual-scattering）、`evaluate_hair_kajiya_direct`（Kajiya-Kay 廉价路径）、`evaluate_hair_fiber_direct`（fiber-level）、`evaluate_hair_direct`（统一入口，配 CPU golden） | Chiang(Disney) / Marschner / Kajiya-Kay |
+| **NPR 响应（真分家）** | `prism_render_shading/src/stylized_hair.rs` | `StylizedHairParams`/`evaluate_stylized_hair_direct`（风格化各向异性高光带 + ramp + 可与切线解耦的阴影偏移＝天使环） | miHoYo / Arc System Works 毛发 |
+
+**注意共享分界**：毛发 sim 落在 `prism_render_architecture/src/hair/`（子系统私有几何+动力学），而 §6.1 已定案软体统一模拟核在 `prism_physics_core`——毛发的 strand XPBD/VBD 是**子系统就地实现**（strand 拓扑特化、self/SDF 碰撞、休眠），与 physics_core 的通用 soft/XPBD 是「同族算法、不同落点」：通用软体（布料/绳）复用 physics_core，毛发因 strand 特化 + deep-opacity/软光栅耦合而自持 sim。这条边界须在 §6.2 判据下保持一致（子系统 = 自己的几何+sim+特殊渲染）。
+
+**所有一等子系统内部都应长这个样**（共享基底 + PBR/NPR 分叉响应 + 连续 LOD + 软/硬光栅路由 + 共享跨切面服务）——毛发是已落地的同构样板，布料/粒子/液体/体积按此范式对齐，架构一致性拉满。
 
 ---
 
