@@ -30,7 +30,7 @@
 
 use alloc::vec::Vec;
 
-use super::asset::FabricMaterial;
+use super::asset::{FabricMaterial, PaintedConstraint};
 use super::bending::{apply_bending, build_dihedral_bending, BendingConstraint};
 use super::ccd::{resolve_ccd, CcdParams};
 use super::collision::{
@@ -43,6 +43,10 @@ use super::constraints::{
 use super::dynamics::{extract_positions, solve_cloth_with_collision, SolverParams};
 use super::embed::{embed_render_mesh, BarycentricBinding};
 use super::lod::{cloth_deformation_request, resolve_cloth_lod, ClothLodThresholds};
+use super::painted::{
+    apply_painted_backstop, blend_to_skin, clamp_max_distance, drive_toward_anim, AnimDriveParams,
+    SkinnedAnchor,
+};
 use super::pressure::{apply_pressure, PressureParams};
 use super::sleep::{max_kinetic_indicator, should_simulate, SleepParams, SleepState, SleepTracker};
 use super::tearing::{apply_plasticity, apply_tearing, PlasticParams, TearingParams};
@@ -145,6 +149,16 @@ pub struct Garment {
     /// Frame-start position snapshot reused as the CCD sweep origin; kept as a
     /// field to avoid a per-frame allocation.
     prev_positions: Vec<Vec3>,
+    /// Per-particle artist-painted simulation weights (design §6.6), parallel to
+    /// `particles`; empty disables all painted passes. See
+    /// [`super::painted`].
+    pub painted: Vec<PaintedConstraint>,
+    /// Per-particle skinned reference anchors the painted weights steer toward,
+    /// parallel to `particles`; empty disables all painted passes.
+    pub anchors: Vec<SkinnedAnchor>,
+    /// Global anim-drive tuning for the pre-solve pull toward the anchors;
+    /// disabled by default even when painted weights are present.
+    pub anim_drive: AnimDriveParams,
 }
 
 /// Projects one position out of every body collider, then behind every
@@ -189,6 +203,9 @@ impl Garment {
             ccd: CcdParams::default(),
             ccd_enabled: false,
             prev_positions: Vec::new(),
+            painted: Vec::new(),
+            anchors: Vec::new(),
+            anim_drive: AnimDriveParams::default(),
         }
     }
 
@@ -243,6 +260,19 @@ impl Garment {
             self.aero,
             dt,
         );
+        // Painted anim drive is a pre-solve pull toward the skinned pose, so the
+        // distance solve then relaxes the tension it introduces and the cloth
+        // tracks animation without going rigid. Requires per-particle painted
+        // weights and anchors; disabled by default.
+        if !self.painted.is_empty() && !self.anchors.is_empty() {
+            drive_toward_anim(
+                &mut self.particles,
+                &self.anchors,
+                &self.painted,
+                self.anim_drive,
+                dt,
+            );
+        }
         let colliders = &self.colliders;
         let backstops = &self.backstops;
         solve_cloth_with_collision(&mut self.particles, &self.graph, self.solver, dt, |p| {
@@ -292,6 +322,15 @@ impl Garment {
                 self.ccd,
                 dt,
             );
+        }
+        // Painted post-solve passes steer the fully resolved positions toward
+        // the skinned pose: cap the drift, push out of the backstop cushion, and
+        // finally blend sim toward skin. Run last so nothing overrides the
+        // artist's max-distance / blend authority.
+        if !self.painted.is_empty() && !self.anchors.is_empty() {
+            clamp_max_distance(&mut self.particles, &self.anchors, &self.painted);
+            apply_painted_backstop(&mut self.particles, &self.anchors, &self.painted);
+            blend_to_skin(&mut self.particles, &self.anchors, &self.painted);
         }
     }
 
@@ -368,6 +407,25 @@ impl Garment {
     /// Disables the continuous-collision sweep.
     pub fn disable_ccd(&mut self) {
         self.ccd_enabled = false;
+    }
+
+    /// Installs per-particle painted simulation weights and their skinned
+    /// anchors (design §6.6). Both slices should be parallel to `particles`;
+    /// once set, the painted anim-drive / max-distance / backstop / blend passes
+    /// run each [`Garment::step`]. Passing empty vectors disables them again.
+    pub fn set_painted(&mut self, painted: Vec<PaintedConstraint>, anchors: Vec<SkinnedAnchor>) {
+        self.painted = painted;
+        self.anchors = anchors;
+    }
+
+    /// Enables the pre-solve pull toward the skinned anchors with the given
+    /// tuning. Has no effect until painted weights and anchors are installed via
+    /// [`Garment::set_painted`].
+    pub fn enable_anim_drive(&mut self, params: AnimDriveParams) {
+        self.anim_drive = AnimDriveParams {
+            enabled: true,
+            ..params
+        };
     }
 
     /// Tears every over-stretched two-sided fabric edge (tensile strain above
@@ -1097,5 +1155,124 @@ mod tests {
             rest_after > rest_before + 1e-4,
             "rest should creep up: {rest_before} -> {rest_after}"
         );
+    }
+
+    #[test]
+    fn painted_max_distance_keeps_cloth_near_the_skinned_pose() {
+        // A hanging sheet with every vertex anchored to its rest pose and a
+        // tight max-distance cannot fall far from the skin, unlike an unpainted
+        // sheet that drapes freely under gravity.
+        let (grid, positions) = drape_grid(5, 3, 0.2);
+        let material = FabricMaterial::default();
+
+        let mut free = build_grid_garment(grid, &positions, &material, stiff_solver());
+        let mut painted = build_grid_garment(grid, &positions, &material, stiff_solver());
+        // Pin the top row on both so only the lower rows can move.
+        for c in 0..grid.cols as usize {
+            free.pin(c);
+            painted.pin(c);
+        }
+        // Anchor every vertex to its rest pose; a 5 cm drift cap everywhere.
+        let anchors: Vec<SkinnedAnchor> = positions
+            .iter()
+            .map(|p| SkinnedAnchor::new(*p, Vec3::new(0.0, 1.0, 0.0)))
+            .collect();
+        let weights: Vec<PaintedConstraint> = positions
+            .iter()
+            .map(|_| PaintedConstraint::new(0.05, 0.0, 1.0, 0.0))
+            .collect();
+        painted.set_painted(weights, anchors);
+
+        for _ in 0..90 {
+            free.step(1.0 / 60.0);
+            painted.step(1.0 / 60.0);
+        }
+
+        let tip = grid.index(grid.rows - 1, 1) as usize;
+        let rest_tip = positions[tip];
+        let painted_drift = painted.particles[tip].position.distance(rest_tip);
+        let free_drift = free.particles[tip].position.distance(rest_tip);
+        // The painted vertex is held within its cap (plus a small solver slack);
+        // the free vertex has fallen much farther.
+        assert!(
+            painted_drift <= 0.05 + 1e-3,
+            "painted drift {painted_drift} should stay within the 5 cm cap"
+        );
+        assert!(
+            free_drift > painted_drift + 0.05,
+            "free drift {free_drift} should exceed painted drift {painted_drift}"
+        );
+        assert_finite(&painted.particles);
+    }
+
+    #[test]
+    fn painted_blend_weight_zero_welds_cloth_to_skin() {
+        // blend_weight = 0 snaps every simulated vertex back onto its skinned
+        // anchor each frame, so the sheet never leaves the rest pose.
+        let (grid, positions) = drape_grid(4, 4, 0.2);
+        let material = FabricMaterial::default();
+        let mut garment = build_grid_garment(grid, &positions, &material, stiff_solver());
+        let anchors: Vec<SkinnedAnchor> = positions
+            .iter()
+            .map(|p| SkinnedAnchor::new(*p, Vec3::ZERO))
+            .collect();
+        let weights: Vec<PaintedConstraint> = positions
+            .iter()
+            .map(|_| PaintedConstraint::new(f32::INFINITY, 0.0, 0.0, 0.0))
+            .collect();
+        garment.set_painted(weights, anchors);
+        for _ in 0..30 {
+            garment.step(1.0 / 60.0);
+        }
+        for (particle, rest) in garment.particles.iter().zip(positions.iter()) {
+            assert!(
+                particle.position.distance(*rest) < 1e-5,
+                "welded vertex drifted to {:?} from {:?}",
+                particle.position,
+                rest
+            );
+        }
+    }
+
+    #[test]
+    fn painted_anim_drive_pulls_free_cloth_toward_the_anchor() {
+        // Two identical draping sheets; the driven one is pulled toward a raised
+        // set of anchors, so after a few frames it sits higher than the sheet
+        // that only falls under gravity.
+        let (grid, positions) = drape_grid(5, 3, 0.2);
+        let material = FabricMaterial::default();
+        let mut plain = build_grid_garment(grid, &positions, &material, stiff_solver());
+        let mut driven = build_grid_garment(grid, &positions, &material, stiff_solver());
+        for c in 0..grid.cols as usize {
+            plain.pin(c);
+            driven.pin(c);
+        }
+        // Anchors lifted 0.5 m above the rest pose; a free (uncapped, fully
+        // simulated) vertex with a strong anim drive climbs toward them.
+        let anchors: Vec<SkinnedAnchor> = positions
+            .iter()
+            .map(|p| SkinnedAnchor::new(Vec3::new(p.x, p.y + 0.5, p.z), Vec3::ZERO))
+            .collect();
+        let weights: Vec<PaintedConstraint> = positions
+            .iter()
+            .map(|_| PaintedConstraint::new(f32::INFINITY, 0.0, 1.0, 1.0))
+            .collect();
+        driven.set_painted(weights, anchors);
+        driven.enable_anim_drive(AnimDriveParams {
+            gain: 0.5,
+            enabled: true,
+        });
+        for _ in 0..60 {
+            plain.step(1.0 / 60.0);
+            driven.step(1.0 / 60.0);
+        }
+        let tip = grid.index(grid.rows - 1, 1) as usize;
+        assert!(
+            driven.particles[tip].position.y > plain.particles[tip].position.y + 0.05,
+            "driven tip y {} should sit above plain tip y {}",
+            driven.particles[tip].position.y,
+            plain.particles[tip].position.y
+        );
+        assert_finite(&driven.particles);
     }
 }

@@ -42,6 +42,7 @@ pub mod constraints;
 pub mod dynamics;
 pub mod embed;
 pub mod lod;
+pub mod painted;
 pub mod pipeline;
 pub mod pressure;
 pub mod sleep;
