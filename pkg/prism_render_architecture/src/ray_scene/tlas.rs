@@ -352,6 +352,55 @@ impl Tlas {
         self.nodes.first().map_or(Aabb::empty(), |n| n.bounds)
     }
 
+    /// Refits every top-level node's bounds in place after instance transforms
+    /// changed, preserving the existing topology (node and leaf structure and
+    /// the reordered instance table).
+    ///
+    /// `updated(instance_id)` returns the instance's new object→world transform.
+    /// Each instance's cached world→object inverse is recomputed; if the new
+    /// transform is singular (non-invertible) the instance keeps its previous
+    /// transform, so a degenerate frame never corrupts the table or leaves an
+    /// instance without an object space to trace in. This is the top-level
+    /// executor for
+    /// [`AccelerationUpdate::Refit`](super::acceleration::AccelerationUpdate::Refit):
+    /// valid only while the instance set is intact — none added, removed, or
+    /// reordered — which the policy guards by bounding motion and the moved
+    /// ratio. A refit is `O(nodes)` versus a rebuild's `O(n log n)`, trading
+    /// gradually looser (still conservative) bounds under large motion for a far
+    /// cheaper per-frame update.
+    ///
+    /// `blases` must be the same pool passed to [`Tlas::build`], used to
+    /// recompute each moved instance's world-space bounds. Bounds are
+    /// recomputed bottom-up in a single reverse pass, correct because the
+    /// depth-first flattening guarantees both children of an interior node sit
+    /// at a strictly greater array index than the node itself.
+    pub fn refit(&mut self, updated: impl Fn(u32) -> Affine3, blases: &[Bvh]) {
+        for inst in &mut self.instances {
+            let object_to_world = updated(inst.instance_id);
+            if let Some(world_to_object) = object_to_world.inverse() {
+                inst.object_to_world = object_to_world;
+                inst.world_to_object = world_to_object;
+            }
+        }
+        for i in (0..self.nodes.len()).rev() {
+            let node = self.nodes[i];
+            let bounds = if node.is_leaf() {
+                let start = node.first_primitive as usize;
+                let end = start + node.primitive_count as usize;
+                self.instances[start..end]
+                    .iter()
+                    .fold(Aabb::empty(), |acc, inst| {
+                        acc.union(&instance_world_bounds(inst, blases))
+                    })
+            } else {
+                let first = self.nodes[i + 1].bounds;
+                let second = self.nodes[node.second_child as usize].bounds;
+                first.union(&second)
+            };
+            self.nodes[i].bounds = bounds;
+        }
+    }
+
     /// Nearest intersection along the world-space `ray`, or `None`.
     ///
     /// `blases` must be the same pool passed to [`Tlas::build`]. Walks the
@@ -806,5 +855,79 @@ mod tests {
         let ray2 = Ray::infinite([0.0, 0.0, 4.0], [0.0, 0.0, -2.0]);
         let h2 = tlas_unit.closest_hit(&ray2, &blases).unwrap();
         assert!(approx(h2.t, 2.0, 1e-4), "t = {}", h2.t);
+    }
+
+    #[test]
+    fn refit_after_instance_motion_matches_rebuild_and_preserves_topology() {
+        let blases = vec![sample_blas()];
+        let mut rng = Rng::new(0x5EED_0F17);
+        for _ in 0..30 {
+            let n = 1 + (rng.next_u32() % 12) as usize;
+            // Stable ids 0..n so `updated(id)` can index a transform table.
+            let start: Vec<Instance> = (0..n)
+                .map(|id| Instance::new(random_affine(&mut rng), 0, id as u32).unwrap())
+                .collect();
+            let mut tlas = Tlas::build(&start, &blases);
+            let nodes_before = tlas.node_count();
+            let instances_before = tlas.instances().len();
+
+            // New transforms per id; rebuild an independent reference TLAS with
+            // them, then refit the existing one to the same target.
+            let moved_transforms: Vec<Affine3> =
+                (0..n).map(|_| random_affine(&mut rng)).collect();
+            let moved_instances: Vec<Instance> = (0..n)
+                .map(|id| Instance::new(moved_transforms[id], 0, id as u32).unwrap())
+                .collect();
+            let rebuilt = Tlas::build(&moved_instances, &blases);
+
+            tlas.refit(|id| moved_transforms[id as usize], &blases);
+
+            // Topology is preserved: same node and instance counts.
+            assert_eq!(tlas.node_count(), nodes_before);
+            assert_eq!(tlas.instances().len(), instances_before);
+
+            for _ in 0..300 {
+                let origin = [
+                    rng.range(-10.0, 10.0),
+                    rng.range(-10.0, 10.0),
+                    rng.range(-10.0, 10.0),
+                ];
+                let dir = [
+                    rng.range(-1.0, 1.0),
+                    rng.range(-1.0, 1.0),
+                    rng.range(-1.0, 1.0),
+                ];
+                let ray = Ray::infinite(origin, dir);
+                let refit_hit = tlas.closest_hit(&ray, &blases);
+                let ref_hit = rebuilt.closest_hit(&ray, &blases);
+                match (refit_hit, ref_hit) {
+                    (None, None) => {}
+                    (Some(a), Some(b)) => {
+                        assert_eq!(a.instance_id, b.instance_id, "instance mismatch");
+                        assert_eq!(a.primitive, b.primitive, "primitive mismatch");
+                        assert!(approx(a.t, b.t, 1e-4), "t {} != {}", a.t, b.t);
+                    }
+                    (a, b) => panic!("existence mismatch: {a:?} vs {b:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn refit_keeps_previous_transform_for_singular_update() {
+        // A singular target transform must not corrupt the instance: the refit
+        // keeps the prior (invertible) transform, so hits are unchanged.
+        let blases = vec![sample_blas()];
+        let inst = Instance::new(Affine3::from_translation([0.0, 0.0, 5.0]), 0, 0).unwrap();
+        let mut tlas = Tlas::build(&[inst], &blases);
+        let ray = Ray::infinite([0.0, 0.0, 10.0], [0.0, 0.0, -1.0]);
+        let before = tlas.closest_hit(&ray, &blases).expect("hits the quad");
+
+        // Flatten the transform (non-invertible) -> instance keeps its old one.
+        tlas.refit(|_| Affine3::from_scale([1.0, 0.0, 1.0]), &blases);
+        let after = tlas.closest_hit(&ray, &blases).expect("still hits the quad");
+        assert_eq!(after.instance_id, before.instance_id);
+        assert_eq!(after.primitive, before.primitive);
+        assert!(approx(after.t, before.t, 1e-5), "t {} != {}", after.t, before.t);
     }
 }

@@ -314,6 +314,45 @@ impl Bvh {
     pub fn primitives(&self) -> &[Triangle] {
         &self.primitives
     }
+
+    /// Refits every node's bounds in place after the referenced primitives
+    /// moved, preserving the existing topology (node and leaf structure).
+    ///
+    /// `updated(primitive_id)` returns the triangle's new `[v0, v1, v2]`
+    /// positions. This is the executor for
+    /// [`AccelerationUpdate::Refit`](super::acceleration::AccelerationUpdate::Refit):
+    /// valid only while connectivity is intact — no primitives added, removed,
+    /// or reordered — which the policy guards by bounding deformation and the
+    /// moved-primitive ratio. A refit is `O(nodes)` versus a rebuild's
+    /// `O(n log n)`, trading gradually looser (still conservative) bounds under
+    /// large motion for a far cheaper per-frame update.
+    ///
+    /// Bounds are recomputed bottom-up in a single reverse pass, which is
+    /// correct because the depth-first flattening guarantees both children of an
+    /// interior node sit at a strictly greater array index than the node itself.
+    pub fn refit(&mut self, updated: impl Fn(u32) -> [[f32; 3]; 3]) {
+        for tri in &mut self.primitives {
+            let [v0, v1, v2] = updated(tri.primitive);
+            tri.v0 = v0;
+            tri.v1 = v1;
+            tri.v2 = v2;
+        }
+        for i in (0..self.nodes.len()).rev() {
+            let node = self.nodes[i];
+            let bounds = if node.is_leaf() {
+                let start = node.first_primitive as usize;
+                let end = start + node.primitive_count as usize;
+                self.primitives[start..end]
+                    .iter()
+                    .fold(Aabb::empty(), |acc, t| acc.union(&t.bounds()))
+            } else {
+                let first = self.nodes[i + 1].bounds;
+                let second = self.nodes[node.second_child as usize].bounds;
+                first.union(&second)
+            };
+            self.nodes[i].bounds = bounds;
+        }
+    }
 }
 
 /// Partitions `refs` so all primitives whose centroid falls in bin `<= split_bin`

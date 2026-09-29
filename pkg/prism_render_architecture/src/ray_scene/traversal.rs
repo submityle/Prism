@@ -520,4 +520,71 @@ mod tests {
             assert_eq!(bvh.any_hit(&ray), bvh.closest_hit(&ray).is_some());
         }
     }
+
+    #[test]
+    fn refit_after_motion_matches_brute_force_and_preserves_topology() {
+        // Build over the original scene, then translate every triangle and
+        // refit in place. Traversal against the refit hierarchy must agree with
+        // a brute-force scan of the moved geometry, and the node/leaf topology
+        // must be untouched (refit never rebuilds).
+        let tris = random_scene(400, 0x00c0_ffee_d00d_1010);
+        let mut bvh = Bvh::build(&tris);
+        let node_count_before = bvh.node_count();
+        let prim_count_before = bvh.primitive_count();
+
+        // A deterministic per-primitive displacement keyed on the stable id.
+        let offset = |id: u32| {
+            let f = id as f32 * 0.123;
+            [0.7 + 0.1 * f, -0.4 + 0.05 * f, 0.9 - 0.03 * f]
+        };
+        let moved: Vec<Triangle> = tris
+            .iter()
+            .map(|t| {
+                let o = offset(t.primitive);
+                let shift = |p: [f32; 3]| [p[0] + o[0], p[1] + o[1], p[2] + o[2]];
+                tri(shift(t.v0), shift(t.v1), shift(t.v2), t.primitive)
+            })
+            .collect();
+
+        bvh.refit(|id| {
+            let m = moved[id as usize];
+            [m.v0, m.v1, m.v2]
+        });
+        assert_eq!(bvh.node_count(), node_count_before, "refit changed node count");
+        assert_eq!(bvh.primitive_count(), prim_count_before);
+
+        let mut rng = Rng(0x5151_2727_9393_a1a1);
+        let mut hits = 0u32;
+        for _ in 0..4000 {
+            let origin = [
+                rng.range(-12.0, 12.0),
+                rng.range(-12.0, 12.0),
+                rng.range(-12.0, 12.0),
+            ];
+            let dir = [
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+            ];
+            if dir == [0.0, 0.0, 0.0] {
+                continue;
+            }
+            let ray = Ray::infinite(origin, dir);
+            match (bvh.closest_hit(&ray), brute_force(&moved, &ray)) {
+                (None, None) => {}
+                (Some(a), Some(b)) => {
+                    assert!(
+                        (a.t - b.t).abs() <= 1e-4 * (1.0 + b.t.abs()),
+                        "refit t mismatch: bvh={} bf={}",
+                        a.t,
+                        b.t
+                    );
+                    assert_eq!(a.primitive, b.primitive, "refit primitive mismatch");
+                    hits += 1;
+                }
+                (a, b) => panic!("refit hit disagreement: bvh={a:?} bf={b:?}"),
+            }
+        }
+        assert!(hits > 50, "expected meaningful hit coverage after refit, got {hits}");
+    }
 }
