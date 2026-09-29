@@ -257,6 +257,280 @@ pub struct CloudShading {
     pub powder: f32,
     /// Ambient (sky/ground) light ratio `0..=1` mixed into scattering.
     pub ambient_ratio: f32,
+    /// Top-tier next-gen `NPR` stylization vector (design section 9e).
+    /// Consulted only when [`Self::frontend`] resolves to the `NPR` or
+    /// hybrid path; `PBR` and custom frontends ignore it. It is always
+    /// present so a layer can switch frontends at runtime without
+    /// reshaping its shading contract.
+    pub npr: NprStyle,
+    /// Per-height `PBR`↔`NPR` blend mask for the hybrid frontend
+    /// (design section 5.3/5.4). Ignored by the non-hybrid frontends.
+    pub hybrid_mix: HybridLayerMix,
+}
+
+/// Top-tier next-gen `NPR` cloud stylization vector (design section 9e).
+///
+/// These are the *illumination-response and post-process* knobs that pull
+/// stylized clouds to capability parity with the `PBR` frontend. The geometry,
+/// simulation, `AVSM` self-shadowing, multiple scattering, `GI`, atmosphere,
+/// and temporal upsampling feeding an `NPR` layer are byte-for-byte identical
+/// to the `PBR` path (see [`ShadingFrontend`]); only the final lighting
+/// interpretation and screen-space stylization differ. Every axis is a pure,
+/// deterministic, artist-facing scalar (or a small integer cadence), so the
+/// whole struct is `CPU`-testable with no `GPU` state.
+///
+/// The eight design-section-9e axes map to the fields as follows: painterly
+/// oil strokes ([`Self::painterly`]); eastern ink-wash diffusion with dry-brush
+/// break-up ([`Self::ink_diffusion`], [`Self::flying_white`]); 2.5D parallax
+/// puffiness ([`Self::parallax_layers`], [`Self::parallax_scale`]); stylized
+/// crepuscular shafts ([`Self::crepuscular_threshold`],
+/// [`Self::crepuscular_gain`]); hand-drawn silver rim and toon specular blocks
+/// ([`Self::silver_rim`], [`Self::toon_specular`]); warm/cool tone-grading ramp
+/// ([`Self::ramp_warm`], [`Self::ramp_cool`]); silhouette outline plus interior
+/// ink lines ([`Self::outline_width`], [`Self::interior_ink`]); and `on-twos`
+/// stepped animation cadence ([`Self::on_twos`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NprStyle {
+    /// Painterly / oil-brush strength `0..=1` (flow-aligned `Kuwahara`-style
+    /// smoothing of the lit result into hand-painted patches).
+    pub painterly: f32,
+    /// Ink-wash diffusion edge width `0..=1`: how far the cloud silhouette
+    /// bleeds outward in an eastern-ink bloom.
+    pub ink_diffusion: f32,
+    /// Flying-white (dry-brush) break-up amount `0..=1` fracturing the ink edge
+    /// so it is not a solid stroke.
+    pub flying_white: f32,
+    /// 2.5D parallax-puffiness slab count: pseudo-volume cel layers offset by
+    /// view parallax to fake thickness. Zero is treated as a single slab.
+    pub parallax_layers: u32,
+    /// Per-slab parallax offset scale `0..=1` driving the puffiness magnitude.
+    pub parallax_scale: f32,
+    /// Stylized crepuscular (god-ray) cull threshold `0..=1`: raw shaft
+    /// intensity below this is discretized to zero for hand-drawn banding.
+    pub crepuscular_threshold: f32,
+    /// Stylized crepuscular shaft gain `0..=1` applied above the threshold.
+    pub crepuscular_gain: f32,
+    /// Hand-drawn silver-rim strength `0..=1` (thresholded grazing rim light).
+    pub silver_rim: f32,
+    /// Toon specular-block strength `0..=1` (quantized highlight patches).
+    pub toon_specular: f32,
+    /// Warm (lit-side) end of the tone-grading ramp, linear `RGB`.
+    pub ramp_warm: Vec3,
+    /// Cool (shadow-side) end of the tone-grading ramp, linear `RGB`.
+    pub ramp_cool: Vec3,
+    /// Silhouette outline width `0..=1` driven by depth/density gradient.
+    pub outline_width: f32,
+    /// Interior ink-line density `0..=1` (layered inner strokes).
+    pub interior_ink: f32,
+    /// `on-twos` animation cadence: hold each simulated frame for this many
+    /// display frames (1 = full rate, 2 = classic `on-twos`). Zero is 1.
+    pub on_twos: u32,
+}
+
+impl NprStyle {
+    /// A fully disabled style: no stylization, an identity warm→cool ramp
+    /// (white lit, black shadow), one parallax slab, full-rate animation. A
+    /// layer that carries this on an `NPR` frontend renders like a plain
+    /// grayscale lighting readout.
+    pub const DISABLED: Self = Self {
+        painterly: 0.0,
+        ink_diffusion: 0.0,
+        flying_white: 0.0,
+        parallax_layers: 1,
+        parallax_scale: 0.0,
+        crepuscular_threshold: 0.0,
+        crepuscular_gain: 0.0,
+        silver_rim: 0.0,
+        toon_specular: 0.0,
+        ramp_warm: Vec3 {
+            x: 1.0,
+            y: 1.0,
+            z: 1.0,
+        },
+        ramp_cool: Vec3::ZERO,
+        outline_width: 0.0,
+        interior_ink: 0.0,
+        on_twos: 1,
+    };
+
+    /// A Ghibli-flavoured preset: soft painterly patches, warm sunlit tops
+    /// fading to cool blue-grey shadow, gentle silver rim, a light outline, and
+    /// classic `on-twos` cadence.
+    #[must_use]
+    pub fn ghibli() -> Self {
+        Self {
+            painterly: 0.65,
+            ink_diffusion: 0.15,
+            flying_white: 0.1,
+            parallax_layers: 4,
+            parallax_scale: 0.35,
+            crepuscular_threshold: 0.35,
+            crepuscular_gain: 0.8,
+            silver_rim: 0.7,
+            toon_specular: 0.5,
+            ramp_warm: Vec3::new(1.0, 0.93, 0.78),
+            ramp_cool: Vec3::new(0.32, 0.4, 0.55),
+            outline_width: 0.25,
+            interior_ink: 0.2,
+            on_twos: 2,
+        }
+    }
+
+    /// An eastern ink-wash (`shui-mo`) preset: strong diffusion edges with
+    /// dry-brush break-up, monochrome cool ramp, heavy outline, minimal
+    /// specular, and stepped animation.
+    #[must_use]
+    pub fn ink_wash() -> Self {
+        Self {
+            painterly: 0.2,
+            ink_diffusion: 0.85,
+            flying_white: 0.6,
+            parallax_layers: 2,
+            parallax_scale: 0.15,
+            crepuscular_threshold: 0.5,
+            crepuscular_gain: 0.4,
+            silver_rim: 0.15,
+            toon_specular: 0.1,
+            ramp_warm: Vec3::new(0.92, 0.92, 0.9),
+            ramp_cool: Vec3::new(0.12, 0.13, 0.16),
+            outline_width: 0.6,
+            interior_ink: 0.55,
+            on_twos: 3,
+        }
+    }
+
+    /// Returns a copy with every axis clamped into its valid range: strengths
+    /// into `[0, 1]`, cadence counts to at least 1. Idempotent and never
+    /// produces `NaN`, so downstream stylization can assume well-formed input.
+    #[must_use]
+    pub fn sanitized(self) -> Self {
+        Self {
+            painterly: math::saturate(self.painterly),
+            ink_diffusion: math::saturate(self.ink_diffusion),
+            flying_white: math::saturate(self.flying_white),
+            parallax_layers: self.parallax_layers.max(1),
+            parallax_scale: math::saturate(self.parallax_scale),
+            crepuscular_threshold: math::saturate(self.crepuscular_threshold),
+            crepuscular_gain: math::saturate(self.crepuscular_gain),
+            silver_rim: math::saturate(self.silver_rim),
+            toon_specular: math::saturate(self.toon_specular),
+            ramp_warm: self.ramp_warm,
+            ramp_cool: self.ramp_cool,
+            outline_width: math::saturate(self.outline_width),
+            interior_ink: math::saturate(self.interior_ink),
+            on_twos: self.on_twos.max(1),
+        }
+    }
+
+    /// Grades a scalar lit term `0..=1` through the warm/cool tone ramp,
+    /// returning the stylized colour. `lit == 0` yields [`Self::ramp_cool`],
+    /// `lit == 1` yields [`Self::ramp_warm`], with a linear blend between; the
+    /// input is saturated so out-of-range lighting cannot extrapolate past the
+    /// ramp ends.
+    #[must_use]
+    pub fn ramp_color(self, lit: f32) -> Vec3 {
+        self.ramp_cool.lerp(self.ramp_warm, math::saturate(lit))
+    }
+
+    /// Discretizes a raw physical god-ray intensity `0..=1` into a stylized
+    /// shaft weight. Intensity at or below [`Self::crepuscular_threshold`] is
+    /// culled to zero (hand-drawn banding); above it, the remainder is
+    /// remapped to `[0, 1]` and scaled by [`Self::crepuscular_gain`]. The
+    /// result is a non-decreasing function of `raw` in `[0, 1]`.
+    #[must_use]
+    pub fn crepuscular_shaft(self, raw: f32) -> f32 {
+        let raw = math::saturate(raw);
+        if raw <= self.crepuscular_threshold {
+            return 0.0;
+        }
+        let above = math::remap(raw, self.crepuscular_threshold, 1.0, 0.0, 1.0);
+        math::saturate(above * math::saturate(self.crepuscular_gain))
+    }
+
+    /// Combines depth and density silhouette gradients into a `[0, 1]` outline
+    /// weight scaled by [`Self::outline_width`]. The stronger of the two
+    /// gradients drives the edge so either a depth discontinuity or a density
+    /// cliff raises an outline.
+    #[must_use]
+    pub fn outline_weight(self, depth_gradient: f32, density_gradient: f32) -> f32 {
+        let edge = depth_gradient.max(density_gradient).max(0.0);
+        math::saturate(math::saturate(self.outline_width) * edge)
+    }
+
+    /// Thresholded hand-drawn silver-rim weight from a grazing term
+    /// `grazing` (`0..=1`, e.g. `1 - |view·light|`). Below the rim onset the
+    /// weight is zero; above it the rim ramps smoothly to
+    /// [`Self::silver_rim`]. Deterministic and in `[0, 1]`.
+    #[must_use]
+    pub fn silver_rim_weight(self, grazing: f32) -> f32 {
+        let onset = 0.6;
+        let band = math::smoothstep(onset, 1.0, math::saturate(grazing));
+        math::saturate(self.silver_rim) * band
+    }
+
+    /// Holds the simulation clock to the `on-twos` cadence: the returned
+    /// display frame is the most recent multiple of the cadence at or before
+    /// `frame`, so animation updates in discrete steps like hand-drawn
+    /// two-frame holds. A zero cadence is treated as full rate.
+    #[must_use]
+    pub fn on_twos_frame(self, frame: u64) -> u64 {
+        let cadence = self.on_twos.max(1) as u64;
+        frame - (frame % cadence)
+    }
+
+    /// Parallax offset for one 2.5D puffiness slab. Slab `layer_index` (0 at
+    /// the base) is displaced along the view direction by a fraction of
+    /// [`Self::parallax_scale`] proportional to its depth in the stack, faking
+    /// cel-animation thickness. Out-of-range indices are clamped to the top
+    /// slab so the call never panics.
+    #[must_use]
+    pub fn parallax_offset(self, layer_index: u32, view_xy: Vec2) -> Vec2 {
+        let slabs = self.parallax_layers.max(1);
+        let clamped = layer_index.min(slabs - 1);
+        let depth = clamped as f32 / slabs as f32;
+        view_xy.scale(depth * math::saturate(self.parallax_scale))
+    }
+}
+
+/// Per-height `PBR`↔`NPR` blend mask for the hybrid frontend (design section
+/// 5.3/5.4). It answers "how stylized is this layer at a given height?" so a
+/// stacked cloud domain can run physical low cumulus and stylized high cirrus
+/// within one layer, cross-fading smoothly rather than hard-switching.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HybridLayerMix {
+    /// Height fraction `0..=1` at or below which the layer is fully `PBR`.
+    pub pbr_below: f32,
+    /// Height fraction `0..=1` at or above which the layer is fully `NPR`.
+    pub npr_above: f32,
+}
+
+impl HybridLayerMix {
+    /// A degenerate all-`PBR` mask (no stylization anywhere), the neutral
+    /// default a non-hybrid layer carries.
+    pub const ALL_PBR: Self = Self {
+        pbr_below: 1.0,
+        npr_above: 1.0,
+    };
+
+    /// The `NPR` weight `0..=1` at the given height fraction, ramping smoothly
+    /// from 0 at [`Self::pbr_below`] to 1 at [`Self::npr_above`]. Monotonically
+    /// non-decreasing in `height_fraction`; an inverted or collapsed band
+    /// degrades to a hard step via [`math::smoothstep`] instead of dividing by
+    /// zero.
+    #[must_use]
+    pub fn npr_weight(self, height_fraction: f32) -> f32 {
+        math::smoothstep(
+            self.pbr_below,
+            self.npr_above,
+            math::saturate(height_fraction),
+        )
+    }
+
+    /// The complementary `PBR` weight `1 - npr_weight`, in `[0, 1]`.
+    #[must_use]
+    pub fn pbr_weight(self, height_fraction: f32) -> f32 {
+        1.0 - self.npr_weight(height_fraction)
+    }
 }
 
 /// The unified authoring/runtime description of one cloud layer.
@@ -553,5 +827,179 @@ mod tests {
                 assert!(frontend.shared_base().contains(service));
             }
         }
+    }
+
+    #[test]
+    fn npr_style_presets_sanitize_into_range() {
+        for style in [NprStyle::DISABLED, NprStyle::ghibli(), NprStyle::ink_wash()] {
+            let s = style.sanitized();
+            assert_eq!(s, s.sanitized(), "sanitize is idempotent");
+            for v in [
+                s.painterly,
+                s.ink_diffusion,
+                s.flying_white,
+                s.parallax_scale,
+                s.crepuscular_threshold,
+                s.crepuscular_gain,
+                s.silver_rim,
+                s.toon_specular,
+                s.outline_width,
+                s.interior_ink,
+            ] {
+                assert!((0.0..=1.0).contains(&v), "strength axis in range: {v}");
+            }
+            assert!(s.parallax_layers >= 1);
+            assert!(s.on_twos >= 1);
+        }
+    }
+
+    #[test]
+    fn npr_style_clamps_out_of_range_input() {
+        let wild = NprStyle {
+            painterly: 5.0,
+            ink_diffusion: -2.0,
+            flying_white: f32::NAN.max(2.0),
+            parallax_layers: 0,
+            parallax_scale: 9.0,
+            crepuscular_threshold: -0.5,
+            crepuscular_gain: 3.0,
+            silver_rim: -1.0,
+            toon_specular: 4.0,
+            ramp_warm: Vec3::splat(2.0),
+            ramp_cool: Vec3::splat(-1.0),
+            outline_width: 7.0,
+            interior_ink: -3.0,
+            on_twos: 0,
+        };
+        let s = wild.sanitized();
+        assert_eq!(s.painterly, 1.0);
+        assert_eq!(s.ink_diffusion, 0.0);
+        assert_eq!(s.crepuscular_threshold, 0.0);
+        assert_eq!(s.parallax_layers, 1);
+        assert_eq!(s.on_twos, 1);
+    }
+
+    #[test]
+    fn npr_ramp_color_interpolates_cool_to_warm() {
+        let s = NprStyle::ghibli();
+        let close = |a: Vec3, b: Vec3| {
+            (a.x - b.x).abs() < 1e-5 && (a.y - b.y).abs() < 1e-5 && (a.z - b.z).abs() < 1e-5
+        };
+        assert_eq!(s.ramp_color(0.0), s.ramp_cool);
+        assert!(close(s.ramp_color(1.0), s.ramp_warm));
+        // Out-of-range lit terms saturate rather than extrapolate.
+        assert_eq!(s.ramp_color(-1.0), s.ramp_cool);
+        assert!(close(s.ramp_color(2.0), s.ramp_warm));
+        let mid = s.ramp_color(0.5);
+        assert!(mid.x > s.ramp_cool.x && mid.x < s.ramp_warm.x);
+    }
+
+    #[test]
+    fn npr_crepuscular_shaft_thresholds_and_is_monotone() {
+        let s = NprStyle {
+            crepuscular_threshold: 0.3,
+            crepuscular_gain: 1.0,
+            ..NprStyle::DISABLED
+        };
+        assert_eq!(s.crepuscular_shaft(0.0), 0.0);
+        assert_eq!(s.crepuscular_shaft(0.3), 0.0);
+        assert!(s.crepuscular_shaft(0.6) > 0.0);
+        // Non-decreasing above the threshold and bounded to [0, 1].
+        let mut prev = 0.0;
+        let mut x = 0.0;
+        while x <= 1.0 {
+            let w = s.crepuscular_shaft(x);
+            assert!((0.0..=1.0).contains(&w));
+            assert!(w + 1e-6 >= prev, "monotone non-decreasing at {x}");
+            prev = w;
+            x += 0.05;
+        }
+        assert!((s.crepuscular_shaft(1.0) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn npr_outline_and_silver_rim_are_bounded() {
+        let s = NprStyle {
+            outline_width: 0.5,
+            silver_rim: 0.8,
+            ..NprStyle::DISABLED
+        };
+        assert_eq!(s.outline_weight(0.0, 0.0), 0.0);
+        // Negative gradients cannot produce a negative outline.
+        assert_eq!(s.outline_weight(-3.0, -1.0), 0.0);
+        assert!(s.outline_weight(2.0, 0.0) <= 1.0);
+        assert!(s.outline_weight(0.0, 2.0) <= 1.0);
+        // Silver rim is zero below onset and rises to at most `silver_rim`.
+        assert_eq!(s.silver_rim_weight(0.0), 0.0);
+        assert!(s.silver_rim_weight(1.0) <= 0.8 + 1e-6);
+        assert!(s.silver_rim_weight(1.0) > s.silver_rim_weight(0.65));
+    }
+
+    #[test]
+    fn npr_on_twos_holds_frames() {
+        let s = NprStyle {
+            on_twos: 3,
+            ..NprStyle::DISABLED
+        };
+        assert_eq!(s.on_twos_frame(0), 0);
+        assert_eq!(s.on_twos_frame(1), 0);
+        assert_eq!(s.on_twos_frame(2), 0);
+        assert_eq!(s.on_twos_frame(3), 3);
+        assert_eq!(s.on_twos_frame(7), 6);
+        // A zero cadence is treated as full rate.
+        let full = NprStyle {
+            on_twos: 0,
+            ..NprStyle::DISABLED
+        };
+        assert_eq!(full.on_twos_frame(42), 42);
+    }
+
+    #[test]
+    fn npr_parallax_offset_grows_with_slab_depth_and_clamps() {
+        let s = NprStyle {
+            parallax_layers: 4,
+            parallax_scale: 0.5,
+            ..NprStyle::DISABLED
+        };
+        let dir = Vec2::new(1.0, 0.0);
+        let base = s.parallax_offset(0, dir);
+        let top = s.parallax_offset(3, dir);
+        assert_eq!(base.x, 0.0);
+        assert!(top.x > base.x);
+        // Out-of-range slab index clamps to the top slab (no panic).
+        assert_eq!(s.parallax_offset(99, dir), top);
+    }
+
+    #[test]
+    fn hybrid_layer_mix_is_monotone_and_complementary() {
+        let mix = HybridLayerMix {
+            pbr_below: 0.3,
+            npr_above: 0.7,
+        };
+        assert_eq!(mix.npr_weight(0.0), 0.0);
+        assert_eq!(mix.npr_weight(0.3), 0.0);
+        assert_eq!(mix.npr_weight(0.7), 1.0);
+        assert_eq!(mix.npr_weight(1.0), 1.0);
+        let mut prev = 0.0;
+        let mut h = 0.0;
+        while h <= 1.0 {
+            let w = mix.npr_weight(h);
+            assert!((0.0..=1.0).contains(&w));
+            assert!(w + 1e-6 >= prev, "npr weight monotone at {h}");
+            assert!(
+                (mix.pbr_weight(h) + w - 1.0).abs() < 1e-6,
+                "weights sum to one"
+            );
+            prev = w;
+            h += 0.05;
+        }
+        // Inverted band degrades to a hard step without dividing by zero.
+        let inverted = HybridLayerMix {
+            pbr_below: 0.8,
+            npr_above: 0.2,
+        };
+        let w = inverted.npr_weight(0.5);
+        assert!((0.0..=1.0).contains(&w));
+        assert_eq!(HybridLayerMix::ALL_PBR.npr_weight(0.5), 0.0);
     }
 }
