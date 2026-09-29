@@ -49,6 +49,7 @@
 pub mod attributes;
 pub mod authoring;
 pub mod boids;
+pub mod collision;
 pub mod compression;
 pub mod constraints;
 pub mod curves;
@@ -61,6 +62,7 @@ pub mod fluid;
 pub mod frame_pipeline;
 pub mod graph;
 pub mod lod;
+pub mod mesh_emission;
 pub mod modules;
 pub mod motion_vectors;
 pub mod noise;
