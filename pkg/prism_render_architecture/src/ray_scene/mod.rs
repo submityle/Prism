@@ -20,11 +20,15 @@
 //!   transform and cross-instance nearest-hit pruning.
 //! - [`traversal`] — [`Ray`]/`BVH` slab + Möller–Trumbore intersection with
 //!   closest-hit and any-hit walks (the `GPU` traversal kernel's golden ref).
+//! - [`gpu_layout`] — flat, `GPU`-uploadable `BVH`/`TLAS` buffer layout (the
+//!   authoritative `WESL` kernel `ABI`) plus a packed traversal that reproduces
+//!   the in-memory walk bit-for-bit as the `CPU`↔`GPU` parity reference.
 
 pub mod acceleration;
 pub mod backend;
 pub mod bvh;
 pub mod footprint;
+pub mod gpu_layout;
 pub mod tlas;
 pub mod traversal;
 
@@ -40,3 +44,7 @@ pub use footprint::{log2_linear, RayFootprint};
 pub use bvh::{Aabb, Axis, Bvh, BvhBuildConfig, LinearBvhNode, Triangle};
 pub use tlas::{Affine3, Instance, Tlas, TlasHit};
 pub use traversal::{Hit, Ray};
+pub use gpu_layout::{
+    GpuBlasPool, GpuBvhBuffers, GpuTlasBuffers, TlasPackedHit, BLAS_OFFSET_WORDS, INSTANCE_WORDS,
+    NODE_WORDS, TRIANGLE_WORDS,
+};

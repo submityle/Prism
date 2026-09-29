@@ -156,7 +156,7 @@ fn slab_interval(origin: [f32; 3], inv_dir: [f32; 3], bounds: &Aabb, t_lo: f32, 
 /// triangle plane (near-zero determinant) miss. Both faces are tested so the
 /// caller can decide culling separately.
 #[inline]
-fn intersect_triangle(ray: &Ray, tri: &Triangle) -> Option<(f32, f32, f32)> {
+pub(crate) fn intersect_triangle(ray: &Ray, tri: &Triangle) -> Option<(f32, f32, f32)> {
     const EPS: f32 = 1e-8;
     let e1 = sub(tri.v1, tri.v0);
     let e2 = sub(tri.v2, tri.v0);
