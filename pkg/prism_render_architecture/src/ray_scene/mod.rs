@@ -1,23 +1,28 @@
 //! Hardware and software ray-scene contracts.
+//!
+//! This module owns the `CPU`-verifiable policy layer for ray tracing: how
+//! acceleration structures are updated, which trace backend serves a workload,
+//! and how a ray cone's footprint selects a texture mip level. The physical
+//! `GPU` `BVH` builds, compaction, and traversal kernels are pending the GPU
+//! backend; everything here is deterministic arithmetic that the backend will
+//! drive.
+//!
+//! Submodules:
+//! - [`acceleration`] — `BLAS`/`TLAS` update-strategy decisions and rebuild
+//!   budgeting (`Reuse`/`Refit`/`Rebuild`/`BuildAndCompact`).
+//! - [`backend`] — capability-driven [`TraceBackend`] fallback selection.
+//! - [`footprint`] — ray-cone [`RayFootprint`] and texture-`LOD` (mip) math.
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum AccelerationUpdate {
-    Reuse,
-    Refit,
-    Rebuild,
-    BuildAndCompact,
-}
+pub mod acceleration;
+pub mod backend;
+pub mod footprint;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TraceBackend {
-    ScreenSpace,
-    SoftwareBvh,
-    HardwareRayQuery,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub struct RayFootprint {
-    pub cone_width: f32,
-    pub cone_spread_angle: f32,
-    pub hit_distance: f32,
-}
+pub use acceleration::{
+    update_scratch_bytes, AccelerationUpdate, AccelerationUpdatePolicy, GeometryChange,
+    RebuildLedger,
+};
+pub use backend::{
+    select_backend, BackendCapabilities, BackendRejection, BackendSelection, TraceBackend,
+    TraceRequirements,
+};
+pub use footprint::{log2_linear, RayFootprint};
