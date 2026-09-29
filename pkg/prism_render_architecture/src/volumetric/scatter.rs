@@ -171,6 +171,48 @@ pub fn hg_draine_phase(
     lerp(draine, hg, saturate(hg_weight))
 }
 
+/// Evaluates the anisotropic `dual-lobe` cloud phase with a `Draine`-sharpened
+/// forward lobe (design section 5, "anisotropic dual-lobe HG + Draine").
+///
+/// The backward lobe is a soft `Henyey-Greenstein` lobe (`g_backward`, meant to
+/// be negative) that fills the ambient wrap-around light, while the forward
+/// lobe is the [`hg_draine_phase`] `Mie` mixture: `g_forward` drives both its
+/// `HG` and `Draine` terms, `alpha` sharpens the forward `Draine` peak, and
+/// `draine_weight` in `[0, 1]` selects how much of the sharper `Draine` shape
+/// to fold in (`1` = pure `Draine`, `0` = pure `HG`). That forward lobe
+/// reproduces the silver-lining and glory response of measured water droplets.
+/// The two lobes are mixed by `blend` (clamped to `[0, 1]`, `1` selecting the
+/// forward lobe).
+///
+/// Each lobe is individually normalized and the outer mix is convex, so the
+/// result still integrates to one over the sphere. With `alpha = 0` the forward
+/// `Draine` term collapses to `HG` (independently of `draine_weight`), so the
+/// phase reduces exactly to [`dual_lobe_phase`] and preserves the pure-`HG`
+/// dual-lobe golden.
+#[must_use]
+pub fn dual_lobe_draine_phase(
+    cos_theta: f32,
+    g_forward: f32,
+    g_backward: f32,
+    alpha: f32,
+    draine_weight: f32,
+    blend: f32,
+) -> f32 {
+    let backward = hg_phase(cos_theta, g_backward);
+    // `hg_weight = 1 - draine_weight`: the forward lobe leans on the sharp
+    // pure-`Draine` peak as `draine_weight` -> 1 and on the softer `HG` lobe as
+    // `draine_weight` -> 0. Both `g` arguments share `g_forward` so the lobe is
+    // parameterized by a single forward eccentricity.
+    let forward = hg_draine_phase(
+        cos_theta,
+        g_forward,
+        g_forward,
+        alpha,
+        1.0 - saturate(draine_weight),
+    );
+    lerp(backward, forward, saturate(blend))
+}
+
 /// Evaluates the Nubis `powder` dark-edge term for a given view-ray optical
 /// depth.
 ///
@@ -402,6 +444,61 @@ mod tests {
         let forward = hg_draine_phase(1.0, 0.6, 0.7, 1.0, 0.5);
         let backward = hg_draine_phase(-1.0, 0.6, 0.7, 1.0, 0.5);
         assert!(forward > backward);
+    }
+
+    #[test]
+    fn dual_lobe_draine_phase_is_normalized() {
+        for (alpha, draine_weight, blend) in [
+            (1.0, 0.5, 0.6),
+            (2.0, 1.0, 0.7),
+            (0.5, 0.25, 0.4),
+            (0.0, 0.8, 0.6),
+        ] {
+            let integral = integrate_phase(|u| {
+                dual_lobe_draine_phase(u, 0.8, -0.3, alpha, draine_weight, blend)
+            });
+            assert!(
+                close(integral, 1.0, 1.5e-2),
+                "dual-lobe Draine not normalized for alpha={alpha},                  draine_weight={draine_weight}, blend={blend}: {integral}"
+            );
+        }
+    }
+
+    #[test]
+    fn dual_lobe_draine_forward_lobe_dominates() {
+        let forward = dual_lobe_draine_phase(1.0, 0.8, -0.3, 1.0, 1.0, 0.6);
+        let backward = dual_lobe_draine_phase(-1.0, 0.8, -0.3, 1.0, 1.0, 0.6);
+        assert!(
+            forward > backward,
+            "forward lobe must exceed backward: {forward} vs {backward}"
+        );
+    }
+
+    #[test]
+    fn dual_lobe_draine_sharper_peak_with_alpha() {
+        // A positive Draine alpha must sharpen the forward peak relative to the
+        // pure-HG dual lobe at the same forward/backward/blend configuration.
+        let sharp = dual_lobe_draine_phase(1.0, 0.8, -0.3, 2.0, 1.0, 0.6);
+        let base = dual_lobe_phase(1.0, 0.8, -0.3, 0.6);
+        assert!(
+            sharp > base,
+            "Draine forward peak must exceed HG: {sharp} vs {base}"
+        );
+    }
+
+    #[test]
+    fn dual_lobe_draine_reduces_to_dual_lobe_at_zero_alpha() {
+        // alpha = 0 collapses the Draine term to HG for any draine_weight, so
+        // the phase must equal the pure-HG dual lobe bit-for-bit.
+        for &draine_weight in &[0.0, 0.5, 1.0] {
+            for &u in &COSINES {
+                assert_eq!(
+                    dual_lobe_draine_phase(u, 0.8, -0.3, 0.0, draine_weight, 0.6).to_bits(),
+                    dual_lobe_phase(u, 0.8, -0.3, 0.6).to_bits(),
+                    "alpha=0 must reduce to dual_lobe_phase"
+                );
+            }
+        }
     }
 
     #[test]
