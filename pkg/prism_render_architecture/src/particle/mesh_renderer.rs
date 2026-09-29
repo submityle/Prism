@@ -516,7 +516,7 @@ mod tests {
 
     #[test]
     fn eps_is_positive() {
-        assert!(EPS > 0.0);
+        const { assert!(EPS > 0.0) };
     }
 
     #[test]

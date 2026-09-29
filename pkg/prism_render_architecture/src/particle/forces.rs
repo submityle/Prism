@@ -703,7 +703,6 @@ impl ForceField {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec;
 
     fn approx(a: f32, b: f32) -> bool {
         (a - b).abs() <= 1.0e-4

@@ -971,7 +971,7 @@ mod tests {
         let (tu, tv) = octa_to_unorm(u, v);
         let (bu, bv) = octa_from_unorm(tu, tv);
         assert!(approx(u, bu) && approx(v, bv));
-        assert!(tu >= 0.0 && tu <= 1.0 && tv >= 0.0 && tv <= 1.0);
+        assert!((0.0..=1.0).contains(&tu) && (0.0..=1.0).contains(&tv));
     }
 
     #[test]

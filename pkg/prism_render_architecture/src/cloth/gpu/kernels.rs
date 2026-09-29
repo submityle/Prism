@@ -261,6 +261,11 @@ impl ClothKernel {
     /// descriptor binds at least one resource and has a non-zero tile, which
     /// the `CPU` tests enforce.
     #[must_use]
+    #[expect(
+        clippy::match_same_arms,
+        reason = "each kernel documents its own binding rationale even when two \
+                  layouts coincide; merging the arms would drop that per-kernel doc"
+    )]
     pub fn descriptor(self) -> KernelDescriptor {
         let (layout, workgroup, domain) = match self {
             ClothKernel::AerodynamicsSnapshot => (

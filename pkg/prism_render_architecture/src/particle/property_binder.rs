@@ -523,7 +523,7 @@ mod tests {
             ParamValue::Scalar(v) => v,
             other => panic!("expected scalar, got {other:?}"),
         };
-        assert!(a >= 0.0 && a < 1.0);
+        assert!((0.0..1.0).contains(&a));
         // Same context, same request -> identical draw.
         let b = match c.resolve_global(signal) {
             ParamValue::Scalar(v) => v,

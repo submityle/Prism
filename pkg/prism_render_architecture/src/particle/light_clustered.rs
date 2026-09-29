@@ -1012,7 +1012,7 @@ mod tests {
         let mut per_cluster: Vec<Vec<u32>> = Vec::new();
         per_cluster.resize(grid.cluster_count() as usize, Vec::new());
         per_cluster[cluster as usize] = vec![0, 1];
-        let refs: Vec<&[u32]> = per_cluster.iter().map(|v| v.as_slice()).collect();
+        let refs: Vec<&[u32]> = per_cluster.iter().map(Vec::as_slice).collect();
         let list = ClusterLightList::from_per_cluster(&refs);
 
         let normal = Vec3::new(0.0, 0.0, -1.0); // faces toward light 0 (in front)
@@ -1058,7 +1058,7 @@ mod tests {
         let mut per_cluster: Vec<Vec<u32>> = Vec::new();
         per_cluster.resize(grid.cluster_count() as usize, Vec::new());
         per_cluster[cluster as usize] = vec![5];
-        let refs: Vec<&[u32]> = per_cluster.iter().map(|v| v.as_slice()).collect();
+        let refs: Vec<&[u32]> = per_cluster.iter().map(Vec::as_slice).collect();
         let list = ClusterLightList::from_per_cluster(&refs);
         // Empty light table -> the dangling index is skipped, no panic.
         let lights: Vec<PunctualLight> = Vec::new();

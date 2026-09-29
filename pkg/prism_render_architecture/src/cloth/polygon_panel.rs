@@ -551,11 +551,7 @@ mod tests {
         // The bend joins the two corners not on the shared diagonal; for the
         // unit square those two corners sit opposite each other on the ring, so
         // their indices differ by two.
-        let span = if bend.a < bend.b {
-            bend.b - bend.a
-        } else {
-            bend.a - bend.b
-        };
+        let span = bend.a.abs_diff(bend.b);
         assert_eq!(span, 2);
     }
 
