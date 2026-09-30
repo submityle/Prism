@@ -57,6 +57,7 @@ pub mod geometry;
 pub mod multi_position;
 pub mod occlusion;
 pub mod panner;
+pub mod propagation;
 pub mod spatializer;
 pub mod spread;
 
@@ -75,5 +76,10 @@ pub use occlusion::{
     NullOcclusionQuery, Occlusion, OcclusionFactors, OcclusionNode, OcclusionParams, OcclusionQuery,
 };
 pub use panner::{Panner, PannerNode, VbapPanner};
+pub use propagation::{
+    AcousticMaterial, FreeFieldBackend, MAX_PROPAGATION_PATHS, PathKind, PropagationBackend,
+    PropagationPath, PropagationSummary, diffraction_cutoff_hz, diffraction_gain,
+    edge_path_difference, fresnel_number, maekawa_attenuation_db, transmission_gain,
+};
 pub use spatializer::{SourceDescriptor, SpatialParams, resolve};
 pub use spread::{MAX_SPREAD_TAPS, Spread, SpreadParams, SpreadTap, compute_spread_gains, spread_taps};
