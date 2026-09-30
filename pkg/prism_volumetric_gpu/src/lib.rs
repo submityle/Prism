@@ -55,6 +55,7 @@
 //! Engine source or derived code.
 #![forbid(unsafe_code)]
 
+pub mod aerial;
 pub mod context;
 pub mod curl;
 pub mod godray;
@@ -68,6 +69,7 @@ pub mod powder;
 pub mod shadow;
 pub mod worley;
 
+pub use aerial::{AerialQuery, GpuAerialPerspective};
 pub use context::{block_on, GpuContext};
 pub use curl::{CurlQuery, GpuCurl};
 pub use godray::{GodRayWeightQuery, GpuGodRayWeight};
