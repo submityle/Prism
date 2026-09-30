@@ -71,6 +71,7 @@
 
 pub mod bin_cut;
 pub mod cluster_cull;
+pub mod cluster_raster;
 pub mod context;
 pub mod decide_cluster;
 pub mod lod_select;
@@ -87,6 +88,7 @@ pub mod triangle_gradients;
 
 pub use bin_cut::GpuCutBinner;
 pub use cluster_cull::GpuClusterCuller;
+pub use cluster_raster::GpuClusterRaster;
 pub use context::{block_on, GpuContext};
 pub use decide_cluster::{ClusterDecisionInput, GpuClusterDecider};
 pub use lod_select::{GpuLodSelector, LodQuery};
