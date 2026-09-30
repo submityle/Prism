@@ -67,6 +67,6 @@ fn active_pixel_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let q = queries[idx];
-    let active = active_pixel(q.frame_index, q.x, q.y, q.mode);
-    results[idx] = select(0u, 1u, active);
+    let is_active = active_pixel(q.frame_index, q.x, q.y, q.mode);
+    results[idx] = select(0u, 1u, is_active);
 }

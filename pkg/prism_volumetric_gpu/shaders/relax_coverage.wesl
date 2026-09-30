@@ -34,7 +34,7 @@ struct Params {
 // and the timestep. Matches `GpuQuery` in `src/relax_coverage.rs`.
 struct Query {
     current: f32,
-    target: f32,
+    target_coverage: f32,
     rate: f32,
     dt: f32,
 }
@@ -52,7 +52,7 @@ fn exp2_int(k: i32) -> f32 {
         return 0.0;
     }
     if (k > 127) {
-        return 3.4028235e38 * 3.4028235e38;
+        return bitcast<f32>(0x7f800000u);
     }
     return bitcast<f32>(u32(k + 127) << 23u);
 }
@@ -75,9 +75,9 @@ fn exp_approx(x: f32) -> f32 {
 }
 
 // Exponential relaxation toward target, mirroring `relax_coverage`.
-fn relax_coverage(current: f32, target: f32, rate: f32, dt: f32) -> f32 {
+fn relax_coverage(current: f32, target_coverage: f32, rate: f32, dt: f32) -> f32 {
     let k = saturate_s(1.0 - exp_approx(-max(rate, 0.0) * max(dt, 0.0)));
-    return current + (target - current) * k;
+    return current + (target_coverage - current) * k;
 }
 
 @compute @workgroup_size(64)
@@ -87,5 +87,5 @@ fn relax_coverage_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let q = queries[idx];
-    results[idx] = relax_coverage(q.current, q.target, q.rate, q.dt);
+    results[idx] = relax_coverage(q.current, q.target_coverage, q.rate, q.dt);
 }

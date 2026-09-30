@@ -54,7 +54,7 @@ fn exp2_int(k: i32) -> f32 {
         return 0.0;
     }
     if (k > 127) {
-        return 3.4028235e38 * 3.4028235e38;
+        return bitcast<f32>(0x7f800000u);
     }
     return bitcast<f32>(u32(k + 127) << 23u);
 }
