@@ -60,7 +60,7 @@ pub enum BoundaryMode {
 impl BoundaryMode {
     /// The `u32` selector uploaded to the kernel.
     #[must_use]
-    fn as_u32(self) -> u32 {
+    pub(crate) fn as_u32(self) -> u32 {
         match self {
             BoundaryMode::Sticky => 0,
             BoundaryMode::Slip => 1,

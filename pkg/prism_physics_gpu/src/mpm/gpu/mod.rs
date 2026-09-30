@@ -15,6 +15,8 @@
 //!   [`grid_update::GpuMpmGridUpdate`].
 //! - [`g2p`] — the grid-to-particle affine gather pipeline
 //!   [`g2p::GpuMpmG2p`].
+//! - [`step`] — the fused full-step / multi-step advance orchestrator
+//!   [`step::GpuMpmStep`].
 //!
 //! # Provenance
 //!
@@ -28,8 +30,10 @@ pub mod grid_update;
 pub mod layout;
 pub mod p2g;
 pub mod params;
+pub mod step;
 
 pub use constitutive::{ConstitutiveOutput, GpuMpmConstitutive};
 pub use g2p::{G2pParticles, GpuMpmG2p};
 pub use grid_update::{BoundaryMode, GpuMpmGridUpdate};
 pub use p2g::{GpuMpmP2g, P2gGrid};
+pub use step::{GpuMpmStep, StepConfig, StepInputs, StepParticles};
