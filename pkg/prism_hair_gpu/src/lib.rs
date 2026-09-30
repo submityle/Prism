@@ -276,6 +276,14 @@
 //!   height and completes a right-handed orthonormal basis; unbound,
 //!   out-of-range or zero-area attachments resolve to the identity frame
 //!   exactly (see [`root_resolve`]).
+//! * [`GpuHairRtProxy`] evaluates
+//!   [`resolve_rt_role`](prism_render_architecture::hair::rt_proxy::resolve_rt_role),
+//!   classifying each groom instance's ray-traced-reflection role one thread
+//!   per instance — a visibility gate excludes grooms below the coverage
+//!   threshold, then a representation gate traces strand-based tiers as real
+//!   strands only when the policy opts in and registers a cheap proxy
+//!   otherwise, the RT-side policy the reflection BVH build consumes (see
+//!   [`rt_proxy`]).
 //!
 //! # Portability
 //!
@@ -324,6 +332,7 @@ pub mod resample;
 pub mod ribbon;
 pub mod root_bind;
 pub mod root_resolve;
+pub mod rt_proxy;
 pub mod sdf_collision;
 pub mod self_collision_grid;
 pub mod self_collision_jacobi;
@@ -359,6 +368,7 @@ pub use resample::{reference_resample_groom, reference_resample_strand, GpuHairR
 pub use ribbon::{GpuRibbon, GpuRibbonMesh, RibbonStrandInput};
 pub use root_bind::GpuHairRootBind;
 pub use root_resolve::GpuHairRootResolve;
+pub use rt_proxy::{reference_rt_role, role_code, role_from_code, tier_code, GpuHairRtProxy};
 pub use sdf_collision::GpuSdfCollider;
 pub use self_collision_grid::GpuSelfCollisionGrid;
 pub use self_collision_jacobi::GpuSelfCollisionJacobi;
