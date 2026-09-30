@@ -437,9 +437,9 @@ fn hash_build_chains_each_particle_into_its_bucket_once() {
 
     // 逐桶：走链表收集成员集合，与期望集合（顺序无关）+ count 对齐。
     let mut total_seen = 0usize;
-    for bucket in 0..table_size as usize {
+    for (bucket, cell) in readback.cell_table.iter().enumerate() {
         let mut chain = Vec::new();
-        let mut j = readback.cell_table[bucket].head;
+        let mut j = cell.head;
         let mut guard = 0u32;
         while j != SENTINEL {
             assert!(
@@ -455,7 +455,7 @@ fn hash_build_chains_each_particle_into_its_bucket_once() {
             );
         }
         assert_eq!(
-            readback.cell_table[bucket].count as usize,
+            cell.count as usize,
             expected[bucket].len(),
             "bucket {bucket}: count mismatch"
         );
@@ -591,7 +591,7 @@ fn resolve_coincident_particles_separate_symmetrically() {
     );
 }
 
-/// resolve：跨格子边界（cell_size 0.5，x = 0.45 在格 0、x = 0.55 在格 1）仍被 27
+/// resolve：跨格子边界（`cell_size` 0.5，x = 0.45 在格 0、x = 0.55 在格 1）仍被 27
 /// 邻域检出并推到 thickness 0.5 间距。锁死邻域遍历跨边界的正确性。
 #[test]
 #[expect(
