@@ -103,6 +103,17 @@
 //!   the two half-edge vectors, shared [`gpu_layout::NODE_WORDS`] nodes) plus
 //!   a packed rectangle walk that reproduces the in-memory rectangle walk
 //!   bit-for-bit.
+//! - [`cone`] — analytic finite *capped* cone / cone-frustum
+//!   [`cone::Cone`] procedural primitive (`DXR`/Vulkan `AABB` intersection
+//!   shader analogue): a base + top point with a base and top radius, the
+//!   lateral surface solved by the reduced Inigo-Quilez `iCappedCone`
+//!   quadratic and the two caps by the exact plane + radius test, reports the
+//!   [`cone::ConeHit`], and a single-level [`cone::ConeBvh`] reusing the shared
+//!   binned-`SAH` build and slab traversal.
+//! - [`cone_gpu_layout`] — flat, `GPU`-uploadable [`cone::ConeBvh`] buffer
+//!   layout ([`cone_gpu_layout::CONE_WORDS`] stride packing `base`/`top` plus
+//!   the two radii) with node records reusing the shared [`NODE_WORDS`] and a
+//!   packed cone walk that reproduces the in-memory cone walk bit-for-bit.
 //! - [`traversal`] — [`Ray`]/`BVH` slab + Möller–Trumbore intersection with
 //!   closest-hit and any-hit walks (the `GPU` traversal kernel's golden ref).
 //! - [`traversal_stackless`] — stackless (threaded / escape-index) `BVH` walk:
@@ -135,6 +146,8 @@ pub mod disk;
 pub mod disk_gpu_layout;
 pub mod rectangle;
 pub mod rectangle_gpu_layout;
+pub mod cone;
+pub mod cone_gpu_layout;
 pub mod footprint;
 pub mod gpu_layout;
 pub mod motion;
@@ -178,6 +191,8 @@ pub use cylinder_gpu_layout::{GpuCylinderBvhBuffers, CYLINDER_WORDS};
 pub use disk::{Disk, DiskBvh, DiskHit};
 pub use disk_gpu_layout::{GpuDiskBvhBuffers, DISK_WORDS};
 pub use rectangle::{Rectangle, RectangleBvh, RectangleHit};
+pub use cone::{Cone, ConeBvh, ConeHit};
+pub use cone_gpu_layout::{GpuConeBvhBuffers, CONE_WORDS};
 pub use rectangle_gpu_layout::{GpuRectangleBvhBuffers, RECTANGLE_WORDS};
 pub use aabb_primitive_gpu_layout::{GpuAabbBvhBuffers, AABB_PRIMITIVE_WORDS};
 pub use sphere_gpu_layout::{GpuSphereBvhBuffers, SPHERE_WORDS};
