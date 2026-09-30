@@ -72,6 +72,7 @@ mod obb_halfspace_gpu;
 mod obb_obb;
 mod obb_obb_gpu;
 mod obb_obb_manifold;
+mod obb_obb_manifold_gpu;
 mod sphere;
 
 pub use capsule::{cpu_capsule_narrowphase, Capsule, SphereCapsulePair};
@@ -91,3 +92,4 @@ pub use obb_halfspace_gpu::GpuObbHalfspaceNarrowphase;
 pub use obb_obb::{cpu_obb_obb_narrowphase, ObbObbPair};
 pub use obb_obb_gpu::GpuObbObbNarrowphase;
 pub use obb_obb_manifold::cpu_obb_obb_manifold;
+pub use obb_obb_manifold_gpu::GpuObbObbManifoldNarrowphase;
