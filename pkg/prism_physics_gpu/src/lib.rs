@@ -43,6 +43,7 @@
 
 pub mod broadphase;
 pub mod buffer;
+pub mod cfl;
 pub mod context;
 pub mod fluid;
 pub mod fracture;
@@ -50,6 +51,7 @@ pub mod mpm;
 pub mod xpbd;
 
 pub use broadphase::{cpu_broadphase, BroadphaseConfig, BroadphaseError, CandidatePair, Particle};
+pub use cfl::{cpu_cfl_dt, cpu_max_speed, CflConfig, GpuCflReduce};
 pub use context::GpuContext;
 pub use fluid::{
     grid_to_particle, particle_to_grid, CellType, FluidConfig, FluidError, FluidParticles,
