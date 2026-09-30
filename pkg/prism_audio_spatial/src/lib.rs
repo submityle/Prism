@@ -73,6 +73,7 @@ pub mod room_acoustics;
 pub mod room_modes;
 pub mod rooms;
 pub mod scattering;
+pub mod source_directivity;
 pub mod spatializer;
 pub mod spread;
 
@@ -133,5 +134,6 @@ pub use scattering::{
     ScatteringSpectrum, SurfaceScatter, diffuse_fraction, lambert_directivity, lambert_weight,
     specular_fraction,
 };
+pub use source_directivity::{DirectivityPreset, SourceDirectivity};
 pub use spatializer::{SourceDescriptor, SpatialParams, resolve};
 pub use spread::{MAX_SPREAD_TAPS, Spread, SpreadParams, SpreadTap, compute_spread_gains, spread_taps};
