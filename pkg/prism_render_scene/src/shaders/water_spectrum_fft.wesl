@@ -37,10 +37,15 @@
 //! butterfly's `1/N²` and `(-1)^(px+py) = e^{-i PI (px+py)}` compensates the
 //! `N/2` frequency shift.
 //!
-//! Buffer indexing is consistent end to end: evolve writes `F` at `m*N + n`
-//! (`m = gid.x`, `n = gid.y`); the butterfly `ifft2` (row then column, matching
-//! the `CPU` `fft::ifft2`) outputs `g` at `px*N + py`; assemble reads `gx*N + gy`
-//! and stores texel `(gx, gy)`. The three agree cell-for-cell.
+//! Buffer indexing is consistent end to end: evolve reads this cascade's slice
+//! of the concatenated `h0` pool at `h0_offset + m*N + n` and writes the packed
+//! scratch `F` at the local index `m*N + n` (`m = gid.x`, `n = gid.y`); the
+//! butterfly `ifft2` (row then column, matching the `CPU` `fft::ifft2`) outputs
+//! `g` at the local index `px*N + py`; assemble reads `gx*N + gy` and stores the
+//! displacement/normal texel at `(gx, gy + tile_origin_y)` — this cascade's tile
+//! in the vertically stacked atlas. The scratch grids stay local (`N*N`) and are
+//! reused across cascades; only the `h0` read and the texture write carry the
+//! per-cascade offsets, which are both zero on the single-cascade path.
 //!
 //! Entry-point names (`water_spectrum_evolve`, `water_spectrum_assemble`) are
 //! the byte-identical strings the host
@@ -186,9 +191,12 @@ fn water_spectrum_evolve(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Advance the spectral amplitude to the current frame (Hermitian pairing).
     let omega = water_dispersion(sqrt(k_sq));
+    // This cascade's amplitudes live in the concatenated multi-cascade pool at
+    // [h0_offset, h0_offset + N*N); h0_offset is zero on the single-cascade path.
+    let pool_idx = evolve_params.h0_offset + idx;
     let h = water_advance_amplitude(
-        evolve_h0[idx],
-        evolve_h0_neg[idx],
+        evolve_h0[pool_idx],
+        evolve_h0_neg[pool_idx],
         omega,
         evolve_params.time,
     );
@@ -303,7 +311,10 @@ fn water_spectrum_assemble(@builtin(global_invocation_id) gid: vec3<u32>) {
         foam = 1.0;
     }
 
-    let texel = vec2<i32>(i32(gx), i32(gy));
+    // Write into this cascade's tile: the vertically stacked atlas places
+    // cascade c's N*N tile at rows [tile_origin_y, tile_origin_y + N); the
+    // offset is zero on the single-cascade path so the tile sits at the origin.
+    let texel = vec2<i32>(i32(gx), i32(gy + evolve_params.tile_origin_y));
     textureStore(spectrum_displacement, texel, vec4<f32>(disp_x, height, disp_z, jacobian));
     textureStore(spectrum_normal, texel, vec4<f32>(normal, foam));
 }
