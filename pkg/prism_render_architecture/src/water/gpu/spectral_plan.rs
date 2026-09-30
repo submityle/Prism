@@ -141,6 +141,12 @@ pub enum SpectralStage {
         /// The packed complex buffer this pass transforms
         /// (`0..SPECTRAL_COMPLEX_FIELD_COUNT`).
         complex_index: u32,
+        /// The zero-based position of this pass within the single grid's pass
+        /// list, so the recorder can look up its
+        /// [`super::fft_plan::FftPingPong`] physical buffer routing directly
+        /// (via [`super::fft_plan::fft_pass_ping_pong`]) without re-deriving the
+        /// ping-pong parity from the running stage counter.
+        pass_ordinal: u32,
         /// The butterfly pass to run on that buffer.
         pass: FftPass,
     },
@@ -186,9 +192,10 @@ pub fn plan_cascade_spectral(n: u32) -> Vec<SpectralStage> {
     let mut stages = Vec::with_capacity(2 + SPECTRAL_COMPLEX_FIELD_COUNT * fft.len());
     stages.push(SpectralStage::Evolve);
     for complex_index in 0..SPECTRAL_COMPLEX_FIELD_COUNT as u32 {
-        for &pass in &fft {
+        for (pass_ordinal, &pass) in fft.iter().enumerate() {
             stages.push(SpectralStage::Butterfly {
                 complex_index,
+                pass_ordinal: pass_ordinal as u32,
                 pass,
             });
         }
@@ -328,6 +335,7 @@ mod tests {
                     SpectralStage::Butterfly {
                         complex_index: ci,
                         pass,
+                        ..
                     } if *ci == complex_index => Some(*pass),
                     _ => None,
                 })
@@ -335,6 +343,44 @@ mod tests {
             assert_eq!(group, single, "buffer runs the full inverse-FFT plan");
             // The first transform pass is the row bit-reversal, matching fft_plan.
             assert_eq!(group[0].entry, FftEntry::BitReversal);
+        }
+    }
+
+    #[test]
+    fn cascade_plan_tags_each_butterfly_with_its_pass_ordinal() {
+        // Each packed buffer's butterfly stages carry a zero-based ordinal that
+        // counts its own pass list `0, 1, .., len - 1`, so the recorder can index
+        // the ping-pong routing directly instead of tracking a running counter.
+        let n = 16u32;
+        let stages = plan_cascade_spectral(n);
+        let single_len = plan_inverse_fft2(n).len() as u32;
+        for complex_index in 0..SPECTRAL_COMPLEX_FIELD_COUNT as u32 {
+            let ordinals: Vec<u32> = stages
+                .iter()
+                .filter_map(|s| match s {
+                    SpectralStage::Butterfly {
+                        complex_index: ci,
+                        pass_ordinal,
+                        ..
+                    } if *ci == complex_index => Some(*pass_ordinal),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(ordinals, (0..single_len).collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
+    fn butterfly_ordinal_selects_the_matching_ping_pong_route() {
+        // The tagged ordinal is exactly the argument `fft_pass_ping_pong` expects:
+        // the seed buffer feeds the first pass and the routing flips each pass.
+        let stages = plan_cascade_spectral(16);
+        for stage in &stages {
+            if let SpectralStage::Butterfly { pass_ordinal, .. } = stage {
+                let route = super::super::fft_plan::fft_pass_ping_pong(*pass_ordinal as usize);
+                assert_eq!(route.src, *pass_ordinal & 1);
+                assert_ne!(route.src, route.dst);
+            }
         }
     }
 
