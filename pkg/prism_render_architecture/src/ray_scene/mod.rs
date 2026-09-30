@@ -72,6 +72,11 @@
 //!   `base`/`top` endpoints plus radius, shared [`gpu_layout::NODE_WORDS`]
 //!   nodes) plus a packed cylinder walk that reproduces the in-memory
 //!   cylinder walk bit-for-bit.
+//! - [`disk`] — analytic oriented disk [`disk::Disk`] procedural primitive
+//!   (`DXR`/Vulkan `AABB` path, round area lights / emitter faces) with a
+//!   single ray/plane solve plus a radius test that reports the
+//!   [`disk::DiskHit`], and a single-level [`disk::DiskBvh`] reusing the
+//!   shared binned-`SAH` build and ordered slab walk.
 //! - [`sphere_gpu_layout`] — flat, `GPU`-uploadable [`sphere::SphereBvh`]
 //!   buffer layout ([`sphere_gpu_layout::SPHERE_WORDS`] stride, shared
 //!   [`gpu_layout::NODE_WORDS`] nodes) plus a packed procedural-primitive
@@ -108,6 +113,7 @@ pub mod curve;
 pub mod curve_gpu_layout;
 pub mod cylinder;
 pub mod cylinder_gpu_layout;
+pub mod disk;
 pub mod footprint;
 pub mod gpu_layout;
 pub mod motion;
@@ -148,6 +154,7 @@ pub use curve::{Curve, CurveBvh, CurveHit};
 pub use curve_gpu_layout::{GpuCurveBvhBuffers, CURVE_WORDS};
 pub use cylinder::{Cylinder, CylinderBvh, CylinderHit};
 pub use cylinder_gpu_layout::{GpuCylinderBvhBuffers, CYLINDER_WORDS};
+pub use disk::{Disk, DiskBvh, DiskHit};
 pub use aabb_primitive_gpu_layout::{GpuAabbBvhBuffers, AABB_PRIMITIVE_WORDS};
 pub use sphere_gpu_layout::{GpuSphereBvhBuffers, SPHERE_WORDS};
 pub use traversal::{Hit, Ray};
