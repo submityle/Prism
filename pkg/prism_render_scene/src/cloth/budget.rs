@@ -173,11 +173,15 @@ mod tests {
 
     /// A garment authored to only ever skin: its native form is the skinned
     /// proxy, so LOD never promotes it to a simulation and it emits no request.
+    /// The frame-state tier is seeded to the skinned proxy to match what the
+    /// builder's stateless seed and the coverage system's native-form clamp
+    /// would resolve for such an outfit.
     fn skinned(vertices: usize) -> ClothGarment {
         ClothGarment {
             positions: vec![[0.0; 4]; vertices],
             coverage: 1.0,
             native_form: ClothLodTier::SkinnedProxy,
+            current_tier: ClothLodTier::SkinnedProxy,
             ..Default::default()
         }
     }

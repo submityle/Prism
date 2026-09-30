@@ -38,6 +38,7 @@ use prism_render_architecture::cloth::{ClothLodTier, ClothParticle, Constraint};
 
 use super::abi::{GpuClothBackstop, GpuClothCollider, GpuClothEmbedBinding};
 use super::garment::ClothGarment;
+use super::lod::resolve_garment_lod;
 use super::lod_mesh::ClothReducedMesh;
 use super::pack::{pack_backstops, pack_colliders, pack_embed_bindings};
 
@@ -104,6 +105,7 @@ pub struct ClothGarmentBuilder {
     lod_skinned_below: f32,
     lod_piece_id: u32,
     reduced_mesh: Option<ClothReducedMesh>,
+    lod_hysteresis: f32,
 }
 
 impl Default for ClothGarmentBuilder {
@@ -144,6 +146,7 @@ impl Default for ClothGarmentBuilder {
             lod_skinned_below: 0.0,
             lod_piece_id: 0,
             reduced_mesh: None,
+            lod_hysteresis: 0.0,
         }
     }
 }
@@ -378,6 +381,20 @@ impl ClothGarmentBuilder {
         self
     }
 
+    /// Sets the symmetric coverage dead-band that suppresses LOD popping.
+    ///
+    /// A garment hovering on an LOD threshold reclassifies frame to frame under
+    /// tiny coverage jitter, visibly "popping" between tiers. This dead-band
+    /// holds the current tier until the coverage moves a full `band` past the
+    /// authored boundary, so the transition is continuous. The default `0.0`
+    /// disables hysteresis and reproduces the stateless coverage gate exactly.
+    /// Negative values are clamped to `0.0` by the classifier.
+    #[must_use]
+    pub fn lod_hysteresis(mut self, band: f32) -> Self {
+        self.lod_hysteresis = band;
+        self
+    }
+
     /// Sets this frame's projected screen coverage in `0..=1`.
     ///
     /// A coverage-feeding system normally updates this per frame; authoring it
@@ -415,9 +432,15 @@ impl ClothGarmentBuilder {
     }
 
     /// Consumes the builder and produces the spawnable [`ClothGarment`] component.
+    ///
+    /// The frame-state `current_tier` is seeded from the stateless coverage
+    /// classification ([`resolve_garment_lod`]) so the very first frame already
+    /// resolves to the same tier the non-hysteretic gate would pick; the
+    /// coverage system then advances it through the hysteretic gate on later
+    /// frames.
     #[must_use]
     pub fn build(self) -> ClothGarment {
-        ClothGarment {
+        let mut garment = ClothGarment {
             positions: self.positions,
             velocities: self.velocities,
             constraints: self.constraints,
@@ -448,7 +471,14 @@ impl ClothGarmentBuilder {
             lod_skinned_below: self.lod_skinned_below,
             lod_piece_id: self.lod_piece_id,
             reduced_mesh: self.reduced_mesh,
-        }
+            lod_hysteresis: self.lod_hysteresis,
+            current_tier: ClothLodTier::FullSim,
+        };
+        // Seed the frame-state tier from the stateless coverage classification so
+        // the first frame matches the non-hysteretic decision before the coverage
+        // system starts advancing it through the hysteretic gate.
+        garment.set_current_tier(resolve_garment_lod(&garment).tier);
+        garment
     }
 }
 

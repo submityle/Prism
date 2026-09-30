@@ -52,6 +52,7 @@ pub mod air;
 pub mod ambisonics;
 pub mod attenuation;
 pub mod cone;
+pub mod diffraction;
 pub mod diffusion_field;
 pub mod doppler;
 pub mod early_reflections;
@@ -84,6 +85,7 @@ pub use ambisonics::{
 };
 pub use attenuation::{Attenuation, DistanceModel};
 pub use cone::Cone;
+pub use diffraction::Diffraction;
 pub use diffusion_field::{DiffusionField, MAX_ECHO_DENSITY};
 pub use doppler::{Doppler, SPEED_OF_SOUND_MPS, doppler_ratio};
 pub use early_reflections::{

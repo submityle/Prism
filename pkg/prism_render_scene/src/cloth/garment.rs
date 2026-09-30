@@ -17,11 +17,11 @@ use bevy_ecs::component::Component;
 use bevy_ecs::resource::Resource;
 
 use prism_render_architecture::cloth::bending::BendingConstraint;
-use prism_render_architecture::cloth::lod::ClothLodDecision;
+use prism_render_architecture::cloth::lod::{cloth_lod_budget, ClothLodDecision};
 use prism_render_architecture::cloth::{ClothLodTier, Constraint};
 
 use super::abi::{GpuClothBackstop, GpuClothCollider, GpuClothEmbedBinding};
-use super::lod::resolve_garment_lod;
+use super::lod::garment_cloth_piece;
 use super::lod_mesh::ClothReducedMesh;
 use super::solve_plan::ClothSolveInput;
 
@@ -121,6 +121,19 @@ pub struct ClothGarment {
     /// fewer particles, constraints and dispatched work-items — whenever the
     /// coverage gate selects [`ClothLodTier::ReducedSim`].
     pub(crate) reduced_mesh: Option<ClothReducedMesh>,
+    /// Symmetric screen-coverage dead-band applied around each LOD threshold so
+    /// a garment hovering on a boundary does not oscillate ("pop") between tiers
+    /// frame to frame. The default `0.0` disables hysteresis: the frame-state
+    /// tier then tracks the stateless coverage classification exactly, matching
+    /// the pre-hysteresis behavior bit for bit.
+    pub(crate) lod_hysteresis: f32,
+    /// The LOD tier resolved for this garment last frame. The coverage system
+    /// advances it through the hysteretic gate each frame (holding it inside the
+    /// dead-band), the extract stage snapshots it into the render world, and the
+    /// prepare/budget stages solve and charge against it. Seeded at build time
+    /// to the stateless coverage tier so the very first frame already matches the
+    /// non-hysteretic decision. Defaults to [`ClothLodTier::FullSim`].
+    pub(crate) current_tier: ClothLodTier,
 }
 
 impl Default for ClothGarment {
@@ -161,6 +174,8 @@ impl Default for ClothGarment {
             lod_skinned_below: 0.0,
             lod_piece_id: 0,
             reduced_mesh: None,
+            lod_hysteresis: 0.0,
+            current_tier: ClothLodTier::FullSim,
         }
     }
 }
@@ -324,11 +339,46 @@ impl ClothGarment {
         self.lod_piece_id
     }
 
-    /// Resolves this garment's LOD decision at its current coverage, reusing the
-    /// architecture-layer golden classifier through [`resolve_garment_lod`].
+    /// The symmetric coverage dead-band this garment applies around each LOD
+    /// threshold. `0.0` (the default) disables hysteresis.
+    #[must_use]
+    pub(crate) fn lod_hysteresis(&self) -> f32 {
+        self.lod_hysteresis
+    }
+
+    /// The LOD tier resolved for this garment as of the last coverage update.
+    #[must_use]
+    pub(crate) fn current_tier(&self) -> ClothLodTier {
+        self.current_tier
+    }
+
+    /// Advances this garment's frame-state LOD tier.
+    ///
+    /// Written by the coverage estimator ([`update_cloth_coverage`]) each frame
+    /// through the hysteretic gate, before the extract stage snapshots the
+    /// garment into the render world. The prepare and budget stages then solve
+    /// and charge against this tier via [`Self::lod_decision`].
+    ///
+    /// [`update_cloth_coverage`]: super::coverage::update_cloth_coverage
+    pub(crate) fn set_current_tier(&mut self, tier: ClothLodTier) {
+        self.current_tier = tier;
+    }
+
+    /// Resolves this garment's LOD budget at its current frame-state tier.
+    ///
+    /// The tier itself is chosen by the coverage system through the hysteretic
+    /// gate ([`resolve_garment_tier_hysteretic`]) and already clamped no finer
+    /// than the garment's native form; this reads that stored [`current_tier`]
+    /// and charges its decimated budget through the one authoritative
+    /// [`cloth_lod_budget`]. With hysteresis disabled and a build-time seed of
+    /// the stateless coverage tier, the decision is bit-identical to the
+    /// stateless [`resolve_garment_lod`] gate.
+    ///
+    /// [`resolve_garment_tier_hysteretic`]: super::lod::resolve_garment_tier_hysteretic
+    /// [`current_tier`]: Self::current_tier
     #[must_use]
     pub(crate) fn lod_decision(&self) -> ClothLodDecision {
-        resolve_garment_lod(self)
+        cloth_lod_budget(garment_cloth_piece(self), self.current_tier)
     }
 }
 
@@ -533,5 +583,60 @@ mod tests {
         assert_eq!(reduced.iterations, 5);
         // But the mesh itself is the coarse one.
         assert_eq!(reduced.positions.len(), 2);
+    }
+
+    #[test]
+    fn build_seeds_current_tier_from_the_stateless_coverage_gate() {
+        use crate::cloth::ClothGarmentBuilder;
+        use prism_render_architecture::cloth::{ClothParticle, Vec3};
+
+        let particles = [
+            ClothParticle::pinned(Vec3::new(0.0, 0.0, 0.0)),
+            ClothParticle::new(Vec3::new(1.0, 0.0, 0.0), 1.0),
+            ClothParticle::new(Vec3::new(0.0, 1.0, 0.0), 1.0),
+            ClothParticle::new(Vec3::new(1.0, 1.0, 0.0), 1.0),
+        ];
+        // Coverage 0.3 with thresholds 0.5/0.1 classifies as reduced sim, so the
+        // seed and the decision it drives must both land on the reduced tier.
+        let garment = ClothGarmentBuilder::from_particles(&particles)
+            .lod_thresholds(0.5, 0.1)
+            .coverage(0.3)
+            .build();
+        assert_eq!(garment.current_tier(), ClothLodTier::ReducedSim);
+        assert_eq!(garment.lod_decision().tier, ClothLodTier::ReducedSim);
+        assert_eq!(garment.lod_hysteresis(), 0.0);
+    }
+
+    #[test]
+    fn lod_decision_charges_the_held_frame_state_tier() {
+        use crate::cloth::ClothGarmentBuilder;
+        use prism_render_architecture::cloth::{ClothParticle, Vec3};
+
+        let particles = [
+            ClothParticle::pinned(Vec3::new(0.0, 0.0, 0.0)),
+            ClothParticle::new(Vec3::new(1.0, 0.0, 0.0), 1.0),
+            ClothParticle::new(Vec3::new(0.0, 1.0, 0.0), 1.0),
+            ClothParticle::new(Vec3::new(1.0, 1.0, 0.0), 1.0),
+        ];
+        let mut garment = ClothGarmentBuilder::from_particles(&particles)
+            .lod_thresholds(0.5, 0.1)
+            .coverage(1.0)
+            .build();
+        assert_eq!(garment.current_tier(), ClothLodTier::FullSim);
+        assert_eq!(garment.lod_decision().sim_vertices, 4);
+
+        // The decision reads the held frame-state tier, not the coverage: forcing
+        // the tier to reduced decimates the charged budget to a quarter (clamped
+        // to at least one) even though coverage still fills the screen.
+        garment.set_current_tier(ClothLodTier::ReducedSim);
+        let reduced = garment.lod_decision();
+        assert_eq!(reduced.tier, ClothLodTier::ReducedSim);
+        assert_eq!(reduced.sim_vertices, 1);
+
+        // The skinned proxy drops all sim geometry.
+        garment.set_current_tier(ClothLodTier::SkinnedProxy);
+        let skinned = garment.lod_decision();
+        assert_eq!(skinned.tier, ClothLodTier::SkinnedProxy);
+        assert_eq!(skinned.sim_vertices, 0);
     }
 }

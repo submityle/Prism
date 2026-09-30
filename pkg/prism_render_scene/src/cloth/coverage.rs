@@ -33,6 +33,7 @@ use bevy_math::{Mat4, Vec3};
 use bevy_transform::components::GlobalTransform;
 
 use super::garment::ClothGarment;
+use super::lod::resolve_garment_tier_hysteretic;
 
 /// Clip-space `w` below which a projected corner is treated as on or behind the
 /// near plane. A box with any such corner is straddling the camera and is, by
@@ -161,6 +162,14 @@ pub(crate) fn update_cloth_coverage(
         if (garment.coverage() - coverage).abs() > f32::EPSILON {
             garment.set_coverage(coverage);
         }
+        // Advance the LOD tier through the hysteretic gate against the freshly
+        // written coverage, holding the current tier inside the dead-band so a
+        // garment on a threshold does not pop. Only touch the garment when the
+        // tier actually changes, so idle garments do not churn change detection.
+        let tier = resolve_garment_tier_hysteretic(&garment);
+        if tier != garment.current_tier() {
+            garment.set_current_tier(tier);
+        }
     }
 }
 
@@ -262,11 +271,7 @@ mod tests {
     #[test]
     fn perspective_coverage_grows_as_the_box_approaches() {
         let proj = pinhole();
-        let near = screen_coverage(
-            proj,
-            Vec3::new(-0.5, -0.5, -3.0),
-            Vec3::new(0.5, 0.5, -2.0),
-        );
+        let near = screen_coverage(proj, Vec3::new(-0.5, -0.5, -3.0), Vec3::new(0.5, 0.5, -2.0));
         let far = screen_coverage(
             proj,
             Vec3::new(-0.5, -0.5, -11.0),

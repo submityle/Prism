@@ -21,9 +21,9 @@
 //! tier today.
 
 use prism_render_architecture::cloth::lod::{
-    resolve_cloth_lod, ClothLodDecision, ClothLodThresholds,
+    resolve_cloth_lod, select_cloth_lod_tier_hysteretic, ClothLodDecision, ClothLodThresholds,
 };
-use prism_render_architecture::cloth::{ClothPiece, ClothPieceHandle};
+use prism_render_architecture::cloth::{ClothLodTier, ClothPiece, ClothPieceHandle};
 use prism_render_architecture::deformation::DeformationHandle;
 
 use super::garment::ClothGarment;
@@ -71,6 +71,32 @@ pub(crate) fn resolve_garment_lod(garment: &ClothGarment) -> ClothLodDecision {
         garment.coverage(),
         garment_thresholds(garment),
     )
+}
+
+/// Advances a garment's LOD tier for the frame through the *hysteretic* gate.
+///
+/// Unlike [`resolve_garment_lod`] (which reclassifies the coverage from scratch
+/// every frame and would pop across a threshold), this feeds the garment's
+/// authored coverage dead-band and its last-frame [`current_tier`] into the
+/// golden [`select_cloth_lod_tier_hysteretic`], then clamps the result no finer
+/// than the garment's native form — the same clamp the stateless gate applies.
+/// The coverage system calls this each frame and stores the result back on the
+/// garment so [`ClothGarment::lod_decision`] charges the held tier.
+///
+/// With a zero dead-band this is bit-identical to the tier
+/// [`resolve_garment_lod`] selects, so a garment that never opts into hysteresis
+/// keeps the stateless behavior.
+///
+/// [`current_tier`]: ClothGarment::current_tier
+#[must_use]
+pub(crate) fn resolve_garment_tier_hysteretic(garment: &ClothGarment) -> ClothLodTier {
+    select_cloth_lod_tier_hysteretic(
+        garment.coverage(),
+        garment_thresholds(garment),
+        garment.lod_hysteresis(),
+        garment.current_tier(),
+    )
+    .coarser_of(garment.native_form())
 }
 
 #[cfg(test)]
@@ -179,5 +205,67 @@ mod tests {
             let golden = resolve_cloth_lod(piece, coverage, thresholds);
             assert_eq!(scene, golden, "coverage {coverage} diverged from golden");
         }
+    }
+
+    #[test]
+    fn hysteretic_tier_with_zero_band_matches_the_stateless_gate() {
+        // A garment that never opts into hysteresis must resolve exactly the
+        // tier the stateless gate would pick, across the whole coverage sweep.
+        for coverage in [0.0, 0.05, 0.1, 0.3, 0.49, 0.5, 0.9, 1.0] {
+            let garment = lod_garment_at(coverage);
+            assert_eq!(
+                resolve_garment_tier_hysteretic(&garment),
+                resolve_garment_lod(&garment).tier,
+                "coverage {coverage} diverged from the stateless tier",
+            );
+        }
+    }
+
+    #[test]
+    fn hysteretic_tier_holds_the_current_tier_inside_the_dead_band() {
+        // Thresholds 0.5/0.1 with a 0.1 band: the reduced boundary drops at 0.4
+        // and refines at 0.6. A garment currently at full sim sitting at 0.45 is
+        // inside the band, so it must hold full sim rather than pop to reduced.
+        let garment = ClothGarmentBuilder::from_particles(&lod_particles())
+            .lod_thresholds(0.5, 0.1)
+            .lod_hysteresis(0.1)
+            .coverage(0.45)
+            .build();
+        // Seeded from the stateless gate: 0.45 < 0.5 classifies as reduced.
+        assert_eq!(garment.current_tier(), ClothLodTier::ReducedSim);
+
+        // Now pin the current tier to full sim and re-resolve at 0.45: the band
+        // spans (0.4, 0.6) around the reduced boundary, so full sim is held.
+        let mut held = garment.clone();
+        held.set_current_tier(ClothLodTier::FullSim);
+        assert_eq!(
+            resolve_garment_tier_hysteretic(&held),
+            ClothLodTier::FullSim,
+            "0.45 is inside the reduced dead-band and must not pop",
+        );
+
+        // Drop coverage below the lower edge (< 0.4): the garment finally
+        // coarsens to reduced sim.
+        held.set_coverage(0.35);
+        assert_eq!(
+            resolve_garment_tier_hysteretic(&held),
+            ClothLodTier::ReducedSim,
+        );
+    }
+
+    #[test]
+    fn hysteretic_tier_never_refines_past_the_native_form() {
+        // A background outfit authored to only ever skin must stay skinned even
+        // when it fills the screen, exactly like the stateless clamp.
+        let garment = ClothGarmentBuilder::from_particles(&lod_particles())
+            .lod_thresholds(0.5, 0.1)
+            .lod_hysteresis(0.2)
+            .native_form(ClothLodTier::SkinnedProxy)
+            .coverage(1.0)
+            .build();
+        assert_eq!(
+            resolve_garment_tier_hysteretic(&garment),
+            ClothLodTier::SkinnedProxy,
+        );
     }
 }
