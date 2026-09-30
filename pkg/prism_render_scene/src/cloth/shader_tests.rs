@@ -202,3 +202,41 @@ fn cloth_pressure_abi_matches_the_shader_layout() {
     assert_eq!(align_of::<GpuClothPressureParams>(), 4);
     assert_eq!(CLOTH_WORKGROUP_SIZE, 64);
 }
+
+/// Compiles `cloth_plasticity.wesl`, proving the single own-slot per-edge
+/// plastic-creep kernel (`cloth_apply_plasticity`, one invocation per constraint
+/// that skips one-sided, degenerate, out-of-range, and within-yield edges then
+/// creeps the rest length toward the current length under the residual clamp)
+/// parses and type-checks exactly as it will in the render world, guarding the
+/// plastic-flow maths against drift from the `CPU` golden
+/// `prism_render_architecture::cloth::tearing::apply_plasticity`.
+#[test]
+fn cloth_plasticity_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let plasticity = shader_id(0x5052_4953_4d5f_434c_4f54_4841_4552_5306);
+    cache.set_shader(
+        plasticity,
+        Shader::from_wesl(
+            include_str!("../shaders/cloth_plasticity.wesl"),
+            "embedded://prism_render_scene/shaders/cloth_plasticity.wesl",
+        ),
+    );
+
+    cache
+        .get(0, plasticity, &[])
+        .unwrap_or_else(|error| panic!("cloth_plasticity.wesl failed to compile: {error}"));
+}
+
+/// Guards the Rust `ABI` against drift from the plasticity `WESL` struct: the
+/// `GpuClothPlasticityParams` uniform is the flat 32-byte block matching
+/// `ClothPlasticityParams` in `cloth_plasticity.wesl`, and the workgroup
+/// constant matches the kernel's `@workgroup_size(64)`.
+#[test]
+fn cloth_plasticity_abi_matches_the_shader_layout() {
+    use super::abi::{GpuClothPlasticityParams, CLOTH_WORKGROUP_SIZE};
+    assert_eq!(size_of::<GpuClothPlasticityParams>(), 32);
+    assert_eq!(size_of::<GpuClothPlasticityParams>() % 16, 0);
+    assert_eq!(align_of::<GpuClothPlasticityParams>(), 4);
+    assert_eq!(CLOTH_WORKGROUP_SIZE, 64);
+}

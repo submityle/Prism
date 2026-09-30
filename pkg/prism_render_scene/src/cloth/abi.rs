@@ -421,6 +421,32 @@ pub(crate) struct GpuClothPressureParams {
     pub alpha_tilde: f32,
 }
 
+/// 32-byte uniform driving the plastic rest-length creep pass. Two counts and
+/// the three scalars the host copies from the sanitized golden
+/// `tearing::PlasticParams` (`yield_strain`, `creep`, `max_strain`), padded to a
+/// whole 16-byte uniform stride. The shader mutates only `rest_length`, so no
+/// derived scalars are precomputed.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq)]
+pub(crate) struct GpuClothPlasticityParams {
+    /// Number of constraints bounding the per-edge dispatch.
+    pub constraint_count: u32,
+    /// Number of particles, for the endpoint range guard.
+    pub particle_count: u32,
+    /// Strain magnitude beyond which plastic flow begins (sanitized, `>= 0`).
+    pub yield_strain: f32,
+    /// Fraction in `[0, 1]` of the beyond-yield excess made permanent per call.
+    pub creep: f32,
+    /// Cap on the residual elastic strain magnitude left after creep (`>= 0`).
+    pub max_strain: f32,
+    /// Padding to a 16-byte uniform stride.
+    pub pad0: u32,
+    /// Padding to a 16-byte uniform stride.
+    pub pad1: u32,
+    /// Padding to a 16-byte uniform stride.
+    pub pad2: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -563,6 +589,16 @@ mod tests {
         assert_eq!(size_of::<GpuClothPressureParams>(), 16);
         assert_eq!(size_of::<GpuClothPressureParams>() % 16, 0);
         assert_eq!(align_of::<GpuClothPressureParams>(), 4);
+    }
+
+    /// The plasticity uniform is two flat 16-byte rows: two counts, the three
+    /// sanitized golden scalars, and three pad words. Pin the 32-byte size
+    /// against drift from `ClothPlasticityParams` in `cloth_plasticity.wesl`.
+    #[test]
+    fn plasticity_params_is_uniform_stride() {
+        assert_eq!(size_of::<GpuClothPlasticityParams>(), 32);
+        assert_eq!(size_of::<GpuClothPlasticityParams>() % 16, 0);
+        assert_eq!(align_of::<GpuClothPlasticityParams>(), 4);
     }
 
     /// The collider discriminants match the shader's `CLOTH_COLLIDER_*` order.
