@@ -74,9 +74,11 @@ pub mod page_pool;
 pub mod page_storage;
 pub mod payload_raster;
 pub mod raster;
+pub mod raster_classify;
 
 pub use context::{block_on, GpuContext};
 pub use page_pool::{GpuPageTable, ResolveError};
 pub use page_storage::GpuPageStorage;
 pub use payload_raster::GpuPayloadRaster;
 pub use raster::{GpuSoftwareRaster, RasterError};
+pub use raster_classify::GpuRasterClassifier;
