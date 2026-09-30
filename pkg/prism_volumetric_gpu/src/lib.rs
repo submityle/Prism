@@ -58,6 +58,7 @@
 pub mod aerial;
 pub mod context;
 pub mod curl;
+pub mod fog;
 pub mod godray;
 pub mod mask;
 pub mod modeling;
@@ -73,6 +74,7 @@ pub mod worley;
 pub use aerial::{AerialQuery, GpuAerialPerspective};
 pub use context::{block_on, GpuContext};
 pub use curl::{CurlQuery, GpuCurl};
+pub use fog::{FogQuery, GpuFogTransmittance};
 pub use godray::{GodRayWeightQuery, GpuGodRayWeight};
 pub use mask::{GpuScatteringMask, MaskQuery};
 pub use modeling::{GpuModeling, ModelingQuery};
