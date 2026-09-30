@@ -14,7 +14,10 @@
 //! The kernel mirrors `math::smoothstep` bit for bit, so agreement is asserted
 //! within a tight absolute tolerance. The suite also checks the invariants that
 //! make the blend correct: the endpoints are exact (`t = 0` yields the source
-//! target, `t = 1` the destination), and the result is monotone in `t`.
+//! target, `t = 1` the destination), the result is monotone in `t`, and the
+//! interpolated coverage stays within the unit range `0..=1` (design section 16)
+//! for every state pair and every `t`, including the out-of-range `t` that must
+//! saturate.
 //!
 //! Provenance: standard smoothstep coverage blend / weather state machine; no
 //! Unreal Engine source or derived code.
@@ -71,6 +74,22 @@ fn gpu_blend_state_matches_cpu_golden() {
             q.t,
             gpu[i],
             (gpu[i] - exp).abs()
+        );
+        // Section 16 invariant, asserted directly on the on-device output (not
+        // merely implied by CPU parity): the interpolated storm/sky coverage
+        // must stay within the unit range for every state pair and every `t`,
+        // including the out-of-range `t` that must saturate. A dropped device
+        // `saturate` (or a smoothstep that overshoots at a boundary) could slip
+        // a hair past 0 or 1 while still landing within `TOL` of the golden, so
+        // parity alone would not catch it; this range guard does.
+        assert!(
+            (0.0..=1.0).contains(&gpu[i]),
+            "gpu blend-state coverage must stay in the unit range for query \
+             {i} (from {:?}, to {:?}, t {}): {}",
+            q.from,
+            q.to,
+            q.t,
+            gpu[i]
         );
     }
 
