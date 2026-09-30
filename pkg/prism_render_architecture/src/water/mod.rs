@@ -72,6 +72,7 @@ pub mod simulation;
 pub mod spectrum;
 pub mod surface_fx;
 pub mod swe;
+pub mod synthesis;
 pub mod transition;
 pub mod underwater;
 pub mod waterline;
