@@ -50,6 +50,7 @@ pub mod fluid;
 pub mod fracture;
 pub mod grid;
 pub mod mpm;
+pub mod narrowphase;
 pub mod radix;
 pub mod scan;
 pub mod xpbd;
@@ -78,6 +79,7 @@ pub use mpm::{
     GpuMpmGridUpdate, GpuMpmP2g, GpuMpmResident, GpuMpmStep, P2gGrid, StepConfig, StepInputs,
     StepParticles,
 };
+pub use narrowphase::{cpu_narrowphase, Contact};
 pub use radix::{cpu_radix_sort_keys, cpu_radix_sort_pairs, GpuRadixSort};
 pub use scan::{cpu_compact, cpu_exclusive_scan, GpuScan};
 pub use xpbd::{
