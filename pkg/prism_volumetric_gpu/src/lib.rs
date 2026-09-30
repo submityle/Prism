@@ -67,6 +67,7 @@ pub mod perlin_worley;
 pub mod phase;
 pub mod powder;
 pub mod shadow;
+pub mod trilinear;
 pub mod worley;
 
 pub use aerial::{AerialQuery, GpuAerialPerspective};
@@ -81,4 +82,5 @@ pub use perlin_worley::{GpuPerlinWorley, PerlinWorleyQuery};
 pub use phase::{GpuPhaseEvaluator, PhaseQuery};
 pub use powder::{GpuPowder, PowderQuery};
 pub use shadow::{GpuShadow, ShadowRay};
+pub use trilinear::{GpuTrilinear, TrilinearQuery};
 pub use worley::{GpuWorley, WorleyQuery};
