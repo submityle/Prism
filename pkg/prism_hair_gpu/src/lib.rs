@@ -166,6 +166,15 @@
 //!   cross-fade `blend` (kept fraction `1 - blend`), the decision a smooth tier
 //!   transition composites (see [`transition`]).
 //!
+//! * [`GpuDecimationPriority`] evaluates
+//!   [`decimation_priority`](prism_render_architecture::hair::decimation::decimation_priority),
+//!   the importance-weighted ranking key that drives pop-free density LOD —
+//!   one thread per strand returns `importance + jitter * (hash - 0.5)`, and
+//!   the host sorts those keys (descending, ties by ascending index) into the
+//!   nested decimation order
+//!   [`build_decimation_order`](prism_render_architecture::hair::decimation::build_decimation_order)
+//!   whose every prefix is a valid kept set (see [`decimation_priority`]).
+//!
 //! # Portability
 //!
 //! The projection uses only `sqrt`, `min`, `max`, `clamp`, `dot` and
@@ -194,6 +203,7 @@
 pub mod bin_samples;
 pub mod collision;
 pub mod context;
+pub mod decimation_priority;
 pub mod deep_opacity;
 pub mod forward_scatter;
 pub mod frames;
@@ -216,6 +226,7 @@ pub mod wind;
 pub use bin_samples::GpuHairBinSamples;
 pub use collision::{query_for, CollisionQuery, GpuColliderProjector};
 pub use context::{block_on, GpuContext};
+pub use decimation_priority::GpuDecimationPriority;
 pub use deep_opacity::GpuHairDeepOpacity;
 pub use forward_scatter::GpuHairForwardScatter;
 pub use frames::{GpuStrandFrame, GpuStrandFrames};
