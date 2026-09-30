@@ -8728,3 +8728,470 @@ fn mac_projection_gpu_removes_checkerboard_divergence() {
         "residual divergence {prev_max_div} must fall below {MAC_DIV_RESIDUAL_FRACTION} of the seed {init_max_div}"
     );
 }
+
+/// Compiles `water_flip_mac_p2g.wesl` and returns its `Wgsl` translation.
+fn compile_flip_mac_p2g_wgsl() -> String {
+    let mut cache = ShaderCache::new((), keep_wgsl);
+    let id = AssetId::Uuid {
+        uuid: Uuid::from_u128(0x5052_4953_4d5f_5741_5445_5246_4c50_0004),
+    };
+    cache.set_shader(
+        id,
+        Shader::from_wesl(
+            include_str!("../shaders/water_flip_mac_p2g.wesl"),
+            "embedded://prism_render_scene/shaders/water_flip_mac_p2g.wesl",
+        ),
+    );
+    let module = cache
+        .get(0, id, &[])
+        .unwrap_or_else(|error| panic!("water_flip_mac_p2g.wesl failed to compile: {error}"));
+    (*module).clone()
+}
+
+/// `CPU` golden twin of `water_flip_mac_p2g`: scatters each particle's velocity
+/// component (with the `APIC` affine field) onto the three staggered face grids,
+/// accumulating `[momentum, mass]` signed fixed-point pairs per face over the
+/// `[u | v | w]` block order — identical addressing, weights, and encode as the
+/// shader.
+fn mac_p2g_golden(particles: &[GpuFlipParticle], params: &GpuFlipSimParams) -> Vec<u32> {
+    let dim = [params.dim[0], params.dim[1], params.dim[2]];
+    let total_faces = mac_face_count(dim) as usize;
+    let mut scatter = vec![0u32; total_faces * 2];
+    let mass = params.particle_mass.max(0.0);
+    if mass <= FLIP_EPS {
+        return scatter;
+    }
+    let origin = Vec3::new(params.origin[0], params.origin[1], params.origin[2]);
+    let affine = f32::from(params.use_affine != 0);
+    let dx = params.dx;
+    let inv_dx = params.inv_dx;
+
+    // Per-axis staggered node lattice: half-cell shift + node dimensions.
+    let axes: [(Vec3, [u32; 3]); 3] = [
+        (Vec3::new(0.0, 0.5, 0.5), [dim[0] + 1, dim[1], dim[2]]),
+        (Vec3::new(0.5, 0.0, 0.5), [dim[0], dim[1] + 1, dim[2]]),
+        (Vec3::new(0.5, 0.5, 0.0), [dim[0], dim[1], dim[2] + 1]),
+    ];
+
+    let mut p = 0usize;
+    while p < params.particle_count as usize {
+        let particle = particles[p];
+        p += 1;
+        if particle.pos[3] <= 0.5 {
+            continue;
+        }
+        let pos = Vec3::new(particle.pos[0], particle.pos[1], particle.pos[2]);
+        let vel = Vec3::new(particle.vel[0], particle.vel[1], particle.vel[2]);
+        let rows = [
+            Vec3::new(particle.c0[0], particle.c0[1], particle.c0[2]).scale(affine),
+            Vec3::new(particle.c1[0], particle.c1[1], particle.c1[2]).scale(affine),
+            Vec3::new(particle.c2[0], particle.c2[1], particle.c2[2]).scale(affine),
+        ];
+        let mut axis = 0usize;
+        while axis < 3 {
+            let (shift, node_dim) = axes[axis];
+            let local = pos.sub(origin).scale(inv_dx).sub(shift);
+            let base_i = local.x.floor() as i32;
+            let base_j = local.y.floor() as i32;
+            let base_k = local.z.floor() as i32;
+            let weights = trilinear_weights(
+                local.x - local.x.floor(),
+                local.y - local.y.floor(),
+                local.z - local.z.floor(),
+            );
+            let mut corner = 0usize;
+            let mut cz = 0i32;
+            while cz < 2 {
+                let mut cy = 0i32;
+                while cy < 2 {
+                    let mut cx = 0i32;
+                    while cx < 2 {
+                        let w = weights[corner];
+                        corner += 1;
+                        let fi = base_i + cx;
+                        let fj = base_j + cy;
+                        let fk = base_k + cz;
+                        cx += 1;
+                        if fi < 0
+                            || fj < 0
+                            || fk < 0
+                            || fi >= node_dim[0] as i32
+                            || fj >= node_dim[1] as i32
+                            || fk >= node_dim[2] as i32
+                        {
+                            continue;
+                        }
+                        if w <= 0.0 {
+                            continue;
+                        }
+                        let node = Vec3::new(
+                            origin.x + (fi as f32 + shift.x) * dx,
+                            origin.y + (fj as f32 + shift.y) * dx,
+                            origin.z + (fk as f32 + shift.z) * dx,
+                        );
+                        let offset = node.sub(pos);
+                        let node_vel = apic_velocity(vel, rows, offset);
+                        let comp = match axis {
+                            0 => node_vel.x,
+                            1 => node_vel.y,
+                            _ => node_vel.z,
+                        };
+                        let flat = match axis {
+                            0 => mac_u_index(fi as u32, fj as u32, fk as u32, dim),
+                            1 => mac_v_index(fi as u32, fj as u32, fk as u32, dim),
+                            _ => mac_w_index(fi as u32, fj as u32, fk as u32, dim),
+                        } as usize;
+                        let slot = flat * 2;
+                        scatter[slot] =
+                            scatter[slot].wrapping_add(flip_encode_fixed(comp * mass * w));
+                        scatter[slot + 1] =
+                            scatter[slot + 1].wrapping_add(flip_encode_fixed(mass * w));
+                    }
+                    cy += 1;
+                }
+                cz += 1;
+            }
+            axis += 1;
+        }
+    }
+    scatter
+}
+
+/// `CPU` golden twin of `water_flip_mac_faces_normalize`: divides each face's
+/// accumulated momentum by its accumulated mass, seeding massless faces to zero.
+fn mac_faces_normalize_golden(scatter: &[u32], dim: [u32; 3]) -> Vec<f32> {
+    let total = mac_face_count(dim) as usize;
+    let mut faces = vec![0.0f32; total];
+    let mut f = 0usize;
+    while f < total {
+        let slot = f * 2;
+        let mass = flip_decode_fixed(scatter[slot + 1]);
+        if mass > FLIP_EPS {
+            faces[f] = flip_decode_fixed(scatter[slot]) / mass;
+        }
+        f += 1;
+    }
+    faces
+}
+
+/// Dispatches the face-centered `P2G` scatter followed by the normalize pass on
+/// device, reading back both the raw fixed-point face accumulators and the
+/// normalized `[u | v | w]` velocity buffer.
+///
+/// Each kernel's bind group is built from its pipeline's reflected `group(0)`
+/// layout: `water_flip_mac_p2g` touches the particles, the scatter atomics, and
+/// the parameter block (bindings 0, 1, 3); `water_flip_mac_faces_normalize`
+/// touches the scatter atomics, the face velocities, and the parameters
+/// (bindings 1, 2, 3).
+fn dispatch_flip_mac_p2g(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    wgsl: &str,
+    p2g_entry: &str,
+    norm_entry: &str,
+    particles: &[GpuFlipParticle],
+    dim: [u32; 3],
+    params: &GpuFlipSimParams,
+) -> (Vec<u32>, Vec<f32>) {
+    let module = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("water_flip_mac_p2g"),
+        source: ShaderSource::Wgsl(wgsl.into()),
+    });
+    let p2g_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("mac_p2g_pipeline"),
+        layout: None,
+        module: &module,
+        entry_point: Some(p2g_entry),
+        compilation_options: PipelineCompilationOptions::default(),
+        cache: None,
+    });
+    let norm_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("mac_faces_normalize_pipeline"),
+        layout: None,
+        module: &module,
+        entry_point: Some(norm_entry),
+        compilation_options: PipelineCompilationOptions::default(),
+        cache: None,
+    });
+
+    let face_count = mac_face_count(dim) as usize;
+    let scatter_len = face_count * 2;
+    let scatter_zero = vec![0u32; scatter_len];
+    let faces_zero = vec![0.0f32; face_count];
+
+    let particle_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("mac_p2g_particles"),
+        contents: bytemuck::cast_slice(particles),
+        usage: BufferUsages::STORAGE,
+    });
+    let scatter_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("mac_p2g_scatter"),
+        contents: bytemuck::cast_slice(&scatter_zero),
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+    });
+    let faces_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("mac_p2g_faces"),
+        contents: bytemuck::cast_slice(&faces_zero),
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+    });
+    let param_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("mac_p2g_params"),
+        contents: bytemuck::bytes_of(params),
+        usage: BufferUsages::UNIFORM,
+    });
+
+    let p2g_layout = p2g_pipeline.get_bind_group_layout(0);
+    let p2g_group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("mac_p2g_group0"),
+        layout: &p2g_layout,
+        entries: &[
+            BindGroupEntry {
+                binding: 0,
+                resource: particle_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 1,
+                resource: scatter_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 3,
+                resource: param_buf.as_entire_binding(),
+            },
+        ],
+    });
+    let norm_layout = norm_pipeline.get_bind_group_layout(0);
+    let norm_group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("mac_faces_normalize_group0"),
+        layout: &norm_layout,
+        entries: &[
+            BindGroupEntry {
+                binding: 1,
+                resource: scatter_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 2,
+                resource: faces_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 3,
+                resource: param_buf.as_entire_binding(),
+            },
+        ],
+    });
+
+    let scatter_bytes = (scatter_len * size_of::<u32>()) as u64;
+    let faces_bytes = (face_count * size_of::<f32>()) as u64;
+    let scatter_stage = device.create_buffer(&BufferDescriptor {
+        label: Some("mac_p2g_scatter_stage"),
+        size: scatter_bytes,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let faces_stage = device.create_buffer(&BufferDescriptor {
+        label: Some("mac_p2g_faces_stage"),
+        size: faces_bytes,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("mac_p2g_encoder"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("mac_p2g_pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&p2g_pipeline);
+        pass.set_bind_group(0, &p2g_group, &[]);
+        pass.dispatch_workgroups(params.particle_count.div_ceil(64), 1, 1);
+    }
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("mac_faces_normalize_pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&norm_pipeline);
+        pass.set_bind_group(0, &norm_group, &[]);
+        pass.dispatch_workgroups((face_count as u32).div_ceil(64), 1, 1);
+    }
+    encoder.copy_buffer_to_buffer(&scatter_buf, 0, &scatter_stage, 0, scatter_bytes);
+    encoder.copy_buffer_to_buffer(&faces_buf, 0, &faces_stage, 0, faces_bytes);
+    queue.submit([encoder.finish()]);
+
+    scatter_stage.slice(..).map_async(MapMode::Read, |_| {});
+    faces_stage.slice(..).map_async(MapMode::Read, |_| {});
+    device
+        .poll(PollType::wait_indefinitely())
+        .expect("device poll should complete the submitted work");
+
+    let scatter_view = scatter_stage
+        .slice(..)
+        .get_mapped_range()
+        .expect("scatter readback range should be available after poll");
+    let scatter_out: Vec<u32> = bytemuck::cast_slice::<u8, u32>(&scatter_view).to_vec();
+    drop(scatter_view);
+    scatter_stage.unmap();
+
+    let faces_view = faces_stage
+        .slice(..)
+        .get_mapped_range()
+        .expect("faces readback range should be available after poll");
+    let faces_out: Vec<f32> = bytemuck::cast_slice::<u8, f32>(&faces_view).to_vec();
+    drop(faces_view);
+    faces_stage.unmap();
+
+    (scatter_out, faces_out)
+}
+
+/// One on-device face-centered `P2G` + normalize must match the `CPU` golden.
+///
+/// The scene mixes an interior particle (all staggered corners in-bounds), a
+/// boundary particle straddling the grid edge (some faces skipped by the bounds
+/// guard, including solid domain-wall faces that must stay zero), two particles
+/// sharing a cell (order-independent atomic accumulation), an `APIC`-affine
+/// particle (non-zero `C_p` rows exercising the per-component affine offset),
+/// and an inactive particle (`pos.w <= 0.5`) that must contribute nothing. All
+/// positions, velocities, affine rows, mass, and cell size are dyadic so the
+/// fixed-point round is tie-free and the raw accumulators agree bit-for-bit,
+/// with the normalized face velocities agreeing to `float32` rounding. This is
+/// the transfer half of the staggered-`MAC` migration that feeds
+/// `water_flip_mac.wesl`'s unconditionally-stable projection.
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice must reach the test log on hosts without a wgpu adapter"
+)]
+fn flip_mac_p2g_gpu_matches_cpu_golden() {
+    let Some((device, queue)) = try_solver_device() else {
+        eprintln!(
+            "flip_mac_p2g_gpu_matches_cpu_golden: no wgpu adapter, skipping on-device parity"
+        );
+        return;
+    };
+
+    let dim = [4u32, 4u32, 4u32];
+    let cell_count = dim[0] * dim[1] * dim[2];
+    let dx = 1.0_f32;
+    let inv_dx = 1.0_f32;
+
+    let particles = [
+        // Interior particle: all staggered corners inside every face lattice.
+        GpuFlipParticle {
+            pos: [1.25, 1.5, 1.75, 1.0],
+            vel: [0.5, -0.25, 0.75, 0.0],
+            c0: [0.0, 0.0, 0.0, 0.0],
+            c1: [0.0, 0.0, 0.0, 0.0],
+            c2: [0.0, 0.0, 0.0, 0.0],
+        },
+        // Boundary particle straddling the low corner: some faces are skipped.
+        GpuFlipParticle {
+            pos: [0.25, 0.25, 0.25, 1.0],
+            vel: [-1.0, 0.5, 0.25, 0.0],
+            c0: [0.0, 0.0, 0.0, 0.0],
+            c1: [0.0, 0.0, 0.0, 0.0],
+            c2: [0.0, 0.0, 0.0, 0.0],
+        },
+        // Two particles sharing one cell: order-independent atomic accumulation.
+        GpuFlipParticle {
+            pos: [2.5, 2.5, 2.5, 1.0],
+            vel: [0.125, 0.25, -0.5, 0.0],
+            c0: [0.0, 0.0, 0.0, 0.0],
+            c1: [0.0, 0.0, 0.0, 0.0],
+            c2: [0.0, 0.0, 0.0, 0.0],
+        },
+        GpuFlipParticle {
+            pos: [2.5, 2.5, 2.5, 1.0],
+            vel: [-0.25, 0.75, 0.5, 0.0],
+            c0: [0.0, 0.0, 0.0, 0.0],
+            c1: [0.0, 0.0, 0.0, 0.0],
+            c2: [0.0, 0.0, 0.0, 0.0],
+        },
+        // APIC-affine particle: non-zero C_p rows exercise the affine offset.
+        GpuFlipParticle {
+            pos: [1.75, 2.25, 1.5, 1.0],
+            vel: [0.5, -0.5, 0.25, 0.0],
+            c0: [0.25, -0.125, 0.5, 0.0],
+            c1: [-0.5, 0.25, 0.125, 0.0],
+            c2: [0.125, 0.5, -0.25, 0.0],
+        },
+        // Inactive particle: contributes nothing.
+        GpuFlipParticle {
+            pos: [2.0, 2.0, 2.0, 0.0],
+            vel: [9.0, 9.0, 9.0, 0.0],
+            c0: [9.0, 9.0, 9.0, 0.0],
+            c1: [9.0, 9.0, 9.0, 0.0],
+            c2: [9.0, 9.0, 9.0, 0.0],
+        },
+    ];
+
+    let params = GpuFlipSimParams {
+        origin: [0.0, 0.0, 0.0, 0.0],
+        dim: [dim[0], dim[1], dim[2], 0],
+        dx,
+        inv_dx,
+        flip_blend: 1.0,
+        particle_mass: 2.0,
+        jacobi_omega: 0.6,
+        use_affine: 1,
+        particle_count: particles.len() as u32,
+        cell_count,
+    };
+
+    let wgsl = compile_flip_mac_p2g_wgsl();
+    let p2g_entry = find_entry_point(&wgsl, "water_flip_mac_p2g");
+    let norm_entry = find_entry_point(&wgsl, "water_flip_mac_faces_normalize");
+
+    let (gpu_scatter, gpu_faces) = dispatch_flip_mac_p2g(
+        &device,
+        &queue,
+        &wgsl,
+        &p2g_entry,
+        &norm_entry,
+        &particles,
+        dim,
+        &params,
+    );
+    let cpu_scatter = mac_p2g_golden(&particles, &params);
+    let cpu_faces = mac_faces_normalize_golden(&cpu_scatter, dim);
+
+    assert_eq!(
+        gpu_scatter.len(),
+        cpu_scatter.len(),
+        "scatter buffer length mismatch"
+    );
+    let mut f = 0usize;
+    while f < cpu_scatter.len() {
+        assert_eq!(
+            gpu_scatter[f], cpu_scatter[f],
+            "raw fixed-point scatter slot {f} mismatch: gpu {} vs cpu {}",
+            gpu_scatter[f], cpu_scatter[f]
+        );
+        f += 1;
+    }
+
+    assert_eq!(
+        gpu_faces.len(),
+        cpu_faces.len(),
+        "face buffer length mismatch"
+    );
+    let mut i = 0usize;
+    while i < cpu_faces.len() {
+        let delta = (gpu_faces[i] - cpu_faces[i]).abs();
+        assert!(
+            delta <= PARITY_EPS,
+            "normalized face {i} mismatch: gpu {} vs cpu {} (delta {delta})",
+            gpu_faces[i],
+            cpu_faces[i]
+        );
+        i += 1;
+    }
+
+    // The scatter must actually fire: at least one interior face carries a
+    // normalized velocity.
+    let live_faces = gpu_faces.iter().filter(|v| v.abs() > FLIP_EPS).count();
+    assert!(
+        live_faces > 0,
+        "face-centered P2G produced an all-zero face field"
+    );
+}
