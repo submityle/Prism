@@ -26,7 +26,10 @@
 
 mod contact;
 mod cpu;
+mod gpu;
+mod layout;
 mod sphere;
 
 pub use contact::Contact;
 pub use cpu::cpu_narrowphase;
+pub use gpu::GpuNarrowphase;
