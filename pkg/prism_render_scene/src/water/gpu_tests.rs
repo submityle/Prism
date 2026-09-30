@@ -7909,3 +7909,822 @@ fn spectrum_fft_cascade_atlas_gpu_stacks_distinct_tiles() {
         "stacked cascades must resolve different bands, but the two tiles were identical (max |d|={max_tile_delta})"
     );
 }
+
+// ============================================================================
+// Staggered `MAC` pressure projection — checkerboard null-space eradication.
+//
+// `water_flip.wesl`'s collocated cell-centered projection carries the classic
+// odd/even (checkerboard) null space, so repeated projection injects energy
+// (documented honestly by the collocated goldens). `water_flip_mac.wesl` moves
+// the velocity to the six `MAC` faces so `div(grad)` is byte-for-byte the same
+// compact 7-point `Laplacian` the `Jacobi` sweep relaxes; the projection then is
+// a true orthogonal removal of the divergent component, matching `Houdini`,
+// `UE5` `Niagara`, and `Bridson`-style solvers. This block proves that on a real
+// device: every stage tracks its `CPU` golden to `float32` rounding, and the
+// projected field's divergence collapses while total kinetic energy never grows
+// — the discriminating behaviour the collocated scheme cannot achieve.
+// ============================================================================
+
+/// Grid-scalar uniform block mirrored from `MacParams` in `water_flip_mac.wesl`.
+/// 32 bytes: a `vec4<u32>` row (grid dim + total cell count) then four `f32`
+/// scalars (`inv_dx`, `dx`, `jacobi_omega`, pad).
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct GpuMacParams {
+    dim: [u32; 4],
+    inv_dx: f32,
+    dx: f32,
+    jacobi_omega: f32,
+    pad: f32,
+}
+
+/// Absolute epsilon guarding the `Neumann` neighbour-count divide, mirrored from
+/// `MAC_EPS` in `water_flip_mac.wesl`.
+const MAC_EPS: f32 = 1.0e-6;
+
+/// Bound on the fraction of the initial peak divergence that may survive the
+/// full projection roll-out. Set from the measured `M2` reduction with ample
+/// margin; the collocated scheme cannot approach it because its checkerboard
+/// divergence lives in the operator null space and is invisible to the solve.
+const MAC_DIV_RESIDUAL_FRACTION: f32 = 0.20;
+
+/// Slack allowed on the "energy never grows" invariant across projection
+/// cycles. Orthogonal projection can only remove kinetic energy; only `float32`
+/// summation rounding may nudge the total upward by this relative amount.
+const MAC_ENERGY_GROWTH_EPS: f32 = 1.0e-4;
+
+/// Compiles `water_flip_mac.wesl` and returns its `Wgsl` translation.
+fn compile_flip_mac_wgsl() -> String {
+    let mut cache = ShaderCache::new((), keep_wgsl);
+    let id = AssetId::Uuid {
+        uuid: Uuid::from_u128(0x5052_4953_4d5f_5741_5445_5246_4c50_0003),
+    };
+    cache.set_shader(
+        id,
+        Shader::from_wesl(
+            include_str!("../shaders/water_flip_mac.wesl"),
+            "embedded://prism_render_scene/shaders/water_flip_mac.wesl",
+        ),
+    );
+    let module = cache
+        .get(0, id, &[])
+        .unwrap_or_else(|error| panic!("water_flip_mac.wesl failed to compile: {error}"));
+    (*module).clone()
+}
+
+/// `u`-face element count `(nx+1)·ny·nz`, mirroring `mac_u_count`.
+fn mac_u_count(dim: [u32; 3]) -> u32 {
+    (dim[0] + 1) * dim[1] * dim[2]
+}
+
+/// `v`-face element count `nx·(ny+1)·nz`, mirroring `mac_v_count`.
+fn mac_v_count(dim: [u32; 3]) -> u32 {
+    dim[0] * (dim[1] + 1) * dim[2]
+}
+
+/// `w`-face element count `nx·ny·(nz+1)`.
+fn mac_w_count(dim: [u32; 3]) -> u32 {
+    dim[0] * dim[1] * (dim[2] + 1)
+}
+
+/// Total packed face count over the `[u | v | w]` blocks.
+fn mac_face_count(dim: [u32; 3]) -> u32 {
+    mac_u_count(dim) + mac_v_count(dim) + mac_w_count(dim)
+}
+
+/// Linear cell index `(k·ny + j)·nx + i`, mirroring `mac_cell_index`.
+fn mac_cell_index(i: u32, j: u32, k: u32, dim: [u32; 3]) -> u32 {
+    (k * dim[1] + j) * dim[0] + i
+}
+
+/// Linear `u`-face index for `i ∈ 0..=nx`, mirroring `mac_u_index`.
+fn mac_u_index(i: u32, j: u32, k: u32, dim: [u32; 3]) -> u32 {
+    (k * dim[1] + j) * (dim[0] + 1) + i
+}
+
+/// Linear `v`-face index for `j ∈ 0..=ny`, mirroring `mac_v_index`.
+fn mac_v_index(i: u32, j: u32, k: u32, dim: [u32; 3]) -> u32 {
+    mac_u_count(dim) + (k * (dim[1] + 1) + j) * dim[0] + i
+}
+
+/// Linear `w`-face index for `k ∈ 0..=nz`, mirroring `mac_w_index`.
+fn mac_w_index(i: u32, j: u32, k: u32, dim: [u32; 3]) -> u32 {
+    mac_u_count(dim) + mac_v_count(dim) + (k * dim[1] + j) * dim[0] + i
+}
+
+/// Whether cell `(i, j, k)` lies inside the grid, mirroring `mac_in_bounds`.
+fn mac_cell_in_bounds(i: i32, j: i32, k: i32, dim: [u32; 3]) -> bool {
+    i >= 0 && j >= 0 && k >= 0 && i < dim[0] as i32 && j < dim[1] as i32 && k < dim[2] as i32
+}
+
+/// `CPU` golden twin of `mac_divergence`: compact one-sided face divergence per
+/// cell `((u[i+1]-u[i]) + (v[j+1]-v[j]) + (w[k+1]-w[k])) / dx`.
+fn mac_divergence_golden(faces: &[f32], dim: [u32; 3], inv_dx: f32) -> Vec<f32> {
+    let total = (dim[0] * dim[1] * dim[2]) as usize;
+    let mut out = vec![0.0_f32; total];
+    let mut k = 0u32;
+    while k < dim[2] {
+        let mut j = 0u32;
+        while j < dim[1] {
+            let mut i = 0u32;
+            while i < dim[0] {
+                let du = faces[mac_u_index(i + 1, j, k, dim) as usize]
+                    - faces[mac_u_index(i, j, k, dim) as usize];
+                let dv = faces[mac_v_index(i, j + 1, k, dim) as usize]
+                    - faces[mac_v_index(i, j, k, dim) as usize];
+                let dw = faces[mac_w_index(i, j, k + 1, dim) as usize]
+                    - faces[mac_w_index(i, j, k, dim) as usize];
+                out[mac_cell_index(i, j, k, dim) as usize] = (du + dv + dw) * inv_dx;
+                i += 1;
+            }
+            j += 1;
+        }
+        k += 1;
+    }
+    out
+}
+
+/// `CPU` golden twin of `sweeps` damped-`Jacobi` sweeps of `mac_pressure`,
+/// starting from a zero pressure estimate (each projection cycle solves for a
+/// correction against the current residual divergence). The host `ping`-`pong`
+/// is a plain double buffer here.
+fn mac_pressure_golden(
+    divergence: &[f32],
+    dim: [u32; 3],
+    dx: f32,
+    jacobi_omega: f32,
+    sweeps: u32,
+) -> Vec<f32> {
+    let total = (dim[0] * dim[1] * dim[2]) as usize;
+    let mut p_in = vec![0.0_f32; total];
+    let mut p_out = vec![0.0_f32; total];
+    let dx2 = dx * dx;
+    let omega = jacobi_omega.clamp(0.0, 1.0);
+    let offsets: [[i32; 3]; 6] = [
+        [1, 0, 0],
+        [-1, 0, 0],
+        [0, 1, 0],
+        [0, -1, 0],
+        [0, 0, 1],
+        [0, 0, -1],
+    ];
+    let mut sweep = 0u32;
+    while sweep < sweeps {
+        let mut k = 0u32;
+        while k < dim[2] {
+            let mut j = 0u32;
+            while j < dim[1] {
+                let mut i = 0u32;
+                while i < dim[0] {
+                    let cell = mac_cell_index(i, j, k, dim) as usize;
+                    let mut p_sum = 0.0_f32;
+                    let mut count = 0.0_f32;
+                    let mut n = 0usize;
+                    while n < 6 {
+                        let ni = i as i32 + offsets[n][0];
+                        let nj = j as i32 + offsets[n][1];
+                        let nk = k as i32 + offsets[n][2];
+                        if mac_cell_in_bounds(ni, nj, nk, dim) {
+                            p_sum +=
+                                p_in[mac_cell_index(ni as u32, nj as u32, nk as u32, dim) as usize];
+                            count += 1.0;
+                        }
+                        n += 1;
+                    }
+                    if count <= MAC_EPS {
+                        p_out[cell] = 0.0;
+                    } else {
+                        let relaxed = (p_sum - dx2 * divergence[cell]) / count;
+                        p_out[cell] = p_in[cell] * (1.0 - omega) + relaxed * omega;
+                    }
+                    i += 1;
+                }
+                j += 1;
+            }
+            k += 1;
+        }
+        core::mem::swap(&mut p_in, &mut p_out);
+        sweep += 1;
+    }
+    // After the final swap the freshest estimate is in `p_in`.
+    p_in
+}
+
+/// `CPU` golden twin of `mac_project`: subtract the compact face pressure
+/// gradient from every interior face, leaving solid boundary faces untouched.
+/// Walks the flat `[u | v | w]` index exactly like the kernel.
+fn mac_project_golden(faces: &[f32], pressure: &[f32], dim: [u32; 3], inv_dx: f32) -> Vec<f32> {
+    let mut out = faces.to_vec();
+    let u_count = mac_u_count(dim);
+    let v_count = mac_v_count(dim);
+    let total = mac_face_count(dim);
+    let mut f = 0u32;
+    while f < total {
+        if f < u_count {
+            let nxp1 = dim[0] + 1;
+            let i = f % nxp1;
+            let rem = f / nxp1;
+            let j = rem % dim[1];
+            let k = rem / dim[1];
+            if i == 0 || i == dim[0] {
+                f += 1;
+                continue;
+            }
+            let grad = (pressure[mac_cell_index(i, j, k, dim) as usize]
+                - pressure[mac_cell_index(i - 1, j, k, dim) as usize])
+                * inv_dx;
+            out[f as usize] -= grad;
+        } else if f < u_count + v_count {
+            let g = f - u_count;
+            let nyp1 = dim[1] + 1;
+            let i = g % dim[0];
+            let rem = g / dim[0];
+            let j = rem % nyp1;
+            let k = rem / nyp1;
+            if j == 0 || j == dim[1] {
+                f += 1;
+                continue;
+            }
+            let grad = (pressure[mac_cell_index(i, j, k, dim) as usize]
+                - pressure[mac_cell_index(i, j - 1, k, dim) as usize])
+                * inv_dx;
+            out[f as usize] -= grad;
+        } else {
+            let g = f - u_count - v_count;
+            let i = g % dim[0];
+            let rem = g / dim[0];
+            let j = rem % dim[1];
+            let k = rem / dim[1];
+            if k == 0 || k == dim[2] {
+                f += 1;
+                continue;
+            }
+            let grad = (pressure[mac_cell_index(i, j, k, dim) as usize]
+                - pressure[mac_cell_index(i, j, k - 1, dim) as usize])
+                * inv_dx;
+            out[f as usize] -= grad;
+        }
+        f += 1;
+    }
+    out
+}
+
+/// Seeds a staggered face field: a smooth low-frequency divergent flow plus a
+/// strong pure-checkerboard component on the interior faces only. Boundary faces
+/// (`i = 0`/`i = nx` for `u`, etc.) stay zero — the solid tank wall. The
+/// checkerboard is the highest-frequency mode and is exactly what the collocated
+/// null space hides; the `MAC` projection must be able to remove it.
+fn seed_mac_faces(dim: [u32; 3]) -> Vec<f32> {
+    let mut faces = vec![0.0_f32; mac_face_count(dim) as usize];
+    let checker = 0.7_f32;
+    // u-faces.
+    let mut k = 0u32;
+    while k < dim[2] {
+        let mut j = 0u32;
+        while j < dim[1] {
+            let mut i = 0u32;
+            while i <= dim[0] {
+                if i != 0 && i != dim[0] {
+                    let smooth = 0.05 * (2.0 * i as f32 - j as f32 + 0.5 * k as f32);
+                    let sign = if (i + j + k) % 2 == 0 { 1.0 } else { -1.0 };
+                    faces[mac_u_index(i, j, k, dim) as usize] = smooth + sign * checker;
+                }
+                i += 1;
+            }
+            j += 1;
+        }
+        k += 1;
+    }
+    // v-faces.
+    k = 0;
+    while k < dim[2] {
+        let mut i = 0u32;
+        while i < dim[0] {
+            let mut j = 0u32;
+            while j <= dim[1] {
+                if j != 0 && j != dim[1] {
+                    let smooth = 0.04 * (i as f32 - 2.0 * j as f32 + k as f32);
+                    let sign = if (i + j + k) % 2 == 0 { 1.0 } else { -1.0 };
+                    faces[mac_v_index(i, j, k, dim) as usize] = smooth + sign * checker;
+                }
+                j += 1;
+            }
+            i += 1;
+        }
+        k += 1;
+    }
+    // w-faces.
+    let mut j = 0u32;
+    while j < dim[1] {
+        let mut i = 0u32;
+        while i < dim[0] {
+            let mut kk = 0u32;
+            while kk <= dim[2] {
+                if kk != 0 && kk != dim[2] {
+                    let smooth = 0.03 * (i as f32 + j as f32 - 2.0 * kk as f32);
+                    let sign = if (i + j + kk) % 2 == 0 { 1.0 } else { -1.0 };
+                    faces[mac_w_index(i, j, kk, dim) as usize] = smooth + sign * checker;
+                }
+                kk += 1;
+            }
+            i += 1;
+        }
+        j += 1;
+    }
+    faces
+}
+
+/// Total discrete kinetic energy proxy `Σ face²`.
+fn mac_face_energy(faces: &[f32]) -> f32 {
+    let mut e = 0.0_f32;
+    let mut idx = 0usize;
+    while idx < faces.len() {
+        let v = faces[idx];
+        e += v * v;
+        idx += 1;
+    }
+    e
+}
+
+/// Peak absolute value across a scalar field.
+fn mac_max_abs(field: &[f32]) -> f32 {
+    let mut m = 0.0_f32;
+    let mut idx = 0usize;
+    while idx < field.len() {
+        let a = field[idx].abs();
+        if a > m {
+            m = a;
+        }
+        idx += 1;
+    }
+    m
+}
+
+/// Asserts two float fields agree cell-for-cell to [`PARITY_EPS`].
+fn mac_assert_parity(label: &str, gpu: &[f32], cpu: &[f32]) {
+    assert_eq!(gpu.len(), cpu.len(), "{label}: length mismatch");
+    let mut idx = 0usize;
+    while idx < gpu.len() {
+        let d = (gpu[idx] - cpu[idx]).abs();
+        assert!(
+            d < PARITY_EPS,
+            "{label}[{idx}]: gpu={} cpu={} |d|={d}",
+            gpu[idx],
+            cpu[idx]
+        );
+        idx += 1;
+    }
+}
+
+/// Dispatches `mac_divergence` and reads the per-cell divergence back.
+fn dispatch_mac_divergence(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    wgsl: &str,
+    entry: &str,
+    faces: &[f32],
+    params: &GpuMacParams,
+) -> Vec<f32> {
+    let module = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("water_flip_mac"),
+        source: ShaderSource::Wgsl(wgsl.into()),
+    });
+    let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("mac_divergence_pipeline"),
+        layout: None,
+        module: &module,
+        entry_point: Some(entry),
+        compilation_options: PipelineCompilationOptions::default(),
+        cache: None,
+    });
+    let cell_count = params.dim[3] as usize;
+    let faces_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("mac_faces"),
+        contents: bytemuck::cast_slice(faces),
+        usage: BufferUsages::STORAGE,
+    });
+    let div_bytes = (cell_count * size_of::<f32>()) as u64;
+    let div_buf = device.create_buffer(&BufferDescriptor {
+        label: Some("mac_divergence"),
+        size: div_bytes,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let param_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("mac_params"),
+        contents: bytemuck::bytes_of(params),
+        usage: BufferUsages::UNIFORM,
+    });
+    let layout = pipeline.get_bind_group_layout(0);
+    let bind_group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("mac_div_group0"),
+        layout: &layout,
+        entries: &[
+            BindGroupEntry {
+                binding: 0,
+                resource: faces_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 1,
+                resource: div_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 4,
+                resource: param_buf.as_entire_binding(),
+            },
+        ],
+    });
+    let stage = device.create_buffer(&BufferDescriptor {
+        label: Some("mac_div_stage"),
+        size: div_bytes,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("mac_div_encoder"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("mac_div_pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(
+            params.dim[0].div_ceil(4),
+            params.dim[1].div_ceil(4),
+            params.dim[2].div_ceil(4),
+        );
+    }
+    encoder.copy_buffer_to_buffer(&div_buf, 0, &stage, 0, div_bytes);
+    queue.submit([encoder.finish()]);
+    stage.slice(..).map_async(MapMode::Read, |_| {});
+    device
+        .poll(PollType::wait_indefinitely())
+        .expect("device poll should complete the submitted work");
+    let view = stage
+        .slice(..)
+        .get_mapped_range()
+        .expect("mapped readback range should be available after poll");
+    let values: Vec<f32> = bytemuck::cast_slice::<u8, f32>(&view).to_vec();
+    drop(view);
+    stage.unmap();
+    values
+}
+
+/// Dispatches `sweeps` damped-`Jacobi` `mac_pressure` sweeps (ping-pong over two
+/// storage buffers, `divergence` frozen) and reads the converged pressure back.
+fn dispatch_mac_pressure(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    wgsl: &str,
+    entry: &str,
+    divergence: &[f32],
+    params: &GpuMacParams,
+    sweeps: u32,
+) -> Vec<f32> {
+    let module = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("water_flip_mac"),
+        source: ShaderSource::Wgsl(wgsl.into()),
+    });
+    let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("mac_pressure_pipeline"),
+        layout: None,
+        module: &module,
+        entry_point: Some(entry),
+        compilation_options: PipelineCompilationOptions::default(),
+        cache: None,
+    });
+    let cell_count = params.dim[3] as usize;
+    let bytes = (cell_count * size_of::<f32>()) as u64;
+    let zeros = vec![0.0_f32; cell_count];
+    let div_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("mac_pressure_div"),
+        contents: bytemuck::cast_slice(divergence),
+        usage: BufferUsages::STORAGE,
+    });
+    let p_a = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("mac_pressure_a"),
+        contents: bytemuck::cast_slice(&zeros),
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+    });
+    let p_b = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("mac_pressure_b"),
+        contents: bytemuck::cast_slice(&zeros),
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+    });
+    let param_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("mac_params"),
+        contents: bytemuck::bytes_of(params),
+        usage: BufferUsages::UNIFORM,
+    });
+    let layout = pipeline.get_bind_group_layout(0);
+    // Read `a` → write `b`.
+    let bg_ab = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("mac_pressure_ab"),
+        layout: &layout,
+        entries: &[
+            BindGroupEntry {
+                binding: 1,
+                resource: div_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 2,
+                resource: p_a.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 3,
+                resource: p_b.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 4,
+                resource: param_buf.as_entire_binding(),
+            },
+        ],
+    });
+    // Read `b` → write `a`.
+    let bg_ba = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("mac_pressure_ba"),
+        layout: &layout,
+        entries: &[
+            BindGroupEntry {
+                binding: 1,
+                resource: div_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 2,
+                resource: p_b.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 3,
+                resource: p_a.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 4,
+                resource: param_buf.as_entire_binding(),
+            },
+        ],
+    });
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("mac_pressure_encoder"),
+    });
+    let mut sweep = 0u32;
+    while sweep < sweeps {
+        let bind = if sweep % 2 == 0 { &bg_ab } else { &bg_ba };
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("mac_pressure_pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, bind, &[]);
+        pass.dispatch_workgroups(
+            params.dim[0].div_ceil(4),
+            params.dim[1].div_ceil(4),
+            params.dim[2].div_ceil(4),
+        );
+        drop(pass);
+        sweep += 1;
+    }
+    // The freshest estimate is the write side of the last sweep: `b` when the
+    // final sweep index was even, otherwise `a`.
+    let latest = if sweeps % 2 == 1 { &p_b } else { &p_a };
+    let stage = device.create_buffer(&BufferDescriptor {
+        label: Some("mac_pressure_stage"),
+        size: bytes,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    encoder.copy_buffer_to_buffer(latest, 0, &stage, 0, bytes);
+    queue.submit([encoder.finish()]);
+    stage.slice(..).map_async(MapMode::Read, |_| {});
+    device
+        .poll(PollType::wait_indefinitely())
+        .expect("device poll should complete the submitted work");
+    let view = stage
+        .slice(..)
+        .get_mapped_range()
+        .expect("mapped readback range should be available after poll");
+    let values: Vec<f32> = bytemuck::cast_slice::<u8, f32>(&view).to_vec();
+    drop(view);
+    stage.unmap();
+    values
+}
+
+/// Dispatches `mac_project` and reads the corrected face field back.
+fn dispatch_mac_project(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    wgsl: &str,
+    entry: &str,
+    faces: &[f32],
+    pressure: &[f32],
+    params: &GpuMacParams,
+) -> Vec<f32> {
+    let module = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("water_flip_mac"),
+        source: ShaderSource::Wgsl(wgsl.into()),
+    });
+    let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("mac_project_pipeline"),
+        layout: None,
+        module: &module,
+        entry_point: Some(entry),
+        compilation_options: PipelineCompilationOptions::default(),
+        cache: None,
+    });
+    let face_bytes = size_of_val(faces) as u64;
+    let faces_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("mac_project_faces"),
+        contents: bytemuck::cast_slice(faces),
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+    });
+    let pressure_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("mac_project_pressure"),
+        contents: bytemuck::cast_slice(pressure),
+        usage: BufferUsages::STORAGE,
+    });
+    let param_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("mac_params"),
+        contents: bytemuck::bytes_of(params),
+        usage: BufferUsages::UNIFORM,
+    });
+    let layout = pipeline.get_bind_group_layout(0);
+    let bind_group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("mac_project_group0"),
+        layout: &layout,
+        entries: &[
+            BindGroupEntry {
+                binding: 0,
+                resource: faces_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 2,
+                resource: pressure_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 4,
+                resource: param_buf.as_entire_binding(),
+            },
+        ],
+    });
+    let stage = device.create_buffer(&BufferDescriptor {
+        label: Some("mac_project_stage"),
+        size: face_bytes,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("mac_project_encoder"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("mac_project_pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(
+            mac_face_count([params.dim[0], params.dim[1], params.dim[2]]).div_ceil(64),
+            1,
+            1,
+        );
+    }
+    encoder.copy_buffer_to_buffer(&faces_buf, 0, &stage, 0, face_bytes);
+    queue.submit([encoder.finish()]);
+    stage.slice(..).map_async(MapMode::Read, |_| {});
+    device
+        .poll(PollType::wait_indefinitely())
+        .expect("device poll should complete the submitted work");
+    let view = stage
+        .slice(..)
+        .get_mapped_range()
+        .expect("mapped readback range should be available after poll");
+    let values: Vec<f32> = bytemuck::cast_slice::<u8, f32>(&view).to_vec();
+    drop(view);
+    stage.unmap();
+    values
+}
+
+/// The staggered `MAC` projection must remove the checkerboard divergence the
+/// collocated scheme cannot, tracking the `CPU` golden at every stage.
+///
+/// Runs several projection cycles (divergence → `Jacobi` pressure → project) on
+/// a 4×4×4 tank seeded with a smooth divergent flow plus a strong pure
+/// checkerboard face field. Each stage is compared cell-for-cell against its
+/// `CPU` golden, the projected divergence must collapse to a small fraction of
+/// its seed, and the total face energy must never grow across cycles — the
+/// orthogonal-projection signature that proves the checkerboard null space is
+/// gone.
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice and measured reduction must reach the test log"
+)]
+fn mac_projection_gpu_removes_checkerboard_divergence() {
+    let Some((device, queue)) = try_solver_device() else {
+        eprintln!(
+            "skipping mac_projection_gpu_removes_checkerboard_divergence: no wgpu adapter available"
+        );
+        return;
+    };
+
+    let dim = [4u32, 4u32, 4u32];
+    let cell_count = dim[0] * dim[1] * dim[2];
+    let dx = 1.0_f32;
+    let inv_dx = 1.0_f32;
+    let jacobi_omega = 0.6_f32;
+    let params = GpuMacParams {
+        dim: [dim[0], dim[1], dim[2], cell_count],
+        inv_dx,
+        dx,
+        jacobi_omega,
+        pad: 0.0,
+    };
+    const CYCLES: u32 = 4;
+    const JACOBI: u32 = 60;
+
+    let wgsl = compile_flip_mac_wgsl();
+    let div_entry = find_entry_point(&wgsl, "mac_divergence");
+    let pressure_entry = find_entry_point(&wgsl, "mac_pressure");
+    let project_entry = find_entry_point(&wgsl, "mac_project");
+
+    let mut faces = seed_mac_faces(dim);
+    let init_div = mac_divergence_golden(&faces, dim, inv_dx);
+    let init_max_div = mac_max_abs(&init_div);
+    let init_energy = mac_face_energy(&faces);
+    assert!(
+        init_max_div > 0.5,
+        "seed must carry a non-trivial divergence, got {init_max_div}"
+    );
+
+    let mut prev_energy = init_energy;
+    let mut prev_max_div = init_max_div;
+    let mut cycle = 0u32;
+    while cycle < CYCLES {
+        // Stage 1: divergence.
+        let gpu_div = dispatch_mac_divergence(&device, &queue, &wgsl, &div_entry, &faces, &params);
+        let cpu_div = mac_divergence_golden(&faces, dim, inv_dx);
+        mac_assert_parity("mac_divergence", &gpu_div, &cpu_div);
+
+        // Stage 2: damped-Jacobi pressure over the GPU divergence.
+        let gpu_pressure = dispatch_mac_pressure(
+            &device,
+            &queue,
+            &wgsl,
+            &pressure_entry,
+            &gpu_div,
+            &params,
+            JACOBI,
+        );
+        let cpu_pressure = mac_pressure_golden(&cpu_div, dim, dx, jacobi_omega, JACOBI);
+        mac_assert_parity("mac_pressure", &gpu_pressure, &cpu_pressure);
+
+        // Stage 3: project.
+        let gpu_faces = dispatch_mac_project(
+            &device,
+            &queue,
+            &wgsl,
+            &project_entry,
+            &faces,
+            &gpu_pressure,
+            &params,
+        );
+        let cpu_faces = mac_project_golden(&faces, &cpu_pressure, dim, inv_dx);
+        mac_assert_parity("mac_project", &gpu_faces, &cpu_faces);
+
+        faces = gpu_faces;
+
+        let post_div = mac_divergence_golden(&faces, dim, inv_dx);
+        let post_max_div = mac_max_abs(&post_div);
+        let energy = mac_face_energy(&faces);
+        eprintln!(
+            "mac cycle {cycle}: max|div|={post_max_div:.6} (was {prev_max_div:.6}), E={energy:.6} (was {prev_energy:.6})"
+        );
+
+        // Energy is monotonically non-increasing: orthogonal projection can only
+        // remove kinetic energy. The collocated scheme injects it.
+        assert!(
+            energy <= prev_energy * (1.0 + MAC_ENERGY_GROWTH_EPS),
+            "cycle {cycle}: face energy grew {prev_energy} -> {energy} (projection must not inject energy)"
+        );
+        // Divergence is non-increasing across cycles (each projection strictly
+        // reduces the residual it can see; MAC sees all of it).
+        assert!(
+            post_max_div <= prev_max_div * (1.0 + MAC_ENERGY_GROWTH_EPS),
+            "cycle {cycle}: peak divergence grew {prev_max_div} -> {post_max_div}"
+        );
+
+        prev_energy = energy;
+        prev_max_div = post_max_div;
+        cycle += 1;
+    }
+
+    eprintln!(
+        "mac final: max|div|={prev_max_div:.6} / init {init_max_div:.6} = {:.4}",
+        prev_max_div / init_max_div
+    );
+    assert!(
+        prev_max_div < init_max_div * MAC_DIV_RESIDUAL_FRACTION,
+        "residual divergence {prev_max_div} must fall below {MAC_DIV_RESIDUAL_FRACTION} of the seed {init_max_div}"
+    );
+}
