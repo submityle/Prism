@@ -19,9 +19,11 @@ use alloc::vec::Vec;
 
 pub mod page_pool;
 pub mod page_storage;
+pub mod streaming;
 
 pub use page_pool::{PagePool, PagePoolError, UNMAPPED_SLOT};
 pub use page_storage::{PageStorage, PageStorageError};
+pub use streaming::{PageSource, PageStreamManager, ReconcileReport, StreamError};
 
 /// Lifecycle state of a tracked page.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -168,6 +170,33 @@ impl<K: Copy + Ord> ResidencyTable<K> {
             victims.push(key);
         }
         victims
+    }
+
+    /// Lists pages awaiting a stream-in: those [`PageResidency::Requested`] but
+    /// not yet resident, each paired with its recorded priority.
+    ///
+    /// The list follows key order; callers rank it by priority to decide which
+    /// pending pages to stream in first when physical slots are scarce.
+    #[must_use]
+    pub fn pending_requests(&self) -> Vec<(K, f32)> {
+        self.entries
+            .iter()
+            .filter(|(_, e)| e.residency == PageResidency::Requested)
+            .map(|(k, e)| (*k, e.priority))
+            .collect()
+    }
+
+    /// Lists every resident page with its full bookkeeping record, in key order.
+    ///
+    /// A streaming controller uses this to pick a replacement victim when it
+    /// must evict a resident page to admit a higher-priority pending one.
+    #[must_use]
+    pub fn resident_entries(&self) -> Vec<(K, PageEntry)> {
+        self.entries
+            .iter()
+            .filter(|(_, e)| e.residency == PageResidency::Resident)
+            .map(|(k, e)| (*k, *e))
+            .collect()
     }
 }
 
