@@ -81,6 +81,7 @@ pub mod payload_raster;
 pub mod raster;
 pub mod raster_classify;
 pub mod select_cut;
+pub mod triangle_gradients;
 
 pub use bin_cut::GpuCutBinner;
 pub use cluster_cull::GpuClusterCuller;
@@ -94,3 +95,4 @@ pub use payload_raster::GpuPayloadRaster;
 pub use raster::{GpuSoftwareRaster, RasterError};
 pub use raster_classify::GpuRasterClassifier;
 pub use select_cut::GpuCutSelector;
+pub use triangle_gradients::GpuTriangleGradients;
