@@ -94,6 +94,16 @@
 //!   that a dual-scattering shading pass decodes for the multiple-scattering
 //!   terms `a_f^n` and `n * beta_f^2` (see [`forward_scatter`]).
 //!
+//! * [`GpuHairForwardScatterSample`] evaluates
+//!   [`sample_forward_scatter`](prism_render_architecture::hair::dual_scattering::sample_forward_scatter),
+//!   the read side of the [`forward_scatter`] packing — one thread per
+//!   receiver brackets its query depth against a curve's packed layer
+//!   depths and linearly interpolates the two straddling additive
+//!   crossing counts (clamping to `0` before the front layer and to the
+//!   last crossing beyond the back layer) so a dual-scattering shading
+//!   pass can decode the coverage-weighted count `n` at an arbitrary
+//!   depth (see [`forward_scatter_sample`]).
+//!
 //! * [`GpuHairVoxelDensity`] evaluates
 //!   [`accumulate_voxel_density`](prism_render_architecture::hair::deep_transmittance::accumulate_voxel_density),
 //!   the sort-free froxel sibling of the deep opacity packing — one thread per
@@ -254,6 +264,7 @@ pub mod context;
 pub mod decimation_priority;
 pub mod deep_opacity;
 pub mod forward_scatter;
+pub mod forward_scatter_sample;
 pub mod frames;
 pub mod guide_solver;
 pub mod importance;
@@ -282,6 +293,7 @@ pub use context::{block_on, GpuContext};
 pub use decimation_priority::GpuDecimationPriority;
 pub use deep_opacity::GpuHairDeepOpacity;
 pub use forward_scatter::GpuHairForwardScatter;
+pub use forward_scatter_sample::{GpuHairForwardScatterSample, ScatterQuery};
 pub use frames::{GpuStrandFrame, GpuStrandFrames};
 pub use guide_solver::GpuGuideSolver;
 pub use importance::GpuHairImportance;
