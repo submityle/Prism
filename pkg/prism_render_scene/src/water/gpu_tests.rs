@@ -5510,3 +5510,446 @@ fn dispersion_refract_gpu_matches_cpu_golden() {
         i += 1;
     }
 }
+
+// -----------------------------------------------------------------------------
+// Spectral inverse-`FFT` parity (`water_spectrum_ifft`).
+// -----------------------------------------------------------------------------
+
+use super::abi::GpuWaterSpectrumParams;
+
+/// Deterministic complex spectral seed for the `water_spectrum_ifft` parity
+/// test. Returns the `h0(+k)` and `h0(-k)` arrays (`N*N` entries, `[real, imag]`
+/// packed as `[f32; 2]` to match the shader's `array<vec2<f32>>`), filled with
+/// small bounded values so the summed field stays `O(1)` and the `rgba32float`
+/// accumulation error stays far under [`PARITY_EPS`].
+fn spectrum_field(n: u32) -> (Vec<[f32; 2]>, Vec<[f32; 2]>) {
+    let count = (n * n) as usize;
+    let mut h0 = Vec::with_capacity(count);
+    let mut h0_neg = Vec::with_capacity(count);
+    let mut i = 0usize;
+    while i < count {
+        let fi = i as f32;
+        h0.push([
+            0.02 * bevy_math::ops::sin(0.7 * fi + 0.3),
+            0.02 * bevy_math::ops::cos(0.4 * fi + 1.1),
+        ]);
+        h0_neg.push([
+            0.015 * bevy_math::ops::sin(0.9 * fi + 2.0),
+            0.015 * bevy_math::ops::cos(0.6 * fi + 0.5),
+        ]);
+        i += 1;
+    }
+    (h0, h0_neg)
+}
+
+/// `CPU` golden twin of `water_spectrum_ifft`. Replays the direct-summation
+/// inverse transform texel-for-texel with the crate's `libm`-backed
+/// `bevy_math::ops` `sin`/`cos` (the same function the shader's native `sin`/`cos`
+/// intrinsics evaluate). Returns the two flat `rgba32float` fields in texel order
+/// `n = y*N + x`: the displacement `(Dx, height, Dz, J)` and the normal
+/// `(nx, ny, nz, foam)`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the eight complex accumulators of the direct-summation transform are clearest replayed inline against the shader"
+)]
+fn spectrum_ifft_golden(
+    h0: &[[f32; 2]],
+    h0_neg: &[[f32; 2]],
+    params: &GpuWaterSpectrumParams,
+) -> (Vec<f32>, Vec<f32>) {
+    let n = params.grid_size;
+    let total = (n * n) as usize;
+    let mut disp_out = vec![0.0_f32; total * 4];
+    let mut norm_out = vec![0.0_f32; total * 4];
+
+    let inv_n = 1.0_f32 / (n as f32).max(1.0);
+    let cell = params.patch_size * inv_n;
+    let dk = WATER_TWO_PI / params.patch_size.max(WATER_EPS_LEN_SQ);
+    let half = n as f32 * 0.5;
+    let lambda = params.choppiness;
+
+    let mut gy = 0u32;
+    while gy < n {
+        let mut gx = 0u32;
+        while gx < n {
+            let world_x = gx as f32 * cell;
+            let world_z = gy as f32 * cell;
+
+            let mut acc_height = [0.0_f32, 0.0];
+            let mut acc_disp_x = [0.0_f32, 0.0];
+            let mut acc_disp_z = [0.0_f32, 0.0];
+            let mut acc_slope_x = [0.0_f32, 0.0];
+            let mut acc_slope_z = [0.0_f32, 0.0];
+            let mut acc_dxdx = [0.0_f32, 0.0];
+            let mut acc_dzdz = [0.0_f32, 0.0];
+            let mut acc_dxdz = [0.0_f32, 0.0];
+
+            let mut m = 0u32;
+            while m < n {
+                let kx = (m as f32 - half) * dk;
+                let mut nn = 0u32;
+                while nn < n {
+                    let kz = (nn as f32 - half) * dk;
+                    let idx = (m * n + nn) as usize;
+
+                    let k_sq = kx * kx + kz * kz;
+                    let omega = ocean_dispersion(k_sq.sqrt());
+                    // Hermitian advance: h0 e^{i w t} + conj(h0_neg) e^{-i w t}.
+                    let theta = omega * params.time;
+                    let cf = bevy_math::ops::cos(theta);
+                    let sf = bevy_math::ops::sin(theta);
+                    let hp = h0[idx];
+                    let fwd = [hp[0] * cf - hp[1] * sf, hp[0] * sf + hp[1] * cf];
+                    // conj(h0_neg) * e^{-i w t}: conjugate negates imag, phasor
+                    // uses (cos(-theta), sin(-theta)) = (cf, -sf).
+                    let hn = [h0_neg[idx][0], -h0_neg[idx][1]];
+                    let bwd = [hn[0] * cf - hn[1] * (-sf), hn[0] * (-sf) + hn[1] * cf];
+                    let h = [fwd[0] + bwd[0], fwd[1] + bwd[1]];
+
+                    // Inverse-transform kernel e^{i k·x} for this texel.
+                    let phase = kx * world_x + kz * world_z;
+                    let cp = bevy_math::ops::cos(phase);
+                    let sp = bevy_math::ops::sin(phase);
+                    let hk = [h[0] * cp - h[1] * sp, h[0] * sp + h[1] * cp];
+
+                    acc_height[0] += hk[0];
+                    acc_height[1] += hk[1];
+
+                    if k_sq > WATER_EPS_LEN_SQ {
+                        let inv_k = 1.0_f32 / k_sq.sqrt();
+                        // (0, a) * hk = (-a*hk_im, a*hk_re) — pure-imag factor.
+                        let fx = -kx * inv_k;
+                        acc_disp_x[0] += -fx * hk[1];
+                        acc_disp_x[1] += fx * hk[0];
+                        let fz = -kz * inv_k;
+                        acc_disp_z[0] += -fz * hk[1];
+                        acc_disp_z[1] += fz * hk[0];
+                        // Slope factor i*k (per axis).
+                        acc_slope_x[0] += -kx * hk[1];
+                        acc_slope_x[1] += kx * hk[0];
+                        acc_slope_z[0] += -kz * hk[1];
+                        acc_slope_z[1] += kz * hk[0];
+                        // (r, 0) * hk = (r*hk_re, r*hk_im) — pure-real factor.
+                        let gxx = kx * kx * inv_k;
+                        acc_dxdx[0] += gxx * hk[0];
+                        acc_dxdx[1] += gxx * hk[1];
+                        let gzz = kz * kz * inv_k;
+                        acc_dzdz[0] += gzz * hk[0];
+                        acc_dzdz[1] += gzz * hk[1];
+                        let gxz = kx * kz * inv_k;
+                        acc_dxdz[0] += gxz * hk[0];
+                        acc_dxdz[1] += gxz * hk[1];
+                    }
+                    nn += 1;
+                }
+                m += 1;
+            }
+
+            let height = acc_height[0];
+            let disp_x = lambda * acc_disp_x[0];
+            let disp_z = lambda * acc_disp_z[0];
+            let dxdx = lambda * acc_dxdx[0];
+            let dzdz = lambda * acc_dzdz[0];
+            let dxdz = lambda * acc_dxdz[0];
+            let jacobian = (1.0 + dxdx) * (1.0 + dzdz) - dxdz * dxdz;
+
+            // N = normalize(-dh/dx, 1, -dh/dz); ny = 1 keeps the length >= 1.
+            let nx = -acc_slope_x[0];
+            let ny = 1.0_f32;
+            let nz = -acc_slope_z[0];
+            let inv_len = 1.0_f32 / (nx * nx + ny * ny + nz * nz).sqrt();
+            let normal = [nx * inv_len, ny * inv_len, nz * inv_len];
+
+            let mut foam = 0.0_f32;
+            if jacobian <= params.foam_threshold {
+                foam = 1.0;
+            }
+
+            let base = ((gy * n + gx) * 4) as usize;
+            disp_out[base] = disp_x;
+            disp_out[base + 1] = height;
+            disp_out[base + 2] = disp_z;
+            disp_out[base + 3] = jacobian;
+            norm_out[base] = normal[0];
+            norm_out[base + 1] = normal[1];
+            norm_out[base + 2] = normal[2];
+            norm_out[base + 3] = foam;
+
+            gx += 1;
+        }
+        gy += 1;
+    }
+
+    (disp_out, norm_out)
+}
+
+/// Dispatches one `water_spectrum_ifft` pass on device and reads back the
+/// displacement and normal textures as flat `rgba32float` lanes.
+///
+/// The `group(0)` layout is reflected straight off the pipeline (`layout: None`),
+/// so only the bindings this entry point touches are materialised: `0`/`1` the
+/// read-only `h0`/`h0_neg` spectral buffers, `2` the params uniform, and `3`/`4`
+/// the displacement and normal storage textures. `N == 16` keeps
+/// `row_bytes == N*16 == 256` naturally aligned, so the readback rows are dense.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one linear dispatch-and-readback over two storage textures keeps the parity path auditable"
+)]
+fn dispatch_spectrum_ifft(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    wgsl: &str,
+    entry: &str,
+    h0: &[[f32; 2]],
+    h0_neg: &[[f32; 2]],
+    params: &GpuWaterSpectrumParams,
+) -> (Vec<f32>, Vec<f32>) {
+    let n = params.grid_size;
+
+    let module = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("water_ocean_spectrum_parity"),
+        source: ShaderSource::Wgsl(wgsl.into()),
+    });
+    let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("water_spectrum_ifft_parity"),
+        layout: None,
+        module: &module,
+        entry_point: Some(entry),
+        compilation_options: PipelineCompilationOptions::default(),
+        cache: None,
+    });
+
+    let h0_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("spectrum_h0"),
+        contents: bytemuck::cast_slice(h0),
+        usage: BufferUsages::STORAGE,
+    });
+    let h0_neg_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("spectrum_h0_neg"),
+        contents: bytemuck::cast_slice(h0_neg),
+        usage: BufferUsages::STORAGE,
+    });
+    let params_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("spectrum_params"),
+        contents: bytemuck::bytes_of(params),
+        usage: BufferUsages::UNIFORM,
+    });
+
+    let extent = Extent3d {
+        width: n,
+        height: n,
+        depth_or_array_layers: 1,
+    };
+    let disp_tex = device.create_texture(&TextureDescriptor {
+        label: Some("spectrum_displacement_out"),
+        size: extent,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: TextureFormat::Rgba32Float,
+        usage: TextureUsages::STORAGE_BINDING | TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let norm_tex = device.create_texture(&TextureDescriptor {
+        label: Some("spectrum_normal_out"),
+        size: extent,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: TextureFormat::Rgba32Float,
+        usage: TextureUsages::STORAGE_BINDING | TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let disp_view = disp_tex.create_view(&TextureViewDescriptor::default());
+    let norm_view = norm_tex.create_view(&TextureViewDescriptor::default());
+
+    let layout = pipeline.get_bind_group_layout(0);
+    let bind_group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("spectrum_bind_group"),
+        layout: &layout,
+        entries: &[
+            BindGroupEntry {
+                binding: 0,
+                resource: h0_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 1,
+                resource: h0_neg_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 2,
+                resource: params_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 3,
+                resource: BindingResource::TextureView(&disp_view),
+            },
+            BindGroupEntry {
+                binding: 4,
+                resource: BindingResource::TextureView(&norm_view),
+            },
+        ],
+    });
+
+    let row_bytes = n * 16;
+    let readback_size = u64::from(row_bytes * n);
+    let disp_readback = device.create_buffer(&BufferDescriptor {
+        label: Some("spectrum_disp_readback"),
+        size: readback_size,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let norm_readback = device.create_buffer(&BufferDescriptor {
+        label: Some("spectrum_norm_readback"),
+        size: readback_size,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("spectrum_parity_encoder"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("spectrum_parity_pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        let groups = n.div_ceil(8);
+        pass.dispatch_workgroups(groups, groups, 1);
+    }
+    for (tex, readback) in [(&disp_tex, &disp_readback), (&norm_tex, &norm_readback)] {
+        encoder.copy_texture_to_buffer(
+            TexelCopyTextureInfo {
+                texture: tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: TextureAspect::All,
+            },
+            TexelCopyBufferInfo {
+                buffer: readback,
+                layout: TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row_bytes),
+                    rows_per_image: Some(n),
+                },
+            },
+            extent,
+        );
+    }
+    queue.submit([encoder.finish()]);
+
+    disp_readback.slice(..).map_async(MapMode::Read, |_| {});
+    norm_readback.slice(..).map_async(MapMode::Read, |_| {});
+    device
+        .poll(PollType::wait_indefinitely())
+        .expect("device poll should complete the submitted work");
+
+    let disp_out = {
+        let view = disp_readback
+            .slice(..)
+            .get_mapped_range()
+            .expect("mapped displacement readback should be available after poll");
+        let floats = bytemuck::cast_slice::<u8, f32>(&view).to_vec();
+        drop(view);
+        disp_readback.unmap();
+        floats
+    };
+    let norm_out = {
+        let view = norm_readback
+            .slice(..)
+            .get_mapped_range()
+            .expect("mapped normal readback should be available after poll");
+        let floats = bytemuck::cast_slice::<u8, f32>(&view).to_vec();
+        drop(view);
+        norm_readback.unmap();
+        floats
+    };
+
+    (disp_out, norm_out)
+}
+
+/// Real-device parity for `water_spectrum_ifft`: run the direct-summation
+/// inverse transform on device over a deterministic Hermitian spectrum and match
+/// both output textures against the `CPU` golden. The chosen `choppiness`/foam
+/// threshold exercise both whitecap branches (`foam == 0` and `foam == 1`) and
+/// the `k_sq <= EPS` center-cell guard.
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice must reach the test log on hosts without a wgpu adapter"
+)]
+fn spectrum_ifft_gpu_matches_cpu_golden() {
+    let Some((device, queue)) = try_solver_device() else {
+        eprintln!(
+            "spectrum_ifft_gpu_matches_cpu_golden: no wgpu adapter, skipping on-device parity"
+        );
+        return;
+    };
+
+    let params = GpuWaterSpectrumParams {
+        grid_size: 16,
+        patch_size: 50.0,
+        time: 1.3,
+        choppiness: 1.6,
+        foam_threshold: 1.05,
+        _pad: [0; 3],
+    };
+
+    let (h0, h0_neg) = spectrum_field(params.grid_size);
+    let (gold_disp, gold_norm) = spectrum_ifft_golden(&h0, &h0_neg, &params);
+
+    // The golden must actually straddle the whitecap threshold, else the parity
+    // check would never touch the `foam == 1` branch.
+    let mut foam_off = false;
+    let mut foam_on = false;
+    let mut t = 3usize;
+    while t < gold_norm.len() {
+        if gold_norm[t] < 0.5 {
+            foam_off = true;
+        } else {
+            foam_on = true;
+        }
+        t += 4;
+    }
+    assert!(
+        foam_off && foam_on,
+        "spectrum golden must cover both whitecap branches (off={foam_off}, on={foam_on})"
+    );
+
+    let wgsl = compile_ocean_wgsl();
+    let entry = find_entry_point(&wgsl, "water_spectrum_ifft");
+    let (gpu_disp, gpu_norm) =
+        dispatch_spectrum_ifft(&device, &queue, &wgsl, &entry, &h0, &h0_neg, &params);
+
+    assert_eq!(
+        gpu_disp.len(),
+        gold_disp.len(),
+        "displacement texel count mismatch"
+    );
+    assert_eq!(
+        gpu_norm.len(),
+        gold_norm.len(),
+        "normal texel count mismatch"
+    );
+
+    let mut i = 0usize;
+    while i < gold_disp.len() {
+        let dd = (gpu_disp[i] - gold_disp[i]).abs();
+        assert!(
+            dd < PARITY_EPS,
+            "displacement lane {i}: gpu={} cpu={} |d|={dd}",
+            gpu_disp[i],
+            gold_disp[i],
+        );
+        let dn = (gpu_norm[i] - gold_norm[i]).abs();
+        assert!(
+            dn < PARITY_EPS,
+            "normal lane {i}: gpu={} cpu={} |d|={dn}",
+            gpu_norm[i],
+            gold_norm[i],
+        );
+        i += 1;
+    }
+}
