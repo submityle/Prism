@@ -69,6 +69,7 @@
 //! Unreal Engine source or derived code.
 #![forbid(unsafe_code)]
 
+pub mod bin_cut;
 pub mod cluster_cull;
 pub mod context;
 pub mod lod_select;
@@ -78,6 +79,7 @@ pub mod payload_raster;
 pub mod raster;
 pub mod raster_classify;
 
+pub use bin_cut::GpuCutBinner;
 pub use cluster_cull::GpuClusterCuller;
 pub use context::{block_on, GpuContext};
 pub use lod_select::{GpuLodSelector, LodQuery};
