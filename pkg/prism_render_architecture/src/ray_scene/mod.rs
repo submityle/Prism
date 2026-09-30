@@ -114,6 +114,20 @@
 //!   layout ([`cone_gpu_layout::CONE_WORDS`] stride packing `base`/`top` plus
 //!   the two radii) with node records reusing the shared [`NODE_WORDS`] and a
 //!   packed cone walk that reproduces the in-memory cone walk bit-for-bit.
+//! - [`paraboloid`] — analytic paraboloid / parabolic dish
+//!   [`paraboloid::Paraboloid`] procedural primitive (reflector dishes,
+//!   spotlight cups, satellite antennas): an `apex` + rim `top` + rim
+//!   `radius`, the wall solved from the implicit quadric `k · ρ² − z = 0`
+//!   (`dd`-carrying `t²` coefficient, no unit-direction assumption), reporting
+//!   the [`paraboloid::ParaboloidHit`], with a single-level
+//!   [`paraboloid::ParaboloidBvh`] reusing the shared binned-`SAH` build and
+//!   slab traversal.
+//! - [`paraboloid_gpu_layout`] — flat, `GPU`-uploadable
+//!   [`paraboloid::ParaboloidBvh`] buffer layout
+//!   ([`paraboloid_gpu_layout::PARABOLOID_WORDS`] stride packing `apex`/`top`
+//!   plus the rim radius) with node records reusing the shared [`NODE_WORDS`]
+//!   and a packed paraboloid walk that reproduces the in-memory walk
+//!   bit-for-bit.
 //! - [`traversal`] — [`Ray`]/`BVH` slab + Möller–Trumbore intersection with
 //!   closest-hit and any-hit walks (the `GPU` traversal kernel's golden ref).
 //! - [`traversal_stackless`] — stackless (threaded / escape-index) `BVH` walk:
@@ -148,6 +162,8 @@ pub mod rectangle;
 pub mod rectangle_gpu_layout;
 pub mod cone;
 pub mod cone_gpu_layout;
+pub mod paraboloid;
+pub mod paraboloid_gpu_layout;
 pub mod footprint;
 pub mod gpu_layout;
 pub mod motion;
@@ -193,6 +209,8 @@ pub use disk_gpu_layout::{GpuDiskBvhBuffers, DISK_WORDS};
 pub use rectangle::{Rectangle, RectangleBvh, RectangleHit};
 pub use cone::{Cone, ConeBvh, ConeHit};
 pub use cone_gpu_layout::{GpuConeBvhBuffers, CONE_WORDS};
+pub use paraboloid::{Paraboloid, ParaboloidBvh, ParaboloidHit};
+pub use paraboloid_gpu_layout::{GpuParaboloidBvhBuffers, PARABOLOID_WORDS};
 pub use rectangle_gpu_layout::{GpuRectangleBvhBuffers, RECTANGLE_WORDS};
 pub use aabb_primitive_gpu_layout::{GpuAabbBvhBuffers, AABB_PRIMITIVE_WORDS};
 pub use sphere_gpu_layout::{GpuSphereBvhBuffers, SPHERE_WORDS};
