@@ -203,6 +203,15 @@
 //!   reduced host-side over the blended metrics, so the kernel owns the naturally
 //!   parallel per-binding gather + fold (see [`binding_importance`]).
 //!
+//! * [`GpuHairRootBind`] evaluates
+//!   [`bind_roots`](prism_render_architecture::hair::binding::bind_roots),
+//!   the import-time bake that precedes that replay — one thread per strand
+//!   root brute-force scans every scalp triangle for the nearest
+//!   closest-surface-point (ties resolve to the lowest index, matching the
+//!   golden's first-strict-minimum scan) and records the barycentric
+//!   projection plus the signed height along that face's normal; a face with
+//!   an out-of-range vertex is skipped and a root with no bindable triangle
+//!   resolves to the unbound sentinel exactly (see [`root_bind`]).
 //! * [`GpuHairRootResolve`] evaluates
 //!   [`resolve_root_frames`](prism_render_architecture::hair::binding::resolve_root_frames),
 //!   the per-frame root-binding replay that pins each strand root to the
@@ -253,6 +262,7 @@ pub mod mesh_shell;
 pub mod mesh_shell_tapered;
 pub mod raster;
 pub mod ribbon;
+pub mod root_bind;
 pub mod root_resolve;
 pub mod sdf_collision;
 pub mod self_collision_grid;
@@ -280,6 +290,7 @@ pub use mesh_shell::{GpuMeshShell, GpuShellMesh, ShellStrandInput};
 pub use mesh_shell_tapered::{GpuMeshShellTapered, TaperedShellStrandInput};
 pub use raster::{path_code, GpuHairRaster, RasterQuery};
 pub use ribbon::{GpuRibbon, GpuRibbonMesh, RibbonStrandInput};
+pub use root_bind::GpuHairRootBind;
 pub use root_resolve::GpuHairRootResolve;
 pub use sdf_collision::GpuSdfCollider;
 pub use self_collision_grid::GpuSelfCollisionGrid;
