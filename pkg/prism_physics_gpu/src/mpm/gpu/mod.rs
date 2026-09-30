@@ -9,6 +9,8 @@
 //!   matrices out to match their WGSL `std430` uploads and read them back.
 //! - [`constitutive`] — the constitutive probe pipeline
 //!   [`constitutive::GpuMpmConstitutive`].
+//! - [`p2g`] — the particle-to-grid affine scatter pipeline
+//!   [`p2g::GpuMpmP2g`].
 //!
 //! # Provenance
 //!
@@ -18,6 +20,8 @@
 
 pub mod constitutive;
 pub mod layout;
+pub mod p2g;
 pub mod params;
 
 pub use constitutive::{ConstitutiveOutput, GpuMpmConstitutive};
+pub use p2g::{GpuMpmP2g, P2gGrid};

@@ -23,4 +23,4 @@
 
 pub mod gpu;
 
-pub use gpu::{ConstitutiveOutput, GpuMpmConstitutive};
+pub use gpu::{ConstitutiveOutput, GpuMpmConstitutive, GpuMpmP2g, P2gGrid};
