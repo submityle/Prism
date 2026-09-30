@@ -82,6 +82,66 @@ impl RayFootprint {
         level as u32
     }
 
+    /// World-space footprint width measured *along the surface*, accounting for
+    /// the incidence angle between the ray and the surface normal.
+    ///
+    /// [`Self::projected_width`] returns the cone's cross-section perpendicular
+    /// to the ray. At grazing incidence that cross-section is smeared across a
+    /// much larger surface patch: the elongation factor is `1 / |cos θ|`, where
+    /// `θ` is the angle between the ray direction and the surface normal
+    /// (`cos θ = dot(-ray_dir, normal)`). This anisotropic stretch is what
+    /// production ray-cones texture-`LOD` uses to avoid under-blurring textures
+    /// on surfaces seen edge-on.
+    ///
+    /// `cos_incidence` is clamped to `[MIN_COS_INCIDENCE, 1.0]` (via its
+    /// magnitude) so a perfectly grazing hit (`cos θ -> 0`) selects a bounded,
+    /// very coarse mip instead of dividing by zero.
+    #[must_use]
+    pub fn projected_width_on_surface(self, cos_incidence: f32) -> f32 {
+        self.projected_width() / clamp_cos_incidence(cos_incidence)
+    }
+
+    /// Surface-projected analogue of [`Self::texel_span`].
+    ///
+    /// Uses [`Self::projected_width_on_surface`] so grazing hits report the
+    /// larger texel count they actually cover on the surface.
+    #[must_use]
+    pub fn texel_span_on_surface(self, texel_world_size: f32, cos_incidence: f32) -> f32 {
+        let texel = sanitize_nonneg(texel_world_size);
+        if texel <= 0.0 {
+            return 0.0;
+        }
+        self.projected_width_on_surface(cos_incidence) / texel
+    }
+
+    /// Surface-projected analogue of [`Self::mip_level`].
+    #[must_use]
+    pub fn mip_level_on_surface(
+        self,
+        texel_world_size: f32,
+        cos_incidence: f32,
+        max_mip: u32,
+    ) -> f32 {
+        let span = self.texel_span_on_surface(texel_world_size, cos_incidence);
+        let raw = log2_linear(span);
+        let ceiling = max_mip as f32;
+        raw.clamp(0.0, ceiling)
+    }
+
+    /// Surface-projected analogue of [`Self::mip_floor`].
+    #[must_use]
+    pub fn mip_floor_on_surface(
+        self,
+        texel_world_size: f32,
+        cos_incidence: f32,
+        max_mip: u32,
+    ) -> u32 {
+        let level = self
+            .mip_level_on_surface(texel_world_size, cos_incidence, max_mip)
+            .floor();
+        level as u32
+    }
+
     fn sanitized(self) -> Self {
         Self {
             cone_width: sanitize_nonneg(self.cone_width),
@@ -97,6 +157,27 @@ fn sanitize_nonneg(value: f32) -> f32 {
         return 0.0;
     }
     value
+}
+
+/// Smallest incidence cosine used when projecting a footprint onto a surface.
+///
+/// A hit at exactly `90` degrees would elongate the footprint infinitely
+/// (`1 / cos 90 deg -> inf`). Flooring the cosine at this value caps the
+/// anisotropic stretch at `1 / 0.05 = 20x`, which keeps mip selection finite
+/// while still choosing a very coarse mip for near-grazing hits.
+pub const MIN_COS_INCIDENCE: f32 = 0.05;
+
+/// Sanitizes an incidence cosine and clamps its magnitude to
+/// `[MIN_COS_INCIDENCE, 1.0]`.
+///
+/// The sign is discarded (only the angle between ray and normal matters), and
+/// non-finite inputs collapse to the grazing floor so the divisor is always a
+/// well-defined positive value in the valid range.
+fn clamp_cos_incidence(cos_incidence: f32) -> f32 {
+    if !cos_incidence.is_finite() {
+        return MIN_COS_INCIDENCE;
+    }
+    cos_incidence.abs().clamp(MIN_COS_INCIDENCE, 1.0)
 }
 
 /// Transcendental-free approximation of `log2(ratio)`.
@@ -205,5 +286,57 @@ mod tests {
         assert!(close(f.cone_width, 0.0));
         assert!(close(f.cone_spread_angle, 0.0));
         assert!(close(f.hit_distance, 0.0));
+    }
+
+    #[test]
+    fn surface_projection_matches_perpendicular_width_at_normal_incidence() {
+        // cos = 1 (head-on): the surface footprint equals the perpendicular one.
+        let f = RayFootprint::new(0.1, 0.05, 10.0);
+        assert!(close(
+            f.projected_width_on_surface(1.0),
+            f.projected_width()
+        ));
+        // Sign of the cosine is irrelevant; only the angle matters.
+        assert!(close(
+            f.projected_width_on_surface(-1.0),
+            f.projected_width()
+        ));
+    }
+
+    #[test]
+    fn grazing_incidence_stretches_footprint_and_coarsens_mip() {
+        let f = RayFootprint::new(1.0, 0.0, 0.0);
+        // cos = 0.5 (60 deg) doubles the surface footprint.
+        assert!(close(f.projected_width_on_surface(0.5), 2.0));
+        // A grazing hit must never select a finer mip than a head-on hit.
+        let head_on = f.mip_level_on_surface(1.0, 1.0, 8);
+        let grazing = f.mip_level_on_surface(1.0, 0.2, 8);
+        assert!(grazing >= head_on);
+        // The stretched span (1 / 0.2 = 5 texels) lands in mip bucket 2
+        // (`log2(5) ~= 2.32`).
+        assert_eq!(f.mip_floor_on_surface(1.0, 0.2, 8), 2);
+    }
+
+    #[test]
+    fn extreme_grazing_is_clamped_by_min_cos_incidence() {
+        let f = RayFootprint::new(1.0, 0.0, 0.0);
+        // cos -> 0 would blow up; the floor caps the stretch at 1 / 0.05 = 20x.
+        assert!(close(f.projected_width_on_surface(0.0), 20.0));
+        assert!(close(f.projected_width_on_surface(1.0e-9), 20.0));
+        // Non-finite cosines collapse to the same grazing floor.
+        assert!(close(f.projected_width_on_surface(f32::NAN), 20.0));
+        assert!(close(f.projected_width_on_surface(f32::INFINITY), 20.0));
+        // Below the floor the stretch never grows further.
+        assert!(close(
+            f.projected_width_on_surface(0.01),
+            f.projected_width_on_surface(0.05)
+        ));
+    }
+
+    #[test]
+    fn texel_span_on_surface_guards_zero_texel() {
+        let f = RayFootprint::new(2.0, 0.0, 0.0);
+        assert!(close(f.texel_span_on_surface(0.0, 0.5), 0.0));
+        assert!(close(f.texel_span_on_surface(-1.0, 0.5), 0.0));
     }
 }
