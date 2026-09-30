@@ -70,6 +70,7 @@ pub mod propagation;
 pub mod reverb_zones;
 pub mod room_acoustics;
 pub mod rooms;
+pub mod scattering;
 pub mod spatializer;
 pub mod spread;
 
@@ -123,6 +124,10 @@ pub use room_acoustics::{
 };
 pub use rooms::{
     Portal, Room, RoomId, RoomNetwork, obliquity_factor, portal_coupling_gain, room_of,
+};
+pub use scattering::{
+    ScatteringSpectrum, SurfaceScatter, diffuse_fraction, lambert_directivity, lambert_weight,
+    specular_fraction,
 };
 pub use spatializer::{SourceDescriptor, SpatialParams, resolve};
 pub use spread::{MAX_SPREAD_TAPS, Spread, SpreadParams, SpreadTap, compute_spread_gains, spread_taps};
