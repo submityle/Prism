@@ -63,6 +63,7 @@ pub mod apply_carve;
 pub mod blend_state;
 pub mod blend_with_atmosphere;
 pub mod clamp_history;
+pub mod classify_precip;
 pub mod cloud_shadow_modulation;
 pub mod composite_motion_vector;
 pub mod context;
@@ -111,6 +112,7 @@ pub use apply_carve::{ApplyCarveQuery, GpuApplyCarve};
 pub use blend_state::{BlendStateQuery, GpuBlendState};
 pub use blend_with_atmosphere::{BlendQuery, BlendedColor, GpuBlendWithAtmosphere};
 pub use clamp_history::{ClampHistoryQuery, GpuClampHistory};
+pub use classify_precip::{ClassifyPrecipQuery, GpuClassifyPrecip};
 pub use cloud_shadow_modulation::{CloudShadowModulationQuery, GpuCloudShadowModulation};
 pub use composite_motion_vector::{
     CompositeMotionVectorQuery, GpuCompositeMotionVector, MotionVector,
