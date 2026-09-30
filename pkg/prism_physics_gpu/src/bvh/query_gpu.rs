@@ -35,6 +35,7 @@ use super::config::Aabb;
 use super::cpu::Lbvh;
 use super::layout::{buffer_entry, entry};
 use super::query::BvhQueryError;
+use super::resident::GpuResidentLbvh;
 
 /// Lanes per workgroup; must match `@workgroup_size` in `bvh_pairs.wgsl`.
 const WORKGROUP: u32 = 64;
@@ -61,8 +62,16 @@ pub struct GpuBvhQuery {
         reason = "kept alive so the pipeline it produced stays valid"
     )]
     module: ShaderModule,
+    /// Kept alive so the resident-tree pipeline it produced stays valid.
+    #[expect(
+        dead_code,
+        reason = "kept alive so the resident pipeline it produced stays valid"
+    )]
+    resident_module: ShaderModule,
     layout: BindGroupLayout,
     pipeline: ComputePipeline,
+    /// Overlap-pair kernel binding a device-resident tree's buffers directly.
+    resident: ComputePipeline,
 }
 
 impl GpuBvhQuery {
@@ -103,10 +112,24 @@ impl GpuBvhQuery {
             compilation_options: PipelineCompilationOptions::default(),
             cache: None,
         });
+        let resident_module = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("prism_bvh_pairs_resident"),
+            source: ShaderSource::Wgsl(include_str!("../shaders/bvh_pairs_resident.wgsl").into()),
+        });
+        let resident = device.create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some("prism_bvh_pairs_resident_pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &resident_module,
+            entry_point: Some("find_pairs"),
+            compilation_options: PipelineCompilationOptions::default(),
+            cache: None,
+        });
         GpuBvhQuery {
             module,
+            resident_module,
             layout,
             pipeline,
+            resident,
         }
     }
 
@@ -187,6 +210,95 @@ impl GpuBvhQuery {
             label: Some("prism_bvh_pairs_encoder"),
         });
         dispatch(&mut encoder, &self.pipeline, &bind, groups);
+        buffer::copy(&mut encoder, &count_buf, &count_stage, 4);
+        buffer::copy(&mut encoder, &pairs_buf, &pairs_stage, pairs_bytes);
+        ctx.queue().submit([encoder.finish()]);
+
+        let total = buffer::read_back::<u32>(ctx, &count_stage)[0];
+        if total > capacity {
+            return Err(BvhQueryError::PairCapacityExceeded { capacity });
+        }
+        let raw = buffer::read_back::<[u32; 2]>(ctx, &pairs_stage);
+        let pairs = raw
+            .into_iter()
+            .take(total as usize)
+            .map(|[i, j]| CandidatePair::new(i, j))
+            .collect();
+        Ok(pairs)
+    }
+
+    /// Runs the overlap-pair query over a device-resident `lbvh` and returns the
+    /// pairs, binding the built tree's device buffers directly with no host
+    /// round-trip between build and traversal.
+    ///
+    /// The resident tree carries its internal-node bounds order-encoded (the
+    /// exact `u32`s the build's bounds pass wrote); the resident kernel decodes
+    /// them in-shader with the integer inverse of that encoding, so the overlap
+    /// tests, and thus the pair set, match [`query`](GpuBvhQuery::query) and the
+    /// [`cpu_bvh_pairs`](super::query::cpu_bvh_pairs) twin exactly.
+    ///
+    /// `capacity` bounds the output buffer; the query reports overflow rather
+    /// than silently dropping pairs past the end. A resident tree with fewer
+    /// than two leaves holds no traversable hierarchy and yields no pairs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BvhQueryError::PairCapacityExceeded`] when the device found
+    /// more pairs than `capacity`, matching the `CPU` twin's overflow contract.
+    pub fn query_resident(
+        &self,
+        ctx: &GpuContext,
+        lbvh: &GpuResidentLbvh,
+        capacity: u32,
+    ) -> Result<Vec<CandidatePair>, BvhQueryError> {
+        // A resident tree with fewer than two leaves owns no buffers and has no
+        // internal root to traverse, so there is nothing to dispatch.
+        let Some(inner) = lbvh.buffers() else {
+            return Ok(Vec::new());
+        };
+
+        let device = ctx.device();
+
+        let params = Params {
+            num_internal: u32::try_from(inner.num_internal).unwrap_or(u32::MAX),
+            num_leaves: u32::try_from(lbvh.num_leaves()).unwrap_or(u32::MAX),
+            root: inner.root,
+            capacity,
+        };
+
+        let params_buf = buffer::uniform(device, "prism_bvh_pairs_resident_params", &params);
+        let count_buf = buffer::storage_rw_zeroed(device, "prism_bvh_pairs_resident_count", 4);
+        let pairs_bytes = u64::from(capacity) * 8;
+        let pairs_buf =
+            buffer::storage_rw_zeroed(device, "prism_bvh_pairs_resident_out", pairs_bytes);
+
+        let bind = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("prism_bvh_pairs_resident_bind"),
+            layout: &self.layout,
+            entries: &[
+                entry(0, &params_buf),
+                entry(1, &inner.left),
+                entry(2, &inner.right),
+                entry(3, &inner.parent),
+                entry(4, &inner.node_min),
+                entry(5, &inner.node_max),
+                entry(6, &inner.aabb_min),
+                entry(7, &inner.aabb_max),
+                entry(8, inner.sorted.values()),
+                entry(9, &count_buf),
+                entry(10, &pairs_buf),
+            ],
+        });
+
+        let count_stage = buffer::staging(device, "prism_bvh_pairs_resident_count_stage", 4);
+        let pairs_stage =
+            buffer::staging(device, "prism_bvh_pairs_resident_out_stage", pairs_bytes);
+
+        let groups = params.num_leaves.div_ceil(WORKGROUP);
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("prism_bvh_pairs_resident_encoder"),
+        });
+        dispatch(&mut encoder, &self.resident, &bind, groups);
         buffer::copy(&mut encoder, &count_buf, &count_stage, 4);
         buffer::copy(&mut encoder, &pairs_buf, &pairs_stage, pairs_bytes);
         ctx.queue().submit([encoder.finish()]);

@@ -35,20 +35,22 @@
 use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
 use wgpu::{
-    BindGroup, BindGroupDescriptor, BindGroupLayout, BindGroupLayoutDescriptor, BufferBindingType,
-    CommandEncoder, CommandEncoderDescriptor, ComputePassDescriptor, ComputePipeline,
-    ComputePipelineDescriptor, PipelineCompilationOptions, PipelineLayoutDescriptor, ShaderModule,
-    ShaderModuleDescriptor, ShaderSource,
+    BindGroup, BindGroupDescriptor, BindGroupLayout, BindGroupLayoutDescriptor, Buffer,
+    BufferBindingType, CommandEncoder, CommandEncoderDescriptor, ComputePassDescriptor,
+    ComputePipeline, ComputePipelineDescriptor, PipelineCompilationOptions,
+    PipelineLayoutDescriptor, ShaderModule, ShaderModuleDescriptor, ShaderSource,
 };
 
 use crate::buffer;
 use crate::context::GpuContext;
+use crate::radix::gpu::SortedBuffers;
 use crate::radix::GpuRadixSort;
 
 use super::config::{Aabb, SceneBounds};
 use super::cpu::{cpu_build_lbvh, Lbvh, NO_PARENT};
 use super::layout::{buffer_entry, entry};
 use super::morton::cpu_inv_extent;
+use super::resident::GpuResidentLbvh;
 
 /// Lanes per workgroup for every `LBVH` kernel; must match `@workgroup_size`.
 const WORKGROUP: u32 = 64;
@@ -126,6 +128,43 @@ pub struct GpuLbvh {
     radix: GpuRadixSort,
 }
 
+/// Every device buffer and keepalive produced by recording an `LBVH` build
+/// into a command encoder, before submission.
+///
+/// The build is recorded once by [`GpuLbvh::record_build`]; the caller then either
+/// stages these buffers for readback into a host [`Lbvh`] or keeps them resident
+/// to bind directly into a query. Every buffer and bind group is owned here so
+/// it outlives the submission that runs the recorded passes.
+pub(crate) struct RecordedBuild {
+    /// Original-order primitive box minimum corners, `vec4` lanes (`w` unused).
+    pub(crate) aabb_min: Buffer,
+    /// Original-order primitive box maximum corners, `vec4` lanes (`w` unused).
+    pub(crate) aabb_max: Buffer,
+    /// Sorted radix output: keys are leaf Morton codes, values the leaf-slot
+    /// primitive indices.
+    pub(crate) sorted: SortedBuffers,
+    /// Left child (encoded id) per internal node.
+    pub(crate) left: Buffer,
+    /// Right child (encoded id) per internal node.
+    pub(crate) right: Buffer,
+    /// Parent (encoded id) of every node, indexed by encoded id.
+    pub(crate) parent: Buffer,
+    /// Order-encoded internal-node minimum bounds, three lanes per node.
+    pub(crate) node_min: Buffer,
+    /// Order-encoded internal-node maximum bounds, three lanes per node.
+    pub(crate) node_max: Buffer,
+    /// Build bind groups kept alive until the recorded passes are submitted.
+    #[expect(
+        dead_code,
+        reason = "kept alive so the recorded dispatches keep valid bindings until submit"
+    )]
+    pub(crate) binds: Vec<BindGroup>,
+    /// Number of leaves.
+    pub(crate) num_leaves: usize,
+    /// Number of internal nodes (`num_leaves - 1`).
+    pub(crate) num_internal: usize,
+}
+
 impl GpuLbvh {
     /// Compiles the Morton, tree, and bounds kernels on `ctx`.
     #[must_use]
@@ -199,10 +238,13 @@ impl GpuLbvh {
         }
     }
 
-    /// Builds the complete `LBVH` over `boxes` on the device.
+    /// Builds the complete `LBVH` over `boxes` on the device and reads it back.
     ///
-    /// Empty and single-leaf inputs have no parallel work and are built directly
-    /// by the golden twin so the trivial cases stay identical.
+    /// Records the build into one encoder, stages every result buffer, submits,
+    /// and assembles a host [`Lbvh`]. Empty and single-leaf inputs have no
+    /// parallel work and are built directly by the golden twin so the trivial
+    /// cases stay identical. To keep the built tree on device without a host
+    /// round-trip, use [`build_resident`](GpuLbvh::build_resident) instead.
     #[must_use]
     pub fn build(&self, ctx: &GpuContext, boxes: &[Aabb]) -> Lbvh {
         let n = boxes.len();
@@ -212,13 +254,126 @@ impl GpuLbvh {
         let num_internal = n - 1;
         let total_nodes = num_internal + n;
 
+        let device = ctx.device();
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("prism_bvh_encoder"),
+        });
+        let rec = self.record_build(device, &mut encoder, boxes);
+
+        let key_bytes = (n * size_of::<u32>()) as u64;
+        let node_link_bytes = (num_internal * size_of::<u32>()) as u64;
+        let parent_bytes = (total_nodes * size_of::<u32>()) as u64;
+        let node_box_bytes = (num_internal * 3 * size_of::<u32>()) as u64;
+
+        // Stage every result buffer for readback.
+        let idx_stage = buffer::staging(device, "prism_bvh_indices_stage", key_bytes);
+        let codes_stage = buffer::staging(device, "prism_bvh_codes_stage", key_bytes);
+        let left_stage = buffer::staging(device, "prism_bvh_left_stage", node_link_bytes);
+        let right_stage = buffer::staging(device, "prism_bvh_right_stage", node_link_bytes);
+        let parent_stage = buffer::staging(device, "prism_bvh_parent_stage", parent_bytes);
+        let node_min_stage = buffer::staging(device, "prism_bvh_node_min_stage", node_box_bytes);
+        let node_max_stage = buffer::staging(device, "prism_bvh_node_max_stage", node_box_bytes);
+        buffer::copy(&mut encoder, rec.sorted.values(), &idx_stage, key_bytes);
+        buffer::copy(&mut encoder, rec.sorted.keys(), &codes_stage, key_bytes);
+        buffer::copy(&mut encoder, &rec.left, &left_stage, node_link_bytes);
+        buffer::copy(&mut encoder, &rec.right, &right_stage, node_link_bytes);
+        buffer::copy(&mut encoder, &rec.parent, &parent_stage, parent_bytes);
+        buffer::copy(&mut encoder, &rec.node_min, &node_min_stage, node_box_bytes);
+        buffer::copy(&mut encoder, &rec.node_max, &node_max_stage, node_box_bytes);
+        ctx.queue().submit([encoder.finish()]);
+
+        let sorted_indices = buffer::read_back::<u32>(ctx, &idx_stage);
+        let sorted_codes = buffer::read_back::<u32>(ctx, &codes_stage);
+        let left = buffer::read_back::<u32>(ctx, &left_stage);
+        let right = buffer::read_back::<u32>(ctx, &right_stage);
+        let parent = buffer::read_back::<u32>(ctx, &parent_stage);
+        let node_min = buffer::read_back::<u32>(ctx, &node_min_stage);
+        let node_max = buffer::read_back::<u32>(ctx, &node_max_stage);
+        drop(rec);
+
+        let internal_aabb: Vec<Aabb> = (0..num_internal)
+            .map(|i| {
+                let base = i * 3;
+                Aabb::new(
+                    Vec3::new(
+                        from_order(node_min[base]),
+                        from_order(node_min[base + 1]),
+                        from_order(node_min[base + 2]),
+                    ),
+                    Vec3::new(
+                        from_order(node_max[base]),
+                        from_order(node_max[base + 1]),
+                        from_order(node_max[base + 2]),
+                    ),
+                )
+            })
+            .collect();
+        let leaf_aabb: Vec<Aabb> = sorted_indices.iter().map(|&i| boxes[i as usize]).collect();
+
+        Lbvh {
+            num_leaves: n,
+            num_internal,
+            root: 0,
+            sorted_indices,
+            sorted_codes,
+            left,
+            right,
+            parent,
+            internal_aabb,
+            leaf_aabb,
+        }
+    }
+
+    /// Builds the complete `LBVH` over `boxes` and keeps it resident on the
+    /// device for direct query consumption, with no host round-trip.
+    ///
+    /// Unlike [`build`](GpuLbvh::build), no result buffer is staged or read back:
+    /// the node links, order-encoded internal-node bounds, original-order
+    /// primitive boxes, and sorted leaf-slot indices stay in device memory,
+    /// ready to bind straight into
+    /// [`query_resident`](crate::bvh::GpuBvhQuery::query_resident). Empty and
+    /// single-leaf inputs have no traversable hierarchy, so they yield an empty
+    /// resident tree that produces no pairs.
+    #[must_use]
+    pub fn build_resident(&self, ctx: &GpuContext, boxes: &[Aabb]) -> GpuResidentLbvh {
+        let n = boxes.len();
+        if n <= 1 {
+            return GpuResidentLbvh::empty(n);
+        }
+        let device = ctx.device();
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("prism_bvh_resident_encoder"),
+        });
+        let rec = self.record_build(device, &mut encoder, boxes);
+        ctx.queue().submit([encoder.finish()]);
+        GpuResidentLbvh::from_recorded(rec)
+    }
+
+    /// Records the whole `LBVH` build over `boxes` into `encoder` without
+    /// submitting or reading anything back.
+    ///
+    /// Returns every device buffer the build produced, together with the bind
+    /// groups and the on-device sort kept alive until the caller submits
+    /// `encoder`. Callers either stage those buffers for readback into a host
+    /// [`Lbvh`] (see [`build`](GpuLbvh::build)) or keep them resident to feed a
+    /// query directly (see [`build_resident`](GpuLbvh::build_resident)). `boxes`
+    /// must hold at least two entries, the only case with parallel work; both
+    /// callers special-case the trivial sizes before recording.
+    pub(crate) fn record_build(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut CommandEncoder,
+        boxes: &[Aabb],
+    ) -> RecordedBuild {
+        let n = boxes.len();
+        let num_internal = n - 1;
+        let total_nodes = num_internal + n;
+
         let bounds = SceneBounds::of(boxes).unwrap_or(SceneBounds {
             min: Vec3::ZERO,
             max: Vec3::ZERO,
         });
         let extent = bounds.extent();
-
-        let device = ctx.device();
 
         let packed_min: Vec<[f32; 4]> = boxes
             .iter()
@@ -240,7 +395,6 @@ impl GpuLbvh {
         let right_buf = buffer::storage_rw_zeroed(device, "prism_bvh_right", node_link_bytes);
 
         let parent_init = vec![NO_PARENT; total_nodes];
-        let parent_bytes = size_of_val(parent_init.as_slice()) as u64;
         let parent_buf = buffer::storage_rw_init(device, "prism_bvh_parent", &parent_init);
 
         let node_lane_count = num_internal * 3;
@@ -276,10 +430,6 @@ impl GpuLbvh {
             },
         );
 
-        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
-            label: Some("prism_bvh_encoder"),
-        });
-
         // Morton pass: write per-leaf codes and identity payloads. The bind
         // group holds strong references to `keys_buf`/`idx_buf`, so they stay
         // valid after their handles move into the sort below.
@@ -296,7 +446,7 @@ impl GpuLbvh {
             ],
         });
         dispatch(
-            &mut encoder,
+            encoder,
             "prism_bvh_morton_pass",
             &self.morton,
             &morton_bind,
@@ -307,7 +457,7 @@ impl GpuLbvh {
         // tree kernel reads; sorted values are the leaf-order primitive indices.
         let sorted = self
             .radix
-            .record_sort(device, &mut encoder, keys_buf, idx_buf, n);
+            .record_sort(device, encoder, keys_buf, idx_buf, n);
 
         // Tree pass: build the binary radix tree over the sorted codes.
         let internal_groups = ni_u32.div_ceil(WORKGROUP);
@@ -323,7 +473,7 @@ impl GpuLbvh {
             ],
         });
         dispatch(
-            &mut encoder,
+            encoder,
             "prism_bvh_tree_pass",
             &self.tree,
             &tree_bind,
@@ -345,72 +495,25 @@ impl GpuLbvh {
             ],
         });
         dispatch(
-            &mut encoder,
+            encoder,
             "prism_bvh_bbox_pass",
             &self.bbox,
             &bbox_bind,
             leaf_groups,
         );
 
-        // Stage every result buffer for readback.
-        let idx_stage = buffer::staging(device, "prism_bvh_indices_stage", key_bytes);
-        let codes_stage = buffer::staging(device, "prism_bvh_codes_stage", key_bytes);
-        let left_stage = buffer::staging(device, "prism_bvh_left_stage", node_link_bytes);
-        let right_stage = buffer::staging(device, "prism_bvh_right_stage", node_link_bytes);
-        let parent_stage = buffer::staging(device, "prism_bvh_parent_stage", parent_bytes);
-        let node_min_stage = buffer::staging(device, "prism_bvh_node_min_stage", node_box_bytes);
-        let node_max_stage = buffer::staging(device, "prism_bvh_node_max_stage", node_box_bytes);
-        buffer::copy(&mut encoder, sorted.values(), &idx_stage, key_bytes);
-        buffer::copy(&mut encoder, sorted.keys(), &codes_stage, key_bytes);
-        buffer::copy(&mut encoder, &left_buf, &left_stage, node_link_bytes);
-        buffer::copy(&mut encoder, &right_buf, &right_stage, node_link_bytes);
-        buffer::copy(&mut encoder, &parent_buf, &parent_stage, parent_bytes);
-        buffer::copy(&mut encoder, &node_min_buf, &node_min_stage, node_box_bytes);
-        buffer::copy(&mut encoder, &node_max_buf, &node_max_stage, node_box_bytes);
-        ctx.queue().submit([encoder.finish()]);
-
-        let sorted_indices = buffer::read_back::<u32>(ctx, &idx_stage);
-        let sorted_codes = buffer::read_back::<u32>(ctx, &codes_stage);
-        let left = buffer::read_back::<u32>(ctx, &left_stage);
-        let right = buffer::read_back::<u32>(ctx, &right_stage);
-        let parent = buffer::read_back::<u32>(ctx, &parent_stage);
-        let node_min = buffer::read_back::<u32>(ctx, &node_min_stage);
-        let node_max = buffer::read_back::<u32>(ctx, &node_max_stage);
-        drop(sorted);
-        drop(morton_bind);
-        drop(tree_bind);
-        drop(bbox_bind);
-
-        let internal_aabb: Vec<Aabb> = (0..num_internal)
-            .map(|i| {
-                let base = i * 3;
-                Aabb::new(
-                    Vec3::new(
-                        from_order(node_min[base]),
-                        from_order(node_min[base + 1]),
-                        from_order(node_min[base + 2]),
-                    ),
-                    Vec3::new(
-                        from_order(node_max[base]),
-                        from_order(node_max[base + 1]),
-                        from_order(node_max[base + 2]),
-                    ),
-                )
-            })
-            .collect();
-        let leaf_aabb: Vec<Aabb> = sorted_indices.iter().map(|&i| boxes[i as usize]).collect();
-
-        Lbvh {
+        RecordedBuild {
+            aabb_min,
+            aabb_max,
+            sorted,
+            left: left_buf,
+            right: right_buf,
+            parent: parent_buf,
+            node_min: node_min_buf,
+            node_max: node_max_buf,
+            binds: vec![morton_bind, tree_bind, bbox_bind],
             num_leaves: n,
             num_internal,
-            root: 0,
-            sorted_indices,
-            sorted_codes,
-            left,
-            right,
-            parent,
-            internal_aabb,
-            leaf_aabb,
         }
     }
 }
