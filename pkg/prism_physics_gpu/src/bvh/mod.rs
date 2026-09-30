@@ -33,6 +33,7 @@ pub mod layout;
 pub mod morton;
 pub mod query;
 pub mod query_gpu;
+pub mod ray;
 pub mod resident;
 
 pub use config::{Aabb, SceneBounds};
@@ -40,4 +41,5 @@ pub use cpu::{cpu_build_lbvh, Lbvh, NO_PARENT};
 pub use gpu::GpuLbvh;
 pub use query::{cpu_bvh_pairs, BvhQueryError};
 pub use query_gpu::GpuBvhQuery;
+pub use ray::{cpu_bvh_raycast_any, cpu_bvh_raycast_closest, Ray, RayHit};
 pub use resident::GpuResidentLbvh;
