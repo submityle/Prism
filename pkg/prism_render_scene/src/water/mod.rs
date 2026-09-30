@@ -54,6 +54,7 @@ mod shader_tests;
 /// build, re-exported so a game can spawn an ocean, `FLIP`/`PBF` pool, or
 /// shallow-water pond with one call.
 pub use authoring::{
-    FlipPoolPreset, OceanPreset, PbfPoolPreset, RiverControlPoint, RiverPreset, ShallowWaterPreset,
+    FlipPoolPreset, LakeInflow, LakePreset, OceanPreset, PbfPoolPreset, RiverControlPoint,
+    RiverPreset, ShallowWaterPreset,
 };
 pub use body::WaterBody;

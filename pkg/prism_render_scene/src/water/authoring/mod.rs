@@ -22,18 +22,23 @@
 //! * [`ocean`] - wind-driven spectral `IFFT` + analytic `Gerstner` swell.
 //! * [`flip`] - a `FLIP`/`APIC` liquid volume seeded in a box, with screen-space
 //!   surface reconstruction.
+//! * [`lake`] - a polygon-bounded lake: a closed `Catmull-Rom` shoreline
+//!   rasterized into a Shallow-Water basin with wind-driven surface drift and
+//!   optional stream-mouth inflows, mirroring `UE5` Water lakes.
 //! * [`pbf`] - a `Position-Based-Fluids` particle pool with its spatial hash.
 //! * [`river`] - a spline-driven river: a `Catmull-Rom` centerline rasterized
 //!   into a Shallow-Water flow field, mirroring `UE5` Water river splines.
 //! * [`swe`] - a Shallow-Water height field stepped under a `CFL` bound.
 
 mod flip;
+mod lake;
 mod ocean;
 mod pbf;
 mod river;
 mod swe;
 
 pub use flip::FlipPoolPreset;
+pub use lake::{LakeInflow, LakePreset};
 pub use ocean::OceanPreset;
 pub use pbf::PbfPoolPreset;
 pub use river::{RiverControlPoint, RiverPreset};

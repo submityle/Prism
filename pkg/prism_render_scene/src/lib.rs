@@ -65,8 +65,8 @@ pub use visibility::{
     UnifiedVisibilityReader,
 };
 pub use water::{
-    FlipPoolPreset, OceanPreset, PbfPoolPreset, RiverControlPoint, RiverPreset, ShallowWaterPreset,
-    WaterBody,
+    FlipPoolPreset, LakeInflow, LakePreset, OceanPreset, PbfPoolPreset, RiverControlPoint,
+    RiverPreset, ShallowWaterPreset, WaterBody,
 };
 
 #[cfg(test)]
