@@ -38,6 +38,7 @@ use prism_render_architecture::cloth::{ClothLodTier, ClothParticle, Constraint};
 
 use super::abi::{GpuClothBackstop, GpuClothCollider, GpuClothEmbedBinding};
 use super::garment::ClothGarment;
+use super::lod_mesh::ClothReducedMesh;
 use super::pack::{pack_backstops, pack_colliders, pack_embed_bindings};
 
 /// Default full-frame timestep: one 60 Hz frame.
@@ -102,6 +103,7 @@ pub struct ClothGarmentBuilder {
     lod_reduced_sim_below: f32,
     lod_skinned_below: f32,
     lod_piece_id: u32,
+    reduced_mesh: Option<ClothReducedMesh>,
 }
 
 impl Default for ClothGarmentBuilder {
@@ -141,6 +143,7 @@ impl Default for ClothGarmentBuilder {
             lod_reduced_sim_below: 0.0,
             lod_skinned_below: 0.0,
             lod_piece_id: 0,
+            reduced_mesh: None,
         }
     }
 }
@@ -393,6 +396,24 @@ impl ClothGarmentBuilder {
         self
     }
 
+    /// Attaches a pre-authored coarse simulation mesh the garment swaps to at the
+    /// reduced-simulation LOD tier.
+    ///
+    /// Build it with
+    /// [`ClothReducedMeshBuilder`](super::lod_mesh::ClothReducedMeshBuilder). When
+    /// present and non-empty, a garment whose coverage drops it to
+    /// [`ClothLodTier::ReducedSim`] solves this coarser mesh instead of the full
+    /// one, so the reduced tier lands a real per-frame cost reduction rather than
+    /// a budget annotation. Leaving it unset keeps the honest fallback: the
+    /// reduced tier re-solves the full mesh. Pair it with
+    /// [`ClothGarmentBuilder::lod_thresholds`] so the coverage gate can actually
+    /// select the reduced tier.
+    #[must_use]
+    pub fn reduced_lod_mesh(mut self, reduced: ClothReducedMesh) -> Self {
+        self.reduced_mesh = Some(reduced);
+        self
+    }
+
     /// Consumes the builder and produces the spawnable [`ClothGarment`] component.
     #[must_use]
     pub fn build(self) -> ClothGarment {
@@ -426,6 +447,7 @@ impl ClothGarmentBuilder {
             lod_reduced_sim_below: self.lod_reduced_sim_below,
             lod_skinned_below: self.lod_skinned_below,
             lod_piece_id: self.lod_piece_id,
+            reduced_mesh: self.reduced_mesh,
         }
     }
 }

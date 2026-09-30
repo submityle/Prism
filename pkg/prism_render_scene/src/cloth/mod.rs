@@ -55,6 +55,7 @@ mod gpu_test_support;
 #[cfg(test)]
 mod layers_gpu_tests;
 mod lod;
+mod lod_mesh;
 mod pack;
 #[cfg(test)]
 mod painted_gpu_tests;
@@ -86,3 +87,4 @@ mod virtual_gpu_tests;
 
 pub use authoring::ClothGarmentBuilder;
 pub use garment::ClothGarment;
+pub use lod_mesh::{ClothReducedMesh, ClothReducedMeshBuilder};

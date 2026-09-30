@@ -72,9 +72,11 @@ pub(crate) fn prepare_cloth_pieces(
     for (index, garment) in extracted.garments.iter().enumerate() {
         // Screen-coverage LOD gate: a garment whose coverage collapses it to a
         // non-simulated tier (the skinned proxy) builds no resident piece, so the
-        // dispatch node records no compute pass for it. Simulated tiers (full and
-        // reduced) still solve the authored mesh. Reuses the architecture-layer
-        // golden classifier through the garment's own decision.
+        // dispatch node records no compute pass for it. Simulated tiers still
+        // solve: full sim solves the authored mesh, and reduced sim solves the
+        // garment's coarse LOD mesh when one was authored (else it falls back to
+        // the full mesh). Reuses the architecture-layer golden classifier through
+        // the garment's own decision.
         let lod = garment.lod_decision();
         if !lod.tier.is_simulated() {
             continue;
@@ -88,7 +90,11 @@ pub(crate) fn prepare_cloth_pieces(
             continue;
         }
 
-        let input = garment.as_solve_input();
+        // Tier-aware solve view: at the reduced-simulation tier a garment that
+        // authored a coarse LOD mesh solves that mesh instead of the full one,
+        // landing the reduced tier's real per-frame cost reduction. Every other
+        // tier (and the reduced tier with no coarse mesh) solves the full mesh.
+        let input = garment.as_solve_input_for_tier(lod.tier);
         let plan = build_solve_plan(&input);
         if plan.counts.particles == 0 {
             continue;

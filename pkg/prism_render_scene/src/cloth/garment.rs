@@ -22,6 +22,7 @@ use prism_render_architecture::cloth::{ClothLodTier, Constraint};
 
 use super::abi::{GpuClothBackstop, GpuClothCollider, GpuClothEmbedBinding};
 use super::lod::resolve_garment_lod;
+use super::lod_mesh::ClothReducedMesh;
 use super::solve_plan::ClothSolveInput;
 
 /// The authored `CPU` state of one cloth garment, spawned on a main-world
@@ -113,6 +114,13 @@ pub struct ClothGarment {
     /// [`ClothLodDecision::handle`] so the renderer can bin pieces by tier.
     /// Defaults to `0`.
     pub(crate) lod_piece_id: u32,
+    /// The pre-authored coarser simulation mesh this garment swaps to at the
+    /// reduced-simulation LOD tier. `None` (the default) keeps the honest
+    /// fallback: the reduced tier re-solves the full mesh because no coarse
+    /// geometry was authored. `Some` lands a real per-frame cost reduction —
+    /// fewer particles, constraints and dispatched work-items — whenever the
+    /// coverage gate selects [`ClothLodTier::ReducedSim`].
+    pub(crate) reduced_mesh: Option<ClothReducedMesh>,
 }
 
 impl Default for ClothGarment {
@@ -152,6 +160,7 @@ impl Default for ClothGarment {
             lod_reduced_sim_below: 0.0,
             lod_skinned_below: 0.0,
             lod_piece_id: 0,
+            reduced_mesh: None,
         }
     }
 }
@@ -178,6 +187,62 @@ impl ClothGarment {
             embed_bindings: &self.embed_bindings,
             render_vertex_count: self.render_vertex_count,
             hash_cell_count: self.hash_cell_count,
+            gravity: self.gravity,
+            dt: self.dt,
+            substeps: self.substeps,
+            iterations: self.iterations,
+            damping: self.damping,
+            strain_limit: self.strain_limit,
+            self_thickness: self.self_thickness,
+            self_cell_size: self.self_cell_size,
+        }
+    }
+
+    /// Borrows this garment's fields as a [`ClothSolveInput`] for the prepare
+    /// stage at a given resolved LOD tier.
+    ///
+    /// At [`ClothLodTier::ReducedSim`], when this garment carries a non-empty
+    /// pre-authored coarse mesh, the resolution-dependent buffers (particles,
+    /// constraints, bending, triangles, backstops, embeds and the self-collision
+    /// hash size) come from that coarser mesh, so the solve genuinely runs fewer
+    /// particles and constraints — a real per-frame cost reduction, not a budget
+    /// annotation. Every material/environment scalar and the analytic colliders
+    /// and render-vertex count are shared off this garment because they do not
+    /// change with mesh resolution. Any other tier — and the reduced tier with no
+    /// authored coarse mesh — borrows the full mesh through [`Self::as_solve_input`],
+    /// preserving the honest fallback of re-solving the full mesh.
+    #[must_use]
+    pub(crate) fn as_solve_input_for_tier(&self, tier: ClothLodTier) -> ClothSolveInput<'_> {
+        match (tier, &self.reduced_mesh) {
+            (ClothLodTier::ReducedSim, Some(reduced)) if !reduced.positions.is_empty() => {
+                self.reduced_solve_input(reduced)
+            }
+            _ => self.as_solve_input(),
+        }
+    }
+
+    /// Borrows the reduced-tier solve view: the resolution-dependent buffers from
+    /// `reduced` spliced onto this garment's shared material/environment scalars,
+    /// analytic colliders and render-vertex count.
+    #[must_use]
+    fn reduced_solve_input<'a>(&'a self, reduced: &'a ClothReducedMesh) -> ClothSolveInput<'a> {
+        ClothSolveInput {
+            positions: &reduced.positions,
+            velocities: &reduced.velocities,
+            constraints: &reduced.constraints,
+            bending: &reduced.bending,
+            triangles: &reduced.triangles,
+            wind_velocity: self.wind_velocity,
+            wind_turbulence: self.wind_turbulence,
+            aero_drag: self.aero_drag,
+            aero_lift: self.aero_lift,
+            aero_air_density: self.aero_air_density,
+            friction: self.friction,
+            colliders: &self.colliders,
+            backstops: &reduced.backstops,
+            embed_bindings: &reduced.embed_bindings,
+            render_vertex_count: self.render_vertex_count,
+            hash_cell_count: reduced.hash_cell_count,
             gravity: self.gravity,
             dt: self.dt,
             substeps: self.substeps,
@@ -265,7 +330,6 @@ impl ClothGarment {
     pub(crate) fn lod_decision(&self) -> ClothLodDecision {
         resolve_garment_lod(self)
     }
-
 }
 
 /// The render-world snapshot of every main-world [`ClothGarment`] this frame.
@@ -315,5 +379,159 @@ mod tests {
         assert!(garment.positions.is_empty());
         assert!(garment.constraints.is_empty());
         assert_eq!(garment.render_vertex_count, 0);
+    }
+
+    /// A four-particle full mesh with four structural edges, mirrored by a
+    /// two-particle coarse mesh with a single edge, so the reduced tier is a
+    /// strictly smaller solve.
+    fn full_and_reduced_garment(coverage: f32) -> ClothGarment {
+        use crate::cloth::{ClothGarmentBuilder, ClothReducedMeshBuilder};
+        use prism_render_architecture::cloth::{ClothParticle, Compliance, ConstraintKind, Vec3};
+
+        let full = [
+            ClothParticle::pinned(Vec3::new(0.0, 0.0, 0.0)),
+            ClothParticle::new(Vec3::new(1.0, 0.0, 0.0), 1.0),
+            ClothParticle::new(Vec3::new(0.0, 1.0, 0.0), 1.0),
+            ClothParticle::new(Vec3::new(1.0, 1.0, 0.0), 1.0),
+        ];
+        let full_constraints = vec![
+            Constraint::new(0, 1, 1.0, Compliance::RIGID, ConstraintKind::Stretch),
+            Constraint::new(1, 3, 1.0, Compliance::RIGID, ConstraintKind::Stretch),
+            Constraint::new(3, 2, 1.0, Compliance::RIGID, ConstraintKind::Stretch),
+            Constraint::new(2, 0, 1.0, Compliance::RIGID, ConstraintKind::Stretch),
+        ];
+        let coarse = [
+            ClothParticle::pinned(Vec3::new(0.0, 0.0, 0.0)),
+            ClothParticle::new(Vec3::new(1.0, 1.0, 0.0), 1.0),
+        ];
+        let reduced = ClothReducedMeshBuilder::from_particles(&coarse)
+            .constraints(vec![Constraint::new(
+                0,
+                1,
+                1.0,
+                Compliance::RIGID,
+                ConstraintKind::Stretch,
+            )])
+            .build();
+        ClothGarmentBuilder::from_particles(&full)
+            .constraints(full_constraints)
+            .lod_thresholds(0.5, 0.1)
+            .coverage(coverage)
+            .reduced_lod_mesh(reduced)
+            .build()
+    }
+
+    #[test]
+    fn reduced_tier_solves_the_coarse_mesh_when_authored() {
+        let garment = full_and_reduced_garment(1.0);
+        let full = garment.as_solve_input_for_tier(ClothLodTier::FullSim);
+        assert_eq!(full.positions.len(), 4);
+        assert_eq!(full.constraints.len(), 4);
+
+        let reduced = garment.as_solve_input_for_tier(ClothLodTier::ReducedSim);
+        // The reduced tier borrows the coarse mesh: strictly fewer particles and
+        // constraints, so the per-frame solve genuinely costs less.
+        assert_eq!(reduced.positions.len(), 2);
+        assert_eq!(reduced.constraints.len(), 1);
+        assert!(reduced.positions.len() < full.positions.len());
+        assert!(reduced.constraints.len() < full.constraints.len());
+    }
+
+    #[test]
+    fn reduced_tier_without_a_coarse_mesh_falls_back_to_the_full_mesh() {
+        use crate::cloth::ClothGarmentBuilder;
+        use prism_render_architecture::cloth::{ClothParticle, Vec3};
+
+        let particles = [
+            ClothParticle::pinned(Vec3::new(0.0, 0.0, 0.0)),
+            ClothParticle::new(Vec3::new(1.0, 0.0, 0.0), 1.0),
+            ClothParticle::new(Vec3::new(0.0, 1.0, 0.0), 1.0),
+        ];
+        let garment = ClothGarmentBuilder::from_particles(&particles).build();
+        // No coarse mesh authored: the reduced tier honestly re-solves the full
+        // mesh rather than fabricating a decimation.
+        let reduced = garment.as_solve_input_for_tier(ClothLodTier::ReducedSim);
+        assert_eq!(reduced.positions.len(), 3);
+    }
+
+    #[test]
+    fn empty_coarse_mesh_falls_back_to_the_full_mesh() {
+        use crate::cloth::{ClothGarmentBuilder, ClothReducedMeshBuilder};
+        use prism_render_architecture::cloth::{ClothParticle, Vec3};
+
+        let particles = [
+            ClothParticle::pinned(Vec3::new(0.0, 0.0, 0.0)),
+            ClothParticle::new(Vec3::new(1.0, 0.0, 0.0), 1.0),
+        ];
+        let garment = ClothGarmentBuilder::from_particles(&particles)
+            .reduced_lod_mesh(ClothReducedMeshBuilder::default().build())
+            .build();
+        // An attached-but-empty coarse mesh carries no geometry, so the reduced
+        // tier still falls back to the full mesh instead of solving nothing.
+        let reduced = garment.as_solve_input_for_tier(ClothLodTier::ReducedSim);
+        assert_eq!(reduced.positions.len(), 2);
+    }
+
+    #[test]
+    fn coverage_selected_reduced_tier_picks_the_coarse_solve_input() {
+        // End-to-end wiring: at a coverage that the LOD gate classifies as the
+        // reduced tier, selecting the solve input by the resolved tier lands on
+        // the coarse mesh — the same path the prepare stage takes.
+        let garment = full_and_reduced_garment(0.3);
+        let decision = garment.lod_decision();
+        assert_eq!(decision.tier, ClothLodTier::ReducedSim);
+        let input = garment.as_solve_input_for_tier(decision.tier);
+        assert_eq!(input.positions.len(), 2);
+    }
+
+    #[test]
+    fn reduced_tier_produces_a_strictly_smaller_solve_plan() {
+        use crate::cloth::solve_plan::build_solve_plan;
+
+        let garment = full_and_reduced_garment(1.0);
+        let full_plan = build_solve_plan(&garment.as_solve_input_for_tier(ClothLodTier::FullSim));
+        let reduced_plan =
+            build_solve_plan(&garment.as_solve_input_for_tier(ClothLodTier::ReducedSim));
+        // The reduced tier is not a budget annotation: the actual device plan
+        // schedules fewer particles and constraints, so it dispatches less work.
+        assert!(reduced_plan.counts.particles < full_plan.counts.particles);
+        assert_eq!(reduced_plan.counts.particles, 2);
+        assert_eq!(full_plan.counts.particles, 4);
+    }
+
+    #[test]
+    fn reduced_tier_shares_material_and_environment_scalars() {
+        use crate::cloth::{ClothGarmentBuilder, ClothReducedMeshBuilder};
+        use prism_render_architecture::cloth::{ClothParticle, Vec3};
+
+        let full = [
+            ClothParticle::pinned(Vec3::new(0.0, 0.0, 0.0)),
+            ClothParticle::new(Vec3::new(1.0, 0.0, 0.0), 1.0),
+            ClothParticle::new(Vec3::new(0.0, 1.0, 0.0), 1.0),
+        ];
+        let coarse = [
+            ClothParticle::pinned(Vec3::new(0.0, 0.0, 0.0)),
+            ClothParticle::new(Vec3::new(1.0, 1.0, 0.0), 1.0),
+        ];
+        let garment = ClothGarmentBuilder::from_particles(&full)
+            .wind([3.0, 0.0, 0.0], 0.25)
+            .aerodynamics(0.8, 0.4)
+            .air_density(1.2)
+            .gravity([0.0, -9.81, 0.0])
+            .solver_iterations(6, 5)
+            .reduced_lod_mesh(ClothReducedMeshBuilder::from_particles(&coarse).build())
+            .build();
+        let reduced = garment.as_solve_input_for_tier(ClothLodTier::ReducedSim);
+        // Resolution-independent scalars are shared off the garment, not the mesh.
+        assert_eq!(reduced.wind_velocity, [3.0, 0.0, 0.0]);
+        assert!((reduced.wind_turbulence - 0.25).abs() <= 1e-6);
+        assert!((reduced.aero_drag - 0.8).abs() <= 1e-6);
+        assert!((reduced.aero_lift - 0.4).abs() <= 1e-6);
+        assert!((reduced.aero_air_density - 1.2).abs() <= 1e-6);
+        assert_eq!(reduced.gravity, [0.0, -9.81, 0.0]);
+        assert_eq!(reduced.substeps, 6);
+        assert_eq!(reduced.iterations, 5);
+        // But the mesh itself is the coarse one.
+        assert_eq!(reduced.positions.len(), 2);
     }
 }
