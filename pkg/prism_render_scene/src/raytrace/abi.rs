@@ -22,6 +22,7 @@
     reason = "the ray-traversal ABI strides and shader-mirror constants are the verified layout foundation of this subsystem; the pipeline / bind-group / dispatch slices that upload against them land next, and the contract tests exercise every stride now"
 )]
 
+use bytemuck::{Pod, Zeroable};
 use prism_render_architecture::ray_scene::{NODE_WORDS, TRIANGLE_WORDS};
 
 /// `u32` words per packed `BVH` node, re-exported from the golden layout. Must
@@ -70,12 +71,42 @@ pub(crate) const POSITIVE_INF_BITS: u32 = 0x7F80_0000;
 /// shader and `u32::MAX`.
 pub(crate) const MISS_PRIMITIVE: u32 = u32::MAX;
 
+/// `params.mode` value selecting the nearest-hit walk (`closest_hit`). Must
+/// match the `mode == 0u` branch in `shaders/ray_traverse.wesl`.
+pub(crate) const RAYTRACE_MODE_CLOSEST: u32 = 0;
+
+/// `params.mode` value selecting the any-hit occlusion walk (`any_hit`). Must
+/// match the `mode == 1u` branch in `shaders/ray_traverse.wesl`.
+pub(crate) const RAYTRACE_MODE_ANY: u32 = 1;
+
+/// Host mirror of the traversal kernel's `RayTraverseParams` uniform.
+///
+/// The four `u32` fields are exactly the `struct RayTraverseParams` in
+/// `shaders/ray_traverse.wesl` (`ray_count`, `mode`, `pad0`, `pad1`): a 16-byte
+/// block that satisfies the uniform-buffer 16-byte size/alignment rule with no
+/// implicit tail padding, so `bytemuck::bytes_of` yields the exact bytes the
+/// shader reads.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq)]
+pub(crate) struct GpuRayTraverseParams {
+    /// Number of packed rays in the `rays` buffer; invocations at or past this
+    /// index early-out without writing a hit.
+    pub(crate) ray_count: u32,
+    /// Traversal mode: [`RAYTRACE_MODE_CLOSEST`] or [`RAYTRACE_MODE_ANY`].
+    pub(crate) mode: u32,
+    /// Padding word 0, pinning the uniform to the shader's 16-byte struct size.
+    pub(crate) pad0: u32,
+    /// Padding word 1, pinning the uniform to the shader's 16-byte struct size.
+    pub(crate) pad1: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        HIT_WORDS, MISS_PRIMITIVE, NODE_AXIS_WORD, NODE_FIRST_PRIMITIVE_WORD,
-        NODE_PRIMITIVE_COUNT_WORD, NODE_SECOND_CHILD_WORD, POSITIVE_INF_BITS, RAYTRACE_NODE_WORDS,
-        RAYTRACE_TRIANGLE_WORDS, RAY_WORDS, TRIANGLE_PRIMITIVE_WORD,
+        GpuRayTraverseParams, HIT_WORDS, MISS_PRIMITIVE, NODE_AXIS_WORD, NODE_FIRST_PRIMITIVE_WORD,
+        NODE_PRIMITIVE_COUNT_WORD, NODE_SECOND_CHILD_WORD, POSITIVE_INF_BITS, RAYTRACE_MODE_ANY,
+        RAYTRACE_MODE_CLOSEST, RAYTRACE_NODE_WORDS, RAYTRACE_TRIANGLE_WORDS, RAY_WORDS,
+        TRIANGLE_PRIMITIVE_WORD,
     };
     use prism_render_architecture::ray_scene::{NODE_WORDS, TRIANGLE_WORDS};
 
@@ -125,5 +156,32 @@ mod tests {
     fn miss_sentinels_match_the_shader_constants() {
         assert_eq!(POSITIVE_INF_BITS, f32::INFINITY.to_bits());
         assert_eq!(MISS_PRIMITIVE, u32::MAX);
+    }
+
+    #[test]
+    fn traverse_modes_match_the_shader_branches() {
+        // `shaders/ray_traverse.wesl` gates the walk on `params.mode`: `0u`
+        // takes the nearest-hit branch, `1u` the any-hit occlusion branch.
+        assert_eq!(RAYTRACE_MODE_CLOSEST, 0);
+        assert_eq!(RAYTRACE_MODE_ANY, 1);
+    }
+
+    #[test]
+    fn params_uniform_is_a_16_byte_block() {
+        // The shader's `RayTraverseParams` is four `u32`s; a `UNIFORM` buffer
+        // must be 16-byte aligned, and this exact-size block carries no tail
+        // padding so `bytes_of` matches the on-device read byte-for-byte.
+        assert_eq!(size_of::<GpuRayTraverseParams>(), 16);
+        assert_eq!(align_of::<GpuRayTraverseParams>(), 4);
+        let params = GpuRayTraverseParams {
+            ray_count: 7,
+            mode: RAYTRACE_MODE_ANY,
+            pad0: 0,
+            pad1: 0,
+        };
+        let bytes = bytemuck::bytes_of(&params);
+        assert_eq!(bytes.len(), 16);
+        assert_eq!(&bytes[0..4], &7u32.to_le_bytes());
+        assert_eq!(&bytes[4..8], &1u32.to_le_bytes());
     }
 }

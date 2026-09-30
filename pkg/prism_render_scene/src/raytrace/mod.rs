@@ -19,11 +19,22 @@
 //!   `prism_render_architecture::ray_scene` layout and pinned to it by the
 //!   contract tests so a stride drift fails the build.
 //!
-//! The `wgpu` pipeline, bind groups and dispatch node (and their real-device
-//! `GPU` parity tests against `GpuBvhBuffers::closest_hit`) land in the
-//! following slices.
+//! * [`gpu_tests`] - real-device `GPU` parity coverage (compiled only under
+//!   `#[cfg(test)]`): it builds a real `Bvh`, packs it with
+//!   `GpuBvhBuffers::from_bvh`, binds the `ray_traverse` compute pipeline on a
+//!   live `wgpu` device and asserts the read-back hits ray-for-ray against the
+//!   `CPU` golden `GpuBvhBuffers::closest_hit` / `any_hit` walks, skipping
+//!   gracefully when no adapter is present.
+//!
+//! The production `wgpu` pipeline / bind-group helpers and the render-graph
+//! dispatch node land once a real ray-tracing consumer (screen-space or
+//! world-space reflections, ray-traced shadows) fixes their exact binding
+//! interface; this slice proves the kernel is numerically correct on device
+//! first.
 
 mod abi;
 
+#[cfg(test)]
+mod gpu_tests;
 #[cfg(test)]
 mod shader_tests;
