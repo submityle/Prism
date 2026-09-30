@@ -59,6 +59,7 @@ pub mod hoa_beamform;
 pub mod hoa_decode;
 pub mod hoa_rotation;
 pub mod multi_position;
+pub mod nfc;
 pub mod occlusion;
 pub mod panner;
 pub mod propagation;
@@ -85,6 +86,7 @@ pub use hoa_rotation::{HoaRotationMatrix, rotate_hoa};
 pub use multi_position::{
     MAX_POSITIONS, MultiPositionMode, PositionInput, resolve_multi,
 };
+pub use nfc::{MAX_NFC_ORDER, NfcCoeffs, NfcFilter};
 pub use occlusion::{
     NullOcclusionQuery, Occlusion, OcclusionFactors, OcclusionNode, OcclusionParams, OcclusionQuery,
 };
