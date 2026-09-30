@@ -14,11 +14,23 @@
 //! the honest baseline before a later slice folds in persistent buffers with
 //! `queue`-side rewrites. A garment whose plan has zero particles contributes
 //! no piece, so an empty or degenerate garment never fabricates a solve.
+//!
+//! Two gates upstream of the buffer allocation decide *whether* a garment solves
+//! this frame, both honoring the same "no work, no dispatch" contract:
+//!
+//! * the screen-coverage LOD gate ([`super::lod`]): a garment whose coverage
+//!   collapses it to the skinned proxy tier builds no piece;
+//! * the shared deformation-budget gate ([`super::budget`]): when several
+//!   simulated garments compete for one finite per-frame vertex budget, the
+//!   lower-priority (lower-coverage) garments defer to a later frame and build
+//!   no piece this frame. The budget defaults to unlimited, so the gate is a
+//!   transparent pass-through until a scene opts into a finite ceiling.
 
 use bevy_ecs::prelude::*;
 use bevy_render::renderer::RenderDevice;
 
 use super::bind_groups::{ClothPieceBindGroups, ClothPieceGpuBuffers, ClothPieceUpload};
+use super::budget::{admitted_garment_mask, ClothDeformationBudget};
 use super::garment::ExtractedCloth;
 use super::pipeline::ClothComputePipelines;
 use super::resources::{ClothGpuPiece, ClothGpuPieces};
@@ -26,16 +38,19 @@ use super::solve_plan::build_solve_plan;
 
 /// Rebuilds the resident `GPU` cloth pieces from the extracted garments.
 ///
-/// Clears the existing pieces and, for every extracted garment, resolves its
+/// Clears the existing pieces and resolves the shared deformation-budget verdict
+/// for the whole extracted set, then, for every extracted garment, resolves its
 /// screen-coverage LOD tier and skips the garment when that tier is not
-/// simulated (the skinned proxy), then builds its device-free solve plan,
-/// allocates the resident buffers, builds the seven bind groups and pushes the
-/// resulting [`ClothGpuPiece`] with its golden dispatch schedule and resolved
-/// LOD decision. Garments whose plan has no particles are likewise skipped so
-/// the dispatch node never records an empty solve.
+/// simulated (the skinned proxy) or when the budget deferred it this frame,
+/// otherwise builds its device-free solve plan, allocates the resident buffers,
+/// builds the seven bind groups and pushes the resulting [`ClothGpuPiece`] with
+/// its golden dispatch schedule and resolved LOD decision. Garments whose plan
+/// has no particles are likewise skipped so the dispatch node never records an
+/// empty solve.
 pub(crate) fn prepare_cloth_pieces(
     mut pieces: ResMut<ClothGpuPieces>,
     extracted: Res<ExtractedCloth>,
+    budget: Res<ClothDeformationBudget>,
     pipelines: Option<Res<ClothComputePipelines>>,
     device: Res<RenderDevice>,
 ) {
@@ -48,7 +63,13 @@ pub(crate) fn prepare_cloth_pieces(
         return;
     };
 
-    for garment in &extracted.garments {
+    // Shared deformation-budget arbitration over the whole extracted set: a
+    // `false` slot is either a non-simulated proxy or a simulated garment the
+    // budget deferred to a later frame. The default unlimited budget admits
+    // every simulated garment, keeping this a transparent pass-through.
+    let admitted = admitted_garment_mask(&extracted.garments, budget.budget);
+
+    for (index, garment) in extracted.garments.iter().enumerate() {
         // Screen-coverage LOD gate: a garment whose coverage collapses it to a
         // non-simulated tier (the skinned proxy) builds no resident piece, so the
         // dispatch node records no compute pass for it. Simulated tiers (full and
@@ -56,6 +77,14 @@ pub(crate) fn prepare_cloth_pieces(
         // golden classifier through the garment's own decision.
         let lod = garment.lod_decision();
         if !lod.tier.is_simulated() {
+            continue;
+        }
+
+        // Deformation-budget gate: a simulated garment the shared arbiter
+        // deferred this frame builds no resident piece, so the dispatch node
+        // records no compute pass for it. It keeps last frame's embedded pose and
+        // the arbiter re-offers it next frame.
+        if !admitted[index] {
             continue;
         }
 
@@ -91,8 +120,11 @@ pub(crate) fn prepare_cloth_pieces(
 
         let buffers = ClothPieceGpuBuffers::create(&device, &upload);
         let bind_groups = ClothPieceBindGroups::create(&device, &pipelines, &buffers);
-        pieces
-            .pieces
-            .push(ClothGpuPiece::new(buffers, bind_groups, plan.dispatches, lod));
+        pieces.pieces.push(ClothGpuPiece::new(
+            buffers,
+            bind_groups,
+            plan.dispatches,
+            lod,
+        ));
     }
 }

@@ -44,6 +44,7 @@ use bevy_camera::CameraUpdateSystems;
 use bevy_ecs::schedule::IntoScheduleConfigs;
 use bevy_render::{ExtractSchedule, Render, RenderApp, RenderStartup, RenderSystems};
 
+use super::budget::ClothDeformationBudget;
 use super::coverage::update_cloth_coverage;
 use super::dispatch::dispatch_cloth;
 use super::extract::extract_cloth_garments;
@@ -75,10 +76,7 @@ impl Plugin for ClothPlugin {
         // a live coverage rather than a static authored value. It runs after the
         // camera projection is recomputed (`CameraUpdateSystems`) and before the
         // extract stage snapshots the garments into the render world.
-        app.add_systems(
-            PostUpdate,
-            update_cloth_coverage.after(CameraUpdateSystems),
-        );
+        app.add_systems(PostUpdate, update_cloth_coverage.after(CameraUpdateSystems));
 
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
@@ -91,6 +89,10 @@ impl Plugin for ClothPlugin {
             .init_resource::<ClothGpuPieces>()
             // Default-empty snapshot the extract stage refills every frame.
             .init_resource::<ExtractedCloth>()
+            // Shared per-frame deformation budget the prepare stage arbitrates
+            // simulated garments against. Defaults to unlimited, so the budget
+            // gate is a transparent pass-through until a scene lowers it.
+            .init_resource::<ClothDeformationBudget>()
             // Build the thirteen pipelines + seven layouts once, then insert the
             // shared `ClothComputePipelines` resource the prepare and dispatch
             // stages read.

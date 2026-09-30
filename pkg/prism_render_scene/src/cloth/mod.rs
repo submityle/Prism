@@ -39,6 +39,7 @@ mod authoring;
 #[cfg(test)]
 mod backstop_gpu_tests;
 mod bind_groups;
+mod budget;
 #[cfg(test)]
 mod body_collision_gpu_tests;
 #[cfg(test)]
