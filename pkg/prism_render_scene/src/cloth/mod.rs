@@ -47,7 +47,9 @@ mod backstop_gpu_tests;
 #[cfg(test)]
 mod body_collision_gpu_tests;
 #[cfg(test)]
-mod collision_gpu_test_support;
+mod embed_gpu_tests;
+#[cfg(test)]
+mod gpu_test_support;
 #[cfg(test)]
 mod aero_parity;
 #[cfg(test)]

@@ -1,10 +1,11 @@
-//! 共享的 `cloth_collision.wesl` 真机测试脚手架：把 `WESL` 编译回 `Wgsl`、
-//! 尽力取一个原生 compute 设备、以及裸 `wgpu` 缓冲小工具。
+//! 共享的 cloth 真机 GPU 测试脚手架：把 `WESL` 源编译回 `Wgsl`、尽力取一个原生
+//! compute 设备、以及裸 `wgpu` 缓冲小工具。
 //!
-//! body-collision 与 backstop 两个 parity 模块都 dispatch 同一份
-//! `cloth_collision.wesl`，故编译、找入口、取设备、建只读存储缓冲这些与内核无关的
-//! 步骤集中在此，避免每个测试文件各抄一份。内核相关的绑定布局、replay 与断言仍留在
-//! 各自模块里，保持每个内核的对拍逻辑自解释。
+//! 多个 parity 模块（body-collision / backstop 共用 `cloth_collision.wesl`，
+//! skin-embed 用 `cloth_embed.wesl`）都要做同一批与内核无关的准备：编译着色器、
+//! 在编译产物里定位真实入口符号、取设备、建只读存储缓冲。这些集中在此，避免每个
+//! 测试文件各抄一份。内核相关的绑定布局、replay 与断言仍留在各自模块里，保持每个
+//! 内核的对拍逻辑自解释。
 //!
 //! 全部 `#[cfg(test)]`：这是测试专用支撑，不进 shipping 二进制。
 
@@ -17,16 +18,19 @@ use wgpu::{
     InstanceFlags, RequestAdapterOptions,
 };
 
-/// `GPU`-对-`CPU` 逐分量绝对容差，供两个 collision parity 模块共用。
+/// `GPU`-对-`CPU` 逐分量绝对容差，供各 parity 模块共用。
 ///
-/// collision.wesl 的投影/回拉都是单 pass 纯几何，两条路径跑同一份 `float32`
-/// 算术，唯一自由度是归一化里 CPU 的 `1.0 / sqrt` 与 WESL 的 `inverseSqrt`
-/// （多为原生 `rsqrt`）的几个 ULP 之差。位置量级 `O(1)`，`1e-4` 既能吸收该 ULP
-/// 差，又远紧于任何真实内核 bug 会产生的 `O(0.1)` 级发散。
+/// 这些内核都是单 pass 纯几何，CPU 与 GPU 两条路径跑同一份 `float32` 算术，唯一自由度
+/// 是归一化里 CPU 的 `1.0 / sqrt` 与 WESL 的 `inverseSqrt`（多为原生 `rsqrt`）之间的
+/// 几个 ULP 之差。位置量级 `O(1)`，`1e-4` 既能吸收该 ULP 差，又远紧于任何真实内核 bug
+/// 会产生的 `O(0.1)` 级发散。
 pub(super) const PARITY_EPS: f32 = 1.0e-4;
 
-/// 本测试组编译 `cloth_collision.wesl` 用的一次性 `AssetId`，只需在本次编译内唯一。
+/// 编译 `cloth_collision.wesl` 用的一次性 `AssetId`，只需在本次编译内唯一。
 const CLOTH_COLLISION_WESL_UUID: u128 = 0x434c_4f54_485f_434f_4c4c_4244_5f42_4f01;
+
+/// 编译 `cloth_embed.wesl` 用的一次性 `AssetId`，只需在本次编译内唯一。
+const CLOTH_EMBED_WESL_UUID: u128 = 0x434c_4f54_485f_454d_4245_445f_5f5f_4501;
 
 /// 把 `WESL` 源经 render-world 的 [`ShaderCache`] 编译回 `Wgsl` 字符串（不建
 /// 设备），供各模块自建的裸 `wgpu` 设备使用。镜像 `sim_gpu_tests` 的编译闭包。
@@ -41,23 +45,36 @@ fn keep_wgsl(
     }
 }
 
-/// 经 `ShaderCache` 把嵌入式 `cloth_collision.wesl` 编译成 `Wgsl`。
-pub(super) fn compile_collision_wgsl() -> String {
+/// 经 `ShaderCache` 把一份嵌入式 cloth `WESL` 源编译成 `Wgsl`。`uuid` 只需在本次编译内
+/// 唯一，`path` 仅用于错误信息里的定位。
+fn compile_cloth_wgsl(source: &'static str, path: &'static str, uuid: u128) -> String {
     let mut cache = ShaderCache::new((), keep_wgsl);
     let id = AssetId::Uuid {
-        uuid: Uuid::from_u128(CLOTH_COLLISION_WESL_UUID),
+        uuid: Uuid::from_u128(uuid),
     };
-    cache.set_shader(
-        id,
-        Shader::from_wesl(
-            include_str!("../shaders/cloth_collision.wesl"),
-            "shaders/cloth_collision.wesl",
-        ),
-    );
+    cache.set_shader(id, Shader::from_wesl(source, path));
     let module = cache
         .get(0, id, &[])
-        .unwrap_or_else(|error| panic!("cloth_collision.wesl failed to compile: {error}"));
+        .unwrap_or_else(|error| panic!("{path} failed to compile: {error}"));
     (*module).clone()
+}
+
+/// 经 `ShaderCache` 把嵌入式 `cloth_collision.wesl` 编译成 `Wgsl`。
+pub(super) fn compile_collision_wgsl() -> String {
+    compile_cloth_wgsl(
+        include_str!("../shaders/cloth_collision.wesl"),
+        "shaders/cloth_collision.wesl",
+        CLOTH_COLLISION_WESL_UUID,
+    )
+}
+
+/// 经 `ShaderCache` 把嵌入式 `cloth_embed.wesl` 编译成 `Wgsl`。
+pub(super) fn compile_embed_wgsl() -> String {
+    compile_cloth_wgsl(
+        include_str!("../shaders/cloth_embed.wesl"),
+        "shaders/cloth_embed.wesl",
+        CLOTH_EMBED_WESL_UUID,
+    )
 }
 
 /// 在编译后的 `Wgsl` 里按子串定位 compute 入口的真实符号名（`WESL` 可能给模块内
@@ -79,10 +96,10 @@ pub(super) fn find_entry_point(wgsl: &str, needle: &str) -> String {
 
 /// 尽力获取一个原生 compute 设备与队列。
 ///
-/// collision.wesl 的这两个内核都不用 `immediate`（push-constant），故只需一个默认
-/// 能力的 compute 设备——比求解核宽松，能在更多机器上跑满。无 adapter 时返回
-/// `None`（不 panic），让无头机保持绿。
-pub(super) fn try_collision_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+/// 这些 parity 内核都不用 `immediate`（push-constant），故只需一个默认能力的 compute
+/// 设备——比求解核宽松，能在更多机器上跑满。无 adapter 时返回 `None`（不 panic），让
+/// 无头机保持绿。
+pub(super) fn try_compute_device() -> Option<(wgpu::Device, wgpu::Queue)> {
     let instance = Instance::new(InstanceDescriptor {
         backends: Backends::METAL | Backends::VULKAN | Backends::DX12,
         flags: InstanceFlags::default(),

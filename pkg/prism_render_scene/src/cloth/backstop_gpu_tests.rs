@@ -30,7 +30,7 @@
 //! 返回——与 CPU 的短切片语义逐比特一致，也顺带把空 backstops（`particle_count == 0`，
 //! 彻底 no-op）覆盖进来。
 //!
-//! 取设备是尽力而为：无 `wgpu` adapter 的无头机上 [`try_collision_device`] 返回
+//! 取设备是尽力而为：无 `wgpu` adapter 的无头机上 [`try_compute_device`] 返回
 //! `None`，测试打印跳过提示而非失败，让套件在任何机器上保持绿。
 
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
@@ -46,8 +46,8 @@ use prism_render_architecture::cloth::collision::{resolve_backstops, Backstop};
 use prism_render_architecture::cloth::{ClothParticle, Vec3};
 
 use super::abi::{GpuClothBackstop, GpuClothBackstopParams};
-use super::collision_gpu_test_support::{
-    compile_collision_wgsl, find_entry_point, storage_from_slice, try_collision_device, PARITY_EPS,
+use super::gpu_test_support::{
+    compile_collision_wgsl, find_entry_point, storage_from_slice, try_compute_device, PARITY_EPS,
 };
 use super::pack::pack_backstops;
 
@@ -270,7 +270,7 @@ fn plane(origin: [f32; 3], normal: [f32; 3], distance: f32) -> Backstop {
     reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志"
 )]
 fn backstop_pushes_behind_particles_onto_limit_plane() {
-    let Some((device, queue)) = try_collision_device() else {
+    let Some((device, queue)) = try_compute_device() else {
         eprintln!(
             "backstop_pushes_behind_particles_onto_limit_plane: no wgpu adapter, skipping on-device parity"
         );
@@ -302,7 +302,7 @@ fn backstop_pushes_behind_particles_onto_limit_plane() {
     reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志"
 )]
 fn backstop_handles_non_unit_and_oblique_normals() {
-    let Some((device, queue)) = try_collision_device() else {
+    let Some((device, queue)) = try_compute_device() else {
         eprintln!(
             "backstop_handles_non_unit_and_oblique_normals: no wgpu adapter, skipping on-device parity"
         );
@@ -331,7 +331,7 @@ fn backstop_handles_non_unit_and_oblique_normals() {
     reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志"
 )]
 fn backstop_zero_normal_is_inert_on_gpu() {
-    let Some((device, queue)) = try_collision_device() else {
+    let Some((device, queue)) = try_compute_device() else {
         eprintln!("backstop_zero_normal_is_inert_on_gpu: no wgpu adapter, skipping on-device parity");
         return;
     };
@@ -354,7 +354,7 @@ fn backstop_zero_normal_is_inert_on_gpu() {
     reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志"
 )]
 fn backstop_short_slice_leaves_trailing_particles_free() {
-    let Some((device, queue)) = try_collision_device() else {
+    let Some((device, queue)) = try_compute_device() else {
         eprintln!(
             "backstop_short_slice_leaves_trailing_particles_free: no wgpu adapter, skipping on-device parity"
         );
@@ -381,7 +381,7 @@ fn backstop_short_slice_leaves_trailing_particles_free() {
     reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志"
 )]
 fn empty_backstop_set_is_noop_on_gpu() {
-    let Some((device, queue)) = try_collision_device() else {
+    let Some((device, queue)) = try_compute_device() else {
         eprintln!("empty_backstop_set_is_noop_on_gpu: no wgpu adapter, skipping on-device parity");
         return;
     };

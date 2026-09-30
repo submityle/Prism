@@ -32,7 +32,7 @@
 //! 端到端接线 `friction`（补 abi + pack + extract + 对齐多碰撞体逐个施摩擦的 WESL
 //! 结构）是更大的后续 feature，单列。
 //!
-//! 取设备是尽力而为：无 `wgpu` adapter 的无头机上 [`try_collision_device`] 返回
+//! 取设备是尽力而为：无 `wgpu` adapter 的无头机上 [`try_compute_device`] 返回
 //! `None`，测试打印跳过提示而非失败，让套件在任何机器上保持绿，同时在有真实设备
 //! （如 `Apple` `M` 系列 `GPU`）时跑满整条 dispatch。
 
@@ -49,8 +49,8 @@ use prism_render_architecture::cloth::collision::{resolve_body_collisions, BodyC
 use prism_render_architecture::cloth::{ClothParticle, Vec3};
 
 use super::abi::{GpuClothBodyParams, GpuClothCollider};
-use super::collision_gpu_test_support::{
-    compile_collision_wgsl, find_entry_point, storage_from_slice, try_collision_device, PARITY_EPS,
+use super::gpu_test_support::{
+    compile_collision_wgsl, find_entry_point, storage_from_slice, try_compute_device, PARITY_EPS,
 };
 use super::pack::pack_colliders;
 
@@ -278,7 +278,7 @@ fn pinned(x: f32, y: f32, z: f32) -> ClothParticle {
     reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志"
 )]
 fn sphere_projection_matches_cpu_golden() {
-    let Some((device, queue)) = try_collision_device() else {
+    let Some((device, queue)) = try_compute_device() else {
         eprintln!(
             "sphere_projection_matches_cpu_golden: no wgpu adapter, skipping on-device parity"
         );
@@ -309,7 +309,7 @@ fn sphere_projection_matches_cpu_golden() {
     reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志"
 )]
 fn capsule_projection_matches_cpu_golden() {
-    let Some((device, queue)) = try_collision_device() else {
+    let Some((device, queue)) = try_compute_device() else {
         eprintln!(
             "capsule_projection_matches_cpu_golden: no wgpu adapter, skipping on-device parity"
         );
@@ -350,7 +350,7 @@ fn capsule_projection_matches_cpu_golden() {
     reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志"
 )]
 fn half_space_projection_matches_cpu_golden() {
-    let Some((device, queue)) = try_collision_device() else {
+    let Some((device, queue)) = try_compute_device() else {
         eprintln!(
             "half_space_projection_matches_cpu_golden: no wgpu adapter, skipping on-device parity"
         );
@@ -388,7 +388,7 @@ fn half_space_projection_matches_cpu_golden() {
     reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志"
 )]
 fn multi_collider_order_matches_cpu_golden() {
-    let Some((device, queue)) = try_collision_device() else {
+    let Some((device, queue)) = try_compute_device() else {
         eprintln!(
             "multi_collider_order_matches_cpu_golden: no wgpu adapter, skipping on-device parity"
         );
@@ -424,7 +424,7 @@ fn multi_collider_order_matches_cpu_golden() {
     reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志"
 )]
 fn empty_collider_set_is_noop_on_gpu() {
-    let Some((device, queue)) = try_collision_device() else {
+    let Some((device, queue)) = try_compute_device() else {
         eprintln!("empty_collider_set_is_noop_on_gpu: no wgpu adapter, skipping on-device parity");
         return;
     };

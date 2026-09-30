@@ -21,11 +21,13 @@
 
 use prism_render_architecture::cloth::bending::BendingConstraint;
 use prism_render_architecture::cloth::collision::{Backstop, BodyCollider};
+use prism_render_architecture::cloth::embed::BarycentricBinding;
 use prism_render_architecture::cloth::gpu::upload::{BendingUploadPlan, ConstraintUploadPlan};
 use prism_render_architecture::cloth::{Constraint, ConstraintKind};
 
 use super::abi::{
     GpuClothBackstop, GpuClothBendingConstraint, GpuClothCollider, GpuClothConstraint,
+    GpuClothEmbedBinding,
     CLOTH_COLLIDER_CAPSULE,
     CLOTH_COLLIDER_HALF_SPACE, CLOTH_COLLIDER_SPHERE, CLOTH_CONSTRAINT_BEND, CLOTH_CONSTRAINT_LRA,
     CLOTH_CONSTRAINT_SHEAR, CLOTH_CONSTRAINT_STRETCH, CLOTH_CONSTRAINT_TETHER,
@@ -236,6 +238,57 @@ pub(crate) fn pack_backstop(backstop: &Backstop) -> GpuClothBackstop {
 )]
 pub(crate) fn pack_backstops(backstops: &[Backstop]) -> Vec<GpuClothBackstop> {
     backstops.iter().map(pack_backstop).collect()
+}
+
+/// Packs one authored architecture-layer [`BarycentricBinding`] into its
+/// byte-compatible [`GpuClothEmbedBinding`] mirror, the 32-byte `std430` record
+/// `cloth_embed.wesl` reads at `@binding(2)`.
+///
+/// This is the host bridge between the `CPU`-golden render-mesh embedding type
+/// ([`BarycentricBinding`], one host triangle + weights + signed normal offset
+/// per render vertex) and the device record the
+/// [`cloth_skin_embed`](super::abi) kernel evaluates. The three host indices,
+/// the three barycentric weights and the signed normal offset copy across
+/// field-for-field; `pad` rounds the record up to the shared 32-byte stride and
+/// is never read.
+///
+/// Nothing is normalised or clamped here: the kernel reproduces the CPU
+/// out-of-range and degenerate-triangle fallbacks
+/// (see [`embed_render_vertex`](prism_render_architecture::cloth::embed::embed_render_vertex))
+/// on read, so the packed record stays a lossless copy of the authored binding.
+#[must_use]
+pub(crate) fn pack_embed_binding(binding: &BarycentricBinding) -> GpuClothEmbedBinding {
+    let (w0, w1, w2) = binding.bary;
+    GpuClothEmbedBinding {
+        tri0: binding.tri[0],
+        tri1: binding.tri[1],
+        tri2: binding.tri[2],
+        w0,
+        w1,
+        w2,
+        normal_offset: binding.normal_offset,
+        pad: 0,
+    }
+}
+
+/// Packs an authored embedding-binding slice into the contiguous device buffer
+/// content the skin-embed dispatch binds at `@binding(2)`.
+///
+/// Order is preserved one-to-one and index-aligned with the render-mesh output:
+/// `bindings[i]` drives render vertex `i`, mirroring the CPU
+/// [`embed_render_mesh`](prism_render_architecture::cloth::embed::embed_render_mesh)
+/// traversal exactly. An empty input packs to an empty `Vec` (an honest
+/// zero-vertex render mesh).
+#[must_use]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "authored-BarycentricBinding slice -> GPU buffer host bridge; exercised now by the skin-embed on-device parity test and wired into the garment spawn path once main-world render-mesh binding lands"
+    )
+)]
+pub(crate) fn pack_embed_bindings(bindings: &[BarycentricBinding]) -> Vec<GpuClothEmbedBinding> {
+    bindings.iter().map(pack_embed_binding).collect()
 }
 
 #[cfg(test)]
@@ -453,5 +506,46 @@ mod tests {
     #[test]
     fn empty_backstop_set_packs_to_empty() {
         assert!(pack_backstops(&[]).is_empty());
+    }
+    #[test]
+    fn single_embed_binding_maps_every_field() {
+        let b = BarycentricBinding::new([4, 9, 2], (0.25, 0.5, 0.25), 0.125);
+        let packed = pack_embed_binding(&b);
+        assert_eq!([packed.tri0, packed.tri1, packed.tri2], [4, 9, 2]);
+        assert!((packed.w0 - 0.25).abs() <= f32::EPSILON);
+        assert!((packed.w1 - 0.5).abs() <= f32::EPSILON);
+        assert!((packed.w2 - 0.25).abs() <= f32::EPSILON);
+        assert!((packed.normal_offset - 0.125).abs() <= f32::EPSILON);
+        assert_eq!(packed.pad, 0);
+    }
+
+    #[test]
+    fn embed_binding_copies_weights_verbatim_without_renormalising() {
+        // Weights that do not sum to one must round-trip untouched: packing is a
+        // lossless copy; any renormalisation belongs to the authoring/bind step.
+        let b = BarycentricBinding::new([0, 1, 2], (0.7, 0.7, -0.4), -1.5);
+        let packed = pack_embed_binding(&b);
+        assert!((packed.w0 - 0.7).abs() <= f32::EPSILON);
+        assert!((packed.w1 - 0.7).abs() <= f32::EPSILON);
+        assert!((packed.w2 + 0.4).abs() <= f32::EPSILON);
+        assert!((packed.normal_offset + 1.5).abs() <= f32::EPSILON);
+    }
+
+    #[test]
+    fn packed_embed_bindings_preserve_index_pairing_and_length() {
+        let input = vec![
+            BarycentricBinding::new([0, 1, 2], (1.0, 0.0, 0.0), 0.0),
+            BarycentricBinding::new([5, 6, 7], (0.2, 0.3, 0.5), 0.05),
+        ];
+        let packed = pack_embed_bindings(&input);
+        assert_eq!(packed.len(), input.len());
+        for (i, b) in input.iter().enumerate() {
+            assert_eq!(packed[i], pack_embed_binding(b));
+        }
+    }
+
+    #[test]
+    fn empty_embed_binding_set_packs_to_empty() {
+        assert!(pack_embed_bindings(&[]).is_empty());
     }
 }
