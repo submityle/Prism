@@ -503,6 +503,25 @@ pub(crate) struct GpuClothPaintedParams {
     pub pad0: u32,
 }
 
+/// 16-byte uniform driving the sleep kinetic-indicator reduction. Carries only
+/// the particle count bounding the dispatch plus three pad words to a whole
+/// 16-byte uniform stride. The reduction reads the per-particle velocities and
+/// folds a single scalar (the largest velocity length_squared over the unpinned
+/// particles) back to the host, mirroring the golden
+/// `prism_render_architecture::cloth::sleep::max_kinetic_indicator`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq)]
+pub(crate) struct GpuClothSleepParams {
+    /// Number of particles bounding the dispatch (the golden slice length).
+    pub particle_count: u32,
+    /// Padding to a 16-byte uniform stride.
+    pub pad0: u32,
+    /// Padding to a 16-byte uniform stride.
+    pub pad1: u32,
+    /// Padding to a 16-byte uniform stride.
+    pub pad2: u32,
+}
+
 /// 32-byte uniform driving the continuous-collision (CCD) sweep. The three
 /// sanitized golden scalars (`skin`, `restitution`, `dt`) plus the `friction`
 /// coefficient and two counts, padded to a whole 16-byte uniform stride. The
@@ -718,6 +737,16 @@ mod tests {
         assert_eq!(size_of::<GpuClothPaintedParams>(), 16);
         assert_eq!(size_of::<GpuClothPaintedParams>() % 16, 0);
         assert_eq!(align_of::<GpuClothPaintedParams>(), 4);
+    }
+
+    /// The sleep reduction uniform is one count plus three pad words: pin the
+    /// 16-byte size against drift from `GpuClothSleepParams` in
+    /// `cloth_sleep.wesl`.
+    #[test]
+    fn sleep_params_is_uniform_stride() {
+        assert_eq!(size_of::<GpuClothSleepParams>(), 16);
+        assert_eq!(size_of::<GpuClothSleepParams>() % 16, 0);
+        assert_eq!(align_of::<GpuClothSleepParams>(), 4);
     }
 
     /// The collider discriminants match the shader's `CLOTH_COLLIDER_*` order.
