@@ -1,0 +1,35 @@
+[package]
+name = "prism_audio_spatial"
+version = "0.1.0"
+edition = "2024"
+description = "Spatial audio layer for Prism's next-generation audio engine: listener/emitter geometry, distance attenuation, directional cones, Doppler, multi-layout panning, air absorption, and Ambisonics. Contains no Unreal Engine, Unity, Godot, Wwise, or FMOD source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_audio_core = { path = "../prism_audio_core" }
+# Deterministic, cross-platform scalar transcendental functions (sin/cos/atan2/
+# sqrt) plus the glam `Vec3`/`Quat` prelude used for listener/emitter geometry.
+# `nostd-libm` keeps the math bit-reproducible across targets under `no_std`,
+# which the workspace lints enforce.
+bevy_math = { path = "../../crates/bevy_math", default-features = false, features = [
+  "nostd-libm",
+] }
+serde = { version = "1", default-features = false, features = [
+  "derive",
+], optional = true }
+
+[dev-dependencies]
+prism_audio_spatial = { path = ".", features = ["serialize"] }
+
+[features]
+default = ["std"]
+# Enables std-backed facilities in the dependency graph. The real-time hot path
+# (node `process`) stays allocation-free regardless of this feature.
+std = ["prism_audio_core/std", "bevy_math/std"]
+# Enables serde (de)serialization of plain, non-real-time description data
+# (listener/emitter poses, attenuation/cone descriptors).
+serialize = ["dep:serde", "prism_audio_core/serialize", "bevy_math/serialize"]
+
+[lints]
+workspace = true
