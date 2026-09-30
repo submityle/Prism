@@ -96,12 +96,17 @@ extern crate alloc;
 
 pub mod binaural;
 pub mod dataset;
+pub mod headtracked;
 pub mod interpolation;
 pub mod nearfield;
 pub mod sofa;
 
 pub use binaural::BinauralRenderer;
 pub use dataset::{DatasetError, HrtfDataset, Measurement};
+pub use headtracked::{
+    HeadLocalAngles, HeadPose, HeadTracker, MAX_PREDICTION_SECONDS, local_azimuth,
+    local_elevation, predicted_local_angles, world_to_local_direction,
+};
 pub use interpolation::{
     InterpolationInfo, MAX_NEIGHBORS, angular_distance, direction_from_angles,
     estimate_onset_delay, interpolate,
