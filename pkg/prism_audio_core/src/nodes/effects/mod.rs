@@ -27,6 +27,8 @@
 //!   driven by a control-rate LFO.
 //! - [`bitcrusher::BitcrusherNode`] — bit-depth quantization plus sample-rate
 //!   reduction (sample-and-hold decimation) for gritty lo-fi degradation.
+//! - [`ring_modulator::RingModulatorNode`] — multiplies the signal by a
+//!   bipolar audio-rate carrier for inharmonic, bell-like, or robotic timbres.
 
 pub mod bitcrusher;
 pub mod chorus;
@@ -34,6 +36,7 @@ pub mod delay;
 pub mod flanger;
 pub mod parametric_eq;
 pub mod phaser;
+pub mod ring_modulator;
 pub mod stereo_width;
 pub mod tremolo;
 pub mod waveshaper;
@@ -44,6 +47,7 @@ pub use delay::DelayNode;
 pub use flanger::{FlangerNode, FlangerParams};
 pub use parametric_eq::{EqBand, ParametricEqNode};
 pub use phaser::{PhaserNode, PhaserParams};
+pub use ring_modulator::{RingModulatorNode, RingModulatorParams};
 pub use stereo_width::{MAX_WIDTH, StereoWidthNode, StereoWidthParams};
 pub use tremolo::{TremoloMode, TremoloNode, TremoloParams};
 pub use waveshaper::{Oversample, WaveshaperNode};

@@ -53,7 +53,8 @@ pub use dynamics::{
 pub use effects::{
     BitcrusherNode, BitcrusherParams, ChorusNode, ChorusParams, DelayNode, EqBand, FlangerNode,
     FlangerParams, MAX_BIT_DEPTH, MIN_BIT_DEPTH, Oversample, ParametricEqNode, PhaserNode,
-    PhaserParams, TremoloMode, TremoloNode, TremoloParams, WaveshaperNode,
+    PhaserParams, RingModulatorNode, RingModulatorParams, TremoloMode, TremoloNode, TremoloParams,
+    WaveshaperNode,
 };
 pub use gain::GainNode;
 pub use mix::SumNode;
