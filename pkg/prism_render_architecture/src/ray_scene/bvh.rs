@@ -189,6 +189,62 @@ impl Triangle {
     pub fn centroid(&self) -> [f32; 3] {
         self.bounds().centroid()
     }
+
+    /// Unit geometric (face) normal, `normalize(cross(v1 - v0, v2 - v0))`.
+    ///
+    /// This is the flat normal of the triangle's plane, following the vertex
+    /// winding: a counter-clockwise triangle viewed from the `+normal` side
+    /// yields an outward normal. It is the surface normal a closest-hit walk
+    /// needs to shade a flat primitive, to orient a spawned shadow/bounce ray,
+    /// and to decide front/back facing.
+    ///
+    /// A degenerate (zero-area or collinear) triangle has no well-defined plane,
+    /// so this returns `[0.0, 0.0, 0.0]` rather than a `NaN`-poisoned direction.
+    /// Uses only subtraction, multiplication, and one `sqrt` — no transcendental
+    /// functions — so it matches a `GPU` twin bit-for-bit.
+    #[must_use]
+    pub fn geometric_normal(&self) -> [f32; 3] {
+        let e1 = [
+            self.v1[0] - self.v0[0],
+            self.v1[1] - self.v0[1],
+            self.v1[2] - self.v0[2],
+        ];
+        let e2 = [
+            self.v2[0] - self.v0[0],
+            self.v2[1] - self.v0[1],
+            self.v2[2] - self.v0[2],
+        ];
+        let n = [
+            e1[1] * e2[2] - e1[2] * e2[1],
+            e1[2] * e2[0] - e1[0] * e2[2],
+            e1[0] * e2[1] - e1[1] * e2[0],
+        ];
+        let len_sq = n[0] * n[0] + n[1] * n[1] + n[2] * n[2];
+        if !len_sq.is_finite() || len_sq <= 0.0 {
+            return [0.0, 0.0, 0.0];
+        }
+        let inv_len = 1.0 / len_sq.sqrt();
+        [n[0] * inv_len, n[1] * inv_len, n[2] * inv_len]
+    }
+
+    /// Surface point at barycentric weights `(u, v)`, matching the
+    /// [`super::traversal::Hit`] convention: `u` weights `v1`, `v` weights `v2`,
+    /// and `1 - u - v` weights `v0`.
+    ///
+    /// Reconstructing the hit point from the triangle vertices and the reported
+    /// barycentrics is more robust than `ray.at(t)` for spawning secondary rays:
+    /// it stays exactly on the primitive's plane regardless of ray-parameter
+    /// rounding, which is what a watertight self-intersection offset needs. Pure
+    /// multiply/add arithmetic, so it mirrors a `GPU` twin exactly.
+    #[must_use]
+    pub fn point_at(&self, u: f32, v: f32) -> [f32; 3] {
+        let w = 1.0 - u - v;
+        [
+            w * self.v0[0] + u * self.v1[0] + v * self.v2[0],
+            w * self.v0[1] + u * self.v1[1] + v * self.v2[1],
+            w * self.v0[2] + u * self.v1[2] + v * self.v2[2],
+        ]
+    }
 }
 
 /// One node of the flattened depth-first `BVH`.
@@ -839,5 +895,51 @@ mod tests {
         // triangle finds a hit.
         let ray = Ray::new([0.25, 0.25, 1.0], [0.0, 0.0, -1.0], 0.0, f32::INFINITY);
         assert!(bvh.closest_hit(&ray).is_some());
+    }
+
+    fn vclose(a: [f32; 3], b: [f32; 3]) -> bool {
+        (a[0] - b[0]).abs() <= 1.0e-5
+            && (a[1] - b[1]).abs() <= 1.0e-5
+            && (a[2] - b[2]).abs() <= 1.0e-5
+    }
+
+    #[test]
+    fn geometric_normal_is_unit_and_follows_winding() {
+        // CCW triangle in the z = 0 plane -> +z normal.
+        let tri = Triangle::new([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], 0);
+        let n = tri.geometric_normal();
+        assert!(vclose(n, [0.0, 0.0, 1.0]));
+        // Reversing the winding flips the normal.
+        let flipped = Triangle::new([0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0], 0);
+        assert!(vclose(flipped.geometric_normal(), [0.0, 0.0, -1.0]));
+        // Always unit length for a non-degenerate triangle.
+        let skew = Triangle::new([1.0, 2.0, -3.0], [4.0, 0.0, 1.0], [-2.0, 5.0, 2.0], 7);
+        let ns = skew.geometric_normal();
+        let len = (ns[0] * ns[0] + ns[1] * ns[1] + ns[2] * ns[2]).sqrt();
+        assert!((len - 1.0).abs() <= 1.0e-5);
+    }
+
+    #[test]
+    fn geometric_normal_guards_degenerate_triangle() {
+        // Collinear vertices span no plane -> zero vector, never NaN.
+        let line = Triangle::new([0.0, 0.0, 0.0], [1.0, 1.0, 1.0], [2.0, 2.0, 2.0], 0);
+        assert!(vclose(line.geometric_normal(), [0.0, 0.0, 0.0]));
+        let point = Triangle::new([3.0, 3.0, 3.0], [3.0, 3.0, 3.0], [3.0, 3.0, 3.0], 0);
+        assert!(vclose(point.geometric_normal(), [0.0, 0.0, 0.0]));
+    }
+
+    #[test]
+    fn point_at_matches_vertices_and_hit_barycentrics() {
+        let tri = Triangle::new([0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 4.0, 0.0], 0);
+        // Corners recover the vertices under the (u -> v1, v -> v2) convention.
+        assert!(vclose(tri.point_at(0.0, 0.0), tri.v0));
+        assert!(vclose(tri.point_at(1.0, 0.0), tri.v1));
+        assert!(vclose(tri.point_at(0.0, 1.0), tri.v2));
+        // The reconstructed hit point agrees with the traced ray parameter.
+        use crate::ray_scene::traversal::intersect_triangle;
+        use crate::ray_scene::Ray;
+        let ray = Ray::new([0.5, 0.5, 1.0], [0.0, 0.0, -1.0], 0.0, f32::INFINITY);
+        let (t, u, v) = intersect_triangle(&ray, &tri).expect("ray should hit the triangle");
+        assert!(vclose(tri.point_at(u, v), ray.at(t)));
     }
 }
