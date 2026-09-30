@@ -29,6 +29,10 @@
 //!   layout ([`motion_gpu_layout::MOTION_INSTANCE_WORDS`] stride packing both
 //!   key poses) plus a packed matrix-motion walk that blends and inverts the
 //!   pose per ray and reproduces the in-memory motion walk bit-for-bit.
+//! - [`sphere`] — analytic [`sphere::Sphere`] primitive (`DXR`/Vulkan
+//!   procedural-primitive `AABB` path) with a numerically stable ray test
+//!   and a single-level [`sphere::SphereBvh`] reusing the shared
+//!   binned-`SAH` build and ordered slab walk.
 //! - [`traversal`] — [`Ray`]/`BVH` slab + Möller–Trumbore intersection with
 //!   closest-hit and any-hit walks (the `GPU` traversal kernel's golden ref).
 //! - [`ray_offset`] — Wächter-Binder watertight secondary-ray origin offset
@@ -47,6 +51,7 @@ pub mod motion;
 pub mod motion_gpu_layout;
 pub mod ray_offset;
 pub mod scheduler;
+pub mod sphere;
 pub mod tlas;
 pub mod traversal;
 
@@ -65,6 +70,7 @@ pub use motion::{MotionInstance, MotionTlas};
 pub use motion_gpu_layout::{GpuMotionTlasBuffers, MOTION_INSTANCE_WORDS};
 pub use ray_offset::offset_ray_origin;
 pub use scheduler::{AccelerationScheduler, ScheduledUpdate};
+pub use sphere::{Sphere, SphereBvh, SphereHit};
 pub use traversal::{Hit, Ray};
 pub use gpu_layout::{
     GpuBlasPool, GpuBvhBuffers, GpuTlasBuffers, TlasPackedHit, BLAS_OFFSET_WORDS, INSTANCE_WORDS,
