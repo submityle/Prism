@@ -13,6 +13,8 @@
 //!   [`p2g::GpuMpmP2g`].
 //! - [`grid_update`] — the node-wise finalise / gravity / boundary pipeline
 //!   [`grid_update::GpuMpmGridUpdate`].
+//! - [`g2p`] — the grid-to-particle affine gather pipeline
+//!   [`g2p::GpuMpmG2p`].
 //!
 //! # Provenance
 //!
@@ -21,11 +23,13 @@
 //! derived code.
 
 pub mod constitutive;
+pub mod g2p;
 pub mod grid_update;
 pub mod layout;
 pub mod p2g;
 pub mod params;
 
 pub use constitutive::{ConstitutiveOutput, GpuMpmConstitutive};
+pub use g2p::{G2pParticles, GpuMpmG2p};
 pub use grid_update::{BoundaryMode, GpuMpmGridUpdate};
 pub use p2g::{GpuMpmP2g, P2gGrid};

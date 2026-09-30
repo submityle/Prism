@@ -56,7 +56,8 @@ pub use fluid::{
     GpuGridOps, GpuPressureSolver, GridDims, PressureConfig, TransferMode,
 };
 pub use mpm::{
-    BoundaryMode, ConstitutiveOutput, GpuMpmConstitutive, GpuMpmGridUpdate, GpuMpmP2g, P2gGrid,
+    BoundaryMode, ConstitutiveOutput, G2pParticles, GpuMpmConstitutive, GpuMpmG2p,
+    GpuMpmGridUpdate, GpuMpmP2g, P2gGrid,
 };
 pub use xpbd::{
     cpu_solve, Colouring, DistanceConstraint, GpuXpbdSolver, ParticleState, XpbdConfig, XpbdError,
