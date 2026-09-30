@@ -18,7 +18,7 @@
 
 use super::bvh::{Aabb, Bvh, Triangle};
 use super::tlas::{Affine3, Tlas};
-use super::traversal::{intersect_triangle, Hit, Ray};
+use super::traversal::{intersect_triangle, intersect_triangle_watertight, Hit, Ray};
 
 /// `u32` words per packed `BVH`/`TLAS` node (48 bytes, 16-byte aligned).
 ///
@@ -229,6 +229,124 @@ impl GpuBvhBuffers {
                     for pi in start..end {
                         let tri = self.triangle(pi);
                         if intersect_triangle(ray, &tri).is_some() {
+                            return true;
+                        }
+                    }
+                    match pop(&mut stack, &mut sp) {
+                        Some(n) => node_index = n,
+                        None => break,
+                    }
+                } else {
+                    let first_child = node_index + 1;
+                    if sp < stack.len() {
+                        stack[sp] = self.nodes[base + 7];
+                        sp += 1;
+                    }
+                    node_index = first_child;
+                }
+            } else {
+                match pop(&mut stack, &mut sp) {
+                    Some(n) => node_index = n,
+                    None => break,
+                }
+            }
+        }
+        false
+    }
+
+    /// Nearest intersection along `ray` using the watertight leaf test.
+    ///
+    /// The watertight twin of [`GpuBvhBuffers::closest_hit`]: identical packed
+    /// walk (slab rejection, near/far ordering, running `t_max` shrink), but the
+    /// leaf test is [`intersect_triangle_watertight`], so a ray striking a seam
+    /// shared by two triangles is never lost between them. Mirrors the in-memory
+    /// [`Bvh::closest_hit_watertight`] and is the `CPU` golden the
+    /// `ray_watertight.wesl` kernel is diffed against on device.
+    #[must_use]
+    pub fn closest_hit_watertight(&self, ray: &Ray) -> Option<Hit> {
+        if self.nodes.is_empty() {
+            return None;
+        }
+        let mut ray = *ray;
+        let mut best: Option<Hit> = None;
+
+        let mut stack = [0u32; 64];
+        let mut sp = 0usize;
+        let mut node_index = 0u32;
+        loop {
+            let ni = node_index as usize;
+            let bounds = self.node_bounds(ni);
+            if ray.aabb_interval(&bounds, ray.t_min(), ray.t_max()).is_some() {
+                let base = ni * NODE_WORDS;
+                let primitive_count = self.nodes[base + 8];
+                if primitive_count > 0 {
+                    let start = self.nodes[base + 6] as usize;
+                    let end = start + primitive_count as usize;
+                    for pi in start..end {
+                        let tri = self.triangle(pi);
+                        if let Some((t, u, v)) = intersect_triangle_watertight(&ray, &tri) {
+                            ray = Ray::new(ray.origin(), ray.direction(), ray.t_min(), t);
+                            best = Some(Hit {
+                                t,
+                                u,
+                                v,
+                                primitive: tri.primitive,
+                            });
+                        }
+                    }
+                    match pop(&mut stack, &mut sp) {
+                        Some(n) => node_index = n,
+                        None => break,
+                    }
+                } else {
+                    let first_child = node_index + 1;
+                    let second_child = self.nodes[base + 7];
+                    let axis = self.nodes[base + 9] as usize;
+                    let neg = ray.direction()[axis] < 0.0;
+                    let (near, far) = if neg {
+                        (second_child, first_child)
+                    } else {
+                        (first_child, second_child)
+                    };
+                    if sp < stack.len() {
+                        stack[sp] = far;
+                        sp += 1;
+                    }
+                    node_index = near;
+                }
+            } else {
+                match pop(&mut stack, &mut sp) {
+                    Some(n) => node_index = n,
+                    None => break,
+                }
+            }
+        }
+        best
+    }
+
+    /// True when *any* triangle intersects `ray` under the watertight leaf test;
+    /// the occlusion twin of [`GpuBvhBuffers::any_hit`], mirroring
+    /// [`Bvh::any_hit_watertight`] so seam-aligned shadow rays never leak.
+    #[must_use]
+    pub fn any_hit_watertight(&self, ray: &Ray) -> bool {
+        if self.nodes.is_empty() {
+            return false;
+        }
+        let mut stack = [0u32; 64];
+        let mut sp = 0usize;
+        let mut node_index = 0u32;
+        loop {
+            let ni = node_index as usize;
+            let bounds = self.node_bounds(ni);
+            if ray.aabb_interval(&bounds, ray.t_min(), ray.t_max()).is_some() {
+                let base = ni * NODE_WORDS;
+                let primitive_count = self.nodes[base + 8];
+                if primitive_count > 0 {
+                    let start = self.nodes[base + 6] as usize;
+                    let end = start + primitive_count as usize;
+                    for pi in start..end {
+                        let tri = self.triangle(pi);
+                        if intersect_triangle_watertight(ray, &tri).is_some() {
                             return true;
                         }
                     }
@@ -483,6 +601,144 @@ impl GpuBlasPool {
         }
         false
     }
+
+    /// Nearest intersection along `ray` in `BLAS` `blas` using the watertight
+    /// leaf test; the pool-direct twin of [`GpuBlasPool::closest_hit`].
+    ///
+    /// Walks identically to [`GpuBlasPool::closest_hit`] — same slab rejection,
+    /// near/far ordering and running `t_max` shrink — but swaps the leaf test
+    /// for [`intersect_triangle_watertight`] so seam-aligned rays never leak.
+    /// Agrees bit-for-bit with [`Bvh::closest_hit_watertight`] on the same
+    /// geometry and is the pool-side `CPU` golden the `ray_watertight.wesl`
+    /// kernel is diffed against on device.
+    #[must_use]
+    pub fn closest_hit_watertight(&self, blas: usize, ray: &Ray) -> Option<Hit> {
+        let o = blas * BLAS_OFFSET_WORDS;
+        let node_base = self.offsets[o] as usize;
+        let node_count = self.offsets[o + 1] as usize;
+        if node_count == 0 {
+            return None;
+        }
+        let mut ray = *ray;
+        let mut best: Option<Hit> = None;
+
+        let mut stack = [0u32; 64];
+        let mut sp = 0usize;
+        let mut node_index = 0u32;
+        loop {
+            let base = (node_base + node_index as usize) * NODE_WORDS;
+            let bounds = Aabb::new(read_vec3(&self.nodes, base), read_vec3(&self.nodes, base + 3));
+            if ray.aabb_interval(&bounds, ray.t_min(), ray.t_max()).is_some() {
+                let primitive_count = self.nodes[base + 8];
+                if primitive_count > 0 {
+                    // Leaf `first_primitive` is a global pool triangle index.
+                    let start = self.nodes[base + 6] as usize;
+                    let end = start + primitive_count as usize;
+                    for pi in start..end {
+                        let tb = pi * TRIANGLE_WORDS;
+                        let tri = Triangle::new(
+                            read_vec3(&self.triangles, tb),
+                            read_vec3(&self.triangles, tb + 3),
+                            read_vec3(&self.triangles, tb + 6),
+                            self.triangles[tb + 9],
+                        );
+                        if let Some((t, u, v)) = intersect_triangle_watertight(&ray, &tri) {
+                            ray = Ray::new(ray.origin(), ray.direction(), ray.t_min(), t);
+                            best = Some(Hit {
+                                t,
+                                u,
+                                v,
+                                primitive: tri.primitive,
+                            });
+                        }
+                    }
+                    match pop(&mut stack, &mut sp) {
+                        Some(n) => node_index = n,
+                        None => break,
+                    }
+                } else {
+                    // Child indices are BLAS-local; `node_base` rebases at read.
+                    let first_child = node_index + 1;
+                    let second_child = self.nodes[base + 7];
+                    let axis = self.nodes[base + 9] as usize;
+                    let neg = ray.direction()[axis] < 0.0;
+                    let (near, far) = if neg {
+                        (second_child, first_child)
+                    } else {
+                        (first_child, second_child)
+                    };
+                    if sp < stack.len() {
+                        stack[sp] = far;
+                        sp += 1;
+                    }
+                    node_index = near;
+                }
+            } else {
+                match pop(&mut stack, &mut sp) {
+                    Some(n) => node_index = n,
+                    None => break,
+                }
+            }
+        }
+        best
+    }
+
+    /// True when *any* triangle of `BLAS` `blas` intersects `ray` under the
+    /// watertight leaf test; the pool-direct twin of [`GpuBlasPool::any_hit`]
+    /// used by [`GpuTlasBuffers::any_hit_watertight`] for shadow / AO occlusion
+    /// rays so seam-aligned occluders never leak.
+    #[must_use]
+    pub fn any_hit_watertight(&self, blas: usize, ray: &Ray) -> bool {
+        let o = blas * BLAS_OFFSET_WORDS;
+        let node_base = self.offsets[o] as usize;
+        let node_count = self.offsets[o + 1] as usize;
+        if node_count == 0 {
+            return false;
+        }
+        let mut stack = [0u32; 64];
+        let mut sp = 0usize;
+        let mut node_index = 0u32;
+        loop {
+            let base = (node_base + node_index as usize) * NODE_WORDS;
+            let bounds = Aabb::new(read_vec3(&self.nodes, base), read_vec3(&self.nodes, base + 3));
+            if ray.aabb_interval(&bounds, ray.t_min(), ray.t_max()).is_some() {
+                let primitive_count = self.nodes[base + 8];
+                if primitive_count > 0 {
+                    let start = self.nodes[base + 6] as usize;
+                    let end = start + primitive_count as usize;
+                    for pi in start..end {
+                        let tb = pi * TRIANGLE_WORDS;
+                        let tri = Triangle::new(
+                            read_vec3(&self.triangles, tb),
+                            read_vec3(&self.triangles, tb + 3),
+                            read_vec3(&self.triangles, tb + 6),
+                            self.triangles[tb + 9],
+                        );
+                        if intersect_triangle_watertight(ray, &tri).is_some() {
+                            return true;
+                        }
+                    }
+                    match pop(&mut stack, &mut sp) {
+                        Some(n) => node_index = n,
+                        None => break,
+                    }
+                } else {
+                    let first_child = node_index + 1;
+                    if sp < stack.len() {
+                        stack[sp] = self.nodes[base + 7];
+                        sp += 1;
+                    }
+                    node_index = first_child;
+                }
+            } else {
+                match pop(&mut stack, &mut sp) {
+                    Some(n) => node_index = n,
+                    None => break,
+                }
+            }
+        }
+        false
+    }
 }
 
 /// Flattened `GPU` buffers for a top-level acceleration structure.
@@ -683,6 +939,146 @@ impl GpuTlasBuffers {
                         let obj_dir = world_to_object.transform_vector(ray.direction());
                         let obj_ray = Ray::new(obj_origin, obj_dir, t_min, t_max);
                         if pool.any_hit(blas, &obj_ray) {
+                            return true;
+                        }
+                    }
+                    match pop(&mut stack, &mut sp) {
+                        Some(n) => node_index = n,
+                        None => break,
+                    }
+                } else {
+                    let first_child = node_index + 1;
+                    let second_child = self.nodes[base + 7];
+                    if sp < stack.len() {
+                        stack[sp] = second_child;
+                        sp += 1;
+                    }
+                    node_index = first_child;
+                }
+            } else {
+                match pop(&mut stack, &mut sp) {
+                    Some(n) => node_index = n,
+                    None => break,
+                }
+            }
+        }
+        false
+    }
+
+    /// Nearest intersection along the world-space `ray` using the watertight
+    /// leaf test, mirroring [`Tlas::closest_hit_watertight`] over the packed
+    /// buffers and shared `pool`.
+    ///
+    /// Identical to [`GpuTlasBuffers::closest_hit`] except each referenced
+    /// `BLAS` slice is queried with [`GpuBlasPool::closest_hit_watertight`], so
+    /// rays grazing shared instance seams never leak. The running `t_max`
+    /// shrinks across instances exactly like the in-memory `TLAS`.
+    #[must_use]
+    pub fn closest_hit_watertight(&self, ray: &Ray, pool: &GpuBlasPool) -> Option<TlasPackedHit> {
+        if self.nodes.is_empty() {
+            return None;
+        }
+        let mut best: Option<TlasPackedHit> = None;
+        let mut best_t = ray.t_max();
+        let t_min = ray.t_min();
+
+        let mut stack = [0u32; 64];
+        let mut sp = 0usize;
+        let mut node_index = 0u32;
+        loop {
+            let ni = node_index as usize;
+            let bounds = self.node_bounds(ni);
+            if ray.aabb_interval(&bounds, t_min, best_t).is_some() {
+                let base = ni * NODE_WORDS;
+                let primitive_count = self.nodes[base + 8];
+                if primitive_count > 0 {
+                    let start = self.nodes[base + 6] as usize;
+                    let end = start + primitive_count as usize;
+                    for inst_idx in start..end {
+                        let ib = inst_idx * INSTANCE_WORDS;
+                        let world_to_object = read_affine(&self.instances, ib);
+                        let blas = self.instances[ib + 12] as usize;
+                        let instance_id = self.instances[ib + 13];
+                        let obj_origin = world_to_object.transform_point(ray.origin());
+                        let obj_dir = world_to_object.transform_vector(ray.direction());
+                        let obj_ray = Ray::new(obj_origin, obj_dir, t_min, best_t);
+                        if let Some(hit) = pool.closest_hit_watertight(blas, &obj_ray)
+                            && hit.t < best_t
+                        {
+                            best_t = hit.t;
+                            best = Some(TlasPackedHit {
+                                t: hit.t,
+                                u: hit.u,
+                                v: hit.v,
+                                primitive: hit.primitive,
+                                instance_id,
+                                instance_index: inst_idx as u32,
+                            });
+                        }
+                    }
+                    match pop(&mut stack, &mut sp) {
+                        Some(n) => node_index = n,
+                        None => break,
+                    }
+                } else {
+                    let first_child = node_index + 1;
+                    let second_child = self.nodes[base + 7];
+                    let axis = self.nodes[base + 9] as usize;
+                    let neg = ray.direction()[axis] < 0.0;
+                    let (near, far) = if neg {
+                        (second_child, first_child)
+                    } else {
+                        (first_child, second_child)
+                    };
+                    if sp < stack.len() {
+                        stack[sp] = far;
+                        sp += 1;
+                    }
+                    node_index = near;
+                }
+            } else {
+                match pop(&mut stack, &mut sp) {
+                    Some(n) => node_index = n,
+                    None => break,
+                }
+            }
+        }
+        best
+    }
+
+    /// True when *any* instance intersects the world-space `ray` under the
+    /// watertight leaf test, mirroring [`Tlas::any_hit_watertight`] over the
+    /// packed buffers and shared `pool`. Returns on the first confirmed hit and
+    /// never shrinks `t_max`; the watertight twin of [`GpuTlasBuffers::any_hit`]
+    /// for shadow / ambient-occlusion occlusion queries.
+    #[must_use]
+    pub fn any_hit_watertight(&self, ray: &Ray, pool: &GpuBlasPool) -> bool {
+        if self.nodes.is_empty() {
+            return false;
+        }
+        let t_min = ray.t_min();
+        let t_max = ray.t_max();
+
+        let mut stack = [0u32; 64];
+        let mut sp = 0usize;
+        let mut node_index = 0u32;
+        loop {
+            let ni = node_index as usize;
+            let bounds = self.node_bounds(ni);
+            if ray.aabb_interval(&bounds, t_min, t_max).is_some() {
+                let base = ni * NODE_WORDS;
+                let primitive_count = self.nodes[base + 8];
+                if primitive_count > 0 {
+                    let start = self.nodes[base + 6] as usize;
+                    let end = start + primitive_count as usize;
+                    for inst_idx in start..end {
+                        let ib = inst_idx * INSTANCE_WORDS;
+                        let world_to_object = read_affine(&self.instances, ib);
+                        let blas = self.instances[ib + 12] as usize;
+                        let obj_origin = world_to_object.transform_point(ray.origin());
+                        let obj_dir = world_to_object.transform_vector(ray.direction());
+                        let obj_ray = Ray::new(obj_origin, obj_dir, t_min, t_max);
+                        if pool.any_hit_watertight(blas, &obj_ray) {
                             return true;
                         }
                     }
@@ -1081,5 +1477,171 @@ mod tests {
         let ray = Ray::infinite([0.0, 0.0, 5.0], [0.0, 0.0, -1.0]);
         assert!(packed.closest_hit(&ray, &pool).is_none());
         assert!(!packed.any_hit(&ray, &pool));
+    }
+
+    #[test]
+    fn packed_blas_watertight_matches_in_memory_bit_for_bit() {
+        // The packed watertight BLAS walk must agree bit-for-bit with the
+        // in-memory `Bvh::closest_hit_watertight` golden, and its any-hit twin
+        // with hit existence, over the same random rays.
+        let mut rng = Rng::new(0x5EED_DEAD);
+        let tris = random_triangles(600, &mut rng);
+        let bvh = Bvh::build(&tris);
+        let packed = GpuBvhBuffers::from_bvh(&bvh);
+
+        let mut hits = 0u32;
+        for _ in 0..4000 {
+            let origin = [
+                rng.range(-12.0, 12.0),
+                rng.range(-12.0, 12.0),
+                rng.range(-12.0, 12.0),
+            ];
+            let dir = [
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+            ];
+            let ray = if rng.unit() < 0.5 {
+                Ray::infinite(origin, dir)
+            } else {
+                Ray::new(origin, dir, rng.range(0.0, 1.0), rng.range(2.0, 20.0))
+            };
+            let reference = bvh.closest_hit_watertight(&ray);
+            let via_packed = packed.closest_hit_watertight(&ray);
+            assert_eq!(reference, via_packed, "watertight closest-hit divergence");
+            assert_eq!(
+                reference.is_some(),
+                packed.any_hit_watertight(&ray),
+                "watertight any-hit divergence"
+            );
+            if reference.is_some() {
+                hits += 1;
+            }
+        }
+        assert!(hits > 100, "scene too sparse to be a meaningful test: {hits}");
+    }
+
+    #[test]
+    fn pool_direct_watertight_matches_bvh_golden() {
+        // Pool-direct watertight walk vs standalone `Bvh` watertight golden,
+        // proving the `node_base` rebasing / global leaf indexing hold under
+        // the watertight leaf test as well as the fast one.
+        let mut rng = Rng::new(0x1CE_DEAD);
+        let blases: Vec<Bvh> = (0..4)
+            .map(|_| Bvh::build(&random_triangles(150, &mut rng)))
+            .collect();
+        let pool = GpuBlasPool::from_blases(&blases);
+
+        let mut hits = 0u32;
+        for (blas, bvh) in blases.iter().enumerate() {
+            for _ in 0..2000 {
+                let origin = [
+                    rng.range(-12.0, 12.0),
+                    rng.range(-12.0, 12.0),
+                    rng.range(-12.0, 12.0),
+                ];
+                let dir = [
+                    rng.range(-1.0, 1.0),
+                    rng.range(-1.0, 1.0),
+                    rng.range(-1.0, 1.0),
+                ];
+                let ray = if rng.unit() < 0.5 {
+                    Ray::infinite(origin, dir)
+                } else {
+                    Ray::new(origin, dir, rng.range(0.0, 1.0), rng.range(2.0, 20.0))
+                };
+                let direct = pool.closest_hit_watertight(blas, &ray);
+                assert_eq!(
+                    direct,
+                    bvh.closest_hit_watertight(&ray),
+                    "pool-direct watertight vs Bvh golden"
+                );
+                let direct_any = pool.any_hit_watertight(blas, &ray);
+                assert_eq!(
+                    direct_any,
+                    direct.is_some(),
+                    "watertight any-hit vs closest existence"
+                );
+                if direct.is_some() {
+                    hits += 1;
+                }
+            }
+        }
+        assert!(hits > 40, "scene too sparse: {hits}");
+    }
+
+    #[test]
+    fn packed_tlas_watertight_matches_in_memory() {
+        // Packed TLAS watertight walk vs the in-memory `Tlas` watertight golden
+        // over a shared multi-BLAS pool and randomized instances; every hit
+        // field (including the reordered instance_index) must match, and the
+        // any-hit twin must agree with closest-hit existence.
+        let mut rng = Rng::new(0x0DDB_DEAD);
+        let blases: Vec<Bvh> = (0..3)
+            .map(|_| Bvh::build(&random_triangles(120, &mut rng)))
+            .collect();
+        let pool = GpuBlasPool::from_blases(&blases);
+
+        let mut hits = 0u32;
+        let mut occluded = 0u32;
+        for _ in 0..30 {
+            let count = 1 + (rng.next_u32() % 10) as usize;
+            let mut instances = Vec::with_capacity(count);
+            for id in 0..count {
+                let blas = (rng.next_u32() as usize) % blases.len();
+                instances.push(Instance::new(random_affine(&mut rng), blas, id as u32).unwrap());
+            }
+            let tlas = Tlas::build(&instances, &blases);
+            let packed = GpuTlasBuffers::from_tlas(&tlas);
+
+            for _ in 0..300 {
+                let origin = [
+                    rng.range(-10.0, 10.0),
+                    rng.range(-10.0, 10.0),
+                    rng.range(-10.0, 10.0),
+                ];
+                let dir = [
+                    rng.range(-1.0, 1.0),
+                    rng.range(-1.0, 1.0),
+                    rng.range(-1.0, 1.0),
+                ];
+                let ray = if rng.unit() < 0.5 {
+                    Ray::infinite(origin, dir)
+                } else {
+                    Ray::new(origin, dir, rng.range(0.0, 1.0), rng.range(2.0, 20.0))
+                };
+                let reference = tlas.closest_hit_watertight(&ray, &blases);
+                let via_packed = packed.closest_hit_watertight(&ray, &pool);
+                match (reference, via_packed) {
+                    (None, None) => {}
+                    (Some(r), Some(v)) => {
+                        assert_eq!(r.t, v.t, "t divergence");
+                        assert_eq!(r.u, v.u, "u divergence");
+                        assert_eq!(r.v, v.v, "v divergence");
+                        assert_eq!(r.primitive, v.primitive, "primitive divergence");
+                        assert_eq!(r.instance_id, v.instance_id, "instance_id divergence");
+                        assert_eq!(
+                            r.instance_index, v.instance_index,
+                            "instance_index divergence"
+                        );
+                        hits += 1;
+                    }
+                    (r, v) => panic!("existence mismatch: {r:?} vs {v:?}"),
+                }
+                let ref_any = tlas.any_hit_watertight(&ray, &blases);
+                let any_packed = packed.any_hit_watertight(&ray, &pool);
+                assert_eq!(ref_any, any_packed, "tlas watertight any-hit divergence");
+                assert_eq!(
+                    any_packed,
+                    via_packed.is_some(),
+                    "watertight any-hit vs closest existence divergence"
+                );
+                if any_packed {
+                    occluded += 1;
+                }
+            }
+        }
+        assert!(hits > 40, "scene too sparse: {hits}");
+        assert!(occluded > 40, "scene too sparse: {occluded}");
     }
 }
