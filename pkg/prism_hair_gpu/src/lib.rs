@@ -30,6 +30,13 @@
 //!   along the rotation-minimizing bitangent, with an arc-length `v` coordinate
 //!   (see [`ribbon`]).
 //!
+//! * [`GpuSdfCollider`] evaluates
+//!   [`push_out_of_field`](prism_render_architecture::hair::sdf_collision::push_out_of_field),
+//!   pushing a batch of query points out of a union SDF (sphere, capsule,
+//!   half-space, box) along the field gradient, one thread per point, for the
+//!   tighter body-collision tier layered on the analytic proxies (see
+//!   [`sdf_collision`]).
+//!
 //! # Portability
 //!
 //! The projection uses only `sqrt`, `min`, `max`, `clamp`, `dot` and
@@ -59,10 +66,12 @@ pub mod collision;
 pub mod context;
 pub mod frames;
 pub mod ribbon;
+pub mod sdf_collision;
 pub mod wind;
 
 pub use collision::{query_for, CollisionQuery, GpuColliderProjector};
 pub use context::{block_on, GpuContext};
 pub use frames::{GpuStrandFrame, GpuStrandFrames};
 pub use ribbon::{GpuRibbon, GpuRibbonMesh, RibbonStrandInput};
+pub use sdf_collision::GpuSdfCollider;
 pub use wind::{query_for_wind, GpuWindField, WindQuery};
