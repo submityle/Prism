@@ -61,6 +61,30 @@ impl Disk {
         }
     }
 
+    /// Builds a disk from fields that are already unit-normalized and
+    /// non-negative, storing them verbatim without re-normalizing the normal
+    /// or folding the radius.
+    ///
+    /// This is the exact inverse of the field accessors and exists so the `GPU`
+    /// layout decoder can round-trip a packed [`Disk`] bit-for-bit: passing an
+    /// already-unit `normal` back through [`Disk::new`] would re-run the
+    /// (non-idempotent) normalization and perturb the low bits. Callers must
+    /// pass a unit `normal` and a non-negative `radius`.
+    #[must_use]
+    pub(crate) fn from_parts(
+        center: [f32; 3],
+        normal: [f32; 3],
+        radius: f32,
+        primitive: u32,
+    ) -> Self {
+        Self {
+            center,
+            normal,
+            radius,
+            primitive,
+        }
+    }
+
     /// Center of the disk (a point on its plane).
     #[must_use]
     pub fn center(&self) -> [f32; 3] {
