@@ -12,6 +12,7 @@
 //! Unreal Engine source or derived code.
 
 mod advect;
+mod apic_step;
 mod extrapolate;
 mod grid_ops;
 mod layout;
@@ -20,6 +21,7 @@ mod solver;
 mod step;
 
 pub use advect::GpuAdvect;
+pub use apic_step::GpuFluidApicStep;
 pub use extrapolate::GpuExtrapolate;
 pub use grid_ops::GpuGridOps;
 pub use pressure::GpuPressureSolver;

@@ -45,7 +45,8 @@ pub use cpu::{
     particle_to_grid, AxisDims, GoldenGrid, PressureConfig,
 };
 pub use gpu::{
-    GpuAdvect, GpuExtrapolate, GpuFluidSolver, GpuFluidStep, GpuGridOps, GpuPressureSolver,
+    GpuAdvect, GpuExtrapolate, GpuFluidApicStep, GpuFluidSolver, GpuFluidStep, GpuGridOps,
+    GpuPressureSolver,
 };
 pub use grid::{CellType, GridDims};
 pub use particle::FluidParticles;

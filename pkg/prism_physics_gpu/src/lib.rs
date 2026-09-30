@@ -51,8 +51,8 @@ pub use broadphase::{cpu_broadphase, BroadphaseConfig, BroadphaseError, Candidat
 pub use context::GpuContext;
 pub use fluid::{
     grid_to_particle, particle_to_grid, CellType, FluidConfig, FluidError, FluidParticles,
-    GoldenGrid, GpuAdvect, GpuExtrapolate, GpuFluidSolver, GpuFluidStep, GpuGridOps,
-    GpuPressureSolver, GridDims, PressureConfig, TransferMode,
+    GoldenGrid, GpuAdvect, GpuExtrapolate, GpuFluidApicStep, GpuFluidSolver, GpuFluidStep,
+    GpuGridOps, GpuPressureSolver, GridDims, PressureConfig, TransferMode,
 };
 pub use xpbd::{
     cpu_solve, Colouring, DistanceConstraint, GpuXpbdSolver, ParticleState, XpbdConfig, XpbdError,
