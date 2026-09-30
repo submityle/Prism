@@ -94,6 +94,15 @@
 //!   input a shading pass composites into transmittance `T = product(1 -
 //!   sigma_j)` (see [`voxel_density`]).
 //!
+//! * [`GpuHairVoxelForwardScatter`] evaluates
+//!   [`voxel_forward_scatter`](prism_render_architecture::hair::dual_scattering::voxel_forward_scatter),
+//!   the additive sibling of the froxel transmittance decode — one thread
+//!   per light texel folds its own per-voxel optical density row into the
+//!   running coverage-weighted crossing count `n = sum(sigma_j)`, emitting
+//!   the whole monotonically non-decreasing curve a dual-scattering pass
+//!   samples for the `a_f^n` forward-scatter exponent (see
+//!   [`voxel_forward_scatter`]).
+//!
 //! * [`GpuHairVoxelTransmittance`] evaluates
 //!   [`voxel_transmittance`](prism_render_architecture::hair::deep_transmittance::voxel_transmittance),
 //!   the decode half of the froxel path — one thread per light texel folds its
@@ -149,6 +158,7 @@ pub mod sdf_collision;
 pub mod self_collision_jacobi;
 pub mod strand_metrics;
 pub mod voxel_density;
+pub mod voxel_forward_scatter;
 pub mod voxel_transmittance;
 pub mod wind;
 
@@ -165,5 +175,6 @@ pub use sdf_collision::GpuSdfCollider;
 pub use self_collision_jacobi::GpuSelfCollisionJacobi;
 pub use strand_metrics::{GpuStrandMetric, GpuStrandMetrics};
 pub use voxel_density::GpuHairVoxelDensity;
+pub use voxel_forward_scatter::GpuHairVoxelForwardScatter;
 pub use voxel_transmittance::GpuHairVoxelTransmittance;
 pub use wind::{query_for_wind, GpuWindField, WindQuery};
