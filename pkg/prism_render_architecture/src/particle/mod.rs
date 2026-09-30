@@ -47,6 +47,7 @@
 //! "pending the GPU backend" where the contract signatures anticipate them.
 
 pub mod alpha_erosion;
+pub mod alpha_hashed;
 pub mod ao_sample;
 pub mod atlas_packing;
 pub mod attributes;
@@ -93,6 +94,7 @@ pub mod gpu_prefix_scan;
 pub mod gpu_radix_histogram;
 pub mod gpu_reduce;
 pub mod gpu_scan_segmented;
+pub mod gpu_stream_append;
 pub mod gpu_timer_query;
 pub mod graph;
 pub mod heat_distortion;
@@ -108,6 +110,7 @@ pub mod modules;
 pub mod motion_blur;
 pub mod motion_vectors;
 pub mod noise;
+pub mod normal_reconstruct;
 pub mod occlusion;
 pub mod oit;
 pub mod orientation_basis;
@@ -144,11 +147,13 @@ pub mod stats_overlay;
 pub mod suballocator;
 pub mod subframe_spawn;
 pub mod temporal_dither;
+pub mod temporal_reprojection;
 pub mod time_control;
 pub mod tonemap;
 pub mod uv_animation;
 pub mod validation;
 pub mod vector_field;
+pub mod velocity_dilate;
 pub mod vignette_mask;
 pub mod volume_march;
 pub mod volumetrics;
