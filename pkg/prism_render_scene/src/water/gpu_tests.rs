@@ -5953,3 +5953,366 @@ fn spectrum_ifft_gpu_matches_cpu_golden() {
         i += 1;
     }
 }
+
+// ---------------------------------------------------------------------------
+// Butterfly FFT parity: the ping-pong `water_butterfly.wesl` inverse transform
+// versus a host-side radix-2 `DIT` reference sharing the shader's `libm` trig.
+// ---------------------------------------------------------------------------
+
+/// Uniform driving one butterfly pass; mirrors the `FftParams` struct in
+/// `water_butterfly.wesl` (16 bytes, `std140`-safe as four `u32`s).
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct GpuFftParams {
+    n: u32,
+    axis: u32,
+    len: u32,
+    log2n: u32,
+}
+
+/// Compiles `water_butterfly.wesl` to `Wgsl` through the render-world cache,
+/// mirroring [`compile_pbf_wgsl`] but for the butterfly module.
+fn compile_butterfly_wgsl() -> String {
+    let mut cache = ShaderCache::new((), keep_wgsl);
+    let id = AssetId::Uuid {
+        uuid: Uuid::from_u128(0x5052_4953_4d5f_5741_5445_5242_5546_0002),
+    };
+    cache.set_shader(
+        id,
+        Shader::from_wesl(
+            include_str!("../shaders/water_butterfly.wesl"),
+            "embedded://prism_render_scene/shaders/water_butterfly.wesl",
+        ),
+    );
+    let module = cache
+        .get(0, id, &[])
+        .unwrap_or_else(|error| panic!("water_butterfly.wesl failed to compile: {error}"));
+    (*module).clone()
+}
+
+/// Reverses the low `bits` bits of `x` (host mirror of the shader's
+/// `reverse_bits_low` and the crate golden's `reverse_bits`).
+fn cpu_reverse_bits(mut x: usize, bits: u32) -> usize {
+    let mut reversed = 0usize;
+    let mut b = 0u32;
+    while b < bits {
+        reversed = (reversed << 1) | (x & 1);
+        x >>= 1;
+        b += 1;
+    }
+    reversed
+}
+
+/// In-place radix-2 `DIT` transform of one `[re, im]` line, using the shader's
+/// `libm` [`bevy_math::ops`] trig so the reference matches the on-device path
+/// to `float32` rounding. `inverse` flips the twiddle sign; no normalisation is
+/// applied here (the caller scales once, as `transform2` does).
+fn cpu_line_transform(buf: &mut [[f32; 2]], inverse: bool) {
+    let n = buf.len();
+    let bits = n.trailing_zeros();
+    let mut i = 1usize;
+    while i < n {
+        let j = cpu_reverse_bits(i, bits);
+        if j > i {
+            buf.swap(i, j);
+        }
+        i += 1;
+    }
+    let sign = if inverse { 1.0_f32 } else { -1.0_f32 };
+    let mut len = 2usize;
+    while len <= n {
+        let half = len / 2;
+        let step = sign * core::f32::consts::TAU / len as f32;
+        let mut start = 0usize;
+        while start < n {
+            let mut k = 0usize;
+            while k < half {
+                let theta = step * k as f32;
+                let tw = [bevy_math::ops::cos(theta), bevy_math::ops::sin(theta)];
+                let top = buf[start + k];
+                let bi = buf[start + k + half];
+                let bottom = [bi[0] * tw[0] - bi[1] * tw[1], bi[0] * tw[1] + bi[1] * tw[0]];
+                buf[start + k] = [top[0] + bottom[0], top[1] + bottom[1]];
+                buf[start + k + half] = [top[0] - bottom[0], top[1] - bottom[1]];
+                k += 1;
+            }
+            start += len;
+        }
+        len *= 2;
+    }
+}
+
+/// Separable 2D inverse `FFT` of a row-major `n*n` `[re, im]` grid: transform
+/// every row, then every column, then scale once by `1/(N*N)`. Host reference
+/// for the `GPU` butterfly, identical in structure to the crate golden
+/// `fft::ifft2` but sharing the shader's `libm` trig.
+fn cpu_butterfly_ifft2(grid: &[[f32; 2]], n: usize) -> Vec<[f32; 2]> {
+    let mut data = grid.to_vec();
+    let mut row = 0usize;
+    while row < n {
+        let start = row * n;
+        cpu_line_transform(&mut data[start..start + n], true);
+        row += 1;
+    }
+    let mut col = 0usize;
+    while col < n {
+        let mut column: Vec<[f32; 2]> = Vec::with_capacity(n);
+        let mut r = 0usize;
+        while r < n {
+            column.push(data[r * n + col]);
+            r += 1;
+        }
+        cpu_line_transform(&mut column, true);
+        let mut r = 0usize;
+        while r < n {
+            data[r * n + col] = column[r];
+            r += 1;
+        }
+        col += 1;
+    }
+    let inv = 1.0_f32 / (n * n) as f32;
+    for c in &mut data {
+        c[0] *= inv;
+        c[1] *= inv;
+    }
+    data
+}
+
+/// A deterministic, non-symmetric complex `n*n` spectrum grid. Asymmetry across
+/// both axes ensures the row and column passes, the bit-reversal permutation,
+/// and every twiddle are genuinely exercised (a symmetric grid could mask an
+/// axis/sign bug).
+fn build_butterfly_input(n: usize) -> Vec<[f32; 2]> {
+    let mut grid = Vec::with_capacity(n * n);
+    let mut y = 0usize;
+    while y < n {
+        let mut x = 0usize;
+        while x < n {
+            let fx = x as f32;
+            let fy = y as f32;
+            let re = 0.1 * fx - 0.05 * fy + 0.01 * fx * fy;
+            let im = 0.2 - 0.03 * fx + 0.07 * fy - 0.004 * fx * fx;
+            grid.push([re, im]);
+            x += 1;
+        }
+        y += 1;
+    }
+    grid
+}
+
+/// Records the full inverse-`FFT` pass schedule into one encoder and returns
+/// the mapped result. Ping-pongs two storage buffers across `bitrev` + `log2 N`
+/// stages on axis 0, the same on axis 1, then one normalize — the exact
+/// row-then-column, normalise-once order the `CPU` `transform2` uses.
+fn dispatch_butterfly_ifft2(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    wgsl: &str,
+    bitrev: &str,
+    stage: &str,
+    normalize: &str,
+    input: &[[f32; 2]],
+    n: usize,
+) -> Vec<[f32; 2]> {
+    let byte_len = size_of_val(input) as u64;
+    let log2n = (n as u32).trailing_zeros();
+
+    let module = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("water_butterfly_parity"),
+        source: ShaderSource::Wgsl(wgsl.into()),
+    });
+    let make_pipeline = |entry: &str, label: &str| {
+        device.create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some(label),
+            layout: None,
+            module: &module,
+            entry_point: Some(entry),
+            compilation_options: PipelineCompilationOptions::default(),
+            cache: None,
+        })
+    };
+    let bitrev_pipeline = make_pipeline(bitrev, "butterfly_bitrev");
+    let stage_pipeline = make_pipeline(stage, "butterfly_stage");
+    let normalize_pipeline = make_pipeline(normalize, "butterfly_normalize");
+
+    let buf_a = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("butterfly_a"),
+        contents: bytemuck::cast_slice(input),
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+    });
+    let buf_b = device.create_buffer(&BufferDescriptor {
+        label: Some("butterfly_b"),
+        size: byte_len,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+
+    // Build the ordered pass list: (pipeline, params). `len == 0` marks a
+    // reorder/normalize pass (the shader ignores `len` there).
+    let mut passes: Vec<(&wgpu::ComputePipeline, GpuFftParams, u32, u32)> = Vec::new();
+    for axis in [0u32, 1u32] {
+        passes.push((
+            &bitrev_pipeline,
+            GpuFftParams {
+                n: n as u32,
+                axis,
+                len: 0,
+                log2n,
+            },
+            (n as u32).div_ceil(8),
+            (n as u32).div_ceil(8),
+        ));
+        let mut len = 2u32;
+        while len as usize <= n {
+            passes.push((
+                &stage_pipeline,
+                GpuFftParams {
+                    n: n as u32,
+                    axis,
+                    len,
+                    log2n,
+                },
+                ((n as u32) / 2).div_ceil(8),
+                (n as u32).div_ceil(8),
+            ));
+            len *= 2;
+        }
+    }
+    passes.push((
+        &normalize_pipeline,
+        GpuFftParams {
+            n: n as u32,
+            axis: 0,
+            len: 0,
+            log2n,
+        },
+        (n as u32).div_ceil(8),
+        (n as u32).div_ceil(8),
+    ));
+
+    // Each pass gets its own uniform buffer and bind group (params differ).
+    let param_buffers: Vec<wgpu::Buffer> = passes
+        .iter()
+        .map(|(_, params, _, _)| {
+            device.create_buffer_init(&BufferInitDescriptor {
+                label: Some("butterfly_params"),
+                contents: bytemuck::bytes_of(params),
+                usage: BufferUsages::UNIFORM,
+            })
+        })
+        .collect();
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("butterfly_parity_encoder"),
+    });
+
+    let mut cur_is_a = true;
+    for (pass_index, (pipeline, _, groups_x, groups_y)) in passes.iter().enumerate() {
+        let (src, dst) = if cur_is_a {
+            (&buf_a, &buf_b)
+        } else {
+            (&buf_b, &buf_a)
+        };
+        let layout = pipeline.get_bind_group_layout(0);
+        let bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("butterfly_group0"),
+            layout: &layout,
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: src.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: dst.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 2,
+                    resource: param_buffers[pass_index].as_entire_binding(),
+                },
+            ],
+        });
+        {
+            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: Some("butterfly_pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(*groups_x, *groups_y, 1);
+        }
+        cur_is_a = !cur_is_a;
+    }
+
+    // After the loop, the last-written buffer is the one `cur_is_a` now points
+    // *away* from (each pass wrote `dst`, then toggled).
+    let final_buf = if cur_is_a { &buf_a } else { &buf_b };
+
+    let stage_buf = device.create_buffer(&BufferDescriptor {
+        label: Some("butterfly_stage_readback"),
+        size: byte_len,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    encoder.copy_buffer_to_buffer(final_buf, 0, &stage_buf, 0, byte_len);
+    queue.submit([encoder.finish()]);
+
+    stage_buf.slice(..).map_async(MapMode::Read, |_| {});
+    device
+        .poll(PollType::wait_indefinitely())
+        .expect("device poll should complete the submitted work");
+    let view = stage_buf
+        .slice(..)
+        .get_mapped_range()
+        .expect("mapped readback range should be available after poll");
+    let values: Vec<[f32; 2]> = bytemuck::cast_slice::<u8, [f32; 2]>(&view).to_vec();
+    drop(view);
+    stage_buf.unmap();
+    values
+}
+
+/// The on-device ping-pong butterfly inverse `FFT` must match the host `DIT`
+/// reference (and thus the crate golden `fft::ifft2`) cell-for-cell within
+/// `float32` rounding.
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice must reach the test log on hosts without a wgpu adapter"
+)]
+fn butterfly_ifft2_gpu_matches_cpu_golden() {
+    let Some((device, queue)) = try_solver_device() else {
+        eprintln!(
+            "butterfly_ifft2_gpu_matches_cpu_golden: no wgpu adapter, skipping on-device parity"
+        );
+        return;
+    };
+
+    let n = 16usize;
+    let input = build_butterfly_input(n);
+    let golden = cpu_butterfly_ifft2(&input, n);
+
+    let wgsl = compile_butterfly_wgsl();
+    let bitrev = find_entry_point(&wgsl, "water_fft_bitrev");
+    let stage = find_entry_point(&wgsl, "water_fft_stage");
+    let normalize = find_entry_point(&wgsl, "water_fft_normalize");
+
+    let gpu = dispatch_butterfly_ifft2(
+        &device, &queue, &wgsl, &bitrev, &stage, &normalize, &input, n,
+    );
+
+    assert_eq!(gpu.len(), golden.len(), "readback length mismatch");
+    let mut i = 0usize;
+    while i < golden.len() {
+        let dre = (gpu[i][0] - golden[i][0]).abs();
+        let dim = (gpu[i][1] - golden[i][1]).abs();
+        assert!(
+            dre < PARITY_EPS && dim < PARITY_EPS,
+            "cell {i}: gpu=({}, {}) cpu=({}, {}) |dre|={dre} |dim|={dim}",
+            gpu[i][0],
+            gpu[i][1],
+            golden[i][0],
+            golden[i][1],
+        );
+        i += 1;
+    }
+}

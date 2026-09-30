@@ -106,6 +106,18 @@ fn water_render_fx_wesl_compiles_standalone() {
     );
 }
 
+/// The standalone ping-pong butterfly `FFT` (`water_fft_bitrev` /
+/// `water_fft_stage` / `water_fft_normalize`), the real-device twin of the
+/// `CPU` golden `prism_render_architecture::water::fft::ifft2`.
+#[test]
+fn water_butterfly_wesl_compiles_standalone() {
+    compile_standalone(
+        include_str!("../shaders/water_butterfly.wesl"),
+        "embedded://prism_render_scene/shaders/water_butterfly.wesl",
+        0x5052_4953_4d5f_5741_5445_5242_5546_0001,
+    );
+}
+
 /// Registers `lighting.wesl` and `brdf.wesl` under their canonical module paths
 /// and compiles `water.wesl`, forcing the importer to resolve the
 /// `prism_render_scene::shaders::{brdf, lighting}::{...}` imports the
