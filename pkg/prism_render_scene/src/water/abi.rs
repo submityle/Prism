@@ -70,6 +70,33 @@ pub(crate) struct GpuWaterSpectrumParams {
     pub _pad: [u32; 3],
 }
 
+/// Per-pass driver for one separable butterfly `FFT` stage. Byte-compatible
+/// with `FftParams` in `shaders/water_butterfly.wesl` (four `u32` scalars =
+/// 16 bytes, already a valid uniform stride) and with the arch-side
+/// [`prism_render_architecture::water::gpu::fft_plan::FftPassParams`] the
+/// dispatch scheduler emits, so the same integer plan drives both the host
+/// dynamic-uniform upload and the shader.
+///
+/// One instance is uploaded per butterfly pass (bit-reversal, each radix-2
+/// stage, and the final normalize) at a distinct dynamic-uniform offset; the
+/// spectral ocean path replaces the O(`N`^2)-per-texel direct sum with
+/// `2*(1 + log2(N)) + 1` of these passes per cascade.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq)]
+pub(crate) struct GpuWaterFftParams {
+    /// Grid resolution `N` (a power of two); each transform axis is length `N`.
+    pub n: u32,
+    /// Transform axis for this pass: `0` = row (x), `1` = column (y). Matches
+    /// [`prism_render_architecture::water::gpu::fft_plan::FftAxis::index`].
+    pub axis: u32,
+    /// Butterfly span `len` for a radix-2 stage (`2, 4, ..., N`); unused by the
+    /// bit-reversal and normalize passes, which set it to `0`.
+    pub len: u32,
+    /// `log2(N)`, the total stage count per axis, so the shader can size the
+    /// twiddle exponent without a runtime log.
+    pub log2n: u32,
+}
+
 /// One analytic `Gerstner` wave train. Byte-compatible with `GerstnerWave` in
 /// `water_ocean.wesl` and the golden `GERSTNER_WAVE_STRIDE` (32 bytes: eight
 /// `f32` lanes = two `vec4<f32>` rows).
@@ -536,6 +563,41 @@ mod tests {
     fn spectrum_params_is_uniform_stride() {
         assert_eq!(size_of::<GpuWaterSpectrumParams>(), 32);
         assert_eq!(size_of::<GpuWaterSpectrumParams>() % 16, 0);
+    }
+
+    /// The butterfly `FFT` per-pass uniform is four `u32` scalars (16 bytes),
+    /// already a valid uniform stride, and mirrors the four fields of the
+    /// arch-side `FftPassParams` the dispatch scheduler emits.
+    #[test]
+    fn fft_params_is_uniform_stride() {
+        assert_eq!(size_of::<GpuWaterFftParams>(), 16);
+        assert_eq!(size_of::<GpuWaterFftParams>() % 16, 0);
+        // Field order matches `FftParams` in `water_butterfly.wesl`:
+        // (n, axis, len, log2n).
+        let p = GpuWaterFftParams {
+            n: 256,
+            axis: 1,
+            len: 8,
+            log2n: 8,
+        };
+        let bytes = bytemuck::bytes_of(&p);
+        assert_eq!(bytes.len(), 16);
+        assert_eq!(
+            u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+            256
+        );
+        assert_eq!(
+            u32::from_ne_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+            1
+        );
+        assert_eq!(
+            u32::from_ne_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
+            8
+        );
+        assert_eq!(
+            u32::from_ne_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]),
+            8
+        );
     }
 
     /// The `Gerstner` uniform rounds up to a 32-byte uniform stride.

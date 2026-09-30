@@ -40,12 +40,13 @@ mod bind_groups;
 mod body;
 mod dispatch;
 mod extract;
+mod fft_upload;
+#[cfg(test)]
+mod gpu_tests;
 mod pipeline;
 pub(crate) mod plugin;
 mod prepare;
 mod resources;
-#[cfg(test)]
-mod gpu_tests;
 #[cfg(test)]
 mod shader_tests;
 

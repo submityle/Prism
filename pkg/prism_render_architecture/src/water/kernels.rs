@@ -182,12 +182,23 @@ pub enum WaterKernel {
     UnderwaterVolume,
     /// Read back bounded two-way coupling field queries from the `GPU`.
     CouplingReadback,
+    /// Evolve the `Tessendorf` wave spectrum to time `t` and write the four
+    /// packed cascade grids the separable `FFT` consumes.
+    SpectrumEvolve,
+    /// Bit-reverse reorder one `FFT` axis: the radix-2 butterfly prologue.
+    FftBitReverse,
+    /// One radix-2 butterfly stage over one `FFT` axis.
+    FftStage,
+    /// Normalize the inverse-`FFT` output by `1/(N*N)`.
+    FftNormalize,
+    /// Assemble the four cascade grids into displacement and normal textures.
+    SpectrumAssemble,
 }
 
 impl WaterKernel {
     /// Every kernel, in a stable order, for descriptor-table iteration and
     /// exhaustiveness tests.
-    pub const ALL: [WaterKernel; 16] = [
+    pub const ALL: [WaterKernel; 21] = [
         WaterKernel::SpectrumIfft,
         WaterKernel::GerstnerDisplace,
         WaterKernel::SweStep,
@@ -204,6 +215,11 @@ impl WaterKernel {
         WaterKernel::DispersionRefract,
         WaterKernel::UnderwaterVolume,
         WaterKernel::CouplingReadback,
+        WaterKernel::SpectrumEvolve,
+        WaterKernel::FftBitReverse,
+        WaterKernel::FftStage,
+        WaterKernel::FftNormalize,
+        WaterKernel::SpectrumAssemble,
     ];
 
     /// The stable `WESL` entry-point name the shader codegen emits for this
@@ -230,6 +246,11 @@ impl WaterKernel {
             WaterKernel::DispersionRefract => "water_dispersion_refract",
             WaterKernel::UnderwaterVolume => "water_underwater_volume",
             WaterKernel::CouplingReadback => "water_coupling_readback",
+            WaterKernel::SpectrumEvolve => "water_spectrum_evolve",
+            WaterKernel::FftBitReverse => "water_fft_bitrev",
+            WaterKernel::FftStage => "water_fft_stage",
+            WaterKernel::FftNormalize => "water_fft_normalize",
+            WaterKernel::SpectrumAssemble => "water_spectrum_assemble",
         }
     }
 
@@ -372,6 +393,36 @@ impl WaterKernel {
                 },
                 WorkgroupSize { x: 4, y: 4, z: 4 },
                 DispatchDomain::Grid3d,
+            ),
+            WaterKernel::SpectrumEvolve => (
+                BindGroupLayout {
+                    storage_buffers: 6,
+                    uniform_buffers: 1,
+                    storage_textures: 0,
+                    sampled_textures: 0,
+                },
+                WorkgroupSize { x: 8, y: 8, z: 1 },
+                DispatchDomain::Grid2d,
+            ),
+            WaterKernel::SpectrumAssemble => (
+                BindGroupLayout {
+                    storage_buffers: 4,
+                    uniform_buffers: 1,
+                    storage_textures: 2,
+                    sampled_textures: 0,
+                },
+                WorkgroupSize { x: 8, y: 8, z: 1 },
+                DispatchDomain::Grid2d,
+            ),
+            WaterKernel::FftBitReverse | WaterKernel::FftStage | WaterKernel::FftNormalize => (
+                BindGroupLayout {
+                    storage_buffers: 2,
+                    uniform_buffers: 1,
+                    storage_textures: 0,
+                    sampled_textures: 0,
+                },
+                WorkgroupSize { x: 8, y: 8, z: 1 },
+                DispatchDomain::Grid2d,
             ),
         };
         KernelDescriptor {

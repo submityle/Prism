@@ -308,6 +308,16 @@ pub(crate) struct WaterBodyGpuBuffers {
     pub(crate) wetness_state: Buffer,
     pub(crate) wetness_params: Buffer,
     pub(crate) wetness_out: TextureView,
+    // Spectral `FFT` (`Tessendorf`) ping-pong pools.
+    pub(crate) packed_g0: Buffer,
+    pub(crate) packed_g1: Buffer,
+    pub(crate) packed_g2: Buffer,
+    pub(crate) packed_g3: Buffer,
+    pub(crate) scratch_g0: Buffer,
+    pub(crate) scratch_g1: Buffer,
+    pub(crate) scratch_g2: Buffer,
+    pub(crate) scratch_g3: Buffer,
+    pub(crate) fft_params: Buffer,
     // Coupling.
     pub(crate) coupling_queries: Buffer,
     pub(crate) coupling_readback: Buffer,
@@ -365,6 +375,27 @@ impl WaterBodyGpuBuffers {
             "prism water gerstner normal",
             upload.ocean_extent,
             TextureFormat::Rgba32Float,
+        );
+
+        // ---- Spectral FFT (Tessendorf) ping-pong pools ----
+        // One complex `[f32; 2]` (eight bytes) per spectrum texel; the butterfly
+        // passes ping-pong between the packed and scratch grids per cascade.
+        let cascade_bytes = (upload.spectrum_h0.len() as u64) * 8;
+        let packed_g0 = zeroed_storage(device, "prism water packed g0", cascade_bytes);
+        let packed_g1 = zeroed_storage(device, "prism water packed g1", cascade_bytes);
+        let packed_g2 = zeroed_storage(device, "prism water packed g2", cascade_bytes);
+        let packed_g3 = zeroed_storage(device, "prism water packed g3", cascade_bytes);
+        let scratch_g0 = zeroed_storage(device, "prism water scratch g0", cascade_bytes);
+        let scratch_g1 = zeroed_storage(device, "prism water scratch g1", cascade_bytes);
+        let scratch_g2 = zeroed_storage(device, "prism water scratch g2", cascade_bytes);
+        let scratch_g3 = zeroed_storage(device, "prism water scratch g3", cascade_bytes);
+        let fft_params = uniform(
+            device,
+            "prism water fft params",
+            &super::fft_upload::fft_pass_uniforms_for(upload.ocean_extent.width)
+                .first()
+                .copied()
+                .unwrap_or_default(),
         );
 
         // ---- FLIP / APIC ----
@@ -636,6 +667,15 @@ impl WaterBodyGpuBuffers {
             wetness_state,
             wetness_params,
             wetness_out,
+            packed_g0,
+            packed_g1,
+            packed_g2,
+            packed_g3,
+            scratch_g0,
+            scratch_g1,
+            scratch_g2,
+            scratch_g3,
+            fft_params,
             coupling_queries,
             coupling_readback,
             coupling_params,
@@ -675,6 +715,10 @@ pub(crate) struct WaterBodyBindGroups {
     pub(crate) wetness: BindGroup,
     /// `@group(4)` for `coupling_readback`.
     pub(crate) coupling: BindGroup,
+    /// `@group(0)` for `spectrum_evolve` + `spectrum_assemble` (thirteen bindings).
+    pub(crate) spectrum_fft: BindGroup,
+    /// `@group(0)` for the three butterfly `FFT` passes (three bindings).
+    pub(crate) butterfly: BindGroup,
 }
 
 impl WaterBodyBindGroups {
@@ -820,6 +864,34 @@ impl WaterBodyBindGroups {
                 buffers.coupling_params.as_entire_binding(),
             )),
         );
+        let spectrum_fft = device.create_bind_group(
+            "prism water spectrum fft",
+            &pipelines.spectrum_fft_layout,
+            &BindGroupEntries::sequential((
+                buffers.spectrum_h0.as_entire_binding(),
+                buffers.spectrum_h0_neg.as_entire_binding(),
+                buffers.spectrum_params.as_entire_binding(),
+                buffers.packed_g0.as_entire_binding(),
+                buffers.packed_g1.as_entire_binding(),
+                buffers.packed_g2.as_entire_binding(),
+                buffers.packed_g3.as_entire_binding(),
+                buffers.scratch_g0.as_entire_binding(),
+                buffers.scratch_g1.as_entire_binding(),
+                buffers.scratch_g2.as_entire_binding(),
+                buffers.scratch_g3.as_entire_binding(),
+                &buffers.spectrum_displacement,
+                &buffers.spectrum_normal,
+            )),
+        );
+        let butterfly = device.create_bind_group(
+            "prism water butterfly",
+            &pipelines.butterfly_layout,
+            &BindGroupEntries::sequential((
+                buffers.packed_g0.as_entire_binding(),
+                buffers.scratch_g0.as_entire_binding(),
+                buffers.fft_params.as_entire_binding(),
+            )),
+        );
         Self {
             ocean,
             flip,
@@ -833,6 +905,8 @@ impl WaterBodyBindGroups {
             underwater,
             wetness,
             coupling,
+            spectrum_fft,
+            butterfly,
         }
     }
 }

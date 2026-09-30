@@ -92,7 +92,15 @@ impl WaterGpuExtract {
     /// per-cascade texel count; every other domain reads the matching extent.
     #[must_use]
     fn invocations(&self, kernel: WaterKernel) -> u32 {
-        if kernel == WaterKernel::SpectrumIfft {
+        if matches!(
+            kernel,
+            WaterKernel::SpectrumIfft
+                | WaterKernel::SpectrumEvolve
+                | WaterKernel::FftBitReverse
+                | WaterKernel::FftStage
+                | WaterKernel::FftNormalize
+                | WaterKernel::SpectrumAssemble
+        ) {
             return self.spectrum_texels;
         }
         match kernel.descriptor().domain {

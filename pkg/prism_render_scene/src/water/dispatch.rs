@@ -55,6 +55,10 @@ fn bind_group_for<'a>(
         WaterKernel::UnderwaterVolume => &groups.underwater,
         WaterKernel::WetnessStep => &groups.wetness,
         WaterKernel::CouplingReadback => &groups.coupling,
+        WaterKernel::SpectrumEvolve | WaterKernel::SpectrumAssemble => &groups.spectrum_fft,
+        WaterKernel::FftBitReverse | WaterKernel::FftStage | WaterKernel::FftNormalize => {
+            &groups.butterfly
+        }
     }
 }
 
@@ -169,6 +173,8 @@ mod tests {
             WaterKernel::UnderwaterVolume => 9,
             WaterKernel::WetnessStep => 10,
             WaterKernel::CouplingReadback => 11,
+            WaterKernel::SpectrumEvolve | WaterKernel::SpectrumAssemble => 12,
+            WaterKernel::FftBitReverse | WaterKernel::FftStage | WaterKernel::FftNormalize => 13,
         }
     }
 }

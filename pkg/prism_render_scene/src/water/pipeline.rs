@@ -105,6 +105,11 @@ pub(crate) struct WaterComputePipelines {
     pub(crate) wetness_layout: BindGroupLayout,
     /// `@group(4)` for the `water_coupling_readback` pass (three bindings).
     pub(crate) coupling_layout: BindGroupLayout,
+    /// `@group(0)` for both `water_spectrum_fft.wesl` entry points
+    /// (`water_spectrum_evolve` + `water_spectrum_assemble`, thirteen bindings).
+    pub(crate) spectrum_fft_layout: BindGroupLayout,
+    /// `@group(0)` for the three `water_butterfly.wesl` passes (three bindings).
+    pub(crate) butterfly_layout: BindGroupLayout,
 
     /// `water_spectrum_ifft`: evolve and inverse-`FFT` the wave spectrum.
     pub(crate) spectrum_ifft: CachedComputePipelineId,
@@ -138,6 +143,16 @@ pub(crate) struct WaterComputePipelines {
     pub(crate) underwater_volume: CachedComputePipelineId,
     /// `water_coupling_readback`: read back bounded two-way coupling queries.
     pub(crate) coupling_readback: CachedComputePipelineId,
+    /// `water_spectrum_evolve`: advance `h0` to the time-`t` complex spectrum.
+    pub(crate) spectrum_evolve: CachedComputePipelineId,
+    /// `water_fft_bitrev`: bit-reversal permutation before the butterfly stages.
+    pub(crate) fft_bit_reverse: CachedComputePipelineId,
+    /// `water_fft_stage`: one radix-2 butterfly stage of the inverse `FFT`.
+    pub(crate) fft_stage: CachedComputePipelineId,
+    /// `water_fft_normalize`: scale the transformed grid by `1/N`.
+    pub(crate) fft_normalize: CachedComputePipelineId,
+    /// `water_spectrum_assemble`: pack displacement/normal from the `FFT` grids.
+    pub(crate) spectrum_assemble: CachedComputePipelineId,
 }
 
 impl WaterComputePipelines {
@@ -165,6 +180,11 @@ impl WaterComputePipelines {
             WaterKernel::DispersionRefract => self.dispersion_refract,
             WaterKernel::UnderwaterVolume => self.underwater_volume,
             WaterKernel::CouplingReadback => self.coupling_readback,
+            WaterKernel::SpectrumEvolve => self.spectrum_evolve,
+            WaterKernel::FftBitReverse => self.fft_bit_reverse,
+            WaterKernel::FftStage => self.fft_stage,
+            WaterKernel::FftNormalize => self.fft_normalize,
+            WaterKernel::SpectrumAssemble => self.spectrum_assemble,
         }
     }
 
@@ -191,6 +211,12 @@ impl WaterComputePipelines {
             WaterKernel::UnderwaterVolume => &self.underwater_layout,
             WaterKernel::WetnessStep => &self.wetness_layout,
             WaterKernel::CouplingReadback => &self.coupling_layout,
+            WaterKernel::SpectrumEvolve | WaterKernel::SpectrumAssemble => {
+                &self.spectrum_fft_layout
+            }
+            WaterKernel::FftBitReverse | WaterKernel::FftStage | WaterKernel::FftNormalize => {
+                &self.butterfly_layout
+            }
         }
     }
 }
@@ -218,7 +244,12 @@ pub(crate) fn wesl_group(kernel: WaterKernel) -> u32 {
         | WaterKernel::FlipG2P
         | WaterKernel::SurfaceReconstruct
         | WaterKernel::CausticsProject
-        | WaterKernel::SprayEmit => 0,
+        | WaterKernel::SprayEmit
+        | WaterKernel::SpectrumEvolve
+        | WaterKernel::FftBitReverse
+        | WaterKernel::FftStage
+        | WaterKernel::FftNormalize
+        | WaterKernel::SpectrumAssemble => 0,
     }
 }
 
@@ -413,6 +444,46 @@ fn wetness_layout_entries() -> BindGroupLayoutEntries<3> {
     )
 }
 
+/// Builds the two-entry-point `water_spectrum_fft.wesl` `@group(0)` layout
+/// entries (thirteen bindings): the two read-only spectrum `h0` pools, the
+/// spectrum uniform, the four read-write packed `FFT` grids, the four read-only
+/// assembled `FFT` grids, and the two write-only displacement/normal storage
+/// textures.
+fn spectrum_fft_layout_entries() -> BindGroupLayoutEntries<13> {
+    BindGroupLayoutEntries::sequential(
+        ShaderStages::COMPUTE,
+        (
+            storage_buffer_read_only_sized(false, None),
+            storage_buffer_read_only_sized(false, None),
+            uniform_buffer_sized(false, None),
+            storage_buffer_sized(false, None),
+            storage_buffer_sized(false, None),
+            storage_buffer_sized(false, None),
+            storage_buffer_sized(false, None),
+            storage_buffer_read_only_sized(false, None),
+            storage_buffer_read_only_sized(false, None),
+            storage_buffer_read_only_sized(false, None),
+            storage_buffer_read_only_sized(false, None),
+            texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::WriteOnly),
+            texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::WriteOnly),
+        ),
+    )
+}
+
+/// Builds the `water_butterfly.wesl` `@group(0)` layout entries (three
+/// bindings): the read-only `FFT` source grid, the read-write `FFT` destination
+/// grid, and the per-pass butterfly uniform.
+fn butterfly_layout_entries() -> BindGroupLayoutEntries<3> {
+    BindGroupLayoutEntries::sequential(
+        ShaderStages::COMPUTE,
+        (
+            storage_buffer_read_only_sized(false, None),
+            storage_buffer_sized(false, None),
+            uniform_buffer_sized(false, None),
+        ),
+    )
+}
+
 /// Builds the `water_coupling_readback` `@group(4)` layout entries (three
 /// bindings): the read-only coupling queries, the read-write readback buffer,
 /// and the coupling uniform.
@@ -454,6 +525,8 @@ pub(crate) fn init_water_compute_pipelines(
     let underwater_entries = underwater_layout_entries();
     let wetness_entries = wetness_layout_entries();
     let coupling_entries = coupling_layout_entries();
+    let spectrum_fft_entries = spectrum_fft_layout_entries();
+    let butterfly_entries = butterfly_layout_entries();
 
     let ocean_descriptor = BindGroupLayoutDescriptor::new("prism water ocean", &ocean_entries);
     let flip_descriptor = BindGroupLayoutDescriptor::new("prism water flip", &flip_entries);
@@ -473,6 +546,10 @@ pub(crate) fn init_water_compute_pipelines(
         BindGroupLayoutDescriptor::new("prism water wetness", &wetness_entries);
     let coupling_descriptor =
         BindGroupLayoutDescriptor::new("prism water coupling", &coupling_entries);
+    let spectrum_fft_descriptor =
+        BindGroupLayoutDescriptor::new("prism water spectrum fft", &spectrum_fft_entries);
+    let butterfly_descriptor =
+        BindGroupLayoutDescriptor::new("prism water butterfly", &butterfly_entries);
 
     // Empty placeholder layout padding the lower, unused group slots of the
     // `@group(1..=4)` passes so the `wgpu` pipeline layout stays contiguous; the
@@ -496,6 +573,10 @@ pub(crate) fn init_water_compute_pipelines(
     let wetness_layout = device.create_bind_group_layout("prism water wetness", &wetness_entries);
     let coupling_layout =
         device.create_bind_group_layout("prism water coupling", &coupling_entries);
+    let spectrum_fft_layout =
+        device.create_bind_group_layout("prism water spectrum fft", &spectrum_fft_entries);
+    let butterfly_layout =
+        device.create_bind_group_layout("prism water butterfly", &butterfly_entries);
 
     let ocean_shader: Handle<Shader> =
         load_embedded_asset!(asset_server.as_ref(), "../shaders/water_ocean.wesl");
@@ -507,6 +588,10 @@ pub(crate) fn init_water_compute_pipelines(
         load_embedded_asset!(asset_server.as_ref(), "../shaders/water_surface.wesl");
     let render_fx_shader: Handle<Shader> =
         load_embedded_asset!(asset_server.as_ref(), "../shaders/water_render_fx.wesl");
+    let spectrum_fft_shader: Handle<Shader> =
+        load_embedded_asset!(asset_server.as_ref(), "../shaders/water_spectrum_fft.wesl");
+    let butterfly_shader: Handle<Shader> =
+        load_embedded_asset!(asset_server.as_ref(), "../shaders/water_butterfly.wesl");
 
     // Every water pipeline binds the layout(s) matching its shader's declared
     // `@group(N)` index; passes on `@group(1..=4)` prepend empty placeholder
@@ -633,6 +718,36 @@ pub(crate) fn init_water_compute_pipelines(
         &render_fx_shader,
         WaterKernel::CouplingReadback,
     );
+    let spectrum_evolve = queue(
+        "prism water spectrum evolve",
+        vec![spectrum_fft_descriptor.clone()],
+        &spectrum_fft_shader,
+        WaterKernel::SpectrumEvolve,
+    );
+    let spectrum_assemble = queue(
+        "prism water spectrum assemble",
+        vec![spectrum_fft_descriptor.clone()],
+        &spectrum_fft_shader,
+        WaterKernel::SpectrumAssemble,
+    );
+    let fft_bit_reverse = queue(
+        "prism water fft bit reverse",
+        vec![butterfly_descriptor.clone()],
+        &butterfly_shader,
+        WaterKernel::FftBitReverse,
+    );
+    let fft_stage = queue(
+        "prism water fft stage",
+        vec![butterfly_descriptor.clone()],
+        &butterfly_shader,
+        WaterKernel::FftStage,
+    );
+    let fft_normalize = queue(
+        "prism water fft normalize",
+        vec![butterfly_descriptor.clone()],
+        &butterfly_shader,
+        WaterKernel::FftNormalize,
+    );
 
     commands.insert_resource(WaterComputePipelines {
         ocean_layout,
@@ -663,6 +778,13 @@ pub(crate) fn init_water_compute_pipelines(
         dispersion_refract,
         underwater_volume,
         coupling_readback,
+        spectrum_fft_layout,
+        butterfly_layout,
+        spectrum_evolve,
+        spectrum_assemble,
+        fft_bit_reverse,
+        fft_stage,
+        fft_normalize,
     });
 }
 
@@ -692,6 +814,11 @@ mod tests {
         assert_eq!(wesl_group(WaterKernel::UnderwaterVolume), 2);
         assert_eq!(wesl_group(WaterKernel::WetnessStep), 3);
         assert_eq!(wesl_group(WaterKernel::CouplingReadback), 4);
+        assert_eq!(wesl_group(WaterKernel::SpectrumEvolve), 0);
+        assert_eq!(wesl_group(WaterKernel::SpectrumAssemble), 0);
+        assert_eq!(wesl_group(WaterKernel::FftBitReverse), 0);
+        assert_eq!(wesl_group(WaterKernel::FftStage), 0);
+        assert_eq!(wesl_group(WaterKernel::FftNormalize), 0);
     }
 
     /// The layout-entry builders must report the binding counts the shaders
@@ -714,6 +841,8 @@ mod tests {
         assert_eq!(underwater_layout_entries().len(), 3);
         assert_eq!(wetness_layout_entries().len(), 3);
         assert_eq!(coupling_layout_entries().len(), 3);
+        assert_eq!(spectrum_fft_layout_entries().len(), 13);
+        assert_eq!(butterfly_layout_entries().len(), 3);
 
         for kernel in WaterKernel::ALL {
             assert!(
