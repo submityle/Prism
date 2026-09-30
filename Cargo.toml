@@ -29,6 +29,8 @@ members = [
   "pkg/prism_physics_gpu",
   # Prism experimental virtual-geometry GPU software-raster twin.
   "pkg/prism_virtual_geometry_gpu",
+  # Prism experimental volumetric-cloud scattering GPU twin.
+  "pkg/prism_volumetric_gpu",
   # Prism experimental next-generation audio engine.
   "pkg/prism_audio_core",
   # Several crates with macros have "compile fail" tests nested inside them, also known as UI
