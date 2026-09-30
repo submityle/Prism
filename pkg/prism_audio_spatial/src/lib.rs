@@ -53,6 +53,7 @@ pub mod ambisonics;
 pub mod attenuation;
 pub mod cone;
 pub mod doppler;
+pub mod early_reflections;
 pub mod geometry;
 pub mod hoa;
 pub mod hoa_beamform;
@@ -75,6 +76,10 @@ pub use ambisonics::{
 pub use attenuation::{Attenuation, DistanceModel};
 pub use cone::Cone;
 pub use doppler::{Doppler, SPEED_OF_SOUND_MPS, doppler_ratio};
+pub use early_reflections::{
+    DEFAULT_SOUND_SPEED, EarlyReflectionRenderer, MAX_EARLY_REFLECTIONS, MAX_REFLECTION_ORDER,
+    ReflectionTap, ShoeboxRoom, compute_early_reflections,
+};
 pub use geometry::{Emitter, Listener, LocalSource};
 pub use hoa::{
     HoaEncoderNode, MAX_HOA_CHANNELS, MAX_HOA_ORDER, acn_index, decode_hoa, encode_hoa,
