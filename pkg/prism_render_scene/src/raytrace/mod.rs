@@ -9,8 +9,10 @@
 //! `BLAS_OFFSET_WORDS = 4`) and their walks are the authoritative reference. This
 //! module is the `bevy`-render half that turns that `ABI` into a real `wgpu`
 //! compute dispatch against the sibling `WESL` shaders
-//! `shaders/ray_traverse.wesl` (single-`BLAS` walk) and
-//! `shaders/tlas_traverse.wesl` (two-level `TLAS`-over-pool walk).
+//! `shaders/ray_traverse.wesl` (single-`BLAS` walk),
+//! `shaders/tlas_traverse.wesl` (two-level `TLAS`-over-pool walk) and
+//! `shaders/ray_footprint.wesl` (ray-cone footprint / texture-`LOD` mip
+//! selection).
 //!
 //! Mirroring the water and cloth compute subsystems, the module is split into
 //! cohesive files rather than one large module:
@@ -35,6 +37,15 @@
 //!   ray-for-ray against the golden `GpuTlasBuffers::closest_hit` /
 //!   `any_hit` walks, skipping gracefully when no adapter is present.
 //!
+//! * [`footprint_gpu_tests`] - the ray-cone footprint / texture-`LOD`
+//!   analogue (also `#[cfg(test)]`): it packs a batch of ray-cone
+//!   footprints (each with a per-surface texel size), binds the
+//!   `ray_footprint` compute pipeline on a live `wgpu` device and
+//!   asserts the read-back `projected_width` / `texel_span` /
+//!   `mip_level` / `mip_floor` against the golden
+//!   `prism_render_architecture::ray_scene::footprint::RayFootprint`
+//!   math ray-for-ray, skipping gracefully when no adapter is present.
+//!
 //! The production `wgpu` pipeline / bind-group helpers and the render-graph
 //! dispatch node land once a real ray-tracing consumer (screen-space or
 //! world-space reflections, ray-traced shadows) fixes their exact binding
@@ -49,3 +60,5 @@ mod gpu_tests;
 mod shader_tests;
 #[cfg(test)]
 mod tlas_gpu_tests;
+#[cfg(test)]
+mod footprint_gpu_tests;

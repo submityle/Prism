@@ -63,3 +63,15 @@ fn tlas_traverse_wesl_compiles_standalone() {
         0x5052_4953_4d5f_5449_4c41_5354_5256_0001,
     );
 }
+
+/// The ray-cone footprint / texture-`LOD` kernel, the real-device twin of the
+/// golden `RayFootprint` mip math (`projected_width` / `texel_span` /
+/// `mip_level` / `mip_floor`) and `log2_linear`.
+#[test]
+fn ray_footprint_wesl_compiles_standalone() {
+    compile_standalone(
+        include_str!("../shaders/ray_footprint.wesl"),
+        "embedded://prism_render_scene/shaders/ray_footprint.wesl",
+        0x5052_4953_4d5f_4655_5450_5249_4e54_0001,
+    );
+}

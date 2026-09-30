@@ -119,6 +119,48 @@ pub(crate) const BLAS_OFFSET_TRIANGLE_BASE_WORD: usize = 2;
 /// Word offset of `triangle_count` inside a packed `BLAS` offset record (word 3).
 pub(crate) const BLAS_OFFSET_TRIANGLE_COUNT_WORD: usize = 3;
 
+/// `u32` words per packed ray-cone footprint in the `ray_footprint` kernel's
+/// `footprints` input buffer (16 bytes, 16-byte aligned). Layout: `cone_width`
+/// (0), `cone_spread_angle` (1), `hit_distance` (2), `texel_world_size` (3),
+/// each an `f32` stored as its `to_bits` pattern. Mirrors the golden
+/// `prism_render_architecture::ray_scene::RayFootprint` fields plus the
+/// per-surface texel size the mip math consumes.
+pub(crate) const FOOTPRINT_WORDS: usize = 4;
+
+/// `u32` words per packed footprint result in the `ray_footprint` kernel's
+/// `results` output buffer (16 bytes, 16-byte aligned). Layout: `projected_width`
+/// (0), `texel_span` (1), `mip_level` (2) as `f32` bit patterns, and `mip_floor`
+/// (3) as a raw `u32`. Must match `RESULT_WORDS` in `shaders/ray_footprint.wesl`.
+pub(crate) const FOOTPRINT_RESULT_WORDS: usize = 4;
+
+/// Linear workgroup size of the footprint entry point. Must match the
+/// `@workgroup_size(64)` on `ray_footprint` in `shaders/ray_footprint.wesl`.
+pub(crate) const FOOTPRINT_WORKGROUP: u32 = 64;
+
+/// Word offset of `cone_width` inside a packed footprint record (word 0).
+pub(crate) const FOOTPRINT_CONE_WIDTH_WORD: usize = 0;
+
+/// Word offset of `cone_spread_angle` (a slope) inside a footprint record (word 1).
+pub(crate) const FOOTPRINT_CONE_SPREAD_WORD: usize = 1;
+
+/// Word offset of `hit_distance` inside a packed footprint record (word 2).
+pub(crate) const FOOTPRINT_HIT_DISTANCE_WORD: usize = 2;
+
+/// Word offset of `texel_world_size` inside a packed footprint record (word 3).
+pub(crate) const FOOTPRINT_TEXEL_SIZE_WORD: usize = 3;
+
+/// Word offset of `projected_width` inside a footprint result record (word 0).
+pub(crate) const FOOTPRINT_RESULT_PROJECTED_WIDTH_WORD: usize = 0;
+
+/// Word offset of `texel_span` inside a footprint result record (word 1).
+pub(crate) const FOOTPRINT_RESULT_TEXEL_SPAN_WORD: usize = 1;
+
+/// Word offset of the continuous `mip_level` inside a result record (word 2).
+pub(crate) const FOOTPRINT_RESULT_MIP_LEVEL_WORD: usize = 2;
+
+/// Word offset of the discrete `mip_floor` (raw `u32`) inside a result record (word 3).
+pub(crate) const FOOTPRINT_RESULT_MIP_FLOOR_WORD: usize = 3;
+
 /// Host mirror of the traversal kernel's `RayTraverseParams` uniform.
 ///
 /// The four `u32` fields are exactly the `struct RayTraverseParams` in
@@ -140,14 +182,37 @@ pub(crate) struct GpuRayTraverseParams {
     pub(crate) pad1: u32,
 }
 
+/// Host mirror of the footprint kernel's `FootprintParams` uniform.
+///
+/// The four `u32` fields are exactly the `struct FootprintParams` in
+/// `shaders/ray_footprint.wesl` (`footprint_count`, `max_mip`, `pad0`, `pad1`):
+/// a 16-byte block satisfying the uniform 16-byte size/alignment rule with no
+/// implicit tail padding, so `bytemuck::bytes_of` yields the exact device bytes.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq)]
+pub(crate) struct GpuFootprintParams {
+    /// Number of packed footprints; invocations at or past this index early-out.
+    pub(crate) footprint_count: u32,
+    /// Maximum mip level the continuous `mip_level` is clamped to (inclusive).
+    pub(crate) max_mip: u32,
+    /// Padding word 0, pinning the uniform to the shader's 16-byte struct size.
+    pub(crate) pad0: u32,
+    /// Padding word 1, pinning the uniform to the shader's 16-byte struct size.
+    pub(crate) pad1: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         BLAS_OFFSET_NODE_BASE_WORD, BLAS_OFFSET_NODE_COUNT_WORD, BLAS_OFFSET_TRIANGLE_BASE_WORD,
-        BLAS_OFFSET_TRIANGLE_COUNT_WORD, GpuRayTraverseParams, HIT_WORDS, INSTANCE_BLAS_INDEX_WORD,
-        INSTANCE_ID_WORD, MISS_PRIMITIVE, NODE_AXIS_WORD, NODE_FIRST_PRIMITIVE_WORD,
-        NODE_PRIMITIVE_COUNT_WORD, NODE_SECOND_CHILD_WORD, POSITIVE_INF_BITS,
-        RAYTRACE_BLAS_OFFSET_WORDS, RAYTRACE_INSTANCE_WORDS, RAYTRACE_MODE_ANY,
+        BLAS_OFFSET_TRIANGLE_COUNT_WORD, FOOTPRINT_CONE_SPREAD_WORD, FOOTPRINT_CONE_WIDTH_WORD,
+        FOOTPRINT_HIT_DISTANCE_WORD, FOOTPRINT_RESULT_MIP_FLOOR_WORD,
+        FOOTPRINT_RESULT_MIP_LEVEL_WORD, FOOTPRINT_RESULT_PROJECTED_WIDTH_WORD,
+        FOOTPRINT_RESULT_TEXEL_SPAN_WORD, FOOTPRINT_RESULT_WORDS, FOOTPRINT_TEXEL_SIZE_WORD,
+        FOOTPRINT_WORDS, GpuFootprintParams, GpuRayTraverseParams, HIT_WORDS,
+        INSTANCE_BLAS_INDEX_WORD, INSTANCE_ID_WORD, MISS_PRIMITIVE, NODE_AXIS_WORD,
+        NODE_FIRST_PRIMITIVE_WORD, NODE_PRIMITIVE_COUNT_WORD, NODE_SECOND_CHILD_WORD,
+        POSITIVE_INF_BITS, RAYTRACE_BLAS_OFFSET_WORDS, RAYTRACE_INSTANCE_WORDS, RAYTRACE_MODE_ANY,
         RAYTRACE_MODE_CLOSEST, RAYTRACE_NODE_WORDS, RAYTRACE_TRIANGLE_WORDS, RAY_WORDS,
         TLAS_HIT_WORDS, TRIANGLE_PRIMITIVE_WORD,
     };
@@ -280,5 +345,67 @@ mod tests {
         assert_eq!(BLAS_OFFSET_NODE_COUNT_WORD, 1);
         assert_eq!(BLAS_OFFSET_TRIANGLE_BASE_WORD, 2);
         assert_eq!(BLAS_OFFSET_TRIANGLE_COUNT_WORD, 3);
+    }
+
+    #[test]
+    fn footprint_record_strides_are_16_byte_aligned() {
+        // The footprint input and result records are both 4-word (16-byte)
+        // 16-byte-aligned blocks the `ray_footprint` kernel hardcodes as
+        // `FOOTPRINT_WORDS` / `RESULT_WORDS`.
+        assert_eq!(FOOTPRINT_WORDS, 4, "footprint record must be 16 bytes");
+        assert_eq!(FOOTPRINT_RESULT_WORDS, 4, "result record must be 16 bytes");
+        assert_eq!((FOOTPRINT_WORDS * 4) % 16, 0);
+        assert_eq!((FOOTPRINT_RESULT_WORDS * 4) % 16, 0);
+    }
+
+    #[test]
+    fn footprint_field_offsets_cover_both_records() {
+        // Input fields occupy words 0..=3 in the order the host packs a
+        // `RayFootprint` plus its surface texel size.
+        assert_eq!(FOOTPRINT_CONE_WIDTH_WORD, 0);
+        assert_eq!(FOOTPRINT_CONE_SPREAD_WORD, 1);
+        assert_eq!(FOOTPRINT_HIT_DISTANCE_WORD, 2);
+        assert_eq!(FOOTPRINT_TEXEL_SIZE_WORD, 3);
+        for word in [
+            FOOTPRINT_CONE_WIDTH_WORD,
+            FOOTPRINT_CONE_SPREAD_WORD,
+            FOOTPRINT_HIT_DISTANCE_WORD,
+            FOOTPRINT_TEXEL_SIZE_WORD,
+        ] {
+            assert!(word < FOOTPRINT_WORDS, "input field word {word} out of stride");
+        }
+        // Result fields occupy words 0..=3: three `f32` scalars then the raw
+        // `u32` mip bucket.
+        assert_eq!(FOOTPRINT_RESULT_PROJECTED_WIDTH_WORD, 0);
+        assert_eq!(FOOTPRINT_RESULT_TEXEL_SPAN_WORD, 1);
+        assert_eq!(FOOTPRINT_RESULT_MIP_LEVEL_WORD, 2);
+        assert_eq!(FOOTPRINT_RESULT_MIP_FLOOR_WORD, 3);
+        for word in [
+            FOOTPRINT_RESULT_PROJECTED_WIDTH_WORD,
+            FOOTPRINT_RESULT_TEXEL_SPAN_WORD,
+            FOOTPRINT_RESULT_MIP_LEVEL_WORD,
+            FOOTPRINT_RESULT_MIP_FLOOR_WORD,
+        ] {
+            assert!(word < FOOTPRINT_RESULT_WORDS, "result field word {word} out of stride");
+        }
+    }
+
+    #[test]
+    fn footprint_params_uniform_is_a_16_byte_block() {
+        // The shader's `FootprintParams` is four `u32`s; the `UNIFORM` buffer
+        // must be 16-byte aligned with no tail padding so `bytes_of` matches the
+        // on-device read byte-for-byte.
+        assert_eq!(size_of::<GpuFootprintParams>(), 16);
+        assert_eq!(align_of::<GpuFootprintParams>(), 4);
+        let params = GpuFootprintParams {
+            footprint_count: 5,
+            max_mip: 8,
+            pad0: 0,
+            pad1: 0,
+        };
+        let bytes = bytemuck::bytes_of(&params);
+        assert_eq!(bytes.len(), 16);
+        assert_eq!(&bytes[0..4], &5u32.to_le_bytes());
+        assert_eq!(&bytes[4..8], &8u32.to_le_bytes());
     }
 }
