@@ -69,6 +69,7 @@
 //! Unreal Engine source or derived code.
 #![forbid(unsafe_code)]
 
+pub mod aabb_frustum_cull;
 pub mod bin_cut;
 pub mod cluster_cull;
 pub mod cluster_raster;
@@ -91,6 +92,7 @@ pub mod signed_distance;
 pub mod sphere_frustum_cull;
 pub mod triangle_gradients;
 
+pub use aabb_frustum_cull::{bounds_of, AabbQuery, GpuAabbFrustumCull};
 pub use bin_cut::GpuCutBinner;
 pub use cluster_cull::GpuClusterCuller;
 pub use cluster_raster::GpuClusterRaster;
