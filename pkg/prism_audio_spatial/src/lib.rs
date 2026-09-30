@@ -55,6 +55,7 @@ pub mod cone;
 pub mod doppler;
 pub mod geometry;
 pub mod hoa;
+pub mod hoa_beamform;
 pub mod hoa_decode;
 pub mod hoa_rotation;
 pub mod multi_position;
@@ -78,6 +79,7 @@ pub use hoa::{
     HoaEncoderNode, MAX_HOA_CHANNELS, MAX_HOA_ORDER, acn_index, decode_hoa, encode_hoa,
     hoa_channel_count,
 };
+pub use hoa_beamform::{BeamPattern, Beamformer, beam_gains};
 pub use hoa_decode::{DecodeBand, DualBandDecoder, SpeakerLayout, max_re_gains, max_re_radius};
 pub use hoa_rotation::{HoaRotationMatrix, rotate_hoa};
 pub use multi_position::{
