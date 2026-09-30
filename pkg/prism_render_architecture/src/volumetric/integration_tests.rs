@@ -90,8 +90,8 @@ use super::storm::{
 };
 use super::temporal::{active_pixel, clamp_history, UpscaleMode};
 use super::weather::{
-    advance_state, blend_state, classify_precip, dissipate_state, relax_coverage, target_coverage,
-    Precip, PrecipKind, SkyState, WeatherField, WindField,
+    advance_state, advect_semi_lagrangian, blend_state, classify_precip, dissipate_state,
+    relax_coverage, target_coverage, Precip, PrecipKind, SkyState, WeatherField, WindField,
 };
 use super::{
     CloudKind, CloudLayerHandle, CloudModeling, Vec2, Vec3, VolumetricBudget, WeatherMapHandle,
@@ -1594,5 +1594,75 @@ fn weather_sky_state_machine_and_precip_drive_the_density_pipeline() {
     assert!(
         dense_i >= sparse_i,
         "denser sky should not rain less: {dense_i} < {sparse_i}"
+    );
+}
+
+#[test]
+fn semi_lagrangian_wind_advection_transports_coverage_into_the_density_pipeline() {
+    // A localized coverage feature sits at x = 2 in an otherwise sparse row.
+    let handle = WeatherMapHandle(3);
+    let low = WeatherSample::from_rgba(0.1, 0.5, 0.1, 0.0);
+    let peak = WeatherSample::from_rgba(0.9, 0.5, 0.1, 0.0);
+    let mut field = WeatherField::filled(handle, 7, 1, low);
+    assert!(field.set(2, 0, peak));
+
+    // A due-east wind built from a compass angle: `from_polar` must yield a
+    // base velocity that points along +x (its magnitude is the speed).
+    let wind = WindField::from_polar(0.0, 2.0, 0.0);
+    let base = wind.base_velocity();
+    assert!(base.x > 0.0, "polar wind should blow along +x: {}", base.x);
+    assert!(
+        base.y.abs() < 1.0e-3,
+        "angle 0 wind should not drift in y: {}",
+        base.y
+    );
+
+    // One semi-Lagrangian step at dt = 0.5 backtraces each cell by base * dt =
+    // one cell, so the feature at x = 2 is transported downwind to x = 3.
+    let advected = advect_semi_lagrangian(&field, base, 0.5);
+
+    // Range is preserved on every channel (convex bilinear taps).
+    for cell in advected.cells() {
+        assert!((0.0..=1.0).contains(&cell.coverage));
+        assert!((0.0..=1.0).contains(&cell.cloud_type));
+        assert!((0.0..=1.0).contains(&cell.precipitation));
+        assert!((0.0..=1.0).contains(&cell.wind_disturbance));
+    }
+
+    // The feature moved downwind: the cell it vacated thins while the cell it
+    // arrived at thickens.
+    let before_up = field.get(2, 0).coverage;
+    let after_up = advected.get(2, 0).coverage;
+    let before_down = field.get(3, 0).coverage;
+    let after_down = advected.get(3, 0).coverage;
+    assert!(
+        after_up < before_up,
+        "vacated cell should thin: {after_up} >= {before_up}"
+    );
+    assert!(
+        after_down > before_down,
+        "downwind cell should thicken: {after_down} <= {before_down}"
+    );
+
+    // Uniform (divergence-free) wind conserves the interior coverage mass up to
+    // bilinear rounding.
+    let mass_before = field.total_coverage();
+    let mass_after = advected.total_coverage();
+    assert!(
+        (mass_before - mass_after).abs() < 0.1,
+        "uniform advection should conserve coverage mass: {mass_before} vs {mass_after}"
+    );
+
+    // Closing the weather -> modeling seam: the transported coverage drives the
+    // density pipeline, so the downwind column that the feature blew into is
+    // now denser than it was before the wind arrived.
+    let modeling = sample_modeling();
+    let seed = 0x11C7_0FE5;
+    let probe = Vec3::new(0.5, 0.5, 0.5);
+    let density_before = field_density(modeling, CloudKind::Cumulus, probe, before_down, seed);
+    let density_after = field_density(modeling, CloudKind::Cumulus, probe, after_down, seed);
+    assert!(
+        density_after >= density_before - EPS,
+        "coverage blown downwind should not thin the cloud: {density_after} < {density_before}"
     );
 }
