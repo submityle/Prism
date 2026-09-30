@@ -64,6 +64,8 @@ mod ccd_gpu_tests;
 #[cfg(test)]
 mod vbd_gpu_tests;
 #[cfg(test)]
+mod tearing_gpu_tests;
+#[cfg(test)]
 mod gpu_test_support;
 #[cfg(test)]
 mod aero_parity;

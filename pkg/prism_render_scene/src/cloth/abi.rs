@@ -447,6 +447,24 @@ pub(crate) struct GpuClothPlasticityParams {
     pub pad2: u32,
 }
 
+/// 16-byte uniform driving the per-edge tearing (constraint-break) test. Carries
+/// the sanitized golden `break_strain`, the two counts bounding the dispatch and
+/// the endpoint range guard, and padding to a whole 16-byte uniform stride. The
+/// shader only reads positions and constraints and writes a break flag, so no
+/// derived scalars are precomputed.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq)]
+pub(crate) struct GpuClothTearingParams {
+    /// Tensile strain above which a two-sided edge breaks (sanitized, `>= 0`).
+    pub break_strain: f32,
+    /// Number of constraints bounding the per-edge dispatch.
+    pub constraint_count: u32,
+    /// Number of particles, for the endpoint range guard.
+    pub particle_count: u32,
+    /// Padding to a 16-byte uniform stride.
+    pub pad0: u32,
+}
+
 /// 32-byte uniform driving the continuous-collision (CCD) sweep. The three
 /// sanitized golden scalars (`skin`, `restitution`, `dt`) plus the `friction`
 /// coefficient and two counts, padded to a whole 16-byte uniform stride. The
@@ -626,6 +644,9 @@ mod tests {
         assert_eq!(size_of::<GpuClothPlasticityParams>(), 32);
         assert_eq!(size_of::<GpuClothPlasticityParams>() % 16, 0);
         assert_eq!(align_of::<GpuClothPlasticityParams>(), 4);
+        assert_eq!(size_of::<GpuClothTearingParams>(), 16);
+        assert_eq!(size_of::<GpuClothTearingParams>() % 16, 0);
+        assert_eq!(align_of::<GpuClothTearingParams>(), 4);
     }
 
     /// The CCD uniform is a flat 32-byte block: three sanitized scalars, the

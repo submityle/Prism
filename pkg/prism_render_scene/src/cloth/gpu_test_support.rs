@@ -50,6 +50,9 @@ const CLOTH_CCD_WESL_UUID: u128 = 0x434c_4f54_485f_4343_445f_5f5f_5f5f_5a01;
 /// 编译 `cloth_vbd.wesl` 用的一次性 `AssetId`，只需在本次编译内唯一。
 const CLOTH_VBD_WESL_UUID: u128 = 0x434c_4f54_485f_5642_445f_5f5f_5f5f_5b01;
 
+/// Stable cache UUID for the tearing shader twin.
+const CLOTH_TEARING_WESL_UUID: u128 = 0x434c_4f54_485f_5445_4152_5f5f_5f5f_5c01;
+
 /// 把 `WESL` 源经 render-world 的 [`ShaderCache`] 编译回 `Wgsl` 字符串（不建
 /// 设备），供各模块自建的裸 `wgpu` 设备使用。镜像 `sim_gpu_tests` 的编译闭包。
 fn keep_wgsl(
@@ -146,6 +149,15 @@ pub(super) fn compile_vbd_wgsl() -> String {
         include_str!("../shaders/cloth_vbd.wesl"),
         "shaders/cloth_vbd.wesl",
         CLOTH_VBD_WESL_UUID,
+    )
+}
+
+/// 经 `ShaderCache` 把嵌入式 `cloth_tearing.wesl` 编译成 `Wgsl`。
+pub(super) fn compile_tearing_wgsl() -> String {
+    compile_cloth_wgsl(
+        include_str!("../shaders/cloth_tearing.wesl"),
+        "shaders/cloth_tearing.wesl",
+        CLOTH_TEARING_WESL_UUID,
     )
 }
 
