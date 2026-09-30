@@ -503,7 +503,16 @@ fn build_recursive(
                 .unwrap_or(core::cmp::Ordering::Equal)
         });
         let mid = refs.len() / 2;
-        return emit_interior(refs, mid, axis, nodes, order, max_leaf, bins, traversal_cost);
+        return emit_interior(
+            refs,
+            mid,
+            axis,
+            nodes,
+            order,
+            max_leaf,
+            bins,
+            traversal_cost,
+        );
     }
 
     // Bin primitives by centroid position along `axis`, then evaluate the SAH
@@ -595,14 +604,28 @@ fn build_recursive(
 
     // Reserve this interior node's slot, emit both children depth-first, and
     // patch the second-child offset via the shared helper.
-    emit_interior(refs, mid, axis, nodes, order, max_leaf, bins, traversal_cost)
+    emit_interior(
+        refs,
+        mid,
+        axis,
+        nodes,
+        order,
+        max_leaf,
+        bins,
+        traversal_cost,
+    )
 }
 
 /// Emits one interior node splitting `refs` at `mid` along `axis`, recursing
 /// into both halves and patching the second-child offset. Both halves must be
 /// non-empty so every interior node strictly reduces the primitive count on
 /// each side and the build always terminates.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Interior emission threads the full split context (refs, split index, \
+axis, node and order arenas, leaf budget, bins and traversal cost) through one \
+recursive call; bundling it into a struct would only relocate the same fields."
+)]
 fn emit_interior(
     refs: &mut [PrimRef],
     mid: usize,
@@ -634,7 +657,6 @@ fn emit_interior(
     nodes[node_index].second_child = second_child;
     node_index as u32
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -794,9 +816,7 @@ mod tests {
         // count wraps through `as u16` and silently drops primitives.
         let count = u16::MAX as u32 + 1_000;
         let tris: Vec<Triangle> = (0..count)
-            .map(|i| {
-                Triangle::new([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], i)
-            })
+            .map(|i| Triangle::new([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], i))
             .collect();
         let bvh = Bvh::build(&tris);
 
