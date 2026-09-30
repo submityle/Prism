@@ -67,6 +67,11 @@
 //!   report the nearest of all valid roots, and a single-level
 //!   [`cylinder::CylinderBvh`] reusing the shared binned-`SAH` build and
 //!   ordered slab walk.
+//! - [`cylinder_gpu_layout`] — flat, `GPU`-uploadable [`cylinder::CylinderBvh`]
+//!   buffer layout ([`cylinder_gpu_layout::CYLINDER_WORDS`] stride packing
+//!   `base`/`top` endpoints plus radius, shared [`gpu_layout::NODE_WORDS`]
+//!   nodes) plus a packed cylinder walk that reproduces the in-memory
+//!   cylinder walk bit-for-bit.
 //! - [`sphere_gpu_layout`] — flat, `GPU`-uploadable [`sphere::SphereBvh`]
 //!   buffer layout ([`sphere_gpu_layout::SPHERE_WORDS`] stride, shared
 //!   [`gpu_layout::NODE_WORDS`] nodes) plus a packed procedural-primitive
@@ -102,6 +107,7 @@ pub mod bvh_wide_gpu_layout;
 pub mod curve;
 pub mod curve_gpu_layout;
 pub mod cylinder;
+pub mod cylinder_gpu_layout;
 pub mod footprint;
 pub mod gpu_layout;
 pub mod motion;
@@ -141,6 +147,7 @@ pub use sphere::{Sphere, SphereBvh, SphereHit};
 pub use curve::{Curve, CurveBvh, CurveHit};
 pub use curve_gpu_layout::{GpuCurveBvhBuffers, CURVE_WORDS};
 pub use cylinder::{Cylinder, CylinderBvh, CylinderHit};
+pub use cylinder_gpu_layout::{GpuCylinderBvhBuffers, CYLINDER_WORDS};
 pub use aabb_primitive_gpu_layout::{GpuAabbBvhBuffers, AABB_PRIMITIVE_WORDS};
 pub use sphere_gpu_layout::{GpuSphereBvhBuffers, SPHERE_WORDS};
 pub use traversal::{Hit, Ray};
