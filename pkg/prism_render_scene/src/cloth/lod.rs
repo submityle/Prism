@@ -9,16 +9,21 @@
 //! coverage through the golden [`resolve_cloth_lod`], and exposes the decision
 //! the prepare stage gates on.
 //!
-//! The one *device* consequence this slice lands is honest and verifiable: a
-//! garment whose coverage collapses it to [`ClothLodTier::SkinnedProxy`] builds
-//! no resident GPU piece and therefore records no compute pass — the same
-//! "no work, no dispatch" contract an empty garment already honors. Simulated
-//! tiers (full and reduced) still solve the authored mesh; swapping a reduced
-//! tier onto a pre-authored, decimated LOD mesh is an asset-pipeline follow-up
-//! tracked in the cloth design doc, so this slice deliberately does not fake a
-//! decimation it cannot yet run. The resolved budget counts are still surfaced
+//! The device consequences this gate lands are honest and verifiable. A garment
+//! whose coverage collapses it to [`ClothLodTier::SkinnedProxy`] builds no
+//! resident GPU piece and therefore records no compute pass — the same "no work,
+//! no dispatch" contract an empty garment already honors. At
+//! [`ClothLodTier::ReducedSim`] a garment that carries a pre-authored coarse
+//! simulation mesh ([`super::lod_mesh`]) solves *that* mesh — fewer particles,
+//! constraints and dispatched work-items — so the reduced tier delivers a real
+//! per-frame cost reduction rather than merely recording a smaller budget; the
+//! tier-aware mesh selection lives in
+//! [`ClothGarment::as_solve_input_for_tier`](super::garment::ClothGarment::as_solve_input_for_tier)
+//! and the prepare stage solves whichever view it returns. A reduced-tier garment
+//! with no authored coarse mesh keeps the honest fallback of re-solving the full
+//! mesh (never a fabricated decimation). The resolved budget counts are surfaced
 //! (see [`ClothLodDecision`]) so the renderer can bin and account for pieces by
-//! tier today.
+//! tier.
 
 use prism_render_architecture::cloth::lod::{
     resolve_cloth_lod, select_cloth_lod_tier_hysteretic, ClothLodDecision, ClothLodThresholds,
