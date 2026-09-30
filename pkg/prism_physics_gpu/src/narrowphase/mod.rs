@@ -19,6 +19,9 @@
 //!   primitive driving particle-particle collision.
 //! - [`halfspace`] / [`GpuHalfspaceNarrowphase`]: sphere versus an infinite
 //!   plane, the canonical static collider for grounds, walls, and frustum faces.
+//! - [`capsule`] / [`GpuCapsuleNarrowphase`]: sphere versus a capsule (a segment
+//!   swept by a radius), collapsing to sphere-sphere against the closest point
+//!   on the segment.
 //!
 //! Every pair emits one contact slot per input candidate: a passing real-device
 //! parity test is direct evidence the ported kernel builds the same manifolds as
@@ -35,6 +38,8 @@
 //! Provenance: textbook collision-manifold construction; no Unreal Engine source
 //! or derived code.
 
+mod capsule;
+mod capsule_gpu;
 mod contact;
 mod cpu;
 mod gpu;
@@ -43,6 +48,8 @@ mod halfspace_gpu;
 mod layout;
 mod sphere;
 
+pub use capsule::{cpu_capsule_narrowphase, Capsule, SphereCapsulePair};
+pub use capsule_gpu::GpuCapsuleNarrowphase;
 pub use contact::Contact;
 pub use cpu::cpu_narrowphase;
 pub use gpu::GpuNarrowphase;

@@ -85,8 +85,9 @@ pub use mpm::{
     StepParticles,
 };
 pub use narrowphase::{
-    cpu_halfspace_narrowphase, cpu_narrowphase, Contact, GpuHalfspaceNarrowphase, GpuNarrowphase,
-    Plane, SpherePlanePair,
+    cpu_capsule_narrowphase, cpu_halfspace_narrowphase, cpu_narrowphase, Capsule, Contact,
+    GpuCapsuleNarrowphase, GpuHalfspaceNarrowphase, GpuNarrowphase, Plane, SphereCapsulePair,
+    SpherePlanePair,
 };
 pub use radix::{cpu_radix_sort_keys, cpu_radix_sort_pairs, GpuRadixSort};
 pub use scan::{cpu_compact, cpu_exclusive_scan, GpuScan};
