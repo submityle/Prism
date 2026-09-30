@@ -430,7 +430,7 @@ fallback:              strand 高配, card 基线; RT 反射里毛发用 proxy �
 - **NPR 一等公民无成熟范式**：PBR 侧有 UE/业界抄作业，**NPR 一等前端这条基本得自己趟**——这是全设计风险最高、参考最少的部分（顶级二次元 NPR 大作多为自研或魔改引擎，不用 UE 招牌管线）。
 - **已放弃 Slang（2026-09-29 定案，见 §2）**：其唯一独占价值（shader/CPU-golden 单源）建立在"存在需长期对齐的真实 CPU 路径"上，而实测 CPU 参考只是测试脚手架、漂移面很小；成本却是一整套 shader 构建子系统 + 联网装 slangc（本机装不上）。收益/成本倒挂，直接砍掉。着色器维持 WESL，跨平台交 wgpu。将来若 compute 核心 shader/CPU 孪生真的维护痛，再评估（且 Slang 非唯一选项）。
 - **strand 毛发是 AAA 最重特性之一**：card 基线务实、strand 高配可选，别一上来就 strand。
-- **真正的 blocker 不在材质模型**（业界已收敛），也不在运行时后端（**wgpu 已提供跨平台运行时**），也不在着色器语言（**WESL 已够，Slang 已放弃**，见 §2）。真·出血点已随并发施工收敛为两条：**① vis-buffer 基底只完成了 CPU 决策层，GPU 光栅后端未落地（功能层面最大出血点）+ ② reactive mask GPU 收尾（算法层消费端已在 `resolve_taa` 落地，commit `e4790e0c6`；剩 WESL twin+bind-group 遮罩绑定与逐像素生产端）**。原先「大量效果仍是桩、未上 frame graph」已大幅缓解——outline/halftone/kuwahara/hatching/ssgi/world_space_gi/virtual_shadow 等已成全套 Core3d dispatch 节点上图（见 §11 第 1 步）。`virtual_geometry` 已从早期 22 行 stub 演进为 11 文件的 CPU 侧层（cull/lod/page_table/raster_path/pipeline/hierarchy/bins/page_request/frame + software_raster，确定性、后端无关、可单测），**其中 vis-buffer 软光栅数学已落地 CPU 金标准**（`software_raster.rs`，见 §5 第 1 项），剩**物理页存储、GPU 软光栅 compute twin 对拍、流式 I/O 仍在 backend 待建**（见 mod.rs 边界声明）。历史上先误判为"Vulkan 后端"、再误判为"Slang 工具链"，实为**桩接管线 + vis-buffer GPU 后端**。
+- **真正的 blocker 不在材质模型**（业界已收敛），也不在运行时后端（**wgpu 已提供跨平台运行时**），也不在着色器语言（**WESL 已够，Slang 已放弃**，见 §2）。真·出血点已随并发施工大幅收敛：**① vis-buffer GPU 光栅后端已落地并 Metal 实跑对拍（软光栅 `atomic<u32>` + 64-bit payload `atomic<u64>` + 页表解析 + 物理页存储 scatter/gather + 流式 I/O 全套 WESL twin，commit `1d67f2fa1`/`98029f2f7`/`4fc25c2dc`/`616e24b03`，三大出血点全闭合，见 §11 第 9 项）；仅剩 ② reactive mask GPU 收尾（算法层消费端已在 `resolve_taa` 落地，commit `e4790e0c6`；剩 WESL twin+bind-group 遮罩绑定与逐像素生产端）**。原先「大量效果仍是桩、未上 frame graph」已大幅缓解——outline/halftone/kuwahara/hatching/ssgi/world_space_gi/virtual_shadow 等已成全套 Core3d dispatch 节点上图（见 §11 第 1 步）。`virtual_geometry` 已从早期 22 行 stub 演进为 11 文件的 CPU 侧层（cull/lod/page_table/raster_path/pipeline/hierarchy/bins/page_request/frame + software_raster，确定性、后端无关、可单测），**其中 vis-buffer 软光栅数学已落地 CPU 金标准**（`software_raster.rs`，见 §5 第 1 项），**GPU 软光栅 compute twin 对拍、物理页存储、流式 I/O 均已落地并 Metal 实跑对拍**（三大出血点全闭合，见 §11 第 9 项）。历史上先误判为"Vulkan 后端"、再误判为"Slang 工具链"，实为**桩接管线 + vis-buffer GPU 后端**。
 
 ### 与 UE 的关系（定位参考）
 
@@ -444,7 +444,7 @@ fallback:              strand 高配, card 基线; RT 反射里毛发用 proxy �
 
 **破除分析瘫痪的关键：先一条极薄端到端竖切，让竖切反过来钉死 ABI。**
 **跨平台策略（2026-09-29 定案）：竖切跑在 wgpu 上（Metal/Web 就地可测），不等原生 Vulkan；着色器用 WESL（经 naga 编各后端）。已放弃 Slang（§2）。**
-**优先级：真·第一优先是把已有桩效果接上 frame graph（0 行新语言层依赖）+ 补 vis-buffer 的 GPU 光栅后端（CPU 层 `virtual_geometry` 已落地：决策层 + **软光栅数学金标准 `software_raster.rs`**，缺物理页存储/GPU 软光栅 compute twin/流式 I/O），不是任何 shader 语言工作。**
+**优先级：真·第一优先是把已有桩效果接上 frame graph（0 行新语言层依赖）（vis-buffer GPU 光栅后端已落地并 Metal 实跑对拍：软光栅/payload/页表/物理页存储/流式 I/O 全套 WESL twin，三大出血点全闭合，见 §11 第 9 项），不是任何 shader 语言工作。**
 
 1. **（大部已完成）桩接管线（纯 WESL）**：把桩效果接成活管线——**outline 已落地**（`pkg/prism_render_scene/src/shading/outline/`：abi/settings/pipeline/bind_groups/resources/dispatch 共 ~767 行，Core3d compute pass 消费 vis-buffer + SSR 深度/法线，输出拷回 `scene_color`）；**halftone/kuwahara/hatching 亦已落地**（各自成 abi/pipeline/dispatch/settings 全套 Core3d 节点）。**剩余**：`light_routing` 目前只有 `mod.rs`（数据服务逻辑 + WESL + 测试），尚未包装成独立 Core3d dispatch 节点——若需作为可视 pass 呈现则补一个 dispatch，否则维持数据服务被上层消费即可。
 2. **极薄竖切**：wgpu → 蒙皮(支柱四地基) → vis-buffer → material id → **一个 PBR 延迟着色 + 一个 NPR forward 着色**，点亮光照/阴影**数据服务最小版**（一盏方向光 + 一张 VSM）。
@@ -503,7 +503,7 @@ fallback:              strand 高配, card 基线; RT 反射里毛发用 proxy �
 **一句话**：**几乎全部高级特性 NPR 都享有**——基底数据是共享的，绝大多数是"同能力不同实现（A 类）"或"能用但固有降级（B 类）"；只有 slab/SSS/路径追踪这几项偏 PBR，且原因是它们本质属 closure 轴或物理正确性（对 NPR 无意义），**不是 NPR 被架构排除**。这正是"共享基底 + 前端分叉"范式的价值：NPR 不用自己重造这些高级特性，白嫖基底、只写风格化响应。
 
 
-1. **虚拟几何（Nanite 级）**：cluster DAG 连续 LOD + 软件光栅（compute 画微三角，避硬件光栅小三角浪费）+ vis-buffer 延迟着色。**性能**：几何吞吐与屏幕像素解耦，海量 instance 近似常数级；代价是软光栅 compute 占用 + vis-buffer 带宽。**效果**：零 LOD 突变、亿级三角。CPU 侧已落 `virtual_geometry`（cluster DAG cut/连续 LOD/页驻留/软硬光栅分类/帧计划 + **软光栅数学金标准 `software_raster.rs`**：水密 top-left + reversed-Z `max` 合成），**剩 GPU compute twin 对拍 + 物理页存储/流式 I/O 待建**（§11 真·出血点）。
+1. **虚拟几何（Nanite 级）**：cluster DAG 连续 LOD + 软件光栅（compute 画微三角，避硬件光栅小三角浪费）+ vis-buffer 延迟着色。**性能**：几何吞吐与屏幕像素解耦，海量 instance 近似常数级；代价是软光栅 compute 占用 + vis-buffer 带宽。**效果**：零 LOD 突变、亿级三角。CPU 侧已落 `virtual_geometry`（cluster DAG cut/连续 LOD/页驻留/软硬光栅分类/帧计划 + **软光栅数学金标准 `software_raster.rs`**：水密 top-left + reversed-Z `max` 合成），**GPU compute twin 对拍 + 物理页存储 + 流式 I/O 均已落地并 Metal 实跑对拍**（§11 第 9 项，三大出血点全闭合）。
 2. **Lumen 式混合 GI**：近场 SDF/mesh-card 软件 RT + 有硬件 RT 时切硬件；surface cache 缓存表面辐照度；屏幕空间探针 final gather。**性能**：surface cache + 探针把每像素多次弹射摊薄到缓存更新；**效果**：动态间接光/软反射，无需烘焙。无 RT 平台降级 SSGI/SSR + 探针。落 §4.1 基底 + 前端 final gather。
 3. **ReSTIR DI/GI**：储层时空重采样，几千动态光 + GI 一次积分。`lighting/mod.rs` 已有 `ReservoirBudget`，culling clustered 已就位（commit `d7dfa5fc1`）可接候选层。**性能**：把"每像素遍历所有光"降到"重采样少量储层"；**效果**：多光源无偏低方差。
 4. **虚拟阴影 VSM**：16k 虚拟页 + directional clipmap，只渲驻留页。`virtual_shadow` 已有 residency loop（集成测试绿）。**性能**：只画可见页；**效果**：接触硬阴影到远景一致密度。
