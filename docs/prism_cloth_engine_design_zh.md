@@ -113,7 +113,7 @@ fallback:
 
 1. **多求解器插槽（XPBD 基线 / VBD 高保真）**：默认 XPBD 子步 + compliance（稳、快、跨平台）；极刚材料/大形变切 VBD（无条件稳定、GPU 大并行）。**对齐物理 §4 SolverRegistry**。成本：VBD 每顶点更贵；效果：皮革/厚重织物不软塌。落点 `cloth/dynamics.rs`。
 2. **自碰撞 + CCD（连续碰撞检测）**：空间哈希 + 虚拟粒子；CCD 防高速穿插隧穿。**最重特性**——高配可选、基线只做身体碰撞。成本：空间哈希构建 + 大量对测；效果：多层裙摆不互穿。落点 `cloth/collision.rs`。
-3. **空气动力学（逐三角升/阻力）**：按三角法线与相对风速算升力/阻力（Chaos）。成本：低（逐三角一次）；效果：飘动/鼓风/降落伞感。
+3. **空气动力学（逐三角升/阻力，双模型）**：按三角法线与相对风速拆分法向阻力/切向升力（Chaos）。**线性模型**（`air_density <= 0`，历史默认）力 `= (drag·法向分量 + lift·切向分量)·面积`；**二次模型**（`air_density > 0`，UE5 Chaos/NvCloth 风格）在此基础上再乘动压因子 `0.5·air_density·|相对风速|`，使力随空速平方增长——贴合真实空气阻力特性。经 `AeroParams::with_air_density()` / `ClothGarmentBuilder::air_density()` 选入；两段式 GPU dispatch（先冻结帧初速度快照、再逐顶点 CSR gather 保确定性），CPU 黄金与真机 GPU 逐位/浮点容差对拍。成本：低（逐三角一次，仅 `sqrt` 无 transcendental）；效果：飘动/鼓风/降落伞感，高速气流下阻力更真实。落点 `cloth/wind.rs`（黄金）+ `cloth_aerodynamics{,_snapshot}.wesl`（GPU 孪生）。
 4. **风场耦合**：全局风 + 局部风场（体积/噪声），可与粒子/植被共享风数据。成本：低；效果：环境一致的摆动。
 5. **strain limiting（应变限制）**：约束投影后二次钳制边长，防"超弹"拉丝。成本：一趟后处理；效果：布料不像橡皮。
 6. **backstop / max-distance / blend-weight（绘制约束）**：美术刷权重控制贴合与位移上限、防穿身体、sim↔蒙皮混合。成本：数据驱动近零；效果：紧身处稳、飘逸处自由——**AAA 角色服装质感的关键调参手段**。
