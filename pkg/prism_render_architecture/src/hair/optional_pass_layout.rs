@@ -71,9 +71,10 @@ pub struct HairOptionalExtents {
 /// dispatch for one optional pass. Contains a [`Vec`], so it is not `Copy`.
 ///
 /// Parallels [`HairPassPlan`](super::pass_layout::HairPassPlan) for the main
-/// spine, with the extra `params_immediate_bytes` because the optional buffer
-/// modules publish their immediate block size (the main spine's push-constant
-/// sizing is not yet centralised there).
+/// spine; both plan types now carry `params_immediate_bytes` (the main spine's
+/// push-constant sizing is centralised in
+/// [`pass_params`](super::pass_params), the optional passes' in their own
+/// buffer modules), so the two are symmetric.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct HairOptionalPassPlan {
     /// The optional compute pass this plan binds and dispatches.

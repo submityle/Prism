@@ -32,6 +32,7 @@ use crate::hair::gpu_dispatch::{
 use crate::hair::import_buffers::{HairImportExtent, HairResampleBuffer, HairRootBindBuffer};
 use crate::hair::interp_buffers::HairInterpBuffer;
 use crate::hair::lod_dither_buffers::HairLodDitherBuffer;
+use crate::hair::pass_params::params_immediate_bytes;
 use crate::hair::shadow_buffers::{
     HairDeepOpacityBuffer, HairShadowExtent, HairTransmittanceBuffer,
 };
@@ -104,6 +105,12 @@ pub struct HairPassPlan {
     pub bindings: Vec<HairBindingLayout>,
     /// Sum of every binding's `byte_size` — the pass's total storage footprint.
     pub total_binding_bytes: usize,
+    /// Byte size of the pass's `var<immediate>` params block (push constants),
+    /// from [`params_immediate_bytes`]. The render graph reserves this
+    /// push-constant range when it builds the pass's compute pipeline. Mirrors
+    /// [`HairOptionalPassPlan::params_immediate_bytes`](super::optional_pass_layout::HairOptionalPassPlan)
+    /// so both plan types carry the full pipeline-layout footprint.
+    pub params_immediate_bytes: usize,
 }
 
 /// Appends the `@group(0)` binding layouts of `pass` (in dense binding order) to
@@ -266,6 +273,7 @@ pub fn plan_pass(
         workgroup_count,
         bindings,
         total_binding_bytes,
+        params_immediate_bytes: params_immediate_bytes(pass),
     }
 }
 
@@ -404,6 +412,8 @@ mod tests {
             assert_eq!(plan.bindings, expected);
             let sum: usize = expected.iter().map(|b| b.byte_size).sum();
             assert_eq!(plan.total_binding_bytes, sum);
+            // Immediate-params half matches pass_params exactly.
+            assert_eq!(plan.params_immediate_bytes, params_immediate_bytes(pass));
         }
     }
 
