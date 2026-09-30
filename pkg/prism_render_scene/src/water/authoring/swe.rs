@@ -105,11 +105,14 @@ impl WaterBody {
         let cells = cfg.nx * cfg.nz;
 
         // A dense per-cell source field: zero everywhere except a steady inflow
-        // at the pond center (`w` is the height source; `xyz` momentum stays 0
-        // so the spring adds water without stirring a direction into it).
+        // at the pond center. The interaction-source layout the `SWE` kernel
+        // reads is `[.x depth delta, .y u impulse, .z v impulse, .w unused]`
+        // (see `water_surface.wesl`), so the steady inflow is a pure height
+        // source in `.x` and the momentum lanes stay zero — the spring adds
+        // water without stirring a direction into it.
         let mut sources = vec![[0.0_f32; 4]; cells as usize];
         let center = (cfg.nz / 2) * cfg.nx + (cfg.nx / 2);
-        sources[center as usize] = [0.0, 0.0, 0.0, preset.source_rate];
+        sources[center as usize] = [preset.source_rate, 0.0, 0.0, 0.0];
 
         Self {
             swe_cells: cells,
@@ -206,8 +209,8 @@ mod tests {
         assert!(prepare(&body.as_extract()).dispatches.is_empty());
     }
 
-    /// A single steady inflow sits at the pond center and adds water without
-    /// stirring a momentum direction.
+    /// A single steady inflow sits at the pond center in the depth lane (`.x`)
+    /// and adds water without stirring a momentum direction.
     #[test]
     fn central_inflow_is_a_pure_height_source() {
         let preset = ShallowWaterPreset {
@@ -218,17 +221,18 @@ mod tests {
         };
         let body = WaterBody::shallow_water(preset);
         let center = (9 / 2) * 9 + (9 / 2);
-        let injected: f32 = body.swe_sources.iter().map(|s| s[3]).sum();
+        // The depth delta lives in `.x` (the only volume-changing lane).
+        let injected: f32 = body.swe_sources.iter().map(|s| s[0]).sum();
         assert!(
             (injected - 0.2).abs() < 1.0e-6,
             "only the inflow adds height"
         );
-        assert!((body.swe_sources[center as usize][3] - 0.2).abs() < 1.0e-6);
-        // No source carries momentum.
+        assert!((body.swe_sources[center as usize][0] - 0.2).abs() < 1.0e-6);
+        // No source carries momentum (`.y`/`.z`) and the `.w` lane is unused.
         for s in &body.swe_sources {
-            assert!(s[0].abs() < 1.0e-12);
             assert!(s[1].abs() < 1.0e-12);
             assert!(s[2].abs() < 1.0e-12);
+            assert!(s[3].abs() < 1.0e-12);
         }
     }
 }
