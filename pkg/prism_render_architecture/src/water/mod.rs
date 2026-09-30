@@ -50,6 +50,7 @@
 // intermediate state keeps the crate compiling and its gates green.
 pub mod breaking;
 pub mod budget;
+pub mod cascade;
 pub mod caustics;
 pub mod coupling;
 pub mod coupling_frame;
