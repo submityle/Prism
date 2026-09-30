@@ -16,7 +16,11 @@
 //! fused-multiply-add contraction. Each value is asserted to within
 //! `abs_diff < 1e-4` or `rel_diff < 1e-3` — tight enough to fail a genuinely
 //! wrong port (a swapped lobe, a missing normalization factor, a sign error in
-//! the anisotropy), loose enough to admit fma contraction. The sweep also
+//! the anisotropy), loose enough to admit fma contraction. Near the
+//! back-scatter singularity, where out-of-range inputs clamp the `HG`
+//! denominator down to `EPS`, the relative bound is widened by the genuine
+//! `1.5 * DENOM_ULP / denom` conditioning (a `denom^-1.5` sensitivity) rather
+//! than relaxed blindly. The sweep also
 //! asserts the physical shape (a forward peak well above isotropic and a softer
 //! backward lobe) so a degenerate all-constant kernel could not pass.
 //!
@@ -39,6 +43,13 @@ fn default_query(cos_theta: f32) -> DualLobePhaseQuery {
     }
 }
 
+/// First-order fused-multiply-add spread of the `Henyey-Greenstein` denominator
+/// `1 + g^2 - 2*g*u`. The `CPU` and `GPU` contract those `~O(1)` terms
+/// differently, so the denominator differs by a couple of `f32` `ULP`
+/// (`~2e-7`); measured worst case over the grid is `~8e-8`, and `2e-7` keeps
+/// `~2.5x` margin.
+const DENOM_ULP: f32 = 2e-7;
+
 /// Asserts `gpu` matches the `CPU` golden for every query to within the
 /// documented fma tolerance, returning the `CPU` reference values for further
 /// physical-shape assertions.
@@ -50,9 +61,32 @@ fn assert_parity(queries: &[DualLobePhaseQuery], gpu: &[f32]) -> Vec<f32> {
         let got = gpu[i];
         let abs_diff = (got - expected).abs();
         let rel_diff = abs_diff / expected.abs().max(1e-6);
+        // Conditioning-aware relative tolerance. Each lobe divides by
+        // `denom * sqrt(denom)`, so `d(phase)/phase = -1.5 * d(denom)/denom`.
+        // Near the back-scatter singularity (out-of-range `cos_theta` / `g`
+        // clamped so `denom -> EPS`) the shared denominator's `~ULP` spread is
+        // amplified by `1/denom`, and the value cannot be pinned down to the
+        // well-conditioned `1e-3`. We mirror the `CPU` clamps to recover the
+        // effective denominator of the contributing lobe(s) and widen the
+        // relative bound by `1.5 * DENOM_ULP / min_denom`; for well-conditioned
+        // queries (`denom` well above `EPS`) this collapses back to `1e-3`.
+        let u = q.cos_theta.clamp(-1.0, 1.0);
+        let gf = q.g_forward.clamp(-0.999, 0.999);
+        let gb = q.g_backward.clamp(-0.999, 0.999);
+        let b = q.blend.clamp(0.0, 1.0);
+        let denom_f = (1.0 + gf * gf - 2.0 * gf * u).max(1e-6);
+        let denom_b = (1.0 + gb * gb - 2.0 * gb * u).max(1e-6);
+        let mut min_denom = f32::INFINITY;
+        if b > 0.0 {
+            min_denom = min_denom.min(denom_f);
+        }
+        if b < 1.0 {
+            min_denom = min_denom.min(denom_b);
+        }
+        let rel_tol = 1e-3 + 1.5 * DENOM_ULP / min_denom;
         assert!(
-            abs_diff < 1e-4 || rel_diff < 1e-3,
-            "phase mismatch for query {q:?}: gpu {got}, cpu {expected} (abs {abs_diff}, rel {rel_diff})"
+            abs_diff < 1e-4 || rel_diff < rel_tol,
+            "phase mismatch for query {q:?}: gpu {got}, cpu {expected} (abs {abs_diff}, rel {rel_diff}, rel_tol {rel_tol})"
         );
         cpu.push(expected);
     }

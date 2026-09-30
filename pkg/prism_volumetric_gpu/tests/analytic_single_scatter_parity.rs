@@ -24,10 +24,24 @@
 use prism_render_architecture::volumetric::reference::analytic_single_scatter;
 use prism_volumetric_gpu::{AnalyticSingleScatterQuery, GpuAnalyticSingleScatter, GpuContext};
 
-/// Absolute tolerance for the radiance. The polynomial `exp_approx` is shared by
-/// both sides, so agreement is close; radiance products can be a few units, so
-/// the tolerance is scaled accordingly.
+/// Base absolute tolerance for the radiance in the well-conditioned regime. The
+/// polynomial `exp_approx` is shared by both sides, so agreement is close;
+/// radiance products can be a few units, so the tolerance is scaled
+/// accordingly.
 const TOL: f32 = 2e-5;
+
+/// Per-evaluation numerator spread (a few `f32` `ULP` at magnitude 1) used to
+/// widen the tolerance in the ill-conditioned regime. The path integral
+/// `(1 - exp(-st*d)) / st` divides a numerator in `[0, 1]` by `st`; when
+/// `sigma_t` is non-positive it is floored to `EPS = 1e-6`, so the shared
+/// `exp_approx` rounding (which the `CPU` and `GPU` contract into `FMA`s
+/// independently) is amplified by `1 / st`. The admissible spread of the
+/// radiance is therefore `c / st * NUM_ULP` with `c = sigma_s*phase*L` the
+/// non-negative product prefactor. Half a `ULP` at 1.0 is `2^-24 ~ 6e-8`; two
+/// independent roundings differ by up to twice that, and `2e-7` keeps a safety
+/// margin while staying far below any real port error (a wrong formula shifts
+/// the value by `O(radiance)`, not a few `ULP`).
+const NUM_ULP: f32 = 2e-7;
 
 #[test]
 #[expect(
@@ -75,9 +89,16 @@ fn gpu_analytic_single_scatter_matches_cpu_golden() {
     for (q, &got) in queries.iter().zip(gpu.iter()) {
         let want =
             analytic_single_scatter(q.sigma_t, q.sigma_s, q.phase, q.light_radiance, q.distance);
+        // Conditioning-aware tolerance: the floored `st` amplifies the shared
+        // `exp_approx` numerator rounding by `1 / st`, scaled by the radiance
+        // prefactor `c`. In the well-conditioned regime (`st` not floored, `c`
+        // moderate) this collapses back to `TOL`.
+        let c = q.sigma_s.max(0.0) * q.phase.max(0.0) * q.light_radiance.max(0.0);
+        let st = q.sigma_t.max(1e-6);
+        let tol = TOL + (c / st) * NUM_ULP;
         assert!(
-            (got - want).abs() <= TOL,
-            "radiance mismatch for {q:?}: gpu={got} cpu={want}"
+            (got - want).abs() <= tol,
+            "radiance mismatch for {q:?}: gpu={got} cpu={want} (tol {tol})"
         );
         assert!(
             got >= -TOL,

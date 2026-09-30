@@ -7,8 +7,10 @@
 //! near-tie angles where `round_ties_away` matters (odd multiples of `PI`, the
 //! `±0.5 * TWO_PI` reduction boundaries, and `n*PI + PI/2` fold edges), and a
 //! few large magnitudes that stress the range reduction. Both `sin` and `cos`
-//! must agree to `abs_diff < 1e-6`, so a wrong reduction branch or a dropped
-//! polynomial term would fail. An empty query slice must yield an empty result.
+//! must agree within a conditioning-aware tolerance `1e-6 + 2*f32::EPSILON *
+//! |angle|` that tracks the range-reduction cancellation growing with the
+//! angle magnitude, so a wrong reduction branch or a dropped polynomial term
+//! would still fail. An empty query slice must yield an empty result.
 
 #![expect(
     clippy::print_stderr,
@@ -73,14 +75,26 @@ fn trig_approx_matches_cpu() {
     for (&angle, gpu) in angles.iter().zip(results.iter()) {
         let sin_cpu = sin_approx(angle);
         let cos_cpu = cos_approx(angle);
+        // Conditioning-aware tolerance. `wrap_pi` reduces the angle by
+        // subtracting `k * TWO_PI`; the `GPU` fuses that `x - k*TWO_PI` into a
+        // single-rounding `FMA` while the `CPU` rounds the product first, so the
+        // reduced angle can differ by up to a couple of `ULP` of the subtracted
+        // multiple, i.e. `~f32::EPSILON * |angle|`. Near a zero crossing (odd
+        // multiples of `PI`, where the folded angle is a catastrophic
+        // cancellation to `~0`) that reduction spread is the whole signal, so a
+        // fixed `1e-6` floor is too tight for large `|angle|`. The linear term
+        // tracks the genuine range-reduction conditioning and stays far below
+        // any real port error (a dropped polynomial term shifts the value by
+        // `>= ~5e-3` at the fold edge).
+        let tol = 1e-6 + 2.0 * f32::EPSILON * angle.abs();
         assert!(
-            (gpu.sin - sin_cpu).abs() < 1e-6,
-            "sin mismatch at angle {angle}: gpu {} vs cpu {sin_cpu}",
+            (gpu.sin - sin_cpu).abs() < tol,
+            "sin mismatch at angle {angle}: gpu {} vs cpu {sin_cpu} (tol {tol})",
             gpu.sin
         );
         assert!(
-            (gpu.cos - cos_cpu).abs() < 1e-6,
-            "cos mismatch at angle {angle}: gpu {} vs cpu {cos_cpu}",
+            (gpu.cos - cos_cpu).abs() < tol,
+            "cos mismatch at angle {angle}: gpu {} vs cpu {cos_cpu} (tol {tol})",
             gpu.cos
         );
     }
