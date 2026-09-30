@@ -225,6 +225,15 @@ impl AudioRuntime {
         self.sample_rate
     }
 
+    /// The maximum number of frames rendered per [`AudioRuntime::process_block`]
+    /// call. Device and offline backends size their scratch buffers to at most
+    /// this value so the hot path never rejects an oversized block.
+    #[must_use]
+    #[inline]
+    pub fn max_block(&self) -> usize {
+        self.max_block
+    }
+
     /// Read-only access to the voice pool for diagnostics and tests.
     #[must_use]
     #[inline]

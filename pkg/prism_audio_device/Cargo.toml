@@ -1,0 +1,28 @@
+[package]
+name = "prism_audio_device"
+version = "0.1.0"
+edition = "2024"
+description = "Device and offline backends for Prism's next-generation audio engine: a cpal output backend, a deterministic offline WAV file sink, and lock-free microphone input capture, all driving the shared real-time render graph. Contains no Unreal Engine, Unity, Godot, Wwise, or FMOD source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_audio_core = { path = "../prism_audio_core" }
+prism_audio_rt = { path = "../prism_audio_rt" }
+# Cross-platform audio device I/O (output playback and input capture). Version
+# aligned with the one already vendored for `bevy_audio` to avoid duplicate
+# builds in the workspace lockfile. Optional so offline rendering, capture, and
+# the deterministic test suite build without linking a platform audio SDK.
+cpal = { version = "0.17", optional = true }
+# Minimal, dependency-light WAV encoder/decoder used by the offline file sink
+# and its golden round-trip tests.
+hound = "3.5"
+
+[features]
+# The live device backend is on by default; disable it (`--no-default-features`)
+# for pure offline rendering, CI, or headless hosts with no audio device.
+default = ["cpal-backend"]
+cpal-backend = ["dep:cpal"]
+
+[lints]
+workspace = true
