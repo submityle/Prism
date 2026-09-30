@@ -48,6 +48,10 @@
 //! - [`obb_halfspace`] / [`GpuObbHalfspaceNarrowphase`]: oriented bounding box
 //!   versus a halfspace, using the box support function along the plane normal
 //!   to report the deepest penetrating vertex.
+//! - [`obb_halfspace_manifold`] / [`cpu_obb_halfspace_manifold`]: promotes the
+//!   OBB-halfspace contact to the full up-to-four-corner incident-face
+//!   [`ContactManifold`], the manifold a solver needs to keep a box resting flat
+//!   and stable on the ground.
 //! - [`obb_obb`] / [`GpuObbObbNarrowphase`]: oriented bounding box versus
 //!   oriented bounding box (dynamic-dynamic), a fifteen-axis separating-axis
 //!   test reporting the minimum-translation contact.
@@ -94,6 +98,8 @@ mod obb;
 mod obb_gpu;
 mod obb_halfspace;
 mod obb_halfspace_gpu;
+mod obb_halfspace_manifold;
+mod obb_halfspace_manifold_gpu;
 mod obb_obb;
 mod obb_obb_gpu;
 mod obb_obb_manifold;
@@ -122,6 +128,8 @@ pub use obb::{cpu_obb_narrowphase, Obb, SphereObbPair};
 pub use obb_gpu::GpuObbNarrowphase;
 pub use obb_halfspace::{cpu_obb_halfspace_narrowphase, ObbPlanePair};
 pub use obb_halfspace_gpu::GpuObbHalfspaceNarrowphase;
+pub use obb_halfspace_manifold::cpu_obb_halfspace_manifold;
+pub use obb_halfspace_manifold_gpu::GpuObbHalfspaceManifoldNarrowphase;
 pub use obb_obb::{cpu_obb_obb_narrowphase, ObbObbPair};
 pub use obb_obb_gpu::GpuObbObbNarrowphase;
 pub use obb_obb_manifold::cpu_obb_obb_manifold;
