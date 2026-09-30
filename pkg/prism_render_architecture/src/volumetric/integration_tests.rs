@@ -89,7 +89,10 @@ use super::storm::{
     anvil_profile, gravity_wave, overshooting_bump, pyrocumulus_buoyancy, virga_fade, StormState,
 };
 use super::temporal::{active_pixel, clamp_history, UpscaleMode};
-use super::weather::{WeatherField, WindField};
+use super::weather::{
+    advance_state, blend_state, classify_precip, dissipate_state, relax_coverage, target_coverage,
+    Precip, PrecipKind, SkyState, WeatherField, WindField,
+};
 use super::{
     CloudKind, CloudLayerHandle, CloudModeling, Vec2, Vec3, VolumetricBudget, WeatherMapHandle,
     WeatherSample,
@@ -1452,5 +1455,144 @@ fn cloud_shadow_and_god_rays_compose_with_the_density_pipeline() {
     assert!(
         bright > dim,
         "mask should grow with light and medium: {bright} <= {dim}"
+    );
+}
+
+#[test]
+fn weather_sky_state_machine_and_precip_drive_the_density_pipeline() {
+    // §9 sky-state machine: stepping up the discrete states raises the target
+    // coverage strictly and monotonically; dissipating reverses it; both ends
+    // saturate rather than wrapping.
+    let ladder = [
+        SkyState::Clear,
+        SkyState::Fair,
+        SkyState::Overcast,
+        SkyState::Storm,
+    ];
+    let mut prev = -1.0_f32;
+    for s in ladder {
+        let c = target_coverage(s);
+        assert!(
+            (0.0..=1.0).contains(&c),
+            "target coverage out of range: {c}"
+        );
+        assert!(
+            c > prev,
+            "target coverage not strictly rising: {c} <= {prev}"
+        );
+        prev = c;
+    }
+    assert_eq!(advance_state(SkyState::Clear), SkyState::Fair);
+    assert_eq!(advance_state(SkyState::Fair), SkyState::Overcast);
+    assert_eq!(advance_state(SkyState::Overcast), SkyState::Storm);
+    assert_eq!(advance_state(SkyState::Storm), SkyState::Storm);
+    assert_eq!(dissipate_state(SkyState::Storm), SkyState::Overcast);
+    assert_eq!(dissipate_state(SkyState::Clear), SkyState::Clear);
+
+    // A developing sky (Clear -> Storm) relaxes coverage toward the storm
+    // target: the per-cell coverage rises monotonically, stays in `0..=1`,
+    // never overshoots the target, and converges. Feeding each step's coverage
+    // through the real density pipeline shows the cloud growing denser as the
+    // sky matures (weather coverage drives density monotonically).
+    let modeling = sample_modeling();
+    let seed = 0x9EA7_4E20;
+    let probe = Vec3::new(0.5, 0.5, 0.5);
+    let target = target_coverage(SkyState::Storm);
+    let mut cov = target_coverage(SkyState::Clear);
+    let mut prev_cov = cov;
+    let mut prev_density = field_density(modeling, CloudKind::Cumulonimbus, probe, cov, seed);
+    for _ in 0..48 {
+        cov = relax_coverage(cov, target, 0.8, 0.3);
+        assert!(
+            (0.0..=1.0).contains(&cov),
+            "relaxed coverage out of range: {cov}"
+        );
+        assert!(
+            cov >= prev_cov - EPS,
+            "coverage went backwards: {cov} < {prev_cov}"
+        );
+        assert!(
+            cov <= target + EPS,
+            "coverage overshot target: {cov} > {target}"
+        );
+        let density = field_density(modeling, CloudKind::Cumulonimbus, probe, cov, seed);
+        assert!(
+            density >= prev_density - EPS,
+            "denser sky should not thin the cloud: {density} < {prev_density}"
+        );
+        prev_cov = cov;
+        prev_density = density;
+    }
+    assert!(
+        (target - cov).abs() < 1.0e-2,
+        "relaxation did not converge to target: {cov} vs {target}"
+    );
+
+    // `blend_state` gives a smooth, jump-free transition whose endpoints are
+    // exact and whose interior is monotone in `t`.
+    let t0 = blend_state(SkyState::Clear, SkyState::Storm, 0.0);
+    let t1 = blend_state(SkyState::Clear, SkyState::Storm, 1.0);
+    assert!((t0 - target_coverage(SkyState::Clear)).abs() < 1.0e-4);
+    assert!((t1 - target_coverage(SkyState::Storm)).abs() < 1.0e-4);
+    let mut prev_blend = t0;
+    for i in 0..=16 {
+        let t = i as f32 / 16.0;
+        let b = blend_state(SkyState::Clear, SkyState::Storm, t);
+        assert!((0.0..=1.0).contains(&b), "blend out of range: {b}");
+        assert!(
+            b >= prev_blend - EPS,
+            "blend not monotone at t={t}: {b} < {prev_blend}"
+        );
+        prev_blend = b;
+    }
+
+    // §9 precipitation classifier as a signal fed by the weather map: a dry
+    // cell (precip below the trigger) never precipitates; above the trigger the
+    // phase is temperature-gated (snow at/below freezing, rain above), the
+    // deep-convective storm cloud precipitates harder than an ordinary cloud,
+    // and intensity grows with coverage — all in `0..=1`, never spawning
+    // particles here.
+    let dry = WeatherSample::from_rgba(0.8, 0.5, 0.2, 0.0);
+    assert_eq!(
+        classify_precip(&dry, CloudKind::Cumulonimbus, 10.0),
+        Precip::NONE
+    );
+
+    let wet = WeatherSample::from_rgba(0.8, 0.5, 0.9, 0.0);
+    let rain = classify_precip(&wet, CloudKind::Cumulonimbus, 10.0);
+    let snow = classify_precip(&wet, CloudKind::Cumulonimbus, -5.0);
+    assert_eq!(rain.kind, PrecipKind::Rain);
+    assert_eq!(snow.kind, PrecipKind::Snow);
+    assert_eq!(
+        classify_precip(&wet, CloudKind::Cumulonimbus, 0.0).kind,
+        PrecipKind::Snow,
+        "the freezing edge itself must classify as snow"
+    );
+    for p in [&rain, &snow] {
+        assert!(
+            (0.0..=1.0).contains(&p.intensity),
+            "precip intensity out of range: {}",
+            p.intensity
+        );
+        assert!(p.intensity > 0.0, "wet cell should precipitate");
+    }
+
+    // The storm cloud's deep-convective gain outweighs an ordinary cloud's.
+    let storm_i = classify_precip(&wet, CloudKind::Cumulonimbus, 10.0).intensity;
+    let calm_i = classify_precip(&wet, CloudKind::Cumulus, 10.0).intensity;
+    assert!(
+        storm_i > calm_i,
+        "cumulonimbus should precipitate harder than cumulus: {storm_i} <= {calm_i}"
+    );
+
+    // Intensity grows with coverage: a fuller sky rains harder for the same
+    // precip channel.
+    let sparse = WeatherSample::from_rgba(0.3, 0.5, 0.9, 0.0);
+    let dense = WeatherSample::from_rgba(0.9, 0.5, 0.9, 0.0);
+    let sparse_i = classify_precip(&sparse, CloudKind::Cumulonimbus, 10.0).intensity;
+    let dense_i = classify_precip(&dense, CloudKind::Cumulonimbus, 10.0).intensity;
+    assert!(
+        dense_i >= sparse_i,
+        "denser sky should not rain less: {dense_i} < {sparse_i}"
     );
 }
