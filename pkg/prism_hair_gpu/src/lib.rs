@@ -104,6 +104,17 @@
 //!   pass can decode the coverage-weighted count `n` at an arbitrary
 //!   depth (see [`forward_scatter_sample`]).
 //!
+//! * [`GpuHairDeepTransmittanceSample`] evaluates
+//!   [`sample_transmittance`](prism_render_architecture::hair::deep_transmittance::sample_transmittance),
+//!   the read side of the [`deep_opacity`] packing and the multiplicative
+//!   dual of [`GpuHairForwardScatterSample`] — one thread per receiver
+//!   brackets its query depth against a curve's packed layer depths and
+//!   linearly interpolates the two straddling cumulative transmittances
+//!   (reading `1.0`, fully lit, before the front layer and the last
+//!   transmittance beyond the back layer) so a shading pass can decode the
+//!   surviving self-shadow transmittance `T` in `0..=1` at an arbitrary
+//!   depth (see [`deep_transmittance_sample`]).
+//!
 //! * [`GpuHairVoxelDensity`] evaluates
 //!   [`accumulate_voxel_density`](prism_render_architecture::hair::deep_transmittance::accumulate_voxel_density),
 //!   the sort-free froxel sibling of the deep opacity packing — one thread per
@@ -263,6 +274,7 @@ pub mod collision;
 pub mod context;
 pub mod decimation_priority;
 pub mod deep_opacity;
+pub mod deep_transmittance_sample;
 pub mod forward_scatter;
 pub mod forward_scatter_sample;
 pub mod frames;
@@ -292,6 +304,7 @@ pub use collision::{query_for, CollisionQuery, GpuColliderProjector};
 pub use context::{block_on, GpuContext};
 pub use decimation_priority::GpuDecimationPriority;
 pub use deep_opacity::GpuHairDeepOpacity;
+pub use deep_transmittance_sample::{GpuHairDeepTransmittanceSample, TransmittanceQuery};
 pub use forward_scatter::GpuHairForwardScatter;
 pub use forward_scatter_sample::{GpuHairForwardScatterSample, ScatterQuery};
 pub use frames::{GpuStrandFrame, GpuStrandFrames};
