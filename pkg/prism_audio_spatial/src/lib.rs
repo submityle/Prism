@@ -54,6 +54,7 @@ pub mod attenuation;
 pub mod cone;
 pub mod doppler;
 pub mod geometry;
+pub mod hoa;
 pub mod multi_position;
 pub mod occlusion;
 pub mod panner;
@@ -71,6 +72,10 @@ pub use attenuation::{Attenuation, DistanceModel};
 pub use cone::Cone;
 pub use doppler::{Doppler, SPEED_OF_SOUND_MPS, doppler_ratio};
 pub use geometry::{Emitter, Listener, LocalSource};
+pub use hoa::{
+    HoaEncoderNode, MAX_HOA_CHANNELS, MAX_HOA_ORDER, acn_index, decode_hoa, encode_hoa,
+    hoa_channel_count,
+};
 pub use multi_position::{
     MAX_POSITIONS, MultiPositionMode, PositionInput, resolve_multi,
 };
