@@ -93,6 +93,15 @@
 //!   monotonically non-increasing curve a shading pass samples to attenuate
 //!   light through the groom (see [`voxel_transmittance`]).
 //!
+//! * [`GpuHairBinSamples`] evaluates
+//!   [`bin_samples`](prism_render_architecture::hair::deep_transmittance::bin_samples),
+//!   the shared fan-out that feeds both self-shadow paths — one thread per
+//!   destination light texel walks the indexed sample stream and appends
+//!   every sample tagged for it into its own disjoint bucket slice,
+//!   preserving input order and skipping out-of-range tags, so the layered
+//!   deep opacity and the froxel voxel accumulations each receive per-texel
+//!   buckets identical to the reference (see [`bin_samples`]).
+//!
 //! # Portability
 //!
 //! The projection uses only `sqrt`, `min`, `max`, `clamp`, `dot` and
@@ -118,6 +127,7 @@
 //! compute dispatch; no Unreal Engine source or derived code.
 #![forbid(unsafe_code)]
 
+pub mod bin_samples;
 pub mod collision;
 pub mod context;
 pub mod deep_opacity;
@@ -132,6 +142,7 @@ pub mod voxel_density;
 pub mod voxel_transmittance;
 pub mod wind;
 
+pub use bin_samples::GpuHairBinSamples;
 pub use collision::{query_for, CollisionQuery, GpuColliderProjector};
 pub use context::{block_on, GpuContext};
 pub use deep_opacity::GpuHairDeepOpacity;
