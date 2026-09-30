@@ -167,7 +167,7 @@ fallback:
 - **正确性模型**：核心为闭式几何、无超越调用，`CPU`/`GPU` 算同一公式，但**非位精确**（`GPU` 可 fuse mul-add，扰动低位 mantissa 几 `ULP`），故每分量断言容差 `abs_diff<1e-4` 或 `rel_diff<1e-3`；迭代类 kernel 参数保守以控 fma 累积。每个 parity 测试均带物理断言 + 非平凡断言（防 no-op 蒙混）+ 空/退化输入用例。
 - **可移植性**：只用 `sqrt`/`min`/`max`/`clamp`/`dot`/mul-add 的 core-`WGSL` 子集——无 `exp`/`pow`/可选 device feature——故孪生在 Metal/Vulkan/DX12 不改即跑。
 
-当前已落 **10 个真机对拍孪生**（Apple M2 Metal 全绿 **49 passed**）：
+当前已落 **11 个真机对拍孪生**（Apple M2 Metal 全绿 **55 passed**）：
 
 | kernel | 对拍的 `CPU` golden | 语义 | 真机单测 |
 |---|---|---|---|
@@ -181,6 +181,7 @@ fallback:
 | `guide_solver` | `simulate_guides` | 每 strand 独立跑整条 substeps×iterations 的 XPBD 核心 sim（积分 + 边长 + 局部/全局形状 + `LRA` + 可选代理体碰撞；一线程一 strand 在读写 storage 上原地 Gauss-Seidel，disjoint particle range 天然 race-free，无 barrier） | 6 |
 | `interp` | `interpolate_render_strand` | guide→render 插值完整变换链（加权 blend → 长度抖动 → 向代表 guide 的 clump 拉拽 → 基于 clumped 切线的 seed 稳定 curl 螺旋 → 逐点位置抖动；一线程一 render strand，`splitmix64` 以 `vec2<u32>` 仿真、`sin_turns` Taylor 保确定性，输出长度取最短贡献 guide） | 10 |
 | `deep_opacity` | `build_deep_opacity_map` | 跨纹素 deep opacity 自阴影 slab 打包（一线程一 light texel，host 预排序切片，kernel 等宽分层 + 乘性 `alpha`-composite `T=Π(1-α)`；不在 GPU 排序，deep_transmittance/forward_scatter 的乘性姊妹） | 7 |
+| `voxel_density` | `accumulate_voxel_density` | froxel 体素自阴影密度累加（一线程一 light texel，host 不排序保 bin 序，kernel 均匀 voxel 分箱 + 越界跳过 + scatter-add clamp opacity 进各自 disjoint 密度行 `σ`；deep_opacity 的免排序廉价姊妹，`voxel_transmittance` 复合 `T=Π(1-σⱼ)`） | 6 |
 
 **已落（本轮新增第 8 个）**：guide XPBD 求解器（`simulate_guides`，每 strand 独立跑整条 substeps×iterations 的核心 sim 阶段，`UE5` Groom/`TressFX` 都在 `GPU` 跑）——`guide_solver.wesl` 5 bindings（uniform `Params` 48B / 只读 `strands` / 读写 `state` stride8 / 只读 `goals` / 只读 `colliders`），host 严格照 golden 派生序算 `sub_dt`/`sub_dt_sq`/`alpha`/`velocity_retain`/预乘 `gravity_step`；kernel 逐位对齐 golden 的 `is_pinned`(inv_mass≤0)、all-or-nothing per-strand rest/goal 门控（`has_rest`/`has_goal`）、`EPS_LEN`/`EPS_LEN_SQ`；6 用例真机对拍（单 strand 重力+约束、kinked bending+`LRA`、sphere+capsule 碰撞、多 strand 截断+门控、缺 goal slice 禁全局、no-op guards），Apple M2 Metal 6/6 全绿。至此核心 XPBD sim 阶段已在真机 `GPU` 落地。
 
@@ -188,7 +189,9 @@ fallback:
 
 **已落（本轮新增第 10 个）**：deep opacity 自阴影跨纹素 build（`build_deep_opacity_map`，把 `bin_samples` 的 per-texel 桶打包成上传就绪的定长层 slab，`UE5` Groom/`TressFX` 自阴影 bake 同款；`deep_transmittance` per-ray 透射曲线的跨纹素乘性姊妹、`forward_scatter` 加性打包的乘性对偶）——`deep_opacity.wesl` 6 bindings（uniform `Params` 16B{texel_count,layer_count,start_offset,pad} / 只读 `samples`(vec2 depth,opacity) / 只读 `texel_ranges`(start,count 8B) / 读写 `near_depth` / 读写 `layer_step` / 读写 `transmittance`），entry `evaluate`、`@workgroup_size(64)`，一线程一 light texel；host 侧严格复刻 `pack_bucket` 的稳定 `total_cmp` 深度升序排序后再 flatten 成共享 `samples` 池 + 紧凑 `texel_ranges`（kernel 不排序，device-side sort 属独立调度），kernel 只做等宽分层切片 + 乘性 `running *= 1 - clamp(opacity,0,1)` 累加，boundary 拼写 `start + width*(f32(i)+1.0)`、末层 pin `end`、`width=(end-start)/f32(layers)` 与 `<= boundary` 逐位对齐 golden 保 bit-faithful；空 texel 打全 `1.0` 行 + near/step=0，`layer_count` 钳 1、`start_offset` 钳 0、零宽 slab 边界退化到 end；`texel_count==0` 短路返回空 golden 不发 dispatch，全空桶 pad 一条 dummy sample 防零尺寸 storage buffer；dispatch `texel_count.div_ceil(64)`；7 用例真机对拍（单纹素分层/乱序输入验 host 排序/空 texel 全 1.0 行/`start_offset` 偏置/零宽 slab/`layer_count` 钳 1/多纹素批量），逐值对比 golden `transmittance`+`near`+`step` 并 `map_transmittance` 全深度扫掠对拍，Apple M2 Metal 7/7 全绿。至此 deep opacity 自阴影跨纹素打包已在真机 `GPU` 落地。
 
-**待续**：voxel 自阴影密度累加（`accumulate_voxel_density`/`voxel_transmittance`）或 `bin_samples` 分桶的真机对拍孪生，为下一批落地目标。
+**已落（本轮新增第 11 个）**：voxel 体素自阴影密度累加（`accumulate_voxel_density`，froxel 均匀网格自阴影，`deep_opacity` 分层打包的免排序廉价姊妹——均匀 voxel 无需深度排序，故 host 保 bin 序、kernel 只做分箱 scatter-add）——`voxel_density.wesl` 4 bindings（uniform `HairVoxelParams` 16B{slab_start,slab_end,voxel_count,texel_count} / 只读 `samples`(vec2 depth,opacity) / 只读 `texel_ranges`(start,count 8B) / 读写 texel-major `densities`），entry `evaluate`、`@workgroup_size(64)`，一线程一 light texel 拥有 disjoint 密度行（无跨线程竞争，per-voxel 累加序 = golden bucket 序）；kernel 先清零本行 → `span=slab_end-slab_start`，`span<=0` 退化全 0 → `width=span/f32(voxel_count)` → 逐 sample 若 `depth<slab_start` 或 `depth>=slab_end` 跳过，否则 `raw=u32((depth-slab_start)/width)`、`index=min(raw,voxel_count-1)`、`densities[base+index]+=clamp(opacity,0,1)`，`voxel_count` 钳 1，与 golden 的 `as usize` 截断/`.min` 钳位/skip 边界逐位对齐保 bit-faithful；`texel_count==0` 短路返回空 golden 不发 dispatch，全空桶 pad 一条 dummy sample 防零尺寸 storage buffer；dispatch `texel_count.div_ceil(64)`；6 用例真机对拍（单纹素直方图/越界 sample 跳过/退化 slab 全 0/`voxel_count` 钳 1/同 voxel 累加 + 末 voxel 钳位/多纹素批含空纹素），逐值对比 golden `accumulate_voxel_density` 密度行并经 `voxel_transmittance` 逐 index 复合复核（覆盖两个 golden 函数），Apple M2 Metal 6/6 全绿。至此 voxel froxel 自阴影密度累加已在真机 `GPU` 落地。
+
+**待续**：`bin_samples` per-texel 分桶或 `voxel_transmittance` 独立 kernel 的真机对拍孪生，为下一批落地目标。
 
 ---
 
