@@ -36,7 +36,8 @@ pub const TRIANGLE_WORDS: usize = 12;
 ///
 /// Layout: `world_to_object` linear columns `c0.xyz` (0..3), `c1.xyz` (3..6),
 /// `c2.xyz` (6..9), translation `t.xyz` (9..12), `blas_index` (12),
-/// `instance_id` (13), padding (14..16).
+/// `instance_id` (13), DXR-style 8-bit visibility `mask` in the low byte of
+/// word 14 (see [`super::tlas::Instance::mask`]), padding (15..16).
 pub const INSTANCE_WORDS: usize = 16;
 
 /// `u32` words per packed `BLAS` offset record (16 bytes, 16-byte aligned).
@@ -797,6 +798,7 @@ impl GpuTlasBuffers {
             write_affine(&mut instances, b, &inst.world_to_object());
             instances[b + 12] = inst.blas() as u32;
             instances[b + 13] = inst.instance_id();
+            instances[b + 14] = u32::from(inst.mask());
         }
         Self { nodes, instances }
     }
@@ -811,6 +813,17 @@ impl GpuTlasBuffers {
     #[must_use]
     pub fn instance_count(&self) -> usize {
         self.instances.len() / INSTANCE_WORDS
+    }
+
+    /// The DXR-style 8-bit visibility mask packed for instance `i`.
+    ///
+    /// Reads the low byte of word 14 of the instance record (see
+    /// [`INSTANCE_WORDS`]). This is the value the masked traversal entry points
+    /// bitwise-AND against a ray's inclusion mask. Panics if `i` is out of
+    /// range, matching slice indexing.
+    #[must_use]
+    pub fn instance_mask(&self, i: usize) -> u8 {
+        (self.instances[i * INSTANCE_WORDS + 14] & 0xFF) as u8
     }
 
     /// True when the `TLAS` holds no instances.
@@ -835,6 +848,24 @@ impl GpuTlasBuffers {
     /// `t_max` shrinks across instances exactly like the in-memory `TLAS`.
     #[must_use]
     pub fn closest_hit(&self, ray: &Ray, pool: &GpuBlasPool) -> Option<TlasPackedHit> {
+        self.closest_hit_masked(ray, pool, 0xFF)
+    }
+
+    /// Nearest intersection restricted to instances the `ray_mask` includes,
+    /// the packed GPU-ABI twin of [`Tlas::closest_hit_masked`].
+    ///
+    /// Applies the same DXR-style inclusion predicate as the in-memory walk: a
+    /// packed instance is tested only when `(mask & ray_mask) != 0`, where
+    /// `mask` is the byte packed into word 14 of the instance record. A
+    /// `ray_mask` of `0xFF` reproduces [`GpuTlasBuffers::closest_hit`]; `0`
+    /// matches nothing.
+    #[must_use]
+    pub fn closest_hit_masked(
+        &self,
+        ray: &Ray,
+        pool: &GpuBlasPool,
+        ray_mask: u8,
+    ) -> Option<TlasPackedHit> {
         if self.nodes.is_empty() {
             return None;
         }
@@ -859,6 +890,10 @@ impl GpuTlasBuffers {
                         let world_to_object = read_affine(&self.instances, ib);
                         let blas = self.instances[ib + 12] as usize;
                         let instance_id = self.instances[ib + 13];
+                        let mask = (self.instances[ib + 14] & 0xFF) as u8;
+                        if mask & ray_mask == 0 {
+                            continue;
+                        }
                         let obj_origin = world_to_object.transform_point(ray.origin());
                         let obj_dir = world_to_object.transform_vector(ray.direction());
                         let obj_ray = Ray::new(obj_origin, obj_dir, t_min, best_t);
@@ -913,6 +948,15 @@ impl GpuTlasBuffers {
     /// packed GPU-ABI twin of the in-memory any-hit walk.
     #[must_use]
     pub fn any_hit(&self, ray: &Ray, pool: &GpuBlasPool) -> bool {
+        self.any_hit_masked(ray, pool, 0xFF)
+    }
+
+    /// Occlusion query restricted to instances the `ray_mask` includes, the
+    /// packed GPU-ABI twin of [`Tlas::any_hit_masked`]. A packed instance can
+    /// occlude only when `(mask & ray_mask) != 0`. `0xFF` reproduces
+    /// [`GpuTlasBuffers::any_hit`]; `0` is never blocked.
+    #[must_use]
+    pub fn any_hit_masked(&self, ray: &Ray, pool: &GpuBlasPool, ray_mask: u8) -> bool {
         if self.nodes.is_empty() {
             return false;
         }
@@ -935,6 +979,10 @@ impl GpuTlasBuffers {
                         let ib = inst_idx * INSTANCE_WORDS;
                         let world_to_object = read_affine(&self.instances, ib);
                         let blas = self.instances[ib + 12] as usize;
+                        let mask = (self.instances[ib + 14] & 0xFF) as u8;
+                        if mask & ray_mask == 0 {
+                            continue;
+                        }
                         let obj_origin = world_to_object.transform_point(ray.origin());
                         let obj_dir = world_to_object.transform_vector(ray.direction());
                         let obj_ray = Ray::new(obj_origin, obj_dir, t_min, t_max);
@@ -975,6 +1023,21 @@ impl GpuTlasBuffers {
     /// shrinks across instances exactly like the in-memory `TLAS`.
     #[must_use]
     pub fn closest_hit_watertight(&self, ray: &Ray, pool: &GpuBlasPool) -> Option<TlasPackedHit> {
+        self.closest_hit_watertight_masked(ray, pool, 0xFF)
+    }
+
+    /// Watertight nearest intersection restricted to `ray_mask`-included
+    /// instances, the packed GPU-ABI twin of
+    /// [`Tlas::closest_hit_watertight_masked`]. A packed instance is tested only
+    /// when `(mask & ray_mask) != 0`. `0xFF` reproduces
+    /// [`GpuTlasBuffers::closest_hit_watertight`]; `0` matches nothing.
+    #[must_use]
+    pub fn closest_hit_watertight_masked(
+        &self,
+        ray: &Ray,
+        pool: &GpuBlasPool,
+        ray_mask: u8,
+    ) -> Option<TlasPackedHit> {
         if self.nodes.is_empty() {
             return None;
         }
@@ -999,6 +1062,10 @@ impl GpuTlasBuffers {
                         let world_to_object = read_affine(&self.instances, ib);
                         let blas = self.instances[ib + 12] as usize;
                         let instance_id = self.instances[ib + 13];
+                        let mask = (self.instances[ib + 14] & 0xFF) as u8;
+                        if mask & ray_mask == 0 {
+                            continue;
+                        }
                         let obj_origin = world_to_object.transform_point(ray.origin());
                         let obj_dir = world_to_object.transform_vector(ray.direction());
                         let obj_ray = Ray::new(obj_origin, obj_dir, t_min, best_t);
@@ -1053,6 +1120,15 @@ impl GpuTlasBuffers {
     /// for shadow / ambient-occlusion occlusion queries.
     #[must_use]
     pub fn any_hit_watertight(&self, ray: &Ray, pool: &GpuBlasPool) -> bool {
+        self.any_hit_watertight_masked(ray, pool, 0xFF)
+    }
+
+    /// Watertight occlusion query restricted to `ray_mask`-included instances,
+    /// the packed GPU-ABI twin of [`Tlas::any_hit_watertight_masked`]. A packed
+    /// instance can occlude only when `(mask & ray_mask) != 0`. `0xFF`
+    /// reproduces [`GpuTlasBuffers::any_hit_watertight`]; `0` is never blocked.
+    #[must_use]
+    pub fn any_hit_watertight_masked(&self, ray: &Ray, pool: &GpuBlasPool, ray_mask: u8) -> bool {
         if self.nodes.is_empty() {
             return false;
         }
@@ -1075,6 +1151,10 @@ impl GpuTlasBuffers {
                         let ib = inst_idx * INSTANCE_WORDS;
                         let world_to_object = read_affine(&self.instances, ib);
                         let blas = self.instances[ib + 12] as usize;
+                        let mask = (self.instances[ib + 14] & 0xFF) as u8;
+                        if mask & ray_mask == 0 {
+                            continue;
+                        }
                         let obj_origin = world_to_object.transform_point(ray.origin());
                         let obj_dir = world_to_object.transform_vector(ray.direction());
                         let obj_ray = Ray::new(obj_origin, obj_dir, t_min, t_max);
@@ -1643,5 +1723,139 @@ mod tests {
         }
         assert!(hits > 40, "scene too sparse: {hits}");
         assert!(occluded > 40, "scene too sparse: {occluded}");
+    }
+
+    #[test]
+    fn packed_instance_mask_matches_in_memory() {
+        let mut rng = Rng::new(0x4A5C_0001);
+        let blases: Vec<Bvh> = (0..2)
+            .map(|_| Bvh::build(&random_triangles(80, &mut rng)))
+            .collect();
+        let count = 12usize;
+        let mut instances = Vec::with_capacity(count);
+        for id in 0..count {
+            let blas = (rng.next_u32() as usize) % blases.len();
+            let mask = (rng.next_u32() & 0xFF) as u8;
+            instances.push(
+                Instance::with_mask(random_affine(&mut rng), blas, id as u32, mask).unwrap(),
+            );
+        }
+        let tlas = Tlas::build(&instances, &blases);
+        let packed = GpuTlasBuffers::from_tlas(&tlas);
+        assert_eq!(packed.instance_count(), tlas.instances().len());
+        // TLAS may reorder instances; the packed mask must track the same
+        // per-instance order as tlas.instances().
+        for (i, inst) in tlas.instances().iter().enumerate() {
+            assert_eq!(packed.instance_mask(i), inst.mask(), "mask packing at {i}");
+        }
+    }
+
+    #[test]
+    fn packed_masked_traversal_matches_in_memory_bit_for_bit() {
+        let mut rng = Rng::new(0x4A5C_BEEF);
+        let blases: Vec<Bvh> = (0..3)
+            .map(|_| Bvh::build(&random_triangles(100, &mut rng)))
+            .collect();
+        let pool = GpuBlasPool::from_blases(&blases);
+
+        let mut checked_hits = 0u32;
+        let mut checked_occ = 0u32;
+        for _ in 0..24 {
+            let count = 1 + (rng.next_u32() % 10) as usize;
+            let mut instances = Vec::with_capacity(count);
+            for id in 0..count {
+                let blas = (rng.next_u32() as usize) % blases.len();
+                // Single-bit masks so different ray masks partition the scene.
+                let mask = 1u8 << ((rng.next_u32() % 8) as u8);
+                instances.push(
+                    Instance::with_mask(random_affine(&mut rng), blas, id as u32, mask).unwrap(),
+                );
+            }
+            let tlas = Tlas::build(&instances, &blases);
+            let packed = GpuTlasBuffers::from_tlas(&tlas);
+
+            for _ in 0..120 {
+                let origin = [
+                    rng.range(-10.0, 10.0),
+                    rng.range(-10.0, 10.0),
+                    rng.range(-10.0, 10.0),
+                ];
+                let dir = [
+                    rng.range(-1.0, 1.0),
+                    rng.range(-1.0, 1.0),
+                    rng.range(-1.0, 1.0),
+                ];
+                let ray = Ray::new(origin, dir, 1.0e-4, 50.0);
+                let ray_mask = (rng.next_u32() & 0xFF) as u8;
+
+                let reference = tlas.closest_hit_masked(&ray, &blases, ray_mask);
+                let via_packed = packed.closest_hit_masked(&ray, &pool, ray_mask);
+                match (reference, via_packed) {
+                    (None, None) => {}
+                    (Some(r), Some(v)) => {
+                        assert_eq!(r.instance_id, v.instance_id, "instance mismatch");
+                        assert_eq!(r.primitive, v.primitive, "primitive mismatch");
+                        assert_eq!(r.t.to_bits(), v.t.to_bits(), "t mismatch");
+                        assert_eq!(r.instance_index, v.instance_index, "instance_index mismatch");
+                        checked_hits += 1;
+                    }
+                    (r, v) => panic!("masked existence mismatch: {r:?} vs {v:?}"),
+                }
+
+                let ref_any = tlas.any_hit_masked(&ray, &blases, ray_mask);
+                let packed_any = packed.any_hit_masked(&ray, &pool, ray_mask);
+                assert_eq!(ref_any, packed_any, "masked any-hit divergence");
+                if packed_any {
+                    checked_occ += 1;
+                }
+
+                // Watertight variants stay in lockstep too.
+                let rw = tlas.closest_hit_watertight_masked(&ray, &blases, ray_mask);
+                let pw = packed.closest_hit_watertight_masked(&ray, &pool, ray_mask);
+                assert_eq!(
+                    rw.map(|h| (h.instance_id, h.primitive, h.t.to_bits())),
+                    pw.map(|h| (h.instance_id, h.primitive, h.t.to_bits())),
+                    "watertight masked closest divergence"
+                );
+                assert_eq!(
+                    tlas.any_hit_watertight_masked(&ray, &blases, ray_mask),
+                    packed.any_hit_watertight_masked(&ray, &pool, ray_mask),
+                    "watertight masked any-hit divergence"
+                );
+            }
+        }
+        assert!(checked_hits > 20, "scene too sparse: {checked_hits}");
+        assert!(checked_occ > 20, "scene too sparse: {checked_occ}");
+    }
+
+    #[test]
+    fn packed_mask_all_matches_unmasked_traversal() {
+        let mut rng = Rng::new(0x4A5C_FFFF);
+        let blases: Vec<Bvh> = (0..2)
+            .map(|_| Bvh::build(&random_triangles(90, &mut rng)))
+            .collect();
+        let pool = GpuBlasPool::from_blases(&blases);
+        let mut instances = Vec::new();
+        for id in 0..8usize {
+            let blas = (rng.next_u32() as usize) % blases.len();
+            instances.push(Instance::new(random_affine(&mut rng), blas, id as u32).unwrap());
+        }
+        let tlas = Tlas::build(&instances, &blases);
+        let packed = GpuTlasBuffers::from_tlas(&tlas);
+        for i in 0..packed.instance_count() {
+            assert_eq!(packed.instance_mask(i), 0xFF);
+        }
+        for _ in 0..400 {
+            let origin = [rng.range(-9.0, 9.0), rng.range(-9.0, 9.0), rng.range(-9.0, 9.0)];
+            let dir = [rng.range(-1.0, 1.0), rng.range(-1.0, 1.0), rng.range(-1.0, 1.0)];
+            let ray = Ray::new(origin, dir, 1.0e-4, 50.0);
+            let a = packed.closest_hit(&ray, &pool);
+            let b = packed.closest_hit_masked(&ray, &pool, 0xFF);
+            assert_eq!(
+                a.map(|h| (h.instance_id, h.primitive, h.t.to_bits())),
+                b.map(|h| (h.instance_id, h.primitive, h.t.to_bits()))
+            );
+            assert_eq!(packed.any_hit(&ray, &pool), packed.any_hit_masked(&ray, &pool, 0xFF));
+        }
     }
 }

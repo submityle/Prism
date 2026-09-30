@@ -15,6 +15,8 @@
 //!   peak/RMS detection, look-ahead, make-up gain, and parallel wet/dry mix.
 //! - [`limiter::LimiterNode`] — look-ahead brick-wall peak limiter with a
 //!   guaranteed output ceiling.
+//! - [`multiband::MultibandCompressorNode`] — Linkwitz-Riley band split
+//!   feeding an independent compressor per band, recombined flat.
 //! - [`gate::ExpanderGateNode`] — downward expander / noise gate with hold.
 //! - [`ducking::DuckingNode`] — side-chain ducker (key on input port 1).
 
@@ -23,9 +25,11 @@ pub mod detector;
 pub mod ducking;
 pub mod gate;
 pub mod limiter;
+pub mod multiband;
 
 pub use compressor::{CompressorNode, CompressorParams};
 pub use detector::{DetectionMode, GainBallistics, LevelDetector};
 pub use ducking::{DuckingNode, DuckingParams};
 pub use gate::{ExpanderGateNode, GateParams};
 pub use limiter::{LimiterNode, LimiterParams};
+pub use multiband::MultibandCompressorNode;

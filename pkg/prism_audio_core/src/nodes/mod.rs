@@ -47,7 +47,7 @@ pub use biquad::{BiquadKind, BiquadNode};
 pub use crossover::{LinkwitzRileyCrossover, MAX_BANDS, MAX_CROSSOVERS};
 pub use dynamics::{
     CompressorNode, CompressorParams, DetectionMode, DuckingNode, DuckingParams, ExpanderGateNode,
-    GateParams, LimiterNode, LimiterParams,
+    GateParams, LimiterNode, LimiterParams, MultibandCompressorNode,
 };
 pub use effects::{
     ChorusNode, ChorusParams, DelayNode, EqBand, FlangerNode, FlangerParams, Oversample,
