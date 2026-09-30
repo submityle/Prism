@@ -88,6 +88,7 @@ pub mod row_span;
 pub mod raster_classify;
 pub mod select_cut;
 pub mod signed_distance;
+pub mod sphere_frustum_cull;
 pub mod triangle_gradients;
 
 pub use bin_cut::GpuCutBinner;
@@ -109,4 +110,5 @@ pub use row_span::{GpuRowSpan, ScanQuery, ScanResult};
 pub use raster_classify::GpuRasterClassifier;
 pub use select_cut::GpuCutSelector;
 pub use signed_distance::{GpuSignedDistance, SignedDistanceQuery};
+pub use sphere_frustum_cull::{GpuSphereFrustumCull, SphereQuery};
 pub use triangle_gradients::GpuTriangleGradients;
