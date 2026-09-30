@@ -21,6 +21,10 @@
 //!   (`rayleigh_phase`, `ozone_absorption`, `spectral_to_rgb`,
 //!   `sunset_reddening`) feeds the aerial-perspective coupling so a low sun
 //!   only ever *warms* (reddens) the sampled airlight, staying energy-bounded.
+//! - `reference` -> `raymarch`: the unbiased delta-/ratio-tracking
+//!   transmittance oracles and the analytic Beer-Lambert form agree with the
+//!   ray-march's accumulated transmittance on a homogeneous column (design
+//!   section 9c reference cross-check).
 //! - `reference` -> `multiscatter`: the Monte-Carlo single-scatter oracle and
 //!   the closed form agree, and folding the LUT energy gain into the resolve
 //!   composition `single * (1 + gain)` only ever adds bounded energy (never
@@ -49,7 +53,10 @@ use super::modeling::{compose_from_modeling, height_gradient};
 use super::multiscatter::MultiScatterLut;
 use super::noise::{perlin_worley, worley_fbm};
 use super::raymarch::{march, RaymarchConfig};
-use super::reference::{analytic_single_scatter, single_scatter_reference};
+use super::reference::{
+    analytic_single_scatter, analytic_transmittance, delta_tracking_transmittance,
+    ratio_tracking_transmittance, single_scatter_reference,
+};
 use super::scatter::{hg_phase, octave_scatter, OctaveParams};
 use super::spectral::{
     ozone_absorption, rayleigh_phase, spectral_to_rgb, sunset_reddening, SpectralBands,
@@ -781,5 +788,63 @@ fn sunset_coupling_warms_airlight_relative_to_neutral_over_the_march() {
     assert!(
         tint.z < tint.x,
         "twilight tint should suppress blue below red"
+    );
+}
+
+#[test]
+fn reference_tracking_estimators_agree_with_march_transmittance() {
+    // Homogeneous column so every transmittance model has the same closed form.
+    // A constant density of 0.25 maps (via `sigma_from_density`) to sigma_t = 1,
+    // and over `distance` the analytic Beer-Lambert transmittance is exp(-1.2).
+    let density = 0.25_f32;
+    let (sigma_t, _sigma_s) = sigma_from_density(density);
+    let distance = 1.2_f32;
+
+    // 1) The ray-march accumulates exact per-segment Beer-Lambert factors, so it
+    //    must match the analytic transmittance tightly for a homogeneous field.
+    let cfg = RaymarchConfig::default();
+    let cloud = march(
+        |_t| density,
+        sigma_from_density,
+        hg_phase(0.4, 0.3),
+        |_| 1.0,
+        distance,
+        cfg,
+    );
+    let analytic = analytic_transmittance(sigma_t, distance);
+    assert!(
+        (cloud.transmittance - analytic).abs() < 1.0e-3,
+        "march transmittance {} diverged from analytic {analytic}",
+        cloud.transmittance
+    );
+
+    // 2) The unbiased tracking oracles converge to the same analytic value. A
+    //    majorant above sigma_t exercises real null-collisions in both walks.
+    let majorant = 2.0_f32;
+    let samples = 8192;
+    let seed = 0xC0FF_EE01;
+    let delta = delta_tracking_transmittance(|_| sigma_t, majorant, distance, seed, samples);
+    let ratio = ratio_tracking_transmittance(|_| sigma_t, majorant, distance, seed, samples);
+    for (name, est) in [("delta", delta), ("ratio", ratio)] {
+        assert!(
+            (0.0..=1.0).contains(&est),
+            "{name} tracking out of range: {est}"
+        );
+        assert!(
+            (est - analytic).abs() < 0.05,
+            "{name} tracking {est} did not converge to analytic {analytic}"
+        );
+    }
+
+    // 3) Both estimators are deterministic for a fixed seed (reproducible oracle).
+    assert_eq!(
+        delta.to_bits(),
+        delta_tracking_transmittance(|_| sigma_t, majorant, distance, seed, samples).to_bits(),
+        "delta tracking not deterministic"
+    );
+    assert_eq!(
+        ratio.to_bits(),
+        ratio_tracking_transmittance(|_| sigma_t, majorant, distance, seed, samples).to_bits(),
+        "ratio tracking not deterministic"
     );
 }
