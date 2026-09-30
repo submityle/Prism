@@ -1092,4 +1092,94 @@ mod tests {
             "expected the Moller-Trumbore walk to leak so the fix is exercised",
         );
     }
+
+    /// The `GPU` twin `ray_watertight.wesl` has no `f64`, so its boundary-zero
+    /// refinement replaces the golden's exact-`f64` recompute of the scaled edge
+    /// areas `wa`/`wb`/`wc` with Kahan's fma-compensated difference-of-products
+    /// `diff_prod(a, b, c, d) = a*b - c*d`. Watertightness on device hinges on
+    /// that stand-in recovering the *sign* the golden `f64` path would, for the
+    /// near-cancellation quadruples a shared triangle seam produces.
+    ///
+    /// Kahan's algorithm computes `a*b - c*d` with relative error `<= 2u`
+    /// (`u = 2^-24`), so its sign is correct whenever the true value is nonzero.
+    /// Since each input is `f32`, both products are exact in `f64` (`<= 48`
+    /// bits) and so is their difference, making the `f64` result the exact real
+    /// value and the authoritative sign. This proves — with no device — that the
+    /// WESL boundary path never disagrees with the golden on which side of an
+    /// edge owns a boundary ray, the property that seals seams.
+    #[test]
+    fn diff_prod_fma_matches_f64_boundary_sign() {
+        // Mirror of `ray_watertight.wesl`'s `diff_prod` using Rust `mul_add`
+        // (fma): `cd = c*d`, `err = (-c)*d + cd` (the rounding slice of `cd`),
+        // `dop = a*b - cd`, result `dop + err`. `fma` is contractually correctly
+        // rounded in WGSL, so this Rust twin is bit-faithful to the shader.
+        fn diff_prod(a: f32, b: f32, c: f32, d: f32) -> f32 {
+            let cd = c * d;
+            let err = (-c).mul_add(d, cd);
+            let dop = a.mul_add(b, -cd);
+            dop + err
+        }
+        // Exact real value of `a*b - c*d`: `f32` products are `<= 48` bits so
+        // both the products and their difference are exact in `f64`.
+        fn exact(a: f32, b: f32, c: f32, d: f32) -> f64 {
+            f64::from(a) * f64::from(b) - f64::from(c) * f64::from(d)
+        }
+
+        let mut rng = Rng(0xB0A7_F00D_1234_5678);
+        let mut catastrophic = 0u32; // plain f32 disagreed with the exact sign
+        let mut recovered = 0u32; // ...and diff_prod recovered the exact sign
+        let mut nonzero = 0u32;
+        for _ in 0..200_000 {
+            let a = rng.range(-6.0, 6.0);
+            let b = rng.range(-6.0, 6.0);
+            let c = rng.range(-6.0, 6.0);
+            // Force heavy cancellation: aim `c*d` at `a*b`, then nudge `d` by a
+            // tiny delta so the true difference is small but (usually) nonzero.
+            // Additive nudge on the order of a product ULP (`|a*b| ~ 36`,
+            // `ULP ~ 2e-6`) so the true difference lands in the cancellation
+            // zone where plain `f32` frequently rounds to the wrong sign / zero.
+            let d = if c.abs() > 1.0e-3 {
+                let target = a * b / c;
+                target + rng.range(-6.0e-6, 6.0e-6)
+            } else {
+                rng.range(-6.0, 6.0)
+            };
+
+            let truth = exact(a, b, c, d);
+            if truth == 0.0 {
+                continue;
+            }
+            nonzero += 1;
+            let truth_pos = truth > 0.0;
+
+            let compensated = diff_prod(a, b, c, d);
+            // Kahan's `<= 2u` relative error => sign is always correct here.
+            assert!(compensated != 0.0, "compensated value collapsed to zero");
+            assert_eq!(
+                compensated > 0.0,
+                truth_pos,
+                "diff_prod sign disagreed with the exact f64 sign: \
+                 a={a} b={b} c={c} d={d} truth={truth} got={compensated}",
+            );
+
+            let plain = a * b - c * d;
+            if plain == 0.0 || (plain > 0.0) != truth_pos {
+                catastrophic += 1;
+                // The compensated path fixed a case plain f32 got wrong/zero.
+                recovered += 1;
+            }
+        }
+        // The generator must actually exercise catastrophic cancellation, else
+        // the test proves nothing about the boundary path.
+        assert!(nonzero > 50_000, "too few nonzero trials: {nonzero}");
+        assert!(
+            catastrophic > 1_000,
+            "plain f32 never catastrophically cancelled ({catastrophic}); \
+             the compensated path is not being exercised",
+        );
+        assert_eq!(
+            catastrophic, recovered,
+            "diff_prod failed to recover every case plain f32 got wrong",
+        );
+    }
 }
