@@ -21,12 +21,13 @@
 //! handles and does no allocation itself; the backend consumes the byte counts
 //! to make the real allocations.
 //!
-//! **Compile-verified twin, layout still to confirm on device.** The strides
-//! below are the `std430`-aligned targets the `WESL` twin
-//! (`shaders/volumetric_clouds.wesl`, compile-verified by
-//! `prism_render_scene::shading::volumetric_clouds`) is written against; they
-//! are sound by construction but must still be re-checked against the real
-//! backend buffer layout once the dispatch pass allocates and binds them.
+//! **Device-verified twin.** The strides below are the `std430`-aligned targets
+//! the `WESL` twin (`shaders/volumetric_clouds.wesl`, device-verified by
+//! `prism_render_scene::shading::volumetric_clouds`) is written against; the
+//! wired dispatch pass there allocates and binds these buffers and the eight
+//! kernels pass on-device Metal parity, so the layout is confirmed on real
+//! hardware. Only the workgroup-tile / stride *performance* tuning stays a
+//! design target pending a profiling capture.
 
 use alloc::vec::Vec;
 

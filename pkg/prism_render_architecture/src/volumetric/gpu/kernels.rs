@@ -18,17 +18,19 @@
 //! allocation, so the descriptor table is a pure deterministic function of a
 //! [`VolumetricKernel`] tag.
 //!
-//! **Compile-verified twin, perf still to calibrate.** The `WESL` kernels these
+//! **Device-verified twin, perf still to calibrate.** The `WESL` kernels these
 //! descriptors anticipate are authored in `shaders/volumetric_clouds.wesl` and
 //! compile + type-check through the render-world `ShaderCache` / `wesl`
 //! pipeline (see `prism_render_scene::shading::volumetric_clouds`), and each
 //! [`VolumetricKernel::wesl_entry_point`] name is pinned against a live
 //! `@compute fn` in that twin — so a rename or a lost kernel is caught before
-//! it reaches the device. The workgroup tiles below (a 4x4x4 voxel brick for
-//! the 3D density/`LUT` bakes, an 8x8 tile for the 2D screen/shadow passes) are
-//! the tiles the twin declares; they are sound but **not yet perf-tuned**, and
-//! must be re-profiled against real captures once the dispatch backend records
-//! them on hardware.
+//! it reaches the device. Those kernels are dispatched by that render node and
+//! pass on-device Metal parity, so the entry points and tiles are exercised on
+//! real hardware. The workgroup tiles below (a 4x4x4 voxel brick for the 3D
+//! density/`LUT` bakes, an 8x8 tile for the 2D screen/shadow passes) are the
+//! tiles the twin declares; they are correct but **not yet perf-tuned**, and
+//! must still be re-profiled against real captures to settle the final tile
+//! sizes.
 
 /// The bind-group resource counts a kernel declares, grouped by binding class.
 ///

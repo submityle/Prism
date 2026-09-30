@@ -33,14 +33,17 @@
 //! `CPU`-testable. The numerical passes themselves are authored in `WESL` and
 //! mirror the `CPU` golden reference.
 //!
-//! **Compile-verified twin, dispatch/perf still to wire.** The numerical passes
-//! are authored in `shaders/volumetric_clouds.wesl` and compile + type-check
-//! through the render-world `ShaderCache` / `wesl` pipeline (verified by
-//! `prism_render_scene::shading::volumetric_clouds`), and every kernel
-//! entry-point name here is pinned against a live `@compute fn` in that twin.
-//! What still awaits the device is the render-graph dispatch recording and the
-//! on-hardware calibration of the workgroup tiles and buffer strides — those
-//! remain design targets to re-profile once the backend records them.
+//! **Device-verified twin; only perf calibration stays open.** The numerical
+//! passes are authored in `shaders/volumetric_clouds.wesl` and compile +
+//! type-check through the render-world `ShaderCache` / `wesl` pipeline, and
+//! every kernel entry-point name here is pinned against a live `@compute fn` in
+//! that twin. The render-graph dispatch recording is wired in
+//! `prism_render_scene::shading::volumetric_clouds` and all eight kernels pass
+//! on-device Metal parity against this `CPU` golden, so the schedule, bindings
+//! and buffer strides are proven correct on real hardware. What remains a
+//! design target is the *performance* calibration of the workgroup tiles and
+//! buffer strides — correctness is verified, but the tile/stride sizing still
+//! awaits a hardware profiling capture.
 
 pub mod buffers;
 pub mod kernels;

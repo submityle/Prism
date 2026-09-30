@@ -17,11 +17,12 @@
 //! pure integer/enum bookkeeping, so the wiring table is a deterministic,
 //! `CPU`-testable function of a kernel tag.
 //!
-//! **Compile-verified twin, resource resolution still to wire.** The `WESL`
-//! twin (`shaders/volumetric_clouds.wesl`, compile-verified by
+//! **Device-verified twin.** The `WESL` twin
+//! (`shaders/volumetric_clouds.wesl`, device-verified by
 //! `prism_render_scene::shading::volumetric_clouds`) declares the kernels these
-//! bindings describe; the contract here is what the render-graph backend will
-//! resolve to real shared-service resources once the dispatch pass is wired.
+//! bindings describe; the render-graph backend there resolves them to real
+//! bind-group resources and the eight kernels pass on-device Metal parity, so
+//! this access table is the contract the wired dispatch pass already fulfils.
 
 use super::super::SharedBaseServices;
 use super::kernels::VolumetricKernel;
