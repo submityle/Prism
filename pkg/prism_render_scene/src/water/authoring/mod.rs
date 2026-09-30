@@ -19,6 +19,9 @@
 //! schedule expects. A degenerate preset (calm sea, empty pool) yields an
 //! honest no-op body rather than a fabricated one.
 //!
+//! * [`coastline`] - a terrain-flooded coastline: a `Landscape` heightfield
+//!   flooded under a sea level into a Shallow-Water basin with wind drift and
+//!   coastal foam, mirroring the `UE5` Water `Landscape` blend.
 //! * [`ocean`] - wind-driven spectral `IFFT` + analytic `Gerstner` swell.
 //! * [`flip`] - a `FLIP`/`APIC` liquid volume seeded in a box, with screen-space
 //!   surface reconstruction.
@@ -30,6 +33,7 @@
 //!   into a Shallow-Water flow field, mirroring `UE5` Water river splines.
 //! * [`swe`] - a Shallow-Water height field stepped under a `CFL` bound.
 
+mod coastline;
 mod flip;
 mod lake;
 mod ocean;
@@ -37,6 +41,7 @@ mod pbf;
 mod river;
 mod swe;
 
+pub use coastline::CoastlinePreset;
 pub use flip::FlipPoolPreset;
 pub use lake::{LakeInflow, LakePreset};
 pub use ocean::OceanPreset;

@@ -52,6 +52,7 @@ pub mod breaking;
 pub mod budget;
 pub mod cascade;
 pub mod caustics;
+pub mod coastline;
 pub mod coupling;
 pub mod coupling_frame;
 pub mod dispersion;
