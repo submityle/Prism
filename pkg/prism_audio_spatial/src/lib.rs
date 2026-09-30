@@ -48,6 +48,20 @@
 
 extern crate alloc;
 
+pub mod air;
+pub mod ambisonics;
+pub mod attenuation;
+pub mod cone;
+pub mod doppler;
 pub mod geometry;
+pub mod panner;
 
+pub use air::{AirAbsorption, AirAbsorptionNode, AtmosphericConditions, absorption_db_per_metre};
+pub use ambisonics::{
+    FOA_CHANNELS, FoaEncoderNode, decode_foa, encode_foa_gains, encode_foa_sample, rotate_foa,
+};
+pub use attenuation::{Attenuation, DistanceModel};
+pub use cone::Cone;
+pub use doppler::{Doppler, SPEED_OF_SOUND_MPS, doppler_ratio};
 pub use geometry::{Emitter, Listener, LocalSource};
+pub use panner::{Panner, PannerNode, VbapPanner};
