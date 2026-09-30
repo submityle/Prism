@@ -21,6 +21,7 @@ pub mod grid_ops;
 pub mod p2g;
 pub mod pressure;
 pub mod stencil;
+pub mod step;
 
 pub use advect::advect_rk2;
 pub use extrapolate::{extrapolate_axis, AxisDims};
@@ -29,3 +30,4 @@ pub use g2p::grid_to_particle;
 pub use grid_ops::{add_gravity, enforce_solid_faces};
 pub use p2g::particle_to_grid;
 pub use pressure::PressureConfig;
+pub use step::fluid_step;

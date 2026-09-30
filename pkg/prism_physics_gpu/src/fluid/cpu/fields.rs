@@ -19,6 +19,7 @@
 
 use glam::Vec3;
 
+use super::extrapolate::{extrapolate_axis, AxisDims};
 use super::stencil::{axis_stencil, trilinear_nodes};
 use crate::fluid::grid::GridDims;
 use crate::fluid::quantize::{dequantise, quantise, MOMENTUM_SCALE, WEIGHT_SCALE};
@@ -160,6 +161,58 @@ impl GoldenGrid {
     /// for the `FLIP` increment.
     pub fn save_velocity(&mut self) {
         self.saved.copy_from_slice(&self.velocity);
+    }
+
+    /// Mutable access to the normalised face-velocity field (concatenated
+    /// `[u | v | w]`).
+    ///
+    /// The in-place grid operators of a full solver step — `add_gravity`,
+    /// `enforce_solid_faces`, and the pressure projection — write the field
+    /// through this handle, so a full step can run without reallocating.
+    #[inline]
+    pub fn velocity_mut(&mut self) -> &mut [f32] {
+        &mut self.velocity
+    }
+
+    /// Extrapolates the velocity field into its unknown faces, one staggered
+    /// axis at a time, using the transfer weight accumulator as the known-band
+    /// mask (a face is known when its accumulated weight is positive).
+    ///
+    /// This is the concatenated-field twin of the core
+    /// `MacGrid::extrapolate_velocity`: it runs `iterations` Jacobi sweeps per
+    /// axis through [`extrapolate_axis`], growing the known band outward one
+    /// cell per sweep so advection near the free surface stays stable.
+    pub fn extrapolate_velocity(&mut self, iterations: u32) {
+        let d = self.dims;
+        let axes = [
+            (
+                d.u_offset(),
+                d.u_count(),
+                AxisDims::new(d.nx + 1, d.ny, d.nz),
+            ),
+            (
+                d.v_offset(),
+                d.v_count(),
+                AxisDims::new(d.nx, d.ny + 1, d.nz),
+            ),
+            (
+                d.w_offset(),
+                d.w_count(),
+                AxisDims::new(d.nx, d.ny, d.nz + 1),
+            ),
+        ];
+        for (base, count, adims) in axes {
+            let weights: Vec<f32> = self.weight[base..base + count]
+                .iter()
+                .map(|&w| dequantise(w, WEIGHT_SCALE))
+                .collect();
+            extrapolate_axis(
+                &mut self.velocity[base..base + count],
+                &weights,
+                adims,
+                iterations,
+            );
+        }
     }
 
     /// Samples the normalised velocity field trilinearly at world `position`.
