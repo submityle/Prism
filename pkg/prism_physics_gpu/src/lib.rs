@@ -84,7 +84,10 @@ pub use mpm::{
     GpuMpmGridUpdate, GpuMpmP2g, GpuMpmResident, GpuMpmStep, P2gGrid, StepConfig, StepInputs,
     StepParticles,
 };
-pub use narrowphase::{cpu_narrowphase, Contact, GpuNarrowphase};
+pub use narrowphase::{
+    cpu_halfspace_narrowphase, cpu_narrowphase, Contact, GpuHalfspaceNarrowphase, GpuNarrowphase,
+    Plane, SpherePlanePair,
+};
 pub use radix::{cpu_radix_sort_keys, cpu_radix_sort_pairs, GpuRadixSort};
 pub use scan::{cpu_compact, cpu_exclusive_scan, GpuScan};
 pub use xpbd::{
