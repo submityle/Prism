@@ -56,6 +56,7 @@
 #![forbid(unsafe_code)]
 
 pub mod context;
+pub mod curl;
 pub mod modeling;
 pub mod octave;
 pub mod perlin;
@@ -64,6 +65,7 @@ pub mod phase;
 pub mod worley;
 
 pub use context::{block_on, GpuContext};
+pub use curl::{CurlQuery, GpuCurl};
 pub use modeling::{GpuModeling, ModelingQuery};
 pub use octave::{GpuOctaveScatter, OctaveQuery, OctaveResult};
 pub use perlin::{GpuPerlin, PerlinQuery};
