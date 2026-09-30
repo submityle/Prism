@@ -401,6 +401,26 @@ pub(crate) struct GpuClothCcdParams {
     pub _pad1: u32,
 }
 
+/// Host mirror of `ClothPressureParams` in `cloth_pressure.wesl`: the flat
+/// 16-byte uniform driving the closed-mesh pressure (volume) constraint. Two
+/// counts and the two scalars the host precomputes from the sanitized golden
+/// `pressure::PressureParams` (`target_volume = overpressure * rest_volume`) and
+/// the substep (`alpha_tilde = compliance / dt^2`), so the shader never needs the
+/// raw compliance or `dt`. A `vec3<f32>`-free all-scalar block: 16 bytes is
+/// already a whole uniform row, so no trailing pad is required.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq)]
+pub(crate) struct GpuClothPressureParams {
+    /// Number of particles, bounding the solve reduction and the apply dispatch.
+    pub particle_count: u32,
+    /// Number of triangles in the closed shell.
+    pub triangle_count: u32,
+    /// Target enclosed volume, `overpressure * rest_volume` (already sanitized).
+    pub target_volume: f32,
+    /// XPBD compliance over `dt` squared, `compliance / dt^2`.
+    pub alpha_tilde: f32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -533,6 +553,16 @@ mod tests {
         assert_eq!(size_of::<GpuClothVpParams>(), 32);
         assert_eq!(size_of::<GpuClothVpParams>() % 16, 0);
         assert_eq!(align_of::<GpuClothVpParams>(), 4);
+    }
+
+    /// The pressure uniform is one flat 16-byte row: two counts and the two
+    /// derived scalars, with no `vec3` to force a wider stride. Pin the 16-byte
+    /// size against drift from `ClothPressureParams` in `cloth_pressure.wesl`.
+    #[test]
+    fn pressure_params_is_uniform_stride() {
+        assert_eq!(size_of::<GpuClothPressureParams>(), 16);
+        assert_eq!(size_of::<GpuClothPressureParams>() % 16, 0);
+        assert_eq!(align_of::<GpuClothPressureParams>(), 4);
     }
 
     /// The collider discriminants match the shader's `CLOTH_COLLIDER_*` order.

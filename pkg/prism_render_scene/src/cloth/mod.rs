@@ -56,6 +56,8 @@ mod virtual_gpu_tests;
 #[cfg(test)]
 mod self_ccd_gpu_tests;
 #[cfg(test)]
+mod pressure_gpu_tests;
+#[cfg(test)]
 mod gpu_test_support;
 #[cfg(test)]
 mod aero_parity;

@@ -38,6 +38,9 @@ const CLOTH_VIRTUAL_WESL_UUID: u128 = 0x434c_4f54_485f_5654_5f5f_5f5f_5f5f_5601;
 /// 编译 `cloth_self_ccd.wesl` 用的一次性 `AssetId`，只需在本次编译内唯一。
 const CLOTH_SELF_CCD_WESL_UUID: u128 = 0x434c_4f54_485f_5343_4344_5f5f_5f5f_5701;
 
+/// 编译 `cloth_pressure.wesl` 用的一次性 `AssetId`，只需在本次编译内唯一。
+const CLOTH_PRESSURE_WESL_UUID: u128 = 0x434c_4f54_485f_5052_4553_5f5f_5f5f_5801;
+
 /// 把 `WESL` 源经 render-world 的 [`ShaderCache`] 编译回 `Wgsl` 字符串（不建
 /// 设备），供各模块自建的裸 `wgpu` 设备使用。镜像 `sim_gpu_tests` 的编译闭包。
 fn keep_wgsl(
@@ -98,6 +101,15 @@ pub(super) fn compile_self_ccd_wgsl() -> String {
         include_str!("../shaders/cloth_self_ccd.wesl"),
         "shaders/cloth_self_ccd.wesl",
         CLOTH_SELF_CCD_WESL_UUID,
+    )
+}
+
+/// 经 `ShaderCache` 把嵌入式 `cloth_pressure.wesl` 编译成 `Wgsl`。
+pub(super) fn compile_pressure_wgsl() -> String {
+    compile_cloth_wgsl(
+        include_str!("../shaders/cloth_pressure.wesl"),
+        "shaders/cloth_pressure.wesl",
+        CLOTH_PRESSURE_WESL_UUID,
     )
 }
 

@@ -164,3 +164,41 @@ fn cloth_self_ccd_abi_matches_the_shader_layout() {
     assert_eq!(align_of::<GpuClothCcdParams>(), 4);
     assert_eq!(CLOTH_WORKGROUP_SIZE, 64);
 }
+
+/// Compiles `cloth_pressure.wesl`, proving the two own-slot pressure (volume)
+/// kernels (the single-invocation `cloth_pressure_solve` reduction summing the
+/// signed volume and per-vertex gradient in the golden's order then solving the
+/// shared `d_lambda`, and the per-particle `cloth_pressure_apply` that folds it
+/// into every free particle) parse and type-check exactly as they will in the
+/// render world, guarding the closed-mesh volume maths against drift from the
+/// `CPU` golden `prism_render_architecture::cloth::pressure`.
+#[test]
+fn cloth_pressure_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let pressure = shader_id(0x5052_4953_4d5f_434c_4f54_4841_4552_5305);
+    cache.set_shader(
+        pressure,
+        Shader::from_wesl(
+            include_str!("../shaders/cloth_pressure.wesl"),
+            "embedded://prism_render_scene/shaders/cloth_pressure.wesl",
+        ),
+    );
+
+    cache
+        .get(0, pressure, &[])
+        .unwrap_or_else(|error| panic!("cloth_pressure.wesl failed to compile: {error}"));
+}
+
+/// Guards the Rust `ABI` against drift from the pressure `WESL` struct: the
+/// `GpuClothPressureParams` uniform is the flat 16-byte block matching
+/// `ClothPressureParams` in `cloth_pressure.wesl`, and the workgroup constant
+/// matches the apply kernel's `@workgroup_size(64)`.
+#[test]
+fn cloth_pressure_abi_matches_the_shader_layout() {
+    use super::abi::{GpuClothPressureParams, CLOTH_WORKGROUP_SIZE};
+    assert_eq!(size_of::<GpuClothPressureParams>(), 16);
+    assert_eq!(size_of::<GpuClothPressureParams>() % 16, 0);
+    assert_eq!(align_of::<GpuClothPressureParams>(), 4);
+    assert_eq!(CLOTH_WORKGROUP_SIZE, 64);
+}
