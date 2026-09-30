@@ -55,7 +55,9 @@ pub use fluid::{
     GoldenGrid, GpuAdvect, GpuExtrapolate, GpuFluidApicStep, GpuFluidSolver, GpuFluidStep,
     GpuGridOps, GpuPressureSolver, GridDims, PressureConfig, TransferMode,
 };
+pub use mpm::{
+    BoundaryMode, ConstitutiveOutput, GpuMpmConstitutive, GpuMpmGridUpdate, GpuMpmP2g, P2gGrid,
+};
 pub use xpbd::{
     cpu_solve, Colouring, DistanceConstraint, GpuXpbdSolver, ParticleState, XpbdConfig, XpbdError,
 };
-pub use mpm::{ConstitutiveOutput, GpuMpmConstitutive, GpuMpmP2g, P2gGrid};
