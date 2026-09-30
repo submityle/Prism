@@ -80,6 +80,7 @@ pub mod shadow;
 pub mod sunset_reddening;
 pub mod terrain_occlusion;
 pub mod trilinear;
+pub mod virga_fade;
 pub mod worley;
 
 pub use aerial::{AerialQuery, GpuAerialPerspective};
@@ -107,4 +108,5 @@ pub use shadow::{GpuShadow, ShadowRay};
 pub use sunset_reddening::{GpuSunsetReddening, SunsetReddeningQuery};
 pub use terrain_occlusion::{GpuTerrainOcclusion, TerrainOcclusionQuery};
 pub use trilinear::{GpuTrilinear, TrilinearQuery};
+pub use virga_fade::{GpuVirgaFade, VirgaFadeQuery};
 pub use worley::{GpuWorley, WorleyQuery};
