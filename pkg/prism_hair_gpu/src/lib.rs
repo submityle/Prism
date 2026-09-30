@@ -120,6 +120,15 @@
 //!   deep opacity and the froxel voxel accumulations each receive per-texel
 //!   buckets identical to the reference (see [`bin_samples`]).
 //!
+//! * [`GpuSelfCollisionGrid`] evaluates
+//!   [`UniformGrid::neighbors`](prism_render_architecture::hair::self_collision_grid::UniformGrid::neighbors),
+//!   the spatial query a self-collision pass needs — one thread per
+//!   particle binary-searches the host-built sorted cell-key table for
+//!   each of its 27 neighbor cells, copies the hit buckets into its own
+//!   disjoint slice, and insertion-sorts that slice into the ascending
+//!   neighbor-index union the reference returns, the first twin to run a
+//!   device-side search and sort (see [`self_collision_grid`]).
+//!
 //! # Portability
 //!
 //! The projection uses only `sqrt`, `min`, `max`, `clamp`, `dot` and
@@ -155,6 +164,7 @@ pub mod guide_solver;
 pub mod interp;
 pub mod ribbon;
 pub mod sdf_collision;
+pub mod self_collision_grid;
 pub mod self_collision_jacobi;
 pub mod strand_metrics;
 pub mod voxel_density;
@@ -172,6 +182,7 @@ pub use guide_solver::GpuGuideSolver;
 pub use interp::GpuHairInterp;
 pub use ribbon::{GpuRibbon, GpuRibbonMesh, RibbonStrandInput};
 pub use sdf_collision::GpuSdfCollider;
+pub use self_collision_grid::GpuSelfCollisionGrid;
 pub use self_collision_jacobi::GpuSelfCollisionJacobi;
 pub use strand_metrics::{GpuStrandMetric, GpuStrandMetrics};
 pub use voxel_density::GpuHairVoxelDensity;
