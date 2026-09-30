@@ -25,7 +25,7 @@
 //! - [`capsule_capsule`] / [`GpuCapsuleCapsuleNarrowphase`]: capsule versus
 //!   capsule (dynamic-dynamic), finding the closest point pair between the two
 //!   segments and collapsing to sphere-sphere there.
-//! - [`capsule_halfspace`] / [`cpu_capsule_halfspace_manifold`]: capsule versus
+//! - [`capsule_halfspace`] / [`GpuCapsuleHalfspaceNarrowphase`]: capsule versus
 //!   a halfspace, reporting up to two contact points (one per penetrating
 //!   axis endpoint) so a capsule resting flat on a plane stays put.
 //! - [`obb`] / [`GpuObbNarrowphase`]: sphere versus an oriented bounding box,
@@ -62,6 +62,7 @@ mod capsule_capsule;
 mod capsule_capsule_gpu;
 mod capsule_gpu;
 mod capsule_halfspace;
+mod capsule_halfspace_gpu;
 mod contact;
 mod cpu;
 mod gpu;
@@ -84,6 +85,7 @@ pub use capsule_capsule::{cpu_capsule_capsule_narrowphase, CapsuleCapsulePair};
 pub use capsule_capsule_gpu::GpuCapsuleCapsuleNarrowphase;
 pub use capsule_gpu::GpuCapsuleNarrowphase;
 pub use capsule_halfspace::{cpu_capsule_halfspace_manifold, CapsulePlanePair};
+pub use capsule_halfspace_gpu::GpuCapsuleHalfspaceNarrowphase;
 pub use contact::Contact;
 pub use cpu::cpu_narrowphase;
 pub use gpu::GpuNarrowphase;
