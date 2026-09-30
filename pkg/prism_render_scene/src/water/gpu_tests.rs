@@ -6840,3 +6840,395 @@ fn spectrum_fft_pipeline_gpu_matches_direct_sum_golden() {
         i += 1;
     }
 }
+
+/// Dispatches `water_spectrum_assemble` once per cascade into a single stacked
+/// atlas texture of size `N x (M*N)`, each cascade writing its `N x N` tile at
+/// rows `[tile_origin_y, tile_origin_y + N)` exactly as the production recorder
+/// does. Returns the displacement and normal atlases as flat `rgba32float`
+/// lanes in texel order `n = y*N + x` over the full `M*N`-tall atlas.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one dispatch-and-readback per cascade into a shared atlas keeps the multi-cascade parity path auditable in one place"
+)]
+fn dispatch_cascade_assemble_atlas(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    wgsl: &str,
+    entry: &str,
+    cascades: &[([Vec<[f32; 2]>; 4], GpuWaterSpectrumParams)],
+    atlas_height: u32,
+) -> (Vec<f32>, Vec<f32>) {
+    let n = cascades[0].1.grid_size;
+
+    let module = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("water_cascade_assemble_atlas"),
+        source: ShaderSource::Wgsl(wgsl.into()),
+    });
+    let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("water_cascade_assemble_atlas"),
+        layout: None,
+        module: &module,
+        entry_point: Some(entry),
+        compilation_options: PipelineCompilationOptions::default(),
+        cache: None,
+    });
+
+    let extent = Extent3d {
+        width: n,
+        height: atlas_height,
+        depth_or_array_layers: 1,
+    };
+    let make_tex = |label: &str| {
+        device.create_texture(&TextureDescriptor {
+            label: Some(label),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Rgba32Float,
+            usage: TextureUsages::STORAGE_BINDING | TextureUsages::COPY_SRC,
+            view_formats: &[],
+        })
+    };
+    let disp_tex = make_tex("cascade_atlas_displacement");
+    let norm_tex = make_tex("cascade_atlas_normal");
+    let disp_view = disp_tex.create_view(&TextureViewDescriptor::default());
+    let norm_view = norm_tex.create_view(&TextureViewDescriptor::default());
+
+    let layout = pipeline.get_bind_group_layout(0);
+
+    // Keep every per-cascade buffer alive until submission completes.
+    let mut keep_alive: Vec<wgpu::Buffer> = Vec::new();
+    let mut bind_groups: Vec<wgpu::BindGroup> = Vec::new();
+    for (grids, params) in cascades {
+        let params_buf = device.create_buffer_init(&BufferInitDescriptor {
+            label: Some("cascade_assemble_params"),
+            contents: bytemuck::bytes_of(params),
+            usage: BufferUsages::UNIFORM,
+        });
+        let g_bufs: [wgpu::Buffer; 4] = core::array::from_fn(|i| {
+            device.create_buffer_init(&BufferInitDescriptor {
+                label: Some("cascade_assemble_g"),
+                contents: bytemuck::cast_slice(&grids[i]),
+                usage: BufferUsages::STORAGE,
+            })
+        });
+        let bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("cascade_assemble_bind_group"),
+            layout: &layout,
+            entries: &[
+                BindGroupEntry {
+                    binding: 2,
+                    resource: params_buf.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 7,
+                    resource: g_bufs[0].as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 8,
+                    resource: g_bufs[1].as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 9,
+                    resource: g_bufs[2].as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 10,
+                    resource: g_bufs[3].as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 11,
+                    resource: BindingResource::TextureView(&disp_view),
+                },
+                BindGroupEntry {
+                    binding: 12,
+                    resource: BindingResource::TextureView(&norm_view),
+                },
+            ],
+        });
+        bind_groups.push(bind_group);
+        keep_alive.push(params_buf);
+        keep_alive.extend(g_bufs);
+    }
+
+    let row_bytes = n * 16;
+    let readback_size = u64::from(row_bytes * atlas_height);
+    let disp_readback = device.create_buffer(&BufferDescriptor {
+        label: Some("cascade_atlas_disp_readback"),
+        size: readback_size,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let norm_readback = device.create_buffer(&BufferDescriptor {
+        label: Some("cascade_atlas_norm_readback"),
+        size: readback_size,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("cascade_assemble_encoder"),
+    });
+    for bind_group in &bind_groups {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("cascade_assemble_pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, bind_group, &[]);
+        let groups = n.div_ceil(8);
+        pass.dispatch_workgroups(groups, groups, 1);
+    }
+    for (tex, readback) in [(&disp_tex, &disp_readback), (&norm_tex, &norm_readback)] {
+        encoder.copy_texture_to_buffer(
+            TexelCopyTextureInfo {
+                texture: tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: TextureAspect::All,
+            },
+            TexelCopyBufferInfo {
+                buffer: readback,
+                layout: TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row_bytes),
+                    rows_per_image: Some(atlas_height),
+                },
+            },
+            extent,
+        );
+    }
+    queue.submit([encoder.finish()]);
+
+    disp_readback.slice(..).map_async(MapMode::Read, |_| {});
+    norm_readback.slice(..).map_async(MapMode::Read, |_| {});
+    device
+        .poll(PollType::wait_indefinitely())
+        .expect("device poll should complete the submitted work");
+
+    let disp_out = {
+        let view = disp_readback
+            .slice(..)
+            .get_mapped_range()
+            .expect("mapped displacement readback should be available after poll");
+        let floats = bytemuck::cast_slice::<u8, f32>(&view).to_vec();
+        drop(view);
+        disp_readback.unmap();
+        floats
+    };
+    let norm_out = {
+        let view = norm_readback
+            .slice(..)
+            .get_mapped_range()
+            .expect("mapped normal readback should be available after poll");
+        let floats = bytemuck::cast_slice::<u8, f32>(&view).to_vec();
+        drop(view);
+        norm_readback.unmap();
+        floats
+    };
+
+    (disp_out, norm_out)
+}
+
+/// End-to-end parity for the *multi-cascade* spectral path introduced to stop
+/// the ocean re-solving one band `M` times. Two structurally distinct cascades
+/// (different amplitudes and patch sizes) are concatenated into one `h0` pool;
+/// the evolve pass reads each cascade's slice through its own `h0_offset`, the
+/// production butterfly inverse-`FFT`s each, and assemble stacks each tile into
+/// one `N x (2*N)` atlas at its own `tile_origin_y`. The read-back atlas must
+/// (a) match the per-cascade direct-summation `spectrum_ifft_golden` tile for
+/// tile, proving the offset addressing is correct, and (b) carry genuinely
+/// different tiles, proving the ocean now resolves waves across scales the way
+/// `UE5` Water, `Crest` and `WaveWorks` stack `FFT` bands rather than repeating
+/// a single band.
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice must reach the test log on hosts without a wgpu adapter"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "building two cascades, running the full stacked-atlas dispatch, and checking both tile parity and tile distinctness reads clearest as one linear scenario"
+)]
+fn spectrum_fft_cascade_atlas_gpu_stacks_distinct_tiles() {
+    let Some((device, queue)) = try_solver_device() else {
+        eprintln!(
+            "spectrum_fft_cascade_atlas_gpu_stacks_distinct_tiles: no wgpu adapter, skipping on-device parity"
+        );
+        return;
+    };
+
+    let n = 16u32;
+    let cascade_count = 2u32;
+    let atlas_height = n * cascade_count;
+
+    // Cascade 0: the coarse band. Cascade 1: a finer, weaker band. Halving the
+    // amplitudes keeps the field Hermitian (a linear scale of a Hermitian pair
+    // is Hermitian) while the smaller patch size changes both the wavenumber
+    // grid and the dispersion, so the two tiles cannot coincide by accident.
+    let (h0_c0, h0_neg_c0) = spectrum_field_hermitian(n);
+    let scale = 0.5_f32;
+    let h0_c1: Vec<[f32; 2]> = h0_c0.iter().map(|c| [c[0] * scale, c[1] * scale]).collect();
+    let h0_neg_c1: Vec<[f32; 2]> = h0_neg_c0
+        .iter()
+        .map(|c| [c[0] * scale, c[1] * scale])
+        .collect();
+
+    let tile_len = (n * n) as usize;
+
+    // Concatenated pools, coarsest cascade first — exactly what `pack_cascades`
+    // hands the recorder.
+    let mut h0_pool: Vec<[f32; 2]> = Vec::with_capacity(tile_len * 2);
+    h0_pool.extend_from_slice(&h0_c0);
+    h0_pool.extend_from_slice(&h0_c1);
+    let mut h0_neg_pool: Vec<[f32; 2]> = Vec::with_capacity(tile_len * 2);
+    h0_neg_pool.extend_from_slice(&h0_neg_c0);
+    h0_neg_pool.extend_from_slice(&h0_neg_c1);
+
+    let params0 = GpuWaterSpectrumParams {
+        grid_size: n,
+        patch_size: 50.0,
+        time: 1.3,
+        choppiness: 1.6,
+        foam_threshold: 1.05,
+        h0_offset: 0,
+        tile_origin_y: 0,
+        _pad: 0,
+    };
+    let params1 = GpuWaterSpectrumParams {
+        grid_size: n,
+        patch_size: 25.0,
+        time: 1.3,
+        choppiness: 1.6,
+        foam_threshold: 1.05,
+        h0_offset: n * n,
+        tile_origin_y: n,
+        _pad: 0,
+    };
+
+    // Per-cascade golden references address a tile-local pool at offset zero.
+    let mut gold0_params = params0;
+    gold0_params.h0_offset = 0;
+    gold0_params.tile_origin_y = 0;
+    let mut gold1_params = params1;
+    gold1_params.h0_offset = 0;
+    gold1_params.tile_origin_y = 0;
+    let (gold0_disp, gold0_norm) = spectrum_ifft_golden(&h0_c0, &h0_neg_c0, &gold0_params);
+    let (gold1_disp, gold1_norm) = spectrum_ifft_golden(&h0_c1, &h0_neg_c1, &gold1_params);
+
+    let fft_wgsl = compile_spectrum_fft_wgsl();
+    let evolve_entry = find_entry_point(&fft_wgsl, "water_spectrum_evolve");
+    let assemble_entry = find_entry_point(&fft_wgsl, "water_spectrum_assemble");
+    let butterfly_wgsl = compile_butterfly_wgsl();
+    let bitrev = find_entry_point(&butterfly_wgsl, "water_fft_bitrev");
+    let stage = find_entry_point(&butterfly_wgsl, "water_fft_stage");
+    let normalize = find_entry_point(&butterfly_wgsl, "water_fft_normalize");
+    let n_usize = n as usize;
+
+    // Evolve each cascade by pointing the shared pool at that cascade's slice
+    // through `h0_offset`, then run the production butterfly inverse FFT.
+    let make_tiles = |params: &GpuWaterSpectrumParams| -> [Vec<[f32; 2]>; 4] {
+        let packed = dispatch_spectrum_evolve(
+            &device,
+            &queue,
+            &fft_wgsl,
+            &evolve_entry,
+            &h0_pool,
+            &h0_neg_pool,
+            params,
+        );
+        core::array::from_fn(|i| {
+            dispatch_butterfly_ifft2(
+                &device,
+                &queue,
+                &butterfly_wgsl,
+                &bitrev,
+                &stage,
+                &normalize,
+                &packed[i],
+                n_usize,
+            )
+        })
+    };
+    let tiles0 = make_tiles(&params0);
+    let tiles1 = make_tiles(&params1);
+
+    let (atlas_disp, atlas_norm) = dispatch_cascade_assemble_atlas(
+        &device,
+        &queue,
+        &fft_wgsl,
+        &assemble_entry,
+        &[(tiles0, params0), (tiles1, params1)],
+        atlas_height,
+    );
+
+    assert_eq!(
+        atlas_disp.len(),
+        (atlas_height * n * 4) as usize,
+        "stacked displacement atlas lane count mismatch"
+    );
+    assert_eq!(
+        atlas_norm.len(),
+        (atlas_height * n * 4) as usize,
+        "stacked normal atlas lane count mismatch"
+    );
+
+    // Compare each cascade's atlas tile against its own direct-sum golden. The
+    // atlas texel (x, c*N + y) lives at flat lane (((c*N + y)*N + x)*4 + ch).
+    let check_tile = |cascade: u32, gold_disp: &[f32], gold_norm: &[f32]| {
+        let base_row = cascade * n;
+        let mut y = 0u32;
+        while y < n {
+            let mut x = 0u32;
+            while x < n {
+                let tile_texel = (y * n + x) as usize;
+                let atlas_texel = (((base_row + y) * n) + x) as usize;
+                let mut ch = 0usize;
+                while ch < 4 {
+                    let g_disp = gold_disp[tile_texel * 4 + ch];
+                    let a_disp = atlas_disp[atlas_texel * 4 + ch];
+                    let dd = (a_disp - g_disp).abs();
+                    assert!(
+                        dd < PARITY_EPS,
+                        "cascade {cascade} disp ({x},{y}) ch{ch}: atlas={a_disp} golden={g_disp} |d|={dd}"
+                    );
+                    let g_norm = gold_norm[tile_texel * 4 + ch];
+                    let a_norm = atlas_norm[atlas_texel * 4 + ch];
+                    let dn = (a_norm - g_norm).abs();
+                    assert!(
+                        dn < PARITY_EPS,
+                        "cascade {cascade} norm ({x},{y}) ch{ch}: atlas={a_norm} golden={g_norm} |d|={dn}"
+                    );
+                    ch += 1;
+                }
+                x += 1;
+            }
+            y += 1;
+        }
+    };
+    check_tile(0, &gold0_disp, &gold0_norm);
+    check_tile(1, &gold1_disp, &gold1_norm);
+
+    // The two stacked tiles must genuinely differ: if the recorder still fed one
+    // band into both slots (the old fake multi-cascade), every lane would match.
+    let mut max_tile_delta = 0.0_f32;
+    let mut texel = 0usize;
+    while texel < tile_len {
+        let mut ch = 0usize;
+        while ch < 4 {
+            let lane0 = atlas_disp[texel * 4 + ch];
+            let lane1 = atlas_disp[(tile_len + texel) * 4 + ch];
+            let d = (lane0 - lane1).abs();
+            if d > max_tile_delta {
+                max_tile_delta = d;
+            }
+            ch += 1;
+        }
+        texel += 1;
+    }
+    assert!(
+        max_tile_delta > PARITY_EPS,
+        "stacked cascades must resolve different bands, but the two tiles were identical (max |d|={max_tile_delta})"
+    );
+}
