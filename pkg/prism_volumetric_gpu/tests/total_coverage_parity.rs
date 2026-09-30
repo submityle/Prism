@@ -116,3 +116,79 @@ fn total_coverage_all_empty_fields_are_zero() {
     let gpu = kernel.eval(&ctx, &fields);
     assert_eq!(gpu, vec![0.0, 0.0, 0.0]);
 }
+
+/// Builds an `n x n` field whose `coverage` is a compact interior bump that
+/// vanishes well before the border, mirroring the CPU golden's `interior_bump`.
+/// Because the bump never touches the edge, a fractional interior advection
+/// backtrace stays inside the domain, so clamp-to-edge sampling neither gains
+/// nor loses mass — the setup under which coverage is a conserved quantity.
+fn interior_bump_field(n: u32) -> WeatherField {
+    let center = (n as f32 - 1.0) * 0.5;
+    let mut cells = Vec::with_capacity((n * n) as usize);
+    for y in 0..n {
+        for x in 0..n {
+            let dx = x as f32 - center;
+            let dy = y as f32 - center;
+            let r2 = dx * dx + dy * dy;
+            // A compact quadratic bump that reaches zero before the border.
+            let cov = (1.0 - r2 / 9.0).clamp(0.0, 1.0);
+            cells.push(WeatherSample::from_rgba(cov, 0.5, 0.0, 0.0));
+        }
+    }
+    WeatherField::from_cells(WeatherMapHandle(2), n, n, cells)
+        .expect("cell count matches dimensions")
+}
+
+/// Section 16 invariant, certified on the on-device reduction (not merely
+/// implied by CPU parity): under a divergence-free (uniform) wind the weather
+/// map's total `coverage` is conserved up to bilinear rounding. Advecting a
+/// compact interior bump by a fractional interior shift keeps every backtrace
+/// tap inside the domain, so no mass leaves through the clamped border; the
+/// GPU-reduced pre/post totals must therefore agree to within the documented
+/// mass-drift bound. A lossy or mis-strided GPU reduction would report false
+/// drift and fail this guard even while a same-field parity check still passed.
+#[test]
+fn total_coverage_certifies_mass_conservation_on_gpu() {
+    let Some(ctx) = GpuContext::try_headless() else {
+        eprintln!("skipping total_coverage mass conservation: no GPU adapter available");
+        return;
+    };
+    let kernel = GpuTotalCoverage::new(&ctx);
+
+    let before_field = interior_bump_field(24);
+    // A fractional interior shift: every backtrace tap stays interior, matching
+    // the CPU golden's `uniform_wind_advection_conserves_mass`.
+    let after_field = advect_semi_lagrangian(&before_field, Vec2::new(0.73, -0.41), 1.0);
+
+    let gpu = kernel.eval(&ctx, &[snapshot(&before_field), snapshot(&after_field)]);
+    assert_eq!(gpu.len(), 2, "one total per field");
+
+    // Anchor both on-device totals to the CPU golden so the drift below is
+    // measured against trustworthy sums, not two coincidentally-equal errors.
+    let before_cpu = before_field.total_coverage();
+    let after_cpu = after_field.total_coverage();
+    assert!(
+        (gpu[0] - before_cpu).abs() < 1e-4 * before_cpu.max(1.0),
+        "pre-advection total: gpu {} vs cpu {before_cpu}",
+        gpu[0]
+    );
+    assert!(
+        (gpu[1] - after_cpu).abs() < 1e-4 * after_cpu.max(1.0),
+        "post-advection total: gpu {} vs cpu {after_cpu}",
+        gpu[1]
+    );
+
+    // The mass-conservation bound, asserted on the GPU-reduced totals.
+    let before_gpu = gpu[0];
+    let after_gpu = gpu[1];
+    assert!(
+        before_gpu > 0.0,
+        "the interior bump must carry positive mass"
+    );
+    let drift = (after_gpu - before_gpu).abs() / before_gpu;
+    assert!(
+        drift < 1e-3,
+        "gpu-reduced mass drift {drift} exceeds the conservation bound \
+         (before {before_gpu}, after {after_gpu})"
+    );
+}
