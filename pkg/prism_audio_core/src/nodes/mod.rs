@@ -15,6 +15,9 @@
 //! - [`mix::SumNode`] — explicit N-input summing node (a bus mixer primitive).
 //! - [`crossover::LinkwitzRileyCrossover`] — fourth-order Linkwitz-Riley
 //!   multi-band splitter whose bands sum back to a flat response.
+//! - [`svf::SvfNode`] - topology-preserving (TPT) state-variable filter with
+//!   simultaneous low/high/band-pass, notch, peak, all-pass, bell, and shelf
+//!   responses; stable under fast cutoff modulation.
 //!
 //! Insert-style effect processors live in the [`effects`] submodule:
 //! [`ParametricEqNode`], [`DelayNode`], the `tanh` [`WaveshaperNode`], and the
@@ -42,6 +45,7 @@ pub mod mix;
 pub mod pan;
 pub mod reverb;
 pub mod sources;
+pub mod svf;
 
 pub use biquad::{BiquadKind, BiquadNode};
 pub use crossover::{LinkwitzRileyCrossover, MAX_BANDS, MAX_CROSSOVERS};
@@ -66,3 +70,4 @@ pub use reverb::{
 pub use sources::{
     Interpolation, LoopMode, NoiseColor, NoiseNode, OscillatorNode, SamplePlayerNode, Waveform,
 };
+pub use svf::{Svf, SvfCoeffs, SvfKind, SvfNode, SvfParams};
