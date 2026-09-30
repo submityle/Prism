@@ -780,7 +780,7 @@ Panner 可插拔（`Panner` trait），对齐 Unity Spatializer / Ambisonic Deco
 
 - **M0 内核（已完成）**：math/buffer/param/time/graph + 首发 4 节点，31 测试（27 单测 + 4 doctest），双构建，零告警，已 commit。
 - **M1 效果与动态（✅ 已完成）**：effects（parametric_eq/delay/waveshaper/chorus/flanger/phaser）+ dynamics（detector/compressor/limiter/gate/ducking）+ reverb（fdn/convolver/algorithmic 三族全落地）。103 单测 + 4 doctest 全绿，clippy 零告警，no_std 双构建通过，已分两次 commit。
-- **M2 声源与调度（🔄 进行中）**：`nodes/sources/`（oscillator 带限 PolyBLEP / noise white·pink·brown / sample_player 变调重采样+循环点 / generator 推流）+ `time.rs` 扩展（采样精确事件堆 + Quartz 式命名多时钟量化）+ 语音池与虚拟语音行为。streaming/解码依赖 std+file IO，归 M3 device 层，M2 不做假实现。
+- **M2 声源与调度（✅ 已完成）**：`nodes/sources/`（oscillator 带限 PolyBLEP / noise white·pink·brown / sample_player 变调重采样+循环点）+ `scheduler.rs`（采样精确事件最小堆 `EventScheduler` + Quartz 式命名多时钟 `NamedClock` 量化）+ `voice.rs` 语音池（固定容量、优先级窃取、per-group Playback Limit 三策略、Wwise 式虚拟语音行为 `ContinueVirtual`/`Kill`/`RestartFromBeginning`/`PlayFromElapsedTime` + 迟滞进出阈值 revoice）。147 单测 + 5 doctest 全绿，clippy 零告警，no_std 双构建通过，已分三次 commit。streaming/解码依赖 std+file IO，归 M3 device 层，M2 不做假实现。
 - **M3 ECS 桥与设备**：命令/遥测环 + epoch 回收 + cpal/worklet/FileSink/输入捕获 + `bevy_audio` 前端改造（兼容 API）。
 - **M4 空间**：遮挡/障碍/透射/衍射/反射 + 距离塑形（衰减/锥形/spread/focus/doppler/多位置）+ HRTF/Ambisonics + Rooms&Portals + Aux 发送 + 平台空间后端桥。
 - **M5 编排、Patch 与音乐**：Event/Container/State/Switch/RTPC + Patch 编译器与合成原语 + Modulation（LFO/包络/控制总线）+ 交互音乐（段/过渡/stinger）+ Bank/流式 + 对白与本地化解析（§35）+ 程序化音景（§37）。
