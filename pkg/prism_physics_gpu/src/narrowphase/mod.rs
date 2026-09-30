@@ -34,6 +34,10 @@
 //! - [`obb_obb`] / [`GpuObbObbNarrowphase`]: oriented bounding box versus
 //!   oriented bounding box (dynamic-dynamic), a fifteen-axis separating-axis
 //!   test reporting the minimum-translation contact.
+//! - [`obb_obb_manifold`] / [`cpu_obb_obb_manifold`]: promotes the OBB-OBB
+//!   contact to a multi-point [`ContactManifold`] by clipping the incident face
+//!   against the reference face, the manifold a solver needs for stable
+//!   stacking.
 //!
 //! Every pair emits one contact slot per input candidate: a passing real-device
 //! parity test is direct evidence the ported kernel builds the same manifolds as
@@ -60,12 +64,14 @@ mod gpu;
 mod halfspace;
 mod halfspace_gpu;
 mod layout;
+mod manifold;
 mod obb;
 mod obb_gpu;
 mod obb_halfspace;
 mod obb_halfspace_gpu;
 mod obb_obb;
 mod obb_obb_gpu;
+mod obb_obb_manifold;
 mod sphere;
 
 pub use capsule::{cpu_capsule_narrowphase, Capsule, SphereCapsulePair};
@@ -77,9 +83,11 @@ pub use cpu::cpu_narrowphase;
 pub use gpu::GpuNarrowphase;
 pub use halfspace::{cpu_halfspace_narrowphase, Plane, SpherePlanePair};
 pub use halfspace_gpu::GpuHalfspaceNarrowphase;
+pub use manifold::{ContactManifold, ManifoldPoint, MAX_MANIFOLD_POINTS};
 pub use obb::{cpu_obb_narrowphase, Obb, SphereObbPair};
 pub use obb_gpu::GpuObbNarrowphase;
 pub use obb_halfspace::{cpu_obb_halfspace_narrowphase, ObbPlanePair};
 pub use obb_halfspace_gpu::GpuObbHalfspaceNarrowphase;
 pub use obb_obb::{cpu_obb_obb_narrowphase, ObbObbPair};
 pub use obb_obb_gpu::GpuObbObbNarrowphase;
+pub use obb_obb_manifold::cpu_obb_obb_manifold;

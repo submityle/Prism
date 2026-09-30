@@ -148,16 +148,33 @@ fn support_vertex(center: Vec3, x: &[Vec3; 3], he: Vec3, dir: Vec3) -> Vec3 {
         + x[2] * (sign_pos(dir.dot(x[2])) * he.z)
 }
 
-/// Tests whether two oriented bounding boxes penetrate and, if so, builds the
-/// contact along the minimum-translation axis.
+/// The winning separating axis and the oriented minimum-translation data.
 ///
-/// Returns [`Some`] with the manifold for the couple `(a_id, b_id)` when every
-/// candidate separating axis overlaps, or [`None`] when any axis separates the
-/// boxes or they exactly graze (`overlap <= 0`). The arithmetic mirrors
-/// `narrowphase_obb_obb.wgsl` operation for operation; see the module
-/// documentation for the geometry and the normal convention.
+/// The [`axis_index`](Self::axis_index) records which of the fifteen candidate
+/// axes won: `0..=2` is a face normal of box `a`, `3..=5` a face normal of box
+/// `b`, and `6..=14` an edge-edge cross `a_i x b_j` (with `i = (index - 6) / 3`
+/// and `j = (index - 6) % 3`). The manifold builder needs this to tell a
+/// face contact (clip an incident face against a reference face) from an
+/// edge-edge contact (a single closest-point pair).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SatQuery {
+    /// Index of the winning candidate axis, `0..=14`.
+    pub(crate) axis_index: usize,
+    /// Unit contact normal oriented from box `a` toward box `b`.
+    pub(crate) normal: Vec3,
+    /// Penetration depth along [`normal`](Self::normal); always positive.
+    pub(crate) depth: f32,
+}
+
+/// Runs the fifteen-axis separating-axis test on the two boxes.
+///
+/// Returns [`Some`] with the minimum-translation axis, oriented normal, and
+/// penetration depth when every candidate axis overlaps, or [`None`] when any
+/// axis separates the boxes or they exactly graze (`overlap <= 0`). This is the
+/// shared core of both the single-point [`obb_obb_contact`] and the multi-point
+/// manifold builder, so the two agree on the contact normal by construction.
 #[must_use]
-pub(crate) fn obb_obb_contact(a_id: u32, b_id: u32, a: &Obb, b: &Obb) -> Option<Contact> {
+pub(crate) fn obb_obb_sat(a: &Obb, b: &Obb) -> Option<SatQuery> {
     let ax = a.axes;
     let bx = b.axes;
     let ea = a.half_extents;
@@ -194,6 +211,7 @@ pub(crate) fn obb_obb_contact(a_id: u32, b_id: u32, a: &Obb, b: &Obb) -> Option<
     let mut best_overlap = SKIP_OVERLAP;
     let mut best_cmp = SKIP_OVERLAP;
     let mut best_axis = Vec3::ZERO;
+    let mut best_index = 0usize;
     let mut separated = false;
     for idx in 0..15 {
         if !valid[idx] {
@@ -215,6 +233,7 @@ pub(crate) fn obb_obb_contact(a_id: u32, b_id: u32, a: &Obb, b: &Obb) -> Option<
             best_cmp = cmp;
             best_overlap = overlap;
             best_axis = axis;
+            best_index = idx;
         }
     }
 
@@ -229,13 +248,36 @@ pub(crate) fn obb_obb_contact(a_id: u32, b_id: u32, a: &Obb, b: &Obb) -> Option<
         best_axis
     };
 
+    Some(SatQuery {
+        axis_index: best_index,
+        normal,
+        depth: best_overlap,
+    })
+}
+
+/// Tests whether two oriented bounding boxes penetrate and, if so, builds the
+/// contact along the minimum-translation axis.
+///
+/// Returns [`Some`] with the manifold for the couple `(a_id, b_id)` when every
+/// candidate separating axis overlaps, or [`None`] when any axis separates the
+/// boxes or they exactly graze (`overlap <= 0`). The arithmetic mirrors
+/// `narrowphase_obb_obb.wgsl` operation for operation; see the module
+/// documentation for the geometry and the normal convention.
+#[must_use]
+pub(crate) fn obb_obb_contact(a_id: u32, b_id: u32, a: &Obb, b: &Obb) -> Option<Contact> {
+    let sat = obb_obb_sat(a, b)?;
+    let ax = a.axes;
+    let bx = b.axes;
+    let ea = a.half_extents;
+    let eb = b.half_extents;
+
     // Representative single point: the mid-overlap between box a's support
     // vertex along +normal and box b's support vertex along -normal.
-    let pa = support_vertex(a.center, &ax, ea, normal);
-    let pb = support_vertex(b.center, &bx, eb, -normal);
+    let pa = support_vertex(a.center, &ax, ea, sat.normal);
+    let pb = support_vertex(b.center, &bx, eb, -sat.normal);
     let point = (pa + pb) * 0.5;
 
-    Some(Contact::new(a_id, b_id, normal, best_overlap, point))
+    Some(Contact::new(a_id, b_id, sat.normal, sat.depth, point))
 }
 
 /// `CPU` golden twin of the OBB-versus-OBB narrow phase.
