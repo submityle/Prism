@@ -21,11 +21,11 @@
 //!
 //! Both sides resolve the same sorted table with the same lexicographic key
 //! order and the same lower-bound-then-exact-match rule, over integer keys, so
-//! every resolved slot - hit or the [`UNMAPPED_SLOT`] sentinel on a miss - is
-//! bit-exact.
+//! every resolved slot - hit or the
+//! [`UNMAPPED_SLOT`](prism_render_architecture::paging::UNMAPPED_SLOT)
+//! sentinel on a miss - is bit-exact.
 //!
 //! There is no floating-point arithmetic and hence no tolerance.
-//! [`UNMAPPED_SLOT`]: prism_render_architecture::paging::UNMAPPED_SLOT
 //!
 //! Provenance: standard sorted-table binary search and `wgpu` compute dispatch;
 //! no Unreal Engine source or derived code.

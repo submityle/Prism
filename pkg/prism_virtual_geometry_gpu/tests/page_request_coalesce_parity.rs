@@ -21,7 +21,9 @@
 //! Provenance: standard screen-coverage page-priority coalescing; no Unreal
 //! Engine source or derived code.
 
-use std::collections::BTreeSet;
+extern crate alloc;
+
+use alloc::collections::BTreeSet;
 
 use prism_render_architecture::gpu_scene::SceneBounds;
 use prism_render_architecture::virtual_geometry::{

@@ -84,7 +84,7 @@ fn gpu_page_storage_matches_cpu_golden() {
     // The scene must genuinely read both written and unwritten slots so a
     // degenerate all-zero result cannot pass vacuously.
     assert!(gpu.iter().any(|&w| w != 0), "scene must read written data");
-    assert!(gpu.iter().any(|&w| w == 0), "scene must read a zeroed slot");
+    assert!(gpu.contains(&0), "scene must read a zeroed slot");
 }
 
 #[test]

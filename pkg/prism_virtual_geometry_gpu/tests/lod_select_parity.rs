@@ -22,7 +22,9 @@
 //! Provenance: standard screen-space-error LOD selection with hysteresis and
 //! velocity-scaled prefetch; no Unreal Engine source or derived code.
 
-use std::collections::BTreeSet;
+extern crate alloc;
+
+use alloc::collections::BTreeSet;
 
 use prism_render_architecture::virtual_geometry::{
     select_lod, GeometryLodPolicy, LodLevel, LodProjection,

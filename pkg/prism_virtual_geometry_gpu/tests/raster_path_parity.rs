@@ -10,19 +10,21 @@
 //!
 //! # Parity criterion
 //!
-//! The classification does no floating-point arithmetic - only a
-//! `max(threshold, 0.0)` clamp and a single `<=` compare on identical operands
-//! - so there is no tolerance: each emitted path index is asserted bit-exact
-//! against `select_raster_path(..) as u32`. The scene deliberately spans all
-//! four paths (empty -> `FallbackMesh`, tiny -> `ComputeSoftware`, large under
-//! each hardware capability), the exact `<=` boundary at the threshold, and a
-//! negative threshold that must clamp to zero, and it is run under every
-//! capability combination so no path is left unverified.
+//! The classification does no floating-point arithmetic (only a
+//! `max(threshold, 0.0)` clamp and a single `<=` compare on identical
+//! operands), so there is no tolerance: each emitted path index is asserted
+//! bit-exact against `select_raster_path(..) as u32`. The scene deliberately
+//! spans all four paths (empty -> `FallbackMesh`, tiny -> `ComputeSoftware`,
+//! large under each hardware capability), the exact `<=` boundary at the
+//! threshold, and a negative threshold that must clamp to zero, and it is run
+//! under every capability combination so no path is left unverified.
 //!
 //! Provenance: standard cluster raster-path selection heuristic; no Unreal
 //! Engine source or derived code.
 
-use std::collections::BTreeSet;
+extern crate alloc;
+
+use alloc::collections::BTreeSet;
 
 use prism_render_architecture::virtual_geometry::raster_path::DEFAULT_SOFTWARE_PIXEL_THRESHOLD;
 use prism_render_architecture::virtual_geometry::{

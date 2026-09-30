@@ -27,7 +27,9 @@
 //! Provenance: standard AABB projected-radius frustum culling; no Unreal Engine
 //! source or derived code.
 
-use std::collections::BTreeSet;
+extern crate alloc;
+
+use alloc::collections::BTreeSet;
 
 use prism_render_architecture::virtual_geometry::{Frustum, Plane};
 use prism_virtual_geometry_gpu::{bounds_of, AabbQuery, GpuAabbFrustumCull, GpuContext};

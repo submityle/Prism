@@ -22,7 +22,9 @@
 //! Provenance: standard stable multi-bucket partition and cluster raster-path
 //! selection heuristic; no Unreal Engine source or derived code.
 
-use std::collections::BTreeSet;
+extern crate alloc;
+
+use alloc::collections::BTreeSet;
 
 use prism_render_architecture::virtual_geometry::raster_path::DEFAULT_SOFTWARE_PIXEL_THRESHOLD;
 use prism_render_architecture::virtual_geometry::{
