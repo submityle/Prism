@@ -67,6 +67,7 @@ pub mod multi_position;
 pub mod nfc;
 pub mod occlusion;
 pub mod octave_reverb;
+pub mod outdoor_propagation;
 pub mod panner;
 pub mod portal_graph;
 pub mod propagation;
@@ -113,6 +114,7 @@ pub use occlusion::{
     NullOcclusionQuery, Occlusion, OcclusionFactors, OcclusionNode, OcclusionParams, OcclusionQuery,
 };
 pub use octave_reverb::OctaveReverb;
+pub use outdoor_propagation::OutdoorPropagation;
 pub use panner::{Panner, PannerNode, VbapPanner};
 pub use portal_graph::{
     MAX_PORTAL_HOPS, MAX_PORTALS, MAX_ROOMS, MAX_ROUTED_PATHS, PortalHop, RoutedPath,
