@@ -37,6 +37,13 @@
 //!   tighter body-collision tier layered on the analytic proxies (see
 //!   [`sdf_collision`]).
 //!
+//! * [`GpuSelfCollisionJacobi`] evaluates
+//!   [`accumulate_jacobi_corrections`](prism_render_architecture::hair::self_collision_jacobi::accumulate_jacobi_corrections),
+//!   accumulating each strand particle's parallel-safe (Jacobi) self-collision
+//!   correction from a read-only snapshot, one thread per particle, walking a
+//!   host-built per-particle neighbor slice so the reduction order matches the
+//!   reference (see [`self_collision_jacobi`]).
+//!
 //! # Portability
 //!
 //! The projection uses only `sqrt`, `min`, `max`, `clamp`, `dot` and
@@ -67,6 +74,7 @@ pub mod context;
 pub mod frames;
 pub mod ribbon;
 pub mod sdf_collision;
+pub mod self_collision_jacobi;
 pub mod wind;
 
 pub use collision::{query_for, CollisionQuery, GpuColliderProjector};
@@ -74,4 +82,5 @@ pub use context::{block_on, GpuContext};
 pub use frames::{GpuStrandFrame, GpuStrandFrames};
 pub use ribbon::{GpuRibbon, GpuRibbonMesh, RibbonStrandInput};
 pub use sdf_collision::GpuSdfCollider;
+pub use self_collision_jacobi::GpuSelfCollisionJacobi;
 pub use wind::{query_for_wind, GpuWindField, WindQuery};
