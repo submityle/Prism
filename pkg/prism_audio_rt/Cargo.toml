@@ -1,0 +1,22 @@
+[package]
+name = "prism_audio_rt"
+version = "0.1.0"
+edition = "2024"
+description = "Lock-free real-time runtime bridge for Prism's next-generation audio engine: bounded command/telemetry rings and epoch-style deferred reclamation between the ECS/task threads and the audio callback thread. Contains no Unreal Engine, Unity, Godot, Wwise, or FMOD source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_audio_core = { path = "../prism_audio_core" }
+# Battle-tested bounded, lock-free MPMC queue used to build the command and
+# telemetry rings and the deferred-reclamation queue. We do not reinvent
+# lock-free primitives; this crate keeps our own code `unsafe`-free.
+crossbeam-queue = { version = "0.3", default-features = false, features = [
+  "std",
+] }
+
+[features]
+default = []
+
+[lints]
+workspace = true
