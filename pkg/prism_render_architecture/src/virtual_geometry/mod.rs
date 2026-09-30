@@ -41,7 +41,7 @@ pub mod software_raster;
 pub use bins::{bin_cut, RasterBins};
 pub use cull::{cluster_cull, CullVerdict, Frustum, OcclusionProbe, Plane};
 pub use frame::{plan_frame, FrameView, GeometryFramePlan, RasterConfig};
-pub use hierarchy::{ClusterHierarchy, ClusterNode, CutCluster};
+pub use hierarchy::{coverage_priority, ClusterHierarchy, ClusterNode, CutCluster};
 pub use lod::{select_lod, LodLevel, LodProjection, LodSelection};
 pub use page_request::PageRequestBatch;
 pub use page_table::{GeometryPageTable, PageEntry, PageResidency};
