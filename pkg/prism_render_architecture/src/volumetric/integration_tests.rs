@@ -79,6 +79,9 @@ use super::scatter::{
     DEFAULT_BACKWARD_G, DEFAULT_DRAINE_ALPHA, DEFAULT_FORWARD_G, DEFAULT_HG_DRAINE_WEIGHT,
     DEFAULT_LOBE_BLEND, DEFAULT_POWDER_STRENGTH,
 };
+use super::shadow::{
+    accumulate_shadow, god_ray_weight, scattering_mask, CloudShadowConfig, GodRayConfig,
+};
 use super::spectral::{
     ozone_absorption, rayleigh_phase, spectral_to_rgb, sunset_reddening, SpectralBands,
 };
@@ -1364,4 +1367,90 @@ fn production_dual_lobe_draine_phase_and_powder_drive_a_bounded_march() {
         prev = cur;
         d += 0.5;
     }
+}
+
+/// Section 12 seam: the cloud self-shadow and crepuscular (god-ray) helpers
+/// compose with the real density pipeline. A density profile sampled along the
+/// sun ray accumulates into a Beer-Lambert shadow transmittance that (a) is a
+/// valid monotone light-visibility function fed back into [`march`], and only
+/// ever darkens as more cloud is added; the god-ray sample weights taper
+/// geometrically with bounded partial sums; and the screen-space scattering
+/// mask vanishes in full shadow or clear air while growing with both light and
+/// medium.
+#[test]
+fn cloud_shadow_and_god_rays_compose_with_the_density_pipeline() {
+    let modeling = sample_modeling();
+    let shadow_cfg = CloudShadowConfig::default();
+    let seed = 0x5AD0_0011;
+    let steps = shadow_cfg.step_count as usize;
+    let step = shadow_cfg.max_shadow_distance / shadow_cfg.step_count as f32;
+
+    // Sample the density profile toward the sun through a cumulonimbus column.
+    let mut samples = [0.0_f32; 16];
+    for (i, slot) in samples.iter_mut().enumerate().take(steps) {
+        let frac = saturate(i as f32 / steps as f32);
+        let density = field_density(
+            modeling,
+            CloudKind::Cumulonimbus,
+            Vec3::new(0.5, frac, 0.5),
+            0.7,
+            seed,
+        );
+        *slot = density * shadow_cfg.density_scale;
+    }
+
+    // Adding more cloud along the ray only ever darkens the shadow.
+    let half = accumulate_shadow(&samples[..steps / 2], step);
+    let full = accumulate_shadow(&samples[..steps], step);
+    assert!((0.0..=1.0).contains(&half) && (0.0..=1.0).contains(&full));
+    assert!(
+        full <= half + EPS,
+        "more cloud should not brighten: {full} > {half}"
+    );
+
+    // The self-shadow transmittance is a valid light-visibility function: fed as
+    // the march light term it keeps the accumulated transmittance/radiance bounded.
+    let sun_visibility = full;
+    let cfg = RaymarchConfig::default();
+    let phase = hg_phase(0.5, DEFAULT_FORWARD_G);
+    let lit = march(
+        |_t| 0.5,
+        sigma_from_density,
+        phase,
+        |_t| sun_visibility,
+        200.0,
+        cfg,
+    );
+    assert!((0.0..=1.0).contains(&lit.transmittance));
+    assert!(lit.scattered.is_finite() && lit.scattered >= 0.0);
+
+    // God-ray weights taper monotonically and their partial sum stays under the
+    // closed-form geometric bound weight / (1 - decay).
+    let ray_cfg = GodRayConfig::default();
+    let mut prev = 2.0_f32;
+    let mut sum = 0.0_f32;
+    for i in 0..ray_cfg.sample_count {
+        let w = god_ray_weight(i, ray_cfg);
+        assert!((0.0..=1.0).contains(&w), "god-ray weight out of range: {w}");
+        assert!(w <= prev + EPS, "god-ray weight rose at index {i}");
+        prev = w;
+        sum += w;
+    }
+    let bound = saturate(ray_cfg.weight) / (1.0 - saturate(ray_cfg.decay));
+    assert!(
+        sum <= bound + 1.0e-3,
+        "god-ray partial sum {sum} exceeded bound {bound}"
+    );
+
+    // The scattering mask vanishes in full shadow and in clear air, and rises
+    // when both light reaches the fragment and there is medium to scatter off.
+    assert_eq!(scattering_mask(0.0, 0.8), 0.0);
+    assert_eq!(scattering_mask(0.9, 0.0), 0.0);
+    let dim = scattering_mask(0.3, 0.3);
+    let bright = scattering_mask(0.9, 0.9);
+    assert!((0.0..=1.0).contains(&dim) && (0.0..=1.0).contains(&bright));
+    assert!(
+        bright > dim,
+        "mask should grow with light and medium: {bright} <= {dim}"
+    );
 }
