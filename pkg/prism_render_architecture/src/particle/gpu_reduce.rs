@@ -394,7 +394,7 @@ mod tests {
         assert_eq!(ReduceConfig::new(0, 256).total_reduction_steps(), 0);
         assert_eq!(ReduceConfig::new(200, 256).total_reduction_steps(), 1);
         assert_eq!(ReduceConfig::new(1025, 256).total_reduction_steps(), 2);
-        assert_eq!(ReduceConfig::new(1000, 4).total_reduction_steps(), 6);
+        assert_eq!(ReduceConfig::new(1000, 4).total_reduction_steps(), 5);
     }
 
     #[test]
