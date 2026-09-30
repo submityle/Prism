@@ -374,6 +374,33 @@ pub(crate) struct GpuClothVpParams {
     pub _pad: u32,
 }
 
+/// `ClothCcdParams` in `cloth_self_ccd.wesl`: the particle count, hash
+/// modulus, cell size and thickness fill the first two 16-byte rows, then the
+/// restitution, the inverse frame time and two trailing pads fill the rest, so
+/// the whole block is one 32-byte uniform stride mirroring the sanitized `CPU`
+/// golden `self_ccd::SelfCcdParams` inputs plus the `inv_dt` the resolver
+/// derives once per frame.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq)]
+pub(crate) struct GpuClothCcdParams {
+    /// Number of particles, bounding every self-CCD dispatch.
+    pub particle_count: u32,
+    /// Number of hash buckets in the cell table (the cell-hash modulus).
+    pub table_size: u32,
+    /// Uniform grid cell edge, world units.
+    pub cell_size: f32,
+    /// Minimum enforced separation; the TOI target distance.
+    pub thickness: f32,
+    /// Normal restitution in `[0, 1]`.
+    pub restitution: f32,
+    /// Inverse frame time `1/dt`, or `0` when `|dt|` is negligible.
+    pub inv_dt: f32,
+    /// Trailing pad so the block is a flat 32-byte uniform; never read.
+    pub _pad0: u32,
+    /// Trailing pad so the block is a flat 32-byte uniform; never read.
+    pub _pad1: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

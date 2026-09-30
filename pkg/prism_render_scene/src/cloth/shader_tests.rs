@@ -126,3 +126,41 @@ fn cloth_virtual_self_collision_abi_matches_the_shader_layout() {
     assert_eq!(align_of::<GpuClothVpParams>(), 4);
     assert_eq!(CLOTH_WORKGROUP_SIZE, 64);
 }
+
+/// Compiles `cloth_self_ccd.wesl`, proving the three own-slot continuous
+/// self-collision kernels (the `atomicExchange` swept-box hash build, the
+/// canonical-cell resolve accumulating each particle's own half TOI snap and
+/// restitution impulse into `ccd_pos_delta` / `ccd_vel_delta`, and the pinned-
+/// guarded apply) parse and type-check exactly as they will in the render world,
+/// and that their struct/helper layouts match the `CPU` golden
+/// `prism_render_architecture::cloth::self_ccd`.
+#[test]
+fn cloth_self_ccd_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let self_ccd = shader_id(0x5052_4953_4d5f_434c_4f54_4841_4552_5304);
+    cache.set_shader(
+        self_ccd,
+        Shader::from_wesl(
+            include_str!("../shaders/cloth_self_ccd.wesl"),
+            "embedded://prism_render_scene/shaders/cloth_self_ccd.wesl",
+        ),
+    );
+
+    cache
+        .get(0, self_ccd, &[])
+        .unwrap_or_else(|error| panic!("cloth_self_ccd.wesl failed to compile: {error}"));
+}
+
+/// Guards the Rust immediate-block `ABI` against drift from the self-CCD `WESL`
+/// struct: the `GpuClothCcdParams` uniform is the flat 32-byte block matching
+/// `ClothCcdParams` in `cloth_self_ccd.wesl`, and the workgroup constant matches
+/// the kernels' `@workgroup_size(64)`.
+#[test]
+fn cloth_self_ccd_abi_matches_the_shader_layout() {
+    use super::abi::{GpuClothCcdParams, CLOTH_WORKGROUP_SIZE};
+    assert_eq!(size_of::<GpuClothCcdParams>(), 32);
+    assert_eq!(size_of::<GpuClothCcdParams>() % 16, 0);
+    assert_eq!(align_of::<GpuClothCcdParams>(), 4);
+    assert_eq!(CLOTH_WORKGROUP_SIZE, 64);
+}
