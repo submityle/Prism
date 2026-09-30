@@ -29,6 +29,11 @@
 //!   layout ([`motion_gpu_layout::MOTION_INSTANCE_WORDS`] stride packing both
 //!   key poses) plus a packed matrix-motion walk that blends and inverts the
 //!   pose per ray and reproduces the in-memory motion walk bit-for-bit.
+//! - [`aabb_primitive`] — analytic axis-aligned box [`aabb_primitive::AabbPrimitive`]
+//!   procedural primitive (`DXR`/Vulkan `AABB` path) with a slab intersection
+//!   that reports the face normal and front/back flag, plus a single-level
+//!   [`aabb_primitive::AabbBvh`] reusing the shared binned-`SAH` build and
+//!   ordered slab walk.
 //! - [`sphere`] — analytic [`sphere::Sphere`] primitive (`DXR`/Vulkan
 //!   procedural-primitive `AABB` path) with a numerically stable ray test
 //!   and a single-level [`sphere::SphereBvh`] reusing the shared
@@ -65,6 +70,7 @@ pub mod motion;
 pub mod motion_gpu_layout;
 pub mod ray_offset;
 pub mod scheduler;
+pub mod aabb_primitive;
 pub mod sphere;
 pub mod sphere_gpu_layout;
 pub mod tlas;
@@ -87,6 +93,7 @@ pub use motion::{MotionInstance, MotionTlas};
 pub use motion_gpu_layout::{GpuMotionTlasBuffers, MOTION_INSTANCE_WORDS};
 pub use ray_offset::offset_ray_origin;
 pub use scheduler::{AccelerationScheduler, ScheduledUpdate};
+pub use aabb_primitive::{AabbBvh, AabbHit, AabbPrimitive};
 pub use sphere::{Sphere, SphereBvh, SphereHit};
 pub use sphere_gpu_layout::{GpuSphereBvhBuffers, SPHERE_WORDS};
 pub use traversal::{Hit, Ray};
