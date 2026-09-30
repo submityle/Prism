@@ -35,6 +35,7 @@ use glam::Vec3;
 use crate::xpbd::{Colouring, ParticleState, XpbdConfig, XpbdError};
 
 use super::constraint::ContactConstraint;
+use super::warm_start::ContactCache;
 
 /// Machine epsilon for `f32`, matching the distance solver's degenerate-length
 /// guard so both engines treat near-coincident particles identically.
@@ -124,6 +125,161 @@ pub fn cpu_resolve_contacts(
         }
     }
     Ok(())
+}
+
+/// Advances `state` under the non-penetration `contacts` exactly like
+/// [`cpu_resolve_contacts`], but *warm-started* from `cache`.
+///
+/// Before each substep's projection sweep, every contact's running multiplier
+/// is seeded from the [`ContactCache`] (its previous frame's converged value,
+/// or `0` for a new contact) and the matching one-sided position correction is
+/// applied in colour order (see [`apply_warm_start`]). The iterative projection
+/// then converges from near the previous solution instead of from rest, which
+/// is what lets deep stacks settle in a handful of iterations. After the final
+/// substep the converged multipliers are written back into `cache`, pruning any
+/// pair that separated this frame.
+///
+/// An empty `cache` seeds every contact to `0`, so the first warmed frame is
+/// bit-for-bit the trajectory [`cpu_resolve_contacts`] produces; subsequent
+/// frames diverge only by starting closer to the answer.
+///
+/// # Errors
+///
+/// Returns [`XpbdError`] under the identical conditions as
+/// [`cpu_resolve_contacts`].
+pub fn cpu_resolve_contacts_warm(
+    state: &mut ParticleState,
+    contacts: &[ContactConstraint],
+    config: &XpbdConfig,
+    dt: f32,
+    cache: &mut ContactCache,
+) -> Result<(), XpbdError> {
+    config.validate()?;
+    if !state.is_consistent() {
+        return Err(XpbdError::InvalidConfig(
+            "particle state arrays must have equal length",
+        ));
+    }
+    if state.is_empty() || dt <= 0.0 {
+        return Ok(());
+    }
+
+    let particle_count = state.len() as u32;
+    let colouring = Colouring::build(contacts, particle_count)?;
+    let ordered = colouring.reorder(contacts);
+
+    let substeps = config.effective_substeps();
+    let iterations = config.effective_iterations();
+    let h = dt / substeps as f32;
+    if h <= 0.0 {
+        return Ok(());
+    }
+    let damping_scale = (1.0 - config.damping * h).max(0.0);
+    let inv_h = 1.0 / h;
+
+    // The per-contact seed is read once (the cache does not change mid-frame)
+    // and is aligned with `ordered`, so it is re-applied identically every
+    // substep alongside that substep's fresh gravity prediction.
+    let seed = cache.seed(&ordered);
+    let mut prev = vec![Vec3::ZERO; state.len()];
+    let mut vel_pre = vec![Vec3::ZERO; state.len()];
+    let mut lambda = vec![0.0f32; ordered.len()];
+
+    for _ in 0..substeps {
+        predict(state, &mut prev, config.gravity, damping_scale, h);
+        vel_pre.copy_from_slice(&state.velocities);
+        // Warm-start: seed each multiplier and apply its cached impulse in
+        // colour order (same-colour contacts share no particle) so the sweep
+        // below starts from the previous frame's solution.
+        for &(start, end) in colouring.ranges() {
+            for gi in start..end {
+                apply_warm_start(
+                    &ordered[gi as usize],
+                    &mut lambda[gi as usize],
+                    seed[gi as usize],
+                    &mut state.positions,
+                    &state.inverse_masses,
+                );
+            }
+        }
+        for _ in 0..iterations {
+            for &(start, end) in colouring.ranges() {
+                for gi in start..end {
+                    project(
+                        &ordered[gi as usize],
+                        &mut lambda[gi as usize],
+                        &mut state.positions,
+                        &prev,
+                        &state.inverse_masses,
+                        h,
+                    );
+                }
+            }
+        }
+        finalize(state, &prev, inv_h);
+        for &(start, end) in colouring.ranges() {
+            for gi in start..end {
+                apply_restitution(
+                    &ordered[gi as usize],
+                    &state.positions,
+                    &mut state.velocities,
+                    &vel_pre,
+                    &prev,
+                    &state.inverse_masses,
+                );
+            }
+        }
+    }
+
+    // Persist the converged multipliers (aligned with `ordered`) so next frame
+    // seeds from them; pairs absent this frame are pruned by the rebuild.
+    cache.store(&ordered, &lambda);
+    Ok(())
+}
+
+/// Seeds one contact's running multiplier from the cache and applies the
+/// matching warm-start impulse.
+///
+/// The running multiplier is set to `seed` and, when that seed is positive, the
+/// same one-sided position correction the projection would have accumulated —
+/// `normal * seed`, split by inverse mass — is applied up front. Because the
+/// projection updates positions by the *increment* in the multiplier, this
+/// pre-application is what makes the seeded multiplier actually move the pair;
+/// without it the seed would be a no-op and the "warm" start would be fake.
+///
+/// A non-positive seed (a new contact) sets the multiplier to `seed` and
+/// returns without moving anything, so a cold cache reproduces the cold solve
+/// exactly. The correction uses the same degenerate-length guard and the same
+/// `normal * lambda` arithmetic as [`project`], so the seeded state lies on the
+/// projection's own trajectory.
+fn apply_warm_start(
+    con: &ContactConstraint,
+    lambda: &mut f32,
+    seed: f32,
+    positions: &mut [Vec3],
+    inverse_masses: &[f32],
+) {
+    *lambda = seed;
+    if seed <= 0.0 {
+        return;
+    }
+    let ia = con.a as usize;
+    let ib = con.b as usize;
+    let wa = inverse_masses[ia];
+    let wb = inverse_masses[ib];
+    let w_sum = wa + wb;
+    if w_sum <= 0.0 {
+        return;
+    }
+    let delta = positions[ia] - positions[ib];
+    let length = delta.length();
+    if length < EPSILON {
+        return;
+    }
+    let normal = delta / length;
+    let correction = normal * seed;
+    positions[ia] += correction * wa;
+    positions[ib] -= correction * wb;
 }
 
 /// One substep prediction: snapshot positions, integrate acceleration, damp.
@@ -623,5 +779,117 @@ mod tests {
         cpu_resolve_contacts(&mut state, &cons, &config, 1.0 / 60.0).unwrap();
         assert_eq!(state.positions[0], Vec3::ZERO);
         assert_eq!(state.velocities[0], Vec3::ZERO);
+    }
+
+    fn config_low(iterations: u32) -> XpbdConfig {
+        // One substep, few iterations: a deliberately under-resolved solve so
+        // warm-starting's convergence advantage is measurable.
+        XpbdConfig::new(Vec3::new(-9.81, 0.0, 0.0), 1, iterations, 0.0)
+    }
+
+    /// Pinned particle 0 at the origin and a movable particle 1 pressed toward
+    /// it by the `-x` gravity, initially overlapping (centres `0.98` apart,
+    /// rest `1.0`). The pair axis is `x`, so gravity drives the penetration the
+    /// contact must fight every frame — the classic resting-contact probe.
+    fn resting_pair() -> ParticleState {
+        let mut state = ParticleState::new();
+        state.push(Vec3::ZERO, 0.0);
+        state.push(Vec3::new(0.98, 0.0, 0.0), 1.0);
+        state
+    }
+
+    #[test]
+    fn warm_empty_cache_matches_cold_solve_exactly() {
+        // The keystone parity: a fresh (empty) cache seeds every contact to 0,
+        // so the first warmed frame must be bit-for-bit the cold trajectory.
+        let cons = vec![ContactConstraint::new(0, 1, 1.0, 0.0).with_friction(0.6, 0.4)];
+        let config = XpbdConfig::new(Vec3::new(0.0, -9.81, 0.0), 4, 8, 0.1);
+        let mut cold = resting_pair();
+        let mut warm = resting_pair();
+        let mut cache = ContactCache::new();
+        cpu_resolve_contacts(&mut cold, &cons, &config, 1.0 / 60.0).unwrap();
+        cpu_resolve_contacts_warm(&mut warm, &cons, &config, 1.0 / 60.0, &mut cache).unwrap();
+        assert_eq!(cold.positions, warm.positions);
+        assert_eq!(cold.velocities, warm.velocities);
+    }
+
+    #[test]
+    fn warm_caches_the_converged_multiplier_of_a_live_contact() {
+        // A pressed, overlapping pair converges to a positive normal multiplier;
+        // that value must land in the cache under the pair's key for next frame.
+        let cons = vec![ContactConstraint::new(0, 1, 1.0, 0.0)];
+        let config = config_low(8);
+        let mut state = resting_pair();
+        let mut cache = ContactCache::new();
+        cpu_resolve_contacts_warm(&mut state, &cons, &config, 1.0 / 60.0, &mut cache).unwrap();
+        assert_eq!(cache.len(), 1);
+        assert!(
+            cache.get(super::super::warm_start::ContactKey::new(0, 1)) > 0.0,
+            "a pressed contact should cache a positive multiplier"
+        );
+    }
+
+    #[test]
+    fn warm_cache_prunes_a_separated_contact() {
+        // Solve a live contact (fills the cache), then a frame with no contacts
+        // must empty it, so a re-touch next frame is treated as brand new.
+        let cons = vec![ContactConstraint::new(0, 1, 1.0, 0.0)];
+        let config = config_low(8);
+        let mut state = resting_pair();
+        let mut cache = ContactCache::new();
+        cpu_resolve_contacts_warm(&mut state, &cons, &config, 1.0 / 60.0, &mut cache).unwrap();
+        assert_eq!(cache.len(), 1);
+        cpu_resolve_contacts_warm(&mut state, &[], &config, 1.0 / 60.0, &mut cache).unwrap();
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn warm_start_holds_a_resting_contact_tighter_than_cold() {
+        // Under-resolved (one iteration) the cold solver leaks penetration every
+        // frame because it re-solves from rest; warm-starting re-applies last
+        // frame's impulse first, so over many frames it holds the pair far
+        // closer to the rest separation. Measured as the steady penetration
+        // deficit (rest - separation) after 120 frames.
+        let cons = vec![ContactConstraint::new(0, 1, 1.0, 0.0)];
+        let config = config_low(1);
+        let dt = 1.0 / 60.0;
+
+        let mut cold = resting_pair();
+        for _ in 0..120 {
+            cpu_resolve_contacts(&mut cold, &cons, &config, dt).unwrap();
+        }
+        let cold_sep = (cold.positions[0] - cold.positions[1]).length();
+        let cold_deficit = 1.0 - cold_sep;
+
+        let mut warm = resting_pair();
+        let mut cache = ContactCache::new();
+        for _ in 0..120 {
+            cpu_resolve_contacts_warm(&mut warm, &cons, &config, dt, &mut cache).unwrap();
+        }
+        let warm_sep = (warm.positions[0] - warm.positions[1]).length();
+        let warm_deficit = 1.0 - warm_sep;
+
+        assert!(warm.positions[1].is_finite());
+        assert!(
+            warm_deficit < cold_deficit,
+            "warm deficit {warm_deficit} should beat cold deficit {cold_deficit}"
+        );
+    }
+
+    #[test]
+    fn warm_matches_error_semantics_of_cold_on_bad_state() {
+        // A contact indexing a missing particle must fail the warmed path with
+        // the same error class as the cold path — warm-starting adds no new
+        // silent success.
+        let cons = vec![ContactConstraint::new(0, 9, 1.0, 0.0)];
+        let config = config_low(4);
+        let mut state = resting_pair();
+        let mut cache = ContactCache::new();
+        let warmed = cpu_resolve_contacts_warm(&mut state, &cons, &config, 1.0 / 60.0, &mut cache);
+        assert!(warmed.is_err());
+        assert!(
+            cache.is_empty(),
+            "a failed solve must not populate the cache"
+        );
     }
 }
