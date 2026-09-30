@@ -142,6 +142,50 @@ impl RayFootprint {
         level as u32
     }
 
+    /// Returns a copy of this footprint with a new hit distance.
+    ///
+    /// The distance is sanitized like the constructor input. This is the
+    /// ergonomic way to advance a propagated cone (see [`Self::propagate`]) to
+    /// the next surface once its travel distance is known.
+    #[must_use]
+    pub fn with_hit_distance(self, hit_distance: f32) -> Self {
+        Self {
+            cone_width: self.cone_width,
+            cone_spread_angle: self.cone_spread_angle,
+            hit_distance: sanitize_nonneg(hit_distance),
+        }
+    }
+
+    /// Propagates the cone through a surface interaction, yielding the footprint
+    /// that enters the *next* ray segment (reflection, refraction, or transmit).
+    ///
+    /// This is the recurrence at the heart of the Akenine-Möller ray-cones
+    /// technique. Single-bounce mip selection (the `projected_width` /
+    /// `mip_level` family) only describes the cone at the current hit; a
+    /// multi-bounce path (mirror reflections, glossy `GI`) must carry the cone
+    /// forward so texture `LOD` stays correct after each interaction. Two things
+    /// change at a hit:
+    ///
+    /// 1. The cone width at the hit, [`Self::projected_width`], becomes the base
+    ///    width of the next segment (the interaction point is the new origin, so
+    ///    `hit_distance` resets to `0`).
+    /// 2. The spread angle grows by `surface_spread`, the curvature-derived
+    ///    contribution of the interaction (`0` for a perfectly flat mirror;
+    ///    larger for convex/curved or rougher surfaces). Curvature is evaluated
+    ///    by the caller — mirroring how `cone_spread_angle` and the incidence
+    ///    cosine are supplied — so this layer stays pure arithmetic. The term is
+    ///    sanitized and accumulated, so spread is monotonically non-decreasing
+    ///    along a path and the footprint never shrinks across bounces.
+    #[must_use]
+    pub fn propagate(self, surface_spread: f32) -> Self {
+        let clamped = self.sanitized();
+        Self {
+            cone_width: clamped.projected_width(),
+            cone_spread_angle: clamped.cone_spread_angle + sanitize_nonneg(surface_spread),
+            hit_distance: 0.0,
+        }
+    }
+
     fn sanitized(self) -> Self {
         Self {
             cone_width: sanitize_nonneg(self.cone_width),
@@ -338,5 +382,61 @@ mod tests {
         let f = RayFootprint::new(2.0, 0.0, 0.0);
         assert!(close(f.texel_span_on_surface(0.0, 0.5), 0.0));
         assert!(close(f.texel_span_on_surface(-1.0, 0.5), 0.0));
+    }
+
+    #[test]
+    fn with_hit_distance_replaces_and_sanitizes() {
+        let f = RayFootprint::new(0.2, 0.1, 3.0);
+        let moved = f.with_hit_distance(7.0);
+        assert!(close(moved.cone_width, 0.2));
+        assert!(close(moved.cone_spread_angle, 0.1));
+        assert!(close(moved.hit_distance, 7.0));
+        // Bad distances collapse to zero, other fields untouched.
+        let guarded = f.with_hit_distance(-4.0);
+        assert!(close(guarded.hit_distance, 0.0));
+        let nan = f.with_hit_distance(f32::NAN);
+        assert!(close(nan.hit_distance, 0.0));
+    }
+
+    #[test]
+    fn propagate_carries_hit_width_into_next_base_width() {
+        // Width at the hit is 0.1 + 5*0.02 = 0.2; that becomes the next base.
+        let f = RayFootprint::new(0.1, 0.02, 5.0);
+        let next = f.propagate(0.0);
+        assert!(close(next.cone_width, 0.2));
+        // Flat interaction keeps the spread and resets travel to the new origin.
+        assert!(close(next.cone_spread_angle, 0.02));
+        assert!(close(next.hit_distance, 0.0));
+        // The propagated cone starts exactly at the width it ended the last
+        // segment with (continuity across the bounce).
+        assert!(close(next.projected_width(), f.projected_width()));
+    }
+
+    #[test]
+    fn propagate_accumulates_surface_spread_and_sanitizes() {
+        let f = RayFootprint::new(0.1, 0.02, 5.0);
+        // A curved/rough interaction widens the cone's spread.
+        let next = f.propagate(0.03);
+        assert!(close(next.cone_spread_angle, 0.05));
+        // Negative or non-finite curvature contributions are ignored (spread
+        // never shrinks across a bounce).
+        assert!(close(f.propagate(-1.0).cone_spread_angle, 0.02));
+        assert!(close(f.propagate(f32::NAN).cone_spread_angle, 0.02));
+    }
+
+    #[test]
+    fn multi_bounce_footprint_never_shrinks() {
+        // Walk a three-bounce path with equal segment lengths and a little
+        // curvature at each hit; the footprint width must be monotonically
+        // non-decreasing along the path.
+        let mut cone = RayFootprint::new(0.05, 0.01, 0.0);
+        let mut previous = 0.0;
+        for _ in 0..3 {
+            cone = cone.with_hit_distance(4.0);
+            let width = cone.projected_width();
+            assert!(width >= previous);
+            previous = width;
+            cone = cone.propagate(0.005);
+        }
     }
 }
