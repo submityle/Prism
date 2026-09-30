@@ -58,6 +58,7 @@ pub mod multi_position;
 pub mod occlusion;
 pub mod panner;
 pub mod propagation;
+pub mod reverb_zones;
 pub mod rooms;
 pub mod spatializer;
 pub mod spread;
@@ -81,6 +82,9 @@ pub use propagation::{
     AcousticMaterial, FreeFieldBackend, MAX_PROPAGATION_PATHS, PathKind, PropagationBackend,
     PropagationPath, PropagationSummary, diffraction_cutoff_hz, diffraction_gain,
     edge_path_difference, fresnel_number, maekawa_attenuation_db, transmission_gain,
+};
+pub use reverb_zones::{
+    AuxBusId, AuxSend, MAX_AUX_SENDS, ReverbZone, ReverbZoneField, ZoneShape, source_send_gain,
 };
 pub use rooms::{
     Portal, Room, RoomId, RoomNetwork, obliquity_factor, portal_coupling_gain, room_of,
