@@ -17,6 +17,8 @@
 //!   guaranteed output ceiling.
 //! - [`multiband::MultibandCompressorNode`] — Linkwitz-Riley band split
 //!   feeding an independent compressor per band, recombined flat.
+//! - [`transient_shaper::TransientShaperNode`] - differential-envelope
+//!   attack / sustain designer (fast vs slow follower), threshold-free.
 //! - [`gate::ExpanderGateNode`] — downward expander / noise gate with hold.
 //! - [`ducking::DuckingNode`] — side-chain ducker (key on input port 1).
 
@@ -26,6 +28,7 @@ pub mod ducking;
 pub mod gate;
 pub mod limiter;
 pub mod multiband;
+pub mod transient_shaper;
 
 pub use compressor::{CompressorNode, CompressorParams};
 pub use detector::{DetectionMode, GainBallistics, LevelDetector};
@@ -33,3 +36,4 @@ pub use ducking::{DuckingNode, DuckingParams};
 pub use gate::{ExpanderGateNode, GateParams};
 pub use limiter::{LimiterNode, LimiterParams};
 pub use multiband::MultibandCompressorNode;
+pub use transient_shaper::{TransientShaperNode, TransientShaperParams};
