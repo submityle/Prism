@@ -57,6 +57,7 @@ pub mod diffusion_field;
 pub mod doppler;
 pub mod early_reflections;
 pub mod geometry;
+pub mod ground_effect;
 pub mod hoa;
 pub mod hoa_beamform;
 pub mod hoa_decode;
@@ -93,6 +94,7 @@ pub use early_reflections::{
     ReflectionTap, ShoeboxRoom, compute_early_reflections,
 };
 pub use geometry::{Emitter, Listener, LocalSource};
+pub use ground_effect::GroundEffect;
 pub use hoa::{
     HoaEncoderNode, MAX_HOA_CHANNELS, MAX_HOA_ORDER, acn_index, decode_hoa, encode_hoa,
     hoa_channel_count,
