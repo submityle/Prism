@@ -55,6 +55,7 @@ pub mod cone;
 pub mod doppler;
 pub mod geometry;
 pub mod hoa;
+pub mod hoa_rotation;
 pub mod multi_position;
 pub mod occlusion;
 pub mod panner;
@@ -76,6 +77,7 @@ pub use hoa::{
     HoaEncoderNode, MAX_HOA_CHANNELS, MAX_HOA_ORDER, acn_index, decode_hoa, encode_hoa,
     hoa_channel_count,
 };
+pub use hoa_rotation::{HoaRotationMatrix, rotate_hoa};
 pub use multi_position::{
     MAX_POSITIONS, MultiPositionMode, PositionInput, resolve_multi,
 };
