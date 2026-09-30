@@ -48,6 +48,7 @@ pub mod context;
 pub mod fluid;
 pub mod fracture;
 pub mod mpm;
+pub mod scan;
 pub mod xpbd;
 
 pub use broadphase::{cpu_broadphase, BroadphaseConfig, BroadphaseError, CandidatePair, Particle};
@@ -68,6 +69,7 @@ pub use mpm::{
     GpuMpmGridUpdate, GpuMpmP2g, GpuMpmResident, GpuMpmStep, P2gGrid, StepConfig, StepInputs,
     StepParticles,
 };
+pub use scan::{cpu_compact, cpu_exclusive_scan, GpuScan};
 pub use xpbd::{
     cpu_solve, Colouring, DistanceConstraint, GpuXpbdSolver, ParticleState, XpbdConfig, XpbdError,
 };
