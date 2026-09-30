@@ -63,6 +63,7 @@ pub mod multi_position;
 pub mod nfc;
 pub mod occlusion;
 pub mod panner;
+pub mod portal_graph;
 pub mod propagation;
 pub mod reverb_zones;
 pub mod rooms;
@@ -96,6 +97,10 @@ pub use occlusion::{
     NullOcclusionQuery, Occlusion, OcclusionFactors, OcclusionNode, OcclusionParams, OcclusionQuery,
 };
 pub use panner::{Panner, PannerNode, VbapPanner};
+pub use portal_graph::{
+    MAX_PORTAL_HOPS, MAX_PORTALS, MAX_ROOMS, MAX_ROUTED_PATHS, PortalHop, RoutedPath,
+    route_portals,
+};
 pub use propagation::{
     AcousticMaterial, FreeFieldBackend, MAX_PROPAGATION_PATHS, PathKind, PropagationBackend,
     PropagationPath, PropagationSummary, diffraction_cutoff_hz, diffraction_gain,
