@@ -568,7 +568,7 @@ fallback:              strand 高配, card 基线; RT 反射里毛发用 proxy �
 
 | 特性 | 桶（§8.1） | 性能要点 | 效果上限 | 易用性 / 风险 |
 |---|---|---|---|---|
-| 虚拟几何 Nanite | compute-可移植 | 几何与像素解耦；软光栅 + vis-buffer 带宽 | 亿级三角、零 LOD pop | CPU 决策层 + 软光栅数学金标准已落地，缺 GPU compute twin/物理页/流式 I/O |
+| 虚拟几何 Nanite | compute-可移植 | 几何与像素解耦；软光栅 + vis-buffer 带宽 | 亿级三角、零 LOD pop | CPU 决策层 + 软光栅数学金标准 + GPU compute twin/物理页/流式 I/O 均已落地并 Metal 实跑对拍（软/硬光栅、payload、页表解析、物理页 scatter/gather、集群剔除/光栅分类 twin 全套，见 §11 第 9 项） |
 | Lumen 混合 GI | compute + RT | surface cache 摊薄弹射；RT 加速可选 | 动态无烘焙 GI | 高复杂度；无 RT 降级 SSGI |
 | ReSTIR DI/GI | compute + RT | 储层重采样代替全光遍历 | 千级动态光低方差 | 需去噪配套；基底已就位 |
 | VSM | compute-可移植 | 只渲驻留页 | 全程一致密度阴影 | residency 已落 |
