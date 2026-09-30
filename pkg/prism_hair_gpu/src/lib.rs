@@ -52,6 +52,13 @@
 //!   transcendental-free turning one thread per strand over the strand-major
 //!   fixed-stride point pool, the two cheap scalars the density/decimation LOD
 //!   ranking consumes (see [`strand_metrics`]).
+//! * [`GpuGuideSolver`] evaluates
+//!   [`simulate_guides`](prism_render_architecture::hair::dynamics::simulate_guides),
+//!   advancing the sparse guide strands one thread per strand through the
+//!   full `XPBD` substep/iteration schedule (compliant edge-length, bending,
+//!   goal-pose and long-range-attachment constraints plus analytic body
+//!   push-out), the core strand-dynamics stage the render strands are
+//!   interpolated from (see [`guide_solver`]).
 //!
 //! # Portability
 //!
@@ -81,6 +88,7 @@
 pub mod collision;
 pub mod context;
 pub mod frames;
+pub mod guide_solver;
 pub mod ribbon;
 pub mod sdf_collision;
 pub mod self_collision_jacobi;
@@ -90,6 +98,7 @@ pub mod wind;
 pub use collision::{query_for, CollisionQuery, GpuColliderProjector};
 pub use context::{block_on, GpuContext};
 pub use frames::{GpuStrandFrame, GpuStrandFrames};
+pub use guide_solver::GpuGuideSolver;
 pub use ribbon::{GpuRibbon, GpuRibbonMesh, RibbonStrandInput};
 pub use sdf_collision::GpuSdfCollider;
 pub use self_collision_jacobi::GpuSelfCollisionJacobi;
