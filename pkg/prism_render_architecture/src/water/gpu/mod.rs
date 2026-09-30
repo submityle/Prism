@@ -15,6 +15,10 @@
 //!   and write in place across frames, and the [`buffers::AsyncFrameState`]
 //!   double-buffer state machine that sequences record → submit → retire so a
 //!   slot is never read while the `GPU` is still writing it.
+//! * [`fft_plan`] — the deterministic ping-pong pass schedule for the
+//!   separable inverse butterfly `FFT` that replaces the ocean spectrum's
+//!   `O(N^4)` direct-sum reference with the `O(N^2 log N)` transform every
+//!   shipping ocean (`WaveWorks`, `Crest`, `UE5` Water) uses.
 //!
 //! Everything here is pure integer bookkeeping with no `GPU` handles, no floats
 //! and no wall clock, so the whole `GPU` schedule is deterministic and
@@ -23,6 +27,7 @@
 //! `water_surface`) and mirror the `CPU` golden reference byte-for-byte.
 
 pub mod buffers;
+pub mod fft_plan;
 pub mod pipeline;
 
 pub use buffers::{
@@ -30,6 +35,10 @@ pub use buffers::{
     WaterPersistentBufferSet, DISPLACEMENT_TEXEL_STRIDE, FLIP_PARTICLE_STRIDE, FOAM_CELL_STRIDE,
     FROXEL_STRIDE, GERSTNER_WAVE_STRIDE, GRID_SCALAR_STRIDE, NORMAL_TEXEL_STRIDE,
     PBF_PARTICLE_STRIDE, SPECTRUM_AMPLITUDE_STRIDE, SWE_CELL_STRIDE, WETNESS_CELL_STRIDE,
+};
+
+pub use fft_plan::{
+    inverse_fft2_pass_count, plan_inverse_fft2, FftAxis, FftEntry, FftPass, FftPassParams,
 };
 
 pub use pipeline::{
