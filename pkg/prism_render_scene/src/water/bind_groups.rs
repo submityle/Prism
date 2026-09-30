@@ -50,6 +50,7 @@ use bytemuck::Pod;
 use prism_render_architecture::water::gpu::buffers::{
     WaterBufferCounts, WaterPersistentBufferSet, GRID_SCALAR_STRIDE, PBF_PARTICLE_STRIDE,
 };
+use prism_render_architecture::water::gpu::fft_pass_ping_pong;
 
 use super::abi::{
     GpuFlipParticle, GpuFlipSimParams, GpuFlipSurfaceParams, GpuGerstnerWave, GpuPbfParams,
@@ -317,7 +318,12 @@ pub(crate) struct WaterBodyGpuBuffers {
     pub(crate) scratch_g1: Buffer,
     pub(crate) scratch_g2: Buffer,
     pub(crate) scratch_g3: Buffer,
-    pub(crate) fft_params: Buffer,
+    /// One small uniform per scheduled inverse-`FFT` pass, in dispatch
+    /// order; the butterfly bind groups bind the matching payload per pass.
+    pub(crate) fft_pass_params: Vec<Buffer>,
+    /// The ocean grid edge `N`, forwarded so the dispatch node can re-derive
+    /// the per-pass dispatch dimensions and kernels from the golden plan.
+    pub(crate) ocean_n: u32,
     // Coupling.
     pub(crate) coupling_queries: Buffer,
     pub(crate) coupling_readback: Buffer,
@@ -389,14 +395,15 @@ impl WaterBodyGpuBuffers {
         let scratch_g1 = zeroed_storage(device, "prism water scratch g1", cascade_bytes);
         let scratch_g2 = zeroed_storage(device, "prism water scratch g2", cascade_bytes);
         let scratch_g3 = zeroed_storage(device, "prism water scratch g3", cascade_bytes);
-        let fft_params = uniform(
-            device,
-            "prism water fft params",
-            &super::fft_upload::fft_pass_uniforms_for(upload.ocean_extent.width)
-                .first()
-                .copied()
-                .unwrap_or_default(),
-        );
+        let ocean_n = upload.ocean_extent.width;
+        // One small uniform per scheduled inverse-`FFT` pass, in dispatch order,
+        // so the recorder can re-bind the correct pass payload before every
+        // butterfly launch. A non-power-of-two edge plans no passes and yields
+        // an empty vector (a deterministic no-op, matching the arch contract).
+        let fft_pass_params: Vec<Buffer> = super::fft_upload::fft_pass_uniforms_for(ocean_n)
+            .iter()
+            .map(|params| uniform(device, "prism water fft pass params", params))
+            .collect();
 
         // ---- FLIP / APIC ----
         let flip_particles =
@@ -675,7 +682,8 @@ impl WaterBodyGpuBuffers {
             scratch_g1,
             scratch_g2,
             scratch_g3,
-            fft_params,
+            fft_pass_params,
+            ocean_n,
             coupling_queries,
             coupling_readback,
             coupling_params,
@@ -717,8 +725,19 @@ pub(crate) struct WaterBodyBindGroups {
     pub(crate) coupling: BindGroup,
     /// `@group(0)` for `spectrum_evolve` + `spectrum_assemble` (thirteen bindings).
     pub(crate) spectrum_fft: BindGroup,
-    /// `@group(0)` for the three butterfly `FFT` passes (three bindings).
-    pub(crate) butterfly: BindGroup,
+    /// `@group(0)` butterfly `FFT` bind groups, one per `(pass, complex grid)`.
+    ///
+    /// The outer index is the pass ordinal in [`plan_inverse_fft2`] order; the
+    /// inner four are the packed<->scratch ping-pong bindings for the packed
+    /// complex grids `g0..g3`. Each binds `(src, dst, fft_pass_params[pass])`
+    /// with `src`/`dst` chosen by the golden `fft_pass_ping_pong` parity, so the
+    /// dispatch node walks the matrix without re-deriving the routing.
+    ///
+    /// [`plan_inverse_fft2`]: prism_render_architecture::water::gpu::plan_inverse_fft2
+    pub(crate) butterfly_passes: Vec<[BindGroup; 4]>,
+    /// The ocean grid edge `N`, so the dispatch node re-derives per-pass
+    /// dispatch dimensions and kernels from the golden inverse-`FFT` plan.
+    pub(crate) ocean_n: u32,
 }
 
 impl WaterBodyBindGroups {
@@ -883,15 +902,46 @@ impl WaterBodyBindGroups {
                 &buffers.spectrum_normal,
             )),
         );
-        let butterfly = device.create_bind_group(
-            "prism water butterfly",
-            &pipelines.butterfly_layout,
-            &BindGroupEntries::sequential((
-                buffers.packed_g0.as_entire_binding(),
-                buffers.scratch_g0.as_entire_binding(),
-                buffers.fft_params.as_entire_binding(),
-            )),
-        );
+        // Per-pass, per-complex-grid butterfly bind groups. Each of the four
+        // packed complex grids `g0..g3` keeps its own packed<->scratch ping-pong
+        // pair; the golden `fft_pass_ping_pong` routing picks which buffer is
+        // read and which is written for every pass (pass 0 reads the packed seed
+        // and writes scratch, and every subsequent pass flips). One bind group
+        // per `(pass, grid)` so the dispatch recorder only walks the matrix.
+        let packed = [
+            &buffers.packed_g0,
+            &buffers.packed_g1,
+            &buffers.packed_g2,
+            &buffers.packed_g3,
+        ];
+        let scratch = [
+            &buffers.scratch_g0,
+            &buffers.scratch_g1,
+            &buffers.scratch_g2,
+            &buffers.scratch_g3,
+        ];
+        let butterfly_passes: Vec<[BindGroup; 4]> = buffers
+            .fft_pass_params
+            .iter()
+            .enumerate()
+            .map(|(ordinal, pass_params)| {
+                let route = fft_pass_ping_pong(ordinal);
+                core::array::from_fn(|grid| {
+                    let pair = [packed[grid], scratch[grid]];
+                    let src = pair[route.src as usize];
+                    let dst = pair[route.dst as usize];
+                    device.create_bind_group(
+                        "prism water butterfly pass",
+                        &pipelines.butterfly_layout,
+                        &BindGroupEntries::sequential((
+                            src.as_entire_binding(),
+                            dst.as_entire_binding(),
+                            pass_params.as_entire_binding(),
+                        )),
+                    )
+                })
+            })
+            .collect();
         Self {
             ocean,
             flip,
@@ -906,7 +956,8 @@ impl WaterBodyBindGroups {
             wetness,
             coupling,
             spectrum_fft,
-            butterfly,
+            butterfly_passes,
+            ocean_n: buffers.ocean_n,
         }
     }
 }

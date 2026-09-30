@@ -20,6 +20,7 @@ use bevy_render::{
     renderer::RenderContext,
 };
 
+use prism_render_architecture::water::gpu::{plan_inverse_fft2, FftEntry};
 use prism_render_architecture::water::kernels::WaterKernel;
 
 use super::bind_groups::WaterBodyBindGroups;
@@ -55,10 +56,15 @@ fn bind_group_for<'a>(
         WaterKernel::UnderwaterVolume => &groups.underwater,
         WaterKernel::WetnessStep => &groups.wetness,
         WaterKernel::CouplingReadback => &groups.coupling,
-        WaterKernel::SpectrumEvolve | WaterKernel::SpectrumAssemble => &groups.spectrum_fft,
-        WaterKernel::FftBitReverse | WaterKernel::FftStage | WaterKernel::FftNormalize => {
-            &groups.butterfly
-        }
+        // The spectral evolve/assemble and the three butterfly passes are only
+        // ever recorded through the `SpectrumIfft` expansion below (which binds
+        // the per-pass ping-pong groups directly), never as a top-level planned
+        // dispatch; the arm exists solely to keep this match total.
+        WaterKernel::SpectrumEvolve
+        | WaterKernel::SpectrumAssemble
+        | WaterKernel::FftBitReverse
+        | WaterKernel::FftStage
+        | WaterKernel::FftNormalize => &groups.spectrum_fft,
     }
 }
 
@@ -97,6 +103,17 @@ pub(crate) fn dispatch_water(
 
     for body in &bodies.bodies {
         for dispatch in &body.dispatches {
+            // The golden plan still emits one `SpectrumIfft` marker per ocean
+            // cascade, but production no longer runs the `O(N^4)` direct-sum
+            // inverse: it expands the marker here into the separable
+            // `O(N log N)` butterfly `FFT` (spectrum evolve, then a per-grid
+            // ping-pong pass list, then the assemble that packs the four
+            // inverted complex grids into the displacement/normal textures) — the
+            // same production transform `WaveWorks`/`Crest`/`UE5` Water run.
+            if dispatch.kernel == WaterKernel::SpectrumIfft {
+                record_spectral_ifft(&mut pass, &pipelines, &cache, &body.bind_groups);
+                continue;
+            }
             // Safe to expect: readiness was gated above and the pipeline set is
             // shared by every body.
             let pipeline = cache
@@ -114,6 +131,75 @@ pub(crate) fn dispatch_water(
             pass.dispatch_workgroups(dispatch.groups, 1, 1);
         }
     }
+}
+
+/// Records one ocean cascade's production spectral inverse `FFT` in place of the
+/// `O(N^4)` direct-sum `SpectrumIfft` marker.
+///
+/// Replays the golden [`plan_inverse_fft2`] schedule on device: a spectrum
+/// evolve writes the four packed complex grids, each grid is then inverted by
+/// the deterministic ping-pong butterfly pass list (bit-reversal, `log2(N)`
+/// stages per axis, then the shared normalize), and a final assemble packs the
+/// inverted grids into the displacement and normal textures. Dispatch
+/// dimensions mirror the `8x8`-tiled `water_spectrum_fft.wesl` /
+/// `water_butterfly.wesl` entry points: the stage kernel launches one thread per
+/// butterfly pair (`N/2` along the transform axis) while every other pass covers
+/// the full `N*N` grid. A non-power-of-two edge plans no passes and is a
+/// deterministic no-op.
+fn record_spectral_ifft(
+    pass: &mut bevy_render::render_resource::ComputePass<'_>,
+    pipelines: &WaterComputePipelines,
+    cache: &PipelineCache,
+    groups: &WaterBodyBindGroups,
+) {
+    let n = groups.ocean_n;
+    let plan = plan_inverse_fft2(n);
+    if plan.is_empty() {
+        return;
+    }
+    let full = n.div_ceil(8);
+
+    // 1. Time-advance the spectrum into the four packed complex grids.
+    pass.set_pipeline(
+        cache
+            .get_compute_pipeline(pipelines.pipeline(WaterKernel::SpectrumEvolve))
+            .expect("water pipelines were all checked ready above"),
+    );
+    pass.set_bind_group(0, &groups.spectrum_fft, &[]);
+    pass.dispatch_workgroups(full, full, 1);
+
+    // 2. Invert each of the four packed complex grids with the ping-pong
+    //    butterfly pass list; every grid replays the full plan in order.
+    for grid in 0..4 {
+        for (ordinal, fft_pass) in plan.iter().enumerate() {
+            let kernel = match fft_pass.entry {
+                FftEntry::BitReversal => WaterKernel::FftBitReverse,
+                FftEntry::Butterfly => WaterKernel::FftStage,
+                FftEntry::Normalize => WaterKernel::FftNormalize,
+            };
+            pass.set_pipeline(
+                cache
+                    .get_compute_pipeline(pipelines.pipeline(kernel))
+                    .expect("water pipelines were all checked ready above"),
+            );
+            pass.set_bind_group(0, &groups.butterfly_passes[ordinal][grid], &[]);
+            let groups_x = match fft_pass.entry {
+                FftEntry::Butterfly => (n / 2).div_ceil(8),
+                FftEntry::BitReversal | FftEntry::Normalize => full,
+            };
+            pass.dispatch_workgroups(groups_x, full, 1);
+        }
+    }
+
+    // 3. Pack the four inverted complex grids into the displacement/normal
+    //    storage textures the render passes sample.
+    pass.set_pipeline(
+        cache
+            .get_compute_pipeline(pipelines.pipeline(WaterKernel::SpectrumAssemble))
+            .expect("water pipelines were all checked ready above"),
+    );
+    pass.set_bind_group(0, &groups.spectrum_fft, &[]);
+    pass.dispatch_workgroups(full, full, 1);
 }
 
 #[cfg(test)]
@@ -173,8 +259,13 @@ mod tests {
             WaterKernel::UnderwaterVolume => 9,
             WaterKernel::WetnessStep => 10,
             WaterKernel::CouplingReadback => 11,
-            WaterKernel::SpectrumEvolve | WaterKernel::SpectrumAssemble => 12,
-            WaterKernel::FftBitReverse | WaterKernel::FftStage | WaterKernel::FftNormalize => 13,
+            // All five spectral/butterfly kernels bind the shared spectrum_fft
+            // group in `bind_group_for`, so the mirror collapses them together.
+            WaterKernel::SpectrumEvolve
+            | WaterKernel::SpectrumAssemble
+            | WaterKernel::FftBitReverse
+            | WaterKernel::FftStage
+            | WaterKernel::FftNormalize => 12,
         }
     }
 }
