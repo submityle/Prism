@@ -22,6 +22,9 @@
 //! - [`capsule`] / [`GpuCapsuleNarrowphase`]: sphere versus a capsule (a segment
 //!   swept by a radius), collapsing to sphere-sphere against the closest point
 //!   on the segment.
+//! - [`capsule_capsule`] / [`GpuCapsuleCapsuleNarrowphase`]: capsule versus
+//!   capsule (dynamic-dynamic), finding the closest point pair between the two
+//!   segments and collapsing to sphere-sphere there.
 //! - [`obb`] / [`GpuObbNarrowphase`]: sphere versus an oriented bounding box,
 //!   clamping the sphere centre in the box frame with an interior push-out
 //!   fallback through the least-penetrated face.
@@ -42,6 +45,8 @@
 //! or derived code.
 
 mod capsule;
+mod capsule_capsule;
+mod capsule_capsule_gpu;
 mod capsule_gpu;
 mod contact;
 mod cpu;
@@ -54,6 +59,8 @@ mod obb_gpu;
 mod sphere;
 
 pub use capsule::{cpu_capsule_narrowphase, Capsule, SphereCapsulePair};
+pub use capsule_capsule::{cpu_capsule_capsule_narrowphase, CapsuleCapsulePair};
+pub use capsule_capsule_gpu::GpuCapsuleCapsuleNarrowphase;
 pub use capsule_gpu::GpuCapsuleNarrowphase;
 pub use contact::Contact;
 pub use cpu::cpu_narrowphase;

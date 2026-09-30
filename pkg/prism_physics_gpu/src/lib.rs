@@ -85,8 +85,9 @@ pub use mpm::{
     StepParticles,
 };
 pub use narrowphase::{
-    cpu_capsule_narrowphase, cpu_halfspace_narrowphase, cpu_narrowphase, cpu_obb_narrowphase,
-    Capsule, Contact, GpuCapsuleNarrowphase, GpuHalfspaceNarrowphase, GpuNarrowphase,
+    cpu_capsule_capsule_narrowphase, cpu_capsule_narrowphase, cpu_halfspace_narrowphase,
+    cpu_narrowphase, cpu_obb_narrowphase, Capsule, CapsuleCapsulePair, Contact,
+    GpuCapsuleCapsuleNarrowphase, GpuCapsuleNarrowphase, GpuHalfspaceNarrowphase, GpuNarrowphase,
     GpuObbNarrowphase, Obb, Plane, SphereCapsulePair, SphereObbPair, SpherePlanePair,
 };
 pub use radix::{cpu_radix_sort_keys, cpu_radix_sort_pairs, GpuRadixSort};
