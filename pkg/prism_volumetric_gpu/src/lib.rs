@@ -62,6 +62,7 @@ pub mod blend_with_atmosphere;
 pub mod cloud_shadow_modulation;
 pub mod context;
 pub mod contrail_kernel;
+pub mod contrail_spread;
 pub mod curl;
 pub mod density_delta;
 pub mod fog;
@@ -98,6 +99,7 @@ pub use blend_with_atmosphere::{BlendQuery, BlendedColor, GpuBlendWithAtmosphere
 pub use cloud_shadow_modulation::{CloudShadowModulationQuery, GpuCloudShadowModulation};
 pub use context::{block_on, GpuContext};
 pub use contrail_kernel::{ContrailKernelQuery, GpuContrailKernel};
+pub use contrail_spread::{ContrailSpreadQuery, GpuContrailSpread};
 pub use curl::{CurlQuery, GpuCurl};
 pub use density_delta::{CarveBrush, DensityDeltaQuery, GpuDensityDelta};
 pub use fog::{FogQuery, GpuFogTransmittance};
