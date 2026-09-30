@@ -22,6 +22,9 @@
 //! - [`capsule`] / [`GpuCapsuleNarrowphase`]: sphere versus a capsule (a segment
 //!   swept by a radius), collapsing to sphere-sphere against the closest point
 //!   on the segment.
+//! - [`obb`] / [`GpuObbNarrowphase`]: sphere versus an oriented bounding box,
+//!   clamping the sphere centre in the box frame with an interior push-out
+//!   fallback through the least-penetrated face.
 //!
 //! Every pair emits one contact slot per input candidate: a passing real-device
 //! parity test is direct evidence the ported kernel builds the same manifolds as
@@ -46,6 +49,8 @@ mod gpu;
 mod halfspace;
 mod halfspace_gpu;
 mod layout;
+mod obb;
+mod obb_gpu;
 mod sphere;
 
 pub use capsule::{cpu_capsule_narrowphase, Capsule, SphereCapsulePair};
@@ -55,3 +60,5 @@ pub use cpu::cpu_narrowphase;
 pub use gpu::GpuNarrowphase;
 pub use halfspace::{cpu_halfspace_narrowphase, Plane, SpherePlanePair};
 pub use halfspace_gpu::GpuHalfspaceNarrowphase;
+pub use obb::{cpu_obb_narrowphase, Obb, SphereObbPair};
+pub use obb_gpu::GpuObbNarrowphase;
