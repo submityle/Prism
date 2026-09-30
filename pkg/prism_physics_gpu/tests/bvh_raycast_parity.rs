@@ -20,7 +20,8 @@
 
 use glam::Vec3;
 use prism_physics_gpu::{
-    cpu_build_lbvh, cpu_bvh_raycast_closest, Aabb, GpuBvhRaycast, GpuContext, GpuLbvh, Ray, RayHit,
+    cpu_build_lbvh, cpu_bvh_raycast_any, cpu_bvh_raycast_closest, Aabb, GpuBvhRaycast, GpuContext,
+    GpuLbvh, Ray, RayHit,
 };
 
 /// A small xorshift generator so the tests are deterministic without pulling in
@@ -244,4 +245,168 @@ fn empty_ray_batch_returns_empty() {
     let got = raycast.query_closest(&ctx, &resident, &[]);
     ctx.wait();
     assert!(got.is_empty(), "no rays yields no hits");
+}
+
+/// Builds the tree resident on device, casts `rays` with the any-hit kernel, and
+/// asserts each flag exactly equals the [`cpu_bvh_raycast_any`] brute-force twin
+/// over the host-built tree.
+///
+/// Any-hit answers a boolean, so the tolerance that closest-hit distances need
+/// never enters: every scene here is built so each ray either clears every box
+/// or strikes one squarely, and the flag must match the twin bit-for-bit.
+#[expect(clippy::print_stderr, reason = "surface the ray on parity failure")]
+fn assert_any_matches(
+    builder: &GpuLbvh,
+    raycast: &GpuBvhRaycast,
+    ctx: &GpuContext,
+    boxes: &[Aabb],
+    rays: &[Ray],
+) {
+    let tree = cpu_build_lbvh(boxes);
+    let resident = builder.build_resident(ctx, boxes);
+    let got = raycast.query_any(ctx, &resident, rays);
+    ctx.wait();
+    assert_eq!(got.len(), rays.len(), "one flag slot per ray");
+    for (i, ray) in rays.iter().enumerate() {
+        let want = cpu_bvh_raycast_any(&tree, *ray);
+        if want != got[i] {
+            eprintln!(
+                "ray {i} origin {:?} dir {:?}: cpu {want} vs gpu {}",
+                ray.origin, ray.dir, got[i]
+            );
+            panic!("any-hit mismatch at ray {i}");
+        }
+    }
+}
+
+#[test]
+fn wall_of_boxes_any_matches_the_twin() {
+    let Some(ctx) = GpuContext::try_headless() else {
+        return;
+    };
+    let builder = GpuLbvh::new(&ctx);
+    let raycast = GpuBvhRaycast::new(&ctx);
+    // The same +x wall the closest-hit test uses: ten unit boxes five units
+    // apart, so a forward ray blocks and a straight-up ray clears the wall.
+    let boxes: Vec<Aabb> = (1..=10).map(|k| box_at(k as f32 * 5.0, 0.0, 0.0)).collect();
+    let mut rng = Rng::new(0x5151_5151_a2a2_a2a2);
+    let mut rays = Vec::new();
+    // Forward rays that strike box 0 squarely: each is blocked.
+    for _ in 0..40 {
+        let y = rng.coord(-0.2, 0.4);
+        let z = rng.coord(-0.2, 0.4);
+        rays.push(Ray::new(
+            Vec3::ZERO,
+            Vec3::new(1.0, y, z).normalize(),
+            100.0,
+        ));
+    }
+    // Rays shooting straight up between the boxes clear the whole wall.
+    for _ in 0..20 {
+        let x = rng.coord(5.0, 45.0);
+        rays.push(Ray::new(Vec3::new(x, -5.0, 0.0), Vec3::Y, 3.0));
+    }
+    assert_any_matches(&builder, &raycast, &ctx, &boxes, &rays);
+}
+
+#[test]
+fn sparse_targets_any_matches_the_twin() {
+    let Some(ctx) = GpuContext::try_headless() else {
+        return;
+    };
+    let builder = GpuLbvh::new(&ctx);
+    let raycast = GpuBvhRaycast::new(&ctx);
+    // A coarse grid eight units apart. Half the rays aim at a box centre (a
+    // clean block); half aim into the wide empty gaps between planes (a clean
+    // clear), so no ray grazes a boundary.
+    let mut centres = Vec::new();
+    for x in 0..3 {
+        for y in 0..3 {
+            for z in 0..3 {
+                centres.push(Vec3::new(x as f32 * 8.0, y as f32 * 8.0, z as f32 * 8.0));
+            }
+        }
+    }
+    let boxes: Vec<Aabb> = centres.iter().map(|c| box_at(c.x, c.y, c.z)).collect();
+    let mut rng = Rng::new(0x9e37_79b9_7f4a_7c15);
+    let mut rays = Vec::new();
+    // Aimed at a centre: blocked.
+    for _ in 0..40 {
+        let target = centres[(rng.next_u64() as usize) % centres.len()];
+        let origin = Vec3::new(
+            rng.coord(-40.0, 20.0),
+            rng.coord(-40.0, 20.0),
+            rng.coord(-40.0, 20.0),
+        );
+        let dir = (target - origin).normalize();
+        rays.push(Ray::new(origin, dir, 500.0));
+    }
+    // Fired straight along +x on a y/z gap plane: the box centres sit on
+    // multiples of eight, so a track near y = z = 4 stays at least three units
+    // clear of every box and the ray traverses the whole grid hitting nothing.
+    for _ in 0..20 {
+        let y = rng.coord(3.5, 1.0);
+        let z = rng.coord(3.5, 1.0);
+        let origin = Vec3::new(-40.0, y, z);
+        rays.push(Ray::new(origin, Vec3::X, 120.0));
+    }
+    assert_any_matches(&builder, &raycast, &ctx, &boxes, &rays);
+}
+
+#[test]
+fn t_max_gates_the_any_hit() {
+    let Some(ctx) = GpuContext::try_headless() else {
+        return;
+    };
+    let builder = GpuLbvh::new(&ctx);
+    let raycast = GpuBvhRaycast::new(&ctx);
+    // Two well-separated boxes; the nearest face is at x = 4.5, the far one at
+    // x = 19.5.
+    let boxes = [box_at(5.0, 0.0, 0.0), box_at(20.0, 0.0, 0.0)];
+    let rays = [
+        // t_max short of the near face: nothing in range.
+        Ray::new(Vec3::ZERO, Vec3::X, 4.0),
+        // t_max past the near face: blocked by box 0.
+        Ray::new(Vec3::ZERO, Vec3::X, 6.0),
+        // Straight up from between the boxes: clears both.
+        Ray::new(Vec3::new(12.0, -5.0, 0.0), Vec3::Y, 3.0),
+    ];
+    assert_any_matches(&builder, &raycast, &ctx, &boxes, &rays);
+}
+
+#[test]
+fn trivial_trees_report_no_any_hit() {
+    let Some(ctx) = GpuContext::try_headless() else {
+        return;
+    };
+    let builder = GpuLbvh::new(&ctx);
+    let raycast = GpuBvhRaycast::new(&ctx);
+    // A resident tree with fewer than two leaves owns no buffers, so the
+    // resident kernel reports no hit for every ray. The full n <= 1 behaviour is
+    // covered by the CPU twin's own unit tests.
+    let rays = [
+        Ray::new(Vec3::ZERO, Vec3::X, 100.0),
+        Ray::new(Vec3::new(1.0, 2.0, 3.0), Vec3::NEG_Z, 100.0),
+    ];
+    for boxes in [Vec::new(), vec![box_at(0.0, 0.0, 0.0)]] {
+        let resident = builder.build_resident(&ctx, &boxes);
+        let got = raycast.query_any(&ctx, &resident, &rays);
+        ctx.wait();
+        assert_eq!(got.len(), rays.len());
+        assert!(got.iter().all(|hit| !hit), "trivial tree hits nothing");
+    }
+}
+
+#[test]
+fn empty_ray_batch_returns_empty_any() {
+    let Some(ctx) = GpuContext::try_headless() else {
+        return;
+    };
+    let builder = GpuLbvh::new(&ctx);
+    let raycast = GpuBvhRaycast::new(&ctx);
+    let boxes = [box_at(0.0, 0.0, 0.0), box_at(2.0, 0.0, 0.0)];
+    let resident = builder.build_resident(&ctx, &boxes);
+    let got = raycast.query_any(&ctx, &resident, &[]);
+    ctx.wait();
+    assert!(got.is_empty(), "no rays yields no flags");
 }
