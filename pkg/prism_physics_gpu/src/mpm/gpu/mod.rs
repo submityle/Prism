@@ -20,4 +20,4 @@ pub mod constitutive;
 pub mod layout;
 pub mod params;
 
-pub use constitutive::GpuMpmConstitutive;
+pub use constitutive::{ConstitutiveOutput, GpuMpmConstitutive};

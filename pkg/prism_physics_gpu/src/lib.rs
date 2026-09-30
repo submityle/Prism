@@ -58,4 +58,4 @@ pub use fluid::{
 pub use xpbd::{
     cpu_solve, Colouring, DistanceConstraint, GpuXpbdSolver, ParticleState, XpbdConfig, XpbdError,
 };
-pub use mpm::GpuMpmConstitutive;
+pub use mpm::{ConstitutiveOutput, GpuMpmConstitutive};
