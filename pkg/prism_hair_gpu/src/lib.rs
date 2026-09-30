@@ -59,6 +59,15 @@
 //!   goal-pose and long-range-attachment constraints plus analytic body
 //!   push-out), the core strand-dynamics stage the render strands are
 //!   interpolated from (see [`guide_solver`]).
+//! * [`GpuVbdSolver`] evaluates
+//!   [`simulate_strand_vbd`](prism_render_architecture::hair::solver::simulate_strand_vbd),
+//!   the stiff-groom sister of the `XPBD` guide solver: one thread per strand
+//!   walks the same substep/iteration schedule but minimizes the backward-Euler
+//!   incremental potential block-locally, taking one exact per-vertex Newton
+//!   step against that vertex's own 3x3 Hessian (stretch, bending and inertial
+//!   terms) each Gauss-Seidel sweep plus analytic body push-out — the high
+//!   effective stiffness braids, dreadlocks and gel-set styles need that
+//!   position-based projection cannot reach (see [`vbd_solver`]).
 //! * [`GpuHairInterp`] evaluates
 //!   [`interpolate_render_strand`](prism_render_architecture::hair::interpolation::interpolate_render_strand),
 //!   expanding each render strand from its (up to four) guides one thread per
@@ -250,6 +259,7 @@ pub mod self_collision_grid;
 pub mod self_collision_jacobi;
 pub mod strand_metrics;
 pub mod transition;
+pub mod vbd_solver;
 pub mod voxel_density;
 pub mod voxel_forward_scatter;
 pub mod voxel_transmittance;
@@ -276,6 +286,7 @@ pub use self_collision_grid::GpuSelfCollisionGrid;
 pub use self_collision_jacobi::GpuSelfCollisionJacobi;
 pub use strand_metrics::{GpuStrandMetric, GpuStrandMetrics};
 pub use transition::GpuHairTransition;
+pub use vbd_solver::GpuVbdSolver;
 pub use voxel_density::GpuHairVoxelDensity;
 pub use voxel_forward_scatter::GpuHairVoxelForwardScatter;
 pub use voxel_transmittance::GpuHairVoxelTransmittance;
