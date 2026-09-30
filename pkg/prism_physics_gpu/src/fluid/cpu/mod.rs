@@ -13,6 +13,7 @@
 //! 2005, Bridson, and (for the affine path) Jiang et al. 2015. No Unreal Engine
 //! source or derived code.
 
+pub mod extrapolate;
 pub mod fields;
 pub mod g2p;
 pub mod grid_ops;
@@ -20,6 +21,7 @@ pub mod p2g;
 pub mod pressure;
 pub mod stencil;
 
+pub use extrapolate::{extrapolate_axis, AxisDims};
 pub use fields::GoldenGrid;
 pub use g2p::grid_to_particle;
 pub use grid_ops::{add_gravity, enforce_solid_faces};

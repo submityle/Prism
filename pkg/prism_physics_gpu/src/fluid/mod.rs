@@ -41,9 +41,9 @@ pub mod quantize;
 
 pub use config::{FluidConfig, FluidError, TransferMode};
 pub use cpu::{
-    add_gravity, enforce_solid_faces, grid_to_particle, particle_to_grid, GoldenGrid,
-    PressureConfig,
+    add_gravity, enforce_solid_faces, extrapolate_axis, grid_to_particle, particle_to_grid,
+    AxisDims, GoldenGrid, PressureConfig,
 };
-pub use gpu::{GpuFluidSolver, GpuGridOps, GpuPressureSolver};
+pub use gpu::{GpuExtrapolate, GpuFluidSolver, GpuGridOps, GpuPressureSolver};
 pub use grid::{CellType, GridDims};
 pub use particle::FluidParticles;
