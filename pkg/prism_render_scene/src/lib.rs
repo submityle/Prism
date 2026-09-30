@@ -18,8 +18,8 @@ mod geometry;
 mod lighting;
 mod material;
 mod opaque;
-mod raytrace;
 mod plugin;
+mod raytrace;
 mod scene;
 mod shading;
 mod visibility;
@@ -28,8 +28,8 @@ mod water;
 pub use buffers::{
     GpuSceneBuffers, RenderGpuSceneBounds, RenderGpuSceneInstance, RenderGpuSceneTransform,
 };
-pub use compare::GpuSceneParityDiagnostics;
 pub use cloth::{ClothGarment, ClothGarmentBuilder};
+pub use compare::GpuSceneParityDiagnostics;
 pub use completion::GpuCompletionTracker;
 pub use consumer::{GpuSceneBufferBindings, GpuSceneReader};
 pub use diagnostics::{GpuSceneDiagnostics, GpuSceneUploadSettings};
@@ -64,7 +64,10 @@ pub use visibility::{
     PrismVisibilityDiagnostics, PrismVisibilityPlugin, UnifiedVisibilityEnabled,
     UnifiedVisibilityReader,
 };
-pub use water::{FlipPoolPreset, OceanPreset, PbfPoolPreset, ShallowWaterPreset, WaterBody};
+pub use water::{
+    FlipPoolPreset, OceanPreset, PbfPoolPreset, RiverControlPoint, RiverPreset, ShallowWaterPreset,
+    WaterBody,
+};
 
 #[cfg(test)]
 mod tests;
