@@ -18,11 +18,14 @@
 //! backend" where the descriptors anticipate them.
 //!
 //! Any frame-budget, bandwidth, or occupancy figure implied by a workgroup
-//! size here is a **design target, not a measured value**: without the `GPU`
-//! backend online there is nothing to measure against, so the numbers only
-//! encode the intended tiling (a 8x8 screen tile, a 4x4x4 voxel brick, a
-//! 64-lane linear particle group) and must be re-tuned against real Metal
-//! captures once the backend lands.
+//! size here starts life as a **design target** encoding the intended tiling
+//! (a 8x8 screen tile, a 4x4x4 voxel brick, a 64-lane linear particle group).
+//! The ocean spectrum `evolve`/`assemble` passes are no longer unmeasured: the
+//! `prism_render_scene::water::gpu_bench` harness now times them on real
+//! hardware via `TIMESTAMP_QUERY` (median of repeated dispatches), so those
+//! tiles can be re-tuned against captured microseconds rather than estimates.
+//! The remaining tiles stay design targets until an equivalent measured pass
+//! lands for each and should still be validated against real Metal captures.
 //!
 //! Everything exposed here is a pure, deterministic function of a
 //! [`WaterKernel`] tag — no `GPU` state, no floats, no allocation — so the

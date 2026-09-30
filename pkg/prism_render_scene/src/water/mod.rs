@@ -42,6 +42,8 @@ mod dispatch;
 mod extract;
 mod fft_upload;
 #[cfg(test)]
+mod gpu_bench;
+#[cfg(test)]
 mod gpu_tests;
 mod pipeline;
 pub(crate) mod plugin;
