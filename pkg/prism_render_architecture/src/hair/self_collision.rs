@@ -115,7 +115,11 @@ pub fn resolve_self_collision(particles: &mut [StrandParticle], params: SelfColl
         for dx in -1..=1 {
             for dy in -1..=1 {
                 for dz in -1..=1 {
-                    if let Some(bucket) = grid.get(&(cx + dx, cy + dy, cz + dz)) {
+                    if let Some(bucket) = grid.get(&(
+                        cx.saturating_add(dx),
+                        cy.saturating_add(dy),
+                        cz.saturating_add(dz),
+                    )) {
                         for &j in bucket {
                             if j > i {
                                 candidates.push(j);
@@ -204,6 +208,23 @@ mod tests {
         resolve_self_collision(&mut ps, params());
         assert!(ps[0].position.length_squared() < 1.0e-12);
         assert!((ps[1].position.x - 5.0).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn extreme_finite_positions_do_not_overflow() {
+        // A finite but extreme coordinate saturates to the i32 cell boundary in
+        // `cell_of`; gathering the 27-cell neighborhood must use saturating
+        // offsets so `cx + 1` / `cx - 1` never overflows. This particle sits
+        // alone in a saturated cell, so it stays put, but the call must not
+        // panic (honors the no-op/no-panic contract for finite input).
+        let mut ps = vec![
+            StrandParticle::free(Vec3::new(1.0e30, -1.0e30, 1.0e30)),
+            StrandParticle::free(Vec3::new(0.0, 0.0, 0.0)),
+        ];
+        resolve_self_collision(&mut ps, params());
+        // Extreme particle is alone in its saturated cell: unchanged.
+        assert!((ps[0].position.x - 1.0e30).abs() <= 1.0e24);
+        assert!(ps[1].position.length_squared() < 1.0e-12);
     }
 
     #[test]

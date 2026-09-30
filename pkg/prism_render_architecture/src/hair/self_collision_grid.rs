@@ -129,14 +129,22 @@ impl UniformGrid {
     /// each axis and sorted ascending. Filtering the result by `index > i`
     /// reproduces the candidate set that
     /// [`super::self_collision::resolve_self_collision`] gathers inline for
-    /// particle `i`, so the two stay value-for-value in parity.
+    /// particle `i`, so the two stay value-for-value in parity. The per-axis
+    /// offset uses [`i32::saturating_add`] so a boundary cell (a finite but
+    /// extreme position that saturates to `i32::MAX`/`MIN` in
+    /// [`grid_cell_of`]) can never overflow — the query stays total and
+    /// panic-free, matching the golden.
     pub fn neighbors(&self, cell: GridCell, out: &mut Vec<u32>) {
         out.clear();
         let (cx, cy, cz) = cell;
         for dx in -1..=1 {
             for dy in -1..=1 {
                 for dz in -1..=1 {
-                    if let Some(bucket) = self.cells.get(&(cx + dx, cy + dy, cz + dz)) {
+                    if let Some(bucket) = self.cells.get(&(
+                        cx.saturating_add(dx),
+                        cy.saturating_add(dy),
+                        cz.saturating_add(dz),
+                    )) {
                         out.extend_from_slice(bucket);
                     }
                 }
@@ -386,5 +394,23 @@ mod tests {
         for w in csr.cell_keys.windows(2) {
             assert!(w[0] < w[1]);
         }
+    }
+
+    #[test]
+    fn neighbors_at_i32_boundary_never_overflows() {
+        // A finite but extreme position saturates to the i32 cell boundary in
+        // `grid_cell_of`; gathering its 27-cell neighborhood must not overflow
+        // `cx + 1` / `cx - 1`. This asserts the saturating-add contract.
+        let grid = UniformGrid::default();
+        let mut out = Vec::new();
+        grid.neighbors((i32::MAX, i32::MAX, i32::MAX), &mut out);
+        assert!(out.is_empty());
+        grid.neighbors((i32::MIN, i32::MIN, i32::MIN), &mut out);
+        assert!(out.is_empty());
+        // Same via a real saturating position fed through grid_cell_of.
+        let cell = grid_cell_of(Vec3::new(1.0e30, -1.0e30, 1.0e30), 1.0);
+        assert_eq!(cell, (i32::MAX, i32::MIN, i32::MAX));
+        grid.neighbors(cell, &mut out);
+        assert!(out.is_empty());
     }
 }
