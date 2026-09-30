@@ -169,6 +169,12 @@ pub(crate) fn build_solve_plan(input: &ClothSolveInput<'_>) -> ClothSolvePlan {
     let self_collision = input.hash_cell_count > 0 && particle_count > 0;
     let embed = input.render_vertex_count > 0 && !input.embed_bindings.is_empty();
     let backstop = !input.backstops.is_empty();
+    // The rigid body-collision resolve only projects particles out of colliders
+    // when the piece carries at least one; an empty set makes the CPU golden
+    // `resolve_body_collisions` a no-op, so the GPU schedule drops the pass to
+    // stay in lockstep (and to avoid forcing consumers to compile the collision
+    // module for zero work).
+    let body = !input.colliders.is_empty() && particle_count > 0;
 
     // Aerodynamics needs a driving wind (steady or turbulent) *and* a triangle
     // topology to integrate that wind over; with neither there is no force to
@@ -204,6 +210,7 @@ pub(crate) fn build_solve_plan(input: &ClothSolveInput<'_>) -> ClothSolvePlan {
         backstop,
         aerodynamics,
         strain,
+        body,
     );
     let prepared = prepare(&plan);
 

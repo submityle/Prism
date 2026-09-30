@@ -58,6 +58,17 @@ pub struct ClothGpuExtract {
     /// over-stretched edge to its rest length (which a `1 + 0` max-scale would
     /// otherwise do), diverging from the golden.
     pub strain: bool,
+    /// Whether the rigid body-collider resolve pass runs this frame.
+    ///
+    /// Gated by collider presence: the CPU golden
+    /// `solve_cloth_with_collision` only projects particles out of colliders
+    /// when the piece carries at least one collider. A garment with no
+    /// colliders must drop the pass entirely rather than schedule a
+    /// zero-collider dispatch — both to avoid useless GPU work and because the
+    /// `cloth_body_collision` kernel lives in the sibling `cloth_collision.wesl`
+    /// module, so an unconditional dispatch would force every consumer to
+    /// compile that module even when no body collision is needed.
+    pub body: bool,
 }
 
 /// The per-color addressing window a graph-colored projection dispatch writes.
@@ -176,6 +187,7 @@ pub fn extract(
     backstop: bool,
     aerodynamics: bool,
     strain: bool,
+    body: bool,
 ) -> ClothGpuExtract {
     ClothGpuExtract {
         counts,
@@ -189,6 +201,7 @@ pub fn extract(
         backstop,
         aerodynamics,
         strain,
+        body,
     }
 }
 
@@ -356,12 +369,14 @@ pub fn prepare(extract: &ClothGpuExtract) -> ClothGpuPrepare {
             );
         }
 
-        push_particle(
-            &mut dispatches,
-            ClothKernel::BodyCollision,
-            particles,
-            group,
-        );
+        if extract.body {
+            push_particle(
+                &mut dispatches,
+                ClothKernel::BodyCollision,
+                particles,
+                group,
+            );
+        }
         if extract.backstop {
             push_particle(&mut dispatches, ClothKernel::Backstop, particles, group);
         }
@@ -475,6 +490,7 @@ mod tests {
             true,
             true,
             true,
+            true,
         )
     }
 
@@ -487,6 +503,7 @@ mod tests {
             Vec::new(),
             0,
             0,
+            false,
             false,
             false,
             false,
@@ -645,6 +662,7 @@ mod tests {
             false,
             false,
             false,
+            false,
         );
         let plan = prepare(&e);
         let has_distance = plan
@@ -663,6 +681,7 @@ mod tests {
             Vec::new(),
             1,
             1,
+            false,
             false,
             false,
             false,
@@ -754,12 +773,60 @@ mod tests {
             false,
             false,
             false,
+            false,
         );
         let plan = prepare(&e);
         assert!(!plan
             .dispatches
             .iter()
             .any(|d| d.kernel == ClothKernel::Backstop));
+    }
+
+    #[test]
+    fn disabling_body_collision_drops_its_pass() {
+        // With no colliders the piece disables the body flag, so the schedule
+        // must not emit a `cloth_body_collision` dispatch. This mirrors the
+        // CPU golden `solve_cloth_with_collision`, whose body-collider resolve
+        // is a no-op when the collider set is empty, and keeps the sim parity
+        // harness (which only compiles `cloth_sim.wesl`) from having to resolve
+        // a kernel that lives in the sibling `cloth_collision.wesl` module.
+        let e = extract(
+            sample_counts(),
+            vec![50],
+            Vec::new(),
+            Vec::new(),
+            1,
+            1,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+        );
+        let plan = prepare(&e);
+        assert!(
+            !plan
+                .dispatches
+                .iter()
+                .any(|d| d.kernel == ClothKernel::BodyCollision),
+            "body-collision dispatch must be dropped when no collider is present"
+        );
+    }
+
+    #[test]
+    fn body_collision_scheduled_once_per_substep_when_enabled() {
+        // `sample_extract` enables the body flag and runs two substeps, so the
+        // schedule records exactly one body-collision resolve per substep.
+        let e = sample_extract();
+        assert!(e.body);
+        let plan = prepare(&e);
+        let bodies = plan
+            .dispatches
+            .iter()
+            .filter(|d| d.kernel == ClothKernel::BodyCollision)
+            .count();
+        assert_eq!(bodies, 2);
     }
 
     #[test]
@@ -771,6 +838,7 @@ mod tests {
             Vec::new(),
             1,
             3,
+            false,
             false,
             false,
             false,
@@ -879,6 +947,7 @@ mod tests {
             Vec::new(),
             1,
             1,
+            false,
             false,
             false,
             false,
