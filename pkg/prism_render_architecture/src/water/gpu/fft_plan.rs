@@ -171,6 +171,45 @@ pub fn plan_inverse_fft2(n: u32) -> Vec<FftPass> {
     passes
 }
 
+/// The physical source and destination complex buffer a single ping-pong pass
+/// reads from and writes to.
+///
+/// A grid keeps two resident complex buffers: buffer `0` seeds the spectrum and
+/// buffer `1` is scratch. Every scheduled pass reads one and writes the other,
+/// so the routing is pure parity of the pass position within the plan.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct FftPingPong {
+    /// The complex buffer index (`0` or `1`) the pass reads from.
+    pub src: u32,
+    /// The complex buffer index (`0` or `1`) the pass writes to.
+    pub dst: u32,
+}
+
+/// The physical `src`/`dst` complex buffer selection for the pass at `ordinal`
+/// in a [`plan_inverse_fft2`] pass list.
+///
+/// Every pass ping-pongs, so pass `0` reads the seed buffer `0` and writes the
+/// scratch buffer `1`, and each subsequent pass flips. The dispatch recorder
+/// uses this to bind the correct physical buffer as the read and read-write
+/// binding of `water_butterfly.wesl` without re-deriving the parity itself.
+#[must_use]
+pub fn fft_pass_ping_pong(ordinal: usize) -> FftPingPong {
+    let src = (ordinal & 1) as u32;
+    FftPingPong { src, dst: src ^ 1 }
+}
+
+/// The physical complex buffer index holding the finished transform after the
+/// full `n * n` inverse plan runs — where the assemble stage reads each grid.
+///
+/// A valid power-of-two edge always schedules an odd pass count
+/// (`2 * (1 + log2(n)) + 1`), so the result always lands in the scratch buffer
+/// `1`; a degenerate or non-power-of-two edge plans no passes and leaves the
+/// result in the seed buffer `0`.
+#[must_use]
+pub fn fft_result_buffer(n: u32) -> u32 {
+    (inverse_fft2_pass_count(n) & 1) as u32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -320,6 +359,57 @@ mod tests {
                 FftEntry::BitReversal | FftEntry::Normalize => assert_eq!(pass.params.len, 0),
                 FftEntry::Butterfly => assert!(pass.params.len >= 2),
             }
+        }
+    }
+
+    #[test]
+    fn ping_pong_reads_the_seed_then_flips_every_pass() {
+        // Pass 0 reads the seed buffer 0 and writes scratch 1; each subsequent
+        // pass swaps the roles, so src is exactly the pass-position parity.
+        for ordinal in 0..8usize {
+            let route = fft_pass_ping_pong(ordinal);
+            let expected_src = (ordinal & 1) as u32;
+            assert_eq!(route.src, expected_src);
+            assert_eq!(route.dst, expected_src ^ 1);
+            assert_ne!(route.src, route.dst);
+        }
+    }
+
+    #[test]
+    fn ping_pong_src_dst_are_always_the_two_valid_buffers() {
+        for ordinal in 0..16usize {
+            let route = fft_pass_ping_pong(ordinal);
+            assert!(route.src < 2);
+            assert!(route.dst < 2);
+        }
+    }
+
+    #[test]
+    fn result_buffer_is_the_scratch_for_every_valid_edge() {
+        // A valid power-of-two edge always plans an odd pass count, so the
+        // finished transform always lands in the scratch buffer 1.
+        for &n in &[2u32, 4, 8, 16, 64, 256, 512] {
+            assert_eq!(fft_result_buffer(n), 1, "n = {n}");
+        }
+    }
+
+    #[test]
+    fn result_buffer_is_the_seed_for_empty_plans() {
+        // Degenerate and non-power-of-two edges plan no passes, so the result
+        // trivially stays in the seed buffer 0.
+        for &n in &[0u32, 1, 3, 24] {
+            assert_eq!(fft_result_buffer(n), 0, "n = {n}");
+        }
+    }
+
+    #[test]
+    fn result_buffer_matches_the_parity_of_the_scheduled_pass_count() {
+        for &n in &[2u32, 4, 16, 256] {
+            let count = inverse_fft2_pass_count(n);
+            let route = fft_pass_ping_pong(count.saturating_sub(1));
+            // The last pass writes into the result buffer; that destination is
+            // exactly what `fft_result_buffer` reports for the grid edge.
+            assert_eq!(route.dst, fft_result_buffer(n), "n = {n}");
         }
     }
 }

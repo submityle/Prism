@@ -42,7 +42,8 @@ pub use buffers::{
 };
 
 pub use fft_plan::{
-    inverse_fft2_pass_count, plan_inverse_fft2, FftAxis, FftEntry, FftPass, FftPassParams,
+    fft_pass_ping_pong, fft_result_buffer, inverse_fft2_pass_count, plan_inverse_fft2, FftAxis,
+    FftEntry, FftPass, FftPassParams, FftPingPong,
 };
 
 pub use pipeline::{
