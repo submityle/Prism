@@ -21,12 +21,15 @@
 //!   the classic sweeping comb / "jet" effect.
 //! - [`phaser::PhaserNode`] — cascaded first-order all-pass stages swept by an
 //!   LFO to drag notches through the spectrum.
+//! - [`stereo_width::StereoWidthNode`] — Mid-Side stereo widener with an
+//!   optional bass-mono crossover for image control.
 
 pub mod chorus;
 pub mod delay;
 pub mod flanger;
 pub mod parametric_eq;
 pub mod phaser;
+pub mod stereo_width;
 pub mod waveshaper;
 
 pub use chorus::{ChorusNode, ChorusParams};
@@ -34,4 +37,5 @@ pub use delay::DelayNode;
 pub use flanger::{FlangerNode, FlangerParams};
 pub use parametric_eq::{EqBand, ParametricEqNode};
 pub use phaser::{PhaserNode, PhaserParams};
+pub use stereo_width::{MAX_WIDTH, StereoWidthNode, StereoWidthParams};
 pub use waveshaper::{Oversample, WaveshaperNode};
