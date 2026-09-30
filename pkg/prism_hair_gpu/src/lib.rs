@@ -175,6 +175,15 @@
 //!   [`build_decimation_order`](prism_render_architecture::hair::decimation::build_decimation_order)
 //!   whose every prefix is a valid kept set (see [`decimation_priority`]).
 //!
+//! * [`GpuHairImportance`] evaluates
+//!   [`compute_importance`](prism_render_architecture::hair::decimation::compute_importance),
+//!   the density-LOD metric fold that turns each strand's arc length,
+//!   accumulated curvature and authored priority into one importance in
+//!   `0..=1` — one thread per strand normalizes each metric by the
+//!   groom-wide maximum (reduced host-side), blends them by artist weights
+//!   and renormalizes by the weight sum, the ranking key
+//!   [`decimation_priority`] then jitters (see [`importance`]).
+//!
 //! # Portability
 //!
 //! The projection uses only `sqrt`, `min`, `max`, `clamp`, `dot` and
@@ -208,6 +217,7 @@ pub mod deep_opacity;
 pub mod forward_scatter;
 pub mod frames;
 pub mod guide_solver;
+pub mod importance;
 pub mod interp;
 pub mod mesh_shell;
 pub mod mesh_shell_tapered;
@@ -231,6 +241,7 @@ pub use deep_opacity::GpuHairDeepOpacity;
 pub use forward_scatter::GpuHairForwardScatter;
 pub use frames::{GpuStrandFrame, GpuStrandFrames};
 pub use guide_solver::GpuGuideSolver;
+pub use importance::GpuHairImportance;
 pub use interp::GpuHairInterp;
 pub use mesh_shell::{GpuMeshShell, GpuShellMesh, ShellStrandInput};
 pub use mesh_shell_tapered::{GpuMeshShellTapered, TaperedShellStrandInput};
