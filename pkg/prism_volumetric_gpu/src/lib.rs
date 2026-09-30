@@ -22,6 +22,13 @@
 //! the per-octave `(sigma_s, sigma_t, g)` geometric attenuation the same
 //! multi-scatter stage sums.
 //!
+//! [`GpuModeling`] composes the final cloud density from the four
+//! authored/weather modulators
+//! ([`compose_from_modeling`](prism_render_architecture::volumetric::modeling::compose_from_modeling)):
+//! the cloud-type blend, the coverage `remap`, the per-`CloudKind` `height`
+//! gradient and the energy-preserving `detail erosion` `remap`, the shape half
+//! of the density field the ray-march stage samples.
+//!
 //! # Portability
 //!
 //! The phase algebra uses only `sqrt`, `min`, `max` and multiply/add in the
@@ -49,9 +56,11 @@
 #![forbid(unsafe_code)]
 
 pub mod context;
+pub mod modeling;
 pub mod octave;
 pub mod phase;
 
 pub use context::{block_on, GpuContext};
+pub use modeling::{GpuModeling, ModelingQuery};
 pub use octave::{GpuOctaveScatter, OctaveQuery, OctaveResult};
 pub use phase::{GpuPhaseEvaluator, PhaseQuery};
