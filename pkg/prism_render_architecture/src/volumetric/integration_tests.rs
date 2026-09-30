@@ -65,7 +65,7 @@ use super::fog::{
     contrail_kernel, contrail_spread, fog_transmittance, froxel_injection_weight,
     height_fog_density, Contrail, HeightFogParams,
 };
-use super::math::{saturate, EPS};
+use super::math::{ln_approx, saturate, EPS};
 use super::modeling::{compose_from_modeling, height_gradient};
 use super::multiscatter::{MultiScatterLut, ProbeGrid, PROBE_BANDS};
 use super::noise::{perlin_worley, worley_fbm};
@@ -74,7 +74,11 @@ use super::reference::{
     analytic_single_scatter, analytic_transmittance, delta_tracking_transmittance,
     ratio_tracking_transmittance, single_scatter_reference,
 };
-use super::scatter::{hg_phase, octave_scatter, OctaveParams};
+use super::scatter::{
+    dual_lobe_draine_phase, hg_phase, isotropic_phase, octave_scatter, powder, OctaveParams,
+    DEFAULT_BACKWARD_G, DEFAULT_DRAINE_ALPHA, DEFAULT_FORWARD_G, DEFAULT_HG_DRAINE_WEIGHT,
+    DEFAULT_LOBE_BLEND, DEFAULT_POWDER_STRENGTH,
+};
 use super::spectral::{
     ozone_absorption, rayleigh_phase, spectral_to_rgb, sunset_reddening, SpectralBands,
 };
@@ -1266,4 +1270,98 @@ fn avsm_compression_from_march_extinction_preserves_self_shadow_within_budget() 
     );
     assert!((0.0..=1.0).contains(&lit.transmittance));
     assert!(lit.scattered.is_finite() && lit.scattered >= 0.0);
+}
+
+/// Section 5/7 seam: the production anisotropic dual-lobe HG+Draine cloud phase
+/// (parameterized entirely by the `scatter::DEFAULT_*` presets) drives a real
+/// ray-march, and the Nubis powder dark-edge term composes onto its scattered
+/// radiance. Asserts the silver-lining anisotropy (forward >> side >> back, and
+/// the forward peak beats isotropic), that the march stays energy-bounded, and
+/// that powder only ever darkens the edge while keeping the result in `[0, 1]`.
+#[test]
+fn production_dual_lobe_draine_phase_and_powder_drive_a_bounded_march() {
+    // Silver-lining anisotropy of the authored default phase.
+    let phase_at = |cos: f32| {
+        dual_lobe_draine_phase(
+            cos,
+            DEFAULT_FORWARD_G,
+            DEFAULT_BACKWARD_G,
+            DEFAULT_DRAINE_ALPHA,
+            DEFAULT_HG_DRAINE_WEIGHT,
+            DEFAULT_LOBE_BLEND,
+        )
+    };
+    let forward = phase_at(0.95);
+    let side = phase_at(0.0);
+    let back = phase_at(-0.9);
+    let iso = isotropic_phase();
+    // The Draine-sharpened forward lobe dominates every other direction (the
+    // silver-lining peak).
+    assert!(
+        forward > side,
+        "forward lobe {forward} should beat side {side}"
+    );
+    assert!(
+        forward > back,
+        "forward lobe {forward} should beat back {back}"
+    );
+    assert!(
+        forward > iso,
+        "forward peak {forward} should exceed isotropic {iso}"
+    );
+    // The soft negative-g backward lobe lifts back-scatter above the side
+    // minimum: the dual-lobe wrap-around ambient fill.
+    assert!(
+        back > side,
+        "backward wrap lobe {back} should lift above the side minimum {side}"
+    );
+    for c in [-1.0_f32, -0.5, 0.0, 0.5, 1.0] {
+        assert!(phase_at(c) >= 0.0, "phase went negative at cos {c}");
+    }
+
+    // Feed the forward-scattering phase value into a real march over a density
+    // field; the accumulated transmittance and scattered radiance stay bounded.
+    let modeling = sample_modeling();
+    let cfg = RaymarchConfig::default();
+    let seed = 0x00A1_1CE0;
+    let state = march(
+        |t| {
+            field_density(
+                modeling,
+                CloudKind::Cumulus,
+                Vec3::new(0.6, saturate(t / 200.0), 0.35),
+                0.65,
+                seed,
+            )
+        },
+        sigma_from_density,
+        forward,
+        |_t| 1.0,
+        200.0,
+        cfg,
+    );
+    assert!((0.0..=1.0).contains(&state.transmittance));
+    assert!(state.scattered.is_finite() && state.scattered >= 0.0);
+
+    // Powder darkens the edge: applying `1 - powder` to the scattered radiance
+    // only ever removes energy and stays in range, and the darkening deepens as
+    // the view-ray optical depth grows.
+    let optical_depth = -ln_approx(state.transmittance.max(EPS));
+    let dark = powder(optical_depth, DEFAULT_POWDER_STRENGTH);
+    assert!((0.0..=1.0).contains(&dark));
+    let radiance = saturate(state.scattered);
+    let darkened = radiance * (1.0 - dark);
+    assert!((0.0..=1.0).contains(&darkened));
+    assert!(
+        darkened <= radiance + EPS,
+        "powder should not brighten: {darkened} > {radiance}"
+    );
+    let mut prev = 0.0_f32;
+    let mut d = 0.0;
+    while d <= 4.0 {
+        let cur = powder(d, DEFAULT_POWDER_STRENGTH);
+        assert!(cur + EPS >= prev, "powder darkening should grow with depth");
+        prev = cur;
+        d += 0.5;
+    }
 }
