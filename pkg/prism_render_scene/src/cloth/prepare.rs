@@ -126,11 +126,6 @@ pub(crate) fn prepare_cloth_pieces(
 
         let buffers = ClothPieceGpuBuffers::create(&device, &upload);
         let bind_groups = ClothPieceBindGroups::create(&device, &pipelines, &buffers);
-        pieces.pieces.push(ClothGpuPiece::new(
-            buffers,
-            bind_groups,
-            plan.dispatches,
-            lod,
-        ));
+        pieces.pieces.push(ClothGpuPiece::new(buffers, bind_groups, plan.dispatches));
     }
 }

@@ -15,7 +15,6 @@
 use bevy_ecs::resource::Resource;
 
 use prism_render_architecture::cloth::gpu::pipeline::PlannedDispatch;
-use prism_render_architecture::cloth::lod::{ClothLodDecision, ClothLodPlan};
 
 use super::bind_groups::{ClothPieceBindGroups, ClothPieceGpuBuffers};
 
@@ -42,13 +41,6 @@ pub(crate) struct ClothGpuPiece {
     pub(crate) bind_groups: ClothPieceBindGroups,
     /// The ordered dispatch schedule in exact golden record order.
     pub(crate) dispatches: Vec<PlannedDispatch>,
-    /// The LOD decision that admitted this piece this frame (always a simulated
-    /// tier — skinned proxies never become resident). Surfaced so the renderer
-    /// can bin resident pieces by tier and account for the sim budget through
-    /// [`ClothGpuPieces::lod_plan`]; the dispatch node itself walks the golden
-    /// schedule and never reads the tier directly, so the field is currently
-    /// only consumed by that aggregation.
-    pub(crate) lod: ClothLodDecision,
 }
 
 impl ClothGpuPiece {
@@ -60,13 +52,11 @@ impl ClothGpuPiece {
         buffers: ClothPieceGpuBuffers,
         bind_groups: ClothPieceBindGroups,
         dispatches: Vec<PlannedDispatch>,
-        lod: ClothLodDecision,
     ) -> Self {
         Self {
             buffers,
             bind_groups,
             dispatches,
-            lod,
         }
     }
 }
@@ -88,25 +78,5 @@ impl ClothGpuPieces {
     #[must_use]
     pub(crate) fn is_empty(&self) -> bool {
         self.pieces.is_empty()
-    }
-
-    /// Bins the resident pieces by their resolved LOD tier for the frame.
-    ///
-    /// Every resident piece is a simulated tier (the prepare stage skips the
-    /// skinned proxy before a piece is ever built), so the returned plan's
-    /// `skinned_proxy` bucket is always empty here; the full/reduced buckets let
-    /// the renderer submit and account for cloth work per tier in a stable
-    /// input order.
-    #[must_use]
-    #[expect(
-        dead_code,
-        reason = "per-frame resident-piece tier accounting surface for the renderer binning path; wired ahead of the tier-aware submission slice that will consume it. The per-piece `lod` it bins is produced by the golden classifier covered in `cloth::lod` tests"
-    )]
-    pub(crate) fn lod_plan(&self) -> ClothLodPlan {
-        let mut plan = ClothLodPlan::default();
-        for piece in &self.pieces {
-            plan.push(piece.lod);
-        }
-        plan
     }
 }
