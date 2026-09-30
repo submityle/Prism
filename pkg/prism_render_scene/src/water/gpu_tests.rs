@@ -5939,7 +5939,9 @@ fn spectrum_ifft_gpu_matches_cpu_golden() {
         time: 1.3,
         choppiness: 1.6,
         foam_threshold: 1.05,
-        _pad: [0; 3],
+        h0_offset: 0,
+        tile_origin_y: 0,
+        _pad: 0,
     };
 
     let (h0, h0_neg) = spectrum_field(params.grid_size);
@@ -6739,7 +6741,9 @@ fn spectrum_fft_pipeline_gpu_matches_direct_sum_golden() {
         time: 1.3,
         choppiness: 1.6,
         foam_threshold: 1.05,
-        _pad: [0; 3],
+        h0_offset: 0,
+        tile_origin_y: 0,
+        _pad: 0,
     };
     let n = params.grid_size as usize;
 

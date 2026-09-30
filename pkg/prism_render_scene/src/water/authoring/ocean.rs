@@ -189,7 +189,12 @@ impl WaterBody {
                 time: 0.0,
                 choppiness: preset.choppiness,
                 foam_threshold: preset.foam_threshold,
-                _pad: [0; 3],
+                // Single-cascade authoring: the sole tile starts at the pool
+                // and texture origin. The multi-cascade packer fills these per
+                // cascade once the spectral dispatch loops over the atlas.
+                h0_offset: 0,
+                tile_origin_y: 0,
+                _pad: 0,
             },
             gerstner_waves,
             gerstner_params: GpuWaterGerstnerParams {

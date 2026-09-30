@@ -132,6 +132,13 @@ struct WaterSpectrumParams {
     choppiness: f32,
     /// Fold threshold: `J <= foam_threshold` flags a breaking crest (whitecap).
     foam_threshold: f32,
+    /// First element in the concatenated multi-cascade `h0` pool this cascade
+    /// reads: cascade `c` owns `[h0_offset, h0_offset + N*N)`. Zero on the
+    /// single-cascade path so the evolve kernel indexes the pool from its start.
+    h0_offset: u32,
+    /// First atlas row this cascade's `N x N` tile writes to (`c*N`). Zero on
+    /// the single-cascade path so the assembled tile coincides with the origin.
+    tile_origin_y: u32,
 }
 
 // -----------------------------------------------------------------------------

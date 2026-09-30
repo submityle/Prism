@@ -66,8 +66,19 @@ pub(crate) struct GpuWaterSpectrumParams {
     pub choppiness: f32,
     /// Fold threshold: `J <= foam_threshold` flags a breaking crest.
     pub foam_threshold: f32,
+    /// First element in the concatenated multi-cascade `h0` amplitude pool this
+    /// cascade transforms: cascade `c` owns the half-open element range
+    /// `[h0_offset, h0_offset + N*N)`, matching
+    /// [`prism_render_architecture::water::cascade::CascadeAtlasLayout::h0_offset`].
+    /// Zero for a single-cascade ocean, so the field is inert on the legacy path.
+    pub h0_offset: u32,
+    /// First atlas row this cascade's `N x N` displacement/normal tile writes to
+    /// (`c*N` in the vertically stacked cascade atlas), matching
+    /// [`prism_render_architecture::water::cascade::CascadeAtlasLayout::tile_origin`].
+    /// Zero for a single-cascade ocean, so the tile coincides with the texture origin.
+    pub tile_origin_y: u32,
     /// Trailing pad to the 32-byte uniform stride; never read.
-    pub _pad: [u32; 3],
+    pub _pad: u32,
 }
 
 /// Per-pass driver for one separable butterfly `FFT` stage. Byte-compatible
@@ -563,6 +574,49 @@ mod tests {
     fn spectrum_params_is_uniform_stride() {
         assert_eq!(size_of::<GpuWaterSpectrumParams>(), 32);
         assert_eq!(size_of::<GpuWaterSpectrumParams>() % 16, 0);
+    }
+
+    /// The per-cascade addressing fields (`h0_offset`, `tile_origin_y`) occupy
+    /// the two `u32` slots the legacy layout left as trailing pad, so the record
+    /// keeps its 32-byte stride and stays byte-compatible with the shader mirror.
+    /// A single-cascade ocean leaves both zero, which the shaders read as "index
+    /// the pool from its start, write the tile at the texture origin", so the
+    /// legacy path is bit-for-bit unchanged.
+    #[test]
+    fn spectrum_params_cascade_addressing_reuses_the_pad_region() {
+        let single = GpuWaterSpectrumParams {
+            grid_size: 128,
+            patch_size: 100.0,
+            time: 0.0,
+            choppiness: 1.0,
+            foam_threshold: 0.6,
+            h0_offset: 0,
+            tile_origin_y: 0,
+            _pad: 0,
+        };
+        assert_eq!(single.h0_offset, 0);
+        assert_eq!(single.tile_origin_y, 0);
+        // The addressing fields sit at byte offsets 20 and 24 — exactly where
+        // the old `[u32; 3]` pad began — and the whole record is still 32 bytes,
+        // so the concatenated-pool offset and atlas tile row travel in the space
+        // the single-cascade layout wasted.
+        let cascade_two = GpuWaterSpectrumParams {
+            h0_offset: 2 * 128 * 128,
+            tile_origin_y: 2 * 128,
+            ..single
+        };
+        let bytes = bytemuck::bytes_of(&cascade_two);
+        assert_eq!(bytes.len(), 32);
+        assert_eq!(
+            u32::from_le_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]),
+            2 * 128 * 128,
+            "h0_offset must land in the first former-pad word (byte 20)"
+        );
+        assert_eq!(
+            u32::from_le_bytes([bytes[24], bytes[25], bytes[26], bytes[27]]),
+            2 * 128,
+            "tile_origin_y must land in the second former-pad word (byte 24)"
+        );
     }
 
     /// The butterfly `FFT` per-pass uniform is four `u32` scalars (16 bytes),

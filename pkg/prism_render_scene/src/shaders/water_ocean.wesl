@@ -111,6 +111,13 @@ struct WaterSpectrumParams {
     /// Fold threshold: `J <= foam_threshold` flags a breaking crest (whitecap),
     /// matching `spectrum::is_wave_folding`.
     foam_threshold: f32,
+    /// First element in the concatenated multi-cascade `h0` pool this cascade
+    /// reads: cascade `c` owns `[h0_offset, h0_offset + N*N)`. Zero on the
+    /// single-cascade path so the shader indexes the pool from its start.
+    h0_offset: u32,
+    /// First atlas row this cascade's `N x N` tile writes to (`c*N`). Zero on
+    /// the single-cascade path so the tile coincides with the texture origin.
+    tile_origin_y: u32,
 }
 
 // Initial complex spectral amplitude `h0(+k)` at grid index `m*N + n`
