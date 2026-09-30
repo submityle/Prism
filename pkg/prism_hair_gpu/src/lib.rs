@@ -184,6 +184,16 @@
 //!   and renormalizes by the weight sum, the ranking key
 //!   [`decimation_priority`] then jitters (see [`importance`]).
 //!
+//! * [`GpuHairBindingImportance`] evaluates
+//!   [`binding_importances`](prism_render_architecture::hair::density_lod::binding_importances),
+//!   the guide->render density-LOD propagation that precedes that fold — one
+//!   thread per render-strand binding gathers the weight-blended arc length,
+//!   curvature and authored thickness of the (up to four) guides it is skinned
+//!   to (skipping out-of-range guides and non-positive weights), then folds the
+//!   blended triple into an importance in `0..=1`; the two groom-level maxima are
+//!   reduced host-side over the blended metrics, so the kernel owns the naturally
+//!   parallel per-binding gather + fold (see [`binding_importance`]).
+//!
 //! # Portability
 //!
 //! The projection uses only `sqrt`, `min`, `max`, `clamp`, `dot` and
@@ -210,6 +220,7 @@
 #![forbid(unsafe_code)]
 
 pub mod bin_samples;
+pub mod binding_importance;
 pub mod collision;
 pub mod context;
 pub mod decimation_priority;
@@ -234,6 +245,7 @@ pub mod voxel_transmittance;
 pub mod wind;
 
 pub use bin_samples::GpuHairBinSamples;
+pub use binding_importance::GpuHairBindingImportance;
 pub use collision::{query_for, CollisionQuery, GpuColliderProjector};
 pub use context::{block_on, GpuContext};
 pub use decimation_priority::GpuDecimationPriority;
