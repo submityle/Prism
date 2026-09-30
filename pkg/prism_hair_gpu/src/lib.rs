@@ -76,6 +76,15 @@
 //!   self-shadow transmittance `T = product(1 - alpha)` a shading pass
 //!   decodes with a constant stride (see [`deep_opacity`]).
 //!
+//! * [`GpuHairVoxelDensity`] evaluates
+//!   [`accumulate_voxel_density`](prism_render_architecture::hair::deep_transmittance::accumulate_voxel_density),
+//!   the sort-free froxel sibling of the deep opacity packing — one thread per
+//!   light texel bins its host-flattened samples into a uniform slab of voxels
+//!   and scatter-adds each in-slab sample's clamped opacity into its own
+//!   disjoint per-voxel optical density `sigma` row, the cheap self-shadow
+//!   input a shading pass composites into transmittance `T = product(1 -
+//!   sigma_j)` (see [`voxel_density`]).
+//!
 //! # Portability
 //!
 //! The projection uses only `sqrt`, `min`, `max`, `clamp`, `dot` and
@@ -111,6 +120,7 @@ pub mod ribbon;
 pub mod sdf_collision;
 pub mod self_collision_jacobi;
 pub mod strand_metrics;
+pub mod voxel_density;
 pub mod wind;
 
 pub use collision::{query_for, CollisionQuery, GpuColliderProjector};
@@ -123,4 +133,5 @@ pub use ribbon::{GpuRibbon, GpuRibbonMesh, RibbonStrandInput};
 pub use sdf_collision::GpuSdfCollider;
 pub use self_collision_jacobi::GpuSelfCollisionJacobi;
 pub use strand_metrics::{GpuStrandMetric, GpuStrandMetrics};
+pub use voxel_density::GpuHairVoxelDensity;
 pub use wind::{query_for_wind, GpuWindField, WindQuery};
