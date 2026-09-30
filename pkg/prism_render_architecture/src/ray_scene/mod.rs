@@ -56,6 +56,11 @@
 //!   [`Aabb`] and, at refinement depth, a swept-segment cap/chord test
 //!   reports the [`curve::CurveHit`]; a single-level [`curve::CurveBvh`]
 //!   reuses the shared binned-`SAH` build and ordered stack walk.
+//! - [`curve_gpu_layout`] — flat, `GPU`-uploadable [`curve::CurveBvh`]
+//!   buffer layout ([`curve_gpu_layout::CURVE_WORDS`] stride packing the
+//!   four control points plus start/end widths, shared
+//!   [`gpu_layout::NODE_WORDS`] nodes) plus a packed curve walk that
+//!   reproduces the in-memory curve walk bit-for-bit.
 //! - [`sphere_gpu_layout`] — flat, `GPU`-uploadable [`sphere::SphereBvh`]
 //!   buffer layout ([`sphere_gpu_layout::SPHERE_WORDS`] stride, shared
 //!   [`gpu_layout::NODE_WORDS`] nodes) plus a packed procedural-primitive
@@ -89,6 +94,7 @@ pub mod bvh;
 pub mod bvh_wide;
 pub mod bvh_wide_gpu_layout;
 pub mod curve;
+pub mod curve_gpu_layout;
 pub mod footprint;
 pub mod gpu_layout;
 pub mod motion;
@@ -126,6 +132,7 @@ pub use scheduler::{AccelerationScheduler, ScheduledUpdate};
 pub use aabb_primitive::{AabbBvh, AabbHit, AabbPrimitive};
 pub use sphere::{Sphere, SphereBvh, SphereHit};
 pub use curve::{Curve, CurveBvh, CurveHit};
+pub use curve_gpu_layout::{GpuCurveBvhBuffers, CURVE_WORDS};
 pub use aabb_primitive_gpu_layout::{GpuAabbBvhBuffers, AABB_PRIMITIVE_WORDS};
 pub use sphere_gpu_layout::{GpuSphereBvhBuffers, SPHERE_WORDS};
 pub use traversal::{Hit, Ray};
