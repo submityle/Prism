@@ -5,7 +5,7 @@
 > **空间与内容一等公民**：几何驱动空间化与 Event 驱动内容模型同为一等公民；程序化合成（Patch）、调制（Modulation）与母带合规（LUFS/True-Peak/HDR）三者贯通，可达顶级次世代 AAA 质量。
 > 本文档为设计规格与落地实现的权威规范；采用纯经典 DSP 路线，不含任何 AI/ML 内容，不含任何 UE/Unity/Godot/Wwise/FMOD 源码或衍生代码。
 
-- 版本: v0.8（**M1 全族已完成**：effects/dynamics/reverb 三族节点全部落地，103 单测 + 4 doctest 全绿、clippy 零告警、no_std 双构建通过，已 commit；现进入 **M2 声源与调度**（源节点/采样精确调度器/命名时钟/语音池）。本版据实校准 §3/§9/§39/§40 状态，并新增 §2.1「较新版本特性追踪（2023–2025）」把各引擎最新一代能力（Steam Audio UTD 衍射与探针烘焙、Wwise Impacter/Strata、UE5.4/5.5 MetaSound Pages、Unity 6 DOTS Audio）纳入采纳映射，深化 §8 调度器与 §10 声源的 M2 落地细节。v0.7 前序：基础层已落地编码：`pkg/prism_audio_core`，M1 效果族已落地首个节点 `ParametricEqNode`（级联复用 `Biquad`，35 测试绿/clippy 零告警/no_std 双构建通过）；本版聚焦「逐引擎深读」精修方案：扩展 §2 为业界参考+采纳映射+逐引擎深读（UE5/Unity/Godot 借鉴·覆盖·超越三段式），并补齐各引擎较新特性——UE5 MetaSound Builder API 运行时构图（§11）、Audio Gameplay Volumes（§17）、Audio Insights 检视（§26）；Godot AudioStreamInteractive 片段式交互流与过渡类型（§19）、AudioStreamPolyphonic 多voice复用（§25）、延迟补偿播放头查询（§8）；Unity Audio Random Container 原生随机容器（§18）、Timeline 音频轨（§19）；相应增补 §41 扩展点 `PatchBuilder` 与 §42 开放问题。v0.6 前序：新增内容生产与跨模态层：对白与本地化（程序化对白/语言 Bank/字幕同步/viseme 口型）、触感与跨模态输出（音频同源触感/触感总线/DualSense·双马达后端）、程序化环境音景（Soundscape 调色板与散布）、实时授权与远程工具 API（WAAPI 式远程遥测+白名单写命令/live tuning/授权热重载），并为 §16 增补头部追踪双耳、§28 增补属性/模糊测试。v0.5 前序：编译图执行模型（拓扑计划/缓冲活跃度分配/就地别名/PDC）、并行 DSP 图调度（Job 化/确定性并行/岛屿划分）、GPU 加速几何声学（共享渲染器 BVH 的声线与路径追踪）、性能自适应治理与音频 LOD、心理声学虚拟化与声源聚类、时间伸缩变调与重采样质量分级；扩展了参考映射、扩展点、路线图与术语表。v0.4 前序：程序化内容图 Patch、调制系统、多普勒/锥形/Spread/Focus/多位置、遮挡与障碍区分、Aux 发送与环境、HDR 音频、Bank/流式/内存、输入捕获、平台空间后端、虚拟语音行为、Profiler 与可视化调试）
+- 版本: v0.9（**本版新增**：§43 波动声学与混合精算传播（Project Acoustics/Triton/ARD 式离线波动场 + 几何/GPU 射线混合，作为可插拔 `PropagationBackend` 的波动档）、§44 编解码/对象音频/个性化空间输出（Opus/Vorbis/ADPCM 编解码矩阵、杜比 Atmos/MPEG-H 床+对象、SOFA/AES69 测量 HRTF 个性化选型——**均恪守本文档纯经典 DSP 路线、无任何 AI/ML**）；§2.1 追踪表补齐 Project Acoustics/索尼360RA·苹果空间音频/杜比Atmos·MPEG-H/Opus 四行采纳映射，§41 扩展点与 §42 开放问题、术语表相应扩充。前序 v0.8：**M1 全族已完成**：effects/dynamics/reverb 三族节点全部落地，103 单测 + 4 doctest 全绿、clippy 零告警、no_std 双构建通过，已 commit；现进入 **M2 声源与调度**（源节点/采样精确调度器/命名时钟/语音池）。本版据实校准 §3/§9/§39/§40 状态，并新增 §2.1「较新版本特性追踪（2023–2025）」把各引擎最新一代能力（Steam Audio UTD 衍射与探针烘焙、Wwise Impacter/Strata、UE5.4/5.5 MetaSound Pages、Unity 6 DOTS Audio）纳入采纳映射，深化 §8 调度器与 §10 声源的 M2 落地细节。v0.7 前序：基础层已落地编码：`pkg/prism_audio_core`，M1 效果族已落地首个节点 `ParametricEqNode`（级联复用 `Biquad`，35 测试绿/clippy 零告警/no_std 双构建通过）；本版聚焦「逐引擎深读」精修方案：扩展 §2 为业界参考+采纳映射+逐引擎深读（UE5/Unity/Godot 借鉴·覆盖·超越三段式），并补齐各引擎较新特性——UE5 MetaSound Builder API 运行时构图（§11）、Audio Gameplay Volumes（§17）、Audio Insights 检视（§26）；Godot AudioStreamInteractive 片段式交互流与过渡类型（§19）、AudioStreamPolyphonic 多voice复用（§25）、延迟补偿播放头查询（§8）；Unity Audio Random Container 原生随机容器（§18）、Timeline 音频轨（§19）；相应增补 §41 扩展点 `PatchBuilder` 与 §42 开放问题。v0.6 前序：新增内容生产与跨模态层：对白与本地化（程序化对白/语言 Bank/字幕同步/viseme 口型）、触感与跨模态输出（音频同源触感/触感总线/DualSense·双马达后端）、程序化环境音景（Soundscape 调色板与散布）、实时授权与远程工具 API（WAAPI 式远程遥测+白名单写命令/live tuning/授权热重载），并为 §16 增补头部追踪双耳、§28 增补属性/模糊测试。v0.5 前序：编译图执行模型（拓扑计划/缓冲活跃度分配/就地别名/PDC）、并行 DSP 图调度（Job 化/确定性并行/岛屿划分）、GPU 加速几何声学（共享渲染器 BVH 的声线与路径追踪）、性能自适应治理与音频 LOD、心理声学虚拟化与声源聚类、时间伸缩变调与重采样质量分级；扩展了参考映射、扩展点、路线图与术语表。v0.4 前序：程序化内容图 Patch、调制系统、多普勒/锥形/Spread/Focus/多位置、遮挡与障碍区分、Aux 发送与环境、HDR 音频、Bank/流式/内存、输入捕获、平台空间后端、虚拟语音行为、Profiler 与可视化调试）
 - 范围: 一步到位（统一渲染图 / 采样精确调度 / 程序化 Patch / 调制 / 几何声学 / Event+RTPC 编排 / 交互音乐 / LUFS+HDR 母带 / 平台空间输出）
 - 适用引擎: Prism / Bevy ECS 生态
 - 关键依赖: bevy_ecs（并行 ECS）、bevy_math（glam SIMD + `ops` 确定性标量数学）、bevy_tasks（资产解码/烘焙任务）、bevy_asset（音频资产与 Bank）、bevy_transform（听者/声源位姿）、bevy_a11y（无障碍）、cpal/AudioWorklet（设备后端，前端 crate）
@@ -57,7 +57,9 @@
 40. 路线图
 41. 关键扩展点清单
 42. 开放问题
-43. 术语表
+43. 波动声学与混合精算传播（预计算波动场 + 几何/GPU 射线混合）
+44. 编解码、对象音频与个性化空间输出（Codec / Object-based / MPEG-H / 测量 HRTF）
+45. 术语表
 
 ---
 
@@ -184,6 +186,10 @@
 | **FMOD Studio 2.02+** | Programmer Instrument（运行时选媒体）、Spatializer + Resonance Audio 后端、Bank 部分加载 | Programmer=§35 对白 `DialogueResolver`；Resonance Audio=§16 可插拔 `Panner` 后端；部分加载=§20 Bank 粒度预取 |
 | **Unity 6 / DOTS Audio** | DOTS Audio（Burst 编译、无 GC 的数据导向 DSP）、Audio Random Container 原生化、新一代 Spatializer | DOTS 数据导向执行=§5/§6 + §30 岛屿并行的既有取向；Random Container=§18；Spatializer 接口=§16 `Panner` trait |
 | **Godot 4.3 / 4.4** | 实时 MIDI 输入、AudioStreamInteractive/Synchronized/Playlist、播放统计（playback stats）、`AudioStreamPolyphonic` | 交互流=§19、Polyphonic=§25、延迟补偿播放头=§8 已补；实时 MIDI 作为 §8 调度器的采样精确 note 事件源（新增扩展点） |
+| **微软 Project Acoustics（Triton/ARD 波动声学）** | 离线**波动仿真**烘焙 + 运行时**感知参数**（遮挡/衰减/到达方向/混响）查表插值，物理正确处理低频、绕射、房间耦合与动态开口 | 新增 §43 波动档：作为 `PropagationBackend` 的一档，与几何档（§14）、GPU 档（§31）**混合**，复用渲染器同一几何真相并统一到同一空间参数总线 |
+| **索尼 360RA / 苹果个性化空间音频** | 个性化 HRTF（人体测量/耳廓扫描选型）提升双耳定位精度 | 新增 §44.3 走**经典数据驱动**路径：SOFA(AES69) 测量集加载 + 人体测量选型/运行时校准，**无 ML 推理**（恪守本文档纯经典 DSP 路线） |
+| **杜比 Atmos / MPEG-H 3D Audio** | 床+对象（Atmos ≤128 对象）/ 对象+声道+HOA 沉浸式标准（ATSC 3.0 广播） | 新增 §44.2：空间总线原生产出**床+对象**元数据流，平台后端直收或折算进床/双耳，超限对象走 §33 聚类 |
+| **Opus / Vorbis / ADPCM 编解码** | 低延迟语音/对白、流式音乐、大量并发短音效的编码分级 | 新增 §44.1 `SourceDecoder` 编解码矩阵：PCM/ADPCM/Vorbis/Opus/FLAC 按用途分档，后台线程解码、RT 只读 |
 
 **超越判断（保持代际差异）**：这些较新特性多为「单点能力」升级，而 Resonance 的差异化在于把它们**统一进同一条编译图 + 确定性并行 + 渲染器共享 GPU 声学 + 逐样本可对拍**的骨架里——例如 MetaSound Pages 的分档只解决内容分档，我们让分档编译直接受 §32 `QualityGovernor` 的 CPU 预算闭环驱动；Steam Audio 的探针烘焙是独立中间件维护自己的声学场景，我们复用渲染器 BVH（§31）使声学与视觉同一几何真相。
 
@@ -383,7 +389,7 @@
 - **反射**：实时（少量镜像源/光线追踪反射）+ 烘焙（离线预计算响应，运行时插值，探针网格）。
 - **声学材质**：表面携带吸收/散射/透射系数，与 `prism_material_pipeline` 视觉材质在资产层协同。
 
-后端可插拔：默认几何后端；可注册更高精度（波动/BEM）或第三方后端。遮挡/障碍查询复用物理射线，避免重复维护碰撞体。
+后端可插拔：默认几何后端；可注册更高精度（波动/BEM）或第三方后端。遮挡/障碍查询复用物理射线，避免重复维护碰撞体。**波动档的离线预计算（Project Acoustics/ARD 式）与几何/GPU/波动的混合传播详见 §43，后端选择矩阵同列于该节。**
 
 ---
 
@@ -406,10 +412,10 @@
 
 规划：
 
-- **HRTF 双耳渲染**：分块卷积 HRIR（按方位/仰角插值），近场效应与 ITD/ILD，可加载自定义 HRTF 数据集。
+- **HRTF 双耳渲染**：分块卷积 HRIR（按方位/仰角插值），近场效应与 ITD/ILD，可加载自定义 HRTF 数据集（SOFA/AES69 加载与个性化选型见 §44.3）。
 - **头部追踪双耳（Head-tracked Binaural）**（对齐 Meta XR Audio / Steam Audio 头追）：XR/VR 下以低延迟头追姿态旋转 Ambisonic 场或重选 HRIR 方位，头动到声像更新走短前瞻路径，避免"声像黏在头上"；姿态更新经命令环下发，RT 侧插值平滑。
 - **Ambisonics**：FOA/HOA 场景总线，声源编码进 Ambisonic 域，最终按输出布局解码（双耳/多声道）。约定采用 **AmbiX（ACN 通道序 + SN3D 归一化）**，与主流工具链兼容。已在 `ChannelLayout::AmbisonicFoa` 预留，HOA 阶数可扩展。
-- **对象音频 / Atmos**：对象元数据（位置/大小）输出到支持的床（7.1.4）或下混到扬声器/耳机。
+- **对象音频 / Atmos**：对象元数据（位置/大小）输出到支持的床（7.1.4）或下混到扬声器/耳机（床+对象模型、MPEG-H 与对象预算/聚类见 §44.2）。
 - **平台空间后端**（`Panner`/输出适配可插拔）：耳机（内建 HRTF）、立体声、5.1/7.1；并可桥接平台原生空间 API——**Windows Sonic / Spatial Sound**、**索尼 Tempest 3D**、**杜比 Atmos**、**Meta XR Audio**——由 `prism_audio_device` 侦测并选择解码路径。
 - **输出适配**：自动按设备与用户偏好选择 HRTF / 多声道 / 对象床路径。
 
@@ -469,7 +475,7 @@ Panner 可插拔（`Panner` trait），对齐 Unity Spatializer / Ambisonic Deco
 - **内存 vs 流式媒体**：短音效常驻内存池；长音乐/环境走**流式**（磁盘→解码任务→环形预取缓冲→RT 只读），欠载输出静音不阻塞。
 - **预取（Prefetch）**：流式声的首段常驻内存，保证零延迟起播，其余边播边取。
 - **内存池**：解码缓冲、语音状态、延迟线来自构造期分配的池，RT 线程零 malloc。Bank 卸载在任务线程回收（epoch，§21）。
-- **解码任务**：`bevy_tasks` 后台解码，格式插件化（`SourceDecoder` trait：wav/ogg/flac/自定义）。
+- **解码任务**：`bevy_tasks` 后台解码，格式插件化（`SourceDecoder` trait：wav/ogg/flac/自定义）。编解码矩阵（PCM/ADPCM/Vorbis/Opus/FLAC）与按用途分档见 §44.1。
 
 ---
 
@@ -786,7 +792,7 @@ Panner 可插拔（`Panner` trait），对齐 Unity Spatializer / Ambisonic Deco
 | 处理单元 | `AudioNode` | 任意 DSP/总线/空间化 |
 | 内容子图 | `PatchNode`（编译产物） | 程序化合成声音 |
 | 运行时构图 | `PatchBuilder` | 任务线程增量拼装/改写 Patch 后热切换 |
-| 传播后端 | `PropagationBackend` | 几何/波动/第三方空间化 |
+| 传播后端 | `PropagationBackend` | 几何/GPU/波动烘焙/第三方，可混合（§14/§31/§43） |
 | 声像/空间化 | `Panner` | VBAP/HRTF/Ambisonic/平台 SDK |
 | 调制器 | `Modulator` | LFO/包络/曲线/自定义调制 |
 | 解码器 | `SourceDecoder` | wav/ogg/flac/自定义 |
@@ -800,6 +806,10 @@ Panner 可插拔（`Panner` trait），对齐 Unity Spatializer / Ambisonic Deco
 | 触感后端 | `HapticBackend` | 宽频（DualSense）/双马达/运动设备 |
 | 音景调色板 | `SoundscapePalette` | 程序化环境散布规则与调度 |
 | 授权通道 | `AuthoringTransport` | 远程只读遥测 + 白名单写命令 |
+| 波动烘焙 | `WaveAcousticsBaker` | 离线波动仿真 → 感知参数场（§43） |
+| 声学探针场 | `AcousticProbeField` | 运行时感知参数查表/插值/流式加载（§43） |
+| HRTF 数据集 | `HrtfDataset`（SOFA/AES69） | 测量 HRIR 加载与个性化选型（§44.3） |
+| 对象渲染 | `ObjectRenderer` | 床+对象/MPEG-H 元数据渲染与折算（§44.2） |
 
 ---
 
@@ -822,10 +832,66 @@ Panner 可插拔（`Panner` trait），对齐 Unity Spatializer / Ambisonic Deco
 - MetaSound Pages 式分档编译与 §32 `QualityGovernor` 预算联动：分档切换滞回阈值与热切换频率上限，避免档位抖动引发编译风暴。
 - 变调 SamplePlayer 抗混叠档位（过采样倍率 vs 波表 mip）与 §32 音频 LOD 的默认映射。
 - 延迟补偿播放头查询在不同设备后端（cpal/worklet）下 output_latency 的可得性与估计精度。
+- 波动声学探针网格分辨率、感知参数量化位深、压缩与内存·质量折中，以及波动档与几何/GPU 档的混合权重与交叉淡化策略。
+- 动态开口（门/可破坏墙）用多状态预烘焙插值 vs 几何实时增量修正的选择阈值与烘焙组合爆炸控制。
+- 编解码分档默认映射（音效 PCM/ADPCM vs 音乐/对白 Opus）与编码器延迟/填充在无缝循环下的裁剪校准。
+- 硬件对象数上限下的对象→床折算与 §33 聚类阈值默认档；MPEG-H/Atmos 后端能力探测与优雅降级。
+- 个性化 HRTF 的选型输入（人体测量 vs 运行时校准）与 SOFA 数据集打包/流式加载预算。
 
 ---
 
-## 43. 术语表
+## 43. 波动声学与混合精算传播（预计算波动场 + 几何/GPU 射线混合）
+
+几何声学（§14 射线遮挡/障碍、§31 GPU 声线/路径）在**低频、复杂绕射、耦合空间、真实混响衰减**上会失真——射线模型假设波长远小于几何尺度，对门缝绕射、房间共振、软遮挡并不物理正确。次世代旗舰转向**离线波动仿真 + 运行时感知参数查表**：微软 **Project Acoustics**（基于 Triton / **ARD 自适应矩形分解**波动求解，用于《战争机器5》《盗贼之海》）离线求解波动方程，把物理正确的遮挡、衰减、到达方向、混响编码为紧凑参数场，运行时轻量查表即得。Resonance 将其纳为 `PropagationBackend` 的**波动档**，与几何档、GPU 档**并列且可混合**，编译期/资产期选择，运行时统一喂入同一套 §14 空间参数与 §17 发送——不新增第二套声学真相。
+
+- **离线波动烘焙（Wave Bake）**：对静态几何做时域波动仿真。采用 ARD（把场景划成矩形子域，域内解析求解 + 界面数值耦合，远比朴素 FDTD 高效、数值色散低），在**探针网格（Probe Grid）**上对听者位置、多个声源采样位置求解脉冲响应。烘焙经 `bevy_tasks` 后台或离线工具执行，产物经 `bevy_asset` 加载与热重载。
+- **感知参数编码（Perceptual Encoding）**：不存原始 IR（体积巨大），而从仿真 IR 提取**感知参数场**——直达/初期能量（→遮挡增益 + 低通截止）、衰减时间 RT60/EDC（→混响湿量与衰减）、初期到达方向与其能量（→空间化方位与早反射塑形）、湿/干比。每探针一组紧凑量化系数，运行时对听者位置做三线性插值。对齐 Project Acoustics 的「Baked perceptual parameters」，但字段与 §14/§16/§17 的既有参数总线一一对齐，无中间语义层。
+- **动态开口（Dynamic Openings）**：门/窗/可破坏墙等运行时可变连通，用**多状态预烘焙**（开/关及中间档）参数插值，或以几何档实时修正**叠加到波动基线**——静态波动给全局物理正确基线，几何/GPU 射线补动态增量。
+- **混合传播（Hybrid Propagation，本引擎默认目标）**：波动档负责**低频、绕射、软遮挡、房间耦合与真实混响尾**（波动物理强项）；几何/GPU 档（§14/§31）负责**高频镜面反射、动态遮挡增量、多普勒**（射线强项）。两档产出的同名参数在同一 §7 `Smoothed` 上叠加或交叉淡化，`PropagationBackend` 抽象对上层完全透明；场景/预算决定单帧内某源走哪档。
+- **数据规模治理**：探针网格分辨率、参数量化位深随 Bank（§20）分档；远场/次要区域稀疏探针，交互热点加密；压缩场 + 流式加载（§20）控制内存，卸载走 epoch 回收（§21）。
+- **确定性与 RT 安全**：波动求解**只在离线/任务线程**发生；RT 线程只做**查表 + 插值 + 平滑**（标量参数，零分配、无锁、不 panic），绝不在音频回调跑求解——与 §31 GPU 声学「只产控制参数、不回样本流」同构，样本级 DSP（卷积/FDN/双耳）始终在 CPU 音频线程确定性执行。
+
+后端选择矩阵（补充 §14 的可插拔后端说明）：
+
+| 后端档 | 强项 | 代价 | 触发条件 |
+|---|---|---|---|
+| 几何 CPU（`prism_physics` 射线） | 动态、低延迟、通用 | 低频/绕射不准 | 默认；动态源、无烘焙区域 |
+| GPU 声线/路径（§31） | 高密度反射/遮挡并行 | 需 GPU、异步延迟 | 高语音密度且有 GPU |
+| 波动烘焙（本节） | 低频/绕射/耦合物理正确、混响真实 | 需离线烘焙 + 内存 | 静态复杂空间、旗舰质量 |
+| 混合 | 各取所长、代际质量 | 编排/权重复杂 | 次世代默认目标 |
+
+**超越判断（保持代际差异）**：Project Acoustics 是独立中间件，维护自有场景与探针；Resonance 复用渲染器/物理**同一几何真相**（§31），并把波动档、几何档、GPU 档**统一在同一可插拔后端与同一空间参数总线**下，由 §32 `QualityGovernor` 按 CPU 预算与场景特征**自动选档与混合**——近处动态源走几何/GPU、整体房间声学走波动烘焙，二者在参数域无缝叠加。
+
+---
+
+## 44. 编解码、对象音频与个性化空间输出（Codec / Object-based / MPEG-H / 测量 HRTF）
+
+本节补齐从「资产字节」到「沉浸式输出」两端的工程能力。**恪守本文档纯经典 DSP 路线：以下全部为经典编解码与数据驱动方法，不含任何 AI/ML 推理。**
+
+### 44.1 编解码策略（Codec）
+
+- **`SourceDecoder` 矩阵化**（§10/§20 已引 trait）：PCM（无损、常驻内存音效）、**ADPCM**（低解码开销、支持海量并发短音效，对齐主机常用）、Vorbis/Ogg、**Opus**（低延迟，语音/对白与流式音乐优选，CBR/VBR）、FLAC（无损归档）。格式插件化，第三方可注册自定义解码器。
+- **质量/内存/CPU 三角**：Bank（§20）按用途选编码——短高频音效走 PCM/ADPCM（解码近零成本、可高并发），音乐/环境走 Opus/Vorbis（压缩比优先、流式），对白走 Opus（低码率高可懂度）。
+- **解码位置**：一律在 `bevy_tasks` 后台线程解码到预分配缓冲/环形（§20），RT 线程只读——**编解码永不在音频回调发生**。
+- **无缝循环与采样精确**：Opus/Vorbis 的编码器延迟/填充在资产期记录，解码后精确裁剪，保证 §8 循环点与节拍量化对齐不随重编码漂移。
+
+### 44.2 对象音频与沉浸格式（Object-based / Atmos / MPEG-H）
+
+- **床 + 对象（Bed + Objects）模型**：混音同时输出**声道床**（7.1.4 等）与**动态对象**（携位置/大小/增益元数据），对齐杜比 **Atmos**（最多 128 对象）与 **MPEG-H 3D Audio**（对象 + 声道 + HOA，ATSC 3.0 广播标准）。§16 空间总线原生产出对象元数据流。
+- **渲染分叉**：支持对象的平台后端（Atmos/Tempest/Windows Sonic）直接接收对象元数据；不支持的设备由内建渲染器把对象**折算进床或双耳**（§16 输出适配），能力探测 + 优雅降级。
+- **对象预算与聚类**：硬件对象数有限，超限时用 §33 声源聚类把弱贡献对象归并为床或代表对象，感知优先保留前景对象。
+- **HOA 传输**：场景型环境声用高阶 Ambisonics（AmbiX：ACN + SN3D）承载，末端解码到床/对象/双耳（§16）。
+
+### 44.3 测量与个性化 HRTF（Personalized / SOFA）
+
+- **SOFA 数据集加载**（AES69 标准）：`HrtfDataset` 加载测量 HRIR（多方位/仰角/距离），对齐 Steam Audio 自定义 HRTF 与学术数据集（SADIE/CIPIC 等）。
+- **个性化选择（经典、无 ML）**：借鉴索尼 360 Reality Audio / 苹果个性化空间音频的**目标**，但走经典数据驱动路径——按用户人体测量（耳廓尺寸/头围）或从若干标准数据集中选最匹配者，或运行时校准（用户微调仰角提示直至定位准确）后锁定对应 HRIR 集。**无神经网络推理**，纯查选 + 插值，恪守本文档纯经典 DSP 路线。
+- **近场与距离**：近场声源做 ITD/ILD 增强与近场增益补偿（§16 已引），随距离在测量集内插值。
+- **头追双耳贯通**：与 §16 头部追踪一致——姿态旋转 Ambisonic 场或重选 HRIR 方位，低延迟短前瞻，避免声像黏头。
+
+---
+
+## 45. 术语表
 
 - **RT-safe**：实时安全，指音频回调线程可执行（零分配/锁/阻塞/panic）。
 - **block / 块**：一次处理的定长样本帧数。
@@ -870,3 +936,12 @@ Panner 可插拔（`Panner` trait），对齐 Unity Spatializer / Ambisonic Deco
 - **片段式交互流（Interactive Stream）**：以剪辑为节点、以带过渡类型（next-beat/next-bar/marker 等）的转移为边的交互音乐图（Godot AudioStreamInteractive 式）。
 - **延迟补偿播放头**：向 gameplay 暴露的、扣除输出延迟并加回自上次混音以来时间的“画面对齐”播放位置。
 - **Polyphonic 声源**：单逻辑声源动态复用池内多条 voice 播放重叠实例（Godot AudioStreamPolyphonic 式）。
+- **波动声学（Wave Acoustics）**：以波动方程数值求解声传播，物理正确处理低频/绕射/耦合，对比几何射线的高频近似。
+- **ARD（自适应矩形分解）**：把场景划为矩形子域内解析求解 + 界面耦合的高效波动求解法，Project Acoustics/Triton 采用。
+- **感知参数场（Perceptual Parameter Field）**：从烘焙 IR 提取的紧凑声学参数（遮挡/衰减 RT60/到达方向/湿干比）按探针网格存储、运行时插值。
+- **混合传播（Hybrid Propagation）**：波动档负责低频/绕射/混响、几何或 GPU 档负责高频/动态增量，二者参数域叠加交叉淡化。
+- **Codec / 编解码**：PCM/ADPCM/Vorbis/Opus/FLAC 等音频编码，按用途（音效/音乐/对白/归档）分档。
+- **对象音频（Object-based / Bed+Objects）**：声道床 + 携位置元数据的动态对象混音模型（杜比 Atmos / MPEG-H）。
+- **MPEG-H 3D Audio**：对象 + 声道 + HOA 的沉浸式音频标准（ATSC 3.0 广播）。
+- **SOFA（AES69）**：空间定向声学数据格式，承载测量 HRIR/HRTF 数据集。
+- **个性化 HRTF**：按用户人体测量/校准选取最匹配的测量 HRTF 集以提升双耳定位（本文档走经典数据驱动、无 ML）。
