@@ -318,9 +318,7 @@ pub fn solve_cloth_vbd(
         return;
     }
     let params = params.sanitized();
-    let substeps = params.substeps;
-    let iterations = params.iterations;
-    let dt_sub = dt / substeps as f32;
+    let dt_sub = dt / params.substeps as f32;
     let dt_sub_sq = dt_sub * dt_sub;
     let inv_dt_sub = 1.0 / dt_sub;
     let retain = 1.0 - params.damping;
@@ -334,64 +332,165 @@ pub fn solve_cloth_vbd(
     let mut targets: Vec<Vec3> = vec![Vec3::ZERO; count];
     let mut previous: Vec<Vec3> = vec![Vec3::ZERO; count];
 
-    for _ in 0..substeps {
-        // 1. Predict the inertial target y = x + v·retain·dt + g·dt² from the
-        //    current velocity and snapshot the pre-solve position.
-        for (i, particle) in particles.iter().enumerate() {
-            previous[i] = particle.position;
-            let velocity = particle.velocity.scale(retain);
-            targets[i] = particle
-                .position
-                .add(velocity.scale(dt_sub))
-                .add(gravity_step);
+    for _ in 0..params.substeps {
+        predict_targets(particles, &mut previous, &mut targets, retain, dt_sub, gravity_step);
+
+        // Gauss-Seidel vertex sweeps in natural (ascending) order: one exact
+        // Newton step per free vertex, reading neighbors' current positions.
+        for _ in 0..params.iterations {
+            for (i, &target) in targets.iter().enumerate() {
+                relax_vertex(i, particles, constraints, &adjacency, target, dt_sub_sq);
+            }
         }
 
-        // 2. Gauss-Seidel vertex sweeps: one exact Newton step per free vertex.
-        for _ in 0..iterations {
-            for i in 0..count {
-                if particles[i].is_pinned() {
-                    continue; // pinned: fixed at its anim-driven pose.
-                }
-                let x = particles[i].position;
-                let mass = 1.0 / particles[i].inverse_mass;
-                let inertia = mass / dt_sub_sq;
+        recover_velocity(particles, &previous, inv_dt_sub);
+    }
+}
 
-                let mut grad = x.sub(targets[i]).scale(inertia);
-                let mut hess = Mat3::scaled_identity(inertia);
+/// Advances a cloth patch by `dt` with the VBD solver, sweeping vertices in a
+/// graph-colored order instead of natural index order.
+///
+/// This is the parallel-friendly twin of [`solve_cloth_vbd`]: the `coloring`
+/// (from [`super::vbd_coloring::color_cloth_vertices`]) partitions the vertices so
+/// that within one color no two vertices share a constraint. Relaxing a color's
+/// vertices in any order therefore yields the same per-vertex result — a color
+/// is a Jacobi block — while colors are applied one after another (Gauss-Seidel
+/// across colors). That is exactly the schedule a GPU dispatch runs (one
+/// dispatch per color), so this function is the bit-for-bit CPU golden for the
+/// `cloth_vbd` GPU kernels.
+///
+/// Everything else — inertial prediction, the per-vertex Newton step, velocity
+/// recovery, and the pinned / degenerate / non-finite-`dt` guards — is identical
+/// to [`solve_cloth_vbd`]; only the sweep order differs. The `coloring` must
+/// have been built from the same `constraints` and vertex count, otherwise it is
+/// not a proper coloring of this graph; a mismatched or stale coloring is
+/// treated defensively (a vertex missing from the order is simply not swept).
+pub fn solve_cloth_vbd_colored(
+    particles: &mut [ClothParticle],
+    constraints: &[Constraint],
+    params: VbdParams,
+    dt: f32,
+    coloring: &super::vbd_coloring::VertexColoring,
+) {
+    if particles.is_empty() || dt <= 0.0 || !dt.is_finite() {
+        return;
+    }
+    let params = params.sanitized();
+    let dt_sub = dt / params.substeps as f32;
+    let dt_sub_sq = dt_sub * dt_sub;
+    let inv_dt_sub = 1.0 / dt_sub;
+    let retain = 1.0 - params.damping;
+    let gravity_step = params.gravity.scale(dt_sub_sq);
 
-                for &c_index in &adjacency[i] {
-                    let constraint = constraints[c_index as usize];
-                    let other_index = if constraint.a as usize == i {
-                        constraint.b as usize
-                    } else {
-                        constraint.a as usize
-                    };
-                    let k = constraint_stiffness(constraint.compliance, dt_sub_sq);
-                    accumulate_constraint(
-                        &mut grad,
-                        &mut hess,
-                        x,
-                        particles[other_index].position,
-                        constraint.rest_length,
-                        k,
-                        constraint.kind.is_one_sided(),
-                    );
-                }
+    let count = particles.len();
+    let adjacency = build_adjacency(constraints, count);
 
-                if let Some(delta) = hess.solve(grad) {
-                    particles[i].position = x.sub(delta);
+    let mut targets: Vec<Vec3> = vec![Vec3::ZERO; count];
+    let mut previous: Vec<Vec3> = vec![Vec3::ZERO; count];
+
+    for _ in 0..params.substeps {
+        predict_targets(particles, &mut previous, &mut targets, retain, dt_sub, gravity_step);
+
+        // Gauss-Seidel across colors, Jacobi within a color: iterate colors in
+        // order, and each color's vertices in the coloring's ascending order.
+        for _ in 0..params.iterations {
+            for &v in coloring.order() {
+                let i = v as usize;
+                if i < count {
+                    relax_vertex(i, particles, constraints, &adjacency, targets[i], dt_sub_sq);
                 }
             }
         }
 
-        // 3. Recover velocity from the position delta; pinned vertices stay put.
-        for (i, particle) in particles.iter_mut().enumerate() {
-            if particle.is_pinned() {
-                particle.velocity = Vec3::ZERO;
-                continue;
-            }
-            particle.velocity = particle.position.sub(previous[i]).scale(inv_dt_sub);
+        recover_velocity(particles, &previous, inv_dt_sub);
+    }
+}
+
+/// Predicts the inertial target `y = x + v·retain·dt + g·dt²` for every particle
+/// and snapshots the pre-solve position into `previous`.
+///
+/// Shared verbatim by [`solve_cloth_vbd`] and [`solve_cloth_vbd_colored`] so the
+/// two sweep orders start each substep from an identical target field.
+fn predict_targets(
+    particles: &[ClothParticle],
+    previous: &mut [Vec3],
+    targets: &mut [Vec3],
+    retain: f32,
+    dt_sub: f32,
+    gravity_step: Vec3,
+) {
+    for (i, particle) in particles.iter().enumerate() {
+        previous[i] = particle.position;
+        let velocity = particle.velocity.scale(retain);
+        targets[i] = particle
+            .position
+            .add(velocity.scale(dt_sub))
+            .add(gravity_step);
+    }
+}
+
+/// Recovers `v = (x - x_prev) / dt_sub` for every free particle; pinned particles
+/// are frozen with zero velocity.
+///
+/// Shared verbatim by [`solve_cloth_vbd`] and [`solve_cloth_vbd_colored`].
+fn recover_velocity(particles: &mut [ClothParticle], previous: &[Vec3], inv_dt_sub: f32) {
+    for (i, particle) in particles.iter_mut().enumerate() {
+        if particle.is_pinned() {
+            particle.velocity = Vec3::ZERO;
+            continue;
         }
+        particle.velocity = particle.position.sub(previous[i]).scale(inv_dt_sub);
+    }
+}
+
+/// Takes one exact per-vertex Newton step for vertex `i` against its inertia plus
+/// constraint Hessian, in place; a pinned vertex is left untouched.
+///
+/// This is the single relaxation kernel shared by the natural-order
+/// [`solve_cloth_vbd`] and the colored [`solve_cloth_vbd_colored`] sweeps, and it
+/// is mirrored bit-for-bit by the GPU `cloth_vbd_sweep_color` kernel. The
+/// accumulation order over a vertex's constraints follows `adjacency[i]` (ascending
+/// constraint index), which the GPU CSR upload preserves, so the summed gradient
+/// and Hessian match across CPU and GPU.
+fn relax_vertex(
+    i: usize,
+    particles: &mut [ClothParticle],
+    constraints: &[Constraint],
+    adjacency: &[Vec<u32>],
+    target: Vec3,
+    dt_sub_sq: f32,
+) {
+    if particles[i].is_pinned() {
+        return;
+    }
+    let x = particles[i].position;
+    let mass = 1.0 / particles[i].inverse_mass;
+    let inertia = mass / dt_sub_sq;
+
+    let mut grad = x.sub(target).scale(inertia);
+    let mut hess = Mat3::scaled_identity(inertia);
+
+    for &c_index in &adjacency[i] {
+        let constraint = constraints[c_index as usize];
+        let other_index = if constraint.a as usize == i {
+            constraint.b as usize
+        } else {
+            constraint.a as usize
+        };
+        let k = constraint_stiffness(constraint.compliance, dt_sub_sq);
+        accumulate_constraint(
+            &mut grad,
+            &mut hess,
+            x,
+            particles[other_index].position,
+            constraint.rest_length,
+            k,
+            constraint.kind.is_one_sided(),
+        );
+    }
+
+    if let Some(delta) = hess.solve(grad) {
+        particles[i].position = x.sub(delta);
     }
 }
 
@@ -638,5 +737,113 @@ mod tests {
         // length.
         let total = chain[4].position.sub(chain[0].position).length();
         assert!(total < 6.0, "chain length {total} exploded");
+    }
+
+    use crate::cloth::vbd_coloring::color_cloth_vertices;
+
+    /// A rectangular sim grid with structural + shear constraints; the top row
+    /// is pinned. Returns particles and the shared constraint list used by both
+    /// VBD sweep orders.
+    fn pinned_grid(nx: usize, nz: usize, compliance: f32) -> (Vec<ClothParticle>, Vec<Constraint>) {
+        let idx = |x: usize, z: usize| (z * nx + x) as u32;
+        let mut particles = Vec::with_capacity(nx * nz);
+        for z in 0..nz {
+            for x in 0..nx {
+                let pos = Vec3::new(x as f32 * 0.1, 0.0, z as f32 * 0.1);
+                if z == 0 {
+                    particles.push(ClothParticle::pinned(pos));
+                } else {
+                    particles.push(ClothParticle::new(pos, 1.0));
+                }
+            }
+        }
+        let mut cons = Vec::new();
+        for z in 0..nz {
+            for x in 0..nx {
+                if x + 1 < nx {
+                    cons.push(stretch(idx(x, z), idx(x + 1, z), 0.1, compliance));
+                }
+                if z + 1 < nz {
+                    cons.push(stretch(idx(x, z), idx(x, z + 1), 0.1, compliance));
+                }
+                if x + 1 < nx && z + 1 < nz {
+                    let diag = 0.1_f32 * core::f32::consts::SQRT_2;
+                    cons.push(Constraint {
+                        a: idx(x, z),
+                        b: idx(x + 1, z + 1),
+                        rest_length: diag,
+                        compliance: Compliance(compliance),
+                        kind: ConstraintKind::Shear,
+                    });
+                }
+            }
+        }
+        (particles, cons)
+    }
+
+    #[test]
+    fn colored_matches_natural_when_graph_has_no_constraints() {
+        // With no constraints every vertex is isolated -> a single color whose
+        // order is 0..count ascending, i.e. identical to the natural sweep. The
+        // two solvers must then agree bit-for-bit.
+        let build = || {
+            let mut ps = Vec::new();
+            for i in 0..12 {
+                ps.push(ClothParticle::new(Vec3::new(i as f32 * 0.1, 0.5, 0.0), 1.0));
+            }
+            ps
+        };
+        let coloring = color_cloth_vertices(&[], 12);
+        let mut natural = build();
+        let mut colored = build();
+        for _ in 0..30 {
+            solve_cloth_vbd(&mut natural, &[], params(4, 4, 0.02), 1.0 / 60.0);
+            solve_cloth_vbd_colored(&mut colored, &[], params(4, 4, 0.02), 1.0 / 60.0, &coloring);
+        }
+        for (a, b) in natural.iter().zip(colored.iter()) {
+            assert_eq!(a.position.x.to_bits(), b.position.x.to_bits());
+            assert_eq!(a.position.y.to_bits(), b.position.y.to_bits());
+            assert_eq!(a.position.z.to_bits(), b.position.z.to_bits());
+            assert_eq!(a.velocity.y.to_bits(), b.velocity.y.to_bits());
+        }
+    }
+
+    #[test]
+    fn colored_sweep_is_deterministic_and_finite() {
+        let (base, cons) = pinned_grid(6, 5, 1.0e-4);
+        let coloring = color_cloth_vertices(&cons, base.len());
+        let run = || {
+            let mut ps = base.clone();
+            for _ in 0..40 {
+                solve_cloth_vbd_colored(&mut ps, &cons, params(4, 6, 0.03), 1.0 / 60.0, &coloring);
+            }
+            ps
+        };
+        let first = run();
+        let second = run();
+        for (a, b) in first.iter().zip(second.iter()) {
+            assert_eq!(a.position.x.to_bits(), b.position.x.to_bits());
+            assert_eq!(a.position.y.to_bits(), b.position.y.to_bits());
+            assert_eq!(a.position.z.to_bits(), b.position.z.to_bits());
+            assert!(a.position.x.is_finite() && a.position.y.is_finite() && a.position.z.is_finite());
+        }
+    }
+
+    #[test]
+    fn colored_sweep_holds_pinned_top_row() {
+        let (mut ps, cons) = pinned_grid(5, 4, 1.0e-4);
+        let coloring = color_cloth_vertices(&cons, ps.len());
+        let anchors: Vec<Vec3> = ps.iter().take(5).map(|p| p.position).collect();
+        for _ in 0..60 {
+            solve_cloth_vbd_colored(&mut ps, &cons, params(4, 6, 0.03), 1.0 / 60.0, &coloring);
+        }
+        for (i, anchor) in anchors.iter().enumerate() {
+            assert!(
+                ps[i].position.sub(*anchor).length_squared() < 1.0e-12,
+                "pinned vertex {i} drifted"
+            );
+        }
+        // The freed rows must have sagged under gravity (moved down in y).
+        assert!(ps[10].position.y < -0.01, "cloth did not fall");
     }
 }

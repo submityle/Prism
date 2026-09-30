@@ -56,6 +56,7 @@ pub mod self_ccd;
 pub mod sleep;
 pub mod tearing;
 pub mod vbd;
+pub mod vbd_coloring;
 pub mod virtual_particles;
 pub mod virtual_particles_jacobi;
 pub mod wind;
