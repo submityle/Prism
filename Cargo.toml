@@ -31,8 +31,12 @@ members = [
   "pkg/prism_virtual_geometry_gpu",
   # Prism experimental volumetric-cloud scattering GPU twin.
   "pkg/prism_volumetric_gpu",
+  # Prism experimental strand-hair body-collider projection GPU twin.
+  "pkg/prism_hair_gpu",
   # Prism experimental next-generation audio engine.
   "pkg/prism_audio_core",
+  # Prism next-generation audio engine real-time runtime bridge (command/telemetry rings + epoch reclamation).
+  "pkg/prism_audio_rt",
   # Several crates with macros have "compile fail" tests nested inside them, also known as UI
   # tests, that verify diagnostic output does not accidentally change.
   # TODO: Use a glob pattern once they are fixed in `dependabot-core`
