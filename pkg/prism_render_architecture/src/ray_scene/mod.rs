@@ -25,6 +25,10 @@
 //!   matrix-motion instances with two key poses blended per ray at a
 //!   normalized shutter `time`, over a `BVH` built once on conservative swept
 //!   bounds; shares the top-level walk, inclusion masks, and [`tlas::TlasHit`].
+//! - [`motion_gpu_layout`] — flat, `GPU`-uploadable [`MotionTlas`] buffer
+//!   layout ([`motion_gpu_layout::MOTION_INSTANCE_WORDS`] stride packing both
+//!   key poses) plus a packed matrix-motion walk that blends and inverts the
+//!   pose per ray and reproduces the in-memory motion walk bit-for-bit.
 //! - [`traversal`] — [`Ray`]/`BVH` slab + Möller–Trumbore intersection with
 //!   closest-hit and any-hit walks (the `GPU` traversal kernel's golden ref).
 //! - [`ray_offset`] — Wächter-Binder watertight secondary-ray origin offset
@@ -40,6 +44,7 @@ pub mod bvh;
 pub mod footprint;
 pub mod gpu_layout;
 pub mod motion;
+pub mod motion_gpu_layout;
 pub mod ray_offset;
 pub mod scheduler;
 pub mod tlas;
@@ -57,6 +62,7 @@ pub use footprint::{log2_linear, RayFootprint};
 pub use bvh::{Aabb, Axis, Bvh, BvhBuildConfig, LinearBvhNode, Triangle};
 pub use tlas::{Affine3, Instance, Tlas, TlasHit};
 pub use motion::{MotionInstance, MotionTlas};
+pub use motion_gpu_layout::{GpuMotionTlasBuffers, MOTION_INSTANCE_WORDS};
 pub use ray_offset::offset_ray_origin;
 pub use scheduler::{AccelerationScheduler, ScheduledUpdate};
 pub use traversal::{Hit, Ray};
