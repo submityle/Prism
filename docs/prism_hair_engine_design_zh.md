@@ -167,7 +167,7 @@ fallback:
 - **正确性模型**：核心为闭式几何、无超越调用，`CPU`/`GPU` 算同一公式，但**非位精确**（`GPU` 可 fuse mul-add，扰动低位 mantissa 几 `ULP`），故每分量断言容差 `abs_diff<1e-4` 或 `rel_diff<1e-3`；迭代类 kernel 参数保守以控 fma 累积。每个 parity 测试均带物理断言 + 非平凡断言（防 no-op 蒙混）+ 空/退化输入用例。
 - **可移植性**：只用 `sqrt`/`min`/`max`/`clamp`/`dot`/mul-add 的 core-`WGSL` 子集——无 `exp`/`pow`/可选 device feature——故孪生在 Metal/Vulkan/DX12 不改即跑。
 
-当前已落 **7 个真机对拍孪生**（Apple M2 Metal 全绿 **26 passed**）：
+当前已落 **8 个真机对拍孪生**（Apple M2 Metal 全绿 **32 passed**）：
 
 | kernel | 对拍的 `CPU` golden | 语义 | 真机单测 |
 |---|---|---|---|
@@ -178,8 +178,11 @@ fallback:
 | `sdf_collision` | `push_out_of_field` | union `SDF`（sphere/capsule/half-space/box）沿梯度推出（一线程一 point，更紧的体碰撞档） | 3 |
 | `self_collision_jacobi` | `accumulate_jacobi_corrections` | 并行安全（Jacobi）自碰撞修正累加（一线程一 particle，host 建 per-particle 邻居切片保 reduction 序） | 3 |
 | `strand_metrics` | `strand_arc_length` / `strand_curvature` | 每 render strand 折线折叠成弧长 + 无超越转角（一线程一 strand，density/decimation LOD 排序消费的两个廉价标量） | 5 |
+| `guide_solver` | `simulate_guides` | 每 strand 独立跑整条 substeps×iterations 的 XPBD 核心 sim（积分 + 边长 + 局部/全局形状 + `LRA` + 可选代理体碰撞；一线程一 strand 在读写 storage 上原地 Gauss-Seidel，disjoint particle range 天然 race-free，无 barrier） | 6 |
 
-**待续**：guide XPBD 求解器（`simulate_guides`，每 strand 独立跑整条 substeps×iterations 的核心 sim 阶段，`UE5` Groom/`TressFX` 都在 `GPU` 跑）的真机对拍孪生，为下一个落地目标。
+**已落（本轮新增第 8 个）**：guide XPBD 求解器（`simulate_guides`，每 strand 独立跑整条 substeps×iterations 的核心 sim 阶段，`UE5` Groom/`TressFX` 都在 `GPU` 跑）——`guide_solver.wesl` 5 bindings（uniform `Params` 48B / 只读 `strands` / 读写 `state` stride8 / 只读 `goals` / 只读 `colliders`），host 严格照 golden 派生序算 `sub_dt`/`sub_dt_sq`/`alpha`/`velocity_retain`/预乘 `gravity_step`；kernel 逐位对齐 golden 的 `is_pinned`(inv_mass≤0)、all-or-nothing per-strand rest/goal 门控（`has_rest`/`has_goal`）、`EPS_LEN`/`EPS_LEN_SQ`；6 用例真机对拍（单 strand 重力+约束、kinked bending+`LRA`、sphere+capsule 碰撞、多 strand 截断+门控、缺 goal slice 禁全局、no-op guards），Apple M2 Metal 6/6 全绿。至此核心 XPBD sim 阶段已在真机 `GPU` 落地。
+
+**待续**：guide→render 插值（clumping/curl/jitter，`hair_interp.wesl`）与 deep opacity 自阴影 build（`hair_deep_opacity.wesl`）的真机对拍孪生，为下一批落地目标。
 
 ---
 
