@@ -54,6 +54,7 @@ pub mod attenuation;
 pub mod cone;
 pub mod doppler;
 pub mod geometry;
+pub mod multi_position;
 pub mod occlusion;
 pub mod panner;
 pub mod spatializer;
@@ -67,6 +68,9 @@ pub use attenuation::{Attenuation, DistanceModel};
 pub use cone::Cone;
 pub use doppler::{Doppler, SPEED_OF_SOUND_MPS, doppler_ratio};
 pub use geometry::{Emitter, Listener, LocalSource};
+pub use multi_position::{
+    MAX_POSITIONS, MultiPositionMode, PositionInput, resolve_multi,
+};
 pub use occlusion::{
     NullOcclusionQuery, Occlusion, OcclusionFactors, OcclusionNode, OcclusionParams, OcclusionQuery,
 };
