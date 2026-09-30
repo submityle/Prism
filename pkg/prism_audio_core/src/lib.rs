@@ -21,6 +21,10 @@
 //!   [`scheduler::EventScheduler`] min-heap for sample-accurate event dispatch.
 //! - [`time`] holds the sample-accurate [`time::Transport`] and musical
 //!   [`time::TimeSignature`] used by the scheduler.
+//! - [`voice`] holds the fixed-capacity [`voice::VoicePool`]: priority-based
+//!   voice stealing, per-group playback limits, and Wwise-style virtual-voice
+//!   behavior (`ContinueVirtual`/`Kill`/`RestartFromBeginning`/
+//!   `PlayFromElapsedTime`).
 //! - [`graph`] holds the unified render graph: the [`graph::AudioNode`] trait,
 //!   the [`graph::AudioGraph`] container, deterministic topological
 //!   compilation, and the allocation-free [`graph::AudioGraph::process`] block
@@ -58,6 +62,7 @@ pub mod nodes;
 pub mod param;
 pub mod scheduler;
 pub mod time;
+pub mod voice;
 
 pub use buffer::{AudioBuffer, ChannelLayout};
 pub use graph::{AudioGraph, AudioNode, NodeId, PortRef, ProcessIo, RenderContext};
@@ -66,3 +71,7 @@ pub use modulation::{Lfo, LfoWaveform};
 pub use param::{Ramp, Smoothed};
 pub use scheduler::{EventScheduler, Grid, NamedClock};
 pub use time::{TimeSignature, Transport};
+pub use voice::{
+    Importance, LimitPolicy, VirtualBehavior, VirtualizationThresholds, VoiceGroup, VoiceHandle,
+    VoiceInfo, VoicePool, VoiceRequest, VoiceState,
+};
