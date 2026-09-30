@@ -18,6 +18,11 @@
 //!   [`wind_acceleration`](prism_render_architecture::hair::wind::wind_acceleration)
 //!   for a batch of sample point/time/field triples, reproducing the steady,
 //!   gust and turbulent terms of the wind coupling (see [`wind`]).
+//! * [`GpuStrandFrames`] evaluates
+//!   [`build_strand_frames`](prism_render_architecture::hair::frames::build_strand_frames),
+//!   walking the double-reflection rotation-minimizing frame transport one
+//!   thread per strand so every control point gets a coherent orthonormal
+//!   tangent/normal/bitangent basis (see [`frames`]).
 //!
 //! # Portability
 //!
@@ -46,8 +51,10 @@
 
 pub mod collision;
 pub mod context;
+pub mod frames;
 pub mod wind;
 
 pub use collision::{query_for, CollisionQuery, GpuColliderProjector};
 pub use context::{block_on, GpuContext};
+pub use frames::{GpuStrandFrame, GpuStrandFrames};
 pub use wind::{query_for_wind, GpuWindField, WindQuery};
