@@ -70,6 +70,7 @@ use crate::cone::Cone;
 use crate::doppler::Doppler;
 use crate::geometry::{Emitter, Listener};
 use crate::occlusion::{Occlusion, OcclusionFactors};
+use crate::spread::{Spread, SpreadParams};
 
 /// Authoring-time description of how a single source spatialises.
 ///
@@ -92,6 +93,8 @@ pub struct SourceDescriptor {
     /// Atmospheric conditions feeding the distance-dependent air-absorption
     /// low-pass corner.
     pub conditions: AtmosphericConditions,
+    /// Angular spread/focus shaping (distance-driven image width).
+    pub spread: Spread,
 }
 
 impl Default for SourceDescriptor {
@@ -107,6 +110,7 @@ impl Default for SourceDescriptor {
             doppler: Doppler::default(),
             occlusion: Occlusion::default(),
             conditions: AtmosphericConditions::default(),
+            spread: Spread::default(),
         }
     }
 }
@@ -135,6 +139,9 @@ pub struct SpatialParams {
     /// Multiplicative scale for the source's reverb/aux (wet) send, in
     /// `[0, 1]`. Driven by the occlusion factor alone.
     pub wet_gain: Sample,
+    /// Angular spread/focus for the pan stage (feed to
+    /// [`compute_spread_gains`](crate::spread::compute_spread_gains)).
+    pub spread: SpreadParams,
 }
 
 /// Resolves the full spatialisation for one source in a single control-rate
@@ -199,6 +206,9 @@ pub fn resolve(
         AirAbsorption::new(descriptor.conditions).cutoff_hz(local.distance, sample_rate);
     let direct_cutoff_hz = air_cutoff.min(occ.direct_cutoff_hz);
 
+    // 6. Angular spread widens the source image as it approaches the listener.
+    let spread = descriptor.spread.resolve(local.distance);
+
     SpatialParams {
         direct_gain,
         pitch_ratio,
@@ -206,6 +216,7 @@ pub fn resolve(
         elevation: local.elevation(),
         direct_cutoff_hz,
         wet_gain: occ.wet_gain,
+        spread,
     }
 }
 
@@ -414,6 +425,29 @@ mod tests {
         assert!(approx(params.azimuth, 0.0, 1e-4));
         assert!(approx(params.elevation, 0.0, 1e-4));
         assert!(approx(params.pitch_ratio, 1.0, 1e-4));
+    }
+
+    #[test]
+    fn spread_narrows_with_distance() {
+        // A near source is enveloping; a distant one collapses toward a point.
+        let listener = Listener::default();
+        let descriptor = SourceDescriptor::default();
+        let near = resolve(
+            &listener,
+            &Emitter::point(Vec3::new(0.0, 0.0, -0.5), Vec3::ZERO),
+            &descriptor,
+            OcclusionFactors::OPEN,
+            SR,
+        );
+        let far = resolve(
+            &listener,
+            &Emitter::point(Vec3::new(0.0, 0.0, -100.0), Vec3::ZERO),
+            &descriptor,
+            OcclusionFactors::OPEN,
+            SR,
+        );
+        assert!(near.spread.spread > far.spread.spread);
+        assert!(far.spread.spread <= 1e-4);
     }
 
     #[test]
