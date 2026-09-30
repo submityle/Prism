@@ -54,6 +54,7 @@ pub mod caustics;
 pub mod coupling;
 pub mod coupling_frame;
 pub mod dispersion;
+pub mod fft;
 pub mod flip;
 pub mod foam;
 pub mod gpu;
