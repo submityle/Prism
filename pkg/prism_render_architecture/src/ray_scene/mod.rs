@@ -44,6 +44,11 @@
 //!   node so a ray descends with a single cursor and no per-thread stack
 //!   (`GPU`-friendly), reproducing [`Bvh::closest_hit`]/[`Bvh::any_hit`]
 //!   (and watertight variants) bit-for-bit.
+//! - [`traversal_stackless_gpu_layout`] — flat, `GPU`-uploadable stackless
+//!   `BVH`: the packed [`gpu_layout::GpuBvhBuffers`] geometry plus a parallel
+//!   escape-index `array<u32>` ([`traversal_stackless_gpu_layout::GpuStacklessBvh`]),
+//!   with a packed single-cursor walk that reproduces the in-memory stackless
+//!   walk (and the stack walk) bit-for-bit.
 //! - [`ray_offset`] — Wächter-Binder watertight secondary-ray origin offset
 //!   (adaptive integer-`ULP` push) that keeps shadow/reflection/`GI` rays from
 //!   self-intersecting the surface they leave, at any scene scale.
@@ -65,6 +70,7 @@ pub mod sphere_gpu_layout;
 pub mod tlas;
 pub mod traversal;
 pub mod traversal_stackless;
+pub mod traversal_stackless_gpu_layout;
 
 pub use acceleration::{
     update_scratch_bytes, AccelerationUpdate, AccelerationUpdatePolicy, GeometryChange,
@@ -85,6 +91,7 @@ pub use sphere::{Sphere, SphereBvh, SphereHit};
 pub use sphere_gpu_layout::{GpuSphereBvhBuffers, SPHERE_WORDS};
 pub use traversal::{Hit, Ray};
 pub use traversal_stackless::{BvhEscapeTable, ESCAPE_SENTINEL};
+pub use traversal_stackless_gpu_layout::GpuStacklessBvh;
 pub use gpu_layout::{
     GpuBlasPool, GpuBvhBuffers, GpuTlasBuffers, TlasPackedHit, BLAS_OFFSET_WORDS, INSTANCE_WORDS,
     NODE_WORDS, TRIANGLE_WORDS,
