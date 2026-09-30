@@ -31,6 +31,7 @@
 //! graph node.
 
 mod abi;
+mod authoring;
 mod bind_groups;
 mod dispatch;
 mod extract;
@@ -59,3 +60,6 @@ mod shader_tests;
 #[cfg(test)]
 mod sim_gpu_tests;
 mod solve_plan;
+
+pub use authoring::ClothGarmentBuilder;
+pub use garment::ClothGarment;

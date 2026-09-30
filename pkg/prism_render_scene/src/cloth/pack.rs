@@ -181,13 +181,6 @@ pub(crate) fn pack_collider(collider: &BodyCollider) -> GpuClothCollider {
 /// reshuffled. An empty input packs to an empty `Vec` (an honest no-op collider
 /// set).
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "authored-BodyCollider slice -> GPU buffer host bridge; exercised now by the body-collision on-device parity test and wired into the garment spawn path once main-world authoring lands"
-    )
-)]
 pub(crate) fn pack_colliders(colliders: &[BodyCollider]) -> Vec<GpuClothCollider> {
     colliders.iter().map(pack_collider).collect()
 }
@@ -229,13 +222,6 @@ pub(crate) fn pack_backstop(backstop: &Backstop) -> GpuClothBackstop {
 /// index pairing exactly. An empty input packs to an empty `Vec` (an honest
 /// no-op backstop set).
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "authored-Backstop slice -> GPU buffer host bridge; exercised now by the backstop on-device parity test and wired into the garment spawn path once main-world painted-backstop authoring lands"
-    )
-)]
 pub(crate) fn pack_backstops(backstops: &[Backstop]) -> Vec<GpuClothBackstop> {
     backstops.iter().map(pack_backstop).collect()
 }
@@ -280,13 +266,6 @@ pub(crate) fn pack_embed_binding(binding: &BarycentricBinding) -> GpuClothEmbedB
 /// traversal exactly. An empty input packs to an empty `Vec` (an honest
 /// zero-vertex render mesh).
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "authored-BarycentricBinding slice -> GPU buffer host bridge; exercised now by the skin-embed on-device parity test and wired into the garment spawn path once main-world render-mesh binding lands"
-    )
-)]
 pub(crate) fn pack_embed_bindings(bindings: &[BarycentricBinding]) -> Vec<GpuClothEmbedBinding> {
     bindings.iter().map(pack_embed_binding).collect()
 }

@@ -29,6 +29,7 @@ pub use buffers::{
     GpuSceneBuffers, RenderGpuSceneBounds, RenderGpuSceneInstance, RenderGpuSceneTransform,
 };
 pub use compare::GpuSceneParityDiagnostics;
+pub use cloth::{ClothGarment, ClothGarmentBuilder};
 pub use completion::GpuCompletionTracker;
 pub use consumer::{GpuSceneBufferBindings, GpuSceneReader};
 pub use diagnostics::{GpuSceneDiagnostics, GpuSceneUploadSettings};

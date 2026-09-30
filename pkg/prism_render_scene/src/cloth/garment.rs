@@ -31,7 +31,7 @@ use super::solve_plan::ClothSolveInput;
 /// collider / backstop / embed slices are already in their `#[repr(C)]` device
 /// form because they carry no `CPU`-golden solver type to reorder.
 #[derive(Component, Clone, Debug, Default, PartialEq)]
-pub(crate) struct ClothGarment {
+pub struct ClothGarment {
     /// Particle positions with inverse mass in `.w`.
     pub(crate) positions: Vec<[f32; 4]>,
     /// Particle velocities; `.w` is unused padding.
