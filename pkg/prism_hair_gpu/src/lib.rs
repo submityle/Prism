@@ -68,6 +68,14 @@
 //!   turns the sparse simulated guides into the dense drawn groom (see
 //!   [`interp`]).
 //!
+//! * [`GpuHairDeepOpacity`] evaluates
+//!   [`build_deep_opacity_map`](prism_render_architecture::hair::deep_opacity_layout::build_deep_opacity_map),
+//!   packing the per-texel strand buckets into one flat deep opacity map —
+//!   one thread per light texel slices its host-sorted samples into a fixed
+//!   number of equal-width depth layers and composites the multiplicative
+//!   self-shadow transmittance `T = product(1 - alpha)` a shading pass
+//!   decodes with a constant stride (see [`deep_opacity`]).
+//!
 //! # Portability
 //!
 //! The projection uses only `sqrt`, `min`, `max`, `clamp`, `dot` and
@@ -95,6 +103,7 @@
 
 pub mod collision;
 pub mod context;
+pub mod deep_opacity;
 pub mod frames;
 pub mod guide_solver;
 pub mod interp;
@@ -106,6 +115,7 @@ pub mod wind;
 
 pub use collision::{query_for, CollisionQuery, GpuColliderProjector};
 pub use context::{block_on, GpuContext};
+pub use deep_opacity::GpuHairDeepOpacity;
 pub use frames::{GpuStrandFrame, GpuStrandFrames};
 pub use guide_solver::GpuGuideSolver;
 pub use interp::GpuHairInterp;
