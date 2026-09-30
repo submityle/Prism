@@ -400,6 +400,122 @@ impl Bvh {
         }
         false
     }
+
+    /// Nearest intersection using the watertight leaf test
+    /// ([`intersect_triangle_watertight`]).
+    ///
+    /// Identical traversal to [`Bvh::closest_hit`] but the per-triangle test
+    /// never lets a ray slip between two faces that share an edge, so primary
+    /// and reflection rays against a closed mesh never punch through a seam.
+    /// Use this when watertightness matters more than the marginally cheaper
+    /// Möller–Trumbore leaf test.
+    #[must_use]
+    pub fn closest_hit_watertight(&self, ray: &Ray) -> Option<Hit> {
+        if self.nodes.is_empty() {
+            return None;
+        }
+        let mut ray = *ray;
+        let mut best: Option<Hit> = None;
+
+        let mut stack = [0u32; 64];
+        let mut sp = 0usize;
+        let mut node_index = 0u32;
+        loop {
+            let node = &self.nodes[node_index as usize];
+            if slab_interval(ray.origin, ray.inv_direction, &node.bounds, ray.t_min, ray.t_max)
+                .is_some()
+            {
+                if node.is_leaf() {
+                    let start = node.first_primitive as usize;
+                    let end = start + node.primitive_count as usize;
+                    for tri in &self.primitives[start..end] {
+                        if let Some((t, u, v)) = intersect_triangle_watertight(&ray, tri) {
+                            ray.t_max = t;
+                            best = Some(Hit {
+                                t,
+                                u,
+                                v,
+                                primitive: tri.primitive,
+                            });
+                        }
+                    }
+                    match pop(&mut stack, &mut sp) {
+                        Some(n) => node_index = n,
+                        None => break,
+                    }
+                } else {
+                    let first_child = node_index + 1;
+                    let second_child = node.second_child;
+                    let neg = ray.direction[node.axis as usize] < 0.0;
+                    let (near, far) = if neg {
+                        (second_child, first_child)
+                    } else {
+                        (first_child, second_child)
+                    };
+                    if sp < stack.len() {
+                        stack[sp] = far;
+                        sp += 1;
+                    }
+                    node_index = near;
+                }
+            } else {
+                match pop(&mut stack, &mut sp) {
+                    Some(n) => node_index = n,
+                    None => break,
+                }
+            }
+        }
+        best
+    }
+
+    /// Occlusion query using the watertight leaf test.
+    ///
+    /// The watertight counterpart of [`Bvh::any_hit`]: a shadow/AO ray aimed
+    /// exactly along a shared edge of a closed occluder is still reported as
+    /// blocked, eliminating the pin-hole light leaks that the Möller–Trumbore
+    /// test produces at seams.
+    #[must_use]
+    pub fn any_hit_watertight(&self, ray: &Ray) -> bool {
+        if self.nodes.is_empty() {
+            return false;
+        }
+        let mut stack = [0u32; 64];
+        let mut sp = 0usize;
+        let mut node_index = 0u32;
+        loop {
+            let node = &self.nodes[node_index as usize];
+            if slab_interval(ray.origin, ray.inv_direction, &node.bounds, ray.t_min, ray.t_max)
+                .is_some()
+            {
+                if node.is_leaf() {
+                    let start = node.first_primitive as usize;
+                    let end = start + node.primitive_count as usize;
+                    for tri in &self.primitives[start..end] {
+                        if intersect_triangle_watertight(ray, tri).is_some() {
+                            return true;
+                        }
+                    }
+                    match pop(&mut stack, &mut sp) {
+                        Some(n) => node_index = n,
+                        None => break,
+                    }
+                } else {
+                    let first_child = node_index + 1;
+                    if sp < stack.len() {
+                        stack[sp] = node.second_child;
+                        sp += 1;
+                    }
+                    node_index = first_child;
+                }
+            } else {
+                match pop(&mut stack, &mut sp) {
+                    Some(n) => node_index = n,
+                    None => break,
+                }
+            }
+        }
+        false
+    }
 }
 
 #[inline]
@@ -873,5 +989,109 @@ mod tests {
             }
         }
         assert!(hits > 50, "expected meaningful hit coverage after rebuild, got {hits}");
+    }
+
+    /// Brute-force nearest hit using the watertight leaf test, mirroring
+    /// [`brute_force`] so the traversal can be checked against it.
+    fn brute_force_watertight(tris: &[Triangle], ray: &Ray) -> Option<Hit> {
+        let mut best: Option<Hit> = None;
+        let mut r = *ray;
+        for t in tris {
+            if let Some((tt, u, v)) = intersect_triangle_watertight(&r, t) {
+                r.t_max = tt;
+                best = Some(Hit {
+                    t: tt,
+                    u,
+                    v,
+                    primitive: t.primitive,
+                });
+            }
+        }
+        best
+    }
+
+    /// The watertight `BVH` walk agrees with a brute-force scan that uses the
+    /// same watertight leaf test, over a random scene and many rays.
+    #[test]
+    fn watertight_traversal_matches_brute_force_golden() {
+        let tris = random_scene(600, 0xbeef_face_0011_2233);
+        let bvh = Bvh::build(&tris);
+        let mut rng = Rng(0x0fed_cba9_8765_4321);
+        let mut hits = 0u32;
+        for _ in 0..4000 {
+            let origin = [
+                rng.range(-12.0, 12.0),
+                rng.range(-12.0, 12.0),
+                rng.range(-12.0, 12.0),
+            ];
+            let dir = [
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+            ];
+            if dir == [0.0, 0.0, 0.0] {
+                continue;
+            }
+            let ray = Ray::infinite(origin, dir);
+            match (bvh.closest_hit_watertight(&ray), brute_force_watertight(&tris, &ray)) {
+                (None, None) => {}
+                (Some(a), Some(b)) => {
+                    assert!(
+                        (a.t - b.t).abs() <= 1e-4 * (1.0 + b.t.abs()),
+                        "watertight bvh t mismatch: bvh={} bf={}",
+                        a.t,
+                        b.t
+                    );
+                    assert_eq!(a.primitive, b.primitive, "watertight bvh primitive mismatch");
+                    hits += 1;
+                }
+                (a, b) => panic!("watertight hit disagreement: bvh={a:?} bf={b:?}"),
+            }
+        }
+        assert!(hits > 50, "expected meaningful watertight hit coverage, got {hits}");
+    }
+
+    /// End-to-end seam test through the `BVH`: on a rotated quad split along its
+    /// diagonal, the watertight closest-hit and occlusion walks never leak on
+    /// the shared edge, whereas the Möller–Trumbore closest-hit walk does.
+    #[test]
+    fn watertight_traversal_seals_shared_edge() {
+        let (c, sn) = (0.8f32, 0.6f32);
+        let rot = |p: [f32; 3]| {
+            let z = sn * p[1] + c * p[2];
+            [c * p[0] - sn * z, c * p[1] - sn * p[2], sn * p[0] + c * z]
+        };
+        let p00 = rot([0.0, 0.0, 3.0]);
+        let p10 = rot([1.0, 0.0, 3.0]);
+        let p11 = rot([1.0, 1.0, 3.0]);
+        let p01 = rot([0.0, 1.0, 3.0]);
+        let bvh = Bvh::build(&[tri(p00, p10, p11, 0), tri(p00, p11, p01, 1)]);
+
+        let n = 20_000u32;
+        let mut mt_leaks = 0u32;
+        for i in 1..n {
+            let s = i as f32 / n as f32;
+            let dir = [
+                p00[0] + s * (p11[0] - p00[0]),
+                p00[1] + s * (p11[1] - p00[1]),
+                p00[2] + s * (p11[2] - p00[2]),
+            ];
+            let ray = Ray::infinite([0.0, 0.0, 0.0], dir);
+            assert!(
+                bvh.closest_hit_watertight(&ray).is_some(),
+                "watertight closest-hit leaked on the shared edge at s={s}",
+            );
+            assert!(
+                bvh.any_hit_watertight(&ray),
+                "watertight occlusion leaked on the shared edge at s={s}",
+            );
+            if bvh.closest_hit(&ray).is_none() {
+                mt_leaks += 1;
+            }
+        }
+        assert!(
+            mt_leaks > 0,
+            "expected the Moller-Trumbore walk to leak so the fix is exercised",
+        );
     }
 }
