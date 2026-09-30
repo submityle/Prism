@@ -48,7 +48,8 @@ use bevy_render::{
 };
 use bytemuck::Pod;
 use prism_render_architecture::water::gpu::buffers::{
-    WaterBufferCounts, WaterPersistentBufferSet, GRID_SCALAR_STRIDE, PBF_PARTICLE_STRIDE,
+    WaterBufferCounts, WaterPersistentBufferSet, FLIP_SCATTER_SLOTS_PER_CELL, GRID_SCALAR_STRIDE,
+    PBF_PARTICLE_STRIDE,
 };
 use prism_render_architecture::water::gpu::fft_pass_ping_pong;
 
@@ -427,8 +428,14 @@ impl WaterBodyGpuBuffers {
         // ---- FLIP / APIC ----
         let flip_particles =
             readable_storage(device, "prism water flip particles", upload.flip_particles);
+        // Pressure/divergence hold one f32 per cell; the P2G scatter accumulator
+        // holds FLIP_SCATTER_SLOTS_PER_CELL fixed-point atomics per cell
+        // (momentum_x, momentum_y, momentum_z, mass), so it is four times larger.
+        // Sizing the scatter buffer at `grid_bytes` under-allocates it four-fold
+        // and lets the `water_flip` P2G kernel scatter past the buffer's end.
         let grid_bytes = u64::from(upload.flip_grid_cells) * u64::from(GRID_SCALAR_STRIDE);
-        let flip_grid_scatter = zeroed_storage(device, "prism water flip scatter", grid_bytes);
+        let scatter_bytes = grid_bytes * u64::from(FLIP_SCATTER_SLOTS_PER_CELL);
+        let flip_grid_scatter = zeroed_storage(device, "prism water flip scatter", scatter_bytes);
         let flip_pressure_in = zeroed_storage(device, "prism water flip pressure in", grid_bytes);
         let flip_pressure_out = zeroed_storage(device, "prism water flip pressure out", grid_bytes);
         let flip_params = uniform(device, "prism water flip params", &upload.flip_params);
@@ -1068,6 +1075,13 @@ impl WaterBufferPlan {
         clamp_storage(self.set.flip_grid_bytes())
     }
 
+    /// Bytes for the single-buffered `FLIP` `P2G` scatter accumulator (four
+    /// fixed-point atomics per cell: `momentum_x`/`y`/`z` + `mass`).
+    #[must_use]
+    pub(crate) fn flip_scatter_bytes(&self) -> u64 {
+        clamp_storage(self.set.flip_scatter_bytes())
+    }
+
     /// Bytes for one foam coverage field (double-buffered).
     #[must_use]
     pub(crate) fn foam_bytes(&self) -> u64 {
@@ -1266,9 +1280,9 @@ fn filtering_sampler(device: &RenderDevice, label: &str) -> Sampler {
 mod tests {
     use super::*;
     use prism_render_architecture::water::gpu::buffers::{
-        DISPLACEMENT_TEXEL_STRIDE, FLIP_PARTICLE_STRIDE, FOAM_CELL_STRIDE, FROXEL_STRIDE,
-        GERSTNER_WAVE_STRIDE, NORMAL_TEXEL_STRIDE, SPECTRUM_AMPLITUDE_STRIDE, SWE_CELL_STRIDE,
-        WETNESS_CELL_STRIDE,
+        DISPLACEMENT_TEXEL_STRIDE, FLIP_PARTICLE_STRIDE, FLIP_SCATTER_SLOTS_PER_CELL,
+        FOAM_CELL_STRIDE, FROXEL_STRIDE, GERSTNER_WAVE_STRIDE, NORMAL_TEXEL_STRIDE,
+        SPECTRUM_AMPLITUDE_STRIDE, SWE_CELL_STRIDE, WETNESS_CELL_STRIDE,
     };
 
     fn counts() -> WaterBufferCounts {
@@ -1313,10 +1327,30 @@ mod tests {
             u64::from(golden.flip_particle_bytes())
         );
         assert_eq!(plan.flip_grid_bytes(), u64::from(golden.flip_grid_bytes()));
+        assert_eq!(
+            plan.flip_scatter_bytes(),
+            u64::from(golden.flip_scatter_bytes())
+        );
         assert_eq!(plan.foam_bytes(), u64::from(golden.foam_bytes()));
         assert_eq!(plan.wetness_bytes(), u64::from(golden.wetness_bytes()));
         assert_eq!(plan.froxel_bytes(), u64::from(golden.froxel_bytes()));
         assert_eq!(plan.total_bytes(), u64::from(golden.total_bytes()));
+    }
+
+    /// The `FLIP` `P2G` scatter accumulator must be four times the single
+    /// pressure/divergence scalar buffer: the `water_flip` kernel scatters into
+    /// `grid_scatter[cell * 4 + {0..3}]` (`momentum_x`/`y`/`z` + `mass`), so a
+    /// buffer sized at one scalar per cell would be read and written past its
+    /// end. This pins the four-slot sizing so a regression back to `grid_bytes`
+    /// fails the build.
+    #[test]
+    fn flip_scatter_buffer_holds_four_atomics_per_cell() {
+        let plan = WaterBufferPlan::new(counts());
+        assert_eq!(plan.flip_scatter_bytes(), plan.flip_grid_bytes() * 4);
+        // Enough u32 slots for the kernel's largest write index + 1.
+        let slots_needed =
+            u64::from(counts().flip_grid_cells) * u64::from(FLIP_SCATTER_SLOTS_PER_CELL);
+        assert!(plan.flip_scatter_bytes() >= slots_needed * u64::from(GRID_SCALAR_STRIDE));
     }
 
     /// An empty body clamps every resident buffer to the storage floor so no
@@ -1333,6 +1367,7 @@ mod tests {
         assert_eq!(plan.pbf_hash_bytes(), MIN_STORAGE_BYTES);
         assert_eq!(plan.flip_particle_bytes(), MIN_STORAGE_BYTES);
         assert_eq!(plan.flip_grid_bytes(), MIN_STORAGE_BYTES);
+        assert_eq!(plan.flip_scatter_bytes(), MIN_STORAGE_BYTES);
         assert_eq!(plan.foam_bytes(), MIN_STORAGE_BYTES);
         assert_eq!(plan.wetness_bytes(), MIN_STORAGE_BYTES);
         assert_eq!(plan.froxel_bytes(), MIN_STORAGE_BYTES);

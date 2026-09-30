@@ -67,6 +67,14 @@ pub const FLIP_PARTICLE_STRIDE: u32 = 80;
 /// entry), a single `u32`/`f32` at 4 bytes.
 pub const GRID_SCALAR_STRIDE: u32 = 4;
 
+/// Number of signed fixed-point `atomic<u32>` slots each `FLIP`/`APIC` `MAC`
+/// cell owns in the `P2G` scatter accumulator: three momentum components plus
+/// one mass lane (`[momentum_x, momentum_y, momentum_z, mass]`). The `water_flip`
+/// `P2G` kernel scatters into `grid_scatter[cell * 4 + {0..3}]`, so the scatter
+/// buffer needs four `GRID_SCALAR_STRIDE`-wide slots per cell — one scalar per
+/// cell (as for pressure/divergence) under-allocates it four-fold.
+pub const FLIP_SCATTER_SLOTS_PER_CELL: u32 = 4;
+
 /// Byte stride of one foam coverage cell, a single `f32` density at 4 bytes.
 /// The foam field is semi-Lagrangian advected, so it is double-buffered.
 pub const FOAM_CELL_STRIDE: u32 = 4;
@@ -208,6 +216,20 @@ impl WaterPersistentBufferSet {
             .saturating_mul(GRID_SCALAR_STRIDE)
     }
 
+    /// Bytes for the `FLIP`/`APIC` `P2G` scatter accumulator. Each `MAC` cell
+    /// owns [`FLIP_SCATTER_SLOTS_PER_CELL`] signed fixed-point atomics
+    /// (`momentum_x`, `momentum_y`, `momentum_z`, `mass`), so this buffer is
+    /// four times the single-scalar `flip_grid_bytes`. It is cleared and
+    /// re-accumulated every frame rather than ping-ponged, so it is a single
+    /// (not double-buffered) allocation.
+    #[must_use]
+    pub fn flip_scatter_bytes(self) -> u32 {
+        self.counts
+            .flip_grid_cells
+            .saturating_mul(GRID_SCALAR_STRIDE)
+            .saturating_mul(FLIP_SCATTER_SLOTS_PER_CELL)
+    }
+
     /// Bytes for one foam coverage field. Semi-Lagrangian advection reads the
     /// previous field while writing the next, so it is double-buffered.
     #[must_use]
@@ -232,7 +254,8 @@ impl WaterPersistentBufferSet {
     /// Total resident bytes for every persistent water buffer. The
     /// double-buffered pools — the spectrum `h0`/conjugate pair, the `PBF`
     /// position pool, the `FLIP` pressure buffer and the foam field — are
-    /// counted twice. Saturating throughout.
+    /// counted twice; the single-buffered `FLIP` `P2G` scatter accumulator is
+    /// counted once at its full four-slot-per-cell size. Saturating throughout.
     #[must_use]
     pub fn total_bytes(self) -> u32 {
         let spectrum_pair = self.spectrum_amplitude_bytes().saturating_mul(2);
@@ -247,6 +270,7 @@ impl WaterPersistentBufferSet {
             .saturating_add(pbf_double)
             .saturating_add(self.pbf_hash_bytes())
             .saturating_add(self.flip_particle_bytes())
+            .saturating_add(self.flip_scatter_bytes())
             .saturating_add(pressure_double)
             .saturating_add(foam_double)
             .saturating_add(self.wetness_bytes())
@@ -499,8 +523,8 @@ impl AsyncFrameState {
 mod tests {
     use super::{
         AsyncFrameState, BufferParity, PipelineError, SlotState, WaterBufferCounts,
-        WaterPersistentBufferSet, FLIP_PARTICLE_STRIDE, GERSTNER_WAVE_STRIDE, PBF_PARTICLE_STRIDE,
-        SPECTRUM_AMPLITUDE_STRIDE,
+        WaterPersistentBufferSet, FLIP_PARTICLE_STRIDE, FLIP_SCATTER_SLOTS_PER_CELL,
+        GERSTNER_WAVE_STRIDE, GRID_SCALAR_STRIDE, PBF_PARTICLE_STRIDE, SPECTRUM_AMPLITUDE_STRIDE,
     };
 
     fn counts() -> WaterBufferCounts {
@@ -560,11 +584,32 @@ mod tests {
             + set.pbf_particle_bytes() * 2
             + set.pbf_hash_bytes()
             + set.flip_particle_bytes()
+            + set.flip_scatter_bytes()
             + set.flip_grid_bytes() * 2
             + set.foam_bytes() * 2
             + set.wetness_bytes()
             + set.froxel_bytes();
         assert_eq!(set.total_bytes(), expected);
+    }
+
+    #[test]
+    fn flip_scatter_is_four_slots_per_cell() {
+        // The P2G scatter accumulator owns four fixed-point atomics per MAC
+        // cell (momentum_x, momentum_y, momentum_z, mass), so it must be four
+        // times the single-scalar pressure/divergence buffer. Sizing it at
+        // flip_grid_bytes (one scalar per cell) under-allocates it four-fold and
+        // lets the `water_flip` P2G kernel scatter past the buffer's end.
+        assert_eq!(FLIP_SCATTER_SLOTS_PER_CELL, 4);
+        let set = WaterPersistentBufferSet::new(counts());
+        assert_eq!(
+            set.flip_scatter_bytes(),
+            counts().flip_grid_cells * GRID_SCALAR_STRIDE * FLIP_SCATTER_SLOTS_PER_CELL
+        );
+        assert_eq!(set.flip_scatter_bytes(), set.flip_grid_bytes() * 4);
+        // The kernel writes grid_scatter[cell * 4 + 3] for the last cell, so the
+        // buffer must hold at least flip_grid_cells * 4 u32 slots.
+        let max_index_plus_one = counts().flip_grid_cells * FLIP_SCATTER_SLOTS_PER_CELL;
+        assert!(set.flip_scatter_bytes() >= max_index_plus_one * GRID_SCALAR_STRIDE);
     }
 
     #[test]
