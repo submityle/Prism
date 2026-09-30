@@ -45,6 +45,7 @@ pub mod broadphase;
 pub mod buffer;
 pub mod bvh;
 pub mod cfl;
+pub mod contacts;
 pub mod context;
 pub mod fluid;
 pub mod fracture;
@@ -62,6 +63,9 @@ pub use bvh::{
     SceneBounds, NO_PARENT,
 };
 pub use cfl::{cpu_cfl_dt, cpu_max_speed, CflConfig, GpuCflReduce};
+pub use contacts::{
+    contact_constraints, cpu_resolve_contacts, ContactConstraint, GpuContactSolver,
+};
 pub use context::GpuContext;
 pub use fluid::{
     grid_to_particle, particle_to_grid, CellType, FluidConfig, FluidError, FluidParticles,

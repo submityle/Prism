@@ -35,7 +35,7 @@ mod cpu;
 mod gpu;
 mod state;
 
-pub use coloring::{Colouring, MAX_COLOURS};
+pub use coloring::{ColouredEdge, Colouring, MAX_COLOURS};
 pub use config::{XpbdConfig, XpbdError};
 pub use constraint::DistanceConstraint;
 pub use cpu::cpu_solve;

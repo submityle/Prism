@@ -23,6 +23,25 @@
 use super::config::XpbdError;
 use super::constraint::DistanceConstraint;
 
+/// An edge in the constraint graph the colouring partitions.
+///
+/// The greedy first-fit only ever needs a constraint's two particle indices, so
+/// any constraint type that couples exactly two particles (a distance
+/// constraint, a sphere contact) implements this and shares the identical
+/// colouring machinery. Keeping the colouring generic over the edge — rather
+/// than copying it per constraint type — is what lets the contact solver reuse
+/// the proven partitioner unchanged.
+pub trait ColouredEdge {
+    /// Returns the two particle indices this constraint couples.
+    fn endpoints(&self) -> (u32, u32);
+}
+
+impl ColouredEdge for DistanceConstraint {
+    fn endpoints(&self) -> (u32, u32) {
+        (self.a, self.b)
+    }
+}
+
 /// The maximum number of colours the first-fit packing supports.
 ///
 /// Each particle's used-colour set is a single `u64` bitmask, so the ceiling is
@@ -56,8 +75,8 @@ impl Colouring {
     /// Returns [`XpbdError::ConstraintOutOfRange`] if a constraint references a
     /// particle `>= particle_count`, or [`XpbdError::TooManyColours`] if the
     /// graph needs more than [`MAX_COLOURS`] colours.
-    pub fn build(
-        constraints: &[DistanceConstraint],
+    pub fn build<E: ColouredEdge>(
+        constraints: &[E],
         particle_count: u32,
     ) -> Result<Colouring, XpbdError> {
         // Per-particle bitmask of colours already taken by an incident
@@ -68,9 +87,10 @@ impl Colouring {
         let mut colour_count = 0u32;
 
         for (ci, con) in constraints.iter().enumerate() {
-            check_index(ci as u32, con.a, particle_count)?;
-            check_index(ci as u32, con.b, particle_count)?;
-            let taken = particle_mask[con.a as usize] | particle_mask[con.b as usize];
+            let (a, b) = con.endpoints();
+            check_index(ci as u32, a, particle_count)?;
+            check_index(ci as u32, b, particle_count)?;
+            let taken = particle_mask[a as usize] | particle_mask[b as usize];
             let colour = lowest_free_bit(taken);
             if colour >= MAX_COLOURS {
                 return Err(XpbdError::TooManyColours {
@@ -79,8 +99,8 @@ impl Colouring {
                 });
             }
             let bit = 1u64 << colour;
-            particle_mask[con.a as usize] |= bit;
-            particle_mask[con.b as usize] |= bit;
+            particle_mask[a as usize] |= bit;
+            particle_mask[b as usize] |= bit;
             colour_of[ci] = colour;
             colour_count = colour_count.max(colour + 1);
         }
@@ -130,13 +150,13 @@ impl Colouring {
         &self.ranges
     }
 
-    /// Reorders `constraints` into colour-grouped order, ready for upload.
+    /// Reorders `items` into colour-grouped order, ready for upload.
+    ///
+    /// Generic over the element so the same permutation reorders a distance
+    /// constraint list or a contact constraint list with one implementation.
     #[must_use]
-    pub fn reorder(&self, constraints: &[DistanceConstraint]) -> Vec<DistanceConstraint> {
-        self.order
-            .iter()
-            .map(|&i| constraints[i as usize])
-            .collect()
+    pub fn reorder<T: Copy>(&self, items: &[T]) -> Vec<T> {
+        self.order.iter().map(|&i| items[i as usize]).collect()
     }
 }
 
