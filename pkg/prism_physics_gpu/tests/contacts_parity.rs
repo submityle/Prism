@@ -20,8 +20,15 @@
 //! `prev_positions` snapshot) damps them, so the parity check covers both the
 //! static and dynamic regimes on top of the normal solve.
 //!
-//! Provenance: substep `XPBD` with the one-sided contact constraint and the
-//! positional Coulomb friction of Müller et al. 2020. No Unreal Engine source or
+//! A bouncing scene exercises the velocity-level restitution pass: gently
+//! overlapping head-on pairs rebound at a range of coefficients, so the parity
+//! check covers the restitution kernel (which reads the post-prediction
+//! `vel_pre` snapshot) across both its active impulse and its separated-pair
+//! activity-gate skip.
+//!
+//! Provenance: substep `XPBD` with the one-sided contact constraint, the
+//! positional Coulomb friction of Müller et al. 2020, and the substep
+//! velocity-level restitution of that same 2020 work. No Unreal Engine source or
 //! derived code.
 
 use glam::Vec3;
@@ -113,6 +120,31 @@ fn frictional_slide(n: u32) -> (ParticleState, Vec<ContactConstraint>) {
     let contacts = (0..n - 1)
         .map(|i| ContactConstraint::new(i, i + 1, 1.0, 0.0).with_friction(0.6, 0.4))
         .collect();
+    (state, contacts)
+}
+
+/// Three independent head-on bouncers: each is a pinned particle and a movable
+/// particle gently overlapping it (rest 1.0 vs 0.95 spacing) and approaching at
+/// a modest -x speed, with a different restitution coefficient per pair. The
+/// overlap drives the position solve while the restitution pass (reading the
+/// post-prediction `vel_pre` snapshot) corrects the rebound speed to the
+/// coefficient's target; the pairs then coast apart, so the run stays bounded
+/// and non-chaotic while exercising both the active restitution impulse and the
+/// separated-pair activity-gate skip. The bouncers are spaced far apart so the
+/// contacts stay disjoint — a clean isolation of the restitution kernel.
+fn bouncing_pairs() -> (ParticleState, Vec<ContactConstraint>) {
+    let mut state = ParticleState::new();
+    for &px in &[0.0f32, 10.0, 20.0] {
+        state.push(Vec3::new(px, 0.0, 0.0), 0.0);
+        state.push(Vec3::new(px + 0.95, 0.0, 0.0), 1.0);
+        let movable = state.len() - 1;
+        state.velocities[movable] = Vec3::new(-0.5, 0.0, 0.0);
+    }
+    let contacts = vec![
+        ContactConstraint::new(0, 1, 1.0, 0.0).with_restitution(0.5),
+        ContactConstraint::new(2, 3, 1.0, 0.0).with_restitution(0.7),
+        ContactConstraint::new(4, 5, 1.0, 0.0).with_restitution(0.9),
+    ];
     (state, contacts)
 }
 
@@ -227,5 +259,21 @@ fn gpu_contacts_match_cpu_golden() {
         &no_gravity,
         40,
         "frictional_slide_no_gravity",
+    );
+
+    // Bouncing pairs: independent head-on bouncers with a range of restitution
+    // coefficients. No gravity isolates the restitution kernel's velocity
+    // correction; each pair rebounds once and coasts apart, so the run is
+    // bounded and non-chaotic while covering both the active impulse and the
+    // activity-gate skip once the pair separates.
+    let (bounce, bounce_contacts) = bouncing_pairs();
+    run_parity(
+        &ctx,
+        &solver,
+        &bounce,
+        &bounce_contacts,
+        &no_gravity,
+        40,
+        "bouncing_pairs_no_gravity",
     );
 }
