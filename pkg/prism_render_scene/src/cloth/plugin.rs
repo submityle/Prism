@@ -18,6 +18,11 @@
 //!   [`dispatch_cloth`](super::dispatch::dispatch_cloth) compute node into the
 //!   `Core3d` graph before the main pass, matching every other Prism compute
 //!   pass.
+//! * It installs the main-world screen-coverage estimator
+//!   [`update_cloth_coverage`](super::coverage::update_cloth_coverage) in
+//!   `PostUpdate` (after the camera projection refresh), which projects each
+//!   garment's world bounds and writes back a live `0..=1` coverage that the
+//!   render-world LOD gate resolves against.
 //! * It runs the full end-to-end loop each frame:
 //!   [`extract_cloth_garments`](super::extract::extract_cloth_garments) in
 //!   [`ExtractSchedule`] snapshots the main-world
@@ -33,11 +38,13 @@
 //! shaders still validate, so this plugin is the real, load-bearing wiring for
 //! the device-side solver rather than a placeholder.
 
-use bevy_app::{App, Plugin};
+use bevy_app::{App, Plugin, PostUpdate};
 use bevy_asset::embedded_asset;
+use bevy_camera::CameraUpdateSystems;
 use bevy_ecs::schedule::IntoScheduleConfigs;
 use bevy_render::{ExtractSchedule, Render, RenderApp, RenderStartup, RenderSystems};
 
+use super::coverage::update_cloth_coverage;
 use super::dispatch::dispatch_cloth;
 use super::extract::extract_cloth_garments;
 use super::garment::ExtractedCloth;
@@ -62,6 +69,16 @@ impl Plugin for ClothPlugin {
         embedded_asset!(app, "../shaders/cloth_embed.wesl");
         embedded_asset!(app, "../shaders/cloth_aerodynamics_snapshot.wesl");
         embedded_asset!(app, "../shaders/cloth_aerodynamics.wesl");
+
+        // Main-world screen-coverage estimator: refresh every garment's projected
+        // on-screen size each frame so the render-world LOD gate resolves against
+        // a live coverage rather than a static authored value. It runs after the
+        // camera projection is recomputed (`CameraUpdateSystems`) and before the
+        // extract stage snapshots the garments into the render world.
+        app.add_systems(
+            PostUpdate,
+            update_cloth_coverage.after(CameraUpdateSystems),
+        );
 
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;

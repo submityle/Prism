@@ -189,6 +189,14 @@ impl ClothGarment {
         }
     }
 
+    /// Borrows this garment's world-space particle positions (inverse mass in
+    /// `.w`). The coverage estimator reads the `xyz` cloud to bound the garment
+    /// on screen without cloning the buffer.
+    #[must_use]
+    pub(crate) fn positions(&self) -> &[[f32; 4]] {
+        &self.positions
+    }
+
     // -- Level-of-detail accessors -----------------------------------------
 
     /// The number of simulated sim-mesh vertices (one per particle row). This
@@ -220,6 +228,17 @@ impl ClothGarment {
     #[must_use]
     pub(crate) fn coverage(&self) -> f32 {
         self.coverage
+    }
+
+    /// Records this frame's projected screen coverage, clamped to `0..=1`.
+    ///
+    /// Written by the coverage estimator ([`update_cloth_coverage`]) each frame
+    /// before the extract stage snapshots the garment, so the LOD gate resolves
+    /// against a live on-screen size rather than a static authored value.
+    ///
+    /// [`update_cloth_coverage`]: super::coverage::update_cloth_coverage
+    pub(crate) fn set_coverage(&mut self, coverage: f32) {
+        self.coverage = coverage.clamp(0.0, 1.0);
     }
 
     /// Coverage below which the garment drops to reduced simulation.

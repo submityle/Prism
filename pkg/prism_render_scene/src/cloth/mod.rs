@@ -43,6 +43,7 @@ mod bind_groups;
 mod body_collision_gpu_tests;
 #[cfg(test)]
 mod ccd_gpu_tests;
+mod coverage;
 mod dispatch;
 #[cfg(test)]
 mod embed_gpu_tests;
