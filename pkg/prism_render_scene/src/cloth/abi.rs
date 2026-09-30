@@ -483,6 +483,26 @@ pub(crate) struct GpuClothLayerParams {
     pub pad1: u32,
 }
 
+/// 16-byte uniform driving the artist-painted per-vertex constraint passes.
+/// Carries the sanitized anim-drive master gain, the reciprocal timestep
+/// (`inv_dt`, precomputed host-side exactly as the golden `1.0 / dt` so the
+/// GPU and CPU velocity updates share the identical divisor), the effective
+/// vertex count bounding the dispatch, and one pad word to a whole 16-byte
+/// uniform stride. The per-vertex painted weights and skinned anchors ride in
+/// their own storage arrays; only these whole-pass scalars are uniform.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq)]
+pub(crate) struct GpuClothPaintedParams {
+    /// Master anim-drive gain in `[0, 1]` (sanitized); scales every `anim_drive`.
+    pub anim_gain: f32,
+    /// Reciprocal timestep `1.0 / dt` for the anim-drive velocity update.
+    pub inv_dt: f32,
+    /// Effective vertex count (min of positions, anchors and weights lengths).
+    pub vertex_count: u32,
+    /// Padding to a 16-byte uniform stride.
+    pub pad0: u32,
+}
+
 /// 32-byte uniform driving the continuous-collision (CCD) sweep. The three
 /// sanitized golden scalars (`skin`, `restitution`, `dt`) plus the `friction`
 /// coefficient and two counts, padded to a whole 16-byte uniform stride. The
@@ -688,6 +708,16 @@ mod tests {
         assert_eq!(size_of::<GpuClothLayerParams>(), 16);
         assert_eq!(size_of::<GpuClothLayerParams>() % 16, 0);
         assert_eq!(align_of::<GpuClothLayerParams>(), 4);
+    }
+    /// The painted per-vertex constraint uniform is one flat 16-byte row: the
+    /// anim-drive gain, the reciprocal timestep, the vertex count and one pad
+    /// word. Pin the 16-byte size against drift from `GpuClothPaintedParams` in
+    /// `cloth_painted.wesl`.
+    #[test]
+    fn painted_params_is_uniform_stride() {
+        assert_eq!(size_of::<GpuClothPaintedParams>(), 16);
+        assert_eq!(size_of::<GpuClothPaintedParams>() % 16, 0);
+        assert_eq!(align_of::<GpuClothPaintedParams>(), 4);
     }
 
     /// The collider discriminants match the shader's `CLOTH_COLLIDER_*` order.

@@ -56,6 +56,9 @@ const CLOTH_TEARING_WESL_UUID: u128 = 0x434c_4f54_485f_5445_4152_5f5f_5f5f_5c01;
 /// Stable cache UUID for the inter-layer coupling shader twin.
 const CLOTH_LAYERS_WESL_UUID: u128 = 0x434c_4f54_485f_4c41_5945_5253_5f5f_5d01;
 
+/// Stable cache UUID for the artist-painted per-vertex constraint shader twin.
+const CLOTH_PAINTED_WESL_UUID: u128 = 0x434c_4f54_485f_5041_494e_5445_445f_5e01;
+
 /// 把 `WESL` 源经 render-world 的 [`ShaderCache`] 编译回 `Wgsl` 字符串（不建
 /// 设备），供各模块自建的裸 `wgpu` 设备使用。镜像 `sim_gpu_tests` 的编译闭包。
 fn keep_wgsl(
@@ -170,6 +173,15 @@ pub(super) fn compile_layers_wgsl() -> String {
         include_str!("../shaders/cloth_layers.wesl"),
         "shaders/cloth_layers.wesl",
         CLOTH_LAYERS_WESL_UUID,
+    )
+}
+
+/// 经 `ShaderCache` 把嵌入式 `cloth_painted.wesl` 编译成 `Wgsl`。
+pub(super) fn compile_painted_wgsl() -> String {
+    compile_cloth_wgsl(
+        include_str!("../shaders/cloth_painted.wesl"),
+        "shaders/cloth_painted.wesl",
+        CLOTH_PAINTED_WESL_UUID,
     )
 }
 
