@@ -92,6 +92,7 @@ pub mod signed_distance;
 pub mod sphere_frustum_cull;
 pub mod triangle_gradients;
 pub mod vis_payload_codec;
+pub mod vis_word_codec;
 
 pub use aabb_frustum_cull::{bounds_of, AabbQuery, GpuAabbFrustumCull};
 pub use bin_cut::GpuCutBinner;
@@ -116,3 +117,4 @@ pub use signed_distance::{GpuSignedDistance, SignedDistanceQuery};
 pub use sphere_frustum_cull::{GpuSphereFrustumCull, SphereQuery};
 pub use triangle_gradients::GpuTriangleGradients;
 pub use vis_payload_codec::{GpuVisPayloadCodec, PayloadCodec, PayloadInput};
+pub use vis_word_codec::{GpuVisWordCodec, VisWordCodec, VisWordInput};
