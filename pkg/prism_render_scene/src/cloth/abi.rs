@@ -465,6 +465,24 @@ pub(crate) struct GpuClothTearingParams {
     pub pad0: u32,
 }
 
+/// 16-byte uniform driving the inter-layer garment coupling pass. Only the
+/// sanitized separation `thickness` and the `particle_count` reach the kernel;
+/// the spatial-hash cell size stays on the host (it shapes the prebuilt `CSR`
+/// neighbourhood), so this record needs just the two live scalars plus padding
+/// to a whole 16-byte uniform stride.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq)]
+pub(crate) struct GpuClothLayerParams {
+    /// Minimum separation enforced between particles of different layers.
+    pub thickness: f32,
+    /// Number of particles, bounding the per-particle dispatch.
+    pub particle_count: u32,
+    /// Padding to a 16-byte uniform stride.
+    pub pad0: u32,
+    /// Padding to a 16-byte uniform stride.
+    pub pad1: u32,
+}
+
 /// 32-byte uniform driving the continuous-collision (CCD) sweep. The three
 /// sanitized golden scalars (`skin`, `restitution`, `dt`) plus the `friction`
 /// coefficient and two counts, padded to a whole 16-byte uniform stride. The
@@ -560,7 +578,10 @@ mod tests {
         let round: GpuClothBodyParams = *bytemuck::from_bytes(bytes);
         assert_eq!(round, params);
         // The friction f32 occupies the third 4-byte word (offset 8).
-        assert_eq!(f32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]), 0.42);
+        assert_eq!(
+            f32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
+            0.42
+        );
     }
 
     /// The self-collision uniform is already one full 16-byte row.
@@ -657,6 +678,16 @@ mod tests {
         assert_eq!(size_of::<GpuClothCcdSweepParams>(), 32);
         assert_eq!(size_of::<GpuClothCcdSweepParams>() % 16, 0);
         assert_eq!(align_of::<GpuClothCcdSweepParams>(), 4);
+    }
+
+    /// The inter-layer coupling uniform is one flat 16-byte row: the sanitized
+    /// separation thickness, the particle count and two pad words. Pin the
+    /// 16-byte size against drift from `GpuClothLayerParams` in `cloth_layers.wesl`.
+    #[test]
+    fn layer_params_is_uniform_stride() {
+        assert_eq!(size_of::<GpuClothLayerParams>(), 16);
+        assert_eq!(size_of::<GpuClothLayerParams>() % 16, 0);
+        assert_eq!(align_of::<GpuClothLayerParams>(), 4);
     }
 
     /// The collider discriminants match the shader's `CLOTH_COLLIDER_*` order.

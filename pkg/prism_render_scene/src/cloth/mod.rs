@@ -31,49 +31,51 @@
 //! graph node.
 
 mod abi;
-mod authoring;
-mod bind_groups;
-mod dispatch;
-mod extract;
-mod garment;
-mod pack;
-mod pipeline;
-pub(crate) mod plugin;
-mod prepare;
-mod resources;
 #[cfg(test)]
 mod aero_gpu_tests;
 #[cfg(test)]
+mod aero_parity;
+mod authoring;
+#[cfg(test)]
 mod backstop_gpu_tests;
+mod bind_groups;
 #[cfg(test)]
 mod body_collision_gpu_tests;
 #[cfg(test)]
-mod embed_gpu_tests;
-#[cfg(test)]
-mod self_collision_gpu_tests;
-#[cfg(test)]
-mod virtual_gpu_tests;
-#[cfg(test)]
-mod self_ccd_gpu_tests;
-#[cfg(test)]
-mod pressure_gpu_tests;
-#[cfg(test)]
-mod plasticity_gpu_tests;
-#[cfg(test)]
 mod ccd_gpu_tests;
+mod dispatch;
 #[cfg(test)]
-mod vbd_gpu_tests;
-#[cfg(test)]
-mod tearing_gpu_tests;
+mod embed_gpu_tests;
+mod extract;
+mod garment;
 #[cfg(test)]
 mod gpu_test_support;
 #[cfg(test)]
-mod aero_parity;
+mod layers_gpu_tests;
+mod pack;
+mod pipeline;
+#[cfg(test)]
+mod plasticity_gpu_tests;
+pub(crate) mod plugin;
+mod prepare;
+#[cfg(test)]
+mod pressure_gpu_tests;
+mod resources;
+#[cfg(test)]
+mod self_ccd_gpu_tests;
+#[cfg(test)]
+mod self_collision_gpu_tests;
 #[cfg(test)]
 mod shader_tests;
 #[cfg(test)]
 mod sim_gpu_tests;
 mod solve_plan;
+#[cfg(test)]
+mod tearing_gpu_tests;
+#[cfg(test)]
+mod vbd_gpu_tests;
+#[cfg(test)]
+mod virtual_gpu_tests;
 
 pub use authoring::ClothGarmentBuilder;
 pub use garment::ClothGarment;
