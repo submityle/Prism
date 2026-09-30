@@ -51,3 +51,15 @@ fn ray_traverse_wesl_compiles_standalone() {
         0x5052_4953_4d5f_5241_5954_5241_5645_0001,
     );
 }
+
+/// The top-level `TLAS` closest-hit / any-hit walk, the real-device twin of
+/// `GpuTlasBuffers::closest_hit` / `GpuTlasBuffers::any_hit` over the shared
+/// `GpuBlasPool`.
+#[test]
+fn tlas_traverse_wesl_compiles_standalone() {
+    compile_standalone(
+        include_str!("../shaders/tlas_traverse.wesl"),
+        "embedded://prism_render_scene/shaders/tlas_traverse.wesl",
+        0x5052_4953_4d5f_5449_4c41_5354_5256_0001,
+    );
+}

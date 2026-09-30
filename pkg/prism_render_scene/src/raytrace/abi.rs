@@ -23,7 +23,7 @@
 )]
 
 use bytemuck::{Pod, Zeroable};
-use prism_render_architecture::ray_scene::{NODE_WORDS, TRIANGLE_WORDS};
+use prism_render_architecture::ray_scene::{BLAS_OFFSET_WORDS, INSTANCE_WORDS, NODE_WORDS, TRIANGLE_WORDS};
 
 /// `u32` words per packed `BVH` node, re-exported from the golden layout. Must
 /// match the `NODE_WORDS` constant in `shaders/ray_traverse.wesl`.
@@ -79,6 +79,46 @@ pub(crate) const RAYTRACE_MODE_CLOSEST: u32 = 0;
 /// match the `mode == 1u` branch in `shaders/ray_traverse.wesl`.
 pub(crate) const RAYTRACE_MODE_ANY: u32 = 1;
 
+/// `u32` words per packed `TLAS` instance in the top-level kernel's
+/// `instances` input buffer (64 bytes, 16-byte aligned), re-exported from the
+/// golden layout. Layout: `world_to_object` linear columns `c0.xyz` (0..3),
+/// `c1.xyz` (3..6), `c2.xyz` (6..9), translation (9..12), `blas_index` (12),
+/// `instance_id` (13), pad (14..16). Must match `INSTANCE_WORDS` in
+/// `shaders/tlas_traverse.wesl`.
+pub(crate) const RAYTRACE_INSTANCE_WORDS: usize = INSTANCE_WORDS;
+
+/// `u32` words per per-`BLAS` offset record in the top-level kernel's
+/// `pool_offsets` input buffer (16 bytes, 16-byte aligned), re-exported from the
+/// golden layout. Layout: `node_base` (0), `node_count` (1), `triangle_base`
+/// (2), `triangle_count` (3). Must match `BLAS_OFFSET_WORDS` in
+/// `shaders/tlas_traverse.wesl`.
+pub(crate) const RAYTRACE_BLAS_OFFSET_WORDS: usize = BLAS_OFFSET_WORDS;
+
+/// `u32` words per packed hit in the top-level kernel's `hits` output buffer
+/// (32 bytes, 16-byte aligned). Layout: `t` (0), `u` (1), `v` (2), `primitive`
+/// (3), `instance_id` (4), `instance_index` (5), pad (6..8). Must match
+/// `TLAS_HIT_WORDS` in `shaders/tlas_traverse.wesl`.
+pub(crate) const TLAS_HIT_WORDS: usize = 8;
+
+/// Word offset of the `blas_index` inside a packed instance (word 12). Mirrors
+/// the `instances[ib + 12u]` read in `shaders/tlas_traverse.wesl`.
+pub(crate) const INSTANCE_BLAS_INDEX_WORD: usize = 12;
+
+/// Word offset of the stable `instance_id` inside a packed instance (word 13).
+pub(crate) const INSTANCE_ID_WORD: usize = 13;
+
+/// Word offset of `node_base` inside a packed `BLAS` offset record (word 0).
+pub(crate) const BLAS_OFFSET_NODE_BASE_WORD: usize = 0;
+
+/// Word offset of `node_count` inside a packed `BLAS` offset record (word 1).
+pub(crate) const BLAS_OFFSET_NODE_COUNT_WORD: usize = 1;
+
+/// Word offset of `triangle_base` inside a packed `BLAS` offset record (word 2).
+pub(crate) const BLAS_OFFSET_TRIANGLE_BASE_WORD: usize = 2;
+
+/// Word offset of `triangle_count` inside a packed `BLAS` offset record (word 3).
+pub(crate) const BLAS_OFFSET_TRIANGLE_COUNT_WORD: usize = 3;
+
 /// Host mirror of the traversal kernel's `RayTraverseParams` uniform.
 ///
 /// The four `u32` fields are exactly the `struct RayTraverseParams` in
@@ -103,12 +143,17 @@ pub(crate) struct GpuRayTraverseParams {
 #[cfg(test)]
 mod tests {
     use super::{
-        GpuRayTraverseParams, HIT_WORDS, MISS_PRIMITIVE, NODE_AXIS_WORD, NODE_FIRST_PRIMITIVE_WORD,
-        NODE_PRIMITIVE_COUNT_WORD, NODE_SECOND_CHILD_WORD, POSITIVE_INF_BITS, RAYTRACE_MODE_ANY,
+        BLAS_OFFSET_NODE_BASE_WORD, BLAS_OFFSET_NODE_COUNT_WORD, BLAS_OFFSET_TRIANGLE_BASE_WORD,
+        BLAS_OFFSET_TRIANGLE_COUNT_WORD, GpuRayTraverseParams, HIT_WORDS, INSTANCE_BLAS_INDEX_WORD,
+        INSTANCE_ID_WORD, MISS_PRIMITIVE, NODE_AXIS_WORD, NODE_FIRST_PRIMITIVE_WORD,
+        NODE_PRIMITIVE_COUNT_WORD, NODE_SECOND_CHILD_WORD, POSITIVE_INF_BITS,
+        RAYTRACE_BLAS_OFFSET_WORDS, RAYTRACE_INSTANCE_WORDS, RAYTRACE_MODE_ANY,
         RAYTRACE_MODE_CLOSEST, RAYTRACE_NODE_WORDS, RAYTRACE_TRIANGLE_WORDS, RAY_WORDS,
-        TRIANGLE_PRIMITIVE_WORD,
+        TLAS_HIT_WORDS, TRIANGLE_PRIMITIVE_WORD,
     };
-    use prism_render_architecture::ray_scene::{NODE_WORDS, TRIANGLE_WORDS};
+    use prism_render_architecture::ray_scene::{
+        BLAS_OFFSET_WORDS, INSTANCE_WORDS, NODE_WORDS, TRIANGLE_WORDS,
+    };
 
     #[test]
     fn node_and_triangle_strides_track_golden_layout() {
@@ -183,5 +228,57 @@ mod tests {
         assert_eq!(bytes.len(), 16);
         assert_eq!(&bytes[0..4], &7u32.to_le_bytes());
         assert_eq!(&bytes[4..8], &1u32.to_le_bytes());
+    }
+
+    #[test]
+    fn instance_and_offset_strides_track_golden_layout() {
+        assert_eq!(RAYTRACE_INSTANCE_WORDS, INSTANCE_WORDS);
+        assert_eq!(RAYTRACE_BLAS_OFFSET_WORDS, BLAS_OFFSET_WORDS);
+        // The instance record is a 16-word (64-byte) block and the offset record
+        // a 4-word (16-byte) block, both 16-byte aligned, exactly as
+        // `shaders/tlas_traverse.wesl` hardcodes `INSTANCE_WORDS` /
+        // `BLAS_OFFSET_WORDS`.
+        assert_eq!(INSTANCE_WORDS, 16);
+        assert_eq!(BLAS_OFFSET_WORDS, 4);
+        assert_eq!((INSTANCE_WORDS * 4) % 16, 0);
+        assert_eq!((BLAS_OFFSET_WORDS * 4) % 16, 0);
+    }
+
+    #[test]
+    fn tlas_hit_stride_is_16_byte_aligned() {
+        // The top-level hit carries `t`, `u`, `v`, `primitive`, `instance_id`
+        // and `instance_index` (six words) padded to 8 words (32 bytes) so the
+        // `hits` buffer stays 16-byte aligned, matching `TLAS_HIT_WORDS` in
+        // `shaders/tlas_traverse.wesl`.
+        assert_eq!(TLAS_HIT_WORDS, 8, "TLAS hit record must be 32 bytes");
+        assert_eq!((TLAS_HIT_WORDS * 4) % 16, 0);
+    }
+
+    #[test]
+    fn instance_field_offsets_stay_inside_the_instance_stride() {
+        assert!(INSTANCE_BLAS_INDEX_WORD < INSTANCE_WORDS);
+        assert!(INSTANCE_ID_WORD < INSTANCE_WORDS);
+        // The affine occupies words 0..12; the two id fields follow at 12/13,
+        // exactly as the golden `GpuTlasBuffers::from_tlas` packs them.
+        assert_eq!(INSTANCE_BLAS_INDEX_WORD, 12);
+        assert_eq!(INSTANCE_ID_WORD, 13);
+    }
+
+    #[test]
+    fn blas_offset_field_words_cover_the_record() {
+        for word in [
+            BLAS_OFFSET_NODE_BASE_WORD,
+            BLAS_OFFSET_NODE_COUNT_WORD,
+            BLAS_OFFSET_TRIANGLE_BASE_WORD,
+            BLAS_OFFSET_TRIANGLE_COUNT_WORD,
+        ] {
+            assert!(word < BLAS_OFFSET_WORDS, "offset field word {word} out of stride");
+        }
+        // The four fields occupy words 0..=3 in order, exactly as
+        // `GpuBlasPool::from_blases` writes them and the kernel reads them.
+        assert_eq!(BLAS_OFFSET_NODE_BASE_WORD, 0);
+        assert_eq!(BLAS_OFFSET_NODE_COUNT_WORD, 1);
+        assert_eq!(BLAS_OFFSET_TRIANGLE_BASE_WORD, 2);
+        assert_eq!(BLAS_OFFSET_TRIANGLE_COUNT_WORD, 3);
     }
 }

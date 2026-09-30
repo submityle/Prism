@@ -8,8 +8,9 @@
 //! layout (`NODE_WORDS = 12`, `TRIANGLE_WORDS = 12`, `INSTANCE_WORDS = 16`,
 //! `BLAS_OFFSET_WORDS = 4`) and their walks are the authoritative reference. This
 //! module is the `bevy`-render half that turns that `ABI` into a real `wgpu`
-//! compute dispatch against the sibling `WESL` shader
-//! `shaders/ray_traverse.wesl`.
+//! compute dispatch against the sibling `WESL` shaders
+//! `shaders/ray_traverse.wesl` (single-`BLAS` walk) and
+//! `shaders/tlas_traverse.wesl` (two-level `TLAS`-over-pool walk).
 //!
 //! Mirroring the water and cloth compute subsystems, the module is split into
 //! cohesive files rather than one large module:
@@ -26,6 +27,14 @@
 //!   `CPU` golden `GpuBvhBuffers::closest_hit` / `any_hit` walks, skipping
 //!   gracefully when no adapter is present.
 //!
+//! * [`tlas_gpu_tests`] - the two-level analogue (also `#[cfg(test)]`):
+//!   it builds a real `Tlas` over several `BLAS` soups with affine
+//!   instances, packs it with `GpuTlasBuffers::from_tlas` /
+//!   `GpuBlasPool::from_blases`, binds the `tlas_traverse` compute
+//!   pipeline on a live `wgpu` device and asserts the read-back hits
+//!   ray-for-ray against the golden `GpuTlasBuffers::closest_hit` /
+//!   `any_hit` walks, skipping gracefully when no adapter is present.
+//!
 //! The production `wgpu` pipeline / bind-group helpers and the render-graph
 //! dispatch node land once a real ray-tracing consumer (screen-space or
 //! world-space reflections, ray-traced shadows) fixes their exact binding
@@ -38,3 +47,5 @@ mod abi;
 mod gpu_tests;
 #[cfg(test)]
 mod shader_tests;
+#[cfg(test)]
+mod tlas_gpu_tests;
