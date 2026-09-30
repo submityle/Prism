@@ -54,6 +54,7 @@ pub mod attenuation;
 pub mod cone;
 pub mod doppler;
 pub mod geometry;
+pub mod occlusion;
 pub mod panner;
 
 pub use air::{AirAbsorption, AirAbsorptionNode, AtmosphericConditions, absorption_db_per_metre};
@@ -64,4 +65,7 @@ pub use attenuation::{Attenuation, DistanceModel};
 pub use cone::Cone;
 pub use doppler::{Doppler, SPEED_OF_SOUND_MPS, doppler_ratio};
 pub use geometry::{Emitter, Listener, LocalSource};
+pub use occlusion::{
+    NullOcclusionQuery, Occlusion, OcclusionFactors, OcclusionNode, OcclusionParams, OcclusionQuery,
+};
 pub use panner::{Panner, PannerNode, VbapPanner};
