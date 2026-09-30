@@ -101,6 +101,7 @@ pub mod hoa_binaural;
 pub mod interpolation;
 pub mod nearfield;
 pub mod sofa;
+pub mod transaural;
 
 pub use binaural::BinauralRenderer;
 pub use dataset::{DatasetError, HrtfDataset, Measurement};
@@ -119,4 +120,8 @@ pub use nearfield::{
 pub use sofa::{
     HrirRecord, HrirSource, LoadError, SofaConvention, SofaRecord, SofaRecords, aes69_to_local,
     build_dataset,
+};
+pub use transaural::{
+    CrosstalkCanceller, CrosstalkParams, DEFAULT_CONTRALATERAL_GAIN, DEFAULT_SOUND_SPEED,
+    MIN_CROSSTALK_DELAY,
 };
