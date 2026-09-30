@@ -33,6 +33,10 @@
 //!   procedural-primitive `AABB` path) with a numerically stable ray test
 //!   and a single-level [`sphere::SphereBvh`] reusing the shared
 //!   binned-`SAH` build and ordered slab walk.
+//! - [`sphere_gpu_layout`] — flat, `GPU`-uploadable [`sphere::SphereBvh`]
+//!   buffer layout ([`sphere_gpu_layout::SPHERE_WORDS`] stride, shared
+//!   [`gpu_layout::NODE_WORDS`] nodes) plus a packed procedural-primitive
+//!   walk that reproduces the in-memory sphere walk bit-for-bit.
 //! - [`traversal`] — [`Ray`]/`BVH` slab + Möller–Trumbore intersection with
 //!   closest-hit and any-hit walks (the `GPU` traversal kernel's golden ref).
 //! - [`ray_offset`] — Wächter-Binder watertight secondary-ray origin offset
@@ -52,6 +56,7 @@ pub mod motion_gpu_layout;
 pub mod ray_offset;
 pub mod scheduler;
 pub mod sphere;
+pub mod sphere_gpu_layout;
 pub mod tlas;
 pub mod traversal;
 
@@ -71,6 +76,7 @@ pub use motion_gpu_layout::{GpuMotionTlasBuffers, MOTION_INSTANCE_WORDS};
 pub use ray_offset::offset_ray_origin;
 pub use scheduler::{AccelerationScheduler, ScheduledUpdate};
 pub use sphere::{Sphere, SphereBvh, SphereHit};
+pub use sphere_gpu_layout::{GpuSphereBvhBuffers, SPHERE_WORDS};
 pub use traversal::{Hit, Ray};
 pub use gpu_layout::{
     GpuBlasPool, GpuBvhBuffers, GpuTlasBuffers, TlasPackedHit, BLAS_OFFSET_WORDS, INSTANCE_WORDS,
