@@ -36,6 +36,17 @@
 //!   gradient, staying bounded and growing with storm maturity.
 //! - `cloud_lod`, `temporal`, `budget`: scheduling and selection are
 //!   deterministic and stay within their declared limits.
+//! - `coupling` (two-way, section 9d): terrain occlusion only ever *carves*
+//!   cloud density, and the cloud-shadow modulation feeding ground/GI bounce
+//!   grows monotonically with cloud transmittance, both staying in `0..=1`.
+//! - `fog` (unified volumetric fog, section 9f): the contrail diffusion kernel
+//!   conserves cross-section mass, spread grows with age, and froxel injection
+//!   weights taper monotonically without overwriting deeper slices.
+//! - `storm` authored primitives (section 9b): the anvil/overshoot/virga/
+//!   pyrocumulus curves fold into the modelling height gradient as bounded,
+//!   only-additive vertical development.
+//! - `multiscatter` probe grid: trilinear irradiance sampling is a convex
+//!   blend of the shared probes and agrees with the lattice accessor.
 //!
 //! These tests only consume the public contracts of each module, so they also
 //! act as a compile-time guard that the cross-module API surface stays stable.
@@ -46,11 +57,16 @@ use super::atmosphere::{
 use super::avsm::AvsmCurve;
 use super::budget::{plan_volumetric, VolumetricJobKind, VolumetricJobRequest};
 use super::cloud_lod::{bin_by_distance, select_lod, CloudLodThresholds};
-use super::coupling::{apply_carve, density_delta, CarveBrush};
-use super::fog::{fog_transmittance, height_fog_density, HeightFogParams};
+use super::coupling::{
+    apply_carve, cloud_shadow_modulation, density_delta, terrain_occlusion, CarveBrush,
+};
+use super::fog::{
+    contrail_kernel, contrail_spread, fog_transmittance, froxel_injection_weight,
+    height_fog_density, Contrail, HeightFogParams,
+};
 use super::math::{saturate, EPS};
 use super::modeling::{compose_from_modeling, height_gradient};
-use super::multiscatter::MultiScatterLut;
+use super::multiscatter::{MultiScatterLut, ProbeGrid, PROBE_BANDS};
 use super::noise::{perlin_worley, worley_fbm};
 use super::raymarch::{march, RaymarchConfig};
 use super::reference::{
@@ -61,7 +77,9 @@ use super::scatter::{hg_phase, octave_scatter, OctaveParams};
 use super::spectral::{
     ozone_absorption, rayleigh_phase, spectral_to_rgb, sunset_reddening, SpectralBands,
 };
-use super::storm::{gravity_wave, StormState};
+use super::storm::{
+    anvil_profile, gravity_wave, overshooting_bump, pyrocumulus_buoyancy, virga_fade, StormState,
+};
 use super::temporal::{active_pixel, clamp_history, UpscaleMode};
 use super::weather::{WeatherField, WindField};
 use super::{
@@ -847,4 +865,228 @@ fn reference_tracking_estimators_agree_with_march_transmittance() {
         ratio_tracking_transmittance(|_| sigma_t, majorant, distance, seed, samples).to_bits(),
         "ratio tracking not deterministic"
     );
+}
+
+#[test]
+fn terrain_and_cloud_shadow_close_the_two_way_coupling() {
+    // Section 9d, downward half: terrain punching into the cloud layer only ever
+    // *carves* density, and the occlusion is monotone non-increasing with height.
+    let terrain_height = 100.0_f32;
+    let base_density = 0.8_f32;
+    let mut prev_occ = f32::INFINITY;
+    let mut prev_density = f32::NEG_INFINITY;
+    let mut y = 90.0_f32;
+    while y <= 130.0 {
+        let occ = terrain_occlusion(y, terrain_height);
+        assert!(
+            (0.0..=1.0).contains(&occ),
+            "occlusion out of range at y={y}"
+        );
+        assert!(
+            occ <= prev_occ + EPS,
+            "occlusion rose with altitude at y={y}"
+        );
+        prev_occ = occ;
+        // Fold the occlusion into the density through the shared carve choke.
+        let carved = apply_carve(base_density, -occ);
+        assert!(
+            carved <= base_density + EPS,
+            "terrain added density at y={y}"
+        );
+        assert!(
+            carved >= prev_density - EPS,
+            "carved density not monotone in height"
+        );
+        prev_density = carved;
+        y += 2.5;
+    }
+    // Deep below terrain is fully occluded (density fully removed); well above is clear.
+    assert!(apply_carve(base_density, -terrain_occlusion(0.0, terrain_height)) < EPS);
+    assert_eq!(
+        apply_carve(base_density, -terrain_occlusion(1000.0, terrain_height)).to_bits(),
+        base_density.to_bits()
+    );
+
+    // Section 9d, upward half: cloud shadow modulates the lit ground that bounces
+    // back into the aerial-perspective/GI sky-light. More sky shows through the
+    // cloud (higher transmittance) => strictly more lit ground, bounded by albedo.
+    let albedo = 0.6_f32;
+    let mut prev_lit = f32::NEG_INFINITY;
+    for step in 0..=10 {
+        let transmittance = step as f32 / 10.0;
+        let lit = cloud_shadow_modulation(transmittance, albedo);
+        assert!(
+            (0.0..=albedo + EPS).contains(&lit),
+            "lit ground out of range: {lit}"
+        );
+        assert!(
+            lit >= prev_lit - EPS,
+            "lit ground not monotone in transmittance"
+        );
+        prev_lit = lit;
+    }
+    // Opaque cloud kills the ground bounce; clear sky reflects the full albedo.
+    assert!(cloud_shadow_modulation(0.0, albedo) < EPS);
+    assert!((cloud_shadow_modulation(1.0, albedo) - albedo).abs() < EPS);
+}
+
+#[test]
+fn contrail_and_froxel_injection_conserve_mass_and_taper() {
+    // Section 9f: the contrail diffusion kernel is a unit-area Gaussian, so a
+    // fine numeric integral across its cross-section recovers (near) unit mass
+    // regardless of age -- injecting a contrail conserves total condensate.
+    for age in [0.0_f32, 5.0, 30.0] {
+        let contrail = Contrail {
+            age,
+            width: 2.0,
+            diffusion: 0.5,
+        };
+        let dx = 0.05_f32;
+        let mut mass = 0.0_f32;
+        let mut off = -160.0_f32;
+        while off <= 160.0 {
+            let k = contrail_kernel(off, contrail);
+            assert!(k >= 0.0, "contrail kernel went negative");
+            mass += k * dx;
+            off += dx;
+        }
+        assert!(
+            (mass - 1.0).abs() < 2.0e-2,
+            "contrail mass not conserved: {mass}"
+        );
+    }
+    // Spread widens monotonically with age (diffusion + wind shear).
+    let mut prev_spread = f32::NEG_INFINITY;
+    for age in [0.0_f32, 1.0, 10.0, 60.0] {
+        let sp = contrail_spread(age);
+        assert!(sp >= prev_spread, "contrail spread shrank with age");
+        prev_spread = sp;
+    }
+
+    // Froxel injection only adds near-field energy and tapers to zero far away,
+    // and the injected fog density still composes into a valid transmittance.
+    let slices = 16u32;
+    let mut prev_w = f32::INFINITY;
+    for slice in 0..=slices {
+        let w = froxel_injection_weight(slice, slices);
+        assert!(
+            (0.0..=1.0).contains(&w),
+            "froxel weight out of range at {slice}"
+        );
+        assert!(
+            w <= prev_w + EPS,
+            "froxel weight not monotone non-increasing"
+        );
+        prev_w = w;
+        let params = HeightFogParams {
+            density_at_sea_level: 0.5,
+            falloff: 0.1,
+            max_height: 500.0,
+        };
+        let injected = height_fog_density(10.0, params) * w;
+        let t = fog_transmittance(200.0, injected);
+        assert!(
+            (0.0..=1.0).contains(&t),
+            "fog transmittance escaped unit range: {t}"
+        );
+    }
+    assert!(
+        froxel_injection_weight(slices, slices) < EPS,
+        "far slice should taper to zero"
+    );
+}
+
+#[test]
+fn storm_authored_profiles_fold_into_bounded_vertical_development() {
+    // Section 9b: the individual authored cumulonimbus curves are bounded and
+    // monotone in their maturity drivers, independent of the StormState machine.
+    // Anvil flares more with spread near the band top.
+    let mut prev_anvil = f32::NEG_INFINITY;
+    for spread in [0.0_f32, 0.3, 0.6, 1.0] {
+        let a = anvil_profile(0.95, spread);
+        assert!((0.0..=1.0).contains(&a), "anvil out of range");
+        assert!(a >= prev_anvil - EPS, "anvil not monotone in spread");
+        prev_anvil = a;
+    }
+    // Overshooting dome peaks at the band top and is bounded above/below it.
+    let top = 0.8_f32;
+    assert!(overshooting_bump(1.0, top) >= overshooting_bump(0.7, top));
+    assert!(overshooting_bump(1.0, top) >= overshooting_bump(1.3, top));
+    for h in [0.0_f32, 0.5, 1.0, 1.4] {
+        assert!((0.0..=1.0).contains(&overshooting_bump(h, top)));
+    }
+    // Virga veil and pyrocumulus buoyancy are bounded, monotone ramps.
+    assert!(virga_fade(1.0) >= virga_fade(0.5) && virga_fade(0.5) >= virga_fade(0.0));
+    assert!(pyrocumulus_buoyancy(2.0) >= pyrocumulus_buoyancy(0.5));
+    for q in [-1.0_f32, 0.0, 1.0, 5.0] {
+        assert!((0.0..=1.0).contains(&pyrocumulus_buoyancy(q)));
+    }
+
+    // Seam: union the authored anvil + overshoot development onto the modelling
+    // height gradient for a deep-convective column. It only ever *adds* density
+    // and stays bounded, matching the state-machine seam's invariant.
+    let spread = 0.8_f32;
+    let mut h = 0.0_f32;
+    while h <= 1.0 {
+        let base = height_gradient(h, CloudKind::Cumulonimbus);
+        let dev = saturate(anvil_profile(h, spread) + overshooting_bump(h, top));
+        let density = saturate(base + dev - base * dev);
+        assert!(
+            (0.0..=1.0).contains(&density),
+            "storm density out of range at {h}"
+        );
+        assert!(
+            density + EPS >= base,
+            "authored storm curves removed density at {h}"
+        );
+        h += 0.05;
+    }
+}
+
+#[test]
+fn multiscatter_probe_grid_blends_shared_irradiance_convexly() {
+    // The probe grid only *consumes* shared irradiance; sampling must be a convex
+    // blend of the stored probes and agree with the lattice accessor.
+    let min_corner = Vec3::new(0.0, 0.0, 0.0);
+    let max_corner = Vec3::new(1.0, 1.0, 1.0);
+    // Fill each probe's bands with its own x coordinate: a known linear ramp.
+    let grid = ProbeGrid::from_fn([2, 2, 2], min_corner, max_corner, |pos| {
+        [pos.x; PROBE_BANDS]
+    });
+    assert_eq!(grid.dims(), [2, 2, 2]);
+
+    // The lattice accessor reports the ramp endpoints exactly.
+    for j in 0..2 {
+        for k in 0..2 {
+            assert!((grid.probe_at(0, j, k).irradiance[0] - 0.0).abs() < EPS);
+            assert!((grid.probe_at(1, j, k).irradiance[0] - 1.0).abs() < EPS);
+        }
+    }
+
+    // An interior query is the convex (here linear) blend of the corners.
+    let mid = grid.sample(Vec3::new(0.5, 0.5, 0.5));
+    for &v in mid.iter() {
+        assert!(
+            (v - 0.5).abs() < 1.0e-4,
+            "probe blend not linear at midpoint"
+        );
+        assert!((0.0..=1.0).contains(&v), "probe blend left convex hull");
+    }
+
+    // Queries outside the box clamp to the boundary probes (no out-of-range read).
+    let clamped = grid.sample(Vec3::new(5.0, 0.5, 0.5));
+    for &v in clamped.iter() {
+        assert!(
+            (v - 1.0).abs() < 1.0e-4,
+            "out-of-box query did not clamp high"
+        );
+    }
+    let clamped_low = grid.sample(Vec3::new(-5.0, 0.5, 0.5));
+    for &v in clamped_low.iter() {
+        assert!(v.abs() < 1.0e-4, "out-of-box query did not clamp low");
+    }
+
+    // Degenerate dims are floored to at least one probe per axis (no panic).
+    let thin = ProbeGrid::new([0, 3, 1], min_corner, max_corner);
+    assert_eq!(thin.dims(), [1, 3, 1]);
 }
