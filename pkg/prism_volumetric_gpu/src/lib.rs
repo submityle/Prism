@@ -62,6 +62,7 @@ pub mod analytic_single_scatter;
 pub mod analytic_transmittance;
 pub mod anvil_profile;
 pub mod apply_carve;
+pub mod avsm_area;
 pub mod avsm_transmittance;
 pub mod blend_state;
 pub mod blend_with_atmosphere;
@@ -126,6 +127,7 @@ pub use analytic_single_scatter::{AnalyticSingleScatterQuery, GpuAnalyticSingleS
 pub use analytic_transmittance::{AnalyticTransmittanceQuery, GpuAnalyticTransmittance};
 pub use anvil_profile::{AnvilProfileQuery, GpuAnvilProfile};
 pub use apply_carve::{ApplyCarveQuery, GpuApplyCarve};
+pub use avsm_area::GpuAvsmArea;
 pub use avsm_transmittance::{AvsmSampleNode, GpuAvsmTransmittance};
 pub use blend_state::{BlendStateQuery, GpuBlendState};
 pub use blend_with_atmosphere::{BlendQuery, BlendedColor, GpuBlendWithAtmosphere};
