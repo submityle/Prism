@@ -36,11 +36,6 @@
 //! pipeline declares zero. The pipeline handles are keyed by [`ClothKernel`] so
 //! the dispatch slice can look one up directly from the golden kernel schedule.
 
-#![allow(
-    dead_code,
-    reason = "the cloth compute pipelines and the seven bind-group layouts are the render-resource foundation of the GPU cloth subsystem; the bind-group preparation and Core3d dispatch slices that consume `ClothComputePipelines`, its accessors and `init_cloth_compute_pipelines` land in the following slices, and the layout grouping is exercised now by the kernel-contract test below"
-)]
-
 use bevy_asset::{load_embedded_asset, Handle};
 use bevy_ecs::prelude::*;
 use bevy_material::{
@@ -137,31 +132,6 @@ impl ClothComputePipelines {
             ClothKernel::SkinEmbed => self.skin_embed,
             ClothKernel::AerodynamicsSnapshot => self.aerodynamics_snapshot,
             ClothKernel::Aerodynamics => self.aerodynamics,
-        }
-    }
-
-    /// Returns the group-0 layout the given kernel's bind group must target.
-    ///
-    /// Mirrors the shader interface: the six `cloth_sim.wesl` kernels share the
-    /// simulation layout, the two self-collision kernels share the self layout,
-    /// and the body / backstop / embed kernels each take their own layout.
-    #[must_use]
-    pub(crate) fn layout(&self, kernel: ClothKernel) -> &BindGroupLayout {
-        match kernel {
-            ClothKernel::Predict
-            | ClothKernel::ProjectDistanceBatch
-            | ClothKernel::ProjectBendingBatch
-            | ClothKernel::ProjectLongRangeBatch
-            | ClothKernel::StrainLimit
-            | ClothKernel::VelocityUpdate => &self.sim_layout,
-            ClothKernel::BodyCollision => &self.body_layout,
-            ClothKernel::Backstop => &self.backstop_layout,
-            ClothKernel::SelfCollisionHashBuild | ClothKernel::SelfCollisionResolve => {
-                &self.self_layout
-            }
-            ClothKernel::SkinEmbed => &self.embed_layout,
-            ClothKernel::AerodynamicsSnapshot => &self.aero_snapshot_layout,
-            ClothKernel::Aerodynamics => &self.aero_layout,
         }
     }
 }

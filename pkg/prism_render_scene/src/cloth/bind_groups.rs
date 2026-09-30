@@ -24,11 +24,6 @@
 //! valid; the matching per-pass uniform count is zero, so the dispatch bounds
 //! check discards the placeholder before it is ever read.
 
-#![allow(
-    dead_code,
-    reason = "the per-piece cloth buffer set and its seven bind groups are consumed by the Core3d dispatch slice and the plugin that lands next; the device-free buffer-plan sizing is exercised by the contract tests below"
-)]
-
 use bevy_render::{
     render_resource::{
         BindGroup, BindGroupEntries, Buffer, BufferDescriptor, BufferInitDescriptor, BufferUsages,
@@ -50,6 +45,13 @@ use super::pipeline::ClothComputePipelines;
 /// The packed byte size of one analytic collider proxy ([`GpuClothCollider`]).
 /// Colliders are scene-supplied per solve rather than sized by
 /// [`BufferCounts`], so the stride lives here next to the plan that consumes it.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "device-free byte-size oracle: mirrors the runtime `zeroed_storage` / `storage_with_data` clamping so the golden buffer sizing can be unit-tested without a `RenderDevice`; the live allocation path clamps inside those device helpers instead"
+    )
+)]
 pub(crate) const COLLIDER_STRIDE: u32 = size_of::<GpuClothCollider>() as u32;
 
 /// The packed byte size of one per-particle spatial-hash `next` link (a single
@@ -460,11 +462,25 @@ fn uniform<T: Pod>(device: &RenderDevice, label: &str, value: &T) -> Buffer {
 /// list (scene-supplied per solve) and the storage-buffer floor every binding is
 /// clamped to. Kept pure so the sizing can be unit-tested without a
 /// [`RenderDevice`].
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "device-free byte-size oracle: mirrors the runtime `zeroed_storage` / `storage_with_data` clamping so the golden buffer sizing can be unit-tested without a `RenderDevice`; the live allocation path clamps inside those device helpers instead"
+    )
+)]
 pub(crate) struct ClothBufferPlan {
     set: PersistentBufferSet,
     collider_count: u32,
 }
 
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "device-free byte-size oracle: mirrors the runtime `zeroed_storage` / `storage_with_data` clamping so the golden buffer sizing can be unit-tested without a `RenderDevice`; the live allocation path clamps inside those device helpers instead"
+    )
+)]
 impl ClothBufferPlan {
     /// Builds a plan from the golden element counts plus the collider count.
     #[must_use]
@@ -522,6 +538,13 @@ impl ClothBufferPlan {
 /// Clamps a golden byte size up to the storage-buffer floor, matching the
 /// runtime padding [`zeroed_storage`] and [`storage_with_data`] apply.
 #[must_use]
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "device-free byte-size oracle: mirrors the runtime `zeroed_storage` / `storage_with_data` clamping so the golden buffer sizing can be unit-tested without a `RenderDevice`; the live allocation path clamps inside those device helpers instead"
+    )
+)]
 fn clamp_storage(bytes: u32) -> u64 {
     u64::from(bytes).max(MIN_STORAGE_BYTES)
 }

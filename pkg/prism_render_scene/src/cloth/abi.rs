@@ -21,15 +21,17 @@
 //! * A `vec3<f32>` has 16-byte alignment, so a trailing scalar packs into the
 //!   same 16-byte row (the classic `vec3 + f32` slot).
 
-#![allow(
-    dead_code,
-    reason = "the GPU cloth ABI records and shader-mirror constants are the verified layout foundation of this subsystem; the pipeline / bind-group / dispatch slices that consume them land in the following slices, and the `size_of` contract tests exercise every record now"
-)]
-
 use bytemuck::{Pod, Zeroable};
 
 /// Workgroup size shared by every per-particle / per-element cloth compute
 /// entry point. Must match every `@workgroup_size(...)` in the cloth shaders.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "shader-mirror oracle: the WESL @workgroup_size / size_of contract tests assert against it; no non-test consumer because the architecture-layer KernelDescriptor owns the live dispatch tiling"
+    )
+)]
 pub(crate) const CLOTH_WORKGROUP_SIZE: u32 = 64;
 
 /// Collider variant discriminant: analytic sphere. Mirrors
@@ -46,6 +48,13 @@ pub(crate) const CLOTH_COLLIDER_HALF_SPACE: u32 = 2;
 
 /// Empty-cell sentinel for the self-collision spatial hash linked list.
 /// Mirrors `CLOTH_COL_SENTINEL` in `cloth_collision.wesl`.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "shader-mirror oracle: the abi contract test asserts it equals u32::MAX to match CLOTH_COL_SENTINEL in cloth_collision.wesl; the live empty-cell sentinel is written by the shader, not host code"
+    )
+)]
 pub(crate) const CLOTH_HASH_SENTINEL: u32 = 0xffff_ffff;
 
 /// Constraint-kind tags stamped into [`GpuClothConstraint::kind`]. These mirror
