@@ -36,7 +36,6 @@ use crate::hair::frame_schedule::{per_frame_schedule, HairFrameConfig, HairSched
 use crate::hair::gpu_dispatch::HairGpuCounts;
 use crate::hair::optional_pass_layout::{plan_optional_pass, HairOptionalExtents};
 use crate::hair::pass_layout::{plan_pass, HairBindingLayout, HairGpuExtents};
-use crate::hair::pass_params::params_immediate_bytes;
 
 /// One resolved entry of the per-frame hair compute schedule: a scheduled pass
 /// joined with its dispatch dimension, its dense `@group(0)` binding table, and
@@ -68,9 +67,10 @@ pub struct HairScheduledPassPlan {
 /// [`HairScheduledPassPlan`] rows, appending to `out` (cleared first).
 ///
 /// The main-spine extents feed [`plan_pass`] and the optional extents feed
-/// [`plan_optional_pass`]; each row's immediate size comes from
-/// [`params_immediate_bytes`] for main passes and from the optional plan for
-/// optional passes. Empty-domain passes (`workgroup_count == 0`) are skipped so
+/// [`plan_optional_pass`]; each row's immediate size is copied from its own
+/// plan's `params_immediate_bytes`, so main and optional rows source the
+/// push-constant footprint identically. Empty-domain passes
+/// (`workgroup_count == 0`) are skipped so
 /// the list matches
 /// [`plan_frame_dispatches`](super::frame_schedule::plan_frame_dispatches)
 /// one-for-one; order is otherwise the schedule order. Never panics.
@@ -94,7 +94,7 @@ pub fn plan_frame_passes(
                     workgroup_count: plan.workgroup_count,
                     bindings: plan.bindings,
                     total_binding_bytes: plan.total_binding_bytes,
-                    params_immediate_bytes: params_immediate_bytes(pass),
+                    params_immediate_bytes: plan.params_immediate_bytes,
                 }
             }
             HairScheduledPass::Optional(pass) => {
