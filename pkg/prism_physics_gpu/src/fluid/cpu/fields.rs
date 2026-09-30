@@ -17,7 +17,7 @@
 //! standard `GPU` scatter technique. This module contains no Unreal Engine
 //! source or derived code.
 
-use glam::Vec3;
+use glam::{Mat3, Vec3};
 
 use super::extrapolate::{extrapolate_axis, AxisDims};
 use super::stencil::{axis_stencil, trilinear_nodes};
@@ -144,6 +144,56 @@ impl GoldenGrid {
         }
     }
 
+    /// Splats one marker particle's velocity with the `APIC` affine correction
+    /// `C·(x_face − x_p)` added to each face, preserving local angular momentum
+    /// (Jiang et al. 2015). Each contribution is quantised and summed as `i32`
+    /// exactly as the device atomics do, mirroring [`scatter_velocity`] plus the
+    /// affine term so the `CPU` twin matches the device `p2g_scatter_affine`
+    /// kernel bit-for-bit on the accumulators.
+    ///
+    /// [`scatter_velocity`]: GoldenGrid::scatter_velocity
+    pub fn scatter_velocity_affine(&mut self, position: Vec3, vel: Vec3, affine: Mat3) {
+        let c = self.dims.cell_space(position);
+        let dx = self.dims.dx;
+        let axes = self.axes();
+        // Rows of the affine matrix (glam `Mat3` is column-major).
+        let rows = [
+            Vec3::new(affine.x_axis.x, affine.y_axis.x, affine.z_axis.x),
+            Vec3::new(affine.x_axis.y, affine.y_axis.y, affine.z_axis.y),
+            Vec3::new(affine.x_axis.z, affine.y_axis.z, affine.z_axis.z),
+        ];
+        let base_vels = [vel.x, vel.y, vel.z];
+        for ((axis, &base_vel), &row) in axes.iter().zip(base_vels.iter()).zip(rows.iter()) {
+            let sx = axis_stencil(c.x - axis.off.x, axis.dims.0);
+            let sy = axis_stencil(c.y - axis.off.y, axis.dims.1);
+            let sz = axis_stencil(c.z - axis.off.z, axis.dims.2);
+            let xs = [(sx.lo, 1.0 - sx.frac), (sx.hi, sx.frac)];
+            let ys = [(sy.lo, 1.0 - sy.frac), (sy.hi, sy.frac)];
+            let zs = [(sz.lo, 1.0 - sz.frac), (sz.hi, sz.frac)];
+            for &(ix, wx) in &xs {
+                for &(iy, wy) in &ys {
+                    for &(iz, wz) in &zs {
+                        let w = wx * wy * wz;
+                        if w <= 0.0 {
+                            continue;
+                        }
+                        let node = Vec3::new(
+                            ix as f32 + axis.off.x,
+                            iy as f32 + axis.off.y,
+                            iz as f32 + axis.off.z,
+                        );
+                        let dpos = (node - c) * dx;
+                        let value = base_vel + row.dot(dpos);
+                        let local = ix + axis.stride_y() * iy + axis.stride_z() * iz;
+                        let idx = axis.base + local;
+                        self.momentum[idx] += quantise(w * value, MOMENTUM_SCALE);
+                        self.weight[idx] += quantise(w, WEIGHT_SCALE);
+                    }
+                }
+            }
+        }
+    }
+
     /// Divides accumulated momentum by accumulated weight on each face,
     /// producing the mass-weighted average velocity (zero where untouched).
     pub fn normalize_velocity(&mut self) {
@@ -225,6 +275,66 @@ impl GoldenGrid {
     #[must_use]
     pub fn sample_saved_velocity(&self, position: Vec3) -> Vec3 {
         self.sample_from(position, &self.saved)
+    }
+
+    /// Samples the velocity and reconstructs the `APIC` affine matrix `C` at
+    /// world `position` via a per-component least-squares affine fit
+    /// (`C_row = B·D⁻¹`, Jiang et al. 2015). `D` is regularised so the solve
+    /// stays well-defined even for degenerate stencils. This mirrors the core
+    /// reference and the device `g2p_affine` kernel; the only floating-point
+    /// difference from the device is the reassociated `3×3` solve, bounded by
+    /// the parity tolerance.
+    #[must_use]
+    pub fn sample_velocity_affine(&self, position: Vec3) -> (Vec3, Mat3) {
+        let c = self.dims.cell_space(position);
+        let dx = self.dims.dx;
+        let axes = self.axes();
+        let eps = 1.0e-9 + 1.0e-6 * dx * dx;
+        let reg = Mat3::from_diagonal(Vec3::splat(eps));
+        let mut vals = [0.0f32; 3];
+        let mut rows = [Vec3::ZERO; 3];
+        for (n, axis) in axes.iter().enumerate() {
+            let sx = axis_stencil(c.x - axis.off.x, axis.dims.0);
+            let sy = axis_stencil(c.y - axis.off.y, axis.dims.1);
+            let sz = axis_stencil(c.z - axis.off.z, axis.dims.2);
+            let xs = [(sx.lo, 1.0 - sx.frac), (sx.hi, sx.frac)];
+            let ys = [(sy.lo, 1.0 - sy.frac), (sy.hi, sy.frac)];
+            let zs = [(sz.lo, 1.0 - sz.frac), (sz.hi, sz.frac)];
+            let mut val = 0.0;
+            let mut b = Vec3::ZERO;
+            let mut d = Mat3::ZERO;
+            for &(ix, wx) in &xs {
+                for &(iy, wy) in &ys {
+                    for &(iz, wz) in &zs {
+                        let w = wx * wy * wz;
+                        let local = ix + axis.stride_y() * iy + axis.stride_z() * iz;
+                        let vf = self.velocity[axis.base + local];
+                        val += w * vf;
+                        let node = Vec3::new(
+                            ix as f32 + axis.off.x,
+                            iy as f32 + axis.off.y,
+                            iz as f32 + axis.off.z,
+                        );
+                        let dpos = (node - c) * dx;
+                        b += (w * vf) * dpos;
+                        d += Mat3::from_cols(
+                            dpos * (w * dpos.x),
+                            dpos * (w * dpos.y),
+                            dpos * (w * dpos.z),
+                        );
+                    }
+                }
+            }
+            vals[n] = val;
+            rows[n] = (d + reg).inverse() * b;
+        }
+        // Assemble `C` (column-major) from its three rows.
+        let cmat = Mat3::from_cols(
+            Vec3::new(rows[0].x, rows[1].x, rows[2].x),
+            Vec3::new(rows[0].y, rows[1].y, rows[2].y),
+            Vec3::new(rows[0].z, rows[1].z, rows[2].z),
+        );
+        (Vec3::new(vals[0], vals[1], vals[2]), cmat)
     }
 
     fn sample_from(&self, position: Vec3, field: &[f32]) -> Vec3 {

@@ -33,12 +33,33 @@ pub fn grid_to_particle(grid: &GoldenGrid, particles: &mut FluidParticles, blend
     }
 }
 
+/// Reconstructs particle velocities and the `APIC` affine matrix `C` from the
+/// projected `grid`.
+///
+/// Unlike the `PIC`/`FLIP` blend, the affine path takes the interpolated grid
+/// velocity directly (there is no `FLIP` increment, so the saved field is not
+/// consulted) and additionally fits the per-particle affine matrix `C` through
+/// [`GoldenGrid::sample_velocity_affine`], mirroring the device `g2p_affine`
+/// kernel. Call after the pressure projection.
+pub fn grid_to_particle_affine(grid: &GoldenGrid, particles: &mut FluidParticles) {
+    let positions = particles.positions().to_vec();
+    let mut new_vel = particles.velocities().to_vec();
+    let mut new_affine = particles.affine().to_vec();
+    for p in 0..positions.len() {
+        let (vel, cmat) = grid.sample_velocity_affine(positions[p]);
+        new_vel[p] = vel;
+        new_affine[p] = cmat;
+    }
+    particles.velocities_mut().copy_from_slice(&new_vel);
+    particles.affine_mut().copy_from_slice(&new_affine);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fluid::cpu::p2g::particle_to_grid;
+    use crate::fluid::cpu::p2g::{particle_to_grid, particle_to_grid_affine};
     use crate::fluid::grid::GridDims;
-    use glam::Vec3;
+    use glam::{Mat3, Vec3};
 
     #[test]
     fn pure_pic_roundtrip_recovers_constant_field() {
@@ -101,5 +122,43 @@ mod tests {
         grid_to_particle(&grid, &mut probe, 1.0);
         let expected = old + v_pic;
         assert!((probe.velocities()[0] - expected).length() < 1e-6);
+    }
+    #[test]
+    fn apic_recovers_linear_field() {
+        // A linear velocity field `v = A·(x − center)` is captured exactly by
+        // the `APIC` affine matrix, so the round-trip reconstructs `C ≈ A` for
+        // interior particles. Mirrors the core `apic_recovers_linear_field`.
+        let mut grid = GoldenGrid::new(GridDims::new(12, 12, 12, 0.1, Vec3::ZERO));
+        let mut parts = FluidParticles::new();
+        let a = Mat3::from_cols(
+            Vec3::new(0.0, 0.3, 0.0),
+            Vec3::new(-0.3, 0.0, 0.0),
+            Vec3::ZERO,
+        );
+        let center = Vec3::splat(0.6);
+        for i in 0..5 {
+            for j in 0..5 {
+                for k in 0..5 {
+                    let x = center
+                        + Vec3::new(
+                            (i as f32 - 2.0) * 0.03,
+                            (j as f32 - 2.0) * 0.03,
+                            (k as f32 - 2.0) * 0.03,
+                        );
+                    let v = a * (x - center);
+                    let idx = parts.spawn(x, v);
+                    parts.affine_mut()[idx] = a;
+                }
+            }
+        }
+        particle_to_grid_affine(&mut grid, &parts);
+        grid.save_velocity();
+        grid_to_particle_affine(&grid, &mut parts);
+        // The reconstructed affine matrix should be close to `A` for an
+        // interior particle (the mid particle is well inside the stencil).
+        let recon = parts.affine()[parts.len() / 2];
+        let diff = recon - a;
+        let fro = diff.x_axis.length() + diff.y_axis.length() + diff.z_axis.length();
+        assert!(fro < 0.15, "affine mismatch fro={fro}");
     }
 }

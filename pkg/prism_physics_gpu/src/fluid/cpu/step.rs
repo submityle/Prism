@@ -27,11 +27,11 @@
 
 use super::advect::advect_rk2;
 use super::fields::GoldenGrid;
-use super::g2p::grid_to_particle;
+use super::g2p::{grid_to_particle, grid_to_particle_affine};
 use super::grid_ops::{add_gravity, enforce_solid_faces};
-use super::p2g::particle_to_grid;
+use super::p2g::{particle_to_grid, particle_to_grid_affine};
 use super::pressure::{self, PressureConfig};
-use crate::fluid::config::FluidConfig;
+use crate::fluid::config::{FluidConfig, TransferMode};
 use crate::fluid::grid::CellType;
 use crate::fluid::particle::FluidParticles;
 
@@ -55,8 +55,12 @@ pub fn fluid_step(
 ) {
     let dims = grid.dims();
 
-    // 1. Particle velocities -> grid, marking fluid faces.
-    particle_to_grid(grid, particles);
+    // 1. Particle velocities -> grid: the affine (`APIC`) transfer adds the
+    //    `C·(x_face − x_p)` correction, the `PIC`/`FLIP` transfer does not.
+    match cfg.transfer {
+        TransferMode::PicFlip => particle_to_grid(grid, particles),
+        TransferMode::Apic => particle_to_grid_affine(grid, particles),
+    }
     // 2. Save the transferred field for the `FLIP` increment.
     grid.save_velocity();
     // 3. Body force.
@@ -73,8 +77,14 @@ pub fn fluid_step(
     let _pressure = pressure::project(dims, cell_types, grid.velocity_mut(), pcfg);
     // 6. Fill air faces so surface advection stays stable.
     grid.extrapolate_velocity(cfg.extrapolation_iterations);
-    // 7. Grid -> particles with the `PIC`/`FLIP` blend.
-    grid_to_particle(grid, particles, cfg.effective_flip_blend());
+    // 7. Grid -> particles: the affine transfer refits `C` and takes the grid
+    //    velocity directly; the `PIC`/`FLIP` transfer applies the blend.
+    match cfg.transfer {
+        TransferMode::PicFlip => {
+            grid_to_particle(grid, particles, cfg.effective_flip_blend());
+        }
+        TransferMode::Apic => grid_to_particle_affine(grid, particles),
+    }
     // 8. Move the markers through the flow.
     advect_rk2(grid, particles.positions_mut(), cfg.dt);
 }

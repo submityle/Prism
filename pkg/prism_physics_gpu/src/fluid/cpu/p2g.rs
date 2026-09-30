@@ -28,6 +28,24 @@ pub fn particle_to_grid(grid: &mut GoldenGrid, particles: &FluidParticles) {
     grid.normalize_velocity();
 }
 
+/// Splats particle velocities with the `APIC` affine correction onto `grid`
+/// and normalises the result in place.
+///
+/// This is the `CPU` reference for the device `p2g_scatter_affine` pass chain:
+/// each particle contributes its base velocity plus the affine term
+/// `C·(x_face − x_p)` through [`GoldenGrid::scatter_velocity_affine`], and the
+/// touched faces are then mass-weighted exactly as the `PIC` path is.
+pub fn particle_to_grid_affine(grid: &mut GoldenGrid, particles: &FluidParticles) {
+    grid.begin_transfer();
+    let positions = particles.positions();
+    let velocities = particles.velocities();
+    let affine = particles.affine();
+    for p in 0..particles.len() {
+        grid.scatter_velocity_affine(positions[p], velocities[p], affine[p]);
+    }
+    grid.normalize_velocity();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
