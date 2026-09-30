@@ -426,6 +426,76 @@ impl Bvh {
     pub fn rebuilt(&self) -> Bvh {
         Bvh::build(&self.primitives)
     }
+
+    /// Expected `SAH` traversal cost of the current hierarchy.
+    ///
+    /// This is the surface-area heuristic estimate of the average work a random
+    /// ray does against this tree — the same quantity the binned builder
+    /// minimises locally at each split, evaluated globally over the whole
+    /// hierarchy (Wald, "On fast Construction of `SAH`-based Bounding Volume
+    /// Hierarchies"; `pbrt` §4.3):
+    ///
+    /// ```text
+    /// C = (1 / SA(root)) * [ C_trav * Σ_interior SA(node)
+    ///                      + C_isect * Σ_leaf SA(leaf) * prim_count(leaf) ]
+    /// ```
+    ///
+    /// with the ray-triangle test cost `C_isect` fixed at `1.0` (the unit the
+    /// builder's [`BvhBuildConfig::traversal_cost`] is expressed relative to) and
+    /// `C_trav` supplied as `traversal_cost` so a caller can score a tree under
+    /// the same weight it was built with. The `1 / SA(root)` normalisation makes
+    /// the score the expected number of node visits plus primitive tests for a
+    /// ray whose origin is outside the root box and whose direction is uniform,
+    /// so it is comparable across trees of different absolute size.
+    ///
+    /// An empty tree (zero-area root) has no work to do and scores `0.0`.
+    #[must_use]
+    pub fn sah_cost(&self, traversal_cost: f32) -> f64 {
+        if self.nodes.is_empty() {
+            return 0.0;
+        }
+        let root_area = f64::from(self.nodes[0].bounds.surface_area());
+        if root_area <= 0.0 {
+            return 0.0;
+        }
+        let c_trav = f64::from(traversal_cost);
+        let mut interior = 0.0f64;
+        let mut leaf = 0.0f64;
+        for node in &self.nodes {
+            let area = f64::from(node.bounds.surface_area());
+            if node.is_leaf() {
+                leaf += area * f64::from(node.primitive_count);
+            } else {
+                interior += area;
+            }
+        }
+        (c_trav * interior + leaf) / root_area
+    }
+
+    /// Ratio of the current hierarchy's [`sah_cost`](Self::sah_cost) to that of a
+    /// fresh rebuild over the same primitives.
+    ///
+    /// A [`refit`](Self::refit) keeps leaf and interior bounds tight for the
+    /// *existing* topology but never re-partitions, so as primitives drift the
+    /// original split planes stop matching the geometry and the tree does more
+    /// work per ray even though every box is still snug. Comparing the refit
+    /// tree's `SAH` cost against a [`rebuilt`](Self::rebuilt) tree's cost isolates
+    /// exactly that topological degradation: the value is `1.0` right after a
+    /// build and climbs above `1.0` as motion accumulates, which is the standard
+    /// production signal — used for `DXR`/`Vulkan` acceleration-structure refit
+    /// budgeting — for escalating from a cheap refit to a full rebuild.
+    ///
+    /// Both trees are scored with the same `traversal_cost`. An empty tree, whose
+    /// costs are both `0.0`, reports `1.0` (no degradation).
+    #[must_use]
+    pub fn refit_quality(&self, traversal_cost: f32) -> f64 {
+        let current = self.sah_cost(traversal_cost);
+        let ideal = self.rebuilt().sah_cost(traversal_cost);
+        if ideal <= 0.0 {
+            return 1.0;
+        }
+        current / ideal
+    }
 }
 
 /// Partitions `refs` so all primitives whose centroid falls in bin `<= split_bin`
@@ -941,5 +1011,79 @@ mod tests {
         let ray = Ray::new([0.5, 0.5, 1.0], [0.0, 0.0, -1.0], 0.0, f32::INFINITY);
         let (t, u, v) = intersect_triangle(&ray, &tri).expect("ray should hit the triangle");
         assert!(vclose(tri.point_at(u, v), ray.at(t)));
+    }
+
+    #[test]
+    fn sah_cost_of_empty_tree_is_zero() {
+        assert_eq!(Bvh::build(&[]).sah_cost(0.125), 0.0);
+    }
+
+    #[test]
+    fn sah_cost_of_single_leaf_is_its_primitive_count() {
+        // A lone leaf is also the root, so SA(leaf) / SA(root) == 1 and the cost
+        // collapses to the ray-triangle test count (no interior nodes).
+        let t = tri([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], 0);
+        let bvh = Bvh::build(&[t]);
+        assert!(bvh.nodes()[0].is_leaf());
+        assert!((bvh.sah_cost(0.125) - 1.0).abs() <= 1.0e-9);
+    }
+
+    #[test]
+    fn freshly_built_tree_has_unit_refit_quality() {
+        // A build is already optimal for its own primitives, so rebuilding it
+        // reproduces the same cost and the degradation ratio is exactly 1.
+        let tris: Vec<Triangle> = (0..16)
+            .map(|i| {
+                let x = i as f32;
+                tri([x, 0.0, 0.0], [x + 1.0, 0.0, 0.0], [x, 1.0, 0.0], i)
+            })
+            .collect();
+        let bvh = Bvh::build(&tris);
+        assert!((bvh.refit_quality(0.125) - 1.0).abs() <= 1.0e-6);
+    }
+
+    #[test]
+    fn refit_degrades_quality_when_topology_stops_matching_geometry() {
+        // Two well-separated clusters build into a clean two-subtree split.
+        let mut tris = Vec::new();
+        for i in 0..8u32 {
+            let x = i as f32;
+            tris.push(tri([x, 0.0, 0.0], [x + 0.5, 0.0, 0.0], [x, 0.5, 0.0], i));
+        }
+        for i in 0..8u32 {
+            let x = 100.0 + i as f32;
+            tris.push(tri([x, 0.0, 0.0], [x + 0.5, 0.0, 0.0], [x, 0.5, 0.0], 8 + i));
+        }
+        let mut bvh = Bvh::build(&tris);
+        let before = bvh.refit_quality(0.125);
+        assert!((before - 1.0).abs() <= 1.0e-6);
+        // Interleave the two clusters in place: same connectivity, but the
+        // original split plane now separates spatially mixed primitives.
+        bvh.refit(|id| {
+            let base = if id % 2 == 0 { id as f32 } else { 100.0 + id as f32 };
+            [
+                [base, 0.0, 0.0],
+                [base + 0.5, 0.0, 0.0],
+                [base, 0.5, 0.0],
+            ]
+        });
+        let after = bvh.refit_quality(0.125);
+        assert!(
+            after > before,
+            "scrambling geometry under a fixed topology must raise SAH cost:              before={before}, after={after}"
+        );
+        assert!(after >= 1.0);
+    }
+
+    #[test]
+    fn refit_quality_is_deterministic() {
+        let tris: Vec<Triangle> = (0..12)
+            .map(|i| {
+                let x = i as f32;
+                tri([x, 0.0, 0.0], [x + 1.0, 0.0, 0.0], [x, 1.0, 0.0], i)
+            })
+            .collect();
+        let bvh = Bvh::build(&tris);
+        assert_eq!(bvh.refit_quality(0.125), bvh.refit_quality(0.125));
     }
 }
