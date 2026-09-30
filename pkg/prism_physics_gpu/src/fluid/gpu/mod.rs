@@ -11,9 +11,11 @@
 //! Bridson) and fixed-point atomic scatter (standard `GPU` technique). No
 //! Unreal Engine source or derived code.
 
+mod grid_ops;
 mod layout;
 mod pressure;
 mod solver;
 
+pub use grid_ops::GpuGridOps;
 pub use pressure::GpuPressureSolver;
 pub use solver::GpuFluidSolver;

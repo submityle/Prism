@@ -40,7 +40,10 @@ pub mod particle;
 pub mod quantize;
 
 pub use config::{FluidConfig, FluidError, TransferMode};
-pub use cpu::{grid_to_particle, particle_to_grid, GoldenGrid, PressureConfig};
-pub use gpu::{GpuFluidSolver, GpuPressureSolver};
+pub use cpu::{
+    add_gravity, enforce_solid_faces, grid_to_particle, particle_to_grid, GoldenGrid,
+    PressureConfig,
+};
+pub use gpu::{GpuFluidSolver, GpuGridOps, GpuPressureSolver};
 pub use grid::{CellType, GridDims};
 pub use particle::FluidParticles;

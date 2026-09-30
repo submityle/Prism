@@ -15,11 +15,13 @@
 
 pub mod fields;
 pub mod g2p;
+pub mod grid_ops;
 pub mod p2g;
 pub mod pressure;
 pub mod stencil;
 
 pub use fields::GoldenGrid;
 pub use g2p::grid_to_particle;
+pub use grid_ops::{add_gravity, enforce_solid_faces};
 pub use p2g::particle_to_grid;
 pub use pressure::PressureConfig;
