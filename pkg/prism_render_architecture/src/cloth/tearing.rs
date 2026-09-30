@@ -98,13 +98,40 @@ pub fn apply_tearing(
     particles: &[ClothParticle],
     params: TearingParams,
 ) -> usize {
-    let params = params.sanitized();
+    let flags = tear_flags(constraints, particles, params);
     let before = constraints.len();
-    constraints.retain(|c| match edge_strain(c, particles) {
-        Some(strain) => strain <= params.break_strain,
-        None => true,
+    let mut index = 0;
+    constraints.retain(|_| {
+        let keep = !flags[index];
+        index += 1;
+        keep
     });
     before - constraints.len()
+}
+
+/// Returns, for every constraint in order, whether [`apply_tearing`] would tear
+/// it (remove it) at `params`: `true` exactly when the edge is a valid two-sided
+/// fabric edge whose tensile strain `(len - rest) / rest` exceeds
+/// `params.break_strain`. One-sided attachments, degenerate rest lengths, and
+/// out-of-range endpoints never tear, so their flag is `false`.
+///
+/// This is the single source of truth for the tear decision (both
+/// [`apply_tearing`] and the GPU tearing kernel consume it) and the golden the
+/// GPU per-edge flag kernel is checked against.
+#[must_use]
+pub fn tear_flags(
+    constraints: &[Constraint],
+    particles: &[ClothParticle],
+    params: TearingParams,
+) -> Vec<bool> {
+    let params = params.sanitized();
+    constraints
+        .iter()
+        .map(|c| match edge_strain(c, particles) {
+            Some(strain) => strain > params.break_strain,
+            None => false,
+        })
+        .collect()
 }
 
 /// Inspects the graph without modifying it and returns a [`TearReport`] of the
@@ -283,6 +310,38 @@ mod tests {
         );
         assert_eq!(torn, 0);
         assert_eq!(constraints.len(), 2);
+    }
+
+    #[test]
+    fn tear_flags_mark_break_decision_per_edge() {
+        let particles = [
+            free_particle(Vec3::ZERO),
+            free_particle(Vec3::new(2.0, 0.0, 0.0)),
+            free_particle(Vec3::new(2.0, 1.05, 0.0)),
+        ];
+        // Edge 0-1 strain 1.0 (over), edge 1-2 strain ~0.05 (under), a one-sided
+        // tether (never), and an out-of-range edge (never).
+        let constraints = vec![
+            stretch(0, 1, 1.0),
+            stretch(1, 2, 1.0),
+            Constraint::new(0, 1, 1.0, Compliance::RIGID, ConstraintKind::Tether),
+            stretch(0, 9, 1.0),
+        ];
+        let flags = tear_flags(
+            &constraints,
+            &particles,
+            TearingParams { break_strain: 0.5 },
+        );
+        assert_eq!(flags, vec![true, false, false, false]);
+        // The flags exactly predict what apply_tearing removes.
+        let mut torn = constraints.clone();
+        let removed = apply_tearing(
+            &mut torn,
+            &particles,
+            TearingParams { break_strain: 0.5 },
+        );
+        assert_eq!(removed, flags.iter().filter(|&&f| f).count());
+        assert_eq!(torn.len(), constraints.len() - removed);
     }
 
     #[test]
