@@ -537,6 +537,129 @@ impl Tlas {
         }
         false
     }
+
+    /// Nearest world-space intersection using the watertight `BLAS` walk.
+    ///
+    /// Identical top-level traversal to [`Tlas::closest_hit`] but each instance
+    /// is queried with [`Bvh::closest_hit_watertight`], so a primary/reflection
+    /// ray that strikes a seam shared by two triangles of an instanced mesh is
+    /// never lost between them.
+    #[must_use]
+    pub fn closest_hit_watertight(&self, ray: &Ray, blases: &[Bvh]) -> Option<TlasHit> {
+        if self.nodes.is_empty() {
+            return None;
+        }
+        let mut best: Option<TlasHit> = None;
+        let mut best_t = ray.t_max();
+        let t_min = ray.t_min();
+
+        let mut stack = [0u32; 64];
+        let mut sp = 0usize;
+        let mut node_index = 0u32;
+        loop {
+            let node = &self.nodes[node_index as usize];
+            if ray.aabb_interval(&node.bounds, t_min, best_t).is_some() {
+                if node.is_leaf() {
+                    let start = node.first_primitive as usize;
+                    let end = start + node.primitive_count as usize;
+                    for (offset, inst) in self.instances[start..end].iter().enumerate() {
+                        let obj_origin = inst.world_to_object.transform_point(ray.origin());
+                        let obj_dir = inst.world_to_object.transform_vector(ray.direction());
+                        let obj_ray = Ray::new(obj_origin, obj_dir, t_min, best_t);
+                        if let Some(hit) = blases[inst.blas].closest_hit_watertight(&obj_ray)
+                            && hit.t < best_t
+                        {
+                            best_t = hit.t;
+                            best = Some(TlasHit {
+                                t: hit.t,
+                                u: hit.u,
+                                v: hit.v,
+                                primitive: hit.primitive,
+                                instance_id: inst.instance_id,
+                                instance_index: (start + offset) as u32,
+                            });
+                        }
+                    }
+                    match pop(&mut stack, &mut sp) {
+                        Some(n) => node_index = n,
+                        None => break,
+                    }
+                } else {
+                    let first_child = node_index + 1;
+                    let second_child = node.second_child;
+                    let neg = ray.direction()[node.axis as usize] < 0.0;
+                    let (near, far) = if neg {
+                        (second_child, first_child)
+                    } else {
+                        (first_child, second_child)
+                    };
+                    if sp < stack.len() {
+                        stack[sp] = far;
+                        sp += 1;
+                    }
+                    node_index = near;
+                }
+            } else {
+                match pop(&mut stack, &mut sp) {
+                    Some(n) => node_index = n,
+                    None => break,
+                }
+            }
+        }
+        best
+    }
+
+    /// Occlusion query using the watertight `BLAS` walk.
+    ///
+    /// The watertight counterpart of [`Tlas::any_hit`]: a shadow/AO ray aimed
+    /// along a seam of an instanced occluder is still reported as blocked, so
+    /// closed instanced meshes cast leak-free shadows.
+    #[must_use]
+    pub fn any_hit_watertight(&self, ray: &Ray, blases: &[Bvh]) -> bool {
+        if self.nodes.is_empty() {
+            return false;
+        }
+        let t_min = ray.t_min();
+        let t_max = ray.t_max();
+
+        let mut stack = [0u32; 64];
+        let mut sp = 0usize;
+        let mut node_index = 0u32;
+        loop {
+            let node = &self.nodes[node_index as usize];
+            if ray.aabb_interval(&node.bounds, t_min, t_max).is_some() {
+                if node.is_leaf() {
+                    let start = node.first_primitive as usize;
+                    let end = start + node.primitive_count as usize;
+                    for inst in &self.instances[start..end] {
+                        let obj_origin = inst.world_to_object.transform_point(ray.origin());
+                        let obj_dir = inst.world_to_object.transform_vector(ray.direction());
+                        let obj_ray = Ray::new(obj_origin, obj_dir, t_min, t_max);
+                        if blases[inst.blas].any_hit_watertight(&obj_ray) {
+                            return true;
+                        }
+                    }
+                    match pop(&mut stack, &mut sp) {
+                        Some(n) => node_index = n,
+                        None => break,
+                    }
+                } else {
+                    let first_child = node_index + 1;
+                    if sp < stack.len() {
+                        stack[sp] = node.second_child;
+                        sp += 1;
+                    }
+                    node_index = first_child;
+                }
+            } else {
+                match pop(&mut stack, &mut sp) {
+                    Some(n) => node_index = n,
+                    None => break,
+                }
+            }
+        }
+        false
+    }
 }
 
 #[inline]
@@ -996,5 +1119,172 @@ mod tests {
         assert_eq!(after.instance_id, before.instance_id);
         assert_eq!(after.primitive, before.primitive);
         assert!(approx(after.t, before.t, 1e-5), "t {} != {}", after.t, before.t);
+    }
+
+    /// Brute-force watertight reference: query every instance's BLAS with the
+    /// watertight walk and keep the globally nearest hit. Mirror of
+    /// [`brute_closest`] but exercising the leak-free triangle test.
+    fn brute_closest_watertight(
+        instances: &[Instance],
+        blases: &[Bvh],
+        ray: &Ray,
+    ) -> Option<(u32, u32, f32)> {
+        let mut best: Option<(u32, u32, f32)> = None;
+        let mut best_t = ray.t_max();
+        for inst in instances {
+            let obj_origin = inst.world_to_object().transform_point(ray.origin());
+            let obj_dir = inst.world_to_object().transform_vector(ray.direction());
+            let obj_ray = Ray::new(obj_origin, obj_dir, ray.t_min(), ray.t_max());
+            if let Some(hit) = blases[inst.blas()].closest_hit_watertight(&obj_ray)
+                && hit.t < best_t
+            {
+                best_t = hit.t;
+                best = Some((inst.instance_id(), hit.primitive, hit.t));
+            }
+        }
+        best
+    }
+
+    #[test]
+    fn watertight_identity_instance_matches_blas_directly() {
+        // Under an identity transform the TLAS watertight walk must agree with
+        // the BLAS watertight walk ray-for-ray (same t/primitive), confirming the
+        // top-level traversal does not perturb the per-instance result.
+        let blas = sample_blas();
+        let blases = vec![blas.clone()];
+        let inst = Instance::new(Affine3::identity(), 0, 7).unwrap();
+        let tlas = Tlas::build(&[inst], &blases);
+
+        let mut rng = Rng::new(0x1DEF_2266);
+        for _ in 0..5000 {
+            let origin = [rng.range(-3.0, 3.0), rng.range(-3.0, 3.0), rng.range(2.0, 6.0)];
+            let dir = [rng.range(-1.0, 1.0), rng.range(-1.0, 1.0), rng.range(-2.0, -0.2)];
+            let ray = Ray::infinite(origin, dir);
+            let direct = blas.closest_hit_watertight(&ray);
+            let via = tlas.closest_hit_watertight(&ray, &blases);
+            match (direct, via) {
+                (None, None) => {}
+                (Some(d), Some(v)) => {
+                    assert_eq!(d.primitive, v.primitive, "primitive mismatch");
+                    assert!(approx(d.t, v.t, 1e-5), "t {} != {}", d.t, v.t);
+                    assert_eq!(v.instance_id, 7);
+                }
+                (a, b) => panic!(
+                    "existence mismatch: {:?} vs {:?}",
+                    a.map(|h| h.t),
+                    b.map(|h| h.t)
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn watertight_random_scene_matches_brute_force() {
+        // The accelerated watertight TLAS walk must return exactly the globally
+        // nearest watertight hit that a brute-force per-instance scan finds.
+        let blases = vec![sample_blas()];
+        let mut rng = Rng::new(0xC0FF_EE42);
+        for _ in 0..40 {
+            let n = 1 + (rng.next_u32() % 12) as usize;
+            let mut instances = Vec::with_capacity(n);
+            for id in 0..n {
+                instances.push(Instance::new(random_affine(&mut rng), 0, id as u32).unwrap());
+            }
+            let tlas = Tlas::build(&instances, &blases);
+            for _ in 0..300 {
+                let origin = [
+                    rng.range(-10.0, 10.0),
+                    rng.range(-10.0, 10.0),
+                    rng.range(-10.0, 10.0),
+                ];
+                let dir = [
+                    rng.range(-1.0, 1.0),
+                    rng.range(-1.0, 1.0),
+                    rng.range(-1.0, 1.0),
+                ];
+                let ray = Ray::infinite(origin, dir);
+                let brute = brute_closest_watertight(&instances, &blases, &ray);
+                let via = tlas.closest_hit_watertight(&ray, &blases);
+                match (brute, via) {
+                    (None, None) => {}
+                    (Some((bid, bprim, bt)), Some(v)) => {
+                        assert_eq!(bid, v.instance_id, "instance mismatch");
+                        assert_eq!(bprim, v.primitive, "primitive mismatch");
+                        assert!(approx(bt, v.t, 1e-4), "t {bt} != {}", v.t);
+                        assert_eq!(
+                            tlas.instances()[v.instance_index as usize].instance_id(),
+                            v.instance_id
+                        );
+                    }
+                    (b, v) => panic!("existence mismatch: {b:?} vs {v:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn watertight_any_hit_agrees_with_closest_hit() {
+        // Occlusion via the watertight walk must exactly match the existence of a
+        // watertight nearest hit for the same ray.
+        let blases = vec![sample_blas()];
+        let mut rng = Rng::new(0x5EA1_ED00);
+        for _ in 0..20 {
+            let n = 1 + (rng.next_u32() % 8) as usize;
+            let instances: Vec<Instance> = (0..n)
+                .map(|id| Instance::new(random_affine(&mut rng), 0, id as u32).unwrap())
+                .collect();
+            let tlas = Tlas::build(&instances, &blases);
+            for _ in 0..400 {
+                let origin = [
+                    rng.range(-10.0, 10.0),
+                    rng.range(-10.0, 10.0),
+                    rng.range(-10.0, 10.0),
+                ];
+                let dir = [
+                    rng.range(-1.0, 1.0),
+                    rng.range(-1.0, 1.0),
+                    rng.range(-1.0, 1.0),
+                ];
+                let ray = Ray::infinite(origin, dir);
+                assert_eq!(
+                    tlas.any_hit_watertight(&ray, &blases),
+                    tlas.closest_hit_watertight(&ray, &blases).is_some()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn watertight_instanced_seam_has_no_leaks() {
+        // A ray marched across the shared diagonal of an instanced quad must
+        // always report a hit through the watertight TLAS walk. The instance is
+        // rotated so the seam is not axis-aligned, matching the standalone and
+        // BLAS-level leak proofs but now exercised through the full TLAS path.
+        let blases = vec![sample_blas()];
+        // Rotate about z (in-plane) so the shared diagonal is a generic line
+        // rather than axis-aligned. z-rotation keeps the quad in the z = 0
+        // plane, so a -z ray still sees it. Exact 3-4-5 rotation (c^2+s^2=1)
+        // avoids transcendental calls. Column-major z-rotation matrix.
+        let (c, s) = (0.6_f32, 0.8_f32);
+        let rot = Affine3::from_cols([[c, s, 0.0], [-s, c, 0.0], [0.0, 0.0, 1.0]], [0.0, 0.0, 0.0]);
+        let inst = Instance::new(rot, 0, 0).unwrap();
+        let tlas = Tlas::build(&[inst], &blases);
+
+        // The BLAS seam is the diagonal from [-1,-1,0] to [1,1,0]; its world
+        // image under `rot` is R*[t,t,0] = [t(c-s), t(c+s), 0]. March a -z ray
+        // straight down that world line: every step must strike one of the two
+        // triangles sharing the seam, so a watertight walk never leaks.
+        let steps = 20_000u32;
+        let mut leaks = 0u32;
+        for i in 0..steps {
+            let t = -0.95 + 1.9 * (i as f32 / steps as f32);
+            let x = t * (c - s);
+            let y = t * (c + s);
+            let ray = Ray::infinite([x, y, 5.0], [0.0, 0.0, -1.0]);
+            if tlas.closest_hit_watertight(&ray, &blases).is_none() {
+                leaks += 1;
+            }
+        }
+        assert_eq!(leaks, 0, "watertight TLAS leaked {leaks}/{steps} along seam");
     }
 }

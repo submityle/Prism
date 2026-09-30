@@ -220,9 +220,7 @@ pub(crate) fn intersect_triangle_watertight(ray: &Ray, tri: &Triangle) -> Option
     let mut ky = if kx + 1 == 3 { 0 } else { kx + 1 };
     // Swap `kx`/`ky` when the ray points down `-kz` so winding is preserved.
     if dir[kz] < 0.0 {
-        let tmp = kx;
-        kx = ky;
-        ky = tmp;
+        core::mem::swap(&mut kx, &mut ky);
     }
 
     // Shear/scale constants aligning the ray with `+kz`.
