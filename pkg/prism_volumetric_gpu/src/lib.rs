@@ -56,6 +56,7 @@
 #![forbid(unsafe_code)]
 
 pub mod active_pixel;
+pub mod adaptive_step;
 pub mod aerial;
 pub mod anvil_profile;
 pub mod apply_carve;
@@ -102,6 +103,7 @@ pub mod virga_veil;
 pub mod worley;
 
 pub use active_pixel::{ActivePixelQuery, GpuActivePixel};
+pub use adaptive_step::{AdaptiveStepQuery, GpuAdaptiveStep};
 pub use aerial::{AerialQuery, GpuAerialPerspective};
 pub use anvil_profile::{AnvilProfileQuery, GpuAnvilProfile};
 pub use apply_carve::{ApplyCarveQuery, GpuApplyCarve};
