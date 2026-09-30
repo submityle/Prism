@@ -56,6 +56,7 @@ pub mod doppler;
 pub mod geometry;
 pub mod occlusion;
 pub mod panner;
+pub mod spatializer;
 
 pub use air::{AirAbsorption, AirAbsorptionNode, AtmosphericConditions, absorption_db_per_metre};
 pub use ambisonics::{
@@ -69,3 +70,4 @@ pub use occlusion::{
     NullOcclusionQuery, Occlusion, OcclusionFactors, OcclusionNode, OcclusionParams, OcclusionQuery,
 };
 pub use panner::{Panner, PannerNode, VbapPanner};
+pub use spatializer::{SourceDescriptor, SpatialParams, resolve};
