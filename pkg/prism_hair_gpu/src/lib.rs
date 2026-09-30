@@ -158,6 +158,14 @@
 //!   the same deterministic winding is rebuilt host-side (see
 //!   [`mesh_shell_tapered`]).
 //!
+//! * [`GpuHairTransition`] evaluates
+//!   [`strand_survives_dither`](prism_render_architecture::hair::transition::strand_survives_dither),
+//!   the continuous-LOD screen-door dither that dissolves a cross-fading groom
+//!   strand-by-strand instead of popping — one thread per strand keeps drawing
+//!   as the finer tier while its stable `splitmix64` hash is at or above the
+//!   cross-fade `blend` (kept fraction `1 - blend`), the decision a smooth tier
+//!   transition composites (see [`transition`]).
+//!
 //! # Portability
 //!
 //! The projection uses only `sqrt`, `min`, `max`, `clamp`, `dot` and
@@ -199,6 +207,7 @@ pub mod sdf_collision;
 pub mod self_collision_grid;
 pub mod self_collision_jacobi;
 pub mod strand_metrics;
+pub mod transition;
 pub mod voxel_density;
 pub mod voxel_forward_scatter;
 pub mod voxel_transmittance;
@@ -220,6 +229,7 @@ pub use sdf_collision::GpuSdfCollider;
 pub use self_collision_grid::GpuSelfCollisionGrid;
 pub use self_collision_jacobi::GpuSelfCollisionJacobi;
 pub use strand_metrics::{GpuStrandMetric, GpuStrandMetrics};
+pub use transition::GpuHairTransition;
 pub use voxel_density::GpuHairVoxelDensity;
 pub use voxel_forward_scatter::GpuHairVoxelForwardScatter;
 pub use voxel_transmittance::GpuHairVoxelTransmittance;
