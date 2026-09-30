@@ -56,6 +56,7 @@
 #![forbid(unsafe_code)]
 
 pub mod aerial;
+pub mod anvil_profile;
 pub mod apply_carve;
 pub mod cloud_shadow_modulation;
 pub mod context;
@@ -82,6 +83,7 @@ pub mod trilinear;
 pub mod worley;
 
 pub use aerial::{AerialQuery, GpuAerialPerspective};
+pub use anvil_profile::{AnvilProfileQuery, GpuAnvilProfile};
 pub use apply_carve::{ApplyCarveQuery, GpuApplyCarve};
 pub use cloud_shadow_modulation::{CloudShadowModulationQuery, GpuCloudShadowModulation};
 pub use context::{block_on, GpuContext};
