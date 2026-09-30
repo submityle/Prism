@@ -167,7 +167,7 @@ fallback:
 - **正确性模型**：核心为闭式几何、无超越调用，`CPU`/`GPU` 算同一公式，但**非位精确**（`GPU` 可 fuse mul-add，扰动低位 mantissa 几 `ULP`），故每分量断言容差 `abs_diff<1e-4` 或 `rel_diff<1e-3`；迭代类 kernel 参数保守以控 fma 累积。每个 parity 测试均带物理断言 + 非平凡断言（防 no-op 蒙混）+ 空/退化输入用例。
 - **可移植性**：只用 `sqrt`/`min`/`max`/`clamp`/`dot`/mul-add 的 core-`WGSL` 子集——无 `exp`/`pow`/可选 device feature——故孪生在 Metal/Vulkan/DX12 不改即跑。
 
-当前已落 **9 个真机对拍孪生**（Apple M2 Metal 全绿 **42 passed**）：
+当前已落 **10 个真机对拍孪生**（Apple M2 Metal 全绿 **49 passed**）：
 
 | kernel | 对拍的 `CPU` golden | 语义 | 真机单测 |
 |---|---|---|---|
@@ -180,12 +180,15 @@ fallback:
 | `strand_metrics` | `strand_arc_length` / `strand_curvature` | 每 render strand 折线折叠成弧长 + 无超越转角（一线程一 strand，density/decimation LOD 排序消费的两个廉价标量） | 5 |
 | `guide_solver` | `simulate_guides` | 每 strand 独立跑整条 substeps×iterations 的 XPBD 核心 sim（积分 + 边长 + 局部/全局形状 + `LRA` + 可选代理体碰撞；一线程一 strand 在读写 storage 上原地 Gauss-Seidel，disjoint particle range 天然 race-free，无 barrier） | 6 |
 | `interp` | `interpolate_render_strand` | guide→render 插值完整变换链（加权 blend → 长度抖动 → 向代表 guide 的 clump 拉拽 → 基于 clumped 切线的 seed 稳定 curl 螺旋 → 逐点位置抖动；一线程一 render strand，`splitmix64` 以 `vec2<u32>` 仿真、`sin_turns` Taylor 保确定性，输出长度取最短贡献 guide） | 10 |
+| `deep_opacity` | `build_deep_opacity_map` | 跨纹素 deep opacity 自阴影 slab 打包（一线程一 light texel，host 预排序切片，kernel 等宽分层 + 乘性 `alpha`-composite `T=Π(1-α)`；不在 GPU 排序，deep_transmittance/forward_scatter 的乘性姊妹） | 7 |
 
 **已落（本轮新增第 8 个）**：guide XPBD 求解器（`simulate_guides`，每 strand 独立跑整条 substeps×iterations 的核心 sim 阶段，`UE5` Groom/`TressFX` 都在 `GPU` 跑）——`guide_solver.wesl` 5 bindings（uniform `Params` 48B / 只读 `strands` / 读写 `state` stride8 / 只读 `goals` / 只读 `colliders`），host 严格照 golden 派生序算 `sub_dt`/`sub_dt_sq`/`alpha`/`velocity_retain`/预乘 `gravity_step`；kernel 逐位对齐 golden 的 `is_pinned`(inv_mass≤0)、all-or-nothing per-strand rest/goal 门控（`has_rest`/`has_goal`）、`EPS_LEN`/`EPS_LEN_SQ`；6 用例真机对拍（单 strand 重力+约束、kinked bending+`LRA`、sphere+capsule 碰撞、多 strand 截断+门控、缺 goal slice 禁全局、no-op guards），Apple M2 Metal 6/6 全绿。至此核心 XPBD sim 阶段已在真机 `GPU` 落地。
 
 **已落（本轮新增第 9 个）**：guide→render 插值（`interpolate_render_strand`，把稀疏 guide 展开成致密 render strand 的核心阶段，`UE5` Groom/`TressFX`/`HairWorks` 都在此分叉）——`interp.wesl` 5 bindings（uniform `Params` 32B / 只读 `guide_points` 点池 / 只读 `guide_ranges`(offset,count) / 只读 `bindings`(guides/weights/root_uv/seed/out_offset 48B) / 读写 `out_points`），一线程一 render strand 逐位镜像 golden 的变换链与序：加权 blend → 长度抖动 → 向代表 guide（最大 weight）的 clump 拉拽（×t 向尖端加强）→ 基于 clumped 切线前向差分帧的 seed 稳定 curl 螺旋 → 逐点位置抖动（curl/jitter 均 root(0)→tip(full) 增长）；`splitmix64` 以 `vec2<u32>`(lo,hi) 手写 64-bit 加/异或/右移/低 64 位乘法逐位复刻，`round_away` 半数远零对齐 Rust `f32::round`，`sin_turns` 沿用区间归约 9 阶 Taylor（禁 `f32::sin`）；host 复刻 golden 的贡献 gather 预算每 strand 输出长度（取最短贡献 guide 的控制点数、capped 256 scratch 上界）与 flat 偏移，全退化批（空/越界/零权重）短路返回 per-binding 空列表不发 dispatch；10 用例真机对拍（单 guide 直插/加权 blend/clump 拉拽/curl 螺旋/位置抖动/长度抖动/最短 guide 截断/退化 bindings/空批/多 strand 全链），逐点对 golden，Apple M2 Metal 10/10 全绿。至此 guide→render 插值阶段已在真机 `GPU` 落地。
 
-**待续**：deep opacity 自阴影 build（`hair_deep_opacity.wesl`）的真机对拍孪生，为下一批落地目标。
+**已落（本轮新增第 10 个）**：deep opacity 自阴影跨纹素 build（`build_deep_opacity_map`，把 `bin_samples` 的 per-texel 桶打包成上传就绪的定长层 slab，`UE5` Groom/`TressFX` 自阴影 bake 同款；`deep_transmittance` per-ray 透射曲线的跨纹素乘性姊妹、`forward_scatter` 加性打包的乘性对偶）——`deep_opacity.wesl` 6 bindings（uniform `Params` 16B{texel_count,layer_count,start_offset,pad} / 只读 `samples`(vec2 depth,opacity) / 只读 `texel_ranges`(start,count 8B) / 读写 `near_depth` / 读写 `layer_step` / 读写 `transmittance`），entry `evaluate`、`@workgroup_size(64)`，一线程一 light texel；host 侧严格复刻 `pack_bucket` 的稳定 `total_cmp` 深度升序排序后再 flatten 成共享 `samples` 池 + 紧凑 `texel_ranges`（kernel 不排序，device-side sort 属独立调度），kernel 只做等宽分层切片 + 乘性 `running *= 1 - clamp(opacity,0,1)` 累加，boundary 拼写 `start + width*(f32(i)+1.0)`、末层 pin `end`、`width=(end-start)/f32(layers)` 与 `<= boundary` 逐位对齐 golden 保 bit-faithful；空 texel 打全 `1.0` 行 + near/step=0，`layer_count` 钳 1、`start_offset` 钳 0、零宽 slab 边界退化到 end；`texel_count==0` 短路返回空 golden 不发 dispatch，全空桶 pad 一条 dummy sample 防零尺寸 storage buffer；dispatch `texel_count.div_ceil(64)`；7 用例真机对拍（单纹素分层/乱序输入验 host 排序/空 texel 全 1.0 行/`start_offset` 偏置/零宽 slab/`layer_count` 钳 1/多纹素批量），逐值对比 golden `transmittance`+`near`+`step` 并 `map_transmittance` 全深度扫掠对拍，Apple M2 Metal 7/7 全绿。至此 deep opacity 自阴影跨纹素打包已在真机 `GPU` 落地。
+
+**待续**：voxel 自阴影密度累加（`accumulate_voxel_density`/`voxel_transmittance`）或 `bin_samples` 分桶的真机对拍孪生，为下一批落地目标。
 
 ---
 
