@@ -8,6 +8,10 @@
 //! primitive each ray enters. The result is the same nearest hit the
 //! [`cpu_bvh_raycast_closest`](super::ray::cpu_bvh_raycast_closest) twin computes by
 //! brute force.
+//! [`GpuBvhRaycast::query_any`] shares the same traversal but stops at the first
+//! leaf box a ray enters, reporting only whether some primitive is hit — the
+//! occlusion probe of a blocking line trace — matching the
+//! [`cpu_bvh_raycast_any`](super::ray::cpu_bvh_raycast_any) twin.
 //!
 //! # Resident-tree contract
 //!
@@ -68,9 +72,16 @@ pub struct GpuBvhRaycast {
         reason = "kept alive so the closest-hit pipeline it produced stays valid"
     )]
     closest_module: ShaderModule,
+    #[expect(
+        dead_code,
+        reason = "kept alive so the any-hit pipeline it produced stays valid"
+    )]
+    any_module: ShaderModule,
     layout: BindGroupLayout,
     /// Closest-hit kernel binding a device-resident tree's buffers directly.
     closest: ComputePipeline,
+    /// Any-hit kernel: reports whether each ray hits any primitive at all.
+    any: ComputePipeline,
 }
 
 impl GpuBvhRaycast {
@@ -81,6 +92,10 @@ impl GpuBvhRaycast {
         let closest_module = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("prism_bvh_raycast"),
             source: ShaderSource::Wgsl(include_str!("../shaders/bvh_raycast.wgsl").into()),
+        });
+        let any_module = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("prism_bvh_raycast_any"),
+            source: ShaderSource::Wgsl(include_str!("../shaders/bvh_raycast_any.wgsl").into()),
         });
         // The eight resident-tree buffers plus params, rays, and hits. The
         // closest and any-hit kernels share this layout: every binding type is
@@ -114,10 +129,22 @@ impl GpuBvhRaycast {
             compilation_options: PipelineCompilationOptions::default(),
             cache: None,
         });
+        // The any-hit kernel reuses the same pipeline layout and bind-group
+        // layout; only the entry point and hit element type differ.
+        let any = device.create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some("prism_bvh_raycast_any_pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &any_module,
+            entry_point: Some("raycast_any"),
+            compilation_options: PipelineCompilationOptions::default(),
+            cache: None,
+        });
         GpuBvhRaycast {
             closest_module,
+            any_module,
             layout,
             closest,
+            any,
         }
     }
 
@@ -202,6 +229,75 @@ impl GpuBvhRaycast {
                 }
             })
             .collect()
+    }
+
+    /// Reports whether each ray in `rays` hits any primitive in the resident
+    /// `lbvh`, the device counterpart of
+    /// [`cpu_bvh_raycast_any`](super::ray::cpu_bvh_raycast_any).
+    ///
+    /// Returns one flag per ray, in input order: `true` when the ray enters some
+    /// primitive box within its extent, `false` otherwise. Traversal stops at the
+    /// first crossing rather than searching for the nearest one, the occlusion
+    /// probe of a blocking line trace. A resident tree with fewer than two leaves
+    /// holds no hierarchy, so every ray misses (see the [module docs](self)).
+    #[must_use]
+    pub fn query_any(&self, ctx: &GpuContext, lbvh: &GpuResidentLbvh, rays: &[Ray]) -> Vec<bool> {
+        // A resident tree with fewer than two leaves owns no buffers and has no
+        // root to traverse, so every ray misses.
+        let Some(inner) = lbvh.buffers() else {
+            return vec![false; rays.len()];
+        };
+        if rays.is_empty() {
+            return Vec::new();
+        }
+
+        let device = ctx.device();
+        let num_rays = u32::try_from(rays.len()).unwrap_or(u32::MAX);
+
+        let params = Params {
+            num_internal: u32::try_from(inner.num_internal).unwrap_or(u32::MAX),
+            num_leaves: u32::try_from(lbvh.num_leaves()).unwrap_or(u32::MAX),
+            root: inner.root,
+            num_rays,
+        };
+
+        let packed = pack_rays(rays);
+        let params_buf = buffer::uniform(device, "prism_bvh_raycast_any_params", &params);
+        let rays_buf = buffer::storage_read(device, "prism_bvh_raycast_any_rays", &packed);
+        // One u32 flag per ray; the buffer starts zeroed, so a missing ray keeps
+        // its zero and only a hit writes 1.
+        let hits_bytes = u64::from(num_rays) * 4;
+        let hits_buf = buffer::storage_rw_zeroed(device, "prism_bvh_raycast_any_hits", hits_bytes);
+
+        let bind = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("prism_bvh_raycast_any_bind"),
+            layout: &self.layout,
+            entries: &[
+                entry(0, &params_buf),
+                entry(1, &inner.left),
+                entry(2, &inner.right),
+                entry(3, &inner.parent),
+                entry(4, &inner.node_min),
+                entry(5, &inner.node_max),
+                entry(6, &inner.aabb_min),
+                entry(7, &inner.aabb_max),
+                entry(8, inner.sorted.values()),
+                entry(9, &rays_buf),
+                entry(10, &hits_buf),
+            ],
+        });
+
+        let hits_stage = buffer::staging(device, "prism_bvh_raycast_any_hits_stage", hits_bytes);
+        let groups = num_rays.div_ceil(WORKGROUP);
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("prism_bvh_raycast_any_encoder"),
+        });
+        dispatch(&mut encoder, &self.any, &bind, groups);
+        buffer::copy(&mut encoder, &hits_buf, &hits_stage, hits_bytes);
+        ctx.queue().submit([encoder.finish()]);
+
+        let raw = buffer::read_back::<u32>(ctx, &hits_stage);
+        raw.into_iter().take(rays.len()).map(|v| v != 0).collect()
     }
 }
 
