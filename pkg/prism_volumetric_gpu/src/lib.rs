@@ -57,6 +57,7 @@
 
 pub mod context;
 pub mod curl;
+pub mod mask;
 pub mod modeling;
 pub mod octave;
 pub mod perlin;
@@ -68,6 +69,7 @@ pub mod worley;
 
 pub use context::{block_on, GpuContext};
 pub use curl::{CurlQuery, GpuCurl};
+pub use mask::{GpuScatteringMask, MaskQuery};
 pub use modeling::{GpuModeling, ModelingQuery};
 pub use octave::{GpuOctaveScatter, OctaveQuery, OctaveResult};
 pub use perlin::{GpuPerlin, PerlinQuery};
