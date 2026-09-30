@@ -136,6 +136,19 @@
 //!   per-region coverage the aggregate nearest scan in [`root_bind`] cannot
 //!   (see [`closest_point_triangle`]).
 //!
+//! * [`GpuHairResample`] evaluates
+//!   [`resample_strand`](prism_render_architecture::hair::groom_import::resample_strand)
+//!   /
+//!   [`resample_groom`](prism_render_architecture::hair::groom_import::resample_groom),
+//!   the import-time arc-length rebake that reparameterizes every raw guide
+//!   polyline into a fixed `target_points` stride — one thread per strand walks
+//!   the cumulative arc length and emits evenly spaced control points, the
+//!   uniform-stride buffer every downstream stage (dynamics rest lengths,
+//!   interpolation, `LOD`, raster) consumes. The root/tip endpoints are pinned
+//!   bit-exactly while the interior samples are tolerance-checked; the host
+//!   pre-filters out-of-bounds and zero-length ranges to mirror
+//!   [`resample_groom`]'s survivor set (see [`resample`]).
+//!
 //! * [`GpuHairVoxelDensity`] evaluates
 //!   [`accumulate_voxel_density`](prism_render_architecture::hair::deep_transmittance::accumulate_voxel_density),
 //!   the sort-free froxel sibling of the deep opacity packing — one thread per
@@ -307,6 +320,7 @@ pub mod interp;
 pub mod mesh_shell;
 pub mod mesh_shell_tapered;
 pub mod raster;
+pub mod resample;
 pub mod ribbon;
 pub mod root_bind;
 pub mod root_resolve;
@@ -341,6 +355,7 @@ pub use interp::GpuHairInterp;
 pub use mesh_shell::{GpuMeshShell, GpuShellMesh, ShellStrandInput};
 pub use mesh_shell_tapered::{GpuMeshShellTapered, TaperedShellStrandInput};
 pub use raster::{path_code, GpuHairRaster, RasterQuery};
+pub use resample::{reference_resample_groom, reference_resample_strand, GpuHairResample};
 pub use ribbon::{GpuRibbon, GpuRibbonMesh, RibbonStrandInput};
 pub use root_bind::GpuHairRootBind;
 pub use root_resolve::GpuHairRootResolve;
