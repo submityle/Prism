@@ -120,7 +120,15 @@ impl AccelerationUpdatePolicy {
         self.rebuild_variant(change.fragmentation)
     }
 
-    fn rebuild_variant(&self, fragmentation: f64) -> AccelerationUpdate {
+    /// Picks the rebuild flavour for a forced rebuild: plain [`Rebuild`], or
+    /// [`BuildAndCompact`] once `fragmentation` reaches
+    /// [`Self::compact_fragmentation_min`]. A `NaN` fragmentation is treated as
+    /// zero. Shared with the update scheduler so a quality-driven escalation
+    /// honours the same compaction threshold as a motion-driven rebuild.
+    ///
+    /// [`Rebuild`]: AccelerationUpdate::Rebuild
+    /// [`BuildAndCompact`]: AccelerationUpdate::BuildAndCompact
+    pub(crate) fn rebuild_variant(&self, fragmentation: f64) -> AccelerationUpdate {
         let frag = if fragmentation.is_nan() {
             0.0
         } else {
@@ -218,6 +226,19 @@ impl RebuildLedger {
         self.spent_bytes = projected;
         self.admitted += 1;
         true
+    }
+
+    /// Charges `cost_bytes` unconditionally and counts the update as admitted,
+    /// even when it overruns the remaining budget.
+    ///
+    /// Used for work that cannot be deferred without rendering an incorrect
+    /// structure — a topology-changing rebuild or the bound-enclosing refit for
+    /// moved geometry — so the ledger records the true (possibly over-budget)
+    /// spend, which the renderer observes as [`remaining_bytes`](Self::remaining_bytes)
+    /// saturating to zero, rather than silently skipping mandatory work.
+    pub fn force_admit(&mut self, cost_bytes: u64) {
+        self.spent_bytes = self.spent_bytes.saturating_add(cost_bytes);
+        self.admitted += 1;
     }
 
     /// Bytes charged so far this frame.
@@ -392,5 +413,19 @@ mod tests {
     fn undefined_refit_quality_never_rebuilds() {
         let policy = AccelerationUpdatePolicy::default();
         assert!(!policy.should_rebuild_after_refit(f64::NAN));
+    }
+
+    #[test]
+    fn force_admit_charges_and_counts_even_when_over_budget() {
+        let mut ledger = RebuildLedger::new(1000);
+        assert!(ledger.admit(600));
+        // A mandatory update overruns the remaining 400 bytes but still charges.
+        ledger.force_admit(700);
+        assert_eq!(ledger.spent_bytes(), 1300);
+        assert_eq!(ledger.remaining_bytes(), 0);
+        assert_eq!(ledger.counts(), (2, 0));
+        // A gated admit afterwards sees no budget left and defers.
+        assert!(!ledger.admit(1));
+        assert_eq!(ledger.counts(), (2, 1));
     }
 }

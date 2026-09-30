@@ -11,6 +11,9 @@
 //! Submodules:
 //! - [`acceleration`] — `BLAS`/`TLAS` update-strategy decisions and rebuild
 //!   budgeting (`Reuse`/`Refit`/`Rebuild`/`BuildAndCompact`).
+//! - [`scheduler`] — per-structure [`AccelerationScheduler`] tying the update
+//!   policy, refit-quality feedback, and per-frame rebuild budget into one
+//!   cross-frame lifecycle (mandatory correctness work vs. deferrable rebuilds).
 //! - [`backend`] — capability-driven [`TraceBackend`] fallback selection.
 //! - [`footprint`] — ray-cone [`RayFootprint`] and texture-`LOD` (mip) math.
 //! - [`bvh`] — software `BVH`: primitive bounds, binned-`SAH` build, and the
@@ -33,6 +36,7 @@ pub mod bvh;
 pub mod footprint;
 pub mod gpu_layout;
 pub mod ray_offset;
+pub mod scheduler;
 pub mod tlas;
 pub mod traversal;
 
@@ -48,6 +52,7 @@ pub use footprint::{log2_linear, RayFootprint};
 pub use bvh::{Aabb, Axis, Bvh, BvhBuildConfig, LinearBvhNode, Triangle};
 pub use tlas::{Affine3, Instance, Tlas, TlasHit};
 pub use ray_offset::offset_ray_origin;
+pub use scheduler::{AccelerationScheduler, ScheduledUpdate};
 pub use traversal::{Hit, Ray};
 pub use gpu_layout::{
     GpuBlasPool, GpuBvhBuffers, GpuTlasBuffers, TlasPackedHit, BLAS_OFFSET_WORDS, INSTANCE_WORDS,
