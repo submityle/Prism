@@ -126,22 +126,26 @@ fn cell_gaussian(cell: u32, seed: u32) -> Complex {
     Complex::new(standard_gaussian(base, 0), standard_gaussian(base, 1))
 }
 
-/// Builds the deterministic initial spectral field for a wind-driven sea.
+/// A wave-number magnitude band `[lo, hi)` (rad/m) a cascade keeps, used to
+/// split a geometric cascade set into non-overlapping wavelength shells so no
+/// wave is synthesized twice. `lo` is inclusive, `hi` exclusive; a full-band
+/// field (a lone ocean, or the wrapper below) passes `None` and keeps every
+/// resolvable mode.
+type WaveBand = Option<(f32, f32)>;
+
+/// Core field builder shared by the single-field wrapper and the cascade set.
 ///
-/// `resolution` is the grid size `N` (the field holds `N*N` amplitudes);
-/// `patch_size` is the tiled patch extent `L` in metres; `params` is the sea
-/// state (spectrum kind, wind, amplitude); `seed` selects the random draw so
-/// distinct bodies get uncorrelated fields while any one body is reproducible.
-///
-/// A non-positive `resolution` or `patch_size`, or a calm sea (zero wind, so
-/// the spectrum carries no energy), yields an empty field and an honest no-op
-/// ocean rather than a fabricated one.
+/// `band` limits which wave-number magnitudes contribute: a cell whose `|k|`
+/// falls outside the half-open band is zeroed in both `h0` and `h0_neg` (the
+/// grid layout is preserved so the `IFFT` indexing never shifts). `None` keeps
+/// every mode, reproducing the classic single-patch `Tessendorf` field.
 #[must_use]
-pub fn build_initial_spectrum(
+fn build_field(
     resolution: u32,
     patch_size: f32,
     params: SpectrumParams,
     seed: u32,
+    band: WaveBand,
 ) -> OceanSpectrumField {
     if resolution == 0 || patch_size <= 0.0 {
         return OceanSpectrumField {
@@ -177,18 +181,34 @@ pub fn build_initial_spectrum(
             let kx = (j as f32 - half) * k_scale;
             let k_vec = Vec2::new(kx, kz);
 
-            let energy = energy_density(k_vec, params);
-            let amp = (energy * 0.5).max(0.0).sqrt();
-            let g = gaussians[(i * n + j) as usize];
-            h0.push(Complex::new(amp * g.re, amp * g.im));
+            // A cascade only owns wave-number magnitudes inside its band; a
+            // mode outside it belongs to a coarser or finer cascade and is
+            // dropped here so the summed cascades never double-count a wave.
+            let in_band = match band {
+                Some((lo, hi)) => {
+                    let k_mag = k_vec.length();
+                    k_mag >= lo && k_mag < hi
+                }
+                None => true,
+            };
 
-            // -k reuses the mirror cell's Gaussian; the energy is symmetric in
-            // k -> -k, so its amplitude matches, but the draw differs.
-            let mj = (n - j) % n;
-            let g_neg = gaussians[(mi * n + mj) as usize];
-            let energy_neg = energy_density(k_vec.scale(-1.0), params);
-            let amp_neg = (energy_neg * 0.5).max(0.0).sqrt();
-            h0_neg.push(Complex::new(amp_neg * g_neg.re, amp_neg * g_neg.im));
+            if in_band {
+                let energy = energy_density(k_vec, params);
+                let amp = (energy * 0.5).max(0.0).sqrt();
+                let g = gaussians[(i * n + j) as usize];
+                h0.push(Complex::new(amp * g.re, amp * g.im));
+
+                // -k reuses the mirror cell's Gaussian; the energy is symmetric
+                // in k -> -k, so its amplitude matches, but the draw differs.
+                let mj = (n - j) % n;
+                let g_neg = gaussians[(mi * n + mj) as usize];
+                let energy_neg = energy_density(k_vec.scale(-1.0), params);
+                let amp_neg = (energy_neg * 0.5).max(0.0).sqrt();
+                h0_neg.push(Complex::new(amp_neg * g_neg.re, amp_neg * g_neg.im));
+            } else {
+                h0.push(Complex::new(0.0, 0.0));
+                h0_neg.push(Complex::new(0.0, 0.0));
+            }
 
             j += 1;
         }
@@ -203,6 +223,88 @@ pub fn build_initial_spectrum(
     }
 }
 
+/// Builds the deterministic initial spectral field for a wind-driven sea.
+///
+/// `resolution` is the grid size `N` (the field holds `N*N` amplitudes);
+/// `patch_size` is the tiled patch extent `L` in metres; `params` is the sea
+/// state (spectrum kind, wind, amplitude); `seed` selects the random draw so
+/// distinct bodies get uncorrelated fields while any one body is reproducible.
+///
+/// A non-positive `resolution` or `patch_size`, or a calm sea (zero wind, so
+/// the spectrum carries no energy), yields an empty field and an honest no-op
+/// ocean rather than a fabricated one.
+#[must_use]
+pub fn build_initial_spectrum(
+    resolution: u32,
+    patch_size: f32,
+    params: SpectrumParams,
+    seed: u32,
+) -> OceanSpectrumField {
+    build_field(resolution, patch_size, params, seed, None)
+}
+
+/// Builds a geometrically-spaced set of band-limited initial spectra, one per
+/// cascade, the way `UE5` Water, `Crest` and `WaveWorks` stack several `FFT`
+/// patches to resolve waves across scales without a single ruinously large
+/// grid.
+///
+/// Cascade `c` tiles the patch `base_patch_size / cascade_ratio^c`, so cascade
+/// `0` carries the longest swell and each finer cascade a smaller patch with
+/// shorter waves. Each cascade keeps only the wave-number shell it samples
+/// best: cascade `c` owns `|k|` in `[TAU / patch_c, cascade_ratio * TAU /
+/// patch_c)`, which tiles exactly onto its neighbours (cascade `c`'s upper
+/// cutoff is cascade `c+1`'s lower cutoff). The coarsest cascade keeps every
+/// mode below its upper cutoff (down to `k = 0`) and the finest keeps every
+/// mode above its lower cutoff (up to Nyquist), so no resolvable wave is lost
+/// and none is synthesized twice. Each cascade draws from a distinct seed
+/// (`seed + c`) so the shells are statistically independent yet reproducible.
+///
+/// Returns an empty vector for a degenerate request — zero resolution, a
+/// non-positive base patch, zero cascades, or a ratio that does not shrink
+/// (`<= 1`, which would just restack the same patch) — an honest no-op rather
+/// than a fabricated cascade set. A single-cascade request reproduces
+/// [`build_initial_spectrum`] exactly.
+#[must_use]
+pub fn build_cascade_spectra(
+    resolution: u32,
+    base_patch_size: f32,
+    cascade_ratio: f32,
+    cascade_count: u32,
+    params: SpectrumParams,
+    seed: u32,
+) -> Vec<OceanSpectrumField> {
+    if resolution == 0 || base_patch_size <= 0.0 || cascade_count == 0 || cascade_ratio <= 1.0 {
+        return Vec::new();
+    }
+
+    let last = cascade_count - 1;
+    let mut cascades = Vec::with_capacity(cascade_count as usize);
+    let mut c = 0u32;
+    let mut patch = base_patch_size;
+    while c < cascade_count {
+        // The shell this cascade owns, in wave-number magnitude. The coarsest
+        // cascade has no lower bound (it sweeps up the longest swell) and the
+        // finest no upper bound (it sweeps down to Nyquist); interior cascades
+        // tile exactly onto their neighbours.
+        let k_lo = if c == 0 { 0.0 } else { TAU / patch };
+        let k_hi = if c == last {
+            f32::INFINITY
+        } else {
+            cascade_ratio * TAU / patch
+        };
+        cascades.push(build_field(
+            resolution,
+            patch,
+            params,
+            seed.wrapping_add(c),
+            Some((k_lo, k_hi)),
+        ));
+        patch /= cascade_ratio;
+        c += 1;
+    }
+
+    cascades
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,6 +406,105 @@ mod tests {
         assert!(
             (variance - 1.0).abs() < 0.1,
             "Gaussian variance off unit: {variance}"
+        );
+    }
+
+    #[test]
+    fn cascade_set_has_geometric_patch_sizes() {
+        let set = build_cascade_spectra(32, 256.0, 2.0, 4, sea(12.0), 7);
+        assert_eq!(set.len(), 4, "one field per requested cascade");
+        let mut expected = 256.0_f32;
+        for field in &set {
+            assert_eq!(field.resolution, 32);
+            assert_eq!(field.len(), 32 * 32);
+            assert!(
+                (field.patch_size - expected).abs() < 1.0e-3,
+                "cascade patch must shrink geometrically: {} != {expected}",
+                field.patch_size
+            );
+            expected /= 2.0;
+        }
+    }
+
+    #[test]
+    fn single_cascade_matches_the_full_spectrum() {
+        // A lone cascade owns the whole band with the base seed, so it must be
+        // byte-identical to the classic single-patch build.
+        let set = build_cascade_spectra(24, 128.0, 2.0, 1, sea(10.0), 5);
+        assert_eq!(set.len(), 1);
+        let full = build_initial_spectrum(24, 128.0, sea(10.0), 5);
+        assert_eq!(set[0], full, "a single cascade is the full-band field");
+    }
+
+    #[test]
+    fn cascade_bands_partition_the_wave_numbers() {
+        // Every non-zero mode a cascade carries must lie in the wave-number
+        // shell that cascade owns; nothing leaks across a band boundary, which
+        // is what stops a wave being synthesized in two cascades at once.
+        let count = 4u32;
+        let ratio = 2.0_f32;
+        let base = 256.0_f32;
+        let n = 32u32;
+        let set = build_cascade_spectra(n, base, ratio, count, sea(14.0), 3);
+        let half = (n as f32) * 0.5;
+        for (c, field) in set.iter().enumerate() {
+            let patch = field.patch_size;
+            let k_scale = TAU / patch;
+            let k_lo = if c == 0 { 0.0 } else { TAU / patch };
+            let k_hi = if c as u32 == count - 1 {
+                f32::INFINITY
+            } else {
+                ratio * TAU / patch
+            };
+            let mut i = 0u32;
+            while i < n {
+                let kz = (i as f32 - half) * k_scale;
+                let mut j = 0u32;
+                while j < n {
+                    let kx = (j as f32 - half) * k_scale;
+                    let idx = (i * n + j) as usize;
+                    if field.h0[idx].norm_squared() > CALM {
+                        let k_mag = Vec2::new(kx, kz).length();
+                        assert!(
+                            k_mag >= k_lo && k_mag < k_hi,
+                            "cascade {c} carried an out-of-shell mode |k|={k_mag}"
+                        );
+                    }
+                    j += 1;
+                }
+                i += 1;
+            }
+        }
+    }
+
+    #[test]
+    fn cascade_set_carries_energy_and_is_deterministic() {
+        let a = build_cascade_spectra(32, 256.0, 2.0, 4, sea(12.0), 9);
+        let b = build_cascade_spectra(32, 256.0, 2.0, 4, sea(12.0), 9);
+        assert_eq!(a, b, "same request must rebuild identically");
+        let total: f32 = a.iter().map(OceanSpectrumField::total_energy).sum();
+        assert!(total > CALM, "a windy cascade set must carry energy");
+    }
+
+    #[test]
+    fn coarse_cascade_holds_the_longer_waves() {
+        // The coarsest cascade sweeps up the long swell, the finest the short
+        // chop, so the coarse patch must exceed the fine patch.
+        let set = build_cascade_spectra(48, 400.0, 2.0, 3, sea(15.0), 2);
+        assert!(
+            set[0].patch_size > set[2].patch_size,
+            "cascade 0 must tile a larger patch than the finest cascade"
+        );
+    }
+
+    #[test]
+    fn degenerate_cascade_requests_are_empty() {
+        assert!(build_cascade_spectra(0, 256.0, 2.0, 4, sea(12.0), 1).is_empty());
+        assert!(build_cascade_spectra(32, 0.0, 2.0, 4, sea(12.0), 1).is_empty());
+        assert!(build_cascade_spectra(32, 256.0, 2.0, 0, sea(12.0), 1).is_empty());
+        assert!(
+            build_cascade_spectra(32, 256.0, 1.0, 4, sea(12.0), 1).is_empty(),
+            "a non-shrinking ratio would restack the same patch"
         );
     }
 }
