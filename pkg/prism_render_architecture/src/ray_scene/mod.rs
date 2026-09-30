@@ -18,6 +18,13 @@
 //! - [`footprint`] — ray-cone [`RayFootprint`] and texture-`LOD` (mip) math.
 //! - [`bvh`] — software `BVH`: primitive bounds, binned-`SAH` build, and the
 //!   flattened [`LinearBvhNode`] layout the `GPU` builder mirrors.
+//! - [`bvh_wide`] — compressed *wide* (`BVH8`) acceleration structure: the
+//!   binary [`bvh::Bvh`] collapsed (Ylitie et al.) into nodes with up to
+//!   [`bvh_wide::WIDE_BRANCHING`] children whose bounds are *quantized* to a
+//!   per-node byte lattice (floored low / ceiled high corners), so a
+//!   [`bvh_wide::WideBvh`] fetches many boxes per cache line yet stays a
+//!   conservative superset and reproduces [`bvh::Bvh::closest_hit`]
+//!   bit-for-bit on rays with a unique nearest hit.
 //! - [`tlas`] — two-level acceleration: a top-level `BVH` over affine
 //!   [`tlas::Instance`]s of a shared `BLAS` pool, with object-space ray
 //!   transform and cross-instance nearest-hit pruning.
@@ -68,6 +75,7 @@
 pub mod acceleration;
 pub mod backend;
 pub mod bvh;
+pub mod bvh_wide;
 pub mod footprint;
 pub mod gpu_layout;
 pub mod motion;
