@@ -52,7 +52,8 @@ pub use dynamics::{
 };
 pub use effects::{
     ChorusNode, ChorusParams, DelayNode, EqBand, FlangerNode, FlangerParams, Oversample,
-    ParametricEqNode, PhaserNode, PhaserParams, WaveshaperNode,
+    ParametricEqNode, PhaserNode, PhaserParams, TremoloMode, TremoloNode, TremoloParams,
+    WaveshaperNode,
 };
 pub use gain::GainNode;
 pub use mix::SumNode;
