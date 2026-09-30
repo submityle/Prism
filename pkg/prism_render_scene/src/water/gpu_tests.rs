@@ -5542,6 +5542,51 @@ fn spectrum_field(n: u32) -> (Vec<[f32; 2]>, Vec<[f32; 2]>) {
     (h0, h0_neg)
 }
 
+/// A deterministic *Hermitian* spectrum for the packed-`FFT` parity test.
+///
+/// The two-for-one packing (`G = A_hat + i*B_hat`) only reconstructs both real
+/// fields when each field's spectrum is Hermitian (`X_hat(-k) = conj(X_hat(k))`),
+/// which for the `Tessendorf` advance reduces to `h0_neg(k) = h0(-k)` (see
+/// `water_spectrum_fft.wesl`). Production spectra satisfy this; the arbitrary
+/// [`spectrum_field`] does not. Here `h0` is filled on the interior and mirrored
+/// into `h0_neg` at the frequency-negated index `(N-m, N-n)`; the boundary lanes
+/// (`m == 0` or `n == 0`, whose negated frequency `+N/2` is unrepresentable) are
+/// zeroed so the grid is exactly Hermitian with no Nyquist defect.
+fn spectrum_field_hermitian(n: u32) -> (Vec<[f32; 2]>, Vec<[f32; 2]>) {
+    let count = (n * n) as usize;
+    let mut h0 = vec![[0.0_f32, 0.0]; count];
+    let mut m = 1u32;
+    while m < n {
+        let mut nn = 1u32;
+        while nn < n {
+            let idx = (m * n + nn) as usize;
+            let fm = m as f32;
+            let fn_ = nn as f32;
+            h0[idx] = [
+                0.03 * bevy_math::ops::sin(0.6 * fm + 0.2 * fn_ + 0.3),
+                0.03 * bevy_math::ops::cos(0.4 * fm - 0.5 * fn_ + 1.1),
+            ];
+            nn += 1;
+        }
+        m += 1;
+    }
+    let mut h0_neg = vec![[0.0_f32, 0.0]; count];
+    let mut m = 0u32;
+    while m < n {
+        let mut nn = 0u32;
+        while nn < n {
+            let idx = (m * n + nn) as usize;
+            let m2 = (n - m) % n;
+            let nn2 = (n - nn) % n;
+            let mirror = (m2 * n + nn2) as usize;
+            h0_neg[idx] = h0[mirror];
+            nn += 1;
+        }
+        m += 1;
+    }
+    (h0, h0_neg)
+}
+
 /// `CPU` golden twin of `water_spectrum_ifft`. Replays the direct-summation
 /// inverse transform texel-for-texel with the crate's `libm`-backed
 /// `bevy_math::ops` `sin`/`cos` (the same function the shader's native `sin`/`cos`
@@ -6312,6 +6357,481 @@ fn butterfly_ifft2_gpu_matches_cpu_golden() {
             gpu[i][1],
             golden[i][0],
             golden[i][1],
+        );
+        i += 1;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Packed spectral FFT pipeline parity: the O(N log N) `water_spectrum_evolve`
+// + butterfly `ifft2` + `water_spectrum_assemble` path must reproduce the
+// direct-summation `spectrum_ifft_golden` texel-for-texel.
+// ---------------------------------------------------------------------------
+
+/// Compiles `water_spectrum_fft.wesl` to `Wgsl` through the render-world cache.
+fn compile_spectrum_fft_wgsl() -> String {
+    let mut cache = ShaderCache::new((), keep_wgsl);
+    let id = AssetId::Uuid {
+        uuid: Uuid::from_u128(0x5052_4953_4d5f_5741_5445_5246_4654_0003),
+    };
+    cache.set_shader(
+        id,
+        Shader::from_wesl(
+            include_str!("../shaders/water_spectrum_fft.wesl"),
+            "embedded://prism_render_scene/shaders/water_spectrum_fft.wesl",
+        ),
+    );
+    let module = cache
+        .get(0, id, &[])
+        .unwrap_or_else(|error| panic!("water_spectrum_fft.wesl failed to compile: {error}"));
+    (*module).clone()
+}
+
+/// Dispatches `water_spectrum_evolve` and reads back the four packed complex
+/// grids (`G0..G3`) as row-major `[re, im]` arrays indexed `m*N + n`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one linear dispatch-and-readback over four packed output grids keeps the parity path auditable"
+)]
+fn dispatch_spectrum_evolve(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    wgsl: &str,
+    entry: &str,
+    h0: &[[f32; 2]],
+    h0_neg: &[[f32; 2]],
+    params: &GpuWaterSpectrumParams,
+) -> [Vec<[f32; 2]>; 4] {
+    let n = params.grid_size;
+    let cell_count = (n * n) as usize;
+    let byte_len = (cell_count * size_of::<[f32; 2]>()) as u64;
+
+    let module = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("water_spectrum_evolve_parity"),
+        source: ShaderSource::Wgsl(wgsl.into()),
+    });
+    let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("water_spectrum_evolve_parity"),
+        layout: None,
+        module: &module,
+        entry_point: Some(entry),
+        compilation_options: PipelineCompilationOptions::default(),
+        cache: None,
+    });
+
+    let h0_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("evolve_h0"),
+        contents: bytemuck::cast_slice(h0),
+        usage: BufferUsages::STORAGE,
+    });
+    let h0_neg_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("evolve_h0_neg"),
+        contents: bytemuck::cast_slice(h0_neg),
+        usage: BufferUsages::STORAGE,
+    });
+    let params_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("evolve_params"),
+        contents: bytemuck::bytes_of(params),
+        usage: BufferUsages::UNIFORM,
+    });
+    let make_g = |label: &str| {
+        device.create_buffer(&BufferDescriptor {
+            label: Some(label),
+            size: byte_len,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        })
+    };
+    let g0 = make_g("packed_g0");
+    let g1 = make_g("packed_g1");
+    let g2 = make_g("packed_g2");
+    let g3 = make_g("packed_g3");
+
+    let layout = pipeline.get_bind_group_layout(0);
+    let bind_group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("evolve_bind_group"),
+        layout: &layout,
+        entries: &[
+            BindGroupEntry {
+                binding: 0,
+                resource: h0_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 1,
+                resource: h0_neg_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 2,
+                resource: params_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 3,
+                resource: g0.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 4,
+                resource: g1.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 5,
+                resource: g2.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 6,
+                resource: g3.as_entire_binding(),
+            },
+        ],
+    });
+
+    let readbacks: [wgpu::Buffer; 4] = core::array::from_fn(|_| {
+        device.create_buffer(&BufferDescriptor {
+            label: Some("evolve_readback"),
+            size: byte_len,
+            usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    });
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("evolve_parity_encoder"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("evolve_parity_pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        let groups = n.div_ceil(8);
+        pass.dispatch_workgroups(groups, groups, 1);
+    }
+    for (src, dst) in [
+        (&g0, &readbacks[0]),
+        (&g1, &readbacks[1]),
+        (&g2, &readbacks[2]),
+        (&g3, &readbacks[3]),
+    ] {
+        encoder.copy_buffer_to_buffer(src, 0, dst, 0, byte_len);
+    }
+    queue.submit([encoder.finish()]);
+
+    for rb in &readbacks {
+        rb.slice(..).map_async(MapMode::Read, |_| {});
+    }
+    device
+        .poll(PollType::wait_indefinitely())
+        .expect("device poll should complete the submitted work");
+
+    core::array::from_fn(|i| {
+        let view = readbacks[i]
+            .slice(..)
+            .get_mapped_range()
+            .expect("mapped evolve readback should be available after poll");
+        let grid: Vec<[f32; 2]> = bytemuck::cast_slice::<u8, [f32; 2]>(&view).to_vec();
+        drop(view);
+        readbacks[i].unmap();
+        grid
+    })
+}
+
+/// Dispatches `water_spectrum_assemble` over the four inverse-transformed grids
+/// and reads back the displacement and normal textures as flat `rgba32float`
+/// lanes (texel order `n = y*N + x`).
+#[expect(
+    clippy::too_many_lines,
+    reason = "one linear dispatch-and-readback over four inputs and two storage textures keeps the parity path auditable"
+)]
+fn dispatch_spectrum_assemble(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    wgsl: &str,
+    entry: &str,
+    grids: &[Vec<[f32; 2]>; 4],
+    params: &GpuWaterSpectrumParams,
+) -> (Vec<f32>, Vec<f32>) {
+    let n = params.grid_size;
+
+    let module = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("water_spectrum_assemble_parity"),
+        source: ShaderSource::Wgsl(wgsl.into()),
+    });
+    let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("water_spectrum_assemble_parity"),
+        layout: None,
+        module: &module,
+        entry_point: Some(entry),
+        compilation_options: PipelineCompilationOptions::default(),
+        cache: None,
+    });
+
+    let params_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("assemble_params"),
+        contents: bytemuck::bytes_of(params),
+        usage: BufferUsages::UNIFORM,
+    });
+    let g_bufs: [wgpu::Buffer; 4] = core::array::from_fn(|i| {
+        device.create_buffer_init(&BufferInitDescriptor {
+            label: Some("assemble_g"),
+            contents: bytemuck::cast_slice(&grids[i]),
+            usage: BufferUsages::STORAGE,
+        })
+    });
+
+    let extent = Extent3d {
+        width: n,
+        height: n,
+        depth_or_array_layers: 1,
+    };
+    let make_tex = |label: &str| {
+        device.create_texture(&TextureDescriptor {
+            label: Some(label),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Rgba32Float,
+            usage: TextureUsages::STORAGE_BINDING | TextureUsages::COPY_SRC,
+            view_formats: &[],
+        })
+    };
+    let disp_tex = make_tex("assemble_displacement_out");
+    let norm_tex = make_tex("assemble_normal_out");
+    let disp_view = disp_tex.create_view(&TextureViewDescriptor::default());
+    let norm_view = norm_tex.create_view(&TextureViewDescriptor::default());
+
+    let layout = pipeline.get_bind_group_layout(0);
+    let bind_group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("assemble_bind_group"),
+        layout: &layout,
+        entries: &[
+            BindGroupEntry {
+                binding: 2,
+                resource: params_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 7,
+                resource: g_bufs[0].as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 8,
+                resource: g_bufs[1].as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 9,
+                resource: g_bufs[2].as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 10,
+                resource: g_bufs[3].as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 11,
+                resource: BindingResource::TextureView(&disp_view),
+            },
+            BindGroupEntry {
+                binding: 12,
+                resource: BindingResource::TextureView(&norm_view),
+            },
+        ],
+    });
+
+    let row_bytes = n * 16;
+    let readback_size = u64::from(row_bytes * n);
+    let disp_readback = device.create_buffer(&BufferDescriptor {
+        label: Some("assemble_disp_readback"),
+        size: readback_size,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let norm_readback = device.create_buffer(&BufferDescriptor {
+        label: Some("assemble_norm_readback"),
+        size: readback_size,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("assemble_parity_encoder"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("assemble_parity_pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        let groups = n.div_ceil(8);
+        pass.dispatch_workgroups(groups, groups, 1);
+    }
+    for (tex, readback) in [(&disp_tex, &disp_readback), (&norm_tex, &norm_readback)] {
+        encoder.copy_texture_to_buffer(
+            TexelCopyTextureInfo {
+                texture: tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: TextureAspect::All,
+            },
+            TexelCopyBufferInfo {
+                buffer: readback,
+                layout: TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row_bytes),
+                    rows_per_image: Some(n),
+                },
+            },
+            extent,
+        );
+    }
+    queue.submit([encoder.finish()]);
+
+    disp_readback.slice(..).map_async(MapMode::Read, |_| {});
+    norm_readback.slice(..).map_async(MapMode::Read, |_| {});
+    device
+        .poll(PollType::wait_indefinitely())
+        .expect("device poll should complete the submitted work");
+
+    let disp_out = {
+        let view = disp_readback
+            .slice(..)
+            .get_mapped_range()
+            .expect("mapped displacement readback should be available after poll");
+        let floats = bytemuck::cast_slice::<u8, f32>(&view).to_vec();
+        drop(view);
+        disp_readback.unmap();
+        floats
+    };
+    let norm_out = {
+        let view = norm_readback
+            .slice(..)
+            .get_mapped_range()
+            .expect("mapped normal readback should be available after poll");
+        let floats = bytemuck::cast_slice::<u8, f32>(&view).to_vec();
+        drop(view);
+        norm_readback.unmap();
+        floats
+    };
+
+    (disp_out, norm_out)
+}
+
+/// End-to-end parity for the packed spectral butterfly path: run
+/// `water_spectrum_evolve` on device, inverse-`FFT` the four packed grids with
+/// the `water_butterfly.wesl` ping-pong pipeline, run `water_spectrum_assemble`,
+/// and match both output textures against the direct-summation
+/// `spectrum_ifft_golden`. This proves the O(N log N) production path is
+/// numerically identical to the O(N⁴) reference it replaces.
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice must reach the test log on hosts without a wgpu adapter"
+)]
+fn spectrum_fft_pipeline_gpu_matches_direct_sum_golden() {
+    let Some((device, queue)) = try_solver_device() else {
+        eprintln!(
+            "spectrum_fft_pipeline_gpu_matches_direct_sum_golden: no wgpu adapter, skipping on-device parity"
+        );
+        return;
+    };
+
+    let params = GpuWaterSpectrumParams {
+        grid_size: 16,
+        patch_size: 50.0,
+        time: 1.3,
+        choppiness: 1.6,
+        foam_threshold: 1.05,
+        _pad: [0; 3],
+    };
+    let n = params.grid_size as usize;
+
+    let (h0, h0_neg) = spectrum_field_hermitian(params.grid_size);
+    let (gold_disp, gold_norm) = spectrum_ifft_golden(&h0, &h0_neg, &params);
+
+    // The golden must straddle the whitecap threshold so the parity check
+    // exercises both `foam == 0` and `foam == 1` branches of assemble.
+    let mut foam_off = false;
+    let mut foam_on = false;
+    let mut t = 3usize;
+    while t < gold_norm.len() {
+        if gold_norm[t] < 0.5 {
+            foam_off = true;
+        } else {
+            foam_on = true;
+        }
+        t += 4;
+    }
+    assert!(
+        foam_off && foam_on,
+        "spectrum golden must cover both whitecap branches (off={foam_off}, on={foam_on})"
+    );
+
+    // 1. Packed evolve → four complex grids at index `m*N + n`.
+    let fft_wgsl = compile_spectrum_fft_wgsl();
+    let evolve_entry = find_entry_point(&fft_wgsl, "water_spectrum_evolve");
+    let assemble_entry = find_entry_point(&fft_wgsl, "water_spectrum_assemble");
+    let packed = dispatch_spectrum_evolve(
+        &device,
+        &queue,
+        &fft_wgsl,
+        &evolve_entry,
+        &h0,
+        &h0_neg,
+        &params,
+    );
+
+    // 2. Separable inverse FFT2 of each packed grid (the production butterfly).
+    let butterfly_wgsl = compile_butterfly_wgsl();
+    let bitrev = find_entry_point(&butterfly_wgsl, "water_fft_bitrev");
+    let stage = find_entry_point(&butterfly_wgsl, "water_fft_stage");
+    let normalize = find_entry_point(&butterfly_wgsl, "water_fft_normalize");
+    let transformed: [Vec<[f32; 2]>; 4] = core::array::from_fn(|i| {
+        dispatch_butterfly_ifft2(
+            &device,
+            &queue,
+            &butterfly_wgsl,
+            &bitrev,
+            &stage,
+            &normalize,
+            &packed[i],
+            n,
+        )
+    });
+
+    // 3. Assemble → displacement/normal textures.
+    let (gpu_disp, gpu_norm) = dispatch_spectrum_assemble(
+        &device,
+        &queue,
+        &fft_wgsl,
+        &assemble_entry,
+        &transformed,
+        &params,
+    );
+
+    assert_eq!(
+        gpu_disp.len(),
+        gold_disp.len(),
+        "displacement texel count mismatch"
+    );
+    assert_eq!(
+        gpu_norm.len(),
+        gold_norm.len(),
+        "normal texel count mismatch"
+    );
+
+    let mut i = 0usize;
+    while i < gold_disp.len() {
+        let dd = (gpu_disp[i] - gold_disp[i]).abs();
+        assert!(
+            dd < PARITY_EPS,
+            "displacement lane {i}: fft={} direct={} |d|={dd}",
+            gpu_disp[i],
+            gold_disp[i],
+        );
+        let dn = (gpu_norm[i] - gold_norm[i]).abs();
+        assert!(
+            dn < PARITY_EPS,
+            "normal lane {i}: fft={} direct={} |d|={dn}",
+            gpu_norm[i],
+            gold_norm[i],
         );
         i += 1;
     }

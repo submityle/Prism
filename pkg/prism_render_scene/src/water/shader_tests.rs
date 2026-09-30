@@ -118,6 +118,19 @@ fn water_butterfly_wesl_compiles_standalone() {
     );
 }
 
+/// The packed spectral butterfly path (`water_spectrum_evolve` /
+/// `water_spectrum_assemble`), the O(N log N) production replacement for the
+/// direct-sum `water_spectrum_ifft`. Two disjoint-binding entry points in one
+/// module; naga type-checks the whole module in a single compile.
+#[test]
+fn water_spectrum_fft_wesl_compiles_standalone() {
+    compile_standalone(
+        include_str!("../shaders/water_spectrum_fft.wesl"),
+        "embedded://prism_render_scene/shaders/water_spectrum_fft.wesl",
+        0x5052_4953_4d5f_5741_5445_5246_4654_0001,
+    );
+}
+
 /// Registers `lighting.wesl` and `brdf.wesl` under their canonical module paths
 /// and compiles `water.wesl`, forcing the importer to resolve the
 /// `prism_render_scene::shaders::{brdf, lighting}::{...}` imports the
