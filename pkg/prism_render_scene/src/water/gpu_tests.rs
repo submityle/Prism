@@ -43,6 +43,19 @@ use super::abi::GpuWaterSweParams;
 /// contraction and reordering freedom.
 const PARITY_EPS: f32 = 1.0e-3;
 
+/// Accumulated parity bound for a multi-frame roll-out. Per-frame rounding and
+/// fused-multiply-add reordering compound across frames; on an `M2` the measured
+/// worst-case drift over 64 frames is ~5.5e-6, so this bound (matching the
+/// single-step [`PARITY_EPS`]) leaves ample headroom for driver variance while
+/// still catching a divergent scheme, which grows without bound rather than
+/// staying near rounding.
+const MULTI_FRAME_PARITY_EPS: f32 = 1.0e-3;
+
+/// Relative bound on total-volume drift for the conservative continuity flux
+/// with damping disabled, reflective walls, and no sources. Volume is invariant
+/// in exact arithmetic; only float32 summation rounding may nudge it.
+const MASS_CONSERVATION_REL_EPS: f32 = 1.0e-4;
+
 /// Streams the `Wgsl` source back out of the shader cache without a device.
 ///
 /// Mirrors the closure [`shader_tests`](super::shader_tests) uses so the `WESL`
@@ -418,6 +431,146 @@ fn swe_step_gpu_matches_cpu_golden() {
         );
         i += 1;
     }
+}
+
+/// A long `SWE` roll-out on device must track the `CPU` golden step-for-step and
+/// keep total water volume within rounding of its initial value.
+///
+/// The single-step golden only proves one dispatch is faithful. Production
+/// surfaces integrate for thousands of frames, so this test loops the on-device
+/// `water_swe_step` and the [`swe::step`] reference in lockstep for many frames,
+/// feeding each frame's output back as the next frame's input. Two invariants
+/// are asserted every frame:
+///
+/// 1. **Parity does not drift**: the on-device state stays within a snug bound
+///    of the `CPU` reference, and neither path ever produces a non-finite value
+///    (an explicit scheme that diverges would blow up to `NaN`/`inf` first).
+/// 2. **Mass is conserved**: with linear damping disabled, reflective (no-flux)
+///    walls, and no interaction sources, the conservative continuity flux must
+///    preserve `sum(h) * dx * dx` across the whole roll-out. This is the same
+///    physical golden `FLIP`/`SWE` pipelines (Houdini, UE5 Water) hold their
+///    solvers to across a long transition band.
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice and observed drift must reach the test log"
+)]
+fn swe_multi_frame_gpu_tracks_cpu_and_conserves_mass() {
+    let Some((device, queue)) = try_solver_device() else {
+        eprintln!(
+            "swe_multi_frame_gpu_tracks_cpu_and_conserves_mass: no wgpu adapter, skipping on-device parity"
+        );
+        return;
+    };
+
+    const NX: usize = 32;
+    const NZ: usize = 32;
+    const FRAMES: usize = 64;
+    let cfg = SweConfig {
+        nx: NX as u32,
+        nz: NZ as u32,
+        dx: 0.5,
+        gravity: 9.81,
+        // Damping disabled so the conservative flux is the only thing moving
+        // volume: any per-frame leak shows up directly in the mass invariant.
+        damping: 0.0,
+    };
+    let cfl_number = 0.5_f32;
+    let requested_dt = 0.05_f32;
+
+    // A non-trivial bump plus a shear flow gives the flux something to do; the
+    // interaction sources are zeroed so volume can only change through a solver
+    // bug, not through injection.
+    let (init_state, _) = build_initial_state(NX, NZ);
+    let zero_sources = vec![[0.0_f32; 4]; NX * NZ];
+
+    let wgsl = compile_surface_wgsl();
+    let entry = find_entry_point(&wgsl, "swe_step");
+
+    let volume0 = init_state.total_volume(cfg);
+    assert!(volume0 > 0.0, "seed volume must be positive");
+
+    let mut cpu_state = init_state.clone();
+    let mut gpu_state = init_state;
+
+    let mut max_parity_drift = 0.0_f32;
+    let mut max_volume_rel_drift = 0.0_f32;
+
+    let mut frame = 0;
+    while frame < FRAMES {
+        // The golden state is the timestep authority; the same effective dt and
+        // wave-speed feed the device so the two paths advance identically.
+        let max_wave_speed = swe::max_wave_speed(&cpu_state, cfg);
+        let cfl_dt = swe::cfl_timestep(max_wave_speed, cfg.dx, cfl_number);
+        let effective_dt = requested_dt.min(cfl_dt);
+
+        let cpu_next = swe::step(&cpu_state, cfg, effective_dt);
+
+        let params = GpuWaterSweParams {
+            nx: cfg.nx,
+            nz: cfg.nz,
+            dx: cfg.dx,
+            gravity: cfg.gravity,
+            damping: cfg.damping,
+            dt: requested_dt,
+            cfl_number,
+            max_wave_speed,
+        };
+        let gpu_next = dispatch_swe(
+            &device,
+            &queue,
+            &wgsl,
+            &entry,
+            cfg,
+            &gpu_state,
+            &zero_sources,
+            &params,
+        );
+
+        assert_eq!(gpu_next.h.len(), cpu_next.h.len(), "cell count mismatch");
+        let mut i = 0;
+        while i < cpu_next.h.len() {
+            for (label, g, c) in [
+                ("h", gpu_next.h[i], cpu_next.h[i]),
+                ("u", gpu_next.u[i], cpu_next.u[i]),
+                ("v", gpu_next.v[i], cpu_next.v[i]),
+            ] {
+                assert!(
+                    g.is_finite() && c.is_finite(),
+                    "frame {frame} cell {i} {label}: non-finite gpu={g} cpu={c}"
+                );
+                let drift = (g - c).abs();
+                if drift > max_parity_drift {
+                    max_parity_drift = drift;
+                }
+                assert!(
+                    drift < MULTI_FRAME_PARITY_EPS,
+                    "frame {frame} cell {i} {label}: gpu={g} cpu={c} |d|={drift}"
+                );
+            }
+            i += 1;
+        }
+
+        // Reflective walls + zero damping + no sources => volume is invariant.
+        let gpu_volume = gpu_next.total_volume(cfg);
+        let rel = ((gpu_volume - volume0) / volume0).abs();
+        if rel > max_volume_rel_drift {
+            max_volume_rel_drift = rel;
+        }
+        assert!(
+            rel < MASS_CONSERVATION_REL_EPS,
+            "frame {frame}: gpu volume drifted {volume0} -> {gpu_volume} (rel {rel})"
+        );
+
+        cpu_state = cpu_next;
+        gpu_state = gpu_next;
+        frame += 1;
+    }
+
+    eprintln!(
+        "swe_multi_frame_gpu_tracks_cpu_and_conserves_mass: {FRAMES} frames, \
+         max parity drift {max_parity_drift:e}, max volume rel drift {max_volume_rel_drift:e}"
+    );
 }
 
 // ===========================================================================
