@@ -56,6 +56,7 @@
 #![forbid(unsafe_code)]
 
 pub mod aerial;
+pub mod cloud_shadow_modulation;
 pub mod context;
 pub mod curl;
 pub mod fog;
@@ -74,6 +75,7 @@ pub mod trilinear;
 pub mod worley;
 
 pub use aerial::{AerialQuery, GpuAerialPerspective};
+pub use cloud_shadow_modulation::{CloudShadowModulationQuery, GpuCloudShadowModulation};
 pub use context::{block_on, GpuContext};
 pub use curl::{CurlQuery, GpuCurl};
 pub use fog::{FogQuery, GpuFogTransmittance};
