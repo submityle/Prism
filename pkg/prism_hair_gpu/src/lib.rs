@@ -76,6 +76,15 @@
 //!   self-shadow transmittance `T = product(1 - alpha)` a shading pass
 //!   decodes with a constant stride (see [`deep_opacity`]).
 //!
+//! * [`GpuHairForwardScatter`] evaluates
+//!   [`build_forward_scatter_map`](prism_render_architecture::hair::forward_scatter_layout::build_forward_scatter_map),
+//!   the additive sibling of the deep opacity packing — one thread per
+//!   light texel slices its host-sorted samples into the same fixed number
+//!   of equal-width depth layers but accumulates the running additive
+//!   crossing count `n = sum(alpha)` (monotone non-decreasing, uncapped)
+//!   that a dual-scattering shading pass decodes for the multiple-scattering
+//!   terms `a_f^n` and `n * beta_f^2` (see [`forward_scatter`]).
+//!
 //! * [`GpuHairVoxelDensity`] evaluates
 //!   [`accumulate_voxel_density`](prism_render_architecture::hair::deep_transmittance::accumulate_voxel_density),
 //!   the sort-free froxel sibling of the deep opacity packing — one thread per
@@ -131,6 +140,7 @@ pub mod bin_samples;
 pub mod collision;
 pub mod context;
 pub mod deep_opacity;
+pub mod forward_scatter;
 pub mod frames;
 pub mod guide_solver;
 pub mod interp;
@@ -146,6 +156,7 @@ pub use bin_samples::GpuHairBinSamples;
 pub use collision::{query_for, CollisionQuery, GpuColliderProjector};
 pub use context::{block_on, GpuContext};
 pub use deep_opacity::GpuHairDeepOpacity;
+pub use forward_scatter::GpuHairForwardScatter;
 pub use frames::{GpuStrandFrame, GpuStrandFrames};
 pub use guide_solver::GpuGuideSolver;
 pub use interp::GpuHairInterp;
