@@ -29,6 +29,15 @@
 //! [`TransmittanceSample`] so a light ray's strand samples build both the
 //! deep-opacity transmittance curve and this forward-scatter crossing curve
 //! from one input set.
+//!
+//! Alongside that layered curve this module also decodes the *voxel* slab:
+//! given the per-voxel density from
+//! [`crate::hair::deep_transmittance::accumulate_voxel_density`],
+//! [`voxel_forward_scatter`] reads the cumulative crossing count `n` at a
+//! voxel — the additive twin of that module's
+//! [`crate::hair::deep_transmittance::voxel_transmittance`] product — so the
+//! froxel self-shadow path carries both attenuation `T` and the
+//! dual-scattering count `n` from one froxel volume.
 
 use alloc::vec::Vec;
 
@@ -192,6 +201,40 @@ pub fn sample_forward_scatter(layers: &ForwardScatterLayers, depth: f32) -> f32 
         }
     }
     crossings[last]
+}
+
+/// Reads the coverage-weighted crossing count up to and including voxel `index`.
+///
+/// The additive counterpart of
+/// [`crate::hair::deep_transmittance::voxel_transmittance`]: where that
+/// composites the per-voxel densities into a transmittance *product*
+/// `T = product(1 - sigma_j)`, this sums them into the cumulative crossing count
+/// `n = sum(sigma_j)` over voxels `0..=index`. Both decode the *same*
+/// [`crate::hair::deep_transmittance::accumulate_voxel_density`] slab but carry
+/// independent information — the product discards how the coverage splits across
+/// strands while the sum preserves the raw count — so the voxel self-shadow path
+/// can hand the shading side both `T` (attenuation) and `n` (the `a_f^n`
+/// exponent) for dual-scattering from one froxel volume.
+///
+/// The count is monotonically non-decreasing in `index` and never negative: the
+/// per-sample opacity was already clamped to `0..=1` at accumulation, and each
+/// density is floored at `0` here so an out-of-contract negative slab cannot
+/// break monotonicity. A voxel may hold several strands, so its density — and
+/// the running sum — can exceed `1`, exactly like the layered
+/// [`total_crossings`]; the count is deliberately *not* capped. `index` past the
+/// last voxel is clamped to the last voxel (full slab); an empty density slab
+/// returns `0`. Never panics.
+#[must_use]
+pub fn voxel_forward_scatter(densities: &[f32], index: usize) -> f32 {
+    if densities.is_empty() {
+        return 0.0;
+    }
+    let end = index.min(densities.len() - 1);
+    let mut crossings = 0.0_f32;
+    for &sigma in &densities[..=end] {
+        crossings += sigma.max(0.0);
+    }
+    crossings
 }
 
 #[cfg(test)]
@@ -384,5 +427,86 @@ mod tests {
         // convention; only receivers strictly behind it see the full count.
         assert!(close(sample_forward_scatter(&layers, 4.0), 0.0));
         assert!(close(sample_forward_scatter(&layers, 100.0), 0.8));
+    }
+
+    #[test]
+    fn voxel_forward_scatter_is_prefix_sum_and_clamps_past_end() {
+        // A froxel density slab decodes to the running crossing count.
+        let densities = [0.5_f32, 0.25, 0.75];
+        assert!(close(voxel_forward_scatter(&densities, 0), 0.5));
+        assert!(close(voxel_forward_scatter(&densities, 1), 0.75));
+        assert!(close(voxel_forward_scatter(&densities, 2), 1.5));
+        // Index past the last voxel clamps to the full slab.
+        assert!(close(voxel_forward_scatter(&densities, 999), 1.5));
+        // Monotonically non-decreasing across the slab.
+        let mut prev = 0.0_f32;
+        for i in 0..densities.len() {
+            let n = voxel_forward_scatter(&densities, i);
+            assert!(n >= prev - EPS);
+            prev = n;
+        }
+    }
+
+    #[test]
+    fn voxel_full_slab_matches_total_crossings() {
+        use crate::hair::deep_transmittance::accumulate_voxel_density;
+
+        // All three samples fall inside the slab, so the full-slab voxel
+        // count must equal the order-independent per-ray total.
+        let samples = [
+            TransmittanceSample::new(1.0, 0.5),
+            TransmittanceSample::new(3.0, 0.5),
+            TransmittanceSample::new(9.0, 0.5),
+        ];
+        let densities = accumulate_voxel_density(&samples, 0.0, 10.0, 5);
+        let last = densities.len() - 1;
+        assert!(close(
+            voxel_forward_scatter(&densities, last),
+            total_crossings(&samples),
+        ));
+    }
+
+    #[test]
+    fn voxel_count_is_independent_of_transmittance_product() {
+        use crate::hair::deep_transmittance::{accumulate_voxel_density, voxel_transmittance};
+
+        // Two vs three half-coverage strands piled into the same voxel: the
+        // transmittance product saturates to 0 either way, but the crossing
+        // count keeps climbing — proving the sum carries information the
+        // product cannot express.
+        let two = accumulate_voxel_density(
+            &[
+                TransmittanceSample::new(1.0, 0.5),
+                TransmittanceSample::new(1.5, 0.5),
+            ],
+            0.0,
+            10.0,
+            5,
+        );
+        let three = accumulate_voxel_density(
+            &[
+                TransmittanceSample::new(1.0, 0.5),
+                TransmittanceSample::new(1.2, 0.5),
+                TransmittanceSample::new(1.5, 0.5),
+            ],
+            0.0,
+            10.0,
+            5,
+        );
+        // Same saturated transmittance (fully opaque front voxel) ...
+        assert!(close(voxel_transmittance(&two, 4), 0.0));
+        assert!(close(voxel_transmittance(&three, 4), 0.0));
+        // ... but the crossing count distinguishes the two stacks.
+        assert!(close(voxel_forward_scatter(&two, 4), 1.0));
+        assert!(close(voxel_forward_scatter(&three, 4), 1.5));
+    }
+
+    #[test]
+    fn voxel_empty_and_single_slab_never_panic() {
+        assert!(close(voxel_forward_scatter(&[], 0), 0.0));
+        assert!(close(voxel_forward_scatter(&[], 999), 0.0));
+        let one = [0.3_f32];
+        assert!(close(voxel_forward_scatter(&one, 0), 0.3));
+        assert!(close(voxel_forward_scatter(&one, 50), 0.3));
     }
 }
