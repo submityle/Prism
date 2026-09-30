@@ -25,6 +25,7 @@ mod face_shadow;
 mod film_grain;
 mod gamut_map;
 mod hair;
+mod hair_angel_ring;
 mod hair_chiang;
 mod hair_fiber;
 mod hair_kajiya;
@@ -121,6 +122,7 @@ pub use gamut_map::{
     GamutMapParams, GAMUT_MAP_LUMA_WEIGHTS,
 };
 pub use hair::evaluate_hair_direct;
+pub use hair_angel_ring::{accumulate_angel_rings, angel_ring_band, AngelRing, MAX_ANGEL_RINGS};
 pub use hair_chiang::{evaluate_hair_chiang_direct, HairChiangParams};
 pub use hair_fiber::{evaluate_hair_fiber_direct, HairFiberParams};
 pub use hair_kajiya::{evaluate_hair_kajiya_direct, HairKajiyaParams};
