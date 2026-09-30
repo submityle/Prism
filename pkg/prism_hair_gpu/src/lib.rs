@@ -148,6 +148,16 @@
 //!   perimeter/arc UVs of a closed box tube; the deterministic triangle
 //!   winding is rebuilt host-side (see [`mesh_shell`]).
 //!
+//! * [`GpuMeshShellTapered`] evaluates
+//!   [`build_shell_tapered`](prism_render_architecture::hair::mesh_shell::build_shell_tapered),
+//!   the tapered sibling of [`GpuMeshShell`]: instead of a uniform section it
+//!   narrows the square cross-section from root to tip exactly as the groom was
+//!   authored, taking each ring's half-extent from
+//!   [`StrandAttributes::radius_at`](prism_render_architecture::hair::groom_import::StrandAttributes::radius_at)
+//!   at that ring's normalized arc position; the connectivity is unchanged, so
+//!   the same deterministic winding is rebuilt host-side (see
+//!   [`mesh_shell_tapered`]).
+//!
 //! # Portability
 //!
 //! The projection uses only `sqrt`, `min`, `max`, `clamp`, `dot` and
@@ -182,6 +192,7 @@ pub mod frames;
 pub mod guide_solver;
 pub mod interp;
 pub mod mesh_shell;
+pub mod mesh_shell_tapered;
 pub mod raster;
 pub mod ribbon;
 pub mod sdf_collision;
@@ -202,6 +213,7 @@ pub use frames::{GpuStrandFrame, GpuStrandFrames};
 pub use guide_solver::GpuGuideSolver;
 pub use interp::GpuHairInterp;
 pub use mesh_shell::{GpuMeshShell, GpuShellMesh, ShellStrandInput};
+pub use mesh_shell_tapered::{GpuMeshShellTapered, TaperedShellStrandInput};
 pub use raster::{path_code, GpuHairRaster, RasterQuery};
 pub use ribbon::{GpuRibbon, GpuRibbonMesh, RibbonStrandInput};
 pub use sdf_collision::GpuSdfCollider;
