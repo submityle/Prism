@@ -65,6 +65,10 @@ pub(crate) struct ClothSolveInput<'a> {
     pub(crate) aero_drag: f32,
     /// In-plane (lift) aerodynamic coefficient.
     pub(crate) aero_lift: f32,
+    /// Cloth-side Coulomb friction coefficient for body collision (`mu`), sourced
+    /// from `FabricMaterial::friction`. Sanitised to `0..=1` (non-finite mapped
+    /// to `0`) during planning and written into `body_params.friction`.
+    pub(crate) friction: f32,
     /// Analytic body-collision proxies.
     pub(crate) colliders: &'a [GpuClothCollider],
     /// Painted backstop planes, one per constrained particle.
@@ -130,6 +134,20 @@ pub(crate) struct ClothSolvePlan {
     pub(crate) backstop_params: GpuClothBackstopParams,
     /// Initial skin-embed uniform.
     pub(crate) embed_params: GpuClothEmbedParams,
+}
+
+/// Clamps a body-collision friction coefficient to `0..=1`, mapping any
+/// non-finite input to `0`. Mirrors the architecture layer's private
+/// `sanitize_friction` so the GPU uniform carries the same coefficient the CPU
+/// golden `resolve_body_collisions_with_friction` derives, keeping the on-device
+/// parity honest.
+#[must_use]
+fn sanitize_body_friction(mu: f32) -> f32 {
+    if mu.is_finite() {
+        mu.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
 }
 
 /// Builds the complete device-free solve plan for one cloth piece.
@@ -235,7 +253,12 @@ pub(crate) fn build_solve_plan(input: &ClothSolveInput<'_>) -> ClothSolvePlan {
     let body_params = GpuClothBodyParams {
         particle_count,
         collider_count: input.colliders.len() as u32,
-        _pad: [0; 2],
+        // Sanitise `FabricMaterial::friction` to `0..=1` here (non-finite maps to
+        // `0`) so the uniform can never inject a `NaN`; the kernel re-clamps and
+        // the CPU golden `resolve_body_collisions_with_friction` sanitises the
+        // same way, keeping host and device on the identical coefficient.
+        friction: sanitize_body_friction(input.friction),
+        _pad: [0; 1],
     };
     let self_params = GpuClothSelfParams {
         particle_count,
@@ -316,6 +339,7 @@ mod tests {
             wind_turbulence: 0.0,
             aero_drag: 0.0,
             aero_lift: 0.0,
+            friction: 0.0,
             colliders: &[],
             backstops: &[],
             embed_bindings: &[],
@@ -446,6 +470,7 @@ mod tests {
             wind_turbulence: 0.0,
             aero_drag: 0.0,
             aero_lift: 0.0,
+            friction: 0.0,
             colliders: &[],
             backstops: &[],
             embed_bindings: &[],

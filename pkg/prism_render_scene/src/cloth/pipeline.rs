@@ -73,7 +73,7 @@ use prism_render_architecture::cloth::gpu::kernels::ClothKernel;
 pub(crate) struct ClothComputePipelines {
     /// group 0 for every `cloth_sim.wesl` entry point (six bindings).
     pub(crate) sim_layout: BindGroupLayout,
-    /// group 0 for the `cloth_body_collision` pass (three bindings).
+    /// group 0 for the `cloth_body_collision` pass (four bindings).
     pub(crate) body_layout: BindGroupLayout,
     /// group 0 for both self-collision passes (four bindings).
     pub(crate) self_layout: BindGroupLayout,
@@ -188,15 +188,18 @@ fn sim_layout_entries() -> BindGroupLayoutEntries<6> {
 }
 
 /// Builds the `cloth_body_collision` group-0 layout entries: the read-write
-/// particle positions, the read-only analytic collider list, and the body-pass
-/// uniform.
-fn body_layout_entries() -> BindGroupLayoutEntries<3> {
+/// particle positions, the read-only analytic collider list, the body-pass
+/// uniform, and the read-only frame-start positions the Coulomb friction pass
+/// measures each particle's tangential slide from (binding 3, matching the
+/// `body_prev_positions` binding in `cloth_collision.wesl`).
+fn body_layout_entries() -> BindGroupLayoutEntries<4> {
     BindGroupLayoutEntries::sequential(
         ShaderStages::COMPUTE,
         (
             storage_buffer_sized(false, None),
             storage_buffer_read_only_sized(false, None),
             uniform_buffer_sized(false, None),
+            storage_buffer_read_only_sized(false, None),
         ),
     )
 }

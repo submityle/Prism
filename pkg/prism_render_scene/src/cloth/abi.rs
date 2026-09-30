@@ -186,8 +186,13 @@ pub(crate) struct GpuClothBodyParams {
     pub particle_count: u32,
     /// Number of colliders every free particle is projected against, in order.
     pub collider_count: u32,
+    /// Cloth-side Coulomb friction coefficient (`mu`), clamped to `0..=1` on the
+    /// host before upload and re-clamped in the kernel. Sourced from
+    /// `FabricMaterial::friction`; a garment that leaves it `0` gets the exact
+    /// frictionless body-collision path.
+    pub friction: f32,
     /// Trailing pad to the 16-byte-rounded uniform stride; never read.
-    pub _pad: [u32; 2],
+    pub _pad: [u32; 1],
 }
 
 /// Self-collision dispatch uniform. Byte-compatible with `ClothSelfParams` in
@@ -410,6 +415,25 @@ mod tests {
     #[test]
     fn body_params_is_uniform_stride() {
         assert_eq!(size_of::<GpuClothBodyParams>(), 16);
+    }
+
+    /// The friction word sits between `collider_count` and the trailing pad, so
+    /// a populated coefficient survives a byte round-trip and `Default` leaves
+    /// it frictionless.
+    #[test]
+    fn body_params_carries_friction() {
+        assert_eq!(GpuClothBodyParams::default().friction, 0.0);
+        let params = GpuClothBodyParams {
+            particle_count: 7,
+            collider_count: 3,
+            friction: 0.42,
+            _pad: [0],
+        };
+        let bytes = bytemuck::bytes_of(&params);
+        let round: GpuClothBodyParams = *bytemuck::from_bytes(bytes);
+        assert_eq!(round, params);
+        // The friction f32 occupies the third 4-byte word (offset 8).
+        assert_eq!(f32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]), 0.42);
     }
 
     /// The self-collision uniform is already one full 16-byte row.

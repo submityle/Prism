@@ -267,11 +267,17 @@ fn cloth_damp_tangential_slip(
 }
 
 /// Body-collision stage: one invocation per particle projects a free particle
-/// out of every collider in order, then damps its tangential slip against the
-/// contact with Coulomb friction. Mirrors the CPU
-/// `resolve_body_collisions_with_friction` (pinned particles are skipped; an
-/// empty collider set is a no-op; `friction` is clamped to `0..=1` and `0` is
-/// exactly frictionless).
+/// out of every collider in order, damping its tangential slip against each
+/// contact with Coulomb friction as it goes. Bit-parity mirror of the CPU
+/// `resolve_body_collisions_with_friction`: friction is applied per collider
+/// (the projected position after collider `i` feeds collider `i + 1`), and the
+/// tangential slide is always measured against the frame-start `prev` position,
+/// not the running position, so the multi-collider result matches the CPU
+/// golden exactly rather than only for a single contact. Pinned particles are
+/// skipped, an empty collider set is a no-op, and `friction` is clamped to
+/// `0..=1` with `0` exactly frictionless (`cloth_damp_tangential_slip` returns
+/// the raw projection unchanged, so the frictionless path is bit-identical to a
+/// plain sequential projection).
 @compute @workgroup_size(64)
 fn cloth_body_collision(@builtin(global_invocation_id) gid: vec3<u32>) {
     let p = gid.x;
@@ -283,16 +289,18 @@ fn cloth_body_collision(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let mu = clamp(body_params.friction, 0.0, 1.0);
-    let before = body_positions[p].xyz;
-    var pos = before;
-    for (var i = 0u; i < body_params.collider_count; i = i + 1u) {
-        pos = cloth_project_collider(colliders[i], pos);
-    }
-    // Net correction from the projection: length = penetration depth removed,
-    // direction = contact normal. Damp the frame's tangential slip against it.
-    let correction = pos - before;
     let prev = body_prev_positions[p].xyz;
-    pos = cloth_damp_tangential_slip(prev, pos, correction, mu);
+    var pos = body_positions[p].xyz;
+    for (var i = 0u; i < body_params.collider_count; i = i + 1u) {
+        let before = pos;
+        let projected = cloth_project_collider(colliders[i], before);
+        // Per-collider correction: length = this collider's push-out depth,
+        // direction = its outward contact normal. Damp the frame's tangential
+        // slip (measured from the frame-start `prev`) against each contact in
+        // turn, matching the CPU golden's per-collider friction application.
+        let correction = projected - before;
+        pos = cloth_damp_tangential_slip(prev, projected, correction, mu);
+    }
     body_positions[p] = vec4<f32>(pos, body_positions[p].w);
 }
 

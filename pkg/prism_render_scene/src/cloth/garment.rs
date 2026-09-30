@@ -52,6 +52,11 @@ pub(crate) struct ClothGarment {
     pub(crate) aero_drag: f32,
     /// In-plane (lift) aerodynamic coefficient.
     pub(crate) aero_lift: f32,
+    /// Cloth-side Coulomb friction coefficient for body collision, sourced from
+    /// `FabricMaterial::friction` and clamped to `0..=1` during planning. `0`
+    /// (the default) keeps the frictionless projection; higher values grip the
+    /// garment against the collider proxies instead of letting it slide.
+    pub(crate) friction: f32,
     /// Analytic body-collision proxies.
     pub(crate) colliders: Vec<GpuClothCollider>,
     /// Painted backstop planes, one per constrained particle.
@@ -95,6 +100,7 @@ impl ClothGarment {
             wind_turbulence: self.wind_turbulence,
             aero_drag: self.aero_drag,
             aero_lift: self.aero_lift,
+            friction: self.friction,
             colliders: &self.colliders,
             backstops: &self.backstops,
             embed_bindings: &self.embed_bindings,

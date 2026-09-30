@@ -331,10 +331,24 @@ impl ClothKernel {
             ),
             ClothKernel::StrainLimit
             | ClothKernel::VelocityUpdate
-            | ClothKernel::BodyCollision
             | ClothKernel::Backstop => (
                 BindGroupLayout {
                     storage_buffers: 2,
+                    uniform_buffers: 1,
+                    storage_textures: 0,
+                    sampled_textures: 0,
+                },
+                WorkgroupSize { x: 64, y: 1, z: 1 },
+                DispatchDomain::Particle,
+            ),
+            ClothKernel::BodyCollision => (
+                // Read-write particle positions, the read-only analytic collider
+                // list, and the read-only frame-start positions the Coulomb
+                // friction pass measures each particle's tangential slide from,
+                // plus the body-pass uniform (particle/collider counts + the
+                // friction coefficient).
+                BindGroupLayout {
+                    storage_buffers: 3,
                     uniform_buffers: 1,
                     storage_textures: 0,
                     sampled_textures: 0,

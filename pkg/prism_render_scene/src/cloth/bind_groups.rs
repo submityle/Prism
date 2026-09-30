@@ -268,7 +268,8 @@ impl ClothPieceGpuBuffers {
 pub(crate) struct ClothPieceBindGroups {
     /// group 0 for all six `cloth_sim.wesl` kernels.
     pub(crate) sim: BindGroup,
-    /// group 0 for the `cloth_body_collision` pass.
+    /// group 0 for the `cloth_body_collision` pass (positions, colliders,
+    /// uniform, and the read-only frame-start positions for friction).
     pub(crate) body: BindGroup,
     /// group 0 for both self-collision passes (hash build + resolve).
     pub(crate) self_collision: BindGroup,
@@ -314,6 +315,12 @@ impl ClothPieceBindGroups {
                 buffers.positions.as_entire_binding(),
                 buffers.colliders.as_entire_binding(),
                 buffers.body_params.as_entire_binding(),
+                // Frame-start positions: the Coulomb friction pass reads these
+                // as `body_prev_positions` (binding 3) to measure each particle's
+                // tangential slide. The shared `prev_positions` pool already
+                // holds the pre-integration snapshot, so the body pass reuses it
+                // read-only rather than allocating a second copy.
+                buffers.prev_positions.as_entire_binding(),
             )),
         );
         let self_collision = device.create_bind_group(
