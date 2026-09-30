@@ -57,6 +57,7 @@
 
 pub mod active_pixel;
 pub mod adaptive_step;
+pub mod advect_semi_lagrangian;
 pub mod aerial;
 pub mod analytic_single_scatter;
 pub mod analytic_transmittance;
@@ -122,6 +123,7 @@ pub mod worley;
 
 pub use active_pixel::{ActivePixelQuery, GpuActivePixel};
 pub use adaptive_step::{AdaptiveStepQuery, GpuAdaptiveStep};
+pub use advect_semi_lagrangian::{GpuAdvectSemiLagrangian, WeatherAdvectSample};
 pub use aerial::{AerialQuery, GpuAerialPerspective};
 pub use analytic_single_scatter::{AnalyticSingleScatterQuery, GpuAnalyticSingleScatter};
 pub use analytic_transmittance::{AnalyticTransmittanceQuery, GpuAnalyticTransmittance};
