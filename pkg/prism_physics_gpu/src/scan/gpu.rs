@@ -61,7 +61,10 @@ struct Params {
 /// Ownership is returned to the caller so every buffer and bind group outlives
 /// the submitted encoder. `buffers[0]` is scanned in place and holds the final
 /// exclusive scan on completion; the last entry is the length-one grand total.
-struct ScanLevels {
+/// It is `pub(crate)` so sibling primitives (for example the radix sort) can
+/// scan an on-device histogram in place and read the offsets back without a
+/// host round-trip.
+pub(crate) struct ScanLevels {
     /// Per-level device buffers, coarsest last; `buffers[0]` is the input level.
     buffers: Vec<Buffer>,
     /// Per-dispatch uniform parameter buffers, kept alive for submission.
@@ -76,6 +79,16 @@ struct ScanLevels {
         reason = "kept alive so the recorded dispatches keep valid bindings until submit"
     )]
     binds: Vec<BindGroup>,
+}
+
+impl ScanLevels {
+    /// The buffer holding the exclusive scan of the input once the recorded
+    /// encoder has been submitted (the in-place scanned input level).
+    #[must_use]
+    pub(crate) fn result(&self) -> &Buffer {
+        &self.buffers[0]
+    }
+
 }
 
 /// A compiled, reusable `GPU` scan and compaction pipeline set.
@@ -321,7 +334,7 @@ impl GpuScan {
     /// Returns the level buffers and per-dispatch bindings so they outlive the
     /// submitted encoder; on completion `buffers[0]` holds the exclusive scan
     /// and the last buffer holds the length-one grand total.
-    fn record_scan(
+    pub(crate) fn record_scan(
         &self,
         device: &Device,
         encoder: &mut CommandEncoder,
