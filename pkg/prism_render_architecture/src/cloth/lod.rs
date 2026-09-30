@@ -78,6 +78,23 @@ pub fn resolve_cloth_lod(
     thresholds: ClothLodThresholds,
 ) -> ClothLodDecision {
     let tier = select_cloth_lod_tier(coverage, thresholds).coarser_of(piece.native_form);
+    cloth_lod_budget(piece, tier)
+}
+
+/// Resolves the sim-vertex and constraint budget a cloth piece keeps at an
+/// already-selected tier.
+///
+/// Full simulation keeps the authored counts; reduced simulation decimates to a
+/// quarter of the sim vertices and a quarter of the constraints (never below
+/// one, so a simulated tier always has something to solve); the skinned proxy
+/// keeps no sim geometry. This is the single authoritative decimation rule: both
+/// the stateless [`resolve_cloth_lod`] gate and the hysteretic scene-side gate
+/// build their decision through it, so a tier chosen by either path charges an
+/// identical budget. The tier is taken as already resolved (and, where relevant,
+/// already clamped to a piece's native form), so this function performs no
+/// classification of its own.
+#[must_use]
+pub fn cloth_lod_budget(piece: ClothPiece, tier: ClothLodTier) -> ClothLodDecision {
     let (sim_vertices, constraints) = match tier {
         ClothLodTier::FullSim => (piece.sim_vertex_count, piece.constraint_count),
         ClothLodTier::ReducedSim => (
@@ -91,6 +108,72 @@ pub fn resolve_cloth_lod(
         tier,
         sim_vertices,
         constraints,
+    }
+}
+
+/// Classifies a screen coverage into a cloth LOD tier *with hysteresis*, so a
+/// garment hovering on a threshold does not oscillate ("pop") between tiers
+/// frame to frame.
+///
+/// `hysteresis` is a symmetric coverage dead-band applied around each authored
+/// boundary: starting from the `current` tier, a garment must fall a full
+/// `hysteresis` *below* a boundary to drop to the coarser tier, and rise a full
+/// `hysteresis` *above* it to climb back to the finer tier. Between those two
+/// edges the `current` tier is held, which is exactly the continuous, pop-free
+/// LOD transition the cloth design doc calls for (mirroring the bias/hysteresis
+/// band UE's Chaos cloth LOD uses).
+///
+/// A `hysteresis` of `0.0` collapses both edges onto the authored boundary and
+/// reproduces [`select_cloth_lod_tier`] exactly for *every* `current` tier, so a
+/// garment that never opts into hysteresis is bit-identical to the stateless
+/// gate. The band is clamped non-negative, and every boundary is retested
+/// against the new coverage, so a garment that jumps several tiers in one frame
+/// (a hard camera cut) still resolves directly to the correct distant tier
+/// rather than stepping one tier per frame.
+#[must_use]
+pub fn select_cloth_lod_tier_hysteretic(
+    coverage: f32,
+    thresholds: ClothLodThresholds,
+    hysteresis: f32,
+    current: ClothLodTier,
+) -> ClothLodTier {
+    let band = hysteresis.max(0.0);
+    // "down" edges must be crossed (strictly below) to coarsen; "up" edges must
+    // be reached (`>=`) to refine. Separating them by `2 * band` is the dead-band
+    // that suppresses boundary popping. With `band == 0` both edges coincide with
+    // the authored boundary and this reduces to `select_cloth_lod_tier`.
+    let reduced_down = thresholds.reduced_sim_below - band;
+    let reduced_up = thresholds.reduced_sim_below + band;
+    let skinned_down = thresholds.skinned_below - band;
+    let skinned_up = thresholds.skinned_below + band;
+    match current {
+        ClothLodTier::FullSim => {
+            if coverage < skinned_down {
+                ClothLodTier::SkinnedProxy
+            } else if coverage < reduced_down {
+                ClothLodTier::ReducedSim
+            } else {
+                ClothLodTier::FullSim
+            }
+        }
+        ClothLodTier::ReducedSim => {
+            if coverage >= reduced_up {
+                ClothLodTier::FullSim
+            } else if coverage < skinned_down {
+                ClothLodTier::SkinnedProxy
+            } else {
+                ClothLodTier::ReducedSim
+            }
+        }
+        ClothLodTier::SkinnedProxy => {
+            if coverage >= reduced_up {
+                ClothLodTier::FullSim
+            } else if coverage >= skinned_up {
+                ClothLodTier::ReducedSim
+            } else {
+                ClothLodTier::SkinnedProxy
+            }
+        }
     }
 }
 
@@ -372,6 +455,111 @@ mod tests {
         assert_eq!(close.tier, ClothLodTier::ReducedSim);
         let far = resolve_cloth_lod(reduced_authored, 0.01, THRESHOLDS);
         assert_eq!(far.tier, ClothLodTier::SkinnedProxy);
+    }
+
+    #[test]
+    fn hysteresis_zero_matches_stateless_for_every_current_tier() {
+        // With no dead-band, the hysteretic gate must be bit-identical to the
+        // stateless classifier regardless of which tier the garment currently
+        // holds: the default (opt-out) behavior is unchanged.
+        for tier in CLOTH_LOD_ORDER {
+            for step in 0..=100 {
+                let coverage = step as f32 / 100.0;
+                assert_eq!(
+                    select_cloth_lod_tier_hysteretic(coverage, THRESHOLDS, 0.0, tier),
+                    select_cloth_lod_tier(coverage, THRESHOLDS),
+                    "coverage {coverage} from {tier:?} diverged from the stateless gate",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn hysteresis_holds_the_current_tier_across_the_boundary_band() {
+        // A garment sitting just above the reduced boundary does not drop until
+        // coverage falls a full band below it, and once reduced it does not climb
+        // back until coverage rises a full band above it. The band around 0.5
+        // with hysteresis 0.05 is [0.45, 0.55).
+        let band = 0.05;
+        // Coming from full sim, coverage in [0.45, 0.5) holds full sim even though
+        // the stateless gate would already have dropped to reduced.
+        assert_eq!(
+            select_cloth_lod_tier_hysteretic(0.47, THRESHOLDS, band, ClothLodTier::FullSim),
+            ClothLodTier::FullSim,
+        );
+        assert_eq!(
+            select_cloth_lod_tier(0.47, THRESHOLDS),
+            ClothLodTier::ReducedSim,
+        );
+        // Falling below 0.45 finally drops to reduced.
+        assert_eq!(
+            select_cloth_lod_tier_hysteretic(0.44, THRESHOLDS, band, ClothLodTier::FullSim),
+            ClothLodTier::ReducedSim,
+        );
+        // Coming from reduced, coverage in (0.5, 0.55) holds reduced even though
+        // the stateless gate would already have climbed to full sim.
+        assert_eq!(
+            select_cloth_lod_tier_hysteretic(0.53, THRESHOLDS, band, ClothLodTier::ReducedSim),
+            ClothLodTier::ReducedSim,
+        );
+        assert_eq!(select_cloth_lod_tier(0.53, THRESHOLDS), ClothLodTier::FullSim);
+        // Rising above 0.55 finally climbs back to full sim.
+        assert_eq!(
+            select_cloth_lod_tier_hysteretic(0.56, THRESHOLDS, band, ClothLodTier::ReducedSim),
+            ClothLodTier::FullSim,
+        );
+    }
+
+    #[test]
+    fn hysteresis_suppresses_popping_across_a_dithering_sweep() {
+        // Coverage dithering by +/- one band step around the reduced boundary must
+        // not produce a single tier flip once the dead-band is entered: the whole
+        // point of hysteresis. Sweep coverage back and forth inside the band and
+        // assert the tier never changes.
+        let band = 0.08;
+        let mut tier = ClothLodTier::FullSim;
+        // Seed just inside the upper edge so we start held at full sim.
+        tier = select_cloth_lod_tier_hysteretic(0.5 + band - 1.0e-3, THRESHOLDS, band, tier);
+        assert_eq!(tier, ClothLodTier::FullSim);
+        // Dither strictly inside (down_edge, up_edge) = (0.42, 0.58): no flips.
+        for &coverage in &[0.57, 0.43, 0.55, 0.45, 0.5, 0.44, 0.56] {
+            let next = select_cloth_lod_tier_hysteretic(coverage, THRESHOLDS, band, tier);
+            assert_eq!(next, ClothLodTier::FullSim, "coverage {coverage} popped the tier");
+            tier = next;
+        }
+    }
+
+    #[test]
+    fn hysteresis_still_allows_a_multi_tier_jump_on_a_hard_cut() {
+        // A hard camera cut that drops coverage from full-screen to almost nothing
+        // must collapse straight to the skinned proxy in one step, not walk down
+        // one tier per frame.
+        assert_eq!(
+            select_cloth_lod_tier_hysteretic(0.001, THRESHOLDS, 0.05, ClothLodTier::FullSim),
+            ClothLodTier::SkinnedProxy,
+        );
+        // ...and the reverse: from a distant proxy straight back to full sim when
+        // the garment snaps to fill the screen.
+        assert_eq!(
+            select_cloth_lod_tier_hysteretic(0.99, THRESHOLDS, 0.05, ClothLodTier::SkinnedProxy),
+            ClothLodTier::FullSim,
+        );
+    }
+
+    #[test]
+    fn cloth_lod_budget_matches_resolve_for_the_same_tier() {
+        // The extracted budget helper must agree with the stateless resolver
+        // whenever they land on the same tier, so routing a hysteretic tier
+        // through the budget helper charges an identical cost.
+        for (coverage, tier) in [
+            (0.9, ClothLodTier::FullSim),
+            (0.3, ClothLodTier::ReducedSim),
+            (0.01, ClothLodTier::SkinnedProxy),
+        ] {
+            let resolved = resolve_cloth_lod(piece(3), coverage, THRESHOLDS);
+            assert_eq!(resolved.tier, tier);
+            assert_eq!(cloth_lod_budget(piece(3), tier), resolved);
+        }
     }
 
     #[test]
