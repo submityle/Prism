@@ -5,7 +5,8 @@
 > **空间与内容一等公民**：几何驱动空间化与 Event 驱动内容模型同为一等公民；程序化合成（Patch）、调制（Modulation）与母带合规（LUFS/True-Peak/HDR）三者贯通，可达顶级次世代 AAA 质量。
 > 本文档为设计规格与落地实现的权威规范；采用纯经典 DSP 路线，不含任何 AI/ML 内容，不含任何 UE/Unity/Godot/Wwise/FMOD 源码或衍生代码。
 
-- 版本: v0.12（**本版新增**：§47 物理耦合程序化音频（接触/模态/颗粒合成 · 直接联动本仓库 `prism_physics` 与 §31 GPU 场景同一几何真相）——借鉴 Wwise Impacter 与经典模态合成/物理建模，把「碰撞→查表播 wav」升级为「冲量→采样精确激励模态/颗粒合成」，滚动/摩擦/滑动为随相对速度演化的连续合成；§48 输出渲染链与母带交付档（ITU-R BS.775 下混矩阵、低频管理 LFE 交叉、Home Theater/TV/Night/耳机 动态范围交付档、平台响度目标与对白锚定响度）——补齐「内部规范格式→具体收听设备」最后一公里与主机认证硬指标；§2.1 追踪表补「主机认证响度 / 杜比输出模式 / BS.775 下混」一行；§41 扩展点 +6（`ContactEventSource`/`ModalSynth`/`GranularEngine`/`DownmixMatrix`/`OutputProfile`/`BassManager`）；§42 开放问题把 Impacter 项落为 §47 并新增输出档默认值决策；术语表 +14 并顺延为 §49；均恪守纯经典 DSP、无任何 AI/ML、无任何引擎源码或行生代码）
+- 版本: v0.13（**本版新增**：据实校准设计与已落地代码——**M3 设备层 `prism_audio_device` 已实现并通过验证**：cpal 原生输出后端（默认特性门控、`--no-default-features` 可离线构建、采样率不匹配即报错不静默重采样、F32/F64/I16/U16/I32/I8/U8 全格式回调分派、回调零分配/零锁）、`BlockRenderer` 固定块→可变交错缓冲拉取适配器（设备与离线共用同一渲染路径、逐样本一致）、`render_to_wav` 确定性离线 32-bit float WAV、无锁环形捕获（麦克风/总线回读、整帧溢出计数）；11 单测全绿、clippy 零告警、双特性配置构建通过、已 commit。据此刷新 §22 设备后端、§39 crate 表、§40 M3 路线图状态，使方案与仓库实现保持一致；恪守纯经典 DSP、无任何 AI/ML、无任何引擎源码或衍生代码）
+- 版本历史: v0.12（§47 物理耦合程序化音频（接触/模态/颗粒合成 · 直接联动本仓库 `prism_physics` 与 §31 GPU 场景同一几何真相）——借鉴 Wwise Impacter 与经典模态合成/物理建模，把「碰撞→查表播 wav」升级为「冲量→采样精确激励模态/颗粒合成」，滚动/摩擦/滑动为随相对速度演化的连续合成；§48 输出渲染链与母带交付档（ITU-R BS.775 下混矩阵、低频管理 LFE 交叉、Home Theater/TV/Night/耳机 动态范围交付档、平台响度目标与对白锚定响度）——补齐「内部规范格式→具体收听设备」最后一公里与主机认证硬指标；§2.1 追踪表补「主机认证响度 / 杜比输出模式 / BS.775 下混」一行；§41 扩展点 +6（`ContactEventSource`/`ModalSynth`/`GranularEngine`/`DownmixMatrix`/`OutputProfile`/`BassManager`）；§42 开放问题把 Impacter 项落为 §47 并新增输出档默认值决策；术语表 +14 并顺延为 §49；均恪守纯经典 DSP、无任何 AI/ML、无任何引擎源码或行生代码）
 - 版本: v0.11（**本版新增**：§46 次世代 DSP 与工程内核深化（借鉴超越）——零延迟分区卷积（UPOLS 非均匀分区）、planar SIMD 内核抽象、反规格化数保护（FTZ/DAZ + denormal-safe DSP）、Ambisonic 声场旋转与双频段解码（max-rE / in-phase + 虚拟扬声器双耳）、近场 HRTF 与视差补偿、频变空气吸收（ISO 9613-1 式）、反馈安全图（单样本延迟破代数环）、声明式自动混音与类别响度治理（CRIWARE REACT / Category 式）；§2 逐引擎深读补「日系 / 底层中间件参照（CRIWARE ADX2 / RAD Miles）」；§2.1 追踪表补 CRIWARE ADX2 与 Wwise 2024 Reflect·卷积·Auto-Ducking 两行；术语表 +12 并顺延为 §47；均恪守纯经典 DSP、无任何 AI/ML、无任何引擎源码或衍生代码）
 - 版本: v0.10（**本版新增**：§45 实时通信音频（位置语音/AEC 回声消除/经典降噪 NS/AGC/VAD/自适应抖动缓冲/丢包隐藏 PLC，**全经典 DSP、无任何 AI/ML**）——把实时语音纳入统一渲染图作为一等声源，复用 §13 母带/§14 遮挡/§15 距离/§16 空间化/§31 GPU 声学/§32 LOD；§2.1 追踪表补 WebRTC 经典 DSP 与 Wwise Communication·平台语音两行；§41 扩展点 +3（`VoiceCommPipeline`/`EchoCanceller`/`VoiceTransport`）；§42 开放问题补通信抖动缓冲档位与「是否放开纯经典约束纳入神经音频」决策项；术语表 +9，术语表顺延为 §46）
 - 版本历史（v0.9 及更早，**当版新增**：§43 波动声学与混合精算传播（Project Acoustics/Triton/ARD 式离线波动场 + 几何/GPU 射线混合，作为可插拔 `PropagationBackend` 的波动档）、§44 编解码/对象音频/个性化空间输出（Opus/Vorbis/ADPCM 编解码矩阵、杜比 Atmos/MPEG-H 床+对象、SOFA/AES69 测量 HRTF 个性化选型——**均恪守本文档纯经典 DSP 路线、无任何 AI/ML**）；§2.1 追踪表补齐 Project Acoustics/索尼360RA·苹果空间音频/杜比Atmos·MPEG-H/Opus 四行采纳映射，§41 扩展点与 §42 开放问题、术语表相应扩充。前序 v0.8：**M1 全族已完成**：effects/dynamics/reverb 三族节点全部落地，103 单测 + 4 doctest 全绿、clippy 零告警、no_std 双构建通过，已 commit；现进入 **M2 声源与调度**（源节点/采样精确调度器/命名时钟/语音池）。本版据实校准 §3/§9/§39/§40 状态，并新增 §2.1「较新版本特性追踪（2023–2025）」把各引擎最新一代能力（Steam Audio UTD 衍射与探针烘焙、Wwise Impacter/Strata、UE5.4/5.5 MetaSound Pages、Unity 6 DOTS Audio）纳入采纳映射，深化 §8 调度器与 §10 声源的 M2 落地细节。v0.7 前序：基础层已落地编码：`pkg/prism_audio_core`，M1 效果族已落地首个节点 `ParametricEqNode`（级联复用 `Biquad`，35 测试绿/clippy 零告警/no_std 双构建通过）；本版聚焦「逐引擎深读」精修方案：扩展 §2 为业界参考+采纳映射+逐引擎深读（UE5/Unity/Godot 借鉴·覆盖·超越三段式），并补齐各引擎较新特性——UE5 MetaSound Builder API 运行时构图（§11）、Audio Gameplay Volumes（§17）、Audio Insights 检视（§26）；Godot AudioStreamInteractive 片段式交互流与过渡类型（§19）、AudioStreamPolyphonic 多voice复用（§25）、延迟补偿播放头查询（§8）；Unity Audio Random Container 原生随机容器（§18）、Timeline 音频轨（§19）；相应增补 §41 扩展点 `PatchBuilder` 与 §42 开放问题。v0.6 前序：新增内容生产与跨模态层：对白与本地化（程序化对白/语言 Bank/字幕同步/viseme 口型）、触感与跨模态输出（音频同源触感/触感总线/DualSense·双马达后端）、程序化环境音景（Soundscape 调色板与散布）、实时授权与远程工具 API（WAAPI 式远程遥测+白名单写命令/live tuning/授权热重载），并为 §16 增补头部追踪双耳、§28 增补属性/模糊测试。v0.5 前序：编译图执行模型（拓扑计划/缓冲活跃度分配/就地别名/PDC）、并行 DSP 图调度（Job 化/确定性并行/岛屿划分）、GPU 加速几何声学（共享渲染器 BVH 的声线与路径追踪）、性能自适应治理与音频 LOD、心理声学虚拟化与声源聚类、时间伸缩变调与重采样质量分级；扩展了参考映射、扩展点、路线图与术语表。v0.4 前序：程序化内容图 Patch、调制系统、多普勒/锥形/Spread/Focus/多位置、遮挡与障碍区分、Aux 发送与环境、HDR 音频、Bank/流式/内存、输入捕获、平台空间后端、虚拟语音行为、Profiler 与可视化调试）
@@ -527,13 +528,14 @@ Panner 可插拔（`Panner` trait），对齐 Unity Spatializer / Ambisonic Deco
 
 ## 22. 设备后端、离线渲染与输入捕获
 
-规划 crate `prism_audio_device`：
+crate `prism_audio_device`（✅ M3 输出/离线/捕获三条链已落地并单测通过；worklet/触感/远程授权后续档）：
 
-- **cpal 后端**：桌面/移动原生输出，处理设备采样率/块大小协商与重采样；侦测平台空间能力（§16）。
-- **AudioWorklet 后端**：Web 平台（wasm），在 worklet 线程跑图。
-- **FileSink（离线）**：以任意块大小离线渲染到 wav，用于 golden 测试与过场预渲染。**离线路径与实时路径共用同一图**，保证一致性。
-- **输入捕获（麦克风 / 回读）**（对齐 Godot Microphone / AudioEffectCapture）：设备输入作为源节点进图；`CaptureNode` 从任意总线回读到环形缓冲，供录制、语音、频谱 UI（§26）。
-- **欠载保护**：设备回调欠载时输出静音并计数，不阻塞。
+- **cpal 后端**（✅ 已落地，`cpal_backend.rs`）：桌面/移动原生输出。以 `feature = "cpal-backend"`（默认开）门控，离线/CI/无声卡主机可 `--no-default-features` 不链平台 SDK。`open_default_output` 取默认 host/device，**按 `AudioRuntime` 采样率建流；设备无法满足该率时上报 `BuildStream` 错误而非静默重采样**（避免隐式质量损失），设备声道数经 `layout_for_channels` 映射到引擎 `ChannelLayout`（1→Mono/2→Stereo/4→Quad/6→5.1/8→7.1）。数据回调经 `SampleFormat` 分派到泛型 `build_typed::<T>`（覆盖 F32/F64/I16/U16/I32/I8/U8），用开流时一次性预分配的 scratch 在引擎固定块与主机可变缓冲间搬运、逐样本 `from_sample` 转格式，**回调路径零分配/零锁**。
+- **`BlockRenderer` 拉取适配器**（✅ `render.rs`）：把 `AudioRuntime` 产出的固定引擎块喂进任意大小的交错缓冲，稳态零分配；设备与离线**共用同一渲染路径**，因此离线 WAV 与实时播放对同一图/命令流逐样本一致。
+- **FileSink（离线）**（✅ `file_sink.rs`）：`render_to_wav` 以任意块大小确定性离线渲染到 32-bit float WAV，用于 golden 对拍与过场预渲染。
+- **输入捕获（麦克风 / 回读）**（✅ `capture.rs`，对齐 Godot Microphone / AudioEffectCapture）：`CaptureSink::push_interleaved` 从设备回调把交错输入以整帧写入无锁环形缓冲，`CaptureConsumer` 在非 RT 侧取平面帧，供录制、语音（§45）、频谱 UI（§26）；缓冲溢出按整帧丢弃并计数，不阻塞回调。
+- **AudioWorklet 后端**（规划）：Web 平台（wasm），在 worklet 线程跑图。
+- **欠载保护**：设备回调欠载/断连时由平台错误回调计数（`CpalOutput::error_count`），主机可在其上叠加日志与恢复策略；回调本身始终输出可用样本，不阻塞。
 
 ---
 
@@ -779,7 +781,7 @@ Panner 可插拔（`Panner` trait），对齐 Unity Spatializer / Ambisonic Deco
 | `pkg/prism_audio_core` | L1+L2 | math/buffer/param/time/graph + nodes | ✅ L1 内核 + L2 effects/dynamics/reverb 全族已落地（103 测试）；M2 sources/scheduler 进行中 |
 | `pkg/prism_audio_spatial` | L3 | 几何传播/HRTF/Ambisonics/panner/多普勒/平台后端桥 | 规划 |
 | `pkg/prism_audio_authoring` | L3 | Event/Container/State/Switch/RTPC/Patch 编译/Modulation/交互音乐/Bank/对白与本地化/音景 | 规划 |
-| `pkg/prism_audio_device` | L3 | cpal/worklet/FileSink/输入捕获/触感后端/远程授权通道 | 规划 |
+| `pkg/prism_audio_device` | L3 | cpal 输出/离线 FileSink/输入捕获（已落地）；worklet/触感后端/远程授权通道（规划） | ✅ M3 输出+离线+捕获落地（11 测试，cpal 特性门控，`--no-default-features` 离线构建通过）；余项规划 |
 | `crates/bevy_audio` | L4 | ECS 前端（改接命令通道，保留兼容 API） | 规划改造 |
 
 **并行开发拆分**（写集不相交，可 fan-out 给并行 agent）：
@@ -808,7 +810,8 @@ Panner 可插拔（`Panner` trait），对齐 Unity Spatializer / Ambisonic Deco
 - **M2 声源与调度（✅ 已完成）**：`nodes/sources/`（oscillator 带限 PolyBLEP / noise white·pink·brown / sample_player 变调重采样+循环点）+ `scheduler.rs`（采样精确事件最小堆 `EventScheduler` + Quartz 式命名多时钟 `NamedClock` 量化）+ `voice.rs` 语音池（固定容量、优先级窃取、per-group Playback Limit 三策略、Wwise 式虚拟语音行为 `ContinueVirtual`/`Kill`/`RestartFromBeginning`/`PlayFromElapsedTime` + 迟滞进出阈值 revoice）。147 单测 + 5 doctest 全绿，clippy 零告警，no_std 双构建通过，已分三次 commit。streaming/解码依赖 std+file IO，归 M3 device 层，M2 不做假实现。
 - **M3 ECS 桥与设备**：
   - **运行时桥（✅ 已落地）**：`prism_audio_rt` crate——有界无锁命令环（`AudioCommand`：SpawnVoice/StopVoice/SetVoiceImportance/SetMasterGain/SetMaxPhysicalVoices）+ 遥测环（`TelemetryFrame`：块序号/播放头/物理·虚拟语音数/主峰值·RMS/CPU 负载）+ **epoch 回收队列**（RT `retire` 推 `Box<dyn Any+Send>`，收集线程 drain·drop，队满时 RT 保留不 drop 形成背压）+ **capacity-1 最新胜图交换**（`GraphHandoff`，被挤下的旧图退回任务线程处理，绝不在 RT 侧 drop）。`process_block` 全链路零分配/锁/panic；语音命令块起点应用（块粒度），仅 `SetMasterGain` 的 `at_frame`+`ramp_frames` 逐样本兑现（采样精确增益 ramp），采样精确音乐事件调度交 §8 `EventScheduler`。真 std 多线程集成测试验证跨线程交付/图交换/回收/遥测。零 unsafe（底座复用 `crossbeam-queue` 的 `ArrayQueue`）。
-  - **设备与前端（进行中）**：`prism_audio_device`（cpal/worklet/FileSink 离线/输入捕获）+ `bevy_audio` 前端改造（`AudioPlayer`/`PlaybackSettings`/`Volume` 兼容 API 翻译为命令）。
+  - **设备后端（✅ 已落地）**：`prism_audio_device` crate——`cpal_backend`（默认特性门控的原生输出，采样率不匹配即报错不静默重采样，F32/F64/I16/U16/I32/I8/U8 全格式分派，回调零分配/零锁）+ `render::BlockRenderer`（固定块→可变交错缓冲的拉取适配器，设备/离线同路径）+ `file_sink::render_to_wav`（确定性离线 32-bit float WAV，golden 对拍）+ `capture`（无锁环形缓冲的麦克风/总线回读，整帧溢出计数）。11 单测全绿，clippy 零告警，默认与 `--no-default-features` 双配置构建通过，已 commit。worklet/触感/远程授权通道后续档。
+  - **ECS 前端（进行中）**：`bevy_audio` 前端改造（`AudioPlayer`/`PlaybackSettings`/`Volume` 兼容 API 翻译为命令环）。
 - **M4 空间**：遮挡/障碍/透射/衍射/反射 + 距离塑形（衰减/锥形/spread/focus/doppler/多位置）+ HRTF/Ambisonics + Rooms&Portals + Aux 发送 + 平台空间后端桥。
 - **M5 编排、Patch 与音乐**：Event/Container/State/Switch/RTPC + Patch 编译器与合成原语 + Modulation（LFO/包络/控制总线）+ 交互音乐（段/过渡/stinger）+ Bank/流式 + 对白与本地化解析（§35）+ 程序化音景（§37） + 物理耦合程序化音频（接触事件总线/模态/颗粒合成，§47，联动 `prism_physics`）。
 - **M6 母带、合规、剖析与工具**：LUFS 归一 + true-peak limiter + HDR 窗口 + snapshot + 无障碍 + Profiler/频谱/计量面板 + 触感与跨模态输出（§36）+ 实时授权与远程工具 API（§38） + 输出渲染链（下混矩阵/低频管理/交付动态范围档，§48）。
