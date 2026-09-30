@@ -57,7 +57,8 @@ pub use fluid::{
 };
 pub use mpm::{
     BoundaryMode, ConstitutiveOutput, G2pParticles, GpuMpmConstitutive, GpuMpmG2p,
-    GpuMpmGridUpdate, GpuMpmP2g, GpuMpmStep, P2gGrid, StepConfig, StepInputs, StepParticles,
+    GpuMpmGridUpdate, GpuMpmP2g, GpuMpmResident, GpuMpmStep, P2gGrid, StepConfig, StepInputs,
+    StepParticles,
 };
 pub use xpbd::{
     cpu_solve, Colouring, DistanceConstraint, GpuXpbdSolver, ParticleState, XpbdConfig, XpbdError,

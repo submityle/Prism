@@ -58,7 +58,7 @@ use super::params::{cols_to_mat3, mat3_to_cols, vec3_to_vec4};
 /// `shaders/mpm_step.wgsl`.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct StepParams {
+pub(crate) struct StepParams {
     /// `xyz` = grid origin, `w` = cell size `dx`.
     origin_dx: [f32; 4],
     /// `x` = shear modulus `μ0`, `y` = first Lamé `λ0`, `z` = hardening `ξ`,
@@ -80,6 +80,49 @@ struct StepParams {
     clamp_lo: [f32; 4],
     /// `xyz` = clamp upper corner, `w` = padding.
     clamp_hi: [f32; 4],
+}
+
+/// Packs the std430 uniform block shared by the one-shot [`GpuMpmStep::advance`]
+/// and the resident [`super::solver::GpuMpmResident`] solver.
+///
+/// The domain-interior clamp corners are computed exactly as the `CPU` golden
+/// `clamp_particles`: every particle is kept at least `margin` inside each face
+/// (with `margin = max(thickness, 2) · dx`) so its quadratic stencil stays in
+/// range. `count` is the particle count written into the `dims.w` slot.
+#[must_use]
+pub(crate) fn build_step_params(cfg: &StepConfig, count: usize) -> StepParams {
+    let (nx, ny, nz) = cfg.dims;
+    let node_count = nx * ny * nz;
+    let margin = (cfg.boundary_thickness.max(2)) as f32 * cfg.dx;
+    let lo = cfg.origin + Vec3::splat(margin);
+    let hi = cfg.origin
+        + Vec3::new(
+            (nx - 1) as f32 * cfg.dx,
+            (ny - 1) as f32 * cfg.dx,
+            (nz - 1) as f32 * cfg.dx,
+        )
+        - Vec3::splat(margin);
+    StepParams {
+        origin_dx: [cfg.origin.x, cfg.origin.y, cfg.origin.z, cfg.dx],
+        material: [cfg.mu0, cfg.lambda0, cfg.hardening, cfg.dt],
+        gravity_dt: [cfg.gravity.x, cfg.gravity.y, cfg.gravity.z, cfg.dt],
+        snow: [cfg.theta_c, cfg.theta_s, 0.0, 0.0],
+        dims: [
+            u32::try_from(nx).unwrap_or(u32::MAX),
+            u32::try_from(ny).unwrap_or(u32::MAX),
+            u32::try_from(nz).unwrap_or(u32::MAX),
+            u32::try_from(count).unwrap_or(u32::MAX),
+        ],
+        grid: [u32::try_from(node_count).unwrap_or(u32::MAX), 0, 0, 0],
+        bounds: [
+            u32::try_from(cfg.boundary_thickness).unwrap_or(u32::MAX),
+            cfg.boundary.as_u32(),
+            u32::from(cfg.plastic),
+            0,
+        ],
+        clamp_lo: [lo.x, lo.y, lo.z, 0.0],
+        clamp_hi: [hi.x, hi.y, hi.z, 0.0],
+    }
 }
 
 /// The particle state produced by an MLS-MPM advance.
@@ -163,11 +206,11 @@ pub struct GpuMpmStep {
         reason = "kept alive so the pipelines it produced stay valid"
     )]
     module: ShaderModule,
-    layout: BindGroupLayout,
-    clear: ComputePipeline,
-    p2g: ComputePipeline,
-    grid: ComputePipeline,
-    g2p: ComputePipeline,
+    pub(crate) layout: BindGroupLayout,
+    pub(crate) clear: ComputePipeline,
+    pub(crate) p2g: ComputePipeline,
+    pub(crate) grid: ComputePipeline,
+    pub(crate) g2p: ComputePipeline,
 }
 
 impl GpuMpmStep {
@@ -269,39 +312,7 @@ impl GpuMpmStep {
         let (nx, ny, nz) = cfg.dims;
         let node_count = nx * ny * nz;
 
-        // Clamp corners, mirroring `clamp_particles`: keep every particle at
-        // least `margin` inside each face so its stencil stays in range.
-        let margin = (cfg.boundary_thickness.max(2)) as f32 * cfg.dx;
-        let lo = cfg.origin + Vec3::splat(margin);
-        let hi = cfg.origin
-            + Vec3::new(
-                (nx - 1) as f32 * cfg.dx,
-                (ny - 1) as f32 * cfg.dx,
-                (nz - 1) as f32 * cfg.dx,
-            )
-            - Vec3::splat(margin);
-
-        let params = StepParams {
-            origin_dx: [cfg.origin.x, cfg.origin.y, cfg.origin.z, cfg.dx],
-            material: [cfg.mu0, cfg.lambda0, cfg.hardening, cfg.dt],
-            gravity_dt: [cfg.gravity.x, cfg.gravity.y, cfg.gravity.z, cfg.dt],
-            snow: [cfg.theta_c, cfg.theta_s, 0.0, 0.0],
-            dims: [
-                u32::try_from(nx).unwrap_or(u32::MAX),
-                u32::try_from(ny).unwrap_or(u32::MAX),
-                u32::try_from(nz).unwrap_or(u32::MAX),
-                u32::try_from(count).unwrap_or(u32::MAX),
-            ],
-            grid: [u32::try_from(node_count).unwrap_or(u32::MAX), 0, 0, 0],
-            bounds: [
-                u32::try_from(cfg.boundary_thickness).unwrap_or(u32::MAX),
-                cfg.boundary.as_u32(),
-                u32::from(cfg.plastic),
-                0,
-            ],
-            clamp_lo: [lo.x, lo.y, lo.z, 0.0],
-            clamp_hi: [hi.x, hi.y, hi.z, 0.0],
-        };
+        let params = build_step_params(cfg, count);
         let params_buf = buffer::uniform(device, "prism_mpm_step_params", &params);
 
         // Resident particle buffers. Positions, velocities, affine, deformation,
@@ -408,7 +419,7 @@ impl GpuMpmStep {
     }
 
     /// Records one compute pass dispatching `groups` workgroups over `bind`.
-    fn pass(
+    pub(crate) fn pass(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         pipeline: &ComputePipeline,

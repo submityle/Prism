@@ -25,5 +25,6 @@ pub mod gpu;
 
 pub use gpu::{
     BoundaryMode, ConstitutiveOutput, G2pParticles, GpuMpmConstitutive, GpuMpmG2p,
-    GpuMpmGridUpdate, GpuMpmP2g, GpuMpmStep, P2gGrid, StepConfig, StepInputs, StepParticles,
+    GpuMpmGridUpdate, GpuMpmP2g, GpuMpmResident, GpuMpmStep, P2gGrid, StepConfig, StepInputs,
+    StepParticles,
 };
