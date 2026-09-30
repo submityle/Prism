@@ -51,10 +51,10 @@ pub use dynamics::{
     MultibandCompressorNode, TransientShaperNode, TransientShaperParams,
 };
 pub use effects::{
-    BitcrusherNode, BitcrusherParams, ChorusNode, ChorusParams, DelayNode, EqBand, FlangerNode,
-    FlangerParams, MAX_BIT_DEPTH, MIN_BIT_DEPTH, Oversample, ParametricEqNode, PhaserNode,
-    PhaserParams, RingModulatorNode, RingModulatorParams, TremoloMode, TremoloNode, TremoloParams,
-    WaveshaperNode,
+    BitcrusherNode, BitcrusherParams, ChorusNode, ChorusParams, CombResonatorNode,
+    CombResonatorParams, DelayNode, EqBand, FlangerNode, FlangerParams, MAX_BIT_DEPTH,
+    MIN_BIT_DEPTH, Oversample, ParametricEqNode, PhaserNode, PhaserParams, RingModulatorNode,
+    RingModulatorParams, TremoloMode, TremoloNode, TremoloParams, WaveshaperNode,
 };
 pub use gain::GainNode;
 pub use mix::SumNode;

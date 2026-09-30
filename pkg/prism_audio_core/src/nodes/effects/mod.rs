@@ -19,6 +19,8 @@
 //!   feedback) for shimmering thickening.
 //! - [`flanger::FlangerNode`] — single short LFO-swept delay with feedback for
 //!   the classic sweeping comb / "jet" effect.
+//! - [`comb_resonator::CombResonatorNode`] — pitched feedback comb with a
+//!   lowpass in the loop for plucked-string / resonant-body voices.
 //! - [`phaser::PhaserNode`] — cascaded first-order all-pass stages swept by an
 //!   LFO to drag notches through the spectrum.
 //! - [`stereo_width::StereoWidthNode`] — Mid-Side stereo widener with an
@@ -32,6 +34,7 @@
 
 pub mod bitcrusher;
 pub mod chorus;
+pub mod comb_resonator;
 pub mod delay;
 pub mod flanger;
 pub mod parametric_eq;
@@ -43,6 +46,7 @@ pub mod waveshaper;
 
 pub use bitcrusher::{BitcrusherNode, BitcrusherParams, MAX_BIT_DEPTH, MIN_BIT_DEPTH};
 pub use chorus::{ChorusNode, ChorusParams};
+pub use comb_resonator::{CombResonatorNode, CombResonatorParams, MAX_FEEDBACK, MIN_FREQUENCY_HZ};
 pub use delay::DelayNode;
 pub use flanger::{FlangerNode, FlangerParams};
 pub use parametric_eq::{EqBand, ParametricEqNode};
