@@ -52,7 +52,8 @@
 //! act as a compile-time guard that the cross-module API surface stays stable.
 
 use super::atmosphere::{
-    aerial_perspective_weight, blend_with_atmosphere, sunset_inscatter_tint, AtmosphereCoupling,
+    aerial_perspective_weight, blend_with_atmosphere, sunset_inscatter_tint,
+    AerialPerspectiveParams, AtmosphereCoupling,
 };
 use super::avsm::AvsmCurve;
 use super::budget::{plan_volumetric, VolumetricJobKind, VolumetricJobRequest};
@@ -1089,4 +1090,180 @@ fn multiscatter_probe_grid_blends_shared_irradiance_convexly() {
     // Degenerate dims are floored to at least one probe per axis (no panic).
     let thin = ProbeGrid::new([0, 3, 1], min_corner, max_corner);
     assert_eq!(thin.dims(), [1, 3, 1]);
+}
+
+/// Section 8 seam: the altitude-aware aerial-perspective weight
+/// ([`AerialPerspectiveParams`]) feeds [`blend_with_atmosphere`] over a real
+/// ray-march output. Thinner air aloft yields a strictly smaller weight, so a
+/// high cloud sample retains more of its own radiance (is washed toward the
+/// airlight less) than an otherwise identical ground-level sample, while both
+/// composites stay inside the convex span of cloud radiance and airlight.
+#[test]
+fn altitude_aware_aerial_perspective_washes_low_clouds_more_than_high_ones() {
+    let modeling = sample_modeling();
+    let cfg = RaymarchConfig::default();
+    let phase = hg_phase(0.4, 0.5);
+    let seed = 0x5EED_1234;
+    let state = march(
+        |t| {
+            field_density(
+                modeling,
+                CloudKind::Cumulus,
+                Vec3::new(0.3, saturate(t / 200.0), 0.7),
+                0.6,
+                seed,
+            )
+        },
+        sigma_from_density,
+        phase,
+        |_t| 1.0,
+        200.0,
+        cfg,
+    );
+    assert!((0.0..=1.0).contains(&state.transmittance));
+
+    let cloud_color = Vec3::splat(saturate(state.scattered));
+    // A distinct bluish airlight so the wash direction is observable.
+    let inscatter = Vec3::new(0.35, 0.5, 0.85);
+    let max_distance = 20_000.0;
+    let distance = 12_000.0;
+
+    let ground = AerialPerspectiveParams::new(distance, 500.0);
+    let aloft = AerialPerspectiveParams::new(distance, 9_000.0);
+
+    // Thinner air aloft => strictly smaller aerial-perspective weight.
+    let wg = ground.weight(max_distance);
+    let wa = aloft.weight(max_distance);
+    assert!((0.0..=1.0).contains(&wg) && (0.0..=1.0).contains(&wa));
+    assert!(
+        wa < wg,
+        "aloft weight {wa} should sit below ground weight {wg}"
+    );
+
+    let bg = blend_with_atmosphere(cloud_color, state.transmittance, inscatter, wg);
+    let ba = blend_with_atmosphere(cloud_color, state.transmittance, inscatter, wa);
+
+    // Both stay within the convex span of cloud_color..inscatter, channel-wise.
+    for (c, i, g, a) in [
+        (cloud_color.x, inscatter.x, bg.x, ba.x),
+        (cloud_color.y, inscatter.y, bg.y, ba.y),
+        (cloud_color.z, inscatter.z, bg.z, ba.z),
+    ] {
+        let lo = c.min(i) - EPS;
+        let hi = c.max(i) + EPS;
+        assert!((lo..=hi).contains(&g), "ground blend left convex hull: {g}");
+        assert!((lo..=hi).contains(&a), "aloft blend left convex hull: {a}");
+    }
+
+    // Less wash aloft => composite sits farther from the airlight (retains more
+    // cloud radiance) on the blue channel, where the two sources differ most.
+    let dist_from_air = |b: f32| (b - inscatter.z).abs();
+    assert!(
+        dist_from_air(ba.z) + EPS >= dist_from_air(bg.z),
+        "aloft composite should retain more cloud radiance: aloft {} ground {}",
+        ba.z,
+        bg.z
+    );
+
+    // The combined weight is monotone non-decreasing in distance at fixed
+    // altitude (distance fade only ever grows).
+    let mut prev = AerialPerspectiveParams::new(0.0, 3_000.0).weight(max_distance);
+    let mut d = 0.0;
+    while d <= max_distance {
+        let cur = AerialPerspectiveParams::new(d, 3_000.0).weight(max_distance);
+        assert!(cur + EPS >= prev, "aerial weight dropped with distance");
+        prev = cur;
+        d += 1_000.0;
+    }
+}
+
+/// Section 6b seam: an [`AvsmCurve`] built from a real ray-march extinction
+/// profile self-compresses to a small node budget yet still reconstructs the
+/// self-shadow transmittance of an uncompressed reference within a bounded
+/// error, preserves the area under the curve (the adaptive-merge error metric),
+/// and remains a valid monotone light-visibility function for [`march`].
+#[test]
+fn avsm_compression_from_march_extinction_preserves_self_shadow_within_budget() {
+    let modeling = sample_modeling();
+    let seed = 0x00C0_FFEE;
+    // Deterministic per-segment optical thickness sampled front-to-back along
+    // the light ray through a tall cumulonimbus column.
+    let seg_at = |i: usize| -> (f32, f32) {
+        let depth = i as f32 * 3.0;
+        let frac = saturate(depth / 200.0);
+        let density = field_density(
+            modeling,
+            CloudKind::Cumulonimbus,
+            Vec3::new(0.4, frac, 0.6),
+            0.7,
+            seed,
+        );
+        let (sigma_t, _sigma_s) = sigma_from_density(density);
+        (depth, sigma_t * 3.0)
+    };
+
+    let n = 64usize;
+    let budget = 8usize;
+    // Fine reference keeps every node; budgeted curve compresses on insert.
+    let mut fine = AvsmCurve::new(n + 2);
+    let mut budgeted = AvsmCurve::new(budget);
+    for i in 0..n {
+        let (d, seg) = seg_at(i);
+        fine.insert(d, seg);
+        budgeted.insert(d, seg);
+    }
+
+    // Node budget is honored and compression actually dropped nodes.
+    assert_eq!(budgeted.max_nodes(), budget);
+    assert!(budgeted.len() <= budgeted.max_nodes());
+    assert!(
+        fine.len() > budgeted.len(),
+        "compression should drop nodes: fine {} budgeted {}",
+        fine.len(),
+        budgeted.len()
+    );
+
+    // Reconstructed transmittance tracks the fine reference and stays a monotone
+    // non-increasing, in-range light function.
+    let mut prev = 2.0_f32;
+    let mut max_err = 0.0_f32;
+    let mut d = 0.0;
+    while d <= 190.0 {
+        let tf = fine.transmittance_at(d);
+        let tb = budgeted.transmittance_at(d);
+        assert!(
+            (0.0..=1.0).contains(&tb),
+            "budgeted transmittance out of range: {tb}"
+        );
+        assert!(
+            tb <= prev + 1.0e-6,
+            "budgeted transmittance rose: {tb} > {prev}"
+        );
+        prev = tb;
+        max_err = max_err.max((tf - tb).abs());
+        d += 5.0;
+    }
+    assert!(
+        max_err < 0.12,
+        "compression transmittance error too large: {max_err}"
+    );
+
+    // Area under the curve (the compression error metric) is preserved.
+    let area_err = (fine.area() - budgeted.area()).abs();
+    let rel = area_err / fine.area().max(EPS);
+    assert!(rel < 0.1, "compression area drifted too far: rel {rel}");
+
+    // The compressed curve is still a valid march light-visibility function.
+    let cfg = RaymarchConfig::default();
+    let phase = hg_phase(0.3, 0.4);
+    let lit = march(
+        |_t| 0.5,
+        sigma_from_density,
+        phase,
+        |t| budgeted.transmittance_at(t),
+        190.0,
+        cfg,
+    );
+    assert!((0.0..=1.0).contains(&lit.transmittance));
+    assert!(lit.scattered.is_finite() && lit.scattered >= 0.0);
 }
