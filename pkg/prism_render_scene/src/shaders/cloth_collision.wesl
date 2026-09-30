@@ -36,13 +36,12 @@
 //! (`positions`, `colliders`, `prev_positions`, `params`): the `prev_positions`
 //! buffer (binding 3) supplies the frame-start reference the tangential Coulomb
 //! friction pass measures slip against, matching the CPU
-//! `resolve_body_collisions_with_friction`. NOTE: the host descriptor
+//! `resolve_body_collisions_with_friction`. The host descriptor
 //! `ClothKernel::BodyCollision` in `prism_render_architecture::cloth::gpu::kernels`
-//! still declares `storage_buffers: 2` and `GpuClothBodyParams` still lacks a
-//! `friction` field; wiring binding 3 and the `friction` uniform on the host is
-//! a required follow-up (those files are outside this change's scope). Until
-//! then the host leaves `friction` zero, so the `GPU` pass stays frictionless
-//! and bit-parity with the CPU zero-friction path. Per-particle painted backstops
+//! now declares `storage_buffers: 3` and `GpuClothBodyParams` carries the
+//! `friction` coefficient, so the host binds binding 3 and drives the uniform
+//! directly: a non-zero `friction` reproduces the CPU Coulomb slip damping
+//! bit-for-bit, and `friction == 0` collapses to the frictionless path. Per-particle painted backstops
 //! (`collision::apply_backstop`) run as their own `ClothKernel::Backstop`
 //! dispatch (`cloth_backstop` below) on a matching 2-storage + 1-uniform layout
 //! (`positions`, `backstops`, `params`), so they are a real bit-parity kernel
@@ -337,15 +336,17 @@ fn cloth_cell_hash(cell: vec3<i32>, table_size: u32) -> u32 {
 }
 
 /// Hash-build stage: one invocation per particle atomically prepends the
-/// particle to its cell's linked list. The `@workgroup_size(4, 4, 4)` tiling
-/// matches the `ClothKernel::SelfCollisionHashBuild` contract; the 3D group id
-/// is linearised into a particle index. The host must clear `cell_table` heads
-/// to `CLOTH_COL_SENTINEL` (a `0xff` byte-fill) and reset the counts before this
-/// dispatch, mirroring the CPU rebuild of a fresh `BTreeMap` each call.
-@compute @workgroup_size(4, 4, 4)
+/// particle to its cell's linked list. This is a flat per-particle launch
+/// (`@workgroup_size(64)`, one invocation per `gid.x`), matching the
+/// `ClothKernel::SelfCollisionHashBuild` contract's `DispatchDomain::Particle`
+/// shape — a multi-axis tile would map several invocations onto the same
+/// `gid.x` and insert each particle into its chain more than once. The host
+/// must clear `cell_table` heads to `CLOTH_COL_SENTINEL` (a `0xff` byte-fill)
+/// and reset the counts before this dispatch, mirroring the CPU rebuild of a
+/// fresh `BTreeMap` each call.
+@compute @workgroup_size(64)
 fn cloth_self_collision_hash_build(@builtin(global_invocation_id) gid: vec3<u32>) {
-    // Linearise the 3D dispatch into a particle index (row-major over the grid
-    // extent the host launched; only `x` varies for a purely linear launch).
+    // One invocation per particle: the linear `gid.x` is the particle index.
     let p = gid.x;
     if p >= self_params.particle_count {
         return;
@@ -362,7 +363,7 @@ fn cloth_self_collision_hash_build(@builtin(global_invocation_id) gid: vec3<u32>
 /// every in-range neighbour across the 27-cell neighbourhood and writes only
 /// its own slot (Jacobi). Mirrors the CPU `resolve_pair` separation law — the
 /// inverse-mass split `w_self / (w_self + w_other)`, the `thickness` target, and
-/// the fixed `+X` fallback for coincident points — but applies it in parallel
+/// the index-signed `X`-axis fallback for coincident points — but applies it in parallel
 /// (see the module determinism note). Pinned neighbours (`w_other == 0`) push a
 /// free particle by the full penetration; a pinned self never moves.
 @compute @workgroup_size(64)
@@ -422,9 +423,21 @@ fn cloth_self_collision_resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
                     }
                     let share = w_self / w_sum;
                     if dist_sq <= CLOTH_COL_EPS_LEN_SQ {
-                        // Coincident: separate along a fixed axis so the result
-                        // is deterministic and never `NaN`.
-                        delta_sum = delta_sum + vec3<f32>(thickness * share, 0.0, 0.0);
+                        // Coincident: no separating direction is defined, so
+                        // split along the fixed `X` axis exactly like the CPU
+                        // golden `resolve_pair`. There the lower-indexed
+                        // particle takes the `-X` half and the higher-indexed
+                        // one the `+X` half of the full-`thickness` push; this
+                        // Jacobi pass reproduces that per particle by signing
+                        // the axis on the index comparison, so two coincident
+                        // free particles separate symmetrically instead of both
+                        // drifting the same way and staying coincident.
+                        var axis_sign = 1.0;
+                        if p < cur {
+                            axis_sign = -1.0;
+                        }
+                        delta_sum = delta_sum
+                            + vec3<f32>(axis_sign * thickness * share, 0.0, 0.0);
                     } else {
                         let dist = sqrt(dist_sq);
                         let penetration = thickness - dist;

@@ -104,13 +104,13 @@ impl WorkgroupSize {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum DispatchDomain {
     /// A flat list of sim-mesh particles (predict, velocity update, strain
-    /// limit, body collision, self-collision resolve).
+    /// limit, body collision, and both self-collision passes: the hash build
+    /// inserts one particle per invocation and the resolve corrects one particle
+    /// per invocation).
     Particle,
     /// A flat list of the constraints in one graph color (the `XPBD` distance,
     /// bending and `LRA` projection passes; the launch is sized per color).
     ConstraintBatch,
-    /// A 3D grid of spatial-hash cells (the self-collision hash build).
-    HashGrid,
     /// A flat list of render-mesh vertices (the barycentric skin embedding that
     /// makes the high-resolution render mesh follow the coarse sim mesh).
     RenderVertex,
@@ -357,14 +357,20 @@ impl ClothKernel {
                 DispatchDomain::Particle,
             ),
             ClothKernel::SelfCollisionHashBuild => (
+                // Read-write particle positions (the hash source), the
+                // read-write cell table (per-bucket linked-list heads + counts)
+                // and the read-write per-particle "next in chain" pointers, plus
+                // the uniform grid parameters. The build inserts one particle
+                // per invocation into its cell's chain, so it is a flat
+                // per-particle launch just like the resolve pass.
                 BindGroupLayout {
                     storage_buffers: 3,
                     uniform_buffers: 1,
                     storage_textures: 0,
                     sampled_textures: 0,
                 },
-                WorkgroupSize { x: 4, y: 4, z: 4 },
-                DispatchDomain::HashGrid,
+                WorkgroupSize { x: 64, y: 1, z: 1 },
+                DispatchDomain::Particle,
             ),
             ClothKernel::SelfCollisionResolve => (
                 BindGroupLayout {
@@ -458,19 +464,21 @@ mod tests {
     }
 
     #[test]
-    fn particle_and_constraint_kernels_are_linear_and_hash_is_a_brick() {
+    fn every_kernel_launches_a_linear_tile() {
+        // Every cloth pass is a flat 1D launch (per particle, per constraint in
+        // a color, per render vertex, or the per-particle hash build): the
+        // workgroup tiles the linear domain along `x` only, so `y` and `z` stay
+        // 1. A multi-axis tile would need a matching multi-axis global-id
+        // linearisation in the shader, which none of these kernels perform.
         for kernel in ClothKernel::ALL {
             let d = kernel.descriptor();
             match d.domain {
                 DispatchDomain::Particle
                 | DispatchDomain::ConstraintBatch
                 | DispatchDomain::RenderVertex => {
-                    assert_eq!(d.workgroup.y, 1);
-                    assert_eq!(d.workgroup.z, 1);
-                    assert!(d.workgroup.x > 1);
-                }
-                DispatchDomain::HashGrid => {
-                    assert!(d.workgroup.x > 1 && d.workgroup.y > 1 && d.workgroup.z > 1);
+                    assert_eq!(d.workgroup.y, 1, "{kernel:?} tiled a non-linear y axis");
+                    assert_eq!(d.workgroup.z, 1, "{kernel:?} tiled a non-linear z axis");
+                    assert!(d.workgroup.x > 1, "{kernel:?} has a degenerate x tile");
                 }
             }
         }

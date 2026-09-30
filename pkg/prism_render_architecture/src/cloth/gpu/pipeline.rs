@@ -19,7 +19,7 @@
 use alloc::vec::Vec;
 
 use super::buffers::{BufferCounts, PersistentBufferSet};
-use super::kernels::{linear_group_count, ClothKernel, DispatchDomain};
+use super::kernels::{linear_group_count, ClothKernel};
 
 /// A snapshot of one cloth piece's `GPU`-relevant sizes for a single frame.
 ///
@@ -257,9 +257,10 @@ fn push_particle(
 ///
 /// The substep loop and per-color projection are unrolled into a flat list in
 /// exact record order. Per-particle passes are sized by the particle count;
-/// projection passes by each color's constraint count; the hash-grid build by
-/// the cell count; the embed by the render-vertex count. Empty domains are
-/// skipped so the schedule never records a zero-group dispatch.
+/// projection passes by each color's constraint count; both self-collision
+/// passes and the embed by their own per-element counts (particles and render
+/// vertices). Empty domains are skipped so the schedule never records a
+/// zero-group dispatch.
 #[must_use]
 pub fn prepare(extract: &ClothGpuExtract) -> ClothGpuPrepare {
     let buffers = PersistentBufferSet::new(extract.counts);
@@ -354,12 +355,17 @@ pub fn prepare(extract: &ClothGpuExtract) -> ClothGpuPrepare {
         // body, so the collider and backstop passes must be the last positional
         // corrections before the velocity update.
         if extract.self_collision {
-            let hash = hash_grid_group_size();
+            // Both self-collision passes are flat per-particle launches: the
+            // hash build inserts one particle per invocation into its cell's
+            // linked-list chain, and the resolve corrects one particle per
+            // invocation. The cell table is sized by `hash_cells`
+            // (see `BufferCounts`), but the dispatch that fills it is sized by
+            // the particle count, since it is the particles that are inserted.
             push_particle(
                 &mut dispatches,
                 ClothKernel::SelfCollisionHashBuild,
-                extract.counts.hash_cells,
-                hash,
+                particles,
+                group,
             );
             push_particle(
                 &mut dispatches,
@@ -413,15 +419,6 @@ fn particle_group_size() -> u32 {
         .descriptor()
         .workgroup
         .invocations_per_group()
-}
-
-/// The workgroup size the self-collision hash-grid build launches with, read
-/// from its descriptor for the same reason.
-#[must_use]
-fn hash_grid_group_size() -> u32 {
-    let d = ClothKernel::SelfCollisionHashBuild.descriptor();
-    debug_assert!(matches!(d.domain, DispatchDomain::HashGrid));
-    d.workgroup.invocations_per_group()
 }
 
 /// Aggregates a set of prepared piece plans into the per-frame [`ClothGpuQueue`]
