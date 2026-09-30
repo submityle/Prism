@@ -183,6 +183,110 @@ pub(crate) fn intersect_triangle(ray: &Ray, tri: &Triangle) -> Option<(f32, f32,
     Some((t, u, v))
 }
 
+/// Watertight ray/triangle intersection (Woop, Benthin, Wald & Áfra, 2013).
+///
+/// Returns `(t, u, v)` on a hit, where `u`/`v` are the barycentric weights of
+/// `v1`/`v2` (weight of `v0` is `1 - u - v`), matching [`intersect_triangle`].
+///
+/// Unlike the Möller–Trumbore variant, this test is *watertight*: a ray that
+/// passes exactly through an edge or vertex shared by two triangles is
+/// classified consistently, so a closed mesh never leaks (no "holes" where a
+/// primary/shadow ray slips between adjacent faces). The ray is transformed
+/// into a space where it points down `+kz`; the triangle is sheared into that
+/// space and three scaled 2D edge cross products give the barycentric
+/// coordinates. Edge tests that land exactly on zero in `f32` are recomputed in
+/// `f64` so both incident triangles agree on which side owns the boundary. Both
+/// faces are tested; the caller decides culling separately.
+///
+/// Only `f32`/`f64` arithmetic (add, mul, div, `abs`) is used — no
+/// transcendentals — so it stays inside the deterministic-math budget the
+/// `GPU` twin also honours.
+#[inline]
+pub(crate) fn intersect_triangle_watertight(ray: &Ray, tri: &Triangle) -> Option<(f32, f32, f32)> {
+    let dir = ray.direction;
+
+    // Pick the largest-magnitude direction component as the projection axis
+    // `kz`; this keeps `1/dir[kz]` well conditioned. `kx`/`ky` are the other two.
+    let mut kz = 0usize;
+    let mut max_abs = dir[0].abs();
+    if dir[1].abs() > max_abs {
+        kz = 1;
+        max_abs = dir[1].abs();
+    }
+    if dir[2].abs() > max_abs {
+        kz = 2;
+    }
+    let mut kx = if kz + 1 == 3 { 0 } else { kz + 1 };
+    let mut ky = if kx + 1 == 3 { 0 } else { kx + 1 };
+    // Swap `kx`/`ky` when the ray points down `-kz` so winding is preserved.
+    if dir[kz] < 0.0 {
+        let tmp = kx;
+        kx = ky;
+        ky = tmp;
+    }
+
+    // Shear/scale constants aligning the ray with `+kz`.
+    let sx = dir[kx] / dir[kz];
+    let sy = dir[ky] / dir[kz];
+    let sz = 1.0 / dir[kz];
+
+    // Triangle vertices relative to the ray origin.
+    let a = sub(tri.v0, ray.origin);
+    let b = sub(tri.v1, ray.origin);
+    let c = sub(tri.v2, ray.origin);
+
+    // Sheared 2D coordinates in the (kx, ky) plane.
+    let ax = a[kx] - sx * a[kz];
+    let ay = a[ky] - sy * a[kz];
+    let bx = b[kx] - sx * b[kz];
+    let by = b[ky] - sy * b[kz];
+    let cx = c[kx] - sx * c[kz];
+    let cy = c[ky] - sy * c[kz];
+
+    // Scaled barycentric coordinates: `wa`/`wb`/`wc` weight `v0`/`v1`/`v2`.
+    let mut wa = cx * by - cy * bx;
+    let mut wb = ax * cy - ay * cx;
+    let mut wc = bx * ay - by * ax;
+
+    // Exact `f64` fallback on boundary zeros: this is what makes the test
+    // watertight, since it removes the single-precision rounding that would
+    // otherwise let a shared edge fall between two triangles.
+    if wa == 0.0 || wb == 0.0 || wc == 0.0 {
+        wa = (f64::from(cx) * f64::from(by) - f64::from(cy) * f64::from(bx)) as f32;
+        wb = (f64::from(ax) * f64::from(cy) - f64::from(ay) * f64::from(cx)) as f32;
+        wc = (f64::from(bx) * f64::from(ay) - f64::from(by) * f64::from(ax)) as f32;
+    }
+
+    // Outside the triangle when the edge signs disagree (a boundary zero is
+    // accepted by both the positive and negative branch, so edges never leak).
+    if (wa < 0.0 || wb < 0.0 || wc < 0.0) && (wa > 0.0 || wb > 0.0 || wc > 0.0) {
+        return None;
+    }
+
+    // Determinant; a zero determinant means the ray grazes the triangle plane.
+    let det = wa + wb + wc;
+    if det == 0.0 {
+        return None;
+    }
+
+    // Scaled hit distance, then the interval test carrying `det`'s sign so we
+    // reject before dividing.
+    let az = sz * a[kz];
+    let bz = sz * b[kz];
+    let cz = sz * c[kz];
+    let t_scaled = wa * az + wb * bz + wc * cz;
+    if det > 0.0 {
+        if t_scaled < ray.t_min * det || t_scaled > ray.t_max * det {
+            return None;
+        }
+    } else if t_scaled > ray.t_min * det || t_scaled < ray.t_max * det {
+        return None;
+    }
+
+    let inv_det = 1.0 / det;
+    Some((t_scaled * inv_det, wb * inv_det, wc * inv_det))
+}
+
 impl Bvh {
     /// Nearest intersection along `ray`, or `None` if the ray hits nothing.
     ///
@@ -336,6 +440,116 @@ fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
 mod tests {
     use super::*;
     use crate::ray_scene::bvh::{Bvh, Triangle};
+
+    /// Deterministic proof of watertightness: rays that strike a shared edge
+    /// exactly must never fall between the two triangles. On this rotated quad
+    /// the Möller–Trumbore test leaks (misses both) on some samples, while the
+    /// watertight test always reports at least one hit.
+    #[test]
+    fn watertight_never_leaks_on_shared_edge() {
+        // Rotate a unit quad off every axis, then split it along its diagonal.
+        let (c, sn) = (0.8f32, 0.6f32);
+        let rot = |p: [f32; 3]| {
+            let z = sn * p[1] + c * p[2];
+            [c * p[0] - sn * z, c * p[1] - sn * p[2], sn * p[0] + c * z]
+        };
+        let p00 = rot([0.0, 0.0, 3.0]);
+        let p10 = rot([1.0, 0.0, 3.0]);
+        let p11 = rot([1.0, 1.0, 3.0]);
+        let p01 = rot([0.0, 1.0, 3.0]);
+        let a = tri(p00, p10, p11, 0);
+        let b = tri(p00, p11, p01, 1);
+
+        let n = 20_000u32;
+        let mut mt_leaks = 0u32;
+        let mut wt_leaks = 0u32;
+        for i in 1..n {
+            let s = i as f32 / n as f32;
+            // A point on the shared diagonal p00 -> p11, seen from the origin.
+            let dir = [
+                p00[0] + s * (p11[0] - p00[0]),
+                p00[1] + s * (p11[1] - p00[1]),
+                p00[2] + s * (p11[2] - p00[2]),
+            ];
+            let ray = Ray::infinite([0.0, 0.0, 0.0], dir);
+            let mt = usize::from(intersect_triangle(&ray, &a).is_some())
+                + usize::from(intersect_triangle(&ray, &b).is_some());
+            let wt = usize::from(intersect_triangle_watertight(&ray, &a).is_some())
+                + usize::from(intersect_triangle_watertight(&ray, &b).is_some());
+            if mt == 0 {
+                mt_leaks += 1;
+            }
+            if wt == 0 {
+                wt_leaks += 1;
+            }
+        }
+        assert_eq!(wt_leaks, 0, "watertight test leaked on a shared edge");
+        assert!(
+            mt_leaks > 0,
+            "expected Moller-Trumbore to leak so the improvement is exercised",
+        );
+    }
+
+    /// Where both intersectors agree a ray hits a given triangle, the reported
+    /// distance and barycentric weights must match closely.
+    #[test]
+    fn watertight_matches_moller_trumbore_on_clear_hits() {
+        let tris = random_scene(400, 0x00c0_ffee_dead_beef);
+        let mut rng = Rng(0x1234_5678_9abc_def0);
+        let mut compared = 0u32;
+        for _ in 0..6000 {
+            let origin = [
+                rng.range(-12.0, 12.0),
+                rng.range(-12.0, 12.0),
+                rng.range(-12.0, 12.0),
+            ];
+            let dir = [
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+            ];
+            let ray = Ray::infinite(origin, dir);
+            for t in &tris {
+                if let (Some((tm, um, vm)), Some((tw, uw, vw))) = (
+                    intersect_triangle(&ray, t),
+                    intersect_triangle_watertight(&ray, t),
+                ) {
+                    assert!((tm - tw).abs() <= 1e-3 * tm.abs().max(1.0), "t {tm} vs {tw}");
+                    assert!((um - uw).abs() <= 2e-3, "u {um} vs {uw}");
+                    assert!((vm - vw).abs() <= 2e-3, "v {vm} vs {vw}");
+                    compared += 1;
+                }
+            }
+        }
+        assert!(compared > 100, "too few mutual hits ({compared}) to be meaningful");
+    }
+
+    /// The test is double-sided: it reports a hit from either face and returns
+    /// mirrored barycentric weights when the winding flips.
+    #[test]
+    fn watertight_hits_both_faces() {
+        let t = tri([-1.0, -1.0, 2.0], [1.0, -1.0, 2.0], [0.0, 1.0, 2.0], 7);
+        let front = Ray::infinite([0.0, 0.0, 0.0], [0.0, 0.0, 1.0]);
+        let back = Ray::infinite([0.0, 0.0, 4.0], [0.0, 0.0, -1.0]);
+        let (tf, _, _) = intersect_triangle_watertight(&front, &t).expect("front hit");
+        let (tb, _, _) = intersect_triangle_watertight(&back, &t).expect("back hit");
+        assert!((tf - 2.0).abs() < 1e-5);
+        assert!((tb - 2.0).abs() < 1e-5);
+    }
+
+    /// Rays parallel to the triangle plane and zero-area triangles miss.
+    #[test]
+    fn watertight_misses_parallel_and_degenerate() {
+        // Triangle in the z=2 plane; a ray gliding through z=0 never reaches it.
+        let t = tri([-1.0, -1.0, 2.0], [1.0, -1.0, 2.0], [0.0, 1.0, 2.0], 0);
+        let parallel = Ray::infinite([0.0, 0.0, 0.0], [1.0, 0.0, 0.0]);
+        assert!(intersect_triangle_watertight(&parallel, &t).is_none());
+
+        // Collinear vertices span no area, so nothing can be inside them.
+        let degenerate = tri([0.0, 0.0, 2.0], [1.0, 0.0, 2.0], [2.0, 0.0, 2.0], 1);
+        let ray = Ray::infinite([0.5, 0.0, 0.0], [0.0, 0.0, 1.0]);
+        assert!(intersect_triangle_watertight(&ray, &degenerate).is_none());
+    }
 
     fn tri(a: [f32; 3], b: [f32; 3], c: [f32; 3], id: u32) -> Triangle {
         Triangle::new(a, b, c, id)
