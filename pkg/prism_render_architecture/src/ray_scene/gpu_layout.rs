@@ -317,7 +317,11 @@ impl GpuBlasPool {
     ///
     /// The copy re-bases the leaf `first_primitive` fields to zero so the
     /// returned standalone buffer traverses correctly on its own; the shared
-    /// pool keeps the original global bases for kernel use.
+    /// pool keeps the original global bases for kernel use. Production traversal
+    /// walks the pool directly via [`GpuBlasPool::closest_hit`] /
+    /// [`GpuBlasPool::any_hit`]; this copying reconstruction exists only to
+    /// cross-check that the direct walk matches a standalone per-`BLAS` buffer.
+    #[cfg(test)]
     #[must_use]
     fn blas_view(&self, blas: usize) -> GpuBvhBuffers {
         let o = blas * BLAS_OFFSET_WORDS;
@@ -340,6 +344,144 @@ impl GpuBlasPool {
             self.triangles[tri_base * TRIANGLE_WORDS..(tri_base + tri_count) * TRIANGLE_WORDS]
                 .to_vec();
         GpuBvhBuffers { nodes, triangles }
+    }
+
+    /// Nearest intersection of `ray` against `BLAS` `blas`, walking the shared
+    /// pool buffers directly by per-`BLAS` offset — no slice copy — exactly as a
+    /// compute kernel bound to the single pooled node/triangle arrays does.
+    ///
+    /// Node child indices are `BLAS`-local (rebased by the pool `node_base` at
+    /// read time); leaf `first_primitive` is already a global pool triangle
+    /// index. The walk otherwise mirrors [`GpuBvhBuffers::closest_hit`]
+    /// bit-for-bit — same slab rejection, near/far ordering, running `t_max`
+    /// shrink and [`intersect_triangle`] test — so it agrees with the copying
+    /// [`GpuBlasPool::blas_view`] path and with [`Bvh::closest_hit`].
+    #[must_use]
+    pub fn closest_hit(&self, blas: usize, ray: &Ray) -> Option<Hit> {
+        let o = blas * BLAS_OFFSET_WORDS;
+        let node_base = self.offsets[o] as usize;
+        let node_count = self.offsets[o + 1] as usize;
+        if node_count == 0 {
+            return None;
+        }
+        let mut ray = *ray;
+        let mut best: Option<Hit> = None;
+
+        let mut stack = [0u32; 64];
+        let mut sp = 0usize;
+        let mut node_index = 0u32;
+        loop {
+            let base = (node_base + node_index as usize) * NODE_WORDS;
+            let bounds = Aabb::new(read_vec3(&self.nodes, base), read_vec3(&self.nodes, base + 3));
+            if ray.aabb_interval(&bounds, ray.t_min(), ray.t_max()).is_some() {
+                let primitive_count = self.nodes[base + 8];
+                if primitive_count > 0 {
+                    // Leaf `first_primitive` is a global pool triangle index.
+                    let start = self.nodes[base + 6] as usize;
+                    let end = start + primitive_count as usize;
+                    for pi in start..end {
+                        let tb = pi * TRIANGLE_WORDS;
+                        let tri = Triangle::new(
+                            read_vec3(&self.triangles, tb),
+                            read_vec3(&self.triangles, tb + 3),
+                            read_vec3(&self.triangles, tb + 6),
+                            self.triangles[tb + 9],
+                        );
+                        if let Some((t, u, v)) = intersect_triangle(&ray, &tri) {
+                            ray = Ray::new(ray.origin(), ray.direction(), ray.t_min(), t);
+                            best = Some(Hit {
+                                t,
+                                u,
+                                v,
+                                primitive: tri.primitive,
+                            });
+                        }
+                    }
+                    match pop(&mut stack, &mut sp) {
+                        Some(n) => node_index = n,
+                        None => break,
+                    }
+                } else {
+                    // Child indices are BLAS-local; `node_base` rebases at read.
+                    let first_child = node_index + 1;
+                    let second_child = self.nodes[base + 7];
+                    let axis = self.nodes[base + 9] as usize;
+                    let neg = ray.direction()[axis] < 0.0;
+                    let (near, far) = if neg {
+                        (second_child, first_child)
+                    } else {
+                        (first_child, second_child)
+                    };
+                    if sp < stack.len() {
+                        stack[sp] = far;
+                        sp += 1;
+                    }
+                    node_index = near;
+                }
+            } else {
+                match pop(&mut stack, &mut sp) {
+                    Some(n) => node_index = n,
+                    None => break,
+                }
+            }
+        }
+        best
+    }
+
+    /// True when *any* triangle of `BLAS` `blas` intersects `ray` inside its
+    /// interval; the zero-copy pool-direct twin of [`GpuBvhBuffers::any_hit`]
+    /// used by [`GpuTlasBuffers::any_hit`] for shadow / AO occlusion rays.
+    #[must_use]
+    pub fn any_hit(&self, blas: usize, ray: &Ray) -> bool {
+        let o = blas * BLAS_OFFSET_WORDS;
+        let node_base = self.offsets[o] as usize;
+        let node_count = self.offsets[o + 1] as usize;
+        if node_count == 0 {
+            return false;
+        }
+        let mut stack = [0u32; 64];
+        let mut sp = 0usize;
+        let mut node_index = 0u32;
+        loop {
+            let base = (node_base + node_index as usize) * NODE_WORDS;
+            let bounds = Aabb::new(read_vec3(&self.nodes, base), read_vec3(&self.nodes, base + 3));
+            if ray.aabb_interval(&bounds, ray.t_min(), ray.t_max()).is_some() {
+                let primitive_count = self.nodes[base + 8];
+                if primitive_count > 0 {
+                    let start = self.nodes[base + 6] as usize;
+                    let end = start + primitive_count as usize;
+                    for pi in start..end {
+                        let tb = pi * TRIANGLE_WORDS;
+                        let tri = Triangle::new(
+                            read_vec3(&self.triangles, tb),
+                            read_vec3(&self.triangles, tb + 3),
+                            read_vec3(&self.triangles, tb + 6),
+                            self.triangles[tb + 9],
+                        );
+                        if intersect_triangle(ray, &tri).is_some() {
+                            return true;
+                        }
+                    }
+                    match pop(&mut stack, &mut sp) {
+                        Some(n) => node_index = n,
+                        None => break,
+                    }
+                } else {
+                    let first_child = node_index + 1;
+                    if sp < stack.len() {
+                        stack[sp] = self.nodes[base + 7];
+                        sp += 1;
+                    }
+                    node_index = first_child;
+                }
+            } else {
+                match pop(&mut stack, &mut sp) {
+                    Some(n) => node_index = n,
+                    None => break,
+                }
+            }
+        }
+        false
     }
 }
 
@@ -464,8 +606,7 @@ impl GpuTlasBuffers {
                         let obj_origin = world_to_object.transform_point(ray.origin());
                         let obj_dir = world_to_object.transform_vector(ray.direction());
                         let obj_ray = Ray::new(obj_origin, obj_dir, t_min, best_t);
-                        let view = pool.blas_view(blas);
-                        if let Some(hit) = view.closest_hit(&obj_ray)
+                        if let Some(hit) = pool.closest_hit(blas, &obj_ray)
                             && hit.t < best_t
                         {
                             best_t = hit.t;
@@ -541,7 +682,7 @@ impl GpuTlasBuffers {
                         let obj_origin = world_to_object.transform_point(ray.origin());
                         let obj_dir = world_to_object.transform_vector(ray.direction());
                         let obj_ray = Ray::new(obj_origin, obj_dir, t_min, t_max);
-                        if pool.blas_view(blas).any_hit(&obj_ray) {
+                        if pool.any_hit(blas, &obj_ray) {
                             return true;
                         }
                     }
@@ -751,6 +892,62 @@ mod tests {
         let ray = Ray::infinite([0.0, 0.0, 0.0], [0.0, 0.0, 1.0]);
         assert!(packed.closest_hit(&ray).is_none());
         assert!(!packed.any_hit(&ray));
+    }
+
+    #[test]
+    fn pool_direct_traversal_matches_blas_view_bit_for_bit() {
+        // The zero-copy pool-direct walk (production path) must be
+        // indistinguishable from reconstructing a standalone per-BLAS buffer
+        // and walking that — proving the `node_base` rebasing and global leaf
+        // indexing are exactly equivalent to the copying view.
+        let mut rng = Rng::new(0x1CE_B00C);
+        let blases: Vec<Bvh> = (0..4)
+            .map(|_| Bvh::build(&random_triangles(150, &mut rng)))
+            .collect();
+        let pool = GpuBlasPool::from_blases(&blases);
+
+        let mut closest_hits = 0u32;
+        let mut occlusions = 0u32;
+        for (blas, bvh) in blases.iter().enumerate() {
+            let view = pool.blas_view(blas);
+            for _ in 0..2000 {
+                let origin = [
+                    rng.range(-12.0, 12.0),
+                    rng.range(-12.0, 12.0),
+                    rng.range(-12.0, 12.0),
+                ];
+                let dir = [
+                    rng.range(-1.0, 1.0),
+                    rng.range(-1.0, 1.0),
+                    rng.range(-1.0, 1.0),
+                ];
+                let ray = if rng.unit() < 0.5 {
+                    Ray::infinite(origin, dir)
+                } else {
+                    Ray::new(origin, dir, rng.range(0.0, 1.0), rng.range(2.0, 20.0))
+                };
+                // Pool-direct vs copying view — bit-for-bit on the whole `Hit`.
+                let direct = pool.closest_hit(blas, &ray);
+                let via_view = view.closest_hit(&ray);
+                assert_eq!(direct, via_view, "pool-direct closest-hit divergence");
+                // The direct walk must also match the standalone `Bvh` golden.
+                assert_eq!(direct, bvh.closest_hit(&ray), "pool vs Bvh golden");
+                // any-hit parity across all three paths.
+                let direct_any = pool.any_hit(blas, &ray);
+                assert_eq!(direct_any, view.any_hit(&ray), "pool-direct any-hit divergence");
+                assert_eq!(direct_any, direct.is_some(), "any-hit vs closest existence");
+                if direct.is_some() {
+                    closest_hits += 1;
+                }
+                if direct_any {
+                    occlusions += 1;
+                }
+            }
+        }
+        // Both counts are equal (any-hit agrees with closest existence every
+        // ray); guard only that the scene is non-trivially populated.
+        assert!(closest_hits > 40, "scene too sparse: {closest_hits}");
+        assert!(occlusions > 40, "scene too sparse: {occlusions}");
     }
 
     #[test]
