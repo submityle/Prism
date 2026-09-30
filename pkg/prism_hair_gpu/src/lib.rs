@@ -125,6 +125,17 @@
 //!   density/decimation LOD; `Sum`, tolerance-checked, for the motion energy
 //!   that gates sleep) (see [`analysis_reduce`]).
 //!
+//! * [`GpuHairClosestPointTriangle`] evaluates
+//!   [`closest_point_on_triangle`](prism_render_architecture::hair::binding::closest_point_on_triangle),
+//!   the inner kernel of the strand-root binder isolated as a stand-alone
+//!   twin — one thread per `(p, a, b, c)` query returns the point on triangle
+//!   `abc` closest to `p` plus its barycentric weights via the standard
+//!   Ericson Voronoi-region test (three vertex, three edge, one interior
+//!   region). The arithmetic-free vertex regions are bit-exact while the
+//!   dividing edge and interior regions are tolerance-checked; this isolates
+//!   per-region coverage the aggregate nearest scan in [`root_bind`] cannot
+//!   (see [`closest_point_triangle`]).
+//!
 //! * [`GpuHairVoxelDensity`] evaluates
 //!   [`accumulate_voxel_density`](prism_render_architecture::hair::deep_transmittance::accumulate_voxel_density),
 //!   the sort-free froxel sibling of the deep opacity packing — one thread per
@@ -281,6 +292,7 @@
 pub mod analysis_reduce;
 pub mod bin_samples;
 pub mod binding_importance;
+pub mod closest_point_triangle;
 pub mod collision;
 pub mod context;
 pub mod decimation_priority;
@@ -312,6 +324,9 @@ pub mod wind;
 pub use analysis_reduce::{reference_reduce, GpuHairAnalysisReduce};
 pub use bin_samples::GpuHairBinSamples;
 pub use binding_importance::GpuHairBindingImportance;
+pub use closest_point_triangle::{
+    reference_closest_point, ClosestPointQuery, ClosestPointResult, GpuHairClosestPointTriangle,
+};
 pub use collision::{query_for, CollisionQuery, GpuColliderProjector};
 pub use context::{block_on, GpuContext};
 pub use decimation_priority::GpuDecimationPriority;
