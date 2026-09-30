@@ -44,6 +44,15 @@
 //!   host-built per-particle neighbor slice so the reduction order matches the
 //!   reference (see [`self_collision_jacobi`]).
 //!
+//! * [`GpuStrandMetrics`] evaluates
+//!   [`strand_arc_length`](prism_render_architecture::hair::decimation::strand_arc_length)
+//!   and
+//!   [`strand_curvature`](prism_render_architecture::hair::decimation::strand_curvature),
+//!   folding each render strand's control polyline into its arc length and
+//!   transcendental-free turning one thread per strand over the strand-major
+//!   fixed-stride point pool, the two cheap scalars the density/decimation LOD
+//!   ranking consumes (see [`strand_metrics`]).
+//!
 //! # Portability
 //!
 //! The projection uses only `sqrt`, `min`, `max`, `clamp`, `dot` and
@@ -75,6 +84,7 @@ pub mod frames;
 pub mod ribbon;
 pub mod sdf_collision;
 pub mod self_collision_jacobi;
+pub mod strand_metrics;
 pub mod wind;
 
 pub use collision::{query_for, CollisionQuery, GpuColliderProjector};
@@ -83,4 +93,5 @@ pub use frames::{GpuStrandFrame, GpuStrandFrames};
 pub use ribbon::{GpuRibbon, GpuRibbonMesh, RibbonStrandInput};
 pub use sdf_collision::GpuSdfCollider;
 pub use self_collision_jacobi::GpuSelfCollisionJacobi;
+pub use strand_metrics::{GpuStrandMetric, GpuStrandMetrics};
 pub use wind::{query_for_wind, GpuWindField, WindQuery};
