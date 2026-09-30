@@ -15,7 +15,9 @@
 // momentum component are quantised to `i32` (multiply by a fixed scale, round,
 // `atomicAdd`) exactly as the fluid affine scatter does. The host dequantises
 // on read-back. The scales are chosen so the accumulated magnitudes stay well
-// within `i32` range for the tested configurations.
+// within `i32` range for the tested configurations. The scale is 2^22, which
+// keeps roughly seven fractional digits while leaving ample headroom below the
+// `i32` limit for the accumulated mass/momentum magnitudes seen in practice.
 //
 // Provenance: the affine MLS-MPM scatter with the folded stress term (Hu et al.
 // 2018; Jiang et al. 2015) and the fixed-corotated model (Stomakhin et al.
@@ -23,9 +25,9 @@
 // or derived code.
 
 // Fixed-point scale for accumulated mass.
-const MPM_MASS_SCALE: f32 = 65536.0;
+const MPM_MASS_SCALE: f32 = 4194304.0;
 // Fixed-point scale for accumulated momentum components.
-const MPM_MOMENTUM_SCALE: f32 = 65536.0;
+const MPM_MOMENTUM_SCALE: f32 = 4194304.0;
 
 // Uniform parameter block. Mirrors `P2gParams` in the Rust harness.
 struct P2gParams {

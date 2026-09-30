@@ -46,10 +46,10 @@ use super::params::{mat3_to_cols, vec3_to_vec4};
 
 /// Fixed-point scale applied to accumulated mass before quantising to `i32`.
 /// Must match `MPM_MASS_SCALE` in `shaders/mpm_p2g.wgsl`.
-const MASS_SCALE: f32 = 65536.0;
+const MASS_SCALE: f32 = 4_194_304.0;
 /// Fixed-point scale applied to accumulated momentum components before
 /// quantising to `i32`. Must match `MPM_MOMENTUM_SCALE` in the WGSL.
-const MOMENTUM_SCALE: f32 = 65536.0;
+const MOMENTUM_SCALE: f32 = 4_194_304.0;
 
 /// Uniform parameter block. Layout matches `P2gParams` in
 /// `shaders/mpm_p2g.wgsl`.
