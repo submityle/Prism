@@ -36,102 +36,23 @@
 //! `None`，测试打印跳过提示而非失败，让套件在任何机器上保持绿，同时在有真实设备
 //! （如 `Apple` `M` 系列 `GPU`）时跑满整条 dispatch。
 
-use bevy_asset::{uuid::Uuid, AssetId};
-use bevy_platform::future::block_on;
-use bevy_shader::{Shader, ShaderCache, ShaderCacheError, ShaderCacheSource, ValidateShader};
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
 use wgpu::{
-    BackendOptions, Backends, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
-    BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, BufferBindingType,
-    BufferDescriptor, BufferUsages, CommandEncoderDescriptor, ComputePassDescriptor,
-    ComputePipelineDescriptor, DeviceDescriptor, Instance, InstanceDescriptor, InstanceFlags,
-    MapMode, PipelineCompilationOptions, PipelineLayoutDescriptor, PollType, RequestAdapterOptions,
-    ShaderModuleDescriptor, ShaderSource, ShaderStages,
+    BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
+    BindGroupLayoutEntry, BindingType, BufferBindingType, BufferDescriptor, BufferUsages,
+    CommandEncoderDescriptor, ComputePassDescriptor, ComputePipelineDescriptor, MapMode,
+    PipelineCompilationOptions, PipelineLayoutDescriptor, PollType, ShaderModuleDescriptor,
+    ShaderSource, ShaderStages,
 };
 
 use prism_render_architecture::cloth::collision::{resolve_body_collisions, BodyCollider};
 use prism_render_architecture::cloth::{ClothParticle, Vec3};
 
 use super::abi::{GpuClothBodyParams, GpuClothCollider};
+use super::collision_gpu_test_support::{
+    compile_collision_wgsl, find_entry_point, storage_from_slice, try_collision_device, PARITY_EPS,
+};
 use super::pack::pack_colliders;
-
-/// `GPU`-对-`CPU` 逐分量绝对容差。
-///
-/// body-collision 是单 pass 纯投影，两条路径跑同一份 `float32` 算术，唯一自由度是
-/// 球面投影里 `1.0 / sqrt`（CPU）与 `inverseSqrt`（WESL，多为原生 `rsqrt`）的几个
-/// ULP 之差。位置量级为 `O(1)`，`1e-4` 既能吸收该 ULP 差，又远紧于任何真实内核 bug
-/// 会产生的 `O(0.1)` 级发散。
-const PARITY_EPS: f32 = 1.0e-4;
-
-/// 本模块编译 `cloth_collision.wesl` 用的一次性 `AssetId`，只需在本次编译内唯一。
-const CLOTH_COLLISION_WESL_UUID: u128 = 0x434c_4f54_485f_434f_4c4c_4244_5f42_4f01;
-
-/// 把 `WESL` 源经 render-world 的 [`ShaderCache`] 编译回 `Wgsl` 字符串（不建
-/// 设备），供本模块自建的裸 `wgpu` 设备使用。镜像 `sim_gpu_tests` 的编译闭包。
-fn keep_wgsl(
-    _: &(),
-    source: ShaderCacheSource,
-    _: &ValidateShader,
-) -> Result<String, ShaderCacheError> {
-    match source {
-        ShaderCacheSource::Wgsl(source) => Ok(source),
-        ShaderCacheSource::SpirV(_) => unreachable!("cloth shaders are WESL"),
-    }
-}
-
-/// 经 `ShaderCache` 把嵌入式 `cloth_collision.wesl` 编译成 `Wgsl`。
-fn compile_collision_wgsl() -> String {
-    let mut cache = ShaderCache::new((), keep_wgsl);
-    let id = AssetId::Uuid {
-        uuid: Uuid::from_u128(CLOTH_COLLISION_WESL_UUID),
-    };
-    cache.set_shader(
-        id,
-        Shader::from_wesl(
-            include_str!("../shaders/cloth_collision.wesl"),
-            "shaders/cloth_collision.wesl",
-        ),
-    );
-    let module = cache
-        .get(0, id, &[])
-        .unwrap_or_else(|error| panic!("cloth_collision.wesl failed to compile: {error}"));
-    (*module).clone()
-}
-
-/// 在编译后的 `Wgsl` 里按子串定位 compute 入口的真实符号名（`WESL` 可能给模块内
-/// 名字加前缀，故按子串而非固定符号查找）。
-fn find_entry_point(wgsl: &str, needle: &str) -> String {
-    for line in wgsl.lines() {
-        let trimmed = line.trim_start();
-        if let Some(rest) = trimmed.strip_prefix("fn ")
-            && let Some(paren) = rest.find('(')
-        {
-            let name = &rest[..paren];
-            if name.contains(needle) {
-                return name.to_string();
-            }
-        }
-    }
-    panic!("no compute entry point containing `{needle}` in compiled Wgsl");
-}
-
-/// 尽力获取一个原生 compute 设备与队列。
-///
-/// body-collision 不用 `immediate`（push-constant），故只需一个默认能力的 compute
-/// 设备——比求解核宽松，能在更多机器上跑满。无 adapter 时返回 `None`（不 panic），
-/// 让无头机保持绿。
-fn try_collision_device() -> Option<(wgpu::Device, wgpu::Queue)> {
-    let instance = Instance::new(InstanceDescriptor {
-        backends: Backends::METAL | Backends::VULKAN | Backends::DX12,
-        flags: InstanceFlags::default(),
-        memory_budget_thresholds: Default::default(),
-        display: None,
-        backend_options: BackendOptions::default(),
-    });
-    let adapter = block_on(instance.request_adapter(&RequestAdapterOptions::default())).ok()?;
-    let (device, queue) = block_on(adapter.request_device(&DeviceDescriptor::default())).ok()?;
-    Some((device, queue))
-}
 
 /// `cloth_body_collision` 的 group-0 布局：positions（rw storage）、colliders（ro
 /// storage）、`body_params`（uniform）、`prev_positions`（ro storage）。与 WESL 的
@@ -165,29 +86,6 @@ fn body_bind_group_layout(device: &wgpu::Device) -> BindGroupLayout {
             storage(3, true),
         ],
     })
-}
-
-/// 从一份 `Pod` 切片建只读存储缓冲；空输入回退到一个零元素，避免 runtime-sized
-/// array 绑定非法（`0` 字节绑定被拒）。
-fn storage_from_slice<T: bytemuck::Pod>(
-    device: &wgpu::Device,
-    label: &str,
-    data: &[T],
-    fallback: T,
-) -> wgpu::Buffer {
-    if data.is_empty() {
-        device.create_buffer_init(&BufferInitDescriptor {
-            label: Some(label),
-            contents: bytemuck::bytes_of(&fallback),
-            usage: BufferUsages::STORAGE,
-        })
-    } else {
-        device.create_buffer_init(&BufferInitDescriptor {
-            label: Some(label),
-            contents: bytemuck::cast_slice(data),
-            usage: BufferUsages::STORAGE,
-        })
-    }
 }
 
 /// 在真机上跑一遍 `cloth_body_collision`，读回投影后的 positions（`xyzw`）。

@@ -20,12 +20,13 @@
 //! pack into their own buffer.
 
 use prism_render_architecture::cloth::bending::BendingConstraint;
-use prism_render_architecture::cloth::collision::BodyCollider;
+use prism_render_architecture::cloth::collision::{Backstop, BodyCollider};
 use prism_render_architecture::cloth::gpu::upload::{BendingUploadPlan, ConstraintUploadPlan};
 use prism_render_architecture::cloth::{Constraint, ConstraintKind};
 
 use super::abi::{
-    GpuClothBendingConstraint, GpuClothCollider, GpuClothConstraint, CLOTH_COLLIDER_CAPSULE,
+    GpuClothBackstop, GpuClothBendingConstraint, GpuClothCollider, GpuClothConstraint,
+    CLOTH_COLLIDER_CAPSULE,
     CLOTH_COLLIDER_HALF_SPACE, CLOTH_COLLIDER_SPHERE, CLOTH_CONSTRAINT_BEND, CLOTH_CONSTRAINT_LRA,
     CLOTH_CONSTRAINT_SHEAR, CLOTH_CONSTRAINT_STRETCH, CLOTH_CONSTRAINT_TETHER,
 };
@@ -187,6 +188,54 @@ pub(crate) fn pack_collider(collider: &BodyCollider) -> GpuClothCollider {
 )]
 pub(crate) fn pack_colliders(colliders: &[BodyCollider]) -> Vec<GpuClothCollider> {
     colliders.iter().map(pack_collider).collect()
+}
+
+/// Packs one authored architecture-layer [`Backstop`] plane into its
+/// byte-compatible [`GpuClothBackstop`] mirror, the two-`vec4` `std430` record
+/// `cloth_collision.wesl` reads.
+///
+/// This is the host bridge between the `CPU`-golden painted-backstop authoring
+/// type ([`Backstop`], one limiting plane per particle) and the device record
+/// the [`cloth_backstop`](super::abi) kernel clamps against. Slot 0 carries
+/// `origin.xyz` plus the scalar `distance`; slot 1 carries `normal.xyz` plus a
+/// trailing pad word, matching the shader struct field-for-field.
+///
+/// Nothing is normalised or clamped here: the kernel reproduces the CPU
+/// degeneracy rule (a near-zero normal has no defined plane and is inert) on
+/// read via [`apply_backstop`](prism_render_architecture::cloth::collision::apply_backstop),
+/// so the packed record stays a lossless copy of the authored plane.
+#[must_use]
+pub(crate) fn pack_backstop(backstop: &Backstop) -> GpuClothBackstop {
+    GpuClothBackstop {
+        ox: backstop.origin.x,
+        oy: backstop.origin.y,
+        oz: backstop.origin.z,
+        distance: backstop.distance,
+        nx: backstop.normal.x,
+        ny: backstop.normal.y,
+        nz: backstop.normal.z,
+        pad: 0.0,
+    }
+}
+
+/// Packs an authored backstop slice into the contiguous device buffer content
+/// the backstop dispatch binds at `@binding(1)`.
+///
+/// Order is preserved one-to-one: `backstops[i]` constrains particle `i`, so the
+/// packed order is load-bearing and mirrors the CPU
+/// [`resolve_backstops`](prism_render_architecture::cloth::collision::resolve_backstops)
+/// index pairing exactly. An empty input packs to an empty `Vec` (an honest
+/// no-op backstop set).
+#[must_use]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "authored-Backstop slice -> GPU buffer host bridge; exercised now by the backstop on-device parity test and wired into the garment spawn path once main-world painted-backstop authoring lands"
+    )
+)]
+pub(crate) fn pack_backstops(backstops: &[Backstop]) -> Vec<GpuClothBackstop> {
+    backstops.iter().map(pack_backstop).collect()
 }
 
 #[cfg(test)]
@@ -351,5 +400,58 @@ mod tests {
     #[test]
     fn empty_collider_set_packs_to_empty() {
         assert!(pack_colliders(&[]).is_empty());
+    }
+
+    #[test]
+    fn backstop_maps_origin_distance_and_normal() {
+        let packed = pack_backstop(&Backstop {
+            origin: Vec3::new(1.0, 2.0, 3.0),
+            normal: Vec3::new(0.0, 1.0, 0.0),
+            distance: 0.5,
+        });
+        assert_eq!([packed.ox, packed.oy, packed.oz], [1.0, 2.0, 3.0]);
+        assert!((packed.distance - 0.5).abs() <= f32::EPSILON);
+        assert_eq!([packed.nx, packed.ny, packed.nz], [0.0, 1.0, 0.0]);
+        // The trailing pad word must be zeroed so the record is deterministic.
+        assert_eq!(packed.pad, 0.0);
+    }
+
+    #[test]
+    fn backstop_preserves_a_non_unit_normal_verbatim() {
+        // Packing is lossless: the kernel normalises on read, so a non-unit
+        // authored normal must be copied through unchanged.
+        let packed = pack_backstop(&Backstop {
+            origin: Vec3::new(-1.0, 0.0, 4.0),
+            normal: Vec3::new(0.0, 3.0, 0.0),
+            distance: -0.25,
+        });
+        assert_eq!([packed.nx, packed.ny, packed.nz], [0.0, 3.0, 0.0]);
+        assert!((packed.distance + 0.25).abs() <= f32::EPSILON);
+    }
+
+    #[test]
+    fn packed_backstops_preserve_index_pairing_and_length() {
+        let input = vec![
+            Backstop {
+                origin: Vec3::new(0.0, 0.0, 0.0),
+                normal: Vec3::new(0.0, 0.0, 1.0),
+                distance: 0.1,
+            },
+            Backstop {
+                origin: Vec3::new(1.0, 1.0, 1.0),
+                normal: Vec3::new(1.0, 0.0, 0.0),
+                distance: 0.2,
+            },
+        ];
+        let packed = pack_backstops(&input);
+        assert_eq!(packed.len(), input.len());
+        for (i, b) in input.iter().enumerate() {
+            assert_eq!(packed[i], pack_backstop(b));
+        }
+    }
+
+    #[test]
+    fn empty_backstop_set_packs_to_empty() {
+        assert!(pack_backstops(&[]).is_empty());
     }
 }
