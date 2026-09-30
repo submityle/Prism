@@ -45,6 +45,7 @@ pub mod broadphase;
 pub mod buffer;
 pub mod context;
 pub mod fluid;
+pub mod mpm;
 pub mod xpbd;
 
 pub use broadphase::{cpu_broadphase, BroadphaseConfig, BroadphaseError, CandidatePair, Particle};
@@ -57,3 +58,4 @@ pub use fluid::{
 pub use xpbd::{
     cpu_solve, Colouring, DistanceConstraint, GpuXpbdSolver, ParticleState, XpbdConfig, XpbdError,
 };
+pub use mpm::GpuMpmConstitutive;
