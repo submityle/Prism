@@ -42,6 +42,10 @@
 //!   buffer layout ([`sphere_gpu_layout::SPHERE_WORDS`] stride, shared
 //!   [`gpu_layout::NODE_WORDS`] nodes) plus a packed procedural-primitive
 //!   walk that reproduces the in-memory sphere walk bit-for-bit.
+//! - [`aabb_primitive_gpu_layout`] — flat, `GPU`-uploadable [`aabb_primitive::AabbBvh`]
+//!   buffer layout ([`aabb_primitive_gpu_layout::AABB_PRIMITIVE_WORDS`] stride,
+//!   shared [`gpu_layout::NODE_WORDS`] nodes) plus a packed procedural-primitive
+//!   walk that reproduces the in-memory box walk bit-for-bit.
 //! - [`traversal`] — [`Ray`]/`BVH` slab + Möller–Trumbore intersection with
 //!   closest-hit and any-hit walks (the `GPU` traversal kernel's golden ref).
 //! - [`traversal_stackless`] — stackless (threaded / escape-index) `BVH` walk:
@@ -72,6 +76,7 @@ pub mod ray_offset;
 pub mod scheduler;
 pub mod aabb_primitive;
 pub mod sphere;
+pub mod aabb_primitive_gpu_layout;
 pub mod sphere_gpu_layout;
 pub mod tlas;
 pub mod traversal;
@@ -95,6 +100,7 @@ pub use ray_offset::offset_ray_origin;
 pub use scheduler::{AccelerationScheduler, ScheduledUpdate};
 pub use aabb_primitive::{AabbBvh, AabbHit, AabbPrimitive};
 pub use sphere::{Sphere, SphereBvh, SphereHit};
+pub use aabb_primitive_gpu_layout::{GpuAabbBvhBuffers, AABB_PRIMITIVE_WORDS};
 pub use sphere_gpu_layout::{GpuSphereBvhBuffers, SPHERE_WORDS};
 pub use traversal::{Hit, Ray};
 pub use traversal_stackless::{BvhEscapeTable, ESCAPE_SENTINEL};
