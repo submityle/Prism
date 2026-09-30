@@ -9,6 +9,9 @@
 //!
 //! # Catalogue
 //!
+//! - [`auto_wah::AutoWahNode`] -- envelope-controlled resonant filter
+//!   (auto-wah / envelope filter): a rectified attack / release follower sweeps
+//!   the shared [`Svf`](crate::nodes::svf::Svf) cutoff with the input loudness.
 //! - [`parametric_eq::ParametricEqNode`] — multi-band parametric EQ built by
 //!   cascading reusable [`Biquad`](crate::nodes::biquad::Biquad) sections.
 //! - [`delay::DelayNode`] — fractional delay line with feedback and wet/dry
@@ -34,6 +37,7 @@
 //! - [`vibrato::VibratoNode`] — single LFO-swept fractional delay for
 //!   periodic pitch modulation.
 
+pub mod auto_wah;
 pub mod bitcrusher;
 pub mod chorus;
 pub mod comb_resonator;
@@ -47,6 +51,7 @@ pub mod tremolo;
 pub mod vibrato;
 pub mod waveshaper;
 
+pub use auto_wah::{AutoWah, AutoWahNode, AutoWahParams, SweepDirection, WahMode};
 pub use bitcrusher::{BitcrusherNode, BitcrusherParams, MAX_BIT_DEPTH, MIN_BIT_DEPTH};
 pub use chorus::{ChorusNode, ChorusParams};
 pub use comb_resonator::{CombResonatorNode, CombResonatorParams, MAX_FEEDBACK, MIN_FREQUENCY_HZ};
