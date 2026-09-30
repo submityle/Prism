@@ -498,6 +498,18 @@ Panner 可插拔（`Panner` trait），对齐 Unity Spatializer / Ambisonic Deco
 
 前端 `bevy_audio` 保留 `AudioPlayer`/`PlaybackSettings`/`Volume` API 兼容，内部翻译为命令。
 
+### 21.1 运行时桥落地契约（`prism_audio_rt`，已实现）
+
+以下为 `prism_audio_rt` 的具体实现契约，是上述线程/内存模型的可运行落地，与 AAA 实践对齐并逐条闭环验证：
+
+- **RT 唯一入口 `process_block`**：单一执行序为 `swap_graph → drain_commands → render → apply_master_gain（逐样本）→ voices.advance → build_telemetry → push_telemetry`。全链路**零分配/零锁/零 panic**（禁 `unwrap/expect/vec!`），`cpu_load` 用 `Instant` 测量并随遥测回传，对齐 Wwise/FMOD 音频回调的硬实时约束。
+- **命令粒度分层**（借鉴 UE5 Quartz 的"块量化 vs 采样精确"分工）：语音生命周期与池容量类命令在**块起点批量应用**（块粒度足够且避免每样本分支开销）；只有母线增益 `SetMasterGain{at_frame, ramp_frames}` 被**逐样本兑现**为采样精确 ramp（`Ramp::Immediate` 或 `Ramp::Linear`）；需要采样精确的音乐/事件时刻交给 §8 `EventScheduler` 的最小堆，避免命令枚举堆积语义无用的时间字段。
+- **图交换 = capacity-1 最新胜**（`GraphHandoff`）：任务线程 `publish_graph` 时，若上一张待接图未被 RT 取走则被挤下并**退回任务线程**处理；RT 在块起点 `take` 最新图并原子换指针，**被换下的旧图绝不在 RT 侧 drop**，而是投入 epoch 回收队列。对齐"渲染图双缓冲 + 编译产物热切换"实践。
+- **epoch 回收带背压**（`RetireQueue`）：RT 侧 `retire(Box<dyn Any + Send>)` 有界推入；队满时**返回资源给 RT 保留**（下一轮再试），绝不阻塞或 drop-in-RT；收集线程 `collect()` 在 gameplay/任务线程 drain 并析构。这实现了 §21"RT 从不 drop 分配"的铁律。
+- **通道形态**：命令环为 MPSC 就绪（生产端 `Clone` 共享 `Arc<ArrayQueue>`，多 ECS/gameplay 系统可并发投递）；遥测环为 SPSC（RT 单产、UI 单耗）。有界、满则 `push` 返回 `Err(item)` 不阻塞不分配。
+- **零 unsafe**：本 crate 不含任何 `unsafe`，无锁底座复用经审计的 `crossbeam-queue::ArrayQueue`，把无锁正确性下沉到成熟依赖，符合 §28 可信度基础设施取向。
+
+
 ---
 
 ## 22. 设备后端、离线渲染与输入捕获
@@ -781,7 +793,9 @@ Panner 可插拔（`Panner` trait），对齐 Unity Spatializer / Ambisonic Deco
 - **M0 内核（已完成）**：math/buffer/param/time/graph + 首发 4 节点，31 测试（27 单测 + 4 doctest），双构建，零告警，已 commit。
 - **M1 效果与动态（✅ 已完成）**：effects（parametric_eq/delay/waveshaper/chorus/flanger/phaser）+ dynamics（detector/compressor/limiter/gate/ducking）+ reverb（fdn/convolver/algorithmic 三族全落地）。103 单测 + 4 doctest 全绿，clippy 零告警，no_std 双构建通过，已分两次 commit。
 - **M2 声源与调度（✅ 已完成）**：`nodes/sources/`（oscillator 带限 PolyBLEP / noise white·pink·brown / sample_player 变调重采样+循环点）+ `scheduler.rs`（采样精确事件最小堆 `EventScheduler` + Quartz 式命名多时钟 `NamedClock` 量化）+ `voice.rs` 语音池（固定容量、优先级窃取、per-group Playback Limit 三策略、Wwise 式虚拟语音行为 `ContinueVirtual`/`Kill`/`RestartFromBeginning`/`PlayFromElapsedTime` + 迟滞进出阈值 revoice）。147 单测 + 5 doctest 全绿，clippy 零告警，no_std 双构建通过，已分三次 commit。streaming/解码依赖 std+file IO，归 M3 device 层，M2 不做假实现。
-- **M3 ECS 桥与设备**：命令/遥测环 + epoch 回收 + cpal/worklet/FileSink/输入捕获 + `bevy_audio` 前端改造（兼容 API）。
+- **M3 ECS 桥与设备**：
+  - **运行时桥（✅ 已落地）**：`prism_audio_rt` crate——有界无锁命令环（`AudioCommand`：SpawnVoice/StopVoice/SetVoiceImportance/SetMasterGain/SetMaxPhysicalVoices）+ 遥测环（`TelemetryFrame`：块序号/播放头/物理·虚拟语音数/主峰值·RMS/CPU 负载）+ **epoch 回收队列**（RT `retire` 推 `Box<dyn Any+Send>`，收集线程 drain·drop，队满时 RT 保留不 drop 形成背压）+ **capacity-1 最新胜图交换**（`GraphHandoff`，被挤下的旧图退回任务线程处理，绝不在 RT 侧 drop）。`process_block` 全链路零分配/锁/panic；语音命令块起点应用（块粒度），仅 `SetMasterGain` 的 `at_frame`+`ramp_frames` 逐样本兑现（采样精确增益 ramp），采样精确音乐事件调度交 §8 `EventScheduler`。真 std 多线程集成测试验证跨线程交付/图交换/回收/遥测。零 unsafe（底座复用 `crossbeam-queue` 的 `ArrayQueue`）。
+  - **设备与前端（进行中）**：`prism_audio_device`（cpal/worklet/FileSink 离线/输入捕获）+ `bevy_audio` 前端改造（`AudioPlayer`/`PlaybackSettings`/`Volume` 兼容 API 翻译为命令）。
 - **M4 空间**：遮挡/障碍/透射/衍射/反射 + 距离塑形（衰减/锥形/spread/focus/doppler/多位置）+ HRTF/Ambisonics + Rooms&Portals + Aux 发送 + 平台空间后端桥。
 - **M5 编排、Patch 与音乐**：Event/Container/State/Switch/RTPC + Patch 编译器与合成原语 + Modulation（LFO/包络/控制总线）+ 交互音乐（段/过渡/stinger）+ Bank/流式 + 对白与本地化解析（§35）+ 程序化音景（§37）。
 - **M6 母带、合规、剖析与工具**：LUFS 归一 + true-peak limiter + HDR 窗口 + snapshot + 无障碍 + Profiler/频谱/计量面板 + 触感与跨模态输出（§36）+ 实时授权与远程工具 API（§38）。
