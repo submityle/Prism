@@ -508,6 +508,65 @@ impl GpuTlasBuffers {
         }
         best
     }
+
+    /// True when *any* instance intersects the world-space `ray` inside its
+    /// interval, mirroring [`Tlas::any_hit`] over the packed buffers and shared
+    /// `pool`. Returns on the first confirmed hit and never shrinks `t_max`
+    /// (the cheap shadow / ambient-occlusion occlusion query), making it the
+    /// packed GPU-ABI twin of the in-memory any-hit walk.
+    #[must_use]
+    pub fn any_hit(&self, ray: &Ray, pool: &GpuBlasPool) -> bool {
+        if self.nodes.is_empty() {
+            return false;
+        }
+        let t_min = ray.t_min();
+        let t_max = ray.t_max();
+
+        let mut stack = [0u32; 64];
+        let mut sp = 0usize;
+        let mut node_index = 0u32;
+        loop {
+            let ni = node_index as usize;
+            let bounds = self.node_bounds(ni);
+            if ray.aabb_interval(&bounds, t_min, t_max).is_some() {
+                let base = ni * NODE_WORDS;
+                let primitive_count = self.nodes[base + 8];
+                if primitive_count > 0 {
+                    let start = self.nodes[base + 6] as usize;
+                    let end = start + primitive_count as usize;
+                    for inst_idx in start..end {
+                        let ib = inst_idx * INSTANCE_WORDS;
+                        let world_to_object = read_affine(&self.instances, ib);
+                        let blas = self.instances[ib + 12] as usize;
+                        let obj_origin = world_to_object.transform_point(ray.origin());
+                        let obj_dir = world_to_object.transform_vector(ray.direction());
+                        let obj_ray = Ray::new(obj_origin, obj_dir, t_min, t_max);
+                        if pool.blas_view(blas).any_hit(&obj_ray) {
+                            return true;
+                        }
+                    }
+                    match pop(&mut stack, &mut sp) {
+                        Some(n) => node_index = n,
+                        None => break,
+                    }
+                } else {
+                    let first_child = node_index + 1;
+                    let second_child = self.nodes[base + 7];
+                    if sp < stack.len() {
+                        stack[sp] = second_child;
+                        sp += 1;
+                    }
+                    node_index = first_child;
+                }
+            } else {
+                match pop(&mut stack, &mut sp) {
+                    Some(n) => node_index = n,
+                    None => break,
+                }
+            }
+        }
+        false
+    }
 }
 
 /// A `TLAS` intersection reported by the packed walk; mirrors
@@ -753,6 +812,64 @@ mod tests {
     }
 
     #[test]
+    fn packed_tlas_any_hit_matches_in_memory() {
+        let mut rng = Rng::new(0x7A5C_0DE9);
+        // A shared pool of a few distinct BLASes so instance BLAS selection and
+        // the pool offset table are both exercised, mirroring the closest-hit
+        // parity test's multi-instance / multi-BLAS setup.
+        let blases: Vec<Bvh> = (0..3)
+            .map(|_| Bvh::build(&random_triangles(120, &mut rng)))
+            .collect();
+        let pool = GpuBlasPool::from_blases(&blases);
+
+        let mut occluded = 0u32;
+        for _ in 0..30 {
+            let count = 1 + (rng.next_u32() % 10) as usize;
+            let mut instances = Vec::with_capacity(count);
+            for id in 0..count {
+                let blas = (rng.next_u32() as usize) % blases.len();
+                instances.push(Instance::new(random_affine(&mut rng), blas, id as u32).unwrap());
+            }
+            let tlas = Tlas::build(&instances, &blases);
+            let packed = GpuTlasBuffers::from_tlas(&tlas);
+
+            for _ in 0..300 {
+                let origin = [
+                    rng.range(-10.0, 10.0),
+                    rng.range(-10.0, 10.0),
+                    rng.range(-10.0, 10.0),
+                ];
+                let dir = [
+                    rng.range(-1.0, 1.0),
+                    rng.range(-1.0, 1.0),
+                    rng.range(-1.0, 1.0),
+                ];
+                // Mix open-ended and bounded intervals so the fixed-`t_max`
+                // any-hit early-out is stressed both ways.
+                let ray = if rng.unit() < 0.5 {
+                    Ray::infinite(origin, dir)
+                } else {
+                    Ray::new(origin, dir, rng.range(0.0, 1.0), rng.range(2.0, 20.0))
+                };
+                let reference = tlas.any_hit(&ray, &blases);
+                let via_packed = packed.any_hit(&ray, &pool);
+                assert_eq!(reference, via_packed, "tlas any-hit divergence");
+                // any_hit must also agree with closest_hit existence over the
+                // same bounded interval on the packed buffers.
+                assert_eq!(
+                    via_packed,
+                    packed.closest_hit(&ray, &pool).is_some(),
+                    "any-hit vs closest-hit existence divergence"
+                );
+                if via_packed {
+                    occluded += 1;
+                }
+            }
+        }
+        assert!(occluded > 100, "scene too sparse to be a meaningful test: {occluded}");
+    }
+
+    #[test]
     fn packed_empty_tlas_never_hits() {
         let blases = vec![Bvh::build(&[Triangle::new(
             [-1.0, -1.0, 0.0],
@@ -766,5 +883,6 @@ mod tests {
         assert!(packed.is_empty());
         let ray = Ray::infinite([0.0, 0.0, 5.0], [0.0, 0.0, -1.0]);
         assert!(packed.closest_hit(&ray, &pool).is_none());
+        assert!(!packed.any_hit(&ray, &pool));
     }
 }
