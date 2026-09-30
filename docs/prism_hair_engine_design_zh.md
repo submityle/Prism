@@ -158,6 +158,29 @@ fallback:
 
 毛发 sim / LOD / 光栅落"compute 可移植"桶（材质设计 §8.1）：数组进数组出，可写手写 Rust CPU golden 逐值对数。当前 `hair/lod.rs` 已有约 13 个确定性单测（阈值分档、抽稀因子、代理档丢几何、strand 档发形变请求、分桶保序、越界跳过、空输入、`native_form` 卡片钳制、`coarser_of` 秩比较）。着色 BSDF closure 可 golden；RT traversal 不可（驱动 BVH）——与全引擎三桶边界一致。
 
+### 9.1 真机 GPU 对拍孪生 crate `prism_hair_gpu`（`WESL`/`GPU` kernel 的落地验证层）
+
+设计文档中每个 `.wesl` GPU twin 都标注「走 `ShaderCache`/`wesl` 管线编译+类型检查通过，真机 dispatch/perf 与数值标定待硬件」——`pkg/prism_hair_gpu` 就是**闭合这道「待硬件」缺口**的独立可选 crate：在 Apple M2 的 Metal 后端上**实跑** compute kernel，并断言其逐值结果与 `prism_render_architecture::hair` 的 `CPU` golden 一致（不只是编译通过，而是**真机数值对拍**——一个通过的真机 parity 测试即「移植 kernel 与 golden 算同值」的直接证据）。
+
+- **定位**：依赖 `prism_render_architecture`(path) + `wgpu 30`(`["wgsl","metal"]`) + `bytemuck` + `futures-lite`；`#![forbid(unsafe_code)]`、`[lints] workspace=true`。测试禁 `f32::sin/cos`（`disallowed_methods`，构造点一律用直线/折线/多项式曲线，保确定性且不引入超越函数分歧）。`GpuContext::try_headless()` 拿不到设备（无 `GPU` 环境）时优雅 skip，不误判失败。
+- **统一 dispatch 形态**：一线程一 query/strand/particle，`@workgroup_size(64)` + `if(idx>=count){return;}`；uniform 计数 + 只读 query buffer + 读写 value buffer，新 kernel 即插即用。所有 strand-无关派生标量一律 host 预算并上传，保 bit-faithful（只余 `GPU` 可能 fuse 的 fma 低位分歧）。
+- **正确性模型**：核心为闭式几何、无超越调用，`CPU`/`GPU` 算同一公式，但**非位精确**（`GPU` 可 fuse mul-add，扰动低位 mantissa 几 `ULP`），故每分量断言容差 `abs_diff<1e-4` 或 `rel_diff<1e-3`；迭代类 kernel 参数保守以控 fma 累积。每个 parity 测试均带物理断言 + 非平凡断言（防 no-op 蒙混）+ 空/退化输入用例。
+- **可移植性**：只用 `sqrt`/`min`/`max`/`clamp`/`dot`/mul-add 的 core-`WGSL` 子集——无 `exp`/`pow`/可选 device feature——故孪生在 Metal/Vulkan/DX12 不改即跑。
+
+当前已落 **7 个真机对拍孪生**（Apple M2 Metal 全绿 **26 passed**）：
+
+| kernel | 对拍的 `CPU` golden | 语义 | 真机单测 |
+|---|---|---|---|
+| `collision` | `Collider::push_out` | sphere/capsule 解析体碰撞推出（一线程一 point×collider 对） | 4 |
+| `wind` | `wind_acceleration` | 稳态 + 阵风 + 湍流风场耦合（一线程一 sample point/time/field 三元组） | 4 |
+| `frames` | `build_strand_frames` | double-reflection `RMF` 传输（一线程一 strand，逐控制点正交 tangent/normal/bitangent 基） | 3 |
+| `ribbon` | `build_ribbon` | `Cards` LOD ribbon 代理网格化（一线程一 strand，每控制点 ±radius 沿 bitangent 两边顶点 + 弧长 `v`） | 4 |
+| `sdf_collision` | `push_out_of_field` | union `SDF`（sphere/capsule/half-space/box）沿梯度推出（一线程一 point，更紧的体碰撞档） | 3 |
+| `self_collision_jacobi` | `accumulate_jacobi_corrections` | 并行安全（Jacobi）自碰撞修正累加（一线程一 particle，host 建 per-particle 邻居切片保 reduction 序） | 3 |
+| `strand_metrics` | `strand_arc_length` / `strand_curvature` | 每 render strand 折线折叠成弧长 + 无超越转角（一线程一 strand，density/decimation LOD 排序消费的两个廉价标量） | 5 |
+
+**待续**：guide XPBD 求解器（`simulate_guides`，每 strand 独立跑整条 substeps×iterations 的核心 sim 阶段，`UE5` Groom/`TressFX` 都在 `GPU` 跑）的真机对拍孪生，为下一个落地目标。
+
 ---
 
 ## 10. 落地路线图
