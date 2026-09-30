@@ -70,6 +70,7 @@ pub mod portal_graph;
 pub mod propagation;
 pub mod reverb_zones;
 pub mod room_acoustics;
+pub mod room_modes;
 pub mod rooms;
 pub mod scattering;
 pub mod spatializer;
@@ -124,6 +125,7 @@ pub use room_acoustics::{
     critical_distance, eyring_rt60, mean_free_path, millington_sette_rt60, sabine_rt60,
     schroeder_frequency,
 };
+pub use room_modes::{MAX_ROOM_MODES, ModeKind, RoomMode, RoomModes};
 pub use rooms::{
     Portal, Room, RoomId, RoomNetwork, obliquity_factor, portal_coupling_gain, room_of,
 };
