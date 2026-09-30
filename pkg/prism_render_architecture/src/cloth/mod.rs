@@ -45,6 +45,7 @@ pub mod dynamics;
 pub mod embed;
 pub mod gpu;
 pub mod layers;
+pub mod layers_jacobi;
 pub mod lod;
 pub mod painted;
 pub mod panel;

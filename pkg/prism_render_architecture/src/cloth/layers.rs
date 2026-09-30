@@ -82,7 +82,7 @@ impl LayerParams {
 /// `cell_size` is assumed positive (the caller guards this). The cast saturates
 /// rather than wrapping, so an extreme coordinate still buckets deterministically
 /// and never panics.
-fn cell_of(pos: Vec3, cell_size: f32) -> (i32, i32, i32) {
+pub(crate) fn cell_of(pos: Vec3, cell_size: f32) -> (i32, i32, i32) {
     let inv = 1.0 / cell_size;
     let cx = (pos.x * inv).floor() as i32;
     let cy = (pos.y * inv).floor() as i32;
