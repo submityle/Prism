@@ -129,6 +129,16 @@
 //!   neighbor-index union the reference returns, the first twin to run a
 //!   device-side search and sort (see [`self_collision_grid`]).
 //!
+//! * [`GpuHairRaster`] evaluates
+//!   [`classify_hair_raster`](prism_render_architecture::hair::raster::classify_hair_raster),
+//!   the per-segment routing a hair visibility pass needs — one thread per
+//!   projected strand segment culls a degenerate or sub-coverage segment,
+//!   sends a thin one to the compute sub-pixel software path and a thick one
+//!   to the hardware triangle path, emitting the resolved `HairRasterPath`
+//!   discriminant; being pure comparison arithmetic with no fused
+//!   multiply-add, its path code is bit-identical to the reference (see
+//!   [`raster`]).
+//!
 //! # Portability
 //!
 //! The projection uses only `sqrt`, `min`, `max`, `clamp`, `dot` and
@@ -162,6 +172,7 @@ pub mod forward_scatter;
 pub mod frames;
 pub mod guide_solver;
 pub mod interp;
+pub mod raster;
 pub mod ribbon;
 pub mod sdf_collision;
 pub mod self_collision_grid;
@@ -180,6 +191,7 @@ pub use forward_scatter::GpuHairForwardScatter;
 pub use frames::{GpuStrandFrame, GpuStrandFrames};
 pub use guide_solver::GpuGuideSolver;
 pub use interp::GpuHairInterp;
+pub use raster::{path_code, GpuHairRaster, RasterQuery};
 pub use ribbon::{GpuRibbon, GpuRibbonMesh, RibbonStrandInput};
 pub use sdf_collision::GpuSdfCollider;
 pub use self_collision_grid::GpuSelfCollisionGrid;
