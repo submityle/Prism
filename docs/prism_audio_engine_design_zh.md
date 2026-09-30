@@ -5,7 +5,7 @@
 > **空间与内容一等公民**：几何驱动空间化与 Event 驱动内容模型同为一等公民；程序化合成（Patch）、调制（Modulation）与母带合规（LUFS/True-Peak/HDR）三者贯通，可达顶级次世代 AAA 质量。
 > 本文档为设计规格与落地实现的权威规范；采用纯经典 DSP 路线，不含任何 AI/ML 内容，不含任何 UE/Unity/Godot/Wwise/FMOD 源码或衍生代码。
 
-- 版本: v0.7（基础层已落地编码：`pkg/prism_audio_core`，M1 效果族已落地首个节点 `ParametricEqNode`（级联复用 `Biquad`，35 测试绿/clippy 零告警/no_std 双构建通过）；本版聚焦「逐引擎深读」精修方案：扩展 §2 为业界参考+采纳映射+逐引擎深读（UE5/Unity/Godot 借鉴·覆盖·超越三段式），并补齐各引擎较新特性——UE5 MetaSound Builder API 运行时构图（§11）、Audio Gameplay Volumes（§17）、Audio Insights 检视（§26）；Godot AudioStreamInteractive 片段式交互流与过渡类型（§19）、AudioStreamPolyphonic 多voice复用（§25）、延迟补偿播放头查询（§8）；Unity Audio Random Container 原生随机容器（§18）、Timeline 音频轨（§19）；相应增补 §41 扩展点 `PatchBuilder` 与 §42 开放问题。v0.6 前序：新增内容生产与跨模态层：对白与本地化（程序化对白/语言 Bank/字幕同步/viseme 口型）、触感与跨模态输出（音频同源触感/触感总线/DualSense·双马达后端）、程序化环境音景（Soundscape 调色板与散布）、实时授权与远程工具 API（WAAPI 式远程遥测+白名单写命令/live tuning/授权热重载），并为 §16 增补头部追踪双耳、§28 增补属性/模糊测试。v0.5 前序：编译图执行模型（拓扑计划/缓冲活跃度分配/就地别名/PDC）、并行 DSP 图调度（Job 化/确定性并行/岛屿划分）、GPU 加速几何声学（共享渲染器 BVH 的声线与路径追踪）、性能自适应治理与音频 LOD、心理声学虚拟化与声源聚类、时间伸缩变调与重采样质量分级；扩展了参考映射、扩展点、路线图与术语表。v0.4 前序：程序化内容图 Patch、调制系统、多普勒/锥形/Spread/Focus/多位置、遮挡与障碍区分、Aux 发送与环境、HDR 音频、Bank/流式/内存、输入捕获、平台空间后端、虚拟语音行为、Profiler 与可视化调试）
+- 版本: v0.8（**M1 全族已完成**：effects/dynamics/reverb 三族节点全部落地，103 单测 + 4 doctest 全绿、clippy 零告警、no_std 双构建通过，已 commit；现进入 **M2 声源与调度**（源节点/采样精确调度器/命名时钟/语音池）。本版据实校准 §3/§9/§39/§40 状态，并新增 §2.1「较新版本特性追踪（2023–2025）」把各引擎最新一代能力（Steam Audio UTD 衍射与探针烘焙、Wwise Impacter/Strata、UE5.4/5.5 MetaSound Pages、Unity 6 DOTS Audio）纳入采纳映射，深化 §8 调度器与 §10 声源的 M2 落地细节。v0.7 前序：基础层已落地编码：`pkg/prism_audio_core`，M1 效果族已落地首个节点 `ParametricEqNode`（级联复用 `Biquad`，35 测试绿/clippy 零告警/no_std 双构建通过）；本版聚焦「逐引擎深读」精修方案：扩展 §2 为业界参考+采纳映射+逐引擎深读（UE5/Unity/Godot 借鉴·覆盖·超越三段式），并补齐各引擎较新特性——UE5 MetaSound Builder API 运行时构图（§11）、Audio Gameplay Volumes（§17）、Audio Insights 检视（§26）；Godot AudioStreamInteractive 片段式交互流与过渡类型（§19）、AudioStreamPolyphonic 多voice复用（§25）、延迟补偿播放头查询（§8）；Unity Audio Random Container 原生随机容器（§18）、Timeline 音频轨（§19）；相应增补 §41 扩展点 `PatchBuilder` 与 §42 开放问题。v0.6 前序：新增内容生产与跨模态层：对白与本地化（程序化对白/语言 Bank/字幕同步/viseme 口型）、触感与跨模态输出（音频同源触感/触感总线/DualSense·双马达后端）、程序化环境音景（Soundscape 调色板与散布）、实时授权与远程工具 API（WAAPI 式远程遥测+白名单写命令/live tuning/授权热重载），并为 §16 增补头部追踪双耳、§28 增补属性/模糊测试。v0.5 前序：编译图执行模型（拓扑计划/缓冲活跃度分配/就地别名/PDC）、并行 DSP 图调度（Job 化/确定性并行/岛屿划分）、GPU 加速几何声学（共享渲染器 BVH 的声线与路径追踪）、性能自适应治理与音频 LOD、心理声学虚拟化与声源聚类、时间伸缩变调与重采样质量分级；扩展了参考映射、扩展点、路线图与术语表。v0.4 前序：程序化内容图 Patch、调制系统、多普勒/锥形/Spread/Focus/多位置、遮挡与障碍区分、Aux 发送与环境、HDR 音频、Bank/流式/内存、输入捕获、平台空间后端、虚拟语音行为、Profiler 与可视化调试）
 - 范围: 一步到位（统一渲染图 / 采样精确调度 / 程序化 Patch / 调制 / 几何声学 / Event+RTPC 编排 / 交互音乐 / LUFS+HDR 母带 / 平台空间输出）
 - 适用引擎: Prism / Bevy ECS 生态
 - 关键依赖: bevy_ecs（并行 ECS）、bevy_math（glam SIMD + `ops` 确定性标量数学）、bevy_tasks（资产解码/烘焙任务）、bevy_asset（音频资产与 Bank）、bevy_transform（听者/声源位姿）、bevy_a11y（无障碍）、cpal/AudioWorklet（设备后端，前端 crate）
@@ -172,6 +172,21 @@
 
 *专业中间件参照（Wwise / FMOD / Steam Audio）*：内容生产力（Event/Container/State/Switch/RTPC=§18、交互音乐=§19、Bank/流式=§20、Profiler=§26、WAAPI/Live Update=§38）与几何声学（§14/§16）已系统性采纳；差异化在于把中间件的“内容生产 + 几何声学”与引擎内建的“渲染器共享 GPU 声学 + 编译图确定性并行 + 可回放对拍”合一，而非以外挂中间件形式并存。
 
+### 2.1 较新版本特性追踪（2023–2025）与采纳映射
+
+上表覆盖各引擎的经典能力；本节补齐**最新一代**（2023–2025）出现、值得借鉴的特性，并给出 Resonance 的落地/超越判断。原则不变：**只借思想，不含任何源码或衍生代码**。
+
+| 引擎/版本 | 较新特性 | 我们的采纳 / 落地位置 |
+|---|---|---|
+| **Steam Audio 4.x** | 频率相关**透射**（多频段材质损失）、基于 **UTD（均匀衍射理论）** 的边缘衍射、**探针批次（Probe Batch）烘焙**反射并运行时插值、**TrueAudio Next** GPU 卷积加速 | 3 频段透射曲线并入 §14 声学材质；UTD 衍射作为 `PropagationBackend` 的边缘路径求解档位（§14）；探针烘焙 = §14 反射「烘焙」路径的具体数据结构；GPU 卷积对齐 §31 复用渲染器算力 |
+| **UE 5.4 / 5.5 MetaSounds** | **MetaSound Pages**（按平台/质量分档选择子图实现）、**Wavetable** 合成节点族、内联空间化与 MIDI/trigger 类型扩展、Builder API 成熟化 | Pages 直接映射 §32 音频 LOD 的「按预算选 Patch 变体」，落到 §11 `PatchBuilder` 的**分档编译**；Wavetable 合成并入 §10 `WavetableNode`/§11 Patch 原语 |
+| **Wwise 2023.1 / 2024.1** | **Impacter**（物理冲量驱动的程序化撞击/材质合成）、**Strata** 分层多变体音效库、Motion（触感统一）、Spatial Audio 几何驱动衍射/房间门户成熟化 | Impacter = 物理碰撞冲量→Patch（§11）合成参数的**跨系统联动**（新增 §42 开放问题）；Strata 分层变体并入 §18 容器/§20 Bank 分层预取；Motion=§36 触感；几何衍射/门户=§14/§17 已覆盖 |
+| **FMOD Studio 2.02+** | Programmer Instrument（运行时选媒体）、Spatializer + Resonance Audio 后端、Bank 部分加载 | Programmer=§35 对白 `DialogueResolver`；Resonance Audio=§16 可插拔 `Panner` 后端；部分加载=§20 Bank 粒度预取 |
+| **Unity 6 / DOTS Audio** | DOTS Audio（Burst 编译、无 GC 的数据导向 DSP）、Audio Random Container 原生化、新一代 Spatializer | DOTS 数据导向执行=§5/§6 + §30 岛屿并行的既有取向；Random Container=§18；Spatializer 接口=§16 `Panner` trait |
+| **Godot 4.3 / 4.4** | 实时 MIDI 输入、AudioStreamInteractive/Synchronized/Playlist、播放统计（playback stats）、`AudioStreamPolyphonic` | 交互流=§19、Polyphonic=§25、延迟补偿播放头=§8 已补；实时 MIDI 作为 §8 调度器的采样精确 note 事件源（新增扩展点） |
+
+**超越判断（保持代际差异）**：这些较新特性多为「单点能力」升级，而 Resonance 的差异化在于把它们**统一进同一条编译图 + 确定性并行 + 渲染器共享 GPU 声学 + 逐样本可对拍**的骨架里——例如 MetaSound Pages 的分档只解决内容分档，我们让分档编译直接受 §32 `QualityGovernor` 的 CPU 预算闭环驱动；Steam Audio 的探针烘焙是独立中间件维护自己的声学场景，我们复用渲染器 BVH（§31）使声学与视觉同一几何真相。
+
 ---
 
 ## 3. 分层架构
@@ -194,7 +209,7 @@
 ```
 
 - **L1 内核（已实现）**：`math`（Sample/dB/denormal/等功率声像）、`buffer`（planar `AudioBuffer` + `ChannelLayout`）、`param`（`Smoothed`/`Ramp`）、`time`（`Transport`/`TimeSignature`）、`graph`（`AudioNode`/`AudioGraph`/编译/块渲染）。
-- **L2 节点库（进行中）**：全部实现 `AudioNode` trait 的具体处理单元。首发 `GainNode`/`BiquadNode`/`StereoPanNode`/`SumNode`，规划扩展见 §9。
+- **L2 节点库（M1 完成，M2 进行中）**：全部实现 `AudioNode` trait 的具体处理单元。基础 `GainNode`/`BiquadNode`/`StereoPanNode`/`SumNode` + effects（parametric_eq/delay/waveshaper/chorus/flanger/phaser）+ dynamics（detector/compressor/limiter/gate/ducking）+ reverb（fdn/convolver/algorithmic）已全部落地；M2 扩展声源与采样精确调度见 §8/§9/§10。
 - **L3 子系统**：空间、编排/事件（含 Patch 编译与调制）、设备/捕获。互相独立、写集不相交，适合并行开发。
 - **L4 前端**：`bevy_audio` 保留现有 `AudioPlayer`/`PlaybackSettings`/`Volume` API 兼容，内部改接无锁命令通道。
 
@@ -262,12 +277,25 @@
 - **量化过渡**：过渡对齐拍/小节/段边界（用 `next_bar_boundary`），保证无缝（§19）。
 - **前瞻窗口**：调度器提前一个块预调度，配合设备缓冲吸收抖动。
 - **延迟补偿播放头查询（对齐 Godot）**：向 gameplay 暴露“画面对齐”的播放位置 `pos = raw_playhead + time_since_last_mix − output_latency`，供画面/字幕/节奏玩法精确同步，而非直接用抖动的游戏帧时钟读原始播放头。
+- **实时 MIDI / note 事件源（对齐 Godot 4.3 实时 MIDI + UE Quartz）**：外部 MIDI/序列作为调度器的采样精确事件源，note-on/off 经命令环下发并落到指定时钟的量化边界，与 Patch（§11）触发端口贯通。
+
+**M2 落地契约（RT 铁律）**：
+- 事件堆为**构造期预分配的有界最小堆**（按触发样本排序），块内插入/弹出零分配；溢出走可配置策略（丢最旧/记遥测），绝不在音频线程分配。
+- 命名时钟集合固定容量（构造期定），每时钟维护 `(bpm, time_sig, sample_origin)`，量化 API 提供 `quantize(target_sample, Grid)`（Grid=Beat/Bar/Nth/Marker），返回对齐后的绝对样本；跨块事件保留至后续块，保证块边界不吞事件。
+- 前瞻窗口 = 一个块，量化过渡（§19）在前瞻内决议，避免边界抖动。
 
 ---
 
 ## 9. 节点库（DSP 原语矩阵）
 
-已实现（`pkg/prism_audio_core/src/nodes/`）：`GainNode`、`BiquadNode`（RBJ 7 型）、`StereoPanNode`（等功率）、`SumNode`（N 输入求和）。
+已实现（`pkg/prism_audio_core/src/nodes/`，103 单测 + 4 doctest 全绿、clippy 零告警、no_std 双构建）：
+
+- **基础**：`GainNode`、`BiquadNode`（RBJ 7 型）、`StereoPanNode`（等功率）、`SumNode`（N 输入求和）。
+- **effects**：`parametric_eq`（biquad 级联）、`delay`（分数延迟 + 反馈 + 湿干）、`waveshaper`（过采样防混叠）、`chorus`/`flanger`/`phaser`（调制延迟族）。
+- **dynamics**：`detector`（峰值/RMS 检波）、`compressor`（软/硬拐点 + 前瞻）、`limiter`（前瞻）、`gate`（扩展门）、`ducking`（侧链闪避）。
+- **reverb**：`fdn`（反馈延迟网络）、`convolver`（分块卷积）、`algorithmic`（Freeverb 式 pre-delay + 早反射 + 并联 comb + 串联 allpass + 立体声宽度）。
+
+仍规划（M2 及以后）：
 
 规划扩展（每个：完整实现、构造期预分配、带 impulse/golden 稳定性测试）：
 
@@ -288,9 +316,10 @@
 
 - **SamplePlayerNode**：解码后 PCM 的播放头，支持循环点、分数重采样（线性/Catmull-Rom）、变速播放、start/stop 采样精确。解码在 `bevy_tasks` 任务线程，RT 线程只读环形/预载缓冲。
 - **StreamingSource**：长音频流式，双缓冲预取，欠载保护（输出静音而非阻塞）。见 §20 流式媒体。
-- **OscillatorNode / WavetableNode**：程序化合成（正弦/锯齿/方波/自定义波表），带 PolyBLEP 防混叠。
-- **NoiseNode**：白/粉/棕噪声（种子确定性），程序化音效基石。
-- **GeneratorSource**：外部程序按块推流（对齐 Godot `AudioStreamGenerator`），供 gameplay 生成的 PCM。
+- **OscillatorNode / WavetableNode**：带限振荡器（sine/saw/square/triangle）用 **PolyBLEP** 在跳变点做多项式带限校正抑制混叠；相位累加走 `bevy_math::ops` 保证跨平台位一致；波表合成（对齐 UE5.4 MetaSound Wavetable）用相位读表 + 线性/Catmull-Rom 插值，mip 化波表按基频选层进一步抗混叠。
+- **NoiseNode**：white（种子 PRNG）/ pink（Voss-McCartney 或 Paul Kellet 一阶滤波器组，恒 -3dB/oct）/ brown（积分白噪 + 泄漏防漂移）；种子确定性，逐样本可对拍。
+- **SamplePlayerNode（变调重采样）**：播放头 + 分数重采样（线性/Catmull-Rom）+ 循环点（forward/ping-pong）+ 播放速率；高变调倍率并入抗混叠（过采样或波表 mip 思路），start/stop 采样精确对齐 §8 事件。
+- **GeneratorSource**：外部程序按块推流（对齐 Godot `AudioStreamGenerator`），供 gameplay 生成的 PCM；RT 侧只读**预分配环形缓冲**，欠载输出静音不阻塞。
 - **SilenceNode**：确定性静音源（占位/测试）。
 
 资产：经 `bevy_asset` 加载 wav/ogg/flac；解码格式插件化（`SourceDecoder` trait）。程序化声音优先走 Patch（§11）而非固定波形。
@@ -712,7 +741,7 @@ Panner 可插拔（`Panner` trait），对齐 Unity Spatializer / Ambisonic Deco
 
 | Crate | 层 | 内容 | 状态 |
 |---|---|---|---|
-| `pkg/prism_audio_core` | L1+L2 | math/buffer/param/time/graph + nodes | ✅ 基础层已落地 |
+| `pkg/prism_audio_core` | L1+L2 | math/buffer/param/time/graph + nodes | ✅ L1 内核 + L2 effects/dynamics/reverb 全族已落地（103 测试）；M2 sources/scheduler 进行中 |
 | `pkg/prism_audio_spatial` | L3 | 几何传播/HRTF/Ambisonics/panner/多普勒/平台后端桥 | 规划 |
 | `pkg/prism_audio_authoring` | L3 | Event/Container/State/Switch/RTPC/Patch 编译/Modulation/交互音乐/Bank/对白与本地化/音景 | 规划 |
 | `pkg/prism_audio_device` | L3 | cpal/worklet/FileSink/输入捕获/触感后端/远程授权通道 | 规划 |
@@ -740,8 +769,8 @@ Panner 可插拔（`Panner` trait），对齐 Unity Spatializer / Ambisonic Deco
 ## 40. 路线图
 
 - **M0 内核（已完成）**：math/buffer/param/time/graph + 首发 4 节点，31 测试（27 单测 + 4 doctest），双构建，零告警，已 commit。
-- **M1 效果与动态**：EQ/delay/waveshaper/调制延迟 + compressor/limiter/gate/ducking + reverb（FDN/convolver）。
-- **M2 声源与调度**：sample player/oscillator/noise/streaming/generator + 采样精确调度器 + 命名时钟 + 语音池与虚拟语音行为。
+- **M1 效果与动态（✅ 已完成）**：effects（parametric_eq/delay/waveshaper/chorus/flanger/phaser）+ dynamics（detector/compressor/limiter/gate/ducking）+ reverb（fdn/convolver/algorithmic 三族全落地）。103 单测 + 4 doctest 全绿，clippy 零告警，no_std 双构建通过，已分两次 commit。
+- **M2 声源与调度（🔄 进行中）**：`nodes/sources/`（oscillator 带限 PolyBLEP / noise white·pink·brown / sample_player 变调重采样+循环点 / generator 推流）+ `time.rs` 扩展（采样精确事件堆 + Quartz 式命名多时钟量化）+ 语音池与虚拟语音行为。streaming/解码依赖 std+file IO，归 M3 device 层，M2 不做假实现。
 - **M3 ECS 桥与设备**：命令/遥测环 + epoch 回收 + cpal/worklet/FileSink/输入捕获 + `bevy_audio` 前端改造（兼容 API）。
 - **M4 空间**：遮挡/障碍/透射/衍射/反射 + 距离塑形（衰减/锥形/spread/focus/doppler/多位置）+ HRTF/Ambisonics + Rooms&Portals + Aux 发送 + 平台空间后端桥。
 - **M5 编排、Patch 与音乐**：Event/Container/State/Switch/RTPC + Patch 编译器与合成原语 + Modulation（LFO/包络/控制总线）+ 交互音乐（段/过渡/stinger）+ Bank/流式 + 对白与本地化解析（§35）+ 程序化音景（§37）。
@@ -789,6 +818,9 @@ Panner 可插拔（`Panner` trait），对齐 Unity Spatializer / Ambisonic Deco
 - 程序化音景元素密度与 §33 聚类阈值的默认档位。
 - 运行时 `PatchBuilder` 增量构图的编译预算与热切换频率上限（防任务线程构图风暴与 epoch 回收积压）。
 - 片段式交互流与段/播放列表两种交互音乐模型的统一数据表示与作者取舍。
+- 物理冲量驱动程序化撞击（Impacter 式）：碰撞事件到 Patch 合成参数的映射粒度与每帧撞击事件的采样精确注入预算。
+- MetaSound Pages 式分档编译与 §32 `QualityGovernor` 预算联动：分档切换滞回阈值与热切换频率上限，避免档位抖动引发编译风暴。
+- 变调 SamplePlayer 抗混叠档位（过采样倍率 vs 波表 mip）与 §32 音频 LOD 的默认映射。
 - 延迟补偿播放头查询在不同设备后端（cpal/worklet）下 output_latency 的可得性与估计精度。
 
 ---
