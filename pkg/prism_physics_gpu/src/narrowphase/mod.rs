@@ -28,7 +28,7 @@
 //! - [`capsule_halfspace`] / [`GpuCapsuleHalfspaceNarrowphase`]: capsule versus
 //!   a halfspace, reporting up to two contact points (one per penetrating
 //!   axis endpoint) so a capsule resting flat on a plane stays put.
-//! - [`capsule_obb`]: capsule versus an
+//! - [`capsule_obb`] / [`GpuCapsuleObbNarrowphase`]: capsule versus an
 //!   oriented bounding box, taking the point on the capsule axis closest to
 //!   the box (an exact convex piecewise-quadratic segment-box minimisation)
 //!   and collapsing to the sphere-versus-box manifold there.
@@ -68,6 +68,7 @@ mod capsule_gpu;
 mod capsule_halfspace;
 mod capsule_halfspace_gpu;
 mod capsule_obb;
+mod capsule_obb_gpu;
 mod contact;
 mod cpu;
 mod gpu;
@@ -92,6 +93,7 @@ pub use capsule_gpu::GpuCapsuleNarrowphase;
 pub use capsule_halfspace::{cpu_capsule_halfspace_manifold, CapsulePlanePair};
 pub use capsule_halfspace_gpu::GpuCapsuleHalfspaceNarrowphase;
 pub use capsule_obb::{cpu_capsule_obb_narrowphase, CapsuleObbPair};
+pub use capsule_obb_gpu::GpuCapsuleObbNarrowphase;
 pub use contact::Contact;
 pub use cpu::cpu_narrowphase;
 pub use gpu::GpuNarrowphase;
