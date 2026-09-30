@@ -28,6 +28,9 @@
 //! - [`obb`] / [`GpuObbNarrowphase`]: sphere versus an oriented bounding box,
 //!   clamping the sphere centre in the box frame with an interior push-out
 //!   fallback through the least-penetrated face.
+//! - [`obb_halfspace`] / [`GpuObbHalfspaceNarrowphase`]: oriented bounding box
+//!   versus a halfspace, using the box support function along the plane normal
+//!   to report the deepest penetrating vertex.
 //!
 //! Every pair emits one contact slot per input candidate: a passing real-device
 //! parity test is direct evidence the ported kernel builds the same manifolds as
@@ -56,6 +59,8 @@ mod halfspace_gpu;
 mod layout;
 mod obb;
 mod obb_gpu;
+mod obb_halfspace;
+mod obb_halfspace_gpu;
 mod sphere;
 
 pub use capsule::{cpu_capsule_narrowphase, Capsule, SphereCapsulePair};
@@ -69,3 +74,5 @@ pub use halfspace::{cpu_halfspace_narrowphase, Plane, SpherePlanePair};
 pub use halfspace_gpu::GpuHalfspaceNarrowphase;
 pub use obb::{cpu_obb_narrowphase, Obb, SphereObbPair};
 pub use obb_gpu::GpuObbNarrowphase;
+pub use obb_halfspace::{cpu_obb_halfspace_narrowphase, ObbPlanePair};
+pub use obb_halfspace_gpu::GpuObbHalfspaceNarrowphase;
