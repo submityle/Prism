@@ -451,25 +451,7 @@ impl Bvh {
     /// An empty tree (zero-area root) has no work to do and scores `0.0`.
     #[must_use]
     pub fn sah_cost(&self, traversal_cost: f32) -> f64 {
-        if self.nodes.is_empty() {
-            return 0.0;
-        }
-        let root_area = f64::from(self.nodes[0].bounds.surface_area());
-        if root_area <= 0.0 {
-            return 0.0;
-        }
-        let c_trav = f64::from(traversal_cost);
-        let mut interior = 0.0f64;
-        let mut leaf = 0.0f64;
-        for node in &self.nodes {
-            let area = f64::from(node.bounds.surface_area());
-            if node.is_leaf() {
-                leaf += area * f64::from(node.primitive_count);
-            } else {
-                interior += area;
-            }
-        }
-        (c_trav * interior + leaf) / root_area
+        linear_sah_cost(&self.nodes, traversal_cost)
     }
 
     /// Ratio of the current hierarchy's [`sah_cost`](Self::sah_cost) to that of a
@@ -496,6 +478,51 @@ impl Bvh {
         }
         current / ideal
     }
+}
+
+/// Surface-area-heuristic expected traversal cost of a flattened [`LinearBvhNode`]
+/// array, shared by both [`Bvh::sah_cost`] and the top-level acceleration
+/// structure so bottom- and top-level trees are scored with one identical model.
+///
+/// Evaluates the standard Wald/`pbrt` §4.3 expectation
+///
+/// ```text
+/// cost = (1 / SA(root)) * [ C_trav * Σ_interior SA(node)
+///                         + C_isect * Σ_leaf     SA(leaf) * prim_count(leaf) ]
+/// ```
+///
+/// with the ray-primitive test cost `C_isect` fixed at `1.0` (the unit
+/// [`BvhBuildConfig::traversal_cost`] is expressed relative to) and `C_trav`
+/// supplied as `traversal_cost`. Normalising by the root surface area makes the
+/// score the expected number of node visits plus primitive tests for a ray whose
+/// origin is outside the root box and whose direction is uniform, so scores are
+/// comparable across trees of different absolute size. A leaf's `primitive_count`
+/// is the number of ray-primitive tests it forces — triangles for a `BLAS`,
+/// instances for a `TLAS` — so the same formula scores both levels.
+///
+/// An empty array, or one whose root box has non-positive surface area, has no
+/// work to do and scores `0.0`.
+#[must_use]
+pub(crate) fn linear_sah_cost(nodes: &[LinearBvhNode], traversal_cost: f32) -> f64 {
+    let Some(root) = nodes.first() else {
+        return 0.0;
+    };
+    let root_area = f64::from(root.bounds.surface_area());
+    if root_area <= 0.0 {
+        return 0.0;
+    }
+    let c_trav = f64::from(traversal_cost);
+    let mut interior = 0.0f64;
+    let mut leaf = 0.0f64;
+    for node in nodes {
+        let area = f64::from(node.bounds.surface_area());
+        if node.is_leaf() {
+            leaf += area * f64::from(node.primitive_count);
+        } else {
+            interior += area;
+        }
+    }
+    (c_trav * interior + leaf) / root_area
 }
 
 /// Partitions `refs` so all primitives whose centroid falls in bin `<= split_bin`

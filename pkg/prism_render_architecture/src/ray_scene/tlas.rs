@@ -18,7 +18,7 @@
 //! world space and the running `t_max` prunes across instances exactly like a
 //! single-level walk.
 
-use super::bvh::{build_linear_bvh, Aabb, Bvh, BvhBuildConfig, LinearBvhNode};
+use super::bvh::{build_linear_bvh, linear_sah_cost, Aabb, Bvh, BvhBuildConfig, LinearBvhNode};
 use super::traversal::Ray;
 
 /// An affine transform: a 3×3 linear map (stored column-major) plus a
@@ -455,6 +455,50 @@ impl Tlas {
     #[must_use]
     pub fn rebuilt(&self, blases: &[Bvh]) -> Tlas {
         Tlas::build(&self.instances, blases)
+    }
+
+    /// Surface-area-heuristic expected traversal cost of the current top-level
+    /// hierarchy, scored with the same shared model as
+    /// [`Bvh::sah_cost`](super::bvh::Bvh::sah_cost).
+    ///
+    /// Each top-level leaf's primitive count is the number of *instances* it
+    /// forces a ray to transform-and-test, so the score is the expected number
+    /// of node visits plus instance descents for a uniform ray, normalised by
+    /// the root surface area. `traversal_cost` weights an interior-node visit
+    /// relative to one instance test (fixed at `1.0`); pass the same value the
+    /// `TLAS` was built with to compare a tree against its own build weight. An
+    /// empty `TLAS` scores `0.0`.
+    #[must_use]
+    pub fn sah_cost(&self, traversal_cost: f32) -> f64 {
+        linear_sah_cost(&self.nodes, traversal_cost)
+    }
+
+    /// Ratio of the current top-level hierarchy's [`sah_cost`](Self::sah_cost) to
+    /// that of a fresh [`rebuilt`](Self::rebuilt) tree over the same instances.
+    ///
+    /// A [`refit`](Self::refit) keeps every top-level box tight for the *existing*
+    /// topology but never re-partitions, so as instances translate across the
+    /// scene the original split planes stop matching their world-space layout and
+    /// a ray descends more instance leaves per query even though every box is
+    /// still snug. Comparing the refit tree's cost against a rebuild isolates that
+    /// topological degradation: the value is `1.0` right after a build and climbs
+    /// above `1.0` as instance motion accumulates. This is the top-level twin of
+    /// [`Bvh::refit_quality`](super::bvh::Bvh::refit_quality) and feeds the same
+    /// [`AccelerationUpdatePolicy::should_rebuild_after_refit`](super::acceleration::AccelerationUpdatePolicy::should_rebuild_after_refit)
+    /// decision so many-instance dynamic scenes escalate a cheap top-level refit
+    /// to a full rebuild once the hierarchy has drifted too far.
+    ///
+    /// Both trees are scored with the same `traversal_cost`; `blases` must be the
+    /// same pool passed to [`Tlas::build`]. An empty `TLAS`, whose costs are both
+    /// `0.0`, reports `1.0` (no degradation).
+    #[must_use]
+    pub fn refit_quality(&self, blases: &[Bvh], traversal_cost: f32) -> f64 {
+        let current = self.sah_cost(traversal_cost);
+        let ideal = self.rebuilt(blases).sah_cost(traversal_cost);
+        if ideal <= 0.0 {
+            return 1.0;
+        }
+        current / ideal
     }
 
     /// Nearest intersection along the world-space `ray`, or `None`.
@@ -1403,4 +1447,111 @@ mod tests {
             assert!((tv[i] - vdot(cols[i], v)).abs() <= 1.0e-6, "row {i}");
         }
     }
+    #[test]
+    fn empty_tlas_has_zero_sah_cost_and_unit_refit_quality() {
+        let blases = vec![sample_blas()];
+        let tlas = Tlas::build(&[], &blases);
+        assert!(tlas.is_empty());
+        assert_eq!(tlas.sah_cost(0.125), 0.0);
+        // Both current and rebuilt cost are 0.0, so quality is the neutral 1.0.
+        assert_eq!(tlas.refit_quality(&blases, 0.125), 1.0);
+    }
+
+    #[test]
+    fn single_instance_tlas_scores_its_instance_count() {
+        // One instance -> one leaf whose box equals the root box, so the score is
+        // just that leaf's primitive count (one instance test) = 1.0, with no
+        // interior traversal contributing.
+        let blases = vec![sample_blas()];
+        let inst = Instance::new(Affine3::identity(), 0, 0).unwrap();
+        let tlas = Tlas::build(&[inst], &blases);
+        assert!((tlas.sah_cost(0.125) - 1.0).abs() <= 1.0e-9);
+        assert!((tlas.refit_quality(&blases, 0.125) - 1.0).abs() <= 1.0e-6);
+    }
+
+    #[test]
+    fn freshly_built_tlas_has_unit_refit_quality() {
+        // A tree scored against a rebuild of its own current instances is ideal.
+        let blases = vec![sample_blas()];
+        let mut rng = Rng::new(0xA11A_5EED);
+        for _ in 0..20 {
+            let n = 1 + (rng.next_u32() % 12) as usize;
+            let instances: Vec<Instance> = (0..n)
+                .map(|id| Instance::new(random_affine(&mut rng), 0, id as u32).unwrap())
+                .collect();
+            let tlas = Tlas::build(&instances, &blases);
+            let q = tlas.refit_quality(&blases, 0.125);
+            assert!((q - 1.0).abs() <= 1.0e-6, "fresh quality {q} != 1.0");
+        }
+    }
+
+    #[test]
+    fn scrambling_instances_degrades_refit_quality() {
+        // Lay instances out on a line so the SAH build partitions them cleanly
+        // along X, then *reverse* their positions and refit. Refitting keeps the
+        // original (now wrong) split planes, so each leaf must enclose instances
+        // that ended up far apart -> the top-level boxes balloon and the SAH cost
+        // rises above a fresh rebuild of the same scrambled positions.
+        let blases = vec![sample_blas()];
+        let n = 9usize;
+        let spacing = 8.0f32;
+        let start: Vec<Instance> = (0..n)
+            .map(|id| {
+                let t = Affine3::from_translation([id as f32 * spacing, 0.0, 0.0]);
+                Instance::new(t, 0, id as u32).unwrap()
+            })
+            .collect();
+        let mut tlas = Tlas::build(&start, &blases);
+        assert!(
+            (tlas.refit_quality(&blases, 0.125) - 1.0).abs() <= 1.0e-6,
+            "line layout should build ideally"
+        );
+
+        // Interleave the layout so instances the build grouped into the same
+        // contiguous leaf are flung to opposite ends of the line. Mapping id to
+        // `(id % 4) * n + (id / 4)` spreads each block-of-four leaf across the
+        // whole extent, so the refit's preserved leaf boxes must span nearly the
+        // entire scene while a rebuild would regroup by the new proximity.
+        let moved: Vec<Affine3> = (0..n)
+            .map(|id| {
+                let slot = (id % 4) * n + (id / 4);
+                Affine3::from_translation([slot as f32 * spacing, 0.0, 0.0])
+            })
+            .collect();
+        tlas.refit(|id| moved[id as usize], &blases);
+
+        let degraded = tlas.refit_quality(&blases, 0.125);
+        assert!(
+            degraded > 1.0 + 1.0e-3,
+            "scrambled refit should degrade quality, got {degraded}"
+        );
+
+        // A rebuild over the scrambled positions restores an ideal tree.
+        let rebuilt = tlas.rebuilt(&blases);
+        assert!(
+            (rebuilt.refit_quality(&blases, 0.125) - 1.0).abs() <= 1.0e-6,
+            "rebuild should recover unit quality"
+        );
+        assert!(
+            rebuilt.sah_cost(0.125) < tlas.sah_cost(0.125),
+            "rebuilt tree must be cheaper than the degraded refit"
+        );
+    }
+
+    #[test]
+    fn tlas_sah_cost_and_refit_quality_are_deterministic() {
+        let blases = vec![sample_blas()];
+        let mut rng = Rng::new(0xD37E_2222);
+        let n = 8usize;
+        let instances: Vec<Instance> = (0..n)
+            .map(|id| Instance::new(random_affine(&mut rng), 0, id as u32).unwrap())
+            .collect();
+        let tlas = Tlas::build(&instances, &blases);
+        assert_eq!(tlas.sah_cost(0.125), tlas.sah_cost(0.125));
+        assert_eq!(
+            tlas.refit_quality(&blases, 0.125),
+            tlas.refit_quality(&blases, 0.125)
+        );
+    }
 }
+
