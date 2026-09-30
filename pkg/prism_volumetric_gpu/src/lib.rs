@@ -55,6 +55,7 @@
 //! Engine source or derived code.
 #![forbid(unsafe_code)]
 
+pub mod active_pixel;
 pub mod aerial;
 pub mod anvil_profile;
 pub mod apply_carve;
@@ -97,6 +98,7 @@ pub mod virga_fade;
 pub mod virga_veil;
 pub mod worley;
 
+pub use active_pixel::{ActivePixelQuery, GpuActivePixel};
 pub use aerial::{AerialQuery, GpuAerialPerspective};
 pub use anvil_profile::{AnvilProfileQuery, GpuAnvilProfile};
 pub use apply_carve::{ApplyCarveQuery, GpuApplyCarve};
