@@ -115,6 +115,16 @@
 //!   surviving self-shadow transmittance `T` in `0..=1` at an arbitrary
 //!   depth (see [`deep_transmittance_sample`]).
 //!
+//! * [`GpuHairAnalysisReduce`] evaluates
+//!   [`reduce_lane`](prism_render_architecture::hair::analysis_readback::reduce_lane),
+//!   the read side of the `GPU` -> host -> `CPU` analysis bridge and the
+//!   crate's first many-inputs-to-one-output reduction: a single `256`-wide
+//!   workgroup grid-strides one chosen `vec4` lane of every analysis-output
+//!   element into a private partial and a shared-memory tree fold collapses
+//!   them to one groom-global scalar (`Max`, bit-exact, to normalize the
+//!   density/decimation LOD; `Sum`, tolerance-checked, for the motion energy
+//!   that gates sleep) (see [`analysis_reduce`]).
+//!
 //! * [`GpuHairVoxelDensity`] evaluates
 //!   [`accumulate_voxel_density`](prism_render_architecture::hair::deep_transmittance::accumulate_voxel_density),
 //!   the sort-free froxel sibling of the deep opacity packing — one thread per
@@ -268,6 +278,7 @@
 //! compute dispatch; no Unreal Engine source or derived code.
 #![forbid(unsafe_code)]
 
+pub mod analysis_reduce;
 pub mod bin_samples;
 pub mod binding_importance;
 pub mod collision;
@@ -298,6 +309,7 @@ pub mod voxel_forward_scatter;
 pub mod voxel_transmittance;
 pub mod wind;
 
+pub use analysis_reduce::{reference_reduce, GpuHairAnalysisReduce};
 pub use bin_samples::GpuHairBinSamples;
 pub use binding_importance::GpuHairBindingImportance;
 pub use collision::{query_for, CollisionQuery, GpuColliderProjector};
