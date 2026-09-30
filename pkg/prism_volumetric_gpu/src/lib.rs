@@ -61,6 +61,7 @@ pub mod apply_carve;
 pub mod blend_with_atmosphere;
 pub mod clamp_history;
 pub mod cloud_shadow_modulation;
+pub mod composite_motion_vector;
 pub mod context;
 pub mod contrail_kernel;
 pub mod contrail_spread;
@@ -101,6 +102,9 @@ pub use apply_carve::{ApplyCarveQuery, GpuApplyCarve};
 pub use blend_with_atmosphere::{BlendQuery, BlendedColor, GpuBlendWithAtmosphere};
 pub use clamp_history::{ClampHistoryQuery, GpuClampHistory};
 pub use cloud_shadow_modulation::{CloudShadowModulationQuery, GpuCloudShadowModulation};
+pub use composite_motion_vector::{
+    CompositeMotionVectorQuery, GpuCompositeMotionVector, MotionVector,
+};
 pub use context::{block_on, GpuContext};
 pub use contrail_kernel::{ContrailKernelQuery, GpuContrailKernel};
 pub use contrail_spread::{ContrailSpreadQuery, GpuContrailSpread};
