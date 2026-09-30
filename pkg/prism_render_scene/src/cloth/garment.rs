@@ -17,9 +17,11 @@ use bevy_ecs::component::Component;
 use bevy_ecs::resource::Resource;
 
 use prism_render_architecture::cloth::bending::BendingConstraint;
-use prism_render_architecture::cloth::Constraint;
+use prism_render_architecture::cloth::lod::ClothLodDecision;
+use prism_render_architecture::cloth::{ClothLodTier, Constraint};
 
 use super::abi::{GpuClothBackstop, GpuClothCollider, GpuClothEmbedBinding};
+use super::lod::resolve_garment_lod;
 use super::solve_plan::ClothSolveInput;
 
 /// The authored `CPU` state of one cloth garment, spawned on a main-world
@@ -30,7 +32,7 @@ use super::solve_plan::ClothSolveInput;
 /// partitions and colors it, so the author never has to pre-sort it. The
 /// collider / backstop / embed slices are already in their `#[repr(C)]` device
 /// form because they carry no `CPU`-golden solver type to reorder.
-#[derive(Component, Clone, Debug, Default, PartialEq)]
+#[derive(Component, Clone, Debug, PartialEq)]
 pub struct ClothGarment {
     /// Particle positions with inverse mass in `.w`.
     pub(crate) positions: Vec<[f32; 4]>,
@@ -87,6 +89,71 @@ pub struct ClothGarment {
     pub(crate) self_thickness: f32,
     /// Self-collision uniform grid cell edge, world units.
     pub(crate) self_cell_size: f32,
+
+    // -- Level of detail ----------------------------------------------------
+    /// The finest representation this garment actually has geometry for. LOD
+    /// selection clamps the coverage-chosen tier no finer than this, so a
+    /// background outfit authored to only ever skin
+    /// ([`ClothLodTier::SkinnedProxy`]) is never promoted to a simulation it
+    /// does not own. Defaults to [`ClothLodTier::FullSim`].
+    pub(crate) native_form: ClothLodTier,
+    /// This frame's projected screen coverage in `0..=1`. A coverage feeding
+    /// system updates it per frame; the default `1.0` (fills the screen) keeps
+    /// a garment at its finest tier until coverage is actually supplied.
+    pub(crate) coverage: f32,
+    /// Coverage below which the garment drops from full to reduced simulation.
+    /// The default `0.0` (with `lod_skinned_below` also `0.0`) disables LOD:
+    /// coverage is always `>= 0`, so the garment stays at full simulation until
+    /// an author opts in with real thresholds.
+    pub(crate) lod_reduced_sim_below: f32,
+    /// Coverage below which the garment collapses to a non-simulated skinned
+    /// proxy (no resident GPU piece, no compute pass). Defaults to `0.0`.
+    pub(crate) lod_skinned_below: f32,
+    /// Stable LOD identity for this piece, surfaced in the resolved
+    /// [`ClothLodDecision::handle`] so the renderer can bin pieces by tier.
+    /// Defaults to `0`.
+    pub(crate) lod_piece_id: u32,
+}
+
+impl Default for ClothGarment {
+    /// An empty garment with LOD disabled: `native_form` is
+    /// [`ClothLodTier::FullSim`], coverage is `1.0`, and both LOD thresholds are
+    /// `0.0`, so the coverage->tier classification can never trigger a reduction
+    /// until an author supplies real thresholds. Every other field is the type
+    /// default (empty buffers, zero scalars), matching the pre-LOD behavior.
+    fn default() -> Self {
+        Self {
+            positions: Vec::new(),
+            velocities: Vec::new(),
+            constraints: Vec::new(),
+            bending: Vec::new(),
+            triangles: Vec::new(),
+            wind_velocity: [0.0; 3],
+            wind_turbulence: 0.0,
+            aero_drag: 0.0,
+            aero_lift: 0.0,
+            aero_air_density: 0.0,
+            friction: 0.0,
+            colliders: Vec::new(),
+            backstops: Vec::new(),
+            embed_bindings: Vec::new(),
+            render_vertex_count: 0,
+            hash_cell_count: 0,
+            gravity: [0.0; 3],
+            dt: 0.0,
+            substeps: 0,
+            iterations: 0,
+            damping: 0.0,
+            strain_limit: 0.0,
+            self_thickness: 0.0,
+            self_cell_size: 0.0,
+            native_form: ClothLodTier::FullSim,
+            coverage: 1.0,
+            lod_reduced_sim_below: 0.0,
+            lod_skinned_below: 0.0,
+            lod_piece_id: 0,
+        }
+    }
 }
 
 impl ClothGarment {
@@ -121,6 +188,65 @@ impl ClothGarment {
             self_cell_size: self.self_cell_size,
         }
     }
+
+    // -- Level-of-detail accessors -----------------------------------------
+
+    /// The number of simulated sim-mesh vertices (one per particle row). This
+    /// is the LOD sim-vertex budget and the dominant per-frame solve cost.
+    #[must_use]
+    pub(crate) fn sim_vertex_count(&self) -> u32 {
+        self.positions.len() as u32
+    }
+
+    /// The number of authored constraints in this garment's constraint graph.
+    #[must_use]
+    pub(crate) fn constraint_count(&self) -> u32 {
+        self.constraints.len() as u32
+    }
+
+    /// The number of embedded render-mesh vertices this garment drives.
+    #[must_use]
+    pub(crate) fn render_vertex_count(&self) -> u32 {
+        self.render_vertex_count
+    }
+
+    /// The finest LOD tier this garment has geometry for.
+    #[must_use]
+    pub(crate) fn native_form(&self) -> ClothLodTier {
+        self.native_form
+    }
+
+    /// This frame's projected screen coverage in `0..=1`.
+    #[must_use]
+    pub(crate) fn coverage(&self) -> f32 {
+        self.coverage
+    }
+
+    /// Coverage below which the garment drops to reduced simulation.
+    #[must_use]
+    pub(crate) fn lod_reduced_sim_below(&self) -> f32 {
+        self.lod_reduced_sim_below
+    }
+
+    /// Coverage below which the garment collapses to a skinned proxy.
+    #[must_use]
+    pub(crate) fn lod_skinned_below(&self) -> f32 {
+        self.lod_skinned_below
+    }
+
+    /// This garment's stable LOD identity.
+    #[must_use]
+    pub(crate) fn lod_piece_id(&self) -> u32 {
+        self.lod_piece_id
+    }
+
+    /// Resolves this garment's LOD decision at its current coverage, reusing the
+    /// architecture-layer golden classifier through [`resolve_garment_lod`].
+    #[must_use]
+    pub(crate) fn lod_decision(&self) -> ClothLodDecision {
+        resolve_garment_lod(self)
+    }
+
 }
 
 /// The render-world snapshot of every main-world [`ClothGarment`] this frame.

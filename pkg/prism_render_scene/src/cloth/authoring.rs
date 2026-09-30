@@ -34,7 +34,7 @@ use prism_render_architecture::cloth::bending::BendingConstraint;
 use prism_render_architecture::cloth::collision::{Backstop, BodyCollider};
 use prism_render_architecture::cloth::embed::BarycentricBinding;
 use prism_render_architecture::cloth::polygon_garment::PolygonGarmentMesh;
-use prism_render_architecture::cloth::{ClothParticle, Constraint};
+use prism_render_architecture::cloth::{ClothLodTier, ClothParticle, Constraint};
 
 use super::abi::{GpuClothBackstop, GpuClothCollider, GpuClothEmbedBinding};
 use super::garment::ClothGarment;
@@ -97,6 +97,11 @@ pub struct ClothGarmentBuilder {
     strain_limit: f32,
     self_thickness: f32,
     self_cell_size: f32,
+    native_form: ClothLodTier,
+    coverage: f32,
+    lod_reduced_sim_below: f32,
+    lod_skinned_below: f32,
+    lod_piece_id: u32,
 }
 
 impl Default for ClothGarmentBuilder {
@@ -128,6 +133,14 @@ impl Default for ClothGarmentBuilder {
             strain_limit: 0.0,
             self_thickness: 0.0,
             self_cell_size: 0.0,
+            // LOD off by default: `FullSim` native form, full coverage and both
+            // thresholds at zero, so the coverage->tier classification never
+            // triggers a reduction until an author supplies real thresholds.
+            native_form: ClothLodTier::FullSim,
+            coverage: 1.0,
+            lod_reduced_sim_below: 0.0,
+            lod_skinned_below: 0.0,
+            lod_piece_id: 0,
         }
     }
 }
@@ -335,6 +348,51 @@ impl ClothGarmentBuilder {
         self
     }
 
+    /// Sets the finest LOD tier this garment has geometry for.
+    ///
+    /// LOD selection clamps the coverage-chosen tier no finer than this, so a
+    /// background outfit set to [`ClothLodTier::SkinnedProxy`] is never promoted
+    /// to a simulation it does not own. Leave it at the default
+    /// [`ClothLodTier::FullSim`] for a fully authored, simulated garment.
+    #[must_use]
+    pub fn native_form(mut self, native_form: ClothLodTier) -> Self {
+        self.native_form = native_form;
+        self
+    }
+
+    /// Sets the coverage thresholds that drive LOD selection.
+    ///
+    /// `reduced_sim_below` is the screen coverage under which the garment drops
+    /// from full to reduced simulation; `skinned_below` is the coverage under
+    /// which it collapses to a non-simulated skinned proxy (no resident GPU
+    /// piece, no compute pass). Supply `reduced_sim_below >= skinned_below`.
+    /// Leaving both at the default `0.0` disables LOD: coverage is always
+    /// `>= 0`, so the garment stays fully simulated.
+    #[must_use]
+    pub fn lod_thresholds(mut self, reduced_sim_below: f32, skinned_below: f32) -> Self {
+        self.lod_reduced_sim_below = reduced_sim_below;
+        self.lod_skinned_below = skinned_below;
+        self
+    }
+
+    /// Sets this frame's projected screen coverage in `0..=1`.
+    ///
+    /// A coverage-feeding system normally updates this per frame; authoring it
+    /// on the builder seeds the first frame (and lets tests pin a coverage).
+    #[must_use]
+    pub fn coverage(mut self, coverage: f32) -> Self {
+        self.coverage = coverage;
+        self
+    }
+
+    /// Sets this garment's stable LOD identity, surfaced in the resolved LOD
+    /// decision so the renderer can bin pieces by tier.
+    #[must_use]
+    pub fn lod_piece_id(mut self, id: u32) -> Self {
+        self.lod_piece_id = id;
+        self
+    }
+
     /// Consumes the builder and produces the spawnable [`ClothGarment`] component.
     #[must_use]
     pub fn build(self) -> ClothGarment {
@@ -363,6 +421,11 @@ impl ClothGarmentBuilder {
             strain_limit: self.strain_limit,
             self_thickness: self.self_thickness,
             self_cell_size: self.self_cell_size,
+            native_form: self.native_form,
+            coverage: self.coverage,
+            lod_reduced_sim_below: self.lod_reduced_sim_below,
+            lod_skinned_below: self.lod_skinned_below,
+            lod_piece_id: self.lod_piece_id,
         }
     }
 }

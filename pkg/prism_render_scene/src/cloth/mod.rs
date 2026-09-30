@@ -52,6 +52,7 @@ mod garment;
 mod gpu_test_support;
 #[cfg(test)]
 mod layers_gpu_tests;
+mod lod;
 mod pack;
 #[cfg(test)]
 mod painted_gpu_tests;

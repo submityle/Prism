@@ -26,11 +26,13 @@ use super::solve_plan::build_solve_plan;
 
 /// Rebuilds the resident `GPU` cloth pieces from the extracted garments.
 ///
-/// Clears the existing pieces and, for every extracted garment, builds its
-/// device-free solve plan, allocates the resident buffers, builds the seven bind
-/// groups and pushes the resulting [`ClothGpuPiece`] with its golden dispatch
-/// schedule. Garments whose plan has no particles are skipped so the dispatch
-/// node never records an empty solve.
+/// Clears the existing pieces and, for every extracted garment, resolves its
+/// screen-coverage LOD tier and skips the garment when that tier is not
+/// simulated (the skinned proxy), then builds its device-free solve plan,
+/// allocates the resident buffers, builds the seven bind groups and pushes the
+/// resulting [`ClothGpuPiece`] with its golden dispatch schedule and resolved
+/// LOD decision. Garments whose plan has no particles are likewise skipped so
+/// the dispatch node never records an empty solve.
 pub(crate) fn prepare_cloth_pieces(
     mut pieces: ResMut<ClothGpuPieces>,
     extracted: Res<ExtractedCloth>,
@@ -47,6 +49,16 @@ pub(crate) fn prepare_cloth_pieces(
     };
 
     for garment in &extracted.garments {
+        // Screen-coverage LOD gate: a garment whose coverage collapses it to a
+        // non-simulated tier (the skinned proxy) builds no resident piece, so the
+        // dispatch node records no compute pass for it. Simulated tiers (full and
+        // reduced) still solve the authored mesh. Reuses the architecture-layer
+        // golden classifier through the garment's own decision.
+        let lod = garment.lod_decision();
+        if !lod.tier.is_simulated() {
+            continue;
+        }
+
         let input = garment.as_solve_input();
         let plan = build_solve_plan(&input);
         if plan.counts.particles == 0 {
@@ -81,6 +93,6 @@ pub(crate) fn prepare_cloth_pieces(
         let bind_groups = ClothPieceBindGroups::create(&device, &pipelines, &buffers);
         pieces
             .pieces
-            .push(ClothGpuPiece::new(buffers, bind_groups, plan.dispatches));
+            .push(ClothGpuPiece::new(buffers, bind_groups, plan.dispatches, lod));
     }
 }
