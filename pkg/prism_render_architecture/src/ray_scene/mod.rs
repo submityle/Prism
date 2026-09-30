@@ -89,6 +89,20 @@
 //!   buffer layout ([`aabb_primitive_gpu_layout::AABB_PRIMITIVE_WORDS`] stride,
 //!   shared [`gpu_layout::NODE_WORDS`] nodes) plus a packed procedural-primitive
 //!   walk that reproduces the in-memory box walk bit-for-bit.
+//! - [`rectangle`] — analytic oriented rectangle/parallelogram
+//!   [`rectangle::Rectangle`] procedural primitive (`DXR`/Vulkan `AABB`
+//!   path, rectangular area lights / quad emitters) defined by a center and
+//!   two half-edge vectors, with a single ray/plane solve plus a
+//!   reciprocal-basis containment test (exact for non-orthogonal edges) that
+//!   reports the [`rectangle::RectangleHit`], and a single-level
+//!   [`rectangle::RectangleBvh`] reusing the shared binned-`SAH` build and
+//!   ordered slab walk.
+//! - [`rectangle_gpu_layout`] — flat, `GPU`-uploadable
+//!   [`rectangle::RectangleBvh`] buffer layout
+//!   ([`rectangle_gpu_layout::RECTANGLE_WORDS`] stride packing `center` plus
+//!   the two half-edge vectors, shared [`gpu_layout::NODE_WORDS`] nodes) plus
+//!   a packed rectangle walk that reproduces the in-memory rectangle walk
+//!   bit-for-bit.
 //! - [`traversal`] — [`Ray`]/`BVH` slab + Möller–Trumbore intersection with
 //!   closest-hit and any-hit walks (the `GPU` traversal kernel's golden ref).
 //! - [`traversal_stackless`] — stackless (threaded / escape-index) `BVH` walk:
@@ -119,6 +133,8 @@ pub mod cylinder;
 pub mod cylinder_gpu_layout;
 pub mod disk;
 pub mod disk_gpu_layout;
+pub mod rectangle;
+pub mod rectangle_gpu_layout;
 pub mod footprint;
 pub mod gpu_layout;
 pub mod motion;
@@ -161,6 +177,8 @@ pub use cylinder::{Cylinder, CylinderBvh, CylinderHit};
 pub use cylinder_gpu_layout::{GpuCylinderBvhBuffers, CYLINDER_WORDS};
 pub use disk::{Disk, DiskBvh, DiskHit};
 pub use disk_gpu_layout::{GpuDiskBvhBuffers, DISK_WORDS};
+pub use rectangle::{Rectangle, RectangleBvh, RectangleHit};
+pub use rectangle_gpu_layout::{GpuRectangleBvhBuffers, RECTANGLE_WORDS};
 pub use aabb_primitive_gpu_layout::{GpuAabbBvhBuffers, AABB_PRIMITIVE_WORDS};
 pub use sphere_gpu_layout::{GpuSphereBvhBuffers, SPHERE_WORDS};
 pub use traversal::{Hit, Ray};
