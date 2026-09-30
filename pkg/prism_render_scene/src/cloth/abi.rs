@@ -295,8 +295,9 @@ pub(crate) struct GpuClothEmbedParams {
 /// `ClothAeroParams` in `cloth_aerodynamics.wesl`: the steady wind velocity
 /// packs with the turbulence strength into the first 16-byte row, then the two
 /// aerodynamic coefficients, the substep timestep and the particle bound fill
-/// the second row, so the whole block is one 32-byte uniform stride. The host
-/// sanitizes `wind` / `turbulence` / `drag` / `lift` (matching the golden
+/// the second row, and the fluid density plus its pad fill the third, so the
+/// whole block is one 48-byte uniform stride. The host sanitizes `wind` /
+/// `turbulence` / `drag` / `lift` / `air_density` (matching the golden
 /// `WindField::sanitized` / `AeroParams::sanitized`) before upload, so the
 /// shader reads finite, range-clamped values directly.
 #[repr(C)]
@@ -317,6 +318,15 @@ pub(crate) struct GpuClothAeroParams {
     pub dt: f32,
     /// Number of particles (= gather vertices) bounding the per-vertex dispatch.
     pub particle_count: u32,
+    /// Fluid (air) density scaling the quadratic drag/lift term; sanitized
+    /// non-negative on the host. A non-positive value selects the linear
+    /// (historical) `area * relative_wind` model, a positive value selects the
+    /// UE5 `Chaos`-style quadratic (airspeed-squared) model, mirroring the
+    /// golden `AeroParams::air_density`.
+    pub air_density: f32,
+    /// Trailing pad rounding the block up to a whole third 16-byte uniform row;
+    /// never read by the shader.
+    pub _pad_aero: [f32; 3],
 }
 
 /// One virtual-particle-tier self-collision sample, byte-compatible with
@@ -653,14 +663,15 @@ mod tests {
         assert_eq!(size_of::<GpuClothEmbedParams>(), 16);
     }
 
-    /// The aerodynamic uniform is exactly two 16-byte `WGSL` uniform rows: the
-    /// wind vector packs with the turbulence strength into the first row, and
-    /// the two coefficients, the timestep and the particle bound fill the
-    /// second. Pin the 32-byte stride so a field drift fails the build rather
-    /// than silently misaligning the shader read.
+    /// The aerodynamic uniform is exactly three 16-byte `WGSL` uniform rows: the
+    /// wind vector packs with the turbulence strength into the first row, the
+    /// two coefficients, the timestep and the particle bound fill the second,
+    /// and the fluid density plus its pad fill the third. Pin the 48-byte
+    /// stride so a field drift fails the build rather than silently misaligning
+    /// the shader read.
     #[test]
     fn aero_params_is_uniform_stride() {
-        assert_eq!(size_of::<GpuClothAeroParams>(), 32);
+        assert_eq!(size_of::<GpuClothAeroParams>(), 48);
         assert_eq!(size_of::<GpuClothAeroParams>() % 16, 0);
     }
 

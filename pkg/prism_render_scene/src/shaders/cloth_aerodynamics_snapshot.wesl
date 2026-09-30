@@ -20,7 +20,7 @@
 /// 归一化长度平方下限（本 pass 未用到，但为与同族 `WESL` 内核保持一致而声明）。
 const CLOTH_EPS_LEN_SQ: f32 = 1.0e-12;
 
-/// 气动力全局参数（两文件共用；此处独立声明一份，32 字节，字段偏移严格对齐
+/// 气动力全局参数（两文件共用；此处独立声明一份，48 字节，字段偏移严格对齐
 /// arch 的 `GpuClothAeroParams`）。本 pass 只用到 `vertex_count` 作为越界守卫。
 struct GpuClothAeroParams {
     /// 世界系风速，世界单位每秒（偏移 0）。
@@ -35,6 +35,9 @@ struct GpuClothAeroParams {
     dt: f32,
     /// 顶点数量，界定 per-vertex dispatch（偏移 28）。
     vertex_count: u32,
+    /// 流体（空气）密度（偏移 32）；本 pass 不使用，仅为与气动 gather pass 的
+    /// `GpuClothAeroParams` 布局逐字节一致而声明。
+    air_density: f32,
 }
 
 /// 当前速度缓冲，只读源（`.w` 为载荷位，原样搬运）。

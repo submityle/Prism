@@ -65,6 +65,10 @@ pub(crate) struct ClothSolveInput<'a> {
     pub(crate) aero_drag: f32,
     /// In-plane (lift) aerodynamic coefficient.
     pub(crate) aero_lift: f32,
+    /// Fluid (air) density; `0` selects the linear aerodynamic model, a
+    /// positive value selects the UE5 `Chaos`-style quadratic (airspeed-squared)
+    /// drag/lift model. Sanitised non-negative during planning.
+    pub(crate) aero_air_density: f32,
     /// Cloth-side Coulomb friction coefficient for body collision (`mu`), sourced
     /// from `FabricMaterial::friction`. Sanitised to `0..=1` (non-finite mapped
     /// to `0`) during planning and written into `body_params.friction`.
@@ -291,7 +295,9 @@ pub(crate) fn build_solve_plan(input: &ClothSolveInput<'_>) -> ClothSolvePlan {
         input.wind_turbulence,
     )
     .sanitized();
-    let aero = AeroParams::new(input.aero_drag, input.aero_lift).sanitized();
+    let aero = AeroParams::new(input.aero_drag, input.aero_lift)
+        .with_air_density(input.aero_air_density)
+        .sanitized();
     let aero_params = GpuClothAeroParams {
         wind: [wind.velocity.x, wind.velocity.y, wind.velocity.z],
         turbulence: wind.turbulence,
@@ -299,6 +305,8 @@ pub(crate) fn build_solve_plan(input: &ClothSolveInput<'_>) -> ClothSolvePlan {
         lift: aero.lift,
         dt: input.dt,
         particle_count,
+        air_density: aero.air_density,
+        _pad_aero: [0.0; 3],
     };
 
     ClothSolvePlan {
@@ -339,6 +347,7 @@ mod tests {
             wind_turbulence: 0.0,
             aero_drag: 0.0,
             aero_lift: 0.0,
+            aero_air_density: 0.0,
             friction: 0.0,
             colliders: &[],
             backstops: &[],
@@ -470,6 +479,7 @@ mod tests {
             wind_turbulence: 0.0,
             aero_drag: 0.0,
             aero_lift: 0.0,
+            aero_air_density: 0.0,
             friction: 0.0,
             colliders: &[],
             backstops: &[],
@@ -596,11 +606,35 @@ mod tests {
         input.wind_turbulence = 5.0;
         input.aero_drag = -1.0;
         input.aero_lift = f32::NAN;
+        input.aero_air_density = -2.0;
         let plan = build_solve_plan(&input);
         assert!((plan.aero_params.wind[0] - 0.0).abs() <= 1e-6);
         assert!((plan.aero_params.wind[1] - 2.0).abs() <= 1e-6);
         assert!((plan.aero_params.turbulence - 1.0).abs() <= 1e-6);
         assert!((plan.aero_params.drag - 0.0).abs() <= 1e-6);
         assert!((plan.aero_params.lift - 0.0).abs() <= 1e-6);
+        assert!((plan.aero_params.air_density - 0.0).abs() <= 1e-6);
+    }
+
+    /// A positive fluid density flows through the plan verbatim into the
+    /// uniform (after non-negative sanitisation), selecting the quadratic model.
+    #[test]
+    fn aero_air_density_flows_into_the_uniform() {
+        let positions = [
+            [0.0, 0.0, 0.0, 1.0],
+            [1.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0, 1.0],
+        ];
+        let velocities = [[0.0; 4]; 3];
+        let constraints = [edge(0, 1, ConstraintKind::Stretch)];
+        let triangles = [[0u32, 1, 2]];
+        let mut input = quad_input(&positions, &velocities, &constraints);
+        input.triangles = &triangles;
+        input.wind_velocity = [3.0, 0.0, 0.0];
+        input.aero_drag = 1.0;
+        input.aero_lift = 0.5;
+        input.aero_air_density = 1.225;
+        let plan = build_solve_plan(&input);
+        assert!((plan.aero_params.air_density - 1.225).abs() <= 1e-6);
     }
 }

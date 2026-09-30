@@ -29,7 +29,7 @@
 /// （镜像 CPU 的 `EPS_LEN_SQ`）。
 const CLOTH_EPS_LEN_SQ: f32 = 1.0e-12;
 
-/// 气动力全局参数（两文件共用；此处独立声明一份，32 字节，字段偏移严格对齐
+/// 气动力全局参数（两文件共用；此处独立声明一份，48 字节，字段偏移严格对齐
 /// arch 的 `GpuClothAeroParams`）。
 struct GpuClothAeroParams {
     /// 世界系风速，世界单位每秒（偏移 0）。
@@ -44,6 +44,10 @@ struct GpuClothAeroParams {
     dt: f32,
     /// 顶点数量，界定 per-vertex dispatch（偏移 28）。
     vertex_count: u32,
+    /// 流体（空气）密度（偏移 32）；`<= 0` 选线性模型（历史默认），`> 0` 选
+    /// UE5 `Chaos` 风格二次模型，逐面力再乘动压因子
+    /// `0.5 * air_density * relative_wind_magnitude`，随空速平方增长。
+    air_density: f32,
 }
 
 /// 世界坐标 + inverse mass（`.w`），只读。
@@ -103,7 +107,7 @@ fn turbulence_offset(i0: u32, i1: u32, i2: u32, turb: f32) -> vec3<f32> {
 fn triangle_wind_force(
     p0: vec3<f32>, p1: vec3<f32>, p2: vec3<f32>,
     v0: vec3<f32>, v1: vec3<f32>, v2: vec3<f32>,
-    wind: vec3<f32>, drag: f32, lift: f32,
+    wind: vec3<f32>, drag: f32, lift: f32, air_density: f32,
 ) -> vec3<f32> {
     let cross_vec = cross(p1 - p0, p2 - p0);
     let cross_len_sq = dot(cross_vec, cross_vec);
@@ -116,7 +120,18 @@ fn triangle_wind_force(
     let relative = wind - face_vel;
     let normal_comp = normal * dot(relative, normal);
     let tangent = relative - normal_comp;
-    return (normal_comp * drag + tangent * lift) * area;
+    // 逐面方向力：法向阻力 + 切向升力（每单位压力）。
+    let directional = normal_comp * drag + tangent * lift;
+    // 压力缩放：线性模型（`air_density <= 0`）直接用三角面积，逐位复刻历史
+    // `area * relative_wind`；二次模型（`air_density > 0`）再乘动压因子
+    // `0.5 * air_density * |relative|`，随空速平方增长（UE5 `Chaos` Cloth /
+    // `NvCloth` 流体模型）。乘序 `0.5 * air_density` 先算、再 `* speed`、
+    // 再 `area * (...)`，与 CPU 黄金逐位一致；只用 `sqrt`，无 transcendental。
+    var pressure = area;
+    if air_density > 0.0 {
+        pressure = area * (0.5 * air_density * sqrt(dot(relative, relative)));
+    }
+    return directional * pressure;
 }
 
 /// 气动力 gather 主内核：读快照面速度，把每帧一次的风力冲量累加进自身速度。
@@ -142,6 +157,7 @@ fn cloth_aerodynamics(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let drag = max(aero_params.drag, 0.0);
     let lift = max(aero_params.lift, 0.0);
+    let air_density = max(aero_params.air_density, 0.0);
     var accum = vec3<f32>(0.0);
     let start = csr_offsets[v];
     let end = csr_offsets[v + 1u];
@@ -155,7 +171,7 @@ fn cloth_aerodynamics(@builtin(global_invocation_id) gid: vec3<u32>) {
         let force = triangle_wind_force(
             positions[i0].xyz, positions[i1].xyz, positions[i2].xyz,
             velocity_snapshot[i0].xyz, velocity_snapshot[i1].xyz, velocity_snapshot[i2].xyz,
-            wind_vec, drag, lift,
+            wind_vec, drag, lift, air_density,
         );
         accum = accum + force * (1.0 / 3.0);
     }

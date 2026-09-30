@@ -77,13 +77,15 @@ fn cloth_aerodynamics_wesl_compiles_standalone() {
 }
 
 /// Guards the Rust immediate-block `ABI` against drift from the `WESL` struct:
-/// the `GpuClothAeroParams` uniform is the 32-byte block (a `vec3` wind row plus
-/// five trailing scalars) matching both aerodynamics shaders' `aero_params`
-/// global, and the workgroup constant matches `@workgroup_size(64)`.
+/// the `GpuClothAeroParams` uniform is the 48-byte block (a `vec3` wind row, the
+/// five original trailing scalars, then the fluid density plus its pad rounding
+/// the block up to a whole third 16-byte uniform row) matching both
+/// aerodynamics shaders' `aero_params` global, and the workgroup constant
+/// matches `@workgroup_size(64)`.
 #[test]
 fn cloth_aerodynamics_abi_matches_the_shader_layout() {
     use super::abi::{GpuClothAeroParams, CLOTH_WORKGROUP_SIZE};
-    assert_eq!(size_of::<GpuClothAeroParams>(), 32);
+    assert_eq!(size_of::<GpuClothAeroParams>(), 48);
     assert_eq!(align_of::<GpuClothAeroParams>(), 4);
     assert_eq!(CLOTH_WORKGROUP_SIZE, 64);
 }

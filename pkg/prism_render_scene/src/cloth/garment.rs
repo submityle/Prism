@@ -52,6 +52,10 @@ pub struct ClothGarment {
     pub(crate) aero_drag: f32,
     /// In-plane (lift) aerodynamic coefficient.
     pub(crate) aero_lift: f32,
+    /// Fluid (air) density; `0` (the default) keeps the linear aerodynamic
+    /// model, a positive value selects the UE5 `Chaos`-style quadratic
+    /// (airspeed-squared) drag/lift model.
+    pub(crate) aero_air_density: f32,
     /// Cloth-side Coulomb friction coefficient for body collision, sourced from
     /// `FabricMaterial::friction` and clamped to `0..=1` during planning. `0`
     /// (the default) keeps the frictionless projection; higher values grip the
@@ -100,6 +104,7 @@ impl ClothGarment {
             wind_turbulence: self.wind_turbulence,
             aero_drag: self.aero_drag,
             aero_lift: self.aero_lift,
+            aero_air_density: self.aero_air_density,
             friction: self.friction,
             colliders: &self.colliders,
             backstops: &self.backstops,

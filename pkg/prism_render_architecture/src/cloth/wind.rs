@@ -78,25 +78,51 @@ pub struct AeroParams {
     pub drag: f32,
     /// In-plane (lift) coefficient; clamped non-negative.
     pub lift: f32,
+    /// Fluid (air) density scaling the quadratic drag/lift term, clamped
+    /// non-negative. A non-positive density selects the linear
+    /// `area * relative_wind` model (the historical default); a positive
+    /// density selects the UE5 `Chaos`-style quadratic model, where the
+    /// per-face force additionally scales by `0.5 * air_density *
+    /// relative_wind_magnitude`, so it grows with the square of the airspeed
+    /// the way real aerodynamic drag does.
+    pub air_density: f32,
 }
 
 impl AeroParams {
-    /// Builds coefficients from a drag and lift value.
+    /// Builds coefficients from a drag and lift value, leaving the fluid
+    /// density at zero so the linear (historical) aerodynamic model is used.
     ///
     /// The inputs are stored verbatim; call [`AeroParams::sanitized`] for a
-    /// finite, non-negative copy before simulating.
+    /// finite, non-negative copy before simulating. Use
+    /// [`AeroParams::with_air_density`] to opt into the quadratic model.
     #[must_use]
     pub fn new(drag: f32, lift: f32) -> Self {
-        Self { drag, lift }
+        Self {
+            drag,
+            lift,
+            air_density: 0.0,
+        }
     }
 
-    /// Returns a copy with `drag` and `lift` clamped non-negative and any
-    /// `NaN` replaced by `0`.
+    /// Returns a copy with the fluid density set to `air_density`, opting the
+    /// coefficients into the quadratic (airspeed-squared) aerodynamic model.
+    ///
+    /// A non-positive `air_density` keeps the linear model; the value is
+    /// stored verbatim and clamped non-negative by [`AeroParams::sanitized`].
+    #[must_use]
+    pub fn with_air_density(mut self, air_density: f32) -> Self {
+        self.air_density = air_density;
+        self
+    }
+
+    /// Returns a copy with `drag`, `lift` and `air_density` clamped
+    /// non-negative and any `NaN` replaced by `0`.
     #[must_use]
     pub fn sanitized(self) -> Self {
         Self {
             drag: sanitize_non_negative(self.drag),
             lift: sanitize_non_negative(self.lift),
+            air_density: sanitize_non_negative(self.air_density),
         }
     }
 }
@@ -139,10 +165,24 @@ pub fn triangle_wind_force(
     let normal_component = normal.scale(relative.dot(normal));
     let tangent_component = relative.sub(normal_component);
 
-    normal_component
+    // Directional force per unit pressure: drag along the normal, lift in-plane.
+    let directional = normal_component
         .scale(aero.drag)
-        .add(tangent_component.scale(aero.lift))
-        .scale(area)
+        .add(tangent_component.scale(aero.lift));
+
+    // Pressure scale. The linear model (density <= 0) uses the triangle area
+    // directly, matching the historical `area * relative_wind` force. The
+    // quadratic model (density > 0) additionally scales by the dynamic pressure
+    // factor `0.5 * air_density * relative_wind_magnitude`, so the force grows
+    // with the square of the airspeed — the UE5 `Chaos` Cloth / `NvCloth` fluid
+    // model. Only `sqrt` is used; no transcendental is called.
+    let pressure = if aero.air_density > 0.0 {
+        area * (0.5 * aero.air_density * relative.length_squared().sqrt())
+    } else {
+        area
+    };
+
+    directional.scale(pressure)
 }
 
 /// Applies wind-driven aerodynamic forces to `particles` over `dt` seconds.
@@ -560,5 +600,90 @@ mod tests {
         assert_eq!(turbulence_offset([0, 1, 2], 0.0), Vec3::ZERO);
         assert_eq!(turbulence_offset([3, 4, 5], -1.0), Vec3::ZERO);
         assert!(turbulence_offset([0, 1, 2], 1.0).length_squared() > 0.0);
+    }
+
+    #[test]
+    fn quadratic_model_scales_by_dynamic_pressure() {
+        const EPS: f32 = 1.0e-5;
+        let (p0, p1, p2) = xy_triangle();
+        let wind = Vec3::new(3.0, 0.0, 2.0);
+        let drag = 1.25;
+        let lift = 0.5;
+        let density = 1.225;
+        let linear = triangle_wind_force(
+            p0,
+            p1,
+            p2,
+            Vec3::ZERO,
+            Vec3::ZERO,
+            Vec3::ZERO,
+            wind,
+            AeroParams::new(drag, lift),
+        );
+        let quadratic = triangle_wind_force(
+            p0,
+            p1,
+            p2,
+            Vec3::ZERO,
+            Vec3::ZERO,
+            Vec3::ZERO,
+            wind,
+            AeroParams::new(drag, lift).with_air_density(density),
+        );
+        // Faces at rest make the relative wind equal `wind`; the quadratic
+        // model multiplies the linear force by `0.5 * air_density * |wind|`.
+        let speed = wind.length_squared().sqrt();
+        let factor = 0.5 * density * speed;
+        assert!((quadratic.x - linear.x * factor).abs() < EPS);
+        assert!((quadratic.y - linear.y * factor).abs() < EPS);
+        assert!((quadratic.z - linear.z * factor).abs() < EPS);
+    }
+
+    #[test]
+    fn non_positive_density_keeps_linear_model() {
+        let (p0, p1, p2) = xy_triangle();
+        let wind = Vec3::new(3.0, 0.0, 2.0);
+        let linear = triangle_wind_force(
+            p0,
+            p1,
+            p2,
+            Vec3::ZERO,
+            Vec3::ZERO,
+            Vec3::ZERO,
+            wind,
+            AeroParams::new(1.0, 0.5),
+        );
+        let zero_density = triangle_wind_force(
+            p0,
+            p1,
+            p2,
+            Vec3::ZERO,
+            Vec3::ZERO,
+            Vec3::ZERO,
+            wind,
+            AeroParams::new(1.0, 0.5).with_air_density(0.0),
+        );
+        let negative_density = triangle_wind_force(
+            p0,
+            p1,
+            p2,
+            Vec3::ZERO,
+            Vec3::ZERO,
+            Vec3::ZERO,
+            wind,
+            AeroParams::new(1.0, 0.5).with_air_density(-4.0),
+        );
+        assert_eq!(zero_density, linear);
+        assert_eq!(negative_density, linear);
+    }
+
+    #[test]
+    fn aeroparams_sanitize_clamps_air_density() {
+        let cleaned_negative = AeroParams::new(1.0, 1.0).with_air_density(-2.0).sanitized();
+        assert!(cleaned_negative.air_density.abs() < 1.0e-6);
+        let cleaned_nan = AeroParams::new(1.0, 1.0).with_air_density(f32::NAN).sanitized();
+        assert!(cleaned_nan.air_density.abs() < 1.0e-6);
+        let kept = AeroParams::new(1.0, 1.0).with_air_density(1.225).sanitized();
+        assert!((kept.air_density - 1.225).abs() < 1.0e-6);
     }
 }

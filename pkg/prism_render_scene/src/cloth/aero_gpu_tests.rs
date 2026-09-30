@@ -356,27 +356,16 @@ fn dispatch_aero(
     values
 }
 
-/// 两段式气动 dispatch 在真机上必须与 CPU 黄金落在 `float32` 舍入容差内。
-#[test]
-#[expect(
-    clippy::print_stderr,
-    reason = "无 wgpu adapter 的主机上，跳过提示需要进入测试日志"
-)]
-fn aero_gpu_matches_cpu_golden() {
-    let Some((device, queue)) = try_solver_device() else {
-        eprintln!("aero_gpu_matches_cpu_golden: no wgpu adapter, skipping on-device parity");
-        return;
-    };
-
+/// 在给定设备上跑两段式气动 dispatch，逐顶点与 CPU 黄金对拍（容差 `PARITY_EPS`）。
+///
+/// 抽出 `wind` / `aero` / `dt` 三个入参，供线性与二次（`air_density > 0`）两条
+/// 模型分别驱动同一条真机 dispatch + 对拍路径，避免重复。
+fn run_on_device_parity(device: &wgpu::Device, queue: &wgpu::Queue, wind: WindField, aero: AeroParams, dt: f32) {
     const NX: usize = 12;
     const NZ: usize = 10;
     let (particles, triangles) = build_grid(NX, NZ);
     let count = particles.len();
     let adjacency = VertexTriangleAdjacency::build(count, &triangles);
-
-    let wind = WindField::new(Vec3::new(2.5, -0.4, 1.3), 0.35);
-    let aero = AeroParams::new(1.2, 0.6);
-    let dt = 1.0 / 60.0;
 
     // CPU 黄金：在副本上原地累加。
     let mut golden = particles.clone();
@@ -395,7 +384,7 @@ fn aero_gpu_matches_cpu_golden() {
         .collect();
     let flat: Vec<u32> = triangles.iter().flat_map(|t| t.iter().copied()).collect();
 
-    // 参数按 solve_plan 口径 sanitize 后打包。
+    // 参数按 solve_plan 口径 sanitize 后打包（含二次模型的 air_density）。
     let field = wind.sanitized();
     let clean = aero.sanitized();
     let params = GpuClothAeroParams {
@@ -405,6 +394,8 @@ fn aero_gpu_matches_cpu_golden() {
         lift: clean.lift,
         dt,
         particle_count: count as u32,
+        air_density: clean.air_density,
+        _pad_aero: [0.0; 3],
     };
 
     let snapshot_wgsl = compile_wgsl(
@@ -421,8 +412,8 @@ fn aero_gpu_matches_cpu_golden() {
     let gather_entry = find_entry_point(&gather_wgsl, "cloth_aerodynamics");
 
     let result = dispatch_aero(
-        &device,
-        &queue,
+        device,
+        queue,
         &snapshot_wgsl,
         &snapshot_entry,
         &gather_wgsl,
@@ -457,4 +448,40 @@ fn aero_gpu_matches_cpu_golden() {
             "vertex {i}: payload .w was mutated by the GPU kernels"
         );
     }
+}
+
+/// 线性气动模型（`air_density = 0`）在真机上必须与 CPU 黄金落在 `float32` 舍入容差内。
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "无 wgpu adapter 的主机上，跳过提示需要进入测试日志"
+)]
+fn aero_gpu_matches_cpu_golden() {
+    let Some((device, queue)) = try_solver_device() else {
+        eprintln!("aero_gpu_matches_cpu_golden: no wgpu adapter, skipping on-device parity");
+        return;
+    };
+    let wind = WindField::new(Vec3::new(2.5, -0.4, 1.3), 0.35);
+    let aero = AeroParams::new(1.2, 0.6);
+    run_on_device_parity(&device, &queue, wind, aero, 1.0 / 60.0);
+}
+
+/// 二次（UE5 `Chaos` 风格 airspeed²）气动模型（`air_density > 0`）在真机上同样
+/// 必须与 CPU 黄金逐顶点吻合，验证 `air_density` 经 48 字节 uniform 正确抵达
+/// GPU 并驱动动压分支。
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "无 wgpu adapter 的主机上，跳过提示需要进入测试日志"
+)]
+fn aero_gpu_quadratic_matches_cpu_golden() {
+    let Some((device, queue)) = try_solver_device() else {
+        eprintln!(
+            "aero_gpu_quadratic_matches_cpu_golden: no wgpu adapter, skipping on-device parity"
+        );
+        return;
+    };
+    let wind = WindField::new(Vec3::new(2.5, -0.4, 1.3), 0.35);
+    let aero = AeroParams::new(1.2, 0.6).with_air_density(1.225);
+    run_on_device_parity(&device, &queue, wind, aero, 1.0 / 60.0);
 }

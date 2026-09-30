@@ -82,6 +82,7 @@ pub struct ClothGarmentBuilder {
     wind_turbulence: f32,
     aero_drag: f32,
     aero_lift: f32,
+    aero_air_density: f32,
     friction: f32,
     colliders: Vec<GpuClothCollider>,
     backstops: Vec<GpuClothBackstop>,
@@ -112,6 +113,7 @@ impl Default for ClothGarmentBuilder {
             wind_turbulence: 0.0,
             aero_drag: 0.0,
             aero_lift: 0.0,
+            aero_air_density: 0.0,
             friction: 0.0,
             colliders: Vec::new(),
             backstops: Vec::new(),
@@ -140,7 +142,12 @@ fn split_particle(particle: &ClothParticle) -> ([f32; 4], [f32; 4]) {
         particle.position.z,
         particle.inverse_mass,
     ];
-    let velocity = [particle.velocity.x, particle.velocity.y, particle.velocity.z, 0.0];
+    let velocity = [
+        particle.velocity.x,
+        particle.velocity.y,
+        particle.velocity.z,
+        0.0,
+    ];
     (position, velocity)
 }
 
@@ -267,6 +274,18 @@ impl ClothGarmentBuilder {
         self
     }
 
+    /// Sets the fluid (air) density that scales the quadratic aerodynamic term.
+    ///
+    /// The default of `0` keeps the linear (historical) drag/lift model; a
+    /// positive value opts into the UE5 `Chaos`-style quadratic (airspeed-
+    /// squared) model, where the per-face force additionally scales by
+    /// `0.5 * air_density * relative_wind_magnitude`.
+    #[must_use]
+    pub fn air_density(mut self, density: f32) -> Self {
+        self.aero_air_density = density;
+        self
+    }
+
     /// Enables uniform-grid self-collision with the given separation thickness,
     /// grid cell edge and hash-table cell count. A zero cell count keeps
     /// self-collision disabled.
@@ -329,6 +348,7 @@ impl ClothGarmentBuilder {
             wind_turbulence: self.wind_turbulence,
             aero_drag: self.aero_drag,
             aero_lift: self.aero_lift,
+            aero_air_density: self.aero_air_density,
             friction: self.friction,
             colliders: self.colliders,
             backstops: self.backstops,
@@ -499,6 +519,13 @@ mod tests {
         assert!((garment.wind_turbulence - 0.3).abs() <= 1e-6);
         assert!((garment.aero_drag - 0.7).abs() <= 1e-6);
         assert!((garment.aero_lift - 0.4).abs() <= 1e-6);
+        // The air density defaults to the linear model until opted in.
+        assert!(garment.aero_air_density.abs() <= 1e-6);
+        let quadratic = ClothGarmentBuilder::from_particles(&sample_particles())
+            .aerodynamics(0.7, 0.4)
+            .air_density(1.225)
+            .build();
+        assert!((quadratic.aero_air_density - 1.225).abs() <= 1e-6);
     }
 
     #[test]

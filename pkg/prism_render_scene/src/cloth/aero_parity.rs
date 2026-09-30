@@ -43,6 +43,8 @@ struct WeslAeroParams {
     lift: f32,
     dt: f32,
     vertex_count: u32,
+    /// 流体（空气）密度：`<= 0` 选线性模型，`> 0` 选二次（airspeed²）模型。
+    air_density: f32,
 }
 
 // ------- [f32; 3] 上的标量算术，逐位镜像 arch `Vec3` 的成员方法 -------
@@ -120,6 +122,7 @@ fn triangle_wind_force(
     wind: [f32; 3],
     drag: f32,
     lift: f32,
+    air_density: f32,
 ) -> [f32; 3] {
     const CLOTH_EPS_LEN_SQ: f32 = 1.0e-12;
     let cross_vec = v_cross(v_sub(p1, p0), v_sub(p2, p0));
@@ -133,10 +136,15 @@ fn triangle_wind_force(
     let relative = v_sub(wind, face_vel);
     let normal_comp = v_scale(normal, v_dot(relative, normal));
     let tangent = v_sub(relative, normal_comp);
-    v_scale(
-        v_add(v_scale(normal_comp, drag), v_scale(tangent, lift)),
-        area,
-    )
+    let directional = v_add(v_scale(normal_comp, drag), v_scale(tangent, lift));
+    // 镜像 `WESL`：线性模型（`air_density <= 0`）用面积；二次模型（`> 0`）再乘
+    // 动压因子 `0.5 * air_density * sqrt(dot(relative, relative))`，乘序逐位一致。
+    let pressure = if air_density > 0.0 {
+        area * (0.5 * air_density * v_dot(relative, relative).sqrt())
+    } else {
+        area
+    };
+    v_scale(directional, pressure)
 }
 
 /// `cloth_aerodynamics_snapshot.wesl` 转写：整槽（含 `.w` 载荷位）逐位拷贝。
@@ -172,6 +180,7 @@ fn aero_gather(
         }
         let drag = params.drag.max(0.0);
         let lift = params.lift.max(0.0);
+        let air_density = params.air_density.max(0.0);
         let mut accum = [0.0f32; 3];
         let start = csr_offsets[v];
         let end = csr_offsets[v + 1];
@@ -194,6 +203,7 @@ fn aero_gather(
                 wind_vec,
                 drag,
                 lift,
+                air_density,
             );
             accum = v_add(accum, v_scale(force, 1.0 / 3.0));
             e += 1;
@@ -253,6 +263,7 @@ fn assert_bit_exact(case: &Case, wind: WindField, aero: AeroParams, dt: f32) {
         lift: clean.lift,
         dt,
         vertex_count: count as u32,
+        air_density: clean.air_density,
     };
 
     let snapshot = aero_snapshot(&velocities);
@@ -435,4 +446,83 @@ fn dense_grid_matches_golden_bit_for_bit() {
     let wind = WindField::new(Vec3::new(2.0, -1.0, 3.5), 0.45);
     let aero = AeroParams::new(1.2, 0.7);
     assert_bit_exact(&case, wind, aero, 1.0 / 60.0);
+}
+
+#[test]
+fn quadratic_single_triangle_matches_golden() {
+    let case = Case {
+        particles: vec![
+            moving([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], 1.0),
+            moving([2.0, 0.0, 0.0], [0.3, 0.0, 0.0], 1.0),
+            moving([0.0, 0.0, 2.0], [0.0, 0.1, 0.0], 1.0),
+        ],
+        triangles: vec![[0, 1, 2]],
+    };
+    let wind = WindField::new(Vec3::new(4.0, 1.0, -2.0), 0.0);
+    // 正空气密度选二次模型；黄金侧同样开启，两条路径逐位一致。
+    let aero = AeroParams::new(1.25, 0.6).with_air_density(1.225);
+    assert_bit_exact(&case, wind, aero, 1.0 / 60.0);
+}
+
+#[test]
+fn quadratic_shared_vertex_quad_matches_golden() {
+    let case = quad_case();
+    let wind = WindField::new(Vec3::new(3.0, -1.5, 2.0), 0.4);
+    let aero = AeroParams::new(0.9, 0.35).with_air_density(2.5);
+    assert_bit_exact(&case, wind, aero, 1.0 / 90.0);
+}
+
+#[test]
+fn quadratic_dense_grid_matches_golden_bit_for_bit() {
+    const W: usize = 6;
+    const H: usize = 6;
+    let mut particles = Vec::with_capacity(W * H);
+    let mut seed: u32 = 0x1234_5678;
+    let mut next = || {
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        (seed >> 8) as f32 * (1.0 / 16_777_216.0) * 2.0 - 1.0
+    };
+    for y in 0..H {
+        for x in 0..W {
+            let pos = [
+                x as f32 + 0.05 * next(),
+                0.2 * next(),
+                y as f32 + 0.05 * next(),
+            ];
+            let vel = [0.3 * next(), 0.3 * next(), 0.3 * next()];
+            let inv_mass = if (x + y) % 7 == 0 {
+                0.0
+            } else {
+                0.5 + 0.5 * (next() + 1.0)
+            };
+            particles.push(moving(pos, vel, inv_mass));
+        }
+    }
+    let mut triangles = Vec::new();
+    for y in 0..H - 1 {
+        for x in 0..W - 1 {
+            let i = (y * W + x) as u32;
+            let r = i + 1;
+            let d = i + W as u32;
+            let dr = d + 1;
+            triangles.push([i, r, d]);
+            triangles.push([d, r, dr]);
+        }
+    }
+    let case = Case {
+        particles,
+        triangles,
+    };
+    let wind = WindField::new(Vec3::new(2.0, -1.0, 3.5), 0.45);
+    let aero = AeroParams::new(1.2, 0.7).with_air_density(1.8);
+    assert_bit_exact(&case, wind, aero, 1.0 / 60.0);
+}
+
+#[test]
+fn non_positive_density_falls_back_to_linear_on_both_paths() {
+    // 负密度必须命中线性分支：与显式线性系数逐位一致（黄金/转写同源）。
+    let case = quad_case();
+    let wind = WindField::new(Vec3::new(2.5, 0.5, -3.0), 0.4);
+    let aero = AeroParams::new(1.1, 0.8).with_air_density(-4.0);
+    assert_bit_exact(&case, wind, aero, 1.0 / 120.0);
 }
