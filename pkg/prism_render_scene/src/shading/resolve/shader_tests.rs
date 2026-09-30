@@ -883,6 +883,32 @@ fn hair_deep_opacity_wesl_compiles_standalone() {
         .unwrap_or_else(|error| panic!("hair_deep_opacity.wesl failed to compile: {error}"));
 }
 
+/// Compiles the hair forward-scatter crossing-count packing compute twin
+/// standalone. A green result proves the additive sibling of the deep-opacity
+/// packer — the fixed equal-width depth-layer slicing plus the `alpha`-sum
+/// running crossing count over each texel's host-pre-sorted sample slice, with
+/// the empty-texel zero-crossing branch — parses and type-checks as WESL
+/// through the render-world `ShaderCache` / `wesl` pipeline, in lock-step with
+/// the CPU golden
+/// `prism_render_architecture::hair::forward_scatter_layout::build_forward_scatter_map`.
+#[test]
+fn hair_forward_scatter_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let hair_forward_scatter = shader_id(0x5052_4953_4d5f_4841_4952_5f46_5343_0001);
+    cache.set_shader(
+        hair_forward_scatter,
+        Shader::from_wesl(
+            include_str!("../../shaders/hair_forward_scatter.wesl"),
+            "embedded://prism_render_scene/shaders/hair_forward_scatter.wesl",
+        ),
+    );
+
+    cache
+        .get(0, hair_forward_scatter, &[])
+        .unwrap_or_else(|error| panic!("hair_forward_scatter.wesl failed to compile: {error}"));
+}
+
 /// Compiles the hair per-guide density-LOD metric compute twin standalone. A
 /// green result proves the per-guide measurement kernel — the left-to-right
 /// arc-length sum, the interior-vertex `1 - dot(t_in, t_out)` curvature sum
