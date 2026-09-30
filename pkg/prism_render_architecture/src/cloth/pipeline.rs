@@ -1356,6 +1356,58 @@ mod tests {
     }
 
     #[test]
+    fn quadratic_air_density_amplifies_downwind_drift() {
+        // End-to-end closure: at the `Garment::step` level, selecting the
+        // quadratic (airspeed²) aerodynamic model via a positive `air_density`
+        // scales the wind impulse by the dynamic-pressure factor
+        // `0.5 * air_density * |relative wind|`, so it must move the same sheet
+        // strictly further downwind than the linear (`air_density == 0`) model
+        // when that factor exceeds one.
+        let (grid, positions) = drape_grid(4, 4, 0.25);
+        let material = FabricMaterial::default();
+        let mut linear = build_grid_garment(grid, &positions, &material, stiff_solver());
+        let mut quadratic = build_grid_garment(grid, &positions, &material, stiff_solver());
+        for c in 0..grid.cols as usize {
+            linear.pin(c);
+            quadratic.pin(c);
+        }
+        linear.set_triangles(grid_triangles(grid));
+        quadratic.set_triangles(grid_triangles(grid));
+        let wind = WindField::new(Vec3::new(0.0, 0.0, 10.0), 0.0);
+        // Identical coefficients; only the model selection differs. With a +z
+        // wind of 10 m/s the dynamic-pressure factor is 0.5 * 0.4 * 10 = 2.0,
+        // so the quadratic sheet feels twice the linear impulse.
+        linear.set_wind(wind, AeroParams::new(1.0, 1.0));
+        quadratic.set_wind(wind, AeroParams::new(1.0, 1.0).with_air_density(0.4));
+        for _ in 0..60 {
+            linear.step(1.0 / 60.0);
+            quadratic.step(1.0 / 60.0);
+        }
+        // A calm (gravity-only) reference isolates the wind-driven component of
+        // the downwind (+z) displacement from the gravity sag both windy sheets
+        // share.
+        let mut calm = build_grid_garment(grid, &positions, &material, stiff_solver());
+        for c in 0..grid.cols as usize {
+            calm.pin(c);
+        }
+        calm.set_triangles(grid_triangles(grid));
+        for _ in 0..60 {
+            calm.step(1.0 / 60.0);
+        }
+        let idx = grid.index(3, 3) as usize;
+        let calm_z = calm.particles[idx].position.z;
+        let linear_drift = linear.particles[idx].position.z - calm_z;
+        let quad_drift = quadratic.particles[idx].position.z - calm_z;
+        assert!(linear_drift > 0.0, "linear drift not downwind: {linear_drift}");
+        assert!(
+            quad_drift > linear_drift + 0.01,
+            "quadratic drift {quad_drift} did not exceed linear {linear_drift}"
+        );
+        assert_finite(&linear.particles);
+        assert_finite(&quadratic.particles);
+    }
+
+    #[test]
     fn calm_wind_and_empty_triangulation_change_nothing() {
         let (grid, positions) = drape_grid(3, 3, 0.3);
         let material = FabricMaterial::default();
