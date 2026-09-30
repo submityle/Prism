@@ -19,6 +19,9 @@
 //!   separable inverse butterfly `FFT` that replaces the ocean spectrum's
 //!   `O(N^4)` direct-sum reference with the `O(N^2 log N)` transform every
 //!   shipping ocean (`WaveWorks`, `Crest`, `UE5` Water) uses.
+//! * [`spectral_plan`] — the per-cascade evolve → butterfly → assemble stage
+//!   schedule that drives the spectral ocean over the [`fft_plan`] passes,
+//!   packing the eight real output fields into four complex transforms.
 //!
 //! Everything here is pure integer bookkeeping with no `GPU` handles, no floats
 //! and no wall clock, so the whole `GPU` schedule is deterministic and
@@ -29,6 +32,7 @@
 pub mod buffers;
 pub mod fft_plan;
 pub mod pipeline;
+pub mod spectral_plan;
 
 pub use buffers::{
     AsyncFrameState, BufferParity, FrameSlot, PipelineError, SlotState, WaterBufferCounts,
@@ -44,4 +48,10 @@ pub use fft_plan::{
 pub use pipeline::{
     extract, plan_frame, prepare, queue, PlannedDispatch, WaterGpuExtract, WaterGpuFramePlan,
     WaterGpuPrepare, WaterGpuQueue, WaterPasses,
+};
+
+pub use spectral_plan::{
+    cascade_spectral_stage_count, field_slot, ocean_spectral_pass_count, plan_cascade_spectral,
+    plan_ocean_spectral, ComplexPart, FieldSlot, SpectralPass, SpectralRealField, SpectralStage,
+    SPECTRAL_COMPLEX_FIELD_COUNT, SPECTRAL_REAL_FIELD_COUNT,
 };
