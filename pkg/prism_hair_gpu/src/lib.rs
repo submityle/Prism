@@ -23,6 +23,12 @@
 //!   walking the double-reflection rotation-minimizing frame transport one
 //!   thread per strand so every control point gets a coherent orthonormal
 //!   tangent/normal/bitangent basis (see [`frames`]).
+//! * [`GpuRibbon`] evaluates
+//!   [`build_ribbon`](prism_render_architecture::hair::ribbon::build_ribbon),
+//!   meshing each strand into its view-independent `Cards` LOD ribbon proxy one
+//!   thread per strand — two edge vertices per control point offset `±radius`
+//!   along the rotation-minimizing bitangent, with an arc-length `v` coordinate
+//!   (see [`ribbon`]).
 //!
 //! # Portability
 //!
@@ -52,9 +58,11 @@
 pub mod collision;
 pub mod context;
 pub mod frames;
+pub mod ribbon;
 pub mod wind;
 
 pub use collision::{query_for, CollisionQuery, GpuColliderProjector};
 pub use context::{block_on, GpuContext};
 pub use frames::{GpuStrandFrame, GpuStrandFrames};
+pub use ribbon::{GpuRibbon, GpuRibbonMesh, RibbonStrandInput};
 pub use wind::{query_for_wind, GpuWindField, WindQuery};
