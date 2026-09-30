@@ -21,6 +21,10 @@
 //! - [`tlas`] — two-level acceleration: a top-level `BVH` over affine
 //!   [`tlas::Instance`]s of a shared `BLAS` pool, with object-space ray
 //!   transform and cross-instance nearest-hit pruning.
+//! - [`motion`] — two-level *matrix motion blur* [`motion::MotionTlas`]: DXR
+//!   matrix-motion instances with two key poses blended per ray at a
+//!   normalized shutter `time`, over a `BVH` built once on conservative swept
+//!   bounds; shares the top-level walk, inclusion masks, and [`tlas::TlasHit`].
 //! - [`traversal`] — [`Ray`]/`BVH` slab + Möller–Trumbore intersection with
 //!   closest-hit and any-hit walks (the `GPU` traversal kernel's golden ref).
 //! - [`ray_offset`] — Wächter-Binder watertight secondary-ray origin offset
@@ -35,6 +39,7 @@ pub mod backend;
 pub mod bvh;
 pub mod footprint;
 pub mod gpu_layout;
+pub mod motion;
 pub mod ray_offset;
 pub mod scheduler;
 pub mod tlas;
@@ -51,6 +56,7 @@ pub use backend::{
 pub use footprint::{log2_linear, RayFootprint};
 pub use bvh::{Aabb, Axis, Bvh, BvhBuildConfig, LinearBvhNode, Triangle};
 pub use tlas::{Affine3, Instance, Tlas, TlasHit};
+pub use motion::{MotionInstance, MotionTlas};
 pub use ray_offset::offset_ray_origin;
 pub use scheduler::{AccelerationScheduler, ScheduledUpdate};
 pub use traversal::{Hit, Ray};
