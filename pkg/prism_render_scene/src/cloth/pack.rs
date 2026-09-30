@@ -20,11 +20,13 @@
 //! pack into their own buffer.
 
 use prism_render_architecture::cloth::bending::BendingConstraint;
+use prism_render_architecture::cloth::collision::BodyCollider;
 use prism_render_architecture::cloth::gpu::upload::{BendingUploadPlan, ConstraintUploadPlan};
 use prism_render_architecture::cloth::{Constraint, ConstraintKind};
 
 use super::abi::{
-    GpuClothBendingConstraint, GpuClothConstraint, CLOTH_CONSTRAINT_BEND, CLOTH_CONSTRAINT_LRA,
+    GpuClothBendingConstraint, GpuClothCollider, GpuClothConstraint, CLOTH_COLLIDER_CAPSULE,
+    CLOTH_COLLIDER_HALF_SPACE, CLOTH_COLLIDER_SPHERE, CLOTH_CONSTRAINT_BEND, CLOTH_CONSTRAINT_LRA,
     CLOTH_CONSTRAINT_SHEAR, CLOTH_CONSTRAINT_STRETCH, CLOTH_CONSTRAINT_TETHER,
 };
 
@@ -109,11 +111,89 @@ pub(crate) fn pack_bending(plan: &BendingUploadPlan) -> Vec<GpuClothBendingConst
     plan.bending.iter().map(pack_bending_constraint).collect()
 }
 
+/// Packs one authored architecture-layer [`BodyCollider`] into its
+/// byte-compatible [`GpuClothCollider`] mirror, the flat 32-byte `std430`
+/// record `cloth_collision.wesl` reads.
+///
+/// This is the missing host bridge between the `CPU`-golden authoring type
+/// (`BodyCollider`, the tagged union a garment fits to its skeleton) and the
+/// device record the body-collision kernel projects against. The field mapping
+/// mirrors the shader's tagged-union reading exactly, so the same collider
+/// resolves identically on both paths:
+///
+/// - [`BodyCollider::Sphere`]: `kind = `[`CLOTH_COLLIDER_SPHERE`], `a` = centre,
+///   `radius` = radius, `b` unused (left zero).
+/// - [`BodyCollider::Capsule`]: `kind = `[`CLOTH_COLLIDER_CAPSULE`], `a` = `p0`,
+///   `b` = `p1`, `radius` = inflation radius.
+/// - [`BodyCollider::HalfSpace`]: `kind = `[`CLOTH_COLLIDER_HALF_SPACE`], `a` =
+///   plane normal (need not be unit), `radius` = signed offset, `b` unused.
+///
+/// No value is clamped or normalised here: the projection kernels
+/// (`cloth_project_out_of_sphere` / `cloth_project_out_of_half_space`) reproduce the CPU
+/// degeneracy rules (non-positive radius / near-zero normal are inert) on read,
+/// so the packed record stays a faithful, lossless copy of the authored proxy.
+#[must_use]
+pub(crate) fn pack_collider(collider: &BodyCollider) -> GpuClothCollider {
+    match *collider {
+        BodyCollider::Sphere { center, radius } => GpuClothCollider {
+            kind: CLOTH_COLLIDER_SPHERE,
+            ax: center.x,
+            ay: center.y,
+            az: center.z,
+            bx: 0.0,
+            by: 0.0,
+            bz: 0.0,
+            radius,
+        },
+        BodyCollider::Capsule { p0, p1, radius } => GpuClothCollider {
+            kind: CLOTH_COLLIDER_CAPSULE,
+            ax: p0.x,
+            ay: p0.y,
+            az: p0.z,
+            bx: p1.x,
+            by: p1.y,
+            bz: p1.z,
+            radius,
+        },
+        BodyCollider::HalfSpace { normal, offset } => GpuClothCollider {
+            kind: CLOTH_COLLIDER_HALF_SPACE,
+            ax: normal.x,
+            ay: normal.y,
+            az: normal.z,
+            bx: 0.0,
+            by: 0.0,
+            bz: 0.0,
+            radius: offset,
+        },
+    }
+}
+
+/// Packs an authored collider slice into the contiguous device buffer content
+/// [`super::bind_groups::ClothPieceUpload::colliders`] uploads.
+///
+/// Order is preserved one-to-one: the body-collision kernel applies colliders
+/// in array order per particle (the last to push wins), matching the CPU
+/// [`resolve_body_collisions`](prism_render_architecture::cloth::collision::resolve_body_collisions)
+/// slice-order projection, so the packed order *is* load-bearing and must not be
+/// reshuffled. An empty input packs to an empty `Vec` (an honest no-op collider
+/// set).
+#[must_use]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "authored-BodyCollider slice -> GPU buffer host bridge; exercised now by the body-collision on-device parity test and wired into the garment spawn path once main-world authoring lands"
+    )
+)]
+pub(crate) fn pack_colliders(colliders: &[BodyCollider]) -> Vec<GpuClothCollider> {
+    colliders.iter().map(pack_collider).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use prism_render_architecture::cloth::gpu::upload::{color_bending, plan_constraint_upload};
-    use prism_render_architecture::cloth::{Compliance, ConstraintKind};
+    use prism_render_architecture::cloth::{Compliance, ConstraintKind, Vec3};
 
     /// Builds a distance constraint for the packing tests.
     fn constraint(a: u32, b: u32, rest: f32, compliance: f32, kind: ConstraintKind) -> Constraint {
@@ -203,5 +283,73 @@ mod tests {
         for (i, h) in plan.bending.iter().enumerate() {
             assert_eq!(packed[i], pack_bending_constraint(h));
         }
+    }
+
+    #[test]
+    fn sphere_collider_maps_center_and_radius() {
+        let packed = pack_collider(&BodyCollider::Sphere {
+            center: Vec3::new(1.0, 2.0, 3.0),
+            radius: 0.5,
+        });
+        assert_eq!(packed.kind, CLOTH_COLLIDER_SPHERE);
+        assert_eq!([packed.ax, packed.ay, packed.az], [1.0, 2.0, 3.0]);
+        assert!((packed.radius - 0.5).abs() <= f32::EPSILON);
+        // The second point is unused for a sphere and must be left zeroed.
+        assert_eq!([packed.bx, packed.by, packed.bz], [0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn capsule_collider_maps_both_endpoints_and_radius() {
+        let packed = pack_collider(&BodyCollider::Capsule {
+            p0: Vec3::new(-1.0, 0.0, 0.0),
+            p1: Vec3::new(1.0, 4.0, -2.0),
+            radius: 0.25,
+        });
+        assert_eq!(packed.kind, CLOTH_COLLIDER_CAPSULE);
+        assert_eq!([packed.ax, packed.ay, packed.az], [-1.0, 0.0, 0.0]);
+        assert_eq!([packed.bx, packed.by, packed.bz], [1.0, 4.0, -2.0]);
+        assert!((packed.radius - 0.25).abs() <= f32::EPSILON);
+    }
+
+    #[test]
+    fn half_space_collider_maps_normal_into_a_and_offset_into_radius() {
+        let packed = pack_collider(&BodyCollider::HalfSpace {
+            normal: Vec3::new(0.0, 1.0, 0.0),
+            offset: -0.75,
+        });
+        assert_eq!(packed.kind, CLOTH_COLLIDER_HALF_SPACE);
+        assert_eq!([packed.ax, packed.ay, packed.az], [0.0, 1.0, 0.0]);
+        // The offset lands in the shared radius/offset word.
+        assert!((packed.radius + 0.75).abs() <= f32::EPSILON);
+        assert_eq!([packed.bx, packed.by, packed.bz], [0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn packed_colliders_preserve_author_order_and_length() {
+        let input = vec![
+            BodyCollider::Sphere {
+                center: Vec3::new(0.0, 0.0, 0.0),
+                radius: 1.0,
+            },
+            BodyCollider::HalfSpace {
+                normal: Vec3::new(0.0, 1.0, 0.0),
+                offset: 0.0,
+            },
+            BodyCollider::Capsule {
+                p0: Vec3::new(0.0, 0.0, 0.0),
+                p1: Vec3::new(0.0, 1.0, 0.0),
+                radius: 0.3,
+            },
+        ];
+        let packed = pack_colliders(&input);
+        assert_eq!(packed.len(), input.len());
+        for (i, c) in input.iter().enumerate() {
+            assert_eq!(packed[i], pack_collider(c));
+        }
+    }
+
+    #[test]
+    fn empty_collider_set_packs_to_empty() {
+        assert!(pack_colliders(&[]).is_empty());
     }
 }

@@ -43,6 +43,8 @@ mod resources;
 #[cfg(test)]
 mod aero_gpu_tests;
 #[cfg(test)]
+mod body_collision_gpu_tests;
+#[cfg(test)]
 mod aero_parity;
 #[cfg(test)]
 mod shader_tests;
