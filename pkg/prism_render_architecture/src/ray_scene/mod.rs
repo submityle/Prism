@@ -25,6 +25,11 @@
 //!   [`bvh_wide::WideBvh`] fetches many boxes per cache line yet stays a
 //!   conservative superset and reproduces [`bvh::Bvh::closest_hit`]
 //!   bit-for-bit on rays with a unique nearest hit.
+//! - [`bvh_wide_gpu_layout`] — flat, `GPU`-uploadable [`bvh_wide::WideBvh`]:
+//!   the compressed wide nodes packed into [`bvh_wide_gpu_layout::WIDE_NODE_WORDS`]
+//!   words each (origin, per-axis power-of-two dequant exponents, and every
+//!   child's quantized corners/tag/payload) plus a packed wide walk that
+//!   reproduces the in-memory [`bvh_wide::WideBvh`] traversal bit-for-bit.
 //! - [`tlas`] — two-level acceleration: a top-level `BVH` over affine
 //!   [`tlas::Instance`]s of a shared `BLAS` pool, with object-space ray
 //!   transform and cross-instance nearest-hit pruning.
@@ -76,6 +81,7 @@ pub mod acceleration;
 pub mod backend;
 pub mod bvh;
 pub mod bvh_wide;
+pub mod bvh_wide_gpu_layout;
 pub mod footprint;
 pub mod gpu_layout;
 pub mod motion;
@@ -101,6 +107,10 @@ pub use backend::{
 };
 pub use footprint::{log2_linear, RayFootprint};
 pub use bvh::{Aabb, Axis, Bvh, BvhBuildConfig, LinearBvhNode, Triangle};
+pub use bvh_wide::{WideBvh, WideChild, WideNode, QUANT_STEPS, WIDE_BRANCHING};
+pub use bvh_wide_gpu_layout::{
+    GpuWideBvh, CHILD_EMPTY, CHILD_INTERIOR, CHILD_LEAF, WIDE_NODE_WORDS, WIDE_TRIANGLE_WORDS,
+};
 pub use tlas::{Affine3, Instance, Tlas, TlasHit};
 pub use motion::{MotionInstance, MotionTlas};
 pub use motion_gpu_layout::{GpuMotionTlasBuffers, MOTION_INSTANCE_WORDS};
