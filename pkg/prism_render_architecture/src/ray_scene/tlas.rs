@@ -125,6 +125,22 @@ impl Affine3 {
         ]
     }
 
+    /// Applies the *transpose* of the linear part to a vector (`Lᵀ · v`).
+    ///
+    /// Each output component is the dot of `v` with a column of `L`, which is a
+    /// row of `Lᵀ`. This is the building block for transforming surface normals:
+    /// composed with the cached world→object inverse it yields the
+    /// inverse-transpose `(L⁻¹)ᵀ` that normals require under non-uniform scale or
+    /// shear (see [`Instance::transform_normal_to_world`]).
+    #[must_use]
+    pub fn transpose_transform_vector(&self, v: [f32; 3]) -> [f32; 3] {
+        [
+            self.cols[0][0] * v[0] + self.cols[0][1] * v[1] + self.cols[0][2] * v[2],
+            self.cols[1][0] * v[0] + self.cols[1][1] * v[1] + self.cols[1][2] * v[2],
+            self.cols[2][0] * v[0] + self.cols[2][1] * v[1] + self.cols[2][2] * v[2],
+        ]
+    }
+
     /// Applies the full affine map to a point.
     #[must_use]
     pub fn transform_point(&self, p: [f32; 3]) -> [f32; 3] {
@@ -242,6 +258,30 @@ impl Instance {
     #[must_use]
     pub const fn world_to_object(&self) -> Affine3 {
         self.world_to_object
+    }
+
+    /// Transforms an object-space surface normal into world space.
+    ///
+    /// Directions transform by the linear part `L`, but normals do not: a normal
+    /// must stay perpendicular to the surface it describes, which under
+    /// non-uniform scale or shear requires the inverse-transpose `(L⁻¹)ᵀ` rather
+    /// than `L` (transforming a normal by `L` tilts it off the surface — the
+    /// classic instanced-normal bug that shows up as wrong shading on stretched
+    /// or sheared instances). Because the world→object inverse is already cached,
+    /// this applies its transpose (`(L⁻¹)ᵀ`) with
+    /// [`Affine3::transpose_transform_vector`] and renormalises, so the result is
+    /// the unit world-space normal for a `BLAS` geometric or shading normal (for
+    /// example [`super::bvh::Triangle::geometric_normal`]). A zero or degenerate
+    /// input, or a result that collapses to zero length, yields `[0, 0, 0]`.
+    #[must_use]
+    pub fn transform_normal_to_world(&self, object_normal: [f32; 3]) -> [f32; 3] {
+        let n = self.world_to_object.transpose_transform_vector(object_normal);
+        let len_sq = n[0] * n[0] + n[1] * n[1] + n[2] * n[2];
+        if len_sq <= 0.0 {
+            return [0.0, 0.0, 0.0];
+        }
+        let inv_len = 1.0 / len_sq.sqrt();
+        [n[0] * inv_len, n[1] * inv_len, n[2] * inv_len]
     }
 
     /// `BLAS` pool index this instance references.
@@ -1286,5 +1326,81 @@ mod tests {
             }
         }
         assert_eq!(leaks, 0, "watertight TLAS leaked {leaks}/{steps} along seam");
+    }
+
+    fn vdot(a: [f32; 3], b: [f32; 3]) -> f32 {
+        a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    }
+
+    fn vnorm(v: [f32; 3]) -> [f32; 3] {
+        let inv = 1.0 / vdot(v, v).sqrt();
+        [v[0] * inv, v[1] * inv, v[2] * inv]
+    }
+
+    #[test]
+    fn normal_transform_matches_direction_under_pure_rotation() {
+        // A rotation is orthonormal, so (L^-1)^T == L and the normal transform
+        // coincides with the plain direction transform (up to normalisation).
+        let rot = Affine3::from_cols(
+            [[0.6, 0.8, 0.0], [-0.8, 0.6, 0.0], [0.0, 0.0, 1.0]],
+            [0.0, 0.0, 0.0],
+        );
+        let inst = Instance::new(rot, 0, 0).unwrap();
+        let n = vnorm([0.3, -0.5, 0.8]);
+        let by_normal = inst.transform_normal_to_world(n);
+        let by_dir = vnorm(rot.transform_vector(n));
+        for k in 0..3 {
+            assert!((by_normal[k] - by_dir[k]).abs() <= 1.0e-6, "axis {k}");
+        }
+    }
+
+    #[test]
+    fn normal_stays_perpendicular_to_surface_under_nonuniform_scale() {
+        // Non-uniform scale is where transforming a normal by L breaks: the
+        // correct (L^-1)^T keeps the normal orthogonal to every surface tangent,
+        // while the naive L does not.
+        let scale = Affine3::from_scale([2.0, 1.0, 1.0]);
+        let inst = Instance::new(scale, 0, 0).unwrap();
+
+        let n = vnorm([1.0, 1.0, 0.0]);
+        // Two independent object-space tangents of the surface (both ⟂ n).
+        let t1 = vnorm([1.0, -1.0, 0.0]);
+        let t2 = [0.0, 0.0, 1.0];
+
+        let world_n = inst.transform_normal_to_world(n);
+        let world_t1 = scale.transform_vector(t1);
+        let world_t2 = scale.transform_vector(t2);
+
+        // Correct transform: normal remains orthogonal to the mapped surface.
+        assert!(vdot(world_n, world_t1).abs() <= 1.0e-6);
+        assert!(vdot(world_n, world_t2).abs() <= 1.0e-6);
+        // The result is a unit vector.
+        assert!((vdot(world_n, world_n) - 1.0).abs() <= 1.0e-6);
+
+        // Naive direction transform of the normal is *not* perpendicular here —
+        // this is exactly the bug the inverse-transpose fixes.
+        let naive = vnorm(scale.transform_vector(n));
+        assert!(vdot(naive, world_t1).abs() > 0.1);
+    }
+
+    #[test]
+    fn degenerate_normal_maps_to_zero() {
+        let inst = Instance::new(Affine3::from_scale([2.0, 3.0, 4.0]), 0, 0).unwrap();
+        assert_eq!(inst.transform_normal_to_world([0.0, 0.0, 0.0]), [0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn transpose_transform_vector_is_the_matrix_transpose() {
+        // (L^T v) . e_i == v . (L e_i): checking against every basis column.
+        let m = Affine3::from_cols(
+            [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 10.0]],
+            [0.0, 0.0, 0.0],
+        );
+        let v = [1.3, -2.1, 0.7];
+        let tv = m.transpose_transform_vector(v);
+        let cols = m.columns();
+        for i in 0..3 {
+            assert!((tv[i] - vdot(cols[i], v)).abs() <= 1.0e-6, "row {i}");
+        }
     }
 }
