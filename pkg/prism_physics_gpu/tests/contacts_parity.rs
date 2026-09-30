@@ -15,8 +15,14 @@
 //! must split them across colours — a direct stress test of the shared
 //! partitioner and the one-colour-per-dispatch schedule.
 //!
-//! Provenance: substep `XPBD` with the one-sided contact constraint (Müller et
-//! al.). No Unreal Engine source or derived code.
+//! A frictional scene additionally exercises the positional Coulomb friction
+//! path: free particles slide tangentially while friction (reading the substep
+//! `prev_positions` snapshot) damps them, so the parity check covers both the
+//! static and dynamic regimes on top of the normal solve.
+//!
+//! Provenance: substep `XPBD` with the one-sided contact constraint and the
+//! positional Coulomb friction of Müller et al. 2020. No Unreal Engine source or
+//! derived code.
 
 use glam::Vec3;
 use prism_physics_gpu::{
@@ -85,6 +91,28 @@ fn mixed_pairs() -> (ParticleState, Vec<ContactConstraint>) {
         ContactConstraint::new(2, 3, 1.0, 0.0),
         ContactConstraint::new(4, 5, 1.0, 1.0e-6),
     ];
+    (state, contacts)
+}
+
+/// A gently overlapping line (particle 0 pinned) whose free particles each carry
+/// a tangential (+z) initial velocity, with Coulomb friction on every contact.
+/// The friction correction reads `prev_positions` and applies a mass-weighted
+/// tangential push, so this scene is the direct parity probe for the friction
+/// path on top of the normal solve; adjacent contacts share particles, keeping
+/// the two-colour split under test. A mix of static- and dynamic-regime drifts
+/// arises naturally as the velocities decay frame to frame.
+fn frictional_slide(n: u32) -> (ParticleState, Vec<ContactConstraint>) {
+    let mut state = ParticleState::new();
+    for i in 0..n {
+        let inv_mass = if i == 0 { 0.0 } else { 1.0 };
+        state.push(Vec3::new(0.9 * i as f32, 0.0, 0.0), inv_mass);
+        if i != 0 {
+            state.velocities[i as usize] = Vec3::new(0.0, 0.0, 3.0);
+        }
+    }
+    let contacts = (0..n - 1)
+        .map(|i| ContactConstraint::new(i, i + 1, 1.0, 0.0).with_friction(0.6, 0.4))
+        .collect();
     (state, contacts)
 }
 
@@ -185,5 +213,19 @@ fn gpu_contacts_match_cpu_golden() {
         &gravity,
         30,
         "mixed_pairs",
+    );
+
+    // Frictional sliding line: isolate friction from gravity so the parity is a
+    // clean test of the tangential correction, then run long enough for the
+    // velocities to decay through both the dynamic and static regimes.
+    let (slide, slide_contacts) = frictional_slide(12);
+    run_parity(
+        &ctx,
+        &solver,
+        &slide,
+        &slide_contacts,
+        &no_gravity,
+        40,
+        "frictional_slide_no_gravity",
     );
 }
