@@ -47,6 +47,7 @@ pub mod cfl;
 pub mod context;
 pub mod fluid;
 pub mod fracture;
+pub mod grid;
 pub mod mpm;
 pub mod radix;
 pub mod scan;
@@ -65,6 +66,7 @@ pub use fracture::{
     CellAssignment, FragmentAggregate, FragmentBounds, GpuFragmentAggregate, GpuFragmentBounds,
     GpuVoronoiAssign, VoronoiAssignConfig, NO_CELL,
 };
+pub use grid::{cpu_grid_sort, GpuUniformGrid, GridBuild, GridConfig, GridError};
 pub use mpm::{
     BoundaryMode, ConstitutiveOutput, G2pParticles, GpuMpmConstitutive, GpuMpmG2p,
     GpuMpmGridUpdate, GpuMpmP2g, GpuMpmResident, GpuMpmStep, P2gGrid, StepConfig, StepInputs,

@@ -23,6 +23,15 @@
 //! `wgpu` orders the dispatches and only the final key (and payload) buffer is
 //! read back.
 //!
+//! # Composability
+//!
+//! [`GpuRadixSort::record_sort`] records the whole multi-pass sort into a
+//! caller-supplied encoder over caller-supplied device buffers, without
+//! submitting. Sibling primitives (for example the uniform grid) can therefore
+//! sort keys produced by an earlier kernel and consume the sorted output in a
+//! later kernel within a single submission, never round-tripping through the
+//! host.
+//!
 //! # Keys-only variant
 //!
 //! [`GpuRadixSort::sort_keys`] routes through the pairs path with an identity
@@ -46,6 +55,7 @@ use wgpu::{
 
 use crate::buffer;
 use crate::context::GpuContext;
+use crate::scan::gpu::ScanLevels;
 use crate::scan::GpuScan;
 
 use super::config::{PASSES, RADIX, TILE};
@@ -63,6 +73,61 @@ struct Params {
     num_blocks: u32,
     /// Padding to a 16-byte boundary.
     pad0: u32,
+}
+
+/// The device buffers and per-dispatch keepalive produced while recording a
+/// full radix sort into a command encoder.
+///
+/// Ownership is returned to the caller so every buffer and bind group outlives
+/// submission. After the recorded passes complete, [`SortedBuffers::keys`] and
+/// [`SortedBuffers::values`] name the buffers holding the stably sorted keys and
+/// payloads (each with `COPY_SRC`, so the caller may stage them for readback or
+/// bind them read-only into a later kernel). It is `pub(crate)` so sibling
+/// primitives can sort on-device data mid-encoder without a host round-trip.
+pub(crate) struct SortedBuffers {
+    /// Buffer holding the sorted keys once the encoder has been submitted.
+    keys: Buffer,
+    /// Buffer holding the reordered payloads once the encoder has been submitted.
+    values: Buffer,
+    /// Ping-pong scratch buffers no longer holding the result, kept alive.
+    #[expect(
+        dead_code,
+        reason = "kept alive so the recorded dispatches keep valid bindings until submit"
+    )]
+    scratch: Vec<Buffer>,
+    /// Per-pass histograms and uniform params, kept alive for submission.
+    #[expect(
+        dead_code,
+        reason = "kept alive so the recorded dispatches keep valid bindings until submit"
+    )]
+    params: Vec<Buffer>,
+    /// Per-pass bind groups, kept alive for submission.
+    #[expect(
+        dead_code,
+        reason = "kept alive so the recorded dispatches keep valid bindings until submit"
+    )]
+    binds: Vec<BindGroup>,
+    /// Per-pass scan pyramids, kept alive for submission.
+    #[expect(
+        dead_code,
+        reason = "kept alive so the recorded dispatches keep valid bindings until submit"
+    )]
+    levels: Vec<ScanLevels>,
+}
+
+impl SortedBuffers {
+    /// The buffer holding the sorted keys once the encoder has been submitted.
+    #[must_use]
+    pub(crate) fn keys(&self) -> &Buffer {
+        &self.keys
+    }
+
+    /// The buffer holding the reordered payloads once the encoder has been
+    /// submitted.
+    #[must_use]
+    pub(crate) fn values(&self) -> &Buffer {
+        &self.values
+    }
 }
 
 /// A compiled, reusable `GPU` `LSD` radix sort pipeline set.
@@ -205,26 +270,59 @@ impl GpuRadixSort {
 
         let device = ctx.device();
         let bytes = size_of_val(keys) as u64;
+        let keys_buf = buffer::storage_rw_init(device, "prism_radix_keys_in", keys);
+        let vals_buf = buffer::storage_rw_init(device, "prism_radix_vals_in", values);
+
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("prism_radix_encoder"),
+        });
+        let sorted = self.record_sort(device, &mut encoder, keys_buf, vals_buf, n);
+
+        let keys_stage = buffer::staging(device, "prism_radix_keys_stage", bytes);
+        let vals_stage = buffer::staging(device, "prism_radix_vals_stage", bytes);
+        buffer::copy(&mut encoder, sorted.keys(), &keys_stage, bytes);
+        buffer::copy(&mut encoder, sorted.values(), &vals_stage, bytes);
+        ctx.queue().submit([encoder.finish()]);
+
+        let sorted_keys = buffer::read_back::<u32>(ctx, &keys_stage);
+        let sorted_vals = buffer::read_back::<u32>(ctx, &vals_stage);
+        drop(sorted);
+        (sorted_keys, sorted_vals)
+    }
+
+    /// Records a full stable `LSD` radix sort of `n` key/payload pairs into
+    /// `encoder`, without submitting.
+    ///
+    /// Takes ownership of the initial `keys` and `values` device buffers (each
+    /// holding `n` `u32`s, with `COPY_SRC` for later staging) and returns the
+    /// device buffers holding the sorted result plus all scratch, params, bind
+    /// groups, and scan pyramids kept alive until the caller submits `encoder`.
+    /// The keys buffer must already hold the values to sort by the time the
+    /// recorded dispatches run, so callers producing keys with an earlier
+    /// kernel in the same encoder get the ordering they expect.
+    pub(crate) fn record_sort(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut CommandEncoder,
+        keys: Buffer,
+        values: Buffer,
+        n: usize,
+    ) -> SortedBuffers {
+        let bytes = (n * size_of::<u32>()) as u64;
         let num_blocks = n.div_ceil(TILE as usize);
         let hist_len = (RADIX as usize) * num_blocks;
 
         // Ping-pong key and payload buffers: each pass reads `src` and writes
         // `dst`, then the roles swap. After an even number of passes `src` again
-        // names the initially uploaded buffer, which by then holds the sorted
-        // result.
-        let mut src_keys = buffer::storage_rw_init(device, "prism_radix_keys_a", keys);
-        let mut dst_keys = buffer::storage_rw_zeroed(device, "prism_radix_keys_b", bytes);
-        let mut src_vals = buffer::storage_rw_init(device, "prism_radix_vals_a", values);
-        let mut dst_vals = buffer::storage_rw_zeroed(device, "prism_radix_vals_b", bytes);
+        // names the caller's input buffers, which by then hold the result.
+        let mut src_keys = keys;
+        let mut dst_keys = buffer::storage_rw_zeroed(device, "prism_radix_keys_scratch", bytes);
+        let mut src_vals = values;
+        let mut dst_vals = buffer::storage_rw_zeroed(device, "prism_radix_vals_scratch", bytes);
 
-        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
-            label: Some("prism_radix_encoder"),
-        });
-
-        // Everything recorded into the encoder must outlive submission.
         let mut params_bufs: Vec<Buffer> = Vec::new();
         let mut binds: Vec<BindGroup> = Vec::new();
-        let mut levels = Vec::new();
+        let mut levels: Vec<ScanLevels> = Vec::new();
 
         let groups = u32::try_from(num_blocks).unwrap_or(u32::MAX);
         for pass in 0..PASSES {
@@ -256,7 +354,7 @@ impl GpuRadixSort {
                 ],
             });
             Self::dispatch(
-                &mut encoder,
+                encoder,
                 "prism_radix_count_pass",
                 &self.count,
                 &count_bind,
@@ -267,9 +365,7 @@ impl GpuRadixSort {
             // the per-(digit, block) output bases the scatter writes into. The
             // count bind group keeps a strong reference to `block_hist`, so it
             // stays valid after the handle moves into the scan.
-            let scanned = self
-                .scan
-                .record_scan(device, &mut encoder, block_hist, hist_len);
+            let scanned = self.scan.record_scan(device, encoder, block_hist, hist_len);
 
             let scatter_bind = device.create_bind_group(&BindGroupDescriptor {
                 label: Some("prism_radix_scatter_bind"),
@@ -284,7 +380,7 @@ impl GpuRadixSort {
                 ],
             });
             Self::dispatch(
-                &mut encoder,
+                encoder,
                 "prism_radix_scatter_pass",
                 &self.scatter,
                 &scatter_bind,
@@ -301,18 +397,14 @@ impl GpuRadixSort {
         }
 
         // After `PASSES` swaps `src_*` names the buffers holding the result.
-        let keys_stage = buffer::staging(device, "prism_radix_keys_stage", bytes);
-        let vals_stage = buffer::staging(device, "prism_radix_vals_stage", bytes);
-        buffer::copy(&mut encoder, &src_keys, &keys_stage, bytes);
-        buffer::copy(&mut encoder, &src_vals, &vals_stage, bytes);
-        ctx.queue().submit([encoder.finish()]);
-
-        let sorted_keys = buffer::read_back::<u32>(ctx, &keys_stage);
-        let sorted_vals = buffer::read_back::<u32>(ctx, &vals_stage);
-        drop(levels);
-        drop(binds);
-        drop(params_bufs);
-        (sorted_keys, sorted_vals)
+        SortedBuffers {
+            keys: src_keys,
+            values: src_vals,
+            scratch: vec![dst_keys, dst_vals],
+            params: params_bufs,
+            binds,
+            levels,
+        }
     }
 
     /// Records one block-granular dispatch of `pipeline` bound to `bind`.

@@ -88,7 +88,6 @@ impl ScanLevels {
     pub(crate) fn result(&self) -> &Buffer {
         &self.buffers[0]
     }
-
 }
 
 /// A compiled, reusable `GPU` scan and compaction pipeline set.
