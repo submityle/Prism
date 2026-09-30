@@ -39,6 +39,11 @@
 //!   walk that reproduces the in-memory sphere walk bit-for-bit.
 //! - [`traversal`] — [`Ray`]/`BVH` slab + Möller–Trumbore intersection with
 //!   closest-hit and any-hit walks (the `GPU` traversal kernel's golden ref).
+//! - [`traversal_stackless`] — stackless (threaded / escape-index) `BVH` walk:
+//!   a [`traversal_stackless::BvhEscapeTable`] precomputes one skip index per
+//!   node so a ray descends with a single cursor and no per-thread stack
+//!   (`GPU`-friendly), reproducing [`Bvh::closest_hit`]/[`Bvh::any_hit`]
+//!   (and watertight variants) bit-for-bit.
 //! - [`ray_offset`] — Wächter-Binder watertight secondary-ray origin offset
 //!   (adaptive integer-`ULP` push) that keeps shadow/reflection/`GI` rays from
 //!   self-intersecting the surface they leave, at any scene scale.
@@ -59,6 +64,7 @@ pub mod sphere;
 pub mod sphere_gpu_layout;
 pub mod tlas;
 pub mod traversal;
+pub mod traversal_stackless;
 
 pub use acceleration::{
     update_scratch_bytes, AccelerationUpdate, AccelerationUpdatePolicy, GeometryChange,
@@ -78,6 +84,7 @@ pub use scheduler::{AccelerationScheduler, ScheduledUpdate};
 pub use sphere::{Sphere, SphereBvh, SphereHit};
 pub use sphere_gpu_layout::{GpuSphereBvhBuffers, SPHERE_WORDS};
 pub use traversal::{Hit, Ray};
+pub use traversal_stackless::{BvhEscapeTable, ESCAPE_SENTINEL};
 pub use gpu_layout::{
     GpuBlasPool, GpuBvhBuffers, GpuTlasBuffers, TlasPackedHit, BLAS_OFFSET_WORDS, INSTANCE_WORDS,
     NODE_WORDS, TRIANGLE_WORDS,
