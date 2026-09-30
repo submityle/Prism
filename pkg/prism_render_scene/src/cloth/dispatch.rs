@@ -126,7 +126,7 @@ pub(crate) fn dispatch_cloth(
             timestamp_writes: None,
         });
 
-    for piece in &pieces.pieces {
+    for piece in pieces.active_pieces() {
         for dispatch in &piece.dispatches {
             // Safe to expect: readiness was gated above and the pipeline set is
             // shared by every piece.

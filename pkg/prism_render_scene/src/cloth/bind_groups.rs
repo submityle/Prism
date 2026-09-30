@@ -28,7 +28,7 @@ use bevy_render::{
     render_resource::{
         BindGroup, BindGroupEntries, Buffer, BufferDescriptor, BufferInitDescriptor, BufferUsages,
     },
-    renderer::RenderDevice,
+    renderer::{RenderDevice, RenderQueue},
 };
 use bytemuck::Pod;
 use prism_render_architecture::cloth::gpu::buffers::{
@@ -255,6 +255,45 @@ impl ClothPieceGpuBuffers {
             backstop_params,
             embed_params,
             aero_params,
+        }
+    }
+
+    /// Restreams the per-frame dynamic inputs into an already-resident piece.
+    ///
+    /// A persistent piece keeps its simulation *state* — the particle
+    /// position/velocity/`prev` pools and the pass-produced hash and embed
+    /// pools — resident on the device so the solver evolves them in place across
+    /// frames. Only the small, genuinely per-frame inputs are restreamed here:
+    /// the six uniform parameter blocks (timestep, gravity, wind, and the
+    /// material/collision coefficients) and the analytic collider proxies, which
+    /// track the animated body each frame. The immutable topology buffers
+    /// (constraints, bending, triangles, `CSR` adjacency, embed bindings) are
+    /// never rewritten because they only change when the mesh itself changes,
+    /// which the caller detects through the buffer signature and handles with a
+    /// fresh allocation instead of a rewrite.
+    ///
+    /// Every target buffer carries `COPY_DST` (the uniforms are `UNIFORM |
+    /// COPY_DST`, the collider pool is `STORAGE | COPY_DST`), and the writes are
+    /// staged on the render queue ahead of the frame's compute pass, so the
+    /// solver reads the updated inputs against last frame's evolved state.
+    pub(crate) fn write_dynamic(&self, queue: &RenderQueue, upload: &ClothPieceUpload<'_>) {
+        queue.write_buffer(&self.sim_params, 0, bytemuck::bytes_of(&upload.sim_params));
+        queue.write_buffer(&self.body_params, 0, bytemuck::bytes_of(&upload.body_params));
+        queue.write_buffer(&self.self_params, 0, bytemuck::bytes_of(&upload.self_params));
+        queue.write_buffer(
+            &self.backstop_params,
+            0,
+            bytemuck::bytes_of(&upload.backstop_params),
+        );
+        queue.write_buffer(&self.embed_params, 0, bytemuck::bytes_of(&upload.embed_params));
+        queue.write_buffer(&self.aero_params, 0, bytemuck::bytes_of(&upload.aero_params));
+        // Colliders are kinematic inputs that track the animated body. Restream
+        // them only when present: an empty list left the buffer as the single
+        // zeroed placeholder, and the owning pass's collider count is zero so it
+        // is never read. The signature gate guarantees the resident collider pool
+        // is exactly `upload.colliders.len()` elements, so this write always fits.
+        if !upload.colliders.is_empty() {
+            queue.write_buffer(&self.colliders, 0, bytemuck::cast_slice(upload.colliders));
         }
     }
 }

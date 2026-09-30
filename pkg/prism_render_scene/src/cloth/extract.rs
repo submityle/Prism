@@ -24,13 +24,17 @@ use super::garment::{ClothGarment, ExtractedCloth};
 /// Clears the resource and refills it from the current main-world query each
 /// frame, mirroring the lighting extract's rebuild pattern so despawned
 /// garments drop out cleanly and no stale piece survives into the prepare
-/// stage.
+/// stage. Each garment's stable [`Entity`] is captured alongside it, in the same
+/// order, so the prepare stage can key each garment's resident `GPU` piece by
+/// identity and persist its device state across frames.
 pub(crate) fn extract_cloth_garments(
     mut extracted: ResMut<ExtractedCloth>,
-    garments: Extract<Query<&ClothGarment>>,
+    garments: Extract<Query<(Entity, &ClothGarment)>>,
 ) {
     extracted.garments.clear();
-    for garment in garments.iter() {
+    extracted.entities.clear();
+    for (entity, garment) in garments.iter() {
         extracted.garments.push(garment.clone());
+        extracted.entities.push(entity);
     }
 }

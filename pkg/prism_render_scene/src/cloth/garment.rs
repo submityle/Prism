@@ -14,6 +14,7 @@
 //! entity that despawns simply stops contributing.
 
 use bevy_ecs::component::Component;
+use bevy_ecs::entity::Entity;
 use bevy_ecs::resource::Resource;
 
 use prism_render_architecture::cloth::bending::BendingConstraint;
@@ -391,6 +392,12 @@ impl ClothGarment {
 pub(crate) struct ExtractedCloth {
     /// Every extracted garment, in main-world iteration order.
     pub(crate) garments: Vec<ClothGarment>,
+    /// The stable main-world [`Entity`] of each garment, kept strictly parallel
+    /// to [`Self::garments`] (same length, same order). The prepare stage keys
+    /// each garment's resident `GPU` piece by this entity so its device state
+    /// persists across frames; a despawned garment drops out of both arrays
+    /// together, which is how the prepare stage detects the eviction.
+    pub(crate) entities: Vec<Entity>,
 }
 
 #[cfg(test)]
