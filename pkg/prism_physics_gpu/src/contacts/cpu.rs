@@ -4,7 +4,8 @@
 //! [`ContactConstraint`]s by one frame step using the same substep `XPBD` scheme
 //! as the distance solver — predict, reset multipliers, sweep the colours,
 //! recover velocities — but with the projection replaced by the *one-sided*
-//! non-penetration rule (see [`project`]). It performs the identical
+//! non-penetration rule (see [`project`]) and a trailing velocity-level
+//! restitution pass (see [`apply_restitution`]). It performs the identical
 //! floating-point arithmetic, in the identical order, as
 //! `shaders/contacts_resolve.wgsl`, so a passing real-device parity test is
 //! direct evidence the ported kernel computes the same trajectory as this
@@ -26,7 +27,8 @@
 //! mid-step; that is the standard per-frame detection limit.
 //!
 //! Provenance: substep `XPBD` with the canonical one-sided contact projection
-//! (Müller et al.). No Unreal Engine source or derived code.
+//! and the substep velocity-level restitution of Müller et al. 2020. No Unreal
+//! Engine source or derived code.
 
 use glam::Vec3;
 
@@ -80,10 +82,16 @@ pub fn cpu_resolve_contacts(
     let inv_h = 1.0 / h;
 
     let mut prev = vec![Vec3::ZERO; state.len()];
+    let mut vel_pre = vec![Vec3::ZERO; state.len()];
     let mut lambda = vec![0.0f32; ordered.len()];
 
     for _ in 0..substeps {
         predict(state, &mut prev, config.gravity, damping_scale, h);
+        // Snapshot the post-prediction (post-gravity) velocities: the
+        // restitution pass restores the *pre-solve* approach speed, so it must
+        // read the velocities as they were before the position solve altered
+        // them through `finalize`.
+        vel_pre.copy_from_slice(&state.velocities);
         lambda.iter_mut().for_each(|l| *l = 0.0);
         for _ in 0..iterations {
             for &(start, end) in colouring.ranges() {
@@ -100,6 +108,20 @@ pub fn cpu_resolve_contacts(
             }
         }
         finalize(state, &prev, inv_h);
+        // Velocity-level restitution, in colour order so no two updates touch a
+        // shared particle's velocity at once (mirroring the projection sweep).
+        for &(start, end) in colouring.ranges() {
+            for gi in start..end {
+                apply_restitution(
+                    &ordered[gi as usize],
+                    &state.positions,
+                    &mut state.velocities,
+                    &vel_pre,
+                    &prev,
+                    &state.inverse_masses,
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -247,6 +269,74 @@ fn finalize(state: &mut ParticleState, prev: &[Vec3], inv_h: f32) {
     {
         *vel = (*pos - *prev_pos) * inv_h;
     }
+}
+
+/// Applies the velocity-level restitution correction for one contact.
+///
+/// Called once per substep *after* [`finalize`] has recovered the post-solve
+/// velocities. Restitution restores a fraction of the pre-solve *approach*
+/// speed along the contact normal as a post-solve *separating* speed, so a
+/// struck pair rebounds rather than sticking: the target relative normal
+/// velocity is `max(-restitution * v_n_pre, 0)`, where `v_n_pre` is the
+/// relative normal velocity captured right after prediction (`vel_pre`). The
+/// current relative normal velocity `v_n` is nudged to that target by a
+/// mass-weighted impulse split along the same normal the projection used. The
+/// `max(_, 0)` clamp means an already-separating pair (`v_n_pre >= 0`) is never
+/// given extra energy, so the pass can only add a bounce, never inject it into
+/// a resting stack.
+///
+/// Two guards keep the pass faithful to the position solve:
+///
+/// * **Inactive pairs are skipped.** Using the substep-start snapshot `prev`, a
+///   pair that was already separated (`c_pre = |prev_a - prev_b| - rest >= 0`)
+///   was never a live contact this substep, so it gets no impulse — matching
+///   the projection's own separated-pair skip and leaving disjoint pairs
+///   untouched.
+/// * **An inelastic contact is a no-op.** A zero `restitution` returns
+///   immediately, so the pre-restitution trajectory is preserved byte for byte.
+///
+/// The impulse is split by inverse-mass weight and applied with opposite signs
+/// to `a` and `b`, so it changes only the *relative* normal velocity and leaves
+/// the pair's momentum untouched, exactly like the normal projection.
+fn apply_restitution(
+    con: &ContactConstraint,
+    positions: &[Vec3],
+    velocities: &mut [Vec3],
+    vel_pre: &[Vec3],
+    prev: &[Vec3],
+    inverse_masses: &[f32],
+) {
+    if con.restitution <= 0.0 {
+        return;
+    }
+    let ia = con.a as usize;
+    let ib = con.b as usize;
+    let delta_pre = prev[ia] - prev[ib];
+    let length_pre = delta_pre.length();
+    let c_pre = length_pre - con.rest;
+    if c_pre >= 0.0 {
+        return;
+    }
+    let wa = inverse_masses[ia];
+    let wb = inverse_masses[ib];
+    let w_sum = wa + wb;
+    if w_sum <= 0.0 {
+        return;
+    }
+    let delta = positions[ia] - positions[ib];
+    let length = delta.length();
+    if length < EPSILON {
+        return;
+    }
+    let normal = delta / length;
+    let relative = velocities[ia] - velocities[ib];
+    let v_n = relative.dot(normal);
+    let relative_pre = vel_pre[ia] - vel_pre[ib];
+    let v_n_pre = relative_pre.dot(normal);
+    let target = (-con.restitution * v_n_pre).max(0.0);
+    let dv = target - v_n;
+    velocities[ia] += normal * dv * (wa / w_sum);
+    velocities[ib] -= normal * dv * (wb / w_sum);
 }
 
 #[cfg(test)]
@@ -434,5 +524,104 @@ mod tests {
         }
         assert!((state.positions[0] - x).length() < 1e-6);
         assert!((state.velocities[0] - v).length() < 1e-6);
+    }
+
+    /// A pinned particle 0 at the origin and a movable particle 1 offset along
+    /// +x by `gap` (rest 1.0), approaching head-on with normal velocity `vx`
+    /// (negative toward the pin). The contact normal is the x-axis, so the
+    /// whole interaction is a clean 1-D bounce.
+    fn headon_pair(gap: f32, vx: f32) -> ParticleState {
+        let mut state = ParticleState::new();
+        state.push(Vec3::ZERO, 0.0);
+        state.push(Vec3::new(gap, 0.0, 0.0), 1.0);
+        state.velocities[1] = Vec3::new(vx, 0.0, 0.0);
+        state
+    }
+
+    /// Runs one frame of a head-on bounce and returns the movable particle's
+    /// recovered +x (separating) velocity. With particle 0 pinned the whole
+    /// mass weight lands on particle 1, so the restitution pass sets its normal
+    /// velocity exactly to the target `restitution * approach_speed`.
+    fn bounce_velocity(restitution: f32, gap: f32, vx: f32) -> f32 {
+        let mut state = headon_pair(gap, vx);
+        let cons = vec![ContactConstraint::new(0, 1, 1.0, 0.0).with_restitution(restitution)];
+        let config = XpbdConfig::new(Vec3::ZERO, 1, 8, 0.0);
+        cpu_resolve_contacts(&mut state, &cons, &config, 1.0 / 60.0).unwrap();
+        state.velocities[1].x
+    }
+
+    #[test]
+    fn zero_restitution_matches_default_exactly() {
+        // A `with_restitution(0.0)` contact must be bit-for-bit the same
+        // trajectory as a plain `new` contact — the restitution path is a true
+        // no-op at zero, guarding the pre-restitution regression suite.
+        let cons_plain = vec![ContactConstraint::new(0, 1, 1.0, 0.0)];
+        let cons_zero = vec![ContactConstraint::new(0, 1, 1.0, 0.0).with_restitution(0.0)];
+        let config = XpbdConfig::new(Vec3::ZERO, 2, 8, 0.0);
+        let mut a = headon_pair(0.9, -1.5);
+        let mut b = headon_pair(0.9, -1.5);
+        cpu_resolve_contacts(&mut a, &cons_plain, &config, 1.0 / 60.0).unwrap();
+        cpu_resolve_contacts(&mut b, &cons_zero, &config, 1.0 / 60.0).unwrap();
+        assert_eq!(a.positions[1], b.positions[1]);
+        assert_eq!(a.velocities[1], b.velocities[1]);
+    }
+
+    #[test]
+    fn full_restitution_restores_approach_speed() {
+        // A head-on unit approach against a pin: with e = 1 the pair must leave
+        // at essentially the incoming normal speed (energy conserved along the
+        // normal), the position solve's over-separation corrected to the target.
+        let elastic = bounce_velocity(1.0, 0.99, -1.0);
+        assert!(
+            (elastic - 1.0).abs() < 1e-2,
+            "elastic rebound not ~approach speed: {elastic}"
+        );
+    }
+
+    #[test]
+    fn restitution_scales_rebound_monotonically() {
+        // Among active coefficients the rebound speed grows with the
+        // coefficient: each simply sets the target separation velocity to
+        // `e * approach_speed`.
+        let quarter = bounce_velocity(0.25, 0.99, -1.0);
+        let half = bounce_velocity(0.5, 0.99, -1.0);
+        let full = bounce_velocity(1.0, 0.99, -1.0);
+        assert!(quarter > 0.0, "no rebound at all: {quarter}");
+        assert!(
+            half > quarter,
+            "half not bouncier than quarter: {half} vs {quarter}"
+        );
+        assert!(full > half, "full not bounciest: {full} vs {half}");
+    }
+
+    #[test]
+    fn separated_pair_never_bounces() {
+        // Two particles far apart (rest 1.0, 5.0 apart) with e = 1 under
+        // gravity: the activity gate (checked on the substep-start snapshot)
+        // skips the pair every substep, so both fall exactly as free particles.
+        let mut with_contact = ParticleState::new();
+        with_contact.push(Vec3::ZERO, 1.0);
+        with_contact.push(Vec3::new(5.0, 0.0, 0.0), 1.0);
+        let mut free = with_contact.clone();
+        let cons = vec![ContactConstraint::new(0, 1, 1.0, 0.0).with_restitution(1.0)];
+        let g = XpbdConfig::new(Vec3::new(0.0, -9.81, 0.0), 4, 8, 0.0);
+        cpu_resolve_contacts(&mut with_contact, &cons, &g, 1.0 / 60.0).unwrap();
+        cpu_resolve_contacts(&mut free, &[], &g, 1.0 / 60.0).unwrap();
+        for i in 0..free.len() {
+            assert!((with_contact.positions[i] - free.positions[i]).length() < 1e-6);
+            assert!((with_contact.velocities[i] - free.velocities[i]).length() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn restitution_never_moves_the_pinned_particle() {
+        // The immovable half of a bouncing contact must stay put in both
+        // position and velocity.
+        let mut state = headon_pair(0.9, -3.0);
+        let cons = vec![ContactConstraint::new(0, 1, 1.0, 0.0).with_restitution(1.0)];
+        let config = XpbdConfig::new(Vec3::ZERO, 2, 8, 0.0);
+        cpu_resolve_contacts(&mut state, &cons, &config, 1.0 / 60.0).unwrap();
+        assert_eq!(state.positions[0], Vec3::ZERO);
+        assert_eq!(state.velocities[0], Vec3::ZERO);
     }
 }

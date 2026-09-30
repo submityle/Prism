@@ -5,8 +5,8 @@
 //! exposes [`GpuContactSolver::resolve`], which uploads the particle state and
 //! the colour-reordered contacts, then encodes the full frame — for each
 //! substep: `predict`, `reset_lambdas`, `iterations` sweeps of one `project`
-//! pass per colour, then `finalize` — as a chain of compute passes in a single
-//! submission. Separate passes give the implicit memory barrier that makes each
+//! pass per colour, `finalize`, then one `restitution` pass per colour — as a
+//! chain of compute passes in a single submission. Separate passes give the implicit memory barrier that makes each
 //! colour's position writes visible to the next colour, so the device
 //! reproduces the sequential Gauss-Seidel sweep of the
 //! [`cpu_resolve_contacts`](super::cpu_resolve_contacts) twin.
@@ -16,8 +16,9 @@
 //! per-colour uniform) and dispatch schedule, and differ only in the projection
 //! kernel they run.
 //!
-//! Provenance: substep `XPBD` (Müller et al.); standard `wgpu` compute
-//! dispatch. No Unreal Engine source or derived code.
+//! Provenance: substep `XPBD` (Müller et al.) with the substep velocity-level
+//! restitution of Müller et al. 2020; standard `wgpu` compute dispatch. No
+//! Unreal Engine source or derived code.
 
 use bytemuck::{Pod, Zeroable};
 use wgpu::{
@@ -70,6 +71,7 @@ pub struct GpuContactSolver {
     reset_lambdas: ComputePipeline,
     project: ComputePipeline,
     finalize: ComputePipeline,
+    restitution: ComputePipeline,
 }
 
 impl GpuContactSolver {
@@ -91,14 +93,15 @@ impl GpuContactSolver {
                 buffer_entry(4, BufferBindingType::Storage { read_only: true }),
                 buffer_entry(5, BufferBindingType::Storage { read_only: true }),
                 buffer_entry(6, BufferBindingType::Storage { read_only: false }),
+                buffer_entry(7, BufferBindingType::Storage { read_only: false }),
             ],
         });
         let colour_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("prism_contacts_colour_layout"),
             entries: &[buffer_entry(0, BufferBindingType::Uniform)],
         });
-        // `predict` / `reset_lambdas` / `finalize` only touch group 0; `project`
-        // also reads the per-colour uniform in group 1.
+        // `predict` / `reset_lambdas` / `finalize` only touch group 0;
+        // `project` and `restitution` also read the per-colour uniform in group 1.
         let global_only = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("prism_contacts_global_pipeline_layout"),
             bind_group_layouts: &[Some(&global_layout)],
@@ -137,6 +140,13 @@ impl GpuContactSolver {
             "prism_contacts_finalize",
             &global_only,
         );
+        let restitution = make(
+            device,
+            &module,
+            "restitution",
+            "prism_contacts_restitution",
+            &with_colour,
+        );
         GpuContactSolver {
             module,
             global_layout,
@@ -145,6 +155,7 @@ impl GpuContactSolver {
             reset_lambdas,
             project,
             finalize,
+            restitution,
         }
     }
 
@@ -220,6 +231,7 @@ impl GpuContactSolver {
         let positions: Vec<[f32; 4]> = state.positions.iter().map(vec3_to_vec4).collect();
         let velocities: Vec<[f32; 4]> = state.velocities.iter().map(vec3_to_vec4).collect();
         let prev = vec![[0.0f32; 4]; state.len()];
+        let vel_pre = vec![[0.0f32; 4]; state.len()];
         let gpu_contacts: Vec<GpuContactConstraint> = ordered.iter().map(|c| c.to_gpu()).collect();
         let contact_upload = if gpu_contacts.is_empty() {
             vec![GpuContactConstraint::zeroed()]
@@ -231,6 +243,7 @@ impl GpuContactSolver {
         let positions_buf = buffer::storage_rw_init(device, "contacts_positions", &positions);
         let velocities_buf = buffer::storage_rw_init(device, "contacts_velocities", &velocities);
         let prev_buf = buffer::storage_rw_init(device, "contacts_prev", &prev);
+        let vel_pre_buf = buffer::storage_rw_init(device, "contacts_vel_pre", &vel_pre);
         let inverse_mass_buf =
             buffer::storage_read(device, "contacts_inverse_masses", &state.inverse_masses);
         let contact_buf = buffer::storage_read(device, "contacts_constraints", &contact_upload);
@@ -251,6 +264,7 @@ impl GpuContactSolver {
                 entry(4, &inverse_mass_buf),
                 entry(5, &contact_buf),
                 entry(6, &lambda_buf),
+                entry(7, &vel_pre_buf),
             ],
         });
 
@@ -322,6 +336,19 @@ impl GpuContactSolver {
                 particle_groups,
                 None,
             );
+            // Velocity-level restitution, one dispatch per colour (like project)
+            // so no two threads write a shared particle's velocity at once.
+            for (c, &(start, end)) in colouring.ranges().iter().enumerate() {
+                let groups = (end - start).div_ceil(64).max(1);
+                self.pass(
+                    &mut encoder,
+                    "restitution",
+                    &self.restitution,
+                    plan,
+                    groups,
+                    Some(&colour_binds[c]),
+                );
+            }
         }
 
         let position_stage =

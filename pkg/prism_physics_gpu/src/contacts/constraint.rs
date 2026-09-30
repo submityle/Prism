@@ -34,10 +34,23 @@
 //! contact is frictionless and byte-for-byte identical to the pre-friction
 //! solver; friction is opted into with [`ContactConstraint::with_friction`].
 //!
+//! # Restitution
+//!
+//! A contact also carries a single `restitution` coefficient in `[0, 1]`
+//! (`0` perfectly inelastic, `1` perfectly elastic). Restitution is a
+//! *velocity*-level correction the solver applies once per substep *after* the
+//! position solve: it restores the pre-solve approach speed along the contact
+//! normal, scaled by the coefficient, so a struck pair bounces instead of
+//! coming to rest. It defaults to `0` in [`ContactConstraint::new`] — a plain
+//! contact is perfectly inelastic and byte-for-byte identical to the
+//! pre-restitution solver — and is opted into with
+//! [`ContactConstraint::with_restitution`].
+//!
 //! Provenance: canonical `XPBD` inequality (contact) constraint of Müller et
 //! al., with the positional Coulomb friction of Müller et al. 2020 ("Detailed
 //! Rigid Body Simulation with `XPBD`") bounded by penetration depth after
-//! Macklin et al. 2014. No Unreal Engine source or derived code.
+//! Macklin et al. 2014, and the substep velocity-level restitution of that same
+//! 2020 work. No Unreal Engine source or derived code.
 
 use bytemuck::{Pod, Zeroable};
 
@@ -60,6 +73,10 @@ pub struct ContactConstraint {
     /// Dynamic (slip) Coulomb coefficient bounding the tangential correction to
     /// the cone `dynamic_friction * penetration` once the pair is sliding.
     pub dynamic_friction: f32,
+    /// Restitution coefficient in `[0, 1]`: the fraction of the pre-solve
+    /// normal approach speed restored as a post-solve separating speed (`0`
+    /// perfectly inelastic, `1` perfectly elastic).
+    pub restitution: f32,
 }
 
 impl ContactConstraint {
@@ -77,6 +94,7 @@ impl ContactConstraint {
             compliance: compliance.max(0.0),
             static_friction: 0.0,
             dynamic_friction: 0.0,
+            restitution: 0.0,
         }
     }
 
@@ -97,6 +115,20 @@ impl ContactConstraint {
         }
     }
 
+    /// Returns a copy of this contact with the given restitution coefficient.
+    ///
+    /// `restitution` is clamped to `[0, 1]`: values below `0` would remove
+    /// energy the position solve already resolved, and values above `1` would
+    /// inject energy every bounce and diverge. Leaving this un-called (or
+    /// passing `0`) keeps the contact perfectly inelastic.
+    #[must_use]
+    pub fn with_restitution(self, restitution: f32) -> ContactConstraint {
+        ContactConstraint {
+            restitution: restitution.clamp(0.0, 1.0),
+            ..self
+        }
+    }
+
     /// Packs the constraint into its `std430` upload form.
     #[must_use]
     pub(crate) fn to_gpu(self) -> GpuContactConstraint {
@@ -107,6 +139,7 @@ impl ContactConstraint {
             compliance: self.compliance,
             static_friction: self.static_friction,
             dynamic_friction: self.dynamic_friction,
+            restitution: self.restitution,
         }
     }
 }
@@ -117,10 +150,10 @@ impl ColouredEdge for ContactConstraint {
     }
 }
 
-/// `std430`-compatible upload form of [`ContactConstraint`] (24 bytes).
+/// `std430`-compatible upload form of [`ContactConstraint`] (28 bytes).
 ///
-/// All six members are 4-byte scalars, so the `std430` array stride is a tight
-/// 24 bytes with no interior or trailing padding — matching the `Contact`
+/// All seven members are 4-byte scalars, so the `std430` array stride is a tight
+/// 28 bytes with no interior or trailing padding — matching the `Contact`
 /// struct in `shaders/contacts_resolve.wgsl` field for field.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -137,6 +170,8 @@ pub(crate) struct GpuContactConstraint {
     pub static_friction: f32,
     /// Dynamic (slip) Coulomb coefficient.
     pub dynamic_friction: f32,
+    /// Restitution coefficient in `[0, 1]`.
+    pub restitution: f32,
 }
 
 #[cfg(test)]
@@ -169,14 +204,42 @@ mod tests {
     }
 
     #[test]
-    fn to_gpu_carries_friction_and_is_twenty_four_bytes() {
-        assert_eq!(size_of::<GpuContactConstraint>(), 24);
+    fn to_gpu_carries_friction_and_is_twenty_eight_bytes() {
+        assert_eq!(size_of::<GpuContactConstraint>(), 28);
         let gpu = ContactConstraint::new(1, 2, 2.0, 0.0)
             .with_friction(0.6, 0.4)
+            .with_restitution(0.75)
             .to_gpu();
         assert_eq!(gpu.a, 1);
         assert_eq!(gpu.b, 2);
         assert!((gpu.static_friction - 0.6).abs() < 1e-6);
         assert!((gpu.dynamic_friction - 0.4).abs() < 1e-6);
+        assert!((gpu.restitution - 0.75).abs() < 1e-6);
+    }
+
+    #[test]
+    fn new_is_perfectly_inelastic() {
+        let con = ContactConstraint::new(0, 1, 2.0, 0.0);
+        assert_eq!(con.restitution, 0.0);
+    }
+
+    #[test]
+    fn with_restitution_sets_and_preserves_other_fields() {
+        let con = ContactConstraint::new(3, 7, 2.0, 1.0e-6)
+            .with_friction(0.8, 0.5)
+            .with_restitution(0.9);
+        assert_eq!(con.a, 3);
+        assert_eq!(con.b, 7);
+        assert!((con.static_friction - 0.8).abs() < 1e-6);
+        assert!((con.dynamic_friction - 0.5).abs() < 1e-6);
+        assert!((con.restitution - 0.9).abs() < 1e-6);
+    }
+
+    #[test]
+    fn with_restitution_clamps_to_unit_interval() {
+        let below = ContactConstraint::new(0, 1, 2.0, 0.0).with_restitution(-0.5);
+        assert_eq!(below.restitution, 0.0);
+        let above = ContactConstraint::new(0, 1, 2.0, 0.0).with_restitution(1.5);
+        assert_eq!(above.restitution, 1.0);
     }
 }
