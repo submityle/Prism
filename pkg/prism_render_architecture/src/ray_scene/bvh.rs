@@ -415,7 +415,7 @@ pub fn build_linear_bvh(bounds: &[Aabb], config: BvhBuildConfig) -> (Vec<LinearB
         return (Vec::new(), Vec::new());
     }
     let bins = config.sah_bins.max(1);
-    let max_leaf = config.max_leaf_primitives.max(1);
+    let max_leaf = config.max_leaf_primitives.clamp(1, u16::MAX as usize);
 
     let mut refs: Vec<PrimRef> = bounds
         .iter()
@@ -458,6 +458,10 @@ fn build_recursive(
         .fold(Aabb::empty(), |acc, r| acc.union(&r.bounds));
 
     let make_leaf = |nodes: &mut Vec<LinearBvhNode>, order: &mut Vec<u32>| -> u32 {
+        debug_assert!(
+            refs.len() <= u16::MAX as usize,
+            "leaf primitive count must fit the u16 `primitive_count` field"
+        );
         let first = order.len() as u32;
         for r in refs.iter() {
             order.push(r.index as u32);
@@ -484,10 +488,22 @@ fn build_recursive(
     let axis = centroid_bounds.max_extent_axis();
     let axis_min = centroid_bounds.min[axis];
     let axis_max = centroid_bounds.max[axis];
-    // A degenerate (flat) centroid box means all centers coincide on this axis;
-    // no partition helps, so emit a leaf.
+    // A degenerate (flat) centroid box means all centers coincide on this axis,
+    // so no binned partition can separate them. Emit a leaf when the cluster
+    // fits the u16 `primitive_count` field; otherwise median-split so an
+    // oversized coincident cluster still produces legal (non-truncated) leaves
+    // instead of silently wrapping the count.
     if axis_max <= axis_min {
-        return make_leaf(nodes, order);
+        if refs.len() <= u16::MAX as usize {
+            return make_leaf(nodes, order);
+        }
+        refs.sort_by(|a, b| {
+            a.centroid[axis]
+                .partial_cmp(&b.centroid[axis])
+                .unwrap_or(core::cmp::Ordering::Equal)
+        });
+        let mid = refs.len() / 2;
+        return emit_interior(refs, mid, axis, nodes, order, max_leaf, bins, traversal_cost);
     }
 
     // Bin primitives by centroid position along `axis`, then evaluate the SAH
@@ -577,8 +593,33 @@ fn build_recursive(
         mid = refs.len() / 2;
     }
 
-    // Reserve this interior node's slot, emit first child (immediately after),
-    // then the second child, and patch the offset.
+    // Reserve this interior node's slot, emit both children depth-first, and
+    // patch the second-child offset via the shared helper.
+    emit_interior(refs, mid, axis, nodes, order, max_leaf, bins, traversal_cost)
+}
+
+/// Emits one interior node splitting `refs` at `mid` along `axis`, recursing
+/// into both halves and patching the second-child offset. Both halves must be
+/// non-empty so every interior node strictly reduces the primitive count on
+/// each side and the build always terminates.
+#[allow(clippy::too_many_arguments)]
+fn emit_interior(
+    refs: &mut [PrimRef],
+    mid: usize,
+    axis: usize,
+    nodes: &mut Vec<LinearBvhNode>,
+    order: &mut Vec<u32>,
+    max_leaf: usize,
+    bins: usize,
+    traversal_cost: f64,
+) -> u32 {
+    debug_assert!(
+        mid > 0 && mid < refs.len(),
+        "interior split must leave both children non-empty"
+    );
+    let node_bounds = refs
+        .iter()
+        .fold(Aabb::empty(), |acc, r| acc.union(&r.bounds));
     let node_index = nodes.len();
     nodes.push(LinearBvhNode {
         bounds: node_bounds,
@@ -741,5 +782,42 @@ mod tests {
             .count();
         // Random jittered triangles are splittable, so no oversized leaves.
         assert_eq!(over, 0);
+    }
+
+    #[test]
+    fn oversized_coincident_cluster_never_truncates_leaf_counts() {
+        use crate::ray_scene::Ray;
+        // More triangles than the u16 `primitive_count` field can hold, all
+        // sharing identical geometry (hence one coincident centroid). The
+        // builder cannot separate them by centroid, so the degenerate-centroid
+        // branch must median-split instead of emitting a single leaf whose
+        // count wraps through `as u16` and silently drops primitives.
+        let count = u16::MAX as u32 + 1_000;
+        let tris: Vec<Triangle> = (0..count)
+            .map(|i| {
+                Triangle::new([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], i)
+            })
+            .collect();
+        let bvh = Bvh::build(&tris);
+
+        // No leaf may exceed the u16 field, and the leaf counts must sum back to
+        // the input; a truncating cast would violate both.
+        let mut total = 0usize;
+        for node in bvh.nodes() {
+            if node.is_leaf() {
+                assert!(
+                    node.primitive_count as usize <= u16::MAX as usize,
+                    "leaf primitive_count overflowed the u16 field"
+                );
+                total += node.primitive_count as usize;
+            }
+        }
+        assert_eq!(total, count as usize, "primitives lost to truncation");
+        assert_eq!(bvh.primitive_count(), count as usize);
+
+        // The median-split structure still traces: a ray through the shared
+        // triangle finds a hit.
+        let ray = Ray::new([0.25, 0.25, 1.0], [0.0, 0.0, -1.0], 0.0, f32::INFINITY);
+        assert!(bvh.closest_hit(&ray).is_some());
     }
 }
