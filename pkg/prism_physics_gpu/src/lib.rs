@@ -55,7 +55,10 @@ pub mod scan;
 pub mod xpbd;
 
 pub use broadphase::{cpu_broadphase, BroadphaseConfig, BroadphaseError, CandidatePair, Particle};
-pub use bvh::{cpu_build_lbvh, Aabb, GpuLbvh, Lbvh, SceneBounds, NO_PARENT};
+pub use bvh::{
+    cpu_build_lbvh, cpu_bvh_pairs, Aabb, BvhQueryError, GpuBvhQuery, GpuLbvh, Lbvh, SceneBounds,
+    NO_PARENT,
+};
 pub use cfl::{cpu_cfl_dt, cpu_max_speed, CflConfig, GpuCflReduce};
 pub use context::GpuContext;
 pub use fluid::{
