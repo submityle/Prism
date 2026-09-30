@@ -17,6 +17,11 @@
 //! sub-phases, so a single kernel covers the whole phase stack the ray-march
 //! and multi-scatter stages consume.
 //!
+//! [`GpuOctaveScatter`] evaluates the Wrenninge-style octave-scatter decay
+//! [`octave_scatter`](prism_render_architecture::volumetric::scatter::octave_scatter),
+//! the per-octave `(sigma_s, sigma_t, g)` geometric attenuation the same
+//! multi-scatter stage sums.
+//!
 //! # Portability
 //!
 //! The phase algebra uses only `sqrt`, `min`, `max` and multiply/add in the
@@ -44,7 +49,9 @@
 #![forbid(unsafe_code)]
 
 pub mod context;
+pub mod octave;
 pub mod phase;
 
 pub use context::{block_on, GpuContext};
+pub use octave::{GpuOctaveScatter, OctaveQuery, OctaveResult};
 pub use phase::{GpuPhaseEvaluator, PhaseQuery};
