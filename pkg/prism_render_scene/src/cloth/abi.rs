@@ -447,6 +447,33 @@ pub(crate) struct GpuClothPlasticityParams {
     pub pad2: u32,
 }
 
+/// 32-byte uniform driving the continuous-collision (CCD) sweep. The three
+/// sanitized golden scalars (`skin`, `restitution`, `dt`) plus the `friction`
+/// coefficient and two counts, padded to a whole 16-byte uniform stride. The
+/// shader re-derives `inv_dt` and re-clamps the scalars itself so the host copy
+/// stays a straight mirror of `CcdParams` and `FabricMaterial::friction`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq)]
+pub(crate) struct GpuClothCcdSweepParams {
+    /// Push-out distance along the outward normal after a hit (`>= 0`).
+    pub skin: f32,
+    /// Normal restitution in `[0, 1]`.
+    pub restitution: f32,
+    /// Substep `dt`; a (near) zero `dt` leaves velocities untouched.
+    pub dt: f32,
+    /// Coulomb friction coefficient in `[0, 1]`.
+    pub friction: f32,
+    /// Number of colliders bounding the per-particle inner loop.
+    pub collider_count: u32,
+    /// Number of particles bounding the dispatch (the golden `min` of the
+    /// position and previous-position slice lengths).
+    pub particle_count: u32,
+    /// Padding to a 16-byte uniform stride.
+    pub pad0: u32,
+    /// Padding to a 16-byte uniform stride.
+    pub pad1: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -599,6 +626,16 @@ mod tests {
         assert_eq!(size_of::<GpuClothPlasticityParams>(), 32);
         assert_eq!(size_of::<GpuClothPlasticityParams>() % 16, 0);
         assert_eq!(align_of::<GpuClothPlasticityParams>(), 4);
+    }
+
+    /// The CCD uniform is a flat 32-byte block: three sanitized scalars, the
+    /// friction coefficient, two counts and padding to a whole 16-byte uniform
+    /// stride, pinned against drift from `ClothCcdParams` in `cloth_ccd.wesl`.
+    #[test]
+    fn ccd_params_is_uniform_stride() {
+        assert_eq!(size_of::<GpuClothCcdSweepParams>(), 32);
+        assert_eq!(size_of::<GpuClothCcdSweepParams>() % 16, 0);
+        assert_eq!(align_of::<GpuClothCcdSweepParams>(), 4);
     }
 
     /// The collider discriminants match the shader's `CLOTH_COLLIDER_*` order.

@@ -60,6 +60,8 @@ mod pressure_gpu_tests;
 #[cfg(test)]
 mod plasticity_gpu_tests;
 #[cfg(test)]
+mod ccd_gpu_tests;
+#[cfg(test)]
 mod gpu_test_support;
 #[cfg(test)]
 mod aero_parity;

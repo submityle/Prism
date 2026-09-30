@@ -240,3 +240,41 @@ fn cloth_plasticity_abi_matches_the_shader_layout() {
     assert_eq!(align_of::<GpuClothPlasticityParams>(), 4);
     assert_eq!(CLOTH_WORKGROUP_SIZE, 64);
 }
+
+/// Compiles `cloth_ccd.wesl`, proving the per-particle continuous-collision
+/// sweep kernel (`cloth_resolve_ccd`, one invocation per particle that walks the
+/// colliders for the earliest closed-form time of impact, snaps to the surface
+/// with a skin offset, reflects the normal velocity by restitution and damps the
+/// tangential slide with Coulomb friction) parses and type-checks exactly as it
+/// will in the render world, guarding the swept-TOI maths against drift from the
+/// `CPU` golden `prism_render_architecture::cloth::ccd::resolve_ccd`.
+#[test]
+fn cloth_ccd_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let ccd = shader_id(0x5052_4953_4d5f_434c_4f54_4841_4552_5307);
+    cache.set_shader(
+        ccd,
+        Shader::from_wesl(
+            include_str!("../shaders/cloth_ccd.wesl"),
+            "embedded://prism_render_scene/shaders/cloth_ccd.wesl",
+        ),
+    );
+
+    cache
+        .get(0, ccd, &[])
+        .unwrap_or_else(|error| panic!("cloth_ccd.wesl failed to compile: {error}"));
+}
+
+/// Guards the Rust `ABI` against drift from the CCD `WESL` struct: the
+/// `GpuClothCcdParams` uniform is the flat 32-byte block matching
+/// `ClothCcdParams` in `cloth_ccd.wesl`, and the workgroup constant matches the
+/// kernel's `@workgroup_size(64)`.
+#[test]
+fn cloth_ccd_abi_matches_the_shader_layout() {
+    use super::abi::{GpuClothCcdSweepParams, CLOTH_WORKGROUP_SIZE};
+    assert_eq!(size_of::<GpuClothCcdSweepParams>(), 32);
+    assert_eq!(size_of::<GpuClothCcdSweepParams>() % 16, 0);
+    assert_eq!(align_of::<GpuClothCcdSweepParams>(), 4);
+    assert_eq!(CLOTH_WORKGROUP_SIZE, 64);
+}
