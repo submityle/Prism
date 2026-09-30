@@ -148,3 +148,69 @@ fn avsm_transmittance_empty_queries_is_empty() {
     let gpu = kernel.eval(&ctx, &nodes, &[]);
     assert!(gpu.is_empty());
 }
+
+/// Directly asserts the AVSM physical invariant (design section 16): the
+/// transmittance sampled on-device is monotonically non-increasing along
+/// increasing depth and stays in `[0, 1]`.
+///
+/// The parity tests above only prove `gpu == cpu` within a tolerance, so a
+/// device interpolation bug that stays inside that band around a monotone `CPU`
+/// value could still introduce a tiny non-monotone bump. This test builds a
+/// compressed curve, sweeps a *strictly increasing* depth range entirely on the
+/// device, and checks the sampled curve never rises (beyond one-`ULP` join
+/// rounding) — light can only be attenuated with depth, never restored.
+#[test]
+fn avsm_transmittance_is_monotone_non_increasing_on_gpu() {
+    let Some(ctx) = GpuContext::try_headless() else {
+        eprintln!("skipping avsm_transmittance_parity monotonicity: no GPU adapter available");
+        return;
+    };
+    let kernel = GpuAvsmTransmittance::new(&ctx);
+
+    // A small budget so `compress` fires and the surviving nodes are re-forced
+    // monotone; irregular segments give a non-trivial descending curve.
+    let mut curve = AvsmCurve::new(6);
+    for i in 0..40 {
+        let depth = i as f32 * 0.23;
+        let seg = 0.02 + 0.05 * ((i * 7 % 11) as f32 / 11.0);
+        curve.insert(depth, seg);
+    }
+
+    let nodes = snapshot(&curve);
+    assert!(nodes.len() >= 2, "curve must retain at least two nodes");
+    let lo = nodes[0].depth;
+    let hi = nodes[nodes.len() - 1].depth;
+    let span = (hi - lo).max(1.0);
+    let start = lo - 0.5 * span;
+    let end = hi + 0.5 * span;
+
+    // A strictly increasing depth sweep (so index order == depth order),
+    // covering the constant flat before the first node, the descending body and
+    // the constant tail past the last node.
+    let steps = 800usize;
+    let depths: Vec<f32> = (0..=steps)
+        .map(|i| start + (end - start) * (i as f32 / steps as f32))
+        .collect();
+    for w in depths.windows(2) {
+        assert!(w[1] > w[0], "depth sweep must be strictly increasing");
+    }
+
+    let gpu = kernel.eval(&ctx, &nodes, &depths);
+    assert_eq!(gpu.len(), depths.len());
+
+    // One-ULP-scale slack absorbs f32 rounding at segment joins; the underlying
+    // node sequence is exactly monotone, so any real violation dwarfs this.
+    const MONO_SLACK: f32 = 1e-6;
+    let mut prev = f32::INFINITY;
+    for (&d, &g) in depths.iter().zip(gpu.iter()) {
+        assert!(
+            (0.0..=1.0).contains(&g),
+            "transmittance must stay in [0, 1], got {g} at depth {d}",
+        );
+        assert!(
+            g <= prev + MONO_SLACK,
+            "transmittance rose with depth at {d}: {g} > previous {prev}",
+        );
+        prev = g;
+    }
+}
