@@ -103,6 +103,7 @@ pub mod storm_vertical_profile;
 pub mod sunset_inscatter_tint;
 pub mod sunset_reddening;
 pub mod terrain_occlusion;
+pub mod tracking_transmittance;
 pub mod trilinear;
 pub mod variance_clip;
 pub mod velocity_at;
@@ -160,6 +161,9 @@ pub use storm_vertical_profile::{GpuStormVerticalProfile, StormVerticalProfileQu
 pub use sunset_inscatter_tint::{GpuSunsetInscatterTint, InscatterTint, SunsetInscatterTintQuery};
 pub use sunset_reddening::{GpuSunsetReddening, SunsetReddeningQuery};
 pub use terrain_occlusion::{GpuTerrainOcclusion, TerrainOcclusionQuery};
+pub use tracking_transmittance::{
+    GpuTrackingTransmittance, TrackingEstimate, TrackingTransmittanceQuery,
+};
 pub use trilinear::{GpuTrilinear, TrilinearQuery};
 pub use variance_clip::{GpuVarianceClip, VarianceClipQuery};
 pub use velocity_at::{GpuVelocityAt, VelocityAtQuery};
