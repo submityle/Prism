@@ -75,6 +75,7 @@ pub mod frame_schedule;
 pub mod frames;
 pub mod gpu_buffers;
 pub mod gpu_dispatch;
+pub mod gpu_scene_handoff;
 pub mod groom;
 pub mod groom_import;
 pub mod import_buffers;
