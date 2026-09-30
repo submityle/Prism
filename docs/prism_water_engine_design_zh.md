@@ -198,6 +198,8 @@ SPH 邻域 → 密度约束 C_i=ρ_i/ρ0−1，XPBD 迭代投影（对齐 physic
 ### 7.2 FLIP/APIC（大规模/影视级）
 P2G → 压力泊松解（不可压缩投影）→ G2P；APIC 仿射速度场保角动量抑制噪声/耗散；压力解 Jacobi/CG/多重网格（GPU 并行），MAC 网格。
 
+**现状与差距（诚实标注）**：当前 `water_flip.wesl` 压力级为 **collocated cell-centered** 离散——散度与所施加梯度均用宽中心差分 `(v[i+1]-v[i-1])·0.5/dx`，而 Jacobi 松弛用紧凑 7 点 Laplacian。该算子对带经典**奇偶（棋盘）零空间**，`v−∇p` 并非真正交投影，对一般速度场会**注入能量**（真机实测无散涡旋种子每帧约 1.5× 增长，靠阻尼反射壁泄回），故非无条件不可压稳定。已有真机金标（`flip_full_pipeline_gpu_multi_frame_tracks_cpu`）将其**如实定位为跨帧「设备保真」**（GPU 精确复现 CPU 权威态，跨帧漂移 6.1e-5），不作有界能量断言。**对齐 Houdini/UE5 Niagara 的显式工程项**：迁移到真正的**交错 MAC 网格**（面心速度分量 + 匹配的紧凑 grad/div），消除棋盘零空间以获得无条件不可压稳定。
+
 ### 7.3 表面重建
 粒子密度场 → 等值面，三路线：屏幕空间流体（默认实时，粒子 splat 深度→双边/窄带平滑→法线重建，van der Laan）；各向异性 Marching Cubes（离线/近景高配，Yu-Turk 各向异性核）；narrow-band SDF+MC（质量/带宽折中）。
 
