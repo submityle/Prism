@@ -75,6 +75,10 @@ pub struct AccelerationUpdatePolicy {
     pub refit_moved_ratio_max: f64,
     /// At or above this fragmentation a rebuild also compacts.
     pub compact_fragmentation_min: f64,
+    /// At or above this measured refit-quality ratio (current `SAH` cost over a
+    /// rebuild's cost, from [`Bvh::refit_quality`](super::bvh::Bvh::refit_quality))
+    /// accumulated refits have degraded the tree enough to force a rebuild.
+    pub refit_quality_rebuild_ratio: f64,
 }
 
 impl Default for AccelerationUpdatePolicy {
@@ -83,6 +87,7 @@ impl Default for AccelerationUpdatePolicy {
             refit_deformation_max: 0.05,
             refit_moved_ratio_max: 0.25,
             compact_fragmentation_min: 0.5,
+            refit_quality_rebuild_ratio: 1.3,
         }
     }
 }
@@ -125,6 +130,27 @@ impl AccelerationUpdatePolicy {
             return AccelerationUpdate::BuildAndCompact;
         }
         AccelerationUpdate::Rebuild
+    }
+
+    /// Whether an *already refit* structure has degraded enough to warrant a
+    /// rebuild, from its measured surface-area-heuristic quality.
+    ///
+    /// [`decide`](Self::decide) chooses refit-vs-rebuild *before* an update from
+    /// predicted motion, but a run of accepted refits keeps the original split
+    /// planes while geometry drifts, so quality erodes silently. Feeding the
+    /// measured [`Bvh::refit_quality`](super::bvh::Bvh::refit_quality) — `1.0`
+    /// for an ideal tree, larger as topology stops matching geometry — back into
+    /// the policy closes that loop: once the ratio reaches
+    /// [`Self::refit_quality_rebuild_ratio`] the next update is escalated to a
+    /// rebuild even though per-frame motion still looked refit-sized. A `NaN`
+    /// quality (undefined, e.g. an empty tree) is treated as no degradation and
+    /// does not trigger a rebuild.
+    #[must_use]
+    pub fn should_rebuild_after_refit(&self, refit_quality: f64) -> bool {
+        if refit_quality.is_nan() {
+            return false;
+        }
+        refit_quality >= self.refit_quality_rebuild_ratio
     }
 }
 
@@ -349,5 +375,22 @@ mod tests {
         assert!(!AccelerationUpdate::Refit.is_rebuild());
         assert!(AccelerationUpdate::Rebuild.is_rebuild());
         assert!(AccelerationUpdate::BuildAndCompact.is_rebuild());
+    }
+
+    #[test]
+    fn measured_refit_quality_escalates_to_rebuild_at_threshold() {
+        let policy = AccelerationUpdatePolicy::default();
+        // Ideal / mildly degraded trees keep refitting.
+        assert!(!policy.should_rebuild_after_refit(1.0));
+        assert!(!policy.should_rebuild_after_refit(1.29));
+        // At and past the ratio a rebuild is forced.
+        assert!(policy.should_rebuild_after_refit(policy.refit_quality_rebuild_ratio));
+        assert!(policy.should_rebuild_after_refit(2.5));
+    }
+
+    #[test]
+    fn undefined_refit_quality_never_rebuilds() {
+        let policy = AccelerationUpdatePolicy::default();
+        assert!(!policy.should_rebuild_after_refit(f64::NAN));
     }
 }
