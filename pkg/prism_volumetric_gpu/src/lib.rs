@@ -58,6 +58,7 @@
 pub mod active_pixel;
 pub mod adaptive_step;
 pub mod aerial;
+pub mod analytic_single_scatter;
 pub mod analytic_transmittance;
 pub mod anvil_profile;
 pub mod apply_carve;
@@ -110,6 +111,7 @@ pub mod worley;
 pub use active_pixel::{ActivePixelQuery, GpuActivePixel};
 pub use adaptive_step::{AdaptiveStepQuery, GpuAdaptiveStep};
 pub use aerial::{AerialQuery, GpuAerialPerspective};
+pub use analytic_single_scatter::{AnalyticSingleScatterQuery, GpuAnalyticSingleScatter};
 pub use analytic_transmittance::{AnalyticTransmittanceQuery, GpuAnalyticTransmittance};
 pub use anvil_profile::{AnvilProfileQuery, GpuAnvilProfile};
 pub use apply_carve::{ApplyCarveQuery, GpuApplyCarve};
