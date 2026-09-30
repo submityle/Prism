@@ -75,3 +75,16 @@ fn ray_footprint_wesl_compiles_standalone() {
         0x5052_4953_4d5f_4655_5450_5249_4e54_0001,
     );
 }
+
+/// The watertight bottom-level `BVH` closest-hit / any-hit walk (Woop 2013),
+/// the real-device twin of `Bvh::closest_hit_watertight` /
+/// `Bvh::any_hit_watertight`. Shares `ray_traverse.wesl`'s packed-buffer
+/// contract, swapping only the leaf test for the leak-free triangle intersector.
+#[test]
+fn ray_watertight_wesl_compiles_standalone() {
+    compile_standalone(
+        include_str!("../shaders/ray_watertight.wesl"),
+        "embedded://prism_render_scene/shaders/ray_watertight.wesl",
+        0x5052_4953_4d5f_5241_5957_4154_5254_0001,
+    );
+}
