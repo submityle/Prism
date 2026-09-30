@@ -1,21 +1,23 @@
-//! Optional `wgpu` compute twin of Prism's strand-hair body-collider
-//! projection.
+//! Optional `wgpu` compute twins of Prism's strand-hair guide-solver kernels.
 //!
-//! Strand grooms keep hair off the body by projecting each free particle out of
-//! a small set of analytic collider proxies (spheres and capsules fitted to the
-//! head, neck and shoulders) after every constraint sweep. The `CPU` golden
-//! standard for that projection lives in
-//! [`prism_render_architecture::hair::collision`]; this crate is the `GPU`
-//! twin, validated against that reference so a passing real-device parity test
-//! is direct evidence the ported kernel computes the same projected positions
-//! as the reference, not merely that its shader compiles.
+//! Each kernel here is the on-device counterpart of a `CPU` golden standard in
+//! [`prism_render_architecture::hair`], validated against that reference so a
+//! passing real-device parity test is direct evidence the ported kernel
+//! computes the same values as the reference, not merely that its shader
+//! compiles. The twins share one dispatch shape — one thread per query, a
+//! uniform count plus a read-only query buffer plus a read-write value buffer —
+//! so new kernels slot in beside the existing ones.
 //!
 //! # Scope
 //!
-//! [`GpuColliderProjector`] evaluates
-//! [`Collider::push_out`](prism_render_architecture::hair::collision::Collider::push_out)
-//! for a batch of point/collider pairs, covering both the sphere and capsule
-//! branches the analytic body-collision tier uses.
+//! * [`GpuColliderProjector`] evaluates
+//!   [`Collider::push_out`](prism_render_architecture::hair::collision::Collider::push_out)
+//!   for a batch of point/collider pairs, covering both the sphere and capsule
+//!   branches the analytic body-collision tier uses (see [`collision`]).
+//! * [`GpuWindField`] evaluates
+//!   [`wind_acceleration`](prism_render_architecture::hair::wind::wind_acceleration)
+//!   for a batch of sample point/time/field triples, reproducing the steady,
+//!   gust and turbulent terms of the wind coupling (see [`wind`]).
 //!
 //! # Portability
 //!
@@ -44,6 +46,8 @@
 
 pub mod collision;
 pub mod context;
+pub mod wind;
 
 pub use collision::{query_for, CollisionQuery, GpuColliderProjector};
 pub use context::{block_on, GpuContext};
+pub use wind::{query_for_wind, GpuWindField, WindQuery};

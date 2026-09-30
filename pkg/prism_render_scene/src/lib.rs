@@ -18,6 +18,7 @@ mod geometry;
 mod lighting;
 mod material;
 mod opaque;
+mod raytrace;
 mod plugin;
 mod scene;
 mod shading;
