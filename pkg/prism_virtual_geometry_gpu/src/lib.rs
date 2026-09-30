@@ -71,6 +71,7 @@
 
 pub mod cluster_cull;
 pub mod context;
+pub mod lod_select;
 pub mod page_pool;
 pub mod page_storage;
 pub mod payload_raster;
@@ -79,6 +80,7 @@ pub mod raster_classify;
 
 pub use cluster_cull::GpuClusterCuller;
 pub use context::{block_on, GpuContext};
+pub use lod_select::{GpuLodSelector, LodQuery};
 pub use page_pool::{GpuPageTable, ResolveError};
 pub use page_storage::GpuPageStorage;
 pub use payload_raster::GpuPayloadRaster;
