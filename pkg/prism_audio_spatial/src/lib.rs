@@ -69,6 +69,7 @@ pub mod panner;
 pub mod portal_graph;
 pub mod propagation;
 pub mod reverb_zones;
+pub mod reverberant_field;
 pub mod room_acoustics;
 pub mod room_modes;
 pub mod rooms;
@@ -121,6 +122,7 @@ pub use propagation::{
 pub use reverb_zones::{
     AuxBusId, AuxSend, MAX_AUX_SENDS, ReverbZone, ReverbZoneField, ZoneShape, source_send_gain,
 };
+pub use reverberant_field::ReverberantField;
 pub use room_acoustics::{
     CRITICAL_DISTANCE_CONSTANT, RoomAcoustics, SABINE_CONSTANT, SCHROEDER_CONSTANT,
     critical_distance, eyring_rt60, mean_free_path, millington_sette_rt60, sabine_rt60,
