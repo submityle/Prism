@@ -55,8 +55,11 @@ pub struct WaterBody {
     pub(crate) spectrum_h0: Vec<[f32; 2]>,
     /// Conjugate spectrum `h0(-k)` (`array<vec2<f32>>`).
     pub(crate) spectrum_h0_neg: Vec<[f32; 2]>,
-    /// Per-frame spectrum scalars.
+    /// Per-frame spectrum scalars (the ocean group's direct-sum reference).
     pub(crate) spectrum_params: GpuWaterSpectrumParams,
+    /// Per-cascade spectral uniforms, one per stacked atlas tile; production's
+    /// `spectrum_fft` groups bind these in cascade order.
+    pub(crate) cascade_params: Vec<GpuWaterSpectrumParams>,
     /// Analytic `Gerstner` wave trains; empty when the body is spectrum-only.
     pub(crate) gerstner_waves: Vec<GpuGerstnerWave>,
     /// Per-frame `Gerstner` scalars.
@@ -214,6 +217,7 @@ impl WaterBody {
             spectrum_h0: &self.spectrum_h0,
             spectrum_h0_neg: &self.spectrum_h0_neg,
             spectrum_params: self.spectrum_params,
+            cascade_params: &self.cascade_params,
             gerstner_waves: &self.gerstner_waves,
             gerstner_params: self.gerstner_params,
             ocean_extent: self.ocean_extent,
@@ -289,6 +293,7 @@ mod tests {
             spectrum_h0: vec![[0.0, 0.0]; 4],
             spectrum_h0_neg: vec![[0.0, 0.0]; 4],
             gerstner_waves: vec![GpuGerstnerWave::default(); 2],
+            cascade_params: vec![GpuWaterSpectrumParams::default(); 4],
             flip_particles: vec![GpuFlipParticle::default(); 8],
             flip_grid_cells: 64 * 64 * 64,
             pbf_positions: Vec::new(),
@@ -360,6 +365,7 @@ mod tests {
         let upload = body.as_upload();
         assert_eq!(upload.spectrum_h0.len(), 4);
         assert_eq!(upload.spectrum_h0_neg.len(), 4);
+        assert_eq!(upload.cascade_params.len(), 4);
         assert_eq!(upload.gerstner_waves.len(), 2);
         assert_eq!(upload.flip_particles.len(), 8);
         assert_eq!(upload.flip_grid_cells, 64 * 64 * 64);

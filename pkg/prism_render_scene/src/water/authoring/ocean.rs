@@ -12,7 +12,7 @@
 //! The flagship [`WaterBody::ocean`](crate::water::body::WaterBody::ocean) preset is
 //! not a stub: it draws the deterministic initial spectrum from the
 //! dependency-free architecture core
-//! ([`build_initial_spectrum`](prism_render_architecture::water::initial_spectrum::build_initial_spectrum)),
+//! ([`build_cascade_spectra`](prism_render_architecture::water::initial_spectrum::build_cascade_spectra)),
 //! synthesises a physically bounded `Gerstner` wave fan whose summed steepness
 //! can never fold the surface onto itself, and lights exactly the spectral +
 //! `Gerstner` passes the golden schedule expects. A calm sea (no wind) carries
@@ -23,9 +23,10 @@ use std::f32::consts::TAU;
 
 use bevy_math::ops;
 
+use prism_render_architecture::water::cascade::pack_cascades;
 use prism_render_architecture::water::gpu::buffers::WaterBufferCounts;
 use prism_render_architecture::water::gpu::pipeline::WaterPasses;
-use prism_render_architecture::water::initial_spectrum::build_initial_spectrum;
+use prism_render_architecture::water::initial_spectrum::build_cascade_spectra;
 use prism_render_architecture::water::spectrum::{SpectrumKind, SpectrumParams};
 use prism_render_architecture::water::Vec2;
 
@@ -82,6 +83,11 @@ pub struct OceanPreset {
     /// Number of spectral cascades the ocean pass loops over (clamped to at
     /// least one live cascade).
     pub cascades: u32,
+    /// Geometric patch-size ratio between neighbouring cascades (`> 1`). Each
+    /// finer cascade tiles a patch `1 / cascade_ratio` the size of the coarser
+    /// one, the way `UE5` Water, `Crest` and `WaveWorks` stack `FFT` bands
+    /// across scales. A ratio `<= 1` degenerates to no ocean.
+    pub cascade_ratio: f32,
     /// How many analytic `Gerstner` trains to synthesise for the readable
     /// swell; `0` leaves the ocean spectrum-only.
     pub gerstner_waves: u32,
@@ -116,6 +122,7 @@ impl Default for OceanPreset {
             min_wavelength: 0.08,
             directional_exponent: 2,
             cascades: 4,
+            cascade_ratio: 4.0,
             gerstner_waves: 8,
             steepness: 0.75,
             base_level: 0.0,
@@ -143,63 +150,84 @@ impl WaterBody {
             preset.wind_speed * ops::cos(preset.wind_direction),
             preset.wind_speed * ops::sin(preset.wind_direction),
         );
-        let spectrum = build_initial_spectrum(
+        let params = SpectrumParams {
+            kind: preset.kind,
+            wind,
+            amplitude: preset.amplitude,
+            peak_enhancement: preset.peak_enhancement,
+            min_wavelength: preset.min_wavelength,
+            directional_exponent: preset.directional_exponent,
+        };
+
+        // Draw one band-limited spectrum per cascade and flatten the ragged set
+        // into the device-friendly stacked atlas the shader addresses by a
+        // per-cascade `h0_offset` / `tile_origin_y`, the way `UE5` Water,
+        // `Crest` and `WaveWorks` resolve waves across scales.
+        let fields = build_cascade_spectra(
             preset.resolution,
             preset.patch_size,
-            SpectrumParams {
-                kind: preset.kind,
-                wind,
-                amplitude: preset.amplitude,
-                peak_enhancement: preset.peak_enhancement,
-                min_wavelength: preset.min_wavelength,
-                directional_exponent: preset.directional_exponent,
-            },
+            preset.cascade_ratio,
+            preset.cascades,
+            params,
             preset.seed,
         );
+        let Some(packed) = pack_cascades(&fields) else {
+            return Self::default();
+        };
 
-        // A degenerate grid carries no amplitudes and a calm sea (no wind, so
-        // every drawn amplitude is zero) carries no energy: either way keep the
-        // body an honest no-op rather than lighting a pass that solves nothing.
-        if spectrum.is_empty() || spectrum.total_energy() <= f32::EPSILON {
+        // A calm sea (no wind, so every drawn amplitude is zero) carries no
+        // energy across any cascade: keep the body an honest no-op.
+        let total_energy: f32 = packed.h0.iter().map(|a| a[0] * a[0] + a[1] * a[1]).sum();
+        if total_energy <= f32::EPSILON {
             return Self::default();
         }
 
-        let n = spectrum.resolution;
+        let layout = packed.layout;
+        let n = layout.resolution();
+        // Per-cascade grid size: the packed/scratch buffers and the counts are
+        // sized for one `N*N` tile that the spectral pass reuses per cascade.
         let texels = n * n;
 
-        // Pack the complex amplitude pair into the `array<vec2<f32>>` pools the
-        // ocean shader binds directly (real, imaginary lanes).
-        let spectrum_h0: Vec<[f32; 2]> = spectrum.h0.iter().map(|c| [c.re, c.im]).collect();
-        let spectrum_h0_neg: Vec<[f32; 2]> = spectrum.h0_neg.iter().map(|c| [c.re, c.im]).collect();
+        // The concatenated `M*N*N` amplitude pools, coarsest cascade first.
+        let spectrum_h0 = packed.h0;
+        let spectrum_h0_neg = packed.h0_neg;
+
+        // One spectral uniform per cascade: patch size plus the cascade's slice
+        // offset into the concatenated `h0` pool and its tile's top atlas row.
+        let cascade_params: Vec<GpuWaterSpectrumParams> = (0..layout.cascade_count())
+            .map(|c| GpuWaterSpectrumParams {
+                grid_size: n,
+                patch_size: packed.patch_sizes[c as usize],
+                time: 0.0,
+                choppiness: preset.choppiness,
+                foam_threshold: preset.foam_threshold,
+                h0_offset: layout.h0_offset(c),
+                tile_origin_y: layout.tile_origin(c).1,
+                _pad: 0,
+            })
+            .collect();
 
         let gerstner_waves = gerstner_fan(&preset);
         let wave_count = gerstner_waves.len() as u32;
+        // Cascade 0 is the coarsest patch (the readable swell) the analytic fan rides.
+        let gerstner_patch = packed.patch_sizes[0];
 
         let extent = WaterSurfaceExtent {
-            width: n,
-            height: n,
+            width: layout.atlas_width(),
+            height: layout.atlas_height(),
         };
 
         Self {
             spectrum_h0,
             spectrum_h0_neg,
-            spectrum_params: GpuWaterSpectrumParams {
-                grid_size: n,
-                patch_size: spectrum.patch_size,
-                time: 0.0,
-                choppiness: preset.choppiness,
-                foam_threshold: preset.foam_threshold,
-                // Single-cascade authoring: the sole tile starts at the pool
-                // and texture origin. The multi-cascade packer fills these per
-                // cascade once the spectral dispatch loops over the atlas.
-                h0_offset: 0,
-                tile_origin_y: 0,
-                _pad: 0,
-            },
+            // The ocean group's direct-sum reference binds a single spectral
+            // uniform; production runs the per-cascade `spectrum_fft` groups.
+            spectrum_params: cascade_params[0],
+            cascade_params,
             gerstner_waves,
             gerstner_params: GpuWaterGerstnerParams {
                 grid_size: n,
-                patch_size: spectrum.patch_size,
+                patch_size: gerstner_patch,
                 time: 0.0,
                 wave_count,
                 base_level: preset.base_level,
@@ -212,7 +240,7 @@ impl WaterBody {
                 gerstner: wave_count > 0,
                 ..WaterPasses::default()
             },
-            ocean_cascades: preset.cascades.max(1),
+            ocean_cascades: layout.cascade_count(),
             spectrum_texels: texels,
             grid2d_texels: texels,
             counts: WaterBufferCounts {
@@ -291,13 +319,13 @@ mod tests {
         };
         let body = WaterBody::ocean(preset);
 
-        assert_eq!(body.spectrum_h0.len(), 64 * 64);
-        assert_eq!(body.spectrum_h0_neg.len(), 64 * 64);
+        assert_eq!(body.spectrum_h0.len(), 4 * 64 * 64);
+        assert_eq!(body.spectrum_h0_neg.len(), 4 * 64 * 64);
         assert_eq!(body.gerstner_waves.len(), 8);
         assert_eq!(body.counts.gerstner_waves, 8);
         assert_eq!(body.counts.spectrum_texels, 64 * 64);
         assert_eq!(body.ocean_extent.width, 64);
-        assert_eq!(body.ocean_extent.height, 64);
+        assert_eq!(body.ocean_extent.height, 4 * 64);
 
         let ex = body.as_extract();
         assert!(ex.ocean_spectrum);

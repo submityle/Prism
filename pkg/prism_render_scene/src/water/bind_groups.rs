@@ -134,8 +134,11 @@ pub(crate) struct WaterBodyUpload<'a> {
     pub(crate) spectrum_h0: &'a [[f32; 2]],
     /// Conjugate spectrum `h0(-k)` (`array<vec2<f32>>`).
     pub(crate) spectrum_h0_neg: &'a [[f32; 2]],
-    /// Per-frame spectrum scalars.
+    /// Per-frame spectrum scalars (the ocean group's direct-sum reference).
     pub(crate) spectrum_params: GpuWaterSpectrumParams,
+    /// Per-cascade spectral uniforms, one per stacked atlas tile; the
+    /// production `spectrum_fft` groups bind these in cascade order.
+    pub(crate) cascade_params: &'a [GpuWaterSpectrumParams],
     /// Analytic `Gerstner` wave trains; empty when the body is spectrum-only.
     pub(crate) gerstner_waves: &'a [GpuGerstnerWave],
     /// Per-frame `Gerstner` scalars.
@@ -241,7 +244,11 @@ pub(crate) struct WaterBodyGpuBuffers {
     // Ocean buffers.
     pub(crate) spectrum_h0: Buffer,
     pub(crate) spectrum_h0_neg: Buffer,
+    /// The ocean group's single direct-sum reference spectral uniform.
     pub(crate) spectrum_params: Buffer,
+    /// One spectral uniform per cascade, in cascade order; the `spectrum_fft`
+    /// groups bind these so each inverse `FFT` transforms its own atlas tile.
+    pub(crate) cascade_params: Vec<Buffer>,
     pub(crate) gerstner_waves: Buffer,
     pub(crate) gerstner_params: Buffer,
     // Ocean storage textures (`rgba32float`, write).
@@ -386,7 +393,11 @@ impl WaterBodyGpuBuffers {
         // ---- Spectral FFT (Tessendorf) ping-pong pools ----
         // One complex `[f32; 2]` (eight bytes) per spectrum texel; the butterfly
         // passes ping-pong between the packed and scratch grids per cascade.
-        let cascade_bytes = (upload.spectrum_h0.len() as u64) * 8;
+        // These grids hold one `N*N` tile that the spectral pass reuses across
+        // every cascade, so they are sized from the atlas edge `N` (not the
+        // concatenated `M*N*N` amplitude pool, which would over-allocate `M`x).
+        let cascade_bytes =
+            (upload.ocean_extent.width as u64) * (upload.ocean_extent.width as u64) * 8;
         let packed_g0 = zeroed_storage(device, "prism water packed g0", cascade_bytes);
         let packed_g1 = zeroed_storage(device, "prism water packed g1", cascade_bytes);
         let packed_g2 = zeroed_storage(device, "prism water packed g2", cascade_bytes);
@@ -403,6 +414,14 @@ impl WaterBodyGpuBuffers {
         let fft_pass_params: Vec<Buffer> = super::fft_upload::fft_pass_uniforms_for(ocean_n)
             .iter()
             .map(|params| uniform(device, "prism water fft pass params", params))
+            .collect();
+        // One spectral uniform buffer per cascade, in cascade order; the
+        // `spectrum_fft` groups bind these so each inverse `FFT` transforms its
+        // own atlas tile via the cascade's `h0_offset` / `tile_origin_y`.
+        let cascade_params: Vec<Buffer> = upload
+            .cascade_params
+            .iter()
+            .map(|p| uniform(device, "prism water spectrum cascade params", p))
             .collect();
 
         // ---- FLIP / APIC ----
@@ -683,6 +702,7 @@ impl WaterBodyGpuBuffers {
             scratch_g2,
             scratch_g3,
             fft_pass_params,
+            cascade_params,
             ocean_n,
             coupling_queries,
             coupling_readback,
@@ -723,8 +743,10 @@ pub(crate) struct WaterBodyBindGroups {
     pub(crate) wetness: BindGroup,
     /// `@group(4)` for `coupling_readback`.
     pub(crate) coupling: BindGroup,
-    /// `@group(0)` for `spectrum_evolve` + `spectrum_assemble` (thirteen bindings).
-    pub(crate) spectrum_fft: BindGroup,
+    /// `@group(0)` for `spectrum_evolve` + `spectrum_assemble` (thirteen
+    /// bindings), one bind group per cascade in cascade order. The recorder
+    /// binds `spectrum_fft[c]` so each inverse `FFT` transforms atlas tile `c`.
+    pub(crate) spectrum_fft: Vec<BindGroup>,
     /// `@group(0)` butterfly `FFT` bind groups, one per `(pass, complex grid)`.
     ///
     /// The outer index is the pass ordinal in [`plan_inverse_fft2`] order; the
@@ -883,25 +905,35 @@ impl WaterBodyBindGroups {
                 buffers.coupling_params.as_entire_binding(),
             )),
         );
-        let spectrum_fft = device.create_bind_group(
-            "prism water spectrum fft",
-            &pipelines.spectrum_fft_layout,
-            &BindGroupEntries::sequential((
-                buffers.spectrum_h0.as_entire_binding(),
-                buffers.spectrum_h0_neg.as_entire_binding(),
-                buffers.spectrum_params.as_entire_binding(),
-                buffers.packed_g0.as_entire_binding(),
-                buffers.packed_g1.as_entire_binding(),
-                buffers.packed_g2.as_entire_binding(),
-                buffers.packed_g3.as_entire_binding(),
-                buffers.scratch_g0.as_entire_binding(),
-                buffers.scratch_g1.as_entire_binding(),
-                buffers.scratch_g2.as_entire_binding(),
-                buffers.scratch_g3.as_entire_binding(),
-                &buffers.spectrum_displacement,
-                &buffers.spectrum_normal,
-            )),
-        );
+        // One spectral bind group per cascade: the concatenated `h0` pools and
+        // shared ping-pong grids stay bound, and `@binding(2)` selects the
+        // cascade's own spectral uniform so the evolve reads its `h0_offset`
+        // slice and the assemble writes its `tile_origin_y` atlas tile.
+        let spectrum_fft: Vec<BindGroup> = buffers
+            .cascade_params
+            .iter()
+            .map(|cascade_params| {
+                device.create_bind_group(
+                    "prism water spectrum fft",
+                    &pipelines.spectrum_fft_layout,
+                    &BindGroupEntries::sequential((
+                        buffers.spectrum_h0.as_entire_binding(),
+                        buffers.spectrum_h0_neg.as_entire_binding(),
+                        cascade_params.as_entire_binding(),
+                        buffers.packed_g0.as_entire_binding(),
+                        buffers.packed_g1.as_entire_binding(),
+                        buffers.packed_g2.as_entire_binding(),
+                        buffers.packed_g3.as_entire_binding(),
+                        buffers.scratch_g0.as_entire_binding(),
+                        buffers.scratch_g1.as_entire_binding(),
+                        buffers.scratch_g2.as_entire_binding(),
+                        buffers.scratch_g3.as_entire_binding(),
+                        &buffers.spectrum_displacement,
+                        &buffers.spectrum_normal,
+                    )),
+                )
+            })
+            .collect();
         // Per-pass, per-complex-grid butterfly bind groups. Each of the four
         // packed complex grids `g0..g3` keeps its own packed<->scratch ping-pong
         // pair; the golden `fft_pass_ping_pong` routing picks which buffer is

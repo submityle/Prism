@@ -64,7 +64,7 @@ fn bind_group_for<'a>(
         | WaterKernel::SpectrumAssemble
         | WaterKernel::FftBitReverse
         | WaterKernel::FftStage
-        | WaterKernel::FftNormalize => &groups.spectrum_fft,
+        | WaterKernel::FftNormalize => &groups.spectrum_fft[0],
     }
 }
 
@@ -102,6 +102,10 @@ pub(crate) fn dispatch_water(
         });
 
     for body in &bodies.bodies {
+        // The golden plan emits the spectral `IFFT` markers first, one per
+        // cascade in cascade order; walk a counter so each marker records the
+        // inverse `FFT` for its own atlas tile (bind group `spectrum_fft[c]`).
+        let mut cascade = 0usize;
         for dispatch in &body.dispatches {
             // The golden plan still emits one `SpectrumIfft` marker per ocean
             // cascade, but production no longer runs the `O(N^4)` direct-sum
@@ -111,7 +115,8 @@ pub(crate) fn dispatch_water(
             // inverted complex grids into the displacement/normal textures) — the
             // same production transform `WaveWorks`/`Crest`/`UE5` Water run.
             if dispatch.kernel == WaterKernel::SpectrumIfft {
-                record_spectral_ifft(&mut pass, &pipelines, &cache, &body.bind_groups);
+                record_spectral_ifft(&mut pass, &pipelines, &cache, &body.bind_groups, cascade);
+                cascade += 1;
                 continue;
             }
             // Safe to expect: readiness was gated above and the pipeline set is
@@ -151,6 +156,7 @@ fn record_spectral_ifft(
     pipelines: &WaterComputePipelines,
     cache: &PipelineCache,
     groups: &WaterBodyBindGroups,
+    cascade: usize,
 ) {
     let n = groups.ocean_n;
     let plan = plan_inverse_fft2(n);
@@ -165,7 +171,7 @@ fn record_spectral_ifft(
             .get_compute_pipeline(pipelines.pipeline(WaterKernel::SpectrumEvolve))
             .expect("water pipelines were all checked ready above"),
     );
-    pass.set_bind_group(0, &groups.spectrum_fft, &[]);
+    pass.set_bind_group(0, &groups.spectrum_fft[cascade], &[]);
     pass.dispatch_workgroups(full, full, 1);
 
     // 2. Invert each of the four packed complex grids with the ping-pong
@@ -198,7 +204,7 @@ fn record_spectral_ifft(
             .get_compute_pipeline(pipelines.pipeline(WaterKernel::SpectrumAssemble))
             .expect("water pipelines were all checked ready above"),
     );
-    pass.set_bind_group(0, &groups.spectrum_fft, &[]);
+    pass.set_bind_group(0, &groups.spectrum_fft[cascade], &[]);
     pass.dispatch_workgroups(full, full, 1);
 }
 
