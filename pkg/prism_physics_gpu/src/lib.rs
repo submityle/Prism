@@ -45,6 +45,7 @@ pub mod broadphase;
 pub mod buffer;
 pub mod context;
 pub mod fluid;
+pub mod fracture;
 pub mod mpm;
 pub mod xpbd;
 
@@ -54,6 +55,9 @@ pub use fluid::{
     grid_to_particle, particle_to_grid, CellType, FluidConfig, FluidError, FluidParticles,
     GoldenGrid, GpuAdvect, GpuExtrapolate, GpuFluidApicStep, GpuFluidSolver, GpuFluidStep,
     GpuGridOps, GpuPressureSolver, GridDims, PressureConfig, TransferMode,
+};
+pub use fracture::{
+    cpu_assign_cells, CellAssignment, GpuVoronoiAssign, VoronoiAssignConfig, NO_CELL,
 };
 pub use mpm::{
     BoundaryMode, ConstitutiveOutput, G2pParticles, GpuMpmConstitutive, GpuMpmG2p,
