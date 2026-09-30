@@ -43,7 +43,7 @@ mod cpu;
 mod gpu;
 mod layout;
 
-pub use build::contact_constraints;
+pub use build::{contact_constraints, contact_constraints_with_friction};
 pub use constraint::ContactConstraint;
 pub use cpu::cpu_resolve_contacts;
 pub use gpu::GpuContactSolver;

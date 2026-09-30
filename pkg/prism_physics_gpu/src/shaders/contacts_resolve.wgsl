@@ -11,13 +11,21 @@
 // in `src/xpbd/coloring.rs`) so no two live threads touch the same particle: the
 // position read-modify-write is therefore race-free without atomics.
 //
-// The projection differs from the distance kernel in exactly two places — a
-// separated pair (c >= 0) is skipped, and the accumulated multiplier is clamped
-// to be non-negative so a contact can push apart but never pull together. Those
-// two lines are the whole of the one-sided contact model.
+// The normal projection differs from the distance kernel in exactly two places —
+// a separated pair (c >= 0) is skipped, and the accumulated multiplier is
+// clamped to be non-negative so a contact can push apart but never pull
+// together. Those two lines are the whole of the one-sided normal model.
+//
+// After the normal correction each contact also applies positional Coulomb
+// friction: the tangential drift accumulated this substep (from prev_positions)
+// is either fully cancelled (static, inside the cone mu_s * penetration) or
+// clamped to the dynamic cone mu_d * penetration. A frictionless contact
+// (both coefficients 0) short-circuits, leaving the trajectory unchanged.
 //
 // Provenance: substep XPBD (Müller et al.) with the canonical one-sided contact
-// constraint. No Unreal Engine source or derived code.
+// constraint and the positional Coulomb friction of Müller et al. 2020, bounded
+// by penetration depth after Macklin et al. 2014. No Unreal Engine source or
+// derived code.
 
 struct Params {
     gravity: vec3<f32>,
@@ -40,6 +48,8 @@ struct Contact {
     b: u32,
     rest: f32,
     compliance: f32,
+    static_friction: f32,
+    dynamic_friction: f32,
 };
 
 const EPSILON: f32 = 1.1920929e-7; // f32::EPSILON, matching the CPU guard.
@@ -117,6 +127,30 @@ fn project(@builtin(global_invocation_id) gid: vec3<u32>) {
     let correction = normal * applied;
     positions[con.a] = vec4<f32>(positions[con.a].xyz + correction * wa, 0.0);
     positions[con.b] = vec4<f32>(positions[con.b].xyz - correction * wb, 0.0);
+
+    // Positional Coulomb friction. `penetration = -c > 0` (the pair overlaps);
+    // reuse the pre-correction `normal` (b toward a) to strip the normal
+    // component from the substep drift so the correction is purely tangential.
+    if (con.static_friction <= 0.0 && con.dynamic_friction <= 0.0) {
+        return;
+    }
+    let penetration = -c;
+    let da = positions[con.a].xyz - prev_positions[con.a].xyz;
+    let db = positions[con.b].xyz - prev_positions[con.b].xyz;
+    let relative = da - db;
+    let normal_amount = dot(relative, normal);
+    let tangent = relative - normal * normal_amount;
+    let tangent_len = sqrt(dot(tangent, tangent));
+    if (tangent_len < EPSILON) {
+        return;
+    }
+    var scale = 1.0;
+    if (tangent_len >= con.static_friction * penetration) {
+        scale = min(con.dynamic_friction * penetration / tangent_len, 1.0);
+    }
+    let friction = tangent * scale;
+    positions[con.a] = vec4<f32>(positions[con.a].xyz - friction * (wa / w_sum), 0.0);
+    positions[con.b] = vec4<f32>(positions[con.b].xyz + friction * (wb / w_sum), 0.0);
 }
 
 // Stage 4: recover velocities from the net substep displacement.

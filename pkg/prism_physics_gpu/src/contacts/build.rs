@@ -11,6 +11,11 @@
 //! the contact, keeping the radii the single source of truth for how far apart
 //! the solver drives the pair.
 //!
+//! [`contact_constraints_with_friction`] is the same transform but stamps a
+//! uniform Coulomb friction pair onto every constraint, so a narrow-phase-driven
+//! pipeline can produce frictional contacts without hand-building each one;
+//! [`contact_constraints`] is the frictionless special case.
+//!
 //! Provenance: trivial list transform; no Unreal Engine source or derived code.
 
 use crate::broadphase::Particle;
@@ -29,12 +34,31 @@ pub fn contact_constraints(
     contacts: &[Option<Contact>],
     compliance: f32,
 ) -> Vec<ContactConstraint> {
+    contact_constraints_with_friction(particles, contacts, compliance, 0.0, 0.0)
+}
+
+/// Builds one frictional [`ContactConstraint`] per populated slot of `contacts`.
+///
+/// Identical to [`contact_constraints`] but stamps `static_friction` and
+/// `dynamic_friction` onto every produced constraint (both clamped to be
+/// non-negative by [`ContactConstraint::with_friction`]). Passing `0.0` for both
+/// coefficients yields exactly the frictionless list [`contact_constraints`]
+/// returns.
+#[must_use]
+pub fn contact_constraints_with_friction(
+    particles: &[Particle],
+    contacts: &[Option<Contact>],
+    compliance: f32,
+    static_friction: f32,
+    dynamic_friction: f32,
+) -> Vec<ContactConstraint> {
     contacts
         .iter()
         .filter_map(|slot| slot.as_ref())
         .map(|contact| {
             let rest = particles[contact.a as usize].radius + particles[contact.b as usize].radius;
             ContactConstraint::new(contact.a, contact.b, rest, compliance)
+                .with_friction(static_friction, dynamic_friction)
         })
         .collect()
 }
@@ -71,6 +95,25 @@ mod tests {
         let cons = contact_constraints(&particles, &contacts, 0.5);
         assert!((cons[0].rest - 1.0).abs() < 1e-6);
         assert!((cons[0].compliance - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn friction_variant_stamps_every_constraint() {
+        let particles = vec![particle(0.0, 0.5), particle(0.8, 0.5)];
+        let contacts = vec![Some(Contact::new(0, 1, Vec3::X, 0.2, Vec3::ZERO))];
+        let cons = contact_constraints_with_friction(&particles, &contacts, 0.0, 0.7, 0.4);
+        assert_eq!(cons.len(), 1);
+        assert!((cons[0].static_friction - 0.7).abs() < 1e-6);
+        assert!((cons[0].dynamic_friction - 0.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn frictionless_helper_matches_zero_friction_variant() {
+        let particles = vec![particle(0.0, 0.5), particle(0.8, 0.5)];
+        let contacts = vec![Some(Contact::new(0, 1, Vec3::X, 0.2, Vec3::ZERO))];
+        let plain = contact_constraints(&particles, &contacts, 0.25);
+        let zero = contact_constraints_with_friction(&particles, &contacts, 0.25, 0.0, 0.0);
+        assert_eq!(plain, zero);
     }
 
     #[test]

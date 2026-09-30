@@ -92,6 +92,7 @@ pub fn cpu_resolve_contacts(
                         &ordered[gi as usize],
                         &mut lambda[gi as usize],
                         &mut state.positions,
+                        &prev,
                         &state.inverse_masses,
                         h,
                     );
@@ -129,10 +130,11 @@ fn predict(
     }
 }
 
-/// Projects one contact constraint, accumulating its (non-negative) multiplier.
+/// Projects one contact constraint, accumulating its (non-negative) multiplier
+/// and then applying positional Coulomb friction.
 ///
 /// The two differences from the bidirectional distance projection are the whole
-/// of the contact model:
+/// of the *normal* contact model:
 ///
 /// * **Separated pairs are skipped.** When `c = length - rest >= 0` the spheres
 ///   are not overlapping, so the inequality is already satisfied and the pair is
@@ -142,10 +144,14 @@ fn predict(
 ///   *clamped* increment is applied to the positions, so the accumulated
 ///   impulse can push the pair apart but never pull it together across
 ///   iterations.
+///
+/// After the normal correction, [`apply_friction`] adds the tangential Coulomb
+/// term (a no-op for a frictionless contact), completing the contact response.
 fn project(
     con: &ContactConstraint,
     lambda: &mut f32,
     positions: &mut [Vec3],
+    prev: &[Vec3],
     inverse_masses: &[f32],
     h: f32,
 ) {
@@ -175,6 +181,60 @@ fn project(
     let correction = normal * applied;
     positions[ia] += correction * wa;
     positions[ib] -= correction * wb;
+    apply_friction(con, ia, ib, positions, prev, normal, -c, wa, wb, w_sum);
+}
+
+/// Applies the positional Coulomb friction correction for one contact.
+///
+/// Called immediately after the normal projection with the same `normal`
+/// (`b` toward `a`) and the pre-projection penetration `penetration = -c > 0`.
+/// It measures the tangential drift the pair accumulated *this substep* from the
+/// `prev` snapshot, then either fully cancels it (static, while the drift stays
+/// inside the cone `static_friction * penetration`) or clamps it to the dynamic
+/// cone `dynamic_friction * penetration`. A frictionless contact (both
+/// coefficients `0`) returns immediately, leaving the trajectory identical to
+/// the pre-friction solver.
+///
+/// The correction is split by inverse-mass weight so it cancels the *relative*
+/// tangential motion without moving the pair's centre of mass, exactly like the
+/// normal projection; the shared `normal` means the correction is purely
+/// tangential and never fights the non-penetration solve.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the projection's live locals are threaded in rather than recomputed so the CPU twin matches the WGSL kernel arithmetic exactly"
+)]
+fn apply_friction(
+    con: &ContactConstraint,
+    ia: usize,
+    ib: usize,
+    positions: &mut [Vec3],
+    prev: &[Vec3],
+    normal: Vec3,
+    penetration: f32,
+    wa: f32,
+    wb: f32,
+    w_sum: f32,
+) {
+    if con.static_friction <= 0.0 && con.dynamic_friction <= 0.0 {
+        return;
+    }
+    let da = positions[ia] - prev[ia];
+    let db = positions[ib] - prev[ib];
+    let relative = da - db;
+    let normal_amount = relative.dot(normal);
+    let tangent = relative - normal * normal_amount;
+    let tangent_len = tangent.length();
+    if tangent_len < EPSILON {
+        return;
+    }
+    let scale = if tangent_len < con.static_friction * penetration {
+        1.0
+    } else {
+        (con.dynamic_friction * penetration / tangent_len).min(1.0)
+    };
+    let correction = tangent * scale;
+    positions[ia] -= correction * (wa / w_sum);
+    positions[ib] += correction * (wb / w_sum);
 }
 
 /// Recovers velocities from the net substep displacement.
@@ -260,6 +320,98 @@ mod tests {
         let cons = vec![ContactConstraint::new(0, 1, 2.0, 0.0)];
         cpu_resolve_contacts(&mut state, &cons, &XpbdConfig::default(), 0.0).unwrap();
         assert_eq!(state, before);
+    }
+
+    /// A helper: one pinned particle at the origin and one overlapping movable
+    /// particle offset along +x by `gap` (rest 1.0), the movable one carrying a
+    /// purely tangential (+y) initial velocity. The contact normal is x, so all
+    /// of the initial motion is tangential — the cleanest possible friction probe.
+    fn tangential_pair(gap: f32, vy: f32) -> ParticleState {
+        let mut state = ParticleState::new();
+        state.push(Vec3::ZERO, 0.0);
+        state.push(Vec3::new(gap, 0.0, 0.0), 1.0);
+        state.velocities[1] = Vec3::new(0.0, vy, 0.0);
+        state
+    }
+
+    /// Runs one frame of a tangential-slide pair and returns the movable
+    /// particle's recovered tangential (+y) velocity. The single pinned/​movable
+    /// pair unavoidably couples a little tangential motion through the tilting
+    /// normal, so the friction tests below compare *against the frictionless
+    /// run of the identical scene* rather than an absolute target.
+    fn slide_tangential_velocity(
+        static_f: f32,
+        dynamic_f: f32,
+        gap: f32,
+        vy: f32,
+        substeps: u32,
+    ) -> f32 {
+        let mut state = tangential_pair(gap, vy);
+        let cons = vec![ContactConstraint::new(0, 1, 1.0, 0.0).with_friction(static_f, dynamic_f)];
+        let config = XpbdConfig::new(Vec3::ZERO, substeps, 8, 0.0);
+        cpu_resolve_contacts(&mut state, &cons, &config, 1.0 / 60.0).unwrap();
+        state.velocities[1].y
+    }
+
+    #[test]
+    fn zero_friction_matches_new_constructor_exactly() {
+        // A `with_friction(0.0, 0.0)` contact must be bit-for-bit the same
+        // trajectory as a plain `new` contact — the friction path is a true
+        // no-op at zero, guarding the pre-friction regression suite.
+        let cons_plain = vec![ContactConstraint::new(0, 1, 1.0, 0.0)];
+        let cons_zero = vec![ContactConstraint::new(0, 1, 1.0, 0.0).with_friction(0.0, 0.0)];
+        let config = XpbdConfig::new(Vec3::ZERO, 2, 8, 0.0);
+        let mut a = tangential_pair(0.85, 1.0);
+        let mut b = tangential_pair(0.85, 1.0);
+        cpu_resolve_contacts(&mut a, &cons_plain, &config, 1.0 / 60.0).unwrap();
+        cpu_resolve_contacts(&mut b, &cons_zero, &config, 1.0 / 60.0).unwrap();
+        assert_eq!(a.positions[1], b.positions[1]);
+        assert_eq!(a.velocities[1], b.velocities[1]);
+    }
+
+    #[test]
+    fn strong_static_friction_kills_most_tangential_motion() {
+        // Against the frictionless baseline, a large static coefficient (the
+        // substep drift stays well inside the stick cone) must cancel the bulk
+        // of the tangential slide — only the small normal-coupling residual of
+        // the single pinned pair survives.
+        let free = slide_tangential_velocity(0.0, 0.0, 0.85, 1.0, 1);
+        let stuck = slide_tangential_velocity(2.0, 2.0, 0.85, 1.0, 1);
+        assert!(free > 0.9, "baseline slide unexpectedly small: {free}");
+        assert!(
+            stuck.abs() < 0.25 * free,
+            "static friction left too much tangential motion: {stuck} vs baseline {free}"
+        );
+    }
+
+    #[test]
+    fn dynamic_friction_partially_damps_sliding() {
+        // A moderate slide over a deep overlap (gap 0.5, so the pair stays in
+        // contact through the frame) lands in the dynamic regime: friction
+        // reduces the tangential velocity monotonically in the coefficient, but
+        // a bounded cone never fully stops (nor reverses) the slide in one frame.
+        let free = slide_tangential_velocity(0.0, 0.0, 0.5, 8.0, 1);
+        let weak = slide_tangential_velocity(0.05, 0.05, 0.5, 8.0, 1);
+        let strong = slide_tangential_velocity(0.2, 0.2, 0.5, 8.0, 1);
+        assert!(weak < free, "weak friction did not damp: {weak} vs {free}");
+        assert!(
+            strong < weak,
+            "stronger friction should damp more: strong {strong} vs weak {weak}"
+        );
+        assert!(
+            strong > 0.0,
+            "a bounded dynamic cone must not reverse the slide: {strong}"
+        );
+    }
+
+    #[test]
+    fn friction_never_moves_the_pinned_particle() {
+        // The immovable half of a frictional contact must stay put.
+        let mut state = tangential_pair(0.85, 5.0);
+        let cons = vec![ContactConstraint::new(0, 1, 1.0, 0.0).with_friction(1.0, 1.0)];
+        let config = XpbdConfig::new(Vec3::ZERO, 2, 8, 0.0);
+        cpu_resolve_contacts(&mut state, &cons, &config, 1.0 / 60.0).unwrap();
+        assert_eq!(state.positions[0], Vec3::ZERO);
     }
 
     #[test]
