@@ -62,6 +62,7 @@ pub mod octave;
 pub mod perlin;
 pub mod perlin_worley;
 pub mod phase;
+pub mod powder;
 pub mod shadow;
 pub mod worley;
 
@@ -72,5 +73,6 @@ pub use octave::{GpuOctaveScatter, OctaveQuery, OctaveResult};
 pub use perlin::{GpuPerlin, PerlinQuery};
 pub use perlin_worley::{GpuPerlinWorley, PerlinWorleyQuery};
 pub use phase::{GpuPhaseEvaluator, PhaseQuery};
+pub use powder::{GpuPowder, PowderQuery};
 pub use shadow::{GpuShadow, ShadowRay};
 pub use worley::{GpuWorley, WorleyQuery};
