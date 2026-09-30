@@ -25,7 +25,10 @@
 //!   optional bass-mono crossover for image control.
 //! - [`tremolo::TremoloNode`] — low-frequency amplitude modulation / auto-pan
 //!   driven by a control-rate LFO.
+//! - [`bitcrusher::BitcrusherNode`] — bit-depth quantization plus sample-rate
+//!   reduction (sample-and-hold decimation) for gritty lo-fi degradation.
 
+pub mod bitcrusher;
 pub mod chorus;
 pub mod delay;
 pub mod flanger;
@@ -35,6 +38,7 @@ pub mod stereo_width;
 pub mod tremolo;
 pub mod waveshaper;
 
+pub use bitcrusher::{BitcrusherNode, BitcrusherParams, MAX_BIT_DEPTH, MIN_BIT_DEPTH};
 pub use chorus::{ChorusNode, ChorusParams};
 pub use delay::DelayNode;
 pub use flanger::{FlangerNode, FlangerParams};
