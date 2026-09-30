@@ -112,6 +112,7 @@ pub mod storm_vertical_profile;
 pub mod sunset_inscatter_tint;
 pub mod sunset_reddening;
 pub mod terrain_occlusion;
+pub mod total_coverage;
 pub mod tracking_transmittance;
 pub mod transcendental_approx;
 pub mod trig_approx;
@@ -181,6 +182,7 @@ pub use storm_vertical_profile::{GpuStormVerticalProfile, StormVerticalProfileQu
 pub use sunset_inscatter_tint::{GpuSunsetInscatterTint, InscatterTint, SunsetInscatterTintQuery};
 pub use sunset_reddening::{GpuSunsetReddening, SunsetReddeningQuery};
 pub use terrain_occlusion::{GpuTerrainOcclusion, TerrainOcclusionQuery};
+pub use total_coverage::GpuTotalCoverage;
 pub use tracking_transmittance::{
     GpuTrackingTransmittance, TrackingEstimate, TrackingTransmittanceQuery,
 };
