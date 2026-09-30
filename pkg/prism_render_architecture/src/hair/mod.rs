@@ -65,6 +65,7 @@ pub mod deep_transmittance;
 pub mod density_lod;
 pub mod dual_scattering;
 pub mod dynamics;
+pub mod forward_scatter_layout;
 pub mod frame_barriers;
 pub mod frame_bind_plan;
 pub mod frame_budget;
