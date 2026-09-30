@@ -22,6 +22,11 @@
 //! [`CompressorNode`], [`LimiterNode`], [`ExpanderGateNode`], and the
 //! side-chain [`DuckingNode`].
 //!
+//! Signal-generating voices live in the [`sources`] submodule: the
+//! band-limited [`OscillatorNode`], the deterministic [`NoiseNode`], and the
+//! resampling [`SamplePlayerNode`]. They declare no inputs and originate a
+//! signal rather than transforming one.
+//!
 //! Spatial ambience processors live in the [`reverb`] submodule: the
 //! [`FdnReverb`], the impulse-response [`Convolver`], and the Freeverb-style
 //! [`AlgorithmicRoom`].
@@ -33,6 +38,7 @@ pub mod gain;
 pub mod mix;
 pub mod pan;
 pub mod reverb;
+pub mod sources;
 
 pub use biquad::{BiquadKind, BiquadNode};
 pub use dynamics::{
@@ -48,4 +54,7 @@ pub use mix::SumNode;
 pub use pan::StereoPanNode;
 pub use reverb::{
     AlgorithmicRoom, AlgorithmicRoomParams, Convolver, FdnOrder, FdnReverb, FdnReverbParams,
+};
+pub use sources::{
+    Interpolation, LoopMode, NoiseColor, NoiseNode, OscillatorNode, SamplePlayerNode, Waveform,
 };
