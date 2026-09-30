@@ -31,6 +31,8 @@
 //!   reduction (sample-and-hold decimation) for gritty lo-fi degradation.
 //! - [`ring_modulator::RingModulatorNode`] — multiplies the signal by a
 //!   bipolar audio-rate carrier for inharmonic, bell-like, or robotic timbres.
+//! - [`vibrato::VibratoNode`] — single LFO-swept fractional delay for
+//!   periodic pitch modulation.
 
 pub mod bitcrusher;
 pub mod chorus;
@@ -42,6 +44,7 @@ pub mod phaser;
 pub mod ring_modulator;
 pub mod stereo_width;
 pub mod tremolo;
+pub mod vibrato;
 pub mod waveshaper;
 
 pub use bitcrusher::{BitcrusherNode, BitcrusherParams, MAX_BIT_DEPTH, MIN_BIT_DEPTH};
@@ -54,4 +57,5 @@ pub use phaser::{PhaserNode, PhaserParams};
 pub use ring_modulator::{RingModulatorNode, RingModulatorParams};
 pub use stereo_width::{MAX_WIDTH, StereoWidthNode, StereoWidthParams};
 pub use tremolo::{TremoloMode, TremoloNode, TremoloParams};
+pub use vibrato::{VibratoNode, VibratoParams};
 pub use waveshaper::{Oversample, WaveshaperNode};
