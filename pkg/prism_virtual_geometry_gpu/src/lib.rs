@@ -72,6 +72,7 @@
 pub mod bin_cut;
 pub mod cluster_cull;
 pub mod context;
+pub mod decide_cluster;
 pub mod lod_select;
 pub mod page_pool;
 pub mod page_storage;
@@ -83,6 +84,7 @@ pub mod select_cut;
 pub use bin_cut::GpuCutBinner;
 pub use cluster_cull::GpuClusterCuller;
 pub use context::{block_on, GpuContext};
+pub use decide_cluster::{ClusterDecisionInput, GpuClusterDecider};
 pub use lod_select::{GpuLodSelector, LodQuery};
 pub use page_pool::{GpuPageTable, ResolveError};
 pub use page_storage::GpuPageStorage;
