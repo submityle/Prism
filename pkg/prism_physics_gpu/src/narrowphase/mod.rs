@@ -32,6 +32,11 @@
 //!   oriented bounding box, taking the point on the capsule axis closest to
 //!   the box (an exact convex piecewise-quadratic segment-box minimisation)
 //!   and collapsing to the sphere-versus-box manifold there.
+//! - [`capsule_obb_manifold`] / [`cpu_capsule_obb_manifold`]: promotes the
+//!   capsule-OBB contact to an up-to-two-point [`ContactManifold`] by
+//!   clipping the capsule axis to the reference box face with the
+//!   Liang-Barsky algorithm, the manifold a solver needs to hold a capsule
+//!   resting flat on a face still.
 //! - [`obb`] / [`GpuObbNarrowphase`]: sphere versus an oriented bounding box,
 //!   clamping the sphere centre in the box frame with an interior push-out
 //!   fallback through the least-penetrated face.
@@ -69,6 +74,8 @@ mod capsule_halfspace;
 mod capsule_halfspace_gpu;
 mod capsule_obb;
 mod capsule_obb_gpu;
+mod capsule_obb_manifold;
+mod capsule_obb_manifold_gpu;
 mod contact;
 mod cpu;
 mod gpu;
@@ -94,6 +101,8 @@ pub use capsule_halfspace::{cpu_capsule_halfspace_manifold, CapsulePlanePair};
 pub use capsule_halfspace_gpu::GpuCapsuleHalfspaceNarrowphase;
 pub use capsule_obb::{cpu_capsule_obb_narrowphase, CapsuleObbPair};
 pub use capsule_obb_gpu::GpuCapsuleObbNarrowphase;
+pub use capsule_obb_manifold::cpu_capsule_obb_manifold;
+pub use capsule_obb_manifold_gpu::GpuCapsuleObbManifoldNarrowphase;
 pub use contact::Contact;
 pub use cpu::cpu_narrowphase;
 pub use gpu::GpuNarrowphase;
