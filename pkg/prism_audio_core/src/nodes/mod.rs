@@ -13,6 +13,8 @@
 //!   (low/high-pass, band-pass, notch, peaking, shelving).
 //! - [`pan::StereoPanNode`] — equal-power mono-to-stereo panner.
 //! - [`mix::SumNode`] — explicit N-input summing node (a bus mixer primitive).
+//! - [`crossover::LinkwitzRileyCrossover`] — fourth-order Linkwitz-Riley
+//!   multi-band splitter whose bands sum back to a flat response.
 //!
 //! Insert-style effect processors live in the [`effects`] submodule:
 //! [`ParametricEqNode`], [`DelayNode`], the `tanh` [`WaveshaperNode`], and the
@@ -32,6 +34,7 @@
 //! [`AlgorithmicRoom`].
 
 pub mod biquad;
+pub mod crossover;
 pub mod dynamics;
 pub mod effects;
 pub mod gain;
@@ -41,6 +44,7 @@ pub mod reverb;
 pub mod sources;
 
 pub use biquad::{BiquadKind, BiquadNode};
+pub use crossover::{LinkwitzRileyCrossover, MAX_BANDS, MAX_CROSSOVERS};
 pub use dynamics::{
     CompressorNode, CompressorParams, DetectionMode, DuckingNode, DuckingParams, ExpanderGateNode,
     GateParams, LimiterNode, LimiterParams,
