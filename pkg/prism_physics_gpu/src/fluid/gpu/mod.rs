@@ -17,9 +17,11 @@ mod grid_ops;
 mod layout;
 mod pressure;
 mod solver;
+mod step;
 
 pub use advect::GpuAdvect;
 pub use extrapolate::GpuExtrapolate;
 pub use grid_ops::GpuGridOps;
 pub use pressure::GpuPressureSolver;
 pub use solver::GpuFluidSolver;
+pub use step::GpuFluidStep;
