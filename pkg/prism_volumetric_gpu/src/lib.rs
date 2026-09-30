@@ -89,6 +89,7 @@ pub mod sunset_inscatter_tint;
 pub mod sunset_reddening;
 pub mod terrain_occlusion;
 pub mod trilinear;
+pub mod variance_clip;
 pub mod virga_fade;
 pub mod virga_veil;
 pub mod worley;
@@ -127,6 +128,7 @@ pub use sunset_inscatter_tint::{GpuSunsetInscatterTint, InscatterTint, SunsetIns
 pub use sunset_reddening::{GpuSunsetReddening, SunsetReddeningQuery};
 pub use terrain_occlusion::{GpuTerrainOcclusion, TerrainOcclusionQuery};
 pub use trilinear::{GpuTrilinear, TrilinearQuery};
+pub use variance_clip::{GpuVarianceClip, VarianceClipQuery};
 pub use virga_fade::{GpuVirgaFade, VirgaFadeQuery};
 pub use virga_veil::{GpuVirgaVeil, VirgaVeilQuery};
 pub use worley::{GpuWorley, WorleyQuery};
