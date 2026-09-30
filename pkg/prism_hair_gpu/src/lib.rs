@@ -139,6 +139,15 @@
 //!   multiply-add, its path code is bit-identical to the reference (see
 //!   [`raster`]).
 //!
+//! * [`GpuMeshShell`] evaluates
+//!   [`build_shell`](prism_render_architecture::hair::mesh_shell::build_shell),
+//!   the coarsest `Mesh` LOD rung a distant groom collapses onto — one
+//!   thread per strand sweeps a four-corner rectangular cross-section
+//!   (bitangent spans the width, normal the thickness) along the
+//!   centerline, emitting the ring positions, diagonal corner normals and
+//!   perimeter/arc UVs of a closed box tube; the deterministic triangle
+//!   winding is rebuilt host-side (see [`mesh_shell`]).
+//!
 //! # Portability
 //!
 //! The projection uses only `sqrt`, `min`, `max`, `clamp`, `dot` and
@@ -172,6 +181,7 @@ pub mod forward_scatter;
 pub mod frames;
 pub mod guide_solver;
 pub mod interp;
+pub mod mesh_shell;
 pub mod raster;
 pub mod ribbon;
 pub mod sdf_collision;
@@ -191,6 +201,7 @@ pub use forward_scatter::GpuHairForwardScatter;
 pub use frames::{GpuStrandFrame, GpuStrandFrames};
 pub use guide_solver::GpuGuideSolver;
 pub use interp::GpuHairInterp;
+pub use mesh_shell::{GpuMeshShell, GpuShellMesh, ShellStrandInput};
 pub use raster::{path_code, GpuHairRaster, RasterQuery};
 pub use ribbon::{GpuRibbon, GpuRibbonMesh, RibbonStrandInput};
 pub use sdf_collision::GpuSdfCollider;
