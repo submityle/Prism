@@ -59,6 +59,14 @@
 //!   goal-pose and long-range-attachment constraints plus analytic body
 //!   push-out), the core strand-dynamics stage the render strands are
 //!   interpolated from (see [`guide_solver`]).
+//! * [`GpuHairInterp`] evaluates
+//!   [`interpolate_render_strand`](prism_render_architecture::hair::interpolation::interpolate_render_strand),
+//!   expanding each render strand from its (up to four) guides one thread per
+//!   strand through the shared transform chain — weighted blend, length jitter,
+//!   clump pull toward the representative guide, a seed-stable curl helix framed
+//!   on the clumped tangent, and per-point position jitter — the stage that
+//!   turns the sparse simulated guides into the dense drawn groom (see
+//!   [`interp`]).
 //!
 //! # Portability
 //!
@@ -89,6 +97,7 @@ pub mod collision;
 pub mod context;
 pub mod frames;
 pub mod guide_solver;
+pub mod interp;
 pub mod ribbon;
 pub mod sdf_collision;
 pub mod self_collision_jacobi;
@@ -99,6 +108,7 @@ pub use collision::{query_for, CollisionQuery, GpuColliderProjector};
 pub use context::{block_on, GpuContext};
 pub use frames::{GpuStrandFrame, GpuStrandFrames};
 pub use guide_solver::GpuGuideSolver;
+pub use interp::GpuHairInterp;
 pub use ribbon::{GpuRibbon, GpuRibbonMesh, RibbonStrandInput};
 pub use sdf_collision::GpuSdfCollider;
 pub use self_collision_jacobi::GpuSelfCollisionJacobi;
