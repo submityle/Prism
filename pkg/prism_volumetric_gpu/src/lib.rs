@@ -57,6 +57,7 @@
 
 pub mod context;
 pub mod curl;
+pub mod godray;
 pub mod mask;
 pub mod modeling;
 pub mod octave;
@@ -69,6 +70,7 @@ pub mod worley;
 
 pub use context::{block_on, GpuContext};
 pub use curl::{CurlQuery, GpuCurl};
+pub use godray::{GodRayWeightQuery, GpuGodRayWeight};
 pub use mask::{GpuScatteringMask, MaskQuery};
 pub use modeling::{GpuModeling, ModelingQuery};
 pub use octave::{GpuOctaveScatter, OctaveQuery, OctaveResult};
