@@ -58,6 +58,7 @@
 pub mod aerial;
 pub mod anvil_profile;
 pub mod apply_carve;
+pub mod blend_with_atmosphere;
 pub mod cloud_shadow_modulation;
 pub mod context;
 pub mod contrail_kernel;
@@ -93,6 +94,7 @@ pub mod worley;
 pub use aerial::{AerialQuery, GpuAerialPerspective};
 pub use anvil_profile::{AnvilProfileQuery, GpuAnvilProfile};
 pub use apply_carve::{ApplyCarveQuery, GpuApplyCarve};
+pub use blend_with_atmosphere::{BlendQuery, BlendedColor, GpuBlendWithAtmosphere};
 pub use cloud_shadow_modulation::{CloudShadowModulationQuery, GpuCloudShadowModulation};
 pub use context::{block_on, GpuContext};
 pub use contrail_kernel::{ContrailKernelQuery, GpuContrailKernel};
