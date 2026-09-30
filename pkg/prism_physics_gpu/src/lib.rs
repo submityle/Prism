@@ -86,8 +86,9 @@ pub use mpm::{
 };
 pub use narrowphase::{
     cpu_capsule_capsule_narrowphase, cpu_capsule_halfspace_manifold, cpu_capsule_narrowphase,
-    cpu_halfspace_narrowphase, cpu_narrowphase, cpu_obb_halfspace_narrowphase, cpu_obb_narrowphase,
-    cpu_obb_obb_manifold, cpu_obb_obb_narrowphase, Capsule, CapsuleCapsulePair, CapsulePlanePair,
+    cpu_capsule_obb_narrowphase, cpu_halfspace_narrowphase, cpu_narrowphase,
+    cpu_obb_halfspace_narrowphase, cpu_obb_narrowphase, cpu_obb_obb_manifold,
+    cpu_obb_obb_narrowphase, Capsule, CapsuleCapsulePair, CapsuleObbPair, CapsulePlanePair,
     Contact, ContactManifold, GpuCapsuleCapsuleNarrowphase, GpuCapsuleHalfspaceNarrowphase,
     GpuCapsuleNarrowphase, GpuHalfspaceNarrowphase, GpuNarrowphase, GpuObbHalfspaceNarrowphase,
     GpuObbNarrowphase, GpuObbObbManifoldNarrowphase, GpuObbObbNarrowphase, ManifoldPoint, Obb,
