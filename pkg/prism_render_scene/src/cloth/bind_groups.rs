@@ -32,7 +32,7 @@ use bevy_render::{
 };
 use bytemuck::Pod;
 use prism_render_architecture::cloth::gpu::buffers::{
-    BufferCounts, PersistentBufferSet, HASH_CELL_STRIDE, PARTICLE_VEC_STRIDE,
+    BufferCounts, PersistentBufferSet, PARTICLE_VEC_STRIDE,
 };
 
 use super::abi::{
@@ -41,22 +41,6 @@ use super::abi::{
     GpuClothEmbedParams, GpuClothSelfParams, GpuClothSimParams,
 };
 use super::pipeline::ClothComputePipelines;
-
-/// The packed byte size of one analytic collider proxy ([`GpuClothCollider`]).
-/// Colliders are scene-supplied per solve rather than sized by
-/// [`BufferCounts`], so the stride lives here next to the plan that consumes it.
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "device-free byte-size oracle: mirrors the runtime `zeroed_storage` / `storage_with_data` clamping so the golden buffer sizing can be unit-tested without a `RenderDevice`; the live allocation path clamps inside those device helpers instead"
-    )
-)]
-pub(crate) const COLLIDER_STRIDE: u32 = size_of::<GpuClothCollider>() as u32;
-
-/// The packed byte size of one per-particle spatial-hash `next` link (a single
-/// `u32` particle index).
-pub(crate) const HASH_NEXT_STRIDE: u32 = 4;
 
 /// Minimum storage-buffer size in bytes.
 ///
@@ -176,6 +160,19 @@ impl ClothPieceGpuBuffers {
     /// remaining storage buffers are device-local (`STORAGE | COPY_DST`). Empty
     /// optional arrays pad to one zeroed element (see [`MIN_STORAGE_BYTES`]).
     pub(crate) fn create(device: &RenderDevice, upload: &ClothPieceUpload<'_>) -> Self {
+        // The data-free pools below carry no upload bytes, so they size against
+        // the scene-clamped golden [`ClothBufferPlan`] rather than an inline
+        // stride multiply: the plan is the single sizing authority, and the
+        // `plan_reproduces_golden_byte_sizes` test pins it to the
+        // architecture-layer [`PersistentBufferSet`].
+        let plan = ClothBufferPlan::new(BufferCounts {
+            particles: upload.positions.len() as u32,
+            constraints: upload.constraints.len() as u32,
+            hash_cells: upload.hash_cell_count,
+            render_vertices: upload.render_vertex_count,
+            backstops: upload.backstops.len() as u32,
+        });
+
         let positions = readable_storage(device, "prism cloth positions", upload.positions);
         let velocities = readable_storage(device, "prism cloth velocities", upload.velocities);
         // The pre-step snapshot starts equal to the initial positions so the
@@ -188,7 +185,7 @@ impl ClothPieceGpuBuffers {
         let velocity_snapshot = zeroed_storage(
             device,
             "prism cloth velocity snapshot",
-            u64::from(upload.positions.len() as u32) * u64::from(PARTICLE_VEC_STRIDE),
+            plan.position_bytes(),
         );
 
         let constraints = read_only_storage(device, "prism cloth constraints", upload.constraints);
@@ -210,19 +207,19 @@ impl ClothPieceGpuBuffers {
         let hash_cells = zeroed_storage(
             device,
             "prism cloth hash cells",
-            u64::from(upload.hash_cell_count) * u64::from(HASH_CELL_STRIDE),
+            plan.hash_cell_bytes(),
         );
         let particle_next = zeroed_storage(
             device,
             "prism cloth particle next",
-            u64::from(upload.positions.len() as u32) * u64::from(HASH_NEXT_STRIDE),
+            plan.hash_next_bytes(),
         );
         // The embed pass writes the skinned render vertices; the pool starts
         // zeroed and is fully overwritten on the first skinning dispatch.
         let render_positions = zeroed_storage(
             device,
             "prism cloth render positions",
-            u64::from(upload.render_vertex_count) * u64::from(PARTICLE_VEC_STRIDE),
+            plan.render_position_bytes(),
         );
 
         let sim_params = uniform(device, "prism cloth sim params", &upload.sim_params);
@@ -454,40 +451,26 @@ fn uniform<T: Pod>(device: &RenderDevice, label: &str, value: &T) -> Buffer {
     })
 }
 
-/// Device-free byte-size plan for one piece's resident buffers.
+/// Device-free byte-size authority for one piece's zeroed resident buffers.
 ///
 /// Wraps the golden [`PersistentBufferSet`] (which sizes the particle pools,
-/// constraint, hash and embed buffers from a [`BufferCounts`]) and adds the two
-/// counts the golden contract leaves to the render layer: the analytic collider
-/// list (scene-supplied per solve) and the storage-buffer floor every binding is
-/// clamped to. Kept pure so the sizing can be unit-tested without a
-/// [`RenderDevice`].
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "device-free byte-size oracle: mirrors the runtime `zeroed_storage` / `storage_with_data` clamping so the golden buffer sizing can be unit-tested without a `RenderDevice`; the live allocation path clamps inside those device helpers instead"
-    )
-)]
+/// constraint, hash and embed buffers from a [`BufferCounts`]) and applies the
+/// scene-layer storage-buffer floor `wgpu` requires (see [`clamp_storage`]).
+/// [`ClothPieceGpuBuffers::create`] allocates every data-free pool (the velocity
+/// snapshot, the two self-collision hash tables and the embed output positions)
+/// against this plan, so the golden `std430` sizing has one production
+/// authority instead of an inline stride multiply per pool. Kept pure so the
+/// sizing can be unit-tested without a [`RenderDevice`].
 pub(crate) struct ClothBufferPlan {
     set: PersistentBufferSet,
-    collider_count: u32,
 }
 
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "device-free byte-size oracle: mirrors the runtime `zeroed_storage` / `storage_with_data` clamping so the golden buffer sizing can be unit-tested without a `RenderDevice`; the live allocation path clamps inside those device helpers instead"
-    )
-)]
 impl ClothBufferPlan {
-    /// Builds a plan from the golden element counts plus the collider count.
+    /// Builds a plan from the golden element counts.
     #[must_use]
-    pub(crate) fn new(counts: BufferCounts, collider_count: u32) -> Self {
+    pub(crate) fn new(counts: BufferCounts) -> Self {
         Self {
             set: PersistentBufferSet::new(counts),
-            collider_count,
         }
     }
 
@@ -496,12 +479,6 @@ impl ClothBufferPlan {
     #[must_use]
     pub(crate) fn position_bytes(&self) -> u64 {
         clamp_storage(self.set.position_bytes())
-    }
-
-    /// Bytes for the packed distance-constraint buffer.
-    #[must_use]
-    pub(crate) fn constraint_bytes(&self) -> u64 {
-        clamp_storage(self.set.constraint_bytes())
     }
 
     /// Bytes for the self-collision hash cell-header table.
@@ -516,45 +493,30 @@ impl ClothBufferPlan {
         clamp_storage(self.set.hash_entry_bytes())
     }
 
-    /// Bytes for the render-vertex embed-binding buffer.
+    /// Bytes for the embed pass's skinned render-vertex output pool (one
+    /// `vec4<f32>` per render vertex). This vec4 position pool is distinct from
+    /// the architecture-layer `embed_bytes` weight buffer, so it derives from
+    /// the render-vertex count directly against [`PARTICLE_VEC_STRIDE`].
     #[must_use]
-    pub(crate) fn embed_bytes(&self) -> u64 {
-        clamp_storage(self.set.embed_bytes())
-    }
-
-    /// Bytes for the painted-backstop plane buffer.
-    #[must_use]
-    pub(crate) fn backstop_bytes(&self) -> u64 {
-        clamp_storage(self.set.backstop_bytes())
-    }
-
-    /// Bytes for the analytic collider list.
-    #[must_use]
-    pub(crate) fn collider_bytes(&self) -> u64 {
-        clamp_storage(self.collider_count.saturating_mul(COLLIDER_STRIDE))
+    pub(crate) fn render_position_bytes(&self) -> u64 {
+        clamp_storage(
+            self.set
+                .counts()
+                .render_vertices
+                .saturating_mul(PARTICLE_VEC_STRIDE),
+        )
     }
 }
 
 /// Clamps a golden byte size up to the storage-buffer floor, matching the
 /// runtime padding [`zeroed_storage`] and [`storage_with_data`] apply.
 #[must_use]
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "device-free byte-size oracle: mirrors the runtime `zeroed_storage` / `storage_with_data` clamping so the golden buffer sizing can be unit-tested without a `RenderDevice`; the live allocation path clamps inside those device helpers instead"
-    )
-)]
 fn clamp_storage(bytes: u32) -> u64 {
     u64::from(bytes).max(MIN_STORAGE_BYTES)
 }
 
 #[cfg(test)]
 mod tests {
-    use prism_render_architecture::cloth::gpu::buffers::{
-        BACKSTOP_STRIDE, CONSTRAINT_STRIDE, EMBED_STRIDE,
-    };
-
     use super::*;
 
     fn counts() -> BufferCounts {
@@ -567,31 +529,23 @@ mod tests {
         }
     }
 
-    /// The collider stride the plan sizes against must equal the packed
-    /// `#[repr(C)]` collider record the `bytemuck` upload casts.
-    #[test]
-    fn collider_stride_matches_abi_record() {
-        assert_eq!(COLLIDER_STRIDE, size_of::<GpuClothCollider>() as u32);
-    }
-
     /// A populated plan reproduces the golden per-buffer byte sizes so the
     /// render allocation can never drift from the architecture-layer contract.
     #[test]
     fn plan_reproduces_golden_byte_sizes() {
-        let plan = ClothBufferPlan::new(counts(), 8);
+        let plan = ClothBufferPlan::new(counts());
         let golden = PersistentBufferSet::new(counts());
+        // Every data-free pool the plan authorizes is pinned against the
+        // architecture-layer golden sizing, so a stride drift there surfaces
+        // here rather than as a silent allocation mismatch at dispatch time.
         assert_eq!(plan.position_bytes(), u64::from(golden.position_bytes()));
-        assert_eq!(
-            plan.constraint_bytes(),
-            u64::from(golden.constraint_bytes())
-        );
         assert_eq!(plan.hash_cell_bytes(), u64::from(golden.hash_cell_bytes()));
         assert_eq!(plan.hash_next_bytes(), u64::from(golden.hash_entry_bytes()));
-        assert_eq!(plan.embed_bytes(), u64::from(golden.embed_bytes()));
-        assert_eq!(plan.backstop_bytes(), u64::from(golden.backstop_bytes()));
+        // The render-vertex vec4 output pool is not modeled by the architecture
+        // `embed_bytes` weight buffer, so pin it against the render count here.
         assert_eq!(
-            plan.collider_bytes(),
-            u64::from(8u32.saturating_mul(COLLIDER_STRIDE))
+            plan.render_position_bytes(),
+            u64::from(500u32.saturating_mul(PARTICLE_VEC_STRIDE))
         );
     }
 
@@ -599,7 +553,7 @@ mod tests {
     /// the golden double-buffered position pool.
     #[test]
     fn position_and_prev_share_one_copy_size() {
-        let plan = ClothBufferPlan::new(counts(), 0);
+        let plan = ClothBufferPlan::new(counts());
         assert_eq!(plan.position_bytes(), u64::from(100 * PARTICLE_VEC_STRIDE));
     }
 
@@ -607,25 +561,10 @@ mod tests {
     /// ever zero-sized, mirroring the runtime placeholder padding.
     #[test]
     fn empty_plan_clamps_to_storage_floor() {
-        let plan = ClothBufferPlan::new(BufferCounts::default(), 0);
+        let plan = ClothBufferPlan::new(BufferCounts::default());
         assert_eq!(plan.position_bytes(), MIN_STORAGE_BYTES);
-        assert_eq!(plan.constraint_bytes(), MIN_STORAGE_BYTES);
         assert_eq!(plan.hash_cell_bytes(), MIN_STORAGE_BYTES);
         assert_eq!(plan.hash_next_bytes(), MIN_STORAGE_BYTES);
-        assert_eq!(plan.embed_bytes(), MIN_STORAGE_BYTES);
-        assert_eq!(plan.backstop_bytes(), MIN_STORAGE_BYTES);
-        assert_eq!(plan.collider_bytes(), MIN_STORAGE_BYTES);
-    }
-
-    /// The `CONSTRAINT_STRIDE` / `BACKSTOP_STRIDE` / `EMBED_STRIDE` imports are
-    /// the golden strides the plan's byte sizes derive from; pin them so a
-    /// golden drift is caught here rather than at dispatch time.
-    #[test]
-    fn golden_strides_are_stable() {
-        assert_eq!(CONSTRAINT_STRIDE, 20);
-        assert_eq!(BACKSTOP_STRIDE, 32);
-        assert_eq!(EMBED_STRIDE, 32);
-        assert_eq!(HASH_CELL_STRIDE, 8);
-        assert_eq!(PARTICLE_VEC_STRIDE, 16);
+        assert_eq!(plan.render_position_bytes(), MIN_STORAGE_BYTES);
     }
 }
