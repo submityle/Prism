@@ -10,6 +10,8 @@
 //!   cell and the distance to the nearest cell wall.
 //! - [`GpuFragmentAggregate`] reduces a classified point cloud to one
 //!   rigid-body seed per fragment: mass, centre of mass, and inertia tensor.
+//! - [`GpuFragmentBounds`] reduces a classified point cloud to one broad-phase
+//!   proxy per fragment: an axis-aligned bounding box and a bounding sphere.
 //!
 //! Together they cover the classify-then-seed pipeline a real-time destruction
 //! system runs at the hundred-thousand-to-million point scale.
@@ -23,6 +25,8 @@
 //! - [`gpu`] — the real-device [`GpuVoronoiAssign`] classifier.
 //! - [`aggregate`] — the per-fragment [`GpuFragmentAggregate`] reducer, its
 //!   [`cpu_aggregate_fragments`] twin, and the [`FragmentAggregate`] output.
+//! - [`bounds`] — the per-fragment [`GpuFragmentBounds`] proxy builder, its
+//!   [`cpu_bounds_fragments`] twin, and the [`FragmentBounds`] output.
 //!
 //! # Correctness model
 //!
@@ -42,6 +46,7 @@
 //! formulas are standard, publicly documented results.
 
 pub mod aggregate;
+pub mod bounds;
 pub mod config;
 pub mod cpu;
 pub mod gpu;
@@ -49,6 +54,7 @@ pub mod gpu;
 pub use aggregate::{
     cpu_aggregate_fragments, AggregateConfig, FragmentAggregate, GpuFragmentAggregate,
 };
+pub use bounds::{cpu_bounds_fragments, BoundsConfig, FragmentBounds, GpuFragmentBounds};
 pub use config::{VoronoiAssignConfig, NO_CELL};
 pub use cpu::{cpu_assign_cells, CellAssignment};
 pub use gpu::GpuVoronoiAssign;

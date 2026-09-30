@@ -57,8 +57,9 @@ pub use fluid::{
     GpuGridOps, GpuPressureSolver, GridDims, PressureConfig, TransferMode,
 };
 pub use fracture::{
-    cpu_aggregate_fragments, cpu_assign_cells, AggregateConfig, CellAssignment, FragmentAggregate,
-    GpuFragmentAggregate, GpuVoronoiAssign, VoronoiAssignConfig, NO_CELL,
+    cpu_aggregate_fragments, cpu_assign_cells, cpu_bounds_fragments, AggregateConfig, BoundsConfig,
+    CellAssignment, FragmentAggregate, FragmentBounds, GpuFragmentAggregate, GpuFragmentBounds,
+    GpuVoronoiAssign, VoronoiAssignConfig, NO_CELL,
 };
 pub use mpm::{
     BoundaryMode, ConstitutiveOutput, G2pParticles, GpuMpmConstitutive, GpuMpmG2p,
