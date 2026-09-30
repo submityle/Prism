@@ -16,6 +16,9 @@
 //!   [`buffer::ChannelLayout`] descriptor.
 //! - [`param`] holds sample-accurate parameter smoothing ([`param::Smoothed`])
 //!   and the [`param::Ramp`] shapes used to avoid zipper noise.
+//! - [`scheduler`] holds sample-accurate musical clocks
+//!   ([`scheduler::NamedClock`]) with beat/bar quantization and the bounded
+//!   [`scheduler::EventScheduler`] min-heap for sample-accurate event dispatch.
 //! - [`time`] holds the sample-accurate [`time::Transport`] and musical
 //!   [`time::TimeSignature`] used by the scheduler.
 //! - [`graph`] holds the unified render graph: the [`graph::AudioNode`] trait,
@@ -53,6 +56,7 @@ pub mod math;
 pub mod modulation;
 pub mod nodes;
 pub mod param;
+pub mod scheduler;
 pub mod time;
 
 pub use buffer::{AudioBuffer, ChannelLayout};
@@ -60,4 +64,5 @@ pub use graph::{AudioGraph, AudioNode, NodeId, PortRef, ProcessIo, RenderContext
 pub use math::{Sample, db_to_linear, linear_to_db};
 pub use modulation::{Lfo, LfoWaveform};
 pub use param::{Ramp, Smoothed};
+pub use scheduler::{EventScheduler, Grid, NamedClock};
 pub use time::{TimeSignature, Transport};
