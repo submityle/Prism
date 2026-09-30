@@ -1891,6 +1891,12 @@ use wgpu::{
     TextureViewDimension,
 };
 
+use wgpu::{AddressMode, FilterMode, MipmapFilterMode, SamplerBindingType, SamplerDescriptor};
+
+use prism_render_architecture::water::dispersion;
+
+use super::abi::GpuWaterDispersionParams;
+
 /// Finite-difference floor; mirrors `WATER_EPS` in `water_render_fx.wesl`.
 const WATER_EPS: f32 = 1.0e-6;
 
@@ -5023,6 +5029,483 @@ fn surface_reconstruct_gpu_matches_cpu_golden() {
                 );
                 k += 1;
             }
+        }
+        i += 1;
+    }
+}
+
+/// Builds the scene colour field sampled behind the water for the dispersion
+/// parity test: an `Rgba32Float` texture whose three colour channels ramp
+/// independently along x and stay constant along y, so each chromatic offset
+/// lands on its own texel and the per-channel selection is observable. The
+/// alpha lane is a constant `1.0`. Returned row-major as `w * h` RGBA texels.
+fn dispersion_scene_field(w: u32, h: u32) -> Vec<f32> {
+    let mut out = Vec::with_capacity((w * h * 4) as usize);
+    let mut y = 0u32;
+    while y < h {
+        let mut x = 0u32;
+        while x < w {
+            let xf = x as f32;
+            // Distinct per-channel ramps keep the red/green/blue lookups from
+            // aliasing onto one another and stay inside the f16 range.
+            out.push(0.12 + 0.021 * xf);
+            out.push(0.30 + 0.014 * xf);
+            out.push(0.08 + 0.018 * xf);
+            out.push(1.0);
+            x += 1;
+        }
+        y += 1;
+    }
+    out
+}
+
+/// Builds the constant surface-normal field for the dispersion parity test: a
+/// uniform view-space normal with a lateral x tilt (so the refraction direction
+/// is exactly `+x`) and a small up component (so the incidence sine is near
+/// grazing and the chromatic spread is wide). Returned row-major as `w * h`
+/// RGBA texels; only the xyz lanes are read by the kernel.
+fn dispersion_normal_field(w: u32, h: u32, normal: [f32; 3]) -> Vec<f32> {
+    let count = w * h;
+    let mut out = Vec::with_capacity((count * 4) as usize);
+    let mut i = 0u32;
+    while i < count {
+        out.push(normal[0]);
+        out.push(normal[1]);
+        out.push(normal[2]);
+        out.push(0.0);
+        i += 1;
+    }
+    out
+}
+
+/// CPU golden twin of `water_dispersion_refract`. Reproduces the shader's
+/// chromatic-offset chain lane-for-lane: the `Cauchy` `IOR` per `RGB`
+/// wavelength (via the `dispersion` architecture module), the transmitted-sine
+/// offsets scaled by `strength`, the refraction direction from the normal
+/// tangent, and the nearest-neighbour scene sample per channel with
+/// `ClampToEdge` addressing. Returns `w * h` `(r, g, b, 1)` texels.
+fn dispersion_refract_golden(
+    scene: &[f32],
+    normal: &[f32],
+    params: &GpuWaterDispersionParams,
+) -> Vec<[f32; 4]> {
+    let w = params.width;
+    let h = params.height;
+    let dims_w = w as f32;
+    let dims_h = h as f32;
+    let mut out = Vec::with_capacity((w * h) as usize);
+    let mut gy = 0u32;
+    while gy < h {
+        let mut gx = 0u32;
+        while gx < w {
+            let ni = ((gy * w + gx) * 4) as usize;
+            let nx = normal[ni];
+            let ny = normal[ni + 1];
+            let nz = normal[ni + 2];
+            // Incidence sine from the normal's up (view-space z) component.
+            let cos_i = nz.abs().clamp(0.0, 1.0);
+            let sin_i = (1.0 - cos_i * cos_i).max(0.0).sqrt();
+            // Per-channel transmitted-sine offsets from the Cauchy law; the
+            // architecture module folds in the same clamp-divide-clamp chain
+            // and the strength gain the shader applies.
+            let iors = dispersion::spectral_iors(params.cauchy_a, params.cauchy_b);
+            let offs = dispersion::dispersion_offsets(iors, sin_i, params.strength);
+            // Lateral refraction direction from the normal tangent projection.
+            let t_len = (nx * nx + ny * ny).max(WATER_EPS).sqrt();
+            let dir_x = nx / t_len;
+            let dir_y = ny / t_len;
+            let uv_x = (gx as f32 + 0.5) / dims_w;
+            let uv_y = (gy as f32 + 0.5) / dims_h;
+            let px_x = dir_x / dims_w;
+            let px_y = dir_y / dims_h;
+            let mut texel = [0.0f32; 3];
+            let mut c = 0usize;
+            while c < 3 {
+                let su_x = uv_x + px_x * offs[c];
+                let su_y = uv_y + px_y * offs[c];
+                // Nearest-neighbour texel selection with ClampToEdge, matching
+                // the sampler: texel = clamp(floor(uv * dim), 0, dim - 1).
+                let fx = (su_x * dims_w).floor();
+                let fy = (su_y * dims_h).floor();
+                let tx = (fx as i32).clamp(0, (w as i32) - 1) as u32;
+                let ty = (fy as i32).clamp(0, (h as i32) - 1) as u32;
+                let si = ((ty * w + tx) * 4) as usize;
+                texel[c] = scene[si + c].max(0.0);
+                c += 1;
+            }
+            out.push([texel[0], texel[1], texel[2], 1.0]);
+            gx += 1;
+        }
+        gy += 1;
+    }
+    out
+}
+
+/// Dispatches `water_dispersion_refract` on device and reads back the decoded
+/// `rgba16float` refracted colour target. Uses a `Nearest`/`ClampToEdge`
+/// `NonFiltering` sampler over `Rgba32Float` scene and normal inputs so each
+/// scene sample returns an exact texel value and the parity reduces to the
+/// deterministic offset-and-select chain.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one parity harness wires an explicit group-1 layout, the scene/normal input textures, a sampler, and the colour read-back in a single auditable path"
+)]
+fn dispatch_dispersion_refract(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    wgsl: &str,
+    entry: &str,
+    params: &GpuWaterDispersionParams,
+    scene: &[f32],
+    normal: &[f32],
+) -> Vec<[f32; 4]> {
+    let module = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("water_render_fx_dispersion_parity"),
+        source: ShaderSource::Wgsl(wgsl.into()),
+    });
+    let empty_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+        label: Some("water_dispersion_empty_layout"),
+        entries: &[],
+    });
+    let group1_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+        label: Some("water_dispersion_layout"),
+        entries: &[
+            BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            BindGroupLayoutEntry {
+                binding: 1,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::StorageTexture {
+                    access: StorageTextureAccess::WriteOnly,
+                    format: TextureFormat::Rgba16Float,
+                    view_dimension: TextureViewDimension::D2,
+                },
+                count: None,
+            },
+            BindGroupLayoutEntry {
+                binding: 2,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Texture {
+                    sample_type: TextureSampleType::Float { filterable: false },
+                    view_dimension: TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            BindGroupLayoutEntry {
+                binding: 3,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Texture {
+                    sample_type: TextureSampleType::Float { filterable: false },
+                    view_dimension: TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            BindGroupLayoutEntry {
+                binding: 4,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Sampler(SamplerBindingType::NonFiltering),
+                count: None,
+            },
+        ],
+    });
+    let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+        label: Some("water_dispersion_pipeline_layout"),
+        bind_group_layouts: &[Some(&empty_layout), Some(&group1_layout)],
+        immediate_size: 0,
+    });
+    let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("water_dispersion_refract_parity"),
+        layout: Some(&pipeline_layout),
+        module: &module,
+        entry_point: Some(entry),
+        compilation_options: PipelineCompilationOptions::default(),
+        cache: None,
+    });
+
+    let params_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("dispersion_params"),
+        contents: bytemuck::bytes_of(params),
+        usage: BufferUsages::UNIFORM,
+    });
+    let scene_tex = device.create_texture(&TextureDescriptor {
+        label: Some("dispersion_scene"),
+        size: Extent3d {
+            width: params.width,
+            height: params.height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: TextureFormat::Rgba32Float,
+        usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        TexelCopyTextureInfo {
+            texture: &scene_tex,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: TextureAspect::All,
+        },
+        bytemuck::cast_slice(scene),
+        TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(params.width * 16),
+            rows_per_image: Some(params.height),
+        },
+        Extent3d {
+            width: params.width,
+            height: params.height,
+            depth_or_array_layers: 1,
+        },
+    );
+    let scene_view = scene_tex.create_view(&TextureViewDescriptor::default());
+    let normal_tex = device.create_texture(&TextureDescriptor {
+        label: Some("dispersion_normal"),
+        size: Extent3d {
+            width: params.width,
+            height: params.height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: TextureFormat::Rgba32Float,
+        usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        TexelCopyTextureInfo {
+            texture: &normal_tex,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: TextureAspect::All,
+        },
+        bytemuck::cast_slice(normal),
+        TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(params.width * 16),
+            rows_per_image: Some(params.height),
+        },
+        Extent3d {
+            width: params.width,
+            height: params.height,
+            depth_or_array_layers: 1,
+        },
+    );
+    let normal_view = normal_tex.create_view(&TextureViewDescriptor::default());
+    let sampler = device.create_sampler(&SamplerDescriptor {
+        label: Some("dispersion_sampler"),
+        address_mode_u: AddressMode::ClampToEdge,
+        address_mode_v: AddressMode::ClampToEdge,
+        address_mode_w: AddressMode::ClampToEdge,
+        mag_filter: FilterMode::Nearest,
+        min_filter: FilterMode::Nearest,
+        mipmap_filter: MipmapFilterMode::Nearest,
+        ..Default::default()
+    });
+    let out_tex = device.create_texture(&TextureDescriptor {
+        label: Some("dispersion_out"),
+        size: Extent3d {
+            width: params.width,
+            height: params.height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: TextureFormat::Rgba16Float,
+        usage: TextureUsages::STORAGE_BINDING | TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let out_view = out_tex.create_view(&TextureViewDescriptor::default());
+
+    let empty_group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("dispersion_empty_group"),
+        layout: &empty_layout,
+        entries: &[],
+    });
+    let bind_group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("dispersion_bind_group"),
+        layout: &group1_layout,
+        entries: &[
+            BindGroupEntry {
+                binding: 0,
+                resource: params_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 1,
+                resource: BindingResource::TextureView(&out_view),
+            },
+            BindGroupEntry {
+                binding: 2,
+                resource: BindingResource::TextureView(&scene_view),
+            },
+            BindGroupEntry {
+                binding: 3,
+                resource: BindingResource::TextureView(&normal_view),
+            },
+            BindGroupEntry {
+                binding: 4,
+                resource: BindingResource::Sampler(&sampler),
+            },
+        ],
+    });
+
+    let row_bytes = params.width * 8;
+    let tex_bytes = u64::from(row_bytes * params.height);
+    let stage = device.create_buffer(&BufferDescriptor {
+        label: Some("dispersion_stage"),
+        size: tex_bytes,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("dispersion_parity_encoder"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("dispersion_parity_pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &empty_group, &[]);
+        pass.set_bind_group(1, &bind_group, &[]);
+        // One extra workgroup per axis exercises the in-kernel bounds guard.
+        pass.dispatch_workgroups(
+            params.width.div_ceil(8) + 1,
+            params.height.div_ceil(8) + 1,
+            1,
+        );
+    }
+    encoder.copy_texture_to_buffer(
+        TexelCopyTextureInfo {
+            texture: &out_tex,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: TextureAspect::All,
+        },
+        TexelCopyBufferInfo {
+            buffer: &stage,
+            layout: TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row_bytes),
+                rows_per_image: Some(params.height),
+            },
+        },
+        Extent3d {
+            width: params.width,
+            height: params.height,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit([encoder.finish()]);
+
+    stage.slice(..).map_async(MapMode::Read, |_| {});
+    device
+        .poll(PollType::wait_indefinitely())
+        .expect("device poll should complete the submitted work");
+
+    let view = stage
+        .slice(..)
+        .get_mapped_range()
+        .expect("mapped dispersion target should be available after poll");
+    let halves = bytemuck::cast_slice::<u8, u16>(&view).to_vec();
+    drop(view);
+    stage.unmap();
+    halves
+        .chunks_exact(4)
+        .map(|texel| {
+            [
+                f16_bits_to_f32(texel[0]),
+                f16_bits_to_f32(texel[1]),
+                f16_bits_to_f32(texel[2]),
+                f16_bits_to_f32(texel[3]),
+            ]
+        })
+        .collect()
+}
+
+/// Real-device parity for `water_dispersion_refract`: refract a ramped scene
+/// colour behind a uniform near-grazing surface normal on device and match the
+/// decoded `rgba16float` chromatic-fringe texels lane-for-lane against the CPU
+/// golden. The exaggerated `Cauchy` dispersion coefficient pushes the red,
+/// green, and blue offsets onto three distinct texels so the per-channel
+/// selection is exercised, the right edge exercises the `ClampToEdge` branch,
+/// and the alpha lane must read a flat `1.0`.
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice must reach the test log on hosts without a wgpu adapter"
+)]
+fn dispersion_refract_gpu_matches_cpu_golden() {
+    let Some((device, queue)) = try_solver_device() else {
+        eprintln!(
+            "dispersion_refract_gpu_matches_cpu_golden: no wgpu adapter, skipping on-device parity"
+        );
+        return;
+    };
+
+    let width = 32u32;
+    let height = 8u32;
+    let params = GpuWaterDispersionParams {
+        cauchy_a: 1.324,
+        cauchy_b: 0.36,
+        strength: 10.0,
+        width,
+        height,
+        _pad0: 0,
+        _pad1: 0,
+        _pad2: 0,
+    };
+    // A lateral x tilt yields an exact +x refraction direction; the small up
+    // component puts the incidence near grazing for a wide chromatic spread.
+    let normal = [0.5f32, 0.0, 0.05];
+
+    let scene = dispersion_scene_field(width, height);
+    let normal_field = dispersion_normal_field(width, height, normal);
+    let golden = dispersion_refract_golden(&scene, &normal_field, &params);
+
+    let wgsl = compile_render_fx_wgsl();
+    let entry = find_entry_point(&wgsl, "water_dispersion_refract");
+    let gpu = dispatch_dispersion_refract(
+        &device,
+        &queue,
+        &wgsl,
+        &entry,
+        &params,
+        &scene,
+        &normal_field,
+    );
+
+    assert_eq!(gpu.len(), golden.len(), "dispersion texel count mismatch");
+
+    let mut i = 0usize;
+    while i < golden.len() {
+        let g = gpu[i];
+        let c = golden[i];
+        let mut k = 0usize;
+        while k < 4 {
+            let d = (g[k] - c[k]).abs();
+            assert!(
+                d < RECON_EPS,
+                "texel {i} lane[{k}]: gpu={} cpu={} |d|={d}",
+                g[k],
+                c[k],
+            );
+            k += 1;
         }
         i += 1;
     }
