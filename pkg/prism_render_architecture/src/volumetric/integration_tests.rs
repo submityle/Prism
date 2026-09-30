@@ -17,6 +17,10 @@
 //!   light-visibility function for the march.
 //! - `multiscatter`, `fog`, `atmosphere`: energy stays bounded when composed
 //!   with the ray-march result.
+//! - `spectral` -> `atmosphere`: the spectral night-sky/twilight model
+//!   (`rayleigh_phase`, `ozone_absorption`, `spectral_to_rgb`,
+//!   `sunset_reddening`) feeds the aerial-perspective coupling so a low sun
+//!   only ever *warms* (reddens) the sampled airlight, staying energy-bounded.
 //! - `reference` -> `multiscatter`: the Monte-Carlo single-scatter oracle and
 //!   the closed form agree, and folding the LUT energy gain into the resolve
 //!   composition `single * (1 + gain)` only ever adds bounded energy (never
@@ -32,7 +36,9 @@
 //! These tests only consume the public contracts of each module, so they also
 //! act as a compile-time guard that the cross-module API surface stays stable.
 
-use super::atmosphere::{aerial_perspective_weight, blend_with_atmosphere};
+use super::atmosphere::{
+    aerial_perspective_weight, blend_with_atmosphere, sunset_inscatter_tint, AtmosphereCoupling,
+};
 use super::avsm::AvsmCurve;
 use super::budget::{plan_volumetric, VolumetricJobKind, VolumetricJobRequest};
 use super::cloud_lod::{bin_by_distance, select_lod, CloudLodThresholds};
@@ -45,6 +51,9 @@ use super::noise::{perlin_worley, worley_fbm};
 use super::raymarch::{march, RaymarchConfig};
 use super::reference::{analytic_single_scatter, single_scatter_reference};
 use super::scatter::{hg_phase, octave_scatter, OctaveParams};
+use super::spectral::{
+    ozone_absorption, rayleigh_phase, spectral_to_rgb, sunset_reddening, SpectralBands,
+};
 use super::storm::{gravity_wave, StormState};
 use super::temporal::{active_pixel, clamp_history, UpscaleMode};
 use super::weather::{WeatherField, WindField};
@@ -631,4 +640,146 @@ fn wind_field_advection_preserves_weather_range() {
         assert!((0.0..=1.0).contains(&cell.cloud_type));
         assert!((0.0..=1.0).contains(&cell.precipitation));
     }
+}
+
+#[test]
+fn spectral_night_sky_base_color_conserves_energy() {
+    // A bluish twilight distribution maps to a non-negative RGB whose channels
+    // sum to the (unit) band energy: `spectral_to_rgb` conserves weight and
+    // never manufactures negative light, so it is a valid sky base colour.
+    for (r, g, b) in [
+        (0.10_f32, 0.15, 0.60),
+        (0.05, 0.20, 0.75),
+        (0.33, 0.33, 0.34),
+        (0.00, 0.00, 1.00),
+    ] {
+        let bands = SpectralBands::from_rgb(r, g, b);
+        assert!(
+            (bands.sum() - 1.0).abs() < 1.0e-5,
+            "band set not normalised"
+        );
+        let rgb = spectral_to_rgb(&bands);
+        for c in [rgb.x, rgb.y, rgb.z] {
+            assert!(c.is_finite() && c >= 0.0, "sky channel invalid: {c}");
+            assert!(c <= 1.0 + 1.0e-5, "sky channel exceeds unit energy: {c}");
+        }
+        let total = rgb.x + rgb.y + rgb.z;
+        assert!(
+            (total - 1.0).abs() < 1.0e-4,
+            "spectral_to_rgb did not conserve band energy: {total}"
+        );
+    }
+}
+
+#[test]
+fn rayleigh_phase_is_symmetric_and_bounds_the_hg_product() {
+    // Rayleigh scattering is forward/back symmetric, and multiplying it by the
+    // cloud HG lobe (the airlight-through-cloud product used along the march)
+    // stays finite and non-negative for every scattering angle.
+    let g = 0.4_f32;
+    for step in 0..=20 {
+        let mu = -1.0 + step as f32 / 10.0;
+        let fwd = rayleigh_phase(mu);
+        let bwd = rayleigh_phase(-mu);
+        assert!(
+            fwd.is_finite() && fwd >= 0.0,
+            "rayleigh not finite/positive"
+        );
+        assert_eq!(
+            fwd.to_bits(),
+            bwd.to_bits(),
+            "rayleigh not symmetric at mu={mu}"
+        );
+        let product = fwd * hg_phase(mu, g);
+        assert!(
+            product.is_finite() && product >= 0.0,
+            "rayleigh*hg product invalid at mu={mu}: {product}"
+        );
+    }
+}
+
+#[test]
+fn ozone_absorption_peaks_in_the_chappuis_band_and_stays_non_negative() {
+    // The Chappuis band centre absorbs more than the red tail, and the
+    // coefficient is non-negative across (and beyond) the visible span.
+    let chappuis_center = ozone_absorption(602.0);
+    let red_tail = ozone_absorption(700.0);
+    assert!(
+        chappuis_center > red_tail,
+        "Chappuis centre should absorb more than the red tail: {chappuis_center} vs {red_tail}"
+    );
+    for nm in [200.0_f32, 380.0, 500.0, 602.0, 700.0, 900.0] {
+        assert!(
+            ozone_absorption(nm) >= 0.0,
+            "ozone absorption went negative at {nm}nm"
+        );
+    }
+}
+
+#[test]
+fn sunset_coupling_warms_airlight_relative_to_neutral_over_the_march() {
+    // End-to-end spectral -> atmosphere seam: march a near-opaque cloud column,
+    // fade it into sampled airlight with the aerial-perspective weight, and
+    // compare a low (sunset) sun against a high (neutral) sun. The low sun must
+    // redden the airlight -- i.e. attenuate blue relative to red -- while every
+    // channel stays finite and non-negative.
+    let cfg = RaymarchConfig::default();
+    let cloud = march(
+        |_t| 0.7,
+        sigma_from_density,
+        hg_phase(0.5, 0.4),
+        |_| 1.0,
+        300.0,
+        cfg,
+    );
+    // Airlight dominates when the cloud is near-opaque and the view distance is
+    // large, so the sunset tint is actually visible in the composite.
+    let cloud_color = Vec3::new(0.05, 0.05, 0.06);
+    let inscatter = Vec3::new(0.20, 0.35, 0.80);
+    let weight = aerial_perspective_weight(950.0, 1000.0);
+
+    let sunset = AtmosphereCoupling::new(1.0, 0.0).with_sun_altitude(0.0);
+    let neutral = AtmosphereCoupling::new(1.0, 0.0);
+    // `new` leaves the sun high (neutral tint); only `with_sun_altitude` arms it.
+    assert_eq!(
+        neutral.sun_altitude,
+        super::atmosphere::NO_TWILIGHT_ALTITUDE
+    );
+
+    let warm = sunset.apply(cloud_color, cloud.transmittance, inscatter, weight);
+    let cool = neutral.apply(cloud_color, cloud.transmittance, inscatter, weight);
+
+    for c in [warm.x, warm.y, warm.z, cool.x, cool.y, cool.z] {
+        assert!(c.is_finite() && c >= 0.0, "coupled channel invalid: {c}");
+    }
+    // The neutral coupling reproduces the plain, untinted blend exactly.
+    let plain = blend_with_atmosphere(cloud_color, cloud.transmittance, inscatter, weight);
+    for (a, b) in [(cool.x, plain.x), (cool.y, plain.y), (cool.z, plain.z)] {
+        assert!(
+            (a - b).abs() < 1.0e-6,
+            "neutral coupling drifted from plain blend"
+        );
+    }
+    // Reddening: blue/red ratio strictly drops under the sunset tint.
+    let warm_ratio = warm.z / warm.x.max(EPS);
+    let cool_ratio = cool.z / cool.x.max(EPS);
+    assert!(
+        warm_ratio < cool_ratio,
+        "sunset did not warm the airlight (blue/red {warm_ratio} !< {cool_ratio})"
+    );
+    // The tint only attenuates, so warm channels never exceed the neutral ones.
+    for (w, c) in [(warm.x, cool.x), (warm.y, cool.y), (warm.z, cool.z)] {
+        assert!(
+            w <= c + 1.0e-6,
+            "sunset tint amplified a channel: {w} > {c}"
+        );
+    }
+    // And the underlying reddening driver is monotone: a low sun reddens more.
+    assert!(sunset_reddening(0.0) > sunset_reddening(super::atmosphere::NO_TWILIGHT_ALTITUDE));
+    // The exposed tint agrees with what the coupling applied.
+    let tint = sunset_inscatter_tint(0.0);
+    assert!(
+        tint.z < tint.x,
+        "twilight tint should suppress blue below red"
+    );
 }

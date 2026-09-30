@@ -30,7 +30,10 @@
 
 #![forbid(unsafe_code)]
 
+use alloc::vec;
+
 use super::math::{clamp, exp_approx, saturate};
+use super::spectral::{spectral_to_rgb, sunset_reddening, SpectralBands};
 use super::{Vec3, EPS};
 
 /// Extinction strength of the normalised exponential `aerial perspective`
@@ -41,6 +44,27 @@ pub const AERIAL_EXTINCTION: f32 = 4.0;
 /// Atmospheric scale height in metres, the `e`-folding altitude over which the
 /// `aerial perspective` contribution thins as a cloud sample rises.
 pub const SCALE_HEIGHT_M: f32 = 8000.0;
+
+/// Solar altitude (radians) used by [`AtmosphereCoupling::IDENTITY`] and the
+/// two-argument [`AtmosphereCoupling::new`]: the sun sits at the zenith so
+/// [`sunset_inscatter_tint`] returns the neutral `(1, 1, 1)` tint and the
+/// coupling reduces exactly to the untinted blend. Any altitude at or above the
+/// spectral reddening cut-off would do; the zenith is the unambiguous default.
+pub const NO_TWILIGHT_ALTITUDE: f32 = core::f32::consts::FRAC_PI_2;
+
+/// Short-wavelength (blue bucket) weight of the fixed warm twilight spectrum
+/// consumed by [`sunset_inscatter_tint`]. It is the smallest of the three so
+/// blue is the first channel scattered out of the airlight as the sun sets
+/// (the `Rayleigh` reddening signature).
+const TWILIGHT_BLUE_WEIGHT: f32 = 0.2;
+
+/// Mid-wavelength (green bucket) weight of the warm twilight spectrum.
+const TWILIGHT_GREEN_WEIGHT: f32 = 0.5;
+
+/// Long-wavelength (red bucket) weight of the warm twilight spectrum; the
+/// largest of the three, so the surviving airlight is red-dominated at the
+/// horizon.
+const TWILIGHT_RED_WEIGHT: f32 = 1.0;
 
 /// The distance-driven `aerial perspective` blend weight in `0..=1`.
 ///
@@ -61,6 +85,39 @@ pub fn aerial_perspective_weight(distance: f32, max_distance: f32) -> f32 {
     let numer = 1.0 - exp_approx(-AERIAL_EXTINCTION * t);
     let denom = 1.0 - exp_approx(-AERIAL_EXTINCTION);
     saturate(numer / denom)
+}
+
+/// The spectral sunset / twilight tint for the atmosphere in-scatter (design
+/// section 8b), as a per-channel multiplier in `0..=1`.
+///
+/// `sun_altitude` is the sun's angular altitude in radians (see
+/// [`sunset_reddening`]): zero at the horizon, positive above it. The reddening
+/// amount it returns drives a linear interpolation from the neutral tint
+/// `(1, 1, 1)` (sun high, no twilight) toward a warm twilight tint derived
+/// entirely from the read-only spectral helpers: a fixed short-to-long
+/// twilight [`SpectralBands`] spectrum is collapsed to linear `RGB` via
+/// [`spectral_to_rgb`], then rescaled so its brightest channel is exactly one.
+///
+/// Because every channel of the warm tint is therefore in `0..=1`, and the
+/// neutral tint is one, the interpolated tint is in `0..=1` on every channel:
+/// multiplying the sampled airlight by it can only *attenuate* (never amplify)
+/// a channel, so the downstream [`blend_with_atmosphere`] composite stays
+/// energy-conserving. As the sun drops toward the horizon the blue and green
+/// channels are attenuated faster than red, warming the airlight. This is the
+/// only place the atmosphere hookup consumes the spectral module; it is pure,
+/// deterministic, and never `panic`s.
+#[must_use]
+pub fn sunset_inscatter_tint(sun_altitude: f32) -> Vec3 {
+    let reddening = sunset_reddening(sun_altitude);
+    let twilight = SpectralBands::new(vec![
+        TWILIGHT_BLUE_WEIGHT,
+        TWILIGHT_GREEN_WEIGHT,
+        TWILIGHT_RED_WEIGHT,
+    ]);
+    let warm = spectral_to_rgb(&twilight);
+    let peak = warm.x.max(warm.y).max(warm.z).max(EPS);
+    let warm_tint = warm.scale(1.0 / peak);
+    Vec3::splat(1.0).lerp(warm_tint, reddening)
 }
 
 /// Read-only, energy-conserving blend of a cloud colour with sampled
@@ -108,6 +165,11 @@ pub struct AtmosphereCoupling {
     /// Minimum cloud `transmittance` used by the blend, in `0..=1`; a floor
     /// above zero keeps a sliver of sky showing through even the densest cloud.
     pub transmittance_floor: f32,
+    /// Solar altitude (radians) driving the spectral sunset tint applied to the
+    /// sampled in-scatter (see [`sunset_inscatter_tint`]). At or above
+    /// [`NO_TWILIGHT_ALTITUDE`] the tint is neutral and the coupling reduces to
+    /// the untinted blend; lower altitudes warm the airlight toward the horizon.
+    pub sun_altitude: f32,
 }
 
 impl AtmosphereCoupling {
@@ -115,6 +177,7 @@ impl AtmosphereCoupling {
     pub const IDENTITY: Self = Self {
         inscatter_scale: 1.0,
         transmittance_floor: 0.0,
+        sun_altitude: NO_TWILIGHT_ALTITUDE,
     };
 
     /// Builds a coupling, saturating both parameters into `0..=1` so the
@@ -124,15 +187,30 @@ impl AtmosphereCoupling {
         Self {
             inscatter_scale: saturate(inscatter_scale),
             transmittance_floor: saturate(transmittance_floor),
+            sun_altitude: NO_TWILIGHT_ALTITUDE,
         }
     }
 
+    /// Returns a copy of this coupling with its `sun_altitude` (radians) set,
+    /// enabling the spectral sunset tint in [`AtmosphereCoupling::apply`]. The
+    /// altitude is stored verbatim; [`sunset_inscatter_tint`] clamps it, so any
+    /// value is safe.
+    #[must_use]
+    pub fn with_sun_altitude(mut self, sun_altitude: f32) -> Self {
+        self.sun_altitude = sun_altitude;
+        self
+    }
+
     /// Applies the coupling: floors the cloud `transmittance`, scales the
-    /// sampled `inscatter`, then defers to [`blend_with_atmosphere`].
+    /// sampled `inscatter`, applies the spectral sunset tint for the configured
+    /// `sun_altitude`, then defers to [`blend_with_atmosphere`].
     ///
-    /// Both parameters are re-saturated here (the public fields may have been
-    /// set directly), so the scaled in-scatter never exceeds the sampled
-    /// radiance and the composite stays energy-conserving and never panics.
+    /// Both scalar parameters are re-saturated here (the public fields may have
+    /// been set directly), and the sunset tint is a per-channel multiplier in
+    /// `0..=1` (see [`sunset_inscatter_tint`]), so the tinted, scaled in-scatter
+    /// never exceeds the sampled radiance and the composite stays
+    /// energy-conserving and never panics. At [`NO_TWILIGHT_ALTITUDE`] the tint
+    /// is neutral and this reduces exactly to the untinted scale-and-blend.
     #[must_use]
     pub fn apply(
         &self,
@@ -143,7 +221,8 @@ impl AtmosphereCoupling {
     ) -> Vec3 {
         let floor = saturate(self.transmittance_floor);
         let transmittance = clamp(cloud_transmittance, floor, 1.0);
-        let scaled = inscatter.scale(saturate(self.inscatter_scale));
+        let tint = sunset_inscatter_tint(self.sun_altitude);
+        let scaled = inscatter.scale(saturate(self.inscatter_scale)).mul(tint);
         blend_with_atmosphere(cloud_color, transmittance, scaled, weight)
     }
 }
@@ -320,5 +399,111 @@ mod tests {
             prev = cur;
             i += 1;
         }
+    }
+
+    #[test]
+    fn sunset_tint_is_neutral_when_the_sun_is_high() {
+        // At the default no-twilight altitude the tint collapses to (1, 1, 1),
+        // so the coupling reduces exactly to the untinted blend.
+        let t = sunset_inscatter_tint(NO_TWILIGHT_ALTITUDE);
+        assert!((t.x - 1.0).abs() < TOL, "red neutral, got {}", t.x);
+        assert!((t.y - 1.0).abs() < TOL, "green neutral, got {}", t.y);
+        assert!((t.z - 1.0).abs() < TOL, "blue neutral, got {}", t.z);
+        // Well above the reddening cut-off is equally neutral.
+        let high = sunset_inscatter_tint(1.0);
+        assert!((high.x - 1.0).abs() < TOL);
+        assert!((high.y - 1.0).abs() < TOL);
+        assert!((high.z - 1.0).abs() < TOL);
+    }
+
+    #[test]
+    fn sunset_tint_is_warm_and_bounded_at_the_horizon() {
+        // At the horizon the tint is fully warm: red is the (unit) peak, and
+        // green/blue are attenuated with blue attenuated at least as much as
+        // green. Every channel stays in [0, 1].
+        let h = sunset_inscatter_tint(0.0);
+        for c in [h.x, h.y, h.z] {
+            assert!((0.0..=1.0).contains(&c), "tint channel {c} out of range");
+        }
+        assert!(
+            (h.x - 1.0).abs() < TOL,
+            "red must be the unit peak, got {}",
+            h.x
+        );
+        assert!(h.y <= h.x + TOL, "green must not exceed red");
+        assert!(
+            h.z <= h.y + TOL,
+            "blue must be attenuated at least as much as green"
+        );
+        assert!(
+            h.y < h.x - TOL,
+            "green must be visibly attenuated at the horizon"
+        );
+        assert!(
+            h.z < h.y - TOL,
+            "blue must be visibly attenuated at the horizon"
+        );
+    }
+
+    #[test]
+    fn sunset_tint_blue_recovers_monotonically_as_the_sun_rises() {
+        // Blue is the most scattered channel at sunset; as the sun climbs it
+        // must recover monotonically toward one, and red stays pinned at the
+        // unit peak throughout.
+        let mut prev = sunset_inscatter_tint(-0.3);
+        let mut i = 1;
+        while i <= 100 {
+            let altitude = -0.3 + (i as f32) / 100.0 * (NO_TWILIGHT_ALTITUDE + 0.3);
+            let cur = sunset_inscatter_tint(altitude);
+            for c in [cur.x, cur.y, cur.z] {
+                assert!((0.0..=1.0).contains(&c), "tint channel {c} out of range");
+            }
+            assert!((cur.x - 1.0).abs() < TOL, "red must stay at the unit peak");
+            assert!(
+                cur.z >= prev.z - TOL,
+                "blue must not darken as the sun rises"
+            );
+            assert!(
+                cur.y >= prev.y - TOL,
+                "green must not darken as the sun rises"
+            );
+            prev = cur;
+            i += 1;
+        }
+    }
+
+    #[test]
+    fn coupling_sunset_tint_attenuates_airlight_but_stays_bounded() {
+        // With a fully opaque cloud the composite is just the (scaled, tinted)
+        // airlight, so we can read the tint straight off the output.
+        let air = Vec3::splat(0.8);
+        let neutral = AtmosphereCoupling::new(1.0, 0.0);
+        let sunset = AtmosphereCoupling::new(1.0, 0.0).with_sun_altitude(0.0);
+        let neutral_out = neutral.apply(Vec3::ZERO, 1.0, air, 0.0);
+        let sunset_out = sunset.apply(Vec3::ZERO, 1.0, air, 0.0);
+        // The neutral coupling passes the airlight through untouched.
+        assert!((neutral_out.x - 0.8).abs() < TOL);
+        assert!((neutral_out.y - 0.8).abs() < TOL);
+        assert!((neutral_out.z - 0.8).abs() < TOL);
+        // The sunset coupling keeps red, and attenuates green then blue harder.
+        assert!(
+            (sunset_out.x - 0.8).abs() < TOL,
+            "red preserved, got {}",
+            sunset_out.x
+        );
+        assert!(sunset_out.y < neutral_out.y, "green must be attenuated");
+        assert!(sunset_out.z < sunset_out.y, "blue must be attenuated most");
+        for c in [sunset_out.x, sunset_out.y, sunset_out.z] {
+            assert!((0.0..=1.0).contains(&c), "sunset output {c} over-exposed");
+        }
+    }
+
+    #[test]
+    fn with_sun_altitude_only_touches_the_tint_field() {
+        let base = AtmosphereCoupling::new(0.5, 0.25);
+        let tinted = base.with_sun_altitude(0.0);
+        assert_eq!(tinted.inscatter_scale, base.inscatter_scale);
+        assert_eq!(tinted.transmittance_floor, base.transmittance_floor);
+        assert_eq!(tinted.sun_altitude, 0.0);
     }
 }
