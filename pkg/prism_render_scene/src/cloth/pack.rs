@@ -21,17 +21,38 @@
 
 use prism_render_architecture::cloth::bending::BendingConstraint;
 use prism_render_architecture::cloth::gpu::upload::{BendingUploadPlan, ConstraintUploadPlan};
-use prism_render_architecture::cloth::Constraint;
+use prism_render_architecture::cloth::{Constraint, ConstraintKind};
 
-use super::abi::{GpuClothBendingConstraint, GpuClothConstraint};
+use super::abi::{
+    GpuClothBendingConstraint, GpuClothConstraint, CLOTH_CONSTRAINT_BEND, CLOTH_CONSTRAINT_LRA,
+    CLOTH_CONSTRAINT_SHEAR, CLOTH_CONSTRAINT_STRETCH, CLOTH_CONSTRAINT_TETHER,
+};
+
+/// Maps an architecture-layer [`ConstraintKind`] to its stable `GPU` tag
+/// ([`CLOTH_CONSTRAINT_*`](super::abi)), mirroring the `cloth_sim.wesl`
+/// constants. The encoding follows the enum's declaration order and must stay
+/// in lockstep with the shader-side constants: the strain limiter reads it to
+/// clamp only structural (stretch) edges.
+#[must_use]
+fn gpu_constraint_kind(kind: ConstraintKind) -> u32 {
+    match kind {
+        ConstraintKind::Stretch => CLOTH_CONSTRAINT_STRETCH,
+        ConstraintKind::Bend => CLOTH_CONSTRAINT_BEND,
+        ConstraintKind::Shear => CLOTH_CONSTRAINT_SHEAR,
+        ConstraintKind::Lra => CLOTH_CONSTRAINT_LRA,
+        ConstraintKind::Tether => CLOTH_CONSTRAINT_TETHER,
+    }
+}
 
 /// Packs one architecture-layer [`Constraint`] into its byte-compatible
 /// [`GpuClothConstraint`] mirror.
 ///
-/// The one-sidedness carried by [`Constraint::kind`] is *not* stored in the
-/// record: distance and long-range constraints run in separate kernels and the
-/// plan already routes each into its own buffer section, so the `GPU` record
-/// only needs the two endpoints, the rest length and the compliance. The
+/// The record carries the two endpoints, the rest length, the compliance and a
+/// [`ConstraintKind`] tag. The projection kernels treat every two-sided
+/// distance edge alike and the plan routes one-sided long-range edges into
+/// their own buffer section, so the kind is *not* needed for projection — but
+/// the strain limiter must clamp only structural (stretch) edges to mirror the
+/// CPU golden `apply_strain_limit`, so the kind travels with each record. The
 /// compliance is read through
 /// [`Compliance::value`](prism_render_architecture::cloth::Compliance::value),
 /// clamping any negative authored value to the rigid `0.0` the shader expects.
@@ -42,6 +63,7 @@ pub(crate) fn pack_constraint(constraint: &Constraint) -> GpuClothConstraint {
         b: constraint.b,
         rest_length: constraint.rest_length,
         compliance: constraint.compliance.value(),
+        kind: gpu_constraint_kind(constraint.kind),
     }
 }
 

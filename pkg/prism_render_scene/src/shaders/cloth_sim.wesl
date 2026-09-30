@@ -44,14 +44,22 @@
 //! `positions[p].xyz` is the world position and `positions[p].w` is the inverse
 //! mass (`<= 0` = pinned). `velocities[p].xyz` is the explicit XPBD velocity.
 //! `prev_positions[p].xyz` is the pre-substep position snapshot. Each distance
-//! constraint is a 16-byte `ClothConstraint { a, b, rest_length, compliance }`;
-//! one-sided-ness and structural-ness are encoded by which dispatch a
-//! constraint is placed in (matching the colored-batch split on the host), so
-//! the struct never needs a kind tag.
+//! constraint is a 20-byte
+//! `ClothConstraint { a, b, rest_length, compliance, kind }`. One-sided-ness is
+//! encoded by which dispatch a constraint is placed in (matching the
+//! colored-batch split on the host), so projection ignores `kind`; the strain
+//! limiter, which sweeps the whole constraint buffer in one pass, reads `kind`
+//! to clamp only structural (`CLOTH_CONSTRAINT_STRETCH`) edges — mirroring the
+//! CPU golden `apply_strain_limit`.
 
 /// Squared-length floor below which a constraint / edge is skipped, so
 /// normalization never divides by ~0 (mirrors the CPU `EPS_LEN_SQ`).
 const CLOTH_EPS_LEN_SQ: f32 = 1.0e-12;
+
+/// Constraint-kind tag for a structural warp/weft (stretch) edge. Mirrors
+/// `CLOTH_CONSTRAINT_STRETCH` in `abi.rs` and is the only kind the strain
+/// limiter clamps (the CPU golden `apply_strain_limit` skips every other kind).
+const CLOTH_CONSTRAINT_STRETCH: u32 = 0u;
 
 /// Global parameters shared by every cloth kernel in the dispatch. Mirrors the
 /// per-substep scalars the CPU `solve_cloth_with_collision` derives once.
@@ -83,6 +91,9 @@ struct ClothConstraint {
     rest_length: f32,
     /// XPBD compliance (inverse stiffness); `<= 0` = rigid.
     compliance: f32,
+    /// Constraint-kind tag (`CLOTH_CONSTRAINT_*`). Projection ignores it; the
+    /// strain limiter uses it to clamp only structural (stretch) edges.
+    kind: u32,
 }
 
 /// One dihedral bending hinge. Mirrors the CPU
@@ -316,6 +327,9 @@ fn cloth_strain_limit(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let con = constraints[c];
     if con.a == con.b {
+        return;
+    }
+    if con.kind != CLOTH_CONSTRAINT_STRETCH {
         return;
     }
     let a = con.a;

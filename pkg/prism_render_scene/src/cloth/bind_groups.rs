@@ -592,7 +592,7 @@ mod tests {
     /// golden drift is caught here rather than at dispatch time.
     #[test]
     fn golden_strides_are_stable() {
-        assert_eq!(CONSTRAINT_STRIDE, 16);
+        assert_eq!(CONSTRAINT_STRIDE, 20);
         assert_eq!(BACKSTOP_STRIDE, 32);
         assert_eq!(EMBED_STRIDE, 32);
         assert_eq!(HASH_CELL_STRIDE, 8);

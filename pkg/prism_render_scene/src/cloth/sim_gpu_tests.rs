@@ -58,7 +58,9 @@ use prism_render_architecture::cloth::constraints::{
 use prism_render_architecture::cloth::dynamics::{solve_cloth, SolverParams};
 use prism_render_architecture::cloth::gpu::kernels::ClothKernel;
 use prism_render_architecture::cloth::gpu::upload::color_bending;
-use prism_render_architecture::cloth::{ClothParticle, Compliance, Vec3};
+use prism_render_architecture::cloth::{
+    ClothParticle, Compliance, Constraint, ConstraintKind, Vec3,
+};
 
 use super::abi::{GpuClothBendingConstraint, GpuClothConstraint};
 use super::solve_plan::{build_solve_plan, ClothSolveInput};
@@ -826,7 +828,7 @@ fn bending_gpu_matches_cpu_golden() {
 fn build_leash_constraints(
     rows: u32,
     cols: u32,
-) -> Vec<prism_render_architecture::cloth::Constraint> {
+) -> Vec<Constraint> {
     let mut lra_leashes: Vec<AnchorLeash> = Vec::new();
     let mut tether_leashes: Vec<AnchorLeash> = Vec::new();
     for r in 1..rows {
@@ -992,6 +994,172 @@ fn long_range_gpu_matches_cpu_golden() {
         );
         assert_eq!(
             v[3].to_bits(),
+            ((i as f32) + 0.5).to_bits(),
+            "vertex {i}: velocities.w payload was mutated"
+        );
+    }
+}
+
+/// 应变限制内核 `cloth_strain_limit` 必须**只**硬钳制结构（`Stretch`）边，
+/// 与架构层黄金 [`apply_strain_limit`]（`dynamics.rs`，`if kind != Stretch
+/// { continue; }`）逐字对齐；剪切 / 弯曲 / 长程 / 系绳边即使被投影后仍过伸，也
+/// **不得**被应变通道二次收缩。此前 GPU 内核缺 kind 过滤，会把任何过伸边一律钳
+/// 到 `1 + strain_limit` 倍，与黄金发散——本测试就是那道回归闸。
+///
+/// 工况刻意收敛到「两条互不相交、都被投影后仍过伸」的边，好让应变通道成为唯一
+/// 分歧源：
+/// - p0(pin)–p1(free) 为 **Stretch**，rest = 1，软 compliance = 1（投影后仍留
+///   ~2 倍长）⇒ 黄金与 GPU 都应把 p1 钳到 dist = 1.5（`max_scale = 1.5`）。
+/// - p2(pin)–p3(free) 为 **Shear**，同样参数 ⇒ 黄金**跳过**（p3 留 ~2 倍长），
+///   GPU 修复后也必须跳过。修复前 GPU 会误钳 p3 到 1.5 ⇒ 与黄金差 ~0.5 ≫
+///   [`PARITY_EPS`] ⇒ 测试先红、修复后绿。
+///
+/// 两条边无共享粒子 ⇒ 同色可并行投影，色内可交换，GPU 展平序与黄金一致。
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志"
+)]
+fn strain_skips_non_stretch_edges_gpu_matches_cpu_golden() {
+    let Some((device, queue)) = try_solver_device() else {
+        eprintln!(
+            "strain_skips_non_stretch_edges_gpu_matches_cpu_golden: no wgpu adapter with \
+             IMMEDIATES support, skipping on-device parity"
+        );
+        return;
+    };
+
+    // 4 粒子、两条互不相交的边：Stretch(p0-p1) 与 Shear(p2-p3)。
+    // 每条：一端 pin（inverse_mass = 0）、一端 free（inverse_mass = 1）；初始被拉到
+    // rest 的 2 倍长，软 compliance 让投影只回收极小量，投影后仍远超应变阈。
+    let particles = vec![
+        ClothParticle::new(Vec3::new(0.0, 0.0, 0.0), 0.0), // p0 pin
+        ClothParticle::new(Vec3::new(2.0, 0.0, 0.0), 1.0), // p1 free (stretch 对端)
+        ClothParticle::new(Vec3::new(0.0, 5.0, 0.0), 0.0), // p2 pin
+        ClothParticle::new(Vec3::new(2.0, 5.0, 0.0), 1.0), // p3 free (shear 对端)
+    ];
+    let count = particles.len();
+
+    let constraints = vec![
+        Constraint::new(0, 1, 1.0, Compliance(1.0), ConstraintKind::Stretch),
+        Constraint::new(2, 3, 1.0, Compliance(1.0), ConstraintKind::Shear),
+    ];
+
+    // 无重力 / 无阻尼：唯一动力来自约束投影，好把分歧锁死在应变通道。
+    // strain_limit = 0.5 ⇒ max_scale = 1.5，max_len = rest * 1.5 = 1.5。
+    let params = SolverParams {
+        substeps: 1,
+        iterations: 1,
+        gravity: Vec3::new(0.0, 0.0, 0.0),
+        damping: 0.0,
+        strain_limit: 0.5,
+    };
+
+    // --- CPU 黄金：投影后仅对 Stretch 做应变钳制，Shear 跳过 ---
+    let mut golden = particles.clone();
+    let graph = color_constraints(&constraints);
+    solve_cloth(&mut golden, &graph, params);
+
+    // 意义性断言：黄金确实「Stretch 被钳、Shear 未钳」，否则本测试无鉴别力。
+    let golden_stretch_len = (golden[1].position.sub(golden[0].position)).length();
+    let golden_shear_len = (golden[3].position.sub(golden[2].position)).length();
+    assert!(
+        (golden_stretch_len - 1.5).abs() <= 1.0e-4,
+        "黄金 Stretch 边应被应变钳到 max_len = 1.5，实得 {golden_stretch_len}"
+    );
+    assert!(
+        golden_shear_len > 1.5 + 1.0e-2,
+        "黄金 Shear 边应跳过应变钳制（留过伸），实得 {golden_shear_len}"
+    );
+
+    // --- host 上传口径：positions.w = inverse mass；velocities.w 塞可辨识载荷位 ---
+    let positions: Vec<[f32; 4]> = particles
+        .iter()
+        .map(|p| [p.position.x, p.position.y, p.position.z, p.inverse_mass])
+        .collect();
+    let velocities: Vec<[f32; 4]> = particles
+        .iter()
+        .enumerate()
+        .map(|(i, p)| [p.velocity.x, p.velocity.y, p.velocity.z, (i as f32) + 0.5])
+        .collect();
+
+    let input = ClothSolveInput {
+        positions: &positions,
+        velocities: &velocities,
+        constraints: &constraints,
+        bending: &[],
+        triangles: &[],
+        wind_velocity: [0.0, 0.0, 0.0],
+        wind_turbulence: 0.0,
+        aero_drag: 0.0,
+        aero_lift: 0.0,
+        colliders: &[],
+        backstops: &[],
+        embed_bindings: &[],
+        render_vertex_count: 0,
+        hash_cell_count: 0,
+        gravity: [0.0, 0.0, 0.0],
+        dt: 1.0 / 60.0,
+        substeps: 1,
+        iterations: 1,
+        damping: 0.0,
+        strain_limit: 0.5,
+        self_thickness: 0.0,
+        self_cell_size: 0.0,
+    };
+    let plan = build_solve_plan(&input);
+    assert!(
+        plan.dispatches
+            .iter()
+            .any(|d| d.kernel == ClothKernel::StrainLimit),
+        "strain_limit > 0 时计划应调度应变限制内核"
+    );
+    assert!(
+        plan.dispatches
+            .iter()
+            .any(|d| d.kernel == ClothKernel::ProjectDistanceBatch),
+        "两条双侧边应触发距离投影内核"
+    );
+
+    let wgsl = compile_wgsl(
+        include_str!("../shaders/cloth_sim.wesl"),
+        "embedded://prism_render_scene/shaders/cloth_sim.wesl",
+        0x434c_4f54_485f_5354_5241_494e_4b44_5f01,
+    );
+
+    let (gpu_positions, gpu_velocities) =
+        replay_sim_on_gpu(&device, &queue, &wgsl, &positions, &velocities, &plan);
+
+    assert_eq!(gpu_positions.len(), count, "position readback length");
+    assert_eq!(gpu_velocities.len(), count, "velocity readback length");
+
+    for (i, g) in golden.iter().enumerate() {
+        let pgpu = gpu_positions[i];
+        let px = (pgpu[0] - g.position.x).abs();
+        let py = (pgpu[1] - g.position.y).abs();
+        let pz = (pgpu[2] - g.position.z).abs();
+        assert!(
+            px <= PARITY_EPS && py <= PARITY_EPS && pz <= PARITY_EPS,
+            "vertex {i}: GPU position ({}, {}, {}) drifted from golden ({}, {}, {}) beyond {PARITY_EPS}",
+            pgpu[0], pgpu[1], pgpu[2], g.position.x, g.position.y, g.position.z
+        );
+        assert_eq!(
+            pgpu[3].to_bits(),
+            g.inverse_mass.to_bits(),
+            "vertex {i}: positions.w (inverse mass) was mutated"
+        );
+
+        let vgpu = gpu_velocities[i];
+        let vx = (vgpu[0] - g.velocity.x).abs();
+        let vy = (vgpu[1] - g.velocity.y).abs();
+        let vz = (vgpu[2] - g.velocity.z).abs();
+        assert!(
+            vx <= PARITY_EPS && vy <= PARITY_EPS && vz <= PARITY_EPS,
+            "vertex {i}: GPU velocity ({}, {}, {}) drifted from golden ({}, {}, {}) beyond {PARITY_EPS}",
+            vgpu[0], vgpu[1], vgpu[2], g.velocity.x, g.velocity.y, g.velocity.z
+        );
+        assert_eq!(
+            vgpu[3].to_bits(),
             ((i as f32) + 0.5).to_bits(),
             "vertex {i}: velocities.w payload was mutated"
         );

@@ -48,8 +48,26 @@ pub(crate) const CLOTH_COLLIDER_HALF_SPACE: u32 = 2;
 /// Mirrors `CLOTH_COL_SENTINEL` in `cloth_collision.wesl`.
 pub(crate) const CLOTH_HASH_SENTINEL: u32 = 0xffff_ffff;
 
+/// Constraint-kind tags stamped into [`GpuClothConstraint::kind`]. These mirror
+/// the `CLOTH_CONSTRAINT_*` constants in `cloth_sim.wesl` and encode
+/// `prism_render_architecture::cloth::ConstraintKind` in its declaration order.
+/// Only [`CLOTH_CONSTRAINT_STRETCH`] is currently consulted on the GPU (by the
+/// strain limiter), but the full ladder is encoded so future per-kind kernels
+/// need no ABI change.
+///
+/// Structural warp/weft edge — the only kind the strain limiter clamps.
+pub(crate) const CLOTH_CONSTRAINT_STRETCH: u32 = 0;
+/// Cross-diagonal bending-resistance distance edge.
+pub(crate) const CLOTH_CONSTRAINT_BEND: u32 = 1;
+/// Quad-diagonal shear-resistance edge.
+pub(crate) const CLOTH_CONSTRAINT_SHEAR: u32 = 2;
+/// Long-range attachment leash to a pinned anchor.
+pub(crate) const CLOTH_CONSTRAINT_LRA: u32 = 3;
+/// One-sided tether leash to an anchor.
+pub(crate) const CLOTH_CONSTRAINT_TETHER: u32 = 4;
+
 /// One distance constraint. Byte-compatible with `ClothConstraint` in
-/// `cloth_sim.wesl` and the golden `CONSTRAINT_STRIDE` (16 bytes).
+/// `cloth_sim.wesl` and the golden `CONSTRAINT_STRIDE` (20 bytes).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq)]
 pub(crate) struct GpuClothConstraint {
@@ -61,6 +79,11 @@ pub(crate) struct GpuClothConstraint {
     pub rest_length: f32,
     /// XPBD compliance (inverse stiffness); `<= 0` = rigid.
     pub compliance: f32,
+    /// Constraint-kind tag (`CLOTH_CONSTRAINT_*`). The projection kernels treat
+    /// every two-sided distance edge alike, but the strain limiter must clamp
+    /// only structural (stretch) edges to mirror the CPU golden
+    /// `apply_strain_limit`, so the kind travels with each record.
+    pub kind: u32,
 }
 
 /// One dihedral bending hinge. Byte-compatible with `ClothBendingConstraint`

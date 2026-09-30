@@ -24,10 +24,14 @@ use alloc::vec::Vec;
 /// element. Padding to 16 keeps the stride aligned for the `GPU`.
 pub const PARTICLE_VEC_STRIDE: u32 = 16;
 
-/// The byte size of one packed distance/bending constraint record (two or four
-/// `u32` indices plus a packed rest-length and compliance `f32`), rounded up to
-/// the 16-byte `std430` stride the constraint storage buffer uses.
-pub const CONSTRAINT_STRIDE: u32 = 16;
+/// The byte size of one packed distance constraint record: two `u32`
+/// endpoint indices, a rest-length and compliance `f32`, and a trailing
+/// `u32` constraint-kind tag. All five words are 4-byte scalars, so the
+/// `std430` array stride is the packed 20 bytes (no 16-byte rounding — the
+/// element has no member requiring 16-byte alignment). The kind tag lets the
+/// strain limiter clamp only structural (stretch) edges, matching the CPU
+/// golden `apply_strain_limit`.
+pub const CONSTRAINT_STRIDE: u32 = 20;
 
 /// The byte size of one spatial-hash cell header (a start offset plus an
 /// occupant count, two `u32`), padded to 8 bytes.
