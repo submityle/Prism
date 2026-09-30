@@ -230,6 +230,7 @@ pub struct Instance {
     world_to_object: Affine3,
     blas: usize,
     instance_id: u32,
+    mask: u8,
 }
 
 impl Instance {
@@ -239,12 +240,43 @@ impl Instance {
     /// since such an instance has no well-defined object space to trace in.
     #[must_use]
     pub fn new(object_to_world: Affine3, blas: usize, instance_id: u32) -> Option<Self> {
+        Self::with_mask(object_to_world, blas, instance_id, Self::MASK_ALL)
+    }
+
+    /// The all-ones (`0xFF`) visibility mask assigned by [`Instance::new`].
+    ///
+    /// An instance built with this mask is visible to every ray regardless of
+    /// the ray's inclusion mask, matching the DXR default where an instance
+    /// with `InstanceMask = 0xFF` participates in all `TraceRay` calls.
+    pub const MASK_ALL: u8 = 0xFF;
+
+    /// Builds an instance carrying an explicit 8-bit DXR-style visibility mask.
+    ///
+    /// The `mask` follows Direct3D 12 `InstanceMask` semantics: a ray traced
+    /// with inclusion mask `ray_mask` tests this instance only when
+    /// `(mask & ray_mask) != 0`. A `mask` of `0` makes the instance invisible
+    /// to every ray (it can never satisfy the bitwise-AND predicate), which is
+    /// useful for temporarily disabling an instance without removing it from
+    /// the `TLAS`. Selective categories (for example "casts shadows" versus
+    /// "seen by reflections") are encoded as distinct bits so a shadow ray and
+    /// a reflection ray can each include a different subset of the scene.
+    ///
+    /// Returns `None` when the transform is non-invertible (degenerate scale),
+    /// exactly like [`Instance::new`].
+    #[must_use]
+    pub fn with_mask(
+        object_to_world: Affine3,
+        blas: usize,
+        instance_id: u32,
+        mask: u8,
+    ) -> Option<Self> {
         let world_to_object = object_to_world.inverse()?;
         Some(Self {
             object_to_world,
             world_to_object,
             blas,
             instance_id,
+            mask,
         })
     }
 
@@ -294,6 +326,17 @@ impl Instance {
     #[must_use]
     pub const fn instance_id(&self) -> u32 {
         self.instance_id
+    }
+
+    /// The instance's 8-bit DXR-style visibility mask.
+    ///
+    /// Defaults to [`Instance::MASK_ALL`] for instances built via
+    /// [`Instance::new`]; set explicitly through [`Instance::with_mask`]. A ray
+    /// with inclusion mask `ray_mask` tests this instance only when
+    /// `(mask() & ray_mask) != 0`.
+    #[must_use]
+    pub const fn mask(&self) -> u8 {
+        self.mask
     }
 }
 
@@ -510,6 +553,20 @@ impl Tlas {
     /// far candidates are culled by the slab test.
     #[must_use]
     pub fn closest_hit(&self, ray: &Ray, blases: &[Bvh]) -> Option<TlasHit> {
+        self.closest_hit_masked(ray, blases, Instance::MASK_ALL)
+    }
+
+    /// Nearest intersection restricted to instances the `ray_mask` includes.
+    ///
+    /// Applies DXR-style instance inclusion: an instance participates only when
+    /// `(instance.mask() & ray_mask) != 0`, so a caller can trace, for example,
+    /// a reflection ray that ignores instances excluded from reflections while
+    /// the identical geometry still shows up for primary rays. Passing
+    /// [`Instance::MASK_ALL`] reproduces [`Tlas::closest_hit`] exactly; a
+    /// `ray_mask` of `0` matches nothing and always returns `None`. Traversal,
+    /// `t_max` shrinking, and the returned [`TlasHit`] are otherwise identical.
+    #[must_use]
+    pub fn closest_hit_masked(&self, ray: &Ray, blases: &[Bvh], ray_mask: u8) -> Option<TlasHit> {
         if self.nodes.is_empty() {
             return None;
         }
@@ -527,6 +584,9 @@ impl Tlas {
                     let start = node.first_primitive as usize;
                     let end = start + node.primitive_count as usize;
                     for (offset, inst) in self.instances[start..end].iter().enumerate() {
+                        if inst.mask & ray_mask == 0 {
+                            continue;
+                        }
                         let obj_origin = inst.world_to_object.transform_point(ray.origin());
                         let obj_dir = inst.world_to_object.transform_vector(ray.direction());
                         let obj_ray = Ray::new(obj_origin, obj_dir, t_min, best_t);
@@ -577,6 +637,19 @@ impl Tlas {
     /// interval. Returns on the first hit; the cheap shadow/AO query.
     #[must_use]
     pub fn any_hit(&self, ray: &Ray, blases: &[Bvh]) -> bool {
+        self.any_hit_masked(ray, blases, Instance::MASK_ALL)
+    }
+
+    /// Occlusion query restricted to instances the `ray_mask` includes.
+    ///
+    /// The masked counterpart of [`Tlas::any_hit`]: an instance can occlude the
+    /// ray only when `(instance.mask() & ray_mask) != 0`. This is the primitive
+    /// behind selective shadows — a shadow ray traced with a "casts shadows"
+    /// bit skips instances that are visible to the camera but excluded from
+    /// shadow casting. [`Instance::MASK_ALL`] reproduces [`Tlas::any_hit`]; a
+    /// `ray_mask` of `0` is never blocked.
+    #[must_use]
+    pub fn any_hit_masked(&self, ray: &Ray, blases: &[Bvh], ray_mask: u8) -> bool {
         if self.nodes.is_empty() {
             return false;
         }
@@ -593,6 +666,9 @@ impl Tlas {
                     let start = node.first_primitive as usize;
                     let end = start + node.primitive_count as usize;
                     for inst in &self.instances[start..end] {
+                        if inst.mask & ray_mask == 0 {
+                            continue;
+                        }
                         let obj_origin = inst.world_to_object.transform_point(ray.origin());
                         let obj_dir = inst.world_to_object.transform_vector(ray.direction());
                         let obj_ray = Ray::new(obj_origin, obj_dir, t_min, t_max);
@@ -630,6 +706,22 @@ impl Tlas {
     /// never lost between them.
     #[must_use]
     pub fn closest_hit_watertight(&self, ray: &Ray, blases: &[Bvh]) -> Option<TlasHit> {
+        self.closest_hit_watertight_masked(ray, blases, Instance::MASK_ALL)
+    }
+
+    /// Watertight nearest intersection restricted to `ray_mask`-included instances.
+    ///
+    /// Combines the leak-free seam handling of [`Tlas::closest_hit_watertight`]
+    /// with DXR-style instance inclusion: an instance is queried only when
+    /// `(instance.mask() & ray_mask) != 0`. [`Instance::MASK_ALL`] reproduces
+    /// [`Tlas::closest_hit_watertight`]; a `ray_mask` of `0` returns `None`.
+    #[must_use]
+    pub fn closest_hit_watertight_masked(
+        &self,
+        ray: &Ray,
+        blases: &[Bvh],
+        ray_mask: u8,
+    ) -> Option<TlasHit> {
         if self.nodes.is_empty() {
             return None;
         }
@@ -647,6 +739,9 @@ impl Tlas {
                     let start = node.first_primitive as usize;
                     let end = start + node.primitive_count as usize;
                     for (offset, inst) in self.instances[start..end].iter().enumerate() {
+                        if inst.mask & ray_mask == 0 {
+                            continue;
+                        }
                         let obj_origin = inst.world_to_object.transform_point(ray.origin());
                         let obj_dir = inst.world_to_object.transform_vector(ray.direction());
                         let obj_ray = Ray::new(obj_origin, obj_dir, t_min, best_t);
@@ -700,6 +795,17 @@ impl Tlas {
     /// closed instanced meshes cast leak-free shadows.
     #[must_use]
     pub fn any_hit_watertight(&self, ray: &Ray, blases: &[Bvh]) -> bool {
+        self.any_hit_watertight_masked(ray, blases, Instance::MASK_ALL)
+    }
+
+    /// Watertight occlusion query restricted to `ray_mask`-included instances.
+    ///
+    /// The masked counterpart of [`Tlas::any_hit_watertight`]: a seam-safe
+    /// shadow/AO ray is blocked only by instances for which
+    /// `(instance.mask() & ray_mask) != 0`. [`Instance::MASK_ALL`] reproduces
+    /// [`Tlas::any_hit_watertight`]; a `ray_mask` of `0` is never blocked.
+    #[must_use]
+    pub fn any_hit_watertight_masked(&self, ray: &Ray, blases: &[Bvh], ray_mask: u8) -> bool {
         if self.nodes.is_empty() {
             return false;
         }
@@ -716,6 +822,9 @@ impl Tlas {
                     let start = node.first_primitive as usize;
                     let end = start + node.primitive_count as usize;
                     for inst in &self.instances[start..end] {
+                        if inst.mask & ray_mask == 0 {
+                            continue;
+                        }
                         let obj_origin = inst.world_to_object.transform_point(ray.origin());
                         let obj_dir = inst.world_to_object.transform_vector(ray.direction());
                         let obj_ray = Ray::new(obj_origin, obj_dir, t_min, t_max);
@@ -1552,6 +1661,150 @@ mod tests {
             tlas.refit_quality(&blases, 0.125),
             tlas.refit_quality(&blases, 0.125)
         );
+    }
+
+    /// A ray whose inclusion mask shares no bit with an instance's mask must
+    /// treat that instance as absent: no closest hit and no occlusion.
+    #[test]
+    fn masked_out_instance_never_hits() {
+        let blases = vec![sample_blas()];
+        // Instance visible only on bit 0; ray includes only bit 1 -> disjoint.
+        let inst = Instance::with_mask(Affine3::identity(), 0, 42, 0b0000_0001).unwrap();
+        let tlas = Tlas::build(&[inst], &blases);
+        // Straight down -z at the z=0 quad, which an all-mask ray would hit at t=5.
+        let ray = Ray::new([0.0, 0.0, 5.0], [0.0, 0.0, -1.0], 1.0e-4, 100.0);
+        assert!(tlas.closest_hit(&ray, &blases).is_some(), "sanity: geometry is there");
+        assert!(tlas.closest_hit_masked(&ray, &blases, 0b0000_0010).is_none());
+        assert!(!tlas.any_hit_masked(&ray, &blases, 0b0000_0010));
+        assert!(tlas.closest_hit_watertight_masked(&ray, &blases, 0b0000_0010).is_none());
+        assert!(!tlas.any_hit_watertight_masked(&ray, &blases, 0b0000_0010));
+    }
+
+    /// `Instance::new` yields `MASK_ALL`, and tracing with `MASK_ALL` reproduces
+    /// the unmasked traversal on every one of the four query variants.
+    #[test]
+    fn mask_all_matches_unmasked() {
+        let blases = vec![sample_blas()];
+        let mut rng = Rng::new(0x51DE_ABCD);
+        let n = 12usize;
+        let instances: Vec<Instance> = (0..n)
+            .map(|id| Instance::new(random_affine(&mut rng), 0, id as u32).unwrap())
+            .collect();
+        assert!(instances.iter().all(|i| i.mask() == Instance::MASK_ALL));
+        let tlas = Tlas::build(&instances, &blases);
+        for _ in 0..500 {
+            let origin = [rng.range(-8.0, 8.0), rng.range(-8.0, 8.0), rng.range(-8.0, 8.0)];
+            let dir = [rng.range(-1.0, 1.0), rng.range(-1.0, 1.0), rng.range(-1.0, 1.0)];
+            let ray = Ray::new(origin, dir, 1.0e-4, 50.0);
+
+            let a = tlas.closest_hit(&ray, &blases);
+            let b = tlas.closest_hit_masked(&ray, &blases, Instance::MASK_ALL);
+            match (a, b) {
+                (None, None) => {}
+                (Some(x), Some(y)) => {
+                    assert_eq!(x.instance_id, y.instance_id);
+                    assert_eq!(x.primitive, y.primitive);
+                    assert_eq!(x.t.to_bits(), y.t.to_bits());
+                }
+                _ => panic!("closest_hit vs mask_all disagree"),
+            }
+            assert_eq!(
+                tlas.any_hit(&ray, &blases),
+                tlas.any_hit_masked(&ray, &blases, Instance::MASK_ALL)
+            );
+            let cw = tlas.closest_hit_watertight(&ray, &blases);
+            let cwm = tlas.closest_hit_watertight_masked(&ray, &blases, Instance::MASK_ALL);
+            assert_eq!(cw.map(|h| h.instance_id), cwm.map(|h| h.instance_id));
+            assert_eq!(
+                tlas.any_hit_watertight(&ray, &blases),
+                tlas.any_hit_watertight_masked(&ray, &blases, Instance::MASK_ALL)
+            );
+        }
+    }
+
+    /// Any shared bit between the instance mask and ray mask admits the instance.
+    #[test]
+    fn partial_bit_overlap_hits() {
+        let blases = vec![sample_blas()];
+        // Instance visible on bits 1 and 2; ray includes bit 2 only -> overlap.
+        let inst = Instance::with_mask(Affine3::identity(), 0, 7, 0b0000_0110).unwrap();
+        let tlas = Tlas::build(&[inst], &blases);
+        let ray = Ray::new([0.0, 0.0, 5.0], [0.0, 0.0, -1.0], 1.0e-4, 100.0);
+        let hit = tlas.closest_hit_masked(&ray, &blases, 0b0000_0100).expect("overlap hits");
+        assert_eq!(hit.instance_id, 7);
+        assert!(tlas.any_hit_masked(&ray, &blases, 0b0000_0100));
+    }
+
+    /// A zero inclusion mask can never satisfy the bitwise-AND predicate, so it
+    /// matches nothing regardless of geometry, on all four query variants.
+    #[test]
+    fn zero_ray_mask_matches_nothing() {
+        let blases = vec![sample_blas()];
+        let inst = Instance::new(Affine3::identity(), 0, 1).unwrap();
+        let tlas = Tlas::build(&[inst], &blases);
+        let ray = Ray::new([0.0, 0.0, 5.0], [0.0, 0.0, -1.0], 1.0e-4, 100.0);
+        assert!(tlas.closest_hit_masked(&ray, &blases, 0).is_none());
+        assert!(!tlas.any_hit_masked(&ray, &blases, 0));
+        assert!(tlas.closest_hit_watertight_masked(&ray, &blases, 0).is_none());
+        assert!(!tlas.any_hit_watertight_masked(&ray, &blases, 0));
+    }
+
+    /// Selective visibility: two stacked instances carry different category
+    /// bits, and a ray selects which one it can see. The nearer instance is
+    /// excluded from the "shadow" category, so a shadow-masked ray skips it and
+    /// reports the farther instance instead — the primitive behind per-ray
+    /// shadow/reflection instance selection.
+    #[test]
+    fn selective_category_masks_pick_different_instances() {
+        let blases = vec![sample_blas()];
+        // Near quad at z=3, reflection-only (bit 0). Far quad at z=1, shadow-only (bit 1).
+        let near = Instance::with_mask(
+            Affine3::from_translation([0.0, 0.0, 3.0]),
+            0,
+            100,
+            0b0000_0001,
+        )
+        .unwrap();
+        let far = Instance::with_mask(
+            Affine3::from_translation([0.0, 0.0, 1.0]),
+            0,
+            200,
+            0b0000_0010,
+        )
+        .unwrap();
+        let tlas = Tlas::build(&[near, far], &blases);
+        let ray = Ray::new([0.0, 0.0, 5.0], [0.0, 0.0, -1.0], 1.0e-4, 100.0);
+
+        // Reflection ray (bit 0) sees only the near quad.
+        let refl = tlas.closest_hit_masked(&ray, &blases, 0b0000_0001).unwrap();
+        assert_eq!(refl.instance_id, 100);
+        // Shadow ray (bit 1) skips the near quad and lands on the far one.
+        let shadow = tlas.closest_hit_masked(&ray, &blases, 0b0000_0010).unwrap();
+        assert_eq!(shadow.instance_id, 200);
+        // A ray including both bits still returns the globally nearest.
+        let both = tlas.closest_hit_masked(&ray, &blases, 0b0000_0011).unwrap();
+        assert_eq!(both.instance_id, 100);
+    }
+
+    /// Masked traversal is deterministic across repeated identical queries.
+    #[test]
+    fn masked_traversal_is_deterministic() {
+        let blases = vec![sample_blas()];
+        let mut rng = Rng::new(0x0FF1_CE55);
+        let instances: Vec<Instance> = (0..10)
+            .map(|id| {
+                let mask = 1u8 << (id % 8);
+                Instance::with_mask(random_affine(&mut rng), 0, id as u32, mask).unwrap()
+            })
+            .collect();
+        let tlas = Tlas::build(&instances, &blases);
+        let ray = Ray::new([0.5, 0.5, 6.0], [0.0, 0.0, -1.0], 1.0e-4, 50.0);
+        for mask in 0u8..=0xFF {
+            let a = tlas.closest_hit_masked(&ray, &blases, mask);
+            let b = tlas.closest_hit_masked(&ray, &blases, mask);
+            assert_eq!(a.map(|h| (h.instance_id, h.primitive, h.t.to_bits())),
+                       b.map(|h| (h.instance_id, h.primitive, h.t.to_bits())));
+        }
     }
 }
 
