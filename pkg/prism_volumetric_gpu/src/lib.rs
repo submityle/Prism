@@ -58,9 +58,11 @@
 pub mod context;
 pub mod modeling;
 pub mod octave;
+pub mod perlin;
 pub mod phase;
 
 pub use context::{block_on, GpuContext};
 pub use modeling::{GpuModeling, ModelingQuery};
 pub use octave::{GpuOctaveScatter, OctaveQuery, OctaveResult};
+pub use perlin::{GpuPerlin, PerlinQuery};
 pub use phase::{GpuPhaseEvaluator, PhaseQuery};
