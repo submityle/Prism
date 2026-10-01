@@ -374,6 +374,13 @@
 //!   as a surface low-pass; the Taubin variant alternates a shrinking `λ`
 //!   pass with an inflating `μ` pass to preserve volume, and open
 //!   boundaries are either pinned or curve-smoothed along the border.
+//! - [`mesh_border_detection`] — open-boundary and non-manifold edge
+//!   classification ([`mesh_border_detection::detect_borders`]): counts
+//!   incident faces per edge to flag single-face open borders and
+//!   three-plus-face non-manifold defects, then stitches the open edges
+//!   into winding-oriented loops ([`mesh_border_detection::MeshBorders`])
+//!   ready for hole filling, with an [`mesh_border_detection::MeshBorders::is_watertight`]
+//!   predicate — pure integer connectivity bookkeeping.
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -529,6 +536,7 @@ pub mod mesh_welding;
 pub mod mesh_smooth_normals;
 pub mod mesh_decimation;
 pub mod mesh_laplacian_smoothing;
+pub mod mesh_border_detection;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -635,6 +643,7 @@ pub use mesh_welding::{weld_vertices, WeldError};
 pub use mesh_smooth_normals::{compute_smooth_normals, with_smooth_normals};
 pub use mesh_decimation::{decimate, DecimationError};
 pub use mesh_laplacian_smoothing::{BoundaryRule, LaplacianSmoothing};
+pub use mesh_border_detection::{detect_borders, MeshBorders};
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
 pub use obb::{Obb, ObbBvh, ObbHit};
