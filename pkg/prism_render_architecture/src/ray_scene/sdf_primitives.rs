@@ -683,12 +683,34 @@ pub fn line_sdf(point: [f32; 3], direction: [f32; 3]) -> f32 {
     ])
 }
 
+/// Signed distance from `point` to a capped cylinder aligned with the `y`
+/// axis whose vertical edges are rounded. The lateral surface sits at radius
+/// `outer_radius` from the axis, the flat top and bottom caps lie at
+/// `y = +-half_height`, and the circular edge joining cap to side is filleted
+/// with radius `rounding`. For a meaningful solid, `rounding` must not exceed
+/// either `outer_radius` or `half_height`.
+///
+/// This is Inigo Quilez's exact `sdRoundedCylinder`, reparameterised so the
+/// arguments describe the outer silhouette directly (the raw formula insets
+/// the rectangular profile by `rounding` on both axes before the rounded-box
+/// combine). In the meridian plane the problem reduces to a rounded rectangle
+/// of half-extents `(outer_radius - rounding, half_height - rounding)` offset
+/// outward by `rounding`. Built from `abs`, `min`, `max`, and vector lengths,
+/// so it stays transcendental-free.
+pub fn rounded_cylinder(point: [f32; 3], outer_radius: f32, rounding: f32, half_height: f32) -> f32 {
+    // Meridian rounded-rectangle offsets: radial reach and vertical reach of
+    // the inset profile, measured against the fillet radius.
+    let dx = length2([point[0], point[2]]) - (outer_radius - rounding);
+    let dy = point[1].abs() - (half_height - rounding);
+    dx.max(dy).min(0.0) + length2([dx.max(0.0), dy.max(0.0)]) - rounding
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         box_frame, box_sdf, capped_cone, capped_cylinder, capped_torus, capsule, cone_sdf, cut_hollow_sphere, cut_sphere,
         death_star, ellipsoid_sdf, hex_prism, length2, line_sdf, link, octahedron, plane, pyramid, rhombus, round_box,
-        round_cone_sdf, solid_angle, sphere, torus, triangular_prism, vesica,
+        round_cone_sdf, rounded_cylinder, solid_angle, sphere, torus, triangular_prism, vesica,
     };
 
     #[test]
@@ -1231,5 +1253,25 @@ mod tests {
         assert!(line_sdf([5.0, 0.0, 0.0], [1.0, 0.0, 0.0]).abs() < 1e-6);
         // Direction need not be unit length.
         assert!((line_sdf([1.0, 2.0, 2.0], [2.0, 0.0, 0.0]) - (8.0f32).sqrt()).abs() < 1e-6);
+    }
+
+    #[test]
+    fn rounded_cylinder_outer_silhouette_on_surface() {
+        let (r, rb, h) = (0.6f32, 0.1f32, 0.6f32);
+        // On the lateral surface at the equator.
+        assert!(rounded_cylinder([0.6, 0.0, 0.0], r, rb, h).abs() < 1e-6);
+        // On the flat top cap on the axis.
+        assert!(rounded_cylinder([0.0, 0.6, 0.0], r, rb, h).abs() < 1e-6);
+        // On the inner band where the fillet begins (inset by the rounding).
+        assert!((rounded_cylinder([0.5, 0.5, 0.0], r, rb, h) - (-0.1)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn rounded_cylinder_interior_and_exterior_closed_forms() {
+        let (r, rb, h) = (0.6f32, 0.1f32, 0.6f32);
+        // Dead centre: deepest interior distance.
+        assert!((rounded_cylinder([0.0, 0.0, 0.0], r, rb, h) - (-0.6)).abs() < 1e-6);
+        // Radially outside at the equator: plain lateral gap.
+        assert!((rounded_cylinder([1.0, 0.0, 0.0], r, rb, h) - 0.4).abs() < 1e-6);
     }
 }

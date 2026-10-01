@@ -568,7 +568,7 @@
 //!   [`sdf_primitives::capped_torus`], [`sdf_primitives::triangular_prism`],
 //!   [`sdf_primitives::solid_angle`], [`sdf_primitives::round_cone_sdf`],
 //!   [`sdf_primitives::death_star`], [`sdf_primitives::cone_sdf`],
-//!   [`sdf_primitives::line_sdf`]) with exact
+//!   [`sdf_primitives::line_sdf`], [`sdf_primitives::rounded_cylinder`]) with exact
 //!   closed-form distances plus
 //!   the approximate [`sdf_primitives::ellipsoid_sdf`] bound, the atoms the
 //!   domain and `CSG` operators compose.
@@ -926,6 +926,7 @@ pub use sdf_primitives::{
     death_star,
     ellipsoid_sdf,
     hex_prism, line_sdf, link, octahedron, plane, pyramid, rhombus, round_box, round_cone_sdf,
+    rounded_cylinder,
     solid_angle, sphere, torus, triangular_prism, vesica,
 };
 pub use sdf_unsigned::{segment_distance, triangle_distance};
