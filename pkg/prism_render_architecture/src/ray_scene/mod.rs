@@ -454,6 +454,12 @@
 //!   plane and whose centroid stays within a distance tolerance, yielding
 //!   per-face region ids and region planes ([`mesh_planar_regions::PlanarRegions`])
 //!   for planar UV, decals, lightmap charts, and flat-face merging.
+//! - [`mesh_closest_point`] — nearest surface point to a probe
+//!   ([`mesh_closest_point::closest_point_on_mesh`]): Ericson's
+//!   Voronoi-region point/triangle test across every face, returning the
+//!   surface point, distance, triangle index, and barycentric weights
+//!   ([`mesh_closest_point::MeshClosestPoint`]) for `SDF` baking,
+//!   collision projection, and click-to-surface picking (`f64`, one sqrt).
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -624,6 +630,7 @@ pub mod mesh_mass_properties;
 pub mod mesh_euler_characteristic;
 pub mod mesh_bounding_sphere;
 pub mod mesh_planar_regions;
+pub mod mesh_closest_point;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -745,6 +752,7 @@ pub use mesh_mass_properties::{mass_properties, MeshMassProperties};
 pub use mesh_euler_characteristic::{mesh_topology, MeshTopology};
 pub use mesh_bounding_sphere::{bounding_sphere, BoundingSphere};
 pub use mesh_planar_regions::{planar_regions, PlanarRegions, RegionPlane};
+pub use mesh_closest_point::{closest_point_on_mesh, MeshClosestPoint};
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
 pub use obb::{Obb, ObbBvh, ObbHit};
