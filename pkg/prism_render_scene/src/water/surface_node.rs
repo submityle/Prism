@@ -68,13 +68,6 @@ pub(crate) struct SurfaceDraw {
 /// Otherwise it returns the fully-resolved [`SurfaceDraw`]. Pure: the same body
 /// always yields the same plan, so every branch is unit-tested without a `GPU`.
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "called by the water-surface raster draw system (the following slice); exercised now by this module's unit tests"
-    )
-)]
 pub(crate) fn plan_surface_draw(body: &WaterBody) -> Option<SurfaceDraw> {
     let shading = body.surface_shading?;
     if body.surface_vertex_count == 0 {

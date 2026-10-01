@@ -59,8 +59,15 @@ pub(crate) fn prepare_water_bodies(
         let upload = body.as_upload();
         let buffers = WaterBodyGpuBuffers::create(&device, &upload);
         let bind_groups = WaterBodyBindGroups::create(&device, &pipelines, &buffers);
-        bodies
-            .bodies
-            .push(WaterGpuBody::new(buffers, bind_groups, plan.dispatches));
+        // Resolve the on-screen surface raster plan from the same body on the
+        // CPU (no device needed): `None` for simulation-only / un-swept /
+        // degenerate bodies, which then draw nothing.
+        let surface_draw = super::surface_node::plan_surface_draw(body);
+        bodies.bodies.push(WaterGpuBody::new(
+            buffers,
+            bind_groups,
+            plan.dispatches,
+            surface_draw,
+        ));
     }
 }

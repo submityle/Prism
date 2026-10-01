@@ -18,6 +18,7 @@ use bevy_ecs::resource::Resource;
 use prism_render_architecture::water::gpu::pipeline::PlannedDispatch;
 
 use super::bind_groups::{WaterBodyBindGroups, WaterBodyGpuBuffers};
+use super::surface_node::SurfaceDraw;
 
 /// One resident water body the dispatch node can record a frame's solve for.
 ///
@@ -45,6 +46,18 @@ pub(crate) struct WaterGpuBody {
     pub(crate) bind_groups: WaterBodyBindGroups,
     /// The ordered dispatch schedule in exact golden record order.
     pub(crate) dispatches: Vec<PlannedDispatch>,
+    /// The resolved raster-draw plan for this body's on-screen surface, or
+    /// `None` when the body is simulation-only / un-swept / degenerate and
+    /// draws nothing. Computed by the device-free
+    /// [`plan_surface_draw`](super::surface_node::plan_surface_draw) in the
+    /// prepare stage and consumed by the raster draw system (following slice).
+    #[expect(
+        dead_code,
+        reason = "read by the water-surface raster draw system (the following \
+                  slice) to key the pipeline and size the index buffer; this \
+                  slice only resolves and stashes the plan on the resident body"
+    )]
+    pub(crate) surface_draw: Option<SurfaceDraw>,
 }
 
 impl WaterGpuBody {
@@ -56,11 +69,13 @@ impl WaterGpuBody {
         buffers: WaterBodyGpuBuffers,
         bind_groups: WaterBodyBindGroups,
         dispatches: Vec<PlannedDispatch>,
+        surface_draw: Option<SurfaceDraw>,
     ) -> Self {
         Self {
             buffers,
             bind_groups,
             dispatches,
+            surface_draw,
         }
     }
 }
