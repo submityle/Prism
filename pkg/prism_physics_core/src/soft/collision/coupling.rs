@@ -109,6 +109,88 @@ fn translate_collider(collider: BodyCollider, delta: Vec3) -> BodyCollider {
     }
 }
 
+/// The per-particle contribution of one two-way coupling contact.
+///
+/// [`couple_particle_against_body`] returns this for a single
+/// particle/body pair: how far the particle itself moves
+/// ([`particle_delta`](Self::particle_delta)), the opposing translation the
+/// body accrues from this particle ([`body_delta`](Self::body_delta)), and the
+/// Newton reaction impulse the particle imparts on the body
+/// ([`impulse`](Self::impulse)). Every field is zero for a no-contact,
+/// degenerate, or `dt <= 0` case, so the caller can sum contributions
+/// unconditionally.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CouplingContribution {
+    /// Displacement added to the particle position (its mass-weighted share of
+    /// the push-out).
+    pub particle_delta: Vec3,
+    /// Displacement this particle contributes to the body translation (the
+    /// complementary, opposite share, scaled by the body inverse mass).
+    pub body_delta: Vec3,
+    /// Newton reaction impulse (momentum) this particle imparts on the body,
+    /// opposing the push-out.
+    pub impulse: Vec3,
+}
+
+impl CouplingContribution {
+    /// The all-zero contribution of a contact that does nothing.
+    pub const ZERO: Self = Self {
+        particle_delta: Vec3::ZERO,
+        body_delta: Vec3::ZERO,
+        impulse: Vec3::ZERO,
+    };
+}
+
+/// Computes the two-way coupling contribution of a single particle against a
+/// single rigid proxy, the scalar kernel shared by the sequential
+/// [`resolve_two_way_coupling`] pass and the `prism_physics_gpu` cloth coupling
+/// twin.
+///
+/// `position` is the particle's current world position, `inverse_mass` its
+/// inverse mass (`<= 0` for a pinned particle), `collider` the body's current
+/// pose, `w_body` the body's (already non-negative) inverse mass, and `dt` the
+/// substep. The push-out `c = collider.project(position) - position` is split
+/// by inverse mass: the particle takes `w_particle / w_sum` of it and the body
+/// the complementary `-w_body / w_sum`; the reaction impulse is
+/// `-c / (w_sum * dt)`.
+///
+/// Returns [`CouplingContribution::ZERO`] for a non-positive `dt`, a contact
+/// where both sides are infinite mass (`w_sum == 0`), or a particle already
+/// outside the collider, so no path can produce a [`f32::NAN`]. `w_body` is
+/// clamped to be non-negative defensively.
+///
+/// # Provenance
+///
+/// This is textbook position-based-dynamics / rigid-body contact mechanics and
+/// contains no Unreal Engine source or derived code.
+#[must_use]
+pub fn couple_particle_against_body(
+    position: Vec3,
+    inverse_mass: Real,
+    collider: BodyCollider,
+    w_body: Real,
+    dt: Real,
+) -> CouplingContribution {
+    if dt <= 0.0 {
+        return CouplingContribution::ZERO;
+    }
+    let w_particle = inverse_mass.max(0.0);
+    let w_body = w_body.max(0.0);
+    let w_sum = w_particle + w_body;
+    if w_sum <= 0.0 {
+        return CouplingContribution::ZERO;
+    }
+    let correction = collider.project(position) - position;
+    if correction.length_squared() <= EPS_LEN_SQ {
+        return CouplingContribution::ZERO;
+    }
+    CouplingContribution {
+        particle_delta: correction * (w_particle / w_sum),
+        body_delta: correction * (-(w_body / w_sum)),
+        impulse: correction * (-(1.0 / (w_sum * dt))),
+    }
+}
+
 /// Resolves two-way particle/rigid contact for every particle against every
 /// body.
 ///
@@ -146,21 +228,14 @@ pub fn resolve_two_way_coupling(
         let mut impulse = Vec3::ZERO;
 
         for i in 0..count {
-            let w_particle = inverse_masses[i].max(0.0);
-            let w_sum = w_particle + w_body;
-            if w_sum <= 0.0 {
-                continue;
-            }
-            let projected = collider.project(positions[i]);
-            let correction = projected - positions[i];
-            if correction.length_squared() <= EPS_LEN_SQ {
-                continue;
-            }
+            // Delegate the per-particle contact to the shared scalar kernel so
+            // this pass and the GPU twin agree up to floating-point rounding.
+            let c = couple_particle_against_body(positions[i], inverse_masses[i], collider, w_body, dt);
             // Mass-weighted split: the lighter side moves more.
-            positions[i] += correction * (w_particle / w_sum);
-            body_delta += correction * (-(w_body / w_sum));
+            positions[i] += c.particle_delta;
+            body_delta += c.body_delta;
             // Newton reaction on the body (momentum), opposing the push.
-            impulse += correction * (-(1.0 / (w_sum * dt)));
+            impulse += c.impulse;
         }
 
         if w_body > 0.0 && body_delta.length_squared() > EPS_LEN_SQ {
@@ -353,5 +428,70 @@ mod tests {
         assert!((positions[0].x - 1.0).abs() < 1e-5);
         assert!((positions[1].x - 0.4).abs() < 1e-9);
         assert!((positions[2].x - 0.3).abs() < 1e-9);
+    }
+
+    #[test]
+    fn scalar_kernel_matches_resolve_for_one_body() {
+        // The scalar kernel, summed by hand, must reproduce the sequential pass
+        // for a single body and a handful of particles.
+        let positions = [
+            Vec3::new(0.5, 0.0, 0.0),
+            Vec3::new(0.0, 0.4, 0.0),
+            Vec3::new(2.0, 0.0, 0.0), // already outside the unit sphere
+        ];
+        let inverse_masses = [1.0, 2.0, 1.0];
+        let dt = 1.0 / 60.0;
+        let w_body = 1.0;
+        let collider = unit_sphere();
+
+        // Reference via the full pass.
+        let mut ref_pos = positions;
+        let mut bodies = [CouplingBody::new(collider, w_body)];
+        resolve_two_way_coupling(&mut ref_pos, &inverse_masses, &mut bodies, dt);
+
+        // Hand reduction via the scalar kernel.
+        let mut body_delta = Vec3::ZERO;
+        let mut impulse = Vec3::ZERO;
+        let mut pos = positions;
+        for i in 0..positions.len() {
+            let c = couple_particle_against_body(pos[i], inverse_masses[i], collider, w_body, dt);
+            pos[i] += c.particle_delta;
+            body_delta += c.body_delta;
+            impulse += c.impulse;
+        }
+
+        for (a, b) in pos.iter().zip(ref_pos.iter()) {
+            assert!(a.distance(*b) < 1e-9);
+        }
+        assert!(impulse.distance(bodies[0].reaction_impulse) < 1e-9);
+        // The outside particle contributes nothing.
+        let outside = couple_particle_against_body(
+            Vec3::new(2.0, 0.0, 0.0),
+            1.0,
+            collider,
+            w_body,
+            dt,
+        );
+        assert_eq!(outside, CouplingContribution::ZERO);
+    }
+
+    #[test]
+    fn scalar_kernel_degenerate_cases_are_zero() {
+        let collider = unit_sphere();
+        // Non-positive dt.
+        assert_eq!(
+            couple_particle_against_body(Vec3::ZERO, 1.0, collider, 1.0, 0.0),
+            CouplingContribution::ZERO
+        );
+        // Both infinite mass (pinned particle vs kinematic body).
+        assert_eq!(
+            couple_particle_against_body(Vec3::ZERO, 0.0, collider, 0.0, 1.0 / 60.0),
+            CouplingContribution::ZERO
+        );
+        // Already outside the collider.
+        assert_eq!(
+            couple_particle_against_body(Vec3::new(5.0, 0.0, 0.0), 1.0, collider, 1.0, 1.0 / 60.0),
+            CouplingContribution::ZERO
+        );
     }
 }

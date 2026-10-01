@@ -137,8 +137,9 @@ pub use soft::collision::{
     resolve_body_collisions, resolve_body_collisions_with_friction, resolve_ccd, resolve_self_ccd,
     resolve_self_collision, resolve_self_collision_virtual, resolve_self_collision_virtual_augment,
     resolve_self_collision_virtual_augment_jacobi, resolve_self_collision_virtual_jacobi,
-    resolve_self_collision_with_friction, resolve_two_way_coupling, sphere_toi, swept_pair_toi,
-    Backstop, BodyCollider, CcdParams, CouplingBody, SelfCcdParams, VirtualParticle,
+    couple_particle_against_body, resolve_self_collision_with_friction, resolve_two_way_coupling,
+    sphere_toi, swept_pair_toi, Backstop, BodyCollider, CcdParams, CouplingBody,
+    CouplingContribution, SelfCcdParams, VirtualParticle,
     VirtualParticlePattern,
 };
 pub use soft::constraint::{

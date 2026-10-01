@@ -71,14 +71,15 @@ pub use cfl::{cpu_cfl_dt, cpu_max_speed, CflConfig, GpuCflReduce};
 pub use cloth::{
     build_cloth_aero_prep, build_vertex_triangle_adjacency, colour_bending, colour_long_range,
     colour_strain_limit, cpu_cloth_aero, cpu_cloth_backstops, cpu_cloth_bending,
-    cpu_cloth_body_collision, cpu_cloth_long_range, cpu_cloth_plasticity, cpu_cloth_pressure,
-    cpu_cloth_self_collision_jacobi, cpu_cloth_strain_limit, cpu_cloth_tearing, pack_backstops,
-    pack_body_colliders, BendingColoring, ClothAeroParams, ClothAeroPrep, ClothAeroTriangle,
-    ClothBendingConstraint, ClothLongRangeConstraint, ClothPlasticEdge, ClothPrep,
-    ClothSelfCollisionScope, ClothStrainLimitConstraint, ClothTearEdge, GpuBackstop,
-    GpuBodyCollider, GpuClothAero, GpuClothBending, GpuClothBodyCollision, GpuClothLongRange,
-    GpuClothPlasticity, GpuClothPressure, GpuClothSelfCollision, GpuClothStrainLimit,
-    GpuClothTearing, LongRangeColoring, StrainLimitColoring, VertexTriangleAdjacency,
+    cpu_cloth_body_collision, cpu_cloth_coupling, cpu_cloth_long_range, cpu_cloth_plasticity,
+    cpu_cloth_pressure, cpu_cloth_self_collision_jacobi, cpu_cloth_strain_limit, cpu_cloth_tearing,
+    pack_backstops, pack_body_colliders, BendingColoring, ClothAeroParams, ClothAeroPrep,
+    ClothAeroTriangle, ClothBendingConstraint, ClothLongRangeConstraint, ClothPlasticEdge,
+    ClothPrep, ClothSelfCollisionScope, ClothStrainLimitConstraint, ClothTearEdge, GpuBackstop,
+    GpuBodyCollider, GpuClothAero, GpuClothBending, GpuClothBodyCollision, GpuClothCoupling,
+    GpuClothLongRange, GpuClothPlasticity, GpuClothPressure, GpuClothSelfCollision,
+    GpuClothStrainLimit, GpuClothTearing, LongRangeColoring, StrainLimitColoring,
+    VertexTriangleAdjacency,
 };
 pub use contacts::{
     contact_constraints, contact_constraints_with_friction, cpu_resolve_contacts,
