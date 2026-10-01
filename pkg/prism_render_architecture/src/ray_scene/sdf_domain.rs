@@ -354,15 +354,42 @@ pub fn extrude(d2d: f32, z: f32, half_height: f32) -> f32 {
     inside + outside
 }
 
+/// Extrudes a two-dimensional signed-distance field `d2d` (measured in the
+/// `xy` plane) into a three-dimensional slab of half-thickness `half_height`
+/// along the `z` axis while rounding the rim where the side wall meets each
+/// cap with fillet radius `rounding`, yielding an exact 3D signed distance.
+///
+/// This is the rounded-rim variant of [`extrude`]: the profile is inset by
+/// `rounding` on both the planar and the axial axes before the standard
+/// extrusion combine, then the result is offset back out by `rounding`. With
+/// `w = (d2d + rounding, |z| - (half_height - rounding))` the distance is
+/// `min(max(w.x, w.y), 0) + length(max(w, 0)) - rounding` — the same
+/// inset-then-round pattern used by [`crate::ray_scene::sdf_primitives::rounded_box_2d`]
+/// and [`crate::ray_scene::sdf_primitives::rounded_cylinder`]. For a solid
+/// result `rounding` must not exceed `half_height`, and for a circular
+/// profile of radius `r` it must not exceed `r`. Extruding a circle profile
+/// `d2d = length(xy) - r` reproduces an exact rounded cylinder. Uses only
+/// `abs`, `min`/`max` and a single `sqrt`, so it stays transcendental-free.
+pub fn extrude_round(d2d: f32, z: f32, half_height: f32, rounding: f32) -> f32 {
+    let wx = d2d + rounding;
+    let wy = z.abs() - (half_height - rounding);
+    let inside = wx.max(wy).min(0.0);
+    let ox = wx.max(0.0);
+    let oy = wy.max(0.0);
+    let outside = (ox * ox + oy * oy).sqrt();
+    inside + outside - rounding
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        elongate, elongate_2d, elongate_2d_correction, elongate_correction, extrude, fold_plane, fold_plane_offset, limited_repeat, mirror, mirror_repeat, onion,
+        elongate, elongate_2d, elongate_2d_correction, elongate_correction, extrude, extrude_round, fold_plane, fold_plane_offset, limited_repeat, mirror, mirror_repeat, onion,
         repeat, revolution, rotate_2d, rotate_axis, round_distance, scale_distance, scale_point,
         translate,
     };
     use crate::ray_scene::sdf_primitives::{
-        box_2d, capped_cylinder, circle_2d, round_box, rounded_box_2d, sphere, torus,
+        box_2d, capped_cylinder, circle_2d, round_box, rounded_box_2d, rounded_cylinder, sphere,
+        torus,
     };
 
     #[test]
@@ -409,6 +436,124 @@ mod tests {
         let (dx, dz) = (0.6_f32, 0.8_f32);
         let want = (dx * dx + dz * dz).sqrt();
         assert!((extrude(dx, h + dz, h) - want).abs() < 1e-6);
+    }
+
+    #[test]
+    fn extrude_round_of_a_circle_matches_a_rounded_cylinder() {
+        // Extruding a 2D circle of radius R along z with rim radius r must
+        // reproduce an exact rounded cylinder (whose axis runs along y): map
+        // our (x, y, z) sample into the cylinder frame by swapping the
+        // extrusion axis z into y, exactly as the plain-extrude test does.
+        let big_r = 1.1_f32;
+        let h = 1.3_f32;
+        let fillet = 0.35_f32;
+        let samples: [[f32; 3]; 8] = [
+            [0.0, 0.0, 0.0],   // interior centre
+            [0.3, 0.2, 0.5],   // interior, off centre
+            [1.8, 0.0, 0.0],   // outside the side wall
+            [0.0, 0.0, 2.1],   // outside past the end cap
+            [1.1, 0.0, 1.3],   // near the rounded rim corner
+            [0.9, 0.1, 1.1],   // inside, close to the fillet
+            [1.4, 0.3, 1.6],   // outside the rounded corner
+            [0.5, 0.5, 0.9],   // generic interior
+        ];
+        for p in samples {
+            let d2d = (p[0] * p[0] + p[1] * p[1]).sqrt() - big_r;
+            let got = extrude_round(d2d, p[2], h, fillet);
+            let want = rounded_cylinder([p[0], p[2], p[1]], big_r, fillet, h);
+            assert!(
+                (got - want).abs() < 1e-6,
+                "mismatch at {p:?}: got={got} want={want}"
+            );
+        }
+    }
+
+    #[test]
+    fn extrude_round_matches_an_independent_meridian_reference() {
+        // Cross-check against a brute-force signed distance computed purely in
+        // the meridian plane (radial = length(xy), axial = z) to a rectangle of
+        // half-extents (R - r, h - r) offset outward by r. This reference does
+        // not reuse any sibling SDF, so it independently pins the formula.
+        fn length2(a: f32, b: f32) -> f32 {
+            (a * a + b * b).sqrt()
+        }
+        // Signed distance from (rad, ax) to the inset rectangle boundary, then
+        // offset by the fillet radius. Interior is negative.
+        fn brute(rad: f32, ax: f32, hx: f32, hy: f32, r: f32) -> f32 {
+            let ar = rad.abs();
+            let aa = ax.abs();
+            let inside = ar <= hx && aa <= hy;
+            let mut best = f32::INFINITY;
+            let n = 20_000_u32;
+            for i in 0..n {
+                let t = (i as f32) / (n as f32) * 4.0;
+                let (bx, by) = if t < 1.0 {
+                    (-hx + 2.0 * hx * t, hy)
+                } else if t < 2.0 {
+                    (hx, hy - 2.0 * hy * (t - 1.0))
+                } else if t < 3.0 {
+                    (hx - 2.0 * hx * (t - 2.0), -hy)
+                } else {
+                    (-hx, -hy + 2.0 * hy * (t - 3.0))
+                };
+                let d = length2(ar - bx, aa - by);
+                if d < best {
+                    best = d;
+                }
+            }
+            let sd = if inside { -best } else { best };
+            sd - r
+        }
+        let big_r = 1.2_f32;
+        let h = 1.0_f32;
+        let fillet = 0.3_f32;
+        let samples: [[f32; 3]; 6] = [
+            [0.6, 0.4, 0.3],
+            [1.5, 0.0, 0.2],
+            [0.2, 0.1, 1.4],
+            [1.3, 0.2, 1.1],
+            [0.0, 0.0, 0.0],
+            [0.9, 0.5, 0.7],
+        ];
+        for p in samples {
+            let rad = (p[0] * p[0] + p[1] * p[1]).sqrt();
+            let d2d = rad - big_r;
+            let got = extrude_round(d2d, p[2], h, fillet);
+            let want = brute(rad, p[2], big_r - fillet, h - fillet, fillet);
+            // Brute reference carries O(1e-4) perimeter-sampling error.
+            assert!(
+                (got - want).abs() < 2e-3,
+                "mismatch at {p:?}: got={got} want={want}"
+            );
+        }
+    }
+
+    #[test]
+    fn extrude_round_closed_form_rim_cap_and_interior() {
+        // Unit-circle profile (R = 1), half-thickness 1, fillet 0.25.
+        let big_r = 1.0_f32;
+        let h = 1.0_f32;
+        let r = 0.25_f32;
+        // Straight out the side wall within the slab: distance is the plain 2D
+        // profile distance (the fillet only rounds the rim corner, not the
+        // flat wall), so d2d outward with |z| well inside the slab -> d2d.
+        let d2d = 0.5_f32;
+        assert!((extrude_round(d2d, 0.0, h, r) - d2d).abs() < 1e-6);
+        // Directly beyond a cap on the axis: the flat cap sits at |z| = h, so
+        // distance is |z| - h regardless of the fillet when radially centred.
+        let z = 2.0_f32;
+        assert!((extrude_round(-big_r, z, h, r) - (z - h)).abs() < 1e-6);
+        // Deep interior on the axis: nearest exit is the closer flat face,
+        // min(R, h) = 1 away, so the signed distance is -1 (the fillet does not
+        // reach the centre).
+        assert!((extrude_round(-big_r, 0.0, h, r) + 1.0).abs() < 1e-6);
+        // Exterior rounded corner: approach the rim corner (d2d = 0 at the
+        // nominal radius, z = h) diagonally. The inset corner sits at
+        // (0 + r, h - (h - r)) = (r, r) in w-space offsets... instead verify the
+        // outward diagonal: at the exact rim point the surface distance is 0.
+        let on_rim = extrude_round(0.0, h, h, r); // wx=r, wy=r -> sqrt(2)*r - r
+        let want_rim = (2.0_f32).sqrt() * r - r;
+        assert!((on_rim - want_rim).abs() < 1e-6);
     }
 
     #[test]
