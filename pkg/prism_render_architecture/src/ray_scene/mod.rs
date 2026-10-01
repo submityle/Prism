@@ -302,6 +302,16 @@
 //!   patches that agree on a shared edge's factor leave no T-junctions —
 //!   the `GPU`-tessellation LOD path, emitting a watertight
 //!   [`triangle_mesh::TriangleMesh`] / [`triangle_mesh::TriangleMeshBvh`].
+//! - [`adaptive_tessellation`] — curvature-driven level-of-detail wrapper
+//!   around [`patch_tessellation`]: it splits the `(u, v)` domain into a grid
+//!   of sub-patches and, per shared edge, measures the surface's chordal
+//!   deviation to pick the smallest crack-free segment count under a
+//!   tolerance ([`adaptive_tessellation::AdaptiveTessellation`]). Flat regions
+//!   collapse to one segment, curved regions refine up to a cap, and the
+//!   shared-edge global-parameter mapping keeps neighbouring sub-patches
+//!   bit-identical so the welded [`triangle_mesh::TriangleMesh`] stays
+//!   watertight — the automatic LOD driver feeding the hardware-tessellation
+//!   path.
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -447,6 +457,7 @@ pub mod displaced_surface;
 pub mod trimmed_surface;
 pub mod surface_group;
 pub mod patch_tessellation;
+pub mod adaptive_tessellation;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -543,6 +554,7 @@ pub use displaced_surface::{DisplacedSurface, HeightMap, HeightMapError, Paramet
 pub use trimmed_surface::{TrimLoop, TrimmedSurface, TrimmedSurfaceError};
 pub use surface_group::{SurfaceGroup, SurfaceGroupBvh, SurfaceGroupError, SurfaceGroupHit};
 pub use patch_tessellation::{Edge, PatchTessellation, MAX_FACTOR};
+pub use adaptive_tessellation::AdaptiveTessellation;
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
 pub use obb::{Obb, ObbBvh, ObbHit};
