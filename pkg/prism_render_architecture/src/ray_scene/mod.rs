@@ -381,6 +381,12 @@
 //!   into winding-oriented loops ([`mesh_border_detection::MeshBorders`])
 //!   ready for hole filling, with an [`mesh_border_detection::MeshBorders::is_watertight`]
 //!   predicate — pure integer connectivity bookkeeping.
+//! - [`mesh_edge_split`] — adaptive length-budget edge subdivision
+//!   ([`mesh_edge_split::split_long_edges`]): marks edges longer than a
+//!   target length, inserts one shared midpoint per marked edge, and
+//!   re-triangulates each face from its marked-edge template so the mesh
+//!   stays watertight, iterating up to
+//!   [`mesh_edge_split::MAX_PASSES`] for geometric convergence.
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -537,6 +543,7 @@ pub mod mesh_smooth_normals;
 pub mod mesh_decimation;
 pub mod mesh_laplacian_smoothing;
 pub mod mesh_border_detection;
+pub mod mesh_edge_split;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -644,6 +651,7 @@ pub use mesh_smooth_normals::{compute_smooth_normals, with_smooth_normals};
 pub use mesh_decimation::{decimate, DecimationError};
 pub use mesh_laplacian_smoothing::{BoundaryRule, LaplacianSmoothing};
 pub use mesh_border_detection::{detect_borders, MeshBorders};
+pub use mesh_edge_split::{split_long_edges, MAX_PASSES as EDGE_SPLIT_MAX_PASSES};
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
 pub use obb::{Obb, ObbBvh, ObbHit};
