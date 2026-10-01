@@ -16,8 +16,11 @@
 //! * [`alpha_block`] -- the 8-byte single-channel + 3-bit-index block shared by
 //!   BC4, the alpha half of BC3, and both channels of BC5.
 //! * [`formats`] -- the public per-format decoders that compose the two.
+//! * [`bc7`] -- the standalone BC7 mode-6 (`RGBA`) block decoder.
 //!
-//! BC6H/BC7 (multi-mode HDR / high-quality) are intentionally out of scope.
+//! BC7 **mode 6** (single-subset, full `RGBA`, no partition table) is
+//! decoded by [`bc7`]; the partitioned BC7 modes (0-5, 7) and BC6H HDR
+//! remain follow-ups (they need validated Khronos partition/anchor tables).
 //!
 //! # Conventions
 //! * All blocks are little-endian; texel ordering is row-major with
@@ -31,10 +34,12 @@
 //! * Vulkan `VK_FORMAT_BC{1,3,4,5}_*` / D3D `DXGI_FORMAT_BC{1,3,4,5}_*`.
 
 mod alpha_block;
+mod bc7;
 mod color_block;
 mod formats;
 mod source;
 
+pub use bc7::{bc7_mode, decode_bc7_mode6};
 pub use color_block::rgb565_to_rgb888;
 pub use formats::{decode_bc1, decode_bc2, decode_bc3, decode_bc4, decode_bc5};
 pub use source::{BcFormat, BcSourceError, BcTexelSource};
