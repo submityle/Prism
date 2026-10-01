@@ -541,7 +541,8 @@
 //!   [`sdf_primitives::round_box`], [`sdf_primitives::plane`],
 //!   [`sdf_primitives::torus`], [`sdf_primitives::capsule`],
 //!   [`sdf_primitives::capped_cylinder`], [`sdf_primitives::capped_cone`],
-//!   [`sdf_primitives::hex_prism`]) with exact closed-form distances, the
+//!   [`sdf_primitives::hex_prism`], [`sdf_primitives::box_frame`],
+//!   [`sdf_primitives::octahedron`]) with exact closed-form distances, the
 //!   atoms the domain and `CSG` operators compose.
 //! - [`sdf_unsigned`] — unsigned distance primitives for open geometry
 //!   ([`sdf_unsigned::segment_distance`], [`sdf_unsigned::triangle_distance`])
@@ -875,7 +876,8 @@ pub use sdf_domain::{
 };
 pub use mesh_sdf_thickness::sdf_thickness;
 pub use sdf_primitives::{
-    box_sdf, capped_cone, capped_cylinder, capsule, hex_prism, plane, round_box, sphere, torus,
+    box_frame, box_sdf, capped_cone, capped_cylinder, capsule, hex_prism, octahedron, plane,
+    round_box, sphere, torus,
 };
 pub use sdf_unsigned::{segment_distance, triangle_distance};
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};

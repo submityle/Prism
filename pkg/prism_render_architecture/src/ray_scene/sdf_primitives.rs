@@ -13,9 +13,10 @@
 //! and [`round_box`] bound convex solids; [`plane`] is a half-space;
 //! [`torus`] and [`capsule`] cover the common swept shapes;
 //! [`capped_cylinder`], [`capped_cone`], and [`hex_prism`] are the extruded
-//! and revolved solids that round out the catalogue. The box, cylinder, cone,
-//! and hex prism all use the split interior/exterior form so the distance
-//! stays exact (not merely a bound) both inside and out.
+//! and revolved solids; [`box_frame`] is the hollow wireframe of a box and
+//! [`octahedron`] is the exact dual of the cube. The box, cylinder, cone, hex
+//! prism, box frame, and octahedron all yield a true distance (not merely a
+//! bound) both inside and out.
 //!
 //! Every primitive is built from `abs`, `min`, `max`, `clamp`, dot products,
 //! and the `sqrt` inside a vector length — all permitted — so the module is
@@ -189,11 +190,68 @@ pub fn hex_prism(point: [f32; 3], apothem: f32, half_depth: f32) -> f32 {
     inside + outside
 }
 
+/// Signed distance from `point` to the hollow wireframe of an axis-aligned
+/// box: the twelve square-section bars running along the edges of a box of
+/// the given `half_extent`, each bar `thickness` wide, centred at the origin.
+///
+/// Follows Inigo Quilez's exact `sdBoxFrame`. The point is folded into the
+/// positive octant and offset by the frame thickness, then the three
+/// axis-aligned bar families are measured with the interior/exterior split and
+/// combined with a minimum, so the hollow interior and the bar solids both
+/// carry a true distance.
+pub fn box_frame(point: [f32; 3], half_extent: [f32; 3], thickness: f32) -> f32 {
+    let p = [
+        point[0].abs() - half_extent[0],
+        point[1].abs() - half_extent[1],
+        point[2].abs() - half_extent[2],
+    ];
+    let q = [
+        (p[0] + thickness).abs() - thickness,
+        (p[1] + thickness).abs() - thickness,
+        (p[2] + thickness).abs() - thickness,
+    ];
+    // One bar family per axis: keep that axis sharp while rounding the others.
+    let bar_x = length([p[0].max(0.0), q[1].max(0.0), q[2].max(0.0)])
+        + p[0].max(q[1].max(q[2])).min(0.0);
+    let bar_y = length([q[0].max(0.0), p[1].max(0.0), q[2].max(0.0)])
+        + q[0].max(p[1].max(q[2])).min(0.0);
+    let bar_z = length([q[0].max(0.0), q[1].max(0.0), p[2].max(0.0)])
+        + q[0].max(q[1].max(p[2])).min(0.0);
+    bar_x.min(bar_y).min(bar_z)
+}
+
+/// Signed distance from `point` to a regular octahedron (the dual of the cube)
+/// with the given `radius` from the centre to each of its six vertices along
+/// the axes, centred at the origin.
+///
+/// Follows Inigo Quilez's exact `sdOctahedron`. The point is folded into the
+/// positive octant; when it sits inside the central slab the distance is the
+/// scaled `L1` excess over the face plane, otherwise the dominant axis is
+/// rotated into place and the distance is measured to the slanted face via a
+/// clamped projection. The inscribed radius is `radius / sqrt 3`.
+pub fn octahedron(point: [f32; 3], radius: f32) -> f32 {
+    let p = [point[0].abs(), point[1].abs(), point[2].abs()];
+    let m = p[0] + p[1] + p[2] - radius;
+    // Rotate the dominant axis into `q.x` so one slanted face solves all eight.
+    let q = if 3.0 * p[0] < m {
+        [p[0], p[1], p[2]]
+    } else if 3.0 * p[1] < m {
+        [p[1], p[2], p[0]]
+    } else if 3.0 * p[2] < m {
+        [p[2], p[0], p[1]]
+    } else {
+        // Inside the central slab: L1 excess scaled onto the face normal.
+        return m * 0.577_350_26;
+    };
+    let k = (0.5 * (q[2] - q[1] + radius)).clamp(0.0, radius);
+    length([q[0], q[1] - radius + k, q[2] - k])
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        box_sdf, capped_cone, capped_cylinder, capsule, hex_prism, plane, round_box, sphere,
-        torus,
+        box_frame, box_sdf, capped_cone, capped_cylinder, capsule, hex_prism, octahedron, plane,
+        round_box, sphere, torus,
     };
 
     #[test]
@@ -295,5 +353,27 @@ mod tests {
         assert!((hex_prism([0.0, 2.0, 0.0], apothem, half_depth) - 1.0).abs() < 1e-6);
         // One unit past the +z depth cap.
         assert!((hex_prism([0.0, 0.0, 3.0], apothem, half_depth) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn box_frame_outside_bar_and_hollow_centre() {
+        let half = [1.0, 1.0, 1.0];
+        let e = 0.1;
+        // One unit out along +x from the (y=1, z=1) edge bar: on the bar axis.
+        assert!((box_frame([2.0, 1.0, 1.0], half, e) - 1.0).abs() < 1e-6);
+        // Dead centre lies in the hollow, far from every bar (positive).
+        let centre = box_frame([0.0, 0.0, 0.0], half, e);
+        assert!((centre - (1.28f32).sqrt()).abs() < 1e-6);
+    }
+
+    #[test]
+    fn octahedron_vertex_centre_and_face() {
+        let r = 1.0;
+        // Vertex sits at (1, 0, 0); one unit beyond it along the axis.
+        assert!((octahedron([2.0, 0.0, 0.0], r) - 1.0).abs() < 1e-6);
+        // Centre: negative inscribed radius r / sqrt(3).
+        assert!((octahedron([0.0, 0.0, 0.0], r) - (-0.577_350_26)).abs() < 1e-6);
+        // A point on the +++ face plane is on the surface.
+        assert!(octahedron([1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0], r).abs() < 1e-6);
     }
 }
