@@ -188,7 +188,13 @@ pub fn cpu_solve_contacts_tgs(
         }
     }
 
-    apply_restitution(state, &mut work, &approach_speed, tgs.restitution_threshold);
+    apply_restitution(
+        state,
+        &mut work,
+        &colouring,
+        &approach_speed,
+        tgs.restitution_threshold,
+    );
 
     // Store the converged impulses back for next frame's warm start.
     for (dst, src) in contacts.iter_mut().zip(work.iter()) {
@@ -401,30 +407,38 @@ fn integrate_orientation(q: Quat, omega: Vec3, h: f32) -> Quat {
 
 /// Restores the elastic bounce from the pre-step approach speed for every
 /// contact whose approach exceeded the restitution threshold and which carried
-/// a positive normal impulse, in a single pass after the substep loop.
+/// a positive normal impulse, in a single colour-ordered pass after the
+/// substep loop. Visiting the contacts in batch order (rather than raw
+/// index order) keeps the sequential sweep deterministic and lets the GPU
+/// twin reproduce it with a per-batch dispatch over disjoint bodies.
 fn apply_restitution(
     state: &mut RigidBodyState,
     work: &mut [RigidContact],
+    colouring: &RigidContactColouring,
     approach_speed: &[f32],
     restitution_threshold: f32,
 ) {
-    for (ci, c) in work.iter_mut().enumerate() {
-        let vn0 = approach_speed[ci];
-        if vn0 >= -restitution_threshold || c.normal_impulse <= 0.0 {
-            continue;
+    for &(start, end) in colouring.ranges() {
+        for &ordered in &colouring.order()[start as usize..end as usize] {
+            let ci = ordered as usize;
+            let vn0 = approach_speed[ci];
+            let c = &mut work[ci];
+            if vn0 >= -restitution_threshold || c.normal_impulse <= 0.0 {
+                continue;
+            }
+            let n = c.normal;
+            let k_n = effective_mass(state, c, n);
+            if k_n <= EPSILON {
+                continue;
+            }
+            let normal_mass = 1.0 / k_n;
+            let vn = relative_velocity(state, c).dot(n);
+            let impulse = -normal_mass * (vn + c.restitution * vn0);
+            let new_impulse = (c.normal_impulse + impulse).max(0.0);
+            let applied = new_impulse - c.normal_impulse;
+            c.normal_impulse = new_impulse;
+            apply_impulse(state, c, n * applied);
         }
-        let n = c.normal;
-        let k_n = effective_mass(state, c, n);
-        if k_n <= EPSILON {
-            continue;
-        }
-        let normal_mass = 1.0 / k_n;
-        let vn = relative_velocity(state, c).dot(n);
-        let impulse = -normal_mass * (vn + c.restitution * vn0);
-        let new_impulse = (c.normal_impulse + impulse).max(0.0);
-        let applied = new_impulse - c.normal_impulse;
-        c.normal_impulse = new_impulse;
-        apply_impulse(state, c, n * applied);
     }
 }
 

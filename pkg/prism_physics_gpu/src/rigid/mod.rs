@@ -37,6 +37,7 @@ mod contact_cpu;
 mod contact_gpu;
 mod contact_tgs_config;
 mod contact_tgs_cpu;
+mod contact_tgs_gpu;
 mod cpu;
 mod gpu;
 
@@ -48,5 +49,6 @@ pub use contact_cpu::cpu_solve_contacts;
 pub use contact_gpu::GpuRigidContactSolver;
 pub use contact_tgs_config::TgsContactConfig;
 pub use contact_tgs_cpu::cpu_solve_contacts_tgs;
+pub use contact_tgs_gpu::GpuRigidTgsContactSolver;
 pub use cpu::cpu_integrate;
 pub use gpu::GpuRigidIntegrator;
