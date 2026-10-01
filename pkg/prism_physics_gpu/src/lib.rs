@@ -71,15 +71,15 @@ pub use cfl::{cpu_cfl_dt, cpu_max_speed, CflConfig, GpuCflReduce};
 pub use cloth::{
     build_cloth_aero_prep, build_vertex_triangle_adjacency, colour_bending, colour_long_range,
     colour_strain_limit, cpu_cloth_aero, cpu_cloth_backstops, cpu_cloth_bending,
-    cpu_cloth_body_collision, cpu_cloth_coupling, cpu_cloth_long_range, cpu_cloth_plasticity,
-    cpu_cloth_pressure, cpu_cloth_self_collision_jacobi, cpu_cloth_strain_limit, cpu_cloth_tearing,
-    pack_backstops, pack_body_colliders, BendingColoring, ClothAeroParams, ClothAeroPrep,
-    ClothAeroTriangle, ClothBendingConstraint, ClothLongRangeConstraint, ClothPlasticEdge,
-    ClothPrep, ClothSelfCollisionScope, ClothStrainLimitConstraint, ClothTearEdge, GpuBackstop,
-    GpuBodyCollider, GpuClothAero, GpuClothBending, GpuClothBodyCollision, GpuClothCoupling,
-    GpuClothLongRange, GpuClothPlasticity, GpuClothPressure, GpuClothSelfCollision,
-    GpuClothStrainLimit, GpuClothTearing, LongRangeColoring, StrainLimitColoring,
-    VertexTriangleAdjacency,
+    cpu_cloth_body_collision, cpu_cloth_ccd, cpu_cloth_coupling, cpu_cloth_long_range,
+    cpu_cloth_plasticity, cpu_cloth_pressure, cpu_cloth_self_collision_jacobi,
+    cpu_cloth_strain_limit, cpu_cloth_tearing, pack_backstops, pack_body_colliders,
+    BendingColoring, ClothAeroParams, ClothAeroPrep, ClothAeroTriangle, ClothBendingConstraint,
+    ClothLongRangeConstraint, ClothPlasticEdge, ClothPrep, ClothSelfCollisionScope,
+    ClothStrainLimitConstraint, ClothTearEdge, GpuBackstop, GpuBodyCollider, GpuClothAero,
+    GpuClothBending, GpuClothBodyCollision, GpuClothCcd, GpuClothCoupling, GpuClothLongRange,
+    GpuClothPlasticity, GpuClothPressure, GpuClothSelfCollision, GpuClothStrainLimit,
+    GpuClothTearing, LongRangeColoring, StrainLimitColoring, VertexTriangleAdjacency,
 };
 pub use contacts::{
     contact_constraints, contact_constraints_with_friction, cpu_resolve_contacts,
@@ -121,7 +121,7 @@ pub use radix::{cpu_radix_sort_keys, cpu_radix_sort_pairs, GpuRadixSort};
 pub use rigid::{
     cpu_integrate, cpu_integrate_gyro, cpu_solve_contacts, cpu_solve_contacts_tgs,
     cpu_solve_joints_angular_slerp_drive, cpu_solve_joints_cylindrical,
-    cpu_solve_joints_cylindrical_drive, cpu_solve_joints_cylindrical_limit,
+    cpu_solve_joints_cylindrical_drive, cpu_solve_joints_cylindrical_limit, cpu_solve_joints_d6,
     cpu_solve_joints_distance, cpu_solve_joints_elliptical_cone_twist, cpu_solve_joints_fixed,
     cpu_solve_joints_gear, cpu_solve_joints_hinge_limit, cpu_solve_joints_prismatic,
     cpu_solve_joints_prismatic_drive, cpu_solve_joints_prismatic_limit,

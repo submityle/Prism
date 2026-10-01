@@ -62,7 +62,7 @@ pub use gpu::GpuRigidIntegrator;
 pub use gyroscopic::{GyroscopicConfig, GyroscopicMode};
 pub use joint::{
     cpu_solve_joints_angular_slerp_drive, cpu_solve_joints_cylindrical,
-    cpu_solve_joints_cylindrical_drive, cpu_solve_joints_cylindrical_limit,
+    cpu_solve_joints_cylindrical_drive, cpu_solve_joints_cylindrical_limit, cpu_solve_joints_d6,
     cpu_solve_joints_distance, cpu_solve_joints_elliptical_cone_twist, cpu_solve_joints_fixed,
     cpu_solve_joints_gear, cpu_solve_joints_hinge_limit, cpu_solve_joints_prismatic,
     cpu_solve_joints_prismatic_drive, cpu_solve_joints_prismatic_limit,
