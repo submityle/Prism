@@ -50,6 +50,11 @@
 //!   and a decode stage. Distinct from
 //!   [`stereo_width::StereoWidthNode`], which never exposes `M` / `S` and
 //!   only applies a single width scale internally.
+//! - [`haas_widener::HaasWidenerNode`] -- precedence / Haas stereo widener that
+//!   delays only the Mid-Side side component by a few milliseconds, widening
+//!   the image through time decorrelation while staying mono-compatible.
+//!   Distinct from [`stereo_width::StereoWidthNode`] (side-gain) and
+//!   [`mid_side_matrix::MidSideMatrixNode`] (static M/S trim).
 //! - [`tremolo::TremoloNode`] — low-frequency amplitude modulation / auto-pan
 //!   driven by a control-rate LFO.
 //! - [`bitcrusher::BitcrusherNode`] — bit-depth quantization plus sample-rate
@@ -99,6 +104,7 @@ pub mod flanger;
 pub mod formant_filter;
 pub mod frequency_shifter;
 pub mod graphic_eq;
+pub mod haas_widener;
 pub mod mid_side_matrix;
 pub mod multi_tap_delay;
 pub mod parametric_eq;
@@ -126,6 +132,7 @@ pub use formant_filter::{
 };
 pub use frequency_shifter::{FrequencyShifterNode, FrequencyShifterParams};
 pub use graphic_eq::{GraphicEqNode, GraphicEqSpacing};
+pub use haas_widener::{HaasWidenerNode, HaasWidenerParams};
 pub use mid_side_matrix::{MidSideMatrixNode, MidSideMatrixParams, MidSideMode};
 pub use multi_tap_delay::{MAX_TAPS, MultiTapDelayNode, MultiTapDelayParams, TapSpec};
 pub use parametric_eq::{EqBand, ParametricEqNode};
