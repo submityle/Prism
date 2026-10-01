@@ -20,6 +20,7 @@ mod texture_sample;
 mod texture_filter;
 mod texture_codec;
 mod normal_map;
+mod texture_mipgen;
 mod validation;
 
 pub use authoring::FACE_SHADOW_SDF_SEMANTIC;
@@ -57,6 +58,10 @@ pub use texture_filter::{
 pub use texture_codec::{
     decode_bc1, decode_bc2, decode_bc3, decode_bc4, decode_bc5, rgb565_to_rgb888, BcFormat,
     BcSourceError, BcTexelSource,
+};
+pub use texture_mipgen::{
+    box_downsample, generate_mip_chain, linear_to_srgb, srgb_to_linear, ColorSpace,
+    Rgba8Image,
 };
 pub use normal_map::{
     blend_linear, blend_rnm, blend_udn, blend_whiteout, decode_ag, decode_rg, reconstruct_z,
