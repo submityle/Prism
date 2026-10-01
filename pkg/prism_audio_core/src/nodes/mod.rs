@@ -35,7 +35,13 @@
 //! Spatial ambience processors live in the [`reverb`] submodule: the
 //! [`FdnReverb`], the impulse-response [`Convolver`], and the Freeverb-style
 //! [`AlgorithmicRoom`].
+//!
+//! Read-only measurement taps live in the [`analysis`] submodule: the
+//! `ITU-R` `BS.1770` / `EBU` `R128` [`LoudnessMeterNode`] reports momentary,
+//! short-term, and integrated loudness, loudness range, and true-peak level
+//! without altering the signal.
 
+pub mod analysis;
 pub mod biquad;
 pub mod crossover;
 pub mod dynamics;
@@ -47,6 +53,9 @@ pub mod reverb;
 pub mod sources;
 pub mod svf;
 
+pub use analysis::{
+    KWeighting, LoudnessMeasurement, LoudnessMeter, LoudnessMeterNode, TruePeakMeter,
+};
 pub use biquad::{BiquadKind, BiquadNode};
 pub use crossover::{LinkwitzRileyCrossover, MAX_BANDS, MAX_CROSSOVERS};
 pub use dynamics::{
