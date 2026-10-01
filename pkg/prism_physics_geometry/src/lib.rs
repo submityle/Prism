@@ -30,7 +30,7 @@ pub use bvh::DynamicBvh;
 pub use narrow::{
     closest_point_on_aabb, closest_point_on_segment, closest_point_on_triangle,
     closest_points_segment_segment, contact_manifold, gjk_closest_points, gjk_contact,
-    gjk_intersect, ray_obb, ray_sphere, ray_triangle, ClipShape, ClosestPoints, Contact,
+    gjk_intersect, ray_capsule, ray_obb, ray_sphere, ray_triangle, ClipShape, ClosestPoints, Contact,
     ContactManifold, FacePolygon, ManifoldPoint, RayTriangleHit, SegmentClosest, SupportMap,
 };
 pub use proxy::ProxyId;

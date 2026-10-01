@@ -2,7 +2,7 @@
 
 use glam::Vec3;
 
-use crate::bounding::{Aabb, BoundingSphere, Obb, Ray};
+use crate::bounding::{Aabb, BoundingSphere, Capsule, Obb, Ray};
 
 /// Returns the nearest parametric distance `t` at which `ray` enters `sphere`,
 /// or [`None`] when there is no hit within `[0, ray.tmax]`.
@@ -102,13 +102,134 @@ pub fn ray_obb(ray: &Ray, obb: &Obb) -> Option<f32> {
     local_box.ray_hit(&local_ray)
 }
 
+/// Returns the parametric distance to the nearest ray/capsule intersection.
+///
+/// A capsule is the set of points within `radius` of its core segment
+/// `a`-`b`: an open cylinder closed by a hemisphere at each endpoint. The test
+/// intersects the ray against the infinite cylinder around the core axis
+/// (clamped to the segment span) and against the two end-cap spheres, then
+/// returns the smallest non-negative hit within `ray.tmax`. Cap hits are
+/// restricted to their outward hemisphere so interior sphere surfaces never
+/// produce a spurious early hit. Returns `None` when the ray misses.
+pub fn ray_capsule(ray: &Ray, capsule: &Capsule) -> Option<f32> {
+    let radius = capsule.radius;
+    let axis = capsule.b - capsule.a;
+    let axis_len_sq = axis.length_squared();
+    // A zero-length capsule is a sphere centred on `a`.
+    if axis_len_sq <= f32::EPSILON {
+        return ray_sphere(ray, &BoundingSphere::new(capsule.a, radius));
+    }
+
+    let len = axis_len_sq.sqrt();
+    let n = axis / len;
+    let oa = ray.origin - capsule.a;
+    let oa_dot_n = oa.dot(n);
+    let d_dot_n = ray.dir.dot(n);
+    // Components perpendicular to the capsule axis.
+    let m = oa - n * oa_dot_n;
+    let w = ray.dir - n * d_dot_n;
+    let a_coef = w.dot(w);
+    let b_coef = m.dot(w);
+    let c_coef = m.dot(m) - radius * radius;
+
+    let mut best = f32::INFINITY;
+
+    // Cylinder body: skip when the ray is (near) parallel to the axis.
+    if a_coef > f32::EPSILON {
+        let disc = b_coef * b_coef - a_coef * c_coef;
+        if disc >= 0.0 {
+            let sqrt_disc = disc.sqrt();
+            let roots = [
+                (-b_coef - sqrt_disc) / a_coef,
+                (-b_coef + sqrt_disc) / a_coef,
+            ];
+            for t in roots {
+                if (0.0..=ray.tmax).contains(&t) {
+                    let s = oa_dot_n + t * d_dot_n;
+                    if (0.0..=len).contains(&s) {
+                        best = best.min(t);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // End-cap spheres, restricted to their outward hemisphere.
+    if let Some(t) = ray_sphere(ray, &BoundingSphere::new(capsule.a, radius)) {
+        let s = (ray.at(t) - capsule.a).dot(n);
+        if s <= 0.0 {
+            best = best.min(t);
+        }
+    }
+    if let Some(t) = ray_sphere(ray, &BoundingSphere::new(capsule.b, radius)) {
+        let s = (ray.at(t) - capsule.a).dot(n);
+        if s >= len {
+            best = best.min(t);
+        }
+    }
+
+    if best.is_finite() {
+        Some(best)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ray_obb, ray_sphere, ray_triangle};
-    use crate::bounding::{BoundingSphere, Obb, Ray};
+    use super::{ray_capsule, ray_obb, ray_sphere, ray_triangle};
+    use crate::bounding::{BoundingSphere, Capsule, Obb, Ray};
     use approx::assert_relative_eq;
     use core::f32::consts::FRAC_PI_4;
     use glam::{Quat, Vec3};
+
+    #[test]
+    fn ray_capsule_hits_cylinder_body() {
+        // Capsule along X at origin; ray from +Z toward it hits the side wall.
+        let c = Capsule::new(Vec3::new(-2.0, 0.0, 0.0), Vec3::new(2.0, 0.0, 0.0), 1.0);
+        let ray = Ray::new(Vec3::new(0.0, 0.0, 5.0), Vec3::NEG_Z);
+        let t = ray_capsule(&ray, &c).expect("hit body");
+        // Enters the cylinder surface at z = 1.
+        assert_relative_eq!(t, 4.0, epsilon = 1e-4);
+    }
+
+    #[test]
+    fn ray_capsule_hits_end_cap() {
+        // Ray along +X toward the +X hemispherical cap at x = 2, radius 1.
+        let c = Capsule::new(Vec3::new(-2.0, 0.0, 0.0), Vec3::new(2.0, 0.0, 0.0), 1.0);
+        let ray = Ray::new(Vec3::new(10.0, 0.0, 0.0), Vec3::NEG_X);
+        let t = ray_capsule(&ray, &c).expect("hit cap");
+        // Cap surface at x = 3; origin at x = 10 => t = 7.
+        assert_relative_eq!(t, 7.0, epsilon = 1e-4);
+    }
+
+    #[test]
+    fn ray_capsule_misses_past_the_ends() {
+        // Ray parallel to the axis but far outside the radius misses entirely.
+        let c = Capsule::new(Vec3::new(-2.0, 0.0, 0.0), Vec3::new(2.0, 0.0, 0.0), 1.0);
+        let miss = Ray::new(Vec3::new(10.0, 5.0, 0.0), Vec3::NEG_X);
+        assert!(ray_capsule(&miss, &c).is_none());
+    }
+
+    #[test]
+    fn ray_capsule_grazes_beyond_segment_uses_cap() {
+        // A ray that would hit the infinite cylinder beyond the segment span
+        // must fall through to the cap sphere rather than the body.
+        let c = Capsule::new(Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 4.0, 0.0), 1.0);
+        // Aim at the top cap region from +Z.
+        let ray = Ray::new(Vec3::new(0.0, 4.0, 5.0), Vec3::NEG_Z);
+        let t = ray_capsule(&ray, &c).expect("hit top cap");
+        assert_relative_eq!(t, 4.0, epsilon = 1e-4);
+    }
+
+    #[test]
+    fn ray_capsule_degenerate_is_sphere() {
+        let c = Capsule::new(Vec3::ZERO, Vec3::ZERO, 2.0);
+        let ray = Ray::new(Vec3::new(0.0, 0.0, 5.0), Vec3::NEG_Z);
+        let t = ray_capsule(&ray, &c).expect("hit sphere");
+        assert_relative_eq!(t, 3.0, epsilon = 1e-4);
+    }
 
     #[test]
     fn ray_sphere_front_hit() {
