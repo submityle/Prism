@@ -210,6 +210,15 @@
 //!   ([`PATCH_MESH_VERTEX_WORDS`] + [`PATCH_MESH_INDEX_WORDS`] strides, node
 //!   records reusing the shared [`NODE_WORDS`]) with a packed walk that
 //!   decodes and reproduces the in-memory walk bit-for-bit.
+//! - [`bezier_patch`] — a bicubic Bézier surface patch (4×4 control net,
+//!   tensor-product Bernstein basis) evaluated with De Casteljau's algorithm,
+//!   i.e. pure `lerp`s with no transcendental basis functions: the surface
+//!   point is three nested cubic `lerp`s and the analytic normal is
+//!   `∂P/∂u × ∂P/∂v`. [`bezier_patch::BezierPatch`] tessellates the smooth
+//!   surface into an [`indexed_bilinear_patch_mesh::IndexedBilinearPatchMesh`]
+//!   (sampling exact positions + analytic normals at every tessellation
+//!   vertex, welded and seamless) so it reuses the existing patch-mesh `BVH`
+//!   and `GPU` layout path unchanged.
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -344,6 +353,7 @@ pub mod shaded_bilinear_patch;
 pub mod shaded_bilinear_patch_gpu_layout;
 pub mod indexed_bilinear_patch_mesh;
 pub mod indexed_bilinear_patch_mesh_gpu_layout;
+pub mod bezier_patch;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -429,6 +439,7 @@ pub use indexed_bilinear_patch_mesh_gpu_layout::{
     GpuIndexedBilinearPatchMeshBvhBuffers, PATCH_MESH_INDEX_WORDS,
     PATCH_MESH_VERTEX_WORDS,
 };
+pub use bezier_patch::BezierPatch;
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
 pub use obb::{Obb, ObbBvh, ObbHit};
