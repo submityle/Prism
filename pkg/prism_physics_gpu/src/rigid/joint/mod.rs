@@ -90,6 +90,11 @@
 //!   twist limit, and point-to-point weld).
 //! * [`swing_twist_gpu`] — the device-side [`GpuSwingTwistJointSolver`]
 //!   twin.
+//! * [`universal`] — the [`UniversalJoint`] (Cardan/Hooke) definition and its
+//!   device-packed storage representation.
+//! * [`universal_cpu`] — the authoritative [`cpu_solve_joints_universal`]
+//!   golden stepper (perpendicularity plus point-to-point weld).
+//! * [`universal_gpu`] — the device-side [`GpuUniversalJointSolver`] twin.
 //!
 //! # Scheme and scope
 //!
@@ -140,6 +145,9 @@ mod stepper;
 mod swing_twist;
 mod swing_twist_cpu;
 mod swing_twist_gpu;
+mod universal;
+mod universal_cpu;
+mod universal_gpu;
 
 pub use coloring::{JointColouring, MAX_JOINT_BATCHES};
 pub use config::JointSolverConfig;
@@ -173,3 +181,6 @@ pub use spherical_gpu::GpuSphericalJointSolver;
 pub use swing_twist::SwingTwistJoint;
 pub use swing_twist_cpu::cpu_solve_joints_swing_twist;
 pub use swing_twist_gpu::GpuSwingTwistJointSolver;
+pub use universal::UniversalJoint;
+pub use universal_cpu::cpu_solve_joints_universal;
+pub use universal_gpu::GpuUniversalJointSolver;

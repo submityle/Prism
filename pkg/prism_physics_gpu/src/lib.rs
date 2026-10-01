@@ -107,15 +107,16 @@ pub use rigid::{
     cpu_solve_joints_distance, cpu_solve_joints_fixed, cpu_solve_joints_hinge_limit,
     cpu_solve_joints_prismatic, cpu_solve_joints_prismatic_drive, cpu_solve_joints_prismatic_limit,
     cpu_solve_joints_revolute, cpu_solve_joints_revolute_drive, cpu_solve_joints_spherical,
-    cpu_solve_joints_swing_twist, ContactSolverConfig, DistanceJoint, FixedJoint,
-    GpuDistanceJointSolver, GpuFixedJointSolver, GpuHingeLimitJointSolver,
+    cpu_solve_joints_swing_twist, cpu_solve_joints_universal, ContactSolverConfig, DistanceJoint,
+    FixedJoint, GpuDistanceJointSolver, GpuFixedJointSolver, GpuHingeLimitJointSolver,
     GpuPrismaticDriveJointSolver, GpuPrismaticJointSolver, GpuPrismaticLimitJointSolver,
     GpuRevoluteDriveJointSolver, GpuRevoluteJointSolver, GpuRigidContactSolver, GpuRigidIntegrator,
-    GpuRigidTgsContactSolver, GpuSphericalJointSolver, GpuSwingTwistJointSolver, GyroscopicConfig,
-    GyroscopicMode, HingeLimitJoint, IntegratorConfig, JointColouring, JointSolverConfig,
-    PrismaticDriveJoint, PrismaticJoint, PrismaticLimitJoint, RevoluteDriveJoint, RevoluteJoint,
-    RigidBodyState, RigidContact, RigidContactColouring, RigidError, SphericalJoint,
-    SwingTwistJoint, TgsContactConfig, MAX_JOINT_BATCHES,
+    GpuRigidTgsContactSolver, GpuSphericalJointSolver, GpuSwingTwistJointSolver,
+    GpuUniversalJointSolver, GyroscopicConfig, GyroscopicMode, HingeLimitJoint, IntegratorConfig,
+    JointColouring, JointSolverConfig, PrismaticDriveJoint, PrismaticJoint, PrismaticLimitJoint,
+    RevoluteDriveJoint, RevoluteJoint, RigidBodyState, RigidContact, RigidContactColouring,
+    RigidError, SphericalJoint, SwingTwistJoint, TgsContactConfig, UniversalJoint,
+    MAX_JOINT_BATCHES,
 };
 pub use scan::{cpu_compact, cpu_exclusive_scan, GpuScan};
 pub use xpbd::{
