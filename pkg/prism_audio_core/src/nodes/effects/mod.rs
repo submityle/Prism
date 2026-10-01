@@ -46,6 +46,10 @@
 //!   (`tanh` / `arctan` / cubic / reciprocal / sine) with a drive + DC bias
 //!   stage, oversampling, and an output DC blocker; distinct from
 //!   [`waveshaper::WaveshaperNode`], which is a fixed symmetric `tanh` clip.
+//! - [`spectral_gate::SpectralGateNode`] -- frequency-domain spectral gate /
+//!   downward spectral expander: a weighted overlap-add short-time Fourier
+//!   transform (`STFT`) attenuates bins below a `dBFS` threshold toward a floor,
+//!   suppressing steady broadband noise that a time-domain gate cannot isolate.
 
 pub mod auto_wah;
 pub mod bitcrusher;
@@ -58,6 +62,7 @@ pub mod parametric_eq;
 pub mod phaser;
 pub mod ring_modulator;
 pub mod saturation;
+pub mod spectral_gate;
 pub mod stereo_width;
 pub mod tape;
 pub mod tremolo;
@@ -75,6 +80,10 @@ pub use parametric_eq::{EqBand, ParametricEqNode};
 pub use phaser::{PhaserNode, PhaserParams};
 pub use ring_modulator::{RingModulatorNode, RingModulatorParams};
 pub use saturation::{DEFAULT_DC_BLOCK_COEFF, SaturationCurve, SaturationNode, SaturationParams};
+pub use spectral_gate::{
+    DEFAULT_ATTACK_MS, DEFAULT_FFT_SIZE, DEFAULT_RELEASE_MS, DEFAULT_REDUCTION_DB,
+    DEFAULT_THRESHOLD_DB, MIN_FFT_SIZE, OVERLAP_FACTOR, SpectralGateNode, SpectralGateParams,
+};
 pub use stereo_width::{MAX_WIDTH, StereoWidthNode, StereoWidthParams};
 pub use tape::{Tape, TapeNode, TapeParams};
 pub use tremolo::{TremoloMode, TremoloNode, TremoloParams};
