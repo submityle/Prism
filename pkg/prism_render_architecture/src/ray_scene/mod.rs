@@ -441,6 +441,12 @@
 //!   characteristic `V - E + F`, a closed-manifold predicate, and the
 //!   orientable genus `(2 - chi) / 2` for a single closed manifold,
 //!   computed with exact integer arithmetic for mesh validation.
+//! - [`mesh_bounding_sphere`] — approximate minimal bounding sphere
+//!   ([`mesh_bounding_sphere::bounding_sphere`]): Jack Ritter's linear
+//!   two-pass heuristic over the referenced vertices, seeding a diameter
+//!   from a far-apart pair and growing to swallow outliers, yielding a
+//!   [`mesh_bounding_sphere::BoundingSphere`] for culling, LOD, and
+//!   broad-phase queries (`f64` accumulation, square root only).
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -609,6 +615,7 @@ pub mod mesh_edge_length_stats;
 pub mod mesh_dihedral_cosine;
 pub mod mesh_mass_properties;
 pub mod mesh_euler_characteristic;
+pub mod mesh_bounding_sphere;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -728,6 +735,7 @@ pub use mesh_edge_length_stats::{edge_length_stats, EdgeLengthStats};
 pub use mesh_dihedral_cosine::{dihedral_cosines, DihedralCosines, DihedralEdge};
 pub use mesh_mass_properties::{mass_properties, MeshMassProperties};
 pub use mesh_euler_characteristic::{mesh_topology, MeshTopology};
+pub use mesh_bounding_sphere::{bounding_sphere, BoundingSphere};
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
 pub use obb::{Obb, ObbBvh, ObbHit};
