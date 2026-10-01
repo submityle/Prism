@@ -327,6 +327,12 @@
 //!   resolve to the **max** of both adjacent cells' demands, so varying detail
 //!   across the surface (fine over a face, coarse elsewhere) stays watertight —
 //!   the spatially-varying LOD authoring path on top of [`adaptive_tessellation`].
+//! - [`mesh_tangents`] — `MikkTSpace`-style per-vertex tangent frames from a
+//!   [`triangle_mesh::TriangleMesh`]'s positions, normals, and `UV`s
+//!   ([`mesh_tangents::compute_tangents`]): solves each triangle's 2×2 `UV`
+//!   system for tangent/bitangent, accumulates area-weighted per vertex,
+//!   Gram-Schmidts against the normal, and packs an `xyzw` handedness tangent —
+//!   the attribute normal mapping, parallax, and anisotropy require.
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -475,6 +481,7 @@ pub mod patch_tessellation;
 pub mod adaptive_tessellation;
 pub mod displacement_tessellation;
 pub mod patch_grid;
+pub mod mesh_tangents;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -574,6 +581,7 @@ pub use patch_tessellation::{Edge, PatchTessellation, MAX_FACTOR};
 pub use adaptive_tessellation::AdaptiveTessellation;
 pub use displacement_tessellation::{DisplacedField, DisplacementTessellation};
 pub use patch_grid::PatchGrid;
+pub use mesh_tangents::{compute_tangents, TangentError};
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
 pub use obb::{Obb, ObbBvh, ObbHit};
