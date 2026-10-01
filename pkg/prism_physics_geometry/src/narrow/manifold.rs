@@ -18,7 +18,7 @@
 use alloc::vec::Vec;
 use glam::Vec3;
 
-use crate::bounding::{Aabb, Obb};
+use crate::bounding::{Aabb, Capsule, Obb};
 use crate::narrow::closest_point::closest_points_segment_segment;
 use crate::narrow::epa::gjk_contact;
 use crate::narrow::support::SupportMap;
@@ -41,6 +41,12 @@ const MAX_MANIFOLD_POINTS: usize = 4;
 /// an analytic closest-edge solve. `cos(~18 deg)` keeps genuine face contacts
 /// (including lightly tilted resting boxes) on the clipping path.
 const FACE_ALIGN_THRESHOLD: f32 = 0.95;
+
+/// When the absolute cosine between a capsule's core segment and the box
+/// contact normal exceeds this, the capsule meets the face end-on (nearly
+/// perpendicular to it), so a single deepest point is the honest manifold.
+/// Below it the segment lies along the face and a two-point manifold is sought.
+const CAPSULE_END_ON_THRESHOLD: f32 = 0.9;
 
 /// A planar convex face of a polytope, wound counter-clockwise when viewed
 /// from outside the shape (looking against `normal`).
@@ -412,6 +418,107 @@ fn edge_edge_contact(
     })
 }
 
+/// Builds a contact manifold between a capsule (shape `a`) and an oriented box
+/// (shape `b`), producing a stable two-point manifold when the capsule's core
+/// segment lies roughly parallel to the box's contact face.
+///
+/// A single deepest contact ([`Obb::capsule_contact`]) is enough to
+/// depenetrate, but a capsule resting lengthwise on a surface pivots about one
+/// point and see-saws unless both ends are constrained. This clips the core
+/// segment to the prism above the box's contact face and resolves each clipped
+/// end as a sphere, keeping only ends that actually penetrate. End-on
+/// (near-perpendicular) and vertex contacts fall back to the single deepest
+/// point. The manifold `normal` points from the capsule toward the box.
+pub fn capsule_box_manifold(capsule: &Capsule, obb: &Obb) -> Option<ContactManifold> {
+    let (deep_point, n_box, deep_depth) =
+        obb.capsule_contact(capsule.a, capsule.b, capsule.radius)?;
+    // `Obb::capsule_contact` reports the direction the capsule must move to
+    // separate (box -> capsule); the manifold normal is capsule -> box.
+    let normal = -n_box;
+
+    let seg = capsule.b - capsule.a;
+    let seg_len2 = seg.length_squared();
+    // Sphere-like capsule, or an end-on contact: a single point is honest.
+    if seg_len2 < EDGE_EPSILON_SQ {
+        return one_point_manifold(deep_point, normal, deep_depth);
+    }
+    let seg_dir = seg * seg_len2.sqrt().recip();
+    if seg_dir.dot(n_box).abs() > CAPSULE_END_ON_THRESHOLD {
+        return one_point_manifold(deep_point, normal, deep_depth);
+    }
+
+    // Clip the core segment to the infinite prism over the box's contact face.
+    let face = obb.best_face(n_box);
+    if face.vertices.len() < 3 {
+        return one_point_manifold(deep_point, normal, deep_depth);
+    }
+    let mut t_lo = 0.0f32;
+    let mut t_hi = 1.0f32;
+    let fv = &face.vertices;
+    let n = fv.len();
+    for i in 0..n {
+        let e0 = fv[i];
+        let e1 = fv[(i + 1) % n];
+        let edge = e1 - e0;
+        if edge.length_squared() < EDGE_EPSILON_SQ {
+            continue;
+        }
+        let side = edge.cross(face.normal).normalize_or_zero();
+        if side.length_squared() < 0.5 {
+            continue;
+        }
+        // Keep the portion with side.dot(point) <= off (inside the face span).
+        let off = side.dot(e0);
+        let num = off - side.dot(capsule.a);
+        let den = side.dot(seg);
+        if den > f32::EPSILON {
+            t_hi = t_hi.min(num / den);
+        } else if den < -f32::EPSILON {
+            t_lo = t_lo.max(num / den);
+        } else if num < 0.0 {
+            // Segment runs parallel to this side plane and entirely outside it.
+            return one_point_manifold(deep_point, normal, deep_depth);
+        }
+    }
+
+    if t_lo > t_hi {
+        return one_point_manifold(deep_point, normal, deep_depth);
+    }
+
+    // Resolve each clipped end as a sphere; keep ends that truly penetrate.
+    let mut points = Vec::with_capacity(2);
+    for &t in &[t_lo, t_hi] {
+        let sample = capsule.a + seg * t;
+        if let Some((cp, _, depth)) = obb.sphere_contact(sample, capsule.radius) {
+            points.push(ManifoldPoint {
+                position: cp,
+                depth: depth.max(0.0),
+            });
+        }
+        // A zero-length clip span contributes only one sample.
+        if (t_hi - t_lo).abs() <= CONTACT_SLOP {
+            break;
+        }
+    }
+
+    if points.is_empty() {
+        return one_point_manifold(deep_point, normal, deep_depth);
+    }
+
+    Some(ContactManifold { normal, points })
+}
+
+/// Wraps a single resolved contact point into a one-point manifold.
+fn one_point_manifold(position: Vec3, normal: Vec3, depth: f32) -> Option<ContactManifold> {
+    Some(ContactManifold {
+        normal,
+        points: alloc::vec![ManifoldPoint {
+            position,
+            depth: depth.max(0.0),
+        }],
+    })
+}
+
 /// Produces a one-point manifold from the EPA witness pair when face clipping
 /// cannot form a polygon (e.g. edge or vertex contact).
 fn single_point_fallback(
@@ -433,7 +540,8 @@ fn single_point_fallback(
 #[cfg(test)]
 mod tests {
     use super::{contact_manifold, ClipShape};
-    use crate::bounding::{Aabb, Obb};
+    use crate::bounding::{Aabb, Capsule, Obb};
+    use super::capsule_box_manifold;
     use glam::{Quat, Vec3};
 
     #[test]
@@ -525,5 +633,67 @@ mod tests {
         assert!(pos.x.abs() < 2.0e-2, "x near crossing: {}", pos.x);
         assert!(pos.z.abs() < 2.0e-2, "z near crossing: {}", pos.z);
         assert!(m.points[0].depth > 0.0, "contact penetrates");
+    }
+
+    #[test]
+    fn horizontal_capsule_resting_on_box_is_two_point() {
+        // Unit box centred at origin (top face at y = 1). A capsule lying along
+        // world X just above it, pressed down so its lower surface sinks 0.1
+        // into the face.
+        let obb = Obb::new(Vec3::ZERO, Vec3::splat(1.0), Quat::IDENTITY);
+        let capsule = Capsule::new(
+            Vec3::new(-0.5, 1.4, 0.0),
+            Vec3::new(0.5, 1.4, 0.0),
+            0.5,
+        );
+        let m = capsule_box_manifold(&capsule, &obb).expect("resting contact");
+        // Normal points capsule -> box, i.e. downward.
+        assert!(m.normal.y < -0.9, "normal points down: {:?}", m.normal);
+        assert_eq!(m.points.len(), 2, "lengthwise rest yields two points");
+        for p in &m.points {
+            assert!(p.depth > 0.0, "each end penetrates: {}", p.depth);
+            assert!((p.position.y - 1.0).abs() < 1e-4, "point on top face");
+        }
+        // The two points straddle the capsule span along X.
+        let x0 = m.points[0].position.x;
+        let x1 = m.points[1].position.x;
+        assert!(
+            x0.min(x1) < -0.3 && x0.max(x1) > 0.3,
+            "points straddle span: {x0}, {x1}"
+        );
+    }
+
+    #[test]
+    fn vertical_capsule_on_box_is_single_point() {
+        // Capsule standing end-on above the box: only the lower cap touches.
+        let obb = Obb::new(Vec3::ZERO, Vec3::splat(1.0), Quat::IDENTITY);
+        let capsule = Capsule::new(
+            Vec3::new(0.0, 1.4, 0.0),
+            Vec3::new(0.0, 3.4, 0.0),
+            0.5,
+        );
+        let m = capsule_box_manifold(&capsule, &obb).expect("end-on contact");
+        assert_eq!(m.points.len(), 1, "end-on contact is a single point");
+        assert!(m.normal.y < -0.9);
+        assert!(m.points[0].depth > 0.0);
+    }
+
+    #[test]
+    fn capsule_overhanging_box_edge_keeps_only_supported_end() {
+        // Capsule lies along X but shifted so one end hangs past the box's +X
+        // edge. The clipped span should drop the unsupported end, yielding a
+        // single contact where the capsule still rests on the face.
+        let obb = Obb::new(Vec3::ZERO, Vec3::splat(1.0), Quat::IDENTITY);
+        let capsule = Capsule::new(
+            Vec3::new(0.5, 1.4, 0.0),
+            Vec3::new(3.0, 1.4, 0.0),
+            0.5,
+        );
+        let m = capsule_box_manifold(&capsule, &obb).expect("overhang contact");
+        assert!(m.normal.y < -0.9);
+        for p in &m.points {
+            assert!(p.position.x <= 1.0 + 1e-3, "contact stays over the face");
+            assert!(p.depth > 0.0);
+        }
     }
 }
