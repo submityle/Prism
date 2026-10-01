@@ -333,6 +333,13 @@
 //!   system for tangent/bitangent, accumulates area-weighted per vertex,
 //!   Gram-Schmidts against the normal, and packs an `xyzw` handedness tangent —
 //!   the attribute normal mapping, parallax, and anisotropy require.
+//! - [`mesh_welding`] — spatial vertex welding plus degenerate-triangle
+//!   cleanup ([`mesh_welding::weld_vertices`]): collapses coincident or
+//!   near-coincident vertices onto one representative (exact bit-hash at
+//!   `tolerance == 0`, else a `3 × 3 × 3` spatial-hash neighbourhood scan so
+//!   boundary-straddling pairs still merge), rewrites the index buffer,
+//!   drops triangles that collapse to zero area, and compacts unreferenced
+//!   vertices — making split meshes watertight for shared-edge passes.
 //! - [`mesh_smooth_normals`] — area-weighted smooth per-vertex normals for a
 //!   [`triangle_mesh::TriangleMesh`] lacking shading normals
 //!   ([`mesh_smooth_normals::compute_smooth_normals`],
@@ -489,6 +496,7 @@ pub mod adaptive_tessellation;
 pub mod displacement_tessellation;
 pub mod patch_grid;
 pub mod mesh_tangents;
+pub mod mesh_welding;
 pub mod mesh_smooth_normals;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
@@ -590,6 +598,7 @@ pub use adaptive_tessellation::AdaptiveTessellation;
 pub use displacement_tessellation::{DisplacedField, DisplacementTessellation};
 pub use patch_grid::PatchGrid;
 pub use mesh_tangents::{compute_tangents, TangentError};
+pub use mesh_welding::{weld_vertices, WeldError};
 pub use mesh_smooth_normals::{compute_smooth_normals, with_smooth_normals};
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
