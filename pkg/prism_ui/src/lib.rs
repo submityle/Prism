@@ -80,6 +80,7 @@ pub mod backend;
 pub mod element;
 pub mod paint;
 pub mod reactive_view;
+pub mod structural;
 pub mod style_map;
 pub mod ui;
 

@@ -588,6 +588,19 @@
 //!   sanitised exactly as the reference; only the final divide is inexact, so
 //!   the parity test matches the weights within the fma tolerance (see
 //!   [`stratified_weights`]).
+//! * [`GpuHairStrandKeepRatio`] evaluates
+//!   [`strand_keep_ratio`](prism_render_architecture::hair::cluster::strand_keep_ratio),
+//!   the continuous anti-pop strand decimation ramp: one thread per cluster
+//!   projected pixel footprint maps that footprint to a keep ratio in
+//!   `[min_ratio, 1]` — ratio `1` at or above `full_px`, the `min_ratio` floor
+//!   at or below `cull_px`, and a linear ramp between so a receding groom thins
+//!   out without a visible pop. The [`DecimationThresholds`](prism_render_architecture::hair::cluster::DecimationThresholds)
+//!   are a per-dispatch constant, sanitised once host-side exactly as the
+//!   reference and uploaded as uniforms; the per-element work sanitises the
+//!   footprint (non-finite or negative collapses to `0`) and evaluates the
+//!   ramp. The saturated plateaus are exact; only the in-band divide is
+//!   inexact, so the parity test matches ratios within the fma tolerance (see
+//!   [`strand_keep_ratio`](prism_render_architecture::hair::cluster::strand_keep_ratio)).
 //!
 //! # Portability
 //!
@@ -668,6 +681,7 @@ pub mod self_collision_grid;
 pub mod self_collision_jacobi;
 pub mod self_collision_voxel;
 pub mod spectrum_sample_map;
+pub mod strand_keep_ratio;
 pub mod strand_metrics;
 pub mod stratified_allocation;
 pub mod stratified_weights;
@@ -740,6 +754,7 @@ pub use self_collision_grid::GpuSelfCollisionGrid;
 pub use self_collision_jacobi::GpuSelfCollisionJacobi;
 pub use self_collision_voxel::GpuHairSelfCollisionVoxel;
 pub use spectrum_sample_map::{reference_spectrum_sample_map, GpuHairSpectrumSample};
+pub use strand_keep_ratio::{reference_strand_keep_ratio, GpuHairStrandKeepRatio};
 pub use strand_metrics::{GpuStrandMetric, GpuStrandMetrics};
 pub use stratified_allocation::{reference_stratified_allocation, GpuHairStratifiedAllocation};
 pub use stratified_weights::{reference_stratified_weights, GpuHairStratifiedWeights};
