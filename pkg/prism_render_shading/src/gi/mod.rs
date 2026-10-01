@@ -47,6 +47,10 @@
 //! * [`temporal`] — TAA-grade temporal resolve: reprojection, Catmull-Rom, clipping.
 //! * [`translucency`] — subsurface/translucency GI (Burley diffusion + transmission).
 //! * [`upscale`] — classic temporal super-resolution + checkerboard reconstruction.
+//! * [`post_gi`] — auto-exposure, ACES/AgX tonemap, bloom, GI/AO composite.
+//! * [`env_brdf`] — split-sum DFG LUT + multiscatter energy compensation.
+//! * [`clouds`] — ray-marched volumetric cloud layer (Beer-powder + HG).
+//! * [`motion`] — motion-vector reprojection, dilation, and tile velocity.
 
 pub mod denoise;
 pub mod occlusion;
@@ -73,4 +77,8 @@ pub mod spec_denoise;
 pub mod temporal;
 pub mod translucency;
 pub mod upscale;
+pub mod post_gi;
+pub mod env_brdf;
+pub mod clouds;
+pub mod motion;
 pub mod world_space;
