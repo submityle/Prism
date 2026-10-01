@@ -28,6 +28,13 @@
 //!   toward higher frequencies to produce the ethereal, blooming wash of
 //!   ambient and cinematic sound design. It composes [`fdn::FdnReverb`]
 //!   and the effects-family pitch shifter rather than duplicating them.
+//! - [`spring_reverb::SpringReverbNode`] -- a dispersive spring-tank model:
+//!   a short recirculating delay whose feedback loop contains a cascade of
+//!   first-order all-pass dispersion stages and an in-loop damping low-pass,
+//!   synthesising the chirped, metallic "boing" of a guitar-amp or studio
+//!   spring reverb. Distinct from the diffuse-field room models above, its
+//!   defining feature is the all-pass dispersion chain rather than a dense
+//!   reflection field.
 //!
 //! Every processor pre-allocates all delay-line and filter state at
 //! construction, so [`AudioNode::process`](crate::graph::AudioNode::process)
@@ -38,9 +45,15 @@ pub mod convolver;
 pub mod fdn;
 pub mod plate;
 pub mod shimmer;
+pub mod spring_reverb;
 
 pub use algorithmic::{AlgorithmicRoom, AlgorithmicRoomParams};
 pub use convolver::Convolver;
 pub use fdn::{FdnOrder, FdnReverb, FdnReverbParams};
 pub use plate::{PlateReverb, PlateReverbParams};
 pub use shimmer::{MAX_SHIMMER_FEEDBACK, ShimmerReverb, ShimmerReverbParams};
+pub use spring_reverb::{
+    DEFAULT_SPRING_DAMPING, DEFAULT_SPRING_DECAY, DEFAULT_SPRING_DISPERSION,
+    DEFAULT_SPRING_MIX, DEFAULT_SPRING_SIZE_MS, MAX_SPRING_FEEDBACK, MAX_SPRING_SIZE_MS,
+    MIN_SPRING_SIZE_MS, SPRING_ALLPASS_STAGES, SpringReverbNode, SpringReverbParams,
+};
