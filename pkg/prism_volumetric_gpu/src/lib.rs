@@ -144,6 +144,7 @@ pub mod sky_state_transition;
 pub mod soft_particle;
 pub mod spectral_to_rgb;
 pub mod specular_aa;
+pub mod sphere_aabb;
 pub mod spherical_harmonics_rotate;
 pub mod storm_vertical_profile;
 pub mod sunset_inscatter_tint;
@@ -263,6 +264,7 @@ pub use specular_aa::{
     GpuSpecularAa, SpecularAaBatchQuery, SpecularAaScalarQuery, SpecularAaScalarSample,
     SpecularAaScalars,
 };
+pub use sphere_aabb::{GpuSphereAabb, SphereAabbQuery};
 pub use spherical_harmonics_rotate::{
     GpuSphericalHarmonicsRotate, ShRotationProbe, ShRotationResult, L2_COEFF_COUNT,
 };
