@@ -102,6 +102,6 @@ pub use narrowphase::{
 pub use radix::{cpu_radix_sort_keys, cpu_radix_sort_pairs, GpuRadixSort};
 pub use scan::{cpu_compact, cpu_exclusive_scan, GpuScan};
 pub use xpbd::{
-    cpu_solve, Colouring, DistanceConstraint, GpuIslandedXpbdSolver, GpuXpbdSolver, IslandStep,
-    IslandedSolver, ParticleState, XpbdConfig, XpbdError,
+    cpu_solve, tgs_solve, Colouring, DistanceConstraint, GpuIslandedXpbdSolver, GpuXpbdSolver,
+    IslandStep, IslandedSolver, ParticleState, SoftParams, TgsConfig, XpbdConfig, XpbdError,
 };

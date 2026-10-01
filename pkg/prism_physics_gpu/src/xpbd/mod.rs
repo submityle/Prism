@@ -36,6 +36,8 @@ mod gpu;
 mod gpu_islanded;
 mod islanded;
 mod state;
+mod tgs;
+mod tgs_soft;
 
 pub use coloring::{ColouredEdge, Colouring, MAX_COLOURS};
 pub use config::{XpbdConfig, XpbdError};
@@ -45,3 +47,5 @@ pub use gpu::GpuXpbdSolver;
 pub use gpu_islanded::GpuIslandedXpbdSolver;
 pub use islanded::{IslandStep, IslandedSolver};
 pub use state::ParticleState;
+pub use tgs::{TgsConfig, tgs_solve};
+pub use tgs_soft::SoftParams;
