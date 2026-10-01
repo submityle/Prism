@@ -438,6 +438,16 @@
 //!   RGB-primary [`melanin`] twin (per-wavelength `LUT` interpolation versus
 //!   three fixed-primary channels), checked within the fma tolerance
 //!   (see [`spectrum_sample_map`]).
+//! * [`GpuHairHeroWavelengths`] evaluates
+//!   [`hero_wavelengths`](prism_render_architecture::hair::spectral_absorption::hero_wavelengths)
+//!   paired with
+//!   [`hero_sigma_a`](prism_render_architecture::hair::spectral_absorption::hero_sigma_a),
+//!   the `Wilkie` 2014 hero-wavelength stratified sampler that turns a
+//!   `(u, rotate)` stratified coordinate into four quarter-band cyclic
+//!   wavelengths and folds each into `sigma_a` — one thread per sample; a
+//!   distinct sibling of the [`spectrum_sample_map`] twin (derived cyclic
+//!   wavelengths versus caller-supplied ones), checked within the fma
+//!   tolerance (see [`hero_wavelengths`]).
 //! * [`GpuHairCurlWind`] evaluates
 //!   [`curl_wind_map`](prism_render_architecture::hair::wind_field::curl_wind_map),
 //!   the divergence-free `Bridson` 2007 curl-noise wind field that maps a
@@ -529,6 +539,7 @@ pub mod forward_scatter_power;
 pub mod forward_scatter_sample;
 pub mod frames;
 pub mod guide_solver;
+pub mod hero_wavelengths;
 pub mod importance;
 pub mod interp;
 pub mod line_coverage;
@@ -589,6 +600,7 @@ pub use forward_scatter_power::{
 pub use forward_scatter_sample::{GpuHairForwardScatterSample, ScatterQuery};
 pub use frames::{GpuStrandFrame, GpuStrandFrames};
 pub use guide_solver::GpuGuideSolver;
+pub use hero_wavelengths::GpuHairHeroWavelengths;
 pub use importance::GpuHairImportance;
 pub use interp::GpuHairInterp;
 pub use line_coverage::{reference_coverage, GpuHairLineCoverage};
