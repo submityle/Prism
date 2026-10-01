@@ -636,10 +636,39 @@ pub fn death_star(point: [f32; 3], large_radius: f32, small_radius: f32, bite_di
     }
 }
 
+/// Signed distance from `point` to a solid right circular cone with its apex
+/// at the origin, opening downward along `-y`, with base `base_radius` at
+/// height `-height` (so the cap disc lies in the plane `y = -height`). The
+/// solid is bounded by the slanted lateral surface and the flat circular base.
+///
+/// This is Inigo Quilez's exact `sdCone`, reformulated to take the base radius
+/// and height directly (`q = (base_radius, -height)` is the apex-to-rim edge in
+/// the meridian plane) so no trigonometry is needed. In the meridian plane
+/// `w = (length(point.xz), point.y)` the distance is the smaller of the squared
+/// distances to the lateral edge segment (`a`) and to the base cap segment
+/// (`b`), with the sign recovered from the two half-plane tests. Built from
+/// `clamp`, `sign`, `min`, `max`, dot products, and a single `sqrt`, so it
+/// stays transcendental-free.
+pub fn cone_sdf(point: [f32; 3], base_radius: f32, height: f32) -> f32 {
+    // Apex-to-base-rim edge in the meridian (radial, axial) plane.
+    let q = [base_radius, -height];
+    let w = [length2([point[0], point[2]]), point[1]];
+    // Nearest point on the lateral edge segment (clamped projection).
+    let t = ((w[0] * q[0] + w[1] * q[1]) / dot2_2(q)).clamp(0.0, 1.0);
+    let a = [w[0] - q[0] * t, w[1] - q[1] * t];
+    // Nearest point on the base cap segment (radial clamp, fixed axial).
+    let u = (w[0] / q[0]).clamp(0.0, 1.0);
+    let b = [w[0] - q[0] * u, w[1] - q[1]];
+    let k = q[1].signum();
+    let d = dot2_2(a).min(dot2_2(b));
+    let sign = (k * (w[0] * q[1] - w[1] * q[0])).max(k * (w[1] - q[1]));
+    d.max(0.0).sqrt() * sign.signum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        box_frame, box_sdf, capped_cone, capped_cylinder, capped_torus, capsule, cut_hollow_sphere, cut_sphere,
+        box_frame, box_sdf, capped_cone, capped_cylinder, capped_torus, capsule, cone_sdf, cut_hollow_sphere, cut_sphere,
         death_star, ellipsoid_sdf, hex_prism, length2, link, octahedron, plane, pyramid, rhombus, round_box,
         round_cone_sdf, solid_angle, sphere, torus, triangular_prism, vesica,
     };
@@ -1153,5 +1182,26 @@ mod tests {
         // circle; values cross-checked against a brute-force surface sampler.
         assert!((death_star([2.0, 0.0, 0.0], ra, rb, d) - 1.207_122).abs() < 1e-5);
         assert!((death_star([0.9, 0.0, 0.0], ra, rb, d) - 0.464_451).abs() < 1e-5);
+    }
+
+    #[test]
+    fn cone_sdf_apex_base_and_lateral_surface() {
+        let (r, h) = (0.5f32, 1.0f32);
+        // Straight above the apex: distance is the gap to the apex.
+        assert!((cone_sdf([0.0, 0.5, 0.0], r, h) - 0.5).abs() < 1e-6);
+        // Below the base disc on the axis: distance to the base plane.
+        assert!((cone_sdf([0.0, -1.5, 0.0], r, h) - 0.5).abs() < 1e-6);
+        // On the lateral surface (half height has half the base radius).
+        assert!(cone_sdf([0.25, -0.5, 0.0], r, h).abs() < 1e-6);
+        // On the base rim.
+        assert!(cone_sdf([0.5, -1.0, 0.0], r, h).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cone_sdf_interior_is_negative_perpendicular_distance() {
+        let (r, h) = (0.5f32, 1.0f32);
+        // Inside, nearest feature is the slanted face: -(0.5 / sqrt(5)).
+        let expected = -0.5f32 / (5.0f32).sqrt();
+        assert!((cone_sdf([0.0, -0.5, 0.0], r, h) - expected).abs() < 1e-6);
     }
 }
