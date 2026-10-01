@@ -157,6 +157,35 @@ pub fn elongate_correction(point: [f32; 3], half_extent: [f32; 3]) -> f32 {
     qx.max(qy).max(qz).min(0.0)
 }
 
+/// Two-dimensional [`elongate`]: stretches a 2D profile into a slab by carving
+/// the `[-h, h]` core out of each axis of the query point.
+///
+/// Mirrors the 3D transform exactly — `p - clamp(p, -h, h)` per axis — and is
+/// likewise exact only in the exterior. Pair it with [`elongate_2d_correction`]
+/// for an exact field everywhere:
+/// `profile(elongate_2d(p, h)) + elongate_2d_correction(p, h)`. Useful for
+/// shaping a 2D profile before [`revolution`] or [`extrude`].
+pub fn elongate_2d(point: [f32; 2], half_extent: [f32; 2]) -> [f32; 2] {
+    [
+        point[0] - point[0].clamp(-half_extent[0], half_extent[0]),
+        point[1] - point[1].clamp(-half_extent[1], half_extent[1]),
+    ]
+}
+
+/// Interior distance correction for [`elongate_2d`], the 2D companion to
+/// [`elongate_correction`].
+///
+/// Adds the (non-positive) signed distance into the inserted elongation box:
+/// `min(max(|p.x| - h.x, |p.y| - h.y), 0)`, and zero outside it. Combined with
+/// [`elongate_2d`] it is exact everywhere — elongating a circle of radius `r`
+/// by half-extents `h` reproduces, to float round-off, a rounded box of outer
+/// half-extents `h + r` and corner radius `r`.
+pub fn elongate_2d_correction(point: [f32; 2], half_extent: [f32; 2]) -> f32 {
+    let qx = point[0].abs() - half_extent[0];
+    let qy = point[1].abs() - half_extent[1];
+    qx.max(qy).min(0.0)
+}
+
 /// Mirrors the field across the selected coordinate planes by folding those
 /// axes to their absolute value, instancing a symmetric copy of the primitive.
 ///
@@ -267,10 +296,12 @@ pub fn extrude(d2d: f32, z: f32, half_height: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        elongate, elongate_correction, extrude, fold_plane, limited_repeat, mirror, mirror_repeat, onion,
+        elongate, elongate_2d, elongate_2d_correction, elongate_correction, extrude, fold_plane, limited_repeat, mirror, mirror_repeat, onion,
         repeat, revolution, round_distance, scale_distance, scale_point, translate,
     };
-    use crate::ray_scene::sdf_primitives::{capped_cylinder, round_box, sphere, torus};
+    use crate::ray_scene::sdf_primitives::{
+        capped_cylinder, circle_2d, round_box, rounded_box_2d, sphere, torus,
+    };
 
     #[test]
     fn extrude_of_a_circle_matches_a_capped_cylinder() {
@@ -567,6 +598,47 @@ mod tests {
             maxerr = maxerr.max((got - want).abs());
         }
         assert!(maxerr < 1e-5, "elongate-exact vs round_box maxerr = {maxerr}");
+    }
+
+    #[test]
+    fn elongate_2d_matches_the_3d_transform_on_a_slice() {
+        // The 2D transform must agree with the 3D one on the shared axes.
+        let h2 = [1.0, 0.5];
+        let h3 = [1.0, 0.5, 0.0];
+        for p in [[2.0, 0.1], [0.3, 0.8], [-1.5, -0.2], [0.0, 0.0]] {
+            let got = elongate_2d(p, h2);
+            let want = elongate([p[0], p[1], 0.0], h3);
+            assert!((got[0] - want[0]).abs() < 1e-6 && (got[1] - want[1]).abs() < 1e-6);
+        }
+        // Correction term matches too (z extent zero -> same max over x,y).
+        let c2 = elongate_2d_correction([0.2, 0.1], h2);
+        let want = (0.2_f32 - 1.0).max(0.1 - 0.5).min(0.0);
+        assert!((c2 - want).abs() < 1e-6);
+    }
+
+    #[test]
+    fn elongate_2d_plus_correction_of_a_circle_matches_a_rounded_box_2d() {
+        // Exact 2D elongation: circle(radius r) elongated by half-extents h is
+        // identically a rounded box of outer half-extents h + r and corner
+        // radius r. Verified over a deterministic sweep against the
+        // independently derived `rounded_box_2d`.
+        let mut state: u32 = 0x0bad_c0de;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state as f32 / u32::MAX as f32
+        };
+        let mut maxerr = 0.0f32;
+        for _ in 0..5000 {
+            let h = [next() * 2.0, next() * 2.0];
+            let r = next() * 1.5 + 0.05;
+            let p = [next() * 8.0 - 4.0, next() * 8.0 - 4.0];
+            let got = circle_2d(elongate_2d(p, h), r) + elongate_2d_correction(p, h);
+            let want = rounded_box_2d(p, [h[0] + r, h[1] + r], [r, r, r, r]);
+            maxerr = maxerr.max((got - want).abs());
+        }
+        assert!(maxerr < 1e-5, "elongate_2d-exact vs rounded_box_2d maxerr = {maxerr}");
     }
 
     #[test]
