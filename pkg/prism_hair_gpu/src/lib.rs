@@ -671,6 +671,7 @@
 
 pub mod adaptive_transmittance;
 pub mod analysis_reduce;
+pub mod apply_wind;
 pub mod barrier_contact;
 pub mod bin_samples;
 pub mod bind_follicle;
@@ -748,6 +749,7 @@ pub use adaptive_transmittance::{
     reference_adaptive_transmittance_sample, GpuHairAdaptiveTransmittance,
 };
 pub use analysis_reduce::{reference_reduce, GpuHairAnalysisReduce};
+pub use apply_wind::{reference_apply_wind, GpuHairApplyWind};
 pub use barrier_contact::{reference_resolve, ContactInput, ContactOutput, GpuHairBarrierContact};
 pub use bin_samples::GpuHairBinSamples;
 pub use bind_follicle::{reference_bind_follicle, GpuHairBindFollicle};

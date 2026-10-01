@@ -26,4 +26,4 @@ pub mod tearing;
 mod strain;
 
 pub use plasticity::{apply_plasticity, plastic_rest_length, PlasticParams};
-pub use tearing::{apply_tearing, tear_flags, tear_report, TearReport, TearingParams};
+pub use tearing::{apply_tearing, tear_flag, tear_flags, tear_report, TearReport, TearingParams};

@@ -148,8 +148,8 @@ pub use soft::constraint::{
     StrainLimitConstraint, TetraVolumeConstraint,
 };
 pub use soft::damage::{
-    apply_plasticity, apply_tearing, plastic_rest_length, tear_flags, tear_report, PlasticParams,
-    TearReport, TearingParams,
+    apply_plasticity, apply_tearing, plastic_rest_length, tear_flag, tear_flags, tear_report,
+    PlasticParams, TearReport, TearingParams,
 };
 pub use soft::particle::{ParticleHandle, ParticleStorage};
 pub use soft::solver::{

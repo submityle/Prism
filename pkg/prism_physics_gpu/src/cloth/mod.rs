@@ -46,6 +46,7 @@ pub mod plasticity;
 pub mod prep;
 pub mod pressure;
 pub mod strain_limit;
+pub mod tearing;
 
 pub use aero::{
     build_cloth_aero_prep, cpu_cloth_aero, ClothAeroParams, ClothAeroPrep, ClothAeroTriangle,
@@ -73,6 +74,7 @@ pub use strain_limit::{
     colour_strain_limit, cpu_cloth_strain_limit, ClothStrainLimitConstraint, GpuClothStrainLimit,
     StrainLimitColoring,
 };
+pub use tearing::{cpu_cloth_tearing, ClothTearEdge, GpuClothTearing};
 
 /// Which sample pairs one cloth self-collision pass resolves.
 ///

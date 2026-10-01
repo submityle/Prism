@@ -24,7 +24,7 @@ use glam::Vec3;
 use crate::math::scalar::Real;
 use crate::soft::constraint::DistanceConstraint;
 
-use super::strain::edge_strain;
+use super::strain::{edge_length, edge_strain, EPS_REST};
 
 /// Tuning for distance-constraint tearing.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -93,11 +93,40 @@ pub fn tear_flags(
     let params = params.sanitized();
     constraints
         .iter()
-        .map(|c| match edge_strain(c, positions) {
-            Some(strain) => strain > params.break_strain,
+        .map(|c| match edge_length(c, positions) {
+            Some(len) => tear_flag(c.rest_length, len, params.break_strain),
             None => false,
         })
         .collect()
+}
+
+/// Decides whether a single distance edge tears, from its current `rest_length`,
+/// its current `length` (the separation of its two endpoints), and a
+/// `break_strain` threshold.
+///
+/// Returns `true` exactly when the edge has a valid rest length
+/// (`> EPS_REST`) and a tensile strain `(length - rest_length) / rest_length`
+/// strictly exceeding `break_strain`; a degenerate rest length never tears.
+/// `break_strain` is sanitized internally (a `NaN` or negative threshold maps to
+/// infinity, so nothing tears), so the function is safe to call with raw
+/// authored values.
+///
+/// This is the scalar kernel shared by the sequential [`tear_flags`]/
+/// [`apply_tearing`] passes and the `prism_physics_gpu` cloth tearing twin, so
+/// both agree on the break decision up to floating-point rounding. Out-of-range
+/// endpoints are handled by the caller (an inert edge never tears).
+#[must_use]
+pub fn tear_flag(rest_length: Real, length: Real, break_strain: Real) -> bool {
+    let break_strain = if break_strain.is_nan() || break_strain < 0.0 {
+        Real::INFINITY
+    } else {
+        break_strain
+    };
+    if rest_length <= EPS_REST {
+        return false;
+    }
+    let strain = (length - rest_length) / rest_length;
+    strain > break_strain
 }
 
 /// Removes every distance edge whose tensile strain exceeds
@@ -167,7 +196,10 @@ mod tests {
 
     #[test]
     fn negative_and_nan_thresholds_sanitize_to_infinity() {
-        assert_eq!(TearingParams::new(-1.0).sanitized().break_strain, Real::INFINITY);
+        assert_eq!(
+            TearingParams::new(-1.0).sanitized().break_strain,
+            Real::INFINITY
+        );
         assert_eq!(
             TearingParams::new(Real::NAN).sanitized().break_strain,
             Real::INFINITY
@@ -233,5 +265,23 @@ mod tests {
         assert_eq!(report.inspected, 2);
         assert_eq!(report.over_threshold, 1);
         assert!((report.max_strain - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn tear_flag_scalar_matches_edge_decision() {
+        // Stretched past the threshold tears.
+        assert!(tear_flag(1.0, 2.0, 0.5));
+        // Within the threshold stays.
+        assert!(!tear_flag(1.0, 1.4, 0.5));
+        // Compression never tears.
+        assert!(!tear_flag(1.0, 0.1, 0.5));
+        // Degenerate rest length never tears.
+        assert!(!tear_flag(0.0, 10.0, 0.5));
+        assert!(!tear_flag(1e-12, 10.0, 0.5));
+        // NaN / negative threshold sanitizes to infinity (nothing tears).
+        assert!(!tear_flag(1.0, 100.0, Real::NAN));
+        assert!(!tear_flag(1.0, 100.0, -1.0));
+        // Boundary is strict: strain exactly at the threshold does not tear.
+        assert!(!tear_flag(1.0, 1.5, 0.5));
     }
 }
