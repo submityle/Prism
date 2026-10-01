@@ -51,6 +51,7 @@ extern crate alloc;
 pub mod air;
 pub mod ambisonics;
 pub mod attenuation;
+pub mod center_time;
 pub mod cone;
 pub mod convex_room;
 pub mod diffraction;
@@ -93,6 +94,7 @@ pub use ambisonics::{
     FOA_CHANNELS, FoaEncoderNode, decode_foa, encode_foa_gains, encode_foa_sample, rotate_foa,
 };
 pub use attenuation::{Attenuation, DistanceModel};
+pub use center_time::{CenterTime, center_time_ms, center_time_seconds};
 pub use cone::Cone;
 pub use convex_room::{
     ConvexReflections, ConvexRoom, MAX_PLANES, ReflectionPlane, compute_convex_reflections,
