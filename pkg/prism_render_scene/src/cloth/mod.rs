@@ -84,6 +84,8 @@ mod resources;
 #[cfg(test)]
 mod self_ccd_gpu_tests;
 #[cfg(test)]
+mod self_ccd_parity;
+#[cfg(test)]
 mod self_collision_gpu_tests;
 #[cfg(test)]
 mod shader_tests;
