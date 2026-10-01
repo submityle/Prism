@@ -12,6 +12,7 @@ mod binning;
 mod culling;
 mod diagnostics;
 mod hzb_footprint;
+mod hzb_projection;
 mod lod;
 mod occlusion;
 mod output;
@@ -29,6 +30,7 @@ pub use binning::{
 pub use culling::{cull_view, CullReason, VisibilityInput};
 pub use diagnostics::VisibilityDiagnostics;
 pub use hzb_footprint::{conservative_occluder_reverse_z, HzbFootprint};
+pub use hzb_projection::{project_world_aabb, ProjectedBounds, WorldAabb};
 pub use lod::{GeometryLod, GeometryLodChain, LodSelection};
 pub use occlusion::{HzbPhase, HzbTest};
 pub use output::{BufferRange, ViewVisibilityOutput, VisibilityFrame};
