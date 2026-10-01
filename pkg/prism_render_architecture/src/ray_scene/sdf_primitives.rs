@@ -1699,13 +1699,47 @@ pub fn circle_2d(point: [f32; 2], radius: f32) -> f32 {
     length2(point) - radius
 }
 
+/// Exact signed distance to an upward-pointing regular five-pointed star in 2D
+/// (Inigo Quilez `sdStar5`).
+///
+/// `radius` is the outer-tip radius and `inner_ratio` in `(0, 1)` scales the
+/// inner-vertex radius (`inner = radius * inner_ratio`). The query is folded
+/// into one 36 degree wedge by two mirror reflections against fixed
+/// `cos 36 deg`/`sin 36 deg` constants and reduced to a single edge distance, so
+/// the field is exact and uses only `abs`, `max`, `clamp`, `sqrt`, `sign` and
+/// dot products (no runtime trigonometry).
+pub fn star5_2d(point: [f32; 2], radius: f32, inner_ratio: f32) -> f32 {
+    // k1 = (cos 36 deg, -sin 36 deg); the second reflection mirrors it across
+    // the y axis. Both are compile-time constants, keeping the fold trig-free.
+    const K1X: f32 = 0.809_017;
+    const K1Y: f32 = -0.587_785_25;
+    let mut px = point[0].abs();
+    let mut py = point[1];
+    let d1 = (K1X * px + K1Y * py).max(0.0);
+    px -= 2.0 * d1 * K1X;
+    py -= 2.0 * d1 * K1Y;
+    let d2 = (-K1X * px + K1Y * py).max(0.0);
+    px -= 2.0 * d2 * (-K1X);
+    py -= 2.0 * d2 * K1Y;
+    px = px.abs();
+    py -= radius;
+    // Edge running from the outer tip towards the neighbouring inner vertex.
+    let bax = inner_ratio * (-K1Y);
+    let bay = inner_ratio * K1X - 1.0;
+    let bb = bax * bax + bay * bay;
+    let h = ((px * bax + py * bay) / bb).clamp(0.0, radius);
+    let dx = px - bax * h;
+    let dy = py - bay * h;
+    (dx * dx + dy * dy).sqrt() * (py * bax - px * bay).signum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         arc, box_frame, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_torus, capsule, circle_2d, cone_sdf, cross_2d, cut_disk_2d, cut_hollow_sphere,
         cut_sphere, cylinder_segment, death_star, egg_2d, ellipsoid_sdf, equilateral_triangle_2d, heart_2d, hex_prism, hexagram_2d, infinite_cone, infinite_cylinder, isosceles_triangle_2d, length2, line_sdf, link, moon,
         octagon_prism, octahedron, oriented_box_2d, parallelogram, pie, plane, polygon_2d, pyramid, quad_sdf, regular_hexagon_2d, regular_octagon_2d, regular_pentagon_2d, rhombus, rhombus_2d, round_box, round_cone_sdf,
-        round_cone_segment, rounded_box_2d, rounded_cylinder, rounded_x, segment_2d, solid_angle, sphere, torus, trapezoid_isosceles, triangle_sdf, triangular_prism,
+        round_cone_segment, rounded_box_2d, rounded_cylinder, rounded_x, segment_2d, solid_angle, sphere, star5_2d, torus, trapezoid_isosceles, triangle_sdf, triangular_prism,
         uneven_capsule_2d, vesica, vesica_segment,
     };
 
@@ -3153,6 +3187,46 @@ mod tests {
             let want = best.sqrt() * sign;
             let got = circle_2d(p, r);
             assert!((got - want).abs() < 2e-3, "p={p:?} got={got} want={want}");
+        }
+    }
+
+    #[test]
+    fn star5_2d_matches_decagon_reference() {
+        // A regular five-pointed star is a 10-gon with alternating outer/inner
+        // radii; build it from first principles and cross-check sdPolygon.
+        let r = 1.0f32;
+        let rf = 0.45f32;
+        let mut verts: Vec<[f32; 2]> = Vec::new();
+        for k in 0..5 {
+            let ao = (90.0 + 72.0 * k as f32).to_radians();
+            verts.push([r * ao.cos(), r * ao.sin()]);
+            let ai = (90.0 + 36.0 + 72.0 * k as f32).to_radians();
+            verts.push([r * rf * ai.cos(), r * rf * ai.sin()]);
+        }
+        // Top outer tip and an inner vertex sit on the surface.
+        assert!(star5_2d([0.0, r], r, rf).abs() < 1e-4);
+        let ai = (90.0f32 + 36.0).to_radians();
+        assert!(star5_2d([r * rf * ai.cos(), r * rf * ai.sin()], r, rf).abs() < 1e-4);
+        let samples: [[f32; 2]; 14] = [
+            [0.0, 0.0],
+            [0.0, 0.9],
+            [0.0, 1.3],
+            [0.6, 0.1],
+            [-0.6, 0.1],
+            [0.3, -0.8],
+            [-0.3, -0.8],
+            [0.9, 0.9],
+            [-0.9, -0.9],
+            [0.2, 0.2],
+            [1.2, 0.0],
+            [-1.2, 0.0],
+            [0.0, -1.1],
+            [0.45, 0.45],
+        ];
+        for s in samples {
+            let got = star5_2d(s, r, rf);
+            let want = polygon_sdf2(s[0], s[1], &verts);
+            assert!((got - want).abs() < 1e-4, "s={s:?} got={got} want={want}");
         }
     }
 
