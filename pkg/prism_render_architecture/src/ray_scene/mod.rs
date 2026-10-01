@@ -333,6 +333,12 @@
 //!   system for tangent/bitangent, accumulates area-weighted per vertex,
 //!   Gram-Schmidts against the normal, and packs an `xyzw` handedness tangent —
 //!   the attribute normal mapping, parallax, and anisotropy require.
+//! - [`silhouette_tessellation`] — view-dependent tessellation
+//!   ([`silhouette_tessellation::SilhouetteTessellation`]): drives
+//!   subdivision from the viewer rather than curvature, refining each
+//!   sub-patch edge toward the cap as its facing term `n · v` approaches
+//!   zero (the silhouette) and capping it where the term changes sign;
+//!   crack-free by the same global-edge agreement as the adaptive path.
 //! - [`mesh_welding`] — spatial vertex welding plus degenerate-triangle
 //!   cleanup ([`mesh_welding::weld_vertices`]): collapses coincident or
 //!   near-coincident vertices onto one representative (exact bit-hash at
@@ -496,6 +502,7 @@ pub mod adaptive_tessellation;
 pub mod displacement_tessellation;
 pub mod patch_grid;
 pub mod mesh_tangents;
+pub mod silhouette_tessellation;
 pub mod mesh_welding;
 pub mod mesh_smooth_normals;
 pub mod ellipsoid;
@@ -598,6 +605,7 @@ pub use adaptive_tessellation::AdaptiveTessellation;
 pub use displacement_tessellation::{DisplacedField, DisplacementTessellation};
 pub use patch_grid::PatchGrid;
 pub use mesh_tangents::{compute_tangents, TangentError};
+pub use silhouette_tessellation::SilhouetteTessellation;
 pub use mesh_welding::{weld_vertices, WeldError};
 pub use mesh_smooth_normals::{compute_smooth_normals, with_smooth_normals};
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
