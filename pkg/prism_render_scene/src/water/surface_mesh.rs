@@ -45,6 +45,8 @@ use bytemuck::{Pod, Zeroable};
 
 use prism_render_architecture::water::gpu::SurfaceGrid;
 
+use crate::water::abi::GpuWaterSurfaceMeshParams;
+
 /// Build the triangle-list index buffer for one surface patch.
 ///
 /// Returns `quad_count * 6` indices (two triangles per interior quad), each a
@@ -99,6 +101,30 @@ pub(crate) fn surface_index_data(grid: SurfaceGrid) -> Vec<u32> {
     }
 
     indices
+}
+
+/// Reconstruct the [`SurfaceGrid`] from the compute sweep's authored mesh
+/// params so the raster draw node sizes and fills the index buffer from the
+/// same lattice resolution the sweep placed, with no second source of truth.
+///
+/// Reads only the vertex counts: `grid_dims[0]` vertices along x and
+/// `grid_dims[1]` along z (see [`GpuWaterSurfaceMeshParams::grid_dims`]). The
+/// remaining lanes (`[2]` total vertex count, `[3]` lane width) are sweep-side
+/// bookkeeping the raster path recomputes from the grid, so they are
+/// intentionally not read here.
+#[must_use]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "consumed by the water-surface raster draw node (the following slice) to size the index buffer; exercised now by the unit tests in this module"
+    )
+)]
+pub(crate) fn surface_grid_from_params(params: &GpuWaterSurfaceMeshParams) -> SurfaceGrid {
+    SurfaceGrid {
+        verts_x: params.grid_dims[0],
+        verts_z: params.grid_dims[1],
+    }
 }
 
 /// Host mirror of the `WaterSurfaceView` uniform `struct` in
@@ -397,6 +423,54 @@ mod tests {
             (area2 - patch_area).abs() < 1e-3,
             "tiled area {area2} must equal twice the patch area {patch_area}"
         );
+    }
+
+    // ------------------------------------------------- surface_grid_from_params
+
+    /// Authored mesh params whose bookkeeping lanes deliberately disagree with
+    /// the lattice vertex counts, so a test proves the reconstruction reads the
+    /// resolution lanes and nothing else.
+    fn mesh_params(verts_x: u32, verts_z: u32) -> GpuWaterSurfaceMeshParams {
+        GpuWaterSurfaceMeshParams {
+            // [2]/[3] are intentionally bogus: the grid must come from [0]/[1].
+            grid_dims: [verts_x, verts_z, 0xDEAD_BEEF, 0x7FFF_FFFF],
+            patch_origin: [1.0, 2.0, 3.0, 0.0],
+            patch_extent: [10.0, 20.0, 1.0, 1.0],
+        }
+    }
+
+    #[test]
+    fn grid_from_params_reads_the_lattice_vertex_counts() {
+        let grid = surface_grid_from_params(&mesh_params(7, 5));
+        assert_eq!(grid.verts_x, 7);
+        assert_eq!(grid.verts_z, 5);
+    }
+
+    #[test]
+    fn grid_from_params_ignores_the_bookkeeping_lanes() {
+        // Flipping only [2]/[3] must not change the reconstructed grid.
+        let a = surface_grid_from_params(&mesh_params(4, 6));
+        let mut params = mesh_params(4, 6);
+        params.grid_dims[2] = 0;
+        params.grid_dims[3] = 0;
+        let b = surface_grid_from_params(&params);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn grid_from_params_feeds_an_index_buffer_of_the_contract_length() {
+        // The reconstructed grid and the index data agree by construction: the
+        // slice the draw node allocates is exactly `index_count` long.
+        let params = mesh_params(5, 4);
+        let grid = surface_grid_from_params(&params);
+        assert_eq!(surface_index_data(grid).len() as u32, grid.index_count());
+    }
+
+    #[test]
+    fn grid_from_params_degenerate_lattice_yields_an_empty_index_buffer() {
+        // A single-row patch has no interior quad; the draw node must skip it.
+        let grid = surface_grid_from_params(&mesh_params(1, 9));
+        assert!(surface_index_data(grid).is_empty());
     }
 
     // --------------------------------------------------------------- uniform
