@@ -1910,13 +1910,36 @@ pub fn box_frame_2d(point: [f32; 2], half_extent: [f32; 2], thickness: f32) -> f
     box_2d(point, half_extent).abs() - thickness
 }
 
+/// Exact signed distance to a 2D tunnel / archway (Inigo Quilez `sdTunnel`):
+/// a flat-bottomed rectangle of half-width `half_width` spanning `y` in
+/// `[-height, 0]` capped by a semicircle of radius `half_width` over `y >= 0`.
+///
+/// Folding with `abs` on `x` and flipping `y` reduces the query to one quadrant.
+/// Two candidate distances are combined: `d1` measures the rectangular walls
+/// (clamped corner offset) while `d2` switches, for the capped region, to the
+/// radial distance `length(p) - half_width` so the semicircular arch is exact.
+/// The nearer squared distance is taken and the interior sign recovered from
+/// `max(q.x, q.y) < 0`. Built from `abs`, `min`, `max` and `sqrt`, so it is exact
+/// and transcendental-free.
+pub fn tunnel_2d(point: [f32; 2], half_width: f32, height: f32) -> f32 {
+    let px = point[0].abs();
+    let py = -point[1];
+    let mut qx = px - half_width;
+    let qy = py - height;
+    let d1 = dot2_2([qx.max(0.0), qy]);
+    qx = if py > 0.0 { qx } else { length2([px, py]) - half_width };
+    let d2 = dot2_2([qx, qy.max(0.0)]);
+    let d = d1.min(d2).sqrt();
+    if qx.max(qy) < 0.0 { -d } else { d }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         annulus_2d, arc, box_2d, box_frame, box_frame_2d, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_torus, capsule, capsule_2d, circle_2d, cone_sdf, cross_2d, cut_disk_2d, cut_hollow_sphere,
         cut_sphere, cylinder_segment, death_star, egg_2d, ellipsoid_sdf, equilateral_triangle_2d, heart_2d, hex_prism, hexagram_2d, infinite_cone, infinite_cylinder, isosceles_triangle_2d, length2, line_sdf, link, moon,
         octagon_prism, octahedron, oriented_box_2d, oriented_vesica_2d, parallelogram, pentagram_2d, pie, plane, polygon_2d, pyramid, quad_sdf, regular_hexagon_2d, regular_octagon_2d, regular_pentagon_2d, rhombus, rhombus_2d, round_box, round_cone_sdf,
-        round_cone_segment, rounded_box_2d, rounded_cylinder, rounded_x, segment_2d, solid_angle, sphere, star5_2d, torus, trapezoid_isosceles, triangle_2d, triangle_sdf, triangular_prism,
+        round_cone_segment, rounded_box_2d, rounded_cylinder, rounded_x, segment_2d, solid_angle, sphere, star5_2d, torus, trapezoid_isosceles, triangle_2d, triangle_sdf, triangular_prism, tunnel_2d,
         uneven_capsule_2d, vertical_capsule, vesica, vesica_2d, vesica_segment,
     };
 
@@ -2145,6 +2168,62 @@ mod tests {
             }
         }
         assert!(maxerr < 1e-5, "maxerr = {maxerr}");
+    }
+
+    #[test]
+    fn tunnel_2d_closed_forms() {
+        let w = 1.2_f32;
+        let h = 0.9_f32;
+        assert!(tunnel_2d([0.0, w], w, h).abs() < 1e-6); // arch apex
+        assert!(tunnel_2d([0.0, -h], w, h).abs() < 1e-6); // bottom centre
+        assert!(tunnel_2d([-w, -0.5], w, h).abs() < 1e-6); // on left wall
+        // Interior centre: nearest wall is whichever of (w, h) is smaller.
+        assert!((tunnel_2d([0.0, 0.0], w, h) - (-h.min(w))).abs() < 1e-6);
+        assert!((tunnel_2d([0.0, -h - 0.3], w, h) - 0.3).abs() < 1e-6); // below floor
+        assert!((tunnel_2d([0.0, w + 0.4], w, h) - 0.4).abs() < 1e-6); // above apex
+    }
+
+    #[test]
+    fn tunnel_2d_matches_region_boundary_reference() {
+        // Independent reference: region = rect(|x|<=w, -h<=y<=0) U
+        // half-disk(x^2+y^2<=w^2, y>=0); unsigned distance to the sampled
+        // boundary (floor, two walls, semicircular arch), signed by membership.
+        fn dist_seg(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
+            let ex = b[0] - a[0];
+            let ey = b[1] - a[1];
+            let t = (((p[0] - a[0]) * ex + (p[1] - a[1]) * ey) / (ex * ex + ey * ey))
+                .clamp(0.0, 1.0);
+            let qx = p[0] - (a[0] + ex * t);
+            let qy = p[1] - (a[1] + ey * t);
+            (qx * qx + qy * qy).sqrt()
+        }
+        let w = 1.2_f32;
+        let h = 0.9_f32;
+        let m = 1000usize;
+        let mut arc: Vec<[f32; 2]> = Vec::with_capacity(m + 1);
+        for i in 0..=m {
+            let a = std::f32::consts::PI * (i as f32) / (m as f32);
+            arc.push([w * a.cos(), w * a.sin()]);
+        }
+        let reference = |p: [f32; 2]| -> f32 {
+            let mut d = dist_seg(p, [-w, -h], [w, -h])
+                .min(dist_seg(p, [-w, -h], [-w, 0.0]))
+                .min(dist_seg(p, [w, -h], [w, 0.0]));
+            for i in 0..m {
+                d = d.min(dist_seg(p, arc[i], arc[i + 1]));
+            }
+            let inside = (p[0].abs() <= w && p[1] >= -h && p[1] <= 0.0)
+                || (p[0] * p[0] + p[1] * p[1] <= w * w && p[1] >= 0.0);
+            if inside { -d } else { d }
+        };
+        let mut maxerr = 0.0_f32;
+        for gy in -24..=24 {
+            for gx in -24..=24 {
+                let p = [gx as f32 * 0.1, gy as f32 * 0.1];
+                maxerr = maxerr.max((tunnel_2d(p, w, h) - reference(p)).abs());
+            }
+        }
+        assert!(maxerr < 5e-3, "maxerr = {maxerr}");
     }
 
     #[test]
