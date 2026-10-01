@@ -475,12 +475,49 @@ pub fn capped_torus(
     (p_dot_p + major_radius * major_radius - 2.0 * major_radius * k).max(0.0).sqrt() - tube_radius
 }
 
+/// Signed distance from `point` to a solid equilateral triangular prism
+/// extruded along the `z` axis, centred at the origin.
+///
+/// The cross-section is an equilateral triangle lying in the `xy` plane with
+/// side length `2 * size`: its apex sits at `(0, 2 * size / sqrt 3)` and its
+/// base edge runs between `(-size, -size / sqrt 3)` and `(size, -size / sqrt
+/// 3)`, giving an inradius of `size / sqrt 3`. The prism spans `-half_depth` to
+/// `half_depth` along `z`.
+///
+/// Evaluates Inigo Quilez's exact equilateral-triangle 2D distance (an `x`
+/// fold, a single slanted-edge fold, then a base-edge clamp, so corners carry
+/// the true vertex distance) and extrudes it exactly: the planar distance and
+/// the depth-cap excess are combined with the standard interior/exterior split.
+/// Every trigonometric term is baked into the `sqrt 3` constant, so evaluation
+/// is transcendental-free, and because the triangle is convex the extrusion
+/// stays an exact signed distance.
+pub fn triangular_prism(point: [f32; 3], size: f32, half_depth: f32) -> f32 {
+    /// Baked `sqrt 3`, the equilateral-triangle fold constant.
+    const SQRT3: f32 = 1.732_050_8;
+    // Exact 2D equilateral-triangle distance evaluated in the xy plane.
+    let mut x = point[0].abs() - size;
+    let mut y = point[1] + size / SQRT3;
+    if x + SQRT3 * y > 0.0 {
+        let folded_x = (x - SQRT3 * y) * 0.5;
+        let folded_y = (-SQRT3 * x - y) * 0.5;
+        x = folded_x;
+        y = folded_y;
+    }
+    x -= x.clamp(-2.0 * size, 0.0);
+    let planar = -length2([x, y]) * if y < 0.0 { -1.0 } else { 1.0 };
+    // Exact extrusion of the planar distance against the depth caps.
+    let cap = [planar, point[2].abs() - half_depth];
+    let inside = cap[0].max(cap[1]).min(0.0);
+    let outside = length2([cap[0].max(0.0), cap[1].max(0.0)]);
+    inside + outside
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         box_frame, box_sdf, capped_cone, capped_cylinder, capped_torus, capsule, cut_sphere,
         ellipsoid_sdf, hex_prism, length2, link, octahedron, plane, pyramid, rhombus, round_box,
-        sphere, torus, vesica,
+        sphere, torus, triangular_prism, vesica,
     };
 
     #[test]
@@ -814,5 +851,78 @@ mod tests {
         let cap_centre = [sin_a * major, cos_a * major];
         let expected = length2([q[0] - cap_centre[0], q[1] - cap_centre[1]]) - tube;
         assert!((capped_torus(q, sc, major, tube) - expected).abs() < 1e-6);
+    }
+
+    /// Baked `sqrt 3` for the triangular-prism geometry assertions.
+    const SQRT3_T: f32 = 1.732_050_8;
+
+    /// Minimum distance from a 2D `point` to the equilateral triangle used by
+    /// [`triangular_prism`] with the given `size`, measured by brute force over
+    /// its three edges. Serves as an independent reference for the analytic
+    /// planar distance.
+    fn tri_edge_distance(point: [f32; 2], size: f32) -> f32 {
+        let verts = [
+            [0.0, 2.0 * size / SQRT3_T],
+            [-size, -size / SQRT3_T],
+            [size, -size / SQRT3_T],
+        ];
+        let mut best = f32::MAX;
+        for i in 0..3 {
+            let a = verts[i];
+            let b = verts[(i + 1) % 3];
+            let ab = [b[0] - a[0], b[1] - a[1]];
+            let ap = [point[0] - a[0], point[1] - a[1]];
+            let t = ((ap[0] * ab[0] + ap[1] * ab[1]) / (ab[0] * ab[0] + ab[1] * ab[1]))
+                .clamp(0.0, 1.0);
+            let c = [a[0] + ab[0] * t, a[1] + ab[1] * t];
+            let d = length2([point[0] - c[0], point[1] - c[1]]);
+            best = best.min(d);
+        }
+        best
+    }
+
+    #[test]
+    fn triangular_prism_centre_is_negative_inradius() {
+        // Deep prism: the planar inradius dominates the depth cap.
+        let inradius = 1.0 / SQRT3_T;
+        assert!((triangular_prism([0.0, 0.0, 0.0], 1.0, 10.0) - (-inradius)).abs() < 1e-6);
+        // Shallow prism: the depth half-thickness dominates instead.
+        assert!((triangular_prism([0.0, 0.0, 0.0], 1.0, 0.1) - (-0.1)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn triangular_prism_apex_and_base_distances() {
+        // Straight above the apex: nearest feature is the apex vertex.
+        let apex_y = 2.0 / SQRT3_T;
+        assert!((triangular_prism([0.0, apex_y + 1.0, 0.0], 1.0, 10.0) - 1.0).abs() < 1e-6);
+        // Below the horizontal base edge: nearest feature is that edge.
+        let base_y = 1.0 / SQRT3_T;
+        assert!((triangular_prism([0.0, -base_y - 0.5, 0.0], 1.0, 10.0) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn triangular_prism_extrudes_exactly_along_z() {
+        // Over the interior footprint, past the depth cap: pure z overshoot.
+        assert!((triangular_prism([0.0, 0.0, 10.0], 1.0, 2.0) - 8.0).abs() < 1e-6);
+        // Corner of the end cap: diagonal of planar excess and depth excess.
+        let apex_y = 2.0 / SQRT3_T;
+        let expected = length2([0.5, 0.5]);
+        let got = triangular_prism([0.0, apex_y + 0.5, 2.5], 1.0, 2.0);
+        assert!((got - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn triangular_prism_planar_matches_brute_force() {
+        // Deep prism so the result reduces to the exact planar triangle SDF for
+        // z = 0 queries; compare exterior points against the brute-force edge
+        // distance.
+        for &p in &[[2.0, 2.0], [-1.5, 0.3], [0.7, -2.0], [3.0, 0.0]] {
+            let got = triangular_prism([p[0], p[1], 0.0], 1.0, 10.0);
+            let reference = tri_edge_distance(p, 1.0);
+            assert!(
+                (got - reference).abs() < 1e-5,
+                "point {p:?}: got {got}, reference {reference}"
+            );
+        }
     }
 }
