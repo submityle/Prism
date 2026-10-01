@@ -661,6 +661,26 @@ struct WaterGtaoConfig {
 
 @group(6) @binding(0) var<uniform> gtao_cfg: WaterGtaoConfig;
 
+// Screen-space one-bounce indirect-diffuse base (`@group(7)`): a single config
+// uniform. The transparent water surface gathers a single bounce of near-field
+// indirect diffuse out of the already-composited `@group(0)` `scene_color`
+// along the `GTAO` bent normal, marched over the shared reverse-Z Hi-Z pyramid
+// bound at `@group(3)`. This mirrors the cheap screen-space half of `UE5`
+// `Lumen`'s first bounce; the `ssgi_`-prefixed twins below match the
+// `prism_render_shading::gi::denoise::firefly` `CPU` golden verbatim.
+struct WaterSsgiConfig {
+    intensity: f32,
+    radius: f32,
+    max_luminance: f32,
+    min_cosine: f32,
+    step_count: u32,
+    sample_enable: u32,
+    _pad0: u32,
+    _pad1: u32,
+}
+
+@group(7) @binding(0) var<uniform> ssgi_cfg: WaterSsgiConfig;
+
 const GTAO_FRAC_PI_2: f32 = 1.5707964;
 const GTAO_PI: f32 = 3.1415927;
 

@@ -43,6 +43,7 @@ use super::surface_mesh::{build_surface_view, surface_index_data};
 use super::surface_motion::ViewWaterMotionUniform;
 use super::surface_pipeline::{ViewWaterSurfacePipelines, WaterSurfacePipelines};
 use super::surface_shading::SurfaceViewInputs;
+use super::surface_ssgi::GpuWaterSsgiConfig;
 use super::surface_ssr::{GpuWaterSsrConfig, WaterSsrFallback};
 use super::surface_vsm::WaterVsmFallback;
 
@@ -345,6 +346,31 @@ pub(crate) fn draw_water_surface(
         &BindGroupEntries::single(gtao_params_buffer.as_entire_binding()),
     );
 
+    // The `@group(7)` SSGI group: a one-bounce near-field indirect-diffuse
+    // gather that marches the `GTAO` bent normal over the shared `@group(3)`
+    // Hi-Z pyramid and reads `@group(0)` `scene_color`. Like `GTAO` it needs
+    // that depth pyramid, so it is gated on both the `SSGI` feature flag and a
+    // resident `ViewSsrTextures`; otherwise the config's `sample_enable` bit is
+    // clear and the shader adds no indirect diffuse. Radius and step budget
+    // track the shared opaque `SSGI` settings.
+    let ssgi_layout = cache.get_bind_group_layout(&surface_pipeline.ssgi_layout);
+    let ssgi_enable = settings.enable_ssgi && ssr_textures.is_some();
+    let ssgi_config = GpuWaterSsgiConfig::new(
+        ssgi_enable,
+        settings.ssgi_max_distance,
+        settings.ssgi_sample_count,
+    );
+    let ssgi_params_buffer = device.create_buffer_with_data(&BufferInitDescriptor {
+        label: Some("prism water surface ssgi params"),
+        contents: bytemuck::bytes_of(&ssgi_config),
+        usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+    });
+    let ssgi_group = device.create_bind_group(
+        "prism water surface ssgi",
+        &ssgi_layout,
+        &BindGroupEntries::single(ssgi_params_buffer.as_entire_binding()),
+    );
+
     // The `@group(4)` motion-vector group: the per-view current+previous
     // view-projection uniform `prepare_water_surface_motion` built this frame.
     // The fragment stage reprojects the surface's world position through both
@@ -391,6 +417,7 @@ pub(crate) fn draw_water_surface(
         pass.set_bind_group(4, &motion_group, &[]);
         pass.set_bind_group(5, &draw.froxel_group, &[]);
         pass.set_bind_group(6, &gtao_group, &[]);
+        pass.set_bind_group(7, &ssgi_group, &[]);
         pass.set_index_buffer(draw.index_buffer.slice(..), IndexFormat::Uint32);
         pass.draw_indexed(0..draw.index_count, 0, 0..1);
     }

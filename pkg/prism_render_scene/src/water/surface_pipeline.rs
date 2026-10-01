@@ -240,6 +240,12 @@ pub(crate) struct WaterSurfacePipelines {
     /// `@group(3)` Hi-Z pyramid it already binds, modulating the image-based
     /// ambient term with the surface's own occlusion (see [`super::surface_gtao`]).
     pub(crate) gtao_layout: BindGroupLayoutDescriptor,
+    /// `@group(7)` layout for the water surface's screen-space one-bounce
+    /// indirect-diffuse (`SSGI`) config uniform. The draw node binds a per-view
+    /// buffer here so the fragment stage can gather `scene_color` along the
+    /// `GTAO` bent normal over the `@group(3)` Hi-Z pyramid (see
+    /// [`super::surface_ssgi`]).
+    pub(crate) ssgi_layout: BindGroupLayoutDescriptor,
     /// The embedded `water_surface_raster.wesl` module both stages compile from.
     pub(crate) shader: Handle<Shader>,
 }
@@ -261,6 +267,7 @@ impl SpecializedRenderPipeline for WaterSurfacePipelines {
                 self.motion_layout.clone(),
                 self.froxel_layout.clone(),
                 self.gtao_layout.clone(),
+                self.ssgi_layout.clone(),
             ],
             immediate_size: 0,
             vertex: VertexState {
@@ -409,6 +416,14 @@ pub(crate) fn init_water_surface_pipelines(
         "prism water surface gtao",
         &super::surface_gtao::gtao_layout_entries(),
     );
+    // @group(7): the SSGI config uniform; the draw node binds a per-view buffer
+    // against this descriptor so the fragment stage can gather a one-bounce
+    // near-field indirect diffuse out of @group(0) scene_color along the GTAO
+    // bent normal.
+    let ssgi_layout = BindGroupLayoutDescriptor::new(
+        "prism water surface ssgi",
+        &super::surface_ssgi::ssgi_layout_entries(),
+    );
 
     commands.insert_resource(WaterSurfacePipelines {
         layout,
@@ -418,6 +433,7 @@ pub(crate) fn init_water_surface_pipelines(
         motion_layout,
         froxel_layout,
         gtao_layout,
+        ssgi_layout,
         shader,
     });
 }
@@ -499,6 +515,10 @@ mod tests {
                 "prism water surface gtao",
                 &crate::water::surface_gtao::gtao_layout_entries(),
             ),
+            ssgi_layout: BindGroupLayoutDescriptor::new(
+                "prism water surface ssgi",
+                &crate::water::surface_ssgi::ssgi_layout_entries(),
+            ),
             shader: Handle::default(),
         }
     }
@@ -579,14 +599,15 @@ mod tests {
         assert_eq!(depth.depth_compare, Some(CompareFunction::GreaterEqual));
         assert_eq!(desc.primitive.cull_mode, None);
         assert_eq!(desc.primitive.topology, PrimitiveTopology::TriangleList);
-        // Seven bind-group layouts: the per-body @group(0) surface layout, the
+        // Eight bind-group layouts: the per-body @group(0) surface layout, the
         // shared @group(1) engine light table the fragment stage samples, the
         // @group(2) virtual-shadow-map twin the primary directional light reads,
         // the @group(3) screen-space-reflection Hi-Z pyramid + march config, the
         // @group(4) motion-vector uniform feeding the second render target, the
-        // @group(5) underwater froxel volume composited into refraction, and the
-        // @group(6) horizon-GTAO config occluding the image-based ambient term.
-        assert_eq!(desc.layout.len(), 7);
+        // @group(5) underwater froxel volume composited into refraction, the
+        // @group(6) horizon-GTAO config occluding the image-based ambient term,
+        // and the @group(7) SSGI config gathering a one-bounce indirect diffuse.
+        assert_eq!(desc.layout.len(), 8);
     }
 
     #[test]
