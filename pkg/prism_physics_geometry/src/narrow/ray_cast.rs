@@ -176,9 +176,76 @@ pub fn ray_capsule(ray: &Ray, capsule: &Capsule) -> Option<f32> {
     }
 }
 
+/// A segment/triangle crossing: the segment parameter and barycentrics.
+///
+/// The hit point is `p0 + t * (p1 - p0)` and also equals
+/// `(1 - u - v) * a + u * b + v * c` for the triangle vertices.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct SegmentTriangleHit {
+    /// Parametric position along the segment in `[0, 1]`.
+    pub t: f32,
+    /// Barycentric weight of vertex `b`.
+    pub u: f32,
+    /// Barycentric weight of vertex `c`.
+    pub v: f32,
+    /// The world-space crossing point.
+    pub point: Vec3,
+}
+
+/// Intersects the segment `[p0, p1]` with the triangle `(a, b, c)` using an
+/// unnormalised Möller–Trumbore test, returning the crossing in `[0, 1]` along
+/// the segment or [`None`] when it does not pierce the triangle.
+///
+/// Unlike [`ray_triangle`] the direction is the raw `p1 - p0`, so the reported
+/// `t` is the fraction of the segment travelled. The test is double sided;
+/// segments lying in or parallel to the triangle plane (near-zero
+/// determinant) are rejected.
+pub fn segment_triangle_intersection(
+    p0: Vec3,
+    p1: Vec3,
+    a: Vec3,
+    b: Vec3,
+    c: Vec3,
+) -> Option<SegmentTriangleHit> {
+    const EPSILON: f32 = 1.0e-7;
+    let dir = p1 - p0;
+    let edge1 = b - a;
+    let edge2 = c - a;
+    let pvec = dir.cross(edge2);
+    let det = edge1.dot(pvec);
+    if det.abs() < EPSILON {
+        // Segment is parallel to (or lies within) the triangle plane.
+        return None;
+    }
+    let inv_det = 1.0 / det;
+    let tvec = p0 - a;
+    let u = tvec.dot(pvec) * inv_det;
+    if !(0.0..=1.0).contains(&u) {
+        return None;
+    }
+    let qvec = tvec.cross(edge1);
+    let v = dir.dot(qvec) * inv_det;
+    if v < 0.0 || u + v > 1.0 {
+        return None;
+    }
+    let t = edge2.dot(qvec) * inv_det;
+    if (0.0..=1.0).contains(&t) {
+        Some(SegmentTriangleHit {
+            t,
+            u,
+            v,
+            point: p0 + dir * t,
+        })
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ray_capsule, ray_obb, ray_sphere, ray_triangle};
+    use super::{
+        ray_capsule, ray_obb, ray_sphere, ray_triangle, segment_triangle_intersection,
+    };
     use crate::bounding::{BoundingSphere, Capsule, Obb, Ray};
     use approx::assert_relative_eq;
     use core::f32::consts::FRAC_PI_4;
@@ -339,5 +406,74 @@ mod tests {
         // Hit beyond tmax.
         let short = Ray::with_tmax(Vec3::ZERO, Vec3::Z, 1.0);
         assert!(ray_obb(&short, &obb).is_none());
+    }
+
+    #[test]
+    fn segment_triangle_crosses_interior() {
+        // Triangle in the z = 0 plane; segment pierces straight down the +z
+        // axis through the centroid at t = 0.5.
+        let a = Vec3::new(0.0, 0.0, 0.0);
+        let b = Vec3::new(1.0, 0.0, 0.0);
+        let c = Vec3::new(0.0, 1.0, 0.0);
+        let hit = segment_triangle_intersection(
+            Vec3::new(0.25, 0.25, 1.0),
+            Vec3::new(0.25, 0.25, -1.0),
+            a,
+            b,
+            c,
+        )
+        .expect("crossing");
+        assert_relative_eq!(hit.t, 0.5, epsilon = 1e-5);
+        assert_relative_eq!(hit.point.z, 0.0, epsilon = 1e-5);
+        assert_relative_eq!(hit.u, 0.25, epsilon = 1e-5);
+        assert_relative_eq!(hit.v, 0.25, epsilon = 1e-5);
+    }
+
+    #[test]
+    fn segment_triangle_stops_short_is_none() {
+        // Same geometry but the segment ends above the plane, never reaching it.
+        let a = Vec3::new(0.0, 0.0, 0.0);
+        let b = Vec3::new(1.0, 0.0, 0.0);
+        let c = Vec3::new(0.0, 1.0, 0.0);
+        assert!(segment_triangle_intersection(
+            Vec3::new(0.25, 0.25, 1.0),
+            Vec3::new(0.25, 0.25, 0.5),
+            a,
+            b,
+            c,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn segment_triangle_misses_outside_edge() {
+        // Vertical segment outside the triangle footprint.
+        let a = Vec3::new(0.0, 0.0, 0.0);
+        let b = Vec3::new(1.0, 0.0, 0.0);
+        let c = Vec3::new(0.0, 1.0, 0.0);
+        assert!(segment_triangle_intersection(
+            Vec3::new(0.9, 0.9, 1.0),
+            Vec3::new(0.9, 0.9, -1.0),
+            a,
+            b,
+            c,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn segment_triangle_parallel_is_none() {
+        // Segment lies in the plane -> degenerate determinant -> no crossing.
+        let a = Vec3::new(0.0, 0.0, 0.0);
+        let b = Vec3::new(1.0, 0.0, 0.0);
+        let c = Vec3::new(0.0, 1.0, 0.0);
+        assert!(segment_triangle_intersection(
+            Vec3::new(-1.0, 0.25, 0.0),
+            Vec3::new(1.0, 0.25, 0.0),
+            a,
+            b,
+            c,
+        )
+        .is_none());
     }
 }
