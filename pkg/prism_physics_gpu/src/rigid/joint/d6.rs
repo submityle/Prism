@@ -343,10 +343,11 @@ impl JointBodies for D6Joint {
 
 /// Device-packed [`D6Joint`]; layout matches `Joint` in
 /// `shaders/rigid_joint_d6.wgsl` (`128` bytes). The two anchors and two joint-
-/// frame quaternions fill four `vec4` blocks; the two body indices and six
-/// per-axis motion codes fill the next two `16`-byte blocks; the linear limit,
-/// twist range, and swing half-angles the next; the three compliances plus one
-/// pad word close the final block.
+/// frame quaternions fill four `vec4` blocks (`64` bytes); the two body indices
+/// and six per-axis motion codes fill the next two `16`-byte blocks; the linear
+/// limit, twist lower bound, twist upper bound, and first swing half-angle fill
+/// the fifth block; the second swing half-angle and the three compliances fill
+/// the sixth, leaving no padding word.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub(crate) struct GpuD6Joint {
