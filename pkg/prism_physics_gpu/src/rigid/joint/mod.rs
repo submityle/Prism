@@ -47,6 +47,12 @@
 //! * [`fixed_cpu`] — the authoritative [`cpu_solve_joints_fixed`] golden
 //!   stepper (angular lock plus full point-to-point weld).
 //! * [`fixed_gpu`] — the device-side [`GpuFixedJointSolver`] twin.
+//! * [`hinge_limit`] — the [`HingeLimitJoint`] (hinge with a swing limit)
+//!   definition and its device-packed storage representation.
+//! * [`hinge_limit_cpu`] — the authoritative [`cpu_solve_joints_hinge_limit`]
+//!   golden stepper (axis alignment, one-sided angular limit, and
+//!   point-to-point weld).
+//! * [`hinge_limit_gpu`] — the device-side [`GpuHingeLimitJointSolver`] twin.
 //! * [`prismatic`] — the [`PrismaticJoint`] (slider) definition and its
 //!   device-packed storage representation.
 //! * [`prismatic_cpu`] — the authoritative [`cpu_solve_joints_prismatic`] golden
@@ -76,6 +82,9 @@ mod fixed;
 mod fixed_cpu;
 mod fixed_gpu;
 mod gpu_core;
+mod hinge_limit;
+mod hinge_limit_cpu;
+mod hinge_limit_gpu;
 mod math;
 mod prismatic;
 mod prismatic_cpu;
@@ -96,6 +105,9 @@ pub use distance_gpu::GpuDistanceJointSolver;
 pub use fixed::FixedJoint;
 pub use fixed_cpu::cpu_solve_joints_fixed;
 pub use fixed_gpu::GpuFixedJointSolver;
+pub use hinge_limit::HingeLimitJoint;
+pub use hinge_limit_cpu::cpu_solve_joints_hinge_limit;
+pub use hinge_limit_gpu::GpuHingeLimitJointSolver;
 pub use prismatic::PrismaticJoint;
 pub use prismatic_cpu::cpu_solve_joints_prismatic;
 pub use prismatic_gpu::GpuPrismaticJointSolver;

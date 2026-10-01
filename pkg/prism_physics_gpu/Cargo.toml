@@ -9,6 +9,9 @@ publish = false
 [dependencies]
 prism_physics_core = { path = "../prism_physics_core" }
 glam = { version = "0.33.2", default-features = false, features = ["std"] }
+bevy_math = { path = "../../crates/bevy_math", default-features = false, features = [
+  "nostd-libm",
+] }
 wgpu = { version = "30", default-features = false, features = ["wgsl", "metal"] }
 bytemuck = { version = "1.5", features = ["derive"] }
 futures-lite = "2"
