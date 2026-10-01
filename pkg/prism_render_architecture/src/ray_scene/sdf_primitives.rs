@@ -1065,11 +1065,41 @@ pub fn octagon_prism(point: [f32; 3], radius: f32, half_depth: f32) -> f32 {
     inside + outside
 }
 
+/// Signed distance from `point` to an *infinite* circular cone: the unbounded
+/// solid whose apex sits at the origin and whose surface opens along the `+y`
+/// axis with half-angle given by `sin_cos = [sin(angle), cos(angle)]`.
+///
+/// Where [`cone_sdf`] is a finite cone with a base cap and [`solid_angle`] is a
+/// cone sector clipped by a bounding sphere, this cone extends forever: it is
+/// the exact primitive for carving conical bevels, spotlight volumes, and
+/// chamfers via the CSG operators. Pre-baking the aperture as `[sin, cos]`
+/// (as [`solid_angle`] does) keeps the function transcendental-free.
+///
+/// This is Inigo Quilez's exact infinite `sdCone`. In the meridian plane
+/// `q = (length(point.xz), point.y)` the flank is the ray from the origin along
+/// `c = sin_cos`; the distance is the length of `q` minus its (non-negative)
+/// projection onto `c`, which collapses to the apex distance behind the cone,
+/// and the sign flips inside the solid. Built from `clamp`/`max`, dot products,
+/// and a single `sqrt`, so it stays transcendental-free.
+pub fn infinite_cone(point: [f32; 3], sin_cos: [f32; 2]) -> f32 {
+    let q = [length2([point[0], point[2]]), point[1]];
+    // Project onto the flank ray, clamped at the apex (no negative extent).
+    let proj = (q[0] * sin_cos[0] + q[1] * sin_cos[1]).max(0.0);
+    let w = [q[0] - sin_cos[0] * proj, q[1] - sin_cos[1] * proj];
+    let d = length2(w);
+    // Inside the solid cone when the point sits on the axis side of the flank.
+    if sin_cos[1] * q[0] - sin_cos[0] * q[1] < 0.0 {
+        -d
+    } else {
+        d
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         box_frame, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_torus, capsule, cone_sdf, cut_hollow_sphere, cut_sphere, cylinder_segment,
-        death_star, ellipsoid_sdf, hex_prism, infinite_cylinder, length2, line_sdf, link, octagon_prism, octahedron, plane, pyramid, rhombus, round_box,
+        death_star, ellipsoid_sdf, hex_prism, infinite_cone, infinite_cylinder, length2, line_sdf, link, octagon_prism, octahedron, plane, pyramid, rhombus, round_box,
         quad_sdf, round_cone_sdf, round_cone_segment, rounded_cylinder, solid_angle, sphere, torus, triangle_sdf, triangular_prism, vesica,
     };
 
@@ -1202,6 +1232,67 @@ mod tests {
             assert!(
                 (got - want).abs() < 1e-4,
                 "mismatch at {p:?}: got={got} want={want}"
+            );
+        }
+    }
+
+    #[test]
+    fn infinite_cone_axis_distances_are_exact() {
+        // Aperture of 30 degrees, pre-baked as [sin, cos].
+        let alpha = 30.0_f32.to_radians();
+        let sc = [alpha.sin(), alpha.cos()];
+
+        // On the +y axis at height V (inside the solid): the nearest flank point
+        // sits perpendicular at distance V*sin(alpha), with the interior sign.
+        let v = 2.5_f32;
+        let got = infinite_cone([0.0, v, 0.0], sc);
+        let want = -v * alpha.sin();
+        assert!((got - want).abs() < 1e-5, "axis interior: got={got} want={want}");
+
+        // Below the apex the whole cone retreats behind, so the closest feature
+        // is the apex itself at exactly the depth, with the exterior sign.
+        let got_below = infinite_cone([0.0, -v, 0.0], sc);
+        assert!((got_below - v).abs() < 1e-5, "apex distance: got={got_below} want={v}");
+
+        // The apex is exactly on the surface.
+        assert!(infinite_cone([0.0, 0.0, 0.0], sc).abs() < 1e-6);
+    }
+
+    #[test]
+    fn infinite_cone_matches_independent_meridian_reference() {
+        // Cross-check IQ's closed form against an independent geometric solve in
+        // the meridian half-plane: project onto the flank ray, fall back to the
+        // apex behind it, and sign by the axis-side half-plane.
+        let alpha = 42.0_f32.to_radians();
+        let (s, c) = (alpha.sin(), alpha.cos());
+        let sc = [s, c];
+
+        // Deterministic LCG samples spanning interior/exterior and both y signs.
+        let mut state: u32 = 0x1234_5678;
+        let mut next = || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 8) as f32 / (1u32 << 24) as f32 // in [0, 1)
+        };
+        for _ in 0..256 {
+            let x = (next() - 0.5) * 8.0;
+            let y = (next() - 0.5) * 8.0;
+            let z = (next() - 0.5) * 8.0;
+
+            let u = (x * x + z * z).sqrt();
+            let v = y;
+            let proj = u * s + v * c;
+            let perp = u * c - v * s;
+            let dist = if proj >= 0.0 {
+                perp.abs()
+            } else {
+                (u * u + v * v).sqrt()
+            };
+            let want = if perp < 0.0 { -dist } else { dist };
+
+            let got = infinite_cone([x, y, z], sc);
+            assert!(
+                (got - want).abs() < 1e-4,
+                "mismatch at ({x},{y},{z}): got={got} want={want}"
             );
         }
     }
