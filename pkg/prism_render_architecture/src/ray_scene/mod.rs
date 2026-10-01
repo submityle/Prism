@@ -522,6 +522,10 @@
 //!   [`mesh_sdf_soft_shadow::SoftShadow`]) estimating the light's visible
 //!   fraction with Inigo Quilez's improved penumbra ratio over the exterior
 //!   shell, for grounded distance-field contact shadows.
+//! - [`mesh_sdf_ambient_occlusion`] — distance-field ambient occlusion
+//!   ([`mesh_sdf_ambient_occlusion::sdf_ambient_occlusion`]) estimating the
+//!   visible ambient fraction with Inigo Quilez's normal-cone taps over the
+//!   exterior shell, darkening creases, contacts, and cavities.
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -704,6 +708,7 @@ pub mod mesh_sdf_surface_projection;
 pub mod sdf_csg;
 pub mod mesh_voxel_padding;
 pub mod mesh_sdf_soft_shadow;
+pub mod mesh_sdf_ambient_occlusion;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -839,6 +844,7 @@ pub use sdf_csg::{
 };
 pub use mesh_voxel_padding::pad_voxel_grid;
 pub use mesh_sdf_soft_shadow::{sdf_soft_shadow, SoftShadow};
+pub use mesh_sdf_ambient_occlusion::sdf_ambient_occlusion;
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
 pub use obb::{Obb, ObbBvh, ObbHit};
