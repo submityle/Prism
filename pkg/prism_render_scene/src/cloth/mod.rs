@@ -94,6 +94,8 @@ mod sim_gpu_tests;
 #[cfg(test)]
 mod sim_predict_parity;
 #[cfg(test)]
+mod sim_bending_parity;
+#[cfg(test)]
 mod sleep_parity;
 #[cfg(test)]
 mod sleep_gpu_tests;
