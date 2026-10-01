@@ -1322,13 +1322,111 @@ pub fn arc(point: [f32; 2], sin_cos: [f32; 2], radius: f32, thickness: f32) -> f
     skeleton - thickness
 }
 
+/// Signed distance to a two-dimensional isosceles triangle with its apex at the
+/// origin and a horizontal base of half-width `half_base` at `y = height`
+/// (vertices `(0, 0)`, `(+/-half_base, height)`).
+///
+/// This is Inigo Quilez's exact `sdTriangleIsosceles`. After folding `x` to its
+/// magnitude the field is the component-wise minimum of the distance to the
+/// slanted edge (projection onto the apex-to-corner vector) and to the capped
+/// base edge; the interior sign is recovered from the two edge half-plane
+/// tests. Built from `abs`, `clamp`, `min`, `sign` and `sqrt`, so it stays
+/// transcendental-free.
+pub fn isosceles_triangle_2d(point: [f32; 2], half_base: f32, height: f32) -> f32 {
+    let q = [half_base, height];
+    let p = [point[0].abs(), point[1]];
+    let t = ((p[0] * q[0] + p[1] * q[1]) / (q[0] * q[0] + q[1] * q[1])).clamp(0.0, 1.0);
+    let a = [p[0] - q[0] * t, p[1] - q[1] * t];
+    let tb = (p[0] / q[0]).clamp(0.0, 1.0);
+    let b = [p[0] - q[0] * tb, p[1] - q[1]];
+    let s = -q[1].signum();
+    let dx = (a[0] * a[0] + a[1] * a[1]).min(b[0] * b[0] + b[1] * b[1]);
+    let dy = (s * (p[0] * q[1] - p[1] * q[0])).min(s * (p[1] - q[1]));
+    -dx.sqrt() * dy.signum()
+}
+
+/// Signed distance to a two-dimensional cut disk: the disk of `radius` with the
+/// cap above the horizontal line `y = cut_height` sliced off, keeping the lower
+/// body with a flat top edge (requires `-radius < cut_height < radius`).
+///
+/// This is Inigo Quilez's exact `sdCutDisk`, evaluated on the `y`-reflected
+/// configuration so that the retained half-plane is `y <= cut_height`. The
+/// precomputed chord half-width `w = sqrt(radius^2 - cut_height^2)` and the
+/// discriminant `s` classify the query into three Voronoi regions: the circular
+/// arc, the straight chord, and the two sharp chord corners. Returning the
+/// matching closed form keeps the field exact where a naive disk/half-plane
+/// intersection would round the corners. Built from `abs`, `min`/`max` and
+/// `sqrt`, so it stays transcendental-free.
+pub fn cut_disk_2d(point: [f32; 2], radius: f32, cut_height: f32) -> f32 {
+    // Reflect in y so IQ's cap-above core yields the flat-top (keep y <= cut)
+    // orientation: SDF_{y<=cut}(x, y) = core_{y>=-cut}(x, -y).
+    let r = radius;
+    let h = -cut_height;
+    let w = (r * r - h * h).max(0.0).sqrt();
+    let p = [point[0].abs(), -point[1]];
+    let s = ((h - r) * p[0] * p[0] + w * w * (h + r - 2.0 * p[1])).max(h * p[0] - w * p[1]);
+    if s < 0.0 {
+        length2(p) - r
+    } else if p[0] < w {
+        h - p[1]
+    } else {
+        length2([p[0] - w, p[1] - h])
+    }
+}
+
+/// Signed distance to a two-dimensional uneven capsule: the convex hull of a
+/// disk of radius `r_bottom` centred at the origin and a disk of radius
+/// `r_top` centred at `(0, h)` (a round cone / tapered stadium).
+///
+/// This is Inigo Quilez's exact `sdUnevenCapsule`. After folding `x` the slope
+/// `b = (r_bottom - r_top)/h` and `a = sqrt(1 - b^2)` define the external
+/// tangent; the parameter `k` selects the bottom cap, the top cap, or the
+/// tangent flank, each with its own exact distance. Built from `abs` and
+/// `sqrt`, so it stays transcendental-free. Requires `|r_bottom - r_top| <= h`.
+pub fn uneven_capsule_2d(point: [f32; 2], r_bottom: f32, r_top: f32, h: f32) -> f32 {
+    let p = [point[0].abs(), point[1]];
+    let b = (r_bottom - r_top) / h;
+    let a = (1.0 - b * b).max(0.0).sqrt();
+    let k = -b * p[0] + a * p[1];
+    if k < 0.0 {
+        length2(p) - r_bottom
+    } else if k > a * h {
+        length2([p[0], p[1] - h]) - r_top
+    } else {
+        a * p[0] + b * p[1] - r_bottom
+    }
+}
+
+/// Signed distance to a two-dimensional regular hexagon centred at the origin
+/// with inradius (apothem) `apothem`, oriented flat-side up (horizontal top and
+/// bottom edges at `y = +/-apothem`).
+///
+/// This is Inigo Quilez's exact `sdHexagon`. The baked constant
+/// `k = (-cos 30deg, sin 30deg, tan 30deg)` lets a single reflection fold the
+/// query into one sextant, after which the shape reduces to a capped edge whose
+/// signed distance is `length(p) * sign(p.y)`. The transcendental values live
+/// only in the compile-time constants, so the runtime path uses just `abs`,
+/// `clamp`, `min`, `sign` and `sqrt`.
+pub fn regular_hexagon_2d(point: [f32; 2], apothem: f32) -> f32 {
+    // k = (-cos(pi/6), sin(pi/6), tan(pi/6)) as compile-time constants.
+    const KX: f32 = -0.866_025_4;
+    const KY: f32 = 0.5;
+    const KZ: f32 = 0.577_350_26;
+    let mut p = [point[0].abs(), point[1].abs()];
+    let fold = 2.0 * (KX * p[0] + KY * p[1]).min(0.0);
+    p = [p[0] - fold * KX, p[1] - fold * KY];
+    p = [p[0] - p[0].clamp(-KZ * apothem, KZ * apothem), p[1] - apothem];
+    length2(p) * p[1].signum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        arc, box_frame, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_torus, capsule, cone_sdf, cross_2d, cut_hollow_sphere, cut_sphere,
-        cylinder_segment, death_star, ellipsoid_sdf, hex_prism, infinite_cone, infinite_cylinder, length2, line_sdf, link, moon, octagon_prism, octahedron,
-        oriented_box_2d, parallelogram, pie, plane, pyramid, quad_sdf, rhombus, rhombus_2d, round_box, round_cone_sdf, round_cone_segment, rounded_cylinder,
-        rounded_x, segment_2d, solid_angle, sphere, torus, trapezoid_isosceles, triangle_sdf, triangular_prism, vesica,
+        arc, box_frame, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_torus, capsule, cone_sdf, cross_2d, cut_disk_2d, cut_hollow_sphere,
+        cut_sphere, cylinder_segment, death_star, ellipsoid_sdf, hex_prism, infinite_cone, infinite_cylinder, isosceles_triangle_2d, length2, line_sdf, link, moon,
+        octagon_prism, octahedron, oriented_box_2d, parallelogram, pie, plane, pyramid, quad_sdf, regular_hexagon_2d, rhombus, rhombus_2d, round_box, round_cone_sdf,
+        round_cone_segment, rounded_cylinder, rounded_x, segment_2d, solid_angle, sphere, torus, trapezoid_isosceles, triangle_sdf, triangular_prism,
+        uneven_capsule_2d, vesica,
     };
 
     #[test]
@@ -2022,6 +2120,157 @@ mod tests {
             let got = arc(p, sc, ra, rb);
             let want = brute(p[0], p[1]);
             assert!((got - want).abs() < 5e-3, "p={p:?} got={got} want={want}");
+        }
+    }
+
+    #[test]
+    fn isosceles_triangle_2d_vertices_and_matches_polygon() {
+        let (half_base, height) = (0.6f32, 1.2f32);
+        // The three vertices lie on the surface.
+        for v in [[0.0f32, 0.0], [half_base, height], [-half_base, height]] {
+            assert!(isosceles_triangle_2d(v, half_base, height).abs() < 1e-6, "vertex {v:?}");
+        }
+        let verts = [[0.0, 0.0], [half_base, height], [-half_base, height]];
+        let samples: [[f32; 2]; 8] = [
+            [0.0, 0.6],
+            [0.0, -0.3],
+            [0.0, 1.5],
+            [0.3, 1.0],
+            [0.8, 1.1],
+            [-0.5, 0.9],
+            [0.2, 0.2],
+            [0.0, 1.19],
+        ];
+        for p in samples {
+            let got = isosceles_triangle_2d(p, half_base, height);
+            let want = polygon_sdf2(p[0], p[1], &verts);
+            assert!((got - want).abs() < 1e-5, "p={p:?} got={got} want={want}");
+        }
+    }
+
+    #[test]
+    fn cut_disk_2d_arc_chord_and_corner_regions() {
+        let (r, h) = (1.0f32, 0.5f32);
+        let w = (r * r - h * h).sqrt();
+        // Bottom of the disk sits on the retained arc.
+        assert!(cut_disk_2d([0.0, -1.0], r, h).abs() < 1e-6);
+        // Straight above the flat top: vertical gap to y = h.
+        assert!((cut_disk_2d([0.0, 1.5], r, h) - 1.0).abs() < 1e-6);
+        // A corner of the chord lies on the surface.
+        assert!(cut_disk_2d([w, h], r, h).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cut_disk_2d_matches_brute_force_boundary() {
+        let (r, h) = (1.0f32, 0.35f32);
+        let w = (r * r - h * h).sqrt();
+        // Independent reference: nearest distance to the retained boundary (the
+        // circular arc with y <= h plus the chord segment at y = h), signed by
+        // the disk/half-plane intersection test (keep y <= h).
+        let brute = |px: f32, py: f32| -> f32 {
+            let mut best = f32::INFINITY;
+            let n = 4000;
+            for i in 0..=n {
+                let a = -std::f32::consts::PI + 2.0 * std::f32::consts::PI * (i as f32) / (n as f32);
+                let (cx, cy) = (r * a.cos(), r * a.sin());
+                if cy <= h + 1e-6 {
+                    best = best.min(((px - cx).powi(2) + (py - cy).powi(2)).sqrt());
+                }
+                let t = -w + 2.0 * w * (i as f32) / (n as f32);
+                best = best.min(((px - t).powi(2) + (py - h).powi(2)).sqrt());
+            }
+            let inside = (px * px + py * py).sqrt() < r && py < h;
+            if inside { -best } else { best }
+        };
+        let samples: [[f32; 2]; 8] = [
+            [0.0, 0.0],
+            [0.0, -0.8],
+            [0.6, 0.2],
+            [0.0, 0.8],
+            [1.2, 0.4],
+            [-0.9, 0.0],
+            [0.5, 0.34],
+            [-0.3, -0.5],
+        ];
+        for p in samples {
+            let got = cut_disk_2d(p, r, h);
+            let want = brute(p[0], p[1]);
+            assert!((got - want).abs() < 5e-3, "p={p:?} got={got} want={want}");
+        }
+    }
+
+    #[test]
+    fn uneven_capsule_2d_caps_and_flank() {
+        let (r1, r2, h) = (0.6f32, 0.3f32, 1.0f32);
+        // Deepest point of the bottom cap.
+        assert!((uneven_capsule_2d([0.0, 0.0], r1, r2, h) - (-r1)).abs() < 1e-6);
+        // Deepest point of the top cap.
+        assert!((uneven_capsule_2d([0.0, h], r1, r2, h) - (-r2)).abs() < 1e-6);
+        // Straight out from the bottom cap along x.
+        assert!((uneven_capsule_2d([r1 + 0.5, 0.0], r1, r2, h) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn uneven_capsule_2d_matches_envelope_reference() {
+        let (r1, r2, h) = (0.6f32, 0.25f32, 1.1f32);
+        // Independent reference: lower envelope of the swept disk family
+        // c(t) = (0, t*h), radius(t) = lerp(r1, r2, t), t in [0, 1].
+        let brute = |px: f32, py: f32| -> f32 {
+            let mut best = f32::INFINITY;
+            let n = 6000;
+            for i in 0..=n {
+                let t = (i as f32) / (n as f32);
+                let cy = t * h;
+                let rad = r1 + t * (r2 - r1);
+                let d = ((px).powi(2) + (py - cy).powi(2)).sqrt() - rad;
+                best = best.min(d);
+            }
+            best
+        };
+        let samples: [[f32; 2]; 8] = [
+            [0.0, 0.5],
+            [0.7, 0.0],
+            [0.4, 1.1],
+            [0.5, 0.5],
+            [-0.6, 0.3],
+            [0.9, 0.9],
+            [0.0, -0.4],
+            [0.3, 1.4],
+        ];
+        for p in samples {
+            let got = uneven_capsule_2d(p, r1, r2, h);
+            let want = brute(p[0], p[1]);
+            assert!((got - want).abs() < 2e-3, "p={p:?} got={got} want={want}");
+        }
+    }
+
+    #[test]
+    fn regular_hexagon_2d_apothem_and_matches_polygon() {
+        let apothem = 1.0f32;
+        // The flats sit at y = +/-apothem on the surface.
+        assert!(regular_hexagon_2d([0.0, apothem], apothem).abs() < 1e-6);
+        assert!((regular_hexagon_2d([0.0, 0.0], apothem) - (-apothem)).abs() < 1e-6);
+        // Circumradius vertices on the x axis.
+        let big_r = apothem / (std::f32::consts::PI / 6.0).cos();
+        let mut verts = [[0.0f32; 2]; 6];
+        for (k, v) in verts.iter_mut().enumerate() {
+            let ang = std::f32::consts::FRAC_PI_3 * k as f32;
+            *v = [big_r * ang.cos(), big_r * ang.sin()];
+        }
+        let samples: [[f32; 2]; 8] = [
+            [0.0, 0.0],
+            [0.5, 0.3],
+            [1.3, 0.0],
+            [0.0, 1.3],
+            [0.9, 0.9],
+            [-1.1, 0.4],
+            [0.6, -0.8],
+            [1.1547, 0.0],
+        ];
+        for p in samples {
+            let got = regular_hexagon_2d(p, apothem);
+            let want = polygon_sdf2(p[0], p[1], &verts);
+            assert!((got - want).abs() < 1e-5, "p={p:?} got={got} want={want}");
         }
     }
 
