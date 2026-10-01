@@ -420,6 +420,10 @@
 //!   ([`mesh_triangle_quality::triangle_quality`]): the scale-invariant
 //!   normalized shape-quality (mean-ratio) metric plus area, total area, and
 //!   min / average quality and sliver counts for mesh-health analysis.
+//! - [`mesh_edge_length_stats`] — undirected edge-length distribution
+//!   ([`mesh_edge_length_stats::edge_length_stats`]): per-edge Euclidean
+//!   lengths plus min / max / mean / total and split/collapse candidate counts
+//!   for driving target-edge-length isotropic remeshing.
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -584,6 +588,7 @@ pub mod mesh_feature_edges;
 pub mod mesh_hard_normal_split;
 pub mod mesh_vertex_valence;
 pub mod mesh_triangle_quality;
+pub mod mesh_edge_length_stats;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -699,6 +704,7 @@ pub use mesh_feature_edges::{detect_feature_edges, EdgeKind, FeatureEdgeError, F
 pub use mesh_hard_normal_split::{split_hard_normals, HardNormalError, HardNormalSplit};
 pub use mesh_vertex_valence::{vertex_valence, VertexValence};
 pub use mesh_triangle_quality::{triangle_quality, TriangleQuality};
+pub use mesh_edge_length_stats::{edge_length_stats, EdgeLengthStats};
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
 pub use obb::{Obb, ObbBvh, ObbHit};
