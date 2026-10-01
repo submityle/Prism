@@ -71,6 +71,7 @@ pub mod avsm_transmittance;
 pub mod barycentric_coord;
 pub mod binary_search_range;
 pub mod bit_pack_u32;
+pub mod bit_reversal_u32;
 pub mod blend_state;
 pub mod blend_with_atmosphere;
 pub mod bloom_threshold;
@@ -216,6 +217,10 @@ pub use avsm_transmittance::{AvsmSampleNode, GpuAvsmTransmittance};
 pub use barycentric_coord::{BarycentricQuery, BarycentricResult, GpuBarycentricCoord};
 pub use binary_search_range::GpuBinarySearchRange;
 pub use bit_pack_u32::{packed_len_words, GpuBitPackU32};
+pub use bit_reversal_u32::{
+    host_bit_reverse_increment, host_is_bit_reversal_palindrome, host_reverse_bits_u32,
+    host_reverse_lowest_bits, GpuBitReversalU32,
+};
 pub use blend_state::{BlendStateQuery, GpuBlendState};
 pub use blend_with_atmosphere::{BlendQuery, BlendedColor, GpuBlendWithAtmosphere};
 pub use bloom_threshold::{BloomThresholdQuery, GpuBloomThreshold};
