@@ -30,6 +30,10 @@
 //!   whose taps modulate cyclically rather than stay fixed.
 //! - [`waveshaper::WaveshaperNode`] — `tanh` soft-clip saturation with optional
 //!   2x/4x band-limiting oversampling.
+//! - [`wavefolder::WavefolderNode`] -- west-coast reflective wave folder
+//!   (triangle / sine fold) with selectable up-to-8x oversampling; unlike the
+//!   compressive [`waveshaper::WaveshaperNode`] it mirrors signal past the fold
+//!   threshold for bright, metallic, harmonically dense timbres.
 //! - [`chorus::ChorusNode`] — multi-voice LFO-modulated delay ensemble (no
 //!   feedback) for shimmering thickening.
 //! - [`flanger::FlangerNode`] — single short LFO-swept delay with feedback for
@@ -118,6 +122,7 @@ pub mod tilt_eq;
 pub mod tremolo;
 pub mod vibrato;
 pub mod vocoder;
+pub mod wavefolder;
 pub mod waveshaper;
 
 pub use auto_wah::{AutoWah, AutoWahNode, AutoWahParams, SweepDirection, WahMode};
@@ -149,4 +154,7 @@ pub use tilt_eq::{TiltEq, TiltEqNode, TiltEqParams};
 pub use tremolo::{TremoloMode, TremoloNode, TremoloParams};
 pub use vibrato::{VibratoNode, VibratoParams};
 pub use vocoder::{Vocoder, VocoderNode, VocoderParams};
+pub use wavefolder::{
+    FoldShape, Oversample as FolderOversample, WavefolderNode, WavefolderParams,
+};
 pub use waveshaper::{Oversample, WaveshaperNode};

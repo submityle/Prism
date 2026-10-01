@@ -59,6 +59,7 @@ pub mod graph;
 pub mod math;
 pub mod modulation;
 pub mod nodes;
+pub mod oversampler;
 pub mod param;
 pub mod scheduler;
 pub mod time;
