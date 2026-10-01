@@ -392,6 +392,12 @@
 //!   coarse grid and collapses each occupied cell to one centroid
 //!   representative, dropping degenerate faces — the cheapest aggressive
 //!   `LOD` proxy, below `QEM` edge collapse.
+//! - [`mesh_connected_components`] — union-find island labelling
+//!   ([`mesh_connected_components::connected_components`]) and extraction
+//!   ([`mesh_connected_components::split_components`]): groups triangles
+//!   sharing a vertex chain and splits the mesh into one compacted
+//!   [`TriangleMesh`] per island, largest first — pure integer
+//!   bookkeeping.
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -550,6 +556,7 @@ pub mod mesh_laplacian_smoothing;
 pub mod mesh_border_detection;
 pub mod mesh_edge_split;
 pub mod mesh_vertex_clustering;
+pub mod mesh_connected_components;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -659,6 +666,7 @@ pub use mesh_laplacian_smoothing::{BoundaryRule, LaplacianSmoothing};
 pub use mesh_border_detection::{detect_borders, MeshBorders};
 pub use mesh_edge_split::{split_long_edges, MAX_PASSES as EDGE_SPLIT_MAX_PASSES};
 pub use mesh_vertex_clustering::{cluster_vertices, ClusterError};
+pub use mesh_connected_components::{connected_components, split_components, MeshComponents};
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
 pub use obb::{Obb, ObbBvh, ObbHit};
