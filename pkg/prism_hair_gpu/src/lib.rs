@@ -427,6 +427,17 @@
 //!   per-vertex frame, authored normals, position-only output) checked within
 //!   a tolerance for the `sqrt` normalise and the fused multiply-add
 //!   (see [`transfer_root_map`](prism_render_architecture::hair::follicle_bind::transfer_root_map)).
+//! * [`GpuHairSpectrumSample`] evaluates
+//!   [`spectrum_sample_map`](prism_render_architecture::hair::spectral_absorption::spectrum_sample_map),
+//!   the per-wavelength spectral melanin-absorption sampler that maps a batch
+//!   of wavelengths to their scalar `sigma_a` for one fibre's two pigment
+//!   concentrations — one thread per wavelength `floor`-indexes and linearly
+//!   interpolates the two 15-point visible-band spectra (uploaded from the
+//!   architecture crate, never duplicated in the shader) and folds
+//!   `eu * eu_sample + pheo * pheo_sample`; a spectral counterpart of the
+//!   RGB-primary [`melanin`] twin (per-wavelength `LUT` interpolation versus
+//!   three fixed-primary channels), checked within the fma tolerance
+//!   (see [`spectrum_sample_map`]).
 //!
 //! # Portability
 //!
@@ -491,6 +502,7 @@ pub mod scatter_lod;
 pub mod sdf_collision;
 pub mod self_collision_grid;
 pub mod self_collision_jacobi;
+pub mod spectrum_sample_map;
 pub mod strand_metrics;
 pub mod transition;
 pub mod vbd_solver;
@@ -542,6 +554,7 @@ pub use scatter_lod::{reference_pdf, GpuHairScatterLod, PDF_PER_ELEMENT};
 pub use sdf_collision::GpuSdfCollider;
 pub use self_collision_grid::GpuSelfCollisionGrid;
 pub use self_collision_jacobi::GpuSelfCollisionJacobi;
+pub use spectrum_sample_map::{reference_spectrum_sample_map, GpuHairSpectrumSample};
 pub use strand_metrics::{GpuStrandMetric, GpuStrandMetrics};
 pub use transition::GpuHairTransition;
 pub use vbd_solver::GpuVbdSolver;
