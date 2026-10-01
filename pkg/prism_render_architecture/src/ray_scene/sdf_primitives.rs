@@ -512,12 +512,44 @@ pub fn triangular_prism(point: [f32; 3], size: f32, half_depth: f32) -> f32 {
     inside + outside
 }
 
+/// Signed distance from `point` to a solid angular sector: the intersection
+/// of a ball of the given `radius` (centred at the origin) with an infinite
+/// cone whose apex is at the origin and whose axis points along `+y`.
+///
+/// The cone half-angle is supplied pre-baked as `sin_cos = (sin angle, cos
+/// angle)`, so the caller bakes the only trigonometry and evaluation here is
+/// transcendental-free. The shape is the classic "ice-cream cone" region used
+/// for spotlight and sector volumes.
+///
+/// Follows Inigo Quilez's exact `sdSolidAngle`. The point is reduced to its
+/// meridian coordinates `(radial distance from the axis, height)`; the ball is
+/// measured directly while the cone flank is measured against the clamped
+/// projection onto the flank ray, and the two are combined so the rounded cap,
+/// the straight flank, and the apex each carry a true distance.
+pub fn solid_angle(point: [f32; 3], sin_cos: [f32; 2], radius: f32) -> f32 {
+    // Meridian coordinates: radial distance from the +y axis, then height.
+    let q = [length2([point[0], point[2]]), point[1]];
+    // Distance to the bounding sphere.
+    let ball = length2(q) - radius;
+    // Distance to the cone flank: project onto the flank ray, clamped to the
+    // sphere radius so the flank terminates at the cap, then measure the gap.
+    let proj = (q[0] * sin_cos[0] + q[1] * sin_cos[1]).clamp(0.0, radius);
+    let flank = length2([q[0] - sin_cos[0] * proj, q[1] - sin_cos[1] * proj]);
+    // Sign the flank distance by which side of the flank ray the point lies on.
+    let flank_sign = if sin_cos[1] * q[0] - sin_cos[0] * q[1] < 0.0 {
+        -1.0
+    } else {
+        1.0
+    };
+    ball.max(flank * flank_sign)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         box_frame, box_sdf, capped_cone, capped_cylinder, capped_torus, capsule, cut_sphere,
         ellipsoid_sdf, hex_prism, length2, link, octahedron, plane, pyramid, rhombus, round_box,
-        sphere, torus, triangular_prism, vesica,
+        solid_angle, sphere, torus, triangular_prism, vesica,
     };
 
     #[test]
@@ -924,5 +956,35 @@ mod tests {
                 "point {p:?}: got {got}, reference {reference}"
             );
         }
+    }
+
+    #[test]
+    fn solid_angle_axis_and_cap_distances() {
+        // sin/cos of a 30-degree half-angle, baked without trigonometry.
+        let sc = [0.5f32, (0.75f32).sqrt()];
+        let ra = 2.0f32;
+        // Interior axis point: nearest feature is the cone flank, at the
+        // perpendicular distance height * sin(angle), signed negative inside.
+        assert!((solid_angle([0.0, 1.0, 0.0], sc, ra) - (-0.5)).abs() < 1e-6);
+        // On the spherical cap along the axis.
+        assert!(solid_angle([0.0, 2.0, 0.0], sc, ra).abs() < 1e-6);
+        // Beyond the cap along the axis: pure radial overshoot.
+        assert!((solid_angle([0.0, 3.0, 0.0], sc, ra) - 1.0).abs() < 1e-6);
+        // Below the apex (outside the cone): nearest feature is the apex.
+        assert!((solid_angle([0.0, -1.0, 0.0], sc, ra) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn solid_angle_flank_distances() {
+        let sc = [0.5f32, (0.75f32).sqrt()];
+        let ra = 2.0f32;
+        // Equatorial point outside the cone: perpendicular distance to the
+        // flank ray equals radial * cos(angle) while the projection stays in
+        // range.
+        let expected = 1.5 * (0.75f32).sqrt();
+        assert!((solid_angle([1.5, 0.0, 0.0], sc, ra) - expected).abs() < 1e-6);
+        // Interior off-axis point: inside both the ball and the cone, governed
+        // by the flank with a hand-derived reference.
+        assert!((solid_angle([0.5, 1.5, 0.0], sc, ra) - (-0.316_987_3)).abs() < 1e-5);
     }
 }
