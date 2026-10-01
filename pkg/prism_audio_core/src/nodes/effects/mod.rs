@@ -57,6 +57,11 @@
 //!   sideband pair rather than a one-sided shift.
 //! - [`vibrato::VibratoNode`] — single LFO-swept fractional delay for
 //!   periodic pitch modulation.
+//! - [`vocoder::VocoderNode`] -- channel vocoder cross-synthesis: a band bank
+//!   imprints the moving spectral envelope of a modulator (input 0) onto a
+//!   carrier (input 1); distinct from the fixed vowel bank of
+//!   [`formant_filter::FormantFilterNode`] and from the single-signal band
+//!   splitting of [`crate::nodes::dynamics::multiband`].
 //! - [`exciter::ExciterNode`] — high-frequency harmonic exciter / aural
 //!   enhancer: a highpass-isolated band is `tanh`-shaped to synthesize added
 //!   odd / even harmonics that are mixed back for presence and air.
@@ -98,6 +103,7 @@ pub mod tape;
 pub mod tilt_eq;
 pub mod tremolo;
 pub mod vibrato;
+pub mod vocoder;
 pub mod waveshaper;
 
 pub use auto_wah::{AutoWah, AutoWahNode, AutoWahParams, SweepDirection, WahMode};
@@ -126,4 +132,5 @@ pub use tape::{Tape, TapeNode, TapeParams};
 pub use tilt_eq::{TiltEq, TiltEqNode, TiltEqParams};
 pub use tremolo::{TremoloMode, TremoloNode, TremoloParams};
 pub use vibrato::{VibratoNode, VibratoParams};
+pub use vocoder::{Vocoder, VocoderNode, VocoderParams};
 pub use waveshaper::{Oversample, WaveshaperNode};
