@@ -1,0 +1,17 @@
+[package]
+name = "prism_ui_form"
+version = "0.1.0"
+edition = "2024"
+description = "Loom form layer: reactive two-way bindings and declarative validation over prism_ui_reactive. Contains no Unreal Engine source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_ui_reactive = { path = "../prism_ui_reactive" }
+
+[features]
+default = ["std"]
+std = ["prism_ui_reactive/std"]
+
+[lints]
+workspace = true

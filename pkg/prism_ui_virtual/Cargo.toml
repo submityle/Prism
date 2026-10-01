@@ -1,0 +1,18 @@
+[package]
+name = "prism_ui_virtual"
+version = "0.1.0"
+edition = "2024"
+description = "Loom list virtualization: windowed visible-range computation and recycle pooling over prism_ui. Contains no Unreal Engine source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_ui = { path = "../prism_ui" }
+prism_ui_layout = { path = "../prism_ui_layout" }
+
+[features]
+default = ["std"]
+std = ["prism_ui/std", "prism_ui_layout/std"]
+
+[lints]
+workspace = true
