@@ -125,6 +125,7 @@ pub mod vdb_sample;
 pub mod velocity_at;
 pub mod virga_fade;
 pub mod virga_veil;
+pub mod volume_scene_shadow_cast;
 pub mod worley;
 
 pub use active_pixel::{ActivePixelQuery, GpuActivePixel};
@@ -201,4 +202,5 @@ pub use vdb_sample::GpuVdbSample;
 pub use velocity_at::{GpuVelocityAt, VelocityAtQuery};
 pub use virga_fade::{GpuVirgaFade, VirgaFadeQuery};
 pub use virga_veil::{GpuVirgaVeil, VirgaVeilQuery};
+pub use volume_scene_shadow_cast::{GpuVolumeShadowCast, ShadowMarch, VolumeShadowRay};
 pub use worley::{GpuWorley, WorleyQuery};
