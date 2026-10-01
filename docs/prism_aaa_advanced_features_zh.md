@@ -1,4 +1,4 @@
-# Prism 渲染引擎 — 顶级次世代 AAA 高级特性专项设计（v5 / PBR·NPR·混合 全前端 + 子系统完成度 + 2025–2026 天花板增补）
+# Prism 渲染引擎 — 顶级次世代 AAA 高级特性专项设计（v7 / PBR·NPR·混合 全前端 + 子系统完成度 + 路线图兑现核对 + 真实空白补齐 + v7 绝对天花板增补）
 
 > 本文是 `prism_material_pipeline_design_zh.md`（顶层架构与决策）的**下钻分册**：把 §12–16 的对标矩阵与特性清单展开为**逐特性规格书**——每条给出「借鉴对象 / 算法要点 / 性能预算 / 效果上限 / 模块落点 / 验收口径」。
 > **一句话立场**：共享 GPU-driven 基底算一次，PBR / NPR / 自定义三前端并存消费，混合在管线级路由。**三条赛道都是一等公民，都能拿到顶级次世代 AAA 效果**，差异只在「怎么解读同一份光/影/GI/几何数据」的前端响应处。
@@ -8,6 +8,8 @@
 > **v3 本版新增**：按 2026-10 仓内实况刷新 §9 分级与文件计数（虚拟几何/GI/水体/体积/采样降噪/后期多项由 🟡 升 ✅，依据各 `pkg/` 子目录真实规模）；新增 **§10「子系统完成度矩阵 + 跨子系统集成 + 子系统 AAA 高级特性」**，把物理（GPU 刚体 TGS / XPBD / MPM / FLIP / 断裂 / 软体 VBD）、音频（HRTF 双耳 / 光线声学 / 空间化）、水体（FFT 海面 / FLIP / 浅水）、毛发、布料、体积六大子系统的现状、缺口、及达到 AAA 所需高级特性逐条展开，**全程纯经典数值，排除所有 AI/ML/LLM 路径**。
 > **v4 本版新增**：① 按 2026-10 仓内实况再刷新规模计数（物理 GPU 188 / 音频 core 67 / 毛发 GPU 41 / `ray_scene` 82 文件）；② 新增 **§11「次世代天花板增补（2024–2026 前沿，纯经典数值）」**——补齐当前仍是空白或仅骨架的最前沿赛道：辐射级联（Radiance Cascades, PoE2 / Sannikov）、RT 簇级加速结构（RTX Mega Geometry 形态，让虚拟几何可被硬件 RT）、不透明微贴图（Opacity Micromaps）、解耦/物体空间着色（texture-space shading）、镜面/法线抗锯齿（Toksvig/LEAN）、运行期虚拟纹理（RVT）、虚拟几何蒙皮/植被、输入延迟流水线（Reflex 形态，纯经典）；逐条给借鉴对象 + 算法要点 + 预算 + 落点 + 验收；并把这些增补并入 §9 路线图优先级。**全程纯经典数值，排除一切 AI/ML/神经/LLM 路径**（厂商时序上采样 SDK 仅渲染侧可选外部后端）。
 > **v5 本版新增（2026-10）**：① 按仓内实况再刷新规模计数（`prism_render_shading` 344 / `gi/` 62 子系统 · `prism_render_scene`(ray_scene) 456 · `prism_render_architecture` 671 · 虚拟几何 GPU 49 · 体积 GPU 163 · 毛发 GPU 98 · 物理 GPU 263 / core 168 / geometry 33 · 音频 core 79 / spatial 52 文件）；② 新增 **§12「2025–2026 最前沿天花板增补（纯经典数值）」**——补齐 §6/§11 仍未展开、却已是当代影视/实时 AAA 天花板的赛道：**OpenPBR 收敛标准材质 · 光谱渲染/Hero 波长 · 薄膜虹彩（Belcour-Barla）· ACES 2.0/AgX/OCIO 显示变换 + 物理相机自动曝光 · 光树/ReGIR 多光重要性采样 · 世界空间哈希辐照缓存 · 异质介质体积路径追踪（delta/ratio tracking）· 物理天空多重散射 · Sampler Feedback 纹理流送 · DirectStorage/GDeflate GPU 解压流送 · 可见性缓冲延迟纹理化+材质分箱 · 矩不变 OIT · 波动声学/高阶 Ambisonics · 跨平台确定性收敛**；逐条给借鉴对象+算法要点+预算+落点+验收，并给 §12 增补路线图优先级。**全程纯经典数值，排除一切 AI/ML/神经/LLM 推理路径**（厂商时序上采样 SDK 仅渲染侧可选外部后端）。
+> **v6 本版新增（2026-10）**：① **路线图兑现核对**——按仓内实测，v4/v5 列为 ⬜/🟡 的多条前沿已落为真实模块（LTC 面光 `gi/area_light`、路径重用 `gi/path_reuse`、RT 焦散 `gi/caustics`、光树/ReGIR `gi/light`+`gi/nee`、世界空间哈希辐照缓存 `gi/world_space`、镜面 AA `gi/specular_aa`、DDGI 重定位 `gi/irradiance_volume`、IES `gi/ies_profile`、微遮蔽 `gi/micro`、音频波动声学/HOA/卷积混响 `prism_audio_spatial`+`prism_audio_core/reverb`），逐条给文件证据并升级分级；② **真实空白补齐 + 收敛深化**——新增 **§13**：对**仓内 0 文件实测**的真实空白（稀疏虚拟纹理 RVT/SVT + Sampler Feedback、DirectStorage/GDeflate GPU 解压流送、经典帧生成〈无神经〉、仿射体动力学 ABD）给规格，并把已有骨架（GRIS 全路径重用、LTC 纹理化/线光面光、自适应方差制导采样、RT 焦散自适应光子）推向绝对天花板；给 §13 兑现核对表 + 增补路线图优先级。**全程纯经典数值，排除一切 AI/ML/神经/LLM 推理路径**（厂商时序上采样/帧生成 SDK 仅渲染侧可选外部后端）。
+> **v7 本版新增（2026-10）**：① 按「代码有更新」用户反馈，用统一口径 `find src -name '*.rs'` **重算规模并修正 v6 §13.0 偏高计数**（新增权威基线表 §14.0）；② 空白赛道再核验（§14.1，RVT/SVT·DirectStorage·GDeflate·frame_gen·ABD·micromap 仍 0 文件，维持 ⬜；仅毛发 LSS 段切分孪生动工）；③ 新增 **§14** 八条 2024–2026 真·前沿赛道：**随机纹理过滤 STF · 硬件曲线/发丝 RT（LSS）· 微几何硬件 RT（DMM+OMM）· 可编程光栅 WPO/蒙皮虚拟几何 · 分层 GI 融合（屏幕探针+世界缓存）· 整帧 GPU Work Graph（mesh nodes）· 物理 IPC 无穿透摩擦接触+ABD · 预计算波场参数解码声学**；逐条给借鉴对象+算法要点+性能预算+效果上限+落点+验收，并并入 §14.3 优先级阶梯。**全程纯经典数值，排除一切 AI/ML/神经/LLM 推理路径**（厂商时序上采样/帧生成 SDK 仅渲染侧可选外部后端）。
 
 ---
 
@@ -574,6 +576,242 @@
 | 物理确定性 + 统一碰撞场 | `prism_physics_*` `prism_physics_geometry` | 🟡 网格查询族成规模，确定性收敛/统一代理待连 | P1 | 物理几何查询 |
 
 **v5 增补总原则**：§12 **不改变 §9 P0 基底次序**，而是把「已达 AAA 骨架」推向「物理正确的顶级天花板」。最高价值两条为 **OpenPBR 收敛 + ACES2/AgX/OCIO 色彩管线**（决定全画面物理正确性与跨工具一致性，列 P0）与 **光树/ReGIR + 哈希辐照缓存 + 异质介质体积路径追踪**（决定多光与介质保真上限，列 P1）。光谱渲染、SFS/GPU 解压、MBOIT 为按需摊销增量（P2）。全部遵循数值红线：走「CPU golden → GPU kernel → 真机 parity」三步，关键路径必须与**路径追踪参考**或**解析解**可对拍，未毕业不作生产默认；**任何增补均不引入 AI/ML/神经/LLM 推理路径**。
+
+---
+
+## 13. v6 顶级天花板增补与路线图兑现核对（2026-10，纯经典数值 / 无 AI·ML·LLM）
+
+> **本版双目的**：① **兑现核对**——按 2026-10 仓内实测，v4/v5 列为 ⬜/🟡 的多条前沿已落为真实模块（给文件证据，升级分级）；② **补齐真实空白 + 收敛深化**——只对**仓内 0 文件实测**的真实空白赛道新增规格，并把**已有骨架**推向绝对天花板，达顶级次世代 AAA。**全程纯经典数值，排除一切 AI/ML/神经/LLM 推理路径**（厂商时序上采样/帧生成 SDK 仅渲染侧可选外部后端，本体走经典路径，CPU golden 可对拍）。
+
+### 13.0 规模计数刷新（2026-10 实测 `*.rs` 文件数）
+
+| crate / 子系统 | v5 记载 | 当前实测 | 增量说明 |
+|---|---|---|---|
+| `prism_render_shading`（`gi/` 62 子系统） | 344 | **344** | 内部深化为主，gi 子系统已达 62 |
+| `prism_render_scene`（ray_scene） | 456 | **458** | 软件 BVH/TLAS/SDF 查询继续收敛 |
+| `prism_render_architecture` | 671 | **680** | 帧图/流送/view_family 深化 |
+| `prism_virtual_geometry_gpu` | 49 | **49** | 软光栅主路径稳定 |
+| `prism_volumetric_gpu` | 163 | **191** | 体积储层/异质介质路径扩张 |
+| `prism_hair_gpu` | 98 | **108** | rt_proxy/hero_wavelengths/双散射深化 |
+| `prism_physics_gpu` / `core` / `geometry` | 263 / 168 / 33 | **275 / 183 / 34** | 流体/断裂/VBD/CCD/几何流形深化 |
+| `prism_audio_core` / `spatial` | 79 / 52 | **83 / 52** | 卷积混响/房间声学深化 |
+
+### 13.1 v4/v5 路线图兑现核对（已从 ⬜/🟡 升级，附文件证据）
+
+> 用户多轮指出「代码有更新」。下表按**真实目录证据**把 v4/v5 roadmap 中原记 ⬜/🟡 的赛道升级，证明「天花板增补」已大面积从设计落为实现，v6 不再把它们当空白。
+
+| 赛道 | v4/v5 记载 | 当前实况（文件证据） | 升级后 |
+|---|---|---|---|
+| LTC 解析面光 | 未单列 / 🟡 area_light | `gi/area_light/{ltc_lut.rs, polygon.rs, shapes.rs}` | ✅ 多边形 LTC 已落 |
+| ReSTIR PT / 路径重用 | 🟡 path_reuse 待连 | `gi/path_reuse/{path_reservoir.rs, shift_map.rs, vertex.rs}` | ✅ 路径储层+重投影骨架已落 |
+| RT 焦散（manifold/光子） | 🟡 caustics | `gi/caustics/{photon.rs, manifold_nee.rs, density_estimate.rs}` | ✅ 光子+流形 NEE+密度估计已落 |
+| 光树 / ReGIR 多光重采样 | 🟡→P1 待建 | `gi/light/{light_tree.rs, regir.rs}` + `gi/nee/{mis.rs, ris.rs, light_sampling.rs}` | ✅ 光树+ReGIR+MIS/RIS 已落 |
+| 世界空间哈希辐照缓存 | 🟡→P1 待建 | `gi/world_space/{radiance_cache.rs, spherical_gaussian.rs, octahedral.rs, probe_placement.rs, probe_interpolation.rs, visibility.rs}` | ✅ 哈希辐照缓存已落 |
+| 镜面/法线抗锯齿（Toksvig/LEAN） | §11 🟡 | `gi/specular_aa/{toksvig.rs, lean.rs, normal_variance.rs}` | ✅ 已落 |
+| DDGI 探针重定位 | 🟡 探针兜底 | `gi/irradiance_volume/{ddgi_probe.rs, relocation.rs, visibility.rs}` | ✅ 重定位+可见性已落 |
+| IES 光度配光 | 未单列 | `gi/ies_profile/{grid.rs, normalize.rs, symmetry.rs}` | ✅ 已落 |
+| 微遮蔽（micro-occlusion） | 未单列 | `gi/micro/micro_occlusion.rs` | ✅ 已落 |
+| 波动声学 / 高阶 Ambisonics / 衍射 / 卷积混响 | §12 🟡 待建 | `prism_audio_spatial`（52：`ambisonics/hoa/hoa_decode/hoa_rotation/diffraction/room_modes/portal_graph/scattering/material_library/early_reflections/convex_room/outdoor_propagation` 等）+ `prism_audio_core/reverb/convolver.rs` | ✅ 房间声学/HOA/衍射/卷积混响成规模 |
+| 物理软体/流体/断裂/VBD/CCD | §10 🟡 | `prism_physics_core/{soft, fluid, mpm, fracture, vbd, ccd, reduced, island, sleep}` | ✅ 子系统成规模 |
+
+**核对结论**：v4/v5 的「天花板增补」清单已**大面积兑现**；渲染正向、GI、面光、焦散、多光重采样、世界空间缓存、镜面 AA、音频波动声学/HOA、物理软体/流体均已有真实模块。v6 的新增聚焦于**仓内 0 文件实测的真实空白**（§13.2）与**已有骨架推向天花板的收敛深化**（§13.3）。
+
+### 13.2 真实空白赛道（本版新增规格，仓内 0 文件实测 → ⬜）
+
+> 以下赛道经 `find pkg -iname` 实测**当前为 0 文件**（`virtual_texture`/`sampler_feedback`/`directstorage`/`gdeflate`/`frame_gen` 均 0；物理 `abd`/`affine` 0）。它们是达到顶级次世代 AAA 仍缺的最后拼图，逐条给规格。
+
+#### 13.2.1 稀疏虚拟纹理运行期（RVT / SVT）+ Sampler Feedback 流送
+- **借鉴对象**：id Tech MegaTexture / UE Runtime Virtual Texture / D3D12 Sampler Feedback + Tiled Resources。
+- **算法要点**：全场景纹理内容虚拟化为页表（间接纹理 + 物理页池）；着色器通过 Sampler Feedback 回写**本帧实际被采样的 mip/页**，驱动按需页加载与驻留回收；地形/贴花/程序化材质烘到 RVT 复用，着色与 texel 驻留解耦。
+- **预算**：间接纹理一次采样 + 物理页池（可配，典型 256–1024MB）；feedback 回写走 UAV，按 tile 聚合，带宽占比 <2%。
+- **效果**：零可见纹理 pop、巨幅世界恒定显存、贴花/地形混合一次烘定复用。
+- **落点**：新建 `prism_render_architecture/src/virtual_texture/`（页表/物理页池/feedback 聚合）+ `prism_render_architecture/src/texture_streaming/`（已存在，接驻留调度）+ shading 侧间接采样 helper。
+- **验收**：高速移动相机下无 mip/页 pop；物理页池满载时 LRU 回收无抖动；feedback 预算与真机 parity 对拍。
+
+#### 13.2.2 DirectStorage / GDeflate GPU 解压直通流送
+- **借鉴对象**：Microsoft DirectStorage 1.2 + GDeflate GPU 解压（NVIDIA RTX IO 形态）。
+- **算法要点**：资源以 GDeflate 块压缩落盘，IO 请求批量提交，解压在 GPU compute 完成，绕过 CPU 解压与多余拷贝；与 §13.2.1 RVT 页加载、虚拟几何页池、BVH 流送共用一套异步流送队列。
+- **预算**：解压 compute 分帧摊销（预算如 <0.3ms/帧），IO 队列深度可配；无平台支持时回退 CPU 多线程解压路径（功能一致、吞吐降级）。
+- **效果**：开放世界瞬时跳转/传送无加载卡顿，流送吞吐数 GB/s 级。
+- **落点**：`prism_render_architecture/src/{texture_streaming, paging, memory}/` + 新建 `storage/`（IO 队列抽象 + GDeflate 解压 kernel + CPU 回退）。
+- **验收**：传送/跳转无长卡顿；GPU 解压与 CPU 回退逐块 bit 一致（经典可对拍）；队列背压下无死锁。
+
+#### 13.2.3 经典帧生成（运动矢量重投影 + 遮挡修复，无神经，可选）
+- **借鉴对象**：AMD FSR3 Frame Generation 的**经典核**（光流/运动矢量 + 遮挡遮罩 + UI 剥离），**不含**其任何神经部分。
+- **算法要点**：以相邻两渲染帧 + 稠密运动矢量（已有 `screen_space/motion.rs`/`reconstruct.rs` 可复用）做前后双向重投影生成中间帧；遮挡/去遮挡区按运动一致性检测并以邻域填补；HUD/UI 分层剥离后合成避免鬼影；与 §Reflex 形态延迟流水线协同以抵消插帧延迟。**默认关闭、可选**。
+- **预算**：生成一帧 compute（1440p 目标 <2ms），运动矢量复用零额外几何开销；延迟预算显式计入（插帧必然 +0.5–1 帧延迟，用低延迟流水线补偿）。
+- **效果**：显示帧率翻倍级平滑度提升，运动流畅；**纯经典、CPU 可对拍参考帧**。
+- **落点**：新建 `prism_render_shading/src/frame_gen/`（双向重投影/遮挡修复/UI 剥离）复用 `screen_space/motion.rs`、`history/`、`taa/jitter.rs`；厂商 SDK 作可选外部后端。
+- **验收**：快速平移/转身无撕裂/鬼影；UI 无抖动；关闭时零开销；延迟预算符合低延迟档；与经典参考帧误差有界。
+
+#### 13.2.4 仿射体动力学 ABD（刚体-软体统一，物理子系统）
+- **借鉴对象**：Affine Body Dynamics（Lan et al. 2022）+ IPC 无穿透接触，统一到现有 VBD/XPBD 求解框架。
+- **算法要点**：以每体 12 自由度仿射场代替纯刚体 6 自由度，近刚体用高刚度仿射能量约束，天然统一刚体/近刚体软体/关节；与现有 `physics_core/{vbd, soft, ccd}` 共用一套障碍接触与 CCD，消除刚体与软体两套接触代码的接缝。
+- **预算**：每体 12 DOF（刚体 6 DOF 的 2×），接触走已有 CCD/几何查询族；确定性定序求解（与现有确定性收敛约定一致）。
+- **效果**：刚体/软体/关节统一表达，大刚度下不抖、接触无穿透、与软体耦合无接缝。
+- **落点**：新建 `prism_physics_core/src/abd/`（仿射体 + 能量约束 + 接触耦合），复用 `ccd/`、`collide/`、`prism_physics_geometry` 查询族，接入 `solver/`。
+- **验收**：高刚度仿射体退化为刚体行为（与刚体解对拍）；刚-软耦合无穿插；跨平台确定性逐位复现。
+
+### 13.3 前沿收敛深化（已有骨架 → 推向绝对天花板）
+
+> 这些赛道已有真实骨架（§13.1），v6 给出**把骨架推向顶级天花板**的收敛规格。
+
+#### 13.3.1 GRIS 广义储层全路径重用（`path_reuse/` 深化）
+- **借鉴对象**：Generalized Resampled Importance Sampling（Lin et al. 2022, SIGGRAPH）/ ReSTIR PT。
+- **算法要点**：在现有 `path_reservoir.rs` + `shift_map.rs` 之上落**广义平衡启发式 MIS** 与**无偏雅可比校正**：相邻/历史像素路径经 reconnection shift 重连并以 GRIS Jacobian 加权，时空双重用全路径（含多次漫反射弹射），而非仅末端 DI/GI。
+- **预算**：路径储层 + shift 重连（每像素 1–2 候选），与现有去噪协同；偏差校正纯解析。
+- **效果**：多弹射间接光低方差无偏，暗角/焦散路径收敛显著快于逐帧 PT。
+- **落点**：`gi/path_reuse/{path_reservoir.rs, shift_map.rs, vertex.rs}` + `gi/nee/mis.rs`（MIS 权重）+ `gi/denoise/`。
+- **验收**：与离线 PT 参考在等时预算下方差更低且无系统性偏差（白炉/等效能量对拍）。
+
+#### 13.3.2 LTC 面光纹理化 + 线光/管光 + 多散射补偿（`gi/area_light/` 深化）
+- **借鉴对象**：Heitz et al. Linearly Transformed Cosines（含纹理化面光、线光/管光解析）。
+- **算法要点**：现有 `ltc_lut.rs`/`polygon.rs` 扩到**纹理化多边形光**（LTC 对纹理 mip 的解析积分）、**线光/管光**（LTC 边界积分闭式）、以及与 §多散射 GGX 能量补偿衔接，保高粗糙度面光不丢能量。
+- **预算**：LTC LUT 一次采样 + 多边形边积分 O(边数)，线/管光闭式；无额外采样噪声。
+- **效果**：霓虹/灯管/屏幕等纹理化/线状光源解析高光，无噪声、无需 RT。
+- **落点**：`gi/area_light/{ltc_lut.rs, polygon.rs, shapes.rs}` + `gi/env_brdf/`（多散射补偿）。
+- **验收**：与 RT 参考面光高光形状/能量一致；纹理化面光 mip 过渡平滑；高粗糙度能量守恒。
+
+#### 13.3.3 自适应方差制导采样 + 停机准则（与 `gi/denoise`/`gi/temporal` 协同）
+- **借鉴对象**：Adaptive sampling（Dammertz / A-SVGF 时域方差）+ ReSTIR confidence weights。
+- **算法要点**：以时域方差 + 储层置信度估计每像素收敛度，动态分配 spp 预算，收敛像素早停、噪声像素加采；与现有时空去噪的方差估计复用同一通道。
+- **预算**：方差估计复用去噪缓冲，无额外全屏 pass；采样预算有上限封顶，防长尾。
+- **效果**：等总预算下边缘/高频区更干净，平坦区省算力，整体方差下降。
+- **落点**：`gi/sample/`（预算分配）+ `gi/temporal/` + `gi/denoise/`/`gi/spec_denoise/`（方差源）。
+- **验收**：固定总 spp 预算下，相对均匀采样方差更低；无过曝/欠采闪烁；预算上限不被突破。
+
+#### 13.3.4 RT 焦散自适应光子 + manifold NEE 收敛（`gi/caustics/` 深化）
+- **借鉴对象**：Specular Manifold Sampling（Zeltner et al.）+ 自适应光子密度估计。
+- **算法要点**：在现有 `photon.rs`/`manifold_nee.rs`/`density_estimate.rs` 上落**自适应核半径**（按局部光子密度收缩）与**流形 NEE 连接**（镜面-漫反射-光源链），聚焦水下/玻璃焦散的无噪尖锐光斑。
+- **预算**：光子图分帧累积 + 自适应核；流形连接每焦散像素少量牛顿迭代。
+- **效果**：水下/玻璃/金属焦散尖锐无噪，与体积/水体子系统衔接。
+- **落点**：`gi/caustics/{photon.rs, manifold_nee.rs, density_estimate.rs}` + `water/caustics` + `gi/refraction/`。
+- **验收**：焦散光斑与离线光子映射参考形状一致、无能量泄漏；动态光下时域稳定不闪。
+
+### 13.4 v6 增补路线图优先级
+
+| 增补特性 | 落点 | 现状（实测） | 优先级 | 依赖 |
+|---|---|---|---|---|
+| 稀疏虚拟纹理 RVT/SVT + Sampler Feedback | `virtual_texture/`（0，待建）+ `texture_streaming/` | ⬜ | P1 | 页池、帧图、流送 |
+| DirectStorage/GDeflate GPU 解压流送 | `storage/`（待建）+ `paging/memory/` | ⬜ | P1 | 异步流送队列 |
+| 经典帧生成（可选，无神经） | `frame_gen/`（待建）复用 `motion/history/taa` | ⬜ | P2 | 运动矢量、低延迟流水线 |
+| 仿射体动力学 ABD | `prism_physics_core/abd/`（0，待建） | ⬜ | P2 | VBD/CCD/几何查询族 |
+| GRIS 广义储层全路径重用 | `gi/path_reuse/` + `gi/nee/mis.rs` | 🟡 骨架在 | P1 | 路径储层、去噪 |
+| LTC 面光纹理化 + 线光/管光 | `gi/area_light/` + `gi/env_brdf/` | 🟡 多边形在 | P1 | 面光、多散射 |
+| 自适应方差制导采样 + 停机 | `gi/sample/` + `gi/temporal/denoise/` | 🟡 采样器在 | P1 | 时空方差、储层置信度 |
+| RT 焦散自适应光子 + manifold NEE | `gi/caustics/` + `water/caustics` | 🟡 骨架在 | P2 | 光子图、折射、水体 |
+
+**v6 增补总原则**：① v6 **不改变 §9 P0 基底次序**，也不重复 §11/§12 已兑现条目；② 真实空白（§13.2，仓内 0 文件实测）列为新规格，其中 **RVT/SVT + DirectStorage 流送**是开放世界恒定显存与零加载卡顿的最后短板（P1），**ABD 与经典帧生成**为按需增量（P2）；③ 已有骨架（§13.3）走收敛深化，**GRIS 全路径重用 / LTC 纹理化面光 / 自适应采样**价值最高（P1）。全部遵循数值红线：走「CPU golden → GPU kernel → 真机 parity」三步，关键路径必须与**路径追踪参考**或**解析解**可对拍，未毕业不作生产默认；**任何增补均不引入 AI/ML/神经/LLM 推理路径**（厂商时序上采样/帧生成 SDK 仅渲染侧可选外部后端）。
+
+---
+
+## 14. v7 绝对天花板增补与规模再刷新（2026-10，纯经典数值 / 无 AI·ML·神经·LLM）
+
+> **本版双目的**：① 用户再次指出「代码有更新」，按 2026-10 实测 `find pkg/<crate>/src -name '*.rs'` **重算规模并修正 v6 §13.0 的记载**（v6 部分子目录计数偏高，本版以统一口径为准）；② 在 v6 §13 的空白补齐与收敛深化之上，追加 **8 条 2024–2026 真·前沿赛道**——这些是把 Prism 从「功能齐备」推到「顶级次世代 AAA 天花板」仍差的最后增量，覆盖**纹理采样 / 硬件曲线 RT / 微几何 RT / 可编程光栅动画几何 / 分层 GI 融合 / 整帧 GPU 自驱 / 物理无穿透接触 / 波场声学**。逐条给借鉴对象 + 算法要点 + 性能预算 + 效果上限 + 模块落点 + 验收口径。**全程纯经典数值，排除一切 AI/ML/神经/LLM 推理路径**；厂商时序上采样/帧生成 SDK 仅渲染侧可选外部后端，本体默认经典路径，关键路径与路径追踪参考或解析解可对拍。
+
+### 14.0 规模计数再刷新（2026-10 实测，统一口径 `find src -name '*.rs' | wc -l`）
+
+> **口径声明**：以下为 `pkg/<crate>/src` 下 `*.rs` 文件计数（含测试文件），与 v3/v6 偶有的"子目录/行数"混计不同。本表为后续各版的权威基线，修正 v6 §13.0 中偏高的几项（如虚拟几何 GPU、体积 GPU、毛发 GPU）。
+
+| crate / 子系统 | v6 §13.0 记载 | v7 统一口径实测 | 说明 |
+|---|---|---|---|
+| `prism_render_architecture` | 680 | **680** | 帧图/流送/view_family/ray_scene(118) 持续深化 |
+| `prism_render_shading`（含 `gi/` **63 子目录** / 246 文件） | 344 | **344** | GI 子系统已达 63 子目录、`gi/` 下 246 `*.rs` |
+| `prism_render_scene`（ray_scene 精确 SDF 族） | 458 | **459** | 新增 `cut_hollow_sphere`/`round_cone`/`solid_angle` 等精确 SDF 图元 |
+| `prism_render_visibility`（两阶段 HZB 遮挡） | — | **16** | 本 lane：HZB footprint→projection→pyramid→query 全链 CPU 参考 |
+| `prism_render_material` | — | **12** | 闭包 IR / ABI 前端 |
+| `prism_virtual_geometry_gpu` | 49 | **25** | 软光栅主路径稳定（v6 计数偏高，统一口径修正） |
+| `prism_volumetric_gpu` | 191 | **101** | froxel/储层/异质介质孪生（统一口径修正；近期新增 soft_particle/luminance_hist/sharpen_cas/checkerboard_resolve 孪生） |
+| `prism_hair_gpu` | 108 | **59** | Marschner/双散射 + **逐发丝 LSS 段切分 GPU 孪生**（统一口径修正） |
+| `prism_physics_gpu` / `core` / `geometry` | 275 / 183 / 34 | **220 / 167 / 34** | 流体/断裂/VBD/CCD/几何流形（统一口径修正） |
+| `prism_audio_core` / `spatial` / `rt` / `hrtf` | 83 / 52 | **84 / 52 / 6 / 9** | 卷积混响/HOA/衍射/房间声学；共享 `Fft` 原语已统一消除私有 radix-2 重复 |
+
+**修正说明**：v6 §13.0 对 `virtual_geometry_gpu / volumetric_gpu / hair_gpu / physics_gpu` 的计数高于当前统一口径实测——原因是早期按「孪生对 + WGSL + 测试」混计或含已合并文件。本表改用单一 `*.rs` 文件口径，后续版本一律沿用，避免分级虚高。**结论不变**：GI/面光/焦散/多光/世界空间缓存/镜面 AA/音频波动声学/物理软体流体仍为真实成规模模块，兑现核对结论（v6 §13.1）继续成立。
+
+### 14.1 空白赛道再核验（v6 §13.2 四项 + §11 两项，当前实测仍 0 文件 → 维持 ⬜）
+
+> `find pkg -iname '*<kw>*' -name '*.rs'` 实测：`virtual_texture / sampler_feedback / directstorage / gdeflate / frame_gen / abd / affine_body / opacity_micromap / micromap / nanite_tessellation` **当前均 0 文件**。维持 v6 分级，继续列为最高优先的真实短板。**唯一进展信号**：`prism_hair_gpu` 近期落 `逐发丝 LSS 段计数 / 发丝折线→LSS 段切分 GPU 孪生`——这是 §14.2.2「硬件曲线 RT」赛道的**上游几何前置**已动工（LSS 段数据正在生成），但硬件 BLAS 构建/相交内核仍 0，赛道整体维持 🟡 骨架前。
+
+### 14.2 v7 新增前沿赛道（纯经典数值，逐条规格）
+
+#### 14.2.1 随机纹理过滤 STF（Stochastic Texture Filtering）
+- **借鉴对象**：Pharr/Wronski/Hofmann《Filtering After Shading with Stochastic Texture Filtering》(2024) + TAA/TSR 时序累积。
+- **算法要点**：对**任意纹理编码**（压缩块、神经无关的程序化、稀疏虚拟页、各向异性 ratio 采样）以**单次随机抽样**代替昂贵的硬件三线性/各向异性过滤，把过滤移到着色之后，由时序累积（TSR/TAA）在时域求期望收敛；用蓝噪声（STBN）+ Owen-scrambled Sobol 抖动降低单帧方差，jitter 与上采样 jitter 共用同一序列保证无相关聚块。
+- **预算**：每纹理采样从 N tap 降为 1 tap（省带宽/ALU），代价是单帧方差上升、依赖时序累积收敛；禁用过滤硬件时对 RVT/SVT（§13.2.1）尤其划算。
+- **效果**：高分辨率贴图/虚拟纹理页在相同带宽下可过滤任意编码；与各向异性 ratio、mip bias 协同，动态场景静止 2–4 帧即收敛到参考三线性质量。
+- **落点**：`gi/sample/`（STBN/Sobol 抖动源）+ `temporal_upscale/`（时序求期望）+ `texture_streaming/` / 未来 `virtual_texture/`（页采样）。
+- **验收**：静止相机 ≤4 帧内与硬件三线性 PSNR 差 <0.5 dB；运动下无过滤抖动/闪烁；禁用硬件各向异性时等质量下带宽显著下降；CPU golden 以固定随机序列可逐 texel 对拍。
+
+#### 14.2.2 硬件曲线 / 发丝 RT — 线性扫掠球 LSS（Linear Swept Spheres）
+- **借鉴对象**：NVIDIA RTX Mega Geometry 的 **Linear Swept Spheres** 曲线图元 + DXR 曲线/`OptiX` curve primitive + UE Groom RT。
+- **算法要点**：发丝折线段编码为**两端半径线性插值的扫掠球**（LSS），构建专用 BLAS，由硬件 RT 直接相交发丝曲线——取代把每根发丝 proxy 成管状三角网格（省几何/BVH 内存一个数量级）；相交后接 Marschner/Zinke 双散射 BSDF 做阴影/反射/GI 可见性。**上游 LSS 段切分已在 `prism_hair_gpu` 落孪生**，本赛道补齐 BLAS 构建 + 相交内核 + 软件 fallback。
+- **预算**：LSS BLAS 构建分帧 refit（蒙皮/风动发丝）；相交比管状网格省 BVH 节点与 traversal；无 RT 平台降级为 strand→card LOD + 软件 BVH。
+- **效果**：毛发在反射/阴影/GI 中以真实曲线出现（而非卡片近似），自阴影与透射散射物理正确；与水体/体积焦散、RT 反射统一走同一 TLAS。
+- **落点**：`prism_hair_gpu`（LSS 段数据已动工）+ `prism_render_architecture/ray_scene/`（BLAS/TLAS 接入）+ `prism_render_scene/raytrace/` + `gi/hair_bsdf/`（散射响应）。
+- **验收**：LSS 相交与管状网格参考在发丝剪影/自阴影一致；BVH 内存较三角 proxy 降 ≥5×；蒙皮/风动下 refit 不破时域稳定；软件 fallback 与硬件 parity 可对拍。
+
+#### 14.2.3 微几何硬件 RT — 位移微网格 DMM + 不透明微贴图 OMM
+- **借鉴对象**：NVIDIA Displaced Micro-Mesh (DMM) + Opacity Micromap (OMM) + RTX Mega Geometry 簇级 BLAS。
+- **算法要点**：**DMM**——把高度/位移烘为基三角上的**微网格位移 LOD**，让 Nanite 式程序化置换几何**可被硬件 RT**（反射/阴影/GI 看到真实置换表面，而非低模），位移在 BLAS 构建期解算、按屏幕投影选微细分级；**OMM**——把 alpha-test 掩码（植被叶片/发卡/铁丝网）烘为**三态微贴图**（全不透明/全透明/未知），RT 相交时对「全透明/全不透明」微三角**跳过 any-hit shader**，仅「未知」区回落 alpha 采样，消除植被 RT 的 any-hit 风暴。
+- **预算**：DMM/OMM 烘焙离线或异步；BLAS 内存随微细分上升但 traversal 省；OMM 把植被阴影 any-hit 调用降一个数量级。
+- **效果**：置换地形/岩石/树皮在 RT 反射与光追阴影中有真实微起伏；植被/透明掩码 RT 阴影无 any-hit 卡顿、边缘锐利。
+- **落点**：`virtual_geometry/`（DMM 与软光栅置换共享高度源）+ `ray_scene/`（micromap BLOB → BLAS）+ `gi/shadow/` `gi/reflect/`（消费）。
+- **验收**：DMM RT 命中与软光栅置换剪影一致、无 LOD 跳变；OMM 对 alpha-test 植被阴影较朴素 any-hit 提速且无边缘漏光；micromap 构建确定性可对拍。
+
+#### 14.2.4 可编程光栅 WPO — 动画 / 蒙皮虚拟几何（植被风动 · 角色）
+- **借鉴对象**：UE5.4+ Nanite **可编程光栅（World Position Offset / 顶点动画）** + Nanite Skinned Mesh + Nanite Foliage。
+- **算法要点**：在虚拟几何软光栅前端插入**可编程顶点阶段**——支持 world-position-offset（风场/顶点动画材质驱动植被摆动）与**蒙皮**（骨骼矩阵调色板 → cluster 顶点变形），使海量角色/植被进入 vis-buffer 零 LOD pop 的高密度管线；WPO/蒙皮后更新**保守包围与运动矢量**，供 HZB 两阶段遮挡（本 lane 已落 CPU 参考）与 TSR 重投影正确剔除/累积。
+- **预算**：顶点阶段 ALU 随 WPO 复杂度上升；蒙皮矩阵调色板常驻；运动矢量必须随 WPO 更新（否则 TSR ghosting）。
+- **效果**：森林级植被风动、人群级蒙皮角色全部走 Nanite 密度与一致着色；与 VSM（§3.4）协同得到动画几何的一致阴影。
+- **落点**：`prism_virtual_geometry_gpu`（可编程顶点/蒙皮前端）+ `prism_render_architecture/motion/`（WPO 运动矢量）+ `prism_render_visibility`（WPO 后保守包围喂两阶段 HZB）+ `deformation/`（蒙皮调色板）。
+- **验收**：WPO/蒙皮几何在 HZB 遮挡与 TSR 下无错剔除、无 ghosting；运动矢量与几何位移一致；大规模植被/人群维持零 LOD pop。
+
+#### 14.2.5 分层 GI 融合 — 屏幕探针 + 世界空间辐照缓存（ReSTIR GI 多级）
+- **借鉴对象**：UE5 Lumen 的 **Screen Probe Gather + World Radiance Cache** 分层 + ReSTIR GI 时空重用 + 世界空间哈希缓存（§13.1 已落 `gi/world_space`）。
+- **算法要点**：近场由**屏幕空间探针**（`gi/screen_probe`）稠密采样 + ReSTIR 时空重用解短程间接光；远场/被遮挡区由**世界空间哈希辐照缓存**（`gi/world_space`）提供低频兜底，二者按射线命中距离与屏幕可见性**加权融合**，消除屏幕空间 GI 的边界漏光与 off-screen 丢失；缓存按相机驻留分帧更新、八面体编码方向辐照。
+- **预算**：屏幕探针固定屏幕预算；世界缓存哈希桶按驻留分帧摊销；融合权重一趟全屏。
+- **效果**：动态无烘焙下近场细节 + 远场稳定兼得；相机转动/off-screen 间接光不丢、不闪；关 RT 时与 SSGI/DDGI 平滑降级。
+- **落点**：`gi/screen_probe/` + `gi/world_space/` + `gi/world_restir/`（融合与时空重用）+ `gi/surface_cache/`（弹射摊薄）。
+- **验收**：与路径追踪 GI 参考多弹射辐照收敛一致；屏幕边界/遮挡过渡无漏光；相机运动时域稳定、无缓存爆闪。
+
+#### 14.2.6 整帧 GPU 自驱 — Work Graph（mesh nodes 全管线调度）
+- **借鉴对象**：D3D12 **Work Graphs**（含 2024 mesh nodes）+ Metal `MTL4` 命令调度 + NVIDIA 持久线程生产者-消费者。
+- **算法要点**：把 visibility→material classify→material shade→lighting 的分发从 CPU 预录命令改为 **GPU 自驱 work graph**：上游节点动态产出下游工作项（如 vis-buffer 分箱后按材质桶 fan-out 着色节点，mesh node 直接产出微三角），消除往返 CPU 的 indirect 分发与过度保守的 worst-case 分配；与 bindless 堆 + SER（§6.12）协同提高着色相干。`prism_render_architecture/work_graph/`（5 文件）已有骨架，本赛道补齐节点图编排与材质桶 fan-out。
+- **预算**：work graph 调度省 CPU 录制与 indirect 读回；节点 backing 内存按峰值估算封顶；无硬件 work graph 平台降级为经典 indirect + 多 pass。
+- **效果**：GPU-driven 管线端到端自驱，材质分箱着色相干、空桶零开销；超大场景分发不再被 CPU 命令录制瓶颈。
+- **落点**：`prism_render_architecture/work_graph/`（节点图）+ `gpu_scene/` + `material/`（材质桶 fan-out）+ `frame_graph/`（降级路径）。
+- **验收**：work graph 与经典 indirect 多 pass 结果逐像素一致；空材质桶无 launch 开销；降级路径 parity；节点 backing 不溢出封顶。
+
+#### 14.2.7 物理 — IPC 无穿透摩擦接触 + ABD 刚软统一（纯经典数值）
+- **借鉴对象**：Li et al.《Incremental Potential Contact》(2020) 的**保证非穿透 + 精确摩擦**障碍能量 + 《Affine Body Dynamics》(2022) 刚软统一（§13.2.4 已列 ABD 空白）。
+- **算法要点**：接触以**对数障碍能量**表达（距离趋零时能量趋无穷，数学上保证无穿透），配 CCD 过滤线搜索步长；摩擦走**半隐式对偶**近似精确库仑摩擦；ABD 用仿射坐标统一表达刚体与近刚软体，与现有 VBD/XPBD 求解器共存，难接触场景（齿轮/堆叠/布-体耦合）切 IPC 分支求鲁棒解。
+- **预算**：IPC 牛顿迭代 + CCD 线搜索成本高，仅难接触子集启用；ABD 自由度远低于全 FEM，适合实时近刚；与 island/sleep（已落）协同只激活活跃岛。
+- **效果**：堆叠/楔入/薄壳接触零穿透、摩擦物理正确，消除 XPBD 常见的穿透抖动与爆飞；刚软耦合（角色与布/软体）统一稳定。
+- **落点**：`prism_physics_core/{abd(待建), ccd, island, sleep, soft, vbd}` + `prism_physics_geometry/`（距离/流形查询）。
+- **验收**：难接触基准（斜面摩擦停住、深楔入不穿透、堆叠稳定）与离线 IPC 参考一致；能量无爆增；活跃岛外零成本；确定性可对拍。
+
+#### 14.2.8 音频 — 预计算波场 + 运行期参数解码（波动声学天花板，纯经典数值）
+- **借鉴对象**：Raghuvanshi/Snyder《Parametric Wave Field Coding》+ Microsoft Project Acoustics 形态 + 现有 `prism_audio_spatial` 波动声学/HOA/衍射。
+- **算法要点**：离线用 **FDTD / ARD 波动求解器**在场景几何上预计算声场，提取**感知参数场**（到达方向、初始能量、混响衰减 RT60、遮挡/衍射量）压成空间网格；运行期按声源-听者位置**三线性插值参数**并驱动现有 HOA 空间化 + 卷积混响（`prism_audio_core/reverb/convolver.rs`）——得到绕角衍射、门洞传播、室内外过渡的物理声场，而运行期零波动求解。**纯经典 DSP**：求解是数值 PDE，解码是参数插值 + 卷积，无任何神经/学习路径。
+- **预算**：波场求解离线/烘焙；运行期仅参数网格采样 + 既有卷积混响；参数场按分区流送控内存。
+- **效果**：遮挡/衍射/混响随几何物理正确变化（墙后闷、门洞泄声、室内外无缝），超越纯几何光线声学的硬边界。
+- **落点**：`prism_audio_spatial/`（参数场解码 + 衍射）+ `prism_audio_core/reverb/`（卷积混响驱动）+ 烘焙工具侧波动求解。
+- **验收**：参数解码混响/遮挡与离线波动求解参考在关键听点一致；声源/听者移动时参数插值无突跳；室内外过渡平滑；确定性可对拍。
+
+### 14.3 v7 增补路线图优先级（并入既有阶梯，不改 §9 P0 基底次序）
+
+| 增补特性 | 落点 | 现状（实测） | 优先级 | 依赖 |
+|---|---|---|---|---|
+| 可编程光栅 WPO/蒙皮虚拟几何 | `virtual_geometry_gpu` + `motion/` + `render_visibility` | 🟡 软光栅主路径在，WPO/蒙皮前端待建 | **P0.5** | 虚拟几何软光栅、运动矢量、两阶段 HZB |
+| 硬件曲线 RT（LSS 发丝） | `hair_gpu` + `ray_scene` + `gi/hair_bsdf` | 🟡 LSS 段切分孪生已动工，BLAS/相交 0 | **P1** | RTX 曲线 BLAS、毛发 BSDF、TLAS |
+| 微几何 RT（DMM + OMM） | `virtual_geometry/` + `ray_scene/` + `gi/shadow,reflect` | ⬜ micromap 0 文件 | **P1** | DMM/OMM 烘焙、簇级 BLAS |
+| 分层 GI 融合（屏幕探针+世界缓存） | `gi/screen_probe` + `gi/world_space` + `gi/world_restir` | 🟡 两侧骨架均在，融合权重待连 | **P1** | 屏幕探针、世界哈希缓存、ReSTIR |
+| 随机纹理过滤 STF | `gi/sample` + `temporal_upscale` + `texture_streaming` | 🟡 抖动源/时序在，STF 采样路径待建 | **P1** | STBN/Sobol、TSR、（RVT 协同） |
+| 整帧 GPU Work Graph（mesh nodes） | `work_graph/` + `gpu_scene` + `material` | 🟡 骨架 5 文件 | **P2** | work graph 后端、bindless、材质分箱 |
+| IPC 无穿透摩擦接触 + ABD | `prism_physics_core/{abd(待建),ccd,soft,vbd}` | ⬜ abd 0 文件，CCD/VBD/soft 在 | **P2** | CCD、几何流形、island/sleep |
+| 预计算波场 + 参数解码（音频） | `prism_audio_spatial` + `prism_audio_core/reverb` | 🟡 HOA/衍射/卷积混响在，波场烘焙待建 | **P2** | 离线 FDTD/ARD、HOA、卷积混响 |
+
+**v7 增补总原则**：① **不改 §9 P0 基底次序**，也不重复 §6/§11/§12/§13 已兑现条目；② **WPO/蒙皮虚拟几何列 P0.5**——它是「海量动画几何进 Nanite 密度」的开阔世界刚需，且本 lane 两阶段 HZB CPU 参考已就绪可直接消费其保守包围，依赖最成熟、价值最高；③ **LSS 发丝 RT / 微几何 DMM-OMM / 分层 GI 融合 / STF 列 P1**——前两者让毛发与置换/透明几何进入统一 TLAS 的 RT 保真，后两者补 GI 边界质量与带宽；④ **Work Graph / IPC-ABD / 波场声学列 P2**——价值高但依赖重、按需增量；⑤ 全部遵循数值红线，走「CPU golden → GPU kernel → 真机 parity」三步，关键路径必须与**路径追踪参考 / 解析解 / 离线数值求解**可对拍，未毕业不作生产默认；**任何增补均不引入 AI/ML/神经/LLM 推理路径**（厂商时序上采样/帧生成 SDK 仅渲染侧可选外部后端）。
 
 ---
 
