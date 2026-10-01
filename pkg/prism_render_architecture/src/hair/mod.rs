@@ -83,6 +83,7 @@ pub mod interp_buffers;
 pub mod interpolation;
 pub mod lod;
 pub mod lod_dither_buffers;
+pub mod melanin;
 pub mod mesh_shell;
 pub mod optional_pass_dispatch;
 pub mod optional_pass_layout;
