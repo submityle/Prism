@@ -1,0 +1,18 @@
+[package]
+name = "prism_ui_scoped"
+version = "0.1.0"
+edition = "2024"
+description = "Loom scoped styles and responsive @media resolution: component-scoped class namespacing and breakpoint-gated rule activation over prism_ui_style. Contains no Unreal Engine source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_ui = { path = "../prism_ui" }
+prism_ui_style = { path = "../prism_ui_style" }
+
+[features]
+default = ["std"]
+std = ["prism_ui/std", "prism_ui_style/std"]
+
+[lints]
+workspace = true

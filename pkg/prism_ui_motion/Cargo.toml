@@ -1,0 +1,19 @@
+[package]
+name = "prism_ui_motion"
+version = "0.1.0"
+edition = "2024"
+description = "Loom automatic motion: implicit style transitions, FLIP layout animation and shared-element (Hero) transitions over prism_ui elements. Contains no Unreal Engine source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_ui = { path = "../prism_ui" }
+prism_ui_anim = { path = "../prism_ui_anim" }
+prism_ui_style = { path = "../prism_ui_style" }
+
+[features]
+default = ["std"]
+std = ["prism_ui/std", "prism_ui_anim/std", "prism_ui_style/std"]
+
+[lints]
+workspace = true
