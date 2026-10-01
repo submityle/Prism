@@ -37,6 +37,7 @@
 
 pub mod aero;
 pub mod bending;
+pub mod body;
 pub mod cpu;
 pub mod gpu;
 pub mod layout;
@@ -52,6 +53,10 @@ pub use aero::{
 pub use bending::{
     colour_bending, cpu_cloth_bending, BendingColoring, ClothBendingConstraint, GpuClothBending,
 };
+pub use body::{
+    cpu_cloth_backstops, cpu_cloth_body_collision, pack_backstops, pack_body_colliders,
+    GpuBackstop, GpuBodyCollider, GpuClothBodyCollision,
+};
 pub use cpu::cpu_cloth_self_collision_jacobi;
 pub use gpu::GpuClothSelfCollision;
 pub use long_range::{
@@ -60,8 +65,7 @@ pub use long_range::{
 };
 pub use prep::{build as build_cloth_prep, ClothPrep};
 pub use pressure::{
-    build_vertex_triangle_adjacency, cpu_cloth_pressure, GpuClothPressure,
-    VertexTriangleAdjacency,
+    build_vertex_triangle_adjacency, cpu_cloth_pressure, GpuClothPressure, VertexTriangleAdjacency,
 };
 pub use strain_limit::{
     colour_strain_limit, cpu_cloth_strain_limit, ClothStrainLimitConstraint, GpuClothStrainLimit,
