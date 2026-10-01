@@ -95,6 +95,14 @@ pub fn plane(point: [f32; 3], normal: [f32; 3], offset: f32) -> f32 {
     dot(point, normal) + offset
 }
 
+/// Exact surface normal (unit gradient) of [`plane`]: the plane's own
+/// `normal`, which is constant everywhere. `normal` must already be unit
+/// length (the same precondition as [`plane`]); the gradient of
+/// `dot(point, normal) + offset` is exactly `normal`.
+pub fn plane_gradient(normal: [f32; 3]) -> [f32; 3] {
+    normal
+}
+
 /// Signed distance from `point` to a torus in the `xz` plane with the given
 /// `major_radius` (ring centre to tube centre) and `minor_radius` (tube).
 ///
@@ -202,6 +210,33 @@ pub fn capsule(point: [f32; 3], a: [f32; 3], b: [f32; 3], radius: f32) -> f32 {
     };
     let closest = [pa[0] - ba[0] * h, pa[1] - ba[1] * h, pa[2] - ba[2] * h];
     length(closest) - radius
+}
+
+/// Exact surface normal (unit gradient) of [`capsule`] at `point` for the
+/// segment `a`-`b`: the unit vector from the nearest point on the capsule's
+/// skeleton segment toward `point`.
+///
+/// The capsule SDF is `length(point - closest) - radius` where `closest` is
+/// the clamped projection onto the segment, so its gradient is simply
+/// `(point - closest) / |point - closest|` — pointing radially away from the
+/// axis both inside and outside the tube. On the skeleton itself (and for a
+/// degenerate zero-length segment with `point == a`) the direction is
+/// undefined, so the zero vector is returned.
+pub fn capsule_gradient(point: [f32; 3], a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    let pa = [point[0] - a[0], point[1] - a[1], point[2] - a[2]];
+    let ba = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    let ba_len_sq = dot(ba, ba);
+    let h = if ba_len_sq > f32::MIN_POSITIVE {
+        (dot(pa, ba) / ba_len_sq).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let closest = [pa[0] - ba[0] * h, pa[1] - ba[1] * h, pa[2] - ba[2] * h];
+    let l = length(closest);
+    if l == 0.0 {
+        return [0.0, 0.0, 0.0];
+    }
+    [closest[0] / l, closest[1] / l, closest[2] / l]
 }
 
 /// Squared Euclidean length of a 2-vector (`dot(v, v)`), used by the
@@ -1982,6 +2017,24 @@ pub fn vertical_capsule(point: [f32; 3], height: f32, radius: f32) -> f32 {
     length([point[0], qy, point[2]]) - radius
 }
 
+/// Exact surface normal (unit gradient) of [`vertical_capsule`] at `point` for
+/// a capsule of `height` along `+y`.
+///
+/// Mirrors [`capsule_gradient`] specialised to the upright axis: with
+/// `qy = p.y - clamp(p.y, 0, height)` the offset from the nearest skeleton
+/// point is `(p.x, qy, p.z)`, and the normal is that vector normalised. On the
+/// skeleton segment (where the offset vanishes) the direction is undefined and
+/// the zero vector is returned.
+pub fn vertical_capsule_gradient(point: [f32; 3], height: f32) -> [f32; 3] {
+    let qy = point[1] - point[1].clamp(0.0, height);
+    let v = [point[0], qy, point[2]];
+    let l = length(v);
+    if l == 0.0 {
+        return [0.0, 0.0, 0.0];
+    }
+    [v[0] / l, v[1] / l, v[2] / l]
+}
+
 /// Exact signed distance to a filled annulus (ring / washer) in 2D centred at
 /// the origin, with mid-line radius `radius` and half-thickness `half_width`.
 ///
@@ -2105,12 +2158,12 @@ pub fn segment_3d(point: [f32; 3], a: [f32; 3], b: [f32; 3]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        annulus_2d, arc, box_2d, box_frame, box_frame_2d, box_gradient, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_torus, capsule, capsule_2d, circle_2d, cone_sdf, cross_2d, cut_disk_2d, cut_hollow_sphere,
+        annulus_2d, arc, box_2d, box_frame, box_frame_2d, box_gradient, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_torus, capsule, capsule_2d, capsule_gradient, circle_2d, cone_sdf, cross_2d, cut_disk_2d, cut_hollow_sphere,
         cut_sphere, cylinder_segment, death_star, egg_2d, ellipsoid_sdf, equilateral_triangle_2d, heart_2d, hex_prism, hexagram_2d, horseshoe_2d, infinite_cone, infinite_cylinder, isosceles_triangle_2d, length2, line_sdf, link, moon,
-        octagon_prism, octahedron, oriented_box_2d, oriented_vesica_2d, parallelogram, pentagram_2d, pie, plane, polygon_2d, pyramid, quad_sdf, regular_hexagon_2d, regular_octagon_2d, regular_pentagon_2d, rhombus, rhombus_2d, round_box, round_cone_sdf,
+        octagon_prism, octahedron, oriented_box_2d, oriented_vesica_2d, parallelogram, pentagram_2d, pie, plane, plane_gradient, polygon_2d, pyramid, quad_sdf, regular_hexagon_2d, regular_octagon_2d, regular_pentagon_2d, rhombus, rhombus_2d, round_box, round_cone_sdf,
         round_cone_segment, rounded_box_2d, rounded_cross_2d, rounded_cylinder, rounded_x,
         segment_2d, segment_3d, solid_angle, sphere, sphere_gradient, star5_2d, torus, torus_gradient, trapezoid_isosceles, triangle_2d, triangle_sdf, triangular_prism, tunnel_2d,
-        uneven_capsule_2d, vertical_capsule, vesica, vesica_2d, vesica_segment,
+        uneven_capsule_2d, vertical_capsule, vertical_capsule_gradient, vesica, vesica_2d, vesica_segment,
     };
 
     // Independent brute-force reference: densely sample the segment and take
@@ -3042,6 +3095,69 @@ mod tests {
         // On the central y axis the planar direction is undefined -> +y axis.
         assert_eq!(torus_gradient([0.0, 0.5, 0.0], major, minor), [0.0, 1.0, 0.0]);
         assert_eq!(torus_gradient([0.0, -0.5, 0.0], major, minor), [0.0, -1.0, 0.0]);
+    }
+
+    #[test]
+    fn plane_gradient_is_the_constant_plane_normal() {
+        // The gradient of `dot(point, normal) + offset` is exactly `normal`,
+        // independent of the sample point, and already unit length.
+        for &n in &[
+            [0.0_f32, 1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.267_261_24, 0.534_522_5, 0.801_783_7], // normalized (1,2,3)
+        ] {
+            let g = plane_gradient(n);
+            assert_eq!(g, n);
+            assert!((unit_len3(g) - 1.0).abs() < 1e-6, "unit n={n:?}");
+            // Matches a central difference of the exact plane field anywhere.
+            let fd = central_grad3(&|q| plane(q, n, -0.4), [0.3, -0.2, 0.7]);
+            for k in 0..3 {
+                assert!((g[k] - fd[k]).abs() < 2e-3, "plane grad n={n:?} axis {k}");
+            }
+        }
+    }
+
+    #[test]
+    fn capsule_gradient_matches_central_difference_off_skeleton() {
+        let (a, b, r) = ([-0.5_f32, 0.2, 0.0], [0.6, 0.1, 0.4], 0.3);
+        // Points away from the skeleton segment (the measure-zero crease).
+        for &p in &[
+            [1.2_f32, 0.3, 0.1],
+            [-1.0, 0.4, -0.3],
+            [0.05, 0.9, 0.2],
+            [0.1, -0.6, 0.5],
+        ] {
+            let g = capsule_gradient(p, a, b);
+            assert!((unit_len3(g) - 1.0).abs() < 1e-6, "unit p={p:?}");
+            let fd = central_grad3(&|q| capsule(q, a, b, r), p);
+            for k in 0..3 {
+                assert!((g[k] - fd[k]).abs() < 2e-3, "capsule grad p={p:?} axis {k}: {} vs {}", g[k], fd[k]);
+            }
+        }
+        // On the skeleton (point == a) the radial direction is undefined.
+        assert_eq!(capsule_gradient(a, a, b), [0.0, 0.0, 0.0]);
+        // Degenerate zero-length segment with point at the shared endpoint.
+        assert_eq!(capsule_gradient(a, a, a), [0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn vertical_capsule_gradient_matches_central_difference_off_skeleton() {
+        let (height, r) = (1.0_f32, 0.25);
+        for &p in &[
+            [0.5_f32, 0.3, 0.1],
+            [-0.4, 1.3, 0.2],
+            [0.2, -0.5, 0.3],
+            [0.6, 0.8, -0.3],
+        ] {
+            let g = vertical_capsule_gradient(p, height);
+            assert!((unit_len3(g) - 1.0).abs() < 1e-6, "unit p={p:?}");
+            let fd = central_grad3(&|q| vertical_capsule(q, height, r), p);
+            for k in 0..3 {
+                assert!((g[k] - fd[k]).abs() < 2e-3, "vcap grad p={p:?} axis {k}: {} vs {}", g[k], fd[k]);
+            }
+        }
+        // On the axis segment the radial direction is undefined -> zero.
+        assert_eq!(vertical_capsule_gradient([0.0, 0.5, 0.0], height), [0.0, 0.0, 0.0]);
     }
 
     // Exact unsigned distance to a 2D segment, used to cross-check `segment_2d`
