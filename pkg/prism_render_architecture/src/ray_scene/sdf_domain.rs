@@ -90,9 +90,43 @@ pub fn scale_distance(distance: f32, factor: f32) -> f32 {
     distance * factor
 }
 
+/// Stretches the field into a prism by carving a slab of core out of the
+/// query point, giving a primitive flat caps joined by extruded sides.
+///
+/// Each axis subtracts `clamp(p, -h, h)`, collapsing the `[-h, h]` core to the
+/// origin so the base primitive is evaluated at the squeezed point; sampling a
+/// sphere through `elongate` yields a capsule, a box yields a rounded slab.
+/// A zero half-extent leaves that axis unchanged.
+pub fn elongate(point: [f32; 3], half_extent: [f32; 3]) -> [f32; 3] {
+    [
+        point[0] - point[0].clamp(-half_extent[0], half_extent[0]),
+        point[1] - point[1].clamp(-half_extent[1], half_extent[1]),
+        point[2] - point[2].clamp(-half_extent[2], half_extent[2]),
+    ]
+}
+
+/// Mirrors the field across the selected coordinate planes by folding those
+/// axes to their absolute value, instancing a symmetric copy of the primitive.
+///
+/// For each axis whose `axes` flag is set the coordinate is replaced by its
+/// magnitude, so a primitive placed in the positive octant is reflected into
+/// the negative side; unset axes pass through unchanged. This is the domain
+/// equivalent of modelling one half and letting symmetry complete the shape.
+pub fn mirror(point: [f32; 3], axes: [bool; 3]) -> [f32; 3] {
+    let mut folded = point;
+    for axis in 0..3 {
+        if axes[axis] {
+            folded[axis] = point[axis].abs();
+        }
+    }
+    folded
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{onion, repeat, round_distance, scale_distance, scale_point, translate};
+    use super::{
+        elongate, mirror, onion, repeat, round_distance, scale_distance, scale_point, translate,
+    };
 
     #[test]
     fn round_distance_subtracts_radius() {
@@ -133,6 +167,23 @@ mod tests {
         // from zero, matching `f32::round`).
         assert!((folded[0] - (-1.0)).abs() < 1e-6);
         assert!((folded[2] - (-1.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn elongate_collapses_the_core_and_shifts_the_rest() {
+        // Outside the half-extent: shifted inward by the extent.
+        let outside = elongate([2.0, 0.0, 0.0], [1.0, 0.0, 0.0]);
+        assert!((outside[0] - 1.0).abs() < 1e-6);
+        assert_eq!(outside[1], 0.0);
+        // Inside the half-extent: collapses onto the slab centre.
+        let inside = elongate([0.5, 0.0, 0.0], [1.0, 0.0, 0.0]);
+        assert_eq!(inside[0], 0.0);
+    }
+
+    #[test]
+    fn mirror_folds_selected_axes() {
+        let folded = mirror([-2.0, 3.0, -4.0], [true, false, true]);
+        assert_eq!(folded, [2.0, 3.0, 4.0]);
     }
 
     #[test]

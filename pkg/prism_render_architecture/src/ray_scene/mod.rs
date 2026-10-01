@@ -529,9 +529,9 @@
 //! - [`sdf_domain`] — domain and distance operators for composing fields
 //!   ([`sdf_domain::round_distance`], [`sdf_domain::onion`],
 //!   [`sdf_domain::translate`], [`sdf_domain::repeat`],
-//!   [`sdf_domain::scale_point`], [`sdf_domain::scale_distance`]) that
-//!   reshape a single primitive by transforming the query point or remapping
-//!   its distance.
+//!   [`sdf_domain::scale_point`], [`sdf_domain::scale_distance`],
+//!   [`sdf_domain::elongate`], [`sdf_domain::mirror`]) that reshape a single
+//!   primitive by transforming the query point or remapping its distance.
 //! - [`mesh_sdf_thickness`] — material thickness probing
 //!   ([`mesh_sdf_thickness::sdf_thickness`]) marching inward along the normal
 //!   until the field re-emerges, the thickness map translucency and
@@ -858,7 +858,7 @@ pub use mesh_voxel_padding::pad_voxel_grid;
 pub use mesh_sdf_soft_shadow::{sdf_soft_shadow, SoftShadow};
 pub use mesh_sdf_ambient_occlusion::sdf_ambient_occlusion;
 pub use sdf_domain::{
-    onion, repeat, round_distance, scale_distance, scale_point, translate,
+    elongate, mirror, onion, repeat, round_distance, scale_distance, scale_point, translate,
 };
 pub use mesh_sdf_thickness::sdf_thickness;
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
