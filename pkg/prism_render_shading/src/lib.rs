@@ -29,6 +29,7 @@ mod hair_angel_ring;
 mod hair_chiang;
 mod hair_fiber;
 mod hair_kajiya;
+mod hair_matcap;
 mod halftone;
 mod hatching;
 mod kuwahara;
@@ -126,6 +127,7 @@ pub use hair_angel_ring::{accumulate_angel_rings, angel_ring_band, AngelRing, MA
 pub use hair_chiang::{evaluate_hair_chiang_direct, HairChiangParams};
 pub use hair_fiber::{evaluate_hair_fiber_direct, HairFiberParams};
 pub use hair_kajiya::{evaluate_hair_kajiya_direct, HairKajiyaParams};
+pub use hair_matcap::{evaluate_hair_matcap, hair_matcap_uv, HairMatCapParams, MatCapTexture};
 pub use halftone::{
     apply_halftone, cell_coord, dot_coverage, dot_radius_from_tone,
     luminance as halftone_luminance, rotate2d, smoothstep as halftone_smoothstep, HalftoneParams,
