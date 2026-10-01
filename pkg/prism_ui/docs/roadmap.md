@@ -40,11 +40,12 @@
 ### M1 结构层(部分已交付)
 - [x] `loom!` 宏 + `Element` 构建器。
 - [ ] 静态子树提升(无绑定子树编译期常量化)。
-- [ ] 编译期稳定节点 ID(借 Compose 位置记忆),用于结构变更 / 热重载精确对齐。
+- [x] 编译期稳定节点 ID(借 Compose 位置记忆):`StableId{path}` 由 `loom!` 宏按树下标(如 `"0/1"`)注入到每个节点 + `Element.stable_id`(手写 PartialEq 忽略此字段)+ 热重载 `NodeIdent::Stable`(身份优先级 **Stable > Keyed > Positional**),用于结构变更 / 热重载精确对齐(`prism_ui` / `prism_ui_macro` / `prism_ui_hotreload`,已交付)。
 
 ### M2 响应层到 ECS 的绑定(部分已交付)
 - [x] 独立的 Signal / Memo / Effect 运行时。
 - [x] 字段级 **双向** 绑定:ECS 组件字段 <-> `Signal` 的 `FieldBinding`/`EcsBridge`——读路径复用 `Ref` 的 tick 变更检测(仅变更帧才拉取),写路径用相等性守卫经 `Mut` 回写(不触发无谓 tick、不振荡),零 archetype 搬迁(`prism_ui_ecs`,已交付)。宏层 `$` 语法糖自动登记绑定仍规划中。
+- [x] **Bevy 调度器集成**:`EcsBridge` 作为 `NonSend` 资源经 exclusive system 接入 `Schedule`——`LoomSyncSet{Pull, Push}`(derive `SystemSet`,`.chain()` 保证拉取先于回写)、`insert_bridge` / `remove_bridge`、`loom_pull_system` / `loom_push_system`、`add_loom_sync_systems`;安全的 remove→call→reinsert 模式(无 `unsafe`)(`prism_ui_ecs::schedule`,已交付)。
 - [ ] `Show` / `For` 结构绑定,keyed reconcile 批量 spawn/despawn 到帧末。
 - [x] 可访问性(a11y)基线:角色 / 焦点 / 键盘导航 / 读屏标签(`prism_ui_a11y`,已交付)。
 
