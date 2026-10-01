@@ -13,6 +13,7 @@ mod gjk;
 mod manifold;
 mod minkowski;
 mod ray_cast;
+mod speculative;
 mod support;
 mod sweep;
 mod triangle_box;
@@ -33,6 +34,7 @@ pub use ray_cast::{
     ray_capsule, ray_obb, ray_sphere, ray_triangle, segment_triangle_intersection,
     RayTriangleHit, SegmentTriangleHit,
 };
+pub use speculative::{speculative_contact, SpeculativeContact};
 pub use support::{Inflated, SupportMap, Transformed, Translated};
 pub use sweep::{sweep_capsule_triangle, sweep_sphere_triangle, CapsuleSweepHit, SphereSweepHit};
 pub use triangle_box::{triangle_aabb_overlap, triangle_aabb_penetration};
