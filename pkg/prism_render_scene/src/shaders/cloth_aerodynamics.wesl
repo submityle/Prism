@@ -115,7 +115,7 @@ fn triangle_wind_force(
         return vec3<f32>(0.0);
     }
     let area = 0.5 * sqrt(cross_len_sq);
-    let normal = cross_vec * inverseSqrt(cross_len_sq);
+    let normal = cross_vec * (1.0 / sqrt(cross_len_sq));
     let face_vel = (v0 + v1 + v2) * (1.0 / 3.0);
     let relative = wind - face_vel;
     let normal_comp = normal * dot(relative, normal);

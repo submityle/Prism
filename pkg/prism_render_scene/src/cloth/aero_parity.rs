@@ -11,10 +11,11 @@
 //! 这与虚拟粒子 tier 的 `virtual_particles_jacobi` GPU-twin 金标准同款。
 //!
 //! ## 逐位一致的关键约定
-//! * `WESL` 的 `normal = cross * inverseSqrt(cross_len_sq)` 在这里转写为
-//!   `cross * (1.0 / cross_len_sq.sqrt())`，与黄金 `Vec3::normalize_or_zero`
-//!   的 `self.scale(1.0 / len_sq.sqrt())` 逐位一致；GPU 硬件上 `inverseSqrt`
-//!   与 `1/sqrt` 的精度差异属设备级、无 GPU 沙盒无法覆盖，不在本 parity 范畴。
+//! * `WESL` 的 `normal = cross * (1.0 / sqrt(cross_len_sq))` 与黄金
+//!   `Vec3::normalize_or_zero` 的 `self.scale(1.0 / len_sq.sqrt())` 逐位一致：
+//!   二者都是「先 `sqrt` 再取倒数相除」，`sqrt`/`fdiv` 在 GPU 与 CPU 上均为
+//!   IEEE-754 正确舍入，故 GPU 实机输出与黄金也逐位吻合（`cloth_aerodynamics.wesl`
+//!   已从 `inverseSqrt` 这一设备级近似改为显式 `1.0 / sqrt(..)`，消除原设备级分歧）。
 //! * 速度增量按 `accum * (inv_mass * dt)`（先算标量积）缩放，与黄金
 //!   `accum.scale(inverse_mass * dt)` 的结合序一致——`cloth_aerodynamics.wesl`
 //!   已同步修正为先算 `inv_mass * dt` 再缩放（浮点乘法不满足结合律）。
@@ -111,7 +112,7 @@ fn turbulence_offset(i0: u32, i1: u32, i2: u32, turb: f32) -> [f32; 3] {
 }
 
 /// `WESL` `triangle_wind_force`：叉积求法向与面积，退化三角返回零；相对风速拆
-/// 法向（乘 drag）+ 切向（乘 lift）再乘面积。`inverseSqrt` 转写为 `1/sqrt`。
+/// 法向（乘 drag）+ 切向（乘 lift）再乘面积。归一化用显式 `1.0 / sqrt(..)`。
 fn triangle_wind_force(
     p0: [f32; 3],
     p1: [f32; 3],
