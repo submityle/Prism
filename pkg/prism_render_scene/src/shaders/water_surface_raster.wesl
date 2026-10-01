@@ -794,12 +794,29 @@ fn gtao_side_horizon(
 // visible fraction, mirroring the golden `gtao::integral::integrate`. A
 // disabled pass, a point behind the camera, or an all-degenerate set of slices
 // returns `1` (fully unoccluded) so the ambient term stays lit.
-fn water_gtao(world_position: vec3<f32>, world_normal: vec3<f32>, center_uv: vec2<f32>) -> f32 {
+struct WaterGtaoResult {
+    // Horizon-based ambient-occlusion scalar in [0, 1] (1 = fully unoccluded).
+    ao: f32,
+    // Unit view-space bent normal: the mean unoccluded direction across the
+    // marched slices (the geometric normal when the march is degenerate).
+    bent_normal_view: vec3<f32>,
+    // Half-angle (radians, [0, PI]) of the visibility cone the bent normal
+    // centres, recovered from the mean-resultant length via the uniform-cone
+    // centroid identity r = (1 + cos(aperture)) / 2 (engine BentNormalCone
+    // convention). PI = fully open cone, so the horizon term never occludes.
+    aperture: f32,
+}
+
+fn water_gtao(world_position: vec3<f32>, world_normal: vec3<f32>, center_uv: vec2<f32>) -> WaterGtaoResult {
+    let n = normalize((ssr_cfg.view_from_world * vec4<f32>(world_normal, 0.0)).xyz);
+    var result: WaterGtaoResult;
+    result.ao = 1.0;
+    result.bent_normal_view = n;
+    result.aperture = GTAO_PI;
     if gtao_cfg.sample_enable == 0u {
-        return 1.0;
+        return result;
     }
     let p = (ssr_cfg.view_from_world * vec4<f32>(world_position, 1.0)).xyz;
-    let n = normalize((ssr_cfg.view_from_world * vec4<f32>(world_normal, 0.0)).xyz);
     let view_dir = normalize(-p);
 
     // Project the view-space falloff radius to a screen-space UV radius at this
@@ -807,7 +824,7 @@ fn water_gtao(world_position: vec3<f32>, world_normal: vec3<f32>, center_uv: vec
     let center = ssr_project_view(p);
     let edge = ssr_project_view(p + vec3<f32>(gtao_cfg.radius, 0.0, 0.0));
     if center.clip_w <= 0.0 || edge.clip_w <= 0.0 {
-        return 1.0;
+        return result;
     }
     let uv_radius = clamp(length(edge.uv - center.uv), 1.0e-4, 0.5);
     let steps = max(gtao_cfg.step_count, 1u);
@@ -816,6 +833,8 @@ fn water_gtao(world_position: vec3<f32>, world_normal: vec3<f32>, center_uv: vec
 
     var weighted_fraction = 0.0;
     var weighted_proj = 0.0;
+    var bent_acc = vec3<f32>(0.0);
+    var bent_weight = 0.0;
     for (var slice = 0u; slice < slices; slice = slice + 1u) {
         let phi = (f32(slice) + 0.5) * (GTAO_PI / f32(slices));
         let screen_dir = vec2<f32>(cos(phi), sin(phi));
@@ -853,13 +872,35 @@ fn water_gtao(world_position: vec3<f32>, world_normal: vec3<f32>, center_uv: vec
         }
         weighted_fraction = weighted_fraction + fraction * proj_len;
         weighted_proj = weighted_proj + proj_len;
+
+        // Bent normal: the midpoint of the open arc expressed in the slice
+        // plane (mirrors the golden gtao::integral::slice_fraction), weighted
+        // by the slice's visible fraction and projected-normal importance.
+        let bent_angle = 0.5 * (hc.x + hc.y);
+        let bent_dir = view_dir * cos(bent_angle) + tangent * sin(bent_angle);
+        bent_acc = bent_acc + bent_dir * (fraction * proj_len);
+        bent_weight = bent_weight + fraction * proj_len;
     }
 
     var ao = 1.0;
     if weighted_proj > 1.0e-12 {
         ao = clamp(weighted_fraction / weighted_proj, 0.0, 1.0);
     }
-    return gtao_power_intensity(ao, gtao_cfg.power, gtao_cfg.intensity);
+    result.ao = gtao_power_intensity(ao, gtao_cfg.power, gtao_cfg.intensity);
+
+    // Fit the visibility cone: the bent normal is the normalised resultant and
+    // the aperture follows the mean-resultant length r = |bent_acc| / weight
+    // through aperture = acos(2r - 1) (engine BentNormalCone convention). A
+    // degenerate resultant keeps the fully open cone + geometric normal set
+    // above, i.e. the horizon term stays inert.
+    let bent_len_sq = dot(bent_acc, bent_acc);
+    if bent_weight > 1.0e-12 && bent_len_sq > 1.0e-12 {
+        let bent_len = sqrt(bent_len_sq);
+        result.bent_normal_view = bent_acc * (1.0 / bent_len);
+        let r = clamp(bent_len / bent_weight, 0.0, 1.0);
+        result.aperture = acos(clamp(2.0 * r - 1.0, -1.0, 1.0));
+    }
+    return result;
 }
 
 // Project a world position to the engine's motion-UV convention
@@ -981,7 +1022,89 @@ fn water_spec_occlusion(n_dot_v: f32, ao: f32, roughness: f32) -> f32 {
     return clamp(pow(base, exponent) - 1.0 + a, 0.0, 1.0);
 }
 
-fn water_ibl(surface: SurfaceSample, frame: ShadingFrame, ssr: vec4<f32>) -> vec3<f32> {
+// Single-parameter Hermite smoothstep on [0, 1], byte-identical to the golden
+// `gi::occlusion::specular_occlusion::smoothstep01`. The WESL three-argument
+// `smoothstep` builtin takes separate edges and would not match, so the ramp is
+// written out explicitly here.
+fn water_smoothstep01(t: f32) -> f32 {
+    let x = clamp(t, 0.0, 1.0);
+    return x * x * (3.0 - 2.0 * x);
+}
+
+// Soft overlap fraction of spherical cap A inside cap B (Oat & Sander, `Ambient
+// Aperture Lighting`), byte-identical to the golden
+// `gi::occlusion::cone_cone_intersection`. Returns the fraction of cap A that
+// cap B covers in [0, 1]: 1 when A lies inside B, the cap-area ratio when the
+// smaller cone B sits inside A, 0 when the caps are disjoint, and a smooth
+// `water_smoothstep01` ramp in between. Apertures are clamped to [0, PI] and
+// directions normalised (degenerate -> +Y), so the result is always finite.
+fn water_cone_cone_intersection(dir_a: vec3<f32>, aperture_a: f32, dir_b: vec3<f32>, aperture_b: f32) -> f32 {
+    let a = clamp(aperture_a, 0.0, GTAO_PI);
+    let b = clamp(aperture_b, 0.0, GTAO_PI);
+
+    var da = vec3<f32>(0.0, 1.0, 0.0);
+    let da_len_sq = dot(dir_a, dir_a);
+    if da_len_sq > 1.0e-12 {
+        da = dir_a * (1.0 / sqrt(da_len_sq));
+    }
+    var db = vec3<f32>(0.0, 1.0, 0.0);
+    let db_len_sq = dot(dir_b, dir_b);
+    if db_len_sq > 1.0e-12 {
+        db = dir_b * (1.0 / sqrt(db_len_sq));
+    }
+
+    let cos_angle = clamp(dot(da, db), -1.0, 1.0);
+    let angle = acos(cos_angle);
+
+    let inner = abs(a - b);
+    let outer = a + b;
+
+    // When B is the smaller cone fully inside A the overlap saturates at the
+    // ratio of cap areas rather than at 1.
+    let cap_a = max(1.0 - cos(a), 0.0);
+    let cap_b = max(1.0 - cos(b), 0.0);
+    var contained_fraction = 0.0;
+    if a <= b {
+        contained_fraction = 1.0;
+    } else if cap_a > 1.0e-12 {
+        contained_fraction = clamp(cap_b / cap_a, 0.0, 1.0);
+    }
+
+    if angle <= inner {
+        return contained_fraction;
+    }
+    if angle >= outer {
+        return 0.0;
+    }
+    let span = outer - inner;
+    if span <= 1.0e-12 {
+        return 0.0;
+    }
+    // t = 1 at the containment boundary, 0 at the disjoint boundary.
+    let t = clamp((outer - angle) / span, 0.0, 1.0);
+    return water_smoothstep01(t) * contained_fraction;
+}
+
+// Horizon occlusion of a reflection against the bent-normal visibility cone,
+// byte-identical to the golden `gi::occlusion::horizon_occlusion`. Models the
+// mirror reflection as a thin cone whose soft rim scales with the visibility
+// aperture (SPECULAR_RIM_FRACTION = 0.5), evaluates the overlap through
+// `water_cone_cone_intersection`, and returns the surviving fraction in [0, 1].
+// A fully closed cone (<= 0.02 rad) occludes everything; a fully open cone
+// (>= PI) occludes nothing.
+fn water_horizon_occlusion(reflection_dir: vec3<f32>, bent_normal_view: vec3<f32>, cone_aperture: f32) -> f32 {
+    let aperture = clamp(cone_aperture, 0.0, GTAO_PI);
+    if aperture <= 0.02 {
+        return 0.0;
+    }
+    if aperture >= GTAO_PI - 1.0e-3 {
+        return 1.0;
+    }
+    let rim = clamp(aperture * 0.5, 0.02, GTAO_PI);
+    return water_cone_cone_intersection(reflection_dir, rim, bent_normal_view, aperture);
+}
+
+fn water_ibl(surface: SurfaceSample, frame: ShadingFrame, ssr: vec4<f32>, bent_normal_view: vec3<f32>, cone_aperture: f32) -> vec3<f32> {
     let env = light_env[0];
     let occlusion = clamp(surface.ambient_occlusion, 0.0, 1.0);
     let n = brdf_normalize_or(frame.normal, vec3<f32>(0.0, 1.0, 0.0));
@@ -1000,7 +1123,13 @@ fn water_ibl(surface: SurfaceSample, frame: ShadingFrame, ssr: vec4<f32>) -> vec
         let irradiance = max(sh_irradiance(env, n), vec3<f32>(0.0));
         let diffuse = surface.base_color * (1.0 - metallic) * irradiance * INV_PI;
         let reflection = reflect(-v, n);
-        let prefiltered = max(sh_radiance(env, reflection), vec3<f32>(0.0));
+        // Occlude the image-based environment reflection by the bent-normal
+        // visibility cone (golden horizon_occlusion). SSR is left untouched: a
+        // confirmed screen-space hit (ssr.a = 1) already carries its own
+        // visibility and would be wrongly dimmed here.
+        let reflection_view = normalize((ssr_cfg.view_from_world * vec4<f32>(reflection, 0.0)).xyz);
+        let horizon = water_horizon_occlusion(reflection_view, bent_normal_view, cone_aperture);
+        let prefiltered = max(sh_radiance(env, reflection), vec3<f32>(0.0)) * horizon;
         let env_specular = mix(prefiltered, ssr.rgb, ssr.a) * spec_weight;
         return diffuse * occlusion + env_specular;
     }
@@ -1073,8 +1202,9 @@ fn shade_pbr_core(in: VertexOutput) -> vec4<f32> {
     // marched over the shared @group(3) Hi-Z pyramid. Shared by every §5
     // frontend (NPR/custom/hybrid all route through this core).
     let gtao_uv = in.clip_position.xy / max(view.viewport.xy, vec2<f32>(1.0));
-    surface.ambient_occlusion = water_gtao(in.world_position, frame.normal, gtao_uv);
-    lit = lit + water_ibl(surface, frame, ssr);
+    let gtao = water_gtao(in.world_position, frame.normal, gtao_uv);
+    surface.ambient_occlusion = gtao.ao;
+    lit = lit + water_ibl(surface, frame, ssr, gtao.bent_normal_view, gtao.aperture);
     let refracted_raw = refraction_color(in.clip_position, frame.normal);
     // Composite the underwater single-scatter froxel volume into the refracted
     // scene so the water body has a real participating medium (`Beer-Lambert`

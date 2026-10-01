@@ -54,6 +54,7 @@ mod shader_tests;
 mod surface_draw;
 mod surface_froxel;
 mod surface_gtao;
+mod surface_horizon_occlusion;
 mod surface_mesh;
 mod surface_motion;
 mod surface_node;
