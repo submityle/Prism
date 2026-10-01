@@ -1655,6 +1655,40 @@ pub fn rounded_box_2d(point: [f32; 2], half_extent: [f32; 2], radii: [f32; 4]) -
     qx.max(qy).min(0.0) + length2([qx.max(0.0), qy.max(0.0)]) - r
 }
 
+/// Exact signed distance to an oriented 3D vesica (a lens / rugby-ball shape)
+/// whose axis is the segment `a`-`b` and which bulges to radial half-width
+/// `width` at its midpoint (Inigo Quilez `sdVesicaSegment`).
+///
+/// The surface is the revolution of a circular arc about the `a`-`b` axis: it
+/// tapers to points at both endpoints and reaches its maximum radial half-width
+/// `width` at the centre. The query is reduced to axial/radial cylindrical
+/// coordinates about the axis and the nearest surface point is either the shared
+/// endpoint tip or a point on the generating arc, selected by a single linear
+/// test. The result is therefore exact and uses only `dot`, `sqrt` (through
+/// `length`), division, `min`/`max` and comparisons.
+pub fn vesica_segment(point: [f32; 3], a: [f32; 3], b: [f32; 3], width: f32) -> f32 {
+    let c = [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5, (a[2] + b[2]) * 0.5];
+    let ba = sub3(b, a);
+    let l = length(ba);
+    let v = [ba[0] / l, ba[1] / l, ba[2] / l];
+    let pc = sub3(point, c);
+    let y = dot(pc, v);
+    let perp = [pc[0] - y * v[0], pc[1] - y * v[1], pc[2] - y * v[2]];
+    let qx = length(perp);
+    let qy = y.abs();
+    let r = 0.5 * l;
+    let d = 0.5 * (r * r - width * width) / width;
+    // Nearest feature: the shared tip at radial 0, axial r (when the query sits
+    // past the taper) or the generating arc centred at axial 0, radial -d with
+    // radius d + width (everywhere else).
+    let (hx, hy, hz) = if r * qx < d * (qy - r) {
+        (0.0f32, r, 0.0f32)
+    } else {
+        (-d, 0.0f32, d + width)
+    };
+    length2([qx - hx, qy - hy]) - hz
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1662,7 +1696,7 @@ mod tests {
         cut_sphere, cylinder_segment, death_star, egg_2d, ellipsoid_sdf, equilateral_triangle_2d, heart_2d, hex_prism, hexagram_2d, infinite_cone, infinite_cylinder, isosceles_triangle_2d, length2, line_sdf, link, moon,
         octagon_prism, octahedron, oriented_box_2d, parallelogram, pie, plane, polygon_2d, pyramid, quad_sdf, regular_hexagon_2d, regular_octagon_2d, regular_pentagon_2d, rhombus, rhombus_2d, round_box, round_cone_sdf,
         round_cone_segment, rounded_box_2d, rounded_cylinder, rounded_x, segment_2d, solid_angle, sphere, torus, trapezoid_isosceles, triangle_sdf, triangular_prism,
-        uneven_capsule_2d, vesica,
+        uneven_capsule_2d, vesica, vesica_segment,
     };
 
     #[test]
@@ -2963,6 +2997,113 @@ mod tests {
         for p in samples {
             let got = rounded_box_2d(p, [bx, by], radii);
             let want = rounded_box_reference(p[0], p[1], bx, by, radii);
+            assert!((got - want).abs() < 3e-3, "p={p:?} got={got} want={want}");
+        }
+    }
+
+    #[test]
+    fn vesica_segment_tips_center_and_bulge() {
+        let a = [-1.0f32, 0.0, 0.0];
+        let b = [1.0f32, 0.0, 0.0];
+        let w = 0.5f32;
+        // Both endpoints are tips lying on the surface.
+        assert!(vesica_segment(a, a, b, w).abs() < 1e-5);
+        assert!(vesica_segment(b, a, b, w).abs() < 1e-5);
+        // The midpoint is the deepest interior point, one bulge half-width in.
+        assert!((vesica_segment([0.0, 0.0, 0.0], a, b, w) - (-w)).abs() < 1e-5);
+        // A point on the midpoint bulge lies on the surface regardless of the
+        // perpendicular direction chosen.
+        assert!(vesica_segment([0.0, w, 0.0], a, b, w).abs() < 1e-5);
+        assert!(vesica_segment([0.0, 0.0, w], a, b, w).abs() < 1e-5);
+    }
+
+    // Independent reference: reduce to axial/radial coordinates about the axis
+    // (valid because the vesica is a surface of revolution, so the nearest point
+    // lies in the query's own meridian half-plane), then take the 2D signed
+    // distance to the lens cross-section built from first principles as two
+    // circular arcs. Shares no branch structure with the closed form.
+    fn vesica_segment_reference(p: [f32; 3], a: [f32; 3], b: [f32; 3], w: f32) -> f32 {
+        let c = [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5, (a[2] + b[2]) * 0.5];
+        let ba = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let l = (ba[0] * ba[0] + ba[1] * ba[1] + ba[2] * ba[2]).sqrt();
+        let v = [ba[0] / l, ba[1] / l, ba[2] / l];
+        let pc = [p[0] - c[0], p[1] - c[1], p[2] - c[2]];
+        let y = pc[0] * v[0] + pc[1] * v[1] + pc[2] * v[2];
+        let perp = [pc[0] - y * v[0], pc[1] - y * v[1], pc[2] - y * v[2]];
+        let rho = (perp[0] * perp[0] + perp[1] * perp[1] + perp[2] * perp[2]).sqrt();
+        // Lens cross-section in the (axial, radial) plane.
+        let r = 0.5 * l;
+        let d = 0.5 * (r * r - w * w) / w;
+        let rr = d + w; // generating-arc radius
+        let a0 = (d / rr).asin(); // tip angle from each arc centre
+        let span = std::f32::consts::PI - 2.0 * a0;
+        let n = 128usize;
+        let mut poly: Vec<[f32; 2]> = Vec::new();
+        // Upper arc centred at (0, -d): tip (r,0) over (0,w) to (-r,0).
+        for i in 0..=n {
+            let th = a0 + span * (i as f32 / n as f32);
+            poly.push([rr * th.cos(), -d + rr * th.sin()]);
+        }
+        // Lower arc centred at (0, d): back from (-r,0) over (0,-w) to (r,0).
+        for i in 0..=n {
+            let th = (std::f32::consts::PI - a0) - span * (i as f32 / n as f32);
+            poly.push([rr * th.cos(), d - rr * th.sin()]);
+        }
+        let (px, py) = (y, rho);
+        let m = poly.len();
+        let mut best = f32::INFINITY;
+        for i in 0..m {
+            let s = poly[i];
+            let e = poly[(i + 1) % m];
+            let ex = e[0] - s[0];
+            let ey = e[1] - s[1];
+            let wx = px - s[0];
+            let wy = py - s[1];
+            let len2 = ex * ex + ey * ey;
+            let t = if len2 > 0.0 { ((ex * wx + ey * wy) / len2).clamp(0.0, 1.0) } else { 0.0 };
+            let dx = wx - ex * t;
+            let dy = wy - ey * t;
+            best = best.min(dx * dx + dy * dy);
+        }
+        let mut inside = false;
+        let mut j = m - 1;
+        for i in 0..m {
+            let (xi, yi) = (poly[i][0], poly[i][1]);
+            let (xj, yj) = (poly[j][0], poly[j][1]);
+            if (yi > py) != (yj > py) {
+                let xcross = xi + (py - yi) / (yj - yi) * (xj - xi);
+                if px < xcross {
+                    inside = !inside;
+                }
+            }
+            j = i;
+        }
+        best.sqrt() * if inside { -1.0 } else { 1.0 }
+    }
+
+    #[test]
+    fn vesica_segment_matches_revolution_reference() {
+        // Oriented, off-origin axis to exercise the full reduction.
+        let a = [0.4f32, -0.3, 0.2];
+        let b = [-0.6f32, 0.9, 0.5];
+        let w = 0.35f32;
+        let samples: [[f32; 3]; 12] = [
+            [0.0, 0.0, 0.0],
+            [0.4, -0.3, 0.2],
+            [-0.6, 0.9, 0.5],
+            [-0.1, 0.3, 0.35],
+            [0.2, 0.1, -0.3],
+            [-0.3, 0.6, 0.9],
+            [0.6, -0.5, 0.1],
+            [-0.1, 0.3, -0.2],
+            [0.9, 0.2, 0.4],
+            [-0.9, 1.2, 0.6],
+            [-0.05, 0.3, 0.33],
+            [0.15, 0.0, 0.5],
+        ];
+        for p in samples {
+            let got = vesica_segment(p, a, b, w);
+            let want = vesica_segment_reference(p, a, b, w);
             assert!((got - want).abs() < 3e-3, "p={p:?} got={got} want={want}");
         }
     }
