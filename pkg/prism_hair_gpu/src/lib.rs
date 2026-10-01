@@ -529,6 +529,16 @@
 //!   projection [`GpuHairProjectSh`] and the integer-power
 //!   [`GpuHairForwardScatterPower`] twins, checked within the fma tolerance
 //!   (see [`dual_scatter_factors`]).
+//! * [`GpuHairOitComposite`] evaluates
+//!   [`composite_transmittance`](prism_render_architecture::hair::oit_frontend::composite_transmittance)
+//!   and
+//!   [`composite_coverage`](prism_render_architecture::hair::oit_frontend::composite_coverage),
+//!   the `OIT` `k-layer` `MLAB` resolve: one thread per pixel folds that
+//!   pixel's resolved `front-to-back` stack (up to `MAX_OIT_LAYERS`) plus its
+//!   flattened tail opacity into the transmittance `product(1 - alpha_i) *
+//!   (1 - tail_alpha)` and its complementary coverage, with the host padding
+//!   the unused layer slots by the exact `(1 - 0)` identity so the device
+//!   product mirrors the golden's shorter loop (see [`oit_composite`]).
 //! * [`GpuProjectiveEdge`] evaluates
 //!   [`local_project_edge`](prism_render_architecture::hair::projective_global::local_project_edge),
 //!   the Projective-Dynamics (`Bouaziz` 2014) local edge-length projection:
@@ -676,6 +686,7 @@ pub mod mesh_shell;
 pub mod mesh_shell_tapered;
 pub mod mip_for_footprint;
 pub mod motion_energy;
+pub mod oit_composite;
 pub mod projective_edge;
 pub mod raster;
 pub mod reactive_mask;
@@ -754,6 +765,7 @@ pub use mesh_shell::{GpuMeshShell, GpuShellMesh, ShellStrandInput};
 pub use mesh_shell_tapered::{GpuMeshShellTapered, TaperedShellStrandInput};
 pub use mip_for_footprint::{reference_mip_for_footprint, GpuHairMipForFootprint, MipQuery};
 pub use motion_energy::{reference_motion_energy, GpuHairMotionEnergy};
+pub use oit_composite::{reference_composite, GpuHairOitComposite};
 pub use projective_edge::{reference_project_edge, GpuProjectiveEdge};
 pub use raster::{path_code, GpuHairRaster, RasterQuery};
 pub use reactive_mask::{reference_reactivity, GpuHairReactiveMask};
