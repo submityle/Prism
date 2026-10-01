@@ -170,6 +170,81 @@ impl Obb {
 
         true
     }
+
+    /// Minimum-translation `(normal, depth)` that separates this box from
+    /// `other`, or [`None`] when they do not overlap.
+    ///
+    /// This is the depth-reporting companion to [`intersects_obb`](Self::intersects_obb):
+    /// it evaluates the same 15 separating axes (three face normals per box and
+    /// the nine edge-edge cross products), but on each axis it measures the
+    /// penetration `(ra + rb) - |d . L|` and returns the axis of *least*
+    /// penetration. The returned `normal` is a unit vector pointing from this
+    /// box toward `other`, so translating `other` along `+normal` (or this box
+    /// along `-normal`) by `depth` resolves the overlap; `depth >= 0`.
+    ///
+    /// Edge-edge axes that degenerate to (near) zero length -- the boxes have a
+    /// pair of parallel edges -- cannot separate and are skipped; the face
+    /// axes still decide those configurations. Exactly touching boxes report
+    /// [`None`] because there is zero penetration to resolve.
+    pub fn penetration(&self, other: &Obb) -> Option<(Vec3, f32)> {
+        let a = self.axes();
+        let b = other.axes();
+        let d = other.center - self.center;
+
+        // 15 candidate axes: self faces, other faces, then the nine edge-edge
+        // cross products.
+        let mut axes = [Vec3::ZERO; 15];
+        axes[0] = a[0];
+        axes[1] = a[1];
+        axes[2] = a[2];
+        axes[3] = b[0];
+        axes[4] = b[1];
+        axes[5] = b[2];
+        let mut k = 6;
+        for ai in a {
+            for bj in b {
+                axes[k] = ai.cross(bj);
+                k += 1;
+            }
+        }
+
+        let ea = self.half_extents;
+        let eb = other.half_extents;
+        let mut best_depth = f32::INFINITY;
+        let mut best_normal = Vec3::ZERO;
+
+        for axis in axes {
+            let len2 = axis.length_squared();
+            if len2 <= 1.0e-9 {
+                // Parallel edge pair: this axis is ill-defined and cannot
+                // separate the boxes, so skip it.
+                continue;
+            }
+            let n = axis * len2.sqrt().recip();
+            let ra = ea.x * a[0].dot(n).abs()
+                + ea.y * a[1].dot(n).abs()
+                + ea.z * a[2].dot(n).abs();
+            let rb = eb.x * b[0].dot(n).abs()
+                + eb.y * b[1].dot(n).abs()
+                + eb.z * b[2].dot(n).abs();
+            let dist = d.dot(n);
+            let overlap = ra + rb - dist.abs();
+            if overlap <= 0.0 {
+                return None;
+            }
+            if overlap < best_depth {
+                best_depth = overlap;
+                // Orient the normal from `self` toward `other`.
+                best_normal = if dist < 0.0 { -n } else { n };
+            }
+        }
+
+        if best_normal == Vec3::ZERO {
+            None
+        } else {
+            Some((best_normal, best_depth))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -222,4 +297,50 @@ mod tests {
         assert_relative_eq!(aabb.max.y, half, epsilon = 1e-6);
         assert_relative_eq!(aabb.max.z, 0.5, epsilon = 1e-6);
     }
+
+    #[test]
+    fn penetration_axis_aligned_minimum_axis() {
+        // Two unit (half 0.5) boxes overlapping 0.25 along x.
+        let a = unit_box(Vec3::ZERO, Quat::IDENTITY);
+        let other = unit_box(Vec3::new(0.75, 0.0, 0.0), Quat::IDENTITY);
+        let (normal, depth) = a.penetration(&other).expect("overlap");
+        assert_relative_eq!(depth, 0.25, epsilon = 1e-5);
+        assert!(normal.x > 0.99, "normal points toward +x: {normal:?}");
+        assert!(normal.y.abs() < 1e-5 && normal.z.abs() < 1e-5);
+    }
+
+    #[test]
+    fn penetration_none_when_separated() {
+        let a = unit_box(Vec3::ZERO, Quat::IDENTITY);
+        let far = unit_box(Vec3::new(1.5, 0.0, 0.0), Quat::IDENTITY);
+        assert!(a.penetration(&far).is_none());
+        assert!(!a.intersects_obb(&far));
+    }
+
+    #[test]
+    fn penetration_containment_reports_face_depth() {
+        // A small box fully inside a larger one: least escape is the nearest
+        // face, 0.5 + 0.25 = 0.75 with centres coincident... min over axes.
+        let big = Obb::new(Vec3::ZERO, Vec3::splat(0.5), Quat::IDENTITY);
+        let small = Obb::new(Vec3::ZERO, Vec3::splat(0.25), Quat::IDENTITY);
+        let (normal, depth) = big.penetration(&small).expect("overlap");
+        assert_relative_eq!(depth, 0.75, epsilon = 1e-5);
+        assert_relative_eq!(normal.length(), 1.0, epsilon = 1e-5);
+    }
+
+    #[test]
+    fn penetration_rotation_agrees_with_boolean() {
+        // Spun box bridging a gap: boolean overlap holds, so penetration must
+        // report a positive, unit-normal MTV.
+        let a = unit_box(Vec3::ZERO, Quat::IDENTITY);
+        let spun = unit_box(Vec3::new(1.1, 0.0, 0.0), Quat::from_rotation_z(FRAC_PI_4));
+        assert!(a.intersects_obb(&spun));
+        let (normal, depth) = a.penetration(&spun).expect("overlap");
+        assert!(depth > 0.0, "depth = {depth}");
+        assert_relative_eq!(normal.length(), 1.0, epsilon = 1e-5);
+        // Resolving along the MTV must remove the overlap.
+        let moved = Obb::new(spun.center + normal * depth, spun.half_extents, spun.orientation);
+        assert!(!a.intersects_obb(&moved) || a.penetration(&moved).map(|(_, d)| d).unwrap_or(0.0) < 1e-4);
+    }
+
 }
