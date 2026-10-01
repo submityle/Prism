@@ -61,8 +61,9 @@ pub use cpu::{cpu_integrate, cpu_integrate_gyro};
 pub use gpu::GpuRigidIntegrator;
 pub use gyroscopic::{GyroscopicConfig, GyroscopicMode};
 pub use joint::{
-    cpu_solve_joints_fixed, cpu_solve_joints_prismatic, cpu_solve_joints_revolute,
-    cpu_solve_joints_spherical, FixedJoint, GpuFixedJointSolver, GpuPrismaticJointSolver,
-    GpuRevoluteJointSolver, GpuSphericalJointSolver, JointColouring, JointSolverConfig,
-    PrismaticJoint, RevoluteJoint, SphericalJoint, MAX_JOINT_BATCHES,
+    cpu_solve_joints_distance, cpu_solve_joints_fixed, cpu_solve_joints_prismatic,
+    cpu_solve_joints_revolute, cpu_solve_joints_spherical, DistanceJoint, FixedJoint,
+    GpuDistanceJointSolver, GpuFixedJointSolver, GpuPrismaticJointSolver, GpuRevoluteJointSolver,
+    GpuSphericalJointSolver, JointColouring, JointSolverConfig, PrismaticJoint, RevoluteJoint,
+    SphericalJoint, MAX_JOINT_BATCHES,
 };

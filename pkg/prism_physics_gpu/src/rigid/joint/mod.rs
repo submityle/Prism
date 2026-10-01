@@ -37,6 +37,11 @@
 //! * [`revolute_cpu`] — the authoritative [`cpu_solve_joints_revolute`] golden
 //!   stepper (axis alignment plus point-to-point weld).
 //! * [`revolute_gpu`] — the device-side [`GpuRevoluteJointSolver`] twin.
+//! * [`distance`] — the [`DistanceJoint`] (limit) definition and its
+//!   device-packed storage representation.
+//! * [`distance_cpu`] — the authoritative [`cpu_solve_joints_distance`] golden
+//!   stepper (one-sided min/max separation limit with a free dead zone).
+//! * [`distance_gpu`] — the device-side [`GpuDistanceJointSolver`] twin.
 //! * [`fixed`] — the [`FixedJoint`] (weld) definition and its device-packed
 //!   storage representation.
 //! * [`fixed_cpu`] — the authoritative [`cpu_solve_joints_fixed`] golden
@@ -64,6 +69,9 @@
 
 mod coloring;
 mod config;
+mod distance;
+mod distance_cpu;
+mod distance_gpu;
 mod fixed;
 mod fixed_cpu;
 mod fixed_gpu;
@@ -82,6 +90,9 @@ mod stepper;
 
 pub use coloring::{JointColouring, MAX_JOINT_BATCHES};
 pub use config::JointSolverConfig;
+pub use distance::DistanceJoint;
+pub use distance_cpu::cpu_solve_joints_distance;
+pub use distance_gpu::GpuDistanceJointSolver;
 pub use fixed::FixedJoint;
 pub use fixed_cpu::cpu_solve_joints_fixed;
 pub use fixed_gpu::GpuFixedJointSolver;
