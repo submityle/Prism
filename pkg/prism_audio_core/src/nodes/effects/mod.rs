@@ -28,6 +28,12 @@
 //!   LFO to drag notches through the spectrum.
 //! - [`stereo_width::StereoWidthNode`] — Mid-Side stereo widener with an
 //!   optional bass-mono crossover for image control.
+//! - [`mid_side_matrix::MidSideMatrixNode`] -- pure Mid-Side (sum and
+//!   difference) encoder / decoder with independent mid and side trim
+//!   gains; exposes `M` / `S` for independent processing between an encode
+//!   and a decode stage. Distinct from
+//!   [`stereo_width::StereoWidthNode`], which never exposes `M` / `S` and
+//!   only applies a single width scale internally.
 //! - [`tremolo::TremoloNode`] — low-frequency amplitude modulation / auto-pan
 //!   driven by a control-rate LFO.
 //! - [`bitcrusher::BitcrusherNode`] — bit-depth quantization plus sample-rate
@@ -58,6 +64,7 @@ pub mod comb_resonator;
 pub mod delay;
 pub mod exciter;
 pub mod flanger;
+pub mod mid_side_matrix;
 pub mod parametric_eq;
 pub mod phaser;
 pub mod ring_modulator;
@@ -76,6 +83,7 @@ pub use comb_resonator::{CombResonatorNode, CombResonatorParams, MAX_FEEDBACK, M
 pub use delay::DelayNode;
 pub use exciter::{Exciter, ExciterNode, ExciterParams, HarmonicMode};
 pub use flanger::{FlangerNode, FlangerParams};
+pub use mid_side_matrix::{MidSideMatrixNode, MidSideMatrixParams, MidSideMode};
 pub use parametric_eq::{EqBand, ParametricEqNode};
 pub use phaser::{PhaserNode, PhaserParams};
 pub use ring_modulator::{RingModulatorNode, RingModulatorParams};
