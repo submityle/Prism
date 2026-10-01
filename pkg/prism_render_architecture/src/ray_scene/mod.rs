@@ -526,6 +526,12 @@
 //!   ([`mesh_sdf_ambient_occlusion::sdf_ambient_occlusion`]) estimating the
 //!   visible ambient fraction with Inigo Quilez's normal-cone taps over the
 //!   exterior shell, darkening creases, contacts, and cavities.
+//! - [`sdf_domain`] — domain and distance operators for composing fields
+//!   ([`sdf_domain::round_distance`], [`sdf_domain::onion`],
+//!   [`sdf_domain::translate`], [`sdf_domain::repeat`],
+//!   [`sdf_domain::scale_point`], [`sdf_domain::scale_distance`]) that
+//!   reshape a single primitive by transforming the query point or remapping
+//!   its distance.
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -709,6 +715,7 @@ pub mod sdf_csg;
 pub mod mesh_voxel_padding;
 pub mod mesh_sdf_soft_shadow;
 pub mod mesh_sdf_ambient_occlusion;
+pub mod sdf_domain;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -845,6 +852,9 @@ pub use sdf_csg::{
 pub use mesh_voxel_padding::pad_voxel_grid;
 pub use mesh_sdf_soft_shadow::{sdf_soft_shadow, SoftShadow};
 pub use mesh_sdf_ambient_occlusion::sdf_ambient_occlusion;
+pub use sdf_domain::{
+    onion, repeat, round_distance, scale_distance, scale_point, translate,
+};
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
 pub use obb::{Obb, ObbBvh, ObbHit};
