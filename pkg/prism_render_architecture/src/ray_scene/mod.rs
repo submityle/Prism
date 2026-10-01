@@ -398,6 +398,11 @@
 //!   sharing a vertex chain and splits the mesh into one compacted
 //!   [`TriangleMesh`] per island, largest first — pure integer
 //!   bookkeeping.
+//! - [`mesh_normal_consistency`] — triangle winding repair
+//!   ([`mesh_normal_consistency::make_winding_consistent`]): breadth-first
+//!   floods each edge-connected patch to one orientation and flips closed
+//!   patches outward by signed volume, reporting flips, patches, and
+//!   non-manifold edges.
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -557,6 +562,7 @@ pub mod mesh_border_detection;
 pub mod mesh_edge_split;
 pub mod mesh_vertex_clustering;
 pub mod mesh_connected_components;
+pub mod mesh_normal_consistency;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -667,6 +673,7 @@ pub use mesh_border_detection::{detect_borders, MeshBorders};
 pub use mesh_edge_split::{split_long_edges, MAX_PASSES as EDGE_SPLIT_MAX_PASSES};
 pub use mesh_vertex_clustering::{cluster_vertices, ClusterError};
 pub use mesh_connected_components::{connected_components, split_components, MeshComponents};
+pub use mesh_normal_consistency::{make_winding_consistent, WindingFix};
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
 pub use obb::{Obb, ObbBvh, ObbHit};
