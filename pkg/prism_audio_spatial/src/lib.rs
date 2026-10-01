@@ -69,6 +69,7 @@ pub mod hoa_beamform;
 pub mod hoa_decode;
 pub mod hoa_rotation;
 pub mod initial_time_delay_gap;
+pub mod interaural_time_difference;
 pub mod late_lateral_sound_level;
 pub mod material_library;
 pub mod multi_position;
@@ -142,6 +143,10 @@ pub use hoa_beamform::{BeamPattern, Beamformer, beam_gains};
 pub use hoa_decode::{DecodeBand, DualBandDecoder, SpeakerLayout, max_re_gains, max_re_radius};
 pub use hoa_rotation::{HoaRotationMatrix, rotate_hoa};
 pub use initial_time_delay_gap::{DEFAULT_REFLECTION_THRESHOLD_DB, InitialTimeDelayGap, initial_time_delay_gap_ms};
+pub use interaural_time_difference::{
+    DEFAULT_HEAD_RADIUS_M, DEFAULT_SPEED_OF_SOUND, InterauralTimeDifference, KUHN_HIGH_FACTOR,
+    KUHN_LOW_FACTOR,
+};
 pub use late_lateral_sound_level::{LATE_LATERAL_START_MS, LateLateralSoundLevel, NO_LATE_LATERAL_DB, late_lateral_sound_level_db};
 pub use material_library::{
     Material, MaterialAbsorption, OCTAVE_BAND_CENTERS, OCTAVE_BAND_COUNT,
