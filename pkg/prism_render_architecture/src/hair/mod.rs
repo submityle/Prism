@@ -63,6 +63,7 @@ pub mod binding;
 pub mod card_bake;
 pub mod cluster;
 pub mod collision;
+pub mod cosserat;
 pub mod decimation;
 pub mod deep_opacity_layout;
 pub mod deep_transmittance;
