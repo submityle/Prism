@@ -278,6 +278,13 @@
 //!   from the displaced grid and welds a watertight
 //!   [`indexed_bilinear_patch_mesh`], adding AAA micro-detail (pores, bark,
 //!   terrain relief) on a smooth low-order base.
+//! - [`trimmed_surface`] — trimmed parametric surfaces: a
+//!   [`trimmed_surface::TrimmedSurface`] carves any
+//!   [`displaced_surface::ParametricSurface`]'s `(u, v)` domain with closed
+//!   [`trimmed_surface::TrimLoop`]s (even–odd fill, so nested loops punch
+//!   holes) and tessellates only the kept region into a watertight,
+//!   conforming triangle mesh via marching squares with per-edge bisection
+//!   crossings and a cell-centre saddle test — the CAD/NURBS trimming path.
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -420,6 +427,7 @@ pub mod bspline_surface;
 pub mod nurbs_surface;
 pub mod bezier_surface;
 pub mod displaced_surface;
+pub mod trimmed_surface;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -513,6 +521,7 @@ pub use bspline_surface::{BsplineSurface, BsplineSurfaceError};
 pub use nurbs_surface::{NurbsSurface, NurbsSurfaceError};
 pub use bezier_surface::{BezierSurface, BezierSurfaceError};
 pub use displaced_surface::{DisplacedSurface, HeightMap, HeightMapError, ParametricSurface};
+pub use trimmed_surface::{TrimLoop, TrimmedSurface, TrimmedSurfaceError};
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
 pub use obb::{Obb, ObbBvh, ObbHit};
