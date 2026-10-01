@@ -131,28 +131,30 @@ pub use soft::aero::{
 };
 pub use soft::body::SoftBody;
 pub use soft::build::{Cloth, ClothGrid, Rope, RopeGrid, SoftBox, SoftBoxGrid};
-pub use soft::damage::{
-    apply_plasticity, apply_tearing, tear_flags, tear_report, PlasticParams, TearReport,
-    TearingParams,
+pub use soft::collision::{
+    apply_backstop, capsule_toi, closest_point_on_segment, generate_virtual_particles,
+    half_space_toi, project_out_of_half_space, project_out_of_sphere, resolve_backstops,
+    resolve_body_collisions, resolve_body_collisions_with_friction, resolve_ccd, resolve_self_ccd,
+    resolve_self_collision, resolve_self_collision_virtual, resolve_self_collision_virtual_augment,
+    resolve_self_collision_virtual_augment_jacobi, resolve_self_collision_virtual_jacobi,
+    resolve_self_collision_with_friction, resolve_two_way_coupling, sphere_toi, swept_pair_toi,
+    Backstop, BodyCollider, CcdParams, CouplingBody, SelfCcdParams, VirtualParticle,
+    VirtualParticlePattern,
 };
 pub use soft::constraint::{
     mesh_volume, project_bending, project_long_range, project_pressure, project_strain_limit,
-    AttachmentConstraint, BendingConstraint, ConstraintSet, DistanceConstraint, LongRangeConstraint,
-    ParticleConstraint, PressureConstraint, SoftConstraintKind, StrainLimitConstraint,
-    TetraVolumeConstraint,
+    AttachmentConstraint, BendingConstraint, ConstraintSet, DistanceConstraint,
+    LongRangeConstraint, ParticleConstraint, PressureConstraint, SoftConstraintKind,
+    StrainLimitConstraint, TetraVolumeConstraint,
 };
-pub use soft::collision::{
-    apply_backstop, capsule_toi, closest_point_on_segment, half_space_toi,
-    project_out_of_half_space, project_out_of_sphere, resolve_backstops, resolve_body_collisions,
-    resolve_body_collisions_with_friction, resolve_ccd, resolve_self_ccd, resolve_self_collision,
-    generate_virtual_particles, resolve_self_collision_virtual,
-    resolve_self_collision_virtual_augment, resolve_self_collision_virtual_augment_jacobi,
-    resolve_self_collision_virtual_jacobi, resolve_self_collision_with_friction,
-    resolve_two_way_coupling, sphere_toi, swept_pair_toi, Backstop, BodyCollider,
-    CcdParams, CouplingBody, SelfCcdParams, VirtualParticle, VirtualParticlePattern,
+pub use soft::damage::{
+    apply_plasticity, apply_tearing, plastic_rest_length, tear_flags, tear_report, PlasticParams,
+    TearReport, TearingParams,
 };
 pub use soft::particle::{ParticleHandle, ParticleStorage};
-pub use soft::solver::{SelfCollisionParams, SoftContacts, SoftSolver, SoftSolverConfig, VirtualSelfCollisionParams};
+pub use soft::solver::{
+    SelfCollisionParams, SoftContacts, SoftSolver, SoftSolverConfig, VirtualSelfCollisionParams,
+};
 pub use solver::{IntegrateOnlySolver, Solver, SolverRegistry, XpbdConfig, XpbdSolver};
 pub use state::body::{BodyDesc, BodyKind, MassProperties};
 pub use state::handle::BodyHandle;

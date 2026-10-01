@@ -24,7 +24,7 @@ use glam::Vec3;
 use crate::math::scalar::Real;
 use crate::soft::constraint::DistanceConstraint;
 
-use super::strain::{edge_length, edge_strain, EPS_REST};
+use super::strain::{edge_length, EPS_REST};
 
 /// Tuning for plastic (permanent) rest-length creep.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -100,34 +100,63 @@ pub fn apply_plasticity(
     let params = params.sanitized();
     let mut modified = 0;
     for c in constraints.iter_mut() {
-        let Some(strain) = edge_strain(c, positions) else {
-            continue;
-        };
-        if strain.abs() <= params.yield_strain {
-            continue;
-        }
+        // Out-of-range endpoints make the edge inert; the rest-length guard and
+        // the whole creep decision live in [`plastic_rest_length`].
         let Some(len) = edge_length(c, positions) else {
             continue;
         };
-        let sign = if strain >= 0.0 { 1.0 } else { -1.0 };
-        let excess = strain - sign * params.yield_strain;
-        // Move the rest length by `creep` fraction of the excess strain.
-        let mut new_rest = c.rest_length * (1.0 + params.creep * excess);
-        if new_rest <= EPS_REST {
-            new_rest = EPS_REST;
-        }
-        // Clamp so the residual elastic strain magnitude stays within max.
-        let residual = (len - new_rest) / new_rest;
-        if residual.abs() > params.max_strain {
-            let residual_sign = if residual >= 0.0 { 1.0 } else { -1.0 };
-            new_rest = len / (1.0 + residual_sign * params.max_strain);
-        }
-        if new_rest > EPS_REST {
+        if let Some(new_rest) = plastic_rest_length(c.rest_length, len, params) {
             c.rest_length = new_rest;
             modified += 1;
         }
     }
     modified
+}
+
+/// Computes the plastically crept rest length for a single distance edge from
+/// its current `rest_length`, its current `length` (the separation of its two
+/// endpoints), and the plastic `params`.
+///
+/// Returns `Some(new_rest)` when the signed strain `(length - rest) / rest` lies
+/// beyond the yield band and the edge creeps to a strictly positive new rest
+/// length, or `None` when the edge is within the yield band, has a degenerate
+/// rest length (`<= EPS_REST`), or would collapse to the numerical floor. The
+/// returned rest length is moved by `creep` times the beyond-yield excess toward
+/// `length`, then clamped so the residual elastic strain magnitude never exceeds
+/// `max_strain`.
+///
+/// This is the single scalar kernel shared by the sequential [`apply_plasticity`]
+/// pass and the `prism_physics_gpu` cloth twin, so both agree on the creep
+/// arithmetic up to floating-point rounding. `params` is sanitized internally,
+/// so the function is safe to call with raw authored values.
+#[must_use]
+pub fn plastic_rest_length(rest_length: Real, length: Real, params: PlasticParams) -> Option<Real> {
+    let params = params.sanitized();
+    if rest_length <= EPS_REST {
+        return None;
+    }
+    let strain = (length - rest_length) / rest_length;
+    if strain.abs() <= params.yield_strain {
+        return None;
+    }
+    let sign = if strain >= 0.0 { 1.0 } else { -1.0 };
+    let excess = strain - sign * params.yield_strain;
+    // Move the rest length by `creep` fraction of the excess strain.
+    let mut new_rest = rest_length * (1.0 + params.creep * excess);
+    if new_rest <= EPS_REST {
+        new_rest = EPS_REST;
+    }
+    // Clamp so the residual elastic strain magnitude stays within max.
+    let residual = (length - new_rest) / new_rest;
+    if residual.abs() > params.max_strain {
+        let residual_sign = if residual >= 0.0 { 1.0 } else { -1.0 };
+        new_rest = length / (1.0 + residual_sign * params.max_strain);
+    }
+    if new_rest > EPS_REST {
+        Some(new_rest)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -187,7 +216,11 @@ mod tests {
         );
         assert_eq!(modified, 1);
         // excess = 1.0 - 0.1 = 0.9; new_rest = 1 * (1 + 0.5*0.9) = 1.45.
-        assert!((constraints[0].rest_length - 1.45).abs() < 1e-5, "rest {}", constraints[0].rest_length);
+        assert!(
+            (constraints[0].rest_length - 1.45).abs() < 1e-5,
+            "rest {}",
+            constraints[0].rest_length
+        );
     }
 
     #[test]

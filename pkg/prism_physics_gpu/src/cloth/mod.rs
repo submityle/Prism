@@ -42,6 +42,7 @@ pub mod cpu;
 pub mod gpu;
 pub mod layout;
 pub mod long_range;
+pub mod plasticity;
 pub mod prep;
 pub mod pressure;
 pub mod strain_limit;
@@ -63,6 +64,7 @@ pub use long_range::{
     colour_long_range, cpu_cloth_long_range, ClothLongRangeConstraint, GpuClothLongRange,
     LongRangeColoring,
 };
+pub use plasticity::{cpu_cloth_plasticity, ClothPlasticEdge, GpuClothPlasticity};
 pub use prep::{build as build_cloth_prep, ClothPrep};
 pub use pressure::{
     build_vertex_triangle_adjacency, cpu_cloth_pressure, GpuClothPressure, VertexTriangleAdjacency,
