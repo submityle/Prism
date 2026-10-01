@@ -9,7 +9,7 @@
 //!   is the angular size of one pixel; it is updated at each scattering event
 //!   by surface curvature and BSDF roughness.
 //! * Growth uses the standard small-angle linearization `width += t *
-//!   spread_angle` (RTGems ch. 20), exact to first order for the sub-degree
+//!   spread_angle` (`RTGems` ch. 20), exact to first order for the sub-degree
 //!   pixel angles seen in practice.
 //!
 //! # References
@@ -84,7 +84,7 @@ impl RayCone {
     /// Update the spread angle at a scattering event.
     ///
     /// `curvature_spread` is the surface's additional spread half-angle from
-    /// local curvature (`2 * beta` in RTGems; pass the already-doubled value or
+    /// local curvature (`2 * beta` in `RTGems`; pass the already-doubled value or
     /// use [`Self::reflected`] which doubles it). `roughness_spread` is an
     /// extra isotropic widening from BSDF roughness. Both are additive and the
     /// result is clamped.
@@ -98,7 +98,7 @@ impl RayCone {
     }
 
     /// Specialized reflection update: adds `2 * surface_curvature_spread` (the
-    /// RTGems reflection term) plus a roughness widening.
+    /// `RTGems` reflection term) plus a roughness widening.
     #[inline]
     #[must_use]
     pub fn reflected(self, surface_curvature_spread: f32, roughness_spread: f32) -> Self {

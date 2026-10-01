@@ -50,7 +50,7 @@ pub fn wrap_coord(c: f32, mode: WrapMode) -> (f32, bool) {
         }
         WrapMode::MirrorClampToEdge => (c.abs().clamp(0.0, 1.0), false),
         WrapMode::ClampToBorder => {
-            let border = c < 0.0 || c > 1.0;
+            let border = !(0.0..=1.0).contains(&c);
             (c.clamp(0.0, 1.0), border)
         }
     }

@@ -15,7 +15,7 @@
 //!   a coarse (safe) mip rather than producing `NaN`.
 //!
 //! # References
-//! Ray Tracing Gems 2019, ch. 20, eq. "Delta_i" (triangle LOD constant).
+//! Ray Tracing Gems 2019, ch. 20, eq. "`Delta_i`" (triangle LOD constant).
 
 use bevy_math::ops;
 

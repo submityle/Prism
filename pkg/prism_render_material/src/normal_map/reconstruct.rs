@@ -3,7 +3,7 @@
 //! AAA pipelines store tangent-space normals in two channels and rebuild the
 //! third on the GPU, because the normal is unit length so `z` is redundant.
 //! The two staple packings are **BC5 "RG"** (x in red, y in green -- the modern
-//! default) and the legacy **DXT5nm "AG"** (x in alpha, y in green, chosen so
+//! default) and the legacy **`DXT5nm` "AG"** (x in alpha, y in green, chosen so
 //! the two surviving channels sit on BC3's independently-compressed alpha and
 //! green blocks). Both decode here with pure analytic math -- no AI/ML -- so a
 //! CPU golden matches a GPU twin to floating-point tolerance.
@@ -18,7 +18,7 @@
 //!   geometric normal `(0, 0, 1)` rather than producing NaNs.
 //!
 //! # References
-//! * Mittring, "Finding Next Gen -- CryEngine 2" (two-channel normal storage).
+//! * Mittring, "Finding Next Gen -- `CryEngine` 2" (two-channel normal storage).
 //! * Akenine-Moller et al., *Real-Time Rendering* 4th ed., Section 6.7.2.
 
 /// Geometric fallback used when a reconstructed vector is too short to
@@ -62,7 +62,7 @@ pub fn decode_rg(rg: [f32; 2]) -> [f32; 3] {
     reconstruct_z([unorm_to_snorm(rg[0]), unorm_to_snorm(rg[1])])
 }
 
-/// Decode a legacy DXT5nm **AG** normal sample: `x` from alpha, `y` from green.
+/// Decode a legacy `DXT5nm` **AG** normal sample: `x` from alpha, `y` from green.
 #[must_use]
 pub fn decode_ag(rgba: [f32; 4]) -> [f32; 3] {
     reconstruct_z([unorm_to_snorm(rgba[3]), unorm_to_snorm(rgba[1])])

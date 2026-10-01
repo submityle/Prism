@@ -2,7 +2,7 @@
 //! propagated cone footprint, and the incidence angle into a continuous LOD,
 //! and provide the isotropic footprint helper shared with ray differentials.
 //!
-//! The ray-cone LOD follows RTGems ch. 20:
+//! The ray-cone LOD follows `RTGems` ch. 20:
 //! `lambda = Delta + log2(|cone_width|) - log2(|n . d|)`.
 //! The `-log2(|n . d|)` term stretches the footprint at grazing incidence,
 //! matching the elongation a surface sees from an oblique ray.

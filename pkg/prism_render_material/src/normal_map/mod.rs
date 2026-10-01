@@ -12,7 +12,7 @@
 //! GPU twin to floating-point tolerance.
 //!
 //! # References
-//! * Mittring, "Finding Next Gen -- CryEngine 2" (two-channel normals).
+//! * Mittring, "Finding Next Gen -- `CryEngine` 2" (two-channel normals).
 //! * Barre-Brisebois & Hill, "Blending in Detail" (reoriented normal mapping).
 
 mod blend;
