@@ -58,6 +58,7 @@ pub mod analysis_dispatch;
 pub mod analysis_pass_layout;
 pub mod analysis_readback;
 pub mod async_pipeline;
+pub mod barrier_contact;
 pub mod binding;
 pub mod card_bake;
 pub mod cluster;
