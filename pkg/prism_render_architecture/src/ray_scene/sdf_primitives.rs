@@ -1636,13 +1636,32 @@ pub fn polygon_2d(point: [f32; 2], verts: &[[f32; 2]]) -> f32 {
     s * d.sqrt()
 }
 
+/// Exact signed distance to an axis-aligned rounded rectangle in 2D with
+/// independent per-corner radii (Inigo Quilez `sdRoundedBox`).
+///
+/// `half_extent` is the box half-size and `radii` lists the corner radii as
+/// `[top_right, bottom_right, top_left, bottom_left]`; the active corner radius
+/// is selected by the query's quadrant. Each radius must not exceed the smaller
+/// half-extent. The straight edges fall out of the inset-box `min(max(..),0)`
+/// term and the corners from `length(max(q,0))`, so the result is exact and
+/// uses only `abs`, `min`, `max` and `sqrt`.
+pub fn rounded_box_2d(point: [f32; 2], half_extent: [f32; 2], radii: [f32; 4]) -> f32 {
+    // radii = [top_right, bottom_right, top_left, bottom_left]; pick by quadrant.
+    let rx = if point[0] > 0.0 { radii[0] } else { radii[2] };
+    let ry = if point[0] > 0.0 { radii[1] } else { radii[3] };
+    let r = if point[1] > 0.0 { rx } else { ry };
+    let qx = point[0].abs() - half_extent[0] + r;
+    let qy = point[1].abs() - half_extent[1] + r;
+    qx.max(qy).min(0.0) + length2([qx.max(0.0), qy.max(0.0)]) - r
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         arc, box_frame, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_torus, capsule, cone_sdf, cross_2d, cut_disk_2d, cut_hollow_sphere,
         cut_sphere, cylinder_segment, death_star, egg_2d, ellipsoid_sdf, equilateral_triangle_2d, heart_2d, hex_prism, hexagram_2d, infinite_cone, infinite_cylinder, isosceles_triangle_2d, length2, line_sdf, link, moon,
         octagon_prism, octahedron, oriented_box_2d, parallelogram, pie, plane, polygon_2d, pyramid, quad_sdf, regular_hexagon_2d, regular_octagon_2d, regular_pentagon_2d, rhombus, rhombus_2d, round_box, round_cone_sdf,
-        round_cone_segment, rounded_cylinder, rounded_x, segment_2d, solid_angle, sphere, torus, trapezoid_isosceles, triangle_sdf, triangular_prism,
+        round_cone_segment, rounded_box_2d, rounded_cylinder, rounded_x, segment_2d, solid_angle, sphere, torus, trapezoid_isosceles, triangle_sdf, triangular_prism,
         uneven_capsule_2d, vesica,
     };
 
@@ -2848,6 +2867,104 @@ mod tests {
         // Degenerate inputs: empty slice is +inf, a single vertex is its radius.
         assert_eq!(polygon_2d([0.0, 0.0], &[]), f32::INFINITY);
         assert!((polygon_2d([3.0, 4.0], &[[0.0, 0.0]]) - 5.0).abs() < 1e-6);
+    }
+
+    // Independent reference for the per-corner rounded box: build the exact
+    // boundary (four straight edges + four quarter-circle corner arcs) from
+    // first-principles geometry, then take the min point-to-segment distance
+    // with an even-odd winding sign. Shares no branch structure with the
+    // closed-form rounded_box_2d.
+    fn rounded_box_reference(px: f32, py: f32, bx: f32, by: f32, radii: [f32; 4]) -> f32 {
+        let (rtr, rbr, rtl, rbl) = (radii[0], radii[1], radii[2], radii[3]);
+        let mut poly: Vec<[f32; 2]> = Vec::new();
+        let push_arc = |v: &mut Vec<[f32; 2]>, c: [f32; 2], rad: f32, a0: f32, a1: f32| {
+            let n = 64usize;
+            for i in 0..=n {
+                let a = a0 + (a1 - a0) * (i as f32 / n as f32);
+                v.push([c[0] + rad * a.cos(), c[1] + rad * a.sin()]);
+            }
+        };
+        // CCW from the bottom of the right edge.
+        // Right edge bottom -> top.
+        poly.push([bx, -(by - rbr)]);
+        poly.push([bx, by - rtr]);
+        // Top-right arc 0 -> 90.
+        push_arc(&mut poly, [bx - rtr, by - rtr], rtr, 0.0, 90.0f32.to_radians());
+        // Top edge.
+        poly.push([-(bx - rtl), by]);
+        // Top-left arc 90 -> 180.
+        push_arc(&mut poly, [-(bx - rtl), by - rtl], rtl, 90.0f32.to_radians(), std::f32::consts::PI);
+        // Left edge.
+        poly.push([-bx, -(by - rbl)]);
+        // Bottom-left arc 180 -> 270.
+        push_arc(&mut poly, [-(bx - rbl), -(by - rbl)], rbl, std::f32::consts::PI, 270.0f32.to_radians());
+        // Bottom edge.
+        poly.push([bx - rbr, -by]);
+        // Bottom-right arc 270 -> 360.
+        push_arc(&mut poly, [bx - rbr, -(by - rbr)], rbr, 270.0f32.to_radians(), 360.0f32.to_radians());
+        let n = poly.len();
+        let mut best = f32::INFINITY;
+        for i in 0..n {
+            let a = poly[i];
+            let b = poly[(i + 1) % n];
+            let e = [b[0] - a[0], b[1] - a[1]];
+            let w = [px - a[0], py - a[1]];
+            let len2 = e[0] * e[0] + e[1] * e[1];
+            let t = if len2 > 0.0 { ((e[0] * w[0] + e[1] * w[1]) / len2).clamp(0.0, 1.0) } else { 0.0 };
+            let dx = w[0] - e[0] * t;
+            let dy = w[1] - e[1] * t;
+            best = best.min(dx * dx + dy * dy);
+        }
+        let mut inside = false;
+        let mut j = n - 1;
+        for i in 0..n {
+            let (xi, yi) = (poly[i][0], poly[i][1]);
+            let (xj, yj) = (poly[j][0], poly[j][1]);
+            if (yi > py) != (yj > py) {
+                let xcross = xi + (py - yi) / (yj - yi) * (xj - xi);
+                if px < xcross {
+                    inside = !inside;
+                }
+            }
+            j = i;
+        }
+        best.sqrt() * if inside { -1.0 } else { 1.0 }
+    }
+
+    #[test]
+    fn rounded_box_2d_matches_boundary_reference() {
+        let (bx, by) = (1.2f32, 0.8f32);
+        let radii = [0.3f32, 0.2, 0.4, 0.1]; // TR, BR, TL, BL
+        // With zero radii it collapses to a plain box distance.
+        let box_ref = |p: [f32; 2]| {
+            let qx = p[0].abs() - bx;
+            let qy = p[1].abs() - by;
+            (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt() + qx.max(qy).min(0.0)
+        };
+        for p in [[0.0, 0.0], [1.5, 0.0], [0.0, 1.1], [0.5, 0.5], [-1.3, -0.9]] {
+            assert!((rounded_box_2d(p, [bx, by], [0.0; 4]) - box_ref(p)).abs() < 1e-6, "box collapse at {p:?}");
+        }
+        // Centre is one short half-extent inside (0.8), minus nothing (corner far).
+        assert!((rounded_box_2d([0.0, 0.0], [bx, by], radii) - (-by)).abs() < 1e-5);
+        let samples: [[f32; 2]; 12] = [
+            [0.0, 0.0],
+            [1.0, 0.6],
+            [-1.0, 0.6],
+            [1.0, -0.6],
+            [-1.0, -0.6],
+            [1.4, 0.9],
+            [-1.4, 0.9],
+            [0.0, 0.85],
+            [1.25, 0.0],
+            [-1.25, 0.0],
+            [0.7, -0.7],
+            [-0.9, 0.75],
+        ];
+        for p in samples {
+            let got = rounded_box_2d(p, [bx, by], radii);
+            let want = rounded_box_reference(p[0], p[1], bx, by, radii);
+            assert!((got - want).abs() < 3e-3, "p={p:?} got={got} want={want}");
+        }
     }
 
     #[test]
