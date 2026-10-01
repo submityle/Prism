@@ -244,6 +244,14 @@
 //!   division; analytic normals use the quotient rule and the surface is
 //!   tessellated into the shared [`indexed_bilinear_patch_mesh`] path. All
 //!   weights equal to `1` reproduce [`bezier_patch::BezierPatch`] exactly.
+//! - [`bspline_surface`] — a uniform bicubic B-spline surface
+//!   ([`bspline_surface::BsplineSurface`]) over an arbitrary `R × C`
+//!   control grid, i.e. the authored counterpart to the single-span
+//!   [`bspline_patch::BsplinePatch`]. The net is partitioned into
+//!   `(C - 3) × (R - 3)` overlapping cubic spans that share three control
+//!   rows/columns, so the surface is globally `C²` and sampling one global
+//!   grid welds into a watertight [`indexed_bilinear_patch_mesh`] with no
+//!   cracks between spans.
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -382,6 +390,7 @@ pub mod bezier_patch;
 pub mod catmull_rom_patch;
 pub mod bspline_patch;
 pub mod rational_bezier_patch;
+pub mod bspline_surface;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -471,6 +480,7 @@ pub use bezier_patch::BezierPatch;
 pub use catmull_rom_patch::CatmullRomPatch;
 pub use bspline_patch::BsplinePatch;
 pub use rational_bezier_patch::RationalBezierPatch;
+pub use bspline_surface::{BsplineSurface, BsplineSurfaceError};
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
 pub use obb::{Obb, ObbBvh, ObbHit};
