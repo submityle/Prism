@@ -1594,12 +1594,54 @@ pub fn egg_2d(point: [f32; 2], ra: f32, rb: f32) -> f32 {
     d - rb
 }
 
+/// Exact signed distance to a filled simple polygon in 2D (Inigo Quilez
+/// `sdPolygon`). `verts` lists the vertices in order; the sign is
+/// winding-independent (negative inside, positive outside) and the magnitude is
+/// the true Euclidean distance to the nearest edge.
+///
+/// Every edge contributes its clamped point-to-segment distance and an even-odd
+/// crossing test flips the running sign, so the routine resolves convex and
+/// concave outlines alike using only `dot`, `clamp`, `min`, `sqrt` and
+/// comparisons. Fewer than three vertices bound no interior, so the distance to
+/// the first vertex is returned (or `f32::INFINITY` for an empty slice).
+pub fn polygon_2d(point: [f32; 2], verts: &[[f32; 2]]) -> f32 {
+    let n = verts.len();
+    if n == 0 {
+        return f32::INFINITY;
+    }
+    let mut d = {
+        let w = [point[0] - verts[0][0], point[1] - verts[0][1]];
+        w[0] * w[0] + w[1] * w[1]
+    };
+    let mut s = 1.0f32;
+    for i in 0..n {
+        let j = (i + n - 1) % n;
+        let e = [verts[j][0] - verts[i][0], verts[j][1] - verts[i][1]];
+        let w = [point[0] - verts[i][0], point[1] - verts[i][1]];
+        let dot_ee = e[0] * e[0] + e[1] * e[1];
+        let t = if dot_ee > 0.0 {
+            ((e[0] * w[0] + e[1] * w[1]) / dot_ee).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let b = [w[0] - e[0] * t, w[1] - e[1] * t];
+        d = d.min(b[0] * b[0] + b[1] * b[1]);
+        let c0 = point[1] >= verts[i][1];
+        let c1 = point[1] < verts[j][1];
+        let c2 = e[0] * w[1] > e[1] * w[0];
+        if (c0 && c1 && c2) || (!c0 && !c1 && !c2) {
+            s = -s;
+        }
+    }
+    s * d.sqrt()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         arc, box_frame, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_torus, capsule, cone_sdf, cross_2d, cut_disk_2d, cut_hollow_sphere,
         cut_sphere, cylinder_segment, death_star, egg_2d, ellipsoid_sdf, equilateral_triangle_2d, heart_2d, hex_prism, hexagram_2d, infinite_cone, infinite_cylinder, isosceles_triangle_2d, length2, line_sdf, link, moon,
-        octagon_prism, octahedron, oriented_box_2d, parallelogram, pie, plane, pyramid, quad_sdf, regular_hexagon_2d, regular_octagon_2d, regular_pentagon_2d, rhombus, rhombus_2d, round_box, round_cone_sdf,
+        octagon_prism, octahedron, oriented_box_2d, parallelogram, pie, plane, polygon_2d, pyramid, quad_sdf, regular_hexagon_2d, regular_octagon_2d, regular_pentagon_2d, rhombus, rhombus_2d, round_box, round_cone_sdf,
         round_cone_segment, rounded_cylinder, rounded_x, segment_2d, solid_angle, sphere, torus, trapezoid_isosceles, triangle_sdf, triangular_prism,
         uneven_capsule_2d, vesica,
     };
@@ -2744,6 +2786,68 @@ mod tests {
             let want = egg_reference(p[0], p[1], ra, rb);
             assert!((got - want).abs() < 3e-3, "p={p:?} got={got} want={want}");
         }
+    }
+
+    #[test]
+    fn polygon_2d_matches_fold_based_primitives() {
+        // Cross-check the general polygon SDF against two independent
+        // fold-based exact primitives (hexagon + equilateral triangle) and a
+        // closed-form rectangle distance, exercising convex outlines.
+        let apothem = 1.0f32;
+        let big_r = apothem / (std::f32::consts::PI / 6.0).cos();
+        let mut hexagon = [[0.0f32; 2]; 6];
+        for (k, v) in hexagon.iter_mut().enumerate() {
+            let ang = std::f32::consts::FRAC_PI_3 * k as f32;
+            *v = [big_r * ang.cos(), big_r * ang.sin()];
+        }
+        let hw = 1.0f32;
+        const K: f32 = 1.732_050_8f32;
+        let triangle: [[f32; 2]; 3] = [[hw, -hw / K], [-hw, -hw / K], [0.0, 2.0 * hw / K]];
+        // Axis-aligned rectangle, half extents (1.2, 0.7), CCW winding.
+        let (ex, ey) = (1.2f32, 0.7f32);
+        let rect: [[f32; 2]; 4] = [[ex, ey], [-ex, ey], [-ex, -ey], [ex, -ey]];
+        let rect_ref = |p: [f32; 2]| {
+            let qx = p[0].abs() - ex;
+            let qy = p[1].abs() - ey;
+            let ox = qx.max(0.0);
+            let oy = qy.max(0.0);
+            (ox * ox + oy * oy).sqrt() + qx.max(qy).min(0.0)
+        };
+        let samples: [[f32; 2]; 10] = [
+            [0.0, 0.0],
+            [0.5, 0.3],
+            [-0.6, 0.2],
+            [1.3, 0.0],
+            [0.0, 1.3],
+            [0.9, 0.9],
+            [-1.1, -0.4],
+            [0.3, -0.9],
+            [1.5, 1.0],
+            [-0.2, 0.6],
+        ];
+        for p in samples {
+            assert!(
+                (polygon_2d(p, &hexagon) - regular_hexagon_2d(p, apothem)).abs() < 1e-5,
+                "hexagon mismatch at {p:?}"
+            );
+            assert!(
+                (polygon_2d(p, &triangle) - equilateral_triangle_2d(p, hw)).abs() < 1e-5,
+                "triangle mismatch at {p:?}"
+            );
+            assert!(
+                (polygon_2d(p, &rect) - rect_ref(p)).abs() < 1e-5,
+                "rect mismatch at {p:?}"
+            );
+        }
+        // Winding independence: reversing the vertex order keeps the result.
+        let mut rev = hexagon;
+        rev.reverse();
+        for p in samples {
+            assert!((polygon_2d(p, &hexagon) - polygon_2d(p, &rev)).abs() < 1e-6);
+        }
+        // Degenerate inputs: empty slice is +inf, a single vertex is its radius.
+        assert_eq!(polygon_2d([0.0, 0.0], &[]), f32::INFINITY);
+        assert!((polygon_2d([3.0, 4.0], &[[0.0, 0.0]]) - 5.0).abs() < 1e-6);
     }
 
     #[test]
