@@ -70,6 +70,32 @@ pub fn repeat(point: [f32; 3], period: [f32; 3]) -> [f32; 3] {
     folded
 }
 
+/// Folds `point` into a *finite* lattice: like [`repeat`] but the instance
+/// index on each axis is clamped to `+-limit`, so exactly `2 * limit + 1`
+/// copies are placed and the field reverts to a single (edge) primitive beyond
+/// the clamped range instead of tiling forever.
+///
+/// Each axis maps to `p - period * clamp(round(p / period), -limit, limit)`.
+/// Inside the clamped band this is identical to [`repeat`]; past the last cell
+/// the subtracted offset saturates, so the query point keeps growing away from
+/// the final instance and the base primitive's distance grows monotonically
+/// (no spurious wrapped copies). An axis whose period is zero (or sub-normal)
+/// is left unchanged. This is Inigo Quilez's `opRepLim` — the operator AAA
+/// procedural content uses for bounded arrays (a row of columns, a bank of
+/// studs) rather than an unbounded crystal.
+pub fn limited_repeat(point: [f32; 3], period: [f32; 3], limit: [f32; 3]) -> [f32; 3] {
+    let mut folded = point;
+    for axis in 0..3 {
+        if period[axis].abs() > f32::MIN_POSITIVE {
+            let cell = (point[axis] / period[axis])
+                .round()
+                .clamp(-limit[axis], limit[axis]);
+            folded[axis] = point[axis] - period[axis] * cell;
+        }
+    }
+    folded
+}
+
 /// Scales the field uniformly by `factor`: returns the point at which the base
 /// field should be sampled to evaluate the scaled shape.
 ///
@@ -125,7 +151,8 @@ pub fn mirror(point: [f32; 3], axes: [bool; 3]) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use super::{
-        elongate, mirror, onion, repeat, round_distance, scale_distance, scale_point, translate,
+        elongate, limited_repeat, mirror, onion, repeat, round_distance, scale_distance, scale_point,
+        translate,
     };
 
     #[test]
@@ -167,6 +194,53 @@ mod tests {
         // from zero, matching `f32::round`).
         assert!((folded[0] - (-1.0)).abs() < 1e-6);
         assert!((folded[2] - (-1.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn limited_repeat_matches_repeat_inside_the_band() {
+        // Instance index round(1.4) = 1 is within the +-2 limit, so the fold is
+        // identical to the unbounded lattice: 1.4 - 1 = 0.4.
+        let period = [1.0, 1.0, 1.0];
+        let limit = [2.0, 2.0, 2.0];
+        let point = [1.4, -1.4, 0.3];
+        let bounded = limited_repeat(point, period, limit);
+        let unbounded = repeat(point, period);
+        for axis in 0..3 {
+            assert!((bounded[axis] - unbounded[axis]).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn limited_repeat_saturates_past_the_last_cell() {
+        // Beyond the clamp band the subtracted instance index saturates at the
+        // limit, so the fold stops wrapping: round(2.6) = 3 is clamped to 2,
+        // giving 2.6 - 1*2 = 0.6 instead of the unbounded 2.6 - 3 = -0.4.
+        let period = [1.0, 1.0, 1.0];
+        let limit = [2.0, 2.0, 2.0];
+        let folded = limited_repeat([2.6, 0.0, 0.0], period, limit);
+        assert!((folded[0] - 0.6).abs() < 1e-6);
+        assert!((repeat([2.6, 0.0, 0.0], period)[0] - (-0.4)).abs() < 1e-6);
+
+        // Pushing the query point further out keeps the folded coordinate
+        // growing one-for-one (the field reverts to the single edge instance),
+        // so the base primitive's distance increases monotonically rather than
+        // spawning spurious wrapped copies.
+        let near = limited_repeat([10.0, 0.0, 0.0], period, limit)[0];
+        let far = limited_repeat([11.0, 0.0, 0.0], period, limit)[0];
+        assert!((near - 8.0).abs() < 1e-6);
+        assert!((far - 9.0).abs() < 1e-6);
+        assert!(far > near);
+    }
+
+    #[test]
+    fn limited_repeat_leaves_zero_period_axes_untouched() {
+        // Axis 1 has zero period and passes through verbatim; the finite lattice
+        // only clamps axes that actually tile.
+        let folded = limited_repeat([5.0, 7.0, 5.0], [2.0, 0.0, 2.0], [1.0, 1.0, 1.0]);
+        assert_eq!(folded[1], 7.0);
+        // Axes 0 and 2: round(2.5) = 3 clamped to limit 1, so 5 - 2*1 = 3.
+        assert!((folded[0] - 3.0).abs() < 1e-6);
+        assert!((folded[2] - 3.0).abs() < 1e-6);
     }
 
     #[test]
