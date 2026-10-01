@@ -367,12 +367,51 @@ pub fn cut_sphere(point: [f32; 3], radius: f32, cut_height: f32) -> f32 {
     }
 }
 
+/// Signed distance from `point` to a rhombic prism: a rhombus in the `xz`
+/// plane with half-diagonals `half_diag_x` (along `x`) and `half_diag_z`
+/// (along `z`), extruded to `half_height` along `y`, with its edges rounded by
+/// `rounding`.
+///
+/// This is Inigo Quilez's exact `sdRhombus`. The point is folded into the
+/// first octant, projected onto the nearest rhombus edge via the clamped
+/// parameter `f`, then the planar edge distance (signed by which side of the
+/// edge the point lies on) is paired with the vertical cap distance and
+/// resolved with the standard rounded-box interior/exterior combine. Built
+/// from `abs`, `sign`, `clamp`, `min`, `max`, and vector lengths, so it stays
+/// transcendental-free.
+pub fn rhombus(
+    point: [f32; 3],
+    half_diag_x: f32,
+    half_diag_z: f32,
+    half_height: f32,
+    rounding: f32,
+) -> f32 {
+    let px = point[0].abs();
+    let py = point[1].abs();
+    let pz = point[2].abs();
+    let bx = half_diag_x;
+    let bz = half_diag_z;
+    // `ndot(b, b - 2*p.xz) = bx*(bx - 2*px) - bz*(bz - 2*pz)`; the clamped
+    // ratio is the fractional position of the foot of the perpendicular along
+    // the rhombus edge.
+    let ndot = bx * (bx - 2.0 * px) - bz * (bz - 2.0 * pz);
+    let denom = bx * bx + bz * bz;
+    let f = (ndot / denom).clamp(-1.0, 1.0);
+    let foot_x = 0.5 * bx * (1.0 - f);
+    let foot_z = 0.5 * bz * (1.0 + f);
+    let edge = length2([px - foot_x, pz - foot_z]);
+    let side = (px * bz + pz * bx - bx * bz).signum();
+    let qx = edge * side - rounding;
+    let qy = py - half_height;
+    qx.max(qy).min(0.0) + length2([qx.max(0.0), qy.max(0.0)])
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         box_frame, box_sdf, capped_cone, capped_cylinder, capsule, cut_sphere, ellipsoid_sdf,
         hex_prism,
-        link, octahedron, plane, pyramid, round_box, sphere, torus,
+        link, octahedron, plane, pyramid, rhombus, round_box, sphere, torus,
     };
 
     #[test]
@@ -618,5 +657,28 @@ mod tests {
         // A point inside the retained volume reports a negative distance equal
         // to its depth below the spherical cap.
         assert!((cut_sphere([0.0, 0.5, 0.0], 1.0, 0.0) - (-0.5)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn rhombus_edge_and_vertex_lie_on_the_surface() {
+        // Unit rhombus (half-diagonals 1, half-height 1, no rounding): the edge
+        // midpoint x+z=1 and the x-axis vertex both sit on the boundary.
+        assert!(rhombus([0.5, 0.0, 0.5], 1.0, 1.0, 1.0, 0.0).abs() < 1e-6);
+        assert!(rhombus([1.0, 0.0, 0.0], 1.0, 1.0, 1.0, 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn rhombus_interior_measures_the_nearest_edge() {
+        // The centre is a half-diagonal's perpendicular 1/sqrt(2) inside the
+        // nearest slanted edge, which is closer than the vertical cap.
+        let expected = -(0.5f32).sqrt();
+        assert!((rhombus([0.0, 0.0, 0.0], 1.0, 1.0, 1.0, 0.0) - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn rhombus_above_the_cap_is_the_vertical_gap() {
+        // Directly above the rhombus the governing feature is the top cap, so
+        // the distance is the overshoot past half-height.
+        assert!((rhombus([0.0, 2.0, 0.0], 1.0, 1.0, 1.0, 0.0) - 1.0).abs() < 1e-6);
     }
 }
