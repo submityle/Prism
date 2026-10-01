@@ -50,6 +50,7 @@ pub mod context;
 pub mod fluid;
 pub mod fracture;
 pub mod grid;
+pub mod island;
 pub mod mpm;
 pub mod narrowphase;
 pub mod radix;
@@ -79,6 +80,7 @@ pub use fracture::{
     GpuVoronoiAssign, VoronoiAssignConfig, NO_CELL,
 };
 pub use grid::{cpu_grid_sort, GpuUniformGrid, GridBuild, GridConfig, GridError};
+pub use island::{build_islands, Island, IslandSet, SleepConfig, SleepState};
 pub use mpm::{
     BoundaryMode, ConstitutiveOutput, G2pParticles, GpuMpmConstitutive, GpuMpmG2p,
     GpuMpmGridUpdate, GpuMpmP2g, GpuMpmResident, GpuMpmStep, P2gGrid, StepConfig, StepInputs,
