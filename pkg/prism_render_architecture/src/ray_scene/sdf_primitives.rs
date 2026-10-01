@@ -1095,11 +1095,35 @@ pub fn infinite_cone(point: [f32; 3], sin_cos: [f32; 2]) -> f32 {
     }
 }
 
+/// Signed distance to a two-dimensional circular sector ("pie slice") of
+/// radius `radius`, centred on the `+y` axis and opening symmetrically with
+/// half-aperture given by `sin_cos = [sin(angle), cos(angle)]`.
+///
+/// This is Inigo Quilez's exact `sdPie`. Folding `x` to its magnitude exploits
+/// the mirror symmetry so only one straight edge needs solving: `l` is the
+/// distance to the bounding circle, `m` the distance to that edge (projecting
+/// onto the edge ray with the parameter clamped to `[0, radius]`), and the two
+/// combine with `max`, the edge term signed by the half-plane test
+/// `sin*|x| - cos*y`. Pair it with the `extrude` domain operator to build a
+/// wedge prism, or with a radial offset for a lathed ring segment. Uses only
+/// `abs`, `clamp`, `min`/`max`, `sign` and `sqrt`, so it stays
+/// transcendental-free.
+pub fn pie(point: [f32; 2], sin_cos: [f32; 2], radius: f32) -> f32 {
+    let px = point[0].abs();
+    let p = [px, point[1]];
+    let l = length2(p) - radius;
+    // Distance to the straight edge ray along `sin_cos`, clamped to the radius.
+    let t = (p[0] * sin_cos[0] + p[1] * sin_cos[1]).clamp(0.0, radius);
+    let m = length2([p[0] - sin_cos[0] * t, p[1] - sin_cos[1] * t]);
+    let edge_sign = (sin_cos[1] * p[0] - sin_cos[0] * p[1]).signum();
+    l.max(m * edge_sign)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         box_frame, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_torus, capsule, cone_sdf, cut_hollow_sphere, cut_sphere, cylinder_segment,
-        death_star, ellipsoid_sdf, hex_prism, infinite_cone, infinite_cylinder, length2, line_sdf, link, octagon_prism, octahedron, plane, pyramid, rhombus, round_box,
+        death_star, ellipsoid_sdf, hex_prism, infinite_cone, infinite_cylinder, length2, line_sdf, link, octagon_prism, octahedron, pie, plane, pyramid, rhombus, round_box,
         quad_sdf, round_cone_sdf, round_cone_segment, rounded_cylinder, solid_angle, sphere, torus, triangle_sdf, triangular_prism, vesica,
     };
 
@@ -1293,6 +1317,81 @@ mod tests {
             assert!(
                 (got - want).abs() < 1e-4,
                 "mismatch at ({x},{y},{z}): got={got} want={want}"
+            );
+        }
+    }
+
+    #[test]
+    fn pie_axis_arc_and_edge_distances_are_exact() {
+        let alpha = 50.0_f32.to_radians();
+        let (s, c) = (alpha.sin(), alpha.cos());
+        let r = 2.0_f32;
+
+        // Interior point on the +y axis: the nearest boundary is the closer of
+        // the bounding arc (r - h) and either straight edge (h*sin(alpha)).
+        let h = 1.2_f32;
+        let got = pie([0.0, h], [s, c], r);
+        let want = -(r - h).min(h * s);
+        assert!((got - want).abs() < 1e-5, "axis interior: got={got} want={want}");
+
+        // The apex (origin) is a vertex of the sector, hence on the surface.
+        assert!(pie([0.0, 0.0], [s, c], r).abs() < 1e-6);
+
+        // A point just outside the arc straight along +y is (dist = depth - r).
+        let far = 3.0_f32;
+        let got_arc = pie([0.0, far], [s, c], r);
+        assert!((got_arc - (far - r)).abs() < 1e-5, "beyond arc: got={got_arc}");
+    }
+
+    #[test]
+    fn pie_matches_brute_force_boundary() {
+        // Independent reference: the sector is the disk intersected with the
+        // angular wedge, so its boundary is the two straight edges (t in [0,r])
+        // plus the arc (theta in [-alpha, alpha]). Compare the signed distance
+        // to a dense brute-force scan of that boundary.
+        let alpha = 50.0_f32.to_radians();
+        let (s, c) = (alpha.sin(), alpha.cos());
+        let r = 2.0_f32;
+
+        // Pre-sample the boundary polyline.
+        let mut boundary: Vec<[f32; 2]> = Vec::new();
+        let n = 2000;
+        for k in 0..=n {
+            let t = r * k as f32 / n as f32;
+            boundary.push([s * t, c * t]);   // +edge
+            boundary.push([-s * t, c * t]);  // -edge (mirror)
+        }
+        for k in 0..=n {
+            let theta = -alpha + 2.0 * alpha * k as f32 / n as f32;
+            boundary.push([r * theta.sin(), r * theta.cos()]);
+        }
+
+        let mut state: u32 = 0x9e37_79b9;
+        let mut next = || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 8) as f32 / (1u32 << 24) as f32
+        };
+        for _ in 0..200 {
+            let x = (next() - 0.5) * 6.0;
+            let y = (next() - 0.5) * 6.0;
+
+            // Unsigned distance to the boundary samples.
+            let mut best = f32::INFINITY;
+            for b in &boundary {
+                let dx = x - b[0];
+                let dy = y - b[1];
+                best = best.min((dx * dx + dy * dy).sqrt());
+            }
+            // Inside iff within the wedge AND within the disk.
+            let px = x.abs();
+            let in_wedge = c * px - s * y <= 0.0;
+            let in_disk = (x * x + y * y).sqrt() <= r;
+            let want = if in_wedge && in_disk { -best } else { best };
+
+            let got = pie([x, y], [s, c], r);
+            assert!(
+                (got - want).abs() < 3e-3,
+                "mismatch at ({x},{y}): got={got} want={want}"
             );
         }
     }
