@@ -437,12 +437,50 @@ pub fn vesica(point: [f32; 3], radius: f32, half_separation: f32) -> f32 {
     }
 }
 
+/// Signed distance from `point` to a capped torus: a torus arc whose tube of
+/// radius `tube_radius` is swept around a major circle of radius
+/// `major_radius` in the `x`-`y` plane, but only across an angular aperture of
+/// `+-half_angle` about the `+y` axis (the rest of the ring is removed and
+/// closed off with flat disc caps).
+///
+/// `sin_cos_aperture` is the baked `(sin(half_angle), cos(half_angle))` of that
+/// half-angle, so the caller folds the only trigonometry into two constants
+/// and this routine stays transcendental-free. With `half_angle = PI` it is a
+/// full torus; with `half_angle = PI/2` it is a half torus.
+///
+/// This is Inigo Quilez's exact `sdCappedTorus`: the query is folded across
+/// the `yz` plane, a single comparison selects whether the nearest feature is
+/// the swept tube (`k = length(point.xy)`) or one of the flat end caps
+/// (`k = dot(point.xy, sin_cos_aperture)`), and the tube radius is subtracted
+/// from the resulting ring distance. Built from `abs`, `dot`, `min`/`max`
+/// comparisons, and two square roots.
+pub fn capped_torus(
+    point: [f32; 3],
+    sin_cos_aperture: [f32; 2],
+    major_radius: f32,
+    tube_radius: f32,
+) -> f32 {
+    let px = point[0].abs();
+    let py = point[1];
+    let pz = point[2];
+    let [sin_a, cos_a] = sin_cos_aperture;
+    // Past the aperture the nearest feature is the flat cap, reached by
+    // projecting onto the cap direction; inside it the full ring applies.
+    let k = if cos_a * px > sin_a * py {
+        px * sin_a + py * cos_a
+    } else {
+        length2([px, py])
+    };
+    let p_dot_p = px * px + py * py + pz * pz;
+    (p_dot_p + major_radius * major_radius - 2.0 * major_radius * k).max(0.0).sqrt() - tube_radius
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        box_frame, box_sdf, capped_cone, capped_cylinder, capsule, cut_sphere, ellipsoid_sdf,
-        hex_prism,
-        link, octahedron, plane, pyramid, rhombus, round_box, sphere, torus, vesica,
+        box_frame, box_sdf, capped_cone, capped_cylinder, capped_torus, capsule, cut_sphere,
+        ellipsoid_sdf, hex_prism, length2, link, octahedron, plane, pyramid, rhombus, round_box,
+        sphere, torus, vesica,
     };
 
     #[test]
@@ -741,5 +779,40 @@ mod tests {
         // lens is exactly a sphere of the given radius.
         assert!(vesica([1.0, 0.0, 0.0], 1.0, 0.0).abs() < 1e-6);
         assert!((vesica([0.0, 0.0, 0.0], 1.0, 0.0) - (-1.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn capped_torus_tube_cross_section_is_exact() {
+        // Half torus (half_angle = 90deg -> sin_cos = (1, 0)), major 1, tube
+        // 0.2. On the +y ring centreline the distance is -tube_radius; the ring
+        // surface is reached at the tube radius both radially and in z.
+        let sc = [1.0, 0.0];
+        assert!((capped_torus([0.0, 1.0, 0.0], sc, 1.0, 0.2) - (-0.2)).abs() < 1e-6);
+        assert!(capped_torus([0.0, 1.2, 0.0], sc, 1.0, 0.2).abs() < 1e-6);
+        assert!(capped_torus([0.0, 1.0, 0.2], sc, 1.0, 0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn capped_torus_outside_the_tube_tracks_the_ring() {
+        // A point beyond the tube on the ring plane is its radial gap to the
+        // tube surface.
+        assert!((capped_torus([0.0, 1.5, 0.0], [1.0, 0.0], 1.0, 0.2) - 0.3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn capped_torus_past_the_aperture_measures_the_end_cap() {
+        // half_angle = 30deg: the ring ends at angle 30deg from +y, centreline
+        // endpoint (sin30, cos30). A query past the aperture (at 45deg) is
+        // governed by the flat end cap, i.e. its distance to that endpoint minus
+        // the tube radius.
+        let sin_a = 0.5f32;
+        let cos_a = (0.75f32).sqrt(); // cos 30deg
+        let sc = [sin_a, cos_a];
+        let major = 1.0f32;
+        let tube = 0.2f32;
+        let q = [(0.5f32).sqrt(), (0.5f32).sqrt(), 0.0]; // 45deg on the ring radius
+        let cap_centre = [sin_a * major, cos_a * major];
+        let expected = length2([q[0] - cap_centre[0], q[1] - cap_centre[1]]) - tube;
+        assert!((capped_torus(q, sc, major, tube) - expected).abs() < 1e-6);
     }
 }
