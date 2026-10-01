@@ -58,6 +58,16 @@ impl RayDifferential {
         mip_from_isotropic_footprint(lx.max(ly), max_mip)
     }
 
+    /// The major footprint axis in UV units: whichever screen-axis derivative
+    /// (`d_dx` or `d_dy`) has the larger texel-space length. This is the step
+    /// direction/extent anisotropic filtering walks; feed it to
+    /// [`super::anisotropic_taps`]. A degenerate footprint returns `[0, 0]`.
+    #[must_use]
+    pub fn major_axis_uv(self, tex_width: u32, tex_height: u32) -> [f32; 2] {
+        let (lx, ly) = self.axis_lengths_texels(tex_width, tex_height);
+        if lx >= ly { self.d_dx } else { self.d_dy }
+    }
+
     /// Anisotropic LOD: base LOD from the minor axis plus the clamped
     /// major/minor anisotropy ratio.
     #[must_use]

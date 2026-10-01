@@ -34,6 +34,7 @@
 //! * Igehy, "Tracing Ray Differentials", SIGGRAPH 1999.
 //! * Ewins et al., "MIP-Map Level Selection for Texture Mapping", 1998.
 
+mod aniso;
 mod math;
 mod mip;
 mod ray_cone;
@@ -41,6 +42,7 @@ mod ray_differential;
 mod residency;
 mod triangle;
 
+pub use aniso::{anisotropic_taps, AnisoTaps, MAX_ANISO_TAPS};
 pub use mip::{
     cone_mip_level, mip_from_isotropic_footprint, AnisotropicMip, MIN_COS_INCIDENCE,
 };
