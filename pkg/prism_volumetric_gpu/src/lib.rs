@@ -116,6 +116,7 @@ pub mod frustum_cull;
 pub mod fxaa;
 pub mod gamut_clip;
 pub mod gaussian_splat;
+pub mod ggx_energy_compensation;
 pub mod godray;
 pub mod gpu_radix_histogram;
 pub mod gravity_wave;
@@ -289,6 +290,9 @@ pub use fxaa::{FxaaQuery, GpuFxaa};
 pub use gamut_clip::{GamutClipMode, GamutClipQuery, GpuGamutClip};
 pub use gaussian_splat::{
     GaussianSplatProjection, GpuGaussianSplat, GpuGaussianSplatQuery, SplatFootprint,
+};
+pub use ggx_energy_compensation::{
+    GgxEnergyCompensationQuery, GgxEnergyCompensationResult, GpuGgxEnergyCompensation,
 };
 pub use godray::{GodRayWeightQuery, GpuGodRayWeight};
 pub use gpu_radix_histogram::{GpuRadixHistogram, RadixHistogramQuery};
