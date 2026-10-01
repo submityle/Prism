@@ -136,10 +136,9 @@ pub use soft::damage::{
     TearingParams,
 };
 pub use soft::constraint::{
-    mesh_volume, project_bending, AttachmentConstraint, BendingConstraint, ConstraintSet,
-    DistanceConstraint,
-    LongRangeConstraint, ParticleConstraint, PressureConstraint, SoftConstraintKind,
-    StrainLimitConstraint, TetraVolumeConstraint,
+    mesh_volume, project_bending, project_long_range, AttachmentConstraint, BendingConstraint,
+    ConstraintSet, DistanceConstraint, LongRangeConstraint, ParticleConstraint, PressureConstraint,
+    SoftConstraintKind, StrainLimitConstraint, TetraVolumeConstraint,
 };
 pub use soft::collision::{
     apply_backstop, capsule_toi, closest_point_on_segment, half_space_toi,

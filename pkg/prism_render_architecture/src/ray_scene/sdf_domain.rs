@@ -201,12 +201,80 @@ pub fn fold_plane(point: [f32; 3], normal: [f32; 3]) -> [f32; 3] {
     ]
 }
 
+/// Extrudes a two-dimensional signed-distance field `d2d` (measured in the
+/// `xy` plane) into a three-dimensional slab of half-thickness `half_height`
+/// along the `z` axis, yielding an exact 3D signed distance.
+///
+/// This is Inigo Quilez's `opExtrusion`: with `w = (d2d, |z| - half_height)`
+/// the result is `min(max(w.x, w.y), 0) + length(max(w, 0))`. The first term
+/// handles the interior (negative on both the profile and the cap), the second
+/// the exterior corner where the point clears both the side wall and the cap
+/// faces at once. It is the standard bridge for turning any 2D profile — a
+/// polygon, star, text glyph, or arc — into a prism, and uses only `abs`,
+/// `min`/`max` and a single `sqrt`, so it stays transcendental-free.
+pub fn extrude(d2d: f32, z: f32, half_height: f32) -> f32 {
+    let wx = d2d;
+    let wy = z.abs() - half_height;
+    let inside = wx.max(wy).min(0.0);
+    let ox = wx.max(0.0);
+    let oy = wy.max(0.0);
+    let outside = (ox * ox + oy * oy).sqrt();
+    inside + outside
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        elongate, fold_plane, limited_repeat, mirror, mirror_repeat, onion, repeat,
-        round_distance, scale_distance, scale_point, translate,
+        elongate, extrude, fold_plane, limited_repeat, mirror, mirror_repeat, onion,
+        repeat, round_distance, scale_distance, scale_point, translate,
     };
+    use crate::ray_scene::sdf_primitives::capped_cylinder;
+
+    #[test]
+    fn extrude_of_a_circle_matches_a_capped_cylinder() {
+        // Extruding a 2D circle of radius r along z must reproduce an exact
+        // capped cylinder (whose axis runs along y): map our (x, y, z) sample
+        // to the cylinder's frame by swapping the extrusion axis into y.
+        let r = 0.8_f32;
+        let h = 1.3_f32;
+        let samples: [[f32; 3]; 6] = [
+            [0.0, 0.0, 0.0],   // interior centre
+            [0.3, 0.2, 0.5],   // interior, off centre
+            [1.5, 0.0, 0.0],   // outside the side wall
+            [0.0, 0.0, 2.0],   // outside past the end cap
+            [0.8, 0.0, 1.3],   // on the rim edge
+            [1.1, 0.2, 1.9],   // outside the rim corner
+        ];
+        for p in samples {
+            let d2d = (p[0] * p[0] + p[1] * p[1]).sqrt() - r;
+            let got = extrude(d2d, p[2], h);
+            let want = capped_cylinder([p[0], p[2], p[1]], h, r);
+            assert!(
+                (got - want).abs() < 1e-6,
+                "mismatch at {p:?}: got={got} want={want}"
+            );
+        }
+    }
+
+    #[test]
+    fn extrude_interior_and_cap_distances_are_exact() {
+        // A unit-circle profile extruded to half-thickness 1 along z.
+        let r = 1.0_f32;
+        let h = 1.0_f32;
+        // Deep interior on the axis: nearest exit is the closer of the side
+        // wall (distance r) and the cap (distance h) -> -min(r, h) = -1.
+        assert!((extrude(-r, 0.0, h) + 1.0).abs() < 1e-6);
+        // Directly beyond a cap on the axis (profile interior, z past cap).
+        let z = 2.5_f32;
+        assert!((extrude(-r, z, h) - (z - h)).abs() < 1e-6);
+        // Straight out the side wall within the slab: pure 2D distance.
+        let d2d = 0.6_f32;
+        assert!((extrude(d2d, 0.0, h) - d2d).abs() < 1e-6);
+        // Exterior rim corner: both terms positive -> Euclidean corner distance.
+        let (dx, dz) = (0.6_f32, 0.8_f32);
+        let want = (dx * dx + dz * dz).sqrt();
+        assert!((extrude(dx, h + dz, h) - want).abs() < 1e-6);
+    }
 
     #[test]
     fn round_distance_subtracts_radius() {

@@ -40,6 +40,7 @@ pub mod bending;
 pub mod cpu;
 pub mod gpu;
 pub mod layout;
+pub mod long_range;
 pub mod prep;
 
 pub use aero::{
@@ -51,6 +52,10 @@ pub use bending::{
 };
 pub use cpu::cpu_cloth_self_collision_jacobi;
 pub use gpu::GpuClothSelfCollision;
+pub use long_range::{
+    colour_long_range, cpu_cloth_long_range, ClothLongRangeConstraint, GpuClothLongRange,
+    LongRangeColoring,
+};
 pub use prep::{build as build_cloth_prep, ClothPrep};
 
 /// Which sample pairs one cloth self-collision pass resolves.

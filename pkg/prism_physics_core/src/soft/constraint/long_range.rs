@@ -103,29 +103,75 @@ impl ParticleConstraint for LongRangeConstraint {
     }
 
     fn project(&mut self, positions: &mut [Vec3], inverse_masses: &[Real], dt: Real) {
-        let i = self.particle.index();
-        let (Some(&w), Some(&position)) = (inverse_masses.get(i), positions.get(i)) else {
-            return;
-        };
-        if w <= 0.0 {
-            return;
-        }
-        let delta = position - self.anchor;
-        let length = delta.length();
-        if length < EPSILON {
-            return;
-        }
-        // One-sided: slack inside the leash sphere does nothing.
-        let c = length - self.max_distance;
-        if c <= 0.0 {
-            return;
-        }
-        let normal = delta / length;
-        let alpha_tilde = self.compliance / (dt * dt);
-        let delta_lambda = (-c - alpha_tilde * self.lambda) / (w + alpha_tilde);
-        self.lambda += delta_lambda;
-        positions[i] += normal * (delta_lambda * w);
+        // Delegate the arithmetic to the raw-index [`project_long_range`] so the
+        // sequential golden and its parallel `GPU` twin stay bit-for-bit the
+        // same function with no risk of drift.
+        self.lambda = project_long_range(
+            positions,
+            inverse_masses,
+            self.particle.raw(),
+            self.anchor,
+            self.max_distance,
+            self.compliance,
+            self.lambda,
+            dt,
+        );
     }
+}
+
+/// Projects a single one-sided long-range-attachment leash in place over a raw
+/// particle index so a parallel `GPU` twin can share the exact arithmetic of
+/// the sequential [`LongRangeConstraint`] golden.
+///
+/// Reads and writes `positions[particle]` in place and returns the updated
+/// accumulated Lagrange multiplier; the input `lambda` is returned unchanged
+/// when the projection is inert (an out-of-range or pinned particle, a particle
+/// coincident with its anchor, or one still inside the leash sphere). The
+/// gradient is the unit vector from the anchor to the particle, so the XPBD
+/// denominator is `w + alpha_tilde` and the anchor (infinite mass) takes none
+/// of the correction.
+///
+/// `max_distance` and `compliance` are used as given (the
+/// [`LongRangeConstraint`] constructor already clamps them non-negative).
+///
+/// # Provenance
+///
+/// The one-sided long-range-attachment leash is a published position-based
+/// dynamics technique (Kim et al., "Long Range Attachments"). No Unreal Engine
+/// source or derived code.
+#[must_use]
+pub fn project_long_range(
+    positions: &mut [Vec3],
+    inverse_masses: &[Real],
+    particle: u32,
+    anchor: Vec3,
+    max_distance: Real,
+    compliance: Real,
+    lambda: Real,
+    dt: Real,
+) -> Real {
+    let i = particle as usize;
+    let (Some(&w), Some(&position)) = (inverse_masses.get(i), positions.get(i)) else {
+        return lambda;
+    };
+    if w <= 0.0 {
+        return lambda;
+    }
+    let delta = position - anchor;
+    let length = delta.length();
+    if length < EPSILON {
+        return lambda;
+    }
+    // One-sided: slack inside the leash sphere does nothing.
+    let c = length - max_distance;
+    if c <= 0.0 {
+        return lambda;
+    }
+    let normal = delta / length;
+    let alpha_tilde = compliance / (dt * dt);
+    let delta_lambda = (-c - alpha_tilde * lambda) / (w + alpha_tilde);
+    positions[i] += normal * (delta_lambda * w);
+    lambda + delta_lambda
 }
 
 #[cfg(test)]
