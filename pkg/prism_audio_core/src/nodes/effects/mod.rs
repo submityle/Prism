@@ -129,6 +129,13 @@
 //!   caps the output's rising and falling slope with independent linear rates,
 //!   for glide / lag smoothing and analog-style slew distortion; distinct from
 //!   the amplitude-tracking [`envelope_follower::EnvelopeFollowerNode`].
+//! - [`octave_divider::OctaveDividerNode`] -- analog-style sub-octave
+//!   generator: a Schmitt-triggered flip-flop frequency divider synthesises
+//!   square waves one (`flop1`, f/2) and two (`flop2`, f/4) octaves below a
+//!   monophonic input, scaled by a peak envelope; distinct from the resampling
+//!   [`pitch_shifter::PitchShifterNode`] / [`pitch_delay::PitchDelayNode`] and
+//!   from the inharmonic [`ring_modulator::RingModulatorNode`] /
+//!   [`frequency_shifter::FrequencyShifterNode`].
 //! - [`spectral_delay::SpectralDelayNode`] -- frequency-domain spectral delay:
 //!   a weighted overlap-add short-time Fourier transform (`STFT`) delays each
 //!   frequency bin by its own time (interpolated across the spectrum) with an
@@ -237,6 +244,7 @@ pub mod leslie;
 pub mod mid_side_matrix;
 pub mod modal_resonator;
 pub mod multi_tap_delay;
+pub mod octave_divider;
 pub mod parametric_eq;
 pub mod phaser;
 pub mod ping_pong_delay;
@@ -303,6 +311,7 @@ pub use modal_resonator::{
     ModalResonatorNode, ModalResonatorParams,
 };
 pub use multi_tap_delay::{MAX_TAPS, MultiTapDelayNode, MultiTapDelayParams, TapSpec};
+pub use octave_divider::{OctaveDividerNode, OctaveDividerParams};
 pub use parametric_eq::{EqBand, ParametricEqNode};
 pub use phaser::{PhaserNode, PhaserParams};
 pub use ping_pong_delay::{
