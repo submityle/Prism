@@ -529,6 +529,14 @@
 //!   projection [`GpuHairProjectSh`] and the integer-power
 //!   [`GpuHairForwardScatterPower`] twins, checked within the fma tolerance
 //!   (see [`dual_scatter_factors`]).
+//! * [`GpuProjectiveEdge`] evaluates
+//!   [`local_project_edge`](prism_render_architecture::hair::projective_global::local_project_edge),
+//!   the Projective-Dynamics (`Bouaziz` 2014) local edge-length projection:
+//!   one thread per edge recenters the edge on its midpoint and places the
+//!   two endpoints symmetrically about it so their separation equals the
+//!   (sanitised, non-negative) rest length, a degenerate edge splitting along
+//!   `+x`. A pure per-edge map matched within the fma tolerance for the
+//!   `rest / length` divide (see [`projective_edge`]).
 //!
 //! # Portability
 //!
@@ -587,6 +595,7 @@ pub mod melanin;
 pub mod mesh_shell;
 pub mod mesh_shell_tapered;
 pub mod mip_for_footprint;
+pub mod projective_edge;
 pub mod raster;
 pub mod reactive_mask;
 pub mod resample;
@@ -653,6 +662,7 @@ pub use melanin::{reference_absorption, GpuHairMelanin};
 pub use mesh_shell::{GpuMeshShell, GpuShellMesh, ShellStrandInput};
 pub use mesh_shell_tapered::{GpuMeshShellTapered, TaperedShellStrandInput};
 pub use mip_for_footprint::{reference_mip_for_footprint, GpuHairMipForFootprint, MipQuery};
+pub use projective_edge::{reference_project_edge, GpuProjectiveEdge};
 pub use raster::{path_code, GpuHairRaster, RasterQuery};
 pub use reactive_mask::{reference_reactivity, GpuHairReactiveMask};
 pub use resample::{reference_resample_groom, reference_resample_strand, GpuHairResample};
