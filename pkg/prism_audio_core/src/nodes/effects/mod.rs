@@ -100,6 +100,11 @@
 //!   (`tanh` / `arctan` / cubic / reciprocal / sine) with a drive + DC bias
 //!   stage, oversampling, and an output DC blocker; distinct from
 //!   [`waveshaper::WaveshaperNode`], which is a fixed symmetric `tanh` clip.
+//! - [`spectral_delay::SpectralDelayNode`] -- frequency-domain spectral delay:
+//!   a weighted overlap-add short-time Fourier transform (`STFT`) delays each
+//!   frequency bin by its own time (interpolated across the spectrum) with an
+//!   independent per-bin feedback loop, smearing the spectrum in a way no
+//!   time-domain delay can.
 //! - [`spectral_freeze::SpectralFreezeNode`] -- frequency-domain spectral
 //!   freeze: a weighted overlap-add short-time Fourier transform (`STFT`)
 //!   latches the current magnitude spectrum and advances each bin's phase by
@@ -168,6 +173,7 @@ pub mod phaser;
 pub mod pitch_shifter;
 pub mod ring_modulator;
 pub mod saturation;
+pub mod spectral_delay;
 pub mod spectral_freeze;
 pub mod spectral_gate;
 pub mod stereo_width;
@@ -213,6 +219,12 @@ pub use pitch_shifter::{
 };
 pub use ring_modulator::{RingModulatorNode, RingModulatorParams};
 pub use saturation::{DEFAULT_DC_BLOCK_COEFF, SaturationCurve, SaturationNode, SaturationParams};
+pub use spectral_delay::{
+    DEFAULT_FEEDBACK, DEFAULT_HIGH_DELAY_MS, DEFAULT_LOW_DELAY_MS, DEFAULT_MIX,
+    DEFAULT_SPECTRAL_DELAY_FFT_SIZE, MAX_DELAY_MS, MAX_SPECTRAL_DELAY_FEEDBACK,
+    MIN_SPECTRAL_DELAY_FFT_SIZE, SPECTRAL_DELAY_OVERLAP_FACTOR, SpectralDelayNode,
+    SpectralDelayParams,
+};
 pub use spectral_freeze::{
     FREEZE_RAMP_SECONDS, MAX_DIFFUSION, MIN_FREEZE_FFT_SIZE, SpectralFreezeNode,
     SpectralFreezeParams,
