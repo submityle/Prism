@@ -36,6 +36,7 @@
 mod body;
 mod friction;
 mod ccd;
+mod self_ccd;
 mod self_collision;
 
 pub use body::{
@@ -44,6 +45,7 @@ pub use body::{
     BodyCollider,
 };
 pub use ccd::{capsule_toi, half_space_toi, resolve_ccd, sphere_toi, CcdParams};
+pub use self_ccd::{resolve_self_ccd, swept_pair_toi, SelfCcdParams};
 pub use self_collision::{resolve_self_collision, resolve_self_collision_with_friction};
 
 use glam::Vec3;
