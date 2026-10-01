@@ -6,6 +6,7 @@
 //! ray-cast code.
 
 use alloc::collections::BinaryHeap;
+use alloc::vec::Vec;
 use core::cmp::Ordering;
 
 use glam::Vec3;
@@ -55,6 +56,45 @@ impl DynamicBvh {
             }
         }
         None
+    }
+
+    /// Returns up to `k` leaves ordered by increasing squared fat-box distance
+    /// from `p`, nearest first. Fewer than `k` entries are returned when the
+    /// tree has fewer leaves, and an empty vector when `k == 0` or the tree is
+    /// empty.
+    ///
+    /// Each entry is `(payload, fat_box, squared_box_distance)`, matching
+    /// [`DynamicBvh::nearest_leaf_to_point`]. The best-first frontier yields
+    /// leaves in non-decreasing lower-bound order, so collecting the first `k`
+    /// popped leaves is exact; the traversal stops as soon as `k` leaves are
+    /// found and never enumerates farther subtrees.
+    pub fn nearest_k_leaves_to_point(&self, p: Vec3, k: usize) -> Vec<(u64, Aabb, f32)> {
+        let mut out = Vec::new();
+        if k == 0 || self.root == NULL {
+            return out;
+        }
+        let mut frontier = BinaryHeap::new();
+        let root_d2 = self.nodes[self.root as usize]
+            .aabb
+            .distance_squared_to_point(p);
+        frontier.push(PointCandidate { d2: root_d2, node: self.root });
+        while let Some(PointCandidate { d2, node }) = frontier.pop() {
+            let node = self.nodes[node as usize];
+            if node.is_leaf() {
+                out.push((node.data, node.aabb, d2));
+                if out.len() == k {
+                    break;
+                }
+            } else {
+                for child in [node.child1, node.child2] {
+                    let cd2 = self.nodes[child as usize]
+                        .aabb
+                        .distance_squared_to_point(p);
+                    frontier.push(PointCandidate { d2: cd2, node: child });
+                }
+            }
+        }
+        out
     }
 }
 
@@ -159,5 +199,30 @@ mod tests {
             .nearest_leaf_to_point(Vec3::new(10.0, 10.0, 10.0))
             .expect("one leaf");
         assert_eq!(data, 7);
+    }
+
+    #[test]
+    fn k_nearest_orders_by_distance() {
+        let bvh = spaced_tree();
+        let got = bvh.nearest_k_leaves_to_point(Vec3::new(-2.0, 0.0, 0.0), 2);
+        assert_eq!(got[0].0, 0);
+        assert_eq!(got[1].0, 1);
+        // Distances must be non-decreasing.
+        assert!(got[0].2 <= got[1].2);
+    }
+
+    #[test]
+    fn k_nearest_clamps_to_leaf_count() {
+        let bvh = spaced_tree();
+        let got = bvh.nearest_k_leaves_to_point(Vec3::ZERO, 10);
+        assert_eq!(got.len(), 3);
+    }
+
+    #[test]
+    fn k_nearest_zero_or_empty_is_empty() {
+        let bvh = spaced_tree();
+        assert!(bvh.nearest_k_leaves_to_point(Vec3::ZERO, 0).is_empty());
+        let empty = DynamicBvh::new();
+        assert!(empty.nearest_k_leaves_to_point(Vec3::ZERO, 3).is_empty());
     }
 }
