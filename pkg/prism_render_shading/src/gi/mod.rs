@@ -67,6 +67,10 @@
 //! * [`eye`] — cornea refraction, iris parallax, limbal darkening.
 //! * [`vrs`] — variable-rate shading tile classification.
 //! * [`cloth`] — Charlie/velvet fabric sheen BRDF lobes.
+//! * [`light_shaft`] — screen-space god-ray radial scattering.
+//! * [`refraction`] — screen-space rough refraction (Snell + Beer).
+//! * [`film_grain`] — film grain + sensor photon/read noise.
+//! * [`triplanar`] — triplanar projection + stochastic tiling.
 
 pub mod denoise;
 pub mod occlusion;
@@ -113,4 +117,8 @@ pub mod subsurface;
 pub mod eye;
 pub mod vrs;
 pub mod cloth;
+pub mod light_shaft;
+pub mod refraction;
+pub mod film_grain;
+pub mod triplanar;
 pub mod world_space;
