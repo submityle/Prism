@@ -23,6 +23,10 @@
 //! Because both directions are equality-guarded, an `ECS → signal → ECS` round
 //! trip settles rather than oscillating.
 //!
+//! The [`schedule`] module adapts the bridge to a real Bevy frame loop: it is
+//! installed as a non-send resource and driven by two exclusive systems
+//! ([`loom_pull_system`] at frame start, [`loom_push_system`] at frame end).
+//!
 //! # `std`-only exception
 //!
 //! Unlike the other Loom crates, this is an **engine-integration bridge** and is
@@ -71,7 +75,12 @@
 pub mod binding;
 pub mod bridge;
 pub mod entity_binding;
+pub mod schedule;
 
 pub use binding::FieldBinding;
 pub use bridge::EcsBridge;
 pub use entity_binding::{EntityBinding, SyncBinding};
+pub use schedule::{
+    add_loom_sync_systems, insert_bridge, loom_pull_system, loom_push_system, remove_bridge,
+    LoomSyncSet,
+};
