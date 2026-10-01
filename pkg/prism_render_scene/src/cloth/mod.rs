@@ -109,6 +109,7 @@ mod tearing_parity;
 mod tearing_gpu_tests;
 #[cfg(test)]
 mod vbd_gpu_tests;
+mod vbd_parity;
 #[cfg(test)]
 mod virtual_gpu_tests;
 
