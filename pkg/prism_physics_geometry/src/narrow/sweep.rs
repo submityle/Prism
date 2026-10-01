@@ -21,7 +21,9 @@ use glam::Vec3;
 
 use crate::bounding::{Capsule, Ray};
 
-use super::closest_point::{closest_point_on_segment, closest_point_on_triangle};
+use super::closest_point::{
+    closest_point_on_segment, closest_point_on_triangle, closest_point_segment_triangle,
+};
 use super::ray_cast::ray_capsule;
 
 /// The result of sweeping a sphere against a triangle.
@@ -104,6 +106,94 @@ pub fn sweep_sphere_triangle(
     best
 }
 
+/// The result of sweeping a capsule against a triangle.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct CapsuleSweepHit {
+    /// Parametric time of impact along the motion direction (a distance when
+    /// the direction is unit length).
+    pub t: f32,
+    /// Contact point on the triangle surface where the capsule first touches.
+    pub point: Vec3,
+    /// Unit surface normal at the contact, pointing from the triangle toward
+    /// the capsule's core segment.
+    pub normal: Vec3,
+}
+
+/// Sweeps a capsule (core segment `[seg_a, seg_b]` inflated by `radius`) moving
+/// along `dir` by up to `tmax` against the triangle `(a, b, c)` and returns the
+/// earliest contact.
+///
+/// The solver is a conservative-advancement loop: at each step it measures the
+/// exact gap between the translated core segment and the triangle, subtracts
+/// `radius`, and advances time by that clearance divided by the (unit) closing
+/// speed, which never overshoots the true time of impact. It converges
+/// monotonically toward the first touch and reports it once the gap falls to
+/// `radius`. Returns `None` when the capsule never touches the triangle within
+/// `[0, tmax]`, and reports `t = 0` when the capsule already overlaps at the
+/// start. `dir` is normalised internally; a zero direction performs only the
+/// static overlap test.
+pub fn sweep_capsule_triangle(
+    seg_a: Vec3,
+    seg_b: Vec3,
+    radius: f32,
+    dir: Vec3,
+    tmax: f32,
+    a: Vec3,
+    b: Vec3,
+    c: Vec3,
+) -> Option<CapsuleSweepHit> {
+    let radius = radius.max(0.0);
+    let d = dir.normalize_or_zero();
+
+    // No motion: only a static overlap can register.
+    if d == Vec3::ZERO {
+        let closest = closest_point_segment_triangle(seg_a, seg_b, a, b, c);
+        if closest.distance_squared <= radius * radius {
+            return Some(capsule_hit(closest, 0.0, a, b, c));
+        }
+        return None;
+    }
+
+    let mut t = 0.0f32;
+    // Conservative advancement with a hard iteration cap as a safety net; the
+    // clearance-based step guarantees monotone progress toward contact.
+    for _ in 0..128 {
+        let sa = seg_a + d * t;
+        let sb = seg_b + d * t;
+        let closest = closest_point_segment_triangle(sa, sb, a, b, c);
+        let dist = closest.distance_squared.sqrt();
+        let sep = dist - radius;
+        if sep <= 1e-5 {
+            return Some(capsule_hit(closest, t, a, b, c));
+        }
+        // Unit closing speed bounds the time to close `sep`, so advancing by
+        // `sep` never skips past the true time of impact.
+        t += sep;
+        if t > tmax {
+            return None;
+        }
+    }
+    None
+}
+
+/// Builds a [`CapsuleSweepHit`] from a segment/triangle closest-point result,
+/// choosing the push-out normal (surface -> axis) with a face-normal fallback.
+fn capsule_hit(
+    closest: super::closest_point::SegmentTriangleClosest,
+    t: f32,
+    a: Vec3,
+    b: Vec3,
+    c: Vec3,
+) -> CapsuleSweepHit {
+    let gap = closest.on_segment - closest.on_triangle;
+    let normal = fallback_normal(gap, a, b, c);
+    CapsuleSweepHit {
+        t,
+        point: closest.on_triangle,
+        normal,
+    }
+}
+
 /// Picks a unit contact normal from the start-overlap separation vector,
 /// falling back to the triangle face normal when the sphere centre sits exactly
 /// on the surface.
@@ -141,7 +231,7 @@ fn point_in_triangle(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::sweep_sphere_triangle;
+    use super::{sweep_capsule_triangle, sweep_sphere_triangle};
     use crate::bounding::Ray;
     use glam::Vec3;
 
@@ -217,5 +307,108 @@ mod tests {
         let hit = sweep_sphere_triangle(&ray, 0.5, a, b, c).expect("vertex/edge hit");
         // Must stop before reaching the apex at y = 1 (touches at <= 0.5 short).
         assert!(hit.t > 0.0 && hit.t < 4.0, "t = {}", hit.t);
+    }
+
+    #[test]
+    fn capsule_sweep_head_on_face_stops_at_radius() {
+        let (a, b, c) = tri();
+        // Horizontal capsule (axis along X) 3 units above the z = 0 face,
+        // dropping along -Z. Radius 0.5 so the surface meets the face at t = 2.5.
+        let hit = sweep_capsule_triangle(
+            Vec3::new(-0.4, -0.2, 3.0),
+            Vec3::new(0.4, -0.2, 3.0),
+            0.5,
+            Vec3::new(0.0, 0.0, -1.0),
+            100.0,
+            a,
+            b,
+            c,
+        )
+        .expect("capsule contact");
+        assert!((hit.t - 2.5).abs() < 1e-3, "t = {}", hit.t);
+        assert!(hit.normal.z > 0.99, "normal points toward axis (+z): {:?}", hit.normal);
+        assert!(hit.point.z.abs() < 1e-3, "contact on the face: {:?}", hit.point);
+    }
+
+    #[test]
+    fn capsule_sweep_misses_when_parallel_offset() {
+        let (a, b, c) = tri();
+        // Capsule travels in +X, staying 3 units above the face: never touches.
+        let hit = sweep_capsule_triangle(
+            Vec3::new(-0.4, -0.2, 3.0),
+            Vec3::new(0.4, -0.2, 3.0),
+            0.5,
+            Vec3::new(1.0, 0.0, 0.0),
+            100.0,
+            a,
+            b,
+            c,
+        );
+        assert!(hit.is_none());
+    }
+
+    #[test]
+    fn capsule_sweep_respects_tmax() {
+        let (a, b, c) = tri();
+        // Needs t = 2.5 to touch, but tmax is 1.0.
+        let hit = sweep_capsule_triangle(
+            Vec3::new(-0.4, -0.2, 3.0),
+            Vec3::new(0.4, -0.2, 3.0),
+            0.5,
+            Vec3::new(0.0, 0.0, -1.0),
+            1.0,
+            a,
+            b,
+            c,
+        );
+        assert!(hit.is_none());
+    }
+
+    #[test]
+    fn capsule_sweep_already_overlapping_returns_zero() {
+        let (a, b, c) = tri();
+        // Axis crosses the face at the start.
+        let hit = sweep_capsule_triangle(
+            Vec3::new(0.0, -0.2, -0.1),
+            Vec3::new(0.0, -0.2, 0.1),
+            0.5,
+            Vec3::new(0.0, 0.0, -1.0),
+            100.0,
+            a,
+            b,
+            c,
+        )
+        .expect("overlap");
+        assert_eq!(hit.t, 0.0);
+    }
+
+    #[test]
+    fn capsule_sweep_zero_direction_is_static_test() {
+        let (a, b, c) = tri();
+        // No motion and no overlap => miss.
+        assert!(sweep_capsule_triangle(
+            Vec3::new(-0.4, -0.2, 3.0),
+            Vec3::new(0.4, -0.2, 3.0),
+            0.5,
+            Vec3::ZERO,
+            100.0,
+            a,
+            b,
+            c,
+        )
+        .is_none());
+        // No motion but overlapping => t = 0.
+        let hit = sweep_capsule_triangle(
+            Vec3::new(-0.4, -0.2, 0.0),
+            Vec3::new(0.4, -0.2, 0.0),
+            0.5,
+            Vec3::ZERO,
+            100.0,
+            a,
+            b,
+            c,
+        )
+        .expect("static overlap");
+        assert_eq!(hit.t, 0.0);
     }
 }

@@ -31,5 +31,5 @@ pub use manifold::{
 };
 pub use ray_cast::{ray_capsule, ray_obb, ray_sphere, ray_triangle, RayTriangleHit};
 pub use support::{Inflated, SupportMap, Translated};
-pub use sweep::{sweep_sphere_triangle, SphereSweepHit};
+pub use sweep::{sweep_capsule_triangle, sweep_sphere_triangle, CapsuleSweepHit, SphereSweepHit};
 pub use triangle_box::triangle_aabb_overlap;

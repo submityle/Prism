@@ -19,7 +19,7 @@ use crate::bounding::{Aabb, BoundingSphere, Capsule, Ray};
 use crate::bvh::DynamicBvh;
 use crate::narrow::{
     closest_point_on_triangle, closest_point_segment_triangle, ray_triangle,
-    sweep_sphere_triangle, triangle_aabb_overlap,
+    sweep_capsule_triangle, sweep_sphere_triangle, triangle_aabb_overlap,
 };
 
 /// An exact ray/triangle-mesh intersection.
@@ -61,6 +61,20 @@ pub struct MeshSweepHit {
     /// Contact point on the triangle surface.
     pub point: Vec3,
     /// Unit surface normal at the contact, pointing toward the sphere centre.
+    pub normal: Vec3,
+}
+
+/// The result of sweeping a capsule against a [`TriangleMesh`].
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct MeshCapsuleSweepHit {
+    /// Index of the triangle the swept capsule first touches.
+    pub triangle: u32,
+    /// Time of impact along the motion direction (a distance when the ray
+    /// direction is unit length, as it always is for [`Ray`]).
+    pub t: f32,
+    /// Contact point on the triangle surface.
+    pub point: Vec3,
+    /// Unit surface normal at the contact, pointing toward the capsule axis.
     pub normal: Vec3,
 }
 
@@ -448,6 +462,48 @@ impl TriangleMesh {
             });
         best
     }
+
+    /// Sweeps a `capsule` whose core segment translates along `ray` against the
+    /// mesh and returns the earliest contact within `[0, ray.tmax]`.
+    ///
+    /// The broad phase gathers every triangle whose fat box overlaps the swept
+    /// capsule bounds (the start box unioned with the box translated by
+    /// `ray.dir * ray.tmax`); for an infinite `ray.tmax` it conservatively
+    /// scans the whole mesh. Each candidate is refined with an exact
+    /// moving-capsule/triangle conservative-advancement test, and the global
+    /// minimum time of impact wins. Returns `None` when the swept capsule never
+    /// touches the mesh.
+    pub fn capsule_cast(&self, capsule: &Capsule, ray: &Ray) -> Option<MeshCapsuleSweepHit> {
+        let r = capsule.radius.max(0.0);
+        let base = capsule.aabb();
+        let query_box = if ray.tmax.is_finite() {
+            let off = ray.dir * ray.tmax;
+            let moved = Aabb::new(base.min + off, base.max + off);
+            base.merged(&moved)
+        } else {
+            Aabb::new(Vec3::splat(-f32::MAX), Vec3::splat(f32::MAX))
+        };
+        let mut best: Option<MeshCapsuleSweepHit> = None;
+        self.bvh.query_aabb(query_box, &mut |data| {
+            let tri_index = data as usize;
+            let [ia, ib, ic] = self.indices[tri_index];
+            let a = self.vertices[ia as usize];
+            let b = self.vertices[ib as usize];
+            let c = self.vertices[ic as usize];
+            if let Some(hit) =
+                sweep_capsule_triangle(capsule.a, capsule.b, r, ray.dir, ray.tmax, a, b, c)
+                && best.is_none_or(|h| hit.t < h.t)
+            {
+                best = Some(MeshCapsuleSweepHit {
+                    triangle: data as u32,
+                    t: hit.t,
+                    point: hit.point,
+                    normal: hit.normal,
+                });
+            }
+        });
+        best
+    }
 }
 
 #[cfg(test)]
@@ -776,6 +832,57 @@ mod tests {
         assert!(!contacts.is_empty());
         let pierced = contacts.iter().any(|c| (c.depth - 0.4).abs() < 1e-4);
         assert!(pierced, "piercing axis gives full-radius depth: {contacts:?}");
+    }
+
+    #[test]
+    fn capsule_cast_stops_at_front_quad() {
+        let mesh = two_quads();
+        // Horizontal capsule (axis along X) at z = 0 swept +Z toward quad A at
+        // z = 2. Radius 0.5 so the surface meets the face at t = 1.5.
+        let capsule = Capsule::new(
+            Vec3::new(-0.3, 0.0, 0.0),
+            Vec3::new(0.3, 0.0, 0.0),
+            0.5,
+        );
+        let ray = Ray::new(Vec3::ZERO, Vec3::Z);
+        let hit = mesh.capsule_cast(&capsule, &ray).expect("capsule sweep hit");
+        assert!((hit.t - 1.5).abs() < 1e-2, "t = {}", hit.t);
+        assert!(hit.triangle < 2, "front triangle, got {}", hit.triangle);
+        assert!(hit.normal.z < -0.99, "normal faces the ray: {:?}", hit.normal);
+    }
+
+    #[test]
+    fn capsule_cast_misses_when_offset_far() {
+        let mesh = two_quads();
+        // Axis path well off the +x side of the unit quads for radius 0.3.
+        let capsule = Capsule::new(
+            Vec3::new(5.0, 0.0, 0.0),
+            Vec3::new(5.6, 0.0, 0.0),
+            0.3,
+        );
+        let ray = Ray::new(Vec3::new(0.0, 0.0, 0.0), Vec3::Z);
+        assert!(mesh.capsule_cast(&capsule, &ray).is_none());
+    }
+
+    #[test]
+    fn capsule_cast_respects_tmax() {
+        let mesh = two_quads();
+        let capsule = Capsule::new(
+            Vec3::new(-0.3, 0.0, 0.0),
+            Vec3::new(0.3, 0.0, 0.0),
+            0.5,
+        );
+        // Contact needs t = 1.5 but tmax is 1.0.
+        let ray = Ray::with_tmax(Vec3::ZERO, Vec3::Z, 1.0);
+        assert!(mesh.capsule_cast(&capsule, &ray).is_none());
+    }
+
+    #[test]
+    fn capsule_cast_empty_mesh_is_none() {
+        let mesh = TriangleMesh::new(alloc::vec![], alloc::vec![]);
+        let capsule = Capsule::new(Vec3::ZERO, Vec3::X, 0.5);
+        let ray = Ray::new(Vec3::ZERO, Vec3::Z);
+        assert!(mesh.capsule_cast(&capsule, &ray).is_none());
     }
 
     #[test]
