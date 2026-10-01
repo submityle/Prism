@@ -143,6 +143,13 @@
 //! * [`universal_cpu`] — the authoritative [`cpu_solve_joints_universal`]
 //!   golden stepper (perpendicularity plus point-to-point weld).
 //! * [`universal_gpu`] — the device-side [`GpuUniversalJointSolver`] twin.
+//! * [`angular_slerp_drive`] — the [`AngularSlerpDriveJoint`] (pure 3-DOF
+//!   angular `SLERP` attitude drive) definition and its device-packed storage.
+//! * [`angular_slerp_drive_cpu`] — the authoritative
+//!   [`cpu_solve_joints_angular_slerp_drive`] golden stepper (the geodesic
+//!   relative-orientation drive with compliance, damping, and a torque cap).
+//! * [`angular_slerp_drive_gpu`] — the device-side
+//!   [`GpuAngularSlerpDriveJointSolver`] twin.
 //!
 //! # Scheme and scope
 //!
@@ -158,6 +165,9 @@
 //! inertia and quaternion kinematics of Baraff & Witkin. No Unreal Engine source
 //! or derived code.
 
+mod angular_slerp_drive;
+mod angular_slerp_drive_cpu;
+mod angular_slerp_drive_gpu;
 mod coloring;
 mod config;
 mod cylindrical;
@@ -221,6 +231,9 @@ mod universal;
 mod universal_cpu;
 mod universal_gpu;
 
+pub use angular_slerp_drive::AngularSlerpDriveJoint;
+pub use angular_slerp_drive_cpu::cpu_solve_joints_angular_slerp_drive;
+pub use angular_slerp_drive_gpu::GpuAngularSlerpDriveJointSolver;
 pub use coloring::{JointColouring, MAX_JOINT_BATCHES};
 pub use config::JointSolverConfig;
 pub use cylindrical::CylindricalJoint;
