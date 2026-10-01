@@ -32,9 +32,11 @@ use crate::context::GpuContext;
 
 use super::body::RigidBodyState;
 use super::config::{IntegratorConfig, RigidError};
+use super::gyroscopic::{GyroscopicConfig, GyroscopicMode};
 
 /// Global integrator parameters. Layout matches `Params` in
-/// `shaders/rigid_integrate.wgsl` (32 bytes).
+/// `shaders/rigid_integrate.wgsl` (48 bytes: padded so its size is a multiple
+/// of the 16-byte `vec3` alignment the uniform binding requires).
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Params {
@@ -44,6 +46,14 @@ struct Params {
     angular_damping_scale: f32,
     substeps: u32,
     body_count: u32,
+    /// Gyroscopic integration scheme: `1` selects the implicit Newton solve,
+    /// anything else the explicit subtraction. Mirrors [`GyroscopicMode`].
+    gyroscopic_mode: u32,
+    /// Newton iterations per substep when `gyroscopic_mode` is implicit.
+    gyroscopic_iterations: u32,
+    /// Padding to 48 bytes; the shader declares matching `pad0`/`pad1` fields.
+    pad0: u32,
+    pad1: u32,
 }
 
 /// A compiled, reusable `GPU` rigid-body integrator pipeline.
@@ -124,6 +134,55 @@ impl GpuRigidIntegrator {
         config: &IntegratorConfig,
         dt: f32,
     ) -> Result<(), RigidError> {
+        self.integrate_inner(ctx, state, forces, torques, config, &GyroscopicConfig::explicit(), dt)
+    }
+
+    /// Advances `state` by `dt` seconds like [`integrate`](Self::integrate) but
+    /// with the gyroscopic coupling of the angular update integrated according
+    /// to `gyro`.
+    ///
+    /// With [`GyroscopicConfig::explicit`] this is identical to
+    /// [`integrate`](Self::integrate). With [`GyroscopicConfig::implicit`] the
+    /// angular update solves the backward-Euler gyroscopic equation with Newton
+    /// iteration on device, matching the `CPU` twin
+    /// [`cpu_integrate_gyro`](super::cpu_integrate_gyro). A body with any locked
+    /// (zero-inertia) axis falls back to the explicit path on both backends so
+    /// they stay in parity.
+    ///
+    /// # Errors
+    ///
+    /// Identical to [`integrate`](Self::integrate).
+    pub fn integrate_with_gyroscopic(
+        &self,
+        ctx: &GpuContext,
+        state: &mut RigidBodyState,
+        forces: &[Vec3],
+        torques: &[Vec3],
+        config: &IntegratorConfig,
+        gyro: &GyroscopicConfig,
+        dt: f32,
+    ) -> Result<(), RigidError> {
+        self.integrate_inner(ctx, state, forces, torques, config, gyro, dt)
+    }
+
+    /// Shared integrate path for the explicit and implicit gyroscopic entry
+    /// points. Only the `gyro` configuration they pass differs; every other
+    /// step — validation, substep sizing, upload, dispatch, readback — is
+    /// identical.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "shared integrate path threads every per-call input plus the gyroscopic config"
+    )]
+    fn integrate_inner(
+        &self,
+        ctx: &GpuContext,
+        state: &mut RigidBodyState,
+        forces: &[Vec3],
+        torques: &[Vec3],
+        config: &IntegratorConfig,
+        gyro: &GyroscopicConfig,
+        dt: f32,
+    ) -> Result<(), RigidError> {
         config.validate()?;
         if !state.is_consistent() {
             return Err(RigidError::InconsistentState {
@@ -151,13 +210,32 @@ impl GpuRigidIntegrator {
             return Ok(());
         }
 
-        let plan = self.upload(ctx, state, forces, torques, config, h, substeps);
+        let gyroscopic_mode = match gyro.mode {
+            GyroscopicMode::Explicit => 0u32,
+            GyroscopicMode::Implicit => 1u32,
+        };
+        let gyroscopic_iterations = gyro.effective_iterations();
+        let plan = self.upload(
+            ctx,
+            state,
+            forces,
+            torques,
+            config,
+            h,
+            substeps,
+            gyroscopic_mode,
+            gyroscopic_iterations,
+        );
         let staging = self.encode_and_run(ctx, &plan);
         read_state_back(ctx, &staging, state);
         Ok(())
     }
 
     /// Uploads every buffer and builds the bind group for one `integrate` call.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "uploads every per-call input plus the two gyroscopic uniform fields"
+    )]
     fn upload(
         &self,
         ctx: &GpuContext,
@@ -167,6 +245,8 @@ impl GpuRigidIntegrator {
         config: &IntegratorConfig,
         h: f32,
         substeps: u32,
+        gyroscopic_mode: u32,
+        gyroscopic_iterations: u32,
     ) -> IntegratePlan {
         let device = ctx.device();
         let body_count = state.len() as u32;
@@ -178,6 +258,10 @@ impl GpuRigidIntegrator {
             angular_damping_scale: (1.0 - config.angular_damping * h).max(0.0),
             substeps,
             body_count,
+            gyroscopic_mode,
+            gyroscopic_iterations,
+            pad0: 0,
+            pad1: 0,
         };
 
         let positions: Vec<[f32; 4]> = state.positions.iter().map(vec3_to_vec4).collect();

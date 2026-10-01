@@ -1,4 +1,4 @@
-// Explicit-gyroscopic 6-DOF rigid-body integrator, device kernel.
+// 6-DOF rigid-body integrator, device kernel (explicit or implicit gyroscopic).
 //
 // Byte-for-byte-intent twin of the CPU reference in `src/rigid/cpu.rs`. Each
 // invocation integrates one body through every substep internally (bodies are
@@ -13,11 +13,29 @@
 // components (x, y, z, w) so they mirror the CPU reference exactly rather than
 // relying on any built-in quaternion type.
 //
-// Provenance: Euler's rigid-body equations with explicit gyroscopic coupling
-// and the quaternion kinematic equation (Baraff & Witkin; standard rigid-body
-// dynamics). No Unreal Engine source or derived code.
+// The gyroscopic coupling term `omega x (I * omega)` of the angular update is
+// integrated either explicitly (evaluate at the start-of-substep angular
+// velocity and subtract) or implicitly (solve the backward-Euler coupling with
+// Newton iteration). The implicit path reproduces `implicit_gyroscopic_body`
+// and `solve_3x3` from `src/rigid/gyroscopic.rs` as the identical sequence of
+// scalar multiplies and divides so the two stay in parity.
+//
+// Provenance: Euler's rigid-body equations with gyroscopic coupling and the
+// quaternion kinematic equation (Baraff & Witkin; standard rigid-body
+// dynamics). The implicit gyroscopic solve follows Bullet's
+// `computeGyroscopicImpulseImplicit_Body` and PhysX's gyroscopic forces option.
+// No Unreal Engine source or derived code.
 
 const EPSILON: f32 = 1.1920929e-7; // f32::EPSILON, matching the CPU guard.
+
+// Determinant magnitude below which the Newton Jacobian is treated as singular
+// and the step is dropped. Matches `GYRO_DET_EPSILON` in `rigid/gyroscopic.rs`.
+const GYRO_DET_EPSILON: f32 = 1.0e-20;
+
+// Value of `Params.gyroscopic_mode` selecting the implicit Newton solve; any
+// other value selects the explicit subtraction. Mirrors `GyroscopicMode` on
+// the host (`Explicit = 0`, `Implicit = 1`).
+const GYRO_MODE_IMPLICIT: u32 = 1u;
 
 struct Params {
     gravity: vec3<f32>,
@@ -26,6 +44,16 @@ struct Params {
     angular_damping_scale: f32,
     substeps: u32,
     body_count: u32,
+    // Gyroscopic integration scheme: `GYRO_MODE_IMPLICIT` for the Newton solve,
+    // anything else for the explicit subtraction.
+    gyroscopic_mode: u32,
+    // Newton iterations per substep when `gyroscopic_mode` is implicit; clamped
+    // to at least one inside the solve. Ignored by the explicit scheme.
+    gyroscopic_iterations: u32,
+    // Pads the uniform struct to 48 bytes so its size is a multiple of the
+    // 16-byte vec3 alignment; mirrored by the host `Params` padding fields.
+    pad0: u32,
+    pad1: u32,
 };
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -82,6 +110,84 @@ fn principal_inertia(inverse_inertia: vec3<f32>) -> vec3<f32> {
     return inertia;
 }
 
+// Solves the 3x3 system `m * x = b` for `x` using an explicit cofactor
+// (adjugate over determinant) inverse, where `m` is stored row-major as
+// `[m00, m01, m02, m10, m11, m12, m20, m21, m22]`. Returns the zero vector when
+// the determinant magnitude is below `GYRO_DET_EPSILON`, dropping the step
+// rather than producing a non-finite result. Byte-for-byte-intent twin of
+// `solve_3x3` in `rigid/gyroscopic.rs`.
+fn solve_3x3(m: array<f32, 9>, bx: f32, by: f32, bz: f32) -> vec3<f32> {
+    let c0 = m[4] * m[8] - m[5] * m[7];
+    let c1 = m[5] * m[6] - m[3] * m[8];
+    let c2 = m[3] * m[7] - m[4] * m[6];
+    let det = m[0] * c0 + m[1] * c1 + m[2] * c2;
+    if (abs(det) < GYRO_DET_EPSILON) {
+        return vec3<f32>(0.0, 0.0, 0.0);
+    }
+    let inv_det = 1.0 / det;
+    let x = (c0 * bx + (m[2] * m[7] - m[1] * m[8]) * by + (m[1] * m[5] - m[2] * m[4]) * bz) * inv_det;
+    let y = (c1 * bx + (m[0] * m[8] - m[2] * m[6]) * by + (m[2] * m[3] - m[0] * m[5]) * bz) * inv_det;
+    let z = (c2 * bx + (m[1] * m[6] - m[0] * m[7]) * by + (m[0] * m[4] - m[1] * m[3]) * bz) * inv_det;
+    return vec3<f32>(x, y, z);
+}
+
+// Solves the implicit (backward-Euler) gyroscopic update for the end-of-substep
+// body-frame angular velocity `omega1` satisfying
+// `I*omega1 + h*(omega1 x (I*omega1)) = I*omega_body` with Newton iteration.
+// The caller must pass a strictly positive inertia on every axis so the
+// Jacobian is non-singular. Byte-for-byte-intent twin of
+// `implicit_gyroscopic_body` in `rigid/gyroscopic.rs`.
+fn implicit_gyroscopic_body(omega_body: vec3<f32>, inertia: vec3<f32>, h: f32, iterations: u32) -> vec3<f32> {
+    let ix = inertia.x;
+    let iy = inertia.y;
+    let iz = inertia.z;
+    // Constant right-hand-side angular momentum L0 = I * omega0.
+    let l0x = ix * omega_body.x;
+    let l0y = iy * omega_body.y;
+    let l0z = iz * omega_body.z;
+
+    var omega = omega_body;
+    var steps = iterations;
+    if (steps < 1u) { steps = 1u; }
+    var iter: u32 = 0u;
+    loop {
+        if (iter >= steps) { break; }
+        let wx = omega.x;
+        let wy = omega.y;
+        let wz = omega.z;
+        // Current angular momentum L = I * omega.
+        let lx = ix * wx;
+        let ly = iy * wy;
+        let lz = iz * wz;
+        // Residual f = I*omega - L0 + h*(omega x L).
+        let cross_x = wy * lz - wz * ly;
+        let cross_y = wz * lx - wx * lz;
+        let cross_z = wx * ly - wy * lx;
+        let fx = lx - l0x + h * cross_x;
+        let fy = ly - l0y + h * cross_y;
+        let fz = lz - l0z + h * cross_z;
+        // Jacobian J = I_mat + h*(skew(omega)*I_mat - skew(L)), row-major.
+        let a01 = -wz * iy + lz;
+        let a02 = wy * iz - ly;
+        let a10 = wz * ix - lz;
+        let a12 = -wx * iz + lx;
+        let a20 = -wy * ix + ly;
+        let a21 = wx * iy - lx;
+        let m = array<f32, 9>(
+            ix, h * a01, h * a02,
+            h * a10, iy, h * a12,
+            h * a20, h * a21, iz,
+        );
+        // Solve J * delta = -f.
+        let delta = solve_3x3(m, -fx, -fy, -fz);
+        omega.x = omega.x + delta.x;
+        omega.y = omega.y + delta.y;
+        omega.z = omega.z + delta.z;
+        iter = iter + 1u;
+    }
+    return omega;
+}
+
 @compute @workgroup_size(64)
 fn integrate(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = gid.x;
@@ -98,6 +204,11 @@ fn integrate(@builtin(global_invocation_id) gid: vec3<u32>) {
     let can_translate = inverse_mass > 0.0;
     let can_rotate = inverse_inertia.x > 0.0 || inverse_inertia.y > 0.0 || inverse_inertia.z > 0.0;
     let inertia = principal_inertia(inverse_inertia);
+    // The implicit solve needs a strictly positive inertia on every axis so its
+    // Newton Jacobian is non-singular; a body with any locked axis falls back
+    // to the explicit path. The same guard runs on the CPU twin.
+    let use_implicit = params.gyroscopic_mode == GYRO_MODE_IMPLICIT
+        && min(inertia.x, min(inertia.y, inertia.z)) > 0.0;
 
     var position = positions[i].xyz;
     var linear_velocity = linear_velocities[i].xyz;
@@ -116,9 +227,17 @@ fn integrate(@builtin(global_invocation_id) gid: vec3<u32>) {
             let angular_acceleration_body = inverse_inertia * torque_body;
             var omega_body = quat_rotate(conjugate, angular_velocity);
             omega_body = omega_body + angular_acceleration_body * h;
-            let angular_momentum_body = inertia * omega_body;
-            let gyroscopic = cross(omega_body, angular_momentum_body);
-            omega_body = omega_body - inverse_inertia * gyroscopic * h;
+            if (use_implicit) {
+                // Implicit (backward-Euler) gyroscopic coupling: solve for the
+                // end-of-substep body-frame angular velocity.
+                omega_body = implicit_gyroscopic_body(omega_body, inertia, h, params.gyroscopic_iterations);
+            } else {
+                // Explicit gyroscopic coupling: subtract omega x (I * omega),
+                // expressed as an angular acceleration via the inverse inertia.
+                let angular_momentum_body = inertia * omega_body;
+                let gyroscopic = cross(omega_body, angular_momentum_body);
+                omega_body = omega_body - inverse_inertia * gyroscopic * h;
+            }
             angular_velocity = quat_rotate(q, omega_body) * params.angular_damping_scale;
             let omega_quat = vec4<f32>(angular_velocity.x, angular_velocity.y, angular_velocity.z, 0.0);
             let dq = quat_mul(omega_quat, q);

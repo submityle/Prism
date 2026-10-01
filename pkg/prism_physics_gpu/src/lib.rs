@@ -60,8 +60,9 @@ pub mod xpbd;
 
 pub use broadphase::{cpu_broadphase, BroadphaseConfig, BroadphaseError, CandidatePair, Particle};
 pub use rigid::{
-    cpu_integrate, cpu_solve_contacts, cpu_solve_contacts_tgs, ContactSolverConfig,
-    GpuRigidContactSolver, GpuRigidIntegrator, GpuRigidTgsContactSolver, IntegratorConfig, RigidBodyState, RigidContact,
+    cpu_integrate, cpu_integrate_gyro, cpu_solve_contacts, cpu_solve_contacts_tgs,
+    ContactSolverConfig, GpuRigidContactSolver, GpuRigidIntegrator, GpuRigidTgsContactSolver,
+    GyroscopicConfig, GyroscopicMode, IntegratorConfig, RigidBodyState, RigidContact,
     RigidContactColouring, RigidError, TgsContactConfig,
 };
 pub use bvh::{

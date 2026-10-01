@@ -50,6 +50,7 @@ use glam::{Quat, Vec3};
 
 use super::body::RigidBodyState;
 use super::config::{IntegratorConfig, RigidError};
+use super::gyroscopic::{implicit_gyroscopic_body, GyroscopicConfig, GyroscopicMode};
 
 /// Guard below which a quaternion is treated as degenerate and reset to
 /// identity. Matches `EPSILON` in `shaders/rigid_integrate.wgsl` (`f32::EPSILON`).
@@ -73,6 +74,57 @@ pub fn cpu_integrate(
     forces: &[Vec3],
     torques: &[Vec3],
     config: &IntegratorConfig,
+    dt: f32,
+) -> Result<(), RigidError> {
+    integrate_impl(
+        state,
+        forces,
+        torques,
+        config,
+        &GyroscopicConfig::explicit(),
+        dt,
+    )
+}
+
+/// Advances `state` by `dt` seconds exactly like [`cpu_integrate`], but with the
+/// gyroscopic coupling of the angular update integrated according to `gyro`.
+///
+/// With [`GyroscopicConfig::explicit`] this is identical to [`cpu_integrate`].
+/// With [`GyroscopicConfig::implicit`] the angular update solves the
+/// backward-Euler gyroscopic equation (see [`gyroscopic`](super::gyroscopic))
+/// per substep for every body whose body-frame inertia is strictly positive on
+/// all three axes; a body with any locked axis falls back to the explicit path
+/// so the behaviour never becomes singular.
+///
+/// # Errors
+///
+/// Returns the same errors as [`cpu_integrate`]: [`RigidError::InvalidConfig`]
+/// when `config` fails validation, or [`RigidError::InconsistentState`] when the
+/// state arrays disagree in length or a non-empty `forces`/`torques` slice does
+/// not match the body count. Does nothing (returns `Ok`) when there are no
+/// bodies or `dt` is non-positive.
+pub fn cpu_integrate_gyro(
+    state: &mut RigidBodyState,
+    forces: &[Vec3],
+    torques: &[Vec3],
+    config: &IntegratorConfig,
+    gyro: &GyroscopicConfig,
+    dt: f32,
+) -> Result<(), RigidError> {
+    integrate_impl(state, forces, torques, config, gyro, dt)
+}
+
+/// Shared integration driver backing both [`cpu_integrate`] and
+/// [`cpu_integrate_gyro`]. The two public entry points differ only in the
+/// [`GyroscopicConfig`] they pass; every other step — validation, substep
+/// splitting, the semi-implicit linear update, and the quaternion kinematic
+/// orientation advance — is identical.
+fn integrate_impl(
+    state: &mut RigidBodyState,
+    forces: &[Vec3],
+    torques: &[Vec3],
+    config: &IntegratorConfig,
+    gyro: &GyroscopicConfig,
     dt: f32,
 ) -> Result<(), RigidError> {
     config.validate()?;
@@ -104,6 +156,8 @@ pub fn cpu_integrate(
     let half_h = 0.5 * h;
     let linear_damping_scale = (1.0 - config.linear_damping * h).max(0.0);
     let angular_damping_scale = (1.0 - config.angular_damping * h).max(0.0);
+    let implicit_gyro = matches!(gyro.mode, GyroscopicMode::Implicit);
+    let gyro_iterations = gyro.effective_iterations();
 
     for i in 0..n {
         let force = if forces.is_empty() {
@@ -122,6 +176,10 @@ pub fn cpu_integrate(
         let can_rotate =
             inverse_inertia.x > 0.0 || inverse_inertia.y > 0.0 || inverse_inertia.z > 0.0;
         let inertia = principal_inertia(inverse_inertia);
+        // The implicit solve needs a strictly positive inertia on every axis so
+        // its Newton Jacobian is non-singular; a body with any locked axis falls
+        // back to the explicit path. The same guard runs on the device.
+        let use_implicit = implicit_gyro && inertia.min_element() > 0.0;
 
         let mut position = state.positions[i];
         let mut linear_velocity = state.linear_velocities[i];
@@ -143,11 +201,18 @@ pub fn cpu_integrate(
                 let angular_acceleration_body = inverse_inertia * torque_body;
                 let mut omega_body = quat_rotate(conjugate, angular_velocity);
                 omega_body += angular_acceleration_body * h;
-                // Explicit gyroscopic coupling: subtract omega x (I * omega),
-                // expressed as an angular acceleration via the inverse inertia.
-                let angular_momentum_body = inertia * omega_body;
-                let gyroscopic = omega_body.cross(angular_momentum_body);
-                omega_body -= inverse_inertia * gyroscopic * h;
+                if use_implicit {
+                    // Implicit (backward-Euler) gyroscopic coupling: solve for
+                    // the end-of-substep body-frame angular velocity.
+                    omega_body =
+                        implicit_gyroscopic_body(omega_body, inertia, h, gyro_iterations);
+                } else {
+                    // Explicit gyroscopic coupling: subtract omega x (I * omega),
+                    // expressed as an angular acceleration via the inverse inertia.
+                    let angular_momentum_body = inertia * omega_body;
+                    let gyroscopic = omega_body.cross(angular_momentum_body);
+                    omega_body -= inverse_inertia * gyroscopic * h;
+                }
                 // Back to world space and apply angular damping.
                 angular_velocity = quat_rotate(q, omega_body) * angular_damping_scale;
                 // Advance the orientation by the quaternion kinematic equation.
