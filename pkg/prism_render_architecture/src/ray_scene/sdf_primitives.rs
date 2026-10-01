@@ -11,9 +11,11 @@
 //! the surface — negative inside, positive outside, zero on the boundary —
 //! following Inigo Quilez's canonical formulations. [`sphere`], [`box_sdf`],
 //! and [`round_box`] bound convex solids; [`plane`] is a half-space;
-//! [`torus`] and [`capsule`] cover the common swept shapes. The box uses the
-//! split interior/exterior form so the distance stays exact (not merely a
-//! bound) both inside and out.
+//! [`torus`] and [`capsule`] cover the common swept shapes;
+//! [`capped_cylinder`], [`capped_cone`], and [`hex_prism`] are the extruded
+//! and revolved solids that round out the catalogue. The box, cylinder, cone,
+//! and hex prism all use the split interior/exterior form so the distance
+//! stays exact (not merely a bound) both inside and out.
 //!
 //! Every primitive is built from `abs`, `min`, `max`, `clamp`, dot products,
 //! and the `sqrt` inside a vector length — all permitted — so the module is
@@ -103,9 +105,96 @@ pub fn capsule(point: [f32; 3], a: [f32; 3], b: [f32; 3], radius: f32) -> f32 {
     length(closest) - radius
 }
 
+/// Squared Euclidean length of a 2-vector (`dot(v, v)`), used by the
+/// nearest-feature comparisons in the cone solver.
+fn dot2_2(v: [f32; 2]) -> f32 {
+    v[0] * v[0] + v[1] * v[1]
+}
+
+/// Euclidean length of a 2-vector.
+fn length2(v: [f32; 2]) -> f32 {
+    (v[0] * v[0] + v[1] * v[1]).sqrt()
+}
+
+/// Signed distance from `point` to a capped cylinder aligned with the `y`
+/// axis, of the given `radius` and `half_height` (so it spans `y` in
+/// `[-half_height, half_height]`), centred at the origin.
+///
+/// The point is reduced to its radial distance in the `xz` plane paired with
+/// its `y` offset, then measured against the rectangular cross-section with
+/// the exact interior/exterior split, giving a true distance on both sides of
+/// the side wall and the end caps.
+pub fn capped_cylinder(point: [f32; 3], half_height: f32, radius: f32) -> f32 {
+    let radial = (point[0] * point[0] + point[2] * point[2]).sqrt();
+    let d = [radial - radius, point[1].abs() - half_height];
+    let inside = d[0].max(d[1]).min(0.0);
+    let outside = length2([d[0].max(0.0), d[1].max(0.0)]);
+    inside + outside
+}
+
+/// Signed distance from `point` to a capped cone aligned with the `y` axis,
+/// spanning `y` in `[-half_height, half_height]`, with `bottom_radius` at the
+/// lower cap and `top_radius` at the upper cap.
+///
+/// Follows Inigo Quilez's exact capped-cone solver: it compares the squared
+/// distance to the nearer cap rim against the squared distance to the slanted
+/// side segment (projecting onto it with a clamped parameter), takes the
+/// smaller, and signs it negative when the point lies inside both the lateral
+/// and the cap slabs. Setting `top_radius == bottom_radius` recovers a
+/// cylinder; a zero cap radius recovers a true cone tip.
+pub fn capped_cone(
+    point: [f32; 3],
+    half_height: f32,
+    bottom_radius: f32,
+    top_radius: f32,
+) -> f32 {
+    let q = [(point[0] * point[0] + point[2] * point[2]).sqrt(), point[1]];
+    let k1 = [top_radius, half_height];
+    let k2 = [top_radius - bottom_radius, 2.0 * half_height];
+    // Snap the radius to whichever cap the point faces for the rim distance.
+    let cap_radius = if q[1] < 0.0 { bottom_radius } else { top_radius };
+    let ca = [q[0] - q[0].min(cap_radius), q[1].abs() - half_height];
+    // Project onto the slanted side segment, parameter clamped to the caps.
+    let k1_minus_q = [k1[0] - q[0], k1[1] - q[1]];
+    let proj =
+        ((k1_minus_q[0] * k2[0] + k1_minus_q[1] * k2[1]) / dot2_2(k2)).clamp(0.0, 1.0);
+    let cb = [q[0] - k1[0] + k2[0] * proj, q[1] - k1[1] + k2[1] * proj];
+    let sign = if cb[0] < 0.0 && ca[1] < 0.0 { -1.0 } else { 1.0 };
+    sign * dot2_2(ca).min(dot2_2(cb)).sqrt()
+}
+
+/// Signed distance from `point` to a regular hexagonal prism extruded along
+/// the `z` axis, with the given hexagon `apothem` (centre-to-flat-face
+/// distance) and `half_depth` along `z`, centred at the origin.
+///
+/// Folds the point into one hexagon sextant using the precomputed constant
+/// normal `k = (-cos 30 degrees, sin 30 degrees, 1 / sqrt 3)`, then applies
+/// the exact interior/exterior split against the folded face and the depth
+/// caps. Every trigonometric term is baked into a constant, so evaluation is
+/// transcendental-free. A flat face sits at distance `apothem` along `y`.
+pub fn hex_prism(point: [f32; 3], apothem: f32, half_depth: f32) -> f32 {
+    // k = (-cos(30 degrees), sin(30 degrees), 1 / sqrt(3)); baked constants.
+    const K: [f32; 3] = [-0.866_025_4, 0.5, 0.577_35];
+    let mut p = [point[0].abs(), point[1].abs(), point[2].abs()];
+    // Reflect across the sextant boundary so one slice covers the hexagon.
+    let fold = 2.0 * (K[0] * p[0] + K[1] * p[1]).min(0.0);
+    p[0] -= fold * K[0];
+    p[1] -= fold * K[1];
+    let clamped_x = p[0].clamp(-K[2] * apothem, K[2] * apothem);
+    let face = [p[0] - clamped_x, p[1] - apothem];
+    let sign = if p[1] - apothem < 0.0 { -1.0 } else { 1.0 };
+    let d = [length2(face) * sign, p[2] - half_depth];
+    let inside = d[0].max(d[1]).min(0.0);
+    let outside = length2([d[0].max(0.0), d[1].max(0.0)]);
+    inside + outside
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{box_sdf, capsule, plane, round_box, sphere, torus};
+    use super::{
+        box_sdf, capped_cone, capped_cylinder, capsule, hex_prism, plane, round_box, sphere,
+        torus,
+    };
 
     #[test]
     fn sphere_is_centre_distance_minus_radius() {
@@ -163,5 +252,48 @@ mod tests {
         // Zero-length segment: distance reduces to a sphere about `a`.
         let d = capsule([3.0, 1.0, 1.0], a, a, 0.5);
         assert!((d - 1.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn capped_cylinder_side_cap_and_corner() {
+        let (h, r) = (1.0, 1.0);
+        // One unit past the side wall.
+        assert!((capped_cylinder([2.0, 0.0, 0.0], h, r) - 1.0).abs() < 1e-6);
+        // Dead centre: equidistant from side and caps, one unit inside.
+        assert!((capped_cylinder([0.0, 0.0, 0.0], h, r) - (-1.0)).abs() < 1e-6);
+        // One unit above the top cap on the axis.
+        assert!((capped_cylinder([0.0, 2.0, 0.0], h, r) - 1.0).abs() < 1e-6);
+        // Diagonal past the top rim: length of the (1, 1) overshoot.
+        let corner = capped_cylinder([2.0, 2.0, 0.0], h, r);
+        assert!((corner - (2.0f32).sqrt()).abs() < 1e-6);
+    }
+
+    #[test]
+    fn capped_cone_reduces_to_cylinder_when_radii_match() {
+        // Equal radii: the slanted side is vertical, so it matches a cylinder.
+        let cone = capped_cone([2.0, 0.0, 0.0], 1.0, 1.0, 1.0);
+        let cyl = capped_cylinder([2.0, 0.0, 0.0], 1.0, 1.0);
+        assert!((cone - cyl).abs() < 1e-6);
+        // Interior point is signed negative.
+        assert!((capped_cone([0.0, 0.0, 0.0], 1.0, 1.0, 1.0) - (-1.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn capped_cone_measures_distance_above_the_tip() {
+        // Tip cone: bottom radius 1, top radius 0, apex at y = +half_height.
+        // A point one unit above the apex is one unit outside.
+        let d = capped_cone([0.0, 2.0, 0.0], 1.0, 1.0, 0.0);
+        assert!((d - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn hex_prism_apothem_face_and_depth() {
+        let (apothem, half_depth) = (1.0, 2.0);
+        // Centre: one apothem inside the nearest flat face.
+        assert!((hex_prism([0.0, 0.0, 0.0], apothem, half_depth) - (-1.0)).abs() < 1e-6);
+        // The +y flat face sits at y = apothem; one unit beyond it.
+        assert!((hex_prism([0.0, 2.0, 0.0], apothem, half_depth) - 1.0).abs() < 1e-6);
+        // One unit past the +z depth cap.
+        assert!((hex_prism([0.0, 0.0, 3.0], apothem, half_depth) - 1.0).abs() < 1e-6);
     }
 }

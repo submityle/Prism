@@ -539,8 +539,10 @@
 //! - [`sdf_primitives`] — analytic signed distance primitives
 //!   ([`sdf_primitives::sphere`], [`sdf_primitives::box_sdf`],
 //!   [`sdf_primitives::round_box`], [`sdf_primitives::plane`],
-//!   [`sdf_primitives::torus`], [`sdf_primitives::capsule`]) with exact
-//!   closed-form distances, the atoms the domain and `CSG` operators compose.
+//!   [`sdf_primitives::torus`], [`sdf_primitives::capsule`],
+//!   [`sdf_primitives::capped_cylinder`], [`sdf_primitives::capped_cone`],
+//!   [`sdf_primitives::hex_prism`]) with exact closed-form distances, the
+//!   atoms the domain and `CSG` operators compose.
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -867,7 +869,9 @@ pub use sdf_domain::{
     elongate, mirror, onion, repeat, round_distance, scale_distance, scale_point, translate,
 };
 pub use mesh_sdf_thickness::sdf_thickness;
-pub use sdf_primitives::{box_sdf, capsule, plane, round_box, sphere, torus};
+pub use sdf_primitives::{
+    box_sdf, capped_cone, capped_cylinder, capsule, hex_prism, plane, round_box, sphere, torus,
+};
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
 pub use obb::{Obb, ObbBvh, ObbHit};
