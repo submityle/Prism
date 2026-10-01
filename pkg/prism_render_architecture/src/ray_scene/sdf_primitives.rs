@@ -318,11 +318,27 @@ pub fn pyramid(point: [f32; 3], height: f32) -> f32 {
     ((d2 + qz * qz) / m2).sqrt() * qz.max(-py).signum()
 }
 
+/// Signed distance from `point` to a chain link: a torus of ring radius `r1`
+/// and tube radius `r2` stretched by `half_length` along the `y` axis (so the
+/// straight sides are `2 * half_length` long and the ring lies in the `x`-`y`
+/// plane about the `z` axis).
+///
+/// This is Inigo Quilez's exact `sdLink`: the `y` coordinate is collapsed onto
+/// the stadium's straight run (`max(|y| - half_length, 0)`), reducing the query
+/// to the planar torus distance. With `half_length = 0` it is exactly a torus.
+/// Built from `abs`, `max`, and two vector lengths, so it stays
+/// transcendental-free.
+pub fn link(point: [f32; 3], half_length: f32, r1: f32, r2: f32) -> f32 {
+    let qy = (point[1].abs() - half_length).max(0.0);
+    let planar = length2([point[0], qy]) - r1;
+    length2([planar, point[2]]) - r2
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         box_frame, box_sdf, capped_cone, capped_cylinder, capsule, ellipsoid_sdf, hex_prism,
-        octahedron, plane, pyramid, round_box, sphere, torus,
+        link, octahedron, plane, pyramid, round_box, sphere, torus,
     };
 
     #[test]
@@ -517,5 +533,27 @@ mod tests {
         // Far out along +x at base level, the nearest surface point is the base
         // edge midpoint (0.5, 0, 0), so the distance is the planar overshoot.
         assert!((pyramid([3.0, 0.0, 0.0], 1.0) - 2.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn link_reduces_to_a_torus_with_zero_length() {
+        // half_length = 0 is a plain torus: the ring centreline is -r2 inside
+        // the tube and the outer equator sits on the surface.
+        assert!((link([1.0, 0.0, 0.0], 0.0, 1.0, 0.3) - (-0.3)).abs() < 1e-6);
+        assert!(link([1.3, 0.0, 0.0], 0.0, 1.0, 0.3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn link_straight_section_tracks_the_tube() {
+        // Along the stretched y run the cross-section is still the tube: the
+        // centreline is -r2 and the +x surface point is on the boundary.
+        assert!((link([1.0, 0.5, 0.0], 0.5, 1.0, 0.3) - (-0.3)).abs() < 1e-6);
+        assert!(link([1.3, 0.5, 0.0], 0.5, 1.0, 0.3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn link_hole_centre_is_outside_the_solid() {
+        // The centre of the ring hole is r1 - r2 outside the tube.
+        assert!((link([0.0, 0.0, 0.0], 0.5, 1.0, 0.3) - 0.7).abs() < 1e-6);
     }
 }
