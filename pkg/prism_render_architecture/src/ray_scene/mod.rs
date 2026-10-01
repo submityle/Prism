@@ -434,6 +434,13 @@
 //!   volume, centre of mass, and the inertia tensor about the centroid
 //!   via the Blow & Binstock signed-tetrahedron decomposition, with a
 //!   watertight / consistent-winding flag, for seeding physics bodies.
+//! - [`mesh_euler_characteristic`] — integer surface topology
+//!   ([`mesh_euler_characteristic::mesh_topology`]): referenced
+//!   vertex/edge/face counts, boundary-edge and boundary-loop counts,
+//!   non-manifold edge count, connected-component count, the Euler
+//!   characteristic `V - E + F`, a closed-manifold predicate, and the
+//!   orientable genus `(2 - chi) / 2` for a single closed manifold,
+//!   computed with exact integer arithmetic for mesh validation.
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -601,6 +608,7 @@ pub mod mesh_triangle_quality;
 pub mod mesh_edge_length_stats;
 pub mod mesh_dihedral_cosine;
 pub mod mesh_mass_properties;
+pub mod mesh_euler_characteristic;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -719,6 +727,7 @@ pub use mesh_triangle_quality::{triangle_quality, TriangleQuality};
 pub use mesh_edge_length_stats::{edge_length_stats, EdgeLengthStats};
 pub use mesh_dihedral_cosine::{dihedral_cosines, DihedralCosines, DihedralEdge};
 pub use mesh_mass_properties::{mass_properties, MeshMassProperties};
+pub use mesh_euler_characteristic::{mesh_topology, MeshTopology};
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
 pub use obb::{Obb, ObbBvh, ObbHit};
