@@ -1,0 +1,20 @@
+[package]
+name = "prism_ui_workbench"
+version = "0.1.0"
+edition = "2024"
+description = "Loom component workbench: Storybook-style story registry and isolated render harness for Loom components. Contains no Unreal Engine source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_ui = { path = "../prism_ui" }
+prism_ui_reactive = { path = "../prism_ui_reactive" }
+prism_ui_component = { path = "../prism_ui_component" }
+prism_ui_devtools = { path = "../prism_ui_devtools" }
+
+[features]
+default = ["std"]
+std = ["prism_ui/std", "prism_ui_reactive/std", "prism_ui_component/std", "prism_ui_devtools/std"]
+
+[lints]
+workspace = true

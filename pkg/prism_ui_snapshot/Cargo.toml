@@ -1,0 +1,20 @@
+[package]
+name = "prism_ui_snapshot"
+version = "0.1.0"
+edition = "2024"
+description = "Loom snapshot testing: stable serialization of Element trees and layout results with golden comparison and human-readable diffs. Contains no Unreal Engine source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_ui = { path = "../prism_ui" }
+prism_ui_layout = { path = "../prism_ui_layout" }
+prism_ui_devtools = { path = "../prism_ui_devtools" }
+prism_ui_style = { path = "../prism_ui_style" }
+
+[features]
+default = ["std"]
+std = ["prism_ui/std", "prism_ui_layout/std", "prism_ui_devtools/std", "prism_ui_style/std"]
+
+[lints]
+workspace = true
