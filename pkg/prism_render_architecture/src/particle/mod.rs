@@ -59,6 +59,7 @@ pub mod atlas_packing;
 pub mod attributes;
 pub mod audio_spectrum;
 pub mod authoring;
+pub mod backface_outline_expand;
 pub mod barycentric_coord;
 pub mod bicubic_sample;
 pub mod billboard_atlas;
