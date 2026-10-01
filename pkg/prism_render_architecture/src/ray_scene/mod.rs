@@ -517,6 +517,11 @@
 //!   ([`mesh_voxel_padding::pad_voxel_grid`]) that grows the lattice by a
 //!   fixed band of empty cells on every face, carving the exterior shell
 //!   distance-field soft shadows, ambient occlusion, and cone-traced GI need.
+//! - [`mesh_sdf_soft_shadow`] — sphere-traced soft shadows
+//!   ([`mesh_sdf_soft_shadow::sdf_soft_shadow`],
+//!   [`mesh_sdf_soft_shadow::SoftShadow`]) estimating the light's visible
+//!   fraction with Inigo Quilez's improved penumbra ratio over the exterior
+//!   shell, for grounded distance-field contact shadows.
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -698,6 +703,7 @@ pub mod mesh_sdf_normal;
 pub mod mesh_sdf_surface_projection;
 pub mod sdf_csg;
 pub mod mesh_voxel_padding;
+pub mod mesh_sdf_soft_shadow;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -832,6 +838,7 @@ pub use sdf_csg::{
     intersection, smooth_intersection, smooth_subtraction, smooth_union, subtraction, union,
 };
 pub use mesh_voxel_padding::pad_voxel_grid;
+pub use mesh_sdf_soft_shadow::{sdf_soft_shadow, SoftShadow};
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
 pub use obb::{Obb, ObbBvh, ObbHit};
