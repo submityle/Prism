@@ -27,6 +27,12 @@
 //!   arbitrary frequency / Q / gain / shape per band.
 //! - [`delay::DelayNode`] — fractional delay line with feedback and wet/dry
 //!   mix (the echo / slap-back / modulated-delay primitive).
+//! - [`dc_blocker::DcBlockerNode`] -- first-order DC-blocking high pass
+//!   `y = x - x[-1] + R * y[-1]` whose zero sits exactly at 0 Hz, removing
+//!   DC offset and subsonic rumble with a tunable corner while passing the
+//!   audible band at essentially unity gain; a routable, user-tunable
+//!   sibling of the fixed DC blockers inside the saturators and distinct
+//!   from the second-order [`biquad`](crate::nodes::biquad) high pass.
 //! - [`multi_tap_delay::MultiTapDelayNode`] -- a single shared mono delay
 //!   line read by up to [`MAX_TAPS`] independently timed, gained, and
 //!   panned taps with a global feedback coefficient, for rhythmic echo
@@ -202,6 +208,7 @@ pub mod auto_wah;
 pub mod bitcrusher;
 pub mod chorus;
 pub mod comb_resonator;
+pub mod dc_blocker;
 pub mod delay;
 pub mod diode_clipper;
 pub mod envelope_follower;
@@ -243,6 +250,10 @@ pub use auto_wah::{AutoWah, AutoWahNode, AutoWahParams, SweepDirection, WahMode}
 pub use bitcrusher::{BitcrusherNode, BitcrusherParams, MAX_BIT_DEPTH, MIN_BIT_DEPTH};
 pub use chorus::{ChorusNode, ChorusParams};
 pub use comb_resonator::{CombResonatorNode, CombResonatorParams, MAX_FEEDBACK, MIN_FREQUENCY_HZ};
+pub use dc_blocker::{
+    DEFAULT_DC_BLOCKER_CUTOFF_HZ, DcBlockerNode, DcBlockerParams, MAX_DC_BLOCKER_CUTOFF_HZ,
+    MIN_DC_BLOCKER_CUTOFF_HZ,
+};
 pub use delay::DelayNode;
 pub use diode_clipper::{DiodeClipper, DiodeClipperNode, DiodeClipperParams};
 pub use envelope_follower::{
