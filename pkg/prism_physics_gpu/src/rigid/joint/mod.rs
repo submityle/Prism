@@ -83,6 +83,13 @@
 //!   perpendicular weld plus a one-sided along-axis travel limit).
 //! * [`prismatic_limit_gpu`] — the device-side
 //!   [`GpuPrismaticLimitJointSolver`] twin.
+//! * [`swing_twist`] — the [`SwingTwistJoint`] (cone-twist/ragdoll)
+//!   definition and its device-packed storage representation.
+//! * [`swing_twist_cpu`] — the authoritative
+//!   [`cpu_solve_joints_swing_twist`] golden stepper (swing cone,
+//!   twist limit, and point-to-point weld).
+//! * [`swing_twist_gpu`] — the device-side [`GpuSwingTwistJointSolver`]
+//!   twin.
 //!
 //! # Scheme and scope
 //!
@@ -130,6 +137,9 @@ mod spherical;
 mod spherical_cpu;
 mod spherical_gpu;
 mod stepper;
+mod swing_twist;
+mod swing_twist_cpu;
+mod swing_twist_gpu;
 
 pub use coloring::{JointColouring, MAX_JOINT_BATCHES};
 pub use config::JointSolverConfig;
@@ -160,3 +170,6 @@ pub use revolute_gpu::GpuRevoluteJointSolver;
 pub use spherical::SphericalJoint;
 pub use spherical_cpu::cpu_solve_joints_spherical;
 pub use spherical_gpu::GpuSphericalJointSolver;
+pub use swing_twist::SwingTwistJoint;
+pub use swing_twist_cpu::cpu_solve_joints_swing_twist;
+pub use swing_twist_gpu::GpuSwingTwistJointSolver;
