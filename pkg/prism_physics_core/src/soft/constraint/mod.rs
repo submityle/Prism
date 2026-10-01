@@ -27,13 +27,17 @@
 pub mod attachment;
 pub mod bending;
 pub mod distance;
+pub mod long_range;
 pub mod set;
+pub mod strain_limit;
 pub mod volume;
 
 pub use attachment::AttachmentConstraint;
 pub use bending::BendingConstraint;
 pub use distance::DistanceConstraint;
+pub use long_range::LongRangeConstraint;
 pub use set::ConstraintSet;
+pub use strain_limit::StrainLimitConstraint;
 pub use volume::TetraVolumeConstraint;
 
 use glam::Vec3;
@@ -52,6 +56,10 @@ pub enum SoftConstraintKind {
     Volume,
     /// An attachment pinning a particle toward a fixed world-space point.
     Attachment,
+    /// A one-sided long-range-attachment leash to a fixed anchor.
+    LongRange,
+    /// A hard biphasic length clamp (strain limiter) over a stretch edge.
+    StrainLimit,
 }
 
 /// A projectable XPBD constraint over soft-body particles.

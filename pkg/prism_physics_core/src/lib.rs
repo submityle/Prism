@@ -128,8 +128,9 @@ pub use snapshot::StateSnapshot;
 pub use soft::body::SoftBody;
 pub use soft::build::{Cloth, ClothGrid, Rope, RopeGrid, SoftBox, SoftBoxGrid};
 pub use soft::constraint::{
-    AttachmentConstraint, BendingConstraint, ConstraintSet, DistanceConstraint, ParticleConstraint,
-    SoftConstraintKind, TetraVolumeConstraint,
+    AttachmentConstraint, BendingConstraint, ConstraintSet, DistanceConstraint,
+    LongRangeConstraint, ParticleConstraint, SoftConstraintKind, StrainLimitConstraint,
+    TetraVolumeConstraint,
 };
 pub use soft::collision::{
     apply_backstop, closest_point_on_segment, project_out_of_half_space, project_out_of_sphere,

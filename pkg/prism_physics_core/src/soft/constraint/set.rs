@@ -18,15 +18,17 @@ use glam::Vec3;
 use crate::math::scalar::Real;
 
 use super::{
-    AttachmentConstraint, BendingConstraint, DistanceConstraint, ParticleConstraint,
-    TetraVolumeConstraint,
+    AttachmentConstraint, BendingConstraint, DistanceConstraint, LongRangeConstraint,
+    ParticleConstraint, StrainLimitConstraint, TetraVolumeConstraint,
 };
 
 /// A typed collection of every constraint acting on a soft body's particles.
 ///
 /// The projection order within a sweep is fixed and deterministic: distance,
-/// then bending, then volume, then attachment constraints. Determinism matters
-/// for networked lock-step and golden-replay testing.
+/// bending, volume, attachment, then the long-range leashes, and finally the
+/// hard strain limiters (which run last so they clamp the result of every
+/// compliant sweep). Determinism matters for networked lock-step and
+/// golden-replay testing.
 #[derive(Clone, PartialEq, Debug, Default)]
 #[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 pub struct ConstraintSet {
@@ -38,6 +40,10 @@ pub struct ConstraintSet {
     pub volume: Vec<TetraVolumeConstraint>,
     /// Attachment constraints pinning particles toward world anchors.
     pub attachment: Vec<AttachmentConstraint>,
+    /// One-sided long-range-attachment leashes to fixed anchors.
+    pub long_range: Vec<LongRangeConstraint>,
+    /// Hard biphasic strain limiters applied last as a final length clamp.
+    pub strain_limit: Vec<StrainLimitConstraint>,
 }
 
 impl ConstraintSet {
@@ -49,13 +55,20 @@ impl ConstraintSet {
             bending: Vec::new(),
             volume: Vec::new(),
             attachment: Vec::new(),
+            long_range: Vec::new(),
+            strain_limit: Vec::new(),
         }
     }
 
     /// Returns the total number of constraints across all families.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.distance.len() + self.bending.len() + self.volume.len() + self.attachment.len()
+        self.distance.len()
+            + self.bending.len()
+            + self.volume.len()
+            + self.attachment.len()
+            + self.long_range.len()
+            + self.strain_limit.len()
     }
 
     /// Returns `true` when the set holds no constraints at all.
@@ -65,6 +78,8 @@ impl ConstraintSet {
             && self.bending.is_empty()
             && self.volume.is_empty()
             && self.attachment.is_empty()
+            && self.long_range.is_empty()
+            && self.strain_limit.is_empty()
     }
 
     /// Resets the accumulated Lagrange multiplier of every constraint. The
@@ -82,6 +97,12 @@ impl ConstraintSet {
         for c in &mut self.attachment {
             c.reset();
         }
+        for c in &mut self.long_range {
+            c.reset();
+        }
+        for c in &mut self.strain_limit {
+            c.reset();
+        }
     }
 
     /// Runs one Gauss-Seidel projection sweep over every constraint, in the
@@ -97,6 +118,13 @@ impl ConstraintSet {
             c.project(positions, inverse_masses, dt);
         }
         for c in &mut self.attachment {
+            c.project(positions, inverse_masses, dt);
+        }
+        for c in &mut self.long_range {
+            c.project(positions, inverse_masses, dt);
+        }
+        // Strain limiters run last: a hard clamp on the fully-projected state.
+        for c in &mut self.strain_limit {
             c.project(positions, inverse_masses, dt);
         }
     }
@@ -129,6 +157,45 @@ mod tests {
             .push(AttachmentConstraint::new(h(0), Vec3::ZERO, 0.0));
         assert_eq!(s.len(), 3);
         assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn len_and_empty_track_long_range_and_strain_limit() {
+        let mut s = ConstraintSet::new();
+        s.long_range
+            .push(LongRangeConstraint::new(h(0), Vec3::ZERO, 1.0, 0.0));
+        s.strain_limit
+            .push(StrainLimitConstraint::new(h(0), h(1), 1.0, 1.1, 0.0));
+        assert_eq!(s.len(), 2);
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn long_range_leash_clamps_overstretched_particle() {
+        let mut positions = [Vec3::new(3.0, 0.0, 0.0)];
+        let inv = [1.0];
+        let mut s = ConstraintSet::new();
+        s.long_range
+            .push(LongRangeConstraint::new(h(0), Vec3::ZERO, 1.0, 0.0));
+        s.reset();
+        s.project(&mut positions, &inv, 1.0 / 60.0);
+        assert!((positions[0].length() - 1.0).abs() < 1e-5, "pos {:?}", positions[0]);
+    }
+
+    #[test]
+    fn strain_limiter_runs_after_distance_and_caps_length() {
+        // A rigid distance constraint restores rest length 1; the strain limiter
+        // is a no-op here but, when the edge is overstretched past the band, it
+        // must clamp. Verify the limiter clamps a pre-stretched edge.
+        let mut positions = [Vec3::ZERO, Vec3::new(2.0, 0.0, 0.0)];
+        let inv = [1.0, 1.0];
+        let mut s = ConstraintSet::new();
+        s.strain_limit
+            .push(StrainLimitConstraint::new(h(0), h(1), 1.0, 1.2, 0.0));
+        s.reset();
+        s.project(&mut positions, &inv, 1.0 / 60.0);
+        let length = (positions[0] - positions[1]).length();
+        assert!((length - 1.2).abs() < 1e-5, "length was {length}");
     }
 
     #[test]
