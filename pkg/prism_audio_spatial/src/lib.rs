@@ -78,6 +78,7 @@ pub mod reflection_clustering;
 pub mod reflection_directivity;
 pub mod reverb_zones;
 pub mod reverberant_field;
+pub mod reverberation_spectrum;
 pub mod room_acoustics;
 pub mod room_clarity;
 pub mod room_modes;
@@ -145,6 +146,10 @@ pub use reverb_zones::{
     AuxBusId, AuxSend, MAX_AUX_SENDS, ReverbZone, ReverbZoneField, ZoneShape, source_send_gain,
 };
 pub use reverberant_field::ReverberantField;
+pub use reverberation_spectrum::{
+    ReverberationSpectrum, T30_FIT_LOWER_DB, T30_FIT_UPPER_DB, bass_ratio,
+    octave_band_reverberation_times, treble_ratio,
+};
 pub use room_acoustics::{
     CRITICAL_DISTANCE_CONSTANT, RoomAcoustics, SABINE_CONSTANT, SCHROEDER_CONSTANT,
     critical_distance, eyring_rt60, mean_free_path, millington_sette_rt60, sabine_rt60,
