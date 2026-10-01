@@ -3,4 +3,4 @@
 
 mod triangle_mesh;
 
-pub use triangle_mesh::{MeshRayHit, TriangleMesh};
+pub use triangle_mesh::{MeshClosestPoint, MeshRayHit, TriangleMesh};

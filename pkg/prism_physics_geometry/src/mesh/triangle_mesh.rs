@@ -15,9 +15,9 @@
 use alloc::vec::Vec;
 use glam::Vec3;
 
-use crate::bounding::{Aabb, Ray};
+use crate::bounding::{Aabb, BoundingSphere, Ray};
 use crate::bvh::DynamicBvh;
-use crate::narrow::ray_triangle;
+use crate::narrow::{closest_point_on_triangle, ray_triangle, triangle_aabb_overlap};
 
 /// An exact ray/triangle-mesh intersection.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -34,6 +34,17 @@ pub struct MeshRayHit {
     pub v: f32,
     /// Geometric (face) unit normal, from the triangle winding.
     pub normal: Vec3,
+}
+
+/// The closest point on a [`TriangleMesh`] to a query point.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct MeshClosestPoint {
+    /// Index of the triangle carrying the closest point.
+    pub triangle: u32,
+    /// World-space closest point on that triangle.
+    pub point: Vec3,
+    /// Euclidean distance from the query to `point`.
+    pub distance: f32,
 }
 
 /// An indexed triangle mesh accelerated by a dynamic BVH.
@@ -130,6 +141,116 @@ impl TriangleMesh {
         });
         best
     }
+
+    /// Returns the closest point on the mesh to `p`, or [`None`] when the mesh
+    /// is empty.
+    ///
+    /// The query performs branch-and-bound over the BVH: fat boxes are visited
+    /// nearest-first and each candidate triangle is refined with an exact
+    /// Voronoi-region closest-point test, so traversal stops as soon as the
+    /// next box lies farther than the closest confirmed triangle point.
+    pub fn closest_point(&self, p: Vec3) -> Option<MeshClosestPoint> {
+        let mut result: Option<MeshClosestPoint> = None;
+        self.bvh.nearest_leaf_refined(p, |data, _box| {
+            let tri_index = data as usize;
+            let [ia, ib, ic] = self.indices[tri_index];
+            let a = self.vertices[ia as usize];
+            let b = self.vertices[ib as usize];
+            let c = self.vertices[ic as usize];
+            let cp = closest_point_on_triangle(p, a, b, c);
+            let d2 = (cp - p).length_squared();
+            if result.is_none_or(|r| d2 < r.distance * r.distance) {
+                result = Some(MeshClosestPoint {
+                    triangle: data as u32,
+                    point: cp,
+                    distance: d2.sqrt(),
+                });
+            }
+            Some(d2)
+        });
+        result
+    }
+
+    /// Returns the Euclidean distance from `p` to the nearest triangle, or
+    /// [`None`] when the mesh is empty.
+    pub fn distance(&self, p: Vec3) -> Option<f32> {
+        self.closest_point(p).map(|hit| hit.distance)
+    }
+
+    /// Returns `true` when any triangle lies within `radius` of `center`.
+    ///
+    /// Candidate triangles are gathered from the BVH by fat-box/sphere overlap
+    /// and confirmed with an exact closest-point distance test, so a box that
+    /// overlaps the sphere but whose triangle does not is correctly rejected.
+    pub fn intersects_sphere(&self, center: Vec3, radius: f32) -> bool {
+        if radius < 0.0 {
+            return false;
+        }
+        let r2 = radius * radius;
+        let mut hit = false;
+        self.bvh
+            .query_sphere(BoundingSphere::new(center, radius), &mut |data| {
+                if hit {
+                    return;
+                }
+                let tri_index = data as usize;
+                let [ia, ib, ic] = self.indices[tri_index];
+                let a = self.vertices[ia as usize];
+                let b = self.vertices[ib as usize];
+                let c = self.vertices[ic as usize];
+                let cp = closest_point_on_triangle(center, a, b, c);
+                if (cp - center).length_squared() <= r2 {
+                    hit = true;
+                }
+            });
+        hit
+    }
+
+    /// Collects the indices of every triangle within `radius` of `center`.
+    ///
+    /// Returns an empty vector when `radius` is negative or no triangle is in
+    /// range. Indices are reported in BVH traversal order, not sorted.
+    pub fn overlap_sphere(&self, center: Vec3, radius: f32) -> Vec<u32> {
+        let mut out = Vec::new();
+        if radius < 0.0 {
+            return out;
+        }
+        let r2 = radius * radius;
+        self.bvh
+            .query_sphere(BoundingSphere::new(center, radius), &mut |data| {
+                let tri_index = data as usize;
+                let [ia, ib, ic] = self.indices[tri_index];
+                let a = self.vertices[ia as usize];
+                let b = self.vertices[ib as usize];
+                let c = self.vertices[ic as usize];
+                let cp = closest_point_on_triangle(center, a, b, c);
+                if (cp - center).length_squared() <= r2 {
+                    out.push(data as u32);
+                }
+            });
+        out
+    }
+
+    /// Collects the indices of every triangle overlapping `aabb`.
+    ///
+    /// Candidate triangles are gathered from the BVH by fat-box overlap and
+    /// confirmed with an exact triangle/box separating-axis test, so a box that
+    /// overlaps the fat bounds but not the triangle itself is rejected. Indices
+    /// are reported in BVH traversal order, not sorted.
+    pub fn overlap_aabb(&self, aabb: &Aabb) -> Vec<u32> {
+        let mut out = Vec::new();
+        self.bvh.query_aabb(*aabb, &mut |data| {
+            let tri_index = data as usize;
+            let [ia, ib, ic] = self.indices[tri_index];
+            let a = self.vertices[ia as usize];
+            let b = self.vertices[ib as usize];
+            let c = self.vertices[ic as usize];
+            if triangle_aabb_overlap(a, b, c, aabb) {
+                out.push(data as u32);
+            }
+        });
+        out
+    }
 }
 
 #[cfg(test)]
@@ -202,6 +323,95 @@ mod tests {
         // A ray through the valid triangle still hits.
         let ray = Ray::new(Vec3::new(0.2, 0.2, -1.0), Vec3::Z);
         assert!(mesh.ray_cast(&ray).is_some());
+    }
+
+    #[test]
+    fn closest_point_on_near_quad() {
+        let mesh = two_quads();
+        // Point just in front of quad A (z = 2) along the ray.
+        let hit = mesh.closest_point(Vec3::new(0.0, 0.0, 1.0)).expect("closest");
+        assert!(hit.point.abs_diff_eq(Vec3::new(0.0, 0.0, 2.0), 1e-5));
+        assert!((hit.distance - 1.0).abs() < 1e-5, "distance = {}", hit.distance);
+        assert!(hit.triangle < 2, "front triangle, got {}", hit.triangle);
+    }
+
+    #[test]
+    fn closest_point_prefers_true_nearest_triangle() {
+        let mesh = two_quads();
+        // Closer to the far quad (z = 6): point at z = 5.
+        let hit = mesh.closest_point(Vec3::new(0.0, 0.0, 5.0)).expect("closest");
+        assert!(hit.point.abs_diff_eq(Vec3::new(0.0, 0.0, 6.0), 1e-5));
+        assert!(hit.triangle >= 2, "back triangle, got {}", hit.triangle);
+    }
+
+    #[test]
+    fn closest_point_clamps_to_edge() {
+        let mesh = two_quads();
+        // Query off the +x side of quad A projects onto its edge at x = 1.
+        let hit = mesh.closest_point(Vec3::new(3.0, 0.0, 2.0)).expect("closest");
+        assert!((hit.point.x - 1.0).abs() < 1e-5, "x = {}", hit.point.x);
+        assert!((hit.distance - 2.0).abs() < 1e-5, "distance = {}", hit.distance);
+    }
+
+    #[test]
+    fn distance_matches_closest_point() {
+        let mesh = two_quads();
+        let p = Vec3::new(0.0, 0.0, -3.0);
+        let d = mesh.distance(p).expect("distance");
+        assert!((d - 5.0).abs() < 1e-5, "distance = {d}");
+    }
+
+    #[test]
+    fn sphere_overlap_detects_and_rejects() {
+        let mesh = two_quads();
+        // Sphere centred at z = 1 with radius 1.5 reaches quad A (z = 2).
+        assert!(mesh.intersects_sphere(Vec3::new(0.0, 0.0, 1.0), 1.5));
+        // Radius 0.5 falls short.
+        assert!(!mesh.intersects_sphere(Vec3::new(0.0, 0.0, 1.0), 0.5));
+        // Negative radius never intersects.
+        assert!(!mesh.intersects_sphere(Vec3::ZERO, -1.0));
+    }
+
+    #[test]
+    fn overlap_sphere_collects_front_quad_only() {
+        let mesh = two_quads();
+        // Reach quad A (z = 2) but not quad B (z = 6).
+        let tris = mesh.overlap_sphere(Vec3::new(0.0, 0.0, 1.0), 1.5);
+        assert_eq!(tris.len(), 2, "both front triangles: {tris:?}");
+        assert!(tris.iter().all(|&t| t < 2));
+    }
+
+    #[test]
+    fn overlap_aabb_selects_crossing_triangles() {
+        let mesh = two_quads();
+        // A thin box straddling quad A's plane (z = 2) over the unit square.
+        let box_ = crate::bounding::Aabb::new(
+            Vec3::new(-2.0, -2.0, 1.9),
+            Vec3::new(2.0, 2.0, 2.1),
+        );
+        let tris = mesh.overlap_aabb(&box_);
+        assert_eq!(tris.len(), 2, "both front triangles: {tris:?}");
+        assert!(tris.iter().all(|&t| t < 2));
+    }
+
+    #[test]
+    fn overlap_aabb_rejects_boxes_between_quads() {
+        let mesh = two_quads();
+        // Box in the gap between the quads (z in [3, 4]) touches neither.
+        let box_ = crate::bounding::Aabb::new(
+            Vec3::new(-2.0, -2.0, 3.0),
+            Vec3::new(2.0, 2.0, 4.0),
+        );
+        assert!(mesh.overlap_aabb(&box_).is_empty());
+    }
+
+    #[test]
+    fn closest_point_on_empty_mesh_is_none() {
+        let mesh = TriangleMesh::new(alloc::vec![], alloc::vec![]);
+        assert!(mesh.closest_point(Vec3::ZERO).is_none());
+        assert!(mesh.distance(Vec3::ZERO).is_none());
+        assert!(!mesh.intersects_sphere(Vec3::ZERO, 10.0));
+        assert!(mesh.overlap_sphere(Vec3::ZERO, 10.0).is_empty());
     }
 
     #[test]

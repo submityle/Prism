@@ -96,6 +96,54 @@ impl DynamicBvh {
         }
         out
     }
+
+    /// Returns the nearest leaf and its exact squared geometric distance using
+    /// branch-and-bound refinement.
+    ///
+    /// The frontier yields nodes by non-decreasing fat-box lower bound, so once
+    /// a node's box distance exceeds the best confirmed geometric distance the
+    /// search can terminate: every remaining node is at least as far. For each
+    /// popped leaf, `refine` is invoked with the payload and fat box and must
+    /// return the exact squared distance from the query to the stored geometry,
+    /// or [`None`] to reject the leaf. The returned pair is the payload and
+    /// squared geometric distance of the globally nearest accepted leaf, or
+    /// [`None`] when the tree is empty or every leaf was rejected.
+    pub fn nearest_leaf_refined<F>(&self, p: Vec3, mut refine: F) -> Option<(u64, f32)>
+    where
+        F: FnMut(u64, Aabb) -> Option<f32>,
+    {
+        if self.root == NULL {
+            return None;
+        }
+        let mut frontier = BinaryHeap::new();
+        let root_d2 = self.nodes[self.root as usize]
+            .aabb
+            .distance_squared_to_point(p);
+        frontier.push(PointCandidate { d2: root_d2, node: self.root });
+        let mut best: Option<(u64, f32)> = None;
+        while let Some(PointCandidate { d2, node }) = frontier.pop() {
+            // Box lower bound already beyond the best hit: nothing nearer left.
+            if best.is_some_and(|(_, b)| d2 >= b) {
+                break;
+            }
+            let node = self.nodes[node as usize];
+            if node.is_leaf() {
+                if let Some(actual) = refine(node.data, node.aabb)
+                    && best.is_none_or(|(_, b)| actual < b)
+                {
+                    best = Some((node.data, actual));
+                }
+            } else {
+                for child in [node.child1, node.child2] {
+                    let cd2 = self.nodes[child as usize]
+                        .aabb
+                        .distance_squared_to_point(p);
+                    frontier.push(PointCandidate { d2: cd2, node: child });
+                }
+            }
+        }
+        best
+    }
 }
 
 /// A pending node in a nearest-point traversal, keyed by the squared distance

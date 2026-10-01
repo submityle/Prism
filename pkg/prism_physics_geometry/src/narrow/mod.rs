@@ -14,6 +14,7 @@ mod manifold;
 mod minkowski;
 mod ray_cast;
 mod support;
+mod triangle_box;
 
 pub use ccd::{conservative_advancement, TimeOfImpact};
 pub use closest_point::{
@@ -28,3 +29,4 @@ pub use manifold::{
 };
 pub use ray_cast::{ray_capsule, ray_obb, ray_sphere, ray_triangle, RayTriangleHit};
 pub use support::{Inflated, SupportMap, Translated};
+pub use triangle_box::triangle_aabb_overlap;
