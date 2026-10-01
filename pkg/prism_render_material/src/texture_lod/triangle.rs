@@ -17,6 +17,8 @@
 //! # References
 //! Ray Tracing Gems 2019, ch. 20, eq. "Delta_i" (triangle LOD constant).
 
+use bevy_math::ops;
+
 use super::math::{cross3, length3, sub3, uv_double_area};
 
 /// A triangle's texel-density constant `Delta = 0.5 * log2(T_a / W_a)`.
@@ -56,7 +58,7 @@ impl TriangleLodConstant {
         let e2 = sub3(world[2], world[0]);
         let w_a = length3(cross3(e1, e2)).max(MIN_AREA);
 
-        let delta = 0.5 * (t_a / w_a).log2();
+        let delta = 0.5 * ops::log2(t_a / w_a);
         Self {
             delta: delta.clamp(-DELTA_CLAMP, DELTA_CLAMP),
         }

@@ -16,13 +16,15 @@
 //! * IEC 61966-2-1:1999 (sRGB), the standard piecewise EOTF / OETF.
 
 /// Decode one sRGB-encoded `u8` channel to a scene-linear `f32` in `[0, 1]`.
+use bevy_math::ops;
+
 #[must_use]
 pub fn srgb_to_linear(encoded: u8) -> f32 {
     let s = f32::from(encoded) / 255.0;
     if s <= 0.040_448_237 {
         s / 12.92
     } else {
-        ((s + 0.055) / 1.055).powf(2.4)
+        ops::powf((s + 0.055) / 1.055, 2.4)
     }
 }
 
@@ -39,7 +41,7 @@ pub fn linear_to_srgb(linear: f32) -> u8 {
     let s = if l <= 0.003_130_8 {
         12.92 * l
     } else {
-        1.055 * l.powf(1.0 / 2.4) - 0.055
+        1.055 * ops::powf(l, 1.0 / 2.4) - 0.055
     };
     // s is already in [0, 1] for l in [0, 1]; clamp defends against FP drift.
     let scaled = (s.clamp(0.0, 1.0) * 255.0 + 0.5).floor();

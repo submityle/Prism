@@ -19,6 +19,8 @@
 
 /// Maximum spread half-angle (radians) a cone may accumulate; prevents a long
 /// chain of rough bounces from driving `spread_angle` to a nonsensical value.
+use bevy_math::ops;
+
 const MAX_SPREAD_ANGLE: f32 = core::f32::consts::FRAC_PI_2;
 
 /// A propagated ray cone (footprint diameter + growth half-angle).
@@ -49,8 +51,8 @@ impl RayCone {
     #[must_use]
     pub fn from_pinhole_pixel(vertical_fov: f32, screen_height_px: f32) -> Self {
         let height = screen_height_px.max(1.0);
-        let half = (vertical_fov.max(0.0) * 0.5).tan();
-        let spread = (2.0 * half / height).atan();
+        let half = ops::tan(vertical_fov.max(0.0) * 0.5);
+        let spread = ops::atan(2.0 * half / height);
         Self::new(0.0, spread)
     }
 
@@ -113,7 +115,7 @@ mod tests {
         let fov = core::f32::consts::FRAC_PI_2; // 90 deg
         let h = 1080.0;
         let cone = RayCone::from_pinhole_pixel(fov, h);
-        let expected = (2.0 * (fov * 0.5).tan() / h).atan();
+        let expected = ops::atan(2.0 * ops::tan(fov * 0.5) / h);
         assert!((cone.spread_angle() - expected).abs() < 1.0e-9);
         assert_eq!(cone.width(), 0.0);
     }

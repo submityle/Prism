@@ -18,6 +18,8 @@
 //! Ray Tracing Gems 2019, ch. 20 (ray-cone LOD equation); Ewins et al. 1998
 //! (log2 footprint-to-LOD mapping).
 
+use bevy_math::ops;
+
 use super::triangle::TriangleLodConstant;
 
 /// Lower bound on `|n . d|`; a cosine below this is treated as this value so a
@@ -30,7 +32,7 @@ pub const MIN_COS_INCIDENCE: f32 = 1.0e-3;
 #[must_use]
 pub fn mip_from_isotropic_footprint(footprint_texels: f32, max_mip: f32) -> f32 {
     let f = footprint_texels.max(f32::MIN_POSITIVE);
-    f.log2().clamp(0.0, max_mip.max(0.0))
+    ops::log2(f).clamp(0.0, max_mip.max(0.0))
 }
 
 /// Compute the ray-cone mip level for a hit.
@@ -48,7 +50,7 @@ pub fn cone_mip_level(
 ) -> f32 {
     let width = cone_width.abs().max(f32::MIN_POSITIVE);
     let cos_i = n_dot_d.abs().max(MIN_COS_INCIDENCE);
-    let lambda = tri.delta() + width.log2() - cos_i.log2();
+    let lambda = tri.delta() + ops::log2(width) - ops::log2(cos_i);
     lambda.clamp(0.0, max_mip.max(0.0))
 }
 

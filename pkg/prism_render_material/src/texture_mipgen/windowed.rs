@@ -29,6 +29,7 @@ use core::f32::consts::PI;
 
 use super::box_filter::{ColorSpace, Rgba8Image};
 use super::srgb::{linear_to_srgb, srgb_to_linear};
+use bevy_math::ops;
 
 /// Windowed-sinc kernel selection for the mip reduction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,7 +57,7 @@ fn sinc(x: f32) -> f32 {
         1.0
     } else {
         let p = PI * x;
-        p.sin() / p
+        ops::sin(p) / p
     }
 }
 
