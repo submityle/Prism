@@ -194,6 +194,16 @@
 //!   `radii`, and `primitive`; node records reusing the shared [`NODE_WORDS`])
 //!   plus a packed ellipsoid walk that reproduces the in-memory walk
 //!   bit-for-bit.
+//! - [`obb`] — analytic oriented bounding box [`obb::Obb`]: an arbitrarily
+//!   rotated box tested in its own local frame with the same slab arithmetic as
+//!   the axis-aligned primitive, reporting the [`obb::ObbHit`] world-space face
+//!   normal and a single-level [`obb::ObbBvh`] reusing the shared binned-`SAH`
+//!   build.
+//! - [`obb_gpu_layout`] — flat, `GPU`-uploadable [`obb::ObbBvh`] buffer layout
+//!   ([`obb_gpu_layout::OBB_WORDS`] stride packing `center`, `half`, the three
+//!   frame `axes`, and `primitive`; node records reusing the shared
+//!   [`NODE_WORDS`]) plus a packed oriented-box walk that reproduces the
+//!   in-memory walk bit-for-bit.
 //! - [`traversal`] — [`Ray`]/`BVH` slab + Möller–Trumbore intersection with
 //!   closest-hit and any-hit walks (the `GPU` traversal kernel's golden ref).
 //! - [`traversal_stackless`] — stackless (threaded / escape-index) `BVH` walk:
@@ -240,6 +250,8 @@ pub mod bilinear_patch;
 pub mod bilinear_patch_gpu_layout;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
+pub mod obb;
+pub mod obb_gpu_layout;
 pub mod footprint;
 pub mod gpu_layout;
 pub mod motion;
@@ -297,6 +309,8 @@ pub use bilinear_patch::{BilinearPatch, BilinearPatchBvh, BilinearPatchHit};
 pub use bilinear_patch_gpu_layout::{GpuBilinearPatchBvhBuffers, BILINEAR_PATCH_WORDS};
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
+pub use obb::{Obb, ObbBvh, ObbHit};
+pub use obb_gpu_layout::{GpuObbBvhBuffers, OBB_WORDS};
 pub use rectangle_gpu_layout::{GpuRectangleBvhBuffers, RECTANGLE_WORDS};
 pub use aabb_primitive_gpu_layout::{GpuAabbBvhBuffers, AABB_PRIMITIVE_WORDS};
 pub use sphere_gpu_layout::{GpuSphereBvhBuffers, SPHERE_WORDS};
