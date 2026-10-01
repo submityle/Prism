@@ -73,6 +73,7 @@ pub mod clamp_history;
 pub mod classify_precip;
 pub mod cloud_shadow_modulation;
 pub mod composite_motion_vector;
+pub mod contact_shadow;
 pub mod context;
 pub mod contrail_kernel;
 pub mod contrail_spread;
@@ -128,6 +129,7 @@ pub mod transcendental_approx;
 pub mod trig_approx;
 pub mod trilinear;
 pub mod variance_clip;
+pub mod variance_shadow;
 pub mod vdb_sample;
 pub mod velocity_at;
 pub mod velocity_dilate;
@@ -157,6 +159,7 @@ pub use cloud_shadow_modulation::{CloudShadowModulationQuery, GpuCloudShadowModu
 pub use composite_motion_vector::{
     CompositeMotionVectorQuery, GpuCompositeMotionVector, MotionVector,
 };
+pub use contact_shadow::{ContactShadowQuery, GpuContactShadow};
 pub use context::{block_on, GpuContext};
 pub use contrail_kernel::{ContrailKernelQuery, GpuContrailKernel};
 pub use contrail_spread::{ContrailSpreadQuery, GpuContrailSpread};
@@ -201,7 +204,9 @@ pub use should_fallback::{GpuShouldFallback, ShouldFallbackQuery};
 pub use single_scatter_reference::{GpuSingleScatterReference, SingleScatterReferenceQuery};
 pub use sky_state_transition::{GpuSkyStateTransition, SkyStateTransition};
 pub use spectral_to_rgb::{GpuSpectralToRgb, SpectralRgb};
-pub use spherical_harmonics_rotate::{GpuSphericalHarmonicsRotate, ShRotationProbe, ShRotationResult, L2_COEFF_COUNT};
+pub use spherical_harmonics_rotate::{
+    GpuSphericalHarmonicsRotate, ShRotationProbe, ShRotationResult, L2_COEFF_COUNT,
+};
 pub use storm_vertical_profile::{GpuStormVerticalProfile, StormVerticalProfileQuery};
 pub use sunset_inscatter_tint::{GpuSunsetInscatterTint, InscatterTint, SunsetInscatterTintQuery};
 pub use sunset_reddening::{GpuSunsetReddening, SunsetReddeningQuery};
@@ -214,6 +219,7 @@ pub use transcendental_approx::{GpuTranscendental, TranscendentalQuery, Transcen
 pub use trig_approx::{GpuTrigApprox, TrigApproxQuery, TrigApproxResult};
 pub use trilinear::{GpuTrilinear, TrilinearQuery};
 pub use variance_clip::{GpuVarianceClip, VarianceClipQuery};
+pub use variance_shadow::{GpuVarianceShadow, VarianceShadowQuery};
 pub use vdb_sample::GpuVdbSample;
 pub use velocity_at::{GpuVelocityAt, VelocityAtQuery};
 pub use velocity_dilate::GpuVelocityDilate;
