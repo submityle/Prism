@@ -52,6 +52,15 @@
 //!   golden stepper (axis alignment plus a point-on-line weld, freeing the
 //!   slide along and the spin about a shared axis).
 //! * [`cylindrical_gpu`] — the device-side [`GpuCylindricalJointSolver`] twin.
+//! * [`cylindrical_drive`] — the [`CylindricalDriveJoint`] (cylindrical
+//!   joint with a linear position drive/motor along its slide axis)
+//!   definition and its device-packed storage representation.
+//! * [`cylindrical_drive_cpu`] — the authoritative
+//!   [`cpu_solve_joints_cylindrical_drive`] golden stepper (axis alignment
+//!   plus a point-on-line weld plus an along-axis compliant-and-damped
+//!   linear position drive, leaving the spin about the axis free).
+//! * [`cylindrical_drive_gpu`] — the device-side
+//!   [`GpuCylindricalDriveJointSolver`] twin.
 //! * [`distance`] — the [`DistanceJoint`] (limit) definition and its
 //!   device-packed storage representation.
 //! * [`distance_cpu`] — the authoritative [`cpu_solve_joints_distance`] golden
@@ -120,6 +129,9 @@ mod coloring;
 mod config;
 mod cylindrical;
 mod cylindrical_cpu;
+mod cylindrical_drive;
+mod cylindrical_drive_cpu;
+mod cylindrical_drive_gpu;
 mod cylindrical_gpu;
 mod distance;
 mod distance_cpu;
@@ -162,6 +174,9 @@ pub use coloring::{JointColouring, MAX_JOINT_BATCHES};
 pub use config::JointSolverConfig;
 pub use cylindrical::CylindricalJoint;
 pub use cylindrical_cpu::cpu_solve_joints_cylindrical;
+pub use cylindrical_drive::CylindricalDriveJoint;
+pub use cylindrical_drive_cpu::cpu_solve_joints_cylindrical_drive;
+pub use cylindrical_drive_gpu::GpuCylindricalDriveJointSolver;
 pub use cylindrical_gpu::GpuCylindricalJointSolver;
 pub use distance::DistanceJoint;
 pub use distance_cpu::cpu_solve_joints_distance;

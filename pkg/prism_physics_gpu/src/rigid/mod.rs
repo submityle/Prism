@@ -61,11 +61,12 @@ pub use cpu::{cpu_integrate, cpu_integrate_gyro};
 pub use gpu::GpuRigidIntegrator;
 pub use gyroscopic::{GyroscopicConfig, GyroscopicMode};
 pub use joint::{
-    cpu_solve_joints_cylindrical, cpu_solve_joints_distance, cpu_solve_joints_fixed,
-    cpu_solve_joints_hinge_limit, cpu_solve_joints_prismatic, cpu_solve_joints_prismatic_drive,
-    cpu_solve_joints_prismatic_limit, cpu_solve_joints_revolute, cpu_solve_joints_revolute_drive,
-    cpu_solve_joints_spherical, cpu_solve_joints_swing_twist, cpu_solve_joints_universal,
-    CylindricalJoint, DistanceJoint, FixedJoint, GpuCylindricalJointSolver, GpuDistanceJointSolver,
+    cpu_solve_joints_cylindrical, cpu_solve_joints_cylindrical_drive, cpu_solve_joints_distance,
+    cpu_solve_joints_fixed, cpu_solve_joints_hinge_limit, cpu_solve_joints_prismatic,
+    cpu_solve_joints_prismatic_drive, cpu_solve_joints_prismatic_limit, cpu_solve_joints_revolute,
+    cpu_solve_joints_revolute_drive, cpu_solve_joints_spherical, cpu_solve_joints_swing_twist,
+    cpu_solve_joints_universal, CylindricalDriveJoint, CylindricalJoint, DistanceJoint, FixedJoint,
+    GpuCylindricalDriveJointSolver, GpuCylindricalJointSolver, GpuDistanceJointSolver,
     GpuFixedJointSolver, GpuHingeLimitJointSolver, GpuPrismaticDriveJointSolver,
     GpuPrismaticJointSolver, GpuPrismaticLimitJointSolver, GpuRevoluteDriveJointSolver,
     GpuRevoluteJointSolver, GpuSphericalJointSolver, GpuSwingTwistJointSolver,
