@@ -111,8 +111,10 @@ Loom 以多个独立 crate 分层实现,每一层都可单独使用。下表为 
 | [`prism_ui_motion`](../prism_ui_motion) | 自动过渡:隐式样式过渡(记忆旧值→Tween)、FLIP 布局动画、共享元素(Hero)过渡 | ✅ 已交付 | 32 |
 | [`prism_ui_snapshot`](../prism_ui_snapshot) | 快照测试:可逆文本序列化、行级 LCS diff、golden 比对(`Comparison`)、布局快照(`LayoutQuery`) | ✅ 已交付 | 25 |
 | [`prism_ui_workbench`](../prism_ui_workbench) | 组件工作台(Storybook 风格):`ControlValue`/`ArgSet` 类型校验、`Story`/`StoryBuilder`、两级分层注册、隔离 harness | ✅ 已交付 | 19 |
+| [`prism_ui_timetravel`](../prism_ui_timetravel) | 时间旅行调试:帧时间线(编辑器式 undo/redo)、跳转、重放(相邻帧 `diff`/变更摘要) | ✅ 已交付 | 20 |
+| [`prism_ui_inspector`](../prism_ui_inspector) | 元素树检查器:`NodePath` 寻址、`Query` 过滤、`PerfReport`/`TreeMetrics` 性能面板 | ✅ 已交付 | 36 |
 
-全部 21 个 crate 累计 **367 个单测通过**(另有集成测试与 doctest)。每个 crate 均:`#![forbid(unsafe_code)]`、
+全部 23 个 crate 累计 **423 个单测通过**(另有集成测试与 doctest)。每个 crate 均:`#![forbid(unsafe_code)]`、
 `no_std` 友好(`default = ["std"]`,proc-macro crate 除外)、通过严格 Clippy(零告警)。
 
 > **诚实声明**:仍为 **设计阶段(PLANNED)** 的能力包括:响应式信号 **自动绑定到

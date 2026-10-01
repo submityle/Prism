@@ -73,7 +73,9 @@
 
 ### M6 工具链(部分已交付)
 - [x] DevTools 基线:树快照 + `render_tree` 美化输出 + `OpTrace` 操作轨迹(`prism_ui_devtools`,已交付)。
-- [ ] DevTools 进阶:实体 / 组件树检查器、signal 依赖图、本帧更新 / 重排性能面板、状态时间旅行回放。
+- [x] DevTools 进阶 · 树检查器 + 性能面板:`NodePath` 寻址 / `Query` 过滤 / `PerfReport` / `TreeMetrics`(`prism_ui_inspector`,已交付)。
+- [x] DevTools 进阶 · 状态时间旅行回放:帧时间线 undo/redo + 跳转 + 相邻帧 diff / 变更摘要(`prism_ui_timetravel`,已交付)。
+- [ ] DevTools 进阶 · signal 依赖图:需 `prism_ui_reactive` 暴露依赖边 introspection API(规划中)。
 - [x] 快照测试(渲染树 / 布局结果序列化比对)(`prism_ui_snapshot`,已交付)。
 - [x] 组件工作台(Storybook 式隔离预览)(`prism_ui_workbench`,已交付)。
 - [ ] 双模式编译:开发期解释(极速热重载)/ 发布期宏固化(零解析开销)。

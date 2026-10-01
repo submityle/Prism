@@ -554,6 +554,96 @@ assert_eq!(outline.element().class_names(), &["btn-outline".to_string()]);
 
 ---
 
+## 15. `prism_ui_timetravel` — 时间旅行调试
+
+对标:Redux DevTools 的时间旅行、浏览器性能面板的帧回放。它记录一条 UI *帧*
+时间线,像编辑器的 undo 历史那样前后游走。每个 `Frame` 捕获某一时刻视图的
+`TreeSnapshot`(拥有所有权),外加可选的 `OpTrace`(产生它的后端变更)。
+
+- `Timeline`:存帧并维护可移动游标;在 **回退后再 record** 会截断 redo 分支(分叉新历史),与编辑器一致。`back/forward/jump/first/last/can_undo/can_redo/current`。
+- `Replay`:只读检查——任意两帧之间的 **文本 diff**(序列化 + 行级 LCS)、逐步 `ReplayStep{from,to,delta_nodes,changed}` 变更摘要、有序标签。
+- `Replayer`:前向游标,逐帧驱动一个后端重放历史。
+
+全部导航确定、无浮点运算,行为完全可复现、易测试。
+
+```rust
+use prism_ui::Element;
+use prism_ui_timetravel::{Frame, Timeline};
+
+// 同一控件的两个不同视图。
+let first = Element::box_().child(Element::text("hello"));
+let second = Element::box_().child(Element::text("world"));
+
+// 把两者作为帧记录到时间线。
+let mut timeline = Timeline::new();
+timeline.record(Frame::capture("v1", &first));
+timeline.record(Frame::capture("v2", &second));
+
+assert_eq!(timeline.len(), 2);
+assert_eq!(timeline.current().unwrap().label(), "v2");
+
+// 在历史中前后导航。
+assert_eq!(timeline.back().unwrap().label(), "v1");
+assert_eq!(timeline.forward().unwrap().label(), "v2");
+
+// 对两帧做 diff;报告同时含两段文本。
+let report = timeline.replay().diff_between(0, 1).unwrap();
+assert!(report.contains("hello"));
+assert!(report.contains("world"));
+```
+
+> 差异:时间线复用快照/序列化作为帧表示,diff 为可人工审阅的文本;整条历史
+> 无浮点、确定可复现,既能做调试回放,也能做回归 golden。
+
+---
+
+## 16. `prism_ui_inspector` — 元素树检查器 / 性能面板
+
+对标:React DevTools 的组件树检查器与 Profiler。它是 Loom 工具链 **只读、分析**
+的那一半:`prism_ui_devtools` 把活树变成 `TreeSnapshot`,本 crate 则让你拷问
+这棵快照以及一次 flush 产生的 backend-op 流。
+
+- `path`:按位置寻址节点。`NodePath` 渲染为 `/0/2/1`,可从同样语法 parse 回来;`paths_of` 以确定的深度优先顺序枚举每个节点。
+- `query`:过滤树。`Query` 组合 kind / class / 子串 text 条件,返回匹配项及其路径。
+- `perf`:聚合度量。`PerfReport` 把 `OpTrace` 汇总成分类计数 + 整数 *churn* 指标;`TreeMetrics` 概括一棵快照的形状(node_count/depth/kind 直方图/max_fan_out)。
+
+全部 `no_std` 友好、度量中不含浮点、输出确定,适合 golden 测试。
+
+```rust
+use prism_ui::layout::{AvailableSpace, Size};
+use prism_ui::{Element, RecordingBackend, Ui};
+use prism_ui_devtools::{snapshot, OpTrace};
+use prism_ui_inspector::{NodePath, PerfReport, Query};
+
+// 构建一个带 class 的卡片包裹文本的小视图。
+let view = Element::box_()
+    .class("app")
+    .child(Element::box_().class("card").child(Element::text("hello")))
+    .child(Element::text("world"));
+
+// 快照并查询唯一的 `.card` 盒子。
+let snap = snapshot(&view);
+let hits = Query::new().kind("Box").with_class("card").find_all(&snap);
+assert_eq!(hits.len(), 1);
+assert_eq!(hits[0].0, "/0".parse::<NodePath>().unwrap());
+
+// 经录制后端挂载并聚合 op 轨迹。
+let mut ui = Ui::new(RecordingBackend::new());
+ui.mount(&view);
+ui.compute_layout(Size::new(
+    AvailableSpace::Definite(800.0),
+    AvailableSpace::Definite(600.0),
+));
+let report = PerfReport::from_trace(&OpTrace::from_ops(ui.backend().ops()));
+assert_eq!(report.creates, snap.node_count());
+assert_eq!(report.set_texts, 2);
+```
+
+> 差异:检查器与第 13 节快照、第 15 节时间旅行共用同一套 `TreeSnapshot` /
+> `OpTrace` 表示——查询结果、性能计数、历史 diff 可互相印证,构成一致的工具链。
+
+---
+
 ## 组合示例:高级层如何协同
 
 一个典型的「可国际化、带全局状态、按路由切换」的视图,其数据流为:
@@ -582,4 +672,5 @@ I18n.translation     (Memo)  ─┘                              │
   仍为 **规划中** 的是:守卫 / 深链接(router)、时间旅行 UI(devtools)、
   静态子树提升 / 编译期稳定节点 ID,见 [roadmap.md](roadmap.md)。隐式过渡 / FLIP 布局动画 /
   共享元素过渡(第 11 节)、作用域样式 / 响应式 @media(第 12 节)、
-  快照测试(第 13 节)与组件工作台(第 14 节)**均已交付**。
+  快照测试(第 13 节)、组件工作台(第 14 节)、时间旅行调试(第 15 节)与
+  元素树检查器 / 性能面板(第 16 节)**均已交付**;DevTools 的 **signal 依赖图** 仍在规划(需 reactive 暴露依赖边)。
