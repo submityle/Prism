@@ -95,6 +95,7 @@ pub mod fog;
 pub mod froxel_injection;
 pub mod frustum_cull;
 pub mod fxaa;
+pub mod gamut_clip;
 pub mod gaussian_splat;
 pub mod godray;
 pub mod gravity_wave;
@@ -200,6 +201,7 @@ pub use fog::{FogQuery, GpuFogTransmittance};
 pub use froxel_injection::{FroxelInjectionQuery, GpuFroxelInjection};
 pub use frustum_cull::{FrustumCullPrimitive, FrustumCullQuery, GpuFrustumCull};
 pub use fxaa::{FxaaQuery, GpuFxaa};
+pub use gamut_clip::{GamutClipMode, GamutClipQuery, GpuGamutClip};
 pub use gaussian_splat::{
     GaussianSplatProjection, GpuGaussianSplat, GpuGaussianSplatQuery, SplatFootprint,
 };
