@@ -46,6 +46,7 @@ mod contact_tgs_gpu;
 mod cpu;
 mod gpu;
 mod gyroscopic;
+mod joint;
 
 pub use body::RigidBodyState;
 pub use config::{ContactSolverConfig, IntegratorConfig, RigidError};
@@ -59,3 +60,7 @@ pub use contact_tgs_gpu::GpuRigidTgsContactSolver;
 pub use cpu::{cpu_integrate, cpu_integrate_gyro};
 pub use gpu::GpuRigidIntegrator;
 pub use gyroscopic::{GyroscopicConfig, GyroscopicMode};
+pub use joint::{
+    cpu_solve_joints_spherical, GpuSphericalJointSolver, JointColouring, JointSolverConfig,
+    SphericalJoint, MAX_JOINT_BATCHES,
+};

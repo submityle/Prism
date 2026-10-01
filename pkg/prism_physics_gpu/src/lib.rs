@@ -59,12 +59,6 @@ pub mod scan;
 pub mod xpbd;
 
 pub use broadphase::{cpu_broadphase, BroadphaseConfig, BroadphaseError, CandidatePair, Particle};
-pub use rigid::{
-    cpu_integrate, cpu_integrate_gyro, cpu_solve_contacts, cpu_solve_contacts_tgs,
-    ContactSolverConfig, GpuRigidContactSolver, GpuRigidIntegrator, GpuRigidTgsContactSolver,
-    GyroscopicConfig, GyroscopicMode, IntegratorConfig, RigidBodyState, RigidContact,
-    RigidContactColouring, RigidError, TgsContactConfig,
-};
 pub use bvh::{
     cpu_build_lbvh, cpu_bvh_pairs, cpu_bvh_raycast_any, cpu_bvh_raycast_closest, Aabb,
     BvhQueryError, GpuBvhQuery, GpuBvhRaycast, GpuLbvh, GpuResidentLbvh, Lbvh, Ray, RayHit,
@@ -108,6 +102,13 @@ pub use narrowphase::{
     ObbPlanePair, Plane, SphereCapsulePair, SphereObbPair, SpherePlanePair, MAX_MANIFOLD_POINTS,
 };
 pub use radix::{cpu_radix_sort_keys, cpu_radix_sort_pairs, GpuRadixSort};
+pub use rigid::{
+    cpu_integrate, cpu_integrate_gyro, cpu_solve_contacts, cpu_solve_contacts_tgs,
+    cpu_solve_joints_spherical, ContactSolverConfig, GpuRigidContactSolver, GpuRigidIntegrator,
+    GpuRigidTgsContactSolver, GpuSphericalJointSolver, GyroscopicConfig, GyroscopicMode,
+    IntegratorConfig, JointColouring, JointSolverConfig, RigidBodyState, RigidContact,
+    RigidContactColouring, RigidError, SphericalJoint, TgsContactConfig, MAX_JOINT_BATCHES,
+};
 pub use scan::{cpu_compact, cpu_exclusive_scan, GpuScan};
 pub use xpbd::{
     cpu_solve, cpu_solve_warm, tgs_solve, Colouring, DistanceCache, DistanceConstraint,

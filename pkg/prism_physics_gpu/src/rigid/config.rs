@@ -214,6 +214,14 @@ pub enum RigidError {
         /// The maximum number of batches supported.
         maximum: u32,
     },
+    /// The joint graph needed more parallel batches (colours) than the joint
+    /// solver's fixed ceiling supports.
+    TooManyJointBatches {
+        /// The batch index that overflowed the ceiling.
+        batches: u32,
+        /// The maximum number of batches supported.
+        maximum: u32,
+    },
 }
 
 impl core::fmt::Display for RigidError {
@@ -228,6 +236,10 @@ impl core::fmt::Display for RigidError {
             RigidError::TooManyContactBatches { batches, maximum } => write!(
                 f,
                 "contact graph needs {batches} batches, exceeding the maximum of {maximum}"
+            ),
+            RigidError::TooManyJointBatches { batches, maximum } => write!(
+                f,
+                "joint graph needs {batches} batches, exceeding the maximum of {maximum}"
             ),
         }
     }
