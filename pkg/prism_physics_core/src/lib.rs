@@ -150,7 +150,7 @@ pub use soft::collision::{
     CcdParams, CouplingBody, SelfCcdParams, VirtualParticle, VirtualParticlePattern,
 };
 pub use soft::particle::{ParticleHandle, ParticleStorage};
-pub use soft::solver::{SelfCollisionParams, SoftContacts, SoftSolver, SoftSolverConfig};
+pub use soft::solver::{SelfCollisionParams, SoftContacts, SoftSolver, SoftSolverConfig, VirtualSelfCollisionParams};
 pub use solver::{IntegrateOnlySolver, Solver, SolverRegistry, XpbdConfig, XpbdSolver};
 pub use state::body::{BodyDesc, BodyKind, MassProperties};
 pub use state::handle::BodyHandle;

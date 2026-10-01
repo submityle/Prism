@@ -23,13 +23,14 @@ pub mod config;
 pub mod contacts;
 pub mod integrate;
 
-pub use config::{SelfCollisionParams, SoftSolverConfig};
+pub use config::{SelfCollisionParams, SoftSolverConfig, VirtualSelfCollisionParams};
 pub use contacts::SoftContacts;
 
 use crate::math::scalar::Real;
 use crate::soft::collision::{
     resolve_backstops, resolve_body_collisions, resolve_body_collisions_with_friction, resolve_ccd,
-    resolve_self_ccd, resolve_self_collision, resolve_self_collision_with_friction,
+    resolve_self_ccd, resolve_self_collision, resolve_self_collision_virtual,
+    resolve_self_collision_virtual_augment, resolve_self_collision_with_friction,
 };
 use crate::soft::constraint::ConstraintSet;
 use crate::soft::particle::ParticleStorage;
@@ -70,10 +71,16 @@ impl SoftSolver {
     ///
     /// Each substep predicts under gravity, projects the constraints, then runs
     /// the collide stage in a fixed order so later passes win where they
-    /// overlap: optional discrete self-collision then optional continuous
-    /// self-collision (self-CCD), both from `config`; then discrete body-proxy
-    /// collision then optional continuous body collision (CCD) against the same
-    /// `contacts` colliders; then backstops. Running the body passes last keeps
+    /// overlap: optional discrete self-collision, then optional `NvCloth`-style
+    /// virtual-particle self-collision (gated by
+    /// [`virtual_self_collision`](SoftSolverConfig::virtual_self_collision) with
+    /// the per-frame
+    /// [`contacts.virtual_particles`](SoftContacts::virtual_particles); run in
+    /// augment mode when discrete self-collision is also on so it preserves that
+    /// pass's friction), then optional continuous self-collision (self-CCD), all
+    /// in the self-collision tier; then discrete body-proxy collision then
+    /// optional continuous body collision (CCD) against the same `contacts`
+    /// colliders; then backstops. Running the body passes last keeps
     /// the garment out of the animated body and off its backstop planes at the
     /// end of the substep, and the continuous passes close the thin-sheet or
     /// fast-proxy tunneling gaps their discrete counterparts can miss. Finally
@@ -123,6 +130,27 @@ impl SoftSolver {
                         columns.inverse_masses,
                         contact.cell_size,
                         contact.thickness,
+                    );
+                }
+            }
+            if let Some(vp_params) = config.virtual_self_collision
+                && !contacts.virtual_particles.is_empty()
+            {
+                if config.self_collision.is_some() {
+                    resolve_self_collision_virtual_augment(
+                        columns.positions,
+                        columns.inverse_masses,
+                        contacts.virtual_particles,
+                        vp_params.cell_size,
+                        vp_params.thickness,
+                    );
+                } else {
+                    resolve_self_collision_virtual(
+                        columns.positions,
+                        columns.inverse_masses,
+                        contacts.virtual_particles,
+                        vp_params.cell_size,
+                        vp_params.thickness,
                     );
                 }
             }
@@ -182,7 +210,10 @@ impl SoftSolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::soft::collision::{Backstop, BodyCollider, CcdParams, SelfCcdParams};
+    use crate::soft::collision::{
+        Backstop, BodyCollider, CcdParams, SelfCcdParams, VirtualParticlePattern,
+        generate_virtual_particles,
+    };
     use crate::soft::constraint::DistanceConstraint;
     use crate::soft::particle::ParticleHandle;
     use glam::Vec3;
@@ -569,5 +600,88 @@ mod tests {
             pa.position(ParticleHandle::from_index(1)).unwrap(),
             pb.position(ParticleHandle::from_index(1)).unwrap()
         );
+    }
+
+    // A big triangle in the z=0 plane (corners pinned) plus a free intruder
+    // hovering just above its centroid, inside `thickness` of the face but far
+    // from every corner. Gravity is zeroed so the only motion is the collide
+    // stage, isolating the virtual-particle tier.
+    fn build_vertex_through_triangle() -> (ParticleStorage, ConstraintSet, ParticleHandle) {
+        let mut particles = ParticleStorage::new();
+        particles.spawn_pinned(Vec3::new(0.0, 0.0, 0.0));
+        particles.spawn_pinned(Vec3::new(4.0, 0.0, 0.0));
+        particles.spawn_pinned(Vec3::new(0.0, 4.0, 0.0));
+        let intruder = particles.spawn(Vec3::new(4.0 / 3.0, 4.0 / 3.0, 0.05), 1.0);
+        (particles, ConstraintSet::new(), intruder)
+    }
+
+    #[test]
+    fn virtual_self_collision_catches_vertex_through_triangle() {
+        let solver = SoftSolver::new();
+        let virtuals =
+            generate_virtual_particles(&[[0, 1, 2]], &VirtualParticlePattern::nvcloth_default());
+        let contacts = SoftContacts::EMPTY.with_virtual_particles(&virtuals);
+        let base = SoftSolverConfig {
+            gravity: Vec3::ZERO,
+            ..SoftSolverConfig::default()
+        };
+
+        // Gate off: the intruder is far from every real corner, so the solver's
+        // self-collision tier never touches it and it stays at z=0.05.
+        let (mut off_p, mut off_c, off_h) = build_vertex_through_triangle();
+        solver.step_with_contacts(&mut off_p, &mut off_c, &base, &contacts, 1.0 / 60.0);
+        let off_z = off_p.position(off_h).unwrap().z;
+        assert!(
+            (off_z - 0.05).abs() < 1e-5,
+            "no virtual gate should leave the intruder in place, got z={off_z}"
+        );
+
+        // Gate on: the centroid virtual particle sits under the intruder and the
+        // solver pushes it back out along +z past the 0.2 contact thickness.
+        let cfg = SoftSolverConfig {
+            virtual_self_collision: Some(VirtualSelfCollisionParams::new(1.0, 0.2)),
+            ..base
+        };
+        let (mut on_p, mut on_c, on_h) = build_vertex_through_triangle();
+        solver.step_with_contacts(&mut on_p, &mut on_c, &cfg, &contacts, 1.0 / 60.0);
+        let on_z = on_p.position(on_h).unwrap().z;
+        assert!(
+            on_z > 0.05 + 1e-4,
+            "virtual gate should push the intruder out along +z, got z={on_z}"
+        );
+    }
+
+    #[test]
+    fn virtual_self_collision_noop_without_particles_or_gate() {
+        // Enabling the gate with an empty virtual slice, and leaving the gate
+        // None with virtual particles present, must both exactly match the plain
+        // step with no virtual tier at all.
+        let solver = SoftSolver::new();
+        let virtuals =
+            generate_virtual_particles(&[[0, 1, 2]], &VirtualParticlePattern::nvcloth_default());
+        let base = SoftSolverConfig {
+            gravity: Vec3::ZERO,
+            ..SoftSolverConfig::default()
+        };
+
+        let run = |cfg: &SoftSolverConfig, contacts: &SoftContacts<'_>| {
+            let (mut p, mut c, h) = build_vertex_through_triangle();
+            solver.step_with_contacts(&mut p, &mut c, cfg, contacts, 1.0 / 60.0);
+            p.position(h).unwrap()
+        };
+
+        let plain = run(&base, &SoftContacts::EMPTY);
+
+        // Gate on but no virtual particles supplied -> no-op.
+        let gate_on = SoftSolverConfig {
+            virtual_self_collision: Some(VirtualSelfCollisionParams::new(1.0, 0.2)),
+            ..base
+        };
+        let gate_on_no_vps = run(&gate_on, &SoftContacts::EMPTY);
+        assert_eq!(plain, gate_on_no_vps);
+
+        // Virtual particles supplied but gate None -> no-op.
+        let vps_no_gate = run(&base, &SoftContacts::EMPTY.with_virtual_particles(&virtuals));
+        assert_eq!(plain, vps_no_gate);
     }
 }

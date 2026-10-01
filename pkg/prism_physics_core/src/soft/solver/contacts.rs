@@ -18,7 +18,7 @@
 //! plain borrowed parameter bundle.
 
 use crate::math::scalar::Real;
-use crate::soft::collision::{Backstop, BodyCollider};
+use crate::soft::collision::{Backstop, BodyCollider, VirtualParticle};
 
 /// Per-frame external contact inputs threaded into one solver step.
 ///
@@ -44,6 +44,15 @@ pub struct SoftContacts<'a> {
     /// Coulomb friction coefficient for the body-contact pass, clamped to
     /// `0..=1` by the resolver; `0` gives a frictionless (pure normal) slide.
     pub body_friction: Real,
+    /// `NvCloth`-style virtual particles sampling the garment's triangle
+    /// interiors, folded into the self-collision tier so a vertex cannot tunnel
+    /// through a triangle's face between its three corners. These are a
+    /// *topology-derived*, per-frame input (regenerated when the mesh retopos or
+    /// tears), so—like the body colliders—they are borrowed into each step
+    /// rather than stored on the config. An empty slice disables the virtual
+    /// tier regardless of the config gate. Gate the pass with
+    /// [`SoftSolverConfig::virtual_self_collision`](crate::soft::solver::SoftSolverConfig::virtual_self_collision).
+    pub virtual_particles: &'a [VirtualParticle],
 }
 
 impl SoftContacts<'_> {
@@ -55,6 +64,7 @@ impl SoftContacts<'_> {
         body_colliders: &[],
         backstops: &[],
         body_friction: 0.0,
+        virtual_particles: &[],
     };
 }
 
@@ -70,6 +80,7 @@ impl<'a> SoftContacts<'a> {
             body_colliders,
             backstops,
             body_friction: 0.0,
+            virtual_particles: &[],
         }
     }
 
@@ -78,6 +89,21 @@ impl<'a> SoftContacts<'a> {
     #[must_use]
     pub const fn with_body_friction(mut self, friction: Real) -> SoftContacts<'a> {
         self.body_friction = friction;
+        self
+    }
+
+    /// Returns a copy of this bundle carrying the given `NvCloth`-style
+    /// `virtual_particles` for the self-collision tier. The virtual pass still
+    /// only runs when
+    /// [`SoftSolverConfig::virtual_self_collision`](crate::soft::solver::SoftSolverConfig::virtual_self_collision)
+    /// is set; an empty slice (the default) leaves the garment's vertex-only
+    /// self-collision behaviour unchanged.
+    #[must_use]
+    pub const fn with_virtual_particles(
+        mut self,
+        virtual_particles: &'a [VirtualParticle],
+    ) -> SoftContacts<'a> {
+        self.virtual_particles = virtual_particles;
         self
     }
 
@@ -105,6 +131,7 @@ mod tests {
         assert!(SoftContacts::EMPTY.is_empty());
         assert!(SoftContacts::default().is_empty());
         assert_eq!(SoftContacts::EMPTY.body_friction, 0.0);
+        assert!(SoftContacts::EMPTY.virtual_particles.is_empty());
     }
 
     #[test]
@@ -134,5 +161,20 @@ mod tests {
         let c = SoftContacts::new(&colliders, &[]).with_body_friction(0.4);
         assert_eq!(c.body_friction, 0.4);
         assert!(!c.is_empty());
+    }
+
+    #[test]
+    fn with_virtual_particles_carries_slice_without_changing_emptiness() {
+        let vps = [VirtualParticle {
+            verts: [0, 1, 2],
+            weights: [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0],
+        }];
+        // Virtual particles alone do not flip `is_empty`, which only gates the
+        // body-contact/backstop work; the virtual tier is gated separately by
+        // `SoftSolverConfig::virtual_self_collision`.
+        let c = SoftContacts::new(&[], &[]).with_virtual_particles(&vps);
+        assert!(c.is_empty());
+        assert_eq!(c.virtual_particles.len(), 1);
+        assert_eq!(c.virtual_particles[0].verts, [0, 1, 2]);
     }
 }

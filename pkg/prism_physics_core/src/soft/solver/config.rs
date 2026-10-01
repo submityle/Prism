@@ -56,6 +56,20 @@ pub struct SoftSolverConfig {
     /// [`CcdParams`] value is also a no-op. The body-contact friction is taken
     /// from the same `SoftContacts` bundle as the discrete pass.
     pub ccd: Option<CcdParams>,
+    /// Optional `NvCloth`-style virtual-particle self-collision pass run once
+    /// per substep in the self-collision tier (right after the discrete
+    /// point-to-point [`self_collision`](Self::self_collision) pass). `None`
+    /// (the default) disables it. When set, the solver folds the per-frame
+    /// virtual particles from
+    /// [`SoftContacts::virtual_particles`](crate::soft::solver::SoftContacts::virtual_particles)
+    /// into the self-collision sweep so a vertex cannot tunnel through a
+    /// triangle's interior between its three corners. When
+    /// [`self_collision`](Self::self_collision) is also set, the virtual pass
+    /// runs in *augment* mode (resolving only pairs that touch a virtual
+    /// particle) so it never strips the friction the point-to-point pass applied
+    /// to real-vertex pairs; otherwise it runs as the full self-collision tier.
+    /// An empty `virtual_particles` slice makes the pass a no-op regardless.
+    pub virtual_self_collision: Option<VirtualSelfCollisionParams>,
 }
 
 impl SoftSolverConfig {
@@ -80,6 +94,7 @@ impl Default for SoftSolverConfig {
             self_collision: None,
             self_ccd: None,
             ccd: None,
+            virtual_self_collision: None,
         }
     }
 }
@@ -126,6 +141,43 @@ impl SelfCollisionParams {
     pub const fn with_friction(mut self, friction: Real) -> SelfCollisionParams {
         self.friction = friction;
         self
+    }
+}
+
+/// Parameters for the solver's optional `NvCloth`-style virtual-particle
+/// self-collision pass.
+///
+/// Unlike [`SelfCollisionParams`], this tier carries no friction coefficient:
+/// the virtual pass folds triangle-interior sample points into the
+/// self-collision sweep purely to close the vertex-through-face tunnelling gap,
+/// scattering each correction back onto the triangle corners by barycentric
+/// weight. Tangential friction, when wanted, is supplied by the point-to-point
+/// [`SelfCollisionParams::with_friction`] pass, which the virtual pass augments
+/// rather than replaces (see
+/// [`SoftSolverConfig::virtual_self_collision`](SoftSolverConfig::virtual_self_collision)).
+/// See [`crate::soft::collision`] for the exact math and determinism guarantees.
+#[derive(Clone, Copy, PartialEq, Debug)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
+pub struct VirtualSelfCollisionParams {
+    /// Uniform spatial-hash cell side length, in metres. Should be on the order
+    /// of the particle spacing (or the `thickness`); a non-positive value makes
+    /// the pass a no-op.
+    pub cell_size: Real,
+    /// Contact thickness: the minimum separation enforced between any two
+    /// samples (real vertices and virtual particles), in metres. A non-positive
+    /// value makes the pass a no-op.
+    pub thickness: Real,
+}
+
+impl VirtualSelfCollisionParams {
+    /// Creates virtual-particle self-collision parameters with the given
+    /// spatial-hash `cell_size` and contact `thickness`.
+    #[must_use]
+    pub const fn new(cell_size: Real, thickness: Real) -> VirtualSelfCollisionParams {
+        VirtualSelfCollisionParams {
+            cell_size,
+            thickness,
+        }
     }
 }
 
