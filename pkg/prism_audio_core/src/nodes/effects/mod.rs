@@ -71,6 +71,12 @@
 //!   metallic, clangorous timbres; distinct from
 //!   [`ring_modulator::RingModulatorNode`], which produces a symmetric
 //!   sideband pair rather than a one-sided shift.
+//! - [`pitch_shifter::PitchShifterNode`] -- phase-vocoder pitch shifter that
+//!   transposes every partial by one ratio (preserving harmonic ratios and
+//!   duration) via STFT analysis, instantaneous-frequency estimation, and
+//!   phase-accumulating resynthesis; distinct from the inharmonic
+//!   [`frequency_shifter::FrequencyShifterNode`] (adds a Hz offset) and the
+//!   time-domain [`vibrato::VibratoNode`] (cyclic delay-based bend).
 //! - [`vibrato::VibratoNode`] — single LFO-swept fractional delay for
 //!   periodic pitch modulation.
 //! - [`vocoder::VocoderNode`] -- channel vocoder cross-synthesis: a band bank
@@ -113,6 +119,7 @@ pub mod mid_side_matrix;
 pub mod multi_tap_delay;
 pub mod parametric_eq;
 pub mod phaser;
+pub mod pitch_shifter;
 pub mod ring_modulator;
 pub mod saturation;
 pub mod spectral_gate;
@@ -142,6 +149,9 @@ pub use mid_side_matrix::{MidSideMatrixNode, MidSideMatrixParams, MidSideMode};
 pub use multi_tap_delay::{MAX_TAPS, MultiTapDelayNode, MultiTapDelayParams, TapSpec};
 pub use parametric_eq::{EqBand, ParametricEqNode};
 pub use phaser::{PhaserNode, PhaserParams};
+pub use pitch_shifter::{
+    MAX_PITCH_RATIO, MIN_PITCH_RATIO, PitchShifterNode, PitchShifterParams, semitones_to_ratio,
+};
 pub use ring_modulator::{RingModulatorNode, RingModulatorParams};
 pub use saturation::{DEFAULT_DC_BLOCK_COEFF, SaturationCurve, SaturationNode, SaturationParams};
 pub use spectral_gate::{
