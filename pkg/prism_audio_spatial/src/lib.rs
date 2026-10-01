@@ -58,6 +58,7 @@ pub mod diffraction;
 pub mod diffusion_field;
 pub mod doppler;
 pub mod early_reflections;
+pub mod echo_criterion;
 pub mod geometry;
 pub mod ground_effect;
 pub mod hoa;
@@ -107,6 +108,10 @@ pub use doppler::{Doppler, SPEED_OF_SOUND_MPS, doppler_ratio};
 pub use early_reflections::{
     DEFAULT_SOUND_SPEED, EarlyReflectionRenderer, MAX_EARLY_REFLECTIONS, MAX_REFLECTION_ORDER,
     ReflectionTap, ShoeboxRoom, compute_early_reflections,
+};
+pub use echo_criterion::{
+    EchoCriterion, EchoMode, MUSIC_EXPONENT, MUSIC_THRESHOLD, MUSIC_WINDOW_MS, SPEECH_EXPONENT,
+    SPEECH_THRESHOLD, SPEECH_WINDOW_MS, echo_criterion,
 };
 pub use geometry::{Emitter, Listener, LocalSource};
 pub use ground_effect::GroundEffect;
