@@ -359,6 +359,19 @@
 //!   otherwise, the RT-side policy the reflection BVH build consumes (see
 //!   [`rt_proxy`]).
 //!
+//! * [`GpuHairDitherAlpha`] evaluates
+//!   [`dither_alpha_map`](prism_render_architecture::hair::reactive_mask::dither_alpha_map),
+//!   the blue-noise sub-pixel fallback that draws the thinnest fibres the
+//!   analytic `line_coverage` ramp cannot resolve — one thread per pixel
+//!   derives a deterministic threshold in `[0, 1)` from `(base_x + i,
+//!   base_y, frame)` through an integer xorshift / multiply finaliser, then
+//!   makes a hard draw decision (`alpha = 1` when the sanitised coverage is
+//!   at or above the threshold, else `0`); because the threshold is pure
+//!   32-bit integer arithmetic whose `WGSL` wrapping path mirrors Rust's
+//!   `wrapping_mul` / `wrapping_add` exactly, this is the first twin checked
+//!   **bit-exact** (raw `to_bits()` compare, not a tolerance) rather than
+//!   within an fma bound (see [`dither_alpha`]).
+//!
 //! # Portability
 //!
 //! The projection uses only `sqrt`, `min`, `max`, `clamp`, `dot` and
@@ -395,6 +408,7 @@ pub mod cosserat;
 pub mod decimation_priority;
 pub mod deep_opacity;
 pub mod deep_transmittance_sample;
+pub mod dither_alpha;
 pub mod forward_scatter;
 pub mod forward_scatter_sample;
 pub mod frames;
@@ -439,6 +453,7 @@ pub use cosserat::GpuCosserat;
 pub use decimation_priority::GpuDecimationPriority;
 pub use deep_opacity::GpuHairDeepOpacity;
 pub use deep_transmittance_sample::{GpuHairDeepTransmittanceSample, TransmittanceQuery};
+pub use dither_alpha::{reference_dither_alpha_map, GpuHairDitherAlpha};
 pub use forward_scatter::GpuHairForwardScatter;
 pub use forward_scatter_sample::{GpuHairForwardScatterSample, ScatterQuery};
 pub use frames::{GpuStrandFrame, GpuStrandFrames};
