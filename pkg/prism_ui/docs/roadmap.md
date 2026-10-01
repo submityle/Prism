@@ -48,11 +48,11 @@
 - [ ] `Show` / `For` 结构绑定,keyed reconcile 批量 spawn/despawn 到帧末。
 - [x] 可访问性(a11y)基线:角色 / 焦点 / 键盘导航 / 读屏标签(`prism_ui_a11y`,已交付)。
 
-### M3 样式层增强(scoped / @media 已交付,热重载规划中)
+### M3 样式层增强(scoped / @media / 热重载核心已交付)
 - [x] token / class / 级联 / 交互态 / 断点匹配上下文。
 - [x] 作用域样式(scoped):`ScopeId` 稳定散列 + class 命名空间化(`prism_ui_scoped`,已交付)。
 - [x] `@media` 响应式断点解析:mobile-first 级联解出生效属性集(`prism_ui_scoped`,已交付)。
-- [ ] `.loom` 结构 + `.loom.style` 样式热重载,**保留运行时状态**。
+- [x] `.loom` 结构 + `.loom.style` 样式热重载,**保留运行时状态**:`NodePath` 身份比对 + `ReloadPlan`(保留/新增/移除/重建)+ `StateStore` 状态裁剪 + `StyleDiff`(`prism_ui_hotreload`,已交付)。文件系统监听集成仍规划中。
 
 ### M4 效果层增强(已交付)
 - [x] 缓动 / 弹簧 / 时间线 / 进出场 `Transition`。
@@ -75,7 +75,7 @@
 - [x] DevTools 基线:树快照 + `render_tree` 美化输出 + `OpTrace` 操作轨迹(`prism_ui_devtools`,已交付)。
 - [x] DevTools 进阶 · 树检查器 + 性能面板:`NodePath` 寻址 / `Query` 过滤 / `PerfReport` / `TreeMetrics`(`prism_ui_inspector`,已交付)。
 - [x] DevTools 进阶 · 状态时间旅行回放:帧时间线 undo/redo + 跳转 + 相邻帧 diff / 变更摘要(`prism_ui_timetravel`,已交付)。
-- [ ] DevTools 进阶 · signal 依赖图:需 `prism_ui_reactive` 暴露依赖边 introspection API(规划中)。
+- [x] DevTools 进阶 · signal 依赖图:`prism_ui_reactive` 暴露只读 `GraphSnapshot` introspection,`prism_ui_inspector::DependencyGraph` 提供传递闭包 / 拓扑序(Kahn)/ Graphviz 导出(已交付)。
 - [x] 快照测试(渲染树 / 布局结果序列化比对)(`prism_ui_snapshot`,已交付)。
 - [x] 组件工作台(Storybook 式隔离预览)(`prism_ui_workbench`,已交付)。
 - [ ] 双模式编译:开发期解释(极速热重载)/ 发布期宏固化(零解析开销)。

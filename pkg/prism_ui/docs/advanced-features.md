@@ -193,8 +193,8 @@ assert_eq!(render_tree(&snap), "Box\n  Text \"hello\"\n  Text \"world\"\n");
 
 **与性能契约闭环**:`OpTrace` + `RecordingBackend` 把 README 里「成本 ∝ 变化量」
 的口号钉成可回归的测试——相同输入零新增 op、keyed 反转仅 1 次 reorder 等,
-都能被 DevTools 产物断言。完整的实体/组件树检查器、signal 依赖图可视化、
-状态时间旅行回放为 roadmap M6 的后续增强。
+都能被 DevTools 产物断言。元素树检查器(第 16 节)、signal 依赖图检查(本节 roadmap M6
+现已交付于 `prism_ui_inspector::DependencyGraph`)、状态时间旅行回放(第 15 节)均已落地。
 
 ## 6. `prism_ui_overlay` — Portal / Overlay 栈
 
@@ -606,6 +606,7 @@ assert!(report.contains("world"));
 - `path`:按位置寻址节点。`NodePath` 渲染为 `/0/2/1`,可从同样语法 parse 回来;`paths_of` 以确定的深度优先顺序枚举每个节点。
 - `query`:过滤树。`Query` 组合 kind / class / 子串 text 条件,返回匹配项及其路径。
 - `perf`:聚合度量。`PerfReport` 把 `OpTrace` 汇总成分类计数 + 整数 *churn* 指标;`TreeMetrics` 概括一棵快照的形状(node_count/depth/kind 直方图/max_fan_out)。
+- `graph`:signal 依赖图检查。`DependencyGraph::from(&GraphSnapshot)` 消费 `prism_ui_reactive` 暴露的只读依赖快照,提供 `dependents_of`/`dependencies_of`(传递闭包)、`topo_order`(Kahn 拓扑排序,有环返回 `None`)、`roots`/`leaves`,以及 `to_dot` 的 Graphviz 导出——把「谁依赖谁」从运行时内部结构变成可断言、可可视化的产物。
 
 全部 `no_std` 友好、度量中不含浮点、输出确定,适合 golden 测试。
 
@@ -644,6 +645,63 @@ assert_eq!(report.set_texts, 2);
 
 ---
 
+## 17. `prism_ui_hotreload` — 状态保留式热重载
+
+对标:Vite / Webpack 的 HMR、SwiftUI Preview、Flutter 的 hot reload。当 `.loom`
+视图或 `.loom.style` 样式表在磁盘上变化时,UI 应该 **原地更新**,而不是推倒重来丢掉
+每个节点的瞬态状态(滚动偏移、文本框内容、动画进度)。本 crate 实现这一行为的
+**引擎无关核心**,全部为确定性整数 / 排序运算,重载完全可复现。
+
+- `identity`:给每个节点分配稳定的 `NodePath`,让新树里的节点能匹配回旧树的对应节点;`paths_of` 以确定顺序枚举 `(路径, &Element)`。
+- `plan`:把旧树与新树 diff 成 `ReloadPlan`,逐节点归类为 **保留(Preserved)/ 新增(Added)/ 移除(Removed)/ 重建(Recreated,kind 或 key 改变)**;`counts()` / `report()` 产出可断言摘要。
+- `statestore`:`StateStore<T>` 按路径承载每节点状态;`apply_plan` 应用一次计划,**只丢弃不再有效的状态**,返回 `ReloadReport { preserved, added, dropped, .. }`。
+- `style_reload`:`diff_classes` 基于 `prism_ui_style::resolve` 比对一组 class 名在新旧样式表下的 `ComputedStyle`,产出 `StyleDiff`,让后端只热替换真正变化的属性。
+- `reload`:`HotReloader<T>` 把树与状态绑在一起,`reload(new_source)` 一步完成「计划 + 应用 + 状态裁剪」。
+
+```rust
+use prism_ui::{Element, Key};
+use prism_ui_hotreload::{identity::paths_of, HotReloader};
+
+// 一个 keyed 列表:a 保留,b 改变 kind(box→text)将被重建,c 被移除。
+let old = Element::box_()
+    .child(Element::text("keep").key_str("a"))
+    .child(Element::box_().key_str("b"))
+    .child(Element::text("gone").key_str("c"));
+
+let mut reloader: HotReloader<&str> = HotReloader::new(old.clone());
+
+// 为 a、b 两项播种每节点状态(先 collect 结束对 current() 的借用)。
+let seeds: Vec<(_, &str)> = paths_of(reloader.current())
+    .into_iter()
+    .filter_map(|(path, element)| match element.explicit_key() {
+        Some(Key::Str(k)) if k == "a" => Some((path, "a-state")),
+        Some(Key::Str(k)) if k == "b" => Some((path, "b-state")),
+        _ => None,
+    })
+    .collect();
+for (path, state) in seeds {
+    reloader.state_mut().insert(path, state);
+}
+
+// 新源:a 保留、b 重建(box→text)、c 移除、d 新增。
+let new = Element::box_()
+    .child(Element::text("keep").key_str("a"))
+    .child(Element::text("changed").key_str("b"))
+    .child(Element::text("new").key_str("d"));
+
+let report = reloader.reload(new);
+
+// 根 + a 文本被保留;d 新增;b 的旧状态被丢弃。
+assert_eq!(report.preserved, 2);
+assert_eq!(report.added, 1);
+assert_eq!(report.dropped, 1);
+```
+
+> 差异:热重载复用第 16 节检查器的 `NodePath` 身份模型与核心层的 keyed 协调语义——
+> 「谁被保留 / 谁被重建」与运行时实际的最小化 `BackendOp` 流一致,不引入第二套 diff。
+
+---
+
 ## 组合示例:高级层如何协同
 
 一个典型的「可国际化、带全局状态、按路由切换」的视图,其数据流为:
@@ -673,4 +731,4 @@ I18n.translation     (Memo)  ─┘                              │
   静态子树提升 / 编译期稳定节点 ID,见 [roadmap.md](roadmap.md)。隐式过渡 / FLIP 布局动画 /
   共享元素过渡(第 11 节)、作用域样式 / 响应式 @media(第 12 节)、
   快照测试(第 13 节)、组件工作台(第 14 节)、时间旅行调试(第 15 节)与
-  元素树检查器 / 性能面板(第 16 节)**均已交付**;DevTools 的 **signal 依赖图** 仍在规划(需 reactive 暴露依赖边)。
+  元素树检查器 / 性能面板(第 16 节)、**signal 依赖图检查**(第 16 节 `DependencyGraph`,`prism_ui_reactive` 已暴露只读依赖边)与 **`.loom` / `.loom.style` 热重载**(第 17 节)**均已交付**。
