@@ -255,43 +255,10 @@ pub fn resolve_self_ccd(
         return;
     }
 
-    // Broad phase: bucket each particle's thickness-expanded swept box into
-    // every integer cell it overlaps. Ascending index insertion keeps each
-    // bucket sorted for deterministic pairing.
-    let cell_size = params.cell_size;
-    let margin = Vec3::splat(params.thickness);
-    let mut buckets: BTreeMap<(i32, i32, i32), Vec<u32>> = BTreeMap::new();
-    for index in 0..count {
-        let prev = prev_positions[index];
-        let curr = positions[index];
-        let lo = prev.min(curr) - margin;
-        let hi = prev.max(curr) + margin;
-        let (lx, ly, lz) = cell_of(lo, cell_size);
-        let (hx, hy, hz) = cell_of(hi, cell_size);
-        let mut cx = lx;
-        while cx <= hx {
-            let mut cy = ly;
-            while cy <= hy {
-                let mut cz = lz;
-                while cz <= hz {
-                    buckets.entry((cx, cy, cz)).or_default().push(index as u32);
-                    cz += 1;
-                }
-                cy += 1;
-            }
-            cx += 1;
-        }
-    }
-
-    // Collect unique candidate pairs across all shared cells.
-    let mut pairs: BTreeSet<(u32, u32)> = BTreeSet::new();
-    for occupants in buckets.values() {
-        for slot_a in 0..occupants.len() {
-            for slot_b in (slot_a + 1)..occupants.len() {
-                pairs.insert((occupants[slot_a], occupants[slot_b]));
-            }
-        }
-    }
+    // Broad phase: enumerate the deterministic candidate-pair set shared by
+    // the Gauss-Seidel core and its parallel-safe Jacobi twin.
+    let pairs =
+        collect_self_ccd_candidate_pairs(positions, prev_positions, count, params.cell_size, params.thickness);
 
     let inv_dt = if dt.abs() <= EPS_REL_MOTION {
         0.0
@@ -364,6 +331,63 @@ pub fn resolve_self_ccd(
             }
         }
     }
+}
+
+/// Enumerates the deterministic set of candidate self-collision pairs.
+///
+/// Each of the first `count` particles is bucketed into every integer cell its
+/// `thickness`-expanded swept box (the box of `prev_positions[i]` and
+/// `positions[i]`) overlaps, keyed by a [`BTreeMap`] so cell order is fixed and
+/// indices are inserted in ascending order so each bucket stays sorted. Every
+/// unordered pair that co-occupies at least one cell is returned exactly once in
+/// a [`BTreeSet`], giving a single stable pair order that both
+/// [`resolve_self_ccd`] (Gauss-Seidel) and
+/// [`resolve_self_ccd_jacobi`](super::resolve_self_ccd_jacobi) consume so the
+/// two resolvers fold the identical candidate set.
+///
+/// `cell_size` is used verbatim (callers pass the already-[`SelfCcdParams::sanitized`]
+/// value); `count` is assumed to be within the bounds of both slices.
+#[must_use]
+pub(crate) fn collect_self_ccd_candidate_pairs(
+    positions: &[Vec3],
+    prev_positions: &[Vec3],
+    count: usize,
+    cell_size: Real,
+    thickness: Real,
+) -> BTreeSet<(u32, u32)> {
+    let margin = Vec3::splat(thickness);
+    let mut buckets: BTreeMap<(i32, i32, i32), Vec<u32>> = BTreeMap::new();
+    for index in 0..count {
+        let prev = prev_positions[index];
+        let curr = positions[index];
+        let lo = prev.min(curr) - margin;
+        let hi = prev.max(curr) + margin;
+        let (lx, ly, lz) = cell_of(lo, cell_size);
+        let (hx, hy, hz) = cell_of(hi, cell_size);
+        let mut cx = lx;
+        while cx <= hx {
+            let mut cy = ly;
+            while cy <= hy {
+                let mut cz = lz;
+                while cz <= hz {
+                    buckets.entry((cx, cy, cz)).or_default().push(index as u32);
+                    cz += 1;
+                }
+                cy += 1;
+            }
+            cx += 1;
+        }
+    }
+
+    let mut pairs: BTreeSet<(u32, u32)> = BTreeSet::new();
+    for occupants in buckets.values() {
+        for slot_a in 0..occupants.len() {
+            for slot_b in (slot_a + 1)..occupants.len() {
+                pairs.insert((occupants[slot_a], occupants[slot_b]));
+            }
+        }
+    }
+    pairs
 }
 
 #[cfg(test)]

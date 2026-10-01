@@ -38,7 +38,7 @@ pub use build::{Cloth, ClothGrid, Rope, RopeGrid, SoftBox, SoftBoxGrid};
 pub use collision::{
     apply_backstop, capsule_toi, closest_point_on_segment, generate_virtual_particles,
     half_space_toi, project_out_of_half_space, project_out_of_sphere, resolve_backstops,
-    resolve_body_collisions, resolve_body_collisions_with_friction, resolve_ccd, resolve_self_ccd,
+    resolve_body_collisions, resolve_body_collisions_with_friction, resolve_ccd, resolve_self_ccd, resolve_self_ccd_jacobi,
     resolve_self_collision, resolve_self_collision_virtual, resolve_self_collision_virtual_augment,
     resolve_self_collision_virtual_augment_jacobi, resolve_self_collision_virtual_jacobi,
     couple_particle_against_body, resolve_self_collision_with_friction, resolve_two_way_coupling,
