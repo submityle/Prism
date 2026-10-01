@@ -49,6 +49,36 @@ impl Capsule {
         closest.distance_squared <= sum * sum
     }
 
+    /// Resolves this capsule against `other`, returning `(point, normal, depth)`
+    /// when their surfaces overlap or [`None`] otherwise.
+    ///
+    /// `normal` is a unit vector pointing from this capsule toward `other` (the
+    /// direction `other` must travel to separate), `point` is the midpoint of
+    /// the overlapping surface span, and `depth >= 0` is the penetration. When
+    /// the core segments touch or cross the gap direction is ill-defined, so a
+    /// stable axis is taken from the cross product of the two segment
+    /// directions, falling back to the world up axis for parallel cores.
+    pub fn contact(&self, other: &Capsule) -> Option<(Vec3, Vec3, f32)> {
+        let sum = self.radius + other.radius;
+        let near = closest_points_segment_segment(self.a, self.b, other.a, other.b);
+        if near.distance_squared > sum * sum {
+            return None;
+        }
+        let dist = near.distance_squared.sqrt();
+        let normal = if dist > 1.0e-6 {
+            (near.c2 - near.c1) * dist.recip()
+        } else {
+            let cross = (self.b - self.a).cross(other.b - other.a);
+            let n = cross.normalize_or_zero();
+            if n == Vec3::ZERO { Vec3::Y } else { n }
+        };
+        let depth = sum - dist;
+        let surface_self = near.c1 + normal * self.radius;
+        let surface_other = near.c2 - normal * other.radius;
+        let point = (surface_self + surface_other) * 0.5;
+        Some((point, normal, depth))
+    }
+
     /// Returns a tight axis-aligned bounding box enclosing the capsule.
     ///
     /// This is the box of the core segment expanded by `radius` on each axis,
@@ -113,5 +143,46 @@ mod tests {
         let got = c.aabb();
         assert!(got.min.abs_diff_eq(expected.min, 1e-6));
         assert!(got.max.abs_diff_eq(expected.max, 1e-6));
+    }
+
+    #[test]
+    fn contact_parallel_overlap() {
+        // Two parallel capsules 0.8 apart on y with radii 0.5 + 0.4 = 0.9 sum,
+        // overlapping by 0.1 with an upward normal toward `other`.
+        let a = x_capsule();
+        let b = Capsule::new(Vec3::new(-1.0, 0.8, 0.0), Vec3::new(1.0, 0.8, 0.0), 0.4);
+        let (_, normal, depth) = a.contact(&b).expect("overlap");
+        assert!(normal.y > 0.99, "normal toward +y: {normal:?}");
+        assert_relative_eq!(depth, 0.1, epsilon = 1e-5);
+    }
+
+    #[test]
+    fn contact_too_far_is_none() {
+        let a = x_capsule();
+        let b = Capsule::new(Vec3::new(-1.0, 1.2, 0.0), Vec3::new(1.0, 1.2, 0.0), 0.4);
+        assert!(a.contact(&b).is_none());
+    }
+
+    #[test]
+    fn contact_crossing_cores() {
+        // Perpendicular capsules whose cores meet at the origin: the gap is
+        // zero, so the normal comes from the cross of the two axes and the
+        // depth is the full radius sum.
+        let a = x_capsule();
+        let b = Capsule::new(Vec3::new(0.0, 0.0, -1.0), Vec3::new(0.0, 0.0, 1.0), 0.3);
+        let (_, normal, depth) = a.contact(&b).expect("overlap");
+        assert_relative_eq!(depth, 0.8, epsilon = 1e-5);
+        assert_relative_eq!(normal.length(), 1.0, epsilon = 1e-5);
+    }
+
+    #[test]
+    fn contact_degenerate_points_are_spheres() {
+        // Point capsules behave like spheres: centres 0.8 apart, radii 0.5 each.
+        let a = Capsule::new(Vec3::ZERO, Vec3::ZERO, 0.5);
+        let b = Capsule::new(Vec3::new(0.8, 0.0, 0.0), Vec3::new(0.8, 0.0, 0.0), 0.5);
+        let (point, normal, depth) = a.contact(&b).expect("overlap");
+        assert!(normal.x > 0.99, "normal toward +x: {normal:?}");
+        assert_relative_eq!(depth, 0.2, epsilon = 1e-5);
+        assert_relative_eq!(point.x, 0.4, epsilon = 1e-5);
     }
 }
