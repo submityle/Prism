@@ -104,6 +104,7 @@ pub mod shadow_buffers;
 pub mod sim_pass_buffers;
 pub mod sleep;
 pub mod solver;
+pub mod spectral_absorption;
 pub mod transition;
 pub mod vbd_pass_buffers;
 pub mod wetness;
