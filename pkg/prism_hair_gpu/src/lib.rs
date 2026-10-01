@@ -44,6 +44,15 @@
 //!   host-built per-particle neighbor slice so the reduction order matches the
 //!   reference (see [`self_collision_jacobi`]).
 //!
+//! * [`GpuHairSelfCollisionVoxel`] evaluates
+//!   [`resolve_self_collision`](prism_render_architecture::hair::self_collision_voxel::resolve_self_collision),
+//!   the voxel-density self-collision pass: the host splats the density +
+//!   velocity field (phase 1), then one thread per particle gathers it with a
+//!   trilinear stencil, pushes down a central-difference density gradient
+//!   (repulsion + two-sided volume preservation) and blends velocity toward the
+//!   local mass-weighted average (friction), reproducing the reference's
+//!   phase-2 resolve body (see [`self_collision_voxel`]).
+//!
 //! * [`GpuStrandMetrics`] evaluates
 //!   [`strand_arc_length`](prism_render_architecture::hair::decimation::strand_arc_length)
 //!   and
@@ -559,6 +568,7 @@ pub mod scatter_lod;
 pub mod sdf_collision;
 pub mod self_collision_grid;
 pub mod self_collision_jacobi;
+pub mod self_collision_voxel;
 pub mod spectrum_sample_map;
 pub mod strand_metrics;
 pub mod transition;
@@ -620,6 +630,7 @@ pub use scatter_lod::{reference_pdf, GpuHairScatterLod, PDF_PER_ELEMENT};
 pub use sdf_collision::GpuSdfCollider;
 pub use self_collision_grid::GpuSelfCollisionGrid;
 pub use self_collision_jacobi::GpuSelfCollisionJacobi;
+pub use self_collision_voxel::GpuHairSelfCollisionVoxel;
 pub use spectrum_sample_map::{reference_spectrum_sample_map, GpuHairSpectrumSample};
 pub use strand_metrics::{GpuStrandMetric, GpuStrandMetrics};
 pub use transition::GpuHairTransition;
