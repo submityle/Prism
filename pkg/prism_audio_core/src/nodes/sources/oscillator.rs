@@ -218,7 +218,7 @@ impl AudioNode for OscillatorNode {
 /// over the two samples straddling the jump and thereby suppresses aliasing.
 /// It returns `0.0` away from the discontinuity.
 #[inline]
-fn poly_blep(t: Sample, dt: Sample) -> Sample {
+pub(crate) fn poly_blep(t: Sample, dt: Sample) -> Sample {
     if dt <= 0.0 {
         return 0.0;
     }

@@ -28,6 +28,10 @@
 //!   operator: a sine core deflected by an optional modulation input and
 //!   two-sample-averaged self-feedback, the primitive voice of FM
 //!   synthesis algorithms assembled in the mix graph.
+//! - [`supersaw::SupersawNode`] -- detuned saw-stack ("super saw"): seven
+//!   `PolyBLEP` band-limited sawtooths spread around one fundamental by an
+//!   equal-temperament detune control and blended center-vs-sides by a `mix`
+//!   control, the lush JP-8000-style unison lead/pad voice.
 //!
 //! Every generator is real-time safe: `process` performs no allocation, no
 //! locking, and no panics, and reproducible generators are fully deterministic
@@ -38,6 +42,7 @@ pub mod karplus_strong;
 pub mod noise;
 pub mod oscillator;
 pub mod sample_player;
+pub mod supersaw;
 pub mod wavetable_oscillator;
 
 pub use fm_operator::{FmOperatorNode, FmOperatorParams};
@@ -45,4 +50,5 @@ pub use karplus_strong::{KarplusStrongNode, KarplusStrongParams};
 pub use noise::{NoiseColor, NoiseNode};
 pub use oscillator::{OscillatorNode, Waveform};
 pub use sample_player::{Interpolation, LoopMode, SamplePlayerNode};
+pub use supersaw::{SupersawNode, SupersawParams};
 pub use wavetable_oscillator::{WavetableOscillatorNode, WavetableOscillatorParams};
