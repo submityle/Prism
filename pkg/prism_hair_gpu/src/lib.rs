@@ -372,6 +372,20 @@
 //!   **bit-exact** (raw `to_bits()` compare, not a tolerance) rather than
 //!   within an fma bound (see [`dither_alpha`]).
 //!
+//! * [`GpuHairEvalSh`] reconstructs
+//!   [`eval_sh`](prism_render_architecture::hair::dual_scatter_sh::eval_sh),
+//!   the second-order real spherical-harmonic (`SH`) transmittance a `Zinke`
+//!   dual-scattering groom caches in nine band-major coefficients — one thread
+//!   per query direction normalises the direction (`normalize_or_zero`:
+//!   degenerate / non-finite directions collapse to the pole), evaluates the
+//!   nine `SH` basis functions in Cartesian polynomial form (no trigonometry,
+//!   only multiply/add plus the one `sqrt` of the normalisation), dots them
+//!   against the shared coefficients, then sanitises and clamps the result
+//!   non-negative; because the reconstruction is a `sqrt`/divide/multiply-add
+//!   chain a `GPU` may fuse, this twin is checked within an fma **tolerance**
+//!   (`abs_diff < 1e-4` or `rel_diff < 1e-3`) rather than bit-exact (see
+//!   [`eval_sh`]).
+//!
 //! # Portability
 //!
 //! The projection uses only `sqrt`, `min`, `max`, `clamp`, `dot` and
@@ -409,6 +423,7 @@ pub mod decimation_priority;
 pub mod deep_opacity;
 pub mod deep_transmittance_sample;
 pub mod dither_alpha;
+pub mod eval_sh;
 pub mod forward_scatter;
 pub mod forward_scatter_sample;
 pub mod frames;
@@ -454,6 +469,7 @@ pub use decimation_priority::GpuDecimationPriority;
 pub use deep_opacity::GpuHairDeepOpacity;
 pub use deep_transmittance_sample::{GpuHairDeepTransmittanceSample, TransmittanceQuery};
 pub use dither_alpha::{reference_dither_alpha_map, GpuHairDitherAlpha};
+pub use eval_sh::{reference_eval_sh, GpuHairEvalSh};
 pub use forward_scatter::GpuHairForwardScatter;
 pub use forward_scatter_sample::{GpuHairForwardScatterSample, ScatterQuery};
 pub use frames::{GpuStrandFrame, GpuStrandFrames};
