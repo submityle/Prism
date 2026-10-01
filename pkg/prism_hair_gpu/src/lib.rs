@@ -96,6 +96,15 @@
 //!   on the clumped tangent, and per-point position jitter — the stage that
 //!   turns the sparse simulated guides into the dense drawn groom (see
 //!   [`interp`]).
+//! * [`GpuHairLineCoverage`] evaluates
+//!   [`pixel_coverage`](prism_render_architecture::hair::line_coverage::pixel_coverage),
+//!   the analytic sub-pixel anti-aliasing coverage of one width-carrying fibre
+//!   segment one thread per pixel centre — the pixel is a round kernel of
+//!   radius `0.5`, the fibre a capsule of half-width `width * 0.5`, and the
+//!   coverage the monotone trapezoidal ramp `clamp(width*0.5 + 0.5 - d, 0, 1)`
+//!   over the clamped point-to-segment distance `d` (one `sqrt`, no
+//!   transcendental), with the segment on a host uniform and the same
+//!   finite-and-positive width guard the golden uses (see [`line_coverage`]).
 //! * [`GpuHairMelanin`] evaluates
 //!   [`melanin_absorption`](prism_render_architecture::hair::melanin::melanin_absorption),
 //!   folding each fibre's two non-negative pigment concentrations (eumelanin,
@@ -356,6 +365,7 @@ pub mod frames;
 pub mod guide_solver;
 pub mod importance;
 pub mod interp;
+pub mod line_coverage;
 pub mod melanin;
 pub mod mesh_shell;
 pub mod mesh_shell_tapered;
@@ -396,6 +406,7 @@ pub use frames::{GpuStrandFrame, GpuStrandFrames};
 pub use guide_solver::GpuGuideSolver;
 pub use importance::GpuHairImportance;
 pub use interp::GpuHairInterp;
+pub use line_coverage::{reference_coverage, GpuHairLineCoverage};
 pub use melanin::{reference_absorption, GpuHairMelanin};
 pub use mesh_shell::{GpuMeshShell, GpuShellMesh, ShellStrandInput};
 pub use mesh_shell_tapered::{GpuMeshShellTapered, TaperedShellStrandInput};
