@@ -12,6 +12,12 @@
 //! - [`auto_wah::AutoWahNode`] -- envelope-controlled resonant filter
 //!   (auto-wah / envelope filter): a rectified attack / release follower sweeps
 //!   the shared [`Svf`](crate::nodes::svf::Svf) cutoff with the input loudness.
+//! - [`envelope_follower::EnvelopeFollowerNode`] -- envelope follower that
+//!   rectifies the input (peak or RMS) and smooths it with split attack /
+//!   release ballistics, then emits that per-channel envelope as an
+//!   audio-rate control signal rather than consuming it internally; reuses
+//!   the dynamics family's shared [`LevelDetector`](crate::nodes::dynamics::detector::LevelDetector)
+//!   detection stage for side-chain, ducking-trigger, or modulation routing.
 //! - [`parametric_eq::ParametricEqNode`] — multi-band parametric EQ built by
 //!   cascading reusable [`Biquad`](crate::nodes::biquad::Biquad) sections.
 //! - [`graphic_eq::GraphicEqNode`] -- fixed ISO octave / third-octave graphic
@@ -198,6 +204,7 @@ pub mod chorus;
 pub mod comb_resonator;
 pub mod delay;
 pub mod diode_clipper;
+pub mod envelope_follower;
 pub mod exciter;
 pub mod flanger;
 pub mod formant_filter;
@@ -238,6 +245,10 @@ pub use chorus::{ChorusNode, ChorusParams};
 pub use comb_resonator::{CombResonatorNode, CombResonatorParams, MAX_FEEDBACK, MIN_FREQUENCY_HZ};
 pub use delay::DelayNode;
 pub use diode_clipper::{DiodeClipper, DiodeClipperNode, DiodeClipperParams};
+pub use envelope_follower::{
+    DEFAULT_ENVELOPE_ATTACK_MS, DEFAULT_ENVELOPE_RELEASE_MS, DEFAULT_ENVELOPE_RMS_WINDOW_MS,
+    EnvelopeFollowerNode, EnvelopeFollowerParams, MAX_ENVELOPE_TIME_MS,
+};
 pub use exciter::{Exciter, ExciterNode, ExciterParams, HarmonicMode};
 pub use flanger::{FlangerNode, FlangerParams};
 pub use formant_filter::{
