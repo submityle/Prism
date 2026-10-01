@@ -80,6 +80,7 @@ pub mod room_acoustics;
 pub mod room_modes;
 pub mod rooms;
 pub mod scattering;
+pub mod seat_dip_effect;
 pub mod source_directivity;
 pub mod spatializer;
 pub mod spread;
@@ -149,6 +150,9 @@ pub use rooms::{
 pub use scattering::{
     ScatteringSpectrum, SurfaceScatter, diffuse_fraction, lambert_directivity, lambert_weight,
     specular_fraction,
+};
+pub use seat_dip_effect::{
+    MAX_SEAT_DIP_DB, SeatDipEffect, SeatDipGeometry, seat_dip_attenuation_db,
 };
 pub use source_directivity::{DirectivityPreset, SourceDirectivity};
 pub use spatializer::{SourceDescriptor, SpatialParams, resolve};
