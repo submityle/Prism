@@ -505,6 +505,11 @@
 //! - [`mesh_sdf_normal`] — outward surface normals of a signed distance
 //!   field by central-difference gradient ([`mesh_sdf_normal::sdf_gradient`],
 //!   [`mesh_sdf_normal::sdf_normal`]) for shading sphere-traced hits.
+//! - [`mesh_sdf_surface_projection`] — Newton projection of a point onto the
+//!   signed-distance zero level set
+//!   ([`mesh_sdf_surface_projection::project_to_surface`],
+//!   [`mesh_sdf_surface_projection::SurfaceProjection`]) for collision and
+//!   contact resolution.
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -683,6 +688,7 @@ pub mod mesh_solid_voxelization;
 pub mod mesh_signed_distance_field;
 pub mod mesh_sdf_raymarch;
 pub mod mesh_sdf_normal;
+pub mod mesh_sdf_surface_projection;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -812,6 +818,7 @@ pub use mesh_solid_voxelization::{solidify, CellClass, SolidVoxelization};
 pub use mesh_signed_distance_field::{signed_distance_field, SignedDistanceField};
 pub use mesh_sdf_raymarch::{sample_signed_distance, sphere_trace, SdfHit};
 pub use mesh_sdf_normal::{sdf_gradient, sdf_normal};
+pub use mesh_sdf_surface_projection::{project_to_surface, SurfaceProjection};
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
 pub use obb::{Obb, ObbBvh, ObbHit};
