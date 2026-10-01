@@ -24,7 +24,7 @@ pub mod bvh;
 pub mod narrow;
 pub mod proxy;
 
-pub use bounding::{Aabb, BoundingSphere, Frustum, Plane, Ray};
+pub use bounding::{Aabb, BoundingSphere, Capsule, Frustum, Plane, Ray};
 pub use broadphase::{generate_pairs, BroadPhasePair, PairChanges, PersistentBroadPhase};
 pub use bvh::DynamicBvh;
 pub use narrow::{

@@ -4,12 +4,14 @@
 //! geometric vocabulary used by the broad-phase.
 
 mod aabb;
+mod capsule;
 mod frustum;
 mod plane;
 mod ray;
 mod sphere;
 
 pub use aabb::Aabb;
+pub use capsule::Capsule;
 pub use frustum::Frustum;
 pub use plane::Plane;
 pub use ray::Ray;
