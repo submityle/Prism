@@ -566,7 +566,8 @@
 //!   [`sdf_primitives::cut_sphere`],
 //!   [`sdf_primitives::rhombus`], [`sdf_primitives::vesica`],
 //!   [`sdf_primitives::capped_torus`], [`sdf_primitives::triangular_prism`],
-//!   [`sdf_primitives::solid_angle`], [`sdf_primitives::round_cone_sdf`]) with exact
+//!   [`sdf_primitives::solid_angle`], [`sdf_primitives::round_cone_sdf`],
+//!   [`sdf_primitives::death_star`]) with exact
 //!   closed-form distances plus
 //!   the approximate [`sdf_primitives::ellipsoid_sdf`] bound, the atoms the
 //!   domain and `CSG` operators compose.
@@ -921,6 +922,7 @@ pub use mesh_sdf_thickness::sdf_thickness;
 pub use sdf_primitives::{
     box_frame, box_sdf, capped_cone, capped_cylinder, capped_torus, capsule, cut_hollow_sphere,
     cut_sphere,
+    death_star,
     ellipsoid_sdf,
     hex_prism, link, octahedron, plane, pyramid, rhombus, round_box, round_cone_sdf,
     solid_angle, sphere, torus, triangular_prism, vesica,

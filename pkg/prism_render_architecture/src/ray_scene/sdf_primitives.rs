@@ -598,11 +598,49 @@ pub fn cut_hollow_sphere(point: [f32; 3], radius: f32, cut_height: f32, thicknes
     surface - thickness
 }
 
+/// Signed distance from `point` to a "Death Star": a large sphere of radius
+/// `large_radius` centred at the origin with a smaller spherical bite of
+/// radius `small_radius` carved out, the carving sphere centred at
+/// `(bite_distance, 0, 0)` along the `+x` axis. The subtraction leaves a
+/// crescent-shaped crater whose circular lip (the rim where the two spheres
+/// intersect) is the sharpest feature.
+///
+/// This is Inigo Quilez's exact `sdDeathStar`. Working in the meridian
+/// half-plane `(axial, radial) = (point.x, length(point.yz))`, the rim of the
+/// crater sits at `(a, b)` where `a = (ra^2 - rb^2 + d^2) / (2 d)` is the
+/// axial coordinate of the intersection circle and `b = sqrt(ra^2 - a^2)` its
+/// radial coordinate. A single half-plane test selects whether the nearest
+/// feature is that rim circle (points facing into the crater lip) or the body
+/// of the solid, which is the large sphere intersected with the complement of
+/// the biting sphere. Built from `sqrt`, `min`, `max`, and vector lengths, so
+/// it stays transcendental-free.
+///
+/// The rim `sqrt` is guarded with `.max(0.0)`, so degenerate configurations
+/// where the biting sphere no longer clips the body collapse to a plain sphere
+/// boundary instead of producing `NaN`.
+pub fn death_star(point: [f32; 3], large_radius: f32, small_radius: f32, bite_distance: f32) -> f32 {
+    let ra = large_radius;
+    let rb = small_radius;
+    let d = bite_distance;
+    // Axial/radial coordinates of the circular rim where the two spheres meet.
+    let a = (ra * ra - rb * rb + d * d) / (2.0 * d);
+    let b = (ra * ra - a * a).max(0.0).sqrt();
+    // Meridian query: axial distance along x, radial distance off the x axis.
+    let p = [point[0], length2([point[1], point[2]])];
+    if p[0] * b - p[1] * a > d * (b - p[1]).max(0.0) {
+        // Facing the crater lip: nearest feature is the rim circle at (a, b).
+        length2([p[0] - a, p[1] - b])
+    } else {
+        // Large sphere intersected with the complement of the biting sphere.
+        (length2(p) - ra).max(-(length2([p[0] - d, p[1]]) - rb))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         box_frame, box_sdf, capped_cone, capped_cylinder, capped_torus, capsule, cut_hollow_sphere, cut_sphere,
-        ellipsoid_sdf, hex_prism, length2, link, octahedron, plane, pyramid, rhombus, round_box,
+        death_star, ellipsoid_sdf, hex_prism, length2, link, octahedron, plane, pyramid, rhombus, round_box,
         round_cone_sdf, solid_angle, sphere, torus, triangular_prism, vesica,
     };
 
@@ -1096,5 +1134,24 @@ mod tests {
         assert!((cut_hollow_sphere([2.0, 0.5, 0.0], r, h, t) - expected_sphere).abs() < 1e-6);
         // Inside the sphere, below the cap on the axis: sphere-surface distance.
         assert!((cut_hollow_sphere([0.0, -0.6, 0.0], r, h, t) - 0.3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn death_star_axis_features_match_closed_forms() {
+        let (ra, rb, d) = (1.0f32, 0.5f32, 0.7f32);
+        // Far pole of the large sphere, opposite the bite: on the surface.
+        assert!(death_star([-1.0, 0.0, 0.0], ra, rb, d).abs() < 1e-6);
+        // Origin lies inside the body but inside the biting sphere's hull:
+        // the crater floor governs, giving -(d - rb) = -0.2.
+        assert!((death_star([0.0, 0.0, 0.0], ra, rb, d) - (-0.2)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn death_star_rim_branch_matches_reference() {
+        let (ra, rb, d) = (1.0f32, 0.5f32, 0.7f32);
+        // Points facing the crater lip take the exact distance to the rim
+        // circle; values cross-checked against a brute-force surface sampler.
+        assert!((death_star([2.0, 0.0, 0.0], ra, rb, d) - 1.207_122).abs() < 1e-5);
+        assert!((death_star([0.9, 0.0, 0.0], ra, rb, d) - 0.464_451).abs() < 1e-5);
     }
 }
