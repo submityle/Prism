@@ -178,6 +178,14 @@
 //!   [`multi_tap_delay::MultiTapDelayNode`], and
 //!   [`ping_pong_delay::PingPongDelayNode`], it reverses the time axis
 //!   within each segment, which no fractional-delay read can do.
+//! - [`stutter::StutterNode`] -- stutter / beat-repeat glitch that
+//!   captures one fixed-length slice of the input and replays that grain
+//!   several times in strict phase lock, with a raised-cosine edge fade
+//!   keeping the loop points click-free. Unlike the feedback delays above
+//!   it has no delay line and no fractional read -- it hard-switches
+//!   between recording a grain and looping that exact grain -- and unlike
+//!   [`granular::GranularNode`] it replays a single grain deterministically
+//!   rather than overlapping many randomized ones.
 
 pub mod auto_wah;
 pub mod bitcrusher;
@@ -207,6 +215,7 @@ pub mod spectral_delay;
 pub mod spectral_freeze;
 pub mod spectral_gate;
 pub mod stereo_width;
+pub mod stutter;
 pub mod tape;
 pub mod tilt_eq;
 pub mod transformer;
@@ -278,6 +287,11 @@ pub use spectral_gate::{
     DEFAULT_THRESHOLD_DB, MIN_FFT_SIZE, OVERLAP_FACTOR, SpectralGateNode, SpectralGateParams,
 };
 pub use stereo_width::{MAX_WIDTH, StereoWidthNode, StereoWidthParams};
+pub use stutter::{
+    DEFAULT_STUTTER_FADE_MS, DEFAULT_STUTTER_MIX, DEFAULT_STUTTER_REPEATS,
+    DEFAULT_STUTTER_SLICE_MS, MAX_STUTTER_FADE_MS, MAX_STUTTER_REPEATS,
+    MAX_STUTTER_SLICE_MS, MIN_STUTTER_SLICE_MS, StutterNode, StutterParams,
+};
 pub use tape::{Tape, TapeNode, TapeParams};
 pub use tilt_eq::{TiltEq, TiltEqNode, TiltEqParams};
 pub use transformer::{Transformer, TransformerNode, TransformerParams};
