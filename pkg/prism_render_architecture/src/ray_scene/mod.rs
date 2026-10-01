@@ -548,6 +548,11 @@
 //!   ([`sdf_unsigned::segment_distance`], [`sdf_unsigned::triangle_distance`])
 //!   returning the Euclidean distance to a finite segment or a single
 //!   triangle, the atoms of point-to-mesh proximity queries.
+//! - [`mesh_sdf_enhanced_trace`] — over-relaxed (Keinert 2014) sphere
+//!   tracing of a signed distance field
+//!   ([`mesh_sdf_enhanced_trace::enhanced_sphere_trace`],
+//!   [`mesh_sdf_enhanced_trace::EnhancedSdfHit`]) that accelerates the
+//!   naive march while reproducing its hits.
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -735,6 +740,7 @@ pub mod sdf_domain;
 pub mod mesh_sdf_thickness;
 pub mod sdf_primitives;
 pub mod sdf_unsigned;
+pub mod mesh_sdf_enhanced_trace;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -880,6 +886,7 @@ pub use sdf_primitives::{
     round_box, sphere, torus,
 };
 pub use sdf_unsigned::{segment_distance, triangle_distance};
+pub use mesh_sdf_enhanced_trace::{enhanced_sphere_trace, EnhancedSdfHit};
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
 pub use obb::{Obb, ObbBvh, ObbHit};

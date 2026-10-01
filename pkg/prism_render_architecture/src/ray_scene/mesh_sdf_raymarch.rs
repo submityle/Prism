@@ -190,7 +190,7 @@ fn lerp(a: f32, b: f32, s: f32) -> f32 {
 
 /// Returns the unit-length direction, or `None` when `direction` is too short
 /// to normalize reliably.
-fn normalize(direction: [f32; 3]) -> Option<[f32; 3]> {
+pub(crate) fn normalize(direction: [f32; 3]) -> Option<[f32; 3]> {
     let length_squared =
         direction[0] * direction[0] + direction[1] * direction[1] + direction[2] * direction[2];
     if length_squared <= f32::MIN_POSITIVE {
@@ -207,7 +207,7 @@ fn normalize(direction: [f32; 3]) -> Option<[f32; 3]> {
 /// Intersects a ray with an axis-aligned bounding box using the slab method,
 /// returning the clamped entry/exit parameters `(t_enter, t_exit)` with
 /// `t_enter >= 0`, or `None` when the ray never overlaps the box.
-fn ray_aabb(
+pub(crate) fn ray_aabb(
     origin: [f32; 3],
     direction: [f32; 3],
     box_min: [f32; 3],
