@@ -136,7 +136,8 @@ pub use soft::damage::{
     TearingParams,
 };
 pub use soft::constraint::{
-    mesh_volume, project_bending, project_long_range, AttachmentConstraint, BendingConstraint,
+    mesh_volume, project_bending, project_long_range, project_strain_limit, AttachmentConstraint,
+    BendingConstraint,
     ConstraintSet, DistanceConstraint, LongRangeConstraint, ParticleConstraint, PressureConstraint,
     SoftConstraintKind, StrainLimitConstraint, TetraVolumeConstraint,
 };

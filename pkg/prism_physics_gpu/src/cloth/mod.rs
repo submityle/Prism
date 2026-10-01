@@ -42,6 +42,7 @@ pub mod gpu;
 pub mod layout;
 pub mod long_range;
 pub mod prep;
+pub mod strain_limit;
 
 pub use aero::{
     build_cloth_aero_prep, cpu_cloth_aero, ClothAeroParams, ClothAeroPrep, ClothAeroTriangle,
@@ -57,6 +58,10 @@ pub use long_range::{
     LongRangeColoring,
 };
 pub use prep::{build as build_cloth_prep, ClothPrep};
+pub use strain_limit::{
+    colour_strain_limit, cpu_cloth_strain_limit, ClothStrainLimitConstraint, GpuClothStrainLimit,
+    StrainLimitColoring,
+};
 
 /// Which sample pairs one cloth self-collision pass resolves.
 ///

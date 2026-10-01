@@ -116,41 +116,88 @@ impl ParticleConstraint for StrainLimitConstraint {
     }
 
     fn project(&mut self, positions: &mut [Vec3], inverse_masses: &[Real], _dt: Real) {
-        let ia = self.a.index();
-        let ib = self.b.index();
-        if ia == ib {
-            return;
-        }
-        let (Some(&wa), Some(&wb)) = (inverse_masses.get(ia), inverse_masses.get(ib)) else {
-            return;
-        };
-        let w_sum = wa + wb;
-        if w_sum <= 0.0 {
-            return;
-        }
-        let delta = positions[ia] - positions[ib];
-        let length = delta.length();
-        if length < EPSILON {
-            return;
-        }
-        let max_len = self.rest_length * self.max_scale;
-        let min_len = self.rest_length * self.min_scale;
-        // Signed length error outside the allowed band; positive means
-        // overstretched, negative means over-compressed. Zero inside the band.
-        let error = if length > max_len {
-            length - max_len
-        } else if self.min_scale > 0.0 && length < min_len {
-            length - min_len
-        } else {
-            return;
-        };
-        let direction = delta / length;
-        let correction = direction * error;
-        // Mass-weighted split; moving `a` toward `b` for overstretch (error > 0)
-        // and apart for over-compression (error < 0) via the shared sign.
-        positions[ia] -= correction * (wa / w_sum);
-        positions[ib] += correction * (wb / w_sum);
+        // Delegate the geometric clamp to the raw-index [`project_strain_limit`]
+        // so the sequential golden and its parallel `GPU` twin stay the exact
+        // same function with no risk of arithmetic drift.
+        project_strain_limit(
+            positions,
+            inverse_masses,
+            self.a.raw(),
+            self.b.raw(),
+            self.rest_length,
+            self.max_scale,
+            self.min_scale,
+        );
     }
+}
+
+/// Projects a single biphasic strain-limiting clamp in place over raw particle
+/// indices so a parallel `GPU` twin can share the exact arithmetic of the
+/// sequential [`StrainLimitConstraint`] golden.
+///
+/// Reads `positions[a]`/`positions[b]` and, when the edge length falls outside
+/// the `[rest_length * min_scale, rest_length * max_scale]` band, removes the
+/// excess along the edge direction with a mass-weighted split proportional to
+/// the inverse masses. The clamp is a pure geometric projection: it has no
+/// Lagrange multiplier and returns nothing.
+///
+/// The projection is inert (leaves `positions` unchanged) when the two indices
+/// are equal, either is out of range, their inverse masses sum to zero, the
+/// particles are coincident, or the edge already lies inside the band. A
+/// `min_scale` of `0` disables the lower (compression) clamp.
+///
+/// `rest_length`, `max_scale`, and `min_scale` are used as given (the
+/// [`StrainLimitConstraint`] constructor already clamps them into their valid
+/// ranges).
+///
+/// # Provenance
+///
+/// Biphasic strain limiting is a standard, publicly documented cloth technique
+/// (Provot 1995; Thomaszewski et al. 2009). No Unreal Engine source or derived
+/// code.
+pub fn project_strain_limit(
+    positions: &mut [Vec3],
+    inverse_masses: &[Real],
+    a: u32,
+    b: u32,
+    rest_length: Real,
+    max_scale: Real,
+    min_scale: Real,
+) {
+    let ia = a as usize;
+    let ib = b as usize;
+    if ia == ib {
+        return;
+    }
+    let (Some(&wa), Some(&wb)) = (inverse_masses.get(ia), inverse_masses.get(ib)) else {
+        return;
+    };
+    let w_sum = wa + wb;
+    if w_sum <= 0.0 {
+        return;
+    }
+    let delta = positions[ia] - positions[ib];
+    let length = delta.length();
+    if length < EPSILON {
+        return;
+    }
+    let max_len = rest_length * max_scale;
+    let min_len = rest_length * min_scale;
+    // Signed length error outside the allowed band; positive means
+    // overstretched, negative means over-compressed. Zero inside the band.
+    let error = if length > max_len {
+        length - max_len
+    } else if min_scale > 0.0 && length < min_len {
+        length - min_len
+    } else {
+        return;
+    };
+    let direction = delta / length;
+    let correction = direction * error;
+    // Mass-weighted split; moving `a` toward `b` for overstretch (error > 0)
+    // and apart for over-compression (error < 0) via the shared sign.
+    positions[ia] -= correction * (wa / w_sum);
+    positions[ib] += correction * (wb / w_sum);
 }
 
 #[cfg(test)]

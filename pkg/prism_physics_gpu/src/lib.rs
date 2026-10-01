@@ -69,11 +69,12 @@ pub use bvh::{
 };
 pub use cfl::{cpu_cfl_dt, cpu_max_speed, CflConfig, GpuCflReduce};
 pub use cloth::{
-    build_cloth_aero_prep, colour_bending, colour_long_range, cpu_cloth_aero, cpu_cloth_bending,
-    cpu_cloth_long_range, cpu_cloth_self_collision_jacobi, BendingColoring, ClothAeroParams,
-    ClothAeroPrep, ClothAeroTriangle, ClothBendingConstraint, ClothLongRangeConstraint, ClothPrep,
-    ClothSelfCollisionScope, GpuClothAero, GpuClothBending, GpuClothLongRange,
-    GpuClothSelfCollision, LongRangeColoring,
+    build_cloth_aero_prep, colour_bending, colour_long_range, colour_strain_limit, cpu_cloth_aero,
+    cpu_cloth_bending, cpu_cloth_long_range, cpu_cloth_self_collision_jacobi,
+    cpu_cloth_strain_limit, BendingColoring, ClothAeroParams, ClothAeroPrep, ClothAeroTriangle,
+    ClothBendingConstraint, ClothLongRangeConstraint, ClothPrep, ClothSelfCollisionScope,
+    ClothStrainLimitConstraint, GpuClothAero, GpuClothBending, GpuClothLongRange,
+    GpuClothSelfCollision, GpuClothStrainLimit, LongRangeColoring, StrainLimitColoring,
 };
 pub use contacts::{
     contact_constraints, contact_constraints_with_friction, cpu_resolve_contacts,
