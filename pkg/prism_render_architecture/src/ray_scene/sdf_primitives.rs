@@ -1881,6 +1881,20 @@ pub fn circle_2d(point: [f32; 2], radius: f32) -> f32 {
     length2(point) - radius
 }
 
+/// Exact 2D surface normal (unit gradient) of [`circle_2d`] at `point`: the
+/// outward radial unit vector `point / |point|`.
+///
+/// The circle field is `|point| - radius`, whose gradient is the normalised
+/// position independent of `radius`. At the centre the direction is undefined,
+/// so the zero vector is returned.
+pub fn circle_2d_gradient(point: [f32; 2]) -> [f32; 2] {
+    let l = length2(point);
+    if l == 0.0 {
+        return [0.0, 0.0];
+    }
+    [point[0] / l, point[1] / l]
+}
+
 /// Exact signed distance to an upward-pointing regular five-pointed star in 2D
 /// (Inigo Quilez `sdStar5`).
 ///
@@ -2000,6 +2014,32 @@ pub fn box_2d(point: [f32; 2], half_extent: [f32; 2]) -> f32 {
     let qx = point[0].abs() - half_extent[0];
     let qy = point[1].abs() - half_extent[1];
     length2([qx.max(0.0), qy.max(0.0)]) + qx.max(qy).min(0.0)
+}
+
+/// Exact 2D surface normal (unit gradient) of [`box_2d`] at `point` for the
+/// axis-aligned rectangle of half-extents `half_extent`.
+///
+/// Mirrors the 3D [`box_gradient`] in the plane. With
+/// `q = |point| - half_extent` and `m = max(q, 0)`: outside the rectangle the
+/// gradient is the normalised overshoot `m / |m|` with each axis' original
+/// sign restored; inside, the nearest edge is the least-negative axis (largest
+/// `q_i`) and the gradient is the unit vector along that axis. Points exactly on
+/// a face/corner crease (where the direction is undefined) are a measure-zero
+/// set and resolve to one of the adjacent faces.
+pub fn box_2d_gradient(point: [f32; 2], half_extent: [f32; 2]) -> [f32; 2] {
+    let qx = point[0].abs() - half_extent[0];
+    let qy = point[1].abs() - half_extent[1];
+    let mx = qx.max(0.0);
+    let my = qy.max(0.0);
+    let len = length2([mx, my]);
+    if len > 0.0 {
+        return [point[0].signum() * mx / len, point[1].signum() * my / len];
+    }
+    if qx >= qy {
+        [point[0].signum(), 0.0]
+    } else {
+        [0.0, point[1].signum()]
+    }
 }
 
 /// Exact signed distance to a vertical capsule in 3D: the segment from the
@@ -2158,7 +2198,7 @@ pub fn segment_3d(point: [f32; 3], a: [f32; 3], b: [f32; 3]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        annulus_2d, arc, box_2d, box_frame, box_frame_2d, box_gradient, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_torus, capsule, capsule_2d, capsule_gradient, circle_2d, cone_sdf, cross_2d, cut_disk_2d, cut_hollow_sphere,
+        annulus_2d, arc, box_2d, box_2d_gradient, box_frame, box_frame_2d, box_gradient, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_torus, capsule, capsule_2d, capsule_gradient, circle_2d, circle_2d_gradient, cone_sdf, cross_2d, cut_disk_2d, cut_hollow_sphere,
         cut_sphere, cylinder_segment, death_star, egg_2d, ellipsoid_sdf, equilateral_triangle_2d, heart_2d, hex_prism, hexagram_2d, horseshoe_2d, infinite_cone, infinite_cylinder, isosceles_triangle_2d, length2, line_sdf, link, moon,
         octagon_prism, octahedron, oriented_box_2d, oriented_vesica_2d, parallelogram, pentagram_2d, pie, plane, plane_gradient, polygon_2d, pyramid, quad_sdf, regular_hexagon_2d, regular_octagon_2d, regular_pentagon_2d, rhombus, rhombus_2d, round_box, round_cone_sdf,
         round_cone_segment, rounded_box_2d, rounded_cross_2d, rounded_cylinder, rounded_x,
@@ -3158,6 +3198,60 @@ mod tests {
         }
         // On the axis segment the radial direction is undefined -> zero.
         assert_eq!(vertical_capsule_gradient([0.0, 0.5, 0.0], height), [0.0, 0.0, 0.0]);
+    }
+
+    // Central-difference gradient of a 2D scalar field, the independent
+    // reference the analytic 2D primitive gradients are checked against.
+    fn central_grad2(f: &dyn Fn([f32; 2]) -> f32, p: [f32; 2]) -> [f32; 2] {
+        let h = 1e-4_f32;
+        let mut g = [0.0_f32; 2];
+        for i in 0..2 {
+            let mut a = p;
+            let mut b = p;
+            a[i] += h;
+            b[i] -= h;
+            g[i] = (f(a) - f(b)) / (2.0 * h);
+        }
+        g
+    }
+
+    fn unit_len2(v: [f32; 2]) -> f32 {
+        (v[0] * v[0] + v[1] * v[1]).sqrt()
+    }
+
+    #[test]
+    fn circle_2d_gradient_is_the_exact_unit_radial_normal() {
+        for &p in &[[1.0_f32, 0.0], [0.3, -0.7], [-2.0, 0.5]] {
+            let g = circle_2d_gradient(p);
+            assert!((unit_len2(g) - 1.0).abs() < 1e-6, "unit p={p:?}");
+            let fd = central_grad2(&|q| circle_2d(q, 1.3), p);
+            for k in 0..2 {
+                assert!((g[k] - fd[k]).abs() < 2e-3, "circle grad p={p:?} axis {k}");
+            }
+        }
+        assert_eq!(circle_2d_gradient([0.0, 0.0]), [0.0, 0.0]);
+    }
+
+    #[test]
+    fn box_2d_gradient_matches_central_difference_off_creases() {
+        let b = [0.7_f32, 0.4];
+        // Points away from faces/corners (the measure-zero creases).
+        for &p in &[
+            [1.2_f32, 0.1],   // exterior, +x edge region
+            [0.1, 0.9],       // exterior, +y edge region
+            [-1.3, -1.0],     // exterior corner quadrant
+            [0.3, -0.1],      // interior, nearest -y edge
+            [0.55, 0.1],      // interior, nearest +x edge
+        ] {
+            let g = box_2d_gradient(p, b);
+            assert!((unit_len2(g) - 1.0).abs() < 1e-6, "unit p={p:?}");
+            let fd = central_grad2(&|q| box_2d(q, b), p);
+            for k in 0..2 {
+                assert!((g[k] - fd[k]).abs() < 1e-3, "box2d grad p={p:?} axis {k}: {} vs {}", g[k], fd[k]);
+            }
+        }
+        // Interior point closest to the +x edge points along +x.
+        assert_eq!(box_2d_gradient([0.55, 0.05], b), [1.0, 0.0]);
     }
 
     // Exact unsigned distance to a 2D segment, used to cross-check `segment_2d`
