@@ -170,3 +170,51 @@ fn water_bsdf_wesl_compiles_and_resolves_imports() {
         .get(0, water, &[])
         .unwrap_or_else(|error| panic!("water.wesl failed to compile/resolve imports: {error}"));
 }
+
+/// The water-surface raster shader (`@vertex` + the four per-frontend
+/// `@fragment` entries) must compile and resolve its `brdf`/`water` imports,
+/// mirroring the `prism_render_architecture::water::gpu::surface_pass` contract.
+#[test]
+fn water_surface_raster_wesl_compiles_and_resolves_imports() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let lighting = shader_id(0x5052_4953_4d5f_4c49_4748_5449_4e47_00a1);
+    cache.set_shader(
+        lighting,
+        Shader::from_wesl(
+            include_str!("../shaders/lighting.wesl"),
+            "embedded://prism_render_scene/shaders/lighting.wesl",
+        ),
+    );
+
+    let brdf = shader_id(0x5052_4953_4d5f_4252_4446_0000_0000_00a1);
+    cache.set_shader(
+        brdf,
+        Shader::from_wesl(
+            include_str!("../shaders/brdf.wesl"),
+            "embedded://prism_render_scene/shaders/brdf.wesl",
+        ),
+    );
+
+    let water = shader_id(0x5052_4953_4d5f_5741_5445_5242_5344_0001);
+    cache.set_shader(
+        water,
+        Shader::from_wesl(
+            include_str!("../shaders/water.wesl"),
+            "embedded://prism_render_scene/shaders/water.wesl",
+        ),
+    );
+
+    let raster = shader_id(0x5052_4953_4d5f_5741_5445_5253_5552_00f1);
+    cache.set_shader(
+        raster,
+        Shader::from_wesl(
+            include_str!("../shaders/water_surface_raster.wesl"),
+            "embedded://prism_render_scene/shaders/water_surface_raster.wesl",
+        ),
+    );
+
+    cache.get(0, raster, &[]).unwrap_or_else(|error| {
+        panic!("water_surface_raster.wesl failed to compile/resolve imports: {error}")
+    });
+}
