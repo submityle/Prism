@@ -103,6 +103,14 @@
 //!   `-tilt_db`) and high-shelf (at `+tilt_db`) pair; distinct from
 //!   [`parametric_eq::ParametricEqNode`] (arbitrary independent bands) and
 //!   [`graphic_eq::GraphicEqNode`] (fixed ISO grid) by exposing one tilt knob.
+//! - [`granular::GranularNode`] -- real-time granular / grain-cloud
+//!   texture processor: records input into a mono capture ring and sprays
+//!   short Hann-windowed grains that read back from the recent past with
+//!   per-grain randomized position, pitch, and stereo pan, dissolving a
+//!   steady input into an evolving cloud; reuses
+//!   [`pitch_shifter::semitones_to_ratio`] for grain detune and is distinct
+//!   from the single-ratio [`pitch_shifter::PitchShifterNode`] and the
+//!   static-asset [`crate::nodes::sources::sample_player`].
 
 pub mod auto_wah;
 pub mod bitcrusher;
@@ -113,6 +121,7 @@ pub mod exciter;
 pub mod flanger;
 pub mod formant_filter;
 pub mod frequency_shifter;
+pub mod granular;
 pub mod graphic_eq;
 pub mod haas_widener;
 pub mod mid_side_matrix;
@@ -143,6 +152,10 @@ pub use formant_filter::{
     FormantFilter, FormantFilterNode, FormantFilterParams, FormantSpec, Vowel,
 };
 pub use frequency_shifter::{FrequencyShifterNode, FrequencyShifterParams};
+pub use granular::{
+    DEFAULT_CAPTURE_SECONDS, DEFAULT_SEED, GranularNode, GranularParams, MAX_DENSITY_HZ,
+    MAX_GRAIN_MS, MAX_GRAINS, MAX_SPREAD, MIN_DENSITY_HZ, MIN_GRAIN_MS,
+};
 pub use graphic_eq::{GraphicEqNode, GraphicEqSpacing};
 pub use haas_widener::{HaasWidenerNode, HaasWidenerParams};
 pub use mid_side_matrix::{MidSideMatrixNode, MidSideMatrixParams, MidSideMode};
