@@ -133,6 +133,7 @@ pub mod pyrocumulus_buoyancy;
 pub mod ray_aabb;
 pub mod ray_capsule;
 pub mod ray_cylinder;
+pub mod ray_obb;
 pub mod ray_sphere;
 pub mod rayleigh_phase;
 pub mod relax_coverage;
@@ -253,6 +254,7 @@ pub use pyrocumulus_buoyancy::{GpuPyrocumulusBuoyancy, PyrocumulusBuoyancyQuery}
 pub use ray_aabb::{GpuRayAabb, RayAabbQuery, RayAabbResult};
 pub use ray_capsule::{GpuRayCapsule, RayCapsuleQuery, RayCapsuleResult};
 pub use ray_cylinder::{GpuRayCylinder, RayCylinderQuery, RayCylinderResult};
+pub use ray_obb::{GpuRayObb, RayObbQuery, RayObbResult};
 pub use ray_sphere::{GpuRaySphere, RaySphereProbe, RaySphereResult};
 pub use rayleigh_phase::{GpuRayleighPhase, RayleighPhaseQuery};
 pub use relax_coverage::{GpuRelaxCoverage, RelaxCoverageQuery};
