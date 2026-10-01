@@ -86,7 +86,7 @@ struct ClothEmbedParams {
 fn cloth_embed_normalize_or_zero(v: vec3<f32>) -> vec3<f32> {
     let len_sq = dot(v, v);
     if len_sq > CLOTH_EMBED_EPS_LEN_SQ {
-        return v * inverseSqrt(len_sq);
+        return v * (1.0 / sqrt(len_sq));
     }
     return vec3<f32>(0.0, 0.0, 0.0);
 }

@@ -16,10 +16,10 @@
 //! 与设备无关的逐位闭环。
 //!
 //! 本模块逐词把 WESL 算术搬到 CPU（原生 `f32`，不复用黄金的 `Vec3` 方法），再用
-//! `f32::to_bits` 逐分量比对黄金。WESL 球面投影的 `inverseSqrt(dist_sq)` 按
-//! `1.0 / dist_sq.sqrt()` 转写，对应黄金 `Vec3::normalize_or_zero` 的
-//! `scale(1.0 / len_sq.sqrt())`；真机 `rsqrt` 的硬件差异由 `body_collision_gpu_tests`
-//! 的带容差比对覆盖。
+//! `f32::to_bits` 逐分量比对黄金。WESL 球面投影现用显式 `1.0 / sqrt(dist_sq)`
+//! （已从 `inverseSqrt` 这一设备级近似改掉），与黄金 `Vec3::normalize_or_zero`
+//! 的 `scale(1.0 / len_sq.sqrt())` 完全同序；`sqrt`/`fdiv` 在 GPU 与 CPU 上均为
+//! IEEE-754 正确舍入，故 `body_collision_gpu_tests` 的真机输出与黄金也逐位吻合。
 
 use prism_render_architecture::cloth::collision::{resolve_body_collisions, BodyCollider};
 use prism_render_architecture::cloth::{ClothParticle, Vec3, EPS_LEN_SQ};

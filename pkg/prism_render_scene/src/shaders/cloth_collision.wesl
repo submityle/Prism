@@ -170,7 +170,7 @@ fn cloth_project_out_of_sphere(pos: vec3<f32>, center: vec3<f32>, radius: f32) -
     if dist_sq <= CLOTH_COL_EPS_LEN_SQ {
         return center + vec3<f32>(0.0, radius, 0.0);
     }
-    let dir = delta * inverseSqrt(dist_sq);
+    let dir = delta * (1.0 / sqrt(dist_sq));
     return center + dir * radius;
 }
 
@@ -504,7 +504,7 @@ fn cloth_apply_backstop(pos: vec3<f32>, b: ClothBackstop) -> vec3<f32> {
     if len_sq <= CLOTH_COL_EPS_LEN_SQ {
         return pos;
     }
-    let n = normal * inverseSqrt(len_sq);
+    let n = normal * (1.0 / sqrt(len_sq));
     let origin = vec3<f32>(b.ox, b.oy, b.oz);
     let s = dot(n, pos - origin);
     let min_s = -b.distance;

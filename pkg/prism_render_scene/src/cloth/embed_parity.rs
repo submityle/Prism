@@ -9,8 +9,9 @@
 //!
 //! 本模块逐词把 WESL 算术搬到 CPU（原生 `f32`，不复用黄金的 `Vec3` 方法），
 //! 再用 `f32::to_bits` 逐分量比对黄金，证明 WESL 内核与黄金 **逐位** 一致。
-//! 真机 GPU 的 `rsqrt` 与 `1/sqrt` 的硬件差异由 `embed_gpu_tests` 的带容差
-//! 比对覆盖；本 CPU parity 建立的是「算法等价」这一与设备无关的闭环。
+//! WESL 现用显式 `1.0 / sqrt(len_sq)`（已从 `inverseSqrt` 这一设备级近似改掉）；
+//! `sqrt`/`fdiv` 在 GPU 与 CPU 上均为 IEEE-754 正确舍入，故 `embed_gpu_tests` 的
+//! 真机输出与黄金也逐位吻合（原 `rsqrt` vs `1/sqrt` 的设备级分歧已消除）。
 
 use prism_render_architecture::cloth::embed::{
     bind_render_vertex, embed_render_vertex, BarycentricBinding,
