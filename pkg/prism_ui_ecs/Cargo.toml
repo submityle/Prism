@@ -1,0 +1,19 @@
+[package]
+name = "prism_ui_ecs"
+version = "0.1.0"
+edition = "2024"
+description = "Loom <-> Prism ECS bridge: field-level, change-detected binding between ECS component fields and reactive Signals, in both directions. Reuses the ECS tick-based change detection as the transport for reactivity. Contains no Unreal Engine source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_ui = { path = "../prism_ui" }
+prism_ui_reactive = { path = "../prism_ui_reactive" }
+bevy_ecs = { path = "../../crates/bevy_ecs", version = "0.20.0-dev", default-features = false, features = ["std"] }
+
+[features]
+default = ["std"]
+std = ["prism_ui/std", "prism_ui_reactive/std"]
+
+[lints]
+workspace = true

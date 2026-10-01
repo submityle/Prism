@@ -68,6 +68,7 @@ members = [
   "pkg/prism_ui_timetravel",
   "pkg/prism_ui_inspector",
   "pkg/prism_ui_hotreload",
+  "pkg/prism_ui_ecs",
   # Several crates with macros have "compile fail" tests nested inside them, also known as UI
   # tests, that verify diagnostic output does not accidentally change.
   # TODO: Use a glob pattern once they are fixed in `dependabot-core`
