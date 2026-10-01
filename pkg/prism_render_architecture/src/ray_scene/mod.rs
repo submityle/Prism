@@ -157,6 +157,17 @@
 //!   ([`capsule_gpu_layout::CAPSULE_WORDS`] stride packing `a`/`b` plus
 //!   `radius`) with node records reusing the shared [`NODE_WORDS`] and a
 //!   packed capsule walk that reproduces the in-memory walk bit-for-bit.
+//! - [`round_cone`] — analytic round cone (`IQ` unequal-radius
+//!   sphere-swept segment: convex hull of an `a`/`radius_a` sphere and a
+//!   `b`/`radius_b` sphere, degenerating to [`capsule`] when the radii are
+//!   equal) [`round_cone::RoundCone`] procedural primitive (tapered limbs,
+//!   horns, branches, tapered cables): single-sphere engulf test, cylinder
+//!   body when the radii match, otherwise a tapered-cone band solved as a
+//!   quadric (every `t²` coefficient carries `dd`) clipped to the band plus
+//!   two endpoint spherical caps clipped to their cap half-spaces,
+//!   reporting the [`round_cone::RoundConeHit`], with a single-level
+//!   [`round_cone::RoundConeBvh`] reusing the shared binned-`SAH` build and
+//!   slab traversal.
 //! - [`traversal`] — [`Ray`]/`BVH` slab + Möller–Trumbore intersection with
 //!   closest-hit and any-hit walks (the `GPU` traversal kernel's golden ref).
 //! - [`traversal_stackless`] — stackless (threaded / escape-index) `BVH` walk:
@@ -197,6 +208,7 @@ pub mod hyperboloid;
 pub mod hyperboloid_gpu_layout;
 pub mod capsule;
 pub mod capsule_gpu_layout;
+pub mod round_cone;
 pub mod footprint;
 pub mod gpu_layout;
 pub mod motion;
@@ -248,6 +260,7 @@ pub use hyperboloid::{Hyperboloid, HyperboloidBvh, HyperboloidHit};
 pub use hyperboloid_gpu_layout::{GpuHyperboloidBvhBuffers, HYPERBOLOID_WORDS};
 pub use capsule::{Capsule, CapsuleBvh, CapsuleHit};
 pub use capsule_gpu_layout::{GpuCapsuleBvhBuffers, CAPSULE_WORDS};
+pub use round_cone::{RoundCone, RoundConeBvh, RoundConeHit};
 pub use rectangle_gpu_layout::{GpuRectangleBvhBuffers, RECTANGLE_WORDS};
 pub use aabb_primitive_gpu_layout::{GpuAabbBvhBuffers, AABB_PRIMITIVE_WORDS};
 pub use sphere_gpu_layout::{GpuSphereBvhBuffers, SPHERE_WORDS};
