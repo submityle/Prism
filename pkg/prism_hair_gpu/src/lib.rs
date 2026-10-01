@@ -386,6 +386,21 @@
 //!   (`abs_diff < 1e-4` or `rel_diff < 1e-3`) rather than bit-exact (see
 //!   [`eval_sh`]).
 //!
+//! * [`GpuHairForwardScatterPower`] raises
+//!   [`forward_scatter_power`](prism_render_architecture::hair::dual_scatter_sh::forward_scatter_power),
+//!   the `Zinke` dual-scattering global multiplier `a_f^n` a receiver
+//!   accumulates over `n` crossed strands — one thread per `(base, exponent)`
+//!   [`PowerQuery`] sanitises the forward-scatter factor (`is_finite` test
+//!   collapsing a non-finite base to `0`), then raises it with an explicit
+//!   integer multiply loop (`accum = 1`, multiplied by the base exactly
+//!   `exponent` times) rather than `pow`/`exp`, so `exponent = 0` yields
+//!   exactly `1.0`; because the trip count is a per-thread `u32` read from a
+//!   storage buffer the loop diverges between invocations, and because the
+//!   accumulator is a dependent `f32` product chain with no add to fuse into an
+//!   fma this is the second twin checked **bit-exact** (raw `to_bits()`
+//!   compare, not a tolerance) rather than within an fma bound (see
+//!   [`forward_scatter_power`]).
+//!
 //! # Portability
 //!
 //! The projection uses only `sqrt`, `min`, `max`, `clamp`, `dot` and
@@ -425,6 +440,7 @@ pub mod deep_transmittance_sample;
 pub mod dither_alpha;
 pub mod eval_sh;
 pub mod forward_scatter;
+pub mod forward_scatter_power;
 pub mod forward_scatter_sample;
 pub mod frames;
 pub mod guide_solver;
@@ -471,6 +487,9 @@ pub use deep_transmittance_sample::{GpuHairDeepTransmittanceSample, Transmittanc
 pub use dither_alpha::{reference_dither_alpha_map, GpuHairDitherAlpha};
 pub use eval_sh::{reference_eval_sh, GpuHairEvalSh};
 pub use forward_scatter::GpuHairForwardScatter;
+pub use forward_scatter_power::{
+    reference_forward_scatter_power, GpuHairForwardScatterPower, PowerQuery,
+};
 pub use forward_scatter_sample::{GpuHairForwardScatterSample, ScatterQuery};
 pub use frames::{GpuStrandFrame, GpuStrandFrames};
 pub use guide_solver::GpuGuideSolver;
