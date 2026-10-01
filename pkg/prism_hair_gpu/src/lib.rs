@@ -77,6 +77,17 @@
 //!   the frames so each adjacent pair is driven toward its rest curvature and
 //!   twist — the torsional stiffness and natural `helix`/curl rest shape a
 //!   pure mass-spring (`XPBD`) network cannot express (see [`cosserat`]).
+//! * [`GpuHairBarrierContact`] evaluates
+//!   [`resolve_contact`](prism_render_architecture::hair::barrier_contact::resolve_contact),
+//!   the per-contact collision response one thread per contact recomputes
+//!   from the pristine pre-solve state (`Jacobi`, never the serial
+//!   `Gauss-Seidel` sweep that `resolve_contacts` runs over shared
+//!   endpoints): a `C-IPC`-style `C`-continuous rational barrier (no `ln`
+//!   term, so the force stays finite and differentiable right up to the
+//!   activation distance) pushes the pair apart along the normal, then a
+//!   `Coulomb` friction cone clamps the tangential impulse — with the same
+//!   no-op guards (zero-length normal, both endpoints pinned, or a gap at
+//!   or beyond the activation distance leave the inputs untouched).
 //! * [`GpuHairInterp`] evaluates
 //!   [`interpolate_render_strand`](prism_render_architecture::hair::interpolation::interpolate_render_strand),
 //!   expanding each render strand from its (up to four) guides one thread per
@@ -320,6 +331,7 @@
 #![forbid(unsafe_code)]
 
 pub mod analysis_reduce;
+pub mod barrier_contact;
 pub mod bin_samples;
 pub mod binding_importance;
 pub mod closest_point_triangle;
@@ -356,6 +368,7 @@ pub mod voxel_transmittance;
 pub mod wind;
 
 pub use analysis_reduce::{reference_reduce, GpuHairAnalysisReduce};
+pub use barrier_contact::{reference_resolve, ContactInput, ContactOutput, GpuHairBarrierContact};
 pub use bin_samples::GpuHairBinSamples;
 pub use binding_importance::GpuHairBindingImportance;
 pub use closest_point_triangle::{
