@@ -12,6 +12,7 @@ mod binning;
 mod cull_hzb;
 mod culling;
 mod diagnostics;
+mod hzb_build;
 mod hzb_footprint;
 mod hzb_projection;
 mod hzb_pyramid;
@@ -34,6 +35,7 @@ pub use binning::{
 pub use cull_hzb::{cull_view_with_hzb, HzbCullScene};
 pub use culling::{cull_view, CullReason, VisibilityInput};
 pub use diagnostics::VisibilityDiagnostics;
+pub use hzb_build::{build_hzb_pyramid, HzbPyramidStorage, OwnedHzbMip};
 pub use hzb_footprint::{conservative_occluder_reverse_z, HzbFootprint};
 pub use hzb_projection::{project_world_aabb, ProjectedBounds, WorldAabb};
 pub use hzb_pyramid::{HzbMip, HzbPyramid};
