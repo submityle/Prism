@@ -22,6 +22,12 @@
 //!   input diffuser feeding a single cross-coupled all-pass feedback tank
 //!   with modulated all-passes and multi-tap stereo outputs, synthesising
 //!   the dense metallic wash of a vintage mechanical plate.
+//! - [`shimmer::ShimmerReverb`] -- a shimmer reverb: an FDN tank whose own
+//!   tail is pitch-shifted (classically up one octave) and re-injected
+//!   through a sub-unity feedback path, so energy perpetually climbs
+//!   toward higher frequencies to produce the ethereal, blooming wash of
+//!   ambient and cinematic sound design. It composes [`fdn::FdnReverb`]
+//!   and the effects-family pitch shifter rather than duplicating them.
 //!
 //! Every processor pre-allocates all delay-line and filter state at
 //! construction, so [`AudioNode::process`](crate::graph::AudioNode::process)
@@ -31,8 +37,10 @@ pub mod algorithmic;
 pub mod convolver;
 pub mod fdn;
 pub mod plate;
+pub mod shimmer;
 
 pub use algorithmic::{AlgorithmicRoom, AlgorithmicRoomParams};
 pub use convolver::Convolver;
 pub use fdn::{FdnOrder, FdnReverb, FdnReverbParams};
 pub use plate::{PlateReverb, PlateReverbParams};
+pub use shimmer::{MAX_SHIMMER_FEEDBACK, ShimmerReverb, ShimmerReverbParams};
