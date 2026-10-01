@@ -14,6 +14,11 @@
 //!   the shared [`Svf`](crate::nodes::svf::Svf) cutoff with the input loudness.
 //! - [`parametric_eq::ParametricEqNode`] — multi-band parametric EQ built by
 //!   cascading reusable [`Biquad`](crate::nodes::biquad::Biquad) sections.
+//! - [`graphic_eq::GraphicEqNode`] -- fixed ISO octave / third-octave graphic
+//!   equalizer: a bank of constant-Q RBJ peaking biquads on standardized
+//!   center frequencies, giving bit-exact bypass when every band is flat;
+//!   distinct from [`parametric_eq::ParametricEqNode`], which exposes an
+//!   arbitrary frequency / Q / gain / shape per band.
 //! - [`delay::DelayNode`] — fractional delay line with feedback and wet/dry
 //!   mix (the echo / slap-back / modulated-delay primitive).
 //! - [`waveshaper::WaveshaperNode`] — `tanh` soft-clip saturation with optional
@@ -71,6 +76,7 @@ pub mod delay;
 pub mod exciter;
 pub mod flanger;
 pub mod frequency_shifter;
+pub mod graphic_eq;
 pub mod mid_side_matrix;
 pub mod parametric_eq;
 pub mod phaser;
@@ -91,6 +97,7 @@ pub use delay::DelayNode;
 pub use exciter::{Exciter, ExciterNode, ExciterParams, HarmonicMode};
 pub use flanger::{FlangerNode, FlangerParams};
 pub use frequency_shifter::{FrequencyShifterNode, FrequencyShifterParams};
+pub use graphic_eq::{GraphicEqNode, GraphicEqSpacing};
 pub use mid_side_matrix::{MidSideMatrixNode, MidSideMatrixParams, MidSideMode};
 pub use parametric_eq::{EqBand, ParametricEqNode};
 pub use phaser::{PhaserNode, PhaserParams};
