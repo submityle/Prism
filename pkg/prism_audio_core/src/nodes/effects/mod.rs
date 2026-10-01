@@ -94,6 +94,11 @@
 //!   (`tanh` / `arctan` / cubic / reciprocal / sine) with a drive + DC bias
 //!   stage, oversampling, and an output DC blocker; distinct from
 //!   [`waveshaper::WaveshaperNode`], which is a fixed symmetric `tanh` clip.
+//! - [`spectral_freeze::SpectralFreezeNode`] -- frequency-domain spectral
+//!   freeze: a weighted overlap-add short-time Fourier transform (`STFT`)
+//!   latches the current magnitude spectrum and advances each bin's phase by
+//!   its own centre frequency, sustaining the captured timbre indefinitely
+//!   with an optional deterministic phase diffusion for a shimmering pad.
 //! - [`spectral_gate::SpectralGateNode`] -- frequency-domain spectral gate /
 //!   downward spectral expander: a weighted overlap-add short-time Fourier
 //!   transform (`STFT`) attenuates bins below a `dBFS` threshold toward a floor,
@@ -131,6 +136,7 @@ pub mod phaser;
 pub mod pitch_shifter;
 pub mod ring_modulator;
 pub mod saturation;
+pub mod spectral_freeze;
 pub mod spectral_gate;
 pub mod stereo_width;
 pub mod tape;
@@ -167,6 +173,10 @@ pub use pitch_shifter::{
 };
 pub use ring_modulator::{RingModulatorNode, RingModulatorParams};
 pub use saturation::{DEFAULT_DC_BLOCK_COEFF, SaturationCurve, SaturationNode, SaturationParams};
+pub use spectral_freeze::{
+    FREEZE_RAMP_SECONDS, MAX_DIFFUSION, MIN_FREEZE_FFT_SIZE, SpectralFreezeNode,
+    SpectralFreezeParams,
+};
 pub use spectral_gate::{
     DEFAULT_ATTACK_MS, DEFAULT_FFT_SIZE, DEFAULT_RELEASE_MS, DEFAULT_REDUCTION_DB,
     DEFAULT_THRESHOLD_DB, MIN_FFT_SIZE, OVERLAP_FACTOR, SpectralGateNode, SpectralGateParams,
