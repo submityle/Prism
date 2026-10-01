@@ -1,4 +1,4 @@
-# Prism 渲染引擎 — 顶级次世代 AAA 高级特性专项设计（v7 / PBR·NPR·混合 全前端 + 子系统完成度 + 路线图兑现核对 + 真实空白补齐 + v7 绝对天花板增补）
+# Prism 渲染引擎 — 顶级次世代 AAA 高级特性专项设计（v8 / PBR·NPR·混合 全前端 + 子系统完成度 + 路线图兑现核对 + 真实空白补齐 + v7 绝对天花板 + v8 产品对标高级特性增补与规模三刷）
 
 > 本文是 `prism_material_pipeline_design_zh.md`（顶层架构与决策）的**下钻分册**：把 §12–16 的对标矩阵与特性清单展开为**逐特性规格书**——每条给出「借鉴对象 / 算法要点 / 性能预算 / 效果上限 / 模块落点 / 验收口径」。
 > **一句话立场**：共享 GPU-driven 基底算一次，PBR / NPR / 自定义三前端并存消费，混合在管线级路由。**三条赛道都是一等公民，都能拿到顶级次世代 AAA 效果**，差异只在「怎么解读同一份光/影/GI/几何数据」的前端响应处。
@@ -812,6 +812,95 @@
 | 预计算波场 + 参数解码（音频） | `prism_audio_spatial` + `prism_audio_core/reverb` | 🟡 HOA/衍射/卷积混响在，波场烘焙待建 | **P2** | 离线 FDTD/ARD、HOA、卷积混响 |
 
 **v7 增补总原则**：① **不改 §9 P0 基底次序**，也不重复 §6/§11/§12/§13 已兑现条目；② **WPO/蒙皮虚拟几何列 P0.5**——它是「海量动画几何进 Nanite 密度」的开阔世界刚需，且本 lane 两阶段 HZB CPU 参考已就绪可直接消费其保守包围，依赖最成熟、价值最高；③ **LSS 发丝 RT / 微几何 DMM-OMM / 分层 GI 融合 / STF 列 P1**——前两者让毛发与置换/透明几何进入统一 TLAS 的 RT 保真，后两者补 GI 边界质量与带宽；④ **Work Graph / IPC-ABD / 波场声学列 P2**——价值高但依赖重、按需增量；⑤ 全部遵循数值红线，走「CPU golden → GPU kernel → 真机 parity」三步，关键路径必须与**路径追踪参考 / 解析解 / 离线数值求解**可对拍，未毕业不作生产默认；**任何增补均不引入 AI/ML/神经/LLM 推理路径**（厂商时序上采样/帧生成 SDK 仅渲染侧可选外部后端）。
+
+---
+
+## 15. v8 产品对标高级特性增补与规模三刷（2026-10，纯经典数值 / 无 AI·ML·神经·LLM）
+
+> **本版目的**：用户再次指出「代码有更新」并要求「借鉴参考优先产品、添加高级特性、兼顾性能与效果、达到顶级次世代 AAA 级别、更新优化设计文档」。本版 ① 以统一口径 `find pkg/<crate>/src -name '*.rs' | wc -l` **三刷规模**（2026-10 实测，接续 v7 §14.0 的权威基线）；② 在 v7 §14.2 的 8 条前沿之上，追加 **6 条产品级高级特性赛道**——均为 2023–2026 顶级 AAA 实际落地的「可见天花板」，经关键字实测确认**上游骨架是否已在**，逐条标注 🟡（骨架在/缺整合）或 ⬜（真实空白），避免分级虚高；③ 刷新路线图优先级。**全程纯经典数值**，排除一切 AI/ML/神经/LLM 推理路径；厂商时序上采样 / 帧生成 SDK 仅渲染侧可选外部后端，本体默认经典路径，关键路径与路径追踪参考 / 解析解 / 离线数值求解可对拍。
+
+### 15.0 规模三刷（2026-10 实测，统一口径 `find src -name '*.rs' | wc -l`）
+
+| crate / 子系统 | v7 §14.0 | v8 实测 | 变化与说明 |
+|---|---|---|---|
+| `prism_render_architecture` | 680 | **680** | 帧图 / 流送 / `work_graph`(5 文件: graph·queue·ratio·indirect·mod) / `ray_scene`(含 4 文件 tessellation 族) 持续深化 |
+| `prism_render_shading`（`gi/` 63 子目录 / 246 文件） | 344 | **344** | GI 子系统稳定在 63 子目录、`gi/` 下 246 `*.rs`（screen_probe·world_space·world_restir·probe_volume·path_reuse·area_light·caustics·denoise·spec_denoise·light·nee 全在） |
+| `prism_render_scene` | 459 | **459** | 精确 SDF 图元族稳定 |
+| `prism_render_visibility`（两阶段 HZB 遮挡） | 16 | **20** | 本 lane 本版新增 **场景级两阶段遮挡解析器 `two_phase_resolve.rs`**（Nanite 式：仅当实例在上一帧 + 当前帧 HZB **双重证明被遮挡**才剔除，复用 `classify_early_hzb`/`resolve_current_hzb` 单源 stage 逻辑；75 测试全绿）。全链：footprint→projection→pyramid→query→build→cull_hzb→occlusion_resolve→two_phase→two_phase_resolve |
+| `prism_render_material` | 12 | **12** | 闭包 IR / ABI 前端 |
+| `prism_virtual_geometry_gpu` | 25 | **25** | 软光栅主路径稳定 |
+| `prism_volumetric_gpu` | 101 | **112** | froxel / 储层 / 异质介质孪生持续新增（soft_particle / luminance_hist / sharpen_cas / checkerboard_resolve 等） |
+| `prism_hair_gpu` | 59 | **63** | Marschner / 双散射 + **近/远场散射混合 ramp GPU 孪生** + 逐发丝 LSS 段切分 |
+| `prism_physics_gpu` / `prism_physics_core` / `prism_physics_geometry` | 220 / 167 / 34 | **224 / 167 / 34** | 流体 / 断裂 / VBD / CCD / MPM / 几何流形；`physics_core` 子目录 30+（含 fluid·fracture·vbd·soft·mpm·island·sleep·ccd·reduced 等） |
+| `prism_audio_core` / `prism_audio_spatial` / `prism_audio_rt` / `prism_audio_hrtf` / `prism_audio_device` | 83 / 52 / 6 / 9 / — | **86 / 52 / 6 / 9 / 7** | 音频已拆为 5 crate；卷积混响 / HOA / 衍射 / 房间声学 / 设备 I/O；共享 `Fft` 原语统一 |
+
+**口径一致性**：本表与 v7 §14.0 同口径（单一 `*.rs` 文件计数，含测试文件），兑现核对结论（v6 §13.1 / v7 §14.1）继续成立。**本版唯一结构性增量**在 `prism_render_visibility`（+4，两阶段遮挡解析闭环）与 `volumetric_gpu`/`hair_gpu`/`physics_gpu` 的孪生增量。
+
+### 15.1 产品级高级特性赛道（v8 新增，逐条实测分级）
+
+> 关键字实测（`find pkg -iname '*<kw>*' -name '*.rs'`）结果直接决定下列分级，杜绝虚高：
+> `mega_light/light_bvh=0`、`light_tree=1`、`iridescen/thinfilm=0`、`thin_film=1`、`deferred_material/visibility_buffer=0`、`hploc/ploc/lbvh/blas_refit=0`、`tessellation=4`（CPU 侧 ray_scene 族）、`ray_acoustic=0`、`prism_audio_rt=6`。
+
+#### 15.1.1 MegaLights 式无界阴影光（随机光采样 + 光重要性树 + RT 软阴影 + ReSTIR DI 复用）
+- **借鉴对象**：UE 5.5 **MegaLights** 形态 + Estevez-Kulla《Importance Sampling of Many Lights with Adaptive Tree Splitting》(2018) + ReSTIR DI 时空复用。
+- **算法要点**：对**成百上千盏带阴影光**不再逐光一张阴影图，而是：① 用**光重要性树 BVH**（已有 `gi/light/light_tree.rs` 为上游）按辐照度 × 立体角自适应切分，每像素**随机抽样 1–few 盏光**；② 对抽中光投**硬件 RT 软阴影**（锥角采样）；③ 用 **ReSTIR DI** 时空储层复用邻域/历史样本把单样本方差压到可用（接 `gi/world_restir`）；④ 遮挡剔除消费本 lane 两阶段 HZB 保守可见集，避免对被遮光做无效 RT。
+- **预算**：从「N 盏光 × 全屏阴影」降为「每像素 O(1) 光样本 + ReSTIR 复用」；RT 软阴影按半分辨率 + 时序累积；光树构建每帧增量重排。
+- **效果**：开阔世界 / 室内海量点光·聚光·面光全部带接触硬化软阴影，告别「只有主光有阴影」的妥协；夜景霓虹、烛海、科幻舰桥密集光达到电影级。
+- **落点**：`gi/light`（光树深化）+ `gi/nee/light_sampling` + `gi/world_restir`（DI 储层）+ `ray_scene`（RT 软阴影）+ `render_visibility`（遮挡驱动）。
+- **分级 / 验收**：🟡（light_tree + nee + world_restir 骨架在，缺「随机光采样 × RT 软阴影 × ReSTIR DI」整合管线）。验收：固定 1k 盏光场景与路径追踪多光参考在收敛帧误差 < 阈值；相机静止 ReSTIR 收敛无闪烁；光数翻倍帧时间近似常数。
+
+#### 15.1.2 可见性缓冲延迟材质着色（Visibility-Buffer Deferred Material Shading）
+- **借鉴对象**：Nanite **Visibility Buffer + Deferred Material** + Burns/Hunt《The Visibility Buffer》(2013) + 材质分类分箱（material classification tiles）。
+- **算法要点**：虚拟几何软/硬光栅只写 **VisBuffer（triangle/cluster/instance ID）**，不在光栅阶段执行材质；随后 ① 按**材质 ID 对像素做屏幕 tile 分类**（间接派发，GPU 自驱）；② 每种材质**只跑一次全屏 compute 着色 pass**，在 pass 内按重心插值现算属性 + 执行闭包 IR（接 `render_material` 12 文件闭包前端）。消除 overdraw 下的重复着色，材质数量与管线状态切换解耦。
+- **预算**：着色复杂度 = 可见像素 × 单次闭包，与几何密度 / overdraw 解耦；tile 分箱用前缀和 + 间接 dispatch；bindless 纹理避免描述符爆炸。
+- **效果**：Nanite 密度（百万三角）下材质着色成本稳定，支撑复杂 über-BSDF（§6.4）+ 多层 Substrate（§3.5）而不炸管线。
+- **落点**：`render_architecture`（VisBuffer / 间接派发）+ `render_material`（闭包 IR 着色核）+ `virtual_geometry_gpu`（ID 写出）。
+- **分级 / 验收**：⬜（`visibility_buffer/deferred_material/material_classif` 均 0 文件；闭包 IR 前端在）。验收：与 forward 着色同场景逐像素一致；材质种类翻倍时着色时间不随之线性增长；tile 分类无漏/重着色。
+
+#### 15.1.3 动态场景 BVH 实时重建（HPLOC / PLOC++ + refit 混合，簇级 BLAS 刷新）
+- **借鉴对象**：Benthin 等《H-PLOC》(2024) + 《PLOC++》(2022) + Nanite 簇级 BLAS 刷新策略。
+- **算法要点**：动态几何每帧 RT 加速结构更新采「**refit 优先、重建兜底**」混合：① 微形变（蒙皮/布料小位移）只 **refit** 现有 BLAS 盒；② 拓扑/大位移触发 **GPU 并行 HPLOC/PLOC++ 重建**（Morton 排序 → 局部近邻合并聚簇 → 自底向上建树，全程 GPU、无 CPU 回读）；③ 簇级（meshlet）BLAS 与虚拟几何 LOD 对齐，只重建受影响簇。TLAS 每帧轻量重排。
+- **预算**：refit O(节点数) 远低于重建；HPLOC 单 pass 并行合并，适合每帧预算；按「脏簇」局部刷新摊销。
+- **效果**：大规模动态场景（群集动画、破碎、植被风动）保持 RT 反射 / 阴影 / GI 的 BVH 新鲜度，无「RT 结构过期导致鬼影 / 漏光」。
+- **落点**：`ray_scene`（BVH 构建 / refit）+ `virtual_geometry_gpu`（簇级 BLAS）+ 与 §14.2.4 WPO 蒙皮几何协同。
+- **分级 / 验收**：⬜（`hploc/ploc/lbvh/blas_refit` 均 0 文件；ray_scene 有静态求交基础）。验收：动态场景 RT 结果与逐帧全重建参考一致；refit/重建切换阈值无可见跳变；GPU 构建吞吐达每帧预算内千万图元级。
+
+#### 15.1.4 薄膜干涉 + 光谱色散 iridescence（物理正确的虹彩，深化 `gi/material/thin_film.rs`）
+- **借鉴对象**：Belcour & Barla《A Practical Extension to Microfacet Theory for the Modeling of Varying Iridescence》(2017) + Hero-Wavelength 光谱上采样 + Substrate 薄膜 slab。
+- **算法要点**：在现有 `thin_film.rs` 之上补 ① **Airy 多次反射求和**的薄膜反射率（随膜厚 / 入射角变化的相位干涉），② **Hero-wavelength 光谱采样 + RGB 上采样**解决 RGB 下虹彩偏色，③ 与多瓣 slab（§3.5）**能量守恒耦合**（薄膜 coat 作为可叠加 lobe），④ 色散（阿贝数）可选。全程解析 Fresnel + 相位，纯经典数值。
+- **预算**：每样本几次三角 / 复数运算（走 `bevy_math::ops`），比全光谱渲染便宜；Hero-wavelength 单波长 + 时序累积补方差。
+- **效果**：肥皂泡、油膜、甲虫鞘翅、车漆珠光、CD 光盘、相机镀膜达到物理级虹彩，随视角连续变化而非贴图伪造。
+- **落点**：`gi/material/thin_film`（Airy / 光谱）+ `render_material`（闭包 lobe）+ `particle`/über-BSDF 复用。
+- **分级 / 验收**：🟡（`thin_film.rs` 在，缺 Airy 求和 + 光谱上采样 + slab 能量守恒耦合）。验收：与离线光谱薄膜参考在多膜厚 / 多视角一致；能量守恒（反射 + 透射 ≤ 1）；无 RGB 偏色拍频。
+
+#### 15.1.5 自适应 Nanite 置换 tessellation 收口（GPU 簇级细分 + crack-free + VSM/RT 一致）
+- **借鉴对象**：UE 5.3 **Nanite Tessellation** + 现有 `ray_scene/{adaptive,patch,displacement,silhouette}_tessellation.rs`（CPU 侧 4 文件）。
+- **算法要点**：把现有 CPU 侧 tessellation 族推到 **GPU 簇级运行期细分**：① 屏幕空间误差驱动的**自适应细分因子**；② **crack-free 边界**（相邻 patch 边细分因子取 min / 水密缝合）；③ **位移贴图**沿法线置换，与 §14.2.3 DMM（微网格 RT）**同一位移源**保证光栅与 RT 一致；④ 与 VSM（§3.4）阴影 / §14.2.4 WPO 动画几何协同；⑤ 消费本 lane 两阶段 HZB 做细分前保守剔除。
+- **预算**：细分因子按屏幕误差夹紧上限；只对轮廓 / 近景簇高细分；位移在 mesh node / 放大 pass 内就地展开，避免烘死几何。
+- **效果**：地形 / 岩壁 / 砖石 / 角色褶皱获得真实轮廓位移（非法线贴图伪高），近景无「贴图平面感」，且 RT 阴影 / 反射与之一致。
+- **落点**：`ray_scene`（tessellation 族 → GPU）+ `virtual_geometry_gpu`（簇级细分）+ `gi/shadow`/VSM 协同 + `render_visibility`（剔除）。
+- **分级 / 验收**：🟡（CPU 侧 4 文件 tessellation 族在，缺 GPU 簇级 + crack-free + DMM 位移源统一）。验收：相邻 patch 无裂缝；位移光栅与 RT BLAS 轮廓一致；屏幕误差阈值内 LOD 过渡无爆/漏。
+
+#### 15.1.6 实时光线声学 + UTD 边缘衍射（深化 `prism_audio_rt`，与 §14.2.8 波场互补）
+- **借鉴对象**：NVIDIA VRWorks Audio / Valve Steam Audio 形态 + UTD（Uniform Theory of Diffraction）边缘衍射 + 现有 `prism_audio_rt`(6 文件)。
+- **算法要点**：运行期对**声学网格 path-trace** 声线（镜面反射 + 漫反射散射 + 透射），用 **UTD 对几何边缘求衍射贡献**（绕角泄声的解析加权），把到达方向 / 能量 / 延迟聚合为冲激响应，驱动现有 HOA 空间化 + 卷积混响（`prism_audio_core/reverb`）。与 §14.2.8 预计算波场**互补**：波场擅长低频 / 室内外过渡的烘焙精度，实时光线声学擅长**动态几何 / 可破坏场景**的运行期适应。纯经典几何声学 + DSP，无任何学习路径。
+- **预算**：声线数 / 反射阶数按预算夹紧；时序累积 + 空间复用（类 ReSTIR 思路）降方差；活跃声源优先。
+- **效果**：动态 / 可破坏场景下遮挡、绕角衍射、回声随几何实时变化（墙倒后声场立刻改变），超越静态烘焙的硬边界。
+- **落点**：`prism_audio_rt`（声线 path-trace + UTD）+ `prism_audio_spatial`（HOA）+ `prism_audio_core/reverb`（卷积驱动）。
+- **分级 / 验收**：🟡（`prism_audio_rt` 6 文件在，缺运行期 path-trace × UTD × HOA/卷积整合）。验收：与离线声学求解参考在关键听点冲激响应一致；动态几何改变后声场即时更新无突跳；确定性可对拍。
+
+### 15.2 v8 增补路线图优先级（并入既有阶梯，不改 §9 P0 基底次序，不重复 §6/§11/§12/§13/§14 条目）
+
+| 增补特性 | 落点 | 现状（实测） | 优先级 | 依赖 |
+|---|---|---|---|---|
+| MegaLights 无界阴影光（光树 + RT 软阴影 + ReSTIR DI） | `gi/light` + `gi/world_restir` + `ray_scene` + `render_visibility` | 🟡 light_tree + nee + world_restir 骨架在，整合待建 | **P1** | 光重要性树、RT 软阴影、ReSTIR DI、两阶段 HZB |
+| 可见性缓冲延迟材质着色 | `render_architecture`(VisBuffer) + `render_material` + `virtual_geometry_gpu` | ⬜ 0 文件；闭包 IR 前端在 | **P1** | VisBuffer、材质 tile 分类、bindless、间接派发 |
+| 动态 BVH 实时重建（HPLOC/PLOC++ + refit） | `ray_scene` + `virtual_geometry_gpu` | ⬜ 0 文件；静态求交基础在 | **P1** | GPU LBVH/PLOC、簇级 BLAS、WPO 蒙皮几何 |
+| 薄膜干涉 + 光谱色散 iridescence | `gi/material/thin_film` + `render_material` | 🟡 thin_film.rs 在，Airy/光谱待建 | **P1.5** | Airy 求和、Hero-wavelength 上采样、slab 耦合 |
+| Nanite 置换 tessellation 收口（GPU 簇级） | `ray_scene`(tess 族) + `virtual_geometry_gpu` + VSM | 🟡 CPU 侧 4 文件在，GPU/crack-free 待建 | **P1** | 自适应细分、DMM 位移源、WPO、VSM、两阶段 HZB |
+| 实时光线声学 + UTD 衍射 | `prism_audio_rt` + `prism_audio_spatial` + `prism_audio_core/reverb` | 🟡 audio_rt 6 文件在，整合待建 | **P2** | 声线 path-trace、UTD、HOA、卷积混响 |
+
+**v8 增补总原则**：① **不改 §9 P0 基底次序**，不重复 §6/§11/§12/§13/§14 已登记条目——本版 6 条均经关键字实测确认为「上游骨架在但产品级整合缺位（🟡）」或「真实空白（⬜）」的**新**赛道；② **MegaLights / 可见性缓冲延迟材质 / 动态 BVH / Nanite 置换收口列 P1**——它们是「海量光 + 海量几何 + 动态场景」三位一体 AAA 开阔世界的直接刚需，且多数上游骨架已就绪、依赖最成熟；③ **薄膜干涉列 P1.5**——效果天花板高、风险低（纯解析），在 `thin_film.rs` 上增量即可；④ **实时光线声学列 P2**——与 §14.2.8 预计算波场互补，价值高但依赖重；⑤ 全部遵循数值红线，走「CPU golden → GPU kernel → 真机 parity」三步，关键路径必须与**路径追踪参考 / 解析解 / 离线数值求解**可对拍，未毕业不作生产默认；**任何增补均不引入 AI/ML/神经/LLM 推理路径**（厂商时序上采样 / 帧生成 SDK 仅渲染侧可选外部后端）。
 
 ---
 
