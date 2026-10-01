@@ -269,6 +269,15 @@
 //!   handles are collinear). This is the classic authored net — the Utah
 //!   teapot and many legacy assets are expressed this way — and welds into
 //!   the same watertight [`indexed_bilinear_patch_mesh`].
+//! - [`displaced_surface`] — normal displacement mapping over the whole
+//!   parametric-surface family. The [`displaced_surface::ParametricSurface`]
+//!   trait (position + normal at `(u, v)`) is implemented for every patch and
+//!   control-net surface, and [`displaced_surface::DisplacedSurface`] offsets
+//!   each sample along its base normal by a bilinearly sampled
+//!   [`displaced_surface::HeightMap`]. Tessellation re-derives shading normals
+//!   from the displaced grid and welds a watertight
+//!   [`indexed_bilinear_patch_mesh`], adding AAA micro-detail (pores, bark,
+//!   terrain relief) on a smooth low-order base.
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -410,6 +419,7 @@ pub mod rational_bezier_patch;
 pub mod bspline_surface;
 pub mod nurbs_surface;
 pub mod bezier_surface;
+pub mod displaced_surface;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -502,6 +512,7 @@ pub use rational_bezier_patch::RationalBezierPatch;
 pub use bspline_surface::{BsplineSurface, BsplineSurfaceError};
 pub use nurbs_surface::{NurbsSurface, NurbsSurfaceError};
 pub use bezier_surface::{BezierSurface, BezierSurfaceError};
+pub use displaced_surface::{DisplacedSurface, HeightMap, HeightMapError, ParametricSurface};
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
 pub use obb::{Obb, ObbBvh, ObbHit};
