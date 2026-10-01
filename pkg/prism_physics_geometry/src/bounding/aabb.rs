@@ -177,6 +177,29 @@ impl Aabb {
             None
         }
     }
+
+    /// Intersects `ray` against the box and returns the `(entry, exit)`
+    /// parameter pair of the overlapping slab interval, clamped to
+    /// `[0, ray.tmax]`.
+    ///
+    /// Unlike [`ray_hit`](Self::ray_hit), which reports only the entry
+    /// parameter, this returns both bounds so callers can march the segment of
+    /// the ray that lies inside the box (volume traversal, occupancy marching,
+    /// segment-vs-box tests). `entry` is clamped to be non-negative, so a ray
+    /// whose origin is already inside the box reports `entry == 0.0`, and
+    /// `exit` is clamped to `ray.tmax`. Returns [`None`] when the slabs do not
+    /// overlap within the ray's valid range.
+    pub fn ray_hit_interval(&self, ray: &Ray) -> Option<(f32, f32)> {
+        let t1 = (self.min - ray.origin) * ray.inv_dir;
+        let t2 = (self.max - ray.origin) * ray.inv_dir;
+        let t_near = t1.min(t2).max_element().max(0.0);
+        let t_far = t1.max(t2).min_element().min(ray.tmax);
+        if t_far >= t_near {
+            Some((t_near, t_far))
+        } else {
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -281,6 +304,49 @@ mod tests {
         // hit is beyond tmax -> miss
         let short = Ray::with_tmax(Vec3::new(0.5, 0.5, -5.0), Vec3::Z, 1.0);
         assert!(a.ray_hit(&short).is_none());
+    }
+
+    #[test]
+    fn ray_hit_interval_front_to_back() {
+        let a = unit();
+        // Straight through the unit box: enters z = 0 (t = 5), exits z = 1 (t = 6).
+        let ray = Ray::new(Vec3::new(0.5, 0.5, -5.0), Vec3::Z);
+        let (entry, exit) = a.ray_hit_interval(&ray).unwrap();
+        assert_relative_eq!(entry, 5.0, epsilon = 1e-5);
+        assert_relative_eq!(exit, 6.0, epsilon = 1e-5);
+        assert_relative_eq!(ray.at(entry).z, 0.0, epsilon = 1e-5);
+        assert_relative_eq!(ray.at(exit).z, 1.0, epsilon = 1e-5);
+    }
+
+    #[test]
+    fn ray_hit_interval_from_inside_entry_zero() {
+        let a = unit();
+        // Origin inside: entry clamps to 0, exit is the far x face at x = 1.
+        let ray = Ray::new(Vec3::splat(0.5), Vec3::X);
+        let (entry, exit) = a.ray_hit_interval(&ray).unwrap();
+        assert_relative_eq!(entry, 0.0, epsilon = 1e-6);
+        assert_relative_eq!(exit, 0.5, epsilon = 1e-5);
+    }
+
+    #[test]
+    fn ray_hit_interval_clamps_exit_to_tmax() {
+        let a = unit();
+        // tmax falls inside the box, so exit is clamped while entry is unchanged.
+        let ray = Ray::with_tmax(Vec3::new(0.5, 0.5, -5.0), Vec3::Z, 5.5);
+        let (entry, exit) = a.ray_hit_interval(&ray).unwrap();
+        assert_relative_eq!(entry, 5.0, epsilon = 1e-5);
+        assert_relative_eq!(exit, 5.5, epsilon = 1e-5);
+    }
+
+    #[test]
+    fn ray_hit_interval_miss_and_short_tmax() {
+        let a = unit();
+        // Parallel, offset ray never enters the slabs.
+        let miss = Ray::new(Vec3::new(5.0, 5.0, -5.0), Vec3::Z);
+        assert!(a.ray_hit_interval(&miss).is_none());
+        // tmax short of the near face: the interval is empty.
+        let short = Ray::with_tmax(Vec3::new(0.5, 0.5, -5.0), Vec3::Z, 1.0);
+        assert!(a.ray_hit_interval(&short).is_none());
     }
 
     #[test]
