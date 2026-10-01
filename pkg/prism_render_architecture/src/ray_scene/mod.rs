@@ -543,6 +543,10 @@
 //!   [`sdf_primitives::capped_cylinder`], [`sdf_primitives::capped_cone`],
 //!   [`sdf_primitives::hex_prism`]) with exact closed-form distances, the
 //!   atoms the domain and `CSG` operators compose.
+//! - [`sdf_unsigned`] — unsigned distance primitives for open geometry
+//!   ([`sdf_unsigned::segment_distance`], [`sdf_unsigned::triangle_distance`])
+//!   returning the Euclidean distance to a finite segment or a single
+//!   triangle, the atoms of point-to-mesh proximity queries.
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -729,6 +733,7 @@ pub mod mesh_sdf_ambient_occlusion;
 pub mod sdf_domain;
 pub mod mesh_sdf_thickness;
 pub mod sdf_primitives;
+pub mod sdf_unsigned;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -872,6 +877,7 @@ pub use mesh_sdf_thickness::sdf_thickness;
 pub use sdf_primitives::{
     box_sdf, capped_cone, capped_cylinder, capsule, hex_prism, plane, round_box, sphere, torus,
 };
+pub use sdf_unsigned::{segment_distance, triangle_distance};
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
 pub use obb::{Obb, ObbBvh, ObbHit};
