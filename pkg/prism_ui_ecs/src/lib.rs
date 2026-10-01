@@ -76,6 +76,7 @@ pub mod binding;
 pub mod bridge;
 pub mod entity_binding;
 pub mod schedule;
+pub mod structural;
 
 pub use binding::FieldBinding;
 pub use bridge::EcsBridge;
@@ -83,4 +84,7 @@ pub use entity_binding::{EntityBinding, SyncBinding};
 pub use schedule::{
     add_loom_sync_systems, insert_bridge, loom_pull_system, loom_push_system, remove_bridge,
     LoomSyncSet,
+};
+pub use structural::{
+    ForBinding, ShowBinding, StructuralBinding, StructuralScope, StructuralStats,
 };

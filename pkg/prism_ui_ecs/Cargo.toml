@@ -9,11 +9,12 @@ publish = false
 [dependencies]
 prism_ui = { path = "../prism_ui" }
 prism_ui_reactive = { path = "../prism_ui_reactive" }
+prism_ui_tree = { path = "../prism_ui_tree" }
 bevy_ecs = { path = "../../crates/bevy_ecs", version = "0.20.0-dev", default-features = false, features = ["std"] }
 
 [features]
 default = ["std"]
-std = ["prism_ui/std", "prism_ui_reactive/std"]
+std = ["prism_ui/std", "prism_ui_reactive/std", "prism_ui_tree/std"]
 
 [lints]
 workspace = true
