@@ -557,6 +557,17 @@
 //!   and a negative or non-finite `max_gain` collapses to `0` (gain `1`, no
 //!   widening) exactly as the reference; the single multiply-add is matched
 //!   within the fma tolerance (see [`far_field_gain`]).
+//! * [`GpuHairSampleLobe`] evaluates
+//!   [`sample_lobe`](prism_render_architecture::hair::scatter_lod::sample_lobe),
+//!   the `Marschner` three-lobe importance sampler: one thread per `(pdf, u)`
+//!   tuple walks the per-lobe pdf as a cdf (`R -> TT -> TRT`), picks the lobe
+//!   whose slice contains the canonical uniform `u`, and remaps `u` back into
+//!   `[0, 1)` within that slice for reuse as a fresh stratified sample. `u` is
+//!   clamped to `[0, 1]` and each pdf component sanitised non-negative exactly
+//!   as the reference, and the final `TRT` lobe absorbs the upper end so a
+//!   valid lobe is always returned. The lobe index and probability are exact;
+//!   only the `(u - lo) / p` remap divides, matched within the fma tolerance
+//!   (see [`sample_lobe`]).
 //!
 //! # Portability
 //!
@@ -629,6 +640,7 @@ pub mod rt_curve_bounds;
 pub mod rt_curve_counts;
 pub mod rt_curve_segments;
 pub mod rt_proxy;
+pub mod sample_lobe;
 pub mod scatter_blend;
 pub mod scatter_lod;
 pub mod sdf_collision;
@@ -698,6 +710,7 @@ pub use rt_curve_bounds::{reference_segments_aabb, GpuHairRtCurveBounds};
 pub use rt_curve_counts::{reference_lss_segment_counts, GpuHairRtCurveCounts};
 pub use rt_curve_segments::{reference_strand_to_lss, GpuHairRtCurveSegments};
 pub use rt_proxy::{reference_rt_role, role_code, role_from_code, tier_code, GpuHairRtProxy};
+pub use sample_lobe::{reference_sample_lobe, GpuHairSampleLobe};
 pub use scatter_blend::{reference_scatter_blend, GpuHairScatterBlend};
 pub use scatter_lod::{reference_pdf, GpuHairScatterLod, PDF_PER_ELEMENT};
 pub use sdf_collision::GpuSdfCollider;
