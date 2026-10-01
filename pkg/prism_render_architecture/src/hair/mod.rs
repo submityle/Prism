@@ -93,12 +93,14 @@ pub mod line_coverage;
 pub mod lod;
 pub mod lod_dither_buffers;
 pub mod melanin;
+pub mod mesh_shader_strand;
 pub mod mesh_shell;
 pub mod oit_frontend;
 pub mod optional_pass_dispatch;
 pub mod optional_pass_layout;
 pub mod pass_layout;
 pub mod pass_params;
+pub mod persistent_coloring;
 pub mod pipeline_layout;
 pub mod projective_global;
 pub mod raster;
@@ -124,6 +126,7 @@ pub mod vbd_pass_buffers;
 pub mod wetness;
 pub mod wind;
 pub mod wind_field;
+pub mod work_graph_sched;
 
 use crate::deformation::DeformationHandle;
 
