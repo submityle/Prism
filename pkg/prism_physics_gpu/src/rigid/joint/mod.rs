@@ -94,6 +94,9 @@
 //!   the twist, and the two pyramidal swings).
 //! * [`d6_drive`] — the per-axis [`D6Drive`] spring-damper actuators and the
 //!   [`D6DriveSet`] attached alongside each [`D6Joint`].
+//! * [`d6_drive_cpu`] — the authoritative [`cpu_solve_joints_d6_driven`]
+//!   golden stepper (the passive `D6` projection plus the six per-axis
+//!   compliant, velocity-damped drives).
 //! * [`d6_gpu`] — the device-side [`GpuD6JointSolver`] twin.
 //! * [`distance`] — the [`DistanceJoint`] (limit) definition and its
 //!   device-packed storage representation.
@@ -191,6 +194,7 @@ mod cylindrical_limit_gpu;
 mod d6;
 mod d6_cpu;
 mod d6_drive;
+mod d6_drive_cpu;
 mod d6_gpu;
 mod distance;
 mod distance_cpu;
@@ -261,6 +265,7 @@ pub use cylindrical_limit_gpu::GpuCylindricalLimitJointSolver;
 pub use d6::{D6Joint, D6Motion};
 pub use d6_cpu::cpu_solve_joints_d6;
 pub use d6_drive::{D6Drive, D6DriveSet};
+pub use d6_drive_cpu::cpu_solve_joints_d6_driven;
 pub use d6_gpu::GpuD6JointSolver;
 pub use distance::DistanceJoint;
 pub use distance_cpu::cpu_solve_joints_distance;

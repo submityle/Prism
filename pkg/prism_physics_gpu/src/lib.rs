@@ -60,6 +60,7 @@ pub mod radix;
 pub mod rigid;
 pub mod scan;
 pub mod xpbd;
+pub mod vbd;
 
 pub use broadphase::{cpu_broadphase, BroadphaseConfig, BroadphaseError, CandidatePair, Particle};
 pub use bvh::{
@@ -123,9 +124,9 @@ pub use rigid::{
     cpu_integrate, cpu_integrate_gyro, cpu_solve_contacts, cpu_solve_contacts_tgs,
     cpu_solve_joints_angular_slerp_drive, cpu_solve_joints_cylindrical,
     cpu_solve_joints_cylindrical_drive, cpu_solve_joints_cylindrical_limit, cpu_solve_joints_d6,
-    cpu_solve_joints_distance, cpu_solve_joints_elliptical_cone_twist, cpu_solve_joints_fixed,
-    cpu_solve_joints_gear, cpu_solve_joints_hinge_limit, cpu_solve_joints_prismatic,
-    cpu_solve_joints_prismatic_drive, cpu_solve_joints_prismatic_limit,
+    cpu_solve_joints_d6_driven, cpu_solve_joints_distance, cpu_solve_joints_elliptical_cone_twist,
+    cpu_solve_joints_fixed, cpu_solve_joints_gear, cpu_solve_joints_hinge_limit,
+    cpu_solve_joints_prismatic, cpu_solve_joints_prismatic_drive, cpu_solve_joints_prismatic_limit,
     cpu_solve_joints_rack_pinion, cpu_solve_joints_revolute, cpu_solve_joints_revolute_drive,
     cpu_solve_joints_revolute_motor, cpu_solve_joints_revolute_servo, cpu_solve_joints_spherical,
     cpu_solve_joints_swing_twist, cpu_solve_joints_universal, AngularSlerpDriveJoint,
@@ -152,3 +153,4 @@ pub use xpbd::{
     GpuXpbdWarmSolver, IslandStep, IslandedSolver, IslandedTgsSolver, ParticleState, SoftParams,
     TgsConfig, XpbdConfig, XpbdError,
 };
+pub use vbd::{build_vbd_prep, cpu_vbd, GpuSpring, GpuVbd, VbdPrep};

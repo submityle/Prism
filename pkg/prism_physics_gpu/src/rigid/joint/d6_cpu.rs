@@ -182,7 +182,7 @@ pub fn cpu_solve_joints_d6(
         for _ in 0..iterations {
             for &(start, end) in ranges {
                 for k in start as usize..end as usize {
-                    solve_one(state, &ordered[k], h, &mut lambda[6 * k..6 * k + 6]);
+                    solve_passive(state, &ordered[k], h, &mut lambda[6 * k..6 * k + 6]);
                 }
             }
         }
@@ -195,7 +195,12 @@ pub fn cpu_solve_joints_d6(
 /// Projects one `D6` joint for a single sweep: swing1 (`lambda[4]`), swing2
 /// (`lambda[5]`), the twist (`lambda[3]`), then the three linear axes
 /// (`lambda[0..3]`), each applied directly to the two bodies' transforms.
-fn solve_one(state: &mut RigidBodyState, joint: &D6Joint, h: f32, lambda: &mut [f32]) {
+pub(super) fn solve_passive(
+    state: &mut RigidBodyState,
+    joint: &D6Joint,
+    h: f32,
+    lambda: &mut [f32],
+) {
     solve_swing(state, joint, h, &mut lambda[4], 0);
     solve_swing(state, joint, h, &mut lambda[5], 1);
     solve_twist(state, joint, h, &mut lambda[3]);
@@ -206,7 +211,7 @@ fn solve_one(state: &mut RigidBodyState, joint: &D6Joint, h: f32, lambda: &mut [
 
 /// The world-space joint-frame orientation of body `b` for `b in {a_index,
 /// b_index}` — the body orientation composed with the body-local joint basis.
-fn frame_world(body_orientation: Quat, basis: Quat) -> [f32; 4] {
+pub(super) fn frame_world(body_orientation: Quat, basis: Quat) -> [f32; 4] {
     quat_mul(quat_array(body_orientation), quat_array(basis))
 }
 
