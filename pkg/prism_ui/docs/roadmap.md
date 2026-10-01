@@ -46,7 +46,7 @@
 - [x] 独立的 Signal / Memo / Effect 运行时。
 - [x] 字段级 **双向** 绑定:ECS 组件字段 <-> `Signal` 的 `FieldBinding`/`EcsBridge`——读路径复用 `Ref` 的 tick 变更检测(仅变更帧才拉取),写路径用相等性守卫经 `Mut` 回写(不触发无谓 tick、不振荡),零 archetype 搬迁(`prism_ui_ecs`,已交付)。宏层 `$` 语法糖自动登记绑定仍规划中。
 - [x] **Bevy 调度器集成**:`EcsBridge` 作为 `NonSend` 资源经 exclusive system 接入 `Schedule`——`LoomSyncSet{Pull, Push}`(derive `SystemSet`,`.chain()` 保证拉取先于回写)、`insert_bridge` / `remove_bridge`、`loom_pull_system` / `loom_push_system`、`add_loom_sync_systems`;安全的 remove→call→reinsert 模式(无 `unsafe`)(`prism_ui_ecs::schedule`,已交付)。
-- [ ] `Show` / `For` 结构绑定,keyed reconcile 批量 spawn/despawn 到帧末。
+- [x] `Show` / `For` **结构绑定**:信号驱动的条件挂载 / keyed 列表镜像——两阶段批量(`reconcile(&World)` 只读算 plan、`flush(&mut World)` 统一 spawn/despawn 到帧末),`ShowBinding`(相等守卫)、`ForBinding<T,K>`(借 `prism_ui_tree::diff_keyed` 的 LIS 最小移动跨重排复用实体 id,可选 `update` 原地刷新)、`StructuralScope` 聚合多绑定统一 reconcile/flush,返回 `StructuralStats{spawned,despawned}`(`prism_ui_ecs::structural`,已交付)。
 - [x] 可访问性(a11y)基线:角色 / 焦点 / 键盘导航 / 读屏标签(`prism_ui_a11y`,已交付)。
 
 ### M3 样式层增强(scoped / @media / 热重载核心已交付)

@@ -114,9 +114,9 @@ Loom 以多个独立 crate 分层实现,每一层都可单独使用。下表为 
 | [`prism_ui_timetravel`](../prism_ui_timetravel) | 时间旅行调试:帧时间线(编辑器式 undo/redo)、跳转、重放(相邻帧 `diff`/变更摘要) | ✅ 已交付 | 24 |
 | [`prism_ui_inspector`](../prism_ui_inspector) | 元素树检查器:`NodePath` 寻址、`Query` 过滤、`PerfReport`/`TreeMetrics` 性能面板、`DependencyGraph`(signal 依赖图:传递闭包/拓扑序/Graphviz 导出) | ✅ 已交付 | 57 |
 | [`prism_ui_hotreload`](../prism_ui_hotreload) | `.loom` / `.loom.style` 热重载:节点身份(`NodePath`)比对、`ReloadPlan`(保留/新增/移除/重建)、跨重载状态保留(`StateStore`)、样式 `StyleDiff` | ✅ 已交付 | 45 |
-| [`prism_ui_ecs`](../prism_ui_ecs) | **ECS 桥接(M2 headline)**:组件字段 <-> `Signal` 字段级双向绑定(`FieldBinding`/`EcsBridge`),复用 ECS tick 变更检测作传输、相等性守卫防振荡;Bevy 调度器集成(`LoomSyncSet` / `NonSend` + exclusive system) | ✅ 已交付 | 43 |
+| [`prism_ui_ecs`](../prism_ui_ecs) | **ECS 桥接(M2 headline)**:组件字段 <-> `Signal` 字段级双向绑定(`FieldBinding`/`EcsBridge`),复用 ECS tick 变更检测作传输、相等性守卫防振荡;Bevy 调度器集成(`LoomSyncSet` / `NonSend` + exclusive system);`Show`/`For` 信号驱动结构绑定(两阶段批量 spawn/despawn,`diff_keyed` LIS 最小移动,`StructuralScope`) | ✅ 已交付 | 64 |
 
-全部 25 个 crate 累计 **605 个 lib + 集成测试通过**(表中「测试」列为各 crate `--lib --tests` 计数;另有 41 个 doctest 通过,合计 646)。每个 crate 均:`#![forbid(unsafe_code)]`、
+全部 25 个 crate 累计 **626 个 lib + 集成测试通过**(表中「测试」列为各 crate `--lib --tests` 计数;另有 42 个 doctest 通过,合计 668)。每个 crate 均:`#![forbid(unsafe_code)]`、
 `no_std` 友好(`default = ["std"]`,proc-macro crate 除外)、通过严格 Clippy(零告警)。
 
 > **诚实声明**:仍为 **设计阶段(PLANNED)** 的能力包括:宏层 `$` 语法糖 **自动登记
