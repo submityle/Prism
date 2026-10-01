@@ -35,6 +35,7 @@
 
 mod body;
 mod friction;
+mod ccd;
 mod self_collision;
 
 pub use body::{
@@ -42,6 +43,7 @@ pub use body::{
     resolve_backstops, resolve_body_collisions, resolve_body_collisions_with_friction, Backstop,
     BodyCollider,
 };
+pub use ccd::{capsule_toi, half_space_toi, resolve_ccd, sphere_toi, CcdParams};
 pub use self_collision::{resolve_self_collision, resolve_self_collision_with_friction};
 
 use glam::Vec3;

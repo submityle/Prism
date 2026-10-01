@@ -40,9 +40,10 @@ pub use damage::{
     TearingParams,
 };
 pub use collision::{
-    apply_backstop, closest_point_on_segment, project_out_of_half_space, project_out_of_sphere,
-    resolve_backstops, resolve_body_collisions, resolve_body_collisions_with_friction,
-    resolve_self_collision, resolve_self_collision_with_friction, Backstop, BodyCollider,
+    apply_backstop, capsule_toi, closest_point_on_segment, half_space_toi,
+    project_out_of_half_space, project_out_of_sphere, resolve_backstops, resolve_body_collisions,
+    resolve_body_collisions_with_friction, resolve_ccd, resolve_self_collision,
+    resolve_self_collision_with_friction, sphere_toi, Backstop, BodyCollider, CcdParams,
 };
 pub use constraint::{
     mesh_volume, AttachmentConstraint, BendingConstraint, ConstraintSet, DistanceConstraint,
