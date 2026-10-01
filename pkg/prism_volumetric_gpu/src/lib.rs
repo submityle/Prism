@@ -70,6 +70,7 @@ pub mod avsm_area;
 pub mod avsm_transmittance;
 pub mod backface_outline_expand;
 pub mod barycentric_coord;
+pub mod bicubic_sample;
 pub mod binary_search_range;
 pub mod bit_pack_u32;
 pub mod bit_reversal_u32;
@@ -221,6 +222,7 @@ pub use backface_outline_expand::{
     GpuBackfaceOutlineExpand, OutlineExpandResult, OutlineExpandVertex,
 };
 pub use barycentric_coord::{BarycentricQuery, BarycentricResult, GpuBarycentricCoord};
+pub use bicubic_sample::GpuBicubicSample;
 pub use binary_search_range::GpuBinarySearchRange;
 pub use bit_pack_u32::{packed_len_words, GpuBitPackU32};
 pub use bit_reversal_u32::{
