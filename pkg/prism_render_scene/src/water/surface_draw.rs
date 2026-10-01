@@ -170,6 +170,10 @@ pub(crate) fn draw_water_surface(
                 body.buffers.surface_mesh_normal_foam.as_entire_binding(),
                 visibility.scene_color_view(),
                 &sampler,
+                // @binding(7) previous-frame displacement for wave self-motion.
+                body.buffers
+                    .surface_mesh_displacement_prev
+                    .as_entire_binding(),
             )),
         );
         prepared.push(PreparedSurfaceDraw {

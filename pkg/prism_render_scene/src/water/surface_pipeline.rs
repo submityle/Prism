@@ -125,7 +125,7 @@ const fn frontend_slot(frontend: ShadingFrontend) -> usize {
 /// reads the uniform and the four storage arrays, the lighting stage reads the
 /// uniform plus the refraction texture/sampler, and a visibility superset is a
 /// legal and cheaper declaration than two separate masks.
-fn surface_layout_entries() -> BindGroupLayoutEntries<7> {
+fn surface_layout_entries() -> BindGroupLayoutEntries<8> {
     BindGroupLayoutEntries::sequential(
         ShaderStages::VERTEX_FRAGMENT,
         (
@@ -141,6 +141,9 @@ fn surface_layout_entries() -> BindGroupLayoutEntries<7> {
             texture_2d(TextureSampleType::Float { filterable: true }),
             // @binding(6) the filtering sampler the refraction lookup uses.
             sampler(SamplerBindingType::Filtering),
+            // @binding(7) previous-frame displacement (motion-vector twin of
+            // @binding(3)); vertex-stage read, one `array<vec4<f32>>`.
+            storage_buffer_read_only_sized(false, None),
         ),
     )
 }

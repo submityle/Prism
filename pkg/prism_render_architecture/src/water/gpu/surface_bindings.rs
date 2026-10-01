@@ -45,11 +45,17 @@ pub enum SurfaceBinding {
     SceneColor,
     /// `@binding(6)`: the sampler the refraction lookup uses.
     SceneSampler,
+    /// `@binding(7)`: previous-frame solver displacement per vertex (`xyz` world
+    /// offset), the double-buffered twin of [`SurfaceBinding::Displacement`].
+    /// The vertex stage reconstructs last frame's displaced world position from
+    /// it so the motion vector captures the wave's own crest motion, not just
+    /// camera reprojection.
+    PreviousDisplacement,
 }
 
 impl SurfaceBinding {
     /// Every binding in shader-declaration order.
-    pub const ALL: [SurfaceBinding; 7] = [
+    pub const ALL: [SurfaceBinding; 8] = [
         SurfaceBinding::View,
         SurfaceBinding::BasePositions,
         SurfaceBinding::SurfaceUvs,
@@ -57,6 +63,7 @@ impl SurfaceBinding {
         SurfaceBinding::NormalFoam,
         SurfaceBinding::SceneColor,
         SurfaceBinding::SceneSampler,
+        SurfaceBinding::PreviousDisplacement,
     ];
 
     /// The literal `@binding(n)` slot index this binding occupies in `@group(0)`.
@@ -70,6 +77,7 @@ impl SurfaceBinding {
             SurfaceBinding::NormalFoam => 4,
             SurfaceBinding::SceneColor => 5,
             SurfaceBinding::SceneSampler => 6,
+            SurfaceBinding::PreviousDisplacement => 7,
         }
     }
 
@@ -81,7 +89,8 @@ impl SurfaceBinding {
             SurfaceBinding::BasePositions
             | SurfaceBinding::SurfaceUvs
             | SurfaceBinding::Displacement
-            | SurfaceBinding::NormalFoam => SurfaceBindingKind::StorageRead,
+            | SurfaceBinding::NormalFoam
+            | SurfaceBinding::PreviousDisplacement => SurfaceBindingKind::StorageRead,
             SurfaceBinding::SceneColor => SurfaceBindingKind::SampledTexture,
             SurfaceBinding::SceneSampler => SurfaceBindingKind::Sampler,
         }
@@ -90,8 +99,9 @@ impl SurfaceBinding {
     /// Whether the vertex stage reads this binding.
     ///
     /// The displaced-mesh geometry stage reads the uniform (for the
-    /// clip transform) and all four per-vertex storage arrays; the refraction
-    /// texture and its sampler are fragment-only.
+    /// clip transform) and all five per-vertex storage arrays (including the
+    /// previous-frame displacement for motion vectors); the refraction texture
+    /// and its sampler are fragment-only.
     #[must_use]
     pub fn visible_in_vertex(self) -> bool {
         matches!(
@@ -101,6 +111,7 @@ impl SurfaceBinding {
                 | SurfaceBinding::SurfaceUvs
                 | SurfaceBinding::Displacement
                 | SurfaceBinding::NormalFoam
+                | SurfaceBinding::PreviousDisplacement
         )
     }
 
@@ -254,7 +265,7 @@ mod tests {
 
     #[test]
     fn binding_indices_are_unique_and_contiguous() {
-        let mut seen = [false; 7];
+        let mut seen = [false; 8];
         for binding in SurfaceBinding::ALL {
             let i = binding.index() as usize;
             assert!(i < seen.len());
@@ -291,10 +302,14 @@ mod tests {
             SurfaceBinding::SceneSampler.kind(),
             SurfaceBindingKind::Sampler
         );
+        assert_eq!(
+            SurfaceBinding::PreviousDisplacement.kind(),
+            SurfaceBindingKind::StorageRead
+        );
     }
 
     #[test]
-    fn vertex_stage_reads_the_uniform_and_all_four_vertex_arrays() {
+    fn vertex_stage_reads_the_uniform_and_all_five_vertex_arrays() {
         for binding in SurfaceBinding::ALL {
             let expected = matches!(
                 binding,
@@ -303,6 +318,7 @@ mod tests {
                     | SurfaceBinding::SurfaceUvs
                     | SurfaceBinding::Displacement
                     | SurfaceBinding::NormalFoam
+                    | SurfaceBinding::PreviousDisplacement
             );
             assert_eq!(binding.visible_in_vertex(), expected, "{binding:?}");
         }
@@ -318,6 +334,7 @@ mod tests {
         assert!(!SurfaceBinding::BasePositions.visible_in_fragment());
         assert!(!SurfaceBinding::SurfaceUvs.visible_in_fragment());
         assert!(!SurfaceBinding::Displacement.visible_in_fragment());
+        assert!(!SurfaceBinding::PreviousDisplacement.visible_in_fragment());
     }
 
     #[test]

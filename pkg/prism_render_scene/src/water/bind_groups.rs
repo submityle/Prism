@@ -367,6 +367,10 @@ pub(crate) struct WaterBodyGpuBuffers {
     pub(crate) surface_mesh_base_positions: Buffer,
     pub(crate) surface_mesh_surface_uvs: Buffer,
     pub(crate) surface_mesh_displacement: Buffer,
+    // Previous-frame displacement, copied from `surface_mesh_displacement`
+    // before each frame's assembly overwrites it, so the raster vertex stage
+    // can emit wave self-motion into the motion G-buffer.
+    pub(crate) surface_mesh_displacement_prev: Buffer,
     pub(crate) surface_mesh_normal_foam: Buffer,
     pub(crate) surface_mesh_sampler: Sampler,
 }
@@ -731,6 +735,11 @@ impl WaterBodyGpuBuffers {
             "prism water surface mesh displacement",
             surface_mesh_vertex_bytes,
         );
+        let surface_mesh_displacement_prev = zeroed_storage(
+            device,
+            "prism water surface mesh displacement prev",
+            surface_mesh_vertex_bytes,
+        );
         let surface_mesh_normal_foam = zeroed_storage(
             device,
             "prism water surface mesh normal foam",
@@ -823,6 +832,7 @@ impl WaterBodyGpuBuffers {
             surface_mesh_base_positions,
             surface_mesh_surface_uvs,
             surface_mesh_displacement,
+            surface_mesh_displacement_prev,
             surface_mesh_normal_foam,
             surface_mesh_sampler,
         }

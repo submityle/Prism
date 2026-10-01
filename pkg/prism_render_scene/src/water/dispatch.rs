@@ -104,6 +104,29 @@ pub(crate) fn dispatch_water(
         }
     }
 
+    // Double-buffer the surface displacement for motion vectors: snapshot each
+    // body's current displacement (still holding last frame's assembled result)
+    // into its previous-displacement twin *before* this frame's SurfaceMesh
+    // assembly overwrites it. The raster vertex stage then reconstructs where
+    // each vertex sat last frame, so the motion G-buffer captures the wave's own
+    // crest motion in addition to camera reprojection. On the first frame the
+    // twin is zeroed, collapsing `prev` to the undisplaced base plane for one
+    // frame; TAA history clamping hides this transient. The copy is recorded on
+    // its own encoder borrow, released before the compute pass opens.
+    {
+        let encoder = ctx.command_encoder();
+        for body in &bodies.bodies {
+            let size = body.buffers.surface_mesh_displacement.size();
+            encoder.copy_buffer_to_buffer(
+                &body.buffers.surface_mesh_displacement,
+                0,
+                &body.buffers.surface_mesh_displacement_prev,
+                0,
+                size,
+            );
+        }
+    }
+
     let mut pass = ctx
         .command_encoder()
         .begin_compute_pass(&ComputePassDescriptor {

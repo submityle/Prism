@@ -77,6 +77,12 @@ struct WaterSurfaceView {
 // Already-rendered opaque scene color, sampled for refraction.
 @group(0) @binding(5) var scene_color: texture_2d<f32>;
 @group(0) @binding(6) var scene_sampler: sampler;
+// Previous-frame solver displacement per vertex (xyz world-space offset); the
+// double-buffered twin of binding 3, copied before each frame's SurfaceMesh
+// assembly overwrites binding 3. Lets the vertex stage reconstruct where this
+// vertex sat last frame so the motion vector captures wave self-motion, not
+// just camera reprojection.
+@group(0) @binding(7) var<storage, read> previous_displacement: array<vec4<f32>>;
 
 // Shared engine lighting base (`@group(1)`): byte-identical bindings to the
 // opaque `shading_resolve` path. All analytic directional + punctual lights
@@ -573,6 +579,59 @@ struct VertexOutput {
     @location(1) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
     @location(3) foam: f32,
+    // World position reconstructed from last frame's displacement, used by the
+    // motion vector so wave crest motion (not only camera motion) is captured.
+    @location(4) previous_world_position: vec3<f32>,
+}
+
+// Motion-vector base (`@group(4)`): the current and previous `clip_from_world`
+// so the fragment stage can reproject this surface's displaced world position
+// and emit `cur_uv - prev_uv` into the second (motion) render target. The twin
+// matches the opaque resolve pass's motion convention so both writers agree on
+// the shared `Rg16Float` motion G-buffer.
+struct WaterMotionConfig {
+    clip_from_world: mat4x4<f32>,
+    previous_clip_from_world: mat4x4<f32>,
+}
+
+@group(4) @binding(0) var<uniform> motion_cfg: WaterMotionConfig;
+
+// Project a world position to the engine's motion-UV convention
+// (ndc.x*0.5+0.5, ndc.y*-0.5+0.5), returning clip.w in `.z` so the caller can
+// reject points behind the camera (clip.w <= 0). Mirrors the opaque resolve
+// pass's `project_world_to_uv`.
+fn water_project_to_uv(clip_from_world: mat4x4<f32>, world: vec3<f32>) -> vec3<f32> {
+    let clip = clip_from_world * vec4<f32>(world, 1.0);
+    if (clip.w <= 0.0) {
+        return vec3<f32>(0.0, 0.0, clip.w);
+    }
+    let ndc = clip.xy / clip.w;
+    return vec3<f32>(ndc.x * 0.5 + 0.5, ndc.y * -0.5 + 0.5, clip.w);
+}
+
+// Full surface motion: project this frame's displaced world position through the
+// current view-projection and last frame's displaced world position through the
+// previous view-projection, returning `cur_uv - prev_uv`. Because `prev` uses
+// the previous-frame displacement (binding 7) rather than the current one, the
+// result captures both camera reprojection and the wave's own crest motion. A
+// point behind either camera emits zero. On the first frame the previous
+// displacement buffer is zeroed, so `prev` collapses to the undisplaced base
+// plane for one frame; TAA history clamping hides this transient.
+fn water_motion_vector(in: VertexOutput) -> vec2<f32> {
+    let cur = water_project_to_uv(motion_cfg.clip_from_world, in.world_position);
+    let prev = water_project_to_uv(motion_cfg.previous_clip_from_world, in.previous_world_position);
+    if (cur.z > 0.0 && prev.z > 0.0) {
+        return cur.xy - prev.xy;
+    }
+    return vec2<f32>(0.0);
+}
+
+// The water surface's MRT output: the composited transparent colour on
+// `@location(0)` and the screen-space motion vector on `@location(1)` (written
+// over the shared motion G-buffer for exactly the water-covered pixels).
+struct FragmentOutput {
+    @location(0) color: vec4<f32>,
+    @location(1) motion: vec2<f32>,
 }
 
 // Shared geometry stage: displace the base grid vertex by the solved field and
@@ -581,6 +640,7 @@ struct VertexOutput {
 fn water_surface_vs(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     let i = vertex_index;
     let world_position = base_positions[i].xyz + displacement[i].xyz;
+    let previous_world_position = base_positions[i].xyz + previous_displacement[i].xyz;
 
     var out: VertexOutput;
     out.clip_position = view.clip_from_world * vec4<f32>(world_position, 1.0);
@@ -588,6 +648,7 @@ fn water_surface_vs(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     out.normal = normal_foam[i].xyz;
     out.uv = surface_uvs[i].xy;
     out.foam = clamp(normal_foam[i].w, 0.0, 1.0);
+    out.previous_world_position = previous_world_position;
     return out;
 }
 
@@ -738,12 +799,16 @@ fn shade_pbr_core(in: VertexOutput) -> vec4<f32> {
 }
 
 @fragment
-fn water_surface_fs_pbr(in: VertexOutput) -> @location(0) vec4<f32> {
-    return shade_pbr_core(in);
+fn water_surface_fs_pbr(in: VertexOutput) -> FragmentOutput {
+    return FragmentOutput(shade_pbr_core(in), water_motion_vector(in));
 }
 
 @fragment
-fn water_surface_fs_npr(in: VertexOutput) -> @location(0) vec4<f32> {
+fn water_surface_fs_npr(in: VertexOutput) -> FragmentOutput {
+    return FragmentOutput(shade_npr_core(in), water_motion_vector(in));
+}
+
+fn shade_npr_core(in: VertexOutput) -> vec4<f32> {
     let pbr = shade_pbr_core(in);
     let alpha = pbr.a;
     let base = select(pbr.rgb / alpha, vec3<f32>(0.0), alpha <= 0.0);
@@ -759,20 +824,21 @@ fn water_surface_fs_npr(in: VertexOutput) -> @location(0) vec4<f32> {
 }
 
 @fragment
-fn water_surface_fs_custom(in: VertexOutput) -> @location(0) vec4<f32> {
+fn water_surface_fs_custom(in: VertexOutput) -> FragmentOutput {
     // Author-hook default: the physical base plus a tunable emissive tint so a
     // custom closure has a non-trivial, non-identity starting point.
     let pbr = shade_pbr_core(in);
     let tint = view.water_color.rgb * view.style_params.z;
-    return vec4<f32>(pbr.rgb + tint * pbr.a, pbr.a);
+    let color = vec4<f32>(pbr.rgb + tint * pbr.a, pbr.a);
+    return FragmentOutput(color, water_motion_vector(in));
 }
 
 @fragment
-fn water_surface_fs_hybrid(in: VertexOutput) -> @location(0) vec4<f32> {
+fn water_surface_fs_hybrid(in: VertexOutput) -> FragmentOutput {
     let pbr = shade_pbr_core(in);
-    let npr = water_surface_fs_npr(in);
+    let npr = shade_npr_core(in);
     // Blend physical body into stylized shallows by a shore factor driven by
     // foam coverage and the authored bias.
     let shore = clamp(in.foam + view.style_params.w, 0.0, 1.0);
-    return mix(pbr, npr, shore);
+    return FragmentOutput(mix(pbr, npr, shore), water_motion_vector(in));
 }
