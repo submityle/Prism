@@ -297,6 +297,7 @@ impl SplineStripBvh {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ray_scene::curve_gpu_layout::GpuCurveBvhBuffers;
 
     /// Small deterministic xorshift RNG (shared `ray_scene` test generator).
     struct Rng(u64);
@@ -511,5 +512,64 @@ mod tests {
         let ray = Ray::new([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], 0.0, 100.0);
         assert!(bvh.closest_hit(&ray).is_none());
         assert!(!bvh.any_hit(&ray));
+    }
+
+    /// The pooled strand segments lower through the shared curve GPU layout
+    /// and the packed walk reproduces the in-memory closest hit, confirming
+    /// the module's "a strip uploads as its Bezier segments" contract holds
+    /// end to end (there is deliberately no separate strip layout).
+    #[test]
+    fn strip_bvh_packs_via_shared_curve_layout() {
+        let mut rng = Rng::new(0x51C3_7A11);
+        let strips: Vec<SplineStrip> = (0..10)
+            .map(|s| {
+                let n = 5 + (s as usize % 3);
+                let base = rng.point(-6.0, 6.0);
+                let verts: Vec<[f32; 3]> = (0..n)
+                    .map(|_| {
+                        [
+                            base[0] + rng.range(-2.0, 2.0),
+                            base[1] + rng.range(-2.0, 2.0),
+                            base[2] + rng.range(-2.0, 2.0),
+                        ]
+                    })
+                    .collect();
+                let widths = vec![rng.range(0.1, 0.3); n];
+                let basis = if s % 2 == 0 {
+                    SplineBasis::CatmullRom
+                } else {
+                    SplineBasis::BSpline
+                };
+                SplineStrip::new(verts, widths, basis, s)
+            })
+            .collect();
+        let bvh = SplineStripBvh::build(&strips);
+        let gpu = GpuCurveBvhBuffers::from_bvh(bvh.spline_bvh().curve_bvh());
+
+        for _ in 0..2000 {
+            let origin = rng.point(-10.0, 10.0);
+            let target = rng.point(-6.0, 6.0);
+            let dir = [
+                target[0] - origin[0],
+                target[1] - origin[1],
+                target[2] - origin[2],
+            ];
+            let len2 = dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2];
+            if len2 < 1e-3 {
+                continue;
+            }
+            let inv = 1.0 / len2.sqrt();
+            let ray = Ray::new(origin, [dir[0] * inv, dir[1] * inv, dir[2] * inv], 0.0, 100.0);
+            let cpu = bvh.closest_hit(&ray);
+            let packed = gpu.closest_hit(&ray);
+            match (cpu, packed) {
+                (None, None) => {}
+                (Some(a), Some(b)) => {
+                    assert_eq!(a.primitive, b.primitive);
+                    assert!((a.t - b.t).abs() < 1e-4);
+                }
+                _ => panic!("packed walk disagreement"),
+            }
+        }
     }
 }
