@@ -143,6 +143,7 @@ pub mod rayleigh_phase;
 pub mod relax_coverage;
 pub mod rgb_ycocg;
 pub mod ribbon_geometry;
+pub mod segment_closest_point_3d;
 pub mod select_lod;
 pub mod shadow;
 pub mod sharpen_cas;
@@ -270,6 +271,9 @@ pub use rayleigh_phase::{GpuRayleighPhase, RayleighPhaseQuery};
 pub use relax_coverage::{GpuRelaxCoverage, RelaxCoverageQuery};
 pub use rgb_ycocg::GpuRgbYCoCg;
 pub use ribbon_geometry::{GpuRibbonGeometry, RibbonStripQuery};
+pub use segment_closest_point_3d::{
+    GpuSegmentClosestPoint3d, SegmentClosestQuery, SegmentClosestResult,
+};
 pub use select_lod::{GpuSelectLod, SelectLodQuery};
 pub use shadow::{GpuShadow, ShadowRay};
 pub use sharpen_cas::{GpuSharpenCas, SharpenCasQuery};
