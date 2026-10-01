@@ -367,6 +367,14 @@
 //!   box and unions the two per axis, the device-side `BLAS`-build input a
 //!   hardware ray-traced curve primitive registers; with no multiply to
 //!   fuse the twin is bit-exact with the golden (see [`rt_curve_aabb`]).
+//! * [`GpuHairRtCurveSegments`] evaluates
+//!   [`strand_to_lss`](prism_render_architecture::hair::rt_curve::strand_to_lss),
+//!   splitting a strand polyline into one `Linear Swept Spheres` segment per
+//!   adjacent vertex pair one thread per segment — it copies each sanitised
+//!   position and radius into an endpoint pair, the per-segment primitives a
+//!   hardware ray-traced curve `BLAS` build registers; with no arithmetic
+//!   beyond the sanitiser the twin is bit-exact with the golden (see
+//!   [`rt_curve_segments`]).
 //! * [`GpuHairRtProxy`] evaluates
 //!   [`resolve_rt_role`](prism_render_architecture::hair::rt_proxy::resolve_rt_role),
 //!   classifying each groom instance's ray-traced-reflection role one thread
@@ -572,6 +580,7 @@ pub mod ribbon;
 pub mod root_bind;
 pub mod root_resolve;
 pub mod rt_curve_aabb;
+pub mod rt_curve_segments;
 pub mod rt_proxy;
 pub mod scatter_lod;
 pub mod sdf_collision;
@@ -635,6 +644,7 @@ pub use ribbon::{GpuRibbon, GpuRibbonMesh, RibbonStrandInput};
 pub use root_bind::GpuHairRootBind;
 pub use root_resolve::GpuHairRootResolve;
 pub use rt_curve_aabb::{reference_segment_aabb, GpuHairRtCurveAabb};
+pub use rt_curve_segments::{reference_strand_to_lss, GpuHairRtCurveSegments};
 pub use rt_proxy::{reference_rt_role, role_code, role_from_code, tier_code, GpuHairRtProxy};
 pub use scatter_lod::{reference_pdf, GpuHairScatterLod, PDF_PER_ELEMENT};
 pub use sdf_collision::GpuSdfCollider;
