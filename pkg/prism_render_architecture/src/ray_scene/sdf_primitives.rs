@@ -1767,13 +1767,51 @@ pub fn vesica_2d(point: [f32; 2], radius: f32, offset: f32) -> f32 {
     }
 }
 
+/// Exact signed distance to an arbitrary triangle in 2D with vertices `a`,
+/// `b` and `c` (Inigo Quilez `sdTriangle`).
+///
+/// Each of the three edges contributes a point-to-segment distance (the
+/// projection parameter clamped to the edge) and the unsigned distance is the
+/// smallest of the three. The interior sign is recovered winding-independently
+/// by taking the component-wise minimum of the signed edge areas scaled by the
+/// triangle's own orientation `s`: a point that lies on the inner side of every
+/// edge keeps a positive minimum area and is reported negative. Built from
+/// `clamp`, `min`, `signum` and `sqrt`, so it is exact, transcendental-free and
+/// valid for either vertex winding.
+pub fn triangle_2d(point: [f32; 2], a: [f32; 2], b: [f32; 2], c: [f32; 2]) -> f32 {
+    let e0 = [b[0] - a[0], b[1] - a[1]];
+    let e1 = [c[0] - b[0], c[1] - b[1]];
+    let e2 = [a[0] - c[0], a[1] - c[1]];
+    let v0 = [point[0] - a[0], point[1] - a[1]];
+    let v1 = [point[0] - b[0], point[1] - b[1]];
+    let v2 = [point[0] - c[0], point[1] - c[1]];
+    let pq0 = {
+        let t = ((v0[0] * e0[0] + v0[1] * e0[1]) / dot2_2(e0)).clamp(0.0, 1.0);
+        [v0[0] - e0[0] * t, v0[1] - e0[1] * t]
+    };
+    let pq1 = {
+        let t = ((v1[0] * e1[0] + v1[1] * e1[1]) / dot2_2(e1)).clamp(0.0, 1.0);
+        [v1[0] - e1[0] * t, v1[1] - e1[1] * t]
+    };
+    let pq2 = {
+        let t = ((v2[0] * e2[0] + v2[1] * e2[1]) / dot2_2(e2)).clamp(0.0, 1.0);
+        [v2[0] - e2[0] * t, v2[1] - e2[1] * t]
+    };
+    let s = (e0[0] * e2[1] - e0[1] * e2[0]).signum();
+    let dx = dot2_2(pq0).min(dot2_2(pq1)).min(dot2_2(pq2));
+    let dy = (s * (v0[0] * e0[1] - v0[1] * e0[0]))
+        .min(s * (v1[0] * e1[1] - v1[1] * e1[0]))
+        .min(s * (v2[0] * e2[1] - v2[1] * e2[0]));
+    -dx.sqrt() * dy.signum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         arc, box_frame, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_torus, capsule, circle_2d, cone_sdf, cross_2d, cut_disk_2d, cut_hollow_sphere,
         cut_sphere, cylinder_segment, death_star, egg_2d, ellipsoid_sdf, equilateral_triangle_2d, heart_2d, hex_prism, hexagram_2d, infinite_cone, infinite_cylinder, isosceles_triangle_2d, length2, line_sdf, link, moon,
         octagon_prism, octahedron, oriented_box_2d, parallelogram, pentagram_2d, pie, plane, polygon_2d, pyramid, quad_sdf, regular_hexagon_2d, regular_octagon_2d, regular_pentagon_2d, rhombus, rhombus_2d, round_box, round_cone_sdf,
-        round_cone_segment, rounded_box_2d, rounded_cylinder, rounded_x, segment_2d, solid_angle, sphere, star5_2d, torus, trapezoid_isosceles, triangle_sdf, triangular_prism,
+        round_cone_segment, rounded_box_2d, rounded_cylinder, rounded_x, segment_2d, solid_angle, sphere, star5_2d, torus, trapezoid_isosceles, triangle_2d, triangle_sdf, triangular_prism,
         uneven_capsule_2d, vesica, vesica_2d, vesica_segment,
     };
 
@@ -3361,6 +3399,78 @@ mod tests {
             let got = vesica_2d(s, r, off);
             let want = reference(s[0], s[1]);
             assert!((got - want).abs() < 5e-3, "s={s:?} got={got} want={want}");
+        }
+    }
+
+    // Independent reference for `triangle_2d`: the unsigned distance is the
+    // smallest point-to-segment distance over the three edges, and the sign is
+    // taken from a winding-independent half-plane inside test (all three edge
+    // cross products share one sign iff the point is inside). This shares no
+    // logic with the IQ component-wise-min formula under test.
+    fn triangle_ref(p: [f32; 2], a: [f32; 2], b: [f32; 2], c: [f32; 2]) -> f32 {
+        fn seg(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
+            let pa = [p[0] - a[0], p[1] - a[1]];
+            let ba = [b[0] - a[0], b[1] - a[1]];
+            let h = ((pa[0] * ba[0] + pa[1] * ba[1]) / (ba[0] * ba[0] + ba[1] * ba[1]))
+                .clamp(0.0, 1.0);
+            ((pa[0] - ba[0] * h).powi(2) + (pa[1] - ba[1] * h).powi(2)).sqrt()
+        }
+        let d = seg(p, a, b).min(seg(p, b, c)).min(seg(p, c, a));
+        let cr = |u: [f32; 2], v: [f32; 2], w: [f32; 2]| {
+            (v[0] - u[0]) * (w[1] - u[1]) - (v[1] - u[1]) * (w[0] - u[0])
+        };
+        let c0 = cr(a, b, p);
+        let c1 = cr(b, c, p);
+        let c2 = cr(c, a, p);
+        let inside = (c0 >= 0.0 && c1 >= 0.0 && c2 >= 0.0)
+            || (c0 <= 0.0 && c1 <= 0.0 && c2 <= 0.0);
+        if inside { -d } else { d }
+    }
+
+    #[test]
+    fn triangle_2d_closed_form_points() {
+        // Right triangle with legs along the axes: (0,0),(4,0),(0,3).
+        let a = [0.0f32, 0.0];
+        let b = [4.0f32, 0.0];
+        let c = [0.0f32, 3.0];
+        // Centroid is interior; distance to nearest edge (the hypotenuse, line
+        // 3x+4y-12=0 at distance |3*4/3+4*1-12|/5 = 0.8) -> negative 0.8.
+        let g = [4.0 / 3.0, 1.0];
+        assert!((triangle_2d(g, a, b, c) - (-0.8)).abs() < 1e-5);
+        // Point 2 units to the left of the vertical leg is outside at distance 2.
+        assert!((triangle_2d([-2.0, 1.0], a, b, c) - 2.0).abs() < 1e-6);
+        // Point directly below the base is outside at its vertical distance.
+        assert!((triangle_2d([1.0, -1.5], a, b, c) - 1.5).abs() < 1e-6);
+        // On an edge midpoint the field is zero.
+        assert!(triangle_2d([2.0, 0.0], a, b, c).abs() < 1e-6);
+    }
+
+    #[test]
+    fn triangle_2d_matches_half_plane_reference() {
+        // A few fixed non-degenerate triangles, both windings, sampled on a grid.
+        let tris: [[[f32; 2]; 3]; 4] = [
+            [[-2.0, -1.0], [3.0, -0.5], [0.5, 2.5]],
+            [[0.5, 2.5], [3.0, -0.5], [-2.0, -1.0]], // reversed winding
+            [[-3.0, 2.0], [-1.0, -3.0], [2.5, 0.0]],
+            [[1.0, 1.0], [4.0, 1.5], [2.0, 4.0]],
+        ];
+        for tri in tris.iter() {
+            let (a, b, c) = (tri[0], tri[1], tri[2]);
+            let mut i = -40i32;
+            while i <= 40 {
+                let mut j = -40i32;
+                while j <= 40 {
+                    let p = [i as f32 * 0.15, j as f32 * 0.15];
+                    let got = triangle_2d(p, a, b, c);
+                    let want = triangle_ref(p, a, b, c);
+                    assert!(
+                        (got - want).abs() < 1e-4,
+                        "triangle mismatch at {p:?}: got {got} want {want}"
+                    );
+                    j += 1;
+                }
+                i += 1;
+            }
         }
     }
 
