@@ -438,6 +438,15 @@
 //!   RGB-primary [`melanin`] twin (per-wavelength `LUT` interpolation versus
 //!   three fixed-primary channels), checked within the fma tolerance
 //!   (see [`spectrum_sample_map`]).
+//! * [`GpuHairCurlWind`] evaluates
+//!   [`curl_wind_map`](prism_render_architecture::hair::wind_field::curl_wind_map),
+//!   the divergence-free `Bridson` 2007 curl-noise wind field that maps a
+//!   batch of world positions to their per-point wind velocity — one thread
+//!   per position takes the curl of a hashed-lattice trilinear value-noise
+//!   vector potential via central finite differences; a genuinely distinct
+//!   sibling of the analytic gust-superposition [`GpuWindField`] twin
+//!   (procedural curl-noise versus steady + gust + turbulent model), checked
+//!   within the fma tolerance (see [`curl_wind_map`]).
 //!
 //! # Portability
 //!
@@ -511,6 +520,7 @@ pub mod voxel_forward_scatter;
 pub mod voxel_transmittance;
 pub mod wetness;
 pub mod wind;
+pub mod wind_field;
 
 pub use analysis_reduce::{reference_reduce, GpuHairAnalysisReduce};
 pub use barrier_contact::{reference_resolve, ContactInput, ContactOutput, GpuHairBarrierContact};
@@ -563,3 +573,4 @@ pub use voxel_forward_scatter::GpuHairVoxelForwardScatter;
 pub use voxel_transmittance::GpuHairVoxelTransmittance;
 pub use wetness::{reference_response, GpuHairWetness, MODIFIERS_PER_ELEMENT};
 pub use wind::{query_for_wind, GpuWindField, WindQuery};
+pub use wind_field::{reference_curl_wind_map, GpuHairCurlWind};
