@@ -35,4 +35,4 @@ pub use constraint::{
     SoftConstraintKind, TetraVolumeConstraint,
 };
 pub use particle::{ParticleHandle, ParticleStorage};
-pub use solver::{SoftSolver, SoftSolverConfig};
+pub use solver::{SelfCollisionParams, SoftSolver, SoftSolverConfig};

@@ -22,9 +22,10 @@
 pub mod config;
 pub mod integrate;
 
-pub use config::SoftSolverConfig;
+pub use config::{SelfCollisionParams, SoftSolverConfig};
 
 use crate::math::scalar::Real;
+use crate::soft::collision::{resolve_self_collision, resolve_self_collision_with_friction};
 use crate::soft::constraint::ConstraintSet;
 use crate::soft::particle::ParticleStorage;
 
@@ -68,6 +69,25 @@ impl SoftSolver {
             for _ in 0..iterations {
                 constraints.project(columns.positions, columns.inverse_masses, h);
             }
+            if let Some(contact) = config.self_collision {
+                if contact.friction > 0.0 {
+                    resolve_self_collision_with_friction(
+                        columns.positions,
+                        columns.prev_positions,
+                        columns.inverse_masses,
+                        contact.cell_size,
+                        contact.thickness,
+                        contact.friction,
+                    );
+                } else {
+                    resolve_self_collision(
+                        columns.positions,
+                        columns.inverse_masses,
+                        contact.cell_size,
+                        contact.thickness,
+                    );
+                }
+            }
             integrate::finalize_velocities(&mut columns, h);
         }
     }
@@ -77,6 +97,7 @@ impl SoftSolver {
 mod tests {
     use super::*;
     use crate::soft::constraint::DistanceConstraint;
+    use crate::soft::particle::ParticleHandle;
     use glam::Vec3;
 
     #[test]
@@ -162,6 +183,70 @@ mod tests {
                 solver.step(&mut particles, &mut constraints, &config, 1.0 / 60.0);
             }
             particles.position(bottom).unwrap()
+        };
+        assert_eq!(run(), run());
+    }
+
+    #[test]
+    fn self_collision_disabled_by_default_lets_particles_overlap() {
+        // Two coincident free particles with no constraints: with the collide
+        // stage off (the default), nothing pushes them apart.
+        let solver = SoftSolver::new();
+        let mut particles = ParticleStorage::new();
+        particles.spawn(Vec3::ZERO, 1.0);
+        particles.spawn(Vec3::ZERO, 1.0);
+        let mut constraints = ConstraintSet::new();
+        let config = SoftSolverConfig {
+            gravity: Vec3::ZERO,
+            self_collision: None,
+            ..SoftSolverConfig::default()
+        };
+        solver.step(&mut particles, &mut constraints, &config, 1.0 / 60.0);
+        let gap = (particles.position(ParticleHandle::from_index(0)).unwrap()
+            - particles.position(ParticleHandle::from_index(1)).unwrap())
+        .length();
+        assert!(gap < 1e-6, "particles drifted apart without a collide stage: {gap}");
+    }
+
+    #[test]
+    fn self_collision_stage_pushes_overlapping_particles_to_thickness() {
+        // Same pair, but with the collide stage enabled: the substep's collide
+        // pass must separate them to (at least) the contact thickness.
+        let solver = SoftSolver::new();
+        let mut particles = ParticleStorage::new();
+        particles.spawn(Vec3::new(0.0, 0.0, 0.0), 1.0);
+        particles.spawn(Vec3::new(0.1, 0.0, 0.0), 1.0);
+        let mut constraints = ConstraintSet::new();
+        let config = SoftSolverConfig {
+            gravity: Vec3::ZERO,
+            damping: 0.0,
+            self_collision: Some(SelfCollisionParams::new(1.0, 1.0)),
+            ..SoftSolverConfig::default()
+        };
+        solver.step(&mut particles, &mut constraints, &config, 1.0 / 60.0);
+        let gap = (particles.position(ParticleHandle::from_index(0)).unwrap()
+            - particles.position(ParticleHandle::from_index(1)).unwrap())
+        .length();
+        assert!(gap >= 1.0 - 1e-5, "pair not separated to thickness: {gap}");
+    }
+
+    #[test]
+    fn self_collision_stage_is_deterministic() {
+        let run = || {
+            let solver = SoftSolver::new();
+            let mut particles = ParticleStorage::new();
+            particles.spawn(Vec3::new(0.0, 0.0, 0.0), 1.0);
+            particles.spawn(Vec3::new(0.2, 0.1, 0.0), 1.0);
+            particles.spawn(Vec3::new(0.1, 0.2, 0.1), 1.0);
+            let mut constraints = ConstraintSet::new();
+            let config = SoftSolverConfig {
+                self_collision: Some(SelfCollisionParams::new(1.0, 0.5).with_friction(0.3)),
+                ..SoftSolverConfig::default()
+            };
+            for _ in 0..30 {
+                solver.step(&mut particles, &mut constraints, &config, 1.0 / 60.0);
+            }
+            particles.position(ParticleHandle::from_index(2)).unwrap()
         };
         assert_eq!(run(), run());
     }

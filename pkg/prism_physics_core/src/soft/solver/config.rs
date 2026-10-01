@@ -33,6 +33,12 @@ pub struct SoftSolverConfig {
     /// velocity by `(1 - damping * h).max(0)`, bleeding off energy so cloth and
     /// rope settle instead of oscillating forever.
     pub damping: Real,
+    /// Optional self-collision contact pass run once per substep after
+    /// constraint projection. `None` (the default) disables it entirely, so a
+    /// garment that never folds onto itself pays no cost. When set, the solver
+    /// pushes interpenetrating particle pairs apart with the deterministic
+    /// spatial-hash resolver in [`crate::soft::collision`].
+    pub self_collision: Option<SelfCollisionParams>,
 }
 
 impl SoftSolverConfig {
@@ -54,7 +60,53 @@ impl Default for SoftSolverConfig {
             substeps: Self::DEFAULT_SUBSTEPS,
             iterations: Self::DEFAULT_ITERATIONS,
             damping: Self::DEFAULT_DAMPING,
+            self_collision: None,
         }
+    }
+}
+
+/// Parameters for the solver's optional per-substep self-collision pass.
+///
+/// The pass buckets particles into a uniform spatial hash of side
+/// [`cell_size`](Self::cell_size) and pushes any pair closer than
+/// [`thickness`](Self::thickness) apart, split by inverse mass. A positive
+/// [`friction`](Self::friction) additionally rubs each separated pair's
+/// tangential slide with position-level Coulomb friction so stacked layers grip
+/// instead of shearing freely. See [`crate::soft::collision`] for the exact
+/// math and determinism guarantees.
+#[derive(Clone, Copy, PartialEq, Debug)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
+pub struct SelfCollisionParams {
+    /// Uniform spatial-hash cell side length, in metres. Should be on the order
+    /// of the particle spacing (or the `thickness`); a non-positive value makes
+    /// the pass a no-op.
+    pub cell_size: Real,
+    /// Contact thickness: the minimum separation enforced between any two
+    /// particles, in metres. A non-positive value makes the pass a no-op.
+    pub thickness: Real,
+    /// Coulomb friction coefficient, clamped to `0..=1` by the resolver; `0`
+    /// gives a frictionless (pure normal) separation.
+    pub friction: Real,
+}
+
+impl SelfCollisionParams {
+    /// Creates frictionless self-collision parameters with the given spatial-
+    /// hash `cell_size` and contact `thickness`.
+    #[must_use]
+    pub const fn new(cell_size: Real, thickness: Real) -> SelfCollisionParams {
+        SelfCollisionParams {
+            cell_size,
+            thickness,
+            friction: 0.0,
+        }
+    }
+
+    /// Returns a copy of these parameters with the given Coulomb `friction`
+    /// coefficient (clamped to `0..=1` by the resolver at use time).
+    #[must_use]
+    pub const fn with_friction(mut self, friction: Real) -> SelfCollisionParams {
+        self.friction = friction;
+        self
     }
 }
 
