@@ -44,6 +44,8 @@ mod budget;
 mod body_collision_gpu_tests;
 #[cfg(test)]
 mod ccd_gpu_tests;
+#[cfg(test)]
+mod ccd_parity;
 mod coverage;
 mod dispatch;
 #[cfg(test)]
