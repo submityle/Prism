@@ -91,6 +91,7 @@ pub mod depth_linearize;
 pub mod distance_field_shadow;
 pub mod dual_lobe_phase;
 pub mod edge_detect;
+pub mod fibonacci_lfsr;
 pub mod film_grain;
 pub mod flipbook_blend;
 pub mod fluid_diffusion;
@@ -222,6 +223,7 @@ pub use depth_linearize::{DepthLinearizeQuery, DepthLinearizeResult, GpuDepthLin
 pub use distance_field_shadow::{GpuDistanceFieldShadow, GpuSdfGrid, SdfShadowRay};
 pub use dual_lobe_phase::{DualLobePhaseQuery, GpuDualLobePhase};
 pub use edge_detect::{EdgeDetectOutput, EdgeDetectQuery, EdgeFrame, EdgeResponse, GpuEdgeDetect};
+pub use fibonacci_lfsr::GpuFibonacciLfsr;
 pub use film_grain::{FilmGrainPixel, FilmGrainQuery, GpuFilmGrain};
 pub use flipbook_blend::{FlipbookQuery, FlipbookResult, FlipbookSample, GpuFlipbookBlend};
 pub use fluid_diffusion::{GpuDiffusionResult, GpuFluidDiffusion};
