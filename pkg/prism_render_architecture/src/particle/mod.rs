@@ -286,6 +286,7 @@ pub mod tri_tri_intersect;
 pub mod triangle_aabb_overlap;
 pub mod triangle_circumcircle;
 pub mod triplanar_blend;
+pub mod two_way_coupling;
 pub mod unorm_snorm_pack;
 pub mod uv_animation;
 pub mod validation;
