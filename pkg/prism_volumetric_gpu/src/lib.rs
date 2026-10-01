@@ -93,6 +93,7 @@ pub mod flipbook_blend;
 pub mod fluid_diffusion;
 pub mod fog;
 pub mod froxel_injection;
+pub mod frustum_aabb_cull;
 pub mod frustum_cull;
 pub mod fxaa;
 pub mod gamut_clip;
@@ -208,6 +209,7 @@ pub use flipbook_blend::{FlipbookQuery, FlipbookResult, FlipbookSample, GpuFlipb
 pub use fluid_diffusion::{GpuDiffusionResult, GpuFluidDiffusion};
 pub use fog::{FogQuery, GpuFogTransmittance};
 pub use froxel_injection::{FroxelInjectionQuery, GpuFroxelInjection};
+pub use frustum_aabb_cull::{FrustumAabbCullPrimitive, FrustumAabbCullQuery, GpuFrustumAabbCull};
 pub use frustum_cull::{FrustumCullPrimitive, FrustumCullQuery, GpuFrustumCull};
 pub use fxaa::{FxaaQuery, GpuFxaa};
 pub use gamut_clip::{GamutClipMode, GamutClipQuery, GpuGamutClip};
