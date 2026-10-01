@@ -43,37 +43,7 @@ const WEIGHT2: [u32; 4] = [0, 21, 43, 64];
 /// 3-bit index interpolation weights (Khronos `aWeight3`), in 1/64 units.
 const WEIGHT3: [u32; 8] = [0, 9, 18, 27, 37, 46, 55, 64];
 
-/// LSB-first bit cursor over a 16-byte BC7 block.
-struct BitReader<'a> {
-    bytes: &'a [u8; 16],
-    pos: usize,
-}
-
-impl<'a> BitReader<'a> {
-    #[inline]
-    fn new(bytes: &'a [u8; 16]) -> Self {
-        Self { bytes, pos: 0 }
-    }
-
-    /// Read `n` bits (`n <= 32`) LSB-first and advance the cursor.
-    ///
-    /// Reads past the 128-bit block are impossible for mode 6 (its fields sum
-    /// to exactly 128 bits); the index guard below keeps the function total
-    /// even for a malformed caller by treating out-of-range bits as `0`.
-    #[inline]
-    fn read(&mut self, n: u32) -> u32 {
-        let mut v = 0u32;
-        for i in 0..n {
-            let bit = self
-                .bytes
-                .get(self.pos / 8)
-                .map_or(0, |byte| (byte >> (self.pos % 8)) & 1);
-            v |= u32::from(bit) << i;
-            self.pos += 1;
-        }
-        v
-    }
-}
+use super::bitio::BitReader;
 
 /// Return the BC7 mode (`0..=7`) encoded in the block's unary prefix, or
 /// `None` when byte 0 is zero (a reserved/invalid encoding).

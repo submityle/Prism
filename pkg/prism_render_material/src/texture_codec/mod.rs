@@ -17,10 +17,14 @@
 //!   BC4, the alpha half of BC3, and both channels of BC5.
 //! * [`formats`] -- the public per-format decoders that compose the two.
 //! * [`bc7`] -- the standalone BC7 single-subset (`RGBA`) block decoder.
+//! * [`bc6h`] -- the BC6H HDR single-subset (`RGB` half-float) decoder.
+//! * [`bitio`] -- the shared LSB-first bit cursor used by both BPTC decoders.
 //!
 //! BC7 **modes 4, 5, and 6** (single-subset `RGBA`, no partition table) are
-//! decoded by [`bc7`]; the partitioned BC7 modes (0-3, 7) and BC6H HDR
-//! remain follow-ups (they need validated Khronos partition/anchor tables).
+//! decoded by [`bc7`], and BC6H **mode 11** (single-subset unsigned HDR) by
+//! [`bc6h`]; the partitioned BC7 modes (0-3, 7), BC6H delta/partitioned
+//! modes, and signed BC6H remain follow-ups (they need validated Khronos
+//! partition/anchor and endpoint-transform tables).
 //!
 //! # Conventions
 //! * All blocks are little-endian; texel ordering is row-major with
@@ -34,11 +38,17 @@
 //! * Vulkan `VK_FORMAT_BC{1,3,4,5}_*` / D3D `DXGI_FORMAT_BC{1,3,4,5}_*`.
 
 mod alpha_block;
+mod bc6h;
 mod bc7;
+mod bitio;
 mod color_block;
 mod formats;
 mod source;
 
+pub use bc6h::{
+    bc6h_mode_bits, decode_bc6h_mode11_unsigned, decode_bc6h_unsigned, half_bits_to_f32,
+    Bc6hError,
+};
 pub use bc7::{
     bc7_mode, decode_bc7, decode_bc7_mode4, decode_bc7_mode5, decode_bc7_mode6, Bc7Error,
 };

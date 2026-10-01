@@ -56,9 +56,10 @@ pub use texture_filter::{
     bilinear, filter_resolved, trilinear, wrap_texel, TexelAddr, TexelSource,
 };
 pub use texture_codec::{
-    bc7_mode, decode_bc1, decode_bc2, decode_bc3, decode_bc4, decode_bc5, decode_bc7,
-    decode_bc7_mode4, decode_bc7_mode5, decode_bc7_mode6, rgb565_to_rgb888, Bc7Error, BcFormat,
-    BcSourceError,
+    bc6h_mode_bits, bc7_mode, decode_bc1, decode_bc2, decode_bc3, decode_bc4, decode_bc5,
+    decode_bc6h_mode11_unsigned, decode_bc6h_unsigned, decode_bc7, decode_bc7_mode4,
+    decode_bc7_mode5, decode_bc7_mode6, half_bits_to_f32, rgb565_to_rgb888, Bc6hError, Bc7Error,
+    BcFormat, BcSourceError,
     BcTexelSource,
 };
 pub use texture_mipgen::{
