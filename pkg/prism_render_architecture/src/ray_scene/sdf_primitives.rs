@@ -1871,6 +1871,28 @@ pub fn rounded_box_2d(point: [f32; 2], half_extent: [f32; 2], radii: [f32; 4]) -
     qx.max(qy).min(0.0) + length2([qx.max(0.0), qy.max(0.0)]) - r
 }
 
+/// Exact 2D surface normal (unit gradient) of [`rounded_box_2d`] at `point` for
+/// the per-corner `radii` `[top_right, bottom_right, top_left, bottom_left]`.
+///
+/// Within each open quadrant the active corner radius `r` is constant, and the
+/// field reduces to a [`box_2d`] with the shrunk half-extent
+/// `half_extent - r` offset by the constant `-r`. The constant offset drops out
+/// of the gradient, so the normal is exactly [`box_2d_gradient`] evaluated at
+/// the shrunk half-extent — the straight walls give an axis normal and the
+/// rounded corners give the radial fillet normal. The quadrant boundaries
+/// (`point.x == 0` or `point.y == 0`), where the radius selection switches, are
+/// a measure-zero crease.
+pub fn rounded_box_2d_gradient(
+    point: [f32; 2],
+    half_extent: [f32; 2],
+    radii: [f32; 4],
+) -> [f32; 2] {
+    let rx = if point[0] > 0.0 { radii[0] } else { radii[2] };
+    let ry = if point[0] > 0.0 { radii[1] } else { radii[3] };
+    let r = if point[1] > 0.0 { rx } else { ry };
+    box_2d_gradient(point, [half_extent[0] - r, half_extent[1] - r])
+}
+
 /// Exact signed distance to an oriented 3D vesica (a lens / rugby-ball shape)
 /// whose axis is the segment `a`-`b` and which bulges to radial half-width
 /// `width` at its midpoint (Inigo Quilez `sdVesicaSegment`).
@@ -2235,7 +2257,7 @@ mod tests {
         annulus_2d, arc, box_2d, box_2d_gradient, box_frame, box_frame_2d, box_gradient, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_cylinder_gradient, capped_torus, capsule, capsule_2d, capsule_gradient, circle_2d, circle_2d_gradient, cone_sdf, cross_2d, cut_disk_2d, cut_hollow_sphere,
         cut_sphere, cylinder_segment, death_star, egg_2d, ellipsoid_sdf, equilateral_triangle_2d, heart_2d, hex_prism, hexagram_2d, horseshoe_2d, infinite_cone, infinite_cylinder, isosceles_triangle_2d, length2, line_sdf, link, moon,
         octagon_prism, octahedron, oriented_box_2d, oriented_vesica_2d, parallelogram, pentagram_2d, pie, plane, plane_gradient, polygon_2d, pyramid, quad_sdf, regular_hexagon_2d, regular_octagon_2d, regular_pentagon_2d, rhombus, rhombus_2d, round_box, round_cone_sdf,
-        round_cone_segment, rounded_box_2d, rounded_cross_2d, rounded_cylinder, rounded_x,
+        round_cone_segment, rounded_box_2d, rounded_box_2d_gradient, rounded_cross_2d, rounded_cylinder, rounded_x,
         segment_2d, segment_3d, solid_angle, sphere, sphere_gradient, star5_2d, torus, torus_gradient, trapezoid_isosceles, triangle_2d, triangle_sdf, triangular_prism, tunnel_2d,
         uneven_capsule_2d, vertical_capsule, vertical_capsule_gradient, vesica, vesica_2d, vesica_segment,
     };
@@ -3310,6 +3332,28 @@ mod tests {
         // On the central axis above the cap the normal is the pure +y cap normal.
         assert_eq!(capped_cylinder_gradient([0.0, 1.0, 0.0], half_height, radius), [0.0, 1.0, 0.0]);
         assert_eq!(capped_cylinder_gradient([0.0, -1.0, 0.0], half_height, radius), [0.0, -1.0, 0.0]);
+    }
+
+    #[test]
+    fn rounded_box_2d_gradient_matches_central_difference_off_creases() {
+        let b = [0.8_f32, 0.5];
+        let radii = [0.2_f32, 0.15, 0.1, 0.25]; // tr, br, tl, bl
+        // Points off the quadrant-boundary creases (x==0 / y==0).
+        for &p in &[
+            [1.0_f32, 0.3],    // exterior +x wall
+            [0.3, 0.9],        // exterior +y wall
+            [-1.1, -0.8],      // exterior bottom-left fillet corner
+            [0.2, 0.1],        // interior, nearest +y wall
+            [0.7, 0.1],        // interior, nearest +x wall
+            [-0.75, 0.42],     // top-left fillet corner region (r=0.1)
+        ] {
+            let g = rounded_box_2d_gradient(p, b, radii);
+            assert!((unit_len2(g) - 1.0).abs() < 1e-6, "unit p={p:?}");
+            let fd = central_grad2(&|q| rounded_box_2d(q, b, radii), p);
+            for k in 0..2 {
+                assert!((g[k] - fd[k]).abs() < 2e-3, "rbox grad p={p:?} axis {k}: {} vs {}", g[k], fd[k]);
+            }
+        }
     }
 
     // Exact unsigned distance to a 2D segment, used to cross-check `segment_2d`
