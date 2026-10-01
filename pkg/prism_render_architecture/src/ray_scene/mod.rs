@@ -510,6 +510,11 @@
 //!   ([`mesh_sdf_tetrahedron_normal::sdf_tetrahedron_gradient`],
 //!   [`mesh_sdf_tetrahedron_normal::sdf_tetrahedron_normal`]), a cheaper
 //!   alternative to the six-tap central difference.
+//! - [`mesh_sdf_curvature`] — surface curvature of a signed distance field by
+//!   Hessian estimation ([`mesh_sdf_curvature::sdf_curvature`],
+//!   [`mesh_sdf_curvature::SdfCurvature`]) returning Goldman's convex-positive
+//!   mean and Gaussian curvatures plus the two principal curvatures, for
+//!   cavity/edge-wear masks and curvature-adaptive detail.
 //! - [`mesh_sdf_surface_projection`] — Newton projection of a point onto the
 //!   signed-distance zero level set
 //!   ([`mesh_sdf_surface_projection::project_to_surface`],
@@ -744,6 +749,7 @@ pub mod mesh_signed_distance_field;
 pub mod mesh_sdf_raymarch;
 pub mod mesh_sdf_normal;
 pub mod mesh_sdf_tetrahedron_normal;
+pub mod mesh_sdf_curvature;
 pub mod mesh_sdf_surface_projection;
 pub mod sdf_csg;
 pub mod mesh_voxel_padding;
@@ -885,6 +891,7 @@ pub use mesh_signed_distance_field::{signed_distance_field, SignedDistanceField}
 pub use mesh_sdf_raymarch::{sample_signed_distance, sphere_trace, SdfHit};
 pub use mesh_sdf_normal::{sdf_gradient, sdf_normal};
 pub use mesh_sdf_tetrahedron_normal::{sdf_tetrahedron_gradient, sdf_tetrahedron_normal};
+pub use mesh_sdf_curvature::{sdf_curvature, SdfCurvature};
 pub use mesh_sdf_surface_projection::{project_to_surface, SurfaceProjection};
 pub use sdf_csg::{
     intersection, smooth_intersection, smooth_subtraction, smooth_union, subtraction, union,
