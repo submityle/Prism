@@ -151,6 +151,7 @@ pub mod ray_obb;
 pub mod ray_sphere;
 pub mod rayleigh_phase;
 pub mod relax_coverage;
+pub mod reservoir_sample;
 pub mod rgb_ycocg;
 pub mod ribbon_geometry;
 pub mod segment_closest_point_3d;
@@ -290,6 +291,7 @@ pub use ray_obb::{GpuRayObb, RayObbQuery, RayObbResult};
 pub use ray_sphere::{GpuRaySphere, RaySphereProbe, RaySphereResult};
 pub use rayleigh_phase::{GpuRayleighPhase, RayleighPhaseQuery};
 pub use relax_coverage::{GpuRelaxCoverage, RelaxCoverageQuery};
+pub use reservoir_sample::{GpuReservoirSample, ReservoirValue};
 pub use rgb_ycocg::GpuRgbYCoCg;
 pub use ribbon_geometry::{GpuRibbonGeometry, RibbonStripQuery};
 pub use segment_closest_point_3d::{
