@@ -20,6 +20,10 @@
 //! - [`sample_player::SamplePlayerNode`] -- pitch/rate-resampling PCM player with
 //!   [`sample_player::LoopMode`] loop points and selectable
 //!   [`sample_player::Interpolation`] (linear / Catmull-Rom).
+//! - [`wavetable_oscillator::WavetableOscillatorNode`] -- band-limited mipmap
+//!   wavetable oscillator: an octave mipmap of additively synthesized tables
+//!   (saw/square/triangle presets or an arbitrary harmonic spectrum) read with
+//!   periodic Catmull-Rom interpolation.
 //!
 //! Every generator is real-time safe: `process` performs no allocation, no
 //! locking, and no panics, and reproducible generators are fully deterministic
@@ -29,8 +33,10 @@ pub mod karplus_strong;
 pub mod noise;
 pub mod oscillator;
 pub mod sample_player;
+pub mod wavetable_oscillator;
 
 pub use karplus_strong::{KarplusStrongNode, KarplusStrongParams};
 pub use noise::{NoiseColor, NoiseNode};
 pub use oscillator::{OscillatorNode, Waveform};
 pub use sample_player::{Interpolation, LoopMode, SamplePlayerNode};
+pub use wavetable_oscillator::{WavetableOscillatorNode, WavetableOscillatorParams};
