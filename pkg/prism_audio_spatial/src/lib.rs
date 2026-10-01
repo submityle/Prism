@@ -82,6 +82,7 @@ pub mod room_modes;
 pub mod rooms;
 pub mod scattering;
 pub mod seat_dip_effect;
+pub mod sound_strength;
 pub mod source_directivity;
 pub mod spatial_impression;
 pub mod spatializer;
@@ -161,6 +162,10 @@ pub use scattering::{
 };
 pub use seat_dip_effect::{
     MAX_SEAT_DIP_DB, SeatDipEffect, SeatDipGeometry, seat_dip_attenuation_db,
+};
+pub use sound_strength::{
+    MIN_STRENGTH_DB, SoundStrength, early_sound_strength_db, late_sound_strength_db,
+    sound_strength_db,
 };
 pub use source_directivity::{DirectivityPreset, SourceDirectivity};
 pub use spatial_impression::{
