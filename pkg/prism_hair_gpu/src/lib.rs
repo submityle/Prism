@@ -96,6 +96,15 @@
 //!   on the clumped tangent, and per-point position jitter — the stage that
 //!   turns the sparse simulated guides into the dense drawn groom (see
 //!   [`interp`]).
+//! * [`GpuHairMelanin`] evaluates
+//!   [`melanin_absorption`](prism_render_architecture::hair::melanin::melanin_absorption),
+//!   folding each fibre's two non-negative pigment concentrations (eumelanin,
+//!   pheomelanin) into its RGB absorption coefficient `sigma_a` one thread per
+//!   fibre — a pure non-negative linear combination of the two per-unit
+//!   `Chiang` 2016 / `pbrt` pigment spectra (passed as host uniforms so the
+//!   shader never drifts from the golden constants), with the same
+//!   finite-and-positive concentration guard clamping negative and non-finite
+//!   inputs to `0` (see [`melanin`]).
 //!
 //! * [`GpuHairDeepOpacity`] evaluates
 //!   [`build_deep_opacity_map`](prism_render_architecture::hair::deep_opacity_layout::build_deep_opacity_map),
@@ -347,6 +356,7 @@ pub mod frames;
 pub mod guide_solver;
 pub mod importance;
 pub mod interp;
+pub mod melanin;
 pub mod mesh_shell;
 pub mod mesh_shell_tapered;
 pub mod raster;
@@ -386,6 +396,7 @@ pub use frames::{GpuStrandFrame, GpuStrandFrames};
 pub use guide_solver::GpuGuideSolver;
 pub use importance::GpuHairImportance;
 pub use interp::GpuHairInterp;
+pub use melanin::{reference_absorption, GpuHairMelanin};
 pub use mesh_shell::{GpuMeshShell, GpuShellMesh, ShellStrandInput};
 pub use mesh_shell_tapered::{GpuMeshShellTapered, TaperedShellStrandInput};
 pub use raster::{path_code, GpuHairRaster, RasterQuery};
