@@ -1,0 +1,78 @@
+# Loom 路线图
+
+> 本文清晰区分 **已交付(SHIPPED)** 与 **规划中(PLANNED)**。
+> 原则:不把未实现能力描述为已实现。
+
+## 已交付(SHIPPED)
+
+7 个 crate,全部通过测试、Clippy 零告警,`no_std` 友好(proc-macro crate 除外):
+
+| Crate | 能力 | 测试 |
+|---|---|---|
+| `prism_ui_reactive` | 无毛刺 Signal / Memo / Effect | 9 |
+| `prism_ui_tree` | 分代 Arena、保留树、LIS 最小化 keyed 协调 | 9 |
+| `prism_ui_style` | token / class / 选择器 / 级联(含 token 环检测) | 13 |
+| `prism_ui_layout` | 纯 Rust Flexbox 求解器 | 15 |
+| `prism_ui_anim` | 缓动 / 弹簧 / 时间线 / 过渡 | 24 |
+| `prism_ui` | `Element` / `Ui` 运行时 / `Backend` / 最小化 op 流 | 7 + 2 doctest |
+| `prism_ui_macro` | `loom!` 声明式 DSL | 8 |
+
+对应的核心价值已可验证:
+- 数据层 `Element` → 保留树 → 最小化 `BackendOp` 的完整链路;
+- 「相同输入零新增操作」「keyed 反转 0 新建 / 0 删除 / 1 reorder」等性能契约测试;
+- 响应 / 样式 / 布局 / 动画四层均可独立使用与单测;
+- `loom!` 宏编译期降解为全限定构建器调用,报错精准。
+
+## 规划中(PLANNED)
+
+### M1 结构层(部分已交付)
+- [x] `loom!` 宏 + `Element` 构建器。
+- [ ] 静态子树提升(无绑定子树编译期常量化)。
+- [ ] 编译期稳定节点 ID(借 Compose 位置记忆),用于结构变更 / 热重载精确对齐。
+
+### M2 响应层到 ECS 的绑定(部分已交付)
+- [x] 独立的 Signal / Memo / Effect 运行时。
+- [ ] `$` 绑定 → 注册 Effect,信号变化 **字段级** 回写目标实体组件,零 archetype 搬迁。
+- [ ] `Show` / `For` 结构绑定,keyed reconcile 批量 spawn/despawn 到帧末。
+- [ ] 可访问性(a11y)基线:角色 / 焦点 / 键盘导航 / 读屏标签。
+
+### M3 样式层增强(部分已交付)
+- [x] token / class / 级联 / 交互态 / 断点匹配上下文。
+- [ ] 作用域样式(scoped)。
+- [ ] `@media` 响应式断点生效到布局。
+- [ ] `.loom` 结构 + `.loom.style` 样式热重载,**保留运行时状态**。
+
+### M4 效果层增强(部分已交付)
+- [x] 缓动 / 弹簧 / 时间线 / 进出场 `Transition`。
+- [ ] 隐式过渡:样式 `transition:` 声明,属性值变化自动补间。
+- [ ] 布局动画:插入 / 重排自动补间,避免跳变。
+- [ ] 编排(choreography):stagger / sequence / parallel。
+- [ ] 共享元素过渡(shared element / Hero)。
+
+### M5 高级功能
+- [ ] 组件模型:props(带默认值)、具名多插槽、`children`、生命周期、Context 注入。
+- [ ] Store + 选择器(细粒度订阅)+ 中间件。
+- [ ] 列表虚拟化:`For.virtual`,可视区实例化 + 回收池。
+- [ ] 异步与健壮性:`Resource` + Suspense + Error Boundary。
+- [ ] Portal / Overlay 管理器(模态、tooltip、popover、焦点捕获)。
+- [ ] 表单双向绑定 + 声明式校验。
+- [ ] 声明式路由与导航栈 + 守卫 + 深链接。
+- [ ] 国际化(i18n):`t!`、复数 / 格式化 / RTL。
+
+### M6 工具链
+- [ ] DevTools:实体 / 组件树检查器、signal 依赖图、本帧更新 / 重排性能面板、
+      状态时间旅行回放。
+- [ ] 快照测试(渲染树 / 布局结果序列化比对)。
+- [ ] 组件工作台(Storybook 式隔离预览)。
+- [ ] 双模式编译:开发期解释(极速热重载)/ 发布期宏固化(零解析开销)。
+
+## 风险与开放问题
+
+1. **响应式实现策略**:自研细粒度 vs 复用 ECS 变更检测。倾向复用变更检测承载、
+   薄封装 Signal,降低与引擎的割裂。
+2. **宏编译开销**:大文件宏展开可能拖慢编译 → 用双模式缓解。
+3. **宏报错可读性**:必须做 span 映射(现已保留 ident span),否则开发体验崩塌。
+4. **服务端驱动 UI 安全**:远端 `.loom` 需沙箱 + 能力白名单 + 版本协商。
+5. **a11y 深度**:焦点 / 读屏需尽早进模型,后补代价高。
+6. **跨后端抽象边界**:核心机制与渲染后端解耦(已通过 `Backend` trait 落地),
+   输入 / a11y 后续走适配层。
