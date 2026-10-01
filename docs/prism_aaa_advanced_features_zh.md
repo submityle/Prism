@@ -1,43 +1,47 @@
-# Prism 渲染引擎 — 顶级次世代 AAA 高级特性专项设计（PBR / NPR / 混合）
+# Prism 渲染引擎 — 顶级次世代 AAA 高级特性专项设计（v2 / PBR·NPR·混合 全前端）
 
 > 本文是 `prism_material_pipeline_design_zh.md`（顶层架构与决策）的**下钻分册**：把 §12–16 的对标矩阵与特性清单展开为**逐特性规格书**——每条给出「借鉴对象 / 算法要点 / 性能预算 / 效果上限 / 模块落点 / 验收口径」。
 > **一句话立场**：共享 GPU-driven 基底算一次，PBR / NPR / 自定义三前端并存消费，混合在管线级路由。**三条赛道都是一等公民，都能拿到顶级次世代 AAA 效果**，差异只在「怎么解读同一份光/影/GI/几何数据」的前端响应处。
 > **纪律**：只借鉴公开算法与形态，**不本地拉取任何产品源码**（UE 算法已获授权，同样只借形态）。
+> **数值红线（硬约束）**：所有高级特性走**纯经典数值路径**（蒙特卡洛/准蒙特卡洛、SH/SG、reservoir 重采样、SDF 步进、时空双边降噪、时空蓝噪声、FFT）。**不引入任何 AI / ML / 神经网络 / LLM 路径**——不做神经降噪、Ray Reconstruction、神经辐射缓存、神经上采样、神经材质压缩。厂商时序上采样 SDK（DLSS/FSR2/XeSS）仅作**可选外部后端**接入，本体默认路径为纯经典 TSR 式时序累积，保证 CPU golden 可对拍、跨平台可移植。
+> **v2 本版新增**：在 v1（§1–§8，三前端共享基底 + PBR/NPR/混合逐特性规格）之上，追加 **§6「次世代前沿高级特性全景」**——覆盖几何 / 阴影 / 反射 / 材质 / 体积 / 透明 / 毛发 / 水体 / 后期影视 / 采样降噪 / 上采样抗锯齿 / 性能工程 12 条前沿赛道，对标最新实时 AAA 天花板（UE5.6 / Cyberpunk RT Overdrive / Alan Wake 2 / Portal RTX / Horizon / Nanite Tessellation / MegaLights），逐条给算法要点 + 预算 + 落点 + 验收；并刷新 §2 对标矩阵（§2.3 前沿总表）与 §9 落点路线图（按仓内现状分级）。
 
 ---
 
 ## 0. 阅读地图与非目标
 
 - 本文 = 特性目录 + 预算 + 验收。顶层为什么这么拆见管线文档 §0–§11。
-- **非目标**：不在本文重复"为什么放弃 Slang / 为什么共享基底"的论证（见管线 §1、§2）；不做纯 raw-VK 独占特性的跨平台承诺（见 §8.1 三桶）。
-- 时间预算基线：**1440p 内部渲染 + 时序上采样到 4K，目标 16.6ms（60fps）/ 高配 8.3ms（120fps）**，桌面独显参考档；集显/移动为降级档。
+- GI 深水区（surface cache / 多层辐射缓存 / World-Space ReSTIR / ReSTIR PT / 焦散 / 探针体）在 `prism_gi_lumen_design_zh.md`（v4）独立成册，本文 §6.3 反射与 §6.5 体积只给**衔接口径**，不重复其内部规格。
+- **非目标**：不在本文重复“为什么放弃 Slang / 为什么共享基底”的论证（见管线 §1、§2）；不做纯 raw-VK 独占特性的跨平台承诺（见 §8.1 三桶）；不做离线烘焙管线（Phase 6 另行）；**不做任何神经/ML 推理路径**（见上数值红线）。
+- 时间预算基线：**1440p 内部渲染 + 时序上采样到 4K，目标 16.6ms（60fps）/ 高配 8.3ms（120fps）**，桌面独显参考档；集显/移动为降级档。沙盒无 GPU，所有耗时为**设计目标（design target），非实测**。
 
 ---
 
 ## 1. 共享基底服务（三前端的地基，算一次）
 
-> 这些不是"PBR 的特性"，是**全前端共享的数据服务**。NPR / 混合同样消费，只是响应不同。落点均在 `prism_render_architecture/src/`。
+> 这些不是“PBR 的特性”，是**全前端共享的数据服务**。NPR / 混合同样消费，只是响应不同。落点均在 `prism_render_architecture/src/` 与 `prism_render_shading/src/gi/`。
 
 | 服务 | 模块落点 | 产出的数据 | 三前端如何消费 |
 |---|---|---|---|
 | 虚拟几何 vis-buffer | `virtual_geometry/` | cluster DAG LOD、软光栅微三角、visibility buffer、material id/边界 | 三者同吃；NPR 额外白得 material id 描边边 |
 | GPU 场景 / 剔除 | `gpu_scene/` `geometry/` | instance/mesh 表、GPU 剔除、draw 生成 | 全共享 |
-| 光照数据 | `lighting/` | clustered 光照剔除、ReSTIR 储层预算、探针/GI 采样 | PBR 积分、NPR ramp 量化、混合共享预算 |
+| 光照数据 | `lighting/` + `gi/world_restir/` | clustered 光照剔除、ReSTIR 储层预算、探针/GI 采样 | PBR 积分、NPR ramp 量化、混合共享预算 |
 | 虚拟阴影 VSM | `virtual_shadow/` | 虚拟页 + clipmap 深度、residency | PBR 软阴影、NPR 阈值硬阴影+染色、另叠 SDF 面部阴影 |
-| 光线场景 | `ray_scene/` | BVH/TLAS、RT 反射/阴影/GI 输入 | PBR 全保真、NPR 降级风格化近似 |
+| 光线场景 | `ray_scene/`（78 文件，软件 BVH 已成规模） | BVH/TLAS、RT 反射/阴影/GI 输入 | PBR 全保真、NPR 降级风格化近似 |
+| 全局光照 / 反射 | `gi/`（surface_cache/screen_probe/spec_gi/world_restir/path_reuse/probe_volume/vxgi/global_sdf/caustics 等已落） | surface cache、屏幕探针、SHARC、ReSTIR 储层、反射 | 见 GI 文档 v4 |
 | 时序 / 上采样 | `temporal_upscale/` `motion/` `history/` | motion vector、历史累积、reactive mask、上采样 | 全共享；NPR 锐利分段靠 reactive mask 保护 |
-| 透明 | `transparency/` | OIT 路径、HairVisibility 等 | 全共享 |
-| 形变 / 子系统 | `deformation/` `hair/` (+ 规划中 `cloth/` `particle/`) | 蒙皮/morph/布料/毛发/顶点动画的形变预算与调度 | 全共享 |
+| 透明 | `transparency/` + `gi/oit/` | OIT 路径、HairVisibility 等 | 全共享 |
+| 形变 / 子系统 | `deformation/` `hair/` `cloth/` `particle/` `water/` `volumetric/` | 蒙皮/morph/布料/毛发/粒子/水/顶点动画的形变预算与调度 | 全共享 |
 | 材质 ABI | `material/` `abi/` | 正交轴 + 闭包 IR + über-BSDF/有界 slab | 三前端的统一材质表达 |
-| 视图族 / 分帧 | `view_family/` `frame_graph/` `paging/` | 多视图、帧图、页驻留 | 全共享 |
+| 视图族 / 分帧 | `view_family/` `frame_graph/` `paging/` `work_graph/` | 多视图、帧图、页驻留、GPU 工作图 | 全共享 |
 
-**规则**：任何"高级特性"先问一句——它是**基底服务**（放这里，全前端白嫖）还是**前端响应**（放前端，各自解读）。绝不让 NPR/PBR 各自重造 GI/阴影/几何。
+**规则**：任何“高级特性”先问一句——它是**基底服务**（放这里，全前端白嫖）还是**前端响应**（放前端，各自解读）。绝不让 NPR/PBR 各自重造 GI/阴影/几何。
 
 ---
 
 ## 2. 顶级产品对标（借形态，不抄码）
 
-> 比管线 §12 更细：拆出"具体借哪一招 / 借到什么程度 / 不借什么"。
+> 比管线 §12 更细：拆出“具体借哪一招 / 借到什么程度 / 不借什么”。
 
 ### 2.1 PBR 线（业界已收敛，抄作业到位即 AAA）
 
@@ -48,8 +52,8 @@
 | 多光源/采样 | NVIDIA ReSTIR DI/GI (RTXDI) + NRD | 储层时空重采样、ReBLUR/ReLAX 去噪思路 | — |
 | 阴影 | UE5 VSM + RT 阴影 | 虚拟页 + clipmap、按驻留渲染 | — |
 | 材质分层 | UE5 Substrate / OpenPBR | über-BSDF + slab 分层思想 → **收敛成有界 slab** | 无界 slab（刻意封顶防 variant 爆炸） |
-| 上采样 | UE5 TSR / DLSS / FSR2 / XeSS | 时序上采样形态；接厂商 SDK 为可选后端 | — |
-| 参考渲染 | RED Engine Cyberpunk RT Overdrive | ReSTIR GI 路径追踪 + NRD 的离线对拍口径 | — |
+| 上采样 | UE5 TSR / DLSS / FSR2 / XeSS | 时序上采样形态；接厂商 SDK 为可选后端 | 神经网络内核（本体走经典时序） |
+| 参考渲染 | RED Engine Cyberpunk RT Overdrive | ReSTIR GI 路径追踪 + NRD 的离线对拍口径 | Ray Reconstruction（神经降噪） |
 
 ### 2.2 NPR 线（无现成招牌管线，最大增量也最高风险）
 
@@ -58,20 +62,26 @@
 | 卡通着色 | miHoYo（原神/星铁）、Arc System Works（GG Xrd / DBFZ） | ramp/阶梯 Blinn、ID map + 顶点色控制、手编法线 |
 | 面部阴影 | miHoYo / HoYo 系 | SDF 面部阴影图（独立数据、主光方向阈值切换）+ 阈值硬阴影染色 |
 | 高光 | miHoYo / Arc Sys | 天使环各向异性高光带（与真实切线解耦）、MatCap、阶梯高光 |
-| 描边 | Arc Sys / miHoYo / Borderlands | inverted-hull 背面挤出（顶点色控宽度）、屏幕空间深度/法线边、material id 边、墨线 |
-| view-dependent ramp | Valve TF2（论文） | 半兰伯特 warp + light-warp ramp + rim |
-| 影视风格化 | Spider-Verse / Arcane(Fortiche) / Okami | halftone/Ben-Day 点、色差、墨线、降帧步进、水墨/宣纸、Kuwahara 油画 |
+| 描边 | Arc Sys / miHoYo / Borderlands | inverted-hull 背面挤出（顶点色控宽度）、屏幕空间深度/法线边、material id 边、墨线笔刷 |
 
-### 2.3 混合线（对标"风格化 PBR"与影视混合管线）
+### 2.3 前沿总表（v2 新增，§6 各赛道的对标源，均纯经典数值）
 
-| 形态 | 对标 | 借什么 |
-|---|---|---|
-| 风格化 PBR 中间态 | Fortnite / Valorant / Overwatch / Sea of Thieves | über 少瓣 + Stylized illumination 轻叠加 + 真 GI/Nanite/Lumen |
-| 影视级混合 | Spider-Verse / Arcane | 3D 基底 + 2D 手绘 FX/线 + 逐物体降帧步进 |
-| 选择性 NPR | 影视混合、卡通角色进实景 | 写实世界里对特定角色/道具开 Stylized，其余 PBR，共享同一光影 |
+| 前沿赛道 | 首选对标 | 借什么形态 | 明确不借 |
+|---|---|---|---|
+| 几何置换/细分 | UE5.4 Nanite Tessellation + NVIDIA DMM | cluster 级程序化置换 + 位移微网格 LOD | 其数据布局/源码；神经几何压缩 |
+| 多光源阴影 | UE5.5 MegaLights + NVIDIA SMRT | 统一海量光源 reservoir 直接光 + 光追软阴影核 | — |
+| 混合反射 | Lumen 反射 + 随机 HiZ-SSR + glossy ReSTIR | 粗糙度分档 SSR→RT 升级 + 镜面储层重用 | 神经反射重建 |
+| 能量守恒材质 | OpenPBR / Filament multiscatter GGX | 多散射能量补偿 + 布料 sheen + 车漆 flakes | — |
+| 体积云/雾 | Decima/Nubis + Frostbite froxel + Volumetric ReSTIR | 时域重投影 + 蓝噪声步进 + froxel 储层 | 神经体积超分 |
+| 透明 OIT | McGuire MBOIT + per-pixel linked list | 加权混合/链表 OIT + 折射 + hair visibility | — |
+| 毛发 | Marschner + Zinke 双散射 + UE Groom | 物理发丝 BSDF + 双散射多散射能量补偿 + strand→card LOD | — |
+| 水体/海洋 | Tessendorf FFT + Sea of Thieves/AC 海洋 | 频谱 FFT 海面 + 泡沫/湿润/焦散 | — |
+| 后期影视 | ACES/AgX + Frostbite 物理镜头 | bokeh DoF/物理 bloom/tile 运动模糊/自动曝光 | 神经风格迁移 |
+| 采样/降噪 | STBN(Heitz) + Owen-Sobol + NRD/A-SVGF | 时空蓝噪声 + 低差异 QMC + 时空双边降噪 | 神经降噪 / Ray Reconstruction |
+| 上采样/AA | UE5 TSR + VRS | 经典时序上采样 + 可变着色率 | 神经上采样内核（SDK 仅可选后端） |
+| 性能工程 | D3D12/Metal Work Graphs + NVIDIA SER + bindless | GPU 自驱调度 + 着色重排 + bindless 堆 | — |
 
 ---
-
 ## 3. PBR 前端 AAA 高级特性规格
 
 > 前端 = 延迟 PBR（承载虚拟几何/RT/GI/VSM 的最高保真度驱动方）。逐条：算法 / 预算 / 效果 / 落点。
@@ -192,55 +202,184 @@
 
 ---
 
-## 6. 帧时间预算（1440p→4K，60fps 目标档）
+## 6. 次世代前沿高级特性全景（v2 新增，纯经典数值 / 无 AI·ML·LLM）
 
-> 粗预算，用于取舍与验收基线；实际以 GPU profiling 为准（沙盒无 GPU，本表为设计目标非实测）。
+> 本章把“到顶级次世代 AAA 天花板”所需的前沿特性拆成 12 条赛道。每条给**借鉴对象 / 算法要点 / 性能预算 / 效果上限 / 模块落点 / 验收口径**。GI 本体规格在 `prism_gi_lumen_design_zh.md`（v4），这里只给与其它赛道的衔接增量。所有条目均为经典数值，**不含任何神经/ML 内核**。
+
+### 6.1 几何前沿 — 微多边形 + 程序化置换
+
+| 能力 | 借鉴对象 | 算法要点 | 性能预算 | 效果上限 | 落点 | 验收 |
+|---|---|---|---|---|---|---|
+| 微多边形软光栅 | UE5 Nanite | cluster DAG 连续 LOD + 64 像素级 tri 的 compute 软光栅 + 硬件栅格混合 | 与 draw 数解耦，vis-buffer 一趟；两趟 HiZ 遮挡剔除去背面/被遮 cluster | 像素级几何密度、无 LOD pop | `virtual_geometry/`（12 文件，骨架在，软光栅为最大出血点） | 任意距离无 pop、无裂缝；vis-buffer material id 正确 |
+| 程序化置换/细分 | UE5.4 Nanite Tessellation + NVIDIA DMM | cluster 级自适应细分 + 位移贴图；位移微网格（DMM）做 LOD 压缩 | 仅可见 cluster 细分；置换预算随屏占自适应 | 近景置换细节（砖缝/岩面/地形）无需烘高模 | `virtual_geometry/` + `material/`（置换轴） | 置换边界不裂、与 VSM/RT 一致 |
+| 两趟遮挡剔除 | UE Nanite HiZ | 上帧 HiZ 剔第一趟，渲染后重建 HiZ 剔第二趟补绘 | 剔除在 GPU，CPU 零往返 | 大遮挡场景 draw 大降 | `virtual_geometry/` + `geometry/` | 无错剔（可见物不丢）、无漏剔开销 |
+| 蒙皮体素/SDF 代理 | UE Lumen 动态几何 | 蒙皮网格每帧体素化/SDF 更新，供 GI/DFAO/软阴影 | 低分辨率代理 + 增量更新 | 动态角色参与 GI/遮蔽不漏光 | `ray_scene/` + GI `global_sdf/` | 角色移动间接光/AO 跟随无延迟 |
+
+### 6.2 阴影前沿 — 虚拟页 + 光追软阴影 + 海量光
+
+| 能力 | 借鉴对象 | 算法要点 | 性能预算 | 效果上限 | 落点 | 验收 |
+|---|---|---|---|---|---|---|
+| VSM 深化 | UE5 Virtual Shadow Maps | 虚拟页 + clipmap，仅渲驻留页；页缓存复用静态 | residency 已落；增量重绘脏页 | 全程一致阴影密度，近不虚远不抖 | `virtual_shadow/`（7 文件） | 页抖动/缓存失配可量化为零 |
+| 光追软阴影 | NVIDIA SMRT / RT Shadows + NRD | 面光锥内分层随机射线 + 时空去噪，物理半影 | RT 桶；少射线 + 去噪补 | 距离相关半影、接触硬+远软 | `ray_scene/` + GI `denoise/` | 半影宽度物理正确、无噪无带状 |
+| 接触阴影 | 屏幕空间射线步进 | 深度缓冲短程 ray-march 补 VSM 近景漏接触 | 屏幕空间一趟，低成本 | 脚底/缝隙接触黑边自然 | `gi/distance_field_shadow/` + 屏空 | 无 peter-panning、无自阴影痤疮 |
+| 海量光阴影 | UE5.5 MegaLights | 统一 reservoir 直接光，阴影与 GI 共享可见性查询，灯数与成本解耦 | 千级动态光下恒定预算 | 千级带阴影光源无逐灯 shadow map | `lighting/` + `gi/world_restir/` | 千灯低方差、无萤火虫、去噪不糊边 |
+| 胶囊/面光软阴影 | 解析胶囊 + LTC 面光 | 角色用胶囊近似软阴影；面光用 LTC 解析 | 解析式，无射线 | 角色自阴影柔和、面光软边 | `gi/capsule_shadow/` `gi/area_light/` | 胶囊贴合骨架、面光能量守恒 |
+
+### 6.3 反射前沿 — 分档混合 + 储层重用
+
+> GI/反射本体见 GI 文档 §9.2；此处给**跨档升级与 glossy 储层**衔接增量。
+
+| 能力 | 借鉴对象 | 算法要点 | 性能预算 | 效果上限 | 落点 | 验收 |
+|---|---|---|---|---|---|---|
+| 粗糙度分档混合反射 | UE5 Lumen Reflections | 镜面→随机 HiZ-SSR→RT 升级，按粗糙度/置信度路由；SSR miss 落 RT/surface cache | 低粗糙度省 RT、高粗糙度走 SG 近似 | 清晰镜面 + 粗糙面各向异性连续 | `gi/spec_gi/` `gi/reflect/` `gi/planar_reflect/` | 与路径追踪参考对拍误差收敛 |
+| 随机 HiZ-SSR | 随机屏空反射 | HiZ 加速步进 + 重要性采样 GGX + 时空去噪 | 屏幕空间，层级深度剔除 | 屏内反射无条纹、接触反射准 | `gi/reflect/` | 边缘淡出/屏外回退无突变 |
+| glossy reservoir 重用 | ReSTIR 反射 | 镜面样本 reservoir 时空重用，少射线出低方差 glossy | 与 GI 储层共享基建 | 中粗糙镜面低噪、方向保真 | `gi/spec_gi/` `gi/spec_denoise/` | 1–2 spp glossy 收敛、无拖影 |
+| 薄膜干涉/各向异性反射 | Belcour-Barla thin-film | 膜厚色散并入 GGX，各向异性切线帧响应 | 闭包内解析，无额外射线 | 肥皂膜/氧化金属/车漆彩虹 | `material/` + `gi/anisotropy/` | 色散随视角连续、能量守恒 |
+
+### 6.4 材质前沿 — 能量守恒 über-BSDF
+
+| 能力 | 借鉴对象 | 算法要点 | 性能预算 | 效果上限 | 落点 | 验收 |
+|---|---|---|---|---|---|---|
+| 多散射能量补偿 GGX | Filament / OpenPBR | 高粗糙度多次散射能量回补，防变暗 | 查表/解析，极低 | 粗糙金属不发灰、能量守恒 | `gi/env_brdf/` `material/` | 白炉测试(white furnace)能量≈1 |
+| 有界 slab 多瓣 | UE5 Substrate / OpenPBR | über-BSDF 一等 + 有界 slab（清漆/车漆/多层皮）封顶防 variant 爆炸 | shader 特化桶，封顶是刻意取舍 | 清漆/车漆/多层皮达标 | `material/` `abi/` | variant 受控、分层响应正确 |
+| 布料 sheen / 车漆 flakes | Estevez-Kulla sheen + flake | sheen 边缘散射 BRDF；车漆双 clearcoat + 金属 flake 法线扰动 | 闭包内解析 | 丝绒/天鹅绒边缘光、车漆颗粒闪 | `gi/cloth/` `gi/clearcoat/` | 掠射边缘光/flake 闪随光移动 |
+| SSS 三档 | Burley/可分离 + 屏空 + 路径追踪参考 | 低配可分离卷积、中配屏空、参考走路径追踪 diffusion | 屏幕空间一趟（主路径） | 皮肤/蜡/玉透光自然、边不发绿 | `gi/subsurface/` `gi/eye/` | 三档一致收敛、厚薄过渡自然 |
+| 视差遮蔽/triplanar/贴花 | POM + 延迟贴花 | POM 自遮蔽 + 轮廓裁剪；triplanar 无缝；clustered 贴花 | 屏空/延迟一趟 | 砖缝/地形细节、无接缝贴花 | `gi/parallax/` `gi/triplanar/` `gi/decal/` | 掠射无拉伸、贴花混法线正确 |
+
+### 6.5 体积前沿 — froxel + 云 + 储层
+
+| 能力 | 借鉴对象 | 算法要点 | 性能预算 | 效果上限 | 落点 | 验收 |
+|---|---|---|---|---|---|---|
+| froxel 参与介质 | Frostbite 体积雾 | 相机对齐 froxel 散射/消光 + 时域累积 | froxel 分辨率可调，内存为主成本 | 体积光轴/高度雾无带状 | `volumetric/` `gi/fog/` `gi/light_shaft/` | 光轴/大气无带状、时域不闪 |
+| Volumetric ReSTIR | Lin et al. | froxel 储层重用散射样本，介质获多弹跳间接光 | 复用 GI 储层基建 | 体积雾/云内间接光、方差大降 | `gi/volumetric_gi/` | 体积多弹跳低噪、无闪烁 |
+| 光线步进体积云 | Decima Nubis + Schneider | 分形噪声密度场 + 蓝噪声步进 + 时域重投影复用 | 低分辨率 + 时域放大 | 实时演进云、自投影/光散射 | `gi/clouds/` | 时域重投影无鬼影、步进无带状 |
+| 大气空中透视 | Hillaire sky LUT | 预计算透射/多散射 LUT + 空中透视体积 | LUT 一次，查表廉价 | 行星级大气、黄昏红移 | `gi/atmosphere/` `gi/sky_lut/` | 日照角连续、无 LUT 接缝 |
+
+### 6.6 透明前沿 — 顺序无关 + 折射
+
+| 能力 | 借鉴对象 | 算法要点 | 性能预算 | 效果上限 | 落点 | 验收 |
+|---|---|---|---|---|---|---|
+| 加权混合 OIT | McGuire-Bavoil MBOIT | 深度加权累积，一趟近似顺序无关 | 一趟，无排序 | 多层半透明无排序闪烁 | `gi/oit/` `transparency/` | 层叠顺序视觉稳定 |
+| 每像素链表 OIT | per-pixel linked list | 片段链表 + 精确排序合成，高配精确 | 带宽/内存重，高配档 | 精确多层透明/玻璃 | `transparency/` | 精确排序、无丢片 |
+| 折射 | 屏空厚度折射 | 法线/厚度驱动屏空偏移 + 粗糙度模糊 | 屏空一趟 | 玻璃/液体折射、吸收着色 | `gi/refraction/` `gi/translucency/` | 折射方向物理、吸收 Beer 定律 |
+| 发丝可见性 | UE HairVisibility | 发丝深度/覆盖 OIT，接 GI/阴影 | 与毛发子系统共享 | 毛发半透明层叠无排序错 | `transparency/` + `prism_hair_gpu` | 毛发边缘无硬切、覆盖正确 |
+
+### 6.7 毛发/皮毛前沿 — 物理发丝 BSDF + 双散射
+
+| 能力 | 借鉴对象 | 算法要点 | 性能预算 | 效果上限 | 落点 | 验收 |
+|---|---|---|---|---|---|---|
+| Marschner 发丝 BSDF | Marschner + Chiang | R/TT/TRT 三瓣物理发丝散射 | 闭包解析 | 高光环/透射辉光物理正确 | `gi/hair_bsdf/` + `prism_hair_gpu` | 高光环随光移动、金/深发色准 |
+| 双散射多散射能量补偿 | Zinke-Weyrich dual scattering | 全局多散射近似 + 单散射，能量不丢 | 预计算散射表 + 实时查 | 浅色发/毛发体积通透不发黑 | `gi/hair_bsdf/` | 白炉测试能量守恒、浅发通透 |
+| strand→card LOD | UE5 Groom | 近景发丝、远景卡片/网格连续过渡 | LOD 随屏占 | 远近无 pop、发量成本可控 | `prism_hair_gpu` | LOD 过渡无跳变 |
+| 深度不透明图 | Deep Opacity Maps | 发丝自阴影分层深度 | 低分辨率分层 | 发丛自阴影柔和 | `prism_hair_gpu` + `virtual_shadow/` | 自阴影无痤疮、分层连续 |
+
+### 6.8 水体/海洋前沿 — FFT 频谱海面
+
+| 能力 | 借鉴对象 | 算法要点 | 性能预算 | 效果上限 | 落点 | 验收 |
+|---|---|---|---|---|---|---|
+| FFT 海洋 | Tessendorf + Sea of Thieves/AC | Phillips/JONSWAP 频谱 + IFFT 置换+法线，多级联拼接 | GPU FFT，级联数可调 | 真实海浪谱、远近无重复感 | `water/` | 浪谱统计正确、无平铺重复 |
+| 水面反射/折射 | planar + 屏空 + RT 回退 | 近 planar/屏空、远 RT/surface cache | 分档，共享反射基建 | 镜面水/粗糙波面连续 | `water/` + `gi/planar_reflect/` | 反射与场景一致、无漏光 |
+| 泡沫/湿润/焦散 | 开放世界水体经验 | Jacobian 泡沫 + 湿表面 BRDF 变暗提亮 + 焦散投射 | 焦散走 GI 焦散路径 | 浪尖泡沫、岸边湿痕、水下焦散 | `water/` + `gi/caustics/` | 泡沫随浪峰、焦散锐利无噪 |
+
+### 6.9 后期/影视前沿 — 物理镜头 + 色调映射
+
+| 能力 | 借鉴对象 | 算法要点 | 性能预算 | 效果上限 | 落点 | 验收 |
+|---|---|---|---|---|---|---|
+| bokeh 景深 | Frostbite 物理镜头 | 光圈形状散景 + 近/远场分离 + 聚集 | 半分辨率聚集 + 合成 | 影视散景、无硬边 | `gi/depth_of_field/` `gi/lens/` | 焦外过渡自然、无环状伪影 |
+| tile 运动模糊 | McGuire tile MB | tile 最大速度 + 邻域重建 | 低分辨率 tile + 重建 | 快速运动平滑、无条带 | `gi/motion_blur/` `motion/` | 速度边界无撕裂、不糊静物 |
+| 物理 bloom | Jimenez 下采样卷积 | 多级降采样高斯/FFT 卷积能量守恒辉光 | mip 金字塔 | 高光溢出自然、无方块 | `gi/light_shaft/` + bloom | 能量守恒、无网格伪影 |
+| 自动曝光 + 色调映射 | 直方图测光 + ACES/AgX | GPU 直方图测光 + ACES/AgX 色调 + 局部色调映射 | 直方图一趟 | HDR 场景宽容度、无死黑死白 | `gi/local_tonemap/` `gi/color_grade/` | 明暗适应平滑、肤色不偏 |
+| 色差/炫光/暗角/片grain | 物理镜头瑕疵 | 棱镜色散/光晕/渐晕/胶片颗粒，艺术可控 | 后处理叠加 | 影视镜头质感 | `gi/lens/` `gi/film_grain/` | 可独立开关、不过曝 |
+
+### 6.10 采样/降噪前沿 — 低差异 + 时空双边
+
+| 能力 | 借鉴对象 | 算法要点 | 性能预算 | 效果上限 | 落点 | 验收 |
+|---|---|---|---|---|---|---|
+| 时空蓝噪声 | Heitz/Wolfe STBN | 噪声在时空“蓝”化，感知误差远优于白噪声 | 预生成 STBN 纹理 | 低 spp 感知噪声极低 | `gi/sample/` | 低 spp 下无结构性噪声 |
+| Owen-scrambled Sobol | QMC 低差异 | 加扰 Sobol 序列做准蒙特卡洛积分 | 查表廉价 | 积分收敛快于白噪声 | `gi/sample/` `gi/nee/` | 收敛阶优于随机采样 |
+| 时空双边降噪 | NRD ReBLUR/ReLAX + A-SVGF | 方差引导时空双边 + 历史 clamp + diffuse/specular 分离 | 多趟 à-trous | 1–2 spp 出收敛画面、不糊边 | `gi/denoise/` `gi/spec_denoise/` `gi/temporal/` | 无鬼影、无边缘糊化、无带状 |
+| 萤火虫抑制/去遮挡 | firefly clamp + 历史修复 | 亮度钳位 + 去遮挡历史重建 | 低成本后处理 | 无高亮噪点、运动边缘干净 | `gi/denoise/` `history/` | 无萤火虫、去遮挡无拖尾 |
+
+### 6.11 上采样/抗锯齿前沿 — 经典时序为本体
+
+| 能力 | 借鉴对象 | 算法要点 | 性能预算 | 效果上限 | 落点 | 验收 |
+|---|---|---|---|---|---|---|
+| TSR 式时序上采样 | UE5 TSR | 低分辨率内部渲染 + 抖动 + 历史重投影累积放大，**纯经典** | 依赖 motion vector + reactive mask | 4K 级清晰度、运动无重影 | `temporal_upscale/` `motion/` `history/` | 4K 清晰度、无拖尾/鬼影 |
+| 厂商 SDK 可选后端 | DLSS/FSR2/XeSS | 仅作外部后端接入，不进 CPU golden 路径 | 运行期切换 | 平台最优上采样 | `temporal_upscale/`（后端抽象） | 开关不影响本体 parity |
+| 可变着色率 VRS | DX12/VK VRS | 按内容/速度/中心凹降着色率 | 省着色，边缘保全率 | 外围降率省算力、无可见劣化 | `gi/vrs/` | 感知无损、速度区降率正确 |
+| 前向 MSAA | 硬件 MSAA | NPR/透明前向路径的几何抗锯齿兜底 | 前向桶 | 卡通硬边抗锯齿 | 前向前端 | 边缘无阶梯、与 TAA 不冲突 |
+
+### 6.12 性能工程前沿 — GPU 自驱 + 相干
+
+| 能力 | 借鉴对象 | 算法要点 | 性能预算 | 效果上限 | 落点 | 验收 |
+|---|---|---|---|---|---|---|
+| GPU Work Graphs | D3D12/Metal Work Graphs | GPU 自驱动态调度射线/卡片/探针，去 CPU 往返 | 负载自均衡 | 长短射线负载不塌陷 | `work_graph/` `frame_graph/` | 调度无 CPU 回环、吞吐稳定 |
+| 着色执行重排 SER | NVIDIA SER | 硬件重排提升射线相干 | RT 桶可选 | 发散射线吞吐提升 | `ray_scene/`（能力探测） | 开启后吞吐升、结果不变 |
+| bindless/描述符堆 | 现代 bindless | 全场景资源 bindless 寻址，去绑定开销 | 描述符堆常驻 | 海量材质/纹理零绑定切换 | `descriptor_heap/` `shader_package/` | 无绑定瓶颈、无越界 |
+| 帧图别名 + async compute | frame graph aliasing | 瞬态资源别名复用 + 计算/图形异步重叠 | 显存与时间双省 | 显存占用降、空泡填满 | `frame_graph/` `virtual_resource/` | 别名无读写冲突、重叠无竞态 |
+| mesh shader 卡片捕获 | mesh shader | mesh-shader 直出 Surface Cache 卡片/几何 | 剔除+放大在 GPU | 卡片捕获省几何遍历 | `geometry/` + GI `surface_cache/` | 卡片覆盖正确、无遗漏面 |
+
+---
+## 7. 帧时间预算（1440p→4K，60fps 目标档）
+
+> 粗预算，用于取舍与验收基线；实际以 GPU profiling 为准（沙盒无 GPU，本表为设计目标非实测）。v2 的前沿特性大多摊进既有阶段（置换进几何、软阴影进阴影、储层反射进 GI/反射、体积云进体积），不新增独立大头。
 
 | 阶段 | PBR 场景占比 | NPR 场景占比 | 混合场景 | 备注 |
 |---|---|---|---|---|
-| 虚拟几何 vis-buffer + 剔除 | ~20% | ~20% | ~20% | 三者共享，几何成本一致 |
-| GI（Lumen/surface cache 摊销） | ~18% | ~10%（只收不发省） | ~16% | NPR 省在不弹射 |
-| ReSTIR + 去噪 | ~15% | ~8%（ramp 量化省积分） | ~13% | 光源储层共享 |
-| VSM 阴影 | ~10% | ~10%（+SDF 面部小额） | ~10% | 深度页共享 |
-| 前端着色 | ~15%（BRDF 积分） | ~8%（ramp/SDF 省） | ~15%（tile 路由 + 特化） | 混合多出 tile 分类 |
-| 体积/雾/云 | ~7% | ~7% | ~7% | 共享 |
-| 时序上采样 | ~8% | ~8%（+reactive mask 小额） | ~8% | 共享 |
+| 虚拟几何 vis-buffer + 剔除（含置换/两趟 HiZ） | ~20% | ~20% | ~20% | 三者共享，几何成本一致 |
+| GI（Lumen/surface cache/储层 摊销） | ~18% | ~10%（只收不发省） | ~16% | NPR 省在不弹射 |
+| ReSTIR DI/GI + 去噪（含 MegaLights） | ~15% | ~8%（ramp 量化省积分） | ~13% | 光源储层共享 |
+| VSM + 光追软阴影/接触阴影 | ~10% | ~10%（+SDF 面部小额） | ~10% | 深度页共享 |
+| 反射（分档 SSR/RT + glossy 储层） | ~6% | ~3%（NPR 降级近似） | ~5% | 低粗糙度省 RT |
+| 前端着色 | ~12%（BRDF 积分） | ~7%（ramp/SDF 省） | ~13%（tile 路由 + 特化） | 混合多出 tile 分类 |
+| 体积/雾/云（froxel + 体积储层 + 云重投影） | ~7% | ~7% | ~7% | 共享 |
+| 时序上采样（TSR + VRS） | ~7% | ~7%（+reactive mask 小额） | ~7% | 共享 |
+| 后期（DoF/MB/bloom/tonemap/lens） | ~3% | ~3% | ~3% | 影视后期链 |
 | 风格化后处理 | ~2% | ~9%（halftone/墨线/步进） | ~6% | NPR 后处理重 |
-| 透明/其他 | ~5% | ~5% | ~5% | — |
+| 透明/其他 | ~5% | ~5% | ~5% | OIT/折射/发丝 |
 
-**结论**：NPR 整体算力**低于** PBR（省在 GI 不弹射 + ramp 量化 + 着色简化），但吃美术管线与 reactive mask 复杂度；混合多出 tile 路由与前端特化，换来风格接缝连贯——**三线皆 AAA 的性价比最优点**。
+**结论**：NPR 整体算力**低于** PBR（省在 GI 不弹射 + ramp 量化 + 着色简化），但吃美术管线与 reactive mask 复杂度；混合多出 tile 路由与前端特化，换来风格接缝连贯——**三线皆 AAA 的性价比最优点**。前沿特性靠**分档降级 + 储层/时域复用 + GPU 自驱调度**把成本压回预算内。
 
 ---
 
-## 7. 效果验收口径（三线一致的"顶级"判据）
+## 8. 效果验收口径（三线一致的“顶级”判据）
 
-- **PBR**：与路径追踪参考模式离线对拍，误差可量化收敛；动态光照无烘焙、无萤火虫、无 LOD pop。
+- **PBR**：与路径追踪参考模式离线对拍，误差可量化收敛；动态光照无烘焙、无萤火虫、无 LOD pop；反射/软阴影/SSS/置换均过各自白炉或 parity 门槛。
 - **NPR**：达顶级二次元观感（原神/GG Xrd 级 ramp/描边/面部阴影）；运动下锐利分段不被 TAA 抹糊（reactive mask 生效）；降帧步进与背景混排不撕裂。
-- **混合**：卡通角色置入写实场景，阴影方向/底光/间接光一致，无"贴纸感"；风格切换处像素级路由无接缝。
-- **跨平台**：野心效果落 compute-可移植桶，可 CPU golden 对拍；RT 桶部分可测；raw-VK 桶严格隔离（见管线 §8.1）。
+- **混合**：卡通角色置入写实场景，阴影方向/底光/间接光一致，无“贴纸感”；风格切换处像素级路由无接缝。
+- **前沿特性专项**：多散射能量守恒过白炉测试（能量≈1）；毛发/云/水体通透与演进物理合理；降噪 1–2 spp 收敛无鬼影无糊边；上采样 4K 无拖尾；VRS 感知无损。
+- **跨平台**：野心效果落 compute-可移植桶，可 CPU golden 对拍；RT 桶部分可测；raw-VK 桶严格隔离（见管线 §8.1）。**所有本体路径为纯经典数值，可确定性复现与对拍**。
 
 ---
 
-## 8. 落点与路线图映射
+## 9. 落点与路线图映射（v2 按仓内现状分级）
+
+> 现状分级：✅ 已成规模 / 🟡 骨架在待深化 / ⬜ 待建。基于 `pkg/` 实际模块（`gi/` 下 world_restir·surface_cache·screen_probe·spec_gi·path_reuse·probe_volume·vxgi·global_sdf·caustics 等已落；`ray_scene/` 78 文件；`virtual_geometry/` 12 文件骨架）。
 
 | 特性块 | 主模块 | 现状 | 优先级 |
 |---|---|---|---|
-| 虚拟几何 | `virtual_geometry/` | stub，最大出血点 | P0（先立几何基底） |
-| 光照/GI/ReSTIR | `lighting/` | 有 clustered 剔除 + ReservoirBudget | P0 |
-| VSM | `virtual_shadow/` | residency 已落 | P0 |
-| 时序/上采样/reactive mask | `temporal_upscale/` `motion/` `history/` | 基础在，reactive mask 是 NPR 头号前置 | P0（NPR 前置） |
-| 材质 ABI / 有界 slab / SSS | `material/` `abi/` | 正交轴 + 闭包 IR 已定 | P1 |
-| RT 反射/路径追踪参考 | `ray_scene/` | 基础在，Metal RT 弱 | P1（跨平台部分覆盖） |
-| 混合 tile 路由 | `material/` + 前端 | 依赖 material id 基底 | P1 |
-| NPR 专属响应（ramp/SDF/描边/后处理） | 前端 + 专属数据通道 | 待建 | P1（reactive mask 就绪后） |
-| 子系统（毛发/布料/粒子/体积） | `hair/`（进行中）、`cloth/`/`particle/`（待建） | 见各子系统文档 | 并行推进 |
+| 虚拟几何软光栅 + 置换 + 两趟剔除 | `virtual_geometry/` | 🟡 骨架在，软光栅为最大出血点 | P0（先立几何基底） |
+| GI/反射/ReSTIR 全家桶 | `gi/*` `lighting/` | ✅ 多模块已落，按 GI 文档 v4 深化收敛 | P0 |
+| VSM + 光追软阴影 + MegaLights | `virtual_shadow/` `lighting/` `gi/distance_field_shadow/` | 🟡 VSM residency 在，软阴影/海量光待深化 | P0 |
+| 时序/上采样/reactive mask/VRS | `temporal_upscale/` `motion/` `history/` `gi/vrs/` | 🟡 基础在，reactive mask 是 NPR 头号前置 | P0（NPR 前置） |
+| 材质 ABI / 有界 slab / 多散射 / SSS | `material/` `abi/` `gi/env_brdf/` `gi/subsurface/` | 🟡 正交轴+闭包 IR 已定，能量守恒待补 | P1 |
+| 反射分档 + glossy 储层 + 薄膜 | `gi/spec_gi/` `gi/reflect/` `gi/anisotropy/` | 🟡 模块在，跨档升级待连 | P1 |
+| 体积雾/云 + 体积储层 | `volumetric/` `gi/clouds/` `gi/fog/` `gi/volumetric_gi/` | 🟡 模块在，时域重投影/储层待深化 | P1 |
+| 透明 OIT + 折射 + 发丝可见性 | `transparency/` `gi/oit/` `gi/refraction/` | 🟡 OIT 在，链表/折射待深化 | P1 |
+| 毛发 BSDF + 双散射 + LOD | `gi/hair_bsdf/` `prism_hair_gpu` | 🟡 毛发引擎进行中 | 并行推进 |
+| 水体 FFT + 反射 + 泡沫/焦散 | `water/` `gi/caustics/` | 🟡 水模块在，FFT 海面待建 | P2 |
+| 后期影视链（DoF/MB/bloom/tonemap/lens） | `gi/depth_of_field/` `gi/motion_blur/` `gi/local_tonemap/` `gi/lens/` `gi/film_grain/` | ✅ 多模块已落，接链待梳 | P2 |
+| 采样/降噪（STBN/Sobol/NRD/A-SVGF） | `gi/sample/` `gi/denoise/` `gi/spec_denoise/` `gi/temporal/` | ✅ 多模块已落，分离/clamp 待对齐 | P1 |
+| 性能工程（Work Graphs/SER/bindless/帧图别名） | `work_graph/` `descriptor_heap/` `frame_graph/` `virtual_resource/` | 🟡 骨架在，GPU 自驱调度待深化 | P1 |
+| NPR 专属响应（ramp/SDF/描边/后处理） | 前端 + 专属数据通道 | ⬜ 待建（reactive mask 就绪后） | P1 |
+| 混合 tile 路由 | `material/` + 前端 | 🟡 依赖 material id 基底 | P1 |
 
-**总原则**：先立 P0 基底（几何/光照/阴影/时序），三前端才有共享数据可消费；NPR 的 reactive mask 属 P0 前置；有界 slab/SSS/RT 属 P1；子系统并行开发。
+**总原则**：先立 P0 基底（几何/光照/阴影/时序），三前端才有共享数据可消费；NPR 的 reactive mask 属 P0 前置；反射/材质/体积/采样属 P1；水体/后期链属 P2；毛发子系统并行开发。**每条前沿特性落地走管线 §9 的“CPU golden → WESL kernel → 真机 parity”三步，未毕业不作生产默认。**
 
 ---
 
 ## 附：与管线文档的关系
 - 顶层架构 / 决策 / 后端策略 / 三桶可测性 / 代码重构清单：见 `prism_material_pipeline_design_zh.md`。
-- 毛发子系统：见 `prism_hair_engine_design_zh.md`。
-- 粒子：见 `prism_particle_engine_design_zh.md`。物理：见 `prism_physics_design_zh.md`。
-- 本文只负责"三前端各自与共享的高级特性目录 + 预算 + 验收"。
+- 全局光照 / 反射 / 采样降噪 深水区：见 `prism_gi_lumen_design_zh.md`（v4）。
+- 毛发子系统：见 `prism_hair_engine_design_zh.md`。粒子：见 `prism_particle_engine_design_zh.md`。物理：见 `prism_physics_design_zh.md`。体积：见 `prism_volumetric_engine_design_zh.md`。水体：见 `prism_water_engine_design_zh.md`。布料：见 `prism_cloth_engine_design_zh.md`。音频：见 `prism_audio_engine_design_zh.md`。
+- 本文只负责“三前端各自与共享的高级特性目录 + 前沿特性全景 + 预算 + 验收”。
