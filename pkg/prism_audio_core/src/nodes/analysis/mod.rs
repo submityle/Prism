@@ -27,6 +27,11 @@
 //!   radix-2 FFT magnitude-spectrum analyzer that reports where a signal's
 //!   energy lives across frequency, complementing the loudness, correlation,
 //!   and goniometer meters that describe level and stereo image.
+//! - [`pitch_detector::PitchDetector`] / [`pitch_detector::PitchDetectorNode`]
+//!   -- a monophonic `YIN` fundamental-frequency (`f0`) estimator that
+//!   condenses a single-voice signal to one pitch with a periodicity
+//!   confidence, complementing the full-spectrum view of the
+//!   [`spectrum`] analyzer.
 //!
 //! # Provenance
 //!
@@ -46,6 +51,7 @@
 pub mod correlation;
 pub mod goniometer;
 pub mod loudness;
+pub mod pitch_detector;
 pub mod spectrum;
 
 pub use correlation::{CorrelationMeasurement, CorrelationMeter, CorrelationMeterNode};
@@ -56,6 +62,7 @@ pub use goniometer::{
 pub use loudness::{
     KWeighting, LoudnessMeasurement, LoudnessMeter, LoudnessMeterNode, TruePeakMeter,
 };
+pub use pitch_detector::{PitchDetector, PitchDetectorNode, PitchEstimate};
 pub use spectrum::{
     DEFAULT_FFT_SIZE, DEFAULT_HOP, MIN_FFT_SIZE, SpectrumAnalyzer, SpectrumNode, Window,
 };
