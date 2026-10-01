@@ -412,6 +412,10 @@
 //!   ([`mesh_hard_normal_split::split_hard_normals`]): duplicates each vertex
 //!   once per smoothing group (faces reachable without crossing a hard edge)
 //!   and assigns the area-weighted group normal, rendering creases crisp.
+//! - [`mesh_vertex_valence`] — vertex valence and local topology statistics
+//!   ([`mesh_vertex_valence::vertex_valence`]): per-vertex edge-neighbour
+//!   valence, triangle degree, boundary flags, and min / max / average
+//!   aggregates for remeshing and simplification heuristics.
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -574,6 +578,7 @@ pub mod mesh_connected_components;
 pub mod mesh_normal_consistency;
 pub mod mesh_feature_edges;
 pub mod mesh_hard_normal_split;
+pub mod mesh_vertex_valence;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -687,6 +692,7 @@ pub use mesh_connected_components::{connected_components, split_components, Mesh
 pub use mesh_normal_consistency::{make_winding_consistent, WindingFix};
 pub use mesh_feature_edges::{detect_feature_edges, EdgeKind, FeatureEdgeError, FeatureEdges};
 pub use mesh_hard_normal_split::{split_hard_normals, HardNormalError, HardNormalSplit};
+pub use mesh_vertex_valence::{vertex_valence, VertexValence};
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
 pub use obb::{Obb, ObbBvh, ObbHit};
