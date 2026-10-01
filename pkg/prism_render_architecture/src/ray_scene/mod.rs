@@ -333,6 +333,13 @@
 //!   system for tangent/bitangent, accumulates area-weighted per vertex,
 //!   Gram-Schmidts against the normal, and packs an `xyzw` handedness tangent —
 //!   the attribute normal mapping, parallax, and anisotropy require.
+//! - [`mesh_smooth_normals`] — area-weighted smooth per-vertex normals for a
+//!   [`triangle_mesh::TriangleMesh`] lacking shading normals
+//!   ([`mesh_smooth_normals::compute_smooth_normals`],
+//!   [`mesh_smooth_normals::with_smooth_normals`]): each triangle's
+//!   un-normalized face normal `e1 × e2` (whose length is `2·area`) is
+//!   accumulated into its three vertices and renormalized, so large faces
+//!   dominate slivers; degenerate and isolated vertices fall back to `+Z`.
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -482,6 +489,7 @@ pub mod adaptive_tessellation;
 pub mod displacement_tessellation;
 pub mod patch_grid;
 pub mod mesh_tangents;
+pub mod mesh_smooth_normals;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -582,6 +590,7 @@ pub use adaptive_tessellation::AdaptiveTessellation;
 pub use displacement_tessellation::{DisplacedField, DisplacementTessellation};
 pub use patch_grid::PatchGrid;
 pub use mesh_tangents::{compute_tangents, TangentError};
+pub use mesh_smooth_normals::{compute_smooth_normals, with_smooth_normals};
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
 pub use obb::{Obb, ObbBvh, ObbHit};
