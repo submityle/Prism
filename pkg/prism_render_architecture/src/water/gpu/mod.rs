@@ -10,7 +10,7 @@
 //! * [`super::kernels`] — the compute-kernel dispatch contract
 //!   ([`super::kernels::WaterKernel`] and its per-kernel descriptor):
 //!   bind-group shape, workgroup tiling, dispatch domain and stable `WESL`
-//!   entry-point name for each of the sixteen water passes.
+//!   entry-point name for each water compute pass.
 //! * [`buffers`] — the sizing of the device-resident buffers the solvers read
 //!   and write in place across frames, and the [`buffers::AsyncFrameState`]
 //!   double-buffer state machine that sequences record → submit → retire so a
@@ -34,6 +34,7 @@ pub mod fft_plan;
 pub mod pipeline;
 pub mod spectral_plan;
 pub mod surface_bindings;
+pub mod surface_mesh;
 pub mod surface_pass;
 
 pub use buffers::{
@@ -63,6 +64,11 @@ pub use spectral_plan::{
 pub use surface_bindings::{
     plan_surface_draw_call, SurfaceBinding, SurfaceBindingKind, SurfaceDrawCall, SurfaceGrid,
     SURFACE_VERTEX_RECORD_STRIDE,
+};
+
+pub use surface_mesh::{
+    plan_surface_mesh_dispatch, surface_mesh_output_bytes, SurfaceMeshDispatch, SurfaceMeshOutput,
+    SurfaceMeshSource, SURFACE_MESH_LANES,
 };
 
 pub use surface_pass::{
