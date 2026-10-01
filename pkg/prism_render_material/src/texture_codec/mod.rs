@@ -46,8 +46,8 @@ mod formats;
 mod source;
 
 pub use bc6h::{
-    bc6h_mode_bits, decode_bc6h_mode11_unsigned, decode_bc6h_unsigned, half_bits_to_f32,
-    Bc6hError,
+    bc6h_mode_bits, decode_bc6h_mode11_signed, decode_bc6h_mode11_unsigned, decode_bc6h_signed,
+    decode_bc6h_unsigned, half_bits_to_f32, Bc6hError,
 };
 pub use bc7::{
     bc7_mode, decode_bc7, decode_bc7_mode4, decode_bc7_mode5, decode_bc7_mode6, Bc7Error,

@@ -11,10 +11,11 @@
 //! matches a GPU twin exactly (integer unquantize + integer interpolation, no
 //! `AI/ML`).
 //!
-//! Only the **unsigned** (`UF16`) variant is decoded here; the signed (`SF16`)
-//! variant and the delta-transform single-subset modes 12-14 (plus the
-//! partitioned modes 1-10) are tracked as follow-ups so nothing is stubbed with
-//! an unvalidated table.
+//! Both the **unsigned** (`UF16`) and **signed** (`SF16`) variants of mode 11
+//! are decoded here: the mode-11 bit layout is identical for both, only the
+//! endpoint interpretation differs (two's-complement + signed unquantize). The
+//! delta-transform single-subset modes 12-14 (plus the partitioned modes 1-10)
+//! are tracked as follow-ups so nothing is stubbed with an unvalidated table.
 //!
 //! # Conventions
 //! * The block is little-endian; bits are read LSB-first via [`BitReader`].
@@ -105,6 +106,50 @@ fn interp_finish_unsigned(e0: u32, e1: u32, weight: u32) -> u16 {
     (((q * 31) >> 6) & 0xFFFF) as u16
 }
 
+/// Sign-extend the low `bits` of `value` into a full `i32` (two's complement).
+#[inline]
+fn sign_extend(value: u32, bits: u32) -> i32 {
+    let shift = 32 - bits;
+    #[expect(clippy::cast_possible_wrap, reason = "deliberate two's-complement reinterpret")]
+    let widened = (value << shift) as i32;
+    widened >> shift
+}
+
+/// Unquantize a **signed** `BC6H` endpoint component of `prec` bits into the
+/// signed 16-bit intermediate range `[-0x7FFF, 0x7FFF]` (Khronos `Unquantize`,
+/// signed). The magnitude saturates to `0x7FFF`; the sign is preserved.
+#[inline]
+fn unquantize_signed(comp: i32, prec: u32) -> i32 {
+    if prec >= 16 {
+        return comp;
+    }
+    let (neg, v) = if comp < 0 { (true, -comp) } else { (false, comp) };
+    let unq = if v == 0 {
+        0
+    } else if v >= (1i32 << (prec - 1)) - 1 {
+        0x7FFF
+    } else {
+        ((v << 15) + 0x4000) >> (prec - 1)
+    };
+    if neg { -unq } else { unq }
+}
+
+/// Interpolate one signed intermediate channel between endpoints by a 4-bit
+/// index weight, apply the signed `finish_unquantize` scale (magnitude * 31/32),
+/// and re-pack the result as a sign-magnitude IEEE half bit pattern (half-float
+/// stores sign and magnitude separately, never two's complement).
+#[inline]
+fn interp_finish_signed(e0: i32, e1: i32, weight: i32) -> u16 {
+    let q = ((64 - weight) * e0 + weight * e1 + 32) >> 6;
+    #[expect(clippy::cast_sign_loss, reason = "magnitude is non-negative after abs")]
+    let (sign, mag): (u16, u32) = if q < 0 {
+        (0x8000, ((-q) as u32 * 31) >> 5)
+    } else {
+        (0, (q as u32 * 31) >> 5)
+    };
+    sign | (mag & 0x7FFF) as u16
+}
+
 /// Read the raw `BC6H` mode field: 2 bits when the low two bits select a
 /// two-bit mode (`00`/`01`), otherwise the full 5-bit field.
 #[inline]
@@ -123,8 +168,9 @@ pub fn bc6h_mode_bits(block: &[u8; 16]) -> u8 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Bc6hError {
     /// A valid but unsupported mode. Only the single-subset, transform-free
-    /// unsigned mode 11 (`0b00011`) is decoded today; the delta-transform
-    /// single-subset modes (12-14) and the partitioned modes are follow-ups.
+    /// mode 11 (`0b00011`) is decoded today for both the signed and unsigned
+    /// variants; the delta-transform single-subset modes (12-14) and the
+    /// partitioned modes are follow-ups.
     UnsupportedMode(u8),
 }
 
@@ -176,6 +222,54 @@ pub fn decode_bc6h_mode11_unsigned(block: &[u8; 16]) -> [[f32; 3]; 16] {
     out
 }
 
+/// Decode one 16-byte **BC6H mode 11 (signed, `SF16`)** block into sixteen
+/// `RGB` `f32` texels.
+///
+/// Identical field layout to [`decode_bc6h_mode11_unsigned`] -- the mode-11 bit
+/// packing does not depend on signedness -- so only the endpoint interpretation
+/// differs: each 10-bit field is read as a two's-complement signed value,
+/// unquantized with the signed rule, interpolated in signed arithmetic, and
+/// finished with the signed `31/32` scale before sign-magnitude half packing.
+#[must_use]
+pub fn decode_bc6h_mode11_signed(block: &[u8; 16]) -> [[f32; 3]; 16] {
+    const PREC: u32 = 10;
+    let mut r = BitReader::new(block);
+    let _mode = r.read(5); // 5-bit mode field 0b00011.
+
+    let rw = sign_extend(r.read(PREC), PREC);
+    let gw = sign_extend(r.read(PREC), PREC);
+    let bw = sign_extend(r.read(PREC), PREC);
+    let rx = sign_extend(r.read(PREC), PREC);
+    let gx = sign_extend(r.read(PREC), PREC);
+    let bx = sign_extend(r.read(PREC), PREC);
+
+    let e0 = [
+        unquantize_signed(rw, PREC),
+        unquantize_signed(gw, PREC),
+        unquantize_signed(bw, PREC),
+    ];
+    let e1 = [
+        unquantize_signed(rx, PREC),
+        unquantize_signed(gx, PREC),
+        unquantize_signed(bx, PREC),
+    ];
+
+    let mut indices = [0u8; 16];
+    indices[0] = r.read(3) as u8; // anchor: implicit high bit 0.
+    for idx in indices.iter_mut().skip(1) {
+        *idx = r.read(4) as u8;
+    }
+
+    let mut out = [[0.0f32; 3]; 16];
+    for (t, texel) in out.iter_mut().enumerate() {
+        let w = WEIGHT4[indices[t] as usize] as i32;
+        for c in 0..3 {
+            texel[c] = half_bits_to_f32(interp_finish_signed(e0[c], e1[c], w));
+        }
+    }
+    out
+}
+
 /// Decode an unsigned `BC6H` block, dispatching on its mode.
 ///
 /// Only the single-subset, transform-free mode 11
@@ -187,6 +281,18 @@ pub fn decode_bc6h_mode11_unsigned(block: &[u8; 16]) -> [[f32; 3]; 16] {
 pub fn decode_bc6h_unsigned(block: &[u8; 16]) -> Result<[[f32; 3]; 16], Bc6hError> {
     match bc6h_mode_bits(block) {
         0b00011 => Ok(decode_bc6h_mode11_unsigned(block)),
+        m => Err(Bc6hError::UnsupportedMode(m)),
+    }
+}
+
+/// Decode a **signed** (`SF16`) `BC6H` block, dispatching on its mode.
+///
+/// Only the single-subset, transform-free mode 11
+/// ([`decode_bc6h_mode11_signed`]) is supported today; every other mode returns
+/// [`Bc6hError::UnsupportedMode`] rather than risk a wrong decode.
+pub fn decode_bc6h_signed(block: &[u8; 16]) -> Result<[[f32; 3]; 16], Bc6hError> {
+    match bc6h_mode_bits(block) {
+        0b00011 => Ok(decode_bc6h_mode11_signed(block)),
         m => Err(Bc6hError::UnsupportedMode(m)),
     }
 }
@@ -322,5 +428,55 @@ mod tests {
             decode_bc6h_unsigned(&m12),
             Err(Bc6hError::UnsupportedMode(0b00111))
         );
+    }
+
+    #[test]
+    fn signed_mode11_zero_decodes_to_zero() {
+        // Both endpoints zero -> every texel is +0.0 regardless of index.
+        let block = make_block11([0; 3], [0; 3], [0u8; 16]);
+        let out = decode_bc6h_mode11_signed(&block);
+        assert!(out.iter().all(|p| p == &[0.0, 0.0, 0.0]));
+    }
+
+    #[test]
+    fn signed_mode11_saturates_to_plus_minus_max_half() {
+        // 10-bit two's complement: 0x1FF = +511 (max positive) saturates to
+        // +65504.0; 0x200 = -512 (max negative) saturates to -65504.0.
+        let mut idx = [0u8; 16];
+        idx[1] = 15; // weight 64 -> endpoint 1
+        let block = make_block11([0x1FF; 3], [0x200; 3], idx);
+        let out = decode_bc6h_mode11_signed(&block);
+        assert_eq!(out[0], [65504.0, 65504.0, 65504.0]); // e0 (+max)
+        assert_eq!(out[1], [-65504.0, -65504.0, -65504.0]); // e1 (-max)
+    }
+
+    #[test]
+    fn signed_mode11_ramp_is_monotonic_decreasing() {
+        // e0 = +max, e1 = -max on R: as the index weight grows the signed R
+        // value decreases monotonically from +max toward -max.
+        let mut idx = [0u8; 16];
+        for (t, slot) in idx.iter_mut().enumerate() {
+            *slot = t.min(15) as u8;
+        }
+        idx[0] = idx[0].min(7); // anchor is 3-bit
+        let block = make_block11([0x1FF, 0, 0], [0x200, 0, 0], idx);
+        let out = decode_bc6h_mode11_signed(&block);
+        for t in 1..16 {
+            assert!(out[t][0] <= out[t - 1][0], "signed R must be monotone at {t}");
+        }
+        assert!(out.iter().all(|p| p[1] == 0.0 && p[2] == 0.0));
+    }
+
+    #[test]
+    fn signed_and_unsigned_disagree_on_negative_endpoint() {
+        // Raw field 0x200 reads as +512 unsigned but -512 signed: the two
+        // decoders must disagree in sign for that endpoint.
+        let mut idx = [0u8; 16];
+        idx[1] = 15;
+        let block = make_block11([0; 3], [0x200; 3], idx);
+        let u = decode_bc6h_mode11_unsigned(&block);
+        let si = decode_bc6h_mode11_signed(&block);
+        assert!(u[1][0] > 0.0, "unsigned reads 0x200 as positive");
+        assert!(si[1][0] < 0.0, "signed reads 0x200 as negative");
     }
 }
