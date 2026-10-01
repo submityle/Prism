@@ -45,6 +45,7 @@ use super::extract::extract_water_bodies;
 use super::pipeline::init_water_compute_pipelines;
 use super::prepare::prepare_water_bodies;
 use super::resources::WaterGpuBodies;
+use super::surface_pipeline::init_water_surface_pipelines;
 
 /// Installs the `GPU` water compute subsystem into an app.
 ///
@@ -55,14 +56,16 @@ pub(crate) struct WaterPlugin;
 
 impl Plugin for WaterPlugin {
     fn build(&self, app: &mut App) {
-        // Embed the five compute shaders next to this module so the pipeline
-        // init system can load them by their stable `../shaders/*.wesl` asset
-        // paths regardless of the working directory.
+        // Embed the five compute shaders plus the surface raster shader next
+        // to this module so the pipeline init systems can load them by their
+        // stable `../shaders/*.wesl` asset paths regardless of the working
+        // directory.
         embedded_asset!(app, "../shaders/water_ocean.wesl");
         embedded_asset!(app, "../shaders/water_flip.wesl");
         embedded_asset!(app, "../shaders/water_pbf.wesl");
         embedded_asset!(app, "../shaders/water_surface.wesl");
         embedded_asset!(app, "../shaders/water_render_fx.wesl");
+        embedded_asset!(app, "../shaders/water_surface_raster.wesl");
 
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
@@ -79,6 +82,7 @@ impl Plugin for WaterPlugin {
             // shared `WaterComputePipelines` resource the prepare and dispatch
             // stages read.
             .add_systems(RenderStartup, init_water_compute_pipelines)
+            .add_systems(RenderStartup, init_water_surface_pipelines)
             // Snapshot the main-world water bodies into the render world each
             // frame.
             .add_systems(ExtractSchedule, extract_water_bodies)

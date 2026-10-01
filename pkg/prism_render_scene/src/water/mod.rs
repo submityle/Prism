@@ -51,6 +51,7 @@ mod prepare;
 mod resources;
 #[cfg(test)]
 mod shader_tests;
+mod surface_pipeline;
 
 /// The high-level water authoring presets and the water body component they
 /// build, re-exported so a game can spawn an ocean, `FLIP`/`PBF` pool, or
