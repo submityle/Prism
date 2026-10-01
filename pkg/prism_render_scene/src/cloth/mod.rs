@@ -58,6 +58,8 @@ mod lod;
 mod lod_mesh;
 mod pack;
 #[cfg(test)]
+mod painted_parity;
+#[cfg(test)]
 mod painted_gpu_tests;
 mod pipeline;
 #[cfg(test)]
