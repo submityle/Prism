@@ -95,7 +95,7 @@ impl Rgba8Image {
 
 #[inline]
 fn reducible_dim(dim: u32) -> bool {
-    dim == 1 || dim % 2 == 0
+    dim == 1 || dim.is_multiple_of(2)
 }
 
 /// Produce the next mip level by box-reducing `src`, or `None` when `src` is
