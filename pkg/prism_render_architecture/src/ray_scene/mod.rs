@@ -474,6 +474,14 @@
 //!   rasterized into the uniform cells its voxel-space bounds touch,
 //!   feeding voxel-cone-traced GI, SDF baking, voxel AO, and conservative
 //!   collision proxies (`f64`, dot/cross/abs/min/max only, no sqrt).
+//! - [`mesh_voxel_distance_field`] — exact Euclidean distance transform
+//!   ([`mesh_voxel_distance_field::voxel_distance_field`],
+//!   [`mesh_voxel_distance_field::VoxelDistanceField`]) of a voxelized
+//!   surface via the separable Felzenszwalb-Huttenlocher lower-envelope
+//!   sweep: every cell receives the exact squared distance (integer
+//!   voxel² units, reproducible) to the nearest occupied cell, feeding
+//!   SDF baking, voxel-cone-traced GI cone biasing, SDF soft shadows, and
+//!   voxel ambient occlusion (one final sqrt for world-space distance).
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -647,6 +655,7 @@ pub mod mesh_planar_regions;
 pub mod mesh_closest_point;
 pub mod mesh_self_intersections;
 pub mod mesh_voxelize;
+pub mod mesh_voxel_distance_field;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -771,6 +780,7 @@ pub use mesh_planar_regions::{planar_regions, PlanarRegions, RegionPlane};
 pub use mesh_closest_point::{closest_point_on_mesh, MeshClosestPoint};
 pub use mesh_self_intersections::{mesh_self_intersections, triangles_intersect};
 pub use mesh_voxelize::{triangle_box_overlap, voxelize_surface, VoxelGrid};
+pub use mesh_voxel_distance_field::{voxel_distance_field, VoxelDistanceField};
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
 pub use obb::{Obb, ObbBvh, ObbHit};
