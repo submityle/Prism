@@ -39,6 +39,7 @@ mod friction;
 mod ccd;
 mod self_ccd;
 mod self_collision;
+mod virtual_particles;
 
 pub use body::{
     apply_backstop, closest_point_on_segment, project_out_of_half_space, project_out_of_sphere,
@@ -49,6 +50,10 @@ pub use ccd::{capsule_toi, half_space_toi, resolve_ccd, sphere_toi, CcdParams};
 pub use coupling::{resolve_two_way_coupling, CouplingBody};
 pub use self_ccd::{resolve_self_ccd, swept_pair_toi, SelfCcdParams};
 pub use self_collision::{resolve_self_collision, resolve_self_collision_with_friction};
+pub use virtual_particles::{
+    generate_virtual_particles, resolve_self_collision_virtual,
+    resolve_self_collision_virtual_augment, VirtualParticle, VirtualParticlePattern,
+};
 
 use glam::Vec3;
 
