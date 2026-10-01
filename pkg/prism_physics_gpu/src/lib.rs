@@ -67,6 +67,7 @@ pub use cfl::{cpu_cfl_dt, cpu_max_speed, CflConfig, GpuCflReduce};
 pub use contacts::{
     contact_constraints, contact_constraints_with_friction, cpu_resolve_contacts,
     cpu_resolve_contacts_warm, ContactCache, ContactConstraint, ContactKey, GpuContactSolver,
+    GpuContactWarmSolver,
 };
 pub use context::GpuContext;
 pub use fluid::{

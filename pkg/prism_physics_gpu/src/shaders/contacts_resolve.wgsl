@@ -68,6 +68,9 @@ const EPSILON: f32 = 1.1920929e-7; // f32::EPSILON, matching the CPU guard.
 @group(0) @binding(5) var<storage, read> contacts: array<Contact>;
 @group(0) @binding(6) var<storage, read_write> lambdas: array<f32>;
 @group(0) @binding(7) var<storage, read_write> vel_pre: array<vec4<f32>>;
+// Cross-frame warm-start seed multipliers, aligned one-to-one with `contacts`.
+// Read only on the warm path (`apply_warm_start`); the cold entries never bind it.
+@group(0) @binding(8) var<storage, read> seed: array<f32>;
 
 @group(1) @binding(0) var<uniform> colour: ColourParams;
 
@@ -103,6 +106,45 @@ fn reset_lambdas(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     lambdas[i] = 0.0;
+}
+
+// Stage 2 (warm path): seed each contact's running multiplier from the
+// cross-frame cache and apply the matching one-sided impulse up front, in
+// colour order so no two live threads touch a shared particle. Replaces
+// `reset_lambdas` on the warm path. Byte-for-byte-intent twin of
+// `apply_warm_start` in `src/contacts/cpu.rs`: a non-positive seed (a new
+// contact) sets the multiplier and returns without moving anything, so a cold
+// cache reproduces the cold solve exactly; a positive seed applies the same
+// `normal * seed` correction, split by inverse mass, that the projection would
+// have accumulated, placing the seeded state on the projection's trajectory.
+@compute @workgroup_size(64)
+fn apply_warm_start(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let local = gid.x;
+    if (local >= colour.count) {
+        return;
+    }
+    let gi = colour.start + local;
+    let s = seed[gi];
+    lambdas[gi] = s;
+    if (s <= 0.0) {
+        return;
+    }
+    let con = contacts[gi];
+    let wa = inverse_masses[con.a];
+    let wb = inverse_masses[con.b];
+    let w_sum = wa + wb;
+    if (w_sum <= 0.0) {
+        return;
+    }
+    let delta = positions[con.a].xyz - positions[con.b].xyz;
+    let length = sqrt(dot(delta, delta));
+    if (length < EPSILON) {
+        return;
+    }
+    let normal = delta / length;
+    let correction = normal * s;
+    positions[con.a] = vec4<f32>(positions[con.a].xyz + correction * wa, 0.0);
+    positions[con.b] = vec4<f32>(positions[con.b].xyz - correction * wb, 0.0);
 }
 
 // Stage 3: project one colour's contacts. `colour.start` indexes the reordered

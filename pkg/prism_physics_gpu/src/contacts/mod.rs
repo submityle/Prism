@@ -41,6 +41,7 @@ mod build;
 mod constraint;
 mod cpu;
 mod gpu;
+mod gpu_warm;
 mod layout;
 mod warm_start;
 
@@ -48,4 +49,5 @@ pub use build::{contact_constraints, contact_constraints_with_friction};
 pub use constraint::ContactConstraint;
 pub use cpu::{cpu_resolve_contacts, cpu_resolve_contacts_warm};
 pub use gpu::GpuContactSolver;
+pub use gpu_warm::GpuContactWarmSolver;
 pub use warm_start::{ContactCache, ContactKey};
