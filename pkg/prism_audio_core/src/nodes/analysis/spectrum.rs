@@ -13,10 +13,11 @@
 //!
 //! The analyzer buffers incoming samples in a fixed ring and, every `hop`
 //! samples, lifts the most recent `size`-sample window into the frequency
-//! domain with a decimation-in-time (DIT) radix-2 Cooley-Tukey FFT. The
-//! transform length `size` is always a power of two (rounded up from the
-//! requested length at construction) so the classic butterfly recursion
-//! applies directly. Before the transform the window is multiplied by one of
+//! domain with the crate's shared radix-2 Cooley-Tukey transform
+//! ([`Fft`](crate::fft::Fft)). The transform length `size` is always a power of
+//! two (rounded up from the requested length at construction) so the classic
+//! butterfly recursion applies directly. Before the transform the window is
+//! multiplied by one of
 //! the standard tapers ([`Window`]) to trade main-lobe width against
 //! side-lobe rejection, and the single-sided magnitude is normalised so that a
 //! pure tone sitting exactly on an analysis bin reads back its own linear
@@ -31,8 +32,9 @@
 //! # Real-time contract
 //!
 //! Every buffer -- the sample ring, the real and imaginary scratch arrays, the
-//! precomputed twiddle-factor tables, the bit-reversal permutation table, the
-//! window coefficients, and the magnitude output -- is allocated once in
+//! shared [`Fft`](crate::fft::Fft) plan (its twiddle-factor and bit-reversal
+//! tables), the window coefficients, and the magnitude output -- is allocated
+//! once in
 //! [`SpectrumAnalyzer::new`] / [`SpectrumNode::new`]. The per-sample hot path
 //! ([`SpectrumAnalyzer::feed_sample`], [`SpectrumNode::process`]) performs no
 //! allocation, takes no locks, and cannot panic: non-finite inputs are treated
@@ -43,11 +45,13 @@
 //!
 //! # Provenance
 //!
-//! The radix-2 Cooley-Tukey FFT and the Hann, Hamming, and Blackman window
-//! tapers are textbook classical signal-processing constructions described in
-//! every digital-signal-processing reference; the single-sided magnitude
-//! normalisation is the elementary coherent-gain correction. This module reuses
-//! only this crate's own [`Sample`] scalar and graph traits. It is pure classic
+//! The radix-2 Cooley-Tukey FFT (factored into the crate's shared
+//! [`Fft`](crate::fft::Fft) primitive) and the Hann, Hamming, and Blackman
+//! window tapers are textbook classical signal-processing constructions
+//! described in every digital-signal-processing reference; the single-sided
+//! magnitude normalisation is the elementary coherent-gain correction. This
+//! module reuses only this crate's own [`Sample`] scalar, graph traits, and
+//! shared [`Fft`](crate::fft::Fft). It is pure classic
 //! DSP with no AI or ML and contains **no Unreal Engine, Unity, Godot, Wwise,
 //! FMOD, Steam Audio, or Google Resonance Audio source or derived code**; it is
 //! implemented purely from those publicly documented algorithms.
@@ -70,6 +74,7 @@ use alloc::vec::Vec;
 use bevy_math::ops;
 use core::f32::consts::TAU;
 
+use crate::fft::Fft;
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
 use crate::math::Sample;
 
@@ -137,25 +142,6 @@ impl Window {
     }
 }
 
-/// Reverses the lowest `bits` bits of `value` (for the FFT index permutation).
-fn reverse_low_bits(mut value: usize, bits: u32) -> usize {
-    let mut result = 0usize;
-    for _ in 0..bits {
-        result = (result << 1) | (value & 1);
-        value >>= 1;
-    }
-    result
-}
-
-/// Rounds `requested` up to the next power of two, never below [`MIN_FFT_SIZE`].
-fn power_of_two_at_least(requested: usize) -> usize {
-    let mut size = MIN_FFT_SIZE;
-    while size < requested {
-        size <<= 1;
-    }
-    size
-}
-
 /// Converts a sample stream into a sequence of single-sided magnitude spectra.
 ///
 /// The analyzer owns a fixed-capacity ring and a complete set of preallocated
@@ -182,9 +168,7 @@ pub struct SpectrumAnalyzer {
     hop: usize,
     window: Window,
     win: Vec<Sample>,
-    tw_re: Vec<Sample>,
-    tw_im: Vec<Sample>,
-    rev: Vec<usize>,
+    fft: Fft,
     ring: Vec<Sample>,
     re: Vec<Sample>,
     im: Vec<Sample>,
@@ -204,7 +188,8 @@ impl SpectrumAnalyzer {
     /// buffers are allocated here so the hot path never allocates.
     #[must_use]
     pub fn new(requested_size: usize, hop: usize, window: Window) -> Self {
-        let size = power_of_two_at_least(requested_size);
+        let fft = Fft::new(requested_size);
+        let size = fft.size();
         let hop = hop.max(1);
         let half = size / 2;
 
@@ -220,24 +205,12 @@ impl SpectrumAnalyzer {
         let inv_window_sum = 1.0 / window_sum;
         let two_inv_window_sum = 2.0 / window_sum;
 
-        let tw_re: Vec<Sample> = (0..half)
-            .map(|j| ops::cos(-TAU * j as Sample / size as Sample))
-            .collect();
-        let tw_im: Vec<Sample> = (0..half)
-            .map(|j| ops::sin(-TAU * j as Sample / size as Sample))
-            .collect();
-
-        let bits = size.trailing_zeros();
-        let rev: Vec<usize> = (0..size).map(|i| reverse_low_bits(i, bits)).collect();
-
         Self {
             size,
             hop,
             window,
             win,
-            tw_re,
-            tw_im,
-            rev,
+            fft,
             ring: vec![0.0; size],
             re: vec![0.0; size],
             im: vec![0.0; size],
@@ -336,39 +309,8 @@ impl SpectrumAnalyzer {
             }
         }
 
-        // Bit-reversal permutation into transform order.
-        for i in 0..size {
-            let j = self.rev[i];
-            if j > i {
-                self.re.swap(i, j);
-                self.im.swap(i, j);
-            }
-        }
-
-        // Iterative decimation-in-time radix-2 butterflies.
-        let mut len = 2;
-        while len <= size {
-            let half = len / 2;
-            let step = size / len;
-            let mut base = 0;
-            while base < size {
-                for k in 0..half {
-                    let tw = k * step;
-                    let wr = self.tw_re[tw];
-                    let wi = self.tw_im[tw];
-                    let a = base + k;
-                    let b = base + k + half;
-                    let tr = wr * self.re[b] - wi * self.im[b];
-                    let ti = wr * self.im[b] + wi * self.re[b];
-                    self.re[b] = self.re[a] - tr;
-                    self.im[b] = self.im[a] - ti;
-                    self.re[a] += tr;
-                    self.im[a] += ti;
-                }
-                base += len;
-            }
-            len <<= 1;
-        }
+        // Transform into the frequency domain with the shared FFT primitive.
+        self.fft.forward(&mut self.re, &mut self.im);
 
         // Single-sided magnitude with coherent-gain correction.
         let half = size / 2;
