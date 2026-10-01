@@ -916,12 +916,66 @@ pub fn capped_cone_segment(point: [f32; 3], a: [f32; 3], b: [f32; 3], ra: f32, r
         .sqrt()
 }
 
+/// Signed distance from `point` to a round cone with arbitrary endpoints: the
+/// convex hull of a sphere of radius `r1` centred at `a` and a sphere of radius
+/// `r2` centred at `b` — a tapered capsule between two arbitrary points.
+///
+/// This is the general-orientation generalisation of [`round_cone_sdf`] (which
+/// is pinned to the `+y` axis with its lower sphere at the origin): both end
+/// spheres may sit anywhere, so it models rounded tapered limbs, tentacles, and
+/// claws directly. With `r1 == r2` it is a [`capsule`]; with the two spheres
+/// touching it is a sphere.
+///
+/// This is Inigo Quilez's exact arbitrary-endpoint `sdRoundCone(p, a, b, r1,
+/// r2)`: the query is split into axial (`y`), beyond-far-cap (`z = y - l2`),
+/// and squared-radial (`x2`) components in units scaled by `l2 = dot(b-a,b-a)`,
+/// and a single comparison against the slope term `k` selects whether the near
+/// sphere, the far sphere, or the exact tangent flank governs. Built from
+/// `dot`, `sign`, `min`/`max`, and square roots, so it stays transcendental-free
+/// and yields a true signed distance (not a bound) inside and out.
+///
+/// Degenerate inputs (`a == b`) make `l2` vanish and the `1/l2` scaling divide
+/// by zero; callers must pass distinct endpoints (use [`sphere`] for a point).
+pub fn round_cone_segment(point: [f32; 3], a: [f32; 3], b: [f32; 3], r1: f32, r2: f32) -> f32 {
+    let ba = sub3(b, a);
+    let l2 = dot(ba, ba);
+    let rr = r1 - r2;
+    let a2 = l2 - rr * rr;
+    let il2 = 1.0 / l2;
+
+    let pa = sub3(point, a);
+    let y = dot(pa, ba);
+    let z = y - l2;
+    // Squared perpendicular component: `dot2(pa*l2 - ba*y)`.
+    let perp = [
+        pa[0] * l2 - ba[0] * y,
+        pa[1] * l2 - ba[1] * y,
+        pa[2] * l2 - ba[2] * y,
+    ];
+    let x2 = dot2_3(perp);
+    let y2 = y * y * l2;
+    let z2 = z * z * l2;
+
+    // Slope threshold selecting the governing feature.
+    let k = rr.signum() * rr * rr * x2;
+    if z.signum() * a2 * z2 > k {
+        // Beyond the far cap: the `b` sphere governs.
+        (x2 + z2).sqrt() * il2 - r2
+    } else if y.signum() * a2 * y2 < k {
+        // Before the near cap: the `a` sphere governs.
+        (x2 + y2).sqrt() * il2 - r1
+    } else {
+        // Along the tangent flank between the caps.
+        (x2 * a2 * il2).sqrt() * il2 + y * rr * il2 - r1
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         box_frame, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_torus, capsule, cone_sdf, cut_hollow_sphere, cut_sphere,
         death_star, ellipsoid_sdf, hex_prism, infinite_cylinder, length2, line_sdf, link, octahedron, plane, pyramid, rhombus, round_box,
-        quad_sdf, round_cone_sdf, rounded_cylinder, solid_angle, sphere, torus, triangle_sdf, triangular_prism, vesica,
+        quad_sdf, round_cone_sdf, round_cone_segment, rounded_cylinder, solid_angle, sphere, torus, triangle_sdf, triangular_prism, vesica,
     };
 
     #[test]
@@ -1528,6 +1582,83 @@ mod tests {
             assert!(
                 (got.abs() - reference).abs() < 6e-3,
                 "point {p:?}: got {got}, reference {reference}"
+            );
+        }
+    }
+
+    // Deterministic rotation matrix (ZYX Euler, baked) used to lift axis-aligned
+    // golden shapes into a general orientation for the arbitrary-endpoint tests.
+    fn rot(v: [f32; 3]) -> [f32; 3] {
+        // Angles ~ (0.6, -0.4, 0.9) rad; matrix elements precomputed to f64 and
+        // narrowed, so the test carries no runtime trigonometry.
+        const M: [[f32; 3]; 3] = [
+            [0.572_540_7, -0.783_188_5, 0.242_513_7],
+            [0.721_491_9, 0.340_797_2, -0.602_749_3],
+            [0.389_418_3, 0.520_070_2, 0.760_184_4],
+        ];
+        [
+            M[0][0] * v[0] + M[0][1] * v[1] + M[0][2] * v[2],
+            M[1][0] * v[0] + M[1][1] * v[1] + M[1][2] * v[2],
+            M[2][0] * v[0] + M[2][1] * v[1] + M[2][2] * v[2],
+        ]
+    }
+
+    #[test]
+    fn round_cone_segment_degenerates_to_axis_aligned() {
+        // a at origin (r1), b at (0, h, 0) (r2): must reproduce round_cone_sdf
+        // point-for-point across cap, flank, and interior regions.
+        let (r1, r2, h) = (1.0f32, 0.4f32, 2.0f32);
+        let a = [0.0, 0.0, 0.0];
+        let b = [0.0, h, 0.0];
+        for &p in &[
+            [0.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0],
+            [0.0, -1.0, 0.0],
+            [0.0, 3.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.5, 1.0, 0.0],
+            [1.5, -0.5, 0.7],
+        ] {
+            let seg = round_cone_segment(p, a, b, r1, r2);
+            let golden = round_cone_sdf(p, r1, r2, h);
+            assert!(
+                (seg - golden).abs() < 1e-5,
+                "point {p:?}: segment {seg}, golden {golden}"
+            );
+        }
+    }
+
+    #[test]
+    fn round_cone_segment_is_rigid_motion_invariant() {
+        // Lift the canonical cone by a rotation + translation and verify the
+        // segment SDF of the transformed query matches the axis-aligned golden
+        // of the untransformed query (a correct Euclidean SDF is isometry
+        // invariant). This proves general-orientation correctness exactly,
+        // leaning on the already-verified round_cone_sdf.
+        let (r1, r2, h) = (1.2f32, 0.5f32, 1.7f32);
+        let tr = [0.3, -0.7, 0.4];
+        let a = tr;
+        let b = {
+            let rb = rot([0.0, h, 0.0]);
+            [rb[0] + tr[0], rb[1] + tr[1], rb[2] + tr[2]]
+        };
+        for &p in &[
+            [0.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0],
+            [0.0, -1.0, 0.0],
+            [2.0, 0.5, 0.0],
+            [1.0, 1.0, 0.3],
+            [0.4, 1.3, -0.6],
+            [-1.0, 0.2, 0.8],
+        ] {
+            let golden = round_cone_sdf(p, r1, r2, h);
+            let rp = rot(p);
+            let tp = [rp[0] + tr[0], rp[1] + tr[1], rp[2] + tr[2]];
+            let seg = round_cone_segment(tp, a, b, r1, r2);
+            assert!(
+                (seg - golden).abs() < 2e-5,
+                "point {p:?}: segment {seg}, golden {golden}"
             );
         }
     }
