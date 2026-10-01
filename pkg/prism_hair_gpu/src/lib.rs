@@ -114,6 +114,16 @@
 //!   shader never drifts from the golden constants), with the same
 //!   finite-and-positive concentration guard clamping negative and non-finite
 //!   inputs to `0` (see [`melanin`]).
+//! * [`GpuHairWetness`] evaluates
+//!   [`wet_hair_response`](prism_render_architecture::hair::wetness::wet_hair_response),
+//!   mapping one scalar water-saturation fraction to the five physical
+//!   parameter modifiers (clump radius, mass, damping, pigment `sigma_a` and
+//!   roughness) one thread per element — every modifier a straight linear
+//!   interpolation between its dry and wet endpoint (pure multiply/add, no
+//!   transcendental), with the five wet endpoints on a host uniform and the
+//!   same `[0, 1]` saturation guard the golden uses so negative,
+//!   greater-than-one and non-finite inputs collapse to the fully dry
+//!   response (see [`wetness`]).
 //!
 //! * [`GpuHairDeepOpacity`] evaluates
 //!   [`build_deep_opacity_map`](prism_render_architecture::hair::deep_opacity_layout::build_deep_opacity_map),
@@ -385,6 +395,7 @@ pub mod vbd_solver;
 pub mod voxel_density;
 pub mod voxel_forward_scatter;
 pub mod voxel_transmittance;
+pub mod wetness;
 pub mod wind;
 
 pub use analysis_reduce::{reference_reduce, GpuHairAnalysisReduce};
@@ -426,4 +437,5 @@ pub use vbd_solver::GpuVbdSolver;
 pub use voxel_density::GpuHairVoxelDensity;
 pub use voxel_forward_scatter::GpuHairVoxelForwardScatter;
 pub use voxel_transmittance::GpuHairVoxelTransmittance;
+pub use wetness::{reference_response, GpuHairWetness, MODIFIERS_PER_ELEMENT};
 pub use wind::{query_for_wind, GpuWindField, WindQuery};

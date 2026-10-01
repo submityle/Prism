@@ -1,10 +1,11 @@
-# Prism 渲染引擎 — 顶级次世代 AAA 高级特性专项设计（v2 / PBR·NPR·混合 全前端）
+# Prism 渲染引擎 — 顶级次世代 AAA 高级特性专项设计（v3 / PBR·NPR·混合 全前端 + 子系统完成度）
 
 > 本文是 `prism_material_pipeline_design_zh.md`（顶层架构与决策）的**下钻分册**：把 §12–16 的对标矩阵与特性清单展开为**逐特性规格书**——每条给出「借鉴对象 / 算法要点 / 性能预算 / 效果上限 / 模块落点 / 验收口径」。
 > **一句话立场**：共享 GPU-driven 基底算一次，PBR / NPR / 自定义三前端并存消费，混合在管线级路由。**三条赛道都是一等公民，都能拿到顶级次世代 AAA 效果**，差异只在「怎么解读同一份光/影/GI/几何数据」的前端响应处。
 > **纪律**：只借鉴公开算法与形态，**不本地拉取任何产品源码**（UE 算法已获授权，同样只借形态）。
 > **数值红线（硬约束）**：所有高级特性走**纯经典数值路径**（蒙特卡洛/准蒙特卡洛、SH/SG、reservoir 重采样、SDF 步进、时空双边降噪、时空蓝噪声、FFT）。**不引入任何 AI / ML / 神经网络 / LLM 路径**——不做神经降噪、Ray Reconstruction、神经辐射缓存、神经上采样、神经材质压缩。厂商时序上采样 SDK（DLSS/FSR2/XeSS）仅作**可选外部后端**接入，本体默认路径为纯经典 TSR 式时序累积，保证 CPU golden 可对拍、跨平台可移植。
 > **v2 本版新增**：在 v1（§1–§8，三前端共享基底 + PBR/NPR/混合逐特性规格）之上，追加 **§6「次世代前沿高级特性全景」**——覆盖几何 / 阴影 / 反射 / 材质 / 体积 / 透明 / 毛发 / 水体 / 后期影视 / 采样降噪 / 上采样抗锯齿 / 性能工程 12 条前沿赛道，对标最新实时 AAA 天花板（UE5.6 / Cyberpunk RT Overdrive / Alan Wake 2 / Portal RTX / Horizon / Nanite Tessellation / MegaLights），逐条给算法要点 + 预算 + 落点 + 验收；并刷新 §2 对标矩阵（§2.3 前沿总表）与 §9 落点路线图（按仓内现状分级）。
+> **v3 本版新增**：按 2026-10 仓内实况刷新 §9 分级与文件计数（虚拟几何/GI/水体/体积/采样降噪/后期多项由 🟡 升 ✅，依据各 `pkg/` 子目录真实规模）；新增 **§10「子系统完成度矩阵 + 跨子系统集成 + 子系统 AAA 高级特性」**，把物理（GPU 刚体 TGS / XPBD / MPM / FLIP / 断裂 / 软体 VBD）、音频（HRTF 双耳 / 光线声学 / 空间化）、水体（FFT 海面 / FLIP / 浅水）、毛发、布料、体积六大子系统的现状、缺口、及达到 AAA 所需高级特性逐条展开，**全程纯经典数值，排除所有 AI/ML/LLM 路径**。
 
 ---
 
@@ -27,7 +28,7 @@
 | GPU 场景 / 剔除 | `gpu_scene/` `geometry/` | instance/mesh 表、GPU 剔除、draw 生成 | 全共享 |
 | 光照数据 | `lighting/` + `gi/world_restir/` | clustered 光照剔除、ReSTIR 储层预算、探针/GI 采样 | PBR 积分、NPR ramp 量化、混合共享预算 |
 | 虚拟阴影 VSM | `virtual_shadow/` | 虚拟页 + clipmap 深度、residency | PBR 软阴影、NPR 阈值硬阴影+染色、另叠 SDF 面部阴影 |
-| 光线场景 | `ray_scene/`（78 文件，软件 BVH 已成规模） | BVH/TLAS、RT 反射/阴影/GI 输入 | PBR 全保真、NPR 降级风格化近似 |
+| 光线场景 | `ray_scene/`（80 文件，软件 BVH 已成规模） | BVH/TLAS、RT 反射/阴影/GI 输入 | PBR 全保真、NPR 降级风格化近似 |
 | 全局光照 / 反射 | `gi/`（surface_cache/screen_probe/spec_gi/world_restir/path_reuse/probe_volume/vxgi/global_sdf/caustics 等已落） | surface cache、屏幕探针、SHARC、ReSTIR 储层、反射 | 见 GI 文档 v4 |
 | 时序 / 上采样 | `temporal_upscale/` `motion/` `history/` | motion vector、历史累积、reactive mask、上采样 | 全共享；NPR 锐利分段靠 reactive mask 保护 |
 | 透明 | `transparency/` + `gi/oit/` | OIT 路径、HairVisibility 等 | 全共享 |
@@ -352,29 +353,93 @@
 
 ---
 
-## 9. 落点与路线图映射（v2 按仓内现状分级）
+## 9. 落点与路线图映射（v3 按仓内实况分级）
 
-> 现状分级：✅ 已成规模 / 🟡 骨架在待深化 / ⬜ 待建。基于 `pkg/` 实际模块（`gi/` 下 world_restir·surface_cache·screen_probe·spec_gi·path_reuse·probe_volume·vxgi·global_sdf·caustics 等已落；`ray_scene/` 78 文件；`virtual_geometry/` 12 文件骨架）。
+> 现状分级：✅ 已成规模（核心路径有真实现，深化/收敛阶段）/ 🟡 骨架在待深化 / ⬜ 待建。基于 2026-10 `pkg/` 实际模块：`prism_render_shading/src/gi/` 下 63 个子系统已落（world_restir·surface_cache·screen_probe·spec_gi·path_reuse·probe_volume·vxgi·global_sdf·caustics·clouds·atmosphere·sky_lut·denoise·spec_denoise·gtao·subsurface·env_brdf·hair_bsdf·oit·refraction·parallax·triplanar·decal·vrs·local_tonemap·depth_of_field·motion_blur·film_grain·sample 等）；`ray_scene/` 80 文件（软件 BVH/TLAS 成规模）；虚拟几何由专用 crate `prism_virtual_geometry_gpu`（25 文件：cluster_cull/cluster_raster/payload_raster/lod_projection/lod_select/page_pool/page_storage/vis_payload_codec/triangle_gradients/frustum_cull 等）承载软光栅主路径。
 
 | 特性块 | 主模块 | 现状 | 优先级 |
 |---|---|---|---|
-| 虚拟几何软光栅 + 置换 + 两趟剔除 | `virtual_geometry/` | 🟡 骨架在，软光栅为最大出血点 | P0（先立几何基底） |
-| GI/反射/ReSTIR 全家桶 | `gi/*` `lighting/` | ✅ 多模块已落，按 GI 文档 v4 深化收敛 | P0 |
-| VSM + 光追软阴影 + MegaLights | `virtual_shadow/` `lighting/` `gi/distance_field_shadow/` | 🟡 VSM residency 在，软阴影/海量光待深化 | P0 |
-| 时序/上采样/reactive mask/VRS | `temporal_upscale/` `motion/` `history/` `gi/vrs/` | 🟡 基础在，reactive mask 是 NPR 头号前置 | P0（NPR 前置） |
-| 材质 ABI / 有界 slab / 多散射 / SSS | `material/` `abi/` `gi/env_brdf/` `gi/subsurface/` | 🟡 正交轴+闭包 IR 已定，能量守恒待补 | P1 |
-| 反射分档 + glossy 储层 + 薄膜 | `gi/spec_gi/` `gi/reflect/` `gi/anisotropy/` | 🟡 模块在，跨档升级待连 | P1 |
-| 体积雾/云 + 体积储层 | `volumetric/` `gi/clouds/` `gi/fog/` `gi/volumetric_gi/` | 🟡 模块在，时域重投影/储层待深化 | P1 |
-| 透明 OIT + 折射 + 发丝可见性 | `transparency/` `gi/oit/` `gi/refraction/` | 🟡 OIT 在，链表/折射待深化 | P1 |
-| 毛发 BSDF + 双散射 + LOD | `gi/hair_bsdf/` `prism_hair_gpu` | 🟡 毛发引擎进行中 | 并行推进 |
-| 水体 FFT + 反射 + 泡沫/焦散 | `water/` `gi/caustics/` | 🟡 水模块在，FFT 海面待建 | P2 |
-| 后期影视链（DoF/MB/bloom/tonemap/lens） | `gi/depth_of_field/` `gi/motion_blur/` `gi/local_tonemap/` `gi/lens/` `gi/film_grain/` | ✅ 多模块已落，接链待梳 | P2 |
-| 采样/降噪（STBN/Sobol/NRD/A-SVGF） | `gi/sample/` `gi/denoise/` `gi/spec_denoise/` `gi/temporal/` | ✅ 多模块已落，分离/clamp 待对齐 | P1 |
-| 性能工程（Work Graphs/SER/bindless/帧图别名） | `work_graph/` `descriptor_heap/` `frame_graph/` `virtual_resource/` | 🟡 骨架在，GPU 自驱调度待深化 | P1 |
-| NPR 专属响应（ramp/SDF/描边/后处理） | 前端 + 专属数据通道 | ⬜ 待建（reactive mask 就绪后） | P1 |
-| 混合 tile 路由 | `material/` + 前端 | 🟡 依赖 material id 基底 | P1 |
+| 虚拟几何软光栅 + 置换 + 两趟剔除 | `prism_virtual_geometry_gpu`（25）+ `virtual_geometry/`（12） | ✅ 软光栅/页池/LOD/vis-codec 主路径已落，置换与两趟 HiZ 深化中 | P0 |
+| GI/反射/ReSTIR 全家桶 | `gi/*`（63）`lighting/` | ✅ 多模块成规模，按 GI 文档 v4 收敛对拍 | P0 |
+| VSM + 光追软阴影 + MegaLights | `virtual_shadow/`（7）`shadow/virtual_sm` `gi/distance_field_shadow/` `gi/capsule_shadow/` `gi/area_light/` | 🟡 VSM residency + 多级阴影在，MegaLights 海量光待深化 | P0 |
+| 时序/上采样/reactive mask/VRS | `temporal_upscale/`（3）`motion/`（7）`history/`（4）`gi/vrs/` `taa/` `upscale/` | 🟡 时序累积+历史在，reactive mask 是 NPR 头号前置 | P0 |
+| 材质 ABI / 有界 slab / 多散射 / SSS | `material/` `abi/` `gi/env_brdf/` `gi/subsurface/` `gi/eye/` `gi/clearcoat/` | 🟡 正交轴+闭包 IR 已定，多散射能量守恒白炉收敛待补 | P1 |
+| 反射分档 + glossy 储层 + 薄膜 | `gi/spec_gi/` `gi/reflect/` `gi/planar_reflect/` `gi/anisotropy/` `gi/spec_denoise/` `screen_space/` | ✅ SSR/planar/各向异性/储层去噪在，跨档升级连线待收 | P1 |
+| 体积雾/云 + 体积储层 | `volumetric/`（21）`prism_volumetric_gpu`（69）`gi/clouds/` `gi/fog/` `gi/volumetric_gi/` `gi/light_shaft/` `gi/atmosphere/` `gi/sky_lut/` | ✅ froxel/云/大气 LUT 成规模，体积储层时域复用深化中 | P1 |
+| 透明 OIT + 折射 + 发丝可见性 | `transparency/` `gi/oit/` `gi/refraction/` `gi/translucency/` | 🟡 OIT/折射在，链表精确档+发丝可见性接线待深化 | P1 |
+| 毛发 BSDF + 双散射 + LOD | `gi/hair_bsdf/` `prism_hair_gpu`（40）`hair_chiang/kajiya/marschner` 系 | ✅ 发丝 BSDF + strand 管线成规模，双散射能量/LOD 收敛中 | 并行推进 |
+| 水体 FFT + 反射 + 泡沫/焦散 | `water/`（32：fft/flip/pbf/swe/foam/caustics/coupling/underwater/wetness/ocean_lod/breaking/shoreline） `gi/caustics/` | ✅ FFT 海面 + FLIP/PBF/浅水 + 泡沫/湿润/焦散/水下成规模 | P2 |
+| 后期影视链（DoF/MB/bloom/tonemap/lens） | `gi/depth_of_field/` `gi/motion_blur/` `gi/local_tonemap/` `gi/lens/` `gi/film_grain/` `bloom/cas/dof/tonemap/vignette` | ✅ 多模块已落，接链与分辨率分档待梳 | P2 |
+| 采样/降噪（STBN/Sobol/NRD/A-SVGF） | `gi/sample/` `gi/denoise/` `gi/spec_denoise/` `gi/temporal/` `gi/debanding/` | ✅ 多模块已落，diffuse/spec 分离与 clamp 对齐收敛中 | P1 |
+| 性能工程（Work Graphs/SER/bindless/帧图别名） | `work_graph/`（5）`descriptor_heap/` `frame_graph/`（7）`virtual_resource/` `shader_package/` | 🟡 骨架在，GPU 自驱调度/SER 探测深化中 | P1 |
+| NPR 专属响应（ramp/SDF/描边/后处理） | `stylized/outline/halftone/hatching/posterize/kuwahara/ordered_dither/face_shadow`（shading 已落）+ reactive mask 通道 | 🟡 后处理算子多数已落，reactive mask 保护链待连 | P1 |
+| 混合 tile 路由 | `material/` + `light_routing/classification` + 前端 | 🟡 依赖 material id 基底，tile 分类雏形在 | P1 |
 
 **总原则**：先立 P0 基底（几何/光照/阴影/时序），三前端才有共享数据可消费；NPR 的 reactive mask 属 P0 前置；反射/材质/体积/采样属 P1；水体/后期链属 P2；毛发子系统并行开发。**每条前沿特性落地走管线 §9 的“CPU golden → WESL kernel → 真机 parity”三步，未毕业不作生产默认。**
+
+---
+
+## 10. 子系统完成度矩阵 + 跨子系统集成 + 子系统 AAA 高级特性（v3 新增）
+
+> 用户多轮追问「子系统完成度」。本节把渲染之外但构成 AAA 整机的六大子系统（物理 / 音频 / 水体 / 毛发 / 布料 / 体积）按仓内实况分级，并给**达到顶级次世代 AAA 所需的高级特性清单**（借鉴优先产品，纯经典数值，排除 AI/ML/LLM）。计数为 2026-10 `pkg/` 下 `*.rs` 文件数，用于规模参考（非完成度百分比）。
+
+### 10.1 子系统完成度矩阵
+
+| 子系统 | 主 crate / 规模 | 已落能力（真实模块） | 现状 | 距 AAA 的关键缺口 |
+|---|---|---|---|---|
+| 物理 | `prism_physics_gpu`（185）`prism_physics_core`（145）`prism_physics_geometry`（12） | GPU 刚体 TGS、XPBD、MPM、FLIP 流体、断裂（fracture）、软体 VBD、broadphase/BVH、narrowphase、CCD、island/sleep、radix/scan、关节 joint、陀螺项 | ✅ 广度已达 AAA 骨架 | 大规模破坏 islands 稳态、SDF/体素碰撞代理接 GI、确定性跨平台 parity 收敛 |
+| 音频 | `prism_audio_core`（66）`prism_audio_spatial`（51）`prism_audio_hrtf`（9）`prism_audio_rt`（6）`prism_audio_device`（7） | DSP 节点图、空间化、HRTF 双耳、实时 ring 运行时、设备后端、effects（含 tilt_eq） | ✅ 核心链路成规模 | 光线声学遮挡/反射（ray-traced acoustics）、卷积混响 IR、与物理事件/材质耦合 |
+| 水体 | `render_architecture/src/water/`（32） | FFT 频谱海面、FLIP/PBF 粒子流体、浅水 SWE、级联 LOD、泡沫/湿润/焦散/水下、破碎波、海岸线、与刚体 coupling | ✅ 成规模 | 大洋级联与近岸统一 LOD 过渡、GPU 全链路 parity、与体积雾/大气衔接 |
+| 毛发 | `prism_hair_gpu`（40）`gi/hair_bsdf/` + shading `hair_*` | 发丝 BSDF（Chiang/Kajiya/Marschner/天使环/matcap）、strand 管线、线覆盖亚像素对拍 | ✅ 成规模 | 双散射多散射能量守恒白炉、strand→card LOD 无跳变、深度不透明图自阴影 |
+| 布料 | `prism_render_scene/src/cloth/`（含 aero/backstop/ccd/embed/layers/plasticity/pressure/tearing/vbd/self_ccd/virtual GPU 对拍） | XPBD/VBD 布料、自碰撞 CCD、气动、撕裂、塑性、压强、多层、虚拟布料 | ✅ 成规模（GPU parity 密集） | 与毛发/刚体统一碰撞、风场耦合、LOD 降解 |
+| 体积 | `prism_volumetric_gpu`（69）`render_architecture/src/volumetric/`（21）`gi/clouds·fog·atmosphere·sky_lut·volumetric_gi` | froxel 参与介质、光线步进云、大气 LUT、体积 GI、光轴 | ✅ 成规模 | 异质介质多弹跳储层收敛、云时域重投影无鬼影、体积阴影与 VSM 衔接 |
+
+### 10.2 跨子系统集成（AAA 整机的「接缝」才是天花板）
+
+> 单子系统达标不等于整机 AAA；次世代观感差距大量来自**子系统耦合**。以下集成点为纯经典数据流，无 ML。
+
+| 集成点 | 借鉴对象 | 数据流 | 效果上限 | 落点 | 验收 |
+|---|---|---|---|---|---|
+| 物理→GI 动态几何 | UE Lumen 动态几何 | 刚体/布料/断裂碎块每帧体素化/SDF 增量更新喂 global_sdf / DFAO / 软阴影 | 动态物体参与间接光/遮蔽不漏光 | `prism_physics_gpu` + `gi/global_sdf/` | 碎块移动间接光/AO 跟随无延迟 |
+| 物理→音频事件 | 物理驱动程序化音频 | 碰撞冲量/断裂事件触发音源参数（能量→响度/频谱） | 破坏/撞击声随物理强度连续 | `prism_physics_core/events` + `prism_audio_core` | 事件延迟 < 1 帧、无声画错位 |
+| 音频→光线声学 | NVIDIA/Steam Audio 几何声学 | 复用渲染 BVH 做声线遮挡/早反射/混响 IR（低频射线预算） | 遮挡闷音、空间混响随几何 | `prism_audio_rt` + `ray_scene/`（共享 BVH） | 遮挡/混响随场景几何、CPU golden 可对拍 |
+| 水体↔刚体/布料 | 开放世界水体耦合 | 水面高度场→浮力/拖拽；物体→溅射/尾迹注入水面 | 浮船/涉水/落水物理一致 | `water/coupling` + `prism_physics_gpu` | 浮力守恒、尾迹随速度、无穿插 |
+| 毛发/布料↔风场 | 统一风场服务 | 共享风场/湍流场驱动毛发、布料、粒子、植被 | 风下毛发/布料/叶片一致摆动 | `particle/wind_field` + `prism_hair_gpu` + cloth | 同风场多子系统方向一致、无相位错 |
+| 水体/云→大气散射 | Hillaire 大气 | 水面/云消光并入空中透视体积，共享 sky LUT | 远海/云海与大气连续、黄昏红移一致 | `water/` `gi/clouds/` + `gi/atmosphere/` | 透视连续、无 LUT 接缝 |
+
+### 10.3 子系统 AAA 高级特性清单（借鉴优先产品，纯经典数值）
+
+> 以下为把各子系统从「成规模」推到「顶级次世代 AAA」的高级特性，逐条给借鉴对象 + 算法要点 + 预算 + 落点 + 验收。
+
+#### 物理
+| 能力 | 借鉴对象 | 算法要点 | 预算 | 落点 | 验收 |
+|---|---|---|---|---|---|
+| 大规模破坏/碎裂 | Chaos / Houdini RBD | 预断裂 Voronoi 碎块 + 岛屿睡眠 + 约束弱化连接 | 岛屿级激活，静态碎块休眠 | `prism_physics_gpu/fracture` + `island` | 千碎块稳态不抖、连接断裂物理合理 |
+| GPU 刚体大批次 | PhysX GPU / TGS Soft | TGS 软约束 + GPU broadphase/narrowphase 全驻留 | 万级刚体恒定帧预算 | `prism_physics_gpu/rigid` `contacts` | 万刚体堆叠稳定、无穿透无抖动 |
+| 统一粒子流体 | FLIP/PBF (Macklin) | FLIP+PBF 混合，网格压力 + 粒子平流 | GPU 网格可调分辨率 | `prism_physics_gpu/fluid` `mpm` | 不可压约束守恒、无体积丢失 |
+| 有限元软体/肌肉 | VBD / Projective Dynamics | VBD 顶点块下降，稳定大步长 | 迭代数可调 | `prism_physics_core/vbd` `soft` | 大形变稳定、能量不爆 |
+| 连续碰撞 CCD | 保守前进 CCD | TOI 保守步进防隧穿，高速物体可靠 | 仅高速对象启用 | `prism_physics_core/ccd` | 高速物体无穿透、无卡顿 |
+
+#### 音频
+| 能力 | 借鉴对象 | 算法要点 | 预算 | 落点 | 验收 |
+|---|---|---|---|---|---|
+| 几何光线声学 | Steam Audio / NVIDIA ACE(非ML部分) | 复用渲染 BVH 投声线算遮挡/早反射/后期混响 | 低射线数 + 时域平滑 | `prism_audio_rt` + `ray_scene/` | 遮挡闷音、反射随几何、无爆音 |
+| HRTF 双耳 | 公开 HRTF 数据集 + 球谐插值 | 方向 → HRTF 卷积 + SH 平滑插值去离散跳变 | 分块卷积 | `prism_audio_hrtf` | 方位/仰角定位准、转头无咔哒 |
+| 卷积混响 | 分区卷积混响 | 空间 IR 分区 FFT 卷积，低延迟长尾 | 分块 FFT | `prism_audio_core/nodes` | 尾混自然、低延迟、无周期伪影 |
+| 遮挡/传播 | 门户/房间传播 | 房间-门户图传播衰减与低通 | 图遍历廉价 | `prism_audio_spatial` | 隔墙闷、门缝漏声方向正确 |
+
+#### 水体 / 毛发 / 布料 / 体积（补强项）
+| 子系统 | 高级特性 | 借鉴对象 | 要点 | 落点 | 验收 |
+|---|---|---|---|---|---|
+| 水体 | 级联统一 LOD | Sea of Thieves | 远 FFT 大洋 ↔ 近 FLIP 交互无缝过渡 | `water/ocean_lod` `transition` | 过渡无接缝/无突变 |
+| 水体 | 波破碎/飞沫 | AC 海洋 | Jacobian 判破碎 + 飞沫粒子注入 | `water/breaking` `foam` | 浪尖破碎物理、飞沫随浪峰 |
+| 毛发 | 双散射能量守恒 | Zinke dual scattering | 全局多散射近似 + 单散射补 | `gi/hair_bsdf/` | 浅发通透、白炉能量≈1 |
+| 毛发 | strand→card LOD | UE Groom | 近发丝远卡片连续过渡 | `prism_hair_gpu` | LOD 过渡无 pop |
+| 布料 | 统一碰撞场 | — | 布料/毛发/刚体共享 SDF 碰撞代理 | cloth + `physics_gpu/bvh` | 多子系统无穿插 |
+| 体积 | 异质介质储层 | Volumetric ReSTIR | froxel 储层重用散射样本多弹跳 | `gi/volumetric_gi/` | 体积内间接光低噪无闪 |
+| 体积 | 云时域重投影 | Decima Nubis | 低分辨率 + 蓝噪声步进 + 时域放大 | `gi/clouds/` | 时域无鬼影、步进无带状 |
+
+**§10 验收总纲**：每个子系统高级特性走与渲染一致的「CPU golden → GPU kernel → 真机 parity」三步；跨子系统集成点额外要求**确定性数据流**（物理→GI/音频、水体→物理）可逐位复现对拍；**全程纯经典数值，任何子系统均不引入 AI/ML/LLM 推理路径**（厂商上采样 SDK 仅渲染侧可选后端，与子系统本体无关）。
 
 ---
 
