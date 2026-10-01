@@ -52,6 +52,10 @@
 //!   (hard brick-wall or soft tanh knee) with anti-aliasing oversampling;
 //!   unity below the ceiling and distinct from the whole-curve saturators
 //!   and from the time-varying limiter.
+//! - [`comb_filter::CombFilterNode`] -- feedforward (FIR) comb that sums the
+//!   input with one delayed, scaled copy for static flanging and metallic
+//!   coloration; the finite-response counterpart to the recirculating
+//!   [`comb_resonator::CombResonatorNode`].
 //! - [`flanger::FlangerNode`] — single short LFO-swept delay with feedback for
 //!   the classic sweeping comb / "jet" effect.
 //! - [`formant_filter::FormantFilterNode`] -- parallel band-pass resonator bank
@@ -212,6 +216,7 @@ pub mod auto_wah;
 pub mod bitcrusher;
 pub mod chorus;
 pub mod clipper;
+pub mod comb_filter;
 pub mod comb_resonator;
 pub mod dc_blocker;
 pub mod delay;
@@ -258,6 +263,7 @@ pub use clipper::{
     ClipperMode, ClipperNode, ClipperParams, DEFAULT_CLIPPER_CEILING_DB, DEFAULT_CLIPPER_KNEE,
     MAX_CLIPPER_GAIN_DB, clip_sample,
 };
+pub use comb_filter::{CombFilterNode, CombFilterParams};
 pub use comb_resonator::{CombResonatorNode, CombResonatorParams, MAX_FEEDBACK, MIN_FREQUENCY_HZ};
 pub use dc_blocker::{
     DEFAULT_DC_BLOCKER_CUTOFF_HZ, DcBlockerNode, DcBlockerParams, MAX_DC_BLOCKER_CUTOFF_HZ,
