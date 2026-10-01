@@ -77,7 +77,7 @@ use super::contact_coloring::RigidContactColouring;
 /// Guard below which an effective mass is treated as infinite (both bodies
 /// static along this direction) and the impulse is skipped. Matches `EPSILON`
 /// in `shaders/rigid_contact.wgsl`.
-const EPSILON: f32 = 1.192_092_9e-7;
+pub(crate) const EPSILON: f32 = 1.192_092_9e-7;
 
 /// Resolves `contacts` between the bodies of `state` over one frame of `dt`
 /// seconds, mutating body velocities and the contacts' accumulated impulses in
@@ -150,7 +150,7 @@ pub fn cpu_solve_contacts(
 
 /// Returns a per-body flag that is `true` when the solver may write the body,
 /// i.e. it has a non-zero inverse mass or any non-zero inverse-inertia axis.
-fn movable_mask(state: &RigidBodyState) -> Vec<bool> {
+pub(crate) fn movable_mask(state: &RigidBodyState) -> Vec<bool> {
     (0..state.len())
         .map(|i| {
             let inv_i = state.inverse_inertias[i];
@@ -160,7 +160,7 @@ fn movable_mask(state: &RigidBodyState) -> Vec<bool> {
 }
 
 /// Relative velocity of the contact point on body `a` with respect to body `b`.
-fn relative_velocity(state: &RigidBodyState, c: &RigidContact) -> Vec3 {
+pub(crate) fn relative_velocity(state: &RigidBodyState, c: &RigidContact) -> Vec3 {
     let a = c.body_a as usize;
     let b = c.body_b as usize;
     let va = state.linear_velocities[a] + state.angular_velocities[a].cross(c.anchor_a);
@@ -232,7 +232,7 @@ fn solve_one(
 
 /// The contact's effective mass along the unit direction `d`, including both
 /// bodies' angular arms through their world-space inverse inertia.
-fn effective_mass(state: &RigidBodyState, c: &RigidContact, d: Vec3) -> f32 {
+pub(crate) fn effective_mass(state: &RigidBodyState, c: &RigidContact, d: Vec3) -> f32 {
     let a = c.body_a as usize;
     let b = c.body_b as usize;
     let mut k = state.inverse_masses[a] + state.inverse_masses[b];
@@ -257,7 +257,7 @@ fn effective_mass(state: &RigidBodyState, c: &RigidContact, d: Vec3) -> f32 {
 /// `anchor_a`, `-p` to body `b` at `anchor_b`), updating both linear and angular
 /// velocities. Static or locked axes contribute zero through their zero inverse
 /// mass or inertia, so no explicit guard is needed for correctness.
-fn apply_impulse(state: &mut RigidBodyState, c: &RigidContact, p: Vec3) {
+pub(crate) fn apply_impulse(state: &mut RigidBodyState, c: &RigidContact, p: Vec3) {
     let a = c.body_a as usize;
     let b = c.body_b as usize;
 
