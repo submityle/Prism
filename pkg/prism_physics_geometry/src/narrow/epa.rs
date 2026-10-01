@@ -13,6 +13,7 @@
 use alloc::vec::Vec;
 use glam::Vec3;
 
+use crate::narrow::minkowski::{support, SupportVertex};
 use crate::narrow::support::SupportMap;
 
 /// Maximum GJK simplex refinement iterations.
@@ -45,29 +46,6 @@ pub struct Contact {
     pub point_a: Vec3,
     /// Witness point on the surface of shape `b`.
     pub point_b: Vec3,
-}
-
-/// A Minkowski-difference vertex that also remembers its supporting points on
-/// each shape, so EPA can reconstruct per-shape witness points.
-#[derive(Clone, Copy)]
-struct SupportVertex {
-    /// Minkowski-difference position `support_a - support_b`.
-    v: Vec3,
-    /// Supporting point on shape `a`.
-    a: Vec3,
-    /// Supporting point on shape `b`.
-    b: Vec3,
-}
-
-/// Samples the Minkowski difference `A (-) B` along `dir`.
-fn support<A: SupportMap, B: SupportMap>(a: &A, b: &B, dir: Vec3) -> SupportVertex {
-    let sa = a.support_point(dir);
-    let sb = b.support_point(-dir);
-    SupportVertex {
-        v: sa - sb,
-        a: sa,
-        b: sb,
-    }
 }
 
 /// Returns `true` when `a` and `b` lie in the same half-space.
