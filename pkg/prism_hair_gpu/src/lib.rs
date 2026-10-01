@@ -568,6 +568,17 @@
 //!   valid lobe is always returned. The lobe index and probability are exact;
 //!   only the `(u - lo) / p` remap divides, matched within the fma tolerance
 //!   (see [`sample_lobe`]).
+//! * [`GpuHairStratifiedAllocation`] evaluates
+//!   [`stratified_allocation`](prism_render_architecture::hair::scatter_lod::stratified_allocation),
+//!   the largest-remainder (Hamilton) split of a sample budget across the
+//!   three `Marschner` lobes: one thread per `(pdf, total)` tuple floors each
+//!   lobe's real quota, then hands the leftover samples to the largest
+//!   fractional remainders, ties broken by ascending lobe index, so a
+//!   normalised pdf's counts always sum to the budget. Each pdf component is
+//!   sanitised non-negative exactly as the reference; the split is pure
+//!   integer arithmetic, so `CPU` and `GPU` agree bit-for-bit and the parity
+//!   test asserts the counts with integer equality (see
+//!   [`stratified_allocation`]).
 //!
 //! # Portability
 //!
@@ -649,6 +660,7 @@ pub mod self_collision_jacobi;
 pub mod self_collision_voxel;
 pub mod spectrum_sample_map;
 pub mod strand_metrics;
+pub mod stratified_allocation;
 pub mod transition;
 pub mod vbd_solver;
 pub mod voxel_density;
@@ -719,6 +731,7 @@ pub use self_collision_jacobi::GpuSelfCollisionJacobi;
 pub use self_collision_voxel::GpuHairSelfCollisionVoxel;
 pub use spectrum_sample_map::{reference_spectrum_sample_map, GpuHairSpectrumSample};
 pub use strand_metrics::{GpuStrandMetric, GpuStrandMetrics};
+pub use stratified_allocation::{reference_stratified_allocation, GpuHairStratifiedAllocation};
 pub use transition::GpuHairTransition;
 pub use vbd_solver::GpuVbdSolver;
 pub use voxel_density::GpuHairVoxelDensity;
