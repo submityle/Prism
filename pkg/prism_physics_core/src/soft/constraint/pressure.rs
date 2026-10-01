@@ -187,55 +187,20 @@ impl ParticleConstraint for PressureConstraint {
     }
 
     fn project(&mut self, positions: &mut [Vec3], inverse_masses: &[Real], dt: Real) {
-        let count = positions.len();
-        if dt <= 0.0 || count == 0 || self.triangles.is_empty() {
-            return;
-        }
-
-        // Accumulate the signed volume and per-vertex gradient in one pass.
-        let mut gradients: Vec<Vec3> = vec![Vec3::ZERO; count];
-        let mut volume = 0.0;
-        for tri in &self.triangles {
-            let (i0, i1, i2) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
-            if i0 >= count || i1 >= count || i2 >= count {
-                continue;
-            }
-            let p0 = positions[i0];
-            let p1 = positions[i1];
-            let p2 = positions[i2];
-            volume += p0.dot(p1.cross(p2));
-            gradients[i0] += p1.cross(p2) * INV_SIX;
-            gradients[i1] += p2.cross(p0) * INV_SIX;
-            gradients[i2] += p0.cross(p1) * INV_SIX;
-        }
-        volume *= INV_SIX;
-
-        let c = volume - self.target_volume();
-
-        // Denominator: sum_i w_i |grad_i|^2 + alpha_tilde.
-        let mut denom = 0.0;
-        for (i, grad) in gradients.iter().enumerate() {
-            let w = inverse_masses.get(i).copied().unwrap_or(0.0);
-            if w <= 0.0 {
-                continue;
-            }
-            denom += w * grad.length_squared();
-        }
-        let alpha_tilde = self.compliance / (dt * dt);
-        denom += alpha_tilde;
-        if denom < EPS_LEN_SQ {
-            return;
-        }
-
-        let delta_lambda = (-c - alpha_tilde * self.lambda) / denom;
-        self.lambda += delta_lambda;
-        for (i, grad) in gradients.iter().enumerate() {
-            let w = inverse_masses.get(i).copied().unwrap_or(0.0);
-            if w <= 0.0 {
-                continue;
-            }
-            positions[i] += *grad * (w * delta_lambda);
-        }
+        // Delegate to the free function so the GPU twin and any external caller
+        // share one authoritative implementation (no arithmetic drift).
+        let target_volume = self.target_volume();
+        let mut lambda = self.lambda;
+        project_pressure(
+            positions,
+            inverse_masses,
+            &self.triangles,
+            target_volume,
+            self.compliance,
+            dt,
+            &mut lambda,
+        );
+        self.lambda = lambda;
     }
 }
 
@@ -267,6 +232,81 @@ fn fetch_triangle_positions(positions: &[Vec3], tri: [u32; 3]) -> Option<(Vec3, 
     let p1 = positions.get(tri[1] as usize)?;
     let p2 = positions.get(tri[2] as usize)?;
     Some((*p0, *p1, *p2))
+}
+
+/// Projects one compliant XPBD pressure (closed-mesh volume) iteration in place.
+///
+/// This is the single authoritative implementation shared by
+/// [`PressureConstraint::project`] and the GPU cloth-pressure twin, kept as a
+/// free function over raw indices so both paths run byte-identical math.
+///
+/// `positions` is mutated toward the `target_volume = overpressure * rest_volume`
+/// goal; `triangles` are outward-wound indices into it; `compliance` is the
+/// inverse stiffness (`0` perfectly rigid); `dt` is the substep; and `lambda`
+/// is the Lagrange multiplier accumulated across iterations of the current
+/// substep (reset to `0` between substeps by the owner).
+///
+/// Pinned particles (`inverse_mass <= 0`) never move, out-of-range triangle
+/// indices are skipped, and a (near) zero denominator or non-positive `dt` is a
+/// no-op, mirroring every other constraint in this module.
+pub fn project_pressure(
+    positions: &mut [Vec3],
+    inverse_masses: &[Real],
+    triangles: &[[u32; 3]],
+    target_volume: Real,
+    compliance: Real,
+    dt: Real,
+    lambda: &mut Real,
+) {
+    let count = positions.len();
+    if dt <= 0.0 || count == 0 || triangles.is_empty() {
+        return;
+    }
+
+    // Accumulate the signed volume and per-vertex gradient in one pass.
+    let mut gradients: Vec<Vec3> = vec![Vec3::ZERO; count];
+    let mut volume = 0.0;
+    for tri in triangles {
+        let (i0, i1, i2) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
+        if i0 >= count || i1 >= count || i2 >= count {
+            continue;
+        }
+        let p0 = positions[i0];
+        let p1 = positions[i1];
+        let p2 = positions[i2];
+        volume += p0.dot(p1.cross(p2));
+        gradients[i0] += p1.cross(p2) * INV_SIX;
+        gradients[i1] += p2.cross(p0) * INV_SIX;
+        gradients[i2] += p0.cross(p1) * INV_SIX;
+    }
+    volume *= INV_SIX;
+
+    let c = volume - target_volume;
+
+    // Denominator: sum_i w_i |grad_i|^2 + alpha_tilde.
+    let mut denom = 0.0;
+    for (i, grad) in gradients.iter().enumerate() {
+        let w = inverse_masses.get(i).copied().unwrap_or(0.0);
+        if w <= 0.0 {
+            continue;
+        }
+        denom += w * grad.length_squared();
+    }
+    let alpha_tilde = compliance / (dt * dt);
+    denom += alpha_tilde;
+    if denom < EPS_LEN_SQ {
+        return;
+    }
+
+    let delta_lambda = (-c - alpha_tilde * *lambda) / denom;
+    *lambda += delta_lambda;
+    for (i, grad) in gradients.iter().enumerate() {
+        let w = inverse_masses.get(i).copied().unwrap_or(0.0);
+        if w <= 0.0 {
+            continue;
+        }
+        positions[i] += *grad * (w * delta_lambda);
+    }
 }
 
 #[cfg(test)]
@@ -468,5 +508,39 @@ mod tests {
         assert!(c.lambda() != 0.0);
         c.reset();
         assert_eq!(c.lambda(), 0.0);
+    }
+    #[test]
+    fn free_function_matches_the_delegating_constraint() {
+        // The free function and the trait method must stay byte-identical so the
+        // GPU twin that delegates to `project_pressure` matches the CPU owner.
+        let triangles = unit_cube_triangles();
+        let rest = mesh_volume(&unit_cube_positions(), &triangles);
+        let inv = vec![1.0; 8];
+
+        let mut via_method = unit_cube_positions();
+        let mut c = PressureConstraint::new(triangles.clone(), rest, 2.0, 1.0e-3);
+        for _ in 0..8 {
+            c.project(&mut via_method, &inv, 1.0 / 60.0);
+        }
+
+        let mut via_free = unit_cube_positions();
+        let target = 2.0 * rest;
+        let mut lambda = 0.0;
+        for _ in 0..8 {
+            project_pressure(
+                &mut via_free,
+                &inv,
+                &triangles,
+                target,
+                1.0e-3,
+                1.0 / 60.0,
+                &mut lambda,
+            );
+        }
+
+        for (a, b) in via_method.iter().zip(via_free.iter()) {
+            assert!((*a - *b).length() < 1.0e-6, "method {a} free {b}");
+        }
+        assert!((lambda - c.lambda()).abs() < 1.0e-6, "lambda {lambda} vs {}", c.lambda());
     }
 }

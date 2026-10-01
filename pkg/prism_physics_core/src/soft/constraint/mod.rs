@@ -37,7 +37,7 @@ pub use attachment::AttachmentConstraint;
 pub use bending::{project_bending, BendingConstraint};
 pub use distance::DistanceConstraint;
 pub use long_range::{project_long_range, LongRangeConstraint};
-pub use pressure::{mesh_volume, PressureConstraint};
+pub use pressure::{mesh_volume, project_pressure, PressureConstraint};
 pub use set::ConstraintSet;
 pub use strain_limit::{project_strain_limit, StrainLimitConstraint};
 pub use volume::TetraVolumeConstraint;
