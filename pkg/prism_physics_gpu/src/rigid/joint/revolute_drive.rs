@@ -64,9 +64,11 @@
 //!
 //! This is a *position-target* angular drive: a rigid servo or a soft
 //! spring-damper to a commanded angle. A pure *velocity* motor — a free-spinning
-//! powered hinge with zero positional stiffness, as a wheel or turntable — is a
-//! velocity-level constraint the shared position-based stepper does not expose,
-//! and is intentionally left as future work rather than faked here.
+//! powered hinge with zero positional stiffness, as a wheel or turntable — is
+//! the velocity dual of this family and lives in its own joint,
+//! [`RevoluteMotorJoint`](super::RevoluteMotorJoint): a per-substep compliant
+//! equality on the relative angular rate about the hinge axis rather than on an
+//! absolute hinge angle.
 //!
 //! Provenance: the point-to-point and hinge axis-alignment constraints (Müller
 //! et al., "Detailed Rigid Body Simulation with XPBD"), the signed hinge-angle

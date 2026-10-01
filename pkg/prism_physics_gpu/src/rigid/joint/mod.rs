@@ -46,6 +46,13 @@
 //!   point-to-point weld).
 //! * [`revolute_drive_gpu`] — the device-side [`GpuRevoluteDriveJointSolver`]
 //!   twin.
+//! * [`revolute_motor`] — the [`RevoluteMotorJoint`] (hinge with an angular
+//!   velocity motor) definition and its device-packed storage representation.
+//! * [`revolute_motor_cpu`] — the authoritative
+//!   [`cpu_solve_joints_revolute_motor`] golden stepper (axis alignment plus
+//!   an about-axis compliant velocity motor plus a point-to-point weld).
+//! * [`revolute_motor_gpu`] — the device-side [`GpuRevoluteMotorJointSolver`]
+//!   twin.
 //! * [`cylindrical`] — the [`CylindricalJoint`] definition and its
 //!   device-packed storage representation.
 //! * [`cylindrical_cpu`] — the authoritative [`cpu_solve_joints_cylindrical`]
@@ -171,6 +178,9 @@ mod revolute_drive;
 mod revolute_drive_cpu;
 mod revolute_drive_gpu;
 mod revolute_gpu;
+mod revolute_motor;
+mod revolute_motor_cpu;
+mod revolute_motor_gpu;
 mod spherical;
 mod spherical_cpu;
 mod spherical_gpu;
@@ -217,6 +227,9 @@ pub use revolute_drive::RevoluteDriveJoint;
 pub use revolute_drive_cpu::cpu_solve_joints_revolute_drive;
 pub use revolute_drive_gpu::GpuRevoluteDriveJointSolver;
 pub use revolute_gpu::GpuRevoluteJointSolver;
+pub use revolute_motor::RevoluteMotorJoint;
+pub use revolute_motor_cpu::cpu_solve_joints_revolute_motor;
+pub use revolute_motor_gpu::GpuRevoluteMotorJointSolver;
 pub use spherical::SphericalJoint;
 pub use spherical_cpu::cpu_solve_joints_spherical;
 pub use spherical_gpu::GpuSphericalJointSolver;
