@@ -292,13 +292,6 @@ impl D6Joint {
 
     /// Packs the joint into its `GPU` storage-buffer representation.
     #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "consumed by the d6_gpu twin landing in a later slice; already exercised by the round-trip unit test under cfg(test)"
-        )
-    )]
     pub(crate) fn to_gpu(self) -> GpuD6Joint {
         GpuD6Joint {
             anchor_a: [self.anchor_a.x, self.anchor_a.y, self.anchor_a.z, 0.0],

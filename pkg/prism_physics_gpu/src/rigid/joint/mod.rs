@@ -92,6 +92,7 @@
 //! * [`d6_cpu`] — the authoritative [`cpu_solve_joints_d6`] golden stepper
 //!   (per-axis `Locked`/`Limited`/`Free` projection of the three linear axes,
 //!   the twist, and the two pyramidal swings).
+//! * [`d6_gpu`] — the device-side [`GpuD6JointSolver`] twin.
 //! * [`distance`] — the [`DistanceJoint`] (limit) definition and its
 //!   device-packed storage representation.
 //! * [`distance_cpu`] — the authoritative [`cpu_solve_joints_distance`] golden
@@ -187,6 +188,7 @@ mod cylindrical_limit_cpu;
 mod cylindrical_limit_gpu;
 mod d6;
 mod d6_cpu;
+mod d6_gpu;
 mod distance;
 mod distance_cpu;
 mod distance_gpu;
@@ -255,6 +257,7 @@ pub use cylindrical_limit_cpu::cpu_solve_joints_cylindrical_limit;
 pub use cylindrical_limit_gpu::GpuCylindricalLimitJointSolver;
 pub use d6::{D6Joint, D6Motion};
 pub use d6_cpu::cpu_solve_joints_d6;
+pub use d6_gpu::GpuD6JointSolver;
 pub use distance::DistanceJoint;
 pub use distance_cpu::cpu_solve_joints_distance;
 pub use distance_gpu::GpuDistanceJointSolver;
