@@ -204,6 +204,17 @@
 //!   frame `axes`, and `primitive`; node records reusing the shared
 //!   [`NODE_WORDS`]) plus a packed oriented-box walk that reproduces the
 //!   in-memory walk bit-for-bit.
+//! - [`shaded_triangle`] — pbrt-style triangle [`shaded_triangle::ShadedTriangle`]
+//!   carrying per-vertex shading normals: Möller–Trumbore intersection returns
+//!   the geometric normal plus the barycentrically interpolated, hemisphere-
+//!   consistent shading normal via [`shaded_triangle::ShadedTriangleHit`], with
+//!   a single-level [`shaded_triangle::ShadedTriangleBvh`].
+//! - [`shaded_triangle_gpu_layout`] — flat, `GPU`-uploadable
+//!   [`shaded_triangle::ShadedTriangleBvh`] buffer layout
+//!   ([`shaded_triangle_gpu_layout::SHADED_TRI_WORDS`] stride packing three
+//!   positions, three vertex normals, and `primitive`; node records reusing the
+//!   shared [`NODE_WORDS`]) plus a packed walk reproducing the in-memory walk
+//!   bit-for-bit.
 //! - [`traversal`] — [`Ray`]/`BVH` slab + Möller–Trumbore intersection with
 //!   closest-hit and any-hit walks (the `GPU` traversal kernel's golden ref).
 //! - [`traversal_stackless`] — stackless (threaded / escape-index) `BVH` walk:
@@ -252,6 +263,8 @@ pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
 pub mod obb_gpu_layout;
+pub mod shaded_triangle;
+pub mod shaded_triangle_gpu_layout;
 pub mod footprint;
 pub mod gpu_layout;
 pub mod motion;
@@ -311,6 +324,8 @@ pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
 pub use obb::{Obb, ObbBvh, ObbHit};
 pub use obb_gpu_layout::{GpuObbBvhBuffers, OBB_WORDS};
+pub use shaded_triangle::{ShadedTriangle, ShadedTriangleBvh, ShadedTriangleHit};
+pub use shaded_triangle_gpu_layout::{GpuShadedTriangleBvhBuffers, SHADED_TRI_WORDS};
 pub use rectangle_gpu_layout::{GpuRectangleBvhBuffers, RECTANGLE_WORDS};
 pub use aabb_primitive_gpu_layout::{GpuAabbBvhBuffers, AABB_PRIMITIVE_WORDS};
 pub use sphere_gpu_layout::{GpuSphereBvhBuffers, SPHERE_WORDS};
