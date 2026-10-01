@@ -513,6 +513,10 @@
 //! - [`sdf_csg`] — constructive-solid-geometry operators on signed distances
 //!   ([`sdf_csg::union`], [`sdf_csg::intersection`], [`sdf_csg::subtraction`]
 //!   and their smooth, filleted variants) for composing distance fields.
+//! - [`mesh_voxel_padding`] — margin padding of a voxel grid
+//!   ([`mesh_voxel_padding::pad_voxel_grid`]) that grows the lattice by a
+//!   fixed band of empty cells on every face, carving the exterior shell
+//!   distance-field soft shadows, ambient occlusion, and cone-traced GI need.
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -693,6 +697,7 @@ pub mod mesh_sdf_raymarch;
 pub mod mesh_sdf_normal;
 pub mod mesh_sdf_surface_projection;
 pub mod sdf_csg;
+pub mod mesh_voxel_padding;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -826,6 +831,7 @@ pub use mesh_sdf_surface_projection::{project_to_surface, SurfaceProjection};
 pub use sdf_csg::{
     intersection, smooth_intersection, smooth_subtraction, smooth_union, subtraction, union,
 };
+pub use mesh_voxel_padding::pad_voxel_grid;
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
 pub use obb::{Obb, ObbBvh, ObbHit};

@@ -72,6 +72,27 @@ impl VoxelGrid {
     pub fn is_occupied(&self, coord: [u32; 3]) -> bool {
         self.occupied.binary_search(&coord).is_ok()
     }
+
+    /// Assembles a grid directly from already-validated parts.
+    ///
+    /// The caller must guarantee the grid invariants: every axis of `dims` is
+    /// at least one, and `occupied` is sorted ascending, de-duplicated, and
+    /// entirely in bounds (`coord[axis] < dims[axis]`). This is a low-level
+    /// primitive for grid-to-grid transforms (such as margin padding) that
+    /// preserve those invariants without re-running voxelization.
+    pub(crate) fn from_sorted_parts(
+        origin: [f32; 3],
+        voxel_size: f32,
+        dims: [u32; 3],
+        occupied: Vec<[u32; 3]>,
+    ) -> VoxelGrid {
+        VoxelGrid {
+            origin,
+            voxel_size,
+            dims,
+            occupied,
+        }
+    }
 }
 
 /// Dot product of two 3-vectors in `f64`.
