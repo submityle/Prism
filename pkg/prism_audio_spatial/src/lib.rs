@@ -90,6 +90,7 @@ pub mod sound_strength;
 pub mod source_directivity;
 pub mod spatial_impression;
 pub mod spatializer;
+pub mod speech_transmission_index;
 pub mod spread;
 
 pub use air::{AirAbsorption, AirAbsorptionNode, AtmosphericConditions, absorption_db_per_metre};
@@ -187,4 +188,8 @@ pub use spatial_impression::{
     interaural_cross_correlation, lateral_energy_fraction, lateral_energy_fraction_cosine,
 };
 pub use spatializer::{SourceDescriptor, SpatialParams, resolve};
+pub use speech_transmission_index::{
+    APPARENT_SNR_LIMIT_DB, MALE_ALPHA, MALE_BETA, MODULATION_COUNT, MODULATION_FREQS_HZ,
+    OCTAVE_CENTERS_HZ, OCTAVE_COUNT, SpeechTransmissionIndex, StiRating, speech_transmission_index,
+};
 pub use spread::{MAX_SPREAD_TAPS, Spread, SpreadParams, SpreadTap, compute_spread_gains, spread_taps};
