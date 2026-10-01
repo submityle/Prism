@@ -665,11 +665,29 @@ pub fn cone_sdf(point: [f32; 3], base_radius: f32, height: f32) -> f32 {
     d.max(0.0).sqrt() * sign.signum()
 }
 
+/// Unsigned distance from `point` to the infinite line through the origin with
+/// direction `direction`. The direction need not be normalised; it must be
+/// non-zero.
+///
+/// Computed as the length of the component of `point` perpendicular to
+/// `direction`, i.e. `point` minus its projection onto the line. An infinite
+/// line has no interior, so the result is always non-negative. Built from dot
+/// products and a single `sqrt`, so it stays transcendental-free.
+pub fn line_sdf(point: [f32; 3], direction: [f32; 3]) -> f32 {
+    let dd = dot(direction, direction);
+    let t = dot(point, direction) / dd;
+    length([
+        point[0] - direction[0] * t,
+        point[1] - direction[1] * t,
+        point[2] - direction[2] * t,
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         box_frame, box_sdf, capped_cone, capped_cylinder, capped_torus, capsule, cone_sdf, cut_hollow_sphere, cut_sphere,
-        death_star, ellipsoid_sdf, hex_prism, length2, link, octahedron, plane, pyramid, rhombus, round_box,
+        death_star, ellipsoid_sdf, hex_prism, length2, line_sdf, link, octahedron, plane, pyramid, rhombus, round_box,
         round_cone_sdf, solid_angle, sphere, torus, triangular_prism, vesica,
     };
 
@@ -1203,5 +1221,15 @@ mod tests {
         // Inside, nearest feature is the slanted face: -(0.5 / sqrt(5)).
         let expected = -0.5f32 / (5.0f32).sqrt();
         assert!((cone_sdf([0.0, -0.5, 0.0], r, h) - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn line_sdf_is_perpendicular_distance_to_the_axis() {
+        // Line = x axis: distance is the yz radius.
+        assert!((line_sdf([0.0, 3.0, 4.0], [1.0, 0.0, 0.0]) - 5.0).abs() < 1e-6);
+        // A point on the line reports zero.
+        assert!(line_sdf([5.0, 0.0, 0.0], [1.0, 0.0, 0.0]).abs() < 1e-6);
+        // Direction need not be unit length.
+        assert!((line_sdf([1.0, 2.0, 2.0], [2.0, 0.0, 0.0]) - (8.0f32).sqrt()).abs() < 1e-6);
     }
 }
