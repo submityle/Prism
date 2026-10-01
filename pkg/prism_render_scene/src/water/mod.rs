@@ -51,6 +51,7 @@ mod prepare;
 mod resources;
 #[cfg(test)]
 mod shader_tests;
+mod surface_mesh;
 mod surface_pipeline;
 
 /// The high-level water authoring presets and the water body component they
