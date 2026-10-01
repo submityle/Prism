@@ -40,6 +40,9 @@ const WEIGHT4: [u32; 16] = [
 /// 2-bit index interpolation weights (Khronos `aWeight2`), in 1/64 units.
 const WEIGHT2: [u32; 4] = [0, 21, 43, 64];
 
+/// 3-bit index interpolation weights (Khronos `aWeight3`), in 1/64 units.
+const WEIGHT3: [u32; 8] = [0, 9, 18, 27, 37, 46, 55, 64];
+
 /// LSB-first bit cursor over a 16-byte BC7 block.
 struct BitReader<'a> {
     bytes: &'a [u8; 16],
@@ -228,28 +231,105 @@ pub fn decode_bc7_mode5(block: &[u8; 16]) -> [[u8; 4]; 16] {
     out
 }
 
+/// Decode one 16-byte **BC7 mode 4** block into sixteen `RGBA8` texels.
+///
+/// Mode 4 is the third partition-free single-subset mode. It carries `RGB`
+/// endpoints at 5 bits/channel and a *separate* 6-bit alpha endpoint pair, plus
+/// **two** index blocks of different precision -- a 2-bit set and a 3-bit set.
+/// A 1-bit *index-selection* flag (`idxMode`) chooses which precision drives
+/// colour and which drives alpha: `idxMode = 0` gives colour the 2-bit indices
+/// and alpha the 3-bit indices; `idxMode = 1` swaps them. A 2-bit **rotation**
+/// then selects which output channel swaps with alpha, exactly as in mode 5.
+/// Giving alpha the higher-precision index set suits smooth alpha gradients
+/// over blocky colour (or vice-versa), which a shared index cannot represent.
+///
+/// The caller must have confirmed the block is mode 4 (see [`bc7_mode`]).
+/// Field order (Khronos): rotation(2); `idxMode`(1); `R0 R1 G0 G1 B0 B1`
+/// (5 bits each); `A0 A1` (6 bits each); the 2-bit index block (anchor 1 bit,
+/// rest 2 bits); the 3-bit index block (anchor 2 bits, rest 3 bits).
+#[must_use]
+pub fn decode_bc7_mode4(block: &[u8; 16]) -> [[u8; 4]; 16] {
+    let mut r = BitReader::new(block);
+    let _mode = r.read(5); // unary mode-4 marker: four 0s then a 1.
+    let rotation = r.read(2);
+    let idx_mode = r.read(1);
+
+    let r0 = r.read(5);
+    let r1 = r.read(5);
+    let g0 = r.read(5);
+    let g1 = r.read(5);
+    let b0 = r.read(5);
+    let b1 = r.read(5);
+    let a0 = r.read(6);
+    let a1 = r.read(6);
+
+    let c0 = [expand_rep(r0, 5), expand_rep(g0, 5), expand_rep(b0, 5)];
+    let c1 = [expand_rep(r1, 5), expand_rep(g1, 5), expand_rep(b1, 5)];
+    let ae0 = expand_rep(a0, 6);
+    let ae1 = expand_rep(a1, 6);
+
+    // Index set 0 (2-bit) is stored first; its anchor (texel 0) is 1 bit.
+    let mut idx2 = [0u8; 16];
+    idx2[0] = r.read(1) as u8;
+    for idx in idx2.iter_mut().skip(1) {
+        *idx = r.read(2) as u8;
+    }
+    // Index set 1 (3-bit) follows; its anchor is 2 bits (implicit high 0).
+    let mut idx3 = [0u8; 16];
+    idx3[0] = r.read(2) as u8;
+    for idx in idx3.iter_mut().skip(1) {
+        *idx = r.read(3) as u8;
+    }
+
+    let mut out = [[0u8; 4]; 16];
+    for (t, texel) in out.iter_mut().enumerate() {
+        // idxMode routes which precision drives colour vs alpha.
+        let (cw, aw) = if idx_mode == 0 {
+            (WEIGHT2[idx2[t] as usize], WEIGHT3[idx3[t] as usize])
+        } else {
+            (WEIGHT3[idx3[t] as usize], WEIGHT2[idx2[t] as usize])
+        };
+        let mut rgba = [
+            interp(c0[0], c1[0], cw),
+            interp(c0[1], c1[1], cw),
+            interp(c0[2], c1[2], cw),
+            interp(ae0, ae1, aw),
+        ];
+        // Rotation un-swaps the channel that carried the alpha-index value.
+        match rotation {
+            1 => rgba.swap(0, 3),
+            2 => rgba.swap(1, 3),
+            3 => rgba.swap(2, 3),
+            _ => {}
+        }
+        *texel = rgba;
+    }
+    out
+}
+
 /// Error returned by [`decode_bc7`] for a BC7 block whose mode is not yet
 /// supported by this decoder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Bc7Error {
     /// Byte 0 was zero: a reserved/invalid mode encoding.
     ReservedMode,
-    /// A valid but unsupported mode (`0..=4`, `7`); only the partition-free
-    /// single-subset modes 5 and 6 are decoded today.
+    /// A valid but unsupported mode (`0..=3`, `7`); only the partition-free
+    /// single-subset modes 4, 5 and 6 are decoded today.
     UnsupportedMode(u8),
 }
 
 /// Decode a BC7 block, dispatching on its mode.
 ///
 /// Only the partition-table-free single-subset modes are supported today:
-/// mode 5 ([`decode_bc7_mode5`]) and mode 6 ([`decode_bc7_mode6`]). The
-/// partitioned modes (0-4, 7) return [`Bc7Error::UnsupportedMode`] rather than
-/// a wrong decode -- they require the validated Khronos partition/anchor tables
-/// (tracked as a follow-up), and silently mis-decoding them would be worse than
-/// an explicit error.
+/// mode 4 ([`decode_bc7_mode4`]), mode 5 ([`decode_bc7_mode5`]), and mode 6
+/// ([`decode_bc7_mode6`]). The partitioned modes (0-3, 7) return
+/// [`Bc7Error::UnsupportedMode`] rather than a wrong decode -- they require the
+/// validated Khronos partition/anchor tables (tracked as a follow-up), and
+/// silently mis-decoding them would be worse than an explicit error.
 pub fn decode_bc7(block: &[u8; 16]) -> Result<[[u8; 4]; 16], Bc7Error> {
     match bc7_mode(block) {
         None => Err(Bc7Error::ReservedMode),
+        Some(4) => Ok(decode_bc7_mode4(block)),
         Some(5) => Ok(decode_bc7_mode5(block)),
         Some(6) => Ok(decode_bc7_mode6(block)),
         Some(m) => Err(Bc7Error::UnsupportedMode(m)),
@@ -536,5 +616,105 @@ mod tests {
         assert_eq!(expand_rep(0x40, 7), 0x81);
         assert_eq!(expand_rep(0xFF, 8), 0xFF); // 8-bit identity
         assert_eq!(expand_rep(0x5A, 8), 0x5A);
+    }
+
+    /// Assemble a mode-4 block: `rgb0/rgb1` are 5-bit, `a0/a1` 6-bit; `idx2`
+    /// are the sixteen 2-bit indices (index 0 <= 1), `idx3` the sixteen 3-bit
+    /// indices (index 0 <= 3); `idx_mode` selects colour/alpha index routing.
+    #[allow(clippy::too_many_arguments)]
+    fn make_block4(
+        rgb0: [u32; 3],
+        rgb1: [u32; 3],
+        a0: u32,
+        a1: u32,
+        rotation: u32,
+        idx_mode: u32,
+        idx2: [u8; 16],
+        idx3: [u8; 16],
+    ) -> [u8; 16] {
+        let mut w = BitWriter::new();
+        w.write(0b1_0000, 5); // mode 4 marker
+        w.write(rotation, 2);
+        w.write(idx_mode, 1);
+        w.write(rgb0[0], 5);
+        w.write(rgb1[0], 5);
+        w.write(rgb0[1], 5);
+        w.write(rgb1[1], 5);
+        w.write(rgb0[2], 5);
+        w.write(rgb1[2], 5);
+        w.write(a0, 6);
+        w.write(a1, 6);
+        w.write(u32::from(idx2[0]), 1);
+        for &i in idx2.iter().skip(1) {
+            w.write(u32::from(i), 2);
+        }
+        w.write(u32::from(idx3[0]), 2);
+        for &i in idx3.iter().skip(1) {
+            w.write(u32::from(i), 3);
+        }
+        assert_eq!(w.pos, 128, "mode-4 fields must fill the block exactly");
+        w.bytes
+    }
+
+    #[test]
+    fn mode4_block_is_tagged_mode4() {
+        let block = make_block4([0; 3], [0x1F; 3], 0, 0x3F, 0, 0, [0u8; 16], [0u8; 16]);
+        assert_eq!(bc7_mode(&block), Some(4));
+    }
+
+    #[test]
+    fn mode4_color_endpoints_replicate_to_8bit() {
+        // 5-bit 0x1F -> (0x1F<<3)|(0x1F>>2) = 0xF8|0x07 = 0xFF; 0x00 -> 0x00.
+        // idx_mode 0: colour uses the 2-bit index set.
+        let mut idx2 = [0u8; 16];
+        idx2[1] = 3; // weight 64 -> c1
+        let block = make_block4([0x1F; 3], [0; 3], 0x3F, 0, 0, 0, idx2, [0u8; 16]);
+        let out = decode_bc7_mode4(&block);
+        assert_eq!([out[0][0], out[0][1], out[0][2]], [0xFF, 0xFF, 0xFF]); // c0
+        assert_eq!([out[1][0], out[1][1], out[1][2]], [0, 0, 0]); // c1
+    }
+
+    #[test]
+    fn mode4_alpha_6bit_replicates_and_uses_3bit_index() {
+        // 6-bit 0x3F -> (0x3F<<2)|(0x3F>>4) = 0xFC|0x03 = 0xFF.
+        // idx_mode 0: alpha uses the 3-bit index set.
+        let mut idx3 = [0u8; 16];
+        idx3[1] = 7; // weight 64 -> a1
+        let block = make_block4([0x10; 3], [0x10; 3], 0, 0x3F, 0, 0, [0u8; 16], idx3);
+        let out = decode_bc7_mode4(&block);
+        assert_eq!(out[0][3], 0); // a0
+        assert_eq!(out[1][3], 0xFF); // a1 replicated
+    }
+
+    #[test]
+    fn mode4_idx_mode_routes_precision() {
+        // idx_mode 1: colour driven by the 3-bit set, alpha by the 2-bit set.
+        // colour c0=0, c1=0xFF; alpha a0=0, a1=0xFF.
+        let mut idx2 = [0u8; 16];
+        let mut idx3 = [0u8; 16];
+        idx3[1] = 7; // colour at texel1 -> c1 (0xFF); its 2-bit alpha stays a0.
+        idx2[2] = 3; // alpha at texel2 -> a1 (0xFF); its 3-bit colour stays c0.
+        let block = make_block4([0; 3], [0x1F; 3], 0, 0x3F, 0, 1, idx2, idx3);
+        let out = decode_bc7_mode4(&block);
+        assert_eq!([out[1][0], out[1][1], out[1][2]], [0xFF, 0xFF, 0xFF]);
+        assert_eq!(out[1][3], 0);
+        assert_eq!([out[2][0], out[2][1], out[2][2]], [0, 0, 0]);
+        assert_eq!(out[2][3], 0xFF);
+    }
+
+    #[test]
+    fn mode4_rotation_swaps_alpha_channel() {
+        // rotation 1 swaps R<->A. idx_mode 0: colour via 2-bit, alpha via 3-bit.
+        // R=0xFF via c0 (idx2 all 0), alpha=0 via a0 (idx3 all 0).
+        let block = make_block4([0x1F, 0, 0], [0x1F, 0, 0], 0, 0, 1, 0, [0u8; 16], [0u8; 16]);
+        let out = decode_bc7_mode4(&block);
+        assert_eq!(out[0][0], 0); // channel 0 now carries the (0) alpha
+        assert_eq!(out[0][3], 0xFF); // channel 3 now carries R=0xFF
+    }
+
+    #[test]
+    fn dispatch_decodes_mode4() {
+        let block = make_block4([0; 3], [0x1F; 3], 0, 0x3F, 0, 0, [0u8; 16], [0u8; 16]);
+        assert!(decode_bc7(&block).is_ok());
     }
 }

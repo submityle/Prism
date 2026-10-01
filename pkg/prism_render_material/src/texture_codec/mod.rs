@@ -16,10 +16,10 @@
 //! * [`alpha_block`] -- the 8-byte single-channel + 3-bit-index block shared by
 //!   BC4, the alpha half of BC3, and both channels of BC5.
 //! * [`formats`] -- the public per-format decoders that compose the two.
-//! * [`bc7`] -- the standalone BC7 mode-6 (`RGBA`) block decoder.
+//! * [`bc7`] -- the standalone BC7 single-subset (`RGBA`) block decoder.
 //!
-//! BC7 **mode 6** (single-subset, full `RGBA`, no partition table) is
-//! decoded by [`bc7`]; the partitioned BC7 modes (0-5, 7) and BC6H HDR
+//! BC7 **modes 4, 5, and 6** (single-subset `RGBA`, no partition table) are
+//! decoded by [`bc7`]; the partitioned BC7 modes (0-3, 7) and BC6H HDR
 //! remain follow-ups (they need validated Khronos partition/anchor tables).
 //!
 //! # Conventions
@@ -39,7 +39,9 @@ mod color_block;
 mod formats;
 mod source;
 
-pub use bc7::{bc7_mode, decode_bc7, decode_bc7_mode5, decode_bc7_mode6, Bc7Error};
+pub use bc7::{
+    bc7_mode, decode_bc7, decode_bc7_mode4, decode_bc7_mode5, decode_bc7_mode6, Bc7Error,
+};
 pub use color_block::rgb565_to_rgb888;
 pub use formats::{decode_bc1, decode_bc2, decode_bc3, decode_bc4, decode_bc5};
 pub use source::{BcFormat, BcSourceError, BcTexelSource};
