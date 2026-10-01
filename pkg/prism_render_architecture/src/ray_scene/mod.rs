@@ -387,6 +387,11 @@
 //!   re-triangulates each face from its marked-edge template so the mesh
 //!   stays watertight, iterating up to
 //!   [`mesh_edge_split::MAX_PASSES`] for geometric convergence.
+//! - [`mesh_vertex_clustering`] — uniform-grid vertex clustering
+//!   ([`mesh_vertex_clustering::cluster_vertices`]): snaps vertices into a
+//!   coarse grid and collapses each occupied cell to one centroid
+//!   representative, dropping degenerate faces — the cheapest aggressive
+//!   `LOD` proxy, below `QEM` edge collapse.
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -544,6 +549,7 @@ pub mod mesh_decimation;
 pub mod mesh_laplacian_smoothing;
 pub mod mesh_border_detection;
 pub mod mesh_edge_split;
+pub mod mesh_vertex_clustering;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -652,6 +658,7 @@ pub use mesh_decimation::{decimate, DecimationError};
 pub use mesh_laplacian_smoothing::{BoundaryRule, LaplacianSmoothing};
 pub use mesh_border_detection::{detect_borders, MeshBorders};
 pub use mesh_edge_split::{split_long_edges, MAX_PASSES as EDGE_SPLIT_MAX_PASSES};
+pub use mesh_vertex_clustering::{cluster_vertices, ClusterError};
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
 pub use obb::{Obb, ObbBvh, ObbHit};
