@@ -253,8 +253,8 @@ fn solve_axis_alignment(
     *lambda += d_lambda;
     let p = n * d_lambda;
 
-    state.orientations[a] = apply_rotation_delta(q_a, world_inv_inertia_apply(q_a, ii_a, p));
-    state.orientations[b] = apply_rotation_delta(q_b, -world_inv_inertia_apply(q_b, ii_b, p));
+    state.orientations[a] = apply_rotation_delta(q_a, -world_inv_inertia_apply(q_a, ii_a, p));
+    state.orientations[b] = apply_rotation_delta(q_b, world_inv_inertia_apply(q_b, ii_b, p));
 }
 
 /// Servos the signed hinge angle `theta` onto `target_angle` with a bilateral
@@ -605,5 +605,48 @@ mod tests {
         let config = JointSolverConfig::new(4);
         cpu_solve_joints_revolute_drive(&mut state, &[], &integrator, &config, 1.0 / 60.0).unwrap();
         assert_eq!(state.positions[0], before);
+    }
+
+    #[test]
+    fn alignment_pulls_a_tilted_axis_parallel() {
+        // A static pivot and a dynamic driven link whose hinge axes start 30
+        // degrees apart: the rigid axis alignment must pull them toward
+        // *parallel* (`dot = +1`), never flip them to anti-parallel
+        // (`dot = -1`). The signed `dot` guards the correction's sign, which a
+        // `sin`-only measure cannot see because both parallel and anti-parallel
+        // read ~0 there.
+        let mut state = RigidBodyState::new();
+        state.push(Vec3::ZERO, Quat::IDENTITY, 0.0, Vec3::ZERO); // 0: static pivot
+        state.push(Vec3::ZERO, Quat::IDENTITY, 1.0, Vec3::splat(1.0)); // 1: dynamic link
+                                                                       // Hinge about the shared world Y axis; tilt body 1 by 30 degrees about X
+                                                                       // so its world hinge axis leans off Y by that angle.
+        state.orientations[1] = Quat::from_axis_angle(Vec3::X, std::f32::consts::FRAC_PI_6);
+        let joint = RevoluteDriveJoint::servo(
+            0,
+            1,
+            Vec3::ZERO,
+            Vec3::ZERO,
+            Vec3::Y,
+            Vec3::Y,
+            Vec3::X,
+            Vec3::X,
+            0.0,
+        );
+        let integrator = IntegratorConfig::new(Vec3::ZERO, 4, 0.0, 0.0);
+        let config = JointSolverConfig::new(8);
+        let dt = 1.0 / 60.0;
+
+        for _ in 0..4 {
+            cpu_solve_joints_revolute_drive(&mut state, &[joint], &integrator, &config, dt)
+                .unwrap();
+        }
+
+        let u_a = rotate(state.orientations[0], joint.axis_a).normalize();
+        let u_b = rotate(state.orientations[1], joint.axis_b).normalize();
+        assert!(
+            u_a.dot(u_b) > 0.9,
+            "hinge axes converged anti-parallel: dot = {}",
+            u_a.dot(u_b)
+        );
     }
 }

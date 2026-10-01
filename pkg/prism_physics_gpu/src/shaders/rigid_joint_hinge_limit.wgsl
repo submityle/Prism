@@ -241,8 +241,8 @@ fn solve(@builtin(global_invocation_id) gid: vec3<u32>) {
                     let d_lambda = (-theta - alpha_tilde * lambda[slot]) / (w + alpha_tilde);
                     lambda[slot] = lambda[slot] + d_lambda;
                     let p = n * d_lambda;
-                    orientations[a] = apply_rotation_delta(q_a, world_inv_inertia_apply(q_a, ii_a, p));
-                    orientations[b] = apply_rotation_delta(q_b, -world_inv_inertia_apply(q_b, ii_b, p));
+                    orientations[a] = apply_rotation_delta(q_a, -world_inv_inertia_apply(q_a, ii_a, p));
+                    orientations[b] = apply_rotation_delta(q_b, world_inv_inertia_apply(q_b, ii_b, p));
                 }
             }
         }

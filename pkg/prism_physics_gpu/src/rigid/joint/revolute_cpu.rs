@@ -191,8 +191,8 @@ fn solve_axis_alignment(
     *lambda += d_lambda;
     let p = n * d_lambda;
 
-    state.orientations[a] = apply_rotation_delta(q_a, world_inv_inertia_apply(q_a, ii_a, p));
-    state.orientations[b] = apply_rotation_delta(q_b, -world_inv_inertia_apply(q_b, ii_b, p));
+    state.orientations[a] = apply_rotation_delta(q_a, -world_inv_inertia_apply(q_a, ii_a, p));
+    state.orientations[b] = apply_rotation_delta(q_b, world_inv_inertia_apply(q_b, ii_b, p));
 }
 
 /// Drives the two world-space anchors together with the identical point-to-point
@@ -368,6 +368,19 @@ mod tests {
         assert!(
             after < 0.2,
             "axis alignment left sin(theta) = {after} of error"
+        );
+        // `sin(theta)` cannot distinguish parallel from anti-parallel (both
+        // read ~0), so guard the sign explicitly: a correct solve pulls the
+        // axes toward `dot = +1`, while the sign bug this test exists to catch
+        // would drive them to `dot = -1`.
+        let a0 = joint.body_a as usize;
+        let b0 = joint.body_b as usize;
+        let u_a = rotate(state.orientations[a0], joint.axis_a).normalize();
+        let u_b = rotate(state.orientations[b0], joint.axis_b).normalize();
+        assert!(
+            u_a.dot(u_b) > 0.9,
+            "axes converged anti-parallel: dot = {}",
+            u_a.dot(u_b)
         );
     }
 

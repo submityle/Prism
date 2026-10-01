@@ -268,8 +268,8 @@ fn solve_axis_alignment(
     *lambda += d_lambda;
     let p = n * d_lambda;
 
-    state.orientations[a] = apply_rotation_delta(q_a, world_inv_inertia_apply(q_a, ii_a, p));
-    state.orientations[b] = apply_rotation_delta(q_b, -world_inv_inertia_apply(q_b, ii_b, p));
+    state.orientations[a] = apply_rotation_delta(q_a, -world_inv_inertia_apply(q_a, ii_a, p));
+    state.orientations[b] = apply_rotation_delta(q_b, world_inv_inertia_apply(q_b, ii_b, p));
 }
 
 /// Pins the two world-space anchors to a common line. With `dx` the anchor
@@ -485,7 +485,11 @@ mod tests {
         let b = joint.body_b as usize;
         let u_a = rotate(state.orientations[a], joint.axis_a).normalize();
         let u_b = rotate(state.orientations[b], joint.axis_b).normalize();
-        ops::asin(u_a.cross(u_b).length().clamp(-1.0, 1.0))
+        // `acos(dot)` returns the true angle over the full `[0, pi]` range so an
+        // anti-parallel axis reads `pi` (not folded back to `0` like `asin` of
+        // the cross-product magnitude), which keeps the alignment assertions
+        // honest about converging to *parallel* rather than anti-parallel.
+        ops::acos(u_a.dot(u_b).clamp(-1.0, 1.0))
     }
 
     #[test]
