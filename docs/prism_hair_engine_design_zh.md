@@ -1,4 +1,4 @@
-# Prism 渲染引擎 — 毛发引擎子系统完整设计（v3 / wgpu + WESL）
+# Prism 渲染引擎 — 毛发引擎子系统完整设计（v4 / wgpu + WESL）
 
 > 状态：架构提案（Draft，允许破坏性重构）
 > 定位：AAA / 次世代 strand-based（发丝级）毛发引擎，与 PBR/NPR/自定义/混合四前端正交协同
@@ -6,6 +6,7 @@
 > 关联文档：`prism_rendering_architecture_zh.md`（总）、`prism_material_pipeline_design_zh.md`（§6.2 子系统注册表、§6.3 毛发 mini 支柱）、`prism_cloth_engine_design_zh.md`（对称子系统）、`prism_physics_design_zh.md`（§3 统一 XPBD、§4 多求解器、§11 GPU 持久化、§12 异步流水线）、`prism_aaa_advanced_features_zh.md`
 > v2 变更：新增 §6 高级仿真特性、§7 毛发着色模型（Marschner/Chiang/dual-scatter/fiber-level + NPR 天使环），§8 性能升级为 GPU-driven 持久化 + 异步流水线，补 §11 效果验收口径；§0 产品对标细化（TressFX 4 / 影视 fiber-level / Frostbite）。
 > v3 变更：顶格增补 §8.5「最新 AAA 高级特性」——对标最新实时 AAA 产品（UE5.4+ Groom、最新 RTX Hair/LSS 曲线图元、TressFX 4.x、Alan Wake 2 / Hellblade II 发丝、影视 Weta Cosserat），全部纯经典数值、**无 AI/ML/神经网络路径**：离散弹性杆/Cosserat 卷发扭转、DFTL 不可伸长积分、体素密度自碰撞+发-发摩擦、C-IPC 式屏障摩擦接触、Nanite 式 strand 簇化 GPU 剔除、深阴影图/ATSM 自适应透射、PPLL/矩/MLAB 发丝 OIT、黑色素(eumelanin/pheomelanin)物理吸收、近场/远场自适应散射 + BSDF 重要性采样、硬件 RT 曲线/LSS 真发自阴影与反射、发丝感知 TAA reactive mask + 抖动 alpha、mesh-shader GPU strand 扩展、GPU Work Graphs/持久线程约束图着色；§0 产品对标补最新档，行数估算上调。
+> v4 变更：再顶格增补 §8.6「更新一代 AAA 高级特性」——对标更晚近实时/影视路线（湿发含水、投影动力学/ADMM、curl-noise 风场、双重散射球谐缓存、解析亚像素线覆盖、光谱黑色素/Hero-wavelength、Groom→card 自动烘焙、卵泡头皮绑定），仍**全部纯经典数值、无 AI/ML/神经网络路径**；§0 产品对标补两档，行数估算再上调。
 
 ---
 
@@ -26,6 +27,8 @@
 | **最新 RTX Hair / LSS** | 硬件 RT 线性扫掠球（Linear Swept Spheres）/曲线图元做发丝自阴影与反射内真发（§8.5 item11）|
 | **Alan Wake 2 / Hellblade II** | 实时 strand 发丝 + 深阴影/透射、发丝感知 TAA/上采样 reactive mask（§8.5 item7/12）|
 | **影视 Weta / DER（Bergou·Kugelstadt）** | 离散弹性杆/Cosserat 扭转、卷发 helix rest、C-IPC 屏障摩擦接触（§8.5 item1/4/5）|
+| **影视湿发 / 近期实时湿发** | 含水饱和聚束 + 吸收加深 + 湿发锐高光、干湿连续插值（§8.6 item16）|
+| **Projective Dynamics / ADMM（Bouaziz·Overby）** | 投影动力学全局-局部快速收敛求解插槽、迭代可预算（§8.6 item17）|
 
 **判据（承接材质设计 §6.2）**：一等子系统必须拥有**自己的几何 + 自己的 sim + 特殊渲染（透射/OIT/RT 代理）**。毛发三者全占，因此是一等子系统；而"毛发看起来的高光"只是 über-BSDF 的一个 closure 瓣，不构成子系统。**毛发与布料是两个独立子系统**（发丝几何+strand sim vs 三角网格+XPBD 布料 sim），仅共享形变预算这一资源仲裁层。
 
@@ -190,6 +193,33 @@ fallback:
 > 按风险从低到高、CPU-golden 可验证优先：先落**纯映射/契约类**（melanin / scatter_lod / reactive_mask / rt_curve 描述 / oit_frontend 分桶），再落**sim 数值类**（dftl / cosserat / self_collision_voxel / barrier_contact），最后 **GPU 孪生 + 真机 parity**（接 `pkg/prism_hair_gpu`，见 §9.1）。每条独立文件 + 独立确定性单测 + 越界/空输入不 panic，disjoint write set 可多 agent 并行（A/B/C 三组互不重叠）。真接渲染图（dispatch / RT BLAS / work graph）仍归跨子系统调度，hair 侧只落架构契约 + CPU golden + GPU 孪生。
 
 - **行数估算（v3 上调）**：A 组 ~2.5–4k、B 组 ~3–5k、C 组 ~1–2k（含孪生 + 测试），合计在现有 hair core 之上再增 **~7–11k 行**；连同 `prism_hair_gpu` 真机 parity 孪生，毛发子系统总量上调至 **~3–4 万行**量级（含测试与 WESL 孪生）。
+
+## 8.6 更新一代 AAA 高级特性（v4 顶格增补）
+
+> 承 §8.5，对标更晚近的实时与影视毛发路线，仍只在**算法层**借鉴形态与数值方法，不复制任何第三方源码。**全部纯经典数值方法，无 AI/ML/神经网络/LLM 路径**。每条给：算法 / 产品对标 / 成本 / 效果 / 落点，严格复用 §1 共享基底（几何 + sim + LOD + 透射），分叉只在着色响应处。item 编号接 §8.5（续 16+）。
+
+### A. 仿真前沿（接 §6 多求解器插槽 / §8.5-A）
+
+16. **湿发含水饱和耦合（wet hair）**：含水率 w∈[0,1] 连续驱动——聚束半径收缩（发丝相吸成束）、附加质量 + 阻尼上升、吸收 σ_a 加深（发色变暗）、高光粗糙度下降（更锐亮）；干→湿单一标量场连续插值无跳变。对标影视湿发 shot 与近期实时湿发。成本：低（标量场驱动参数，无额外求解）；效果：淋雨/出水发丝聚束、变暗、泛锐光，物理可信。落点 `hair/wetness.rs`（新，纯映射 w → {clump_scale, mass_mul, damping_mul, sigma_a_mul, roughness_delta}，CPU golden 直对）。
+17. **投影动力学 / ADMM 全局求解插槽**：Bouaziz 2014 Projective Dynamics + Overby 2017 ADMM——局部约束投影 + 全局（预分解）线性步交替，比纯 Gauss-Seidel 迭代收敛更快、每帧迭代次数可预算，作 §6 多求解器第四选项（XPBD / VBD / Cosserat / PD），与 DFTL/边约束共存。成本：中（全局步需一次预分解，常驻复用）；效果：长发少迭代即稳、低拉伸、尖峰可控。落点 `hair/projective_global.rs`（新，架构侧产局部投影算子 + 全局权重/残差 golden）。
+18. **Curl-noise 无散度风场耦合**：Bridson 2007 curl-noise——对噪声势场取旋度得天然无散度湍流风场，固定种子确定性驱动发丝气动力，无需求解流体即得不塌陷的自然飘动。成本：极低（解析场采样）；效果：风中自然飘动、无体积塌陷、逐帧确定可复现。落点 `hair/wind_field.rs`（新，纯函数 (pos, t) → wind_vec，CPU golden 逐值对）。
+
+### B. 渲染前沿（接 §5 透射 / §7 着色 / §8.5-B）
+
+19. **双重散射球谐透射缓存**：Zinke 2008 dual-scattering 的全局多重散射——前向/后向散射因子用球谐（SH）投影 transmittance 做 irradiance 缓存，摊平逐帧重算（接 §8.5 item10 近/远场自适应）。成本：中（一次 SH 预投影，帧间复用）；效果：金/浅色发全局柔亮、无逐帧闪烁抖动。落点 `hair/dual_scatter_sh.rs`（新，产 SH 系数 + 前/后向散射因子 golden，着色消费）。
+20. **解析亚像素线覆盖 AA**：发丝屏幕宽度 <1px 时，按线段-像素解析覆盖率做抗锯齿（analytic line coverage），与 §8.5 item12 reactive mask / 蓝噪声抖动 alpha 互补——解析覆盖优先，抖动兜底极细档。成本：低（闭式覆盖率）；效果：细发不碎裂、不闪烁、边缘连续。落点 `hair/line_coverage.rs`（新，产每像素覆盖率 golden）。
+21. **光谱黑色素吸收 / Hero-wavelength**：把 §8.5 item9（`hair/melanin.rs` 的 RGB σ_a）扩展到全光谱 + Hero-wavelength 采样（Wilkie 2014），更准的发色、染发渐变与轻微色散。成本：低-中（谱采样 + 复用 melanin 浓度）；效果：发色物理更准、少 RGB 三刺激偏色。落点 `hair/spectral_absorption.rs`（新，产 λ→σ_a 谱 + Hero 采样权重 golden，接 `hair/melanin.rs` 浓度）。
+
+### C. 工程前沿（接 §4 LOD / §8 GPU-driven / §8.5-C）
+
+22. **Groom→card 自动烘焙 LOD 描述**：最远档把发丝簇烘成 card 图集（density / flow / depth map）生成描述 + atlas 布局契约，接 §4 strand→card→mesh 连续 LOD（真烘焙归离线/调度）。成本：离线一次（运行期零）；效果：极远档省算、与 strand 档连续无 pop。落点 `hair/card_bake.rs`（新，产 atlas 分配 + 簇→卡映射描述契约，沿用 `virtual_geometry/bins.rs` 分桶范式）。
+23. **卵泡头皮绑定 / 动画蒙皮附着**：发根 follicle 以 barycentric 坐标 + 切空间帧绑定到动画头皮网格，形变随蒙皮传递（接 `deformation`）。成本：低（根驱动，发身走 sim）；效果：发根贴头皮不穿不滑、随表情/头部动作自然跟随。落点 `hair/follicle_bind.rs`（新，产 barycentric + 切空间帧传递 golden）。
+
+### v4 落地路线（P-next，接 §8.5 落地路线之后）
+
+> 延续风险从低到高、CPU-golden 可验证优先：先落**纯映射/契约类**（wetness / wind_field / line_coverage / spectral_absorption / card_bake 描述），再**sim 数值类**（projective_global / follicle_bind），最后 **SH 缓存 + GPU 孪生**（dual_scatter_sh 接 `pkg/prism_hair_gpu`，见 §9.1）。每条独立文件 + 独立确定性单测 + 越界/空输入不 panic，disjoint write set 可多 agent 并行（A/B/C 三组互不重叠）。真接渲染图（SH 预投影 dispatch / card 烘焙 / 蒙皮传递）仍归跨子系统调度，hair 侧只落架构契约 + CPU golden + GPU 孪生。
+
+- **行数估算（v4 再上调）**：A 组 ~1.5–2.5k、B 组 ~1.5–2.5k、C 组 ~1–1.5k（含孪生 + 测试），在 §8.5 之上再增 **~4–6.5k 行**；毛发子系统总量上调至 **~4–5 万行**量级（含测试与 WESL 孪生）。
 
 ---
 
