@@ -314,7 +314,16 @@ mod tests {
 
     #[test]
     fn f32_roundtrip_within_epsilon() {
-        for &x in &[0.0_f32, 1.0, -1.0, 0.5, -0.25, 3.14159, -2.71828, 100.5] {
+        for &x in &[
+            0.0_f32,
+            1.0,
+            -1.0,
+            0.5,
+            -0.25,
+            core::f32::consts::PI,
+            -core::f32::consts::E,
+            100.5,
+        ] {
             let back = q_to_f32(q_from_f32(x));
             assert!(approx(back, x), "roundtrip {x} -> {back}");
         }

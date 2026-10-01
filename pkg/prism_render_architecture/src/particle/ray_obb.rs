@@ -425,7 +425,7 @@ mod tests {
 
     /// `1 / sqrt(2)`, the cosine/sine of 45°, used to build rotated frames
     /// without calling a transcendental function.
-    const S: f32 = 0.707_106_78;
+    const S: f32 = core::f32::consts::FRAC_1_SQRT_2;
 
     fn approx(a: f32, b: f32) {
         assert!((a - b).abs() < TOL, "expected {b}, got {a}");

@@ -234,7 +234,7 @@ mod tests {
 
     /// One-quarter-turn cosine/sine literal (`1 / sqrt(2)`), written as a plain
     /// constant so the tests never call a transcendental function.
-    const SQRT_1_2: f32 = 0.707_106_78;
+    const SQRT_1_2: f32 = core::f32::consts::FRAC_1_SQRT_2;
 
     const EPS: f32 = 1.0e-4;
 

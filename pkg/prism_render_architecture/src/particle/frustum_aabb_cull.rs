@@ -260,7 +260,7 @@ mod tests {
 
     /// `1 / sqrt(2)` as a literal so the diagonal frustum planes stay unit
     /// length without a runtime `sqrt` in a `const` context.
-    const INV_SQRT2: f32 = 0.707_106_78;
+    const INV_SQRT2: f32 = core::f32::consts::FRAC_1_SQRT_2;
 
     /// A standard symmetric perspective frustum: apex at the origin looking down
     /// `+z` with a 45° half-angle, near plane at `z = 1`, far plane at

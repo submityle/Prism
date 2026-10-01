@@ -204,8 +204,9 @@ mod tests {
     fn isqrt_u64_max() {
         let r = isqrt_u64(u64::MAX);
         assert_eq!(r, 4_294_967_295);
-        assert!(r * r <= u64::MAX);
-        // (r+1)^2 would overflow, so use the equivalent remainder test.
+        // `r * r` cannot exceed `u64::MAX` by construction; the meaningful
+        // floor property is the remainder bound `u64::MAX - r*r <= 2*r`, which
+        // also certifies `(r + 1)^2` would overflow.
         assert!(u64::MAX - r * r <= 2 * r);
     }
 
@@ -295,15 +296,14 @@ mod tests {
     fn icbrt_u64_max() {
         let r = icbrt_u64(u64::MAX);
         assert_eq!(r, 2_642_245);
-        assert!(r * r * r <= u64::MAX);
+        // `r^3` cannot exceed `u64::MAX` by construction. The floor property is
+        // that the next cube `(r + 1)^3` overflows `u64`, i.e. exceeds the
+        // maximum representable value.
         let next = r + 1;
-        // Guard against overflow before comparing the next cube.
-        assert!(
-            next.checked_mul(next)
-                .and_then(|v| v.checked_mul(next))
-                .is_none()
-                || next * next * next > u64::MAX
-        );
+        assert!(next
+            .checked_mul(next)
+            .and_then(|v| v.checked_mul(next))
+            .is_none());
     }
 
     #[test]

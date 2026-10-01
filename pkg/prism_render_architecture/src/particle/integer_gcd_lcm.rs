@@ -350,18 +350,24 @@ mod tests {
 
     #[test]
     fn ext_gcd_with_zero_operands() {
-        let (g, x, y) = ext_gcd_i64(0, 5);
+        // Use bound variables for the operands so the Bezout identity check
+        // `a * x + b * y == g` exercises the returned coefficients instead of
+        // multiplying by a literal zero (which would be a trivial constant).
+        let (a, b) = (0_i64, 5_i64);
+        let (g, x, y) = ext_gcd_i64(a, b);
         assert_eq!(g, 5);
-        assert_eq!(0 * x + 5 * y, 5);
+        assert_eq!(a * x + b * y, g);
 
-        let (g, x, y) = ext_gcd_i64(7, 0);
+        let (a, b) = (7_i64, 0_i64);
+        let (g, x, y) = ext_gcd_i64(a, b);
         assert_eq!(g, 7);
-        assert_eq!(7 * x + 0 * y, 7);
+        assert_eq!(a * x + b * y, g);
 
-        let (g, x, y) = ext_gcd_i64(0, 0);
+        let (a, b) = (0_i64, 0_i64);
+        let (g, x, y) = ext_gcd_i64(a, b);
         assert_eq!(g, 0);
         // Any coefficients satisfy `0 * x + 0 * y == 0`; only `g` is defined.
-        assert_eq!(0 * x + 0 * y, 0);
+        assert_eq!(a * x + b * y, g);
     }
 
     #[test]
