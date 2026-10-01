@@ -264,6 +264,19 @@
 //!   multiply-add, its path code is bit-identical to the reference (see
 //!   [`raster`]).
 //!
+//! * [`GpuHairReactiveMask`] evaluates
+//!   [`reactivity_map`](prism_render_architecture::hair::reactive_mask::reactivity_map),
+//!   the per-pixel temporal reactive mask a `TAA`/`TSR` resolve needs to keep
+//!   thin fibres from ghosting (as in `UE5`'s reactive mask and `Alan Wake 2`)
+//!   — one thread per pixel folds its `(coverage, screen_velocity,
+//!   depth_delta)` triple into a `reactivity` in `[0, max_reactivity]`, a
+//!   weighted sum of three monotone ramps (`1 - coverage` plus the rational
+//!   saturation ramps `v / (v + k)` and `d / (d + k)`) with only `+-*/` and
+//!   `clamp`; the host uploads the raw policy and the shader sanitizes it
+//!   bit-faithfully to the golden's `sanitized()` so negative, out-of-range and
+//!   non-finite weights / inputs produce the same bounded result (see
+//!   [`reactive_mask`]).
+//!
 //! * [`GpuMeshShell`] evaluates
 //!   [`build_shell`](prism_render_architecture::hair::mesh_shell::build_shell),
 //!   the coarsest `Mesh` LOD rung a distant groom collapses onto — one
@@ -393,6 +406,7 @@ pub mod melanin;
 pub mod mesh_shell;
 pub mod mesh_shell_tapered;
 pub mod raster;
+pub mod reactive_mask;
 pub mod resample;
 pub mod rest_helix;
 pub mod ribbon;
@@ -436,6 +450,7 @@ pub use melanin::{reference_absorption, GpuHairMelanin};
 pub use mesh_shell::{GpuMeshShell, GpuShellMesh, ShellStrandInput};
 pub use mesh_shell_tapered::{GpuMeshShellTapered, TaperedShellStrandInput};
 pub use raster::{path_code, GpuHairRaster, RasterQuery};
+pub use reactive_mask::{reference_reactivity, GpuHairReactiveMask};
 pub use resample::{reference_resample_groom, reference_resample_strand, GpuHairResample};
 pub use rest_helix::{GpuRestHelix, GpuRestHelixOut, GpuRestHelixStrand};
 pub use ribbon::{GpuRibbon, GpuRibbonMesh, RibbonStrandInput};
