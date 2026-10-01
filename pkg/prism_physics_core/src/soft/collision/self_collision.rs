@@ -28,11 +28,8 @@ use glam::Vec3;
 
 use crate::math::scalar::Real;
 
+use super::friction::{sanitize_friction, EPS_FRICTION};
 use super::{cell_of, EPS_LEN_SQ};
-
-/// Numerical floor below which a tangential slide is treated as zero, so a
-/// friction correction is never normalised from a (near) zero-length vector.
-const EPS_FRICTION: Real = 1e-12;
 
 /// Resolves soft-body self-collision in place with a deterministic uniform
 /// spatial hash.
@@ -172,18 +169,6 @@ fn build_grid(positions: &[Vec3], cell_size: Real) -> BTreeMap<(i32, i32, i32), 
         grid.entry(cell).or_default().push(index as u32);
     }
     grid
-}
-
-/// Returns `mu` clamped to `0..=1`, mapping any non-finite input to `0` so a
-/// mis-authored coefficient can never inject a [`f32::NAN`] into a friction
-/// pass.
-#[must_use]
-fn sanitize_friction(mu: Real) -> Real {
-    if mu.is_finite() {
-        mu.clamp(0.0, 1.0)
-    } else {
-        0.0
-    }
 }
 
 /// Separates the particle pair `(ai, bi)` if they are closer than `thickness`.

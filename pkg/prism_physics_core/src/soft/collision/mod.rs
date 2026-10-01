@@ -33,8 +33,15 @@
 //! the one published by Macklin et al. (2014), "Unified Particle Physics for
 //! Real-Time Applications".
 
+mod body;
+mod friction;
 mod self_collision;
 
+pub use body::{
+    apply_backstop, closest_point_on_segment, project_out_of_half_space, project_out_of_sphere,
+    resolve_backstops, resolve_body_collisions, resolve_body_collisions_with_friction, Backstop,
+    BodyCollider,
+};
 pub use self_collision::{resolve_self_collision, resolve_self_collision_with_friction};
 
 use glam::Vec3;

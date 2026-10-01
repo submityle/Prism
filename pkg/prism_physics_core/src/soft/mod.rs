@@ -29,7 +29,11 @@ pub mod solver;
 
 pub use body::SoftBody;
 pub use build::{Cloth, ClothGrid, Rope, RopeGrid, SoftBox, SoftBoxGrid};
-pub use collision::{resolve_self_collision, resolve_self_collision_with_friction};
+pub use collision::{
+    apply_backstop, closest_point_on_segment, project_out_of_half_space, project_out_of_sphere,
+    resolve_backstops, resolve_body_collisions, resolve_body_collisions_with_friction,
+    resolve_self_collision, resolve_self_collision_with_friction, Backstop, BodyCollider,
+};
 pub use constraint::{
     AttachmentConstraint, BendingConstraint, ConstraintSet, DistanceConstraint, ParticleConstraint,
     SoftConstraintKind, TetraVolumeConstraint,
