@@ -138,6 +138,7 @@ pub mod single_scatter_reference;
 pub mod sky_state_transition;
 pub mod soft_particle;
 pub mod spectral_to_rgb;
+pub mod specular_aa;
 pub mod spherical_harmonics_rotate;
 pub mod storm_vertical_profile;
 pub mod sunset_inscatter_tint;
@@ -247,6 +248,10 @@ pub use single_scatter_reference::{GpuSingleScatterReference, SingleScatterRefer
 pub use sky_state_transition::{GpuSkyStateTransition, SkyStateTransition};
 pub use soft_particle::{GpuSoftParticle, LinearizeQuery, SoftParticleQuery, SoftParticleSample};
 pub use spectral_to_rgb::{GpuSpectralToRgb, SpectralRgb};
+pub use specular_aa::{
+    GpuSpecularAa, SpecularAaBatchQuery, SpecularAaScalarQuery, SpecularAaScalarSample,
+    SpecularAaScalars,
+};
 pub use spherical_harmonics_rotate::{
     GpuSphericalHarmonicsRotate, ShRotationProbe, ShRotationResult, L2_COEFF_COUNT,
 };
