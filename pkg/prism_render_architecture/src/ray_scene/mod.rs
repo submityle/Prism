@@ -287,6 +287,7 @@ pub mod shaded_triangle_gpu_layout;
 pub mod spline;
 pub mod spline_strip;
 pub mod triangle_mesh;
+pub mod triangle_mesh_gpu_layout;
 pub mod footprint;
 pub mod gpu_layout;
 pub mod motion;
@@ -351,6 +352,9 @@ pub use shaded_triangle_gpu_layout::{GpuShadedTriangleBvhBuffers, SHADED_TRI_WOR
 pub use spline::{SplineBasis, SplineBvh, SplineCurve};
 pub use spline_strip::{SplineStrip, SplineStripBvh};
 pub use triangle_mesh::{MeshHit, TriangleMesh, TriangleMeshBvh, TriangleMeshError};
+pub use triangle_mesh_gpu_layout::{
+    GpuTriangleMeshBvhBuffers, MESH_INDEX_WORDS, MESH_VERTEX_WORDS,
+};
 pub use rectangle_gpu_layout::{GpuRectangleBvhBuffers, RECTANGLE_WORDS};
 pub use aabb_primitive_gpu_layout::{GpuAabbBvhBuffers, AABB_PRIMITIVE_WORDS};
 pub use sphere_gpu_layout::{GpuSphereBvhBuffers, SPHERE_WORDS};
