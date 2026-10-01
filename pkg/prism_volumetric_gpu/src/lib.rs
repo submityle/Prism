@@ -82,6 +82,7 @@ pub mod clamp_history;
 pub mod classify_precip;
 pub mod closest_point_obb;
 pub mod cloud_shadow_modulation;
+pub mod cohen_sutherland_clip;
 pub mod composite_motion_vector;
 pub mod contact_shadow;
 pub mod context;
@@ -234,6 +235,10 @@ pub use clamp_history::{ClampHistoryQuery, GpuClampHistory};
 pub use classify_precip::{ClassifyPrecipQuery, GpuClassifyPrecip};
 pub use closest_point_obb::{ClosestPointObbQuery, ClosestPointObbResult, GpuClosestPointObb};
 pub use cloud_shadow_modulation::{CloudShadowModulationQuery, GpuCloudShadowModulation};
+pub use cohen_sutherland_clip::{
+    ClipSegmentQuery, ClipSegmentResult, GpuCohenSutherlandClip, OUTCODE_BOTTOM, OUTCODE_INSIDE,
+    OUTCODE_LEFT, OUTCODE_RIGHT, OUTCODE_TOP,
+};
 pub use composite_motion_vector::{
     CompositeMotionVectorQuery, GpuCompositeMotionVector, MotionVector,
 };
