@@ -21,6 +21,13 @@
 //!   arbitrary frequency / Q / gain / shape per band.
 //! - [`delay::DelayNode`] — fractional delay line with feedback and wet/dry
 //!   mix (the echo / slap-back / modulated-delay primitive).
+//! - [`multi_tap_delay::MultiTapDelayNode`] -- a single shared mono delay
+//!   line read by up to [`MAX_TAPS`] independently timed, gained, and
+//!   panned taps with a global feedback coefficient, for rhythmic echo
+//!   patterns, discrete early-reflection clusters, and stereo spreading;
+//!   distinct from [`delay::DelayNode`] (one per-channel fractional tap)
+//!   and from the LFO-swept [`chorus::ChorusNode`] / [`flanger::FlangerNode`]
+//!   whose taps modulate cyclically rather than stay fixed.
 //! - [`waveshaper::WaveshaperNode`] — `tanh` soft-clip saturation with optional
 //!   2x/4x band-limiting oversampling.
 //! - [`chorus::ChorusNode`] — multi-voice LFO-modulated delay ensemble (no
@@ -93,6 +100,7 @@ pub mod formant_filter;
 pub mod frequency_shifter;
 pub mod graphic_eq;
 pub mod mid_side_matrix;
+pub mod multi_tap_delay;
 pub mod parametric_eq;
 pub mod phaser;
 pub mod ring_modulator;
@@ -119,6 +127,7 @@ pub use formant_filter::{
 pub use frequency_shifter::{FrequencyShifterNode, FrequencyShifterParams};
 pub use graphic_eq::{GraphicEqNode, GraphicEqSpacing};
 pub use mid_side_matrix::{MidSideMatrixNode, MidSideMatrixParams, MidSideMode};
+pub use multi_tap_delay::{MAX_TAPS, MultiTapDelayNode, MultiTapDelayParams, TapSpec};
 pub use parametric_eq::{EqBand, ParametricEqNode};
 pub use phaser::{PhaserNode, PhaserParams};
 pub use ring_modulator::{RingModulatorNode, RingModulatorParams};
