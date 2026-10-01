@@ -1,0 +1,21 @@
+[package]
+name = "prism_ui_macro"
+version = "0.1.0"
+edition = "2024"
+description = "Procedural macros for Prism's Loom UI runtime. Implements the `loom!` declarative DSL that lowers to `prism_ui::Element` builder calls. Contains no Unreal Engine source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"
+
+[dev-dependencies]
+prism_ui = { path = "../prism_ui" }
+
+[lints]
+workspace = true

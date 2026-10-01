@@ -15,6 +15,7 @@
 //! * [`style`] — design tokens, classes, selectors and the cascade.
 //! * [`layout`] — a pure-Rust flexbox solver.
 //! * [`anim`] — easings, springs, timelines and transitions.
+//! * [`loom!`] — a declarative macro DSL that lowers to [`Element`] builders.
 //!
 //! This umbrella crate wires them together behind one [`Ui`] runtime driven by
 //! cheap, data-only [`Element`] trees.
@@ -49,6 +50,26 @@
 //! ui.update(&view);
 //! assert_eq!(ui.backend().len(), before);
 //! ```
+//!
+//! # The `loom!` macro
+//!
+//! The same tree can be written with the [`loom!`] DSL, which lowers to the
+//! very same [`Element`] builder calls at compile time:
+//!
+//! ```
+//! use prism_ui::{loom, ElementKind};
+//!
+//! let view = loom! {
+//!     box {
+//!         class: "card";
+//!         text("hello");
+//!     }
+//! };
+//!
+//! assert_eq!(view.kind(), &ElementKind::Box);
+//! assert_eq!(view.class_names(), &["card".to_string()]);
+//! assert_eq!(view.child_elements()[0].text_content(), Some("hello"));
+//! ```
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
@@ -77,3 +98,6 @@ pub use prism_ui_reactive as reactive;
 pub use prism_ui_style as style;
 /// The retained tree and keyed reconciler.
 pub use prism_ui_tree as tree;
+
+/// The `loom!` declarative DSL macro (re-exported for a single import).
+pub use prism_ui_macro::loom;

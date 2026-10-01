@@ -69,7 +69,8 @@ pub use bvh::{
 };
 pub use cfl::{cpu_cfl_dt, cpu_max_speed, CflConfig, GpuCflReduce};
 pub use cloth::{
-    cpu_cloth_self_collision_jacobi, ClothPrep, ClothSelfCollisionScope, GpuClothSelfCollision,
+    colour_bending, cpu_cloth_bending, cpu_cloth_self_collision_jacobi, BendingColoring,
+    ClothBendingConstraint, ClothPrep, ClothSelfCollisionScope, GpuClothBending, GpuClothSelfCollision,
 };
 pub use contacts::{
     contact_constraints, contact_constraints_with_friction, cpu_resolve_contacts,

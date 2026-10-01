@@ -12,6 +12,7 @@ prism_ui_tree = { path = "../prism_ui_tree" }
 prism_ui_style = { path = "../prism_ui_style" }
 prism_ui_layout = { path = "../prism_ui_layout" }
 prism_ui_anim = { path = "../prism_ui_anim" }
+prism_ui_macro = { path = "../prism_ui_macro" }
 
 [features]
 default = ["std"]
