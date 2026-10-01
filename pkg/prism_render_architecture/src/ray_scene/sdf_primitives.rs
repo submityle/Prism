@@ -1419,12 +1419,94 @@ pub fn regular_hexagon_2d(point: [f32; 2], apothem: f32) -> f32 {
     length2(p) * p[1].signum()
 }
 
+/// Exact signed distance to a filled, apex-up equilateral triangle centred on
+/// the origin (Inigo Quilez `sdEquilateralTriangle`).
+///
+/// `half_width` is the half-length of the horizontal base: the base vertices
+/// sit at `(+/-half_width, -half_width/sqrt 3)` and the apex at
+/// `(0, 2*half_width/sqrt 3)`, so the centroid lands on the origin and the
+/// centre distance is `-half_width/sqrt 3`.
+///
+/// A reflection about `x = 0` plus one fold across the `k = sqrt 3` edge
+/// collapses the query into one 60-degree wedge, after which the shape reduces
+/// to a single clamped edge whose signed distance is `-length(p) * sign(p.y)`.
+/// `sqrt 3` is the only transcendental and it lives in a compile-time
+/// constant, so the runtime path uses only `abs`, `clamp`, `min`, `sign`
+/// and `sqrt`.
+pub fn equilateral_triangle_2d(point: [f32; 2], half_width: f32) -> f32 {
+    // k = sqrt(3) as a compile-time constant.
+    const K: f32 = 1.732_050_8;
+    let r = half_width;
+    let mut p = [point[0].abs() - r, point[1] + r / K];
+    if p[0] + K * p[1] > 0.0 {
+        p = [(p[0] - K * p[1]) * 0.5, (-K * p[0] - p[1]) * 0.5];
+    }
+    p[0] -= p[0].clamp(-2.0 * r, 0.0);
+    -length2(p) * p[1].signum()
+}
+
+/// Exact signed distance to a filled, flat-top regular pentagon centred on the
+/// origin (Inigo Quilez `sdPentagon`).
+///
+/// `apothem` is the perpendicular distance from the centre to each edge, so the
+/// top edge lies on `y = apothem` and the centre distance is `-apothem`. The
+/// circumradius is `apothem / cos(pi/5)`.
+///
+/// `p.x` is mirrored into the right half-plane and two reflections across the
+/// upper-left and upper-right edges fold the query into the top sector, which
+/// reduces to a single clamped edge with signed distance
+/// `length(p) * sign(p.y)`. The pentagon's fixed interior trig values
+/// (`cos 36deg`, `sin 36deg`, `tan 36deg`) are compile-time constants,
+/// leaving the runtime path on `abs`, `clamp`, `min`, `sign` and `sqrt`.
+pub fn regular_pentagon_2d(point: [f32; 2], apothem: f32) -> f32 {
+    // k = (cos(pi/5), sin(pi/5), tan(pi/5)) as compile-time constants.
+    const KX: f32 = 0.809_017;
+    const KY: f32 = 0.587_785_25;
+    const KZ: f32 = 0.726_542_5;
+    let r = apothem;
+    let mut p = [point[0].abs(), point[1]];
+    let f1 = 2.0 * ((-KX) * p[0] + KY * p[1]).min(0.0);
+    p = [p[0] - f1 * (-KX), p[1] - f1 * KY];
+    let f2 = 2.0 * (KX * p[0] + KY * p[1]).min(0.0);
+    p = [p[0] - f2 * KX, p[1] - f2 * KY];
+    p = [p[0] - p[0].clamp(-r * KZ, r * KZ), p[1] - r];
+    length2(p) * p[1].signum()
+}
+
+/// Exact signed distance to a filled, flat-top regular octagon centred on the
+/// origin (Inigo Quilez `sdOctagon`).
+///
+/// `apothem` is the perpendicular distance from the centre to each edge, so the
+/// top edge lies on `y = apothem`, the flats are axis-aligned and the centre
+/// distance is `-apothem`. The circumradius is `apothem / cos(pi/8)`.
+///
+/// `p` is folded into the first quadrant and two reflections across the two
+/// diagonal edges collapse the query into the top sector, leaving a single
+/// clamped edge with signed distance `length(p) * sign(p.y)`. The fixed
+/// interior trig values (`cos 22.5deg`, `sin 22.5deg`, `tan 22.5deg`) are
+/// compile-time constants, so the runtime path uses only `abs`, `clamp`,
+/// `min`, `sign` and `sqrt`.
+pub fn regular_octagon_2d(point: [f32; 2], apothem: f32) -> f32 {
+    // k = (-cos(pi/8), sin(pi/8), tan(pi/8)) as compile-time constants.
+    const KX: f32 = -0.923_879_5;
+    const KY: f32 = 0.382_683_43;
+    const KZ: f32 = 0.414_213_56;
+    let r = apothem;
+    let mut p = [point[0].abs(), point[1].abs()];
+    let f1 = 2.0 * (KX * p[0] + KY * p[1]).min(0.0);
+    p = [p[0] - f1 * KX, p[1] - f1 * KY];
+    let f2 = 2.0 * ((-KX) * p[0] + KY * p[1]).min(0.0);
+    p = [p[0] - f2 * (-KX), p[1] - f2 * KY];
+    p = [p[0] - p[0].clamp(-KZ * r, KZ * r), p[1] - r];
+    length2(p) * p[1].signum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         arc, box_frame, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_torus, capsule, cone_sdf, cross_2d, cut_disk_2d, cut_hollow_sphere,
-        cut_sphere, cylinder_segment, death_star, ellipsoid_sdf, hex_prism, infinite_cone, infinite_cylinder, isosceles_triangle_2d, length2, line_sdf, link, moon,
-        octagon_prism, octahedron, oriented_box_2d, parallelogram, pie, plane, pyramid, quad_sdf, regular_hexagon_2d, rhombus, rhombus_2d, round_box, round_cone_sdf,
+        cut_sphere, cylinder_segment, death_star, ellipsoid_sdf, equilateral_triangle_2d, hex_prism, infinite_cone, infinite_cylinder, isosceles_triangle_2d, length2, line_sdf, link, moon,
+        octagon_prism, octahedron, oriented_box_2d, parallelogram, pie, plane, pyramid, quad_sdf, regular_hexagon_2d, regular_octagon_2d, regular_pentagon_2d, rhombus, rhombus_2d, round_box, round_cone_sdf,
         round_cone_segment, rounded_cylinder, rounded_x, segment_2d, solid_angle, sphere, torus, trapezoid_isosceles, triangle_sdf, triangular_prism,
         uneven_capsule_2d, vesica,
     };
@@ -2269,6 +2351,91 @@ mod tests {
         ];
         for p in samples {
             let got = regular_hexagon_2d(p, apothem);
+            let want = polygon_sdf2(p[0], p[1], &verts);
+            assert!((got - want).abs() < 1e-5, "p={p:?} got={got} want={want}");
+        }
+    }
+
+    #[test]
+    fn equilateral_triangle_2d_matches_polygon() {
+        let r = 1.0f32;
+        const K: f32 = 1.732_050_8f32;
+        // Apex-up vertices; centroid on the origin.
+        let verts: [[f32; 2]; 3] = [[r, -r / K], [-r, -r / K], [0.0, 2.0 * r / K]];
+        // Centroid distance is -r/sqrt(3); base midpoint and apex are on-surface.
+        assert!((equilateral_triangle_2d([0.0, 0.0], r) - (-r / K)).abs() < 1e-5);
+        assert!(equilateral_triangle_2d([0.0, -r / K], r).abs() < 1e-5);
+        assert!(equilateral_triangle_2d([0.0, 2.0 * r / K], r).abs() < 1e-5);
+        let samples: [[f32; 2]; 8] = [
+            [0.0, 0.0],
+            [0.3, 0.2],
+            [-0.4, 0.1],
+            [0.0, 1.0],
+            [1.5, 0.0],
+            [-1.2, -0.9],
+            [0.0, -1.0],
+            [0.8, 0.8],
+        ];
+        for p in samples {
+            let got = equilateral_triangle_2d(p, r);
+            let want = polygon_sdf2(p[0], p[1], &verts);
+            assert!((got - want).abs() < 1e-5, "p={p:?} got={got} want={want}");
+        }
+    }
+
+    #[test]
+    fn regular_pentagon_2d_apothem_and_matches_polygon() {
+        let apothem = 1.0f32;
+        // Flat top edge sits on y = apothem; centre distance is -apothem.
+        assert!(regular_pentagon_2d([0.0, apothem], apothem).abs() < 1e-6);
+        assert!((regular_pentagon_2d([0.0, 0.0], apothem) - (-apothem)).abs() < 1e-6);
+        let big_r = apothem / (std::f32::consts::PI / 5.0).cos();
+        let mut verts = [[0.0f32; 2]; 5];
+        for (k, v) in verts.iter_mut().enumerate() {
+            let ang = (54.0 + 72.0 * k as f32).to_radians();
+            *v = [big_r * ang.cos(), big_r * ang.sin()];
+        }
+        let samples: [[f32; 2]; 8] = [
+            [0.0, 0.0],
+            [0.4, 0.3],
+            [-0.5, 0.2],
+            [0.0, 0.9],
+            [1.4, 0.0],
+            [-1.0, -0.8],
+            [0.6, -1.1],
+            [0.9, 0.6],
+        ];
+        for p in samples {
+            let got = regular_pentagon_2d(p, apothem);
+            let want = polygon_sdf2(p[0], p[1], &verts);
+            assert!((got - want).abs() < 1e-5, "p={p:?} got={got} want={want}");
+        }
+    }
+
+    #[test]
+    fn regular_octagon_2d_apothem_and_matches_polygon() {
+        let apothem = 1.0f32;
+        // Flat top edge sits on y = apothem; centre distance is -apothem.
+        assert!(regular_octagon_2d([0.0, apothem], apothem).abs() < 1e-6);
+        assert!((regular_octagon_2d([0.0, 0.0], apothem) - (-apothem)).abs() < 1e-6);
+        let big_r = apothem / (std::f32::consts::PI / 8.0).cos();
+        let mut verts = [[0.0f32; 2]; 8];
+        for (k, v) in verts.iter_mut().enumerate() {
+            let ang = (22.5 + 45.0 * k as f32).to_radians();
+            *v = [big_r * ang.cos(), big_r * ang.sin()];
+        }
+        let samples: [[f32; 2]; 8] = [
+            [0.0, 0.0],
+            [0.5, 0.4],
+            [-0.6, 0.3],
+            [0.0, 0.9],
+            [1.3, 0.0],
+            [-1.1, -0.7],
+            [0.7, -1.0],
+            [0.9, 0.9],
+        ];
+        for p in samples {
+            let got = regular_octagon_2d(p, apothem);
             let want = polygon_sdf2(p[0], p[1], &verts);
             assert!((got - want).abs() < 1e-5, "p={p:?} got={got} want={want}");
         }
