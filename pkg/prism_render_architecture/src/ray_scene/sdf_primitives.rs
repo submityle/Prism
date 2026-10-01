@@ -1501,11 +1501,41 @@ pub fn regular_octagon_2d(point: [f32; 2], apothem: f32) -> f32 {
     length2(p) * p[1].signum()
 }
 
+/// Exact signed distance to a filled six-pointed hexagram (Star of David)
+/// centred on the origin (Inigo Quilez `sdHexagram`).
+///
+/// `r` is the mid-scale parameter: the six outer tips sit at radius `2*r`
+/// (angles 30deg + 60deg*k) and the six inner vertices at radius `2*r/sqrt 3`
+/// (angles 60deg*k), so the centre distance is `-2*r/sqrt 3` (the inner
+/// vertex is the nearest boundary feature to the centre).
+///
+/// `p` is folded into the first quadrant and two reflections across the
+/// `k.xy` and `k.yx` edges collapse the query into one of the twelve
+/// congruent wedges, after which the shape reduces to a single clamped edge
+/// with signed distance `length(p) * sign(p.y)`. The fixed hexagonal trig
+/// values (`cos 30deg`, `tan 30deg`, `sqrt 3`) are compile-time constants,
+/// so the runtime path uses only `abs`, `clamp`, `min`, `sign` and `sqrt`.
+pub fn hexagram_2d(point: [f32; 2], r: f32) -> f32 {
+    // k = (-0.5, cos(pi/6), tan(pi/6), sqrt(3)) as compile-time constants.
+    const KX: f32 = -0.5;
+    const KY: f32 = 0.866_025_4;
+    const KZ: f32 = 0.577_350_26;
+    const KW: f32 = 1.732_050_8;
+    let mut p = [point[0].abs(), point[1].abs()];
+    let f1 = 2.0 * (KX * p[0] + KY * p[1]).min(0.0);
+    p = [p[0] - f1 * KX, p[1] - f1 * KY];
+    // Second reflection uses k.yx = (KY, KX).
+    let f2 = 2.0 * (KY * p[0] + KX * p[1]).min(0.0);
+    p = [p[0] - f2 * KY, p[1] - f2 * KX];
+    p = [p[0] - p[0].clamp(KZ * r, KW * r), p[1] - r];
+    length2(p) * p[1].signum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         arc, box_frame, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_torus, capsule, cone_sdf, cross_2d, cut_disk_2d, cut_hollow_sphere,
-        cut_sphere, cylinder_segment, death_star, ellipsoid_sdf, equilateral_triangle_2d, hex_prism, infinite_cone, infinite_cylinder, isosceles_triangle_2d, length2, line_sdf, link, moon,
+        cut_sphere, cylinder_segment, death_star, ellipsoid_sdf, equilateral_triangle_2d, hex_prism, hexagram_2d, infinite_cone, infinite_cylinder, isosceles_triangle_2d, length2, line_sdf, link, moon,
         octagon_prism, octahedron, oriented_box_2d, parallelogram, pie, plane, pyramid, quad_sdf, regular_hexagon_2d, regular_octagon_2d, regular_pentagon_2d, rhombus, rhombus_2d, round_box, round_cone_sdf,
         round_cone_segment, rounded_cylinder, rounded_x, segment_2d, solid_angle, sphere, torus, trapezoid_isosceles, triangle_sdf, triangular_prism,
         uneven_capsule_2d, vesica,
@@ -2436,6 +2466,43 @@ mod tests {
         ];
         for p in samples {
             let got = regular_octagon_2d(p, apothem);
+            let want = polygon_sdf2(p[0], p[1], &verts);
+            assert!((got - want).abs() < 1e-5, "p={p:?} got={got} want={want}");
+        }
+    }
+
+    #[test]
+    fn hexagram_2d_matches_polygon() {
+        let r = 1.0f32;
+        const K: f32 = 1.732_050_8f32; // sqrt(3)
+        let r_out = 2.0 * r; // outer tip radius
+        let r_in = 2.0 * r / K; // inner vertex radius
+        // Twelve alternating vertices: inner at 60*k deg, outer at 30 + 60*k deg.
+        let mut verts = [[0.0f32; 2]; 12];
+        for (k, v) in verts.iter_mut().enumerate() {
+            let ang = (30.0 * k as f32).to_radians();
+            let rad = if k % 2 == 0 { r_in } else { r_out };
+            *v = [rad * ang.cos(), rad * ang.sin()];
+        }
+        // Centre distance is -2r/sqrt(3) (nearest feature is an inner vertex).
+        assert!((hexagram_2d([0.0, 0.0], r) - (-r_in)).abs() < 1e-5);
+        // Inner vertex (0 deg) and an outer tip (30 deg) lie on the surface.
+        assert!(hexagram_2d([r_in, 0.0], r).abs() < 1e-5);
+        assert!(hexagram_2d([r_out * 0.866_025_4, r_out * 0.5], r).abs() < 1e-5);
+        let samples: [[f32; 2]; 10] = [
+            [0.0, 0.0],
+            [0.4, 0.2],
+            [-0.5, 0.3],
+            [0.0, 1.0],
+            [1.9, 0.0],
+            [-1.5, 1.0],
+            [0.8, -1.4],
+            [1.2, 1.2],
+            [0.0, 2.1],
+            [-2.2, 0.1],
+        ];
+        for p in samples {
+            let got = hexagram_2d(p, r);
             let want = polygon_sdf2(p[0], p[1], &verts);
             assert!((got - want).abs() < 1e-5, "p={p:?} got={got} want={want}");
         }
