@@ -33,6 +33,12 @@
 //! * [`caustics`] — photon splatting + manifold NEE for specular-to-diffuse
 //!   caustic light transport.
 //! * [`probe_volume`] — adaptive probe-grid irradiance + sky-visibility occlusion.
+//! * [`path_reuse`] — path-space ReSTIR (ReSTIR PT) with reconnection shift
+//!   mapping for multi-bounce path reuse.
+//! * [`atmosphere`] — physically based sky with Rayleigh/Mie multiple scattering
+//!   and aerial perspective.
+//! * [`surface_cache`] — Lumen-style persistent surfel radiance cache.
+//! * [`global_sdf`] — merged global distance field with cone/sphere tracing.
 
 pub mod denoise;
 pub mod occlusion;
@@ -47,4 +53,8 @@ pub mod world_restir;
 pub mod volumetric_gi;
 pub mod caustics;
 pub mod probe_volume;
+pub mod path_reuse;
+pub mod atmosphere;
+pub mod surface_cache;
+pub mod global_sdf;
 pub mod world_space;
