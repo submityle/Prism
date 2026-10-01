@@ -14,6 +14,7 @@ mod record;
 mod registry;
 mod resources;
 mod surface;
+mod texture_lod;
 mod validation;
 
 pub use authoring::FACE_SHADOW_SDF_SEMANTIC;
@@ -37,6 +38,10 @@ pub use surface::{
     GpuAnisotropyLobe, GpuClearCoatLobe, GpuEmissionLobe, GpuSheenLobe, GpuSubsurfaceLobe,
     GpuSurfaceCore, GpuTransmissionLobe, LobeMask, SurfaceParameterBlock, SurfaceUnpackError,
     SURFACE_CORE_WORDS, SURFACE_LOBE_WORDS,
+};
+pub use texture_lod::{
+    cone_mip_level, mip_from_isotropic_footprint, AnisotropicMip, RayCone, RayDifferential,
+    TriangleLodConstant, MIN_COS_INCIDENCE,
 };
 pub use validation::{validate_graph, MaterialValidationError};
 
