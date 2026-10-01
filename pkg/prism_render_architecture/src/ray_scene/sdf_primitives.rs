@@ -334,10 +334,44 @@ pub fn link(point: [f32; 3], half_length: f32, r1: f32, r2: f32) -> f32 {
     length2([planar, point[2]]) - r2
 }
 
+/// Signed distance from `point` to a cut sphere: a sphere of radius `radius`
+/// sliced by the horizontal plane `y = cut_height`, keeping the portion with
+/// `y >= cut_height` and capping the removed bottom with a flat disc of radius
+/// `w = sqrt(radius^2 - cut_height^2)` at that height.
+///
+/// This is Inigo Quilez's exact `sdCutSphere`. The query is reduced to the
+/// `(radial, y)` half-plane, where `radial = length(point.xz)`. A single
+/// comparison `s` selects the governing feature: the spherical cap when the
+/// point sits in the sphere's angular sector, the flat disc face when it lies
+/// directly under the cap, or the circular rim where cap meets disc otherwise.
+/// Built from `abs`, `min`, `max`, and two vector lengths, so it stays
+/// transcendental-free.
+///
+/// The slice height is only geometrically meaningful for
+/// `cut_height` in `[-radius, radius]`; the cap-radius `sqrt` is guarded with
+/// `.max(0.0)` so out-of-range inputs degrade to a plain hemisphere boundary
+/// instead of producing `NaN`.
+pub fn cut_sphere(point: [f32; 3], radius: f32, cut_height: f32) -> f32 {
+    let r = radius;
+    let h = cut_height;
+    let w = (r * r - h * h).max(0.0).sqrt();
+    let qx = length2([point[0], point[2]]);
+    let qy = point[1];
+    let s = ((h - r) * qx * qx + w * w * (h + r - 2.0 * qy)).max(h * qx - w * qy);
+    if s < 0.0 {
+        length2([qx, qy]) - r
+    } else if qx < w {
+        h - qy
+    } else {
+        length2([qx - w, qy - h])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        box_frame, box_sdf, capped_cone, capped_cylinder, capsule, ellipsoid_sdf, hex_prism,
+        box_frame, box_sdf, capped_cone, capped_cylinder, capsule, cut_sphere, ellipsoid_sdf,
+        hex_prism,
         link, octahedron, plane, pyramid, round_box, sphere, torus,
     };
 
@@ -555,5 +589,34 @@ mod tests {
     fn link_hole_centre_is_outside_the_solid() {
         // The centre of the ring hole is r1 - r2 outside the tube.
         assert!((link([0.0, 0.0, 0.0], 0.5, 1.0, 0.3) - 0.7).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cut_sphere_spherical_cap_matches_the_sphere() {
+        // With radius 1 cut at the equator (h = 0) the retained cap is the
+        // upper hemisphere, so the spherical part is still exactly the sphere:
+        // the top pole is on the surface and the point above it is at distance 1.
+        assert!(cut_sphere([0.0, 1.0, 0.0], 1.0, 0.0).abs() < 1e-6);
+        assert!((cut_sphere([0.0, 2.0, 0.0], 1.0, 0.0) - 1.0).abs() < 1e-6);
+        // The equatorial rim where the cut plane meets the sphere is on the
+        // surface, reached through the rim branch.
+        assert!(cut_sphere([1.0, 0.0, 0.0], 1.0, 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cut_sphere_flat_disc_face_is_planar() {
+        // Directly under the cap the governing feature is the flat disc at
+        // y = h: the disc centre is on the surface and points below it measure
+        // their vertical drop to the plane.
+        assert!(cut_sphere([0.0, 0.0, 0.0], 1.0, 0.0).abs() < 1e-6);
+        assert!((cut_sphere([0.0, -0.5, 0.0], 1.0, 0.0) - 0.5).abs() < 1e-6);
+        assert!((cut_sphere([0.0, -1.0, 0.0], 1.0, 0.0) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cut_sphere_interior_is_negative() {
+        // A point inside the retained volume reports a negative distance equal
+        // to its depth below the spherical cap.
+        assert!((cut_sphere([0.0, 0.5, 0.0], 1.0, 0.0) - (-0.5)).abs() < 1e-6);
     }
 }

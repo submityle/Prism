@@ -558,7 +558,7 @@
 //!   [`sdf_primitives::capped_cylinder`], [`sdf_primitives::capped_cone`],
 //!   [`sdf_primitives::hex_prism`], [`sdf_primitives::box_frame`],
 //!   [`sdf_primitives::octahedron`], [`sdf_primitives::pyramid`],
-//!   [`sdf_primitives::link`]) with exact
+//!   [`sdf_primitives::link`], [`sdf_primitives::cut_sphere`]) with exact
 //!   closed-form distances plus
 //!   the approximate [`sdf_primitives::ellipsoid_sdf`] bound, the atoms the
 //!   domain and `CSG` operators compose.
@@ -906,8 +906,8 @@ pub use sdf_domain::{
 };
 pub use mesh_sdf_thickness::sdf_thickness;
 pub use sdf_primitives::{
-    box_frame, box_sdf, capped_cone, capped_cylinder, capsule, ellipsoid_sdf, hex_prism, link,
-    octahedron, plane, pyramid, round_box, sphere, torus,
+    box_frame, box_sdf, capped_cone, capped_cylinder, capsule, cut_sphere, ellipsoid_sdf,
+    hex_prism, link, octahedron, plane, pyramid, round_box, sphere, torus,
 };
 pub use sdf_unsigned::{segment_distance, triangle_distance};
 pub use mesh_sdf_enhanced_trace::{enhanced_sphere_trace, EnhancedSdfHit};
