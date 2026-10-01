@@ -59,8 +59,10 @@ pub mod sources;
 pub mod svf;
 
 pub use analysis::{
-    CorrelationMeasurement, CorrelationMeter, CorrelationMeterNode, KWeighting,
-    LoudnessMeasurement, LoudnessMeter, LoudnessMeterNode, TruePeakMeter,
+    CorrelationMeasurement, CorrelationMeter, CorrelationMeterNode, DEFAULT_DECIMATION,
+    DEFAULT_POINT_CAPACITY, Goniometer, GoniometerNode, GoniometerPoint, GoniometerStats,
+    KWeighting, LoudnessMeasurement, LoudnessMeter, LoudnessMeterNode, MIN_POINT_CAPACITY,
+    TruePeakMeter,
 };
 pub use biquad::{BiquadKind, BiquadNode};
 pub use crossover::{LinkwitzRileyCrossover, MAX_BANDS, MAX_CROSSOVERS};

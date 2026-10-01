@@ -19,6 +19,10 @@
 //! - [`correlation::CorrelationMeter`] / [`correlation::CorrelationMeterNode`]
 //!   -- stereo phase correlation, mid/side width, left/right balance, and
 //!   mid/side `RMS` levels for stereo-field and mono-compatibility checks.
+//! - [`goniometer::Goniometer`] / [`goniometer::GoniometerNode`] -- a
+//!   vectorscope coordinate generator that emits rotated mid/side (X/Y) point
+//!   clouds for Lissajous stereo-field visualisation, complementing the scalar
+//!   readings of the [`correlation`] meter.
 //!
 //! # Provenance
 //!
@@ -36,9 +40,14 @@
 //! [`biquad`](crate::nodes::biquad) rather than re-implementing them.
 
 pub mod correlation;
+pub mod goniometer;
 pub mod loudness;
 
 pub use correlation::{CorrelationMeasurement, CorrelationMeter, CorrelationMeterNode};
+pub use goniometer::{
+    DEFAULT_DECIMATION, DEFAULT_POINT_CAPACITY, Goniometer, GoniometerNode, GoniometerPoint,
+    GoniometerStats, MIN_POINT_CAPACITY,
+};
 pub use loudness::{
     KWeighting, LoudnessMeasurement, LoudnessMeter, LoudnessMeterNode, TruePeakMeter,
 };
