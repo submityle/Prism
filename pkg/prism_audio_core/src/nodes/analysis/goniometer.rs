@@ -327,7 +327,6 @@ impl AudioNode for GoniometerNode {
 mod tests {
     use super::*;
     use crate::buffer::{AudioBuffer, ChannelLayout};
-    use alloc::vec::Vec;
     use core::f32::consts::FRAC_1_SQRT_2;
 
     const SR: u32 = 48_000;
