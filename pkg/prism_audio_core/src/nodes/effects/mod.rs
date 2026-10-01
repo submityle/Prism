@@ -36,12 +36,16 @@
 //!   bipolar audio-rate carrier for inharmonic, bell-like, or robotic timbres.
 //! - [`vibrato::VibratoNode`] — single LFO-swept fractional delay for
 //!   periodic pitch modulation.
+//! - [`exciter::ExciterNode`] — high-frequency harmonic exciter / aural
+//!   enhancer: a highpass-isolated band is `tanh`-shaped to synthesize added
+//!   odd / even harmonics that are mixed back for presence and air.
 
 pub mod auto_wah;
 pub mod bitcrusher;
 pub mod chorus;
 pub mod comb_resonator;
 pub mod delay;
+pub mod exciter;
 pub mod flanger;
 pub mod parametric_eq;
 pub mod phaser;
@@ -56,6 +60,7 @@ pub use bitcrusher::{BitcrusherNode, BitcrusherParams, MAX_BIT_DEPTH, MIN_BIT_DE
 pub use chorus::{ChorusNode, ChorusParams};
 pub use comb_resonator::{CombResonatorNode, CombResonatorParams, MAX_FEEDBACK, MIN_FREQUENCY_HZ};
 pub use delay::DelayNode;
+pub use exciter::{Exciter, ExciterNode, ExciterParams, HarmonicMode};
 pub use flanger::{FlangerNode, FlangerParams};
 pub use parametric_eq::{EqBand, ParametricEqNode};
 pub use phaser::{PhaserNode, PhaserParams};
