@@ -3,45 +3,55 @@
 //! A waveshaper pushes its input through a static non-linear transfer function.
 //! Here the shape is the classic hyperbolic-tangent soft clipper
 //! `y = tanh(drive * x)`: small signals pass almost linearly while large ones
-//! are smoothly compressed toward `±1`, giving the warm, harmonically rich
+//! are smoothly compressed toward `+/-1`, giving the warm, harmonically rich
 //! saturation used on drums, bass, and mix buses.
 //!
 //! # Why oversample
 //!
 //! Any non-linearity generates harmonics above the input frequency. When those
 //! harmonics exceed the Nyquist limit they *fold back* into the audible band as
-//! inharmonic aliasing. [`WaveshaperNode`] therefore runs the non-linearity at
-//! an integer multiple of the host sample rate (see [`Oversample`]):
-//!
-//! 1. **Upsample** by inserting `factor - 1` zeros between input samples and
-//!    reconstructing with a polyphase windowed-sinc interpolation filter.
-//! 2. **Shape** every oversampled sample with `bevy_math::ops::tanh`.
-//! 3. **Decimate** back to the host rate through the same half-band-style
-//!    low-pass so the freshly created out-of-band harmonics are removed *before*
-//!    they can alias.
+//! inharmonic aliasing. [`WaveshaperNode`] therefore runs the `tanh` through the
+//! shared [`Oversampler`](crate::oversampler::Oversampler) at an integer
+//! multiple of the host sample rate (see [`Oversample`]), filtering the freshly
+//! created out-of-band harmonics away before they can alias.
 //!
 //! The linear-phase FIR pair introduces a fixed group delay reported by
 //! [`AudioNode::latency_frames`]; the internal dry path is delayed by the same
-//! amount so the wet/dry blend stays phase-coherent at the node output.
+//! amount with a [`DryDelay`](crate::oversampler::DryDelay) so the wet/dry blend
+//! stays phase-coherent at the node output.
 //!
-//! All filter state (per-channel interpolation and decimation histories, plus
-//! the dry delay line) is pre-allocated at construction, so
-//! [`WaveshaperNode::process`] performs no allocation and cannot panic — it is
-//! real-time safe.
+//! # Real-time contract
+//!
+//! All filter state (per-channel interpolation/decimation histories and the dry
+//! delay lines) is pre-allocated at construction, so [`WaveshaperNode::process`]
+//! performs no allocation, takes no locks, and cannot panic. All transcendental
+//! math routes through [`bevy_math::ops`] for bit-reproducible output.
+//!
+//! # Provenance
+//!
+//! The `tanh` soft clipper and oversampled anti-aliased waveshaping are textbook
+//! non-linear-processing techniques. This node reuses only this crate's own
+//! shared [`Oversampler`](crate::oversampler::Oversampler) primitive and
+//! parameter smoothing. It is pure classic DSP with no AI or ML and contains
+//! **no Unreal Engine, Unity, Godot, Wwise, FMOD, Steam Audio, or Google
+//! Resonance Audio source or derived code**.
+//!
+//! # Relationship
+//!
+//! This soft clipper *compresses* signal toward a ceiling, the orthogonal
+//! complement to the [`wavefolder`](crate::nodes::effects::wavefolder), which
+//! *reflects* signal past a threshold. Both share the single anti-aliasing
+//! [`Oversampler`](crate::oversampler::Oversampler) so the aliasing cure is
+//! implemented once rather than copied per effect.
 
 use alloc::vec::Vec;
 
 use bevy_math::ops;
-use core::f32::consts::PI;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
 use crate::math::{Sample, flush_denormal};
+use crate::oversampler::{DEFAULT_TAPS_PER_PHASE, DryDelay, Oversampler, OversamplerState};
 use crate::param::{Ramp, Smoothed};
-
-/// Number of filter taps allocated to each polyphase branch of the
-/// oversampler. The full prototype filter length is `TAPS_PER_PHASE * factor`,
-/// trading a little latency and CPU for strong stop-band rejection.
-const TAPS_PER_PHASE: usize = 16;
 
 /// The internal processing rate relative to the host sample rate.
 ///
@@ -73,116 +83,6 @@ impl Oversample {
     }
 }
 
-/// Per-channel filter memory for the oversampler and the dry-path delay.
-///
-/// Each channel owns an independent set of histories so a stereo (or surround)
-/// image is processed without cross-channel bleed.
-#[derive(Debug, Clone)]
-struct ChannelState {
-    /// Ring buffer of the most recent input samples feeding the polyphase
-    /// interpolation filter (length [`TAPS_PER_PHASE`], empty when not
-    /// oversampling).
-    up_hist: Vec<Sample>,
-    /// Write cursor into [`ChannelState::up_hist`].
-    up_pos: usize,
-    /// Ring buffer of the most recent oversampled, shaped samples feeding the
-    /// decimation filter (length `TAPS_PER_PHASE * factor`, empty when not
-    /// oversampling).
-    down_hist: Vec<Sample>,
-    /// Write cursor into [`ChannelState::down_hist`].
-    down_pos: usize,
-    /// Delay line that aligns the dry signal with the latency of the wet
-    /// (oversampled) path. Length equals the reported latency in frames (empty
-    /// at zero latency).
-    dry_delay: Vec<Sample>,
-    /// Write cursor into [`ChannelState::dry_delay`].
-    dry_pos: usize,
-}
-
-impl ChannelState {
-    /// Allocates zeroed histories of the given lengths.
-    fn new(up_len: usize, down_len: usize, dry_len: usize) -> Self {
-        Self {
-            up_hist: zeroed(up_len),
-            up_pos: 0,
-            down_hist: zeroed(down_len),
-            down_pos: 0,
-            dry_delay: zeroed(dry_len),
-            dry_pos: 0,
-        }
-    }
-
-    /// Clears every history back to silence.
-    fn reset(&mut self) {
-        for s in &mut self.up_hist {
-            *s = 0.0;
-        }
-        for s in &mut self.down_hist {
-            *s = 0.0;
-        }
-        for s in &mut self.dry_delay {
-            *s = 0.0;
-        }
-        self.up_pos = 0;
-        self.down_pos = 0;
-        self.dry_pos = 0;
-    }
-
-    /// Shapes one input sample through the oversampled, anti-aliased path and
-    /// returns the resulting host-rate sample.
-    ///
-    /// `phases` are the polyphase interpolation branches and `proto` the shared
-    /// decimation prototype; both are borrowed so the whole node keeps a single
-    /// copy of its coefficients.
-    fn shape_oversampled(
-        &mut self,
-        x: Sample,
-        drive: Sample,
-        phases: &[Vec<Sample>],
-        proto: &[Sample],
-    ) -> Sample {
-        // Advance the interpolation input history.
-        let up_len = self.up_hist.len();
-        self.up_pos = (self.up_pos + 1) % up_len;
-        self.up_hist[self.up_pos] = x;
-
-        let down_len = self.down_hist.len();
-        // Synthesise `factor` oversampled samples, shape each, and push them
-        // into the decimation history in temporal order.
-        for phase in phases {
-            let mut acc = 0.0;
-            for (j, &coeff) in phase.iter().enumerate() {
-                let idx = (self.up_pos + up_len - j) % up_len;
-                acc += coeff * self.up_hist[idx];
-            }
-            let shaped = ops::tanh(drive * acc);
-            self.down_pos = (self.down_pos + 1) % down_len;
-            self.down_hist[self.down_pos] = shaped;
-        }
-
-        // Decimate: one host-rate output per `factor` oversampled samples.
-        let mut out = 0.0;
-        for (j, &coeff) in proto.iter().enumerate() {
-            let idx = (self.down_pos + down_len - j) % down_len;
-            out += coeff * self.down_hist[idx];
-        }
-        flush_denormal(out)
-    }
-
-    /// Returns `x` delayed by the dry-path delay length, keeping the dry signal
-    /// aligned with the latency of the wet path.
-    fn dry_delayed(&mut self, x: Sample) -> Sample {
-        let len = self.dry_delay.len();
-        if len == 0 {
-            return x;
-        }
-        let out = self.dry_delay[self.dry_pos];
-        self.dry_delay[self.dry_pos] = x;
-        self.dry_pos = (self.dry_pos + 1) % len;
-        out
-    }
-}
-
 /// A soft-clipping waveshaper with selectable anti-aliasing oversampling
 /// (input port 0 -> output port 0).
 ///
@@ -202,17 +102,12 @@ pub struct WaveshaperNode {
     wet: Smoothed,
     /// Dry (unprocessed, latency-aligned) mix coefficient.
     dry: Smoothed,
-    /// Decimation prototype filter (unity DC gain). Empty when not oversampling.
-    proto: Vec<Sample>,
-    /// Polyphase interpolation branches derived from [`WaveshaperNode::proto`].
-    /// Empty when not oversampling.
-    phases: Vec<Vec<Sample>>,
-    /// Per-channel filter state.
-    channels: Vec<ChannelState>,
-    /// Reported processing latency in host-rate frames.
-    latency: u32,
-    /// Length of the prototype FIR filter (`0` when not oversampling).
-    filter_taps: usize,
+    /// Shared anti-aliasing resampler (one design, many channels).
+    oversampler: Oversampler,
+    /// Per-channel oversampler history.
+    states: Vec<OversamplerState>,
+    /// Per-channel dry-path delay aligning the dry signal with the wet latency.
+    dry_delays: Vec<DryDelay>,
 }
 
 impl WaveshaperNode {
@@ -233,40 +128,14 @@ impl WaveshaperNode {
         dry: Sample,
     ) -> Self {
         let _ = sample_rate;
-        let factor = oversample.factor();
+        let oversampler = Oversampler::new(oversample.factor(), DEFAULT_TAPS_PER_PHASE);
+        let latency = oversampler.latency_frames() as usize;
 
-        let (proto, phases, filter_taps) = if factor > 1 {
-            let taps = TAPS_PER_PHASE * factor;
-            let proto = design_lowpass(taps, factor);
-            let mut phases = Vec::with_capacity(factor);
-            for p in 0..factor {
-                let mut phase = Vec::with_capacity(TAPS_PER_PHASE);
-                let mut k = 0usize;
-                while p + k * factor < taps {
-                    // Scale by `factor` to compensate for the energy lost to
-                    // zero-stuffing during interpolation.
-                    phase.push(factor as Sample * proto[p + k * factor]);
-                    k += 1;
-                }
-                phases.push(phase);
-            }
-            (proto, phases, taps)
-        } else {
-            (Vec::new(), Vec::new(), 0)
-        };
-
-        // Linear-phase group delay of the up/down filter pair is `taps - 1`
-        // samples at the oversampled rate, i.e. `(taps - 1) / factor` frames.
-        let latency = if factor > 1 {
-            ops::round((filter_taps as Sample - 1.0) / factor as Sample) as u32
-        } else {
-            0
-        };
-
-        let up_len = if factor > 1 { TAPS_PER_PHASE } else { 0 };
         let mut states = Vec::with_capacity(channels);
+        let mut dry_delays = Vec::with_capacity(channels);
         for _ in 0..channels {
-            states.push(ChannelState::new(up_len, filter_taps, latency as usize));
+            states.push(oversampler.make_state());
+            dry_delays.push(DryDelay::new(latency));
         }
 
         Self {
@@ -275,11 +144,9 @@ impl WaveshaperNode {
             output_gain: Smoothed::new(output_gain),
             wet: Smoothed::new(wet),
             dry: Smoothed::new(dry),
-            proto,
-            phases,
-            channels: states,
-            latency,
-            filter_taps,
+            oversampler,
+            states,
+            dry_delays,
         }
     }
 
@@ -319,16 +186,18 @@ impl WaveshaperNode {
     #[inline]
     #[must_use]
     pub fn filter_taps(&self) -> usize {
-        self.filter_taps
+        self.oversampler.filter_taps()
     }
 }
 
 impl AudioNode for WaveshaperNode {
     fn process(&mut self, _ctx: &RenderContext, io: &mut ProcessIo<'_>) {
         let (input, output) = io.io(0, 0);
-        let channels = output.channels().min(input.channels()).min(self.channels.len());
+        let channels = output
+            .channels()
+            .min(input.channels())
+            .min(self.states.len());
         let frames = output.active_frames().min(input.active_frames());
-        let factor = self.oversample.factor();
 
         // Snapshot the smoothers so every channel replays the identical
         // per-sample control trajectory (see `GainNode` for the pattern).
@@ -337,20 +206,20 @@ impl AudioNode for WaveshaperNode {
         let wet0 = self.wet;
         let dry0 = self.dry;
 
-        // Disjoint field borrows: coefficients (shared) and per-channel state
-        // (mutable) live in different fields of `self`.
-        let proto = &self.proto;
-        let phases = &self.phases;
-        let states = &mut self.channels;
+        let oversampler = &self.oversampler;
+        let states = &mut self.states;
+        let dry_delays = &mut self.dry_delays;
 
         let mut committed: Option<(Smoothed, Smoothed, Smoothed, Smoothed)> = None;
 
-        for (ch, state) in states.iter_mut().enumerate().take(channels) {
+        for ch in 0..channels {
             let mut drive = drive0;
             let mut gain = gain0;
             let mut wet = wet0;
             let mut dry = dry0;
 
+            let state = &mut states[ch];
+            let dry_delay = &mut dry_delays[ch];
             let src = input.channel(ch);
             let dst = output.channel_mut(ch);
 
@@ -361,12 +230,8 @@ impl AudioNode for WaveshaperNode {
                 let wv = wet.next_sample();
                 let drv = dry.next_sample();
 
-                let shaped = if factor > 1 {
-                    state.shape_oversampled(x, dv, phases, proto)
-                } else {
-                    flush_denormal(ops::tanh(dv * x))
-                };
-                let dry_sig = state.dry_delayed(x);
+                let shaped = oversampler.process_sample(state, x, |v| ops::tanh(dv * v));
+                let dry_sig = dry_delay.push(x);
                 dst[i] = flush_denormal(wv * (shaped * gv) + drv * dry_sig);
             }
 
@@ -384,8 +249,11 @@ impl AudioNode for WaveshaperNode {
     }
 
     fn reset(&mut self) {
-        for state in &mut self.channels {
+        for state in &mut self.states {
             state.reset();
+        }
+        for dry_delay in &mut self.dry_delays {
+            dry_delay.reset();
         }
         self.drive = Smoothed::new(self.drive.target());
         self.output_gain = Smoothed::new(self.output_gain.target());
@@ -394,59 +262,15 @@ impl AudioNode for WaveshaperNode {
     }
 
     fn latency_frames(&self) -> u32 {
-        self.latency
+        self.oversampler.latency_frames()
     }
-}
-
-/// Allocates a zero-filled sample vector of length `n`.
-fn zeroed(n: usize) -> Vec<Sample> {
-    let mut v = Vec::with_capacity(n);
-    v.resize(n, 0.0);
-    v
-}
-
-/// Designs a `taps`-long, unity-DC-gain, Hann-windowed sinc low-pass prototype.
-///
-/// The cutoff is placed at the host-rate Nyquist, i.e. a normalised cutoff of
-/// `1/(2*factor)` cycles/sample at the oversampled rate, so the filter both
-/// reconstructs interpolated samples and rejects the images/aliases created by
-/// the non-linearity.
-fn design_lowpass(taps: usize, factor: usize) -> Vec<Sample> {
-    let center = (taps - 1) as Sample / 2.0;
-    // `cutoff` is twice the cutoff frequency (the sinc argument scale):
-    // 2 * (1 / (2 * factor)) = 1 / factor.
-    let cutoff = 1.0 / factor as Sample;
-    let denom = (taps - 1) as Sample;
-
-    let mut h = Vec::with_capacity(taps);
-    let mut sum = 0.0;
-    for n in 0..taps {
-        let t = n as Sample - center;
-        let ideal = if t == 0.0 {
-            cutoff
-        } else {
-            let arg = PI * cutoff * t;
-            cutoff * (ops::sin(arg) / arg)
-        };
-        // Hann window keeps the stop-band clean with a gentle main-lobe trade.
-        let window = 0.5 - 0.5 * ops::cos(2.0 * PI * n as Sample / denom);
-        let coeff = ideal * window;
-        h.push(coeff);
-        sum += coeff;
-    }
-
-    // Normalise to unity DC gain so the decimation stage preserves level.
-    let inv = if sum != 0.0 { 1.0 / sum } else { 1.0 };
-    for c in &mut h {
-        *c *= inv;
-    }
-    h
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::buffer::{AudioBuffer, ChannelLayout};
+    use core::f32::consts::PI;
 
     fn ctx(sample_rate: u32, frames: usize) -> RenderContext {
         RenderContext {
