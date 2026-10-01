@@ -601,6 +601,18 @@
 //!   ramp. The saturated plateaus are exact; only the in-band divide is
 //!   inexact, so the parity test matches ratios within the fma tolerance (see
 //!   [`strand_keep_ratio`](prism_render_architecture::hair::cluster::strand_keep_ratio)).
+//! * [`GpuHairKeptStrandCount`] evaluates
+//!   [`kept_strand_count`](prism_render_architecture::hair::cluster::kept_strand_count),
+//!   turning a cluster's keep ratio into an integer strand count: clamp the
+//!   ratio into `[0, 1]`, scale by the member count, round to the nearest
+//!   strand and clamp to `[0, total]`. Rounding is the subtle part — Rust's
+//!   `f32::round` rounds halves away from zero while WGSL's built-in `round`
+//!   rounds to even — so the kernel hand-writes `floor(scaled + 0.5)` to stay
+//!   bit-identical to the golden, and a non-finite ratio collapses to `0` kept.
+//!   For member counts in the f32-exact integer range (strand counts) `CPU` and
+//!   `GPU` agree bit-for-bit, so the parity test asserts the counts with integer
+//!   equality (see
+//!   [`kept_strand_count`](prism_render_architecture::hair::cluster::kept_strand_count)).
 //!
 //! # Portability
 //!
@@ -655,6 +667,7 @@ pub mod guide_solver;
 pub mod hero_wavelengths;
 pub mod importance;
 pub mod interp;
+pub mod kept_strand_count;
 pub mod line_coverage;
 pub mod melanin;
 pub mod mesh_shell;
@@ -728,6 +741,7 @@ pub use guide_solver::GpuGuideSolver;
 pub use hero_wavelengths::GpuHairHeroWavelengths;
 pub use importance::GpuHairImportance;
 pub use interp::GpuHairInterp;
+pub use kept_strand_count::{reference_kept_strand_count, GpuHairKeptStrandCount};
 pub use line_coverage::{reference_coverage, GpuHairLineCoverage};
 pub use melanin::{reference_absorption, GpuHairMelanin};
 pub use mesh_shell::{GpuMeshShell, GpuShellMesh, ShellStrandInput};
