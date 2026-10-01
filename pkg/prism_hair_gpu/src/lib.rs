@@ -367,6 +367,13 @@
 //!   box and unions the two per axis, the device-side `BLAS`-build input a
 //!   hardware ray-traced curve primitive registers; with no multiply to
 //!   fuse the twin is bit-exact with the golden (see [`rt_curve_aabb`]).
+//! * [`GpuHairRtCurveCounts`] evaluates
+//!   [`lss_segment_counts`](prism_render_architecture::hair::rt_curve::lss_segment_counts),
+//!   emitting each strand's `max(0, len - 1)` `Linear Swept Spheres` segment
+//!   count one thread per strand — the per-strand primitive budget a
+//!   hardware ray-traced curve `BLAS` build buckets; pure integer
+//!   arithmetic, so the twin matches the golden exactly (see
+//!   [`rt_curve_counts`]).
 //! * [`GpuHairRtCurveSegments`] evaluates
 //!   [`strand_to_lss`](prism_render_architecture::hair::rt_curve::strand_to_lss),
 //!   splitting a strand polyline into one `Linear Swept Spheres` segment per
@@ -580,6 +587,7 @@ pub mod ribbon;
 pub mod root_bind;
 pub mod root_resolve;
 pub mod rt_curve_aabb;
+pub mod rt_curve_counts;
 pub mod rt_curve_segments;
 pub mod rt_proxy;
 pub mod scatter_lod;
@@ -644,6 +652,7 @@ pub use ribbon::{GpuRibbon, GpuRibbonMesh, RibbonStrandInput};
 pub use root_bind::GpuHairRootBind;
 pub use root_resolve::GpuHairRootResolve;
 pub use rt_curve_aabb::{reference_segment_aabb, GpuHairRtCurveAabb};
+pub use rt_curve_counts::{reference_lss_segment_counts, GpuHairRtCurveCounts};
 pub use rt_curve_segments::{reference_strand_to_lss, GpuHairRtCurveSegments};
 pub use rt_proxy::{reference_rt_role, role_code, role_from_code, tier_code, GpuHairRtProxy};
 pub use scatter_lod::{reference_pdf, GpuHairScatterLod, PDF_PER_ELEMENT};
