@@ -170,6 +170,14 @@
 //!   [`delay::DelayNode`], the shared-line taps of
 //!   [`multi_tap_delay::MultiTapDelayNode`], and the pitched short comb
 //!   of [`comb_resonator::CombResonatorNode`].
+//! - [`reverse_delay::ReverseDelayNode`] -- reverse (backwards) echo
+//!   that captures the input in fixed-length segments and plays each
+//!   segment back-to-front with a Hann taper for click-free grains,
+//!   plus optional feedback for cascading reverse repeats. Unlike the
+//!   forward-reading [`delay::DelayNode`],
+//!   [`multi_tap_delay::MultiTapDelayNode`], and
+//!   [`ping_pong_delay::PingPongDelayNode`], it reverses the time axis
+//!   within each segment, which no fractional-delay read can do.
 
 pub mod auto_wah;
 pub mod bitcrusher;
@@ -192,6 +200,7 @@ pub mod parametric_eq;
 pub mod phaser;
 pub mod ping_pong_delay;
 pub mod pitch_shifter;
+pub mod reverse_delay;
 pub mod ring_modulator;
 pub mod saturation;
 pub mod spectral_delay;
@@ -246,6 +255,11 @@ pub use ping_pong_delay::{
 };
 pub use pitch_shifter::{
     MAX_PITCH_RATIO, MIN_PITCH_RATIO, PitchShifterNode, PitchShifterParams, semitones_to_ratio,
+};
+pub use reverse_delay::{
+    DEFAULT_REVERSE_FEEDBACK, DEFAULT_REVERSE_MIX, DEFAULT_REVERSE_SEGMENT_MS,
+    MAX_REVERSE_FEEDBACK, MAX_REVERSE_SEGMENT_MS, MIN_REVERSE_SEGMENT_MS,
+    ReverseDelayNode, ReverseDelayParams,
 };
 pub use ring_modulator::{RingModulatorNode, RingModulatorParams};
 pub use saturation::{DEFAULT_DC_BLOCK_COEFF, SaturationCurve, SaturationNode, SaturationParams};
