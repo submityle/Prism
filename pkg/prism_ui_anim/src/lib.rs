@@ -25,6 +25,7 @@
 
 extern crate alloc;
 
+pub mod choreography;
 pub mod driver;
 pub mod easing;
 pub mod lerp;
@@ -32,6 +33,7 @@ pub(crate) mod math;
 pub mod spring;
 pub mod timeline;
 
+pub use choreography::{Choreography, Track};
 pub use driver::{Transition, TransitionPhase, Tween};
 pub use easing::{Easing, StepPosition};
 pub use lerp::Lerp;
