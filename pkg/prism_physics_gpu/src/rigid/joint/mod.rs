@@ -37,6 +37,11 @@
 //! * [`revolute_cpu`] — the authoritative [`cpu_solve_joints_revolute`] golden
 //!   stepper (axis alignment plus point-to-point weld).
 //! * [`revolute_gpu`] — the device-side [`GpuRevoluteJointSolver`] twin.
+//! * [`prismatic`] — the [`PrismaticJoint`] (slider) definition and its
+//!   device-packed storage representation.
+//! * [`prismatic_cpu`] — the authoritative [`cpu_solve_joints_prismatic`] golden
+//!   stepper (angular lock plus perpendicular point-to-point weld).
+//! * [`prismatic_gpu`] — the device-side [`GpuPrismaticJointSolver`] twin.
 //!
 //! # Scheme and scope
 //!
@@ -56,6 +61,9 @@ mod coloring;
 mod config;
 mod gpu_core;
 mod math;
+mod prismatic;
+mod prismatic_cpu;
+mod prismatic_gpu;
 mod revolute;
 mod revolute_cpu;
 mod revolute_gpu;
@@ -66,6 +74,9 @@ mod stepper;
 
 pub use coloring::{JointColouring, MAX_JOINT_BATCHES};
 pub use config::JointSolverConfig;
+pub use prismatic::PrismaticJoint;
+pub use prismatic_cpu::cpu_solve_joints_prismatic;
+pub use prismatic_gpu::GpuPrismaticJointSolver;
 pub use revolute::RevoluteJoint;
 pub use revolute_cpu::cpu_solve_joints_revolute;
 pub use revolute_gpu::GpuRevoluteJointSolver;
