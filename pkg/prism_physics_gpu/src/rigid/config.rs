@@ -100,6 +100,101 @@ impl Default for IntegratorConfig {
     }
 }
 
+/// Tunables controlling the velocity-level rigid-body contact solver.
+///
+/// The solver runs `iterations` sequential-impulse sweeps per frame. Penetration
+/// is removed with a Baumgarte position bias `baumgarte / dt * max(penetration -
+/// slop, 0)`: `baumgarte` in `[0, 1]` sets how aggressively overlap is pushed out
+/// (a fraction of the error removed per frame) and `slop` is the small allowed
+/// penetration that is left uncorrected so resting contacts do not jitter.
+/// `restitution_threshold` is the approach speed below which restitution is
+/// suppressed, so bodies merely resting (small, gravity-driven closing speed) do
+/// not bounce and gain energy.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ContactSolverConfig {
+    /// Number of sequential-impulse sweeps over the contact set per frame.
+    /// Clamped to at least `1` when solving.
+    pub iterations: u32,
+    /// Baumgarte position-bias factor in `[0, 1]`: the fraction of the
+    /// (slop-reduced) penetration converted into a separating bias velocity
+    /// each frame.
+    pub baumgarte: f32,
+    /// Allowed penetration (metres) left uncorrected so resting stacks settle
+    /// without jitter.
+    pub slop: f32,
+    /// Approach speed (metres per second) below which restitution is
+    /// suppressed, preventing resting contacts from bouncing.
+    pub restitution_threshold: f32,
+}
+
+impl ContactSolverConfig {
+    /// Default sweep count.
+    pub const DEFAULT_ITERATIONS: u32 = 8;
+    /// Default Baumgarte position-bias factor.
+    pub const DEFAULT_BAUMGARTE: f32 = 0.2;
+    /// Default penetration slop (metres).
+    pub const DEFAULT_SLOP: f32 = 0.005;
+    /// Default restitution suppression threshold (metres per second).
+    pub const DEFAULT_RESTITUTION_THRESHOLD: f32 = 0.5;
+
+    /// Creates a contact-solver configuration.
+    #[must_use]
+    pub fn new(
+        iterations: u32,
+        baumgarte: f32,
+        slop: f32,
+        restitution_threshold: f32,
+    ) -> ContactSolverConfig {
+        ContactSolverConfig {
+            iterations,
+            baumgarte,
+            slop,
+            restitution_threshold,
+        }
+    }
+
+    /// Returns the effective sweep count (at least `1`).
+    #[must_use]
+    pub fn effective_iterations(&self) -> u32 {
+        self.iterations.max(1)
+    }
+
+    /// Validates the configuration, returning the first violated invariant.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RigidError::InvalidConfig`] when `baumgarte` is outside
+    /// `[0, 1]`, when `slop` or `restitution_threshold` is negative, or when any
+    /// field is not finite.
+    pub fn validate(&self) -> Result<(), RigidError> {
+        if !self.baumgarte.is_finite() || !(0.0..=1.0).contains(&self.baumgarte) {
+            return Err(RigidError::InvalidConfig("baumgarte must lie in [0, 1]"));
+        }
+        if !self.slop.is_finite() || self.slop < 0.0 {
+            return Err(RigidError::InvalidConfig(
+                "slop must be finite and non-negative",
+            ));
+        }
+        if !self.restitution_threshold.is_finite() || self.restitution_threshold < 0.0 {
+            return Err(RigidError::InvalidConfig(
+                "restitution_threshold must be finite and non-negative",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Default for ContactSolverConfig {
+    fn default() -> Self {
+        ContactSolverConfig {
+            iterations: Self::DEFAULT_ITERATIONS,
+            baumgarte: Self::DEFAULT_BAUMGARTE,
+            slop: Self::DEFAULT_SLOP,
+            restitution_threshold: Self::DEFAULT_RESTITUTION_THRESHOLD,
+        }
+    }
+}
+
 /// Errors the `GPU` rigid-body integrator can report.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RigidError {
@@ -110,6 +205,14 @@ pub enum RigidError {
     InconsistentState {
         /// A human-readable description of which array disagreed.
         reason: &'static str,
+    },
+    /// The contact graph needed more parallel batches (colours) than the
+    /// solver's fixed ceiling supports.
+    TooManyContactBatches {
+        /// The batch index that overflowed the ceiling.
+        batches: u32,
+        /// The maximum number of batches supported.
+        maximum: u32,
     },
 }
 
@@ -122,6 +225,10 @@ impl core::fmt::Display for RigidError {
             RigidError::InconsistentState { reason } => {
                 write!(f, "inconsistent rigid-body state: {reason}")
             }
+            RigidError::TooManyContactBatches { batches, maximum } => write!(
+                f,
+                "contact graph needs {batches} batches, exceeding the maximum of {maximum}"
+            ),
         }
     }
 }

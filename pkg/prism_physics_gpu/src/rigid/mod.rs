@@ -31,10 +31,18 @@
 
 mod body;
 mod config;
+mod contact;
+mod contact_coloring;
+mod contact_cpu;
+mod contact_gpu;
 mod cpu;
 mod gpu;
 
 pub use body::RigidBodyState;
-pub use config::{IntegratorConfig, RigidError};
+pub use config::{ContactSolverConfig, IntegratorConfig, RigidError};
+pub use contact::RigidContact;
+pub use contact_coloring::RigidContactColouring;
+pub use contact_cpu::cpu_solve_contacts;
+pub use contact_gpu::GpuRigidContactSolver;
 pub use cpu::cpu_integrate;
 pub use gpu::GpuRigidIntegrator;
