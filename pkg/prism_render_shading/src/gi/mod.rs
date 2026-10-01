@@ -39,6 +39,10 @@
 //!   and aerial perspective.
 //! * [`surface_cache`] — Lumen-style persistent surfel radiance cache.
 //! * [`global_sdf`] — merged global distance field with cone/sphere tracing.
+//! * [`shadow`] — virtual shadow maps, ray-traced contact shadows, PCSS penumbra.
+//! * [`spec_gi`] — glossy specular GI via GGX-lobe ReSTIR reuse + BRDF/light MIS.
+//! * [`sky_lut`] — Hillaire sky/transmittance/multiscatter LUT bake + sampling.
+//! * [`irradiance_volume`] — DDGI octahedral irradiance + Chebyshev visibility probes.
 
 pub mod denoise;
 pub mod occlusion;
@@ -57,4 +61,8 @@ pub mod path_reuse;
 pub mod atmosphere;
 pub mod surface_cache;
 pub mod global_sdf;
+pub mod shadow;
+pub mod spec_gi;
+pub mod sky_lut;
+pub mod irradiance_volume;
 pub mod world_space;
