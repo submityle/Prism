@@ -24,6 +24,7 @@ pub mod octahedral;
 pub mod probe_interpolation;
 pub mod probe_placement;
 pub mod radiance_cache;
+pub mod spherical_gaussian;
 pub mod visibility;
 
 pub use octahedral::{dir_to_oct, oct_to_dir};
@@ -36,3 +37,4 @@ pub use probe_placement::{
     PixelRect,
 };
 pub use radiance_cache::{cell_to_key, evaluate_irradiance, world_to_cell, RadianceCell, ShL1Rgb};
+pub use spherical_gaussian::{cosine_lobe_sg, ggx_specular_sg, SphericalGaussian};
