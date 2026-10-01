@@ -70,6 +70,17 @@ use super::pipeline::WaterComputePipelines;
 /// `u32` atomics per face.
 pub(crate) const MAC_FACE_SCATTER_SLOTS: u32 = 2;
 
+/// Byte size of the staggered-`MAC` `P2G` face scatter accumulator for a grid
+/// with `mac_faces_total` velocity faces: [`MAC_FACE_SCATTER_SLOTS`]
+/// (`[momentum, mass]`) fixed-point `u32` atomics per face, each
+/// [`GRID_SCALAR_STRIDE`] bytes. Sizing it at one scalar per face (or per cell)
+/// under-allocates it and lets `water_flip_mac_p2g.wesl` scatter past the
+/// buffer's end at `face_scatter[face_flat * 2 + {0, 1}]`.
+#[must_use]
+pub(crate) fn mac_face_scatter_bytes(mac_faces_total: u32) -> u64 {
+    u64::from(mac_faces_total) * u64::from(MAC_FACE_SCATTER_SLOTS) * u64::from(GRID_SCALAR_STRIDE)
+}
+
 /// Byte stride of one Shallow-Water working scalar (`h`, `u`, `v` are unpacked
 /// into separate `array<f32>` working buffers by `water_surface.wesl`, distinct
 /// from the packed `vec4<f32>` resident cell the sizing contract counts).
@@ -518,9 +529,7 @@ impl WaterBodyGpuBuffers {
         let [mac_nx, mac_ny, mac_nz, _] = upload.flip_params.dim;
         let mac_faces_total = mac_face_count(mac_nx, mac_ny, mac_nz);
         let mac_face_bytes = u64::from(mac_faces_total) * u64::from(GRID_SCALAR_STRIDE);
-        let mac_scatter_bytes = u64::from(mac_faces_total)
-            * u64::from(MAC_FACE_SCATTER_SLOTS)
-            * u64::from(GRID_SCALAR_STRIDE);
+        let mac_scatter_bytes = mac_face_scatter_bytes(mac_faces_total);
         let mac_faces = zeroed_storage(device, "prism water mac faces", mac_face_bytes);
         let mac_face_scatter =
             zeroed_storage(device, "prism water mac face scatter", mac_scatter_bytes);
@@ -1608,6 +1617,36 @@ mod tests {
         let slots_needed =
             u64::from(counts().flip_grid_cells) * u64::from(FLIP_SCATTER_SLOTS_PER_CELL);
         assert!(plan.flip_scatter_bytes() >= slots_needed * u64::from(GRID_SCALAR_STRIDE));
+    }
+
+    /// The staggered-`MAC` `P2G` face scatter accumulator must hold
+    /// [`MAC_FACE_SCATTER_SLOTS`] (`[momentum, mass]`) atomics per velocity
+    /// face, not per cell: the `water_flip_mac_p2g` kernel scatters into
+    /// `face_scatter[face_flat * 2 + {0, 1}]` over the `[u | v | w]` face
+    /// blocks, so sizing it at one scalar per face (or at the smaller cell
+    /// total) is read and written past its end. This pins the two-slot face
+    /// sizing against the kernel's largest write index + 1 on a non-cubic grid
+    /// so a per-axis miscount or a regression to one slot fails the build.
+    #[test]
+    fn mac_face_scatter_buffer_holds_two_atomics_per_face() {
+        assert_eq!(MAC_FACE_SCATTER_SLOTS, 2);
+        // Distinct nx/ny/nz so the u/v/w face families have different counts
+        // and a dropped axis in the sizing would change the total.
+        let (nx, ny, nz) = (6u32, 5u32, 4u32);
+        let faces = mac_face_count(nx, ny, nz);
+        let bytes = mac_face_scatter_bytes(faces);
+        // Two u32 atomics (`[momentum, mass]`) per face.
+        assert_eq!(
+            bytes,
+            u64::from(faces) * u64::from(MAC_FACE_SCATTER_SLOTS) * u64::from(GRID_SCALAR_STRIDE)
+        );
+        // The face total exceeds the cell total, so a cell-sized buffer would
+        // under-allocate even before the two-slot factor.
+        assert!(faces > nx * ny * nz);
+        // The kernel's largest write is `face_scatter[(faces - 1) * 2 + 1]`, so
+        // the buffer must hold at least `faces * 2` u32 slots.
+        let max_index_plus_one = u64::from(faces) * u64::from(MAC_FACE_SCATTER_SLOTS);
+        assert!(bytes >= max_index_plus_one * u64::from(GRID_SCALAR_STRIDE));
     }
 
     /// An empty body clamps every resident buffer to the storage floor so no
