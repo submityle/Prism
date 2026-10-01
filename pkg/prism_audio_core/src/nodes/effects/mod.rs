@@ -27,6 +27,10 @@
 //!   feedback) for shimmering thickening.
 //! - [`flanger::FlangerNode`] — single short LFO-swept delay with feedback for
 //!   the classic sweeping comb / "jet" effect.
+//! - [`formant_filter::FormantFilterNode`] -- parallel band-pass resonator bank
+//!   tuned to the five cardinal vowels, with continuous vowel morphing, for
+//!   talk-box / vocal-pad timbres; distinct from the series EQ nodes and from
+//!   the single swept band of [`auto_wah::AutoWahNode`].
 //! - [`comb_resonator::CombResonatorNode`] — pitched feedback comb with a
 //!   lowpass in the loop for plucked-string / resonant-body voices.
 //! - [`phaser::PhaserNode`] — cascaded first-order all-pass stages swept by an
@@ -80,6 +84,7 @@ pub mod comb_resonator;
 pub mod delay;
 pub mod exciter;
 pub mod flanger;
+pub mod formant_filter;
 pub mod frequency_shifter;
 pub mod graphic_eq;
 pub mod mid_side_matrix;
@@ -102,6 +107,9 @@ pub use comb_resonator::{CombResonatorNode, CombResonatorParams, MAX_FEEDBACK, M
 pub use delay::DelayNode;
 pub use exciter::{Exciter, ExciterNode, ExciterParams, HarmonicMode};
 pub use flanger::{FlangerNode, FlangerParams};
+pub use formant_filter::{
+    FormantFilter, FormantFilterNode, FormantFilterParams, FormantSpec, Vowel,
+};
 pub use frequency_shifter::{FrequencyShifterNode, FrequencyShifterParams};
 pub use graphic_eq::{GraphicEqNode, GraphicEqSpacing};
 pub use mid_side_matrix::{MidSideMatrixNode, MidSideMatrixParams, MidSideMode};
