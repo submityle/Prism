@@ -367,6 +367,14 @@
 //!   box and unions the two per axis, the device-side `BLAS`-build input a
 //!   hardware ray-traced curve primitive registers; with no multiply to
 //!   fuse the twin is bit-exact with the golden (see [`rt_curve_aabb`]).
+//! * [`GpuHairRtCurveBounds`] folds
+//!   [`segments_aabb`](prism_render_architecture::hair::rt_curve::segments_aabb),
+//!   a shared-memory tree reduction that unions a whole batch of
+//!   `Linear Swept Spheres` segments into the single conservative
+//!   `axis-aligned` bounding box enclosing them all — the groom-global
+//!   root box a hardware ray-traced curve `BLAS` build registers before
+//!   refining per primitive; union is order-independent `min`/`max`, so
+//!   the tree fold is bit-exact with the golden (see [`rt_curve_bounds`]).
 //! * [`GpuHairRtCurveCounts`] evaluates
 //!   [`lss_segment_counts`](prism_render_architecture::hair::rt_curve::lss_segment_counts),
 //!   emitting each strand's `max(0, len - 1)` `Linear Swept Spheres` segment
@@ -587,6 +595,7 @@ pub mod ribbon;
 pub mod root_bind;
 pub mod root_resolve;
 pub mod rt_curve_aabb;
+pub mod rt_curve_bounds;
 pub mod rt_curve_counts;
 pub mod rt_curve_segments;
 pub mod rt_proxy;
@@ -652,6 +661,7 @@ pub use ribbon::{GpuRibbon, GpuRibbonMesh, RibbonStrandInput};
 pub use root_bind::GpuHairRootBind;
 pub use root_resolve::GpuHairRootResolve;
 pub use rt_curve_aabb::{reference_segment_aabb, GpuHairRtCurveAabb};
+pub use rt_curve_bounds::{reference_segments_aabb, GpuHairRtCurveBounds};
 pub use rt_curve_counts::{reference_lss_segment_counts, GpuHairRtCurveCounts};
 pub use rt_curve_segments::{reference_strand_to_lss, GpuHairRtCurveSegments};
 pub use rt_proxy::{reference_rt_role, role_code, role_from_code, tier_code, GpuHairRtProxy};
