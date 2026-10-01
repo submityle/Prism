@@ -113,6 +113,20 @@ impl VirtualTexture {
         self.max_mip as f32
     }
 
+    /// Base (mip-0) width in texels.
+    #[inline]
+    #[must_use]
+    pub fn width(self) -> u32 {
+        self.width
+    }
+
+    /// Base (mip-0) height in texels.
+    #[inline]
+    #[must_use]
+    pub fn height(self) -> u32 {
+        self.height
+    }
+
     /// Axis dimension (texels) at `mip`, floored to `>= 1`.
     #[inline]
     #[must_use]

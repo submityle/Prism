@@ -16,6 +16,7 @@ mod resources;
 mod surface;
 mod texture_addressing;
 mod texture_lod;
+mod texture_sample;
 mod validation;
 
 pub use authoring::FACE_SHADOW_SDF_SEMANTIC;
@@ -46,6 +47,7 @@ pub use texture_lod::{
     AnisotropicMip, PageRequest, RayCone, RayDifferential, TriangleLodConstant, TrilinearMip,
     VirtualTexture, MAX_ANISO_TAPS, MIN_COS_INCIDENCE,
 };
+pub use texture_sample::{resolve_cone, resolve_differential, SampleRequest, SampleResolved};
 pub use validation::{validate_graph, MaterialValidationError};
 
 #[cfg(test)]
