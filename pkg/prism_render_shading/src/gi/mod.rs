@@ -63,6 +63,10 @@
 //! * [`lens`] — chromatic aberration, lens flare, vignette.
 //! * [`parallax`] — parallax occlusion / relief height-field mapping.
 //! * [`sharpen`] — FidelityFX CAS/RCAS contrast-adaptive sharpening.
+//! * [`subsurface`] — Penner pre-integrated skin + Jimenez separable SSS.
+//! * [`eye`] — cornea refraction, iris parallax, limbal darkening.
+//! * [`vrs`] — variable-rate shading tile classification.
+//! * [`cloth`] — Charlie/velvet fabric sheen BRDF lobes.
 
 pub mod denoise;
 pub mod occlusion;
@@ -105,4 +109,8 @@ pub mod hair_bsdf;
 pub mod lens;
 pub mod parallax;
 pub mod sharpen;
+pub mod subsurface;
+pub mod eye;
+pub mod vrs;
+pub mod cloth;
 pub mod world_space;
