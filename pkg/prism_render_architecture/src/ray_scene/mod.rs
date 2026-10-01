@@ -143,6 +143,20 @@
 //!   `center`/`top` plus `waist`/`flare`) with node records reusing the shared
 //!   [`NODE_WORDS`] and a packed hyperboloid walk that reproduces the in-memory
 //!   walk bit-for-bit.
+//! - [`capsule`] — analytic capsule (sphere-swept segment / stadium of
+//!   revolution) [`capsule::Capsule`] procedural primitive (character
+//!   controllers, limbs, wires, tubes, thick hair strands — the single most
+//!   common real-time render/collision proxy): endpoints `a`/`b` + sweep
+//!   `radius`, solved as an infinite-cylinder quadratic clipped to the body
+//!   band plus two endpoint hemispheres clipped to their cap half-spaces
+//!   (every `t²` coefficient carries `dd`), reporting the
+//!   [`capsule::CapsuleHit`], with a single-level [`capsule::CapsuleBvh`]
+//!   reusing the shared binned-`SAH` build and slab traversal.
+//! - [`capsule_gpu_layout`] — flat, `GPU`-uploadable
+//!   [`capsule::CapsuleBvh`] buffer layout
+//!   ([`capsule_gpu_layout::CAPSULE_WORDS`] stride packing `a`/`b` plus
+//!   `radius`) with node records reusing the shared [`NODE_WORDS`] and a
+//!   packed capsule walk that reproduces the in-memory walk bit-for-bit.
 //! - [`traversal`] — [`Ray`]/`BVH` slab + Möller–Trumbore intersection with
 //!   closest-hit and any-hit walks (the `GPU` traversal kernel's golden ref).
 //! - [`traversal_stackless`] — stackless (threaded / escape-index) `BVH` walk:
@@ -181,6 +195,8 @@ pub mod paraboloid;
 pub mod paraboloid_gpu_layout;
 pub mod hyperboloid;
 pub mod hyperboloid_gpu_layout;
+pub mod capsule;
+pub mod capsule_gpu_layout;
 pub mod footprint;
 pub mod gpu_layout;
 pub mod motion;
@@ -230,6 +246,8 @@ pub use paraboloid::{Paraboloid, ParaboloidBvh, ParaboloidHit};
 pub use paraboloid_gpu_layout::{GpuParaboloidBvhBuffers, PARABOLOID_WORDS};
 pub use hyperboloid::{Hyperboloid, HyperboloidBvh, HyperboloidHit};
 pub use hyperboloid_gpu_layout::{GpuHyperboloidBvhBuffers, HYPERBOLOID_WORDS};
+pub use capsule::{Capsule, CapsuleBvh, CapsuleHit};
+pub use capsule_gpu_layout::{GpuCapsuleBvhBuffers, CAPSULE_WORDS};
 pub use rectangle_gpu_layout::{GpuRectangleBvhBuffers, RECTANGLE_WORDS};
 pub use aabb_primitive_gpu_layout::{GpuAabbBvhBuffers, AABB_PRIMITIVE_WORDS};
 pub use sphere_gpu_layout::{GpuSphereBvhBuffers, SPHERE_WORDS};
