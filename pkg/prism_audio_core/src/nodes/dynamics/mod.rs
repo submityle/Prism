@@ -25,6 +25,11 @@
 //!   attack / sustain designer (fast vs slow follower), threshold-free.
 //! - [`gate::ExpanderGateNode`] — downward expander / noise gate with hold.
 //! - [`ducking::DuckingNode`] — side-chain ducker (key on input port 1).
+//! - [`upward_compressor::UpwardCompressorNode`] -- feed-forward upward
+//!   compressor that lifts signal below the threshold (boost = (1-1/R)*under,
+//!   capped by `max_gain_db`); stereo-linked, reusing the shared detector and
+//!   ballistics. It is the sign-flipped sibling of the downward compressor and
+//!   is distinct from the gate, which attenuates below the threshold.
 
 pub mod compressor;
 pub mod de_esser;
@@ -35,6 +40,7 @@ pub mod gate;
 pub mod limiter;
 pub mod multiband;
 pub mod transient_shaper;
+pub mod upward_compressor;
 
 pub use compressor::{CompressorNode, CompressorParams};
 pub use de_esser::{DeEsserMode, DeEsserNode, DeEsserParams};
@@ -45,3 +51,7 @@ pub use gate::{ExpanderGateNode, GateParams};
 pub use limiter::{LimiterNode, LimiterParams};
 pub use multiband::MultibandCompressorNode;
 pub use transient_shaper::{TransientShaperNode, TransientShaperParams};
+pub use upward_compressor::{
+    DEFAULT_UPWARD_MAX_GAIN_DB, DEFAULT_UPWARD_RATIO, DEFAULT_UPWARD_THRESHOLD_DB,
+    MAX_UPWARD_GAIN_DB, UpwardCompressorNode, UpwardCompressorParams, upward_boost_db,
+};
