@@ -1112,6 +1112,53 @@ fn hair_angel_ring_wesl_compiles_and_resolves_imports() {
     });
 }
 
+/// Registers `lighting.wesl`, `brdf.wesl` and `hair_matcap.wesl` under their
+/// canonical module paths and compiles `hair_matcap.wesl`, forcing the importer
+/// to resolve the `prism_render_scene::shaders::brdf::{...}` imports the NPR
+/// `MatCap` body shade depends on (`SurfaceSample`, `ShadingFrame` and
+/// `brdf_normalize_or`; `brdf.wesl` in turn imports `lighting.wesl`). A green
+/// result proves the material-capture front end — the view-basis `MatCap`
+/// coordinate reconstruction (`hair_matcap_uv`) and the base/tint/strength
+/// modulation with single emissive add (`hair_matcap_shade` /
+/// `evaluate_hair_matcap`) — parses, resolves its imports and type-checks as
+/// WESL, in lock-step with the CPU golden
+/// `prism_render_shading::hair_matcap::evaluate_hair_matcap`.
+#[test]
+fn hair_matcap_wesl_compiles_and_resolves_imports() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let lighting = shader_id(0x5052_4953_4d5f_4c49_4748_5449_4e47_0009);
+    cache.set_shader(
+        lighting,
+        Shader::from_wesl(
+            include_str!("../../shaders/lighting.wesl"),
+            "embedded://prism_render_scene/shaders/lighting.wesl",
+        ),
+    );
+
+    let brdf = shader_id(0x5052_4953_4d5f_4252_4446_0000_0000_0009);
+    cache.set_shader(
+        brdf,
+        Shader::from_wesl(
+            include_str!("../../shaders/brdf.wesl"),
+            "embedded://prism_render_scene/shaders/brdf.wesl",
+        ),
+    );
+
+    let matcap = shader_id(0x5052_4953_4d5f_4d41_5443_4150_0000_0001);
+    cache.set_shader(
+        matcap,
+        Shader::from_wesl(
+            include_str!("../../shaders/hair_matcap.wesl"),
+            "embedded://prism_render_scene/shaders/hair_matcap.wesl",
+        ),
+    );
+
+    cache.get(0, matcap, &[]).unwrap_or_else(|error| {
+        panic!("hair_matcap.wesl failed to compile/resolve imports: {error}")
+    });
+}
+
 /// Registers `lighting.wesl`, `brdf.wesl` and `hair_chiang.wesl` under their
 /// canonical module paths and compiles `hair_chiang.wesl`, forcing the importer
 /// to resolve the `prism_render_scene::shaders::brdf::{...}` imports the Chiang
