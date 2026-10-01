@@ -59,6 +59,10 @@
 //! * [`motion_blur`] — McGuire tile-velocity reconstruction filter.
 //! * [`fog`] — analytic height/distance fog with sun inscattering.
 //! * [`decal`] — deferred decal projection, blending, clustered binning.
+//! * [`hair_bsdf`] — Marschner/Chiang R/TT/TRT hair scattering.
+//! * [`lens`] — chromatic aberration, lens flare, vignette.
+//! * [`parallax`] — parallax occlusion / relief height-field mapping.
+//! * [`sharpen`] — FidelityFX CAS/RCAS contrast-adaptive sharpening.
 
 pub mod denoise;
 pub mod occlusion;
@@ -97,4 +101,8 @@ pub mod depth_of_field;
 pub mod motion_blur;
 pub mod fog;
 pub mod decal;
+pub mod hair_bsdf;
+pub mod lens;
+pub mod parallax;
+pub mod sharpen;
 pub mod world_space;
