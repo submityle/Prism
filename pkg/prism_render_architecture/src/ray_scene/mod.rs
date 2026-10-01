@@ -221,6 +221,13 @@
 //!   the [`curve`] swept-circle intersector, so [`spline::SplineBvh`] shares the
 //!   Bézier traversal and uploads through [`curve_gpu_layout`] with no separate
 //!   `GPU` layout.
+//! - [`spline_strip`] — multi-segment spline strand [`spline_strip::SplineStrip`]
+//!   (hair/grass/foliage): a sliding four-vertex window expands a run of control
+//!   vertices + per-vertex widths into overlapping [`spline::SplineCurve`]
+//!   segments (`C0`/`C1`-continuous; [`spline_strip::SplineStrip::clamped`] pins
+//!   the endpoints), and a [`spline_strip::SplineStripBvh`] pools every strand's
+//!   segments into one [`spline::SplineBvh`] (shared Bézier traversal + `GPU`
+//!   upload).
 //! - [`traversal`] — [`Ray`]/`BVH` slab + Möller–Trumbore intersection with
 //!   closest-hit and any-hit walks (the `GPU` traversal kernel's golden ref).
 //! - [`traversal_stackless`] — stackless (threaded / escape-index) `BVH` walk:
@@ -272,6 +279,7 @@ pub mod obb_gpu_layout;
 pub mod shaded_triangle;
 pub mod shaded_triangle_gpu_layout;
 pub mod spline;
+pub mod spline_strip;
 pub mod footprint;
 pub mod gpu_layout;
 pub mod motion;
@@ -334,6 +342,7 @@ pub use obb_gpu_layout::{GpuObbBvhBuffers, OBB_WORDS};
 pub use shaded_triangle::{ShadedTriangle, ShadedTriangleBvh, ShadedTriangleHit};
 pub use shaded_triangle_gpu_layout::{GpuShadedTriangleBvhBuffers, SHADED_TRI_WORDS};
 pub use spline::{SplineBasis, SplineBvh, SplineCurve};
+pub use spline_strip::{SplineStrip, SplineStripBvh};
 pub use rectangle_gpu_layout::{GpuRectangleBvhBuffers, RECTANGLE_WORDS};
 pub use aabb_primitive_gpu_layout::{GpuAabbBvhBuffers, AABB_PRIMITIVE_WORDS};
 pub use sphere_gpu_layout::{GpuSphereBvhBuffers, SPHERE_WORDS};
