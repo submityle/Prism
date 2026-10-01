@@ -261,6 +261,14 @@
 //!   reproduce [`bspline_surface`]; unequal weights represent conics
 //!   (spherical caps, cylinders, swept arcs) exactly, and the same global
 //!   sampling welds into a watertight [`indexed_bilinear_patch_mesh`].
+//! - [`bezier_surface`] — a composite bicubic Bézier surface
+//!   ([`bezier_surface::BezierSurface`]) over a `(3m + 1) × (3n + 1)`
+//!   control grid tiled into `m × n` [`bezier_patch::BezierPatch`]es with a
+//!   stride of three, so neighbours share one boundary control row/column
+//!   and the surface is `C⁰` across seams (`G¹` only when straddling
+//!   handles are collinear). This is the classic authored net — the Utah
+//!   teapot and many legacy assets are expressed this way — and welds into
+//!   the same watertight [`indexed_bilinear_patch_mesh`].
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -401,6 +409,7 @@ pub mod bspline_patch;
 pub mod rational_bezier_patch;
 pub mod bspline_surface;
 pub mod nurbs_surface;
+pub mod bezier_surface;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -492,6 +501,7 @@ pub use bspline_patch::BsplinePatch;
 pub use rational_bezier_patch::RationalBezierPatch;
 pub use bspline_surface::{BsplineSurface, BsplineSurfaceError};
 pub use nurbs_surface::{NurbsSurface, NurbsSurfaceError};
+pub use bezier_surface::{BezierSurface, BezierSurfaceError};
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
 pub use obb::{Obb, ObbBvh, ObbHit};
