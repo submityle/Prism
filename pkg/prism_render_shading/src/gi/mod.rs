@@ -55,6 +55,10 @@
 //! * [`nee`] — next-event estimation: light sampling, MIS, RIS.
 //! * [`color_grade`] — ASC CDL, white balance, 3D-LUT color grading.
 //! * [`gtao`] — ground-truth ambient occlusion horizon integral.
+//! * [`depth_of_field`] — thin-lens CoC, bokeh gather, near/far layering.
+//! * [`motion_blur`] — McGuire tile-velocity reconstruction filter.
+//! * [`fog`] — analytic height/distance fog with sun inscattering.
+//! * [`decal`] — deferred decal projection, blending, clustered binning.
 
 pub mod denoise;
 pub mod occlusion;
@@ -89,4 +93,8 @@ pub mod area_light;
 pub mod nee;
 pub mod color_grade;
 pub mod gtao;
+pub mod depth_of_field;
+pub mod motion_blur;
+pub mod fog;
+pub mod decal;
 pub mod world_space;

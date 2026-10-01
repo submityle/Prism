@@ -280,7 +280,7 @@ mod tests {
         }
     }
 
-    fn uniform_slices(h1: f32, h2: f32, count: usize) -> alloc::vec::Vec<Slice> {
+    fn uniform_slices(h1: f32, h2: f32, count: usize) -> Vec<Slice> {
         use core::f32::consts::PI;
         (0..count)
             .map(|i| {
