@@ -19,6 +19,7 @@ use alloc::vec::Vec;
 use glam::Vec3;
 
 use crate::bounding::{Aabb, Obb};
+use crate::narrow::closest_point::closest_points_segment_segment;
 use crate::narrow::epa::gjk_contact;
 use crate::narrow::support::SupportMap;
 
@@ -33,6 +34,13 @@ const EDGE_EPSILON_SQ: f32 = 1.0e-12;
 /// Maximum points retained in a manifold. Four points fully constrain a
 /// face-face contact; extras from clipping are reduced away.
 const MAX_MANIFOLD_POINTS: usize = 4;
+
+/// When neither candidate face is at least this aligned with the contact
+/// normal, the contact is an edge-edge (or edge-vertex) touch rather than a
+/// face-face one, so face clipping cannot localise it well and we fall back to
+/// an analytic closest-edge solve. `cos(~18 deg)` keeps genuine face contacts
+/// (including lightly tilted resting boxes) on the clipping path.
+const FACE_ALIGN_THRESHOLD: f32 = 0.95;
 
 /// A planar convex face of a polytope, wound counter-clockwise when viewed
 /// from outside the shape (looking against `normal`).
@@ -258,6 +266,15 @@ pub fn contact_manifold<A: ClipShape, B: ClipShape>(a: &A, b: &B) -> Option<Cont
     let align_a = face_a.normal.dot(normal);
     let align_b = face_b.normal.dot(-normal);
 
+    // Edge-edge / edge-vertex contact: neither face lies flat against the
+    // contact plane, so clipping would place the point at a face corner rather
+    // than the true crossing. Solve the closest edge pair analytically instead.
+    if align_a.max(align_b) < FACE_ALIGN_THRESHOLD
+        && let Some(m) = edge_edge_contact(&face_a, &face_b, normal, contact.depth)
+    {
+        return Some(m);
+    }
+
     let (reference, incident) = if align_a >= align_b {
         (&face_a, &face_b)
     } else {
@@ -318,6 +335,80 @@ pub fn contact_manifold<A: ClipShape, B: ClipShape>(a: &A, b: &B) -> Option<Cont
     Some(ContactManifold {
         normal,
         points: reduce_points(points),
+    })
+}
+
+/// Localises an edge-edge (or edge-vertex) contact by finding the closest pair
+/// of face edges between the two candidate faces.
+///
+/// Face clipping collapses such contacts onto a face corner, biasing both the
+/// position and the recovered depth. Here we test every edge of `face_a`
+/// against every edge of `face_b` with [`closest_points_segment_segment`] and
+/// keep the pair with the smallest gap; ties (common when edges truly cross and
+/// the gap is ~0) are broken toward the most interior parameters so the point
+/// lands at the crossing rather than at a shared endpoint. The penetration
+/// depth is taken from the EPA witness, which is accurate for the normal even
+/// when the witness *position* is not.
+fn edge_edge_contact(
+    face_a: &FacePolygon,
+    face_b: &FacePolygon,
+    normal: Vec3,
+    depth: f32,
+) -> Option<ContactManifold> {
+    let va = &face_a.vertices;
+    let vb = &face_b.vertices;
+    if va.len() < 2 || vb.len() < 2 {
+        return None;
+    }
+
+    let mut best_pos = Vec3::ZERO;
+    let mut best_dist2 = f32::INFINITY;
+    // Interiority score of the chosen pair: larger means the closest points sit
+    // farther from both segment endpoints (used only to break near-ties).
+    let mut best_interior = f32::NEG_INFINITY;
+    let mut found = false;
+
+    let na = va.len();
+    let nb = vb.len();
+    for i in 0..na {
+        let a0 = va[i];
+        let a1 = va[(i + 1) % na];
+        if (a1 - a0).length_squared() < EDGE_EPSILON_SQ {
+            continue;
+        }
+        for j in 0..nb {
+            let b0 = vb[j];
+            let b1 = vb[(j + 1) % nb];
+            if (b1 - b0).length_squared() < EDGE_EPSILON_SQ {
+                continue;
+            }
+            let cp = closest_points_segment_segment(a0, a1, b0, b1);
+            // How far the closest params sit from either endpoint; higher is a
+            // more credible interior crossing.
+            let interior = cp.s.min(1.0 - cp.s).min(cp.t.min(1.0 - cp.t));
+            // Accept a strictly closer pair, or an equally close but more
+            // interior one (crossing edges all report ~0 distance).
+            let closer = cp.distance_squared < best_dist2 - EDGE_EPSILON_SQ;
+            let tie = (cp.distance_squared - best_dist2).abs() <= EDGE_EPSILON_SQ;
+            if closer || (tie && interior > best_interior) {
+                best_dist2 = cp.distance_squared.min(best_dist2);
+                best_interior = interior;
+                best_pos = (cp.c1 + cp.c2) * 0.5;
+                found = true;
+            }
+        }
+    }
+
+    if !found {
+        return None;
+    }
+
+    Some(ContactManifold {
+        normal,
+        points: alloc::vec![ManifoldPoint {
+            position: best_pos,
+            depth: depth.max(0.0),
+        }],
     })
 }
 
@@ -406,5 +497,33 @@ mod tests {
         for p in &m.points {
             assert!(p.depth >= 0.0);
         }
+    }
+
+    #[test]
+    fn crossing_edges_localise_at_true_intersection() {
+        // Box A tilted 45 deg about X: its top ridge runs along world X at
+        // y ~= sqrt(2). Box B tilted 45 deg about Z and placed above: its
+        // bottom ridge runs along world Z. The two ridges cross perpendicularly
+        // above the origin, so the analytic contact point is x = 0, z = 0.
+        let a = Obb::new(
+            Vec3::ZERO,
+            Vec3::splat(1.0),
+            Quat::from_rotation_x(core::f32::consts::FRAC_PI_4),
+        );
+        let b = Obb::new(
+            Vec3::new(0.0, 2.7, 0.0),
+            Vec3::splat(1.0),
+            Quat::from_rotation_z(core::f32::consts::FRAC_PI_4),
+        );
+        let m = contact_manifold(&a, &b).expect("crossing ridges overlap");
+        // Edge-edge contact localises to a single crossing point.
+        assert_eq!(m.points.len(), 1, "edge-edge yields a single point");
+        assert!(m.normal.y > 0.9, "normal is roughly +Y: {:?}", m.normal);
+        let pos = m.points[0].position;
+        // The old face-clipping fallback landed the point at z ~= 0.128 (a face
+        // corner). The analytic solve must sit on the true crossing (x=0, z=0).
+        assert!(pos.x.abs() < 2.0e-2, "x near crossing: {}", pos.x);
+        assert!(pos.z.abs() < 2.0e-2, "z near crossing: {}", pos.z);
+        assert!(m.points[0].depth > 0.0, "contact penetrates");
     }
 }
