@@ -13,8 +13,9 @@
 //!
 //! The signal is processed with a weighted overlap-add (`OLA`) `STFT`. Each
 //! analysis frame of `fft_size` samples is multiplied by a Hann analysis
-//! window, transformed with a `radix-2` decimation-in-time (`DIT`) fast Fourier
-//! transform (`FFT`), gated bin by bin, inverse-transformed, multiplied by a
+//! window, transformed with the crate's shared `radix-2` decimation-in-time
+//! (`DIT`) fast Fourier transform ([`Fft`](crate::fft::Fft)), gated bin by bin,
+//! inverse-transformed, multiplied by a
 //! matching Hann synthesis window, and overlap-added with a hop of
 //! `fft_size / OVERLAP_FACTOR` (75 percent overlap). The squared Hann window at
 //! this hop satisfies the constant-overlap-add (`COLA`) condition, so with all
@@ -33,8 +34,10 @@
 //!
 //! # Real-time contract
 //!
-//! All ring, overlap-add, twiddle, window, and scratch buffers are allocated
-//! once at construction. [`SpectralGateNode::process`] performs no allocation,
+//! All ring, overlap-add, window, and scratch buffers, together with the shared
+//! [`Fft`](crate::fft::Fft) plan (its twiddle and bit-reversal tables), are
+//! allocated once at construction. [`SpectralGateNode::process`] performs no
+//! allocation,
 //! locking, or panic on the hot path; non-finite input samples are treated as
 //! silence. The node reports a processing latency of `fft_size` frames via
 //! [`SpectralGateNode::latency_frames`].
@@ -42,7 +45,8 @@
 //! # Provenance
 //!
 //! The weighted overlap-add `STFT`, the Hann window, the `radix-2` Cooley-Tukey
-//! `FFT`, and spectral gating / downward spectral expansion are standard,
+//! `FFT` (factored into the crate's shared [`Fft`](crate::fft::Fft) primitive),
+//! and spectral gating / downward spectral expansion are standard,
 //! publicly documented classic DSP techniques found in any signal-processing
 //! text (for example the overlap-add `STFT` described by Allen and Rabiner).
 //! This is pure classic DSP with no AI or ML. This module contains **no Unreal
@@ -54,6 +58,7 @@ use alloc::{vec, vec::Vec};
 use bevy_math::ops;
 use core::f32::consts::TAU;
 
+use crate::fft::Fft;
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
 use crate::math::{Sample, db_to_linear, flush_denormal};
 
@@ -104,81 +109,6 @@ impl Default for SpectralGateParams {
     }
 }
 
-/// Reverses the low `bits` of `value` (bit-reversal permutation index).
-fn reverse_low_bits(mut value: usize, bits: u32) -> usize {
-    let mut result = 0usize;
-    for _ in 0..bits {
-        result = (result << 1) | (value & 1);
-        value >>= 1;
-    }
-    result
-}
-
-/// Rounds `requested` up to the next power of two, never below [`MIN_FFT_SIZE`].
-fn power_of_two_at_least(requested: usize) -> usize {
-    let mut size = MIN_FFT_SIZE;
-    while size < requested {
-        size <<= 1;
-    }
-    size
-}
-
-/// In-place iterative `radix-2` decimation-in-time transform. `tw_im` holds the
-/// forward (`-sin`) twiddles; the inverse path negates them and scales by
-/// `inv_size`.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "a free function avoids borrowing self while its scratch buffers are mutably held"
-)]
-fn transform(
-    re: &mut [Sample],
-    im: &mut [Sample],
-    rev: &[usize],
-    tw_re: &[Sample],
-    tw_im: &[Sample],
-    size: usize,
-    inverse: bool,
-    inv_size: Sample,
-) {
-    for (i, &j) in rev.iter().enumerate() {
-        if j > i {
-            re.swap(i, j);
-            im.swap(i, j);
-        }
-    }
-    let mut len = 2;
-    while len <= size {
-        let half = len / 2;
-        let step = size / len;
-        let mut base = 0;
-        while base < size {
-            for k in 0..half {
-                let tw = k * step;
-                let wr = tw_re[tw];
-                let wi = if inverse { -tw_im[tw] } else { tw_im[tw] };
-                let a = base + k;
-                let b = base + k + half;
-                let tr = wr * re[b] - wi * im[b];
-                let ti = wr * im[b] + wi * re[b];
-                re[b] = re[a] - tr;
-                im[b] = im[a] - ti;
-                re[a] += tr;
-                im[a] += ti;
-            }
-            base += len;
-        }
-        len <<= 1;
-    }
-    if inverse {
-        for value in re.iter_mut() {
-            *value *= inv_size;
-        }
-        for value in im.iter_mut() {
-            *value *= inv_size;
-        }
-    }
-}
-
 /// One-pole smoothing coefficient for a time constant of `ms` milliseconds at a
 /// frame rate of `sample_rate / hop` frames per second. Returns `1` (instant)
 /// for a non-positive or non-finite time constant.
@@ -201,10 +131,7 @@ pub struct SpectralGateNode {
     channels: usize,
     // Precomputed, read-only tables.
     win: Vec<Sample>,
-    tw_re: Vec<Sample>,
-    tw_im: Vec<Sample>,
-    rev: Vec<usize>,
-    inv_size: Sample,
+    fft: Fft,
     inv_window_sum: Sample,
     two_inv_window_sum: Sample,
     ola_norm: Sample,
@@ -248,11 +175,11 @@ impl SpectralGateNode {
         params: SpectralGateParams,
     ) -> Self {
         let channels = channels.max(1);
-        let size = power_of_two_at_least(requested_size);
+        let fft = Fft::new(requested_size.max(MIN_FFT_SIZE));
+        let size = fft.size();
         let hop = (size / OVERLAP_FACTOR).max(1);
         let half = size / 2;
         let fifo_latency = size - hop;
-        let bits = size.trailing_zeros();
 
         let mut win = vec![0.0; size];
         let mut window_sum = 0.0f32;
@@ -260,19 +187,6 @@ impl SpectralGateNode {
             let w = 0.5 - 0.5 * ops::cos(TAU * n as Sample / size as Sample);
             *slot = w;
             window_sum += w;
-        }
-
-        let mut tw_re = vec![0.0; size];
-        let mut tw_im = vec![0.0; size];
-        for t in 0..size {
-            let angle = TAU * t as Sample / size as Sample;
-            tw_re[t] = ops::cos(angle);
-            tw_im[t] = -ops::sin(angle);
-        }
-
-        let mut rev = vec![0usize; size];
-        for (i, slot) in rev.iter_mut().enumerate() {
-            *slot = reverse_low_bits(i, bits);
         }
 
         // Constant-overlap-add denominator of the squared window at the hop.
@@ -294,10 +208,7 @@ impl SpectralGateNode {
             fifo_latency,
             channels,
             win,
-            tw_re,
-            tw_im,
-            rev,
-            inv_size: 1.0 / size as Sample,
+            fft,
             inv_window_sum,
             two_inv_window_sum: 2.0 * inv_window_sum,
             ola_norm,
@@ -348,7 +259,6 @@ impl AudioNode for SpectralGateNode {
         let hop = self.hop;
         let half = self.half;
         let fifo_latency = self.fifo_latency;
-        let inv_size = self.inv_size;
         let inv_window_sum = self.inv_window_sum;
         let two_inv_window_sum = self.two_inv_window_sum;
         let ola_norm = self.ola_norm;
@@ -360,9 +270,7 @@ impl AudioNode for SpectralGateNode {
 
         // Disjoint field borrows: read-only tables plus mutable state buffers.
         let win = &self.win;
-        let tw_re = &self.tw_re;
-        let tw_im = &self.tw_im;
-        let rev = &self.rev;
+        let fft = &self.fft;
         let re = &mut self.re;
         let im = &mut self.im;
         let in_fifo = &mut self.in_fifo;
@@ -399,7 +307,7 @@ impl AudioNode for SpectralGateNode {
                     im[n] = 0.0;
                 }
 
-                transform(re, im, rev, tw_re, tw_im, size, false, inv_size);
+                fft.forward(re, im);
 
                 // Per-bin spectral gate.
                 for bin in 0..bin_count {
@@ -433,7 +341,7 @@ impl AudioNode for SpectralGateNode {
                     }
                 }
 
-                transform(re, im, rev, tw_re, tw_im, size, true, inv_size);
+                fft.inverse(re, im);
 
                 // Synthesis window and overlap-add.
                 for n in 0..size {
