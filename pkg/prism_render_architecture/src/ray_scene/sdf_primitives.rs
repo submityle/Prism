@@ -406,12 +406,43 @@ pub fn rhombus(
     qx.max(qy).min(0.0) + length2([qx.max(0.0), qy.max(0.0)])
 }
 
+/// Signed distance from `point` to a vesica lens: the intersection of two
+/// spheres of radius `radius` whose centres sit at `(+-half_separation, 0, 0)`
+/// in the equatorial plane, revolved into the convex lens that is symmetric
+/// about the `y` axis. The lens has cusps on the `y` axis at
+/// `+-sqrt(radius^2 - half_separation^2)` and an equatorial circle of radius
+/// `radius - half_separation` in the `xz` plane.
+///
+/// This is Inigo Quilez's exact 2D `sdVesica` applied in the meridian
+/// half-plane `(length(point.xz), |point.y|)`; because the profile is convex
+/// the nearest surface point always lies in the query's meridian plane, so the
+/// revolved distance is exact everywhere (including the on-axis cusps). The
+/// branch test picks the spherical arc or the cusp tip as the governing
+/// feature. Built from `abs`, `sign`, `min`, `max`, and vector lengths, so it
+/// stays transcendental-free.
+///
+/// `half_separation` is only meaningful for `0 <= half_separation <= radius`;
+/// the cusp-height `sqrt` is guarded with `.max(0.0)` so out-of-range inputs
+/// degrade gracefully instead of producing `NaN`.
+pub fn vesica(point: [f32; 3], radius: f32, half_separation: f32) -> f32 {
+    let r = radius;
+    let d = half_separation;
+    let qx = length2([point[0], point[2]]);
+    let qy = point[1].abs();
+    let b = (r * r - d * d).max(0.0).sqrt();
+    if (qy - b) * d > qx * b {
+        length2([qx, qy - b]) * d.signum()
+    } else {
+        length2([qx + d, qy]) - r
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         box_frame, box_sdf, capped_cone, capped_cylinder, capsule, cut_sphere, ellipsoid_sdf,
         hex_prism,
-        link, octahedron, plane, pyramid, rhombus, round_box, sphere, torus,
+        link, octahedron, plane, pyramid, rhombus, round_box, sphere, torus, vesica,
     };
 
     #[test]
@@ -680,5 +711,35 @@ mod tests {
         // Directly above the rhombus the governing feature is the top cap, so
         // the distance is the overshoot past half-height.
         assert!((rhombus([0.0, 2.0, 0.0], 1.0, 1.0, 1.0, 0.0) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn vesica_equator_and_cusp_lie_on_the_surface() {
+        // r = 1, d = 0.6 -> cusp height b = 0.8, equator radius r - d = 0.4.
+        // The equatorial rim and the top cusp both sit on the boundary.
+        assert!(vesica([0.4, 0.0, 0.0], 1.0, 0.6).abs() < 1e-6);
+        assert!(vesica([0.0, 0.8, 0.0], 1.0, 0.6).abs() < 1e-6);
+    }
+
+    #[test]
+    fn vesica_above_the_cusp_measures_the_tip() {
+        // Straight above the cusp the governing feature is the tip, so the
+        // distance is the gap past the cusp height.
+        assert!((vesica([0.0, 1.8, 0.0], 1.0, 0.6) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn vesica_centre_is_the_inset_to_the_arc() {
+        // The centre is radius - half_separation inside the nearest spherical
+        // arc, reported as a negative distance.
+        assert!((vesica([0.0, 0.0, 0.0], 1.0, 0.6) - (-0.4)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn vesica_degenerates_to_a_sphere_without_separation() {
+        // With half_separation = 0 both generating spheres coincide, so the
+        // lens is exactly a sphere of the given radius.
+        assert!(vesica([1.0, 0.0, 0.0], 1.0, 0.0).abs() < 1e-6);
+        assert!((vesica([0.0, 0.0, 0.0], 1.0, 0.0) - (-1.0)).abs() < 1e-6);
     }
 }
