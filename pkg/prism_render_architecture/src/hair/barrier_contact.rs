@@ -604,7 +604,7 @@ mod tests {
         assert!(vclose(a.add(b), Vec3::new(5.0, 1.0, 3.5)));
         assert!(vclose(a.sub(b), Vec3::new(-3.0, 3.0, 2.5)));
         assert!(vclose(a.scale(2.0), Vec3::new(2.0, 4.0, 6.0)));
-        assert!(close(a.dot(b), 1.0 * 4.0 + 2.0 * -1.0 + 3.0 * 0.5));
+        assert!(close(a.dot(b), 1.0 * 4.0 + -2.0 + 3.0 * 0.5));
         // x cross y = z for the standard basis.
         let x = Vec3::new(1.0, 0.0, 0.0);
         let y = Vec3::new(0.0, 1.0, 0.0);

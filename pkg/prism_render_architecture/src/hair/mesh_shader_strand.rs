@@ -406,7 +406,7 @@ pub fn dispatch_group_count(meshlet_count: u32, meshlets_per_group: u32) -> u32 
     }
     let count = meshlet_count as u64;
     let per = per_group as u64;
-    ((count + per - 1) / per) as u32
+    count.div_ceil(per) as u32
 }
 
 /// `amplification`-shader dispatch dimensions for a packed `meshlet` list.
@@ -451,7 +451,6 @@ impl AmplificationDispatch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec;
 
     // A small, internally consistent budget for packing tests.
     // segs = 3 -> verts/strand = 4, prims/strand = 6.

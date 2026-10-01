@@ -35,7 +35,6 @@
 //! add/mul is `sqrt` (for vector normalisation), and integer powers (`a_f^n`)
 //! are evaluated with an explicit multiply loop rather than `powi`/`powf`.
 
-use alloc::vec::Vec;
 use core::f32::consts::PI;
 
 /// Number of real spherical-harmonic coefficients retained: a full second-order
@@ -400,14 +399,10 @@ mod tests {
                 }
             }
         }
-        for i in 0..SH_COEFFS {
-            for j in 0..SH_COEFFS {
+        for (i, row) in gram.iter().enumerate() {
+            for (j, &val) in row.iter().enumerate() {
                 let expected = if i == j { 1.0 } else { 0.0 };
-                assert!(
-                    close_tol(gram[i][j], expected, 0.08),
-                    "gram[{i}][{j}] = {}",
-                    gram[i][j]
-                );
+                assert!(close_tol(val, expected, 0.08), "gram[{i}][{j}] = {val}");
             }
         }
     }

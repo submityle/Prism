@@ -914,8 +914,10 @@ mod tests {
             RodParticle::free(Vec3::new(1.0, 0.0, 0.0)),
         ];
         let rest_lengths = [1.0];
-        let mut params = CosseratParams::default();
-        params.substeps = 4;
+        let params = CosseratParams {
+            substeps: 4,
+            ..Default::default()
+        };
         simulate_strand_cosserat(
             &mut particles,
             &mut orientations,
@@ -939,8 +941,10 @@ mod tests {
             RodParticle::free(Vec3::new(1.0, 0.0, 0.0)),
         ];
         let rest_lengths = [1.0];
-        let mut params = CosseratParams::default();
-        params.substeps = 20;
+        let params = CosseratParams {
+            substeps: 20,
+            ..Default::default()
+        };
         simulate_strand_cosserat(
             &mut particles,
             &mut orientations,
@@ -1018,8 +1022,10 @@ mod tests {
         let mut orientations = vec![Quat::IDENTITY, Quat::IDENTITY];
         let rest_lengths = [1.0, 1.0];
         let rest_darboux = [Vec3::ZERO];
-        let mut params = CosseratParams::default();
-        params.substeps = 8;
+        let params = CosseratParams {
+            substeps: 8,
+            ..Default::default()
+        };
         for _ in 0..30 {
             simulate_strand_cosserat(
                 &mut particles,
@@ -1047,8 +1053,10 @@ mod tests {
         let mut orientations = vec![Quat::IDENTITY, Quat::IDENTITY, Quat::IDENTITY];
         let rest_lengths = [1.0, 1.0, 1.0];
         let rest_darboux = [Vec3::ZERO, Vec3::ZERO];
-        let mut params = CosseratParams::default();
-        params.damping = 0.1;
+        let params = CosseratParams {
+            damping: 0.1,
+            ..Default::default()
+        };
         for _ in 0..200 {
             simulate_strand_cosserat(
                 &mut particles,
@@ -1084,8 +1092,10 @@ mod tests {
             let mut orientations = vec![Quat::IDENTITY, Quat::IDENTITY];
             let rest_lengths = [1.0, 1.0];
             let rest_darboux = [Vec3::new(0.05, 0.0, 0.1)];
-            let mut params = CosseratParams::default();
-            params.substeps = 6;
+            let params = CosseratParams {
+                substeps: 6,
+                ..Default::default()
+            };
             for _ in 0..25 {
                 simulate_strand_cosserat(
                     &mut particles,

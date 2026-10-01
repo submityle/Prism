@@ -116,7 +116,7 @@ fn wrap_unit(value: f32) -> f32 {
         return 0.0;
     }
     let fractional = value - value.floor();
-    if fractional < 0.0 || fractional >= 1.0 {
+    if !(0.0..1.0).contains(&fractional) {
         0.0
     } else {
         fractional

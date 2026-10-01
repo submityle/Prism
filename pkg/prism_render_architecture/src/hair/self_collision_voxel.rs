@@ -79,12 +79,20 @@ impl Vec3 {
 
     /// Component-wise sum.
     #[must_use]
+    #[expect(
+        clippy::should_implement_trait,
+        reason = "no_std handwritten vector math uses an explicit method-call API (add/sub/scale/dot) consistently across the crate rather than operator traits"
+    )]
     pub fn add(self, rhs: Self) -> Self {
         Self::new(self.x + rhs.x, self.y + rhs.y, self.z + rhs.z)
     }
 
     /// Component-wise difference `self - rhs`.
     #[must_use]
+    #[expect(
+        clippy::should_implement_trait,
+        reason = "no_std handwritten vector math uses an explicit method-call API (add/sub/scale/dot) consistently across the crate rather than operator traits"
+    )]
     pub fn sub(self, rhs: Self) -> Self {
         Self::new(self.x - rhs.x, self.y - rhs.y, self.z - rhs.z)
     }
@@ -512,7 +520,7 @@ pub fn splat_density(points: &[HairPoint], grid: VoxelGrid) -> DensityField {
             continue;
         }
         let mass = sanitize_nonneg(p.mass);
-        if !(mass > 0.0) {
+        if mass <= 0.0 {
             continue;
         }
         let vel = p.velocity.sanitized();

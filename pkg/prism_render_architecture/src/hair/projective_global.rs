@@ -469,16 +469,16 @@ impl GlobalSystem {
         let mut y = vec![Vec3::ZERO; n];
         for i in 0..n {
             let mut t = *rhs.get(i).unwrap_or(&Vec3::ZERO);
-            for k in 0..i {
-                t = t.sub(y[k].scale(self.l[i * n + k]));
+            for (k, yk) in y.iter().enumerate().take(i) {
+                t = t.sub(yk.scale(self.l[i * n + k]));
             }
             y[i] = t.scale(1.0 / self.l[i * n + i]);
         }
         let mut x = vec![Vec3::ZERO; n];
         for i in (0..n).rev() {
             let mut t = y[i];
-            for k in (i + 1)..n {
-                t = t.sub(x[k].scale(self.l[k * n + i]));
+            for (k, xk) in x.iter().enumerate().skip(i + 1) {
+                t = t.sub(xk.scale(self.l[k * n + i]));
             }
             x[i] = t.scale(1.0 / self.l[i * n + i]);
         }
@@ -493,13 +493,13 @@ impl GlobalSystem {
     pub fn mul(&self, x: &[Vec3]) -> Vec<Vec3> {
         let n = self.n;
         let mut out = vec![Vec3::ZERO; n];
-        for i in 0..n {
+        for (i, out_i) in out.iter_mut().enumerate() {
             let mut s = Vec3::ZERO;
             for j in 0..n {
                 let xj = *x.get(j).unwrap_or(&Vec3::ZERO);
                 s = s.add(xj.scale(self.a[i * n + j]));
             }
-            out[i] = s;
+            *out_i = s;
         }
         out
     }
@@ -742,8 +742,8 @@ pub fn solve_admm(
     while it < cfg.iterations {
         // Global step: assemble the right-hand side from (z - u).
         let mut rhs = Vec::with_capacity(n);
-        for i in 0..n {
-            rhs.push(sn[i].scale(mass_over_h2));
+        for sn_i in &sn {
+            rhs.push(sn_i.scale(mass_over_h2));
         }
         for (c, atom) in atoms.iter().enumerate() {
             let target = z[c].sub(u[c]);

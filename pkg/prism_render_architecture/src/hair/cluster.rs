@@ -152,9 +152,9 @@ impl Aabb {
     /// Grows the box to enclose a (sanitised) point.
     pub fn expand(&mut self, point: [f32; 3]) {
         let p = sanitize_vec3(point);
-        for axis in 0..3 {
-            self.min[axis] = self.min[axis].min(p[axis]);
-            self.max[axis] = self.max[axis].max(p[axis]);
+        for (axis, &pv) in p.iter().enumerate() {
+            self.min[axis] = self.min[axis].min(pv);
+            self.max[axis] = self.max[axis].max(pv);
         }
     }
 
