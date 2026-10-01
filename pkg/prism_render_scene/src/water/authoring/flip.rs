@@ -9,7 +9,8 @@
 //! deterministic block of liquid inside the grid, derives the particle mass
 //! from the density, runs the seeded state through the architecture core's
 //! [`plan_flip`] to clamp the `FLIP`/`PIC` blend and pick the pressure solver,
-//! and lights the `FLIP` solve plus its screen-space surface reconstruction. An
+//! and lights the face-centered staggered `MAC` `FLIP`/`APIC` solve plus its
+//! screen-space surface reconstruction. An
 //! empty fill region yields an honest no-op body.
 
 use prism_render_architecture::water::flip::{plan_flip, FlipParams, PressureSolverThresholds};
@@ -222,7 +223,7 @@ impl WaterBody {
                 height: screen_h,
             },
             passes: WaterPasses {
-                flip: true,
+                flip_mac: true,
                 reconstruct: true,
                 ..WaterPasses::default()
             },
@@ -247,8 +248,10 @@ mod tests {
     use prism_render_architecture::water::gpu::pipeline::prepare;
     use prism_render_architecture::water::kernels::WaterKernel;
 
-    /// The preset expands into a live `FLIP` body whose schedule scatters,
-    /// projects, gathers and reconstructs a surface.
+    /// The preset expands into a live `FLIP`/`APIC` body whose schedule runs the
+    /// face-centered staggered `MAC` chain (scatter, face normalize, compact
+    /// divergence, `Jacobi` pressure, orthogonal projection, gather) and
+    /// reconstructs a surface. The legacy collocated path stays off.
     #[test]
     fn flip_preset_builds_a_live_volume() {
         let preset = FlipPoolPreset {
@@ -266,13 +269,17 @@ mod tests {
         assert_eq!(body.counts.flip_particles, 512);
 
         let ex = body.as_extract();
-        assert!(ex.flip);
+        assert!(ex.flip_mac);
+        assert!(!ex.flip);
         assert!(ex.reconstruct);
         let plan = prepare(&ex);
         let kinds: Vec<WaterKernel> = plan.dispatches.iter().map(|d| d.kernel).collect();
-        assert!(kinds.contains(&WaterKernel::FlipP2G));
-        assert!(kinds.contains(&WaterKernel::FlipPressureSolve));
-        assert!(kinds.contains(&WaterKernel::FlipG2P));
+        assert!(kinds.contains(&WaterKernel::FlipMacP2G));
+        assert!(kinds.contains(&WaterKernel::FlipMacFacesNormalize));
+        assert!(kinds.contains(&WaterKernel::FlipMacDivergence));
+        assert!(kinds.contains(&WaterKernel::FlipMacPressure));
+        assert!(kinds.contains(&WaterKernel::FlipMacProject));
+        assert!(kinds.contains(&WaterKernel::FlipMacG2P));
         assert!(kinds.contains(&WaterKernel::SurfaceReconstruct));
     }
 
