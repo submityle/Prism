@@ -460,6 +460,13 @@
 //!   surface point, distance, triangle index, and barycentric weights
 //!   ([`mesh_closest_point::MeshClosestPoint`]) for `SDF` baking,
 //!   collision projection, and click-to-surface picking (`f64`, one sqrt).
+//! - [`mesh_self_intersections`] — triangle/triangle overlap and mesh
+//!   self-intersection ([`mesh_self_intersections::triangles_intersect`],
+//!   [`mesh_self_intersections::mesh_self_intersections`]): Tomas Moller's
+//!   fast triangle-triangle test (signed-distance straddle plus 1-D
+//!   interval overlap, with a 2-D coplanar fallback), brute-forced over
+//!   non-adjacent face pairs to flag self-intersecting geometry for mesh
+//!   validation and boolean/export pre-checks (dot/cross only).
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -631,6 +638,7 @@ pub mod mesh_euler_characteristic;
 pub mod mesh_bounding_sphere;
 pub mod mesh_planar_regions;
 pub mod mesh_closest_point;
+pub mod mesh_self_intersections;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -753,6 +761,7 @@ pub use mesh_euler_characteristic::{mesh_topology, MeshTopology};
 pub use mesh_bounding_sphere::{bounding_sphere, BoundingSphere};
 pub use mesh_planar_regions::{planar_regions, PlanarRegions, RegionPlane};
 pub use mesh_closest_point::{closest_point_on_mesh, MeshClosestPoint};
+pub use mesh_self_intersections::{mesh_self_intersections, triangles_intersect};
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
 pub use obb::{Obb, ObbBvh, ObbHit};
