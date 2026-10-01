@@ -265,8 +265,10 @@ impl ClothPieceGpuBuffers {
     /// pools — resident on the device so the solver evolves them in place across
     /// frames. Only the small, genuinely per-frame inputs are restreamed here:
     /// the six uniform parameter blocks (timestep, gravity, wind, and the
-    /// material/collision coefficients) and the analytic collider proxies, which
-    /// track the animated body each frame. The immutable topology buffers
+    /// material/collision coefficients), the analytic collider proxies and the
+    /// painted-backstop planes, which all track the animated body each frame (a
+    /// backstop plane is anchored on the skinned surface, so it moves with the
+    /// body exactly like a collider). The immutable topology buffers
     /// (constraints, bending, triangles, `CSR` adjacency, embed bindings) are
     /// never rewritten because they only change when the mesh itself changes,
     /// which the caller detects through the buffer signature and handles with a
@@ -294,6 +296,16 @@ impl ClothPieceGpuBuffers {
         // is exactly `upload.colliders.len()` elements, so this write always fits.
         if !upload.colliders.is_empty() {
             queue.write_buffer(&self.colliders, 0, bytemuck::cast_slice(upload.colliders));
+        }
+        // Painted backstop planes are kinematic inputs too: each plane's anchor
+        // rides the skinned surface, so it drifts frame to frame even when the
+        // plane count is fixed. Restream them exactly like the colliders — only
+        // when present, since an empty list left the single zeroed placeholder and
+        // the backstop pass's plane count is then zero. The signature gate pins the
+        // resident backstop pool at `upload.backstops.len()` elements, so the write
+        // always fits.
+        if !upload.backstops.is_empty() {
+            queue.write_buffer(&self.backstops, 0, bytemuck::cast_slice(upload.backstops));
         }
     }
 }

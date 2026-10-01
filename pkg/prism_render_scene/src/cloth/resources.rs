@@ -318,6 +318,19 @@ mod tests {
     }
 
     #[test]
+    fn growing_the_backstop_pool_breaks_reuse() {
+        let base = UploadFixture::distinct();
+        let base_sig = ClothPieceSignature::from_upload(&base.upload());
+
+        // The backstop pool is restreamed by `write_dynamic` (its planes anchor on
+        // the animated skinned surface); growing it without a realloc would overrun
+        // the resident buffer, so the signature must differ to force a fresh piece.
+        let mut more = UploadFixture::distinct();
+        more.backstops.push(GpuClothBackstop::default());
+        assert_ne!(base_sig, ClothPieceSignature::from_upload(&more.upload()));
+    }
+
+    #[test]
     fn resizing_the_hash_grid_breaks_reuse() {
         let base = UploadFixture::distinct();
         let base_sig = ClothPieceSignature::from_upload(&base.upload());
