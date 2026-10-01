@@ -20,12 +20,17 @@
 //! formulation published by Müller et al.
 
 pub mod config;
+pub mod contacts;
 pub mod integrate;
 
 pub use config::{SelfCollisionParams, SoftSolverConfig};
+pub use contacts::SoftContacts;
 
 use crate::math::scalar::Real;
-use crate::soft::collision::{resolve_self_collision, resolve_self_collision_with_friction};
+use crate::soft::collision::{
+    resolve_backstops, resolve_body_collisions, resolve_body_collisions_with_friction,
+    resolve_self_collision, resolve_self_collision_with_friction,
+};
 use crate::soft::constraint::ConstraintSet;
 use crate::soft::particle::ParticleStorage;
 
@@ -42,15 +47,45 @@ impl SoftSolver {
     }
 
     /// Advances `particles` under `constraints` by `dt` seconds using the
-    /// substep XPBD scheme configured by `config`.
+    /// substep XPBD scheme configured by `config`, with no external contacts.
     ///
-    /// Does nothing when there are no particles or when `dt` is non-positive.
-    /// The substep and iteration counts are clamped to at least `1`.
+    /// This is [`step_with_contacts`](Self::step_with_contacts) with an empty
+    /// [`SoftContacts`] bundle, so only the internal constraints and the
+    /// optional self-collision pass run. Does nothing when there are no
+    /// particles or when `dt` is non-positive; the substep and iteration counts
+    /// are clamped to at least `1`.
     pub fn step(
         &self,
         particles: &mut ParticleStorage,
         constraints: &mut ConstraintSet,
         config: &SoftSolverConfig,
+        dt: Real,
+    ) {
+        self.step_with_contacts(particles, constraints, config, &SoftContacts::EMPTY, dt);
+    }
+
+    /// Advances `particles` under `constraints` by `dt` seconds, additionally
+    /// resolving the per-frame external `contacts` (body-proxy colliders and
+    /// per-particle backstops) each substep.
+    ///
+    /// Each substep predicts under gravity, projects the constraints, then runs
+    /// the collide stage in a fixed order so later passes win where they
+    /// overlap: optional self-collision (from `config`), then body-proxy
+    /// collision, then backstops. Running the body passes last keeps the
+    /// garment out of the animated body and off its backstop planes at the end
+    /// of the substep. Finally velocities are recovered from the net motion, so
+    /// a particle dragged along by a moving collider or backstop keeps the
+    /// implied velocity.
+    ///
+    /// Does nothing when there are no particles or when `dt` is non-positive;
+    /// the substep and iteration counts are clamped to at least `1`. An empty
+    /// `contacts` bundle makes this identical to [`step`](Self::step).
+    pub fn step_with_contacts(
+        &self,
+        particles: &mut ParticleStorage,
+        constraints: &mut ConstraintSet,
+        config: &SoftSolverConfig,
+        contacts: &SoftContacts<'_>,
         dt: Real,
     ) {
         if particles.is_empty() || dt <= 0.0 {
@@ -88,6 +123,30 @@ impl SoftSolver {
                     );
                 }
             }
+            if !contacts.body_colliders.is_empty() {
+                if contacts.body_friction > 0.0 {
+                    resolve_body_collisions_with_friction(
+                        columns.positions,
+                        columns.prev_positions,
+                        columns.inverse_masses,
+                        contacts.body_colliders,
+                        contacts.body_friction,
+                    );
+                } else {
+                    resolve_body_collisions(
+                        columns.positions,
+                        columns.inverse_masses,
+                        contacts.body_colliders,
+                    );
+                }
+            }
+            if !contacts.backstops.is_empty() {
+                resolve_backstops(
+                    columns.positions,
+                    columns.inverse_masses,
+                    contacts.backstops,
+                );
+            }
             integrate::finalize_velocities(&mut columns, h);
         }
     }
@@ -96,6 +155,7 @@ impl SoftSolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::soft::collision::{Backstop, BodyCollider};
     use crate::soft::constraint::DistanceConstraint;
     use crate::soft::particle::ParticleHandle;
     use glam::Vec3;
@@ -247,6 +307,98 @@ mod tests {
                 solver.step(&mut particles, &mut constraints, &config, 1.0 / 60.0);
             }
             particles.position(ParticleHandle::from_index(2)).unwrap()
+        };
+        assert_eq!(run(), run());
+    }
+
+    #[test]
+    fn step_with_empty_contacts_matches_plain_step() {
+        let solver = SoftSolver::new();
+        let config = SoftSolverConfig::default();
+        let build = || {
+            let mut particles = ParticleStorage::new();
+            let top = particles.spawn_pinned(Vec3::ZERO);
+            let bottom = particles.spawn(Vec3::new(0.0, -1.0, 0.0), 1.0);
+            let mut constraints = ConstraintSet::new();
+            constraints
+                .distance
+                .push(DistanceConstraint::new(top, bottom, 1.0, 0.0));
+            (particles, constraints, bottom)
+        };
+        let (mut pa, mut ca, ba) = build();
+        let (mut pb, mut cb, bb) = build();
+        for _ in 0..60 {
+            solver.step(&mut pa, &mut ca, &config, 1.0 / 60.0);
+            solver.step_with_contacts(&mut pb, &mut cb, &config, &SoftContacts::EMPTY, 1.0 / 60.0);
+        }
+        assert_eq!(pa.position(ba).unwrap(), pb.position(bb).unwrap());
+    }
+
+    #[test]
+    fn body_collider_keeps_particle_out_of_sphere() {
+        // A free particle falling onto a sphere centred below it must come to
+        // rest on (or above) the sphere surface, never inside it.
+        let solver = SoftSolver::new();
+        let mut particles = ParticleStorage::new();
+        let p = particles.spawn(Vec3::new(0.0, 1.2, 0.0), 1.0);
+        let mut constraints = ConstraintSet::new();
+        let config = SoftSolverConfig::default();
+        let colliders = [BodyCollider::Sphere {
+            center: Vec3::ZERO,
+            radius: 1.0,
+        }];
+        let contacts = SoftContacts::new(&colliders, &[]);
+        for _ in 0..240 {
+            solver.step_with_contacts(&mut particles, &mut constraints, &config, &contacts, 1.0 / 60.0);
+        }
+        let pos = particles.position(p).unwrap();
+        assert!(
+            pos.length() >= 1.0 - 1e-3,
+            "particle sank into the sphere: {pos:?} (|pos| = {})",
+            pos.length()
+        );
+    }
+
+    #[test]
+    fn backstop_holds_particle_on_front_side() {
+        // A particle pulled toward -Y by gravity, with a backstop plane facing
+        // +Y anchored at the origin (zero slack), must not sink below y = 0.
+        let solver = SoftSolver::new();
+        let mut particles = ParticleStorage::new();
+        let p = particles.spawn(Vec3::new(0.0, 0.5, 0.0), 1.0);
+        let mut constraints = ConstraintSet::new();
+        let config = SoftSolverConfig::default();
+        let backstops = [Backstop {
+            origin: Vec3::ZERO,
+            normal: Vec3::Y,
+            distance: 0.0,
+        }];
+        let contacts = SoftContacts::new(&[], &backstops);
+        for _ in 0..240 {
+            solver.step_with_contacts(&mut particles, &mut constraints, &config, &contacts, 1.0 / 60.0);
+        }
+        let pos = particles.position(p).unwrap();
+        assert!(pos.y >= -1e-3, "particle sank behind its backstop: {pos:?}");
+    }
+
+    #[test]
+    fn step_with_contacts_is_deterministic() {
+        let colliders = [BodyCollider::Sphere {
+            center: Vec3::ZERO,
+            radius: 1.0,
+        }];
+        let run = || {
+            let solver = SoftSolver::new();
+            let mut particles = ParticleStorage::new();
+            particles.spawn(Vec3::new(0.0, 1.2, 0.0), 1.0);
+            particles.spawn(Vec3::new(0.3, 1.0, 0.1), 1.0);
+            let mut constraints = ConstraintSet::new();
+            let config = SoftSolverConfig::default();
+            let contacts = SoftContacts::new(&colliders, &[]).with_body_friction(0.3);
+            for _ in 0..60 {
+                solver.step_with_contacts(&mut particles, &mut constraints, &config, &contacts, 1.0 / 60.0);
+            }
+            particles.position(ParticleHandle::from_index(0)).unwrap()
         };
         assert_eq!(run(), run());
     }

@@ -131,8 +131,13 @@ pub use soft::constraint::{
     AttachmentConstraint, BendingConstraint, ConstraintSet, DistanceConstraint, ParticleConstraint,
     SoftConstraintKind, TetraVolumeConstraint,
 };
+pub use soft::collision::{
+    apply_backstop, closest_point_on_segment, project_out_of_half_space, project_out_of_sphere,
+    resolve_backstops, resolve_body_collisions, resolve_body_collisions_with_friction,
+    resolve_self_collision, resolve_self_collision_with_friction, Backstop, BodyCollider,
+};
 pub use soft::particle::{ParticleHandle, ParticleStorage};
-pub use soft::solver::{SoftSolver, SoftSolverConfig};
+pub use soft::solver::{SelfCollisionParams, SoftContacts, SoftSolver, SoftSolverConfig};
 pub use solver::{IntegrateOnlySolver, Solver, SolverRegistry, XpbdConfig, XpbdSolver};
 pub use state::body::{BodyDesc, BodyKind, MassProperties};
 pub use state::handle::BodyHandle;
