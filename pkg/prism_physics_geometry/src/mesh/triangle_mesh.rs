@@ -20,6 +20,7 @@ use crate::bvh::DynamicBvh;
 use crate::narrow::{
     closest_point_on_triangle, closest_point_segment_triangle, ray_triangle,
     sweep_capsule_triangle, sweep_sphere_triangle, triangle_aabb_overlap,
+    triangle_aabb_penetration,
 };
 
 /// An exact ray/triangle-mesh intersection.
@@ -118,6 +119,26 @@ pub struct MeshCapsuleContact {
     /// touches the triangle (degenerate direction).
     pub normal: Vec3,
     /// Penetration depth (`radius - distance`), always `>= 0`.
+    pub depth: f32,
+}
+
+/// A single oriented-box/triangle overlap reported by
+/// [`TriangleMesh::obb_contacts`].
+///
+/// Each contact promotes an exact oriented-box vs triangle separating-axis
+/// test to a push-out: translating the box along `normal` by `depth` lifts it
+/// clear of the triangle. The box is tested in its own local frame (where it
+/// is axis aligned) and the resulting normal is rotated back into world space.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct MeshObbContact {
+    /// Index of the overlapping triangle.
+    pub triangle: u32,
+    /// Closest point on that triangle to the box centre, in world space.
+    pub point: Vec3,
+    /// Unit contact normal (world space) pointing from the triangle toward the
+    /// box centre: the direction the box must move to resolve penetration.
+    pub normal: Vec3,
+    /// Minimum penetration depth along `normal`, always `>= 0`.
     pub depth: f32,
 }
 
@@ -451,6 +472,51 @@ impl TriangleMesh {
         out
     }
 
+    /// Collects a depenetration contact for every triangle the oriented box
+    /// overlaps.
+    ///
+    /// This is the depth-reporting companion to [`overlap_obb`](Self::overlap_obb).
+    /// Candidate triangles are gathered from the BVH via the box's world-space
+    /// AABB, then transformed into the box's local frame (where the box is an
+    /// axis-aligned box centred at the origin) and run through the exact
+    /// triangle/box separating-axis minimum-translation test. For each
+    /// overlapping triangle a [`MeshObbContact`] is emitted whose `normal`
+    /// (rotated back to world space) points from the triangle toward the box
+    /// centre and whose `depth` is the least penetration; a solver can iterate
+    /// these to push the box out of the mesh. Contacts follow BVH traversal
+    /// order, not sorted by depth.
+    pub fn obb_contacts(&self, obb: &Obb) -> Vec<MeshObbContact> {
+        let mut out = Vec::new();
+        let axes = obb.axes();
+        let local_box = Aabb::from_center_half_extents(Vec3::ZERO, obb.half_extents);
+        self.bvh.query_aabb(obb.aabb(), &mut |data| {
+            let tri_index = data as usize;
+            let [ia, ib, ic] = self.indices[tri_index];
+            let wa = self.vertices[ia as usize];
+            let wb = self.vertices[ib as usize];
+            let wc = self.vertices[ic as usize];
+            let la = to_obb_local(wa, obb.center, &axes);
+            let lb = to_obb_local(wb, obb.center, &axes);
+            let lc = to_obb_local(wc, obb.center, &axes);
+            if let Some((local_normal, depth)) =
+                triangle_aabb_penetration(la, lb, lc, &local_box)
+            {
+                // Rotate the box-local normal back into world space; `axes` is
+                // orthonormal so the mapped vector stays unit length.
+                let normal =
+                    axes[0] * local_normal.x + axes[1] * local_normal.y + axes[2] * local_normal.z;
+                let point = closest_point_on_triangle(obb.center, wa, wb, wc);
+                out.push(MeshObbContact {
+                    triangle: data as u32,
+                    point,
+                    normal,
+                    depth,
+                });
+            }
+        });
+        out
+    }
+
     /// Sweeps a sphere of `radius` whose centre follows `ray` against the mesh
     /// and returns the earliest contact within `[0, ray.tmax]`.
     ///
@@ -760,6 +826,56 @@ mod tests {
             glam::Quat::IDENTITY,
         );
         assert!(mesh.overlap_obb(&obb).is_empty());
+    }
+
+    #[test]
+    fn obb_contacts_report_shallow_push_out() {
+        let mesh = two_quads();
+        // Box straddling quad A (z = 2) with its centre slightly above, so the
+        // shallow escape is +Z by 0.1 (bottom face at z = 1.9 is 0.1 below).
+        let obb = crate::bounding::Obb::new(
+            Vec3::new(0.0, 0.0, 2.1),
+            Vec3::new(0.5, 0.5, 0.2),
+            glam::Quat::IDENTITY,
+        );
+        let contacts = mesh.obb_contacts(&obb);
+        assert_eq!(contacts.len(), 2, "both front triangles: {contacts:?}");
+        for ct in &contacts {
+            assert!(ct.triangle < 2);
+            assert!(ct.normal.z > 0.99, "normal = {:?}", ct.normal);
+            assert!((ct.depth - 0.1).abs() < 1e-5, "depth = {}", ct.depth);
+            assert!((ct.normal.length() - 1.0).abs() < 1e-5, "unit normal");
+        }
+    }
+
+    #[test]
+    fn obb_contacts_empty_when_in_gap() {
+        let mesh = two_quads();
+        // Box in the gap between the quads touches neither.
+        let obb = crate::bounding::Obb::new(
+            Vec3::new(0.0, 0.0, 3.5),
+            Vec3::new(2.0, 2.0, 0.5),
+            glam::Quat::IDENTITY,
+        );
+        assert!(mesh.obb_contacts(&obb).is_empty());
+    }
+
+    #[test]
+    fn obb_contacts_agree_with_overlap_obb() {
+        let mesh = two_quads();
+        let obb = crate::bounding::Obb::new(
+            Vec3::new(0.0, 0.0, 2.0),
+            Vec3::new(2.0, 2.0, 0.2),
+            glam::Quat::from_rotation_z(core::f32::consts::FRAC_PI_4),
+        );
+        // The depth-reporting query selects exactly the overlapping triangles.
+        let overlap = mesh.overlap_obb(&obb);
+        let contacts = mesh.obb_contacts(&obb);
+        assert_eq!(overlap.len(), contacts.len());
+        for ct in &contacts {
+            assert!(overlap.contains(&ct.triangle));
+            assert!(ct.depth >= 0.0);
+        }
     }
 
     #[test]
