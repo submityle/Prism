@@ -59,6 +59,12 @@
 //!   the image through time decorrelation while staying mono-compatible.
 //!   Distinct from [`stereo_width::StereoWidthNode`] (side-gain) and
 //!   [`mid_side_matrix::MidSideMatrixNode`] (static M/S trim).
+//! - [`leslie::LeslieNode`] -- rotary-speaker (Leslie-style) cabinet that
+//!   splits the signal into a slow bass rotor and a fast treble horn and
+//!   imposes coupled Doppler pitch wobble, amplitude tremolo, and antiphase
+//!   stereo motion with mechanical spin-up / spin-down inertia. Distinct from
+//!   [`tremolo::TremoloNode`] (amplitude only) and [`vibrato::VibratoNode`]
+//!   (pitch only) because it couples pitch, amplitude, and stereo image.
 //! - [`tremolo::TremoloNode`] — low-frequency amplitude modulation / auto-pan
 //!   driven by a control-rate LFO.
 //! - [`bitcrusher::BitcrusherNode`] — bit-depth quantization plus sample-rate
@@ -129,6 +135,7 @@ pub mod frequency_shifter;
 pub mod granular;
 pub mod graphic_eq;
 pub mod haas_widener;
+pub mod leslie;
 pub mod mid_side_matrix;
 pub mod multi_tap_delay;
 pub mod parametric_eq;
@@ -164,6 +171,11 @@ pub use granular::{
 };
 pub use graphic_eq::{GraphicEqNode, GraphicEqSpacing};
 pub use haas_widener::{HaasWidenerNode, HaasWidenerParams};
+pub use leslie::{
+    DEFAULT_CROSSOVER_HZ, DRUM_ACCEL_SECONDS, DRUM_DECEL_SECONDS, DRUM_FAST_HZ, DRUM_SLOW_HZ,
+    HORN_ACCEL_SECONDS, HORN_DECEL_SECONDS, HORN_FAST_HZ, HORN_SLOW_HZ, LeslieNode, LeslieParams,
+    LeslieSpeed, MAX_AM_DEPTH, MAX_DOPPLER_DEPTH,
+};
 pub use mid_side_matrix::{MidSideMatrixNode, MidSideMatrixParams, MidSideMode};
 pub use multi_tap_delay::{MAX_TAPS, MultiTapDelayNode, MultiTapDelayParams, TapSpec};
 pub use parametric_eq::{EqBand, ParametricEqNode};
