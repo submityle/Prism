@@ -69,8 +69,10 @@ pub use bvh::{
 };
 pub use cfl::{cpu_cfl_dt, cpu_max_speed, CflConfig, GpuCflReduce};
 pub use cloth::{
-    colour_bending, cpu_cloth_bending, cpu_cloth_self_collision_jacobi, BendingColoring,
-    ClothBendingConstraint, ClothPrep, ClothSelfCollisionScope, GpuClothBending, GpuClothSelfCollision,
+    build_cloth_aero_prep, colour_bending, cpu_cloth_aero, cpu_cloth_bending,
+    cpu_cloth_self_collision_jacobi, BendingColoring, ClothAeroParams, ClothAeroPrep,
+    ClothAeroTriangle, ClothBendingConstraint, ClothPrep, ClothSelfCollisionScope, GpuClothAero,
+    GpuClothBending, GpuClothSelfCollision,
 };
 pub use contacts::{
     contact_constraints, contact_constraints_with_friction, cpu_resolve_contacts,
@@ -113,13 +115,14 @@ pub use rigid::{
     cpu_integrate, cpu_integrate_gyro, cpu_solve_contacts, cpu_solve_contacts_tgs,
     cpu_solve_joints_cylindrical, cpu_solve_joints_cylindrical_drive,
     cpu_solve_joints_cylindrical_limit, cpu_solve_joints_distance, cpu_solve_joints_fixed,
-    cpu_solve_joints_hinge_limit, cpu_solve_joints_prismatic, cpu_solve_joints_prismatic_drive,
-    cpu_solve_joints_prismatic_limit, cpu_solve_joints_revolute, cpu_solve_joints_revolute_drive,
-    cpu_solve_joints_revolute_motor, cpu_solve_joints_spherical, cpu_solve_joints_swing_twist,
-    cpu_solve_joints_universal, ContactSolverConfig, CylindricalDriveJoint, CylindricalJoint,
-    CylindricalLimitJoint, DistanceJoint, FixedJoint, GpuCylindricalDriveJointSolver,
-    GpuCylindricalJointSolver, GpuCylindricalLimitJointSolver, GpuDistanceJointSolver,
-    GpuFixedJointSolver, GpuHingeLimitJointSolver, GpuPrismaticDriveJointSolver,
+    cpu_solve_joints_gear, cpu_solve_joints_hinge_limit, cpu_solve_joints_prismatic,
+    cpu_solve_joints_prismatic_drive, cpu_solve_joints_prismatic_limit, cpu_solve_joints_revolute,
+    cpu_solve_joints_revolute_drive, cpu_solve_joints_revolute_motor, cpu_solve_joints_spherical,
+    cpu_solve_joints_swing_twist, cpu_solve_joints_universal, ContactSolverConfig,
+    CylindricalDriveJoint, CylindricalJoint, CylindricalLimitJoint, DistanceJoint, FixedJoint,
+    GearJoint, GpuCylindricalDriveJointSolver, GpuCylindricalJointSolver,
+    GpuCylindricalLimitJointSolver, GpuDistanceJointSolver, GpuFixedJointSolver,
+    GpuGearJointSolver, GpuHingeLimitJointSolver, GpuPrismaticDriveJointSolver,
     GpuPrismaticJointSolver, GpuPrismaticLimitJointSolver, GpuRevoluteDriveJointSolver,
     GpuRevoluteJointSolver, GpuRevoluteMotorJointSolver, GpuRigidContactSolver, GpuRigidIntegrator,
     GpuRigidTgsContactSolver, GpuSphericalJointSolver, GpuSwingTwistJointSolver,
