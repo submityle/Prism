@@ -1,10 +1,11 @@
-# Prism 渲染引擎 — 毛发引擎子系统完整设计（v2 / wgpu + WESL）
+# Prism 渲染引擎 — 毛发引擎子系统完整设计（v3 / wgpu + WESL）
 
 > 状态：架构提案（Draft，允许破坏性重构）
 > 定位：AAA / 次世代 strand-based（发丝级）毛发引擎，与 PBR/NPR/自定义/混合四前端正交协同
 > Shader：WESL（naga → WGSL/SPIR-V/Metal/DXIL）；运行时：wgpu（Metal/VK/DX12/WebGPU）
 > 关联文档：`prism_rendering_architecture_zh.md`（总）、`prism_material_pipeline_design_zh.md`（§6.2 子系统注册表、§6.3 毛发 mini 支柱）、`prism_cloth_engine_design_zh.md`（对称子系统）、`prism_physics_design_zh.md`（§3 统一 XPBD、§4 多求解器、§11 GPU 持久化、§12 异步流水线）、`prism_aaa_advanced_features_zh.md`
 > v2 变更：新增 §6 高级仿真特性、§7 毛发着色模型（Marschner/Chiang/dual-scatter/fiber-level + NPR 天使环），§8 性能升级为 GPU-driven 持久化 + 异步流水线，补 §11 效果验收口径；§0 产品对标细化（TressFX 4 / 影视 fiber-level / Frostbite）。
+> v3 变更：顶格增补 §8.5「最新 AAA 高级特性」——对标最新实时 AAA 产品（UE5.4+ Groom、最新 RTX Hair/LSS 曲线图元、TressFX 4.x、Alan Wake 2 / Hellblade II 发丝、影视 Weta Cosserat），全部纯经典数值、**无 AI/ML/神经网络路径**：离散弹性杆/Cosserat 卷发扭转、DFTL 不可伸长积分、体素密度自碰撞+发-发摩擦、C-IPC 式屏障摩擦接触、Nanite 式 strand 簇化 GPU 剔除、深阴影图/ATSM 自适应透射、PPLL/矩/MLAB 发丝 OIT、黑色素(eumelanin/pheomelanin)物理吸收、近场/远场自适应散射 + BSDF 重要性采样、硬件 RT 曲线/LSS 真发自阴影与反射、发丝感知 TAA reactive mask + 抖动 alpha、mesh-shader GPU strand 扩展、GPU Work Graphs/持久线程约束图着色；§0 产品对标补最新档，行数估算上调。
 
 ---
 
@@ -12,7 +13,7 @@
 
 是**完整 strand-based（发丝级）毛发引擎**，不是"给头发一个各向异性高光"的着色贴皮。对标业界成熟产品，仅在**算法层**借鉴，不复制其代码：
 
-| 产品 | 借鉴点（算法层，v2 细化） |
+| 产品 | 借鉴点（算法层，v3 细化） |
 |---|---|
 | **UE5 Groom** | Alembic groom 导入、guide→render 插值、compute 可见性光栅、deep opacity/voxel 透射、strand→card→mesh LOD、Niagara/物理驱动 groom sim、strand 软光栅 vis-buffer |
 | **AMD TressFX（含 4.x）** | PPLL/OIT 发丝透明、Kajiya-Kay + Marschner 着色、局部/全局形状约束的 XPBD 式 strand 动力学、SDF 碰撞、近似自阴影 |
@@ -21,6 +22,10 @@
 | **影视 Zinke dual-scattering** | 多重散射近似（浅色/金发的全局散射项）——顶级真实感必需 |
 | **影视 fiber-level（Yan et al.）** | 逐纤维散射高保真——作为**高配着色插槽**（近景特写） |
 | **Frostbite / God of War 系** | 主机预算下的 strand↔card 混合、density LOD、卡带宽的自阴影近似 |
+| **UE5.4+ Groom（最新）** | 发丝 Nanite 式簇化剔除、连续抽稀、mesh-shader strand 扩展、改进 vis-buffer 软光栅（§8.5 item6/13）|
+| **最新 RTX Hair / LSS** | 硬件 RT 线性扫掠球（Linear Swept Spheres）/曲线图元做发丝自阴影与反射内真发（§8.5 item11）|
+| **Alan Wake 2 / Hellblade II** | 实时 strand 发丝 + 深阴影/透射、发丝感知 TAA/上采样 reactive mask（§8.5 item7/12）|
+| **影视 Weta / DER（Bergou·Kugelstadt）** | 离散弹性杆/Cosserat 扭转、卷发 helix rest、C-IPC 屏障摩擦接触（§8.5 item1/4/5）|
 
 **判据（承接材质设计 §6.2）**：一等子系统必须拥有**自己的几何 + 自己的 sim + 特殊渲染（透射/OIT/RT 代理）**。毛发三者全占，因此是一等子系统；而"毛发看起来的高光"只是 über-BSDF 的一个 closure 瓣，不构成子系统。**毛发与布料是两个独立子系统**（发丝几何+strand sim vs 三角网格+XPBD 布料 sim），仅共享形变预算这一资源仲裁层。
 
@@ -151,6 +156,40 @@ fallback:
 
 - strand + deep transmittance 是 AAA 最重特性：**card 基线务实、strand 高配可选**，别一上来全 strand（承接材质设计 §10 风险条）。
 - 形变预算由 `deformation::schedule` 统一仲裁：单帧顶点上限 + BLAS refit 独立配额；密集 groom 超预算时最高优先项无条件先跑（防饿死），其余延后。休眠 groom 不占预算。
+
+## 8.5 最新 AAA 高级特性（v3 顶格增补）
+
+> 对标最新实时 AAA 产品与影视前沿，仅在**算法层**借鉴形态与数值方法，不复制任何第三方源码。**全部纯经典数值方法，无 AI/ML/神经网络/LLM 路径**。每条给：算法 / 产品对标 / 成本 / 效果 / 落点，严格复用 §1 共享基底（几何+sim+LOD+透射），分叉只在着色响应处。本节是 v3 的「做到顶级」缺口清单，逐条按 §3 门禁落 CPU golden + GPU 孪生。
+
+### A. 仿真前沿（接 §6 多求解器插槽 / 碰撞 / 积分）
+
+1. **离散弹性杆 / Cosserat 杆（DER）高保真插槽**：Bergou 2008/2010 的 material-frame 弯曲+扭转能量 + Kugelstadt 2016 position-based Cosserat——用边向量 + 四元数材质帧表达**扭转**与自然 helix rest，纯 mass-spring 无法表达的卷发/辫子刚性由此而来。作 §6 item7 多求解器的第三选项（XPBD / VBD / Cosserat），与 interpolation 的 curl 参数共享 rest-helix。对标：影视 Weta、高端 type-3/4 textured hair。成本：高，仅高配/特写 groom；效果：卷发回弹、辫子不塌、扭转守恒。落点 `hair/cosserat.rs`（新）。
+2. **Dynamic Follow-The-Leader（DFTL）不可伸长积分**：Müller 2012（TressFX 用）——单趟 FTL 位置传播 + 速度校正，无条件稳定的定长约束，比迭代边约束更稳更省，作 strand 快速档的边长地基与 XPBD 边约束并存。成本：极低；效果：高速甩头不伸长、不炸毛。落点 `hair/dftl.rs`（新）。
+3. **体素密度自碰撞 + 体积保持 + 发-发摩擦**：TressFX / Petrovic 2005——把 guide/render 发丝 splat 进低分辨体素密度场，用密度梯度做排斥 + 体积保持 + 速度场摩擦，近似大规模自碰撞（全对 O(n²) 太贵）。接 §6 item2 自碰撞。成本：中（栅格一趟）；效果：发团不塌陷/不自穿、蓬松度稳定。落点 `hair/self_collision_voxel.rs`（新）。
+4. **屏障式摩擦接触（C-IPC 近似）**：Li 2021 Codimensional IPC——对数屏障保证无穿插 + 半隐式库仑摩擦；film-grade 稳态。实时取其简化档（soft log-barrier + 投影 + 距离下限夹持）用于辫子/发胶等强接触造型。成本：高（高配/影视档）；效果：零穿插 + 真实摩擦锁形。落点 `hair/barrier_contact.rs`（新）。
+5. **卷发 rest-helix + 各向异性弯曲刚度**：type-3/4 纹理发的 helical rest state + 方向相关弯曲刚度（切向 vs 法向不同 compliance），接 interpolation 的 curl 与 Cosserat 扭转。成本：低（rest 预计算）；效果：卷度不被拉直、自然回卷。落点并入 `hair/dynamics.rs` 的 rest 构造 + `hair/interpolation.rs`。
+
+### B. 渲染前沿（接 §3 光栅 / §5 透射 / §7 着色 / §8 RT）
+
+6. **Nanite 式 strand 簇化 + GPU 剔除 + 连续抽稀**：发丝按空间局部性聚簇（cluster），GPU 视锥/HiZ 遮挡/背面剔除逐簇 + 每簇连续抽股率随屏占（接 §4 连续 LOD 消 pop）。对标 UE5.4+ 发丝改进。成本：剔除一趟（省光栅）；效果：十万级发丝可扩展、无 LOD pop。落点 `hair/cluster.rs`（新，沿用 `virtual_geometry/bins.rs` 分桶范式）。
+7. **深阴影图 / 自适应透射函数（ATSM）**：Lokovic & Veach 2000 deep shadow map + Salvi 自适应变体——变节点压缩透射曲线，比定层 deep opacity 更准的发内自阴影，作 §5 透射服务的可选高配后端（定层 slab 为基线）。成本：中；效果：发内体积阴影更连续、少分层带。落点 `hair/adaptive_transmittance.rs`（新）。
+8. **PPLL / 矩 OIT / MLAB 发丝透明**：TressFX 3/4 per-pixel linked list + 多层 alpha 混合（MLAB）/ moment-based OIT——亚像素覆盖 + k 层解析的发丝专用 OIT 前端，接共享 OIT（§3 阶段 7）。成本：中-高（带宽）；效果：发缘无排序错误、顺序无关正确合成。落点契约侧 `hair/oit_frontend.rs`（新，分桶 + k 层 ABI）。
+9. **物理黑色素吸收参数化（eumelanin / pheomelanin）**：d'Eon 2011 / Chiang 2016 色素浓度 → σ_a 映射，取代纯 tint，用两种黑色素浓度物理生成金/红/棕/黑同一模型。接 §7 Chiang / fiber closure（材质侧），架构侧产浓度→σ_a 的确定性映射 golden。成本：低；效果：发色物理可信、染发/渐变自然。落点 `hair/melanin.rs`（新，纯映射，CPU golden 直对）。
+10. **近场 / 远场散射自适应 + BSDF 重要性采样**：d'Eon 2011 能量守恒近场/远场——近景逐纤维近场、远景远场解析，随 §4 LOD 切换；BSDF 重要性采样（lobe pdf + 分层采样）供 RT 路径追踪与降噪。成本：按档；效果：近景保真 + 远景省算且不偏色。落点 `hair/scatter_lod.rs`（新，架构侧产 pdf/权重 golden，着色消费）。
+11. **硬件 RT 曲线 / LSS 发丝图元**：最新 RTX 线性扫掠球（Linear Swept Spheres）/曲线图元做发丝 RT 自阴影与反射内真发，取代 §8 的 proxy（高配）；弱平台回退 proxy / deep opacity。对标最新 RTX Hair。成本：高（需 RT 硬件曲线图元）；效果：反射/折射中真发丝、硬件自阴影。落点 `hair/rt_curve.rs`（新，产 LSS/曲线 BLAS 构建描述契约，真构建归调度）。
+12. **发丝感知 TAA / 上采样 reactive mask + 抖动 alpha**：亚像素发丝高频抗锯齿——产 reactive mask 防 TAA 把细发抹糊 + 有序抖动 alpha（蓝噪声）做连续覆盖，接共享 TAA/upscale（不重写）。成本：低；效果：运动下细发不糊、无闪烁爬行。落点 `hair/reactive_mask.rs`（新，产 mask/抖动阈值 golden）。
+
+### C. 工程前沿（接 §8 GPU-driven + 异步）
+
+13. **Mesh-shader GPU strand 扩展 / 细分**：guide→render 插值与样条细分搬上 mesh/amplification shader，省 CPU↔GPU 回读。契约侧产 meshlet 式 strand 分组描述。落点并入 `hair/cluster.rs` 的扩展 ABI。
+14. **GPU Work Graphs 调度 sim**：约束图着色批 + substep 用 work graph 自调度（生产者-消费者图），摊平尖峰（接 §8）。契约侧产调度图节点描述，真调度归 `prism_render_scene`。
+15. **持久线程约束图着色**：常驻 compute kernel + persistent threads 跑图着色批，减 per-dispatch 开销（接 §8 GPU 持久化）。
+
+### v3 落地路线（P-next，接 §10 之后）
+
+> 按风险从低到高、CPU-golden 可验证优先：先落**纯映射/契约类**（melanin / scatter_lod / reactive_mask / rt_curve 描述 / oit_frontend 分桶），再落**sim 数值类**（dftl / cosserat / self_collision_voxel / barrier_contact），最后 **GPU 孪生 + 真机 parity**（接 `pkg/prism_hair_gpu`，见 §9.1）。每条独立文件 + 独立确定性单测 + 越界/空输入不 panic，disjoint write set 可多 agent 并行（A/B/C 三组互不重叠）。真接渲染图（dispatch / RT BLAS / work graph）仍归跨子系统调度，hair 侧只落架构契约 + CPU golden + GPU 孪生。
+
+- **行数估算（v3 上调）**：A 组 ~2.5–4k、B 组 ~3–5k、C 组 ~1–2k（含孪生 + 测试），合计在现有 hair core 之上再增 **~7–11k 行**；连同 `prism_hair_gpu` 真机 parity 孪生，毛发子系统总量上调至 **~3–4 万行**量级（含测试与 WESL 孪生）。
 
 ---
 
