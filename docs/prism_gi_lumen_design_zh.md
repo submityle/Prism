@@ -1,6 +1,7 @@
-# Prism 渲染引擎 — 次世代 AAA 级全局光照（GI）子系统完整设计（v3 / wgpu + WESL）
+# Prism 渲染引擎 — 次世代 AAA 级全局光照（GI）子系统完整设计（v4 / wgpu + WESL）
 
-> 状态：架构提案（Draft，允许破坏性重构）。v3 在 v2 基础上追加 Spherical Gaussian 辐射表示、Mesh Distance Fields / DFAO、bent normal 方向遮蔽、多弹跳镜面、贴花 / 多层 / OIT GI、棋盘交错重建，以及 bindless / persistent-thread / 距离场预剔除等工程优化，并扩充参考产品矩阵与质量验收指标，对标顶级次世代 AAA（Lumen / Cyberpunk RT Overdrive / Alan Wake 2 级）。所有新增项均为纯经典数值路径。
+> 状态：架构提案（Draft，允许破坏性重构）。v3 追加 Spherical Gaussian 辐射、Mesh Distance Fields / DFAO、bent normal、多弹跳镜面、贴花 / 多层 / OIT GI、棋盘重建与 bindless / persistent-thread / 距离场预剔除等工程优化。
+> **v4（本版）在 v3 之上继续顶格增补一批最新 AAA 高级功能（全部纯经典数值、无任何 AI/ML/神经网络/LLM 路径）**：World-Space ReSTIR（空间哈希蓄水池跨帧跨视角重用）、Volumetric ReSTIR / froxel 参与介质 GI、焦散（自适应光子抛撒 + 流形 NEE）、Adaptive Probe Volumes（自适应密度免烘探针体 + 天空遮蔽）、ReSTIR PT（完整路径重采样 + shift map）、随机 HiZ-SSR + 镜面 reservoir 重用、微遮蔽 / 腔体 GI、薄膜干涉 / 各向异性 GI 反射、水面 / 湿表面 GI、大气 / 体积云多散射耦合；工程侧增补 Shader Execution Reordering（SER）、Opacity / Displaced Micromaps（OMM/DMM）、GPU Work Graphs / 动态射线生成、mesh-shader 卡片捕获、HiZ 加速剔除等。新增 **Ultra+（影视级实时）** 档位，对标 Lumen HWRT / Cyberpunk RT Overdrive / Alan Wake 2 / Portal RTX / Half-Life 2 RTX 天花板。
 > 定位：AAA / 次世代 **动态全局光照 + 统一反射 + 采样/降噪** 引擎（软件光追优先、硬件 Ray Query 可选），实时无烘焙，与 PBR/NPR/自定义/混合四前端正交协同，作为四前端共享的高级光照基底。
 > Shader：WESL（naga → WGSL/SPIR-V/Metal/DXIL）；运行时：wgpu（Metal/VK/DX12/WebGPU）。
 > 关联文档：\`prism_rendering_architecture_zh.md\`（总，Phase 5 多后端 GI/反射）、\`prism_material_pipeline_design_zh.md\`（材质语义/Surface Cache 烘焙）、\`prism_volumetric_engine_design_zh.md\`（froxel 参与介质 GI 衔接）、\`prism_aaa_advanced_features_zh.md\`（共享高级基底）、\`prism_particle_engine_design_zh.md\`（自发光粒子作为 GI 光源）、\`prism_hair_engine_design_zh.md\`（毛发 GI）。
@@ -34,6 +35,15 @@
 | **UE5 Mesh Distance Fields / DFAO** | 每物体有向距离场 + 全局 clipmap 合成；距离场软 AO / 软阴影 / 短程间接遮蔽，无 BVH 也能出低频遮蔽 |
 | **UE5 MegaLights** | 统一海量光源随机直接光（reservoir 式），阴影与 GI 共享可见性查询，灯光数量与成本解耦 |
 | **UE5 Nanite + Virtual Shadow Maps** | 虚拟几何 cluster 派生 Surface Cache 卡片；VSM 高频阴影与 GI 共享几何/剔除，省重复遍历 |
+| **World-Space ReSTIR（NVIDIA，空间哈希蓄水池）** | 把 reservoir 存进世界空间哈希网格，跨帧 / 跨视角 / 多弹跳复用样本，解遮挡与多弹跳收敛显著加速，复用 SHARC 哈希基建 |
+| **Volumetric ReSTIR（Lin et al.）** | froxel 体素蓄水池重用参与介质散射样本：体积雾 / 体积光 / 云获得多弹跳间接光，方差大降 |
+| **焦散：自适应光子抛撒 + 流形 NEE（Hanika/Jakob）** | 水面 / 玻璃锐利焦散经典数值路径：光子/流形引导下一事件估计 + 屏幕空间焦散累积，无需 ML |
+| **Adaptive Probe Volumes（Unity APV / UE 探针体）** | 自适应密度辐照 + 可见性探针体，brick 流式 + 天空遮蔽，作免烘动态兜底与远 / 静态区低频 GI |
+| **ReSTIR PT（完整路径重采样，Kettunen/Lin）** | GRIS shift map（重连 / 随机重放）做完整路径时空重用，Ultra 档 1–2 spp 逼近离线路径追踪 |
+| **Shader Execution Reordering（SER）+ OMM/DMM（NVIDIA Micro-Maps）** | 硬件 RT 重排提升射线相干；不透明 / 位移微网格加速 alpha-test 植被与置换几何的 GI 遮挡 |
+| **D3D12 / Metal GPU Work Graphs** | GPU 自驱动态射线 / 卡片 / 探针调度，去 CPU 往返，长短射线负载自均衡 |
+| **Thin-film / Iridescence BRDF（Belcour-Barla）** | 薄膜干涉与各向异性 GGX 并入 SG / traced 反射，GI 反射尊重切线帧与膜厚色散 |
+| **Portal RTX / Half-Life 2 RTX（RTX Remix 级路径追踪）** | 全路径追踪 + ReSTIR PT + 焦散 + 体积多散射的实时参照上限（Ultra+ 对标目标） |
 | **Decima（Horizon）/ Call of Duty** | clipmap irradiance volume 开放世界探针流式与压缩经验，bake-free 滚动更新 |
 | **AMD FidelityFX GI-1.0** | 世界探针 + 屏幕探针轻量实时 diffuse GI，低配兜底参考 |
 | **Spherical Harmonics / SG 文献** | diffuse 走 SH L1 省内存、glossy 走少量 SG 瓣保方向性的混合辐射基 |
@@ -293,6 +303,46 @@ Lumen 级性能的胜负手在这一层：**不对远处几何做逐三角追踪
 
 ---
 
+## 10c. 高级功能（v4 顶级增补，对标最新实时 AAA）
+
+> 下列均为**纯经典数值**（蒙特卡洛 / 准蒙特卡洛 / reservoir / SDF / 光子 / 双边滤波 / 解析 BRDF），不含任何神经网络 / AI / ML / LLM 路径。全部遵循 CPU golden → WESL → 真机 parity 三步与分档降级矩阵。
+
+| 功能 | 借鉴 | 设计要点 | 档位 |
+|---|---|---|---|
+| **World-Space ReSTIR**（空间哈希蓄水池） | NVIDIA WS-ReSTIR | reservoir 存入世界空间哈希网格（复用 SHARC key / `mesh_sdf` 体素化），跨帧 / 跨视角 / 多弹跳样本复用；GRIS 合并保持无偏；解遮挡与弱光区收敛大幅加速 | High |
+| **Volumetric ReSTIR / Froxel GI** | Lin et al. / Lumen 体积 | froxel 网格每体素存散射 reservoir，时空重投影重用；体积雾 / 体积光 / 云获得多弹跳间接光；与现有 froxel 参与介质管线对接 | High |
+| **焦散（Caustics）** | 自适应光子抛撒 + 流形 NEE | 水面 / 玻璃 / 金属锐利聚焦光：光子从光源经镜面 / 折射界面抛撒到屏幕空间焦散缓冲，或流形引导 NEE 直采；时域累积 + 自适应核；全经典 | High / Ultra |
+| **Adaptive Probe Volumes（APV）** | Unity APV / UE 探针体 | 自适应密度辐照 + 可见性探针体，brick 按相机流式；天空遮蔽项防室内漏天光；作免烘动态兜底与远 / 静态区低频 GI，与屏幕探针平滑 LOD 混合 | Medium+ |
+| **ReSTIR PT（完整路径重采样）** | Kettunen / Lin GRIS | 完整路径时空重用：shift map 用重连（reconnection）+ 随机重放（random-replay）两类，雅可比显式；Ultra 档 1–2 spp 逼近离线 PT；bias 对 ground-truth parity | Ultra |
+| **随机 HiZ-SSR + 镜面 reservoir 重用** | 随机 SSR / ReSTIR 反射 | Hierarchical-Z 加速屏幕空间镜面步进，粗糙度抖动 + reservoir 时空重用降噪；与 traced 远场、反射探针按置信度平滑混合 | Medium+ |
+| **微遮蔽 / 腔体 GI（micro-occlusion）** | 法线贴图微 AO / 微 bent normal | 由法线 / 高度贴图导出亚纹素尺度微 bent normal + 腔体 AO，多尺度与 GI mip-cone 口径一致，接触细节更实而不过暗 | Medium+ |
+| **薄膜干涉 / 各向异性 GI 反射** | Belcour-Barla 薄膜 + aniso GGX | 薄膜色散与各向异性 NDF 并入 SG / traced 反射求值，GI 反射尊重切线帧（拉丝金属 / 肥皂泡 / 甲虫壳 / CD） | High |
+| **水面 / 湿表面 GI** | 水体渲染 + 湿表面模型 | 水：屏幕空间 + 平面反射 + 折射 + 焦散按菲涅尔混合；湿表面降粗糙 / 加深 albedo 反馈 GI 反射；浪沫次表面低频散射 | High |
+| **大气 / 体积云 多散射耦合 GI** | 大气多散射 LUT / 体积云 | 天空多散射 LUT 直接喂世界缓存天光项；体积云投射 / 接收低频 GI，与气透视（aerial perspective）耦合，开放世界远景一致 | Medium+ |
+| **置换 / 曲面细分 GI 遮挡（DMM）** | Displaced Micro-Maps | 位移微网格直接参与 RT 遮挡与 surface cache 捕获，置换几何的接触遮蔽 / 自阴影正确，无需全细分 BVH | Ultra |
+| **植被 / alpha-test GI（OMM）** | Opacity Micro-Maps | 不透明微网格让 alpha-test 树叶 / 栅栏在 RT 中按真实镂空透光，GI 穿叶正确且 any-hit 代价低 | High |
+
+### 10c.1 World-Space ReSTIR 落地要点
+- 哈希 key = 量化世界位置 + 法线分桶（复用 SHARC 的视相关分辨率策略），每格一组 reservoir。
+- 复用 `screen_probe/restir.rs` 的 `Reservoir<S>` / GRIS `merge`：世界格样本作为**空域候选**喂屏幕 ReSTIR，诱导权重 `m*pdf*w` 保持无偏，`cap_confidence` 控制时域相关。
+- 作为屏幕探针 reservoir 的"长期记忆"：相机快速移动 / 新进入视野的像素可立即从世界哈希取历史，避免解遮挡闪烁。
+
+### 10c.2 Volumetric ReSTIR / Froxel GI 落地要点
+- froxel 每体素存一个散射 reservoir（相位函数重要性 + 入射 radiance 目标函数），沿视线 ray-march 累积单 + 多散射。
+- 时空重投影复用上一帧 froxel（考虑体素运动 / 相机运动），与 §8.3 时空降噪共用方差引导。
+- 低档回退：无 reservoir 时退回现有 froxel 单散射 + 世界缓存天光，parity 覆盖两路。
+
+### 10c.3 焦散落地要点
+- **光子抛撒路径**：从关键光源发射光子，仅沿镜面 / 折射界面传播，命中漫反射面时抛撒进屏幕空间焦散累积缓冲（带时域滤波 + firefly 钳制）。
+- **流形 NEE 路径**（Ultra）：对镜面 / 折射链用流形行走求解可连接路径，直采焦散，方差更低。
+- 全程确定性 CPU golden：光子-界面求交、流形雅可比、累积核均为纯函数并配单测；无 ML。
+
+### 10c.4 Ultra+（影视级实时）定位
+- 在 Ultra 之上叠加 ReSTIR PT 完整路径重用 + Volumetric ReSTIR + 焦散 + SER/OMM/DMM 硬件加速，作为"实时逼近离线路径追踪"的旗舰档（对标 Portal RTX / Half-Life 2 RTX / Alan Wake 2 PT）。
+- 仍受帧预算硬门禁约束（见 §11），超预算不毕业；默认关闭，能力探测 + 场景复杂度自适应开启。
+
+---
+
 ## 11. 性能预算与分档矩阵（Metal 优先，design target）
 
 | 档位 | 目标平台 | 屏幕探针 | spp | 世界缓存 | 远场 | 反射 | 高级功能 | GI 帧预算 |
@@ -301,6 +351,7 @@ Lumen 级性能的胜负手在这一层：**不对远处几何做逐三角追踪
 | **Medium** | M-Pro/Max | 1/8px | 1–2 + ReSTIR | + DDGI 可见性 + SHARC | SDF + cascades | traced 中粗糙 | RTXDI/半透明/自发光/体积 GI | ≤ 4 ms |
 | **High** | 桌面独显 | 1/4px | 2 + ReSTIR | 全 | SW-BVH 近场 + distant scene | 镜面 ReSTIR + 平面反射 | + SSS/折射/毛发/水面/远场/VR + 光源树 | ≤ 6–8 ms |
 | **Ultra** | 高端独显 | 1/2px | 2–4 + ReSTIR PT | 全 + 硬件 RT hit-lighting | 硬件 RT | 硬件 RT 反射 | + 焦散 + 注视点 + 高质量时空降噪 | ≤ 10–12 ms |
+| **Ultra+** | 旗舰独显（影视级实时） | 1/1px | ReSTIR PT 完整路径重用 | 全 + 硬件 RT + SER + OMM/DMM | 硬件 RT + 流形 | 硬件 RT + 镜面 reservoir | + World-Space ReSTIR + Volumetric ReSTIR + 焦散 + 薄膜 / 各向异性 + 水面 / 湿表面 + 大气多散射 | ≤ 16–20 ms |
 
 **性能杠杆（收益排序）**：Surface Cache（多弹跳变便宜）> ReSTIR/GRIS（降 spp）> STBN 采样（同 spp 更干净）> Radiance Cascades（远场常数）> SHARC（免网格兜底）> ray binning/半分辨率（相干+降载）> 硬件 Ray Query（有则加速）。
 
@@ -326,6 +377,12 @@ Lumen 级性能的胜负手在这一层：**不对远处几何做逐三角追踪
 | **距离场预剔除射线** | gather 前用全局距离场剔除确定遮挡方向，少发无效射线 | 减 10–30% 射线 |
 | **Clustered / tiled 追踪** | 按屏幕 tile 聚类相似射线共享 BVH 遍历状态与缓存 | 提升 cache 命中 |
 | **分级 mip 距离场** | 远场锥步进用 mip 距离场，步长随距离放大 | 远场追踪提速 |
+
+| **Shader Execution Reordering（SER）** | 硬件 RT 命中后按材质 / 着色路径重排线程，恢复发散射线的 warp 相干 | hit-lighting 大幅提速（支持时） |
+| **GPU Work Graphs / 动态射线生成** | GPU 自驱生成探针 / 卡片 / 二次射线工作项，去 CPU 往返，长短射线负载自均衡 | 去调度瓶颈、负载均衡 |
+| **Opacity / Displaced Micromaps（OMM/DMM）** | 微网格描述镂空 / 位移，RT 遍历按微网格快速剔除 / 命中 | alpha-test / 置换几何追踪大幅省算 |
+| **Mesh-shader 卡片捕获** | surface cache 卡片用 mesh/amplification shader 批量捕获，省 draw 调度 | 捕获吞吐提升 |
+| **HiZ 加速屏幕空间步进** | 分级 Z 金字塔跳步，SSR / 接触阴影 / SSGI 步进次数骤减 | 屏幕空间 trace 提速 |
 
 所有优化项都遵循 graduation gate：优化前后 parity 一致，性能达标才开启。
 
@@ -402,9 +459,37 @@ prism_render_shading/src/gi/
     decal_gi.rs             # 贴花写入 surface cache
     layered_gi.rs           # 多层 / clear coat GI 反射
 
+  world_restir/
+    hash_grid.rs            # 世界空间哈希网格 (复用 SHARC key)
+    world_reservoir.rs      # 世界格 reservoir + GRIS 合并到屏幕 ReSTIR
+  volumetric_gi/
+    froxel_reservoir.rs     # 体素散射 reservoir + 时空重投影
+    volumetric_restir.rs    # 参与介质多散射重采样积分
+  caustics/
+    photon_splat.rs         # 镜面/折射光子抛撒 + 屏幕空间累积
+    manifold_nee.rs         # 流形行走下一事件估计 (Ultra)
+  probe_volume/
+    apv.rs                  # 自适应密度探针体 + brick 流式
+    sky_occlusion.rs        # 天空遮蔽项 (防室内漏天光)
+  path_reuse/
+    restir_pt.rs            # 完整路径重采样
+    shift_map.rs            # 重连/随机重放 shift + 雅可比
+  reflect/                  # (扩展 v3 reflect/)
+    stochastic_ssr.rs       # 随机 HiZ-SSR + 镜面 reservoir 重用
+  micro/
+    micro_occlusion.rs      # 微 bent normal + 腔体 AO
+  material/                 # (扩展 v3 material/)
+    thin_film.rs            # 薄膜干涉 + 各向异性 GI 反射
+    water_gi.rs             # 水面/湿表面 GI (反射+折射+焦散混合)
+  atmosphere/
+    multiscatter_gi.rs      # 大气/体积云多散射耦合天光
+
 WESL kernels（新增）：
   gi_sg_eval.wesl gi_mesh_sdf.wesl gi_dfao.wesl gi_bent_normal.wesl
   gi_specular_aa.wesl gi_reflection_probe.wesl gi_checkerboard.wesl
+  gi_world_restir.wesl gi_volumetric_restir.wesl gi_photon_splat.wesl
+  gi_apv.wesl gi_restir_pt.wesl gi_stochastic_ssr.wesl gi_micro_occlusion.wesl
+  gi_thin_film.wesl gi_water.wesl gi_atmosphere_gi.wesl
 ```
 
 ---
@@ -422,7 +507,9 @@ WESL kernels（新增）：
 | **性能优化（贯穿）** | 异步计算 + ray binning + 半分辨率 + 打包 + VRS + 帧摊销 | 各档达帧预算 | ~8–15K |
 | **P7 v3 增强** | SG 辐射 + MDF/DFAO + bent normal/镜面AA + 多弹跳镜面 + 贴花/多层/OIT GI + 棋盘重建 + bindless/persistent-thread | 更高镜面保真 + 更稳遮蔽 + 更低抖动 | ~10–18K |
 
-**合计 ~93–158K 行**（含 surface cache、v2/v3 高级功能与性能优化这类重活；不含高级功能与优化约 ~50–75K）。
+| **P8 v4 顶级增补** | World-Space ReSTIR + Volumetric ReSTIR + 焦散 + APV + ReSTIR PT + 随机HiZ-SSR + 微遮蔽 + 薄膜/各向异性 + 水面/湿表面 + 大气多散射 + SER/OMM/DMM/Work Graphs | 影视级实时上限（Ultra+），逼近离线路径追踪 | ~18–30K |
+
+**合计 ~111–188K 行**（含 surface cache、v2/v3/v4 高级功能与性能优化这类重活；不含高级功能与优化约 ~50–75K）。
 
 ---
 
@@ -460,4 +547,4 @@ WESL kernels（新增）：
 
 ## 17. 一句话总结
 
-**方案 = Lumen 拓扑骨架（Prism 已有一半）+ DDGI 抗漏光 + ReSTIR/GRIS/RTXDI 少射线路径级质量 + 光源树/ReGIR 海量光源 + Radiance Cascades 远场常数成本 + Surface Cache/SHARC 多弹跳免费 + Brixelizer 式 SDF 远场 + STBN/Sobol 低差异采样 + NRD 式经典时空降噪 + SG 高保真镜面 + MDF/DFAO 中距离遮蔽 + bent normal 方向遮蔽 + XeGTAO 高频遮蔽 + 多弹跳镜面 + 异步/半分辨率/VRS/bindless 工程优化，全部套进 Prism 已验证的"软件 BVH + CPU golden + 真机 parity"范式。** 先 P1/P2 拿到"稳定能看的间接光"（~2–3 万行），再 P3–P6 叠加高级功能与性能优化，P7 以 SG 辐射 / MDF-DFAO / bent normal / 多弹跳镜面 / 贴花·多层·OIT GI / 棋盘重建 / bindless·persistent-thread 推到顶级次世代 AAA 天花板（累计 ~9–16 万行）。全程纯经典数值，无任何 AI/ML/神经网络/LLM 路径。
+**方案 = Lumen 拓扑骨架（Prism 已有一半）+ DDGI 抗漏光 + ReSTIR/GRIS/RTXDI 少射线路径级质量 + 光源树/ReGIR 海量光源 + Radiance Cascades 远场常数成本 + Surface Cache/SHARC 多弹跳免费 + Brixelizer 式 SDF 远场 + STBN/Sobol 低差异采样 + NRD 式经典时空降噪 + SG 高保真镜面 + MDF/DFAO 中距离遮蔽 + bent normal 方向遮蔽 + XeGTAO 高频遮蔽 + 多弹跳镜面 + 异步/半分辨率/VRS/bindless 工程优化，全部套进 Prism 已验证的"软件 BVH + CPU golden + 真机 parity"范式。** 先 P1/P2 拿到"稳定能看的间接光"（~2–3 万行），再 P3–P6 叠加高级功能与性能优化，P7 以 SG 辐射 / MDF-DFAO / bent normal / 多弹跳镜面 / 贴花·多层·OIT GI / 棋盘重建 / bindless·persistent-thread 固顶级次世代 AAA 天花板，P8（v4）再以 World-Space ReSTIR / Volumetric ReSTIR / 焦散 / APV / ReSTIR PT / 随机 HiZ-SSR / 微遮蔽 / 薄膜·各向异性 / 水面·湿表面 / 大气多散射 + SER·OMM/DMM·Work Graphs 推到 **Ultra+ 影视级实时**（对标 Portal RTX / Half-Life 2 RTX / Alan Wake 2 PT，累计 ~11–19 万行）。全程纯经典数值，无任何 AI/ML/神经网络/LLM 路径。
