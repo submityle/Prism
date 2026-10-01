@@ -68,6 +68,7 @@ pub mod ao_sample;
 pub mod apply_carve;
 pub mod avsm_area;
 pub mod avsm_transmittance;
+pub mod backface_outline_expand;
 pub mod barycentric_coord;
 pub mod binary_search_range;
 pub mod bit_pack_u32;
@@ -216,6 +217,9 @@ pub use ao_sample::GpuAoSample;
 pub use apply_carve::{ApplyCarveQuery, GpuApplyCarve};
 pub use avsm_area::GpuAvsmArea;
 pub use avsm_transmittance::{AvsmSampleNode, GpuAvsmTransmittance};
+pub use backface_outline_expand::{
+    GpuBackfaceOutlineExpand, OutlineExpandResult, OutlineExpandVertex,
+};
 pub use barycentric_coord::{BarycentricQuery, BarycentricResult, GpuBarycentricCoord};
 pub use binary_search_range::GpuBinarySearchRange;
 pub use bit_pack_u32::{packed_len_words, GpuBitPackU32};
