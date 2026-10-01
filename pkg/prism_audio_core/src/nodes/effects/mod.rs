@@ -122,6 +122,15 @@
 //!   [`pitch_shifter::semitones_to_ratio`] for grain detune and is distinct
 //!   from the single-ratio [`pitch_shifter::PitchShifterNode`] and the
 //!   static-asset [`crate::nodes::sources::sample_player`].
+//! - [`transformer::TransformerNode`] -- audio-transformer (iron-core)
+//!   emulation: a frequency-weighted asymmetric saturator (a low-shelf
+//!   lift before a biased `tanh` and the inverse shelf after it, so bass
+//!   saturates before treble), a winding / leakage resonance peak, and a
+//!   `DC`-blocking output high pass. Reuses
+//!   [`crate::nodes::biquad::BiquadCoeffs::design`] for every section and
+//!   is distinct from the memoryless [`saturation::SaturationNode`], the
+//!   wow / flutter [`tape::TapeNode`], the high-harmonic
+//!   [`exciter::ExciterNode`], and the reflective [`wavefolder::WavefolderNode`].
 
 pub mod auto_wah;
 pub mod bitcrusher;
@@ -148,6 +157,7 @@ pub mod spectral_gate;
 pub mod stereo_width;
 pub mod tape;
 pub mod tilt_eq;
+pub mod transformer;
 pub mod tremolo;
 pub mod vibrato;
 pub mod vocoder;
@@ -196,6 +206,7 @@ pub use spectral_gate::{
 pub use stereo_width::{MAX_WIDTH, StereoWidthNode, StereoWidthParams};
 pub use tape::{Tape, TapeNode, TapeParams};
 pub use tilt_eq::{TiltEq, TiltEqNode, TiltEqParams};
+pub use transformer::{Transformer, TransformerNode, TransformerParams};
 pub use tremolo::{TremoloMode, TremoloNode, TremoloParams};
 pub use vibrato::{VibratoNode, VibratoParams};
 pub use vocoder::{Vocoder, VocoderNode, VocoderParams};
