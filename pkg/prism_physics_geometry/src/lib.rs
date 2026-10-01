@@ -2,7 +2,7 @@
 //! physics engine.
 //!
 //! The M0 surface provides bounding volumes ([`Aabb`], [`BoundingSphere`],
-//! [`Ray`]), a dynamic bounding-volume hierarchy ([`DynamicBvh`], a dynamic
+//! [`Ray`], [`Plane`], [`Frustum`]), a dynamic bounding-volume hierarchy ([`DynamicBvh`], a dynamic
 //! axis-aligned bounding box tree) used as the broad-phase, and persistent
 //! candidate-pair generation. Proxies are identified by an opaque [`ProxyId`],
 //! keeping this crate independent of the physics core.
@@ -23,7 +23,7 @@ pub mod broadphase;
 pub mod bvh;
 pub mod proxy;
 
-pub use bounding::{Aabb, BoundingSphere, Ray};
+pub use bounding::{Aabb, BoundingSphere, Frustum, Plane, Ray};
 pub use broadphase::{generate_pairs, BroadPhasePair, PairChanges, PersistentBroadPhase};
 pub use bvh::DynamicBvh;
 pub use proxy::ProxyId;
