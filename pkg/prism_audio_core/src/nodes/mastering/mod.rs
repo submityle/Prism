@@ -21,6 +21,10 @@
 //!   nodes in the canonical delivery signal order, with per-stage bypass
 //!   switches. It implements no DSP of its own and simply sequences the
 //!   existing processors.
+//! - [`loudness_normalizer::LoudnessNormalizerNode`] -- a target-loudness
+//!   normalizer that applies the static makeup gain implied by a measured
+//!   integrated loudness and a delivery target, bounded by a true-peak
+//!   ceiling. It applies gain only and performs no metering of its own.
 //!
 //! # Provenance
 //!
@@ -40,10 +44,15 @@
 //! degrades a signal for character rather than minimising audible loss.
 
 pub mod dither;
+pub mod loudness_normalizer;
 pub mod mastering_chain;
 
 pub use dither::{
     DEFAULT_DITHER_BITS, Dither, DitherNode, DitherParams, DitherType, MAX_DITHER_BITS,
     MIN_DITHER_BITS, NoiseShaping,
+};
+pub use loudness_normalizer::{
+    DEFAULT_MAX_GAIN_DB, DEFAULT_MAX_TRUE_PEAK_DBTP, DEFAULT_RAMP_SECONDS, DEFAULT_TARGET_LUFS,
+    LoudnessNormalizerNode, LoudnessNormalizerParams, SILENCE_GATE_LUFS, normalization_gain_db,
 };
 pub use mastering_chain::{MasteringChainNode, MasteringChainParams};

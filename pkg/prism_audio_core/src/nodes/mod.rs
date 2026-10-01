@@ -43,7 +43,9 @@
 //!
 //! Delivery-stage processors live in the [`mastering`] submodule: the
 //! [`Dither`] requantizer renders a finished float mix down to a target bit
-//! depth with dither and optional noise shaping.
+//! depth with dither and optional noise shaping, and the
+//! [`LoudnessNormalizerNode`] applies a measured-loudness makeup gain under a
+//! true-peak ceiling.
 
 pub mod analysis;
 pub mod biquad;
@@ -82,8 +84,10 @@ pub use effects::{
 };
 pub use gain::GainNode;
 pub use mastering::{
-    DEFAULT_DITHER_BITS, Dither, DitherNode, DitherParams, DitherType, MAX_DITHER_BITS,
-    MIN_DITHER_BITS, MasteringChainNode, MasteringChainParams, NoiseShaping,
+    DEFAULT_DITHER_BITS, DEFAULT_MAX_GAIN_DB, DEFAULT_MAX_TRUE_PEAK_DBTP, DEFAULT_RAMP_SECONDS,
+    DEFAULT_TARGET_LUFS, Dither, DitherNode, DitherParams, DitherType, LoudnessNormalizerNode,
+    LoudnessNormalizerParams, MAX_DITHER_BITS, MIN_DITHER_BITS, MasteringChainNode,
+    MasteringChainParams, NoiseShaping, SILENCE_GATE_LUFS, normalization_gain_db,
 };
 pub use mix::SumNode;
 pub use pan::StereoPanNode;
