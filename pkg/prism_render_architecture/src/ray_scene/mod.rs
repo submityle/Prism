@@ -195,6 +195,15 @@
 //!   positions, shading normals, and `UV`s, with node records reusing the
 //!   shared [`NODE_WORDS`]) and a packed patch walk that reproduces the
 //!   in-memory walk bit-for-bit.
+//! - [`indexed_bilinear_patch_mesh`] — a smooth-shaded quad-patch mesh over
+//!   a shared vertex pool: parallel `positions`/`normals`/`UV`s plus
+//!   `[u32; 4]` corner indices
+//!   ([`indexed_bilinear_patch_mesh::IndexedBilinearPatchMesh`]) materialise
+//!   each patch on demand as a
+//!   [`shaded_bilinear_patch::ShadedBilinearPatch`], so welded corners share
+//!   one sample (continuous shading, no duplicated edges) and every hit's
+//!   bits match the standalone patch, with a single-level
+//!   [`indexed_bilinear_patch_mesh::IndexedBilinearPatchMeshBvh`].
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -327,6 +336,7 @@ pub mod bilinear_patch;
 pub mod bilinear_patch_gpu_layout;
 pub mod shaded_bilinear_patch;
 pub mod shaded_bilinear_patch_gpu_layout;
+pub mod indexed_bilinear_patch_mesh;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -403,6 +413,10 @@ pub use shaded_bilinear_patch::{
 };
 pub use shaded_bilinear_patch_gpu_layout::{
     GpuShadedBilinearPatchBvhBuffers, SHADED_BILINEAR_PATCH_WORDS,
+};
+pub use indexed_bilinear_patch_mesh::{
+    IndexedBilinearPatchMesh, IndexedBilinearPatchMeshBvh,
+    IndexedBilinearPatchMeshError,
 };
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
