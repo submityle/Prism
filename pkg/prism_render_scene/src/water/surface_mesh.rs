@@ -113,13 +113,6 @@ pub(crate) fn surface_index_data(grid: SurfaceGrid) -> Vec<u32> {
 /// bookkeeping the raster path recomputes from the grid, so they are
 /// intentionally not read here.
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "consumed by the water-surface raster draw node (the following slice) to size the index buffer; exercised now by the unit tests in this module"
-    )
-)]
 pub(crate) fn surface_grid_from_params(params: &GpuWaterSurfaceMeshParams) -> SurfaceGrid {
     SurfaceGrid {
         verts_x: params.grid_dims[0],
