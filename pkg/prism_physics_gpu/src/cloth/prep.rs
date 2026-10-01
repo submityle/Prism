@@ -146,8 +146,7 @@ pub fn build(
 
     // Fixed sample order: real particles first, then in-range virtuals in
     // generation order — identical to both goldens.
-    let mut samples: Vec<Sample> =
-        Vec::with_capacity(real_count.saturating_add(virtuals.len()));
+    let mut samples: Vec<Sample> = Vec::with_capacity(real_count.saturating_add(virtuals.len()));
     for i in 0..real_count {
         samples.push(Sample::real(i as u32));
     }
@@ -182,8 +181,7 @@ pub fn build(
 
     // Phase-2 incidence: walking samples ascending gives each vertex its
     // contributions in ascending sample order, the golden's reduction order.
-    let mut per_vertex: Vec<Vec<[u32; 2]>> =
-        Vec::with_capacity(real_count);
+    let mut per_vertex: Vec<Vec<[u32; 2]>> = Vec::with_capacity(real_count);
     per_vertex.resize_with(real_count, Vec::new);
     for (ai, sample) in samples.iter().enumerate() {
         for k in 0..3 {
@@ -202,8 +200,7 @@ pub fn build(
         vert_offsets.push(u32::try_from(vert_entries.len()).unwrap_or(u32::MAX));
     }
 
-    let positions_packed: Vec<[f32; 4]> =
-        positions.iter().map(|p| [p.x, p.y, p.z, 0.0]).collect();
+    let positions_packed: Vec<[f32; 4]> = positions.iter().map(|p| [p.x, p.y, p.z, 0.0]).collect();
     let sample_verts: Vec<[u32; 4]> = samples
         .iter()
         .map(|s| [s.verts[0], s.verts[1], s.verts[2], 0])
@@ -241,7 +238,7 @@ mod tests {
         let im = vec![1.0, 1.0];
         assert!(build(&positions, &im, &[], 0.0, 0.2).is_none());
         assert!(build(&positions, &im, &[], 1.0, 0.0).is_none());
-        assert!(build(&positions, &vec![1.0], &[], 1.0, 0.2).is_none());
+        assert!(build(&positions, &[1.0], &[], 1.0, 0.2).is_none());
     }
 
     #[test]

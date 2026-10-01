@@ -143,15 +143,13 @@ mod tests {
 
         // Phase 1: each sample's own half-correction, from the frozen snapshot.
         let mut sample_dp = vec![Vec3::ZERO; n];
-        for a in 0..n {
+        for (a, slot) in sample_dp.iter_mut().enumerate() {
             let mut acc = Vec3::ZERO;
             for b in 0..n {
                 if b == a {
                     continue;
                 }
-                if scope == ClothSelfCollisionScope::VirtualOnly
-                    && a < real_count
-                    && b < real_count
+                if scope == ClothSelfCollisionScope::VirtualOnly && a < real_count && b < real_count
                 {
                     continue;
                 }
@@ -179,7 +177,7 @@ mod tests {
                 };
                 acc += dir * (-penetration * (wa / w_sum));
             }
-            sample_dp[a] = acc;
+            *slot = acc;
         }
 
         // Phase 2: barycentric scatter onto the real vertices.
@@ -238,8 +236,13 @@ mod tests {
             thick,
             ClothSelfCollisionScope::All,
         );
-        let brute =
-            brute_force_jacobi(&positions, &im, &virtuals, thick, ClothSelfCollisionScope::All);
+        let brute = brute_force_jacobi(
+            &positions,
+            &im,
+            &virtuals,
+            thick,
+            ClothSelfCollisionScope::All,
+        );
         for (g, b) in golden.iter().zip(brute.iter()) {
             assert!(close(*g, *b), "golden {g:?} vs brute {b:?}");
         }
