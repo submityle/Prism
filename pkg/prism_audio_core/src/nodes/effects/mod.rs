@@ -42,6 +42,10 @@
 //! - [`tape::TapeNode`] — analog tape-machine emulation: `tanh` drive / bias
 //!   saturation feeding a wow / flutter modulated fractional delay and a
 //!   one-pole high-frequency rolloff for vintage warmth and pitch wobble.
+//! - [`saturation::SaturationNode`] -- multi-curve asymmetric saturator
+//!   (`tanh` / `arctan` / cubic / reciprocal / sine) with a drive + DC bias
+//!   stage, oversampling, and an output DC blocker; distinct from
+//!   [`waveshaper::WaveshaperNode`], which is a fixed symmetric `tanh` clip.
 
 pub mod auto_wah;
 pub mod bitcrusher;
@@ -53,6 +57,7 @@ pub mod flanger;
 pub mod parametric_eq;
 pub mod phaser;
 pub mod ring_modulator;
+pub mod saturation;
 pub mod stereo_width;
 pub mod tape;
 pub mod tremolo;
@@ -69,6 +74,7 @@ pub use flanger::{FlangerNode, FlangerParams};
 pub use parametric_eq::{EqBand, ParametricEqNode};
 pub use phaser::{PhaserNode, PhaserParams};
 pub use ring_modulator::{RingModulatorNode, RingModulatorParams};
+pub use saturation::{DEFAULT_DC_BLOCK_COEFF, SaturationCurve, SaturationNode, SaturationParams};
 pub use stereo_width::{MAX_WIDTH, StereoWidthNode, StereoWidthParams};
 pub use tape::{Tape, TapeNode, TapeParams};
 pub use tremolo::{TremoloMode, TremoloNode, TremoloParams};

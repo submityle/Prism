@@ -75,7 +75,8 @@ pub use effects::{
     BitcrusherNode, BitcrusherParams, ChorusNode, ChorusParams, CombResonatorNode,
     CombResonatorParams, DelayNode, EqBand, FlangerNode, FlangerParams, MAX_BIT_DEPTH,
     MIN_BIT_DEPTH, Oversample, ParametricEqNode, PhaserNode, PhaserParams, RingModulatorNode,
-    RingModulatorParams, TremoloMode, TremoloNode, TremoloParams, VibratoNode, VibratoParams,
+    RingModulatorParams, SaturationCurve, SaturationNode, SaturationParams, TremoloMode,
+    TremoloNode, TremoloParams, VibratoNode, VibratoParams,
     WaveshaperNode,
 };
 pub use gain::GainNode;
