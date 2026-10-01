@@ -91,6 +91,14 @@
 //! * [`distance_cpu`] — the authoritative [`cpu_solve_joints_distance`] golden
 //!   stepper (one-sided min/max separation limit with a free dead zone).
 //! * [`distance_gpu`] — the device-side [`GpuDistanceJointSolver`] twin.
+//! * [`elliptical_cone_twist`] — the [`EllipticalConeTwistJoint`] (elliptical
+//!   ragdoll cone-twist) definition and its device-packed storage
+//!   representation.
+//! * [`elliptical_cone_twist_cpu`] — the authoritative
+//!   [`cpu_solve_joints_elliptical_cone_twist`] golden stepper (independent
+//!   swing1/swing2 elliptical cone, twist limit, and point-to-point weld).
+//! * [`elliptical_cone_twist_gpu`] — the device-side
+//!   [`GpuEllipticalConeTwistJointSolver`] twin.
 //! * [`fixed`] — the [`FixedJoint`] (weld) definition and its device-packed
 //!   storage representation.
 //! * [`fixed_cpu`] — the authoritative [`cpu_solve_joints_fixed`] golden
@@ -164,6 +172,9 @@ mod cylindrical_limit_gpu;
 mod distance;
 mod distance_cpu;
 mod distance_gpu;
+mod elliptical_cone_twist;
+mod elliptical_cone_twist_cpu;
+mod elliptical_cone_twist_gpu;
 mod fixed;
 mod fixed_cpu;
 mod fixed_gpu;
@@ -224,6 +235,9 @@ pub use cylindrical_limit_gpu::GpuCylindricalLimitJointSolver;
 pub use distance::DistanceJoint;
 pub use distance_cpu::cpu_solve_joints_distance;
 pub use distance_gpu::GpuDistanceJointSolver;
+pub use elliptical_cone_twist::EllipticalConeTwistJoint;
+pub use elliptical_cone_twist_cpu::cpu_solve_joints_elliptical_cone_twist;
+pub use elliptical_cone_twist_gpu::GpuEllipticalConeTwistJointSolver;
 pub use fixed::FixedJoint;
 pub use fixed_cpu::cpu_solve_joints_fixed;
 pub use fixed_gpu::GpuFixedJointSolver;
