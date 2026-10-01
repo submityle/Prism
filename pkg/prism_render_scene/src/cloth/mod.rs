@@ -84,6 +84,8 @@ mod sleep_gpu_tests;
 mod solve_plan;
 mod teleport;
 #[cfg(test)]
+mod tearing_parity;
+#[cfg(test)]
 mod tearing_gpu_tests;
 #[cfg(test)]
 mod vbd_gpu_tests;
