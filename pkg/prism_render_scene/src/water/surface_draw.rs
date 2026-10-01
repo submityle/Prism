@@ -38,6 +38,7 @@ use crate::shading::{
 
 use super::bind_groups::filtering_sampler;
 use super::resources::WaterGpuBodies;
+use super::surface_gtao::GpuWaterGtaoConfig;
 use super::surface_mesh::{build_surface_view, surface_index_data};
 use super::surface_motion::ViewWaterMotionUniform;
 use super::surface_pipeline::{ViewWaterSurfacePipelines, WaterSurfacePipelines};
@@ -321,6 +322,29 @@ pub(crate) fn draw_water_surface(
         &BindGroupEntries::sequential((ssr_hzb, ssr_params_buffer.as_entire_binding())),
     );
 
+    // The `@group(6)` ground-truth ambient-occlusion group, built once for the
+    // view. The water fragment runs the horizon `GTAO` search over the same
+    // reverse-Z Hi-Z pyramid bound at `@group(3)` (reusing its reconstruction
+    // matrices), occluding the image-based ambient term with the surface's own
+    // occlusion rather than the submerged terrain's resolved opaque `GTAO`.
+    // The search needs that depth pyramid, so it is gated on both the `GTAO`
+    // feature flag and a resident `ViewSsrTextures`; otherwise the config's
+    // `sample_enable` bit is clear and the shader leaves the ambient term fully
+    // lit. The buffer and group are declared here so they outlive the pass.
+    let gtao_layout = cache.get_bind_group_layout(&surface_pipeline.gtao_layout);
+    let gtao_enable = settings.enable_gtao && ssr_textures.is_some();
+    let gtao_config = GpuWaterGtaoConfig::new(gtao_enable);
+    let gtao_params_buffer = device.create_buffer_with_data(&BufferInitDescriptor {
+        label: Some("prism water surface gtao params"),
+        contents: bytemuck::bytes_of(&gtao_config),
+        usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+    });
+    let gtao_group = device.create_bind_group(
+        "prism water surface gtao",
+        &gtao_layout,
+        &BindGroupEntries::single(gtao_params_buffer.as_entire_binding()),
+    );
+
     // The `@group(4)` motion-vector group: the per-view current+previous
     // view-projection uniform `prepare_water_surface_motion` built this frame.
     // The fragment stage reprojects the surface's world position through both
@@ -366,6 +390,7 @@ pub(crate) fn draw_water_surface(
         pass.set_bind_group(3, &ssr_group, &[]);
         pass.set_bind_group(4, &motion_group, &[]);
         pass.set_bind_group(5, &draw.froxel_group, &[]);
+        pass.set_bind_group(6, &gtao_group, &[]);
         pass.set_index_buffer(draw.index_buffer.slice(..), IndexFormat::Uint32);
         pass.draw_indexed(0..draw.index_count, 0, 0..1);
     }

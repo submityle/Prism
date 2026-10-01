@@ -235,6 +235,11 @@ pub(crate) struct WaterSurfacePipelines {
     /// this descriptor so the fragment stage composites the participating
     /// medium into its refraction (see [`super::surface_froxel`]).
     pub(crate) froxel_layout: BindGroupLayoutDescriptor,
+    /// The `@group(6)` ground-truth ambient-occlusion layout: a single config
+    /// uniform. The fragment stage runs the horizon `GTAO` search over the
+    /// `@group(3)` Hi-Z pyramid it already binds, modulating the image-based
+    /// ambient term with the surface's own occlusion (see [`super::surface_gtao`]).
+    pub(crate) gtao_layout: BindGroupLayoutDescriptor,
     /// The embedded `water_surface_raster.wesl` module both stages compile from.
     pub(crate) shader: Handle<Shader>,
 }
@@ -255,6 +260,7 @@ impl SpecializedRenderPipeline for WaterSurfacePipelines {
                 self.ssr_layout.clone(),
                 self.motion_layout.clone(),
                 self.froxel_layout.clone(),
+                self.gtao_layout.clone(),
             ],
             immediate_size: 0,
             vertex: VertexState {
@@ -396,6 +402,13 @@ pub(crate) fn init_water_surface_pipelines(
         "prism water surface froxel",
         &super::surface_froxel::froxel_layout_entries(),
     );
+    // @group(6): the horizon-GTAO config uniform; the draw node binds a per-view
+    // buffer against this descriptor so the fragment stage can occlude its
+    // image-based ambient term with a march over the @group(3) Hi-Z pyramid.
+    let gtao_layout = BindGroupLayoutDescriptor::new(
+        "prism water surface gtao",
+        &super::surface_gtao::gtao_layout_entries(),
+    );
 
     commands.insert_resource(WaterSurfacePipelines {
         layout,
@@ -404,6 +417,7 @@ pub(crate) fn init_water_surface_pipelines(
         ssr_layout,
         motion_layout,
         froxel_layout,
+        gtao_layout,
         shader,
     });
 }
@@ -480,6 +494,10 @@ mod tests {
             froxel_layout: BindGroupLayoutDescriptor::new(
                 "prism water surface froxel",
                 &crate::water::surface_froxel::froxel_layout_entries(),
+            ),
+            gtao_layout: BindGroupLayoutDescriptor::new(
+                "prism water surface gtao",
+                &crate::water::surface_gtao::gtao_layout_entries(),
             ),
             shader: Handle::default(),
         }
@@ -561,13 +579,14 @@ mod tests {
         assert_eq!(depth.depth_compare, Some(CompareFunction::GreaterEqual));
         assert_eq!(desc.primitive.cull_mode, None);
         assert_eq!(desc.primitive.topology, PrimitiveTopology::TriangleList);
-        // Six bind-group layouts: the per-body @group(0) surface layout, the
+        // Seven bind-group layouts: the per-body @group(0) surface layout, the
         // shared @group(1) engine light table the fragment stage samples, the
         // @group(2) virtual-shadow-map twin the primary directional light reads,
         // the @group(3) screen-space-reflection Hi-Z pyramid + march config, the
-        // @group(4) motion-vector uniform feeding the second render target, and
-        // the @group(5) underwater froxel volume composited into refraction.
-        assert_eq!(desc.layout.len(), 6);
+        // @group(4) motion-vector uniform feeding the second render target, the
+        // @group(5) underwater froxel volume composited into refraction, and the
+        // @group(6) horizon-GTAO config occluding the image-based ambient term.
+        assert_eq!(desc.layout.len(), 7);
     }
 
     #[test]

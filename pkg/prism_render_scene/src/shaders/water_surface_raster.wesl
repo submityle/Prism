@@ -639,6 +639,209 @@ fn apply_underwater_volume(refracted: vec3<f32>, screen_uv: vec2<f32>, eye_depth
     return refracted * voxel.a + max(voxel.rgb, vec3<f32>(0.0));
 }
 
+// Ground-truth-ambient-occlusion base (`@group(6)`): a single config uniform.
+// The transparent water surface runs the horizon `GTAO` search (Jimenez et al.
+// 2016) in its own fragment stage, reconstructing view-space positions from the
+// reverse-Z Hi-Z pyramid already bound at `@group(3)` (reusing `ssr_cfg`'s
+// reconstruction matrices) and modulating the image-based ambient term with the
+// surface's own occlusion. It never samples a resolved opaque `GTAO` buffer,
+// which stores the submerged terrain's occlusion rather than the water's. The
+// `gtao_`-prefixed twins below mirror the `prism_render_shading::gi::gtao` `CPU`
+// golden (horizon search + arc integral + power/intensity shaping) verbatim.
+struct WaterGtaoConfig {
+    radius: f32,
+    intensity: f32,
+    power: f32,
+    thickness: f32,
+    slice_count: u32,
+    step_count: u32,
+    sample_enable: u32,
+    _pad0: u32,
+}
+
+@group(6) @binding(0) var<uniform> gtao_cfg: WaterGtaoConfig;
+
+const GTAO_FRAC_PI_2: f32 = 1.5707964;
+const GTAO_PI: f32 = 3.1415927;
+
+// Load the reverse-Z Hi-Z nearest device depth (mip 0) at a framebuffer UV.
+fn gtao_sample_depth(uv: vec2<f32>) -> f32 {
+    let size = vec2<i32>(textureDimensions(ssr_hzb, 0));
+    let clamped = clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0));
+    let coord = clamp(vec2<i32>(clamped * vec2<f32>(size)), vec2<i32>(0), size - vec2<i32>(1));
+    return textureLoad(ssr_hzb, coord, 0).x;
+}
+
+// Reconstruct a view-space position from a framebuffer UV + reverse-Z device
+// depth, inverting the `ssr_project_view` convention (uv.y runs top-down).
+fn gtao_view_from_uv_depth(uv: vec2<f32>, depth: f32) -> vec3<f32> {
+    let ndc = vec3<f32>(uv.x * 2.0 - 1.0, 1.0 - 2.0 * uv.y, depth);
+    let view_point = ssr_cfg.view_from_clip * vec4<f32>(ndc, 1.0);
+    return view_point.xyz / view_point.w;
+}
+
+// Golden `gtao::falloff_weight`: quadratic `1 - (dist/radius)^2`, 1 at the
+// origin, 0 at/after the radius; a disabled radius disables attenuation.
+fn gtao_falloff_weight(dist: f32, radius: f32) -> f32 {
+    if radius <= 0.0 {
+        return 1.0;
+    }
+    let t = dist / radius;
+    return clamp(1.0 - t * t, 0.0, 1.0);
+}
+
+// Golden `gtao::integral::arc_integral`: the closed-form slice arc integral.
+fn gtao_arc_integral(h: f32, gamma: f32) -> f32 {
+    return -cos(2.0 * h - gamma) + cos(gamma) + 2.0 * h * sin(gamma);
+}
+
+// Golden `gtao::integral::clamp_horizons`: sign the two horizon magnitudes and
+// clamp them into the hemisphere centred on the projected normal.
+fn gtao_clamp_horizons(gamma: f32, h1: f32, h2: f32) -> vec2<f32> {
+    let a = clamp(h1, 0.0, GTAO_FRAC_PI_2);
+    let b = clamp(h2, 0.0, GTAO_FRAC_PI_2);
+    let h1c = gamma + max(-a - gamma, -GTAO_FRAC_PI_2);
+    let h2c = gamma + min(b - gamma, GTAO_FRAC_PI_2);
+    return vec2<f32>(h1c, h2c);
+}
+
+// Golden `gtao::integral::project_normal`: project the normal into the slice
+// plane spanned by `view`/`tangent`, returning `(proj_len, gamma)`.
+fn gtao_project_normal(view_dir: vec3<f32>, tangent: vec3<f32>, normal: vec3<f32>) -> vec2<f32> {
+    let comp_v = dot(normal, view_dir);
+    let comp_t = dot(normal, tangent);
+    let proj_len = sqrt(comp_v * comp_v + comp_t * comp_t);
+    if proj_len <= 0.0 {
+        return vec2<f32>(0.0, 0.0);
+    }
+    let gamma = clamp(atan2(comp_t, comp_v), -GTAO_FRAC_PI_2, GTAO_FRAC_PI_2);
+    return vec2<f32>(proj_len, gamma);
+}
+
+// Golden `gtao::multibounce::power_intensity`: sharpen the raw occlusion by
+// `power` then blend it toward fully lit by `intensity`.
+fn gtao_power_intensity(ao: f32, power: f32, intensity: f32) -> f32 {
+    let x = clamp(ao, 0.0, 1.0);
+    let shaped = pow(x, max(power, 0.0));
+    let strength = clamp(intensity, 0.0, 1.0);
+    return clamp(1.0 - strength * (1.0 - clamp(shaped, 0.0, 1.0)), 0.0, 1.0);
+}
+
+// Golden `gtao::horizon::side_horizon`: march one slice side, tracking a
+// falloff-weighted running maximum view-cosine (relaxed toward receding samples
+// by `thickness`), then convert it to a horizon magnitude in `[0, PI/2]`.
+fn gtao_side_horizon(
+    p_view: vec3<f32>,
+    view_dir: vec3<f32>,
+    center_uv: vec2<f32>,
+    screen_dir: vec2<f32>,
+    uv_step: f32,
+    steps: u32,
+    radius: f32,
+    thickness: f32,
+) -> f32 {
+    var max_cos = 0.0;
+    for (var i = 1u; i <= steps; i = i + 1u) {
+        let uv = center_uv + screen_dir * (uv_step * f32(i));
+        if uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 {
+            break;
+        }
+        let sample_view = gtao_view_from_uv_depth(uv, gtao_sample_depth(uv));
+        let delta = sample_view - p_view;
+        let len_sq = dot(delta, delta);
+        if len_sq <= 1.0e-12 {
+            continue;
+        }
+        let inv_len = inverseSqrt(len_sq);
+        let raw_cos = dot(view_dir, delta * inv_len);
+        if raw_cos <= 0.0 {
+            continue;
+        }
+        let dist = len_sq * inv_len;
+        let candidate = clamp(raw_cos * gtao_falloff_weight(dist, radius), 0.0, 1.0);
+        if candidate > max_cos {
+            max_cos = candidate;
+        } else {
+            max_cos = max_cos + (candidate - max_cos) * thickness;
+        }
+    }
+    return clamp(acos(clamp(max_cos, 0.0, 1.0)), 0.0, GTAO_FRAC_PI_2);
+}
+
+// Horizon-based `GTAO` visibility for the water fragment: reconstruct the
+// view-space surface, march `slice_count` azimuthal slices (both tangent sides)
+// over the shared Hi-Z pyramid, and accumulate the projected-normal-weighted
+// visible fraction, mirroring the golden `gtao::integral::integrate`. A
+// disabled pass, a point behind the camera, or an all-degenerate set of slices
+// returns `1` (fully unoccluded) so the ambient term stays lit.
+fn water_gtao(world_position: vec3<f32>, world_normal: vec3<f32>, center_uv: vec2<f32>) -> f32 {
+    if gtao_cfg.sample_enable == 0u {
+        return 1.0;
+    }
+    let p = (ssr_cfg.view_from_world * vec4<f32>(world_position, 1.0)).xyz;
+    let n = normalize((ssr_cfg.view_from_world * vec4<f32>(world_normal, 0.0)).xyz);
+    let view_dir = normalize(-p);
+
+    // Project the view-space falloff radius to a screen-space UV radius at this
+    // depth so the march footprint shrinks with distance.
+    let center = ssr_project_view(p);
+    let edge = ssr_project_view(p + vec3<f32>(gtao_cfg.radius, 0.0, 0.0));
+    if center.clip_w <= 0.0 || edge.clip_w <= 0.0 {
+        return 1.0;
+    }
+    let uv_radius = clamp(length(edge.uv - center.uv), 1.0e-4, 0.5);
+    let steps = max(gtao_cfg.step_count, 1u);
+    let uv_step = uv_radius / f32(steps);
+    let slices = max(gtao_cfg.slice_count, 1u);
+
+    var weighted_fraction = 0.0;
+    var weighted_proj = 0.0;
+    for (var slice = 0u; slice < slices; slice = slice + 1u) {
+        let phi = (f32(slice) + 0.5) * (GTAO_PI / f32(slices));
+        let screen_dir = vec2<f32>(cos(phi), sin(phi));
+
+        // Reconstruct the slice tangent in view space from a +/- screen probe,
+        // then re-orthonormalise it against the view direction.
+        let uv_pos = clamp(center_uv + screen_dir * uv_step, vec2<f32>(0.0), vec2<f32>(1.0));
+        let uv_neg = clamp(center_uv - screen_dir * uv_step, vec2<f32>(0.0), vec2<f32>(1.0));
+        let q_pos = gtao_view_from_uv_depth(uv_pos, gtao_sample_depth(uv_pos));
+        let q_neg = gtao_view_from_uv_depth(uv_neg, gtao_sample_depth(uv_neg));
+        var tangent = q_pos - q_neg;
+        tangent = tangent - view_dir * dot(view_dir, tangent);
+        let t_len_sq = dot(tangent, tangent);
+        if t_len_sq <= 1.0e-12 {
+            continue;
+        }
+        tangent = tangent * inverseSqrt(t_len_sq);
+
+        let h2 = gtao_side_horizon(p, view_dir, center_uv, screen_dir, uv_step, steps, gtao_cfg.radius, gtao_cfg.thickness);
+        let h1 = gtao_side_horizon(p, view_dir, center_uv, -screen_dir, uv_step, steps, gtao_cfg.radius, gtao_cfg.thickness);
+
+        let pn = gtao_project_normal(view_dir, tangent, n);
+        let proj_len = pn.x;
+        if proj_len <= 0.0 {
+            continue;
+        }
+        let gamma = pn.y;
+        let hc = gtao_clamp_horizons(gamma, h1, h2);
+        let occluded = gtao_arc_integral(hc.x, gamma) + gtao_arc_integral(hc.y, gamma);
+        let oc = gtao_clamp_horizons(gamma, GTAO_FRAC_PI_2, GTAO_FRAC_PI_2);
+        let open = gtao_arc_integral(oc.x, gamma) + gtao_arc_integral(oc.y, gamma);
+        var fraction = 1.0;
+        if open > 1.0e-12 {
+            fraction = clamp(occluded / open, 0.0, 1.0);
+        }
+        weighted_fraction = weighted_fraction + fraction * proj_len;
+        weighted_proj = weighted_proj + proj_len;
+    }
+
+    var ao = 1.0;
+    if weighted_proj > 1.0e-12 {
+        ao = clamp(weighted_fraction / weighted_proj, 0.0, 1.0);
+    }
+    return gtao_power_intensity(ao, gtao_cfg.power, gtao_cfg.intensity);
+}
+
 // Project a world position to the engine's motion-UV convention
 // (ndc.x*0.5+0.5, ndc.y*-0.5+0.5), returning clip.w in `.z` so the caller can
 // reject points behind the camera (clip.w <= 0). Mirrors the opaque resolve
@@ -790,7 +993,7 @@ fn ramp_quantize(x: f32, steps: f32) -> f32 {
 // Shared physically based response, composited with refraction. Returns the
 // pre-multiplied color and the surface alpha.
 fn shade_pbr_core(in: VertexOutput) -> vec4<f32> {
-    let surface = surface_from(in.foam);
+    var surface = surface_from(in.foam);
     let frame = frame_at(in.world_position, in.normal);
 
     // Accumulate the engine's full analytic light table (all directional +
@@ -828,6 +1031,11 @@ fn shade_pbr_core(in: VertexOutput) -> vec4<f32> {
         }
     }
     let ssr = water_ssr_reflection(in.world_position, frame.normal, surface.perceptual_roughness);
+    // Occlude the image-based ambient term with the surface's own horizon GTAO,
+    // marched over the shared @group(3) Hi-Z pyramid. Shared by every §5
+    // frontend (NPR/custom/hybrid all route through this core).
+    let gtao_uv = in.clip_position.xy / max(view.viewport.xy, vec2<f32>(1.0));
+    surface.ambient_occlusion = water_gtao(in.world_position, frame.normal, gtao_uv);
     lit = lit + water_ibl(surface, frame, ssr);
     let refracted_raw = refraction_color(in.clip_position, frame.normal);
     // Composite the underwater single-scatter froxel volume into the refracted
