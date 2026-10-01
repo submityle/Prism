@@ -234,6 +234,12 @@
 //!   [`triangle_mesh::TriangleMeshBvh`] whose leaf slices map back to original
 //!   triangle ids so hits report barycentric position, interpolated shading
 //!   normal, and texture coordinate.
+//! - [`alpha_mesh`] — alpha-tested (cutout) triangle mesh for foliage,
+//!   fences, and grates: an [`alpha_mesh::AlphaMesh`] pairs a verbatim
+//!   [`triangle_mesh::TriangleMesh`] with an [`alpha_mesh::AlphaTexture`]
+//!   mask and a cutoff so sub-cutoff hits pass through, and an
+//!   [`alpha_mesh::AlphaMeshBvh`] gates closest-hit/any-hit traversal on the
+//!   sampled alpha (pbrt / hardware any-hit alpha).
 //! - [`traversal`] — [`Ray`]/`BVH` slab + Möller–Trumbore intersection with
 //!   closest-hit and any-hit walks (the `GPU` traversal kernel's golden ref).
 //! - [`traversal_stackless`] — stackless (threaded / escape-index) `BVH` walk:
@@ -288,6 +294,7 @@ pub mod spline;
 pub mod spline_strip;
 pub mod triangle_mesh;
 pub mod triangle_mesh_gpu_layout;
+pub mod alpha_mesh;
 pub mod footprint;
 pub mod gpu_layout;
 pub mod motion;
@@ -355,6 +362,7 @@ pub use triangle_mesh::{MeshHit, TriangleMesh, TriangleMeshBvh, TriangleMeshErro
 pub use triangle_mesh_gpu_layout::{
     GpuTriangleMeshBvhBuffers, MESH_INDEX_WORDS, MESH_VERTEX_WORDS,
 };
+pub use alpha_mesh::{AlphaMesh, AlphaMeshBvh, AlphaTexture, AlphaTextureError};
 pub use rectangle_gpu_layout::{GpuRectangleBvhBuffers, RECTANGLE_WORDS};
 pub use aabb_primitive_gpu_layout::{GpuAabbBvhBuffers, AABB_PRIMITIVE_WORDS};
 pub use sphere_gpu_layout::{GpuSphereBvhBuffers, SPHERE_WORDS};
