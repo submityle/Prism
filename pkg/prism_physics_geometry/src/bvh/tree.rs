@@ -237,18 +237,6 @@ impl DynamicBvh {
         leaves == self.leaf_count
     }
 
-    /// Collects `(payload, fat box)` for every live leaf. Crate-internal helper
-    /// used by the broad-phase.
-    pub(crate) fn collect_leaves(&self) -> Vec<(u64, Aabb)> {
-        let mut out = Vec::with_capacity(self.leaf_count);
-        for node in &self.nodes {
-            if node.height >= 0 && node.is_leaf() {
-                out.push((node.data, node.aabb));
-            }
-        }
-        out
-    }
-
     /// Resolves a handle to a live leaf slot index, validating the generation.
     fn resolve_leaf(&self, proxy: ProxyId) -> Option<u32> {
         let idx = proxy.index();

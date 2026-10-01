@@ -48,18 +48,15 @@ impl BroadPhasePair {
 /// Generates every overlapping leaf fat-box pair in `bvh`.
 ///
 /// The result is deduplicated and sorted in ascending [`BroadPhasePair`] order.
-/// Each leaf's fat box is tested against the tree via an overlap query, so the
-/// cost scales with the number of actual overlaps rather than `O(n^2)`.
+/// Pairs come from [`DynamicBvh::query_self_pairs`], a simultaneous tree
+/// descent that reports each overlapping pair once, so the cost scales with the
+/// number of actual overlaps rather than `O(n^2)` and avoids re-descending the
+/// whole tree per leaf.
 pub fn generate_pairs(bvh: &DynamicBvh) -> Vec<BroadPhasePair> {
-    let leaves = bvh.collect_leaves();
     let mut set: BTreeSet<BroadPhasePair> = BTreeSet::new();
-    for &(data, aabb) in &leaves {
-        bvh.query_aabb(aabb, &mut |other| {
-            if other != data {
-                set.insert(BroadPhasePair::new(data, other));
-            }
-        });
-    }
+    bvh.query_self_pairs(&mut |a, b| {
+        set.insert(BroadPhasePair::new(a, b));
+    });
     set.into_iter().collect()
 }
 
