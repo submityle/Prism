@@ -216,7 +216,7 @@ fn cloth_project_distance_batch(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let d_lambda = -error / denom;
-    let direction = delta / dist;
+    let direction = delta * (1.0 / dist);
     let correction = direction * d_lambda;
     positions[a] = vec4<f32>(positions[a].xyz + correction * wa, positions[a].w);
     positions[b] = vec4<f32>(positions[b].xyz - correction * wb, positions[b].w);
@@ -311,7 +311,7 @@ fn cloth_project_long_range_batch(@builtin(global_invocation_id) gid: vec3<u32>)
         return;
     }
     let d_lambda = -error / denom;
-    let direction = delta / dist;
+    let direction = delta * (1.0 / dist);
     let correction = direction * d_lambda;
     positions[a] = vec4<f32>(positions[a].xyz + correction * wa, positions[a].w);
     positions[b] = vec4<f32>(positions[b].xyz - correction * wb, positions[b].w);
@@ -349,7 +349,7 @@ fn cloth_strain_limit(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let dist = sqrt(dist_sq);
     let excess = dist - max_len;
-    let direction = delta / dist;
+    let direction = delta * (1.0 / dist);
     let correction = direction * excess;
     positions[a] = vec4<f32>(positions[a].xyz - correction * (wa / w_sum), positions[a].w);
     positions[b] = vec4<f32>(positions[b].xyz + correction * (wb / w_sum), positions[b].w);
@@ -371,5 +371,5 @@ fn cloth_velocity_update(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let delta = positions[p].xyz - prev_positions[p].xyz;
-    velocities[p] = vec4<f32>(delta / params.dt_sub, velocities[p].w);
+    velocities[p] = vec4<f32>(delta * (1.0 / params.dt_sub), velocities[p].w);
 }
