@@ -1025,11 +1025,51 @@ pub fn cylinder_segment(point: [f32; 3], a: [f32; 3], b: [f32; 3], radius: f32) 
     d.signum() * d.abs().sqrt() / baba
 }
 
+/// Signed distance from `point` to a regular octagonal prism: a regular octagon
+/// of inradius (apothem) `radius` in the `xy` plane, extruded along the `z`
+/// axis to span `[-half_depth, half_depth]`, centred at the origin.
+///
+/// This is the eight-sided companion of [`hex_prism`] and shares its exact
+/// construction: the cross-section is folded through its mirror planes so a
+/// single wedge represents the whole polygon, the nearest flat is measured with
+/// the interior/exterior split, and the result is combined with the `z` slab so
+/// the side faces, end caps, and their shared edges all carry a true distance
+/// (not a bound). It models the octagonal stock AAA content uses for bolt
+/// heads, nuts, columns, and chamfered posts.
+///
+/// Follows Inigo Quilez's exact `sdOctogonPrism`. The baked constants are
+/// `(-cos(pi/8), sin(pi/8), tan(pi/8))`, so the function stays
+/// transcendental-free.
+pub fn octagon_prism(point: [f32; 3], radius: f32, half_depth: f32) -> f32 {
+    // (-cos(22.5 degrees), sin(22.5 degrees), tan(22.5 degrees) = sqrt(2) - 1).
+    const K: [f32; 3] = [-0.923_879_5, 0.382_683_4, 0.414_213_56];
+    let mut p = [point[0].abs(), point[1].abs(), point[2].abs()];
+
+    // Two reflections fold the absolute-value quadrant down to a single octant
+    // wedge: one against the ( K.x,  K.y) plane, one against the (-K.x, K.y)
+    // plane. After both, the governing feature is always the top flat edge.
+    let fold0 = 2.0 * (K[0] * p[0] + K[1] * p[1]).min(0.0);
+    p[0] -= fold0 * K[0];
+    p[1] -= fold0 * K[1];
+    let fold1 = 2.0 * (-K[0] * p[0] + K[1] * p[1]).min(0.0);
+    p[0] -= fold1 * -K[0];
+    p[1] -= fold1 * K[1];
+
+    // Slide onto the top flat (half-length tan(pi/8) * radius) and drop to it.
+    let clamped_x = p[0].clamp(-K[2] * radius, K[2] * radius);
+    let face = [p[0] - clamped_x, p[1] - radius];
+    let sign = if p[1] - radius < 0.0 { -1.0 } else { 1.0 };
+    let d = [length2(face) * sign, p[2] - half_depth];
+    let inside = d[0].max(d[1]).min(0.0);
+    let outside = length2([d[0].max(0.0), d[1].max(0.0)]);
+    inside + outside
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         box_frame, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_torus, capsule, cone_sdf, cut_hollow_sphere, cut_sphere, cylinder_segment,
-        death_star, ellipsoid_sdf, hex_prism, infinite_cylinder, length2, line_sdf, link, octahedron, plane, pyramid, rhombus, round_box,
+        death_star, ellipsoid_sdf, hex_prism, infinite_cylinder, length2, line_sdf, link, octagon_prism, octahedron, plane, pyramid, rhombus, round_box,
         quad_sdf, round_cone_sdf, round_cone_segment, rounded_cylinder, solid_angle, sphere, torus, triangle_sdf, triangular_prism, vesica,
     };
 
@@ -1084,6 +1124,86 @@ mod tests {
         let base = cylinder_segment(p, a, b, r);
         let moved = cylinder_segment(shift(p), shift(a), shift(b), r);
         assert!((base - moved).abs() < 1e-5, "base={base} moved={moved}");
+    }
+
+    // Independent exact 2D signed distance to a convex polygon (IQ sdPolygon),
+    // used to cross-check the octagon prism's cross-section. Transcendental use
+    // is fine here: test code is not bound by the module's purity rule.
+    fn polygon_sdf2(px: f32, py: f32, verts: &[[f32; 2]]) -> f32 {
+        let n = verts.len();
+        let mut d = {
+            let w = [px - verts[0][0], py - verts[0][1]];
+            w[0] * w[0] + w[1] * w[1]
+        };
+        let mut s = 1.0_f32;
+        for i in 0..n {
+            let j = (i + n - 1) % n;
+            let e = [verts[j][0] - verts[i][0], verts[j][1] - verts[i][1]];
+            let w = [px - verts[i][0], py - verts[i][1]];
+            let t = (e[0] * w[0] + e[1] * w[1]) / (e[0] * e[0] + e[1] * e[1]);
+            let t = t.clamp(0.0, 1.0);
+            let b = [w[0] - e[0] * t, w[1] - e[1] * t];
+            d = d.min(b[0] * b[0] + b[1] * b[1]);
+            let c = [py >= verts[i][1], py < verts[j][1], e[0] * w[1] > e[1] * w[0]];
+            if (c[0] && c[1] && c[2]) || (!c[0] && !c[1] && !c[2]) {
+                s = -s;
+            }
+        }
+        s * d.sqrt()
+    }
+
+    // Reference octagon prism: exact 2D octagon distance (apothem `r`, flats on
+    // the axes) extruded along z by `h`, combined with the standard slab rule.
+    fn octagon_prism_reference(point: [f32; 3], r: f32, h: f32) -> f32 {
+        let big_r = r / (std::f32::consts::PI / 8.0).cos();
+        let mut verts = [[0.0_f32; 2]; 8];
+        for (k, v) in verts.iter_mut().enumerate() {
+            let ang = std::f32::consts::PI / 8.0 + std::f32::consts::FRAC_PI_4 * k as f32;
+            *v = [big_r * ang.cos(), big_r * ang.sin()];
+        }
+        let d2 = polygon_sdf2(point[0], point[1], &verts);
+        let dz = point[2].abs() - h;
+        let outside = (d2.max(0.0).powi(2) + dz.max(0.0).powi(2)).sqrt();
+        let inside = d2.max(dz).min(0.0);
+        inside + outside
+    }
+
+    #[test]
+    fn octagon_prism_extrudes_exactly_along_z() {
+        // Well inside the cross-section, only the z slab governs.
+        let r = 1.0;
+        let h = 0.5;
+        assert!((octagon_prism([0.0, 0.0, h + 2.0], r, h) - 2.0).abs() < 1e-5);
+        assert!((octagon_prism([0.0, 0.0, 0.0], r, h) - (-h)).abs() < 1e-5);
+        // Straight out from the top flat edge (normal +y) at mid-depth: the gap
+        // to the apothem is exact.
+        assert!((octagon_prism([0.0, r + 1.5, 0.0], r, h) - 1.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn octagon_prism_matches_independent_polygon_reference() {
+        let r = 1.3;
+        let h = 0.7;
+        // Deterministic pseudo-random sweep across interior, faces, corners,
+        // caps, and the exterior corner regions.
+        let mut seed = 0x1234_5678_u32;
+        let mut next = || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 8) as f32 / (1u32 << 24) as f32
+        };
+        for _ in 0..400 {
+            let p = [
+                (next() - 0.5) * 6.0,
+                (next() - 0.5) * 6.0,
+                (next() - 0.5) * 4.0,
+            ];
+            let got = octagon_prism(p, r, h);
+            let want = octagon_prism_reference(p, r, h);
+            assert!(
+                (got - want).abs() < 1e-4,
+                "mismatch at {p:?}: got={got} want={want}"
+            );
+        }
     }
 
     #[test]
