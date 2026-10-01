@@ -94,6 +94,7 @@ pub mod spatializer;
 pub mod speech_transmission_index;
 pub mod spread;
 pub mod stage_support;
+pub mod useful_to_detrimental_ratio;
 
 pub use air::{AirAbsorption, AirAbsorptionNode, AtmosphericConditions, absorption_db_per_metre};
 pub use ambisonics::{
@@ -198,4 +199,7 @@ pub use speech_transmission_index::{
 pub use spread::{MAX_SPREAD_TAPS, Spread, SpreadParams, SpreadTap, compute_spread_gains, spread_taps};
 pub use stage_support::{
     NO_SUPPORT_DB, StageSupport, stage_support_early_db, stage_support_late_db,
+};
+pub use useful_to_detrimental_ratio::{
+    NO_USEFUL_RATIO_DB, UsefulToDetrimental, useful_to_detrimental_ratio_db,
 };
