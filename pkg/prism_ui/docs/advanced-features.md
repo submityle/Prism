@@ -448,6 +448,112 @@ assert_eq!(wide.get(&StyleProp::FontSize), Some(&StyleValue::px(24.0)));
 
 ---
 
+## 13. `prism_ui_snapshot` — 快照回归测试
+
+对标:Jest / Vitest snapshot、React Testing Library。把一棵渲染后的视图转成
+**确定、人类可读** 的文本,作为 golden 文件提交,之后每次运行都做比对。它构建在
+`prism_ui_devtools::snapshot`(把活的 `Element` 树走成一棵拥有所有权的 `TreeSnapshot`)之上。
+
+- `serialize_tree` / `parse_tree`:树快照的 **可逆** 文本编码(round-trip 相等)。
+- `Snapshot` / `Comparison`:golden 比对,返回结构化的 `Match` / `Mismatch`。
+- `diff`:不匹配时生成行级、带路径标注的差异。
+- `capture_layout` / `serialize_layout` / `parse_layout`:对 `prism_ui_layout`
+  计算出的几何做同样的工作流。
+
+全部确定且 `no_std` 友好(只需 `alloc`),快照在不同平台与运行间可复现。
+
+```rust
+use prism_ui::Element;
+use prism_ui_devtools::snapshot;
+use prism_ui_snapshot::{parse_tree, serialize_tree, Snapshot};
+
+// 构建视图并捕获其元素树的拥有所有权快照。
+let view = Element::box_()
+    .class("card")
+    .child(Element::text("hello"));
+let captured = snapshot(&view);
+
+// 序列化为确定的 golden 文本。
+let golden = serialize_tree(&captured);
+assert_eq!(
+    golden,
+    "kind=Box text=- classes=,card\n  kind=Text text=+hello classes=\n",
+);
+
+// 文本可逆:round-trip 回相等的快照。
+let restored = parse_tree(&golden).expect("valid snapshot text");
+assert_eq!(restored, captured);
+
+// golden 比对通过;改动后的视图产生带可读 diff 的不匹配。
+let comparison = Snapshot::from_tree(&captured).assert_matches(&golden);
+assert!(comparison.is_match());
+
+let changed = snapshot(&Element::box_().class("card").child(Element::text("world")));
+let mismatch = Snapshot::from_tree(&changed).assert_matches(&golden);
+assert!(mismatch.diff().unwrap().contains("+hello"));
+```
+
+> 差异:序列化是 **完全可逆** 的纯文本变换(可人工 review diff),比对结果是
+> 结构化的 `Comparison`(而非仅 bool),便于在 CI 中给出可读失败信息。
+
+---
+
+## 14. `prism_ui_workbench` — 组件工作台(Storybook 风格)
+
+对标:Storybook、SwiftUI `#Preview`、Ladle。把一个组件的若干不同状态——*story*——
+注册、分组、在 **隔离环境** 中渲染,用于预览与测试。
+
+- `ControlValue` / `ArgSet`:story 渲染时读取的 **带类型** 可调参数(controls);
+  改一个值再渲染即可探索状态,`set_bool` 等写入会做类型一致性校验。
+- `Story` / `StoryBuilder` / `StoryContext`:一个具名用例,持有默认参数与一个
+  在环境上下文上执行的渲染函数。
+- `Workbench`:按 `"Forms/Button"` 这类斜杠分隔路径分组、确定排序的 story 注册表。
+- `render_story` / `RenderResult`:**隔离** 渲染 harness——每个 story 在自己的
+  响应式 runtime 内渲染,互不干扰,结果携带确定的树渲染供快照使用。
+
+```rust
+use prism_ui::{Element, ElementKind};
+use prism_ui_workbench::{render_story, ControlValue, Story, Workbench};
+
+// 一个按钮 story,其填充由布尔 control 驱动。
+let story = Story::builder("Primary")
+    .arg("filled", ControlValue::Bool(true))
+    .arg("label", ControlValue::Text("Click".into()))
+    .build(|ctx| {
+        let class = if ctx.bool_arg("filled").unwrap_or(false) {
+            "btn-filled"
+        } else {
+            "btn-outline"
+        };
+        let label = ctx.text_arg("label").unwrap_or("Button");
+        Element::box_().class(class).child(Element::text(label))
+    });
+
+let mut workbench = Workbench::new();
+workbench.add("Forms/Button", story);
+
+let story = workbench
+    .get("Forms/Button", "Primary")
+    .expect("story is registered");
+
+// 用 story 的默认参数渲染。
+let filled = render_story(story, story.default_args());
+assert_eq!(filled.element().kind(), &ElementKind::Box);
+assert_eq!(filled.element().class_names(), &["btn-filled".to_string()]);
+assert_eq!(filled.tree(), "Box\n  Text \"Click\"\n");
+
+// 翻转 `filled` control 再渲染:输出随之改变。
+let mut args = story.default_args().clone();
+args.set_bool("filled", false).expect("same control kind");
+let outline = render_story(story, &args);
+assert_eq!(outline.element().class_names(), &["btn-outline".to_string()]);
+```
+
+> 差异:每个 story 独立 runtime,天然隔离,无全局状态串扰;`render_story` 与
+> 第 13 节的快照直接衔接——story 的 `tree()` 可作为 golden 文本提交。
+
+---
+
 ## 组合示例:高级层如何协同
 
 一个典型的「可国际化、带全局状态、按路由切换」的视图,其数据流为:
@@ -475,4 +581,5 @@ I18n.translation     (Memo)  ─┘                              │
 - Suspense / Portal / Overlay / 虚拟化 / 表单校验 / a11y 基线 **均已交付**(本文 6–10 节)。
   仍为 **规划中** 的是:守卫 / 深链接(router)、时间旅行 UI(devtools)、
   静态子树提升 / 编译期稳定节点 ID,见 [roadmap.md](roadmap.md)。隐式过渡 / FLIP 布局动画 /
-  共享元素过渡(第 11 节)与作用域样式 / 响应式 @media(第 12 节)**均已交付**。
+  共享元素过渡(第 11 节)、作用域样式 / 响应式 @media(第 12 节)、
+  快照测试(第 13 节)与组件工作台(第 14 节)**均已交付**。
