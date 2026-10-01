@@ -87,12 +87,15 @@ pub mod dual_lobe_phase;
 pub mod fluid_diffusion;
 pub mod fog;
 pub mod froxel_injection;
+pub mod frustum_cull;
+pub mod gaussian_splat;
 pub mod godray;
 pub mod gravity_wave;
 pub mod hash_rng;
 pub mod height_fog;
 pub mod imposter_fade;
 pub mod integrate_segment;
+pub mod kawase_blur;
 pub mod mask;
 pub mod modeling;
 pub mod motion_blur;
@@ -124,6 +127,7 @@ pub mod spherical_harmonics_rotate;
 pub mod storm_vertical_profile;
 pub mod sunset_inscatter_tint;
 pub mod sunset_reddening;
+pub mod temporal_reproject;
 pub mod terrain_occlusion;
 pub mod total_coverage;
 pub mod tracking_transmittance;
@@ -175,12 +179,17 @@ pub use dual_lobe_phase::{DualLobePhaseQuery, GpuDualLobePhase};
 pub use fluid_diffusion::{GpuDiffusionResult, GpuFluidDiffusion};
 pub use fog::{FogQuery, GpuFogTransmittance};
 pub use froxel_injection::{FroxelInjectionQuery, GpuFroxelInjection};
+pub use frustum_cull::{FrustumCullPrimitive, FrustumCullQuery, GpuFrustumCull};
+pub use gaussian_splat::{
+    GaussianSplatProjection, GpuGaussianSplat, GpuGaussianSplatQuery, SplatFootprint,
+};
 pub use godray::{GodRayWeightQuery, GpuGodRayWeight};
 pub use gravity_wave::{GpuGravityWave, GravityWaveQuery};
 pub use hash_rng::{GpuHashRng, HashRngSample};
 pub use height_fog::{GpuHeightFog, HeightFogQuery};
 pub use imposter_fade::{GpuImposterFade, ImposterFadeQuery};
 pub use integrate_segment::{GpuIntegrateSegment, IntegrateSegmentQuery};
+pub use kawase_blur::{GpuKawaseBlur, KawaseBlurQuery};
 pub use mask::{GpuScatteringMask, MaskQuery};
 pub use modeling::{GpuModeling, ModelingQuery};
 pub use motion_blur::{GpuMotionBlur, MotionBlurQuery, MotionBlurResult};
@@ -214,6 +223,9 @@ pub use spherical_harmonics_rotate::{
 pub use storm_vertical_profile::{GpuStormVerticalProfile, StormVerticalProfileQuery};
 pub use sunset_inscatter_tint::{GpuSunsetInscatterTint, InscatterTint, SunsetInscatterTintQuery};
 pub use sunset_reddening::{GpuSunsetReddening, SunsetReddeningQuery};
+pub use temporal_reproject::{
+    GpuTemporalReproject, TemporalReprojectQuery, TemporalReprojectResult, NEIGHBORHOOD_TAPS,
+};
 pub use terrain_occlusion::{GpuTerrainOcclusion, TerrainOcclusionQuery};
 pub use total_coverage::GpuTotalCoverage;
 pub use tracking_transmittance::{
