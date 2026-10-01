@@ -102,6 +102,7 @@ pub mod pipeline_layout;
 pub mod projective_global;
 pub mod raster;
 pub mod reactive_mask;
+pub mod rest_helix;
 pub mod ribbon;
 pub mod rt_curve;
 pub mod rt_proxy;
