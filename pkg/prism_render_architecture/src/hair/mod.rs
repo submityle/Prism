@@ -59,6 +59,8 @@ pub mod analysis_pass_layout;
 pub mod analysis_readback;
 pub mod async_pipeline;
 pub mod binding;
+pub mod card_bake;
+pub mod cluster;
 pub mod collision;
 pub mod decimation;
 pub mod deep_opacity_layout;
