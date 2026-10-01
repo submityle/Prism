@@ -244,6 +244,18 @@
 //!   the proven [`triangle_mesh_gpu_layout::GpuTriangleMeshBvhBuffers`] packing plus
 //!   the row-major mask texels and cutoff ([`alpha_mesh_gpu_layout::ALPHA_HEADER_WORDS`]
 //!   header), with a packed walk that reproduces the alpha-gated traversal bit-for-bit.
+//! - [`heightfield`] — displacement heightfield / terrain: a
+//!   [`heightfield::Heightfield`] stores a `width * height` row-major height
+//!   grid over a planar `X`/`Z` domain and implicitly triangulates it (two
+//!   triangles per cell), ray-traced with the shared Möller–Trumbore test and
+//!   accelerated by a per-cell [`heightfield::HeightfieldBvh`]; reports the
+//!   [`heightfield::HeightfieldHit`] cell / triangle, geometric normal, and
+//!   domain `UV`.
+//! - [`heightfield_gpu_layout`] — flat, `GPU`-uploadable
+//!   [`heightfield::HeightfieldBvh`]: the shared [`gpu_layout`] node records plus
+//!   the row-major height samples and a grid/domain header
+//!   ([`heightfield_gpu_layout::HEIGHTFIELD_HEADER_WORDS`]), with a packed walk
+//!   that reproduces the per-cell traversal bit-for-bit.
 //! - [`traversal`] — [`Ray`]/`BVH` slab + Möller–Trumbore intersection with
 //!   closest-hit and any-hit walks (the `GPU` traversal kernel's golden ref).
 //! - [`traversal_stackless`] — stackless (threaded / escape-index) `BVH` walk:
@@ -300,6 +312,8 @@ pub mod triangle_mesh;
 pub mod triangle_mesh_gpu_layout;
 pub mod alpha_mesh;
 pub mod alpha_mesh_gpu_layout;
+pub mod heightfield;
+pub mod heightfield_gpu_layout;
 pub mod footprint;
 pub mod gpu_layout;
 pub mod motion;
@@ -369,6 +383,8 @@ pub use triangle_mesh_gpu_layout::{
 };
 pub use alpha_mesh::{AlphaMesh, AlphaMeshBvh, AlphaTexture, AlphaTextureError};
 pub use alpha_mesh_gpu_layout::{ALPHA_HEADER_WORDS, GpuAlphaMeshBvhBuffers};
+pub use heightfield::{Heightfield, HeightfieldBvh, HeightfieldError, HeightfieldHit};
+pub use heightfield_gpu_layout::{GpuHeightfieldBvhBuffers, HEIGHTFIELD_HEADER_WORDS};
 pub use rectangle_gpu_layout::{GpuRectangleBvhBuffers, RECTANGLE_WORDS};
 pub use aabb_primitive_gpu_layout::{GpuAabbBvhBuffers, AABB_PRIMITIVE_WORDS};
 pub use sphere_gpu_layout::{GpuSphereBvhBuffers, SPHERE_WORDS};
