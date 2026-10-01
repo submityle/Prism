@@ -63,10 +63,11 @@ pub use gyroscopic::{GyroscopicConfig, GyroscopicMode};
 pub use joint::{
     cpu_solve_joints_distance, cpu_solve_joints_fixed, cpu_solve_joints_hinge_limit,
     cpu_solve_joints_prismatic, cpu_solve_joints_prismatic_drive, cpu_solve_joints_prismatic_limit,
-    cpu_solve_joints_revolute, cpu_solve_joints_spherical, DistanceJoint, FixedJoint,
-    GpuDistanceJointSolver, GpuFixedJointSolver, GpuHingeLimitJointSolver,
-    GpuPrismaticDriveJointSolver, GpuPrismaticJointSolver, GpuPrismaticLimitJointSolver,
-    GpuRevoluteJointSolver, GpuSphericalJointSolver, HingeLimitJoint, JointColouring,
-    JointSolverConfig, PrismaticDriveJoint, PrismaticJoint, PrismaticLimitJoint, RevoluteJoint,
+    cpu_solve_joints_revolute, cpu_solve_joints_revolute_drive, cpu_solve_joints_spherical,
+    DistanceJoint, FixedJoint, GpuDistanceJointSolver, GpuFixedJointSolver,
+    GpuHingeLimitJointSolver, GpuPrismaticDriveJointSolver, GpuPrismaticJointSolver,
+    GpuPrismaticLimitJointSolver, GpuRevoluteDriveJointSolver, GpuRevoluteJointSolver,
+    GpuSphericalJointSolver, HingeLimitJoint, JointColouring, JointSolverConfig,
+    PrismaticDriveJoint, PrismaticJoint, PrismaticLimitJoint, RevoluteDriveJoint, RevoluteJoint,
     SphericalJoint, MAX_JOINT_BATCHES,
 };

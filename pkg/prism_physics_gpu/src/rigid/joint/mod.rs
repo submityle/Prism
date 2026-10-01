@@ -37,6 +37,15 @@
 //! * [`revolute_cpu`] — the authoritative [`cpu_solve_joints_revolute`] golden
 //!   stepper (axis alignment plus point-to-point weld).
 //! * [`revolute_gpu`] — the device-side [`GpuRevoluteJointSolver`] twin.
+//! * [`revolute_drive`] — the [`RevoluteDriveJoint`] (hinge with an angular
+//!   position drive/motor) definition and its device-packed storage
+//!   representation.
+//! * [`revolute_drive_cpu`] — the authoritative
+//!   [`cpu_solve_joints_revolute_drive`] golden stepper (axis alignment plus
+//!   an about-axis compliant-and-damped angular position drive plus a
+//!   point-to-point weld).
+//! * [`revolute_drive_gpu`] — the device-side [`GpuRevoluteDriveJointSolver`]
+//!   twin.
 //! * [`distance`] — the [`DistanceJoint`] (limit) definition and its
 //!   device-packed storage representation.
 //! * [`distance_cpu`] — the authoritative [`cpu_solve_joints_distance`] golden
@@ -113,6 +122,9 @@ mod prismatic_limit_cpu;
 mod prismatic_limit_gpu;
 mod revolute;
 mod revolute_cpu;
+mod revolute_drive;
+mod revolute_drive_cpu;
+mod revolute_drive_gpu;
 mod revolute_gpu;
 mod spherical;
 mod spherical_cpu;
@@ -141,6 +153,9 @@ pub use prismatic_limit_cpu::cpu_solve_joints_prismatic_limit;
 pub use prismatic_limit_gpu::GpuPrismaticLimitJointSolver;
 pub use revolute::RevoluteJoint;
 pub use revolute_cpu::cpu_solve_joints_revolute;
+pub use revolute_drive::RevoluteDriveJoint;
+pub use revolute_drive_cpu::cpu_solve_joints_revolute_drive;
+pub use revolute_drive_gpu::GpuRevoluteDriveJointSolver;
 pub use revolute_gpu::GpuRevoluteJointSolver;
 pub use spherical::SphericalJoint;
 pub use spherical_cpu::cpu_solve_joints_spherical;
