@@ -1,4 +1,4 @@
-# Prism 渲染引擎 — 毛发引擎子系统完整设计（v4 / wgpu + WESL）
+# Prism 渲染引擎 — 毛发引擎子系统完整设计（v5 / wgpu + WESL）
 
 > 状态：架构提案（Draft，允许破坏性重构）
 > 定位：AAA / 次世代 strand-based（发丝级）毛发引擎，与 PBR/NPR/自定义/混合四前端正交协同
@@ -7,6 +7,7 @@
 > v2 变更：新增 §6 高级仿真特性、§7 毛发着色模型（Marschner/Chiang/dual-scatter/fiber-level + NPR 天使环），§8 性能升级为 GPU-driven 持久化 + 异步流水线，补 §11 效果验收口径；§0 产品对标细化（TressFX 4 / 影视 fiber-level / Frostbite）。
 > v3 变更：顶格增补 §8.5「最新 AAA 高级特性」——对标最新实时 AAA 产品（UE5.4+ Groom、最新 RTX Hair/LSS 曲线图元、TressFX 4.x、Alan Wake 2 / Hellblade II 发丝、影视 Weta Cosserat），全部纯经典数值、**无 AI/ML/神经网络路径**：离散弹性杆/Cosserat 卷发扭转、DFTL 不可伸长积分、体素密度自碰撞+发-发摩擦、C-IPC 式屏障摩擦接触、Nanite 式 strand 簇化 GPU 剔除、深阴影图/ATSM 自适应透射、PPLL/矩/MLAB 发丝 OIT、黑色素(eumelanin/pheomelanin)物理吸收、近场/远场自适应散射 + BSDF 重要性采样、硬件 RT 曲线/LSS 真发自阴影与反射、发丝感知 TAA reactive mask + 抖动 alpha、mesh-shader GPU strand 扩展、GPU Work Graphs/持久线程约束图着色；§0 产品对标补最新档，行数估算上调。
 > v4 变更：再顶格增补 §8.6「更新一代 AAA 高级特性」——对标更晚近实时/影视路线（湿发含水、投影动力学/ADMM、curl-noise 风场、双重散射球谐缓存、解析亚像素线覆盖、光谱黑色素/Hero-wavelength、Groom→card 自动烘焙、卵泡头皮绑定），仍**全部纯经典数值、无 AI/ML/神经网络路径**；§0 产品对标补两档，行数估算再上调。
+> v5 变更：§8.5「最新 AAA 高级特性」item1-15 全部落 main 为 CPU golden / GPU 契约侧（见 §8.5 落地状态），毛发 sim 前沿（Cosserat / DFTL / 体素自碰撞 / C-IPC 屏障 / 卷发 helix）与 GPU-driven 契约（Nanite 簇化 / ATSM / 发丝 OIT / 黑色素 / 散射 LOD / RT 曲线 / reactive mask / mesh-shader 扩展 / Work Graphs 调度 / 持久线程图着色）至此架构侧完整，仅剩 GPU 真机 parity 孪生；item13 落点由「并入 `cluster.rs`」修订为新独立文件 `hair/mesh_shader_strand.rs`（遵循一关注点一文件）。
 
 ---
 
@@ -184,7 +185,7 @@ fallback:
 
 ### C. 工程前沿（接 §8 GPU-driven + 异步）
 
-13. **Mesh-shader GPU strand 扩展 / 细分**：guide→render 插值与样条细分搬上 mesh/amplification shader，省 CPU↔GPU 回读。契约侧产 meshlet 式 strand 分组描述。落点并入 `hair/cluster.rs` 的扩展 ABI。
+13. **Mesh-shader GPU strand 扩展 / 细分**：guide→render 插值与样条细分搬上 mesh/amplification shader，省 CPU↔GPU 回读。契约侧产 meshlet 式 strand 分组描述。落点 `hair/mesh_shader_strand.rs`（新独立文件；`cluster.rs` 已偏大，遵循一关注点一文件，不并入其扩展 ABI）。
 14. **GPU Work Graphs 调度 sim**：约束图着色批 + substep 用 work graph 自调度（生产者-消费者图），摊平尖峰（接 §8）。契约侧产调度图节点描述，真调度归 `prism_render_scene`。
 15. **持久线程约束图着色**：常驻 compute kernel + persistent threads 跑图着色批，减 per-dispatch 开销（接 §8 GPU 持久化）。
 
@@ -193,6 +194,12 @@ fallback:
 > 按风险从低到高、CPU-golden 可验证优先：先落**纯映射/契约类**（melanin / scatter_lod / reactive_mask / rt_curve 描述 / oit_frontend 分桶），再落**sim 数值类**（dftl / cosserat / self_collision_voxel / barrier_contact），最后 **GPU 孪生 + 真机 parity**（接 `pkg/prism_hair_gpu`，见 §9.1）。每条独立文件 + 独立确定性单测 + 越界/空输入不 panic，disjoint write set 可多 agent 并行（A/B/C 三组互不重叠）。真接渲染图（dispatch / RT BLAS / work graph）仍归跨子系统调度，hair 侧只落架构契约 + CPU golden + GPU 孪生。
 
 - **行数估算（v3 上调）**：A 组 ~2.5–4k、B 组 ~3–5k、C 组 ~1–2k（含孪生 + 测试），合计在现有 hair core 之上再增 **~7–11k 行**；连同 `prism_hair_gpu` 真机 parity 孪生，毛发子系统总量上调至 **~3–4 万行**量级（含测试与 WESL 孪生）。
+
+**§8.5 落地状态（v5，CPU golden / GPU 契约侧全落 main）**：§8.5 全部 15 条已逐条落地、`cargo test -p prism_render_architecture` 全绿，严格复用 §1 共享基底、无假实现 / 无桩；真渲染图接线（dispatch / RT BLAS / work graph）与 GPU 真机 parity 孪生仍归后续（见 §9.1）。
+
+- A 组仿真：item1 `hair/cosserat.rs`（Bergou DER + Kugelstadt PB Cosserat，无-trig 四元数积分，17 测）/ item2 `hair/dftl.rs`（DFTL 不可伸长积分）/ item3 `hair/self_collision_voxel.rs`（体素密度自碰撞 + 发-发摩擦）/ item4 `hair/barrier_contact.rs`（C-IPC 式 C¹ 有理屏障 + 库仑锥摩擦，18 测）/ item5 `hair/rest_helix.rs`（卷发 helix rest 复数步进 + 各向异性弯曲刚度，14 测）。
+- B 组渲染：item6 `hair/cluster.rs`（Nanite 式簇化剔除 + 连续抽稀）/ item7 `hair/adaptive_transmittance.rs`（ATSM 变节点透射）/ item8 `hair/oit_frontend.rs`（PPLL / 矩 / MLAB 分桶）/ item9 `hair/melanin.rs`（eumelanin / pheomelanin → σ_a 映射）/ item10 `hair/scatter_lod.rs`（近 / 远场自适应 + BSDF 重要性采样）/ item11 `hair/rt_curve.rs`（LSS / 曲线 BLAS 构建描述契约）/ item12 `hair/reactive_mask.rs`（reactive mask + 抖动 alpha）。
+- C 组工程：item13 `hair/mesh_shader_strand.rs`（meshlet 式 strand 分组 / 预算 fan-out / dispatch 向上取整，纯整数，23 测）/ item14 `hair/work_graph_sched.rs`（Work Graph 调度 DAG + Kahn 拓扑序，纯整数 / 枚举，16 测）/ item15 `hair/persistent_coloring.rs`（贪心约束图着色 + verify_coloring 自洽校验 + persistent-thread 批 dispatch，纯整数零浮点，21 测）。
 
 ## 8.6 更新一代 AAA 高级特性（v4 顶格增补）
 
