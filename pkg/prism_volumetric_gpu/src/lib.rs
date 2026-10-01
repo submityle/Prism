@@ -79,6 +79,7 @@ pub mod blend_with_atmosphere;
 pub mod bloom_threshold;
 pub mod bloom_upsample;
 pub mod capsule_capsule_closest;
+pub mod capsule_sdf;
 pub mod checkerboard_resolve;
 pub mod clamp_history;
 pub mod classify_precip;
@@ -236,6 +237,7 @@ pub use bloom_upsample::{BloomUpsampleQuery, GpuBloomUpsample};
 pub use capsule_capsule_closest::{
     CapsuleClosestQuery, CapsuleClosestResult, GpuCapsuleCapsuleClosest,
 };
+pub use capsule_sdf::{CapsuleSdfQuery, CapsuleSdfResult, GpuCapsuleSdf};
 pub use checkerboard_resolve::{CheckerboardResolveQuery, GpuCheckerboardResolve};
 pub use clamp_history::{ClampHistoryQuery, GpuClampHistory};
 pub use classify_precip::{ClassifyPrecipQuery, GpuClassifyPrecip};
