@@ -9,6 +9,7 @@ extern crate alloc;
 
 mod benchmark;
 mod binning;
+mod cull_hzb;
 mod culling;
 mod diagnostics;
 mod hzb_footprint;
@@ -30,6 +31,7 @@ pub use binning::{
     build_view_draw_bins, DrawBinCandidate, DrawBinKey, DrawBinRange, GpuDrawBinHeader,
     ViewDrawBins, DRAW_BIN_HEADER_WORDS,
 };
+pub use cull_hzb::{cull_view_with_hzb, HzbCullScene};
 pub use culling::{cull_view, CullReason, VisibilityInput};
 pub use diagnostics::VisibilityDiagnostics;
 pub use hzb_footprint::{conservative_occluder_reverse_z, HzbFootprint};
