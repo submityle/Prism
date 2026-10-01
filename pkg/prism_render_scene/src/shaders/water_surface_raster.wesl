@@ -966,6 +966,21 @@ fn frame_at(world_position: vec3<f32>, normal: vec3<f32>) -> ShadingFrame {
 // path: a split-sum specular reflection plus `SH` irradiance diffuse when the
 // environment carries image-based data, falling back to the flat ambient
 // radiance otherwise. Shared verbatim by every §5 frontend.
+// Lagarde & de Rousiers specular-occlusion remap (SIGGRAPH 2014 `Frostbite`).
+// Recovers a view- and roughness-dependent specular occlusion from the scalar
+// diffuse ambient occlusion so the narrow glossy lobe is not double-darkened by
+// the full-hemisphere AO. Byte-identical to the engine golden
+// `gi::occlusion::specular_occlusion`; the CPU twin in `surface_spec_occlusion`
+// pins the two together.
+fn water_spec_occlusion(n_dot_v: f32, ao: f32, roughness: f32) -> f32 {
+    let nov = clamp(n_dot_v, 0.0, 1.0);
+    let a = clamp(ao, 0.0, 1.0);
+    let r = clamp(roughness, 0.0, 1.0);
+    let exponent = exp2(-16.0 * r - 1.0);
+    let base = max(nov + a, 0.0);
+    return clamp(pow(base, exponent) - 1.0 + a, 0.0, 1.0);
+}
+
 fn water_ibl(surface: SurfaceSample, frame: ShadingFrame, ssr: vec4<f32>) -> vec3<f32> {
     let env = light_env[0];
     let occlusion = clamp(surface.ambient_occlusion, 0.0, 1.0);
@@ -977,7 +992,10 @@ fn water_ibl(surface: SurfaceSample, frame: ShadingFrame, ssr: vec4<f32>) -> vec
     let reflectance = clamp(surface.reflectance, 0.0, 1.0);
     let f0 = mix(vec3<f32>(0.16 * reflectance * reflectance), surface.base_color, metallic);
     let dfg = env_brdf_approx(n_dot_v, roughness);
-    let spec_weight = (f0 * dfg.x + vec3<f32>(dfg.y)) * occlusion;
+    // Specular lobe integrates only a narrow cone, so weight it by the
+    // Lagarde specular occlusion rather than the full-hemisphere diffuse AO.
+    let spec_occ = water_spec_occlusion(n_dot_v, occlusion, roughness);
+    let spec_weight = (f0 * dfg.x + vec3<f32>(dfg.y)) * spec_occ;
     if environment_has_image_based(env) {
         let irradiance = max(sh_irradiance(env, n), vec3<f32>(0.0));
         let diffuse = surface.base_color * (1.0 - metallic) * irradiance * INV_PI;

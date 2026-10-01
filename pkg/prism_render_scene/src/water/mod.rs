@@ -59,6 +59,7 @@ mod surface_motion;
 mod surface_node;
 mod surface_pipeline;
 mod surface_shading;
+mod surface_spec_occlusion;
 mod surface_ssgi;
 mod surface_ssr;
 mod surface_vsm;
