@@ -43,8 +43,8 @@ pub use collision::{
     apply_backstop, capsule_toi, closest_point_on_segment, half_space_toi,
     project_out_of_half_space, project_out_of_sphere, resolve_backstops, resolve_body_collisions,
     resolve_body_collisions_with_friction, resolve_ccd, resolve_self_ccd, resolve_self_collision,
-    resolve_self_collision_with_friction, sphere_toi, swept_pair_toi, Backstop, BodyCollider,
-    CcdParams, SelfCcdParams,
+    resolve_self_collision_with_friction, resolve_two_way_coupling, sphere_toi, swept_pair_toi,
+    Backstop, BodyCollider, CcdParams, CouplingBody, SelfCcdParams,
 };
 pub use constraint::{
     mesh_volume, AttachmentConstraint, BendingConstraint, ConstraintSet, DistanceConstraint,

@@ -34,6 +34,7 @@
 //! Real-Time Applications".
 
 mod body;
+mod coupling;
 mod friction;
 mod ccd;
 mod self_ccd;
@@ -45,6 +46,7 @@ pub use body::{
     BodyCollider,
 };
 pub use ccd::{capsule_toi, half_space_toi, resolve_ccd, sphere_toi, CcdParams};
+pub use coupling::{resolve_two_way_coupling, CouplingBody};
 pub use self_ccd::{resolve_self_ccd, swept_pair_toi, SelfCcdParams};
 pub use self_collision::{resolve_self_collision, resolve_self_collision_with_friction};
 
