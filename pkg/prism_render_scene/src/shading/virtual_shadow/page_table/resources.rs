@@ -40,6 +40,10 @@ pub(crate) struct ViewVsmPageTable {
     /// resolve pass's `vsm_sample` shader).
     pub buffer: Buffer,
     /// Number of `u32` entries in `buffer` (== `window_slot_count`).
+    #[expect(
+        dead_code,
+        reason = "slot count is read by the resolve-pass vsm_sample integration wired in a later slice"
+    )]
     pub slot_count: u32,
 }
 
