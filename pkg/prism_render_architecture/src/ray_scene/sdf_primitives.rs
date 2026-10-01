@@ -705,11 +705,23 @@ pub fn rounded_cylinder(point: [f32; 3], outer_radius: f32, rounding: f32, half_
     dx.max(dy).min(0.0) + length2([dx.max(0.0), dy.max(0.0)]) - rounding
 }
 
+/// Signed distance from `point` to an infinite circular cylinder of the given
+/// `radius` whose axis is parallel to the `y` axis and passes through
+/// `(axis_xz[0], axis_xz[1])` in the `xz` plane.
+///
+/// This is Inigo Quilez's exact `sdInfiniteCylinder`: the distance is purely a
+/// function of the radial offset in the `xz` plane, independent of `y`.
+/// Negative inside the cylinder, positive outside. Built from a single vector
+/// length, so it stays transcendental-free.
+pub fn infinite_cylinder(point: [f32; 3], axis_xz: [f32; 2], radius: f32) -> f32 {
+    length2([point[0] - axis_xz[0], point[2] - axis_xz[1]]) - radius
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         box_frame, box_sdf, capped_cone, capped_cylinder, capped_torus, capsule, cone_sdf, cut_hollow_sphere, cut_sphere,
-        death_star, ellipsoid_sdf, hex_prism, length2, line_sdf, link, octahedron, plane, pyramid, rhombus, round_box,
+        death_star, ellipsoid_sdf, hex_prism, infinite_cylinder, length2, line_sdf, link, octahedron, plane, pyramid, rhombus, round_box,
         round_cone_sdf, rounded_cylinder, solid_angle, sphere, torus, triangular_prism, vesica,
     };
 
@@ -1273,5 +1285,17 @@ mod tests {
         assert!((rounded_cylinder([0.0, 0.0, 0.0], r, rb, h) - (-0.6)).abs() < 1e-6);
         // Radially outside at the equator: plain lateral gap.
         assert!((rounded_cylinder([1.0, 0.0, 0.0], r, rb, h) - 0.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn infinite_cylinder_is_radial_distance_independent_of_height() {
+        // Axis on the y axis, unit radius.
+        assert!((infinite_cylinder([2.0, 0.0, 0.0], [0.0, 0.0], 1.0) - 1.0).abs() < 1e-6);
+        // On the lateral surface.
+        assert!(infinite_cylinder([1.0, 0.0, 0.0], [0.0, 0.0], 1.0).abs() < 1e-6);
+        // Interior distance is independent of y.
+        assert!((infinite_cylinder([0.5, 100.0, 0.0], [0.0, 0.0], 1.0) - (-0.5)).abs() < 1e-6);
+        // Offset axis shifts the measurement centre.
+        assert!(infinite_cylinder([3.0, 0.0, 4.0], [3.0, 1.0], 3.0).abs() < 1e-6);
     }
 }
