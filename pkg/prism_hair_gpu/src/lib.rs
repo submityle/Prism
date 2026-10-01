@@ -634,6 +634,16 @@
 //!   the real per-pass fold with its pinned skip and collider ordering (see
 //!   [`collision`]).
 //!
+//! * [`GpuHairStrandTangents`] evaluates
+//!   [`strand_tangents`](prism_render_architecture::hair::frames::strand_tangents),
+//!   the per-control-point finite-difference tangents: one thread per control
+//!   point over a flattened batch of strands takes the forward difference at
+//!   interior/root points and the backward difference at the tip, normalizes,
+//!   and falls back to a fixed direction for single-point strands or zero-length
+//!   segments. Unlike [`GpuStrandFrames`], which transports a full orthonormal
+//!   frame one thread per strand, this twin emits only the bare tangent and is
+//!   embarrassingly parallel over the point stream (see [`frames`]).
+//!
 //! # Portability
 //!
 //! The projection uses only `sqrt`, `min`, `max`, `clamp`, `dot` and
@@ -721,6 +731,7 @@ pub mod spectrum_sample_map;
 pub mod strand_collision_resolve;
 pub mod strand_keep_ratio;
 pub mod strand_metrics;
+pub mod strand_tangents;
 pub mod stratified_allocation;
 pub mod stratified_weights;
 pub mod transfer_frame;
@@ -803,6 +814,7 @@ pub use strand_collision_resolve::{
 };
 pub use strand_keep_ratio::{reference_strand_keep_ratio, GpuHairStrandKeepRatio};
 pub use strand_metrics::{GpuStrandMetric, GpuStrandMetrics};
+pub use strand_tangents::{reference_strand_tangents, GpuHairStrandTangents};
 pub use stratified_allocation::{reference_stratified_allocation, GpuHairStratifiedAllocation};
 pub use stratified_weights::{reference_stratified_weights, GpuHairStratifiedWeights};
 pub use transfer_frame::{reference_transfer_frame, GpuHairTransferFrame};
