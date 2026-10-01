@@ -416,6 +416,10 @@
 //!   ([`mesh_vertex_valence::vertex_valence`]): per-vertex edge-neighbour
 //!   valence, triangle degree, boundary flags, and min / max / average
 //!   aggregates for remeshing and simplification heuristics.
+//! - [`mesh_triangle_quality`] — per-triangle area and shape quality
+//!   ([`mesh_triangle_quality::triangle_quality`]): the scale-invariant
+//!   normalized shape-quality (mean-ratio) metric plus area, total area, and
+//!   min / average quality and sliver counts for mesh-health analysis.
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -579,6 +583,7 @@ pub mod mesh_normal_consistency;
 pub mod mesh_feature_edges;
 pub mod mesh_hard_normal_split;
 pub mod mesh_vertex_valence;
+pub mod mesh_triangle_quality;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -693,6 +698,7 @@ pub use mesh_normal_consistency::{make_winding_consistent, WindingFix};
 pub use mesh_feature_edges::{detect_feature_edges, EdgeKind, FeatureEdgeError, FeatureEdges};
 pub use mesh_hard_normal_split::{split_hard_normals, HardNormalError, HardNormalSplit};
 pub use mesh_vertex_valence::{vertex_valence, VertexValence};
+pub use mesh_triangle_quality::{triangle_quality, TriangleQuality};
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
 pub use obb::{Obb, ObbBvh, ObbHit};
