@@ -447,6 +447,15 @@
 //!   sibling of the analytic gust-superposition [`GpuWindField`] twin
 //!   (procedural curl-noise versus steady + gust + turbulent model), checked
 //!   within the fma tolerance (see [`curl_wind_map`]).
+//! * [`GpuHairAdaptiveTransmittance`] samples
+//!   [`sample_transmittance`](prism_render_architecture::hair::adaptive_transmittance::sample_transmittance),
+//!   the adaptive variable-node deep-shadow transmittance curve, mapping a
+//!   batch of receiver depths against one shared compressed curve — one
+//!   thread per depth applies the receiver-query rule (fully lit in front,
+//!   the deepest node's value beyond, bracketing-pair linear interpolation
+//!   between); a distinct sibling of the layered deep-opacity decode
+//!   [`GpuHairDeepTransmittanceSample`] (variable-length node list versus
+//!   fixed equi-depth layers), checked within the fma tolerance.
 //!
 //! # Portability
 //!
@@ -473,6 +482,7 @@
 //! compute dispatch; no Unreal Engine source or derived code.
 #![forbid(unsafe_code)]
 
+pub mod adaptive_transmittance;
 pub mod analysis_reduce;
 pub mod barrier_contact;
 pub mod bin_samples;
@@ -522,6 +532,9 @@ pub mod wetness;
 pub mod wind;
 pub mod wind_field;
 
+pub use adaptive_transmittance::{
+    reference_adaptive_transmittance_sample, GpuHairAdaptiveTransmittance,
+};
 pub use analysis_reduce::{reference_reduce, GpuHairAnalysisReduce};
 pub use barrier_contact::{reference_resolve, ContactInput, ContactOutput, GpuHairBarrierContact};
 pub use bin_samples::GpuHairBinSamples;
