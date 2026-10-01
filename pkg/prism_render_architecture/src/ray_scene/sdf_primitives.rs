@@ -1217,6 +1217,48 @@ pub fn rounded_cross_2d(point: [f32; 2], h: f32) -> f32 {
     }
 }
 
+/// Signed distance to a two-dimensional *horseshoe* (an open omega/U ring): a
+/// circular band of centreline `radius` and half-`thickness`, cut open by a
+/// wedge of half-angle `theta` (passed pre-baked as `sin_cos = [sin(theta),
+/// cos(theta)]`) whose two free ends are extended by straight `arm`-long
+/// prongs capped flat. The opening faces `+y`; the bend sits at `-y`.
+///
+/// This is Inigo Quilez's exact `sdHorseshoe`. The query is folded across the
+/// `y` axis (`abs(x)`) to exploit the mirror symmetry, then rotated by the
+/// opening half-angle; the radial magnitude `l = |p|` is carried through so a
+/// piecewise `select` can stitch the circular bend onto the two straight
+/// prongs (matching the GLSL `vec2` constructor, both lanes read the rotated
+/// pair simultaneously). What remains is the distance to a half-infinite
+/// rounded strip in the rotated frame: offset by the prong length and ring
+/// thickness, `b = (q.x - arm, |q.y - radius| - thickness)`, closed by the
+/// standard box field `length(max(b, 0)) + min(0, max(b.x, b.y))`. Built from
+/// `abs`, `min`/`max`, `sign`, dot products and a single `sqrt`, so it stays
+/// transcendental-free. Pair it with the `extrude` domain operator to raise a
+/// horseshoe prism, or with `revolution` for a toroidal clip.
+pub fn horseshoe_2d(
+    point: [f32; 2],
+    sin_cos: [f32; 2],
+    radius: f32,
+    arm: f32,
+    thickness: f32,
+) -> f32 {
+    // This crate bakes angles as `[sin, cos]`; IQ's `c` is `(cos, sin)`.
+    let (c_cos, c_sin) = (sin_cos[1], sin_cos[0]);
+    let px = point[0].abs();
+    let l = length2([px, point[1]]);
+    // Rotate (|x|, y) by mat2(-cos, sin; sin, cos).
+    let rx = -c_cos * px + c_sin * point[1];
+    let ry = c_sin * px + c_cos * point[1];
+    // Piecewise select: outside the arc keep the rotated pair; inside the bend
+    // fall back to the radial magnitude so the prongs join the ring smoothly.
+    let qx = if ry > 0.0 || rx > 0.0 { rx } else { l * (-c_cos).signum() };
+    let qy = if rx > 0.0 { ry } else { l };
+    // Half-infinite rounded strip offset by prong length and ring thickness.
+    let bx = qx - arm;
+    let by = (qy - radius).abs() - thickness;
+    length2([bx.max(0.0), by.max(0.0)]) + bx.max(by).min(0.0)
+}
+
 /// Unsigned distance from `point` to the line segment `a`-`b` in the plane.
 ///
 /// The point is projected onto the segment with the parameter clamped to
@@ -1986,7 +2028,7 @@ pub fn segment_3d(point: [f32; 3], a: [f32; 3], b: [f32; 3]) -> f32 {
 mod tests {
     use super::{
         annulus_2d, arc, box_2d, box_frame, box_frame_2d, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_torus, capsule, capsule_2d, circle_2d, cone_sdf, cross_2d, cut_disk_2d, cut_hollow_sphere,
-        cut_sphere, cylinder_segment, death_star, egg_2d, ellipsoid_sdf, equilateral_triangle_2d, heart_2d, hex_prism, hexagram_2d, infinite_cone, infinite_cylinder, isosceles_triangle_2d, length2, line_sdf, link, moon,
+        cut_sphere, cylinder_segment, death_star, egg_2d, ellipsoid_sdf, equilateral_triangle_2d, heart_2d, hex_prism, hexagram_2d, horseshoe_2d, infinite_cone, infinite_cylinder, isosceles_triangle_2d, length2, line_sdf, link, moon,
         octagon_prism, octahedron, oriented_box_2d, oriented_vesica_2d, parallelogram, pentagram_2d, pie, plane, polygon_2d, pyramid, quad_sdf, regular_hexagon_2d, regular_octagon_2d, regular_pentagon_2d, rhombus, rhombus_2d, round_box, round_cone_sdf,
         round_cone_segment, rounded_box_2d, rounded_cross_2d, rounded_cylinder, rounded_x,
         segment_2d, segment_3d, solid_angle, sphere, star5_2d, torus, trapezoid_isosceles, triangle_2d, triangle_sdf, triangular_prism, tunnel_2d,
@@ -2784,6 +2826,65 @@ mod tests {
                     / (2.0 * eps);
                 let grad = (fx * fx + fy * fy).sqrt();
                 assert!((grad - 1.0).abs() < 5e-3, "eikonal h={h} p={p:?}: |grad|={grad}");
+            }
+        }
+    }
+
+    // Horseshoe helper: evaluate from a raw angle (tests may use trig).
+    fn horseshoe(point: [f32; 2], theta: f32, r: f32, arm: f32, th: f32) -> f32 {
+        horseshoe_2d(point, [theta.sin(), theta.cos()], r, arm, th)
+    }
+
+    #[test]
+    fn horseshoe_2d_ring_walls_and_symmetry() {
+        // Across opening angles and ring geometries, the deep bend at -y sits
+        // one half-thickness inside (nearest feature is the radial wall), both
+        // ring walls at the bend lie on the surface, a radial step beyond the
+        // outer wall reads back exactly, and the field is mirror-symmetric in x.
+        for &theta in &[1.0_f32, 0.6, 1.3] {
+            for &(r, arm, th) in &[(1.0_f32, 0.4_f32, 0.15_f32), (1.3, 0.5, 0.2), (0.8, 0.3, 0.1)] {
+                let bend = horseshoe([0.0, -r], theta, r, arm, th);
+                assert!((bend + th).abs() < 1e-6, "bend depth theta={theta} r={r}: {bend}");
+                let outer = horseshoe([0.0, -(r + th)], theta, r, arm, th);
+                assert!(outer.abs() < 1e-6, "outer wall theta={theta} r={r}: {outer}");
+                let inner = horseshoe([0.0, -(r - th)], theta, r, arm, th);
+                assert!(inner.abs() < 1e-6, "inner wall theta={theta} r={r}: {inner}");
+                let step = 0.3_f32;
+                let out = horseshoe([0.0, -(r + th + step)], theta, r, arm, th);
+                assert!((out - step).abs() < 1e-6, "radial step theta={theta} r={r}: {out}");
+                for &p in &[[0.5_f32, 0.7], [0.9, -0.2], [1.4, 1.1]] {
+                    let a = horseshoe(p, theta, r, arm, th);
+                    let b = horseshoe([-p[0], p[1]], theta, r, arm, th);
+                    assert!((a - b).abs() < 1e-6, "mirror theta={theta} p={p:?}: {a} vs {b}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn horseshoe_2d_is_an_exact_distance_field() {
+        // The Eikonal property |grad f| = 1 (off the x symmetry axis, which is a
+        // medial-axis crease where a central difference cancels one component)
+        // proves the formula returns exact Euclidean distance, not a bound.
+        let eps = 1e-3_f32;
+        for &theta in &[1.0_f32, 0.6, 1.3] {
+            let (r, arm, th) = (1.0_f32, 0.4_f32, 0.15_f32);
+            for &p in &[
+                [0.55_f32, 0.33],
+                [-0.8, 0.9],
+                [1.4, -0.5],
+                [0.4, -1.7],
+                [1.1, 0.2],
+                [-1.3, -0.6],
+            ] {
+                let fx = (horseshoe([p[0] + eps, p[1]], theta, r, arm, th)
+                    - horseshoe([p[0] - eps, p[1]], theta, r, arm, th))
+                    / (2.0 * eps);
+                let fy = (horseshoe([p[0], p[1] + eps], theta, r, arm, th)
+                    - horseshoe([p[0], p[1] - eps], theta, r, arm, th))
+                    / (2.0 * eps);
+                let grad = (fx * fx + fy * fy).sqrt();
+                assert!((grad - 1.0).abs() < 5e-3, "eikonal theta={theta} p={p:?}: |grad|={grad}");
             }
         }
     }
