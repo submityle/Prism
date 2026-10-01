@@ -131,6 +131,13 @@
 //!   is distinct from the memoryless [`saturation::SaturationNode`], the
 //!   wow / flutter [`tape::TapeNode`], the high-harmonic
 //!   [`exciter::ExciterNode`], and the reflective [`wavefolder::WavefolderNode`].
+//! - [`tube::TubeNode`] -- vacuum-tube (valve) preamp emulation built from
+//!   first-order `RC` filters only: a grid-conduction asymmetric soft clip
+//!   (even harmonics), a cathode-bypass bass shelf, a Miller / anode
+//!   high-frequency roll-off, and a coupling-capacitor `DC` block. Distinct
+//!   from the second-order iron-core [`transformer::TransformerNode`] (no
+//!   winding resonance, no bass-first saturation ordering), the memoryless
+//!   [`saturation::SaturationNode`], and the [`tape::TapeNode`].
 
 pub mod auto_wah;
 pub mod bitcrusher;
@@ -159,6 +166,7 @@ pub mod tape;
 pub mod tilt_eq;
 pub mod transformer;
 pub mod tremolo;
+pub mod tube;
 pub mod vibrato;
 pub mod vocoder;
 pub mod wavefolder;
@@ -208,6 +216,7 @@ pub use tape::{Tape, TapeNode, TapeParams};
 pub use tilt_eq::{TiltEq, TiltEqNode, TiltEqParams};
 pub use transformer::{Transformer, TransformerNode, TransformerParams};
 pub use tremolo::{TremoloMode, TremoloNode, TremoloParams};
+pub use tube::{Tube, TubeNode, TubeParams};
 pub use vibrato::{VibratoNode, VibratoParams};
 pub use vocoder::{Vocoder, VocoderNode, VocoderParams};
 pub use wavefolder::{
