@@ -178,11 +178,34 @@ pub fn mirror_repeat(point: [f32; 3], period: [f32; 3]) -> [f32; 3] {
     folded
 }
 
+/// Folds space across an arbitrary plane through the origin with unit `normal`,
+/// reflecting everything on the plane's negative side onto its positive side so
+/// a primitive modelled in one half is instanced symmetrically about the plane.
+///
+/// Where [`mirror`] only folds across the coordinate planes, this folds across
+/// any orientation: a point whose signed distance to the plane is negative is
+/// mirrored through it (`p - 2 * dot(p, n) * n`), while a point already on the
+/// positive side passes through unchanged. The map is an isometry on each half,
+/// so composing it with a primitive leaves the result an exact distance. With
+/// `normal` equal to a basis axis it reduces to a single-axis [`mirror`].
+///
+/// `normal` must be unit length; a non-normalised vector scales the reflection
+/// and breaks the distance property, so callers must normalise first.
+pub fn fold_plane(point: [f32; 3], normal: [f32; 3]) -> [f32; 3] {
+    let signed = (point[0] * normal[0] + point[1] * normal[1] + point[2] * normal[2]).min(0.0);
+    let k = 2.0 * signed;
+    [
+        point[0] - k * normal[0],
+        point[1] - k * normal[1],
+        point[2] - k * normal[2],
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        elongate, limited_repeat, mirror, mirror_repeat, onion, repeat, round_distance,
-        scale_distance, scale_point, translate,
+        elongate, fold_plane, limited_repeat, mirror, mirror_repeat, onion, repeat,
+        round_distance, scale_distance, scale_point, translate,
     };
 
     #[test]
@@ -302,6 +325,48 @@ mod tests {
         assert_eq!(folded[1], 9.0);
         assert!((folded[0] - (-0.4)).abs() < 1e-6);
         assert!((folded[2] - (-0.4)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn fold_plane_reduces_to_axis_mirror() {
+        // A unit +x normal must reproduce single-axis mirroring: the negative
+        // side is reflected, the positive side passes through.
+        let n = [1.0, 0.0, 0.0];
+        assert_eq!(fold_plane([-3.0, 2.0, 1.0], n), [3.0, 2.0, 1.0]);
+        assert_eq!(fold_plane([3.0, 2.0, 1.0], n), [3.0, 2.0, 1.0]);
+    }
+
+    #[test]
+    fn fold_plane_mirrors_across_a_diagonal_plane() {
+        // Plane normal along the x=y diagonal. A point on the negative side is
+        // reflected to the mirror position; its distance to the plane is
+        // preserved (isometry), only the sign of the normal component flips.
+        let inv = 1.0 / 2.0_f32.sqrt();
+        let n = [inv, inv, 0.0];
+        let p = [-1.0, 0.0, 0.5];
+        let folded = fold_plane(p, n);
+        // Reflection of (-1,0) across the line x+y=0 is (0,1).
+        assert!((folded[0] - 0.0).abs() < 1e-6);
+        assert!((folded[1] - 1.0).abs() < 1e-6);
+        assert!((folded[2] - 0.5).abs() < 1e-6);
+        // The folded point sits on the non-negative side of the plane.
+        let signed = folded[0] * n[0] + folded[1] * n[1] + folded[2] * n[2];
+        assert!(signed >= -1e-6);
+    }
+
+    #[test]
+    fn fold_plane_is_isometric_on_the_reflected_half() {
+        // Reflecting preserves lengths: the distance between two negative-side
+        // points equals the distance between their folds.
+        let inv = 1.0 / 3.0_f32.sqrt();
+        let n = [inv, inv, inv];
+        let a = [-1.0, -0.5, -0.2];
+        let b = [-0.7, -0.9, -0.4];
+        let fa = fold_plane(a, n);
+        let fb = fold_plane(b, n);
+        let d0 = ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
+        let d1 = ((fa[0] - fb[0]).powi(2) + (fa[1] - fb[1]).powi(2) + (fa[2] - fb[2]).powi(2)).sqrt();
+        assert!((d0 - d1).abs() < 1e-6, "d0={d0} d1={d1}");
     }
 
     #[test]
