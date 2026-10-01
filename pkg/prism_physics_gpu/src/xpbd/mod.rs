@@ -33,6 +33,7 @@ mod config;
 mod constraint;
 mod cpu;
 mod gpu;
+mod gpu_islanded;
 mod islanded;
 mod state;
 
@@ -41,5 +42,6 @@ pub use config::{XpbdConfig, XpbdError};
 pub use constraint::DistanceConstraint;
 pub use cpu::cpu_solve;
 pub use gpu::GpuXpbdSolver;
+pub use gpu_islanded::GpuIslandedXpbdSolver;
 pub use islanded::{IslandStep, IslandedSolver};
 pub use state::ParticleState;

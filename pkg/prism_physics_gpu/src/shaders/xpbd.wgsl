@@ -46,6 +46,11 @@ const EPSILON: f32 = 1.1920929e-7; // f32::EPSILON, matching the CPU guard.
 @group(0) @binding(4) var<storage, read> inverse_masses: array<f32>;
 @group(0) @binding(5) var<storage, read> constraints: array<Constraint>;
 @group(0) @binding(6) var<storage, read_write> lambdas: array<f32>;
+// Per-particle integration gate: 1 = integrate this particle this step, 0 =
+// frozen (asleep). The dense `GpuXpbdSolver::solve` uploads an all-ones mask,
+// which makes the extra branch a no-op and keeps bit-identical behaviour; the
+// island-aware stepper uploads a real mask so asleep particles are skipped.
+@group(0) @binding(7) var<storage, read> awake: array<u32>;
 
 @group(1) @binding(0) var<uniform> colour: ColourParams;
 
@@ -58,7 +63,7 @@ fn predict(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     prev_positions[i] = positions[i];
     let w = inverse_masses[i];
-    if (w <= 0.0) {
+    if (w <= 0.0 || awake[i] == 0u) {
         return;
     }
     var v = velocities[i].xyz;
@@ -114,6 +119,9 @@ fn project(@builtin(global_invocation_id) gid: vec3<u32>) {
 fn finalize(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = gid.x;
     if (i >= params.particle_count) {
+        return;
+    }
+    if (awake[i] == 0u) {
         return;
     }
     let v = (positions[i].xyz - prev_positions[i].xyz) * params.inv_h;

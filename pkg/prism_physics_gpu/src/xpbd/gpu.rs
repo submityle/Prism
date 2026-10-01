@@ -87,6 +87,7 @@ impl GpuXpbdSolver {
                 buffer_entry(4, BufferBindingType::Storage { read_only: true }),
                 buffer_entry(5, BufferBindingType::Storage { read_only: true }),
                 buffer_entry(6, BufferBindingType::Storage { read_only: false }),
+                buffer_entry(7, BufferBindingType::Storage { read_only: true }),
             ],
         });
         let colour_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
@@ -174,6 +175,51 @@ impl GpuXpbdSolver {
             return Ok(());
         }
 
+        // The dense solve integrates every particle, so the awake mask is all
+        // ones; the island-aware stepper calls [`solve_masked`](Self::solve_masked)
+        // with a real mask. An all-ones mask makes the shader's awake branch a
+        // no-op, preserving bit-identical behaviour with the pre-mask kernel.
+        let awake = vec![1u32; state.len()];
+        self.solve_masked(ctx, state, constraints, &awake, config, dt)
+    }
+
+    /// Advances `state` under `constraints`, integrating only the particles the
+    /// `awake` mask selects, and recovering velocities for only those particles.
+    ///
+    /// This is the shared device core of both the dense [`solve`](Self::solve)
+    /// (all-ones mask, every constraint) and the island-aware GPU stepper
+    /// (per-particle awake mask, awake-island constraints only). Factoring it
+    /// out keeps a single, parity-locked dispatch path: the two callers differ
+    /// only in which particles and constraints they feed in, never in the
+    /// device arithmetic. `awake` must have one `u32` per particle (1 = awake,
+    /// 0 = frozen).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`XpbdError`] when the config or state is invalid, a constraint
+    /// indexes a missing particle, or the constraint graph needs more colours
+    /// than supported. Does nothing (returns `Ok`) when there are no particles
+    /// or `dt` is non-positive.
+    pub(crate) fn solve_masked(
+        &self,
+        ctx: &GpuContext,
+        state: &mut ParticleState,
+        constraints: &[DistanceConstraint],
+        awake: &[u32],
+        config: &XpbdConfig,
+        dt: f32,
+    ) -> Result<(), XpbdError> {
+        config.validate()?;
+        if !state.is_consistent() {
+            return Err(XpbdError::InvalidConfig(
+                "particle state arrays must have equal length",
+            ));
+        }
+        if state.is_empty() || dt <= 0.0 {
+            return Ok(());
+        }
+        debug_assert_eq!(awake.len(), state.len(), "awake mask must cover every particle");
+
         let particle_count = state.len() as u32;
         let colouring = Colouring::build(constraints, particle_count)?;
         let ordered = colouring.reorder(constraints);
@@ -184,7 +230,7 @@ impl GpuXpbdSolver {
         if h <= 0.0 {
             return Ok(());
         }
-        let plan = self.upload(ctx, state, &ordered, config, h);
+        let plan = self.upload(ctx, state, &ordered, awake, config, h);
         let staging = self.encode_and_run(ctx, &plan, &colouring, substeps, iterations);
         read_state_back(ctx, &staging, state);
         Ok(())
@@ -196,6 +242,7 @@ impl GpuXpbdSolver {
         ctx: &GpuContext,
         state: &ParticleState,
         ordered: &[DistanceConstraint],
+        awake: &[u32],
         config: &XpbdConfig,
         h: f32,
     ) -> SolvePlan {
@@ -234,6 +281,10 @@ impl GpuXpbdSolver {
             "xpbd_lambdas",
             u64::from(constraint_count.max(1)) * 4,
         );
+        // The device needs a non-empty binding even when there are no
+        // particles; `solve_masked` has already returned on the empty state, so
+        // `awake` is non-empty here.
+        let awake_buf = buffer::storage_read(device, "xpbd_awake", awake);
 
         let global_bind = device.create_bind_group(&BindGroupDescriptor {
             label: Some("prism_xpbd_global_bind_group"),
@@ -246,6 +297,7 @@ impl GpuXpbdSolver {
                 entry(4, &inverse_mass_buf),
                 entry(5, &constraint_buf),
                 entry(6, &lambda_buf),
+                entry(7, &awake_buf),
             ],
         });
 
