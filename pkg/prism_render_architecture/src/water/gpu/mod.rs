@@ -33,6 +33,7 @@ pub mod buffers;
 pub mod fft_plan;
 pub mod pipeline;
 pub mod spectral_plan;
+pub mod surface_pass;
 
 pub use buffers::{
     AsyncFrameState, BufferParity, FrameSlot, PipelineError, SlotState, WaterBufferCounts,
@@ -56,4 +57,9 @@ pub use spectral_plan::{
     cascade_spectral_stage_count, field_slot, ocean_spectral_pass_count, plan_cascade_spectral,
     plan_ocean_spectral, ComplexPart, FieldSlot, SpectralPass, SpectralRealField, SpectralStage,
     SPECTRAL_COMPLEX_FIELD_COUNT, SPECTRAL_REAL_FIELD_COUNT,
+};
+
+pub use surface_pass::{
+    plan_surface_draw, DepthTest, SurfaceBlend, SurfaceDepth, SurfaceDrawDescriptor,
+    WaterRenderTarget,
 };
