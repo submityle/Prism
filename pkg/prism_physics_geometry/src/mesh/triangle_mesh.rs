@@ -63,6 +63,28 @@ pub struct MeshSweepHit {
     pub normal: Vec3,
 }
 
+/// A single sphere/triangle overlap reported by [`TriangleMesh::sphere_contacts`].
+///
+/// Each contact describes how to push the sphere out of one overlapping
+/// triangle: move the centre along `normal` by `depth` and the sphere surface
+/// just touches the triangle at `point`. A character controller or rigid-body
+/// solver can accumulate these to resolve penetration against a mesh.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct MeshSphereContact {
+    /// Index of the overlapping triangle.
+    pub triangle: u32,
+    /// Closest point on that triangle to the sphere centre.
+    pub point: Vec3,
+    /// Unit contact normal pointing from `point` toward the sphere centre.
+    ///
+    /// When the centre lies exactly on the triangle the direction is
+    /// ill-defined, so it falls back to the triangle's geometric face normal.
+    pub normal: Vec3,
+    /// Penetration depth: how far the sphere surface lies past `point`
+    /// (`radius - distance`), always `>= 0` for a reported contact.
+    pub depth: f32,
+}
+
 /// An indexed triangle mesh accelerated by a dynamic BVH.
 #[derive(Clone, Debug)]
 pub struct TriangleMesh {
@@ -243,6 +265,58 @@ impl TriangleMesh {
                 if (cp - center).length_squared() <= r2 {
                     out.push(data as u32);
                 }
+            });
+        out
+    }
+
+    /// Collects a depenetration contact for every triangle the sphere overlaps.
+    ///
+    /// For each candidate triangle gathered from the BVH, the exact closest
+    /// point to `center` is computed; when it lies within `radius` the triangle
+    /// contributes a [`MeshSphereContact`] whose `normal` points from the
+    /// surface toward the centre and whose `depth` is `radius - distance`. A
+    /// solver can iterate these to push a sphere (or capsule end-cap) out of a
+    /// mesh. Returns an empty vector when `radius` is negative or nothing
+    /// overlaps. Contacts are reported in BVH traversal order, not sorted by
+    /// depth. When the centre lies exactly on a triangle the contact normal
+    /// falls back to that triangle's geometric face normal so the push-out
+    /// direction stays well defined.
+    pub fn sphere_contacts(&self, center: Vec3, radius: f32) -> Vec<MeshSphereContact> {
+        let mut out = Vec::new();
+        if radius < 0.0 {
+            return out;
+        }
+        let r2 = radius * radius;
+        self.bvh
+            .query_sphere(BoundingSphere::new(center, radius), &mut |data| {
+                let tri_index = data as usize;
+                let [ia, ib, ic] = self.indices[tri_index];
+                let a = self.vertices[ia as usize];
+                let b = self.vertices[ib as usize];
+                let c = self.vertices[ic as usize];
+                let cp = closest_point_on_triangle(center, a, b, c);
+                let gap = center - cp;
+                let dist2 = gap.length_squared();
+                if dist2 > r2 {
+                    return;
+                }
+                let dist = dist2.sqrt();
+                // Prefer the surface-to-centre direction; when the centre sits
+                // on the triangle it is degenerate, so fall back to the face
+                // normal (and finally +Y for a degenerate triangle).
+                let mut normal = gap.normalize_or_zero();
+                if normal == Vec3::ZERO {
+                    normal = (b - a).cross(c - a).normalize_or_zero();
+                    if normal == Vec3::ZERO {
+                        normal = Vec3::Y;
+                    }
+                }
+                out.push(MeshSphereContact {
+                    triangle: data as u32,
+                    point: cp,
+                    normal,
+                    depth: radius - dist,
+                });
             });
         out
     }
@@ -505,6 +579,66 @@ mod tests {
         let ray = Ray::with_tmax(Vec3::ZERO, Vec3::Z, 1.0);
         // Contact needs t = 1.5 but tmax is 1.0.
         assert!(mesh.sphere_cast(&ray, 0.5).is_none());
+    }
+
+    #[test]
+    fn sphere_contacts_on_face_reports_depth_and_normal() {
+        let mesh = two_quads();
+        // Sphere centre at z = 1 just in front of quad A (surface z = 2) with a
+        // radius of 1.5 penetrates the face by 0.5.
+        let contacts = mesh.sphere_contacts(Vec3::new(0.0, 0.0, 1.0), 1.5);
+        assert_eq!(contacts.len(), 2, "both front triangles: {contacts:?}");
+        for c in &contacts {
+            assert!(c.triangle < 2, "front triangle, got {}", c.triangle);
+            assert!(c.point.abs_diff_eq(Vec3::new(0.0, 0.0, 2.0), 1e-5));
+            // Centre is on the -Z side of the quad, so the push-out points -Z.
+            assert!(c.normal.z < -0.99, "normal toward centre: {:?}", c.normal);
+            assert!((c.depth - 0.5).abs() < 1e-5, "depth = {}", c.depth);
+        }
+    }
+
+    #[test]
+    fn sphere_contacts_clamp_to_edge() {
+        let mesh = two_quads();
+        // Centre off the +x edge of quad A (edge at x = 1, z = 2): closest point
+        // is the edge, distance = sqrt(0.4^2 + 0.2^2) ~= 0.4472 < radius 0.6.
+        let contacts = mesh.sphere_contacts(Vec3::new(1.4, 0.0, 2.2), 0.6);
+        assert!(!contacts.is_empty(), "edge contact expected");
+        let c = contacts
+            .iter()
+            .min_by(|a, b| a.depth.total_cmp(&b.depth))
+            .expect("contact");
+        assert!((c.point.x - 1.0).abs() < 1e-5, "clamped x = {}", c.point.x);
+        let (dx, dz) = (1.4f32 - 1.0, 0.2f32);
+        let expected = 0.6 - (dx * dx + dz * dz).sqrt();
+        assert!((c.depth - expected).abs() < 1e-4, "depth = {}", c.depth);
+        // Normal points from the edge toward the centre (outward +x / +z-ish).
+        assert!(c.normal.x > 0.0 && c.normal.z > 0.0, "normal = {:?}", c.normal);
+    }
+
+    #[test]
+    fn sphere_contacts_centre_on_face_uses_face_normal() {
+        let mesh = two_quads();
+        // Centre exactly on quad A's plane: the surface-to-centre direction is
+        // degenerate, so the normal must fall back to the face normal (+/-Z).
+        let contacts = mesh.sphere_contacts(Vec3::new(0.0, 0.0, 2.0), 0.5);
+        assert!(!contacts.is_empty());
+        for c in &contacts {
+            assert!((c.depth - 0.5).abs() < 1e-5, "full-radius depth: {}", c.depth);
+            assert!(c.normal.z.abs() > 0.99, "face normal fallback: {:?}", c.normal);
+        }
+    }
+
+    #[test]
+    fn sphere_contacts_reject_when_out_of_range() {
+        let mesh = two_quads();
+        // Radius 0.5 at z = 1 falls short of quad A at z = 2.
+        assert!(mesh.sphere_contacts(Vec3::new(0.0, 0.0, 1.0), 0.5).is_empty());
+        // Negative radius never contacts.
+        assert!(mesh.sphere_contacts(Vec3::ZERO, -1.0).is_empty());
+        // Empty mesh never contacts.
+        let empty = TriangleMesh::new(alloc::vec![], alloc::vec![]);
+        assert!(empty.sphere_contacts(Vec3::ZERO, 10.0).is_empty());
     }
 
     #[test]

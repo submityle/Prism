@@ -28,7 +28,7 @@ pub mod proxy;
 pub use bounding::{Aabb, BoundingSphere, Capsule, Frustum, Obb, Plane, Ray};
 pub use broadphase::{generate_pairs, BroadPhasePair, PairChanges, PersistentBroadPhase};
 pub use bvh::DynamicBvh;
-pub use mesh::{MeshClosestPoint, MeshRayHit, MeshSweepHit, TriangleMesh};
+pub use mesh::{MeshClosestPoint, MeshRayHit, MeshSphereContact, MeshSweepHit, TriangleMesh};
 pub use narrow::{
     closest_point_on_aabb, closest_point_on_segment, closest_point_on_triangle,
     closest_points_segment_segment, conservative_advancement, contact_manifold, gjk_closest_points,
