@@ -456,6 +456,17 @@
 //!   between); a distinct sibling of the layered deep-opacity decode
 //!   [`GpuHairDeepTransmittanceSample`] (variable-length node list versus
 //!   fixed equi-depth layers), checked within the fma tolerance.
+//! * [`GpuHairProjectSh`] projects
+//!   [`project_sh`](prism_render_architecture::hair::dual_scatter_sh::project_sh),
+//!   the `Zinke` dual-scattering `SH` fit that estimates nine band-major
+//!   coefficients from a batch of directional transmittance samples via the
+//!   Monte-Carlo sum `Σ T·Y_lm·w` with the uniform solid-angle weight
+//!   `w = 4π / N` — one thread per coefficient walks every sample in authored
+//!   order so the per-coefficient accumulation matches the golden, with the
+//!   weight computed on the host to avoid a shader `π` literal; the inverse of
+//!   the coefficient-reconstruction [`GpuHairEvalSh`] twin (fit coefficients
+//!   from samples versus reconstruct a value from coefficients), checked
+//!   within the fma tolerance (see [`dual_scatter_project`]).
 //!
 //! # Portability
 //!
@@ -495,6 +506,7 @@ pub mod decimation_priority;
 pub mod deep_opacity;
 pub mod deep_transmittance_sample;
 pub mod dither_alpha;
+pub mod dual_scatter_project;
 pub mod eval_sh;
 pub mod follicle_bind;
 pub mod forward_scatter;
@@ -549,6 +561,7 @@ pub use decimation_priority::GpuDecimationPriority;
 pub use deep_opacity::GpuHairDeepOpacity;
 pub use deep_transmittance_sample::{GpuHairDeepTransmittanceSample, TransmittanceQuery};
 pub use dither_alpha::{reference_dither_alpha_map, GpuHairDitherAlpha};
+pub use dual_scatter_project::{reference_project_sh, GpuHairProjectSh};
 pub use eval_sh::{reference_eval_sh, GpuHairEvalSh};
 pub use follicle_bind::{reference_transfer_root_map, GpuHairFollicleBind};
 pub use forward_scatter::GpuHairForwardScatter;
