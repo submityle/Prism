@@ -117,7 +117,7 @@ pub(crate) fn surface_grid_from_params(params: &GpuWaterSurfaceMeshParams) -> Su
 /// `water_surface_raster.wesl`, laid out byte-for-byte at the `std140` offsets
 /// [`prism_render_architecture::water::gpu::surface_bindings::view`] pins.
 ///
-/// A `mat4x4<f32>` (64 bytes) followed by seven 16-byte-aligned `vec4<f32>`
+/// A `mat4x4<f32>` (64 bytes) followed by five 16-byte-aligned `vec4<f32>`
 /// rows — already a multiple of 16, so no tail padding. The `offset_of` /
 /// `size_of` contract tests below pin every field to the arch-side offset
 /// constant, so a drift between this host record, the shader `struct` and the
@@ -130,10 +130,6 @@ pub(crate) struct GpuWaterSurfaceView {
     pub clip_from_world: [[f32; 4]; 4],
     /// World-space camera position (`xyz`); `w` is the refraction screen offset.
     pub world_camera_position: [f32; 4],
-    /// Direction *towards* the key light (`xyz`, normalized); `w` unused.
-    pub sun_direction: [f32; 4],
-    /// Key-light illuminance (`rgb`); `w` unused.
-    pub sun_illuminance: [f32; 4],
     /// Base perceptual roughness (`x`), reflectance (`y`), optical thickness
     /// (`z`), foam whiten strength (`w`).
     pub surface_params: [f32; 4],
@@ -164,12 +160,6 @@ pub(crate) struct SurfaceViewParams {
     /// Screen-space refraction offset scale (packed into
     /// `world_camera_position.w`); `0.0` disables the refraction displacement.
     pub refraction_screen_offset: f32,
-    /// Direction *towards* the key light (world space). The shader renormalizes
-    /// and falls back to straight-up for a degenerate direction, so a non-unit
-    /// or zero vector is safe.
-    pub sun_direction: [f32; 3],
-    /// Key-light illuminance (`rgb`, linear).
-    pub sun_illuminance: [f32; 3],
     /// Base perceptual roughness.
     pub roughness: f32,
     /// Base reflectance (`f0` at normal incidence).
@@ -205,28 +195,23 @@ pub(crate) struct SurfaceViewParams {
 /// rows, in the exact order `water_surface_raster.wesl` reads them:
 ///
 /// * `world_camera_position = (camera_xyz, refraction_screen_offset)`,
-/// * `sun_direction = (dir_xyz, 0)` and `sun_illuminance = (rgb, 0)`,
 /// * `surface_params = (roughness, reflectance, optical_thickness, foam_whiten)`,
 /// * `water_color = (albedo_rgb, min_alpha)`,
 /// * `style_params = (npr_ramp_steps, toon_foam_threshold, tint_strength, hybrid_shore_bias)`,
 /// * `viewport = (width, height, 0, 0)`.
 ///
 /// Pure: the same inputs always produce the same bytes, so the uniform upload
-/// is deterministic frame to frame. The unused `vec4` lanes (`sun_*.w`,
-/// `viewport.zw`) are zeroed rather than left undefined.
+/// is deterministic frame to frame. The unused `vec4` lanes (`viewport.zw`)
+/// are zeroed rather than left undefined.
 #[must_use]
 pub(crate) fn build_surface_view(params: &SurfaceViewParams) -> GpuWaterSurfaceView {
     let [cx, cy, cz] = params.camera_world_position;
-    let [sx, sy, sz] = params.sun_direction;
-    let [ir, ig, ib] = params.sun_illuminance;
     let [ar, ag, ab] = params.water_albedo;
     let [vw, vh] = params.viewport_size;
 
     GpuWaterSurfaceView {
         clip_from_world: params.clip_from_world,
         world_camera_position: [cx, cy, cz, params.refraction_screen_offset],
-        sun_direction: [sx, sy, sz, 0.0],
-        sun_illuminance: [ir, ig, ib, 0.0],
         surface_params: [
             params.roughness,
             params.reflectance,
@@ -472,14 +457,6 @@ mod tests {
             view::WORLD_CAMERA_POSITION_OFFSET as usize
         );
         assert_eq!(
-            core::mem::offset_of!(GpuWaterSurfaceView, sun_direction),
-            view::SUN_DIRECTION_OFFSET as usize
-        );
-        assert_eq!(
-            core::mem::offset_of!(GpuWaterSurfaceView, sun_illuminance),
-            view::SUN_ILLUMINANCE_OFFSET as usize
-        );
-        assert_eq!(
             core::mem::offset_of!(GpuWaterSurfaceView, surface_params),
             view::SURFACE_PARAMS_OFFSET as usize
         );
@@ -521,8 +498,6 @@ mod tests {
             ],
             camera_world_position: [100.0, 200.0, 300.0],
             refraction_screen_offset: 0.25,
-            sun_direction: [0.0, 1.0, 0.0],
-            sun_illuminance: [10.0, 11.0, 12.0],
             roughness: 0.3,
             reflectance: 0.02,
             optical_thickness: 0.7,
@@ -553,14 +528,6 @@ mod tests {
             view_uniform.world_camera_position,
             [100.0, 200.0, 300.0, 0.25]
         );
-    }
-
-    #[test]
-    fn build_packs_the_key_light_with_zero_tail_lanes() {
-        let params = sample_params();
-        let view_uniform = build_surface_view(&params);
-        assert_eq!(view_uniform.sun_direction, [0.0, 1.0, 0.0, 0.0]);
-        assert_eq!(view_uniform.sun_illuminance, [10.0, 11.0, 12.0, 0.0]);
     }
 
     #[test]

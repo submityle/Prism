@@ -230,11 +230,11 @@ mod tests {
         let storage_slots: Vec<u32> = SurfaceBinding::ALL
             .into_iter()
             .filter(|b| matches!(b.kind(), SurfaceBindingKind::StorageRead))
-            .map(|b| b.index())
+            .map(SurfaceBinding::index)
             .collect();
         let mut produced: Vec<u32> = SurfaceMeshOutput::ALL
             .into_iter()
-            .map(|o| o.draw_binding_index())
+            .map(SurfaceMeshOutput::draw_binding_index)
             .collect();
         produced.sort_unstable();
         assert_eq!(produced, storage_slots);

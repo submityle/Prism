@@ -26,7 +26,7 @@ use bevy_render::{
     view::{ExtractedView, Msaa, ViewDepthStencilTexture, ViewTarget},
 };
 
-use crate::lighting::ExtractedLights;
+use crate::lighting::LightBindGroup;
 use crate::shading::{PrismShadingSettings, ViewVisibilityBuffer};
 
 use super::bind_groups::filtering_sampler;
@@ -57,7 +57,7 @@ pub(crate) fn draw_water_surface(
     cache: Res<PipelineCache>,
     bodies: Res<WaterGpuBodies>,
     surface_pipeline: Res<WaterSurfacePipelines>,
-    lights: Res<ExtractedLights>,
+    light_bindings: Res<LightBindGroup>,
     device: Res<RenderDevice>,
     view: ViewQuery<(
         &ExtractedView,
@@ -82,19 +82,14 @@ pub(crate) fn draw_water_surface(
         return;
     }
 
-    // Camera and key light are constant across every body this view.
+    // The camera transform is constant across every body this view; scene
+    // lighting is bound separately through the shared `group(1)` light table.
     let clip_from_world = extracted.clip_from_world.unwrap_or_else(|| {
         extracted.clip_from_view * extracted.world_from_view.to_matrix().inverse()
     });
-    let (sun_direction, sun_illuminance) = match lights.directionals.first() {
-        Some(sun) => (sun.direction_to_light, sun.illuminance),
-        None => ([0.0, 1.0, 0.0], [0.0, 0.0, 0.0]),
-    };
     let view_inputs = SurfaceViewInputs {
         clip_from_world: clip_from_world.to_cols_array_2d(),
         camera_world_position: extracted.world_from_view.translation().to_array(),
-        sun_direction,
-        sun_illuminance,
         viewport_size: [
             viewport_dimension(extracted.viewport.z),
             viewport_dimension(extracted.viewport.w),
@@ -159,6 +154,12 @@ pub(crate) fn draw_water_surface(
     if prepared.is_empty() {
         return;
     }
+    // The shared light table must have uploaded this frame; without it the
+    // fragment stage has no `group(1)` to read, so skip exactly like the
+    // opaque resolve pass does on its first frame.
+    let Some(light_group) = light_bindings.bind_group.as_ref() else {
+        return;
+    };
 
     // Single tracked pass: the composite already wrote the view target, so the
     // color attachment loads, and the main-pass depth loads read-only (the
@@ -175,6 +176,7 @@ pub(crate) fn draw_water_surface(
     for draw in &prepared {
         pass.set_render_pipeline(draw.pipeline);
         pass.set_bind_group(0, &draw.bind_group, &[]);
+        pass.set_bind_group(1, light_group, &[]);
         pass.set_index_buffer(draw.index_buffer.slice(..), IndexFormat::Uint32);
         pass.draw_indexed(0..draw.index_count, 0, 0..1);
     }

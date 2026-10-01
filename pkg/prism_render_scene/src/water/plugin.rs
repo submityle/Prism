@@ -38,7 +38,9 @@ use bevy_app::{App, Plugin};
 use bevy_asset::embedded_asset;
 use bevy_ecs::schedule::IntoScheduleConfigs;
 use bevy_render::render_resource::SpecializedRenderPipelines;
-use bevy_render::{ExtractSchedule, Render, RenderApp, RenderStartup, RenderSystems};
+use bevy_render::{
+    init_gpu_resource, ExtractSchedule, Render, RenderApp, RenderStartup, RenderSystems,
+};
 
 use super::body::ExtractedWater;
 use super::dispatch::dispatch_water;
@@ -50,6 +52,7 @@ use super::surface_draw::draw_water_surface;
 use super::surface_pipeline::{
     init_water_surface_pipelines, prepare_water_surface_pipelines, WaterSurfacePipelines,
 };
+use crate::lighting::LightBindGroup;
 
 /// Installs the `GPU` water compute subsystem into an app.
 ///
@@ -100,7 +103,14 @@ impl Plugin for WaterPlugin {
             // pipelines, matching the shading composite pass's specialization
             // registry.
             .init_resource::<SpecializedRenderPipelines<WaterSurfacePipelines>>()
-            .add_systems(RenderStartup, init_water_surface_pipelines)
+            // Build after the shared light table resource exists: the surface
+            // pipeline clones `LightBindGroup`'s `group(1)` layout descriptor so
+            // its fragment stage reads the engine's directional/punctual/
+            // environment tables, exactly like the opaque resolve pass.
+            .add_systems(
+                RenderStartup,
+                init_water_surface_pipelines.after(init_gpu_resource::<LightBindGroup>),
+            )
             // Snapshot the main-world water bodies into the render world each
             // frame.
             .add_systems(ExtractSchedule, extract_water_bodies)

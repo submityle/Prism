@@ -137,7 +137,7 @@ pub enum SurfaceBindingKind {
 
 /// Byte layout of the `WaterSurfaceView` uniform block, mirroring the `WESL`
 /// `struct` in `water_surface_raster.wesl` field-for-field at the `std140`
-/// stride every field already satisfies (a `mat4x4<f32>` followed by seven
+/// stride every field already satisfies (a `mat4x4<f32>` followed by five
 /// 16-byte-aligned `vec4<f32>` rows).
 pub mod view {
     /// Offset of `clip_from_world: mat4x4<f32>`.
@@ -145,23 +145,19 @@ pub mod view {
     /// Offset of `world_camera_position: vec4<f32>` (`xyz`; `w` = refraction
     /// screen offset).
     pub const WORLD_CAMERA_POSITION_OFFSET: u32 = 64;
-    /// Offset of `sun_direction: vec4<f32>`.
-    pub const SUN_DIRECTION_OFFSET: u32 = 80;
-    /// Offset of `sun_illuminance: vec4<f32>`.
-    pub const SUN_ILLUMINANCE_OFFSET: u32 = 96;
     /// Offset of `surface_params: vec4<f32>` (roughness, reflectance,
     /// thickness, foam-whiten).
-    pub const SURFACE_PARAMS_OFFSET: u32 = 112;
+    pub const SURFACE_PARAMS_OFFSET: u32 = 80;
     /// Offset of `water_color: vec4<f32>` (`rgb` albedo, `a` min alpha).
-    pub const WATER_COLOR_OFFSET: u32 = 128;
+    pub const WATER_COLOR_OFFSET: u32 = 96;
     /// Offset of `style_params: vec4<f32>` (ramp steps, foam threshold, tint,
     /// hybrid bias).
-    pub const STYLE_PARAMS_OFFSET: u32 = 144;
+    pub const STYLE_PARAMS_OFFSET: u32 = 112;
     /// Offset of `viewport: vec4<f32>` (`xy` framebuffer pixel size).
-    pub const VIEWPORT_OFFSET: u32 = 160;
-    /// Total size of the uniform block in bytes (`64 + 7 * 16`), already a
+    pub const VIEWPORT_OFFSET: u32 = 128;
+    /// Total size of the uniform block in bytes (`64 + 5 * 16`), already a
     /// multiple of 16 so it needs no tail padding.
-    pub const SIZE: u32 = 176;
+    pub const SIZE: u32 = 144;
 }
 
 /// A regular displaced surface patch: a `verts_x` by `verts_z` lattice of
@@ -339,8 +335,6 @@ mod tests {
         let offsets = [
             view::CLIP_FROM_WORLD_OFFSET,
             view::WORLD_CAMERA_POSITION_OFFSET,
-            view::SUN_DIRECTION_OFFSET,
-            view::SUN_ILLUMINANCE_OFFSET,
             view::SURFACE_PARAMS_OFFSET,
             view::WATER_COLOR_OFFSET,
             view::STYLE_PARAMS_OFFSET,

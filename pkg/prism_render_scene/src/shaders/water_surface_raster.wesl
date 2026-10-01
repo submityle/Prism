@@ -33,6 +33,18 @@ import prism_render_scene::shaders::brdf::{
 import prism_render_scene::shaders::water::{
     water_direct,
 };
+import prism_render_scene::shaders::lighting::{
+    DirectionalLight,
+    PunctualLight,
+    LightEnvironment,
+    sample_directional_light,
+    sample_punctual_light,
+    sh_irradiance,
+    sh_radiance,
+    env_brdf_approx,
+    environment_has_image_based,
+    INV_PI,
+};
 
 // Per-view constants the host uploads once per frame.
 struct WaterSurfaceView {
@@ -40,10 +52,6 @@ struct WaterSurfaceView {
     clip_from_world: mat4x4<f32>,
     // World-space camera position (xyz); w is the refraction screen offset.
     world_camera_position: vec4<f32>,
-    // Direction *towards* the key light (xyz, normalized); w unused.
-    sun_direction: vec4<f32>,
-    // Key-light illuminance (rgb); w unused.
-    sun_illuminance: vec4<f32>,
     // base perceptual roughness (x), reflectance (y), optical thickness (z),
     // foam whiten strength (w).
     surface_params: vec4<f32>,
@@ -69,6 +77,15 @@ struct WaterSurfaceView {
 // Already-rendered opaque scene color, sampled for refraction.
 @group(0) @binding(5) var scene_color: texture_2d<f32>;
 @group(0) @binding(6) var scene_sampler: sampler;
+
+// Shared engine lighting base (`@group(1)`): byte-identical bindings to the
+// opaque `shading_resolve` path. All analytic directional + punctual lights
+// plus the image-based `SH` environment, so every §5 water frontend consumes
+// the exact same light table as the rest of the scene instead of a single
+// hard-coded key light.
+@group(1) @binding(0) var<storage, read> directional_lights: array<DirectionalLight>;
+@group(1) @binding(1) var<storage, read> punctual_lights: array<PunctualLight>;
+@group(1) @binding(2) var<storage, read> light_env: array<LightEnvironment>;
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -138,12 +155,31 @@ fn frame_at(world_position: vec3<f32>, normal: vec3<f32>) -> ShadingFrame {
     return f;
 }
 
-fn key_light() -> DirectLightSample {
-    var l: DirectLightSample;
-    l.direction = brdf_normalize_or(view.sun_direction.xyz, vec3<f32>(0.0, 1.0, 0.0));
-    l.illuminance = view.sun_illuminance.rgb;
-    l.visibility = 1.0;
-    return l;
+// Image-based ambient term, mirroring the opaque `shading_resolve` indirect
+// path: a split-sum specular reflection plus `SH` irradiance diffuse when the
+// environment carries image-based data, falling back to the flat ambient
+// radiance otherwise. Shared verbatim by every §5 frontend.
+fn water_ibl(surface: SurfaceSample, frame: ShadingFrame) -> vec3<f32> {
+    let env = light_env[0];
+    let occlusion = clamp(surface.ambient_occlusion, 0.0, 1.0);
+    let n = brdf_normalize_or(frame.normal, vec3<f32>(0.0, 1.0, 0.0));
+    let v = brdf_normalize_or(frame.view, n);
+    let n_dot_v = max(dot(n, v), 1.0e-4);
+    let roughness = clamp(surface.perceptual_roughness, 0.0, 1.0);
+    let metallic = clamp(surface.metallic, 0.0, 1.0);
+    let reflectance = clamp(surface.reflectance, 0.0, 1.0);
+    let f0 = mix(vec3<f32>(0.16 * reflectance * reflectance), surface.base_color, metallic);
+    let dfg = env_brdf_approx(n_dot_v, roughness);
+    let spec_weight = (f0 * dfg.x + vec3<f32>(dfg.y)) * occlusion;
+    if environment_has_image_based(env) {
+        let irradiance = max(sh_irradiance(env, n), vec3<f32>(0.0));
+        let diffuse = surface.base_color * (1.0 - metallic) * irradiance * INV_PI;
+        let reflection = reflect(-v, n);
+        let prefiltered = max(sh_radiance(env, reflection), vec3<f32>(0.0));
+        let env_specular = prefiltered * spec_weight;
+        return diffuse * occlusion + env_specular;
+    }
+    return surface.base_color * env.ambient * (occlusion * (1.0 - metallic));
 }
 
 // Sample the scene color behind the surface, offset by the surface normal, for
@@ -172,9 +208,32 @@ fn ramp_quantize(x: f32, steps: f32) -> f32 {
 fn shade_pbr_core(in: VertexOutput) -> vec4<f32> {
     let surface = surface_from(in.foam);
     let frame = frame_at(in.world_position, in.normal);
-    let light = key_light();
 
-    let lit = water_direct(surface, frame, light);
+    // Accumulate the engine's full analytic light table (all directional +
+    // punctual lights) through the shared single-layer-water lobe, then add the
+    // image-based ambient term. Identical to the opaque path's direct+indirect
+    // split; `water_direct` already folds in each light's analytic visibility.
+    let env = light_env[0];
+    var lit = vec3<f32>(0.0);
+    for (var i = 0u; i < env.directional_count; i = i + 1u) {
+        let s = sample_directional_light(directional_lights[i]);
+        var dl: DirectLightSample;
+        dl.direction = s.direction;
+        dl.illuminance = s.illuminance;
+        dl.visibility = s.visibility;
+        lit = lit + water_direct(surface, frame, dl);
+    }
+    for (var i = 0u; i < env.punctual_count; i = i + 1u) {
+        let s = sample_punctual_light(punctual_lights[i], in.world_position);
+        if s.valid > 0.5 {
+            var dl: DirectLightSample;
+            dl.direction = s.direction;
+            dl.illuminance = s.illuminance;
+            dl.visibility = s.visibility;
+            lit = lit + water_direct(surface, frame, dl);
+        }
+    }
+    lit = lit + water_ibl(surface, frame);
     let refracted = refraction_color(in.clip_position, frame.normal);
 
     // Grazing angles reflect more and refract less (Fresnel-weighted alpha).

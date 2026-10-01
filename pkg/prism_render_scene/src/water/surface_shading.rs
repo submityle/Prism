@@ -6,9 +6,12 @@
 //! that draw's uniform: the frontend selection plus the body-constant lighting
 //! and style scalars a game sets once when it spawns the water.
 //!
-//! The per-frame, per-view camera / key-light state (which changes every frame
-//! as the camera moves) lives in [`SurfaceViewInputs`]; the draw node fills it
-//! from the active view. [`WaterSurfaceShading::view_params`] is the single
+//! The per-frame, per-view camera state (which changes every frame as the
+//! camera moves) lives in [`SurfaceViewInputs`]; the draw node fills it from the
+//! active view. Scene lighting is no longer carried here: the fragment stage
+//! reads the engine's shared light table (all directionals + punctuals + the
+//! image-based `LightEnvironment`) through the `group(1)` light bind group,
+//! exactly like the opaque `shading_resolve` path. [`WaterSurfaceShading::view_params`] is the single
 //! place the two halves combine into the
 //! [`SurfaceViewParams`](super::surface_mesh::SurfaceViewParams) that
 //! [`build_surface_view`](super::surface_mesh::build_surface_view) then packs
@@ -17,7 +20,7 @@
 //! Keeping the authored body constants separate from the per-view inputs lets
 //! the body own its stable style (uploaded once, compared cheaply via
 //! `PartialEq`) while the node supplies only the volatile camera state each
-//! frame.
+//! frame; the shared light table is bound by the node, not packed here.
 
 use prism_render_architecture::water::ShadingFrontend;
 
@@ -27,7 +30,7 @@ use super::surface_mesh::SurfaceViewParams;
 ///
 /// This is the per-body half of the raster draw's view uniform: the lighting
 /// response frontend plus the style and body scalars a game authors once. The
-/// per-view camera / key-light state is supplied separately each frame by
+/// per-view camera state is supplied separately each frame by
 /// [`SurfaceViewInputs`] and merged in [`WaterSurfaceShading::view_params`].
 ///
 /// `Copy` and `PartialEq` so a body can carry it inline and the extract stage
@@ -101,7 +104,7 @@ impl WaterSurfaceShading {
     /// [`SurfaceViewParams`] the raster draw packs into one uniform.
     ///
     /// Pure: the body contributes the style / lighting scalars and the view
-    /// contributes the camera transform, key light and viewport, so the same
+    /// contributes the camera transform and viewport, so the same
     /// `(self, view)` always yields the same params.
     #[must_use]
     pub(crate) fn view_params(&self, view: &SurfaceViewInputs) -> SurfaceViewParams {
@@ -109,8 +112,6 @@ impl WaterSurfaceShading {
             clip_from_world: view.clip_from_world,
             camera_world_position: view.camera_world_position,
             refraction_screen_offset: self.refraction_screen_offset,
-            sun_direction: view.sun_direction,
-            sun_illuminance: view.sun_illuminance,
             roughness: self.roughness,
             reflectance: self.reflectance,
             optical_thickness: self.optical_thickness,
@@ -126,21 +127,18 @@ impl WaterSurfaceShading {
     }
 }
 
-/// The per-frame, per-view camera and key-light state the raster draw reads.
+/// The per-frame, per-view camera state the raster draw reads.
 ///
 /// Unlike the body-constant [`WaterSurfaceShading`], every field here changes as
-/// the camera and sun move, so the draw node fills it fresh each frame from the
-/// active view rather than storing it on the body.
+/// the camera moves, so the draw node fills it fresh each frame from the
+/// active view rather than storing it on the body. Scene lighting is bound
+/// separately through the shared `group(1)` light table, not carried here.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct SurfaceViewInputs {
     /// Clip-from-world transform for the surface vertices (column-major).
     pub(crate) clip_from_world: [[f32; 4]; 4],
     /// World-space camera position.
     pub(crate) camera_world_position: [f32; 3],
-    /// Direction *towards* the key light (world space); the shader renormalizes.
-    pub(crate) sun_direction: [f32; 3],
-    /// Key-light illuminance (`rgb`, linear).
-    pub(crate) sun_illuminance: [f32; 3],
     /// Framebuffer size in pixels (`width`, `height`).
     pub(crate) viewport_size: [f32; 2],
 }
@@ -158,8 +156,6 @@ mod tests {
                 [4.0, 5.0, 6.0, 1.0],
             ],
             camera_world_position: [7.0, 8.0, 9.0],
-            sun_direction: [0.0, 1.0, 0.0],
-            sun_illuminance: [10.0, 11.0, 12.0],
             viewport_size: [1920.0, 1080.0],
         }
     }
@@ -213,8 +209,6 @@ mod tests {
         // Camera / view lanes come from the per-view inputs.
         assert_eq!(params.clip_from_world, view.clip_from_world);
         assert_eq!(params.camera_world_position, view.camera_world_position);
-        assert_eq!(params.sun_direction, view.sun_direction);
-        assert_eq!(params.sun_illuminance, view.sun_illuminance);
         assert_eq!(params.viewport_size, view.viewport_size);
 
         // Style / body lanes come from the authored shading.

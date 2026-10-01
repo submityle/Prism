@@ -92,6 +92,7 @@ use prism_render_architecture::water::gpu::plan_surface_draw;
 use prism_render_architecture::water::ShadingFrontend;
 
 use super::super::shading::ViewVisibilityBuffer;
+use crate::lighting::LightBindGroup;
 
 /// The four shading frontends in a stable order; the index into
 /// [`ViewWaterSurfacePipelines::ids`] is this slot. `PBR` first keeps the
@@ -194,6 +195,14 @@ pub(crate) struct WaterSurfacePipelines {
     /// from the [`PipelineCache`] with the *same* descriptor the pipeline
     /// specializes against, and the two can never drift.
     pub(crate) layout: BindGroupLayoutDescriptor,
+    /// The engine's shared `@group(1)` light-table layout descriptor (all
+    /// directionals + punctuals + the image-based `LightEnvironment`), cloned
+    /// from [`LightBindGroup`] so the surface fragment stage reads the *same*
+    /// light tables the opaque `shading_resolve` pass does. Resolved to the live
+    /// [`BindGroupLayout`](bevy_render::render_resource::BindGroupLayout) through
+    /// the [`PipelineCache`] with the same descriptor the resolve pipeline uses,
+    /// so the two can never drift.
+    pub(crate) light_layout: BindGroupLayoutDescriptor,
     /// The embedded `water_surface_raster.wesl` module both stages compile from.
     pub(crate) shader: Handle<Shader>,
 }
@@ -207,7 +216,7 @@ impl SpecializedRenderPipeline for WaterSurfacePipelines {
         let draw = plan_surface_draw(key.frontend);
         RenderPipelineDescriptor {
             label: Some(format!("prism water surface {:?}", key.frontend).into()),
-            layout: vec![self.layout.clone()],
+            layout: vec![self.layout.clone(), self.light_layout.clone()],
             immediate_size: 0,
             vertex: VertexState {
                 shader: self.shader.clone(),
@@ -282,19 +291,34 @@ impl ViewWaterSurfacePipelines {
 ///
 /// The raster shader must be registered as an embedded asset before this runs
 /// (see [`super::plugin`]); `load_embedded_asset!` resolves it by its path
-/// relative to this file. No device dependency beyond the shared asset server:
-/// the concrete pipelines are specialized later, per view, in
+/// relative to this file. It also depends on [`LightBindGroup`] already being
+/// initialized (the plugin orders this `.after(init_gpu_resource::<LightBindGroup>)`)
+/// so the shared light-table layout descriptor can be cloned. The concrete
+/// pipelines are specialized later, per view, in
 /// [`prepare_water_surface_pipelines`].
-pub(crate) fn init_water_surface_pipelines(mut commands: Commands, asset_server: Res<AssetServer>) {
+pub(crate) fn init_water_surface_pipelines(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    light_bindings: Res<LightBindGroup>,
+) {
     let entries = surface_layout_entries();
     let layout = BindGroupLayoutDescriptor::new("prism water surface", &entries);
+
+    // Reuse the engine's shared light-table layout verbatim so the surface
+    // fragment stage binds the identical directional/punctual/environment
+    // tables the opaque resolve pass reads - no second light upload.
+    let light_layout = light_bindings.layout_descriptor.clone();
 
     let shader: Handle<Shader> = load_embedded_asset!(
         asset_server.as_ref(),
         "../shaders/water_surface_raster.wesl"
     );
 
-    commands.insert_resource(WaterSurfacePipelines { layout, shader });
+    commands.insert_resource(WaterSurfacePipelines {
+        layout,
+        light_layout,
+        shader,
+    });
 }
 
 /// `RenderSystems::Prepare` system specializing the four surface pipelines per
@@ -340,8 +364,20 @@ mod tests {
     /// `specialize` logic on the `CPU` without a device.
     fn fixture() -> WaterSurfacePipelines {
         let entries = surface_layout_entries();
+        // A structurally equivalent stand-in for the engine's shared light-table
+        // layout (3x read-only storage, visible to compute+fragment); production
+        // clones the real descriptor off `LightBindGroup`.
+        let light_entries = BindGroupLayoutEntries::<3>::sequential(
+            ShaderStages::COMPUTE | ShaderStages::FRAGMENT,
+            (
+                storage_buffer_read_only_sized(false, None),
+                storage_buffer_read_only_sized(false, None),
+                storage_buffer_read_only_sized(false, None),
+            ),
+        );
         WaterSurfacePipelines {
             layout: BindGroupLayoutDescriptor::new("prism water surface", &entries),
+            light_layout: BindGroupLayoutDescriptor::new("prism lights", &light_entries),
             shader: Handle::default(),
         }
     }
@@ -422,6 +458,9 @@ mod tests {
         assert_eq!(depth.depth_compare, Some(CompareFunction::GreaterEqual));
         assert_eq!(desc.primitive.cull_mode, None);
         assert_eq!(desc.primitive.topology, PrimitiveTopology::TriangleList);
+        // Two bind-group layouts: the per-body @group(0) surface layout and the
+        // shared @group(1) engine light table the fragment stage now samples.
+        assert_eq!(desc.layout.len(), 2);
     }
 
     #[test]

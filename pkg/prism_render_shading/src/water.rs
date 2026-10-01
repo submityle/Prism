@@ -313,10 +313,7 @@ mod tests {
                     thickness: 0.0,
                     ..base_surface()
                 },
-                ShadingFrame {
-                    view,
-                    ..frame()
-                },
+                ShadingFrame { view, ..frame() },
                 light(),
             )
         };
