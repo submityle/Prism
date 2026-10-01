@@ -44,7 +44,7 @@
 
 ### M2 响应层到 ECS 的绑定(部分已交付)
 - [x] 独立的 Signal / Memo / Effect 运行时。
-- [ ] `$` 绑定 → 注册 Effect,信号变化 **字段级** 回写目标实体组件,零 archetype 搬迁。
+- [x] 字段级 **双向** 绑定:ECS 组件字段 <-> `Signal` 的 `FieldBinding`/`EcsBridge`——读路径复用 `Ref` 的 tick 变更检测(仅变更帧才拉取),写路径用相等性守卫经 `Mut` 回写(不触发无谓 tick、不振荡),零 archetype 搬迁(`prism_ui_ecs`,已交付)。宏层 `$` 语法糖自动登记绑定仍规划中。
 - [ ] `Show` / `For` 结构绑定,keyed reconcile 批量 spawn/despawn 到帧末。
 - [x] 可访问性(a11y)基线:角色 / 焦点 / 键盘导航 / 读屏标签(`prism_ui_a11y`,已交付)。
 

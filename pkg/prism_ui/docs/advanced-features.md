@@ -702,6 +702,56 @@ assert_eq!(report.dropped, 1);
 
 ---
 
+## 18. `prism_ui_ecs` — ECS 组件 ↔ Signal 字段级绑定(M2 headline)
+
+对标:这是 Loom 相对 Bevy BSN 的 **核心差异点**,也是整条高级层从「引擎弱耦合独立运行时」
+走向「与 Prism/ECS 实体深度绑定」的桥。Loom 的响应式与 ECS **本就都在追踪变化**;本 crate
+把两者在 **字段粒度** 上接起来,并 **复用 ECS 的 tick 变更检测作为响应式的传输**,而不是另造一套脏标记。
+
+- `FieldBinding<C, T>`:把组件 `C` 的 **单个字段** 通过 `reader`(及可选 `writer`)闭包投影到 / 回写自 `Signal<T>`。
+- **拉取(ECS → signal)**:查每个组件的变更 tick,`Ref::is_changed_after(last_tick)` 为真才重读字段再 `set_if_changed` 入信号——空闲实体零成本。
+- **回写(signal → ECS)**:相等性守卫,先经只读 `Deref` 比对字段,仅当与信号真不同才 `Mut` 置脏——写入绝不无谓推进 tick。
+- `EntityBinding` 把绑定钉到具体 `Entity` 并经对象安全的 `SyncBinding` trait 擦除类型;`EcsBridge` 汇集多绑定,驱动整帧 `pull_all` / `push_all`。
+- 因两个方向都带相等性守卫,`ECS → signal → ECS` 往返 **收敛而非振荡**。
+
+> `std`-only 刻意例外:本 crate 链接 `bevy_ecs`(本身需 std),是引擎集成桥,故不走 no_std。
+
+```rust
+use bevy_ecs::prelude::{Component, World};
+use prism_ui_ecs::EcsBridge;
+use prism_ui_reactive::Runtime;
+
+#[derive(Component)]
+struct Counter {
+    value: i32,
+}
+
+let mut world = World::new();
+let entity = world.spawn(Counter { value: 1 }).id();
+
+let rt = Runtime::new();
+let value = rt.signal(0i32);
+
+let mut bridge = EcsBridge::new();
+bridge.bind_two_way::<Counter, i32>(entity, value.clone(), |c| c.value, |c, v| c.value = *v);
+
+// 改组件 → 拉取:信号追上。
+world.get_mut::<Counter>(entity).unwrap().value = 42;
+assert_eq!(bridge.pull_all(&world), 1);
+assert_eq!(value.get_untracked(), 42);
+
+// 改信号 → 回写:组件被写回。
+value.set(7);
+assert_eq!(bridge.push_all(&mut world), 1);
+assert_eq!(world.get::<Counter>(entity).unwrap().value, 7);
+```
+
+> 差异:本 crate 落地了 roadmap M2 的 **字段级双向绑定核心**,也是前文诚实边界里反复提到的
+> 「尚未与 ECS 实体字段深度绑定」局限的正式解除。仍规划中的是宏层 `$` 语法糖(自动登记绑定)
+> 与 `Show` / `For` 结构绑定(批量 spawn/despawn 到帧末)。
+
+---
+
 ## 组合示例:高级层如何协同
 
 一个典型的「可国际化、带全局状态、按路由切换」的视图,其数据流为:
@@ -724,8 +774,8 @@ I18n.translation     (Memo)  ─┘                              │
 ## 诚实边界
 
 - 本文所列能力均 **已交付并通过测试**,但当前为 **引擎弱耦合的独立运行时能力**:
-  它们消费 / 产出 `Element` 与 `Signal`,**尚未** 与 Prism/ECS 实体字段做深度自动绑定
-  (该绑定为 roadmap M2)。
+  它们消费 / 产出 `Element` 与 `Signal`。roadmap M2 的 **字段级双向绑定核心已交付**
+  (第 18 节 `prism_ui_ecs`:组件字段 ↔ `Signal`);仍规划中的是宏层 `$` 绑定语法糖与 `Show` / `For` 结构绑定。
 - Suspense / Portal / Overlay / 虚拟化 / 表单校验 / a11y 基线 **均已交付**(本文 6–10 节)。
   仍为 **规划中** 的是:守卫 / 深链接(router)、时间旅行 UI(devtools)、
   静态子树提升 / 编译期稳定节点 ID,见 [roadmap.md](roadmap.md)。隐式过渡 / FLIP 布局动画 /
