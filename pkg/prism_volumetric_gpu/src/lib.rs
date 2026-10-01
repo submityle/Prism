@@ -99,6 +99,7 @@ pub mod gamut_clip;
 pub mod gaussian_splat;
 pub mod godray;
 pub mod gravity_wave;
+pub mod gray_code;
 pub mod hash_rng;
 pub mod height_fog;
 pub mod imposter_fade;
@@ -210,6 +211,7 @@ pub use gaussian_splat::{
 };
 pub use godray::{GodRayWeightQuery, GpuGodRayWeight};
 pub use gravity_wave::{GpuGravityWave, GravityWaveQuery};
+pub use gray_code::GpuGrayCode;
 pub use hash_rng::{GpuHashRng, HashRngSample};
 pub use height_fog::{GpuHeightFog, HeightFogQuery};
 pub use imposter_fade::{GpuImposterFade, ImposterFadeQuery};
