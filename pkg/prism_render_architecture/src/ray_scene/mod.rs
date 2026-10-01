@@ -235,6 +235,15 @@
 //!   linear convex combination (`b0 = (c0 + 4·c1 + c2)/6`, …), so applying
 //!   it along `u` then `v` yields an equivalent [`bezier_patch::BezierPatch`]
 //!   and all evaluation/normals/tessellation reuse the Bézier path.
+//! - [`rational_bezier_patch`] — a rational bicubic Bézier (single-span
+//!   `NURBS`) surface patch ([`rational_bezier_patch::RationalBezierPatch`])
+//!   with per-control-point weights, so it reproduces conics (spherical
+//!   caps, cylinders, swept arcs) exactly where the polynomial patch only
+//!   approximates. Evaluation runs De Casteljau in homogeneous
+//!   `[wx, wy, wz, w]` coordinates (pure `lerp`s) then projects with one
+//!   division; analytic normals use the quotient rule and the surface is
+//!   tessellated into the shared [`indexed_bilinear_patch_mesh`] path. All
+//!   weights equal to `1` reproduce [`bezier_patch::BezierPatch`] exactly.
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -372,6 +381,7 @@ pub mod indexed_bilinear_patch_mesh_gpu_layout;
 pub mod bezier_patch;
 pub mod catmull_rom_patch;
 pub mod bspline_patch;
+pub mod rational_bezier_patch;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -460,6 +470,7 @@ pub use indexed_bilinear_patch_mesh_gpu_layout::{
 pub use bezier_patch::BezierPatch;
 pub use catmull_rom_patch::CatmullRomPatch;
 pub use bspline_patch::BsplinePatch;
+pub use rational_bezier_patch::RationalBezierPatch;
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
 pub use obb::{Obb, ObbBvh, ObbHit};
