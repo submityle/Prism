@@ -186,6 +186,46 @@ pub fn elongate_2d_correction(point: [f32; 2], half_extent: [f32; 2]) -> f32 {
     qx.max(qy).min(0.0)
 }
 
+/// Rotates a 2D query point by the angle whose sine and cosine are `sin` and
+/// `cos` (counter-clockwise, `R = [[cos, -sin], [sin, cos]]`).
+///
+/// Trigonometry is pre-baked by the caller so the runtime stays
+/// transcendental-free; pass `sin.sin()`/`cos.cos()` of the desired angle (or a
+/// cached pair). Rotation is an isometry, so wrapping a profile as
+/// `profile(rotate_2d(p, -sin, cos))` orients it by `+angle` about the origin
+/// without distorting the field. Supplying a unit `(sin, cos)` keeps distances
+/// exact; a non-unit pair scales the field by the pair's magnitude.
+pub fn rotate_2d(point: [f32; 2], sin: f32, cos: f32) -> [f32; 2] {
+    [
+        cos * point[0] - sin * point[1],
+        sin * point[0] + cos * point[1],
+    ]
+}
+
+/// Rotates a 3D query point about the unit axis `axis` by the angle whose sine
+/// and cosine are `sin` and `cos`, using Rodrigues' rotation formula.
+///
+/// `v*cos + (axis x v)*sin + axis*(axis . v)*(1 - cos)`. Built only from
+/// `dot`, `cross`, and multiply/add, so the runtime is transcendental-free when
+/// the caller pre-bakes `(sin, cos)`. `axis` must be unit length for the result
+/// to be an isometry; sampling a primitive as `primitive(rotate_axis(p, axis,
+/// -sin, cos))` orients it by `+angle` about that axis without distorting the
+/// field.
+pub fn rotate_axis(point: [f32; 3], axis: [f32; 3], sin: f32, cos: f32) -> [f32; 3] {
+    let cross = [
+        axis[1] * point[2] - axis[2] * point[1],
+        axis[2] * point[0] - axis[0] * point[2],
+        axis[0] * point[1] - axis[1] * point[0],
+    ];
+    let axis_dot = axis[0] * point[0] + axis[1] * point[1] + axis[2] * point[2];
+    let w = axis_dot * (1.0 - cos);
+    [
+        point[0] * cos + cross[0] * sin + axis[0] * w,
+        point[1] * cos + cross[1] * sin + axis[1] * w,
+        point[2] * cos + cross[2] * sin + axis[2] * w,
+    ]
+}
+
 /// Mirrors the field across the selected coordinate planes by folding those
 /// axes to their absolute value, instancing a symmetric copy of the primitive.
 ///
@@ -297,10 +337,11 @@ pub fn extrude(d2d: f32, z: f32, half_height: f32) -> f32 {
 mod tests {
     use super::{
         elongate, elongate_2d, elongate_2d_correction, elongate_correction, extrude, fold_plane, limited_repeat, mirror, mirror_repeat, onion,
-        repeat, revolution, round_distance, scale_distance, scale_point, translate,
+        repeat, revolution, rotate_2d, rotate_axis, round_distance, scale_distance, scale_point,
+        translate,
     };
     use crate::ray_scene::sdf_primitives::{
-        capped_cylinder, circle_2d, round_box, rounded_box_2d, sphere, torus,
+        box_2d, capped_cylinder, circle_2d, round_box, rounded_box_2d, sphere, torus,
     };
 
     #[test]
@@ -639,6 +680,91 @@ mod tests {
             maxerr = maxerr.max((got - want).abs());
         }
         assert!(maxerr < 1e-5, "elongate_2d-exact vs rounded_box_2d maxerr = {maxerr}");
+    }
+
+    #[test]
+    fn rotate_2d_is_a_length_preserving_rotation() {
+        // 90 degrees counter-clockwise maps +x onto +y.
+        let q = rotate_2d([1.0, 0.0], 1.0, 0.0);
+        assert!((q[0]).abs() < 1e-6 && (q[1] - 1.0).abs() < 1e-6);
+        // Length preserved and inverse (negated sine) round-trips to identity.
+        for a in [0.3_f32, 1.1, -2.4, 2.9] {
+            let (s, c) = (a.sin(), a.cos());
+            let p = [1.3, -0.7];
+            let r = rotate_2d(p, s, c);
+            let plen = (p[0] * p[0] + p[1] * p[1]).sqrt();
+            let rlen = (r[0] * r[0] + r[1] * r[1]).sqrt();
+            assert!((plen - rlen).abs() < 1e-6);
+            let back = rotate_2d(r, -s, c);
+            assert!((back[0] - p[0]).abs() < 1e-6 && (back[1] - p[1]).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn rotate_2d_orients_a_box_matching_a_hand_rotated_reference() {
+        // A box_2d sampled through the inverse rotation is an exact rotated
+        // box. Cross-check against evaluating box_2d at the point transformed
+        // by an independently written rotation matrix.
+        let he = [1.2, 0.5];
+        for a in [0.2_f32, 0.9, -1.7] {
+            let (s, c) = (a.sin(), a.cos());
+            for p in [[0.4, 0.1], [2.0, -1.3], [-1.1, 0.8], [0.0, 0.0]] {
+                let got = box_2d(rotate_2d(p, -s, c), he);
+                // Independent reference: inverse-rotate by hand (R(-a) * p).
+                let rp = [c * p[0] + s * p[1], -s * p[0] + c * p[1]];
+                let qx = rp[0].abs() - he[0];
+                let qy = rp[1].abs() - he[1];
+                let want = ((qx.max(0.0)).powi(2) + (qy.max(0.0)).powi(2)).sqrt()
+                    + qx.max(qy).min(0.0);
+                assert!((got - want).abs() < 1e-6, "a={a} p={p:?} got={got} want={want}");
+            }
+        }
+    }
+
+    #[test]
+    fn rotate_axis_matches_rotate_2d_about_z_and_preserves_length() {
+        let mut state: u32 = 0x5151_a5a5;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state as f32 / u32::MAX as f32
+        };
+        // About +z, the first two components must track the 2D rotation and z
+        // is untouched.
+        for a in [0.3_f32, 1.4, -2.1] {
+            let (s, c) = (a.sin(), a.cos());
+            let v = [0.7, -1.2, 0.9];
+            let r3 = rotate_axis(v, [0.0, 0.0, 1.0], s, c);
+            let r2 = rotate_2d([v[0], v[1]], s, c);
+            assert!((r3[0] - r2[0]).abs() < 1e-6 && (r3[1] - r2[1]).abs() < 1e-6);
+            assert!((r3[2] - v[2]).abs() < 1e-6);
+        }
+        // 90 degrees about +x maps +y onto +z.
+        let q = rotate_axis([0.0, 1.0, 0.0], [1.0, 0.0, 0.0], 1.0, 0.0);
+        assert!(q[0].abs() < 1e-6 && q[1].abs() < 1e-6 && (q[2] - 1.0).abs() < 1e-6);
+        // Length preservation and inverse round-trip about an arbitrary unit axis.
+        for _ in 0..2000 {
+            let mut axis = [next() * 2.0 - 1.0, next() * 2.0 - 1.0, next() * 2.0 - 1.0];
+            let n = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
+            if n < 1e-3 {
+                continue;
+            }
+            axis = [axis[0] / n, axis[1] / n, axis[2] / n];
+            let a = next() * 6.0 - 3.0;
+            let (s, c) = (a.sin(), a.cos());
+            let v = [next() * 4.0 - 2.0, next() * 4.0 - 2.0, next() * 4.0 - 2.0];
+            let r = rotate_axis(v, axis, s, c);
+            let vlen = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+            let rlen = (r[0] * r[0] + r[1] * r[1] + r[2] * r[2]).sqrt();
+            assert!((vlen - rlen).abs() < 1e-5);
+            let back = rotate_axis(r, axis, -s, c);
+            assert!(
+                (back[0] - v[0]).abs() < 1e-5
+                    && (back[1] - v[1]).abs() < 1e-5
+                    && (back[2] - v[2]).abs() < 1e-5
+            );
+        }
     }
 
     #[test]
