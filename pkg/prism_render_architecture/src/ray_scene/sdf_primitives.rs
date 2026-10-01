@@ -1746,6 +1746,27 @@ pub fn pentagram_2d(point: [f32; 2], radius: f32) -> f32 {
     star5_2d(point, radius, INNER_RATIO)
 }
 
+/// Exact signed distance to a 2D vesica (a symmetric lens) in 2D
+/// (Inigo Quilez `sdVesica`).
+///
+/// The lens is the intersection of two circles of radius `radius` whose centres
+/// sit at `(-offset, 0)` and `(+offset, 0)` (requires `radius > offset`). It
+/// spans `radius - offset` along x and `sqrt(radius^2 - offset^2)` along y, with
+/// the two cusps at the circle intersections. The query is folded into the first
+/// quadrant and the nearest feature is either a cusp or one of the two arcs,
+/// selected by a single linear test, so the field is exact and uses only `abs`,
+/// `sqrt` (through `length2`), `sign` and comparisons.
+pub fn vesica_2d(point: [f32; 2], radius: f32, offset: f32) -> f32 {
+    let px = point[0].abs();
+    let py = point[1].abs();
+    let b = (radius * radius - offset * offset).sqrt();
+    if (py - b) * offset > px * b {
+        length2([px, py - b]) * offset.signum()
+    } else {
+        length2([px + offset, py]) - radius
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1753,7 +1774,7 @@ mod tests {
         cut_sphere, cylinder_segment, death_star, egg_2d, ellipsoid_sdf, equilateral_triangle_2d, heart_2d, hex_prism, hexagram_2d, infinite_cone, infinite_cylinder, isosceles_triangle_2d, length2, line_sdf, link, moon,
         octagon_prism, octahedron, oriented_box_2d, parallelogram, pentagram_2d, pie, plane, polygon_2d, pyramid, quad_sdf, regular_hexagon_2d, regular_octagon_2d, regular_pentagon_2d, rhombus, rhombus_2d, round_box, round_cone_sdf,
         round_cone_segment, rounded_box_2d, rounded_cylinder, rounded_x, segment_2d, solid_angle, sphere, star5_2d, torus, trapezoid_isosceles, triangle_sdf, triangular_prism,
-        uneven_capsule_2d, vesica, vesica_segment,
+        uneven_capsule_2d, vesica, vesica_2d, vesica_segment,
     };
 
     #[test]
@@ -3276,6 +3297,70 @@ mod tests {
             let got = pentagram_2d(s, r);
             let want = polygon_sdf2(s[0], s[1], &verts);
             assert!((got - want).abs() < 1e-4, "s={s:?} got={got} want={want}");
+        }
+    }
+
+    #[test]
+    fn vesica_2d_matches_two_arc_reference() {
+        let r = 1.0f32;
+        let off = 0.6f32;
+        let b = (r * r - off * off).sqrt();
+        // Analytic features: centre, both lateral cusps and the x-extent tips.
+        assert!((vesica_2d([0.0, 0.0], r, off) - (-(r - off))).abs() < 1e-6);
+        assert!(vesica_2d([0.0, b], r, off).abs() < 1e-6);
+        assert!(vesica_2d([0.0, -b], r, off).abs() < 1e-6);
+        assert!(vesica_2d([r - off, 0.0], r, off).abs() < 1e-6);
+        // Independent reference: two circular arcs (centres (-off,0) and
+        // (+off,0)) as a boundary polyline, inside = inside both disks.
+        let a_r = b.atan2(off);
+        let n = 400usize;
+        let mut poly: Vec<[f32; 2]> = Vec::new();
+        for i in 0..=n {
+            let a = -a_r + 2.0 * a_r * (i as f32 / n as f32);
+            poly.push([-off + r * a.cos(), r * a.sin()]);
+        }
+        let a_l = std::f32::consts::PI - a_r;
+        for i in 0..=n {
+            let a = a_l + 2.0 * (std::f32::consts::PI - a_l) * (i as f32 / n as f32);
+            poly.push([off + r * a.cos(), r * a.sin()]);
+        }
+        let m = poly.len();
+        let reference = |px: f32, py: f32| -> f32 {
+            let mut best = f32::INFINITY;
+            for i in 0..m {
+                let s = poly[i];
+                let e = poly[(i + 1) % m];
+                let ex = e[0] - s[0];
+                let ey = e[1] - s[1];
+                let wx = px - s[0];
+                let wy = py - s[1];
+                let t = ((ex * wx + ey * wy) / (ex * ex + ey * ey)).clamp(0.0, 1.0);
+                let dx = wx - ex * t;
+                let dy = wy - ey * t;
+                best = best.min(dx * dx + dy * dy);
+            }
+            let in_a = (px + off) * (px + off) + py * py <= r * r;
+            let in_b = (px - off) * (px - off) + py * py <= r * r;
+            best.sqrt() * if in_a && in_b { -1.0 } else { 1.0 }
+        };
+        let samples: [[f32; 2]; 12] = [
+            [0.0, 0.0],
+            [0.2, 0.3],
+            [-0.2, -0.3],
+            [0.5, 0.0],
+            [0.0, 0.9],
+            [0.9, 0.9],
+            [-0.9, 0.4],
+            [0.35, -0.5],
+            [1.2, 0.0],
+            [0.0, 1.1],
+            [-0.3, 0.7],
+            [0.25, 0.25],
+        ];
+        for s in samples {
+            let got = vesica_2d(s, r, off);
+            let want = reference(s[0], s[1]);
+            assert!((got - want).abs() < 5e-3, "s={s:?} got={got} want={want}");
         }
     }
 
