@@ -58,6 +58,15 @@
 //! * [`prismatic_cpu`] — the authoritative [`cpu_solve_joints_prismatic`] golden
 //!   stepper (angular lock plus perpendicular point-to-point weld).
 //! * [`prismatic_gpu`] — the device-side [`GpuPrismaticJointSolver`] twin.
+//! * [`prismatic_drive`] — the [`PrismaticDriveJoint`] (slider with a linear
+//!   position drive/motor) definition and its device-packed storage
+//!   representation.
+//! * [`prismatic_drive_cpu`] — the authoritative
+//!   [`cpu_solve_joints_prismatic_drive`] golden stepper (angular lock plus
+//!   perpendicular weld plus an along-axis compliant-and-damped position
+//!   drive).
+//! * [`prismatic_drive_gpu`] — the device-side
+//!   [`GpuPrismaticDriveJointSolver`] twin.
 //! * [`prismatic_limit`] — the [`PrismaticLimitJoint`] (slider with a travel
 //!   limit) definition and its device-packed storage representation.
 //! * [`prismatic_limit_cpu`] — the authoritative
@@ -95,6 +104,9 @@ mod hinge_limit_gpu;
 mod math;
 mod prismatic;
 mod prismatic_cpu;
+mod prismatic_drive;
+mod prismatic_drive_cpu;
+mod prismatic_drive_gpu;
 mod prismatic_gpu;
 mod prismatic_limit;
 mod prismatic_limit_cpu;
@@ -120,6 +132,9 @@ pub use hinge_limit_cpu::cpu_solve_joints_hinge_limit;
 pub use hinge_limit_gpu::GpuHingeLimitJointSolver;
 pub use prismatic::PrismaticJoint;
 pub use prismatic_cpu::cpu_solve_joints_prismatic;
+pub use prismatic_drive::PrismaticDriveJoint;
+pub use prismatic_drive_cpu::cpu_solve_joints_prismatic_drive;
+pub use prismatic_drive_gpu::GpuPrismaticDriveJointSolver;
 pub use prismatic_gpu::GpuPrismaticJointSolver;
 pub use prismatic_limit::PrismaticLimitJoint;
 pub use prismatic_limit_cpu::cpu_solve_joints_prismatic_limit;
