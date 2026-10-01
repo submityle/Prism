@@ -403,6 +403,11 @@
 //!   floods each edge-connected patch to one orientation and flips closed
 //!   patches outward by signed volume, reporting flips, patches, and
 //!   non-manifold edges.
+//! - [`mesh_feature_edges`] — feature-edge classification
+//!   ([`mesh_feature_edges::detect_feature_edges`]): walks every undirected
+//!   edge once, tagging boundary (one face), non-manifold (>2 faces), and
+//!   crease (two faces whose unit normals dot below a cosine threshold) edges,
+//!   exposing sorted per-kind lists and their union.
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -563,6 +568,7 @@ pub mod mesh_edge_split;
 pub mod mesh_vertex_clustering;
 pub mod mesh_connected_components;
 pub mod mesh_normal_consistency;
+pub mod mesh_feature_edges;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -674,6 +680,7 @@ pub use mesh_edge_split::{split_long_edges, MAX_PASSES as EDGE_SPLIT_MAX_PASSES}
 pub use mesh_vertex_clustering::{cluster_vertices, ClusterError};
 pub use mesh_connected_components::{connected_components, split_components, MeshComponents};
 pub use mesh_normal_consistency::{make_winding_consistent, WindingFix};
+pub use mesh_feature_edges::{detect_feature_edges, EdgeKind, FeatureEdgeError, FeatureEdges};
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
 pub use obb::{Obb, ObbBvh, ObbHit};
