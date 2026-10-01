@@ -498,6 +498,10 @@
 //!   negative inside / positive outside / zero on surface, reproducible),
 //!   the core asset for SDF soft shadows/AO, distance-field GI, and mesh-
 //!   distance-field collision (one sqrt for world-space signed distance).
+//! - [`mesh_sdf_raymarch`] — sphere-traced ray marching of a signed
+//!   distance field ([`mesh_sdf_raymarch::sample_signed_distance`],
+//!   [`mesh_sdf_raymarch::sphere_trace`], [`mesh_sdf_raymarch::SdfHit`]) for
+//!   distance-field soft shadows, ambient occlusion, and cone-traced GI.
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -674,6 +678,7 @@ pub mod mesh_voxelize;
 pub mod mesh_voxel_distance_field;
 pub mod mesh_solid_voxelization;
 pub mod mesh_signed_distance_field;
+pub mod mesh_sdf_raymarch;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -801,6 +806,7 @@ pub use mesh_voxelize::{triangle_box_overlap, voxelize_surface, VoxelGrid};
 pub use mesh_voxel_distance_field::{voxel_distance_field, VoxelDistanceField};
 pub use mesh_solid_voxelization::{solidify, CellClass, SolidVoxelization};
 pub use mesh_signed_distance_field::{signed_distance_field, SignedDistanceField};
+pub use mesh_sdf_raymarch::{sample_signed_distance, sphere_trace, SdfHit};
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
 pub use obb::{Obb, ObbBvh, ObbHit};
