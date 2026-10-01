@@ -143,6 +143,7 @@ pub mod spherical_harmonics_rotate;
 pub mod storm_vertical_profile;
 pub mod sunset_inscatter_tint;
 pub mod sunset_reddening;
+pub mod temporal_dither;
 pub mod temporal_reproject;
 pub mod terrain_occlusion;
 pub mod total_coverage;
@@ -258,6 +259,7 @@ pub use spherical_harmonics_rotate::{
 pub use storm_vertical_profile::{GpuStormVerticalProfile, StormVerticalProfileQuery};
 pub use sunset_inscatter_tint::{GpuSunsetInscatterTint, InscatterTint, SunsetInscatterTintQuery};
 pub use sunset_reddening::{GpuSunsetReddening, SunsetReddeningQuery};
+pub use temporal_dither::{DitherPixel, DitherQuery, DitherSample, GpuTemporalDither};
 pub use temporal_reproject::{
     GpuTemporalReproject, TemporalReprojectQuery, TemporalReprojectResult, NEIGHBORHOOD_TAPS,
 };
