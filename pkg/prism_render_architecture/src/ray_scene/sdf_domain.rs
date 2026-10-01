@@ -123,12 +123,38 @@ pub fn scale_distance(distance: f32, factor: f32) -> f32 {
 /// origin so the base primitive is evaluated at the squeezed point; sampling a
 /// sphere through `elongate` yields a capsule, a box yields a rounded slab.
 /// A zero half-extent leaves that axis unchanged.
+///
+/// This point transform is exact in the primitive's *exterior* but not in its
+/// interior (the collapsed core maps every inside point to the primitive
+/// centre). For an exact field everywhere, add [`elongate_correction`] to the
+/// evaluated primitive distance: `primitive(elongate(p, h)) + elongate_correction(p, h)`.
 pub fn elongate(point: [f32; 3], half_extent: [f32; 3]) -> [f32; 3] {
     [
         point[0] - point[0].clamp(-half_extent[0], half_extent[0]),
         point[1] - point[1].clamp(-half_extent[1], half_extent[1]),
         point[2] - point[2].clamp(-half_extent[2], half_extent[2]),
     ]
+}
+
+/// Interior distance correction that upgrades [`elongate`] from an
+/// exterior-only transform to an exact signed field everywhere.
+///
+/// [`elongate`] alone evaluates the primitive at a point whose `[-h, h]` core
+/// is collapsed to the origin, which is exact outside the shape but loses the
+/// interior gradient. Adding this term restores it:
+/// `primitive(elongate(p, h)) + elongate_correction(p, h)`. The correction is
+/// `min(max(|p.x| - h.x, |p.y| - h.y, |p.z| - h.z), 0)` — the (non-positive)
+/// signed distance into the inserted elongation box, and zero outside it so the
+/// already-exact exterior is untouched.
+///
+/// This is Inigo Quilez's exact elongation: elongating a sphere of radius `r`
+/// by half-extents `h` is identically a rounded box of half-extents `h` and
+/// corner radius `r`, which this pairing reproduces to the bit.
+pub fn elongate_correction(point: [f32; 3], half_extent: [f32; 3]) -> f32 {
+    let qx = point[0].abs() - half_extent[0];
+    let qy = point[1].abs() - half_extent[1];
+    let qz = point[2].abs() - half_extent[2];
+    qx.max(qy).max(qz).min(0.0)
 }
 
 /// Mirrors the field across the selected coordinate planes by folding those
@@ -241,10 +267,10 @@ pub fn extrude(d2d: f32, z: f32, half_height: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        elongate, extrude, fold_plane, limited_repeat, mirror, mirror_repeat, onion,
+        elongate, elongate_correction, extrude, fold_plane, limited_repeat, mirror, mirror_repeat, onion,
         repeat, revolution, round_distance, scale_distance, scale_point, translate,
     };
-    use crate::ray_scene::sdf_primitives::{capped_cylinder, torus};
+    use crate::ray_scene::sdf_primitives::{capped_cylinder, round_box, sphere, torus};
 
     #[test]
     fn extrude_of_a_circle_matches_a_capped_cylinder() {
@@ -502,6 +528,45 @@ mod tests {
         // Inside the half-extent: collapses onto the slab centre.
         let inside = elongate([0.5, 0.0, 0.0], [1.0, 0.0, 0.0]);
         assert_eq!(inside[0], 0.0);
+    }
+
+    #[test]
+    fn elongate_correction_is_zero_outside_and_negative_inside() {
+        let h = [1.0, 0.5, 0.25];
+        // Fully outside the elongation box on every axis: no correction.
+        assert_eq!(elongate_correction([2.0, 2.0, 2.0], h), 0.0);
+        // On the box face: still zero (boundary of the exterior-exact region).
+        assert!(elongate_correction([1.0, 0.0, 0.0], h).abs() < 1e-6);
+        // Deep inside: correction is the (negative) distance to the nearest
+        // face, i.e. min over axes of (|p| - h) clamped at zero.
+        let got = elongate_correction([0.2, 0.1, 0.05], h);
+        let want = (0.2_f32 - 1.0).max(0.1 - 0.5).max(0.05 - 0.25).min(0.0);
+        assert!((got - want).abs() < 1e-6);
+    }
+
+    #[test]
+    fn elongate_plus_correction_of_a_sphere_matches_a_rounded_box() {
+        // Exact elongation (IQ): sphere(radius r) elongated by half-extents h
+        // is identically a rounded box of half-extents h and corner radius r.
+        // Verifies the point transform + correction over a deterministic sweep,
+        // interior included, against the independently derived `round_box`.
+        let mut state: u32 = 0x1234_5678;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state as f32 / u32::MAX as f32
+        };
+        let mut maxerr = 0.0f32;
+        for _ in 0..5000 {
+            let h = [next() * 2.0, next() * 2.0, next() * 2.0];
+            let r = next() * 1.5 + 0.1;
+            let p = [next() * 6.0 - 3.0, next() * 6.0 - 3.0, next() * 6.0 - 3.0];
+            let got = sphere(elongate(p, h), r) + elongate_correction(p, h);
+            let want = round_box(p, h, r);
+            maxerr = maxerr.max((got - want).abs());
+        }
+        assert!(maxerr < 1e-5, "elongate-exact vs round_box maxerr = {maxerr}");
     }
 
     #[test]
