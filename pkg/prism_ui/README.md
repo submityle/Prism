@@ -107,14 +107,17 @@ Loom 以多个独立 crate 分层实现,每一层都可单独使用。下表为 
 | [`prism_ui_virtual`](../prism_ui_virtual) | 列表虚拟化:定高/变高(前缀和二分)、overscan、回收池、spacer+可见项 | ✅ 已交付 | 18 |
 | [`prism_ui_async`](../prism_ui_async) | 异步健壮性:`AsyncState` / `Resource`、Suspense、Error Boundary、`all` 聚合 | ✅ 已交付 | 9 |
 | [`prism_ui_a11y`](../prism_ui_a11y) | 无障碍:`Role` / `AriaState` / `Label`、`A11yTree`、`FocusOrder`、`KeyboardNav`、`LiveRegion` | ✅ 已交付 | 43 |
+| [`prism_ui_scoped`](../prism_ui_scoped) | 组件作用域样式(`ScopeId` 稳定散列、class 命名空间化)、响应式 `@media` 断点解析(mobile-first 级联) | ✅ 已交付 | 23 |
+| [`prism_ui_motion`](../prism_ui_motion) | 自动过渡:隐式样式过渡(记忆旧值→Tween)、FLIP 布局动画、共享元素(Hero)过渡 | ✅ 已交付 | 32 |
 
-全部 17 个 crate 累计 **268 个单测通过**(另有集成测试与 doctest)。每个 crate 均:`#![forbid(unsafe_code)]`、
+全部 19 个 crate 累计 **323 个单测通过**(另有集成测试与 doctest)。每个 crate 均:`#![forbid(unsafe_code)]`、
 `no_std` 友好(`default = ["std"]`,proc-macro crate 除外)、通过严格 Clippy(零告警)。
 
 > **诚实声明**:仍为 **设计阶段(PLANNED)** 的能力包括:响应式信号 **自动绑定到
-> ECS 实体字段**、`.loom` / `.loom.style` **资产热重载**、**共享元素过渡**、
+> ECS 实体字段**、`.loom` / `.loom.style` **资产热重载**、
 > **静态子树提升 / 编译期稳定节点 ID**。列表 **虚拟化**、**Suspense / Error Boundary**、
-> **Portal / Overlay**、**表单校验**、**a11y 基线** 现均已交付为引擎弱耦合 crate。见
+> **Portal / Overlay**、**表单校验**、**a11y 基线**、**作用域样式 / 响应式 @media**、
+> **隐式过渡 / FLIP 布局动画 / 共享元素过渡** 现均已交付为引擎弱耦合 crate。见
 > [docs/roadmap.md](docs/roadmap.md)。本文档不会把未实现的能力描述为已实现。
 > 已交付的高级层(组件 / Store / i18n / 路由 / DevTools)目前为 **引擎弱耦合的
 > 独立运行时能力**,与 Prism/ECS 实体的深度绑定仍在 roadmap 中推进。

@@ -330,6 +330,124 @@ assert!(btn.is_tab_stop());
 
 ---
 
+## 11. `prism_ui_motion` — 自动过渡 / 布局动画 / 共享元素
+
+对标 **Framer Motion** 的隐式过渡、**FLIP** 布局动画,以及 Flutter `Hero` /
+SwiftUI `matchedGeometryEffect` 的共享元素过渡。三者都构建在 `prism_ui_anim`
+的确定性 `Tween` / `Easing` 之上,纯算术、`no_std` 友好、无 `unsafe`。
+
+**隐式样式过渡** —— `TransitionTracker` 记住每个属性上一帧的值,值变化时自动补间;
+中途打断会从**当前动画值**重定目标(连续性):
+
+```rust
+use prism_ui_motion::{TransitionSpec, TransitionTracker};
+use prism_ui_style::{StyleProp, StyleValue};
+
+let mut tracker = TransitionTracker::new()
+    .with_transition(StyleProp::Width, TransitionSpec::linear(1.0));
+
+tracker.observe(StyleProp::Width, StyleValue::px(0.0));   // 首帧:不动画
+tracker.observe(StyleProp::Width, StyleValue::px(100.0)); // 变化:开始补间
+tracker.step(0.5);                                        // 推进 0.5s
+assert_eq!(tracker.value(StyleProp::Width), Some(StyleValue::px(50.0)));
+```
+
+可连续插值的值(`px`/`percent`/`number`/`color`)按数值混合,其余(`keyword`/`auto`/
+`token`/单位不匹配)按 eased 进度越过阈值离散切换。
+
+**FLIP 布局动画** —— 记录旧矩形,布局变化后计算把新框「反转」回旧框的
+`Transform`,再播放回 identity:
+
+```rust
+use prism_ui_motion::{FlipAnimation, Rect};
+use prism_ui_anim::Easing;
+
+let prev = Rect::new(0.0, 0.0, 100.0, 100.0);
+let current = Rect::new(200.0, 0.0, 100.0, 100.0);
+let flip = FlipAnimation::new(prev, current, 1.0, Easing::Linear);
+assert_eq!(flip.sample(0.0).tx, -200.0); // 起始视觉上仍在旧位置
+assert!(flip.sample(1.0).is_identity()); // 结束落到新位置
+```
+
+**共享元素(Hero)过渡** —— 按 `Key` 配对两套布局中的同一元素,得到源→目标补间;
+只在一侧出现的 key 记为 entering / leaving 并给出进出场标量;`stagger` 复用
+`Choreography` 做级联编排:
+
+```rust
+use prism_ui_motion::SharedElementTransition;
+use prism_ui::Key;
+use prism_ui_anim::Easing;
+
+let from = [(Key::Str("card".into()), prism_ui_motion::Rect::new(0.0, 0.0, 100.0, 80.0))];
+let to   = [(Key::Str("card".into()), prism_ui_motion::Rect::new(300.0, 200.0, 200.0, 160.0))];
+let shared = SharedElementTransition::from_frames(&from, &to, 0.4, Easing::Linear);
+
+assert_eq!(shared.matched_len(), 1);
+let mid = shared.sample(&Key::Str("card".into()), 0.5).unwrap();
+assert!(!mid.is_identity()); // 中途处于飞行状态
+assert!(shared.sample(&Key::Str("card".into()), 1.0).unwrap().is_identity());
+```
+
+> 对标:Framer Motion `layout` / `AnimatePresence`、Flutter `Hero`、SwiftUI
+> `matchedGeometryEffect`。差异:我们把「取值→补间→反转变换」拆成可单测的纯函数,
+> 不绑定任何渲染后端,`Transform` 可直接下发给 Loom 的 paint 层。
+
+---
+
+## 12. `prism_ui_scoped` — 组件作用域样式 / 响应式 @media
+
+对标 **Vue `<style scoped>`** / **CSS Modules** 的 class 命名空间化,以及
+**Tailwind** 的 mobile-first 响应式断点。构建在 `prism_ui_style` 之上,只决定
+「哪个值生效」,不重造级联。
+
+**作用域样式** —— `ScopeId` 用稳定散列(FNV-1a,等价 Vue `data-v-xxxxxxxx`)为组件
+生成唯一后缀;`Scope` 只重写**本作用域登记**的 class,全局 / 未知 class 原样透传。
+同一份样式表给两个组件作用域化后不会相互冲突:
+
+```rust
+use prism_ui::Element;
+use prism_ui_scoped::Scope;
+use prism_ui_style::{Class, StyleProp, StyleSheet, StyleValue};
+
+let sheet = StyleSheet::new()
+    .with_class(Class::new("title").with(StyleProp::FontSize, StyleValue::px(16.0)));
+
+let scope = Scope::from_name("Hero").with_local("title");
+let scoped = scope.scope(&sheet);
+
+let scoped_name = scoped.scoped_name("title").unwrap().to_string();
+assert_ne!(scoped_name, "title");                     // 已命名空间化
+assert_eq!(scoped.local_name(&scoped_name), Some("title")); // 可反查
+
+// 同样的重写应用到视图树,引用保持一致。
+let view = Element::box_().child(Element::text("Hi").class("title"));
+let out = scope.apply(&view);
+assert_eq!(out.child_elements()[0].class_names(), &[scoped_name]);
+```
+
+**响应式 @media 解析** —— `MediaResolver` 以视口宽度为输入,按 mobile-first 级联
+(base 恒生效,较宽断点逐层覆盖)解出当前生效的属性集,语义与 Tailwind 一致:
+
+```rust
+use prism_ui_scoped::MediaResolver;
+use prism_ui_style::{Breakpoint, Class, StyleProp, StyleValue};
+
+let class = Class::new("title")
+    .with(StyleProp::FontSize, StyleValue::px(14.0))
+    .with_breakpoint(Breakpoint::Md, StyleProp::FontSize, StyleValue::px(24.0));
+
+let narrow = MediaResolver::new(640.0).active_props(&class);
+let wide = MediaResolver::new(768.0).active_props(&class);
+assert_eq!(narrow.get(&StyleProp::FontSize), Some(&StyleValue::px(14.0)));
+assert_eq!(wide.get(&StyleProp::FontSize), Some(&StyleValue::px(24.0)));
+```
+
+> 对标:Vue scoped / CSS Modules(作用域),Tailwind `sm:`/`md:`/`lg:`(断点)。
+> 差异:作用域仅重写**登记过**的 local class(确定、无全局副作用),断点解析是
+> cascade 的互补视图(回答「此宽度下谁生效」),二者皆为可单测的纯数据变换。
+
+---
+
 ## 组合示例:高级层如何协同
 
 一个典型的「可国际化、带全局状态、按路由切换」的视图,其数据流为:
@@ -356,4 +474,5 @@ I18n.translation     (Memo)  ─┘                              │
   (该绑定为 roadmap M2)。
 - Suspense / Portal / Overlay / 虚拟化 / 表单校验 / a11y 基线 **均已交付**(本文 6–10 节)。
   仍为 **规划中** 的是:守卫 / 深链接(router)、时间旅行 UI(devtools)、
-  共享元素过渡、静态子树提升 / 编译期稳定节点 ID,见 [roadmap.md](roadmap.md)。
+  静态子树提升 / 编译期稳定节点 ID,见 [roadmap.md](roadmap.md)。隐式过渡 / FLIP 布局动画 /
+  共享元素过渡(第 11 节)与作用域样式 / 响应式 @media(第 12 节)**均已交付**。

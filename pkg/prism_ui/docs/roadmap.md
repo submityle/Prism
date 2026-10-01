@@ -48,18 +48,18 @@
 - [ ] `Show` / `For` 结构绑定,keyed reconcile 批量 spawn/despawn 到帧末。
 - [x] 可访问性(a11y)基线:角色 / 焦点 / 键盘导航 / 读屏标签(`prism_ui_a11y`,已交付)。
 
-### M3 样式层增强(部分已交付)
+### M3 样式层增强(scoped / @media 已交付,热重载规划中)
 - [x] token / class / 级联 / 交互态 / 断点匹配上下文。
-- [ ] 作用域样式(scoped)。
-- [ ] `@media` 响应式断点生效到布局。
+- [x] 作用域样式(scoped):`ScopeId` 稳定散列 + class 命名空间化(`prism_ui_scoped`,已交付)。
+- [x] `@media` 响应式断点解析:mobile-first 级联解出生效属性集(`prism_ui_scoped`,已交付)。
 - [ ] `.loom` 结构 + `.loom.style` 样式热重载,**保留运行时状态**。
 
-### M4 效果层增强(部分已交付)
+### M4 效果层增强(已交付)
 - [x] 缓动 / 弹簧 / 时间线 / 进出场 `Transition`。
-- [ ] 隐式过渡:样式 `transition:` 声明,属性值变化自动补间。
-- [ ] 布局动画:插入 / 重排自动补间,避免跳变。
-- [ ] 编排(choreography):stagger / sequence / parallel。
-- [ ] 共享元素过渡(shared element / Hero)。
+- [x] 隐式过渡:`TransitionTracker` 记忆旧值,属性变化自动补间,打断可重定目标(`prism_ui_motion`,已交付)。
+- [x] 布局动画:FLIP(First/Last/Invert/Play)反转变换回归 identity(`prism_ui_motion`,已交付)。
+- [x] 编排(choreography):stagger / sequence / parallel(`prism_ui_anim::Choreography`,已交付)。
+- [x] 共享元素过渡(shared element / Hero):按 `Key` 配对源→目标补间 + 进出场回退(`prism_ui_motion`,已交付)。
 
 ### M5 高级功能(多数已交付)
 - [x] 组件模型:props、具名多插槽、`children`、Context 注入(`prism_ui_component`,已交付)。生命周期钩子规划中。
