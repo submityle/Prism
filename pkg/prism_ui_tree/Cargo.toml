@@ -1,0 +1,17 @@
+[package]
+name = "prism_ui_tree"
+version = "0.1.0"
+edition = "2024"
+description = "Node tree and keyed list reconciliation for Prism's Loom UI/scene notation. Reuse-over-rebuild, archetype-churn-free, engine-agnostic. Contains no Unreal Engine source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_ui_reactive = { path = "../prism_ui_reactive" }
+
+[features]
+default = ["std"]
+std = ["prism_ui_reactive/std"]
+
+[lints]
+workspace = true

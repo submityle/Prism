@@ -1,0 +1,14 @@
+[package]
+name = "prism_ui_style"
+version = "0.1.0"
+edition = "2024"
+description = "Design tokens, atomic/semantic classes, selectors and cascade for Prism's Loom UI/scene notation. Hot-reload-friendly, no_std-capable. Contains no Unreal Engine source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[features]
+default = ["std"]
+std = []
+
+[lints]
+workspace = true
