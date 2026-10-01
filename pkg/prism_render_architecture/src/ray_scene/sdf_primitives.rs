@@ -1164,11 +1164,37 @@ pub fn rounded_x(point: [f32; 2], w: f32, r: f32) -> f32 {
     length2([p[0] - m, p[1] - m]) - r
 }
 
+/// Signed distance to a two-dimensional rounded cross (plus sign): two bars of
+/// half-length `arm` and half-`thickness` crossing at the origin, every corner
+/// rounded by radius `r`. Requires `arm >= thickness`.
+///
+/// This is Inigo Quilez's exact `sdCross`. Folding the point into the octant
+/// `x >= y >= 0` collapses the plus to a single box there, so the exterior is a
+/// plain box distance. The interior is the subtle part: the nearest boundary of
+/// a point in the central square is the *reentrant* corner, which a naive union
+/// of two box fields misses; the `w = (thickness - x, -k)` branch measures that
+/// corner distance exactly. Rounding then insets the whole field by `r`. Built
+/// from `abs`, `min`/`max`, `sign` and a single `sqrt`, so it stays
+/// transcendental-free.
+pub fn cross_2d(point: [f32; 2], arm: f32, thickness: f32, r: f32) -> f32 {
+    // Fold into the octant x >= y >= 0; the plus reduces to one box there.
+    let mut p = [point[0].abs(), point[1].abs()];
+    if p[1] > p[0] {
+        p = [p[1], p[0]];
+    }
+    let q = [p[0] - arm, p[1] - thickness];
+    let k = q[0].max(q[1]);
+    // Outside the box uses the ordinary box corner distance; inside, measure to
+    // the reentrant corner via (thickness - x, -k).
+    let w = if k > 0.0 { q } else { [thickness - p[0], -k] };
+    k.signum() * length2([w[0].max(0.0), w[1].max(0.0)]) - r
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         box_frame, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_torus, capsule, cone_sdf, cut_hollow_sphere, cut_sphere, cylinder_segment,
-        death_star, ellipsoid_sdf, hex_prism, infinite_cone, infinite_cylinder, length2, line_sdf, link, moon, octagon_prism, octahedron, pie, plane, pyramid, rhombus, round_box, rounded_x,
+        death_star, ellipsoid_sdf, hex_prism, infinite_cone, infinite_cylinder, length2, line_sdf, link, cross_2d, moon, octagon_prism, octahedron, pie, plane, pyramid, rhombus, round_box, rounded_x,
         quad_sdf, round_cone_sdf, round_cone_segment, rounded_cylinder, solid_angle, sphere, torus, triangle_sdf, triangular_prism, vesica,
     };
 
@@ -1557,6 +1583,69 @@ mod tests {
         let got = rounded_x([w * 0.5 + 0.5, w * 0.5 + 0.5], w, r);
         let want = (0.5_f32 * 0.5 + 0.5 * 0.5).sqrt() - r;
         assert!((got - want).abs() < 1e-5, "beyond tip: got={got} want={want}");
+    }
+
+    #[test]
+    fn cross_2d_matches_polyline_boundary() {
+        // Independent reference: brute-force signed distance to the sharp plus
+        // outline (12 edges), with the sign from an explicit inside test.
+        let arm = 1.5_f32;
+        let th = 0.5_f32;
+        // Outline vertices walked counter-clockwise.
+        let verts: [[f32; 2]; 12] = [
+            [arm, th], [th, th], [th, arm], [-th, arm],
+            [-th, th], [-arm, th], [-arm, -th], [-th, -th],
+            [-th, -arm], [th, -arm], [th, -th], [arm, -th],
+        ];
+        let seg_dist = |p: [f32; 2], a: [f32; 2], b: [f32; 2]| -> f32 {
+            let pa = [p[0] - a[0], p[1] - a[1]];
+            let ba = [b[0] - a[0], b[1] - a[1]];
+            let denom = ba[0] * ba[0] + ba[1] * ba[1];
+            let h = ((pa[0] * ba[0] + pa[1] * ba[1]) / denom).clamp(0.0, 1.0);
+            let dx = pa[0] - ba[0] * h;
+            let dy = pa[1] - ba[1] * h;
+            (dx * dx + dy * dy).sqrt()
+        };
+
+        let mut state: u32 = 0x0bad_f00d;
+        let mut next = || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 8) as f32 / (1u32 << 24) as f32
+        };
+        for _ in 0..256 {
+            let x = (next() - 0.5) * 5.0;
+            let y = (next() - 0.5) * 5.0;
+            let p = [x, y];
+            let mut best = f32::INFINITY;
+            for k in 0..12 {
+                best = best.min(seg_dist(p, verts[k], verts[(k + 1) % 12]));
+            }
+            let in_h = x.abs() <= arm && y.abs() <= th;
+            let in_v = x.abs() <= th && y.abs() <= arm;
+            let want = if in_h || in_v { -best } else { best };
+            let got = cross_2d(p, arm, th, 0.0);
+            assert!(
+                (got - want).abs() < 1e-5,
+                "mismatch at ({x},{y}): got={got} want={want}"
+            );
+        }
+    }
+
+    #[test]
+    fn cross_2d_rounding_insets_the_sharp_field() {
+        // Rounding by r grows the shape uniformly, i.e. subtracts r everywhere.
+        let (arm, th, r) = (1.2_f32, 0.4_f32, 0.2_f32);
+        for &p in &[[0.0_f32, 0.0_f32], [1.0, 0.3], [0.3, 1.0], [2.0, 2.0], [0.5, 0.5]] {
+            let sharp = cross_2d(p, arm, th, 0.0);
+            let rounded = cross_2d(p, arm, th, r);
+            assert!((rounded - (sharp - r)).abs() < 1e-6, "offset wrong at {p:?}");
+        }
+        // The nearest boundary to the centre is the reentrant corner at
+        // (thickness, thickness), a distance thickness*sqrt(2) away, then inset
+        // by r. A naive 'nearest wall' guess of thickness would be wrong here.
+        let centre = cross_2d([0.0, 0.0], arm, th, r);
+        let want_centre = -th * std::f32::consts::SQRT_2 - r;
+        assert!((centre - want_centre).abs() < 1e-6, "centre: got={centre} want={want_centre}");
     }
 
     #[test]
