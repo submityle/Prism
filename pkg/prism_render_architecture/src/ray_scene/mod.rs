@@ -172,6 +172,12 @@
 //!   [`round_cone::RoundConeBvh`] ([`ROUND_CONE_WORDS`] stride, node records
 //!   reusing the shared [`NODE_WORDS`]) with a packed round-cone walk that
 //!   reproduces the in-memory walk bit-for-bit.
+//! - [`bilinear_patch`] — analytic bilinear patch (Reshetov 2019 "Cool
+//!   Patches"): the ruled quad `P(u, v)` through four corners, solved as a
+//!   quadratic in `u` with each root back-substituted for `v` and `t` (single
+//!   `sqrt`, no transcendental), reporting the parametric
+//!   [`bilinear_patch::BilinearPatchHit`] with `u`/`v`, and a single-level
+//!   [`bilinear_patch::BilinearPatchBvh`] over the corner `AABB`s.
 //! - [`traversal`] — [`Ray`]/`BVH` slab + Möller–Trumbore intersection with
 //!   closest-hit and any-hit walks (the `GPU` traversal kernel's golden ref).
 //! - [`traversal_stackless`] — stackless (threaded / escape-index) `BVH` walk:
@@ -214,6 +220,7 @@ pub mod capsule;
 pub mod capsule_gpu_layout;
 pub mod round_cone;
 pub mod round_cone_gpu_layout;
+pub mod bilinear_patch;
 pub mod footprint;
 pub mod gpu_layout;
 pub mod motion;
@@ -267,6 +274,7 @@ pub use capsule::{Capsule, CapsuleBvh, CapsuleHit};
 pub use capsule_gpu_layout::{GpuCapsuleBvhBuffers, CAPSULE_WORDS};
 pub use round_cone::{RoundCone, RoundConeBvh, RoundConeHit};
 pub use round_cone_gpu_layout::{GpuRoundConeBvhBuffers, ROUND_CONE_WORDS};
+pub use bilinear_patch::{BilinearPatch, BilinearPatchBvh, BilinearPatchHit};
 pub use rectangle_gpu_layout::{GpuRectangleBvhBuffers, RECTANGLE_WORDS};
 pub use aabb_primitive_gpu_layout::{GpuAabbBvhBuffers, AABB_PRIMITIVE_WORDS};
 pub use sphere_gpu_layout::{GpuSphereBvhBuffers, SPHERE_WORDS};
