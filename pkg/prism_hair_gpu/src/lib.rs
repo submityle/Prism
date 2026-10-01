@@ -124,6 +124,19 @@
 //!   same `[0, 1]` saturation guard the golden uses so negative,
 //!   greater-than-one and non-finite inputs collapse to the fully dry
 //!   response (see [`wetness`]).
+//! * [`GpuHairScatterLod`] evaluates
+//!   [`lobe_pdf`](prism_render_architecture::hair::scatter_lod::lobe_pdf)
+//!   composed with
+//!   [`lobe_weights`](prism_render_architecture::hair::scatter_lod::lobe_weights),
+//!   folding one fibre's optical inputs (a fresnel reflectance proxy and an
+//!   absorption-path proxy) into the normalized `R`/`TT`/`TRT` Marschner lobe
+//!   sampling pdf one thread per fibre — every energy a product / rational /
+//!   normalise of non-negative factors (`T = 1 / (1 + absorption)` the monotone
+//!   rational transmittance stand-in, the real `exp` living only in the shading
+//!   closure), with no material constant to upload, the same `clamp01` /
+//!   `sanitize_nonneg` guards the golden uses so negative, out-of-range and
+//!   non-finite inputs produce the same bounded pdf, and a dead all-zero stack
+//!   falling back to the uniform `1/3` per lobe (see [`scatter_lod`]).
 //!
 //! * [`GpuHairDeepOpacity`] evaluates
 //!   [`build_deep_opacity_map`](prism_render_architecture::hair::deep_opacity_layout::build_deep_opacity_map),
@@ -386,6 +399,7 @@ pub mod ribbon;
 pub mod root_bind;
 pub mod root_resolve;
 pub mod rt_proxy;
+pub mod scatter_lod;
 pub mod sdf_collision;
 pub mod self_collision_grid;
 pub mod self_collision_jacobi;
@@ -428,6 +442,7 @@ pub use ribbon::{GpuRibbon, GpuRibbonMesh, RibbonStrandInput};
 pub use root_bind::GpuHairRootBind;
 pub use root_resolve::GpuHairRootResolve;
 pub use rt_proxy::{reference_rt_role, role_code, role_from_code, tier_code, GpuHairRtProxy};
+pub use scatter_lod::{reference_pdf, GpuHairScatterLod, PDF_PER_ELEMENT};
 pub use sdf_collision::GpuSdfCollider;
 pub use self_collision_grid::GpuSelfCollisionGrid;
 pub use self_collision_jacobi::GpuSelfCollisionJacobi;
