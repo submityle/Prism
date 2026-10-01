@@ -65,6 +65,8 @@ mod plasticity_gpu_tests;
 pub(crate) mod plugin;
 mod prepare;
 #[cfg(test)]
+mod pressure_parity;
+#[cfg(test)]
 mod pressure_gpu_tests;
 mod resources;
 #[cfg(test)]
