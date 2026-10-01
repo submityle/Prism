@@ -201,6 +201,22 @@ pub fn fold_plane(point: [f32; 3], normal: [f32; 3]) -> [f32; 3] {
     ]
 }
 
+/// Maps a three-dimensional query point onto the two-dimensional lathe plane of
+/// a solid of revolution about the `y` axis, offsetting the profile `offset`
+/// units out along the radius.
+///
+/// This is Inigo Quilez's `opRevolution`: it returns
+/// `(length(point.xz) - offset, point.y)`, the coordinates at which a 2D
+/// profile should be sampled so that sweeping it around the `y` axis produces
+/// the lathed solid. Pairing it with any 2D profile builds goblets, columns,
+/// bottles and tori; a circular profile of radius `r` recovers an exact torus
+/// of major radius `offset` and minor radius `r`. Uses a single `sqrt`, so it
+/// stays transcendental-free.
+pub fn revolution(point: [f32; 3], offset: f32) -> [f32; 2] {
+    let radial = (point[0] * point[0] + point[2] * point[2]).sqrt();
+    [radial - offset, point[1]]
+}
+
 /// Extrudes a two-dimensional signed-distance field `d2d` (measured in the
 /// `xy` plane) into a three-dimensional slab of half-thickness `half_height`
 /// along the `z` axis, yielding an exact 3D signed distance.
@@ -226,9 +242,9 @@ pub fn extrude(d2d: f32, z: f32, half_height: f32) -> f32 {
 mod tests {
     use super::{
         elongate, extrude, fold_plane, limited_repeat, mirror, mirror_repeat, onion,
-        repeat, round_distance, scale_distance, scale_point, translate,
+        repeat, revolution, round_distance, scale_distance, scale_point, translate,
     };
-    use crate::ray_scene::sdf_primitives::capped_cylinder;
+    use crate::ray_scene::sdf_primitives::{capped_cylinder, torus};
 
     #[test]
     fn extrude_of_a_circle_matches_a_capped_cylinder() {
@@ -274,6 +290,46 @@ mod tests {
         let (dx, dz) = (0.6_f32, 0.8_f32);
         let want = (dx * dx + dz * dz).sqrt();
         assert!((extrude(dx, h + dz, h) - want).abs() < 1e-6);
+    }
+
+    #[test]
+    fn revolution_of_a_circle_matches_a_torus() {
+        // A circular profile of radius r, offset `offset` out along the radius,
+        // lathed about y, is exactly a torus of major `offset`, minor r.
+        let offset = 1.4_f32;
+        let r = 0.5_f32;
+        let samples: [[f32; 3]; 6] = [
+            [2.0, 0.0, 0.0],   // outside the tube on the +x spoke
+            [1.4, 0.5, 0.0],   // on the top of the tube
+            [1.4, 0.0, 0.0],   // on the ring centreline (interior, -r)
+            [0.0, 0.0, 1.9],   // outside on the +z spoke
+            [1.0, 0.3, 1.0],   // generic off-axis point
+            [0.0, 2.0, 0.0],   // on the y axis, far above
+        ];
+        for p in samples {
+            let q = revolution(p, offset);
+            let got = (q[0] * q[0] + q[1] * q[1]).sqrt() - r;
+            let want = torus(p, offset, r);
+            assert!(
+                (got - want).abs() < 1e-6,
+                "mismatch at {p:?}: got={got} want={want}"
+            );
+        }
+    }
+
+    #[test]
+    fn revolution_reports_radial_offset_and_height() {
+        // On the +x spoke the radial coordinate is x - offset and height is y.
+        let q = revolution([3.0, 0.75, 0.0], 2.0);
+        assert!((q[0] - 1.0).abs() < 1e-6);
+        assert!((q[1] - 0.75).abs() < 1e-6);
+        // Radius is rotation-invariant: same radial coordinate on the +z spoke.
+        let q2 = revolution([0.0, 0.75, 3.0], 2.0);
+        assert!((q2[0] - 1.0).abs() < 1e-6);
+        assert!((q2[1] - 0.75).abs() < 1e-6);
+        // Inside the offset ring the radial coordinate goes negative.
+        let q3 = revolution([0.5, 0.0, 0.0], 2.0);
+        assert!((q3[0] + 1.5).abs() < 1e-6);
     }
 
     #[test]
