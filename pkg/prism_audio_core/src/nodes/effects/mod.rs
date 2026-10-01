@@ -40,6 +40,12 @@
 //!   reduction (sample-and-hold decimation) for gritty lo-fi degradation.
 //! - [`ring_modulator::RingModulatorNode`] — multiplies the signal by a
 //!   bipolar audio-rate carrier for inharmonic, bell-like, or robotic timbres.
+//! - [`frequency_shifter::FrequencyShifterNode`] -- single-sideband (SSB)
+//!   shifter that adds a constant Hz offset to every partial via a Hilbert
+//!   analytic signal and complex modulation, breaking harmonic ratios for
+//!   metallic, clangorous timbres; distinct from
+//!   [`ring_modulator::RingModulatorNode`], which produces a symmetric
+//!   sideband pair rather than a one-sided shift.
 //! - [`vibrato::VibratoNode`] — single LFO-swept fractional delay for
 //!   periodic pitch modulation.
 //! - [`exciter::ExciterNode`] — high-frequency harmonic exciter / aural
@@ -64,6 +70,7 @@ pub mod comb_resonator;
 pub mod delay;
 pub mod exciter;
 pub mod flanger;
+pub mod frequency_shifter;
 pub mod mid_side_matrix;
 pub mod parametric_eq;
 pub mod phaser;
@@ -83,6 +90,7 @@ pub use comb_resonator::{CombResonatorNode, CombResonatorParams, MAX_FEEDBACK, M
 pub use delay::DelayNode;
 pub use exciter::{Exciter, ExciterNode, ExciterParams, HarmonicMode};
 pub use flanger::{FlangerNode, FlangerParams};
+pub use frequency_shifter::{FrequencyShifterNode, FrequencyShifterParams};
 pub use mid_side_matrix::{MidSideMatrixNode, MidSideMatrixParams, MidSideMode};
 pub use parametric_eq::{EqBand, ParametricEqNode};
 pub use phaser::{PhaserNode, PhaserParams};
