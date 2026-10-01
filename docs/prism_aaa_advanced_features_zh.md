@@ -1,4 +1,4 @@
-# Prism 渲染引擎 — 顶级次世代 AAA 高级特性专项设计（v8 / PBR·NPR·混合 全前端 + 子系统完成度 + 路线图兑现核对 + 真实空白补齐 + v7 绝对天花板 + v8 产品对标高级特性增补与规模三刷）
+# Prism 渲染引擎 — 顶级次世代 AAA 高级特性专项设计（v8 / PBR·NPR·混合 全前端 + 子系统完成度 + 路线图兑现核对 + 真实空白补齐 + v7 绝对天花板 + v8 产品对标高级特性增补与规模三刷 + v9 产品对标高级特性增补与规模四刷 + v10 产品对标高级特性增补与规模五刷）
 
 > 本文是 `prism_material_pipeline_design_zh.md`（顶层架构与决策）的**下钻分册**：把 §12–16 的对标矩阵与特性清单展开为**逐特性规格书**——每条给出「借鉴对象 / 算法要点 / 性能预算 / 效果上限 / 模块落点 / 验收口径」。
 > **一句话立场**：共享 GPU-driven 基底算一次，PBR / NPR / 自定义三前端并存消费，混合在管线级路由。**三条赛道都是一等公民，都能拿到顶级次世代 AAA 效果**，差异只在「怎么解读同一份光/影/GI/几何数据」的前端响应处。
@@ -10,6 +10,9 @@
 > **v5 本版新增（2026-10）**：① 按仓内实况再刷新规模计数（`prism_render_shading` 344 / `gi/` 62 子系统 · `prism_render_scene`(ray_scene) 456 · `prism_render_architecture` 671 · 虚拟几何 GPU 49 · 体积 GPU 163 · 毛发 GPU 98 · 物理 GPU 263 / core 168 / geometry 33 · 音频 core 79 / spatial 52 文件）；② 新增 **§12「2025–2026 最前沿天花板增补（纯经典数值）」**——补齐 §6/§11 仍未展开、却已是当代影视/实时 AAA 天花板的赛道：**OpenPBR 收敛标准材质 · 光谱渲染/Hero 波长 · 薄膜虹彩（Belcour-Barla）· ACES 2.0/AgX/OCIO 显示变换 + 物理相机自动曝光 · 光树/ReGIR 多光重要性采样 · 世界空间哈希辐照缓存 · 异质介质体积路径追踪（delta/ratio tracking）· 物理天空多重散射 · Sampler Feedback 纹理流送 · DirectStorage/GDeflate GPU 解压流送 · 可见性缓冲延迟纹理化+材质分箱 · 矩不变 OIT · 波动声学/高阶 Ambisonics · 跨平台确定性收敛**；逐条给借鉴对象+算法要点+预算+落点+验收，并给 §12 增补路线图优先级。**全程纯经典数值，排除一切 AI/ML/神经/LLM 推理路径**（厂商时序上采样 SDK 仅渲染侧可选外部后端）。
 > **v6 本版新增（2026-10）**：① **路线图兑现核对**——按仓内实测，v4/v5 列为 ⬜/🟡 的多条前沿已落为真实模块（LTC 面光 `gi/area_light`、路径重用 `gi/path_reuse`、RT 焦散 `gi/caustics`、光树/ReGIR `gi/light`+`gi/nee`、世界空间哈希辐照缓存 `gi/world_space`、镜面 AA `gi/specular_aa`、DDGI 重定位 `gi/irradiance_volume`、IES `gi/ies_profile`、微遮蔽 `gi/micro`、音频波动声学/HOA/卷积混响 `prism_audio_spatial`+`prism_audio_core/reverb`），逐条给文件证据并升级分级；② **真实空白补齐 + 收敛深化**——新增 **§13**：对**仓内 0 文件实测**的真实空白（稀疏虚拟纹理 RVT/SVT + Sampler Feedback、DirectStorage/GDeflate GPU 解压流送、经典帧生成〈无神经〉、仿射体动力学 ABD）给规格，并把已有骨架（GRIS 全路径重用、LTC 纹理化/线光面光、自适应方差制导采样、RT 焦散自适应光子）推向绝对天花板；给 §13 兑现核对表 + 增补路线图优先级。**全程纯经典数值，排除一切 AI/ML/神经/LLM 推理路径**（厂商时序上采样/帧生成 SDK 仅渲染侧可选外部后端）。
 > **v7 本版新增（2026-10）**：① 按「代码有更新」用户反馈，用统一口径 `find src -name '*.rs'` **重算规模并修正 v6 §13.0 偏高计数**（新增权威基线表 §14.0）；② 空白赛道再核验（§14.1，RVT/SVT·DirectStorage·GDeflate·frame_gen·ABD·micromap 仍 0 文件，维持 ⬜；仅毛发 LSS 段切分孪生动工）；③ 新增 **§14** 八条 2024–2026 真·前沿赛道：**随机纹理过滤 STF · 硬件曲线/发丝 RT（LSS）· 微几何硬件 RT（DMM+OMM）· 可编程光栅 WPO/蒙皮虚拟几何 · 分层 GI 融合（屏幕探针+世界缓存）· 整帧 GPU Work Graph（mesh nodes）· 物理 IPC 无穿透摩擦接触+ABD · 预计算波场参数解码声学**；逐条给借鉴对象+算法要点+性能预算+效果上限+落点+验收，并并入 §14.3 优先级阶梯。**全程纯经典数值，排除一切 AI/ML/神经/LLM 推理路径**（厂商时序上采样/帧生成 SDK 仅渲染侧可选外部后端）。
+> **v8 本版新增（2026-10）**：按「代码有更新」四刷规模（统一口径），在 v7 §14 八条之上追加 **§15** 六条产品级赛道（MegaLights 无界阴影光 · 可见性缓冲延迟材质 · 动态 BVH 实时重建 · 薄膜干涉光谱色散 · Nanite 置换 tessellation 收口 · 实时光线声学+UTD 衍射），逐条实测分级并并入 §15.2 优先级。**全程纯经典数值，排除一切 AI/ML/神经/LLM 推理路径**。
+> **v9 本版新增（2026-10）**：再次按「代码有更新」用统一口径 **四刷规模**（§16.0，新增 `physics_gpu`+14/`volumetric_gpu`+7/`hair_gpu`+4/`render_visibility`+2 与 UI 三 crate 登记），并在 v8 §15 六条之上追加 **§16** 六条产品级赛道：**稀疏虚拟纹理 SVT+GPU 反馈缓冲 · Mesh Shader/meshlet 硬件放大路径 · FFT 频谱海洋+Gerstner+破碎泡沫 · 矩不变 OIT+混合折射 · 延迟贴花 DBuffer+网格贴花 · GPU 蒙皮缓存+WPO 几何馈入 Nanite/RT BLAS**；逐条经关键字实测分级（🟡/⬜）给借鉴对象+算法要点+性能预算+效果上限+落点+验收，并并入 §16.2 优先级（**蒙皮缓存 / SVT 列 P1**，作为 v7/v8 动态世界特性的使能器）。**全程纯经典数值，排除一切 AI/ML/神经/LLM 推理路径**（厂商时序上采样/帧生成 SDK 仅渲染侧可选外部后端）。
+> **v10 本版新增（2026-10）**：延续用户「代码有更新 / 借鉴参考优先产品 / 添加高级功能 / 兼顾性能与效果 / 达到顶级次世代 AAA 级别 / 更新优化设计文档」。本版 ① 以统一口径 `find pkg/<crate>/src -name '*.rs' | wc -l` **五刷规模**（§17.0，接续 v9 §16.0 基线，实测反映 `physics_gpu`+15/`volumetric_gpu`+12/`hair_gpu`+5/`audio_core`+5/`render_scene`+2 的子系统孪生增量）；② 在 v9 §16 六条之上追加 **§17** 六条产品级赛道：**统一次表面散射 SSS（Burley 可分离 + 随机游走 BSSRDF）· 可变速率着色 VRS Tier2 内容自适应 · GTAO 弯曲法线环境光遮蔽 + 镜面遮蔽 · 大气天空 + 空中透视 + Nubis 体积云 · 开阔世界流式 VHM 虚拟高度场 + Nanite 植被散布 + World Partition/HLOD · 毛发/体积深阴影图统一半透射自阴影**；逐条经关键字实测分级（🟡/⬜）给借鉴对象 + 算法要点 + 性能预算 + 效果上限 + 落点 + 验收，并并入 §17.2 优先级（**SSS / GTAO 列 P1**，皮肤次表面与接触遮蔽是「近景人物与接触可信度」刚需）。**全程纯经典数值，排除一切 AI/ML/神经/LLM 推理路径**（厂商时序上采样/帧生成 SDK 仅渲染侧可选外部后端）。
 
 ---
 
@@ -901,6 +904,182 @@
 | 实时光线声学 + UTD 衍射 | `prism_audio_rt` + `prism_audio_spatial` + `prism_audio_core/reverb` | 🟡 audio_rt 6 文件在，整合待建 | **P2** | 声线 path-trace、UTD、HOA、卷积混响 |
 
 **v8 增补总原则**：① **不改 §9 P0 基底次序**，不重复 §6/§11/§12/§13/§14 已登记条目——本版 6 条均经关键字实测确认为「上游骨架在但产品级整合缺位（🟡）」或「真实空白（⬜）」的**新**赛道；② **MegaLights / 可见性缓冲延迟材质 / 动态 BVH / Nanite 置换收口列 P1**——它们是「海量光 + 海量几何 + 动态场景」三位一体 AAA 开阔世界的直接刚需，且多数上游骨架已就绪、依赖最成熟；③ **薄膜干涉列 P1.5**——效果天花板高、风险低（纯解析），在 `thin_film.rs` 上增量即可；④ **实时光线声学列 P2**——与 §14.2.8 预计算波场互补，价值高但依赖重；⑤ 全部遵循数值红线，走「CPU golden → GPU kernel → 真机 parity」三步，关键路径必须与**路径追踪参考 / 解析解 / 离线数值求解**可对拍，未毕业不作生产默认；**任何增补均不引入 AI/ML/神经/LLM 推理路径**（厂商时序上采样 / 帧生成 SDK 仅渲染侧可选外部后端）。
+
+## 16. v9 产品对标高级特性增补与规模四刷（2026-10，纯经典数值 / 无 AI·ML·神经·LLM）
+
+> **本版目的**：用户再次指出「代码有更新」并要求「借鉴参考优先产品、添加高级特性、兼顾性能与效果、达到顶级次世代 AAA 级别、更新优化设计文档」。本版 ① 以统一口径 `find pkg/<crate>/src -name '*.rs' | wc -l` **四刷规模**（2026-10 实测，接续 v8 §15.0 基线）；② 在 v8 §15.1 的 6 条之上，追加 **6 条产品级高级特性赛道**——均为 2023–2026 顶级 AAA 的「可见天花板」，经关键字实测（`find pkg -iname '*<kw>*' -name '*.rs'`）确认上游骨架是否已在，逐条标注 🟡（骨架在/缺整合）或 ⬜（真实空白），杜绝分级虚高；③ 刷新路线图优先级。**全程纯经典数值**，排除一切 AI/ML/神经/LLM 推理路径；厂商时序上采样 / 帧生成 SDK 仅渲染侧可选外部后端，本体默认经典路径，关键路径与路径追踪参考 / 解析解 / 离线数值求解可对拍。
+
+### 16.0 规模四刷（2026-10 实测，统一口径 `find src -name '*.rs' | wc -l`）
+
+| crate / 子系统 | v8 §15.0 | v9 实测 | 变化与说明 |
+|---|---|---|---|
+| `prism_render_architecture` | 680 | **680** | 帧图 / 流送 / `work_graph` / `ray_scene` 稳定；贴花·OIT·折射·海洋 LOD 骨架在 `particle/`·`water/` 下 |
+| `prism_render_shading`（`gi/` 63 子目录 / 246 文件） | 344 | **344** | GI 子系统稳定在 63 子目录、`gi/` 下 246 `*.rs`（surfel·radiance_cache·photon·world_restir·light_tree·thin_film·specular_aa 全在） |
+| `prism_render_scene` | 459 | **459** | 精确 SDF 图元族稳定；本版新增 `shading/light_routing/`(6 文件) + `shading/tonemap/`(6 文件) 光路由与色调映射 ABI 前端（计入既有 459） |
+| `prism_render_visibility`（两阶段 HZB 遮挡） | 20 | **22** | 两阶段遮挡闭环持续加固（binning 增量）。全链：footprint→projection→pyramid→query→build→cull_hzb→occlusion_resolve→two_phase→two_phase_resolve |
+| `prism_render_material` | 12 | **12** | 闭包 IR / ABI 前端 |
+| `prism_virtual_geometry_gpu` | 25 | **25** | 软光栅主路径稳定 |
+| `prism_volumetric_gpu` | 112 | **119** | froxel / 储层 / 异质介质孪生持续新增（curl_noise / fluid_diffusion / velocity_dilate / ray_obb·capsule·cylinder / ribbon_geometry / sprite_stretch / frustum_aabb_cull 等 7 新孪生） |
+| `prism_hair_gpu` | 63 | **67** | Marschner / 双散射 + 分层样本权重/分配 GPU 孪生 + 逐发丝 keep-ratio 段切分 |
+| `prism_physics_gpu` / `prism_physics_core` / `prism_physics_geometry` | 224 / 167 / 34 | **238 / 167 / 34** | 流体 / 断裂 / VBD / CCD / MPM；本版新增 long-range 约束族 + 齿条齿轮(rack-pinion)关节 CPU/GPU 孪生 + 陀螺项 parity（+14） |
+| `prism_audio_core` / `prism_audio_spatial` / `prism_audio_rt` / `prism_audio_hrtf` / `prism_audio_device` | 86 / 52 / 6 / 9 / 7 | **88 / 52 / 6 / 9 / 7** | 卷积混响 / HOA / 衍射 / 房间声学 / 设备 I/O；本版新增 ping-pong delay 效果节点 |
+| `prism_ui_*`（component / devtools / router） | — | **5 / 4 / 5** | 本版新登记：UI 组件 / 开发者工具 / 路由 crate 骨架（响应式视图 + 信号图 + 编排动画，供编辑器与运行期 HUD；非渲染本体，仅登记规模） |
+
+**口径一致性**：本表与 v7 §14.0 / v8 §15.0 同口径（单一 `*.rs` 文件计数，含测试文件），v6 §13.1 / v7 §14.1 的兑现核对结论继续成立。**本版主要结构性增量**在 `physics_gpu`(+14)、`volumetric_gpu`(+7)、`hair_gpu`(+4)、`render_visibility`(+2) 的孪生/关节/剔除增量，以及 UI 三 crate 的新登记。渲染本体核心（architecture / shading / scene / material / virtual_geometry）保持稳定——**天花板增量在子系统孪生与下文 6 条产品级整合缺口**。
+
+### 16.1 产品级高级特性赛道（v9 新增，逐条实测分级）
+
+> 关键字实测直接决定分级：`virtual_texture/feedback_buffer=0`、`meshlet=0`·`mesh_shader=1`(仅 `hair/mesh_shader_strand.rs`)、`fft_ocean/gerstner=0`·`ocean=2`(authoring + LOD 骨架)、`moment_oit/mboit=0`·`oit=3`(particle+hair+shading 骨架)·`refraction=0`、`decal=1`(`particle/decal.rs`)、`skin_cache/wpo/world_position_offset=0`。
+
+#### 16.1.1 稀疏虚拟纹理 SVT + GPU 反馈缓冲（海量唯一纹理 / 零 pop 流送）
+- **借鉴对象**：id Tech **MegaTexture** → UE **Virtual Texturing (RVT/SVT)** + Granite 形态 + DX12 **Sampler Feedback**（硬件级采样命中记录）。
+- **算法要点**：把 TB 级唯一纹理切成固定页（128²），GPU 着色时**只采样常驻物理页**；用**反馈缓冲**（Sampler Feedback 或软件 min-mip 记录）收集本帧「真实被采样页 × mip」→ 回读驱动页请求队列 → DirectStorage/GDeflate 异步解压上传 → 更新间接页表（indirection texture）。缺页用父 mip 兜底，杜绝黑块/pop。与 §11 RVT、§12 Sampler Feedback、§13 DirectStorage 条目的关系：本条是**产品级整机整合**（页表 × 反馈 × 解压 × 兜底四件套闭环），上游全为 0 文件。
+- **预算**：常驻物理池按显存夹紧（如 4K×4K×若干层）；反馈回读半分辨率 + 隔帧；页上传按带宽预算限流；间接表更新 GPU 端 compute。
+- **效果**：开阔世界近景 8K 贴图细节 + 远景无缝 LOD，显存占用与可见页数成正比而非与世界总量成正比；相机瞬移/传送无纹理 pop。
+- **落点**：`render_architecture`（流送/帧图 + 页表 + 反馈回读）+ `render_scene/geometry`（采样绑定）+ `render_material`（bindless 页表句柄）。
+- **分级 / 验收**：⬜（virtual_texture/feedback_buffer 实测 0 文件，流送帧图在）。验收：固定物理池下任意相机轨迹无缺页黑块；反馈页集与「全驻留参考」逐页一致；带宽超限优雅降级（降 mip 不黑块）。
+
+#### 16.1.2 Mesh Shader / meshlet 硬件放大路径（几何前端二选一后端）
+- **借鉴对象**：NVIDIA Mesh Shader / UE Nanite 的硬件 meshlet 回退路径 + `VK_EXT_mesh_shader`；现有 `virtual_geometry_gpu`(软光栅主路径) + `hair/mesh_shader_strand.rs`(发丝骨架)。
+- **算法要点**：对**中大三角形簇**走硬件 mesh/task shader 两级放大（task 做簇级锥剔除 + LOD 选择，mesh 产出 meshlet 顶点/图元），与现有**软光栅**（擅长 ≤1px 微三角）构成「大三角硬件、微三角软件」分档后端；统一消费两阶段 HZB 保守可见集与簇级 LOD 误差。与 §7 Work Graph(§14.2.6)互补：Work Graph 是整帧调度，mesh node 是其几何叶子。
+- **预算**：meshlet 64 顶点 / 124 图元标准封装；task 剔除按屏幕误差 + 背面 + HZB；大三角走硬件省去软光栅原子争用。
+- **效果**：高多边形密度场景在支持 mesh shader 的硬件上吞吐提升，微三角仍由软光栅保精度；跨档位无接缝。
+- **落点**：`virtual_geometry_gpu`（硬件 meshlet 后端）+ `render_architecture`（后端选择/Work Graph 叶子）+ `render_visibility`（HZB 消费）。
+- **分级 / 验收**：🟡（`hair/mesh_shader_strand.rs` 发丝级骨架在，几何级 meshlet 封装 + task 剔除缺位）。验收：硬件/软件两路栅格化结果逐像素一致（±1 ULP 深度）；大/微三角分档切换无裂缝；无硬件支持时自动回退软光栅。
+
+#### 16.1.3 FFT 频谱海洋 + Gerstner 混合 + 破碎白沫/泡沫（开阔水体天花板）
+- **借鉴对象**：Tessendorf FFT 海面 + UE Water / Sea of Thieves / Horizon Forbidden West 水体形态 + 现有 `water/authoring/ocean.rs` + `water/ocean_lod.rs`。
+- **算法要点**：① 用 **FFT 频谱**（Phillips/JONSWAP 谱）生成多级联（cascade）位移 + 法线贴图，叠加 **Gerstner 波**补充可控大浪方向性；② 由雅可比行列式判定**波峰折叠/破碎**区生成白沫 mask，驱动泡沫（foam）贴花与粒子；③ 海面 LOD 用现有 `ocean_lod` clipmap/投影网格，远景并入体积雾与平面反射/SSR 混合。纯 FFT + 解析波 + 泡沫经典数值，无学习路径。
+- **预算**：FFT 分辨率按级联夹紧（512² 近 / 256² 远）；泡沫 mask 复用雅可比，无额外求解；LOD 投影网格顶点数与屏幕覆盖成正比。
+- **效果**：真实海面色散/涌浪/破碎白沫，近景发丝级浪花 + 远景无缝到地平线；与岸线、浮体（接物理）耦合。
+- **落点**：`render_scene/water`（谱 + Gerstner + 泡沫）+ `render_architecture/water/ocean_lod`（LOD）+ `volumetric_gpu`（浪花雾/喷溅）。
+- **分级 / 验收**：🟡（`ocean.rs` + `ocean_lod.rs` 骨架在，FFT 频谱 + 泡沫 + 多级联缺位）。验收：谱统计量（有效波高/周期）与 JONSWAP 参考一致；破碎区白沫与雅可比阈值一致；LOD 过渡无几何爆/漏；详见 `prism_water_engine_design_zh.md`。
+
+#### 16.1.4 矩不变 OIT (Moment-based OIT) + 屏幕/RT 混合折射（透明天花板）
+- **借鉴对象**：Münster **Moment-Based OIT**（Münstermann et al. 2018）+ UE 粗糙折射 + 现有 `particle/oit.rs` · `hair/oit_frontend.rs` · `shading/oit.rs` + `particle/reflect_refract_vec.rs`。
+- **算法要点**：① 用**幂矩/三角矩**压缩逐像素透射率函数（4/6/8 矩），单遍重建顺序无关的透明合成，取代重排序/深度剥离；② 折射走**屏幕空间近似（粗糙度相关 mip 模糊 + 厚度）为主、RT 折射为精档**的分档，法线/粗糙度/厚度来自透明 GBuffer；③ 与毛发 OIT 前端、粒子 OIT 共享矩缓冲，统一合成口径。纯矩重建 + 解析折射，无学习路径。
+- **预算**：矩缓冲 8 矩约 2×RGBA16F；单几何遍 + 单解析遍；RT 折射仅精档/反射性材质开启、半分辨率 + 时序累积。
+- **效果**：烟雾/玻璃/头发/植被叠加无排序瑕疵；粗糙玻璃/水/冰的厚度相关折射与色散，边界无硬切。
+- **落点**：`render_shading/oit`（矩重建）+ `render_architecture/particle/oit`+`hair/oit_frontend`（前端消费）+ `ray_scene`（RT 折射精档）。
+- **分级 / 验收**：🟡（三处 oit 骨架在，矩压缩/重建 + 分档折射缺位）。验收：矩重建合成与「逐片段精确排序参考」在容差内一致；折射厚度/色散与解析/路径追踪参考对拍；多层透明无 pop/排序闪烁。
+
+#### 16.1.5 延迟贴花 DBuffer + 网格贴花（法线/粗糙度/反照率混合）
+- **借鉴对象**：UE **DBuffer Decals** + 网格贴花（mesh decals）形态 + 现有 `particle/decal.rs` 骨架。
+- **算法要点**：在 GBuffer 之后、光照之前，把贴花投影到 **DBuffer**（反照率/法线/粗糙度三张），用权重与屏幕法线做**各向异性混合**（避免拉伸）后再统一光照；网格贴花走独立几何遍贴合曲面（弹孔/裂纹/涂鸦）。与可见性缓冲延迟材质（§15.1.2）协同：贴花在材质分箱前写入 DBuffer。纯混合，无学习路径。
+- **预算**：DBuffer 三张 RT；贴花按簇/tile 剔除后批量；法线混合用 Reoriented Normal Mapping（RNM）解析式。
+- **效果**：海量弹孔/泥渍/路面细节无需烘焙到基础贴图，动态投放且与底材无缝融合；法线正确不翻面。
+- **落点**：`render_architecture/particle/decal`（投影/DBuffer）+ `render_scene/geometry`（GBuffer 混合）+ `render_shading`（光照前合成）。
+- **分级 / 验收**：🟡（`particle/decal.rs` 骨架在，DBuffer 三通道 + RNM 混合 + 网格贴花缺位）。验收：贴花法线混合与 RNM 解析参考一致；陡坡/边缘无拉伸；贴花顺序/权重合成确定可对拍。
+
+#### 16.1.6 GPU 蒙皮缓存 + WPO 几何馈入 Nanite/RT BLAS（动画几何解锁）
+- **借鉴对象**：UE **Skin Cache** + Nanite Skeletal / 可编程光栅 WPO + RT 动态 BLAS refit；补 §7 可编程光栅（§14.2.4）与 §8 动态 BVH（§15.1.3）的**动画几何前置**。
+- **算法要点**：① **GPU 蒙皮/变形缓存**把 skinned/morph/WPO 顶点一次性烘到可被复用的 GPU 顶点缓冲（而非每遍重算），供光栅 + RT + 两阶段 HZB + 虚拟几何共享；② WPO（世界位置偏移，风/植被/顶点动画）在缓存阶段求值，输出稳定几何供 **RT BLAS refit/重建**（接 §15.1.3 HPLOC/PLOC++），使动画角色/植被进入硬件 RT 与 MegaLights（§15.1.1）可见集。纯顶点变换 + BLAS 刷新，无学习路径。
+- **预算**：蒙皮缓存按可见骨架/植被实例预算；BLAS refit 优先于全重建（形变小用 refit，拓扑变用重建）；缓存复用避免 raster/RT 双算。
+- **效果**：动画角色、风吹植被、顶点动画统一进入 RT 反射/软阴影/GI 与海量光，开阔动态世界的「动的东西也有正确间接光/阴影」。
+- **落点**：`virtual_geometry_gpu`（蒙皮缓存 + WPO）+ `ray_scene`（BLAS refit/重建）+ `render_visibility`（HZB 消费）+ `gi/world_restir`+`gi/light`（动态几何入可见集）。
+- **分级 / 验收**：⬜（skin_cache/wpo 实测 0 文件；静态求交 + 两阶段 HZB 基础在）。验收：蒙皮缓存顶点与 CPU 蒙皮参考逐顶点一致；refit 后 BLAS 包围/求交与全重建一致（容差内）；动画几何在 RT 反射/软阴影中无撕裂/残影。
+
+### 16.2 v9 增补路线图优先级（并入既有阶梯，不改 §9 P0 基底次序，不重复 §6/§11/§12/§13/§14/§15 条目）
+
+| 增补特性 | 落点 | 现状（实测） | 优先级 | 依赖 |
+|---|---|---|---|---|
+| GPU 蒙皮缓存 + WPO 几何馈入 RT/Nanite | `virtual_geometry_gpu` + `ray_scene` + `render_visibility` | ⬜ 0 文件；静态求交 + 两阶段 HZB 在 | **P1** | 蒙皮/morph/WPO、BLAS refit、动态 BVH(§15.1.3)、两阶段 HZB |
+| 稀疏虚拟纹理 SVT + GPU 反馈缓冲 | `render_architecture`(流送/页表) + `render_scene/geometry` + `render_material` | ⬜ 0 文件；流送帧图在 | **P1** | 页表、反馈回读、DirectStorage/GDeflate(§13)、bindless |
+| 矩不变 OIT + 混合折射 | `render_shading/oit` + `particle/oit` + `hair/oit_frontend` + `ray_scene` | 🟡 三处 oit 骨架在，矩重建/折射缺 | **P1.5** | 幂矩/三角矩、透明 GBuffer、RT 折射精档 |
+| FFT 频谱海洋 + Gerstner + 泡沫 | `render_scene/water` + `render_architecture/water/ocean_lod` + `volumetric_gpu` | 🟡 ocean + ocean_lod 骨架在，FFT/泡沫缺 | **P1.5** | FFT、JONSWAP 谱、雅可比白沫、LOD 投影网格 |
+| 延迟贴花 DBuffer + 网格贴花 | `particle/decal` + `render_scene/geometry` + `render_shading` | 🟡 decal.rs 骨架在，DBuffer/RNM 缺 | **P2** | DBuffer 三通道、RNM 法线混合、tile 剔除、VisBuffer 协同 |
+| Mesh Shader / meshlet 硬件放大路径 | `virtual_geometry_gpu` + `render_architecture` + `render_visibility` | 🟡 发丝级骨架在，几何级 meshlet 缺 | **P2** | `VK_EXT_mesh_shader`、task 剔除、HZB、软光栅回退 |
+
+**v9 增补总原则**：① **不改 §9 P0 基底次序**，不重复 §6/§11/§12/§13/§14/§15 已登记条目——本版 6 条均经关键字实测确认为「上游骨架在但产品级整合缺位（🟡）」或「真实空白（⬜）」的**新**赛道；② **GPU 蒙皮缓存 / 稀疏虚拟纹理列 P1**——它们是「动态开阔世界」的两大前置刚需：蒙皮缓存让 v7/v8 的 WPO/动态 BVH/MegaLights 真正吃到**动画几何**，SVT 让海量唯一纹理在固定显存下可行，二者是 v7/v8 已列 P1 特性的「使能器」，必须先于其完全落地；③ **矩不变 OIT / FFT 海洋列 P1.5**——效果天花板高、骨架已在，增量风险低；④ **延迟贴花 / Mesh Shader 列 P2**——价值明确但分别依赖 VisBuffer（§15.1.2）与硬件扩展，排在使能器之后；⑤ 全部遵循数值红线，走「CPU golden → GPU kernel → 真机 parity」三步，关键路径必须与**路径追踪参考 / 解析解 / 离线数值求解**可对拍，未毕业不作生产默认；**任何增补均不引入 AI/ML/神经/LLM 推理路径**（厂商时序上采样 / 帧生成 SDK 仅渲染侧可选外部后端）。
+
+---
+
+## 17. v10 产品对标高级特性增补与规模五刷（2026-10，纯经典数值 / 无 AI·ML·神经·LLM）
+
+> **本版目的**：延续用户「代码有更新 / 借鉴参考优先产品 / 添加高级功能 / 兼顾性能与效果 / 达到顶级次世代 AAA 级别 / 更新优化设计文档」的要求。本版 ① 以统一口径 `find pkg/<crate>/src -name '*.rs' | wc -l` **五刷规模**（§17.0，接续 v9 §16.0 基线，实测反映本轮子系统孪生增量）；② 在 v9 §16.1 的 6 条之上，追加 **6 条产品级高级特性赛道**——均为 2016–2026 顶级 AAA 的「可见天花板」，经关键字实测（`find pkg -iname '*<kw>*' -name '*.rs'`）确认上游骨架是否已在，逐条标注 🟡（骨架在 / 缺整合）或 ⬜（真实空白），杜绝分级虚高；③ 刷新路线图优先级。**全程纯经典数值**，排除一切 AI/ML/神经/LLM 推理路径；厂商时序上采样 / 帧生成 SDK 仅渲染侧可选外部后端，本体默认经典路径，关键路径与路径追踪参考 / 解析解 / 离线数值求解可对拍。
+
+### 17.0 规模五刷（2026-10 实测，统一口径 `find pkg/<crate>/src -name '*.rs' | wc -l`）
+
+| crate / 子系统 | v9 §16.0 | v10 实测 | 变化与说明 |
+|---|---|---|---|
+| `prism_render_architecture` | 680 | **680** | 帧图 / 流送 / `work_graph` / `ray_scene` 稳定；贴花·OIT·折射·海洋 LOD 骨架在 `particle/`·`water/` 下 |
+| `prism_render_shading`（`gi/` 子系统） | 344 | **344** | GI 子系统稳定（surfel·radiance_cache·photon·world_restir·light_tree·thin_film·specular_aa 全在）；本版新增条目落点集中在 SSS / GTAO 的 shading 前端 |
+| `prism_render_scene` | 459 | **461** | 精确 SDF 图元族 + 光路由 / 色调映射 ABI 前端稳定并持续加固（+2） |
+| `prism_render_visibility`（两阶段 HZB 遮挡） | 22 | **22** | 两阶段遮挡闭环稳定：footprint→projection→pyramid→query→build→cull_hzb→occlusion_resolve→two_phase→two_phase_resolve |
+| `prism_render_material` | 12 | **12** | 闭包 IR / ABI 前端 |
+| `prism_virtual_geometry_gpu` | 25 | **25** | 软光栅主路径稳定 |
+| `prism_volumetric_gpu` | 119 | **131** | froxel / 储层 / 异质介质孪生持续新增（+12，为 §17.1.4 天空·空中透视·体积云与 §17.1.6 体积深阴影提供底座） |
+| `prism_hair_gpu` | 67 | **72** | Marschner / 双散射 + 分层样本 + 逐发丝段切分 GPU 孪生（+5，deep opacity 已达 6 文件，供 §17.1.6 深阴影统一） |
+| `prism_physics_gpu` / `prism_physics_core` / `prism_physics_geometry` | 238 / 167 / 34 | **253 / 167 / 34** | 流体 / 断裂 / VBD / CCD / MPM / 关节族持续新增（gpu +15） |
+| `prism_audio_core` / `prism_audio_spatial` / `prism_audio_rt` / `prism_audio_hrtf` / `prism_audio_device` | 88 / 52 / 6 / 9 / 7 | **93 / 52 / 6 / 9 / 7** | 卷积混响 / HOA / 衍射 / 房间声学 / 设备 I/O；core +5（效果节点 / 混响拓扑） |
+| `prism_ui_*`（component / devtools / router） | 5 / 4 / 5 | **5 / 4 / 5** | UI 三 crate 骨架稳定（非渲染本体，仅登记规模） |
+
+**口径一致性**：本表与 v7 §14.0 / v8 §15.0 / v9 §16.0 同口径（单一 `*.rs` 文件计数，含测试文件）。**本版主要结构性增量**在 `physics_gpu`(+15)、`volumetric_gpu`(+12)、`hair_gpu`(+5)、`audio_core`(+5)、`render_scene`(+2)。渲染本体核心（architecture / shading / material / virtual_geometry）保持稳定——**天花板增量在子系统孪生与下文 6 条产品级整合缺口**（SSS / GTAO / 大气天空 / 深阴影 / VRS / 开阔世界流式）。
+
+### 17.1 产品级高级特性赛道（v10 新增，逐条实测分级）
+
+> 关键字实测直接决定分级（`find pkg -iname '*<kw>*' -name '*.rs' | wc -l`）：`subsurface=1`·`sss=1`·`bssrdf=0`、`vrs=0`·`shading_rate=0`、`gtao=0`·`ssao=0`·`bent_normal=1`·`specular_occlusion=1`、`sky_atmosphere=0`·`aerial_perspective=0`·`nubis=0`·`volumetric_cloud=0`、`heightfield=2`·`terrain=2`·`foliage=1`·`world_partition=0`·`hlod=0`、`deep_shadow=0`·`deep_opacity=6`·`contact_shadow=3`·`planar_reflection=0`。
+
+#### 17.1.1 统一次表面散射 SSS（Burley 可分离漫射轮廓 + 屏幕空间 + 随机游走 BSSRDF）
+- **借鉴对象**：UE **Subsurface Profile**（可分离漫射轮廓）· Frostbite **Separable SSS**（Jimenez）· Christensen-Burley 归一化漫射 · 影视 **random-walk BSSRDF**（Disney / Weta / pbrt 随机游走）。
+- **算法要点**：① 实时档走屏幕空间可分离卷积——以 Burley/Christensen 归一化漫射轮廓拟合多层皮肤（R/G/B 分离散射半径），按视图深度 / 世界尺度自适应核宽，先横后纵两趟可分离卷积；② 预积分曲率档（pre-integrated skin，查 `NdotL × 曲率` LUT）作低配 / 远景回退；③ 高保真 / 离线对拍档走随机游走 BSSRDF（diffusion 近似外的真散射，均质 / 弱异质用 delta/ratio tracking），作 golden 参考；④ 薄部位（耳缘 / 鼻翼）叠透射轮廓。全程解析漫射轮廓 + 经典蒙特卡洛随机游走，无学习路径。
+- **预算**：屏幕空间两趟可分离 + reactive mask 保护锐利边；核宽随距离收敛；随机游走档仅参考 / 高配。
+- **效果**：皮肤、蜡、玉石、树叶、牛奶、大理石的真实通透与接触软化——近景人物可信度（AAA 角色刚需）。
+- **落点**：`prism_render_shading`（SSS 轮廓 + 屏幕空间 pass + 预积分 LUT）+ `gi/material`（BSSRDF 随机游走参考）+ `render_scene/shading`（profile ABI 前端，接 light_routing）。
+- **分级 / 验收**：🟡（subsurface/sss 各 1 文件骨架在，随机游走 BSSRDF 实测 0）。验收：屏幕空间档与随机游走 BSSRDF 参考在同散射系数下漫射轮廓一致（容差内）；核宽随距离 / 尺度正确收敛无 halo；透射部位能量守恒。
+
+#### 17.1.2 可变速率着色 VRS Tier2 + 内容自适应 shading-rate image + 粗像素合并
+- **借鉴对象**：NVIDIA **Adaptive Shading** · Call of Duty / Gears 5 **content-adaptive VRS** · DX12 / VK VRS Tier2（`VK_KHR_fragment_shading_rate`）。
+- **算法要点**：① 用上一帧亮度 / 边缘 / 运动分析生成每 tile 着色率图（SRI：1×1 / 1×2 / 2×2 / 2×4 / 4×4），平滑 / 低频 / 外围降率，高频 / 边缘 / 中心保 1×1；② 结合 motion / reactive mask 保护锐利分段（与 NPR reactive 协同）；③ 可叠 per-draw / per-primitive 率；④ 时序累积 + TSR 上采样掩盖降率伪影。纯图像统计（Sobel / 亮度方差）驱动，无学习路径。
+- **预算**：SRI 生成为轻量 compute；着色节省目标 15–40% 像素着色工作量，几何 / 深度不受影响。
+- **效果**：在不可见处省着色换帧时间 / 功耗，等画质下更高帧率或把预算让给 GI / 反射。
+- **落点**：`prism_render_architecture`（SRI 生成 pass + frame_graph 资源）+ `render_scene`（VRS attachment 绑定）+ `temporal_upscale`（reactive 协同）。
+- **分级 / 验收**：⬜（vrs/shading_rate 实测 0）。验收：VRS 结果与全率 1×1 参考的 SSIM/FLIP 在阈值内；降率区无可见块状；关闭 VRS 可回退逐像素 golden。
+
+#### 17.1.3 GTAO 水平基环境光遮蔽 + 弯曲法线 + 镜面遮蔽 + 多次反弹补偿
+- **借鉴对象**：Activision **GTAO**（Jimenez 2016，地面真值匹配）· Horizon **bent normals** · HBAO+ · 解析多次反弹补偿。
+- **算法要点**：① 屏幕空间沿方位角切片做 horizon-based 可见性积分，得 AO + 弯曲法线（可见半球平均方向）；② 用弯曲法线修正漫反射入射方向与 GI / 反射的方向性遮蔽；③ 由粗糙度 + 弯曲锥角解析求镜面遮蔽（specular occlusion），抑制掠射漏光；④ Jimenez 多次反弹解析补偿（避免过暗）；⑤ 时空双边滤波去噪 + 时序累积。纯几何可见性积分，无学习路径。
+- **预算**：半分辨率切片 + 双边上采；与 GI 的 near-field 遮蔽互补（远场交给 GI / ReSTIR）。
+- **效果**：接触阴影、缝隙变暗、镜面漏光抑制、弯曲法线驱动的方向性间接光——近景接触真实感。
+- **落点**：`prism_render_shading/gi`（GTAO + bent normal + spec occlusion）+ `render_scene/shading`（消费弯曲法线 / 遮蔽）。
+- **分级 / 验收**：🟡（bent_normal / specular_occlusion 各 1 骨架在，gtao / ssao 实测 0）。验收：GTAO 与路径追踪 AO 参考（cosine 加权可见性）在同半径下一致（容差内）；弯曲法线与半球采样参考方向一致；镜面遮蔽消除掠射漏光。
+
+#### 17.1.4 大气天空 + 空中透视 LUT + Nubis 体积云 + 统一 god-rays
+- **借鉴对象**：Hillaire **Sky-Atmosphere**（Frostbite / UE5，多重散射 LUT + 空中透视体）· **Nubis**（Decima / Guerrilla 体积云）· Horizon cloudscapes。
+- **算法要点**：① 预计算透射率 LUT + 多重散射 LUT + 天空视图 LUT，运行期查表得解析大气；② 空中透视存入低分辨率 froxel 体（接现有 `volumetric_gpu` froxel），统一近景雾 / 远景大气；③ 体积云用 Worley/Perlin FBM 密度场 + Henyey-Greenstein 相位 + 两级 raymarch（低频塑形 + 高频侵蚀）+ powder/beer 透射，接天气参数；④ god-rays 用同一体积积分（无需单独 radial blur）。全程解析相位 + 经典 raymarch / 查表，无学习路径。
+- **预算**：LUT 为小分辨率一次性；云 raymarch 半 / 四分之一分辨率 + 时序累积 + reproject；froxel 复用体积系统。
+- **效果**：物理正确昼夜天空、地平线泛红、远山空中透视、可穿越体积云与丁达尔光——开阔世界天空天花板。
+- **落点**：`prism_volumetric_gpu`（froxel 空中透视 + 云 raymarch）+ `render_shading`（天空 LUT）+ `render_scene`（天气 / 日照参数 ABI）。
+- **分级 / 验收**：⬜（sky_atmosphere / aerial_perspective / nubis / volumetric_cloud 实测 0；froxel 体积基础在）。验收：天空 LUT 与离线大气参考（brute-force 多重散射）一致；云透射 / 散射与参考 raymarch 收敛一致；空中透视与雾在近远景平滑衔接。
+
+#### 17.1.5 开阔世界流式 — 虚拟高度场网格 VHM + Nanite GPU 植被散布 + World Partition / HLOD
+- **借鉴对象**：UE5 **Landscape Nanite** / **Virtual Heightfield Mesh** · **World Partition**（One File Per Actor / 数据层）· **HLOD** 代理网格 · Horizon 程序化植被散布。
+- **算法要点**：① 高度场作为虚拟几何（VHM）——clipmap / 四叉树 LOD + 运行期虚拟纹理（RVT，接 §16.1.1 SVT）合成地貌材质，连续无缝 LOD；② GPU 植被散布——按密度图 / 坡度 / 高度在 compute 中实例化散布点，接虚拟几何 + GPU 剔除（接 §16.1.6 蒙皮缓存做风动 WPO）；③ World Partition 网格化流式分区 + 距离 / 视锥驱动的 cell 载入 + 数据层；④ HLOD 远景代理合并（簇级代理）降 draw / BLAS 压力。纯空间数据结构 + 流式，无学习路径。
+- **预算**：cell 异步流式（接 §13 DirectStorage/GDeflate）；散布 GPU 剔除；HLOD 代理远景替换。
+- **效果**：数十平方公里连续地貌 + 密集植被 + 无缝 LOD——开阔世界骨架（配 §16.1.1 SVT / §16.1.6 蒙皮缓存 / §15.1.1 MegaLights）。
+- **落点**：`prism_render_architecture`（paging / world_partition + HLOD 代理 + 流式）+ `virtual_geometry_gpu`（VHM + 植被实例）+ `render_scene/geometry`（地貌 RVT 材质）。
+- **分级 / 验收**：🟡/⬜（heightfield / terrain 各 2 + foliage 1 骨架在，world_partition / hlod 实测 0）。验收：VHM LOD 过渡无裂缝 / 爆点；植被散布与密度图一致且确定性；cell 流式无可见 pop；HLOD 切换无跳变。
+
+#### 17.1.6 毛发 / 体积深阴影图统一 — Deep Opacity / Deep Shadow Maps + 半透射自阴影
+- **借鉴对象**：PDI **Deep Shadow Maps**（Lokovic-Veach）· UE 毛发 **deep opacity map** · Frostbite 体积自阴影 · 影视发丝 / 烟雾透射。
+- **算法要点**：① 从光源视角沿深度分层记录累积透射率（deep shadow / deep opacity 多层），毛发、烟雾、云、半透织物共用一套半透射自阴影；② 查询时按接收点深度在层间插值得透射率；③ 与 §16.1.4 OIT / §16.1.1 SVT 阴影页协同；④ 毛发接双散射（接现有 Marschner / dual-scatter），体积接 froxel 散射。纯透射率积分，无学习路径。
+- **预算**：分层数自适应（近光密集）；复用 VSM 页驻留；半分辨率 + 时序。
+- **效果**：毛发柔和自阴影不发黑、烟雾 / 云层内部透光梯度、半透织物真实透射——半透材质阴影天花板。
+- **落点**：`prism_hair_gpu`（deep opacity 深化）+ `prism_volumetric_gpu`（体积深阴影）+ `render_shading/virtual_shadow`（统一深阴影页 + 消费）。
+- **分级 / 验收**：🟡（deep_opacity 实测 6 毛发骨架在，deep_shadow 实测 0；体积 / 统一半透射缺）。验收：深阴影透射率与离线光线步进参考一致；毛发自阴影无黑块；体积内部透光梯度与 raymarch 参考收敛一致。
+
+### 17.2 v10 增补路线图优先级（并入既有阶梯，不改 §9 P0 基底次序，不重复 §6/§11/§12/§13/§14/§15/§16 条目）
+
+| 增补特性 | 落点 | 现状（实测） | 优先级 | 依赖 |
+|---|---|---|---|---|
+| 统一次表面散射 SSS | `render_shading` + `gi/material` + `render_scene/shading` | 🟡 subsurface/sss 各 1 骨架，随机游走 0 | **P1** | Burley 轮廓、屏幕空间可分离卷积、随机游走参考、light_routing |
+| GTAO 弯曲法线 + 镜面遮蔽 | `render_shading/gi` + `render_scene/shading` | 🟡 bent_normal/spec_occ 各 1，gtao/ssao 0 | **P1** | 水平基积分、时空双边去噪、GI 近场协同 |
+| 大气天空 + 空中透视 + Nubis 体积云 | `volumetric_gpu` + `render_shading` + `render_scene` | ⬜ 相关 0；froxel 基础在 | **P1.5** | LUT 预计算、froxel、解析相位 raymarch、天气参数 |
+| 毛发 / 体积深阴影统一自阴影 | `hair_gpu` + `volumetric_gpu` + `render_shading/virtual_shadow` | 🟡 deep_opacity 6 毛发在，deep_shadow 0 | **P1.5** | 分层透射、VSM 页复用、OIT 协同 |
+| 可变速率着色 VRS Tier2 | `render_architecture` + `render_scene` + `temporal_upscale` | ⬜ vrs/shading_rate 0 | **P2** | `VK_KHR_fragment_shading_rate`、SRI 生成、reactive mask |
+| 开阔世界流式 VHM + 植被 + WorldPartition/HLOD | `render_architecture` + `virtual_geometry_gpu` + `render_scene/geometry` | 🟡/⬜ heightfield/terrain/foliage 骨架在，WP/HLOD 0 | **P2** | VHM、RVT/SVT(§16.1.1)、流式(§13)、蒙皮缓存(§16.1.6) |
+
+**v10 增补总原则**：① **不改 §9 P0 基底次序**，不重复 §6/§11–§16 已登记条目——6 条均经关键字实测确认为**新**赛道（🟡 骨架在整合缺位 / ⬜ 真实空白）；② **SSS / GTAO 列 P1**——皮肤次表面与接触遮蔽 / 弯曲法线是「近景人物与接触可信度」的刚需，骨架已在、增量风险可控、对角色与近景效果提升最直接；③ **大气天空 / 深阴影列 P1.5**——效果天花板高（天空与半透自阴影），依赖的 froxel / VSM 已在，增量风险低；④ **VRS / 开阔世界流式列 P2**——VRS 依赖硬件扩展与 TSR 协同，开阔世界流式依赖 SVT(§16.1.1) / 蒙皮缓存(§16.1.6) / 流式(§13) 使能器，排其后；⑤ 全部走「CPU golden → GPU kernel → 真机 parity」三步，关键路径必须与**路径追踪参考 / 解析解 / 离线数值求解**可对拍，未毕业不作生产默认；**任何增补均不引入 AI/ML/神经/LLM 推理路径**（厂商时序上采样 / 帧生成 SDK 仅渲染侧可选外部后端）。
 
 ---
 
