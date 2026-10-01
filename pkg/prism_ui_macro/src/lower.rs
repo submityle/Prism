@@ -3,6 +3,19 @@
 //! Each [`Node`] becomes a `::prism_ui::Element` constructor followed by a
 //! chain of builder methods. All emitted paths are fully qualified so the
 //! generated code does not depend on the caller's imports.
+//!
+//! # Stable node ids
+//!
+//! Every statically-known node is tagged with a compile-time
+//! `::prism_ui::StableId` describing its position in the macro call tree. The
+//! root path is `""`, a node's first child is `"0"`, its grandchild `"0/1"`,
+//! and so on. These ids are deterministic (the same source lowers to the same
+//! ids every time) and are used by hot reload to align nodes across edits even
+//! when sibling insertion or deletion shifts positions.
+//!
+//! Dynamic `for_each(..)` splices are *not* assigned a stable id: their length
+//! is unknown at compile time, so their children align at run time by their
+//! explicit reconciliation [`Key`](prism_ui::Key) instead of by a static path.
 
 use proc_macro2::{Ident, TokenStream};
 use quote::quote;
@@ -10,7 +23,12 @@ use quote::quote;
 use crate::ast::{Attr, Child, Node, NodeKind, StyleVal};
 
 /// Lowers a [`Node`] into the builder-call chain that constructs it.
-pub(crate) fn lower_node(node: &Node) -> TokenStream {
+///
+/// `path` is the node's `/`-separated position path within the macro call tree
+/// (the root is `""`). The node is tagged with a `::prism_ui::StableId` built
+/// from this path, and each static child is lowered with the path extended by
+/// its sibling index.
+pub(crate) fn lower_node(node: &Node, path: &str) -> TokenStream {
     let mut expr = match &node.kind {
         NodeKind::Box => quote! { ::prism_ui::Element::box_() },
         NodeKind::Text(content) => quote! { ::prism_ui::Element::text(#content) },
@@ -21,10 +39,13 @@ pub(crate) fn lower_node(node: &Node) -> TokenStream {
         expr = lower_attr(expr, attr);
     }
 
-    for child in &node.children {
+    expr = quote! { #expr.with_stable_id(::prism_ui::StableId::new(#path)) };
+
+    for (index, child) in node.children.iter().enumerate() {
         expr = match child {
             Child::Node(child_node) => {
-                let child_expr = lower_node(child_node);
+                let child_path = child_path(path, index);
+                let child_expr = lower_node(child_node, &child_path);
                 quote! { #expr.child(#child_expr) }
             }
             Child::ForEach(iter) => quote! { #expr.children(#iter) },
@@ -32,6 +53,18 @@ pub(crate) fn lower_node(node: &Node) -> TokenStream {
     }
 
     expr
+}
+
+/// Extends `parent` with `index` to form a child's position path.
+///
+/// The root path is the empty string, so its first child is `"0"` rather than
+/// `"/0"`; deeper children are `"0/1"`, `"0/1/2"` and so on.
+fn child_path(parent: &str, index: usize) -> String {
+    if parent.is_empty() {
+        index.to_string()
+    } else {
+        format!("{parent}/{index}")
+    }
 }
 
 /// Appends the builder calls for a single attribute to `expr`.

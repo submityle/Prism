@@ -9,7 +9,7 @@ extern crate alloc;
 
 use alloc::string::String;
 
-use prism_ui::{Element, Key};
+use prism_ui::{Element, Key, StableId};
 use prism_ui_hotreload::{
     diff_classes, identity::paths_of, ClassChange, HotReloader, NodePath, StateStore,
 };
@@ -140,4 +140,126 @@ fn state_store_apply_plan_matches_reloader() {
     assert_eq!(report.dropped, 0);
     assert_eq!(report.preserved, 2);
     assert!(store.contains(&a_path));
+}
+
+/// Finds the path of the node whose stable id string equals `id`.
+fn path_for_stable(root: &Element, id: &str) -> NodePath {
+    paths_of(root)
+        .into_iter()
+        .find(|(_, element)| element.stable_id().map(StableId::as_str) == Some(id))
+        .map(|(path, _)| path)
+        .expect("node with stable id must exist")
+}
+
+#[test]
+fn stable_id_hit_is_preserved() {
+    let old = Element::box_()
+        .with_stable_id("")
+        .child(Element::text("a").with_stable_id("0"));
+    let new = Element::box_()
+        .with_stable_id("")
+        .child(Element::text("a").with_stable_id("0"));
+
+    let plan = prism_ui_hotreload::plan(&old, &new);
+    assert!(plan.is_noop());
+    assert_eq!(plan.counts().preserved, 2);
+    assert_eq!(plan.counts().added, 0);
+    assert_eq!(plan.counts().removed, 0);
+    assert_eq!(plan.counts().recreated, 0);
+}
+
+#[test]
+fn stable_id_survives_sibling_insertion() {
+    // The tracked node keeps stable id "item" even though a new sibling shifts
+    // it from sibling index 0 to index 1. It must stay preserved and keep state.
+    let old = Element::box_()
+        .with_stable_id("")
+        .child(Element::text("tracked").with_stable_id("item"));
+    let tracked_path = path_for_stable(&old, "item");
+
+    let mut reloader: HotReloader<i64> = HotReloader::new(old);
+    reloader.state_mut().insert(tracked_path.clone(), 7);
+
+    let new = Element::box_()
+        .with_stable_id("")
+        .child(Element::text("inserted").with_stable_id("header"))
+        .child(Element::text("tracked").with_stable_id("item"));
+
+    let report = reloader.reload(new);
+
+    // Root + tracked preserved; the inserted header is added; nothing dropped.
+    assert_eq!(report.preserved, 2);
+    assert_eq!(report.added, 1);
+    assert_eq!(report.dropped, 0);
+    assert_eq!(reloader.state().get(&tracked_path), Some(&7));
+}
+
+#[test]
+fn missing_stable_id_falls_back_to_positional_diff() {
+    // Neither tree carries stable ids, so identity is positional as before:
+    // appending a child registers as a single addition.
+    let old = Element::box_().child(Element::text("a"));
+    let new = Element::box_()
+        .child(Element::text("a"))
+        .child(Element::text("b"));
+
+    let plan = prism_ui_hotreload::plan(&old, &new);
+    assert_eq!(plan.counts().preserved, 2);
+    assert_eq!(plan.counts().added, 1);
+    assert_eq!(plan.counts().removed, 0);
+    assert_eq!(plan.counts().recreated, 0);
+}
+
+#[test]
+fn changed_stable_id_drops_state_as_remove_and_add() {
+    // When the stable id of a slot changes, the old identity disappears and a
+    // fresh one appears: state keyed on the old path must be dropped.
+    let old = Element::box_()
+        .with_stable_id("")
+        .child(Element::text("x").with_stable_id("old-id"));
+    let old_path = path_for_stable(&old, "old-id");
+
+    let mut reloader: HotReloader<&str> = HotReloader::new(old);
+    reloader.state_mut().insert(old_path.clone(), "state");
+
+    let new = Element::box_()
+        .with_stable_id("")
+        .child(Element::text("x").with_stable_id("new-id"));
+
+    let plan = reloader.plan_for(&new);
+    assert_eq!(plan.counts().preserved, 1); // only the root
+    assert_eq!(plan.counts().removed, 1);
+    assert_eq!(plan.counts().added, 1);
+    assert_eq!(plan.counts().recreated, 0);
+
+    let report = reloader.reload(new);
+    assert_eq!(report.dropped, 1);
+    assert!(!reloader.state().contains(&old_path));
+}
+
+#[test]
+fn same_stable_id_with_kind_change_is_recreated() {
+    // Identical stable id but a changed kind under a stable path is a true
+    // recreation: state is invalidated in place.
+    let old = Element::box_()
+        .with_stable_id("")
+        .child(Element::box_().with_stable_id("slot"));
+    let slot_path = path_for_stable(&old, "slot");
+
+    let mut reloader: HotReloader<u8> = HotReloader::new(old);
+    reloader.state_mut().insert(slot_path.clone(), 1);
+
+    let new = Element::box_()
+        .with_stable_id("")
+        .child(Element::text("now text").with_stable_id("slot"));
+
+    let plan = reloader.plan_for(&new);
+    assert_eq!(plan.counts().recreated, 1);
+    assert_eq!(plan.counts().removed, 0);
+    assert_eq!(plan.counts().added, 0);
+    assert!(plan.recreated()[0].reason.contains("box -> text"));
+
+    let report = reloader.reload(new);
+    assert_eq!(report.dropped, 1);
+    assert!(!reloader.state().contains(&slot_path));
 }

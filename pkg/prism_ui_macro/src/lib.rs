@@ -58,5 +58,5 @@ use crate::ast::LoomInput;
 #[proc_macro]
 pub fn loom(input: TokenStream) -> TokenStream {
     let parsed = parse_macro_input!(input as LoomInput);
-    lower::lower_node(&parsed.node).into()
+    lower::lower_node(&parsed.node, "").into()
 }

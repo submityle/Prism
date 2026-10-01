@@ -6,9 +6,14 @@
 //! root down to a node. Two nodes in two different trees are considered the
 //! same logical node exactly when their paths are equal.
 //!
-//! A node's identity segment is derived deterministically:
+//! A node's identity segment is derived deterministically, in priority order:
 //!
-//! * If the node carries an explicit [`Key`] it is identified by
+//! * If the node carries a compile-time [`StableId`] it is identified by
+//!   [`NodeIdent::Stable`], independent of its position, kind or key. This is
+//!   the strongest signal: a node emitted by the `loom!` macro keeps the same
+//!   stable id across edits, so inserting or deleting siblings cannot change
+//!   its identity.
+//! * Otherwise, if the node carries an explicit [`Key`] it is identified by
 //!   [`NodeIdent::Keyed`], independent of its position or kind. This lets a
 //!   keyed list item keep its state even when it moves or changes kind.
 //! * Otherwise it is identified by [`NodeIdent::Positional`], combining its
@@ -19,12 +24,15 @@ use alloc::vec::Vec;
 use core::cmp::Ordering;
 use core::fmt;
 
-use prism_ui::{Element, ElementKind, Key};
+use prism_ui::{Element, ElementKind, Key, StableId};
 
 /// One segment of a [`NodePath`]: how a single node is identified relative to
 /// its parent.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NodeIdent {
+    /// The node carried a compile-time [`StableId`]; identity ignores
+    /// position, kind and key. This is the highest-priority identity.
+    Stable(StableId),
     /// The node carried an explicit [`Key`]; identity ignores position.
     Keyed(Key),
     /// The node had no explicit key; identity is its sibling index paired with
@@ -38,6 +46,12 @@ pub enum NodeIdent {
 }
 
 impl NodeIdent {
+    /// Builds a stable identity segment from a compile-time [`StableId`].
+    #[must_use]
+    pub fn stable(id: StableId) -> Self {
+        NodeIdent::Stable(id)
+    }
+
     /// Builds a keyed identity segment.
     #[must_use]
     pub fn keyed(key: Key) -> Self {
@@ -55,6 +69,12 @@ impl NodeIdent {
     pub fn is_keyed(&self) -> bool {
         matches!(self, NodeIdent::Keyed(_))
     }
+
+    /// Returns `true` when this segment is a stable-id identity.
+    #[must_use]
+    pub fn is_stable(&self) -> bool {
+        matches!(self, NodeIdent::Stable(_))
+    }
 }
 
 /// Returns a total-order sort key for an [`ElementKind`].
@@ -70,12 +90,23 @@ fn kind_order(kind: &ElementKind) -> (u8, &str) {
     }
 }
 
+/// Returns the cross-variant sort rank of a [`NodeIdent`].
+///
+/// Stable identities sort before keyed identities, which sort before
+/// positional identities. Ordering *within* a variant is handled separately.
+fn variant_rank(ident: &NodeIdent) -> u8 {
+    match ident {
+        NodeIdent::Stable(_) => 0,
+        NodeIdent::Keyed(_) => 1,
+        NodeIdent::Positional { .. } => 2,
+    }
+}
+
 impl Ord for NodeIdent {
     fn cmp(&self, other: &Self) -> Ordering {
         match (self, other) {
+            (NodeIdent::Stable(a), NodeIdent::Stable(b)) => a.cmp(b),
             (NodeIdent::Keyed(a), NodeIdent::Keyed(b)) => a.cmp(b),
-            (NodeIdent::Keyed(_), NodeIdent::Positional { .. }) => Ordering::Less,
-            (NodeIdent::Positional { .. }, NodeIdent::Keyed(_)) => Ordering::Greater,
             (
                 NodeIdent::Positional {
                     index: ia,
@@ -86,6 +117,7 @@ impl Ord for NodeIdent {
                     kind: kb,
                 },
             ) => ia.cmp(ib).then_with(|| kind_order(ka).cmp(&kind_order(kb))),
+            _ => variant_rank(self).cmp(&variant_rank(other)),
         }
     }
 }
@@ -99,6 +131,7 @@ impl PartialOrd for NodeIdent {
 impl fmt::Display for NodeIdent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            NodeIdent::Stable(id) => write!(f, "${id}"),
             NodeIdent::Keyed(Key::Index(i)) => write!(f, "@{i}"),
             NodeIdent::Keyed(Key::Int(i)) => write!(f, "#{i}"),
             NodeIdent::Keyed(Key::Str(s)) => write!(f, "#{s}"),
@@ -165,7 +198,13 @@ impl fmt::Display for NodePath {
 }
 
 /// Derives the identity segment for a node at the given sibling index.
+///
+/// Priority: a compile-time [`StableId`] wins over an explicit [`Key`], which
+/// in turn wins over the positional `(index, kind)` fallback.
 fn ident_of(index: usize, element: &Element) -> NodeIdent {
+    if let Some(id) = element.stable_id() {
+        return NodeIdent::Stable(id.clone());
+    }
     match element.explicit_key() {
         Some(key) => NodeIdent::Keyed(key.clone()),
         None => NodeIdent::Positional {
@@ -285,5 +324,80 @@ mod tests {
             map.insert(path, i);
         }
         assert_eq!(map.len(), 3);
+    }
+}
+
+#[cfg(test)]
+mod stable_tests {
+    use super::{ident_of, paths_of, variant_rank, NodeIdent};
+    use alloc::string::ToString;
+    use prism_ui::{Element, Key, StableId};
+
+    #[test]
+    fn stable_id_takes_priority_over_key_and_position() {
+        let el = Element::text("x")
+            .key_int(9)
+            .with_stable_id(StableId::new("0/1"));
+        let ident = ident_of(5, &el);
+        assert!(ident.is_stable());
+        assert!(!ident.is_keyed());
+        assert_eq!(ident, NodeIdent::Stable(StableId::new("0/1")));
+    }
+
+    #[test]
+    fn stable_identity_ignores_sibling_index() {
+        let el = Element::box_().with_stable_id("root/panel");
+        assert_eq!(ident_of(0, &el), ident_of(42, &el));
+    }
+
+    #[test]
+    fn missing_stable_id_falls_back_to_key_then_position() {
+        let keyed = Element::box_().key_str("k");
+        assert_eq!(
+            ident_of(0, &keyed),
+            NodeIdent::Keyed(Key::Str("k".to_string()))
+        );
+        let plain = Element::text("t");
+        assert!(matches!(
+            ident_of(3, &plain),
+            NodeIdent::Positional { index: 3, .. }
+        ));
+    }
+
+    #[test]
+    fn stable_display_and_ordering() {
+        let stable = NodeIdent::Stable(StableId::new("0/1"));
+        assert_eq!(stable.to_string(), "$0/1");
+        // Stable sorts before keyed, which sorts before positional.
+        let keyed = NodeIdent::keyed(Key::Int(1));
+        let positional = NodeIdent::positional(0, prism_ui::ElementKind::Box);
+        assert!(stable < keyed);
+        assert!(keyed < positional);
+        assert_eq!(variant_rank(&stable), 0);
+    }
+
+    #[test]
+    fn stable_path_is_independent_of_structure_position() {
+        // Two trees where the tracked child sits at different sibling indices
+        // but carries the same stable id yields the same path.
+        let a = Element::box_()
+            .with_stable_id("")
+            .child(Element::text("tracked").with_stable_id("0"));
+        let b = Element::box_()
+            .with_stable_id("")
+            .child(Element::text("inserted").with_stable_id("x"))
+            .child(Element::text("tracked").with_stable_id("0"));
+
+        let a_tracked = paths_of(&a)
+            .into_iter()
+            .find(|(_, e)| e.text_content() == Some("tracked"))
+            .map(|(p, _)| p)
+            .unwrap();
+        let b_tracked = paths_of(&b)
+            .into_iter()
+            .find(|(_, e)| e.text_content() == Some("tracked"))
+            .map(|(p, _)| p)
+            .unwrap();
+        assert_eq!(a_tracked, b_tracked);
     }
 }

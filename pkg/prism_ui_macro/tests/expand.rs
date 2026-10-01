@@ -4,7 +4,7 @@
 //! asserts the resulting structure through the public `Element` accessors.
 
 use prism_ui::style::{Color, Keyword, Length, StyleProp, StyleValue};
-use prism_ui::{Element, ElementKind, Key};
+use prism_ui::{Element, ElementKind, Key, StableId};
 use prism_ui_macro::loom;
 
 #[test]
@@ -166,4 +166,121 @@ fn for_each_accepts_a_vec_of_elements() {
     assert_eq!(children.len(), 2);
     assert_eq!(children[0].text_content(), Some("x"));
     assert_eq!(children[1].text_content(), Some("y"));
+}
+
+/// Collects every node's stable-id string in depth-first preorder.
+fn stable_ids(root: &Element) -> Vec<Option<String>> {
+    let mut out = Vec::new();
+    collect_stable_ids(root, &mut out);
+    out
+}
+
+/// Pushes `element`'s stable id, then recurses into its children in order.
+fn collect_stable_ids(element: &Element, out: &mut Vec<Option<String>>) {
+    out.push(element.stable_id().map(StableId::as_str).map(String::from));
+    for child in element.child_elements() {
+        collect_stable_ids(child, out);
+    }
+}
+
+#[test]
+fn root_node_has_empty_stable_id() {
+    let el = loom! { box {} };
+    assert_eq!(el.stable_id().map(StableId::as_str), Some(""));
+
+    let text = loom! { text("hi") };
+    assert_eq!(text.stable_id().map(StableId::as_str), Some(""));
+}
+
+#[test]
+fn nested_children_follow_position_paths() {
+    let el = loom! {
+        box {
+            text("first");
+            box {
+                text("deep");
+            }
+        }
+    };
+
+    assert_eq!(el.stable_id().map(StableId::as_str), Some(""));
+    let children = el.child_elements();
+    assert_eq!(children[0].stable_id().map(StableId::as_str), Some("0"));
+    assert_eq!(children[1].stable_id().map(StableId::as_str), Some("1"));
+    let grandchild = &children[1].child_elements()[0];
+    assert_eq!(grandchild.stable_id().map(StableId::as_str), Some("1/0"));
+}
+
+#[test]
+fn multi_child_paths_match_sibling_indices() {
+    let el = loom! {
+        box {
+            text("a");
+            text("b");
+            text("c");
+        }
+    };
+
+    let ids = stable_ids(&el);
+    assert_eq!(
+        ids,
+        vec![
+            Some(String::new()),
+            Some("0".to_string()),
+            Some("1".to_string()),
+            Some("2".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn two_expansions_produce_identical_ids() {
+    let first = loom! {
+        box {
+            text("a");
+            box {
+                text("b");
+                custom("c") {}
+            }
+        }
+    };
+    let second = loom! {
+        box {
+            text("a");
+            box {
+                text("b");
+                custom("c") {}
+            }
+        }
+    };
+    assert_eq!(stable_ids(&first), stable_ids(&second));
+    // Spot-check the deepest deterministic path.
+    assert_eq!(
+        first.child_elements()[1].child_elements()[1]
+            .stable_id()
+            .map(StableId::as_str),
+        Some("1/1")
+    );
+}
+
+#[test]
+fn for_each_items_carry_no_stable_id() {
+    // Plain (non-macro) elements spliced via `for_each` receive no path id from
+    // the enclosing node: dynamic lists align by runtime key, not static path.
+    let el = loom! {
+        box {
+            text("header");
+            for_each(vec![Element::text("x"), Element::text("y")]);
+        }
+    };
+
+    assert_eq!(el.stable_id().map(StableId::as_str), Some(""));
+    let children = el.child_elements();
+    assert_eq!(children[0].text_content(), Some("header"));
+    assert_eq!(children[0].stable_id().map(StableId::as_str), Some("0"));
+    // Spliced items were built with plain builders, so they carry no stable id.
+    assert_eq!(children[1].text_content(), Some("x"));
+    assert!(children[1].stable_id().is_none());
+    assert_eq!(children[2].text_content(), Some("y"));
+    assert!(children[2].stable_id().is_none());
 }
