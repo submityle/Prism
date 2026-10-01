@@ -1894,10 +1894,26 @@ pub fn oriented_vesica_2d(point: [f32; 2], a: [f32; 2], b: [f32; 2], w: f32) -> 
     vesica_2d([perp, axial], radius, offset)
 }
 
+/// Exact signed distance to a rectangular frame (hollow box outline) in 2D:
+/// the `thickness`-neighbourhood of the axis-aligned rectangle outline with
+/// half-extents `half_extent` centred at the origin.
+///
+/// `box_2d` is the exact signed distance to the solid rectangle, so its
+/// absolute value is the exact unsigned distance to the rectangle *boundary
+/// curve*; subtracting `thickness` offsets that curve into a band straddling
+/// the outline (outer wall at `half_extent + thickness`, inner hole at
+/// `half_extent - thickness`, corners rounded with radius `thickness`). The
+/// result is negative inside the wall and positive in both the hole and the
+/// exterior. Built from `abs`, `min`, `max` and `sqrt` (via `box_2d`), so it is
+/// exact and transcendental-free.
+pub fn box_frame_2d(point: [f32; 2], half_extent: [f32; 2], thickness: f32) -> f32 {
+    box_2d(point, half_extent).abs() - thickness
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        annulus_2d, arc, box_2d, box_frame, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_torus, capsule, capsule_2d, circle_2d, cone_sdf, cross_2d, cut_disk_2d, cut_hollow_sphere,
+        annulus_2d, arc, box_2d, box_frame, box_frame_2d, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_torus, capsule, capsule_2d, circle_2d, cone_sdf, cross_2d, cut_disk_2d, cut_hollow_sphere,
         cut_sphere, cylinder_segment, death_star, egg_2d, ellipsoid_sdf, equilateral_triangle_2d, heart_2d, hex_prism, hexagram_2d, infinite_cone, infinite_cylinder, isosceles_triangle_2d, length2, line_sdf, link, moon,
         octagon_prism, octahedron, oriented_box_2d, oriented_vesica_2d, parallelogram, pentagram_2d, pie, plane, polygon_2d, pyramid, quad_sdf, regular_hexagon_2d, regular_octagon_2d, regular_pentagon_2d, rhombus, rhombus_2d, round_box, round_cone_sdf,
         round_cone_segment, rounded_box_2d, rounded_cylinder, rounded_x, segment_2d, solid_angle, sphere, star5_2d, torus, trapezoid_isosceles, triangle_2d, triangle_sdf, triangular_prism,
@@ -2074,6 +2090,61 @@ mod tests {
             }
         }
         assert!(maxerr < 5e-3, "maxerr = {maxerr}");
+    }
+
+    #[test]
+    fn box_frame_2d_closed_forms() {
+        let b = [1.3_f32, 0.8];
+        let t = 0.25_f32;
+        // Outer and inner wall faces along +x are the zero set.
+        assert!(box_frame_2d([b[0] + t, 0.0], b, t).abs() < 1e-6);
+        assert!(box_frame_2d([b[0] - t, 0.0], b, t).abs() < 1e-6);
+        // Centre of the wall (on the outline itself) is the most interior: -t.
+        assert!((box_frame_2d([b[0], 0.0], b, t) - (-t)).abs() < 1e-6);
+        // Rectangle centre sits inside the hole; nearest wall is the top edge.
+        assert!((box_frame_2d([0.0, 0.0], b, t) - (b[1] - t)).abs() < 1e-6);
+        // Far exterior point measures to the outer +x face.
+        assert!((box_frame_2d([3.0, 0.0], b, t) - (3.0 - b[0] - t)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn box_frame_2d_matches_outline_distance_reference() {
+        // Independent reference: brute-force unsigned distance to the four
+        // rectangle edges, minus the frame thickness (no reuse of box_2d).
+        fn dist_seg(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
+            let ex = b[0] - a[0];
+            let ey = b[1] - a[1];
+            let t = (((p[0] - a[0]) * ex + (p[1] - a[1]) * ey) / (ex * ex + ey * ey))
+                .clamp(0.0, 1.0);
+            let qx = p[0] - (a[0] + ex * t);
+            let qy = p[1] - (a[1] + ey * t);
+            (qx * qx + qy * qy).sqrt()
+        }
+        fn reference(p: [f32; 2], b: [f32; 2], t: f32) -> f32 {
+            let c = [
+                [b[0], b[1]],
+                [-b[0], b[1]],
+                [-b[0], -b[1]],
+                [b[0], -b[1]],
+            ];
+            let d = dist_seg(p, c[0], c[1])
+                .min(dist_seg(p, c[1], c[2]))
+                .min(dist_seg(p, c[2], c[3]))
+                .min(dist_seg(p, c[3], c[0]));
+            d - t
+        }
+        let b = [1.3_f32, 0.8];
+        let t = 0.25_f32;
+        let mut maxerr = 0.0_f32;
+        for gy in -20..=20 {
+            for gx in -25..=25 {
+                let p = [gx as f32 * 0.1, gy as f32 * 0.1];
+                let got = box_frame_2d(p, b, t);
+                let want = reference(p, b, t);
+                maxerr = maxerr.max((got - want).abs());
+            }
+        }
+        assert!(maxerr < 1e-5, "maxerr = {maxerr}");
     }
 
     #[test]
