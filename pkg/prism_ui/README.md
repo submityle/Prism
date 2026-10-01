@@ -120,10 +120,11 @@ Loom 以多个独立 crate 分层实现,每一层都可单独使用。下表为 
 `no_std` 友好(`default = ["std"]`,proc-macro crate 除外)、通过严格 Clippy(零告警)。
 
 > **诚实声明**:仍为 **设计阶段(PLANNED)** 的能力包括:宏层 `$` 语法糖 **自动登记
-> ECS 绑定**、`Show` / `For` 结构绑定(批量 spawn/despawn 到帧末)、`.loom` / `.loom.style`
-> 热重载的 **文件系统监听集成**、**静态子树提升**、**双模式编译**(dev 解释 / release 宏固化)。
+> ECS 绑定**、`.loom` / `.loom.style` 热重载的 **文件系统监听集成**、**静态子树提升**、
+> **双模式编译**(dev 解释 / release 宏固化)。
 > 已交付并通过测试的能力包括:字段级 **ECS ↔ Signal 双向绑定** 及其 **Bevy 调度器集成**
-> (`LoomSyncSet` / `NonSend` + exclusive system)、**编译期稳定节点 ID**、`.loom` / `.loom.style`
+> (`LoomSyncSet` / `NonSend` + exclusive system)、`Show` / `For` **信号驱动结构绑定**
+> (两阶段批量 spawn/despawn + `diff_keyed` LIS 最小移动)、**编译期稳定节点 ID**、`.loom` / `.loom.style`
 > **热重载核心**(节点身份比对 + 状态保留 + 样式 diff)、列表 **虚拟化**、
 > **Suspense / Error Boundary**、**Portal / Overlay**、**表单校验**、**a11y 基线**、
 > **作用域样式 / 响应式 @media**、**隐式过渡 / FLIP 布局动画 / 共享元素过渡**,均为引擎弱耦合 crate。见
