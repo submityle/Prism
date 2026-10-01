@@ -25,6 +25,7 @@ pub mod body;
 pub mod build;
 pub mod collision;
 pub mod constraint;
+pub mod damage;
 pub mod particle;
 pub mod solver;
 
@@ -34,6 +35,10 @@ pub use aero::{
 };
 pub use body::SoftBody;
 pub use build::{Cloth, ClothGrid, Rope, RopeGrid, SoftBox, SoftBoxGrid};
+pub use damage::{
+    apply_plasticity, apply_tearing, tear_flags, tear_report, PlasticParams, TearReport,
+    TearingParams,
+};
 pub use collision::{
     apply_backstop, closest_point_on_segment, project_out_of_half_space, project_out_of_sphere,
     resolve_backstops, resolve_body_collisions, resolve_body_collisions_with_friction,

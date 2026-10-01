@@ -467,6 +467,18 @@
 //!   the coefficient-reconstruction [`GpuHairEvalSh`] twin (fit coefficients
 //!   from samples versus reconstruct a value from coefficients), checked
 //!   within the fma tolerance (see [`dual_scatter_project`]).
+//! * [`GpuHairDualScatterFactors`] estimates
+//!   [`dual_scatter_factors`](prism_render_architecture::hair::dual_scatter_sh::dual_scatter_factors),
+//!   the `Zinke` dual-scattering forward/back factors `a_f`/`a_b` — the mean
+//!   transmittance over the `+z` and `-z` hemispheres driving the global
+//!   multiplier `a_f^n` and the local back-scatter term — with two live
+//!   threads in a single workgroup, lane `0` averaging the `+z` hemisphere and
+//!   lane `1` the `-z` hemisphere, each walking every sample in authored order,
+//!   clamping values into `[0, 1]` and yielding `0` for an empty hemisphere; a
+//!   hemisphere-split averaging reduction genuinely distinct from the `SH`
+//!   projection [`GpuHairProjectSh`] and the integer-power
+//!   [`GpuHairForwardScatterPower`] twins, checked within the fma tolerance
+//!   (see [`dual_scatter_factors`]).
 //!
 //! # Portability
 //!
@@ -506,6 +518,7 @@ pub mod decimation_priority;
 pub mod deep_opacity;
 pub mod deep_transmittance_sample;
 pub mod dither_alpha;
+pub mod dual_scatter_factors;
 pub mod dual_scatter_project;
 pub mod eval_sh;
 pub mod follicle_bind;
@@ -561,6 +574,7 @@ pub use decimation_priority::GpuDecimationPriority;
 pub use deep_opacity::GpuHairDeepOpacity;
 pub use deep_transmittance_sample::{GpuHairDeepTransmittanceSample, TransmittanceQuery};
 pub use dither_alpha::{reference_dither_alpha_map, GpuHairDitherAlpha};
+pub use dual_scatter_factors::{reference_dual_scatter_factors, GpuHairDualScatterFactors};
 pub use dual_scatter_project::{reference_project_sh, GpuHairProjectSh};
 pub use eval_sh::{reference_eval_sh, GpuHairEvalSh};
 pub use follicle_bind::{reference_transfer_root_map, GpuHairFollicleBind};

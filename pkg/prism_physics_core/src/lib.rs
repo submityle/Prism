@@ -131,6 +131,10 @@ pub use soft::aero::{
 };
 pub use soft::body::SoftBody;
 pub use soft::build::{Cloth, ClothGrid, Rope, RopeGrid, SoftBox, SoftBoxGrid};
+pub use soft::damage::{
+    apply_plasticity, apply_tearing, tear_flags, tear_report, PlasticParams, TearReport,
+    TearingParams,
+};
 pub use soft::constraint::{
     mesh_volume, AttachmentConstraint, BendingConstraint, ConstraintSet, DistanceConstraint,
     LongRangeConstraint, ParticleConstraint, PressureConstraint, SoftConstraintKind,
