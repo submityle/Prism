@@ -482,6 +482,14 @@
 //!   voxel² units, reproducible) to the nearest occupied cell, feeding
 //!   SDF baking, voxel-cone-traced GI cone biasing, SDF soft shadows, and
 //!   voxel ambient occlusion (one final sqrt for world-space distance).
+//! - [`mesh_solid_voxelization`] — solid inside/outside classification
+//!   ([`mesh_solid_voxelization::solidify`],
+//!   [`mesh_solid_voxelization::SolidVoxelization`],
+//!   [`mesh_solid_voxelization::CellClass`]) of a watertight shell: a
+//!   6-connected exterior flood fill tags every cell Outside, Surface, or
+//!   Interior, supplying solid occupancy for voxel GI and collision
+//!   proxies and the inside/outside sign for a signed distance field
+//!   (pure integer graph traversal, reproducible).
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -656,6 +664,7 @@ pub mod mesh_closest_point;
 pub mod mesh_self_intersections;
 pub mod mesh_voxelize;
 pub mod mesh_voxel_distance_field;
+pub mod mesh_solid_voxelization;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -781,6 +790,7 @@ pub use mesh_closest_point::{closest_point_on_mesh, MeshClosestPoint};
 pub use mesh_self_intersections::{mesh_self_intersections, triangles_intersect};
 pub use mesh_voxelize::{triangle_box_overlap, voxelize_surface, VoxelGrid};
 pub use mesh_voxel_distance_field::{voxel_distance_field, VoxelDistanceField};
+pub use mesh_solid_voxelization::{solidify, CellClass, SolidVoxelization};
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
 pub use obb::{Obb, ObbBvh, ObbHit};
