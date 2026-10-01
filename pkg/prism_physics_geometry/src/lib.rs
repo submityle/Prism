@@ -22,11 +22,13 @@ pub mod bounding;
 pub mod broadphase;
 pub mod bvh;
 pub mod narrow;
+pub mod mesh;
 pub mod proxy;
 
 pub use bounding::{Aabb, BoundingSphere, Capsule, Frustum, Obb, Plane, Ray};
 pub use broadphase::{generate_pairs, BroadPhasePair, PairChanges, PersistentBroadPhase};
 pub use bvh::DynamicBvh;
+pub use mesh::{MeshRayHit, TriangleMesh};
 pub use narrow::{
     closest_point_on_aabb, closest_point_on_segment, closest_point_on_triangle,
     closest_points_segment_segment, contact_manifold, gjk_closest_points, gjk_contact,
