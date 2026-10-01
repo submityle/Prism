@@ -204,6 +204,12 @@
 //!   one sample (continuous shading, no duplicated edges) and every hit's
 //!   bits match the standalone patch, with a single-level
 //!   [`indexed_bilinear_patch_mesh::IndexedBilinearPatchMeshBvh`].
+//! - [`indexed_bilinear_patch_mesh_gpu_layout`] — flat `GPU` buffers for the
+//!   [`indexed_bilinear_patch_mesh::IndexedBilinearPatchMeshBvh`]: shared
+//!   `nodes`/`vertices`/`indices`/`order` buffers
+//!   ([`PATCH_MESH_VERTEX_WORDS`] + [`PATCH_MESH_INDEX_WORDS`] strides, node
+//!   records reusing the shared [`NODE_WORDS`]) with a packed walk that
+//!   decodes and reproduces the in-memory walk bit-for-bit.
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -337,6 +343,7 @@ pub mod bilinear_patch_gpu_layout;
 pub mod shaded_bilinear_patch;
 pub mod shaded_bilinear_patch_gpu_layout;
 pub mod indexed_bilinear_patch_mesh;
+pub mod indexed_bilinear_patch_mesh_gpu_layout;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -417,6 +424,10 @@ pub use shaded_bilinear_patch_gpu_layout::{
 pub use indexed_bilinear_patch_mesh::{
     IndexedBilinearPatchMesh, IndexedBilinearPatchMeshBvh,
     IndexedBilinearPatchMeshError,
+};
+pub use indexed_bilinear_patch_mesh_gpu_layout::{
+    GpuIndexedBilinearPatchMeshBvhBuffers, PATCH_MESH_INDEX_WORDS,
+    PATCH_MESH_VERTEX_WORDS,
 };
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
