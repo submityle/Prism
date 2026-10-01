@@ -86,6 +86,9 @@
 //!   with a free dead zone, leaving the spin about the axis free).
 //! * [`cylindrical_limit_gpu`] — the device-side
 //!   [`GpuCylindricalLimitJointSolver`] twin.
+//! * [`d6`] — the [`D6Joint`] (configurable 6-DOF) definition and its
+//!   [`D6Motion`] per-axis `Locked`/`Limited`/`Free` mode plus device-packed
+//!   storage representation.
 //! * [`distance`] — the [`DistanceJoint`] (limit) definition and its
 //!   device-packed storage representation.
 //! * [`distance_cpu`] — the authoritative [`cpu_solve_joints_distance`] golden
@@ -179,6 +182,7 @@ mod cylindrical_gpu;
 mod cylindrical_limit;
 mod cylindrical_limit_cpu;
 mod cylindrical_limit_gpu;
+mod d6;
 mod distance;
 mod distance_cpu;
 mod distance_gpu;
@@ -245,6 +249,7 @@ pub use cylindrical_gpu::GpuCylindricalJointSolver;
 pub use cylindrical_limit::CylindricalLimitJoint;
 pub use cylindrical_limit_cpu::cpu_solve_joints_cylindrical_limit;
 pub use cylindrical_limit_gpu::GpuCylindricalLimitJointSolver;
+pub use d6::{D6Joint, D6Motion};
 pub use distance::DistanceJoint;
 pub use distance_cpu::cpu_solve_joints_distance;
 pub use distance_gpu::GpuDistanceJointSolver;
