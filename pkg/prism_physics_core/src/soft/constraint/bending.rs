@@ -119,36 +119,80 @@ impl ParticleConstraint for BendingConstraint {
     }
 
     fn project(&mut self, positions: &mut [Vec3], inverse_masses: &[Real], dt: Real) {
-        let ia = self.a.index();
-        let ic = self.center.index();
-        let ib = self.b.index();
-        let (Some(&wa), Some(&wc), Some(&wb)) = (
-            inverse_masses.get(ia),
-            inverse_masses.get(ic),
-            inverse_masses.get(ib),
-        ) else {
-            return;
-        };
-        // Gradient magnitudes: |grad center| = 1, |grad a| = |grad b| = 1/2.
-        let denom_mass = wc + 0.25 * (wa + wb);
-        if denom_mass <= 0.0 {
-            return;
-        }
-        let midpoint = (positions[ia] + positions[ib]) * 0.5;
-        let delta = positions[ic] - midpoint;
-        let length = delta.length();
-        if length < EPSILON {
-            return;
-        }
-        let normal = delta / length;
-        let c = length - self.rest_offset;
-        let alpha_tilde = self.compliance / (dt * dt);
-        let delta_lambda = (-c - alpha_tilde * self.lambda) / (denom_mass + alpha_tilde);
-        self.lambda += delta_lambda;
-        positions[ic] += normal * (delta_lambda * wc);
-        positions[ia] -= normal * (delta_lambda * wa * 0.5);
-        positions[ib] -= normal * (delta_lambda * wb * 0.5);
+        // Delegate to the free [`project_bending`] primitive so the sequential
+        // golden here and any parallel `GPU` twin share byte-identical
+        // arithmetic from a single source of truth.
+        self.lambda = project_bending(
+            positions,
+            inverse_masses,
+            self.a.raw(),
+            self.center.raw(),
+            self.b.raw(),
+            self.rest_offset,
+            self.compliance,
+            self.lambda,
+            dt,
+        );
     }
+}
+
+/// One compliant `XPBD` projection of the point-to-midpoint bending constraint,
+/// written over raw particle indices so a parallel `GPU` twin can share the
+/// exact arithmetic of the sequential [`BendingConstraint`] golden.
+///
+/// Reads and writes `positions` in place and returns the updated accumulated
+/// Lagrange multiplier; the input `lambda` is returned unchanged when the
+/// projection is inert (an out-of-range handle, a fully pinned joint, or a
+/// coincident center and midpoint). The gradients are `+n` on `center` and
+/// `-n/2` on each neighbour, so the denominator is
+/// `w_center + (w_a + w_b) / 4 + alpha_tilde`.
+///
+/// # Provenance
+///
+/// Standard compliant `XPBD` projection (Müller et al.); the point-to-midpoint
+/// bending model is a publicly documented position-based-dynamics technique. No
+/// Unreal Engine source or derived code.
+#[must_use]
+pub fn project_bending(
+    positions: &mut [Vec3],
+    inverse_masses: &[Real],
+    a: u32,
+    center: u32,
+    b: u32,
+    rest_offset: Real,
+    compliance: Real,
+    lambda: Real,
+    dt: Real,
+) -> Real {
+    let ia = a as usize;
+    let ic = center as usize;
+    let ib = b as usize;
+    let (Some(&wa), Some(&wc), Some(&wb)) = (
+        inverse_masses.get(ia),
+        inverse_masses.get(ic),
+        inverse_masses.get(ib),
+    ) else {
+        return lambda;
+    };
+    // Gradient magnitudes: |grad center| = 1, |grad a| = |grad b| = 1/2.
+    let denom_mass = wc + 0.25 * (wa + wb);
+    if denom_mass <= 0.0 {
+        return lambda;
+    }
+    let midpoint = (positions[ia] + positions[ib]) * 0.5;
+    let delta = positions[ic] - midpoint;
+    let length = delta.length();
+    if length < EPSILON {
+        return lambda;
+    }
+    let normal = delta / length;
+    let c = length - rest_offset;
+    let alpha_tilde = compliance / (dt * dt);
+    let delta_lambda = (-c - alpha_tilde * lambda) / (denom_mass + alpha_tilde);
+    positions[ic] += normal * (delta_lambda * wc);
+    positions[ia] -= normal * (delta_lambda * wa * 0.5);
+    positions[ib] -= normal * (delta_lambda * wb * 0.5);
+    lambda + delta_lambda
 }
 
 #[cfg(test)]

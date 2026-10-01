@@ -34,7 +34,7 @@ pub mod strain_limit;
 pub mod volume;
 
 pub use attachment::AttachmentConstraint;
-pub use bending::BendingConstraint;
+pub use bending::{project_bending, BendingConstraint};
 pub use distance::DistanceConstraint;
 pub use long_range::LongRangeConstraint;
 pub use pressure::{mesh_volume, PressureConstraint};
