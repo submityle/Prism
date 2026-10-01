@@ -26,7 +26,7 @@ use super::state::ParticleState;
 
 /// Machine epsilon for `f32`, matching `prism_physics_core`'s degenerate-length
 /// guard so both engines treat near-coincident particles identically.
-const EPSILON: f32 = f32::EPSILON;
+pub(crate) const EPSILON: f32 = f32::EPSILON;
 
 /// Advances `state` under `constraints` by `dt` seconds using colour-ordered
 /// substep `XPBD`.
@@ -56,6 +56,35 @@ pub fn cpu_solve(
         return Ok(());
     }
 
+    // The plain solver integrates every particle, so the awake mask is all true;
+    // the island-aware stepper reuses [`run_substeps`] with a real mask.
+    let awake = vec![true; state.len()];
+    run_substeps(state, constraints, &awake, config, dt)
+}
+
+/// Runs the colour-ordered substep `XPBD` loop over `constraints`, integrating
+/// only the particles the `awake` mask selects.
+///
+/// This is the shared core of both the plain [`cpu_solve`] (all-true mask, every
+/// constraint) and the island-aware stepper (per-island awake mask, awake-island
+/// constraints only). Factoring it out keeps a single, parity-locked numeric
+/// path: the two callers differ only in which particles and constraints they
+/// feed in, never in the arithmetic.
+///
+/// `awake` must have one entry per particle in `state`. Returns `Ok` without
+/// touching `state` when the effective substep size is non-positive.
+///
+/// # Errors
+///
+/// Returns [`XpbdError`] when the constraint graph needs more colours than
+/// supported or indexes a missing particle.
+pub(crate) fn run_substeps(
+    state: &mut ParticleState,
+    constraints: &[DistanceConstraint],
+    awake: &[bool],
+    config: &XpbdConfig,
+    dt: f32,
+) -> Result<(), XpbdError> {
     let particle_count = state.len() as u32;
     let colouring = Colouring::build(constraints, particle_count)?;
     let ordered = colouring.reorder(constraints);
@@ -73,7 +102,7 @@ pub fn cpu_solve(
     let mut lambda = vec![0.0f32; ordered.len()];
 
     for _ in 0..substeps {
-        predict(state, &mut prev, config.gravity, damping_scale, h);
+        predict(state, &mut prev, config.gravity, damping_scale, h, awake);
         lambda.iter_mut().for_each(|l| *l = 0.0);
         for _ in 0..iterations {
             for &(start, end) in colouring.ranges() {
@@ -88,39 +117,42 @@ pub fn cpu_solve(
                 }
             }
         }
-        finalize(state, &prev, inv_h);
+        finalize(state, &prev, inv_h, awake);
     }
     Ok(())
 }
 
 /// One substep prediction: snapshot positions, integrate acceleration, damp.
-fn predict(
+///
+/// `awake[i]` gates integration: a particle is advanced only when it is awake
+/// *and* dynamic (inverse mass `> 0`). The position snapshot is always taken so
+/// [`finalize`] can recover velocities, but a sleeping or pinned particle keeps
+/// its position and velocity untouched. The plain [`cpu_solve`] passes an
+/// all-true mask; the island-aware stepper passes a real one.
+pub(crate) fn predict(
     state: &mut ParticleState,
     prev: &mut [Vec3],
     gravity: Vec3,
     damping_scale: f32,
     h: f32,
+    awake: &[bool],
 ) {
-    for (((prev_pos, pos), vel), &w) in prev
-        .iter_mut()
-        .zip(state.positions.iter_mut())
-        .zip(state.velocities.iter_mut())
-        .zip(state.inverse_masses.iter())
-    {
-        *prev_pos = *pos;
-        if w <= 0.0 {
+    for i in 0..state.positions.len() {
+        prev[i] = state.positions[i];
+        let w = state.inverse_masses[i];
+        if w <= 0.0 || !awake[i] {
             continue;
         }
-        let mut v = *vel;
+        let mut v = state.velocities[i];
         v += gravity * h;
         v *= damping_scale;
-        *vel = v;
-        *pos += v * h;
+        state.velocities[i] = v;
+        state.positions[i] += v * h;
     }
 }
 
 /// Projects one distance constraint, accumulating its Lagrange multiplier.
-fn project(
+pub(crate) fn project(
     con: &DistanceConstraint,
     lambda: &mut f32,
     positions: &mut [Vec3],
@@ -151,14 +183,17 @@ fn project(
 }
 
 /// Recovers velocities from the net substep displacement.
-fn finalize(state: &mut ParticleState, prev: &[Vec3], inv_h: f32) {
-    for ((vel, pos), prev_pos) in state
-        .velocities
-        .iter_mut()
-        .zip(state.positions.iter())
-        .zip(prev.iter())
-    {
-        *vel = (*pos - *prev_pos) * inv_h;
+///
+/// Only awake particles have their velocity recovered; a sleeping or pinned
+/// particle (masked out) keeps whatever velocity it already had, so it stays at
+/// rest. [`cpu_solve`] passes an all-true mask, recovering every particle's
+/// velocity exactly as the `GPU` kernel does.
+pub(crate) fn finalize(state: &mut ParticleState, prev: &[Vec3], inv_h: f32, awake: &[bool]) {
+    for i in 0..state.velocities.len() {
+        if !awake[i] {
+            continue;
+        }
+        state.velocities[i] = (state.positions[i] - prev[i]) * inv_h;
     }
 }
 
@@ -269,8 +304,9 @@ mod tests {
         let inv_h = 1.0 / h;
         let mut prev = vec![Vec3::ZERO; state.len()];
         let mut lambda = vec![0.0f32; ordered.len()];
+        let awake = vec![true; state.len()];
         for _ in 0..substeps {
-            predict(state, &mut prev, config.gravity, damping_scale, h);
+            predict(state, &mut prev, config.gravity, damping_scale, h, &awake);
             lambda.iter_mut().for_each(|l| *l = 0.0);
             for _ in 0..iterations {
                 for gi in 0..ordered.len() {
@@ -283,7 +319,7 @@ mod tests {
                     );
                 }
             }
-            finalize(state, &prev, inv_h);
+            finalize(state, &prev, inv_h, &awake);
         }
     }
 
