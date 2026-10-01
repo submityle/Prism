@@ -643,6 +643,7 @@ pub mod adaptive_transmittance;
 pub mod analysis_reduce;
 pub mod barrier_contact;
 pub mod bin_samples;
+pub mod bind_follicle;
 pub mod binding_importance;
 pub mod closest_point_triangle;
 pub mod cluster_cull;
@@ -714,6 +715,7 @@ pub use adaptive_transmittance::{
 pub use analysis_reduce::{reference_reduce, GpuHairAnalysisReduce};
 pub use barrier_contact::{reference_resolve, ContactInput, ContactOutput, GpuHairBarrierContact};
 pub use bin_samples::GpuHairBinSamples;
+pub use bind_follicle::{reference_bind_follicle, GpuHairBindFollicle};
 pub use binding_importance::GpuHairBindingImportance;
 pub use closest_point_triangle::{
     reference_closest_point, ClosestPointQuery, ClosestPointResult, GpuHairClosestPointTriangle,
