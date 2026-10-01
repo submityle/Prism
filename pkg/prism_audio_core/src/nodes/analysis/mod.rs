@@ -16,6 +16,9 @@
 //!   pre-filter used by the loudness measurement.
 //! - [`loudness::TruePeakMeter`] -- the 4x oversampling polyphase inter-sample
 //!   peak estimator used for the `dBTP` reading.
+//! - [`correlation::CorrelationMeter`] / [`correlation::CorrelationMeterNode`]
+//!   -- stereo phase correlation, mid/side width, left/right balance, and
+//!   mid/side `RMS` levels for stereo-field and mono-compatibility checks.
 //!
 //! # Provenance
 //!
@@ -32,8 +35,10 @@
 //! here reuse the shared filter primitives in
 //! [`biquad`](crate::nodes::biquad) rather than re-implementing them.
 
+pub mod correlation;
 pub mod loudness;
 
+pub use correlation::{CorrelationMeasurement, CorrelationMeter, CorrelationMeterNode};
 pub use loudness::{
     KWeighting, LoudnessMeasurement, LoudnessMeter, LoudnessMeterNode, TruePeakMeter,
 };
