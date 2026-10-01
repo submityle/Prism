@@ -71,6 +71,10 @@
 //! * [`refraction`] — screen-space rough refraction (Snell + Beer).
 //! * [`film_grain`] — film grain + sensor photon/read noise.
 //! * [`triplanar`] — triplanar projection + stochastic tiling.
+//! * [`anisotropy`] — anisotropic GGX specular (brushed metal).
+//! * [`capsule_shadow`] — capsule/sphere analytic soft shadows + AO.
+//! * [`vxgi`] — voxel cone-traced indirect diffuse/specular.
+//! * [`planar_reflect`] — exact planar mirror reflection.
 
 pub mod denoise;
 pub mod occlusion;
@@ -121,4 +125,8 @@ pub mod light_shaft;
 pub mod refraction;
 pub mod film_grain;
 pub mod triplanar;
+pub mod anisotropy;
+pub mod capsule_shadow;
+pub mod vxgi;
+pub mod planar_reflect;
 pub mod world_space;
