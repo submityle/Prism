@@ -1,0 +1,27 @@
+[package]
+name = "prism_ui"
+version = "0.1.0"
+edition = "2024"
+description = "Loom: declarative UI/scene notation for Prism. Umbrella crate wiring the reactive core, retained tree, style cascade, flexbox layout and animation into one engine-agnostic view runtime. Contains no Unreal Engine source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_ui_reactive = { path = "../prism_ui_reactive" }
+prism_ui_tree = { path = "../prism_ui_tree" }
+prism_ui_style = { path = "../prism_ui_style" }
+prism_ui_layout = { path = "../prism_ui_layout" }
+prism_ui_anim = { path = "../prism_ui_anim" }
+
+[features]
+default = ["std"]
+std = [
+  "prism_ui_reactive/std",
+  "prism_ui_tree/std",
+  "prism_ui_style/std",
+  "prism_ui_layout/std",
+  "prism_ui_anim/std",
+]
+
+[lints]
+workspace = true
