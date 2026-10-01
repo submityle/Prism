@@ -15,7 +15,7 @@
 use alloc::vec::Vec;
 use glam::Vec3;
 
-use crate::bounding::{Aabb, BoundingSphere, Capsule, Ray};
+use crate::bounding::{Aabb, BoundingSphere, Capsule, Obb, Ray};
 use crate::bvh::DynamicBvh;
 use crate::narrow::{
     closest_point_on_triangle, closest_point_segment_triangle, ray_triangle,
@@ -425,6 +425,32 @@ impl TriangleMesh {
         out
     }
 
+    /// Collects the indices of every triangle overlapping the oriented box `obb`.
+    ///
+    /// An oriented box is an axis-aligned box in its own local frame, so each
+    /// candidate triangle (gathered from the BVH via the OBB's world-space
+    /// AABB) is transformed into that frame and confirmed with the exact
+    /// triangle/box separating-axis test against the centred local box. A
+    /// triangle whose world AABB meets the OBB's bounds but whose body clears
+    /// the rotated box is therefore rejected. Indices are reported in BVH
+    /// traversal order, not sorted.
+    pub fn overlap_obb(&self, obb: &Obb) -> Vec<u32> {
+        let mut out = Vec::new();
+        let axes = obb.axes();
+        let local_box = Aabb::from_center_half_extents(Vec3::ZERO, obb.half_extents);
+        self.bvh.query_aabb(obb.aabb(), &mut |data| {
+            let tri_index = data as usize;
+            let [ia, ib, ic] = self.indices[tri_index];
+            let a = to_obb_local(self.vertices[ia as usize], obb.center, &axes);
+            let b = to_obb_local(self.vertices[ib as usize], obb.center, &axes);
+            let c = to_obb_local(self.vertices[ic as usize], obb.center, &axes);
+            if triangle_aabb_overlap(a, b, c, &local_box) {
+                out.push(data as u32);
+            }
+        });
+        out
+    }
+
     /// Sweeps a sphere of `radius` whose centre follows `ray` against the mesh
     /// and returns the earliest contact within `[0, ray.tmax]`.
     ///
@@ -504,6 +530,15 @@ impl TriangleMesh {
         });
         best
     }
+}
+
+/// Projects a world-space `point` into the local frame of an oriented box with
+/// the given `center` and orthonormal `axes`, yielding coordinates in which the
+/// box is axis-aligned and centred at the origin.
+#[inline]
+fn to_obb_local(point: Vec3, center: Vec3, axes: &[Vec3; 3]) -> Vec3 {
+    let d = point - center;
+    Vec3::new(d.dot(axes[0]), d.dot(axes[1]), d.dot(axes[2]))
 }
 
 #[cfg(test)]
@@ -656,6 +691,75 @@ mod tests {
             Vec3::new(2.0, 2.0, 4.0),
         );
         assert!(mesh.overlap_aabb(&box_).is_empty());
+    }
+
+    #[test]
+    fn overlap_obb_axis_aligned_selects_front() {
+        let mesh = two_quads();
+        // Axis-aligned box straddling quad A (z = 2) over the unit square.
+        let obb = crate::bounding::Obb::new(
+            Vec3::new(0.0, 0.0, 2.0),
+            Vec3::new(2.0, 2.0, 0.2),
+            glam::Quat::IDENTITY,
+        );
+        let tris = mesh.overlap_obb(&obb);
+        assert_eq!(tris.len(), 2, "both front triangles: {tris:?}");
+        assert!(tris.iter().all(|&t| t < 2));
+    }
+
+    #[test]
+    fn overlap_obb_rotated_about_z_still_selects() {
+        let mesh = two_quads();
+        // Rotating about Z keeps the box flush with quad A's plane, so the
+        // front triangles are still selected.
+        let obb = crate::bounding::Obb::new(
+            Vec3::new(0.0, 0.0, 2.0),
+            Vec3::new(2.0, 2.0, 0.2),
+            glam::Quat::from_rotation_z(core::f32::consts::FRAC_PI_4),
+        );
+        let tris = mesh.overlap_obb(&obb);
+        assert_eq!(tris.len(), 2, "both front triangles: {tris:?}");
+        assert!(tris.iter().all(|&t| t < 2));
+    }
+
+    #[test]
+    fn overlap_obb_rejects_gap() {
+        let mesh = two_quads();
+        // Box sitting in the gap between the quads (z in [3, 4]) hits nothing.
+        let obb = crate::bounding::Obb::new(
+            Vec3::new(0.0, 0.0, 3.5),
+            Vec3::new(2.0, 2.0, 0.5),
+            glam::Quat::IDENTITY,
+        );
+        assert!(mesh.overlap_obb(&obb).is_empty());
+    }
+
+    #[test]
+    fn overlap_obb_rotation_clears_triangle() {
+        let mesh = two_quads();
+        // A small box near quad A's corner: its world-space AABB overlaps the
+        // quad (so the broad phase keeps the candidate), but the rotated body
+        // misses the quad plane coverage, so the exact test rejects it.
+        let obb = crate::bounding::Obb::new(
+            Vec3::new(1.5, 1.5, 2.0),
+            Vec3::splat(0.5),
+            glam::Quat::from_rotation_z(core::f32::consts::FRAC_PI_4),
+        );
+        // Broad phase (world AABB) still finds candidates...
+        assert!(!mesh.overlap_aabb(&obb.aabb()).is_empty());
+        // ...but the exact oriented-box test clears the triangle.
+        assert!(mesh.overlap_obb(&obb).is_empty());
+    }
+
+    #[test]
+    fn overlap_obb_empty_mesh_is_empty() {
+        let mesh = TriangleMesh::new(alloc::vec![], alloc::vec![]);
+        let obb = crate::bounding::Obb::new(
+            Vec3::ZERO,
+            Vec3::splat(1.0),
+            glam::Quat::IDENTITY,
+        );
+        assert!(mesh.overlap_obb(&obb).is_empty());
     }
 
     #[test]
