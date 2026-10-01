@@ -87,6 +87,7 @@ pub mod lod;
 pub mod lod_dither_buffers;
 pub mod melanin;
 pub mod mesh_shell;
+pub mod oit_frontend;
 pub mod optional_pass_dispatch;
 pub mod optional_pass_layout;
 pub mod pass_layout;

@@ -7953,6 +7953,21 @@ const MAC_DIV_RESIDUAL_FRACTION: f32 = 0.20;
 /// summation rounding may nudge the total upward by this relative amount.
 const MAC_ENERGY_GROWTH_EPS: f32 = 1.0e-4;
 
+/// Ceiling on how far the post-projection face energy may rise above the first
+/// frame's post-projection energy across the whole multi-frame roll-out. The
+/// staggered-`MAC` projection is a true orthogonal projection, so with the
+/// dissipative `PIC`/`FLIP` transfer the grid energy stays bounded frame over
+/// frame. The documented collocated scheme instead pumps energy roughly 1.5x
+/// per frame (its checkerboard residual is invisible to the solve), so it blows
+/// through any constant ceiling within a couple of frames — this bound is the
+/// quantitative line that separates the two.
+const MAC_PIPELINE_ENERGY_CEILING: f32 = 1.25;
+
+/// Absolute floor added to the per-frame divergence-reduction bound so a frame
+/// whose pre-projection field is already nearly divergence-free (nothing left
+/// to remove) does not trip the ratio test on `float32` noise.
+const MAC_PIPELINE_DIV_FLOOR: f32 = 1.0e-3;
+
 /// Compiles `water_flip_mac.wesl` and returns its `Wgsl` translation.
 fn compile_flip_mac_wgsl() -> String {
     let mut cache = ShaderCache::new((), keep_wgsl);
@@ -9650,5 +9665,320 @@ fn flip_mac_g2p_gpu_matches_cpu_golden() {
     assert!(
         (inactive_gpu.vel[0] - 9.0).abs() <= PARITY_EPS,
         "inactive particle was modified by the gather"
+    );
+}
+
+/// Pipeline-level proof that the staggered-`MAC` free-surface solver is
+/// unconditionally bounded and incompressible across a real multi-frame run on
+/// the device — the end state the collocated `water_flip.wesl` path explicitly
+/// could not reach (see `flip_full_pipeline_gpu_multi_frame_tracks_cpu`, which
+/// deliberately makes no bounded-energy claim).
+///
+/// Each frame drives the full staggered chain entirely on the `GPU`:
+/// face-centered `P2G` scatter + normalize (`water_flip_mac_p2g`) builds the
+/// pre-projection face field, the compact `divergence → damped-Jacobi pressure
+/// → project` kernels (`water_flip_mac`) make it discretely divergence-free, and
+/// `water_flip_mac_g2p` gathers the projected field back onto the particles with
+/// the `projected − preprojection` `FLIP` delta and a dissipative `PIC` blend.
+/// The particles are then advected with damped reflective walls and re-gridded
+/// next frame, so the invariants span a genuine run rather than one projection.
+///
+/// Three invariants are asserted every frame, each of which the collocated
+/// scheme violates:
+/// * the compact projection never injects face energy
+///   (`E_post ≤ E_pre·(1+ε)`) — the orthogonal-projection signature;
+/// * the projection never increases the peak divergence
+///   (`|div|_post ≤ |div|_pre·(1+ε)`) and drives it down to a small fraction of
+///   the pre-projection residual (`MAC_DIV_RESIDUAL_FRACTION`, with an absolute
+///   floor for already-smooth frames);
+/// * the post-projection grid energy stays under a constant ceiling relative to
+///   the first frame (`MAC_PIPELINE_ENERGY_CEILING`), so there is no runaway —
+///   the collocated path's ~1.5x-per-frame growth would blow through it almost
+///   immediately.
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice and measured bounded/incompressible metrics must reach the test log"
+)]
+fn flip_mac_full_pipeline_gpu_multi_frame_is_bounded_and_incompressible() {
+    let Some((device, queue)) = try_solver_device() else {
+        eprintln!(
+            "flip_mac_full_pipeline_gpu_multi_frame_is_bounded_and_incompressible: no wgpu adapter, skipping"
+        );
+        return;
+    };
+
+    const FRAMES: usize = 8;
+    const JACOBI: u32 = 80;
+    let dim = [6u32, 6u32, 6u32];
+    let cell_count = dim[0] * dim[1] * dim[2];
+    let dx = 1.0_f32;
+    let inv_dx = 1.0_f32;
+    let dt = 0.04_f32;
+    let lo = 0.05_f32;
+    let hi = dim[0] as f32 * dx - 0.05_f32;
+
+    // A centred block of fluid seeded with a swirl (solenoidal, survives
+    // projection) plus a radial inflow (divergent, must be projected out). The
+    // divergent part gives the projection genuine work; the slight `PIC` blend
+    // keeps the retained swirl from pumping grid-particle noise upward.
+    let centre = [3.0_f32, 3.5_f32, 3.0_f32];
+    let swirl = 1.0_f32;
+    let converge = 0.6_f32;
+    let mut parts: Vec<GpuFlipParticle> = Vec::new();
+    let mut cz = 1u32;
+    while cz <= 4 {
+        let mut cy = 2u32;
+        while cy <= 4 {
+            let mut cx = 1u32;
+            while cx <= 4 {
+                let idx = parts.len() as u32;
+                let jx = (((idx * 5) % 3) as f32 - 1.0) * 0.125;
+                let jy = (((idx * 7) % 3) as f32 - 1.0) * 0.125;
+                let jz = (((idx * 11) % 3) as f32 - 1.0) * 0.125;
+                let px = (cx as f32 + 0.5) * dx + jx;
+                let py = (cy as f32 + 0.5) * dx + jy;
+                let pz = (cz as f32 + 0.5) * dx + jz;
+                let rx = px - centre[0];
+                let ry = py - centre[1];
+                let rz = pz - centre[2];
+                let vx = -rz * swirl - rx * converge;
+                let vy = -ry * converge;
+                let vz = rx * swirl - rz * converge;
+                parts.push(GpuFlipParticle {
+                    pos: [px, py, pz, 1.0],
+                    vel: [vx, vy, vz, 0.0],
+                    c0: [0.0, 0.0, 0.0, 0.0],
+                    c1: [0.0, 0.0, 0.0, 0.0],
+                    c2: [0.0, 0.0, 0.0, 0.0],
+                });
+                cx += 1;
+            }
+            cy += 1;
+        }
+        cz += 1;
+    }
+    let params = GpuFlipSimParams {
+        origin: [0.0, 0.0, 0.0, 0.0],
+        dim: [dim[0], dim[1], dim[2], 0],
+        dx,
+        inv_dx,
+        // Slight `PIC` blend (`0.95` `FLIP`): dissipative enough to keep the
+        // re-gridded energy from drifting on transfer noise, while still a `FLIP`
+        // transfer rather than a pure-`PIC` smear.
+        flip_blend: 0.95,
+        particle_mass: 1.0,
+        jacobi_omega: 0.6,
+        use_affine: 1,
+        particle_count: parts.len() as u32,
+        cell_count,
+    };
+    assert!(parts.len() >= 32, "fluid block must be non-trivial");
+
+    let mac_params = GpuMacParams {
+        dim: [dim[0], dim[1], dim[2], cell_count],
+        inv_dx,
+        dx,
+        jacobi_omega: params.jacobi_omega,
+        pad: 0.0,
+    };
+
+    let mut initial_peak = 0.0_f32;
+    for particle in &parts {
+        let v = particle.vel;
+        let sp = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        if sp > initial_peak {
+            initial_peak = sp;
+        }
+    }
+    assert!(
+        initial_peak > 0.5,
+        "seed impulse must carry a non-trivial speed, got {initial_peak}"
+    );
+
+    let p2g_wgsl = compile_flip_mac_p2g_wgsl();
+    let p2g_entry = find_entry_point(&p2g_wgsl, "water_flip_mac_p2g");
+    let norm_entry = find_entry_point(&p2g_wgsl, "water_flip_mac_faces_normalize");
+    let proj_wgsl = compile_flip_mac_wgsl();
+    let div_entry = find_entry_point(&proj_wgsl, "mac_divergence");
+    let pressure_entry = find_entry_point(&proj_wgsl, "mac_pressure");
+    let project_entry = find_entry_point(&proj_wgsl, "mac_project");
+    let g2p_wgsl = compile_flip_mac_g2p_wgsl();
+    let g2p_entry = find_entry_point(&g2p_wgsl, "water_flip_mac_g2p");
+
+    let mut first_post_energy = 0.0_f32;
+    let mut init_div_pre = 0.0_f32;
+    let mut last_div_post = 0.0_f32;
+    let mut max_post_energy = 0.0_f32;
+    let mut max_speed_seen = 0.0_f32;
+
+    let mut frame = 0usize;
+    while frame < FRAMES {
+        // 1) Face-centered P2G: scatter particles onto the staggered faces and
+        //    normalize momentum by mass. This is the pre-projection field.
+        let (_scatter, preproj) = dispatch_flip_mac_p2g(
+            &device,
+            &queue,
+            &p2g_wgsl,
+            &p2g_entry,
+            &norm_entry,
+            &parts,
+            dim,
+            &params,
+        );
+
+        // 2) Compact projection: divergence → damped-Jacobi pressure → project.
+        let div_pre_field = dispatch_mac_divergence(
+            &device,
+            &queue,
+            &proj_wgsl,
+            &div_entry,
+            &preproj,
+            &mac_params,
+        );
+        let div_pre = mac_max_abs(&div_pre_field);
+        let pressure = dispatch_mac_pressure(
+            &device,
+            &queue,
+            &proj_wgsl,
+            &pressure_entry,
+            &div_pre_field,
+            &mac_params,
+            JACOBI,
+        );
+        let projected = dispatch_mac_project(
+            &device,
+            &queue,
+            &proj_wgsl,
+            &project_entry,
+            &preproj,
+            &pressure,
+            &mac_params,
+        );
+
+        // Energy + divergence diagnostics on the pre/post face fields.
+        let e_pre = mac_face_energy(&preproj);
+        let e_post = mac_face_energy(&projected);
+        let div_post_field = mac_divergence_golden(&projected, dim, inv_dx);
+        let div_post = mac_max_abs(&div_post_field);
+        assert!(
+            e_pre.is_finite() && e_post.is_finite() && div_pre.is_finite() && div_post.is_finite(),
+            "frame {frame}: non-finite diagnostic e_pre={e_pre} e_post={e_post} div_pre={div_pre} div_post={div_post}"
+        );
+
+        if frame == 0 {
+            first_post_energy = e_post;
+            init_div_pre = div_pre;
+            assert!(
+                div_pre > 0.25,
+                "seed must carry a non-trivial divergence for the projection to fight, got {div_pre}"
+            );
+        }
+        if e_post > max_post_energy {
+            max_post_energy = e_post;
+        }
+        last_div_post = div_post;
+
+        // Invariant A: the projection never injects face energy.
+        assert!(
+            e_post <= e_pre * (1.0 + MAC_ENERGY_GROWTH_EPS),
+            "frame {frame}: projection injected face energy {e_pre} -> {e_post}"
+        );
+        // Invariant B: the projection never raises the peak divergence, and it
+        // drives the residual well below the pre-projection peak.
+        assert!(
+            div_post <= div_pre * (1.0 + MAC_ENERGY_GROWTH_EPS),
+            "frame {frame}: projection increased peak divergence {div_pre} -> {div_post}"
+        );
+        assert!(
+            div_post <= div_pre * MAC_DIV_RESIDUAL_FRACTION + MAC_PIPELINE_DIV_FLOOR,
+            "frame {frame}: residual divergence {div_post} exceeds {MAC_DIV_RESIDUAL_FRACTION} of pre-projection {div_pre}"
+        );
+        // Invariant C: no runaway — post-projection energy stays under a
+        // constant ceiling relative to the first frame across the whole run.
+        assert!(
+            e_post <= first_post_energy * MAC_PIPELINE_ENERGY_CEILING,
+            "frame {frame}: grid energy ran away {first_post_energy} -> {e_post} (ceiling x{MAC_PIPELINE_ENERGY_CEILING})"
+        );
+
+        // 3) Face-centered G2P: gather the projected field onto the particles
+        //    with the FLIP delta `projected - preproj` and the PIC blend.
+        let next_parts = dispatch_flip_mac_g2p(
+            &device, &queue, &g2p_wgsl, &g2p_entry, &parts, &projected, &preproj, &params,
+        );
+        assert_eq!(
+            next_parts.len(),
+            parts.len(),
+            "frame {frame}: particle count changed"
+        );
+
+        // 4) Advect with damped reflective walls; this is the state the next
+        //    frame re-grids, so the invariants span a genuine multi-frame run.
+        parts = next_parts;
+        let mut pa = 0usize;
+        while pa < parts.len() {
+            if parts[pa].pos[3] <= 0.5 {
+                pa += 1;
+                continue;
+            }
+            let mut np = [
+                parts[pa].pos[0] + parts[pa].vel[0] * dt,
+                parts[pa].pos[1] + parts[pa].vel[1] * dt,
+                parts[pa].pos[2] + parts[pa].vel[2] * dt,
+            ];
+            let mut nv = [parts[pa].vel[0], parts[pa].vel[1], parts[pa].vel[2]];
+            let mut axis = 0usize;
+            while axis < 3 {
+                if np[axis] < lo {
+                    np[axis] = lo;
+                    if nv[axis] < 0.0 {
+                        nv[axis] = -nv[axis] * FLIP_WALL_RESTITUTION;
+                    }
+                } else if np[axis] > hi {
+                    np[axis] = hi;
+                    if nv[axis] > 0.0 {
+                        nv[axis] = -nv[axis] * FLIP_WALL_RESTITUTION;
+                    }
+                }
+                axis += 1;
+            }
+            parts[pa].pos = [np[0], np[1], np[2], parts[pa].pos[3]];
+            parts[pa].vel = [nv[0], nv[1], nv[2], parts[pa].vel[3]];
+            let speed = (nv[0] * nv[0] + nv[1] * nv[1] + nv[2] * nv[2]).sqrt();
+            assert!(
+                speed.is_finite(),
+                "frame {frame} particle {pa}: non-finite speed"
+            );
+            if speed > max_speed_seen {
+                max_speed_seen = speed;
+            }
+            assert!(
+                np[0] >= lo - WATER_EPS
+                    && np[0] <= hi + WATER_EPS
+                    && np[1] >= lo - WATER_EPS
+                    && np[1] <= hi + WATER_EPS
+                    && np[2] >= lo - WATER_EPS
+                    && np[2] <= hi + WATER_EPS,
+                "frame {frame} particle {pa}: left the domain at {np:?}"
+            );
+            pa += 1;
+        }
+
+        frame += 1;
+    }
+
+    // Over the whole run the particle speed never exploded, matching the bounded
+    // grid energy — the collocated path cannot make this claim.
+    assert!(
+        max_speed_seen <= initial_peak * MAC_PIPELINE_ENERGY_CEILING,
+        "particle speed ran away: {max_speed_seen} > {initial_peak} x {MAC_PIPELINE_ENERGY_CEILING}"
+    );
+
+    eprintln!(
+        "flip_mac_full_pipeline_gpu_multi_frame_is_bounded_and_incompressible: {FRAMES} frames x {JACOBI} Jacobi, \
+         post-energy peak {max_post_energy:.6} / first {first_post_energy:.6} = {:.4} (ceiling {MAC_PIPELINE_ENERGY_CEILING}), \
+         divergence {init_div_pre:.6} -> {last_div_post:.6} = {:.4}, max particle speed {max_speed_seen:.4} / seed {initial_peak:.4}",
+        max_post_energy / first_post_energy.max(FLIP_EPS),
+        last_div_post / init_div_pre.max(FLIP_EPS),
     );
 }
