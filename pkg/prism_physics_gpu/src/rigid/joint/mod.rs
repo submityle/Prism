@@ -46,6 +46,12 @@
 //!   point-to-point weld).
 //! * [`revolute_drive_gpu`] — the device-side [`GpuRevoluteDriveJointSolver`]
 //!   twin.
+//! * [`cylindrical`] — the [`CylindricalJoint`] definition and its
+//!   device-packed storage representation.
+//! * [`cylindrical_cpu`] — the authoritative [`cpu_solve_joints_cylindrical`]
+//!   golden stepper (axis alignment plus a point-on-line weld, freeing the
+//!   slide along and the spin about a shared axis).
+//! * [`cylindrical_gpu`] — the device-side [`GpuCylindricalJointSolver`] twin.
 //! * [`distance`] — the [`DistanceJoint`] (limit) definition and its
 //!   device-packed storage representation.
 //! * [`distance_cpu`] — the authoritative [`cpu_solve_joints_distance`] golden
@@ -112,6 +118,9 @@
 
 mod coloring;
 mod config;
+mod cylindrical;
+mod cylindrical_cpu;
+mod cylindrical_gpu;
 mod distance;
 mod distance_cpu;
 mod distance_gpu;
@@ -151,6 +160,9 @@ mod universal_gpu;
 
 pub use coloring::{JointColouring, MAX_JOINT_BATCHES};
 pub use config::JointSolverConfig;
+pub use cylindrical::CylindricalJoint;
+pub use cylindrical_cpu::cpu_solve_joints_cylindrical;
+pub use cylindrical_gpu::GpuCylindricalJointSolver;
 pub use distance::DistanceJoint;
 pub use distance_cpu::cpu_solve_joints_distance;
 pub use distance_gpu::GpuDistanceJointSolver;

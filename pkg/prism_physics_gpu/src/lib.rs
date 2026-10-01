@@ -104,11 +104,12 @@ pub use narrowphase::{
 pub use radix::{cpu_radix_sort_keys, cpu_radix_sort_pairs, GpuRadixSort};
 pub use rigid::{
     cpu_integrate, cpu_integrate_gyro, cpu_solve_contacts, cpu_solve_contacts_tgs,
-    cpu_solve_joints_distance, cpu_solve_joints_fixed, cpu_solve_joints_hinge_limit,
-    cpu_solve_joints_prismatic, cpu_solve_joints_prismatic_drive, cpu_solve_joints_prismatic_limit,
-    cpu_solve_joints_revolute, cpu_solve_joints_revolute_drive, cpu_solve_joints_spherical,
-    cpu_solve_joints_swing_twist, cpu_solve_joints_universal, ContactSolverConfig, DistanceJoint,
-    FixedJoint, GpuDistanceJointSolver, GpuFixedJointSolver, GpuHingeLimitJointSolver,
+    cpu_solve_joints_cylindrical, cpu_solve_joints_distance, cpu_solve_joints_fixed,
+    cpu_solve_joints_hinge_limit, cpu_solve_joints_prismatic, cpu_solve_joints_prismatic_drive,
+    cpu_solve_joints_prismatic_limit, cpu_solve_joints_revolute, cpu_solve_joints_revolute_drive,
+    cpu_solve_joints_spherical, cpu_solve_joints_swing_twist, cpu_solve_joints_universal,
+    ContactSolverConfig, CylindricalJoint, DistanceJoint, FixedJoint, GpuCylindricalJointSolver,
+    GpuDistanceJointSolver, GpuFixedJointSolver, GpuHingeLimitJointSolver,
     GpuPrismaticDriveJointSolver, GpuPrismaticJointSolver, GpuPrismaticLimitJointSolver,
     GpuRevoluteDriveJointSolver, GpuRevoluteJointSolver, GpuRigidContactSolver, GpuRigidIntegrator,
     GpuRigidTgsContactSolver, GpuSphericalJointSolver, GpuSwingTwistJointSolver,
