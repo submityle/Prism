@@ -511,6 +511,7 @@ pub mod barrier_contact;
 pub mod bin_samples;
 pub mod binding_importance;
 pub mod closest_point_triangle;
+pub mod cluster_cull;
 pub mod collision;
 pub mod context;
 pub mod cosserat;
@@ -568,6 +569,7 @@ pub use binding_importance::GpuHairBindingImportance;
 pub use closest_point_triangle::{
     reference_closest_point, ClosestPointQuery, ClosestPointResult, GpuHairClosestPointTriangle,
 };
+pub use cluster_cull::GpuHairClusterCull;
 pub use collision::{query_for, CollisionQuery, GpuColliderProjector};
 pub use context::{block_on, GpuContext};
 pub use cosserat::GpuCosserat;
