@@ -256,13 +256,14 @@ fn cloth_damp_tangential_slip(
         return projected;
     }
     let tan_len = sqrt(tan_sq);
-    let max_removed = friction * depth;
-    var removed = max_removed;
-    if tan_len <= max_removed {
-        removed = tan_len;
-    }
-    let tan_dir = tangential * (1.0 / tan_len);
-    return projected - tan_dir * removed;
+    // scale = min(mu * ||push|| / ||tangent||, 1.0): saturates at 1 inside the
+    // static cone (full cancellation) and shrinks the slide by mu*push in the
+    // dynamic regime. Same op order as the golden apply_coulomb_friction's
+    // `(mu * normal_push / tan_len).min(1.0)` then `tangent.scale(scale)`, so
+    // the GPU friction matches the CPU golden bit-for-bit (one fmul, one fdiv,
+    // one min, one fmul) instead of the earlier reciprocal-mul reformulation.
+    let scale = min(friction * depth / tan_len, 1.0);
+    return projected - tangential * scale;
 }
 
 /// Body-collision stage: one invocation per particle projects a free particle
