@@ -1733,12 +1733,25 @@ pub fn star5_2d(point: [f32; 2], radius: f32, inner_ratio: f32) -> f32 {
     (dx * dx + dy * dy).sqrt() * (py * bax - px * bay).signum()
 }
 
+/// Exact signed distance to an upward-pointing regular pentagram (the {5/2}
+/// star) of outer radius `radius` in 2D.
+///
+/// A pentagram is the five-pointed star whose inner concave vertices sit at the
+/// golden-ratio radius `radius * (3 - sqrt 5) / 2 = radius / phi^2`, so this
+/// delegates to `star5_2d` with that fixed ratio and inherits its exact,
+/// trigonometry-free evaluation.
+pub fn pentagram_2d(point: [f32; 2], radius: f32) -> f32 {
+    // (3 - sqrt 5) / 2 = 1 / phi^2 is the pentagram inner/outer radius ratio.
+    const INNER_RATIO: f32 = 0.381_966_02;
+    star5_2d(point, radius, INNER_RATIO)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         arc, box_frame, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_torus, capsule, circle_2d, cone_sdf, cross_2d, cut_disk_2d, cut_hollow_sphere,
         cut_sphere, cylinder_segment, death_star, egg_2d, ellipsoid_sdf, equilateral_triangle_2d, heart_2d, hex_prism, hexagram_2d, infinite_cone, infinite_cylinder, isosceles_triangle_2d, length2, line_sdf, link, moon,
-        octagon_prism, octahedron, oriented_box_2d, parallelogram, pie, plane, polygon_2d, pyramid, quad_sdf, regular_hexagon_2d, regular_octagon_2d, regular_pentagon_2d, rhombus, rhombus_2d, round_box, round_cone_sdf,
+        octagon_prism, octahedron, oriented_box_2d, parallelogram, pentagram_2d, pie, plane, polygon_2d, pyramid, quad_sdf, regular_hexagon_2d, regular_octagon_2d, regular_pentagon_2d, rhombus, rhombus_2d, round_box, round_cone_sdf,
         round_cone_segment, rounded_box_2d, rounded_cylinder, rounded_x, segment_2d, solid_angle, sphere, star5_2d, torus, trapezoid_isosceles, triangle_sdf, triangular_prism,
         uneven_capsule_2d, vesica, vesica_segment,
     };
@@ -3225,6 +3238,42 @@ mod tests {
         ];
         for s in samples {
             let got = star5_2d(s, r, rf);
+            let want = polygon_sdf2(s[0], s[1], &verts);
+            assert!((got - want).abs() < 1e-4, "s={s:?} got={got} want={want}");
+        }
+    }
+
+    #[test]
+    fn pentagram_2d_matches_golden_decagon_reference() {
+        let r = 1.0f32;
+        let rf = (3.0f32 - 5.0f32.sqrt()) / 2.0; // 1 / phi^2
+        let mut verts: Vec<[f32; 2]> = Vec::new();
+        for k in 0..5 {
+            let ao = (90.0 + 72.0 * k as f32).to_radians();
+            verts.push([r * ao.cos(), r * ao.sin()]);
+            let ai = (90.0 + 36.0 + 72.0 * k as f32).to_radians();
+            verts.push([r * rf * ai.cos(), r * rf * ai.sin()]);
+        }
+        // Centre lies one inner radius from the nearest concave vertex.
+        assert!((pentagram_2d([0.0, 0.0], r) - (-r * rf)).abs() < 1e-4);
+        // Top outer tip is on the surface.
+        assert!(pentagram_2d([0.0, r], r).abs() < 1e-4);
+        let samples: [[f32; 2]; 12] = [
+            [0.0, 0.0],
+            [0.0, 0.8],
+            [0.0, 1.2],
+            [0.5, 0.2],
+            [-0.5, 0.2],
+            [0.3, -0.6],
+            [-0.3, -0.6],
+            [0.9, 0.9],
+            [-1.1, 0.0],
+            [1.1, 0.0],
+            [0.0, -0.9],
+            [0.25, 0.25],
+        ];
+        for s in samples {
+            let got = pentagram_2d(s, r);
             let want = polygon_sdf2(s[0], s[1], &verts);
             assert!((got - want).abs() < 1e-4, "s={s:?} got={got} want={want}");
         }
