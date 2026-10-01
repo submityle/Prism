@@ -311,3 +311,14 @@ impl Runtime {
         inner.free.push(id);
     }
 }
+
+impl Inner {
+    /// Read-only view of the node slots, for in-crate introspection.
+    ///
+    /// Live nodes are `Some`; freed slots are `None`. The slot index is the
+    /// node's [`NodeId`]. This is a pure accessor used by
+    /// [`crate::introspect`]; it does not mutate or drive the graph.
+    pub(crate) fn node_slots(&self) -> &[Option<Node>] {
+        &self.nodes
+    }
+}

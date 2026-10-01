@@ -57,12 +57,14 @@
 extern crate alloc;
 
 mod effect;
+pub mod introspect;
 mod memo;
 mod node;
 pub mod runtime;
 mod signal;
 
 pub use effect::Effect;
+pub use introspect::{GraphSnapshot, NodeInfo, NodeKindInfo};
 pub use memo::Memo;
 pub use node::NodeId;
 pub use runtime::Runtime;
