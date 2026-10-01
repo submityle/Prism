@@ -10,6 +10,7 @@ extern crate alloc;
 mod benchmark;
 mod binning;
 mod cull_hzb;
+mod cull_two_phase;
 mod culling;
 mod diagnostics;
 mod hzb_build;
@@ -34,6 +35,7 @@ pub use binning::{
     ViewDrawBins, DRAW_BIN_HEADER_WORDS,
 };
 pub use cull_hzb::{cull_view_with_hzb, HzbCullScene};
+pub use cull_two_phase::cull_view_two_phase;
 pub use culling::{cull_view, CullReason, VisibilityInput};
 pub use diagnostics::VisibilityDiagnostics;
 pub use hzb_build::{build_hzb_pyramid, HzbPyramidStorage, OwnedHzbMip};
