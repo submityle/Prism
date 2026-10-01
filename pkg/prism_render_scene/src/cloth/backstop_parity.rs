@@ -1,6 +1,6 @@
 #![cfg(test)]
 //! `cloth_collision.wesl` 的 `cloth_backstop` 内核的 **逐位** CPU 转写，对齐
-//! 架构层黄金 [`resolve_backstops`] / [`apply_backstop`]（逐顶点绘制式背板约束
+//! 架构层黄金 [`resolve_backstops`] / [`apply_backstop`](prism_render_architecture::cloth::collision::apply_backstop)（逐顶点绘制式背板约束
 //! pass）。
 //!
 //! GPU 内核对每个粒子单独求值一块绘制背板平面：读取锚点 `origin`、（无需单位化
@@ -16,7 +16,7 @@
 //! 无关的「算法等价」闭环；真机 GPU 的 `rsqrt` 与 `1/sqrt` 的硬件差异由
 //! `backstop_gpu_tests` 的带容差比对覆盖。
 
-use prism_render_architecture::cloth::collision::{apply_backstop, resolve_backstops, Backstop};
+use prism_render_architecture::cloth::collision::{resolve_backstops, Backstop};
 use prism_render_architecture::cloth::{ClothParticle, Vec3, EPS_LEN_SQ};
 
 /// WESL `cloth_apply_backstop` 的逐位转写。平方长度不超过 `EPS_LEN_SQ` 的（近）零
