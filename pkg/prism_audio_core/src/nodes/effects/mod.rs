@@ -138,12 +138,21 @@
 //!   from the second-order iron-core [`transformer::TransformerNode`] (no
 //!   winding resonance, no bass-first saturation ordering), the memoryless
 //!   [`saturation::SaturationNode`], and the [`tape::TapeNode`].
+//! - [`diode_clipper::DiodeClipperNode`] -- diode-clipper overdrive whose
+//!   antiparallel-diode clamp is defined implicitly by the Shockley law
+//!   `u = y + ca * sinh(y / vt)` and solved per sample with a fixed
+//!   Newton-Raphson iteration; an asymmetry bias injects even harmonics
+//!   and a coupling `DC` block removes the resulting offset. Distinct
+//!   from the explicit `tanh` clamps of [`tube::TubeNode`],
+//!   [`saturation::SaturationNode`], and [`waveshaper::WaveshaperNode`],
+//!   and from the reflective [`wavefolder::WavefolderNode`].
 
 pub mod auto_wah;
 pub mod bitcrusher;
 pub mod chorus;
 pub mod comb_resonator;
 pub mod delay;
+pub mod diode_clipper;
 pub mod exciter;
 pub mod flanger;
 pub mod formant_filter;
@@ -177,6 +186,7 @@ pub use bitcrusher::{BitcrusherNode, BitcrusherParams, MAX_BIT_DEPTH, MIN_BIT_DE
 pub use chorus::{ChorusNode, ChorusParams};
 pub use comb_resonator::{CombResonatorNode, CombResonatorParams, MAX_FEEDBACK, MIN_FREQUENCY_HZ};
 pub use delay::DelayNode;
+pub use diode_clipper::{DiodeClipper, DiodeClipperNode, DiodeClipperParams};
 pub use exciter::{Exciter, ExciterNode, ExciterParams, HarmonicMode};
 pub use flanger::{FlangerNode, FlangerParams};
 pub use formant_filter::{
