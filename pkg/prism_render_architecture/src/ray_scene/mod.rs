@@ -536,6 +536,11 @@
 //!   ([`mesh_sdf_thickness::sdf_thickness`]) marching inward along the normal
 //!   until the field re-emerges, the thickness map translucency and
 //!   subsurface scattering need.
+//! - [`sdf_primitives`] — analytic signed distance primitives
+//!   ([`sdf_primitives::sphere`], [`sdf_primitives::box_sdf`],
+//!   [`sdf_primitives::round_box`], [`sdf_primitives::plane`],
+//!   [`sdf_primitives::torus`], [`sdf_primitives::capsule`]) with exact
+//!   closed-form distances, the atoms the domain and `CSG` operators compose.
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -721,6 +726,7 @@ pub mod mesh_sdf_soft_shadow;
 pub mod mesh_sdf_ambient_occlusion;
 pub mod sdf_domain;
 pub mod mesh_sdf_thickness;
+pub mod sdf_primitives;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -861,6 +867,7 @@ pub use sdf_domain::{
     elongate, mirror, onion, repeat, round_distance, scale_distance, scale_point, translate,
 };
 pub use mesh_sdf_thickness::sdf_thickness;
+pub use sdf_primitives::{box_sdf, capsule, plane, round_box, sphere, torus};
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
 pub use obb::{Obb, ObbBvh, ObbHit};
