@@ -81,6 +81,7 @@ pub mod bloom_upsample;
 pub mod capsule_capsule_closest;
 pub mod capsule_sdf;
 pub mod checkerboard_resolve;
+pub mod cie_xyz;
 pub mod clamp_history;
 pub mod classify_precip;
 pub mod closest_point_obb;
@@ -242,6 +243,7 @@ pub use capsule_capsule_closest::{
 };
 pub use capsule_sdf::{CapsuleSdfQuery, CapsuleSdfResult, GpuCapsuleSdf};
 pub use checkerboard_resolve::{CheckerboardResolveQuery, GpuCheckerboardResolve};
+pub use cie_xyz::{CieXyzQuery, CieXyzResult, GpuCieXyz};
 pub use clamp_history::{ClampHistoryQuery, GpuClampHistory};
 pub use classify_precip::{ClassifyPrecipQuery, GpuClassifyPrecip};
 pub use closest_point_obb::{ClosestPointObbQuery, ClosestPointObbResult, GpuClosestPointObb};
