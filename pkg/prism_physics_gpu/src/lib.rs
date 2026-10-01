@@ -104,10 +104,11 @@ pub use narrowphase::{
 pub use radix::{cpu_radix_sort_keys, cpu_radix_sort_pairs, GpuRadixSort};
 pub use rigid::{
     cpu_integrate, cpu_integrate_gyro, cpu_solve_contacts, cpu_solve_contacts_tgs,
-    cpu_solve_joints_spherical, ContactSolverConfig, GpuRigidContactSolver, GpuRigidIntegrator,
-    GpuRigidTgsContactSolver, GpuSphericalJointSolver, GyroscopicConfig, GyroscopicMode,
-    IntegratorConfig, JointColouring, JointSolverConfig, RigidBodyState, RigidContact,
-    RigidContactColouring, RigidError, SphericalJoint, TgsContactConfig, MAX_JOINT_BATCHES,
+    cpu_solve_joints_revolute, cpu_solve_joints_spherical, ContactSolverConfig,
+    GpuRevoluteJointSolver, GpuRigidContactSolver, GpuRigidIntegrator, GpuRigidTgsContactSolver,
+    GpuSphericalJointSolver, GyroscopicConfig, GyroscopicMode, IntegratorConfig, JointColouring,
+    JointSolverConfig, RevoluteJoint, RigidBodyState, RigidContact, RigidContactColouring,
+    RigidError, SphericalJoint, TgsContactConfig, MAX_JOINT_BATCHES,
 };
 pub use scan::{cpu_compact, cpu_exclusive_scan, GpuScan};
 pub use xpbd::{

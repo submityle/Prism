@@ -32,6 +32,11 @@
 //!   stepper.
 //! * [`spherical_gpu`] — the device-side [`GpuSphericalJointSolver`] that
 //!   reproduces the golden stepper on real `wgpu` hardware.
+//! * [`revolute`] — the [`RevoluteJoint`] (hinge) definition and its
+//!   device-packed storage representation.
+//! * [`revolute_cpu`] — the authoritative [`cpu_solve_joints_revolute`] golden
+//!   stepper (axis alignment plus point-to-point weld).
+//! * [`revolute_gpu`] — the device-side [`GpuRevoluteJointSolver`] twin.
 //!
 //! # Scheme and scope
 //!
@@ -51,6 +56,9 @@ mod coloring;
 mod config;
 mod gpu_core;
 mod math;
+mod revolute;
+mod revolute_cpu;
+mod revolute_gpu;
 mod spherical;
 mod spherical_cpu;
 mod spherical_gpu;
@@ -58,6 +66,9 @@ mod stepper;
 
 pub use coloring::{JointColouring, MAX_JOINT_BATCHES};
 pub use config::JointSolverConfig;
+pub use revolute::RevoluteJoint;
+pub use revolute_cpu::cpu_solve_joints_revolute;
+pub use revolute_gpu::GpuRevoluteJointSolver;
 pub use spherical::SphericalJoint;
 pub use spherical_cpu::cpu_solve_joints_spherical;
 pub use spherical_gpu::GpuSphericalJointSolver;

@@ -61,6 +61,7 @@ pub use cpu::{cpu_integrate, cpu_integrate_gyro};
 pub use gpu::GpuRigidIntegrator;
 pub use gyroscopic::{GyroscopicConfig, GyroscopicMode};
 pub use joint::{
-    cpu_solve_joints_spherical, GpuSphericalJointSolver, JointColouring, JointSolverConfig,
-    SphericalJoint, MAX_JOINT_BATCHES,
+    cpu_solve_joints_revolute, cpu_solve_joints_spherical, GpuRevoluteJointSolver,
+    GpuSphericalJointSolver, JointColouring, JointSolverConfig, RevoluteJoint, SphericalJoint,
+    MAX_JOINT_BATCHES,
 };
