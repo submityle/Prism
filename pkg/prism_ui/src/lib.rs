@@ -79,12 +79,14 @@ extern crate alloc;
 pub mod backend;
 pub mod element;
 pub mod paint;
+pub mod reactive_view;
 pub mod style_map;
 pub mod ui;
 
 pub use backend::{Backend, BackendId, BackendOp, RecordingBackend};
 pub use element::{Element, ElementKind, Key};
 pub use paint::PaintStyle;
+pub use reactive_view::ReactiveView;
 pub use style_map::build_styles;
 pub use ui::Ui;
 
