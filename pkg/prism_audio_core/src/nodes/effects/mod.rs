@@ -151,6 +151,16 @@
 //!   from the explicit `tanh` clamps of [`tube::TubeNode`],
 //!   [`saturation::SaturationNode`], and [`waveshaper::WaveshaperNode`],
 //!   and from the reflective [`wavefolder::WavefolderNode`].
+//! - [`modal_resonator::ModalResonatorNode`] -- modal-synthesis resonator
+//!   bank: up to [`modal_resonator::MAX_MODES`] parallel high-`Q` two-pole
+//!   band-pass modes summed together, each with its own frequency, `-60 dB`
+//!   decay time (mapped to resonator `Q`), and gain, imposing the ringing
+//!   body of a struck or plucked object. Reuses
+//!   [`crate::nodes::biquad::BiquadCoeffs::design`] per mode and is distinct
+//!   from the series [`parametric_eq::ParametricEqNode`] /
+//!   [`graphic_eq::GraphicEqNode`], the single-comb
+//!   [`comb_resonator::CombResonatorNode`], and the fixed-vowel
+//!   [`formant_filter::FormantFilterNode`].
 
 pub mod auto_wah;
 pub mod bitcrusher;
@@ -167,6 +177,7 @@ pub mod graphic_eq;
 pub mod haas_widener;
 pub mod leslie;
 pub mod mid_side_matrix;
+pub mod modal_resonator;
 pub mod multi_tap_delay;
 pub mod parametric_eq;
 pub mod phaser;
@@ -211,6 +222,10 @@ pub use leslie::{
     LeslieSpeed, MAX_AM_DEPTH, MAX_DOPPLER_DEPTH,
 };
 pub use mid_side_matrix::{MidSideMatrixNode, MidSideMatrixParams, MidSideMode};
+pub use modal_resonator::{
+    DEFAULT_MODAL_MIX, MAX_DECAY_S, MAX_MODES, MAX_MODE_Q, MIN_MODE_Q, ModalMode,
+    ModalResonatorNode, ModalResonatorParams,
+};
 pub use multi_tap_delay::{MAX_TAPS, MultiTapDelayNode, MultiTapDelayParams, TapSpec};
 pub use parametric_eq::{EqBand, ParametricEqNode};
 pub use phaser::{PhaserNode, PhaserParams};
