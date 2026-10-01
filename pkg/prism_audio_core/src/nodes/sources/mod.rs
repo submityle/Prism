@@ -15,6 +15,11 @@
 //!   so timbres can be morphed live rather than baked into a table.
 //! - [`oscillator::OscillatorNode`] -- band-limited (`PolyBLEP`) sine/saw/square/
 //!   triangle geometric oscillator selected by [`oscillator::Waveform`].
+//! - [`pwm_oscillator::PwmOscillatorNode`] -- band-limited (`PolyBLEP`) pulse
+//!   oscillator with a continuously smoothed, audio-rate duty cycle: the
+//!   classic pulse-width-modulation animation. It reuses the oscillator's
+//!   `PolyBLEP` edge correction but places the second (falling) edge at the
+//!   variable width, generalizing the fixed 50%-duty square.
 //! - [`karplus_strong::KarplusStrongNode`] -- extended Karplus-Strong
 //!   plucked-string physical model: a noise burst recirculating through a tuned,
 //!   damped feedback delay line with an allpass fractional-delay tuning filter.
@@ -46,6 +51,7 @@ pub mod fm_operator;
 pub mod karplus_strong;
 pub mod noise;
 pub mod oscillator;
+pub mod pwm_oscillator;
 pub mod sample_player;
 pub mod supersaw;
 pub mod wavetable_oscillator;
@@ -55,6 +61,7 @@ pub use fm_operator::{FmOperatorNode, FmOperatorParams};
 pub use karplus_strong::{KarplusStrongNode, KarplusStrongParams};
 pub use noise::{NoiseColor, NoiseNode};
 pub use oscillator::{OscillatorNode, Waveform};
+pub use pwm_oscillator::{PwmOscillatorNode, PwmOscillatorParams};
 pub use sample_player::{Interpolation, LoopMode, SamplePlayerNode};
 pub use supersaw::{SupersawNode, SupersawParams};
 pub use wavetable_oscillator::{WavetableOscillatorNode, WavetableOscillatorParams};
