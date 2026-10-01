@@ -15,6 +15,8 @@
 //!   peak/RMS detection, look-ahead, make-up gain, and parallel wet/dry mix.
 //! - [`de_esser::DeEsserNode`] — split-band de-esser: a crossover keyed off the
 //!   high band tames vocal sibilance while the body of the voice passes through.
+//! - [`dynamic_eq::DynamicEqNode`] -- single parametric bell whose boost/cut is
+//!   cross-faded by a band-level detector (dynamic equalisation).
 //! - [`limiter::LimiterNode`] — look-ahead brick-wall peak limiter with a
 //!   guaranteed output ceiling.
 //! - [`multiband::MultibandCompressorNode`] — Linkwitz-Riley band split
@@ -28,6 +30,7 @@ pub mod compressor;
 pub mod de_esser;
 pub mod detector;
 pub mod ducking;
+pub mod dynamic_eq;
 pub mod gate;
 pub mod limiter;
 pub mod multiband;
@@ -37,6 +40,7 @@ pub use compressor::{CompressorNode, CompressorParams};
 pub use de_esser::{DeEsserMode, DeEsserNode, DeEsserParams};
 pub use detector::{DetectionMode, GainBallistics, LevelDetector};
 pub use ducking::{DuckingNode, DuckingParams};
+pub use dynamic_eq::{DynamicEqMode, DynamicEqNode, DynamicEqParams};
 pub use gate::{ExpanderGateNode, GateParams};
 pub use limiter::{LimiterNode, LimiterParams};
 pub use multiband::MultibandCompressorNode;
