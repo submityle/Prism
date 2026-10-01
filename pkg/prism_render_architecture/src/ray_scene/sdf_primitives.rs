@@ -1190,6 +1190,33 @@ pub fn cross_2d(point: [f32; 2], arm: f32, thickness: f32, r: f32) -> f32 {
     k.signum() * length2([w[0].max(0.0), w[1].max(0.0)]) - r
 }
 
+/// Signed distance to a two-dimensional *rounded cross* of vertical reach
+/// `h`: a four-armed cross whose horizontal arms reach `x = +-1` and whose
+/// vertical arms reach `y = +-h`, with the four re-entrant junctions between
+/// the arms joined by circular fillets of radius `k = (h + 1/h) / 2`. For a
+/// well-formed shape `h` must be positive.
+///
+/// This is Inigo Quilez's exact `sdRoundedCross`. The point is folded into the
+/// first quadrant by `abs`; inside the wedge below the line through the tip
+/// `(0, h)` and the fillet centre `(1, k)` the nearest boundary is the fillet
+/// arc, so the distance is `k - length(p - (1, k))` (negative inside the
+/// solid, where the arc bulges away from its centre). Elsewhere the nearest
+/// feature is one of the two convex tips `(1, 0)` or `(0, h)`, giving
+/// `min(length(p - (0, h)), length(p - (1, 0)))`. The fillet centre lies at
+/// distance `k` from both tips, so the two branches meet continuously. Built
+/// from `abs`, `min`, a division and a single `sqrt`, so it stays
+/// transcendental-free. Pair it with the `extrude` domain operator to turn the
+/// profile into a 3D cross prism.
+pub fn rounded_cross_2d(point: [f32; 2], h: f32) -> f32 {
+    let k = 0.5 * (h + 1.0 / h);
+    let p = [point[0].abs(), point[1].abs()];
+    if p[0] < 1.0 && p[1] < p[0] * (k - h) + h {
+        k - length2([p[0] - 1.0, p[1] - k])
+    } else {
+        length2([p[0], p[1] - h]).min(length2([p[0] - 1.0, p[1]]))
+    }
+}
+
 /// Unsigned distance from `point` to the line segment `a`-`b` in the plane.
 ///
 /// The point is projected onto the segment with the parameter clamped to
@@ -1961,7 +1988,8 @@ mod tests {
         annulus_2d, arc, box_2d, box_frame, box_frame_2d, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_torus, capsule, capsule_2d, circle_2d, cone_sdf, cross_2d, cut_disk_2d, cut_hollow_sphere,
         cut_sphere, cylinder_segment, death_star, egg_2d, ellipsoid_sdf, equilateral_triangle_2d, heart_2d, hex_prism, hexagram_2d, infinite_cone, infinite_cylinder, isosceles_triangle_2d, length2, line_sdf, link, moon,
         octagon_prism, octahedron, oriented_box_2d, oriented_vesica_2d, parallelogram, pentagram_2d, pie, plane, polygon_2d, pyramid, quad_sdf, regular_hexagon_2d, regular_octagon_2d, regular_pentagon_2d, rhombus, rhombus_2d, round_box, round_cone_sdf,
-        round_cone_segment, rounded_box_2d, rounded_cylinder, rounded_x, segment_2d, segment_3d, solid_angle, sphere, star5_2d, torus, trapezoid_isosceles, triangle_2d, triangle_sdf, triangular_prism, tunnel_2d,
+        round_cone_segment, rounded_box_2d, rounded_cross_2d, rounded_cylinder, rounded_x,
+        segment_2d, segment_3d, solid_angle, sphere, star5_2d, torus, trapezoid_isosceles, triangle_2d, triangle_sdf, triangular_prism, tunnel_2d,
         uneven_capsule_2d, vertical_capsule, vesica, vesica_2d, vesica_segment,
     };
 
@@ -2662,6 +2690,102 @@ mod tests {
         let centre = cross_2d([0.0, 0.0], arm, th, r);
         let want_centre = -th * std::f32::consts::SQRT_2 - r;
         assert!((centre - want_centre).abs() < 1e-6, "centre: got={centre} want={want_centre}");
+    }
+
+    #[test]
+    fn rounded_cross_2d_tips_surface_origin_and_symmetry() {
+        // The four convex tips (+-1, 0) and (0, +-h) lie exactly on the
+        // surface; the centre is interior with the exact closed-form depth
+        // k - sqrt(1 + k^2); and the field is symmetric under axis reflection.
+        for &h in &[1.0_f32, 1.4, 2.0, 0.7] {
+            let k = 0.5 * (h + 1.0 / h);
+            for &tip in &[[1.0_f32, 0.0], [-1.0, 0.0], [0.0, h], [0.0, -h]] {
+                assert!(
+                    rounded_cross_2d(tip, h).abs() < 1e-6,
+                    "tip {tip:?} not on surface for h={h}"
+                );
+            }
+            let origin = rounded_cross_2d([0.0, 0.0], h);
+            let want = k - (1.0 + k * k).sqrt();
+            assert!((origin - want).abs() < 1e-6, "origin h={h}: {origin} vs {want}");
+            // Reflection symmetry across both axes.
+            for &p in &[[0.37_f32, 0.52], [0.8, 0.1], [1.3, 0.9]] {
+                let base = rounded_cross_2d(p, h);
+                for &q in &[[-p[0], p[1]], [p[0], -p[1]], [-p[0], -p[1]]] {
+                    assert!((rounded_cross_2d(q, h) - base).abs() < 1e-6, "symmetry h={h} p={p:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rounded_cross_2d_fillet_arc_lies_on_the_surface() {
+        // The innermost point of the first-quadrant fillet arc (the arc of
+        // radius k centred at (1, k)) is the circle point nearest the origin,
+        // P = (1, k) * (1 - k / |(1, k)|). It sits on the boundary, so f = 0.
+        // Derived purely from the fillet geometry, independent of the branch
+        // formula's exterior half.
+        for &h in &[1.0_f32, 1.4, 2.0, 0.7] {
+            let k = 0.5 * (h + 1.0 / h);
+            let cmag = (1.0 + k * k).sqrt();
+            let s = 1.0 - k / cmag;
+            let pt = [1.0 * s, k * s];
+            // Confirm the sample really falls in the fillet wedge.
+            assert!(pt[0] < 1.0 && pt[1] < pt[0] * (k - h) + h, "fillet wedge h={h}");
+            assert!(
+                rounded_cross_2d(pt, h).abs() < 1e-5,
+                "fillet-arc point off surface h={h}: {}",
+                rounded_cross_2d(pt, h)
+            );
+        }
+    }
+
+    #[test]
+    fn rounded_cross_2d_exterior_is_distance_to_the_nearest_tip() {
+        // Beyond an arm tip the nearest feature is the convex tip corner, so
+        // the distance is the plain Euclidean distance to that point -- an
+        // independent closed form that does not use the fillet branch.
+        for &h in &[1.0_f32, 1.4, 2.0, 0.7] {
+            // Straight out the +x axis past the tip (1, 0).
+            let dx = 0.75_f32;
+            assert!((rounded_cross_2d([1.0 + dx, 0.0], h) - dx).abs() < 1e-6, "x tip h={h}");
+            // Straight up past the +y tip (0, h).
+            let dy = 0.6_f32;
+            assert!((rounded_cross_2d([0.0, h + dy], h) - dy).abs() < 1e-6, "y tip h={h}");
+            // Diagonally beyond the +x tip: exact corner distance.
+            let off = [1.0 + 0.4, 0.3_f32];
+            let want = (0.4_f32 * 0.4 + 0.3 * 0.3).sqrt();
+            assert!((rounded_cross_2d(off, h) - want).abs() < 1e-6, "x corner h={h}");
+        }
+    }
+
+    #[test]
+    fn rounded_cross_2d_is_an_exact_distance_field() {
+        // Verify the Eikonal property |grad f| = 1 off the symmetry axes (the
+        // axes are medial-axis creases where a central difference cancels one
+        // component). A true signed-distance field satisfies this everywhere it
+        // is differentiable, confirming the formula returns exact Euclidean
+        // distance rather than a mere bound.
+        let eps = 1e-3_f32;
+        for &h in &[1.0_f32, 1.4, 2.0, 0.7] {
+            for &p in &[
+                [0.55_f32, 0.33],
+                [0.2, 0.9],
+                [1.4, 0.5],
+                [0.4, 1.7],
+                [0.9, 0.9],
+                [1.1, 0.2],
+            ] {
+                let fx = (rounded_cross_2d([p[0] + eps, p[1]], h)
+                    - rounded_cross_2d([p[0] - eps, p[1]], h))
+                    / (2.0 * eps);
+                let fy = (rounded_cross_2d([p[0], p[1] + eps], h)
+                    - rounded_cross_2d([p[0], p[1] - eps], h))
+                    / (2.0 * eps);
+                let grad = (fx * fx + fy * fy).sqrt();
+                assert!((grad - 1.0).abs() < 5e-3, "eikonal h={h} p={p:?}: |grad|={grad}");
+            }
+        }
     }
 
     // Exact unsigned distance to a 2D segment, used to cross-check `segment_2d`
