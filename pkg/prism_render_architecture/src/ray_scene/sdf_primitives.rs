@@ -1531,11 +1531,44 @@ pub fn hexagram_2d(point: [f32; 2], r: f32) -> f32 {
     length2(p) * p[1].signum()
 }
 
+/// Exact signed distance to the Inigo Quilez unit heart (`sdHeart`), with its
+/// bottom tip at the origin and its top cusp at `(0, 1)`.
+///
+/// The upper lobes are circular arcs of radius `sqrt 2 / 4` centred at
+/// `(+/-0.25, 0.75)`; the lower sides are straight flanks running from the tip
+/// up to `(+/-0.5, 0.5)`. Points above the `|x| + y = 1` diagonal measure
+/// against the lobe circle; the rest take the nearer of the top cusp and the
+/// diagonal flank, signed by `sign(|x| - y)`. The only transcendental is the
+/// compile-time constant `sqrt 2 / 4`, so the runtime path uses only `abs`,
+/// `max`, `min`, `sign` and `sqrt`.
+pub fn heart_2d(point: [f32; 2]) -> f32 {
+    // sqrt(2)/4 as a compile-time constant (lobe circle radius).
+    const R: f32 = 0.353_553_38;
+    let x = point[0].abs();
+    let y = point[1];
+    if y + x > 1.0 {
+        // Upper lobe: distance to the right lobe circle (left is the mirror).
+        let dx = x - 0.25;
+        let dy = y - 0.75;
+        (dx * dx + dy * dy).sqrt() - R
+    } else {
+        // Lower region: nearer of the top cusp (0,1) and the flank ray y = x.
+        let cx = x;
+        let cy = y - 1.0;
+        let d_cusp = cx * cx + cy * cy;
+        let s = 0.5 * (x + y).max(0.0);
+        let fx = x - s;
+        let fy = y - s;
+        let d_flank = fx * fx + fy * fy;
+        d_cusp.min(d_flank).sqrt() * (x - y).signum()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         arc, box_frame, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_torus, capsule, cone_sdf, cross_2d, cut_disk_2d, cut_hollow_sphere,
-        cut_sphere, cylinder_segment, death_star, ellipsoid_sdf, equilateral_triangle_2d, hex_prism, hexagram_2d, infinite_cone, infinite_cylinder, isosceles_triangle_2d, length2, line_sdf, link, moon,
+        cut_sphere, cylinder_segment, death_star, ellipsoid_sdf, equilateral_triangle_2d, heart_2d, hex_prism, hexagram_2d, infinite_cone, infinite_cylinder, isosceles_triangle_2d, length2, line_sdf, link, moon,
         octagon_prism, octahedron, oriented_box_2d, parallelogram, pie, plane, pyramid, quad_sdf, regular_hexagon_2d, regular_octagon_2d, regular_pentagon_2d, rhombus, rhombus_2d, round_box, round_cone_sdf,
         round_cone_segment, rounded_cylinder, rounded_x, segment_2d, solid_angle, sphere, torus, trapezoid_isosceles, triangle_sdf, triangular_prism,
         uneven_capsule_2d, vesica,
@@ -2505,6 +2538,92 @@ mod tests {
             let got = hexagram_2d(p, r);
             let want = polygon_sdf2(p[0], p[1], &verts);
             assert!((got - want).abs() < 1e-5, "p={p:?} got={got} want={want}");
+        }
+    }
+
+    // Independent reference for the IQ heart: build a dense boundary polyline
+    // (lower flank segment + lobe arc, mirrored) from first principles, then
+    // take the min point-to-segment distance with an even-odd winding sign.
+    // This shares no branch structure with heart_2d's piecewise closed form.
+    fn heart_reference(px: f32, py: f32) -> f32 {
+        let rr = 2.0f32.sqrt() / 4.0;
+        let (cx, cy) = (0.25f32, 0.75f32);
+        let mut right: Vec<[f32; 2]> = Vec::new();
+        // Lower-right flank: tip (0,0) -> (0.5,0.5).
+        let n_line = 80;
+        for i in 0..=n_line {
+            let t = i as f32 / n_line as f32;
+            right.push([0.5 * t, 0.5 * t]);
+        }
+        // Right lobe arc: centre (0.25,0.75), r = sqrt(2)/4, (0.5,0.5)->(0,1).
+        let a0 = (-45.0f32).to_radians();
+        let a1 = (135.0f32).to_radians();
+        let n_arc = 240;
+        for i in 1..=n_arc {
+            let a = a0 + (a1 - a0) * (i as f32 / n_arc as f32);
+            right.push([cx + rr * a.cos(), cy + rr * a.sin()]);
+        }
+        // Close the loop: mirror the right boundary back down the left side.
+        let mut poly = right.clone();
+        for q in right.iter().rev() {
+            poly.push([-q[0], q[1]]);
+        }
+        // Unsigned distance to the closed polyline.
+        let n = poly.len();
+        let mut best = f32::INFINITY;
+        for i in 0..n {
+            let a = poly[i];
+            let b = poly[(i + 1) % n];
+            let e = [b[0] - a[0], b[1] - a[1]];
+            let w = [px - a[0], py - a[1]];
+            let len2 = e[0] * e[0] + e[1] * e[1];
+            let t = if len2 > 0.0 { ((e[0] * w[0] + e[1] * w[1]) / len2).clamp(0.0, 1.0) } else { 0.0 };
+            let dx = w[0] - e[0] * t;
+            let dy = w[1] - e[1] * t;
+            best = best.min(dx * dx + dy * dy);
+        }
+        // Even-odd ray crossing for the inside test (ray toward +x).
+        let mut inside = false;
+        let mut j = n - 1;
+        for i in 0..n {
+            let (xi, yi) = (poly[i][0], poly[i][1]);
+            let (xj, yj) = (poly[j][0], poly[j][1]);
+            if (yi > py) != (yj > py) {
+                let xcross = xi + (py - yi) / (yj - yi) * (xj - xi);
+                if px < xcross {
+                    inside = !inside;
+                }
+            }
+            j = i;
+        }
+        best.sqrt() * if inside { -1.0 } else { 1.0 }
+    }
+
+    #[test]
+    fn heart_2d_matches_boundary_reference() {
+        // Tip and top cusp lie on the surface; a central point is interior.
+        assert!(heart_2d([0.0, 0.0]).abs() < 1e-5);
+        assert!(heart_2d([0.0, 1.0]).abs() < 1e-5);
+        assert!(heart_2d([0.5, 1.0]).abs() < 1e-5); // right lobe peak on the circle
+        assert!(heart_2d([0.0, 0.6]) < 0.0);
+        let samples: [[f32; 2]; 12] = [
+            [0.0, 0.6],
+            [0.3, 0.6],
+            [-0.3, 0.6],
+            [0.0, 0.0],
+            [0.0, 1.3],
+            [0.9, 0.9],
+            [-0.9, 0.9],
+            [0.6, 0.2],
+            [-0.6, 0.2],
+            [0.2, -0.3],
+            [0.0, 0.9],
+            [0.45, 0.95],
+        ];
+        for p in samples {
+            let got = heart_2d(p);
+            let want = heart_reference(p[0], p[1]);
+            assert!((got - want).abs() < 3e-3, "p={p:?} got={got} want={want}");
         }
     }
 
