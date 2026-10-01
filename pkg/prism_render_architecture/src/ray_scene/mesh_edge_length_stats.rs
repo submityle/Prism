@@ -109,13 +109,17 @@ pub fn edge_length_stats(mesh: &TriangleMesh) -> EdgeLengthStats {
         }
     }
 
-    edges.sort_by(|a, b| a.0.cmp(&b.0));
+    edges.sort_by_key(|a| a.0);
     EdgeLengthStats { edges }
 }
 
 /// Returns the sorted `(min, max)` endpoint pair keying a shared edge.
 fn sorted_pair(a: u32, b: u32) -> (u32, u32) {
-    if a < b { (a, b) } else { (b, a) }
+    if a < b {
+        (a, b)
+    } else {
+        (b, a)
+    }
 }
 
 /// Returns the Euclidean distance between two points.
