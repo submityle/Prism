@@ -40,6 +40,7 @@ mod ccd;
 mod self_ccd;
 mod self_collision;
 mod virtual_particles;
+mod virtual_particles_jacobi;
 
 pub use body::{
     apply_backstop, closest_point_on_segment, project_out_of_half_space, project_out_of_sphere,
@@ -53,6 +54,9 @@ pub use self_collision::{resolve_self_collision, resolve_self_collision_with_fri
 pub use virtual_particles::{
     generate_virtual_particles, resolve_self_collision_virtual,
     resolve_self_collision_virtual_augment, VirtualParticle, VirtualParticlePattern,
+};
+pub use virtual_particles_jacobi::{
+    resolve_self_collision_virtual_augment_jacobi, resolve_self_collision_virtual_jacobi,
 };
 
 use glam::Vec3;

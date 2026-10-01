@@ -44,7 +44,8 @@ pub use collision::{
     project_out_of_half_space, project_out_of_sphere, resolve_backstops, resolve_body_collisions,
     resolve_body_collisions_with_friction, resolve_ccd, resolve_self_ccd, resolve_self_collision,
     generate_virtual_particles, resolve_self_collision_virtual,
-    resolve_self_collision_virtual_augment, resolve_self_collision_with_friction,
+    resolve_self_collision_virtual_augment, resolve_self_collision_virtual_augment_jacobi,
+    resolve_self_collision_virtual_jacobi, resolve_self_collision_with_friction,
     resolve_two_way_coupling, sphere_toi, swept_pair_toi, Backstop, BodyCollider,
     CcdParams, CouplingBody, SelfCcdParams, VirtualParticle, VirtualParticlePattern,
 };
