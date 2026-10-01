@@ -186,6 +186,7 @@ pub mod modules;
 pub mod morton_code;
 pub mod motion_blur;
 pub mod motion_vectors;
+pub mod multigrid_pressure;
 pub mod nd_strides_index;
 pub mod noise;
 pub mod normal_reconstruct;
