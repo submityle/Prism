@@ -38,6 +38,7 @@
 pub mod aero;
 pub mod bending;
 pub mod body;
+pub mod ccd;
 pub mod coupling;
 pub mod cpu;
 pub mod gpu;
@@ -60,6 +61,7 @@ pub use body::{
     cpu_cloth_backstops, cpu_cloth_body_collision, pack_backstops, pack_body_colliders,
     GpuBackstop, GpuBodyCollider, GpuClothBodyCollision,
 };
+pub use ccd::{cpu_cloth_ccd, GpuClothCcd};
 pub use coupling::{cpu_cloth_coupling, GpuClothCoupling};
 pub use cpu::cpu_cloth_self_collision_jacobi;
 pub use gpu::GpuClothSelfCollision;
