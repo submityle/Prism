@@ -9,10 +9,11 @@ publish = false
 [dependencies]
 prism_ui = { path = "../prism_ui" }
 prism_ui_devtools = { path = "../prism_ui_devtools" }
+prism_ui_reactive = { path = "../prism_ui_reactive" }
 
 [features]
 default = ["std"]
-std = ["prism_ui/std", "prism_ui_devtools/std"]
+std = ["prism_ui/std", "prism_ui_devtools/std", "prism_ui_reactive/std"]
 
 [lints]
 workspace = true

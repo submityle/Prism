@@ -13,6 +13,11 @@
 //! * [`perf`] aggregates measurements. [`PerfReport`] tallies an [`OpTrace`]
 //!   into per-category counts plus integer *churn* metrics, and [`TreeMetrics`]
 //!   summarises a snapshot's shape.
+//! * [`graph`] analyses reactivity. A [`DependencyGraph`] consumes a
+//!   `prism_ui_reactive::GraphSnapshot` and answers structural questions about
+//!   the signal/memo/effect dependency graph: transitive dependents and
+//!   dependencies, topological order, roots and leaves, and Graphviz/text
+//!   renderings.
 //!
 //! Everything is `no_std`-friendly (uses `alloc`), avoids floating point in its
 //! metrics, and produces deterministic output suited to golden tests.
@@ -54,10 +59,12 @@
 
 extern crate alloc;
 
+pub mod graph;
 pub mod path;
 pub mod perf;
 pub mod query;
 
+pub use graph::DependencyGraph;
 pub use path::{paths_of, resolve, resolve_in_node, NodePath, ParsePathError};
 pub use perf::{PerfReport, TreeMetrics};
 pub use query::{find_by_class, find_by_kind, Query};
