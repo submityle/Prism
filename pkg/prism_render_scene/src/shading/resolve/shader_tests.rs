@@ -1588,3 +1588,294 @@ fn hair_vbd_wesl_compiles_standalone() {
         .get(0, hair_vbd, &[])
         .unwrap_or_else(|error| panic!("hair_vbd.wesl failed to compile: {error}"));
 }
+
+// ───────────────────────── hair 真机 GPU parity ─────────────────────────
+//
+// 以上均为纯编译验证；`hair_wind` 以下是 hair 子系统**第一个真机设备 parity 测试**：
+// 把 `hair_wind.wesl` 外力预 pass 内核在原生 compute 设备上 dispatch，与架构层 CPU
+// 黄金 `apply_wind` 逐粒子对拍（design §9）。沙盒无 `GPU` 时跳过保绿；有真实设备
+// （如 `Apple` `M` 系列 `GPU`）时跑满。
+
+/// 真机 `GPU`-对-`CPU` 逐分量绝对容差。
+///
+/// `hair_wind` 内核与 CPU 黄金 `apply_wind` 跑同一份 `f32` 算术，唯一自由度是归一化里
+/// CPU 的 `1.0 / sqrt` 与 `WESL` `inverseSqrt`（多为原生 `rsqrt`）之间几个 `ULP` 之差；
+/// 位移量级 `O(dt^2)`，`1e-4` 远紧于任何真实内核 bug 的 `O(0.1)` 级发散。
+const HAIR_WIND_PARITY_EPS: f32 = 1.0e-4;
+
+/// `hair_wind.wesl` 的 `var<immediate> params: HairWindParams` 推常量块的 host 镜像。
+///
+/// 字段偏移逐一镜像 `WESL` 结构体：`vec3<f32>` 对齐 16，`speed` 填入其尾部 `12..16`
+/// 的填充位；尾部 `_pad` 把尺寸补到 `vec3` 对齐的 48 字节，与 `naga` 为该块算出的推
+/// 常量尺寸一致。无隐式填充，可安全派生 `Pod`。
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct HairWindImmediate {
+    direction: [f32; 3],
+    speed: f32,
+    gust_amplitude: f32,
+    gust_frequency: f32,
+    turbulence: f32,
+    time: f32,
+    dt: f32,
+    particle_count: u32,
+    _pad: [u32; 2],
+}
+
+/// 把嵌入式 `hair_wind.wesl` 经 render-world [`ShaderCache`] 编译回 `Wgsl`（复用本
+/// 模块的 `load_source` 闭包，不建设备）。
+fn compile_hair_wind_wgsl() -> String {
+    let mut cache = ShaderCache::new((), load_source);
+    let id = shader_id(0x5052_4953_4d5f_4841_4952_5f57_4e44_0001);
+    cache.set_shader(
+        id,
+        Shader::from_wesl(
+            include_str!("../../shaders/hair_wind.wesl"),
+            "embedded://prism_render_scene/shaders/hair_wind.wesl",
+        ),
+    );
+    (*cache
+        .get(0, id, &[])
+        .unwrap_or_else(|error| panic!("hair_wind.wesl failed to compile: {error}")))
+    .clone()
+}
+
+/// 在编译后的 `Wgsl` 里按子串定位 compute 入口的真实符号名（`WESL` 可能给模块内名字
+/// 加前缀，故按子串而非固定符号查找）。
+fn hair_wind_entry_point(wgsl: &str) -> String {
+    for line in wgsl.lines() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("fn ")
+            && let Some(paren) = rest.find('(')
+        {
+            let name = &rest[..paren];
+            if name.contains("hair_wind") {
+                return name.to_string();
+            }
+        }
+    }
+    panic!("no compute entry point containing `hair_wind` in compiled Wgsl");
+}
+
+/// `hair_wind.wesl` 外力预 pass 内核在真机上 dispatch 一帧后，必须与架构层黄金
+/// [`apply_wind`](prism_render_architecture::hair::wind::apply_wind) 逐粒子落在 `f32`
+/// 舍入容差内：自由粒子按 `accel * dt^2` 位移、pin 根（逆质量 `0`）不动、`w`（逆质量）
+/// 严格保持。
+///
+/// 无 `wgpu` adapter、或设备不支持 `immediate`（push-constant）的无头机上打印跳过提示
+/// 而非失败，让套件在任何机器上保持绿；有真实设备时跑满 dispatch 并逐值对拍。
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "一条线性的取设备-建管线-建缓冲-dispatch-读回-对拍让 parity 路径整体可审计"
+)]
+fn hair_wind_gpu_matches_cpu_golden() {
+    use bevy_platform::future::block_on;
+    use prism_render_architecture::hair::dynamics::{StrandParticle, Vec3};
+    use prism_render_architecture::hair::wind::{apply_wind, WindField};
+    use wgpu::util::{BufferInitDescriptor, DeviceExt};
+    use wgpu::{
+        BackendOptions, Backends, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
+        BindGroupLayoutEntry, BindingType, BufferBindingType, BufferDescriptor, BufferUsages,
+        CommandEncoderDescriptor, ComputePassDescriptor, ComputePipelineDescriptor,
+        DeviceDescriptor, Features, Instance, InstanceDescriptor, InstanceFlags, MapMode,
+        PipelineCompilationOptions, PipelineLayoutDescriptor, PollType, RequestAdapterOptions,
+        ShaderModuleDescriptor, ShaderSource, ShaderStages,
+    };
+
+    let immediate_size = size_of::<HairWindImmediate>() as u32;
+
+    // --- 尽力取一个支持 immediate 的 compute 设备（无则跳过保绿）---
+    let instance = Instance::new(InstanceDescriptor {
+        backends: Backends::METAL | Backends::VULKAN | Backends::DX12,
+        flags: InstanceFlags::default(),
+        memory_budget_thresholds: Default::default(),
+        display: None,
+        backend_options: BackendOptions::default(),
+    });
+    let Some(adapter) = block_on(instance.request_adapter(&RequestAdapterOptions::default())).ok()
+    else {
+        eprintln!("hair_wind_gpu_matches_cpu_golden: no wgpu adapter, skipping on-device parity");
+        return;
+    };
+    if !adapter.features().contains(Features::IMMEDIATES)
+        || adapter.limits().max_immediate_size < immediate_size
+    {
+        eprintln!(
+            "hair_wind_gpu_matches_cpu_golden: adapter lacks IMMEDIATES / immediate size, \
+             skipping on-device parity"
+        );
+        return;
+    }
+    let limits = adapter.limits();
+    let Some((device, queue)) = block_on(adapter.request_device(&DeviceDescriptor {
+        required_features: Features::IMMEDIATES,
+        required_limits: limits,
+        ..Default::default()
+    }))
+    .ok() else {
+        eprintln!(
+            "hair_wind_gpu_matches_cpu_golden: request_device failed, skipping on-device parity"
+        );
+        return;
+    };
+
+    // --- 确定性工况：3 根 strand，每根 1 pin 根 + 3 自由粒子，非零风场带 gust/flutter ---
+    let field = WindField {
+        direction: Vec3::new(1.0, 0.2, -0.3),
+        speed: 2.5,
+        gust_amplitude: 1.2,
+        gust_frequency: 0.8,
+        turbulence: 0.4,
+    };
+    let time = 1.37_f32;
+    let dt = 1.0_f32 / 120.0;
+
+    let mut particles = Vec::new();
+    for s in 0..3u32 {
+        for v in 0..4u32 {
+            let base = Vec3::new(
+                s as f32 * 0.05 - 0.05,
+                0.4 - v as f32 * 0.1,
+                s as f32 * 0.02,
+            );
+            if v == 0 {
+                particles.push(StrandParticle::pinned(base));
+            } else {
+                particles.push(StrandParticle::free(base));
+            }
+        }
+    }
+    let count = particles.len();
+
+    // --- CPU 黄金：副本上原地推进一帧风场 ---
+    let mut golden = particles.clone();
+    apply_wind(&mut golden, field, time, dt);
+
+    // --- host 上传口径：positions.w = 逆质量（与 `hair_sim` 同布局）---
+    let positions: Vec<[f32; 4]> = particles
+        .iter()
+        .map(|p| [p.position.x, p.position.y, p.position.z, p.inverse_mass])
+        .collect();
+
+    // --- GPU 重放：编译 → 建管线 → dispatch → 读回 ---
+    let wgsl = compile_hair_wind_wgsl();
+    let entry = hair_wind_entry_point(&wgsl);
+
+    let layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+        label: Some("hair_wind_parity_group0"),
+        entries: &[BindGroupLayoutEntry {
+            binding: 0,
+            visibility: ShaderStages::COMPUTE,
+            ty: BindingType::Buffer {
+                ty: BufferBindingType::Storage { read_only: false },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }],
+    });
+    let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+        label: Some("hair_wind_parity_layout"),
+        bind_group_layouts: &[Some(&layout)],
+        immediate_size,
+    });
+    let module = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("hair_wind_parity"),
+        source: ShaderSource::Wgsl(wgsl.into()),
+    });
+    let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("hair_wind_parity_pipeline"),
+        layout: Some(&pipeline_layout),
+        module: &module,
+        entry_point: Some(&entry),
+        compilation_options: PipelineCompilationOptions::default(),
+        cache: None,
+    });
+
+    let bytes = size_of_val(positions.as_slice()) as u64;
+    let positions_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("hair_wind_positions"),
+        contents: bytemuck::cast_slice(&positions),
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+    });
+    let stage = device.create_buffer(&BufferDescriptor {
+        label: Some("hair_wind_positions_stage"),
+        size: bytes,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let bind_group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("hair_wind_parity_bind"),
+        layout: &layout,
+        entries: &[BindGroupEntry {
+            binding: 0,
+            resource: positions_buf.as_entire_binding(),
+        }],
+    });
+
+    let immediate = HairWindImmediate {
+        direction: [field.direction.x, field.direction.y, field.direction.z],
+        speed: field.speed,
+        gust_amplitude: field.gust_amplitude,
+        gust_frequency: field.gust_frequency,
+        turbulence: field.turbulence,
+        time,
+        dt,
+        particle_count: count as u32,
+        _pad: [0; 2],
+    };
+    let groups = (count as u32).div_ceil(64).max(1);
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("hair_wind_parity_encoder"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("hair_wind_parity_pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.set_immediates(0, bytemuck::bytes_of(&immediate));
+        pass.dispatch_workgroups(groups, 1, 1);
+    }
+    encoder.copy_buffer_to_buffer(&positions_buf, 0, &stage, 0, bytes);
+    queue.submit([encoder.finish()]);
+
+    stage.slice(..).map_async(MapMode::Read, |_| {});
+    device
+        .poll(PollType::wait_indefinitely())
+        .expect("device poll should complete the submitted work");
+    let view = stage
+        .slice(..)
+        .get_mapped_range()
+        .expect("mapped positions readback range should be available after poll");
+    let out: Vec<[f32; 4]> = bytemuck::cast_slice::<u8, [f32; 4]>(&view).to_vec();
+    drop(view);
+    stage.unmap();
+
+    // --- 逐粒子对拍：xyz 落容差内，w（逆质量）保持 ---
+    assert_eq!(out.len(), golden.len());
+    for (i, (gpu, cpu)) in out.iter().zip(golden.iter()).enumerate() {
+        assert!(
+            (gpu[0] - cpu.position.x).abs() < HAIR_WIND_PARITY_EPS
+                && (gpu[1] - cpu.position.y).abs() < HAIR_WIND_PARITY_EPS
+                && (gpu[2] - cpu.position.z).abs() < HAIR_WIND_PARITY_EPS,
+            "particle {i}: GPU {gpu:?} vs CPU golden ({}, {}, {})",
+            cpu.position.x,
+            cpu.position.y,
+            cpu.position.z,
+        );
+        assert!(
+            (gpu[3] - cpu.inverse_mass).abs() < HAIR_WIND_PARITY_EPS,
+            "particle {i}: inverse mass must be preserved (GPU {} vs {})",
+            gpu[3],
+            cpu.inverse_mass,
+        );
+    }
+}
