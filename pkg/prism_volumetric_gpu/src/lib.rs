@@ -158,6 +158,7 @@ pub mod reservoir_sample;
 pub mod rgb_ycocg;
 pub mod ribbon_geometry;
 pub mod segment_closest_point_3d;
+pub mod segment_intersect_2d;
 pub mod select_lod;
 pub mod shadow;
 pub mod sharpen_cas;
@@ -306,6 +307,10 @@ pub use rgb_ycocg::GpuRgbYCoCg;
 pub use ribbon_geometry::{GpuRibbonGeometry, RibbonStripQuery};
 pub use segment_closest_point_3d::{
     GpuSegmentClosestPoint3d, SegmentClosestQuery, SegmentClosestResult,
+};
+pub use segment_intersect_2d::{
+    GpuSegmentIntersect2d, SegmentIntersectQuery, SegmentIntersectResult, CODE_COLLINEAR,
+    CODE_NONE, CODE_POINT,
 };
 pub use select_lod::{GpuSelectLod, SelectLodQuery};
 pub use shadow::{GpuShadow, ShadowRay};
