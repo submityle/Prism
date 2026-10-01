@@ -169,11 +169,94 @@ pub fn closest_points_segment_segment(p1: Vec3, q1: Vec3, p2: Vec3, q2: Vec3) ->
     }
 }
 
+/// The closest pair of points between a segment and a triangle.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct SegmentTriangleClosest {
+    /// Closest point on the segment.
+    pub on_segment: Vec3,
+    /// Closest point on the triangle.
+    pub on_triangle: Vec3,
+    /// Squared distance between `on_segment` and `on_triangle` (zero when the
+    /// segment crosses the triangle).
+    pub distance_squared: f32,
+}
+
+/// Computes the closest pair of points between the segment `[p, q]` and the
+/// triangle `(a, b, c)`.
+///
+/// When the segment pierces the triangle the intersection point is returned on
+/// both features with zero distance. Otherwise the closest pair lies on the
+/// boundary, found by taking the minimum over the three segment/edge
+/// closest-pair tests and the two endpoint projections onto the triangle face.
+/// This mirrors the feature enumeration in Ericson, *Real-Time Collision
+/// Detection*, and uses no transcendental functions.
+pub fn closest_point_segment_triangle(
+    p: Vec3,
+    q: Vec3,
+    a: Vec3,
+    b: Vec3,
+    c: Vec3,
+) -> SegmentTriangleClosest {
+    // Pierce test: does the segment cross the triangle plane inside the face?
+    let n = (b - a).cross(c - a);
+    let d = q - p;
+    let denom = n.dot(d);
+    if denom.abs() > f32::EPSILON {
+        let t = n.dot(a - p) / denom;
+        if (0.0..=1.0).contains(&t) {
+            let x = p + d * t;
+            // Inside the triangle iff its closest point coincides with `x`.
+            let cp = closest_point_on_triangle(x, a, b, c);
+            if (cp - x).length_squared() <= 1e-10 {
+                return SegmentTriangleClosest {
+                    on_segment: x,
+                    on_triangle: x,
+                    distance_squared: 0.0,
+                };
+            }
+        }
+    }
+
+    let mut best = SegmentTriangleClosest {
+        on_segment: p,
+        on_triangle: a,
+        distance_squared: f32::INFINITY,
+    };
+
+    // Segment versus each triangle edge.
+    let edges = [(a, b), (b, c), (c, a)];
+    for (e0, e1) in edges {
+        let r = closest_points_segment_segment(p, q, e0, e1);
+        if r.distance_squared < best.distance_squared {
+            best = SegmentTriangleClosest {
+                on_segment: r.c1,
+                on_triangle: r.c2,
+                distance_squared: r.distance_squared,
+            };
+        }
+    }
+
+    // Each segment endpoint projected onto the triangle face.
+    for endpoint in [p, q] {
+        let cp = closest_point_on_triangle(endpoint, a, b, c);
+        let dist2 = (endpoint - cp).length_squared();
+        if dist2 < best.distance_squared {
+            best = SegmentTriangleClosest {
+                on_segment: endpoint,
+                on_triangle: cp,
+                distance_squared: dist2,
+            };
+        }
+    }
+
+    best
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         closest_point_on_aabb, closest_point_on_segment, closest_point_on_triangle,
-        closest_points_segment_segment,
+        closest_point_segment_triangle, closest_points_segment_segment,
     };
     use crate::bounding::Aabb;
     use approx::assert_relative_eq;
@@ -256,5 +339,78 @@ mod tests {
             Vec3::new(4.0, 6.0, 3.0),
         );
         assert_relative_eq!(r.distance_squared, 25.0, epsilon = 1e-6);
+    }
+
+    // Triangle on the z = 0 plane spanning a right triangle in the first
+    // quadrant, used by the segment/triangle tests.
+    fn unit_triangle() -> (Vec3, Vec3, Vec3) {
+        (
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(2.0, 0.0, 0.0),
+            Vec3::new(0.0, 2.0, 0.0),
+        )
+    }
+
+    #[test]
+    fn segment_triangle_pierces_face() {
+        let (a, b, c) = unit_triangle();
+        // Vertical segment through the interior point (0.5, 0.5, 0).
+        let r = closest_point_segment_triangle(
+            Vec3::new(0.5, 0.5, -1.0),
+            Vec3::new(0.5, 0.5, 1.0),
+            a,
+            b,
+            c,
+        );
+        assert_relative_eq!(r.distance_squared, 0.0, epsilon = 1e-6);
+        assert!(r.on_triangle.abs_diff_eq(Vec3::new(0.5, 0.5, 0.0), 1e-5));
+    }
+
+    #[test]
+    fn segment_triangle_parallel_above_face() {
+        let (a, b, c) = unit_triangle();
+        // Horizontal segment hovering 1 unit above the interior.
+        let r = closest_point_segment_triangle(
+            Vec3::new(0.3, 0.3, 1.0),
+            Vec3::new(0.6, 0.6, 1.0),
+            a,
+            b,
+            c,
+        );
+        assert_relative_eq!(r.distance_squared, 1.0, epsilon = 1e-6);
+        // Closest triangle point stays on the face directly below an endpoint.
+        assert!(r.on_triangle.z.abs() < 1e-6);
+    }
+
+    #[test]
+    fn segment_triangle_closest_is_edge_to_edge() {
+        let (a, b, c) = unit_triangle();
+        // Segment running parallel to edge ab (y = 0) but offset in -y and +z,
+        // so the closest pair is edge-to-edge, not an endpoint projection.
+        let r = closest_point_segment_triangle(
+            Vec3::new(0.5, -1.0, 1.0),
+            Vec3::new(1.5, -1.0, 1.0),
+            a,
+            b,
+            c,
+        );
+        // Distance to edge ab: sqrt(1^2 + 1^2) in the y-z plane => squared 2.
+        assert_relative_eq!(r.distance_squared, 2.0, epsilon = 1e-5);
+        assert!(r.on_triangle.y.abs() < 1e-5 && r.on_triangle.z.abs() < 1e-5);
+    }
+
+    #[test]
+    fn segment_triangle_endpoint_beyond_vertex() {
+        let (a, b, c) = unit_triangle();
+        // Both endpoints sit beyond vertex a (origin) in the -x/-y quadrant.
+        let r = closest_point_segment_triangle(
+            Vec3::new(-1.0, -1.0, 0.0),
+            Vec3::new(-2.0, -1.0, 0.0),
+            a,
+            b,
+            c,
+        );
+        assert!(r.on_triangle.abs_diff_eq(a, 1e-6));
+        assert_relative_eq!(r.distance_squared, 2.0, epsilon = 1e-6);
     }
 }

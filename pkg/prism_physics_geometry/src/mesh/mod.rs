@@ -4,5 +4,6 @@
 mod triangle_mesh;
 
 pub use triangle_mesh::{
-    MeshClosestPoint, MeshRayHit, MeshSphereContact, MeshSweepHit, TriangleMesh,
+    MeshCapsuleContact, MeshClosestPoint, MeshRayHit, MeshSphereContact, MeshSweepHit,
+    TriangleMesh,
 };

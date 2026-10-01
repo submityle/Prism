@@ -20,7 +20,8 @@ mod triangle_box;
 pub use ccd::{conservative_advancement, TimeOfImpact};
 pub use closest_point::{
     closest_point_on_aabb, closest_point_on_segment, closest_point_on_triangle,
-    closest_points_segment_segment, SegmentClosest,
+    closest_point_segment_triangle, closest_points_segment_segment, SegmentClosest,
+    SegmentTriangleClosest,
 };
 pub use distance::{gjk_closest_points, ClosestPoints};
 pub use epa::{gjk_contact, Contact};

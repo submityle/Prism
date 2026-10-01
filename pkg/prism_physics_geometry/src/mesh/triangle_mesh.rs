@@ -15,10 +15,11 @@
 use alloc::vec::Vec;
 use glam::Vec3;
 
-use crate::bounding::{Aabb, BoundingSphere, Ray};
+use crate::bounding::{Aabb, BoundingSphere, Capsule, Ray};
 use crate::bvh::DynamicBvh;
 use crate::narrow::{
-    closest_point_on_triangle, ray_triangle, sweep_sphere_triangle, triangle_aabb_overlap,
+    closest_point_on_triangle, closest_point_segment_triangle, ray_triangle,
+    sweep_sphere_triangle, triangle_aabb_overlap,
 };
 
 /// An exact ray/triangle-mesh intersection.
@@ -82,6 +83,27 @@ pub struct MeshSphereContact {
     pub normal: Vec3,
     /// Penetration depth: how far the sphere surface lies past `point`
     /// (`radius - distance`), always `>= 0` for a reported contact.
+    pub depth: f32,
+}
+
+/// A single capsule/triangle overlap reported by
+/// [`TriangleMesh::capsule_contacts`].
+///
+/// A capsule is a segment inflated by a radius, so each contact is the
+/// closest segment/triangle pair promoted to a push-out: shifting the capsule
+/// axis along `normal` by `depth` lifts its surface clear of the triangle.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct MeshCapsuleContact {
+    /// Index of the overlapping triangle.
+    pub triangle: u32,
+    /// Closest point on that triangle to the capsule's core segment.
+    pub point: Vec3,
+    /// Unit contact normal pointing from `point` toward the capsule axis.
+    ///
+    /// Falls back to the triangle's geometric face normal when the axis
+    /// touches the triangle (degenerate direction).
+    pub normal: Vec3,
+    /// Penetration depth (`radius - distance`), always `>= 0`.
     pub depth: f32,
 }
 
@@ -321,6 +343,53 @@ impl TriangleMesh {
         out
     }
 
+    /// Collects a depenetration contact for every triangle the capsule overlaps.
+    ///
+    /// A capsule is its core segment inflated by `capsule.radius`. For each
+    /// candidate triangle gathered from the capsule's fat AABB, the exact
+    /// closest segment/triangle pair is computed; when the gap is within the
+    /// radius the triangle contributes a [`MeshCapsuleContact`] whose `normal`
+    /// points from the surface toward the capsule axis and whose `depth` is
+    /// `radius - distance`. Returns an empty vector when the radius is negative
+    /// or nothing overlaps. Contacts follow BVH traversal order. When the axis
+    /// touches the triangle the normal falls back to the face normal so the
+    /// push-out direction stays well defined.
+    pub fn capsule_contacts(&self, capsule: &Capsule) -> Vec<MeshCapsuleContact> {
+        let mut out = Vec::new();
+        if capsule.radius < 0.0 {
+            return out;
+        }
+        let r = capsule.radius;
+        let r2 = r * r;
+        self.bvh.query_aabb(capsule.aabb(), &mut |data| {
+            let tri_index = data as usize;
+            let [ia, ib, ic] = self.indices[tri_index];
+            let a = self.vertices[ia as usize];
+            let b = self.vertices[ib as usize];
+            let c = self.vertices[ic as usize];
+            let closest = closest_point_segment_triangle(capsule.a, capsule.b, a, b, c);
+            if closest.distance_squared > r2 {
+                return;
+            }
+            let dist = closest.distance_squared.sqrt();
+            let gap = closest.on_segment - closest.on_triangle;
+            let mut normal = gap.normalize_or_zero();
+            if normal == Vec3::ZERO {
+                normal = (b - a).cross(c - a).normalize_or_zero();
+                if normal == Vec3::ZERO {
+                    normal = Vec3::Y;
+                }
+            }
+            out.push(MeshCapsuleContact {
+                triangle: data as u32,
+                point: closest.on_triangle,
+                normal,
+                depth: r - dist,
+            });
+        });
+        out
+    }
+
     /// Collects the indices of every triangle overlapping `aabb`.
     ///
     /// Candidate triangles are gathered from the BVH by fat-box overlap and
@@ -384,7 +453,7 @@ impl TriangleMesh {
 #[cfg(test)]
 mod tests {
     use super::TriangleMesh;
-    use crate::bounding::Ray;
+    use crate::bounding::{Capsule, Ray};
     use glam::Vec3;
 
     /// Two parallel quads (as triangle pairs) stacked along the ray so the
@@ -639,6 +708,74 @@ mod tests {
         // Empty mesh never contacts.
         let empty = TriangleMesh::new(alloc::vec![], alloc::vec![]);
         assert!(empty.sphere_contacts(Vec3::ZERO, 10.0).is_empty());
+    }
+
+    #[test]
+    fn capsule_contacts_axis_parallel_to_face() {
+        let mesh = two_quads();
+        // Capsule axis lies in the plane z = 1.4 (0.6 below quad A at z = 2),
+        // spanning x in [-0.5, 0.5]; radius 1.0 reaches the face.
+        let capsule = Capsule::new(
+            Vec3::new(-0.5, 0.0, 1.4),
+            Vec3::new(0.5, 0.0, 1.4),
+            1.0,
+        );
+        let contacts = mesh.capsule_contacts(&capsule);
+        assert_eq!(contacts.len(), 2, "both front triangles: {contacts:?}");
+        for c in &contacts {
+            assert!(c.triangle < 2, "front triangle, got {}", c.triangle);
+            assert!(c.point.z > 1.99 && c.point.z < 2.01, "on face: {:?}", c.point);
+            assert!(c.normal.z < -0.99, "push toward axis (-z): {:?}", c.normal);
+            assert!((c.depth - 0.4).abs() < 1e-4, "depth = {}", c.depth);
+        }
+    }
+
+    #[test]
+    fn capsule_contacts_endpoint_reaches_face() {
+        let mesh = two_quads();
+        // Vertical capsule whose top end-cap pokes into quad A at z = 2.
+        let capsule = Capsule::new(
+            Vec3::new(0.0, 0.0, 1.6),
+            Vec3::new(0.0, 0.0, 0.0),
+            0.6,
+        );
+        let contacts = mesh.capsule_contacts(&capsule);
+        assert!(!contacts.is_empty(), "end-cap should touch the face");
+        for c in &contacts {
+            assert!(c.triangle < 2);
+            // Nearest axis point is the z = 1.6 end, gap 0.4 < radius 0.6.
+            assert!((c.depth - 0.2).abs() < 1e-4, "depth = {}", c.depth);
+        }
+    }
+
+    #[test]
+    fn capsule_contacts_reject_out_of_range() {
+        let mesh = two_quads();
+        // Axis at z = 1 with radius 0.5 falls short of quad A at z = 2.
+        let far = Capsule::new(Vec3::new(-1.0, 0.0, 1.0), Vec3::new(1.0, 0.0, 1.0), 0.5);
+        assert!(mesh.capsule_contacts(&far).is_empty());
+        // Negative radius never contacts.
+        let neg = Capsule::new(Vec3::ZERO, Vec3::X, -1.0);
+        assert!(mesh.capsule_contacts(&neg).is_empty());
+        // Empty mesh never contacts.
+        let empty = TriangleMesh::new(alloc::vec![], alloc::vec![]);
+        let cap = Capsule::new(Vec3::ZERO, Vec3::X, 10.0);
+        assert!(empty.capsule_contacts(&cap).is_empty());
+    }
+
+    #[test]
+    fn capsule_contacts_axis_pierces_face() {
+        let mesh = two_quads();
+        // Axis crosses quad A (z = 2): penetration depth equals the full radius.
+        let capsule = Capsule::new(
+            Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(0.0, 0.0, 3.0),
+            0.4,
+        );
+        let contacts = mesh.capsule_contacts(&capsule);
+        assert!(!contacts.is_empty());
+        let pierced = contacts.iter().any(|c| (c.depth - 0.4).abs() < 1e-4);
+        assert!(pierced, "piercing axis gives full-radius depth: {contacts:?}");
     }
 
     #[test]

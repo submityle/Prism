@@ -28,13 +28,16 @@ pub mod proxy;
 pub use bounding::{Aabb, BoundingSphere, Capsule, Frustum, Obb, Plane, Ray};
 pub use broadphase::{generate_pairs, BroadPhasePair, PairChanges, PersistentBroadPhase};
 pub use bvh::DynamicBvh;
-pub use mesh::{MeshClosestPoint, MeshRayHit, MeshSphereContact, MeshSweepHit, TriangleMesh};
+pub use mesh::{
+    MeshCapsuleContact, MeshClosestPoint, MeshRayHit, MeshSphereContact, MeshSweepHit, TriangleMesh,
+};
 pub use narrow::{
     closest_point_on_aabb, closest_point_on_segment, closest_point_on_triangle,
-    closest_points_segment_segment, conservative_advancement, contact_manifold, gjk_closest_points,
+    closest_point_segment_triangle, closest_points_segment_segment, conservative_advancement,
+    contact_manifold, gjk_closest_points,
     gjk_contact, gjk_intersect, ray_capsule, ray_obb, ray_sphere, ray_triangle, ClipShape,
     ClosestPoints, Contact, ContactManifold, FacePolygon, Inflated, ManifoldPoint, RayTriangleHit,
-    sweep_sphere_triangle, triangle_aabb_overlap, SegmentClosest, SphereSweepHit, SupportMap,
+    sweep_sphere_triangle, triangle_aabb_overlap, SegmentClosest, SegmentTriangleClosest, SphereSweepHit, SupportMap,
     TimeOfImpact, Translated,
 };
 pub use proxy::ProxyId;
