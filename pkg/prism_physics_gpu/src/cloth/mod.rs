@@ -35,13 +35,20 @@
 //! dynamics; uniform spatial hashing is the classical Teschner et al. 2003
 //! scheme. No Unreal Engine source or derived code.
 
+pub mod aero;
 pub mod bending;
 pub mod cpu;
 pub mod gpu;
 pub mod layout;
 pub mod prep;
 
-pub use bending::{colour_bending, cpu_cloth_bending, BendingColoring, ClothBendingConstraint, GpuClothBending};
+pub use aero::{
+    build_cloth_aero_prep, cpu_cloth_aero, ClothAeroParams, ClothAeroPrep, ClothAeroTriangle,
+    GpuClothAero,
+};
+pub use bending::{
+    colour_bending, cpu_cloth_bending, BendingColoring, ClothBendingConstraint, GpuClothBending,
+};
 pub use cpu::cpu_cloth_self_collision_jacobi;
 pub use gpu::GpuClothSelfCollision;
 pub use prep::{build as build_cloth_prep, ClothPrep};
