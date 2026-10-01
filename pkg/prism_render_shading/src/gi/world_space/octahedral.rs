@@ -93,7 +93,10 @@ mod tests {
         );
         let back = oct_to_dir(uv);
         let err = (back - n).length();
-        assert!(err < 1e-5, "round trip error {err} for dir {n:?} (uv {uv:?})");
+        assert!(
+            err < 1e-5,
+            "round trip error {err} for dir {n:?} (uv {uv:?})"
+        );
     }
 
     #[test]

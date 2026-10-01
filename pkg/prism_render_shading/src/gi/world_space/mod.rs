@@ -24,6 +24,7 @@ pub mod octahedral;
 pub mod probe_interpolation;
 pub mod probe_placement;
 pub mod radiance_cache;
+pub mod visibility;
 
 pub use octahedral::{dir_to_oct, oct_to_dir};
 pub use probe_interpolation::{
@@ -34,6 +35,4 @@ pub use probe_placement::{
     probe_center_pixel, probe_coord, probe_count, probe_grid_dims, probe_index, probe_pixel_rect,
     PixelRect,
 };
-pub use radiance_cache::{
-    cell_to_key, evaluate_irradiance, world_to_cell, RadianceCell, ShL1Rgb,
-};
+pub use radiance_cache::{cell_to_key, evaluate_irradiance, world_to_cell, RadianceCell, ShL1Rgb};

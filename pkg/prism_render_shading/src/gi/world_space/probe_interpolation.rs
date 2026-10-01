@@ -331,10 +331,10 @@ mod tests {
     fn resolve_weights_drops_rejected_and_renormalises() {
         let cfg = InterpolationConfig::default();
         let neighbors = [
-            probe([1.0; 3], Vec3::Y, 10.0),  // ok
+            probe([1.0; 3], Vec3::Y, 10.0),     // ok
             probe([1.0; 3], Vec3::NEG_Y, 10.0), // rejected normal
-            probe([1.0; 3], Vec3::Y, 999.0), // rejected depth
-            probe([1.0; 3], Vec3::Y, 10.0),  // ok
+            probe([1.0; 3], Vec3::Y, 999.0),    // rejected depth
+            probe([1.0; 3], Vec3::Y, 10.0),     // ok
         ];
         // Centre of quad: bilinear all 0.25 -> two survivors share equally.
         let w = resolve_weights(&neighbors, 0.5, 0.5, Vec3::Y, 10.0, &cfg);

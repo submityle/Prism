@@ -193,7 +193,10 @@ mod tests {
     fn zero_viewport_has_no_probes() {
         assert_eq!(probe_grid_dims(UVec2::ZERO, 8), UVec2::ZERO);
         assert_eq!(probe_count(UVec2::ZERO, 8), 0);
-        assert_eq!(probe_pixel_rect(UVec2::ZERO, UVec2::ZERO, 8), PixelRect::EMPTY);
+        assert_eq!(
+            probe_pixel_rect(UVec2::ZERO, UVec2::ZERO, 8),
+            PixelRect::EMPTY
+        );
         assert_eq!(probe_center_pixel(UVec2::ZERO, UVec2::ZERO, 8), None);
     }
 
