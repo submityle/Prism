@@ -50,6 +50,7 @@ extern crate alloc;
 
 pub mod air;
 pub mod ambisonics;
+pub mod articulation_loss;
 pub mod attenuation;
 pub mod center_time;
 pub mod cone;
@@ -101,6 +102,10 @@ pub mod useful_to_detrimental_ratio;
 pub use air::{AirAbsorption, AirAbsorptionNode, AtmosphericConditions, absorption_db_per_metre};
 pub use ambisonics::{
     FOA_CHANNELS, FoaEncoderNode, decode_foa, encode_foa_gains, encode_foa_sample, rotate_foa,
+};
+pub use articulation_loss::{
+    ArticulationLoss, MAX_ALCONS, PEUTZ_CRITICAL_DISTANCE_CONSTANT, R_LIMIT, alcons_to_sti,
+    articulation_loss_percent,
 };
 pub use attenuation::{Attenuation, DistanceModel};
 pub use center_time::{CenterTime, center_time_ms, center_time_seconds};
