@@ -180,6 +180,7 @@ pub mod tracking_transmittance;
 pub mod transcendental_approx;
 pub mod trig_approx;
 pub mod trilinear;
+pub mod unorm_snorm_pack;
 pub mod variance_clip;
 pub mod variance_shadow;
 pub mod vdb_sample;
@@ -331,6 +332,7 @@ pub use tracking_transmittance::{
 pub use transcendental_approx::{GpuTranscendental, TranscendentalQuery, TranscendentalResult};
 pub use trig_approx::{GpuTrigApprox, TrigApproxQuery, TrigApproxResult};
 pub use trilinear::{GpuTrilinear, TrilinearQuery};
+pub use unorm_snorm_pack::GpuUnormSnormPack;
 pub use variance_clip::{GpuVarianceClip, VarianceClipQuery};
 pub use variance_shadow::{GpuVarianceShadow, VarianceShadowQuery};
 pub use vdb_sample::GpuVdbSample;
