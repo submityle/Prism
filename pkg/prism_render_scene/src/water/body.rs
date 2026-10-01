@@ -40,6 +40,7 @@ use super::abi::{
     GpuWaterWaterlineParams, GpuWaterWetnessParams,
 };
 use super::bind_groups::{WaterBodyUpload, WaterSurfaceExtent, WaterVolumeExtent};
+use super::surface_shading::WaterSurfaceShading;
 
 /// The authored `CPU` state of one water body, spawned on a main-world entity.
 ///
@@ -193,6 +194,13 @@ pub struct WaterBody {
     /// dimensions and world-space origin/extent the scatter kernel uses to
     /// place and displace each render-mesh vertex.
     pub(crate) surface_mesh_params: GpuWaterSurfaceMeshParams,
+
+    // -- Surface raster shading --------------------------------------------
+    /// Authored lighting-response frontend and body-constant style for the
+    /// water-surface raster draw. `None` leaves the body simulation-only with
+    /// no on-screen surface draw — an honest no-op rather than a fabricated
+    /// default surface, which also keeps [`WaterBody`]'s `Default`.
+    pub(crate) surface_shading: Option<WaterSurfaceShading>,
 }
 
 impl WaterBody {
