@@ -19,6 +19,7 @@ mod texture_lod;
 mod texture_sample;
 mod texture_filter;
 mod texture_codec;
+mod normal_map;
 mod validation;
 
 pub use authoring::FACE_SHADOW_SDF_SEMANTIC;
@@ -56,6 +57,10 @@ pub use texture_filter::{
 pub use texture_codec::{
     decode_bc1, decode_bc3, decode_bc4, decode_bc5, rgb565_to_rgb888, BcFormat,
     BcSourceError, BcTexelSource,
+};
+pub use normal_map::{
+    blend_linear, blend_rnm, blend_udn, blend_whiteout, decode_ag, decode_rg, reconstruct_z,
+    unorm_to_snorm,
 };
 pub use validation::{validate_graph, MaterialValidationError};
 
