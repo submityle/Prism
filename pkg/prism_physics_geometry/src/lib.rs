@@ -21,9 +21,11 @@ extern crate alloc;
 pub mod bounding;
 pub mod broadphase;
 pub mod bvh;
+pub mod narrow;
 pub mod proxy;
 
 pub use bounding::{Aabb, BoundingSphere, Frustum, Plane, Ray};
 pub use broadphase::{generate_pairs, BroadPhasePair, PairChanges, PersistentBroadPhase};
 pub use bvh::DynamicBvh;
+pub use narrow::{ray_sphere, ray_triangle, RayTriangleHit};
 pub use proxy::ProxyId;
