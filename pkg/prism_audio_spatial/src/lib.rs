@@ -83,6 +83,7 @@ pub mod rooms;
 pub mod scattering;
 pub mod seat_dip_effect;
 pub mod source_directivity;
+pub mod spatial_impression;
 pub mod spatializer;
 pub mod spread;
 
@@ -162,5 +163,9 @@ pub use seat_dip_effect::{
     MAX_SEAT_DIP_DB, SeatDipEffect, SeatDipGeometry, seat_dip_attenuation_db,
 };
 pub use source_directivity::{DirectivityPreset, SourceDirectivity};
+pub use spatial_impression::{
+    EARLY_WINDOW_END_MS, IACC_MAX_LAG_MS, LF_EARLY_START_MS, SpatialImpression,
+    interaural_cross_correlation, lateral_energy_fraction, lateral_energy_fraction_cosine,
+};
 pub use spatializer::{SourceDescriptor, SpatialParams, resolve};
 pub use spread::{MAX_SPREAD_TAPS, Spread, SpreadParams, SpreadTap, compute_spread_gains, spread_taps};
