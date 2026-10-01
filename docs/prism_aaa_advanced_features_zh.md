@@ -1124,7 +1124,7 @@
 - **预算**：每像素 / 每命中几条标量 FMA + 一次各向异性采样；无额外 pass。
 - **效果**：vis-buffer / RT 下**纹理不走样、不过采样**（远处砖缝 / 栅栏不闪、不糊），SVT 页请求精确——顶级几何密度下的纹理保真刚需。
 - **落点**：`prism_render_scene`（vis-buffer 着色求导）+ `ray_scene`（命中点 ray cone 累积，现有 `ray_cone` 1 文件深化）+ `render_material`（mip 选择接口）+ `render_architecture`（SVT 反馈耦合）。
-- **分级 / 验收**：🟡（`ray_cone` 1 文件骨架在，ray differentials / vis-buffer 求导 / mip 驱动实测 0）。验收：与光栅硬件导数参考的 mip 选择逐像素一致（容差内）；掠射 / 远景纹理无摩尔纹、无过采样噪点；反射多弹跳锥宽随曲率 / 粗糙度单调展宽，与解析参考一致。
+- **分级 / 验收**：🟡→🟢(CPU golden)（**v11 本版落地**：`render_material::texture_lod` 新增纯经典解析 CPU 金标——`TriangleLodConstant`(每三角 texel/world 面积比 Δ) · `RayCone`(RTGems 2019 锥角传播：pinhole/反射/散射逐段展宽) · `RayDifferential`(Igehy 1999 屏幕空间 UV 偏导，各向同性+各向异性) · 共享 `cone_mip_level`/`AnisotropicMip` 钳位策略，退化几何全防 NaN/inf，20 单测绿，commit `bdad48e13`）。**仍缺（🟡）**：vis-buffer 延迟着色求导 + RT 命中锥宽累积的 GPU kernel 接线（落点 `prism_render_scene`/`ray_scene`，并行舰队在途）。验收：与光栅硬件导数参考的 mip 选择逐像素一致（容差内）；掠射 / 远景纹理无摩尔纹、无过采样噪点；反射多弹跳锥宽随曲率 / 粗糙度单调展宽，与解析参考一致。
 
 #### 18.1.3 GPU 驱动粒子渲染整合 — GPU 排序 + mesh/ribbon 粒子 + 软粒子
 - **借鉴对象**：UE **Niagara** GPU 粒子渲染侧 · Frostbite GPU 粒子 · 影视体积粒子。本条**只覆盖渲染侧整合**，粒子**模拟**规格见 `prism_particle_engine_design_zh.md`，不重复。
@@ -1157,7 +1157,7 @@
 | GPU 蒙皮缓存 + WPO 馈入 RT/Nanite（§16.1.6，P1） | ⬜ | 蒙皮缓存 + BLAS refit 全缺（DoD-1/2） | 动画几何在 RT 反射 / 软阴影无撕裂残影 |
 | 稀疏虚拟纹理 SVT + 反馈缓冲（§16.1.1，P1） | ⬜ | 页表 / 反馈回读 / 流送全缺（DoD-1/3） | 海量唯一纹理固定显存下无 pop、无糊 |
 | 着色器 PSO 预编译（§18.1.1，P1） | ⬜ | 预热 / 磁盘缓存 / 缺失反馈全缺（DoD-3） | 首见材质 / 特效零编译卡顿（埋点编译次数=0） |
-| 光线微分纹理 LOD（§18.1.2，P1.5） | 🟡 | vis-buffer / RT 求导 + mip 驱动缺（DoD-1/2） | vis-buffer / RT 下纹理不走样不过采样 |
+| 光线微分纹理 LOD（§18.1.2，P1.5） | 🟡 (CPU golden ✅) | DoD-1 CPU 金标已落地（`render_material::texture_lod`, 20 测, `bdad48e13`）；仍缺 vis-buffer / RT GPU 求导接线（DoD-2） | vis-buffer / RT 下纹理不走样不过采样 |
 | 大气天空 + 空中透视 + 体积云（§17.1.4，P1.5） | ⬜ | LUT 预计算 + froxel raymarch 缺（DoD-1/3） | 行星级大气黄昏红移、云透光梯度物理合理 |
 | 毛发 / 体积深阴影统一（§17.1.6，P1.5） | 🟡 | 体积深阴影 + 统一半透射缺（DoD-1/2） | 毛发自阴影不发黑、体积内部透光梯度收敛 |
 | 矩不变 OIT + 混合折射（§16.1.3，P1.5） | 🟡 | 矩重建 + RT 折射精档缺（DoD-1/2） | 多层透明正确合成、折射物理可信 |
