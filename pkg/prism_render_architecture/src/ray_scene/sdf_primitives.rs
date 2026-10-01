@@ -275,11 +275,54 @@ pub fn ellipsoid_sdf(point: [f32; 3], radii: [f32; 3]) -> f32 {
     k0 * (k0 - 1.0) / k1
 }
 
+/// Signed distance from `point` to a square-based pyramid of the given
+/// `height`, resting on the `y = 0` plane with a unit base (side 1, corners at
+/// `(+/-0.5, 0, +/-0.5)`) and apex at `(0, height, 0)`.
+///
+/// This is Inigo Quilez's exact pyramid distance. The query is folded into one
+/// octant by taking `abs` of the base-plane coordinates and sorting them, so a
+/// single slanted face solves all four; the distance is then the minimum of
+/// the squared distances to that face and to the base-edge region, combined
+/// with the folded coordinate and signed by whether the point sits above the
+/// base. Exact (not a bound) on both sides. Built from `abs`, `min`, `max`,
+/// `clamp`, `signum`, and a single `sqrt`, so it stays transcendental-free.
+pub fn pyramid(point: [f32; 3], height: f32) -> f32 {
+    let m2 = height * height + 0.25;
+    // Fold into one octant of the base plane, then sort so x >= z.
+    let mut px = point[0].abs();
+    let mut pz = point[2].abs();
+    if pz > px {
+        core::mem::swap(&mut px, &mut pz);
+    }
+    px -= 0.5;
+    pz -= 0.5;
+    let py = point[1];
+
+    let qx = pz;
+    let qy = height * py - 0.5 * px;
+    let qz = height * px + 0.5 * py;
+
+    let s = (-qx).max(0.0);
+    let t = ((qy - 0.5 * pz) / (m2 + 0.25)).clamp(0.0, 1.0);
+
+    let a = m2 * (qx + s) * (qx + s) + qy * qy;
+    let b = m2 * (qx + 0.5 * t) * (qx + 0.5 * t) + (qy - m2 * t) * (qy - m2 * t);
+    // Inside the wedge above both the slanted face and the base edge the point
+    // projects straight down the face, so the planar squared distance is zero.
+    let d2 = if qy.min(-qx * m2 - qy * 0.5) > 0.0 {
+        0.0
+    } else {
+        a.min(b)
+    };
+
+    ((d2 + qz * qz) / m2).sqrt() * qz.max(-py).signum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         box_frame, box_sdf, capped_cone, capped_cylinder, capsule, ellipsoid_sdf, hex_prism,
-        octahedron, plane, round_box, sphere, torus,
+        octahedron, plane, pyramid, round_box, sphere, torus,
     };
 
     #[test]
@@ -439,5 +482,40 @@ mod tests {
     fn ellipsoid_centre_is_negative_smallest_radius() {
         let r = [2.0, 1.0, 0.5];
         assert!((ellipsoid_sdf([0.0, 0.0, 0.0], r) - (-0.5)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn pyramid_apex_lies_on_the_surface() {
+        // The apex sits at (0, h, 0); the exact distance there is zero.
+        assert!(pyramid([0.0, 1.0, 0.0], 1.0).abs() < 1e-6);
+        assert!(pyramid([0.0, 3.0, 0.0], 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn pyramid_point_above_apex_is_the_vertical_gap() {
+        // A point one unit above the apex is exactly one unit outside, for any
+        // height (the apex is the nearest surface point straight down).
+        assert!((pyramid([0.0, 2.0, 0.0], 1.0) - 1.0).abs() < 1e-5);
+        assert!((pyramid([0.0, 4.0, 0.0], 3.0) - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn pyramid_base_corner_lies_on_the_surface() {
+        // The unit base has corners at (+/-0.5, 0, +/-0.5); each is on-surface.
+        assert!(pyramid([0.5, 0.0, 0.5], 1.0).abs() < 1e-5);
+        assert!(pyramid([-0.5, 0.0, -0.5], 2.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn pyramid_interior_point_is_negative() {
+        // A point on the axis a quarter of the way up is strictly inside.
+        assert!(pyramid([0.0, 0.25, 0.0], 1.0) < 0.0);
+    }
+
+    #[test]
+    fn pyramid_side_point_matches_base_edge_distance() {
+        // Far out along +x at base level, the nearest surface point is the base
+        // edge midpoint (0.5, 0, 0), so the distance is the planar overshoot.
+        assert!((pyramid([3.0, 0.0, 0.0], 1.0) - 2.5).abs() < 1e-5);
     }
 }
