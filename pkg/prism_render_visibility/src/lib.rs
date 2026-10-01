@@ -32,8 +32,9 @@ mod work;
 pub use benchmark::benchmark_cpu_reference;
 pub use benchmark::VisibilityBenchmarkResult;
 pub use binning::{
-    build_two_phase_view_draw_bins, build_view_draw_bins, DrawBinCandidate, DrawBinKey,
-    DrawBinRange, GpuDrawBinHeader, TwoPhaseViewDrawBins, ViewDrawBins, DRAW_BIN_HEADER_WORDS,
+    build_two_phase_view_draw_bins, build_view_draw_bins, pack_draw_bin_streams, DrawBinCandidate,
+    DrawBinKey, DrawBinRange, GpuDrawBinHeader, TwoPhaseViewDrawBins, ViewDrawBins,
+    DRAW_BIN_HEADER_WORDS,
 };
 pub use cull_hzb::{cull_view_with_hzb, HzbCullScene};
 pub use cull_two_phase::cull_view_two_phase;

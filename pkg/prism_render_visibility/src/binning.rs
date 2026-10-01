@@ -176,6 +176,53 @@ pub fn build_two_phase_view_draw_bins(
     }
 }
 
+impl TwoPhaseViewDrawBins {
+    /// Packs the early and late streams into one shared set of GPU buffers,
+    /// placing the early pass first. After this call the late stream's
+    /// `global_bin_start`, `command_buffer_start`, and `global_candidate_start`
+    /// sit immediately past the early stream, so both can be uploaded into a
+    /// single bin/command/candidate buffer without overlap.
+    pub fn pack(&mut self) {
+        pack_draw_bin_streams([&mut self.early, &mut self.late]);
+    }
+}
+
+/// Packs a sequence of draw-bin streams into shared global buffers by assigning
+/// each stream disjoint offsets via a running prefix sum in iteration order.
+///
+/// [`build_view_draw_bins`] emits every stream with its global offsets at zero,
+/// which is only valid for a single stream drawn in isolation. When several
+/// streams share one GPU bin/command/candidate buffer — multiple views, or the
+/// early and late passes of one view — each must begin past the previous one.
+/// This assigns:
+/// - `global_bin_start` += the sum of preceding `bins.len()`,
+/// - `command_buffer_start` += the sum of preceding `command_count`,
+/// - `global_candidate_start` += the sum of preceding `candidate_bins.len()`.
+///
+/// Candidate strides use the full `candidate_bins` length (the scene capacity
+/// the stream was built with), matching the scene-capacity-strided candidate
+/// lookup documented on [`ViewDrawBins::command_buffer_start`]. All cursors use
+/// saturating addition so a pathological total cannot wrap. The per-bin
+/// `command_start` stored in each [`DrawBinRange`] stays stream-local; the GPU
+/// adds `command_buffer_start` to reach the absolute slot.
+pub fn pack_draw_bin_streams<'a, I>(streams: I)
+where
+    I: IntoIterator<Item = &'a mut ViewDrawBins>,
+{
+    let mut bin_cursor = 0_u32;
+    let mut command_cursor = 0_u32;
+    let mut candidate_cursor = 0_u32;
+    for stream in streams {
+        stream.global_bin_start = bin_cursor;
+        stream.command_buffer_start = command_cursor;
+        stream.global_candidate_start = candidate_cursor;
+        bin_cursor = bin_cursor.saturating_add(stream.bins.len() as u32);
+        command_cursor = command_cursor.saturating_add(stream.command_count);
+        candidate_cursor =
+            candidate_cursor.saturating_add(stream.candidate_bins.len() as u32);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,5 +362,87 @@ mod tests {
         );
         assert_eq!(bins.early.command_count, 1);
         assert_eq!(bins.late.command_count, 0);
+    }
+
+    #[test]
+    fn pack_assigns_disjoint_offsets_to_early_then_late() {
+        let key = |geometry| DrawBinKey {
+            geometry: handle(geometry),
+            lod_or_cluster: 0,
+            pipeline_class: geometry,
+            vertex_buffer_class: 1,
+            index_buffer_class: 2,
+            indexed: true,
+            primitive_kind: GeometryPrimitiveKind::Indexed,
+            pass_mask: crate::RenderPassMask::OPAQUE.0,
+        };
+        let late =
+            crate::VisibilityStageMask::LATE_RETEST | crate::VisibilityStageMask::LATE_VISIBLE;
+        let mut bins = build_two_phase_view_draw_bins(
+            handle(9),
+            8,
+            [
+                DrawBinCandidate {
+                    scene: handle(1),
+                    key: key(1),
+                    visibility_stages: crate::VisibilityStageMask::EARLY,
+                },
+                DrawBinCandidate {
+                    scene: handle(2),
+                    key: key(2),
+                    visibility_stages: crate::VisibilityStageMask::EARLY,
+                },
+                DrawBinCandidate {
+                    scene: handle(3),
+                    key: key(3),
+                    visibility_stages: late,
+                },
+            ],
+        );
+        // Before packing every stream starts at zero.
+        assert_eq!(bins.early.global_bin_start, 0);
+        assert_eq!(bins.late.global_bin_start, 0);
+        bins.pack();
+        // Early pass stays at the origin of each shared buffer.
+        assert_eq!(bins.early.global_bin_start, 0);
+        assert_eq!(bins.early.command_buffer_start, 0);
+        assert_eq!(bins.early.global_candidate_start, 0);
+        // Late pass starts immediately past the early stream.
+        assert_eq!(bins.late.global_bin_start, bins.early.bins.len() as u32);
+        assert_eq!(bins.late.command_buffer_start, bins.early.command_count);
+        assert_eq!(
+            bins.late.global_candidate_start,
+            bins.early.candidate_bins.len() as u32
+        );
+        // Candidate stride is the per-view scene capacity (8), not the bin count.
+        assert_eq!(bins.late.global_candidate_start, 8);
+    }
+
+    #[test]
+    fn pack_streams_prefix_sums_three_views() {
+        let make = |view, caps: &[(u32, u32)], scene_capacity| {
+            let candidates = caps.iter().map(|&(scene, geo)| DrawBinCandidate {
+                scene: handle(scene),
+                key: DrawBinKey {
+                    geometry: handle(geo),
+                    lod_or_cluster: 0,
+                    pipeline_class: geo,
+                    vertex_buffer_class: 1,
+                    index_buffer_class: 2,
+                    indexed: true,
+                    primitive_kind: GeometryPrimitiveKind::Indexed,
+                    pass_mask: crate::RenderPassMask::OPAQUE.0,
+                },
+                visibility_stages: crate::VisibilityStageMask::EARLY,
+            });
+            build_view_draw_bins(handle(view), scene_capacity, candidates)
+        };
+        let mut a = make(1, &[(1, 1), (2, 2)], 4); // 2 bins, 2 commands, cap 4
+        let mut b = make(2, &[(1, 1)], 8); // 1 bin, 1 command, cap 8
+        let mut c = make(3, &[(1, 1), (2, 1), (3, 2)], 16); // 2 bins, 3 commands, cap 16
+        pack_draw_bin_streams([&mut a, &mut b, &mut c]);
+        assert_eq!((a.global_bin_start, a.command_buffer_start, a.global_candidate_start), (0, 0, 0));
+        assert_eq!((b.global_bin_start, b.command_buffer_start, b.global_candidate_start), (2, 2, 4));
+        assert_eq!((c.global_bin_start, c.command_buffer_start, c.global_candidate_start), (3, 3, 12));
     }
 }
