@@ -183,6 +183,7 @@ pub mod tetrahedron_volume;
 pub mod total_coverage;
 pub mod tracking_transmittance;
 pub mod transcendental_approx;
+pub mod triangle_aabb_overlap;
 pub mod trig_approx;
 pub mod trilinear;
 pub mod unorm_snorm_pack;
@@ -348,6 +349,7 @@ pub use tracking_transmittance::{
     GpuTrackingTransmittance, TrackingEstimate, TrackingTransmittanceQuery,
 };
 pub use transcendental_approx::{GpuTranscendental, TranscendentalQuery, TranscendentalResult};
+pub use triangle_aabb_overlap::{GpuTriangleAabbOverlap, TriangleAabbQuery};
 pub use trig_approx::{GpuTrigApprox, TrigApproxQuery, TrigApproxResult};
 pub use trilinear::{GpuTrilinear, TrilinearQuery};
 pub use unorm_snorm_pack::GpuUnormSnormPack;
