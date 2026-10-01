@@ -266,6 +266,40 @@ pub fn capped_cylinder(point: [f32; 3], half_height: f32, radius: f32) -> f32 {
     inside + outside
 }
 
+/// Exact surface normal (unit gradient) of [`capped_cylinder`] at `point` for
+/// the cylinder of `half_height` and `radius` on the `y` axis.
+///
+/// The field is a 2D box SDF in the `(radial, |y|)` plane
+/// (`radial = |p.xz|`) with the box corner at `(radius, half_height)`, so the
+/// planar gradient `(g_r, g_h)` is the first-quadrant case of
+/// [`box_2d_gradient`]: outside, the normalised overshoot `max(d, 0)`; inside,
+/// the unit axis toward the least-negative side (`g_r = 1` on the lateral wall,
+/// `g_h = 1` on a cap). Mapping back to 3D sends the radial component along the
+/// `xz` unit `p.xz / radial` and the height component along `sign(p.y)`; because
+/// that map is an isometry the result is unit length with no renormalisation.
+/// On the central `y` axis (`radial = 0`) the radial direction is undefined, so
+/// the pure cap normal `(0, sign(p.y), 0)` is returned.
+pub fn capped_cylinder_gradient(point: [f32; 3], half_height: f32, radius: f32) -> [f32; 3] {
+    let radial = (point[0] * point[0] + point[2] * point[2]).sqrt();
+    let dx = radial - radius;
+    let dy = point[1].abs() - half_height;
+    let mr = dx.max(0.0);
+    let mh = dy.max(0.0);
+    let l = length2([mr, mh]);
+    let (gr, gh) = if l > 0.0 {
+        (mr / l, mh / l)
+    } else if dx >= dy {
+        (1.0, 0.0)
+    } else {
+        (0.0, 1.0)
+    };
+    let sy = if point[1] < 0.0 { -1.0 } else { 1.0 };
+    if radial == 0.0 {
+        return [0.0, gh * sy, 0.0];
+    }
+    [gr * point[0] / radial, gh * sy, gr * point[2] / radial]
+}
+
 /// Signed distance from `point` to a capped cone aligned with the `y` axis,
 /// spanning `y` in `[-half_height, half_height]`, with `bottom_radius` at the
 /// lower cap and `top_radius` at the upper cap.
@@ -2198,7 +2232,7 @@ pub fn segment_3d(point: [f32; 3], a: [f32; 3], b: [f32; 3]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        annulus_2d, arc, box_2d, box_2d_gradient, box_frame, box_frame_2d, box_gradient, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_torus, capsule, capsule_2d, capsule_gradient, circle_2d, circle_2d_gradient, cone_sdf, cross_2d, cut_disk_2d, cut_hollow_sphere,
+        annulus_2d, arc, box_2d, box_2d_gradient, box_frame, box_frame_2d, box_gradient, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_cylinder_gradient, capped_torus, capsule, capsule_2d, capsule_gradient, circle_2d, circle_2d_gradient, cone_sdf, cross_2d, cut_disk_2d, cut_hollow_sphere,
         cut_sphere, cylinder_segment, death_star, egg_2d, ellipsoid_sdf, equilateral_triangle_2d, heart_2d, hex_prism, hexagram_2d, horseshoe_2d, infinite_cone, infinite_cylinder, isosceles_triangle_2d, length2, line_sdf, link, moon,
         octagon_prism, octahedron, oriented_box_2d, oriented_vesica_2d, parallelogram, pentagram_2d, pie, plane, plane_gradient, polygon_2d, pyramid, quad_sdf, regular_hexagon_2d, regular_octagon_2d, regular_pentagon_2d, rhombus, rhombus_2d, round_box, round_cone_sdf,
         round_cone_segment, rounded_box_2d, rounded_cross_2d, rounded_cylinder, rounded_x,
@@ -3252,6 +3286,30 @@ mod tests {
         }
         // Interior point closest to the +x edge points along +x.
         assert_eq!(box_2d_gradient([0.55, 0.05], b), [1.0, 0.0]);
+    }
+
+    #[test]
+    fn capped_cylinder_gradient_matches_central_difference_off_creases() {
+        let (half_height, radius) = (0.6_f32, 0.5);
+        // Points away from the rim/wall/cap creases (measure-zero).
+        for &p in &[
+            [1.0_f32, 0.2, 0.3],   // exterior lateral wall
+            [0.1, 1.2, 0.2],       // exterior cap
+            [0.9, 1.1, 0.6],       // exterior rim corner
+            [0.2, 0.1, 0.1],       // interior, lateral wall nearer
+            [0.1, 0.55, 0.05],     // interior, cap nearer
+            [-0.8, -0.3, 0.4],     // exterior, negative octant
+        ] {
+            let g = capped_cylinder_gradient(p, half_height, radius);
+            assert!((unit_len3(g) - 1.0).abs() < 1e-6, "unit p={p:?}");
+            let fd = central_grad3(&|q| capped_cylinder(q, half_height, radius), p);
+            for k in 0..3 {
+                assert!((g[k] - fd[k]).abs() < 2e-3, "cc grad p={p:?} axis {k}: {} vs {}", g[k], fd[k]);
+            }
+        }
+        // On the central axis above the cap the normal is the pure +y cap normal.
+        assert_eq!(capped_cylinder_gradient([0.0, 1.0, 0.0], half_height, radius), [0.0, 1.0, 0.0]);
+        assert_eq!(capped_cylinder_gradient([0.0, -1.0, 0.0], half_height, radius), [0.0, -1.0, 0.0]);
     }
 
     // Exact unsigned distance to a 2D segment, used to cross-check `segment_2d`
