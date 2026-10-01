@@ -970,13 +970,121 @@ pub fn round_cone_segment(point: [f32; 3], a: [f32; 3], b: [f32; 3], r1: f32, r2
     }
 }
 
+/// Signed distance from `point` to a capped cylinder with arbitrary endpoints:
+/// a solid cylinder of the given `radius` whose axis runs from `a` to `b`,
+/// closed by a flat cap at each end.
+///
+/// This is the general-orientation generalisation of [`capped_cylinder`]
+/// (which is pinned to the `y` axis and centred at the origin): the axis may
+/// point anywhere, so it models pipes, bars, and bones placed directly in world
+/// space without a separate transform. Passing `a = [0, -h, 0]`, `b = [0, h, 0]`
+/// reproduces [`capped_cylinder`] exactly.
+///
+/// This is Inigo Quilez's exact `sdCylinder(p, a, b, r)`: the query is split
+/// into a radial residual `x` (distance from the axis minus the radius) and an
+/// axial residual `y` (overshoot past the end caps), both expressed in units
+/// scaled by `baba = dot(b - a, b - a)` to avoid a divide until the final
+/// `sqrt`. The interior case takes the negative of the nearer squared residual;
+/// the exterior case sums the positive residuals (corner-correct where the rim
+/// meets a cap). Built from `dot`, `abs`, `min`/`max`, `sign`, and one square
+/// root, so it stays transcendental-free and yields a true distance (not a
+/// bound) inside and out.
+///
+/// Degenerate inputs (`a == b`) make `baba` vanish and the final `1/baba`
+/// scaling divide by zero; callers must pass distinct endpoints.
+pub fn cylinder_segment(point: [f32; 3], a: [f32; 3], b: [f32; 3], radius: f32) -> f32 {
+    let ba = sub3(b, a);
+    let pa = sub3(point, a);
+    let baba = dot(ba, ba);
+    let paba = dot(pa, ba);
+
+    // Radial residual: perpendicular distance from the (infinite) axis, scaled
+    // by `baba`, minus the radius (also scaled). `pa*baba - ba*paba` is the
+    // component of `pa` orthogonal to `ba`, times `baba`.
+    let perp = [
+        pa[0] * baba - ba[0] * paba,
+        pa[1] * baba - ba[1] * paba,
+        pa[2] * baba - ba[2] * paba,
+    ];
+    let x = length(perp) - radius * baba;
+    // Axial residual: overshoot past either flat cap, scaled by `baba`.
+    let y = (paba - baba * 0.5).abs() - baba * 0.5;
+
+    let x2 = x * x;
+    let y2 = y * y * baba;
+
+    // Interior when both residuals are negative: distance is the negated nearer
+    // squared residual. Exterior: sum the squared positive residuals so the
+    // rim/cap corner stays Euclidean-correct.
+    let d = if x.max(y) < 0.0 {
+        -(x2.min(y2))
+    } else {
+        (if x > 0.0 { x2 } else { 0.0 }) + (if y > 0.0 { y2 } else { 0.0 })
+    };
+
+    d.signum() * d.abs().sqrt() / baba
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        box_frame, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_torus, capsule, cone_sdf, cut_hollow_sphere, cut_sphere,
+        box_frame, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_torus, capsule, cone_sdf, cut_hollow_sphere, cut_sphere, cylinder_segment,
         death_star, ellipsoid_sdf, hex_prism, infinite_cylinder, length2, line_sdf, link, octahedron, plane, pyramid, rhombus, round_box,
         quad_sdf, round_cone_sdf, round_cone_segment, rounded_cylinder, solid_angle, sphere, torus, triangle_sdf, triangular_prism, vesica,
     };
+
+    #[test]
+    fn cylinder_segment_matches_axis_aligned_capped_cylinder() {
+        // With endpoints on the y axis symmetric about the origin, the general
+        // solver must agree with the specialised `capped_cylinder` everywhere.
+        let a = [0.0, -1.5, 0.0];
+        let b = [0.0, 1.5, 0.0];
+        let r = 0.75;
+        let samples = [
+            [0.0, 0.0, 0.0],   // interior centre
+            [0.5, 0.0, 0.0],   // interior, off axis
+            [2.0, 0.0, 0.0],   // outside the side wall
+            [0.0, 3.0, 0.0],   // outside past the top cap
+            [0.75, 1.5, 0.0],  // on the top rim
+            [1.2, 2.1, 0.4],   // outside the rim corner
+        ];
+        for p in samples {
+            let general = cylinder_segment(p, a, b, r);
+            let aligned = capped_cylinder(p, 1.5, r);
+            assert!(
+                (general - aligned).abs() < 1e-5,
+                "mismatch at {p:?}: general={general} aligned={aligned}"
+            );
+        }
+    }
+
+    #[test]
+    fn cylinder_segment_side_and_cap_distances_are_exact() {
+        let a = [0.0, 0.0, 0.0];
+        let b = [0.0, 2.0, 0.0];
+        let r = 1.0;
+        // Straight out from the side wall at mid-height: distance is radius gap.
+        assert!((cylinder_segment([3.0, 1.0, 0.0], a, b, r) - 2.0).abs() < 1e-5);
+        // Directly above the top cap on the axis: distance is the axial gap.
+        assert!((cylinder_segment([0.0, 3.5, 0.0], a, b, r) - 1.5).abs() < 1e-5);
+        // Interior point: negative distance to the nearest wall (side at 0.4).
+        assert!((cylinder_segment([0.6, 1.0, 0.0], a, b, r) - (-0.4)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn cylinder_segment_is_rigid_motion_invariant() {
+        // The signed distance is a geometric quantity: translating the query and
+        // both endpoints by the same offset must leave it unchanged.
+        let a = [0.2, -1.0, 0.3];
+        let b = [0.6, 1.0, -0.4];
+        let r = 0.5;
+        let p = [1.3, 0.2, 0.9];
+        let offset = [4.0, -2.0, 7.0];
+        let shift = |v: [f32; 3]| [v[0] + offset[0], v[1] + offset[1], v[2] + offset[2]];
+        let base = cylinder_segment(p, a, b, r);
+        let moved = cylinder_segment(shift(p), shift(a), shift(b), r);
+        assert!((base - moved).abs() < 1e-5, "base={base} moved={moved}");
+    }
 
     #[test]
     fn sphere_is_centre_distance_minus_radius() {
