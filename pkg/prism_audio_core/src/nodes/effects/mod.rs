@@ -125,6 +125,10 @@
 //!   (`tanh` / `arctan` / cubic / reciprocal / sine) with a drive + DC bias
 //!   stage, oversampling, and an output DC blocker; distinct from
 //!   [`waveshaper::WaveshaperNode`], which is a fixed symmetric `tanh` clip.
+//! - [`slew_limiter::SlewLimiterNode`] -- per-channel slew-rate limiter that
+//!   caps the output's rising and falling slope with independent linear rates,
+//!   for glide / lag smoothing and analog-style slew distortion; distinct from
+//!   the amplitude-tracking [`envelope_follower::EnvelopeFollowerNode`].
 //! - [`spectral_delay::SpectralDelayNode`] -- frequency-domain spectral delay:
 //!   a weighted overlap-add short-time Fourier transform (`STFT`) delays each
 //!   frequency bin by its own time (interpolated across the spectrum) with an
@@ -241,6 +245,7 @@ pub mod pitch_shifter;
 pub mod reverse_delay;
 pub mod ring_modulator;
 pub mod saturation;
+pub mod slew_limiter;
 pub mod spectral_delay;
 pub mod spectral_freeze;
 pub mod spectral_gate;
@@ -321,6 +326,7 @@ pub use reverse_delay::{
 };
 pub use ring_modulator::{RingModulatorNode, RingModulatorParams};
 pub use saturation::{DEFAULT_DC_BLOCK_COEFF, SaturationCurve, SaturationNode, SaturationParams};
+pub use slew_limiter::{SlewLimiterNode, SlewLimiterParams};
 pub use spectral_delay::{
     DEFAULT_FEEDBACK, DEFAULT_HIGH_DELAY_MS, DEFAULT_LOW_DELAY_MS, DEFAULT_MIX,
     DEFAULT_SPECTRAL_DELAY_FFT_SIZE, MAX_DELAY_MS, MAX_SPECTRAL_DELAY_FEEDBACK,
