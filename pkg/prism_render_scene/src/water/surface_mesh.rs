@@ -43,7 +43,6 @@
 
 use bytemuck::{Pod, Zeroable};
 
-use prism_render_architecture::water::gpu::surface_bindings::view;
 use prism_render_architecture::water::gpu::SurfaceGrid;
 
 /// Build the triangle-list index buffer for one surface patch.
@@ -113,13 +112,6 @@ pub(crate) fn surface_index_data(grid: SurfaceGrid) -> Vec<u32> {
 /// contract fails the build rather than corrupting the draw at run time.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "uploaded by the water-surface raster draw node (the following slice); exercised now by the layout contract tests in this module"
-    )
-)]
 pub(crate) struct GpuWaterSurfaceView {
     /// Clip-from-world transform for the surface vertices (column-major, the
     /// `wgpu`/`WGSL` convention).
@@ -143,10 +135,117 @@ pub(crate) struct GpuWaterSurfaceView {
     pub viewport: [f32; 4],
 }
 
+/// The authored, semantic inputs the raster draw packs into one
+/// [`GpuWaterSurfaceView`] uniform.
+///
+/// This is the per-frame, per-view camera / key-light / shading-style state in
+/// plain engine units, *before* it is laid out at the `std140` offsets the
+/// `water_surface_raster.wesl` `WaterSurfaceView` `struct` reads. Keeping the
+/// authored values here (rather than hand-packing `vec4` rows at the call site)
+/// keeps the byte layout a single-sourced concern of [`build_surface_view`] and
+/// lets the draw node pass readable, named fields.
+pub(crate) struct SurfaceViewParams {
+    /// Clip-from-world transform for the surface vertices (column-major).
+    pub clip_from_world: [[f32; 4]; 4],
+    /// World-space camera position.
+    pub camera_world_position: [f32; 3],
+    /// Screen-space refraction offset scale (packed into
+    /// `world_camera_position.w`); `0.0` disables the refraction displacement.
+    pub refraction_screen_offset: f32,
+    /// Direction *towards* the key light (world space). The shader renormalizes
+    /// and falls back to straight-up for a degenerate direction, so a non-unit
+    /// or zero vector is safe.
+    pub sun_direction: [f32; 3],
+    /// Key-light illuminance (`rgb`, linear).
+    pub sun_illuminance: [f32; 3],
+    /// Base perceptual roughness.
+    pub roughness: f32,
+    /// Base reflectance (`f0` at normal incidence).
+    pub reflectance: f32,
+    /// Optical thickness driving the `Beer-Lambert` body attenuation.
+    pub optical_thickness: f32,
+    /// Foam whiten strength: how strongly foam coverage washes the body white.
+    pub foam_whiten: f32,
+    /// Base water albedo (`rgb`, linear).
+    pub water_albedo: [f32; 3],
+    /// Minimum surface alpha (the `Fresnel`-weighted alpha never falls below
+    /// this), so still water keeps a floor of opacity.
+    pub min_alpha: f32,
+    /// `NPR` ramp step count (number of discrete toon bands).
+    pub npr_ramp_steps: f32,
+    /// `NPR` toon foam threshold: foam coverage above this draws a hard white
+    /// edge.
+    pub toon_foam_threshold: f32,
+    /// Custom-frontend emissive tint strength.
+    pub tint_strength: f32,
+    /// Hybrid-frontend shore blend bias added to foam coverage when crossfading
+    /// the `PBR` body into the stylized shallows.
+    pub hybrid_shore_bias: f32,
+    /// Framebuffer size in pixels (`width`, `height`) for the refraction screen
+    /// lookup.
+    pub viewport_size: [f32; 2],
+}
+
+/// Pack the authored per-view state into the `std140` [`GpuWaterSurfaceView`]
+/// uniform the raster draw uploads.
+///
+/// This is the single place the semantic inputs map onto the shader's `vec4`
+/// rows, in the exact order `water_surface_raster.wesl` reads them:
+///
+/// * `world_camera_position = (camera_xyz, refraction_screen_offset)`,
+/// * `sun_direction = (dir_xyz, 0)` and `sun_illuminance = (rgb, 0)`,
+/// * `surface_params = (roughness, reflectance, optical_thickness, foam_whiten)`,
+/// * `water_color = (albedo_rgb, min_alpha)`,
+/// * `style_params = (npr_ramp_steps, toon_foam_threshold, tint_strength, hybrid_shore_bias)`,
+/// * `viewport = (width, height, 0, 0)`.
+///
+/// Pure: the same inputs always produce the same bytes, so the uniform upload
+/// is deterministic frame to frame. The unused `vec4` lanes (`sun_*.w`,
+/// `viewport.zw`) are zeroed rather than left undefined.
+#[must_use]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "called by the water-surface raster draw node (the following slice); exercised now by the unit tests in this module"
+    )
+)]
+pub(crate) fn build_surface_view(params: &SurfaceViewParams) -> GpuWaterSurfaceView {
+    let [cx, cy, cz] = params.camera_world_position;
+    let [sx, sy, sz] = params.sun_direction;
+    let [ir, ig, ib] = params.sun_illuminance;
+    let [ar, ag, ab] = params.water_albedo;
+    let [vw, vh] = params.viewport_size;
+
+    GpuWaterSurfaceView {
+        clip_from_world: params.clip_from_world,
+        world_camera_position: [cx, cy, cz, params.refraction_screen_offset],
+        sun_direction: [sx, sy, sz, 0.0],
+        sun_illuminance: [ir, ig, ib, 0.0],
+        surface_params: [
+            params.roughness,
+            params.reflectance,
+            params.optical_thickness,
+            params.foam_whiten,
+        ],
+        water_color: [ar, ag, ab, params.min_alpha],
+        style_params: [
+            params.npr_ramp_steps,
+            params.toon_foam_threshold,
+            params.tint_strength,
+            params.hybrid_shore_bias,
+        ],
+        viewport: [vw, vh, 0.0, 0.0],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The std140 offset/size contract lives in the architecture crate; the
+    // offset and byte-stability tests below assert this packing matches it.
     use prism_render_architecture::water::gpu::plan_surface_draw_call;
+    use prism_render_architecture::water::gpu::surface_bindings::view;
 
     // ------------------------------------------------------------------ mesh
 
@@ -353,5 +452,91 @@ mod tests {
         let bytes = bytemuck::bytes_of(&view_uniform);
         assert_eq!(bytes.len(), view::SIZE as usize);
         assert!(bytes.iter().all(|&b| b == 0));
+    }
+
+    // ---------------------------------------------------------- build_surface_view
+
+    /// A representative, all-distinct set of authored inputs so each packed lane
+    /// is traceable back to exactly one source field.
+    fn sample_params() -> SurfaceViewParams {
+        SurfaceViewParams {
+            clip_from_world: [
+                [1.0, 2.0, 3.0, 4.0],
+                [5.0, 6.0, 7.0, 8.0],
+                [9.0, 10.0, 11.0, 12.0],
+                [13.0, 14.0, 15.0, 16.0],
+            ],
+            camera_world_position: [100.0, 200.0, 300.0],
+            refraction_screen_offset: 0.25,
+            sun_direction: [0.0, 1.0, 0.0],
+            sun_illuminance: [10.0, 11.0, 12.0],
+            roughness: 0.3,
+            reflectance: 0.02,
+            optical_thickness: 0.7,
+            foam_whiten: 0.8,
+            water_albedo: [0.01, 0.1, 0.2],
+            min_alpha: 0.15,
+            npr_ramp_steps: 4.0,
+            toon_foam_threshold: 0.6,
+            tint_strength: 0.5,
+            hybrid_shore_bias: 0.1,
+            viewport_size: [1920.0, 1080.0],
+        }
+    }
+
+    #[test]
+    fn build_passes_the_clip_matrix_through_unchanged() {
+        let params = sample_params();
+        let view_uniform = build_surface_view(&params);
+        assert_eq!(view_uniform.clip_from_world, params.clip_from_world);
+    }
+
+    #[test]
+    fn build_packs_the_camera_and_refraction_offset() {
+        let params = sample_params();
+        let view_uniform = build_surface_view(&params);
+        // xyz is the camera position; w carries the refraction screen offset.
+        assert_eq!(
+            view_uniform.world_camera_position,
+            [100.0, 200.0, 300.0, 0.25]
+        );
+    }
+
+    #[test]
+    fn build_packs_the_key_light_with_zero_tail_lanes() {
+        let params = sample_params();
+        let view_uniform = build_surface_view(&params);
+        assert_eq!(view_uniform.sun_direction, [0.0, 1.0, 0.0, 0.0]);
+        assert_eq!(view_uniform.sun_illuminance, [10.0, 11.0, 12.0, 0.0]);
+    }
+
+    #[test]
+    fn build_packs_the_shading_params_in_contract_order() {
+        let params = sample_params();
+        let view_uniform = build_surface_view(&params);
+        // surface_params = (roughness, reflectance, optical_thickness, foam_whiten).
+        assert_eq!(view_uniform.surface_params, [0.3, 0.02, 0.7, 0.8]);
+        // water_color = (albedo_rgb, min_alpha).
+        assert_eq!(view_uniform.water_color, [0.01, 0.1, 0.2, 0.15]);
+        // style_params = (ramp_steps, foam_threshold, tint_strength, shore_bias).
+        assert_eq!(view_uniform.style_params, [4.0, 0.6, 0.5, 0.1]);
+    }
+
+    #[test]
+    fn build_packs_the_viewport_with_zero_tail_lanes() {
+        let params = sample_params();
+        let view_uniform = build_surface_view(&params);
+        // Only xy (framebuffer size) are read; zw must be zeroed, not undefined.
+        assert_eq!(view_uniform.viewport, [1920.0, 1080.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn build_is_deterministic_and_byte_stable() {
+        let params = sample_params();
+        let a = build_surface_view(&params);
+        let b = build_surface_view(&params);
+        assert_eq!(a, b);
+        // The packed uniform fills exactly the contract-sized binding.
+        assert_eq!(bytemuck::bytes_of(&a).len(), view::SIZE as usize);
     }
 }
