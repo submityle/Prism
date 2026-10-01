@@ -252,6 +252,15 @@
 //!   rows/columns, so the surface is globally `C²` and sampling one global
 //!   grid welds into a watertight [`indexed_bilinear_patch_mesh`] with no
 //!   cracks between spans.
+//! - [`nurbs_surface`] — the rational, weighted generalisation of
+//!   [`bspline_surface`] ([`nurbs_surface::NurbsSurface`]): an `R × C`
+//!   control net plus positive per-point weights, partitioned into
+//!   `(C - 3) × (R - 3)` cubic spans each converted to a
+//!   [`rational_bezier_patch::RationalBezierPatch`] via homogeneous
+//!   `[w·x, w·y, w·z, w]` B-spline → Bézier conversion. Equal weights
+//!   reproduce [`bspline_surface`]; unequal weights represent conics
+//!   (spherical caps, cylinders, swept arcs) exactly, and the same global
+//!   sampling welds into a watertight [`indexed_bilinear_patch_mesh`].
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -391,6 +400,7 @@ pub mod catmull_rom_patch;
 pub mod bspline_patch;
 pub mod rational_bezier_patch;
 pub mod bspline_surface;
+pub mod nurbs_surface;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -481,6 +491,7 @@ pub use catmull_rom_patch::CatmullRomPatch;
 pub use bspline_patch::BsplinePatch;
 pub use rational_bezier_patch::RationalBezierPatch;
 pub use bspline_surface::{BsplineSurface, BsplineSurfaceError};
+pub use nurbs_surface::{NurbsSurface, NurbsSurfaceError};
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
 pub use obb::{Obb, ObbBvh, ObbHit};
