@@ -75,6 +75,10 @@
 //! * [`capsule_shadow`] — capsule/sphere analytic soft shadows + AO.
 //! * [`vxgi`] — voxel cone-traced indirect diffuse/specular.
 //! * [`planar_reflect`] — exact planar mirror reflection.
+//! * [`local_tonemap`] — zonal/local operator with detail preservation.
+//! * [`clearcoat`] — second specular clearcoat lobe (Fresnel + GGX).
+//! * [`particle_shade`] — soft-particle depth fade + billboard lighting.
+//! * [`distance_field_shadow`] — Quilez SDF soft shadow sphere trace.
 
 pub mod denoise;
 pub mod occlusion;
@@ -129,4 +133,8 @@ pub mod anisotropy;
 pub mod capsule_shadow;
 pub mod vxgi;
 pub mod planar_reflect;
+pub mod local_tonemap;
+pub mod clearcoat;
+pub mod particle_shade;
+pub mod distance_field_shadow;
 pub mod world_space;
