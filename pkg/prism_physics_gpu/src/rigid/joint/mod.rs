@@ -37,6 +37,11 @@
 //! * [`revolute_cpu`] — the authoritative [`cpu_solve_joints_revolute`] golden
 //!   stepper (axis alignment plus point-to-point weld).
 //! * [`revolute_gpu`] — the device-side [`GpuRevoluteJointSolver`] twin.
+//! * [`fixed`] — the [`FixedJoint`] (weld) definition and its device-packed
+//!   storage representation.
+//! * [`fixed_cpu`] — the authoritative [`cpu_solve_joints_fixed`] golden
+//!   stepper (angular lock plus full point-to-point weld).
+//! * [`fixed_gpu`] — the device-side [`GpuFixedJointSolver`] twin.
 //! * [`prismatic`] — the [`PrismaticJoint`] (slider) definition and its
 //!   device-packed storage representation.
 //! * [`prismatic_cpu`] — the authoritative [`cpu_solve_joints_prismatic`] golden
@@ -59,6 +64,9 @@
 
 mod coloring;
 mod config;
+mod fixed;
+mod fixed_cpu;
+mod fixed_gpu;
 mod gpu_core;
 mod math;
 mod prismatic;
@@ -74,6 +82,9 @@ mod stepper;
 
 pub use coloring::{JointColouring, MAX_JOINT_BATCHES};
 pub use config::JointSolverConfig;
+pub use fixed::FixedJoint;
+pub use fixed_cpu::cpu_solve_joints_fixed;
+pub use fixed_gpu::GpuFixedJointSolver;
 pub use prismatic::PrismaticJoint;
 pub use prismatic_cpu::cpu_solve_joints_prismatic;
 pub use prismatic_gpu::GpuPrismaticJointSolver;
