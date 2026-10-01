@@ -1849,10 +1849,23 @@ pub fn annulus_2d(point: [f32; 2], radius: f32, half_width: f32) -> f32 {
     (length2(point) - radius).abs() - half_width
 }
 
+/// Exact signed distance to a 2D capsule (stadium): the segment from `a` to
+/// `b` inflated by radius `radius`.
+///
+/// The query is projected onto the segment with the projection parameter
+/// clamped to `[0, 1]`, giving the exact distance to the nearest point of the
+/// segment; subtracting `radius` yields the signed distance to the rounded
+/// stadium (two end discs joined by a slab). Built from `clamp`, `min`, `max`
+/// and `sqrt`, so it is exact and transcendental-free. This is the general
+/// arbitrary-endpoint companion to the upright `uneven_capsule_2d`.
+pub fn capsule_2d(point: [f32; 2], a: [f32; 2], b: [f32; 2], radius: f32) -> f32 {
+    segment_2d(point, a, b) - radius
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        annulus_2d, arc, box_2d, box_frame, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_torus, capsule, circle_2d, cone_sdf, cross_2d, cut_disk_2d, cut_hollow_sphere,
+        annulus_2d, arc, box_2d, box_frame, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_torus, capsule, capsule_2d, circle_2d, cone_sdf, cross_2d, cut_disk_2d, cut_hollow_sphere,
         cut_sphere, cylinder_segment, death_star, egg_2d, ellipsoid_sdf, equilateral_triangle_2d, heart_2d, hex_prism, hexagram_2d, infinite_cone, infinite_cylinder, isosceles_triangle_2d, length2, line_sdf, link, moon,
         octagon_prism, octahedron, oriented_box_2d, parallelogram, pentagram_2d, pie, plane, polygon_2d, pyramid, quad_sdf, regular_hexagon_2d, regular_octagon_2d, regular_pentagon_2d, rhombus, rhombus_2d, round_box, round_cone_sdf,
         round_cone_segment, rounded_box_2d, rounded_cylinder, rounded_x, segment_2d, solid_angle, sphere, star5_2d, torus, trapezoid_isosceles, triangle_2d, triangle_sdf, triangular_prism,
@@ -3649,6 +3662,46 @@ mod tests {
                 j += 1;
             }
             i += 1;
+        }
+    }
+
+    #[test]
+    fn capsule_2d_closed_forms_and_brute_force() {
+        let a = [-2.0f32, 0.0];
+        let b = [2.0f32, 0.0];
+        let r = 0.75f32;
+        // Beside the shaft: perpendicular gap minus radius.
+        assert!((capsule_2d([0.0, 2.0], a, b, r) - (2.0 - r)).abs() < 1e-6);
+        // Past an end cap along the axis: axial gap minus radius.
+        assert!((capsule_2d([4.0, 0.0], a, b, r) - (2.0 - r)).abs() < 1e-6);
+        // On the shaft centre: negative radius (deep interior).
+        assert!((capsule_2d([0.0, 0.0], a, b, r) - (-r)).abs() < 1e-6);
+        // Independent reference: min distance to a densely sampled segment - r.
+        let seg_a = [-1.0f32, -0.5];
+        let seg_b = [1.5f32, 2.0];
+        let reference = |p: [f32; 2]| -> f32 {
+            let mut d = f32::INFINITY;
+            let m = 4000i32;
+            let mut i = 0i32;
+            while i <= m {
+                let t = i as f32 / m as f32;
+                let q = [seg_a[0] + (seg_b[0] - seg_a[0]) * t, seg_a[1] + (seg_b[1] - seg_a[1]) * t];
+                d = d.min(((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2)).sqrt());
+                i += 1;
+            }
+            d - r
+        };
+        let mut gi = -20i32;
+        while gi <= 20 {
+            let mut gj = -20i32;
+            while gj <= 20 {
+                let p = [gi as f32 * 0.3, gj as f32 * 0.3];
+                let got = capsule_2d(p, seg_a, seg_b, r);
+                let want = reference(p);
+                assert!((got - want).abs() < 2e-3, "capsule_2d mismatch at {p:?}: {got} vs {want}");
+                gj += 1;
+            }
+            gi += 1;
         }
     }
 
