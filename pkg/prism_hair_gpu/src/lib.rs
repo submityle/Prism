@@ -548,6 +548,15 @@
 //!   collapses to `0` (blend `1`) exactly as the reference. The hard saturation
 //!   returns are exact and only the in-band `(near - w) / span` ramp divides, so
 //!   it is matched within the fma tolerance (see [`scatter_blend`]).
+//! * [`GpuHairFarFieldGain`] evaluates
+//!   [`far_field_roughness_gain`](prism_render_architecture::hair::scatter_lod::far_field_roughness_gain),
+//!   the far-field lobe-widening gain `1 + blend * max_gain`: one thread per
+//!   `(blend, max_gain)` pair widens the `Marschner`/`Chiang` lobes as the
+//!   projected footprint shrinks so each sample integrates the sub-pixel
+//!   fibres it covers and stops shimmering. The blend is clamped to `[0, 1]`
+//!   and a negative or non-finite `max_gain` collapses to `0` (gain `1`, no
+//!   widening) exactly as the reference; the single multiply-add is matched
+//!   within the fma tolerance (see [`far_field_gain`]).
 //!
 //! # Portability
 //!
@@ -592,6 +601,7 @@ pub mod dither_alpha;
 pub mod dual_scatter_factors;
 pub mod dual_scatter_project;
 pub mod eval_sh;
+pub mod far_field_gain;
 pub mod follicle_bind;
 pub mod forward_scatter;
 pub mod forward_scatter_power;
@@ -658,6 +668,7 @@ pub use dither_alpha::{reference_dither_alpha_map, GpuHairDitherAlpha};
 pub use dual_scatter_factors::{reference_dual_scatter_factors, GpuHairDualScatterFactors};
 pub use dual_scatter_project::{reference_project_sh, GpuHairProjectSh};
 pub use eval_sh::{reference_eval_sh, GpuHairEvalSh};
+pub use far_field_gain::{reference_far_field_gain, GpuHairFarFieldGain};
 pub use follicle_bind::{reference_transfer_root_map, GpuHairFollicleBind};
 pub use forward_scatter::GpuHairForwardScatter;
 pub use forward_scatter_power::{
