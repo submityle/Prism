@@ -67,6 +67,11 @@
 //!   downward spectral expander: a weighted overlap-add short-time Fourier
 //!   transform (`STFT`) attenuates bins below a `dBFS` threshold toward a floor,
 //!   suppressing steady broadband noise that a time-domain gate cannot isolate.
+//! - [`tilt_eq::TiltEqNode`] -- single-knob spectral tilt that rotates the
+//!   whole spectrum about a pivot frequency via a matched low-shelf (at
+//!   `-tilt_db`) and high-shelf (at `+tilt_db`) pair; distinct from
+//!   [`parametric_eq::ParametricEqNode`] (arbitrary independent bands) and
+//!   [`graphic_eq::GraphicEqNode`] (fixed ISO grid) by exposing one tilt knob.
 
 pub mod auto_wah;
 pub mod bitcrusher;
@@ -85,6 +90,7 @@ pub mod saturation;
 pub mod spectral_gate;
 pub mod stereo_width;
 pub mod tape;
+pub mod tilt_eq;
 pub mod tremolo;
 pub mod vibrato;
 pub mod waveshaper;
@@ -109,6 +115,7 @@ pub use spectral_gate::{
 };
 pub use stereo_width::{MAX_WIDTH, StereoWidthNode, StereoWidthParams};
 pub use tape::{Tape, TapeNode, TapeParams};
+pub use tilt_eq::{TiltEq, TiltEqNode, TiltEqParams};
 pub use tremolo::{TremoloMode, TremoloNode, TremoloParams};
 pub use vibrato::{VibratoNode, VibratoParams};
 pub use waveshaper::{Oversample, WaveshaperNode};
