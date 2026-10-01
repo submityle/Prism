@@ -424,6 +424,11 @@
 //!   ([`mesh_edge_length_stats::edge_length_stats`]): per-edge Euclidean
 //!   lengths plus min / max / mean / total and split/collapse candidate counts
 //!   for driving target-edge-length isotropic remeshing.
+//! - [`mesh_dihedral_cosine`] — per-interior-edge dihedral geometry
+//!   ([`mesh_dihedral_cosine::dihedral_cosines`]): the fold cosine
+//!   `dot(n0, n1)` and signed sine of every edge shared by exactly two
+//!   triangles, driving bending energy, crease detection, and
+//!   feature-aware remeshing without any inverse trigonometry.
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -589,6 +594,7 @@ pub mod mesh_hard_normal_split;
 pub mod mesh_vertex_valence;
 pub mod mesh_triangle_quality;
 pub mod mesh_edge_length_stats;
+pub mod mesh_dihedral_cosine;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -705,6 +711,7 @@ pub use mesh_hard_normal_split::{split_hard_normals, HardNormalError, HardNormal
 pub use mesh_vertex_valence::{vertex_valence, VertexValence};
 pub use mesh_triangle_quality::{triangle_quality, TriangleQuality};
 pub use mesh_edge_length_stats::{edge_length_stats, EdgeLengthStats};
+pub use mesh_dihedral_cosine::{dihedral_cosines, DihedralCosines, DihedralEdge};
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
 pub use obb::{Obb, ObbBvh, ObbHit};
