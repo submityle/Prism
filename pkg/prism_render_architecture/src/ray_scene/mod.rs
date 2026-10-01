@@ -189,6 +189,12 @@
 //!   normal (in the geometric hemisphere, pbrt-style) and `UV` via
 //!   [`shaded_bilinear_patch::ShadedBilinearPatchHit`], with a single-level
 //!   [`shaded_bilinear_patch::ShadedBilinearPatchBvh`].
+//! - [`shaded_bilinear_patch_gpu_layout`] — flat `GPU` buffers for the
+//!   [`shaded_bilinear_patch::ShadedBilinearPatchBvh`]
+//!   ([`SHADED_BILINEAR_PATCH_WORDS`] stride packing the four corner
+//!   positions, shading normals, and `UV`s, with node records reusing the
+//!   shared [`NODE_WORDS`]) and a packed patch walk that reproduces the
+//!   in-memory walk bit-for-bit.
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -320,6 +326,7 @@ pub mod round_cone_gpu_layout;
 pub mod bilinear_patch;
 pub mod bilinear_patch_gpu_layout;
 pub mod shaded_bilinear_patch;
+pub mod shaded_bilinear_patch_gpu_layout;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -393,6 +400,9 @@ pub use bilinear_patch::{BilinearPatch, BilinearPatchBvh, BilinearPatchHit};
 pub use bilinear_patch_gpu_layout::{GpuBilinearPatchBvhBuffers, BILINEAR_PATCH_WORDS};
 pub use shaded_bilinear_patch::{
     ShadedBilinearPatch, ShadedBilinearPatchBvh, ShadedBilinearPatchHit,
+};
+pub use shaded_bilinear_patch_gpu_layout::{
+    GpuShadedBilinearPatchBvhBuffers, SHADED_BILINEAR_PATCH_WORDS,
 };
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
