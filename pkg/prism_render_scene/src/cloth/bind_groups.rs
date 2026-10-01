@@ -41,6 +41,7 @@ use super::abi::{
     GpuClothEmbedParams, GpuClothSelfParams, GpuClothSimParams,
 };
 use super::pipeline::ClothComputePipelines;
+use super::teleport::TeleportRestream;
 
 /// Minimum storage-buffer size in bytes.
 ///
@@ -306,6 +307,34 @@ impl ClothPieceGpuBuffers {
         // always fits.
         if !upload.backstops.is_empty() {
             queue.write_buffer(&self.backstops, 0, bytemuck::cast_slice(upload.backstops));
+        }
+    }
+
+    /// Snaps the resident simulation-state pools back to the authored upload when
+    /// a garment teleports (its reference frame jumped discontinuously).
+    ///
+    /// Unlike [`write_dynamic`](Self::write_dynamic) — which restreams the
+    /// kinematic inputs every reused frame — this is applied *once*, the frame the
+    /// prepare stage sees the garment's teleport generation advance past the one
+    /// this resident piece last applied. The [`TeleportRestream`] the garment's
+    /// [`ClothTeleportMode`](super::teleport::ClothTeleportMode) resolves to
+    /// decides which pools are rewritten: positions snap to the new pose, and the
+    /// velocities are optionally reset so the garment either keeps billowing or
+    /// settles. The signature gate pins the resident `positions`/`velocities`
+    /// pools at exactly `upload.positions.len()` elements (velocities mirror
+    /// positions), so these writes always fit; an empty upload (zero particles)
+    /// never reaches here because the prepare stage skips it.
+    pub(crate) fn apply_teleport(
+        &self,
+        queue: &RenderQueue,
+        upload: &ClothPieceUpload<'_>,
+        restream: TeleportRestream,
+    ) {
+        if restream.positions && !upload.positions.is_empty() {
+            queue.write_buffer(&self.positions, 0, bytemuck::cast_slice(upload.positions));
+        }
+        if restream.velocities && !upload.velocities.is_empty() {
+            queue.write_buffer(&self.velocities, 0, bytemuck::cast_slice(upload.velocities));
         }
     }
 }

@@ -172,14 +172,40 @@ pub(crate) fn prepare_cloth_pieces(
                 .resident_mut(entity)
                 .expect("resident piece was just observed present");
             existing.buffers.write_dynamic(&queue, &upload);
+            // Teleport gate: a garment whose reference frame jumped this frame has
+            // bumped its teleport generation past the one this resident piece last
+            // applied. Snap the resident simulation-state pools back to the authored
+            // pose exactly once (the generation only advances on `request_teleport`),
+            // so the solver does not stretch the stale resident state across the jump.
+            // A `Continuous`-latched bump restreams nothing, collapsing to a no-op.
+            let generation = garment.teleport_generation();
+            if generation != existing.applied_teleport_generation {
+                let mode = garment.teleport_mode();
+                if mode.restreams_any() {
+                    existing
+                        .buffers
+                        .apply_teleport(&queue, &upload, mode.restream());
+                }
+                existing.applied_teleport_generation = generation;
+            }
             existing.dispatches = dispatches;
             pieces.mark_active(entity);
         } else {
             let buffers = ClothPieceGpuBuffers::create(&device, &upload);
             let bind_groups = ClothPieceBindGroups::create(&device, &pipelines, &buffers);
+            // A fresh piece's create upload already streamed the garment's authored
+            // pose, so it records the current generation as applied: only a *later*
+            // bump restreams. This keeps a garment spawned mid-teleport from
+            // re-snapping on its very first resident frame.
             pieces.install(
                 entity,
-                ClothGpuPiece::new(buffers, bind_groups, dispatches, signature),
+                ClothGpuPiece::new(
+                    buffers,
+                    bind_groups,
+                    dispatches,
+                    signature,
+                    garment.teleport_generation(),
+                ),
             );
         }
     }

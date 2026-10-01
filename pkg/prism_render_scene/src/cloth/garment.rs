@@ -24,6 +24,7 @@ use prism_render_architecture::cloth::{ClothLodTier, Constraint};
 use super::abi::{GpuClothBackstop, GpuClothCollider, GpuClothEmbedBinding};
 use super::lod::garment_cloth_piece;
 use super::lod_mesh::ClothReducedMesh;
+use super::teleport::ClothTeleportMode;
 use super::solve_plan::ClothSolveInput;
 
 /// The authored `CPU` state of one cloth garment, spawned on a main-world
@@ -135,6 +136,18 @@ pub struct ClothGarment {
     /// to the stateless coverage tier so the very first frame already matches the
     /// non-hysteretic decision. Defaults to [`ClothLodTier::FullSim`].
     pub(crate) current_tier: ClothLodTier,
+    /// The teleport reaction latched for the current teleport
+    /// [`generation`](Self::teleport_generation). Describes how the persistent
+    /// `GPU` piece should treat the resident position/velocity pools the next time
+    /// `teleport_generation` advances past the one a resident piece last applied.
+    /// Defaults to [`ClothTeleportMode::Continuous`], the ordinary evolve-in-place
+    /// behavior.
+    pub(crate) teleport_mode: ClothTeleportMode,
+    /// Monotonic count of teleport events the author has requested. A fresh piece
+    /// records the generation it was allocated at; when this later advances past
+    /// that recorded value the prepare stage applies [`teleport_mode`](Self::teleport_mode)
+    /// once, restreaming the authored pools the mode asks for. Defaults to `0`.
+    pub(crate) teleport_generation: u32,
 }
 
 impl Default for ClothGarment {
@@ -177,6 +190,8 @@ impl Default for ClothGarment {
             reduced_mesh: None,
             lod_hysteresis: 0.0,
             current_tier: ClothLodTier::FullSim,
+            teleport_mode: ClothTeleportMode::Continuous,
+            teleport_generation: 0,
         }
     }
 }
@@ -363,6 +378,46 @@ impl ClothGarment {
     /// [`update_cloth_coverage`]: super::coverage::update_cloth_coverage
     pub(crate) fn set_current_tier(&mut self, tier: ClothLodTier) {
         self.current_tier = tier;
+    }
+
+    /// The teleport reaction latched for the current teleport generation.
+    ///
+    /// The prepare stage applies this mode once, the frame a resident piece sees
+    /// [`Self::teleport_generation`] advance past the generation it last applied.
+    #[must_use]
+    pub(crate) fn teleport_mode(&self) -> ClothTeleportMode {
+        self.teleport_mode
+    }
+
+    /// The monotonic teleport-event counter.
+    ///
+    /// A resident piece records the generation it was allocated at; the prepare
+    /// stage restreams the authored pools [`Self::teleport_mode`] asks for exactly
+    /// once each time this value moves past that recorded generation, so a single
+    /// [`Self::request_teleport`] call snaps the resident state through one jump
+    /// without re-snapping on the quiescent frames that follow.
+    #[must_use]
+    pub(crate) fn teleport_generation(&self) -> u32 {
+        self.teleport_generation
+    }
+
+    /// Requests a teleport of this garment's persistent simulation state.
+    ///
+    /// Call this the frame the garment's reference frame jumps discontinuously —
+    /// the owning actor teleports, a cutscene cuts, a character respawns — so the
+    /// resident `GPU` pools are snapped to the authored pose instead of being
+    /// stretched across the jump by one frame of in-place evolution. The chosen
+    /// [`ClothTeleportMode`] decides whether the garment keeps its motion
+    /// ([`ClothTeleportMode::Teleport`]) or settles onto the authored rest pose
+    /// ([`ClothTeleportMode::TeleportAndReset`]). The effect is idempotent across
+    /// the frames that follow: the generation only advances once per call, so the
+    /// snap is applied on exactly one frame.
+    ///
+    /// Requesting [`ClothTeleportMode::Continuous`] still advances the generation
+    /// but restreams nothing, collapsing to a no-op the prepare stage skips.
+    pub fn request_teleport(&mut self, mode: ClothTeleportMode) {
+        self.teleport_mode = mode;
+        self.teleport_generation = self.teleport_generation.wrapping_add(1);
     }
 
     /// Resolves this garment's LOD budget at its current frame-state tier.

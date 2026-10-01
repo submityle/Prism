@@ -78,6 +78,7 @@ mod sim_gpu_tests;
 #[cfg(test)]
 mod sleep_gpu_tests;
 mod solve_plan;
+mod teleport;
 #[cfg(test)]
 mod tearing_gpu_tests;
 #[cfg(test)]
@@ -87,4 +88,5 @@ mod virtual_gpu_tests;
 
 pub use authoring::ClothGarmentBuilder;
 pub use garment::ClothGarment;
+pub use teleport::ClothTeleportMode;
 pub use lod_mesh::{ClothReducedMesh, ClothReducedMeshBuilder};

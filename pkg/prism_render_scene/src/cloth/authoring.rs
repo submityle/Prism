@@ -41,6 +41,7 @@ use super::garment::ClothGarment;
 use super::lod::resolve_garment_lod;
 use super::lod_mesh::ClothReducedMesh;
 use super::pack::{pack_backstops, pack_colliders, pack_embed_bindings};
+use super::teleport::ClothTeleportMode;
 
 /// Default full-frame timestep: one 60 Hz frame.
 const DEFAULT_DT: f32 = 1.0 / 60.0;
@@ -473,6 +474,8 @@ impl ClothGarmentBuilder {
             reduced_mesh: self.reduced_mesh,
             lod_hysteresis: self.lod_hysteresis,
             current_tier: ClothLodTier::FullSim,
+            teleport_mode: ClothTeleportMode::Continuous,
+            teleport_generation: 0,
         };
         // Seed the frame-state tier from the stateless coverage classification so
         // the first frame matches the non-hysteretic decision before the coverage

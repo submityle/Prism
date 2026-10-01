@@ -45,6 +45,12 @@ pub(crate) struct ClothGpuPiece {
     /// matches; any change (a re-authored mesh or an LOD tier swap that resizes a
     /// pool) forces a fresh allocation instead of a rewrite.
     pub(crate) signature: ClothPieceSignature,
+    /// The teleport generation this resident piece has already applied. A fresh
+    /// piece records the garment's generation at allocation time (its create
+    /// upload already streamed the authored pose), so the prepare stage only
+    /// restreams on a *later* generation bump. See
+    /// [`super::teleport`](super::teleport).
+    pub(crate) applied_teleport_generation: u32,
 }
 
 impl ClothGpuPiece {
@@ -57,12 +63,14 @@ impl ClothGpuPiece {
         bind_groups: ClothPieceBindGroups,
         dispatches: Vec<PlannedDispatch>,
         signature: ClothPieceSignature,
+        applied_teleport_generation: u32,
     ) -> Self {
         Self {
             buffers,
             bind_groups,
             dispatches,
             signature,
+            applied_teleport_generation,
         }
     }
 }

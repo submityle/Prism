@@ -28,7 +28,9 @@ mod water;
 pub use buffers::{
     GpuSceneBuffers, RenderGpuSceneBounds, RenderGpuSceneInstance, RenderGpuSceneTransform,
 };
-pub use cloth::{ClothGarment, ClothGarmentBuilder, ClothReducedMesh, ClothReducedMeshBuilder};
+pub use cloth::{
+    ClothGarment, ClothGarmentBuilder, ClothReducedMesh, ClothReducedMeshBuilder, ClothTeleportMode,
+};
 pub use compare::GpuSceneParityDiagnostics;
 pub use completion::GpuCompletionTracker;
 pub use consumer::{GpuSceneBufferBindings, GpuSceneReader};
