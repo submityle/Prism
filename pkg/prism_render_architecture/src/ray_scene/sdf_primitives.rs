@@ -1933,15 +1933,98 @@ pub fn tunnel_2d(point: [f32; 2], half_width: f32, height: f32) -> f32 {
     if qx.max(qy) < 0.0 { -d } else { d }
 }
 
+/// Exact unsigned distance from `point` to the finite 3D line segment
+/// `a`-`b` (Inigo Quilez `udSegment`).
+///
+/// Projects the point onto the segment, clamping the parameter to `[0, 1]`
+/// so the closest point stays between the endpoints, then returns the
+/// distance to that closest point. A degenerate segment (`a == b`) reduces
+/// to the distance to `a`. This is the zero-radius core of `capsule`,
+/// built only from `dot`, `clamp`, and `sqrt` (transcendental-free).
+pub fn segment_3d(point: [f32; 3], a: [f32; 3], b: [f32; 3]) -> f32 {
+    let pa = sub3(point, a);
+    let ba = sub3(b, a);
+    let ba_len_sq = dot(ba, ba);
+    // Clamp the projection so the closest point stays on the finite segment;
+    // a zero-length segment pins the parameter at the start point.
+    let h = if ba_len_sq > f32::MIN_POSITIVE {
+        (dot(pa, ba) / ba_len_sq).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    length([pa[0] - ba[0] * h, pa[1] - ba[1] * h, pa[2] - ba[2] * h])
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         annulus_2d, arc, box_2d, box_frame, box_frame_2d, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_torus, capsule, capsule_2d, circle_2d, cone_sdf, cross_2d, cut_disk_2d, cut_hollow_sphere,
         cut_sphere, cylinder_segment, death_star, egg_2d, ellipsoid_sdf, equilateral_triangle_2d, heart_2d, hex_prism, hexagram_2d, infinite_cone, infinite_cylinder, isosceles_triangle_2d, length2, line_sdf, link, moon,
         octagon_prism, octahedron, oriented_box_2d, oriented_vesica_2d, parallelogram, pentagram_2d, pie, plane, polygon_2d, pyramid, quad_sdf, regular_hexagon_2d, regular_octagon_2d, regular_pentagon_2d, rhombus, rhombus_2d, round_box, round_cone_sdf,
-        round_cone_segment, rounded_box_2d, rounded_cylinder, rounded_x, segment_2d, solid_angle, sphere, star5_2d, torus, trapezoid_isosceles, triangle_2d, triangle_sdf, triangular_prism, tunnel_2d,
+        round_cone_segment, rounded_box_2d, rounded_cylinder, rounded_x, segment_2d, segment_3d, solid_angle, sphere, star5_2d, torus, trapezoid_isosceles, triangle_2d, triangle_sdf, triangular_prism, tunnel_2d,
         uneven_capsule_2d, vertical_capsule, vesica, vesica_2d, vesica_segment,
     };
+
+    // Independent brute-force reference: densely sample the segment and take
+    // the minimum Euclidean distance to the query point.
+    fn segment_3d_bruteforce(p: [f32; 3], a: [f32; 3], b: [f32; 3]) -> f32 {
+        let mut best = f32::INFINITY;
+        let steps = 4000;
+        for i in 0..=steps {
+            let t = i as f32 / steps as f32;
+            let q = [
+                a[0] + (b[0] - a[0]) * t,
+                a[1] + (b[1] - a[1]) * t,
+                a[2] + (b[2] - a[2]) * t,
+            ];
+            let d = ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2) + (p[2] - q[2]).powi(2)).sqrt();
+            best = best.min(d);
+        }
+        best
+    }
+
+    #[test]
+    fn segment_3d_analytic_cases() {
+        let a = [-1.0, 0.0, 0.0];
+        let b = [1.0, 0.0, 0.0];
+        // Endpoints and midpoint lie on the segment.
+        assert!(segment_3d(a, a, b).abs() < 1e-6);
+        assert!(segment_3d(b, a, b).abs() < 1e-6);
+        assert!(segment_3d([0.0, 0.0, 0.0], a, b).abs() < 1e-6);
+        // Perpendicular offset from the middle equals the offset distance.
+        assert!((segment_3d([0.0, 3.0, 0.0], a, b) - 3.0).abs() < 1e-6);
+        assert!((segment_3d([0.0, 0.0, 4.0], a, b) - 4.0).abs() < 1e-6);
+        // Beyond an endpoint: distance to that endpoint (3-4-5 triangle).
+        assert!((segment_3d([4.0, 3.0, 0.0], a, b) - 3.0f32.hypot(3.0)).abs() < 1e-6);
+        // Degenerate (zero-length) segment reduces to distance to the point.
+        let d = [2.0, 2.0, 1.0];
+        let expect = (4.0f32 + 4.0 + 1.0).sqrt();
+        assert!((segment_3d([0.0, 0.0, 0.0], d, d) - expect).abs() < 1e-6);
+    }
+
+    #[test]
+    fn segment_3d_matches_bruteforce_reference() {
+        // Deterministic pseudo-random sweep over segments and query points.
+        let mut state: u32 = 0x9e37_79b9;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            (state as f32 / u32::MAX as f32) * 8.0 - 4.0
+        };
+        let mut maxerr = 0.0f32;
+        for _ in 0..3000 {
+            let a = [next(), next(), next()];
+            let b = [next(), next(), next()];
+            let p = [next(), next(), next()];
+            let got = segment_3d(p, a, b);
+            let want = segment_3d_bruteforce(p, a, b);
+            maxerr = maxerr.max((got - want).abs());
+        }
+        // Error is bounded by the brute-force sampling resolution, not the
+        // (exact) formula.
+        assert!(maxerr < 1e-2, "segment_3d maxerr = {maxerr}");
+    }
 
     #[test]
     fn cylinder_segment_matches_axis_aligned_capped_cylinder() {
