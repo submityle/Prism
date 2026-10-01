@@ -9,6 +9,10 @@
 //!
 //! # Source catalogue
 //!
+//! - [`additive_oscillator::AdditiveOscillatorNode`] -- real-time additive
+//!   (Fourier-series) oscillator: a bank of phase-locked harmonic sines whose
+//!   per-partial gains are audio-rate controls, Nyquist-muted and sum-normalized
+//!   so timbres can be morphed live rather than baked into a table.
 //! - [`oscillator::OscillatorNode`] -- band-limited (`PolyBLEP`) sine/saw/square/
 //!   triangle geometric oscillator selected by [`oscillator::Waveform`].
 //! - [`karplus_strong::KarplusStrongNode`] -- extended Karplus-Strong
@@ -37,6 +41,7 @@
 //! locking, and no panics, and reproducible generators are fully deterministic
 //! across platforms via [`bevy_math::ops`].
 
+pub mod additive_oscillator;
 pub mod fm_operator;
 pub mod karplus_strong;
 pub mod noise;
@@ -45,6 +50,7 @@ pub mod sample_player;
 pub mod supersaw;
 pub mod wavetable_oscillator;
 
+pub use additive_oscillator::{AdditiveOscillatorNode, AdditiveOscillatorParams};
 pub use fm_operator::{FmOperatorNode, FmOperatorParams};
 pub use karplus_strong::{KarplusStrongNode, KarplusStrongParams};
 pub use noise::{NoiseColor, NoiseNode};
