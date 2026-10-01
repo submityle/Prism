@@ -43,6 +43,10 @@
 //! * [`spec_gi`] — glossy specular GI via GGX-lobe ReSTIR reuse + BRDF/light MIS.
 //! * [`sky_lut`] — Hillaire sky/transmittance/multiscatter LUT bake + sampling.
 //! * [`irradiance_volume`] — DDGI octahedral irradiance + Chebyshev visibility probes.
+//! * [`spec_denoise`] — specular/reflection denoiser (ReBLUR-spec, roughness-aware).
+//! * [`temporal`] — TAA-grade temporal resolve: reprojection, Catmull-Rom, clipping.
+//! * [`translucency`] — subsurface/translucency GI (Burley diffusion + transmission).
+//! * [`upscale`] — classic temporal super-resolution + checkerboard reconstruction.
 
 pub mod denoise;
 pub mod occlusion;
@@ -65,4 +69,8 @@ pub mod shadow;
 pub mod spec_gi;
 pub mod sky_lut;
 pub mod irradiance_volume;
+pub mod spec_denoise;
+pub mod temporal;
+pub mod translucency;
+pub mod upscale;
 pub mod world_space;
