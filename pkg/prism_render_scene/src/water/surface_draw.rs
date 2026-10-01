@@ -20,7 +20,8 @@ use bevy_ecs::prelude::*;
 use bevy_render::{
     render_resource::{
         BindGroup, BindGroupEntries, Buffer, BufferInitDescriptor, BufferUsages, IndexFormat,
-        PipelineCache, RenderPassDescriptor, RenderPipeline, StoreOp,
+        LoadOp, Operations, PipelineCache, RenderPassColorAttachment, RenderPassDescriptor,
+        RenderPipeline, StoreOp,
     },
     renderer::{RenderContext, RenderDevice, ViewQuery},
     view::{ExtractedView, Msaa, ViewDepthStencilTexture, ViewTarget},
@@ -38,6 +39,7 @@ use crate::shading::{
 use super::bind_groups::filtering_sampler;
 use super::resources::WaterGpuBodies;
 use super::surface_mesh::{build_surface_view, surface_index_data};
+use super::surface_motion::ViewWaterMotionUniform;
 use super::surface_pipeline::{ViewWaterSurfacePipelines, WaterSurfacePipelines};
 use super::surface_shading::SurfaceViewInputs;
 use super::surface_ssr::{GpuWaterSsrConfig, WaterSsrFallback};
@@ -77,6 +79,7 @@ pub(crate) fn draw_water_surface(
         &ViewDepthStencilTexture,
         &ViewWaterSurfacePipelines,
         &ViewVisibilityBuffer,
+        &ViewWaterMotionUniform,
         Option<&ViewSsrTextures>,
         Option<&ViewVsmPhysicalAtlas>,
         Option<&ViewVsmPageTable>,
@@ -96,6 +99,7 @@ pub(crate) fn draw_water_surface(
         depth,
         view_pipelines,
         visibility,
+        motion_uniform,
         ssr_textures,
         vsm_atlas,
         vsm_page_table,
@@ -293,13 +297,38 @@ pub(crate) fn draw_water_surface(
         &BindGroupEntries::sequential((ssr_hzb, ssr_params_buffer.as_entire_binding())),
     );
 
+    // The `@group(4)` motion-vector group: the per-view current+previous
+    // view-projection uniform `prepare_water_surface_motion` built this frame.
+    // The fragment stage reprojects the surface's world position through both
+    // matrices and writes `cur_uv - prev_uv` into the second render target.
+    let motion_layout = cache.get_bind_group_layout(&surface_pipeline.motion_layout);
+    let motion_group = device.create_bind_group(
+        "prism water surface motion",
+        &motion_layout,
+        &BindGroupEntries::single(motion_uniform.buffer.as_entire_binding()),
+    );
+
     // Single tracked pass: the composite already wrote the view target, so the
     // color attachment loads, and the main-pass depth loads read-only (the
     // surface pipeline disables depth writes).
     let color = target.get_color_attachment();
+    // Second render target (MRT): the shared `Rg16Float` motion G-buffer. It
+    // loads the opaque resolve pass's camera+object motion and the water
+    // fragment replaces it (write mask RED|GREEN) for exactly the pixels the
+    // surface covers, so the depth-tested water owns the reprojection basis for
+    // its own pixels without disturbing the submerged geometry behind it.
+    let motion_attachment = RenderPassColorAttachment {
+        view: visibility.motion_vectors_view(),
+        depth_slice: None,
+        resolve_target: None,
+        ops: Operations {
+            load: LoadOp::Load,
+            store: StoreOp::Store,
+        },
+    };
     let mut pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
         label: Some("prism water surface"),
-        color_attachments: &[Some(color)],
+        color_attachments: &[Some(color), Some(motion_attachment)],
         depth_stencil_attachment: Some(depth.get_attachment(StoreOp::Store)),
         timestamp_writes: None,
         occlusion_query_set: None,
@@ -311,6 +340,7 @@ pub(crate) fn draw_water_surface(
         pass.set_bind_group(1, light_group, &[]);
         pass.set_bind_group(2, &vsm_group, &[]);
         pass.set_bind_group(3, &ssr_group, &[]);
+        pass.set_bind_group(4, &motion_group, &[]);
         pass.set_index_buffer(draw.index_buffer.slice(..), IndexFormat::Uint32);
         pass.draw_indexed(0..draw.index_count, 0, 0..1);
     }

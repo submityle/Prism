@@ -318,7 +318,13 @@ pub(crate) fn prepare_visibility_buffers(
                 sample_count: 1,
                 dimension: TextureDimension::D2,
                 format: MOTION_VECTOR_FORMAT,
-                usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+                // RENDER_ATTACHMENT: the transparent water-surface raster pass
+                // writes its own screen-space motion as a second colour target
+                // over this G-buffer (MRT), on top of the resolve compute pass's
+                // STORAGE write for the opaque pixels behind the water.
+                usage: TextureUsages::RENDER_ATTACHMENT
+                    | TextureUsages::STORAGE_BINDING
+                    | TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             },
         );

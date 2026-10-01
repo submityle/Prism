@@ -47,6 +47,11 @@ pub use runtime::{PrismShadingDiagnostics, PrismShadingSettings};
 /// shading passes build, so the sibling `water` module needs the component.
 pub(crate) use composite::composite_shading;
 pub(crate) use resources::ViewVisibilityBuffer;
+// Re-export the shared motion-vector G-buffer format so the transparent
+// water surface pass declares a byte-compatible second render target when
+// it writes its own screen-space motion over the pixels it covers (see
+// `water::surface_motion`).
+pub(crate) use resources::MOTION_VECTOR_FORMAT;
 // Re-export the per-view reverse-Z Hi-Z "nearest depth" pyramid so the
 // transparent water surface pass can march it directly for screen-space
 // reflections (see `water::surface_ssr`), reusing the opaque prepass output.

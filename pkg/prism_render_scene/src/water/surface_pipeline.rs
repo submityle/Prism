@@ -91,7 +91,7 @@ use bevy_shader::Shader;
 use prism_render_architecture::water::gpu::plan_surface_draw;
 use prism_render_architecture::water::ShadingFrontend;
 
-use super::super::shading::ViewVisibilityBuffer;
+use super::super::shading::{ViewVisibilityBuffer, MOTION_VECTOR_FORMAT};
 use crate::lighting::LightBindGroup;
 
 /// The four shading frontends in a stable order; the index into
@@ -218,6 +218,14 @@ pub(crate) struct WaterSurfacePipelines {
     /// to the live [`BindGroupLayout`](bevy_render::render_resource::BindGroupLayout)
     /// through the [`PipelineCache`] with the same descriptor the draw node binds.
     pub(crate) ssr_layout: BindGroupLayoutDescriptor,
+    /// The water-surface `@group(4)` motion-vector layout descriptor (the
+    /// current + previous view-projection uniform). Built from
+    /// [`super::surface_motion::motion_layout_entries`] so the transparent
+    /// surface fragment stage can write its own screen-space motion vector into
+    /// the shared motion G-buffer's second render target. Resolved to the live
+    /// [`BindGroupLayout`](bevy_render::render_resource::BindGroupLayout) through
+    /// the [`PipelineCache`] with the same descriptor the draw node binds.
+    pub(crate) motion_layout: BindGroupLayoutDescriptor,
     /// The embedded `water_surface_raster.wesl` module both stages compile from.
     pub(crate) shader: Handle<Shader>,
 }
@@ -236,6 +244,7 @@ impl SpecializedRenderPipeline for WaterSurfacePipelines {
                 self.light_layout.clone(),
                 self.vsm_layout.clone(),
                 self.ssr_layout.clone(),
+                self.motion_layout.clone(),
             ],
             immediate_size: 0,
             vertex: VertexState {
@@ -271,11 +280,24 @@ impl SpecializedRenderPipeline for WaterSurfacePipelines {
             fragment: Some(FragmentState {
                 shader: self.shader.clone(),
                 entry_point: Some(draw.fragment_entry().into()),
-                targets: vec![Some(ColorTargetState {
-                    format: key.target_format,
-                    blend: Some(premultiplied_alpha_blend()),
-                    write_mask: ColorWrites::ALL,
-                })],
+                targets: vec![
+                    Some(ColorTargetState {
+                        format: key.target_format,
+                        blend: Some(premultiplied_alpha_blend()),
+                        write_mask: ColorWrites::ALL,
+                    }),
+                    // Second render target: the shared `Rg16Float` motion
+                    // G-buffer. No blend (the water surface is the foreground
+                    // visible layer, so it *replaces* the opaque motion the
+                    // resolve pass wrote for the pixels it now covers), and only
+                    // the `R`/`G` channels are written because the format has no
+                    // blue/alpha — matching `MOTION_VECTOR_FORMAT`.
+                    Some(ColorTargetState {
+                        format: MOTION_VECTOR_FORMAT,
+                        blend: None,
+                        write_mask: ColorWrites::RED | ColorWrites::GREEN,
+                    }),
+                ],
                 ..Default::default()
             }),
             ..Default::default()
@@ -349,12 +371,20 @@ pub(crate) fn init_water_surface_pipelines(
         "prism water surface ssr",
         &super::surface_ssr::ssr_layout_entries(),
     );
+    // @group(4): the second-render-target motion-vector uniform (current +
+    // previous `clip_from_world`); the draw node binds a per-view buffer built
+    // by `prepare_water_surface_motion` against this descriptor.
+    let motion_layout = BindGroupLayoutDescriptor::new(
+        "prism water surface motion",
+        &super::surface_motion::motion_layout_entries(),
+    );
 
     commands.insert_resource(WaterSurfacePipelines {
         layout,
         light_layout,
         vsm_layout,
         ssr_layout,
+        motion_layout,
         shader,
     });
 }
@@ -423,6 +453,10 @@ mod tests {
             ssr_layout: BindGroupLayoutDescriptor::new(
                 "prism water surface ssr",
                 &crate::water::surface_ssr::ssr_layout_entries(),
+            ),
+            motion_layout: BindGroupLayoutDescriptor::new(
+                "prism water surface motion",
+                &crate::water::surface_motion::motion_layout_entries(),
             ),
             shader: Handle::default(),
         }
@@ -504,11 +538,12 @@ mod tests {
         assert_eq!(depth.depth_compare, Some(CompareFunction::GreaterEqual));
         assert_eq!(desc.primitive.cull_mode, None);
         assert_eq!(desc.primitive.topology, PrimitiveTopology::TriangleList);
-        // Four bind-group layouts: the per-body @group(0) surface layout, the
+        // Five bind-group layouts: the per-body @group(0) surface layout, the
         // shared @group(1) engine light table the fragment stage samples, the
         // @group(2) virtual-shadow-map twin the primary directional light reads,
-        // and the @group(3) screen-space-reflection Hi-Z pyramid + march config.
-        assert_eq!(desc.layout.len(), 4);
+        // the @group(3) screen-space-reflection Hi-Z pyramid + march config, and
+        // the @group(4) motion-vector uniform feeding the second render target.
+        assert_eq!(desc.layout.len(), 5);
     }
 
     #[test]

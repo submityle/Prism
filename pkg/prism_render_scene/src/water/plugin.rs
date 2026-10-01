@@ -49,6 +49,7 @@ use super::pipeline::init_water_compute_pipelines;
 use super::prepare::prepare_water_bodies;
 use super::resources::WaterGpuBodies;
 use super::surface_draw::draw_water_surface;
+use super::surface_motion::{prepare_water_surface_motion, WaterMotionHistory};
 use super::surface_pipeline::{
     init_water_surface_pipelines, prepare_water_surface_pipelines, WaterSurfacePipelines,
 };
@@ -139,6 +140,17 @@ impl Plugin for WaterPlugin {
             .add_systems(
                 Render,
                 prepare_water_surface_pipelines.in_set(RenderSystems::Prepare),
+            )
+            // Per-view history of the previous-frame view-projection, refreshed
+            // wholesale each frame so a vanished view cannot leak its matrix.
+            .init_resource::<WaterMotionHistory>()
+            // Build the per-view `@group(4)` motion-vector uniform (current +
+            // previous `clip_from_world`) the surface raster's second render
+            // target reads, in the same `Prepare` set as the pipeline
+            // specialization so it is resident before the draw node records.
+            .add_systems(
+                Render,
+                prepare_water_surface_motion.in_set(RenderSystems::Prepare),
             )
             // Record the solve in the `Core3d` graph before the main pass, the
             // same ordering every other Prism compute pass uses.

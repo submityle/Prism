@@ -53,6 +53,7 @@ mod resources;
 mod shader_tests;
 mod surface_draw;
 mod surface_mesh;
+mod surface_motion;
 mod surface_node;
 mod surface_pipeline;
 mod surface_shading;
