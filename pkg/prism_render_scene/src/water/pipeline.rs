@@ -120,6 +120,10 @@ pub(crate) struct WaterComputePipelines {
     /// `@group(0)` for `water_flip_mac_g2p.wesl` (`water_flip_mac_g2p`, four
     /// bindings: the projected and pre-projection face snapshots).
     pub(crate) mac_g2p_layout: BindGroupLayout,
+    /// `@group(0)` for `water_surface_mesh.wesl` (`water_surface_mesh`, eight
+    /// bindings: the mesh uniform, the sampled displacement / normal cascade
+    /// textures, the sampler, and the four write-only per-vertex arrays).
+    pub(crate) surface_mesh_layout: BindGroupLayout,
 
     /// `water_spectrum_ifft`: evolve and inverse-`FFT` the wave spectrum.
     pub(crate) spectrum_ifft: CachedComputePipelineId,
@@ -176,6 +180,10 @@ pub(crate) struct WaterComputePipelines {
     pub(crate) fft_normalize: CachedComputePipelineId,
     /// `water_spectrum_assemble`: pack displacement/normal from the `FFT` grids.
     pub(crate) spectrum_assemble: CachedComputePipelineId,
+    /// `water_surface_mesh`: sample the assembled displacement / normal cascade
+    /// textures and scatter the four per-vertex storage arrays the raster draw
+    /// consumes.
+    pub(crate) surface_mesh: CachedComputePipelineId,
 }
 
 impl WaterComputePipelines {
@@ -214,6 +222,7 @@ impl WaterComputePipelines {
             WaterKernel::FftStage => self.fft_stage,
             WaterKernel::FftNormalize => self.fft_normalize,
             WaterKernel::SpectrumAssemble => self.spectrum_assemble,
+            WaterKernel::SurfaceMesh => self.surface_mesh,
         }
     }
 
@@ -245,6 +254,7 @@ impl WaterComputePipelines {
             WaterKernel::UnderwaterVolume => &self.underwater_layout,
             WaterKernel::WetnessStep => &self.wetness_layout,
             WaterKernel::CouplingReadback => &self.coupling_layout,
+            WaterKernel::SurfaceMesh => &self.surface_mesh_layout,
             WaterKernel::SpectrumEvolve | WaterKernel::SpectrumAssemble => {
                 &self.spectrum_fft_layout
             }
@@ -289,7 +299,8 @@ pub(crate) fn wesl_group(kernel: WaterKernel) -> u32 {
         | WaterKernel::FftBitReverse
         | WaterKernel::FftStage
         | WaterKernel::FftNormalize
-        | WaterKernel::SpectrumAssemble => 0,
+        | WaterKernel::SpectrumAssemble
+        | WaterKernel::SurfaceMesh => 0,
     }
 }
 
@@ -595,6 +606,27 @@ fn coupling_layout_entries() -> BindGroupLayoutEntries<3> {
 /// and binds the layout that matches the `@group(N)` index its shader declares,
 /// padding the lower group slots of the `@group(1..=4)` passes with an empty
 /// placeholder layout so the `wgpu` pipeline layout stays contiguous.
+/// Builds the `water_surface_mesh.wesl` `@group(0)` layout entries (eight
+/// bindings): the surface-mesh uniform, the assembled displacement and normal
+/// cascade textures, their non-filtering sampler, and the four write-only
+/// per-vertex storage arrays (base positions, surface `UV`s, displacement, and
+/// normal/foam) the raster draw later reads.
+fn surface_mesh_layout_entries() -> BindGroupLayoutEntries<8> {
+    BindGroupLayoutEntries::sequential(
+        ShaderStages::COMPUTE,
+        (
+            uniform_buffer_sized(false, None),
+            texture_2d(TextureSampleType::Float { filterable: false }),
+            texture_2d(TextureSampleType::Float { filterable: false }),
+            sampler(SamplerBindingType::NonFiltering),
+            storage_buffer_sized(false, None),
+            storage_buffer_sized(false, None),
+            storage_buffer_sized(false, None),
+            storage_buffer_sized(false, None),
+        ),
+    )
+}
+
 pub(crate) fn init_water_compute_pipelines(
     mut commands: Commands,
     device: Res<RenderDevice>,
@@ -618,6 +650,7 @@ pub(crate) fn init_water_compute_pipelines(
     let mac_p2g_entries = mac_p2g_layout_entries();
     let mac_solve_entries = mac_solve_layout_entries();
     let mac_g2p_entries = mac_g2p_layout_entries();
+    let surface_mesh_entries = surface_mesh_layout_entries();
 
     let ocean_descriptor = BindGroupLayoutDescriptor::new("prism water ocean", &ocean_entries);
     let flip_descriptor = BindGroupLayoutDescriptor::new("prism water flip", &flip_entries);
@@ -647,6 +680,8 @@ pub(crate) fn init_water_compute_pipelines(
         BindGroupLayoutDescriptor::new("prism water mac solve", &mac_solve_entries);
     let mac_g2p_descriptor =
         BindGroupLayoutDescriptor::new("prism water mac g2p", &mac_g2p_entries);
+    let surface_mesh_descriptor =
+        BindGroupLayoutDescriptor::new("prism water surface mesh", &surface_mesh_entries);
 
     // Empty placeholder layout padding the lower, unused group slots of the
     // `@group(1..=4)` passes so the `wgpu` pipeline layout stays contiguous; the
@@ -678,6 +713,8 @@ pub(crate) fn init_water_compute_pipelines(
     let mac_solve_layout =
         device.create_bind_group_layout("prism water mac solve", &mac_solve_entries);
     let mac_g2p_layout = device.create_bind_group_layout("prism water mac g2p", &mac_g2p_entries);
+    let surface_mesh_layout =
+        device.create_bind_group_layout("prism water surface mesh", &surface_mesh_entries);
 
     let ocean_shader: Handle<Shader> =
         load_embedded_asset!(asset_server.as_ref(), "../shaders/water_ocean.wesl");
@@ -699,6 +736,8 @@ pub(crate) fn init_water_compute_pipelines(
         load_embedded_asset!(asset_server.as_ref(), "../shaders/water_flip_mac.wesl");
     let mac_g2p_shader: Handle<Shader> =
         load_embedded_asset!(asset_server.as_ref(), "../shaders/water_flip_mac_g2p.wesl");
+    let surface_mesh_shader: Handle<Shader> =
+        load_embedded_asset!(asset_server.as_ref(), "../shaders/water_surface_mesh.wesl");
 
     // Every water pipeline binds the layout(s) matching its shader's declared
     // `@group(N)` index; passes on `@group(1..=4)` prepend empty placeholder
@@ -891,6 +930,12 @@ pub(crate) fn init_water_compute_pipelines(
         &mac_g2p_shader,
         WaterKernel::FlipMacG2P,
     );
+    let surface_mesh = queue(
+        "prism water surface mesh",
+        vec![surface_mesh_descriptor.clone()],
+        &surface_mesh_shader,
+        WaterKernel::SurfaceMesh,
+    );
 
     commands.insert_resource(WaterComputePipelines {
         ocean_layout,
@@ -926,6 +971,7 @@ pub(crate) fn init_water_compute_pipelines(
         mac_p2g_layout,
         mac_solve_layout,
         mac_g2p_layout,
+        surface_mesh_layout,
         spectrum_evolve,
         spectrum_assemble,
         fft_bit_reverse,
@@ -937,6 +983,7 @@ pub(crate) fn init_water_compute_pipelines(
         mac_pressure,
         mac_project,
         mac_g2p,
+        surface_mesh,
     });
 }
 
@@ -998,6 +1045,7 @@ mod tests {
         assert_eq!(mac_p2g_layout_entries().len(), 4);
         assert_eq!(mac_solve_layout_entries().len(), 5);
         assert_eq!(mac_g2p_layout_entries().len(), 4);
+        assert_eq!(surface_mesh_layout_entries().len(), 8);
 
         for kernel in WaterKernel::ALL {
             assert!(

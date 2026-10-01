@@ -59,7 +59,8 @@ use super::abi::{
     GpuPbfParams, GpuSprayParams, GpuSprayParticle, GpuSpraySource, GpuSpraySpawnHeader,
     GpuWaterCausticsParams, GpuWaterCouplingParams, GpuWaterCouplingQuery,
     GpuWaterDispersionParams, GpuWaterFoamParams, GpuWaterGerstnerParams, GpuWaterSpectrumParams,
-    GpuWaterSweParams, GpuWaterUnderwaterParams, GpuWaterWaterlineParams, GpuWaterWetnessParams,
+    GpuWaterSurfaceMeshParams, GpuWaterSweParams, GpuWaterUnderwaterParams,
+    GpuWaterWaterlineParams, GpuWaterWetnessParams,
 };
 use super::pipeline::WaterComputePipelines;
 
@@ -243,6 +244,11 @@ pub(crate) struct WaterBodyUpload<'a> {
     pub(crate) coupling_readback_rows: u32,
     /// Coupling read-back uniform.
     pub(crate) coupling_params: GpuWaterCouplingParams,
+    /// Number of displaced surface-mesh vertices the `water_surface_mesh`
+    /// kernel scatters (and the raster draw later reads).
+    pub(crate) surface_vertex_count: u32,
+    /// Surface-mesh grid / patch uniform.
+    pub(crate) surface_mesh_params: GpuWaterSurfaceMeshParams,
 }
 
 /// Every resident device buffer, storage / sampled texture view and sampler
@@ -354,6 +360,15 @@ pub(crate) struct WaterBodyGpuBuffers {
     pub(crate) coupling_queries: Buffer,
     pub(crate) coupling_readback: Buffer,
     pub(crate) coupling_params: Buffer,
+    // Surface mesh (slice2c): the per-vertex uniform, the four write-only
+    // scatter pools the raster draw reads, and the non-filtering sampler for
+    // the assembled displacement / normal cascade lookups.
+    pub(crate) surface_mesh_params: Buffer,
+    pub(crate) surface_mesh_base_positions: Buffer,
+    pub(crate) surface_mesh_surface_uvs: Buffer,
+    pub(crate) surface_mesh_displacement: Buffer,
+    pub(crate) surface_mesh_normal_foam: Buffer,
+    pub(crate) surface_mesh_sampler: Sampler,
 }
 
 impl WaterBodyGpuBuffers {
@@ -384,13 +399,15 @@ impl WaterBodyGpuBuffers {
             "prism water gerstner params",
             &upload.gerstner_params,
         );
-        let spectrum_displacement = storage_texture_2d(
+        // Written by the ocean kernels as storage and additionally sampled by
+        // the surface-mesh kernel, so these two carry `TEXTURE_BINDING`.
+        let spectrum_displacement = sampled_storage_texture_2d(
             device,
             "prism water spectrum displacement",
             upload.ocean_extent,
             TextureFormat::Rgba32Float,
         );
-        let spectrum_normal = storage_texture_2d(
+        let spectrum_normal = sampled_storage_texture_2d(
             device,
             "prism water spectrum normal",
             upload.ocean_extent,
@@ -686,6 +703,41 @@ impl WaterBodyGpuBuffers {
             &upload.coupling_params,
         );
 
+        // ---- Surface mesh (slice2c) ----
+        // The displaced render mesh the `water_surface_mesh` kernel scatters
+        // into four write-only `array<vec4<f32>>` pools (base positions,
+        // surface `UV`s, displacement and normal/foam), later read by the raster
+        // draw. Each pool is sized to the body's vertex count (clamped to one
+        // vertex so an empty body still binds a valid buffer); sixteen bytes per
+        // `vec4<f32>` vertex.
+        let surface_mesh_vertex_bytes = (upload.surface_vertex_count.max(1) as u64) * 16;
+        let surface_mesh_params = uniform(
+            device,
+            "prism water surface mesh params",
+            &upload.surface_mesh_params,
+        );
+        let surface_mesh_base_positions = zeroed_storage(
+            device,
+            "prism water surface mesh base positions",
+            surface_mesh_vertex_bytes,
+        );
+        let surface_mesh_surface_uvs = zeroed_storage(
+            device,
+            "prism water surface mesh surface uvs",
+            surface_mesh_vertex_bytes,
+        );
+        let surface_mesh_displacement = zeroed_storage(
+            device,
+            "prism water surface mesh displacement",
+            surface_mesh_vertex_bytes,
+        );
+        let surface_mesh_normal_foam = zeroed_storage(
+            device,
+            "prism water surface mesh normal foam",
+            surface_mesh_vertex_bytes,
+        );
+        let surface_mesh_sampler = nonfiltering_sampler(device, "prism water surface mesh sampler");
+
         Self {
             spectrum_h0,
             spectrum_h0_neg,
@@ -767,6 +819,12 @@ impl WaterBodyGpuBuffers {
             coupling_queries,
             coupling_readback,
             coupling_params,
+            surface_mesh_params,
+            surface_mesh_base_positions,
+            surface_mesh_surface_uvs,
+            surface_mesh_displacement,
+            surface_mesh_normal_foam,
+            surface_mesh_sampler,
         }
     }
 }
@@ -828,6 +886,10 @@ pub(crate) struct WaterBodyBindGroups {
     ///
     /// [`plan_inverse_fft2`]: prism_render_architecture::water::gpu::plan_inverse_fft2
     pub(crate) butterfly_passes: Vec<[BindGroup; 4]>,
+    /// `@group(0)` for `water_surface_mesh` (the surface-mesh uniform, the
+    /// assembled displacement / normal cascade textures, their non-filtering
+    /// sampler, and the four write-only per-vertex scatter pools).
+    pub(crate) surface_mesh: BindGroup,
     /// The ocean grid edge `N`, so the dispatch node re-derives per-pass
     /// dispatch dimensions and kernels from the golden inverse-`FFT` plan.
     pub(crate) ocean_n: u32,
@@ -1084,6 +1146,20 @@ impl WaterBodyBindGroups {
                 })
             })
             .collect();
+        let surface_mesh = device.create_bind_group(
+            "prism water surface mesh",
+            &pipelines.surface_mesh_layout,
+            &BindGroupEntries::sequential((
+                buffers.surface_mesh_params.as_entire_binding(),
+                &buffers.spectrum_displacement,
+                &buffers.spectrum_normal,
+                &buffers.surface_mesh_sampler,
+                buffers.surface_mesh_base_positions.as_entire_binding(),
+                buffers.surface_mesh_surface_uvs.as_entire_binding(),
+                buffers.surface_mesh_displacement.as_entire_binding(),
+                buffers.surface_mesh_normal_foam.as_entire_binding(),
+            )),
+        );
         Self {
             ocean,
             flip,
@@ -1102,6 +1178,7 @@ impl WaterBodyBindGroups {
             mac_g2p,
             spectrum_fft,
             butterfly_passes,
+            surface_mesh,
             ocean_n: buffers.ocean_n,
         }
     }
@@ -1313,6 +1390,36 @@ fn storage_texture_2d(
     default_view(&texture)
 }
 
+/// Creates a `2D` storage texture that is also sampleable
+/// (`STORAGE_BINDING | COPY_SRC | TEXTURE_BINDING`) and returns its default
+/// view, clamping the extent to at least one texel. Used for the assembled
+/// displacement / normal cascade, which the ocean kernels write as storage and
+/// the surface-mesh kernel samples.
+fn sampled_storage_texture_2d(
+    device: &RenderDevice,
+    label: &str,
+    extent: WaterSurfaceExtent,
+    format: TextureFormat,
+) -> TextureView {
+    let texture = device.create_texture(&TextureDescriptor {
+        label: Some(label),
+        size: Extent3d {
+            width: extent.width.max(1),
+            height: extent.height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format,
+        usage: TextureUsages::STORAGE_BINDING
+            | TextureUsages::COPY_SRC
+            | TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    default_view(&texture)
+}
+
 /// Creates a `3D` storage texture (`STORAGE_BINDING | COPY_SRC`) and returns its
 /// default view, clamping the extent to at least one texel per axis.
 fn storage_texture_3d(
@@ -1378,6 +1485,22 @@ fn filtering_sampler(device: &RenderDevice, label: &str) -> Sampler {
         mag_filter: FilterMode::Linear,
         min_filter: FilterMode::Linear,
         mipmap_filter: MipmapFilterMode::Linear,
+        ..Default::default()
+    })
+}
+
+/// A non-filtering (nearest) sampler for the surface-mesh kernel's
+/// `Rgba32Float` displacement / normal lookups, which are not filterable
+/// without the `float32-filterable` feature.
+fn nonfiltering_sampler(device: &RenderDevice, label: &str) -> Sampler {
+    device.create_sampler(&SamplerDescriptor {
+        label: Some(label),
+        address_mode_u: AddressMode::ClampToEdge,
+        address_mode_v: AddressMode::ClampToEdge,
+        address_mode_w: AddressMode::ClampToEdge,
+        mag_filter: FilterMode::Nearest,
+        min_filter: FilterMode::Nearest,
+        mipmap_filter: MipmapFilterMode::Nearest,
         ..Default::default()
     })
 }

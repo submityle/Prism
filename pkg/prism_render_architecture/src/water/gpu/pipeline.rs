@@ -73,6 +73,10 @@ pub struct WaterGpuExtract {
     pub underwater: bool,
     /// Whether the bounded two-way coupling readback runs.
     pub coupling_readback: bool,
+    /// Whether the surface meshing pass runs: sample the assembled
+    /// displacement/normal textures into the per-vertex storage arrays the
+    /// raster draw reads. Sized against [`Self::vertex_count`].
+    pub surface_mesh: bool,
     /// Simulation substeps per frame (clamped to at least one by [`extract`]).
     pub substeps: u32,
     /// Projection iterations per substep for the pressure/density solves
@@ -95,6 +99,9 @@ pub struct WaterGpuExtract {
     /// Invocation count for the full-screen passes (reconstruction, caustics,
     /// dispersion, `FLIP` scatter/gather framebuffer tiles).
     pub screen_pixels: u32,
+    /// Invocation count for the surface meshing pass: the number of lattice
+    /// vertices ([`DispatchDomain::Vertices`]), one invocation each.
+    pub vertex_count: u32,
 }
 
 impl WaterGpuExtract {
@@ -120,6 +127,7 @@ impl WaterGpuExtract {
             DispatchDomain::Faces => self.face_count,
             DispatchDomain::Particle => self.particle_count,
             DispatchDomain::Screen => self.screen_pixels,
+            DispatchDomain::Vertices => self.vertex_count,
         }
     }
 
@@ -232,6 +240,7 @@ pub fn extract(
     face_count: u32,
     particle_count: u32,
     screen_pixels: u32,
+    vertex_count: u32,
 ) -> WaterGpuExtract {
     WaterGpuExtract {
         counts,
@@ -255,6 +264,7 @@ pub fn extract(
         dispersion: passes.dispersion,
         underwater: passes.underwater,
         coupling_readback: passes.coupling_readback,
+        surface_mesh: passes.surface_mesh,
         substeps: substeps.max(1),
         solver_iterations: solver_iterations.max(1),
         spectrum_texels,
@@ -263,6 +273,7 @@ pub fn extract(
         face_count,
         particle_count,
         screen_pixels,
+        vertex_count,
     }
 }
 
@@ -319,6 +330,8 @@ pub struct WaterPasses {
     pub underwater: bool,
     /// Bounded two-way coupling readback.
     pub coupling_readback: bool,
+    /// Surface meshing pass (sample cascade textures into per-vertex arrays).
+    pub surface_mesh: bool,
 }
 
 /// Expands one body's [`WaterGpuExtract`] into its ordered dispatch schedule.
@@ -436,6 +449,18 @@ pub fn prepare(extract: &WaterGpuExtract) -> WaterGpuPrepare {
             &mut dispatches,
             extract,
             WaterKernel::SurfaceReconstruct,
+            None,
+            None,
+        );
+    }
+
+    // 3b. Surface meshing: sample the assembled displacement/normal textures
+    // into the per-vertex storage arrays the raster draw reads, once per frame.
+    if extract.surface_mesh {
+        push(
+            &mut dispatches,
+            extract,
+            WaterKernel::SurfaceMesh,
             None,
             None,
         );
@@ -612,6 +637,7 @@ mod tests {
             0, // face_count (no MAC pass in this body)
             0,
             1920 * 1080,
+            0, // vertex_count (no surface mesh in this body)
         )
     }
 
@@ -633,6 +659,7 @@ mod tests {
             1,
             1,
             1,
+            1,
         );
         assert_eq!(ex.ocean_cascades, 1);
         assert_eq!(ex.substeps, 1);
@@ -645,6 +672,7 @@ mod tests {
             WaterBufferCounts::default(),
             WaterPasses::default(),
             8,
+            1,
             1,
             1,
             1,
@@ -701,6 +729,7 @@ mod tests {
             0, // face_count (collocated path under test)
             40_000,
             1920 * 1080,
+            0, // vertex_count
         );
         let plan = prepare(&ex);
         let p2g = plan
@@ -758,6 +787,7 @@ mod tests {
             super::mac_face_count(32, 32, 32),
             40_000,
             0,
+            0, // vertex_count
         );
         let plan = prepare(&ex);
         let count = |k: WaterKernel| plan.dispatches.iter().filter(|d| d.kernel == k).count();
@@ -805,6 +835,36 @@ mod tests {
     }
 
     #[test]
+    fn surface_mesh_pass_schedules_one_vertex_sized_dispatch() {
+        let ex = extract(
+            WaterBufferCounts::default(),
+            WaterPasses {
+                surface_mesh: true,
+                ..WaterPasses::default()
+            },
+            0,
+            1,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            300, // vertex_count
+        );
+        let plan = prepare(&ex);
+        let meshing: Vec<_> = plan
+            .dispatches
+            .iter()
+            .filter(|d| d.kernel == WaterKernel::SurfaceMesh)
+            .collect();
+        assert_eq!(meshing.len(), 1);
+        // 300 vertices over a 64-lane sweep rounds up to five workgroups.
+        assert_eq!(meshing[0].groups, 5);
+    }
+
+    #[test]
     fn empty_passes_produce_an_empty_schedule() {
         let ex = extract(
             WaterBufferCounts::default(),
@@ -812,6 +872,7 @@ mod tests {
             0,
             1,
             1,
+            0,
             0,
             0,
             0,

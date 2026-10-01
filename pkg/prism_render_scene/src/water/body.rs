@@ -36,8 +36,8 @@ use super::abi::{
     GpuFlipParticle, GpuFlipSimParams, GpuFlipSurfaceParams, GpuGerstnerWave, GpuPbfParams,
     GpuSprayParams, GpuSpraySource, GpuWaterCausticsParams, GpuWaterCouplingParams,
     GpuWaterCouplingQuery, GpuWaterDispersionParams, GpuWaterFoamParams, GpuWaterGerstnerParams,
-    GpuWaterSpectrumParams, GpuWaterSweParams, GpuWaterUnderwaterParams, GpuWaterWaterlineParams,
-    GpuWaterWetnessParams,
+    GpuWaterSpectrumParams, GpuWaterSurfaceMeshParams, GpuWaterSweParams, GpuWaterUnderwaterParams,
+    GpuWaterWaterlineParams, GpuWaterWetnessParams,
 };
 use super::bind_groups::{WaterBodyUpload, WaterSurfaceExtent, WaterVolumeExtent};
 
@@ -184,6 +184,15 @@ pub struct WaterBody {
     /// Invocation count for the full-screen passes (reconstruction, caustics,
     /// dispersion, `FLIP` scatter/gather framebuffer tiles).
     pub(crate) screen_pixels: u32,
+    /// Displaced render-mesh vertex count driving the `water_surface_mesh`
+    /// scatter kernel's `DispatchDomain::Vertices` loop and sizing its four
+    /// per-vertex storage pools. Zero leaves the surface-mesh pass an
+    /// honest no-op.
+    pub(crate) surface_vertex_count: u32,
+    /// `@group(0)` binding 0 uniform for `water_surface_mesh`: patch grid
+    /// dimensions and world-space origin/extent the scatter kernel uses to
+    /// place and displace each render-mesh vertex.
+    pub(crate) surface_mesh_params: GpuWaterSurfaceMeshParams,
 }
 
 impl WaterBody {
@@ -215,6 +224,7 @@ impl WaterBody {
             face_count,
             self.particle_count,
             self.screen_pixels,
+            self.surface_vertex_count,
         )
     }
 
@@ -276,6 +286,9 @@ impl WaterBody {
             coupling_queries: &self.coupling_queries,
             coupling_readback_rows: self.coupling_readback_rows,
             coupling_params: self.coupling_params,
+
+            surface_vertex_count: self.surface_vertex_count,
+            surface_mesh_params: self.surface_mesh_params,
         }
     }
 }

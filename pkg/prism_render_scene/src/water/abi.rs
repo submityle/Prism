@@ -581,6 +581,25 @@ pub(crate) struct GpuWaterCouplingParams {
     pub _pad1: u32,
 }
 
+/// Surface-meshing scalars. Byte-compatible with `WaterSurfaceMeshParams` in
+/// `water_surface_mesh.wesl` (three `vec4` = 48 bytes). The compute sweep reads
+/// these to place and tessellate the displaced ocean patch lattice before the
+/// raster draw consumes the four per-vertex storage arrays it writes.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq)]
+pub(crate) struct GpuWaterSurfaceMeshParams {
+    /// Lattice resolution: vertices along x (`[0]`) and z (`[1]`), the total
+    /// vertex count the sweep bounds against (`[2]`), and the linear lane width
+    /// (`[3]`, informational; the dispatch is sized host-side).
+    pub grid_dims: [u32; 4],
+    /// World-space `(ix=0, iz=0)` patch corner (xyz); `w` unused.
+    pub patch_origin: [f32; 4],
+    /// Patch world extent along x (`[0]`) and z (`[1]`), the `uv` tiling scale
+    /// mapping the lattice onto the cascade textures (`[2]`), and the
+    /// cascade-blend weight applied to the sampled displacement (`[3]`).
+    pub patch_extent: [f32; 4],
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -819,6 +838,8 @@ mod tests {
         assert_eq!(size_of::<GpuWaterCouplingQuery>(), 16);
         assert_eq!(size_of::<GpuWaterCouplingParams>(), 32);
         assert_eq!(size_of::<GpuWaterCouplingParams>() % 16, 0);
+        assert_eq!(size_of::<GpuWaterSurfaceMeshParams>(), 48);
+        assert_eq!(size_of::<GpuWaterSurfaceMeshParams>() % 16, 0);
     }
 
     /// The shared workgroup tiles match the `@workgroup_size(...)` literals in

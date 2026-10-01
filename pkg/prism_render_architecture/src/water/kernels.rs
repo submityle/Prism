@@ -128,6 +128,10 @@ pub enum DispatchDomain {
     /// A full-screen pass: caustics projection and screen-space reconstruction
     /// iterate the framebuffer.
     Screen,
+    /// A flat list of surface-mesh vertices: a linear 64-lane sweep over the
+    /// projected-grid / clipmap lattice the surface meshing pass samples the
+    /// cascade displacement/normal textures into (one invocation per vertex).
+    Vertices,
 }
 
 /// A fully described `GPU` compute dispatch for one water pass.
@@ -217,12 +221,16 @@ pub enum WaterKernel {
     FftNormalize,
     /// Assemble the four cascade grids into displacement and normal textures.
     SpectrumAssemble,
+    /// Sample the assembled displacement/normal textures at each surface-mesh
+    /// vertex and scatter the result into the four per-vertex storage arrays
+    /// the raster draw reads (`WaveWorks`/`Crest`/`UE5` projected-grid build).
+    SurfaceMesh,
 }
 
 impl WaterKernel {
     /// Every kernel, in a stable order, for descriptor-table iteration and
     /// exhaustiveness tests.
-    pub const ALL: [WaterKernel; 27] = [
+    pub const ALL: [WaterKernel; 28] = [
         WaterKernel::SpectrumIfft,
         WaterKernel::GerstnerDisplace,
         WaterKernel::SweStep,
@@ -250,6 +258,7 @@ impl WaterKernel {
         WaterKernel::FftStage,
         WaterKernel::FftNormalize,
         WaterKernel::SpectrumAssemble,
+        WaterKernel::SurfaceMesh,
     ];
 
     /// The stable `WESL` entry-point name the shader codegen emits for this
@@ -287,6 +296,7 @@ impl WaterKernel {
             WaterKernel::FftStage => "water_fft_stage",
             WaterKernel::FftNormalize => "water_fft_normalize",
             WaterKernel::SpectrumAssemble => "water_spectrum_assemble",
+            WaterKernel::SurfaceMesh => "water_surface_mesh",
         }
     }
 
@@ -501,6 +511,19 @@ impl WaterKernel {
                 WorkgroupSize { x: 8, y: 8, z: 1 },
                 DispatchDomain::Grid2d,
             ),
+            // The surface meshing pass binds the two assembled source textures
+            // (displacement + normal) through one sampler and scatters into the
+            // four per-vertex storage arrays, over a linear 64-lane vertex sweep.
+            WaterKernel::SurfaceMesh => (
+                BindGroupLayout {
+                    storage_buffers: 4,
+                    uniform_buffers: 1,
+                    storage_textures: 0,
+                    sampled_textures: 2,
+                },
+                WorkgroupSize { x: 64, y: 1, z: 1 },
+                DispatchDomain::Vertices,
+            ),
         };
         KernelDescriptor {
             kernel: self,
@@ -578,7 +601,7 @@ mod tests {
         for kernel in WaterKernel::ALL {
             let d = kernel.descriptor();
             match d.domain {
-                DispatchDomain::Particle | DispatchDomain::Faces => {
+                DispatchDomain::Particle | DispatchDomain::Faces | DispatchDomain::Vertices => {
                     assert_eq!(d.workgroup.y, 1);
                     assert_eq!(d.workgroup.z, 1);
                     assert!(d.workgroup.x > 1);

@@ -56,15 +56,25 @@ pub(crate) struct WaterPlugin;
 
 impl Plugin for WaterPlugin {
     fn build(&self, app: &mut App) {
-        // Embed the five compute shaders plus the surface raster shader next
-        // to this module so the pipeline init systems can load them by their
-        // stable `../shaders/*.wesl` asset paths regardless of the working
-        // directory.
+        // Embed every compute shader the pipeline init systems load through
+        // `load_embedded_asset!`, plus the surface raster shader, next to this
+        // module so they resolve by their stable `../shaders/*.wesl` asset
+        // paths regardless of the working directory. Every path here must stay
+        // in lockstep with the `load_embedded_asset!` calls in
+        // `pipeline.rs::init_water_compute_pipelines`; a missing embed panics
+        // at pipeline-init time on a real device even though the sandbox's
+        // `include_str!`-based shader tests never exercise this path.
         embedded_asset!(app, "../shaders/water_ocean.wesl");
         embedded_asset!(app, "../shaders/water_flip.wesl");
         embedded_asset!(app, "../shaders/water_pbf.wesl");
         embedded_asset!(app, "../shaders/water_surface.wesl");
         embedded_asset!(app, "../shaders/water_render_fx.wesl");
+        embedded_asset!(app, "../shaders/water_spectrum_fft.wesl");
+        embedded_asset!(app, "../shaders/water_butterfly.wesl");
+        embedded_asset!(app, "../shaders/water_flip_mac_p2g.wesl");
+        embedded_asset!(app, "../shaders/water_flip_mac.wesl");
+        embedded_asset!(app, "../shaders/water_flip_mac_g2p.wesl");
+        embedded_asset!(app, "../shaders/water_surface_mesh.wesl");
         embedded_asset!(app, "../shaders/water_surface_raster.wesl");
 
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {

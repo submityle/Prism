@@ -187,6 +187,30 @@ mod tests {
     }
 
     #[test]
+    fn meshing_contract_matches_the_kernel_descriptor() {
+        // The meshing lane width and the four-storage / two-sampled resource
+        // shape here are the single source of truth the `WaterKernel::SurfaceMesh`
+        // descriptor must mirror, so the host dispatch sizing and the device
+        // bind-group layout can never silently disagree.
+        use crate::water::kernels::{DispatchDomain, WaterKernel};
+        let descriptor = WaterKernel::SurfaceMesh.descriptor();
+        assert_eq!(descriptor.workgroup.x, SURFACE_MESH_LANES);
+        assert_eq!(descriptor.workgroup.y, 1);
+        assert_eq!(descriptor.workgroup.z, 1);
+        assert_eq!(descriptor.domain, DispatchDomain::Vertices);
+        assert_eq!(
+            descriptor.layout.storage_buffers,
+            SurfaceMeshOutput::ALL.len() as u32
+        );
+        assert_eq!(
+            descriptor.layout.sampled_textures,
+            SurfaceMeshSource::ALL.len() as u32
+        );
+        assert_eq!(descriptor.layout.uniform_buffers, 1);
+        assert_eq!(descriptor.layout.storage_textures, 0);
+    }
+
+    #[test]
     fn output_slots_match_the_draw_storage_bindings() {
         // Every per-vertex array this pass writes is read back by the raster
         // draw at the same `@group(0)` slot and the same stride; the producer

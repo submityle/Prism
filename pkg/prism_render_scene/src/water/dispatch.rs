@@ -56,6 +56,7 @@ fn bind_group_for<'a>(
         WaterKernel::UnderwaterVolume => &groups.underwater,
         WaterKernel::WetnessStep => &groups.wetness,
         WaterKernel::CouplingReadback => &groups.coupling,
+        WaterKernel::SurfaceMesh => &groups.surface_mesh,
         // Face-centered staggered `MAC` chain: scatter + normalize share the
         // `P2G` group; divergence, pressure and project share the solve group;
         // the gather binds its own `G2P` group. The grouping mirrors
@@ -274,6 +275,7 @@ mod tests {
             WaterKernel::UnderwaterVolume => 9,
             WaterKernel::WetnessStep => 10,
             WaterKernel::CouplingReadback => 11,
+            WaterKernel::SurfaceMesh => 16,
             // The face-centered staggered `MAC` chain groups mirror
             // `bind_group_for`: scatter + normalize, the three solve passes, and
             // the standalone gather.
