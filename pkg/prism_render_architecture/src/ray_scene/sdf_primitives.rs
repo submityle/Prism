@@ -247,11 +247,39 @@ pub fn octahedron(point: [f32; 3], radius: f32) -> f32 {
     length([q[0], q[1] - radius + k, q[2] - k])
 }
 
+/// Approximate signed distance from `point` to an axis-aligned ellipsoid with
+/// per-axis `radii`, centred at the origin.
+///
+/// Unlike the other primitives this is **not** an exact Euclidean distance:
+/// an ellipsoid has no closed-form distance, so this uses Inigo Quilez's
+/// gradient-corrected bound `k0 * (k0 - 1) / k1`, where `k0 = length(p / r)`
+/// and `k1 = length(p / r / r)`. The sign is correct everywhere (negative
+/// inside, positive outside) and the zero level set is the true surface, but
+/// off-surface magnitudes are a close approximation rather than the metric
+/// distance; it degrades for very eccentric radii. Any `radii` component must
+/// be non-zero. Suitable for sphere tracing and `CSG`, where a slight
+/// underestimate of distance only costs extra marching steps.
+pub fn ellipsoid_sdf(point: [f32; 3], radii: [f32; 3]) -> f32 {
+    let scaled = [point[0] / radii[0], point[1] / radii[1], point[2] / radii[2]];
+    let k0 = length(scaled);
+    let k1 = length([
+        scaled[0] / radii[0],
+        scaled[1] / radii[1],
+        scaled[2] / radii[2],
+    ]);
+    // At the exact centre `k1` is zero; the surface is `k0 = 0` away, so the
+    // distance is simply the smallest radius (nearest surface point).
+    if k1 <= f32::MIN_POSITIVE {
+        return -radii[0].min(radii[1]).min(radii[2]);
+    }
+    k0 * (k0 - 1.0) / k1
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        box_frame, box_sdf, capped_cone, capped_cylinder, capsule, hex_prism, octahedron, plane,
-        round_box, sphere, torus,
+        box_frame, box_sdf, capped_cone, capped_cylinder, capsule, ellipsoid_sdf, hex_prism,
+        octahedron, plane, round_box, sphere, torus,
     };
 
     #[test]
@@ -375,5 +403,41 @@ mod tests {
         assert!((octahedron([0.0, 0.0, 0.0], r) - (-0.577_350_26)).abs() < 1e-6);
         // A point on the +++ face plane is on the surface.
         assert!(octahedron([1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0], r).abs() < 1e-6);
+    }
+
+    #[test]
+    fn ellipsoid_sphere_case_matches_exact_distance() {
+        // Equal radii degenerate to a sphere, where the IQ bound is exact.
+        let r = [1.0, 1.0, 1.0];
+        // On axis at distance 2 from a unit sphere: distance 1.
+        assert!((ellipsoid_sdf([2.0, 0.0, 0.0], r) - 1.0).abs() < 1e-5);
+        // On the surface: zero.
+        assert!(ellipsoid_sdf([1.0, 0.0, 0.0], r).abs() < 1e-5);
+    }
+
+    #[test]
+    fn ellipsoid_sign_is_correct_inside_and_out() {
+        let r = [2.0, 1.0, 0.5];
+        // Centre is inside (negative).
+        assert!(ellipsoid_sdf([0.0, 0.0, 0.0], r) < 0.0);
+        // A point just inside the +x tip (x < 2) is negative.
+        assert!(ellipsoid_sdf([1.9, 0.0, 0.0], r) < 0.0);
+        // A point outside the +x tip (x > 2) is positive.
+        assert!(ellipsoid_sdf([2.5, 0.0, 0.0], r) > 0.0);
+    }
+
+    #[test]
+    fn ellipsoid_zero_level_set_is_the_surface() {
+        let r = [2.0, 1.0, 0.5];
+        // Each axis tip lies on the surface (distance ~ 0).
+        assert!(ellipsoid_sdf([2.0, 0.0, 0.0], r).abs() < 1e-5);
+        assert!(ellipsoid_sdf([0.0, 1.0, 0.0], r).abs() < 1e-5);
+        assert!(ellipsoid_sdf([0.0, 0.0, 0.5], r).abs() < 1e-5);
+    }
+
+    #[test]
+    fn ellipsoid_centre_is_negative_smallest_radius() {
+        let r = [2.0, 1.0, 0.5];
+        assert!((ellipsoid_sdf([0.0, 0.0, 0.0], r) - (-0.5)).abs() < 1e-6);
     }
 }
