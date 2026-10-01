@@ -215,6 +215,12 @@
 //!   positions, three vertex normals, and `primitive`; node records reusing the
 //!   shared [`NODE_WORDS`]) plus a packed walk reproducing the in-memory walk
 //!   bit-for-bit.
+//! - [`spline`] — Catmull-Rom / cardinal / uniform-B-spline round-curve segment
+//!   [`spline::SplineCurve`]: a fixed `4×4` basis change lowers one segment of
+//!   the chosen [`spline::SplineBasis`] to an equivalent cubic Bézier and reuses
+//!   the [`curve`] swept-circle intersector, so [`spline::SplineBvh`] shares the
+//!   Bézier traversal and uploads through [`curve_gpu_layout`] with no separate
+//!   `GPU` layout.
 //! - [`traversal`] — [`Ray`]/`BVH` slab + Möller–Trumbore intersection with
 //!   closest-hit and any-hit walks (the `GPU` traversal kernel's golden ref).
 //! - [`traversal_stackless`] — stackless (threaded / escape-index) `BVH` walk:
@@ -265,6 +271,7 @@ pub mod obb;
 pub mod obb_gpu_layout;
 pub mod shaded_triangle;
 pub mod shaded_triangle_gpu_layout;
+pub mod spline;
 pub mod footprint;
 pub mod gpu_layout;
 pub mod motion;
@@ -326,6 +333,7 @@ pub use obb::{Obb, ObbBvh, ObbHit};
 pub use obb_gpu_layout::{GpuObbBvhBuffers, OBB_WORDS};
 pub use shaded_triangle::{ShadedTriangle, ShadedTriangleBvh, ShadedTriangleHit};
 pub use shaded_triangle_gpu_layout::{GpuShadedTriangleBvhBuffers, SHADED_TRI_WORDS};
+pub use spline::{SplineBasis, SplineBvh, SplineCurve};
 pub use rectangle_gpu_layout::{GpuRectangleBvhBuffers, RECTANGLE_WORDS};
 pub use aabb_primitive_gpu_layout::{GpuAabbBvhBuffers, AABB_PRIMITIVE_WORDS};
 pub use sphere_gpu_layout::{GpuSphereBvhBuffers, SPHERE_WORDS};
