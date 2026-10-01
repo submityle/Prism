@@ -1147,11 +1147,28 @@ pub fn moon(point: [f32; 2], d: f32, ra: f32, rb: f32) -> f32 {
     outer.max(-inner)
 }
 
+/// Signed distance to a two-dimensional rounded "X": two diagonal bars of
+/// half-length `w / 2` crossing at the origin, each stroke rounded by radius
+/// `r`.
+///
+/// This is Inigo Quilez's exact `sdRoundedX`. Folding to the first quadrant via
+/// `abs` collapses the four-fold symmetry; the point is then projected onto the
+/// diagonal skeleton segment `y = x` (parameter `min(x + y, w) / 2`, clamped to
+/// the arm length) and offset by the stroke radius. The result is an exact,
+/// everywhere-smooth field built only from `abs`, `min` and a single `sqrt`, so
+/// it stays transcendental-free. Pair it with the `extrude` domain operator to
+/// cut a rounded cross through a slab.
+pub fn rounded_x(point: [f32; 2], w: f32, r: f32) -> f32 {
+    let p = [point[0].abs(), point[1].abs()];
+    let m = (p[0] + p[1]).min(w) * 0.5;
+    length2([p[0] - m, p[1] - m]) - r
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         box_frame, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_torus, capsule, cone_sdf, cut_hollow_sphere, cut_sphere, cylinder_segment,
-        death_star, ellipsoid_sdf, hex_prism, infinite_cone, infinite_cylinder, length2, line_sdf, link, moon, octagon_prism, octahedron, pie, plane, pyramid, rhombus, round_box,
+        death_star, ellipsoid_sdf, hex_prism, infinite_cone, infinite_cylinder, length2, line_sdf, link, moon, octagon_prism, octahedron, pie, plane, pyramid, rhombus, round_box, rounded_x,
         quad_sdf, round_cone_sdf, round_cone_segment, rounded_cylinder, solid_angle, sphere, torus, triangle_sdf, triangular_prism, vesica,
     };
 
@@ -1486,6 +1503,60 @@ mod tests {
             let down = moon([p[0], -p[1]], d, ra, rb);
             assert!((up - down).abs() < 1e-6, "asymmetry at {p:?}");
         }
+    }
+
+    #[test]
+    fn rounded_x_matches_segment_skeleton_reference() {
+        // Independent reference: the rounded X is the two crossing diagonal
+        // segments offset by r. Compare against the exact distance to that
+        // two-segment skeleton minus r.
+        let w = 1.6_f32;
+        let r = 0.25_f32;
+        let half = w * 0.5;
+        let seg_dist = |p: [f32; 2], a: [f32; 2], b: [f32; 2]| -> f32 {
+            let pa = [p[0] - a[0], p[1] - a[1]];
+            let ba = [b[0] - a[0], b[1] - a[1]];
+            let denom = ba[0] * ba[0] + ba[1] * ba[1];
+            let h = ((pa[0] * ba[0] + pa[1] * ba[1]) / denom).clamp(0.0, 1.0);
+            let dx = pa[0] - ba[0] * h;
+            let dy = pa[1] - ba[1] * h;
+            (dx * dx + dy * dy).sqrt()
+        };
+        let s1a = [-half, -half];
+        let s1b = [half, half];
+        let s2a = [-half, half];
+        let s2b = [half, -half];
+
+        let mut state: u32 = 0x5151_a5a5;
+        let mut next = || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 8) as f32 / (1u32 << 24) as f32
+        };
+        for _ in 0..256 {
+            let x = (next() - 0.5) * 4.0;
+            let y = (next() - 0.5) * 4.0;
+            let p = [x, y];
+            let want = seg_dist(p, s1a, s1b).min(seg_dist(p, s2a, s2b)) - r;
+            let got = rounded_x(p, w, r);
+            assert!(
+                (got - want).abs() < 1e-5,
+                "mismatch at ({x},{y}): got={got} want={want}"
+            );
+        }
+    }
+
+    #[test]
+    fn rounded_x_centre_and_arm_tips() {
+        let w = 2.0_f32;
+        let r = 0.3_f32;
+        // The centre lies on both bars, so distance is -r.
+        assert!((rounded_x([0.0, 0.0], w, r) + r).abs() < 1e-6);
+        // An arm tip sits on the skeleton end, still fully inside the stroke.
+        assert!((rounded_x([w * 0.5, w * 0.5], w, r) + r).abs() < 1e-6);
+        // Just outside an arm tip along the diagonal: distance grows past -r.
+        let got = rounded_x([w * 0.5 + 0.5, w * 0.5 + 0.5], w, r);
+        let want = (0.5_f32 * 0.5 + 0.5 * 0.5).sqrt() - r;
+        assert!((got - want).abs() < 1e-5, "beyond tip: got={got} want={want}");
     }
 
     #[test]
