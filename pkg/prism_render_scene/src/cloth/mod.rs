@@ -61,6 +61,8 @@ mod pack;
 mod painted_gpu_tests;
 mod pipeline;
 #[cfg(test)]
+mod plasticity_parity;
+#[cfg(test)]
 mod plasticity_gpu_tests;
 pub(crate) mod plugin;
 mod prepare;
