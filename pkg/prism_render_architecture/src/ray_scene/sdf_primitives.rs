@@ -1119,11 +1119,39 @@ pub fn pie(point: [f32; 2], sin_cos: [f32; 2], radius: f32) -> f32 {
     l.max(m * edge_sign)
 }
 
+/// Signed distance to a two-dimensional crescent ("moon"): the disk of radius
+/// `ra` centred at the origin with a disk of radius `rb` subtracted, the hole
+/// centred `d` units along `+x`.
+///
+/// This is Inigo Quilez's exact `sdMoon`. Folding `y` to its magnitude exploits
+/// the crescent's mirror symmetry. The intersection of the two circles gives
+/// the cusp `(a, b)`; when the query point projects beyond that cusp the exact
+/// distance is to the cusp tip itself, otherwise it is the constructive-solid
+/// difference `max(|p| - ra, -(|p - (d,0)| - rb))`. Handling the cusp
+/// explicitly is what keeps the field exact where a naive CSG `max` would
+/// overshoot. Uses only `abs`, `max`, `sqrt` and dot products, so it stays
+/// transcendental-free. Requires an overlapping configuration
+/// (`|ra - rb| < d < ra + rb`).
+pub fn moon(point: [f32; 2], d: f32, ra: f32, rb: f32) -> f32 {
+    let p = [point[0], point[1].abs()];
+    // Intersection point (a, b) of the two circle boundaries (b >= 0).
+    let a = (ra * ra - rb * rb + d * d) / (2.0 * d);
+    let b = (ra * ra - a * a).max(0.0).sqrt();
+    // Beyond the cusp the nearest feature is the cusp tip itself.
+    if d * (p[0] * b - p[1] * a) > d * d * (b - p[1]).max(0.0) {
+        return length2([p[0] - a, p[1] - b]);
+    }
+    // Otherwise the difference of the two disks is exact.
+    let outer = length2(p) - ra;
+    let inner = length2([p[0] - d, p[1]]) - rb;
+    outer.max(-inner)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         box_frame, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_torus, capsule, cone_sdf, cut_hollow_sphere, cut_sphere, cylinder_segment,
-        death_star, ellipsoid_sdf, hex_prism, infinite_cone, infinite_cylinder, length2, line_sdf, link, octagon_prism, octahedron, pie, plane, pyramid, rhombus, round_box,
+        death_star, ellipsoid_sdf, hex_prism, infinite_cone, infinite_cylinder, length2, line_sdf, link, moon, octagon_prism, octahedron, pie, plane, pyramid, rhombus, round_box,
         quad_sdf, round_cone_sdf, round_cone_segment, rounded_cylinder, solid_angle, sphere, torus, triangle_sdf, triangular_prism, vesica,
     };
 
@@ -1393,6 +1421,70 @@ mod tests {
                 (got - want).abs() < 3e-3,
                 "mismatch at ({x},{y}): got={got} want={want}"
             );
+        }
+    }
+
+    #[test]
+    fn moon_matches_brute_force_boundary() {
+        // Independent reference: the crescent is {inside circle A} minus
+        // {inside circle B}. Its boundary is the arc of A that lies outside B
+        // plus the arc of B that lies inside A. Compare the signed distance to
+        // a dense brute-force scan of that boundary.
+        let d = 0.6_f32;
+        let ra = 1.0_f32;
+        let rb = 0.8_f32;
+
+        let mut boundary: Vec<[f32; 2]> = Vec::new();
+        let n = 3000;
+        for k in 0..n {
+            let t = std::f32::consts::TAU * k as f32 / n as f32;
+            // Arc of A kept where it is outside B.
+            let pa = [ra * t.cos(), ra * t.sin()];
+            if ((pa[0] - d) * (pa[0] - d) + pa[1] * pa[1]).sqrt() >= rb {
+                boundary.push(pa);
+            }
+            // Arc of B kept where it is inside A.
+            let pb = [d + rb * t.cos(), rb * t.sin()];
+            if (pb[0] * pb[0] + pb[1] * pb[1]).sqrt() <= ra {
+                boundary.push(pb);
+            }
+        }
+        assert!(!boundary.is_empty());
+
+        let mut state: u32 = 0xdead_beef;
+        let mut next = || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 8) as f32 / (1u32 << 24) as f32
+        };
+        for _ in 0..200 {
+            let x = (next() - 0.5) * 4.0;
+            let y = (next() - 0.5) * 4.0;
+
+            let mut best = f32::INFINITY;
+            for q in &boundary {
+                let dx = x - q[0];
+                let dy = y - q[1];
+                best = best.min((dx * dx + dy * dy).sqrt());
+            }
+            let in_a = (x * x + y * y).sqrt() <= ra;
+            let out_b = ((x - d) * (x - d) + y * y).sqrt() >= rb;
+            let want = if in_a && out_b { -best } else { best };
+
+            let got = moon([x, y], d, ra, rb);
+            assert!(
+                (got - want).abs() < 4e-3,
+                "mismatch at ({x},{y}): got={got} want={want}"
+            );
+        }
+    }
+
+    #[test]
+    fn moon_is_symmetric_about_the_x_axis() {
+        let (d, ra, rb) = (0.6_f32, 1.0_f32, 0.8_f32);
+        for &p in &[[0.3_f32, 0.4_f32], [-0.5, 0.9], [1.2, 0.2]] {
+            let up = moon(p, d, ra, rb);
+            let down = moon([p[0], -p[1]], d, ra, rb);
+            assert!((up - down).abs() < 1e-6, "asymmetry at {p:?}");
         }
     }
 
