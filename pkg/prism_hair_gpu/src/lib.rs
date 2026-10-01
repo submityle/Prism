@@ -414,6 +414,20 @@
 //!   fuse it is checked **exactly** (direct integer compare, not a tolerance)
 //!   (see [`mip_for_footprint`]).
 //!
+//! * [`GpuHairFollicleBind`] evaluates
+//!   [`transfer_root_map`](prism_render_architecture::hair::follicle_bind::transfer_root_map),
+//!   the per-frame barycentric root-skinning transfer that glues hair roots
+//!   to an animated scalp — one thread per [`FollicleBinding`](prism_render_architecture::hair::follicle_bind::FollicleBinding)
+//!   broadcasts a single deformed [`TriangleFrame`](prism_render_architecture::hair::follicle_bind::TriangleFrame),
+//!   sanitises the weights (clamp negatives, renormalise, centroid fallback),
+//!   mixes the surface point and the interpolated per-vertex normal, then
+//!   floats the root off along that normal by the stored signed offset,
+//!   falling back to the bare surface point on a non-finite result; a
+//!   distinct sibling of the `root_bind` / `root_resolve` pair (explicit
+//!   per-vertex frame, authored normals, position-only output) checked within
+//!   a tolerance for the `sqrt` normalise and the fused multiply-add
+//!   (see [`transfer_root_map`](prism_render_architecture::hair::follicle_bind::transfer_root_map)).
+//!
 //! # Portability
 //!
 //! The projection uses only `sqrt`, `min`, `max`, `clamp`, `dot` and
@@ -452,6 +466,7 @@ pub mod deep_opacity;
 pub mod deep_transmittance_sample;
 pub mod dither_alpha;
 pub mod eval_sh;
+pub mod follicle_bind;
 pub mod forward_scatter;
 pub mod forward_scatter_power;
 pub mod forward_scatter_sample;
@@ -500,6 +515,7 @@ pub use deep_opacity::GpuHairDeepOpacity;
 pub use deep_transmittance_sample::{GpuHairDeepTransmittanceSample, TransmittanceQuery};
 pub use dither_alpha::{reference_dither_alpha_map, GpuHairDitherAlpha};
 pub use eval_sh::{reference_eval_sh, GpuHairEvalSh};
+pub use follicle_bind::{reference_transfer_root_map, GpuHairFollicleBind};
 pub use forward_scatter::GpuHairForwardScatter;
 pub use forward_scatter_power::{
     reference_forward_scatter_power, GpuHairForwardScatterPower, PowerQuery,
