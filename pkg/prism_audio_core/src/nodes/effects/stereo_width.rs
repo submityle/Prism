@@ -296,9 +296,9 @@ mod tests {
             .map(|f| 0.5 * (input.channel(0)[f] + input.channel(1)[f]))
             .collect();
         let out = run(&mut node, input);
-        for f in 0..64 {
+        for (f, &m) in mono_ref.iter().enumerate() {
             assert!((out.channel(0)[f] - out.channel(1)[f]).abs() < 1e-6);
-            assert!((out.channel(0)[f] - mono_ref[f]).abs() < 1e-6);
+            assert!((out.channel(0)[f] - m).abs() < 1e-6);
         }
     }
 

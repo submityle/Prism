@@ -490,8 +490,8 @@ mod tests {
                 assert!(g[n] > 0.0, "order {order}: g[{n}] should stay positive");
             }
             // Degrees beyond the order are untouched (zero).
-            for n in (order + 1)..MAX_ORDER_WEIGHTS {
-                assert!(approx(g[n], 0.0));
+            for &gn in g.iter().skip(order + 1) {
+                assert!(approx(gn, 0.0));
             }
         }
     }

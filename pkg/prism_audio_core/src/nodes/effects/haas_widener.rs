@@ -368,12 +368,11 @@ mod tests {
             .map(|i| input.channel(0)[i] + input.channel(1)[i])
             .collect();
         let out = run(&mut node, input, stereo(256));
-        for i in 0..256 {
+        for (i, &expected) in in_sum.iter().enumerate() {
             let out_sum = out.channel(0)[i] + out.channel(1)[i];
             assert!(
-                (out_sum - in_sum[i]).abs() < 1e-5,
-                "mono sum changed at {i}: {out_sum} vs {}",
-                in_sum[i]
+                (out_sum - expected).abs() < 1e-5,
+                "mono sum changed at {i}: {out_sum} vs {expected}",
             );
         }
     }

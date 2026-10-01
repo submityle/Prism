@@ -585,8 +585,10 @@ mod tests {
 
     #[test]
     fn active_taps_clamped_to_max() {
-        let mut params = MultiTapDelayParams::default();
-        params.active_taps = 999;
+        let params = MultiTapDelayParams {
+            active_taps: 999,
+            ..Default::default()
+        };
         let node = MultiTapDelayNode::new(SR, 32, params);
         assert_eq!(node.active_taps(), MAX_TAPS);
     }
@@ -665,9 +667,11 @@ mod tests {
     #[test]
     fn set_params_updates_targets() {
         let mut node = MultiTapDelayNode::new(SR, 48_000, MultiTapDelayParams::default());
-        let mut params = MultiTapDelayParams::default();
-        params.wet = 0.25;
-        params.active_taps = 2;
+        let params = MultiTapDelayParams {
+            wet: 0.25,
+            active_taps: 2,
+            ..Default::default()
+        };
         node.set_params(&params, Ramp::Immediate);
         assert_eq!(node.active_taps(), 2);
         assert!((node.params().wet - 0.25).abs() < 1e-6);

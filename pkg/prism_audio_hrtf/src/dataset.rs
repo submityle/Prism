@@ -334,7 +334,7 @@ mod tests {
     #[test]
     fn error_display_is_non_empty() {
         let err = DatasetError::EmptyHrir;
-        let mut s = alloc::string::String::new();
+        let mut s = String::new();
         use core::fmt::Write;
         write!(s, "{err}").unwrap();
         assert!(!s.is_empty());

@@ -370,8 +370,8 @@ mod tests {
         let out = outputs[0].channel(0);
         // Compare well past the initial fill so the ring is primed.
         let mut diff = 0.0 as Sample;
-        for i in 512..2048 {
-            diff += (out[i] - input.channel(0)[i]).abs();
+        for (i, &o) in out.iter().enumerate().skip(512) {
+            diff += (o - input.channel(0)[i]).abs();
         }
         assert!(diff > 1.0, "modulated output too close to dry: {diff}");
     }
@@ -509,8 +509,8 @@ mod tests {
             node.process(&ctx(2048), &mut io);
             let out = outputs[0].channel(0);
             let mut d = 0.0 as Sample;
-            for i in 512..2048 {
-                d += (out[i] - input.channel(0)[i]).abs();
+            for (i, &o) in out.iter().enumerate().skip(512) {
+                d += (o - input.channel(0)[i]).abs();
             }
             d
         }

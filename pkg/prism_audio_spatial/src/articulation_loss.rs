@@ -314,7 +314,7 @@ mod tests {
         // Zero loss maps to perfect intelligibility, huge loss clamps to zero.
         assert_eq!(alcons_to_sti(0.0), 1.0);
         let big = alcons_to_sti(1.0e9);
-        assert!(big >= 0.0 && big <= 1.0, "big {big}");
+        assert!((0.0..=1.0).contains(&big), "big {big}");
     }
 
     #[test]
@@ -362,6 +362,6 @@ mod tests {
         // A huge distance in a tiny room with long RT would overflow without the
         // clamp; it must stay within [0, MAX_ALCONS].
         let a = articulation_loss_percent(50.0, 1.0, 10.0, 0.001);
-        assert!(a >= 0.0 && a <= MAX_ALCONS, "alcons {a}");
+        assert!((0.0..=MAX_ALCONS).contains(&a), "alcons {a}");
     }
 }

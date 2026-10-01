@@ -327,7 +327,7 @@ mod tests {
         let ir = vec![1.0, 0.5, 0.25];
         let u = useful_to_detrimental_ratio_db(&ir, EARLY_LATE_SPLIT_50_MS, 20.0, SR);
         assert!(u.is_finite());
-        assert!(u <= MAX_CLARITY_DB && u >= -MAX_CLARITY_DB, "u {u}");
+        assert!((-MAX_CLARITY_DB..=MAX_CLARITY_DB).contains(&u), "u {u}");
     }
 
     #[test]

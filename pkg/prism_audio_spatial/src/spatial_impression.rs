@@ -479,9 +479,7 @@ mod tests {
         // keeps IACC near unity because one sample is well inside +/-1 ms.
         let base = exp_response(8_000, 2_000.0);
         let mut right = vec![0.0; base.len()];
-        for i in 1..base.len() {
-            right[i] = base[i - 1];
-        }
+        right[1..].copy_from_slice(&base[..base.len() - 1]);
         let iacc = interaural_cross_correlation(&base, &right, SR, 0.0, 80.0);
         assert!(iacc > 0.99, "iacc {iacc}");
     }

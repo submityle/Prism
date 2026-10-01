@@ -310,7 +310,7 @@ mod tests {
     fn convolution_is_continuous_across_blocks() {
         let hl = [0.5, 0.25, -0.5, 0.75, 0.1];
         let hr = [0.1, 0.2, 0.3, 0.4, 0.5];
-        let x: Vec<f32> = (0..20).map(|i| ((i as f32) * 0.37).sin()).collect();
+        let x: Vec<f32> = (0..20).map(|i| bevy_math::ops::sin((i as f32) * 0.37)).collect();
         let mut r = BinauralRenderer::new(hl.len(), 8);
         r.set_hrir_immediate(&hl, &hr);
         // Render in irregular chunks and stitch.

@@ -267,8 +267,8 @@ mod tests {
         // of direction.
         for &dir in &[Vec3::NEG_Z, Vec3::Z, Vec3::X, Vec3::Y] {
             let gains = w.tap_band_gains(&tap(0.5, dir, false));
-            for band in 0..OCTAVE_BAND_COUNT {
-                assert!(approx(gains[band], 0.5, 1e-6), "band {band}");
+            for (band, &v) in gains.iter().enumerate() {
+                assert!(approx(v, 0.5, 1e-6), "band {band}");
             }
         }
     }
@@ -283,8 +283,8 @@ mod tests {
         ];
         let energy = w.total_band_energy(&taps);
         let expected = 0.5 * 0.5 + 0.25 * 0.25 + 0.125 * 0.125;
-        for band in 0..OCTAVE_BAND_COUNT {
-            assert!(approx(energy[band], expected, 1e-6), "band {band}");
+        for (band, &v) in energy.iter().enumerate() {
+            assert!(approx(v, expected, 1e-6), "band {band}");
         }
     }
 
@@ -294,8 +294,8 @@ mod tests {
         // A tap arriving from directly behind the forward axis is a rear-null.
         let rear = tap(1.0, Vec3::Z, false);
         let gains = w.tap_band_gains(&rear);
-        for band in 0..OCTAVE_BAND_COUNT {
-            assert!(approx(gains[band], 0.0, 1e-6), "band {band}");
+        for (band, &v) in gains.iter().enumerate() {
+            assert!(approx(v, 0.0, 1e-6), "band {band}");
         }
     }
 
@@ -304,8 +304,8 @@ mod tests {
         let w = DirectionalEarlyReflections::from_preset(DirectivityPreset::Cardioid, Vec3::NEG_Z);
         let front = tap(0.8, Vec3::NEG_Z, false);
         let gains = w.tap_band_gains(&front);
-        for band in 0..OCTAVE_BAND_COUNT {
-            assert!(approx(gains[band], 0.8, 1e-6), "band {band}");
+        for (band, &v) in gains.iter().enumerate() {
+            assert!(approx(v, 0.8, 1e-6), "band {band}");
         }
     }
 
@@ -385,8 +385,8 @@ mod tests {
         let w = DirectionalEarlyReflections::from_preset(DirectivityPreset::Trumpet, Vec3::NEG_Z);
         let bad = tap(Sample::NAN, Vec3::new(Sample::NAN, 1.0, 0.0), false);
         let gains = w.tap_band_gains(&bad);
-        for band in 0..OCTAVE_BAND_COUNT {
-            assert!(gains[band].is_finite(), "band {band}");
+        for (band, &v) in gains.iter().enumerate() {
+            assert!(v.is_finite(), "band {band}");
         }
         assert!(w.tap_broadband_gain(&bad, Sample::INFINITY).is_finite());
         assert!(w.total_send_gain(&[bad]).is_finite());
@@ -396,8 +396,8 @@ mod tests {
     fn empty_tap_set_has_zero_energy() {
         let w = DirectionalEarlyReflections::from_preset(DirectivityPreset::Voice, Vec3::NEG_Z);
         let energy = w.total_band_energy(&[]);
-        for band in 0..OCTAVE_BAND_COUNT {
-            assert!(approx(energy[band], 0.0, 1e-9), "band {band}");
+        for (band, &v) in energy.iter().enumerate() {
+            assert!(approx(v, 0.0, 1e-9), "band {band}");
         }
         assert!(approx(w.total_send_gain(&[]), 0.0, 1e-9));
     }
@@ -409,8 +409,8 @@ mod tests {
         let w = DirectionalEarlyReflections::from_preset(DirectivityPreset::Cardioid, Vec3::NEG_Z);
         let direct = tap(1.0, Vec3::NEG_Z, true);
         let gains = w.tap_band_gains(&direct);
-        for band in 0..OCTAVE_BAND_COUNT {
-            assert!(approx(gains[band], 1.0, 1e-6), "band {band}");
+        for (band, &v) in gains.iter().enumerate() {
+            assert!(approx(v, 1.0, 1e-6), "band {band}");
         }
     }
 }

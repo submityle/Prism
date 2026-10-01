@@ -359,6 +359,6 @@ mod tests {
     fn result_is_clamped_to_range() {
         let ir = ir_with_reverb(1.0, 0.4, 20_000);
         let drr = direct_to_reverberant_ratio_db(&ir, SR);
-        assert!(drr <= MAX_DRR_DB && drr >= -MAX_DRR_DB, "drr {drr}");
+        assert!((-MAX_DRR_DB..=MAX_DRR_DB).contains(&drr), "drr {drr}");
     }
 }

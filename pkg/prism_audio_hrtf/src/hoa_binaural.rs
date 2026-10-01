@@ -548,12 +548,12 @@ mod tests {
 
         // Build per-channel impulse blocks scaled by the coefficient.
         let mut blocks = Vec::new();
-        for c in 0..channels {
+        for &coeff in coeffs.iter().take(channels) {
             let mut b = vec![0.0 as Sample; hrir_len];
-            b[0] = coeffs[c];
+            b[0] = coeff;
             blocks.push(b);
         }
-        let ch: Vec<&[Sample]> = blocks.iter().map(|b| b.as_slice()).collect();
+        let ch: Vec<&[Sample]> = blocks.iter().map(Vec::as_slice).collect();
 
         let mut out_l = vec![0.0 as Sample; hrir_len];
         let mut out_r = vec![0.0 as Sample; hrir_len];

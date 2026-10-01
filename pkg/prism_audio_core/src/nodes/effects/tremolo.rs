@@ -331,7 +331,7 @@ mod tests {
         let out = run(&mut node, &input);
         for &s in out.channel(0) {
             assert!(s.is_finite());
-            assert!(s <= 1.0 + 1e-4 && s >= 0.5 - 1e-4, "outside envelope: {s}");
+            assert!((0.5 - 1e-4..=1.0 + 1e-4).contains(&s), "outside envelope: {s}");
         }
     }
 

@@ -581,8 +581,8 @@ mod tests {
         node.process(&c, &mut io);
         let [o] = outputs;
 
-        for ch in 0..o.channels() {
-            assert_eq!(o.channel(ch), expected[ch].as_slice());
+        for (ch, exp) in expected.iter().enumerate() {
+            assert_eq!(o.channel(ch), exp.as_slice());
         }
         assert_eq!(node.analyzer().frames_computed(), 1);
     }

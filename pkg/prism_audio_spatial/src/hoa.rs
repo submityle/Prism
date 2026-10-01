@@ -616,9 +616,9 @@ mod tests {
 
         let mut expect = [0.0 as Sample; MAX_HOA_CHANNELS];
         encode_hoa(FRONT, 1, &mut expect);
-        for k in 0..4 {
+        for (k, &e) in expect.iter().enumerate().take(4) {
             assert!(
-                out.channel(k).iter().all(|&s| approx(s, expect[k])),
+                out.channel(k).iter().all(|&s| approx(s, e)),
                 "channel {k} mismatch",
             );
         }

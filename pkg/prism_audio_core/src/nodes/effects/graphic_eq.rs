@@ -375,7 +375,7 @@ mod tests {
 
     #[test]
     fn constant_q_matches_textbook_values() {
-        assert!((band_q(1.0) - 1.414_213_6).abs() < 1e-4);
+        assert!((band_q(1.0) - core::f32::consts::SQRT_2).abs() < 1e-4);
         assert!((band_q(3.0) - 4.318_7).abs() < 1e-3);
     }
 

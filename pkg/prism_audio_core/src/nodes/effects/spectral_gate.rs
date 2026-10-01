@@ -585,7 +585,6 @@ mod tests {
             reduction_db: -80.0,
             attack_ms: 0.0,
             release_ms: 0.0,
-            ..Default::default()
         };
         let mut node = SpectralGateNode::new(SR, 1, 512, params);
         let input = sine(1_000.0, 1.0e-3, 8_192);
@@ -606,7 +605,6 @@ mod tests {
             reduction_db: -80.0,
             attack_ms: 0.0,
             release_ms: 0.0,
-            ..Default::default()
         };
         let mut node = SpectralGateNode::new(SR, 1, 512, params);
         let input = sine(1_000.0, 0.5, 8_192);
@@ -651,7 +649,6 @@ mod tests {
             reduction_db: -80.0,
             attack_ms: 0.0,
             release_ms: 0.0,
-            ..Default::default()
         };
         let mut node = SpectralGateNode::new(SR, 2, 512, params);
         let len = 8_192;

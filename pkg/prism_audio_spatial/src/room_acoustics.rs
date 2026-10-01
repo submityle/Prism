@@ -424,7 +424,7 @@ mod tests {
         let acoustics = RoomAcoustics::from_shoebox(&cube_shoebox(10.0, 1.0));
         let eyr = acoustics.rt60_eyring();
         assert!(eyr.is_finite());
-        assert!(eyr >= 0.0 && eyr < 0.1);
+        assert!((0.0..0.1).contains(&eyr));
         // Sabine with full absorption stays finite too (A = S).
         assert!(acoustics.rt60_sabine().is_finite());
     }

@@ -257,27 +257,27 @@ mod tests {
         (a - b).abs() <= EPS
     }
 
-    /// Directivity index from per-degree weights: DI = (sum g_n)^2 / sum(g_n^2 / (2n+1)).
+    /// Directivity index from per-degree weights: `DI = (sum g_n)^2 / sum(g_n^2 / (2n+1))`.
     fn directivity_index(g: &[Sample; MAX_ORDER_WEIGHTS], order: usize) -> Sample {
         let mut num = 0.0 as Sample;
         let mut den = 0.0 as Sample;
-        for n in 0..=order {
-            num += g[n];
-            den += g[n] * g[n] / (2.0 * n as Sample + 1.0);
+        for (n, &gn) in g.iter().enumerate().take(order + 1) {
+            num += gn;
+            den += gn * gn / (2.0 * n as Sample + 1.0);
         }
         (num * num) / den
     }
 
     /// Standard axisymmetric energy-vector radius:
-    /// r_E = 2 sum_{n<order} (n+1) a_n a_{n+1} / sum_n (2n+1) a_n^2.
+    /// `r_E = 2 sum_{n<order} (n+1) a_n a_{n+1} / sum_n (2n+1) a_n^2`.
     fn energy_vector_radius(g: &[Sample; MAX_ORDER_WEIGHTS], order: usize) -> Sample {
         let mut num = 0.0 as Sample;
         let mut den = 0.0 as Sample;
-        for n in 0..order {
-            num += 2.0 * (n as Sample + 1.0) * g[n] * g[n + 1];
+        for (n, &gn) in g.iter().enumerate().take(order) {
+            num += 2.0 * (n as Sample + 1.0) * gn * g[n + 1];
         }
-        for n in 0..=order {
-            den += (2.0 * n as Sample + 1.0) * g[n] * g[n];
+        for (n, &gn) in g.iter().enumerate().take(order + 1) {
+            den += (2.0 * n as Sample + 1.0) * gn * gn;
         }
         num / den
     }
@@ -307,8 +307,8 @@ mod tests {
     #[test]
     fn basic_gains_are_all_unity() {
         let g = beam_gains(BeamPattern::Basic, 3);
-        for n in 0..=3 {
-            assert!(approx(g[n], 1.0));
+        for &gn in g.iter().take(4) {
+            assert!(approx(gn, 1.0));
         }
     }
 

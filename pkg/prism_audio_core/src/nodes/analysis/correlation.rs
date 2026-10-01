@@ -601,9 +601,10 @@ mod tests {
 
     #[test]
     fn measurement_collects_into_vec() {
-        let mut meters: Vec<CorrelationMeter> = Vec::new();
-        meters.push(CorrelationMeter::new(SR, 50.0));
-        meters.push(CorrelationMeter::with_default_ballistic(SR));
+        let mut meters: Vec<CorrelationMeter> = vec![
+            CorrelationMeter::new(SR, 50.0),
+            CorrelationMeter::with_default_ballistic(SR),
+        ];
         for meter in meters.iter_mut() {
             settle_mono(meter, 0.5, 440.0, 0.2);
         }
