@@ -1689,10 +1689,20 @@ pub fn vesica_segment(point: [f32; 3], a: [f32; 3], b: [f32; 3], width: f32) -> 
     length2([qx - hx, qy - hy]) - hz
 }
 
+/// Exact signed distance to a circle of radius `radius` centred at the origin
+/// in 2D (Inigo Quilez `sdCircle`).
+///
+/// Negative inside, zero on the rim and positive outside. The field is simply
+/// the radial distance minus the radius, so it is exact everywhere and uses
+/// only `sqrt` (through `length2`) and a subtraction.
+pub fn circle_2d(point: [f32; 2], radius: f32) -> f32 {
+    length2(point) - radius
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        arc, box_frame, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_torus, capsule, cone_sdf, cross_2d, cut_disk_2d, cut_hollow_sphere,
+        arc, box_frame, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_torus, capsule, circle_2d, cone_sdf, cross_2d, cut_disk_2d, cut_hollow_sphere,
         cut_sphere, cylinder_segment, death_star, egg_2d, ellipsoid_sdf, equilateral_triangle_2d, heart_2d, hex_prism, hexagram_2d, infinite_cone, infinite_cylinder, isosceles_triangle_2d, length2, line_sdf, link, moon,
         octagon_prism, octahedron, oriented_box_2d, parallelogram, pie, plane, polygon_2d, pyramid, quad_sdf, regular_hexagon_2d, regular_octagon_2d, regular_pentagon_2d, rhombus, rhombus_2d, round_box, round_cone_sdf,
         round_cone_segment, rounded_box_2d, rounded_cylinder, rounded_x, segment_2d, solid_angle, sphere, torus, trapezoid_isosceles, triangle_sdf, triangular_prism,
@@ -3105,6 +3115,44 @@ mod tests {
             let got = vesica_segment(p, a, b, w);
             let want = vesica_segment_reference(p, a, b, w);
             assert!((got - want).abs() < 3e-3, "p={p:?} got={got} want={want}");
+        }
+    }
+
+    #[test]
+    fn circle_2d_matches_radial_distance_and_boundary() {
+        let r = 1.3f32;
+        // Analytic radial checks: centre, inside, on-rim and outside.
+        assert!((circle_2d([0.0, 0.0], r) - (-r)).abs() < 1e-6);
+        assert!((circle_2d([r, 0.0], r)).abs() < 1e-6);
+        assert!((circle_2d([0.0, -r], r)).abs() < 1e-6);
+        assert!((circle_2d([2.0, 0.0], r) - (2.0 - r)).abs() < 1e-6);
+        // Independent reference: distance to a dense boundary polyline with an
+        // inside test by radius, sharing no code with the closed form.
+        let n = 512usize;
+        let ring: Vec<[f32; 2]> = (0..n)
+            .map(|i| {
+                let a = std::f32::consts::TAU * (i as f32 / n as f32);
+                [r * a.cos(), r * a.sin()]
+            })
+            .collect();
+        for p in [[0.3f32, 0.2], [1.0, -0.9], [-1.6, 0.4], [0.0, 1.9], [-0.5, -0.5]] {
+            let mut best = f32::INFINITY;
+            for i in 0..n {
+                let s = ring[i];
+                let e = ring[(i + 1) % n];
+                let ex = e[0] - s[0];
+                let ey = e[1] - s[1];
+                let wx = p[0] - s[0];
+                let wy = p[1] - s[1];
+                let t = ((ex * wx + ey * wy) / (ex * ex + ey * ey)).clamp(0.0, 1.0);
+                let dx = wx - ex * t;
+                let dy = wy - ey * t;
+                best = best.min(dx * dx + dy * dy);
+            }
+            let sign = if p[0] * p[0] + p[1] * p[1] < r * r { -1.0 } else { 1.0 };
+            let want = best.sqrt() * sign;
+            let got = circle_2d(p, r);
+            assert!((got - want).abs() < 2e-3, "p={p:?} got={got} want={want}");
         }
     }
 
