@@ -55,7 +55,7 @@ pub use texture_filter::{
     bilinear, filter_resolved, trilinear, wrap_texel, TexelAddr, TexelSource,
 };
 pub use texture_codec::{
-    decode_bc1, decode_bc3, decode_bc4, decode_bc5, rgb565_to_rgb888, BcFormat,
+    decode_bc1, decode_bc2, decode_bc3, decode_bc4, decode_bc5, rgb565_to_rgb888, BcFormat,
     BcSourceError, BcTexelSource,
 };
 pub use normal_map::{

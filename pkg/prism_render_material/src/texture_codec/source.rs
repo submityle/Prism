@@ -25,7 +25,7 @@
 
 use alloc::vec::Vec;
 
-use super::formats::{decode_bc1, decode_bc3, decode_bc4, decode_bc5};
+use super::formats::{decode_bc1, decode_bc2, decode_bc3, decode_bc4, decode_bc5};
 use crate::TexelSource;
 
 /// The subset of block-compressed formats this source can decode.
@@ -33,6 +33,8 @@ use crate::TexelSource;
 pub enum BcFormat {
     /// BC1 -- opaque / 1-bit-alpha albedo, 8-byte blocks.
     Bc1,
+    /// BC2 -- albedo + explicit 4-bit alpha, 16-byte blocks.
+    Bc2,
     /// BC3 -- albedo + smooth alpha, 16-byte blocks.
     Bc3,
     /// BC4 -- single channel (value in `R`), 8-byte blocks.
@@ -48,7 +50,7 @@ impl BcFormat {
     pub const fn block_bytes(self) -> usize {
         match self {
             BcFormat::Bc1 | BcFormat::Bc4 => 8,
-            BcFormat::Bc3 | BcFormat::Bc5 => 16,
+            BcFormat::Bc2 | BcFormat::Bc3 | BcFormat::Bc5 => 16,
         }
     }
 
@@ -64,6 +66,10 @@ impl BcFormat {
             BcFormat::Bc4 => {
                 let b: &[u8; 8] = bytes[..8].try_into().expect("bc4 block is 8 bytes");
                 decode_bc4(b)
+            }
+            BcFormat::Bc2 => {
+                let b: &[u8; 16] = bytes[..16].try_into().expect("bc2 block is 16 bytes");
+                decode_bc2(b)
             }
             BcFormat::Bc3 => {
                 let b: &[u8; 16] = bytes[..16].try_into().expect("bc3 block is 16 bytes");

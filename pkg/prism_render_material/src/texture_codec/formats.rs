@@ -1,8 +1,9 @@
 //! Public block decoders for the BC1/BC3/BC4/BC5 texture-compression formats.
 //!
-//! These cover the AAA texture staples: BC1 (opaque / 1-bit-alpha albedo), BC3
-//! (albedo + smooth alpha), BC4 (single-channel masks: roughness, AO, height),
-//! and BC5 (two-channel tangent-space normals). Each decoder expands one 4x4
+//! These cover the AAA texture staples: BC1 (opaque / 1-bit-alpha albedo), BC2
+//! (albedo + explicit 4-bit alpha), BC3 (albedo + smooth interpolated alpha),
+//! BC4 (single-channel masks: roughness, AO, height), and BC5 (two-channel
+//! tangent-space normals). Each decoder expands one 4x4
 //! block into sixteen `RGBA8` texels so a [`TexelSource`](crate::TexelSource)
 //! over streaming virtual-texture pages can feed the manual sampler. BC6H/BC7
 //! (multi-mode HDR / high-quality) are intentionally out of scope here.
@@ -15,7 +16,7 @@
 //! * Output is row-major `RGBA8`, texel `t = y*4 + x`, `t in [0, 16)`.
 //! * Channel mapping: BC4 -> value in `R`, `G=B=0`, `A=255`; BC5 -> channel 0
 //!   in `R`, channel 1 in `G`, `B=0`, `A=255` (callers reconstruct normal `Z`).
-//! * Block sizes: BC1/BC4 are 8 bytes; BC3/BC5 are 16 bytes.
+//! * Block sizes: BC1/BC4 are 8 bytes; BC2/BC3/BC5 are 16 bytes.
 //!
 //! # References
 //! * Khronos Data Format Spec 1.3 (S3TC/RGTC); Vulkan `VK_FORMAT_BC*`.
@@ -27,6 +28,32 @@ use super::color_block::decode_color_block;
 #[must_use]
 pub fn decode_bc1(block: &[u8; 8]) -> [[u8; 4]; 16] {
     decode_color_block(block, true)
+}
+
+/// Decode one 16-byte BC2 block: explicit 4-bit alpha (bytes `[0..8]`) plus a
+/// BC1-style colour block that is always treated as opaque (bytes `[8..16]`).
+///
+/// Alpha is stored directly -- no interpolation -- as sixteen little-endian
+/// 4-bit nibbles (texel `t` at bits `[4t, 4t+3]`), expanded to 8 bits by nibble
+/// replication (`a4 * 17`). BC2 is the sharp-alpha sibling of BC3; it suits
+/// masks with hard alpha edges where BC3's interpolation would ring.
+#[must_use]
+pub fn decode_bc2(block: &[u8; 16]) -> [[u8; 4]; 16] {
+    let alpha_word = u64::from_le_bytes([
+        block[0], block[1], block[2], block[3], block[4], block[5], block[6], block[7],
+    ]);
+    let mut color_bytes = [0u8; 8];
+    color_bytes.copy_from_slice(&block[8..16]);
+    // BC2 colour never uses the punch-through transparent mode.
+    let color = decode_color_block(&color_bytes, false);
+
+    let mut out = [[0u8; 4]; 16];
+    for (t, texel) in out.iter_mut().enumerate() {
+        let nibble = ((alpha_word >> (4 * t)) & 0xF) as u8;
+        let alpha = (nibble << 4) | nibble; // 4-bit -> 8-bit replication.
+        *texel = [color[t][0], color[t][1], color[t][2], alpha];
+    }
+    out
 }
 
 /// Decode one 16-byte BC3 block: BC1-style colour (always opaque) plus a
@@ -127,6 +154,20 @@ mod tests {
         let block = [128, 128, 0, 0, 0, 0, 0, 0]; // r0==r1 -> flat 128
         let out = decode_bc4(&block);
         assert!(out.iter().all(|t| t == &[128, 0, 0, 255]));
+    }
+
+    #[test]
+    fn bc2_alpha_is_explicit_four_bit() {
+        // Alpha nibbles: texel 0 -> 0x0 (->0), texel 1 -> 0xF (->255); rest 0.
+        let mut block = [0u8; 16];
+        block[0] = 0xF0; // nibble0=0x0, nibble1=0xF
+        // opaque white colour block (c0 > c1, indices 0).
+        block[8] = 0xFF;
+        block[9] = 0xFF;
+        let out = decode_bc2(&block);
+        assert_eq!(out[0][3], 0, "texel0 alpha");
+        assert_eq!(out[1][3], 255, "texel1 alpha");
+        assert_eq!(out[2][3], 0, "texel2 alpha");
     }
 
     #[test]
