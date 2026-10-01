@@ -17,6 +17,7 @@ mod surface;
 mod texture_addressing;
 mod texture_lod;
 mod texture_sample;
+mod texture_filter;
 mod validation;
 
 pub use authoring::FACE_SHADOW_SDF_SEMANTIC;
@@ -48,6 +49,9 @@ pub use texture_lod::{
     VirtualTexture, MAX_ANISO_TAPS, MIN_COS_INCIDENCE,
 };
 pub use texture_sample::{resolve_cone, resolve_differential, SampleRequest, SampleResolved};
+pub use texture_filter::{
+    bilinear, filter_resolved, trilinear, wrap_texel, TexelAddr, TexelSource,
+};
 pub use validation::{validate_graph, MaterialValidationError};
 
 #[cfg(test)]
