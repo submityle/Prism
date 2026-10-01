@@ -71,6 +71,7 @@ pub mod outdoor_propagation;
 pub mod panner;
 pub mod portal_graph;
 pub mod propagation;
+pub mod reflection_clustering;
 pub mod reflection_directivity;
 pub mod reverb_zones;
 pub mod reverberant_field;
@@ -126,6 +127,7 @@ pub use propagation::{
     PropagationPath, PropagationSummary, diffraction_cutoff_hz, diffraction_gain,
     edge_path_difference, fresnel_number, maekawa_attenuation_db, transmission_gain,
 };
+pub use reflection_clustering::{CLUSTER_COUNT, ReflectionCluster, ReflectionClusters, cluster_taps};
 pub use reflection_directivity::DirectionalEarlyReflections;
 pub use reverb_zones::{
     AuxBusId, AuxSend, MAX_AUX_SENDS, ReverbZone, ReverbZoneField, ZoneShape, source_send_gain,
