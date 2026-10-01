@@ -68,6 +68,15 @@
 //!   terms) each Gauss-Seidel sweep plus analytic body push-out — the high
 //!   effective stiffness braids, dreadlocks and gel-set styles need that
 //!   position-based projection cannot reach (see [`vbd_solver`]).
+//! * [`GpuCosserat`] evaluates
+//!   [`simulate_guides_cosserat`](prism_render_architecture::hair::cosserat::simulate_guides_cosserat),
+//!   the oriented-rod sister of the guide solver: one thread per rod walks
+//!   the same substep/iteration schedule but carries a quaternion material
+//!   frame per segment, projecting both the compliant edge-length (stretch)
+//!   constraint on positions and a `Darboux`-vector bend-twist constraint on
+//!   the frames so each adjacent pair is driven toward its rest curvature and
+//!   twist — the torsional stiffness and natural `helix`/curl rest shape a
+//!   pure mass-spring (`XPBD`) network cannot express (see [`cosserat`]).
 //! * [`GpuHairInterp`] evaluates
 //!   [`interpolate_render_strand`](prism_render_architecture::hair::interpolation::interpolate_render_strand),
 //!   expanding each render strand from its (up to four) guides one thread per
@@ -316,6 +325,7 @@ pub mod binding_importance;
 pub mod closest_point_triangle;
 pub mod collision;
 pub mod context;
+pub mod cosserat;
 pub mod decimation_priority;
 pub mod deep_opacity;
 pub mod deep_transmittance_sample;
@@ -353,6 +363,7 @@ pub use closest_point_triangle::{
 };
 pub use collision::{query_for, CollisionQuery, GpuColliderProjector};
 pub use context::{block_on, GpuContext};
+pub use cosserat::GpuCosserat;
 pub use decimation_priority::GpuDecimationPriority;
 pub use deep_opacity::GpuHairDeepOpacity;
 pub use deep_transmittance_sample::{GpuHairDeepTransmittanceSample, TransmittanceQuery};
