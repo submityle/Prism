@@ -20,6 +20,7 @@
 //! implemented from standard, publicly documented position-based-dynamics
 //! literature (Müller et al., "XPBD", 2016/2020).
 
+pub mod aero;
 pub mod body;
 pub mod build;
 pub mod collision;
@@ -27,6 +28,10 @@ pub mod constraint;
 pub mod particle;
 pub mod solver;
 
+pub use aero::{
+    apply_aero_forces, apply_aero_to_columns, triangle_aero_force, turbulence_offset, AeroParams,
+    WindField,
+};
 pub use body::SoftBody;
 pub use build::{Cloth, ClothGrid, Rope, RopeGrid, SoftBox, SoftBoxGrid};
 pub use collision::{

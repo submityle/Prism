@@ -125,6 +125,10 @@ pub use snapshot::buffer::TripleBuffer;
 pub use snapshot::hash::{hash_state, locate_divergence, StateHash};
 pub use snapshot::pose::{lerp_pose, BodyPose};
 pub use snapshot::StateSnapshot;
+pub use soft::aero::{
+    apply_aero_forces, apply_aero_to_columns, triangle_aero_force, turbulence_offset, AeroParams,
+    WindField,
+};
 pub use soft::body::SoftBody;
 pub use soft::build::{Cloth, ClothGrid, Rope, RopeGrid, SoftBox, SoftBoxGrid};
 pub use soft::constraint::{
