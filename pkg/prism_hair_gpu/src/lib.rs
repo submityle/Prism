@@ -537,6 +537,17 @@
 //!   (sanitised, non-negative) rest length, a degenerate edge splitting along
 //!   `+x`. A pure per-edge map matched within the fma tolerance for the
 //!   `rest / length` divide (see [`projective_edge`]).
+//! * [`GpuHairScatterBlend`] evaluates
+//!   [`scatter_blend`](prism_render_architecture::hair::scatter_lod::scatter_blend),
+//!   the `d'Eon` 2011 near-/far-field scatter crossfade: one thread per
+//!   projected fibre width maps the width to a continuous `[0, 1]` blend
+//!   (`0` pure near-field at or above the near threshold, `1` pure far-field at
+//!   or below the far threshold, linearly ramped between) so the LOD ladder
+//!   crosses the boundary without a pop. The thresholds are host-sanitised once
+//!   with the golden's `ScatterLodThresholds::sanitized`; a non-finite width
+//!   collapses to `0` (blend `1`) exactly as the reference. The hard saturation
+//!   returns are exact and only the in-band `(near - w) / span` ramp divides, so
+//!   it is matched within the fma tolerance (see [`scatter_blend`]).
 //!
 //! # Portability
 //!
@@ -608,6 +619,7 @@ pub mod rt_curve_bounds;
 pub mod rt_curve_counts;
 pub mod rt_curve_segments;
 pub mod rt_proxy;
+pub mod scatter_blend;
 pub mod scatter_lod;
 pub mod sdf_collision;
 pub mod self_collision_grid;
@@ -675,6 +687,7 @@ pub use rt_curve_bounds::{reference_segments_aabb, GpuHairRtCurveBounds};
 pub use rt_curve_counts::{reference_lss_segment_counts, GpuHairRtCurveCounts};
 pub use rt_curve_segments::{reference_strand_to_lss, GpuHairRtCurveSegments};
 pub use rt_proxy::{reference_rt_role, role_code, role_from_code, tier_code, GpuHairRtProxy};
+pub use scatter_blend::{reference_scatter_blend, GpuHairScatterBlend};
 pub use scatter_lod::{reference_pdf, GpuHairScatterLod, PDF_PER_ELEMENT};
 pub use sdf_collision::GpuSdfCollider;
 pub use self_collision_grid::GpuSelfCollisionGrid;
