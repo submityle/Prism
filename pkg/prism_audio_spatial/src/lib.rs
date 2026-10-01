@@ -64,6 +64,7 @@ pub mod hoa;
 pub mod hoa_beamform;
 pub mod hoa_decode;
 pub mod hoa_rotation;
+pub mod initial_time_delay_gap;
 pub mod material_library;
 pub mod multi_position;
 pub mod nfc;
@@ -115,6 +116,7 @@ pub use hoa::{
 pub use hoa_beamform::{BeamPattern, Beamformer, beam_gains};
 pub use hoa_decode::{DecodeBand, DualBandDecoder, SpeakerLayout, max_re_gains, max_re_radius};
 pub use hoa_rotation::{HoaRotationMatrix, rotate_hoa};
+pub use initial_time_delay_gap::{DEFAULT_REFLECTION_THRESHOLD_DB, InitialTimeDelayGap, initial_time_delay_gap_ms};
 pub use material_library::{
     Material, MaterialAbsorption, OCTAVE_BAND_CENTERS, OCTAVE_BAND_COUNT,
 };
