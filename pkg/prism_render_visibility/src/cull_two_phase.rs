@@ -20,6 +20,7 @@
 use crate::{
     cull_view, resolve_two_phase_occlusion, GpuRenderWorkItem, GpuViewRecord, HzbCullScene,
     HzbPyramid, OcclusionQuery, TwoPhaseHzbInput, VisibilityDiagnostics, VisibilityInput,
+    VisibilityStageMask,
 };
 use alloc::vec::Vec;
 
@@ -47,6 +48,19 @@ use alloc::vec::Vec;
 /// The extra cost over a bare `cull_view` is one linear pass over
 /// `inputs.handles` plus the transient occluded/late-retest sets; no other
 /// allocation is introduced.
+///
+/// # Stage tagging
+///
+/// `cull_view` stamps every survivor with
+/// [`VisibilityStageMask::EARLY`](crate::VisibilityStageMask::EARLY). That is
+/// correct for instances that passed the previous-frame HZB, but the two-phase
+/// loop also keeps "deferred then revealed" instances — hidden early, revealed
+/// by the current HZB. This driver re-tags exactly those survivors (the
+/// `late_retest` pairs that were *not* culled) with
+/// [`LATE_RETEST`](crate::VisibilityStageMask::LATE_RETEST) |
+/// [`LATE_VISIBLE`](crate::VisibilityStageMask::LATE_VISIBLE), matching the
+/// verdict in [`resolve_current_hzb`](crate::resolve_current_hzb) so the
+/// rasterizer routes them to the late pass instead of the early pass.
 pub fn cull_view_two_phase(
     view: &GpuViewRecord,
     previous_pyramid: &HzbPyramid<'_>,
@@ -63,7 +77,7 @@ pub fn cull_view_two_phase(
         base_query,
         previous_history_epoch: inputs.previous_history_epoch,
     });
-    cull_view(
+    let (mut work, diagnostics) = cull_view(
         view,
         VisibilityInput {
             scene: inputs.scene,
@@ -75,7 +89,25 @@ pub fn cull_view_two_phase(
             capacity: inputs.capacity,
             previous_history_epoch: inputs.previous_history_epoch,
         },
-    )
+    );
+    // Route the two-phase survivors to the correct raster stage. `cull_view`
+    // stamps every item with `EARLY`, which is correct for instances that
+    // passed the previous-frame HZB. The remaining `late_retest` pairs are
+    // precisely the "deferred then revealed" instances: hidden early, re-tested
+    // against the current HZB, and *not* added to `occlusion.occluded` (which
+    // `cull_view` already removed). They must be drawn in the late pass, so we
+    // tag them `LATE_RETEST | LATE_VISIBLE` — mirroring the single source of
+    // truth in `resolve_current_hzb`, where a deferred candidate that survives
+    // the current test carries `LATE_RETEST | LATE_VISIBLE`.
+    if !occlusion.late_retest.is_empty() {
+        for item in &mut work {
+            if occlusion.late_retest.contains(&(view.handle, item.scene)) {
+                item.visibility_stages =
+                    VisibilityStageMask::LATE_RETEST | VisibilityStageMask::LATE_VISIBLE;
+            }
+        }
+    }
+    (work, diagnostics)
 }
 
 #[cfg(test)]
@@ -347,5 +379,83 @@ mod tests {
         // Nothing is deferred in the early phase, so nothing can be culled.
         assert_eq!(work.len(), 2);
         assert_eq!(stats.occlusion_rejected, 0);
+    }
+
+    #[test]
+    fn deferred_then_revealed_survivor_is_tagged_for_the_late_pass() {
+        // Hidden by the previous frame's near wall, revealed by the current
+        // frame's far wall: the survivor must carry the late-pass stage so the
+        // rasterizer draws it in the second Nanite phase, not the early pass.
+        let prev = near_wall();
+        let cur = far_wall();
+        let prev_mips = mips(&prev);
+        let cur_mips = mips(&cur);
+        let previous_pyramid = HzbPyramid::new(&prev_mips);
+        let current_pyramid = HzbPyramid::new(&cur_mips);
+        let far = handle(1);
+        let scene = scene_with(&[(far, [0.0, 0.0, 10.0])]);
+        let (geometry, materials, previous_lods) = maps();
+        let (work, _stats) = cull_view_two_phase(
+            &view(),
+            &previous_pyramid,
+            &current_pyramid,
+            query(),
+            HzbCullScene {
+                scene: &scene,
+                handles: &[far],
+                geometry: &geometry,
+                materials: &materials,
+                previous_lods: &previous_lods,
+                capacity: 8,
+                previous_history_epoch: Some(7),
+            },
+        );
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].scene, far);
+        assert!(work[0]
+            .visibility_stages
+            .contains(VisibilityStageMask::LATE_VISIBLE));
+        assert!(work[0]
+            .visibility_stages
+            .contains(VisibilityStageMask::LATE_RETEST));
+        // A deferred-then-revealed item is *not* early visible.
+        assert!(!work[0]
+            .visibility_stages
+            .contains(VisibilityStageMask::EARLY));
+    }
+
+    #[test]
+    fn early_visible_survivor_keeps_the_early_stage() {
+        // The near instance passes the previous-frame HZB outright, so it is an
+        // early-pass draw and must retain the EARLY stage even when a different
+        // instance in the same cull is deferred to the late pass.
+        let prev = near_wall();
+        let cur = near_wall();
+        let prev_mips = mips(&prev);
+        let cur_mips = mips(&cur);
+        let previous_pyramid = HzbPyramid::new(&prev_mips);
+        let current_pyramid = HzbPyramid::new(&cur_mips);
+        let far = handle(1);
+        let near = handle(2);
+        let scene = scene_with(&[(far, [0.0, 0.0, 10.0]), (near, [0.0, 0.0, 0.5])]);
+        let (geometry, materials, previous_lods) = maps();
+        let (work, _stats) = cull_view_two_phase(
+            &view(),
+            &previous_pyramid,
+            &current_pyramid,
+            query(),
+            HzbCullScene {
+                scene: &scene,
+                handles: &[far, near],
+                geometry: &geometry,
+                materials: &materials,
+                previous_lods: &previous_lods,
+                capacity: 8,
+                previous_history_epoch: Some(7),
+            },
+        );
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].scene, near);
+        assert_eq!(work[0].visibility_stages, VisibilityStageMask::EARLY);
     }
 }
