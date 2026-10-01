@@ -28,6 +28,7 @@ pub mod attachment;
 pub mod bending;
 pub mod distance;
 pub mod long_range;
+pub mod pressure;
 pub mod set;
 pub mod strain_limit;
 pub mod volume;
@@ -36,6 +37,7 @@ pub use attachment::AttachmentConstraint;
 pub use bending::BendingConstraint;
 pub use distance::DistanceConstraint;
 pub use long_range::LongRangeConstraint;
+pub use pressure::{mesh_volume, PressureConstraint};
 pub use set::ConstraintSet;
 pub use strain_limit::StrainLimitConstraint;
 pub use volume::TetraVolumeConstraint;
@@ -58,6 +60,8 @@ pub enum SoftConstraintKind {
     Attachment,
     /// A one-sided long-range-attachment leash to a fixed anchor.
     LongRange,
+    /// A closed-mesh pressure (enclosed-volume) constraint for inflatable cloth.
+    Pressure,
     /// A hard biphasic length clamp (strain limiter) over a stretch edge.
     StrainLimit,
 }

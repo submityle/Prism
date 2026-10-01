@@ -40,9 +40,9 @@ pub use collision::{
     resolve_self_collision, resolve_self_collision_with_friction, Backstop, BodyCollider,
 };
 pub use constraint::{
-    AttachmentConstraint, BendingConstraint, ConstraintSet, DistanceConstraint,
-    LongRangeConstraint, ParticleConstraint, SoftConstraintKind, StrainLimitConstraint,
-    TetraVolumeConstraint,
+    mesh_volume, AttachmentConstraint, BendingConstraint, ConstraintSet, DistanceConstraint,
+    LongRangeConstraint, ParticleConstraint, PressureConstraint, SoftConstraintKind,
+    StrainLimitConstraint, TetraVolumeConstraint,
 };
 pub use particle::{ParticleHandle, ParticleStorage};
 pub use solver::{SelfCollisionParams, SoftContacts, SoftSolver, SoftSolverConfig};
