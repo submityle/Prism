@@ -30,6 +30,11 @@
 //! documented physics and computer-science knowledge.
 #![forbid(unsafe_code)]
 
+// `prism_physics_core` is a std crate, but the workspace `std_instead_of_alloc`
+// lint prefers `alloc` collections where they exist (e.g. `BTreeMap`). Pulling
+// in `alloc` makes those canonical paths resolvable from this std crate.
+extern crate alloc;
+
 pub mod backend;
 pub mod cache;
 pub mod ccd;
