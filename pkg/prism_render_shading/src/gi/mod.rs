@@ -79,6 +79,10 @@
 //! * [`clearcoat`] — second specular clearcoat lobe (Fresnel + GGX).
 //! * [`particle_shade`] — soft-particle depth fade + billboard lighting.
 //! * [`distance_field_shadow`] — Quilez SDF soft shadow sphere trace.
+//! * [`oit`] — order-independent transparency (weighted-blended + moment).
+//! * [`specular_aa`] — geometric specular AA (Toksvig/normal-variance).
+//! * [`ies_profile`] — IES photometric light profile sampling.
+//! * [`debanding`] — ordered/noise dithering + triangular-PDF debanding.
 
 pub mod denoise;
 pub mod occlusion;
@@ -137,4 +141,8 @@ pub mod local_tonemap;
 pub mod clearcoat;
 pub mod particle_shade;
 pub mod distance_field_shadow;
+pub mod oit;
+pub mod specular_aa;
+pub mod ies_profile;
+pub mod debanding;
 pub mod world_space;
