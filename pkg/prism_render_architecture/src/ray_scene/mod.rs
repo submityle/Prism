@@ -219,6 +219,14 @@
 //!   (sampling exact positions + analytic normals at every tessellation
 //!   vertex, welded and seamless) so it reuses the existing patch-mesh `BVH`
 //!   and `GPU` layout path unchanged.
+//! - [`catmull_rom_patch`] — a bicubic Catmull-Rom surface patch
+//!   ([`catmull_rom_patch::CatmullRomPatch`]) that *interpolates* its inner
+//!   2×2 control points (the outer ring only shapes boundary tangents).
+//!   Each uniform Catmull-Rom span is converted to a cubic Bézier segment
+//!   by a purely linear tangent construction (no transcendental basis
+//!   functions); applying it along `u` then `v` yields an equivalent
+//!   [`bezier_patch::BezierPatch`], so evaluation, analytic normals and
+//!   tessellation reuse the Bézier path exactly.
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -354,6 +362,7 @@ pub mod shaded_bilinear_patch_gpu_layout;
 pub mod indexed_bilinear_patch_mesh;
 pub mod indexed_bilinear_patch_mesh_gpu_layout;
 pub mod bezier_patch;
+pub mod catmull_rom_patch;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -440,6 +449,7 @@ pub use indexed_bilinear_patch_mesh_gpu_layout::{
     PATCH_MESH_VERTEX_WORDS,
 };
 pub use bezier_patch::BezierPatch;
+pub use catmull_rom_patch::CatmullRomPatch;
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
 pub use obb::{Obb, ObbBvh, ObbHit};
