@@ -161,6 +161,15 @@
 //!   [`graphic_eq::GraphicEqNode`], the single-comb
 //!   [`comb_resonator::CombResonatorNode`], and the fixed-vowel
 //!   [`formant_filter::FormantFilterNode`].
+//! - [`ping_pong_delay::PingPongDelayNode`] -- cross-coupled stereo
+//!   ping-pong delay: each side's damped feedback is routed into the
+//!   opposite side's fractional ring-buffer delay line, so a single hit
+//!   bounces left, right, left, right as it decays, with independent
+//!   per-side delay times and a one-pole in-loop low-pass that darkens
+//!   successive repeats. Distinct from the self-feeding
+//!   [`delay::DelayNode`], the shared-line taps of
+//!   [`multi_tap_delay::MultiTapDelayNode`], and the pitched short comb
+//!   of [`comb_resonator::CombResonatorNode`].
 
 pub mod auto_wah;
 pub mod bitcrusher;
@@ -181,6 +190,7 @@ pub mod modal_resonator;
 pub mod multi_tap_delay;
 pub mod parametric_eq;
 pub mod phaser;
+pub mod ping_pong_delay;
 pub mod pitch_shifter;
 pub mod ring_modulator;
 pub mod saturation;
@@ -229,6 +239,11 @@ pub use modal_resonator::{
 pub use multi_tap_delay::{MAX_TAPS, MultiTapDelayNode, MultiTapDelayParams, TapSpec};
 pub use parametric_eq::{EqBand, ParametricEqNode};
 pub use phaser::{PhaserNode, PhaserParams};
+pub use ping_pong_delay::{
+    DEFAULT_LEFT_DELAY_MS, DEFAULT_PING_PONG_DAMPING, DEFAULT_PING_PONG_FEEDBACK,
+    DEFAULT_PING_PONG_MIX, DEFAULT_RIGHT_DELAY_MS, MAX_PING_PONG_DELAY_MS,
+    MAX_PING_PONG_FEEDBACK, PingPongDelayNode, PingPongDelayParams,
+};
 pub use pitch_shifter::{
     MAX_PITCH_RATIO, MIN_PITCH_RATIO, PitchShifterNode, PitchShifterParams, semitones_to_ratio,
 };
