@@ -41,10 +41,13 @@
 //! `bytemuck` surfaces.
 #![forbid(unsafe_code)]
 
+extern crate alloc;
+
 pub mod broadphase;
 pub mod buffer;
 pub mod bvh;
 pub mod cfl;
+pub mod cloth;
 pub mod contacts;
 pub mod context;
 pub mod fluid;
@@ -65,6 +68,9 @@ pub use bvh::{
     SceneBounds, NO_PARENT,
 };
 pub use cfl::{cpu_cfl_dt, cpu_max_speed, CflConfig, GpuCflReduce};
+pub use cloth::{
+    cpu_cloth_self_collision_jacobi, ClothPrep, ClothSelfCollisionScope, GpuClothSelfCollision,
+};
 pub use contacts::{
     contact_constraints, contact_constraints_with_friction, cpu_resolve_contacts,
     cpu_resolve_contacts_warm, ContactCache, ContactConstraint, ContactKey, GpuContactSolver,
