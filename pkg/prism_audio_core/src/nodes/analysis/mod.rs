@@ -32,6 +32,12 @@
 //!   condenses a single-voice signal to one pitch with a periodicity
 //!   confidence, complementing the full-spectrum view of the
 //!   [`spectrum`] analyzer.
+//! - [`spectral_features::SpectralFeatures`] /
+//!   [`spectral_features::SpectralFeaturesNode`] -- scalar spectral-shape
+//!   descriptors (centroid, spread, skewness, kurtosis, flatness, crest,
+//!   rolloff, flux, slope, and `MPEG-7` decrease) reduced from the
+//!   [`spectrum`] analyzer's magnitude bins, describing the timbre of a frame
+//!   as compact `MIR` control signals.
 //!
 //! # Provenance
 //!
@@ -52,6 +58,7 @@ pub mod correlation;
 pub mod goniometer;
 pub mod loudness;
 pub mod pitch_detector;
+pub mod spectral_features;
 pub mod spectrum;
 
 pub use correlation::{CorrelationMeasurement, CorrelationMeter, CorrelationMeterNode};
@@ -63,6 +70,9 @@ pub use loudness::{
     KWeighting, LoudnessMeasurement, LoudnessMeter, LoudnessMeterNode, TruePeakMeter,
 };
 pub use pitch_detector::{PitchDetector, PitchDetectorNode, PitchEstimate};
+pub use spectral_features::{
+    DEFAULT_ROLLOFF_FRACTION, SpectralFeatureSet, SpectralFeatures, SpectralFeaturesNode,
+};
 pub use spectrum::{
     DEFAULT_FFT_SIZE, DEFAULT_HOP, MIN_FFT_SIZE, SpectrumAnalyzer, SpectrumNode, Window,
 };
