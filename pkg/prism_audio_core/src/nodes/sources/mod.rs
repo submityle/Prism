@@ -9,12 +9,15 @@
 //!
 //! # Source catalogue
 //!
-//! - [`oscillator::OscillatorNode`] — band-limited (`PolyBLEP`) sine/saw/square/
+//! - [`oscillator::OscillatorNode`] -- band-limited (`PolyBLEP`) sine/saw/square/
 //!   triangle geometric oscillator selected by [`oscillator::Waveform`].
-//! - [`noise::NoiseNode`] — deterministic white/pink/brown generator
+//! - [`karplus_strong::KarplusStrongNode`] -- extended Karplus-Strong
+//!   plucked-string physical model: a noise burst recirculating through a tuned,
+//!   damped feedback delay line with an allpass fractional-delay tuning filter.
+//! - [`noise::NoiseNode`] -- deterministic white/pink/brown generator
 //!   ([`noise::NoiseColor`]) built on a reproducible `xorshift64`/`SplitMix64`
 //!   stream with Paul-Kellet pink shaping and a leaky-integrator brown filter.
-//! - [`sample_player::SamplePlayerNode`] — pitch/rate-resampling PCM player with
+//! - [`sample_player::SamplePlayerNode`] -- pitch/rate-resampling PCM player with
 //!   [`sample_player::LoopMode`] loop points and selectable
 //!   [`sample_player::Interpolation`] (linear / Catmull-Rom).
 //!
@@ -22,10 +25,12 @@
 //! locking, and no panics, and reproducible generators are fully deterministic
 //! across platforms via [`bevy_math::ops`].
 
+pub mod karplus_strong;
 pub mod noise;
 pub mod oscillator;
 pub mod sample_player;
 
+pub use karplus_strong::{KarplusStrongNode, KarplusStrongParams};
 pub use noise::{NoiseColor, NoiseNode};
 pub use oscillator::{OscillatorNode, Waveform};
 pub use sample_player::{Interpolation, LoopMode, SamplePlayerNode};
