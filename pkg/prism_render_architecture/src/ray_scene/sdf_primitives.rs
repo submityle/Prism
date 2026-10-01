@@ -800,12 +800,76 @@ pub fn triangle_sdf(point: [f32; 3], a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> f
     squared.sqrt()
 }
 
+/// Unsigned distance from `point` to the planar convex quadrilateral with
+/// vertices `a`, `b`, `c`, `d` given in winding order.
+///
+/// The four-sided analogue of [`triangle_sdf`] and the natural atom for walls,
+/// panels, blade cards, and any flat quad patch before the mesh baker takes
+/// over. Like a triangle a quad is a 2-manifold with no interior, so the
+/// distance is non-negative everywhere and zero exactly on the (closed) patch.
+///
+/// This is Inigo Quilez's exact `udQuad`: the four edge normals (each the cross
+/// of an edge with the face normal `nor = cross(b-a, a-d)`) classify the query
+/// into the face-interior region versus an edge/vertex region. When the four
+/// edge-sign tests sum below `3` the perpendicular foot escapes through an
+/// edge, so the result is the minimum over the four edges of the distance to
+/// the clamped foot (collapsing to a vertex when the clamp saturates);
+/// otherwise it is the perpendicular projection onto the plane. Built from
+/// `dot`, `cross`, `clamp`, `sign`, `min`, and a single final `sqrt`, so it
+/// stays transcendental-free.
+///
+/// For an exact distance the four vertices must be **coplanar and wound convex**
+/// (consistent order, no self-intersection); the face branch divides by
+/// `dot2(nor)`, so a degenerate / collinear quad has no meaningful face-region
+/// distance (the edge branch stays well-defined regardless).
+pub fn quad_sdf(point: [f32; 3], a: [f32; 3], b: [f32; 3], c: [f32; 3], d: [f32; 3]) -> f32 {
+    let ba = sub3(b, a);
+    let pa = sub3(point, a);
+    let cb = sub3(c, b);
+    let pb = sub3(point, b);
+    let dc = sub3(d, c);
+    let pc = sub3(point, c);
+    let ad = sub3(a, d);
+    let pd = sub3(point, d);
+    let nor = cross(ba, ad);
+
+    let edge_region = dot(cross(ba, nor), pa).signum()
+        + dot(cross(cb, nor), pb).signum()
+        + dot(cross(dc, nor), pc).signum()
+        + dot(cross(ad, nor), pd).signum()
+        < 3.0;
+
+    let squared = if edge_region {
+        let e0 = {
+            let t = (dot(ba, pa) / dot2_3(ba)).clamp(0.0, 1.0);
+            dot2_3(sub3([ba[0] * t, ba[1] * t, ba[2] * t], pa))
+        };
+        let e1 = {
+            let t = (dot(cb, pb) / dot2_3(cb)).clamp(0.0, 1.0);
+            dot2_3(sub3([cb[0] * t, cb[1] * t, cb[2] * t], pb))
+        };
+        let e2 = {
+            let t = (dot(dc, pc) / dot2_3(dc)).clamp(0.0, 1.0);
+            dot2_3(sub3([dc[0] * t, dc[1] * t, dc[2] * t], pc))
+        };
+        let e3 = {
+            let t = (dot(ad, pd) / dot2_3(ad)).clamp(0.0, 1.0);
+            dot2_3(sub3([ad[0] * t, ad[1] * t, ad[2] * t], pd))
+        };
+        e0.min(e1).min(e2).min(e3)
+    } else {
+        let np = dot(nor, pa);
+        np * np / dot2_3(nor)
+    };
+    squared.sqrt()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         box_frame, box_sdf, capped_cone, capped_cylinder, capped_torus, capsule, cone_sdf, cut_hollow_sphere, cut_sphere,
         death_star, ellipsoid_sdf, hex_prism, infinite_cylinder, length2, line_sdf, link, octahedron, plane, pyramid, rhombus, round_box,
-        round_cone_sdf, rounded_cylinder, solid_angle, sphere, torus, triangle_sdf, triangular_prism, vesica,
+        quad_sdf, round_cone_sdf, rounded_cylinder, solid_angle, sphere, torus, triangle_sdf, triangular_prism, vesica,
     };
 
     #[test]
@@ -1209,6 +1273,78 @@ mod tests {
             let reference = tri_edge_distance(p, 1.0);
             assert!(
                 (got - reference).abs() < 1e-5,
+                "point {p:?}: got {got}, reference {reference}"
+            );
+        }
+    }
+
+    // Brute-force reference: minimum distance from `p` to a dense sampling of a
+    // convex quad, splitting it into triangles (a,b,c) and (a,c,d).
+    fn quad_brute_force(
+        p: [f32; 3],
+        a: [f32; 3],
+        b: [f32; 3],
+        c: [f32; 3],
+        d: [f32; 3],
+    ) -> f32 {
+        tri_brute_force(p, a, b, c).min(tri_brute_force(p, a, c, d))
+    }
+
+    #[test]
+    fn quad_zero_on_surface_and_vertices() {
+        let a = [0.0, 0.0, 0.0];
+        let b = [2.0, 0.0, 0.0];
+        let c = [2.0, 2.0, 0.0];
+        let d = [0.0, 2.0, 0.0];
+        assert!(quad_sdf(a, a, b, c, d).abs() < 1e-6);
+        assert!(quad_sdf(c, a, b, c, d).abs() < 1e-6);
+        // Centre of the unit square patch lies on it.
+        assert!(quad_sdf([1.0, 1.0, 0.0], a, b, c, d).abs() < 1e-6);
+    }
+
+    #[test]
+    fn quad_face_region_is_perpendicular_offset() {
+        let a = [0.0, 0.0, 0.0];
+        let b = [2.0, 0.0, 0.0];
+        let c = [2.0, 2.0, 0.0];
+        let d = [0.0, 2.0, 0.0];
+        // Straight above the centre: pure perpendicular height.
+        assert!((quad_sdf([1.0, 1.0, 2.5], a, b, c, d) - 2.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn quad_vertex_region_is_vertex_distance() {
+        let a = [0.0, 0.0, 0.0];
+        let b = [2.0, 0.0, 0.0];
+        let c = [2.0, 2.0, 0.0];
+        let d = [0.0, 2.0, 0.0];
+        // Diagonally past the a corner in-plane: nearest feature is vertex a.
+        assert!((quad_sdf([-1.0, -1.0, 0.0], a, b, c, d) - length2([1.0, 1.0])).abs() < 1e-6);
+    }
+
+    #[test]
+    fn quad_matches_brute_force_general_orientation() {
+        // Tilted, off-origin planar convex quad (built from two coplanar basis
+        // vectors so the four corners stay exactly coplanar).
+        let o = [0.2, -0.3, 0.4];
+        let u = [1.3, 0.1, -0.5];
+        let v = [-0.4, 1.1, 0.6];
+        let a = o;
+        let b = [o[0] + u[0], o[1] + u[1], o[2] + u[2]];
+        let c = [o[0] + u[0] + v[0], o[1] + u[1] + v[1], o[2] + u[2] + v[2]];
+        let d = [o[0] + v[0], o[1] + v[1], o[2] + v[2]];
+        for &p in &[
+            [0.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0],
+            [-1.0, 0.5, -0.5],
+            [0.8, 0.4, 0.9],
+            [2.0, 2.0, -1.0],
+            [0.3, 1.5, 1.8],
+        ] {
+            let got = quad_sdf(p, a, b, c, d);
+            let reference = quad_brute_force(p, a, b, c, d);
+            assert!(
+                (got - reference).abs() < 3e-3,
                 "point {p:?}: got {got}, reference {reference}"
             );
         }
