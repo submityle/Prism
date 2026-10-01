@@ -579,6 +579,15 @@
 //!   integer arithmetic, so `CPU` and `GPU` agree bit-for-bit and the parity
 //!   test asserts the counts with integer equality (see
 //!   [`stratified_allocation`]).
+//! * [`GpuHairStratifiedWeights`] evaluates
+//!   [`stratified_weights`](prism_render_architecture::hair::scatter_lod::stratified_weights),
+//!   the unbiased per-lobe Monte-Carlo weights that pair with the
+//!   allocation: one thread per `(pdf, total)` tuple reproduces the
+//!   integer-exact split, then emits `pdf_i * total / count_i` for each lobe
+//!   (`0` for a lobe that got no samples or a zero budget). The pdf is
+//!   sanitised exactly as the reference; only the final divide is inexact, so
+//!   the parity test matches the weights within the fma tolerance (see
+//!   [`stratified_weights`]).
 //!
 //! # Portability
 //!
@@ -661,6 +670,7 @@ pub mod self_collision_voxel;
 pub mod spectrum_sample_map;
 pub mod strand_metrics;
 pub mod stratified_allocation;
+pub mod stratified_weights;
 pub mod transition;
 pub mod vbd_solver;
 pub mod voxel_density;
@@ -732,6 +742,7 @@ pub use self_collision_voxel::GpuHairSelfCollisionVoxel;
 pub use spectrum_sample_map::{reference_spectrum_sample_map, GpuHairSpectrumSample};
 pub use strand_metrics::{GpuStrandMetric, GpuStrandMetrics};
 pub use stratified_allocation::{reference_stratified_allocation, GpuHairStratifiedAllocation};
+pub use stratified_weights::{reference_stratified_weights, GpuHairStratifiedWeights};
 pub use transition::GpuHairTransition;
 pub use vbd_solver::GpuVbdSolver;
 pub use voxel_density::GpuHairVoxelDensity;
