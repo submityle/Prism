@@ -28,7 +28,8 @@ pub use distance::{gjk_closest_points, ClosestPoints};
 pub use epa::{gjk_contact, Contact};
 pub use gjk::gjk_intersect;
 pub use manifold::{
-    capsule_box_manifold, contact_manifold, ClipShape, ContactManifold, FacePolygon, ManifoldPoint,
+    capsule_box_manifold, capsule_capsule_manifold, contact_manifold, ClipShape, ContactManifold,
+    FacePolygon, ManifoldPoint,
 };
 pub use ray_cast::{
     ray_capsule, ray_obb, ray_sphere, ray_triangle, segment_triangle_intersection,

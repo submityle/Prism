@@ -19,7 +19,7 @@ use alloc::vec::Vec;
 use glam::Vec3;
 
 use crate::bounding::{Aabb, Capsule, Obb};
-use crate::narrow::closest_point::closest_points_segment_segment;
+use crate::narrow::closest_point::{closest_point_on_segment, closest_points_segment_segment};
 use crate::narrow::epa::gjk_contact;
 use crate::narrow::support::SupportMap;
 
@@ -47,6 +47,11 @@ const FACE_ALIGN_THRESHOLD: f32 = 0.95;
 /// perpendicular to it), so a single deepest point is the honest manifold.
 /// Below it the segment lies along the face and a two-point manifold is sought.
 const CAPSULE_END_ON_THRESHOLD: f32 = 0.9;
+
+/// Absolute cosine between two capsule core directions above which they are
+/// treated as parallel, enabling a two-point manifold spanning their overlap.
+/// `cos(~5.7 deg)` keeps genuinely skew pairs on the single closest-pair path.
+const CAPSULE_PARALLEL_THRESHOLD: f32 = 0.995;
 
 /// A planar convex face of a polytope, wound counter-clockwise when viewed
 /// from outside the shape (looking against `normal`).
@@ -508,6 +513,67 @@ pub fn capsule_box_manifold(capsule: &Capsule, obb: &Obb) -> Option<ContactManif
     Some(ContactManifold { normal, points })
 }
 
+/// Builds a contact manifold between two capsules, producing a stable two-point
+/// manifold when their core segments run parallel and their overlap spans a
+/// length (as for stacked limbs or capsule chains in a ragdoll).
+///
+/// A single deepest contact ([`Capsule::contact`]) depenetrates the pair, but
+/// two parallel capsules touch along a line segment; constraining only the
+/// midpoint lets them scissor. Here, when the cores are near-parallel, the
+/// overlapping interval along the shared axis is found and both ends are
+/// resolved, keeping only ends that penetrate. Skew or sphere-like pairs fall
+/// back to the single closest-pair contact. The normal points from `a` to `b`.
+pub fn capsule_capsule_manifold(a: &Capsule, b: &Capsule) -> Option<ContactManifold> {
+    let (deep_point, normal, deep_depth) = a.contact(b)?;
+
+    let da = a.b - a.a;
+    let db = b.b - b.a;
+    let la2 = da.length_squared();
+    let lb2 = db.length_squared();
+    if la2 < EDGE_EPSILON_SQ || lb2 < EDGE_EPSILON_SQ {
+        return one_point_manifold(deep_point, normal, deep_depth);
+    }
+    let la = la2.sqrt();
+    let dir_a = da * la.recip();
+    let dir_b = db * lb2.sqrt().recip();
+    if dir_a.dot(dir_b).abs() < CAPSULE_PARALLEL_THRESHOLD {
+        return one_point_manifold(deep_point, normal, deep_depth);
+    }
+
+    // Overlap interval of the two cores projected onto `a`'s axis (origin a.a).
+    let so0 = (b.a - a.a).dot(dir_a);
+    let so1 = (b.b - a.a).dot(dir_a);
+    let lo = 0.0f32.max(so0.min(so1));
+    let hi = la.min(so0.max(so1));
+    if hi - lo <= CONTACT_SLOP {
+        return one_point_manifold(deep_point, normal, deep_depth);
+    }
+
+    let sum = a.radius + b.radius;
+    let mut points = Vec::with_capacity(2);
+    for &t in &[lo, hi] {
+        let pa = a.a + dir_a * t;
+        let pb = closest_point_on_segment(pa, b.a, b.b);
+        let gap = pb - pa;
+        let dist = gap.length();
+        let depth = sum - dist;
+        if depth > 0.0 {
+            let n = if dist > 1.0e-6 { gap * dist.recip() } else { normal };
+            let surf_a = pa + n * a.radius;
+            let surf_b = pb - n * b.radius;
+            points.push(ManifoldPoint {
+                position: (surf_a + surf_b) * 0.5,
+                depth,
+            });
+        }
+    }
+
+    if points.len() < 2 {
+        return one_point_manifold(deep_point, normal, deep_depth);
+    }
+    Some(ContactManifold { normal, points })
+}
+
 /// Wraps a single resolved contact point into a one-point manifold.
 fn one_point_manifold(position: Vec3, normal: Vec3, depth: f32) -> Option<ContactManifold> {
     Some(ContactManifold {
@@ -541,7 +607,7 @@ fn single_point_fallback(
 mod tests {
     use super::{contact_manifold, ClipShape};
     use crate::bounding::{Aabb, Capsule, Obb};
-    use super::capsule_box_manifold;
+    use super::{capsule_box_manifold, capsule_capsule_manifold};
     use glam::{Quat, Vec3};
 
     #[test]
@@ -693,6 +759,49 @@ mod tests {
         assert!(m.normal.y < -0.9);
         for p in &m.points {
             assert!(p.position.x <= 1.0 + 1e-3, "contact stays over the face");
+            assert!(p.depth > 0.0);
+        }
+    }
+
+    #[test]
+    fn parallel_capsules_yield_two_point_manifold() {
+        // Two X-aligned capsules stacked in Y, overlapping by 0.2.
+        let a = Capsule::new(Vec3::new(-1.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), 0.5);
+        let b = Capsule::new(Vec3::new(-1.0, 0.8, 0.0), Vec3::new(1.0, 0.8, 0.0), 0.5);
+        let m = capsule_capsule_manifold(&a, &b).expect("overlap");
+        assert!(m.normal.y > 0.9, "normal a->b points up: {:?}", m.normal);
+        assert_eq!(m.points.len(), 2, "parallel cores yield two points");
+        for p in &m.points {
+            assert!((p.depth - 0.2).abs() < 1e-3, "uniform depth: {}", p.depth);
+        }
+        let x0 = m.points[0].position.x;
+        let x1 = m.points[1].position.x;
+        assert!(x0.min(x1) < -0.5 && x0.max(x1) > 0.5, "span: {x0}, {x1}");
+    }
+
+    #[test]
+    fn perpendicular_capsules_are_single_point() {
+        // X-aligned under a Z-aligned capsule crossing above the origin.
+        let a = Capsule::new(Vec3::new(-1.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), 0.5);
+        let b = Capsule::new(Vec3::new(0.0, 0.8, -1.0), Vec3::new(0.0, 0.8, 1.0), 0.5);
+        let m = capsule_capsule_manifold(&a, &b).expect("crossing overlap");
+        assert_eq!(m.points.len(), 1, "skew cores give a single point");
+        assert!(m.points[0].depth > 0.0);
+    }
+
+    #[test]
+    fn partially_overlapping_parallel_capsules_clip_to_overlap() {
+        // Offset so the shared span is only x in [0, 1].
+        let a = Capsule::new(Vec3::new(-1.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), 0.5);
+        let b = Capsule::new(Vec3::new(0.0, 0.8, 0.0), Vec3::new(2.0, 0.8, 0.0), 0.5);
+        let m = capsule_capsule_manifold(&a, &b).expect("overlap");
+        assert_eq!(m.points.len(), 2);
+        for p in &m.points {
+            assert!(
+                p.position.x >= -1e-3 && p.position.x <= 1.0 + 1e-3,
+                "contact confined to shared span: {}",
+                p.position.x
+            );
             assert!(p.depth > 0.0);
         }
     }
