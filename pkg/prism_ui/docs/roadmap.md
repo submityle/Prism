@@ -17,6 +17,18 @@
 | `prism_ui` | `Element` / `Ui` 运行时 / `Backend` / 最小化 op 流 | 7 + 2 doctest |
 | `prism_ui_macro` | `loom!` 声明式 DSL | 8 |
 
+**高级层** 5 个 crate 亦已交付(详见 [advanced-features.md](advanced-features.md)):
+
+| Crate | 能力 | 测试 |
+|---|---|---|
+| `prism_ui_component` | 组件模型:props / 具名多插槽 / Context 注入 | 15 |
+| `prism_ui_store` | 可预测状态容器 + 细粒度选择器 + 中间件 | 12 |
+| `prism_ui_i18n` | 响应式目录 + 插值 + CLDR 复数 | 10 |
+| `prism_ui_router` | 路径匹配 + `:param` / `*wildcard` + 历史栈 | 16 |
+| `prism_ui_devtools` | 树快照 + 美化渲染 + `BackendOp` 轨迹 | 10 |
+
+12 个 crate 累计 **176 个测试通过**,Clippy 零告警。
+
 对应的核心价值已可验证:
 - 数据层 `Element` → 保留树 → 最小化 `BackendOp` 的完整链路;
 - 「相同输入零新增操作」「keyed 反转 0 新建 / 0 删除 / 1 reorder」等性能契约测试;
@@ -49,19 +61,19 @@
 - [ ] 编排(choreography):stagger / sequence / parallel。
 - [ ] 共享元素过渡(shared element / Hero)。
 
-### M5 高级功能
-- [ ] 组件模型:props(带默认值)、具名多插槽、`children`、生命周期、Context 注入。
-- [ ] Store + 选择器(细粒度订阅)+ 中间件。
+### M5 高级功能(多数已交付)
+- [x] 组件模型:props、具名多插槽、`children`、Context 注入(`prism_ui_component`,已交付)。生命周期钩子规划中。
+- [x] Store + 细粒度选择器 + 中间件(`prism_ui_store`,已交付)。
 - [ ] 列表虚拟化:`For.virtual`,可视区实例化 + 回收池。
 - [ ] 异步与健壮性:`Resource` + Suspense + Error Boundary。
 - [ ] Portal / Overlay 管理器(模态、tooltip、popover、焦点捕获)。
 - [ ] 表单双向绑定 + 声明式校验。
-- [ ] 声明式路由与导航栈 + 守卫 + 深链接。
-- [ ] 国际化(i18n):`t!`、复数 / 格式化 / RTL。
+- [x] 声明式路由 + 导航/历史栈(`prism_ui_router`,已交付)。守卫 + 深链接规划中。
+- [x] 国际化:响应式目录 + 插值 + CLDR 复数(`prism_ui_i18n`,已交付)。`t!` 宏糖 / RTL 规划中。
 
-### M6 工具链
-- [ ] DevTools:实体 / 组件树检查器、signal 依赖图、本帧更新 / 重排性能面板、
-      状态时间旅行回放。
+### M6 工具链(部分已交付)
+- [x] DevTools 基线:树快照 + `render_tree` 美化输出 + `OpTrace` 操作轨迹(`prism_ui_devtools`,已交付)。
+- [ ] DevTools 进阶:实体 / 组件树检查器、signal 依赖图、本帧更新 / 重排性能面板、状态时间旅行回放。
 - [ ] 快照测试(渲染树 / 布局结果序列化比对)。
 - [ ] 组件工作台(Storybook 式隔离预览)。
 - [ ] 双模式编译:开发期解释(极速热重载)/ 发布期宏固化(零解析开销)。

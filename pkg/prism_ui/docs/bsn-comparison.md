@@ -24,6 +24,7 @@ BSN(Bevy Scene Notation)是 Bevy 新一代的 **声明式场景 / UI 记法**,�
 | archetype 搬迁 | 运行期改变组件集合时可能触发 | **显式规避**:更新只改组件「值」,频繁切换态用枚举字段 |
 | 独立样式层 | 无独立样式层,样式与结构混写 | **独立 token + class + 级联**,设计与结构解耦,规划中支持热重载 |
 | 动画 / 效果 | 非一等公民,需外接动画系统 | **一等公民**:缓动 / 弹簧 / 时间线 / 过渡内置于 `prism_ui_anim` |
+| 组件 / 状态 / 路由 / i18n | 无独立层,靠宏片段拼接 | **一等独立 crate**:`prism_ui_component` / `store` / `router` / `i18n` **均已交付** |
 | 异步 / 错误边界 | 较弱 | 规划 **Suspense + Error Boundary**(roadmap M5) |
 | 类型安全 | 强(宏) | **强(宏)**,`loom!` 展开为全限定构建器调用,错误即编译报错 |
 | 热重载 | 规划中 / 逐步成熟 | 规划 **结构 + 样式热重载且保留运行时状态**(roadmap) |
@@ -68,8 +69,11 @@ keyed 反转 0 新建 0 删除 1 reorder 等,都是现有测试里被钉死的�
 
 - Loom 当前 **已交付** 的是数据层 `Element` → 保留树 → `BackendOp` 的完整链路,
   以及独立可用的响应 / 样式 / 布局 / 动画四层与 `loom!` 宏。
-- 「响应式自动绑定到 ECS 实体字段」「`.loom` / `.loom.style` 资产热重载」
-  「Suspense / Portal / 路由 / i18n / DevTools」等仍为 **规划中**,见
+- **已交付的高级层**:组件模型(`prism_ui_component`)、全局状态(`prism_ui_store`)、
+  国际化(`prism_ui_i18n`)、路由(`prism_ui_router`)、DevTools 基线(`prism_ui_devtools`),
+  详见 [advanced-features.md](advanced-features.md)。它们目前是 **引擎弱耦合** 的独立运行时能力。
+- 仍为 **规划中**:「响应式信号自动绑定到 ECS 实体字段」「`.loom` / `.loom.style` 资产热重载」
+  「Suspense / Error Boundary / Portal / 列表虚拟化 / 共享元素过渡」等,见
   [roadmap.md](roadmap.md)。本对比不把这些未实现能力计入「已胜出」。
 - BSN 作为 Bevy 官方方案,在 **与 Bevy 生态的原生集成度** 上天然领先;Loom 的取舍
   是 **引擎弱耦合 + 可测试的最小增量更新**,两者定位不同。

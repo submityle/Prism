@@ -81,29 +81,44 @@ assert_eq!(view.kind(), &ElementKind::Box);
 
 Loom 以多个独立 crate 分层实现,每一层都可单独使用。下表为 **已交付(SHIPPED)** 的部分:
 
+**核心层(Core)** — 数据层 `Element` → 保留树 → 最小化 `BackendOp` 的完整链路:
+
 | Crate | 职责 | 状态 | 测试 |
 |---|---|---|---|
-| [`prism_ui_reactive`](../prism_ui_reactive) | 无毛刺(glitch-free)的 Signal / Memo / Effect 图 | ✅ 已交付 | 9 |
-| [`prism_ui_tree`](../prism_ui_tree) | 分代 Arena、保留树、LIS 最小化的 keyed 协调器 | ✅ 已交付 | 9 |
-| [`prism_ui_style`](../prism_ui_style) | design token、class、选择器、级联 | ✅ 已交付 | 13 |
-| [`prism_ui_layout`](../prism_ui_layout) | 纯 Rust Flexbox 求解器 | ✅ 已交付 | 15 |
-| [`prism_ui_anim`](../prism_ui_anim) | 缓动、弹簧、时间线、过渡 | ✅ 已交付 | 24 |
-| [`prism_ui`](.) | 伞 crate:`Element` / `Ui` 运行时 / `Backend` | ✅ 已交付 | 7+2 |
+| [`prism_ui_reactive`](../prism_ui_reactive) | 无毛刺(glitch-free)的 Signal / Memo / Effect 图 | ✅ 已交付 | 10 |
+| [`prism_ui_tree`](../prism_ui_tree) | 分代 Arena、保留树、LIS 最小化的 keyed 协调器 | ✅ 已交付 | 10 |
+| [`prism_ui_style`](../prism_ui_style) | design token、class、选择器、级联 | ✅ 已交付 | 14 |
+| [`prism_ui_layout`](../prism_ui_layout) | 纯 Rust Flexbox 求解器 | ✅ 已交付 | 16 |
+| [`prism_ui_anim`](../prism_ui_anim) | 缓动、弹簧、时间线、过渡 | ✅ 已交付 | 34 |
+| [`prism_ui`](.) | 伞 crate:`Element` / `Ui` 运行时 / `Backend` | ✅ 已交付 | 21 |
 | [`prism_ui_macro`](../prism_ui_macro) | `loom!` 声明式 DSL(proc-macro) | ✅ 已交付 | 8 |
 
-每个 crate 均:`#![forbid(unsafe_code)]`、`no_std` 友好(`default = ["std"]`,
-proc-macro crate 除外)、通过严格 Clippy(零告警)。
+**高级层(Advanced)** — 对标 React/SolidJS/Vue 生态的一等能力,全部构建在上述核心层之上:
 
-> **诚实声明**:上表以外的高级功能(响应式到 ECS 的绑定、热重载、Store、
-> 列表虚拟化、Suspense、Portal、路由、i18n、DevTools、共享元素过渡)目前仍为
-> **设计阶段(PLANNED)**,见 [docs/roadmap.md](docs/roadmap.md)。本文档不会把
-> 未实现的能力描述为已实现。
+| Crate | 职责 | 状态 | 测试 |
+|---|---|---|---|
+| [`prism_ui_component`](../prism_ui_component) | 组件模型:`Component` trait、props、具名多插槽、Context 注入 | ✅ 已交付 | 15 |
+| [`prism_ui_store`](../prism_ui_store) | 可预测全局状态:`Store` + 细粒度选择器 + 中间件 | ✅ 已交付 | 12 |
+| [`prism_ui_i18n`](../prism_ui_i18n) | 国际化:响应式消息目录、插值、CLDR 复数选择 | ✅ 已交付 | 10 |
+| [`prism_ui_router`](../prism_ui_router) | 响应式客户端路由:路径匹配、`:param` / `*wildcard`、历史栈 | ✅ 已交付 | 16 |
+| [`prism_ui_devtools`](../prism_ui_devtools) | 内省工具:树快照、`render_tree` 美化输出、`BackendOp` 轨迹统计 | ✅ 已交付 | 10 |
+
+全部 12 个 crate 累计 **176 个测试通过**。每个 crate 均:`#![forbid(unsafe_code)]`、
+`no_std` 友好(`default = ["std"]`,proc-macro crate 除外)、通过严格 Clippy(零告警)。
+
+> **诚实声明**:仍为 **设计阶段(PLANNED)** 的能力包括:响应式信号 **自动绑定到
+> ECS 实体字段**、`.loom` / `.loom.style` **资产热重载**、列表 **虚拟化**、
+> **Suspense / Error Boundary**、**Portal / Overlay**、**共享元素过渡**。见
+> [docs/roadmap.md](docs/roadmap.md)。本文档不会把未实现的能力描述为已实现。
+> 已交付的高级层(组件 / Store / i18n / 路由 / DevTools)目前为 **引擎弱耦合的
+> 独立运行时能力**,与 Prism/ECS 实体的深度绑定仍在 roadmap 中推进。
 
 ## 文档索引
 
 - [架构设计](docs/architecture.md) — 三层分离、数据流、成本契约。
 - [与 Bevy BSN 的对比](docs/bsn-comparison.md) — 逐维度评析与 Loom 的改进。
-- [分层指南](docs/layers.md) — 各 crate 的真实 API 与代码示例。
+- [分层指南](docs/layers.md) — 核心各 crate 的真实 API 与代码示例。
+- [高级功能](docs/advanced-features.md) — 组件模型 / Store / i18n / 路由 / DevTools 的真实 API。
 - [路线图](docs/roadmap.md) — 已交付 vs 规划中,里程碑 M1–M6。
 
 ## 许可
