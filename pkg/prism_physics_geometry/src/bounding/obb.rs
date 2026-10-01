@@ -108,6 +108,44 @@ impl Obb {
         }
     }
 
+    /// Resolves a capsule (core segment `[a, b]` swept by `radius`) against the
+    /// box, returning `(point, normal, depth)` like [`Obb::sphere_contact`].
+    ///
+    /// `point` lies on the box surface, `normal` is the unit direction the
+    /// capsule must move to separate, and `depth >= 0` is the penetration.
+    /// Returns [`None`] for a negative radius or when the capsule stays clear.
+    ///
+    /// The squared distance from the segment to the box is convex in the
+    /// segment parameter, so a ternary search locates the deepest segment
+    /// point; that point is then resolved as a sphere against the box, which
+    /// also handles the case where the core segment passes through the box.
+    pub fn capsule_contact(&self, a: Vec3, b: Vec3, radius: f32) -> Option<(Vec3, Vec3, f32)> {
+        if radius < 0.0 {
+            return None;
+        }
+        let seg = b - a;
+        let dist2_at = |t: f32| -> f32 {
+            let p = a + seg * t;
+            (p - self.closest_point(p)).length_squared()
+        };
+        // Ternary search over t in [0, 1] on the convex squared-distance curve.
+        let mut lo = 0.0f32;
+        let mut hi = 1.0f32;
+        for _ in 0..60 {
+            let third = (hi - lo) / 3.0;
+            let m1 = lo + third;
+            let m2 = hi - third;
+            if dist2_at(m1) <= dist2_at(m2) {
+                hi = m2;
+            } else {
+                lo = m1;
+            }
+        }
+        let t = 0.5 * (lo + hi);
+        let p = a + seg * t;
+        self.sphere_contact(p, radius)
+    }
+
     /// Returns a world-space axis-aligned bounding box enclosing the OBB.
     pub fn aabb(&self) -> Aabb {
         let axes = self.axes();
@@ -435,5 +473,58 @@ mod tests {
     fn sphere_contact_negative_radius_is_none() {
         let b = unit_box(Vec3::ZERO, Quat::IDENTITY);
         assert!(b.sphere_contact(Vec3::new(0.0, 0.0, 0.0), -1.0).is_none());
+    }
+
+    #[test]
+    fn capsule_contact_parallel_above_face() {
+        // Horizontal capsule hovering 0.8 above the box centre, radius 0.5.
+        // Nearest surface is the +y face at y = 0.5, gap 0.3 < r, so depth 0.2.
+        let b = unit_box(Vec3::ZERO, Quat::IDENTITY);
+        let (point, normal, depth) = b
+            .capsule_contact(Vec3::new(-0.5, 0.8, 0.0), Vec3::new(0.5, 0.8, 0.0), 0.5)
+            .expect("overlap");
+        assert_relative_eq!(point.y, 0.5, epsilon = 1e-4);
+        assert!(normal.y > 0.99, "normal points toward +y: {normal:?}");
+        assert_relative_eq!(depth, 0.2, epsilon = 1e-4);
+    }
+
+    #[test]
+    fn capsule_contact_too_far_is_none() {
+        let b = unit_box(Vec3::ZERO, Quat::IDENTITY);
+        assert!(b
+            .capsule_contact(Vec3::new(-0.5, 1.5, 0.0), Vec3::new(0.5, 1.5, 0.0), 0.5)
+            .is_none());
+    }
+
+    #[test]
+    fn capsule_contact_endpoint_cap_touches() {
+        // Capsule running out along +x; only the near endpoint reaches the box.
+        let b = unit_box(Vec3::ZERO, Quat::IDENTITY);
+        let (point, normal, depth) = b
+            .capsule_contact(Vec3::new(2.0, 0.0, 0.0), Vec3::new(0.8, 0.0, 0.0), 0.5)
+            .expect("overlap");
+        assert_relative_eq!(point.x, 0.5, epsilon = 1e-4);
+        assert!(normal.x > 0.99, "normal points toward +x: {normal:?}");
+        assert_relative_eq!(depth, 0.2, epsilon = 1e-4);
+    }
+
+    #[test]
+    fn capsule_contact_core_through_box() {
+        // Core segment skewers the box, so the deepest point sits inside and a
+        // positive, unit-normal push-out is reported.
+        let b = unit_box(Vec3::ZERO, Quat::IDENTITY);
+        let (_, normal, depth) = b
+            .capsule_contact(Vec3::new(-1.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), 0.2)
+            .expect("overlap");
+        assert!(depth > 0.0, "depth = {depth}");
+        assert_relative_eq!(normal.length(), 1.0, epsilon = 1e-5);
+    }
+
+    #[test]
+    fn capsule_contact_negative_radius_is_none() {
+        let b = unit_box(Vec3::ZERO, Quat::IDENTITY);
+        assert!(b
+            .capsule_contact(Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), -1.0)
+            .is_none());
     }
 }
