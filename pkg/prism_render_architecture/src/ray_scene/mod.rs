@@ -294,6 +294,14 @@
 //!   group *bakes* distinct meshes into one vertex/index pool while keeping
 //!   per-part triangle ranges so a hit resolves back to its originating part
 //!   ([`surface_group::SurfaceGroupHit`]) for per-sub-mesh material lookup.
+//! - [`patch_tessellation`] — hardware-tessellator-style crack-free
+//!   triangulation of any [`displaced_surface::ParametricSurface`]:
+//!   [`patch_tessellation::PatchTessellation`] takes four independent
+//!   per-edge outer factors plus an inner factor and zips each boundary
+//!   edge (sampled at `k / outer`) to the interior block, so adjacent
+//!   patches that agree on a shared edge's factor leave no T-junctions —
+//!   the `GPU`-tessellation LOD path, emitting a watertight
+//!   [`triangle_mesh::TriangleMesh`] / [`triangle_mesh::TriangleMeshBvh`].
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -438,6 +446,7 @@ pub mod bezier_surface;
 pub mod displaced_surface;
 pub mod trimmed_surface;
 pub mod surface_group;
+pub mod patch_tessellation;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -533,6 +542,7 @@ pub use bezier_surface::{BezierSurface, BezierSurfaceError};
 pub use displaced_surface::{DisplacedSurface, HeightMap, HeightMapError, ParametricSurface};
 pub use trimmed_surface::{TrimLoop, TrimmedSurface, TrimmedSurfaceError};
 pub use surface_group::{SurfaceGroup, SurfaceGroupBvh, SurfaceGroupError, SurfaceGroupHit};
+pub use patch_tessellation::{Edge, PatchTessellation, MAX_FACTOR};
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
 pub use obb::{Obb, ObbBvh, ObbHit};
