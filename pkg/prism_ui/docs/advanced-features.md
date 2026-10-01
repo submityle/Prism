@@ -196,6 +196,138 @@ assert_eq!(render_tree(&snap), "Box\n  Text \"hello\"\n  Text \"world\"\n");
 都能被 DevTools 产物断言。完整的实体/组件树检查器、signal 依赖图可视化、
 状态时间旅行回放为 roadmap M6 的后续增强。
 
+## 6. `prism_ui_overlay` — Portal / Overlay 栈
+
+把「浮层」从普通文档流里解耦出来,统一到一个 **z-order 受控的覆盖平面**,
+对标 Radix / Headless UI 的 Portal 模型。
+
+- `OverlayManager` 持有一组 `OverlayEntry`,每条带 `OverlayId` 与 `OverlayKind`
+  (`Modal` < `Popover` < `Tooltip` < `Toast`,按 z 优先级升序,同级按插入序)。
+- `render(base)` 产出 `base + portal` 的根 box;portal 内按 z-order 逐层生成
+  **keyed** 浮层 box,`Modal` 自动在其前插入 `prism-overlay-backdrop`。全部节点
+  携带由 overlay id 派生的稳定 key,供协调器精确复用。
+- 消解策略:`on_escape()` 关闭顶部**可消解**浮层(跳过 pinned);`on_scrim_click()`
+  仅关闭顶部 modal。`FocusTrap<K>` 泛型环形焦点循环,空集合优雅返回 `None`。
+
+```rust
+use prism_ui_overlay::{OverlayKind, OverlayManager};
+
+let mut mgr = OverlayManager::new();
+let dialog = mgr.push(OverlayKind::Modal, prism_ui::Element::text("confirm?"));
+let _tip = mgr.push(OverlayKind::Tooltip, prism_ui::Element::text("hint"));
+// tooltip 在 modal 之上;Esc 关掉最顶层可消解项(tooltip)。
+mgr.on_escape();
+assert!(mgr.get(dialog).is_some()); // modal 仍在
+```
+
+---
+
+## 7. `prism_ui_form` — 响应式表单与声明式校验
+
+对标 React Hook Form / VeeValidate:字段值是 **reactive signal**,校验是纯函数的
+组合,错误集合是随值自动重算的 `Memo`。
+
+- `Form::register(id, initial, validators)` 注册字段;`value` / `set` / `binding`
+  提供读 / 写 / 双向绑定;`touch` 与内部 `dirty` 标志记录交互态。
+- 内置 `Validator`:`required` / `min_len` / `max_len` / `int_range` / `pattern` /
+  `custom`,可任意组合为 `Vec<BoxedValidator>`。`first_error` 短路、`all_errors` 收集。
+- `errors_memo()` 缓存且随 `revision` 信号重订阅新字段;`is_valid()` 在 `untrack`
+  下运行以免产生伪订阅。`set` 先释放 map 借用再通知,规避 effect flush 期间的
+  `RefCell` 再入 panic。
+
+```rust
+use prism_ui_form::{pattern, required, Form};
+use prism_ui_reactive::Runtime;
+
+let rt = Runtime::new();
+let form = Form::new(rt);
+let email = form.register(
+    "email",
+    "",
+    vec![required(), pattern(|v| v.contains('@'), "需为邮箱")],
+);
+form.set(email.clone(), "a@b.com");
+assert!(form.all_errors(email).is_empty());
+```
+
+---
+
+## 8. `prism_ui_virtual` — 列表虚拟化
+
+只实例化可视区内的项,对标 react-window / TanStack Virtual,但以 **整数 + 前缀和**
+实现(契合仓库禁用 f32 超越函数的约束)。
+
+- `FixedList` 定高:`total_size` / `offset_of` / `visible_range`(含 overscan 与
+  双端 clamp)全部 O(1)。
+- `VariableList` 变高:构造时把每项尺寸累加成**前缀和偏移表**,`offset_of` O(1),
+  `index_at` 用 `partition_point` 做**二分**(O(log n))。
+- `RecyclePool`:LIFO 复用插槽、幂等 `acquire`、`release` 归还、`active` 绑定映射,
+  为增量滚动提供稳定的节点身份。
+- `virtualize_fixed` / `virtualize_variable` 产出 `(可见范围, Element)`:leading
+  spacer + 每个可见项的 **keyed slot** + trailing spacer,三段尺寸恒等于 `total_size`,
+  使滚动条几何与完整物化列表一致。
+
+```rust
+use prism_ui_virtual::{virtualize_fixed, FixedList, Viewport};
+
+let list = FixedList::new(10_000, 24.0, 4.0); // 1 万项,项高 24px,间距 4px
+let vp = Viewport::new(480.0, 600.0).with_overscan(3); // 滚到 480px,可视 600px
+let (range, _tree) = virtualize_fixed(&list, &vp, |i| prism_ui::Element::text(i.to_string()));
+assert!(range.len() < 40); // 一万项,仅物化几十个
+```
+
+---
+
+## 9. `prism_ui_async` — 异步状态 / Suspense / 错误边界
+
+把「加载中 / 成功 / 失败」建模成一等公民,对标 SolidJS `createResource` + Suspense。
+以**显式驱动的状态机**实现,不绑定任何 futures 运行时,因而 `no_std` 纯净。
+
+- `AsyncState<T, E>`:`is_pending` / `is_ready` / `is_failed`、`ready()` / `failed()`、
+  `map` / `map_err`。
+- `Resource<T, E>` 基于 `Signal`:`resolve` / `fail` / `reload`,状态转移经响应式图
+  自动通知观察者。
+- `suspense` / `suspense_all`(聚合多个资源)、`error_boundary` / `guarded`
+  在失败时回退到降级视图。`all` + `pending_count` / `failed_count` / `ready_count`
+  做批量状态聚合。
+
+```rust
+use prism_ui_async::{suspense, Resource};
+use prism_ui_reactive::Runtime;
+
+let rt = Runtime::new();
+let user: Resource<&str, &str> = Resource::pending(&rt);
+let view = suspense(&user, || prism_ui::Element::text("loading…"), |u| prism_ui::Element::text(*u));
+assert_eq!(view.text_content(), Some("loading…"));
+```
+
+---
+
+## 10. `prism_ui_a11y` — 无障碍基线
+
+把可访问性做进模型层(而非事后补丁),对标 ARIA Authoring Practices。
+
+- `Role` / `AriaState`(`disabled` / `expanded` / `selected` / `hidden` …)/ `Label`
+  (文本 / `labelledby` / `describedby`)构成 `A11yNode`;`A11yNodeBuilder` 流式构建。
+- `A11yTree` 有序 keyed 树,`label_text` 解析带**防环**;`FocusOrder` 实现 tab-index
+  规则、跳过 inert、环绕、first/last。
+- `KeyboardNav` 做 **role 感知** 的方向键 / Tab 导航;`LiveRegion` + `Politeness`
+  管理读屏播报队列。`screen_reader_text` / `describe_node` 产出读屏文本;`derive`
+  模块从 `prism_ui::Element` 桥接。
+
+```rust
+use prism_ui::Key;
+use prism_ui_a11y::{A11yNode, Label, Role};
+
+let btn = A11yNode::builder(Key::Str("save".into()), Role::Button)
+    .label(Label::text("Save"))
+    .focusable(true)
+    .build();
+assert!(btn.is_tab_stop());
+```
+
+---
+
 ---
 
 ## 组合示例:高级层如何协同
@@ -222,5 +354,6 @@ I18n.translation     (Memo)  ─┘                              │
 - 本文所列能力均 **已交付并通过测试**,但当前为 **引擎弱耦合的独立运行时能力**:
   它们消费 / 产出 `Element` 与 `Signal`,**尚未** 与 Prism/ECS 实体字段做深度自动绑定
   (该绑定为 roadmap M2)。
-- 守卫 / 深链接(router)、时间旅行 UI(devtools)、Suspense / Portal / 虚拟化 /
-  共享元素过渡等仍为 **规划中**,见 [roadmap.md](roadmap.md)。
+- Suspense / Portal / Overlay / 虚拟化 / 表单校验 / a11y 基线 **均已交付**(本文 6–10 节)。
+  仍为 **规划中** 的是:守卫 / 深链接(router)、时间旅行 UI(devtools)、
+  共享元素过渡、静态子树提升 / 编译期稳定节点 ID,见 [roadmap.md](roadmap.md)。

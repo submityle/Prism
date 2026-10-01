@@ -46,7 +46,7 @@
 - [x] 独立的 Signal / Memo / Effect 运行时。
 - [ ] `$` 绑定 → 注册 Effect,信号变化 **字段级** 回写目标实体组件,零 archetype 搬迁。
 - [ ] `Show` / `For` 结构绑定,keyed reconcile 批量 spawn/despawn 到帧末。
-- [ ] 可访问性(a11y)基线:角色 / 焦点 / 键盘导航 / 读屏标签。
+- [x] 可访问性(a11y)基线:角色 / 焦点 / 键盘导航 / 读屏标签(`prism_ui_a11y`,已交付)。
 
 ### M3 样式层增强(部分已交付)
 - [x] token / class / 级联 / 交互态 / 断点匹配上下文。
@@ -64,10 +64,10 @@
 ### M5 高级功能(多数已交付)
 - [x] 组件模型:props、具名多插槽、`children`、Context 注入(`prism_ui_component`,已交付)。生命周期钩子规划中。
 - [x] Store + 细粒度选择器 + 中间件(`prism_ui_store`,已交付)。
-- [ ] 列表虚拟化:`For.virtual`,可视区实例化 + 回收池。
-- [ ] 异步与健壮性:`Resource` + Suspense + Error Boundary。
-- [ ] Portal / Overlay 管理器(模态、tooltip、popover、焦点捕获)。
-- [ ] 表单双向绑定 + 声明式校验。
+- [x] 列表虚拟化:定高/变高 + 前缀和二分 + overscan + 回收池(`prism_ui_virtual`,已交付)。
+- [x] 异步与健壮性:`Resource` + Suspense + Error Boundary(`prism_ui_async`,已交付)。
+- [x] Portal / Overlay 管理器(模态 / popover / tooltip / toast、z-order、backdrop、FocusTrap,`prism_ui_overlay`,已交付)。
+- [x] 表单双向绑定 + 声明式校验(`prism_ui_form`,已交付)。
 - [x] 声明式路由 + 导航/历史栈(`prism_ui_router`,已交付)。守卫 + 深链接规划中。
 - [x] 国际化:响应式目录 + 插值 + CLDR 复数(`prism_ui_i18n`,已交付)。`t!` 宏糖 / RTL 规划中。
 
