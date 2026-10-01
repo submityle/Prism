@@ -196,7 +196,11 @@ fn cloth_vbd_sweep(@builtin(global_invocation_id) gid: vec3<u32>) {
         grad.x = grad.x + nx * coef;
         grad.y = grad.y + ny * coef;
         grad.z = grad.z + nz * coef;
-        let tangential = max(1.0 - con.rest_length * inv_len, 0.0);
+        // Direct `rest / len` division (one IEEE fdiv), not `rest * inv_len`,
+        // so the tangential coefficient is bit-identical to the CPU golden
+        // `accumulate_constraint`'s `(1.0 - rest / len).max(0.0)`; the normal
+        // above keeps `d * inv_len` to mirror the golden `d.scale(1.0 / len)`.
+        let tangential = max(1.0 - con.rest_length / len, 0.0);
         let ktang = k * tangential;
         // k * tangential * I first (mirrors the CPU scaled_identity add).
         m0 = m0 + ktang;
