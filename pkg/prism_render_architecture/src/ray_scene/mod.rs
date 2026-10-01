@@ -240,6 +240,10 @@
 //!   mask and a cutoff so sub-cutoff hits pass through, and an
 //!   [`alpha_mesh::AlphaMeshBvh`] gates closest-hit/any-hit traversal on the
 //!   sampled alpha (pbrt / hardware any-hit alpha).
+//! - [`alpha_mesh_gpu_layout`] — flat, `GPU`-uploadable [`alpha_mesh::AlphaMeshBvh`]:
+//!   the proven [`triangle_mesh_gpu_layout::GpuTriangleMeshBvhBuffers`] packing plus
+//!   the row-major mask texels and cutoff ([`alpha_mesh_gpu_layout::ALPHA_HEADER_WORDS`]
+//!   header), with a packed walk that reproduces the alpha-gated traversal bit-for-bit.
 //! - [`traversal`] — [`Ray`]/`BVH` slab + Möller–Trumbore intersection with
 //!   closest-hit and any-hit walks (the `GPU` traversal kernel's golden ref).
 //! - [`traversal_stackless`] — stackless (threaded / escape-index) `BVH` walk:
@@ -295,6 +299,7 @@ pub mod spline_strip;
 pub mod triangle_mesh;
 pub mod triangle_mesh_gpu_layout;
 pub mod alpha_mesh;
+pub mod alpha_mesh_gpu_layout;
 pub mod footprint;
 pub mod gpu_layout;
 pub mod motion;
@@ -363,6 +368,7 @@ pub use triangle_mesh_gpu_layout::{
     GpuTriangleMeshBvhBuffers, MESH_INDEX_WORDS, MESH_VERTEX_WORDS,
 };
 pub use alpha_mesh::{AlphaMesh, AlphaMeshBvh, AlphaTexture, AlphaTextureError};
+pub use alpha_mesh_gpu_layout::{ALPHA_HEADER_WORDS, GpuAlphaMeshBvhBuffers};
 pub use rectangle_gpu_layout::{GpuRectangleBvhBuffers, RECTANGLE_WORDS};
 pub use aabb_primitive_gpu_layout::{GpuAabbBvhBuffers, AABB_PRIMITIVE_WORDS};
 pub use sphere_gpu_layout::{GpuSphereBvhBuffers, SPHERE_WORDS};

@@ -302,6 +302,13 @@ impl AlphaMeshBvh {
         self.inner.mesh()
     }
 
+    /// The underlying triangle-mesh `BVH`, so a flat `GPU` layout can reuse the
+    /// proven [`TriangleMeshBvh`] packing and layer only the mask on top.
+    #[must_use]
+    pub fn triangle_bvh(&self) -> &TriangleMeshBvh {
+        &self.inner
+    }
+
     /// The cutout alpha mask.
     #[must_use]
     pub fn alpha(&self) -> &AlphaTexture {
