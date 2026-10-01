@@ -101,6 +101,7 @@ pub mod fxaa;
 pub mod gamut_clip;
 pub mod gaussian_splat;
 pub mod godray;
+pub mod gpu_radix_histogram;
 pub mod gravity_wave;
 pub mod gray_code;
 pub mod hash_rng;
@@ -226,6 +227,7 @@ pub use gaussian_splat::{
     GaussianSplatProjection, GpuGaussianSplat, GpuGaussianSplatQuery, SplatFootprint,
 };
 pub use godray::{GodRayWeightQuery, GpuGodRayWeight};
+pub use gpu_radix_histogram::{GpuRadixHistogram, RadixHistogramQuery};
 pub use gravity_wave::{GpuGravityWave, GravityWaveQuery};
 pub use gray_code::GpuGrayCode;
 pub use hash_rng::{GpuHashRng, HashRngSample};
