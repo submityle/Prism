@@ -742,6 +742,7 @@ pub mod stratified_weights;
 pub mod transfer_frame;
 pub mod transition;
 pub mod vbd_solver;
+pub mod voxel_avg_velocity;
 pub mod voxel_density;
 pub mod voxel_field_sample;
 pub mod voxel_forward_scatter;
@@ -831,6 +832,7 @@ pub use stratified_weights::{reference_stratified_weights, GpuHairStratifiedWeig
 pub use transfer_frame::{reference_transfer_frame, GpuHairTransferFrame};
 pub use transition::GpuHairTransition;
 pub use vbd_solver::GpuVbdSolver;
+pub use voxel_avg_velocity::{reference_voxel_avg_velocity, GpuHairVoxelAvgVelocity};
 pub use voxel_density::GpuHairVoxelDensity;
 pub use voxel_field_sample::{reference_voxel_field_sample, GpuHairVoxelFieldSample};
 pub use voxel_forward_scatter::GpuHairVoxelForwardScatter;
