@@ -26,14 +26,21 @@ use bevy_render::{
     view::{ExtractedView, Msaa, ViewDepthStencilTexture, ViewTarget},
 };
 
+use bevy_math::Vec3;
+use prism_render_shading::ReceiverProjection;
+
 use crate::lighting::LightBindGroup;
-use crate::shading::{PrismShadingSettings, ViewVisibilityBuffer};
+use crate::shading::{
+    GpuVsmResolveParams, PrismShadingSettings, PrismVirtualShadowSettings, ViewVisibilityBuffer,
+    ViewVsmPageTable, ViewVsmPhysicalAtlas, VsmPrimaryLight,
+};
 
 use super::bind_groups::filtering_sampler;
 use super::resources::WaterGpuBodies;
 use super::surface_mesh::{build_surface_view, surface_index_data};
 use super::surface_pipeline::{ViewWaterSurfacePipelines, WaterSurfacePipelines};
 use super::surface_shading::SurfaceViewInputs;
+use super::surface_vsm::WaterVsmFallback;
 
 /// One body's device resources, built before the pass so the index/uniform
 /// buffers and bind group outlive the single tracked pass that references them.
@@ -59,12 +66,17 @@ pub(crate) fn draw_water_surface(
     surface_pipeline: Res<WaterSurfacePipelines>,
     light_bindings: Res<LightBindGroup>,
     device: Res<RenderDevice>,
+    vsm_fallback: Res<WaterVsmFallback>,
+    vsm_settings: Option<Res<PrismVirtualShadowSettings>>,
+    primary_light: Option<Res<VsmPrimaryLight>>,
     view: ViewQuery<(
         &ExtractedView,
         &ViewTarget,
         &ViewDepthStencilTexture,
         &ViewWaterSurfacePipelines,
         &ViewVisibilityBuffer,
+        Option<&ViewVsmPhysicalAtlas>,
+        Option<&ViewVsmPageTable>,
         Option<&Msaa>,
     )>,
     mut ctx: RenderContext,
@@ -75,7 +87,8 @@ pub(crate) fn draw_water_surface(
     if bodies.is_empty() {
         return;
     }
-    let (extracted, target, depth, view_pipelines, visibility, msaa) = view.into_inner();
+    let (extracted, target, depth, view_pipelines, visibility, vsm_atlas, vsm_page_table, msaa) =
+        view.into_inner();
     // The Prism visibility path is single-sample only; a multisampled view never
     // wrote `scene_color`, so refraction has nothing to sample.
     if msaa.is_some_and(|value| value.samples() != 1) {
@@ -161,6 +174,69 @@ pub(crate) fn draw_water_surface(
         return;
     };
 
+    // The `@group(2)` virtual-shadow-map bind group, built once for the view
+    // (its addressing basis is camera/light constant across every body). A
+    // byte-for-byte twin of the opaque resolve pass's VSM group: it binds the
+    // resident page table + physical atlas when both exist and the feature is
+    // on, else the format-correct fallbacks with the `sample_enable` bit clear
+    // so the shader keeps the analytic directional visibility. The params buffer
+    // and the group are declared here so they outlive the single tracked pass.
+    let vsm_layout = cache.get_bind_group_layout(&surface_pipeline.vsm_layout);
+    let light_direction = primary_light.as_ref().and_then(|light| light.direction);
+    let enable = settings.enable_virtual_shadow
+        && vsm_settings.is_some()
+        && vsm_atlas.is_some()
+        && vsm_page_table.is_some()
+        && light_direction.is_some();
+    let clipmap = vsm_settings.as_ref().map_or_else(
+        || PrismVirtualShadowSettings::default().clipmap(),
+        |s| s.clipmap(),
+    );
+    let pcf_radius = vsm_settings.as_ref().map_or(0, |s| s.pcf_radius);
+    let (physical_pages, physical_pages_per_edge) = vsm_atlas.map_or((1, 1), |atlas| {
+        (atlas.physical_pages(), atlas.physical_pages_per_edge())
+    });
+    let direction = light_direction.unwrap_or(Vec3::NEG_Y);
+    let projection = ReceiverProjection::from_light_direction(direction, Vec3::ZERO, 0.0);
+    let light_forward = {
+        let normalized = direction.normalize_or_zero();
+        if normalized == Vec3::ZERO {
+            Vec3::NEG_Y
+        } else {
+            normalized
+        }
+    };
+    let vsm_params = GpuVsmResolveParams::new(
+        &clipmap,
+        physical_pages,
+        physical_pages_per_edge,
+        pcf_radius,
+        enable,
+        projection.light_right,
+        projection.light_up,
+        light_forward,
+    );
+    let vsm_params_buffer = device.create_buffer_with_data(&BufferInitDescriptor {
+        label: Some("prism water surface vsm params"),
+        contents: bytemuck::bytes_of(&vsm_params),
+        usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+    });
+    let page_table_binding = vsm_page_table.map_or_else(
+        || vsm_fallback.page_table.as_entire_binding(),
+        |table| table.buffer.as_entire_binding(),
+    );
+    let atlas_view = vsm_atlas.map_or(&vsm_fallback.atlas_view, |atlas| atlas.atlas_view());
+    let vsm_group = device.create_bind_group(
+        "prism water surface vsm",
+        &vsm_layout,
+        &BindGroupEntries::sequential((
+            page_table_binding,
+            atlas_view,
+            &vsm_fallback.sampler,
+            vsm_params_buffer.as_entire_binding(),
+        )),
+    );
+
     // Single tracked pass: the composite already wrote the view target, so the
     // color attachment loads, and the main-pass depth loads read-only (the
     // surface pipeline disables depth writes).
@@ -177,6 +253,7 @@ pub(crate) fn draw_water_surface(
         pass.set_render_pipeline(draw.pipeline);
         pass.set_bind_group(0, &draw.bind_group, &[]);
         pass.set_bind_group(1, light_group, &[]);
+        pass.set_bind_group(2, &vsm_group, &[]);
         pass.set_index_buffer(draw.index_buffer.slice(..), IndexFormat::Uint32);
         pass.draw_indexed(0..draw.index_count, 0, 0..1);
     }

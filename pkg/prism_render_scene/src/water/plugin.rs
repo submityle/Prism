@@ -52,6 +52,7 @@ use super::surface_draw::draw_water_surface;
 use super::surface_pipeline::{
     init_water_surface_pipelines, prepare_water_surface_pipelines, WaterSurfacePipelines,
 };
+use super::surface_vsm::init_water_vsm_fallback;
 use crate::lighting::LightBindGroup;
 
 /// Installs the `GPU` water compute subsystem into an app.
@@ -111,6 +112,11 @@ impl Plugin for WaterPlugin {
                 RenderStartup,
                 init_water_surface_pipelines.after(init_gpu_resource::<LightBindGroup>),
             )
+            // Build the surface pass's `@group(2)` virtual-shadow-map fallback
+            // objects (dummy page table + 1x1 atlas + sampler). Depends only on
+            // `RenderDevice`, which is live by `RenderStartup`, so no ordering
+            // constraint is needed.
+            .add_systems(RenderStartup, init_water_vsm_fallback)
             // Snapshot the main-world water bodies into the render world each
             // frame.
             .add_systems(ExtractSchedule, extract_water_bodies)

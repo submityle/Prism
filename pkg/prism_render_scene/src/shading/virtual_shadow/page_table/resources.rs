@@ -35,10 +35,6 @@ use super::pages::{build_render_pages, VsmRenderPage};
 /// Produced by [`super::readback::collect_vsm_page_readback`] and consumed by the
 /// resolve-pass VSM sample integration wired in a later slice.
 #[derive(Component)]
-#[expect(
-    dead_code,
-    reason = "buffer / slot_count are read by the resolve-pass VSM sample integration wired in a later slice"
-)]
 pub(crate) struct ViewVsmPageTable {
     /// `STORAGE | COPY_DST` buffer holding the flat page table (binding for the
     /// resolve pass's `vsm_sample` shader).

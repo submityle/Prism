@@ -47,3 +47,9 @@ pub use runtime::{PrismShadingDiagnostics, PrismShadingSettings};
 /// shading passes build, so the sibling `water` module needs the component.
 pub(crate) use composite::composite_shading;
 pub(crate) use resources::ViewVisibilityBuffer;
+// Re-exports the water surface pass consumes to shadow its directional term
+// with the same demand-paged virtual shadow map the opaque resolve pass reads.
+pub(crate) use resolve::GpuVsmResolveParams;
+pub(crate) use virtual_shadow::{
+    PrismVirtualShadowSettings, ViewVsmPageTable, ViewVsmPhysicalAtlas, VsmPrimaryLight,
+};

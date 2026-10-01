@@ -20,4 +20,4 @@ pub(crate) use readback::{
     collect_vsm_page_readback, map_submitted_vsm_page_readback, request_vsm_page_readback,
     VsmPageRequestReadback,
 };
-pub(crate) use resources::{VirtualShadowMapDriver, VsmPageTableBufferCache};
+pub(crate) use resources::{ViewVsmPageTable, VirtualShadowMapDriver, VsmPageTableBufferCache};

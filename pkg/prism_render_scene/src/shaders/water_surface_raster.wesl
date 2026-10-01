@@ -87,6 +87,214 @@ struct WaterSurfaceView {
 @group(1) @binding(1) var<storage, read> punctual_lights: array<PunctualLight>;
 @group(1) @binding(2) var<storage, read> light_env: array<LightEnvironment>;
 
+// Virtual-shadow-map base (`@group(2)`): a byte-for-byte twin of the opaque
+// `shading_resolve` pass's VSM group (there it is `@group(6)`), re-numbered to
+// `@group(2)` here. The water surface's primary directional light samples the
+// identical demand-paged page table + physical atlas the rest of the scene
+// reads, so a shadow cast by an opaque caster also darkens the water it falls
+// on. The one intentional divergence from the standalone `vsm_sample` shader is
+// the miss return: this twin returns the sentinel `VSM_MISS = -1.0` on an
+// out-of-window page or an unmapped slot so the caller keeps the analytic
+// visibility (the water pass has no cascaded fallback of its own).
+@group(2) @binding(0) var<storage, read> vsm_page_table: array<u32>;
+@group(2) @binding(1) var vsm_physical_atlas: texture_2d<f32>;
+@group(2) @binding(2) var vsm_physical_sampler: sampler;
+
+// Mirrors `GpuVsmResolveParams` in `shading/resolve/abi.rs` (96 bytes). The
+// three leading 16-byte scalar rows are followed by three `vec3<f32>` axes, each
+// on its 16-byte boundary with the trailing `f32` filling the fourth column, so
+// the std140 uniform layout is byte-identical to the `#[repr(C)]` record.
+struct VsmResolveParams {
+    // --- clipmap layout (mirrors ClipmapConfig / GpuVsmSampleParams) ---
+    levels: u32,
+    page_size: u32,
+    pages_per_level_edge: u32,
+    page_coord_bias: i32,
+    level0_texel_world_size: f32,
+    level0_max_distance: f32,
+    // --- physical atlas geometry ---
+    physical_pages: u32,
+    physical_pages_per_edge: u32,
+    pcf_radius: i32,
+    // 1 when the resolve should sample the VSM for the primary directional
+    // light, 0 to skip the branch entirely and always use the cascaded path.
+    // (`enable` is a WESL reserved word, so the field is `sample_enable`.)
+    sample_enable: u32,
+    pad0: u32,
+    pad1: u32,
+    // Orthonormal clipmap basis of the light (see ReceiverProjection): the
+    // world receiver is projected onto (right, up) for page addressing and onto
+    // forward for the along-light reference depth.
+    light_right: vec3<f32>,
+    depth_scale: f32,
+    light_up: vec3<f32>,
+    depth_bias: f32,
+    light_forward: vec3<f32>,
+    pad2: f32,
+}
+
+@group(2) @binding(3) var<uniform> vsm_params: VsmResolveParams;
+
+// Sentinel physical index for a virtual page that is not resident this frame
+// (the twin of `VirtualPageTable::get` returning `None`).
+const VSM_PAGE_UNMAPPED: u32 = 0xffffffffu;
+// Returned by the twin when the receiver has no resident page, signalling the
+// caller to keep the analytic directional visibility. Distinct from any lit
+// fraction in [0, 1].
+const VSM_MISS: f32 = -1.0;
+
+// Number of clipmap levels, always >= 1 (mirrors level_count).
+fn vsm_level_count() -> u32 {
+    return max(vsm_params.levels, 1u);
+}
+
+// Pages along one edge of a level's resident window, always >= 1.
+fn vsm_window_edge() -> i32 {
+    return i32(max(vsm_params.pages_per_level_edge, 1u));
+}
+
+// World-space edge length of one texel at level (doubles each level).
+fn vsm_texel_world_size(level: u32) -> f32 {
+    let clamped = min(level, vsm_level_count() - 1u);
+    return max(vsm_params.level0_texel_world_size, 1.0e-6) * exp2(f32(clamped));
+}
+
+// World-space edge length of one page at level (texel * page_size).
+fn vsm_page_world_size(level: u32) -> f32 {
+    return vsm_texel_world_size(level) * f32(max(vsm_params.page_size, 1u));
+}
+
+// Finest clip level whose texels are still dense enough for a receiver at
+// view_distance. Twin of clipmap.rs's select_level.
+fn vsm_select_level(view_distance: f32) -> u32 {
+    let distance = max(view_distance, 0.0);
+    let reference = max(vsm_params.level0_max_distance, 1.0e-6);
+    let ratio = distance / reference;
+    var level_i: i32;
+    if (ratio <= 1.0) {
+        level_i = 0;
+    } else {
+        level_i = i32(ceil(log2(ratio)));
+    }
+    let max_level = i32(vsm_level_count()) - 1;
+    return u32(clamp(level_i, 0, max_level));
+}
+
+// Absolute world page a point lands on at level (camera independent).
+fn vsm_world_page_coords(level: u32, world_xy: vec2<f32>) -> vec2<i32> {
+    let pws = vsm_page_world_size(level);
+    return vec2<i32>(
+        i32(floor(world_xy.x / pws)),
+        i32(floor(world_xy.y / pws)),
+    );
+}
+
+// Bottom-left page of level's resident window, snapped to whole pages around
+// the camera. Twin of ClipmapConfig::build_level's origin_page.
+fn vsm_window_origin(level: u32, camera_xy: vec2<f32>) -> vec2<i32> {
+    let pws = vsm_page_world_size(level);
+    let center = vec2<i32>(
+        i32(floor(camera_xy.x / pws)),
+        i32(floor(camera_xy.y / pws)),
+    );
+    let half = vsm_window_edge() / 2;
+    return center - vec2<i32>(half, half);
+}
+
+// Flat slot index of a window-local page at level, or -1 when the page lies
+// outside the level's resident window. Identical addressing to
+// vsm_page_mark.wesl so the physical index read corresponds to the flag marked.
+fn vsm_window_slot(level: u32, world_page: vec2<i32>, camera_xy: vec2<f32>) -> i32 {
+    let edge = vsm_window_edge();
+    let local = world_page - vsm_window_origin(level, camera_xy);
+    if (local.x < 0 || local.y < 0 || local.x >= edge || local.y >= edge) {
+        return -1;
+    }
+    return i32(level) * edge * edge + local.y * edge + local.x;
+}
+
+// Physical pages along one edge of the square atlas grid, always >= 1.
+fn vsm_physical_edge() -> u32 {
+    return max(vsm_params.physical_pages_per_edge, 1u);
+}
+
+// Filtered VSM visibility for a world receiver under the primary directional
+// light. Byte-for-byte addressing twin of the opaque resolve pass; the only
+// change is sourcing the camera from this pass's own view uniform (the water
+// pass has no `params` block). Returns a lit fraction in [0, 1], or `VSM_MISS`
+// (< 0) on a page miss so the caller keeps the analytic visibility.
+fn vsm_sample_directional(world_position: vec3<f32>) -> f32 {
+    let camera_world = view.world_camera_position.xyz;
+    let right = vsm_params.light_right;
+    let up = vsm_params.light_up;
+    let forward = vsm_params.light_forward;
+
+    let world_xy = vec2<f32>(dot(world_position, right), dot(world_position, up));
+    let camera_xy = vec2<f32>(dot(camera_world, right), dot(camera_world, up));
+    let view_distance = length(world_position - camera_world);
+    // Reproduce the caster-depth projection's NDC encoding exactly (abi.rs /
+    // atlas::projection): clip.z = (world . forward) * depth_scale + depth_bias,
+    // measured from the world-origin plane (depth_bias = 0.5), so the compare
+    // against the stored depth is meaningful. `reference_depth <= stored => lit`.
+    let reference_depth = clamp(
+        dot(world_position, forward) * vsm_params.depth_scale + vsm_params.depth_bias,
+        0.0,
+        1.0,
+    );
+
+    let level = vsm_select_level(view_distance);
+    let pws = vsm_page_world_size(level);
+    let world_page = vsm_world_page_coords(level, world_xy);
+
+    let slot = vsm_window_slot(level, world_page, camera_xy);
+    if (slot < 0) {
+        return VSM_MISS;
+    }
+    let physical = vsm_page_table[u32(slot)];
+    if (physical == VSM_PAGE_UNMAPPED) {
+        return VSM_MISS;
+    }
+
+    // Fraction of the sampled point within its virtual page, in [0, 1).
+    let page_origin_world = vec2<f32>(f32(world_page.x), f32(world_page.y)) * pws;
+    let in_page_frac = clamp((world_xy - page_origin_world) / pws, vec2<f32>(0.0), vec2<f32>(1.0));
+
+    // The physical page's tile in the square atlas grid.
+    let edge_phys = vsm_physical_edge();
+    let tile = vec2<f32>(
+        f32(physical % edge_phys),
+        f32(physical / edge_phys),
+    );
+    let inv_edge_phys = 1.0 / f32(edge_phys);
+    let page_size = f32(max(vsm_params.page_size, 1u));
+    // Half a physical texel, in page-local fraction units; the PCF step and the
+    // clamp that keeps taps inside this page so the filter cannot bleed across a
+    // seam into the unrelated pages packed beside it in the atlas.
+    let texel_frac = 1.0 / page_size;
+    let half_texel = 0.5 * texel_frac;
+
+    let r = max(vsm_params.pcf_radius, 0);
+    var lit = 0.0;
+    var taps = 0.0;
+    for (var y: i32 = -r; y <= r; y = y + 1) {
+        for (var x: i32 = -r; x <= r; x = x + 1) {
+            let offset = vec2<f32>(f32(x), f32(y)) * texel_frac;
+            let tap_frac = clamp(
+                in_page_frac + offset,
+                vec2<f32>(half_texel),
+                vec2<f32>(1.0 - half_texel),
+            );
+            let atlas_uv = (tile + tap_frac) * inv_edge_phys;
+            let stored = textureSampleLevel(vsm_physical_atlas, vsm_physical_sampler, atlas_uv, 0.0).r;
+            if (reference_depth <= stored) {
+                lit = lit + 1.0;
+            }
+            taps = taps + 1.0;
+        }
+    }
+    return lit / taps;
+}
+
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) world_position: vec3<f32>,
@@ -221,6 +429,16 @@ fn shade_pbr_core(in: VertexOutput) -> vec4<f32> {
         dl.direction = s.direction;
         dl.illuminance = s.illuminance;
         dl.visibility = s.visibility;
+        // Primary directional light (index 0) is the VSM caster. A resident
+        // page replaces the analytic visibility with the filtered shadow; a
+        // miss (`VSM_MISS` < 0) leaves the analytic value untouched, so the
+        // water pass needs no cascaded fallback of its own.
+        if i == 0u && vsm_params.sample_enable != 0u {
+            let v = vsm_sample_directional(in.world_position);
+            if v >= 0.0 {
+                dl.visibility = s.visibility * v;
+            }
+        }
         lit = lit + water_direct(surface, frame, dl);
     }
     for (var i = 0u; i < env.punctual_count; i = i + 1u) {

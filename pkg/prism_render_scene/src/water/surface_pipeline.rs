@@ -203,6 +203,14 @@ pub(crate) struct WaterSurfacePipelines {
     /// the [`PipelineCache`] with the same descriptor the resolve pipeline uses,
     /// so the two can never drift.
     pub(crate) light_layout: BindGroupLayoutDescriptor,
+    /// The water-surface `@group(2)` virtual-shadow-map layout descriptor (page
+    /// table + physical atlas + sampler + params), a re-numbered twin of the
+    /// opaque resolve pass's VSM group. Built from
+    /// [`super::surface_vsm::vsm_layout_entries`] so the primary directional
+    /// light's shadow is sampled from the identical demand-paged atlas. Resolved
+    /// to the live [`BindGroupLayout`](bevy_render::render_resource::BindGroupLayout)
+    /// through the [`PipelineCache`] with the same descriptor the draw node binds.
+    pub(crate) vsm_layout: BindGroupLayoutDescriptor,
     /// The embedded `water_surface_raster.wesl` module both stages compile from.
     pub(crate) shader: Handle<Shader>,
 }
@@ -216,7 +224,11 @@ impl SpecializedRenderPipeline for WaterSurfacePipelines {
         let draw = plan_surface_draw(key.frontend);
         RenderPipelineDescriptor {
             label: Some(format!("prism water surface {:?}", key.frontend).into()),
-            layout: vec![self.layout.clone(), self.light_layout.clone()],
+            layout: vec![
+                self.layout.clone(),
+                self.light_layout.clone(),
+                self.vsm_layout.clone(),
+            ],
             immediate_size: 0,
             vertex: VertexState {
                 shader: self.shader.clone(),
@@ -314,9 +326,18 @@ pub(crate) fn init_water_surface_pipelines(
         "../shaders/water_surface_raster.wesl"
     );
 
+    // The `@group(2)` VSM layout is a re-numbered twin of the opaque resolve
+    // pass's virtual-shadow-map group; the draw node binds either the resident
+    // page table + atlas or the format-correct fallback against this descriptor.
+    let vsm_layout = BindGroupLayoutDescriptor::new(
+        "prism water surface vsm",
+        &super::surface_vsm::vsm_layout_entries(),
+    );
+
     commands.insert_resource(WaterSurfacePipelines {
         layout,
         light_layout,
+        vsm_layout,
         shader,
     });
 }
@@ -378,6 +399,10 @@ mod tests {
         WaterSurfacePipelines {
             layout: BindGroupLayoutDescriptor::new("prism water surface", &entries),
             light_layout: BindGroupLayoutDescriptor::new("prism lights", &light_entries),
+            vsm_layout: BindGroupLayoutDescriptor::new(
+                "prism water surface vsm",
+                &crate::water::surface_vsm::vsm_layout_entries(),
+            ),
             shader: Handle::default(),
         }
     }
@@ -458,9 +483,10 @@ mod tests {
         assert_eq!(depth.depth_compare, Some(CompareFunction::GreaterEqual));
         assert_eq!(desc.primitive.cull_mode, None);
         assert_eq!(desc.primitive.topology, PrimitiveTopology::TriangleList);
-        // Two bind-group layouts: the per-body @group(0) surface layout and the
-        // shared @group(1) engine light table the fragment stage now samples.
-        assert_eq!(desc.layout.len(), 2);
+        // Three bind-group layouts: the per-body @group(0) surface layout, the
+        // shared @group(1) engine light table the fragment stage samples, and the
+        // @group(2) virtual-shadow-map twin the primary directional light reads.
+        assert_eq!(desc.layout.len(), 3);
     }
 
     #[test]

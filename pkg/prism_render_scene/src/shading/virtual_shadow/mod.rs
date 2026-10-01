@@ -37,7 +37,10 @@
 
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "VSM ABI's page-mark / sample blocks are consumed by the device-side wiring slice added separately")
+    expect(
+        dead_code,
+        reason = "VSM ABI's page-mark / sample blocks are consumed by the device-side wiring slice added separately"
+    )
 )]
 mod abi;
 mod atlas;
@@ -60,8 +63,7 @@ mod shader_tests;
 )]
 pub(crate) use abi::{
     window_slot_count, GpuVsmPageMarkParams, GpuVsmReceiver, GpuVsmReceiverGenParams,
-    GpuVsmSampleParams,
-    VSM_PAGE_MARK_WORKGROUP_SIZE, VSM_PAGE_UNMAPPED, VSM_SAMPLE_WORKGROUP_SIZE,
+    GpuVsmSampleParams, VSM_PAGE_MARK_WORKGROUP_SIZE, VSM_PAGE_UNMAPPED, VSM_SAMPLE_WORKGROUP_SIZE,
 };
 
 pub(crate) use bind_groups::prepare_vsm_receiver_gen_bind_groups;
@@ -97,7 +99,7 @@ pub(crate) use page_mark::{
 
 pub(crate) use page_table::{
     collect_vsm_page_readback, map_submitted_vsm_page_readback, request_vsm_page_readback,
-    VirtualShadowMapDriver, VsmPageRequestReadback, VsmPageTableBufferCache,
+    ViewVsmPageTable, VirtualShadowMapDriver, VsmPageRequestReadback, VsmPageTableBufferCache,
 };
 
 pub(crate) use bridge::{bridge_vsm_view_resources, VsmBridgeCache};
