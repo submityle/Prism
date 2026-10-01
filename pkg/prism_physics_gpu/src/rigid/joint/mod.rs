@@ -61,6 +61,15 @@
 //!   linear position drive, leaving the spin about the axis free).
 //! * [`cylindrical_drive_gpu`] — the device-side
 //!   [`GpuCylindricalDriveJointSolver`] twin.
+//! * [`cylindrical_limit`] — the [`CylindricalLimitJoint`] (cylindrical
+//!   joint with a one-sided travel limit along its slide axis)
+//!   definition and its device-packed storage representation.
+//! * [`cylindrical_limit_cpu`] — the authoritative
+//!   [`cpu_solve_joints_cylindrical_limit`] golden stepper (axis alignment
+//!   plus a point-on-line weld plus an along-axis one-sided travel limit
+//!   with a free dead zone, leaving the spin about the axis free).
+//! * [`cylindrical_limit_gpu`] — the device-side
+//!   [`GpuCylindricalLimitJointSolver`] twin.
 //! * [`distance`] — the [`DistanceJoint`] (limit) definition and its
 //!   device-packed storage representation.
 //! * [`distance_cpu`] — the authoritative [`cpu_solve_joints_distance`] golden
@@ -133,6 +142,9 @@ mod cylindrical_drive;
 mod cylindrical_drive_cpu;
 mod cylindrical_drive_gpu;
 mod cylindrical_gpu;
+mod cylindrical_limit;
+mod cylindrical_limit_cpu;
+mod cylindrical_limit_gpu;
 mod distance;
 mod distance_cpu;
 mod distance_gpu;
@@ -178,6 +190,9 @@ pub use cylindrical_drive::CylindricalDriveJoint;
 pub use cylindrical_drive_cpu::cpu_solve_joints_cylindrical_drive;
 pub use cylindrical_drive_gpu::GpuCylindricalDriveJointSolver;
 pub use cylindrical_gpu::GpuCylindricalJointSolver;
+pub use cylindrical_limit::CylindricalLimitJoint;
+pub use cylindrical_limit_cpu::cpu_solve_joints_cylindrical_limit;
+pub use cylindrical_limit_gpu::GpuCylindricalLimitJointSolver;
 pub use distance::DistanceJoint;
 pub use distance_cpu::cpu_solve_joints_distance;
 pub use distance_gpu::GpuDistanceJointSolver;
