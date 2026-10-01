@@ -864,10 +864,62 @@ pub fn quad_sdf(point: [f32; 3], a: [f32; 3], b: [f32; 3], c: [f32; 3], d: [f32;
     squared.sqrt()
 }
 
+/// Signed distance from `point` to a capped cone (conical frustum) with
+/// arbitrary endpoints: a circular cap of radius `ra` centred at `a` and a
+/// circular cap of radius `rb` centred at `b`, with a straight lateral surface
+/// between them.
+///
+/// This is the general-orientation, two-radius generalisation of
+/// [`capped_cylinder`] and [`capped_cone`] (which are axis-aligned and share a
+/// base at the origin): it places both caps anywhere in space, so it directly
+/// models tapered limbs, bolts, nozzles, and trunk segments without a wrapping
+/// transform. With `ra == rb` it degenerates to a capped cylinder along `a->b`.
+///
+/// This is Inigo Quilez's exact `sdCappedCone(p, a, b, ra, rb)`: the query is
+/// reduced to the axial coordinate `paba` (fractional position along `a->b`)
+/// and the radial distance `x` from the axis, then the nearest feature is the
+/// smaller of the distance to a cap rim (`cax`/`cay`) and the distance to the
+/// slanted lateral line (`cbx`/`cby`), with an interior sign test. Built from
+/// `dot`, `clamp`, `abs`, `min`/`max`, and two square roots, so it stays
+/// transcendental-free and yields a true distance (not a bound) inside and out.
+///
+/// Degenerate inputs (`a == b`) make `baba` vanish and the axial projection
+/// divide by zero; callers must pass distinct endpoints.
+pub fn capped_cone_segment(point: [f32; 3], a: [f32; 3], b: [f32; 3], ra: f32, rb: f32) -> f32 {
+    let rba = rb - ra;
+    let ba = sub3(b, a);
+    let pa = sub3(point, a);
+    let baba = dot(ba, ba);
+    let papa = dot(pa, pa);
+    // Fractional axial coordinate of the query's projection onto `a->b`.
+    let paba = dot(pa, ba) / baba;
+    // Perpendicular (radial) distance from the axis, guarded against tiny
+    // negative round-off before the square root.
+    let x = (papa - paba * paba * baba).max(0.0).sqrt();
+
+    // Nearest cap-rim feature: radial overshoot past whichever cap governs,
+    // paired with the axial overshoot past the `[0, 1]` segment.
+    let cax = (x - if paba < 0.5 { ra } else { rb }).max(0.0);
+    let cay = (paba - 0.5).abs() - 0.5;
+
+    // Nearest lateral-line feature: foot of the perpendicular onto the slanted
+    // side, clamped to the frustum's extent.
+    let k = rba * rba + baba;
+    let f = ((rba * (x - ra) + paba * baba) / k).clamp(0.0, 1.0);
+    let cbx = x - ra - f * rba;
+    let cby = paba - f;
+
+    // Interior when both the lateral and axial residuals are negative.
+    let sign = if cbx < 0.0 && cay < 0.0 { -1.0 } else { 1.0 };
+    sign * (cax * cax + cay * cay * baba)
+        .min(cbx * cbx + cby * cby * baba)
+        .sqrt()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        box_frame, box_sdf, capped_cone, capped_cylinder, capped_torus, capsule, cone_sdf, cut_hollow_sphere, cut_sphere,
+        box_frame, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_torus, capsule, cone_sdf, cut_hollow_sphere, cut_sphere,
         death_star, ellipsoid_sdf, hex_prism, infinite_cylinder, length2, line_sdf, link, octahedron, plane, pyramid, rhombus, round_box,
         quad_sdf, round_cone_sdf, rounded_cylinder, solid_angle, sphere, torus, triangle_sdf, triangular_prism, vesica,
     };
@@ -1345,6 +1397,136 @@ mod tests {
             let reference = quad_brute_force(p, a, b, c, d);
             assert!(
                 (got - reference).abs() < 3e-3,
+                "point {p:?}: got {got}, reference {reference}"
+            );
+        }
+    }
+
+    // Brute-force reference for a capped-cone frustum: minimum distance from `p`
+    // to a dense sampling of the lateral surface and both circular caps.
+    fn frustum_brute_force(
+        p: [f32; 3],
+        a: [f32; 3],
+        b: [f32; 3],
+        ra: f32,
+        rb: f32,
+    ) -> f32 {
+        // Orthonormal basis perpendicular to the axis a->b.
+        let axis = {
+            let v = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+            let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+            [v[0] / l, v[1] / l, v[2] / l]
+        };
+        let seed = if axis[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
+        let u = {
+            let c = [
+                axis[1] * seed[2] - axis[2] * seed[1],
+                axis[2] * seed[0] - axis[0] * seed[2],
+                axis[0] * seed[1] - axis[1] * seed[0],
+            ];
+            let l = (c[0] * c[0] + c[1] * c[1] + c[2] * c[2]).sqrt();
+            [c[0] / l, c[1] / l, c[2] / l]
+        };
+        let w = [
+            axis[1] * u[2] - axis[2] * u[1],
+            axis[2] * u[0] - axis[0] * u[2],
+            axis[0] * u[1] - axis[1] * u[0],
+        ];
+        let dist = |q: [f32; 3]| {
+            ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2) + (p[2] - q[2]).powi(2)).sqrt()
+        };
+        let mut best = f32::INFINITY;
+        const NT: usize = 240;
+        const NA: usize = 240;
+        for i in 0..=NA {
+            let t = i as f32 / NA as f32;
+            let center = [
+                a[0] + (b[0] - a[0]) * t,
+                a[1] + (b[1] - a[1]) * t,
+                a[2] + (b[2] - a[2]) * t,
+            ];
+            let r = ra + (rb - ra) * t;
+            for j in 0..NT {
+                let ang = std::f32::consts::TAU * j as f32 / NT as f32;
+                let (sa, ca) = (ang.sin(), ang.cos());
+                let q = [
+                    center[0] + r * (ca * u[0] + sa * w[0]),
+                    center[1] + r * (ca * u[1] + sa * w[1]),
+                    center[2] + r * (ca * u[2] + sa * w[2]),
+                ];
+                let d = dist(q);
+                if d < best {
+                    best = d;
+                }
+            }
+        }
+        // Interior of both caps.
+        for &(center, rad) in &[(a, ra), (b, rb)] {
+            for i in 0..=60 {
+                let rr = rad * i as f32 / 60.0;
+                for j in 0..120 {
+                    let ang = std::f32::consts::TAU * j as f32 / 120.0;
+                    let (sa, ca) = (ang.sin(), ang.cos());
+                    let q = [
+                        center[0] + rr * (ca * u[0] + sa * w[0]),
+                        center[1] + rr * (ca * u[1] + sa * w[1]),
+                        center[2] + rr * (ca * u[2] + sa * w[2]),
+                    ];
+                    let d = dist(q);
+                    if d < best {
+                        best = d;
+                    }
+                }
+            }
+        }
+        best
+    }
+
+    #[test]
+    fn capped_cone_segment_degenerates_to_capped_cylinder() {
+        // Equal radii along +y from the origin: must agree with the axis-aligned
+        // capped cylinder (whose segment runs y in [-h, h], centred at origin).
+        // Build the same shape as a segment and compare at several queries.
+        let h = 1.5f32;
+        let r = 0.6f32;
+        let a = [0.0, -h, 0.0];
+        let b = [0.0, h, 0.0];
+        for &p in &[
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0],
+            [0.9, 1.9, 0.0],
+            [0.3, -0.4, 0.2],
+        ] {
+            let seg = capped_cone_segment(p, a, b, r, r);
+            let cyl = capped_cylinder(p, h, r);
+            assert!(
+                (seg - cyl).abs() < 1e-5,
+                "point {p:?}: segment {seg}, cylinder {cyl}"
+            );
+        }
+    }
+
+    #[test]
+    fn capped_cone_segment_matches_brute_force_general() {
+        // A tilted, off-origin frustum with distinct radii.
+        let a = [0.2, -0.3, 0.1];
+        let b = [1.4, 1.1, -0.6];
+        let (ra, rb) = (0.7f32, 0.3f32);
+        for &p in &[
+            [0.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0],
+            [-0.5, 0.5, 0.5],
+            [0.8, 0.4, 0.2],
+            [2.0, 2.0, -1.5],
+            [0.6, 0.1, -0.3],
+        ] {
+            let got = capped_cone_segment(p, a, b, ra, rb);
+            let reference = frustum_brute_force(p, a, b, ra, rb);
+            // Exterior points: brute force converges from above, so allow a
+            // one-sided sampling slack; magnitude must still match tightly.
+            assert!(
+                (got.abs() - reference).abs() < 6e-3,
                 "point {p:?}: got {got}, reference {reference}"
             );
         }
