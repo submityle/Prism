@@ -14,6 +14,7 @@ mod record;
 mod registry;
 mod resources;
 mod surface;
+mod texture_addressing;
 mod texture_lod;
 mod validation;
 
@@ -39,6 +40,7 @@ pub use surface::{
     GpuSurfaceCore, GpuTransmissionLobe, LobeMask, SurfaceParameterBlock, SurfaceUnpackError,
     SURFACE_CORE_WORDS, SURFACE_LOBE_WORDS,
 };
+pub use texture_addressing::{address_uv, wrap_coord, AddressResult, WrapMode};
 pub use texture_lod::{
     anisotropic_taps, cone_mip_level, mip_from_isotropic_footprint, trilinear_mip, AnisoTaps,
     AnisotropicMip, PageRequest, RayCone, RayDifferential, TriangleLodConstant, TrilinearMip,
