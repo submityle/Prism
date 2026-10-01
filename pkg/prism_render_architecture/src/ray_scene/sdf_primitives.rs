@@ -1820,6 +1820,21 @@ pub fn box_2d(point: [f32; 2], half_extent: [f32; 2]) -> f32 {
     length2([qx.max(0.0), qy.max(0.0)]) + qx.max(qy).min(0.0)
 }
 
+/// Exact signed distance to a vertical capsule in 3D: the segment from the
+/// origin to `(0, height, 0)` inflated by radius `radius` (Inigo Quilez
+/// `sdVerticalCapsule`).
+///
+/// Clamping the query's height into `[0, height]` snaps it onto the nearest
+/// point of the axis segment; the field is then the distance to that point
+/// minus the radius. This is the axis-aligned specialisation of the general
+/// `capsule`, kept as a dedicated entry because it avoids the segment
+/// projection and is the common upright-pill case. Built from `clamp`, `min`,
+/// `max` and `sqrt`, so it is exact and transcendental-free.
+pub fn vertical_capsule(point: [f32; 3], height: f32, radius: f32) -> f32 {
+    let qy = point[1] - point[1].clamp(0.0, height);
+    length([point[0], qy, point[2]]) - radius
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1827,7 +1842,7 @@ mod tests {
         cut_sphere, cylinder_segment, death_star, egg_2d, ellipsoid_sdf, equilateral_triangle_2d, heart_2d, hex_prism, hexagram_2d, infinite_cone, infinite_cylinder, isosceles_triangle_2d, length2, line_sdf, link, moon,
         octagon_prism, octahedron, oriented_box_2d, parallelogram, pentagram_2d, pie, plane, polygon_2d, pyramid, quad_sdf, regular_hexagon_2d, regular_octagon_2d, regular_pentagon_2d, rhombus, rhombus_2d, round_box, round_cone_sdf,
         round_cone_segment, rounded_box_2d, rounded_cylinder, rounded_x, segment_2d, solid_angle, sphere, star5_2d, torus, trapezoid_isosceles, triangle_2d, triangle_sdf, triangular_prism,
-        uneven_capsule_2d, vesica, vesica_2d, vesica_segment,
+        uneven_capsule_2d, vertical_capsule, vesica, vesica_2d, vesica_segment,
     };
 
     #[test]
@@ -3515,6 +3530,44 @@ mod tests {
                 let got = box_2d(p, b);
                 let want = rounded_box_2d(p, b, [0.0; 4]);
                 assert!((got - want).abs() < 1e-6, "box mismatch at {p:?}: {got} vs {want}");
+                j += 1;
+            }
+            i += 1;
+        }
+    }
+
+    #[test]
+    fn vertical_capsule_axis_caps_and_flank() {
+        let h = 3.0f32;
+        let r = 1.0f32;
+        // Radially out from the mid-axis: distance is radial gap.
+        assert!((vertical_capsule([2.0, 1.5, 0.0], h, r) - 1.0).abs() < 1e-6);
+        assert!((vertical_capsule([0.0, 1.5, 2.0], h, r) - 1.0).abs() < 1e-6);
+        // Above the top cap along the axis: spherical cap distance.
+        assert!((vertical_capsule([0.0, h + 2.0, 0.0], h, r) - 1.0).abs() < 1e-6);
+        // Below the bottom cap along the axis.
+        assert!((vertical_capsule([0.0, -2.0, 0.0], h, r) - 1.0).abs() < 1e-6);
+        // On the axis inside the segment: negative radius.
+        assert!((vertical_capsule([0.0, 1.0, 0.0], h, r) - (-1.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn vertical_capsule_matches_general_capsule() {
+        // Must equal the general capsule along the (0,0,0)->(0,h,0) segment.
+        let h = 2.5f32;
+        let r = 0.75f32;
+        let mut i = -30i32;
+        while i <= 30 {
+            let mut j = -30i32;
+            while j <= 30 {
+                let mut k = -30i32;
+                while k <= 30 {
+                    let p = [i as f32 * 0.2, j as f32 * 0.2, k as f32 * 0.2];
+                    let got = vertical_capsule(p, h, r);
+                    let want = capsule(p, [0.0, 0.0, 0.0], [0.0, h, 0.0], r);
+                    assert!((got - want).abs() < 1e-5, "mismatch at {p:?}: {got} vs {want}");
+                    k += 10;
+                }
                 j += 1;
             }
             i += 1;
