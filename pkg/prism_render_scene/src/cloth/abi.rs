@@ -516,7 +516,7 @@ pub(crate) struct GpuClothPaintedParams {
 /// 16-byte uniform driving the sleep kinetic-indicator reduction. Carries only
 /// the particle count bounding the dispatch plus three pad words to a whole
 /// 16-byte uniform stride. The reduction reads the per-particle velocities and
-/// folds a single scalar (the largest velocity length_squared over the unpinned
+/// folds a single scalar (the largest velocity `length_squared` over the unpinned
 /// particles) back to the host, mirroring the golden
 /// `prism_render_architecture::cloth::sleep::max_kinetic_indicator`.
 #[repr(C)]
