@@ -48,6 +48,8 @@ mod coverage;
 mod dispatch;
 #[cfg(test)]
 mod embed_gpu_tests;
+#[cfg(test)]
+mod embed_parity;
 mod extract;
 mod garment;
 #[cfg(test)]
