@@ -23,6 +23,10 @@
 //!   vectorscope coordinate generator that emits rotated mid/side (X/Y) point
 //!   clouds for Lissajous stereo-field visualisation, complementing the scalar
 //!   readings of the [`correlation`] meter.
+//! - [`spectrum::SpectrumAnalyzer`] / [`spectrum::SpectrumNode`] -- a windowed
+//!   radix-2 FFT magnitude-spectrum analyzer that reports where a signal's
+//!   energy lives across frequency, complementing the loudness, correlation,
+//!   and goniometer meters that describe level and stereo image.
 //!
 //! # Provenance
 //!
@@ -42,6 +46,7 @@
 pub mod correlation;
 pub mod goniometer;
 pub mod loudness;
+pub mod spectrum;
 
 pub use correlation::{CorrelationMeasurement, CorrelationMeter, CorrelationMeterNode};
 pub use goniometer::{
@@ -50,4 +55,7 @@ pub use goniometer::{
 };
 pub use loudness::{
     KWeighting, LoudnessMeasurement, LoudnessMeter, LoudnessMeterNode, TruePeakMeter,
+};
+pub use spectrum::{
+    DEFAULT_FFT_SIZE, DEFAULT_HOP, MIN_FFT_SIZE, SpectrumAnalyzer, SpectrumNode, Window,
 };
