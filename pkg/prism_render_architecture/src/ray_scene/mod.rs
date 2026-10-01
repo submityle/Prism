@@ -178,6 +178,10 @@
 //!   `sqrt`, no transcendental), reporting the parametric
 //!   [`bilinear_patch::BilinearPatchHit`] with `u`/`v`, and a single-level
 //!   [`bilinear_patch::BilinearPatchBvh`] over the corner `AABB`s.
+//! - [`bilinear_patch_gpu_layout`] — flat `GPU` buffers for the
+//!   [`bilinear_patch::BilinearPatchBvh`] ([`BILINEAR_PATCH_WORDS`] stride,
+//!   node records reusing the shared [`NODE_WORDS`]) with a packed patch walk
+//!   that reproduces the in-memory walk bit-for-bit.
 //! - [`traversal`] — [`Ray`]/`BVH` slab + Möller–Trumbore intersection with
 //!   closest-hit and any-hit walks (the `GPU` traversal kernel's golden ref).
 //! - [`traversal_stackless`] — stackless (threaded / escape-index) `BVH` walk:
@@ -221,6 +225,7 @@ pub mod capsule_gpu_layout;
 pub mod round_cone;
 pub mod round_cone_gpu_layout;
 pub mod bilinear_patch;
+pub mod bilinear_patch_gpu_layout;
 pub mod footprint;
 pub mod gpu_layout;
 pub mod motion;
@@ -275,6 +280,7 @@ pub use capsule_gpu_layout::{GpuCapsuleBvhBuffers, CAPSULE_WORDS};
 pub use round_cone::{RoundCone, RoundConeBvh, RoundConeHit};
 pub use round_cone_gpu_layout::{GpuRoundConeBvhBuffers, ROUND_CONE_WORDS};
 pub use bilinear_patch::{BilinearPatch, BilinearPatchBvh, BilinearPatchHit};
+pub use bilinear_patch_gpu_layout::{GpuBilinearPatchBvhBuffers, BILINEAR_PATCH_WORDS};
 pub use rectangle_gpu_layout::{GpuRectangleBvhBuffers, RECTANGLE_WORDS};
 pub use aabb_primitive_gpu_layout::{GpuAabbBvhBuffers, AABB_PRIMITIVE_WORDS};
 pub use sphere_gpu_layout::{GpuSphereBvhBuffers, SPHERE_WORDS};
