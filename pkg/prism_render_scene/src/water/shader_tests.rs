@@ -131,6 +131,21 @@ fn water_spectrum_fft_wesl_compiles_standalone() {
     );
 }
 
+/// The surface *meshing* compute pass (`water_surface_mesh`): one invocation
+/// per surface vertex samples the assembled displacement/normal textures and
+/// scatters the result into the four per-vertex storage arrays the raster draw
+/// reads. Self-contained (no imports), so a green compile guards the lattice
+/// `uv` maths and the four `storage, read_write` output bindings against the
+/// `CPU` twin `prism_render_architecture::water::gpu::surface_mesh`.
+#[test]
+fn water_surface_mesh_wesl_compiles_standalone() {
+    compile_standalone(
+        include_str!("../shaders/water_surface_mesh.wesl"),
+        "embedded://prism_render_scene/shaders/water_surface_mesh.wesl",
+        0x5052_4953_4d5f_5741_5445_524d_4553_0001,
+    );
+}
+
 /// Registers `lighting.wesl` and `brdf.wesl` under their canonical module paths
 /// and compiles `water.wesl`, forcing the importer to resolve the
 /// `prism_render_scene::shaders::{brdf, lighting}::{...}` imports the
