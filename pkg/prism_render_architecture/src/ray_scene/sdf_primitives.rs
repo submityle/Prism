@@ -105,6 +105,84 @@ pub fn torus(point: [f32; 3], major_radius: f32, minor_radius: f32) -> f32 {
     (ring * ring + point[1] * point[1]).sqrt() - minor_radius
 }
 
+/// Exact surface normal (unit gradient of the signed distance) of [`sphere`]
+/// at `point`: the outward radial direction `point / |point|`. Returns the
+/// zero vector at the degenerate centre where the normal is undefined.
+///
+/// A sphere's SDF is a true distance field, so its gradient is already unit
+/// length everywhere off the centre; this is the analytic normal with zero
+/// finite-difference error, suitable as the shading normal on the analytic
+/// golden path and as the ground truth for the sampled-field normal estimators.
+pub fn sphere_gradient(point: [f32; 3]) -> [f32; 3] {
+    let l = length(point);
+    if l == 0.0 {
+        return [0.0, 0.0, 0.0];
+    }
+    [point[0] / l, point[1] / l, point[2] / l]
+}
+
+/// Exact surface normal (unit gradient) of [`box_sdf`] at `point` for a box of
+/// `half_extent`.
+///
+/// Outside the box the gradient points along the positive overshoot
+/// `max(|p| - b, 0)`, normalised and re-signed per axis; inside, the nearest
+/// face is the single least-negative axis, so the normal is the unit axis
+/// vector along that face (sign of the corresponding coordinate). The result is
+/// unit length away from edges/corners (the measure-zero creases where the
+/// normal is genuinely undefined). This is the analytic normal of
+/// [`box_sdf`] with no finite-difference error.
+pub fn box_gradient(point: [f32; 3], half_extent: [f32; 3]) -> [f32; 3] {
+    let q = [
+        point[0].abs() - half_extent[0],
+        point[1].abs() - half_extent[1],
+        point[2].abs() - half_extent[2],
+    ];
+    let m = [q[0].max(0.0), q[1].max(0.0), q[2].max(0.0)];
+    let len = length(m);
+    if len > 0.0 {
+        // Exterior: normalise the overshoot and restore each axis' sign.
+        return [
+            point[0].signum() * m[0] / len,
+            point[1].signum() * m[1] / len,
+            point[2].signum() * m[2] / len,
+        ];
+    }
+    // Interior: nearest face is the least-negative axis (largest q_i).
+    if q[0] >= q[1] && q[0] >= q[2] {
+        [point[0].signum(), 0.0, 0.0]
+    } else if q[1] >= q[2] {
+        [0.0, point[1].signum(), 0.0]
+    } else {
+        [0.0, 0.0, point[2].signum()]
+    }
+}
+
+/// Exact surface normal (unit gradient) of [`torus`] at `point` for the ring of
+/// `major_radius` and tube `minor_radius`.
+///
+/// With `rho = |p.xz|` and the reduced coordinates `q = (rho - major, p.y)`,
+/// the gradient is `((q.x / |q|) * p.xz / rho, q.y / |q|)` — the planar
+/// component points radially in the `xz` plane while the `y` component follows
+/// the tube cross-section; it is unit length by construction. On the central
+/// `y` axis (`rho = 0`) the planar direction is undefined, so the pure `+y`
+/// axis is returned as a stable fallback.
+pub fn torus_gradient(point: [f32; 3], major_radius: f32, minor_radius: f32) -> [f32; 3] {
+    let _ = minor_radius; // the normal is independent of the tube radius
+    let rho = (point[0] * point[0] + point[2] * point[2]).sqrt();
+    let qx = rho - major_radius;
+    let qy = point[1];
+    let l = (qx * qx + qy * qy).sqrt();
+    if l == 0.0 {
+        return [0.0, 1.0, 0.0];
+    }
+    if rho == 0.0 {
+        // On the symmetry axis the planar direction is undefined.
+        return [0.0, qy.signum(), 0.0];
+    }
+    let radial = (qx / l) / rho;
+    [radial * point[0], qy / l, radial * point[2]]
+}
+
 /// Signed distance from `point` to a capsule: the segment from `a` to `b`
 /// swept by a sphere of `radius`.
 ///
@@ -2027,11 +2105,11 @@ pub fn segment_3d(point: [f32; 3], a: [f32; 3], b: [f32; 3]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        annulus_2d, arc, box_2d, box_frame, box_frame_2d, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_torus, capsule, capsule_2d, circle_2d, cone_sdf, cross_2d, cut_disk_2d, cut_hollow_sphere,
+        annulus_2d, arc, box_2d, box_frame, box_frame_2d, box_gradient, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_torus, capsule, capsule_2d, circle_2d, cone_sdf, cross_2d, cut_disk_2d, cut_hollow_sphere,
         cut_sphere, cylinder_segment, death_star, egg_2d, ellipsoid_sdf, equilateral_triangle_2d, heart_2d, hex_prism, hexagram_2d, horseshoe_2d, infinite_cone, infinite_cylinder, isosceles_triangle_2d, length2, line_sdf, link, moon,
         octagon_prism, octahedron, oriented_box_2d, oriented_vesica_2d, parallelogram, pentagram_2d, pie, plane, polygon_2d, pyramid, quad_sdf, regular_hexagon_2d, regular_octagon_2d, regular_pentagon_2d, rhombus, rhombus_2d, round_box, round_cone_sdf,
         round_cone_segment, rounded_box_2d, rounded_cross_2d, rounded_cylinder, rounded_x,
-        segment_2d, segment_3d, solid_angle, sphere, star5_2d, torus, trapezoid_isosceles, triangle_2d, triangle_sdf, triangular_prism, tunnel_2d,
+        segment_2d, segment_3d, solid_angle, sphere, sphere_gradient, star5_2d, torus, torus_gradient, trapezoid_isosceles, triangle_2d, triangle_sdf, triangular_prism, tunnel_2d,
         uneven_capsule_2d, vertical_capsule, vesica, vesica_2d, vesica_segment,
     };
 
@@ -2887,6 +2965,83 @@ mod tests {
                 assert!((grad - 1.0).abs() < 5e-3, "eikonal theta={theta} p={p:?}: |grad|={grad}");
             }
         }
+    }
+
+    // Central-difference gradient of a 3D scalar field, the independent
+    // reference the analytic primitive gradients are checked against.
+    fn central_grad3(f: &dyn Fn([f32; 3]) -> f32, p: [f32; 3]) -> [f32; 3] {
+        let h = 1e-4_f32;
+        let mut g = [0.0_f32; 3];
+        for i in 0..3 {
+            let mut a = p;
+            let mut b = p;
+            a[i] += h;
+            b[i] -= h;
+            g[i] = (f(a) - f(b)) / (2.0 * h);
+        }
+        g
+    }
+
+    fn unit_len3(v: [f32; 3]) -> f32 {
+        (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()
+    }
+
+    #[test]
+    fn sphere_gradient_is_the_exact_unit_radial_normal() {
+        // Matches a central difference of the exact SDF, is unit length, and
+        // degrades to zero at the undefined centre.
+        for &p in &[[1.0_f32, 0.0, 0.0], [0.3, -0.7, 1.2], [-2.0, 0.5, -0.4]] {
+            let g = sphere_gradient(p);
+            assert!((unit_len3(g) - 1.0).abs() < 1e-6, "unit p={p:?}");
+            let fd = central_grad3(&|q| sphere(q, 1.3), p);
+            for k in 0..3 {
+                assert!((g[k] - fd[k]).abs() < 2e-3, "sphere grad p={p:?} axis {k}");
+            }
+        }
+        assert_eq!(sphere_gradient([0.0, 0.0, 0.0]), [0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn box_gradient_matches_central_difference_off_creases() {
+        let b = [0.7_f32, 1.0, 0.5];
+        // Points chosen away from faces/edges (the measure-zero creases).
+        for &p in &[
+            [1.4_f32, 0.2, -0.1],   // exterior, +x face region
+            [0.1, 1.6, 0.2],        // exterior, +y face region
+            [-1.3, -1.4, -1.1],     // exterior corner octant
+            [0.2, -0.3, 0.1],       // deep interior, dominant -nearest face
+            [0.55, 0.1, 0.1],       // interior near +x face (x least-negative)
+        ] {
+            let g = box_gradient(p, b);
+            assert!((unit_len3(g) - 1.0).abs() < 1e-6, "unit p={p:?}");
+            let fd = central_grad3(&|q| box_sdf(q, b), p);
+            for k in 0..3 {
+                assert!((g[k] - fd[k]).abs() < 1e-3, "box grad p={p:?} axis {k}: {} vs {}", g[k], fd[k]);
+            }
+        }
+        // Interior point closest to the +x face points along +x.
+        assert_eq!(box_gradient([0.6, 0.05, 0.05], b), [1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn torus_gradient_matches_central_difference_and_axis_fallback() {
+        let (major, minor) = (1.0_f32, 0.3);
+        for &p in &[
+            [1.4_f32, 0.1, 0.0],
+            [0.9, 0.25, 0.6],
+            [-1.2, -0.2, 0.3],
+            [0.0, 0.4, 1.3],
+        ] {
+            let g = torus_gradient(p, major, minor);
+            assert!((unit_len3(g) - 1.0).abs() < 1e-6, "unit p={p:?}");
+            let fd = central_grad3(&|q| torus(q, major, minor), p);
+            for k in 0..3 {
+                assert!((g[k] - fd[k]).abs() < 2e-3, "torus grad p={p:?} axis {k}: {} vs {}", g[k], fd[k]);
+            }
+        }
+        // On the central y axis the planar direction is undefined -> +y axis.
+        assert_eq!(torus_gradient([0.0, 0.5, 0.0], major, minor), [0.0, 1.0, 0.0]);
+        assert_eq!(torus_gradient([0.0, -0.5, 0.0], major, minor), [0.0, -1.0, 0.0]);
     }
 
     // Exact unsigned distance to a 2D segment, used to cross-check `segment_2d`
