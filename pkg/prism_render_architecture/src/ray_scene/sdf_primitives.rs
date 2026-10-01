@@ -544,12 +544,42 @@ pub fn solid_angle(point: [f32; 3], sin_cos: [f32; 2], radius: f32) -> f32 {
     ball.max(flank * flank_sign)
 }
 
+/// Signed distance from `point` to a round cone: the convex hull of a sphere
+/// of radius `r1` centred at the origin and a sphere of radius `r2` centred at
+/// `(0, h, 0)`, i.e. a tapered capsule running along the `+y` axis.
+///
+/// Follows Inigo Quilez's exact `sdRoundCone`. The point is reduced to meridian
+/// coordinates `(radial distance from the y axis, height)`; the slope constant
+/// `b = (r1 - r2) / h` and its complement `a = sqrt(1 - b * b)` define the
+/// flank normal. Below the lower cap the bottom sphere governs, above the flank
+/// band the top sphere governs, and in between the exact flank-plane distance
+/// applies, so every region carries a true signed distance. The lone `sqrt` is
+/// guarded against the degenerate `|b| > 1` case and no transcendental function
+/// is used otherwise.
+pub fn round_cone_sdf(point: [f32; 3], r1: f32, r2: f32, h: f32) -> f32 {
+    let q = [length2([point[0], point[2]]), point[1]];
+    let b = (r1 - r2) / h;
+    let a = (1.0 - b * b).max(0.0).sqrt();
+    // Project onto the flank normal to pick the governing region.
+    let k = -b * q[0] + a * q[1];
+    if k < 0.0 {
+        // Below the lower cap: the bottom sphere governs.
+        length2(q) - r1
+    } else if k > a * h {
+        // Above the flank band: the top sphere governs.
+        length2([q[0], q[1] - h]) - r2
+    } else {
+        // On the flank band: exact distance to the tangent cone plane.
+        a * q[0] + b * q[1] - r1
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         box_frame, box_sdf, capped_cone, capped_cylinder, capped_torus, capsule, cut_sphere,
         ellipsoid_sdf, hex_prism, length2, link, octahedron, plane, pyramid, rhombus, round_box,
-        solid_angle, sphere, torus, triangular_prism, vesica,
+        round_cone_sdf, solid_angle, sphere, torus, triangular_prism, vesica,
     };
 
     #[test]
@@ -986,5 +1016,38 @@ mod tests {
         // Interior off-axis point: inside both the ball and the cone, governed
         // by the flank with a hand-derived reference.
         assert!((solid_angle([0.5, 1.5, 0.0], sc, ra) - (-0.316_987_3)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn round_cone_sphere_caps_and_interior() {
+        let (r1, r2, h) = (1.0f32, 0.4f32, 2.0f32);
+        // Bottom sphere centre: negative its radius.
+        assert!((round_cone_sdf([0.0, 0.0, 0.0], r1, r2, h) - (-1.0)).abs() < 1e-6);
+        // Top sphere centre: negative its radius.
+        assert!((round_cone_sdf([0.0, 2.0, 0.0], r1, r2, h) - (-0.4)).abs() < 1e-6);
+        // Bottom tip sits on the lower sphere surface.
+        assert!(round_cone_sdf([0.0, -1.0, 0.0], r1, r2, h).abs() < 1e-6);
+    }
+
+    #[test]
+    fn round_cone_exterior_regions() {
+        let (r1, r2, h) = (1.0f32, 0.4f32, 2.0f32);
+        // Above the top cap: distance to the top sphere.
+        assert!((round_cone_sdf([0.0, 3.0, 0.0], r1, r2, h) - 0.6).abs() < 1e-6);
+        // Radially out at the base: governed by the bottom sphere.
+        assert!((round_cone_sdf([2.0, 0.0, 0.0], r1, r2, h) - 1.0).abs() < 1e-6);
+        // On the tapered flank band: exact tangent-plane distance.
+        let expected = (0.91f32).sqrt() + 0.3 - 1.0;
+        assert!((round_cone_sdf([1.0, 1.0, 0.0], r1, r2, h) - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn round_cone_equal_radii_is_a_capsule() {
+        // Equal radii collapse the flank to a cylinder, i.e. a capsule.
+        let r = 0.5f32;
+        // Mid-height, exactly one radius off the axis: on the surface.
+        assert!(round_cone_sdf([0.5, 1.0, 0.0], r, r, 2.0).abs() < 1e-6);
+        // Mid-height interior point.
+        assert!((round_cone_sdf([0.2, 1.0, 0.0], r, r, 2.0) - (-0.3)).abs() < 1e-6);
     }
 }
