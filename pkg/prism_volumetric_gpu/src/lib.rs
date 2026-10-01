@@ -151,6 +151,7 @@ pub mod spectral_to_rgb;
 pub mod specular_aa;
 pub mod sphere_aabb;
 pub mod spherical_harmonics_rotate;
+pub mod sprite_stretch;
 pub mod storm_vertical_profile;
 pub mod sunset_inscatter_tint;
 pub mod sunset_reddening;
@@ -278,6 +279,7 @@ pub use sphere_aabb::{GpuSphereAabb, SphereAabbQuery};
 pub use spherical_harmonics_rotate::{
     GpuSphericalHarmonicsRotate, ShRotationProbe, ShRotationResult, L2_COEFF_COUNT,
 };
+pub use sprite_stretch::{GpuSpriteStretch, SpriteStretchQuery, SpriteStretchResult};
 pub use storm_vertical_profile::{GpuStormVerticalProfile, StormVerticalProfileQuery};
 pub use sunset_inscatter_tint::{GpuSunsetInscatterTint, InscatterTint, SunsetInscatterTintQuery};
 pub use sunset_reddening::{GpuSunsetReddening, SunsetReddeningQuery};
