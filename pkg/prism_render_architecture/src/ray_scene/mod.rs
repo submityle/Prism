@@ -285,6 +285,15 @@
 //!   holes) and tessellates only the kept region into a watertight,
 //!   conforming triangle mesh via marching squares with per-edge bisection
 //!   crossings and a cell-centre saddle test — the CAD/NURBS trimming path.
+//! - [`surface_group`] — weld many heterogeneous
+//!   [`triangle_mesh::TriangleMesh`] parts (the meshes emitted by
+//!   [`trimmed_surface`], [`displaced_surface`], or any other source) into
+//!   **one** merged [`surface_group::SurfaceGroup`] / single-`BLAS`
+//!   [`surface_group::SurfaceGroupBvh`], the counterpart to [`tlas`]
+//!   *instancing*: `TLAS` reuses one `BLAS` under many transforms, a surface
+//!   group *bakes* distinct meshes into one vertex/index pool while keeping
+//!   per-part triangle ranges so a hit resolves back to its originating part
+//!   ([`surface_group::SurfaceGroupHit`]) for per-sub-mesh material lookup.
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -428,6 +437,7 @@ pub mod nurbs_surface;
 pub mod bezier_surface;
 pub mod displaced_surface;
 pub mod trimmed_surface;
+pub mod surface_group;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -522,6 +532,7 @@ pub use nurbs_surface::{NurbsSurface, NurbsSurfaceError};
 pub use bezier_surface::{BezierSurface, BezierSurfaceError};
 pub use displaced_surface::{DisplacedSurface, HeightMap, HeightMapError, ParametricSurface};
 pub use trimmed_surface::{TrimLoop, TrimmedSurface, TrimmedSurfaceError};
+pub use surface_group::{SurfaceGroup, SurfaceGroupBvh, SurfaceGroupError, SurfaceGroupHit};
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
 pub use obb::{Obb, ObbBvh, ObbHit};
