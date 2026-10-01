@@ -58,6 +58,56 @@ impl Obb {
         true
     }
 
+    /// Resolves a sphere against the box, returning `(point, normal, depth)`
+    /// when they overlap or [`None`] otherwise.
+    ///
+    /// `point` is the contact point on the box surface, `normal` is a unit
+    /// vector pointing the way the sphere must move to separate (from the box
+    /// surface toward the sphere centre when the centre is outside, or out
+    /// through the nearest face when the centre is inside), and `depth >= 0` is
+    /// the penetration. Returns [`None`] for a negative radius or no overlap.
+    ///
+    /// When the sphere centre lies inside the box the plain closest-point gap
+    /// is zero, so the deepest-face rule is used instead: the centre is pushed
+    /// out through whichever face it is nearest to, and the depth accounts for
+    /// both the radius and how far the centre sits inside that face.
+    pub fn sphere_contact(&self, center: Vec3, radius: f32) -> Option<(Vec3, Vec3, f32)> {
+        if radius < 0.0 {
+            return None;
+        }
+        let axes = self.axes();
+        let eh = [self.half_extents.x, self.half_extents.y, self.half_extents.z];
+        let d = center - self.center;
+        let l = [d.dot(axes[0]), d.dot(axes[1]), d.dot(axes[2])];
+
+        let inside = l[0].abs() <= eh[0] && l[1].abs() <= eh[1] && l[2].abs() <= eh[2];
+        if inside {
+            // Push the centre out through the nearest face.
+            let mut best_i = 0usize;
+            let mut best_pen = f32::INFINITY;
+            for (i, (&li, &ei)) in l.iter().zip(eh.iter()).enumerate() {
+                let pen = ei - li.abs();
+                if pen < best_pen {
+                    best_pen = pen;
+                    best_i = i;
+                }
+            }
+            let s = if l[best_i] >= 0.0 { 1.0 } else { -1.0 };
+            let normal = axes[best_i] * s;
+            let point = center - axes[best_i] * (l[best_i] - s * eh[best_i]);
+            Some((point, normal, radius + best_pen))
+        } else {
+            let cp = self.closest_point(center);
+            let gap = center - cp;
+            let dist2 = gap.length_squared();
+            if dist2 > radius * radius {
+                return None;
+            }
+            let dist = dist2.sqrt();
+            Some((cp, gap.normalize_or_zero(), radius - dist))
+        }
+    }
+
     /// Returns a world-space axis-aligned bounding box enclosing the OBB.
     pub fn aabb(&self) -> Aabb {
         let axes = self.axes();
@@ -343,4 +393,47 @@ mod tests {
         assert!(!a.intersects_obb(&moved) || a.penetration(&moved).map(|(_, d)| d).unwrap_or(0.0) < 1e-4);
     }
 
+
+    #[test]
+    fn sphere_contact_outside_touching_face() {
+        // Unit box [-0.5, 0.5]^3; sphere centre at x = 0.8, r = 0.5.
+        // Nearest surface point is the +x face at x = 0.5, gap = 0.3 < r,
+        // so they overlap with depth 0.5 - 0.3 = 0.2 and an outward +x normal.
+        let b = unit_box(Vec3::ZERO, Quat::IDENTITY);
+        let (point, normal, depth) = b
+            .sphere_contact(Vec3::new(0.8, 0.0, 0.0), 0.5)
+            .expect("overlap");
+        assert_relative_eq!(point.x, 0.5, epsilon = 1e-5);
+        assert!(point.y.abs() < 1e-5 && point.z.abs() < 1e-5);
+        assert!(normal.x > 0.99, "normal points toward +x: {normal:?}");
+        assert_relative_eq!(depth, 0.2, epsilon = 1e-5);
+    }
+
+    #[test]
+    fn sphere_contact_too_far_is_none() {
+        // Centre 1.0 from the +x face (at x = 1.5), radius 0.5 cannot reach.
+        let b = unit_box(Vec3::ZERO, Quat::IDENTITY);
+        assert!(b.sphere_contact(Vec3::new(1.5, 0.0, 0.0), 0.5).is_none());
+    }
+
+    #[test]
+    fn sphere_contact_centre_inside() {
+        // Centre at x = 0.1 inside the box; nearest face is +x with the centre
+        // 0.4 deep, so pushing out gives normal +x, depth 0.2 + 0.4 = 0.6, and
+        // the surface point projected to the +x face.
+        let b = unit_box(Vec3::ZERO, Quat::IDENTITY);
+        let (point, normal, depth) = b
+            .sphere_contact(Vec3::new(0.1, 0.0, 0.0), 0.2)
+            .expect("overlap");
+        assert!(normal.x > 0.99, "normal points toward +x: {normal:?}");
+        assert_relative_eq!(depth, 0.6, epsilon = 1e-5);
+        assert_relative_eq!(point.x, 0.5, epsilon = 1e-5);
+        assert!(point.y.abs() < 1e-5 && point.z.abs() < 1e-5);
+    }
+
+    #[test]
+    fn sphere_contact_negative_radius_is_none() {
+        let b = unit_box(Vec3::ZERO, Quat::IDENTITY);
+        assert!(b.sphere_contact(Vec3::new(0.0, 0.0, 0.0), -1.0).is_none());
+    }
 }
