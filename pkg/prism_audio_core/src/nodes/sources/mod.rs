@@ -24,17 +24,23 @@
 //!   wavetable oscillator: an octave mipmap of additively synthesized tables
 //!   (saw/square/triangle presets or an arbitrary harmonic spectrum) read with
 //!   periodic Catmull-Rom interpolation.
+//! - [`fm_operator::FmOperatorNode`] -- phase-modulation (DX7-style)
+//!   operator: a sine core deflected by an optional modulation input and
+//!   two-sample-averaged self-feedback, the primitive voice of FM
+//!   synthesis algorithms assembled in the mix graph.
 //!
 //! Every generator is real-time safe: `process` performs no allocation, no
 //! locking, and no panics, and reproducible generators are fully deterministic
 //! across platforms via [`bevy_math::ops`].
 
+pub mod fm_operator;
 pub mod karplus_strong;
 pub mod noise;
 pub mod oscillator;
 pub mod sample_player;
 pub mod wavetable_oscillator;
 
+pub use fm_operator::{FmOperatorNode, FmOperatorParams};
 pub use karplus_strong::{KarplusStrongNode, KarplusStrongParams};
 pub use noise::{NoiseColor, NoiseNode};
 pub use oscillator::{OscillatorNode, Waveform};
