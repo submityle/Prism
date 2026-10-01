@@ -312,6 +312,15 @@
 //!   bit-identical so the welded [`triangle_mesh::TriangleMesh`] stays
 //!   watertight — the automatic LOD driver feeding the hardware-tessellation
 //!   path.
+//! - [`displacement_tessellation`] — displacement-aware adaptive
+//!   tessellation: wraps a base [`displaced_surface::ParametricSurface`] and a
+//!   [`displaced_surface::HeightMap`] in a [`displacement_tessellation::DisplacedField`]
+//!   adapter that is itself a `ParametricSurface`, so feeding it to
+//!   [`adaptive_tessellation`] makes the chordal-deviation driver refine on the
+//!   *displaced* surface — curvature **and** high-frequency height relief both
+//!   drive subdivision through one path, with normals re-derived from the
+//!   displaced field and crack-free welding inherited unchanged
+//!   ([`displacement_tessellation::DisplacementTessellation`]).
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -458,6 +467,7 @@ pub mod trimmed_surface;
 pub mod surface_group;
 pub mod patch_tessellation;
 pub mod adaptive_tessellation;
+pub mod displacement_tessellation;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -555,6 +565,7 @@ pub use trimmed_surface::{TrimLoop, TrimmedSurface, TrimmedSurfaceError};
 pub use surface_group::{SurfaceGroup, SurfaceGroupBvh, SurfaceGroupError, SurfaceGroupHit};
 pub use patch_tessellation::{Edge, PatchTessellation, MAX_FACTOR};
 pub use adaptive_tessellation::AdaptiveTessellation;
+pub use displacement_tessellation::{DisplacedField, DisplacementTessellation};
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
 pub use obb::{Obb, ObbBvh, ObbHit};
