@@ -40,6 +40,10 @@
 //! `ITU-R` `BS.1770` / `EBU` `R128` [`LoudnessMeterNode`] reports momentary,
 //! short-term, and integrated loudness, loudness range, and true-peak level
 //! without altering the signal.
+//!
+//! Delivery-stage processors live in the [`mastering`] submodule: the
+//! [`Dither`] requantizer renders a finished float mix down to a target bit
+//! depth with dither and optional noise shaping.
 
 pub mod analysis;
 pub mod biquad;
@@ -47,6 +51,7 @@ pub mod crossover;
 pub mod dynamics;
 pub mod effects;
 pub mod gain;
+pub mod mastering;
 pub mod mix;
 pub mod pan;
 pub mod reverb;
@@ -72,6 +77,10 @@ pub use effects::{
     WaveshaperNode,
 };
 pub use gain::GainNode;
+pub use mastering::{
+    DEFAULT_DITHER_BITS, Dither, DitherNode, DitherParams, DitherType, MAX_DITHER_BITS,
+    MIN_DITHER_BITS, NoiseShaping,
+};
 pub use mix::SumNode;
 pub use pan::StereoPanNode;
 pub use reverb::{
