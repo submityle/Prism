@@ -78,6 +78,8 @@ mod shader_tests;
 #[cfg(test)]
 mod sim_gpu_tests;
 #[cfg(test)]
+mod sleep_parity;
+#[cfg(test)]
 mod sleep_gpu_tests;
 mod solve_plan;
 mod teleport;
