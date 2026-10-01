@@ -132,6 +132,7 @@ pub mod should_early_terminate;
 pub mod should_fallback;
 pub mod single_scatter_reference;
 pub mod sky_state_transition;
+pub mod soft_particle;
 pub mod spectral_to_rgb;
 pub mod spherical_harmonics_rotate;
 pub mod storm_vertical_profile;
@@ -236,6 +237,7 @@ pub use should_early_terminate::{GpuShouldEarlyTerminate, ShouldEarlyTerminateQu
 pub use should_fallback::{GpuShouldFallback, ShouldFallbackQuery};
 pub use single_scatter_reference::{GpuSingleScatterReference, SingleScatterReferenceQuery};
 pub use sky_state_transition::{GpuSkyStateTransition, SkyStateTransition};
+pub use soft_particle::{GpuSoftParticle, LinearizeQuery, SoftParticleQuery, SoftParticleSample};
 pub use spectral_to_rgb::{GpuSpectralToRgb, SpectralRgb};
 pub use spherical_harmonics_rotate::{
     GpuSphericalHarmonicsRotate, ShRotationProbe, ShRotationResult, L2_COEFF_COUNT,
