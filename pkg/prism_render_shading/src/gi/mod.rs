@@ -18,10 +18,22 @@
 //!   Sobol' + R2) and BSDF-domain mappings shared by every GI ray budget.
 //! * [`denoise`] — firefly clamping and running-variance estimation shared by
 //!   the spatio-temporal denoisers.
+//! * [`light`] — many-light importance sampling: hierarchical light BVH and
+//!   ReGIR world-space grid reservoirs for mega-light direct lighting.
+//! * [`reflect`] — unified reflection: stochastic HiZ screen-space reflection
+//!   and reflection-probe blending.
+//! * [`micro`] — micro-scale occlusion: normal-map-derived micro bent normal
+//!   and cavity ambient occlusion.
+//! * [`material`] — material-level GI responses: thin-film iridescence and
+//!   water / wet-surface reflection-refraction blending.
 
 pub mod denoise;
 pub mod occlusion;
 pub mod sample;
 pub mod scene;
 pub mod screen_probe;
+pub mod light;
+pub mod material;
+pub mod micro;
+pub mod reflect;
 pub mod world_space;
