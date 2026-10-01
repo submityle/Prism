@@ -20,6 +20,11 @@
 //!   classic pulse-width-modulation animation. It reuses the oscillator's
 //!   `PolyBLEP` edge correction but places the second (falling) edge at the
 //!   variable width, generalizing the fixed 50%-duty square.
+//! - [`impulse_train::ImpulseTrainNode`] -- band-limited impulse train
+//!   (BLIT): an alias-free train of narrow spikes evaluated as the
+//!   closed-form normalized Dirichlet kernel (periodic sinc), keeping every
+//!   harmonic below Nyquist with equal weight. It is the raw excitation that
+//!   integrates into alias-free saw/pulse voices and formant sources.
 //! - [`karplus_strong::KarplusStrongNode`] -- extended Karplus-Strong
 //!   plucked-string physical model: a noise burst recirculating through a tuned,
 //!   damped feedback delay line with an allpass fractional-delay tuning filter.
@@ -48,6 +53,7 @@
 
 pub mod additive_oscillator;
 pub mod fm_operator;
+pub mod impulse_train;
 pub mod karplus_strong;
 pub mod noise;
 pub mod oscillator;
@@ -58,6 +64,7 @@ pub mod wavetable_oscillator;
 
 pub use additive_oscillator::{AdditiveOscillatorNode, AdditiveOscillatorParams};
 pub use fm_operator::{FmOperatorNode, FmOperatorParams};
+pub use impulse_train::{ImpulseTrainNode, ImpulseTrainParams};
 pub use karplus_strong::{KarplusStrongNode, KarplusStrongParams};
 pub use noise::{NoiseColor, NoiseNode};
 pub use oscillator::{OscillatorNode, Waveform};
