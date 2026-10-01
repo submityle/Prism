@@ -5,7 +5,7 @@
 //! shape-specific primitive the GJK intersection test needs, which keeps the
 //! core algorithm shape-agnostic.
 
-use glam::Vec3;
+use glam::{Quat, Vec3};
 
 use crate::bounding::{Aabb, BoundingSphere, Capsule, Obb};
 
@@ -113,9 +113,46 @@ impl<S: SupportMap> SupportMap for Inflated<'_, S> {
     }
 }
 
+/// A support map that applies a rigid rotation and then a translation to
+/// another shape, i.e. the world placement `x -> rotation * x + translation`.
+///
+/// This lets GJK/EPA queries and continuous-collision sweeps evaluate a convex
+/// shape at an arbitrary rigid pose (for example the interpolated pose of a
+/// rotating body) without rebuilding its geometry. Because a support map
+/// commutes with rotation, the farthest point of the posed shape is found by
+/// rotating the query direction into the shape's local frame, taking the base
+/// support there, and mapping the result back out.
+#[derive(Clone, Copy, Debug)]
+pub struct Transformed<'a, S> {
+    /// The underlying convex shape, expressed in its local frame.
+    pub shape: &'a S,
+    /// Rotation from the shape's local frame into world space.
+    pub rotation: Quat,
+    /// World-space translation applied after the rotation.
+    pub translation: Vec3,
+}
+
+impl<'a, S> Transformed<'a, S> {
+    /// Wraps `shape` under the rigid pose `rotation` then `translation`.
+    pub fn new(shape: &'a S, rotation: Quat, translation: Vec3) -> Self {
+        Self {
+            shape,
+            rotation,
+            translation,
+        }
+    }
+}
+
+impl<S: SupportMap> SupportMap for Transformed<'_, S> {
+    fn support_point(&self, dir: Vec3) -> Vec3 {
+        let local_dir = self.rotation.conjugate() * dir;
+        self.rotation * self.shape.support_point(local_dir) + self.translation
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::SupportMap;
+    use super::{SupportMap, Transformed};
     use crate::bounding::{Aabb, BoundingSphere, Capsule, Obb};
     use glam::{Quat, Vec3};
 
@@ -146,5 +183,23 @@ mod tests {
         let p = c.support_point(Vec3::X);
         // Picks the +x endpoint, then pushes out by the radius along +x.
         assert!(p.abs_diff_eq(Vec3::new(1.5, 0.0, 0.0), 1e-6));
+    }
+
+    #[test]
+    fn transformed_rotates_then_translates() {
+        // A unit cube rotated 90 degrees about +z then shifted to be centred at
+        // (5, 0, 0). The posed cube spans x in [4, 6], y and z in [-1, 1], so a
+        // support query toward world +y must land on the y = 1 face. Because the
+        // query direction has no x/z component the returned witness is a
+        // deterministic corner of that face.
+        let b = Obb::new(Vec3::ZERO, Vec3::splat(1.0), Quat::IDENTITY);
+        let rot = Quat::from_rotation_z(core::f32::consts::FRAC_PI_2);
+        let t = Transformed::new(&b, rot, Vec3::new(5.0, 0.0, 0.0));
+        let p = t.support_point(Vec3::Y);
+        // The maximiser of y over the posed cube is y = 1.
+        assert!((p.y - 1.0).abs() < 1e-5, "p = {p:?}");
+        // The witness must lie within the posed cube's x extent [4, 6].
+        assert!((4.0..=6.0).contains(&p.x), "p = {p:?}");
+        assert!(p.z.abs() <= 1.0 + 1e-5, "p = {p:?}");
     }
 }

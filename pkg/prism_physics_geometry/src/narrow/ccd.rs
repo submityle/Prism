@@ -16,11 +16,11 @@
 //! This is a clean-room implementation of the publicly documented conservative
 //! advancement algorithm and contains no Unreal Engine source or derived code.
 
-use glam::Vec3;
+use glam::{Quat, Vec3};
 
 use crate::narrow::distance::gjk_closest_points;
 use crate::narrow::epa::gjk_contact;
-use crate::narrow::support::{SupportMap, Translated};
+use crate::narrow::support::{SupportMap, Transformed, Translated};
 
 /// Maximum conservative-advancement refinement steps.
 const MAX_ITERATIONS: usize = 32;
@@ -115,11 +115,105 @@ pub fn conservative_advancement<A: SupportMap, B: SupportMap>(
     })
 }
 
+/// Returns the time of impact of shape `a` undergoing a *rigid* motion against
+/// the static shape `b`, or [`None`] when they never come within
+/// `contact_tolerance` during the interval `[0, 1]`.
+///
+/// The motion is a rotation of `rotation` about `pivot` combined with a
+/// `linear` translation, both applied uniformly over `[0, 1]` (the rotation is
+/// spherically interpolated from identity). `radius_a` is the farthest
+/// distance from `pivot` to any point of `a` in its starting pose — pass the
+/// body's bounding-sphere radius about the pivot.
+///
+/// Unlike [`conservative_advancement`], which assumes pure translation, this
+/// bounds the worst-case closing speed as the linear term projected on the
+/// current separating normal plus the angular term `angle * radius_a`, where
+/// `angle` is the total swept rotation. That sum is a valid upper bound on how
+/// fast any point of `a` can approach `b`, so advancing time by
+/// `gap / closing_bound` never steps past a real contact. When the shapes
+/// already overlap at `t = 0` the returned [`TimeOfImpact::toi`] is `0.0`.
+pub fn rotational_conservative_advancement<A: SupportMap, B: SupportMap>(
+    a: &A,
+    b: &B,
+    pivot: Vec3,
+    linear: Vec3,
+    rotation: Quat,
+    radius_a: f32,
+    contact_tolerance: f32,
+) -> Option<TimeOfImpact> {
+    let tolerance = contact_tolerance.max(MIN_CLOSING_SPEED);
+    // Total swept angle over the unit interval bounds the angular point speed.
+    let (_, angle) = rotation.to_axis_angle();
+    let angular_speed = angle.abs() * radius_a.max(0.0);
+
+    // Pure rest: only a pre-existing overlap can count as contact.
+    if linear.length_squared() <= MIN_CLOSING_SPEED * MIN_CLOSING_SPEED
+        && angular_speed <= MIN_CLOSING_SPEED
+    {
+        let moved = Transformed::new(a, rotation, pivot - rotation * pivot + linear);
+        return gjk_contact(&moved, b).map(|c| TimeOfImpact {
+            toi: 0.0,
+            point: c.point_a,
+            normal: c.normal,
+        });
+    }
+
+    let mut t = 0.0f32;
+    let mut last_normal = linear.normalize_or_zero();
+    for _ in 0..MAX_ITERATIONS {
+        let r_t = Quat::IDENTITY.slerp(rotation, t);
+        let translation = pivot - r_t * pivot + linear * t;
+        let moved = Transformed::new(a, r_t, translation);
+        let Some(cp) = gjk_closest_points(&moved, b) else {
+            let (point, normal) = match gjk_contact(&moved, b) {
+                Some(c) => (c.point_a, c.normal),
+                None => (moved.support_point(last_normal), last_normal),
+            };
+            return Some(TimeOfImpact { toi: t, point, normal });
+        };
+
+        if cp.distance <= tolerance {
+            return Some(TimeOfImpact {
+                toi: t,
+                point: cp.point_a,
+                normal: cp.normal,
+            });
+        }
+
+        // Upper bound on the gap's closing speed along the current normal.
+        let closing = linear.dot(cp.normal) + angular_speed;
+        if closing <= MIN_CLOSING_SPEED {
+            // Even the worst-case rotation cannot close the gap this interval.
+            return None;
+        }
+
+        last_normal = cp.normal;
+        let advance = (cp.distance - 0.5 * tolerance).max(0.0) / closing;
+        t += advance;
+        if t > 1.0 {
+            return None;
+        }
+    }
+
+    // Budget exhausted while still approaching: report the best bound reached.
+    let r_t = Quat::IDENTITY.slerp(rotation, t);
+    let translation = pivot - r_t * pivot + linear * t;
+    let moved = Transformed::new(a, r_t, translation);
+    gjk_closest_points(&moved, b).map(|cp| TimeOfImpact {
+        toi: t,
+        point: cp.point_a,
+        normal: cp.normal,
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::conservative_advancement;
-    use crate::bounding::Aabb;
-    use glam::Vec3;
+    use super::{conservative_advancement, rotational_conservative_advancement};
+    use crate::bounding::{Aabb, Obb};
+    use crate::narrow::distance::gjk_closest_points;
+    use crate::narrow::support::Transformed;
+    use core::f32::consts::FRAC_PI_2;
+    use glam::{Quat, Vec3};
 
     #[test]
     fn head_on_translation_reports_toi() {
@@ -165,5 +259,71 @@ mod tests {
         let toi = conservative_advancement(&a, &b, Vec3::new(1.0, 0.0, 0.0), 1e-3)
             .expect("already overlapping");
         assert_eq!(toi.toi, 0.0);
+    }
+
+    #[test]
+    fn rotation_sweeps_bar_into_target() {
+        // A long bar lying along the x axis, pivoting 90 degrees about z about
+        // the origin, so its tip sweeps up toward +y and strikes a small box.
+        let half = Vec3::new(2.0, 0.2, 0.2);
+        let a = Obb::new(Vec3::ZERO, half, Quat::IDENTITY);
+        let b = Obb::new(Vec3::new(0.0, 1.6, 0.0), Vec3::splat(0.3), Quat::IDENTITY);
+        let rot = Quat::from_rotation_z(FRAC_PI_2);
+        let radius_a = half.length();
+        let hit = rotational_conservative_advancement(
+            &a, &b, Vec3::ZERO, Vec3::ZERO, rot, radius_a, 1e-3,
+        )
+        .expect("rotation should bring the bar into contact");
+        assert!(hit.toi > 0.0 && hit.toi <= 1.0, "toi = {}", hit.toi);
+        // Rebuild the pose at the reported TOI and confirm the gap is tiny.
+        let r_t = Quat::IDENTITY.slerp(rot, hit.toi);
+        let moved = Transformed::new(&a, r_t, Vec3::ZERO);
+        let cp = gjk_closest_points(&moved, &b);
+        if let Some(cp) = cp {
+            assert!(cp.distance < 5e-2, "distance at toi = {}", cp.distance);
+        }
+    }
+
+    #[test]
+    fn small_rotation_far_apart_misses() {
+        let a = Obb::new(Vec3::ZERO, Vec3::splat(0.3), Quat::IDENTITY);
+        let b = Obb::new(Vec3::new(5.0, 0.0, 0.0), Vec3::splat(0.3), Quat::IDENTITY);
+        let rot = Quat::from_rotation_z(0.1);
+        let radius_a = Vec3::splat(0.3).length();
+        assert!(rotational_conservative_advancement(
+            &a, &b, Vec3::ZERO, Vec3::ZERO, rot, radius_a, 1e-3,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn coincident_shapes_report_zero_toi() {
+        let a = Obb::new(Vec3::ZERO, Vec3::splat(0.5), Quat::IDENTITY);
+        let b = Obb::new(Vec3::ZERO, Vec3::splat(0.5), Quat::IDENTITY);
+        let hit = rotational_conservative_advancement(
+            &a, &b, Vec3::ZERO, Vec3::ZERO, Quat::IDENTITY, 0.87, 1e-3,
+        )
+        .expect("already overlapping");
+        assert_eq!(hit.toi, 0.0);
+    }
+
+    #[test]
+    fn pure_linear_motion_matches_translation_toi() {
+        // With identity rotation the rigid sweep must coincide with the
+        // translation-only conservative advancement result.
+        let a = Obb::new(Vec3::ZERO, Vec3::splat(0.5), Quat::IDENTITY);
+        let b = Obb::new(Vec3::new(5.0, 0.0, 0.0), Vec3::splat(0.5), Quat::IDENTITY);
+        let hit = rotational_conservative_advancement(
+            &a,
+            &b,
+            Vec3::ZERO,
+            Vec3::new(10.0, 0.0, 0.0),
+            Quat::IDENTITY,
+            Vec3::splat(0.5).length(),
+            1e-3,
+        )
+        .expect("linear sweep should impact");
+        assert!((hit.toi - 0.4).abs() < 2e-2, "toi = {}", hit.toi);
+        assert!(hit.normal.x > 0.9, "normal toward b: {:?}", hit.normal);
     }
 }

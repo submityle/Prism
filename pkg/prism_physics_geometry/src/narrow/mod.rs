@@ -17,7 +17,7 @@ mod support;
 mod sweep;
 mod triangle_box;
 
-pub use ccd::{conservative_advancement, TimeOfImpact};
+pub use ccd::{conservative_advancement, rotational_conservative_advancement, TimeOfImpact};
 pub use closest_point::{
     closest_point_on_aabb, closest_point_on_segment, closest_point_on_triangle,
     closest_point_segment_triangle, closest_points_segment_segment, SegmentClosest,
@@ -33,6 +33,6 @@ pub use ray_cast::{
     ray_capsule, ray_obb, ray_sphere, ray_triangle, segment_triangle_intersection,
     RayTriangleHit, SegmentTriangleHit,
 };
-pub use support::{Inflated, SupportMap, Translated};
+pub use support::{Inflated, SupportMap, Transformed, Translated};
 pub use sweep::{sweep_capsule_triangle, sweep_sphere_triangle, CapsuleSweepHit, SphereSweepHit};
 pub use triangle_box::{triangle_aabb_overlap, triangle_aabb_penetration};
