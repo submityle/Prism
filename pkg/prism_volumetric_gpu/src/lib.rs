@@ -74,6 +74,7 @@ pub mod bloom_upsample;
 pub mod checkerboard_resolve;
 pub mod clamp_history;
 pub mod classify_precip;
+pub mod closest_point_obb;
 pub mod cloud_shadow_modulation;
 pub mod composite_motion_vector;
 pub mod contact_shadow;
@@ -193,6 +194,7 @@ pub use bloom_upsample::{BloomUpsampleQuery, GpuBloomUpsample};
 pub use checkerboard_resolve::{CheckerboardResolveQuery, GpuCheckerboardResolve};
 pub use clamp_history::{ClampHistoryQuery, GpuClampHistory};
 pub use classify_precip::{ClassifyPrecipQuery, GpuClassifyPrecip};
+pub use closest_point_obb::{ClosestPointObbQuery, ClosestPointObbResult, GpuClosestPointObb};
 pub use cloud_shadow_modulation::{CloudShadowModulationQuery, GpuCloudShadowModulation};
 pub use composite_motion_vector::{
     CompositeMotionVectorQuery, GpuCompositeMotionVector, MotionVector,
