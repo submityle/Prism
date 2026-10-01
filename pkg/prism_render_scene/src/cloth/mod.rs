@@ -38,6 +38,8 @@ mod aero_parity;
 mod authoring;
 #[cfg(test)]
 mod backstop_gpu_tests;
+#[cfg(test)]
+mod backstop_parity;
 mod bind_groups;
 mod budget;
 #[cfg(test)]
