@@ -502,6 +502,9 @@
 //!   distance field ([`mesh_sdf_raymarch::sample_signed_distance`],
 //!   [`mesh_sdf_raymarch::sphere_trace`], [`mesh_sdf_raymarch::SdfHit`]) for
 //!   distance-field soft shadows, ambient occlusion, and cone-traced GI.
+//! - [`mesh_sdf_normal`] — outward surface normals of a signed distance
+//!   field by central-difference gradient ([`mesh_sdf_normal::sdf_gradient`],
+//!   [`mesh_sdf_normal::sdf_normal`]) for shading sphere-traced hits.
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -679,6 +682,7 @@ pub mod mesh_voxel_distance_field;
 pub mod mesh_solid_voxelization;
 pub mod mesh_signed_distance_field;
 pub mod mesh_sdf_raymarch;
+pub mod mesh_sdf_normal;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -807,6 +811,7 @@ pub use mesh_voxel_distance_field::{voxel_distance_field, VoxelDistanceField};
 pub use mesh_solid_voxelization::{solidify, CellClass, SolidVoxelization};
 pub use mesh_signed_distance_field::{signed_distance_field, SignedDistanceField};
 pub use mesh_sdf_raymarch::{sample_signed_distance, sphere_trace, SdfHit};
+pub use mesh_sdf_normal::{sdf_gradient, sdf_normal};
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
 pub use obb::{Obb, ObbBvh, ObbHit};
