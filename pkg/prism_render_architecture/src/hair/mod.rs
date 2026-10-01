@@ -98,6 +98,7 @@ pub mod reactive_mask;
 pub mod ribbon;
 pub mod rt_curve;
 pub mod rt_proxy;
+pub mod scatter_lod;
 pub mod sdf_collision;
 pub mod self_collision;
 pub mod self_collision_grid;
