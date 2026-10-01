@@ -228,6 +228,12 @@
 //!   the endpoints), and a [`spline_strip::SplineStripBvh`] pools every strand's
 //!   segments into one [`spline::SplineBvh`] (shared Bézier traversal + `GPU`
 //!   upload).
+//! - [`triangle_mesh`] — indexed triangle mesh [`triangle_mesh::TriangleMesh`]:
+//!   a shared vertex pool + optional normal/`UV` pools referenced by an index
+//!   buffer of vertex triples (the hardware-`RT` built-in triangle path), with a
+//!   [`triangle_mesh::TriangleMeshBvh`] whose leaf slices map back to original
+//!   triangle ids so hits report barycentric position, interpolated shading
+//!   normal, and texture coordinate.
 //! - [`traversal`] — [`Ray`]/`BVH` slab + Möller–Trumbore intersection with
 //!   closest-hit and any-hit walks (the `GPU` traversal kernel's golden ref).
 //! - [`traversal_stackless`] — stackless (threaded / escape-index) `BVH` walk:
@@ -280,6 +286,7 @@ pub mod shaded_triangle;
 pub mod shaded_triangle_gpu_layout;
 pub mod spline;
 pub mod spline_strip;
+pub mod triangle_mesh;
 pub mod footprint;
 pub mod gpu_layout;
 pub mod motion;
@@ -343,6 +350,7 @@ pub use shaded_triangle::{ShadedTriangle, ShadedTriangleBvh, ShadedTriangleHit};
 pub use shaded_triangle_gpu_layout::{GpuShadedTriangleBvhBuffers, SHADED_TRI_WORDS};
 pub use spline::{SplineBasis, SplineBvh, SplineCurve};
 pub use spline_strip::{SplineStrip, SplineStripBvh};
+pub use triangle_mesh::{MeshHit, TriangleMesh, TriangleMeshBvh, TriangleMeshError};
 pub use rectangle_gpu_layout::{GpuRectangleBvhBuffers, RECTANGLE_WORDS};
 pub use aabb_primitive_gpu_layout::{GpuAabbBvhBuffers, AABB_PRIMITIVE_WORDS};
 pub use sphere_gpu_layout::{GpuSphereBvhBuffers, SPHERE_WORDS};
