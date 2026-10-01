@@ -137,6 +137,45 @@ pub fn build_view_draw_bins(
     }
 }
 
+/// Early- and late-pass draw bins for a Nanite-style two-phase raster.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct TwoPhaseViewDrawBins {
+    /// Bins drawn before the current-frame HZB is rebuilt.
+    pub early: ViewDrawBins,
+    /// Bins drawn after the HZB rebuild, from deferred-then-revealed instances.
+    pub late: ViewDrawBins,
+}
+
+/// Builds independent early- and late-pass draw bins from a candidate stream.
+///
+/// Each candidate is routed by [`raster_phase_of`](crate::raster_phase_of) into
+/// at most one phase: early-visible instances never appear in the late pass,
+/// and candidates that are neither early nor late-visible (for example a bare
+/// [`LATE_RETEST`](crate::VisibilityStageMask::LATE_RETEST) that failed the
+/// current HZB) are dropped. The two resulting [`ViewDrawBins`] are separate
+/// indirect-draw command streams, each with its own `command_start` offsets
+/// beginning at zero, matching the two draw dispatches the rasterizer issues
+/// around the HZB rebuild.
+pub fn build_two_phase_view_draw_bins(
+    view: ViewHandle,
+    scene_capacity: u32,
+    candidates: impl IntoIterator<Item = DrawBinCandidate>,
+) -> TwoPhaseViewDrawBins {
+    let mut early = Vec::new();
+    let mut late = Vec::new();
+    for candidate in candidates {
+        match crate::raster_phase_of(candidate.visibility_stages) {
+            Some(crate::RasterPhase::Early) => early.push(candidate),
+            Some(crate::RasterPhase::Late) => late.push(candidate),
+            None => {}
+        }
+    }
+    TwoPhaseViewDrawBins {
+        early: build_view_draw_bins(view, scene_capacity, early),
+        late: build_view_draw_bins(view, scene_capacity, late),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,5 +232,88 @@ mod tests {
         assert_eq!(header.command_start, 1);
         assert_eq!(header.command_capacity, 2);
         assert_eq!(size_of::<GpuDrawBinHeader>(), DRAW_BIN_HEADER_WORDS * 4);
+    }
+
+    #[test]
+    fn two_phase_bins_split_candidates_into_independent_command_streams() {
+        let key = |geometry| DrawBinKey {
+            geometry: handle(geometry),
+            lod_or_cluster: 0,
+            pipeline_class: geometry,
+            vertex_buffer_class: 1,
+            index_buffer_class: 2,
+            indexed: true,
+            primitive_kind: GeometryPrimitiveKind::Indexed,
+            pass_mask: crate::RenderPassMask::OPAQUE.0,
+        };
+        let late = crate::VisibilityStageMask::LATE_RETEST | crate::VisibilityStageMask::LATE_VISIBLE;
+        let bins = build_two_phase_view_draw_bins(
+            handle(9),
+            8,
+            [
+                DrawBinCandidate {
+                    scene: handle(1),
+                    key: key(1),
+                    visibility_stages: crate::VisibilityStageMask::EARLY,
+                },
+                DrawBinCandidate {
+                    scene: handle(2),
+                    key: key(2),
+                    visibility_stages: late,
+                },
+                DrawBinCandidate {
+                    scene: handle(3),
+                    key: key(1),
+                    visibility_stages: crate::VisibilityStageMask::EARLY,
+                },
+                // Deferred but still occluded late: drawn by neither phase.
+                DrawBinCandidate {
+                    scene: handle(4),
+                    key: key(2),
+                    visibility_stages: crate::VisibilityStageMask::LATE_RETEST,
+                },
+            ],
+        );
+        // Early pass: two instances in one bin (same key), own stream from 0.
+        assert_eq!(bins.early.bins.len(), 1);
+        assert_eq!(bins.early.bins[0].command_start, 0);
+        assert_eq!(bins.early.bins[0].command_capacity, 2);
+        assert_eq!(bins.early.command_count, 2);
+        // Late pass: one revealed instance, own stream also from 0.
+        assert_eq!(bins.late.bins.len(), 1);
+        assert_eq!(bins.late.bins[0].command_start, 0);
+        assert_eq!(bins.late.bins[0].command_capacity, 1);
+        assert_eq!(bins.late.command_count, 1);
+        assert_eq!(bins.late.bins[0].representative_scene, handle(2));
+        // The bare LATE_RETEST candidate is routed to neither phase.
+        assert_eq!(
+            bins.early.command_count + bins.late.command_count,
+            3
+        );
+    }
+
+    #[test]
+    fn two_phase_early_visible_candidate_is_not_binned_late() {
+        let both = crate::VisibilityStageMask::EARLY | crate::VisibilityStageMask::LATE_VISIBLE;
+        let bins = build_two_phase_view_draw_bins(
+            handle(9),
+            8,
+            [DrawBinCandidate {
+                scene: handle(1),
+                key: DrawBinKey {
+                    geometry: handle(1),
+                    lod_or_cluster: 0,
+                    pipeline_class: 1,
+                    vertex_buffer_class: 1,
+                    index_buffer_class: 2,
+                    indexed: true,
+                    primitive_kind: GeometryPrimitiveKind::Indexed,
+                    pass_mask: crate::RenderPassMask::OPAQUE.0,
+                },
+                visibility_stages: both,
+            }],
+        );
+        assert_eq!(bins.early.command_count, 1);
+        assert_eq!(bins.late.command_count, 0);
     }
 }
