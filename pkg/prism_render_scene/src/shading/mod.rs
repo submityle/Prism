@@ -47,6 +47,10 @@ pub use runtime::{PrismShadingDiagnostics, PrismShadingSettings};
 /// shading passes build, so the sibling `water` module needs the component.
 pub(crate) use composite::composite_shading;
 pub(crate) use resources::ViewVisibilityBuffer;
+// Re-export the per-view reverse-Z Hi-Z "nearest depth" pyramid so the
+// transparent water surface pass can march it directly for screen-space
+// reflections (see `water::surface_ssr`), reusing the opaque prepass output.
+pub(crate) use ssr::ViewSsrTextures;
 // Re-exports the water surface pass consumes to shadow its directional term
 // with the same demand-paged virtual shadow map the opaque resolve pass reads.
 pub(crate) use resolve::GpuVsmResolveParams;

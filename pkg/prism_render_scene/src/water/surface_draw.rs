@@ -26,13 +26,13 @@ use bevy_render::{
     view::{ExtractedView, Msaa, ViewDepthStencilTexture, ViewTarget},
 };
 
-use bevy_math::Vec3;
+use bevy_math::{Vec3, Vec4};
 use prism_render_shading::ReceiverProjection;
 
 use crate::lighting::LightBindGroup;
 use crate::shading::{
-    GpuVsmResolveParams, PrismShadingSettings, PrismVirtualShadowSettings, ViewVisibilityBuffer,
-    ViewVsmPageTable, ViewVsmPhysicalAtlas, VsmPrimaryLight,
+    GpuVsmResolveParams, PrismShadingSettings, PrismVirtualShadowSettings, ViewSsrTextures,
+    ViewVisibilityBuffer, ViewVsmPageTable, ViewVsmPhysicalAtlas, VsmPrimaryLight,
 };
 
 use super::bind_groups::filtering_sampler;
@@ -40,6 +40,7 @@ use super::resources::WaterGpuBodies;
 use super::surface_mesh::{build_surface_view, surface_index_data};
 use super::surface_pipeline::{ViewWaterSurfacePipelines, WaterSurfacePipelines};
 use super::surface_shading::SurfaceViewInputs;
+use super::surface_ssr::{GpuWaterSsrConfig, WaterSsrFallback};
 use super::surface_vsm::WaterVsmFallback;
 
 /// One body's device resources, built before the pass so the index/uniform
@@ -67,6 +68,7 @@ pub(crate) fn draw_water_surface(
     light_bindings: Res<LightBindGroup>,
     device: Res<RenderDevice>,
     vsm_fallback: Res<WaterVsmFallback>,
+    ssr_fallback: Res<WaterSsrFallback>,
     vsm_settings: Option<Res<PrismVirtualShadowSettings>>,
     primary_light: Option<Res<VsmPrimaryLight>>,
     view: ViewQuery<(
@@ -75,6 +77,7 @@ pub(crate) fn draw_water_surface(
         &ViewDepthStencilTexture,
         &ViewWaterSurfacePipelines,
         &ViewVisibilityBuffer,
+        Option<&ViewSsrTextures>,
         Option<&ViewVsmPhysicalAtlas>,
         Option<&ViewVsmPageTable>,
         Option<&Msaa>,
@@ -87,8 +90,17 @@ pub(crate) fn draw_water_surface(
     if bodies.is_empty() {
         return;
     }
-    let (extracted, target, depth, view_pipelines, visibility, vsm_atlas, vsm_page_table, msaa) =
-        view.into_inner();
+    let (
+        extracted,
+        target,
+        depth,
+        view_pipelines,
+        visibility,
+        ssr_textures,
+        vsm_atlas,
+        vsm_page_table,
+        msaa,
+    ) = view.into_inner();
     // The Prism visibility path is single-sample only; a multisampled view never
     // wrote `scene_color`, so refraction has nothing to sample.
     if msaa.is_some_and(|value| value.samples() != 1) {
@@ -237,6 +249,50 @@ pub(crate) fn draw_water_surface(
         )),
     );
 
+    // The `@group(3)` screen-space-reflection group, built once for the view
+    // (its march basis is camera-constant across every body). The water
+    // fragment reconstructs its own view-space position/normal and marches the
+    // opaque prepass's reverse-Z Hi-Z pyramid itself (see `surface_ssr`); it
+    // never samples the resolved opaque SSR buffer, which would reflect the
+    // submerged terrain rather than the surface. When the feature is off or no
+    // pyramid is resident this frame it binds the format-correct fallback with
+    // the `sample_enable` bit clear, so the shader keeps the image-based
+    // reflection. The params buffer and group are declared here so they outlive
+    // the single tracked pass.
+    let ssr_layout = cache.get_bind_group_layout(&surface_pipeline.ssr_layout);
+    // Recover the positive near-plane distance from the inverse projection: in
+    // Prism's reverse-Z convention device depth 1.0 is the near plane, so
+    // inverse-projecting clip (0, 0, 1, 1) yields a view-space point at `-near`
+    // along the camera's `-Z` (byte-for-byte the opaque `ssr::trace` recovery).
+    let view_from_clip = extracted.clip_from_view.inverse();
+    let near_view = view_from_clip * Vec4::new(0.0, 0.0, 1.0, 1.0);
+    let near = if near_view.w.abs() > f32::EPSILON {
+        (near_view.z / near_view.w).abs().max(1.0e-3)
+    } else {
+        1.0e-3
+    };
+    let view_from_world = extracted.world_from_view.to_matrix().inverse();
+    let ssr_enable = settings.enable_ssr && ssr_textures.is_some();
+    let ssr_config = GpuWaterSsrConfig::new(
+        extracted.clip_from_view,
+        view_from_clip,
+        view_from_world,
+        near,
+        40.0,
+        ssr_enable,
+    );
+    let ssr_params_buffer = device.create_buffer_with_data(&BufferInitDescriptor {
+        label: Some("prism water surface ssr params"),
+        contents: bytemuck::bytes_of(&ssr_config),
+        usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+    });
+    let ssr_hzb = ssr_textures.map_or(&ssr_fallback.hzb_view, ViewSsrTextures::hzb_view);
+    let ssr_group = device.create_bind_group(
+        "prism water surface ssr",
+        &ssr_layout,
+        &BindGroupEntries::sequential((ssr_hzb, ssr_params_buffer.as_entire_binding())),
+    );
+
     // Single tracked pass: the composite already wrote the view target, so the
     // color attachment loads, and the main-pass depth loads read-only (the
     // surface pipeline disables depth writes).
@@ -254,6 +310,7 @@ pub(crate) fn draw_water_surface(
         pass.set_bind_group(0, &draw.bind_group, &[]);
         pass.set_bind_group(1, light_group, &[]);
         pass.set_bind_group(2, &vsm_group, &[]);
+        pass.set_bind_group(3, &ssr_group, &[]);
         pass.set_index_buffer(draw.index_buffer.slice(..), IndexFormat::Uint32);
         pass.draw_indexed(0..draw.index_count, 0, 0..1);
     }

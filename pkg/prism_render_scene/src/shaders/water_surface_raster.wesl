@@ -295,6 +295,278 @@ fn vsm_sample_directional(world_position: vec3<f32>) -> f32 {
     return lit / taps;
 }
 
+// Screen-space-reflection base (`@group(3)`): the engine's reverse-Z Hi-Z
+// "nearest depth" pyramid (built by the opaque `shading::ssr` prepass) plus the
+// march config uniform. The transparent water surface marches this pyramid in
+// its own fragment stage rather than sampling the resolved opaque SSR buffer:
+// that buffer stores the reflection of the opaque surface under each pixel (for
+// a water pixel, the submerged terrain), which is physically wrong on the
+// water. Marching here reflects the view ray about the animated surface normal
+// and samples the current-frame `scene_color` at the hit, reusing the shared
+// depth pyramid with no extra prepass. The twin functions below mirror
+// `shaders/ssr.wesl` (the device twin of the `prism_render_shading::screen_space`
+// `CPU` golden) verbatim, `ssr_`-prefixed to avoid colliding with this module's
+// own names. All reads are `textureLoad`, so the pyramid needs no sampler.
+struct WaterSsrConfig {
+    clip_from_view: mat4x4<f32>,
+    view_from_clip: mat4x4<f32>,
+    view_from_world: mat4x4<f32>,
+    near: f32,
+    max_distance: f32,
+    thickness: f32,
+    max_iterations: u32,
+    edge_fade_start: f32,
+    full_roughness: f32,
+    max_roughness: f32,
+    distance_fade_start: f32,
+    most_detailed_mip: u32,
+    sample_enable: u32,
+    _pad0: u32,
+    _pad1: u32,
+}
+
+@group(3) @binding(0) var ssr_hzb: texture_2d<f32>;
+@group(3) @binding(1) var<uniform> ssr_cfg: WaterSsrConfig;
+
+fn ssr_saturate(x: f32) -> f32 {
+    return clamp(x, 0.0, 1.0);
+}
+
+// Hermite smoothstep matching the golden `smoothstep`.
+fn ssr_smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    if (edge0 == edge1) {
+        return select(0.0, 1.0, x >= edge0);
+    }
+    let t = ssr_saturate((x - edge0) / (edge1 - edge0));
+    return t * t * (3.0 - 2.0 * t);
+}
+
+// Fade toward 0 near any screen border (golden `edge_fade`).
+fn ssr_edge_fade(uv: vec2<f32>, fade_start: f32) -> f32 {
+    let fade = max(fade_start, 1.0e-4);
+    let dx = min(uv.x, 1.0 - uv.x);
+    let dy = min(uv.y, 1.0 - uv.y);
+    return ssr_smoothstep(0.0, fade, min(dx, dy));
+}
+
+// Fade rays that point back toward the camera (golden `facing_fade`).
+fn ssr_facing_fade(reflection: vec3<f32>, camera_to_surface: vec3<f32>) -> f32 {
+    return ssr_smoothstep(-0.15, 0.35, dot(reflection, camera_to_surface));
+}
+
+// Fade out as the surface roughens past a single mirror ray (golden
+// `roughness_fade`).
+fn ssr_roughness_fade(roughness: f32, full_roughness: f32, max_roughness: f32) -> f32 {
+    let lo = min(full_roughness, max_roughness);
+    let hi = max(max_roughness, full_roughness + 1.0e-4);
+    return 1.0 - ssr_smoothstep(lo, hi, roughness);
+}
+
+// Fade toward the far march limit (golden `distance_fade`).
+fn ssr_distance_fade(travel: f32, fade_start: f32) -> f32 {
+    let start = clamp(fade_start, 0.0, 1.0);
+    return 1.0 - ssr_smoothstep(start, 1.0, ssr_saturate(travel));
+}
+
+struct SsrScreenSample {
+    uv: vec2<f32>,
+    device_depth: f32,
+    clip_w: f32,
+}
+
+// Project a view-space point to framebuffer UV + reverse-Z device depth (golden
+// `project_view_to_screen`).
+fn ssr_project_view(point_view: vec3<f32>) -> SsrScreenSample {
+    let clip = ssr_cfg.clip_from_view * vec4<f32>(point_view, 1.0);
+    let inv_w = 1.0 / clip.w;
+    let ndc = clip.xyz * inv_w;
+    var out: SsrScreenSample;
+    out.uv = vec2<f32>(ndc.x * 0.5 + 0.5, ndc.y * -0.5 + 0.5);
+    out.device_depth = ndc.z;
+    out.clip_w = clip.w;
+    return out;
+}
+
+// Smallest ray parameter > t at which the ray crosses into the next integer
+// texel cell at `size` (golden `next_cell_boundary`).
+fn ssr_next_cell_boundary(start: vec2<f32>, delta: vec2<f32>, size: vec2<f32>, t: f32) -> f32 {
+    let eps = 1.0e-6;
+    var best = 1.0;
+    let sx = max(size.x, 1.0);
+    let sy = max(size.y, 1.0);
+
+    let dx = delta.x * sx;
+    if (abs(dx) > eps) {
+        let pos = (start.x + delta.x * t) * sx;
+        let boundary = select(ceil(pos) - 1.0, floor(pos) + 1.0, dx > 0.0);
+        let t_axis = (boundary / sx - start.x) / delta.x;
+        if (t_axis > t + eps && t_axis < best) {
+            best = t_axis;
+        }
+    }
+    let dy = delta.y * sy;
+    if (abs(dy) > eps) {
+        let pos = (start.y + delta.y * t) * sy;
+        let boundary = select(ceil(pos) - 1.0, floor(pos) + 1.0, dy > 0.0);
+        let t_axis = (boundary / sy - start.y) / delta.y;
+        if (t_axis > t + eps && t_axis < best) {
+            best = t_axis;
+        }
+    }
+    return min(best, 1.0);
+}
+
+struct SsrMarchResult {
+    hit: bool,
+    uv: vec2<f32>,
+    depth: f32,
+    travel: f32,
+}
+
+// Hierarchical (Hi-Z) march across the reverse-Z nearest-depth pyramid (golden
+// `march_hierarchical`).
+fn ssr_march(
+    start_uv: vec2<f32>,
+    start_depth: f32,
+    end_uv: vec2<f32>,
+    end_depth: f32,
+) -> SsrMarchResult {
+    let delta = end_uv - start_uv;
+    let mip_levels = i32(textureNumLevels(ssr_hzb));
+    let base = u32(max(mip_levels - 1, 0));
+    let most_detailed = min(ssr_cfg.most_detailed_mip, base);
+
+    var level = most_detailed;
+    var t = 0.0;
+    var iterations = 0u;
+
+    var result: SsrMarchResult;
+    result.hit = false;
+
+    loop {
+        if (iterations >= ssr_cfg.max_iterations || t >= 1.0) {
+            break;
+        }
+        iterations = iterations + 1u;
+
+        let uv = start_uv + delta * t;
+        if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+            result.uv = uv;
+            result.depth = mix(start_depth, end_depth, t);
+            result.travel = t;
+            return result;
+        }
+
+        let size = vec2<f32>(textureDimensions(ssr_hzb, i32(level)));
+        let cell = vec2<i32>(uv * size);
+        let t_next = ssr_next_cell_boundary(start_uv, delta, size, t);
+
+        let depth_near = mix(start_depth, end_depth, t);
+        let depth_far = mix(start_depth, end_depth, t_next);
+        let cell_nearest = textureLoad(ssr_hzb, cell, i32(level)).x;
+
+        if (depth_far > cell_nearest) {
+            t = t_next;
+            if (level < base) {
+                level = level + 1u;
+            }
+            continue;
+        }
+
+        if (level > most_detailed) {
+            level = level - 1u;
+            continue;
+        }
+
+        if (depth_near >= cell_nearest) {
+            let span = depth_near - depth_far;
+            var t_hit = t;
+            if (span > 1.0e-8) {
+                t_hit = t + (depth_near - cell_nearest) / span * (t_next - t);
+            }
+            result.hit = true;
+            result.uv = start_uv + delta * t_hit;
+            result.depth = cell_nearest;
+            result.travel = t_hit;
+            return result;
+        }
+
+        if (cell_nearest - depth_near <= ssr_cfg.thickness) {
+            result.hit = true;
+            result.uv = uv;
+            result.depth = cell_nearest;
+            result.travel = t;
+            return result;
+        }
+        t = t_next;
+    }
+
+    let clamped = min(t, 1.0);
+    result.uv = start_uv + delta * clamped;
+    result.depth = mix(start_depth, end_depth, clamped);
+    result.travel = clamped;
+    return result;
+}
+
+// March one reflected ray from the water surface and return the sampled scene
+// radiance plus a blend confidence (golden `trace_confidence`). The surface
+// world position and normal are rotated into view space; the view ray is
+// reflected about the normal and marched across the shared Hi-Z pyramid, with
+// the far endpoint clipped to the near plane. A disabled pass, a back-facing
+// ray, an off-screen march, or a miss returns zero confidence so the caller
+// falls back to the image-based reflection.
+fn water_ssr_reflection(world_position: vec3<f32>, world_normal: vec3<f32>, roughness: f32) -> vec4<f32> {
+    if (ssr_cfg.sample_enable == 0u) {
+        return vec4<f32>(0.0);
+    }
+
+    let position_view = (ssr_cfg.view_from_world * vec4<f32>(world_position, 1.0)).xyz;
+    let normal_view = normalize((ssr_cfg.view_from_world * vec4<f32>(world_normal, 0.0)).xyz);
+    // Camera sits at the view-space origin, so the incident ray is the direction
+    // from the eye to the surface point.
+    let incident = normalize(position_view);
+    let reflection = reflect(incident, normal_view);
+
+    var travel = max(ssr_cfg.max_distance, 1.0e-3);
+    var end_view = position_view + reflection * travel;
+    let plane = -ssr_cfg.near;
+    if (end_view.z > plane) {
+        let denom = reflection.z;
+        if (abs(denom) <= 1.0e-6) {
+            return vec4<f32>(0.0);
+        }
+        let clipped = (plane - position_view.z) / denom;
+        if (clipped <= 1.0e-4) {
+            return vec4<f32>(0.0);
+        }
+        travel = clipped;
+    }
+    let clipped_fraction = clamp(travel / max(ssr_cfg.max_distance, 1.0e-3), 1.0e-4, 1.0);
+    end_view = position_view + reflection * travel;
+
+    let start = ssr_project_view(position_view);
+    let end = ssr_project_view(end_view);
+    if (start.clip_w <= 0.0 || end.clip_w <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+
+    let march = ssr_march(start.uv, start.device_depth, end.uv, end.device_depth);
+    if (!march.hit) {
+        return vec4<f32>(0.0);
+    }
+
+    let travel_norm = clamp(march.travel * clipped_fraction, 0.0, 1.0);
+    let edge = ssr_edge_fade(march.uv, ssr_cfg.edge_fade_start);
+    let facing = ssr_facing_fade(reflection, incident);
+    let rough = ssr_roughness_fade(roughness, ssr_cfg.full_roughness, ssr_cfg.max_roughness);
+    let dist = ssr_distance_fade(travel_norm, ssr_cfg.distance_fade_start);
+    let confidence = ssr_saturate(edge * facing * rough * dist);
+    // Current-frame scene colour at the hit, sharp (mip 0): the water surface is
+    // a near-mirror, so no roughness-selected colour blur is applied.
+    let reflected = textureSampleLevel(scene_color, scene_sampler, march.uv, 0.0).rgb;
+    return vec4<f32>(reflected, confidence);
+}
+
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) world_position: vec3<f32>,
@@ -367,7 +639,7 @@ fn frame_at(world_position: vec3<f32>, normal: vec3<f32>) -> ShadingFrame {
 // path: a split-sum specular reflection plus `SH` irradiance diffuse when the
 // environment carries image-based data, falling back to the flat ambient
 // radiance otherwise. Shared verbatim by every §5 frontend.
-fn water_ibl(surface: SurfaceSample, frame: ShadingFrame) -> vec3<f32> {
+fn water_ibl(surface: SurfaceSample, frame: ShadingFrame, ssr: vec4<f32>) -> vec3<f32> {
     let env = light_env[0];
     let occlusion = clamp(surface.ambient_occlusion, 0.0, 1.0);
     let n = brdf_normalize_or(frame.normal, vec3<f32>(0.0, 1.0, 0.0));
@@ -384,10 +656,10 @@ fn water_ibl(surface: SurfaceSample, frame: ShadingFrame) -> vec3<f32> {
         let diffuse = surface.base_color * (1.0 - metallic) * irradiance * INV_PI;
         let reflection = reflect(-v, n);
         let prefiltered = max(sh_radiance(env, reflection), vec3<f32>(0.0));
-        let env_specular = prefiltered * spec_weight;
+        let env_specular = mix(prefiltered, ssr.rgb, ssr.a) * spec_weight;
         return diffuse * occlusion + env_specular;
     }
-    return surface.base_color * env.ambient * (occlusion * (1.0 - metallic));
+    return surface.base_color * env.ambient * (occlusion * (1.0 - metallic)) + ssr.rgb * spec_weight * ssr.a;
 }
 
 // Sample the scene color behind the surface, offset by the surface normal, for
@@ -451,7 +723,8 @@ fn shade_pbr_core(in: VertexOutput) -> vec4<f32> {
             lit = lit + water_direct(surface, frame, dl);
         }
     }
-    lit = lit + water_ibl(surface, frame);
+    let ssr = water_ssr_reflection(in.world_position, frame.normal, surface.perceptual_roughness);
+    lit = lit + water_ibl(surface, frame, ssr);
     let refracted = refraction_color(in.clip_position, frame.normal);
 
     // Grazing angles reflect more and refract less (Fresnel-weighted alpha).

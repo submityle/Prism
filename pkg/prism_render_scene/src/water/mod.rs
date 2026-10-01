@@ -56,6 +56,7 @@ mod surface_mesh;
 mod surface_node;
 mod surface_pipeline;
 mod surface_shading;
+mod surface_ssr;
 mod surface_vsm;
 
 /// The high-level water authoring presets and the water body component they

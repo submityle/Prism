@@ -211,6 +211,13 @@ pub(crate) struct WaterSurfacePipelines {
     /// to the live [`BindGroupLayout`](bevy_render::render_resource::BindGroupLayout)
     /// through the [`PipelineCache`] with the same descriptor the draw node binds.
     pub(crate) vsm_layout: BindGroupLayoutDescriptor,
+    /// The water-surface `@group(3)` screen-space-reflection layout descriptor
+    /// (reverse-Z Hi-Z pyramid + march config uniform). Built from
+    /// [`super::surface_ssr::ssr_layout_entries`] so the transparent surface can
+    /// march the same depth pyramid the opaque `SSR` prepass produces. Resolved
+    /// to the live [`BindGroupLayout`](bevy_render::render_resource::BindGroupLayout)
+    /// through the [`PipelineCache`] with the same descriptor the draw node binds.
+    pub(crate) ssr_layout: BindGroupLayoutDescriptor,
     /// The embedded `water_surface_raster.wesl` module both stages compile from.
     pub(crate) shader: Handle<Shader>,
 }
@@ -228,6 +235,7 @@ impl SpecializedRenderPipeline for WaterSurfacePipelines {
                 self.layout.clone(),
                 self.light_layout.clone(),
                 self.vsm_layout.clone(),
+                self.ssr_layout.clone(),
             ],
             immediate_size: 0,
             vertex: VertexState {
@@ -334,10 +342,19 @@ pub(crate) fn init_water_surface_pipelines(
         &super::surface_vsm::vsm_layout_entries(),
     );
 
+    // The `@group(3)` SSR layout: the reverse-Z Hi-Z pyramid plus the march
+    // config uniform. The draw node binds either the resident `ViewSsrTextures`
+    // pyramid or the 1x1 fallback against this descriptor.
+    let ssr_layout = BindGroupLayoutDescriptor::new(
+        "prism water surface ssr",
+        &super::surface_ssr::ssr_layout_entries(),
+    );
+
     commands.insert_resource(WaterSurfacePipelines {
         layout,
         light_layout,
         vsm_layout,
+        ssr_layout,
         shader,
     });
 }
@@ -402,6 +419,10 @@ mod tests {
             vsm_layout: BindGroupLayoutDescriptor::new(
                 "prism water surface vsm",
                 &crate::water::surface_vsm::vsm_layout_entries(),
+            ),
+            ssr_layout: BindGroupLayoutDescriptor::new(
+                "prism water surface ssr",
+                &crate::water::surface_ssr::ssr_layout_entries(),
             ),
             shader: Handle::default(),
         }
@@ -483,10 +504,11 @@ mod tests {
         assert_eq!(depth.depth_compare, Some(CompareFunction::GreaterEqual));
         assert_eq!(desc.primitive.cull_mode, None);
         assert_eq!(desc.primitive.topology, PrimitiveTopology::TriangleList);
-        // Three bind-group layouts: the per-body @group(0) surface layout, the
-        // shared @group(1) engine light table the fragment stage samples, and the
-        // @group(2) virtual-shadow-map twin the primary directional light reads.
-        assert_eq!(desc.layout.len(), 3);
+        // Four bind-group layouts: the per-body @group(0) surface layout, the
+        // shared @group(1) engine light table the fragment stage samples, the
+        // @group(2) virtual-shadow-map twin the primary directional light reads,
+        // and the @group(3) screen-space-reflection Hi-Z pyramid + march config.
+        assert_eq!(desc.layout.len(), 4);
     }
 
     #[test]
