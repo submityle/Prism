@@ -230,6 +230,7 @@ mod tests {
     use super::*;
     use crate::buffer::{AudioBuffer, ChannelLayout};
     use bevy_math::ops;
+    use alloc::vec::Vec;
 
     fn ctx(frames: usize) -> RenderContext {
         RenderContext {
@@ -291,7 +292,7 @@ mod tests {
             let x = f as Sample;
             (ops::sin(0.05 * x), -0.5 * ops::sin(0.03 * x))
         });
-        let mono_ref: alloc::vec::Vec<Sample> = (0..64)
+        let mono_ref: Vec<Sample> = (0..64)
             .map(|f| 0.5 * (input.channel(0)[f] + input.channel(1)[f]))
             .collect();
         let out = run(&mut node, input);
