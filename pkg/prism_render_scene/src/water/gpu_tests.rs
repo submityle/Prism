@@ -9195,3 +9195,460 @@ fn flip_mac_p2g_gpu_matches_cpu_golden() {
         "face-centered P2G produced an all-zero face field"
     );
 }
+
+/// Compiles `water_flip_mac_g2p.wesl` and returns its `Wgsl` translation.
+fn compile_flip_mac_g2p_wgsl() -> String {
+    let mut cache = ShaderCache::new((), keep_wgsl);
+    let id = AssetId::Uuid {
+        uuid: Uuid::from_u128(0x5052_4953_4d5f_5741_5445_5246_4c50_0005),
+    };
+    cache.set_shader(
+        id,
+        Shader::from_wesl(
+            include_str!("../shaders/water_flip_mac_g2p.wesl"),
+            "embedded://prism_render_scene/shaders/water_flip_mac_g2p.wesl",
+        ),
+    );
+    let module = cache
+        .get(0, id, &[])
+        .unwrap_or_else(|error| panic!("water_flip_mac_g2p.wesl failed to compile: {error}"));
+    (*module).clone()
+}
+
+/// `CPU` golden twin of `water_flip_mac_g2p`: gathers each velocity component
+/// from its staggered face family of the projected field, forms the `FLIP`
+/// delta as the per-face `projected − preprojection` change, blends `PIC`/`FLIP`
+/// with the clamped `flip_blend`, and rebuilds the `APIC` affine rows with the
+/// `3 / dx²` inverse — identical addressing, shifts, weights, and arithmetic to
+/// the shader.
+fn mac_g2p_golden(
+    particles: &[GpuFlipParticle],
+    projected: &[f32],
+    preprojection: &[f32],
+    params: &GpuFlipSimParams,
+) -> Vec<GpuFlipParticle> {
+    let dim = [params.dim[0], params.dim[1], params.dim[2]];
+    let origin = Vec3::new(params.origin[0], params.origin[1], params.origin[2]);
+    let dx = params.dx;
+    let inv_dx = params.inv_dx;
+    let inv_d = FLIP_APIC_INV_D * inv_dx * inv_dx;
+    let alpha = params.flip_blend.clamp(0.0, 1.0);
+    let use_affine = params.use_affine != 0;
+
+    // Per-axis staggered node lattice: half-cell shift + node dimensions.
+    let axes: [(Vec3, [u32; 3]); 3] = [
+        (Vec3::new(0.0, 0.5, 0.5), [dim[0] + 1, dim[1], dim[2]]),
+        (Vec3::new(0.5, 0.0, 0.5), [dim[0], dim[1] + 1, dim[2]]),
+        (Vec3::new(0.5, 0.5, 0.0), [dim[0], dim[1], dim[2] + 1]),
+    ];
+
+    let mut out = particles.to_vec();
+    let mut p = 0usize;
+    while p < params.particle_count as usize {
+        let particle = particles[p];
+        if particle.pos[3] <= 0.5 {
+            p += 1;
+            continue;
+        }
+        let pos = Vec3::new(particle.pos[0], particle.pos[1], particle.pos[2]);
+        let vel = Vec3::new(particle.vel[0], particle.vel[1], particle.vel[2]);
+
+        let mut pic = [0.0_f32; 3];
+        let mut delta = [0.0_f32; 3];
+        let mut rows = [Vec3::new(0.0, 0.0, 0.0); 3];
+
+        let mut axis = 0usize;
+        while axis < 3 {
+            let (shift, node_dim) = axes[axis];
+            let local = pos.sub(origin).scale(inv_dx).sub(shift);
+            let base_i = local.x.floor() as i32;
+            let base_j = local.y.floor() as i32;
+            let base_k = local.z.floor() as i32;
+            let weights = trilinear_weights(
+                local.x - local.x.floor(),
+                local.y - local.y.floor(),
+                local.z - local.z.floor(),
+            );
+            let mut corner = 0usize;
+            let mut cz = 0i32;
+            while cz < 2 {
+                let mut cy = 0i32;
+                while cy < 2 {
+                    let mut cx = 0i32;
+                    while cx < 2 {
+                        let w = weights[corner];
+                        corner += 1;
+                        let fi = base_i + cx;
+                        let fj = base_j + cy;
+                        let fk = base_k + cz;
+                        cx += 1;
+                        if fi < 0
+                            || fj < 0
+                            || fk < 0
+                            || fi >= node_dim[0] as i32
+                            || fj >= node_dim[1] as i32
+                            || fk >= node_dim[2] as i32
+                        {
+                            continue;
+                        }
+                        if w <= 0.0 {
+                            continue;
+                        }
+                        let flat = match axis {
+                            0 => mac_u_index(fi as u32, fj as u32, fk as u32, dim),
+                            1 => mac_v_index(fi as u32, fj as u32, fk as u32, dim),
+                            _ => mac_w_index(fi as u32, fj as u32, fk as u32, dim),
+                        } as usize;
+                        let v_proj = projected[flat];
+                        let v_pre = preprojection[flat];
+                        pic[axis] += v_proj * w;
+                        delta[axis] += (v_proj - v_pre) * w;
+                        let node = Vec3::new(
+                            origin.x + (fi as f32 + shift.x) * dx,
+                            origin.y + (fj as f32 + shift.y) * dx,
+                            origin.z + (fk as f32 + shift.z) * dx,
+                        );
+                        let offset = node.sub(pos);
+                        rows[axis] = rows[axis].add(offset.scale(v_proj * w));
+                    }
+                    cy += 1;
+                }
+                cz += 1;
+            }
+            axis += 1;
+        }
+
+        let pic_vec = Vec3::new(pic[0], pic[1], pic[2]);
+        let flip_vel = vel.add(Vec3::new(delta[0], delta[1], delta[2]));
+        let blended = pic_vec.scale(1.0 - alpha).add(flip_vel.scale(alpha));
+        let mut result = particle;
+        result.vel = [blended.x, blended.y, blended.z, particle.vel[3]];
+        if use_affine {
+            let r0 = rows[0].scale(inv_d);
+            let r1 = rows[1].scale(inv_d);
+            let r2 = rows[2].scale(inv_d);
+            result.c0 = [r0.x, r0.y, r0.z, particle.c0[3]];
+            result.c1 = [r1.x, r1.y, r1.z, particle.c1[3]];
+            result.c2 = [r2.x, r2.y, r2.z, particle.c2[3]];
+        } else {
+            result.c0 = [0.0, 0.0, 0.0, particle.c0[3]];
+            result.c1 = [0.0, 0.0, 0.0, particle.c1[3]];
+            result.c2 = [0.0, 0.0, 0.0, particle.c2[3]];
+        }
+        out[p] = result;
+        p += 1;
+    }
+    out
+}
+
+/// Dispatches one `water_flip_mac_g2p` gather on device and reads back the
+/// updated particle buffer.
+///
+/// The bind group is built from the pipeline's reflected `group(0)` layout,
+/// which — because the gather touches the particles (read-write), the projected
+/// faces, the pre-projection faces, and the params — contains bindings 0, 1, 2,
+/// and 3.
+fn dispatch_flip_mac_g2p(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    wgsl: &str,
+    entry: &str,
+    particles: &[GpuFlipParticle],
+    projected: &[f32],
+    preprojection: &[f32],
+    params: &GpuFlipSimParams,
+) -> Vec<GpuFlipParticle> {
+    let module = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("water_flip_mac_g2p"),
+        source: ShaderSource::Wgsl(wgsl.into()),
+    });
+    let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("mac_g2p_pipeline"),
+        layout: None,
+        module: &module,
+        entry_point: Some(entry),
+        compilation_options: PipelineCompilationOptions::default(),
+        cache: None,
+    });
+
+    let particle_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("mac_g2p_particles"),
+        contents: bytemuck::cast_slice(particles),
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+    });
+    let projected_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("mac_g2p_projected"),
+        contents: bytemuck::cast_slice(projected),
+        usage: BufferUsages::STORAGE,
+    });
+    let preproj_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("mac_g2p_preprojection"),
+        contents: bytemuck::cast_slice(preprojection),
+        usage: BufferUsages::STORAGE,
+    });
+    let param_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("mac_g2p_params"),
+        contents: bytemuck::bytes_of(params),
+        usage: BufferUsages::UNIFORM,
+    });
+
+    let layout = pipeline.get_bind_group_layout(0);
+    let group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("mac_g2p_group0"),
+        layout: &layout,
+        entries: &[
+            BindGroupEntry {
+                binding: 0,
+                resource: particle_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 1,
+                resource: projected_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 2,
+                resource: preproj_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 3,
+                resource: param_buf.as_entire_binding(),
+            },
+        ],
+    });
+
+    let particle_bytes = size_of_val(particles) as u64;
+    let particle_stage = device.create_buffer(&BufferDescriptor {
+        label: Some("mac_g2p_particle_stage"),
+        size: particle_bytes,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("mac_g2p_encoder"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("mac_g2p_pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &group, &[]);
+        pass.dispatch_workgroups(params.particle_count.div_ceil(64), 1, 1);
+    }
+    encoder.copy_buffer_to_buffer(&particle_buf, 0, &particle_stage, 0, particle_bytes);
+    queue.submit([encoder.finish()]);
+
+    particle_stage.slice(..).map_async(MapMode::Read, |_| {});
+    device
+        .poll(PollType::wait_indefinitely())
+        .expect("device poll should complete the submitted work");
+
+    let view = particle_stage
+        .slice(..)
+        .get_mapped_range()
+        .expect("particle readback range should be available after poll");
+    let out: Vec<GpuFlipParticle> = bytemuck::cast_slice::<u8, GpuFlipParticle>(&view).to_vec();
+    drop(view);
+    particle_stage.unmap();
+    out
+}
+
+/// One on-device face-centered `G2P` gather must match the `CPU` golden across
+/// the full staggered-`MAC` transfer chain.
+///
+/// The scene drives a real pre-projection face field through the whole
+/// staggered pipeline — face-centered `P2G` scatter + normalize
+/// (`mac_p2g_golden` / `mac_faces_normalize_golden`) → compact divergence
+/// (`mac_divergence_golden`) → damped-`Jacobi` pressure
+/// (`mac_pressure_golden`) → compact projection (`mac_project_golden`) — so the
+/// gather reads a genuinely projected field and a distinct pre-projection field,
+/// making the `FLIP` delta `projected − preprojection` non-zero. The particle
+/// mix covers an interior particle, a boundary particle straddling the grid edge
+/// (staggered corners skipped by the bounds guard), two particles sharing a
+/// cell, an `APIC`-affine particle (non-zero `C_p` rows exercising the
+/// per-component affine reconstruction), and an inactive particle (`pos.w ≤
+/// 0.5`) that must be left untouched. All inputs are dyadic, so the two paths
+/// agree to `float32` rounding (`PARITY_EPS`). This is the gather half that
+/// closes the `FLIP`/`APIC` loop against the unconditionally-stable staggered
+/// projection.
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice must reach the test log on hosts without a wgpu adapter"
+)]
+fn flip_mac_g2p_gpu_matches_cpu_golden() {
+    let Some((device, queue)) = try_solver_device() else {
+        eprintln!(
+            "flip_mac_g2p_gpu_matches_cpu_golden: no wgpu adapter, skipping on-device parity"
+        );
+        return;
+    };
+
+    let dim = [4u32, 4u32, 4u32];
+    let cell_count = dim[0] * dim[1] * dim[2];
+    let dx = 1.0_f32;
+    let inv_dx = 1.0_f32;
+
+    let particles = [
+        // Interior particle: all staggered corners inside every face lattice.
+        GpuFlipParticle {
+            pos: [1.25, 1.5, 1.75, 1.0],
+            vel: [0.5, -0.25, 0.75, 0.0],
+            c0: [0.0, 0.0, 0.0, 0.0],
+            c1: [0.0, 0.0, 0.0, 0.0],
+            c2: [0.0, 0.0, 0.0, 0.0],
+        },
+        // Boundary particle straddling the low corner: some faces are skipped.
+        GpuFlipParticle {
+            pos: [0.25, 0.25, 0.25, 1.0],
+            vel: [-1.0, 0.5, 0.25, 0.0],
+            c0: [0.0, 0.0, 0.0, 0.0],
+            c1: [0.0, 0.0, 0.0, 0.0],
+            c2: [0.0, 0.0, 0.0, 0.0],
+        },
+        // Two particles sharing one cell.
+        GpuFlipParticle {
+            pos: [2.5, 2.5, 2.5, 1.0],
+            vel: [0.125, 0.25, -0.5, 0.0],
+            c0: [0.0, 0.0, 0.0, 0.0],
+            c1: [0.0, 0.0, 0.0, 0.0],
+            c2: [0.0, 0.0, 0.0, 0.0],
+        },
+        GpuFlipParticle {
+            pos: [2.5, 2.5, 2.5, 1.0],
+            vel: [-0.25, 0.75, 0.5, 0.0],
+            c0: [0.0, 0.0, 0.0, 0.0],
+            c1: [0.0, 0.0, 0.0, 0.0],
+            c2: [0.0, 0.0, 0.0, 0.0],
+        },
+        // APIC-affine particle: non-zero C_p rows exercise the affine rebuild.
+        GpuFlipParticle {
+            pos: [1.75, 2.25, 1.5, 1.0],
+            vel: [0.5, -0.5, 0.25, 0.0],
+            c0: [0.25, -0.125, 0.5, 0.0],
+            c1: [-0.5, 0.25, 0.125, 0.0],
+            c2: [0.125, 0.5, -0.25, 0.0],
+        },
+        // Inactive particle: must be left untouched by the gather.
+        GpuFlipParticle {
+            pos: [2.0, 2.0, 2.0, 0.0],
+            vel: [9.0, 9.0, 9.0, 0.0],
+            c0: [9.0, 9.0, 9.0, 0.0],
+            c1: [9.0, 9.0, 9.0, 0.0],
+            c2: [9.0, 9.0, 9.0, 0.0],
+        },
+    ];
+
+    let params = GpuFlipSimParams {
+        origin: [0.0, 0.0, 0.0, 0.0],
+        dim: [dim[0], dim[1], dim[2], 0],
+        dx,
+        inv_dx,
+        flip_blend: 0.95,
+        particle_mass: 2.0,
+        jacobi_omega: 0.6,
+        use_affine: 1,
+        particle_count: particles.len() as u32,
+        cell_count,
+    };
+
+    // Build the pre-projection face field from the face-centered scatter, then
+    // run the staggered projection chain to obtain the projected field so the
+    // FLIP delta `projected − preprojection` is a genuine non-zero correction.
+    let scatter = mac_p2g_golden(&particles, &params);
+    let preprojection = mac_faces_normalize_golden(&scatter, dim);
+    let divergence = mac_divergence_golden(&preprojection, dim, inv_dx);
+    let pressure = mac_pressure_golden(&divergence, dim, dx, params.jacobi_omega, 60);
+    let projected = mac_project_golden(&preprojection, &pressure, dim, inv_dx);
+
+    // The projection must actually change the faces, otherwise the FLIP delta is
+    // trivially zero and the test proves nothing about the delta path.
+    let mut face_changed = false;
+    let mut fi = 0usize;
+    while fi < projected.len() {
+        if (projected[fi] - preprojection[fi]).abs() > PARITY_EPS {
+            face_changed = true;
+            break;
+        }
+        fi += 1;
+    }
+    assert!(
+        face_changed,
+        "projection left the face field unchanged; FLIP delta would be trivially zero"
+    );
+
+    let wgsl = compile_flip_mac_g2p_wgsl();
+    let entry = find_entry_point(&wgsl, "water_flip_mac_g2p");
+    let gpu_particles = dispatch_flip_mac_g2p(
+        &device,
+        &queue,
+        &wgsl,
+        &entry,
+        &particles,
+        &projected,
+        &preprojection,
+        &params,
+    );
+    let cpu_particles = mac_g2p_golden(&particles, &projected, &preprojection, &params);
+
+    assert_eq!(
+        gpu_particles.len(),
+        cpu_particles.len(),
+        "particle buffer length mismatch"
+    );
+
+    let mut p = 0usize;
+    while p < cpu_particles.len() {
+        let g = gpu_particles[p];
+        let c = cpu_particles[p];
+        let mut lane = 0usize;
+        while lane < 3 {
+            assert!(
+                (g.vel[lane] - c.vel[lane]).abs() <= PARITY_EPS,
+                "particle {p} vel lane {lane} mismatch: gpu {} vs cpu {}",
+                g.vel[lane],
+                c.vel[lane]
+            );
+            assert!(
+                (g.c0[lane] - c.c0[lane]).abs() <= PARITY_EPS,
+                "particle {p} c0 lane {lane} mismatch: gpu {} vs cpu {}",
+                g.c0[lane],
+                c.c0[lane]
+            );
+            assert!(
+                (g.c1[lane] - c.c1[lane]).abs() <= PARITY_EPS,
+                "particle {p} c1 lane {lane} mismatch: gpu {} vs cpu {}",
+                g.c1[lane],
+                c.c1[lane]
+            );
+            assert!(
+                (g.c2[lane] - c.c2[lane]).abs() <= PARITY_EPS,
+                "particle {p} c2 lane {lane} mismatch: gpu {} vs cpu {}",
+                g.c2[lane],
+                c.c2[lane]
+            );
+            lane += 1;
+        }
+        p += 1;
+    }
+
+    // The gather must actually move the active particles' velocities away from
+    // their seeded values, proving the transfer fired.
+    let active = &cpu_particles[0];
+    let seeded = &particles[0];
+    let moved = (active.vel[0] - seeded.vel[0]).abs()
+        + (active.vel[1] - seeded.vel[1]).abs()
+        + (active.vel[2] - seeded.vel[2]).abs();
+    assert!(
+        moved > FLIP_EPS,
+        "face-centered G2P left the interior particle velocity unchanged"
+    );
+
+    // The inactive particle must be untouched.
+    let inactive_gpu = gpu_particles[particles.len() - 1];
+    assert!(
+        (inactive_gpu.vel[0] - 9.0).abs() <= PARITY_EPS,
+        "inactive particle was modified by the gather"
+    );
+}
