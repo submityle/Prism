@@ -46,8 +46,15 @@ pub struct WaterGpuExtract {
     pub swe: bool,
     /// Whether the `PBF` density solve runs.
     pub pbf: bool,
-    /// Whether the `FLIP`/`APIC` three-pass grid solve runs.
+    /// Whether the collocated `FLIP`/`APIC` three-pass grid solve runs. This is
+    /// the legacy cell-centered path kept until the staggered `MAC` chain is
+    /// proven end-to-end on real hardware (see [`Self::flip_mac`]).
     pub flip: bool,
+    /// Whether the face-centered staggered `MAC` `FLIP`/`APIC` chain runs
+    /// (`P2G` scatter, face normalize, compact divergence, `Jacobi` pressure,
+    /// orthogonal projection, `G2P` gather). Mutually exclusive with
+    /// [`Self::flip`] in a correct body configuration.
+    pub flip_mac: bool,
     /// Whether the renderable-surface reconstruction runs.
     pub reconstruct: bool,
     /// Whether the caustics projection runs.
@@ -79,6 +86,10 @@ pub struct WaterGpuExtract {
     /// Invocation count for the 3D grid passes (`FLIP` `MAC` voxels, underwater
     /// froxels).
     pub grid3d_voxels: u32,
+    /// Invocation count for the face-centered staggered `MAC` passes: the sum
+    /// of the per-axis face counts of the velocity grid. Use [`mac_face_count`]
+    /// to derive it from the grid dimensions.
+    pub face_count: u32,
     /// Invocation count for the particle-domain passes (`PBF`/spray particles).
     pub particle_count: u32,
     /// Invocation count for the full-screen passes (reconstruction, caustics,
@@ -106,6 +117,7 @@ impl WaterGpuExtract {
         match kernel.descriptor().domain {
             DispatchDomain::Grid2d => self.grid2d_texels,
             DispatchDomain::Grid3d => self.grid3d_voxels,
+            DispatchDomain::Faces => self.face_count,
             DispatchDomain::Particle => self.particle_count,
             DispatchDomain::Screen => self.screen_pixels,
         }
@@ -217,6 +229,7 @@ pub fn extract(
     spectrum_texels: u32,
     grid2d_texels: u32,
     grid3d_voxels: u32,
+    face_count: u32,
     particle_count: u32,
     screen_pixels: u32,
 ) -> WaterGpuExtract {
@@ -232,6 +245,7 @@ pub fn extract(
         swe: passes.swe,
         pbf: passes.pbf,
         flip: passes.flip,
+        flip_mac: passes.flip_mac,
         reconstruct: passes.reconstruct,
         caustics: passes.caustics,
         foam: passes.foam,
@@ -246,9 +260,27 @@ pub fn extract(
         spectrum_texels,
         grid2d_texels,
         grid3d_voxels,
+        face_count,
         particle_count,
         screen_pixels,
     }
+}
+
+/// The total number of staggered `MAC` velocity faces for a `(nx, ny, nz)` cell
+/// grid: the sum of the per-axis face counts.
+///
+/// A `MAC` grid stores velocity components at cell faces, so the `u` family has
+/// `(nx + 1) * ny * nz` faces, the `v` family `nx * (ny + 1) * nz`, and the `w`
+/// family `nx * ny * (nz + 1)`. This is the invocation count the face-domain
+/// passes ([`DispatchDomain::Faces`]) are sized against. All arithmetic is
+/// saturating so an adversarial dimension clamps to `u32::MAX` rather than
+/// wrapping.
+#[must_use]
+pub fn mac_face_count(nx: u32, ny: u32, nz: u32) -> u32 {
+    let u_faces = nx.saturating_add(1).saturating_mul(ny).saturating_mul(nz);
+    let v_faces = nx.saturating_mul(ny.saturating_add(1)).saturating_mul(nz);
+    let w_faces = nx.saturating_mul(ny).saturating_mul(nz.saturating_add(1));
+    u_faces.saturating_add(v_faces).saturating_add(w_faces)
 }
 
 /// The set of live passes for a water body this frame, a flat boolean record so
@@ -264,8 +296,11 @@ pub struct WaterPasses {
     pub swe: bool,
     /// `PBF` density solve.
     pub pbf: bool,
-    /// `FLIP`/`APIC` three-pass grid solve.
+    /// Collocated `FLIP`/`APIC` three-pass grid solve (legacy cell-centered).
     pub flip: bool,
+    /// Face-centered staggered `MAC` `FLIP`/`APIC` chain (`P2G`, face normalize,
+    /// compact divergence, `Jacobi` pressure, orthogonal projection, `G2P`).
+    pub flip_mac: bool,
     /// Renderable-surface reconstruction.
     pub reconstruct: bool,
     /// Caustics projection.
@@ -331,6 +366,56 @@ pub fn prepare(extract: &WaterGpuExtract) -> WaterGpuPrepare {
                 );
             }
             push(&mut dispatches, extract, WaterKernel::FlipG2P, step, None);
+        }
+        // Face-centered staggered `MAC` chain: scatter to faces, normalize by
+        // weight, take the compact divergence once, relax pressure for the
+        // configured iterations, project the faces orthogonally, then gather
+        // the projected faces back to particles.
+        if extract.flip_mac {
+            push(
+                &mut dispatches,
+                extract,
+                WaterKernel::FlipMacP2G,
+                step,
+                None,
+            );
+            push(
+                &mut dispatches,
+                extract,
+                WaterKernel::FlipMacFacesNormalize,
+                step,
+                None,
+            );
+            push(
+                &mut dispatches,
+                extract,
+                WaterKernel::FlipMacDivergence,
+                step,
+                None,
+            );
+            for iteration in 0..extract.solver_iterations {
+                push(
+                    &mut dispatches,
+                    extract,
+                    WaterKernel::FlipMacPressure,
+                    step,
+                    Some(iteration),
+                );
+            }
+            push(
+                &mut dispatches,
+                extract,
+                WaterKernel::FlipMacProject,
+                step,
+                None,
+            );
+            push(
+                &mut dispatches,
+                extract,
+                WaterKernel::FlipMacG2P,
+                step,
+                None,
+            );
         }
         if extract.pbf {
             for iteration in 0..extract.solver_iterations {
@@ -524,6 +609,7 @@ mod tests {
             256 * 256,
             256 * 256,
             160 * 90 * 64,
+            0, // face_count (no MAC pass in this body)
             0,
             1920 * 1080,
         )
@@ -546,6 +632,7 @@ mod tests {
             1,
             1,
             1,
+            1,
         );
         assert_eq!(ex.ocean_cascades, 1);
         assert_eq!(ex.substeps, 1);
@@ -558,6 +645,7 @@ mod tests {
             WaterBufferCounts::default(),
             WaterPasses::default(),
             8,
+            1,
             1,
             1,
             1,
@@ -610,6 +698,7 @@ mod tests {
             0,
             0,
             64 * 64 * 64,
+            0, // face_count (collocated path under test)
             40_000,
             1920 * 1080,
         );
@@ -649,6 +738,73 @@ mod tests {
     }
 
     #[test]
+    fn flip_mac_chain_expands_in_face_centered_order_per_substep() {
+        let ex = extract(
+            WaterBufferCounts {
+                flip_particles: 40_000,
+                flip_grid_cells: 32 * 32 * 32,
+                ..WaterBufferCounts::default()
+            },
+            WaterPasses {
+                flip_mac: true,
+                ..WaterPasses::default()
+            },
+            0,
+            2, // substeps
+            4, // pressure iterations
+            0,
+            0,
+            32 * 32 * 32,
+            super::mac_face_count(32, 32, 32),
+            40_000,
+            0,
+        );
+        let plan = prepare(&ex);
+        let count = |k: WaterKernel| plan.dispatches.iter().filter(|d| d.kernel == k).count();
+        // Each substep: 1 P2G + 1 normalize + 1 divergence + 4 pressure + 1
+        // project + 1 G2P. Two substeps double every count.
+        assert_eq!(count(WaterKernel::FlipMacP2G), 2);
+        assert_eq!(count(WaterKernel::FlipMacFacesNormalize), 2);
+        assert_eq!(count(WaterKernel::FlipMacDivergence), 2);
+        assert_eq!(count(WaterKernel::FlipMacPressure), 2 * 4);
+        assert_eq!(count(WaterKernel::FlipMacProject), 2);
+        assert_eq!(count(WaterKernel::FlipMacG2P), 2);
+        // The collocated path stays silent when only the MAC chain is live.
+        assert_eq!(count(WaterKernel::FlipP2G), 0);
+        // Ordering within the first substep: scatter → normalize → divergence →
+        // pressure → project → gather.
+        let pos = |k: WaterKernel| {
+            plan.dispatches
+                .iter()
+                .position(|d| d.kernel == k)
+                .expect("kernel present")
+        };
+        assert!(pos(WaterKernel::FlipMacP2G) < pos(WaterKernel::FlipMacFacesNormalize));
+        assert!(pos(WaterKernel::FlipMacFacesNormalize) < pos(WaterKernel::FlipMacDivergence));
+        assert!(pos(WaterKernel::FlipMacDivergence) < pos(WaterKernel::FlipMacPressure));
+        assert!(pos(WaterKernel::FlipMacPressure) < pos(WaterKernel::FlipMacProject));
+        assert!(pos(WaterKernel::FlipMacProject) < pos(WaterKernel::FlipMacG2P));
+    }
+
+    #[test]
+    fn mac_face_count_sums_per_axis_faces_and_saturates() {
+        // A unit cell has 2 faces per axis → 6 total.
+        assert_eq!(super::mac_face_count(1, 1, 1), 6);
+        // Explicit per-axis sum for a 2x3x4 grid.
+        let (nx, ny, nz) = (2u32, 3, 4);
+        let expected = (nx + 1) * ny * nz + nx * (ny + 1) * nz + nx * ny * (nz + 1);
+        assert_eq!(super::mac_face_count(nx, ny, nz), expected);
+        // A degenerate zero-cell axis is still well defined: the u family keeps
+        // its `(nx + 1)` boundary faces, so `(0, 10, 10)` yields `1 * 10 * 10`.
+        assert_eq!(super::mac_face_count(0, 10, 10), 100);
+        // Adversarial dimensions saturate rather than wrapping.
+        assert_eq!(
+            super::mac_face_count(u32::MAX, u32::MAX, u32::MAX),
+            u32::MAX
+        );
+    }
+
+    #[test]
     fn empty_passes_produce_an_empty_schedule() {
         let ex = extract(
             WaterBufferCounts::default(),
@@ -656,6 +812,7 @@ mod tests {
             0,
             1,
             1,
+            0,
             0,
             0,
             0,

@@ -118,6 +118,11 @@ pub enum DispatchDomain {
     Grid2d,
     /// A 3D grid: the `MAC` velocity/pressure voxels of a `FLIP`/`APIC` domain.
     Grid3d,
+    /// The interleaved `MAC` face family: a linear 64-lane sweep over the
+    /// per-axis staggered velocity faces (`u`/`v`/`w`). The face normalize and
+    /// projection passes write face-centered components and iterate the summed
+    /// per-axis face count rather than a cell voxel grid.
+    Faces,
     /// A flat list of particles (`PBF` / `FLIP` particle passes).
     Particle,
     /// A full-screen pass: caustics projection and screen-space reconstruction
@@ -166,6 +171,22 @@ pub enum WaterKernel {
     FlipPressureSolve,
     /// `FLIP`/`APIC` grid-to-particle gather (`G2P`).
     FlipG2P,
+    /// Face-centered `MAC` particle-to-grid scatter (`P2G`): accumulate particle
+    /// momentum and weight into the staggered `u`/`v`/`w` faces (`atomic` sum).
+    FlipMacP2G,
+    /// Normalize the scattered `MAC` faces: divide the accumulated momentum sum
+    /// by the weight sum per face to recover face-centered velocities.
+    FlipMacFacesNormalize,
+    /// Compact single-sided divergence of the `MAC` face velocities per cell.
+    FlipMacDivergence,
+    /// One `Jacobi` pressure-relaxation iteration on the `MAC` pressure grid.
+    FlipMacPressure,
+    /// Subtract the compact face gradient of pressure from the `MAC` faces: the
+    /// orthogonal projection step that enforces incompressibility.
+    FlipMacProject,
+    /// Face-centered `MAC` grid-to-particle gather (`G2P`): interpolate the
+    /// projected face velocities back to particles (`FLIP` delta + `APIC`).
+    FlipMacG2P,
     /// Reconstruct a renderable surface from the particle set (screen-space,
     /// anisotropic marching cubes, or narrow-band `SDF`).
     SurfaceReconstruct,
@@ -201,7 +222,7 @@ pub enum WaterKernel {
 impl WaterKernel {
     /// Every kernel, in a stable order, for descriptor-table iteration and
     /// exhaustiveness tests.
-    pub const ALL: [WaterKernel; 21] = [
+    pub const ALL: [WaterKernel; 27] = [
         WaterKernel::SpectrumIfft,
         WaterKernel::GerstnerDisplace,
         WaterKernel::SweStep,
@@ -209,6 +230,12 @@ impl WaterKernel {
         WaterKernel::FlipP2G,
         WaterKernel::FlipPressureSolve,
         WaterKernel::FlipG2P,
+        WaterKernel::FlipMacP2G,
+        WaterKernel::FlipMacFacesNormalize,
+        WaterKernel::FlipMacDivergence,
+        WaterKernel::FlipMacPressure,
+        WaterKernel::FlipMacProject,
+        WaterKernel::FlipMacG2P,
         WaterKernel::SurfaceReconstruct,
         WaterKernel::CausticsProject,
         WaterKernel::FoamAdvect,
@@ -240,6 +267,12 @@ impl WaterKernel {
             WaterKernel::FlipP2G => "water_flip_p2g",
             WaterKernel::FlipPressureSolve => "water_flip_pressure_solve",
             WaterKernel::FlipG2P => "water_flip_g2p",
+            WaterKernel::FlipMacP2G => "water_flip_mac_p2g",
+            WaterKernel::FlipMacFacesNormalize => "water_flip_mac_faces_normalize",
+            WaterKernel::FlipMacDivergence => "mac_divergence",
+            WaterKernel::FlipMacPressure => "mac_pressure",
+            WaterKernel::FlipMacProject => "mac_project",
+            WaterKernel::FlipMacG2P => "water_flip_mac_g2p",
             WaterKernel::SurfaceReconstruct => "water_surface_reconstruct",
             WaterKernel::CausticsProject => "water_caustics_project",
             WaterKernel::FoamAdvect => "water_foam_advect",
@@ -297,7 +330,11 @@ impl WaterKernel {
                 WorkgroupSize { x: 8, y: 8, z: 1 },
                 DispatchDomain::Grid2d,
             ),
-            WaterKernel::PbfDensitySolve | WaterKernel::FlipP2G | WaterKernel::FlipG2P => (
+            WaterKernel::PbfDensitySolve
+            | WaterKernel::FlipP2G
+            | WaterKernel::FlipG2P
+            | WaterKernel::FlipMacP2G
+            | WaterKernel::FlipMacG2P => (
                 BindGroupLayout {
                     storage_buffers: 3,
                     uniform_buffers: 1,
@@ -316,6 +353,43 @@ impl WaterKernel {
                 },
                 WorkgroupSize { x: 4, y: 4, z: 4 },
                 DispatchDomain::Grid3d,
+            ),
+            // Face-normalize shares the `P2G` scatter buffers (`face_scatter`
+            // sum + `faces` output + `sim_params`) but sweeps the face family.
+            WaterKernel::FlipMacFacesNormalize => (
+                BindGroupLayout {
+                    storage_buffers: 3,
+                    uniform_buffers: 1,
+                    storage_textures: 0,
+                    sampled_textures: 0,
+                },
+                WorkgroupSize { x: 64, y: 1, z: 1 },
+                DispatchDomain::Faces,
+            ),
+            // The compact `MAC` divergence and `Jacobi` pressure passes bind the
+            // faces, divergence, ping-pong pressure, and `mac_params` over a
+            // 4x4x4 voxel brick.
+            WaterKernel::FlipMacDivergence | WaterKernel::FlipMacPressure => (
+                BindGroupLayout {
+                    storage_buffers: 4,
+                    uniform_buffers: 1,
+                    storage_textures: 0,
+                    sampled_textures: 0,
+                },
+                WorkgroupSize { x: 4, y: 4, z: 4 },
+                DispatchDomain::Grid3d,
+            ),
+            // Projection subtracts the compact face gradient of pressure; it
+            // shares the five `MAC` bindings but sweeps the face family linearly.
+            WaterKernel::FlipMacProject => (
+                BindGroupLayout {
+                    storage_buffers: 4,
+                    uniform_buffers: 1,
+                    storage_textures: 0,
+                    sampled_textures: 0,
+                },
+                WorkgroupSize { x: 64, y: 1, z: 1 },
+                DispatchDomain::Faces,
             ),
             WaterKernel::SurfaceReconstruct => (
                 BindGroupLayout {
@@ -504,9 +578,10 @@ mod tests {
         for kernel in WaterKernel::ALL {
             let d = kernel.descriptor();
             match d.domain {
-                DispatchDomain::Particle => {
+                DispatchDomain::Particle | DispatchDomain::Faces => {
                     assert_eq!(d.workgroup.y, 1);
                     assert_eq!(d.workgroup.z, 1);
+                    assert!(d.workgroup.x > 1);
                 }
                 DispatchDomain::Grid3d => assert!(d.workgroup.z > 1),
                 DispatchDomain::Grid2d | DispatchDomain::Screen => {
