@@ -624,6 +624,16 @@
 //!   equality (see
 //!   [`kept_strand_count`](prism_render_architecture::hair::cluster::kept_strand_count)).
 //!
+//! * [`GpuStrandCollisionResolve`] evaluates
+//!   [`resolve_strand_collisions`](prism_render_architecture::hair::collision::resolve_strand_collisions),
+//!   the in-place body-collision resolve pass: one thread per guide particle
+//!   folds a per-dispatch shared collider array in order, pushing every free
+//!   particle out of each sphere/capsule proxy (last push wins) while leaving
+//!   pinned particles untouched. Unlike [`GpuColliderProjector`], which runs a
+//!   flat batch of independent `(point, collider)` queries, this twin reproduces
+//!   the real per-pass fold with its pinned skip and collider ordering (see
+//!   [`collision`]).
+//!
 //! # Portability
 //!
 //! The projection uses only `sqrt`, `min`, `max`, `clamp`, `dot` and
@@ -708,6 +718,7 @@ pub mod self_collision_grid;
 pub mod self_collision_jacobi;
 pub mod self_collision_voxel;
 pub mod spectrum_sample_map;
+pub mod strand_collision_resolve;
 pub mod strand_keep_ratio;
 pub mod strand_metrics;
 pub mod stratified_allocation;
@@ -787,6 +798,9 @@ pub use self_collision_grid::GpuSelfCollisionGrid;
 pub use self_collision_jacobi::GpuSelfCollisionJacobi;
 pub use self_collision_voxel::GpuHairSelfCollisionVoxel;
 pub use spectrum_sample_map::{reference_spectrum_sample_map, GpuHairSpectrumSample};
+pub use strand_collision_resolve::{
+    reference_resolve_strand_collisions, GpuStrandCollisionResolve,
+};
 pub use strand_keep_ratio::{reference_strand_keep_ratio, GpuHairStrandKeepRatio};
 pub use strand_metrics::{GpuStrandMetric, GpuStrandMetrics};
 pub use stratified_allocation::{reference_stratified_allocation, GpuHairStratifiedAllocation};
