@@ -150,6 +150,17 @@ impl Aabb {
         self.min.cmple(self.max).all()
     }
 
+    /// Returns the squared Euclidean distance from `p` to the nearest point on
+    /// the box, or `0.0` when `p` lies inside the box.
+    ///
+    /// This clamps `p` into `[min, max]` per axis and measures to the clamp,
+    /// which is the standard point-to-AABB squared distance.
+    #[inline]
+    pub fn distance_squared_to_point(&self, p: Vec3) -> f32 {
+        let clamped = p.clamp(self.min, self.max);
+        clamped.distance_squared(p)
+    }
+
     /// Intersects `ray` against the box using the slab method.
     ///
     /// Returns the entry parameter `t` (clamped to be non-negative) when the
@@ -270,5 +281,43 @@ mod tests {
         // hit is beyond tmax -> miss
         let short = Ray::with_tmax(Vec3::new(0.5, 0.5, -5.0), Vec3::Z, 1.0);
         assert!(a.ray_hit(&short).is_none());
+    }
+
+    #[test]
+    fn distance_squared_inside_is_zero() {
+        let a = unit();
+        assert_relative_eq!(
+            a.distance_squared_to_point(Vec3::splat(0.5)),
+            0.0,
+            epsilon = 1e-6
+        );
+        // On a face still counts as inside -> zero.
+        assert_relative_eq!(
+            a.distance_squared_to_point(Vec3::new(0.0, 0.5, 0.5)),
+            0.0,
+            epsilon = 1e-6
+        );
+    }
+
+    #[test]
+    fn distance_squared_axis_aligned() {
+        let a = unit();
+        // Two units left of the near x face at x = 0.
+        assert_relative_eq!(
+            a.distance_squared_to_point(Vec3::new(-2.0, 0.5, 0.5)),
+            4.0,
+            epsilon = 1e-5
+        );
+    }
+
+    #[test]
+    fn distance_squared_corner_diagonal() {
+        let a = unit();
+        // Offset by (-1, -1, -1) from the min corner -> squared distance 3.
+        assert_relative_eq!(
+            a.distance_squared_to_point(Vec3::splat(-1.0)),
+            3.0,
+            epsilon = 1e-5
+        );
     }
 }
