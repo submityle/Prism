@@ -56,6 +56,7 @@ pub mod cone;
 pub mod convex_room;
 pub mod diffraction;
 pub mod diffusion_field;
+pub mod direct_to_reverberant_ratio;
 pub mod doppler;
 pub mod early_reflections;
 pub mod echo_criterion;
@@ -108,6 +109,10 @@ pub use convex_room::{
 };
 pub use diffraction::Diffraction;
 pub use diffusion_field::{DiffusionField, MAX_ECHO_DENSITY};
+pub use direct_to_reverberant_ratio::{
+    DIRECT_WINDOW_MS, DirectToReverberantRatio, MAX_DRR_DB, NO_DRR_DB,
+    direct_to_reverberant_ratio_db,
+};
 pub use doppler::{Doppler, SPEED_OF_SOUND_MPS, doppler_ratio};
 pub use early_reflections::{
     DEFAULT_SOUND_SPEED, EarlyReflectionRenderer, MAX_EARLY_REFLECTIONS, MAX_REFLECTION_ORDER,
