@@ -701,4 +701,31 @@ mod tests {
         assert_eq!(skinned.tier, ClothLodTier::SkinnedProxy);
         assert_eq!(skinned.sim_vertices, 0);
     }
+
+    #[test]
+    fn request_teleport_latches_mode_and_bumps_generation() {
+        let mut garment = ClothGarment::default();
+        // A fresh garment never asked to teleport: continuous mode, generation 0.
+        assert_eq!(garment.teleport_mode(), ClothTeleportMode::Continuous);
+        assert_eq!(garment.teleport_generation(), 0);
+
+        // The first request latches the mode and advances the generation exactly
+        // once so the prepare stage snaps on a single frame, not every frame.
+        garment.request_teleport(ClothTeleportMode::Teleport);
+        assert_eq!(garment.teleport_mode(), ClothTeleportMode::Teleport);
+        assert_eq!(garment.teleport_generation(), 1);
+
+        // A second request re-latches the newest mode and bumps again, so a
+        // teleport that overrides a still-pending one is a distinct generation.
+        garment.request_teleport(ClothTeleportMode::TeleportAndReset);
+        assert_eq!(garment.teleport_mode(), ClothTeleportMode::TeleportAndReset);
+        assert_eq!(garment.teleport_generation(), 2);
+
+        // Requesting continuous still advances the generation (the prepare stage
+        // then skips it because the mode restreams nothing), proving the bump is
+        // unconditional while the restream decision stays with the mode.
+        garment.request_teleport(ClothTeleportMode::Continuous);
+        assert_eq!(garment.teleport_mode(), ClothTeleportMode::Continuous);
+        assert_eq!(garment.teleport_generation(), 3);
+    }
 }
