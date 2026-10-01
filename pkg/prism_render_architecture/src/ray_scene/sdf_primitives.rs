@@ -1190,12 +1190,145 @@ pub fn cross_2d(point: [f32; 2], arm: f32, thickness: f32, r: f32) -> f32 {
     k.signum() * length2([w[0].max(0.0), w[1].max(0.0)]) - r
 }
 
+/// Unsigned distance from `point` to the line segment `a`-`b` in the plane.
+///
+/// The point is projected onto the segment with the parameter clamped to
+/// `[0, 1]`, so endpoints are handled exactly: beyond an end the distance is to
+/// that endpoint, otherwise it is the perpendicular drop. This is the planar
+/// companion to the 3D `capsule` skeleton. Built from a dot product, a clamp
+/// and one `sqrt`, so it stays transcendental-free.
+pub fn segment_2d(point: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
+    let pa = [point[0] - a[0], point[1] - a[1]];
+    let ba = [b[0] - a[0], b[1] - a[1]];
+    let h = ((pa[0] * ba[0] + pa[1] * ba[1]) / (ba[0] * ba[0] + ba[1] * ba[1])).clamp(0.0, 1.0);
+    length2([pa[0] - ba[0] * h, pa[1] - ba[1] * h])
+}
+
+/// Signed distance to a two-dimensional oriented box: the rectangle whose two
+/// short ends are centred at `a` and `b` with full width `thickness`.
+///
+/// This is Inigo Quilez's exact `sdOrientedBox`. The query is translated to the
+/// box centre and rotated into the box's local frame by projecting onto the
+/// unit axis `d = (b - a)/|b - a|` and its perpendicular, after which it is the
+/// ordinary axis-aligned box distance with half-extents `(|b - a|/2,
+/// thickness/2)`. Built from `abs`, `min`/`max` and `sqrt`, so it stays
+/// transcendental-free. Pair it with `extrude` for a slanted bar prism.
+pub fn oriented_box_2d(point: [f32; 2], a: [f32; 2], b: [f32; 2], thickness: f32) -> f32 {
+    let l = length2([b[0] - a[0], b[1] - a[1]]);
+    let d = [(b[0] - a[0]) / l, (b[1] - a[1]) / l];
+    let c = [point[0] - 0.5 * (a[0] + b[0]), point[1] - 0.5 * (a[1] + b[1])];
+    // Rotate into the box frame: local x along `d`, local y along the normal.
+    let q0 = (d[0] * c[0] + d[1] * c[1]).abs() - 0.5 * l;
+    let q1 = (-d[1] * c[0] + d[0] * c[1]).abs() - 0.5 * thickness;
+    length2([q0.max(0.0), q1.max(0.0)]) + q0.max(q1).min(0.0)
+}
+
+/// Signed distance to a two-dimensional parallelogram centred at the origin
+/// with half-width `half_width`, half-height `half_height` and horizontal
+/// `skew` (the top edge is shifted `+skew` relative to the bottom edge).
+///
+/// This is Inigo Quilez's exact `sdParallelogram`. The lower half is folded onto
+/// the upper half, then the field is the smaller of the distances to the
+/// horizontal edge (parameter clamped to the half-width) and to the slanted
+/// edge (projection onto the skew vector clamped to the side). The interior sign
+/// is recovered from the signed areas accumulated in the `y` channel of `d`.
+/// Built from `abs`, `clamp`, `min` and `sqrt`, so it stays transcendental-free.
+pub fn parallelogram(point: [f32; 2], half_width: f32, half_height: f32, skew: f32) -> f32 {
+    let e = [skew, half_height];
+    let mut p = if point[1] < 0.0 { [-point[0], -point[1]] } else { point };
+    // Distance to the horizontal (top) edge.
+    let mut w = [p[0] - e[0], p[1] - e[1]];
+    w[0] -= w[0].clamp(-half_width, half_width);
+    let mut d = [w[0] * w[0] + w[1] * w[1], -w[1]];
+    // Signed area selects the near slanted edge; fold again across it.
+    let s = p[0] * e[1] - p[1] * e[0];
+    if s < 0.0 {
+        p = [-p[0], -p[1]];
+    }
+    let v = [p[0] - half_width, p[1]];
+    let g = ((v[0] * e[0] + v[1] * e[1]) / (e[0] * e[0] + e[1] * e[1])).clamp(-1.0, 1.0);
+    let v = [v[0] - e[0] * g, v[1] - e[1] * g];
+    d = [
+        d[0].min(v[0] * v[0] + v[1] * v[1]),
+        d[1].min(half_width * half_height - s.abs()),
+    ];
+    d[0].sqrt() * (-d[1]).signum()
+}
+
+/// Signed distance to a two-dimensional rhombus centred at the origin with
+/// half-diagonals `half_diag = [bx, by]` (vertices at `(+/-bx, 0)` and
+/// `(0, +/-by)`).
+///
+/// This is Inigo Quilez's exact `sdRhombus`. Folding to the first quadrant via
+/// `abs` collapses the four-fold symmetry; the nearest point on the slanted edge
+/// is found with the parameter `h` built from `ndot` (`a.x*b.x - a.y*b.y`), and
+/// the interior sign comes from the edge half-plane test. Built from `abs`,
+/// `clamp`, `sign` and `sqrt`, so it stays transcendental-free.
+pub fn rhombus_2d(point: [f32; 2], half_diag: [f32; 2]) -> f32 {
+    let b = half_diag;
+    let p = [point[0].abs(), point[1].abs()];
+    // ndot(b - 2p, b) / dot(b, b), clamped to the edge span.
+    let nd = (b[0] - 2.0 * p[0]) * b[0] - (b[1] - 2.0 * p[1]) * b[1];
+    let h = (nd / (b[0] * b[0] + b[1] * b[1])).clamp(-1.0, 1.0);
+    let q = [p[0] - 0.5 * b[0] * (1.0 - h), p[1] - 0.5 * b[1] * (1.0 + h)];
+    let d = length2(q);
+    d * (p[0] * b[1] + p[1] * b[0] - b[0] * b[1]).signum()
+}
+
+/// Signed distance to a two-dimensional isosceles trapezoid centred at the
+/// origin: bottom half-width `bottom_half` (at `y = -half_height`), top
+/// half-width `top_half` (at `y = +half_height`).
+///
+/// This is Inigo Quilez's exact `sdTrapezoid`. After folding `x` to its
+/// magnitude the field is the smaller of two candidate distances: `ca` to the
+/// capped horizontal edges and `cb` to the slanted side (projection onto the
+/// side direction `k2` clamped to the segment). The interior sign is set when
+/// the point lies left of the slanted edge and below the top. Built from `abs`,
+/// `clamp`, `min` and `sqrt`, so it stays transcendental-free.
+pub fn trapezoid_isosceles(point: [f32; 2], bottom_half: f32, top_half: f32, half_height: f32) -> f32 {
+    let (r1, r2, he) = (bottom_half, top_half, half_height);
+    let k1 = [r2, he];
+    let k2 = [r2 - r1, 2.0 * he];
+    let p = [point[0].abs(), point[1]];
+    let edge = if p[1] < 0.0 { r1 } else { r2 };
+    let ca = [p[0] - p[0].min(edge), p[1].abs() - he];
+    let t = (((k1[0] - p[0]) * k2[0] + (k1[1] - p[1]) * k2[1]) / (k2[0] * k2[0] + k2[1] * k2[1]))
+        .clamp(0.0, 1.0);
+    let cb = [p[0] - k1[0] + k2[0] * t, p[1] - k1[1] + k2[1] * t];
+    let s = if cb[0] < 0.0 && ca[1] < 0.0 { -1.0 } else { 1.0 };
+    s * (ca[0] * ca[0] + ca[1] * ca[1]).min(cb[0] * cb[0] + cb[1] * cb[1]).sqrt()
+}
+
+/// Signed distance to a two-dimensional circular arc band: a stroke of
+/// thickness `thickness` wrapped around the circle of `radius`, centred on the
+/// `+y` axis and spanning the half-aperture given by
+/// `sin_cos = [sin(angle), cos(angle)]`.
+///
+/// This is Inigo Quilez's exact `sdArc`. Folding `x` to its magnitude exploits
+/// the arc's mirror symmetry. Inside the aperture the distance is to the circle
+/// (`||p| - radius|`); outside it the nearest feature is the arc endpoint
+/// `sin_cos * radius`. Subtracting `thickness` turns the skeleton into a solid
+/// band. Built from `abs`, dot products and `sqrt`, so it stays
+/// transcendental-free. Pair it with `extrude` to build a curved wall section.
+pub fn arc(point: [f32; 2], sin_cos: [f32; 2], radius: f32, thickness: f32) -> f32 {
+    let p = [point[0].abs(), point[1]];
+    let skeleton = if sin_cos[1] * p[0] > sin_cos[0] * p[1] {
+        // Beyond the aperture: distance to the arc endpoint.
+        length2([p[0] - sin_cos[0] * radius, p[1] - sin_cos[1] * radius])
+    } else {
+        // Within the aperture: distance to the circle itself.
+        (length2(p) - radius).abs()
+    };
+    skeleton - thickness
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        box_frame, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_torus, capsule, cone_sdf, cut_hollow_sphere, cut_sphere, cylinder_segment,
-        death_star, ellipsoid_sdf, hex_prism, infinite_cone, infinite_cylinder, length2, line_sdf, link, cross_2d, moon, octagon_prism, octahedron, pie, plane, pyramid, rhombus, round_box, rounded_x,
-        quad_sdf, round_cone_sdf, round_cone_segment, rounded_cylinder, solid_angle, sphere, torus, triangle_sdf, triangular_prism, vesica,
+        arc, box_frame, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_torus, capsule, cone_sdf, cross_2d, cut_hollow_sphere, cut_sphere,
+        cylinder_segment, death_star, ellipsoid_sdf, hex_prism, infinite_cone, infinite_cylinder, length2, line_sdf, link, moon, octagon_prism, octahedron,
+        oriented_box_2d, parallelogram, pie, plane, pyramid, quad_sdf, rhombus, rhombus_2d, round_box, round_cone_sdf, round_cone_segment, rounded_cylinder,
+        rounded_x, segment_2d, solid_angle, sphere, torus, trapezoid_isosceles, triangle_sdf, triangular_prism, vesica,
     };
 
     #[test]
@@ -1646,6 +1779,250 @@ mod tests {
         let centre = cross_2d([0.0, 0.0], arm, th, r);
         let want_centre = -th * std::f32::consts::SQRT_2 - r;
         assert!((centre - want_centre).abs() < 1e-6, "centre: got={centre} want={want_centre}");
+    }
+
+    // Exact unsigned distance to a 2D segment, used to cross-check `segment_2d`
+    // independently (and as a boundary skeleton for the oriented box corners).
+    fn segment_ref(px: f32, py: f32, a: [f32; 2], b: [f32; 2]) -> f32 {
+        let (ax, ay, bx, by) = (a[0], a[1], b[0], b[1]);
+        let (ex, ey) = (bx - ax, by - ay);
+        let (wx, wy) = (px - ax, py - ay);
+        let t = ((wx * ex + wy * ey) / (ex * ex + ey * ey)).clamp(0.0, 1.0);
+        let (dx, dy) = (wx - ex * t, wy - ey * t);
+        (dx * dx + dy * dy).sqrt()
+    }
+
+    #[test]
+    fn segment_2d_endpoints_perpendicular_and_caps() {
+        let a = [-1.0, 0.0];
+        let b = [1.0, 0.0];
+        // On the segment: zero.
+        assert!(segment_2d([0.0, 0.0], a, b).abs() < 1e-6);
+        // Perpendicular drop above the midpoint.
+        assert!((segment_2d([0.0, 2.0], a, b) - 2.0).abs() < 1e-6);
+        // Beyond an endpoint: distance to that endpoint.
+        assert!((segment_2d([3.0, 0.0], a, b) - 2.0).abs() < 1e-6);
+        assert!((segment_2d([-2.0, 1.0], a, b) - (1.0f32 + 1.0).sqrt()).abs() < 1e-6);
+    }
+
+    #[test]
+    fn segment_2d_matches_reference_under_rotation() {
+        let a = [0.3, -0.7];
+        let b = [1.4, 0.9];
+        let samples: [[f32; 2]; 6] = [
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [-1.0, 2.0],
+            [2.0, 2.0],
+            [0.8, 0.1],
+            [1.4, 0.9],
+        ];
+        for p in samples {
+            let got = segment_2d(p, a, b);
+            let want = segment_ref(p[0], p[1], a, b);
+            assert!((got - want).abs() < 1e-6, "p={p:?} got={got} want={want}");
+        }
+    }
+
+    #[test]
+    fn oriented_box_2d_axis_aligned_closed_forms() {
+        // Endpoints on the x axis span length 2 (half-length 1); full width 0.5.
+        let a = [-1.0, 0.0];
+        let b = [1.0, 0.0];
+        let th = 0.5;
+        // Straight out from the long side: gap is width/2 subtracted.
+        assert!((oriented_box_2d([0.0, 2.0], a, b, th) - 1.75).abs() < 1e-6);
+        // Straight past the short end on the axis.
+        assert!((oriented_box_2d([3.0, 0.0], a, b, th) - 2.0).abs() < 1e-6);
+        // Dead centre: nearest wall is the long side at width/2 = 0.25.
+        assert!((oriented_box_2d([0.0, 0.0], a, b, th) - (-0.25)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn oriented_box_2d_matches_polygon_reference() {
+        // A slanted bar; cross-check against its four corners as a polygon.
+        let a: [f32; 2] = [-0.6, -0.8];
+        let b: [f32; 2] = [1.0, 0.4];
+        let th = 0.5;
+        let l = {
+            let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+            (dx * dx + dy * dy).sqrt()
+        };
+        let d = [(b[0] - a[0]) / l, (b[1] - a[1]) / l];
+        let n = [-d[1], d[0]];
+        let c = [0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1])];
+        let hl = 0.5 * l;
+        let ht = 0.5 * th;
+        // Corners wound CCW in the box's local frame.
+        let corner = |sl: f32, st: f32| {
+            [c[0] + d[0] * (sl * hl) + n[0] * (st * ht), c[1] + d[1] * (sl * hl) + n[1] * (st * ht)]
+        };
+        let verts = [corner(1.0, -1.0), corner(1.0, 1.0), corner(-1.0, 1.0), corner(-1.0, -1.0)];
+        let samples: [[f32; 2]; 7] = [
+            c,
+            [c[0] + n[0] * 1.5, c[1] + n[1] * 1.5],
+            [c[0] + d[0] * 2.0, c[1] + d[1] * 2.0],
+            [0.0, 0.0],
+            [1.2, 0.8],
+            [-0.5, -1.2],
+            [0.2, -0.2],
+        ];
+        for p in samples {
+            let got = oriented_box_2d(p, a, b, th);
+            let want = polygon_sdf2(p[0], p[1], &verts);
+            assert!((got - want).abs() < 1e-5, "p={p:?} got={got} want={want}");
+        }
+    }
+
+    #[test]
+    fn parallelogram_reduces_to_a_box_without_skew() {
+        let (wi, he) = (1.0f32, 0.5);
+        assert!((parallelogram([0.0, 0.0], wi, he, 0.0) - (-0.5)).abs() < 1e-6);
+        assert!((parallelogram([2.0, 0.0], wi, he, 0.0) - 1.0).abs() < 1e-6);
+        assert!((parallelogram([0.0, 1.0], wi, he, 0.0) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn parallelogram_matches_polygon_reference() {
+        let (wi, he, sk) = (1.0f32, 0.6, 0.4);
+        // Vertices wound CCW: bottom-right, top-right, top-left, bottom-left.
+        let verts = [
+            [wi - sk, -he],
+            [wi + sk, he],
+            [-wi + sk, he],
+            [-wi - sk, -he],
+        ];
+        let samples: [[f32; 2]; 8] = [
+            [0.0, 0.0],
+            [0.4, 0.3],
+            [1.6, 0.6],
+            [-1.6, -0.6],
+            [0.0, 1.2],
+            [0.0, -1.2],
+            [1.2, -0.3],
+            [-0.9, 0.2],
+        ];
+        for p in samples {
+            let got = parallelogram(p, wi, he, sk);
+            let want = polygon_sdf2(p[0], p[1], &verts);
+            assert!((got - want).abs() < 1e-5, "p={p:?} got={got} want={want}");
+        }
+    }
+
+    #[test]
+    fn rhombus_2d_vertices_centre_and_edges() {
+        let b = [1.0f32, 1.0];
+        // Vertex sits on the boundary.
+        assert!(rhombus_2d([1.0, 0.0], b).abs() < 1e-6);
+        // Centre: inradius is bx*by/sqrt(bx^2+by^2) = 1/sqrt(2).
+        assert!((rhombus_2d([0.0, 0.0], b) - (-0.5f32.sqrt())).abs() < 1e-6);
+        // Along the x axis beyond the vertex: plain radial gap.
+        assert!((rhombus_2d([2.0, 0.0], b) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn rhombus_2d_matches_polygon_reference() {
+        let b = [1.3f32, 0.8];
+        let verts = [[b[0], 0.0], [0.0, b[1]], [-b[0], 0.0], [0.0, -b[1]]];
+        let samples: [[f32; 2]; 8] = [
+            [0.0, 0.0],
+            [0.5, 0.2],
+            [1.5, 0.0],
+            [0.0, 1.1],
+            [0.9, 0.9],
+            [-0.6, -0.3],
+            [0.3, -0.7],
+            [-1.0, 0.4],
+        ];
+        for p in samples {
+            let got = rhombus_2d(p, b);
+            let want = polygon_sdf2(p[0], p[1], &verts);
+            assert!((got - want).abs() < 1e-5, "p={p:?} got={got} want={want}");
+        }
+    }
+
+    #[test]
+    fn trapezoid_reduces_to_a_box_with_equal_widths() {
+        // r1 == r2 is a rectangle of half-width 1, half-height 1.
+        assert!((trapezoid_isosceles([0.0, 0.0], 1.0, 1.0, 1.0) - (-1.0)).abs() < 1e-6);
+        assert!((trapezoid_isosceles([2.0, 0.0], 1.0, 1.0, 1.0) - 1.0).abs() < 1e-6);
+        assert!((trapezoid_isosceles([0.0, 2.0], 1.0, 1.0, 1.0) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn trapezoid_matches_polygon_reference() {
+        let (r1, r2, he) = (1.0f32, 0.5, 0.8);
+        // CCW corners: bottom-right, top-right, top-left, bottom-left.
+        let verts = [[r1, -he], [r2, he], [-r2, he], [-r1, -he]];
+        let samples: [[f32; 2]; 8] = [
+            [0.0, 0.0],
+            [0.6, 0.0],
+            [1.4, -0.8],
+            [0.0, 1.2],
+            [0.0, -1.2],
+            [0.9, 0.6],
+            [-0.7, -0.4],
+            [1.1, 0.2],
+        ];
+        for p in samples {
+            let got = trapezoid_isosceles(p, r1, r2, he);
+            let want = polygon_sdf2(p[0], p[1], &verts);
+            assert!((got - want).abs() < 1e-5, "p={p:?} got={got} want={want}");
+        }
+    }
+
+    #[test]
+    fn arc_is_symmetric_and_banded_on_axis() {
+        let ta = std::f32::consts::FRAC_PI_4;
+        let sc = [ta.sin(), ta.cos()];
+        let (ra, rb) = (1.0f32, 0.1);
+        // On the circle centreline (top of the arc): interior by the thickness.
+        assert!((arc([0.0, ra], sc, ra, rb) - (-rb)).abs() < 1e-6);
+        // Radially outside the band on the +y axis.
+        assert!((arc([0.0, ra + 0.3], sc, ra, rb) - (0.3 - rb)).abs() < 1e-6);
+        // Mirror symmetry about the y axis.
+        for p in [[0.7f32, 0.5], [1.2, -0.3], [0.2, 1.1]] {
+            let l = arc([p[0], p[1]], sc, ra, rb);
+            let r = arc([-p[0], p[1]], sc, ra, rb);
+            assert!((l - r).abs() < 1e-6, "asymmetry at {p:?}: {l} vs {r}");
+        }
+    }
+
+    #[test]
+    fn arc_matches_brute_force_skeleton() {
+        // Independent reference: minimum distance to a dense sampling of the arc
+        // skeleton (centre line of the band), then inset by the thickness.
+        let ta = std::f32::consts::FRAC_PI_3; // 60 degree half-aperture
+        let sc = [ta.sin(), ta.cos()];
+        let (ra, rb) = (1.2f32, 0.15);
+        let brute = |px: f32, py: f32| -> f32 {
+            let n = 4000;
+            let mut best = f32::INFINITY;
+            for i in 0..=n {
+                let a = -ta + (2.0 * ta) * (i as f32) / (n as f32);
+                // Arc centred on +y: x = sin(a)*ra, y = cos(a)*ra.
+                let sx = a.sin() * ra;
+                let sy = a.cos() * ra;
+                let d = ((px - sx) * (px - sx) + (py - sy) * (py - sy)).sqrt();
+                best = best.min(d);
+            }
+            best - rb
+        };
+        let samples: [[f32; 2]; 8] = [
+            [0.0, 1.2],
+            [0.0, 1.6],
+            [1.1, 0.6],
+            [1.3, 0.1],
+            [-0.9, 0.9],
+            [0.5, -0.4],
+            [1.5, 1.5],
+            [0.0, -1.0],
+        ];
+        for p in samples {
+            let got = arc(p, sc, ra, rb);
+            let want = brute(p[0], p[1]);
+            assert!((got - want).abs() < 5e-3, "p={p:?} got={got} want={want}");
+        }
     }
 
     #[test]
