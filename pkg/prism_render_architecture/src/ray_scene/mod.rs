@@ -447,6 +447,13 @@
 //!   from a far-apart pair and growing to swallow outliers, yielding a
 //!   [`mesh_bounding_sphere::BoundingSphere`] for culling, LOD, and
 //!   broad-phase queries (`f64` accumulation, square root only).
+//! - [`mesh_planar_regions`] — coplanar face segmentation
+//!   ([`mesh_planar_regions::planar_regions`]): grows connected clusters
+//!   of near-coplanar triangles by edge adjacency, recruiting neighbours
+//!   whose normal stays within a caller-supplied cosine of the fixed seed
+//!   plane and whose centroid stays within a distance tolerance, yielding
+//!   per-face region ids and region planes ([`mesh_planar_regions::PlanarRegions`])
+//!   for planar UV, decals, lightmap charts, and flat-face merging.
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -616,6 +623,7 @@ pub mod mesh_dihedral_cosine;
 pub mod mesh_mass_properties;
 pub mod mesh_euler_characteristic;
 pub mod mesh_bounding_sphere;
+pub mod mesh_planar_regions;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -736,6 +744,7 @@ pub use mesh_dihedral_cosine::{dihedral_cosines, DihedralCosines, DihedralEdge};
 pub use mesh_mass_properties::{mass_properties, MeshMassProperties};
 pub use mesh_euler_characteristic::{mesh_topology, MeshTopology};
 pub use mesh_bounding_sphere::{bounding_sphere, BoundingSphere};
+pub use mesh_planar_regions::{planar_regions, PlanarRegions, RegionPlane};
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
 pub use obb::{Obb, ObbBvh, ObbHit};
