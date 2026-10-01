@@ -55,6 +55,7 @@
 extern crate alloc;
 
 pub mod buffer;
+pub mod fft;
 pub mod graph;
 pub mod math;
 pub mod modulation;
