@@ -51,6 +51,10 @@
 //! * [`env_brdf`] — split-sum DFG LUT + multiscatter energy compensation.
 //! * [`clouds`] — ray-marched volumetric cloud layer (Beer-powder + HG).
 //! * [`motion`] — motion-vector reprojection, dilation, and tile velocity.
+//! * [`area_light`] — LTC polygonal/disk/line area lights (Heitz 2016).
+//! * [`nee`] — next-event estimation: light sampling, MIS, RIS.
+//! * [`color_grade`] — ASC CDL, white balance, 3D-LUT color grading.
+//! * [`gtao`] — ground-truth ambient occlusion horizon integral.
 
 pub mod denoise;
 pub mod occlusion;
@@ -81,4 +85,8 @@ pub mod post_gi;
 pub mod env_brdf;
 pub mod clouds;
 pub mod motion;
+pub mod area_light;
+pub mod nee;
+pub mod color_grade;
+pub mod gtao;
 pub mod world_space;
