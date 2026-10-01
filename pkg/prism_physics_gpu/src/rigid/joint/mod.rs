@@ -58,6 +58,13 @@
 //! * [`prismatic_cpu`] — the authoritative [`cpu_solve_joints_prismatic`] golden
 //!   stepper (angular lock plus perpendicular point-to-point weld).
 //! * [`prismatic_gpu`] — the device-side [`GpuPrismaticJointSolver`] twin.
+//! * [`prismatic_limit`] — the [`PrismaticLimitJoint`] (slider with a travel
+//!   limit) definition and its device-packed storage representation.
+//! * [`prismatic_limit_cpu`] — the authoritative
+//!   [`cpu_solve_joints_prismatic_limit`] golden stepper (angular lock plus
+//!   perpendicular weld plus a one-sided along-axis travel limit).
+//! * [`prismatic_limit_gpu`] — the device-side
+//!   [`GpuPrismaticLimitJointSolver`] twin.
 //!
 //! # Scheme and scope
 //!
@@ -89,6 +96,9 @@ mod math;
 mod prismatic;
 mod prismatic_cpu;
 mod prismatic_gpu;
+mod prismatic_limit;
+mod prismatic_limit_cpu;
+mod prismatic_limit_gpu;
 mod revolute;
 mod revolute_cpu;
 mod revolute_gpu;
@@ -111,6 +121,9 @@ pub use hinge_limit_gpu::GpuHingeLimitJointSolver;
 pub use prismatic::PrismaticJoint;
 pub use prismatic_cpu::cpu_solve_joints_prismatic;
 pub use prismatic_gpu::GpuPrismaticJointSolver;
+pub use prismatic_limit::PrismaticLimitJoint;
+pub use prismatic_limit_cpu::cpu_solve_joints_prismatic_limit;
+pub use prismatic_limit_gpu::GpuPrismaticLimitJointSolver;
 pub use revolute::RevoluteJoint;
 pub use revolute_cpu::cpu_solve_joints_revolute;
 pub use revolute_gpu::GpuRevoluteJointSolver;
