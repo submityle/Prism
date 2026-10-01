@@ -28,8 +28,8 @@ pub use contacts::SoftContacts;
 
 use crate::math::scalar::Real;
 use crate::soft::collision::{
-    resolve_backstops, resolve_body_collisions, resolve_body_collisions_with_friction,
-    resolve_self_collision, resolve_self_collision_with_friction,
+    resolve_backstops, resolve_body_collisions, resolve_body_collisions_with_friction, resolve_ccd,
+    resolve_self_ccd, resolve_self_collision, resolve_self_collision_with_friction,
 };
 use crate::soft::constraint::ConstraintSet;
 use crate::soft::particle::ParticleStorage;
@@ -70,12 +70,15 @@ impl SoftSolver {
     ///
     /// Each substep predicts under gravity, projects the constraints, then runs
     /// the collide stage in a fixed order so later passes win where they
-    /// overlap: optional self-collision (from `config`), then body-proxy
-    /// collision, then backstops. Running the body passes last keeps the
-    /// garment out of the animated body and off its backstop planes at the end
-    /// of the substep. Finally velocities are recovered from the net motion, so
-    /// a particle dragged along by a moving collider or backstop keeps the
-    /// implied velocity.
+    /// overlap: optional discrete self-collision then optional continuous
+    /// self-collision (self-CCD), both from `config`; then discrete body-proxy
+    /// collision then optional continuous body collision (CCD) against the same
+    /// `contacts` colliders; then backstops. Running the body passes last keeps
+    /// the garment out of the animated body and off its backstop planes at the
+    /// end of the substep, and the continuous passes close the thin-sheet or
+    /// fast-proxy tunneling gaps their discrete counterparts can miss. Finally
+    /// velocities are recovered from the net motion, so a particle dragged along
+    /// by a moving collider or backstop keeps the implied velocity.
     ///
     /// Does nothing when there are no particles or when `dt` is non-positive;
     /// the substep and iteration counts are clamped to at least `1`. An empty
@@ -123,6 +126,16 @@ impl SoftSolver {
                     );
                 }
             }
+            if let Some(params) = config.self_ccd {
+                resolve_self_ccd(
+                    columns.positions,
+                    columns.prev_positions,
+                    columns.velocities,
+                    columns.inverse_masses,
+                    params,
+                    h,
+                );
+            }
             if !contacts.body_colliders.is_empty() {
                 if contacts.body_friction > 0.0 {
                     resolve_body_collisions_with_friction(
@@ -140,6 +153,20 @@ impl SoftSolver {
                     );
                 }
             }
+            if let Some(params) = config.ccd
+                && !contacts.body_colliders.is_empty()
+            {
+                resolve_ccd(
+                    columns.positions,
+                    columns.prev_positions,
+                    columns.velocities,
+                    columns.inverse_masses,
+                    contacts.body_colliders,
+                    params,
+                    h,
+                    contacts.body_friction,
+                );
+            }
             if !contacts.backstops.is_empty() {
                 resolve_backstops(
                     columns.positions,
@@ -155,7 +182,7 @@ impl SoftSolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::soft::collision::{Backstop, BodyCollider};
+    use crate::soft::collision::{Backstop, BodyCollider, CcdParams, SelfCcdParams};
     use crate::soft::constraint::DistanceConstraint;
     use crate::soft::particle::ParticleHandle;
     use glam::Vec3;
@@ -401,5 +428,146 @@ mod tests {
             particles.position(ParticleHandle::from_index(0)).unwrap()
         };
         assert_eq!(run(), run());
+    }
+
+    #[test]
+    fn ccd_catches_fast_tunneling_through_sphere() {
+        // One large substep: a particle moving fast enough to cross a small
+        // sphere in a single step starts and ends outside it, so the discrete
+        // body pass misses it. The CCD sweep must catch the crossing.
+        let build = || {
+            let mut particles = ParticleStorage::new();
+            let p = particles.spawn(Vec3::new(-2.0, 0.0, 0.0), 1.0);
+            particles.set_velocity(p, Vec3::new(240.0, 0.0, 0.0));
+            (particles, p)
+        };
+        let colliders = [BodyCollider::Sphere {
+            center: Vec3::ZERO,
+            radius: 0.5,
+        }];
+        let contacts = SoftContacts::new(&colliders, &[]);
+        let base = SoftSolverConfig {
+            gravity: Vec3::ZERO,
+            substeps: 1,
+            iterations: 1,
+            damping: 0.0,
+            ..SoftSolverConfig::default()
+        };
+        let solver = SoftSolver::new();
+
+        // Without CCD the particle tunnels clean through to the far side.
+        let (mut no_ccd, p0) = build();
+        let mut c0 = ConstraintSet::new();
+        solver.step_with_contacts(&mut no_ccd, &mut c0, &base, &contacts, 1.0 / 60.0);
+        assert!(
+            no_ccd.position(p0).unwrap().x > 1.0,
+            "expected tunneling without CCD, got {:?}",
+            no_ccd.position(p0).unwrap()
+        );
+
+        // With CCD the particle is stopped at the entry surface of the sphere.
+        let (mut with_ccd, p1) = build();
+        let mut c1 = ConstraintSet::new();
+        let cfg = SoftSolverConfig {
+            ccd: Some(CcdParams::default()),
+            ..base
+        };
+        solver.step_with_contacts(&mut with_ccd, &mut c1, &cfg, &contacts, 1.0 / 60.0);
+        let pos = with_ccd.position(p1).unwrap();
+        assert!(
+            pos.length() >= 0.5 - 1e-3,
+            "CCD let the particle inside the sphere: {pos:?}"
+        );
+        assert!(pos.x < 0.5, "CCD failed to stop the crossing: {pos:?}");
+    }
+
+    #[test]
+    fn self_ccd_catches_fast_pair_tunneling() {
+        // Two particles rushing through each other in one big substep: the
+        // discrete self-collision pass (disabled here) would miss the crossing,
+        // but self-CCD must keep them from swapping sides.
+        let thickness = 0.5;
+        let build = || {
+            let mut particles = ParticleStorage::new();
+            let a = particles.spawn(Vec3::new(-1.0, 0.0, 0.0), 1.0);
+            let b = particles.spawn(Vec3::new(1.0, 0.0, 0.0), 1.0);
+            particles.set_velocity(a, Vec3::new(180.0, 0.0, 0.0));
+            particles.set_velocity(b, Vec3::new(-180.0, 0.0, 0.0));
+            (particles, a, b)
+        };
+        let base = SoftSolverConfig {
+            gravity: Vec3::ZERO,
+            substeps: 1,
+            iterations: 1,
+            damping: 0.0,
+            ..SoftSolverConfig::default()
+        };
+        let solver = SoftSolver::new();
+
+        // Without self-CCD the pair swaps sides (a ends to the right of b).
+        let (mut plain, a0, b0) = build();
+        let mut c0 = ConstraintSet::new();
+        solver.step(&mut plain, &mut c0, &base, 1.0 / 60.0);
+        assert!(
+            plain.position(a0).unwrap().x > plain.position(b0).unwrap().x,
+            "expected the pair to tunnel past each other without self-CCD"
+        );
+
+        // With self-CCD the ordering is preserved and the gap respects thickness.
+        let (mut swept, a1, b1) = build();
+        let mut c1 = ConstraintSet::new();
+        let cfg = SoftSolverConfig {
+            self_ccd: Some(SelfCcdParams::new(thickness * 2.0, thickness)),
+            ..base
+        };
+        solver.step(&mut swept, &mut c1, &cfg, 1.0 / 60.0);
+        let xa = swept.position(a1).unwrap().x;
+        let xb = swept.position(b1).unwrap().x;
+        assert!(xa <= xb + 1e-4, "self-CCD let the pair swap sides: a={xa} b={xb}");
+        assert!(
+            (xb - xa) >= thickness - 1e-3,
+            "self-CCD did not keep thickness gap: a={xa} b={xb}"
+        );
+    }
+
+    #[test]
+    fn disabled_continuous_passes_match_plain_step() {
+        // self_ccd/ccd set to disabled params must be exact no-ops versus a
+        // config that leaves them None.
+        let solver = SoftSolver::new();
+        let colliders = [BodyCollider::Sphere {
+            center: Vec3::new(0.0, -2.0, 0.0),
+            radius: 1.0,
+        }];
+        let contacts = SoftContacts::new(&colliders, &[]);
+        let build = || {
+            let mut particles = ParticleStorage::new();
+            particles.spawn(Vec3::new(0.0, 1.0, 0.0), 1.0);
+            particles.spawn(Vec3::new(0.2, 1.1, 0.0), 1.0);
+            (particles, ConstraintSet::new())
+        };
+        let plain = SoftSolverConfig::default();
+        let disabled = SoftSolverConfig {
+            self_ccd: Some(SelfCcdParams::default()), // enabled == false by default
+            ccd: Some(CcdParams {
+                enabled: false,
+                ..CcdParams::default()
+            }),
+            ..SoftSolverConfig::default()
+        };
+        let (mut pa, mut ca) = build();
+        let (mut pb, mut cb) = build();
+        for _ in 0..30 {
+            solver.step_with_contacts(&mut pa, &mut ca, &plain, &contacts, 1.0 / 60.0);
+            solver.step_with_contacts(&mut pb, &mut cb, &disabled, &contacts, 1.0 / 60.0);
+        }
+        assert_eq!(
+            pa.position(ParticleHandle::from_index(0)).unwrap(),
+            pb.position(ParticleHandle::from_index(0)).unwrap()
+        );
+        assert_eq!(
+            pa.position(ParticleHandle::from_index(1)).unwrap(),
+            pb.position(ParticleHandle::from_index(1)).unwrap()
+        );
     }
 }

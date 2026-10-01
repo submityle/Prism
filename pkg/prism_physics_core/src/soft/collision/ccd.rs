@@ -42,6 +42,7 @@ const EPS_COEF: Real = 1e-12;
 
 /// Tuning for the continuous-collision sweep.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 pub struct CcdParams {
     /// How far outside the collider surface (along the outward normal) a
     /// particle is placed after a hit, so the next substep starts strictly

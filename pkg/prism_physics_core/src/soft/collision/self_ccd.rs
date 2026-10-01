@@ -82,6 +82,7 @@ const MIN_CELL_SIZE: Real = 1e-4;
 /// mean particle spacing keeps buckets small without exploding the swept-box
 /// cell count.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 pub struct SelfCcdParams {
     /// Spatial-hash cell edge length used to bucket swept bounding boxes.
     pub cell_size: Real,

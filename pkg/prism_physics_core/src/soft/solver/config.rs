@@ -9,6 +9,7 @@
 use glam::Vec3;
 
 use crate::math::scalar::Real;
+use crate::soft::collision::{CcdParams, SelfCcdParams};
 
 /// Tunables controlling how a soft body is advanced each frame.
 ///
@@ -39,6 +40,22 @@ pub struct SoftSolverConfig {
     /// pushes interpenetrating particle pairs apart with the deterministic
     /// spatial-hash resolver in [`crate::soft::collision`].
     pub self_collision: Option<SelfCollisionParams>,
+    /// Optional continuous self-collision (self-CCD) pass run once per substep
+    /// after the discrete self-collision pass. `None` (the default) disables
+    /// it. When set to an *enabled* [`SelfCcdParams`], the solver sweeps each
+    /// particle's substep motion segment against every other and clamps
+    /// particles to their first time of impact, closing the thin-sheet tunneling
+    /// gap the discrete pass can miss under fast motion. A disabled params value
+    /// is a no-op.
+    pub self_ccd: Option<SelfCcdParams>,
+    /// Optional continuous body collision (CCD) pass run once per substep after
+    /// the discrete body-collision pass, sweeping each particle's substep motion
+    /// against the per-frame [`SoftContacts`](crate::soft::solver::SoftContacts)
+    /// body colliders so a fast particle cannot tunnel through a thin or quickly
+    /// moving proxy. `None` (the default) disables it; a disabled
+    /// [`CcdParams`] value is also a no-op. The body-contact friction is taken
+    /// from the same `SoftContacts` bundle as the discrete pass.
+    pub ccd: Option<CcdParams>,
 }
 
 impl SoftSolverConfig {
@@ -61,6 +78,8 @@ impl Default for SoftSolverConfig {
             iterations: Self::DEFAULT_ITERATIONS,
             damping: Self::DEFAULT_DAMPING,
             self_collision: None,
+            self_ccd: None,
+            ccd: None,
         }
     }
 }
