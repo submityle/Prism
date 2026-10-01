@@ -256,6 +256,18 @@
 //!   the row-major height samples and a grid/domain header
 //!   ([`heightfield_gpu_layout::HEIGHTFIELD_HEADER_WORDS`]), with a packed walk
 //!   that reproduces the per-cell traversal bit-for-bit.
+//! - [`sdf_brick`] — sphere-traced signed-distance-field voxel brick: a
+//!   [`sdf_brick::SdfBrick`] stores a dense row-major grid of signed distances
+//!   over an axis-aligned box, trilinearly reconstructs a continuous field, and
+//!   marches a ray onto its zero isocontour with a deterministic, transcendental-
+//!   free sphere trace; accelerated by a per-brick [`sdf_brick::SdfBrickBvh`] and
+//!   reporting the [`sdf_brick::SdfBrickHit`] position, field-gradient normal, and
+//!   `front_face`.
+//! - [`sdf_brick_gpu_layout`] — flat, `GPU`-uploadable [`sdf_brick::SdfBrickBvh`]:
+//!   the shared [`gpu_layout`] node records, a per-brick header
+//!   ([`sdf_brick_gpu_layout::SDF_BRICK_WORDS`]), and a pooled distance buffer,
+//!   with a packed sphere-trace walk that reproduces the in-memory walk
+//!   bit-for-bit.
 //! - [`traversal`] — [`Ray`]/`BVH` slab + Möller–Trumbore intersection with
 //!   closest-hit and any-hit walks (the `GPU` traversal kernel's golden ref).
 //! - [`traversal_stackless`] — stackless (threaded / escape-index) `BVH` walk:
@@ -314,6 +326,8 @@ pub mod alpha_mesh;
 pub mod alpha_mesh_gpu_layout;
 pub mod heightfield;
 pub mod heightfield_gpu_layout;
+pub mod sdf_brick;
+pub mod sdf_brick_gpu_layout;
 pub mod footprint;
 pub mod gpu_layout;
 pub mod motion;
@@ -385,6 +399,8 @@ pub use alpha_mesh::{AlphaMesh, AlphaMeshBvh, AlphaTexture, AlphaTextureError};
 pub use alpha_mesh_gpu_layout::{ALPHA_HEADER_WORDS, GpuAlphaMeshBvhBuffers};
 pub use heightfield::{Heightfield, HeightfieldBvh, HeightfieldError, HeightfieldHit};
 pub use heightfield_gpu_layout::{GpuHeightfieldBvhBuffers, HEIGHTFIELD_HEADER_WORDS};
+pub use sdf_brick::{SdfBrick, SdfBrickBvh, SdfBrickError, SdfBrickHit};
+pub use sdf_brick_gpu_layout::{GpuSdfBrickBvhBuffers, SDF_BRICK_WORDS};
 pub use rectangle_gpu_layout::{GpuRectangleBvhBuffers, RECTANGLE_WORDS};
 pub use aabb_primitive_gpu_layout::{GpuAabbBvhBuffers, AABB_PRIMITIVE_WORDS};
 pub use sphere_gpu_layout::{GpuSphereBvhBuffers, SPHERE_WORDS};
