@@ -151,6 +151,7 @@ pub mod plane_aabb_classify;
 pub mod plane_clip;
 pub mod plane_line_intersect;
 pub mod point_in_polygon;
+pub mod point_in_tetrahedron;
 pub mod popcount_hamming;
 pub mod powder;
 pub mod premultiply_alpha;
@@ -323,6 +324,9 @@ pub use plane_line_intersect::{
     CLASS_POINT,
 };
 pub use point_in_polygon::{GpuPointInPolygon, PointInPolygonResult};
+pub use point_in_tetrahedron::{
+    GpuPointInTetrahedron, PointInTetrahedronQuery, PointInTetrahedronResult,
+};
 pub use popcount_hamming::GpuPopcountHamming;
 pub use powder::{GpuPowder, PowderQuery};
 pub use premultiply_alpha::GpuPremultiplyAlpha;
