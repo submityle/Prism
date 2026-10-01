@@ -156,6 +156,55 @@ impl DynamicBvh {
         });
         hit
     }
+
+    /// Visits candidate leaves whose fat box, expanded by `radius`, is hit by
+    /// `ray`, in order of increasing expanded-box entry distance.
+    ///
+    /// This is the broad phase for a swept sphere (sphere cast): a moving
+    /// sphere of radius `radius` whose centre travels along `ray` can only
+    /// touch geometry stored under a leaf if the ray pierces that leaf's box
+    /// grown by `radius`. The reported entry parameter is therefore a
+    /// conservative lower bound on the true time of impact against the stored
+    /// geometry, so a narrow phase may stop as soon as a candidate's entry
+    /// exceeds the closest confirmed hit. A negative `radius` is treated as
+    /// zero. Returning `false` from the visitor stops the traversal.
+    pub fn ray_cast_ordered_expanded(
+        &self,
+        ray: &Ray,
+        radius: f32,
+        visit: &mut impl FnMut(u64, Aabb, f32) -> bool,
+    ) {
+        if self.root == NULL {
+            return;
+        }
+        let margin = radius.max(0.0);
+        let mut frontier = BinaryHeap::new();
+        if let Some(t) = self.nodes[self.root as usize]
+            .aabb
+            .expanded_by(margin)
+            .ray_hit(ray)
+        {
+            frontier.push(RayCandidate { t, node: self.root });
+        }
+        while let Some(RayCandidate { t, node }) = frontier.pop() {
+            let node = self.nodes[node as usize];
+            if node.is_leaf() {
+                if !visit(node.data, node.aabb, t) {
+                    return;
+                }
+            } else {
+                for child in [node.child1, node.child2] {
+                    if let Some(ct) = self.nodes[child as usize]
+                        .aabb
+                        .expanded_by(margin)
+                        .ray_hit(ray)
+                    {
+                        frontier.push(RayCandidate { t: ct, node: child });
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// A pending node in a distance-ordered ray traversal, keyed by the ray entry

@@ -17,7 +17,9 @@ use glam::Vec3;
 
 use crate::bounding::{Aabb, BoundingSphere, Ray};
 use crate::bvh::DynamicBvh;
-use crate::narrow::{closest_point_on_triangle, ray_triangle, triangle_aabb_overlap};
+use crate::narrow::{
+    closest_point_on_triangle, ray_triangle, sweep_sphere_triangle, triangle_aabb_overlap,
+};
 
 /// An exact ray/triangle-mesh intersection.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -45,6 +47,20 @@ pub struct MeshClosestPoint {
     pub point: Vec3,
     /// Euclidean distance from the query to `point`.
     pub distance: f32,
+}
+
+/// The result of sweeping a sphere against a [`TriangleMesh`].
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct MeshSweepHit {
+    /// Index of the triangle the swept sphere first touches.
+    pub triangle: u32,
+    /// Time of impact along the sphere-centre ray (a distance, since the ray
+    /// direction is unit length).
+    pub t: f32,
+    /// Contact point on the triangle surface.
+    pub point: Vec3,
+    /// Unit surface normal at the contact, pointing toward the sphere centre.
+    pub normal: Vec3,
 }
 
 /// An indexed triangle mesh accelerated by a dynamic BVH.
@@ -251,6 +267,44 @@ impl TriangleMesh {
         });
         out
     }
+
+    /// Sweeps a sphere of `radius` whose centre follows `ray` against the mesh
+    /// and returns the earliest contact within `[0, ray.tmax]`.
+    ///
+    /// The broad phase walks BVH leaves whose box, expanded by `radius`, is hit
+    /// by the ray in near-to-far order; because each box entry is a lower bound
+    /// on the true time of impact, traversal stops as soon as a candidate box
+    /// starts beyond the closest confirmed contact. Each candidate triangle is
+    /// refined with an exact moving-sphere/triangle test. Returns `None` when
+    /// the swept sphere never touches the mesh.
+    pub fn sphere_cast(&self, ray: &Ray, radius: f32) -> Option<MeshSweepHit> {
+        let mut best: Option<MeshSweepHit> = None;
+        self.bvh
+            .ray_cast_ordered_expanded(ray, radius, &mut |data, _box, box_entry| {
+                // Boxes arrive by increasing entry, a lower bound on the TOI, so
+                // once a box starts beyond the best contact nothing can beat it.
+                if best.is_some_and(|h| box_entry > h.t) {
+                    return false;
+                }
+                let tri_index = data as usize;
+                let [ia, ib, ic] = self.indices[tri_index];
+                let a = self.vertices[ia as usize];
+                let b = self.vertices[ib as usize];
+                let c = self.vertices[ic as usize];
+                if let Some(hit) = sweep_sphere_triangle(ray, radius, a, b, c)
+                    && best.is_none_or(|h| hit.t < h.t)
+                {
+                    best = Some(MeshSweepHit {
+                        triangle: data as u32,
+                        t: hit.t,
+                        point: hit.point,
+                        normal: hit.normal,
+                    });
+                }
+                true
+            });
+        best
+    }
 }
 
 #[cfg(test)]
@@ -412,6 +466,45 @@ mod tests {
         assert!(mesh.distance(Vec3::ZERO).is_none());
         assert!(!mesh.intersects_sphere(Vec3::ZERO, 10.0));
         assert!(mesh.overlap_sphere(Vec3::ZERO, 10.0).is_empty());
+    }
+
+    #[test]
+    fn sphere_cast_stops_at_front_quad() {
+        let mesh = two_quads();
+        // Radius-0.5 sphere falling +Z toward quad A at z = 2.
+        let ray = Ray::new(Vec3::ZERO, Vec3::Z);
+        let hit = mesh.sphere_cast(&ray, 0.5).expect("sweep hit");
+        // Surface at z = 2, sphere stops with centre at z = 1.5.
+        assert!((hit.t - 1.5).abs() < 1e-3, "t = {}", hit.t);
+        assert!(hit.triangle < 2, "front triangle, got {}", hit.triangle);
+        assert!(hit.normal.z < -0.99, "normal faces the ray: {:?}", hit.normal);
+    }
+
+    #[test]
+    fn sphere_cast_misses_when_offset_far() {
+        let mesh = two_quads();
+        // Centre path at x = 5 is well outside the unit quads for radius 0.5.
+        let ray = Ray::new(Vec3::new(5.0, 0.0, 0.0), Vec3::Z);
+        assert!(mesh.sphere_cast(&ray, 0.5).is_none());
+    }
+
+    #[test]
+    fn sphere_cast_radius_catches_grazing_edge() {
+        let mesh = two_quads();
+        // Centre path at x = 1.4 misses the quad (half-width 1.0) by 0.4, but a
+        // radius-0.5 sphere still clips the +x edge of quad A.
+        let ray = Ray::new(Vec3::new(1.4, 0.0, 0.0), Vec3::Z);
+        assert!(mesh.sphere_cast(&ray, 0.5).is_some());
+        // A smaller radius-0.3 sphere stays clear.
+        assert!(mesh.sphere_cast(&ray, 0.3).is_none());
+    }
+
+    #[test]
+    fn sphere_cast_respects_tmax() {
+        let mesh = two_quads();
+        let ray = Ray::with_tmax(Vec3::ZERO, Vec3::Z, 1.0);
+        // Contact needs t = 1.5 but tmax is 1.0.
+        assert!(mesh.sphere_cast(&ray, 0.5).is_none());
     }
 
     #[test]

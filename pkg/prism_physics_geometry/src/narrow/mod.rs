@@ -14,6 +14,7 @@ mod manifold;
 mod minkowski;
 mod ray_cast;
 mod support;
+mod sweep;
 mod triangle_box;
 
 pub use ccd::{conservative_advancement, TimeOfImpact};
@@ -29,4 +30,5 @@ pub use manifold::{
 };
 pub use ray_cast::{ray_capsule, ray_obb, ray_sphere, ray_triangle, RayTriangleHit};
 pub use support::{Inflated, SupportMap, Translated};
+pub use sweep::{sweep_sphere_triangle, SphereSweepHit};
 pub use triangle_box::triangle_aabb_overlap;
