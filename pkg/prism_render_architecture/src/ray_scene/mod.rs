@@ -531,6 +531,11 @@
 //!   ([`mesh_sdf_ambient_occlusion::sdf_ambient_occlusion`]) estimating the
 //!   visible ambient fraction with Inigo Quilez's normal-cone taps over the
 //!   exterior shell, darkening creases, contacts, and cavities.
+//! - [`mesh_sdf_cone_occlusion`] — distance-field cone-traced occlusion with
+//!   bent normals ([`mesh_sdf_cone_occlusion::sdf_cone_occlusion`],
+//!   [`mesh_sdf_cone_occlusion::ConeOcclusion`]), sweeping a hemisphere fan
+//!   of cones (Unreal `DFAO` style) for a low-noise visibility factor and
+//!   the mean unoccluded direction for `IBL`/`GI`.
 //! - [`sdf_domain`] — domain and distance operators for composing fields
 //!   ([`sdf_domain::round_distance`], [`sdf_domain::onion`],
 //!   [`sdf_domain::translate`], [`sdf_domain::repeat`],
@@ -743,6 +748,7 @@ pub mod sdf_csg;
 pub mod mesh_voxel_padding;
 pub mod mesh_sdf_soft_shadow;
 pub mod mesh_sdf_ambient_occlusion;
+pub mod mesh_sdf_cone_occlusion;
 pub mod sdf_domain;
 pub mod mesh_sdf_thickness;
 pub mod sdf_primitives;
@@ -885,6 +891,7 @@ pub use sdf_csg::{
 pub use mesh_voxel_padding::pad_voxel_grid;
 pub use mesh_sdf_soft_shadow::{sdf_soft_shadow, SoftShadow};
 pub use mesh_sdf_ambient_occlusion::sdf_ambient_occlusion;
+pub use mesh_sdf_cone_occlusion::{sdf_cone_occlusion, ConeOcclusion};
 pub use sdf_domain::{
     elongate, mirror, onion, repeat, round_distance, scale_distance, scale_point, translate,
 };
