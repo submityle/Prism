@@ -62,13 +62,6 @@ use crate::water::abi::GpuWaterSurfaceMeshParams;
 /// so the device buffer the node allocates from this slice and the draw call
 /// the arch contract plans agree by construction.
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "consumed by the water-surface raster draw node (the following slice); exercised now by the unit tests in this module"
-    )
-)]
 pub(crate) fn surface_index_data(grid: SurfaceGrid) -> Vec<u32> {
     let verts_x = grid.verts_x;
     let verts_z = grid.verts_z;
@@ -222,13 +215,6 @@ pub(crate) struct SurfaceViewParams {
 /// is deterministic frame to frame. The unused `vec4` lanes (`sun_*.w`,
 /// `viewport.zw`) are zeroed rather than left undefined.
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "called by the water-surface raster draw node (the following slice); exercised now by the unit tests in this module"
-    )
-)]
 pub(crate) fn build_surface_view(params: &SurfaceViewParams) -> GpuWaterSurfaceView {
     let [cx, cy, cz] = params.camera_world_position;
     let [sx, sy, sz] = params.sun_direction;

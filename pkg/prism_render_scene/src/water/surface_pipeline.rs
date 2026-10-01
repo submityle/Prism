@@ -271,10 +271,6 @@ pub(crate) struct ViewWaterSurfacePipelines {
 impl ViewWaterSurfacePipelines {
     /// The specialized pipeline id that shades the given frontend for this view.
     #[must_use]
-    #[expect(
-        dead_code,
-        reason = "queried by the water-surface raster draw system (the following slice)"
-    )]
     pub(crate) fn id_for(&self, frontend: ShadingFrontend) -> CachedRenderPipelineId {
         self.ids[frontend_slot(frontend)]
     }

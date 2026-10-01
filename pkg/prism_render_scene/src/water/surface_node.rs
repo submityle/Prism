@@ -31,13 +31,6 @@ use super::surface_shading::WaterSurfaceShading;
 /// ([`surface_index_data`](super::surface_mesh::surface_index_data) +
 /// [`SurfaceGrid::index_count`]), and reads the four per-vertex storage arrays
 /// of `vertex_count` displaced vertices the compute sweep already filled.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "consumed by the water-surface raster draw system (the following slice); its fields are exercised now by this module's unit tests"
-    )
-)]
 pub(crate) struct SurfaceDraw {
     /// The authored shading state (frontend + body-constant style) the draw
     /// keys its pipeline on and packs into the per-view uniform.

@@ -104,13 +104,6 @@ impl WaterSurfaceShading {
     /// contributes the camera transform, key light and viewport, so the same
     /// `(self, view)` always yields the same params.
     #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "called by the water-surface raster draw node (the following slice); exercised now by the unit tests in this module"
-        )
-    )]
     pub(crate) fn view_params(&self, view: &SurfaceViewInputs) -> SurfaceViewParams {
         SurfaceViewParams {
             clip_from_world: view.clip_from_world,

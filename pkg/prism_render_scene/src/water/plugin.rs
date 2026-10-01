@@ -46,6 +46,7 @@ use super::extract::extract_water_bodies;
 use super::pipeline::init_water_compute_pipelines;
 use super::prepare::prepare_water_bodies;
 use super::resources::WaterGpuBodies;
+use super::surface_draw::draw_water_surface;
 use super::surface_pipeline::{
     init_water_surface_pipelines, prepare_water_surface_pipelines, WaterSurfacePipelines,
 };
@@ -122,6 +123,15 @@ impl Plugin for WaterPlugin {
             .add_systems(
                 bevy_core_pipeline::Core3d,
                 dispatch_water.before(bevy_core_pipeline::Core3dSystems::MainPass),
+            )
+            // Rasterize the displaced surface *after* the shading composite (so
+            // the opaque radiance it refracts is present in `scene_color`) and
+            // before Bevy's post-process, matching the composite -> OIT order.
+            .add_systems(
+                bevy_core_pipeline::Core3d,
+                draw_water_surface
+                    .after(crate::shading::composite_shading)
+                    .before(bevy_core_pipeline::Core3dSystems::PostProcess),
             );
     }
 }

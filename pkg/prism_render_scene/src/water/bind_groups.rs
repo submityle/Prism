@@ -1476,7 +1476,7 @@ fn default_view(texture: &Texture) -> TextureView {
 }
 
 /// A trilinear filtering sampler for the refraction scene lookups.
-fn filtering_sampler(device: &RenderDevice, label: &str) -> Sampler {
+pub(crate) fn filtering_sampler(device: &RenderDevice, label: &str) -> Sampler {
     device.create_sampler(&SamplerDescriptor {
         label: Some(label),
         address_mode_u: AddressMode::ClampToEdge,

@@ -30,17 +30,10 @@ use super::surface_node::SurfaceDraw;
 pub(crate) struct WaterGpuBody {
     /// The resident buffer set backing every bind group of this body.
     ///
-    /// Held purely to keep the `wgpu` buffer and texture handles alive for as
-    /// long as the bind groups that reference them; the dispatch node binds
-    /// through the bind groups and never reads this field directly, so it is an
-    /// intentionally unread `RAII` handle.
-    #[expect(
-        dead_code,
-        reason = "an RAII handle held only to keep the wgpu buffers and \
-                  textures alive as long as the bind groups that reference \
-                  them; the dispatch node binds through the bind groups and \
-                  never reads this field directly"
-    )]
+    /// Keeps the `wgpu` buffer and texture handles alive for the lifetime of
+    /// the bind groups that reference them, and the surface raster draw node
+    /// reads its four surface-mesh storage buffers directly to build the
+    /// per-view draw bind group.
     pub(crate) buffers: WaterBodyGpuBuffers,
     /// The twelve bind groups, one per shader-interface layout.
     pub(crate) bind_groups: WaterBodyBindGroups,
@@ -50,13 +43,9 @@ pub(crate) struct WaterGpuBody {
     /// `None` when the body is simulation-only / un-swept / degenerate and
     /// draws nothing. Computed by the device-free
     /// [`plan_surface_draw`](super::surface_node::plan_surface_draw) in the
-    /// prepare stage and consumed by the raster draw system (following slice).
-    #[expect(
-        dead_code,
-        reason = "read by the water-surface raster draw system (the following \
-                  slice) to key the pipeline and size the index buffer; this \
-                  slice only resolves and stashes the plan on the resident body"
-    )]
+    /// prepare stage and consumed by
+    /// [`draw_water_surface`](super::surface_draw::draw_water_surface) to key
+    /// the pipeline and size the index buffer.
     pub(crate) surface_draw: Option<SurfaceDraw>,
 }
 
