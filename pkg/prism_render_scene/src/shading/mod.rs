@@ -41,3 +41,8 @@ mod world_space_gi;
 
 pub use plugin::PrismShadingPlugin;
 pub use runtime::{PrismShadingDiagnostics, PrismShadingSettings};
+
+/// Re-exported for the water-surface raster draw: the water pipeline keys its
+/// specialized render pipeline on the same per-view visibility-buffer path the
+/// shading passes build, so the sibling `water` module needs the component.
+pub(crate) use resources::ViewVisibilityBuffer;

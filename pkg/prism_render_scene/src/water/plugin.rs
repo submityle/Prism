@@ -37,6 +37,7 @@
 use bevy_app::{App, Plugin};
 use bevy_asset::embedded_asset;
 use bevy_ecs::schedule::IntoScheduleConfigs;
+use bevy_render::render_resource::SpecializedRenderPipelines;
 use bevy_render::{ExtractSchedule, Render, RenderApp, RenderStartup, RenderSystems};
 
 use super::body::ExtractedWater;
@@ -45,7 +46,9 @@ use super::extract::extract_water_bodies;
 use super::pipeline::init_water_compute_pipelines;
 use super::prepare::prepare_water_bodies;
 use super::resources::WaterGpuBodies;
-use super::surface_pipeline::init_water_surface_pipelines;
+use super::surface_pipeline::{
+    init_water_surface_pipelines, prepare_water_surface_pipelines, WaterSurfacePipelines,
+};
 
 /// Installs the `GPU` water compute subsystem into an app.
 ///
@@ -92,6 +95,10 @@ impl Plugin for WaterPlugin {
             // shared `WaterComputePipelines` resource the prepare and dispatch
             // stages read.
             .add_systems(RenderStartup, init_water_compute_pipelines)
+            // Cache the per-view, per-target-format specialized surface raster
+            // pipelines, matching the shading composite pass's specialization
+            // registry.
+            .init_resource::<SpecializedRenderPipelines<WaterSurfacePipelines>>()
             .add_systems(RenderStartup, init_water_surface_pipelines)
             // Snapshot the main-world water bodies into the render world each
             // frame.
@@ -102,6 +109,13 @@ impl Plugin for WaterPlugin {
             .add_systems(
                 Render,
                 prepare_water_bodies.in_set(RenderSystems::PrepareResources),
+            )
+            // Specialize the four surface frontends for every visibility-path
+            // view and stash the concrete pipeline ids on the view, in the
+            // standard `Prepare` set Bevy's own fullscreen passes use.
+            .add_systems(
+                Render,
+                prepare_water_surface_pipelines.in_set(RenderSystems::Prepare),
             )
             // Record the solve in the `Core3d` graph before the main pass, the
             // same ordering every other Prism compute pass uses.

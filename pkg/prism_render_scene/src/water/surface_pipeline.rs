@@ -1,5 +1,5 @@
 //! The water-surface **raster** render pipelines: the `@vertex`/`@fragment`
-//! draw that finally turns the solved water fields into visible `HDR` pixels.
+//! draw that finally turns the solved water fields into visible pixels.
 //!
 //! Every pipeline the sibling [`super::pipeline`] slice builds is a `@compute`
 //! solver that writes device buffers; none of them draw. This slice builds the
@@ -14,17 +14,31 @@
 //! ([`SurfaceDrawDescriptor::vertex_entry`](prism_render_architecture::water::gpu::SurfaceDrawDescriptor::vertex_entry)
 //! and [`fragment_entry`](prism_render_architecture::water::gpu::SurfaceDrawDescriptor::fragment_entry)).
 //!
-//! This slice owns only the pipeline *resources* (the shared `@group(0)` layout
-//! and the four cached render pipelines, one per frontend). The draw node that
-//! allocates each body's vertex/index buffers, builds its per-body bind group,
-//! and records `draw_indexed` into the main `HDR` transparent target lands in
-//! the following slice; it reads [`WaterSurfacePipelines`] built here.
+//! ## Why the pipeline is specialized per view
+//!
+//! The surface draw composites into whatever colour attachment the active view
+//! renders into: the main `HDR` `Rgba16Float` texture on screen, or a
+//! render-to-texture view's own format. A render pipeline's colour-target format
+//! must be byte-compatible with the attachment it writes, so — exactly like the
+//! [`super::super::shading::composite`] pass — the pipeline is a
+//! [`SpecializedRenderPipeline`] keyed on
+//! ([`ShadingFrontend`], [`ExtractedView::target_format`]). The frontend selects
+//! the fragment entry point (the §5 lighting fork); the target format keeps the
+//! single `@location(0)` colour target compatible with the view it draws into.
+//!
+//! Specialization happens in [`prepare_water_surface_pipelines`] during
+//! [`RenderSystems::Prepare`](bevy_render::RenderSystems::Prepare), following
+//! Bevy's own fullscreen passes and the Prism composite: it specializes all four
+//! frontends for each visibility-path view and stashes the concrete
+//! [`CachedRenderPipelineId`]s on the view as [`ViewWaterSurfacePipelines`], so
+//! the raster draw system (following slice) stays a thin recorder that only
+//! fetches the pipeline for a body's frontend.
 //!
 //! ## Pass state (mirrors the `CPU` contract)
 //!
-//! * **Target** — the main `HDR` colour ([`WATER_SURFACE_COLOR_FORMAT`],
-//!   `Rgba16Float`), drawn after the opaque pass and before post-processing,
-//!   exactly like `UE5` Single Layer Water, `Crest`, and `WaveWorks`
+//! * **Target** — the view's colour attachment, drawn after the opaque pass and
+//!   before post-processing, exactly like `UE5` Single Layer Water, `Crest`, and
+//!   `WaveWorks`
 //!   ([`WaterRenderTarget::HdrTransparent`](prism_render_architecture::water::gpu::WaterRenderTarget)).
 //! * **Blend** — pre-multiplied alpha
 //!   (`src.One`/`dst.OneMinusSrcAlpha`, add) on both colour and alpha, matching
@@ -49,7 +63,7 @@
 //! declares an empty [`VertexState::buffers`]. The draw node binds the index
 //! buffer and the storage arrays; this pipeline only fixes their layout.
 
-use bevy_asset::{load_embedded_asset, Handle};
+use bevy_asset::{load_embedded_asset, AssetServer, Handle};
 use bevy_core_pipeline::core_3d::CORE_3D_DEPTH_FORMAT;
 use bevy_ecs::prelude::*;
 use bevy_material::{
@@ -59,32 +73,28 @@ use bevy_material::{
         },
         BindGroupLayoutEntries,
     },
-    descriptor::BindGroupLayoutDescriptor,
+    descriptor::{BindGroupLayoutDescriptor, FragmentState, RenderPipelineDescriptor, VertexState},
 };
 use bevy_render::{
+    render_resource::PipelineCache,
     render_resource::{
-        BindGroupLayout, BlendComponent, BlendFactor, BlendOperation, BlendState,
-        CachedRenderPipelineId, ColorTargetState, ColorWrites, CompareFunction, DepthBiasState,
-        DepthStencilState, FragmentState, FrontFace, MultisampleState, PipelineCache,
-        PrimitiveState, PrimitiveTopology, RenderPipelineDescriptor, SamplerBindingType,
-        ShaderStages, StencilState, TextureFormat, TextureSampleType, VertexState,
+        BlendComponent, BlendFactor, BlendOperation, BlendState, CachedRenderPipelineId,
+        ColorTargetState, ColorWrites, CompareFunction, DepthBiasState, DepthStencilState,
+        FrontFace, MultisampleState, PrimitiveState, PrimitiveTopology, SamplerBindingType,
+        ShaderStages, SpecializedRenderPipeline, SpecializedRenderPipelines, StencilState,
+        TextureFormat, TextureSampleType,
     },
-    renderer::RenderDevice,
+    view::ExtractedView,
 };
 use bevy_shader::Shader;
 
 use prism_render_architecture::water::gpu::plan_surface_draw;
 use prism_render_architecture::water::ShadingFrontend;
 
-/// Colour format the water-surface draw composites into: the main `HDR` target.
-///
-/// `Rgba16Float` is the `HDR` colour format every Prism view target carries, so
-/// the surface pipeline is layout-compatible with the main pass colour
-/// attachment it blends into. The draw node must bind an `HDR` view target.
-pub(crate) const WATER_SURFACE_COLOR_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
+use super::super::shading::ViewVisibilityBuffer;
 
 /// The four shading frontends in a stable order; the index into
-/// [`WaterSurfacePipelines::pipelines`] is this slot. `PBR` first keeps the
+/// [`ViewWaterSurfacePipelines::ids`] is this slot. `PBR` first keeps the
 /// default-frontend pipeline at slot zero.
 const FRONTENDS: [ShadingFrontend; 4] = [
     ShadingFrontend::Pbr,
@@ -93,7 +103,7 @@ const FRONTENDS: [ShadingFrontend; 4] = [
     ShadingFrontend::Hybrid,
 ];
 
-/// The slot a frontend occupies in [`WaterSurfacePipelines::pipelines`].
+/// The slot a frontend occupies in [`ViewWaterSurfacePipelines::ids`].
 const fn frontend_slot(frontend: ShadingFrontend) -> usize {
     match frontend {
         ShadingFrontend::Pbr => 0,
@@ -152,102 +162,61 @@ const fn premultiplied_alpha_blend() -> BlendState {
     }
 }
 
-/// The four cached water-surface render pipelines (one per shading frontend)
-/// plus the shared `@group(0)` layout and the raster shader handle.
+/// Specialization key for the water-surface raster pipeline.
+///
+/// Two axes vary at run time: the shading `frontend` selects the fragment entry
+/// point (the §5 lighting-response fork), and `target_format` is the colour
+/// format of the view target this draw composites into — `Rgba16Float` on an
+/// `HDR` screen, or a render-to-texture view's own format. Keying on both keeps
+/// the fragment stage forked correctly *and* the single `@location(0)` colour
+/// target byte-compatible with the attachment it blends into.
+#[derive(Clone, Copy, Hash, PartialEq, Eq, Debug)]
+pub(crate) struct WaterSurfaceKey {
+    /// Lighting-response frontend; selects the fragment entry point.
+    pub(crate) frontend: ShadingFrontend,
+    /// Format of the view target this pass renders into.
+    pub(crate) target_format: TextureFormat,
+}
+
+/// Render-pipeline specializer + the owned shared `@group(0)` layout for the
+/// water-surface raster draw.
 ///
 /// Built once at `RenderStartup` by [`init_water_surface_pipelines`]; read by
-/// the raster draw node (next slice), which binds [`Self::surface_layout`] into
-/// a per-body bind group and keys its draw on [`Self::pipeline_for`].
+/// [`prepare_water_surface_pipelines`] (which specializes the four frontends per
+/// view) and by the raster draw system (following slice), which resolves the
+/// concrete bind-group layout from the [`PipelineCache`] via [`Self::layout`] to
+/// build each body's per-body bind group.
 #[derive(Resource)]
 pub(crate) struct WaterSurfacePipelines {
-    /// The shared `@group(0)` bind-group layout every surface draw binds.
-    // Read by the raster draw node (following slice) to build each body's
-    // per-body bind group; nothing in this slice reads it back.
-    #[expect(
-        dead_code,
-        reason = "bound by the water-surface raster draw node that lands in the following slice; this slice only builds the layout"
-    )]
-    pub(crate) surface_layout: BindGroupLayout,
-    /// One cached render pipeline per [`ShadingFrontend`], indexed by
-    /// [`frontend_slot`].
-    pipelines: [CachedRenderPipelineId; 4],
+    /// The shared `@group(0)` bind-group layout descriptor every surface draw
+    /// binds. Stored as a descriptor (not a concrete handle) so the raster draw
+    /// system resolves the live [`BindGroupLayout`](bevy_render::render_resource::BindGroupLayout)
+    /// from the [`PipelineCache`] with the *same* descriptor the pipeline
+    /// specializes against, and the two can never drift.
+    pub(crate) layout: BindGroupLayoutDescriptor,
     /// The embedded `water_surface_raster.wesl` module both stages compile from.
-    // Retained so the draw node (and future hot-reload) can resolve the module;
-    // not re-read within this slice.
-    #[expect(
-        dead_code,
-        reason = "retained for the raster draw node and shader hot-reload in the following slice"
-    )]
     pub(crate) shader: Handle<Shader>,
 }
 
-impl WaterSurfacePipelines {
-    /// The cached render pipeline that shades the given frontend.
-    #[must_use]
-    #[expect(
-        dead_code,
-        reason = "queried by the water-surface raster draw node that lands in the following slice"
-    )]
-    pub(crate) fn pipeline_for(&self, frontend: ShadingFrontend) -> CachedRenderPipelineId {
-        self.pipelines[frontend_slot(frontend)]
-    }
-}
+impl SpecializedRenderPipeline for WaterSurfacePipelines {
+    type Key = WaterSurfaceKey;
 
-/// `RenderStartup` initializer: creates the shared surface bind-group layout and
-/// queues the four per-frontend render pipelines into the [`PipelineCache`].
-///
-/// The raster shader must be registered as an embedded asset before this runs
-/// (see [`super::plugin`]); `load_embedded_asset!` resolves it by its path
-/// relative to this file. Each frontend's `WESL` entry points come straight
-/// from the deterministic `CPU` contract
-/// ([`plan_surface_draw`]), so the host pipeline and the device shader can never
-/// drift on entry-point names.
-pub(crate) fn init_water_surface_pipelines(
-    mut commands: Commands,
-    device: Res<RenderDevice>,
-    cache: Res<PipelineCache>,
-    asset_server: Res<bevy_asset::AssetServer>,
-) {
-    let entries = surface_layout_entries();
-    // The descriptor the pipeline layout references, and the concrete device
-    // handle the draw node binds a per-body bind group against. Mirrors the
-    // compute slice, which likewise keeps both forms.
-    let layout_descriptor = BindGroupLayoutDescriptor::new("prism water surface", &entries);
-    let surface_layout = device.create_bind_group_layout("prism water surface", &entries);
-
-    let shader: Handle<Shader> = load_embedded_asset!(
-        asset_server.as_ref(),
-        "../shaders/water_surface_raster.wesl"
-    );
-
-    let blend = premultiplied_alpha_blend();
-
-    // One specialization per frontend. The vertex stage is shared (the displaced
-    // mesh is frontend-agnostic, §5); only the fragment entry forks.
-    let pipelines = FRONTENDS.map(|frontend| {
-        let draw = plan_surface_draw(frontend);
-        cache.queue_render_pipeline(RenderPipelineDescriptor {
-            label: Some(format!("prism water surface {frontend:?}").into()),
-            layout: vec![layout_descriptor.clone()],
+    fn specialize(&self, key: Self::Key) -> RenderPipelineDescriptor {
+        // The entry points come straight from the deterministic `CPU` contract,
+        // so the host pipeline and the device shader can never drift on names.
+        let draw = plan_surface_draw(key.frontend);
+        RenderPipelineDescriptor {
+            label: Some(format!("prism water surface {:?}", key.frontend).into()),
+            layout: vec![self.layout.clone()],
             immediate_size: 0,
             vertex: VertexState {
-                shader: shader.clone(),
+                shader: self.shader.clone(),
                 entry_point: Some(draw.vertex_entry().into()),
                 // No vertex buffer: the vertex stage indexes the `@group(0)`
                 // storage arrays by `@builtin(vertex_index)`.
                 buffers: vec![],
                 ..Default::default()
             },
-            fragment: Some(FragmentState {
-                shader: shader.clone(),
-                entry_point: Some(draw.fragment_entry().into()),
-                targets: vec![Some(ColorTargetState {
-                    format: WATER_SURFACE_COLOR_FORMAT,
-                    blend: Some(blend),
-                    write_mask: ColorWrites::ALL,
-                })],
-                ..Default::default()
-            }),
             primitive: PrimitiveState {
                 topology: PrimitiveTopology::TriangleList,
                 front_face: FrontFace::Ccw,
@@ -267,22 +236,119 @@ pub(crate) fn init_water_surface_pipelines(
                 stencil: StencilState::default(),
                 bias: DepthBiasState::default(),
             }),
+            // The Prism visibility path only runs when MSAA is disabled, so the
+            // surface target is always single-sampled.
             multisample: MultisampleState::default(),
+            fragment: Some(FragmentState {
+                shader: self.shader.clone(),
+                entry_point: Some(draw.fragment_entry().into()),
+                targets: vec![Some(ColorTargetState {
+                    format: key.target_format,
+                    blend: Some(premultiplied_alpha_blend()),
+                    write_mask: ColorWrites::ALL,
+                })],
+                ..Default::default()
+            }),
             ..Default::default()
-        })
-    });
+        }
+    }
+}
 
-    commands.insert_resource(WaterSurfacePipelines {
-        surface_layout,
-        pipelines,
-        shader,
-    });
+/// The four specialized water-surface pipelines chosen for one view, one per
+/// [`ShadingFrontend`] (indexed by [`frontend_slot`]), all keyed on the view's
+/// target format.
+///
+/// Present only on views the surface draw should run for (the Prism visibility
+/// path is live for them this frame). The raster draw system (following slice)
+/// reads it to fetch the concrete render pipeline for each body's frontend.
+#[derive(Component)]
+pub(crate) struct ViewWaterSurfacePipelines {
+    /// One cached pipeline id per frontend, in [`FRONTENDS`] / [`frontend_slot`]
+    /// order.
+    ids: [CachedRenderPipelineId; 4],
+}
+
+impl ViewWaterSurfacePipelines {
+    /// The specialized pipeline id that shades the given frontend for this view.
+    #[must_use]
+    #[expect(
+        dead_code,
+        reason = "queried by the water-surface raster draw system (the following slice)"
+    )]
+    pub(crate) fn id_for(&self, frontend: ShadingFrontend) -> CachedRenderPipelineId {
+        self.ids[frontend_slot(frontend)]
+    }
+}
+
+/// `RenderStartup` initializer: builds the shared surface bind-group layout
+/// descriptor and loads the embedded raster shader, then inserts the
+/// [`WaterSurfacePipelines`] specializer resource.
+///
+/// The raster shader must be registered as an embedded asset before this runs
+/// (see [`super::plugin`]); `load_embedded_asset!` resolves it by its path
+/// relative to this file. No device dependency beyond the shared asset server:
+/// the concrete pipelines are specialized later, per view, in
+/// [`prepare_water_surface_pipelines`].
+pub(crate) fn init_water_surface_pipelines(mut commands: Commands, asset_server: Res<AssetServer>) {
+    let entries = surface_layout_entries();
+    let layout = BindGroupLayoutDescriptor::new("prism water surface", &entries);
+
+    let shader: Handle<Shader> = load_embedded_asset!(
+        asset_server.as_ref(),
+        "../shaders/water_surface_raster.wesl"
+    );
+
+    commands.insert_resource(WaterSurfacePipelines { layout, shader });
+}
+
+/// `RenderSystems::Prepare` system specializing the four surface pipelines per
+/// view.
+///
+/// Only views that carry a [`ViewVisibilityBuffer`] (the Prism visibility path
+/// is live for them this frame) get pipelines: MSAA / disabled views never
+/// allocate the buffer, so they are skipped here and the raster draw system
+/// finds no [`ViewWaterSurfacePipelines`] to run. All four frontends are
+/// specialized up front — a view may host several bodies with different
+/// frontends — and keyed on [`ExtractedView::target_format`] so each colour
+/// target stays byte-compatible with the attachment the view renders into.
+pub(crate) fn prepare_water_surface_pipelines(
+    mut commands: Commands,
+    pipeline_cache: Res<PipelineCache>,
+    mut pipelines: ResMut<SpecializedRenderPipelines<WaterSurfacePipelines>>,
+    pipeline: Res<WaterSurfacePipelines>,
+    views: Query<(Entity, &ExtractedView), With<ViewVisibilityBuffer>>,
+) {
+    for (entity, view) in &views {
+        let ids = FRONTENDS.map(|frontend| {
+            pipelines.specialize(
+                &pipeline_cache,
+                &pipeline,
+                WaterSurfaceKey {
+                    frontend,
+                    target_format: view.target_format,
+                },
+            )
+        });
+        commands
+            .entity(entity)
+            .insert(ViewWaterSurfacePipelines { ids });
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use prism_render_architecture::water::gpu::SurfaceBinding;
+
+    /// A specializer with a stub layout + shader, enough to exercise the pure
+    /// `specialize` logic on the `CPU` without a device.
+    fn fixture() -> WaterSurfacePipelines {
+        let entries = surface_layout_entries();
+        WaterSurfacePipelines {
+            layout: BindGroupLayoutDescriptor::new("prism water surface", &entries),
+            shader: Handle::default(),
+        }
+    }
 
     #[test]
     fn layout_entries_match_the_surface_binding_contract() {
@@ -335,7 +401,53 @@ mod tests {
     }
 
     #[test]
-    fn surface_color_format_is_hdr() {
-        assert_eq!(WATER_SURFACE_COLOR_FORMAT, TextureFormat::Rgba16Float);
+    fn specialize_targets_the_key_format_and_keeps_the_transparent_pass_state() {
+        // The colour target must adopt whatever format the view renders into, so
+        // a render-to-texture view (here `Rgba8UnormSrgb`) is byte-compatible
+        // with its attachment, not pinned to the on-screen `HDR` format.
+        let pipelines = fixture();
+        let desc = pipelines.specialize(WaterSurfaceKey {
+            frontend: ShadingFrontend::Pbr,
+            target_format: TextureFormat::Rgba8UnormSrgb,
+        });
+
+        let fragment = desc
+            .fragment
+            .expect("the surface draw has a fragment stage");
+        let target = fragment.targets[0]
+            .as_ref()
+            .expect("the surface draw writes one colour target");
+        assert_eq!(target.format, TextureFormat::Rgba8UnormSrgb);
+        // Transparent composite: pre-multiplied alpha, reverse-Z depth test with
+        // no depth write, both windings rastered.
+        assert!(target.blend.is_some());
+        let depth = desc.depth_stencil.expect("the surface tests opaque depth");
+        assert_eq!(depth.depth_write_enabled, Some(false));
+        assert_eq!(depth.depth_compare, Some(CompareFunction::GreaterEqual));
+        assert_eq!(desc.primitive.cull_mode, None);
+        assert_eq!(desc.primitive.topology, PrimitiveTopology::TriangleList);
+    }
+
+    #[test]
+    fn specialize_forks_the_fragment_entry_per_frontend() {
+        let pipelines = fixture();
+        for frontend in FRONTENDS {
+            let desc = pipelines.specialize(WaterSurfaceKey {
+                frontend,
+                target_format: TextureFormat::Rgba16Float,
+            });
+            let fragment = desc.fragment.expect("a fragment stage per frontend");
+            let expected = plan_surface_draw(frontend).fragment_entry();
+            assert_eq!(
+                fragment.entry_point.as_deref(),
+                Some(expected),
+                "{frontend:?} must bind its own fragment entry point"
+            );
+            // The vertex stage is shared across every frontend.
+            assert_eq!(
+                desc.vertex.entry_point.as_deref(),
+                Some(plan_surface_draw(frontend).vertex_entry())
+            );
+        }
     }
 }
