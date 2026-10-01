@@ -1564,11 +1564,41 @@ pub fn heart_2d(point: [f32; 2]) -> f32 {
     }
 }
 
+/// Exact signed distance to the Inigo Quilez three-arc "egg" (`sdEgg`) with its
+/// axis of symmetry on `x = 0`.
+///
+/// `ra` is the radius of the circular bottom (centred on the origin) and
+/// `rb` is the radius of the rounded top cap (centred at `(0, sqrt 3 * (ra -
+/// rb))`); the two cheeks are arcs of radius `2*(ra - rb) + rb` centred at
+/// `(-/+(ra - rb), 0)`. The query is folded to `x >= 0` and routed to the
+/// bottom circle, the top cap, or a cheek by the sign of `y` and the
+/// `sqrt 3 (x + r) < y` test, so the whole shape stays `C1` continuous. The
+/// only transcendental is the compile-time `sqrt 3`, leaving the runtime path
+/// on `abs`, `min` (branch select) and `sqrt`.
+pub fn egg_2d(point: [f32; 2], ra: f32, rb: f32) -> f32 {
+    // k = sqrt(3) as a compile-time constant.
+    const K: f32 = 1.732_050_8;
+    let px = point[0].abs();
+    let py = point[1];
+    let r = ra - rb;
+    let d = if py < 0.0 {
+        // Bottom: circle of radius ra centred at the origin.
+        length2([px, py]) - r
+    } else if K * (px + r) < py {
+        // Top cap: circle of radius rb centred at (0, sqrt(3) * r).
+        length2([px, py - K * r])
+    } else {
+        // Cheek: arc of radius 2r + rb centred at (-r, 0).
+        length2([px + r, py]) - 2.0 * r
+    };
+    d - rb
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         arc, box_frame, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_torus, capsule, cone_sdf, cross_2d, cut_disk_2d, cut_hollow_sphere,
-        cut_sphere, cylinder_segment, death_star, ellipsoid_sdf, equilateral_triangle_2d, heart_2d, hex_prism, hexagram_2d, infinite_cone, infinite_cylinder, isosceles_triangle_2d, length2, line_sdf, link, moon,
+        cut_sphere, cylinder_segment, death_star, egg_2d, ellipsoid_sdf, equilateral_triangle_2d, heart_2d, hex_prism, hexagram_2d, infinite_cone, infinite_cylinder, isosceles_triangle_2d, length2, line_sdf, link, moon,
         octagon_prism, octahedron, oriented_box_2d, parallelogram, pie, plane, pyramid, quad_sdf, regular_hexagon_2d, regular_octagon_2d, regular_pentagon_2d, rhombus, rhombus_2d, round_box, round_cone_sdf,
         round_cone_segment, rounded_cylinder, rounded_x, segment_2d, solid_angle, sphere, torus, trapezoid_isosceles, triangle_sdf, triangular_prism,
         uneven_capsule_2d, vesica,
@@ -2623,6 +2653,95 @@ mod tests {
         for p in samples {
             let got = heart_2d(p);
             let want = heart_reference(p[0], p[1]);
+            assert!((got - want).abs() < 3e-3, "p={p:?} got={got} want={want}");
+        }
+    }
+
+    // Independent reference for the IQ egg: reconstruct the three-arc boundary
+    // (bottom circle, cheek arc, top cap) from first-principles geometry, then
+    // take the min point-to-segment distance with an even-odd winding sign.
+    fn egg_reference(px: f32, py: f32, ra: f32, rb: f32) -> f32 {
+        let r = ra - rb;
+        let k = 3.0f32.sqrt();
+        let rs = 2.0 * r + rb; // cheek radius
+        let mut right: Vec<[f32; 2]> = Vec::new();
+        let push_arc = |v: &mut Vec<[f32; 2]>, c: [f32; 2], rad: f32, a0: f32, a1: f32, n: usize, skip_first: bool| {
+            for i in 0..=n {
+                if skip_first && i == 0 {
+                    continue;
+                }
+                let a = a0 + (a1 - a0) * (i as f32 / n as f32);
+                v.push([c[0] + rad * a.cos(), c[1] + rad * a.sin()]);
+            }
+        };
+        // Bottom arc: centre origin, radius ra, from -90deg (tip) to 0deg (widest).
+        push_arc(&mut right, [0.0, 0.0], ra, (-90.0f32).to_radians(), 0.0, 120, false);
+        // Cheek arc: centre (-r,0), radius rs, from 0deg to 60deg.
+        push_arc(&mut right, [-r, 0.0], rs, 0.0, 60.0f32.to_radians(), 120, true);
+        // Top cap: centre (0, k*r), radius rb, from 60deg to 90deg.
+        push_arc(&mut right, [0.0, k * r], rb, 60.0f32.to_radians(), 90.0f32.to_radians(), 80, true);
+        // Close by mirroring the right boundary down the left side.
+        let mut poly = right.clone();
+        for q in right.iter().rev() {
+            poly.push([-q[0], q[1]]);
+        }
+        let n = poly.len();
+        let mut best = f32::INFINITY;
+        for i in 0..n {
+            let a = poly[i];
+            let b = poly[(i + 1) % n];
+            let e = [b[0] - a[0], b[1] - a[1]];
+            let w = [px - a[0], py - a[1]];
+            let len2 = e[0] * e[0] + e[1] * e[1];
+            let t = if len2 > 0.0 { ((e[0] * w[0] + e[1] * w[1]) / len2).clamp(0.0, 1.0) } else { 0.0 };
+            let dx = w[0] - e[0] * t;
+            let dy = w[1] - e[1] * t;
+            best = best.min(dx * dx + dy * dy);
+        }
+        let mut inside = false;
+        let mut j = n - 1;
+        for i in 0..n {
+            let (xi, yi) = (poly[i][0], poly[i][1]);
+            let (xj, yj) = (poly[j][0], poly[j][1]);
+            if (yi > py) != (yj > py) {
+                let xcross = xi + (py - yi) / (yj - yi) * (xj - xi);
+                if px < xcross {
+                    inside = !inside;
+                }
+            }
+            j = i;
+        }
+        best.sqrt() * if inside { -1.0 } else { 1.0 }
+    }
+
+    #[test]
+    fn egg_2d_matches_arc_reference() {
+        let (ra, rb) = (1.0f32, 0.3f32);
+        let k = 3.0f32.sqrt();
+        let r = ra - rb;
+        // Bottom tip, widest point and top cap apex are on the surface.
+        assert!(egg_2d([0.0, -ra], ra, rb).abs() < 1e-5);
+        assert!(egg_2d([ra, 0.0], ra, rb).abs() < 1e-5);
+        assert!(egg_2d([0.0, k * r + rb], ra, rb).abs() < 1e-5);
+        // Centre is one bottom-circle radius inside.
+        assert!((egg_2d([0.0, 0.0], ra, rb) - (-ra)).abs() < 1e-5);
+        let samples: [[f32; 2]; 12] = [
+            [0.0, 0.0],
+            [0.4, 0.2],
+            [-0.4, 0.2],
+            [0.0, -0.5],
+            [0.0, 1.2],
+            [0.9, 0.3],
+            [-0.9, 0.3],
+            [0.5, 1.0],
+            [-0.5, 1.0],
+            [1.3, 0.0],
+            [0.2, 1.6],
+            [0.0, -1.4],
+        ];
+        for p in samples {
+            let got = egg_2d(p, ra, rb);
+            let want = egg_reference(p[0], p[1], ra, rb);
             assert!((got - want).abs() < 3e-3, "p={p:?} got={got} want={want}");
         }
     }
