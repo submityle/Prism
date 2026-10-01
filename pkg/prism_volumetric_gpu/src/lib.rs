@@ -152,6 +152,7 @@ pub mod should_fallback;
 pub mod single_scatter_reference;
 pub mod sky_state_transition;
 pub mod soft_particle;
+pub mod spatial_hash;
 pub mod spectral_to_rgb;
 pub mod specular_aa;
 pub mod sphere_aabb;
@@ -282,6 +283,7 @@ pub use should_fallback::{GpuShouldFallback, ShouldFallbackQuery};
 pub use single_scatter_reference::{GpuSingleScatterReference, SingleScatterReferenceQuery};
 pub use sky_state_transition::{GpuSkyStateTransition, SkyStateTransition};
 pub use soft_particle::{GpuSoftParticle, LinearizeQuery, SoftParticleQuery, SoftParticleSample};
+pub use spatial_hash::GpuSpatialHash;
 pub use spectral_to_rgb::{GpuSpectralToRgb, SpectralRgb};
 pub use specular_aa::{
     GpuSpecularAa, SpecularAaBatchQuery, SpecularAaScalarQuery, SpecularAaScalarSample,
