@@ -58,6 +58,61 @@ impl SupportMap for Capsule {
     }
 }
 
+/// A support map that rigidly translates another shape by a fixed `offset`.
+///
+/// This lets GJK-based queries evaluate a convex shape at a shifted position
+/// (for example successive samples along a motion sweep) without rebuilding the
+/// underlying geometry. Translation commutes with the support map, so the
+/// farthest point of the shifted shape is simply the base support plus the
+/// offset.
+#[derive(Clone, Copy, Debug)]
+pub struct Translated<'a, S> {
+    /// The underlying convex shape.
+    pub shape: &'a S,
+    /// World-space translation applied to the shape.
+    pub offset: Vec3,
+}
+
+impl<'a, S> Translated<'a, S> {
+    /// Wraps `shape`, offsetting it by `offset`.
+    pub fn new(shape: &'a S, offset: Vec3) -> Self {
+        Self { shape, offset }
+    }
+}
+
+impl<S: SupportMap> SupportMap for Translated<'_, S> {
+    fn support_point(&self, dir: Vec3) -> Vec3 {
+        self.shape.support_point(dir) + self.offset
+    }
+}
+
+/// A support map that inflates another shape by a uniform `margin`, forming its
+/// Minkowski sum with a sphere of that radius (a rounded shape).
+///
+/// Inflating both operands of a GJK distance query by their collision margins
+/// yields speculative-contact separation: when the rounded shells touch, the
+/// cores are within `margin_a + margin_b` of each other.
+#[derive(Clone, Copy, Debug)]
+pub struct Inflated<'a, S> {
+    /// The underlying convex shape.
+    pub shape: &'a S,
+    /// Non-negative inflation radius.
+    pub margin: f32,
+}
+
+impl<'a, S> Inflated<'a, S> {
+    /// Wraps `shape`, inflating it by `margin`.
+    pub fn new(shape: &'a S, margin: f32) -> Self {
+        Self { shape, margin }
+    }
+}
+
+impl<S: SupportMap> SupportMap for Inflated<'_, S> {
+    fn support_point(&self, dir: Vec3) -> Vec3 {
+        self.shape.support_point(dir) + dir.normalize_or_zero() * self.margin
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::SupportMap;

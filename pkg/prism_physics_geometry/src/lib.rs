@@ -31,8 +31,9 @@ pub use bvh::DynamicBvh;
 pub use mesh::{MeshRayHit, TriangleMesh};
 pub use narrow::{
     closest_point_on_aabb, closest_point_on_segment, closest_point_on_triangle,
-    closest_points_segment_segment, contact_manifold, gjk_closest_points, gjk_contact,
-    gjk_intersect, ray_capsule, ray_obb, ray_sphere, ray_triangle, ClipShape, ClosestPoints, Contact,
-    ContactManifold, FacePolygon, ManifoldPoint, RayTriangleHit, SegmentClosest, SupportMap,
+    closest_points_segment_segment, conservative_advancement, contact_manifold, gjk_closest_points,
+    gjk_contact, gjk_intersect, ray_capsule, ray_obb, ray_sphere, ray_triangle, ClipShape,
+    ClosestPoints, Contact, ContactManifold, FacePolygon, Inflated, ManifoldPoint, RayTriangleHit,
+    SegmentClosest, SupportMap, TimeOfImpact, Translated,
 };
 pub use proxy::ProxyId;
