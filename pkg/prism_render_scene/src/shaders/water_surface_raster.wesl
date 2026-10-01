@@ -596,6 +596,49 @@ struct WaterMotionConfig {
 
 @group(4) @binding(0) var<uniform> motion_cfg: WaterMotionConfig;
 
+// Underwater froxel-volume base (`@group(5)`): the `rgba16float` single-scatter
+// + transmittance volume the `water_underwater_volume` compute kernel fills each
+// frame, stored as `vec4(inscatter.rgb, avg_transmittance)` per froxel. The
+// kernel lays `xy` out as screen columns and `z` as eye-to-slice depth, so the
+// fragment samples at `(screen_uv, eye_depth * inv_far)`. Consuming this volume
+// turns the previously dead-computed scattering into the water's participating
+// medium, matching the `Frostbite` froxel-volume transparent-compositing path.
+struct WaterFroxelParams {
+    // 1 / (slice_thickness * depth_slices): scales eye depth onto froxel z.
+    inv_far: f32,
+    // 1 enables the volume lookup; 0 keeps the raw screen-space refraction.
+    sample_enable: u32,
+    // Padding to the 16-byte uniform block alignment; never read.
+    pad0: u32,
+    // Padding to the 16-byte uniform block alignment; never read.
+    pad1: u32,
+}
+
+@group(5) @binding(0) var froxel_volume: texture_3d<f32>;
+@group(5) @binding(1) var froxel_sampler: sampler;
+@group(5) @binding(2) var<uniform> froxel_params: WaterFroxelParams;
+
+// Map an eye-space depth (metres) onto the froxel z axis in `0..=1`. A zero
+// `inv_far` (degenerate volume) collapses to the near slice.
+fn froxel_depth_coord(eye_depth: f32, inv_far: f32) -> f32 {
+    return clamp(eye_depth * max(inv_far, 0.0), 0.0, 1.0);
+}
+
+// Composite the underwater single-scatter volume into the refracted scene
+// colour: `refracted * transmittance + inscatter`, read from the froxel volume
+// at this fragment's screen column and eye-space depth. When the volume is
+// disabled the raw refraction passes through unchanged, so water-above pixels
+// (which still see the medium through the surface) and degenerate volumes are
+// both honest no-ops.
+fn apply_underwater_volume(refracted: vec3<f32>, screen_uv: vec2<f32>, eye_depth: f32) -> vec3<f32> {
+    if froxel_params.sample_enable == 0u {
+        return refracted;
+    }
+    let w = froxel_depth_coord(eye_depth, froxel_params.inv_far);
+    let voxel = textureSampleLevel(froxel_volume, froxel_sampler, vec3<f32>(screen_uv, w), 0.0);
+    return refracted * voxel.a + max(voxel.rgb, vec3<f32>(0.0));
+}
+
 // Project a world position to the engine's motion-UV convention
 // (ndc.x*0.5+0.5, ndc.y*-0.5+0.5), returning clip.w in `.z` so the caller can
 // reject points behind the camera (clip.w <= 0). Mirrors the opaque resolve
@@ -786,7 +829,13 @@ fn shade_pbr_core(in: VertexOutput) -> vec4<f32> {
     }
     let ssr = water_ssr_reflection(in.world_position, frame.normal, surface.perceptual_roughness);
     lit = lit + water_ibl(surface, frame, ssr);
-    let refracted = refraction_color(in.clip_position, frame.normal);
+    let refracted_raw = refraction_color(in.clip_position, frame.normal);
+    // Composite the underwater single-scatter froxel volume into the refracted
+    // scene so the water body has a real participating medium (`Beer-Lambert`
+    // extinction + phase-weighted in-scatter), not a raw screen-space grab.
+    let screen_uv = in.clip_position.xy / max(view.viewport.xy, vec2<f32>(1.0));
+    let eye_depth = length(in.world_position - view.world_camera_position.xyz);
+    let refracted = apply_underwater_volume(refracted_raw, screen_uv, eye_depth);
 
     // Grazing angles reflect more and refract less (Fresnel-weighted alpha).
     let n_dot_v = clamp(dot(frame.normal, frame.view), 0.0, 1.0);

@@ -58,6 +58,10 @@ struct PreparedSurfaceDraw<'a> {
     uniform: Buffer,
     index_buffer: Buffer,
     bind_group: BindGroup,
+    /// The `@group(5)` underwater froxel-volume group for this body: the sampled
+    /// single-scatter + transmittance volume the surface fragment stage
+    /// composites into its refraction.
+    froxel_group: BindGroup,
     index_count: u32,
 }
 
@@ -126,6 +130,7 @@ pub(crate) fn draw_water_surface(
     };
 
     let layout = cache.get_bind_group_layout(&surface_pipeline.layout);
+    let froxel_layout = cache.get_bind_group_layout(&surface_pipeline.froxel_layout);
     let sampler = filtering_sampler(&device, "prism water surface refraction");
 
     // Build every body's device resources before opening the pass: the index
@@ -176,11 +181,26 @@ pub(crate) fn draw_water_surface(
                     .as_entire_binding(),
             )),
         );
+        // The `@group(5)` underwater froxel volume: the `water_underwater_volume`
+        // kernel already filled this body's `vec4(inscatter, transmittance)`
+        // volume this frame; the fragment stage samples it to composite the
+        // participating medium into the refraction. Per-body (the volume lives
+        // on the body), so it is built here rather than once per view.
+        let froxel_group = device.create_bind_group(
+            "prism water surface froxel",
+            &froxel_layout,
+            &BindGroupEntries::sequential((
+                &body.buffers.underwater_out,
+                &sampler,
+                body.buffers.surface_froxel_params.as_entire_binding(),
+            )),
+        );
         prepared.push(PreparedSurfaceDraw {
             pipeline,
             uniform,
             index_buffer,
             bind_group,
+            froxel_group,
             index_count: draw.grid.index_count(),
         });
     }
@@ -345,6 +365,7 @@ pub(crate) fn draw_water_surface(
         pass.set_bind_group(2, &vsm_group, &[]);
         pass.set_bind_group(3, &ssr_group, &[]);
         pass.set_bind_group(4, &motion_group, &[]);
+        pass.set_bind_group(5, &draw.froxel_group, &[]);
         pass.set_index_buffer(draw.index_buffer.slice(..), IndexFormat::Uint32);
         pass.draw_indexed(0..draw.index_count, 0, 0..1);
     }

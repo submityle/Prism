@@ -337,6 +337,10 @@ pub(crate) struct WaterBodyGpuBuffers {
     pub(crate) underwater_params: Buffer,
     pub(crate) underwater_out: TextureView,
     pub(crate) underwater_surface_light: TextureView,
+    /// Froxel-volume depth-mapping uniform the surface fragment stage binds
+    /// at `@group(5)` to composite the underwater single-scatter volume into
+    /// its refraction (see [`super::surface_froxel`]).
+    pub(crate) surface_froxel_params: Buffer,
     // Wetness.
     pub(crate) wetness_state: Buffer,
     pub(crate) wetness_params: Buffer,
@@ -675,6 +679,17 @@ impl WaterBodyGpuBuffers {
             upload.underwater_light_extent,
             TextureFormat::Rgba16Float,
         );
+        // Precompute the froxel depth-mapping the surface fragment stage reads
+        // to sample the above volume: `1 / (slice_thickness * depth_slices)`.
+        let surface_froxel_params = uniform(
+            device,
+            "prism water surface froxel params",
+            &crate::water::surface_froxel::GpuWaterFroxelParams::new(
+                upload.underwater_params.slice_thickness,
+                upload.underwater_extent.depth,
+                true,
+            ),
+        );
 
         // ---- Wetness ----
         let wetness_state = zeroed_storage(
@@ -811,6 +826,7 @@ impl WaterBodyGpuBuffers {
             underwater_params,
             underwater_out,
             underwater_surface_light,
+            surface_froxel_params,
             wetness_state,
             wetness_params,
             wetness_out,
@@ -1449,7 +1465,9 @@ fn storage_texture_3d(
         sample_count: 1,
         dimension: TextureDimension::D3,
         format,
-        usage: TextureUsages::STORAGE_BINDING | TextureUsages::COPY_SRC,
+        usage: TextureUsages::STORAGE_BINDING
+            | TextureUsages::COPY_SRC
+            | TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     });
     default_view(&texture)

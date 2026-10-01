@@ -229,6 +229,12 @@ pub(crate) struct WaterSurfacePipelines {
     /// [`BindGroupLayout`](bevy_render::render_resource::BindGroupLayout) through
     /// the [`PipelineCache`] with the same descriptor the draw node binds.
     pub(crate) motion_layout: BindGroupLayoutDescriptor,
+    /// The `@group(5)` underwater froxel-volume layout: the sampled `3D`
+    /// single-scatter + transmittance volume, its filtering sampler, and the
+    /// depth-mapping uniform. The draw node binds each body's volume against
+    /// this descriptor so the fragment stage composites the participating
+    /// medium into its refraction (see [`super::surface_froxel`]).
+    pub(crate) froxel_layout: BindGroupLayoutDescriptor,
     /// The embedded `water_surface_raster.wesl` module both stages compile from.
     pub(crate) shader: Handle<Shader>,
 }
@@ -248,6 +254,7 @@ impl SpecializedRenderPipeline for WaterSurfacePipelines {
                 self.vsm_layout.clone(),
                 self.ssr_layout.clone(),
                 self.motion_layout.clone(),
+                self.froxel_layout.clone(),
             ],
             immediate_size: 0,
             vertex: VertexState {
@@ -381,6 +388,14 @@ pub(crate) fn init_water_surface_pipelines(
         "prism water surface motion",
         &super::surface_motion::motion_layout_entries(),
     );
+    // @group(5): the underwater froxel volume the `water_underwater_volume`
+    // kernel fills; the draw node binds each body's volume + sampler + mapping
+    // uniform against this descriptor so the fragment stage composites the
+    // participating medium into its refraction.
+    let froxel_layout = BindGroupLayoutDescriptor::new(
+        "prism water surface froxel",
+        &super::surface_froxel::froxel_layout_entries(),
+    );
 
     commands.insert_resource(WaterSurfacePipelines {
         layout,
@@ -388,6 +403,7 @@ pub(crate) fn init_water_surface_pipelines(
         vsm_layout,
         ssr_layout,
         motion_layout,
+        froxel_layout,
         shader,
     });
 }
@@ -460,6 +476,10 @@ mod tests {
             motion_layout: BindGroupLayoutDescriptor::new(
                 "prism water surface motion",
                 &crate::water::surface_motion::motion_layout_entries(),
+            ),
+            froxel_layout: BindGroupLayoutDescriptor::new(
+                "prism water surface froxel",
+                &crate::water::surface_froxel::froxel_layout_entries(),
             ),
             shader: Handle::default(),
         }
@@ -541,12 +561,13 @@ mod tests {
         assert_eq!(depth.depth_compare, Some(CompareFunction::GreaterEqual));
         assert_eq!(desc.primitive.cull_mode, None);
         assert_eq!(desc.primitive.topology, PrimitiveTopology::TriangleList);
-        // Five bind-group layouts: the per-body @group(0) surface layout, the
+        // Six bind-group layouts: the per-body @group(0) surface layout, the
         // shared @group(1) engine light table the fragment stage samples, the
         // @group(2) virtual-shadow-map twin the primary directional light reads,
-        // the @group(3) screen-space-reflection Hi-Z pyramid + march config, and
-        // the @group(4) motion-vector uniform feeding the second render target.
-        assert_eq!(desc.layout.len(), 5);
+        // the @group(3) screen-space-reflection Hi-Z pyramid + march config, the
+        // @group(4) motion-vector uniform feeding the second render target, and
+        // the @group(5) underwater froxel volume composited into refraction.
+        assert_eq!(desc.layout.len(), 6);
     }
 
     #[test]
