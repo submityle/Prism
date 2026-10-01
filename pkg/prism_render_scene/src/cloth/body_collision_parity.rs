@@ -1,19 +1,22 @@
 #![cfg(test)]
-//! `cloth_collision.wesl` 的 `cloth_body_collision` 内核 **frictionless（shipping）
-//! 路径** 的 **逐位** CPU 转写，对齐架构层黄金 [`resolve_body_collisions`]（把每个
-//! 自由粒子依序投影出每个解析碰撞体）。
+//! `cloth_collision.wesl` 的 `cloth_body_collision` 内核的 **逐位** CPU 转写，覆盖
+//! **frictionless** 与 **Coulomb 摩擦** 两条路径，分别对齐架构层黄金
+//! [`resolve_body_collisions`] 与 [`resolve_body_collisions_with_friction`]（把每个
+//! 自由粒子依序投影出每个解析碰撞体，摩擦路径再对帧首切向滑移施加 Coulomb 阻尼）。
 //!
-//! ## 为何只覆盖 frictionless 路径
-//! 场景层上传口径恒把 body 摩擦 uniform 置零（`GpuClothBodyParams` 无 `friction`
-//! 字段），故 shipping 恒走 `mu == 0`：此时内核的 `cloth_damp_tangential_slip`
-//! 对每个碰撞体早退、原样返回投影位置，整趟塌缩为「逐碰撞体顺序投影」，与黄金
-//! `resolve_body_collisions` 逐位一致。摩擦段（`mu > 0`）的 WESL
-//! `cloth_damp_tangential_slip` 与黄金 `apply_coulomb_friction` 采用 **不同的浮点
-//! 结合顺序**（WESL：`tan_dir * min(||t||, mu*depth)`；黄金：`t * min(mu*depth/||t||,
-//! 1)`），静摩擦锥内 `(t/||t||)*||t||` 与 `t*1` 不逐位相等，故摩擦段 **本就无法**
-//! 逐位对齐——这由 `body_collision_gpu_tests` 的带容差（`PARITY_EPS`）比对如实覆盖，
-//! 不在此 CPU parity 的射程内。本模块因此只对 shipping 的 frictionless 路径建立
-//! 与设备无关的逐位闭环。
+//! ## frictionless 路径
+//! `mu == 0` 时内核的 `cloth_damp_tangential_slip` 对每个碰撞体早退、原样返回投影
+//! 位置，整趟塌缩为「逐碰撞体顺序投影」，与黄金 `resolve_body_collisions` 逐位一致。
+//!
+//! ## 摩擦路径（`mu > 0`）现已逐位对齐
+//! WESL `cloth_damp_tangential_slip` 已把尾段从早期的
+//! `tan_dir * min(||t||, mu*depth)` 倒数乘重构，改为 `scale = min(mu*depth/||t||, 1)`
+//! 再 `projected - t*scale`，与黄金 `apply_coulomb_friction` 的
+//! `scale = (mu*normal_push/||t||).min(1)` + `pos - t*scale` **逐位同序**（同为一次
+//! fmul、一次 fdiv、一次 min、一次 fmul）。EPS 阈值亦全等
+//! (`CLOTH_COL_EPS_LEN_SQ` = `EPS_FRICTION` = `EPS_LEN_SQ` = `1e-12`)，故摩擦段现与
+//! 黄金 CPU 逐位吻合，不再是「仅带容差覆盖」。本模块据此对摩擦路径也建立与设备无关
+//! 的逐位闭环，与 `body_collision_gpu_tests` 的真机带容差（`PARITY_EPS`）比对互补。
 //!
 //! 本模块逐词把 WESL 算术搬到 CPU（原生 `f32`，不复用黄金的 `Vec3` 方法），再用
 //! `f32::to_bits` 逐分量比对黄金。WESL 球面投影现用显式 `1.0 / sqrt(dist_sq)`
@@ -21,7 +24,9 @@
 //! 的 `scale(1.0 / len_sq.sqrt())` 完全同序；`sqrt`/`fdiv` 在 GPU 与 CPU 上均为
 //! IEEE-754 正确舍入，故 `body_collision_gpu_tests` 的真机输出与黄金也逐位吻合。
 
-use prism_render_architecture::cloth::collision::{resolve_body_collisions, BodyCollider};
+use prism_render_architecture::cloth::collision::{
+    resolve_body_collisions, resolve_body_collisions_with_friction, BodyCollider,
+};
 use prism_render_architecture::cloth::{ClothParticle, Vec3, EPS_LEN_SQ};
 
 /// WESL `cloth_project_out_of_sphere` 的逐位转写：非正半径或球外点原样返回；与球心
@@ -379,5 +384,290 @@ fn jittered_particles_and_colliders_bit_for_bit() {
             particles.push(free(next() * 2.0, next() * 2.0, next() * 2.0));
         }
         assert_body_bit_exact(&particles, &colliders);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Coulomb 摩擦路径（`mu > 0`）逐位转写
+// ---------------------------------------------------------------------------
+
+/// WESL `cloth_damp_tangential_slip` 的逐位转写：给定帧首位置 `prev`、投影后位置
+/// `projected` 与本碰撞体 correction（`projected - before`，模长为推出深度、方向为
+/// 外向接触法线），把帧位移 `projected - prev` 分解到法线/切向，并按
+/// `scale = min(mu*depth/||t||, 1)` 收缩切向分量：静摩擦锥内 (`mu*depth >= ||t||`)
+/// 饱和到 1 全消，动态区按 `mu*depth` 线性收缩。非正 `friction`、(近)零深度或
+/// (近)零切向滑移原样返回 `projected`。op 顺序与黄金 `apply_coulomb_friction` 逐位
+/// 相同（一次 fmul、一次 fdiv、一次 min、一次 fmul）。
+fn wesl_damp_tangential_slip(
+    prev: [f32; 3],
+    projected: [f32; 3],
+    correction: [f32; 3],
+    friction: f32,
+) -> [f32; 3] {
+    if friction <= 0.0 {
+        return projected;
+    }
+    let depth_sq = correction[0] * correction[0]
+        + correction[1] * correction[1]
+        + correction[2] * correction[2];
+    if depth_sq <= EPS_LEN_SQ {
+        return projected;
+    }
+    let depth = depth_sq.sqrt();
+    let inv = 1.0_f32 / depth;
+    let normal = [correction[0] * inv, correction[1] * inv, correction[2] * inv];
+    let disp = [
+        projected[0] - prev[0],
+        projected[1] - prev[1],
+        projected[2] - prev[2],
+    ];
+    let normal_amount = disp[0] * normal[0] + disp[1] * normal[1] + disp[2] * normal[2];
+    let tangential = [
+        disp[0] - normal[0] * normal_amount,
+        disp[1] - normal[1] * normal_amount,
+        disp[2] - normal[2] * normal_amount,
+    ];
+    let tan_sq = tangential[0] * tangential[0]
+        + tangential[1] * tangential[1]
+        + tangential[2] * tangential[2];
+    if tan_sq <= EPS_LEN_SQ {
+        return projected;
+    }
+    let tan_len = tan_sq.sqrt();
+    let scale = (friction * depth / tan_len).min(1.0);
+    [
+        projected[0] - tangential[0] * scale,
+        projected[1] - tangential[1] * scale,
+        projected[2] - tangential[2] * scale,
+    ]
+}
+
+/// WESL `cloth_body_collision` 在 `friction > 0` 下整趟派发的逐位转写：逐粒子（派发
+/// 顺序无关、无跨粒子依赖）跳过逆质量 `<= 0` 的钉住粒子，其余把当前位置依序投影出每
+/// 个碰撞体（后一碰撞体吃前一碰撞体的结果），并在每个碰撞体后对帧首切向滑移施加
+/// Coulomb 摩擦（切向始终相对帧首 `prev` 测量，而非 running 位置）。镜像黄金
+/// `resolve_body_collisions_with_friction` 的逐碰撞体施加顺序；`friction` 在读入时
+/// `clamp` 到 `0..=1`，`0` 恰好退化为 frictionless 顺序投影。
+fn wesl_resolve_body_with_friction(
+    particles: &[ClothParticle],
+    prev_positions: &[[f32; 3]],
+    colliders: &[BodyCollider],
+    friction: f32,
+) -> Vec<[f32; 3]> {
+    let mu = friction.clamp(0.0, 1.0);
+    particles
+        .iter()
+        .enumerate()
+        .map(|(i, particle)| {
+            let mut pos = [particle.position.x, particle.position.y, particle.position.z];
+            if particle.inverse_mass <= 0.0 {
+                return pos;
+            }
+            let prev = prev_positions[i];
+            for collider in colliders {
+                let before = pos;
+                let projected = wesl_project_collider(collider, before);
+                let correction = [
+                    projected[0] - before[0],
+                    projected[1] - before[1],
+                    projected[2] - before[2],
+                ];
+                pos = wesl_damp_tangential_slip(prev, projected, correction, mu);
+            }
+            pos
+        })
+        .collect()
+}
+
+/// 逐位断言：WESL 摩擦路径转写与黄金 [`resolve_body_collisions_with_friction`] 的每个
+/// 粒子 `xyz` 比特完全相同，且逆质量（内核直通字段）绝不被摩擦 pass 改动。`prev` 的
+/// 长度必须等于 `particles`（host 恒上传等长 `prev_positions`，无 fallback 分支）。
+#[track_caller]
+fn assert_body_friction_bit_exact(
+    particles: &[ClothParticle],
+    prev: &[Vec3],
+    colliders: &[BodyCollider],
+    friction: f32,
+) {
+    assert_eq!(prev.len(), particles.len(), "测试须为每个粒子提供帧首位置");
+    let mut golden = particles.to_vec();
+    resolve_body_collisions_with_friction(&mut golden, prev, colliders, friction);
+    let prev_native: Vec<[f32; 3]> = prev.iter().map(|v| [v.x, v.y, v.z]).collect();
+    let wesl = wesl_resolve_body_with_friction(particles, &prev_native, colliders, friction);
+    assert_eq!(wesl.len(), golden.len());
+    for (i, (w, g)) in wesl.iter().zip(golden.iter()).enumerate() {
+        assert_eq!(
+            w[0].to_bits(),
+            g.position.x.to_bits(),
+            "particle {i}: x bits diverge: wesl={} golden={}",
+            w[0],
+            g.position.x
+        );
+        assert_eq!(
+            w[1].to_bits(),
+            g.position.y.to_bits(),
+            "particle {i}: y bits diverge: wesl={} golden={}",
+            w[1],
+            g.position.y
+        );
+        assert_eq!(
+            w[2].to_bits(),
+            g.position.z.to_bits(),
+            "particle {i}: z bits diverge: wesl={} golden={}",
+            w[2],
+            g.position.z
+        );
+        assert_eq!(
+            g.inverse_mass.to_bits(),
+            particles[i].inverse_mass.to_bits(),
+            "particle {i}: inverse mass 被摩擦 pass 改动了"
+        );
+    }
+}
+
+#[test]
+fn friction_dynamic_slide_shrinks_bit_for_bit() {
+    // 球内点被径向推出，帧首到投影存在明显切向滑移；中等 mu 走动态区（scale < 1）。
+    let particles = [free(0.3, 0.3, 0.0)];
+    let prev = [Vec3::new(0.5, 0.0, 0.0)];
+    let colliders = [BodyCollider::Sphere {
+        center: Vec3::new(0.0, 0.0, 0.0),
+        radius: 1.0,
+    }];
+    assert_body_friction_bit_exact(&particles, &prev, &colliders, 0.5);
+}
+
+#[test]
+fn friction_static_cone_locks_slide_bit_for_bit() {
+    // 深穿透 + 微小切向滑移 + mu=1：mu*depth >= ||t||，scale 饱和到 1，切向全消。
+    let particles = [free(0.0, 0.02, 0.0)];
+    let prev = [Vec3::new(0.01, 0.0, 0.0)];
+    let colliders = [BodyCollider::Sphere {
+        center: Vec3::new(0.0, 0.0, 0.0),
+        radius: 1.0,
+    }];
+    assert_body_friction_bit_exact(&particles, &prev, &colliders, 1.0);
+}
+
+#[test]
+fn friction_zero_collapses_to_frictionless_bit_for_bit() {
+    // mu == 0：黄金走 resolve_body_collisions，WESL damp 对每碰撞体早退，两者同为纯投影。
+    let particles = [free(0.3, 0.3, 0.1)];
+    let prev = [Vec3::new(0.5, -0.2, 0.0)];
+    let colliders = [BodyCollider::Sphere {
+        center: Vec3::new(0.0, 0.0, 0.0),
+        radius: 1.0,
+    }];
+    assert_body_friction_bit_exact(&particles, &prev, &colliders, 0.0);
+}
+
+#[test]
+fn friction_half_space_slide_bit_for_bit() {
+    // 半空间推出 + 平面内切向滑移。
+    let particles = [free(0.4, -0.9, 0.3)];
+    let prev = [Vec3::new(0.1, -0.4, 0.1)];
+    let colliders = [BodyCollider::HalfSpace {
+        normal: Vec3::new(0.0, 1.0, 0.0),
+        offset: 0.0,
+    }];
+    assert_body_friction_bit_exact(&particles, &prev, &colliders, 0.7);
+}
+
+#[test]
+fn friction_capsule_slide_bit_for_bit() {
+    // 胶囊侧面推出 + 切向滑移。
+    let particles = [free(0.0, 0.2, 0.1)];
+    let prev = [Vec3::new(0.2, 0.1, 0.0)];
+    let colliders = [BodyCollider::Capsule {
+        p0: Vec3::new(-1.0, 0.0, 0.0),
+        p1: Vec3::new(1.0, 0.0, 0.0),
+        radius: 0.5,
+    }];
+    assert_body_friction_bit_exact(&particles, &prev, &colliders, 0.6);
+}
+
+#[test]
+fn friction_pinned_particle_untouched_bit_for_bit() {
+    let particles = [ClothParticle::pinned(Vec3::new(0.0, 0.0, 0.0))];
+    let prev = [Vec3::new(0.3, 0.1, 0.0)];
+    let colliders = [BodyCollider::Sphere {
+        center: Vec3::new(0.0, 0.0, 0.0),
+        radius: 1.0,
+    }];
+    assert_body_friction_bit_exact(&particles, &prev, &colliders, 0.8);
+}
+
+#[test]
+fn friction_no_contact_is_noop_bit_for_bit() {
+    // 球外点：correction≈0（depth_sq <= EPS），damp 早退，摩擦不生效。
+    let particles = [free(3.0, 0.0, 0.0)];
+    let prev = [Vec3::new(2.5, 0.4, 0.0)];
+    let colliders = [BodyCollider::Sphere {
+        center: Vec3::new(0.0, 0.0, 0.0),
+        radius: 1.0,
+    }];
+    assert_body_friction_bit_exact(&particles, &prev, &colliders, 0.9);
+}
+
+#[test]
+fn friction_multi_collider_per_contact_bit_for_bit() {
+    // 多碰撞体：每个碰撞体后施加一次摩擦，切向始终相对帧首 prev 测量。
+    let particles = [free(0.0, 0.0, 0.0)];
+    let prev = [Vec3::new(0.2, -0.3, 0.1)];
+    let colliders = [
+        BodyCollider::Sphere {
+            center: Vec3::new(0.0, 0.0, 0.0),
+            radius: 1.0,
+        },
+        BodyCollider::HalfSpace {
+            normal: Vec3::new(0.0, 1.0, 0.0),
+            offset: 1.5,
+        },
+        BodyCollider::Capsule {
+            p0: Vec3::new(-2.0, 2.0, 0.0),
+            p1: Vec3::new(2.0, 2.0, 0.0),
+            radius: 0.4,
+        },
+    ];
+    assert_body_friction_bit_exact(&particles, &prev, &colliders, 0.5);
+}
+
+#[test]
+fn friction_jittered_particles_and_colliders_bit_for_bit() {
+    // 伪随机扫动：混合自由/钉住粒子、三类碰撞体、多档 mu，逐位闭合摩擦路径。
+    let mut state = 0x0bad_f00d_u32;
+    let mut next = || {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        ((state >> 8) as f32 / 16_777_216.0) * 2.0 - 1.0
+    };
+    for round in 0..48 {
+        let colliders = [
+            BodyCollider::Sphere {
+                center: Vec3::new(next() * 0.5, next() * 0.5, next() * 0.5),
+                radius: 0.3 + next().abs(),
+            },
+            BodyCollider::HalfSpace {
+                normal: Vec3::new(next(), 0.5 + next().abs(), next()),
+                offset: next() * 0.5,
+            },
+            BodyCollider::Capsule {
+                p0: Vec3::new(next(), next(), next()),
+                p1: Vec3::new(next(), next(), next()),
+                radius: 0.2 + next().abs() * 0.5,
+            },
+        ];
+        let mut particles = Vec::new();
+        let mut prev = Vec::new();
+        for i in 0..17 {
+            let pos = Vec3::new(next() * 2.0, next() * 2.0, next() * 2.0);
+            if i % 6 == 0 {
+                particles.push(ClothParticle::pinned(pos));
+            } else {
+                particles.push(free(pos.x, pos.y, pos.z));
+            }
+            prev.push(Vec3::new(next() * 2.0, next() * 2.0, next() * 2.0));
+        }
+        let mu = (round as f32 / 47.0).clamp(0.0, 1.0);
+        assert_body_friction_bit_exact(&particles, &prev, &colliders, mu);
     }
 }
