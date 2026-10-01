@@ -296,6 +296,27 @@ pub fn fold_plane(point: [f32; 3], normal: [f32; 3]) -> [f32; 3] {
     ]
 }
 
+/// Mirror fold across an arbitrary plane `dot(p, normal) = offset`, the
+/// offset-plane generalisation of [`fold_plane`] (which folds through the
+/// origin).
+///
+/// `normal` must be unit length; `offset` is the plane's signed distance from
+/// the origin along `normal`. Points already on the positive side
+/// (`dot(p, normal) >= offset`) pass through unchanged, while points on the
+/// negative side are reflected across the plane. The fold is a distance-
+/// preserving isometry, so modelling one half of a scene and folding reproduces
+/// its mirror image about any placed plane; applying it twice is idempotent.
+pub fn fold_plane_offset(point: [f32; 3], normal: [f32; 3], offset: f32) -> [f32; 3] {
+    let signed =
+        (point[0] * normal[0] + point[1] * normal[1] + point[2] * normal[2] - offset).min(0.0);
+    let k = 2.0 * signed;
+    [
+        point[0] - k * normal[0],
+        point[1] - k * normal[1],
+        point[2] - k * normal[2],
+    ]
+}
+
 /// Maps a three-dimensional query point onto the two-dimensional lathe plane of
 /// a solid of revolution about the `y` axis, offsetting the profile `offset`
 /// units out along the radius.
@@ -336,7 +357,7 @@ pub fn extrude(d2d: f32, z: f32, half_height: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        elongate, elongate_2d, elongate_2d_correction, elongate_correction, extrude, fold_plane, limited_repeat, mirror, mirror_repeat, onion,
+        elongate, elongate_2d, elongate_2d_correction, elongate_correction, extrude, fold_plane, fold_plane_offset, limited_repeat, mirror, mirror_repeat, onion,
         repeat, revolution, rotate_2d, rotate_axis, round_distance, scale_distance, scale_point,
         translate,
     };
@@ -556,6 +577,44 @@ mod tests {
         let n = [1.0, 0.0, 0.0];
         assert_eq!(fold_plane([-3.0, 2.0, 1.0], n), [3.0, 2.0, 1.0]);
         assert_eq!(fold_plane([3.0, 2.0, 1.0], n), [3.0, 2.0, 1.0]);
+    }
+
+    #[test]
+    fn fold_plane_offset_matches_fold_plane_at_zero_offset() {
+        // With offset 0 the generalisation must reduce to fold_plane exactly.
+        let n = [0.6, 0.8, 0.0];
+        for p in [[-1.0, -2.0, 0.5], [3.0, 1.0, -1.0], [0.0, 0.0, 0.0]] {
+            let a = fold_plane_offset(p, n, 0.0);
+            let b = fold_plane(p, n);
+            assert!((a[0] - b[0]).abs() < 1e-6 && (a[1] - b[1]).abs() < 1e-6 && (a[2] - b[2]).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn fold_plane_offset_reflects_across_an_offset_plane() {
+        // Plane dot(p, n) = offset with a unit diagonal normal.
+        let inv = 1.0f32 / 3.0f32.sqrt();
+        let n = [inv, inv, inv];
+        let offset = 1.5f32;
+        // A point on the positive side is left untouched.
+        let keep = [2.0, 2.0, 2.0];
+        let kf = fold_plane_offset(keep, n, offset);
+        assert!((kf[0] - keep[0]).abs() < 1e-6 && (kf[1] - keep[1]).abs() < 1e-6 && (kf[2] - keep[2]).abs() < 1e-6);
+        // A point on the negative side is mirrored: its signed distance to the
+        // plane flips sign while the tangential part is preserved.
+        let p = [-1.0, 0.5, -0.3];
+        let f = fold_plane_offset(p, n, offset);
+        let side_p = p[0] * n[0] + p[1] * n[1] + p[2] * n[2] - offset;
+        let side_f = f[0] * n[0] + f[1] * n[1] + f[2] * n[2] - offset;
+        assert!((side_f + side_p).abs() < 1e-6, "signed distance should negate");
+        for axis in 0..3 {
+            let tp = p[axis] - side_p * n[axis];
+            let tf = f[axis] - side_f * n[axis];
+            assert!((tp - tf).abs() < 1e-6, "tangential component preserved");
+        }
+        // Folding twice lands on the kept side and is then idempotent.
+        let f2 = fold_plane_offset(f, n, offset);
+        assert!((f2[0] - f[0]).abs() < 1e-6 && (f2[1] - f[1]).abs() < 1e-6 && (f2[2] - f[2]).abs() < 1e-6);
     }
 
     #[test]
