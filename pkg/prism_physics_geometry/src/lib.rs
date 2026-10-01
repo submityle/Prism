@@ -29,7 +29,7 @@ pub use broadphase::{generate_pairs, BroadPhasePair, PairChanges, PersistentBroa
 pub use bvh::DynamicBvh;
 pub use narrow::{
     closest_point_on_aabb, closest_point_on_segment, closest_point_on_triangle,
-    closest_points_segment_segment, gjk_intersect, ray_sphere, ray_triangle, RayTriangleHit,
-    SegmentClosest, SupportMap,
+    closest_points_segment_segment, gjk_intersect, ray_obb, ray_sphere, ray_triangle,
+    RayTriangleHit, SegmentClosest, SupportMap,
 };
 pub use proxy::ProxyId;

@@ -2,7 +2,7 @@
 
 use glam::Vec3;
 
-use crate::bounding::{BoundingSphere, Ray};
+use crate::bounding::{Aabb, BoundingSphere, Obb, Ray};
 
 /// Returns the nearest parametric distance `t` at which `ray` enters `sphere`,
 /// or [`None`] when there is no hit within `[0, ray.tmax]`.
@@ -84,12 +84,31 @@ pub fn ray_triangle(ray: &Ray, a: Vec3, b: Vec3, c: Vec3) -> Option<RayTriangleH
     }
 }
 
+/// Returns the entry parameter `t` at which `ray` enters `obb`, or [`None`] on
+/// a miss within `[0, ray.tmax]`.
+///
+/// The ray is rotated into the box's local frame (where the box is
+/// axis-aligned about the origin) and refined with the standard slab test, so
+/// the reported `t` is identical in world space because the transform is a
+/// rigid rotation that preserves distances. When the origin is already inside
+/// the box the returned `t` is `0.0`.
+pub fn ray_obb(ray: &Ray, obb: &Obb) -> Option<f32> {
+    // Conjugate of a unit quaternion is its inverse rotation.
+    let inv = obb.orientation.conjugate();
+    let local_origin = inv * (ray.origin - obb.center);
+    let local_dir = inv * ray.dir;
+    let local_ray = Ray::with_tmax(local_origin, local_dir, ray.tmax);
+    let local_box = Aabb::new(-obb.half_extents, obb.half_extents);
+    local_box.ray_hit(&local_ray)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ray_sphere, ray_triangle};
-    use crate::bounding::{BoundingSphere, Ray};
+    use super::{ray_obb, ray_sphere, ray_triangle};
+    use crate::bounding::{BoundingSphere, Obb, Ray};
     use approx::assert_relative_eq;
-    use glam::Vec3;
+    use core::f32::consts::FRAC_PI_4;
+    use glam::{Quat, Vec3};
 
     #[test]
     fn ray_sphere_front_hit() {
@@ -163,5 +182,41 @@ mod tests {
         // Triangle is behind the origin along +Z.
         let ray = Ray::new(Vec3::ZERO, Vec3::Z);
         assert!(ray_triangle(&ray, a, b, c).is_none());
+    }
+
+    #[test]
+    fn ray_obb_axis_aligned_hit() {
+        let obb = Obb::new(Vec3::new(0.0, 0.0, 5.0), Vec3::splat(1.0), Quat::IDENTITY);
+        let ray = Ray::new(Vec3::ZERO, Vec3::Z);
+        let t = ray_obb(&ray, &obb).expect("hit");
+        assert_relative_eq!(t, 4.0, epsilon = 1e-5);
+    }
+
+    #[test]
+    fn ray_obb_rotation_changes_hit() {
+        // A box spun 45° about Z presents a corner toward a diagonal ray.
+        let obb = Obb::new(
+            Vec3::new(0.0, 0.0, 5.0),
+            Vec3::splat(1.0),
+            Quat::from_rotation_z(FRAC_PI_4),
+        );
+        // Axis ray down +Z enters the rotated square face; near plane still z=4.
+        let ray = Ray::new(Vec3::ZERO, Vec3::Z);
+        let t = ray_obb(&ray, &obb).expect("hit");
+        assert_relative_eq!(t, 4.0, epsilon = 1e-5);
+    }
+
+    #[test]
+    fn ray_obb_miss_and_behind() {
+        let obb = Obb::new(Vec3::new(0.0, 0.0, 5.0), Vec3::splat(1.0), Quat::IDENTITY);
+        // Offset miss parallel to +Z.
+        let miss = Ray::new(Vec3::new(3.0, 0.0, 0.0), Vec3::Z);
+        assert!(ray_obb(&miss, &obb).is_none());
+        // Pointing away.
+        let away = Ray::new(Vec3::ZERO, Vec3::NEG_Z);
+        assert!(ray_obb(&away, &obb).is_none());
+        // Hit beyond tmax.
+        let short = Ray::with_tmax(Vec3::ZERO, Vec3::Z, 1.0);
+        assert!(ray_obb(&short, &obb).is_none());
     }
 }

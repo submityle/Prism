@@ -401,6 +401,19 @@
 //!   compare, not a tolerance) rather than within an fma bound (see
 //!   [`forward_scatter_power`]).
 //!
+//! * [`GpuHairMipForFootprint`] classifies
+//!   [`mip_for_footprint`](prism_render_architecture::hair::card_bake::mip_for_footprint),
+//!   the power-of-two card-chain mip level a baked footprint sits at — one
+//!   thread per [`MipQuery`] triple `(max_dim, base_texels, max_mip)` counts
+//!   how many times the footprint's longest side can be doubled before it
+//!   reaches `base_texels` with an explicit saturating-integer doubling loop
+//!   (mirroring `u32::saturating_mul(2)`) rather than `log2`, clamped to
+//!   `max_mip` and reporting `max_mip` for a zero footprint; because the trip
+//!   count is read per-thread the loop diverges between invocations, and
+//!   because the kernel is pure integer arithmetic with no float to round or
+//!   fuse it is checked **exactly** (direct integer compare, not a tolerance)
+//!   (see [`mip_for_footprint`]).
+//!
 //! # Portability
 //!
 //! The projection uses only `sqrt`, `min`, `max`, `clamp`, `dot` and
@@ -450,6 +463,7 @@ pub mod line_coverage;
 pub mod melanin;
 pub mod mesh_shell;
 pub mod mesh_shell_tapered;
+pub mod mip_for_footprint;
 pub mod raster;
 pub mod reactive_mask;
 pub mod resample;
@@ -499,6 +513,7 @@ pub use line_coverage::{reference_coverage, GpuHairLineCoverage};
 pub use melanin::{reference_absorption, GpuHairMelanin};
 pub use mesh_shell::{GpuMeshShell, GpuShellMesh, ShellStrandInput};
 pub use mesh_shell_tapered::{GpuMeshShellTapered, TaperedShellStrandInput};
+pub use mip_for_footprint::{reference_mip_for_footprint, GpuHairMipForFootprint, MipQuery};
 pub use raster::{path_code, GpuHairRaster, RasterQuery};
 pub use reactive_mask::{reference_reactivity, GpuHairReactiveMask};
 pub use resample::{reference_resample_groom, reference_resample_strand, GpuHairResample};

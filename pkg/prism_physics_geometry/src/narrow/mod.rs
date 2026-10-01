@@ -15,5 +15,5 @@ pub use closest_point::{
     closest_points_segment_segment, SegmentClosest,
 };
 pub use gjk::gjk_intersect;
-pub use ray_cast::{ray_sphere, ray_triangle, RayTriangleHit};
+pub use ray_cast::{ray_obb, ray_sphere, ray_triangle, RayTriangleHit};
 pub use support::SupportMap;
