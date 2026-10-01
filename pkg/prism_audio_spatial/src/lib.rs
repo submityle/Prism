@@ -92,6 +92,7 @@ pub mod spatial_impression;
 pub mod spatializer;
 pub mod speech_transmission_index;
 pub mod spread;
+pub mod stage_support;
 
 pub use air::{AirAbsorption, AirAbsorptionNode, AtmosphericConditions, absorption_db_per_metre};
 pub use ambisonics::{
@@ -193,3 +194,6 @@ pub use speech_transmission_index::{
     OCTAVE_CENTERS_HZ, OCTAVE_COUNT, SpeechTransmissionIndex, StiRating, speech_transmission_index,
 };
 pub use spread::{MAX_SPREAD_TAPS, Spread, SpreadParams, SpreadTap, compute_spread_gains, spread_taps};
+pub use stage_support::{
+    NO_SUPPORT_DB, StageSupport, stage_support_early_db, stage_support_late_db,
+};
