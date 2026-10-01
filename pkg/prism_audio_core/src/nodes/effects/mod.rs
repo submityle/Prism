@@ -77,6 +77,11 @@
 //!   metallic, clangorous timbres; distinct from
 //!   [`ring_modulator::RingModulatorNode`], which produces a symmetric
 //!   sideband pair rather than a one-sided shift.
+//! - [`pitch_delay::PitchDelayNode`] -- feedback echo whose recirculating
+//!   tail is transposed on every pass by an inner
+//!   [`pitch_shifter::PitchShifterNode`], so repeats spiral up or down in
+//!   pitch; distinct from the fixed-pitch [`delay::DelayNode`] and from the
+//!   diffuse-tank [`crate::nodes::reverb::shimmer::ShimmerReverb`].
 //! - [`pitch_shifter::PitchShifterNode`] -- phase-vocoder pitch shifter that
 //!   transposes every partial by one ratio (preserving harmonic ratios and
 //!   duration) via STFT analysis, instantaneous-frequency estimation, and
@@ -207,6 +212,7 @@ pub mod multi_tap_delay;
 pub mod parametric_eq;
 pub mod phaser;
 pub mod ping_pong_delay;
+pub mod pitch_delay;
 pub mod pitch_shifter;
 pub mod reverse_delay;
 pub mod ring_modulator;
@@ -261,6 +267,12 @@ pub use ping_pong_delay::{
     DEFAULT_LEFT_DELAY_MS, DEFAULT_PING_PONG_DAMPING, DEFAULT_PING_PONG_FEEDBACK,
     DEFAULT_PING_PONG_MIX, DEFAULT_RIGHT_DELAY_MS, MAX_PING_PONG_DELAY_MS,
     MAX_PING_PONG_FEEDBACK, PingPongDelayNode, PingPongDelayParams,
+};
+pub use pitch_delay::{
+    DEFAULT_PITCH_DELAY_FEEDBACK, DEFAULT_PITCH_DELAY_MIX, DEFAULT_PITCH_DELAY_MS,
+    DEFAULT_PITCH_DELAY_SEMITONES, MAX_PITCH_DELAY_FEEDBACK, MAX_PITCH_DELAY_MS,
+    MAX_PITCH_DELAY_SEMITONES, MIN_PITCH_DELAY_MS, PITCH_DELAY_FFT_SIZE, PitchDelayNode,
+    PitchDelayParams,
 };
 pub use pitch_shifter::{
     MAX_PITCH_RATIO, MIN_PITCH_RATIO, PitchShifterNode, PitchShifterParams, semitones_to_ratio,
