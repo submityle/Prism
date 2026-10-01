@@ -359,6 +359,14 @@
 //!   height and completes a right-handed orthonormal basis; unbound,
 //!   out-of-range or zero-area attachments resolve to the identity frame
 //!   exactly (see [`root_resolve`]).
+//! * [`GpuHairRtCurveAabb`] evaluates
+//!   [`lss_segment_aabb`](prism_render_architecture::hair::rt_curve::lss_segment_aabb),
+//!   emitting each `Linear Swept Spheres` strand segment's conservative
+//!   `axis-aligned` bounding box one thread per segment — it sanitises the
+//!   endpoints and radii, builds each centre-plus-or-minus-radius endpoint
+//!   box and unions the two per axis, the device-side `BLAS`-build input a
+//!   hardware ray-traced curve primitive registers; with no multiply to
+//!   fuse the twin is bit-exact with the golden (see [`rt_curve_aabb`]).
 //! * [`GpuHairRtProxy`] evaluates
 //!   [`resolve_rt_role`](prism_render_architecture::hair::rt_proxy::resolve_rt_role),
 //!   classifying each groom instance's ray-traced-reflection role one thread
@@ -563,6 +571,7 @@ pub mod rest_helix;
 pub mod ribbon;
 pub mod root_bind;
 pub mod root_resolve;
+pub mod rt_curve_aabb;
 pub mod rt_proxy;
 pub mod scatter_lod;
 pub mod sdf_collision;
@@ -625,6 +634,7 @@ pub use rest_helix::{GpuRestHelix, GpuRestHelixOut, GpuRestHelixStrand};
 pub use ribbon::{GpuRibbon, GpuRibbonMesh, RibbonStrandInput};
 pub use root_bind::GpuHairRootBind;
 pub use root_resolve::GpuHairRootResolve;
+pub use rt_curve_aabb::{reference_segment_aabb, GpuHairRtCurveAabb};
 pub use rt_proxy::{reference_rt_role, role_code, role_from_code, tier_code, GpuHairRtProxy};
 pub use scatter_lod::{reference_pdf, GpuHairScatterLod, PDF_PER_ELEMENT};
 pub use sdf_collision::GpuSdfCollider;
