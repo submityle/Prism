@@ -53,7 +53,10 @@ pub use texture_sample::{resolve_cone, resolve_differential, SampleRequest, Samp
 pub use texture_filter::{
     bilinear, filter_resolved, trilinear, wrap_texel, TexelAddr, TexelSource,
 };
-pub use texture_codec::{decode_bc1, decode_bc3, decode_bc4, decode_bc5, rgb565_to_rgb888};
+pub use texture_codec::{
+    decode_bc1, decode_bc3, decode_bc4, decode_bc5, rgb565_to_rgb888, BcFormat,
+    BcSourceError, BcTexelSource,
+};
 pub use validation::{validate_graph, MaterialValidationError};
 
 #[cfg(test)]
