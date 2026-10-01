@@ -148,11 +148,41 @@ pub fn mirror(point: [f32; 3], axes: [bool; 3]) -> [f32; 3] {
     folded
 }
 
+/// Instances the field across an infinite lattice like [`repeat`], but mirrors
+/// every other cell so adjacent copies meet as reflections instead of plain
+/// translations, giving a seamless kaleidoscopic tiling with no visible seam at
+/// the cell boundary.
+///
+/// Per axis the coordinate is folded to its cell-local offset
+/// `p - period * round(p / period)`; when the integer cell index is odd the
+/// local offset is negated, reflecting that cell. Because the fold is `C0`
+/// continuous across boundaries (both sides evaluate to the same magnitude at
+/// the midpoint), a primitive tiled this way joins its mirror image without a
+/// crack — the operator AAA content uses for brick courses, tread plates and
+/// other mirror-symmetric arrays. A zero-period axis passes through unchanged.
+pub fn mirror_repeat(point: [f32; 3], period: [f32; 3]) -> [f32; 3] {
+    let mut folded = point;
+    for axis in 0..3 {
+        if period[axis].abs() > f32::MIN_POSITIVE {
+            let cell = (point[axis] / period[axis]).round();
+            let mut local = point[axis] - period[axis] * cell;
+            // `cell` is integral; an odd index reflects the cell so neighbours
+            // mirror. `% 2.0 != 0.0` is exact for the integral values `round`
+            // produces.
+            if (cell % 2.0).abs() > 0.5 {
+                local = -local;
+            }
+            folded[axis] = local;
+        }
+    }
+    folded
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        elongate, limited_repeat, mirror, onion, repeat, round_distance, scale_distance, scale_point,
-        translate,
+        elongate, limited_repeat, mirror, mirror_repeat, onion, repeat, round_distance,
+        scale_distance, scale_point, translate,
     };
 
     #[test]
@@ -241,6 +271,37 @@ mod tests {
         // Axes 0 and 2: round(2.5) = 3 clamped to limit 1, so 5 - 2*1 = 3.
         assert!((folded[0] - 3.0).abs() < 1e-6);
         assert!((folded[2] - 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn mirror_repeat_reflects_odd_cells() {
+        let period = [1.0, 1.0, 1.0];
+        // Cell 0 (even): plain fold, 0.3 stays 0.3.
+        assert!((mirror_repeat([0.3, 0.0, 0.0], period)[0] - 0.3).abs() < 1e-6);
+        // Cell 1 (odd): local 1.4 - 1 = 0.4 is reflected to -0.4.
+        assert!((mirror_repeat([1.4, 0.0, 0.0], period)[0] - (-0.4)).abs() < 1e-6);
+        // Cell 3 (odd): local 2.6 - 3 = -0.4 is reflected to +0.4.
+        assert!((mirror_repeat([2.6, 0.0, 0.0], period)[0] - 0.4).abs() < 1e-6);
+        // Cell 2 (even): local 2.3 - 2 = 0.3 passes through.
+        assert!((mirror_repeat([2.3, 0.0, 0.0], period)[0] - 0.3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn mirror_repeat_is_continuous_across_the_seam() {
+        // Approaching the cell-0/cell-1 boundary from both sides yields the same
+        // folded coordinate, so a tiled primitive meets its mirror with no crack.
+        let period = [1.0, 1.0, 1.0];
+        let just_below = mirror_repeat([0.4999, 0.0, 0.0], period)[0];
+        let just_above = mirror_repeat([0.5001, 0.0, 0.0], period)[0];
+        assert!((just_below - just_above).abs() < 1e-3);
+    }
+
+    #[test]
+    fn mirror_repeat_leaves_zero_period_axes_untouched() {
+        let folded = mirror_repeat([1.4, 9.0, 1.4], [1.0, 0.0, 1.0]);
+        assert_eq!(folded[1], 9.0);
+        assert!((folded[0] - (-0.4)).abs() < 1e-6);
+        assert!((folded[2] - (-0.4)).abs() < 1e-6);
     }
 
     #[test]
