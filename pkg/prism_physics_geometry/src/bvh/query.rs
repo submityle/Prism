@@ -8,7 +8,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 
-use crate::bounding::{Aabb, Ray};
+use crate::bounding::{Aabb, BoundingSphere, Ray};
 
 use super::node::NULL;
 use super::tree::DynamicBvh;
@@ -42,6 +42,39 @@ impl DynamicBvh {
     pub fn query_aabb_collect(&self, aabb: Aabb) -> Vec<u64> {
         let mut out = Vec::new();
         self.query_aabb(aabb, &mut |data| out.push(data));
+        out
+    }
+
+    /// Visits the payload of every leaf whose fat box overlaps `sphere`.
+    ///
+    /// Like [`DynamicBvh::query_aabb`], this prunes subtrees whose enclosing
+    /// box does not reach the sphere, so the cost is output sensitive. The box
+    /// test uses the squared distance from the sphere center to the closest
+    /// point on each node box, so it is exact for the broad-phase boxes (no
+    /// enclosing-box slack beyond the stored fat margin).
+    pub fn query_sphere(&self, sphere: BoundingSphere, visit: &mut impl FnMut(u64)) {
+        if self.root == NULL {
+            return;
+        }
+        let mut stack = vec![self.root];
+        while let Some(index) = stack.pop() {
+            let node = self.nodes[index as usize];
+            if !sphere.intersects_aabb(&node.aabb) {
+                continue;
+            }
+            if node.is_leaf() {
+                visit(node.data);
+            } else {
+                stack.push(node.child1);
+                stack.push(node.child2);
+            }
+        }
+    }
+
+    /// Collects the payloads of all leaves whose fat box overlaps `sphere`.
+    pub fn query_sphere_collect(&self, sphere: BoundingSphere) -> Vec<u64> {
+        let mut out = Vec::new();
+        self.query_sphere(sphere, &mut |data| out.push(data));
         out
     }
 
@@ -165,7 +198,7 @@ impl PartialOrd for RayCandidate {
 mod tests {
     use alloc::vec::Vec;
 
-    use crate::bounding::{Aabb, Ray};
+    use crate::bounding::{Aabb, BoundingSphere, Ray};
     use crate::bvh::DynamicBvh;
     use glam::Vec3;
 
@@ -252,5 +285,33 @@ mod tests {
             true
         });
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn query_sphere_selects_overlapping_leaves() {
+        let bvh = spaced_tree();
+        // Sphere centered on box 1 (x = 5..6) with a small radius hits only it.
+        let s = BoundingSphere::new(Vec3::new(5.5, 0.0, 0.0), 0.25);
+        let mut hits = bvh.query_sphere_collect(s);
+        hits.sort_unstable();
+        assert_eq!(hits, [1]);
+    }
+
+    #[test]
+    fn query_sphere_spanning_reaches_multiple() {
+        let bvh = spaced_tree();
+        // Large sphere at the origin reaches boxes 0 and 1 but not box 2 at
+        // x = 10 (nearest fat face x = 9.9 is 9.9 away > radius 6.0).
+        let s = BoundingSphere::new(Vec3::ZERO, 6.0);
+        let mut hits = bvh.query_sphere_collect(s);
+        hits.sort_unstable();
+        assert_eq!(hits, [0, 1]);
+    }
+
+    #[test]
+    fn query_sphere_empty_tree_yields_nothing() {
+        let bvh = DynamicBvh::new();
+        let s = BoundingSphere::new(Vec3::ZERO, 100.0);
+        assert!(bvh.query_sphere_collect(s).is_empty());
     }
 }
