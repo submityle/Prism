@@ -700,6 +700,7 @@ pub mod strand_keep_ratio;
 pub mod strand_metrics;
 pub mod stratified_allocation;
 pub mod stratified_weights;
+pub mod transfer_frame;
 pub mod transition;
 pub mod vbd_solver;
 pub mod voxel_density;
@@ -776,6 +777,7 @@ pub use strand_keep_ratio::{reference_strand_keep_ratio, GpuHairStrandKeepRatio}
 pub use strand_metrics::{GpuStrandMetric, GpuStrandMetrics};
 pub use stratified_allocation::{reference_stratified_allocation, GpuHairStratifiedAllocation};
 pub use stratified_weights::{reference_stratified_weights, GpuHairStratifiedWeights};
+pub use transfer_frame::{reference_transfer_frame, GpuHairTransferFrame};
 pub use transition::GpuHairTransition;
 pub use vbd_solver::GpuVbdSolver;
 pub use voxel_density::GpuHairVoxelDensity;
