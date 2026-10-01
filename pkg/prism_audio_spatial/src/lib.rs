@@ -77,6 +77,7 @@ pub mod reflection_directivity;
 pub mod reverb_zones;
 pub mod reverberant_field;
 pub mod room_acoustics;
+pub mod room_clarity;
 pub mod room_modes;
 pub mod rooms;
 pub mod scattering;
@@ -142,6 +143,12 @@ pub use room_acoustics::{
     CRITICAL_DISTANCE_CONSTANT, RoomAcoustics, SABINE_CONSTANT, SCHROEDER_CONSTANT,
     critical_distance, eyring_rt60, mean_free_path, millington_sette_rt60, sabine_rt60,
     schroeder_frequency,
+};
+pub use room_clarity::{
+    EARLY_LATE_SPLIT_50_MS, EARLY_LATE_SPLIT_80_MS, EDT_LOWER_DB, EDT_UPPER_DB, MAX_CLARITY_DB,
+    RoomClarity, T20_LOWER_DB, T20_UPPER_DB, T30_LOWER_DB, T30_UPPER_DB, center_time_s, clarity_db,
+    definition, early_decay_time_s, energy_decay_curve, reverberation_time_t20_s,
+    reverberation_time_t30_s,
 };
 pub use room_modes::{MAX_ROOM_MODES, ModeKind, RoomMode, RoomModes};
 pub use rooms::{
