@@ -27,5 +27,8 @@ pub mod proxy;
 pub use bounding::{Aabb, BoundingSphere, Frustum, Plane, Ray};
 pub use broadphase::{generate_pairs, BroadPhasePair, PairChanges, PersistentBroadPhase};
 pub use bvh::DynamicBvh;
-pub use narrow::{ray_sphere, ray_triangle, RayTriangleHit};
+pub use narrow::{
+    closest_point_on_aabb, closest_point_on_segment, closest_point_on_triangle,
+    closest_points_segment_segment, ray_sphere, ray_triangle, RayTriangleHit, SegmentClosest,
+};
 pub use proxy::ProxyId;

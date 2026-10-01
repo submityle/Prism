@@ -5,6 +5,11 @@
 //! They are engine-agnostic implementations of publicly documented algorithms
 //! and contain no Unreal Engine source or derived code.
 
+mod closest_point;
 mod ray_cast;
 
+pub use closest_point::{
+    closest_point_on_aabb, closest_point_on_segment, closest_point_on_triangle,
+    closest_points_segment_segment, SegmentClosest,
+};
 pub use ray_cast::{ray_sphere, ray_triangle, RayTriangleHit};
