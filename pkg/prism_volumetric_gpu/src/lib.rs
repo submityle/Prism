@@ -55,6 +55,7 @@
 //! Engine source or derived code.
 #![forbid(unsafe_code)]
 
+pub mod aabb_transform;
 pub mod active_pixel;
 pub mod adaptive_step;
 pub mod advect_semi_lagrangian;
@@ -198,6 +199,7 @@ pub mod volume_scene_shadow_cast;
 pub mod vorticity_confinement;
 pub mod worley;
 
+pub use aabb_transform::{AabbTransformQuery, AabbTransformResult, GpuAabbTransform};
 pub use active_pixel::{ActivePixelQuery, GpuActivePixel};
 pub use adaptive_step::{AdaptiveStepQuery, GpuAdaptiveStep};
 pub use advect_semi_lagrangian::{GpuAdvectSemiLagrangian, WeatherAdvectSample};
