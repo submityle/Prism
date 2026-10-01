@@ -39,6 +39,9 @@
 //! - [`exciter::ExciterNode`] — high-frequency harmonic exciter / aural
 //!   enhancer: a highpass-isolated band is `tanh`-shaped to synthesize added
 //!   odd / even harmonics that are mixed back for presence and air.
+//! - [`tape::TapeNode`] — analog tape-machine emulation: `tanh` drive / bias
+//!   saturation feeding a wow / flutter modulated fractional delay and a
+//!   one-pole high-frequency rolloff for vintage warmth and pitch wobble.
 
 pub mod auto_wah;
 pub mod bitcrusher;
@@ -51,6 +54,7 @@ pub mod parametric_eq;
 pub mod phaser;
 pub mod ring_modulator;
 pub mod stereo_width;
+pub mod tape;
 pub mod tremolo;
 pub mod vibrato;
 pub mod waveshaper;
@@ -66,6 +70,7 @@ pub use parametric_eq::{EqBand, ParametricEqNode};
 pub use phaser::{PhaserNode, PhaserParams};
 pub use ring_modulator::{RingModulatorNode, RingModulatorParams};
 pub use stereo_width::{MAX_WIDTH, StereoWidthNode, StereoWidthParams};
+pub use tape::{Tape, TapeNode, TapeParams};
 pub use tremolo::{TremoloMode, TremoloNode, TremoloParams};
 pub use vibrato::{VibratoNode, VibratoParams};
 pub use waveshaper::{Oversample, WaveshaperNode};
