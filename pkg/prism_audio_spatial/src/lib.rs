@@ -60,6 +60,7 @@ pub mod direct_to_reverberant_ratio;
 pub mod doppler;
 pub mod early_reflections;
 pub mod echo_criterion;
+pub mod echo_density;
 pub mod geometry;
 pub mod ground_effect;
 pub mod hoa;
@@ -121,6 +122,10 @@ pub use early_reflections::{
 pub use echo_criterion::{
     EchoCriterion, EchoMode, MUSIC_EXPONENT, MUSIC_THRESHOLD, MUSIC_WINDOW_MS, SPEECH_EXPONENT,
     SPEECH_THRESHOLD, SPEECH_WINDOW_MS, echo_criterion,
+};
+pub use echo_density::{
+    ECHO_DENSITY_WINDOW_MS, EchoDensityProfile, GAUSSIAN_EXCEEDANCE, MIXING_THRESHOLD,
+    NO_MIXING_TIME_MS, mixing_time_ms, normalized_echo_density,
 };
 pub use geometry::{Emitter, Listener, LocalSource};
 pub use ground_effect::GroundEffect;
