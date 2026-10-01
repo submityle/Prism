@@ -562,7 +562,8 @@
 //!   [`sdf_primitives::capped_cylinder`], [`sdf_primitives::capped_cone`],
 //!   [`sdf_primitives::hex_prism`], [`sdf_primitives::box_frame`],
 //!   [`sdf_primitives::octahedron`], [`sdf_primitives::pyramid`],
-//!   [`sdf_primitives::link`], [`sdf_primitives::cut_sphere`],
+//!   [`sdf_primitives::link`], [`sdf_primitives::cut_hollow_sphere`],
+//!   [`sdf_primitives::cut_sphere`],
 //!   [`sdf_primitives::rhombus`], [`sdf_primitives::vesica`],
 //!   [`sdf_primitives::capped_torus`], [`sdf_primitives::triangular_prism`],
 //!   [`sdf_primitives::solid_angle`], [`sdf_primitives::round_cone_sdf`]) with exact
@@ -918,7 +919,8 @@ pub use sdf_domain::{
 };
 pub use mesh_sdf_thickness::sdf_thickness;
 pub use sdf_primitives::{
-    box_frame, box_sdf, capped_cone, capped_cylinder, capped_torus, capsule, cut_sphere,
+    box_frame, box_sdf, capped_cone, capped_cylinder, capped_torus, capsule, cut_hollow_sphere,
+    cut_sphere,
     ellipsoid_sdf,
     hex_prism, link, octahedron, plane, pyramid, rhombus, round_box, round_cone_sdf,
     solid_angle, sphere, torus, triangular_prism, vesica,

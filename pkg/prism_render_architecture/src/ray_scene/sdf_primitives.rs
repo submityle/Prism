@@ -574,10 +574,34 @@ pub fn round_cone_sdf(point: [f32; 3], r1: f32, r2: f32, h: f32) -> f32 {
     }
 }
 
+/// Signed distance from `point` to a cut hollow sphere: the thin spherical
+/// cap of the sphere of the given `radius` (centred at the origin) that lies
+/// below the plane `y = cut_height`, inflated to a shell of half-`thickness`.
+///
+/// Follows Inigo Quilez's exact `sdCutHollowSphere`. The rim radius where the
+/// cut plane meets the sphere is `rim = sqrt(radius^2 - cut_height^2)` (guarded
+/// against a cut above the pole). In meridian coordinates `(radial distance
+/// from the y axis, height)`, points past the rim's radial cone take the exact
+/// distance to the rim circle while the rest take the distance to the sphere
+/// surface; subtracting `thickness` turns the zero-thickness cap into a shell.
+/// Only `sqrt` is used, so evaluation is transcendental-free.
+pub fn cut_hollow_sphere(point: [f32; 3], radius: f32, cut_height: f32, thickness: f32) -> f32 {
+    // Radius of the circular rim carved by the plane y = cut_height.
+    let rim = (radius * radius - cut_height * cut_height).max(0.0).sqrt();
+    let q = [length2([point[0], point[2]]), point[1]];
+    // Past the rim's radial cone the rim circle governs; otherwise the sphere.
+    let surface = if cut_height * q[0] < rim * q[1] {
+        length2([q[0] - rim, q[1] - cut_height])
+    } else {
+        (length2(q) - radius).abs()
+    };
+    surface - thickness
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        box_frame, box_sdf, capped_cone, capped_cylinder, capped_torus, capsule, cut_sphere,
+        box_frame, box_sdf, capped_cone, capped_cylinder, capped_torus, capsule, cut_hollow_sphere, cut_sphere,
         ellipsoid_sdf, hex_prism, length2, link, octahedron, plane, pyramid, rhombus, round_box,
         round_cone_sdf, solid_angle, sphere, torus, triangular_prism, vesica,
     };
@@ -1049,5 +1073,28 @@ mod tests {
         assert!(round_cone_sdf([0.5, 1.0, 0.0], r, r, 2.0).abs() < 1e-6);
         // Mid-height interior point.
         assert!((round_cone_sdf([0.2, 1.0, 0.0], r, r, 2.0) - (-0.3)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cut_hollow_sphere_shell_centre_on_the_cap() {
+        let (r, h, t) = (1.0f32, 0.5f32, 0.1f32);
+        let rim = (0.75f32).sqrt();
+        // Bottom pole lies on the cap arc: the shell centre is at -thickness.
+        assert!((cut_hollow_sphere([0.0, -1.0, 0.0], r, h, t) - (-0.1)).abs() < 1e-6);
+        // The rim point itself is also on the arc.
+        assert!((cut_hollow_sphere([rim, 0.5, 0.0], r, h, t) - (-0.1)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cut_hollow_sphere_rim_and_sphere_branches() {
+        let (r, h, t) = (1.0f32, 0.5f32, 0.1f32);
+        // Above the cut plane on the axis: nearest feature is the rim circle.
+        let expected_rim = (3.0f32).sqrt() - t;
+        assert!((cut_hollow_sphere([0.0, 2.0, 0.0], r, h, t) - expected_rim).abs() < 1e-6);
+        // Radially outside at rim height: the sphere surface governs.
+        let expected_sphere = (4.25f32).sqrt() - 1.0 - t;
+        assert!((cut_hollow_sphere([2.0, 0.5, 0.0], r, h, t) - expected_sphere).abs() < 1e-6);
+        // Inside the sphere, below the cap on the axis: sphere-surface distance.
+        assert!((cut_hollow_sphere([0.0, -0.6, 0.0], r, h, t) - 0.3).abs() < 1e-6);
     }
 }
