@@ -10,7 +10,7 @@
 //! recorded workgroup count. Unlike cloth, water carries no per-color immediate:
 //! every water kernel reads its whole domain from the uniform counts.
 //!
-//! Readiness is all-or-nothing: if any of the sixteen pipelines is still
+//! Readiness is all-or-nothing: if any of the water pipelines is still
 //! compiling this frame the node records nothing, rather than running a partial
 //! solve that would leave a body in a half-stepped, non-deterministic state.
 
@@ -56,6 +56,15 @@ fn bind_group_for<'a>(
         WaterKernel::UnderwaterVolume => &groups.underwater,
         WaterKernel::WetnessStep => &groups.wetness,
         WaterKernel::CouplingReadback => &groups.coupling,
+        // Face-centered staggered `MAC` chain: scatter + normalize share the
+        // `P2G` group; divergence, pressure and project share the solve group;
+        // the gather binds its own `G2P` group. The grouping mirrors
+        // `WaterComputePipelines::layout` exactly.
+        WaterKernel::FlipMacP2G | WaterKernel::FlipMacFacesNormalize => &groups.mac_p2g,
+        WaterKernel::FlipMacDivergence
+        | WaterKernel::FlipMacPressure
+        | WaterKernel::FlipMacProject => &groups.mac_solve,
+        WaterKernel::FlipMacG2P => &groups.mac_g2p,
         // The spectral evolve/assemble and the three butterfly passes are only
         // ever recorded through the `SpectrumIfft` expansion below (which binds
         // the per-pass ping-pong groups directly), never as a top-level planned
@@ -84,7 +93,7 @@ pub(crate) fn dispatch_water(
 
     // All-or-nothing readiness: bail before opening a pass if any kernel is
     // still compiling, so a frame never records a partial (non-deterministic)
-    // solve. Every body shares these sixteen pipelines.
+    // solve. Every body shares the same water pipeline set.
     for kernel in WaterKernel::ALL {
         if cache
             .get_compute_pipeline(pipelines.pipeline(kernel))
@@ -265,6 +274,14 @@ mod tests {
             WaterKernel::UnderwaterVolume => 9,
             WaterKernel::WetnessStep => 10,
             WaterKernel::CouplingReadback => 11,
+            // The face-centered staggered `MAC` chain groups mirror
+            // `bind_group_for`: scatter + normalize, the three solve passes, and
+            // the standalone gather.
+            WaterKernel::FlipMacP2G | WaterKernel::FlipMacFacesNormalize => 13,
+            WaterKernel::FlipMacDivergence
+            | WaterKernel::FlipMacPressure
+            | WaterKernel::FlipMacProject => 14,
+            WaterKernel::FlipMacG2P => 15,
             // All five spectral/butterfly kernels bind the shared spectrum_fft
             // group in `bind_group_for`, so the mirror collapses them together.
             WaterKernel::SpectrumEvolve

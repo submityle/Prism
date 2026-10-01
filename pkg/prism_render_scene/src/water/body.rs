@@ -28,7 +28,9 @@ use bevy_ecs::component::Component;
 use bevy_ecs::resource::Resource;
 
 use prism_render_architecture::water::gpu::buffers::WaterBufferCounts;
-use prism_render_architecture::water::gpu::pipeline::{extract, WaterGpuExtract, WaterPasses};
+use prism_render_architecture::water::gpu::pipeline::{
+    extract, mac_face_count, WaterGpuExtract, WaterPasses,
+};
 
 use super::abi::{
     GpuFlipParticle, GpuFlipSimParams, GpuFlipSurfaceParams, GpuGerstnerWave, GpuPbfParams,
@@ -194,6 +196,13 @@ impl WaterBody {
     /// [`extract`] so the schedule can never contain an empty active loop.
     #[must_use]
     pub(crate) fn as_extract(&self) -> WaterGpuExtract {
+        // The staggered-`MAC` projection dispatches over velocity *faces*, not
+        // cells, so the schedule's `DispatchDomain::Faces` loop count comes from
+        // the per-axis face sum of the live `FLIP`/`APIC` grid. Derived from the
+        // same authored resolution the collocated path uses, so enabling
+        // `passes.flip_mac` needs no second sizing input.
+        let [nx, ny, nz, _] = self.flip_params.dim;
+        let face_count = mac_face_count(nx, ny, nz);
         extract(
             self.counts,
             self.passes,
@@ -203,6 +212,7 @@ impl WaterBody {
             self.spectrum_texels,
             self.grid2d_texels,
             self.grid3d_voxels,
+            face_count,
             self.particle_count,
             self.screen_pixels,
         )

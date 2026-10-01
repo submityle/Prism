@@ -52,15 +52,22 @@ use prism_render_architecture::water::gpu::buffers::{
     PBF_PARTICLE_STRIDE,
 };
 use prism_render_architecture::water::gpu::fft_pass_ping_pong;
+use prism_render_architecture::water::gpu::pipeline::mac_face_count;
 
 use super::abi::{
-    GpuFlipParticle, GpuFlipSimParams, GpuFlipSurfaceParams, GpuGerstnerWave, GpuPbfParams,
-    GpuSprayParams, GpuSprayParticle, GpuSpraySource, GpuSpraySpawnHeader, GpuWaterCausticsParams,
-    GpuWaterCouplingParams, GpuWaterCouplingQuery, GpuWaterDispersionParams, GpuWaterFoamParams,
-    GpuWaterGerstnerParams, GpuWaterSpectrumParams, GpuWaterSweParams, GpuWaterUnderwaterParams,
-    GpuWaterWaterlineParams, GpuWaterWetnessParams,
+    GpuFlipParticle, GpuFlipSimParams, GpuFlipSurfaceParams, GpuGerstnerWave, GpuMacParams,
+    GpuPbfParams, GpuSprayParams, GpuSprayParticle, GpuSpraySource, GpuSpraySpawnHeader,
+    GpuWaterCausticsParams, GpuWaterCouplingParams, GpuWaterCouplingQuery,
+    GpuWaterDispersionParams, GpuWaterFoamParams, GpuWaterGerstnerParams, GpuWaterSpectrumParams,
+    GpuWaterSweParams, GpuWaterUnderwaterParams, GpuWaterWaterlineParams, GpuWaterWetnessParams,
 };
 use super::pipeline::WaterComputePipelines;
+
+/// Fixed-point atomic slots per staggered-`MAC` velocity face in the `P2G`
+/// scatter accumulator: `[momentum, mass]` packed at `face_flat * 2 + {0, 1}`,
+/// matching `water_flip_mac_p2g.wesl`. The scatter buffer therefore holds two
+/// `u32` atomics per face.
+pub(crate) const MAC_FACE_SCATTER_SLOTS: u32 = 2;
 
 /// Byte stride of one Shallow-Water working scalar (`h`, `u`, `v` are unpacked
 /// into separate `array<f32>` working buffers by `water_surface.wesl`, distinct
@@ -267,6 +274,17 @@ pub(crate) struct WaterBodyGpuBuffers {
     pub(crate) flip_surface_thickness: Buffer,
     pub(crate) flip_surface_normal: TextureView,
     pub(crate) flip_surface_params: Buffer,
+    // Face-centered staggered `MAC` projection buffers (shared `FLIP`/`APIC`
+    // grid): the packed `[u | v | w]` faces, the `P2G` momentum/mass atomic
+    // scatter, a pre-projection snapshot for the `G2P` `FLIP` delta, and the
+    // compact single-sided divergence / `Jacobi` pressure ping-pong.
+    pub(crate) mac_faces: Buffer,
+    pub(crate) mac_face_scatter: Buffer,
+    pub(crate) mac_faces_preproj: Buffer,
+    pub(crate) mac_divergence: Buffer,
+    pub(crate) mac_pressure_in: Buffer,
+    pub(crate) mac_pressure_out: Buffer,
+    pub(crate) mac_params: Buffer,
     // PBF buffers.
     pub(crate) pbf_positions_in: Buffer,
     pub(crate) pbf_positions_out: Buffer,
@@ -464,6 +482,34 @@ impl WaterBodyGpuBuffers {
             &upload.flip_surface_params,
         );
 
+        // ---- Face-centered staggered MAC projection ----
+        // The staggered grid stores one velocity component per cell face, so the
+        // face total differs from the cell total: `mac_face_count` sums the
+        // `(nx+1)·ny·nz` u-faces, `nx·(ny+1)·nz` v-faces and `nx·ny·(nz+1)`
+        // w-faces. The faces buffer and its pre-projection snapshot hold one
+        // `f32` per face; the `P2G` scatter holds `MAC_FACE_SCATTER_SLOTS`
+        // (`[momentum, mass]`) atomics per face. Divergence and the pressure
+        // ping-pong hold one `f32` per cell, exactly like the collocated path.
+        let [mac_nx, mac_ny, mac_nz, _] = upload.flip_params.dim;
+        let mac_faces_total = mac_face_count(mac_nx, mac_ny, mac_nz);
+        let mac_face_bytes = u64::from(mac_faces_total) * u64::from(GRID_SCALAR_STRIDE);
+        let mac_scatter_bytes = u64::from(mac_faces_total)
+            * u64::from(MAC_FACE_SCATTER_SLOTS)
+            * u64::from(GRID_SCALAR_STRIDE);
+        let mac_faces = zeroed_storage(device, "prism water mac faces", mac_face_bytes);
+        let mac_face_scatter =
+            zeroed_storage(device, "prism water mac face scatter", mac_scatter_bytes);
+        let mac_faces_preproj =
+            zeroed_storage(device, "prism water mac faces preproj", mac_face_bytes);
+        let mac_divergence = zeroed_storage(device, "prism water mac divergence", grid_bytes);
+        let mac_pressure_in = zeroed_storage(device, "prism water mac pressure in", grid_bytes);
+        let mac_pressure_out = zeroed_storage(device, "prism water mac pressure out", grid_bytes);
+        let mac_params = uniform(
+            device,
+            "prism water mac params",
+            &GpuMacParams::from_flip(&upload.flip_params),
+        );
+
         // ---- PBF ----
         let pbf_positions_in =
             readable_storage(device, "prism water pbf positions in", upload.pbf_positions);
@@ -659,6 +705,13 @@ impl WaterBodyGpuBuffers {
             flip_surface_thickness,
             flip_surface_normal,
             flip_surface_params,
+            mac_faces,
+            mac_face_scatter,
+            mac_faces_preproj,
+            mac_divergence,
+            mac_pressure_in,
+            mac_pressure_out,
+            mac_params,
             pbf_positions_in,
             pbf_positions_out,
             pbf_hash,
@@ -750,6 +803,17 @@ pub(crate) struct WaterBodyBindGroups {
     pub(crate) wetness: BindGroup,
     /// `@group(4)` for `coupling_readback`.
     pub(crate) coupling: BindGroup,
+    /// `@group(0)` for `water_flip_mac_p2g` + `water_flip_mac_faces_normalize`
+    /// (particles, the momentum/mass atomic scatter, the packed faces and the
+    /// shared `FLIP` uniform).
+    pub(crate) mac_p2g: BindGroup,
+    /// `@group(0)` for the three `water_flip_mac.wesl` solve passes
+    /// (`mac_divergence` + `mac_pressure` + `mac_project`): faces, divergence,
+    /// the pressure ping-pong and the `MAC` uniform.
+    pub(crate) mac_solve: BindGroup,
+    /// `@group(0)` for `water_flip_mac_g2p` (particles, the projected faces, the
+    /// pre-projection snapshot and the shared `FLIP` uniform).
+    pub(crate) mac_g2p: BindGroup,
     /// `@group(0)` for `spectrum_evolve` + `spectrum_assemble` (thirteen
     /// bindings), one bind group per cascade in cascade order. The recorder
     /// binds `spectrum_fft[c]` so each inverse `FFT` transforms atlas tile `c`.
@@ -912,6 +976,45 @@ impl WaterBodyBindGroups {
                 buffers.coupling_params.as_entire_binding(),
             )),
         );
+        // Face-centered staggered `MAC` projection groups. `P2G` scatters the
+        // particle momentum/mass into the atomic accumulator and normalizes into
+        // the packed faces; the solve measures compact divergence, relaxes the
+        // `Jacobi` pressure ping-pong and subtracts the compact gradient in
+        // place; `G2P` gathers the projected faces back, differencing against the
+        // pre-projection snapshot for the `FLIP` delta. All three reuse the live
+        // `FLIP`/`APIC` particle pool and uniform so the staggered chain shares
+        // one authored grid with the collocated path it supersedes.
+        let mac_p2g = device.create_bind_group(
+            "prism water mac p2g",
+            &pipelines.mac_p2g_layout,
+            &BindGroupEntries::sequential((
+                buffers.flip_particles.as_entire_binding(),
+                buffers.mac_face_scatter.as_entire_binding(),
+                buffers.mac_faces.as_entire_binding(),
+                buffers.flip_params.as_entire_binding(),
+            )),
+        );
+        let mac_solve = device.create_bind_group(
+            "prism water mac solve",
+            &pipelines.mac_solve_layout,
+            &BindGroupEntries::sequential((
+                buffers.mac_faces.as_entire_binding(),
+                buffers.mac_divergence.as_entire_binding(),
+                buffers.mac_pressure_in.as_entire_binding(),
+                buffers.mac_pressure_out.as_entire_binding(),
+                buffers.mac_params.as_entire_binding(),
+            )),
+        );
+        let mac_g2p = device.create_bind_group(
+            "prism water mac g2p",
+            &pipelines.mac_g2p_layout,
+            &BindGroupEntries::sequential((
+                buffers.flip_particles.as_entire_binding(),
+                buffers.mac_faces.as_entire_binding(),
+                buffers.mac_faces_preproj.as_entire_binding(),
+                buffers.flip_params.as_entire_binding(),
+            )),
+        );
         // One spectral bind group per cascade: the concatenated `h0` pools and
         // shared ping-pong grids stay bound, and `@binding(2)` selects the
         // cascade's own spectral uniform so the evolve reads its `h0_offset`
@@ -994,6 +1097,9 @@ impl WaterBodyBindGroups {
             underwater,
             wetness,
             coupling,
+            mac_p2g,
+            mac_solve,
+            mac_g2p,
             spectrum_fft,
             butterfly_passes,
             ocean_n: buffers.ocean_n,

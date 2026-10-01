@@ -200,6 +200,42 @@ pub(crate) struct GpuFlipSimParams {
     pub cell_count: u32,
 }
 
+/// Face-centered (staggered `MAC`) projection scalars. Byte-compatible with
+/// `MacParams` in `water_flip_mac.wesl`: a `vec4<u32>` grid resolution row
+/// (`w` unused by the shader) plus `inv_dx`, `dx`, `jacobi_omega` and one pad
+/// word, rounded to the 32-byte uniform stride. Derived from the live
+/// [`GpuFlipSimParams`] so the `MAC` solve shares the one authored grid.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq)]
+pub(crate) struct GpuMacParams {
+    /// Grid resolution in cells along x, y, z (`w` unused).
+    pub dim: [u32; 4],
+    /// Reciprocal cell edge length `1 / dx`.
+    pub inv_dx: f32,
+    /// `MAC` cell edge length (`> 0`).
+    pub dx: f32,
+    /// Damped-`Jacobi` relaxation factor `omega` in `(0, 1]`.
+    pub jacobi_omega: f32,
+    /// Trailing pad to the 16-byte uniform row.
+    pub _pad: f32,
+}
+
+impl GpuMacParams {
+    /// Derives the staggered-`MAC` uniform from the live `FLIP`/`APIC` grid so
+    /// the face-centered projection reuses the exact authored resolution,
+    /// spacing and relaxation factor without a second upload path.
+    #[must_use]
+    pub(crate) fn from_flip(flip: &GpuFlipSimParams) -> Self {
+        Self {
+            dim: flip.dim,
+            inv_dx: flip.inv_dx,
+            dx: flip.dx,
+            jacobi_omega: flip.jacobi_omega,
+            _pad: 0.0,
+        }
+    }
+}
+
 /// Screen-space reconstruction scalars. Byte-compatible with
 /// `FlipSurfaceParams` in `water_flip.wesl` (`van der Laan` smooth + normal),
 /// padded to the 32-byte uniform stride.
@@ -681,6 +717,14 @@ mod tests {
     fn flip_sim_params_is_uniform_stride() {
         assert_eq!(size_of::<GpuFlipSimParams>(), 64);
         assert_eq!(size_of::<GpuFlipSimParams>() % 16, 0);
+    }
+
+    /// The staggered-`MAC` projection uniform is one `vec4<u32>` row plus four
+    /// scalars (32 bytes), matching `MacParams` in `water_flip_mac.wesl`.
+    #[test]
+    fn mac_params_is_uniform_stride() {
+        assert_eq!(size_of::<GpuMacParams>(), 32);
+        assert_eq!(size_of::<GpuMacParams>() % 16, 0);
     }
 
     /// The `FLIP` surface uniform rounds up to a 32-byte uniform stride.

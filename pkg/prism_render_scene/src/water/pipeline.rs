@@ -110,6 +110,16 @@ pub(crate) struct WaterComputePipelines {
     pub(crate) spectrum_fft_layout: BindGroupLayout,
     /// `@group(0)` for the three `water_butterfly.wesl` passes (three bindings).
     pub(crate) butterfly_layout: BindGroupLayout,
+    /// `@group(0)` for `water_flip_mac_p2g.wesl` (`water_flip_mac_p2g` +
+    /// `water_flip_mac_faces_normalize`, four bindings including the `atomic`
+    /// face-scatter accumulator).
+    pub(crate) mac_p2g_layout: BindGroupLayout,
+    /// `@group(0)` for the three `water_flip_mac.wesl` passes (`mac_divergence`
+    /// + `mac_pressure` + `mac_project`, five bindings).
+    pub(crate) mac_solve_layout: BindGroupLayout,
+    /// `@group(0)` for `water_flip_mac_g2p.wesl` (`water_flip_mac_g2p`, four
+    /// bindings: the projected and pre-projection face snapshots).
+    pub(crate) mac_g2p_layout: BindGroupLayout,
 
     /// `water_spectrum_ifft`: evolve and inverse-`FFT` the wave spectrum.
     pub(crate) spectrum_ifft: CachedComputePipelineId,
@@ -125,6 +135,19 @@ pub(crate) struct WaterComputePipelines {
     pub(crate) flip_pressure_solve: CachedComputePipelineId,
     /// `water_flip_g2p`: `FLIP`/`APIC` grid-to-particle gather.
     pub(crate) flip_g2p: CachedComputePipelineId,
+    /// `water_flip_mac_p2g`: face-centered `MAC` particle-to-grid momentum sum.
+    pub(crate) mac_p2g: CachedComputePipelineId,
+    /// `water_flip_mac_faces_normalize`: divide the summed `MAC` momentum by
+    /// weight to recover face-centered velocities.
+    pub(crate) mac_faces_normalize: CachedComputePipelineId,
+    /// `mac_divergence`: compact single-sided divergence of the `MAC` faces.
+    pub(crate) mac_divergence: CachedComputePipelineId,
+    /// `mac_pressure`: one `Jacobi` pressure-relaxation iteration.
+    pub(crate) mac_pressure: CachedComputePipelineId,
+    /// `mac_project`: subtract the compact pressure gradient from the faces.
+    pub(crate) mac_project: CachedComputePipelineId,
+    /// `water_flip_mac_g2p`: face-centered `MAC` grid-to-particle gather.
+    pub(crate) mac_g2p: CachedComputePipelineId,
     /// `water_surface_reconstruct`: build a renderable surface from particles.
     pub(crate) surface_reconstruct: CachedComputePipelineId,
     /// `water_caustics_project`: project caustic intensity onto receivers.
@@ -171,6 +194,12 @@ impl WaterComputePipelines {
             WaterKernel::FlipP2G => self.flip_p2g,
             WaterKernel::FlipPressureSolve => self.flip_pressure_solve,
             WaterKernel::FlipG2P => self.flip_g2p,
+            WaterKernel::FlipMacP2G => self.mac_p2g,
+            WaterKernel::FlipMacFacesNormalize => self.mac_faces_normalize,
+            WaterKernel::FlipMacDivergence => self.mac_divergence,
+            WaterKernel::FlipMacPressure => self.mac_pressure,
+            WaterKernel::FlipMacProject => self.mac_project,
+            WaterKernel::FlipMacG2P => self.mac_g2p,
             WaterKernel::SurfaceReconstruct => self.surface_reconstruct,
             WaterKernel::CausticsProject => self.caustics_project,
             WaterKernel::FoamAdvect => self.foam_advect,
@@ -201,6 +230,11 @@ impl WaterComputePipelines {
             | WaterKernel::FlipPressureSolve
             | WaterKernel::FlipG2P
             | WaterKernel::SurfaceReconstruct => &self.flip_layout,
+            WaterKernel::FlipMacP2G | WaterKernel::FlipMacFacesNormalize => &self.mac_p2g_layout,
+            WaterKernel::FlipMacDivergence
+            | WaterKernel::FlipMacPressure
+            | WaterKernel::FlipMacProject => &self.mac_solve_layout,
+            WaterKernel::FlipMacG2P => &self.mac_g2p_layout,
             WaterKernel::PbfDensitySolve => &self.pbf_layout,
             WaterKernel::SprayEmit => &self.spray_layout,
             WaterKernel::SweStep => &self.swe_layout,
@@ -242,6 +276,12 @@ pub(crate) fn wesl_group(kernel: WaterKernel) -> u32 {
         | WaterKernel::FlipP2G
         | WaterKernel::FlipPressureSolve
         | WaterKernel::FlipG2P
+        | WaterKernel::FlipMacP2G
+        | WaterKernel::FlipMacFacesNormalize
+        | WaterKernel::FlipMacDivergence
+        | WaterKernel::FlipMacPressure
+        | WaterKernel::FlipMacProject
+        | WaterKernel::FlipMacG2P
         | WaterKernel::SurfaceReconstruct
         | WaterKernel::CausticsProject
         | WaterKernel::SprayEmit
@@ -294,6 +334,54 @@ fn flip_layout_entries() -> BindGroupLayoutEntries<9> {
             storage_buffer_read_only_sized(false, None),
             storage_buffer_read_only_sized(false, None),
             texture_storage_2d(TextureFormat::Rgba16Float, StorageTextureAccess::WriteOnly),
+            uniform_buffer_sized(false, None),
+        ),
+    )
+}
+
+/// Builds the `water_flip_mac_p2g.wesl` `@group(0)` layout entries (four
+/// bindings): the read-only particle pool, the read-write `atomic` face-scatter
+/// accumulator, the read-write face-velocity buffer, and the sim uniform. Both
+/// `water_flip_mac_p2g` and `water_flip_mac_faces_normalize` bind this shape.
+fn mac_p2g_layout_entries() -> BindGroupLayoutEntries<4> {
+    BindGroupLayoutEntries::sequential(
+        ShaderStages::COMPUTE,
+        (
+            storage_buffer_read_only_sized(false, None),
+            storage_buffer_sized(false, None),
+            storage_buffer_sized(false, None),
+            uniform_buffer_sized(false, None),
+        ),
+    )
+}
+
+/// Builds the `water_flip_mac.wesl` `@group(0)` layout entries (five bindings):
+/// the read-write `MAC` faces, the read-write divergence scratch, the read-only
+/// pressure ping and read-write pressure pong, and the `MAC` uniform. The
+/// `mac_divergence`, `mac_pressure`, and `mac_project` passes all bind this.
+fn mac_solve_layout_entries() -> BindGroupLayoutEntries<5> {
+    BindGroupLayoutEntries::sequential(
+        ShaderStages::COMPUTE,
+        (
+            storage_buffer_sized(false, None),
+            storage_buffer_sized(false, None),
+            storage_buffer_read_only_sized(false, None),
+            storage_buffer_sized(false, None),
+            uniform_buffer_sized(false, None),
+        ),
+    )
+}
+
+/// Builds the `water_flip_mac_g2p.wesl` `@group(0)` layout entries (four
+/// bindings): the read-write particle pool, the read-only projected faces, the
+/// read-only pre-projection faces (for the `FLIP` delta), and the sim uniform.
+fn mac_g2p_layout_entries() -> BindGroupLayoutEntries<4> {
+    BindGroupLayoutEntries::sequential(
+        ShaderStages::COMPUTE,
+        (
+            storage_buffer_sized(false, None),
+            storage_buffer_read_only_sized(false, None),
+            storage_buffer_read_only_sized(false, None),
             uniform_buffer_sized(false, None),
         ),
     )
@@ -527,6 +615,9 @@ pub(crate) fn init_water_compute_pipelines(
     let coupling_entries = coupling_layout_entries();
     let spectrum_fft_entries = spectrum_fft_layout_entries();
     let butterfly_entries = butterfly_layout_entries();
+    let mac_p2g_entries = mac_p2g_layout_entries();
+    let mac_solve_entries = mac_solve_layout_entries();
+    let mac_g2p_entries = mac_g2p_layout_entries();
 
     let ocean_descriptor = BindGroupLayoutDescriptor::new("prism water ocean", &ocean_entries);
     let flip_descriptor = BindGroupLayoutDescriptor::new("prism water flip", &flip_entries);
@@ -550,6 +641,12 @@ pub(crate) fn init_water_compute_pipelines(
         BindGroupLayoutDescriptor::new("prism water spectrum fft", &spectrum_fft_entries);
     let butterfly_descriptor =
         BindGroupLayoutDescriptor::new("prism water butterfly", &butterfly_entries);
+    let mac_p2g_descriptor =
+        BindGroupLayoutDescriptor::new("prism water mac p2g", &mac_p2g_entries);
+    let mac_solve_descriptor =
+        BindGroupLayoutDescriptor::new("prism water mac solve", &mac_solve_entries);
+    let mac_g2p_descriptor =
+        BindGroupLayoutDescriptor::new("prism water mac g2p", &mac_g2p_entries);
 
     // Empty placeholder layout padding the lower, unused group slots of the
     // `@group(1..=4)` passes so the `wgpu` pipeline layout stays contiguous; the
@@ -577,6 +674,10 @@ pub(crate) fn init_water_compute_pipelines(
         device.create_bind_group_layout("prism water spectrum fft", &spectrum_fft_entries);
     let butterfly_layout =
         device.create_bind_group_layout("prism water butterfly", &butterfly_entries);
+    let mac_p2g_layout = device.create_bind_group_layout("prism water mac p2g", &mac_p2g_entries);
+    let mac_solve_layout =
+        device.create_bind_group_layout("prism water mac solve", &mac_solve_entries);
+    let mac_g2p_layout = device.create_bind_group_layout("prism water mac g2p", &mac_g2p_entries);
 
     let ocean_shader: Handle<Shader> =
         load_embedded_asset!(asset_server.as_ref(), "../shaders/water_ocean.wesl");
@@ -592,6 +693,12 @@ pub(crate) fn init_water_compute_pipelines(
         load_embedded_asset!(asset_server.as_ref(), "../shaders/water_spectrum_fft.wesl");
     let butterfly_shader: Handle<Shader> =
         load_embedded_asset!(asset_server.as_ref(), "../shaders/water_butterfly.wesl");
+    let mac_p2g_shader: Handle<Shader> =
+        load_embedded_asset!(asset_server.as_ref(), "../shaders/water_flip_mac_p2g.wesl");
+    let mac_shader: Handle<Shader> =
+        load_embedded_asset!(asset_server.as_ref(), "../shaders/water_flip_mac.wesl");
+    let mac_g2p_shader: Handle<Shader> =
+        load_embedded_asset!(asset_server.as_ref(), "../shaders/water_flip_mac_g2p.wesl");
 
     // Every water pipeline binds the layout(s) matching its shader's declared
     // `@group(N)` index; passes on `@group(1..=4)` prepend empty placeholder
@@ -748,6 +855,42 @@ pub(crate) fn init_water_compute_pipelines(
         &butterfly_shader,
         WaterKernel::FftNormalize,
     );
+    let mac_p2g = queue(
+        "prism water mac p2g",
+        vec![mac_p2g_descriptor.clone()],
+        &mac_p2g_shader,
+        WaterKernel::FlipMacP2G,
+    );
+    let mac_faces_normalize = queue(
+        "prism water mac faces normalize",
+        vec![mac_p2g_descriptor.clone()],
+        &mac_p2g_shader,
+        WaterKernel::FlipMacFacesNormalize,
+    );
+    let mac_divergence = queue(
+        "prism water mac divergence",
+        vec![mac_solve_descriptor.clone()],
+        &mac_shader,
+        WaterKernel::FlipMacDivergence,
+    );
+    let mac_pressure = queue(
+        "prism water mac pressure",
+        vec![mac_solve_descriptor.clone()],
+        &mac_shader,
+        WaterKernel::FlipMacPressure,
+    );
+    let mac_project = queue(
+        "prism water mac project",
+        vec![mac_solve_descriptor.clone()],
+        &mac_shader,
+        WaterKernel::FlipMacProject,
+    );
+    let mac_g2p = queue(
+        "prism water mac g2p",
+        vec![mac_g2p_descriptor.clone()],
+        &mac_g2p_shader,
+        WaterKernel::FlipMacG2P,
+    );
 
     commands.insert_resource(WaterComputePipelines {
         ocean_layout,
@@ -780,11 +923,20 @@ pub(crate) fn init_water_compute_pipelines(
         coupling_readback,
         spectrum_fft_layout,
         butterfly_layout,
+        mac_p2g_layout,
+        mac_solve_layout,
+        mac_g2p_layout,
         spectrum_evolve,
         spectrum_assemble,
         fft_bit_reverse,
         fft_stage,
         fft_normalize,
+        mac_p2g,
+        mac_faces_normalize,
+        mac_divergence,
+        mac_pressure,
+        mac_project,
+        mac_g2p,
     });
 }
 
@@ -843,6 +995,9 @@ mod tests {
         assert_eq!(coupling_layout_entries().len(), 3);
         assert_eq!(spectrum_fft_layout_entries().len(), 13);
         assert_eq!(butterfly_layout_entries().len(), 3);
+        assert_eq!(mac_p2g_layout_entries().len(), 4);
+        assert_eq!(mac_solve_layout_entries().len(), 5);
+        assert_eq!(mac_g2p_layout_entries().len(), 4);
 
         for kernel in WaterKernel::ALL {
             assert!(
