@@ -16,6 +16,11 @@
 //!   error-feedback noise shaping, decorrelating the quantization error into a
 //!   steady, perceptually weighted noise floor instead of signal-correlated
 //!   distortion.
+//! - [`mastering_chain::MasteringChainNode`] -- a fixed-order mastering chain
+//!   that orchestrates the parametric EQ, compressor, limiter, and dither
+//!   nodes in the canonical delivery signal order, with per-stage bypass
+//!   switches. It implements no DSP of its own and simply sequences the
+//!   existing processors.
 //!
 //! # Provenance
 //!
@@ -35,8 +40,10 @@
 //! degrades a signal for character rather than minimising audible loss.
 
 pub mod dither;
+pub mod mastering_chain;
 
 pub use dither::{
     DEFAULT_DITHER_BITS, Dither, DitherNode, DitherParams, DitherType, MAX_DITHER_BITS,
     MIN_DITHER_BITS, NoiseShaping,
 };
+pub use mastering_chain::{MasteringChainNode, MasteringChainParams};

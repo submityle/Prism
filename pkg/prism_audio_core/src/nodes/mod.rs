@@ -83,7 +83,7 @@ pub use effects::{
 pub use gain::GainNode;
 pub use mastering::{
     DEFAULT_DITHER_BITS, Dither, DitherNode, DitherParams, DitherType, MAX_DITHER_BITS,
-    MIN_DITHER_BITS, NoiseShaping,
+    MIN_DITHER_BITS, MasteringChainNode, MasteringChainParams, NoiseShaping,
 };
 pub use mix::SumNode;
 pub use pan::StereoPanNode;
