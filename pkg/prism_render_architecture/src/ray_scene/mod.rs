@@ -321,6 +321,12 @@
 //!   drive subdivision through one path, with normals re-derived from the
 //!   displaced field and crack-free welding inherited unchanged
 //!   ([`displacement_tessellation::DisplacementTessellation`]).
+//! - [`patch_grid`] — heterogeneous-tolerance crack-free patch grid: a
+//!   `cols × rows` grid of sub-patches over one surface where each cell carries
+//!   its own refinement tolerance ([`patch_grid::PatchGrid`]). Interior edges
+//!   resolve to the **max** of both adjacent cells' demands, so varying detail
+//!   across the surface (fine over a face, coarse elsewhere) stays watertight —
+//!   the spatially-varying LOD authoring path on top of [`adaptive_tessellation`].
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -468,6 +474,7 @@ pub mod surface_group;
 pub mod patch_tessellation;
 pub mod adaptive_tessellation;
 pub mod displacement_tessellation;
+pub mod patch_grid;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -566,6 +573,7 @@ pub use surface_group::{SurfaceGroup, SurfaceGroupBvh, SurfaceGroupError, Surfac
 pub use patch_tessellation::{Edge, PatchTessellation, MAX_FACTOR};
 pub use adaptive_tessellation::AdaptiveTessellation;
 pub use displacement_tessellation::{DisplacedField, DisplacementTessellation};
+pub use patch_grid::PatchGrid;
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
 pub use obb::{Obb, ObbBvh, ObbHit};
