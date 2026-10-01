@@ -22,6 +22,7 @@ mod occlusion;
 mod occlusion_resolve;
 mod output;
 mod two_phase;
+mod two_phase_resolve;
 mod view;
 mod work;
 
@@ -45,6 +46,7 @@ pub use occlusion::{HzbPhase, HzbTest};
 pub use occlusion_resolve::resolve_occluded_set;
 pub use output::{BufferRange, ViewVisibilityOutput, VisibilityFrame};
 pub use two_phase::{classify_early_hzb, resolve_current_hzb};
+pub use two_phase_resolve::{resolve_two_phase_occlusion, TwoPhaseHzbInput, TwoPhaseOcclusion};
 pub use view::{GpuViewRecord, HistoryPolicy, ViewFlags, ViewHandle};
 pub use work::{GpuRenderWorkItem, RenderPassMask, VisibilityStageMask, WorkSortKey};
 

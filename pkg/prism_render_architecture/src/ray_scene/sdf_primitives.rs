@@ -32,6 +32,26 @@ fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
+/// Squared Euclidean length of a 3-vector (`dot(v, v)`), used by the
+/// nearest-feature comparisons in the exact triangle solver.
+fn dot2_3(v: [f32; 3]) -> f32 {
+    v[0] * v[0] + v[1] * v[1] + v[2] * v[2]
+}
+
+/// Component-wise difference `a - b` of two 3-vectors.
+fn sub3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+/// Cross product `a x b` of two 3-vectors.
+fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
 /// Signed distance from `point` to a sphere of `radius` centred at the origin.
 ///
 /// Negative inside, positive outside; simply the point's distance from the
@@ -717,12 +737,75 @@ pub fn infinite_cylinder(point: [f32; 3], axis_xz: [f32; 2], radius: f32) -> f32
     length2([point[0] - axis_xz[0], point[2] - axis_xz[1]]) - radius
 }
 
+/// Unsigned distance from `point` to the triangle with vertices `a`, `b`, `c`
+/// in arbitrary 3D orientation.
+///
+/// A triangle is a 2-manifold with no interior, so there is no "inside": the
+/// distance is non-negative everywhere and zero exactly on the (closed)
+/// triangular patch. This is the exact Euclidean distance to the nearest point
+/// of the triangle, the atom from which arbitrary triangle *soups* and thin
+/// planar features are assembled before the mesh baker takes over.
+///
+/// This is Inigo Quilez's exact `udTriangle`: the three edge normals (each the
+/// cross of an edge with the face normal `nor = cross(b-a, a-c)`) partition
+/// space into the region whose nearest feature is the triangle *interior* (the
+/// perpendicular foot lands inside all three edges, so `sign` of the three edge
+/// tests sums to the in-face value) versus the region governed by an *edge or
+/// vertex*. In the face region the distance is the perpendicular projection
+/// onto the plane; otherwise it is the minimum over the three edges of the
+/// distance to the clamped foot of the perpendicular, which collapses to a
+/// vertex when the clamp saturates. Built from `dot`, `cross`, `clamp`,
+/// `sign`, `min`, and a single final `sqrt`, so it stays transcendental-free.
+///
+/// Degenerate (collinear / zero-area) triangles make `nor` vanish; the face
+/// branch divides by `dot2(nor)`, so callers must pass a non-degenerate
+/// triangle for a meaningful face-region distance (the edge branch stays
+/// well-defined regardless).
+pub fn triangle_sdf(point: [f32; 3], a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> f32 {
+    let ba = sub3(b, a);
+    let pa = sub3(point, a);
+    let cb = sub3(c, b);
+    let pb = sub3(point, b);
+    let ac = sub3(a, c);
+    let pc = sub3(point, c);
+    let nor = cross(ba, ac);
+
+    // Edge-region test: each term is +-1 depending on which side of the edge's
+    // in-plane normal the query falls. A sum below 2 means the perpendicular
+    // foot escapes the triangle through at least one edge, so an edge/vertex
+    // governs; otherwise the face interior governs.
+    let edge_region = dot(cross(ba, nor), pa).signum()
+        + dot(cross(cb, nor), pb).signum()
+        + dot(cross(ac, nor), pc).signum()
+        < 2.0;
+
+    let squared = if edge_region {
+        let e0 = {
+            let t = (dot(ba, pa) / dot2_3(ba)).clamp(0.0, 1.0);
+            dot2_3(sub3([ba[0] * t, ba[1] * t, ba[2] * t], pa))
+        };
+        let e1 = {
+            let t = (dot(cb, pb) / dot2_3(cb)).clamp(0.0, 1.0);
+            dot2_3(sub3([cb[0] * t, cb[1] * t, cb[2] * t], pb))
+        };
+        let e2 = {
+            let t = (dot(ac, pc) / dot2_3(ac)).clamp(0.0, 1.0);
+            dot2_3(sub3([ac[0] * t, ac[1] * t, ac[2] * t], pc))
+        };
+        e0.min(e1).min(e2)
+    } else {
+        let np = dot(nor, pa);
+        np * np / dot2_3(nor)
+    };
+    squared.sqrt()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         box_frame, box_sdf, capped_cone, capped_cylinder, capped_torus, capsule, cone_sdf, cut_hollow_sphere, cut_sphere,
         death_star, ellipsoid_sdf, hex_prism, infinite_cylinder, length2, line_sdf, link, octahedron, plane, pyramid, rhombus, round_box,
-        round_cone_sdf, rounded_cylinder, solid_angle, sphere, torus, triangular_prism, vesica,
+        round_cone_sdf, rounded_cylinder, solid_angle, sphere, torus, triangle_sdf, triangular_prism, vesica,
     };
 
     #[test]
@@ -1126,6 +1209,91 @@ mod tests {
             let reference = tri_edge_distance(p, 1.0);
             assert!(
                 (got - reference).abs() < 1e-5,
+                "point {p:?}: got {got}, reference {reference}"
+            );
+        }
+    }
+
+    // Brute-force reference: minimum distance from `p` to a dense sampling of
+    // the triangle surface via barycentric coordinates. Converges to the exact
+    // distance as the sampling tightens.
+    fn tri_brute_force(p: [f32; 3], a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> f32 {
+        const N: usize = 400;
+        let mut best = f32::INFINITY;
+        for i in 0..=N {
+            let u = i as f32 / N as f32;
+            let jmax = N - i;
+            for j in 0..=jmax {
+                let v = j as f32 / N as f32;
+                let w = 1.0 - u - v;
+                let q = [
+                    a[0] * u + b[0] * v + c[0] * w,
+                    a[1] * u + b[1] * v + c[1] * w,
+                    a[2] * u + b[2] * v + c[2] * w,
+                ];
+                let d = ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2) + (p[2] - q[2]).powi(2)).sqrt();
+                if d < best {
+                    best = d;
+                }
+            }
+        }
+        best
+    }
+
+    #[test]
+    fn triangle_zero_on_surface_and_vertices() {
+        let a = [0.0, 0.0, 0.0];
+        let b = [2.0, 0.0, 0.0];
+        let c = [0.0, 2.0, 0.0];
+        // Vertices and centroid lie on the patch: distance zero.
+        assert!(triangle_sdf(a, a, b, c).abs() < 1e-6);
+        assert!(triangle_sdf(b, a, b, c).abs() < 1e-6);
+        assert!(triangle_sdf(c, a, b, c).abs() < 1e-6);
+        let centroid = [(a[0] + b[0] + c[0]) / 3.0, (a[1] + b[1] + c[1]) / 3.0, 0.0];
+        assert!(triangle_sdf(centroid, a, b, c).abs() < 1e-6);
+    }
+
+    #[test]
+    fn triangle_face_region_is_perpendicular_offset() {
+        // Lift the centroid straight off the xy-plane: nearest feature is the
+        // face interior, so the distance is the pure perpendicular height.
+        let a = [0.0, 0.0, 0.0];
+        let b = [2.0, 0.0, 0.0];
+        let c = [0.0, 2.0, 0.0];
+        let over_centroid = [2.0 / 3.0, 2.0 / 3.0, 1.5];
+        assert!((triangle_sdf(over_centroid, a, b, c) - 1.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn triangle_vertex_region_is_vertex_distance() {
+        // Past the a-vertex along -x/-y: the perpendicular feet all clamp to the
+        // a vertex, so the distance is the straight line to it.
+        let a = [0.0, 0.0, 0.0];
+        let b = [2.0, 0.0, 0.0];
+        let c = [0.0, 2.0, 0.0];
+        let p = [-1.0, -1.0, 0.0];
+        assert!((triangle_sdf(p, a, b, c) - length2([1.0, 1.0])).abs() < 1e-6);
+    }
+
+    #[test]
+    fn triangle_matches_brute_force_general_orientation() {
+        // A tilted, off-origin triangle exercises both the face and edge
+        // branches against the dense surface sampling.
+        let a = [0.3, -0.4, 0.1];
+        let b = [1.7, 0.2, -0.6];
+        let c = [-0.5, 1.3, 0.8];
+        for &p in &[
+            [0.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0],
+            [-1.0, 0.5, -0.5],
+            [0.6, 0.1, 0.2],
+            [2.5, 2.5, -1.0],
+            [0.4, 1.0, 2.0],
+        ] {
+            let got = triangle_sdf(p, a, b, c);
+            let reference = tri_brute_force(p, a, b, c);
+            assert!(
+                (got - reference).abs() < 2e-3,
                 "point {p:?}: got {got}, reference {reference}"
             );
         }
