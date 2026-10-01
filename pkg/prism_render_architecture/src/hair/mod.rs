@@ -109,6 +109,7 @@ pub mod transition;
 pub mod vbd_pass_buffers;
 pub mod wetness;
 pub mod wind;
+pub mod wind_field;
 
 use crate::deformation::DeformationHandle;
 
