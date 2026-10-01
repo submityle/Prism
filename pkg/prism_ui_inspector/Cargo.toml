@@ -1,0 +1,18 @@
+[package]
+name = "prism_ui_inspector"
+version = "0.1.0"
+edition = "2024"
+description = "Loom inspector: query/filter the element tree, address nodes by path, and aggregate backend-op traces into a performance report. Contains no Unreal Engine source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_ui = { path = "../prism_ui" }
+prism_ui_devtools = { path = "../prism_ui_devtools" }
+
+[features]
+default = ["std"]
+std = ["prism_ui/std", "prism_ui_devtools/std"]
+
+[lints]
+workspace = true

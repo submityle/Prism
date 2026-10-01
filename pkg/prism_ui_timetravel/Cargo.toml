@@ -1,0 +1,19 @@
+[package]
+name = "prism_ui_timetravel"
+version = "0.1.0"
+edition = "2024"
+description = "Loom time-travel debugging: record a timeline of UI frames (tree snapshots + op traces), navigate backward/forward, jump, and replay. Contains no Unreal Engine source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_ui = { path = "../prism_ui" }
+prism_ui_devtools = { path = "../prism_ui_devtools" }
+prism_ui_snapshot = { path = "../prism_ui_snapshot" }
+
+[features]
+default = ["std"]
+std = ["prism_ui/std", "prism_ui_devtools/std", "prism_ui_snapshot/std"]
+
+[lints]
+workspace = true
