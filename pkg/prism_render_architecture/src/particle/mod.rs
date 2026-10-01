@@ -278,6 +278,7 @@ pub mod temporal_dither;
 pub mod temporal_reprojection;
 pub mod tetrahedron_volume;
 pub mod tile_light_cull;
+pub mod tiled_depth_sort;
 pub mod time_control;
 pub mod tonemap;
 pub mod tri_tri_intersect;
