@@ -35,6 +35,22 @@
 use super::super::config::RigidError;
 use super::spherical::SphericalJoint;
 
+/// The two body indices a joint couples, in `(a, b)` order.
+///
+/// Colouring needs nothing from a joint but its endpoints, so every joint type
+/// (spherical, revolute, ...) implements this one method and shares the single
+/// generic [`JointColouring::build`].
+pub trait JointBodies {
+    /// The joint's two coupled body indices, `(a, b)`.
+    fn bodies(&self) -> (u32, u32);
+}
+
+impl JointBodies for SphericalJoint {
+    fn bodies(&self) -> (u32, u32) {
+        (self.body_a, self.body_b)
+    }
+}
+
 /// The maximum number of batches the first-fit packing supports.
 ///
 /// Each body's used-batch set is a single `u64` bitmask, so the ceiling is
@@ -70,8 +86,8 @@ impl JointColouring {
     /// Returns [`RigidError::InconsistentState`] if a joint references a body
     /// `>= movable.len()`, or [`RigidError::TooManyJointBatches`] if the graph
     /// needs more than [`MAX_JOINT_BATCHES`] batches.
-    pub fn build(
-        joints: &[SphericalJoint],
+    pub fn build<J: JointBodies>(
+        joints: &[J],
         movable: &[bool],
     ) -> Result<JointColouring, RigidError> {
         let body_count = movable.len();
@@ -81,7 +97,8 @@ impl JointColouring {
         let mut batch_count = 0u32;
 
         for (ji, joint) in joints.iter().enumerate() {
-            let (a, b) = (joint.body_a as usize, joint.body_b as usize);
+            let (ea, eb) = joint.bodies();
+            let (a, b) = (ea as usize, eb as usize);
             if a >= body_count || b >= body_count {
                 return Err(RigidError::InconsistentState {
                     reason: "joint references a body outside the state",

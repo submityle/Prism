@@ -36,20 +36,14 @@
 //! inertia and quaternion kinematics of Baraff & Witkin. No Unreal Engine source
 //! or derived code.
 
-use glam::{Quat, Vec3};
-
 use super::super::body::RigidBodyState;
 use super::super::config::{IntegratorConfig, RigidError};
 use super::super::contact_cpu::movable_mask;
 use super::coloring::JointColouring;
 use super::config::JointSolverConfig;
+use super::math::{apply_rotation_delta, rotate, world_inv_inertia_apply, EPSILON};
 use super::spherical::SphericalJoint;
-
-/// Length below which a separation vector or an effective mass is treated as
-/// degenerate and the correction is skipped. Matches the `EPSILON` the rigid
-/// integrator and contact solver use, so the three stages share one notion of
-/// "numerically zero".
-pub(crate) const EPSILON: f32 = 1.192_092_9e-7;
+use super::stepper::{predict, recover_velocities, snapshot};
 
 /// Advances `state` by `dt` under the spherical joints in `joints`.
 ///
@@ -127,65 +121,6 @@ pub fn cpu_solve_joints_spherical(
     Ok(())
 }
 
-/// Copies the current positions and orientations into the per-substep snapshot
-/// buffers the velocity recovery differences against.
-fn snapshot(state: &RigidBodyState, prev_positions: &mut [Vec3], prev_orientations: &mut [Quat]) {
-    prev_positions.copy_from_slice(&state.positions);
-    prev_orientations.copy_from_slice(&state.orientations);
-}
-
-/// Predicts every body forward one substep: semi-implicit Euler with linear
-/// damping for translation, and the quaternion kinematic equation with angular
-/// damping for rotation. Static (zero inverse mass) bodies keep their position;
-/// non-rotating (zero inverse inertia) bodies keep their orientation.
-fn predict(
-    state: &mut RigidBodyState,
-    gravity: Vec3,
-    linear_damping_scale: f32,
-    angular_damping_scale: f32,
-    h: f32,
-) {
-    for i in 0..state.len() {
-        if state.inverse_masses[i] > 0.0 {
-            let velocity = (state.linear_velocities[i] + gravity * h) * linear_damping_scale;
-            state.linear_velocities[i] = velocity;
-            state.positions[i] += velocity * h;
-        }
-        let omega = state.angular_velocities[i] * angular_damping_scale;
-        state.angular_velocities[i] = omega;
-        if can_rotate(state.inverse_inertias[i]) {
-            state.orientations[i] = integrate_orientation(state.orientations[i], omega, h);
-        }
-    }
-}
-
-/// Recovers each body's linear and angular velocity from the net motion over
-/// the substep, the defining step of position-based dynamics: the velocity is
-/// whatever moved the body from its snapshot to its post-projection transform.
-fn recover_velocities(
-    state: &mut RigidBodyState,
-    prev_positions: &[Vec3],
-    prev_orientations: &[Quat],
-    inv_h: f32,
-) {
-    for i in 0..state.len() {
-        if state.inverse_masses[i] > 0.0 {
-            state.linear_velocities[i] = (state.positions[i] - prev_positions[i]) * inv_h;
-        }
-        if can_rotate(state.inverse_inertias[i]) {
-            let delta = quat_mul(
-                quat_array(state.orientations[i]),
-                quat_conj(quat_array(prev_orientations[i])),
-            );
-            let mut omega = Vec3::new(delta[0], delta[1], delta[2]) * (2.0 * inv_h);
-            if delta[3] < 0.0 {
-                omega = -omega;
-            }
-            state.angular_velocities[i] = omega;
-        }
-    }
-}
-
 /// Projects one spherical joint for a single sweep, applying the `XPBD`
 /// positional correction that drives the two world-space anchors together and
 /// accumulating the joint's Lagrange multiplier in `lambda`.
@@ -231,106 +166,10 @@ fn solve_one(state: &mut RigidBodyState, joint: &SphericalJoint, h: f32, lambda:
     state.orientations[b] = apply_rotation_delta(q_b, -dw_b);
 }
 
-/// Whether the solver may rotate a body with the given body-frame inverse
-/// inertia (any non-zero principal axis).
-fn can_rotate(inverse_inertia: Vec3) -> bool {
-    inverse_inertia.x > 0.0 || inverse_inertia.y > 0.0 || inverse_inertia.z > 0.0
-}
-
-/// Advances an orientation by its world-space angular velocity over `h` via the
-/// quaternion kinematic equation `q' = normalize(q + 0.5 h [omega, 0] q)`,
-/// matching the rigid integrator. Falls back to the input orientation if the
-/// integrated quaternion is degenerate.
-fn integrate_orientation(orientation: Quat, omega: Vec3, h: f32) -> Quat {
-    let q = quat_array(orientation);
-    let dq = quat_mul([omega.x, omega.y, omega.z, 0.0], q);
-    let half_h = 0.5 * h;
-    let integrated = [
-        q[0] + dq[0] * half_h,
-        q[1] + dq[1] * half_h,
-        q[2] + dq[2] * half_h,
-        q[3] + dq[3] * half_h,
-    ];
-    normalize_or(integrated, orientation)
-}
-
-/// Applies a direct `XPBD` rotation delta `omega` (a rotation vector, not scaled
-/// by any time step) to an orientation: `q' = normalize(q + 0.5 [omega, 0] q)`
-/// (Müller et al.). Falls back to the input orientation if the result is
-/// degenerate.
-fn apply_rotation_delta(orientation: Quat, omega: Vec3) -> Quat {
-    let q = quat_array(orientation);
-    let dq = quat_mul([omega.x, omega.y, omega.z, 0.0], q);
-    let integrated = [
-        q[0] + 0.5 * dq[0],
-        q[1] + 0.5 * dq[1],
-        q[2] + 0.5 * dq[2],
-        q[3] + 0.5 * dq[3],
-    ];
-    normalize_or(integrated, orientation)
-}
-
-/// Applies the world-space inverse inertia `R diag(inv_inertia) R^T` to `v`:
-/// rotate `v` into the body frame, scale by the diagonal inverse inertia, and
-/// rotate back. Mirrors the contact solver's identically named helper.
-fn world_inv_inertia_apply(orientation: Quat, inv_inertia: Vec3, v: Vec3) -> Vec3 {
-    let q = quat_array(orientation);
-    let body = quat_rotate(quat_conj(q), v);
-    quat_rotate(q, inv_inertia * body)
-}
-
-/// Rotates `v` by the unit quaternion `orientation`, routing through the
-/// array-based [`quat_rotate`] so the `CPU` reference and the shader share one
-/// rotation formula.
-fn rotate(orientation: Quat, v: Vec3) -> Vec3 {
-    quat_rotate(quat_array(orientation), v)
-}
-
-/// Normalises a quaternion stored as `(x, y, z, w)`, returning `fallback` when
-/// the length is below [`EPSILON`].
-fn normalize_or(q: [f32; 4], fallback: Quat) -> Quat {
-    let length = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt();
-    if length > EPSILON {
-        Quat::from_xyzw(q[0] / length, q[1] / length, q[2] / length, q[3] / length)
-    } else {
-        fallback
-    }
-}
-
-/// Unpacks a [`Quat`] into the `(x, y, z, w)` array the local quaternion
-/// helpers operate on.
-fn quat_array(q: Quat) -> [f32; 4] {
-    [q.x, q.y, q.z, q.w]
-}
-
-/// Hamilton product `a * b` of two quaternions stored as `(x, y, z, w)`.
-fn quat_mul(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
-    let (ax, ay, az, aw) = (a[0], a[1], a[2], a[3]);
-    let (bx, by, bz, bw) = (b[0], b[1], b[2], b[3]);
-    [
-        aw * bx + ax * bw + ay * bz - az * by,
-        aw * by - ax * bz + ay * bw + az * bx,
-        aw * bz + ax * by - ay * bx + az * bw,
-        aw * bw - ax * bx - ay * by - az * bz,
-    ]
-}
-
-/// Conjugate (inverse rotation) of a unit quaternion stored as `(x, y, z, w)`.
-fn quat_conj(q: [f32; 4]) -> [f32; 4] {
-    [-q[0], -q[1], -q[2], q[3]]
-}
-
-/// Rotates `v` by the unit quaternion `q` via the expanded sandwich product
-/// `2 (u . v) u + (s^2 - u . u) v + 2 s (u x v)` with `u = q.xyz`, `s = q.w`.
-fn quat_rotate(q: [f32; 4], v: Vec3) -> Vec3 {
-    let u = Vec3::new(q[0], q[1], q[2]);
-    let s = q[3];
-    u * (2.0 * u.dot(v)) + v * (s * s - u.dot(u)) + u.cross(v) * (2.0 * s)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glam::{Quat, Vec3};
 
     /// Separation between a joint's two world-space anchors in `state`.
     fn anchor_separation(state: &RigidBodyState, joint: &SphericalJoint) -> f32 {

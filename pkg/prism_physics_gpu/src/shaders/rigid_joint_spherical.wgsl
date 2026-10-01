@@ -38,9 +38,11 @@ struct Params {
     angular_damping_scale: f32,
     joint_count: u32,
     body_count: u32,
+    // Number of Lagrange multipliers reset each substep. For the spherical
+    // joint this equals `joint_count` (one positional constraint per joint).
+    lambda_count: u32,
     _pad0: u32,
     _pad1: u32,
-    _pad2: u32,
 };
 
 struct ColourParams {
@@ -174,7 +176,7 @@ fn predict(@builtin(global_invocation_id) gid: vec3<u32>) {
 @compute @workgroup_size(64)
 fn reset_lambda(@builtin(global_invocation_id) gid: vec3<u32>) {
     let j = gid.x;
-    if (j >= params.joint_count) {
+    if (j >= params.lambda_count) {
         return;
     }
     lambda[j] = 0.0;

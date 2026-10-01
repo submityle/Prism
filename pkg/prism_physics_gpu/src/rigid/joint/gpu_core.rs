@@ -1,85 +1,110 @@
-//! Real-device `wgpu` compute implementation of the spherical (ball-and-socket)
-//! rigid-body joint stepper.
+//! Shared real-device `wgpu` compute core for the `XPBD` joint steppers.
 //!
-//! [`GpuSphericalJointSolver`] is the device twin of
-//! [`cpu_solve_joints_spherical`](super::cpu_solve_joints_spherical). Like its
-//! `CPU` golden it is a *full stepper*: it owns the frame's integration. The
-//! host colours the joint graph, uploads the bodies and the colour-reordered
-//! joints, then unrolls the substep loop into the identical dispatch sequence as
-//! the `CPU` reference — `snapshot` / `predict` / `reset_lambda` /
-//! (`position_iterations` × colour-ordered `solve`) / `recover` per substep —
-//! and reads the updated transforms and velocities back into the caller's state.
+//! Every joint `GPU` twin (`GpuSphericalJointSolver`, `GpuRevoluteJointSolver`,
+//! ...) runs the identical dispatch skeleton — `snapshot` / `predict` /
+//! `reset_lambda` / (`position_iterations` × colour-ordered `solve`) /
+//! `recover` per substep — over the identical eleven-binding group-0 layout and
+//! the one-binding per-batch group-1 layout. Only the shader source, the packed
+//! joint element, and the Lagrange-multiplier count differ between joint types.
+//! [`JointGpuCore`] owns that shared skeleton so each joint solver is a thin
+//! wrapper that compiles its own shader, packs its own joints, and calls
+//! [`JointGpuCore::run`].
 //!
-//! The `snapshot`, `predict`, and `recover` passes are per-body global
-//! dispatches whose threads each write only their own body, so they carry no
-//! race; the `reset_lambda` pass is a per-joint global dispatch, likewise
-//! race-free. The `solve` pass is dispatched once per colour batch; the
-//! colouring guarantees same-batch joints write disjoint movable bodies, and
-//! static bodies may be shared because their corrections scale by zero. Solving
-//! the batches in sequence (a barrier between them) reproduces the `CPU`
-//! Gauss-Seidel sweep over the identical reordered joint list.
+//! The core walks the colour batches in the exact order the matching `CPU`
+//! golden does, with a pipeline barrier between batches, so the device
+//! reproduces the Gauss-Seidel sweep frame for frame. The host pre-computes the
+//! substep size, its reciprocal, and the damping scales into [`Params`] so the
+//! device never re-derives them, matching the `CPU` twins.
 //!
-//! The host pre-computes the substep size, its reciprocal, and the per-substep
-//! damping scales so the device never re-derives them, matching the `CPU` twin's
-//! single computation. The solver compiles its own pipelines from its own shader
-//! (`shaders/rigid_joint_spherical.wgsl`) and owns its bind-group layouts,
-//! mirroring the crate convention of copying tiny setup rather than coupling
-//! features through private internals.
+//! The `snapshot`, `predict`, and `recover` passes are per-body dispatches whose
+//! threads each write only their own body; `reset_lambda` is a per-multiplier
+//! dispatch; both are race-free. The `solve` pass is dispatched once per colour
+//! batch, and the colouring guarantees same-batch joints write disjoint movable
+//! bodies, so static bodies may be shared because their corrections scale by
+//! zero.
 //!
-//! Provenance: the point-to-point (ball-socket) constraint and its substep
-//! `XPBD` positional handling (Müller et al., "Detailed Rigid Body Simulation
-//! with XPBD"), over the world-space inverse inertia and quaternion kinematics
-//! of Baraff & Witkin. Standard `wgpu` compute dispatch. No Unreal Engine source
-//! or derived code.
+//! Provenance: the substep-`XPBD` scheme (Müller et al., "Detailed Rigid Body
+//! Simulation with XPBD") over the world-space inverse inertia and quaternion
+//! kinematics of Baraff & Witkin. Standard `wgpu` compute dispatch. No Unreal
+//! Engine source or derived code.
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Quat, Vec3};
 use wgpu::{
     BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindingType, Buffer, BufferBindingType, CommandEncoder,
-    CommandEncoderDescriptor, ComputePass, ComputePassDescriptor, ComputePipeline,
-    ComputePipelineDescriptor, PipelineCompilationOptions, PipelineLayout,
-    PipelineLayoutDescriptor, ShaderModule, ShaderModuleDescriptor, ShaderSource, ShaderStages,
+    CommandEncoderDescriptor, ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor,
+    PipelineCompilationOptions, PipelineLayout, PipelineLayoutDescriptor, ShaderModule,
+    ShaderModuleDescriptor, ShaderSource, ShaderStages,
 };
 
 use crate::buffer;
 use crate::context::GpuContext;
 
 use super::super::body::RigidBodyState;
-use super::super::config::{IntegratorConfig, RigidError};
-use super::super::contact_cpu::movable_mask;
 use super::coloring::JointColouring;
-use super::config::JointSolverConfig;
-use super::spherical::{GpuSphericalJoint, SphericalJoint};
 
-/// Global solver parameters. Layout matches `Params` in
-/// `shaders/rigid_joint_spherical.wgsl` (`48` bytes, `16`-byte aligned).
+/// Workgroup size every joint shader entry declares.
+const WORKGROUP: u32 = 64;
+
+/// Global solver parameters, shared by every joint shader's `Params` uniform
+/// (`48` bytes, `16`-byte aligned). The host fills every field so the device
+/// never re-derives the substep quantities.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct Params {
+pub(super) struct Params {
     /// Uniform acceleration applied each substep, typically gravity.
-    gravity: [f32; 3],
+    pub gravity: [f32; 3],
     /// Substep size `dt / substeps`.
-    h: f32,
+    pub h: f32,
     /// Reciprocal substep size, `1 / h`.
-    inv_h: f32,
+    pub inv_h: f32,
     /// Linear velocity retention per substep: `(1 - linear_damping * h).max(0)`.
-    linear_damping_scale: f32,
+    pub linear_damping_scale: f32,
     /// Angular velocity retention per substep.
-    angular_damping_scale: f32,
+    pub angular_damping_scale: f32,
     /// Number of (colour-reordered) joints in the joint buffer.
-    joint_count: u32,
+    pub joint_count: u32,
     /// Number of bodies.
-    body_count: u32,
+    pub body_count: u32,
+    /// Number of Lagrange multipliers (joint types with more than one
+    /// constraint per joint store several multipliers each).
+    pub lambda_count: u32,
     /// Padding to the `16`-byte `std140` uniform stride.
-    _pad0: u32,
+    pub _pad0: u32,
     /// Padding to the `16`-byte `std140` uniform stride.
-    _pad1: u32,
-    /// Padding to the `16`-byte `std140` uniform stride.
-    _pad2: u32,
+    pub _pad1: u32,
 }
 
-/// Per-batch dispatch parameters. Layout matches `ColourParams` in the shader.
+impl Params {
+    /// Builds the uniform block for one solve, computing the substep size, its
+    /// reciprocal, and the per-substep damping scales once on the host.
+    pub(super) fn new(
+        gravity: Vec3,
+        h: f32,
+        linear_damping: f32,
+        angular_damping: f32,
+        joint_count: u32,
+        body_count: u32,
+        lambda_count: u32,
+    ) -> Params {
+        Params {
+            gravity: [gravity.x, gravity.y, gravity.z],
+            h,
+            inv_h: 1.0 / h,
+            linear_damping_scale: (1.0 - linear_damping * h).max(0.0),
+            angular_damping_scale: (1.0 - angular_damping * h).max(0.0),
+            joint_count,
+            body_count,
+            lambda_count,
+            _pad0: 0,
+            _pad1: 0,
+        }
+    }
+}
+
+/// Per-batch dispatch parameters, shared by every joint shader's `ColourParams`
+/// uniform (`16` bytes).
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct ColourParams {
@@ -93,8 +118,9 @@ struct ColourParams {
     _pad1: u32,
 }
 
-/// A compiled, reusable `GPU` spherical-joint stepper pipeline set.
-pub struct GpuSphericalJointSolver {
+/// A compiled, reusable joint-stepper pipeline set over the shared group-0 /
+/// group-1 layout. Constructed once per joint type from its own shader.
+pub(super) struct JointGpuCore {
     /// Owns the compiled shader so the pipelines built from it stay valid.
     #[expect(
         dead_code,
@@ -109,7 +135,7 @@ pub struct GpuSphericalJointSolver {
     snapshot: ComputePipeline,
     /// Predicts every body forward under gravity and damping (per body).
     predict: ComputePipeline,
-    /// Resets each joint's `XPBD` multiplier (one dispatch per joint).
+    /// Resets each joint's `XPBD` multipliers (one dispatch per multiplier).
     reset_lambda: ComputePipeline,
     /// Projects one colour batch of joints for a single sweep (per batch).
     solve: ComputePipeline,
@@ -117,19 +143,17 @@ pub struct GpuSphericalJointSolver {
     recover: ComputePipeline,
 }
 
-impl GpuSphericalJointSolver {
-    /// Compiles the spherical-joint stepper kernels on `ctx`.
-    #[must_use]
-    pub fn new(ctx: &GpuContext) -> GpuSphericalJointSolver {
+impl JointGpuCore {
+    /// Compiles the shared joint-stepper kernels from `shader_src` on `ctx`.
+    /// `prefix` labels the shader, layouts, and pipelines for debug tooling.
+    pub(super) fn new(ctx: &GpuContext, shader_src: &str, prefix: &str) -> JointGpuCore {
         let device = ctx.device();
         let module = device.create_shader_module(ShaderModuleDescriptor {
-            label: Some("prism_rigid_joint_spherical"),
-            source: ShaderSource::Wgsl(
-                include_str!("../../shaders/rigid_joint_spherical.wgsl").into(),
-            ),
+            label: Some(prefix),
+            source: ShaderSource::Wgsl(shader_src.into()),
         });
         let global_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-            label: Some("prism_rigid_joint_spherical_global_layout"),
+            label: Some(&format!("{prefix}_global_layout")),
             entries: &[
                 buffer_entry(0, BufferBindingType::Uniform),
                 buffer_entry(1, BufferBindingType::Storage { read_only: false }),
@@ -145,18 +169,18 @@ impl GpuSphericalJointSolver {
             ],
         });
         let colour_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-            label: Some("prism_rigid_joint_spherical_colour_layout"),
+            label: Some(&format!("{prefix}_colour_layout")),
             entries: &[buffer_entry(0, BufferBindingType::Uniform)],
         });
-        // The per-body and per-joint passes touch only group 0; the per-batch
-        // `solve` pass also reads the per-batch uniform in group 1.
+        // The per-body and per-multiplier passes touch only group 0; the
+        // per-batch `solve` pass also reads the per-batch uniform in group 1.
         let global_only = device.create_pipeline_layout(&PipelineLayoutDescriptor {
-            label: Some("prism_rigid_joint_spherical_global_pipeline_layout"),
+            label: Some(&format!("{prefix}_global_pipeline_layout")),
             bind_group_layouts: &[Some(&global_layout)],
             immediate_size: 0,
         });
         let with_colour = device.create_pipeline_layout(&PipelineLayoutDescriptor {
-            label: Some("prism_rigid_joint_spherical_colour_pipeline_layout"),
+            label: Some(&format!("{prefix}_colour_pipeline_layout")),
             bind_group_layouts: &[Some(&global_layout), Some(&colour_layout)],
             immediate_size: 0,
         });
@@ -164,38 +188,38 @@ impl GpuSphericalJointSolver {
             device,
             &module,
             "snapshot",
-            "prism_rigid_joint_spherical_snapshot",
+            &format!("{prefix}_snapshot"),
             &global_only,
         );
         let predict = make(
             device,
             &module,
             "predict",
-            "prism_rigid_joint_spherical_predict",
+            &format!("{prefix}_predict"),
             &global_only,
         );
         let reset_lambda = make(
             device,
             &module,
             "reset_lambda",
-            "prism_rigid_joint_spherical_reset_lambda",
+            &format!("{prefix}_reset_lambda"),
             &global_only,
         );
         let recover = make(
             device,
             &module,
             "recover",
-            "prism_rigid_joint_spherical_recover",
+            &format!("{prefix}_recover"),
             &global_only,
         );
         let solve = make(
             device,
             &module,
             "solve",
-            "prism_rigid_joint_spherical_solve",
+            &format!("{prefix}_solve"),
             &with_colour,
         );
-        GpuSphericalJointSolver {
+        JointGpuCore {
             module,
             global_layout,
             colour_layout,
@@ -207,89 +231,45 @@ impl GpuSphericalJointSolver {
         }
     }
 
-    /// Advances `state` by `dt` under the spherical joints in `joints` on the
-    /// device, reproducing [`cpu_solve_joints_spherical`](super::cpu_solve_joints_spherical)
-    /// frame for frame.
+    /// Runs the full substep stepper for one frame and reads the solved
+    /// transforms and velocities back into `state`.
     ///
-    /// # Errors
-    ///
-    /// Returns [`RigidError::InconsistentState`] if the per-body arrays disagree
-    /// in length or a joint references a body outside the state, and
-    /// [`RigidError::TooManyJointBatches`] if the joint graph needs more colour
-    /// batches than the colouring supports. Returns `Ok(())` with the state
-    /// untouched when there is nothing to do (`dt <= 0`, no bodies, or no
-    /// joints).
-    pub fn solve_joints_spherical(
+    /// `joints` is the colour-reordered packed joint buffer (matching the
+    /// `CPU` golden's reordered list), `lambda_count` the total number of
+    /// Lagrange multipliers (`Params::lambda_count`), `colouring` the batch
+    /// partition, and `params` the host-computed uniform block.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one shared joint-stepper entry threading the context, state,                   packed joints, multiplier count, colouring, uniform block,                   and the two sweep counts"
+    )]
+    pub(super) fn run<J: Pod>(
         &self,
         ctx: &GpuContext,
         state: &mut RigidBodyState,
-        joints: &[SphericalJoint],
-        integrator: &IntegratorConfig,
-        joint_config: &JointSolverConfig,
-        dt: f32,
-    ) -> Result<(), RigidError> {
-        integrator.validate()?;
-        joint_config.validate()?;
-        if !state.is_consistent() {
-            return Err(RigidError::InconsistentState {
-                reason: "per-body arrays must have equal length",
-            });
-        }
-        if state.is_empty() || joints.is_empty() || dt <= 0.0 {
-            return Ok(());
-        }
-
-        let substeps = integrator.effective_substeps();
-        let h = dt / substeps as f32;
-        if h <= 0.0 {
-            return Ok(());
-        }
-
-        let movable = movable_mask(state);
-        let colouring = JointColouring::build(joints, &movable)?;
-        let ordered = colouring.reorder(joints);
-        let iterations = joint_config.effective_position_iterations();
-
-        let plan = self.upload(ctx, state, &ordered, integrator, h);
-        let staging = self.encode_and_run(ctx, &plan, &colouring, substeps, iterations);
+        joints: &[J],
+        lambda_count: u32,
+        colouring: &JointColouring,
+        params: &Params,
+        substeps: u32,
+        iterations: u32,
+    ) {
+        let plan = self.upload(ctx, state, joints, lambda_count, params);
+        let staging = self.encode_and_run(ctx, &plan, colouring, substeps, iterations);
         read_back(ctx, &staging, state);
-        Ok(())
     }
 
-    /// Uploads all buffers and builds the group-0 bind group. The host computes
-    /// the substep size, its reciprocal, and the per-substep damping scales once
-    /// so the device never re-derives them, matching the `CPU` twin.
-    fn upload(
+    /// Uploads every buffer and builds the group-0 bind group.
+    fn upload<J: Pod>(
         &self,
         ctx: &GpuContext,
         state: &RigidBodyState,
-        ordered: &[SphericalJoint],
-        integrator: &IntegratorConfig,
-        h: f32,
+        joints: &[J],
+        lambda_count: u32,
+        params: &Params,
     ) -> SolvePlan {
         let device = ctx.device();
         let body_count = state.len();
-        let joint_count = ordered.len() as u32;
-        let inv_h = 1.0 / h;
 
-        let params = Params {
-            gravity: [
-                integrator.gravity.x,
-                integrator.gravity.y,
-                integrator.gravity.z,
-            ],
-            h,
-            inv_h,
-            linear_damping_scale: (1.0 - integrator.linear_damping * h).max(0.0),
-            angular_damping_scale: (1.0 - integrator.angular_damping * h).max(0.0),
-            joint_count,
-            body_count: body_count as u32,
-            _pad0: 0,
-            _pad1: 0,
-            _pad2: 0,
-        };
-
-        // Per-body uploads in original body order.
         let linear: Vec<[f32; 4]> = state.linear_velocities.iter().map(vec3_to_vec4).collect();
         let angular: Vec<[f32; 4]> = state.angular_velocities.iter().map(vec3_to_vec4).collect();
         let positions: Vec<[f32; 4]> = state.positions.iter().map(vec3_to_vec4).collect();
@@ -298,52 +278,41 @@ impl GpuSphericalJointSolver {
             state.inverse_inertias.iter().map(vec3_to_vec4).collect();
 
         // The snapshot pass overwrites these each substep before they are read,
-        // so their initial contents are irrelevant; they only need the per-body
-        // length. Seeding them with the current transforms keeps the upload
-        // simple and avoids a zeroed-buffer helper.
+        // so their initial contents are irrelevant; seeding them with the
+        // current transforms keeps the upload simple.
         let prev_positions = positions.clone();
         let prev_orientations = orientations.clone();
+        let lambda = vec![0.0f32; lambda_count as usize];
 
-        // Per-joint uploads in colour-reordered order, matching the device joint
-        // buffer and the host `cpu_solve_joints_spherical` reordered list.
-        let gpu_joints: Vec<GpuSphericalJoint> = ordered.iter().map(|j| j.to_gpu()).collect();
-        // One Lagrange multiplier per joint, reset to zero each substep by the
-        // `reset_lambda` pass.
-        let lambda = vec![0.0f32; ordered.len()];
-
-        let params_buf = buffer::uniform(device, "rigid_joint_spherical_params", &params);
-        let linear_buf = buffer::storage_rw_init(device, "rigid_joint_spherical_linear", &linear);
-        let angular_buf =
-            buffer::storage_rw_init(device, "rigid_joint_spherical_angular", &angular);
+        let params_buf = buffer::uniform(device, "prism_rigid_joint_params", params);
+        let linear_buf = buffer::storage_rw_init(device, "prism_rigid_joint_linear", &linear);
+        let angular_buf = buffer::storage_rw_init(device, "prism_rigid_joint_angular", &angular);
         let positions_buf =
-            buffer::storage_rw_init(device, "rigid_joint_spherical_positions", &positions);
+            buffer::storage_rw_init(device, "prism_rigid_joint_positions", &positions);
         let orientations_buf =
-            buffer::storage_rw_init(device, "rigid_joint_spherical_orientations", &orientations);
+            buffer::storage_rw_init(device, "prism_rigid_joint_orientations", &orientations);
         let inverse_mass_buf = buffer::storage_read(
             device,
-            "rigid_joint_spherical_inverse_masses",
+            "prism_rigid_joint_inverse_masses",
             &state.inverse_masses,
         );
         let inverse_inertia_buf = buffer::storage_read(
             device,
-            "rigid_joint_spherical_inverse_inertias",
+            "prism_rigid_joint_inverse_inertias",
             &inverse_inertias,
         );
-        let joints_buf = buffer::storage_read(device, "rigid_joint_spherical_joints", &gpu_joints);
-        let lambda_buf = buffer::storage_rw_init(device, "rigid_joint_spherical_lambda", &lambda);
-        let prev_positions_buf = buffer::storage_rw_init(
-            device,
-            "rigid_joint_spherical_prev_positions",
-            &prev_positions,
-        );
+        let joints_buf = buffer::storage_read(device, "prism_rigid_joint_joints", joints);
+        let lambda_buf = buffer::storage_rw_init(device, "prism_rigid_joint_lambda", &lambda);
+        let prev_positions_buf =
+            buffer::storage_rw_init(device, "prism_rigid_joint_prev_positions", &prev_positions);
         let prev_orientations_buf = buffer::storage_rw_init(
             device,
-            "rigid_joint_spherical_prev_orientations",
+            "prism_rigid_joint_prev_orientations",
             &prev_orientations,
         );
 
         let global_bind = device.create_bind_group(&BindGroupDescriptor {
-            label: Some("prism_rigid_joint_spherical_global_bind_group"),
+            label: Some("prism_rigid_joint_global_bind_group"),
             layout: &self.global_layout,
             entries: &[
                 entry(0, &params_buf),
@@ -369,13 +338,12 @@ impl GpuSphericalJointSolver {
             orientations_buf,
             body_bytes,
             body_count: body_count as u32,
-            joint_count,
+            lambda_count,
         }
     }
 
     /// Records every substep's passes into one encoder in the identical phase
-    /// order as the `CPU` twin, submits it, and returns the staging buffers the
-    /// results were copied into.
+    /// order as the `CPU` twin, submits it, and returns the staging buffers.
     fn encode_and_run(
         &self,
         ctx: &GpuContext,
@@ -388,10 +356,10 @@ impl GpuSphericalJointSolver {
         let colour_binds = self.colour_bind_groups(ctx, colouring);
 
         let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
-            label: Some("prism_rigid_joint_spherical_encoder"),
+            label: Some("prism_rigid_joint_encoder"),
         });
-        let body_groups = plan.body_count.div_ceil(64).max(1);
-        let joint_groups = plan.joint_count.div_ceil(64).max(1);
+        let body_groups = plan.body_count.div_ceil(WORKGROUP).max(1);
+        let lambda_groups = plan.lambda_count.div_ceil(WORKGROUP).max(1);
 
         for _ in 0..substeps {
             // 1. Snapshot the transforms the velocity recovery differences against.
@@ -412,19 +380,19 @@ impl GpuSphericalJointSolver {
                 body_groups,
                 None,
             );
-            // 3. Reset each joint's XPBD multiplier.
+            // 3. Reset every joint's XPBD multipliers.
             self.pass(
                 &mut encoder,
                 "reset_lambda",
                 &self.reset_lambda,
                 plan,
-                joint_groups,
+                lambda_groups,
                 None,
             );
             // 4. Project the joint constraints in colour-batch order, repeated
             //    `iterations` times, reproducing the CPU Gauss-Seidel sweeps.
             for _ in 0..iterations {
-                self.each_batch(&mut encoder, &self.solve, plan, colouring, &colour_binds);
+                self.each_batch(&mut encoder, plan, colouring, &colour_binds);
             }
             // 5. Recover the velocities from the net substep motion.
             self.pass(
@@ -437,24 +405,15 @@ impl GpuSphericalJointSolver {
             );
         }
 
-        let linear_stage = buffer::staging(
-            device,
-            "rigid_joint_spherical_linear_stage",
-            plan.body_bytes,
-        );
-        let angular_stage = buffer::staging(
-            device,
-            "rigid_joint_spherical_angular_stage",
-            plan.body_bytes,
-        );
-        let positions_stage = buffer::staging(
-            device,
-            "rigid_joint_spherical_positions_stage",
-            plan.body_bytes,
-        );
+        let linear_stage =
+            buffer::staging(device, "prism_rigid_joint_linear_stage", plan.body_bytes);
+        let angular_stage =
+            buffer::staging(device, "prism_rigid_joint_angular_stage", plan.body_bytes);
+        let positions_stage =
+            buffer::staging(device, "prism_rigid_joint_positions_stage", plan.body_bytes);
         let orientations_stage = buffer::staging(
             device,
-            "rigid_joint_spherical_orientations_stage",
+            "prism_rigid_joint_orientations_stage",
             plan.body_bytes,
         );
         buffer::copy(
@@ -503,9 +462,9 @@ impl GpuSphericalJointSolver {
                     _pad0: 0,
                     _pad1: 0,
                 };
-                let buf = buffer::uniform(device, "rigid_joint_spherical_colour_params", &params);
+                let buf = buffer::uniform(device, "prism_rigid_joint_colour_params", &params);
                 device.create_bind_group(&BindGroupDescriptor {
-                    label: Some("prism_rigid_joint_spherical_colour_bind_group"),
+                    label: Some("prism_rigid_joint_colour_bind_group"),
                     layout: &self.colour_layout,
                     entries: &[BindGroupEntry {
                         binding: 0,
@@ -521,17 +480,16 @@ impl GpuSphericalJointSolver {
     fn each_batch(
         &self,
         encoder: &mut CommandEncoder,
-        pipeline: &ComputePipeline,
         plan: &SolvePlan,
         colouring: &JointColouring,
         colour_binds: &[BindGroup],
     ) {
         for (c, &(start, end)) in colouring.ranges().iter().enumerate() {
-            let groups = (end - start).div_ceil(64).max(1);
+            let groups = (end - start).div_ceil(WORKGROUP).max(1);
             self.pass(
                 encoder,
                 "solve",
-                pipeline,
+                &self.solve,
                 plan,
                 groups,
                 Some(&colour_binds[c]),
@@ -558,12 +516,11 @@ impl GpuSphericalJointSolver {
         if let Some(bind) = colour_bind {
             pass.set_bind_group(1, bind, &[]);
         }
-        dispatch(&mut pass, groups);
+        pass.dispatch_workgroups(groups, 1, 1);
     }
 }
 
-/// The uploaded buffers and dispatch dimensions for one `solve_joints_spherical`
-/// call.
+/// The uploaded buffers and dispatch dimensions for one [`JointGpuCore::run`].
 struct SolvePlan {
     /// Group-0 bind group shared by every pass.
     global_bind: BindGroup,
@@ -579,8 +536,8 @@ struct SolvePlan {
     body_bytes: u64,
     /// Number of bodies.
     body_count: u32,
-    /// Number of joints in the colour-ordered buffer.
-    joint_count: u32,
+    /// Number of Lagrange multipliers.
+    lambda_count: u32,
 }
 
 /// The staging buffers the device results were copied into for readback.
@@ -595,9 +552,9 @@ struct SolveStaging {
     orientations: Buffer,
 }
 
-/// Reads the solved transforms and velocities back into `state`. The joints need
-/// no readback: their Lagrange multipliers are reset each substep and never
-/// persisted.
+/// Reads the solved transforms and velocities back into `state`. The joints
+/// need no readback: their Lagrange multipliers are reset each substep and
+/// never persisted.
 fn read_back(ctx: &GpuContext, staging: &SolveStaging, state: &mut RigidBodyState) {
     let linear = buffer::read_back::<[f32; 4]>(ctx, &staging.linear);
     let angular = buffer::read_back::<[f32; 4]>(ctx, &staging.angular);
@@ -647,11 +604,6 @@ fn vec4_to_vec3(v: [f32; 4]) -> Vec3 {
 /// Unpacks a `(x, y, z, w)` readback element into a [`Quat`].
 fn vec4_to_quat(v: [f32; 4]) -> Quat {
     Quat::from_xyzw(v[0], v[1], v[2], v[3])
-}
-
-/// Dispatches `groups` workgroups on `pass`.
-fn dispatch(pass: &mut ComputePass<'_>, groups: u32) {
-    pass.dispatch_workgroups(groups, 1, 1);
 }
 
 /// Builds a bind-group entry binding `buffer` to `binding`.
