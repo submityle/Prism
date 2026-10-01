@@ -35,6 +35,12 @@
 //!   spring reverb. Distinct from the diffuse-field room models above, its
 //!   defining feature is the all-pass dispersion chain rather than a dense
 //!   reflection field.
+//! - [`gated_reverb::GatedReverbNode`] -- a gated reverb: a fully-wet
+//!   [`algorithmic::AlgorithmicRoom`] whose dense tail is cut by a noise
+//!   gate keyed from the dry source, so the decay blooms while the source
+//!   plays and is slammed shut once it stops, synthesising the punchy,
+//!   truncated ambience of 1980s productions. It composes the room reverb
+//!   and a textbook attack/hold/release gate rather than duplicating them.
 //!
 //! Every processor pre-allocates all delay-line and filter state at
 //! construction, so [`AudioNode::process`](crate::graph::AudioNode::process)
@@ -43,6 +49,7 @@
 pub mod algorithmic;
 pub mod convolver;
 pub mod fdn;
+pub mod gated_reverb;
 pub mod plate;
 pub mod shimmer;
 pub mod spring_reverb;
@@ -50,6 +57,12 @@ pub mod spring_reverb;
 pub use algorithmic::{AlgorithmicRoom, AlgorithmicRoomParams};
 pub use convolver::Convolver;
 pub use fdn::{FdnOrder, FdnReverb, FdnReverbParams};
+pub use gated_reverb::{
+    DEFAULT_GATED_ATTACK_MS, DEFAULT_GATED_DAMPING, DEFAULT_GATED_HOLD_MS,
+    DEFAULT_GATED_MIX, DEFAULT_GATED_PRE_DELAY_MS, DEFAULT_GATED_RELEASE_MS,
+    DEFAULT_GATED_ROOM_SIZE, DEFAULT_GATED_THRESHOLD_DB, GatedReverbNode,
+    GatedReverbParams, MAX_GATED_HOLD_MS, MAX_GATED_PRE_DELAY_MS, MIN_GATED_TIME_MS,
+};
 pub use plate::{PlateReverb, PlateReverbParams};
 pub use shimmer::{MAX_SHIMMER_FEEDBACK, ShimmerReverb, ShimmerReverbParams};
 pub use spring_reverb::{
