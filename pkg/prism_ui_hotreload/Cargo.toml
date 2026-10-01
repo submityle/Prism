@@ -1,0 +1,18 @@
+[package]
+name = "prism_ui_hotreload"
+version = "0.1.0"
+edition = "2024"
+description = "Loom hot-reload core: diff an old vs new element tree, preserve node-local state across reloads by stable identity, and hot-swap stylesheets. Engine-decoupled and deterministic. Contains no Unreal Engine source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_ui = { path = "../prism_ui" }
+prism_ui_style = { path = "../prism_ui_style" }
+
+[features]
+default = ["std"]
+std = ["prism_ui/std", "prism_ui_style/std"]
+
+[lints]
+workspace = true
