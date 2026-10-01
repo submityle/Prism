@@ -40,8 +40,9 @@ pub use surface::{
     SURFACE_CORE_WORDS, SURFACE_LOBE_WORDS,
 };
 pub use texture_lod::{
-    cone_mip_level, mip_from_isotropic_footprint, AnisotropicMip, RayCone, RayDifferential,
-    TriangleLodConstant, MIN_COS_INCIDENCE,
+    cone_mip_level, mip_from_isotropic_footprint, trilinear_mip, AnisotropicMip, PageRequest,
+    RayCone, RayDifferential, TriangleLodConstant, TrilinearMip, VirtualTexture,
+    MIN_COS_INCIDENCE,
 };
 pub use validation::{validate_graph, MaterialValidationError};
 

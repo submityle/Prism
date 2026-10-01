@@ -38,11 +38,13 @@ mod math;
 mod mip;
 mod ray_cone;
 mod ray_differential;
+mod residency;
 mod triangle;
 
 pub use mip::{
     cone_mip_level, mip_from_isotropic_footprint, AnisotropicMip, MIN_COS_INCIDENCE,
 };
 pub use ray_cone::RayCone;
+pub use residency::{trilinear_mip, PageRequest, TrilinearMip, VirtualTexture};
 pub use ray_differential::RayDifferential;
 pub use triangle::TriangleLodConstant;
