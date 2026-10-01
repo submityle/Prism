@@ -98,6 +98,7 @@ pub mod optional_pass_layout;
 pub mod pass_layout;
 pub mod pass_params;
 pub mod pipeline_layout;
+pub mod projective_global;
 pub mod raster;
 pub mod reactive_mask;
 pub mod ribbon;
