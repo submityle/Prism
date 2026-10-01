@@ -467,6 +467,13 @@
 //!   interval overlap, with a 2-D coplanar fallback), brute-forced over
 //!   non-adjacent face pairs to flag self-intersecting geometry for mesh
 //!   validation and boolean/export pre-checks (dot/cross only).
+//! - [`mesh_voxelize`] — conservative surface voxelization
+//!   ([`mesh_voxelize::voxelize_surface`], [`mesh_voxelize::VoxelGrid`])
+//!   via the Akenine-Möller separating-axis triangle/box overlap test
+//!   ([`mesh_voxelize::triangle_box_overlap`]): each triangle is
+//!   rasterized into the uniform cells its voxel-space bounds touch,
+//!   feeding voxel-cone-traced GI, SDF baking, voxel AO, and conservative
+//!   collision proxies (`f64`, dot/cross/abs/min/max only, no sqrt).
 //! - [`ellipsoid`] — analytic axis-aligned ellipsoid [`ellipsoid::Ellipsoid`]
 //!   procedural primitive (`DXR`/Vulkan `AABB` intersection path): the ray is
 //!   scaled into the unit-sphere frame and solved with the same stable reduced
@@ -639,6 +646,7 @@ pub mod mesh_bounding_sphere;
 pub mod mesh_planar_regions;
 pub mod mesh_closest_point;
 pub mod mesh_self_intersections;
+pub mod mesh_voxelize;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
 pub mod obb;
@@ -762,6 +770,7 @@ pub use mesh_bounding_sphere::{bounding_sphere, BoundingSphere};
 pub use mesh_planar_regions::{planar_regions, PlanarRegions, RegionPlane};
 pub use mesh_closest_point::{closest_point_on_mesh, MeshClosestPoint};
 pub use mesh_self_intersections::{mesh_self_intersections, triangles_intersect};
+pub use mesh_voxelize::{triangle_box_overlap, voxelize_surface, VoxelGrid};
 pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
 pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
 pub use obb::{Obb, ObbBvh, ObbHit};
