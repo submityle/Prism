@@ -1862,12 +1862,44 @@ pub fn capsule_2d(point: [f32; 2], a: [f32; 2], b: [f32; 2], radius: f32) -> f32
     segment_2d(point, a, b) - radius
 }
 
+/// Exact signed distance to an oriented 2D vesica (lens) whose pointed tips sit
+/// at `a` and `b` with maximum half-width `w` measured perpendicular to the
+/// `a`-`b` axis at the midpoint.
+///
+/// This is the 2D companion to `vesica_segment`. The query is mapped into the
+/// lens-local frame (`axial` along the unit tip direction, `perp` along the
+/// perpendicular) and then delegated to the already-exact origin-centred
+/// `vesica_2d(_, radius, offset)`. For that canonical lens the tips lie at
+/// `(0, +/-sqrt(radius^2 - offset^2))` and the apex half-width is
+/// `radius - offset`; solving `sqrt(radius^2 - offset^2) = |a-b|/2` and
+/// `radius - offset = w` yields `radius = (half^2 + w^2) / (2w)` and
+/// `offset = (half^2 - w^2) / (2w)` with `half = |a-b|/2`. Built from `sqrt`,
+/// `abs`, `min` and `signum` (via `vesica_2d`), so it is exact and
+/// transcendental-free. Requires `0 < w < half` for a proper lens.
+pub fn oriented_vesica_2d(point: [f32; 2], a: [f32; 2], b: [f32; 2], w: f32) -> f32 {
+    let cx = (a[0] + b[0]) * 0.5;
+    let cy = (a[1] + b[1]) * 0.5;
+    let bax = b[0] - a[0];
+    let bay = b[1] - a[1];
+    let l = length2([bax, bay]);
+    let vx = bax / l;
+    let vy = bay / l;
+    let pcx = point[0] - cx;
+    let pcy = point[1] - cy;
+    let axial = pcx * vx + pcy * vy;
+    let perp = -pcx * vy + pcy * vx;
+    let half = l * 0.5;
+    let radius = (half * half + w * w) / (2.0 * w);
+    let offset = (half * half - w * w) / (2.0 * w);
+    vesica_2d([perp, axial], radius, offset)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         annulus_2d, arc, box_2d, box_frame, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_torus, capsule, capsule_2d, circle_2d, cone_sdf, cross_2d, cut_disk_2d, cut_hollow_sphere,
         cut_sphere, cylinder_segment, death_star, egg_2d, ellipsoid_sdf, equilateral_triangle_2d, heart_2d, hex_prism, hexagram_2d, infinite_cone, infinite_cylinder, isosceles_triangle_2d, length2, line_sdf, link, moon,
-        octagon_prism, octahedron, oriented_box_2d, parallelogram, pentagram_2d, pie, plane, polygon_2d, pyramid, quad_sdf, regular_hexagon_2d, regular_octagon_2d, regular_pentagon_2d, rhombus, rhombus_2d, round_box, round_cone_sdf,
+        octagon_prism, octahedron, oriented_box_2d, oriented_vesica_2d, parallelogram, pentagram_2d, pie, plane, polygon_2d, pyramid, quad_sdf, regular_hexagon_2d, regular_octagon_2d, regular_pentagon_2d, rhombus, rhombus_2d, round_box, round_cone_sdf,
         round_cone_segment, rounded_box_2d, rounded_cylinder, rounded_x, segment_2d, solid_angle, sphere, star5_2d, torus, trapezoid_isosceles, triangle_2d, triangle_sdf, triangular_prism,
         uneven_capsule_2d, vertical_capsule, vesica, vesica_2d, vesica_segment,
     };
@@ -1965,6 +1997,83 @@ mod tests {
         let outside = (d2.max(0.0).powi(2) + dz.max(0.0).powi(2)).sqrt();
         let inside = d2.max(dz).min(0.0);
         inside + outside
+    }
+
+    #[test]
+    fn oriented_vesica_2d_closed_forms() {
+        // Horizontal lens, tips at (+/-1, 0), half-width 0.5 => radius 1.25, offset 0.75.
+        let a = [-1.0_f32, 0.0];
+        let b = [1.0_f32, 0.0];
+        let w = 0.5_f32;
+        assert!((oriented_vesica_2d([0.0, 0.0], a, b, w) - (-0.5)).abs() < 1e-6);
+        assert!(oriented_vesica_2d([1.0, 0.0], a, b, w).abs() < 1e-6);
+        assert!(oriented_vesica_2d([-1.0, 0.0], a, b, w).abs() < 1e-6);
+        assert!(oriented_vesica_2d([0.0, 0.5], a, b, w).abs() < 1e-6);
+        assert!(oriented_vesica_2d([0.0, -0.5], a, b, w).abs() < 1e-6);
+        assert!((oriented_vesica_2d([0.0, 2.0], a, b, w) - 1.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn oriented_vesica_2d_matches_ordered_arc_reference() {
+        // Independent ordered-arc world-space boundary reference (test-only trig).
+        fn reference(p: [f32; 2], a: [f32; 2], b: [f32; 2], w: f32) -> f32 {
+            let cx = (a[0] + b[0]) * 0.5;
+            let cy = (a[1] + b[1]) * 0.5;
+            let bax = b[0] - a[0];
+            let bay = b[1] - a[1];
+            let l = (bax * bax + bay * bay).sqrt();
+            let vx = bax / l;
+            let vy = bay / l;
+            let nx = -vy;
+            let ny = vx;
+            let half = l * 0.5;
+            let radius = (half * half + w * w) / (2.0 * w);
+            let offset = (half * half - w * w) / (2.0 * w);
+            let phi0 = (offset / radius).acos();
+            let to_world =
+                |lx: f32, ly: f32| [cx + nx * lx + vx * ly, cy + ny * lx + vy * ly];
+            let m = 1200usize;
+            let mut pts: Vec<[f32; 2]> = Vec::with_capacity(2 * (m + 1));
+            for i in 0..=m {
+                let phi = -phi0 + (2.0 * phi0) * (i as f32) / (m as f32);
+                pts.push(to_world(-offset + radius * phi.cos(), radius * phi.sin()));
+            }
+            for i in 0..=m {
+                let phi = phi0 - (2.0 * phi0) * (i as f32) / (m as f32);
+                pts.push(to_world(offset - radius * phi.cos(), radius * phi.sin()));
+            }
+            let mut d = f32::INFINITY;
+            for i in 0..pts.len() - 1 {
+                let [x1, y1] = pts[i];
+                let [x2, y2] = pts[i + 1];
+                let ex = x2 - x1;
+                let ey = y2 - y1;
+                let t = (((p[0] - x1) * ex + (p[1] - y1) * ey) / (ex * ex + ey * ey))
+                    .clamp(0.0, 1.0);
+                let qx = p[0] - (x1 + ex * t);
+                let qy = p[1] - (y1 + ey * t);
+                d = d.min((qx * qx + qy * qy).sqrt());
+            }
+            let c1 = [cx + nx * (-offset), cy + ny * (-offset)];
+            let c2 = [cx + nx * offset, cy + ny * offset];
+            let inside = ((p[0] - c1[0]).powi(2) + (p[1] - c1[1]).powi(2)).sqrt() <= radius
+                && ((p[0] - c2[0]).powi(2) + (p[1] - c2[1]).powi(2)).sqrt() <= radius;
+            if inside { -d } else { d }
+        }
+
+        let a = [-0.7_f32, 0.4];
+        let b = [1.3_f32, -0.6];
+        let w = 0.45_f32;
+        let mut maxerr = 0.0_f32;
+        for gy in -8..=8 {
+            for gx in -8..=8 {
+                let p = [gx as f32 * 0.35, gy as f32 * 0.35];
+                let got = oriented_vesica_2d(p, a, b, w);
+                let want = reference(p, a, b, w);
+                maxerr = maxerr.max((got - want).abs());
+            }
+        }
+        assert!(maxerr < 5e-3, "maxerr = {maxerr}");
     }
 
     #[test]
