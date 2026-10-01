@@ -1835,10 +1835,24 @@ pub fn vertical_capsule(point: [f32; 3], height: f32, radius: f32) -> f32 {
     length([point[0], qy, point[2]]) - radius
 }
 
+/// Exact signed distance to a filled annulus (ring / washer) in 2D centred at
+/// the origin, with mid-line radius `radius` and half-thickness `half_width`.
+///
+/// The field of the circle of radius `radius` is `length(point) - radius`; its
+/// absolute value is the distance to that circle, and subtracting the band
+/// half-width yields the signed distance to the ring between radii
+/// `radius - half_width` and `radius + half_width`. Built from `abs`, `min`,
+/// `max` and `sqrt`, so it is exact and transcendental-free. For a hollow ring
+/// outline this is the `onion` of `circle_2d`; kept as a dedicated primitive
+/// because annular bands are a ubiquitous building block.
+pub fn annulus_2d(point: [f32; 2], radius: f32, half_width: f32) -> f32 {
+    (length2(point) - radius).abs() - half_width
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        arc, box_2d, box_frame, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_torus, capsule, circle_2d, cone_sdf, cross_2d, cut_disk_2d, cut_hollow_sphere,
+        annulus_2d, arc, box_2d, box_frame, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_torus, capsule, circle_2d, cone_sdf, cross_2d, cut_disk_2d, cut_hollow_sphere,
         cut_sphere, cylinder_segment, death_star, egg_2d, ellipsoid_sdf, equilateral_triangle_2d, heart_2d, hex_prism, hexagram_2d, infinite_cone, infinite_cylinder, isosceles_triangle_2d, length2, line_sdf, link, moon,
         octagon_prism, octahedron, oriented_box_2d, parallelogram, pentagram_2d, pie, plane, polygon_2d, pyramid, quad_sdf, regular_hexagon_2d, regular_octagon_2d, regular_pentagon_2d, rhombus, rhombus_2d, round_box, round_cone_sdf,
         round_cone_segment, rounded_box_2d, rounded_cylinder, rounded_x, segment_2d, solid_angle, sphere, star5_2d, torus, trapezoid_isosceles, triangle_2d, triangle_sdf, triangular_prism,
@@ -3568,6 +3582,70 @@ mod tests {
                     assert!((got - want).abs() < 1e-5, "mismatch at {p:?}: {got} vs {want}");
                     k += 10;
                 }
+                j += 1;
+            }
+            i += 1;
+        }
+    }
+
+    #[test]
+    fn annulus_2d_band_edges_and_interior() {
+        let r = 3.0f32;
+        let t = 0.5f32;
+        // On the mid-line: deepest interior, negative half-width.
+        assert!((annulus_2d([3.0, 0.0], r, t) - (-0.5)).abs() < 1e-6);
+        // On the outer and inner edges: zero.
+        assert!(annulus_2d([3.5, 0.0], r, t).abs() < 1e-6);
+        assert!(annulus_2d([0.0, 2.5], r, t).abs() < 1e-6);
+        // Outside the outer edge and inside the hole: positive gap.
+        assert!((annulus_2d([5.0, 0.0], r, t) - 1.5).abs() < 1e-6);
+        assert!((annulus_2d([0.0, 0.0], r, t) - 2.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn annulus_2d_matches_two_circle_boundary_reference() {
+        // Independent reference: unsigned distance is the min point-to-segment
+        // distance over polyline approximations of the inner (r-t) and outer
+        // (r+t) circles; sign comes from radial band membership. This shares no
+        // logic with the analytic abs-of-circle formula under test.
+        let r = 2.75f32;
+        let t = 0.6f32;
+        const N: usize = 2048;
+        let circle = |rad: f32| -> Vec<[f32; 2]> {
+            (0..N)
+                .map(|i| {
+                    let a = std::f32::consts::TAU * (i as f32) / (N as f32);
+                    [rad * a.cos(), rad * a.sin()]
+                })
+                .collect()
+        };
+        let seg = |p: [f32; 2], a: [f32; 2], b: [f32; 2]| -> f32 {
+            let pa = [p[0] - a[0], p[1] - a[1]];
+            let ba = [b[0] - a[0], b[1] - a[1]];
+            let h = ((pa[0] * ba[0] + pa[1] * ba[1]) / (ba[0] * ba[0] + ba[1] * ba[1]))
+                .clamp(0.0, 1.0);
+            ((pa[0] - ba[0] * h).powi(2) + (pa[1] - ba[1] * h).powi(2)).sqrt()
+        };
+        let outer = circle(r + t);
+        let inner = circle(r - t);
+        let reference = |p: [f32; 2]| -> f32 {
+            let mut d = f32::INFINITY;
+            for poly in [&outer, &inner] {
+                for i in 0..N {
+                    d = d.min(seg(p, poly[i], poly[(i + 1) % N]));
+                }
+            }
+            let rho = (p[0] * p[0] + p[1] * p[1]).sqrt();
+            if rho >= r - t && rho <= r + t { -d } else { d }
+        };
+        let mut i = -24i32;
+        while i <= 24 {
+            let mut j = -24i32;
+            while j <= 24 {
+                let p = [i as f32 * 0.25, j as f32 * 0.25];
+                let got = annulus_2d(p, r, t);
+                let want = reference(p);
+                assert!((got - want).abs() < 5e-3, "annulus mismatch at {p:?}: {got} vs {want}");
                 j += 1;
             }
             i += 1;
