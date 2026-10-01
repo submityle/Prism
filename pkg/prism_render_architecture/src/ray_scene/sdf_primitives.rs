@@ -1805,10 +1805,25 @@ pub fn triangle_2d(point: [f32; 2], a: [f32; 2], b: [f32; 2], c: [f32; 2]) -> f3
     -dx.sqrt() * dy.signum()
 }
 
+/// Exact signed distance to an axis-aligned rectangle in 2D centred at the
+/// origin with half-extents `half_extent` (Inigo Quilez `sdBox`).
+///
+/// Folding the query into the first quadrant with `abs` reduces the problem to
+/// the corner offset `q = |point| - half_extent`. Outside the box the distance
+/// is `length(max(q, 0))` (the straight edges give a zero component, the corner
+/// region both), and inside it is the negative `max(q.x, q.y)`. Built from
+/// `abs`, `min`, `max` and `sqrt`, so it is exact and transcendental-free. This
+/// is the sharp-cornered specialisation of `rounded_box_2d` with zero radii.
+pub fn box_2d(point: [f32; 2], half_extent: [f32; 2]) -> f32 {
+    let qx = point[0].abs() - half_extent[0];
+    let qy = point[1].abs() - half_extent[1];
+    length2([qx.max(0.0), qy.max(0.0)]) + qx.max(qy).min(0.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        arc, box_frame, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_torus, capsule, circle_2d, cone_sdf, cross_2d, cut_disk_2d, cut_hollow_sphere,
+        arc, box_2d, box_frame, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_torus, capsule, circle_2d, cone_sdf, cross_2d, cut_disk_2d, cut_hollow_sphere,
         cut_sphere, cylinder_segment, death_star, egg_2d, ellipsoid_sdf, equilateral_triangle_2d, heart_2d, hex_prism, hexagram_2d, infinite_cone, infinite_cylinder, isosceles_triangle_2d, length2, line_sdf, link, moon,
         octagon_prism, octahedron, oriented_box_2d, parallelogram, pentagram_2d, pie, plane, polygon_2d, pyramid, quad_sdf, regular_hexagon_2d, regular_octagon_2d, regular_pentagon_2d, rhombus, rhombus_2d, round_box, round_cone_sdf,
         round_cone_segment, rounded_box_2d, rounded_cylinder, rounded_x, segment_2d, solid_angle, sphere, star5_2d, torus, trapezoid_isosceles, triangle_2d, triangle_sdf, triangular_prism,
@@ -3471,6 +3486,38 @@ mod tests {
                 }
                 i += 1;
             }
+        }
+    }
+
+    #[test]
+    fn box_2d_edges_corners_and_interior() {
+        let b = [2.0f32, 1.0];
+        // Outside past an edge: horizontal gap only.
+        assert!((box_2d([5.0, 0.0], b) - 3.0).abs() < 1e-6);
+        // Outside past a corner: diagonal gap (3-4-5 style).
+        assert!((box_2d([2.0 + 3.0, 1.0 + 4.0], b) - 5.0).abs() < 1e-6);
+        // On an edge the field is zero.
+        assert!(box_2d([2.0, 0.5], b).abs() < 1e-6);
+        // Interior: negative distance to the nearest edge.
+        assert!((box_2d([0.0, 0.0], b) - (-1.0)).abs() < 1e-6);
+        assert!((box_2d([1.5, 0.0], b) - (-0.5)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn box_2d_matches_rounded_box_zero_radii() {
+        // Sharp box must equal the rounded box with vanishing corner radii.
+        let b = [1.3f32, 2.1];
+        let mut i = -40i32;
+        while i <= 40 {
+            let mut j = -40i32;
+            while j <= 40 {
+                let p = [i as f32 * 0.1, j as f32 * 0.1];
+                let got = box_2d(p, b);
+                let want = rounded_box_2d(p, b, [0.0; 4]);
+                assert!((got - want).abs() < 1e-6, "box mismatch at {p:?}: {got} vs {want}");
+                j += 1;
+            }
+            i += 1;
         }
     }
 
