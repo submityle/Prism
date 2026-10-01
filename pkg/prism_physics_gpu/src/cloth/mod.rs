@@ -42,6 +42,7 @@ pub mod gpu;
 pub mod layout;
 pub mod long_range;
 pub mod prep;
+pub mod pressure;
 pub mod strain_limit;
 
 pub use aero::{
@@ -58,6 +59,10 @@ pub use long_range::{
     LongRangeColoring,
 };
 pub use prep::{build as build_cloth_prep, ClothPrep};
+pub use pressure::{
+    build_vertex_triangle_adjacency, cpu_cloth_pressure, GpuClothPressure,
+    VertexTriangleAdjacency,
+};
 pub use strain_limit::{
     colour_strain_limit, cpu_cloth_strain_limit, ClothStrainLimitConstraint, GpuClothStrainLimit,
     StrainLimitColoring,

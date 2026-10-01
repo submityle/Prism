@@ -186,9 +186,14 @@ impl ReduceConfig {
         if count == 0 {
             return 0;
         }
+        // Each partial-folding pass folds `fold_width` partials into one. A
+        // size-1 workgroup folds a single element and would never shrink the
+        // partial count, so the iterative passes clamp the fold width to at
+        // least 2 (matching [`Self::reduce`]) to guarantee progress.
+        let fold_width = self.workgroup_size.max(2);
         let mut steps = 1;
         while count > 1 {
-            count = count.div_ceil(self.workgroup_size);
+            count = count.div_ceil(fold_width);
             steps += 1;
         }
         steps
@@ -208,9 +213,14 @@ impl ReduceConfig {
             .chunks(width)
             .map(|chunk| reduce_all(op, chunk))
             .collect();
+        // A size-1 workgroup emits one partial per element, so folding the
+        // partials in chunks of 1 would never converge. The iterative fold
+        // width is therefore clamped to at least 2; the reduction stays
+        // associative, so the final scalar is independent of this width.
+        let fold_width = width.max(2);
         while partials.len() > 1 {
             partials = partials
-                .chunks(width)
+                .chunks(fold_width)
                 .map(|chunk| reduce_partials(op, chunk))
                 .collect();
         }
