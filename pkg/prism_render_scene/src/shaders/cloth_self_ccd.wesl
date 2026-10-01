@@ -40,6 +40,12 @@
 /// Mirrors the CPU EPS_REL_MOTION.
 const CLOTH_CCD_EPS_REL_MOTION: f32 = 1.0e-12;
 
+/// Squared-length floor for treating the TOI separation as degenerate before
+/// normalizing the contact normal. Mirrors the CPU `EPS_LEN_SQ` guard inside
+/// `Vec3::normalize_or_zero`, so a near-coincident pair falls back to the fixed
+/// +X axis on the GPU exactly as it does in the golden.
+const CLOTH_CCD_EPS_LEN_SQ: f32 = 1.0e-12;
+
 /// Linked-list terminator for the spatial-hash cell chains.
 const CLOTH_CCD_SENTINEL: u32 = 0xffffffffu;
 
@@ -289,12 +295,21 @@ fn cloth_ccd_resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
                     let a_c = prev_a + (curr_a - prev_a) * t;
                     let b_c = prev_b + (curr_b - prev_b) * t;
                     let delta = a_c - b_c;
-                    let len = length(delta);
+                    // normalize_or_zero: guard on dot(delta, delta) > EPS_LEN_SQ,
+                    // then scale by 1.0 / sqrt(len_sq) (reciprocal-mul, not a
+                    // component-wise divide) to mirror the golden
+                    // Vec3::normalize_or_zero op order; the trailing dot>0 check
+                    // and +X fallback reproduce the golden's degenerate branch
+                    // bit-for-bit. penetration uses sqrt(len_sq) == delta.length().
+                    let len_sq = dot(delta, delta);
                     var normal = vec3<f32>(1.0, 0.0, 0.0);
-                    if len * len > 0.0 {
-                        normal = delta / len;
+                    if len_sq > CLOTH_CCD_EPS_LEN_SQ {
+                        let unit = delta * (1.0 / sqrt(len_sq));
+                        if dot(unit, unit) > 0.0 {
+                            normal = unit;
+                        }
                     }
-                    let penetration = max(thickness - len, 0.0);
+                    let penetration = max(thickness - sqrt(len_sq), 0.0);
                     let inv_wsum = 1.0 / wsum;
 
                     // i's own half: snap to TOI then push by inverse-mass share.
