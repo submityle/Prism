@@ -750,6 +750,52 @@ assert_eq!(world.get::<Counter>(entity).unwrap().value, 7);
 > 「尚未与 ECS 实体字段深度绑定」局限的正式解除。仍规划中的是宏层 `$` 语法糖(自动登记绑定)
 > 与 `Show` / `For` 结构绑定(批量 spawn/despawn 到帧末)。
 
+### 18.1 Bevy 调度器集成(`prism_ui_ecs::schedule`,已交付)
+
+`EcsBridge` 不再只能手动 `pull_all` / `push_all`,而是作为 **`NonSend` 资源**经两个
+exclusive system 接入 Bevy 的 `Schedule`,把「拉取 → 用户逻辑 → 回写」固化为帧内有序阶段:
+
+- `LoomSyncSet { Pull, Push }`:`#[derive(SystemSet)]` 的两个阶段标记,经
+  `configure_sets((Pull, Push).chain())` 保证 **拉取恒先于回写**,中间留给用户系统读信号、改信号。
+- `insert_bridge(&mut World, EcsBridge)` / `remove_bridge(&mut World) -> Option<EcsBridge>`:
+  安装 / 取出桥(`NonSend`,因 `EcsBridge` 持有非 `Send` 的信号句柄)。
+- `loom_pull_system` / `loom_push_system`:`fn(&mut World)` 的 exclusive system,各自对应一个阶段。
+- `add_loom_sync_systems(&mut Schedule) -> &mut Schedule`:一行把两系统按 `LoomSyncSet` 顺序挂上,返回
+  `&mut Schedule` 以便链式配置。
+
+> 实现要点:`World::resource_scope` 仅支持 `Resource`,对 `NonSend` 不可用;本 crate 用
+> **安全的 remove → 调用 → 重新 insert** 模式借出桥(全程无 `unsafe`,`#![forbid(unsafe_code)]` 不破)。
+
+```rust
+use bevy_ecs::prelude::{Component, Schedule, World};
+use prism_ui_ecs::{EcsBridge, schedule::{add_loom_sync_systems, insert_bridge}};
+use prism_ui_reactive::Runtime;
+
+#[derive(Component)]
+struct Health { hp: i32 }
+
+let mut world = World::new();
+let e = world.spawn(Health { hp: 100 }).id();
+
+let rt = Runtime::new();
+let hp = rt.signal(0i32);
+
+let mut bridge = EcsBridge::new();
+bridge.bind_two_way::<Health, i32>(e, hp.clone(), |c| c.hp, |c, v| c.hp = *v);
+insert_bridge(&mut world, bridge);
+
+let mut schedule = Schedule::default();
+add_loom_sync_systems(&mut schedule);
+
+// 每帧 run:Pull 阶段把组件变化灌入信号,Push 阶段把信号写回组件。
+schedule.run(&mut world);
+assert_eq!(hp.get_untracked(), 100);
+```
+
+这样 Loom 的响应式层就能作为标准 Bevy 系统集参与调度,与渲染 / 物理等既有阶段共存、可排序,
+是「字段级绑定核心」从库函数走向 **引擎原生生命周期** 的关键一步。
+
+
 ---
 
 ## 组合示例:高级层如何协同

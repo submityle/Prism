@@ -85,45 +85,48 @@ Loom 以多个独立 crate 分层实现,每一层都可单独使用。下表为 
 
 | Crate | 职责 | 状态 | 测试 |
 |---|---|---|---|
-| [`prism_ui_reactive`](../prism_ui_reactive) | 无毛刺(glitch-free)的 Signal / Memo / Effect 图 | ✅ 已交付 | 10 |
-| [`prism_ui_tree`](../prism_ui_tree) | 分代 Arena、保留树、LIS 最小化的 keyed 协调器 | ✅ 已交付 | 10 |
-| [`prism_ui_style`](../prism_ui_style) | design token、class、选择器、级联 | ✅ 已交付 | 14 |
-| [`prism_ui_layout`](../prism_ui_layout) | 纯 Rust Flexbox 求解器 | ✅ 已交付 | 16 |
-| [`prism_ui_anim`](../prism_ui_anim) | 缓动、弹簧、时间线、过渡 | ✅ 已交付 | 34 |
-| [`prism_ui`](.) | 伞 crate:`Element` / `Ui` 运行时 / `Backend` | ✅ 已交付 | 21 |
-| [`prism_ui_macro`](../prism_ui_macro) | `loom!` 声明式 DSL(proc-macro) | ✅ 已交付 | 8 |
+| [`prism_ui_reactive`](../prism_ui_reactive) | 无毛刺(glitch-free)的 Signal / Memo / Effect 图 | ✅ 已交付 | 19 |
+| [`prism_ui_tree`](../prism_ui_tree) | 分代 Arena、保留树、LIS 最小化的 keyed 协调器 | ✅ 已交付 | 9 |
+| [`prism_ui_style`](../prism_ui_style) | design token、class、选择器、级联 | ✅ 已交付 | 13 |
+| [`prism_ui_layout`](../prism_ui_layout) | 纯 Rust Flexbox 求解器 | ✅ 已交付 | 15 |
+| [`prism_ui_anim`](../prism_ui_anim) | 缓动、弹簧、时间线、过渡 | ✅ 已交付 | 33 |
+| [`prism_ui`](.) | 伞 crate:`Element` / `Ui` 运行时 / `Backend` | ✅ 已交付 | 28 |
+| [`prism_ui_macro`](../prism_ui_macro) | `loom!` 声明式 DSL(proc-macro) | ✅ 已交付 | 13 |
 
 **高级层(Advanced)** — 对标 React/SolidJS/Vue 生态的一等能力,全部构建在上述核心层之上:
 
 | Crate | 职责 | 状态 | 测试 |
 |---|---|---|---|
-| [`prism_ui_component`](../prism_ui_component) | 组件模型:`Component` trait、props、具名多插槽、Context 注入 | ✅ 已交付 | 15 |
-| [`prism_ui_store`](../prism_ui_store) | 可预测全局状态:`Store` + 细粒度选择器 + 中间件 | ✅ 已交付 | 12 |
-| [`prism_ui_i18n`](../prism_ui_i18n) | 国际化:响应式消息目录、插值、CLDR 复数选择 | ✅ 已交付 | 10 |
-| [`prism_ui_router`](../prism_ui_router) | 响应式客户端路由:路径匹配、`:param` / `*wildcard`、历史栈 | ✅ 已交付 | 16 |
-| [`prism_ui_devtools`](../prism_ui_devtools) | 内省工具:树快照、`render_tree` 美化输出、`BackendOp` 轨迹统计 | ✅ 已交付 | 10 |
-| [`prism_ui_overlay`](../prism_ui_overlay) | Portal / Overlay:模态 / popover / tooltip / toast、z-order、backdrop、`FocusTrap` | ✅ 已交付 | 12 |
-| [`prism_ui_form`](../prism_ui_form) | 响应式表单:双向绑定、`Validator`(required/min/max/int_range/pattern/custom)、touched/dirty、errors memo | ✅ 已交付 | 10 |
-| [`prism_ui_virtual`](../prism_ui_virtual) | 列表虚拟化:定高/变高(前缀和二分)、overscan、回收池、spacer+可见项 | ✅ 已交付 | 18 |
-| [`prism_ui_async`](../prism_ui_async) | 异步健壮性:`AsyncState` / `Resource`、Suspense、Error Boundary、`all` 聚合 | ✅ 已交付 | 9 |
-| [`prism_ui_a11y`](../prism_ui_a11y) | 无障碍:`Role` / `AriaState` / `Label`、`A11yTree`、`FocusOrder`、`KeyboardNav`、`LiveRegion` | ✅ 已交付 | 43 |
-| [`prism_ui_scoped`](../prism_ui_scoped) | 组件作用域样式(`ScopeId` 稳定散列、class 命名空间化)、响应式 `@media` 断点解析(mobile-first 级联) | ✅ 已交付 | 23 |
-| [`prism_ui_motion`](../prism_ui_motion) | 自动过渡:隐式样式过渡(记忆旧值→Tween)、FLIP 布局动画、共享元素(Hero)过渡 | ✅ 已交付 | 32 |
-| [`prism_ui_snapshot`](../prism_ui_snapshot) | 快照测试:可逆文本序列化、行级 LCS diff、golden 比对(`Comparison`)、布局快照(`LayoutQuery`) | ✅ 已交付 | 25 |
-| [`prism_ui_workbench`](../prism_ui_workbench) | 组件工作台(Storybook 风格):`ControlValue`/`ArgSet` 类型校验、`Story`/`StoryBuilder`、两级分层注册、隔离 harness | ✅ 已交付 | 19 |
-| [`prism_ui_timetravel`](../prism_ui_timetravel) | 时间旅行调试:帧时间线(编辑器式 undo/redo)、跳转、重放(相邻帧 `diff`/变更摘要) | ✅ 已交付 | 20 |
-| [`prism_ui_inspector`](../prism_ui_inspector) | 元素树检查器:`NodePath` 寻址、`Query` 过滤、`PerfReport`/`TreeMetrics` 性能面板、`DependencyGraph`(signal 依赖图:传递闭包/拓扑序/Graphviz 导出) | ✅ 已交付 | 50 |
-| [`prism_ui_hotreload`](../prism_ui_hotreload) | `.loom` / `.loom.style` 热重载:节点身份(`NodePath`)比对、`ReloadPlan`(保留/新增/移除/重建)、跨重载状态保留(`StateStore`)、样式 `StyleDiff` | ✅ 已交付 | 30 |
-| [`prism_ui_ecs`](../prism_ui_ecs) | **ECS 桥接(M2 headline)**:组件字段 <-> `Signal` 字段级双向绑定(`FieldBinding`/`EcsBridge`),复用 ECS tick 变更检测作传输、相等性守卫防振荡 | ✅ 已交付 | 19 |
+| [`prism_ui_component`](../prism_ui_component) | 组件模型:`Component` trait、props、具名多插槽、Context 注入 | ✅ 已交付 | 14 |
+| [`prism_ui_store`](../prism_ui_store) | 可预测全局状态:`Store` + 细粒度选择器 + 中间件 | ✅ 已交付 | 11 |
+| [`prism_ui_i18n`](../prism_ui_i18n) | 国际化:响应式消息目录、插值、CLDR 复数选择 | ✅ 已交付 | 9 |
+| [`prism_ui_router`](../prism_ui_router) | 响应式客户端路由:路径匹配、`:param` / `*wildcard`、历史栈 | ✅ 已交付 | 15 |
+| [`prism_ui_devtools`](../prism_ui_devtools) | 内省工具:树快照、`render_tree` 美化输出、`BackendOp` 轨迹统计 | ✅ 已交付 | 9 |
+| [`prism_ui_overlay`](../prism_ui_overlay) | Portal / Overlay:模态 / popover / tooltip / toast、z-order、backdrop、`FocusTrap` | ✅ 已交付 | 22 |
+| [`prism_ui_form`](../prism_ui_form) | 响应式表单:双向绑定、`Validator`(required/min/max/int_range/pattern/custom)、touched/dirty、errors memo | ✅ 已交付 | 20 |
+| [`prism_ui_virtual`](../prism_ui_virtual) | 列表虚拟化:定高/变高(前缀和二分)、overscan、回收池、spacer+可见项 | ✅ 已交付 | 25 |
+| [`prism_ui_async`](../prism_ui_async) | 异步健壮性:`AsyncState` / `Resource`、Suspense、Error Boundary、`all` 聚合 | ✅ 已交付 | 13 |
+| [`prism_ui_a11y`](../prism_ui_a11y) | 无障碍:`Role` / `AriaState` / `Label`、`A11yTree`、`FocusOrder`、`KeyboardNav`、`LiveRegion` | ✅ 已交付 | 49 |
+| [`prism_ui_scoped`](../prism_ui_scoped) | 组件作用域样式(`ScopeId` 稳定散列、class 命名空间化)、响应式 `@media` 断点解析(mobile-first 级联) | ✅ 已交付 | 26 |
+| [`prism_ui_motion`](../prism_ui_motion) | 自动过渡:隐式样式过渡(记忆旧值→Tween)、FLIP 布局动画、共享元素(Hero)过渡 | ✅ 已交付 | 37 |
+| [`prism_ui_snapshot`](../prism_ui_snapshot) | 快照测试:可逆文本序列化、行级 LCS diff、golden 比对(`Comparison`)、布局快照(`LayoutQuery`) | ✅ 已交付 | 29 |
+| [`prism_ui_workbench`](../prism_ui_workbench) | 组件工作台(Storybook 风格):`ControlValue`/`ArgSet` 类型校验、`Story`/`StoryBuilder`、两级分层注册、隔离 harness | ✅ 已交付 | 27 |
+| [`prism_ui_timetravel`](../prism_ui_timetravel) | 时间旅行调试:帧时间线(编辑器式 undo/redo)、跳转、重放(相邻帧 `diff`/变更摘要) | ✅ 已交付 | 24 |
+| [`prism_ui_inspector`](../prism_ui_inspector) | 元素树检查器:`NodePath` 寻址、`Query` 过滤、`PerfReport`/`TreeMetrics` 性能面板、`DependencyGraph`(signal 依赖图:传递闭包/拓扑序/Graphviz 导出) | ✅ 已交付 | 57 |
+| [`prism_ui_hotreload`](../prism_ui_hotreload) | `.loom` / `.loom.style` 热重载:节点身份(`NodePath`)比对、`ReloadPlan`(保留/新增/移除/重建)、跨重载状态保留(`StateStore`)、样式 `StyleDiff` | ✅ 已交付 | 45 |
+| [`prism_ui_ecs`](../prism_ui_ecs) | **ECS 桥接(M2 headline)**:组件字段 <-> `Signal` 字段级双向绑定(`FieldBinding`/`EcsBridge`),复用 ECS tick 变更检测作传输、相等性守卫防振荡;Bevy 调度器集成(`LoomSyncSet` / `NonSend` + exclusive system) | ✅ 已交付 | 43 |
 
-全部 25 个 crate 累计 **486 个单测通过**(另有集成测试与 doctest)。每个 crate 均:`#![forbid(unsafe_code)]`、
+全部 25 个 crate 累计 **605 个 lib + 集成测试通过**(表中「测试」列为各 crate `--lib --tests` 计数;另有 41 个 doctest 通过,合计 646)。每个 crate 均:`#![forbid(unsafe_code)]`、
 `no_std` 友好(`default = ["std"]`,proc-macro crate 除外)、通过严格 Clippy(零告警)。
 
-> **诚实声明**:仍为 **设计阶段(PLANNED)** 的能力包括:响应式信号 **自动绑定到
-> ECS 实体字段**、`.loom` / `.loom.style` **资产热重载**、
-> **静态子树提升 / 编译期稳定节点 ID**。列表 **虚拟化**、**Suspense / Error Boundary**、
-> **Portal / Overlay**、**表单校验**、**a11y 基线**、**作用域样式 / 响应式 @media**、
-> **隐式过渡 / FLIP 布局动画 / 共享元素过渡** 现均已交付为引擎弱耦合 crate。见
+> **诚实声明**:仍为 **设计阶段(PLANNED)** 的能力包括:宏层 `$` 语法糖 **自动登记
+> ECS 绑定**、`Show` / `For` 结构绑定(批量 spawn/despawn 到帧末)、`.loom` / `.loom.style`
+> 热重载的 **文件系统监听集成**、**静态子树提升**、**双模式编译**(dev 解释 / release 宏固化)。
+> 已交付并通过测试的能力包括:字段级 **ECS ↔ Signal 双向绑定** 及其 **Bevy 调度器集成**
+> (`LoomSyncSet` / `NonSend` + exclusive system)、**编译期稳定节点 ID**、`.loom` / `.loom.style`
+> **热重载核心**(节点身份比对 + 状态保留 + 样式 diff)、列表 **虚拟化**、
+> **Suspense / Error Boundary**、**Portal / Overlay**、**表单校验**、**a11y 基线**、
+> **作用域样式 / 响应式 @media**、**隐式过渡 / FLIP 布局动画 / 共享元素过渡**,均为引擎弱耦合 crate。见
 > [docs/roadmap.md](docs/roadmap.md)。本文档不会把未实现的能力描述为已实现。
 > 已交付的高级层(组件 / Store / i18n / 路由 / DevTools)目前为 **引擎弱耦合的
 > 独立运行时能力**,与 Prism/ECS 实体的深度绑定仍在 roadmap 中推进。
