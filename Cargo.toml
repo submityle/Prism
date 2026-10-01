@@ -43,6 +43,8 @@ members = [
   "pkg/prism_audio_spatial",
   # Prism next-generation audio engine HRTF binaural layer (SOFA/AES69 HRIR datasets, ITD-aligned interpolation, partitioned convolution, near-field ILD/parallax).
   "pkg/prism_audio_hrtf",
+  # Prism Loom: next-generation declarative UI/scene notation.
+  "pkg/prism_ui_reactive",
   # Several crates with macros have "compile fail" tests nested inside them, also known as UI
   # tests, that verify diagnostic output does not accidentally change.
   # TODO: Use a glob pattern once they are fixed in `dependabot-core`

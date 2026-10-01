@@ -1,0 +1,14 @@
+[package]
+name = "prism_ui_reactive"
+version = "0.1.0"
+edition = "2024"
+description = "Fine-grained reactive core (signals, memos, effects, batching) for Prism's Loom UI/scene notation. Push-dirty + pull-on-read, glitch-free, engine-agnostic. Contains no Unreal Engine source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[features]
+default = ["std"]
+std = []
+
+[lints]
+workspace = true
