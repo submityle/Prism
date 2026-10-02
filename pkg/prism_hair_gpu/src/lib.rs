@@ -681,6 +681,7 @@ pub mod closest_point_triangle;
 pub mod cluster_cull;
 pub mod collision;
 pub mod compute_barycentric;
+pub mod contact_distance;
 pub mod context;
 pub mod cosserat;
 pub mod decimation_priority;
@@ -767,6 +768,9 @@ pub use closest_point_triangle::{
 pub use cluster_cull::GpuHairClusterCull;
 pub use collision::{query_for, CollisionQuery, GpuColliderProjector};
 pub use compute_barycentric::{reference_compute_barycentric, GpuHairComputeBarycentric};
+pub use contact_distance::{
+    reference_point_plane_signed_distance, reference_point_point_distance, GpuHairContactDistance,
+};
 pub use context::{block_on, GpuContext};
 pub use cosserat::GpuCosserat;
 pub use decimation_priority::GpuDecimationPriority;
