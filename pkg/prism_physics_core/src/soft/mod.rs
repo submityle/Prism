@@ -42,6 +42,7 @@ pub use collision::{
     resolve_self_collision, resolve_self_collision_jacobi, resolve_self_collision_virtual,
     resolve_self_collision_virtual_augment,
     resolve_self_collision_virtual_augment_jacobi, resolve_self_collision_virtual_jacobi,
+    accumulate_vertex_normals, resolve_layer_coupling, resolve_layer_coupling_jacobi, LayerParams,
     couple_particle_against_body, resolve_self_collision_with_friction,
     resolve_self_collision_with_friction_jacobi, resolve_two_way_coupling,
     sphere_toi, swept_pair_toi, Backstop, BodyCollider, CcdParams, CouplingBody,

@@ -37,6 +37,8 @@ mod body;
 mod ccd;
 mod coupling;
 mod friction;
+mod layers;
+mod layers_jacobi;
 mod self_ccd;
 mod self_ccd_jacobi;
 mod self_collision;
@@ -59,6 +61,8 @@ pub use self_collision::{resolve_self_collision, resolve_self_collision_with_fri
 pub use self_collision_jacobi::{
     resolve_self_collision_jacobi, resolve_self_collision_with_friction_jacobi,
 };
+pub use layers::{accumulate_vertex_normals, resolve_layer_coupling, LayerParams};
+pub use layers_jacobi::resolve_layer_coupling_jacobi;
 pub use virtual_particles::{
     generate_virtual_particles, resolve_self_collision_virtual,
     resolve_self_collision_virtual_augment, VirtualParticle, VirtualParticlePattern,
