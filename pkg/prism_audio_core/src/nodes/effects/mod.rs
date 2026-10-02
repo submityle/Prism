@@ -146,6 +146,14 @@
 //!   latches the current magnitude spectrum and advances each bin's phase by
 //!   its own centre frequency, sustaining the captured timbre indefinitely
 //!   with an optional deterministic phase diffusion for a shimmering pad.
+//! - [`spectral_compressor::SpectralCompressorNode`] -- frequency-domain
+//!   spectral compressor: a weighted overlap-add short-time Fourier
+//!   transform (`STFT`) applies a feed-forward compression law (threshold,
+//!   ratio, soft knee, makeup, attack / release) to each bin independently,
+//!   taming loud bands without pumping the rest of the spectrum; distinct
+//!   from the per-bin gating of [`spectral_gate::SpectralGateNode`] and from
+//!   the single broadband detector of the time-domain
+//!   [`dynamics::compressor`](crate::nodes::dynamics::compressor).
 //! - [`spectral_gate::SpectralGateNode`] -- frequency-domain spectral gate /
 //!   downward spectral expander: a weighted overlap-add short-time Fourier
 //!   transform (`STFT`) attenuates bins below a `dBFS` threshold toward a floor,
@@ -267,6 +275,7 @@ pub mod reverse_delay;
 pub mod ring_modulator;
 pub mod saturation;
 pub mod slew_limiter;
+pub mod spectral_compressor;
 pub mod spectral_delay;
 pub mod spectral_freeze;
 pub mod spectral_gate;
@@ -350,6 +359,14 @@ pub use reverse_delay::{
 pub use ring_modulator::{RingModulatorNode, RingModulatorParams};
 pub use saturation::{DEFAULT_DC_BLOCK_COEFF, SaturationCurve, SaturationNode, SaturationParams};
 pub use slew_limiter::{SlewLimiterNode, SlewLimiterParams};
+pub use spectral_compressor::{
+    SpectralCompressorNode, SpectralCompressorParams, COMPRESSOR_OVERLAP_FACTOR,
+    DEFAULT_COMPRESSOR_ATTACK_MS, DEFAULT_COMPRESSOR_FFT_SIZE, DEFAULT_COMPRESSOR_KNEE_DB,
+    DEFAULT_COMPRESSOR_MAKEUP_DB, DEFAULT_COMPRESSOR_MIX, DEFAULT_COMPRESSOR_RATIO,
+    DEFAULT_COMPRESSOR_RELEASE_MS, DEFAULT_COMPRESSOR_THRESHOLD_DB, MAX_COMPRESSOR_KNEE_DB,
+    MAX_COMPRESSOR_MAKEUP_DB, MAX_COMPRESSOR_RATIO, MAX_COMPRESSOR_THRESHOLD_DB,
+    MAX_COMPRESSOR_TIME_MS, MIN_COMPRESSOR_FFT_SIZE, MIN_COMPRESSOR_THRESHOLD_DB,
+};
 pub use spectral_delay::{
     DEFAULT_FEEDBACK, DEFAULT_HIGH_DELAY_MS, DEFAULT_LOW_DELAY_MS, DEFAULT_MIX,
     DEFAULT_SPECTRAL_DELAY_FFT_SIZE, MAX_DELAY_MS, MAX_SPECTRAL_DELAY_FEEDBACK,
