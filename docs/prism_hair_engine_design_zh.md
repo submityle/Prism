@@ -123,6 +123,11 @@ fallback:
 8. **GPU-driven 持久化 + 异步流水线**：guide 状态常驻 GPU、约束图着色分批，sim 与渲染解耦异步跑（物理 §11/§12）——摊平尖峰、不阻塞主渲染。
 9. **休眠 / 激活**：静止角色停 sim、被扰动再激活。成本：负（省算力）；效果：大量 NPC 毛发可扩展。
 
+**与物理内核的边界（对称布料设计 §末）**：通用求解数值（XPBD/VBD 原语）归 `prism_physics_core` 统一内核，渲染侧毛发模块只负责 strand 几何/LOD/插值/透射/形变调度与 **strand 专有**约束，**不重复造通用求解器**。落地状态：
+
+- **已 delegate**：边长（距离）约束——`hair/dynamics.rs` 不再内嵌手写 XPBD 距离步，经 `hair/physics_bridge.rs`（仿 `cloth/physics_bridge.rs`：`StrandParticle`→SoA、pinned→`inverse_mass=0`、写回）调 `prism_physics_core::soft::constraint::project_distance_constraint`（逐段 Gauss-Seidel、`lambda=0`）。数学等价（仅低位 ULP 差），CPU 单测与 `prism_hair_gpu` guide_solver 孪生 parity 全绿。
+- **strand 专有，保留在毛发侧**：局部弯曲（离散 Laplacian 中点平滑，公式异于 physics_core `bending`）、全局形状（拉回造型目标）、LRA/tether（`TressFX` 式线性 stiffness 分数，语义不同于 physics_core `long_range` 的 XPBD compliance——partial stiffness 行为不等价，故不盲目 delegate）、Cosserat 卷发扭转、DFTL 不可伸长积分、PD 全局投影、体素/网格自碰撞、C-IPC 屏障接触，以及 strand↔body 解析代理碰撞（physics_core 无逐粒子等价原语时保留；UE 亦把 groom sim 作专用子系统）。待 physics_core 暴露可直接复用的通用原语后再逐块评估迁移。
+
 ---
 
 ## 7. 毛发着色模型（v2 新增，材质系统 closure 侧）
