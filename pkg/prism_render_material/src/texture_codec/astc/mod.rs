@@ -21,7 +21,7 @@
 mod block_reader;
 mod void_extent;
 
-pub use void_extent::decode_astc_void_extent_ldr;
+pub use void_extent::{decode_astc_void_extent_hdr, decode_astc_void_extent_ldr};
 
 /// Errors returned by the ASTC decoders.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

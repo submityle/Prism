@@ -53,7 +53,9 @@ mod formats;
 mod snorm_block;
 mod source;
 
-pub use astc::{decode_astc_4x4_ldr, decode_astc_void_extent_ldr, AstcError};
+pub use astc::{
+    decode_astc_4x4_ldr, decode_astc_void_extent_hdr, decode_astc_void_extent_ldr, AstcError,
+};
 pub use bc6h::{
     bc6h_mode_bits, decode_bc6h_mode10_signed, decode_bc6h_mode10_unsigned,
     decode_bc6h_mode11_signed, decode_bc6h_mode11_unsigned, decode_bc6h_mode12_signed,

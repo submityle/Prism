@@ -19,6 +19,7 @@
 
 use super::block_reader::read_bits;
 use super::AstcError;
+use crate::texture_codec::half_bits_to_f32;
 
 /// The 9-bit signature that marks a void-extent block.
 pub(super) const VOID_EXTENT_SIGNATURE: u32 = 0b1_1111_1100;
@@ -56,6 +57,35 @@ pub fn decode_astc_void_extent_ldr(block: &[u8; 16]) -> Result<[[u8; 4]; 16], As
     let g = unorm16_to_unorm8(read_bits(block, 80, 16));
     let b = unorm16_to_unorm8(read_bits(block, 96, 16));
     let a = unorm16_to_unorm8(read_bits(block, 112, 16));
+    Ok([[r, g, b, a]; 16])
+}
+
+/// Decode a void-extent **HDR** block to sixteen identical `RGBA` texels, each
+/// channel a decoded FP16 value (red, green, blue, alpha).
+///
+/// Void-extent HDR stores its four 16-bit colour fields as IEEE half-floats
+/// (as opposed to the UNORM16 interpretation used by the LDR path); the field
+/// positions are identical, which is why this reuses the same layout the LDR
+/// decoder is hardware-proven against.
+///
+/// # Errors
+/// * [`AstcError::Reserved`] if the signature bits are not the void-extent
+///   pattern.
+/// * [`AstcError::UnsupportedHdr`] (used here as "not HDR") if the
+///   dynamic-range flag selects LDR; call [`decode_astc_void_extent_ldr`]
+///   for those blocks instead.
+pub fn decode_astc_void_extent_hdr(block: &[u8; 16]) -> Result<[[f32; 4]; 16], AstcError> {
+    if !is_void_extent(block) {
+        return Err(AstcError::Reserved);
+    }
+    if read_bits(block, 9, 1) == 0 {
+        // LDR block routed to the HDR path.
+        return Err(AstcError::UnsupportedHdr);
+    }
+    let r = half_bits_to_f32(read_bits(block, 64, 16) as u16);
+    let g = half_bits_to_f32(read_bits(block, 80, 16) as u16);
+    let b = half_bits_to_f32(read_bits(block, 96, 16) as u16);
+    let a = half_bits_to_f32(read_bits(block, 112, 16) as u16);
     Ok([[r, g, b, a]; 16])
 }
 
@@ -107,6 +137,36 @@ mod tests {
         blk[1] |= 1 << (9 - 8); // set bit 9 (byte 1, bit 1)
         assert_eq!(
             decode_astc_void_extent_ldr(&blk),
+            Err(AstcError::UnsupportedHdr)
+        );
+    }
+
+    /// Build an HDR void-extent block with the given FP16 bit patterns.
+    fn hdr_block(r: u16, g: u16, b: u16, a: u16) -> [u8; 16] {
+        let mut blk = ldr_block(r, g, b, a);
+        blk[1] |= 1 << (9 - 8); // set bit 9 (HDR dynamic-range flag)
+        blk[8..10].copy_from_slice(&r.to_le_bytes());
+        blk[10..12].copy_from_slice(&g.to_le_bytes());
+        blk[12..14].copy_from_slice(&b.to_le_bytes());
+        blk[14..16].copy_from_slice(&a.to_le_bytes());
+        blk
+    }
+
+    #[test]
+    fn hdr_decodes_fp16_channels() {
+        // 0x3C00 = 1.0, 0x4000 = 2.0, 0x0000 = 0.0, 0x3800 = 0.5 in FP16.
+        let blk = hdr_block(0x3C00, 0x4000, 0x0000, 0x3800);
+        let out = decode_astc_void_extent_hdr(&blk).unwrap();
+        for texel in out {
+            assert_eq!(texel, [1.0, 2.0, 0.0, 0.5]);
+        }
+    }
+
+    #[test]
+    fn hdr_path_rejects_ldr_block() {
+        let blk = ldr_block(0, 0, 0, 0);
+        assert_eq!(
+            decode_astc_void_extent_hdr(&blk),
             Err(AstcError::UnsupportedHdr)
         );
     }

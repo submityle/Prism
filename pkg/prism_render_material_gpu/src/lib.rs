@@ -77,7 +77,8 @@ impl BlockOracle {
         let avail = adapter.features();
         let wanted = Features::TEXTURE_COMPRESSION_BC
             | Features::TEXTURE_COMPRESSION_ETC2
-            | Features::TEXTURE_COMPRESSION_ASTC;
+            | Features::TEXTURE_COMPRESSION_ASTC
+            | Features::TEXTURE_COMPRESSION_ASTC_HDR;
         let features = avail & wanted;
         if !features.contains(Features::TEXTURE_COMPRESSION_BC) {
             return None;
