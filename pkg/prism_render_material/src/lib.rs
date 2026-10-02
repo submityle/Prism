@@ -56,7 +56,7 @@ pub use surface::{
 pub use texture_addressing::{address_uv, wrap_coord, AddressResult, WrapMode};
 pub use texture_blur::{
     bilateral_blur, bilateral_blur_plane, blur_plane, box_blur, box_blur_plane, gaussian_blur,
-    gaussian_weights_1d,
+    gaussian_weights_1d, unsharp_mask, unsharp_mask_plane,
 };
 pub use texture_codec::{
     bc6h_mode_bits, bc7_mode, decode_bc1, decode_bc2, decode_bc3, decode_bc4, decode_bc4_signed,
