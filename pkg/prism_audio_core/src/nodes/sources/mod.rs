@@ -94,6 +94,15 @@
 //!   two-layer subtractive voice, and unlike [`analog_kick`] it adds a second
 //!   tuned partial and a dominant deterministic noise layer instead of a pitch
 //!   sweep. Triggered by [`analog_snare::AnalogSnareNode::trigger`].
+//! - [`analog_hihat::AnalogHiHatNode`] -- analog-style hi-hat / cymbal voice:
+//!   a bank of six band-limited square oscillators tuned to an inharmonic
+//!   `sqrt`-integer ratio set, summed into a metallic cluster, then shaped by
+//!   a band-pass and a high-pass biquad and an exponential VCA (short decay
+//!   gives a closed hi-hat, long decay an open one), driven through a `tanh`
+//!   saturator. Unlike the modal physical metals ([`bell`], [`struck_plate`])
+//!   it is a direct subtractive oscillator cluster, and unlike the random
+//!   noise burst of [`analog_snare`] it is fully deterministic. Triggered by
+//!   [`analog_hihat::AnalogHiHatNode::trigger`].
 //!   `rate_hz` scales the integration speed while the single dissipation `b`
 //!   morphs the labyrinthine orbit from dense chaos (small `b`) toward a quiet
 //!   fixed point (large `b`). Unlike [`rossler_attractor`] its sinusoidal
@@ -487,6 +496,7 @@ pub mod thomas_attractor;
 pub mod chua_circuit;
 pub mod analog_kick;
 pub mod analog_snare;
+pub mod analog_hihat;
 
 pub use air_jet_flute::{AirJetFluteNode, AirJetFluteParams};
 pub use additive_oscillator::{AdditiveOscillatorNode, AdditiveOscillatorParams};
@@ -502,6 +512,7 @@ pub use thomas_attractor::{ThomasAttractorNode, ThomasAttractorParams};
 pub use chua_circuit::{ChuaCircuitNode, ChuaCircuitParams};
 pub use analog_kick::{AnalogKickNode, AnalogKickParams};
 pub use analog_snare::{AnalogSnareNode, AnalogSnareParams};
+pub use analog_hihat::{AnalogHiHatNode, AnalogHiHatParams};
 pub use conical_reed::{ConicalReedNode, ConicalReedParams};
 pub use dsf_oscillator::{DsfOscillatorNode, DsfOscillatorParams};
 pub use dust::{DustNode, DustParams, Polarity};
