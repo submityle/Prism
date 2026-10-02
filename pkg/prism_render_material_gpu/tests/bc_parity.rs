@@ -11,7 +11,7 @@
 //! without a usable adapter the oracle returns `None` and the test skips.
 
 use prism_render_material::{
-    decode_bc1, decode_bc3, decode_bc6h_mode10_signed, decode_bc6h_mode10_unsigned,
+    decode_astc_void_extent_ldr, decode_bc1, decode_bc3, decode_bc6h_mode10_signed, decode_bc6h_mode10_unsigned,
     decode_bc6h_mode12_signed, decode_bc6h_mode12_unsigned, decode_bc6h_mode13_signed,
     decode_bc6h_mode13_unsigned, decode_bc6h_mode14_signed, decode_bc6h_mode14_unsigned,
     decode_bc6h_mode1_signed, decode_bc6h_mode1_unsigned, decode_bc6h_mode2_signed,
@@ -1718,4 +1718,64 @@ fn eac_rg11_snorm_parity_against_gpu_hardware_decode() {
         }
     }
     eprintln!("EAC RG11 snorm parity: {COUNT} blocks bit-exact (red+green)");
+}
+
+
+/// Build an LDR void-extent ASTC block carrying the given 16-bit UNORM channels
+/// and a degenerate (all-ones) extent, matching the CPU decoder's expectation.
+fn astc_void_extent_ldr(r: u16, g: u16, b: u16, a: u16) -> [u8; 16] {
+    let mut blk = [0u8; 16];
+    let mut lo: u64 = 0;
+    lo |= 0b1_1111_1100u64; // void-extent signature, bits [0..9)
+    // bit 9 = 0 selects LDR.
+    lo |= 0b11u64 << 10; // reserved, bits [10..12)
+    lo |= ((1u64 << 52) - 1) << 12; // extent coordinates, bits [12..64)
+    blk[0..8].copy_from_slice(&lo.to_le_bytes());
+    blk[8..10].copy_from_slice(&r.to_le_bytes());
+    blk[10..12].copy_from_slice(&g.to_le_bytes());
+    blk[12..14].copy_from_slice(&b.to_le_bytes());
+    blk[14..16].copy_from_slice(&a.to_le_bytes());
+    blk
+}
+
+#[test]
+fn astc_void_extent_ldr_parity_against_gpu_hardware_decode() {
+    let Some(oracle) = BlockOracle::try_new() else {
+        eprintln!("no GPU adapter; skipping ASTC void-extent parity");
+        return;
+    };
+    if !oracle
+        .features()
+        .contains(Features::TEXTURE_COMPRESSION_ASTC)
+    {
+        eprintln!("adapter lacks ASTC support; skipping ASTC void-extent parity");
+        return;
+    }
+    let format = TextureFormat::Astc {
+        block: wgpu::AstcBlock::B4x4,
+        channel: wgpu::AstcChannel::Unorm,
+    };
+    let mut rng = Rng(0xA57C_0001);
+    const COUNT: u32 = 256;
+    for _ in 0..COUNT {
+        let r = (rng.next_u32() & 0xFFFF) as u16;
+        let g = (rng.next_u32() & 0xFFFF) as u16;
+        let b = (rng.next_u32() & 0xFFFF) as u16;
+        let a = (rng.next_u32() & 0xFFFF) as u16;
+        let blk = astc_void_extent_ldr(r, g, b, a);
+        let cpu = decode_astc_void_extent_ldr(&blk).expect("valid LDR void-extent");
+        let gpu = oracle.decode_unorm8(format, &blk);
+        for t in 0..16 {
+            for c in 0..4 {
+                let d = (cpu[t][c] as i32 - gpu[t][c] as i32).abs();
+                assert!(
+                    d <= 1,
+                    "ASTC void-extent block={blk:02x?} texel {t} chan {c}: cpu={} gpu={} (|d|={d})",
+                    cpu[t][c],
+                    gpu[t][c]
+                );
+            }
+        }
+    }
+    eprintln!("ASTC void-extent LDR parity: {COUNT} blocks within 1 LSB of hardware");
 }
