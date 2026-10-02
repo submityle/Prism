@@ -11,11 +11,13 @@ prism_ui = { path = "../prism_ui" }
 prism_ui_layout = { path = "../prism_ui_layout" }
 prism_ui_style = { path = "../prism_ui_style" }
 wgpu = { version = "30", default-features = false, features = ["wgsl", "metal"], optional = true }
+bytemuck = { version = "1", optional = true }
+futures-lite = { version = "2", optional = true }
 
 [features]
 default = ["std"]
 std = ["prism_ui/std", "prism_ui_layout/std", "prism_ui_style/std"]
-gpu = ["dep:wgpu"]
+gpu = ["dep:wgpu", "dep:bytemuck", "dep:futures-lite", "std"]
 
 [lints]
 workspace = true

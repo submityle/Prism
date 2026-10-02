@@ -34,6 +34,26 @@ impl Framebuffer {
         }
     }
 
+    /// Builds a framebuffer from pre-shaded linear `RGBA` pixels in row-major
+    /// order. Used by the optional GPU backend to wrap read-back output so it
+    /// can be diffed against this reference rasteriser via [`Framebuffer::max_diff`].
+    ///
+    /// The `pixels` length must equal `width * height`; excess entries are
+    /// ignored and missing ones default to transparent black, so a malformed
+    /// read-back degrades to a comparable (if wrong) image rather than panics.
+    #[cfg(feature = "gpu")]
+    #[must_use]
+    pub(crate) fn from_pixels(width: u32, height: u32, pixels: alloc::vec::Vec<[f32; 4]>) -> Self {
+        let needed = (width as usize) * (height as usize);
+        let mut px = pixels;
+        px.resize(needed, [0.0; 4]);
+        Self {
+            width,
+            height,
+            pixels: px,
+        }
+    }
+
     /// Framebuffer width in pixels.
     #[must_use]
     pub fn width(&self) -> u32 {

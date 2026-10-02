@@ -61,6 +61,8 @@ extern crate alloc;
 
 pub mod batch;
 pub mod draw;
+#[cfg(feature = "gpu")]
+pub mod gpu;
 pub mod layer;
 pub mod raster;
 pub mod scene;
@@ -68,6 +70,8 @@ pub mod sdf;
 
 pub use batch::{batch, instance_count, Batch, GlyphInstance, RectInstance, ShadowInstance};
 pub use draw::{DrawCommand, DrawList, GlyphCmd, LayerCmd, RectCmd, ShadowCmd};
+#[cfg(feature = "gpu")]
+pub use gpu::GpuRasterizer;
 pub use layer::{Layer, LayerTree};
 pub use raster::{rasterize, Framebuffer};
 pub use scene::RetainedScene;
