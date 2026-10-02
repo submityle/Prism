@@ -46,6 +46,12 @@
 //!   `PolyBLEP` band-limited sawtooths spread around one fundamental by an
 //!   equal-temperament detune control and blended center-vs-sides by a `mix`
 //!   control, the lush JP-8000-style unison lead/pad voice.
+//! - [`granular_source::GranularSourceNode`] -- Gabor grain-cloud synthesizer:
+//!   a scheduler sprays overlapping Hann-windowed sine grains whose carrier
+//!   pitch, lifetime, and stereo placement are randomized from a deterministic
+//!   PRNG, with power-preserving level normalization. Unlike the capture-based
+//!   granulator effect it synthesizes its grains from scratch, so it is a true
+//!   zero-input source.
 //!
 //! Every generator is real-time safe: `process` performs no allocation, no
 //! locking, and no panics, and reproducible generators are fully deterministic
@@ -53,6 +59,7 @@
 
 pub mod additive_oscillator;
 pub mod fm_operator;
+pub mod granular_source;
 pub mod impulse_train;
 pub mod karplus_strong;
 pub mod noise;
@@ -64,6 +71,7 @@ pub mod wavetable_oscillator;
 
 pub use additive_oscillator::{AdditiveOscillatorNode, AdditiveOscillatorParams};
 pub use fm_operator::{FmOperatorNode, FmOperatorParams};
+pub use granular_source::{GranularSourceNode, GranularSourceParams, MAX_GRAINS};
 pub use impulse_train::{ImpulseTrainNode, ImpulseTrainParams};
 pub use karplus_strong::{KarplusStrongNode, KarplusStrongParams};
 pub use noise::{NoiseColor, NoiseNode};
