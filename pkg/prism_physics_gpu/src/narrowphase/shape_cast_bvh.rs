@@ -83,6 +83,23 @@ fn swept_aabb(shape: &RoundedConvex, dt: f32, extra: f32) -> Aabb {
 /// the full target count, which a single query can never exceed, so the gather
 /// cannot overflow; the `Err` arm nonetheless falls back to the whole scene so
 /// correctness never depends on the gather succeeding.
+/// Builds the conservative swept bounds the gather descends: one box per
+/// target (swept with no extra margin) and the moving shape's query box (swept
+/// with the full speculative `target_sep` margin so a target reached only within
+/// that margin is still gathered). Shared by the CPU [`candidates`] walk and the
+/// GPU-driven cast so both descend identical geometry, keeping the GPU candidate
+/// set a provable superset of the CPU one.
+pub(super) fn gather_boxes(
+    shape: &RoundedConvex,
+    targets: &[RoundedConvex],
+    dt: f32,
+    target_sep: f32,
+) -> (Vec<Aabb>, Aabb) {
+    let target_boxes = targets.iter().map(|t| swept_aabb(t, dt, 0.0)).collect();
+    let query = swept_aabb(shape, dt, target_sep.max(0.0));
+    (target_boxes, query)
+}
+
 fn candidates(
     shape: &RoundedConvex,
     targets: &[RoundedConvex],
@@ -92,12 +109,8 @@ fn candidates(
     if targets.is_empty() {
         return Vec::new();
     }
-    let target_boxes: Vec<Aabb> = targets.iter().map(|t| swept_aabb(t, dt, 0.0)).collect();
+    let (target_boxes, query) = gather_boxes(shape, targets, dt, target_sep);
     let lbvh = cpu_build_lbvh(&target_boxes);
-    // The query box carries the full speculative margin so a target reached only
-    // within target_sep is still gathered; over-inclusion only adds candidates
-    // the exact per-pair sweep then rejects.
-    let query = swept_aabb(shape, dt, target_sep.max(0.0));
     let capacity = u32::try_from(targets.len()).unwrap_or(u32::MAX);
     match cpu_bvh_aabb_overlap(&lbvh, &[query], capacity) {
         Ok(mut per_query) => per_query.pop().unwrap_or_default(),
@@ -113,7 +126,7 @@ fn candidates(
 /// order, reproducing [`cast_shape`](super::shape_cast::cast_shape) exactly. The
 /// comparison goes through `partial_cmp` so it never performs a direct float
 /// equality test.
-fn consider(best: &mut Option<ShapeCastHit>, candidate: ShapeCastHit) {
+pub(super) fn consider(best: &mut Option<ShapeCastHit>, candidate: ShapeCastHit) {
     let replace = best.is_none_or(|current| match candidate
         .toi
         .time
@@ -177,6 +190,16 @@ pub fn cast_shape_all_bvh(
                 .map(|toi| ShapeCastHit { target: index, toi })
         })
         .collect();
+    sort_hits(&mut hits);
+    hits
+}
+
+/// Orders a hit list into the stable `(time, target index)` sequence the
+/// brute-force cast produces: increasing impact time, ties broken by ascending
+/// target index. Shared by the CPU and GPU-driven `all`-hit collectors so both
+/// emit the identical order. The comparison goes through `partial_cmp` so it
+/// never performs a direct float equality test.
+pub(super) fn sort_hits(hits: &mut [ShapeCastHit]) {
     hits.sort_by(|lhs, rhs| {
         lhs.toi
             .time
@@ -184,7 +207,6 @@ pub fn cast_shape_all_bvh(
             .unwrap_or(core::cmp::Ordering::Equal)
             .then(lhs.target.cmp(&rhs.target))
     });
-    hits
 }
 
 #[cfg(test)]

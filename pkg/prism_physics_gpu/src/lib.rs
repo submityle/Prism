@@ -124,7 +124,7 @@ pub use narrowphase::{
     cpu_obb_obb_narrowphase, cpu_obb_triangle_manifold, cpu_obb_triangle_narrowphase, cast_shape, cast_shape_all, cast_shape_all_bvh, cast_shape_bvh, conservative_advancement_toi, conservative_advancement_toi_rounded, cpu_convex_convex_toi, cpu_convex_convex_toi_rounded, cpu_sphere_heightfield_narrowphase, cpu_sphere_triangle_narrowphase, epa, gjk, support, Capsule, CapsuleCapsulePair, CellRange,
     CapsuleObbPair, CapsulePlanePair, CapsuleTrianglePair, Contact, ContactManifold,
     BodyMotion, ConvexConvexPair, ConvexConvexSweepPair, ConvexEdge, ConvexFace, ConvexHull, ConvexPose, GjkStatus, Penetration, SupportPoint, Toi,
-    GpuCapsuleCapsuleManifoldNarrowphase, GpuCapsuleCapsuleNarrowphase,
+    GpuBvhShapeCast, GpuCapsuleCapsuleManifoldNarrowphase, GpuCapsuleCapsuleNarrowphase,
     GpuCapsuleHalfspaceNarrowphase, GpuCapsuleNarrowphase, GpuCapsuleObbManifoldNarrowphase,
     GpuCapsuleHeightfieldManifoldNarrowphase, GpuCapsuleObbNarrowphase, GpuCapsuleTriangleManifoldNarrowphase, GpuCapsuleTriangleNarrowphase, GpuHalfspaceNarrowphase, GpuNarrowphase, GpuSphereHeightfieldNarrowphase,
     GpuObbHalfspaceManifoldNarrowphase, GpuObbHalfspaceNarrowphase, GpuObbHeightfieldManifoldNarrowphase, GpuObbNarrowphase,
