@@ -30,13 +30,19 @@
 //! - [`integrator`] — the path-tracing loop ([`integrator::PathIntegrator`]):
 //!   `BSDF` importance sampling, direct-light `NEE`, Russian-roulette path
 //!   termination, and the [`integrator::Scene`] it traces.
+//! - [`camera`] — the pinhole camera ([`camera::PinholeCamera`]) that
+//!   generates primary rays through a virtual image plane.
+//! - [`film`] — the [`film::Film`] framebuffer and the [`film::render`]
+//!   driver that averages jittered primary rays into a reference image.
 //!
 //! All public math is `f32`; floating-point equality is never tested directly
 //! (an epsilon or ordering comparison is used instead), matching the crate's
 //! determinism conventions.
 
 pub mod bsdf;
+pub mod camera;
 pub mod estimator;
+pub mod film;
 pub mod integrator;
 pub mod sampler;
 
