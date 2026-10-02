@@ -239,6 +239,31 @@ mod tests {
     }
 
     #[test]
+    fn both_filters_are_unbiased_and_deterministic() {
+        // The reconstruction filter only reshapes where sub-pixel samples land,
+        // never the energy they carry, so Box and Tent must both converge to
+        // unit radiance on the white furnace and stay bit-identical across runs.
+        let scene = white_furnace_scene();
+        let camera = overhead_camera();
+        let integrator = PathIntegrator::new(8, 5);
+        for filter in [PixelFilter::Box, PixelFilter::Tent] {
+            let a = render_filtered(&scene, &camera, &integrator, 4, 4, 256, 7, filter);
+            let b = render_filtered(&scene, &camera, &integrator, 4, 4, 256, 7, filter);
+            for (pa, pb) in a.pixels().iter().zip(b.pixels()) {
+                assert_eq!(pa.x.to_bits(), pb.x.to_bits());
+            }
+            for p in a.pixels() {
+                assert!(p.is_finite());
+                assert!(
+                    (p.x - 1.0).abs() < 2e-2,
+                    "{filter:?} white furnace pixel {} should converge to 1",
+                    p.x
+                );
+            }
+        }
+    }
+
+    #[test]
     fn thin_lens_render_is_unbiased_and_deterministic() {
         // Depth of field only redistributes where rays land, never how much
         // energy they carry, so a thin-lens white-furnace render must still
