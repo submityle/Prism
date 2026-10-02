@@ -60,6 +60,7 @@ pub mod estimator;
 pub mod film;
 pub mod fresnel_blend;
 pub mod integrator;
+pub mod metal;
 pub mod microfacet;
 pub mod oren_nayar;
 pub mod rough_dielectric;
