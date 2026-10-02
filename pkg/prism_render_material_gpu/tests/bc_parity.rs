@@ -11,11 +11,15 @@
 //! without a usable adapter the oracle returns `None` and the test skips.
 
 use prism_render_material::{
-    decode_bc1, decode_bc3, decode_bc6h_mode12_signed, decode_bc6h_mode12_unsigned,
-    decode_bc6h_mode13_signed, decode_bc6h_mode13_unsigned, decode_bc6h_mode14_signed,
-    decode_bc6h_mode14_unsigned, decode_bc6h_mode1_signed, decode_bc6h_mode1_unsigned,
-    decode_bc6h_mode2_signed, decode_bc6h_mode2_unsigned, decode_bc6h_mode3_signed,
-    decode_bc6h_mode3_unsigned, decode_bc6h_mode4_signed, decode_bc6h_mode4_unsigned,
+    decode_bc1, decode_bc3, decode_bc6h_mode10_signed, decode_bc6h_mode10_unsigned,
+    decode_bc6h_mode12_signed, decode_bc6h_mode12_unsigned, decode_bc6h_mode13_signed,
+    decode_bc6h_mode13_unsigned, decode_bc6h_mode14_signed, decode_bc6h_mode14_unsigned,
+    decode_bc6h_mode1_signed, decode_bc6h_mode1_unsigned, decode_bc6h_mode2_signed,
+    decode_bc6h_mode2_unsigned, decode_bc6h_mode3_signed, decode_bc6h_mode3_unsigned,
+    decode_bc6h_mode4_signed, decode_bc6h_mode4_unsigned, decode_bc6h_mode5_signed,
+    decode_bc6h_mode5_unsigned, decode_bc6h_mode6_signed, decode_bc6h_mode6_unsigned,
+    decode_bc6h_mode7_signed, decode_bc6h_mode7_unsigned, decode_bc6h_mode8_signed,
+    decode_bc6h_mode8_unsigned, decode_bc6h_mode9_signed, decode_bc6h_mode9_unsigned,
     decode_bc6h_signed, decode_bc6h_unsigned, decode_bc7, decode_bc7_mode0, decode_bc7_mode1,
     decode_bc7_mode2, decode_bc7_mode3, decode_bc7_mode7, encode_bc1, encode_bc3,
     encode_bc6h_mode11_unsigned, encode_bc7_mode4, encode_bc7_mode5, encode_bc7_mode6,
@@ -1206,6 +1210,102 @@ const BC6H_MODE4_DESC: &[(F6, u8)] = {
     ]
 };
 
+#[rustfmt::skip]
+const BC6H_MODE5_DESC: &[(F6, u8)] = {
+    use F6::{Bw, Bx, By, Bz, D, Gw, Gx, Gy, Gz, M, Rw, Rx, Ry, Rz};
+    &[
+        (M, 0), (M, 1), (M, 2), (M, 3), (M, 4), (Rw, 0), (Rw, 1), (Rw, 2), (Rw, 3), (Rw, 4),
+        (Rw, 5), (Rw, 6), (Rw, 7), (Rw, 8), (Rw, 9), (Gw, 0), (Gw, 1), (Gw, 2), (Gw, 3), (Gw, 4),
+        (Gw, 5), (Gw, 6), (Gw, 7), (Gw, 8), (Gw, 9), (Bw, 0), (Bw, 1), (Bw, 2), (Bw, 3), (Bw, 4),
+        (Bw, 5), (Bw, 6), (Bw, 7), (Bw, 8), (Bw, 9), (Rx, 0), (Rx, 1), (Rx, 2), (Rx, 3), (Rw, 10),
+        (By, 4), (Gy, 0), (Gy, 1), (Gy, 2), (Gy, 3), (Gx, 0), (Gx, 1), (Gx, 2), (Gx, 3), (Gw, 10),
+        (Bz, 0), (Gz, 0), (Gz, 1), (Gz, 2), (Gz, 3), (Bx, 0), (Bx, 1), (Bx, 2), (Bx, 3), (Bx, 4),
+        (Bw, 10), (By, 0), (By, 1), (By, 2), (By, 3), (Ry, 0), (Ry, 1), (Ry, 2), (Ry, 3), (Bz, 1),
+        (Bz, 2), (Rz, 0), (Rz, 1), (Rz, 2), (Rz, 3), (Bz, 4), (Bz, 3), (D, 0), (D, 1), (D, 2),
+        (D, 3), (D, 4),
+    ]
+};
+
+#[rustfmt::skip]
+const BC6H_MODE6_DESC: &[(F6, u8)] = {
+    use F6::{Bw, Bx, By, Bz, D, Gw, Gx, Gy, Gz, M, Rw, Rx, Ry, Rz};
+    &[
+        (M, 0), (M, 1), (M, 2), (M, 3), (M, 4), (Rw, 0), (Rw, 1), (Rw, 2), (Rw, 3), (Rw, 4),
+        (Rw, 5), (Rw, 6), (Rw, 7), (Rw, 8), (By, 4), (Gw, 0), (Gw, 1), (Gw, 2), (Gw, 3), (Gw, 4),
+        (Gw, 5), (Gw, 6), (Gw, 7), (Gw, 8), (Gy, 4), (Bw, 0), (Bw, 1), (Bw, 2), (Bw, 3), (Bw, 4),
+        (Bw, 5), (Bw, 6), (Bw, 7), (Bw, 8), (Bz, 4), (Rx, 0), (Rx, 1), (Rx, 2), (Rx, 3), (Rx, 4),
+        (Gz, 4), (Gy, 0), (Gy, 1), (Gy, 2), (Gy, 3), (Gx, 0), (Gx, 1), (Gx, 2), (Gx, 3), (Gx, 4),
+        (Bz, 0), (Gz, 0), (Gz, 1), (Gz, 2), (Gz, 3), (Bx, 0), (Bx, 1), (Bx, 2), (Bx, 3), (Bx, 4),
+        (Bz, 1), (By, 0), (By, 1), (By, 2), (By, 3), (Ry, 0), (Ry, 1), (Ry, 2), (Ry, 3), (Ry, 4),
+        (Bz, 2), (Rz, 0), (Rz, 1), (Rz, 2), (Rz, 3), (Rz, 4), (Bz, 3), (D, 0), (D, 1), (D, 2),
+        (D, 3), (D, 4),
+    ]
+};
+
+#[rustfmt::skip]
+const BC6H_MODE7_DESC: &[(F6, u8)] = {
+    use F6::{Bw, Bx, By, Bz, D, Gw, Gx, Gy, Gz, M, Rw, Rx, Ry, Rz};
+    &[
+        (M, 0), (M, 1), (M, 2), (M, 3), (M, 4), (Rw, 0), (Rw, 1), (Rw, 2), (Rw, 3), (Rw, 4),
+        (Rw, 5), (Rw, 6), (Rw, 7), (Gz, 4), (By, 4), (Gw, 0), (Gw, 1), (Gw, 2), (Gw, 3), (Gw, 4),
+        (Gw, 5), (Gw, 6), (Gw, 7), (Bz, 2), (Gy, 4), (Bw, 0), (Bw, 1), (Bw, 2), (Bw, 3), (Bw, 4),
+        (Bw, 5), (Bw, 6), (Bw, 7), (Bz, 3), (Bz, 4), (Rx, 0), (Rx, 1), (Rx, 2), (Rx, 3), (Rx, 4),
+        (Rx, 5), (Gy, 0), (Gy, 1), (Gy, 2), (Gy, 3), (Gx, 0), (Gx, 1), (Gx, 2), (Gx, 3), (Gx, 4),
+        (Bz, 0), (Gz, 0), (Gz, 1), (Gz, 2), (Gz, 3), (Bx, 0), (Bx, 1), (Bx, 2), (Bx, 3), (Bx, 4),
+        (Bz, 1), (By, 0), (By, 1), (By, 2), (By, 3), (Ry, 0), (Ry, 1), (Ry, 2), (Ry, 3), (Ry, 4),
+        (Ry, 5), (Rz, 0), (Rz, 1), (Rz, 2), (Rz, 3), (Rz, 4), (Rz, 5), (D, 0), (D, 1), (D, 2),
+        (D, 3), (D, 4),
+    ]
+};
+
+#[rustfmt::skip]
+const BC6H_MODE8_DESC: &[(F6, u8)] = {
+    use F6::{Bw, Bx, By, Bz, D, Gw, Gx, Gy, Gz, M, Rw, Rx, Ry, Rz};
+    &[
+        (M, 0), (M, 1), (M, 2), (M, 3), (M, 4), (Rw, 0), (Rw, 1), (Rw, 2), (Rw, 3), (Rw, 4),
+        (Rw, 5), (Rw, 6), (Rw, 7), (Bz, 0), (By, 4), (Gw, 0), (Gw, 1), (Gw, 2), (Gw, 3), (Gw, 4),
+        (Gw, 5), (Gw, 6), (Gw, 7), (Gy, 5), (Gy, 4), (Bw, 0), (Bw, 1), (Bw, 2), (Bw, 3), (Bw, 4),
+        (Bw, 5), (Bw, 6), (Bw, 7), (Gz, 5), (Bz, 4), (Rx, 0), (Rx, 1), (Rx, 2), (Rx, 3), (Rx, 4),
+        (Gz, 4), (Gy, 0), (Gy, 1), (Gy, 2), (Gy, 3), (Gx, 0), (Gx, 1), (Gx, 2), (Gx, 3), (Gx, 4),
+        (Gx, 5), (Gz, 0), (Gz, 1), (Gz, 2), (Gz, 3), (Bx, 0), (Bx, 1), (Bx, 2), (Bx, 3), (Bx, 4),
+        (Bz, 1), (By, 0), (By, 1), (By, 2), (By, 3), (Ry, 0), (Ry, 1), (Ry, 2), (Ry, 3), (Ry, 4),
+        (Bz, 2), (Rz, 0), (Rz, 1), (Rz, 2), (Rz, 3), (Rz, 4), (Bz, 3), (D, 0), (D, 1), (D, 2),
+        (D, 3), (D, 4),
+    ]
+};
+
+#[rustfmt::skip]
+const BC6H_MODE9_DESC: &[(F6, u8)] = {
+    use F6::{Bw, Bx, By, Bz, D, Gw, Gx, Gy, Gz, M, Rw, Rx, Ry, Rz};
+    &[
+        (M, 0), (M, 1), (M, 2), (M, 3), (M, 4), (Rw, 0), (Rw, 1), (Rw, 2), (Rw, 3), (Rw, 4),
+        (Rw, 5), (Rw, 6), (Rw, 7), (Bz, 1), (By, 4), (Gw, 0), (Gw, 1), (Gw, 2), (Gw, 3), (Gw, 4),
+        (Gw, 5), (Gw, 6), (Gw, 7), (By, 5), (Gy, 4), (Bw, 0), (Bw, 1), (Bw, 2), (Bw, 3), (Bw, 4),
+        (Bw, 5), (Bw, 6), (Bw, 7), (Bz, 5), (Bz, 4), (Rx, 0), (Rx, 1), (Rx, 2), (Rx, 3), (Rx, 4),
+        (Gz, 4), (Gy, 0), (Gy, 1), (Gy, 2), (Gy, 3), (Gx, 0), (Gx, 1), (Gx, 2), (Gx, 3), (Gx, 4),
+        (Bz, 0), (Gz, 0), (Gz, 1), (Gz, 2), (Gz, 3), (Bx, 0), (Bx, 1), (Bx, 2), (Bx, 3), (Bx, 4),
+        (Bx, 5), (By, 0), (By, 1), (By, 2), (By, 3), (Ry, 0), (Ry, 1), (Ry, 2), (Ry, 3), (Ry, 4),
+        (Bz, 2), (Rz, 0), (Rz, 1), (Rz, 2), (Rz, 3), (Rz, 4), (Bz, 3), (D, 0), (D, 1), (D, 2),
+        (D, 3), (D, 4),
+    ]
+};
+
+#[rustfmt::skip]
+const BC6H_MODE10_DESC: &[(F6, u8)] = {
+    use F6::{Bw, Bx, By, Bz, D, Gw, Gx, Gy, Gz, M, Rw, Rx, Ry, Rz};
+    &[
+        (M, 0), (M, 1), (M, 2), (M, 3), (M, 4), (Rw, 0), (Rw, 1), (Rw, 2), (Rw, 3), (Rw, 4),
+        (Rw, 5), (Gz, 4), (Bz, 0), (Bz, 1), (By, 4), (Gw, 0), (Gw, 1), (Gw, 2), (Gw, 3), (Gw, 4),
+        (Gw, 5), (Gy, 5), (By, 5), (Bz, 2), (Gy, 4), (Bw, 0), (Bw, 1), (Bw, 2), (Bw, 3), (Bw, 4),
+        (Bw, 5), (Gz, 5), (Bz, 3), (Bz, 5), (Bz, 4), (Rx, 0), (Rx, 1), (Rx, 2), (Rx, 3), (Rx, 4),
+        (Rx, 5), (Gy, 0), (Gy, 1), (Gy, 2), (Gy, 3), (Gx, 0), (Gx, 1), (Gx, 2), (Gx, 3), (Gx, 4),
+        (Gx, 5), (Gz, 0), (Gz, 1), (Gz, 2), (Gz, 3), (Bx, 0), (Bx, 1), (Bx, 2), (Bx, 3), (Bx, 4),
+        (Bx, 5), (By, 0), (By, 1), (By, 2), (By, 3), (Ry, 0), (Ry, 1), (Ry, 2), (Ry, 3), (Ry, 4),
+        (Ry, 5), (Rz, 0), (Rz, 1), (Rz, 2), (Rz, 3), (Rz, 4), (Rz, 5), (D, 0), (D, 1), (D, 2),
+        (D, 3), (D, 4),
+    ]
+};
+
 const BC6H_TWO_SUBSET_SPECS: &[TwoSubsetSpec] = &[
     TwoSubsetSpec {
         name: "mode3",
@@ -1221,6 +1321,48 @@ const BC6H_TWO_SUBSET_SPECS: &[TwoSubsetSpec] = &[
         delta: [4, 5, 4],
         desc: BC6H_MODE4_DESC,
     },
+    TwoSubsetSpec {
+        name: "mode5",
+        mode_bits: 0b01010,
+        base_prec: 11,
+        delta: [4, 4, 5],
+        desc: BC6H_MODE5_DESC,
+    },
+    TwoSubsetSpec {
+        name: "mode6",
+        mode_bits: 0b01110,
+        base_prec: 9,
+        delta: [5, 5, 5],
+        desc: BC6H_MODE6_DESC,
+    },
+    TwoSubsetSpec {
+        name: "mode7",
+        mode_bits: 0b10010,
+        base_prec: 8,
+        delta: [6, 5, 5],
+        desc: BC6H_MODE7_DESC,
+    },
+    TwoSubsetSpec {
+        name: "mode8",
+        mode_bits: 0b10110,
+        base_prec: 8,
+        delta: [5, 6, 5],
+        desc: BC6H_MODE8_DESC,
+    },
+    TwoSubsetSpec {
+        name: "mode9",
+        mode_bits: 0b11010,
+        base_prec: 8,
+        delta: [5, 5, 6],
+        desc: BC6H_MODE9_DESC,
+    },
+    TwoSubsetSpec {
+        name: "mode10",
+        mode_bits: 0b11110,
+        base_prec: 6,
+        delta: [6, 6, 6],
+        desc: BC6H_MODE10_DESC,
+    },
 ];
 
 /// Dispatch to the direct per-mode decoder so the parametric test also proves
@@ -1231,6 +1373,18 @@ fn decode_two_subset_direct(mode_bits: u32, block: &[u8; 16], signed: bool) -> [
         (0b00010, true) => decode_bc6h_mode3_signed(block),
         (0b00110, false) => decode_bc6h_mode4_unsigned(block),
         (0b00110, true) => decode_bc6h_mode4_signed(block),
+        (0b01010, false) => decode_bc6h_mode5_unsigned(block),
+        (0b01010, true) => decode_bc6h_mode5_signed(block),
+        (0b01110, false) => decode_bc6h_mode6_unsigned(block),
+        (0b01110, true) => decode_bc6h_mode6_signed(block),
+        (0b10010, false) => decode_bc6h_mode7_unsigned(block),
+        (0b10010, true) => decode_bc6h_mode7_signed(block),
+        (0b10110, false) => decode_bc6h_mode8_unsigned(block),
+        (0b10110, true) => decode_bc6h_mode8_signed(block),
+        (0b11010, false) => decode_bc6h_mode9_unsigned(block),
+        (0b11010, true) => decode_bc6h_mode9_signed(block),
+        (0b11110, false) => decode_bc6h_mode10_unsigned(block),
+        (0b11110, true) => decode_bc6h_mode10_signed(block),
         _ => unreachable!("unhandled two-subset spec mode {mode_bits:#07b}"),
     }
 }
