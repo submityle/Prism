@@ -80,6 +80,12 @@
 //!   ([`lorenz_attractor`], [`rossler_attractor`]) or sinusoidal
 //!   ([`thomas_attractor`]) attractors, and `alpha` walks it from a stable
 //!   focus into the two-lobe double scroll.
+//! - [`analog_kick::AnalogKickNode`] -- analog-style bass-drum (kick) voice:
+//!   a single sine body whose pitch sweeps down from a bright attack toward a
+//!   low fundamental, shaped by an exponential amplitude decay, a short
+//!   transient click, and a `tanh` saturator. Unlike the modal physical drums
+//!   ([`membrane_drum`], [`struck_bar`], [`struck_plate`]) it is a direct
+//!   subtractive one-shot voice triggered by [`analog_kick::AnalogKickNode::trigger`].
 //!   `rate_hz` scales the integration speed while the single dissipation `b`
 //!   morphs the labyrinthine orbit from dense chaos (small `b`) toward a quiet
 //!   fixed point (large `b`). Unlike [`rossler_attractor`] its sinusoidal
@@ -471,6 +477,7 @@ pub mod duffing_oscillator;
 pub mod rossler_attractor;
 pub mod thomas_attractor;
 pub mod chua_circuit;
+pub mod analog_kick;
 
 pub use air_jet_flute::{AirJetFluteNode, AirJetFluteParams};
 pub use additive_oscillator::{AdditiveOscillatorNode, AdditiveOscillatorParams};
@@ -484,6 +491,7 @@ pub use duffing_oscillator::{DuffingOscillatorNode, DuffingOscillatorParams};
 pub use rossler_attractor::{RosslerAttractorNode, RosslerAttractorParams};
 pub use thomas_attractor::{ThomasAttractorNode, ThomasAttractorParams};
 pub use chua_circuit::{ChuaCircuitNode, ChuaCircuitParams};
+pub use analog_kick::{AnalogKickNode, AnalogKickParams};
 pub use conical_reed::{ConicalReedNode, ConicalReedParams};
 pub use dsf_oscillator::{DsfOscillatorNode, DsfOscillatorParams};
 pub use dust::{DustNode, DustParams, Polarity};
