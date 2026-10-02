@@ -116,7 +116,7 @@ pub use mpm::{
     StepParticles,
 };
 pub use narrowphase::{
-    cpu_capsule_capsule_manifold, cpu_capsule_capsule_narrowphase, cpu_capsule_halfspace_manifold, cpu_capsule_heightfield_manifold,
+    cpu_capsule_capsule_manifold, cpu_capsule_capsule_narrowphase, cpu_capsule_halfspace_manifold, cpu_capsule_heightfield_manifold, cpu_obb_heightfield_manifold,
     cpu_capsule_narrowphase, cpu_capsule_obb_manifold, cpu_capsule_obb_narrowphase,
     cpu_capsule_triangle_manifold, cpu_capsule_triangle_narrowphase,
     cpu_halfspace_narrowphase, cpu_narrowphase, cpu_obb_halfspace_manifold,
@@ -128,7 +128,7 @@ pub use narrowphase::{
     GpuCapsuleHeightfieldManifoldNarrowphase, GpuCapsuleObbNarrowphase, GpuCapsuleTriangleManifoldNarrowphase, GpuCapsuleTriangleNarrowphase, GpuHalfspaceNarrowphase, GpuNarrowphase, GpuSphereHeightfieldNarrowphase,
     GpuObbHalfspaceManifoldNarrowphase, GpuObbHalfspaceNarrowphase, GpuObbNarrowphase,
     GpuObbObbManifoldNarrowphase, GpuObbObbNarrowphase, GpuObbTriangleManifoldNarrowphase, GpuObbTriangleNarrowphase, GpuSphereTriangleNarrowphase,
-    Heightfield, HeightfieldCapsulePair, HeightfieldSpherePair, ManifoldPoint, Obb, ObbObbPair, ObbTrianglePair,
+    Heightfield, HeightfieldCapsulePair, HeightfieldObbPair, HeightfieldSpherePair, ManifoldPoint, Obb, ObbObbPair, ObbTrianglePair,
     ObbPlanePair, Plane, SphereCapsulePair, SphereObbPair, SpherePlanePair, SphereTrianglePair,
     Triangle, XzAabb, MAX_MANIFOLD_POINTS,
 };

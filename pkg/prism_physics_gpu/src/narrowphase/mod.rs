@@ -100,6 +100,7 @@ mod heightfield;
 mod heightfield_capsule_manifold;
 mod heightfield_capsule_manifold_gpu;
 mod heightfield_gpu;
+mod heightfield_obb_manifold;
 mod layout;
 mod manifold;
 mod obb;
@@ -145,6 +146,7 @@ pub use heightfield::{cpu_sphere_heightfield_narrowphase, CellRange, Heightfield
 pub use heightfield_capsule_manifold::{cpu_capsule_heightfield_manifold, HeightfieldCapsulePair};
 pub use heightfield_capsule_manifold_gpu::GpuCapsuleHeightfieldManifoldNarrowphase;
 pub use heightfield_gpu::GpuSphereHeightfieldNarrowphase;
+pub use heightfield_obb_manifold::{cpu_obb_heightfield_manifold, HeightfieldObbPair};
 pub use manifold::{ContactManifold, ManifoldPoint, MAX_MANIFOLD_POINTS};
 pub(crate) use manifold::reduce_to_four;
 pub use obb::{cpu_obb_narrowphase, Obb, SphereObbPair};
