@@ -130,6 +130,8 @@ mod obb_triangle;
 mod obb_triangle_gpu;
 mod obb_triangle_manifold;
 mod obb_triangle_manifold_gpu;
+mod ray_cast_bvh;
+mod ray_cast_bvh_gpu;
 mod shape_cast;
 mod shape_cast_bvh;
 mod shape_cast_bvh_gpu;
@@ -163,6 +165,10 @@ pub use convex_convex_manifold::{cpu_convex_convex_manifold, ConvexConvexPair};
 pub use collide_shape_bvh::{collide_shape, collide_shape_bvh, CollideShapeHit};
 pub use collide_shape_bvh_gpu::GpuBvhCollideShape;
 pub use conservative_advancement_gpu::GpuConvexConvexToiNarrowphase;
+pub use ray_cast_bvh::{
+    ray_cast, ray_cast_all, ray_cast_all_bvh, ray_cast_bvh, RayCastHit, SceneRay,
+};
+pub use ray_cast_bvh_gpu::GpuSceneRayCast;
 pub use shape_cast::{cast_shape, cast_shape_all, RoundedConvex, ShapeCastHit};
 pub use shape_cast_bvh::{cast_shape_all_bvh, cast_shape_bvh};
 pub use shape_cast_bvh_gpu::GpuBvhShapeCast;
