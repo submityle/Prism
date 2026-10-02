@@ -2,7 +2,7 @@
 //! kernel must reproduce the `CPU` golden twin's time of impact slot for slot.
 //!
 //! Each test hands a batch of swept `(hull, hull)` couples to both
-//! [`GpuConvexConvexToiNarrowphase::query`] and [`cpu_convex_convex_toi`] and
+//! [`GpuConvexConvexToiNarrowphase::query`] and [`cpu_convex_convex_toi_rounded`] and
 //! compares the two outputs index by index. The hit decision (a reported
 //! impact versus a `None` slot) must match exactly; when both report an
 //! impact, the impact time, the contact point, and the contact normal must all
@@ -25,8 +25,8 @@
 
 use glam::{Quat, Vec3};
 use prism_physics_gpu::{
-    cpu_convex_convex_toi, BodyMotion, ConvexConvexSweepPair, ConvexHull, ConvexPose, GpuContext,
-    GpuConvexConvexToiNarrowphase, Toi,
+    cpu_convex_convex_toi_rounded, BodyMotion, ConvexConvexSweepPair, ConvexHull, ConvexPose,
+    GpuContext, GpuConvexConvexToiNarrowphase, Toi,
 };
 
 /// Tolerance on the impact time, point, and normal; the only inexact steps are
@@ -62,18 +62,24 @@ fn assert_slot_matches(index: usize, want: Option<Toi>, got: Option<Toi>) {
 }
 
 /// Runs both engines over the same swept scene and asserts slot-for-slot parity.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the parity harness mirrors the kernel's full body-indexed input: \
+              hulls, poses, motions, radii, pairs, and the two step scalars"
+)]
 fn run_parity(
     ctx: &GpuContext,
     gpu: &GpuConvexConvexToiNarrowphase,
     hulls: &[ConvexHull],
     poses: &[ConvexPose],
     motions: &[BodyMotion],
+    radii: &[f32],
     pairs: &[ConvexConvexSweepPair],
     dt: f32,
     target: f32,
 ) {
-    let want = cpu_convex_convex_toi(hulls, poses, motions, pairs, dt, target);
-    let got = gpu.query(ctx, hulls, poses, motions, pairs, dt, target);
+    let want = cpu_convex_convex_toi_rounded(hulls, poses, motions, radii, pairs, dt, target);
+    let got = gpu.query(ctx, hulls, poses, motions, radii, pairs, dt, target);
     assert_eq!(want.len(), got.len(), "slot count differs");
     for (i, (w, g)) in want.into_iter().zip(got).enumerate() {
         assert_slot_matches(i, w, g);
@@ -128,8 +134,10 @@ fn gpu_convex_convex_toi_linear_sweeps_match_cpu_golden() {
         ConvexConvexSweepPair::new(3, 4),
         ConvexConvexSweepPair::new(5, 1),
     ];
+    // Every body is a sharp box: zero convex radius across the batch.
+    let radii = [0.0_f32; 6];
 
-    run_parity(&ctx, &gpu, &hulls, &poses, &motions, &pairs, 2.0, 0.0);
+    run_parity(&ctx, &gpu, &hulls, &poses, &motions, &radii, &pairs, 2.0, 0.0);
 }
 
 #[test]
@@ -159,8 +167,9 @@ fn gpu_convex_convex_toi_rotating_sweep_matches_cpu_golden() {
         BodyMotion::new(Vec3::new(-2.0, 0.0, 0.0), Vec3::ZERO),
     ];
     let pairs = [ConvexConvexSweepPair::new(0, 1)];
+    let radii = [0.0_f32; 2];
 
-    run_parity(&ctx, &gpu, &hulls, &poses, &motions, &pairs, 2.0, 0.0);
+    run_parity(&ctx, &gpu, &hulls, &poses, &motions, &radii, &pairs, 2.0, 0.0);
 }
 
 #[test]
@@ -190,8 +199,9 @@ fn gpu_convex_convex_toi_speculative_target_matches_cpu_golden() {
         BodyMotion::new(Vec3::new(-1.0, 0.0, 0.0), Vec3::ZERO),
     ];
     let pairs = [ConvexConvexSweepPair::new(0, 1)];
+    let radii = [0.0_f32; 2];
 
-    run_parity(&ctx, &gpu, &hulls, &poses, &motions, &pairs, 3.0, 0.25);
+    run_parity(&ctx, &gpu, &hulls, &poses, &motions, &radii, &pairs, 3.0, 0.25);
 }
 
 #[test]
@@ -210,6 +220,90 @@ fn gpu_convex_convex_toi_empty_batch_matches_cpu_golden() {
     let poses = [ConvexPose::new(Vec3::ZERO, Quat::IDENTITY)];
     let motions = [BodyMotion::still()];
     let pairs: [ConvexConvexSweepPair; 0] = [];
+    let radii = [0.0_f32; 1];
 
-    run_parity(&ctx, &gpu, &hulls, &poses, &motions, &pairs, 1.0, 0.0);
+    run_parity(&ctx, &gpu, &hulls, &poses, &motions, &radii, &pairs, 1.0, 0.0);
+}
+
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice must reach the test log on hosts without a wgpu adapter"
+)]
+fn gpu_convex_convex_toi_rounded_spheres_match_cpu_golden() {
+    let Some(ctx) = GpuContext::try_headless() else {
+        eprintln!("skipping GPU convex-convex TOI parity: no wgpu adapter on this host");
+        return;
+    };
+    let gpu = GpuConvexConvexToiNarrowphase::new(&ctx);
+
+    // Two rounded spheres (point cores plus a convex radius) closing head-on,
+    // and a third drifting far above as a clean miss. The convex radius lives in
+    // the hull header, so this exercises the device's rounded shape cast end to
+    // end against the inflated-core CPU golden.
+    let hulls = [
+        ConvexHull::from_point(),
+        ConvexHull::from_point(),
+        ConvexHull::from_point(),
+    ];
+    let radii = [0.5_f32, 0.6, 0.4];
+    let poses = [
+        ConvexPose::new(Vec3::new(-3.0, 0.05, 0.0), Quat::IDENTITY),
+        ConvexPose::new(Vec3::new(3.0, 0.0, 0.0), Quat::IDENTITY),
+        ConvexPose::new(Vec3::new(0.0, 25.0, 0.0), Quat::IDENTITY),
+    ];
+    let motions = [
+        BodyMotion::new(Vec3::new(2.0, 0.0, 0.0), Vec3::ZERO),
+        BodyMotion::new(Vec3::new(-1.5, 0.0, 0.0), Vec3::ZERO),
+        BodyMotion::still(),
+    ];
+    let pairs = [
+        ConvexConvexSweepPair::new(0, 1),
+        ConvexConvexSweepPair::new(0, 2),
+    ];
+
+    run_parity(&ctx, &gpu, &hulls, &poses, &motions, &radii, &pairs, 3.0, 0.0);
+}
+
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice must reach the test log on hosts without a wgpu adapter"
+)]
+fn gpu_convex_convex_toi_rounded_mixed_shapes_match_cpu_golden() {
+    let Some(ctx) = GpuContext::try_headless() else {
+        eprintln!("skipping GPU convex-convex TOI parity: no wgpu adapter on this host");
+        return;
+    };
+    let gpu = GpuConvexConvexToiNarrowphase::new(&ctx);
+
+    // A rounded sphere sweeping into a static sharp box, plus a rounded capsule
+    // (segment core) spinning as it drifts onto a static rounded box: a mix of
+    // point, segment, and polyhedral cores with and without a convex radius,
+    // all off the axes so no normal is a near-tie.
+    let hulls = [
+        ConvexHull::from_point(),
+        ConvexHull::from_box(Vec3::splat(0.5)),
+        ConvexHull::from_segment(Vec3::Y, 0.6),
+        ConvexHull::from_box(Vec3::new(0.4, 0.5, 0.6)),
+    ];
+    let radii = [0.5_f32, 0.0, 0.2, 0.1];
+    let poses = [
+        ConvexPose::new(Vec3::new(-3.0, 0.07, 0.0), Quat::IDENTITY),
+        ConvexPose::new(Vec3::ZERO, Quat::IDENTITY),
+        ConvexPose::new(Vec3::new(-2.5, 0.09, 0.0), Quat::IDENTITY),
+        ConvexPose::new(Vec3::new(2.5, 0.0, 0.0), Quat::IDENTITY),
+    ];
+    let motions = [
+        BodyMotion::new(Vec3::new(4.0, 0.0, 0.0), Vec3::ZERO),
+        BodyMotion::still(),
+        BodyMotion::new(Vec3::new(2.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.5)),
+        BodyMotion::still(),
+    ];
+    let pairs = [
+        ConvexConvexSweepPair::new(0, 1),
+        ConvexConvexSweepPair::new(2, 3),
+    ];
+
+    run_parity(&ctx, &gpu, &hulls, &poses, &motions, &radii, &pairs, 2.0, 0.0);
 }

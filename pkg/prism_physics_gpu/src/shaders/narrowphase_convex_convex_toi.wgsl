@@ -11,9 +11,11 @@
 // real-device parity test is direct evidence the kernel finds the same impacts.
 //
 // Buffer layout (byte-for-byte with the wrapper structs):
-//   * hull headers: (vert_offset, vert_count, face_offset, face_count) as a
-//     vec4<u32>; only the vertex slice is read here (support mapping needs no
-//     faces);
+//   * hull headers: (vert_offset, vert_count, radius_bits, 0) as a vec4<u32>;
+//     only the vertex slice and the convex radius are read here (support
+//     mapping needs no faces). radius_bits is the body's convex radius
+//     (sphere/capsule cap radius, or a box bevel) reinterpreted from f32 so a
+//     rounded shape cast needs no extra binding;
 //   * vertices: every hull's local-space vertices concatenated as vec4<f32>
 //     (xyz used, w padding), each body's slice starting at vert_offset;
 //   * poses: GpuPose each, world translation in translation.xyz and the
@@ -42,7 +44,8 @@ struct Params {
 };
 
 struct HullHeader {
-    // (vert_offset, vert_count, face_offset, face_count).
+    // (vert_offset, vert_count, radius_bits, 0); radius_bits is bitcast<f32> of
+    // the body's convex radius for the rounded shape cast.
     data: vec4<u32>,
 };
 
@@ -593,6 +596,9 @@ fn narrowphase_convex_convex_toi(@builtin(global_invocation_id) gid: vec3<u32>) 
     body_a.vert_count = header_a.y;
     body_b.vert_offset = header_b.x;
     body_b.vert_count = header_b.y;
+    // Each hull carries its convex radius in header slot z (bitcast from f32).
+    let radius_a = bitcast<f32>(header_a.z);
+    let radius_b = bitcast<f32>(header_b.z);
 
     let pose_a = poses[ia];
     let pose_b = poses[ib];
@@ -611,6 +617,9 @@ fn narrowphase_convex_convex_toi(@builtin(global_invocation_id) gid: vec3<u32>) 
     // so the kernel stays operation-matched with the CPU twin's call.
     let dt = params.dt;
     let target_sep = params.target_sep;
+    // Rounded cores only have to close to this separation for the inflated
+    // surfaces to reach the requested target gap.
+    let core_target = target_sep + radius_a + radius_b;
 
     let r_a = circumradius(body_a.vert_offset, body_a.vert_count);
     let r_b = circumradius(body_b.vert_offset, body_b.vert_count);
@@ -651,8 +660,12 @@ fn narrowphase_convex_convex_toi(@builtin(global_invocation_id) gid: vec3<u32>) 
         if (res.distance > CLOSING_EPS) {
             last_normal = res.normal;
         }
-        if (res.distance <= target_sep + DISTANCE_TOL) {
-            let point = (res.point_a + res.point_b) * 0.5;
+        if (res.distance <= core_target + DISTANCE_TOL) {
+            // Push each core witness out to its inflated surface along the
+            // contact normal (B toward A), then report the midpoint.
+            let surf_a = res.point_a - last_normal * radius_a;
+            let surf_b = res.point_b + last_normal * radius_b;
+            let point = (surf_a + surf_b) * 0.5;
             out.point_time = vec4<f32>(point.x, point.y, point.z, t);
             out.normal_hit = vec4<f32>(last_normal.x, last_normal.y, last_normal.z, 1.0);
             hit = true;
@@ -663,7 +676,7 @@ fn narrowphase_convex_convex_toi(@builtin(global_invocation_id) gid: vec3<u32>) 
         if (mu <= CLOSING_EPS) {
             break;
         }
-        t = t + (res.distance - target_sep) / mu;
+        t = t + (res.distance - core_target) / mu;
         if (t > dt) {
             break;
         }

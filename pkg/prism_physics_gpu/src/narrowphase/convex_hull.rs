@@ -146,6 +146,44 @@ impl ConvexHull {
         ConvexHull::new(vertices, loops)
     }
 
+    /// Builds a degenerate single-vertex hull at the local origin: the convex
+    /// core of a rounded **sphere** shape.
+    ///
+    /// A sphere has no polygonal surface, so it carries no faces or edges; its
+    /// entire geometry is a point swept by a convex radius. The support mapping
+    /// of this hull returns that one point for every direction, which is exactly
+    /// what the Minkowski-difference support of a sphere's centre needs. Pair it
+    /// with the sphere radius as the `radius` argument of the rounded shape
+    /// cast (see [`conservative_advancement_toi_rounded`](super::conservative_advancement::conservative_advancement_toi_rounded)).
+    #[must_use]
+    pub fn from_point() -> ConvexHull {
+        ConvexHull {
+            vertices: vec![Vec3::ZERO],
+            faces: Vec::new(),
+            edges: Vec::new(),
+        }
+    }
+
+    /// Builds a degenerate two-vertex segment hull centred on the local origin:
+    /// the convex core of a rounded **capsule** shape.
+    ///
+    /// The segment runs `+-half_height` along `axis` (which need not be
+    /// normalised; only its direction matters). A capsule is this segment swept
+    /// by a convex radius, so the support mapping returns whichever endpoint is
+    /// farther along the query direction and the cap radius rides in the
+    /// `radius` argument of the rounded shape cast. The segment has no enclosing
+    /// faces, so none are derived.
+    #[must_use]
+    pub fn from_segment(axis: Vec3, half_height: f32) -> ConvexHull {
+        let dir = axis.try_normalize().unwrap_or(Vec3::Y);
+        let tip = dir * half_height;
+        ConvexHull {
+            vertices: vec![tip, -tip],
+            faces: Vec::new(),
+            edges: Vec::new(),
+        }
+    }
+
     /// The hull's local-space vertices.
     #[must_use]
     pub fn vertices(&self) -> &[Vec3] {
@@ -322,5 +360,37 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn point_hull_is_a_single_origin_vertex_with_no_faces() {
+        let hull = ConvexHull::from_point();
+        assert_eq!(hull.vertices(), &[Vec3::ZERO]);
+        assert!(hull.faces().is_empty(), "a sphere core carries no faces");
+        assert!(hull.edges().is_empty(), "a sphere core carries no edges");
+        // The support is the origin for every direction.
+        assert_eq!(hull.support_local(Vec3::new(3.0, -2.0, 1.0)), 0);
+    }
+
+    #[test]
+    fn segment_hull_endpoints_straddle_the_origin_along_the_axis() {
+        let hull = ConvexHull::from_segment(Vec3::new(0.0, 2.0, 0.0), 1.5);
+        assert_eq!(hull.vertices().len(), 2, "a capsule core is a segment");
+        assert!(hull.faces().is_empty(), "a capsule core carries no faces");
+        // Endpoints sit at +-half_height along the normalised axis.
+        assert_eq!(hull.vertices()[0], Vec3::new(0.0, 1.5, 0.0));
+        assert_eq!(hull.vertices()[1], Vec3::new(0.0, -1.5, 0.0));
+        // Support resolves to the endpoint farther along the query direction.
+        assert_eq!(hull.support_local(Vec3::Y), 0);
+        assert_eq!(hull.support_local(-Vec3::Y), 1);
+    }
+
+    #[test]
+    fn segment_hull_normalises_its_axis() {
+        // An unnormalised axis must still yield unit-length endpoints scaled by
+        // the half height, not by the raw axis length.
+        let hull = ConvexHull::from_segment(Vec3::new(0.0, 0.0, 10.0), 2.0);
+        assert_eq!(hull.vertices()[0], Vec3::new(0.0, 0.0, 2.0));
+        assert_eq!(hull.vertices()[1], Vec3::new(0.0, 0.0, -2.0));
     }
 }

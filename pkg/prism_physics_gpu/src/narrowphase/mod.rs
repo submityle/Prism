@@ -150,7 +150,8 @@ pub use capsule_triangle_gpu::GpuCapsuleTriangleNarrowphase;
 pub use capsule_triangle_manifold::cpu_capsule_triangle_manifold;
 pub use capsule_triangle_manifold_gpu::GpuCapsuleTriangleManifoldNarrowphase;
 pub use conservative_advancement::{
-    conservative_advancement_toi, cpu_convex_convex_toi, ConvexConvexSweepPair, Toi,
+    conservative_advancement_toi, conservative_advancement_toi_rounded, cpu_convex_convex_toi,
+    cpu_convex_convex_toi_rounded, ConvexConvexSweepPair, Toi,
 };
 pub use contact::Contact;
 pub use convex_convex_manifold::{cpu_convex_convex_manifold, ConvexConvexPair};

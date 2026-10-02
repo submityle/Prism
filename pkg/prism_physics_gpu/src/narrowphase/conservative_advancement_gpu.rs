@@ -24,10 +24,12 @@
 //!   `target` separation in one uniform, so every lane reads the same
 //!   advance parameters without threading them through the per-body padding;
 //! * hull headers upload as one [`GpuHullHeader`] each: `(vert_offset,
-//!   vert_count, 0, 0)` as a `vec4<u32>`, locating the body's vertex slice in
-//!   the flattened vertex array (the conservative-advancement kernel reads only
-//!   the support hull, so it never needs the face or loop tables the manifold
-//!   kernel packs);
+//!   vert_count, radius_bits, 0)` as a `vec4<u32>`, locating the body's vertex
+//!   slice in the flattened vertex array and carrying its convex radius
+//!   (sphere/capsule cap radius, or a box bevel) reinterpreted from `f32` so a
+//!   rounded shape cast needs no extra binding (the conservative-advancement
+//!   kernel reads only the support hull, so it never needs the face or loop
+//!   tables the manifold kernel packs);
 //! * every hull's local-space vertices concatenate into one `vec4<f32>` array
 //!   (`xyz` used, `w` padding), each body's slice beginning at its `vert_offset`;
 //! * poses upload as one [`GpuPose`] each: the world translation in
@@ -100,7 +102,8 @@ struct Params {
 }
 
 /// Upload form of one hull header, matching the `WGSL` `HullHeader` struct:
-/// `(vert_offset, vert_count, 0, 0)` as a `vec4<u32>`. The conservative-
+/// `(vert_offset, vert_count, radius_bits, 0)` as a `vec4<u32>`, where
+/// `radius_bits` is the body's convex radius reinterpreted from `f32`. The conservative-
 /// advancement kernel reads only the support hull, so the face and loop fields
 /// the manifold kernel uses stay zero here.
 #[repr(C)]
@@ -231,6 +234,7 @@ impl GpuConvexConvexToiNarrowphase {
         hulls: &[ConvexHull],
         poses: &[ConvexPose],
         motions: &[BodyMotion],
+        radii: &[f32],
         pairs: &[ConvexConvexSweepPair],
         dt: f32,
         target: f32,
@@ -244,6 +248,11 @@ impl GpuConvexConvexToiNarrowphase {
             hulls.len(),
             motions.len(),
             "hull and motion slices must align one body per index"
+        );
+        assert_eq!(
+            hulls.len(),
+            radii.len(),
+            "hull and radius slices must align one body per index"
         );
         if pairs.is_empty() {
             return Vec::new();
@@ -266,14 +275,17 @@ impl GpuConvexConvexToiNarrowphase {
         // only the support hull, so no face or loop tables are packed.
         let mut headers: Vec<GpuHullHeader> = Vec::with_capacity(hulls.len());
         let mut packed_vertices: Vec<[f32; 4]> = Vec::new();
-        for hull in hulls {
+        for (hull, &radius) in hulls.iter().zip(radii.iter()) {
             let vert_offset = u32::try_from(packed_vertices.len()).unwrap_or(u32::MAX);
             for v in hull.vertices() {
                 packed_vertices.push([v.x, v.y, v.z, 0.0]);
             }
             let vert_count = u32::try_from(hull.vertices().len()).unwrap_or(u32::MAX);
+            // Slot z carries the body's convex radius reinterpreted as u32 so the
+            // rounded shape cast needs no extra storage binding; slot w stays
+            // reserved. The kernel bitcasts it back to f32.
             headers.push(GpuHullHeader {
-                data: [vert_offset, vert_count, 0, 0],
+                data: [vert_offset, vert_count, radius.to_bits(), 0],
             });
         }
 
