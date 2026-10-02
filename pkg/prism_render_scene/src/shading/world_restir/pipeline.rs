@@ -1,8 +1,17 @@
-//! The world-space `ReSTIR` fill compute pipeline, its owned group-0 layout,
-//! and the `RenderStartup` initializer that queues it.
+//! The world-space `ReSTIR` seed and fill compute pipelines, their owned
+//! group-0 layouts, and the `RenderStartup` initializer that queues them.
 //!
-//! Mirrors [`super::super::world_space_gi::pipeline`], scaled down to the
-//! single fill pass:
+//! Mirrors [`super::super::world_space_gi::pipeline`], scaled down to the two
+//! world-space `ReSTIR` passes:
+//!
+//! * `seed_main` (`world_restir_seed.wesl`): one invocation per resident
+//!   reservoir-table slot. Its group-0 binds last frame's table read-only
+//!   (`src`, binding 0), this frame's table read-write (`dst`, binding 1) and
+//!   the per-frame candidate light list read-only (`lights`, binding 2); each
+//!   occupied slot streams a short `RIS` over the candidate lights towards its
+//!   visible point and writes the surviving reservoir, while empty slots pass
+//!   through. The grid tunables, the active light count and the per-frame seed
+//!   arrive in the [`GpuWorldRestirSeedParams`] immediate block.
 //!
 //! * `fill_main` (`world_restir_fill.wesl`): one invocation per resident
 //!   reservoir-table slot. Its group-0 binds last frame's reservoir table
@@ -31,11 +40,18 @@ use bevy_render::{
 };
 use bevy_shader::Shader;
 
-use super::abi::GpuWorldRestirFillParams;
+use super::abi::{GpuWorldRestirFillParams, GpuWorldRestirSeedParams};
 
-/// The world-space `ReSTIR` fill compute pipeline and its owned group-0 layout.
+/// The world-space `ReSTIR` seed and fill compute pipelines and their owned
+/// group-0 layouts.
 #[derive(Resource)]
 pub(crate) struct WorldRestirPipeline {
+    /// `seed_main` entry: per-slot streaming `RIS` over the candidate lights.
+    seed: CachedComputePipelineId,
+    /// group 0 for `seed_main`: the previous reservoir table (read-only, 0),
+    /// the next reservoir table (read-write, 1) and the candidate light list
+    /// (read-only, 2).
+    seed_layout: BindGroupLayout,
     /// `fill_main` entry: per-slot spatial `GRIS` reuse + finalise.
     fill: CachedComputePipelineId,
     /// group 0 for `fill_main`: the previous reservoir table (read-only, 0) and
@@ -44,6 +60,26 @@ pub(crate) struct WorldRestirPipeline {
 }
 
 impl WorldRestirPipeline {
+    /// The `seed_main` compute pipeline id. Recorded by the seed dispatch in a
+    /// follow-up slice.
+    #[expect(
+        dead_code,
+        reason = "the seed dispatch records this pipeline in a follow-up slice;                   no render-graph node reads it yet"
+    )]
+    pub(crate) fn seed(&self) -> CachedComputePipelineId {
+        self.seed
+    }
+
+    /// group-0 layout for the `seed_main` dispatch. The seed bind group builds
+    /// against it in a follow-up slice.
+    #[expect(
+        dead_code,
+        reason = "the seed bind group builds against this layout in a follow-up                   slice; no host path reads it yet"
+    )]
+    pub(crate) fn seed_layout(&self) -> &BindGroupLayout {
+        &self.seed_layout
+    }
+
     /// The `fill_main` compute pipeline id.
     pub(crate) fn fill(&self) -> CachedComputePipelineId {
         self.fill
@@ -53,6 +89,24 @@ impl WorldRestirPipeline {
     pub(crate) fn fill_layout(&self) -> &BindGroupLayout {
         &self.fill_layout
     }
+}
+
+/// `seed_main` group-0 layout: the previous frame's reservoir table bound
+/// read-only (0), this frame's table bound read-write (1) and the per-frame
+/// candidate light list bound read-only (2). The reservoir tables are unsized
+/// `array<WorldRestirReservoir>` buffers at the frozen
+/// [`super::abi::WORLD_RESTIR_RESERVOIR_STRIDE`]; the light list is an unsized
+/// `array<WorldRestirLight>` at the frozen
+/// [`super::abi::WORLD_RESTIR_LIGHT_STRIDE`].
+fn seed_layout_entries() -> BindGroupLayoutEntries<3> {
+    BindGroupLayoutEntries::sequential(
+        ShaderStages::COMPUTE,
+        (
+            storage_buffer_read_only_sized(false, None),
+            storage_buffer_sized(false, None),
+            storage_buffer_read_only_sized(false, None),
+        ),
+    )
 }
 
 /// `fill_main` group-0 layout: the previous frame's reservoir table bound
@@ -76,6 +130,24 @@ pub(crate) fn init_world_restir_pipeline(
     cache: Res<PipelineCache>,
     asset_server: Res<bevy_asset::AssetServer>,
 ) {
+    let seed_entries = seed_layout_entries();
+    let seed_descriptor =
+        BindGroupLayoutDescriptor::new("prism world-space ReSTIR seed", &seed_entries);
+    let seed_layout =
+        device.create_bind_group_layout("prism world-space ReSTIR seed", &seed_entries);
+
+    let seed_shader: Handle<Shader> =
+        load_embedded_asset!(asset_server.as_ref(), "../shaders/world_restir_seed.wesl");
+
+    let seed = cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        label: Some("prism world-space ReSTIR seed".into()),
+        layout: vec![seed_descriptor],
+        immediate_size: size_of::<GpuWorldRestirSeedParams>() as u32,
+        shader: seed_shader,
+        entry_point: Some("seed_main".into()),
+        ..Default::default()
+    });
+
     let fill_entries = fill_layout_entries();
     let fill_descriptor =
         BindGroupLayoutDescriptor::new("prism world-space ReSTIR fill", &fill_entries);
@@ -94,7 +166,12 @@ pub(crate) fn init_world_restir_pipeline(
         ..Default::default()
     });
 
-    commands.insert_resource(WorldRestirPipeline { fill, fill_layout });
+    commands.insert_resource(WorldRestirPipeline {
+        seed,
+        seed_layout,
+        fill,
+        fill_layout,
+    });
 }
 
 #[cfg(test)]
@@ -107,5 +184,13 @@ mod tests {
         // drift here would mismatch `set_immediates` against the shader's
         // `var<immediate>` block.
         assert_eq!(size_of::<GpuWorldRestirFillParams>() as u32, 64);
+    }
+
+    #[test]
+    fn seed_immediate_block_is_the_abi_size() {
+        // The seed pipeline reserves exactly the frozen seed immediate block;
+        // a drift here would mismatch `set_immediates` against the seed
+        // shader's `var<immediate>` block.
+        assert_eq!(size_of::<GpuWorldRestirSeedParams>() as u32, 32);
     }
 }
