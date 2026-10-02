@@ -39,6 +39,7 @@ mod vignette;
 mod virtual_shadow;
 mod volumetric_clouds;
 mod volumetrics;
+mod world_restir;
 mod world_space_gi;
 
 pub use plugin::PrismShadingPlugin;
