@@ -16,6 +16,7 @@
 //! * Barre-Brisebois & Hill, "Blending in Detail" (reoriented normal mapping).
 
 mod anisotropy;
+mod basis;
 mod blend;
 mod height;
 mod lean;
@@ -30,6 +31,7 @@ pub use anisotropy::{
     anisotropic_ggx_from_covariance, ggx_alpha_to_variance, slope_covariance_eigen,
     slope_covariance_from_eigen, variance_to_ggx_alpha, SlopeEigen,
 };
+pub use basis::{object_to_tangent, orthonormalize_basis, tangent_to_object, TangentBasis};
 pub use blend::{blend_linear, blend_rnm, blend_udn, blend_whiteout};
 pub use height::{height_to_normal, HeightGradient};
 pub use lean::{
