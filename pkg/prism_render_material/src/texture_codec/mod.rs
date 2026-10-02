@@ -40,6 +40,7 @@
 //! * Vulkan `VK_FORMAT_BC{1,3,4,5}_*` / D3D `DXGI_FORMAT_BC{1,3,4,5}_*`.
 
 mod alpha_block;
+mod astc;
 mod bc6h;
 mod bc7;
 mod bitio;
@@ -52,6 +53,7 @@ mod formats;
 mod snorm_block;
 mod source;
 
+pub use astc::{decode_astc_4x4_ldr, decode_astc_void_extent_ldr, AstcError};
 pub use bc6h::{
     bc6h_mode_bits, decode_bc6h_mode10_signed, decode_bc6h_mode10_unsigned,
     decode_bc6h_mode11_signed, decode_bc6h_mode11_unsigned, decode_bc6h_mode12_signed,

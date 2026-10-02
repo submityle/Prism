@@ -77,7 +77,7 @@ pub use texture_blur::{
     unsharp_mask_plane,
 };
 pub use texture_codec::{
-    bc6h_mode_bits, bc7_mode, decode_bc1, decode_bc2, decode_bc3, decode_bc4, decode_bc4_signed,
+    bc6h_mode_bits, bc7_mode, decode_astc_4x4_ldr, decode_astc_void_extent_ldr, decode_bc1, decode_bc2, decode_bc3, decode_bc4, decode_bc4_signed,
     decode_bc5, decode_bc5_signed, decode_bc6h_mode10_signed, decode_bc6h_mode10_unsigned,
     decode_bc6h_mode11_signed, decode_bc6h_mode11_unsigned, decode_bc6h_mode12_signed,
     decode_bc6h_mode12_unsigned, decode_bc6h_mode13_signed, decode_bc6h_mode13_unsigned,
@@ -94,7 +94,7 @@ pub use texture_codec::{
     encode_bc1, encode_bc2, encode_bc3, encode_bc4, encode_bc4_signed, encode_bc5,
     encode_bc5_signed, encode_bc6h_mode11_signed, encode_bc6h_mode11_unsigned, encode_bc7_mode4,
     encode_bc7_mode5, encode_bc7_mode6, encode_etc2_rgb8, etc2_rgb8_mode, half_bits_to_f32,
-    rgb565_to_rgb888, Bc6hError, Bc7Error, BcFormat, BcSourceError, BcTexelSource, Etc2Error,
+    rgb565_to_rgb888, AstcError, Bc6hError, Bc7Error, BcFormat, BcSourceError, BcTexelSource, Etc2Error,
     Etc2Mode,
 };
 pub use texture_color::{
