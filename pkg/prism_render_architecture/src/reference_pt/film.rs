@@ -15,6 +15,7 @@ use alloc::vec::Vec;
 use super::camera::PinholeCamera;
 use super::filter::PixelFilter;
 use super::integrator::{PathIntegrator, Scene};
+use super::path_sampler::PathSampler;
 use super::sampler::Rng;
 use super::subpixel::{SubpixelSampler, LENS_STREAM_SALT};
 use super::Vec3;
@@ -199,7 +200,15 @@ pub fn render_sampled(
             let index = (y as usize) * (width as usize) + (x as usize);
             // A per-pixel stream keyed by the flat index keeps the render
             // deterministic and order-independent (each pixel is self-contained).
-            let mut rng = Rng::with_stream(seed, index as u64 + 1);
+            let pixel_rng = Rng::with_stream(seed, index as u64 + 1);
+            // The on-path sampler reserves its leading dimensions for
+            // Owen-scrambled Sobol (0, 2)-nets when the caller opts into the
+            // quasi-Monte-Carlo sub-pixel sampler, and otherwise forwards every
+            // draw to `pixel_rng` so the default render stays bit-identical.
+            let mut path_sampler = match sampler {
+                SubpixelSampler::Halton => PathSampler::passthrough(pixel_rng),
+                SubpixelSampler::OwenSobol => PathSampler::new(seed, index as u64, pixel_rng),
+            };
             // Low-discrepancy sub-pixel jitter (decorrelated per pixel) resolves
             // primary-visibility edges far faster than independent jitter would.
             let jitter_sampler = sampler.build(seed, index as u64);
@@ -208,6 +217,9 @@ pub fn render_sampled(
             let lens_sampler = sampler.build(seed ^ LENS_STREAM_SALT, index as u64);
             let mut sum = Vec3::ZERO;
             for s in 0..samples_per_pixel {
+                // Re-point the on-path sampler at this per-pixel sample so each
+                // sample walks a fresh low-discrepancy path.
+                path_sampler.reset_for_sample(u64::from(s));
                 // Warp the uniform jitter through the reconstruction filter so
                 // the averaged radiance is a filtered pixel estimate.
                 let jitter = filter.warp(jitter_sampler.sample(u64::from(s)));
@@ -219,7 +231,7 @@ pub fn render_sampled(
                 } else {
                     camera.primary_ray(x, y, width, height, jitter)
                 };
-                sum = sum.add(integrator.radiance(scene, ray, &mut rng));
+                sum = sum.add(integrator.radiance(scene, ray, &mut path_sampler));
             }
             film.pixels[index] = sum.scale(inv_spp);
         }
@@ -253,6 +265,38 @@ mod tests {
         let materials = alloc::vec![Material::new(Bsdf::Lambert { albedo: Vec3::ONE })];
         Scene::new(ground_plane(), materials, alloc::vec![], Vec3::ONE)
             .expect("white furnace scene")
+    }
+
+    /// A diffuse floor lit only by a small downward-facing emitter floating
+    /// overhead (triangle 1), under a black environment. Whether a bounce ray
+    /// reaches the emitter depends on its sampled direction, so single-sample
+    /// radiance carries real, direction-dependent variance -- exactly what a
+    /// path-space sampler reshapes.
+    fn floor_under_overhead_emitter_scene() -> Scene {
+        let positions = alloc::vec![
+            [-10.0_f32, 0.0, -10.0],
+            [10.0, 0.0, -10.0],
+            [0.0, 0.0, 10.0],
+            [-1.0, 4.0, -1.0],
+            [1.0, 4.0, -1.0],
+            [-1.0, 4.0, 1.0],
+        ];
+        let indices = alloc::vec![[0u32, 1, 2], [3, 4, 5]];
+        let mesh = TriangleMesh::new(positions, alloc::vec![], alloc::vec![], indices)
+            .expect("valid floor + emitter mesh");
+        let materials = alloc::vec![
+            Material::new(Bsdf::Lambert {
+                albedo: Vec3::splat(0.8)
+            }),
+            Material::emissive(Bsdf::Lambert { albedo: Vec3::ZERO }, Vec3::splat(5.0)),
+        ];
+        Scene::new(
+            TriangleMeshBvh::build(mesh),
+            materials,
+            alloc::vec![],
+            Vec3::ZERO,
+        )
+        .expect("floor under overhead emitter scene")
     }
 
     /// A camera above the origin looking straight down at the floor, whose
@@ -379,6 +423,91 @@ mod tests {
         assert_eq!(film.width(), 0);
         assert_eq!(film.height(), 0);
         assert!(film.pixels().is_empty());
+    }
+
+    #[test]
+    fn owen_sobol_path_is_unbiased_and_deterministic() {
+        // Routing the on-path dimensions through the Owen-scrambled Sobol
+        // sampler is a variance-reduction technique, not a bias: a white-furnace
+        // render must still converge to unit radiance and stay bit-identical
+        // across runs.
+        let scene = white_furnace_scene();
+        let camera = overhead_camera();
+        let integrator = PathIntegrator::new(8, 5);
+        let a = render_sampled(
+            &scene,
+            &camera,
+            &integrator,
+            4,
+            4,
+            256,
+            7,
+            PixelFilter::Box,
+            SubpixelSampler::OwenSobol,
+        );
+        let b = render_sampled(
+            &scene,
+            &camera,
+            &integrator,
+            4,
+            4,
+            256,
+            7,
+            PixelFilter::Box,
+            SubpixelSampler::OwenSobol,
+        );
+        for (pa, pb) in a.pixels().iter().zip(b.pixels()) {
+            assert_eq!(pa.x.to_bits(), pb.x.to_bits());
+        }
+        for p in a.pixels() {
+            assert!(p.is_finite());
+            assert!(
+                (p.x - 1.0).abs() < 2e-2,
+                "Owen-Sobol white furnace pixel {} should converge to 1",
+                p.x
+            );
+        }
+    }
+
+    #[test]
+    fn owen_sobol_path_actually_changes_the_sample_stream() {
+        // The default Halton path forwards every on-path draw to the `PCG`
+        // stream, while the Owen-Sobol path reserves its leading dimensions for
+        // the (0, 2)-nets. On a scene whose radiance depends on the sampled
+        // path, the two must produce different per-pixel bits, proving the
+        // quasi-Monte-Carlo path sampler is genuinely wired into the integrator
+        // rather than silently ignored.
+        let scene = floor_under_overhead_emitter_scene();
+        let camera = overhead_camera();
+        let integrator = PathIntegrator::new(8, 5);
+        let halton = render_sampled(
+            &scene,
+            &camera,
+            &integrator,
+            4,
+            4,
+            64,
+            3,
+            PixelFilter::Box,
+            SubpixelSampler::Halton,
+        );
+        let owen = render_sampled(
+            &scene,
+            &camera,
+            &integrator,
+            4,
+            4,
+            64,
+            3,
+            PixelFilter::Box,
+            SubpixelSampler::OwenSobol,
+        );
+        let differs = halton
+            .pixels()
+            .iter()
+            .zip(owen.pixels())
+            .any(|(h, o)| h.x.to_bits() != o.x.to_bits());
+        assert!(differs, "Owen-Sobol path did not change any pixel");
     }
 
     #[test]
