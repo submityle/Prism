@@ -217,6 +217,7 @@ pub mod tonemap;
 pub mod total_coverage;
 pub mod tracking_transmittance;
 pub mod transcendental_approx;
+pub mod tri_tri_intersect;
 pub mod triangle_aabb_overlap;
 pub mod triangle_circumcircle;
 pub mod trig_approx;
@@ -438,6 +439,7 @@ pub use tracking_transmittance::{
     GpuTrackingTransmittance, TrackingEstimate, TrackingTransmittanceQuery,
 };
 pub use transcendental_approx::{GpuTranscendental, TranscendentalQuery, TranscendentalResult};
+pub use tri_tri_intersect::{GpuTriTriIntersect, TriTriQuery};
 pub use triangle_aabb_overlap::{GpuTriangleAabbOverlap, TriangleAabbQuery};
 pub use triangle_circumcircle::{GpuTriangleCircumcircle, TriangleCircumcircleResult};
 pub use trig_approx::{GpuTrigApprox, TrigApproxQuery, TrigApproxResult};
