@@ -109,6 +109,7 @@ pub mod color_gradient;
 pub mod color_temperature;
 pub mod composite_motion_vector;
 pub mod conservative_raster;
+pub mod constraints;
 pub mod contact_shadow;
 pub mod context;
 pub mod contrail_kernel;
@@ -145,6 +146,7 @@ pub mod fixed_point_q16_muldiv;
 pub mod fixed_point_q24_8;
 pub mod fixed_point_q24_8_muldiv;
 pub mod flipbook_blend;
+pub mod fluid;
 pub mod fluid_advect;
 pub mod fluid_cfl_timestep;
 pub mod fluid_combustion;
@@ -191,6 +193,7 @@ pub mod imposter_fade;
 pub mod indirect_dispatch;
 pub mod indirect_draw;
 pub mod inertia_tensor;
+pub mod instancing;
 pub mod integer_gcd;
 pub mod integrate_segment;
 pub mod interval_overlap_1d;
@@ -240,6 +243,7 @@ pub mod normal_reconstruct;
 pub mod obb_obb_sat_3d;
 pub mod occlusion;
 pub mod octave;
+pub mod oit;
 pub mod oklab_color;
 pub mod oren_nayar;
 pub mod orientation_basis;
@@ -290,6 +294,7 @@ pub mod ribbon_trail;
 pub mod ritter_bounding_sphere;
 pub mod sat_collision_2d;
 pub mod scanline_polygon_fill;
+pub mod screen_space_reflection;
 pub mod sdf;
 pub mod segment_closest_point_3d;
 pub mod segment_intersect_2d;
@@ -329,6 +334,7 @@ pub mod sutherland_hodgman_2d;
 pub mod sweep_aabb;
 pub mod temporal_dither;
 pub mod temporal_reproject;
+pub mod temporal_reprojection;
 pub mod terrain_occlusion;
 pub mod tetrahedron_volume;
 pub mod tiled_depth_sort;
@@ -438,6 +444,7 @@ pub use composite_motion_vector::{
 pub use conservative_raster::{
     ConservativeRasterQuery, ConservativeRasterResult, GpuConservativeRaster,
 };
+pub use constraints::{ConstraintsQuery, ConstraintsResult, GpuConstraints, MAX_RIGID_PARTICLES};
 pub use contact_shadow::{ContactShadowQuery, GpuContactShadow};
 pub use context::{block_on, GpuContext};
 pub use contrail_kernel::{ContrailKernelQuery, GpuContrailKernel};
@@ -482,6 +489,7 @@ pub use fixed_point_q16_muldiv::{GpuQ16MulDiv, GpuQ16MulDivQuery, GpuQ16MulOp};
 pub use fixed_point_q24_8::{GpuFixedPointQ24_8, GpuQ24Op, GpuQ24Query};
 pub use fixed_point_q24_8_muldiv::{FixedPointQ24_8MulQuery, GpuFixedPointQ24_8Muldiv};
 pub use flipbook_blend::{FlipbookQuery, FlipbookResult, FlipbookSample, GpuFlipbookBlend};
+pub use fluid::{FluidQuery, FluidResult, GpuFluid};
 pub use fluid_advect::{GpuAdvectQuery, GpuAdvectResult, GpuFluidAdvect};
 pub use fluid_cfl_timestep::{GpuCflTimestepQuery, GpuCflTimestepResult, GpuFluidCflTimestep};
 pub use fluid_combustion::{GpuFluidCombustion, GpuFluidCombustionQuery, GpuFluidCombustionResult};
@@ -554,6 +562,7 @@ pub use indirect_dispatch::{
 };
 pub use indirect_draw::{GpuIndirectDraw, GpuIndirectDrawQuery, GpuIndirectDrawResult};
 pub use inertia_tensor::{BodyOpQuery, BodyOpResult, GpuInertiaTensor};
+pub use instancing::{GpuInstancing, InstancingQuery, InstancingResult};
 pub use integer_gcd::{GpuGcdOp, GpuGcdQuery, GpuIntegerGcd};
 pub use integrate_segment::{GpuIntegrateSegment, IntegrateSegmentQuery};
 pub use interval_overlap_1d::{GpuIntervalOverlap1d, IntervalOverlapQuery, IntervalOverlapResult};
@@ -614,6 +623,7 @@ pub use normal_reconstruct::{GpuNormalReconstruct, NormalQuery, NormalResult};
 pub use obb_obb_sat_3d::{GpuObbSat3d, ObbSat3dQuery, ObbSat3dResult};
 pub use occlusion::{GpuOcclusion, GpuOcclusionQuery, GpuOcclusionResult};
 pub use octave::{GpuOctaveScatter, OctaveQuery, OctaveResult};
+pub use oit::{GpuOit, OitQuery, OitResult};
 pub use oklab_color::{GpuOklabColor, OklabColorQuery, OklabColorResult, CHROMA_FLOOR};
 pub use oren_nayar::{GpuOrenNayar, OrenNayarQuery, OrenNayarResult};
 pub use orientation_basis::{GpuOrientationBasis, OrientationQuery};
@@ -674,6 +684,9 @@ pub use ribbon_trail::{GpuRibbonTrail, GpuRibbonTrailQuery, GpuRibbonTrailResult
 pub use ritter_bounding_sphere::{GpuRitterBoundingSphere, GpuRitterSphere, RitterQuery};
 pub use sat_collision_2d::{GpuSatCollision2d, SatCollision2dQuery, SatCollision2dResult};
 pub use scanline_polygon_fill::{GpuScanlineFill, GpuScanlinePolygonFill, GpuSpan};
+pub use screen_space_reflection::{
+    GpuScreenSpaceReflection, ScreenSpaceReflectionQuery, ScreenSpaceReflectionResult,
+};
 pub use sdf::{GpuSignedDistanceField, SdfQuery, SdfResult};
 pub use segment_closest_point_3d::{
     GpuSegmentClosestPoint3d, SegmentClosestQuery, SegmentClosestResult,
@@ -731,6 +744,9 @@ pub use sweep_aabb::{GpuSweepAabb, SweepAabbQuery};
 pub use temporal_dither::{DitherPixel, DitherQuery, DitherSample, GpuTemporalDither};
 pub use temporal_reproject::{
     GpuTemporalReproject, TemporalReprojectQuery, TemporalReprojectResult, NEIGHBORHOOD_TAPS,
+};
+pub use temporal_reprojection::{
+    GpuTemporalReprojection, TemporalReprojectionQuery, TemporalReprojectionResult,
 };
 pub use terrain_occlusion::{GpuTerrainOcclusion, TerrainOcclusionQuery};
 pub use tetrahedron_volume::{
