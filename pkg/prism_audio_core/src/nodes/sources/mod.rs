@@ -41,6 +41,14 @@
 //!   stochastic and unpitched, this source is deterministic and pitched;
 //!   unlike the fixed waveshape of [`oscillator`], its per-cycle shape
 //!   evolves with the orbit.
+//! - [`lorenz_attractor::LorenzAttractorNode`] -- continuous chaotic-attractor
+//!   source: the Lorenz system `dx = sigma(y - x)`, `dy = x(rho - z) - y`,
+//!   `dz = xy - beta*z` is integrated with oversampled fourth-order
+//!   Runge-Kutta and the `x` coordinate is soft-limited and read out as a
+//!   broadband, aperiodic drone. `rate_hz` scales the integration speed and
+//!   `rho` morphs the attractor. Unlike [`chaotic_oscillator`], which iterates
+//!   a discrete map once per pitched period, this is continuous-flow chaos
+//!   with no hard period; unlike [`noise`] it is fully deterministic.
 //! - [`sample_player::SamplePlayerNode`] -- pitch/rate-resampling PCM player with
 //!   [`sample_player::LoopMode`] loop points and selectable
 //!   [`sample_player::Interpolation`] (linear / Catmull-Rom).
@@ -374,6 +382,7 @@ pub mod bowed_string;
 pub mod conical_reed;
 pub mod brass_lip_reed;
 pub mod chaotic_oscillator;
+pub mod lorenz_attractor;
 pub mod dsf_oscillator;
 pub mod dust;
 pub mod fm_operator;
@@ -411,6 +420,7 @@ pub use blown_pipe::{BlownPipeNode, BlownPipeParams, NUM_HARMONICS};
 pub use bowed_string::{BowedStringNode, BowedStringParams};
 pub use brass_lip_reed::{BrassLipReedNode, BrassLipReedParams};
 pub use chaotic_oscillator::{ChaoticOscillatorNode, ChaoticOscillatorParams};
+pub use lorenz_attractor::{LorenzAttractorNode, LorenzAttractorParams};
 pub use conical_reed::{ConicalReedNode, ConicalReedParams};
 pub use dsf_oscillator::{DsfOscillatorNode, DsfOscillatorParams};
 pub use dust::{DustNode, DustParams, Polarity};
