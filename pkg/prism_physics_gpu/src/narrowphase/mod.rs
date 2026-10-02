@@ -92,6 +92,8 @@ mod capsule_triangle;
 mod capsule_triangle_gpu;
 mod capsule_triangle_manifold;
 mod capsule_triangle_manifold_gpu;
+mod collide_shape_bvh;
+mod collide_shape_bvh_gpu;
 mod conservative_advancement;
 mod conservative_advancement_gpu;
 mod contact;
@@ -158,6 +160,8 @@ pub use conservative_advancement::{
 };
 pub use contact::Contact;
 pub use convex_convex_manifold::{cpu_convex_convex_manifold, ConvexConvexPair};
+pub use collide_shape_bvh::{collide_shape, collide_shape_bvh, CollideShapeHit};
+pub use collide_shape_bvh_gpu::GpuBvhCollideShape;
 pub use conservative_advancement_gpu::GpuConvexConvexToiNarrowphase;
 pub use shape_cast::{cast_shape, cast_shape_all, RoundedConvex, ShapeCastHit};
 pub use shape_cast_bvh::{cast_shape_all_bvh, cast_shape_bvh};
