@@ -41,7 +41,6 @@
 //! Entries are always written in [`PsoCacheKey`] order, so the encoding of a
 //! given logical cache is unique regardless of insertion order.
 
-use alloc::string::String;
 use alloc::vec::Vec;
 
 use super::fingerprint::{DeviceFingerprint, FingerprintMismatch, GraphicsBackend};

@@ -31,10 +31,10 @@ pub use permutation::{PermutationKey, PermutationSelector, PermutationSpace};
 pub use registry::{RegisterError, RegistryEntry, ShaderPackageRegistry};
 pub use state::TransitionError;
 pub use pso_cache::{
-    AdmitOutcome, DeviceFingerprint, FingerprintMismatch, GraphicsBackend, LruPsoCache,
-    PackageWarmSpec, PersistError, PersistLoadError, PersistedPipeline, PersistedPsoCache,
-    PipelineStateHash, PsoCacheKey, WarmEnumerationError, WarmPriority, WarmRequest, WarmSetPlan,
-    WarmSetPlanner,
+    AdmitOutcome, DeviceFingerprint, DrawDecision, FingerprintMismatch, GraphicsBackend,
+    LruPsoCache, PackageWarmSpec, PersistError, PersistLoadError, PersistedPipeline,
+    PersistedPsoCache, PipelineReadiness, PipelineStateHash, PsoCacheKey, WarmCounters,
+    WarmEnumerationError, WarmPriority, WarmRequest, WarmRuntime, WarmSetPlan, WarmSetPlanner,
 };
 
 /// Stable, human-readable identifier for a shader package.

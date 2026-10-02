@@ -19,6 +19,9 @@
 //! - [`eviction`] — [`LruPsoCache`], a byte-budgeted LRU residency model.
 //! - [`warm_enumerate`] — [`PackageWarmSpec`] deriving warm requests from a
 //!   package's [`PermutationSpace`](super::PermutationSpace) × render states.
+//! - [`warm_runtime`] — [`WarmRuntime`], the deterministic runtime
+//!   lifecycle + per-draw gate ([`DrawDecision`]) that keeps the main
+//!   thread hitch-free while pipelines compile asynchronously.
 //!
 //! Pipelines are addressed by a [`PsoCacheKey`] — the shader package, its dense
 //! permutation index, and a hash of the fixed-function / render-target state
@@ -28,6 +31,7 @@ mod eviction;
 mod fingerprint;
 mod persist;
 mod warm_enumerate;
+mod warm_runtime;
 mod warm_set;
 
 pub use eviction::{AdmitOutcome, LruPsoCache};
@@ -36,6 +40,7 @@ pub use persist::{
 };
 pub use fingerprint::{DeviceFingerprint, FingerprintMismatch, GraphicsBackend};
 pub use warm_enumerate::{PackageWarmSpec, WarmEnumerationError};
+pub use warm_runtime::{DrawDecision, PipelineReadiness, WarmCounters, WarmRuntime};
 pub use warm_set::{WarmPriority, WarmRequest, WarmSetPlan, WarmSetPlanner};
 
 use super::ShaderPackageId;
