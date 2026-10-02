@@ -15,6 +15,7 @@
 //! * Mittring, "Finding Next Gen -- `CryEngine` 2" (two-channel normals).
 //! * Barre-Brisebois & Hill, "Blending in Detail" (reoriented normal mapping).
 
+mod anisotropy;
 mod blend;
 mod height;
 mod lean;
@@ -24,6 +25,10 @@ mod strength;
 mod surface_gradient;
 mod triplanar;
 
+pub use anisotropy::{
+    anisotropic_ggx_from_covariance, ggx_alpha_to_variance, slope_covariance_eigen,
+    slope_covariance_from_eigen, variance_to_ggx_alpha, SlopeEigen,
+};
 pub use blend::{blend_linear, blend_rnm, blend_udn, blend_whiteout};
 pub use height::{height_to_normal, HeightGradient};
 pub use lean::{
