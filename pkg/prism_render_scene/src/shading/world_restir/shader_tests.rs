@@ -84,6 +84,28 @@ fn seed_wesl_compiles_standalone() {
         .unwrap_or_else(|error| panic!("world_restir_seed.wesl failed to compile: {error}"));
 }
 
+/// Compiles `world_restir_inject.wesl`, proving the hash-grid injection /
+/// slot-claim kernel parses and type-checks exactly as it will in the render
+/// world (the visible-point storage binding, the `read_write` reservoir table,
+/// the `atomic<u32>` slot-state array, and the `InjectParams` immediate).
+#[test]
+fn inject_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let inject = shader_id(0x5052_4953_4d5f_5753_5244_5f46_494c_0003);
+    cache.set_shader(
+        inject,
+        Shader::from_wesl(
+            include_str!("../../shaders/world_restir_inject.wesl"),
+            "embedded://prism_render_scene/shaders/world_restir_inject.wesl",
+        ),
+    );
+
+    cache
+        .get(0, inject, &[])
+        .unwrap_or_else(|error| panic!("world_restir_inject.wesl failed to compile: {error}"));
+}
+
 /// Guards the Rust device `ABI` against drift from the WESL twin: the reservoir
 /// slot is the 80-byte five-lane record, the fill immediate is the 64-byte
 /// four-lane block, and the workgroup constant matches `@workgroup_size(64, 1,
@@ -91,9 +113,11 @@ fn seed_wesl_compiles_standalone() {
 #[test]
 fn world_restir_abi_matches_the_shader_layout() {
     use super::abi::{
-        GpuWorldRestirFillParams, GpuWorldRestirLight, GpuWorldRestirReservoir,
-        GpuWorldRestirSeedParams, WORLD_RESTIR_LIGHT_STRIDE, WORLD_RESTIR_RESERVOIR_STRIDE,
-        WORLD_RESTIR_SEED_WORKGROUP_SIZE, WORLD_RESTIR_WORKGROUP_SIZE,
+        GpuWorldRestirFillParams, GpuWorldRestirInjectParams, GpuWorldRestirInjectPoint,
+        GpuWorldRestirLight, GpuWorldRestirReservoir, GpuWorldRestirSeedParams,
+        WORLD_RESTIR_INJECT_POINT_STRIDE, WORLD_RESTIR_INJECT_WORKGROUP_SIZE,
+        WORLD_RESTIR_LIGHT_STRIDE, WORLD_RESTIR_RESERVOIR_STRIDE, WORLD_RESTIR_SEED_WORKGROUP_SIZE,
+        WORLD_RESTIR_WORKGROUP_SIZE,
     };
 
     // Fill pass: 80-byte five-lane reservoir slot + 64-byte four-lane immediate.
@@ -111,6 +135,14 @@ fn world_restir_abi_matches_the_shader_layout() {
     assert_eq!(size_of::<GpuWorldRestirSeedParams>(), 32);
     assert_eq!(align_of::<GpuWorldRestirSeedParams>(), 4);
     assert_eq!(WORLD_RESTIR_SEED_WORKGROUP_SIZE, 64);
+
+    // Inject pass: 32-byte two-lane visible point + 48-byte three-lane immediate.
+    assert_eq!(size_of::<GpuWorldRestirInjectPoint>(), 32);
+    assert_eq!(align_of::<GpuWorldRestirInjectPoint>(), 4);
+    assert_eq!(WORLD_RESTIR_INJECT_POINT_STRIDE, 32);
+    assert_eq!(size_of::<GpuWorldRestirInjectParams>(), 48);
+    assert_eq!(align_of::<GpuWorldRestirInjectParams>(), 4);
+    assert_eq!(WORLD_RESTIR_INJECT_WORKGROUP_SIZE, 64);
 }
 
 /// Bit-exact Rust re-implementation of the WESL `vec2<u32>` 64-bit `SHARC`
@@ -708,5 +740,276 @@ fn seed_shader_matches_cpu_golden() {
                 }
             }
         }
+    }
+}
+
+/// Serial CPU mirror of `world_restir_inject.wesl`'s `inject_main` open-address
+/// slot claim. `state[idx]` is `None` for an empty slot or `Some(checksum)` for
+/// a claimed one, reproducing the shader's `atomic<u32>` `slot_state`
+/// (`EMPTY_SLOT = 0`). The probe base, step bound (`PROBE_LIMIT`), and checksum
+/// are the golden `spatial_hash` / `WorldHashGrid::find_or_alloc` values, so the
+/// claimed slot sequence is bit-identical to the device path.
+mod inject_mirror {
+    use bevy_math::Vec3;
+    use prism_render_shading::gi::world_restir::spatial_hash::{self, HashGridKey, HashGridParams};
+    use prism_render_shading::gi::world_restir::world_reservoir::PROBE_LIMIT;
+
+    /// The outcome of claiming a slot for one injected visible point.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Outcome {
+        /// First invocation to own the cell: it claims `state[idx]` and
+        /// pre-seeds the reservoir (shader `claim.exchanged` branch).
+        Fresh(usize),
+        /// The cell was already claimed by a prior point (shader `owner == cs`
+        /// first-wins branch); the slot is left untouched.
+        Reuse(usize),
+        /// The probe window was full of other cells; the point is dropped
+        /// rather than evicting a live cell.
+        Drop,
+    }
+
+    /// Hashes `(position, normal)` into its `SHARC` cell and claims the slot
+    /// owning that cell under the shader's linear probe, mutating `state`.
+    /// Returns the claim outcome plus the resolved key and its checksum.
+    pub fn claim(
+        state: &mut [Option<u32>],
+        position: Vec3,
+        normal: Vec3,
+        camera: Vec3,
+        params: &HashGridParams,
+    ) -> (Outcome, HashGridKey, u32) {
+        let cap = state.len() as u32;
+        let key = spatial_hash::compute_key(position, normal, camera, params);
+        let cs = spatial_hash::checksum(&key);
+        let base = spatial_hash::bucket_index(&key, cap);
+        let steps = PROBE_LIMIT.min(cap);
+        for i in 0..steps {
+            let idx = ((base + i) % cap) as usize;
+            match state[idx] {
+                None => {
+                    state[idx] = Some(cs);
+                    return (Outcome::Fresh(idx), key, cs);
+                }
+                Some(owner) if owner == cs => return (Outcome::Reuse(idx), key, cs),
+                Some(_) => {}
+            }
+        }
+        (Outcome::Drop, key, cs)
+    }
+}
+
+/// Device-equivalence proof for `world_restir_inject.wesl` under the no-GPU
+/// sandbox. The shader's atomic open-address claim is mirrored on the CPU
+/// ([`inject_mirror::claim`]) and cross-checked against the authoritative
+/// `WorldHashGrid::find_or_alloc` (reached through `insert_candidate`), which
+/// shares the identical probe base, step bound, and checksum. For a
+/// deterministic point stream with repeated cells (driving the first-wins
+/// `Reuse` path) across table capacities that force collisions and
+/// probe-window-full `Drop`s, it asserts:
+///
+/// * every checksum is non-zero and distinct cells get distinct checksums, so
+///   the shader's `EMPTY_SLOT = 0` sentinel is never ambiguous with a claim;
+/// * each `Fresh` claim allocates exactly one new grid cell while `Reuse` /
+///   `Drop` allocate none, so grid occupancy equals the distinct-claimed count;
+/// * a cell's reservoir is present in the grid iff the mirror claimed it;
+/// * the pre-seeded reservoir is byte-for-byte what `make_reservoir` writes and
+///   `seed_main` reads back (`visible_point` / `visible_normal` geometry, the
+///   `checksum`, `valid = 1`, and zeroed `w` / `m` / sample / radiance lanes).
+#[test]
+fn inject_shader_matches_cpu_golden() {
+    use super::abi::GpuWorldRestirReservoir;
+    use bevy_math::Vec3;
+    use inject_mirror::{claim, Outcome};
+    use prism_render_shading::gi::screen_probe::restir::GiSample;
+    use prism_render_shading::gi::world_restir::spatial_hash::HashGridParams;
+    use prism_render_shading::gi::world_restir::world_reservoir::WorldHashGrid;
+
+    let camera = Vec3::new(0.0, 1.5, 4.0);
+    let params = HashGridParams::DEFAULT;
+
+    // Deterministic visible-point stream: six well-separated cells with three
+    // exact repeats interleaved so the first-wins `Reuse` branch is exercised.
+    let points: [(Vec3, Vec3); 10] = [
+        (Vec3::new(0.0, 0.0, 0.0), Vec3::Y),
+        (Vec3::new(3.0, 0.0, 0.0), Vec3::X),
+        (Vec3::new(0.0, 0.0, 0.0), Vec3::Y),
+        (Vec3::new(0.0, 3.0, 0.0), Vec3::Z),
+        (Vec3::new(0.0, 0.0, 0.0), Vec3::Y),
+        (Vec3::new(0.0, 0.0, -3.0), Vec3::new(0.0, -1.0, 0.0)),
+        (Vec3::new(3.0, 0.0, 0.0), Vec3::X),
+        (
+            Vec3::new(3.0, 3.0, 0.0),
+            Vec3::new(1.0, 1.0, 0.0).normalize(),
+        ),
+        (
+            Vec3::new(-3.0, 0.0, 3.0),
+            Vec3::new(-1.0, 0.0, 1.0).normalize(),
+        ),
+        (Vec3::new(0.0, 3.0, 0.0), Vec3::Z),
+    ];
+
+    for &cap in &[1u32, 4, 8, 131_072] {
+        let mut state: Vec<Option<u32>> = vec![None; cap as usize];
+        let mut grid = WorldHashGrid::new(cap);
+        // Distinct resolved cells in first-seen order: (key, checksum, claimed?).
+        let mut seen: Vec<(HashGridKey, u32, bool)> = Vec::new();
+        let mut fresh_count = 0usize;
+
+        for &(pos, normal) in &points {
+            let (outcome, key, cs) = claim(&mut state, pos, normal, camera, &params);
+            assert_ne!(
+                cs, 0,
+                "checksum must be non-zero so EMPTY_SLOT=0 is unambiguous (cap={cap}, key={key:?})"
+            );
+
+            // The authoritative grid shares the identical probe window and
+            // checksum, so `find_or_alloc` (via `insert_candidate`) allocates a
+            // cell exactly when the mirror reports `Fresh`.
+            let before = grid.occupied_len();
+            let dummy = GiSample {
+                visible_point: pos,
+                visible_normal: normal,
+                ..GiSample::ZERO
+            };
+            grid.insert_candidate(&key, dummy, 1.0, 0.5);
+            let after = grid.occupied_len();
+
+            match outcome {
+                Outcome::Fresh(_) => {
+                    fresh_count += 1;
+                    assert_eq!(
+                        after,
+                        before + 1,
+                        "fresh claim must allocate one grid cell (cap={cap}, key={key:?})"
+                    );
+                }
+                Outcome::Reuse(_) | Outcome::Drop => {
+                    assert_eq!(
+                        after, before,
+                        "reuse/drop must not allocate (cap={cap}, outcome={outcome:?}, key={key:?})"
+                    );
+                }
+            }
+
+            let claimed_now = matches!(outcome, Outcome::Fresh(_) | Outcome::Reuse(_));
+            match seen.iter_mut().find(|(k, _, _)| *k == key) {
+                Some((_, prev_cs, prev_claimed)) => {
+                    assert_eq!(
+                        *prev_cs, cs,
+                        "a cell's checksum must be stable (cap={cap}, key={key:?})"
+                    );
+                    // No eviction, so a cell's claim state is deterministic
+                    // across repeats (claimed stays claimed, dropped stays
+                    // dropped).
+                    assert_eq!(
+                        *prev_claimed, claimed_now,
+                        "a cell's claim state must be stable across repeats (cap={cap}, key={key:?})"
+                    );
+                }
+                None => seen.push((key, cs, claimed_now)),
+            }
+        }
+
+        // Distinct cells carry distinct checksums in this sweep, so the shader's
+        // EMPTY_SLOT remap can never be reached.
+        let mut checksums: Vec<u32> = seen.iter().map(|&(_, cs, _)| cs).collect();
+        let distinct = checksums.len();
+        checksums.sort_unstable();
+        checksums.dedup();
+        assert_eq!(
+            checksums.len(),
+            distinct,
+            "distinct cells must have distinct checksums (cap={cap})"
+        );
+
+        // Grid occupancy equals the number of distinctly-claimed cells, and each
+        // cell's reservoir is present iff the mirror claimed it.
+        let claimed_cells = seen.iter().filter(|&&(_, _, c)| c).count();
+        assert_eq!(
+            grid.occupied_len(),
+            claimed_cells,
+            "grid occupancy must equal distinct claimed cells (cap={cap})"
+        );
+        assert_eq!(
+            fresh_count, claimed_cells,
+            "exactly one Fresh per distinct claimed cell (cap={cap})"
+        );
+        for (key, _, claimed) in &seen {
+            assert_eq!(
+                grid.reservoir(key).is_some(),
+                *claimed,
+                "grid reservoir presence must match the mirror claim (cap={cap}, key={key:?})"
+            );
+        }
+    }
+
+    // Pre-seeded reservoir bit-exactness: construct what `make_reservoir` writes
+    // for a fresh claim and assert it is byte-for-byte the `seed_main`-readable
+    // record (geometry + checksum + valid flag, every other lane zeroed).
+    let (pos, normal) = points[0];
+    let key = spatial_hash::compute_key(pos, normal, camera, &params);
+    let cs = spatial_hash::checksum(&key);
+    let injected = GpuWorldRestirReservoir {
+        visible_point: pos.to_array(),
+        w: 0.0,
+        visible_normal: normal.to_array(),
+        m: 0.0,
+        sample_point: [0.0; 3],
+        checksum: cs,
+        sample_normal: [0.0; 3],
+        valid: 1,
+        radiance: [0.0; 3],
+        _pad0: 0,
+    };
+    assert_eq!(
+        injected.valid, 1,
+        "injected slot must be marked valid for seed_main"
+    );
+    assert_eq!(
+        injected.checksum, cs,
+        "injected checksum must be the key's SHARC checksum"
+    );
+    assert_ne!(cs, 0, "the injected checksum must be non-zero");
+    assert_eq!(
+        injected.w.to_bits(),
+        0.0_f32.to_bits(),
+        "no W is written at injection"
+    );
+    assert_eq!(
+        injected.m.to_bits(),
+        0.0_f32.to_bits(),
+        "no confidence is written at injection"
+    );
+    assert_eq!(injected._pad0, 0, "the std430 pad word stays zero");
+    for (got, want) in injected.visible_point.iter().zip(pos.to_array().iter()) {
+        assert_eq!(
+            got.to_bits(),
+            want.to_bits(),
+            "visible_point must round-trip the cell geometry"
+        );
+    }
+    for (got, want) in injected.visible_normal.iter().zip(normal.to_array().iter()) {
+        assert_eq!(
+            got.to_bits(),
+            want.to_bits(),
+            "visible_normal must round-trip the cell geometry"
+        );
+    }
+    for got in injected.sample_point {
+        assert_eq!(
+            got.to_bits(),
+            0.0_f32.to_bits(),
+            "no light-sample point at injection"
+        );
+    }
+    for got in injected.sample_normal {
+        assert_eq!(
+            got.to_bits(),
+            0.0_f32.to_bits(),
+            "no light-sample normal at injection"
+        );
+    }
+    for got in injected.radiance {
+        assert_eq!(got.to_bits(), 0.0_f32.to_bits(), "no radiance at injection");
     }
 }

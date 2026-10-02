@@ -309,6 +309,139 @@ impl GpuWorldRestirSeedParams {
     }
 }
 
+/// Workgroup size (1-D) of the world-space `ReSTIR` injection entry point.
+///
+/// Must match `@workgroup_size(N, 1, 1)` in `world_restir_inject.wesl`; the
+/// inject dispatch rounds the visible-point count up to a multiple of this and
+/// the shader bounds-checks every invocation against the live point count.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "inject dispatch extent constant; consumed once the inject pipeline is wired in                   a follow-up slice, so no host path reads it yet"
+    )
+)]
+pub(crate) const WORLD_RESTIR_INJECT_WORKGROUP_SIZE: u32 = 64;
+
+/// Per-point injection storage stride in bytes: two `vec4<f32>` lanes (a `vec3`
+/// payload plus one trailing pad word each) = 32 bytes, matching the WGSL
+/// `InjectPoint` struct's std430 layout and its 16-byte array stride.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "inject point-buffer stride; consumed once the inject bind group binds the                   visible-point list in a follow-up slice, so no host path reads it yet"
+    )
+)]
+pub(crate) const WORLD_RESTIR_INJECT_POINT_STRIDE: u64 = 32;
+
+/// `GPU` twin of one visible shading point the injection pass claims a slot for
+/// (the per-frame visible-point list the inject bind group binds at
+/// `@binding(0)`).
+///
+/// The inject kernel hashes the world position + normal into its `SHARC` cell,
+/// claims the open-addressed reservoir slot, and pre-seeds it with this
+/// geometry (see `world_restir_inject.wesl`). The layout matches the WESL
+/// `InjectPoint` struct: two `vec4` lanes (a `vec3` payload plus one trailing
+/// pad word each) for 32 bytes, a multiple of the 16-byte std430 array stride
+/// with no implicit padding.
+///
+/// Layout (two `vec4` lanes, std430, no implicit padding):
+/// 0. `world_position.xyz` + one pad word
+/// 1. `world_normal.xyz` + one pad word
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq)]
+pub(crate) struct GpuWorldRestirInjectPoint {
+    /// Visible-point (shading-point) world position; the cell centroid the
+    /// seed pass re-exposes as the reservoir's `visible_point`.
+    pub world_position: [f32; 3],
+    /// Padding word rounding the first lane to the 16-byte std430 stride.
+    pub _pad0: f32,
+    /// Unit surface normal at the visible point; octahedrally binned into the
+    /// hash key's `normal_bin`.
+    pub world_normal: [f32; 3],
+    /// Padding word rounding the record to the 16-byte std430 stride.
+    pub _pad1: f32,
+}
+
+/// Immediate (push-constant) block consumed by the `world_restir_inject` entry
+/// point.
+///
+/// One invocation per visible point: it hashes the point into its `SHARC` cell
+/// (golden `spatial_hash::compute_key`), claims the open-addressed slot owning
+/// that cell under a linear probe (golden `WorldHashGrid::find_or_alloc`), and
+/// pre-seeds the slot with the cell geometry + `valid` flag. The hash-grid
+/// tunables mirror the golden
+/// [`prism_render_shading::gi::world_restir::spatial_hash`] `HashGridParams`
+/// so the device cache keys agree with the CPU reference.
+///
+/// The `u32` counts occupy their own lane (unlike the fill block, which
+/// float-encodes `light_count` and recovers it with a `u32(...)` cast); the
+/// host writes them directly with no bitcast.
+///
+/// Layout (three `vec4` lanes, std430, no implicit padding):
+/// 0. `camera_position.xyz` + `base_cell_size`
+/// 1. `jitter.xyz` + `level_scale`
+/// 2. (`capacity`, `point_count`, `normal_resolution`, `frame`)
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq)]
+pub(crate) struct GpuWorldRestirInjectParams {
+    /// Camera world position, forwarded to the golden `grid_level` so the cell
+    /// size grows with viewing distance (constant screen footprint).
+    pub camera_position: [f32; 3],
+    /// Edge length of a level-0 cell in world units (golden
+    /// `HashGridParams::base_cell_size`, clamped positive by the shader).
+    pub base_cell_size: f32,
+    /// Grid-phase jitter in `[0, 1)^3` cell units (golden `HashGridParams`).
+    pub jitter: [f32; 3],
+    /// Distance-to-cell-size scale (golden `HashGridParams::level_scale`);
+    /// `<= 0` disables level scaling (uniform fine grid).
+    pub level_scale: f32,
+    /// Reservoir-table capacity in slots (`>= 1`), the open-addressing modulus
+    /// (golden `bucket_index`) and the probe-window bound.
+    pub capacity: u32,
+    /// Number of visible points to inject this frame, the dispatch extent and
+    /// the per-invocation bounds check.
+    pub point_count: u32,
+    /// Side count of the `resolution x resolution` normal-bin grid (golden
+    /// `HashGridParams::normal_resolution`, clamped to at least `1`).
+    pub normal_resolution: u32,
+    /// Monotonic frame index (reserved for per-frame slot-state reset / debug;
+    /// carried for parity with the seed / fill immediates).
+    pub frame: u32,
+}
+
+impl GpuWorldRestirInjectParams {
+    /// Builds the inject immediate block from the camera position, the
+    /// per-frame jitter + visible-point count + frame index, and the live
+    /// settings (capacity floored at `1`, the grid tunables forwarded verbatim).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "inject immediate builder; called once the inject dispatch is wired in a                       follow-up slice, so no host path constructs it yet"
+        )
+    )]
+    pub(crate) fn from_settings(
+        camera_position: Vec3,
+        jitter: Vec3,
+        point_count: u32,
+        frame: u32,
+        settings: &PrismWorldRestirSettings,
+    ) -> Self {
+        Self {
+            camera_position: camera_position.to_array(),
+            base_cell_size: settings.base_cell_size,
+            jitter: jitter.to_array(),
+            level_scale: settings.level_scale,
+            capacity: settings.capacity.max(1),
+            point_count,
+            normal_resolution: settings.normal_resolution,
+            frame,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -430,6 +563,64 @@ mod tests {
             ..Default::default()
         };
         let params = GpuWorldRestirSeedParams::from_settings(0, 0, &settings);
+        assert_eq!(params.capacity, 1);
+    }
+
+    #[test]
+    fn inject_point_is_the_32_byte_two_lane_record() {
+        // Two `vec4` lanes (a `vec3` payload + trailing pad word each) = 32
+        // bytes, a multiple of the 16-byte std430 array stride.
+        assert_eq!(size_of::<GpuWorldRestirInjectPoint>(), 32);
+        assert_eq!(align_of::<GpuWorldRestirInjectPoint>(), 4);
+        assert_eq!(WORLD_RESTIR_INJECT_POINT_STRIDE, 32);
+        assert_eq!(WORLD_RESTIR_INJECT_POINT_STRIDE % 16, 0);
+        assert_eq!(
+            size_of::<GpuWorldRestirInjectPoint>() as u64,
+            WORLD_RESTIR_INJECT_POINT_STRIDE
+        );
+    }
+
+    #[test]
+    fn inject_params_is_the_48_byte_three_lane_block() {
+        // Three `vec4` lanes = 48 bytes, a multiple of the 16-byte immediate
+        // alignment with no implicit padding.
+        assert_eq!(size_of::<GpuWorldRestirInjectParams>(), 48);
+        assert_eq!(align_of::<GpuWorldRestirInjectParams>(), 4);
+    }
+
+    #[test]
+    fn inject_workgroup_constant_matches_the_shader() {
+        assert_eq!(WORLD_RESTIR_INJECT_WORKGROUP_SIZE, 64);
+    }
+
+    #[test]
+    fn inject_params_from_settings_forwards_the_grid_tunables() {
+        let settings = PrismWorldRestirSettings::default();
+        let params = GpuWorldRestirInjectParams::from_settings(
+            Vec3::new(4.0, 5.0, 6.0),
+            Vec3::new(0.25, 0.5, 0.75),
+            13,
+            9,
+            &settings,
+        );
+        assert_eq!(params.camera_position, [4.0, 5.0, 6.0]);
+        assert_eq!(params.base_cell_size, settings.base_cell_size);
+        assert_eq!(params.jitter, [0.25, 0.5, 0.75]);
+        assert_eq!(params.level_scale, settings.level_scale);
+        assert_eq!(params.capacity, settings.capacity);
+        assert_eq!(params.point_count, 13);
+        assert_eq!(params.normal_resolution, settings.normal_resolution);
+        assert_eq!(params.frame, 9);
+    }
+
+    #[test]
+    fn inject_params_floors_capacity_at_one() {
+        let settings = PrismWorldRestirSettings {
+            capacity: 0,
+            ..Default::default()
+        };
+        let params =
+            GpuWorldRestirInjectParams::from_settings(Vec3::ZERO, Vec3::ZERO, 0, 0, &settings);
         assert_eq!(params.capacity, 1);
     }
 }
