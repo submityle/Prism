@@ -53,6 +53,26 @@ pub enum Light {
     },
 }
 
+/// A ray-light intersection used by the integrator to gather area-light
+/// emission along a `BSDF`-sampled continuation ray.
+///
+/// Only emitters with finite extent (currently [`Light::Quad`]) can be struck;
+/// [`Light::Point`] and [`Light::Directional`] are deltas with zero measure and
+/// never return a hit. The hit carries the emitted radiance and the solid-angle
+/// density that next-event estimation would have assigned to this direction, so
+/// the integrator can multiple-importance weight the gathered emission against
+/// the light-sampling strategy and avoid double counting.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LightHit {
+    /// Distance along the (unit) ray direction to the emitter surface.
+    pub distance: f32,
+    /// Emitted radiance per channel at the hit.
+    pub emission: Vec3,
+    /// Solid-angle density of light sampling for this direction, used as the
+    /// competing strategy density in the integrator's `MIS` weight.
+    pub light_pdf: f32,
+}
+
 impl Light {
     /// Estimates the direct-lighting contribution reflected toward `wo` at a
     /// surface point `point` with viewer-facing shading `normal` and surface
@@ -218,38 +238,13 @@ impl Light {
             }
         }
 
-        // Strategy B: sample the `BSDF` lobe (low variance on sharp, near-specular
-        // lobes) and keep the sample only when the scattered ray strikes this
-        // emitter, weighted against the light density by the power heuristic.
-        let mut strategy_bsdf = || -> Vec3 {
-            let Some(sample) = bsdf.sample(wo, normal, rng) else {
-                return Vec3::ZERO;
-            };
-            if sample.pdf <= 0.0 {
-                return Vec3::ZERO;
-            }
-            let wi = sample.direction;
-            let cos_surface = normal.dot(wi);
-            if cos_surface <= 0.0 {
-                return Vec3::ZERO;
-            }
-            let Some((dist, light_pdf)) =
-                Self::quad_hit(point, wi, origin, edge_u, edge_v, light_normal, area)
-            else {
-                return Vec3::ZERO;
-            };
-            if light_pdf <= 0.0 || occluded(point, wi, dist * (1.0 - RAY_EPS)) {
-                return Vec3::ZERO;
-            }
-            let weight = power_heuristic(sample.pdf, light_pdf);
-            // f_r * L_e * cos_surface / bsdf_pdf, with the `MIS` weight.
-            sample
-                .value
-                .mul(emission)
-                .scale(cos_surface / sample.pdf * weight)
-        };
-        result = result.add(strategy_bsdf());
-
+        // The competing strategy — sampling the `BSDF` lobe and detecting
+        // emitter hits along the continuation ray — lives in the integrator's
+        // path loop (see `Scene::nearest_light_hit`), so this estimator only
+        // performs next-event estimation (Strategy A). Specular vertices skip
+        // next-event estimation entirely and reach the emitter through that
+        // continuation path, which keeps mirror reflections of area lights
+        // unbiased.
         result
     }
 
@@ -298,6 +293,47 @@ impl Light {
             return None;
         }
         Some((t, (t * t) / (cos_light * area)))
+    }
+
+    /// Intersects a world-space ray `origin + t * direction` (with `direction`
+    /// unit length) against this light's emitting surface.
+    ///
+    /// Returns the nearest forward hit as a [`LightHit`], or [`None`] for delta
+    /// emitters and for rays that miss the surface. The integrator uses this to
+    /// let `BSDF`-sampled continuation rays — including perfectly specular ones
+    /// that next-event estimation cannot connect — pick up area-light emission.
+    #[must_use]
+    pub fn intersect(&self, origin: Vec3, direction: Vec3) -> Option<LightHit> {
+        match *self {
+            Self::Point { .. } | Self::Directional { .. } => None,
+            Self::Quad {
+                origin: quad_origin,
+                edge_u,
+                edge_v,
+                emission,
+            } => {
+                let cross = edge_u.cross(edge_v);
+                let area = cross.length();
+                if area <= 0.0 {
+                    return None;
+                }
+                let light_normal = cross.scale(1.0 / area);
+                let (distance, light_pdf) = Self::quad_hit(
+                    origin,
+                    direction,
+                    quad_origin,
+                    edge_u,
+                    edge_v,
+                    light_normal,
+                    area,
+                )?;
+                Some(LightHit {
+                    distance,
+                    emission,
+                    light_pdf,
+                })
+            }
+        }
     }
 }
 
@@ -487,6 +523,44 @@ mod tests {
         fr.mul(emission).scale(geom)
     }
 
+    /// `BSDF`-sampling half of the area-light `MIS` pair, mirroring what the
+    /// path integrator does on a continuation ray: draw a lobe sample, intersect
+    /// the emitter with [`Light::intersect`], and weight the hit against the
+    /// light-sampling density by the power heuristic. Combined with
+    /// [`Light::direct`] (the emitter-sampling half) the two means must match the
+    /// single-strategy reference, proving the split is unbiased.
+    fn bsdf_sample_only(
+        point: Vec3,
+        normal: Vec3,
+        wo: Vec3,
+        bsdf: &Bsdf,
+        light: &Light,
+        rng: &mut Rng,
+    ) -> Vec3 {
+        let Some(sample) = bsdf.sample(wo, normal, rng) else {
+            return Vec3::ZERO;
+        };
+        if sample.pdf <= 0.0 {
+            return Vec3::ZERO;
+        }
+        let wi = sample.direction;
+        let cos_surface = normal.dot(wi);
+        if cos_surface <= 0.0 {
+            return Vec3::ZERO;
+        }
+        let Some(hit) = light.intersect(point, wi) else {
+            return Vec3::ZERO;
+        };
+        if hit.light_pdf <= 0.0 {
+            return Vec3::ZERO;
+        }
+        let weight = power_heuristic(sample.pdf, hit.light_pdf);
+        sample
+            .value
+            .mul(hit.emission)
+            .scale(cos_surface / sample.pdf * weight)
+    }
+
     #[test]
     fn mis_quad_matches_light_sampling_in_the_mean() {
         // A glossy conductor exercises both `MIS` strategies: the emitter sample
@@ -515,10 +589,9 @@ mod tests {
         let mut rng_mis = Rng::seed(900);
         let mut rng_ref = Rng::seed(901);
         for _ in 0..count {
-            mis_sum += f64::from(
-                quad.direct(Vec3::ZERO, N, wo, &bsdf, &mut rng_mis, &never_occluded)
-                    .x,
-            );
+            let strategy_a = quad.direct(Vec3::ZERO, N, wo, &bsdf, &mut rng_mis, &never_occluded);
+            let strategy_b = bsdf_sample_only(Vec3::ZERO, N, wo, &bsdf, &quad, &mut rng_mis);
+            mis_sum += f64::from(strategy_a.add(strategy_b).x);
             ref_sum += f64::from(
                 light_sample_only(
                     Vec3::ZERO,

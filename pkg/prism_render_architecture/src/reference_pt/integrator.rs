@@ -26,7 +26,8 @@
 use alloc::vec::Vec;
 
 use super::bsdf::Bsdf;
-use super::estimator::Light;
+use super::estimator::{Light, LightHit};
+use super::mis::power_heuristic;
 use super::sampler::Rng;
 use super::{Vec3, RAY_EPS};
 use crate::ray_scene::traversal::Ray;
@@ -158,6 +159,30 @@ impl Scene {
         let ray = Ray::new(origin.to_array(), direction.to_array(), 0.0, max_distance);
         self.geometry.any_hit(&ray)
     }
+
+    /// Finds the nearest analytic light struck by the ray `origin + t *
+    /// direction` (with `direction` unit length), or [`None`] when no finite
+    /// emitter lies in front of the ray.
+    ///
+    /// Delta lights ([`Light::Point`], [`Light::Directional`]) are never hit;
+    /// only area emitters contribute. The returned hit is the closest one, so a
+    /// continuation ray cannot pick up an emitter hidden behind another.
+    #[must_use]
+    fn nearest_light_hit(&self, origin: Vec3, direction: Vec3) -> Option<LightHit> {
+        let mut best: Option<LightHit> = None;
+        for light in &self.lights {
+            let Some(hit) = light.intersect(origin, direction) else {
+                continue;
+            };
+            if hit.distance <= RAY_EPS {
+                continue;
+            }
+            if best.is_none_or(|current| hit.distance < current.distance) {
+                best = Some(hit);
+            }
+        }
+        best
+    }
 }
 
 /// A resolved surface interaction: everything a path vertex needs to shade.
@@ -219,9 +244,44 @@ impl PathIntegrator {
         let mut throughput = Vec3::ONE;
         let mut ray = primary;
         let mut depth: u32 = 0;
+        // Multiple-importance-sampling bookkeeping for the previous scattering
+        // event. The camera ray is treated as a delta event (weight 1), so a
+        // primary ray that stares straight into an emitter collects its full
+        // radiance.
+        let mut prev_delta = true;
+        let mut prev_bsdf_pdf = 0.0f32;
 
         loop {
-            let Some(isect) = scene.intersect(&ray) else {
+            // World-space ray origin and unit direction, shared by the geometry
+            // query and the analytic area-light intersection.
+            let origin_v = Vec3::from_array(ray.origin());
+            let dir_v = Vec3::from_array(ray.direction()).normalize_or_zero();
+            let geo = scene.intersect(&ray);
+            let light_hit = scene.nearest_light_hit(origin_v, dir_v);
+
+            // An area light struck before any surface terminates the path with
+            // its emission. This is the `BSDF`-sampling half of the area-light
+            // `MIS` pair; next-event estimation (Strategy A) handles the other
+            // half inside `Light::direct`.
+            let geo_distance = geo.map(|isect| isect.position.sub(origin_v).length());
+            if let Some(lh) = light_hit {
+                let closer_than_geo = geo_distance.is_none_or(|gd| lh.distance < gd);
+                if closer_than_geo {
+                    // Specular bounces and the camera ray cannot be reached by
+                    // next-event estimation, so they claim the emitter in full;
+                    // diffuse/glossy bounces share it with `NEE` by the power
+                    // heuristic.
+                    let weight = if prev_delta {
+                        1.0
+                    } else {
+                        power_heuristic(prev_bsdf_pdf, lh.light_pdf)
+                    };
+                    radiance = radiance.add(throughput.mul(lh.emission).scale(weight));
+                    break;
+                }
+            }
+
+            let Some(isect) = geo else {
                 radiance = radiance.add(throughput.mul(scene.environment));
                 break;
             };
@@ -312,6 +372,11 @@ impl PathIntegrator {
                 0.0,
                 f32::INFINITY,
             );
+
+            // Carry this bounce's sampling density forward so the next vertex
+            // can weight an area-light hit against next-event estimation.
+            prev_delta = sample.specular;
+            prev_bsdf_pdf = sample.pdf;
         }
 
         radiance
@@ -576,5 +641,113 @@ mod tests {
         );
         assert!(integrator.radiance(&scene, zero_dir, &mut rng).is_finite());
         let _ = integrator.radiance(&scene, huge, &mut rng);
+    }
+
+    /// Rectangular area light hovering face-down over the origin, spanning
+    /// `x, z` in `[-1, 1]` at `y = 4`.
+    fn overhead_quad(emission: Vec3) -> Light {
+        Light::Quad {
+            origin: Vec3::new(-1.0, 4.0, -1.0),
+            edge_u: Vec3::new(2.0, 0.0, 0.0),
+            edge_v: Vec3::new(0.0, 0.0, 2.0),
+            emission,
+        }
+    }
+
+    #[test]
+    fn mirror_reflects_area_light() {
+        // A perfect mirror cannot be connected to an emitter by next-event
+        // estimation, so before hittable area lights its reflection of the quad
+        // was pure black. The `BSDF`-sampled continuation ray must now strike the
+        // light and carry its emission back, scaled only by the mirror's
+        // reflectance (the specular vertex claims the full, unweighted radiance).
+        let geometry = ground_plane();
+        let materials = alloc::vec![Material::new(Bsdf::Mirror {
+            reflectance: Vec3::splat(0.9),
+        })];
+        let light = overhead_quad(Vec3::splat(5.0));
+        let scene = Scene::new(geometry, materials, alloc::vec![light], Vec3::ZERO)
+            .expect("mirror + area light scene");
+        let integrator = PathIntegrator::new(4, 4);
+        let mut rng = Rng::seed(2024);
+        let value = integrator.radiance(&scene, down_ray(), &mut rng);
+        // Mirror reflectance (0.9) times emission (5.0): the delta vertex takes
+        // the emitter in full, so the reflection is exactly 4.5.
+        assert!(
+            (value.x - 4.5).abs() < 1e-4,
+            "mirror should reflect the area light, got {}",
+            value.x
+        );
+    }
+
+    #[test]
+    fn glossy_area_light_matches_light_sampling_in_the_mean() {
+        // A glossy floor lit by the quad exercises both halves of the area-light
+        // `MIS` pair: next-event estimation at the floor vertex (Strategy A) and
+        // the continuation ray striking the emitter (Strategy B). Their combined
+        // mean must equal the single-strategy light-sampling reference, proving
+        // the split carries no bias and no double counting.
+        let reflectance = Vec3::splat(0.9);
+        let roughness = 0.3;
+        let bsdf = Bsdf::GgxConductor {
+            reflectance,
+            roughness,
+        };
+        let emission = Vec3::splat(5.0);
+        let geometry = ground_plane();
+        let materials = alloc::vec![Material::new(bsdf)];
+        let light = overhead_quad(emission);
+        let scene = Scene::new(geometry, materials, alloc::vec![light], Vec3::ZERO)
+            .expect("glossy + area light scene");
+        // Two bounces let the continuation ray reach the emitter; there is no
+        // other geometry, so the mean is exactly the single-bounce direct term.
+        let integrator = PathIntegrator::new(2, 2);
+
+        // Shading point, normal and view direction for the camera ray onto the
+        // origin, shared by the brute-force reference below.
+        let point = Vec3::ZERO;
+        let normal = Vec3::new(0.0, 1.0, 0.0);
+        let wo = Vec3::new(0.0, 1.0, 0.0);
+        let origin = Vec3::new(-1.0, 4.0, -1.0);
+        let edge_u = Vec3::new(2.0, 0.0, 0.0);
+        let edge_v = Vec3::new(0.0, 0.0, 2.0);
+        let cross = edge_u.cross(edge_v);
+        let area = cross.length();
+        let light_normal = cross.scale(1.0 / area);
+
+        let count = 200_000u32;
+        let mut path_sum = 0.0f64;
+        let mut ref_sum = 0.0f64;
+        let mut rng_path = Rng::with_stream(1337, 1);
+        let mut rng_ref = Rng::with_stream(1337, 2);
+        for _ in 0..count {
+            path_sum += f64::from(integrator.radiance(&scene, down_ray(), &mut rng_path).x);
+
+            // Pure light-sampling reference: a point drawn uniformly on the quad,
+            // converted to a solid-angle estimate with no `MIS` weight.
+            let on_light = origin
+                .add(edge_u.scale(rng_ref.next_f32()))
+                .add(edge_v.scale(rng_ref.next_f32()));
+            let to_light = on_light.sub(point);
+            let dist_sq = to_light.length_squared();
+            if dist_sq > 0.0 {
+                let dist = dist_sq.sqrt();
+                let wi = to_light.scale(1.0 / dist);
+                let cos_surface = normal.dot(wi);
+                let cos_light = light_normal.dot(wi).abs();
+                if cos_surface > 0.0 && cos_light > 0.0 {
+                    let fr = bsdf.evaluate(wo, wi, normal);
+                    let geom = cos_surface * cos_light * area / dist_sq;
+                    ref_sum += f64::from(fr.mul(emission).scale(geom).x);
+                }
+            }
+        }
+        let path_mean = path_sum / f64::from(count);
+        let ref_mean = ref_sum / f64::from(count);
+        assert!(path_mean > 0.0, "glossy floor should see the area light");
+        assert!(
+            (path_mean / ref_mean - 1.0).abs() < 4.0e-2,
+            "path-traced mean {path_mean} vs light-sampling reference {ref_mean}"
+        );
     }
 }
