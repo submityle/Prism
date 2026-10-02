@@ -403,9 +403,143 @@ pub fn gather_spatial_sources(
     sources
 }
 
+/// Default boiling-filter strength (`RTXDI` convention). A reservoir is cleared
+/// only when its finalized weight exceeds `10 / 0.5 - 9 = 11x` the tile mean, so
+/// just genuine statistical outliers are removed.
+pub const DEFAULT_BOILING_FILTER_STRENGTH: f32 = 0.5;
+
+/// Tile-local **boiling filter** for direct-illumination reservoirs: suppresses
+/// the temporal "boiling" fireflies that a single over-weighted reservoir would
+/// otherwise re-seed every frame.
+///
+/// A rare resample can hand one pixel a finalized contribution weight `W` far
+/// above its neighbors; under temporal reuse that pixel then flashes bright for
+/// several frames ("boiling"). Following `RTXDI`'s boiling filter, this clears
+/// (empties) any reservoir whose `W` exceeds `multiplier * mean_W`, where
+/// `mean_W` averages `W` over the non-empty reservoirs of one screen tile and
+///
+/// ```text
+/// multiplier = 10 / clamp(filter_strength, eps, 1) - 9
+/// ```
+///
+/// so `filter_strength` lives in `(0, 1]`: `1` is most aggressive (threshold at
+/// the mean), the default `0.5` thresholds at `11x` the mean, and
+/// `filter_strength <= 0` (or non-finite) disables the filter entirely.
+///
+/// This is a biased but standard real-time firefly suppressor. When nothing is
+/// clipped -- the common case -- the per-pixel estimate is left exactly as the
+/// unbiased resample produced it, so the unbiased path is preserved whenever the
+/// filter does not fire. A tile with fewer than two non-empty reservoirs is left
+/// untouched (no neighborhood to compare against).
+///
+/// `tile` holds the **finalized** reservoirs (post-[`DiReservoir::finalize`]) of
+/// one screen tile; cleared pixels fall back to their next frame's fresh
+/// candidates.
+pub fn boiling_filter_di(tile: &mut [DiReservoir], filter_strength: f32) {
+    if filter_strength <= 0.0 || !filter_strength.is_finite() {
+        return;
+    }
+    let strength = if filter_strength < 1.0 {
+        filter_strength
+    } else {
+        1.0
+    };
+    let multiplier = 10.0 / strength - 9.0;
+
+    let mut sum = 0.0_f32;
+    let mut count = 0_u32;
+    for r in tile.iter() {
+        if !r.is_empty() && r.reservoir.w > 0.0 {
+            sum += r.reservoir.w;
+            count += 1;
+        }
+    }
+    if count < 2 {
+        return;
+    }
+    let threshold = (sum / count as f32) * multiplier;
+    for r in tile.iter_mut() {
+        if !r.is_empty() && r.reservoir.w > threshold {
+            *r = DiReservoir::empty();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A finalized reservoir holding `light` with contribution weight `w`.
+    fn di_with_w(light: u32, w: f32) -> DiReservoir {
+        DiReservoir {
+            reservoir: Reservoir {
+                sample: light,
+                w_sum: w,
+                m: 1,
+                w,
+            },
+            target_pdf: 1.0,
+        }
+    }
+
+    #[test]
+    fn boiling_filter_clears_single_outlier() {
+        // A representative 8x8 tile: 63 well-behaved reservoirs near W=1 plus one
+        // 100x firefly. mean ~= 2.55, threshold ~= 28, so only the firefly goes.
+        let mut tile: Vec<DiReservoir> = (0..63).map(|i| di_with_w(i, 1.0)).collect();
+        tile.push(di_with_w(63, 100.0));
+        boiling_filter_di(&mut tile, DEFAULT_BOILING_FILTER_STRENGTH);
+        // The outlier is cleared; every in-family reservoir is untouched.
+        assert!(tile[63].is_empty());
+        for (i, r) in tile.iter().enumerate().take(63) {
+            assert!(!r.is_empty(), "reservoir {i} wrongly cleared");
+            assert_eq!(r.light_index(), i as u32);
+        }
+    }
+
+    #[test]
+    fn boiling_filter_preserves_uniform_tile() {
+        // No reservoir exceeds 11x the mean, so nothing is clipped and the
+        // unbiased estimate is left exactly as resampled.
+        let before = [
+            di_with_w(0, 1.0),
+            di_with_w(1, 2.0),
+            di_with_w(2, 3.0),
+            di_with_w(3, 4.0),
+        ];
+        let mut tile = before;
+        boiling_filter_di(&mut tile, DEFAULT_BOILING_FILTER_STRENGTH);
+        assert_eq!(tile, before);
+    }
+
+    #[test]
+    fn boiling_filter_disabled_is_identity() {
+        let before = [di_with_w(0, 1.0), di_with_w(1, 1000.0)];
+        for strength in [0.0_f32, -1.0, f32::NAN, f32::INFINITY] {
+            let mut tile = before;
+            boiling_filter_di(&mut tile, strength);
+            assert_eq!(tile, before, "strength {strength} should be a no-op");
+        }
+    }
+
+    #[test]
+    fn boiling_filter_needs_two_samples() {
+        // A lone non-empty reservoir has no neighborhood to compare against.
+        let mut tile = [di_with_w(0, 1000.0), DiReservoir::empty()];
+        boiling_filter_di(&mut tile, DEFAULT_BOILING_FILTER_STRENGTH);
+        assert!(!tile[0].is_empty());
+    }
+
+    #[test]
+    fn boiling_filter_strength_one_thresholds_at_mean() {
+        // multiplier = 10/1 - 9 = 1, so anything strictly above the mean goes.
+        // mean of {1,1,4} = 2; only the W=4 reservoir exceeds it.
+        let mut tile = [di_with_w(0, 1.0), di_with_w(1, 1.0), di_with_w(2, 4.0)];
+        boiling_filter_di(&mut tile, 1.0);
+        assert!(!tile[0].is_empty());
+        assert!(!tile[1].is_empty());
+        assert!(tile[2].is_empty());
+    }
 
     fn budget(initial: u16, spatial: u16, temporal: bool) -> ReservoirBudget {
         ReservoirBudget {
