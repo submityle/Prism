@@ -14,11 +14,20 @@
 //! * [`cpu_sphere_trimesh_collide`] — the sphere-versus-mesh CPU golden, one
 //!   deepest contact per sphere.
 //! * [`GpuSphereTrimeshCollider`] — the device twin of that golden.
+//! * [`cpu_capsule_trimesh_collide`] — the capsule-versus-mesh CPU golden,
+//!   one deepest contact per capsule.
+//!
+//! The deterministic deepest-contact reduction every mesh collider shares lives
+//! in the private `reduce` module, so the tie-break rule stays identical across
+//! shapes and across CPU and GPU.
 
+mod capsule_trimesh;
+mod reduce;
 mod sphere_trimesh;
 mod sphere_trimesh_gpu;
 mod trimesh;
 
+pub use capsule_trimesh::cpu_capsule_trimesh_collide;
 pub use sphere_trimesh::cpu_sphere_trimesh_collide;
 pub use sphere_trimesh_gpu::GpuSphereTrimeshCollider;
 pub use trimesh::Trimesh;

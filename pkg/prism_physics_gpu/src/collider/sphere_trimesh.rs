@@ -43,6 +43,8 @@ use crate::broadphase::Particle;
 use crate::bvh::{cpu_bvh_aabb_overlap, Aabb, Lbvh, OverlapQueryError};
 use crate::narrowphase::{cpu_sphere_triangle_narrowphase, Contact, SphereTrianglePair, Triangle};
 
+use super::reduce::deepest_per_group;
+
 /// Collides a batch of spheres against a static triangle mesh, returning the
 /// single deepest contact per sphere.
 ///
@@ -100,24 +102,10 @@ pub fn cpu_sphere_trimesh_collide(
 
     let contacts = cpu_sphere_triangle_narrowphase(spheres, &triangles, &pairs);
 
-    // Reduce each sphere's group to its deepest contact. Pairs within a group
-    // are in ascending triangle order, so `depth > best_depth` keeps the
-    // smallest triangle index on ties.
-    let mut out: Vec<Option<Contact>> = Vec::with_capacity(spheres.len());
-    let mut cursor = 0usize;
-    for len in group_len {
-        let mut best: Option<Contact> = None;
-        for c in contacts[cursor..cursor + len].iter().flatten() {
-            match best {
-                Some(b) if c.depth <= b.depth => {}
-                _ => best = Some(*c),
-            }
-        }
-        out.push(best);
-        cursor += len;
-    }
-
-    Ok(out)
+    // Collapse each sphere's candidate group to its single deepest contact; the
+    // shared reduction's strict-deeper rule plus the ascending-index pairs above
+    // break ties toward the smallest triangle index.
+    Ok(deepest_per_group(&contacts, &group_len))
 }
 
 #[cfg(test)]

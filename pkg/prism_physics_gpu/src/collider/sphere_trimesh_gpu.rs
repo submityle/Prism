@@ -36,6 +36,7 @@ use crate::bvh::{GpuBvhOverlap, Lbvh, OverlapQueryError};
 use crate::context::GpuContext;
 use crate::narrowphase::{Contact, GpuSphereTriangleNarrowphase, SphereTrianglePair, Triangle};
 
+use super::reduce::deepest_per_group;
 use super::Trimesh;
 
 /// A reusable sphere-versus-trimesh collider that runs the broad and narrow
@@ -122,22 +123,9 @@ impl GpuSphereTrimeshCollider {
         // Narrow phase on-device over the full pair batch.
         let contacts = self.narrowphase.query(ctx, spheres, &triangles, &pairs);
 
-        // Reduce each sphere's group to its deepest contact (strict-deeper keeps
-        // the smaller triangle index on ties, matching the CPU golden).
-        let mut out: Vec<Option<Contact>> = Vec::with_capacity(spheres.len());
-        let mut cursor = 0usize;
-        for len in group_len {
-            let mut best: Option<Contact> = None;
-            for c in contacts[cursor..cursor + len].iter().flatten() {
-                match best {
-                    Some(b) if c.depth <= b.depth => {}
-                    _ => best = Some(*c),
-                }
-            }
-            out.push(best);
-            cursor += len;
-        }
-
-        Ok(out)
+        // Collapse each sphere's group to its deepest contact through the shared
+        // reduction, so this twin matches `cpu_sphere_trimesh_collide` lane for
+        // lane (strict-deeper keeps the smaller triangle index on ties).
+        Ok(deepest_per_group(&contacts, &group_len))
     }
 }
