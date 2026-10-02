@@ -53,7 +53,7 @@ use crate::WrapMode;
 /// Wrap an integer tap index into `[0, n)` (same convention as the blurs).
 #[inline]
 #[must_use]
-fn wrap_index(i: i64, n: i64, mode: WrapMode) -> usize {
+pub(super) fn wrap_index(i: i64, n: i64, mode: WrapMode) -> usize {
     match mode {
         WrapMode::Repeat => i.rem_euclid(n) as usize,
         WrapMode::MirroredRepeat => {
@@ -67,7 +67,7 @@ fn wrap_index(i: i64, n: i64, mode: WrapMode) -> usize {
 
 /// Nearest-neighbour upsample of `low` into a `full_w * full_h` plane (the
 /// well-defined fallback for a degenerate `sigma`).
-fn nearest_upsample(
+pub(super) fn nearest_upsample(
     low: &[f32],
     low_w: usize,
     low_h: usize,

@@ -98,7 +98,7 @@ pub use texture_mipgen::{
 pub use texture_morphology::{close_plane, dilate_plane, erode_plane, open_plane};
 pub use texture_resize::{resize, ResizeFilter};
 pub use texture_sample::{resolve_cone, resolve_differential, SampleRequest, SampleResolved};
-pub use texture_upsample::joint_bilateral_upsample_plane;
+pub use texture_upsample::{joint_bilateral_upsample_plane, joint_bilateral_upsample_rgba8};
 pub use validation::{validate_graph, MaterialValidationError};
 
 #[cfg(test)]

@@ -5,5 +5,7 @@
 //! resolution under a full-res guide so edges stay crisp.
 
 mod guided;
+mod image;
 
 pub use guided::joint_bilateral_upsample_plane;
+pub use image::joint_bilateral_upsample_rgba8;
