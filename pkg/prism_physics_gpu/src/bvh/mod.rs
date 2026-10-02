@@ -33,6 +33,7 @@ pub mod layout;
 pub mod morton;
 pub mod overlap;
 pub mod overlap_gpu;
+pub mod quality;
 pub mod query;
 pub mod query_gpu;
 pub mod refit;
@@ -48,6 +49,11 @@ pub use overlap::{cpu_bvh_aabb_overlap, OverlapQueryError};
 pub use overlap_gpu::GpuBvhOverlap;
 pub use query::{cpu_bvh_pairs, BvhQueryError};
 pub use refit::cpu_refit_lbvh;
+pub use quality::{
+    lbvh_sah_cost, lbvh_sah_cost_weighted, surface_area, RebuildDecision, RefitQualityTracker,
+    DEFAULT_INTERSECTION_COST, DEFAULT_MAX_REFITS_BETWEEN_REBUILDS, DEFAULT_REBUILD_COST_FACTOR,
+    DEFAULT_TRAVERSAL_COST,
+};
 pub use refit_gpu::GpuBvhRefit;
 pub use query_gpu::GpuBvhQuery;
 pub use ray::{cpu_bvh_raycast_any, cpu_bvh_raycast_closest, Ray, RayHit};
