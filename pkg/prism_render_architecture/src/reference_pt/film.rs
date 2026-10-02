@@ -106,7 +106,14 @@ pub fn render(
                     x: rng.next_f32(),
                     y: rng.next_f32(),
                 };
-                let ray = camera.primary_ray(x, y, width, height, jitter);
+                // A finite aperture engages the thin-lens model (depth of
+                // field); a zero aperture keeps the cheaper pinhole path and its
+                // exact `RNG` stream unchanged.
+                let ray = if camera.aperture_radius() > 0.0 {
+                    camera.primary_ray_lens(x, y, width, height, jitter, &mut rng)
+                } else {
+                    camera.primary_ray(x, y, width, height, jitter)
+                };
                 sum = sum.add(integrator.radiance(scene, ray, &mut rng));
             }
             film.pixels[index] = sum.scale(inv_spp);
@@ -187,6 +194,31 @@ mod tests {
             assert!(
                 (p.x - 1.0).abs() < 2e-2,
                 "white furnace pixel {} should converge to 1",
+                p.x
+            );
+        }
+    }
+
+    #[test]
+    fn thin_lens_render_is_unbiased_and_deterministic() {
+        // Depth of field only redistributes where rays land, never how much
+        // energy they carry, so a thin-lens white-furnace render must still
+        // converge to unit radiance and stay bit-identical across runs.
+        let scene = white_furnace_scene();
+        let camera = overhead_camera()
+            .with_thin_lens(0.05, 3.0)
+            .expect("valid thin-lens camera");
+        let integrator = PathIntegrator::new(8, 5);
+        let a = render(&scene, &camera, &integrator, 4, 4, 256, 9);
+        let b = render(&scene, &camera, &integrator, 4, 4, 256, 9);
+        for (pa, pb) in a.pixels().iter().zip(b.pixels()) {
+            assert_eq!(pa.x.to_bits(), pb.x.to_bits());
+        }
+        for p in a.pixels() {
+            assert!(p.is_finite());
+            assert!(
+                (p.x - 1.0).abs() < 2e-2,
+                "thin-lens white furnace pixel {} should converge to 1",
                 p.x
             );
         }
