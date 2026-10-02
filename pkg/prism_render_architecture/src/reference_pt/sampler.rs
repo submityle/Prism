@@ -9,6 +9,7 @@
 
 use alloc::vec::Vec;
 
+use super::concentric::concentric_disk;
 use super::Vec3;
 
 /// Default `PCG` stream increment (any odd constant selects a distinct stream).
@@ -168,17 +169,22 @@ pub struct HemisphereSample {
     pub pdf: f32,
 }
 
-/// Samples a direction over the hemisphere around unit `normal` with density
-/// proportional to the cosine of the angle to `normal`.
+/// Warps a low-discrepancy unit-square `sample` into a cosine-weighted
+/// hemisphere direction about unit `normal`, returning the direction with its
+/// solid-angle density.
 ///
-/// Implemented with Malley's method: a uniform disk sample `(x, y)` is lifted to
-/// `(x, y, sqrt(1 - x^2 - y^2))` in the local frame, which is exactly
-/// cosine-distributed, then rotated into world space. The returned `pdf` is
+/// This is the quasi-Monte-Carlo-friendly core primitive: the stratification of
+/// `sample` is preserved by the area-preserving Shirley-Chiu concentric map
+/// ([`concentric_disk`]) composed with Malley's method, so feeding a
+/// low-discrepancy sequence here keeps its good coverage instead of destroying
+/// it with rejection sampling. The disk point `(x, y)` is lifted to
+/// `(x, y, sqrt(1 - x^2 - y^2))` in the local frame (exactly cosine
+/// distributed) and rotated into world space; the returned `pdf` is
 /// `cos(theta) / pi`.
 #[must_use]
-pub fn cosine_sample_hemisphere(normal: Vec3, rng: &mut Rng) -> HemisphereSample {
-    let (x, y, r2) = concentric_disk_rejection(rng);
-    let z = (1.0 - r2).max(0.0).sqrt();
+pub fn cosine_hemisphere_from_sample(sample: Sample2, normal: Vec3) -> HemisphereSample {
+    let (x, y) = concentric_disk(sample);
+    let z = (1.0 - (x * x + y * y)).max(0.0).sqrt();
     let (tangent, bitangent) = orthonormal_basis(normal);
     let direction = tangent
         .scale(x)
@@ -190,6 +196,22 @@ pub fn cosine_sample_hemisphere(normal: Vec3, rng: &mut Rng) -> HemisphereSample
         direction,
         pdf: z * super::INV_PI,
     }
+}
+
+/// Samples a direction over the hemisphere around unit `normal` with density
+/// proportional to the cosine of the angle to `normal`.
+///
+/// Draws a fresh unit-square sample from `rng` and warps it with
+/// [`cosine_hemisphere_from_sample`], which owns the single source of truth for
+/// the cosine-hemisphere math (Shirley-Chiu concentric map plus Malley's
+/// method). The returned `pdf` is `cos(theta) / pi`.
+#[must_use]
+pub fn cosine_sample_hemisphere(normal: Vec3, rng: &mut Rng) -> HemisphereSample {
+    let sample = Sample2 {
+        x: rng.next_f32(),
+        y: rng.next_f32(),
+    };
+    cosine_hemisphere_from_sample(sample, normal)
 }
 
 /// The cosine-weighted solid-angle density of a direction `wi` about `normal`:
@@ -328,6 +350,83 @@ mod tests {
         assert!(
             (integral - 1.0).abs() < 2e-2,
             "cosine pdf integral {integral} should converge to 1"
+        );
+    }
+
+    #[test]
+    fn cosine_from_sample_is_single_source_of_truth() {
+        // `cosine_sample_hemisphere` must be a thin wrapper that draws two
+        // uniforms and forwards them to `cosine_hemisphere_from_sample`, so the
+        // two paths are bit-identical for the same stream.
+        let n = Vec3::new(0.0, 0.0, 1.0);
+        let mut a = Rng::seed(555);
+        let mut b = Rng::seed(555);
+        for _ in 0..10_000 {
+            let via_rng = cosine_sample_hemisphere(n, &mut a);
+            let sample = Sample2 {
+                x: b.next_f32(),
+                y: b.next_f32(),
+            };
+            let via_sample = cosine_hemisphere_from_sample(sample, n);
+            assert_eq!(
+                via_rng.direction.x.to_bits(),
+                via_sample.direction.x.to_bits()
+            );
+            assert_eq!(
+                via_rng.direction.y.to_bits(),
+                via_sample.direction.y.to_bits()
+            );
+            assert_eq!(
+                via_rng.direction.z.to_bits(),
+                via_sample.direction.z.to_bits()
+            );
+            assert_eq!(via_rng.pdf.to_bits(), via_sample.pdf.to_bits());
+        }
+    }
+
+    #[test]
+    fn cosine_from_sample_stays_in_hemisphere_with_matching_pdf() {
+        let mut rng = Rng::seed(808);
+        let n = Vec3::new(0.3, 0.5, -0.8).normalize_or_zero();
+        for _ in 0..50_000 {
+            let sample = Sample2 {
+                x: rng.next_f32(),
+                y: rng.next_f32(),
+            };
+            let s = cosine_hemisphere_from_sample(sample, n);
+            assert!(s.direction.dot(n) > -1e-4, "sample fell below the surface");
+            assert!(s.direction.is_finite());
+            assert!((s.direction.length() - 1.0).abs() < 1e-3);
+            let expected = cosine_hemisphere_pdf(n, s.direction);
+            assert!(
+                (s.pdf - expected).abs() < 1e-4,
+                "reported pdf {} should equal cos/pi {expected}",
+                s.pdf
+            );
+        }
+    }
+
+    #[test]
+    fn cosine_from_sample_is_cosine_weighted() {
+        // For a cosine-weighted hemisphere the expected cosine of the polar
+        // angle is `E[cos theta] = 2/3`; the warped low-discrepancy samples must
+        // reproduce that mean.
+        let mut rng = Rng::seed(1300);
+        let n = Vec3::new(0.0, 1.0, 0.0);
+        let count = 400_000u32;
+        let mut sum = 0.0f64;
+        for _ in 0..count {
+            let sample = Sample2 {
+                x: rng.next_f32(),
+                y: rng.next_f32(),
+            };
+            let s = cosine_hemisphere_from_sample(sample, n);
+            sum += f64::from(s.direction.dot(n).max(0.0));
+        }
+        let mean = sum / f64::from(count);
+        assert!(
+            (mean - 2.0 / 3.0).abs() < 5e-3,
+            "mean cos {mean} should approach 2/3"
         );
     }
 }
