@@ -262,6 +262,19 @@
 //!   steady [`oscillator`]/[`additive_oscillator`] tones, the perpetual
 //!   octave illusion of [`shepard_tone`], or a [`noise`] excitation it is a
 //!   deterministic, phase-coherent, one-shot glissando across the band.
+//! - [`hard_sync_oscillator::HardSyncOscillatorNode`] -- hard-sync
+//!   sawtooth: a fast slave sawtooth whose phase is forcibly reset to zero
+//!   each time a slower master oscillator wraps. The perceived pitch locks to
+//!   the master while the slave's higher frequency carves a formant into the
+//!   spectrum, and sweeping the slave/master ratio glides that sync formant
+//!   through the harmonic series for the aggressive, vocal "tearing" lead.
+//!   The slave's own wrap is rounded with the shared two-sided `PolyBLEP`,
+//!   while the forced reset -- which lands at a fractional sample position --
+//!   recomputes the reset sample from the post-reset ramp and rounds the
+//!   step with a one-sided (two-point) `PolyBLEP` residual. Unlike the steady
+//!   single [`oscillator`] sawtooth, the detuned de-synchronized stack of
+//!   [`supersaw`], or the variable-duty [`pwm_oscillator`], it keeps one
+//!   slave edge but re-locks it to the master every cycle.
 //!
 //!
 //! Every generator is real-time safe: `process` performs no allocation, no
@@ -279,6 +292,7 @@ pub mod fm_operator;
 pub mod fof_source;
 pub mod glottal_pulse;
 pub mod granular_source;
+pub mod hard_sync_oscillator;
 pub mod helmholtz_resonator;
 pub mod impulse_train;
 pub mod karplus_strong;
@@ -309,6 +323,7 @@ pub use fm_operator::{FmOperatorNode, FmOperatorParams};
 pub use fof_source::{FofSourceNode, FofSourceParams, Formant, MAX_FOF_GRAINS, MAX_FORMANTS};
 pub use glottal_pulse::{GlottalOutput, GlottalPulseNode, GlottalPulseParams};
 pub use granular_source::{GranularSourceNode, GranularSourceParams, MAX_GRAINS};
+pub use hard_sync_oscillator::{HardSyncOscillatorNode, HardSyncOscillatorParams};
 pub use helmholtz_resonator::{HelmholtzResonatorNode, HelmholtzResonatorParams};
 pub use impulse_train::{ImpulseTrainNode, ImpulseTrainParams};
 pub use karplus_strong::{KarplusStrongNode, KarplusStrongParams};
