@@ -131,6 +131,14 @@ use super::{
         init_sky_multiscatter_lut, init_sky_multiscatter_pipeline,
         prepare_sky_multiscatter_bind_group, sky_multiscatter_lut_pass,
     },
+    sky::sky_view::{
+        init_sky_view_lut, init_sky_view_pipeline, prepare_sky_view_bind_group,
+        sky_view_lut_pass,
+    },
+    sky::transmittance::{
+        init_sky_transmittance_lut, init_sky_transmittance_pipeline,
+        prepare_sky_transmittance_bind_group, sky_transmittance_lut_pass,
+    },
     ssgi::{
         init_ssgi_composite_pipeline, init_ssgi_denoise_pipeline, init_ssgi_trace_pipeline,
         prepare_ssgi_composite_bind_groups, prepare_ssgi_denoise_bind_groups,
@@ -233,6 +241,8 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/ssr_composite.wesl");
         embedded_asset!(app, "../shaders/ssgi.wesl");
         embedded_asset!(app, "../shaders/sky_multiscatter_lut.wesl");
+        embedded_asset!(app, "../shaders/sky_transmittance_lut.wesl");
+        embedded_asset!(app, "../shaders/sky_view_lut.wesl");
         embedded_asset!(app, "../shaders/ssgi_denoise.wesl");
         embedded_asset!(app, "../shaders/ssgi_composite.wesl");
         embedded_asset!(app, "../shaders/world_space_gi_probe_update.wesl");
@@ -440,6 +450,12 @@ impl Plugin for PrismShadingPlugin {
             // `add_systems` call so the eight-kernel initializer never forces the
             // already-full RenderStartup tuple past Bevy's 20-element limit.
             .add_systems(RenderStartup, (init_sky_multiscatter_lut, init_sky_multiscatter_pipeline))
+            // Physical-sky LUT chain inits: transmittance and sky-view
+            // allocate their LUTs + queue their compute pipelines. Own
+            // `add_systems` calls so the already-full RenderStartup tuples
+            // stay within Bevy's 20-element limit.
+            .add_systems(RenderStartup, (init_sky_transmittance_lut, init_sky_transmittance_pipeline))
+            .add_systems(RenderStartup, (init_sky_view_lut, init_sky_view_pipeline))
             .add_systems(RenderStartup, init_volumetric_cloud_pipelines)
             // Light-routing (Lighting Channels) cull pipeline. Its own
             // `add_systems` call so the already-full RenderStartup tuples stay
@@ -466,7 +482,23 @@ impl Plugin for PrismShadingPlugin {
                         .in_set(RenderSystems::PrepareBindGroups),
                 ),
             )
-            .add_systems(Render, sky_multiscatter_lut_pass.before(bevy_core_pipeline::Core3dSystems::MainPass))
+            // Physical-sky LUT bake chain. The sky-view LUT samples both the
+            // transmittance and multiple-scattering LUTs, so it must dispatch
+            // after both are baked: transmittance -> multiscatter -> sky-view,
+            // all before the main pass that consumes the sky-view LUT.
+            .add_systems(
+                Render,
+                (
+                    sky_transmittance_lut_pass
+                        .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                    sky_multiscatter_lut_pass
+                        .after(sky_transmittance_lut_pass)
+                        .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                    sky_view_lut_pass
+                        .after(sky_multiscatter_lut_pass)
+                        .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                ),
+            )
             .add_systems(
                 Render,
                 (
@@ -748,6 +780,8 @@ impl Plugin for PrismShadingPlugin {
                         .after(prepare_film_grain_textures)
                         .in_set(RenderSystems::PrepareBindGroups),
                     prepare_sky_multiscatter_bind_group.in_set(RenderSystems::PrepareBindGroups),
+                    prepare_sky_transmittance_bind_group.in_set(RenderSystems::PrepareBindGroups),
+                    prepare_sky_view_bind_group.in_set(RenderSystems::PrepareBindGroups),
                 ),
             )
             // The nine additional post-process subsystems (display-referred
