@@ -194,11 +194,15 @@ pub mod mask;
 pub mod matrix_decompose;
 pub mod merge_sort_stable;
 pub mod mesh_bary_fold;
+pub mod mesh_cdf_sample;
+pub mod mesh_ray_contains;
 pub mod mesh_renderer;
 pub mod mesh_skinning;
+pub mod mg_coarsen;
 pub mod mg_divergence_gradient;
 pub mod mg_jacobi_smooth;
 pub mod mg_prolong;
+pub mod mg_restrict;
 pub mod microfacet_ggx;
 pub mod minkowski_sum_2d;
 pub mod modeling;
@@ -521,18 +525,22 @@ pub use mask::{GpuScatteringMask, MaskQuery};
 pub use matrix_decompose::{GpuMatrixDecompose, MatrixDecomposeQuery, MatrixDecomposeResult};
 pub use merge_sort_stable::{GpuMergeSort, GpuMergeSortStable};
 pub use mesh_bary_fold::{GpuMeshBaryFold, GpuMeshBaryFoldQuery, GpuMeshBaryFoldResult};
+pub use mesh_cdf_sample::{GpuMeshCdfSample, GpuMeshCdfSampleQuery, GpuMeshCdfSampleResult};
+pub use mesh_ray_contains::{GpuMeshContainsQuery, GpuMeshRayContains, GpuTriangle};
 pub use mesh_renderer::{
     GpuMeshRenderer, GpuMeshRendererQuery, GpuMeshRendererResult, LOCAL_AXIS_PLUS_X,
     LOCAL_AXIS_PLUS_Y, LOCAL_AXIS_PLUS_Z, MAX_LOD_THRESHOLDS, ORIENTATION_ALIGN_TO_AXIS,
     ORIENTATION_FIXED_ROTATION, ORIENTATION_IDENTITY, ORIENTATION_VELOCITY_ALIGNED,
 };
 pub use mesh_skinning::{GpuMeshSkinning, GpuSkinResult};
+pub use mg_coarsen::{GpuMgCoarsen, GpuMgCoarsenQuery, GpuMgCoarsenResult};
 pub use mg_divergence_gradient::{GpuDivergenceQuery, GpuMgDivergenceGradient, GpuProjectionQuery};
 pub use mg_jacobi_smooth::{
     GpuMgJacobiSmooth, GpuMgJacobiSmoothQuery, GpuMgJacobiSmoothResult,
     PRESSURE_BOUNDARY_DIRICHLET, PRESSURE_BOUNDARY_NEUMANN,
 };
 pub use mg_prolong::{GpuMgProlong, GpuMgProlongQuery, GpuMgProlongResult};
+pub use mg_restrict::{GpuMgRestrict, GpuMgRestrictQuery, GpuMgRestrictResult};
 pub use microfacet_ggx::{GpuMicrofacetGgx, MicrofacetSample};
 pub use minkowski_sum_2d::{GpuMinkowskiSum2d, MinkowskiSum2dQuery, MinkowskiSum2dResult};
 pub use modeling::{GpuModeling, ModelingQuery};
