@@ -22,8 +22,12 @@
 //!   generation, cosine-weighted hemisphere sampling, and the orthonormal
 //!   basis used to orient local samples around a surface normal.
 //! - [`bsdf`] — the surface scattering models ([`bsdf::Bsdf`]): a Lambertian
-//!   diffuse lobe and a perfect specular mirror, each exposing evaluate /
-//!   sample / `pdf` with matching conventions.
+//!   diffuse lobe, a perfect specular mirror, and a physically based GGX rough
+//!   conductor, each exposing evaluate / sample / `pdf` with matching
+//!   conventions.
+//! - [`microfacet`] — the shared isotropic GGX (Trowbridge-Reitz) core: the
+//!   normal distribution, the height-correlated Smith masking term, Schlick
+//!   Fresnel, and visible-normal (`VNDF`) importance sampling (Heitz 2018).
 //! - [`estimator`] — next-event estimation ([`estimator::Light`]) for direct
 //!   lighting from point, directional, and quad area lights with visibility
 //!   tested against the scene `BVH`.
@@ -47,6 +51,7 @@ pub mod compare;
 pub mod estimator;
 pub mod film;
 pub mod integrator;
+pub mod microfacet;
 pub mod sampler;
 
 /// Mathematical constant pi, reused from `core` so no literal drifts.

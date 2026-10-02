@@ -15,8 +15,9 @@
 //! the surface, and `normal` is the (viewer-facing) shading normal. All
 //! quantities are linear radiance scales, never gamma-encoded.
 
+use super::microfacet::{fresnel_schlick, GgxIsotropic};
 use super::sampler::{cosine_hemisphere_pdf, cosine_sample_hemisphere, Rng};
-use super::{Vec3, INV_PI};
+use super::{Vec3, EPS_LEN_SQ, INV_PI};
 
 /// A surface scattering model.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -33,6 +34,20 @@ pub enum Bsdf {
     Mirror {
         /// Per-channel specular reflectance.
         reflectance: Vec3,
+    },
+    /// Rough conductor (metal) described by an isotropic GGX microfacet lobe.
+    ///
+    /// `reflectance` is the normal-incidence Fresnel reflectance `F0` (the
+    /// characteristic metallic tint, e.g. gold or copper), and `roughness` is
+    /// the perceptual roughness in `[0, 1]` remapped to the GGX width
+    /// `alpha = roughness^2`. As `roughness -> 0` the lobe narrows toward the
+    /// [`Bsdf::Mirror`] limit, but it is never a Dirac delta, so it is sampled
+    /// and connected to lights like any glossy surface.
+    GgxConductor {
+        /// Per-channel normal-incidence reflectance `F0`.
+        reflectance: Vec3,
+        /// Perceptual roughness in `[0, 1]`.
+        roughness: f32,
     },
 }
 
@@ -76,6 +91,10 @@ impl Bsdf {
                 }
             }
             Self::Mirror { .. } => Vec3::ZERO,
+            Self::GgxConductor {
+                reflectance,
+                roughness,
+            } => Self::ggx_evaluate(*reflectance, *roughness, wo, wi, normal),
         }
     }
 
@@ -93,6 +112,19 @@ impl Bsdf {
                 }
             }
             Self::Mirror { .. } => 0.0,
+            Self::GgxConductor { roughness, .. } => {
+                let cos_o = normal.dot(wo);
+                let cos_i = normal.dot(wi);
+                if cos_o <= 0.0 || cos_i <= 0.0 {
+                    return 0.0;
+                }
+                let half = wo.add(wi).normalize_or_zero();
+                if half.length_squared() <= EPS_LEN_SQ {
+                    return 0.0;
+                }
+                let cos_h = normal.dot(half);
+                GgxIsotropic::from_roughness(*roughness).reflection_pdf(cos_o, cos_h)
+            }
         }
     }
 
@@ -140,7 +172,82 @@ impl Bsdf {
                     specular: true,
                 })
             }
+            Self::GgxConductor {
+                reflectance,
+                roughness,
+            } => Self::ggx_sample(*reflectance, *roughness, wo, normal, rng),
         }
+    }
+
+    /// Evaluates the GGX rough-conductor `BRDF` `f_r = F * D * G2 / (4 cos_o cos_i)`.
+    ///
+    /// Returns [`Vec3::ZERO`] when either direction is below the surface or the
+    /// half vector degenerates.
+    fn ggx_evaluate(reflectance: Vec3, roughness: f32, wo: Vec3, wi: Vec3, normal: Vec3) -> Vec3 {
+        let cos_o = normal.dot(wo);
+        let cos_i = normal.dot(wi);
+        if cos_o <= 0.0 || cos_i <= 0.0 {
+            return Vec3::ZERO;
+        }
+        let half = wo.add(wi).normalize_or_zero();
+        if half.length_squared() <= EPS_LEN_SQ {
+            return Vec3::ZERO;
+        }
+        let cos_h = normal.dot(half);
+        if cos_h <= 0.0 {
+            return Vec3::ZERO;
+        }
+        let ggx = GgxIsotropic::from_roughness(roughness);
+        let d = ggx.distribution(cos_h);
+        let g2 = ggx.g2(cos_o, cos_i);
+        let fresnel = fresnel_schlick(reflectance, wo.dot(half).max(0.0));
+        fresnel.scale(d * g2 / (4.0 * cos_o * cos_i))
+    }
+
+    /// Importance-samples the GGX rough conductor via visible-normal sampling.
+    ///
+    /// The returned `value`/`pdf` are the true `BRDF` and its solid-angle
+    /// density, so the integrator's generic throughput update
+    /// `value * cos_i / pdf` reduces to the clean microfacet weight
+    /// `F * G2 / G1(wo)`.
+    fn ggx_sample(
+        reflectance: Vec3,
+        roughness: f32,
+        wo: Vec3,
+        normal: Vec3,
+        rng: &mut Rng,
+    ) -> Option<BsdfSample> {
+        let cos_o = normal.dot(wo);
+        if cos_o <= 0.0 {
+            return None;
+        }
+        let ggx = GgxIsotropic::from_roughness(roughness);
+        let half = ggx.sample_half_vector(wo, normal, rng)?;
+        let woh = wo.dot(half);
+        if woh <= 0.0 {
+            return None;
+        }
+        // Reflect the view direction about the sampled microfacet normal.
+        let wi = wo.negate().reflect(half).normalize_or_zero();
+        let cos_i = normal.dot(wi);
+        if cos_i <= 0.0 {
+            return None;
+        }
+        let cos_h = normal.dot(half);
+        let pdf = ggx.reflection_pdf(cos_o, cos_h);
+        if pdf <= 0.0 {
+            return None;
+        }
+        let d = ggx.distribution(cos_h);
+        let g2 = ggx.g2(cos_o, cos_i);
+        let fresnel = fresnel_schlick(reflectance, woh);
+        let value = fresnel.scale(d * g2 / (4.0 * cos_o * cos_i));
+        Some(BsdfSample {
+            direction: wi,
+            value,
+            pdf,
+            specular: false,
+        })
     }
 }
 
@@ -281,5 +388,143 @@ mod tests {
         let mut rng = Rng::seed(3);
         let wo = Vec3::new(0.0, -1.0, 0.0);
         assert!(bsdf.sample(wo, N, &mut rng).is_none());
+    }
+
+    #[test]
+    fn ggx_conductor_is_not_specular() {
+        let bsdf = Bsdf::GgxConductor {
+            reflectance: Vec3::splat(0.9),
+            roughness: 0.3,
+        };
+        assert!(!bsdf.is_specular());
+    }
+
+    #[test]
+    fn ggx_evaluate_zero_below_surface() {
+        let bsdf = Bsdf::GgxConductor {
+            reflectance: Vec3::ONE,
+            roughness: 0.4,
+        };
+        let below = Vec3::new(0.0, -1.0, 0.0);
+        assert_eq!(bsdf.evaluate(N, below, N), Vec3::ZERO);
+        assert_eq!(bsdf.evaluate(below, N, N), Vec3::ZERO);
+    }
+
+    #[test]
+    fn ggx_sample_pdf_matches_reported_pdf() {
+        let bsdf = Bsdf::GgxConductor {
+            reflectance: Vec3::splat(0.95),
+            roughness: 0.35,
+        };
+        let mut rng = Rng::seed(4242);
+        let wo = Vec3::new(0.4, 1.0, 0.1).normalize_or_zero();
+        let mut checked = 0u32;
+        for _ in 0..20_000 {
+            // Some samples reflect below the horizon and are terminated (`None`);
+            // only the valid glossy samples are checked for pdf consistency.
+            let Some(s) = bsdf.sample(wo, N, &mut rng) else {
+                continue;
+            };
+            checked += 1;
+            let pdf = bsdf.pdf(wo, s.direction, N);
+            assert!(
+                (pdf - s.pdf).abs() <= 1e-4 * s.pdf.max(1.0),
+                "pdf mismatch {pdf} vs {}",
+                s.pdf
+            );
+            assert!(s.direction.is_finite());
+            assert!(!s.specular);
+        }
+        assert!(checked > 1_000, "too few valid glossy samples ({checked})");
+    }
+
+    #[test]
+    fn ggx_white_furnace_weight_is_masking_ratio() {
+        // With F0 = 1 the Monte Carlo throughput value*cos/pdf collapses to the
+        // Smith ratio G2(wo, wi) / G1(wo), which is in (0, 1]: single-scatter
+        // GGX conserves or loses energy but never creates it.
+        let bsdf = Bsdf::GgxConductor {
+            reflectance: Vec3::ONE,
+            roughness: 0.5,
+        };
+        let mut rng = Rng::seed(2024);
+        let wo = Vec3::new(0.3, 1.0, 0.0).normalize_or_zero();
+        let count = 200_000u32;
+        let mut sum = 0.0f64;
+        for _ in 0..count {
+            // Below-horizon reflections terminate the path and contribute zero,
+            // which is exactly the single-scatter energy deficit.
+            let Some(s) = bsdf.sample(wo, N, &mut rng) else {
+                continue;
+            };
+            let cos_i = N.dot(s.direction);
+            let weight = s.value.x * cos_i / s.pdf;
+            assert!(
+                weight <= 1.0 + 1e-3,
+                "single-scatter weight {weight} must not exceed 1"
+            );
+            assert!(weight >= 0.0);
+            sum += f64::from(weight);
+        }
+        let reflectance = sum / f64::from(count);
+        // Directional-hemispherical reflectance of a white rough conductor is
+        // below one (energy lost to multiple scattering is not re-added here).
+        assert!(
+            reflectance > 0.0 && reflectance < 1.0,
+            "white furnace reflectance {reflectance} should be in (0, 1)"
+        );
+    }
+
+    #[test]
+    fn ggx_smoother_conductor_reflects_more_energy() {
+        // Less roughness means less masking-shadowing loss, so the single-scatter
+        // directional-hemispherical reflectance of a white conductor rises as the
+        // surface gets smoother.
+        fn reflectance(roughness: f32) -> f64 {
+            let bsdf = Bsdf::GgxConductor {
+                reflectance: Vec3::ONE,
+                roughness,
+            };
+            let mut rng = Rng::seed(999 + (roughness * 1000.0) as u64);
+            let wo = Vec3::new(0.5, 1.0, 0.0).normalize_or_zero();
+            let count = 200_000u32;
+            let mut sum = 0.0f64;
+            for _ in 0..count {
+                let Some(s) = bsdf.sample(wo, N, &mut rng) else {
+                    continue;
+                };
+                let cos_i = N.dot(s.direction);
+                sum += f64::from(s.value.x * cos_i / s.pdf);
+            }
+            sum / f64::from(count)
+        }
+        let rough = reflectance(0.6);
+        let smooth = reflectance(0.1);
+        assert!(
+            smooth > rough,
+            "smoother reflectance {smooth} should exceed rougher {rough}"
+        );
+    }
+
+    #[test]
+    fn ggx_colored_fresnel_tints_reflection() {
+        // A copper-like F0 must preserve its spectral tint in the sampled value.
+        let f0 = Vec3::new(0.95, 0.64, 0.54);
+        let bsdf = Bsdf::GgxConductor {
+            reflectance: f0,
+            roughness: 0.2,
+        };
+        let mut rng = Rng::seed(77);
+        let wo = Vec3::new(0.0, 1.0, 0.0);
+        let mut sample = None;
+        for _ in 0..1_000 {
+            if let Some(s) = bsdf.sample(wo, N, &mut rng) {
+                sample = Some(s);
+                break;
+            }
+        }
+        let s = sample.expect("a smooth conductor must yield a valid sample");
+        // Near normal incidence the Fresnel tint keeps red brightest, blue dimmest.
+        assert!(s.value.x > s.value.y && s.value.y > s.value.z);
     }
 }

@@ -145,6 +145,19 @@ fn concentric_disk_rejection(rng: &mut Rng) -> (f32, f32, f32) {
     }
 }
 
+/// A uniform sample inside the unit disk `x^2 + y^2 <= 1`, drawn by rejection
+/// so no trigonometry is involved. Returns the `(x, y)` offset; the point is
+/// uniformly distributed by area, exactly the input that visible-normal
+/// (`VNDF`) microfacet sampling expects for its disk warp.
+///
+/// Falls back to the disk centre `(0, 0)` after [`MAX_REJECT`] rejected draws,
+/// bounding worst-case work without introducing bias in practice.
+#[must_use]
+pub fn uniform_disk(rng: &mut Rng) -> (f32, f32) {
+    let (x, y, _r2) = concentric_disk_rejection(rng);
+    (x, y)
+}
+
 /// A direction drawn from a cosine-weighted hemisphere, with its probability
 /// density, both expressed in world space around `normal`.
 #[derive(Clone, Copy, Debug)]
