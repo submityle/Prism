@@ -10,53 +10,25 @@
 //! single most important self-collision feature (design §6.2).
 //!
 //! This module closes that gap the same way [`super::ccd`] closes it for the
-//! body proxies, but for every *pair of cloth particles* rather than for
-//! particle-vs-analytic-collider. Each particle's frame-start position is swept
-//! to its current position, and for every candidate pair the earliest time of
-//! impact (TOI) — the instant their swept separation first reaches `thickness`
-//! — is solved in closed form. The pair is then resolved *at the TOI*: both
-//! particles are snapped to their TOI positions, separated symmetrically by
-//! inverse mass, and their inbound normal velocity is exchanged through a
-//! restitution impulse. Clamping to the TOI is what defeats tunnelling: the
-//! layers can never be integrated past the contact instant.
+//! body proxies, but for every *pair of cloth particles*: each particle's
+//! frame-start position is swept to its current position, every candidate pair
+//! is solved for the earliest time of impact (the instant their swept
+//! separation first reaches `thickness`), and the pair is resolved *at the TOI*
+//! so the layers can never be integrated past the contact instant.
 //!
-//! # Broad phase
-//!
-//! Testing every pair is `O(n^2)`. Instead each particle is bucketed into a
-//! uniform spatial hash by the integer cells its *swept* axis-aligned bounding
-//! box (the box of `prev` and `curr`, expanded by `thickness` on every side)
-//! overlaps. Two particles are a candidate pair only if they share a cell.
-//!
-//! The `thickness` expansion is what lets the broad phase test a single cell
-//! per bucket instead of a 27-cell neighbourhood: if a pair reaches separation
-//! `<= thickness` at some TOI `t*`, then each particle's TOI position lies in
-//! its own swept box, and because the boxes are grown by `thickness` the two
-//! TOI positions (which are within `thickness` of each other) both fall in the
-//! intersection of the two expanded boxes, so the pair necessarily shares at
-//! least one cell. A [`BTreeSet`] deduplicates pairs that co-occupy several
-//! cells so each is resolved exactly once.
-//!
-//! # Determinism and robustness
-//!
-//! Everything is deterministic array-in/array-out math: a [`BTreeMap`] keyed by
-//! integer cell fixes the bucket order, indices are inserted in ascending order
-//! so each bucket's occupants stay sorted, the [`BTreeSet`] fixes the pair
-//! order, and a coincident pair falls back to a fixed `+X` normal. Only
-//! [`f32::sqrt`] is used; there are no transcendental calls. Pinned particles
-//! (`inverse_mass <= 0`) are never moved, a pair of two pinned particles is
-//! skipped, out-of-range or too-short inputs are handled without panicking, and
-//! degenerate inputs (no relative motion, coincident particles, zero
-//! `thickness`) fall back deterministically and never produce `NaN`.
+//! The authoritative broad-phase spatial hash, the closed-form swept-pair TOI,
+//! and the Gauss-Seidel narrow-phase resolver all live in
+//! [`prism_physics_core`]. This module is a thin render-side façade that keeps
+//! the render particle layout and the public [`SelfCcdParams`] API, converts
+//! through [`physics_bridge`](super::physics_bridge), and projects through the
+//! single physics-engine implementation so there is exactly one copy of the
+//! continuous self-collision math in the engine.
 
-use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 
-use super::{ClothParticle, Vec3};
+use super::{physics_bridge, ClothParticle, Vec3};
 
-/// Numerical floor below which the top quadratic coefficient (the squared
-/// relative speed of a pair) is treated as zero, i.e. the pair has no relative
-/// motion over the frame and cannot cross a `thickness` gap.
-const EPS_REL_MOTION: f32 = 1e-12;
+use prism_physics_core::soft::collision as physics_collision;
 
 /// Smallest spatial-hash cell edge the broad phase will use; guards a
 /// non-positive or non-finite authored `cell_size` from producing a division by
@@ -146,25 +118,27 @@ impl SelfCcdParams {
     }
 }
 
-/// Solves the earliest time of impact for a swept pair of particles.
+/// Converts render [`SelfCcdParams`] into the physics-engine params the
+/// single-source sweep consumes. The fields line up exactly; the physics
+/// resolver sanitizes internally, so this is a lossless field copy.
+#[must_use]
+fn to_physics_params(params: SelfCcdParams) -> physics_collision::SelfCcdParams {
+    physics_collision::SelfCcdParams {
+        cell_size: params.cell_size,
+        thickness: params.thickness,
+        restitution: params.restitution,
+        enabled: params.enabled,
+    }
+}
+
+/// Solves the earliest time of impact for a swept pair of particles, delegating
+/// to the physics-engine closed form.
 ///
-/// Particle `a` moves along the segment `prev_a -> curr_a` and particle `b`
-/// along `prev_b -> curr_b` over the unit frame interval `t in [0, 1]`. Their
-/// relative offset is `d(t) = d0 + t * dv` with `d0 = prev_a - prev_b` and
-/// `dv = (curr_a - curr_b) - d0`, so the first `t` at which `|d(t)| = thickness`
-/// is the smaller root of the quadratic `|d0 + t*dv|^2 = thickness^2`, i.e.
-/// `a*t^2 + b*t + c = 0` with `a = dv.dv`, `b = 2*(d0.dv)`,
-/// `c = d0.d0 - thickness^2`.
-///
-/// Returns:
-/// - `Some(0.0)` when the pair already starts within `thickness` (`c <= 0`);
-/// - `None` when there is no relative motion (`a` negligibly small) and they do
-///   not start overlapping, when the discriminant is negative (they never reach
-///   `thickness`), or when the entry root lies outside `[0, 1]`;
-/// - `Some(t)` with the entry root otherwise.
-///
-/// Only [`f32::sqrt`] is used and every early-out is comparison-based, so the
-/// result is deterministic and free of `NaN`.
+/// Particle `a` moves along `prev_a -> curr_a` and particle `b` along
+/// `prev_b -> curr_b` over the unit frame interval; the first `t` at which their
+/// separation reaches `thickness` is returned. See
+/// [`physics_collision::swept_pair_toi`] for the exact root selection and the
+/// degenerate-input fall-backs.
 #[must_use]
 pub fn swept_pair_toi(
     prev_a: Vec3,
@@ -173,62 +147,13 @@ pub fn swept_pair_toi(
     curr_b: Vec3,
     thickness: f32,
 ) -> Option<f32> {
-    let d0 = prev_a.sub(prev_b);
-    let d1 = curr_a.sub(curr_b);
-    let dv = d1.sub(d0);
-    let c = d0.dot(d0) - thickness * thickness;
-    // Already within the contact band at frame start: contact is immediate.
-    if c <= 0.0 {
-        return Some(0.0);
-    }
-    let a = dv.dot(dv);
-    // No (appreciable) relative motion and not already overlapping: the gap
-    // never closes, so there is no crossing to catch.
-    if a <= EPS_REL_MOTION {
-        return None;
-    }
-    let b = 2.0 * d0.dot(dv);
-    let disc = b * b - 4.0 * a * c;
-    // The swept separation never reaches `thickness`.
-    if disc < 0.0 {
-        return None;
-    }
-    // Entry root (the smaller of the two): first moment the gap closes to
-    // `thickness`. `a > 0` here, so the denominator is safe.
-    let t = (-b - disc.sqrt()) / (2.0 * a);
-    if (0.0..=1.0).contains(&t) {
-        Some(t)
-    } else {
-        None
-    }
-}
-
-/// Maps a world-space position to its integer spatial-hash cell.
-///
-/// The float-to-int cast saturates, so a particle far from the origin yields a
-/// saturated cell index rather than wrapping; it still buckets deterministically
-/// and never panics. `cell_size` is assumed positive (the caller guards this via
-/// [`SelfCcdParams::sanitized`]).
-#[must_use]
-fn cell_of(pos: Vec3, cell_size: f32) -> (i32, i32, i32) {
-    let inv = 1.0 / cell_size;
-    (
-        (pos.x * inv).floor() as i32,
-        (pos.y * inv).floor() as i32,
-        (pos.z * inv).floor() as i32,
+    physics_collision::swept_pair_toi(
+        physics_bridge::to_glam(prev_a),
+        physics_bridge::to_glam(curr_a),
+        physics_bridge::to_glam(prev_b),
+        physics_bridge::to_glam(curr_b),
+        thickness,
     )
-}
-
-/// Component-wise minimum of two positions.
-#[must_use]
-fn min_components(a: Vec3, b: Vec3) -> Vec3 {
-    Vec3::new(a.x.min(b.x), a.y.min(b.y), a.z.min(b.z))
-}
-
-/// Component-wise maximum of two positions.
-#[must_use]
-fn max_components(a: Vec3, b: Vec3) -> Vec3 {
-    Vec3::new(a.x.max(b.x), a.y.max(b.y), a.z.max(b.z))
 }
 
 /// Resolves cloth-vs-cloth continuous self-collision, snapping tunnelling pairs
@@ -240,143 +165,46 @@ fn max_components(a: Vec3, b: Vec3) -> Vec3 {
 /// shares a cell is a candidate; each candidate's [`swept_pair_toi`] is solved,
 /// and on a hit both particles are placed at their TOI positions, separated
 /// symmetrically by inverse mass to restore the `thickness` gap, and their
-/// inbound relative normal velocity is exchanged by a restitution impulse
-/// (velocity recovered from the TOI motion over `dt`, matching the body sweep in
-/// [`super::ccd::resolve_ccd`]).
+/// inbound relative normal velocity is exchanged by a restitution impulse.
 ///
-/// Pairs are visited in [`BTreeSet`] order and resolved in place
-/// (Gauss-Seidel), so a later pair sees an earlier pair's correction; the fixed
-/// order keeps the whole pass deterministic. A pinned particle
-/// (`inverse_mass <= 0`) is never written, a pair of two pinned particles is
-/// skipped, a disabled or zero-`thickness` sweep and a `prev_positions` slice
-/// shorter than `particles` are all no-ops, and a coincident pair falls back to
-/// a fixed `+X` contact normal so the result never contains `NaN`.
+/// Pairs are visited in deterministic order and resolved in place
+/// (Gauss-Seidel). A pinned particle (`inverse_mass <= 0`) is never written, a
+/// pair of two pinned particles is skipped, a disabled or zero-`thickness` sweep
+/// and a `prev_positions` slice shorter than `particles` are all no-ops, and a
+/// coincident pair falls back to a fixed `+X` contact normal so the result never
+/// contains `NaN`.
+///
+/// This is a thin façade over the authoritative physics-engine sweep: the render
+/// particle columns are converted to structure-of-arrays, projected through
+/// [`physics_collision::resolve_self_ccd`], then written back.
 pub fn resolve_self_ccd(
     particles: &mut [ClothParticle],
     prev_positions: &[Vec3],
     params: SelfCcdParams,
     dt: f32,
 ) {
-    let params = params.sanitized();
-    if !params.enabled || params.thickness <= 0.0 {
+    // Cheap early-out mirrors the physics resolver's own guard so a disabled or
+    // zero-thickness sweep (the default) never pays for the SoA conversion.
+    let sanitized = params.sanitized();
+    if !sanitized.enabled || sanitized.thickness <= 0.0 {
         return;
     }
-    let count = particles.len().min(prev_positions.len());
-    if count < 2 {
-        return;
-    }
-
-    // Broad phase: bucket each particle's thickness-expanded swept box into
-    // every integer cell it overlaps. Ascending index insertion keeps each
-    // bucket sorted for deterministic pairing.
-    let cell_size = params.cell_size;
-    let margin = Vec3::new(params.thickness, params.thickness, params.thickness);
-    let mut buckets: BTreeMap<(i32, i32, i32), Vec<u32>> = BTreeMap::new();
-    for index in 0..count {
-        let prev = prev_positions[index];
-        let curr = particles[index].position;
-        let lo = min_components(prev, curr).sub(margin);
-        let hi = max_components(prev, curr).add(margin);
-        let (lx, ly, lz) = cell_of(lo, cell_size);
-        let (hx, hy, hz) = cell_of(hi, cell_size);
-        let mut cx = lx;
-        while cx <= hx {
-            let mut cy = ly;
-            while cy <= hy {
-                let mut cz = lz;
-                while cz <= hz {
-                    buckets.entry((cx, cy, cz)).or_default().push(index as u32);
-                    cz += 1;
-                }
-                cy += 1;
-            }
-            cx += 1;
-        }
-    }
-
-    // Collect unique candidate pairs across all shared cells.
-    let mut pairs: BTreeSet<(u32, u32)> = BTreeSet::new();
-    for occupants in buckets.values() {
-        for slot_a in 0..occupants.len() {
-            for slot_b in (slot_a + 1)..occupants.len() {
-                pairs.insert((occupants[slot_a], occupants[slot_b]));
-            }
-        }
-    }
-
-    let inv_dt = if dt.abs() <= EPS_REL_MOTION {
-        0.0
-    } else {
-        1.0 / dt
-    };
-
-    // Narrow phase: solve and resolve each candidate pair at its TOI.
-    for &(i, j) in &pairs {
-        let ia = i as usize;
-        let jb = j as usize;
-        let wa = particles[ia].inverse_mass.max(0.0);
-        let wb = particles[jb].inverse_mass.max(0.0);
-        let wsum = wa + wb;
-        // Two pinned partners cannot move: nothing to resolve.
-        if wsum <= 0.0 {
-            continue;
-        }
-        let prev_a = prev_positions[ia];
-        let prev_b = prev_positions[jb];
-        let curr_a = particles[ia].position;
-        let curr_b = particles[jb].position;
-        let Some(t) = swept_pair_toi(prev_a, curr_a, prev_b, curr_b, params.thickness) else {
-            continue;
-        };
-
-        // Positions at the time of impact.
-        let a_c = prev_a.add(curr_a.sub(prev_a).scale(t));
-        let b_c = prev_b.add(curr_b.sub(prev_b).scale(t));
-        let delta = a_c.sub(b_c);
-        let normal = {
-            let unit = delta.normalize_or_zero();
-            if unit.length_squared() > 0.0 {
-                unit
-            } else {
-                // Coincident TOI positions: pick a fixed, deterministic axis so
-                // the separation still has a direction and never yields `NaN`.
-                Vec3::new(1.0, 0.0, 0.0)
-            }
-        };
-        let penetration = (params.thickness - delta.length()).max(0.0);
-        let inv_wsum = 1.0 / wsum;
-
-        // Snap both particles to the TOI contact, then push symmetrically apart
-        // by inverse mass to restore the `thickness` gap. Clamping to the TOI is
-        // the anti-tunnelling guarantee; a pinned partner (weight `0`) keeps its
-        // TOI position, which equals its frame-start position.
-        let pos_a = a_c.add(normal.scale(wa * inv_wsum * penetration));
-        let pos_b = b_c.sub(normal.scale(wb * inv_wsum * penetration));
-        if !particles[ia].is_pinned() {
-            particles[ia].position = pos_a;
-        }
-        if !particles[jb].is_pinned() {
-            particles[jb].position = pos_b;
-        }
-
-        // Exchange the inbound relative normal velocity with a restitution
-        // impulse. Velocity is recovered from the TOI motion over `dt` (the
-        // approach velocity), so `vrel_n < 0` means the layers were closing and
-        // an impulse `j = -(1 + e) * vrel_n / (wa + wb)` leaves them separating
-        // at `-e` times the inbound speed.
-        let va_in = a_c.sub(prev_a).scale(inv_dt);
-        let vb_in = b_c.sub(prev_b).scale(inv_dt);
-        let vrel_n = va_in.sub(vb_in).dot(normal);
-        if vrel_n < 0.0 {
-            let impulse = -(1.0 + params.restitution) * vrel_n * inv_wsum;
-            if !particles[ia].is_pinned() {
-                particles[ia].velocity = va_in.add(normal.scale(wa * impulse));
-            }
-            if !particles[jb].is_pinned() {
-                particles[jb].velocity = vb_in.sub(normal.scale(wb * impulse));
-            }
-        }
-    }
+    let (mut positions, mut velocities, inverse_masses) = physics_bridge::to_soa_full(particles);
+    let prev: Vec<_> = prev_positions
+        .iter()
+        .copied()
+        .map(physics_bridge::to_glam)
+        .collect();
+    physics_collision::resolve_self_ccd(
+        &mut positions,
+        &prev,
+        &mut velocities,
+        &inverse_masses,
+        to_physics_params(params),
+        dt,
+    );
+    physics_bridge::write_positions_back(particles, &positions);
+    physics_bridge::write_velocities_back(particles, &velocities);
 }
 
 #[cfg(test)]
@@ -641,3 +469,4 @@ mod tests {
         );
     }
 }
+
