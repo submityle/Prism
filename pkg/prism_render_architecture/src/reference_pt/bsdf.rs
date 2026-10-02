@@ -19,6 +19,7 @@
 
 use super::conductor::Conductor;
 use super::conductor_aniso::AnisoConductor;
+use super::conductor_ms::MultiscatterConductor;
 use super::dielectric::{fresnel_dielectric, refract};
 use super::fresnel_blend::FresnelBlend;
 use super::microfacet::{fresnel_schlick, GgxIsotropic};
@@ -92,6 +93,21 @@ pub enum Bsdf {
         alpha_x: f32,
         /// `GGX` width along the local bitangent axis.
         alpha_y: f32,
+    },
+    /// Energy-conserving rough conductor: the exact single-scatter complex-index
+    /// lobe plus the Kulla-Conty multiple-scattering compensation lobe (see
+    /// [`crate::reference_pt::conductor_ms`]). Rough metals keep the energy that
+    /// bounces several times between micro-facets instead of darkening, and the
+    /// recovered light is tinted by the metal's average `Fresnel` reflectance.
+    /// It is glossy (non-delta), so it is sampled and connected to lights like
+    /// any rough surface.
+    GgxConductorMultiscatter {
+        /// Per-channel real index of refraction `eta`.
+        eta: Vec3,
+        /// Per-channel extinction coefficient `k`.
+        k: Vec3,
+        /// Perceptual roughness in `[0, 1]`.
+        roughness: f32,
     },
     /// Smooth (perfectly specular) dielectric interface: glass, water, or a
     /// clear coat. Light is either mirror-reflected or refracted through the
@@ -233,6 +249,9 @@ impl Bsdf {
                 alpha_x,
                 alpha_y,
             } => AnisoConductor::new(*eta, *k, *alpha_x, *alpha_y).evaluate(wo, wi, normal),
+            Self::GgxConductorMultiscatter { eta, k, roughness } => {
+                MultiscatterConductor::new(*eta, *k, *roughness).evaluate(wo, wi, normal)
+            }
             Self::Plastic {
                 diffuse,
                 specular,
@@ -287,6 +306,9 @@ impl Bsdf {
                 alpha_x,
                 alpha_y,
             } => AnisoConductor::new(*eta, *k, *alpha_x, *alpha_y).pdf(wo, wi, normal),
+            Self::GgxConductorMultiscatter { eta, k, roughness } => {
+                MultiscatterConductor::new(*eta, *k, *roughness).pdf(wo, wi, normal)
+            }
             Self::Plastic {
                 diffuse,
                 specular,
@@ -379,6 +401,16 @@ impl Bsdf {
                     pdf: s.pdf,
                     specular: false,
                 }),
+            Self::GgxConductorMultiscatter { eta, k, roughness } => {
+                MultiscatterConductor::new(*eta, *k, *roughness)
+                    .sample(wo, normal, rng)
+                    .map(|s| BsdfSample {
+                        direction: s.direction,
+                        value: s.value,
+                        pdf: s.pdf,
+                        specular: false,
+                    })
+            }
             Self::Dielectric {
                 ior,
                 reflectance,
