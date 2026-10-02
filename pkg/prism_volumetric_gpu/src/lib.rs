@@ -191,6 +191,7 @@ pub mod ribbon_geometry;
 pub mod segment_closest_point_3d;
 pub mod segment_intersect_2d;
 pub mod segment_obb_intersect;
+pub mod segment_triangle_intersect;
 pub mod select_lod;
 pub mod shadow;
 pub mod sharpen_cas;
@@ -400,6 +401,7 @@ pub use segment_intersect_2d::{
     CODE_NONE, CODE_POINT,
 };
 pub use segment_obb_intersect::{GpuSegmentObbIntersect, SegmentObbQuery, SegmentObbResult};
+pub use segment_triangle_intersect::{GpuSegmentTriangleIntersect, SegmentTriangleQuery};
 pub use select_lod::{GpuSelectLod, SelectLodQuery};
 pub use shadow::{GpuShadow, ShadowRay};
 pub use sharpen_cas::{GpuSharpenCas, SharpenCasQuery};
