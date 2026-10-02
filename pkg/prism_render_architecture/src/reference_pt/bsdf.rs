@@ -17,6 +17,7 @@
 //! the surface, and `normal` is the (viewer-facing) shading normal. All
 //! quantities are linear radiance scales, never gamma-encoded.
 
+use super::clearcoat::ClearcoatConductor;
 use super::conductor::Conductor;
 use super::conductor_aniso::AnisoConductor;
 use super::conductor_aniso_ms::MultiscatterAnisoConductor;
@@ -283,6 +284,29 @@ pub enum Bsdf {
         /// `GGX` width along the local bitangent axis.
         alpha_y: f32,
     },
+    /// Clear-coated conductor: a rough metal base viewed through a dielectric
+    /// clear coat (lacquered car paint, varnished wood, coated carbon fibre).
+    /// The coat adds an isotropic `GGX` dielectric highlight and attenuates the
+    /// base by the Fresnel transmission into and out of the coat (see
+    /// [`crate::reference_pt::clearcoat`]). It is glossy and reflects into the
+    /// upper hemisphere, so it is sampled as a two-lobe mixture.
+    ClearcoatConductor {
+        /// Per-channel real index of refraction `eta` of the base metal.
+        eta: Vec3,
+        /// Per-channel extinction coefficient `k` of the base metal.
+        k: Vec3,
+        /// Perceptual roughness of the base metal in `[0, 1]`.
+        roughness: f32,
+        /// Perceptual roughness of the coat highlight in `[0, 1]`.
+        coat_roughness: f32,
+        /// Relative index of refraction of the coat over the exterior medium
+        /// (e.g. `1.5` for a typical lacquer over air).
+        coat_ior: f32,
+        /// Coat presence in `[0, 1]`: `0` is a bare conductor, `1` a full coat.
+        coat_weight: f32,
+        /// Per-channel tint of the coat highlight (usually white).
+        coat_color: Vec3,
+    },
 }
 
 /// The outcome of importance-sampling a [`Bsdf`].
@@ -405,6 +429,24 @@ impl Bsdf {
                 *alpha_y,
             )
             .evaluate(wo, wi, normal),
+            Self::ClearcoatConductor {
+                eta,
+                k,
+                roughness,
+                coat_roughness,
+                coat_ior,
+                coat_weight,
+                coat_color,
+            } => ClearcoatConductor::new(
+                *eta,
+                *k,
+                *roughness,
+                *coat_roughness,
+                *coat_ior,
+                *coat_weight,
+                *coat_color,
+            )
+            .evaluate(wo, wi, normal),
         }
     }
 
@@ -499,6 +541,24 @@ impl Bsdf {
                 *transmittance,
                 *alpha_x,
                 *alpha_y,
+            )
+            .pdf(wo, wi, normal),
+            Self::ClearcoatConductor {
+                eta,
+                k,
+                roughness,
+                coat_roughness,
+                coat_ior,
+                coat_weight,
+                coat_color,
+            } => ClearcoatConductor::new(
+                *eta,
+                *k,
+                *roughness,
+                *coat_roughness,
+                *coat_ior,
+                *coat_weight,
+                *coat_color,
             )
             .pdf(wo, wi, normal),
         }
@@ -694,6 +754,30 @@ impl Bsdf {
                 *transmittance,
                 *alpha_x,
                 *alpha_y,
+            )
+            .sample(wo, normal, rng)
+            .map(|s| BsdfSample {
+                direction: s.direction,
+                value: s.value,
+                pdf: s.pdf,
+                specular: false,
+            }),
+            Self::ClearcoatConductor {
+                eta,
+                k,
+                roughness,
+                coat_roughness,
+                coat_ior,
+                coat_weight,
+                coat_color,
+            } => ClearcoatConductor::new(
+                *eta,
+                *k,
+                *roughness,
+                *coat_roughness,
+                *coat_ior,
+                *coat_weight,
+                *coat_color,
             )
             .sample(wo, normal, rng)
             .map(|s| BsdfSample {
@@ -909,6 +993,7 @@ impl Bsdf {
 
 #[cfg(test)]
 mod tests {
+    use super::super::metal::Metal;
     use super::super::sampler::Rng;
     use super::*;
 
@@ -1495,6 +1580,50 @@ mod tests {
         let b = base.evaluate(wo, wi, N).max_component();
         assert!(a > b, "compensated {a} should exceed single-scatter {b}");
         assert!((ms.pdf(wo, wi, N) - base.pdf(wo, wi, N)).abs() <= 1e-6);
+    }
+
+    #[test]
+    fn clearcoat_conductor_is_glossy_and_adds_highlight() {
+        // The clear-coated conductor dispatches as a non-delta lobe. With a
+        // full coat it carries a specular highlight the bare metal lacks, and
+        // with a weightless coat it collapses back onto the bare conductor.
+        let (eta, k) = Metal::Gold.complex_ior();
+        let coated = Bsdf::ClearcoatConductor {
+            eta,
+            k,
+            roughness: 0.3,
+            coat_roughness: 0.02,
+            coat_ior: 1.5,
+            coat_weight: 1.0,
+            coat_color: Vec3::ONE,
+        };
+        assert!(!coated.is_specular());
+        let bare = Bsdf::GgxConductorComplex {
+            eta,
+            k,
+            roughness: 0.3,
+        };
+        let wo = Vec3::new(0.6, 0.8, 0.0).normalize_or_zero();
+        // Mirror direction about the `+y` normal picks up the coat highlight.
+        let wi = Vec3::new(-0.6, 0.8, 0.0).normalize_or_zero();
+        let c = coated.evaluate(wo, wi, N).max_component();
+        let b = bare.evaluate(wo, wi, N).max_component();
+        assert!(c > b, "coated {c} should exceed bare {b}");
+
+        // A weightless coat reduces to the bare conductor.
+        let uncoated = Bsdf::ClearcoatConductor {
+            eta,
+            k,
+            roughness: 0.3,
+            coat_roughness: 0.02,
+            coat_ior: 1.5,
+            coat_weight: 0.0,
+            coat_color: Vec3::ONE,
+        };
+        let wi2 = Vec3::new(-0.3, 0.92, 0.1).normalize_or_zero();
+        let a = uncoated.evaluate(wo, wi2, N);
+        let d = bare.evaluate(wo, wi2, N);
+        assert!(a.sub(d).length() < 1e-6, "{a:?} vs {d:?}");
     }
 
     #[test]

@@ -53,6 +53,7 @@
 
 pub mod bsdf;
 pub mod camera;
+pub mod clearcoat;
 pub mod compare;
 pub mod conductor;
 pub mod conductor_aniso;
