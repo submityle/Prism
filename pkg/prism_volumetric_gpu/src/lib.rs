@@ -109,6 +109,7 @@ pub mod contrail_spread;
 pub mod convex_hull_2d;
 pub mod convex_hull_3d;
 pub mod counting_sort_u16;
+pub mod coupling_apply_resolve;
 pub mod coupling_impulse;
 pub mod curl;
 pub mod curl_noise;
@@ -134,6 +135,7 @@ pub mod fibonacci_lfsr;
 pub mod film_grain;
 pub mod flipbook_blend;
 pub mod fluid_advect;
+pub mod fluid_cfl_timestep;
 pub mod fluid_combustion;
 pub mod fluid_diffusion;
 pub mod fluid_pressure_jacobi;
@@ -191,8 +193,12 @@ pub mod marching_squares;
 pub mod mask;
 pub mod matrix_decompose;
 pub mod merge_sort_stable;
+pub mod mesh_bary_fold;
 pub mod mesh_renderer;
+pub mod mesh_skinning;
+pub mod mg_divergence_gradient;
 pub mod mg_jacobi_smooth;
+pub mod mg_prolong;
 pub mod microfacet_ggx;
 pub mod minkowski_sum_2d;
 pub mod modeling;
@@ -398,6 +404,9 @@ pub use contrail_spread::{ContrailSpreadQuery, GpuContrailSpread};
 pub use convex_hull_2d::{ConvexHull2dQuery, ConvexHull2dResult, GpuConvexHull2d};
 pub use convex_hull_3d::{ConvexHull3dQuery, GpuConvexHull3d, GpuHull3d};
 pub use counting_sort_u16::{CountingSortU16Query, GpuCountingSortU16};
+pub use coupling_apply_resolve::{
+    GpuCouplingApplyResolve, GpuCouplingApplyResolveQuery, GpuCouplingApplyResolveResult,
+};
 pub use coupling_impulse::{
     GpuCouplingImpulse, GpuCouplingImpulseQuery, GpuCouplingImpulseResult, GpuMat3,
 };
@@ -429,6 +438,7 @@ pub use fibonacci_lfsr::GpuFibonacciLfsr;
 pub use film_grain::{FilmGrainPixel, FilmGrainQuery, GpuFilmGrain};
 pub use flipbook_blend::{FlipbookQuery, FlipbookResult, FlipbookSample, GpuFlipbookBlend};
 pub use fluid_advect::{GpuAdvectQuery, GpuAdvectResult, GpuFluidAdvect};
+pub use fluid_cfl_timestep::{GpuCflTimestepQuery, GpuCflTimestepResult, GpuFluidCflTimestep};
 pub use fluid_combustion::{GpuFluidCombustion, GpuFluidCombustionQuery, GpuFluidCombustionResult};
 pub use fluid_diffusion::{GpuDiffusionResult, GpuFluidDiffusion};
 pub use fluid_pressure_jacobi::{
@@ -510,15 +520,19 @@ pub use marching_squares::{GpuMarchingSquares, MarchingSquaresQuery, MarchingSqu
 pub use mask::{GpuScatteringMask, MaskQuery};
 pub use matrix_decompose::{GpuMatrixDecompose, MatrixDecomposeQuery, MatrixDecomposeResult};
 pub use merge_sort_stable::{GpuMergeSort, GpuMergeSortStable};
+pub use mesh_bary_fold::{GpuMeshBaryFold, GpuMeshBaryFoldQuery, GpuMeshBaryFoldResult};
 pub use mesh_renderer::{
     GpuMeshRenderer, GpuMeshRendererQuery, GpuMeshRendererResult, LOCAL_AXIS_PLUS_X,
     LOCAL_AXIS_PLUS_Y, LOCAL_AXIS_PLUS_Z, MAX_LOD_THRESHOLDS, ORIENTATION_ALIGN_TO_AXIS,
     ORIENTATION_FIXED_ROTATION, ORIENTATION_IDENTITY, ORIENTATION_VELOCITY_ALIGNED,
 };
+pub use mesh_skinning::{GpuMeshSkinning, GpuSkinResult};
+pub use mg_divergence_gradient::{GpuDivergenceQuery, GpuMgDivergenceGradient, GpuProjectionQuery};
 pub use mg_jacobi_smooth::{
     GpuMgJacobiSmooth, GpuMgJacobiSmoothQuery, GpuMgJacobiSmoothResult,
     PRESSURE_BOUNDARY_DIRICHLET, PRESSURE_BOUNDARY_NEUMANN,
 };
+pub use mg_prolong::{GpuMgProlong, GpuMgProlongQuery, GpuMgProlongResult};
 pub use microfacet_ggx::{GpuMicrofacetGgx, MicrofacetSample};
 pub use minkowski_sum_2d::{GpuMinkowskiSum2d, MinkowskiSum2dQuery, MinkowskiSum2dResult};
 pub use modeling::{GpuModeling, ModelingQuery};
