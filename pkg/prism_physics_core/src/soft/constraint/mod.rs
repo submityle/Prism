@@ -36,7 +36,7 @@ pub mod volume;
 
 pub use attachment::AttachmentConstraint;
 pub use bending::{project_bending, BendingConstraint};
-pub use distance::DistanceConstraint;
+pub use distance::{project_distance_constraint, DistanceConstraint};
 pub use isometric_bending::{
     apply_isometric_bending, build_dihedral_bending, project_isometric_bending,
     IsometricBendingConstraint,

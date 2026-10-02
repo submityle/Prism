@@ -25,12 +25,17 @@
 //! ③ `apply_strain_limit`（仅 stretch）④ 碰撞钩子（本测用 no-op `|p| p.position`）
 //! ⑤ 速度回收。WESL 把步骤 ② 拆成 `distance` / `long_range` 两个 dispatch（host 按
 //! 单侧性把约束放进对应 dispatch），步骤 ③/⑤ 各一个 dispatch。逐内核算术：
-//! * **距离/长程**：`d_lambda = -error / denom`（**直接除**，两侧同序）、
-//!   `direction = delta * (1.0 / dist)`（倒数乘，与黄金 `delta.scale(1.0 / dist)`
-//!   同序）、`alpha_tilde = max(compliance, 0.0) / (dt_sub * dt_sub)`（黄金
-//!   `Compliance::value()` 本身即 `self.0.max(0.0)`，两侧 clamp 口径一致）。
-//!   单侧内核多一道 `error <= 0.0` 早退门，恰为黄金 `project_distance` 里
-//!   `is_one_sided() && error <= 0.0` 的同序分支。
+//! * **距离/长程**：现已统一委托物理引擎单一真源
+//!   [`prism_physics_core::soft::constraint::project_distance_constraint`]：
+//!   `d_lambda = -error / denom`（**直接除**，两侧同序）、分离方向
+//!   `direction = delta / dist`（**逐分量除**，与物理 `normal = delta / length`
+//!   及更新后的 `cloth_sim.wesl` 距离/长程内核逐位同序；黄金 `project_distance`
+//!   亦已改为委托，三侧共用这一步算术）、`alpha_tilde =
+//!   max(compliance, 0.0) / (dt_sub * dt_sub)`（黄金 `Compliance::value()` 本身即
+//!   `self.0.max(0.0)`，与物理自由函数的 raw compliance、WESL `max(.,0.0)` clamp
+//!   口径一致）。单侧内核多一道 `error <= 0.0` 早退门，恰为黄金 `project_distance`
+//!   里 `is_one_sided() && error <= 0.0` 的同序分支（该门仍留在 render 侧，门后
+//!   才调委托）。
 //! * **应变限制**：`direction = delta * (1.0 / dist)`、`correction = direction *
 //!   excess`、`pos_a -= correction * (wa / w_sum)`、`pos_b += correction *
 //!   (wb / w_sum)`，与黄金 `apply_strain_limit` 完全同序。
@@ -136,11 +141,14 @@ fn wesl_project(
         return;
     }
     let d_lambda = -error / denom;
-    let inv_dist = 1.0 / dist;
+    // Separation direction is a component-wise divide (`delta / dist`), matching
+    // the physics `project_distance_constraint` single source and the updated
+    // `cloth_sim.wesl` distance / long-range kernels.
+    let direction = [delta[0] / dist, delta[1] / dist, delta[2] / dist];
     let correction = [
-        delta[0] * inv_dist * d_lambda,
-        delta[1] * inv_dist * d_lambda,
-        delta[2] * inv_dist * d_lambda,
+        direction[0] * d_lambda,
+        direction[1] * d_lambda,
+        direction[2] * d_lambda,
     ];
     particles[a].pos = [
         particles[a].pos[0] + correction[0] * wa,

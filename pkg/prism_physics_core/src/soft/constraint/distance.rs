@@ -101,30 +101,83 @@ impl ParticleConstraint for DistanceConstraint {
     }
 
     fn project(&mut self, positions: &mut [Vec3], inverse_masses: &[Real], dt: Real) {
-        let ia = self.a.index();
-        let ib = self.b.index();
-        // Bounds guard: an out-of-range constraint is inert rather than a panic.
-        let (Some(&wa), Some(&wb)) = (inverse_masses.get(ia), inverse_masses.get(ib)) else {
-            return;
-        };
-        let w_sum = wa + wb;
-        if w_sum <= 0.0 {
-            return;
-        }
-        let delta = positions[ia] - positions[ib];
-        let length = delta.length();
-        if length < EPSILON {
-            return;
-        }
-        let normal = delta / length;
-        let c = length - self.rest_length;
-        let alpha_tilde = self.compliance / (dt * dt);
-        let delta_lambda = (-c - alpha_tilde * self.lambda) / (w_sum + alpha_tilde);
-        self.lambda += delta_lambda;
-        let correction = normal * delta_lambda;
-        positions[ia] += correction * wa;
-        positions[ib] -= correction * wb;
+        // The projection arithmetic lives in the free `project_distance_constraint`
+        // below so the parallel GPU twin and the render-side cloth solver can share
+        // this one, authoritative XPBD step; the constraint object only owns the
+        // warm-started Lagrange multiplier that is threaded through it.
+        self.lambda = project_distance_constraint(
+            positions,
+            inverse_masses,
+            self.a.index(),
+            self.b.index(),
+            self.rest_length,
+            self.compliance,
+            self.lambda,
+            dt,
+        );
     }
+}
+
+/// Projects a single two-sided distance constraint between particles `a` and
+/// `b` in place over raw particle indices, returning the updated accumulated
+/// Lagrange multiplier.
+///
+/// This is the one, authoritative XPBD distance step. [`DistanceConstraint`]
+/// wraps it to own a warm-started multiplier across solver iterations, while a
+/// parallel GPU twin (and the render-side cloth solver) drive it directly from
+/// their own index space with a fresh `lambda` of `0.0` per projection — so
+/// there is exactly one copy of the arithmetic.
+///
+/// The projection is inert (the input `lambda` is returned unchanged) for an
+/// out-of-range pair, a pair with no free inverse mass, or a coincident pair
+/// with no defined separation direction. The correction is split between the
+/// endpoints by inverse mass; the separation direction is `delta / length`
+/// (component-wise), matching the GPU twin bit-for-bit.
+///
+/// `rest_length` and `compliance` are used as given (the
+/// [`DistanceConstraint`] constructor already clamps them non-negative, and the
+/// render cloth solver passes its clamped `Compliance::value()`).
+///
+/// # Provenance
+///
+/// XPBD distance projection is a published position-based-dynamics technique
+/// (Macklin et al., "XPBD: Position-Based Simulation of Compliant Constrained
+/// Dynamics"). No Unreal Engine source or derived code.
+#[must_use]
+pub fn project_distance_constraint(
+    positions: &mut [Vec3],
+    inverse_masses: &[Real],
+    a: usize,
+    b: usize,
+    rest_length: Real,
+    compliance: Real,
+    lambda: Real,
+    dt: Real,
+) -> Real {
+    // Bounds guard: an out-of-range pair is inert rather than a panic.
+    let (Some(&wa), Some(&wb)) = (inverse_masses.get(a), inverse_masses.get(b)) else {
+        return lambda;
+    };
+    if a >= positions.len() || b >= positions.len() {
+        return lambda;
+    }
+    let w_sum = wa + wb;
+    if w_sum <= 0.0 {
+        return lambda;
+    }
+    let delta = positions[a] - positions[b];
+    let length = delta.length();
+    if length < EPSILON {
+        return lambda;
+    }
+    let normal = delta / length;
+    let c = length - rest_length;
+    let alpha_tilde = compliance / (dt * dt);
+    let delta_lambda = (-c - alpha_tilde * lambda) / (w_sum + alpha_tilde);
+    let correction = normal * delta_lambda;
+    positions[a] += correction * wa;
+    positions[b] -= correction * wb;
+    lambda + delta_lambda
 }
 
 #[cfg(test)]

@@ -29,7 +29,9 @@
 
 use alloc::vec::Vec;
 
-use super::{ClothParticle, Constraint, ConstraintGraph, ConstraintKind, Vec3, EPS_LEN_SQ};
+use super::{
+    physics_bridge, ClothParticle, Constraint, ConstraintGraph, ConstraintKind, Vec3, EPS_LEN_SQ,
+};
 use crate::deformation::schedule::DeformationRequest;
 use crate::deformation::{DeformationHandle, DeformationKind};
 
@@ -178,16 +180,31 @@ fn project_distance(particles: &mut [ClothParticle], constraint: Constraint, dt_
     if constraint.kind.is_one_sided() && error <= 0.0 {
         return;
     }
-    let alpha_tilde = constraint.compliance.value() / (dt_sub * dt_sub);
-    let denom = w_sum + alpha_tilde;
-    if denom <= 0.0 {
-        return;
-    }
-    let d_lambda = -error / denom;
-    let direction = delta.scale(1.0 / dist);
-    let correction = direction.scale(d_lambda);
-    particles[a].position = pa.position.add(correction.scale(wa));
-    particles[b].position = pb.position.sub(correction.scale(wb));
+    // Delegate the XPBD projection to the single authoritative physics step
+    // (`prism_physics_core::soft::constraint::project_distance_constraint`).
+    // A fresh (zero) multiplier per call reproduces this solver's stateless
+    // per-projection convention; the physics engine owns the arithmetic so the
+    // CPU golden, this path, and the `cloth_sim.wesl` GPU twin stay bit-identical
+    // (separation direction `delta / dist`, component-wise). The render-side
+    // bounds, mass, degeneracy, and one-sided guards above gate the call so the
+    // delegated step only runs on the exact pairs the golden projects.
+    let mut positions = [
+        physics_bridge::to_glam(pa.position),
+        physics_bridge::to_glam(pb.position),
+    ];
+    let inverse_masses = [wa, wb];
+    let _ = prism_physics_core::soft::constraint::project_distance_constraint(
+        &mut positions,
+        &inverse_masses,
+        0,
+        1,
+        constraint.rest_length,
+        constraint.compliance.value(),
+        0.0,
+        dt_sub,
+    );
+    particles[a].position = physics_bridge::from_glam(positions[0]);
+    particles[b].position = physics_bridge::from_glam(positions[1]);
 }
 
 /// Hard-clamps structural (stretch) edge lengths to `1 + limit` of their rest
