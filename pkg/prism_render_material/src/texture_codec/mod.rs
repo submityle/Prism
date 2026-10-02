@@ -43,6 +43,7 @@ mod bc7;
 mod bitio;
 mod color_block;
 mod encode;
+mod etc2;
 mod formats;
 mod source;
 
@@ -58,5 +59,6 @@ pub use encode::{
     encode_bc1, encode_bc2, encode_bc3, encode_bc4, encode_bc5, encode_bc6h_mode11_signed,
     encode_bc6h_mode11_unsigned, encode_bc7_mode4, encode_bc7_mode5, encode_bc7_mode6,
 };
+pub use etc2::{decode_etc2_rgb8, etc2_rgb8_mode, Etc2Error, Etc2Mode};
 pub use formats::{decode_bc1, decode_bc2, decode_bc3, decode_bc4, decode_bc5};
 pub use source::{BcFormat, BcSourceError, BcTexelSource};
