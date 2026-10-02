@@ -175,6 +175,21 @@
 //!   rolloff. Unlike the tension-restored, fast-decaying circular membrane
 //!   of `membrane_drum`, the plate is stiffness-restored and rings on; like
 //!   the sibling struck sources it carries its own excitation.
+//! - [`bell::BellNode`] -- clapper-struck church / cast-bell modal
+//!   percussion source (bell / carillon / bell-plate family). A unit-area
+//!   raised-cosine contact pulse excites a parallel bank of
+//!   [`bell::NUM_MODES`] decaying two-pole resonators tuned to the named
+//!   church-bell partials -- hum (`0.5`), prime (`1.0`), **minor-third**
+//!   tierce (`1.2`), quint (`1.5`), nominal (`2.0`), and the fast-fading
+//!   upper shell modes -- the strongly inharmonic three-dimensional-shell set
+//!   that no bar or plate series reproduces. Each partial is voiced as a
+//!   near-degenerate `warble` doublet that beats like a real casting, the low
+//!   partials ring far longer than the high ones (the hum drones on), and
+//!   `brightness` sets both the clapper pulse width and the upper-mode tilt.
+//!   Unlike the sparse one-dimensional `struck_bar` beam series or the dense
+//!   two-dimensional `struck_plate` grid, it rings at the bell's defining
+//!   sub-octave hum and minor-third tierce.
+//!
 //!
 //! Every generator is real-time safe: `process` performs no allocation, no
 //! locking, and no panics, and reproducible generators are fully deterministic
@@ -182,6 +197,7 @@
 
 pub mod air_jet_flute;
 pub mod additive_oscillator;
+pub mod bell;
 pub mod bowed_string;
 pub mod conical_reed;
 pub mod brass_lip_reed;
@@ -205,6 +221,7 @@ pub mod wavetable_oscillator;
 
 pub use air_jet_flute::{AirJetFluteNode, AirJetFluteParams};
 pub use additive_oscillator::{AdditiveOscillatorNode, AdditiveOscillatorParams};
+pub use bell::{BellNode, BellParams};
 pub use bowed_string::{BowedStringNode, BowedStringParams};
 pub use brass_lip_reed::{BrassLipReedNode, BrassLipReedParams};
 pub use conical_reed::{ConicalReedNode, ConicalReedParams};
