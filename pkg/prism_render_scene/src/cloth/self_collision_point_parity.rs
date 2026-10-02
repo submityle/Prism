@@ -87,6 +87,13 @@ fn v_scale(a: [f32; 3], s: f32) -> [f32; 3] {
     [a[0] * s, a[1] * s, a[2] * s]
 }
 
+/// 原生 `[f32; 3]` 标量逐分量除（镜像 WESL `vec3 / scalar`，与物理引擎
+/// `separation` 的 `delta / dist` 同序）。
+#[must_use]
+fn v_div(a: [f32; 3], s: f32) -> [f32; 3] {
+    [a[0] / s, a[1] / s, a[2] / s]
+}
+
 /// 原生 `[f32; 3]` 相加（与黄金 `Vec3::add` 同序）。
 #[must_use]
 fn v_add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
@@ -211,7 +218,7 @@ fn resolve(
                         } else {
                             let dist = dist_sq.sqrt();
                             let penetration = thickness - dist;
-                            let dir = v_scale(diff, 1.0 / dist);
+                            let dir = v_div(diff, dist);
                             delta_sum = v_add(delta_sum, v_scale(dir, penetration * share));
                         }
                     }
@@ -282,92 +289,56 @@ fn check_scene(positions: &[[f32; 4]], cell_size: f32, thickness: f32) {
 /// 两个自由粒子沿 X 轴互穿：各按逆质量半分推开，逐位一致。
 #[test]
 fn two_free_particles_penetrating_along_x() {
-    check_scene(
-        &[[0.0, 0.0, 0.0, 1.0], [0.3, 0.0, 0.0, 1.0]],
-        1.0,
-        0.5,
-    );
+    check_scene(&[[0.0, 0.0, 0.0, 1.0], [0.3, 0.0, 0.0, 1.0]], 1.0, 0.5);
 }
 
 /// 自由 + pinned 互穿：pinned 不动，自由粒子吃满 penetration，逐位一致。
 #[test]
 fn free_versus_pinned_takes_whole_correction() {
-    check_scene(
-        &[[0.0, 0.0, 0.0, 0.0], [0.3, 0.0, 0.0, 1.0]],
-        1.0,
-        0.5,
-    );
+    check_scene(&[[0.0, 0.0, 0.0, 0.0], [0.3, 0.0, 0.0, 1.0]], 1.0, 0.5);
 }
 
 /// pinned 作为**高**索引：同样 pinned 不动、自由吃满，验证索引序无关。
 #[test]
 fn free_versus_pinned_high_index() {
-    check_scene(
-        &[[0.3, 0.0, 0.0, 1.0], [0.0, 0.0, 0.0, 0.0]],
-        1.0,
-        0.5,
-    );
+    check_scene(&[[0.3, 0.0, 0.0, 1.0], [0.0, 0.0, 0.0, 0.0]], 1.0, 0.5);
 }
 
 /// 两个自由粒子完全重合：沿固定 X 轴对称半分 thickness（低索引 -X、高索引 +X）。
 #[test]
 fn coincident_free_pair_splits_along_x() {
-    check_scene(
-        &[[0.2, 0.2, 0.2, 1.0], [0.2, 0.2, 0.2, 1.0]],
-        1.0,
-        0.5,
-    );
+    check_scene(&[[0.2, 0.2, 0.2, 1.0], [0.2, 0.2, 0.2, 1.0]], 1.0, 0.5);
 }
 
 /// 重合的自由 + pinned：pinned 不动，自由沿 X 吃满 thickness。
 #[test]
 fn coincident_free_and_pinned() {
-    check_scene(
-        &[[0.2, 0.2, 0.2, 0.0], [0.2, 0.2, 0.2, 1.0]],
-        1.0,
-        0.5,
-    );
+    check_scene(&[[0.2, 0.2, 0.2, 0.0], [0.2, 0.2, 0.2, 1.0]], 1.0, 0.5);
 }
 
 /// 恰好等于 thickness（`dist_sq >= thickness_sq`）：no-op，两侧均不动。
 #[test]
 fn pair_exactly_at_thickness_is_noop() {
-    check_scene(
-        &[[0.0, 0.0, 0.0, 1.0], [0.5, 0.0, 0.0, 1.0]],
-        1.0,
-        0.5,
-    );
+    check_scene(&[[0.0, 0.0, 0.0, 1.0], [0.5, 0.0, 0.0, 1.0]], 1.0, 0.5);
 }
 
 /// 斜向互穿：分离方向沿连线归一化，逐位一致。
 #[test]
 fn diagonal_penetration() {
-    check_scene(
-        &[[0.0, 0.0, 0.0, 1.0], [0.2, 0.2, 0.1, 1.0]],
-        1.0,
-        0.5,
-    );
+    check_scene(&[[0.0, 0.0, 0.0, 1.0], [0.2, 0.2, 0.1, 1.0]], 1.0, 0.5);
 }
 
 /// 非对称逆质量（重粒子动得少）：`share = w_self / w_sum` 的加权半分，逐位一致。
 #[test]
 fn asymmetric_inverse_mass() {
-    check_scene(
-        &[[0.0, 0.0, 0.0, 0.25], [0.3, 0.0, 0.0, 1.0]],
-        1.0,
-        0.5,
-    );
+    check_scene(&[[0.0, 0.0, 0.0, 0.25], [0.3, 0.0, 0.0, 1.0]], 1.0, 0.5);
 }
 
 /// 跨相邻 cell 的穿透对：验证 27-cell 邻域跨格能找到并解算该对。
 #[test]
 fn cross_cell_pair_within_neighborhood() {
     // cell_size = 0.25 → p0 在 cell (0,0,0)，p1 在 cell (1,0,0)，相邻；dist 0.1 < 0.3。
-    check_scene(
-        &[[0.2, 0.0, 0.0, 1.0], [0.3, 0.0, 0.0, 1.0]],
-        0.25,
-        0.3,
-    );
+    check_scene(&[[0.2, 0.0, 0.0, 1.0], [0.3, 0.0, 0.0, 1.0]], 0.25, 0.3);
 }
 
 /// 同桶内第三粒子不穿透：验证桶内游走正确跳过 `dist_sq >= thickness_sq` 的非穿
@@ -406,21 +377,13 @@ fn two_disjoint_pairs_resolve_independently() {
 /// 非正 `cell_size`：早退 no-op，两侧均不动。
 #[test]
 fn non_positive_cell_size_is_noop() {
-    check_scene(
-        &[[0.0, 0.0, 0.0, 1.0], [0.1, 0.0, 0.0, 1.0]],
-        0.0,
-        0.5,
-    );
+    check_scene(&[[0.0, 0.0, 0.0, 1.0], [0.1, 0.0, 0.0, 1.0]], 0.0, 0.5);
 }
 
 /// 非正 `thickness`：早退 no-op。
 #[test]
 fn non_positive_thickness_is_noop() {
-    check_scene(
-        &[[0.0, 0.0, 0.0, 1.0], [0.1, 0.0, 0.0, 1.0]],
-        1.0,
-        0.0,
-    );
+    check_scene(&[[0.0, 0.0, 0.0, 1.0], [0.1, 0.0, 0.0, 1.0]], 1.0, 0.0);
 }
 
 /// 单粒子（`< 2`）：早退 no-op。
@@ -432,9 +395,5 @@ fn single_particle_is_noop() {
 /// 两粒子均 pinned：`w_sum <= 0` 无人可动，no-op。
 #[test]
 fn both_pinned_is_noop() {
-    check_scene(
-        &[[0.0, 0.0, 0.0, 0.0], [0.3, 0.0, 0.0, 0.0]],
-        1.0,
-        0.5,
-    );
+    check_scene(&[[0.0, 0.0, 0.0, 0.0], [0.3, 0.0, 0.0, 0.0]], 1.0, 0.5);
 }

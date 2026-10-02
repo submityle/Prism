@@ -442,7 +442,7 @@ fn cloth_self_collision_resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
                     } else {
                         let dist = sqrt(dist_sq);
                         let penetration = thickness - dist;
-                        let dir = diff * (1.0 / dist);
+                        let dir = diff / dist;
                         delta_sum = delta_sum + dir * (penetration * share);
                     }
                 }

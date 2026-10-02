@@ -40,10 +40,9 @@
 //! segments is a heavier future slot layered on the same spatial hash; it is
 //! deliberately not stubbed here so this module stays fully runnable.
 
-use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
-use super::{ClothParticle, Vec3, EPS_LEN_SQ};
+use super::{physics_bridge, ClothParticle, Vec3, EPS_LEN_SQ};
 
 /// An analytic collision proxy fitted to part of the body.
 ///
@@ -374,119 +373,33 @@ pub fn resolve_backstops(particles: &mut [ClothParticle], backstops: &[Backstop]
     }
 }
 
-/// Maps a world-space position to its integer spatial-hash cell.
-///
-/// The float-to-int cast saturates, so a particle far from the origin yields a
-/// saturated cell index rather than wrapping; it still buckets deterministically
-/// and never panics. `cell_size` is assumed positive (the caller guards this).
-#[must_use]
-fn cell_of(pos: Vec3, cell_size: f32) -> (i32, i32, i32) {
-    let inv = 1.0 / cell_size;
-    let cx = (pos.x * inv).floor() as i32;
-    let cy = (pos.y * inv).floor() as i32;
-    let cz = (pos.z * inv).floor() as i32;
-    (cx, cy, cz)
-}
-
 /// Resolves cloth self-collision with a deterministic uniform spatial hash.
 ///
-/// Particles are bucketed into a [`BTreeMap`] keyed by integer cell so both the
-/// cell traversal and (because indices are inserted in ascending order) the
-/// per-bucket traversal are deterministic. For each particle only its 27-cell
-/// neighborhood is examined, and each unordered pair is tested exactly once (by
-/// requiring the neighbor index to exceed the current index), keeping the pass
-/// near `O(n)` for well-distributed particles.
-///
-/// A pair closer than `thickness` is separated along the line joining them,
-/// split by inverse mass: two equal free particles each move half the
-/// penetration, while a free particle paired with a pinned one takes the whole
-/// correction (the pinned particle never moves). Coincident particles are
-/// separated along a fixed axis (`+X`) so the result stays deterministic and
-/// free of `NaN`. Corrections are applied in place as they are found
-/// (Gauss-Seidel style), which is deterministic given the fixed traversal
-/// order.
+/// The separation law lives in the physics engine
+/// (`prism_physics_core::soft::collision::resolve_self_collision`): particles
+/// are bucketed by integer cell, each particle tests only its 27-cell
+/// neighborhood, and a pair closer than `thickness` is pushed symmetrically
+/// apart split by inverse mass (a pinned partner never moves, so its free
+/// partner takes the whole correction). Coincident particles separate along a
+/// fixed `+X` axis so the result stays deterministic and free of `NaN`. The
+/// render path keeps no second copy of this solver; it only marshals its
+/// compact particle layout into the structure-of-arrays columns the engine
+/// consumes and writes the solved positions back.
 ///
 /// A non-positive `cell_size` or `thickness`, or fewer than two particles, is a
 /// no-op.
 pub fn resolve_self_collision(particles: &mut [ClothParticle], cell_size: f32, thickness: f32) {
-    if cell_size <= 0.0 || thickness <= 0.0 || particles.len() < 2 {
-        return;
-    }
-
-    let mut grid: BTreeMap<(i32, i32, i32), Vec<u32>> = BTreeMap::new();
-    for (index, particle) in particles.iter().enumerate() {
-        let cell = cell_of(particle.position, cell_size);
-        grid.entry(cell).or_default().push(index as u32);
-    }
-
-    let thickness_sq = thickness * thickness;
-    for (&cell, bucket) in &grid {
-        for &a in bucket {
-            let ai = a as usize;
-            for dx in -1..=1 {
-                for dy in -1..=1 {
-                    for dz in -1..=1 {
-                        let neighbor = (cell.0 + dx, cell.1 + dy, cell.2 + dz);
-                        let Some(nbucket) = grid.get(&neighbor) else {
-                            continue;
-                        };
-                        for &b in nbucket {
-                            if b <= a {
-                                continue;
-                            }
-                            let bi = b as usize;
-                            resolve_pair(particles, ai, bi, thickness, thickness_sq);
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Separates the particle pair `(ai, bi)` if they are closer than `thickness`.
-///
-/// The penetration is split by inverse mass so pinned partners stay put. When
-/// the two positions coincide (no defined separating direction) a fixed `+X`
-/// axis is used for determinism. Reads and writes go through distinct indices,
-/// so there is no aliasing.
-fn resolve_pair(
-    particles: &mut [ClothParticle],
-    ai: usize,
-    bi: usize,
-    thickness: f32,
-    thickness_sq: f32,
-) {
-    let pa = particles[ai].position;
-    let pb = particles[bi].position;
-    let delta = pb.sub(pa);
-    let dist_sq = delta.length_squared();
-    if dist_sq >= thickness_sq {
-        return;
-    }
-
-    let wa = particles[ai].inverse_mass.max(0.0);
-    let wb = particles[bi].inverse_mass.max(0.0);
-    let w_sum = wa + wb;
-    if w_sum <= 0.0 {
-        // Both pinned: nothing can move.
-        return;
-    }
-
-    let (dir, penetration) = if dist_sq <= EPS_LEN_SQ {
-        // Coincident particles: separate along a fixed axis by the full
-        // thickness so the result is deterministic and never `NaN`.
-        (Vec3::new(1.0, 0.0, 0.0), thickness)
-    } else {
-        let dist = dist_sq.sqrt();
-        (delta.scale(1.0 / dist), thickness - dist)
-    };
-
-    // `dir` points from `ai` toward `bi`; push them apart along it.
-    let move_a = -penetration * (wa / w_sum);
-    let move_b = penetration * (wb / w_sum);
-    particles[ai].position = pa.add(dir.scale(move_a));
-    particles[bi].position = pb.add(dir.scale(move_b));
+    // `physics_bridge::to_soa` maps a pinned particle to a zero inverse mass,
+    // which reproduces the former `inverse_mass.max(0.0)` weighting exactly
+    // because `ClothParticle::is_pinned()` is defined as `inverse_mass <= 0`.
+    let (mut positions, inverse_masses) = physics_bridge::to_soa(particles);
+    prism_physics_core::soft::collision::resolve_self_collision(
+        &mut positions,
+        &inverse_masses,
+        cell_size,
+        thickness,
+    );
+    physics_bridge::write_positions_back(particles, &positions);
 }
 
 /// Resolves self-collision like [`resolve_self_collision`], but rubs the
@@ -494,12 +407,13 @@ fn resolve_pair(
 /// friction so stacked cloth layers grip instead of shearing freely.
 ///
 /// The spatial hash, traversal order, and inverse-mass-weighted normal push are
-/// identical to [`resolve_self_collision`]; friction is layered on inside
-/// [`resolve_pair_with_friction`] using each partner's frame-start position from
-/// `prev_positions`. `friction` is clamped to `0..=1`; a value of `0` delegates
-/// straight to [`resolve_self_collision`]. A non-positive `cell_size` or
-/// `thickness`, or fewer than two particles, is a no-op, and a short
-/// `prev_positions` slice degrades to no friction for the missing indices.
+/// identical to [`resolve_self_collision`]; the physics engine layers Coulomb
+/// friction (Macklin et al. 2014) on each separated pair using its frame-start
+/// position from `prev_positions`. `friction` is clamped to `0..=1`; a value of
+/// `0` reproduces [`resolve_self_collision`] exactly. A non-positive
+/// `cell_size` or `thickness`, or fewer than two particles, is a no-op, and a
+/// short `prev_positions` slice degrades to no friction for the missing
+/// indices.
 pub fn resolve_self_collision_with_friction(
     particles: &mut [ClothParticle],
     prev_positions: &[Vec3],
@@ -507,120 +421,28 @@ pub fn resolve_self_collision_with_friction(
     thickness: f32,
     friction: f32,
 ) {
-    if cell_size <= 0.0 || thickness <= 0.0 || particles.len() < 2 {
-        return;
-    }
-    let mu = sanitize_friction(friction);
-    if mu <= 0.0 {
-        resolve_self_collision(particles, cell_size, thickness);
-        return;
-    }
-
-    let mut grid: BTreeMap<(i32, i32, i32), Vec<u32>> = BTreeMap::new();
-    for (index, particle) in particles.iter().enumerate() {
-        let cell = cell_of(particle.position, cell_size);
-        grid.entry(cell).or_default().push(index as u32);
-    }
-
-    let thickness_sq = thickness * thickness;
-    for (&cell, bucket) in &grid {
-        for &a in bucket {
-            for dx in -1..=1 {
-                for dy in -1..=1 {
-                    for dz in -1..=1 {
-                        let neighbor = (cell.0 + dx, cell.1 + dy, cell.2 + dz);
-                        let Some(nbucket) = grid.get(&neighbor) else {
-                            continue;
-                        };
-                        for &b in nbucket {
-                            if b <= a {
-                                continue;
-                            }
-                            resolve_pair_with_friction(
-                                particles,
-                                prev_positions,
-                                a as usize,
-                                b as usize,
-                                thickness,
-                                thickness_sq,
-                                mu,
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Separates the pair `(ai, bi)` like [`resolve_pair`], then removes the
-/// friction-limited part of their relative tangential slide.
-///
-/// The normal push (`dir`, `penetration`) is computed exactly as in
-/// [`resolve_pair`]. Friction then acts on the relative frame slide
-/// `(sep_a - prev_a) - (sep_b - prev_b)` projected onto the contact tangent
-/// plane: the removed amount is `min(mu * penetration / ||Dx_t||, 1) * Dx_t`,
-/// split between the partners by inverse mass so a pinned partner never moves
-/// and the heavier partner moves less. Reads and writes go through distinct
-/// indices, so there is no aliasing; a coincident pair or a below-threshold
-/// slide falls back to the plain normal separation without producing `NaN`.
-fn resolve_pair_with_friction(
-    particles: &mut [ClothParticle],
-    prev_positions: &[Vec3],
-    ai: usize,
-    bi: usize,
-    thickness: f32,
-    thickness_sq: f32,
-    mu: f32,
-) {
-    let pa = particles[ai].position;
-    let pb = particles[bi].position;
-    let delta = pb.sub(pa);
-    let dist_sq = delta.length_squared();
-    if dist_sq >= thickness_sq {
-        return;
-    }
-
-    let wa = particles[ai].inverse_mass.max(0.0);
-    let wb = particles[bi].inverse_mass.max(0.0);
-    let w_sum = wa + wb;
-    if w_sum <= 0.0 {
-        return;
-    }
-
-    let (dir, penetration) = if dist_sq <= EPS_LEN_SQ {
-        (Vec3::new(1.0, 0.0, 0.0), thickness)
-    } else {
-        let dist = dist_sq.sqrt();
-        (delta.scale(1.0 / dist), thickness - dist)
-    };
-
-    // Normal separation, inverse-mass weighted (identical to `resolve_pair`).
-    let move_a = -penetration * (wa / w_sum);
-    let move_b = penetration * (wb / w_sum);
-    let sep_a = pa.add(dir.scale(move_a));
-    let sep_b = pb.add(dir.scale(move_b));
-
-    // Relative tangential slide since frame start. `dir` is the contact normal
-    // and `penetration` is the pair's normal-correction magnitude `||Dx_n||`.
-    let prev_a = prev_positions.get(ai).copied().unwrap_or(pa);
-    let prev_b = prev_positions.get(bi).copied().unwrap_or(pb);
-    let rel = sep_a.sub(prev_a).sub(sep_b.sub(prev_b));
-    let normal_amount = rel.dot(dir);
-    let tangent = rel.sub(dir.scale(normal_amount));
-    let tan_len_sq = tangent.length_squared();
-    if tan_len_sq <= EPS_FRICTION {
-        particles[ai].position = sep_a;
-        particles[bi].position = sep_b;
-        return;
-    }
-    let tan_len = tan_len_sq.sqrt();
-    let scale = (mu * penetration / tan_len).min(1.0);
-    let corr = tangent.scale(scale);
-    // Split the relative tangential correction by inverse mass so the change in
-    // `(a - b)` relative slide equals `-corr`.
-    particles[ai].position = sep_a.sub(corr.scale(wa / w_sum));
-    particles[bi].position = sep_b.add(corr.scale(wb / w_sum));
+    // The friction separation law lives in the physics engine
+    // (`prism_physics_core::soft::collision::resolve_self_collision_with_friction`).
+    // Marshal the render particle layout plus the frame-start snapshot into the
+    // structure-of-arrays columns that solver consumes, then write the solved
+    // positions back. A short `prev_positions` slice is preserved verbatim, so
+    // the physics solver falls back to no tangential slide for the missing
+    // indices exactly as the former in-line pass did.
+    let (mut positions, inverse_masses) = physics_bridge::to_soa(particles);
+    let prev: Vec<_> = prev_positions
+        .iter()
+        .copied()
+        .map(physics_bridge::to_glam)
+        .collect();
+    prism_physics_core::soft::collision::resolve_self_collision_with_friction(
+        &mut positions,
+        &prev,
+        &inverse_masses,
+        cell_size,
+        thickness,
+        friction,
+    );
+    physics_bridge::write_positions_back(particles, &positions);
 }
 
 #[cfg(test)]
