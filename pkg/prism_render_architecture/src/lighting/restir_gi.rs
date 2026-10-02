@@ -430,6 +430,99 @@ where
     out
 }
 
+/// Combines reuse sources with **balance-heuristic multiple importance
+/// sampling** (generalized `RIS`, Lin et al. 2022), the minimum-variance
+/// reference weighting that supersedes the `1/Z` normalization of
+/// [`combine_unbiased`].
+///
+/// `target_at(shading_point, sample)` returns the target density of `sample` at
+/// `shading_point`; `center` is the canonical destination domain that owns the
+/// result and **must** be the shading point of `sources[0]` (the pixel's own
+/// reservoir), so the balance-heuristic denominator contains the canonical
+/// term. Every source must already be finalized.
+///
+/// For a sample `y` held by source `i`, the balance-heuristic `MIS` weight in
+/// the canonical domain is
+///
+/// ```text
+///          M_i · p̂_i(y) · J(center→i)
+/// m_i(y) = ───────────────────────────────
+///          Σ_j M_j · p̂_j(y) · J(center→j)
+/// ```
+///
+/// where `p̂_i(y) = target_at(sp_i, y)` and `J(center→i)` is the reconnection
+/// Jacobian from the canonical domain into source `i` (computed directly to
+/// avoid dividing by a possibly degenerate Jacobian). The generalized-`RIS`
+/// resampling weight carries the forward shift Jacobian `J(i→center)`, which is
+/// the reciprocal of `J(center→i)`, so the two cancel exactly and the pushed
+/// weight reduces to
+///
+/// ```text
+/// w_i = M_i · p̂_i(y) · p̂_center(y) · W_i / D   with   D = Σ_j M_j · p̂_j(y) · J(center→j).
+/// ```
+///
+/// A single source whose shading point is `center` reduces to the identity
+/// `W_out = W_in` (`J(center→center) = 1`). Returns a finalized reservoir;
+/// sources with a vanishing denominator or target are dropped unbiasedly.
+#[must_use]
+pub fn combine_mis<F>(
+    sources: &[GiReuseSource],
+    center: ShadingPoint,
+    mut target_at: F,
+    rng: &mut Rng,
+) -> GiReservoir
+where
+    F: FnMut(&ShadingPoint, &GiSample) -> f32,
+{
+    let mut out = GiReservoir::empty();
+    let mut total_m: u32 = 0;
+    for source in sources {
+        if source.reservoir.m == 0 {
+            continue;
+        }
+        total_m += source.reservoir.m;
+        let sample = source.reservoir.sample;
+
+        // Balance-heuristic denominator in the canonical domain: every source's
+        // sample count scaled by its target density for this sample and the
+        // reconnection Jacobian from the center into that source's domain.
+        let mut denom = 0.0_f32;
+        for other in sources {
+            if other.reservoir.m == 0 {
+                continue;
+            }
+            let p_other = target_at(&other.shading_point, &sample);
+            if p_other <= TARGET_PDF_EPS {
+                continue;
+            }
+            let jac = reconnection_jacobian(center, other.shading_point, &sample);
+            denom += (other.reservoir.m as f32) * p_other * jac;
+        }
+        if denom <= TARGET_PDF_EPS {
+            continue;
+        }
+
+        let p_source = target_at(&source.shading_point, &sample);
+        let p_center = target_at(&center, &sample);
+        let weight = (source.reservoir.m as f32) * p_source * p_center * source.reservoir.w / denom;
+        out.push_weighted(sample, p_center, weight, rng.next_u01());
+    }
+
+    out.m = total_m;
+    if total_m == 0 {
+        out.target_pdf = 0.0;
+        out.w = 0.0;
+        return out;
+    }
+    out.target_pdf = target_at(&center, &out.sample);
+    out.w = if out.target_pdf <= TARGET_PDF_EPS || out.w_sum <= 0.0 {
+        0.0
+    } else {
+        out.w_sum / out.target_pdf
+    };
+    out
+}
+
 /// Gathers reuse sources for a spatial combine: the center reservoir first,
 /// then up to `budget.spatial_neighbors` neighbors. Pair with
 /// [`combine_unbiased`].
@@ -715,5 +808,87 @@ mod tests {
         let mut rng = Rng::new(5);
         let r = stream_initial(&cands, budget(3, 0, false), &mut rng);
         assert!(r.m <= 3 && r.m >= 1);
+    }
+
+    #[test]
+    fn mis_combine_with_nontrivial_jacobian_converges() {
+        // Balance-heuristic MIS over a center and a neighbor at *different*
+        // shading points must stay unbiased: the per-source reconnection
+        // Jacobian retargets each held sample to the canonical center domain,
+        // so the estimate converges to the center's irradiance even though the
+        // neighbor subtends the emitter at a different solid angle.
+        let center = ShadingPoint::new([0.0, 0.0, 0.0], [0.0, 0.0, 1.0]);
+        let neighbor = ShadingPoint::new([0.6, -0.5, 0.0], [0.0, 0.0, 1.0]);
+        let exact = reference_irradiance(center);
+        // Sanity: the neighbor's own irradiance differs, so the Jacobian is
+        // doing real retargeting work.
+        assert!(abs_f32(reference_irradiance(neighbor) - exact) / exact > 0.05);
+
+        let m = 12u32;
+        let seeds = 600_000u32;
+        let mut acc = 0.0f64;
+        for s in 0..seeds {
+            let mut rng = Rng::new(s.wrapping_mul(2_654_435_761).wrapping_add(13));
+            let c = GiReuseSource::new(build_reservoir(center, m, &mut rng), center);
+            let n = GiReuseSource::new(build_reservoir(neighbor, m, &mut rng), neighbor);
+            let combined = combine_mis(
+                &[c, n],
+                center,
+                |sp: &ShadingPoint, sample: &GiSample| target_pdf_at(*sp, sample.sample_point),
+                &mut rng,
+            );
+            acc += f64::from(combined.target_pdf * combined.w);
+        }
+        let mean = (acc / f64::from(seeds)) as f32;
+        let rel = abs_f32(mean - exact) / exact;
+        assert!(rel < 0.03, "mis mean {mean} vs exact {exact} ({rel})");
+    }
+
+    #[test]
+    fn mis_combine_has_no_higher_variance_than_z_norm() {
+        // Both combines are unbiased, so their estimator means agree; the
+        // balance heuristic is the reference minimum-variance MIS weighting, so
+        // under neighbors with a non-trivial reconnection Jacobian its per-seed
+        // estimator spread must not exceed the 1/Z path. Common random numbers
+        // (shared sources per seed) keep the comparison low-noise.
+        let center = ShadingPoint::new([0.0, 0.0, 0.0], [0.0, 0.0, 1.0]);
+        let neighbor = ShadingPoint::new([0.6, -0.5, 0.0], [0.0, 0.0, 1.0]);
+        let m = 12u32;
+        let seeds = 400_000u32;
+        let mut sum_z = 0.0f64;
+        let mut sumsq_z = 0.0f64;
+        let mut sum_m = 0.0f64;
+        let mut sumsq_m = 0.0f64;
+        for s in 0..seeds {
+            let mut rng = Rng::new(s.wrapping_mul(2_246_822_519).wrapping_add(17));
+            let c = GiReuseSource::new(build_reservoir(center, m, &mut rng), center);
+            let n = GiReuseSource::new(build_reservoir(neighbor, m, &mut rng), neighbor);
+            let sources = [c, n];
+            let mut rng_z = Rng::new(s.wrapping_mul(747_796_405).wrapping_add(1));
+            let mut rng_m = Rng::new(s.wrapping_mul(747_796_405).wrapping_add(1));
+            let target =
+                |sp: &ShadingPoint, sample: &GiSample| target_pdf_at(*sp, sample.sample_point);
+            let cz = combine_unbiased(&sources, center, target, &mut rng_z);
+            let cm = combine_mis(&sources, center, target, &mut rng_m);
+            let ez = f64::from(cz.target_pdf * cz.w);
+            let em = f64::from(cm.target_pdf * cm.w);
+            sum_z += ez;
+            sumsq_z += ez * ez;
+            sum_m += em;
+            sumsq_m += em * em;
+        }
+        let n = f64::from(seeds);
+        let mean_z = sum_z / n;
+        let mean_m = sum_m / n;
+        let var_z = sumsq_z / n - mean_z * mean_z;
+        let var_m = sumsq_m / n - mean_m * mean_m;
+        assert!(
+            (mean_z - mean_m).abs() < 0.02,
+            "unbiased means should agree: z {mean_z} m {mean_m}"
+        );
+        assert!(
+            var_m <= var_z * 1.02,
+            "MIS variance {var_m} should not exceed Z-norm variance {var_z}"
+        );
     }
 }
