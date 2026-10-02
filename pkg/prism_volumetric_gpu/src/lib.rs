@@ -84,6 +84,7 @@ pub mod blend_state;
 pub mod blend_with_atmosphere;
 pub mod bloom_threshold;
 pub mod bloom_upsample;
+pub mod camera;
 pub mod capsule_capsule_closest;
 pub mod capsule_sdf;
 pub mod checkerboard_resolve;
@@ -117,6 +118,7 @@ pub mod depth_downsample;
 pub mod depth_linearize;
 pub mod depth_of_field;
 pub mod distance_field_shadow;
+pub mod draw_pass_buffers;
 pub mod dual_lobe_phase;
 pub mod dual_quaternion;
 pub mod ear_clip_triangulate;
@@ -191,6 +193,7 @@ pub mod particle_multiscatter;
 pub mod perlin;
 pub mod perlin_worley;
 pub mod phase;
+pub mod pipeline_layout;
 pub mod plane_aabb_classify;
 pub mod plane_clip;
 pub mod plane_line_intersect;
@@ -233,11 +236,13 @@ pub mod segment_intersect_2d;
 pub mod segment_obb_intersect;
 pub mod segment_triangle_intersect;
 pub mod select_lod;
+pub mod serialization;
 pub mod shading;
 pub mod shadow;
 pub mod sharpen_cas;
 pub mod should_early_terminate;
 pub mod should_fallback;
+pub mod sim_pass_buffers;
 pub mod sim_space;
 pub mod single_scatter_reference;
 pub mod sky_state_transition;
@@ -255,6 +260,7 @@ pub mod sss_wrap;
 pub mod stability;
 pub mod stencil_op;
 pub mod storm_vertical_profile;
+pub mod subframe_spawn;
 pub mod sunset_inscatter_tint;
 pub mod sunset_reddening;
 pub mod sutherland_hodgman_2d;
@@ -329,6 +335,7 @@ pub use blend_state::{BlendStateQuery, GpuBlendState};
 pub use blend_with_atmosphere::{BlendQuery, BlendedColor, GpuBlendWithAtmosphere};
 pub use bloom_threshold::{BloomThresholdQuery, GpuBloomThreshold};
 pub use bloom_upsample::{BloomUpsampleQuery, GpuBloomUpsample};
+pub use camera::{CameraQuery, CameraResult, GpuCamera};
 pub use capsule_capsule_closest::{
     CapsuleClosestQuery, CapsuleClosestResult, GpuCapsuleCapsuleClosest,
 };
@@ -373,6 +380,7 @@ pub use depth_downsample::{DepthDownsampleQuery, GpuDepthDownsample};
 pub use depth_linearize::{DepthLinearizeQuery, DepthLinearizeResult, GpuDepthLinearize};
 pub use depth_of_field::{DepthOfFieldQuery, DepthOfFieldSample, GpuDepthOfField};
 pub use distance_field_shadow::{GpuDistanceFieldShadow, GpuSdfGrid, SdfShadowRay};
+pub use draw_pass_buffers::{GpuDrawPassBufferQuery, GpuDrawPassBufferResult, GpuDrawPassBuffers};
 pub use dual_lobe_phase::{DualLobePhaseQuery, GpuDualLobePhase};
 pub use dual_quaternion::{DualQuatTransformQuery, GpuDualQuaternion};
 pub use ear_clip_triangulate::{EarClipAnswer, EarClipQuery, GpuEarClipTriangulate};
@@ -453,6 +461,7 @@ pub use particle_multiscatter::{GpuParticleMultiScatter, MultiScatterResponse};
 pub use perlin::{GpuPerlin, PerlinQuery};
 pub use perlin_worley::{GpuPerlinWorley, PerlinWorleyQuery};
 pub use phase::{GpuPhaseEvaluator, PhaseQuery};
+pub use pipeline_layout::{GpuPipelineLayout, GpuPipelineLayoutQuery, GpuPipelineLayoutResult};
 pub use plane_aabb_classify::{GpuPlaneAabbClassify, PlaneAabbClassifyQuery};
 pub use plane_clip::{
     GpuPlaneClip, PlaneClipQuery, PlaneClipResult, SIDE_INSIDE, SIDE_ON, SIDE_OUTSIDE,
@@ -507,11 +516,16 @@ pub use segment_intersect_2d::{
 pub use segment_obb_intersect::{GpuSegmentObbIntersect, SegmentObbQuery, SegmentObbResult};
 pub use segment_triangle_intersect::{GpuSegmentTriangleIntersect, SegmentTriangleQuery};
 pub use select_lod::{GpuSelectLod, SelectLodQuery};
+pub use serialization::{
+    GpuSerialization, GpuSerializationQuery, GpuSerializationResult, CODE_COMPATIBLE,
+    CODE_INCOMPATIBLE, CODE_NEEDS_MIGRATION,
+};
 pub use shading::{GpuShading, GpuShadingQuery, GpuShadingResult};
 pub use shadow::{GpuShadow, ShadowRay};
 pub use sharpen_cas::{GpuSharpenCas, SharpenCasQuery};
 pub use should_early_terminate::{GpuShouldEarlyTerminate, ShouldEarlyTerminateQuery};
 pub use should_fallback::{GpuShouldFallback, ShouldFallbackQuery};
+pub use sim_pass_buffers::{GpuSimPassBuffers, GpuSimPassBuffersQuery, GpuSimPassBuffersResult};
 pub use sim_space::{GpuSimSpace, GpuSimSpaceQuery, GpuSimSpaceResult};
 pub use single_scatter_reference::{GpuSingleScatterReference, SingleScatterReferenceQuery};
 pub use sky_state_transition::{GpuSkyStateTransition, SkyStateTransition};
@@ -534,6 +548,7 @@ pub use sss_wrap::{GpuSssWrap, SssWrapQuery, SssWrapSample};
 pub use stability::{GpuStability, GpuStabilityQuery, GpuStabilityResult};
 pub use stencil_op::{GpuStencilOp, StencilOpQuery, StencilOpResult};
 pub use storm_vertical_profile::{GpuStormVerticalProfile, StormVerticalProfileQuery};
+pub use subframe_spawn::{GpuSubframeSpawn, SubframeSpawnQuery, SubframeSpawnResult};
 pub use sunset_inscatter_tint::{GpuSunsetInscatterTint, InscatterTint, SunsetInscatterTintQuery};
 pub use sunset_reddening::{GpuSunsetReddening, SunsetReddeningQuery};
 pub use sutherland_hodgman_2d::{
