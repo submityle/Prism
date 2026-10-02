@@ -107,12 +107,10 @@ pub fn cpu_sphere_trimesh_collide(
     let mut cursor = 0usize;
     for len in group_len {
         let mut best: Option<Contact> = None;
-        for contact in &contacts[cursor..cursor + len] {
-            if let Some(c) = contact {
-                match best {
-                    Some(b) if c.depth <= b.depth => {}
-                    _ => best = Some(*c),
-                }
+        for c in contacts[cursor..cursor + len].iter().flatten() {
+            match best {
+                Some(b) if c.depth <= b.depth => {}
+                _ => best = Some(*c),
             }
         }
         out.push(best);

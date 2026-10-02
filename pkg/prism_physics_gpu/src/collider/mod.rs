@@ -13,9 +13,12 @@
 //!   bounding boxes.
 //! * [`cpu_sphere_trimesh_collide`] — the sphere-versus-mesh CPU golden, one
 //!   deepest contact per sphere.
+//! * [`GpuSphereTrimeshCollider`] — the device twin of that golden.
 
 mod sphere_trimesh;
+mod sphere_trimesh_gpu;
 mod trimesh;
 
 pub use sphere_trimesh::cpu_sphere_trimesh_collide;
+pub use sphere_trimesh_gpu::GpuSphereTrimeshCollider;
 pub use trimesh::Trimesh;

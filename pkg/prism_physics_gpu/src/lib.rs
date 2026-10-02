@@ -84,7 +84,7 @@ pub use cloth::{
     GpuClothSelfCollision, GpuClothSelfCollisionPoint, GpuClothStrainLimit, GpuClothTearing,
     LongRangeColoring, StrainLimitColoring, VertexTriangleAdjacency,
 };
-pub use collider::{cpu_sphere_trimesh_collide, Trimesh};
+pub use collider::{cpu_sphere_trimesh_collide, GpuSphereTrimeshCollider, Trimesh};
 pub use contacts::{
     contact_constraints, contact_constraints_with_friction, cpu_resolve_contacts,
     cpu_resolve_contacts_warm, ContactCache, ContactConstraint, ContactKey, GpuContactSolver,
