@@ -36,9 +36,7 @@ use super::bitio::BitReader;
 ///
 /// Local copy mirroring the `BC7` table; kept module-private to keep the two
 /// BPTC decoders decoupled (the constant is tiny and never changes).
-const WEIGHT4: [u32; 16] = [
-    0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 56, 60, 64,
-];
+const WEIGHT4: [u32; 16] = [0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64];
 
 /// Convert an IEEE 754 binary16 (half) bit pattern to `f32`, losslessly.
 ///
@@ -110,7 +108,10 @@ fn interp_finish_unsigned(e0: u32, e1: u32, weight: u32) -> u16 {
 #[inline]
 fn sign_extend(value: u32, bits: u32) -> i32 {
     let shift = 32 - bits;
-    #[expect(clippy::cast_possible_wrap, reason = "deliberate two's-complement reinterpret")]
+    #[expect(
+        clippy::cast_possible_wrap,
+        reason = "deliberate two's-complement reinterpret"
+    )]
     let widened = (value << shift) as i32;
     widened >> shift
 }
@@ -123,7 +124,11 @@ fn unquantize_signed(comp: i32, prec: u32) -> i32 {
     if prec >= 16 {
         return comp;
     }
-    let (neg, v) = if comp < 0 { (true, -comp) } else { (false, comp) };
+    let (neg, v) = if comp < 0 {
+        (true, -comp)
+    } else {
+        (false, comp)
+    };
     let unq = if v == 0 {
         0
     } else if v >= (1i32 << (prec - 1)) - 1 {
@@ -131,7 +136,11 @@ fn unquantize_signed(comp: i32, prec: u32) -> i32 {
     } else {
         ((v << 15) + 0x4000) >> (prec - 1)
     };
-    if neg { -unq } else { unq }
+    if neg {
+        -unq
+    } else {
+        unq
+    }
 }
 
 /// Interpolate one signed intermediate channel between endpoints by a 4-bit
@@ -419,7 +428,10 @@ mod tests {
         // Mode-1 block (low two bits 00) is a two-subset mode: unsupported.
         let m1 = [0u8; 16];
         assert_eq!(bc6h_mode_bits(&m1), 0);
-        assert_eq!(decode_bc6h_unsigned(&m1), Err(Bc6hError::UnsupportedMode(0)));
+        assert_eq!(
+            decode_bc6h_unsigned(&m1),
+            Err(Bc6hError::UnsupportedMode(0))
+        );
         // Mode-12 block (5-bit 0b00111) is single-subset but delta: unsupported.
         let mut m12 = [0u8; 16];
         m12[0] = 0b0_0111;
@@ -462,7 +474,10 @@ mod tests {
         let block = make_block11([0x1FF, 0, 0], [0x200, 0, 0], idx);
         let out = decode_bc6h_mode11_signed(&block);
         for t in 1..16 {
-            assert!(out[t][0] <= out[t - 1][0], "signed R must be monotone at {t}");
+            assert!(
+                out[t][0] <= out[t - 1][0],
+                "signed R must be monotone at {t}"
+            );
         }
         assert!(out.iter().all(|p| p[1] == 0.0 && p[2] == 0.0));
     }

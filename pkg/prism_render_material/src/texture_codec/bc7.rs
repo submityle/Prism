@@ -33,9 +33,7 @@
 //! * Microsoft `DXGI_FORMAT_BC7_*` / Vulkan `VK_FORMAT_BC7_*` BPTC spec.
 
 /// 4-bit index interpolation weights (Khronos `aWeight4`), in 1/64 units.
-const WEIGHT4: [u32; 16] = [
-    0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 56, 60, 64,
-];
+const WEIGHT4: [u32; 16] = [0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64];
 
 /// 2-bit index interpolation weights (Khronos `aWeight2`), in 1/64 units.
 const WEIGHT2: [u32; 4] = [0, 21, 43, 64];
@@ -336,13 +334,7 @@ mod tests {
 
     /// Assemble a mode-6 block from field values; `idx` holds the sixteen
     /// 4-bit indices (index 0 must be `<= 7` so its high bit is implicit 0).
-    fn make_block(
-        rgba0: [u32; 4],
-        rgba1: [u32; 4],
-        p0: u32,
-        p1: u32,
-        idx: [u8; 16],
-    ) -> [u8; 16] {
+    fn make_block(rgba0: [u32; 4], rgba1: [u32; 4], p0: u32, p1: u32, idx: [u8; 16]) -> [u8; 16] {
         let mut w = BitWriter::new();
         w.write(0b100_0000, 7); // mode 6 marker
         w.write(rgba0[0], 7);
@@ -545,8 +537,11 @@ mod tests {
         let out = decode_bc7_mode5(&block);
         assert_eq!(out[0][3], 0); // a0
         assert_eq!(out[1][3], 255); // a1
-        // Colour identical on both texels (flat endpoints).
-        assert_eq!([out[0][0], out[0][1], out[0][2]], [out[1][0], out[1][1], out[1][2]]);
+                                    // Colour identical on both texels (flat endpoints).
+        assert_eq!(
+            [out[0][0], out[0][1], out[0][2]],
+            [out[1][0], out[1][1], out[1][2]]
+        );
     }
 
     #[test]
@@ -589,7 +584,10 @@ mod tests {
     /// Assemble a mode-4 block: `rgb0/rgb1` are 5-bit, `a0/a1` 6-bit; `idx2`
     /// are the sixteen 2-bit indices (index 0 <= 1), `idx3` the sixteen 3-bit
     /// indices (index 0 <= 3); `idx_mode` selects colour/alpha index routing.
-    #[expect(clippy::too_many_arguments, reason = "test block assembler mirrors the BC7 bit-field layout")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "test block assembler mirrors the BC7 bit-field layout"
+    )]
     fn make_block4(
         rgb0: [u32; 3],
         rgb1: [u32; 3],
