@@ -4,7 +4,7 @@
 > 借鉴 UE5 Chaos、Unity DOTS Physics / Havok、PhysX 5、Jolt、Avian、Rapier，取长补短。
 > 本文档为设计规格，不含任何 AI/ML 内容，采用纯经典数值物理路线。
 
-- 版本: v0.1（设计阶段，未进入编码）
+- 版本: v0.3（编码推进中：M0–M8 内核已落地，GPU 后端已上真机验证）
 - 适用引擎: Prism / Bevy ECS 生态
 - 关键依赖: bevy_ecs（并行 ECS）、bevy_math（glam SIMD）、bevy_tasks（任务系统）、wgpu（GPU 后端）
 
@@ -399,16 +399,20 @@ crates/
 | M1 | XPBD 刚体 MVP + 球/盒/胶囊 + 接触摩擦 + 子步 | 能堆箱子稳定 | ✅ 完成 |
 | M2 | 关节族 + 空间查询 + 事件/Observer | 可做门/车/机关 | ✅ 完成 |
 | M2.5 | 异步流水线 + 状态哈希（联机地基） | 插值无抖动 | ✅ 完成 |
-| M3 | Island 并行 + 睡眠 + warm-start + CCD | 万级刚体 60fps | ✅ 完成 |
+| M3 | Island 并行 + 睡眠 + warm-start + CCD（已升级为 rotational conservative-advancement：shape-cast + 位姿回绕，对齐 UE/Chaos） | 万级刚体 60fps | ✅ 完成 |
 | M4 | 布料 / 软体 / 绳索（统一约束复用） | 交互式布料 | ✅ 完成 |
 | M4.5 | 离线烘焙 + Golden replay CI | 缓存回放 demo | ✅ 完成 |
-| M5 | GPU 后端（流体/大布料/破碎） | 十万粒子 | ⬜ 未开始（需真机 GPU 验证） |
+| M5 | GPU 后端（流体/大布料/破碎） | 十万粒子 | ✅ 完成（prism_physics_gpu / prism_volumetric_gpu，每个核均为 CPU golden + WGSL 孪生 + 真机 GPU parity） |
 | M5.5 | MPM（沙/雪/泥）+ FLIP/APIC 流体 + 表面重建 | 溃坝/沙堆 demo | ✅ 完成 |
 | M7 | VBD / 降阶软体 + 自适应 LOD | 巨型软体实时 | ✅ 完成 |
 | M8 | 约束 DSL + 参数热重载 | 编辑器实时调参 | ✅ 完成 |
 | M9 | GPU-Driven 持久化管线 + 实时 Voronoi 破碎 | 零拷贝 + 动态裂纹 | 🟡 CPU 破碎核心完成；GPU 持久化管线随 M5 一并落地 |
 
 关键预留原则：Tier S/A 的功能现在只在 trait Solver、DriveMode、序列化、后端抽象四个扩展点"留好插槽"，M0/M1 不实现，避免过度设计拖慢主线。
+
+> 实现现状补充（截至编码推进）：
+> - CCD 已从纯线性 shape-cast 升级为 rotational conservative-advancement（线性+角向守恒上界，支持纯自转触发与 position+orientation 两段回绕）。
+> - 布料-刚体双向耦合原语已落地（`CouplingBody` / `resolve_two_way_coupling`：逆质量加权接触分配 + 反作用冲量累积），并有 WGSL 孪生与真机 parity（`prism_physics_gpu::cloth::coupling`、`prism_volumetric_gpu`）。**已知差距**：核心 step 管线（`pipeline` / `world` / `XpbdSolver`）尚未端到端串联“从刚体构造 proxy → 耦合 → 反作用冲量写回刚体”，仍在推进。
 
 ---
 
@@ -449,4 +453,4 @@ crates/
 
 ---
 
-*本文档为 Prism Physics 设计规格 v0.1，不含 AI/ML 内容，处于评审阶段，尚未进入编码。*
+*本文档为 Prism Physics 设计规格 v0.3，不含 AI/ML 内容；M0–M8 内核与 GPU 后端已进入编码，并以 CPU golden + 真机 GPU parity 双重验证。*
