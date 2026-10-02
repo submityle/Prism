@@ -61,8 +61,12 @@ pub mod adaptive_step;
 pub mod advect_semi_lagrangian;
 pub mod advect_with_wind;
 pub mod aerial;
+pub mod alpha_erosion;
+pub mod alpha_hashed;
 pub mod analytic_single_scatter;
 pub mod analytic_transmittance;
+pub mod anamorphic_streak;
+pub mod anisotropic_footprint;
 pub mod anvil_profile;
 pub mod ao_sample;
 pub mod aperture_blade;
@@ -90,6 +94,7 @@ pub mod classify_precip;
 pub mod closest_point_obb;
 pub mod cloud_shadow_modulation;
 pub mod cohen_sutherland_clip;
+pub mod color_grade_lut;
 pub mod color_gradient;
 pub mod color_temperature;
 pub mod composite_motion_vector;
@@ -144,6 +149,7 @@ pub mod heap_sort_u32;
 pub mod heat_distortion;
 pub mod height_fog;
 pub mod hilbert_curve;
+pub mod histogram_equalize;
 pub mod hue_shift;
 pub mod imposter_fade;
 pub mod inertia_tensor;
@@ -231,6 +237,7 @@ pub mod sphere_sweep;
 pub mod spherical_harmonics_rotate;
 pub mod sprite_stretch;
 pub mod sss_wrap;
+pub mod stencil_op;
 pub mod storm_vertical_profile;
 pub mod sunset_inscatter_tint;
 pub mod sunset_reddening;
@@ -256,6 +263,7 @@ pub mod uv_animation;
 pub mod variance_clip;
 pub mod variance_shadow;
 pub mod vdb_sample;
+pub mod vector_field;
 pub mod velocity_at;
 pub mod velocity_dilate;
 pub mod vignette_mask;
@@ -276,8 +284,12 @@ pub use adaptive_step::{AdaptiveStepQuery, GpuAdaptiveStep};
 pub use advect_semi_lagrangian::{GpuAdvectSemiLagrangian, WeatherAdvectSample};
 pub use advect_with_wind::GpuAdvectWithWind;
 pub use aerial::{AerialQuery, GpuAerialPerspective};
+pub use alpha_erosion::{AlphaErosionQuery, AlphaErosionResult, GpuAlphaErosion};
+pub use alpha_hashed::{AlphaHashedQuery, AlphaHashedResult, GpuAlphaHashed};
 pub use analytic_single_scatter::{AnalyticSingleScatterQuery, GpuAnalyticSingleScatter};
 pub use analytic_transmittance::{AnalyticTransmittanceQuery, GpuAnalyticTransmittance};
+pub use anamorphic_streak::{AnamorphicStreakQuery, AnamorphicStreakResult, GpuAnamorphicStreak};
+pub use anisotropic_footprint::{FootprintQuery, FootprintResult, GpuAnisotropicFootprint};
 pub use anvil_profile::{AnvilProfileQuery, GpuAnvilProfile};
 pub use ao_sample::GpuAoSample;
 pub use aperture_blade::{ApertureBladeQuery, ApertureBladeResult, GpuApertureBlade};
@@ -305,7 +317,9 @@ pub use capsule_capsule_closest::{
 };
 pub use capsule_sdf::{CapsuleSdfQuery, CapsuleSdfResult, GpuCapsuleSdf};
 pub use checkerboard_resolve::{CheckerboardResolveQuery, GpuCheckerboardResolve};
-pub use chromatic_aberration::{ChromaticAberrationQuery, ChromaticAberrationResult, GpuChromaticAberration};
+pub use chromatic_aberration::{
+    ChromaticAberrationQuery, ChromaticAberrationResult, GpuChromaticAberration,
+};
 pub use cie_xyz::{CieXyzQuery, CieXyzResult, GpuCieXyz};
 pub use clamp_history::{ClampHistoryQuery, GpuClampHistory};
 pub use classify_precip::{ClassifyPrecipQuery, GpuClassifyPrecip};
@@ -315,12 +329,15 @@ pub use cohen_sutherland_clip::{
     ClipSegmentQuery, ClipSegmentResult, GpuCohenSutherlandClip, OUTCODE_BOTTOM, OUTCODE_INSIDE,
     OUTCODE_LEFT, OUTCODE_RIGHT, OUTCODE_TOP,
 };
+pub use color_grade_lut::{ColorGradeLutQuery, ColorGradeLutResult, GpuColorGradeLut};
 pub use color_gradient::{ColorGradientQuery, ColorGradientSample, GpuColorGradient};
 pub use color_temperature::{ColorTemperatureQuery, ColorTemperatureResult, GpuColorTemperature};
 pub use composite_motion_vector::{
     CompositeMotionVectorQuery, GpuCompositeMotionVector, MotionVector,
 };
-pub use conservative_raster::{ConservativeRasterQuery, ConservativeRasterResult, GpuConservativeRaster};
+pub use conservative_raster::{
+    ConservativeRasterQuery, ConservativeRasterResult, GpuConservativeRaster,
+};
 pub use contact_shadow::{ContactShadowQuery, GpuContactShadow};
 pub use context::{block_on, GpuContext};
 pub use contrail_kernel::{ContrailKernelQuery, GpuContrailKernel};
@@ -375,6 +392,9 @@ pub use heap_sort_u32::{GpuHeapSort, GpuHeapSortU32, HeapSortU32Query};
 pub use heat_distortion::{GpuHeatDistortion, HeatQuery, HeatResult};
 pub use height_fog::{GpuHeightFog, HeightFogQuery};
 pub use hilbert_curve::{GpuHilbertCurve, MAX_ORDER};
+pub use histogram_equalize::{
+    GpuHistogramEqualize, HistogramEqualizeQuery, HistogramEqualizeResult,
+};
 pub use hue_shift::{GpuHueShift, HueShiftQuery, HueShiftResult};
 pub use imposter_fade::{GpuImposterFade, ImposterFadeQuery};
 pub use inertia_tensor::{BodyOpQuery, BodyOpResult, GpuInertiaTensor};
@@ -479,6 +499,7 @@ pub use spherical_harmonics_rotate::{
 };
 pub use sprite_stretch::{GpuSpriteStretch, SpriteStretchQuery, SpriteStretchResult};
 pub use sss_wrap::{GpuSssWrap, SssWrapQuery, SssWrapSample};
+pub use stencil_op::{GpuStencilOp, StencilOpQuery, StencilOpResult};
 pub use storm_vertical_profile::{GpuStormVerticalProfile, StormVerticalProfileQuery};
 pub use sunset_inscatter_tint::{GpuSunsetInscatterTint, InscatterTint, SunsetInscatterTintQuery};
 pub use sunset_reddening::{GpuSunsetReddening, SunsetReddeningQuery};
@@ -512,6 +533,7 @@ pub use uv_animation::{GpuUvAnimation, UvAnimationQuery, UvAnimationResult};
 pub use variance_clip::{GpuVarianceClip, VarianceClipQuery};
 pub use variance_shadow::{GpuVarianceShadow, VarianceShadowQuery};
 pub use vdb_sample::GpuVdbSample;
+pub use vector_field::{GpuVectorField, VectorFieldQuery, VectorFieldResult};
 pub use velocity_at::{GpuVelocityAt, VelocityAtQuery};
 pub use velocity_dilate::GpuVelocityDilate;
 pub use vignette_mask::{GpuVignetteMask, VignetteMaskQuery, VignetteMaskResult};
