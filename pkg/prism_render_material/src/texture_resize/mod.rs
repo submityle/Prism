@@ -192,10 +192,12 @@ mod tests {
     use super::*;
     use crate::box_downsample;
 
-    const ALL: [ResizeFilter; 4] = [
+    const ALL: [ResizeFilter; 6] = [
         ResizeFilter::Box,
         ResizeFilter::Triangle,
         ResizeFilter::CatmullRom,
+        ResizeFilter::Mitchell,
+        ResizeFilter::BSpline,
         ResizeFilter::Lanczos3,
     ];
 

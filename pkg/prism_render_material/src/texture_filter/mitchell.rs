@@ -53,7 +53,7 @@ fn accumulate(acc: &mut [f32; 4], c: [f32; 4], w: f32) {
 /// and parameters `(b, c)`. `C1`-continuous at `x = 1`, zero for `x >= 2`.
 #[inline]
 #[must_use]
-fn mn_kernel(x: f32, b: f32, c: f32) -> f32 {
+pub(crate) fn mn_kernel(x: f32, b: f32, c: f32) -> f32 {
     let x2 = x * x;
     let x3 = x2 * x;
     if x < 1.0 {

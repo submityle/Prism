@@ -15,11 +15,15 @@ use core::f32::consts::PI;
 
 use bevy_math::ops;
 
+use crate::texture_filter::mn_kernel;
+
 /// Reconstruction filter selectable for a resize.
 ///
 /// Ordered by cost / support width: [`Box`](ResizeFilter::Box) (nearest-ish,
 /// 1-tap) → [`Triangle`](ResizeFilter::Triangle) (linear) →
 /// [`CatmullRom`](ResizeFilter::CatmullRom) (C1 cubic, mild overshoot) →
+/// [`Mitchell`](ResizeFilter::Mitchell) (balanced B=C=1/3 reconstruction) →
+/// [`BSpline`](ResizeFilter::BSpline) (non-negative, ring-free) →
 /// [`Lanczos3`](ResizeFilter::Lanczos3) (sharpest, visible ringing).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResizeFilter {
@@ -29,6 +33,12 @@ pub enum ResizeFilter {
     Triangle,
     /// Catmull-Rom cubic (`a = -1/2`) of radius `2`, interpolating.
     CatmullRom,
+    /// Mitchell-Netravali balanced cubic (`B = C = 1/3`) of radius `2` -- the
+    /// recommended general-purpose resampling kernel (mild ring, mild blur).
+    Mitchell,
+    /// Cubic B-spline (`B = 1, C = 0`) of radius `2`: strictly non-negative,
+    /// never rings or overshoots -- the smooth reconstruction choice.
+    BSpline,
     /// Three-lobe Lanczos windowed sinc of radius `3`.
     Lanczos3,
 }
@@ -51,7 +61,7 @@ impl ResizeFilter {
         match self {
             ResizeFilter::Box => 0.5,
             ResizeFilter::Triangle => 1.0,
-            ResizeFilter::CatmullRom => 2.0,
+            ResizeFilter::CatmullRom | ResizeFilter::Mitchell | ResizeFilter::BSpline => 2.0,
             ResizeFilter::Lanczos3 => 3.0,
         }
     }
@@ -86,6 +96,11 @@ impl ResizeFilter {
                     0.0
                 }
             }
+            // Mitchell-Netravali reconstruction cubics reuse the already-tested
+            // general `(B, C)` kernel from `texture_filter`; the resize domain is
+            // an identity map (`fscale == 1`) so distance units already match.
+            ResizeFilter::Mitchell => mn_kernel(ax, 1.0 / 3.0, 1.0 / 3.0),
+            ResizeFilter::BSpline => mn_kernel(ax, 1.0, 0.0),
             ResizeFilter::Lanczos3 => {
                 if ax < 3.0 {
                     sinc(x) * sinc(x / 3.0)
@@ -101,7 +116,18 @@ impl ResizeFilter {
 mod tests {
     use super::*;
 
-    const ALL: [ResizeFilter; 4] = [
+    const ALL: [ResizeFilter; 6] = [
+        ResizeFilter::Box,
+        ResizeFilter::Triangle,
+        ResizeFilter::CatmullRom,
+        ResizeFilter::Mitchell,
+        ResizeFilter::BSpline,
+        ResizeFilter::Lanczos3,
+    ];
+
+    // Interpolating (and box) kernels equal 1 at the origin and 0 at every
+    // nonzero integer; the Mitchell/B-spline reconstruction cubics do not.
+    const INTERPOLATING: [ResizeFilter; 4] = [
         ResizeFilter::Box,
         ResizeFilter::Triangle,
         ResizeFilter::CatmullRom,
@@ -109,8 +135,8 @@ mod tests {
     ];
 
     #[test]
-    fn unit_gain_at_zero() {
-        for f in ALL {
+    fn unit_gain_at_zero_for_interpolating_kernels() {
+        for f in INTERPOLATING {
             assert!((f.eval(0.0) - 1.0).abs() < 1.0e-6, "{f:?}");
         }
     }
@@ -155,5 +181,59 @@ mod tests {
         let f = ResizeFilter::CatmullRom;
         assert!((f.eval(0.5) - 0.5625).abs() < 1.0e-6);
         assert!((f.eval(1.5) + 0.0625).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn catmull_rom_matches_mitchell_general_form() {
+        // The resize Keys-form Catmull-Rom (independent closed form here) must
+        // agree with the general (B, C) = (0, 1/2) Mitchell kernel reused from
+        // `texture_filter` -- two independently derived implementations.
+        let f = ResizeFilter::CatmullRom;
+        for i in -40..=40 {
+            let x = i as f32 * 0.0625;
+            assert!(
+                (f.eval(x) - mn_kernel(x.abs(), 0.0, 0.5)).abs() < 1.0e-6,
+                "x={x}"
+            );
+        }
+    }
+
+    #[test]
+    fn bspline_is_strictly_non_negative() {
+        // The cubic B-spline (B=1, C=0) has no negative lobe, so it never rings.
+        let f = ResizeFilter::BSpline;
+        for i in -40..=40 {
+            let x = i as f32 * 0.0625;
+            assert!(f.eval(x) >= -1.0e-7, "x={x} -> {}", f.eval(x));
+        }
+    }
+
+    #[test]
+    fn mitchell_has_sub_unit_central_lobe() {
+        // Reconstruction cubics are not interpolating: the central value is
+        // below 1 (Mitchell 16/18, B-spline 2/3), which is why the resampler
+        // normalises tap weights.
+        assert!((ResizeFilter::Mitchell.eval(0.0) - 16.0 / 18.0).abs() < 1.0e-6);
+        assert!((ResizeFilter::BSpline.eval(0.0) - 2.0 / 3.0).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn cubics_are_a_partition_of_unity() {
+        // Box/triangle/Catmull-Rom/Mitchell/B-spline all sum to 1 over the
+        // integer lattice for any shift (Lanczos only approximates this and is
+        // excluded). Sample off the half-integers so the box stays single-tap.
+        for f in [
+            ResizeFilter::Box,
+            ResizeFilter::Triangle,
+            ResizeFilter::CatmullRom,
+            ResizeFilter::Mitchell,
+            ResizeFilter::BSpline,
+        ] {
+            for i in 0..13 {
+                let t = i as f32 * 0.07 + 0.013;
+                let sum: f32 = (-3..=3).map(|k| f.eval(t - k as f32)).sum();
+                assert!((sum - 1.0).abs() < 1.0e-5, "{f:?} t={t} sum={sum}");
+            }
+        }
     }
 }
