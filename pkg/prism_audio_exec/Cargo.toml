@@ -1,0 +1,24 @@
+[package]
+name = "prism_audio_exec"
+version = "0.1.0"
+edition = "2024"
+description = "Compiled audio-graph execution planning for Prism's next-generation audio engine: deterministic topological ordering, longest-path wavefront levels, weakly-connected island partitioning, output-buffer liveness with linear-scan slot allocation and in-place aliasing, and plugin delay compensation (PDC). Pure integer graph algorithms, deterministic, allocation-light. Contains no Unreal Engine, Unity, Godot, Wwise, FMOD, Steam Audio, or Google Resonance Audio source or derived code; no AI/ML."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+serde = { version = "1", default-features = false, features = [
+  "derive",
+  "alloc",
+], optional = true }
+
+[dev-dependencies]
+prism_audio_exec = { path = ".", features = ["serialize"] }
+
+[features]
+default = ["std"]
+std = ["serde?/std"]
+serialize = ["dep:serde"]
+
+[lints]
+workspace = true

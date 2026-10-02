@@ -53,6 +53,8 @@ members = [
   "pkg/prism_audio_music",
   # Prism next-generation audio engine decoupled resampling + time/pitch scaling primitives (graded resamplers / WSOLA / phase vocoder).
   "pkg/prism_audio_resample",
+  # Prism next-generation audio engine compiled-graph execution planner (topo/levels/islands/liveness/PDC/parallel schedule).
+  "pkg/prism_audio_exec",
   # Prism next-generation audio engine Bevy ECS front-end (emitter/listener components -> prism_audio_rt command ring; telemetry resource).
   "pkg/prism_audio_bevy",
   # Prism Loom: next-generation declarative UI/scene notation.
