@@ -123,6 +123,7 @@ pub use narrowphase::{
     cpu_obb_halfspace_narrowphase, cpu_obb_narrowphase, cpu_obb_obb_manifold,
     cpu_obb_obb_narrowphase, cpu_obb_triangle_manifold, cpu_obb_triangle_narrowphase, cpu_sphere_heightfield_narrowphase, cpu_sphere_triangle_narrowphase, Capsule, CapsuleCapsulePair, CellRange,
     CapsuleObbPair, CapsulePlanePair, CapsuleTrianglePair, Contact, ContactManifold,
+    ConvexEdge, ConvexFace, ConvexHull,
     GpuCapsuleCapsuleManifoldNarrowphase, GpuCapsuleCapsuleNarrowphase,
     GpuCapsuleHalfspaceNarrowphase, GpuCapsuleNarrowphase, GpuCapsuleObbManifoldNarrowphase,
     GpuCapsuleHeightfieldManifoldNarrowphase, GpuCapsuleObbNarrowphase, GpuCapsuleTriangleManifoldNarrowphase, GpuCapsuleTriangleNarrowphase, GpuHalfspaceNarrowphase, GpuNarrowphase, GpuSphereHeightfieldNarrowphase,
