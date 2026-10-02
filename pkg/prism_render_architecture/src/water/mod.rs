@@ -76,6 +76,7 @@ pub mod spray_bridge;
 pub mod surface_fx;
 pub mod swe;
 pub mod synthesis;
+pub mod tile_stream;
 pub mod transition;
 pub mod underwater;
 pub mod waterline;
