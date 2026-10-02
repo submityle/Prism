@@ -431,6 +431,7 @@ pub fn decode_bc6h_mode14_signed(block: &[u8; 16]) -> [[f32; 3]; 16] {
 /// an error.
 pub fn decode_bc6h_unsigned(block: &[u8; 16]) -> Result<[[f32; 3]; 16], Bc6hError> {
     match bc6h_mode_bits(block) {
+        0b00 => Ok(decode_bc6h_mode1_unsigned(block)),
         0b00011 => Ok(decode_bc6h_mode11_unsigned(block)),
         0b00111 => Ok(decode_bc6h_mode12_unsigned(block)),
         0b01011 => Ok(decode_bc6h_mode13_unsigned(block)),
@@ -446,12 +447,211 @@ pub fn decode_bc6h_unsigned(block: &[u8; 16]) -> Result<[[f32; 3]; 16], Bc6hErro
 /// [`Bc6hError::UnsupportedMode`] rather than risk a wrong decode.
 pub fn decode_bc6h_signed(block: &[u8; 16]) -> Result<[[f32; 3]; 16], Bc6hError> {
     match bc6h_mode_bits(block) {
+        0b00 => Ok(decode_bc6h_mode1_signed(block)),
         0b00011 => Ok(decode_bc6h_mode11_signed(block)),
         0b00111 => Ok(decode_bc6h_mode12_signed(block)),
         0b01011 => Ok(decode_bc6h_mode13_signed(block)),
         0b01111 => Ok(decode_bc6h_mode14_signed(block)),
         m => Err(Bc6hError::UnsupportedMode(m)),
     }
+}
+
+// ---------------------------------------------------------------------------
+// BC6H two-subset (partitioned) modes.
+//
+// Ten of BC6H's fourteen modes carry two subsets selected by a 5-bit partition
+// index into the shared 2-subset partition table. Four RGB endpoints are
+// stored (subset 0 endpoints A/B, subset 1 endpoints A/B); in the transformed
+// modes endpoints B/A/B are per-channel two's-complement deltas off the single
+// base endpoint (subset 0 A), sign-extended by their channel delta width, added
+// to the base and wrapped to the base precision before unquantize. Mode 10 is
+// the one non-transformed two-subset mode (four raw 6-bit endpoints).
+//
+// Each mode scatters its ~82 header bits in a mode-specific order (the Khronos
+// / DirectXTex `ModeDescriptor`): a flat list of `(field, bit)` pairs in block
+// bit-stream order. The generic decoder below replays that descriptor to
+// reconstruct the fields, so adding a new mode is just adding its table + the
+// per-channel precisions. Every mode is proved bit-exact against the GPU
+// hardware oracle before being wired into the dispatcher.
+// ---------------------------------------------------------------------------
+
+use super::bptc_tables::{BPTC_ANCHORS_2, BPTC_PARTITIONS_2, WEIGHT3};
+
+/// Header-field identifiers for the BC6H two-subset mode descriptor. `W` is
+/// subset 0 endpoint A (the base in transformed modes), `X` subset 0 endpoint
+/// B, `Y` subset 1 endpoint A, `Z` subset 1 endpoint B; `D` is the partition
+/// index. `M` (mode bits) is implied by dispatch and ignored on decode.
+#[derive(Clone, Copy)]
+enum Bc6hField {
+    Rw,
+    Gw,
+    Bw,
+    Rx,
+    Gx,
+    Bx,
+    Ry,
+    Gy,
+    By,
+    Rz,
+    Gz,
+    Bz,
+    D,
+    M,
+}
+
+/// Static layout of one BC6H two-subset mode: whether endpoints B/A/B are
+/// stored as deltas off the base (`transformed`), the shared endpoint
+/// precision (`base_prec`), the per-channel delta widths (unused when not
+/// transformed), and the 82-entry header-bit descriptor in bit-stream order.
+struct TwoSubsetMode {
+    transformed: bool,
+    base_prec: u32,
+    delta_bits: [u32; 3],
+    descriptor: &'static [(Bc6hField, u8)],
+}
+
+/// BC6H mode 1 (`0b00`, 2-bit mode): two subsets, 10-bit base, 5/5/5 deltas,
+/// transformed. Descriptor transcribed from the Khronos / `DirectXTex`
+/// `ModeDescriptor` and proved bit-exact against the GPU oracle.
+#[rustfmt::skip]
+const BC6H_MODE1: TwoSubsetMode = {
+    use Bc6hField::{Bw, Bx, By, Bz, D, Gw, Gx, Gy, Gz, M, Rw, Rx, Ry, Rz};
+    TwoSubsetMode {
+        transformed: true,
+        base_prec: 10,
+        delta_bits: [5, 5, 5],
+        descriptor: &[
+            (M, 0), (M, 1), (Gy, 4), (By, 4), (Bz, 4), (Rw, 0), (Rw, 1), (Rw, 2), (Rw, 3), (Rw, 4),
+            (Rw, 5), (Rw, 6), (Rw, 7), (Rw, 8), (Rw, 9), (Gw, 0), (Gw, 1), (Gw, 2), (Gw, 3), (Gw, 4),
+            (Gw, 5), (Gw, 6), (Gw, 7), (Gw, 8), (Gw, 9), (Bw, 0), (Bw, 1), (Bw, 2), (Bw, 3), (Bw, 4),
+            (Bw, 5), (Bw, 6), (Bw, 7), (Bw, 8), (Bw, 9), (Rx, 0), (Rx, 1), (Rx, 2), (Rx, 3), (Rx, 4),
+            (Gz, 4), (Gy, 0), (Gy, 1), (Gy, 2), (Gy, 3), (Gx, 0), (Gx, 1), (Gx, 2), (Gx, 3), (Gx, 4),
+            (Bz, 0), (Gz, 0), (Gz, 1), (Gz, 2), (Gz, 3), (Bx, 0), (Bx, 1), (Bx, 2), (Bx, 3), (Bx, 4),
+            (Bz, 1), (By, 0), (By, 1), (By, 2), (By, 3), (Ry, 0), (Ry, 1), (Ry, 2), (Ry, 3), (Ry, 4),
+            (Bz, 2), (Rz, 0), (Rz, 1), (Rz, 2), (Rz, 3), (Rz, 4), (Bz, 3), (D, 0), (D, 1), (D, 2),
+            (D, 3), (D, 4),
+        ],
+    }
+};
+
+/// Decode one BC6H two-subset block via its `mode` descriptor into sixteen RGB
+/// `f32` texels. `signed` selects the `SF16` (two's-complement) vs `UF16`
+/// endpoint interpretation. The caller must have confirmed the block's mode
+/// matches `mode`.
+fn decode_bc6h_two_subset(block: &[u8; 16], mode: &TwoSubsetMode, signed: bool) -> [[f32; 3]; 16] {
+    let mut r = BitReader::new(block);
+
+    // Replay the descriptor: each stream bit sets one bit of one field. Mode
+    // bits (`M`) are implied by dispatch; their descriptor slots are skipped.
+    let mut f = [0u32; 13];
+    for &(field, bit) in mode.descriptor {
+        let b = r.read(1);
+        let i = field as usize;
+        if i < 13 {
+            f[i] |= b << bit;
+        }
+    }
+
+    let partition = f[Bc6hField::D as usize] as usize;
+    let base = [
+        f[Bc6hField::Rw as usize],
+        f[Bc6hField::Gw as usize],
+        f[Bc6hField::Bw as usize],
+    ];
+    // Endpoints B (subset 0), A, B (subset 1) in channel order.
+    let raw = [
+        [
+            f[Bc6hField::Rx as usize],
+            f[Bc6hField::Gx as usize],
+            f[Bc6hField::Bx as usize],
+        ],
+        [
+            f[Bc6hField::Ry as usize],
+            f[Bc6hField::Gy as usize],
+            f[Bc6hField::By as usize],
+        ],
+        [
+            f[Bc6hField::Rz as usize],
+            f[Bc6hField::Gz as usize],
+            f[Bc6hField::Bz as usize],
+        ],
+    ];
+
+    // Reconstruct the four endpoints as `base_prec`-bit integers. In the
+    // transformed modes the three non-base endpoints are deltas: sign-extend
+    // by the channel delta width, add to the base, wrap to the base precision.
+    let mask: u32 = (1u32 << mode.base_prec) - 1;
+    let mut ep = [[0u32; 3]; 4]; // [s0A, s0B, s1A, s1B]
+    ep[0] = base;
+    for (e, raw_e) in raw.iter().enumerate() {
+        for c in 0..3 {
+            ep[e + 1][c] = if mode.transformed {
+                let d = sign_extend(raw_e[c], mode.delta_bits[c]);
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "wrapping add is then masked to base_prec bits"
+                )]
+                let sum = (i64::from(base[c]) + i64::from(d)) as u32;
+                sum & mask
+            } else {
+                raw_e[c]
+            };
+        }
+    }
+
+    let anchor1 = BPTC_ANCHORS_2[partition];
+    let mut indices = [0u8; 16];
+    for (t, slot) in indices.iter_mut().enumerate() {
+        // Subset anchors (texel 0 for subset 0, `anchor1` for subset 1) carry
+        // a 2-bit index with an implicit high zero; all others are 3-bit.
+        let bits = if t == 0 || t == anchor1 { 2 } else { 3 };
+        *slot = r.read(bits) as u8;
+    }
+
+    let mut out = [[0.0f32; 3]; 16];
+    if signed {
+        let q: [[i32; 3]; 4] = core::array::from_fn(|e| {
+            core::array::from_fn(|c| {
+                unquantize_signed(sign_extend(ep[e][c], mode.base_prec), mode.base_prec)
+            })
+        });
+        for (t, texel) in out.iter_mut().enumerate() {
+            let subset = BPTC_PARTITIONS_2[partition][t] as usize;
+            let (a, b) = if subset == 0 { (0, 1) } else { (2, 3) };
+            let w = WEIGHT3[indices[t] as usize] as i32;
+            for c in 0..3 {
+                texel[c] = half_bits_to_f32(interp_finish_signed(q[a][c], q[b][c], w));
+            }
+        }
+    } else {
+        let q: [[u32; 3]; 4] = core::array::from_fn(|e| {
+            core::array::from_fn(|c| unquantize_unsigned(ep[e][c], mode.base_prec))
+        });
+        for (t, texel) in out.iter_mut().enumerate() {
+            let subset = BPTC_PARTITIONS_2[partition][t] as usize;
+            let (a, b) = if subset == 0 { (0, 1) } else { (2, 3) };
+            let w = WEIGHT3[indices[t] as usize];
+            for c in 0..3 {
+                texel[c] = half_bits_to_f32(interp_finish_unsigned(q[a][c], q[b][c], w));
+            }
+        }
+    }
+    out
+}
+
+/// Decode a **BC6H mode 1 (unsigned)** block (two subsets, 10-bit base, 5-bit
+/// deltas). See [`decode_bc6h_two_subset`].
+#[must_use]
+pub fn decode_bc6h_mode1_unsigned(block: &[u8; 16]) -> [[f32; 3]; 16] {
+    decode_bc6h_two_subset(block, &BC6H_MODE1, false)
+}
+
+/// Decode a **BC6H mode 1 (signed, `SF16`)** block (two subsets, 10-bit base,
+/// 5-bit deltas). See [`decode_bc6h_two_subset`].
+#[must_use]
+pub fn decode_bc6h_mode1_signed(block: &[u8; 16]) -> [[f32; 3]; 16] {
+    decode_bc6h_two_subset(block, &BC6H_MODE1, true)
 }
 
 #[cfg(test)]
@@ -608,20 +808,18 @@ mod tests {
 
     #[test]
     fn dispatch_rejects_unsupported_modes() {
-        // Mode-1 block (low two bits 00) is a two-subset mode: unsupported.
+        // Mode-1 block (low two bits 00) is now a supported two-subset mode;
+        // an all-zero block has zero base/deltas, so every texel decodes 0.
         let m1 = [0u8; 16];
         assert_eq!(bc6h_mode_bits(&m1), 0);
+        assert_eq!(decode_bc6h_unsigned(&m1), Ok([[0.0f32; 3]; 16]));
+        // Mode-3 block (5-bit 0b00010) is a two-subset partitioned mode that is
+        // not wired up yet, so it must still report the error rather than guess.
+        let mut m3 = [0u8; 16];
+        m3[0] = 0b0_0010;
+        assert_eq!(bc6h_mode_bits(&m3), 0b00010);
         assert_eq!(
-            decode_bc6h_unsigned(&m1),
-            Err(Bc6hError::UnsupportedMode(0))
-        );
-        // Mode-2 block (5-bit 0b00010) is a two-subset partitioned mode:
-        // still unsupported (single-subset modes 11-14 are all handled now).
-        let mut m2 = [0u8; 16];
-        m2[0] = 0b0_0010;
-        assert_eq!(bc6h_mode_bits(&m2), 0b00010);
-        assert_eq!(
-            decode_bc6h_unsigned(&m2),
+            decode_bc6h_unsigned(&m3),
             Err(Bc6hError::UnsupportedMode(0b00010))
         );
     }
