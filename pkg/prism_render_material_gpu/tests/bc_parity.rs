@@ -835,3 +835,72 @@ fn bc6h_single_subset_delta_signed_parity_against_gpu() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// ETC2 RGB8 extended-mode (T / H / Planar) GPU parity.
+// ---------------------------------------------------------------------------
+
+/// ETC2 is a bit-exact format: every CPU-decoded texel must equal the GPU
+/// hardware decode exactly (tolerance 0). This test forces the differential
+/// flag so random blocks fall into the three extended modes (`T`, `H`,
+/// `Planar`), classifies them with [`etc2_rgb8_mode`], and compares the
+/// pure-CPU [`decode_etc2_rgb8`] output against the Metal hardware oracle for
+/// at least 128 blocks per mode.
+#[test]
+fn etc2_extended_mode_parity() {
+    use prism_render_material::{decode_etc2_rgb8, etc2_rgb8_mode, Etc2Mode};
+    let Some(oracle) = BlockOracle::try_new() else {
+        eprintln!("no GPU adapter; skipping ETC2 parity");
+        return;
+    };
+    if !oracle
+        .features()
+        .contains(Features::TEXTURE_COMPRESSION_ETC2)
+    {
+        eprintln!("adapter lacks ETC2 support; skipping ETC2 parity");
+        return;
+    }
+    let mut rng = Rng(0x5EED_1234);
+    const TARGET: u32 = 128;
+    let (mut nt, mut nh, mut np) = (0u32, 0u32, 0u32);
+    let mut checked = 0u32;
+    for _ in 0..20_000_000u32 {
+        if nt >= TARGET && nh >= TARGET && np >= TARGET {
+            break;
+        }
+        let mut b = [0u8; 8];
+        for by in &mut b {
+            *by = rng.byte();
+        }
+        b[3] |= 0x02; // force the diff flag so we exercise the extended modes
+        let mode = etc2_rgb8_mode(&b);
+        let slot = match mode {
+            Etc2Mode::T => &mut nt,
+            Etc2Mode::H => &mut nh,
+            Etc2Mode::Planar => &mut np,
+            _ => continue,
+        };
+        if *slot >= TARGET {
+            continue;
+        }
+        *slot += 1;
+        let cpu = decode_etc2_rgb8(&b).expect("extended mode decodes");
+        let gpu = oracle.decode_unorm8(TextureFormat::Etc2Rgb8Unorm, &b);
+        for t in 0..16 {
+            assert_eq!(
+                cpu[t][..3],
+                gpu[t][..3],
+                "{mode:?} block={b:02x?} texel {t}: cpu={:?} gpu={:?}",
+                cpu[t],
+                gpu[t]
+            );
+            assert_eq!(cpu[t][3], 255, "{mode:?} alpha must be opaque");
+        }
+        checked += 1;
+    }
+    assert!(
+        nt >= TARGET && nh >= TARGET && np >= TARGET,
+        "insufficient coverage: T={nt} H={nh} Planar={np}"
+    );
+    eprintln!("ETC2 extended-mode parity: {checked} blocks (T={nt} H={nh} Planar={np})");
+}
