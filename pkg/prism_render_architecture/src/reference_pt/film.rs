@@ -13,6 +13,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::camera::PinholeCamera;
+use super::filter::PixelFilter;
 use super::halton::HaltonPixelSampler;
 use super::integrator::{PathIntegrator, Scene};
 use super::sampler::Rng;
@@ -90,6 +91,42 @@ pub fn render(
     samples_per_pixel: u32,
     seed: u64,
 ) -> Film {
+    render_filtered(
+        scene,
+        camera,
+        integrator,
+        width,
+        height,
+        samples_per_pixel,
+        seed,
+        PixelFilter::default(),
+    )
+}
+
+/// Renders exactly like [`render`] but with an explicit pixel reconstruction
+/// `filter`.
+///
+/// The filter importance-samples the sub-pixel position: the low-discrepancy
+/// jitter is warped through the filter's inverse `CDF` so averaging the sample
+/// radiance yields a filtered estimate. [`PixelFilter::Box`] reproduces the
+/// plain box average; [`PixelFilter::Tent`] (the [`render`] default) blends one
+/// pixel into each neighbour for smoother edges. The result stays deterministic
+/// and bit-identical for identical arguments.
+#[must_use]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the renderer needs the scene, camera, integrator, image size, sample budget, seed, and reconstruction filter"
+)]
+pub fn render_filtered(
+    scene: &Scene,
+    camera: &PinholeCamera,
+    integrator: &PathIntegrator,
+    width: u32,
+    height: u32,
+    samples_per_pixel: u32,
+    seed: u64,
+    filter: PixelFilter,
+) -> Film {
     let mut film = Film::new(width, height);
     if width == 0 || height == 0 || samples_per_pixel == 0 {
         return film;
@@ -106,7 +143,9 @@ pub fn render(
             let jitter_sampler = HaltonPixelSampler::new(seed, index as u64);
             let mut sum = Vec3::ZERO;
             for s in 0..samples_per_pixel {
-                let jitter = jitter_sampler.sample(u64::from(s));
+                // Warp the uniform jitter through the reconstruction filter so
+                // the averaged radiance is a filtered pixel estimate.
+                let jitter = filter.warp(jitter_sampler.sample(u64::from(s)));
                 // A finite aperture engages the thin-lens model (depth of
                 // field); a zero aperture keeps the cheaper pinhole path.
                 let ray = if camera.aperture_radius() > 0.0 {

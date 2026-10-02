@@ -60,6 +60,9 @@
 //!   physically based thin-lens aperture for depth-of-field blur.
 //! - [`film`] — the [`film::Film`] framebuffer and the [`film::render`]
 //!   driver that averages jittered primary rays into a reference image.
+//! - [`filter`] — the pixel reconstruction filter ([`filter::PixelFilter`])
+//!   that importance-samples a box or tent kernel through its inverse `CDF`,
+//!   smoothing primary-visibility edges without breaking per-pixel sampling.
 //! - [`compare`] — image-difference metrics ([`compare::ErrorMetrics`])
 //!   for validating a candidate render against this reference.
 //!
@@ -86,6 +89,7 @@ pub mod distribution;
 pub mod environment;
 pub mod estimator;
 pub mod film;
+pub mod filter;
 pub mod fresnel_blend;
 pub mod ggx_energy;
 pub mod halton;
