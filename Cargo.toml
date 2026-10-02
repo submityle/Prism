@@ -55,6 +55,8 @@ members = [
   "pkg/prism_audio_resample",
   # Prism next-generation audio engine compiled-graph execution planner (topo/levels/islands/liveness/PDC/parallel schedule).
   "pkg/prism_audio_exec",
+  # Prism next-generation audio engine procedural content graph (Patch) and full modulation system.
+  "pkg/prism_audio_authoring",
   # Prism next-generation audio engine performance governor and psychoacoustic virtualization.
   "pkg/prism_audio_governor",
   # Prism next-generation audio engine Bevy ECS front-end (emitter/listener components -> prism_audio_rt command ring; telemetry resource).
