@@ -14,9 +14,9 @@ use alloc::vec::Vec;
 
 use super::camera::PinholeCamera;
 use super::filter::PixelFilter;
-use super::halton::HaltonPixelSampler;
 use super::integrator::{PathIntegrator, Scene};
 use super::sampler::Rng;
+use super::subpixel::SubpixelSampler;
 use super::Vec3;
 
 /// A row-major framebuffer of linear per-pixel radiance.
@@ -152,6 +152,43 @@ pub fn render_filtered(
     seed: u64,
     filter: PixelFilter,
 ) -> Film {
+    render_sampled(
+        scene,
+        camera,
+        integrator,
+        width,
+        height,
+        samples_per_pixel,
+        seed,
+        filter,
+        SubpixelSampler::Halton,
+    )
+}
+
+/// Renders like [`render_filtered`] but with an explicit choice of sub-pixel
+/// jitter sequence via `sampler`.
+///
+/// [`SubpixelSampler::Halton`] reproduces [`render_filtered`] bit-for-bit;
+/// [`SubpixelSampler::OwenSobol`] swaps in the Owen-scrambled Sobol (0, 2)-net,
+/// which lowers primary-visibility integration error at higher sample counts
+/// while decorrelating neighbouring pixels. The result stays deterministic and
+/// bit-identical for identical arguments.
+#[must_use]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the renderer needs the scene, camera, integrator, image size, sample budget, seed, reconstruction filter, and sub-pixel sampler choice"
+)]
+pub fn render_sampled(
+    scene: &Scene,
+    camera: &PinholeCamera,
+    integrator: &PathIntegrator,
+    width: u32,
+    height: u32,
+    samples_per_pixel: u32,
+    seed: u64,
+    filter: PixelFilter,
+    sampler: SubpixelSampler,
+) -> Film {
     let mut film = Film::new(width, height);
     if width == 0 || height == 0 || samples_per_pixel == 0 {
         return film;
@@ -165,7 +202,7 @@ pub fn render_filtered(
             let mut rng = Rng::with_stream(seed, index as u64 + 1);
             // Low-discrepancy sub-pixel jitter (decorrelated per pixel) resolves
             // primary-visibility edges far faster than independent jitter would.
-            let jitter_sampler = HaltonPixelSampler::new(seed, index as u64);
+            let jitter_sampler = sampler.build(seed, index as u64);
             let mut sum = Vec3::ZERO;
             for s in 0..samples_per_pixel {
                 // Warp the uniform jitter through the reconstruction filter so

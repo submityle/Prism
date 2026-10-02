@@ -106,6 +106,8 @@ pub mod rough_dielectric;
 pub mod rough_dielectric_aniso;
 pub mod rough_dielectric_aniso_ms;
 pub mod sampler;
+pub mod sobol;
+pub mod subpixel;
 
 /// Mathematical constant pi, reused from `core` so no literal drifts.
 pub const PI: f32 = core::f32::consts::PI;

@@ -29,9 +29,9 @@ use super::camera::PinholeCamera;
 use super::film::Film;
 use super::filter::PixelFilter;
 use super::firefly::FireflyClamp;
-use super::halton::HaltonPixelSampler;
 use super::integrator::{PathIntegrator, Scene};
 use super::sampler::Rng;
+use super::subpixel::SubpixelSampler;
 use super::Vec3;
 
 /// Luma weight for the red channel (standard luma coefficients, summing to one
@@ -171,6 +171,11 @@ pub struct AdaptiveConfig {
     /// opt-in luminance clamp trades a small bounded bias for far fewer
     /// isolated bright outlier pixels.
     pub firefly: FireflyClamp,
+    /// Low-discrepancy sub-pixel sampler used for anti-aliasing jitter. The
+    /// default [`SubpixelSampler::Halton`] keeps results bit-identical to the
+    /// historical renderer; [`SubpixelSampler::OwenSobol`] trades that for the
+    /// lower-variance stratification of an Owen-scrambled `(0,2)`-net.
+    pub sampler: SubpixelSampler,
 }
 
 impl Default for AdaptiveConfig {
@@ -183,6 +188,7 @@ impl Default for AdaptiveConfig {
             relative_tolerance: 0.05,
             batch_size: 16,
             firefly: FireflyClamp::Off,
+            sampler: SubpixelSampler::Halton,
         }
     }
 }
@@ -244,7 +250,7 @@ pub fn render_adaptive(
             // deterministic and order-independent, matching the fixed-budget
             // renderer so a pixel's samples are identical for a given index.
             let mut rng = Rng::with_stream(seed, index as u64 + 1);
-            let jitter_sampler = HaltonPixelSampler::new(seed, index as u64);
+            let jitter_sampler = config.sampler.build(seed, index as u64);
             let mut estimator = VarianceEstimator::new();
             let mut s: u32 = 0;
             while s < config.max_samples {
@@ -416,6 +422,7 @@ mod tests {
             relative_tolerance: 0.05,
             batch_size: 8,
             firefly: FireflyClamp::Off,
+            sampler: SubpixelSampler::Halton,
         };
         let a = render_adaptive(
             &scene,
@@ -459,6 +466,7 @@ mod tests {
             relative_tolerance: 0.002,
             batch_size: 8,
             firefly: FireflyClamp::Off,
+            sampler: SubpixelSampler::Halton,
         };
         let render = render_adaptive(
             &scene,
@@ -500,6 +508,7 @@ mod tests {
             relative_tolerance: 0.05,
             batch_size: 16,
             firefly: FireflyClamp::Off,
+            sampler: SubpixelSampler::Halton,
         };
         let render = render_adaptive(
             &scene,
@@ -544,6 +553,7 @@ mod tests {
             relative_tolerance: 0.01,
             batch_size: 16,
             firefly: FireflyClamp::Off,
+            sampler: SubpixelSampler::Halton,
         };
         let unclamped = render_adaptive(
             &scene,
@@ -594,6 +604,101 @@ mod tests {
         assert!(
             max_clamped < max_unclamped,
             "the clamp must pull the brightest pixel below the unclamped peak {max_unclamped}, got {max_clamped}"
+        );
+    }
+
+    #[test]
+    fn owen_sobol_sampler_flows_through_adaptive_render() {
+        // The Owen-scrambled Sobol sampler must drive the adaptive render path
+        // end to end: a white-furnace image still converges to unit radiance,
+        // the render stays deterministic, and the result differs bit-for-bit
+        // from the Halton default, proving the sampler selection is not a
+        // vacuous no-op silently falling back to Halton.
+        let scene = white_furnace_scene();
+        let camera = overhead_camera();
+        let integrator = PathIntegrator::new(6, 4);
+        let sobol_cfg = AdaptiveConfig {
+            min_samples: 64,
+            max_samples: 256,
+            relative_tolerance: 0.02,
+            batch_size: 32,
+            firefly: FireflyClamp::Off,
+            sampler: SubpixelSampler::OwenSobol,
+        };
+        let sobol = render_adaptive(
+            &scene,
+            &camera,
+            &integrator,
+            4,
+            4,
+            sobol_cfg,
+            7,
+            PixelFilter::Box,
+        );
+        let sobol_again = render_adaptive(
+            &scene,
+            &camera,
+            &integrator,
+            4,
+            4,
+            sobol_cfg,
+            7,
+            PixelFilter::Box,
+        );
+        assert_eq!(
+            sobol.film.pixels(),
+            sobol_again.film.pixels(),
+            "the Owen-Sobol render must be bit-identical for identical arguments"
+        );
+        let mut sum = 0.0f64;
+        for pixel in sobol.film.pixels() {
+            sum += f64::from(luminance(*pixel));
+        }
+        let mean = sum / (sobol.film.pixels().len() as f64);
+        assert!(
+            (mean - 1.0).abs() < 3.0e-2,
+            "Owen-Sobol white-furnace mean luminance {mean} must stay near unit"
+        );
+        // A white furnace is spatially uniform, so sub-pixel jitter cannot
+        // change the converged pixels; prove the sampler selection is live on a
+        // scene with intra-pixel structure, where the jitter sequence matters.
+        let edge_scene = floor_with_overhead_emitter();
+        let edge_cfg = AdaptiveConfig {
+            min_samples: 64,
+            max_samples: 128,
+            relative_tolerance: 0.01,
+            batch_size: 32,
+            firefly: FireflyClamp::Off,
+            sampler: SubpixelSampler::OwenSobol,
+        };
+        let edge_sobol = render_adaptive(
+            &edge_scene,
+            &camera,
+            &integrator,
+            8,
+            8,
+            edge_cfg,
+            7,
+            PixelFilter::Tent,
+        );
+        let edge_halton_cfg = AdaptiveConfig {
+            sampler: SubpixelSampler::Halton,
+            ..edge_cfg
+        };
+        let edge_halton = render_adaptive(
+            &edge_scene,
+            &camera,
+            &integrator,
+            8,
+            8,
+            edge_halton_cfg,
+            7,
+            PixelFilter::Tent,
+        );
+        assert_ne!(
+            edge_sobol.film.pixels(),
+            edge_halton.film.pixels(),
+            "selecting Owen-Sobol must change the jitter sequence versus Halton"
         );
     }
 }
