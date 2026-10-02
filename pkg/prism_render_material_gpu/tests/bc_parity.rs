@@ -11,8 +11,8 @@
 //! without a usable adapter the oracle returns `None` and the test skips.
 
 use prism_render_material::{
-    decode_bc1, decode_bc3, decode_bc6h_unsigned, decode_bc7, encode_bc1, encode_bc3,
-    encode_bc6h_mode11_unsigned, encode_bc7_mode4, encode_bc7_mode5, encode_bc7_mode6,
+    decode_bc1, decode_bc3, decode_bc6h_unsigned, decode_bc7, decode_bc7_mode1, encode_bc1,
+    encode_bc3, encode_bc6h_mode11_unsigned, encode_bc7_mode4, encode_bc7_mode5, encode_bc7_mode6,
 };
 use prism_render_material_gpu::BlockOracle;
 use wgpu::{Features, TextureFormat};
@@ -141,6 +141,134 @@ fn bc_parity_against_gpu_hardware_decode() {
                     "BC6H CPU {a} vs GPU {b} exceeds tol {tol} for block {block:?}"
                 );
             }
+        }
+    }
+}
+
+/// BPTC 2-subset anchor table (Khronos Data Format Spec). Mirrors the private
+/// `BPTC_ANCHORS_2` in `prism_render_material`; the oracle test owns its own
+/// copy so it can assemble spec-correct mode-1 blocks (there is no mode-1
+/// encoder). `ANCHORS_2[p]` is the texel holding subset 1's fixed-high-bit-zero
+/// index; subset 0's anchor is always texel 0.
+#[rustfmt::skip]
+const ANCHORS_2: [usize; 64] = [
+    15, 15, 15, 15, 15, 15, 15, 15,
+    15, 15, 15, 15, 15, 15, 15, 15,
+    15,  2,  8,  2,  2,  8,  8, 15,
+     2,  8,  2,  2,  8,  8,  2,  2,
+    15, 15,  6,  8,  2,  8, 15, 15,
+     2,  8,  2,  2,  2, 15, 15,  6,
+     6,  2,  6,  8, 15, 15,  2,  2,
+    15, 15, 15, 15, 15,  2,  2, 15,
+];
+
+/// LSB-first bit writer for assembling 128-bit BC7 blocks in tests.
+struct BlockWriter {
+    bytes: [u8; 16],
+    pos: usize,
+}
+
+impl BlockWriter {
+    fn new() -> Self {
+        Self {
+            bytes: [0u8; 16],
+            pos: 0,
+        }
+    }
+    fn write(&mut self, value: u32, n: u32) {
+        for i in 0..n {
+            if (value >> i) & 1 == 1 {
+                self.bytes[self.pos / 8] |= 1 << (self.pos % 8);
+            }
+            self.pos += 1;
+        }
+    }
+}
+
+/// Assemble a two-subset RGB BC7 mode-1 block for `partition`, with four 6-bit
+/// RGB endpoints, two shared P-bits, and sixteen indices (anchor texels carry a
+/// 2-bit index, all others 3-bit) laid out exactly as the Khronos spec and the
+/// CPU decoder expect.
+fn make_mode1_block(
+    partition: usize,
+    rgb: [[u32; 3]; 4],
+    pbit: [u32; 2],
+    idx: [u8; 16],
+) -> [u8; 16] {
+    let mut w = BlockWriter::new();
+    w.write(0b10, 2); // mode-1 unary marker: a 0 then a 1.
+    w.write(partition as u32, 6);
+    for e in rgb {
+        w.write(e[0], 6);
+    }
+    for e in rgb {
+        w.write(e[1], 6);
+    }
+    for e in rgb {
+        w.write(e[2], 6);
+    }
+    w.write(pbit[0], 1);
+    w.write(pbit[1], 1);
+    let anchor1 = ANCHORS_2[partition];
+    for (t, &i) in idx.iter().enumerate() {
+        let n = if t == 0 || t == anchor1 { 2 } else { 3 };
+        w.write(u32::from(i), n);
+    }
+    assert_eq!(w.pos, 128, "mode-1 block must be exactly 128 bits");
+    w.bytes
+}
+
+/// BC7 mode 1 (two-subset RGB) parity against GPU hardware across **all 64
+/// partitions**. There is no mode-1 encoder, so the test synthesises blocks
+/// directly; a wrong partition row in the CPU decoder would surface here as a
+/// per-texel subset mismatch versus the hardware unit.
+#[test]
+fn bc7_mode1_parity_against_gpu_hardware_decode() {
+    let Some(oracle) = BlockOracle::try_new() else {
+        #[expect(
+            clippy::print_stderr,
+            reason = "test diagnostic: GPU adapter unreachable in sandbox, graceful skip"
+        )]
+        {
+            eprintln!("no GPU adapter with BC support reachable; skipping mode-1 parity");
+        }
+        return;
+    };
+    assert!(oracle.features().contains(Features::TEXTURE_COMPRESSION_BC));
+
+    let mut rng = Rng(0x0BAD_F00D);
+    for (partition, &anchor1) in ANCHORS_2.iter().enumerate() {
+        // A couple of random endpoint/index draws per partition widens coverage
+        // of the subset -> endpoint mapping and the interpolation ramp.
+        for _ in 0..3 {
+            let mut rgb = [[0u32; 3]; 4];
+            for e in &mut rgb {
+                e[0] = rng.next_u32() & 0x3f;
+                e[1] = rng.next_u32() & 0x3f;
+                e[2] = rng.next_u32() & 0x3f;
+            }
+            let pbit = [rng.next_u32() & 1, rng.next_u32() & 1];
+            let mut idx = [0u8; 16];
+            for (t, slot) in idx.iter_mut().enumerate() {
+                *slot = if t == 0 || t == anchor1 {
+                    (rng.next_u32() & 0x3) as u8 // 2-bit anchor index
+                } else {
+                    (rng.next_u32() & 0x7) as u8 // 3-bit index
+                };
+            }
+            let block = make_mode1_block(partition, rgb, pbit, idx);
+            let cpu = decode_bc7_mode1(&block);
+            let via_dispatch = decode_bc7(&block).expect("mode-1 block decodes");
+            assert_eq!(
+                cpu, via_dispatch,
+                "dispatch must match direct mode-1 decode"
+            );
+            let gpu = oracle.decode_unorm8(TextureFormat::Bc7RgbaUnorm, &block);
+            let d = max_abs_u8(&cpu, &gpu);
+            assert!(
+                d <= 1,
+                "BC7 mode-1 CPU vs GPU diff {d} > 1 LSB, partition {partition}\n cpu={cpu:?}\n gpu={gpu:?}\n block={block:?}"
+            );
         }
     }
 }
