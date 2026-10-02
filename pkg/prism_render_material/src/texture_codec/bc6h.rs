@@ -176,10 +176,11 @@ pub fn bc6h_mode_bits(block: &[u8; 16]) -> u8 {
 /// not yet supported by this decoder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Bc6hError {
-    /// A valid but unsupported mode. Only the single-subset, transform-free
-    /// mode 11 (`0b00011`) is decoded today for both the signed and unsigned
-    /// variants; the delta-transform single-subset modes (12-14) and the
-    /// partitioned modes are follow-ups.
+    /// A valid but unsupported mode. All four single-subset modes are decoded
+    /// for both the signed and unsigned variants: the transform-free mode 11
+    /// (`0b00011`) and the delta-transform modes 12/13/14
+    /// (`0b00111`/`0b01011`/`0b01111`). The two-subset partitioned modes are a
+    /// follow-up and still report this error.
     UnsupportedMode(u8),
 }
 
@@ -279,29 +280,176 @@ pub fn decode_bc6h_mode11_signed(block: &[u8; 16]) -> [[f32; 3]; 16] {
     out
 }
 
+/// Decode a single-subset **delta-transform** `BC6H` block (modes 12/13/14).
+///
+/// The three single-subset transformed modes share one layout: `mode(5)`, the
+/// base endpoint's low 10 bits inline (`rw gw bw`), then per channel the
+/// `delta_bits`-wide two's-complement delta immediately followed by that
+/// channel's relocated high base bits (`bit 10 .. base_prec-1`), giving the
+/// stream `rx rw_hi gx gw_hi bx bw_hi` (each `*_hi` most-significant-bit first),
+/// then the shared index block (anchor
+/// texel 0 is 3 bits with an implicit high `0`, the other fifteen are 4 bits).
+/// The inverse transform reconstructs endpoint 1 as
+/// `(base + sign_extend(delta)) & ((1 << base_prec) - 1)`; both endpoints are
+/// then unquantized at `base_prec`. `signed` selects the `SF16`/`UF16` rule.
+///
+/// | mode | bits    | `base_prec` | `delta_bits` |
+/// |------|---------|-------------|--------------|
+/// | 12   | `00111` | 11          | 9            |
+/// | 13   | `01011` | 12          | 8            |
+/// | 14   | `01111` | 16          | 4            |
+fn decode_bc6h_single_subset_delta(
+    block: &[u8; 16],
+    base_prec: u32,
+    delta_bits: u32,
+    signed: bool,
+) -> [[f32; 3]; 16] {
+    let mut r = BitReader::new(block);
+    let _mode = r.read(5);
+
+    // BC6H packs the base endpoint's low 10 bits inline (`rw gw bw`), then
+    // interleaves, per channel, the delta field followed by that channel's
+    // relocated high base bits (`bit 10 .. base_prec-1`, ascending): the stream
+    // is `rx rw_hi gx gw_hi bx bw_hi` (Khronos/DirectXTex one-region layout).
+    let hi_bits = base_prec - 10;
+    let lo = [r.read(10), r.read(10), r.read(10)];
+    let mut delta = [0u32; 3];
+    let mut base = [0u32; 3];
+    for c in 0..3 {
+        delta[c] = r.read(delta_bits);
+        // High base bits are packed most-significant-first (bit base_prec-1
+        // down to bit 10), immediately after this channel's delta.
+        let mut hi = 0u32;
+        for k in (0..hi_bits).rev() {
+            hi |= r.read(1) << k;
+        }
+        base[c] = lo[c] | (hi << 10);
+    }
+
+    let mut indices = [0u8; 16];
+    indices[0] = r.read(3) as u8; // anchor: implicit high bit 0.
+    for idx in indices.iter_mut().skip(1) {
+        *idx = r.read(4) as u8;
+    }
+
+    // Inverse transform: endpoint 1 = (base + signed delta) wrapped to the base
+    // precision. `base_prec` is at most 16 here, so a 32-bit mask is exact.
+    let mask: u32 = if base_prec >= 32 {
+        u32::MAX
+    } else {
+        (1u32 << base_prec) - 1
+    };
+    let mut e1_bits = [0u32; 3];
+    for c in 0..3 {
+        let d = sign_extend(delta[c], delta_bits);
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "wrapping add is then masked to base_prec bits"
+        )]
+        let sum = (i64::from(base[c]) + i64::from(d)) as u32;
+        e1_bits[c] = sum & mask;
+    }
+
+    let mut out = [[0.0f32; 3]; 16];
+    if signed {
+        let e0: [i32; 3] =
+            core::array::from_fn(|c| unquantize_signed(sign_extend(base[c], base_prec), base_prec));
+        let e1: [i32; 3] = core::array::from_fn(|c| {
+            unquantize_signed(sign_extend(e1_bits[c], base_prec), base_prec)
+        });
+        for (t, texel) in out.iter_mut().enumerate() {
+            let w = WEIGHT4[indices[t] as usize] as i32;
+            for c in 0..3 {
+                texel[c] = half_bits_to_f32(interp_finish_signed(e0[c], e1[c], w));
+            }
+        }
+    } else {
+        let e0: [u32; 3] = core::array::from_fn(|c| unquantize_unsigned(base[c], base_prec));
+        let e1: [u32; 3] = core::array::from_fn(|c| unquantize_unsigned(e1_bits[c], base_prec));
+        for (t, texel) in out.iter_mut().enumerate() {
+            let w = WEIGHT4[indices[t] as usize];
+            for c in 0..3 {
+                texel[c] = half_bits_to_f32(interp_finish_unsigned(e0[c], e1[c], w));
+            }
+        }
+    }
+    out
+}
+
+/// Decode a **BC6H mode 12 (unsigned)** block (one subset, 11-bit base + 9-bit
+/// delta). See [`decode_bc6h_single_subset_delta`].
+#[must_use]
+pub fn decode_bc6h_mode12_unsigned(block: &[u8; 16]) -> [[f32; 3]; 16] {
+    decode_bc6h_single_subset_delta(block, 11, 9, false)
+}
+
+/// Decode a **BC6H mode 12 (signed, `SF16`)** block (one subset, 11-bit base +
+/// 9-bit delta). See [`decode_bc6h_single_subset_delta`].
+#[must_use]
+pub fn decode_bc6h_mode12_signed(block: &[u8; 16]) -> [[f32; 3]; 16] {
+    decode_bc6h_single_subset_delta(block, 11, 9, true)
+}
+
+/// Decode a **BC6H mode 13 (unsigned)** block (one subset, 12-bit base + 8-bit
+/// delta). See [`decode_bc6h_single_subset_delta`].
+#[must_use]
+pub fn decode_bc6h_mode13_unsigned(block: &[u8; 16]) -> [[f32; 3]; 16] {
+    decode_bc6h_single_subset_delta(block, 12, 8, false)
+}
+
+/// Decode a **BC6H mode 13 (signed, `SF16`)** block (one subset, 12-bit base +
+/// 8-bit delta). See [`decode_bc6h_single_subset_delta`].
+#[must_use]
+pub fn decode_bc6h_mode13_signed(block: &[u8; 16]) -> [[f32; 3]; 16] {
+    decode_bc6h_single_subset_delta(block, 12, 8, true)
+}
+
+/// Decode a **BC6H mode 14 (unsigned)** block (one subset, 16-bit base + 4-bit
+/// delta). See [`decode_bc6h_single_subset_delta`].
+#[must_use]
+pub fn decode_bc6h_mode14_unsigned(block: &[u8; 16]) -> [[f32; 3]; 16] {
+    decode_bc6h_single_subset_delta(block, 16, 4, false)
+}
+
+/// Decode a **BC6H mode 14 (signed, `SF16`)** block (one subset, 16-bit base +
+/// 4-bit delta). See [`decode_bc6h_single_subset_delta`].
+#[must_use]
+pub fn decode_bc6h_mode14_signed(block: &[u8; 16]) -> [[f32; 3]; 16] {
+    decode_bc6h_single_subset_delta(block, 16, 4, true)
+}
+
 /// Decode an unsigned `BC6H` block, dispatching on its mode.
 ///
-/// Only the single-subset, transform-free mode 11
-/// ([`decode_bc6h_mode11_unsigned`]) is supported today. The delta-transform
-/// single-subset modes (12-14) and the partitioned modes (1-10) return
-/// [`Bc6hError::UnsupportedMode`] rather than a wrong decode -- they need the
-/// validated Khronos endpoint-transform and partition/anchor tables (tracked as
-/// a follow-up), and silently mis-decoding them would be worse than an error.
+/// All four single-subset modes are supported: the transform-free mode 11
+/// ([`decode_bc6h_mode11_unsigned`]) and the delta-transform modes 12/13/14
+/// ([`decode_bc6h_mode12_unsigned`]/[`decode_bc6h_mode13_unsigned`]/
+/// [`decode_bc6h_mode14_unsigned`]). The two-subset partitioned modes (0-10)
+/// return [`Bc6hError::UnsupportedMode`] rather than a wrong decode -- they need
+/// the validated Khronos partition/anchor and per-mode scrambled-bit tables
+/// (tracked as a follow-up), and silently mis-decoding them would be worse than
+/// an error.
 pub fn decode_bc6h_unsigned(block: &[u8; 16]) -> Result<[[f32; 3]; 16], Bc6hError> {
     match bc6h_mode_bits(block) {
         0b00011 => Ok(decode_bc6h_mode11_unsigned(block)),
+        0b00111 => Ok(decode_bc6h_mode12_unsigned(block)),
+        0b01011 => Ok(decode_bc6h_mode13_unsigned(block)),
+        0b01111 => Ok(decode_bc6h_mode14_unsigned(block)),
         m => Err(Bc6hError::UnsupportedMode(m)),
     }
 }
 
 /// Decode a **signed** (`SF16`) `BC6H` block, dispatching on its mode.
 ///
-/// Only the single-subset, transform-free mode 11
-/// ([`decode_bc6h_mode11_signed`]) is supported today; every other mode returns
+/// All four single-subset modes are supported (mode 11 transform-free plus the
+/// delta-transform modes 12/13/14); every two-subset partitioned mode returns
 /// [`Bc6hError::UnsupportedMode`] rather than risk a wrong decode.
 pub fn decode_bc6h_signed(block: &[u8; 16]) -> Result<[[f32; 3]; 16], Bc6hError> {
     match bc6h_mode_bits(block) {
         0b00011 => Ok(decode_bc6h_mode11_signed(block)),
+        0b00111 => Ok(decode_bc6h_mode12_signed(block)),
+        0b01011 => Ok(decode_bc6h_mode13_signed(block)),
+        0b01111 => Ok(decode_bc6h_mode14_signed(block)),
         m => Err(Bc6hError::UnsupportedMode(m)),
     }
 }
@@ -350,6 +498,41 @@ mod tests {
             w.write(u32::from(i), 4);
         }
         assert_eq!(w.pos, 128, "mode-11 fields must fill the block exactly");
+        w.bytes
+    }
+
+    /// Assemble a single-subset delta block (modes 12/13/14): `mode_bits` is
+    /// the 5-bit mode field, `base` the three base-precision endpoint
+    /// components, `delta` the three delta-precision fields, `idx` the sixteen
+    /// indices (index 0 must be `<= 7`).
+    fn make_block_delta(
+        mode_bits: u32,
+        base_prec: u32,
+        delta_bits: u32,
+        base: [u32; 3],
+        delta: [u32; 3],
+        idx: [u8; 16],
+    ) -> [u8; 16] {
+        let mut w = BitWriter::new();
+        let hi_bits = base_prec - 10;
+        w.write(mode_bits, 5);
+        // Low 10 base bits inline, then per channel: delta then relocated high
+        // base bits (matches `decode_bc6h_single_subset_delta`).
+        w.write(base[0] & 0x3FF, 10);
+        w.write(base[1] & 0x3FF, 10);
+        w.write(base[2] & 0x3FF, 10);
+        for c in 0..3 {
+            w.write(delta[c], delta_bits);
+            // High base bits most-significant-first.
+            for k in (0..hi_bits).rev() {
+                w.write((base[c] >> (10 + k)) & 1, 1);
+            }
+        }
+        w.write(u32::from(idx[0]), 3);
+        for &i in idx.iter().skip(1) {
+            w.write(u32::from(i), 4);
+        }
+        assert_eq!(w.pos, 128, "delta-mode fields must fill the block exactly");
         w.bytes
     }
 
@@ -432,13 +615,14 @@ mod tests {
             decode_bc6h_unsigned(&m1),
             Err(Bc6hError::UnsupportedMode(0))
         );
-        // Mode-12 block (5-bit 0b00111) is single-subset but delta: unsupported.
-        let mut m12 = [0u8; 16];
-        m12[0] = 0b0_0111;
-        assert_eq!(bc6h_mode_bits(&m12), 0b00111);
+        // Mode-2 block (5-bit 0b00010) is a two-subset partitioned mode:
+        // still unsupported (single-subset modes 11-14 are all handled now).
+        let mut m2 = [0u8; 16];
+        m2[0] = 0b0_0010;
+        assert_eq!(bc6h_mode_bits(&m2), 0b00010);
         assert_eq!(
-            decode_bc6h_unsigned(&m12),
-            Err(Bc6hError::UnsupportedMode(0b00111))
+            decode_bc6h_unsigned(&m2),
+            Err(Bc6hError::UnsupportedMode(0b00010))
         );
     }
 
@@ -493,5 +677,114 @@ mod tests {
         let si = decode_bc6h_mode11_signed(&block);
         assert!(u[1][0] > 0.0, "unsigned reads 0x200 as positive");
         assert!(si[1][0] < 0.0, "signed reads 0x200 as negative");
+    }
+
+    #[test]
+    fn delta_modes_are_detected_and_dispatch_ok() {
+        for &(bits, bp, db) in &[
+            (0b00111u32, 11u32, 9u32),
+            (0b01011, 12, 8),
+            (0b01111, 16, 4),
+        ] {
+            let block = make_block_delta(bits, bp, db, [0; 3], [0; 3], [0u8; 16]);
+            assert_eq!(u32::from(bc6h_mode_bits(&block)), bits);
+            assert!(decode_bc6h_unsigned(&block).is_ok());
+            assert!(decode_bc6h_signed(&block).is_ok());
+        }
+    }
+
+    #[test]
+    fn delta_zero_base_zero_delta_decodes_to_zero() {
+        // Base 0 + delta 0 -> both endpoints 0 -> every texel is 0 regardless
+        // of index, for every single-subset delta mode, both signednesses.
+        for &(bits, bp, db) in &[
+            (0b00111u32, 11u32, 9u32),
+            (0b01011, 12, 8),
+            (0b01111, 16, 4),
+        ] {
+            let mut idx = [0u8; 16];
+            for (t, slot) in idx.iter_mut().enumerate() {
+                *slot = (t % 16).min(15) as u8;
+            }
+            idx[0] = idx[0].min(7);
+            let block = make_block_delta(bits, bp, db, [0; 3], [0; 3], idx);
+            let u = decode_bc6h_unsigned(&block).unwrap();
+            assert!(
+                u.iter().all(|p| p == &[0.0, 0.0, 0.0]),
+                "unsigned {bits:#07b}"
+            );
+            let si = decode_bc6h_signed(&block).unwrap();
+            assert!(
+                si.iter().all(|p| p == &[0.0, 0.0, 0.0]),
+                "signed {bits:#07b}"
+            );
+        }
+    }
+
+    #[test]
+    fn delta_positive_delta_raises_endpoint1_monotonically() {
+        // Unsigned mode 12: base small, positive delta -> endpoint 1 brighter
+        // than endpoint 0, so an index ramp is non-decreasing on R.
+        let mut idx = [0u8; 16];
+        for (t, slot) in idx.iter_mut().enumerate() {
+            *slot = t.min(15) as u8;
+        }
+        idx[0] = idx[0].min(7);
+        // base R = 100 (of 2^11), delta R = +200 -> endpoint1 R = 300.
+        let block = make_block_delta(0b00111, 11, 9, [100, 0, 0], [200, 0, 0], idx);
+        let out = decode_bc6h_mode12_unsigned(&block);
+        for t in 1..16 {
+            assert!(out[t][0] >= out[t - 1][0], "R must be monotone at {t}");
+        }
+        assert!(
+            out[15][0] > out[0][0],
+            "positive delta must brighten endpoint 1"
+        );
+    }
+
+    #[test]
+    fn delta_wraps_within_base_precision() {
+        // Mode 13 (base 12 bits): base = 0, delta = -1 (0xFF in 8 bits) must
+        // wrap to the top of the 12-bit range (0xFFF), i.e. endpoint 1 is the
+        // brightest value, not an underflow. Index 15 selects endpoint 1.
+        let mut idx = [0u8; 16];
+        idx[1] = 15;
+        let delta_neg1 = (1u32 << 8) - 1; // 0xFF == -1 as a signed 8-bit delta
+        let block = make_block_delta(0b01011, 12, 8, [0, 0, 0], [delta_neg1, 0, 0], idx);
+        let out = decode_bc6h_mode13_unsigned(&block);
+        // (0 + (-1)) & 0xFFF == 0xFFF -> unquantize(0xFFF, 12) is near full range.
+        let direct = make_block_delta(0b01011, 12, 8, [0xFFF, 0, 0], [0, 0, 0], idx);
+        let want = decode_bc6h_mode13_unsigned(&direct);
+        assert_eq!(
+            out[1][0], want[1][0],
+            "delta -1 from 0 must wrap to top of range"
+        );
+    }
+
+    #[test]
+    fn delta_signed_negative_delta_goes_negative() {
+        // Signed mode 12 (base 11 bits, delta 9 bits): base 0, delta -256
+        // (field 0x100 is the most-negative 9-bit value). Endpoint 1 wraps to
+        // `(0 - 256) & 0x7FF == 0x700`, which sign-extended at 11 bits is -256,
+        // a solidly negative unquantized endpoint. Index 15 picks endpoint 1.
+        let mut idx = [0u8; 16];
+        idx[1] = 15;
+        let delta_neg256 = 1u32 << 8; // 0x100 == -256 as a signed 9-bit delta
+        let block = make_block_delta(0b00111, 11, 9, [0, 0, 0], [delta_neg256, 0, 0], idx);
+        let out = decode_bc6h_mode12_signed(&block);
+        assert!(out[1][0] < 0.0, "wrapped endpoint sign-extends negative");
+    }
+
+    #[test]
+    fn delta_signed_and_unsigned_disagree_on_wrapped_endpoint() {
+        // Mode 12: base 0, delta that reconstructs endpoint1 = 0x7FF (top bit
+        // of the 11-bit base set). Unsigned reads it as +2047, signed as -1.
+        let mut idx = [0u8; 16];
+        idx[1] = 15;
+        let block = make_block_delta(0b00111, 11, 9, [0x7FF, 0, 0], [0, 0, 0], idx);
+        let u = decode_bc6h_mode12_unsigned(&block);
+        let si = decode_bc6h_mode12_signed(&block);
+        assert!(u[1][0] > 0.0, "unsigned high endpoint is positive");
+        assert!(si[1][0] < 0.0, "signed high endpoint is negative");
     }
 }

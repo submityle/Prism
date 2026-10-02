@@ -51,8 +51,10 @@ mod snorm_block;
 mod source;
 
 pub use bc6h::{
-    bc6h_mode_bits, decode_bc6h_mode11_signed, decode_bc6h_mode11_unsigned, decode_bc6h_signed,
-    decode_bc6h_unsigned, half_bits_to_f32, Bc6hError,
+    bc6h_mode_bits, decode_bc6h_mode11_signed, decode_bc6h_mode11_unsigned,
+    decode_bc6h_mode12_signed, decode_bc6h_mode12_unsigned, decode_bc6h_mode13_signed,
+    decode_bc6h_mode13_unsigned, decode_bc6h_mode14_signed, decode_bc6h_mode14_unsigned,
+    decode_bc6h_signed, decode_bc6h_unsigned, half_bits_to_f32, Bc6hError,
 };
 pub use bc7::{
     bc7_mode, decode_bc7, decode_bc7_mode0, decode_bc7_mode1, decode_bc7_mode2, decode_bc7_mode3,
