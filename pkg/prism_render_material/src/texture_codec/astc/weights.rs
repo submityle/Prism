@@ -95,9 +95,58 @@ pub fn decode_astc_4x4_weights(block: &[u8; 16], weight_bits: u32) -> [u8; 16] {
     out
 }
 
+/// Mirror the 128-bit `block` end-for-end: output bit `p` is input bit
+/// `127 - p`. ASTC stores the weight ISE stream bit-reversed at the top of the
+/// block, so reversing the whole block turns it into an ordinary LSB-first
+/// Integer-Sequence-Encoded stream beginning at bit 0.
+#[must_use]
+fn reverse_block_bits(block: &[u8; 16]) -> [u8; 16] {
+    let mut out = [0u8; 16];
+    for p in 0..128u32 {
+        let src = 127 - p;
+        if (block[(src >> 3) as usize] >> (src & 7)) & 1 == 1 {
+            out[(p >> 3) as usize] |= 1 << (p & 7);
+        }
+    }
+    out
+}
+
+/// Decode the sixteen unquantized weights (each `0..=64`) of a single-plane
+/// 4x4 LDR block whose weight range has `levels` distinct levels (e.g. `6` for
+/// a QUANT_6 trit range, `5` for a QUANT_5 quint range). Power-of-two level
+/// counts take the bit-only path; trit/quint level counts use the
+/// `astcenc`-derived unquantization tables.
+///
+/// The weight stream is read by mirroring the block (see
+/// [`reverse_block_bits`]) and decoding `16` BISE values from bit 0, then
+/// unquantizing each via [`super::weight_unquant::unquant_weight`]. As with
+/// [`decode_astc_4x4_weights`], no endpoint or interpolation work is done, so
+/// the result can be proven against the hardware decoder in isolation using
+/// black/white endpoints.
+///
+/// Returns `None` if `levels` is not one of the three BISE range forms, which
+/// cannot occur for a valid ASTC weight range.
+#[must_use]
+pub fn decode_astc_4x4_weights_ise(block: &[u8; 16], levels: u32) -> Option<[u8; 16]> {
+    let range = super::bise::IseRange::from_num_levels(levels)?;
+    let reversed = reverse_block_bits(block);
+    let mut raw = [0u8; 16];
+    // Infallible for every well-formed BISE range; the 4x4 single-plane grid is
+    // always exactly sixteen weights.
+    let _ = super::bise::decode_ise(&reversed, 0, range, 16, &mut raw);
+    let mut out = [0u8; 16];
+    for (o, &r) in out.iter_mut().zip(raw.iter()) {
+        *o = super::weight_unquant::unquant_weight(r as u32, range);
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{decode_astc_4x4_weights, unquant_weight_bits};
+    use super::{
+        decode_astc_4x4_weights, decode_astc_4x4_weights_ise, reverse_block_bits,
+        unquant_weight_bits,
+    };
 
     #[test]
     fn quant16_levels_match_gpu_ground_truth() {
@@ -155,5 +204,53 @@ mod tests {
             0u8, 4, 8, 12, 17, 21, 25, 29, 35, 39, 43, 47, 52, 56, 60, 64,
         ];
         assert_eq!(decode_astc_4x4_weights(&block, 4), expected);
+    }
+
+    #[test]
+    fn reverse_block_bits_is_an_involution() {
+        // Mirroring the block twice must return the original bytes.
+        let mut block = [0u8; 16];
+        for (i, b) in block.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(37).wrapping_add(1);
+        }
+        assert_eq!(reverse_block_bits(&reverse_block_bits(&block)), block);
+    }
+
+    #[test]
+    fn ise_path_matches_bit_only_reader_for_quant16() {
+        // The generic trit/quint-capable ISE weight reader must agree bit-for-
+        // bit with the GPU-proven bit-only reader on a power-of-two range. This
+        // ties the new reverse-and-decode wiring to the hardware-validated
+        // QUANT_16 path. Build the same bit-reversed 4-bit weight grid used in
+        // `weights_are_read_bit_reversed_from_the_top`.
+        let raw = [0u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+        let mut block = [0u8; 16];
+        for (t, &w) in raw.iter().enumerate() {
+            for b in 0..4u32 {
+                if (w >> b) & 1 == 1 {
+                    let pos = 127 - (4 * t as u32 + b);
+                    block[(pos >> 3) as usize] |= 1 << (pos & 7);
+                }
+            }
+        }
+        let via_bits = decode_astc_4x4_weights(&block, 4);
+        let via_ise = decode_astc_4x4_weights_ise(&block, 16).expect("16 is a valid range");
+        assert_eq!(via_ise, via_bits);
+    }
+
+    #[test]
+    fn ise_rejects_non_bise_level_counts() {
+        assert!(decode_astc_4x4_weights_ise(&[0u8; 16], 7).is_none());
+        assert!(decode_astc_4x4_weights_ise(&[0u8; 16], 0).is_none());
+    }
+
+    #[test]
+    fn ise_all_zero_block_is_all_zero_weights() {
+        // Index 0 unquantizes to 0 in every range form, so an empty block maps
+        // to the minimum weight everywhere regardless of the chosen range.
+        for levels in [6u32, 5, 12, 10, 24, 20, 3] {
+            let w = decode_astc_4x4_weights_ise(&[0u8; 16], levels).expect("valid range");
+            assert_eq!(w, [0u8; 16], "levels {levels}");
+        }
     }
 }
