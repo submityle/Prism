@@ -38,11 +38,15 @@
 //! sample is `rate_hz * RATE_TO_TIMESTEP / sample_rate`, so the `rate_hz`
 //! control sets how fast the trajectory moves and therefore the nominal
 //! brightness/pitch of the texture (the spectrum is broadband, so this is a
-//! nominal rate, not a precise fundamental).
+//! nominal rate, not a precise fundamental). Each integrator substep is clamped
+//! to `H_MAX` for stability, so once `rate_hz` grows large enough that the
+//! per-substep timestep saturates (near the top of its range at 48 kHz) further
+//! increases stop speeding up the clock and the brightness plateaus.
 //!
 //! The output coordinate is scaled and soft-limited through a hyperbolic
-//! tangent, guaranteeing a strictly bounded signal and gentle saturation on the
-//! sharp scroll transitions:
+//! tangent, keeping the normalised readout within `+-1` (so the output stays
+//! bounded to `+-amplitude`) with gentle saturation on the sharp scroll
+//! transitions:
 //!
 //! ```text
 //!   raw = tanh(x * OUTPUT_INV_SCALE)
@@ -83,8 +87,9 @@
 //! [`ChuaCircuitNode::process`] performs no allocation, no locking, and no
 //! panicking: it is a pure per-sample state machine. Every integrator substep
 //! clamps the state to a generous bounding box and falls back to the initial
-//! seed if a non-finite value or runaway ever appears, so the output can never
-//! blow up. `alpha` and `amplitude` glide through [`Smoothed`] values and
+//! seed if a non-finite value or runaway ever appears, so the normalised
+//! readout stays bounded to `+-1` and the output to `+-amplitude`. `alpha` and
+//! `amplitude` glide through [`Smoothed`] values and
 //! `rate_hz` only scales the timestep, so automation never produces zipper
 //! clicks. Two nodes built with the same parameters produce bit-identical
 //! output, and [`ChuaCircuitNode::reset`] restarts the exact same trajectory.
@@ -519,7 +524,7 @@ mod tests {
         let _ = render(&mut high, SR, 8_192);
         let hl = hf_energy(&render(&mut low, SR, 16_384));
         let hh = hf_energy(&render(&mut high, SR, 16_384));
-        assert!(hh > hl, "high={hh} low={hl}");
+        assert!(hh > 1.5 * hl, "high={hh} low={hl}");
     }
 
     #[test]
@@ -699,6 +704,20 @@ mod tests {
     fn output_is_bounded_under_extreme_settings() {
         let mut node = ChuaCircuitNode::new(MAX_RATE_HZ, MAX_ALPHA, 1.0);
         let out = render(&mut node, SR, 200_000);
+        for &s in out.channel(0) {
+            assert!(s.is_finite() && s.abs() <= 1.0 + 1e-3, "s={s}");
+        }
+    }
+
+    #[test]
+    fn runaway_state_is_reseeded_and_recovers() {
+        let mut node = ChuaCircuitNode::new(DEFAULT_RATE_HZ, DEFAULT_ALPHA, 0.8);
+        // Force the integrator state far outside the safety bounding box to
+        // exercise the runaway reseed branch inside the substep integrator.
+        node.x = SAFETY_BOUND * 10.0;
+        node.y = SAFETY_BOUND * 10.0;
+        node.z = SAFETY_BOUND * 10.0;
+        let out = render(&mut node, SR, 8_192);
         for &s in out.channel(0) {
             assert!(s.is_finite() && s.abs() <= 1.0 + 1e-3, "s={s}");
         }
