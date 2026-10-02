@@ -49,6 +49,16 @@
 //!   `rho` morphs the attractor. Unlike [`chaotic_oscillator`], which iterates
 //!   a discrete map once per pitched period, this is continuous-flow chaos
 //!   with no hard period; unlike [`noise`] it is fully deterministic.
+//! - [`duffing_oscillator::DuffingOscillatorNode`] -- driven Duffing
+//!   oscillator: the forced double-well flow `dx = v`,
+//!   `dv = -damping*v + x - x^3 + drive*cos(phase)` is integrated with
+//!   oversampled fourth-order Runge-Kutta and the position is soft-limited and
+//!   read out. The periodic forcing anchors a pitch at `frequency` while
+//!   `drive` morphs from a clean forced tone through period-doubling into
+//!   chaos. Unlike [`lorenz_attractor`] (an autonomous flow with no pitch)
+//!   this is a driven oscillator locked loosely to the drive; unlike
+//!   [`chaotic_oscillator`] it is a continuous forced flow, not a discrete
+//!   map.
 //! - [`sample_player::SamplePlayerNode`] -- pitch/rate-resampling PCM player with
 //!   [`sample_player::LoopMode`] loop points and selectable
 //!   [`sample_player::Interpolation`] (linear / Catmull-Rom).
@@ -431,6 +441,7 @@ pub mod tine_electric_piano;
 pub mod vosim;
 pub mod wavetable_oscillator;
 pub mod wave_terrain;
+pub mod duffing_oscillator;
 
 pub use air_jet_flute::{AirJetFluteNode, AirJetFluteParams};
 pub use additive_oscillator::{AdditiveOscillatorNode, AdditiveOscillatorParams};
@@ -440,6 +451,7 @@ pub use bowed_string::{BowedStringNode, BowedStringParams};
 pub use brass_lip_reed::{BrassLipReedNode, BrassLipReedParams};
 pub use chaotic_oscillator::{ChaoticOscillatorNode, ChaoticOscillatorParams};
 pub use lorenz_attractor::{LorenzAttractorNode, LorenzAttractorParams};
+pub use duffing_oscillator::{DuffingOscillatorNode, DuffingOscillatorParams};
 pub use conical_reed::{ConicalReedNode, ConicalReedParams};
 pub use dsf_oscillator::{DsfOscillatorNode, DsfOscillatorParams};
 pub use dust::{DustNode, DustParams, Polarity};
