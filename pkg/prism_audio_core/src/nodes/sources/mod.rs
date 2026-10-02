@@ -197,6 +197,15 @@
 //!   winds it is linear and passive, never closing a nonlinear feedback loop,
 //!   and unlike the struck modal sources it is driven continuously so it
 //!   sustains instead of decaying.
+//! - [`shepard_tone::ShepardToneNode`] -- Shepard/Risset endless-glissando
+//!   source: [`shepard_tone::SPAN_OCTAVES`] octave-spaced sine partials whose
+//!   shared logarithmic position drifts up or down the frequency axis under a
+//!   fixed position-indexed raised-cosine (Hann) envelope that fades partials
+//!   in at the bottom and out at the top, manufacturing a tone that seems to
+//!   rise (or fall) forever. The summed envelope is exactly constant, so the
+//!   illusion is loudness-stable. Unlike `additive_oscillator`'s static
+//!   integer-harmonic series the partials are octave-spaced (geometric) and
+//!   drift continuously; `speed == 0` degenerates to a static Shepard chord.
 //!
 //!
 //! Every generator is real-time safe: `process` performs no allocation, no
@@ -223,6 +232,7 @@ pub mod plucked_body;
 pub mod pwm_oscillator;
 pub mod reed_woodwind;
 pub mod sample_player;
+pub mod shepard_tone;
 pub mod struck_bar;
 pub mod struck_plate;
 pub mod supersaw;
@@ -248,6 +258,10 @@ pub use plucked_body::{PluckedBodyNode, PluckedBodyParams, NUM_BODY_MODES};
 pub use pwm_oscillator::{PwmOscillatorNode, PwmOscillatorParams};
 pub use reed_woodwind::{ReedWoodwindNode, ReedWoodwindParams};
 pub use sample_player::{Interpolation, LoopMode, SamplePlayerNode};
+pub use shepard_tone::{
+    ShepardToneNode, ShepardToneParams, DEFAULT_AMPLITUDE, DEFAULT_BASE_HZ, DEFAULT_SPEED,
+    MAX_BASE_HZ, MAX_SPEED, MIN_BASE_HZ, MIN_SPEED, NYQUIST_GUARD, OUTPUT_GAIN, SPAN_OCTAVES,
+};
 pub use struck_bar::{StruckBarNode, StruckBarParams, NUM_MODES};
 pub use struck_plate::{StruckPlateNode, StruckPlateParams};
 pub use supersaw::{SupersawNode, SupersawParams};
