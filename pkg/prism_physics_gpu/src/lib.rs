@@ -48,6 +48,7 @@ pub mod buffer;
 pub mod bvh;
 pub mod cfl;
 pub mod cloth;
+pub mod collider;
 pub mod contacts;
 pub mod context;
 pub mod fluid;
@@ -83,6 +84,7 @@ pub use cloth::{
     GpuClothSelfCollision, GpuClothSelfCollisionPoint, GpuClothStrainLimit, GpuClothTearing,
     LongRangeColoring, StrainLimitColoring, VertexTriangleAdjacency,
 };
+pub use collider::{cpu_sphere_trimesh_collide, Trimesh};
 pub use contacts::{
     contact_constraints, contact_constraints_with_friction, cpu_resolve_contacts,
     cpu_resolve_contacts_warm, ContactCache, ContactConstraint, ContactKey, GpuContactSolver,
