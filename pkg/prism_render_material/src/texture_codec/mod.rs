@@ -56,7 +56,7 @@ pub use bc6h::{
 };
 pub use bc7::{
     bc7_mode, decode_bc7, decode_bc7_mode1, decode_bc7_mode3, decode_bc7_mode4, decode_bc7_mode5,
-    decode_bc7_mode6, Bc7Error,
+    decode_bc7_mode6, decode_bc7_mode7, Bc7Error,
 };
 pub use color_block::rgb565_to_rgb888;
 pub use encode::{
