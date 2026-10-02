@@ -36,139 +36,16 @@
 //! order, pinned vertices are skipped, and out-of-range triangles are dropped
 //! at build time rather than panicking.
 
-use alloc::vec::Vec;
+use super::wind::{AeroParams, WindField};
+use super::{physics_bridge, ClothParticle};
 
-use super::wind::{triangle_wind_force, turbulence_offset, AeroParams, WindField};
-use super::{ClothParticle, Vec3};
-
-/// A `CSR` vertex→triangle adjacency: for each vertex, the ascending slice
-/// indices of the triangles incident to it.
-///
-/// `offsets` has `vertex_count + 1` entries; the triangles incident to vertex
-/// `v` are `entries[offsets[v] .. offsets[v + 1]]`, and each stored value is an
-/// index into the triangle slice the adjacency was built from. Storing the
-/// triangle *index* (rather than the face's three vertex ids) keeps the gather
-/// able to recompute the exact same per-face force the scatter would, including
-/// the index-derived turbulence jitter.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct VertexTriangleAdjacency {
-    /// Per-vertex start offsets into `entries`; length is `vertex_count + 1`
-    /// and the values are non-decreasing.
-    offsets: Vec<u32>,
-    /// Flattened, per-vertex-contiguous triangle indices, ascending within each
-    /// vertex's run.
-    entries: Vec<u32>,
-}
-
-impl VertexTriangleAdjacency {
-    /// Builds the adjacency for `vertex_count` vertices from `triangles`.
-    ///
-    /// Only triangles whose three indices are all in `0..vertex_count` are
-    /// recorded, so the gather skips exactly the faces
-    /// [`super::wind::apply_aero_forces`] skips. The build is a deterministic
-    /// counting sort: a first pass tallies the incident-triangle count per
-    /// vertex, a prefix sum turns those into `offsets`, and a second pass fills
-    /// `entries` in triangle order, so each vertex's run is ascending. The pass
-    /// is `O(vertex_count + triangles.len())` with no hidden quadratic scan.
-    #[must_use]
-    pub fn build(vertex_count: usize, triangles: &[[u32; 3]]) -> Self {
-        let mut counts = alloc::vec![0u32; vertex_count + 1];
-
-        // First pass: count incident triangles per vertex (in-range faces only).
-        for tri in triangles {
-            if !Self::in_range(*tri, vertex_count) {
-                continue;
-            }
-            for &vi in tri {
-                counts[vi as usize] = counts[vi as usize].saturating_add(1);
-            }
-        }
-
-        // Prefix sum -> offsets. `offsets[v]` is where vertex `v`'s run starts.
-        let mut offsets = alloc::vec![0u32; vertex_count + 1];
-        let mut running = 0u32;
-        for v in 0..vertex_count {
-            offsets[v] = running;
-            running = running.saturating_add(counts[v]);
-        }
-        offsets[vertex_count] = running;
-
-        // Second pass: place each triangle index into its vertices' runs. A
-        // per-vertex write cursor advances through the run; iterating triangles
-        // in order keeps every run ascending.
-        let mut cursor = offsets.clone();
-        let mut entries = alloc::vec![0u32; running as usize];
-        for (t, tri) in triangles.iter().enumerate() {
-            if !Self::in_range(*tri, vertex_count) {
-                continue;
-            }
-            for &vi in tri {
-                let slot = cursor[vi as usize] as usize;
-                entries[slot] = t as u32;
-                cursor[vi as usize] += 1;
-            }
-        }
-
-        Self { offsets, entries }
-    }
-
-    /// Returns `true` when every index of `tri` is a valid vertex id.
-    fn in_range(tri: [u32; 3], vertex_count: usize) -> bool {
-        (tri[0] as usize) < vertex_count
-            && (tri[1] as usize) < vertex_count
-            && (tri[2] as usize) < vertex_count
-    }
-
-    /// Number of vertices the adjacency was built for.
-    #[must_use]
-    pub fn vertex_count(&self) -> usize {
-        self.offsets.len().saturating_sub(1)
-    }
-
-    /// Total number of (vertex, triangle) incidences stored; equals three times
-    /// the number of in-range triangles.
-    #[must_use]
-    pub fn incidence_count(&self) -> usize {
-        self.entries.len()
-    }
-
-    /// The ascending triangle indices incident to `vertex`, or an empty slice
-    /// when `vertex` is out of range or touches no in-range triangle.
-    #[must_use]
-    pub fn incident(&self, vertex: usize) -> &[u32] {
-        if vertex + 1 >= self.offsets.len() {
-            return &[];
-        }
-        let start = self.offsets[vertex] as usize;
-        let end = self.offsets[vertex + 1] as usize;
-        &self.entries[start..end]
-    }
-
-    /// The raw `CSR` start offsets, one per vertex plus a trailing total.
-    ///
-    /// Length is `vertex_count + 1` and the values are non-decreasing, so the
-    /// triangles incident to vertex `v` occupy `entries()[offsets()[v] ..
-    /// offsets()[v + 1]]`. Exposed so a `GPU` per-vertex gather kernel can
-    /// upload the same flattened adjacency the `CPU` gather walks, keeping the
-    /// device pass byte-for-byte faithful to the golden reference.
-    #[must_use]
-    pub fn offsets(&self) -> &[u32] {
-        &self.offsets
-    }
-
-    /// The flattened, per-vertex-contiguous triangle indices (ascending within
-    /// each vertex's run) the `offsets` slice windows into.
-    #[must_use]
-    pub fn entries(&self) -> &[u32] {
-        &self.entries
-    }
-}
+pub use prism_physics_core::soft::aero::VertexTriangleAdjacency;
 
 /// Applies the aerodynamic force to `particles` by a race-free per-vertex
 /// gather over `adjacency`, reading a single pre-pass velocity snapshot.
 ///
 /// For each free vertex the gather sums, over the triangles incident to it (in
-/// ascending `CSR` order), a third of each face's [`triangle_wind_force`] — the
+/// ascending `CSR` order), a third of each face's [`super::wind::triangle_wind_force`] — the
 /// same force the scatter spreads — evaluated against the frozen snapshot, then
 /// applies `sum * inverse_mass * dt` as a single velocity increment. Because
 /// every face reads the snapshot and every velocity is written once, the pass
@@ -186,57 +63,36 @@ pub fn accumulate_aero_gather(
     aero: AeroParams,
     dt: f32,
 ) {
-    if dt <= 0.0 || !dt.is_finite() || particles.is_empty() || triangles.is_empty() {
-        return;
-    }
-    let field = wind.sanitized();
-    let aero = aero.sanitized();
-    let count = particles.len();
-
-    // Frozen pre-pass velocities so every face sees the same input state.
-    let snapshot: Vec<Vec3> = particles.iter().map(|p| p.velocity).collect();
-
-    let vertices = adjacency.vertex_count().min(count);
-    for v in 0..vertices {
-        let particle = &particles[v];
-        if particle.is_pinned() {
-            continue;
-        }
-        let inverse_mass = particle.inverse_mass;
-
-        let mut accum = Vec3::ZERO;
-        for &t in adjacency.incident(v) {
-            let Some(tri) = triangles.get(t as usize) else {
-                continue;
-            };
-            let (i0, i1, i2) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
-            if i0 >= count || i1 >= count || i2 >= count {
-                continue;
-            }
-
-            let wind_vec = field
-                .velocity
-                .add(turbulence_offset(*tri, field.turbulence));
-            let force = triangle_wind_force(
-                particles[i0].position,
-                particles[i1].position,
-                particles[i2].position,
-                snapshot[i0],
-                snapshot[i1],
-                snapshot[i2],
-                wind_vec,
-                aero,
-            );
-            accum = accum.add(force.scale(1.0 / 3.0));
-        }
-
-        let delta = accum.scale(inverse_mass * dt);
-        particles[v].velocity = particles[v].velocity.add(delta);
-    }
+    // Delegate to the single-source physics-engine Jacobi gather. The render
+    // particles are projected into the `(positions, velocities, inverse_masses)`
+    // columns the kernel consumes (pinned particles map to a zero inverse mass),
+    // the wind and coefficients are forwarded verbatim, and the solved
+    // velocities are written back. `prism_physics_core` freezes the same
+    // pre-pass velocity snapshot, walks the same ascending `CSR` adjacency, and
+    // reuses the shared per-face force, so the pass is bit-for-bit identical to
+    // the former inline loop (including every empty/degenerate no-op) and stays
+    // in lock-step with the WESL per-vertex twin.
+    let (positions, mut velocities, inverse_masses) = physics_bridge::to_soa_full(particles);
+    prism_physics_core::soft::aero::accumulate_aero_gather(
+        &positions,
+        &mut velocities,
+        &inverse_masses,
+        triangles,
+        adjacency,
+        &prism_physics_core::soft::aero::WindField::new(
+            physics_bridge::to_glam(wind.velocity),
+            wind.turbulence,
+        ),
+        prism_physics_core::soft::aero::AeroParams::new(aero.drag, aero.lift)
+            .with_air_density(aero.air_density),
+        dt,
+    );
+    physics_bridge::write_velocities_back(particles, &velocities);
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::Vec3;
     use super::*;
 
     /// Small tolerance for the `f32` invariant checks; comparisons are always

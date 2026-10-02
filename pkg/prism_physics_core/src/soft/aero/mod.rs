@@ -19,6 +19,9 @@
 //! * [`apply`] — the mesh-wide velocity pre-pass [`apply_aero_forces`] and the
 //!   [`ParticleColumnsMut`](crate::soft::particle::storage::ParticleColumnsMut)
 //!   convenience entry point [`apply_aero_to_columns`].
+//! * [`gather`] — the race-free (Jacobi) per-vertex twin
+//!   [`accumulate_aero_gather`] over a [`VertexTriangleAdjacency`], the
+//!   GPU-faithful counterpart of the sequential scatter.
 //!
 //! # Provenance
 //!
@@ -29,10 +32,12 @@
 
 pub mod apply;
 pub mod field;
+pub mod gather;
 pub mod triangle;
 
 mod sanitize;
 
 pub use apply::{apply_aero_forces, apply_aero_to_columns};
 pub use field::{AeroParams, WindField};
+pub use gather::{accumulate_aero_gather, VertexTriangleAdjacency};
 pub use triangle::{triangle_aero_force, turbulence_offset};
