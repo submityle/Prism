@@ -276,6 +276,23 @@
 //!   [`supersaw`], or the variable-duty [`pwm_oscillator`], it keeps one
 //!   slave edge but re-locks it to the master every cycle.
 //!
+//! - [`phase_distortion_oscillator::PhaseDistortionOscillatorNode`] -- the
+//!   classic (non-resonant) phase-distortion oscillator. A linear phase ramp
+//!   is bent through a two-segment time warp around a break point, then read
+//!   out of a plain cosine, so advancing time faster through one half-cycle
+//!   compresses that lobe and injects progressively brighter harmonics as the
+//!   `amount` control slides the break point. At `amount == 0` the warp is the
+//!   identity and the output is a mathematically pure sine; as it opens the
+//!   tone brightens continuously and click-free. Because the warp knee and the
+//!   phase wrap both land where the cosine (and its first derivative) are
+//!   zero, the waveform stays C1-continuous -- only the curvature breaks -- so
+//!   its aliasing rolls off steeply enough (~18 dB/octave) to need no
+//!   band-limiting primitive across the musical range. Unlike the discrete
+//!   waveforms of [`oscillator`], the detuned stack of [`supersaw`], the
+//!   moving step edge of [`pwm_oscillator`], or the forced reset of
+//!   [`hard_sync_oscillator`], it recolours a single tone purely by warping
+//!   time.
+//!
 //!
 //! Every generator is real-time safe: `process` performs no allocation, no
 //! locking, and no panics, and reproducible generators are fully deterministic
@@ -299,6 +316,7 @@ pub mod karplus_strong;
 pub mod membrane_drum;
 pub mod noise;
 pub mod oscillator;
+pub mod phase_distortion_oscillator;
 pub mod plucked_body;
 pub mod pwm_oscillator;
 pub mod reed_woodwind;
@@ -330,6 +348,7 @@ pub use karplus_strong::{KarplusStrongNode, KarplusStrongParams};
 pub use membrane_drum::{MembraneDrumNode, MembraneDrumParams};
 pub use noise::{NoiseColor, NoiseNode};
 pub use oscillator::{OscillatorNode, Waveform};
+pub use phase_distortion_oscillator::{PhaseDistortionOscillatorNode, PhaseDistortionOscillatorParams};
 pub use plucked_body::{PluckedBodyNode, PluckedBodyParams, NUM_BODY_MODES};
 pub use pwm_oscillator::{PwmOscillatorNode, PwmOscillatorParams};
 pub use reed_woodwind::{ReedWoodwindNode, ReedWoodwindParams};
