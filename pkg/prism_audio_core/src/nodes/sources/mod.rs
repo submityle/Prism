@@ -73,11 +73,21 @@
 //!   only the odd harmonics, the physical origin of the hollow clarinet timbre.
 //!   Unlike the bow-driven `bowed_string` it is sustained by steady breath
 //!   pressure through the reed rather than bow friction.
+//! - [`air_jet_flute::AirJetFluteNode`] -- air-jet flute (concert-flute /
+//!   recorder family) digital-waveguide physical model: two cross-coupled
+//!   pressure-wave delay lines form an open-open cylindrical bore, plus a jet
+//!   convective-delay line whose cubic edge-tone deflection `jet = JET_DRIVE *
+//!   (x - x^3)` pumps the bore. The two inverting end reflections cancel per
+//!   round trip, so unlike the odd-only `reed_woodwind` it resonates the full
+//!   harmonic series an octave higher; deterministic breath turbulence breaks
+//!   the symmetry to start the tone. Driven by an air jet rather than the
+//!   `bowed_string` bow or `karplus_strong` pluck.
 //!
 //! Every generator is real-time safe: `process` performs no allocation, no
 //! locking, and no panics, and reproducible generators are fully deterministic
 //! across platforms via [`bevy_math::ops`].
 
+pub mod air_jet_flute;
 pub mod additive_oscillator;
 pub mod bowed_string;
 pub mod fm_operator;
@@ -93,10 +103,11 @@ pub mod sample_player;
 pub mod supersaw;
 pub mod wavetable_oscillator;
 
+pub use air_jet_flute::{AirJetFluteNode, AirJetFluteParams};
 pub use additive_oscillator::{AdditiveOscillatorNode, AdditiveOscillatorParams};
 pub use bowed_string::{BowedStringNode, BowedStringParams};
 pub use fm_operator::{FmOperatorNode, FmOperatorParams};
-pub use fof_source::{Formant, FofSourceNode, FofSourceParams, MAX_FOF_GRAINS, MAX_FORMANTS};
+pub use fof_source::{FofSourceNode, FofSourceParams, Formant, MAX_FOF_GRAINS, MAX_FORMANTS};
 pub use granular_source::{GranularSourceNode, GranularSourceParams, MAX_GRAINS};
 pub use impulse_train::{ImpulseTrainNode, ImpulseTrainParams};
 pub use karplus_strong::{KarplusStrongNode, KarplusStrongParams};
