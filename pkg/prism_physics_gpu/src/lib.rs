@@ -91,9 +91,10 @@ pub use collider::{
     cpu_capsule_trimesh_collide, cpu_obb_trimesh_collide, cpu_obb_trimesh_manifold_collide,
     cpu_sphere_trimesh_collide, cpu_trimesh_closest_point, cpu_trimesh_closest_point_built,
     cpu_trimesh_closest_point_bvh, cpu_trimesh_raycast, cpu_trimesh_raycast_built,
-    cpu_trimesh_raycast_bvh, GpuCapsuleTrimeshCollider, GpuObbTrimeshCollider,
-    GpuSphereTrimeshCollider, GpuTrimeshClosestPoint, GpuTrimeshRayCast, MeshRay, Trimesh,
-    TrimeshClosestHit, TrimeshRayHit,
+    cpu_trimesh_raycast_bvh, cpu_trimesh_sphere_sweep, cpu_trimesh_sphere_sweep_built,
+    cpu_trimesh_sphere_sweep_bvh, GpuCapsuleTrimeshCollider, GpuObbTrimeshCollider,
+    GpuSphereTrimeshCollider, GpuTrimeshClosestPoint, GpuTrimeshRayCast, GpuTrimeshSphereSweep,
+    MeshRay, SphereSweep, Trimesh, TrimeshClosestHit, TrimeshRayHit, TrimeshSweepHit,
 };
 pub use contacts::{
     contact_constraints, contact_constraints_with_friction, cpu_resolve_contacts,
