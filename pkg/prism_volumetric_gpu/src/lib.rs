@@ -73,6 +73,7 @@ pub mod ao_sample;
 pub mod aperture_blade;
 pub mod apply_carve;
 pub mod atlas_mip_padding;
+pub mod atlas_packing;
 pub mod audio_spectrum;
 pub mod avsm_area;
 pub mod avsm_transmittance;
@@ -91,6 +92,7 @@ pub mod bloom_upsample;
 pub mod boids;
 pub mod bounds;
 pub mod bresenham_line;
+pub mod bvh;
 pub mod camera;
 pub mod capsule_capsule_closest;
 pub mod capsule_sdf;
@@ -136,7 +138,9 @@ pub mod dual_lobe_phase;
 pub mod dual_quaternion;
 pub mod ear_clip_triangulate;
 pub mod edge_detect;
+pub mod emitter;
 pub mod emitter_pass_buffers;
+pub mod env_brdf_split_sum;
 pub mod epa_penetration_3d;
 pub mod event_pass_buffers;
 pub mod exposure_adapt;
@@ -202,6 +206,7 @@ pub mod interval_tree_1d;
 pub mod kawase_blur;
 pub mod kawase_dual_blur;
 pub mod lens_distortion;
+pub mod lens_flare;
 pub mod liang_barsky_clip;
 pub mod light_clustered;
 pub mod light_shaft;
@@ -252,6 +257,7 @@ pub mod oren_nayar;
 pub mod orientation_basis;
 pub mod overshooting_bump;
 pub mod ozone_absorption;
+pub mod parallax_offset;
 pub mod particle_multiscatter;
 pub mod perlin;
 pub mod perlin_worley;
@@ -398,6 +404,7 @@ pub use ao_sample::GpuAoSample;
 pub use aperture_blade::{ApertureBladeQuery, ApertureBladeResult, GpuApertureBlade};
 pub use apply_carve::{ApplyCarveQuery, GpuApplyCarve};
 pub use atlas_mip_padding::{GpuAtlasMipPadding, GpuAtlasPadOp, GpuAtlasPadQuery, GpuPadMode};
+pub use atlas_packing::{AtlasPackingQuery, AtlasPackingResult, GpuAtlasPacking};
 pub use audio_spectrum::{AudioSpectrumQuery, AudioSpectrumResult, GpuAudioSpectrum};
 pub use avsm_area::GpuAvsmArea;
 pub use avsm_transmittance::{AvsmSampleNode, GpuAvsmTransmittance};
@@ -421,6 +428,7 @@ pub use bloom_upsample::{BloomUpsampleQuery, GpuBloomUpsample};
 pub use boids::{BoidsQuery, BoidsResult, GpuBoids, MAX_NEIGHBORS};
 pub use bounds::{GpuBounds, GpuBoundsQuery, GpuBoundsResult, AXIS_X, AXIS_Y, AXIS_Z};
 pub use bresenham_line::{GpuBresenhamLine, GpuBresenhamQuery, GpuBresenhamResult};
+pub use bvh::{BvhQuery, BvhResult, GpuBvh};
 pub use camera::{CameraQuery, CameraResult, GpuCamera};
 pub use capsule_capsule_closest::{
     CapsuleClosestQuery, CapsuleClosestResult, GpuCapsuleCapsuleClosest,
@@ -481,9 +489,11 @@ pub use dual_lobe_phase::{DualLobePhaseQuery, GpuDualLobePhase};
 pub use dual_quaternion::{DualQuatTransformQuery, GpuDualQuaternion};
 pub use ear_clip_triangulate::{EarClipAnswer, EarClipQuery, GpuEarClipTriangulate};
 pub use edge_detect::{EdgeDetectOutput, EdgeDetectQuery, EdgeFrame, EdgeResponse, GpuEdgeDetect};
+pub use emitter::{EmitterQuery, EmitterResult, GpuEmitter};
 pub use emitter_pass_buffers::{
     GpuEmitterPassBufferQuery, GpuEmitterPassBufferResult, GpuEmitterPassBuffers,
 };
+pub use env_brdf_split_sum::{EnvBrdfSplitSumQuery, EnvBrdfSplitSumResult, GpuEnvBrdfSplitSum};
 pub use epa_penetration_3d::{EpaPenetration3dQuery, GpuEpa, GpuEpaPenetration3d};
 pub use event_pass_buffers::{
     GpuEventPassBufferQuery, GpuEventPassBufferResult, GpuEventPassBuffers,
@@ -577,6 +587,7 @@ pub use interval_tree_1d::{GpuIntervalTree1d, IntervalTree1dQuery, IntervalTree1
 pub use kawase_blur::{GpuKawaseBlur, KawaseBlurQuery};
 pub use kawase_dual_blur::{GpuKawaseDualBlur, GpuKawaseDualBlurQuery, GpuKawaseDualBlurResult};
 pub use lens_distortion::GpuLensDistortion;
+pub use lens_flare::{GpuLensFlare, LensFlareQuery, LensFlareResult};
 pub use liang_barsky_clip::{GpuLiangBarskyClip, LiangBarskyQuery, LiangBarskyResult, CLIP_EPS};
 pub use light_clustered::{
     GpuLightClustered, LightClusteredQuery, LightClusteredResult, MAX_SLICE_BOUNDARIES,
@@ -642,6 +653,7 @@ pub use oren_nayar::{GpuOrenNayar, OrenNayarQuery, OrenNayarResult};
 pub use orientation_basis::{GpuOrientationBasis, OrientationQuery};
 pub use overshooting_bump::{GpuOvershootingBump, OvershootingBumpQuery};
 pub use ozone_absorption::{GpuOzoneAbsorption, OzoneAbsorptionQuery};
+pub use parallax_offset::{GpuParallaxOffset, ParallaxOffsetQuery, ParallaxOffsetResult};
 pub use particle_multiscatter::{GpuParticleMultiScatter, MultiScatterResponse};
 pub use perlin::{GpuPerlin, PerlinQuery};
 pub use perlin_worley::{GpuPerlinWorley, PerlinWorleyQuery};
