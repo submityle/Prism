@@ -23,6 +23,7 @@ use super::conductor_aniso_ms::MultiscatterAnisoConductor;
 use super::conductor_ms::MultiscatterConductor;
 use super::conductor_schlick_ms::SchlickMultiscatterConductor;
 use super::dielectric::{fresnel_dielectric, refract};
+use super::dielectric_ms::MultiscatterDielectric;
 use super::fresnel_blend::FresnelBlend;
 use super::microfacet::{fresnel_schlick, GgxIsotropic};
 use super::oren_nayar::OrenNayar;
@@ -221,6 +222,21 @@ pub enum Bsdf {
         /// Perceptual roughness in `[0, 1]`.
         roughness: f32,
     },
+    /// Energy-conserving rough dielectric: [`Bsdf::RoughDielectric`] wrapped
+    /// with the Turquin multiple-scattering compensation of
+    /// [`crate::reference_pt::dielectric_ms`], restoring the inter-facet energy
+    /// Smith masking drops so rough glass and water keep their brightness.
+    RoughDielectricMultiscatter {
+        /// Relative index of refraction `eta_t / eta_i` of the interior medium
+        /// over the exterior (e.g. `1.5` for air-to-glass).
+        ior: f32,
+        /// Per-channel tint applied to the reflected microfacet lobe.
+        reflectance: Vec3,
+        /// Per-channel tint applied to the transmitted microfacet lobe.
+        transmittance: Vec3,
+        /// Perceptual roughness in `[0, 1]`.
+        roughness: f32,
+    },
 }
 
 /// The outcome of importance-sampling a [`Bsdf`].
@@ -314,6 +330,13 @@ impl Bsdf {
                 roughness,
             } => RoughDielectric::new(*ior, *reflectance, *transmittance, *roughness)
                 .evaluate(wo, wi, normal),
+            Self::RoughDielectricMultiscatter {
+                ior,
+                reflectance,
+                transmittance,
+                roughness,
+            } => MultiscatterDielectric::new(*ior, *reflectance, *transmittance, *roughness)
+                .evaluate(wo, wi, normal),
         }
     }
 
@@ -380,6 +403,13 @@ impl Bsdf {
                 transmittance,
                 roughness,
             } => RoughDielectric::new(*ior, *reflectance, *transmittance, *roughness)
+                .pdf(wo, wi, normal),
+            Self::RoughDielectricMultiscatter {
+                ior,
+                reflectance,
+                transmittance,
+                roughness,
+            } => MultiscatterDielectric::new(*ior, *reflectance, *transmittance, *roughness)
                 .pdf(wo, wi, normal),
         }
     }
@@ -528,6 +558,19 @@ impl Bsdf {
                 transmittance,
                 roughness,
             } => RoughDielectric::new(*ior, *reflectance, *transmittance, *roughness)
+                .sample(wo, normal, rng)
+                .map(|s| BsdfSample {
+                    direction: s.direction,
+                    value: s.value,
+                    pdf: s.pdf,
+                    specular: false,
+                }),
+            Self::RoughDielectricMultiscatter {
+                ior,
+                reflectance,
+                transmittance,
+                roughness,
+            } => MultiscatterDielectric::new(*ior, *reflectance, *transmittance, *roughness)
                 .sample(wo, normal, rng)
                 .map(|s| BsdfSample {
                     direction: s.direction,
@@ -1209,6 +1252,34 @@ mod tests {
         let wi = Vec3::new(-0.15, 0.98, 0.0).normalize_or_zero();
         assert!(bsdf.pdf(wo, wi, N) > 0.0);
         assert!(bsdf.evaluate(wo, wi, N).max_component() > 0.0);
+    }
+
+    #[test]
+    fn rough_dielectric_multiscatter_brightens_rough_glass() {
+        // The compensated variant dispatches as a glossy lobe and, at high
+        // roughness, carries strictly more energy than the single-scatter one
+        // for a reflected pair (the recovered inter-facet bounces).
+        let roughness = 0.9;
+        let ms = Bsdf::RoughDielectricMultiscatter {
+            ior: 1.5,
+            reflectance: Vec3::ONE,
+            transmittance: Vec3::ONE,
+            roughness,
+        };
+        let base = Bsdf::RoughDielectric {
+            ior: 1.5,
+            reflectance: Vec3::ONE,
+            transmittance: Vec3::ONE,
+            roughness,
+        };
+        assert!(!ms.is_specular());
+        let wo = Vec3::new(0.5, 0.86, 0.0).normalize_or_zero();
+        let wi = Vec3::new(-0.5, 0.86, 0.0).normalize_or_zero();
+        let a = ms.evaluate(wo, wi, N).max_component();
+        let b = base.evaluate(wo, wi, N).max_component();
+        assert!(a > b, "compensated {a} should exceed single-scatter {b}");
+        // The density is untouched by the scalar compensation.
+        assert!((ms.pdf(wo, wi, N) - base.pdf(wo, wi, N)).abs() <= 1e-6);
     }
 
     #[test]

@@ -60,6 +60,8 @@ pub mod conductor_aniso_ms;
 pub mod conductor_ms;
 pub mod conductor_schlick_ms;
 pub mod dielectric;
+pub mod dielectric_energy;
+pub mod dielectric_ms;
 pub mod estimator;
 pub mod film;
 pub mod fresnel_blend;
