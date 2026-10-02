@@ -165,8 +165,11 @@ pub fn cast_shape_all(
 
 /// Sweeps the cast `shape` (as body `A`) against one `target` (as body `B`) and
 /// returns the per-pair time of impact.
+///
+/// Exposed to the sibling broad-phase cast so it can run the identical per-pair
+/// sweep over the candidates a `BVH` gather returns.
 #[must_use]
-fn sweep_against(
+pub(super) fn sweep_against(
     shape: &RoundedConvex,
     target: &RoundedConvex,
     dt: f32,

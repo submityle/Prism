@@ -121,7 +121,7 @@ pub use narrowphase::{
     cpu_capsule_triangle_manifold, cpu_capsule_triangle_narrowphase,
     cpu_halfspace_narrowphase, cpu_narrowphase, cpu_obb_halfspace_manifold,
     cpu_obb_halfspace_narrowphase, cpu_obb_narrowphase, cpu_obb_obb_manifold,
-    cpu_obb_obb_narrowphase, cpu_obb_triangle_manifold, cpu_obb_triangle_narrowphase, cast_shape, cast_shape_all, conservative_advancement_toi, conservative_advancement_toi_rounded, cpu_convex_convex_toi, cpu_convex_convex_toi_rounded, cpu_sphere_heightfield_narrowphase, cpu_sphere_triangle_narrowphase, epa, gjk, support, Capsule, CapsuleCapsulePair, CellRange,
+    cpu_obb_obb_narrowphase, cpu_obb_triangle_manifold, cpu_obb_triangle_narrowphase, cast_shape, cast_shape_all, cast_shape_all_bvh, cast_shape_bvh, conservative_advancement_toi, conservative_advancement_toi_rounded, cpu_convex_convex_toi, cpu_convex_convex_toi_rounded, cpu_sphere_heightfield_narrowphase, cpu_sphere_triangle_narrowphase, epa, gjk, support, Capsule, CapsuleCapsulePair, CellRange,
     CapsuleObbPair, CapsulePlanePair, CapsuleTrianglePair, Contact, ContactManifold,
     BodyMotion, ConvexConvexPair, ConvexConvexSweepPair, ConvexEdge, ConvexFace, ConvexHull, ConvexPose, GjkStatus, Penetration, SupportPoint, Toi,
     GpuCapsuleCapsuleManifoldNarrowphase, GpuCapsuleCapsuleNarrowphase,
