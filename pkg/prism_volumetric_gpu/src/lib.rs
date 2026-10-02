@@ -188,6 +188,7 @@ pub mod reservoir_sample;
 pub mod rgb_ycocg;
 pub mod rgbe_encode;
 pub mod ribbon_geometry;
+pub mod sat_collision_2d;
 pub mod segment_closest_point_3d;
 pub mod segment_intersect_2d;
 pub mod segment_obb_intersect;
@@ -394,6 +395,7 @@ pub use reservoir_sample::{GpuReservoirSample, ReservoirValue};
 pub use rgb_ycocg::GpuRgbYCoCg;
 pub use rgbe_encode::{GpuRgbeEncode, RgbePrimQuery, RgbePrimResult};
 pub use ribbon_geometry::{GpuRibbonGeometry, RibbonStripQuery};
+pub use sat_collision_2d::{GpuSatCollision2d, SatCollision2dQuery, SatCollision2dResult};
 pub use segment_closest_point_3d::{
     GpuSegmentClosestPoint3d, SegmentClosestQuery, SegmentClosestResult,
 };
