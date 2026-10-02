@@ -17,6 +17,7 @@
 //! closure backed by the `BVH` any-hit query.
 
 use super::bsdf::Bsdf;
+use super::mis::power_heuristic;
 use super::sampler::Rng;
 use super::{Vec3, EPS_LEN_SQ, RAY_EPS};
 
@@ -180,42 +181,123 @@ impl Light {
     where
         F: Fn(Vec3, Vec3, f32) -> bool,
     {
-        let su = rng.next_f32();
-        let sv = rng.next_f32();
-        let on_light = origin.add(edge_u.scale(su)).add(edge_v.scale(sv));
-        let to_light = on_light.sub(point);
-        let dist_sq = to_light.length_squared();
-        if dist_sq <= EPS_LEN_SQ {
-            return Vec3::ZERO;
-        }
-        let dist = dist_sq.sqrt();
-        let wi = to_light.scale(1.0 / dist);
-        let cos_surface = normal.dot(wi);
-        if cos_surface <= 0.0 {
-            return Vec3::ZERO;
-        }
         let cross = edge_u.cross(edge_v);
         let area = cross.length();
         if area <= 0.0 {
             return Vec3::ZERO;
         }
         let light_normal = cross.scale(1.0 / area);
-        // Two-sided emitter: use the magnitude of the facing cosine.
-        let cos_light = light_normal.dot(wi).abs();
-        if cos_light <= 0.0 {
-            return Vec3::ZERO;
+
+        // Strategy A: sample a point on the emitter (low variance on broad,
+        // near-diffuse lobes), weighted against the `BSDF` density by the power
+        // heuristic.
+        let su = rng.next_f32();
+        let sv = rng.next_f32();
+        let on_light = origin.add(edge_u.scale(su)).add(edge_v.scale(sv));
+        let to_light = on_light.sub(point);
+        let dist_sq = to_light.length_squared();
+        let mut result = Vec3::ZERO;
+        if dist_sq > EPS_LEN_SQ {
+            let dist = dist_sq.sqrt();
+            let wi = to_light.scale(1.0 / dist);
+            let cos_surface = normal.dot(wi);
+            // Two-sided emitter: use the magnitude of the facing cosine.
+            let cos_light = light_normal.dot(wi).abs();
+            if cos_surface > 0.0 && cos_light > 0.0 {
+                let fr = bsdf.evaluate(wo, wi, normal);
+                if fr.max_component() > 0.0 && !occluded(point, wi, dist * (1.0 - RAY_EPS)) {
+                    // Solid-angle density of this strategy and the competing
+                    // `BSDF` density at the same direction.
+                    let light_pdf = dist_sq / (cos_light * area);
+                    let bsdf_pdf = bsdf.pdf(wo, wi, normal);
+                    let weight = power_heuristic(light_pdf, bsdf_pdf);
+                    // fr * L_e * cos_surface / light_pdf, with the `MIS` weight.
+                    let inv_pdf = (cos_light * area) / dist_sq;
+                    result = result.add(fr.mul(emission).scale(cos_surface * inv_pdf * weight));
+                }
+            }
         }
-        let fr = bsdf.evaluate(wo, wi, normal);
-        if fr.max_component() <= 0.0 {
-            return Vec3::ZERO;
+
+        // Strategy B: sample the `BSDF` lobe (low variance on sharp, near-specular
+        // lobes) and keep the sample only when the scattered ray strikes this
+        // emitter, weighted against the light density by the power heuristic.
+        let mut strategy_bsdf = || -> Vec3 {
+            let Some(sample) = bsdf.sample(wo, normal, rng) else {
+                return Vec3::ZERO;
+            };
+            if sample.pdf <= 0.0 {
+                return Vec3::ZERO;
+            }
+            let wi = sample.direction;
+            let cos_surface = normal.dot(wi);
+            if cos_surface <= 0.0 {
+                return Vec3::ZERO;
+            }
+            let Some((dist, light_pdf)) =
+                Self::quad_hit(point, wi, origin, edge_u, edge_v, light_normal, area)
+            else {
+                return Vec3::ZERO;
+            };
+            if light_pdf <= 0.0 || occluded(point, wi, dist * (1.0 - RAY_EPS)) {
+                return Vec3::ZERO;
+            }
+            let weight = power_heuristic(sample.pdf, light_pdf);
+            // f_r * L_e * cos_surface / bsdf_pdf, with the `MIS` weight.
+            sample
+                .value
+                .mul(emission)
+                .scale(cos_surface / sample.pdf * weight)
+        };
+        result = result.add(strategy_bsdf());
+
+        result
+    }
+
+    /// Intersects the ray `point + t * wi` with the rectangular emitter spanned
+    /// by `edge_u` and `edge_v` from `origin`.
+    ///
+    /// On a hit inside the rectangle in front of the shading point, returns the
+    /// hit distance `t` and the emitter's solid-angle density
+    /// `t^2 / (|cos_light| * area)` at that direction, used as the light-sampling
+    /// density of the competing strategy for the `MIS` weight. `light_normal` is
+    /// the unit face normal and `area` the rectangle area, both precomputed by
+    /// the caller.
+    fn quad_hit(
+        point: Vec3,
+        wi: Vec3,
+        origin: Vec3,
+        edge_u: Vec3,
+        edge_v: Vec3,
+        light_normal: Vec3,
+        area: f32,
+    ) -> Option<(f32, f32)> {
+        let denom = wi.dot(light_normal);
+        let cos_light = denom.abs();
+        if cos_light <= 1.0e-8 {
+            return None;
         }
-        if occluded(point, wi, dist * (1.0 - RAY_EPS)) {
-            return Vec3::ZERO;
+        let t = origin.sub(point).dot(light_normal) / denom;
+        if t <= 0.0 {
+            return None;
         }
-        // pdf (solid angle) = dist^2 / (cos_light * area); contribution is
-        // fr * L_e * cos_surface / pdf = fr * L_e * cos_surface * cos_light * area / dist^2.
-        let geom = cos_surface * cos_light * area / dist_sq;
-        fr.mul(emission).scale(geom)
+        let hit = point.add(wi.scale(t));
+        let d = hit.sub(origin);
+        // Solve `d = a * edge_u + b * edge_v` for possibly non-orthogonal edges.
+        let uu = edge_u.dot(edge_u);
+        let vv = edge_v.dot(edge_v);
+        let uv = edge_u.dot(edge_v);
+        let du = d.dot(edge_u);
+        let dv = d.dot(edge_v);
+        let det = uu * vv - uv * uv;
+        if det <= 0.0 {
+            return None;
+        }
+        let a = (du * vv - dv * uv) / det;
+        let b = (dv * uu - du * uv) / det;
+        if !(0.0..=1.0).contains(&a) || !(0.0..=1.0).contains(&b) {
+            return None;
+        }
+        Some((t, (t * t) / (cos_light * area)))
     }
 }
 
@@ -358,6 +440,109 @@ mod tests {
         };
         let v = quad.direct(Vec3::ZERO, N, N, &bsdf, &mut rng, &always_occluded);
         assert_eq!(v, Vec3::ZERO);
+    }
+
+    /// Reference direct-lighting estimator that only samples the emitter, i.e.
+    /// the single-strategy estimator the `MIS` path must agree with in the mean.
+    ///
+    /// Returns `fr * L_e * cos_surface * cos_light * area / dist^2` for one point
+    /// drawn uniformly on the quad, with no `BSDF`-sampling strategy and no `MIS`
+    /// weight. Averaged over many samples it converges to the same integral as
+    /// `Light::direct` for a quad, so the two means must match to within Monte
+    /// Carlo noise if the `MIS` combination is unbiased.
+    fn light_sample_only(
+        point: Vec3,
+        normal: Vec3,
+        wo: Vec3,
+        bsdf: &Bsdf,
+        origin: Vec3,
+        edge_u: Vec3,
+        edge_v: Vec3,
+        emission: Vec3,
+        rng: &mut Rng,
+    ) -> Vec3 {
+        let cross = edge_u.cross(edge_v);
+        let area = cross.length();
+        if area <= 0.0 {
+            return Vec3::ZERO;
+        }
+        let light_normal = cross.scale(1.0 / area);
+        let on_light = origin
+            .add(edge_u.scale(rng.next_f32()))
+            .add(edge_v.scale(rng.next_f32()));
+        let to_light = on_light.sub(point);
+        let dist_sq = to_light.length_squared();
+        if dist_sq <= EPS_LEN_SQ {
+            return Vec3::ZERO;
+        }
+        let dist = dist_sq.sqrt();
+        let wi = to_light.scale(1.0 / dist);
+        let cos_surface = normal.dot(wi);
+        let cos_light = light_normal.dot(wi).abs();
+        if cos_surface <= 0.0 || cos_light <= 0.0 {
+            return Vec3::ZERO;
+        }
+        let fr = bsdf.evaluate(wo, wi, normal);
+        let geom = cos_surface * cos_light * area / dist_sq;
+        fr.mul(emission).scale(geom)
+    }
+
+    #[test]
+    fn mis_quad_matches_light_sampling_in_the_mean() {
+        // A glossy conductor exercises both `MIS` strategies: the emitter sample
+        // and the `BSDF` lobe sample. The combined estimator must converge to the
+        // same radiance as the pure light-sampling reference above, proving the
+        // power-heuristic combination adds no bias.
+        let bsdf = Bsdf::GgxConductor {
+            reflectance: Vec3::splat(0.95),
+            roughness: 0.25,
+        };
+        let wo = Vec3::new(0.0, 1.0, 0.0);
+        let origin = Vec3::new(-1.0, 2.0, -1.0);
+        let edge_u = Vec3::new(2.0, 0.0, 0.0);
+        let edge_v = Vec3::new(0.0, 0.0, 2.0);
+        let emission = Vec3::splat(1.0);
+        let quad = Light::Quad {
+            origin,
+            edge_u,
+            edge_v,
+            emission,
+        };
+
+        let count = 200_000u32;
+        let mut mis_sum = 0.0f64;
+        let mut ref_sum = 0.0f64;
+        let mut rng_mis = Rng::seed(900);
+        let mut rng_ref = Rng::seed(901);
+        for _ in 0..count {
+            mis_sum += f64::from(
+                quad.direct(Vec3::ZERO, N, wo, &bsdf, &mut rng_mis, &never_occluded)
+                    .x,
+            );
+            ref_sum += f64::from(
+                light_sample_only(
+                    Vec3::ZERO,
+                    N,
+                    wo,
+                    &bsdf,
+                    origin,
+                    edge_u,
+                    edge_v,
+                    emission,
+                    &mut rng_ref,
+                )
+                .x,
+            );
+        }
+        let mis_mean = mis_sum / f64::from(count);
+        let ref_mean = ref_sum / f64::from(count);
+        assert!(mis_mean > 0.0, "glossy surface should receive light");
+        // Relative agreement within Monte Carlo noise; glossy light sampling is
+        // noisy, so the tolerance is loose but still catches any systematic bias.
+        assert!(
+            (mis_mean / ref_mean - 1.0).abs() < 4.0e-2,
+            "MIS mean {mis_mean} vs light-sampling reference {ref_mean}"
+        );
     }
 
     #[test]
