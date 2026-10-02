@@ -52,6 +52,13 @@
 //!   PRNG, with power-preserving level normalization. Unlike the capture-based
 //!   granulator effect it synthesizes its grains from scratch, so it is a true
 //!   zero-input source.
+//! - [`fof_source::FofSourceNode`] -- formant-wave-function (FOF) voice
+//!   synthesizer: a fundamental phase accumulator fires one damped-sine
+//!   formant grain per active formant on every period, so the periodic
+//!   triggering fixes the pitch while each grain's exponential decay and
+//!   raised-cosine skirt shape an independent formant peak. Unlike the
+//!   stochastic grain cloud of `granular_source` the schedule is
+//!   deterministic and pitch-synchronous, the classic sung-vowel voice.
 //!
 //! Every generator is real-time safe: `process` performs no allocation, no
 //! locking, and no panics, and reproducible generators are fully deterministic
@@ -59,6 +66,7 @@
 
 pub mod additive_oscillator;
 pub mod fm_operator;
+pub mod fof_source;
 pub mod granular_source;
 pub mod impulse_train;
 pub mod karplus_strong;
@@ -71,6 +79,7 @@ pub mod wavetable_oscillator;
 
 pub use additive_oscillator::{AdditiveOscillatorNode, AdditiveOscillatorParams};
 pub use fm_operator::{FmOperatorNode, FmOperatorParams};
+pub use fof_source::{Formant, FofSourceNode, FofSourceParams, MAX_FOF_GRAINS, MAX_FORMANTS};
 pub use granular_source::{GranularSourceNode, GranularSourceParams, MAX_GRAINS};
 pub use impulse_train::{ImpulseTrainNode, ImpulseTrainParams};
 pub use karplus_strong::{KarplusStrongNode, KarplusStrongParams};
