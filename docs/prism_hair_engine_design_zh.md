@@ -127,6 +127,7 @@ fallback:
 
 - **已 delegate**：边长（距离）约束——`hair/dynamics.rs` 不再内嵌手写 XPBD 距离步，经 `hair/physics_bridge.rs`（仿 `cloth/physics_bridge.rs`：`StrandParticle`→SoA、pinned→`inverse_mass=0`、写回）调 `prism_physics_core::soft::constraint::project_distance_constraint`（逐段 Gauss-Seidel、`lambda=0`）。数学等价（仅低位 ULP 差），CPU 单测与 `prism_hair_gpu` guide_solver 孪生 parity 全绿。
 - **已 delegate**：解析代理碰撞 push-out——`hair/collision.rs` 的 sphere/capsule 投影与 `prism_physics_core::soft::collision::{project_out_of_sphere, closest_point_on_segment}` 逐字节重复，改为经 `physics_bridge` 转 `glam` 后 delegate；`Collider` 枚举作为 strand 专有/GPU 孪生侧的紧凑代理描述保留。位等价，CPU 与 `collision`/`sdf_collision`/`strand_collision_resolve` 孪生 parity 全绿。
+- **已 delegate**：SDF 代理 capsule 最近点——`hair/sdf_collision.rs` 的 `closest_point_on_segment` 与 `prism_physics_core::soft::collision::closest_point_on_segment` 位等价（同 `EPS_LEN_SQ=1e-24` 守卫、同 clamp[0,1] 投影参数），删除内嵌副本改为经 `physics_bridge` 转 `glam` 后 delegate；union SDF 的数值梯度 push-out 等 strand 专有逻辑保留。位等价，CPU 13 单测与 `prism_hair_gpu::sdf_collision_parity`(3) 真机孪生全绿。
 - **strand 专有，保留在毛发侧**：局部弯曲（离散 Laplacian 中点平滑，公式异于 physics_core `bending`）、全局形状（拉回造型目标）、LRA/tether（`TressFX` 式线性 stiffness 分数，语义不同于 physics_core `long_range` 的 XPBD compliance——partial stiffness 行为不等价，故不盲目 delegate）、Cosserat 卷发扭转、DFTL 不可伸长积分、PD 全局投影、体素/网格自碰撞、C-IPC 屏障接触（physics_core 无逐粒子等价原语时保留；UE 亦把 groom sim 作专用子系统）。待 physics_core 暴露可直接复用的通用原语后再逐块评估迁移。
 
 ---

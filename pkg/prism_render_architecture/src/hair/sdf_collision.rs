@@ -24,7 +24,10 @@
 
 use alloc::vec::Vec;
 
+use prism_physics_core::soft::collision::closest_point_on_segment;
+
 use super::dynamics::{StrandParticle, Vec3};
+use super::physics_bridge::{from_glam, to_glam};
 
 /// Vectors shorter than the square root of this are treated as zero-length,
 /// matching the epsilon used by the dynamics solver and the analytic colliders.
@@ -100,7 +103,14 @@ impl SdfPrimitive {
                 if radius <= 0.0 {
                     return f32::INFINITY;
                 }
-                let closest = closest_point_on_segment(a, b, point);
+                // Delegate the segment projection to the authoritative
+                // physics engine (bit-identical to the former hand-rolled
+                // helper) rather than keeping a second copy of the math.
+                let closest = from_glam(closest_point_on_segment(
+                    to_glam(a),
+                    to_glam(b),
+                    to_glam(point),
+                ));
                 point.sub(closest).length() - radius
             }
             SdfPrimitive::HalfSpace { normal, offset } => {
@@ -138,18 +148,6 @@ fn box_signed_distance(center: Vec3, half_extents: Vec3, point: Vec3) -> f32 {
     // Distance while inside: negative, the least-penetrating face.
     let inside = dx.max(dy).max(dz).min(0.0);
     outside + inside
-}
-
-/// Returns the point on segment `a`..`b` closest to `point`; a zero-length
-/// segment collapses to `a`, so a degenerate capsule behaves like a sphere.
-fn closest_point_on_segment(a: Vec3, b: Vec3, point: Vec3) -> Vec3 {
-    let ab = b.sub(a);
-    let len_sq = ab.length_squared();
-    if len_sq <= EPS_LEN_SQ {
-        return a;
-    }
-    let t = (point.sub(a).dot(ab) / len_sq).clamp(0.0, 1.0);
-    a.add(ab.scale(t))
 }
 
 /// Union signed distance: the minimum over all primitives (an empty union is
