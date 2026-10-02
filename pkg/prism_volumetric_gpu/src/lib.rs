@@ -167,6 +167,7 @@ pub mod plane_line_intersect;
 pub mod plucker_coord;
 pub mod point_in_polygon;
 pub mod point_in_tetrahedron;
+pub mod point_triangle_closest_3d;
 pub mod popcount_hamming;
 pub mod powder;
 pub mod premultiply_alpha;
@@ -365,6 +366,7 @@ pub use point_in_polygon::{GpuPointInPolygon, PointInPolygonResult};
 pub use point_in_tetrahedron::{
     GpuPointInTetrahedron, PointInTetrahedronQuery, PointInTetrahedronResult,
 };
+pub use point_triangle_closest_3d::{GpuPointTriangleClosest3d, PointTriangleQuery};
 pub use popcount_hamming::GpuPopcountHamming;
 pub use powder::{GpuPowder, PowderQuery};
 pub use premultiply_alpha::GpuPremultiplyAlpha;
