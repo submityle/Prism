@@ -49,10 +49,12 @@ extern crate alloc;
 
 pub mod component;
 pub mod context;
+pub mod lifecycle;
 pub mod props;
 pub mod slots;
 
 pub use component::{render_with_context, ComponentCtx};
 pub use context::ContextMap;
+pub use lifecycle::{mount, LifecycleScope, Mounted};
 pub use props::{mount_component, Component, FnComponent, Props};
 pub use slots::{Slots, SlottedComponent};
