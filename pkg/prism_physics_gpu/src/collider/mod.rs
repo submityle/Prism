@@ -19,6 +19,7 @@
 //! * [`GpuCapsuleTrimeshCollider`] — the device twin of the capsule golden.
 //! * [`cpu_obb_trimesh_collide`] — the oriented-box-versus-mesh CPU golden,
 //!   one deepest contact per box.
+//! * [`GpuObbTrimeshCollider`] — the device twin of the OBB golden.
 //!
 //! The deterministic deepest-contact reduction every mesh collider shares lives
 //! in the private `reduce` module, so the tie-break rule stays identical across
@@ -27,6 +28,7 @@
 mod capsule_trimesh;
 mod capsule_trimesh_gpu;
 mod obb_trimesh;
+mod obb_trimesh_gpu;
 mod reduce;
 mod sphere_trimesh;
 mod sphere_trimesh_gpu;
@@ -35,6 +37,7 @@ mod trimesh;
 pub use capsule_trimesh::cpu_capsule_trimesh_collide;
 pub use capsule_trimesh_gpu::GpuCapsuleTrimeshCollider;
 pub use obb_trimesh::cpu_obb_trimesh_collide;
+pub use obb_trimesh_gpu::GpuObbTrimeshCollider;
 pub use sphere_trimesh::cpu_sphere_trimesh_collide;
 pub use sphere_trimesh_gpu::GpuSphereTrimeshCollider;
 pub use trimesh::Trimesh;

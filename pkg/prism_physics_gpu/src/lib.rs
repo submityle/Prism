@@ -86,7 +86,7 @@ pub use cloth::{
 };
 pub use collider::{
     cpu_capsule_trimesh_collide, cpu_obb_trimesh_collide, cpu_sphere_trimesh_collide,
-    GpuCapsuleTrimeshCollider, GpuSphereTrimeshCollider, Trimesh,
+    GpuCapsuleTrimeshCollider, GpuObbTrimeshCollider, GpuSphereTrimeshCollider, Trimesh,
 };
 pub use contacts::{
     contact_constraints, contact_constraints_with_friction, cpu_resolve_contacts,
