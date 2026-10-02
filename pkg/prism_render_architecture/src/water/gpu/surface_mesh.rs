@@ -226,18 +226,35 @@ mod tests {
                 "{out:?} feeds the vertex stage"
             );
         }
-        // The four outputs cover exactly the four storage-read draw bindings.
-        let storage_slots: Vec<u32> = SurfaceBinding::ALL
+        // The meshing pass writes one array per *freshly-written* storage-read
+        // binding. A previous-frame double-buffered twin
+        // (`PreviousDisplacement`) is the prior frame's copy of an array the
+        // pass already produces, ping-ponged in rather than written again, so
+        // it is excluded from the fresh-write set the outputs must cover.
+        let mut fresh_storage_slots: Vec<u32> = SurfaceBinding::ALL
             .into_iter()
             .filter(|b| matches!(b.kind(), SurfaceBindingKind::StorageRead))
+            .filter(|b| b.previous_frame_twin_of().is_none())
             .map(SurfaceBinding::index)
             .collect();
+        fresh_storage_slots.sort_unstable();
         let mut produced: Vec<u32> = SurfaceMeshOutput::ALL
             .into_iter()
             .map(SurfaceMeshOutput::draw_binding_index)
             .collect();
         produced.sort_unstable();
-        assert_eq!(produced, storage_slots);
+        assert_eq!(produced, fresh_storage_slots);
+
+        // Every double-buffered storage binding mirrors an array the pass does
+        // produce, so no draw slot is left without a writer across frames.
+        for binding in SurfaceBinding::ALL {
+            if let Some(twin) = binding.previous_frame_twin_of() {
+                assert!(
+                    produced.contains(&twin.index()),
+                    "{binding:?} twins {twin:?}, which the meshing pass must produce"
+                );
+            }
+        }
     }
 
     #[test]

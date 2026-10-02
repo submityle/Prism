@@ -130,6 +130,23 @@ impl SurfaceBinding {
                 | SurfaceBinding::SceneSampler
         )
     }
+
+    /// If this binding is a previous-frame double-buffered copy of a
+    /// freshly-written output array, the output binding it mirrors; otherwise
+    /// `None`.
+    ///
+    /// [`SurfaceBinding::PreviousDisplacement`] is the prior frame's
+    /// [`SurfaceBinding::Displacement`] buffer, ping-ponged in rather than
+    /// re-written by the meshing pass, so the surface-meshing kernel produces
+    /// one array that serves both slots across two frames. Every other storage
+    /// array is written fresh each frame and twins nothing.
+    #[must_use]
+    pub fn previous_frame_twin_of(self) -> Option<SurfaceBinding> {
+        match self {
+            SurfaceBinding::PreviousDisplacement => Some(SurfaceBinding::Displacement),
+            _ => None,
+        }
+    }
 }
 
 /// The resource kind of a surface-draw binding, mapped to the backend's
@@ -306,6 +323,23 @@ mod tests {
             SurfaceBinding::PreviousDisplacement.kind(),
             SurfaceBindingKind::StorageRead
         );
+    }
+
+    #[test]
+    fn only_previous_displacement_twins_a_freshly_written_array() {
+        for binding in SurfaceBinding::ALL {
+            match binding.previous_frame_twin_of() {
+                Some(twin) => {
+                    assert_eq!(binding, SurfaceBinding::PreviousDisplacement);
+                    assert_eq!(twin, SurfaceBinding::Displacement);
+                    // The array it mirrors is itself a freshly-written storage
+                    // array, so no twin ever points at another twin.
+                    assert_eq!(twin.kind(), SurfaceBindingKind::StorageRead);
+                    assert!(twin.previous_frame_twin_of().is_none());
+                }
+                None => assert_ne!(binding, SurfaceBinding::PreviousDisplacement),
+            }
+        }
     }
 
     #[test]
