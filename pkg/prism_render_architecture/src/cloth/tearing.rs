@@ -21,10 +21,12 @@
 
 use alloc::vec::Vec;
 
-use super::{ClothParticle, Constraint};
+use prism_physics_core::soft::damage::{
+    plastic_rest_length as physics_plastic_rest_length, tear_flag as physics_tear_flag,
+    tensile_strain as physics_tensile_strain, PlasticParams as PhysicsPlasticParams,
+};
 
-/// Numerical floor below which a rest length is treated as degenerate.
-const EPS_REST: f32 = 1e-9;
+use super::{ClothParticle, Constraint};
 
 /// Tuning for constraint tearing.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -68,14 +70,19 @@ pub struct TearReport {
     pub max_strain: f32,
 }
 
-/// Returns the tensile strain `(len - rest) / rest` of `constraint`, or `None`
-/// when the edge is one-sided, has a degenerate rest length, or references a
+/// Returns the current separation `|p_a - p_b|` of a *tearable* edge, or `None`
+/// when the edge is one-sided ([`ConstraintKind::is_one_sided`]) or references a
 /// particle index outside `particles`.
-fn edge_strain(constraint: &Constraint, particles: &[ClothParticle]) -> Option<f32> {
+///
+/// This isolates the render-side graph semantics (which edges even participate
+/// in damage) from the physics arithmetic: a one-sided attachment leash never
+/// tears or plastically creeps, and an out-of-range endpoint makes the edge
+/// inert. The returned length is then handed to the authoritative scalar
+/// kernels in [`prism_physics_core::soft::damage`] (the degenerate rest-length
+/// floor lives there, shared with the GPU twin), so render and physics agree on
+/// every tear / creep decision.
+fn edge_length(constraint: &Constraint, particles: &[ClothParticle]) -> Option<f32> {
     if constraint.kind.is_one_sided() {
-        return None;
-    }
-    if constraint.rest_length <= EPS_REST {
         return None;
     }
     let a = constraint.a as usize;
@@ -83,8 +90,19 @@ fn edge_strain(constraint: &Constraint, particles: &[ClothParticle]) -> Option<f
     if a >= particles.len() || b >= particles.len() {
         return None;
     }
-    let len = particles[a].position.distance(particles[b].position);
-    Some((len - constraint.rest_length) / constraint.rest_length)
+    Some(particles[a].position.distance(particles[b].position))
+}
+
+/// Returns the tensile strain `(len - rest) / rest` of `constraint`, or `None`
+/// when the edge is one-sided, has a degenerate rest length, or references a
+/// particle index outside `particles`.
+///
+/// The eligibility gate ([`edge_length`]) is render's; the strain ratio itself
+/// is delegated to [`prism_physics_core::soft::damage::tensile_strain`] so the
+/// floor and divide guard match the physics tear / creep kernels exactly.
+fn edge_strain(constraint: &Constraint, particles: &[ClothParticle]) -> Option<f32> {
+    let len = edge_length(constraint, particles)?;
+    physics_tensile_strain(constraint.rest_length, len)
 }
 
 /// Removes every two-sided fabric edge whose tensile strain exceeds
@@ -127,8 +145,8 @@ pub fn tear_flags(
     let params = params.sanitized();
     constraints
         .iter()
-        .map(|c| match edge_strain(c, particles) {
-            Some(strain) => strain > params.break_strain,
+        .map(|c| match edge_length(c, particles) {
+            Some(len) => physics_tear_flag(c.rest_length, len, params.break_strain),
             None => false,
         })
         .collect()
@@ -220,32 +238,20 @@ pub fn apply_plasticity(
     particles: &[ClothParticle],
     params: PlasticParams,
 ) {
-    let params = params.sanitized();
+    let physics_params = PhysicsPlasticParams::new(
+        params.yield_strain,
+        params.creep,
+        params.max_strain,
+    );
     for c in constraints.iter_mut() {
-        let Some(strain) = edge_strain(c, particles) else {
+        let Some(len) = edge_length(c, particles) else {
             continue;
         };
-        let magnitude = strain.abs();
-        if magnitude <= params.yield_strain {
-            continue;
-        }
-        let a = c.a as usize;
-        let b = c.b as usize;
-        let len = particles[a].position.distance(particles[b].position);
-        let sign = if strain >= 0.0 { 1.0 } else { -1.0 };
-        let excess = strain - sign * params.yield_strain;
-        // Move the rest length by `creep` fraction of the excess strain.
-        let mut new_rest = c.rest_length * (1.0 + params.creep * excess);
-        if new_rest <= EPS_REST {
-            new_rest = EPS_REST;
-        }
-        // Clamp so the residual elastic strain magnitude stays within max.
-        let residual = (len - new_rest) / new_rest;
-        if residual.abs() > params.max_strain {
-            let residual_sign = if residual >= 0.0 { 1.0 } else { -1.0 };
-            new_rest = len / (1.0 + residual_sign * params.max_strain);
-        }
-        if new_rest > EPS_REST {
+        // The whole creep arithmetic (yield band, excess, residual clamp, and
+        // the degenerate rest-length floor) is the authoritative physics
+        // kernel; render only decides which edges are eligible and writes the
+        // crept rest length back.
+        if let Some(new_rest) = physics_plastic_rest_length(c.rest_length, len, physics_params) {
             c.rest_length = new_rest;
         }
     }
@@ -335,11 +341,7 @@ mod tests {
         assert_eq!(flags, vec![true, false, false, false]);
         // The flags exactly predict what apply_tearing removes.
         let mut torn = constraints.clone();
-        let removed = apply_tearing(
-            &mut torn,
-            &particles,
-            TearingParams { break_strain: 0.5 },
-        );
+        let removed = apply_tearing(&mut torn, &particles, TearingParams { break_strain: 0.5 });
         assert_eq!(removed, flags.iter().filter(|&&f| f).count());
         assert_eq!(torn.len(), constraints.len() - removed);
     }

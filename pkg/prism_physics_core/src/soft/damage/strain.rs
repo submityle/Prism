@@ -40,6 +40,24 @@ pub(crate) fn edge_strain(edge: &DistanceConstraint, positions: &[Vec3]) -> Opti
     Some((len - edge.rest_length) / edge.rest_length)
 }
 
+/// Returns the tensile strain `(length - rest_length) / rest_length` for one
+/// edge from its current `rest_length` and current `length` (the separation of
+/// its two endpoints), or `None` when the rest length is degenerate
+/// (`<= EPS_REST`).
+///
+/// This is the scalar primitive behind both tearing and plasticity: a render
+/// (or GPU) caller that already knows an edge's rest length and endpoint
+/// separation routes its strain query through here instead of re-deriving the
+/// ratio, so every consumer agrees on the same floor and divide guard. A
+/// positive value is tension, a negative value is compression.
+#[must_use]
+pub fn tensile_strain(rest_length: Real, length: Real) -> Option<Real> {
+    if rest_length <= EPS_REST {
+        return None;
+    }
+    Some((length - rest_length) / rest_length)
+}
+
 /// Returns the current separation `|p_a - p_b|` of a distance `edge`, or `None`
 /// when either endpoint index is out of range.
 #[must_use]
@@ -47,4 +65,26 @@ pub(crate) fn edge_length(edge: &DistanceConstraint, positions: &[Vec3]) -> Opti
     let pa = positions.get(edge.a.index())?;
     let pb = positions.get(edge.b.index())?;
     Some((*pa - *pb).length())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tensile_strain_is_signed_ratio() {
+        // Stretched: 50% tension.
+        let s = tensile_strain(1.0, 1.5).unwrap();
+        assert!((s - 0.5).abs() < 1e-6);
+        // Compressed: negative strain.
+        let c = tensile_strain(1.0, 0.25).unwrap();
+        assert!((c + 0.75).abs() < 1e-6);
+    }
+
+    #[test]
+    fn tensile_strain_rejects_degenerate_rest() {
+        assert_eq!(tensile_strain(0.0, 10.0), None);
+        assert_eq!(tensile_strain(EPS_REST, 10.0), None);
+        assert!(tensile_strain(EPS_REST * 2.0, 10.0).is_some());
+    }
 }
