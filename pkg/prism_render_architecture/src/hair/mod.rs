@@ -101,6 +101,7 @@ pub mod optional_pass_layout;
 pub mod pass_layout;
 pub mod pass_params;
 pub mod persistent_coloring;
+pub mod physics_bridge;
 pub mod pipeline_layout;
 pub mod projective_global;
 pub mod raster;

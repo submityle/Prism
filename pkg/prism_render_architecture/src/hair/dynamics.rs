@@ -16,8 +16,11 @@
 //! projecting four constraint families for `iterations` Gauss-Seidel sweeps:
 //!
 //! 1. **Edge-length** — a compliant distance constraint per segment keeps the
-//!    strand from stretching, using the XPBD compliance `alpha = compliance /
-//!    dt_sub^2` so stiffness is step-size independent.
+//!    strand from stretching. The projection is delegated to the authoritative
+//!    physics engine (`prism_physics_core`) through
+//!    [`super::physics_bridge::solve_edges`] rather than re-implemented here, so
+//!    there is a single copy of the XPBD distance arithmetic; the engine
+//!    normalizes compliance by `dt_sub^2` so stiffness is step-size independent.
 //! 2. **Local shape (bending)** — each interior particle is pulled toward the
 //!    midpoint of its two neighbors, a discrete Laplacian that resists kinks
 //!    and stops the strand collapsing onto itself.
@@ -246,16 +249,13 @@ pub fn simulate_strand(
     let global_stiffness = params.global_stiffness.clamp(0.0, 1.0);
     let lra_stiffness = params.lra_stiffness.clamp(0.0, 1.0);
     let edge_compliance = params.edge_compliance.max(0.0);
-    // XPBD compliance is normalized by the squared step so stiffness does not
-    // change when the substep count does.
-    let alpha = edge_compliance / sub_dt_sq;
     let gravity_step = params.gravity.scale(sub_dt_sq);
     let velocity_retain = 1.0 - damping;
 
     for _ in 0..params.substeps {
         integrate(particles, gravity_step, velocity_retain);
         for _ in 0..params.iterations {
-            solve_edges(particles, rest_lengths, alpha);
+            super::physics_bridge::solve_edges(particles, rest_lengths, edge_compliance, sub_dt);
             solve_local(particles, local_stiffness);
             solve_global(particles, goal_positions, global_stiffness);
             solve_lra(particles, rest_lengths, lra_stiffness);
@@ -284,45 +284,6 @@ fn integrate(particles: &mut [StrandParticle], gravity_step: Vec3, velocity_reta
             .scale(velocity_retain);
         particle.prev_position = particle.position;
         particle.position = particle.position.add(velocity).add(gravity_step);
-    }
-}
-
-/// Projects the compliant edge-length constraint over every segment once.
-///
-/// For each segment the correction is distributed between its endpoints by
-/// inverse mass, so a pinned endpoint absorbs none of it. A missing
-/// `rest_lengths` entry or a degenerate (zero-length or two-pinned) segment is
-/// skipped.
-fn solve_edges(particles: &mut [StrandParticle], rest_lengths: &[f32], alpha: f32) {
-    let count = particles.len();
-    let mut i = 0;
-    while i + 1 < count {
-        let Some(&rest) = rest_lengths.get(i) else {
-            i += 1;
-            continue;
-        };
-        let (head, tail) = particles.split_at_mut(i + 1);
-        let a = &mut head[i];
-        let b = &mut tail[0];
-        let w_a = a.inverse_mass.max(0.0);
-        let w_b = b.inverse_mass.max(0.0);
-        let w_sum = w_a + w_b;
-        if w_sum <= 0.0 {
-            i += 1;
-            continue;
-        }
-        let delta = b.position.sub(a.position);
-        let len = delta.length();
-        if len <= EPS_LEN {
-            i += 1;
-            continue;
-        }
-        let dir = delta.scale(1.0 / len);
-        let constraint = len - rest;
-        let lambda = constraint / (w_sum + alpha);
-        a.position = a.position.add(dir.scale(w_a * lambda));
-        b.position = b.position.sub(dir.scale(w_b * lambda));
-        i += 1;
     }
 }
 
