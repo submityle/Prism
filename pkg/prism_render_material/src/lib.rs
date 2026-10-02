@@ -42,13 +42,14 @@ pub use ir::{
 pub use normal_map::{
     anisotropic_ggx_from_covariance, average_unit_normals, blend_linear, blend_rnm,
     blend_surface_gradient, blend_surface_gradient_pair, blend_triplanar_whiteout, blend_udn,
-    blend_whiteout, decode_ag, decode_rg, ggx_alpha_to_variance, height_to_normal, lean_average,
-    lean_covariance, lean_effective_variance, lean_from_normal, lean_from_slope,
-    lean_resolve_normal, normal_to_slope, power_from_roughness, reconstruct_z,
-    reduce_normal_roughness_2x, resolve_surface_gradient, roughness_from_power, scale_strength,
-    slope_covariance_eigen, slope_covariance_from_eigen, slope_to_normal, toksvig_factor,
-    toksvig_roughness, triplanar_weights, unorm_to_snorm, variance_to_ggx_alpha, HeightGradient,
-    LeanMoments, NormalLayer, SlopeEigen,
+    blend_whiteout, decode_ag, decode_rg, ggx_alpha_to_variance, height_to_normal, hemi_oct_decode,
+    hemi_oct_decode_unorm, hemi_oct_encode, hemi_oct_encode_unorm, lean_average, lean_covariance,
+    lean_effective_variance, lean_from_normal, lean_from_slope, lean_resolve_normal,
+    normal_to_slope, power_from_roughness, reconstruct_z, reduce_normal_roughness_2x,
+    resolve_surface_gradient, roughness_from_power, scale_strength, slope_covariance_eigen,
+    slope_covariance_from_eigen, slope_to_normal, toksvig_factor, toksvig_roughness,
+    triplanar_weights, unorm_to_snorm, variance_to_ggx_alpha, HeightGradient, LeanMoments,
+    NormalLayer, SlopeEigen,
 };
 pub use record::{
     fallback_material_header, fallback_material_record, inactive_material_header,

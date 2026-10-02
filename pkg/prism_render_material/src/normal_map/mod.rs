@@ -20,6 +20,7 @@ mod blend;
 mod height;
 mod lean;
 mod mipmap;
+mod octahedral;
 mod reconstruct;
 mod strength;
 mod surface_gradient;
@@ -38,6 +39,9 @@ pub use lean::{
 pub use mipmap::{
     average_unit_normals, power_from_roughness, reduce_normal_roughness_2x, roughness_from_power,
     toksvig_factor, toksvig_roughness,
+};
+pub use octahedral::{
+    hemi_oct_decode, hemi_oct_decode_unorm, hemi_oct_encode, hemi_oct_encode_unorm,
 };
 pub use reconstruct::{decode_ag, decode_rg, reconstruct_z, unorm_to_snorm};
 pub use strength::{normal_to_slope, scale_strength, slope_to_normal};
