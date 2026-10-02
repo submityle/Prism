@@ -18,6 +18,7 @@
 mod anisotropy;
 mod basis;
 mod blend;
+mod equirect;
 mod height;
 mod lean;
 mod mipmap;
@@ -35,6 +36,7 @@ pub use anisotropy::{
 };
 pub use basis::{object_to_tangent, orthonormalize_basis, tangent_to_object, TangentBasis};
 pub use blend::{blend_linear, blend_rnm, blend_udn, blend_whiteout};
+pub use equirect::{equirect_decode, equirect_encode};
 pub use height::{height_to_normal, HeightGradient};
 pub use lean::{
     lean_average, lean_covariance, lean_effective_variance, lean_from_normal, lean_from_slope,
