@@ -62,6 +62,28 @@ fn fill_wesl_compiles_standalone() {
         .unwrap_or_else(|error| panic!("world_restir_fill.wesl failed to compile: {error}"));
 }
 
+/// Compiles `world_restir_seed.wesl`, proving the per-cell light `RIS` seed
+/// kernel parses and type-checks exactly as it will in the render world (the
+/// `src`/`dst` reservoir storage bindings, the `@binding(2)` light list, and
+/// the `SeedParams` immediate).
+#[test]
+fn seed_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let seed = shader_id(0x5052_4953_4d5f_5753_5244_5f46_494c_0002);
+    cache.set_shader(
+        seed,
+        Shader::from_wesl(
+            include_str!("../../shaders/world_restir_seed.wesl"),
+            "embedded://prism_render_scene/shaders/world_restir_seed.wesl",
+        ),
+    );
+
+    cache
+        .get(0, seed, &[])
+        .unwrap_or_else(|error| panic!("world_restir_seed.wesl failed to compile: {error}"));
+}
+
 /// Guards the Rust device `ABI` against drift from the WESL twin: the reservoir
 /// slot is the 80-byte five-lane record, the fill immediate is the 64-byte
 /// four-lane block, and the workgroup constant matches `@workgroup_size(64, 1,
@@ -69,16 +91,26 @@ fn fill_wesl_compiles_standalone() {
 #[test]
 fn world_restir_abi_matches_the_shader_layout() {
     use super::abi::{
-        GpuWorldRestirFillParams, GpuWorldRestirReservoir, WORLD_RESTIR_RESERVOIR_STRIDE,
-        WORLD_RESTIR_WORKGROUP_SIZE,
+        GpuWorldRestirFillParams, GpuWorldRestirLight, GpuWorldRestirReservoir,
+        GpuWorldRestirSeedParams, WORLD_RESTIR_LIGHT_STRIDE, WORLD_RESTIR_RESERVOIR_STRIDE,
+        WORLD_RESTIR_SEED_WORKGROUP_SIZE, WORLD_RESTIR_WORKGROUP_SIZE,
     };
 
+    // Fill pass: 80-byte five-lane reservoir slot + 64-byte four-lane immediate.
     assert_eq!(size_of::<GpuWorldRestirReservoir>(), 80);
     assert_eq!(align_of::<GpuWorldRestirReservoir>(), 4);
     assert_eq!(WORLD_RESTIR_RESERVOIR_STRIDE, 80);
     assert_eq!(size_of::<GpuWorldRestirFillParams>(), 64);
     assert_eq!(align_of::<GpuWorldRestirFillParams>(), 4);
     assert_eq!(WORLD_RESTIR_WORKGROUP_SIZE, 64);
+
+    // Seed pass: 32-byte two-lane light record + 32-byte two-lane immediate.
+    assert_eq!(size_of::<GpuWorldRestirLight>(), 32);
+    assert_eq!(align_of::<GpuWorldRestirLight>(), 4);
+    assert_eq!(WORLD_RESTIR_LIGHT_STRIDE, 32);
+    assert_eq!(size_of::<GpuWorldRestirSeedParams>(), 32);
+    assert_eq!(align_of::<GpuWorldRestirSeedParams>(), 4);
+    assert_eq!(WORLD_RESTIR_SEED_WORKGROUP_SIZE, 64);
 }
 
 /// Bit-exact Rust re-implementation of the WESL `vec2<u32>` 64-bit `SHARC`
@@ -249,6 +281,430 @@ fn fill_shader_hash_matches_cpu_golden() {
                         "bucket mismatch at coord={coord:?} level={level} \
                          normal_bin={normal_bin} capacity={capacity}"
                     );
+                }
+            }
+        }
+    }
+}
+
+/// Asserts two `Vec3`s are bit-identical component-by-component. Any NaN would
+/// make a plain `==` lie, so the only faithful equality for a `GPU`-mirrored
+/// float is on the raw bit pattern. `ctx` is the `(frame, slot, candidate_count)`
+/// coordinate, surfaced for diagnostics.
+fn assert_vec3_bits(
+    golden: bevy_math::Vec3,
+    mirror: bevy_math::Vec3,
+    field: &str,
+    ctx: (u32, u32, u32),
+) {
+    assert_eq!(
+        golden.x.to_bits(),
+        mirror.x.to_bits(),
+        "{field}.x mismatch at frame/slot/candidates {ctx:?}"
+    );
+    assert_eq!(
+        golden.y.to_bits(),
+        mirror.y.to_bits(),
+        "{field}.y mismatch at frame/slot/candidates {ctx:?}"
+    );
+    assert_eq!(
+        golden.z.to_bits(),
+        mirror.z.to_bits(),
+        "{field}.z mismatch at frame/slot/candidates {ctx:?}"
+    );
+}
+
+/// Bit-exact Rust transcription of `world_restir_seed.wesl`'s `RIS` estimator.
+///
+/// Every function mirrors a WESL twin line-for-line (`fmix32` / `rng01` /
+/// `pick_light` / `luminance` / `geometric_term` / `target_function` /
+/// `build_sample` / `ris_weight` and the `seed_main` resampling loop), with the
+/// WESL `x == x` NaN probe written as `!x.is_nan()`. Under the finite-only input
+/// sweep in [`seed_shader_matches_cpu_golden`] this is the device-equivalence
+/// proof that the kernel's inlined estimator matches the authoritative
+/// `Reservoir` golden it ports (`WGSL` has no 64-bit ints, so a CPU mirror is
+/// the only no-GPU check available).
+mod seed_mirror {
+    use bevy_math::Vec3;
+    use prism_render_shading::gi::screen_probe::restir::GiSample;
+
+    /// Smallest positive normal `f32` (golden `f32::MIN_POSITIVE`, WESL `MIN_POSITIVE`).
+    const MIN_POSITIVE: f32 = f32::MIN_POSITIVE;
+    /// Rec. 709 luminance weights (golden/WESL `LUMA_R` / `LUMA_G` / `LUMA_B`).
+    const LUMA_R: f32 = 0.212_639;
+    const LUMA_G: f32 = 0.715_169;
+    const LUMA_B: f32 = 0.072_192;
+
+    /// One candidate emitter — mirror of the WESL `WorldRestirLight` fields the
+    /// estimator consumes (`position` / `intensity` / `color`).
+    #[derive(Clone, Copy, Debug)]
+    pub struct Light {
+        pub position: Vec3,
+        pub intensity: f32,
+        pub color: Vec3,
+    }
+
+    /// The seeded reservoir summary the kernel serialises: the surviving sample,
+    /// its finalised contribution weight `W`, and the capped confidence `m`.
+    pub struct SeedResult {
+        pub sample: Option<GiSample>,
+        pub w: f32,
+        pub m: f32,
+    }
+
+    /// `MurmurHash3` 32-bit finalizer (WESL `fmix32`).
+    pub fn fmix32(x_in: u32) -> u32 {
+        let mut x = x_in;
+        x ^= x >> 16;
+        x = x.wrapping_mul(0x7feb_352d);
+        x ^= x >> 15;
+        x = x.wrapping_mul(0x846c_a68b);
+        x ^= x >> 16;
+        x
+    }
+
+    /// Uniform in `[0, 1)` seeded by `(frame, slot, counter)` (WESL `rng01`).
+    pub fn rng01(frame: u32, slot: u32, counter: u32) -> f32 {
+        let h = fmix32(
+            frame
+                .wrapping_mul(0x9e37_79b9)
+                .wrapping_add(fmix32(slot.wrapping_mul(0x85eb_ca6b).wrapping_add(counter))),
+        );
+        (h >> 8) as f32 * (1.0 / 16_777_216.0)
+    }
+
+    /// Picks a light index in `[0, light_count)` for candidate `k` (WESL
+    /// `pick_light`); callers guarantee `light_count > 0`.
+    pub fn pick_light(frame: u32, slot: u32, k: u32, light_count: u32) -> u32 {
+        fmix32(
+            frame
+                .wrapping_mul(0x9e37_79b9)
+                .wrapping_add(slot.wrapping_mul(0x85eb_ca6b))
+                .wrapping_add(k.wrapping_mul(0x1656_67b1)),
+        ) % light_count
+    }
+
+    /// Rec. 709 luminance of a linear RGB triple (WESL `luminance`).
+    fn luminance(rgb: Vec3) -> f32 {
+        LUMA_R * rgb.x.max(0.0) + LUMA_G * rgb.y.max(0.0) + LUMA_B * rgb.z.max(0.0)
+    }
+
+    /// Surface-to-surface geometry factor `cos_v * cos_s / dist^2` (WESL
+    /// `geometric_term`); zero for degenerate / back-facing / NaN pairs. Uses
+    /// `dist_sq.sqrt().recip()` to reproduce the golden's exact IEEE reciprocal
+    /// square root bit-for-bit.
+    fn geometric_term(
+        visible_point: Vec3,
+        visible_normal: Vec3,
+        sample_point: Vec3,
+        sample_normal: Vec3,
+    ) -> f32 {
+        let delta = sample_point - visible_point;
+        let dist_sq = delta.length_squared();
+        if dist_sq > MIN_POSITIVE {
+            let inv_dist = dist_sq.sqrt().recip();
+            let dir = delta * inv_dist;
+            let cos_v = visible_normal.dot(dir).max(0.0);
+            let cos_s = sample_normal.dot(-dir).max(0.0);
+            let term = cos_v * cos_s / dist_sq;
+            // `!term.is_nan()` mirrors the WESL `term == term` NaN reject.
+            if !term.is_nan() {
+                return term.max(0.0);
+            }
+        }
+        0.0
+    }
+
+    /// Scalar resampling target `p_hat` (WESL `target_function`).
+    fn target_function(s: &GiSample) -> f32 {
+        let g = geometric_term(
+            s.visible_point,
+            s.visible_normal,
+            s.sample_point,
+            s.sample_normal,
+        );
+        let t = luminance(s.radiance) * g;
+        if t.is_nan() {
+            0.0
+        } else {
+            t.max(0.0)
+        }
+    }
+
+    /// Resampled-importance weight `target_function / source_pdf` (WESL
+    /// `ris_weight`). The WESL guard is `!(source_pdf > 0.0)`; for the finite
+    /// source pdfs the seed ever sees (`1 / light_count`) that is exactly
+    /// `source_pdf <= 0.0`.
+    fn ris_weight(s: &GiSample, source_pdf: f32) -> f32 {
+        if source_pdf <= 0.0 {
+            return 0.0;
+        }
+        let w = target_function(s) / source_pdf;
+        if w.is_nan() {
+            0.0
+        } else {
+            w.max(0.0)
+        }
+    }
+
+    /// Builds a light candidate from the cell's visible geometry and one emitter
+    /// (WESL `build_sample`): the secondary point is the emitter position, its
+    /// normal faces the visible point, and the radiance is the emitter colour
+    /// scaled by its intensity and the artistic gain. Shared verbatim by the
+    /// golden and mirror sweeps so both resolve the identical `GiSample`.
+    pub fn build_sample(
+        visible_point: Vec3,
+        visible_normal: Vec3,
+        light: &Light,
+        intensity: f32,
+    ) -> GiSample {
+        let sample_point = light.position;
+        let delta = visible_point - sample_point;
+        let dist_sq = delta.length_squared();
+        let sample_normal = if dist_sq > MIN_POSITIVE {
+            delta * dist_sq.sqrt().recip()
+        } else {
+            Vec3::Z
+        };
+        GiSample {
+            visible_point,
+            visible_normal,
+            sample_point,
+            sample_normal,
+            radiance: light.color * (light.intensity * intensity),
+        }
+    }
+
+    /// Hand-rolls the WESL `seed_main` streaming `RIS` loop for one occupied
+    /// cell: draws `candidate_count` lights, folds each positive weight into the
+    /// reservoir, caps the confidence, then finalizes `W` from the surviving
+    /// sample's own target density. Bit-equal to the golden `stream_candidate` +
+    /// `cap_confidence` + `finalize` chain on finite inputs.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "arm-for-arm mirror of the WESL `seed_main` inputs; bundling them would obscure the one-to-one port"
+    )]
+    pub fn seed_cell(
+        visible_point: Vec3,
+        visible_normal: Vec3,
+        lights: &[Light],
+        candidate_count: u32,
+        frame: u32,
+        slot: u32,
+        intensity: f32,
+        m_cap: f32,
+    ) -> SeedResult {
+        let light_count = lights.len() as u32;
+        let mut selected: Option<GiSample> = None;
+        let mut w_sum = 0.0f32;
+        let mut m = 0.0f32;
+        if light_count > 0 {
+            let source_pdf = 1.0 / light_count as f32;
+            for k in 0..candidate_count {
+                let li = pick_light(frame, slot, k, light_count) as usize;
+                let candidate = build_sample(visible_point, visible_normal, &lights[li], intensity);
+                let weight = ris_weight(&candidate, source_pdf);
+                if weight > 0.0 {
+                    w_sum += weight;
+                    m += 1.0;
+                    let u = rng01(frame, slot, k).clamp(0.0, 1.0);
+                    if u * w_sum <= weight {
+                        selected = Some(candidate);
+                    }
+                }
+            }
+        }
+        if m_cap >= 0.0 && m > m_cap {
+            m = m_cap;
+        }
+        let mut w = 0.0f32;
+        if let Some(s) = selected {
+            let p_hat = target_function(&s);
+            // `!w_sum.is_nan()` mirrors the golden `w_sum.is_finite()` guard
+            // (equivalent on the finite sweep); `p_hat > 0.0` is the finalize
+            // positivity test.
+            if m > 0.0 && !w_sum.is_nan() && p_hat > 0.0 {
+                let cw = (w_sum / m) / p_hat;
+                w = if !cw.is_nan() && cw >= 0.0 { cw } else { 0.0 };
+            }
+        }
+        SeedResult {
+            sample: selected,
+            w,
+            m,
+        }
+    }
+}
+
+/// Asserts the seed kernel's inlined `RIS` estimator (transcribed by
+/// [`seed_mirror`]) reproduces the authoritative `Reservoir` golden
+/// (`stream_candidate` / `cap_confidence` / `finalize`) bit-for-bit across a
+/// sweep of cell geometries, light sets (bright / single / dark / coincident),
+/// candidate budgets, `M`-caps, artistic gains, and frames. The golden and the
+/// mirror share `rng01` / `pick_light` / `build_sample`, so the only variable
+/// under test is the resampling arithmetic. This is the device-equivalence
+/// proof for the seed port under the no-GPU sandbox.
+#[test]
+fn seed_shader_matches_cpu_golden() {
+    use bevy_math::Vec3;
+    use prism_render_shading::gi::screen_probe::restir::{GiSample, Reservoir};
+    use prism_render_shading::gi::world_restir::world_reservoir::{finalize, stream_candidate};
+    use seed_mirror::{build_sample, pick_light, rng01, seed_cell, Light};
+
+    let cells: [(Vec3, Vec3); 5] = [
+        (Vec3::new(0.0, 0.0, 0.0), Vec3::Z),
+        (Vec3::new(1.0, 2.0, 3.0), Vec3::new(0.0, 1.0, 0.0)),
+        (Vec3::new(-4.0, 0.5, 2.0), Vec3::new(1.0, 0.0, 0.0)),
+        (Vec3::new(2.5, -1.0, -3.0), Vec3::new(0.0, 0.0, -1.0)),
+        (
+            Vec3::new(-1.0, -2.0, 1.5),
+            Vec3::new(1.0, 1.0, 1.0).normalize(),
+        ),
+    ];
+    let cell0_vp = cells[0].0;
+    let light_sets: [Vec<Light>; 4] = [
+        // Bright: three well-separated emitters with distinct colours.
+        vec![
+            Light {
+                position: Vec3::new(5.0, 4.0, 1.0),
+                intensity: 3.0,
+                color: Vec3::new(1.0, 0.8, 0.6),
+            },
+            Light {
+                position: Vec3::new(-3.0, 6.0, -2.0),
+                intensity: 1.5,
+                color: Vec3::new(0.4, 0.9, 1.0),
+            },
+            Light {
+                position: Vec3::new(0.0, -5.0, 4.0),
+                intensity: 2.0,
+                color: Vec3::new(0.7, 0.7, 0.2),
+            },
+        ],
+        // Single emitter.
+        vec![Light {
+            position: Vec3::new(2.0, 3.0, -1.0),
+            intensity: 4.0,
+            color: Vec3::new(0.9, 0.5, 0.3),
+        }],
+        // Dark: zero radiance (zero intensity / zero colour) -> every candidate
+        // weight is 0 -> no selection on either side.
+        vec![
+            Light {
+                position: Vec3::new(1.0, 1.0, 1.0),
+                intensity: 0.0,
+                color: Vec3::new(1.0, 1.0, 1.0),
+            },
+            Light {
+                position: Vec3::new(-2.0, 2.0, 3.0),
+                intensity: 5.0,
+                color: Vec3::ZERO,
+            },
+        ],
+        // Coincident: the first emitter sits on cell 0's visible point
+        // (degenerate geometry there -> zero geometric term -> skipped) plus one
+        // healthy emitter.
+        vec![
+            Light {
+                position: cell0_vp,
+                intensity: 2.0,
+                color: Vec3::new(1.0, 1.0, 1.0),
+            },
+            Light {
+                position: Vec3::new(3.0, 1.0, -2.0),
+                intensity: 1.0,
+                color: Vec3::new(0.6, 0.8, 1.0),
+            },
+        ],
+    ];
+    let candidate_counts: [u32; 4] = [0, 1, 4, 16];
+    let m_caps: [f32; 4] = [-1.0, 0.0, 2.0, 32.0];
+    let intensities: [f32; 3] = [0.5, 1.0, 2.0];
+
+    for (cell_idx, &(vp, vn)) in cells.iter().enumerate() {
+        let slot = (cell_idx as u32) * 7 + 1;
+        for lights in &light_sets {
+            let light_count = lights.len() as u32;
+            for &candidate_count in &candidate_counts {
+                for &m_cap in &m_caps {
+                    for &intensity in &intensities {
+                        for frame in 0..4u32 {
+                            // Golden: the authoritative Reservoir RIS path.
+                            let mut r = Reservoir::<GiSample>::new();
+                            if light_count > 0 {
+                                let source_pdf = 1.0 / light_count as f32;
+                                for k in 0..candidate_count {
+                                    let li = pick_light(frame, slot, k, light_count) as usize;
+                                    let sample = build_sample(vp, vn, &lights[li], intensity);
+                                    stream_candidate(
+                                        &mut r,
+                                        sample,
+                                        source_pdf,
+                                        rng01(frame, slot, k),
+                                    );
+                                }
+                            }
+                            r.cap_confidence(m_cap);
+                            finalize(&mut r);
+
+                            // Mirror: the kernel's inlined estimator.
+                            let mirror = seed_cell(
+                                vp,
+                                vn,
+                                lights,
+                                candidate_count,
+                                frame,
+                                slot,
+                                intensity,
+                                m_cap,
+                            );
+
+                            let ctx = (frame, slot, candidate_count);
+                            assert_eq!(
+                                r.contribution_weight().to_bits(),
+                                mirror.w.to_bits(),
+                                "W mismatch at {ctx:?} (m_cap={m_cap}, intensity={intensity}, lights={light_count})"
+                            );
+                            assert_eq!(
+                                r.confidence().to_bits(),
+                                mirror.m.to_bits(),
+                                "m mismatch at {ctx:?} (m_cap={m_cap}, intensity={intensity}, lights={light_count})"
+                            );
+                            match (r.sample(), mirror.sample) {
+                                (Some(g), Some(mi)) => {
+                                    assert_vec3_bits(
+                                        g.visible_point,
+                                        mi.visible_point,
+                                        "visible_point",
+                                        ctx,
+                                    );
+                                    assert_vec3_bits(
+                                        g.visible_normal,
+                                        mi.visible_normal,
+                                        "visible_normal",
+                                        ctx,
+                                    );
+                                    assert_vec3_bits(
+                                        g.sample_point,
+                                        mi.sample_point,
+                                        "sample_point",
+                                        ctx,
+                                    );
+                                    assert_vec3_bits(
+                                        g.sample_normal,
+                                        mi.sample_normal,
+                                        "sample_normal",
+                                        ctx,
+                                    );
+                                    assert_vec3_bits(g.radiance, mi.radiance, "radiance", ctx);
+                                }
+                                (None, None) => {}
+                                (g, mi) => {
+                                    panic!("selection divergence at {ctx:?}: golden={g:?} mirror={mi:?}")
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

@@ -35,6 +35,11 @@ const DEFAULT_RESTIR_SPATIAL_SAMPLES: u32 = 4;
 /// Default `GRIS` spatial-reuse search radius in cells around each slot.
 const DEFAULT_RESTIR_SPATIAL_RADIUS: u32 = 1;
 
+/// Default per-occupied-slot `RIS` candidate budget the seed pass streams each
+/// frame: eight light candidates, a sane starting point balancing per-slot cost
+/// against first-frame reservoir quality.
+const DEFAULT_RESTIR_CANDIDATE_COUNT: u32 = 8;
+
 /// Global world-space `ReSTIR` direct-illumination settings consumed by the
 /// fill pass and the water-surface `@group(9)` consumer.
 ///
@@ -71,6 +76,10 @@ pub(crate) struct PrismWorldRestirSettings {
     pub spatial_samples: u32,
     /// Spatial-reuse search radius in cells around each slot.
     pub spatial_radius: u32,
+    /// Per-occupied-slot `RIS` candidate budget the seed pass streams each
+    /// frame (golden `stream_candidate` loop count); `0` leaves every slot
+    /// unseeded.
+    pub candidate_count: u32,
 }
 
 impl Default for PrismWorldRestirSettings {
@@ -90,6 +99,7 @@ impl Default for PrismWorldRestirSettings {
             intensity: 1.0,
             spatial_samples: DEFAULT_RESTIR_SPATIAL_SAMPLES,
             spatial_radius: DEFAULT_RESTIR_SPATIAL_RADIUS,
+            candidate_count: DEFAULT_RESTIR_CANDIDATE_COUNT,
         }
     }
 }
@@ -211,5 +221,12 @@ mod tests {
         assert_eq!(params.m_cap, settings.m_cap);
         assert_eq!(params.spatial_samples, settings.spatial_samples);
         assert_eq!(params.spatial_radius, settings.spatial_radius);
+    }
+
+    #[test]
+    fn default_candidate_count_is_a_sane_seed_budget() {
+        let settings = PrismWorldRestirSettings::default();
+        assert_eq!(settings.candidate_count, DEFAULT_RESTIR_CANDIDATE_COUNT);
+        assert!(settings.candidate_count >= 1);
     }
 }

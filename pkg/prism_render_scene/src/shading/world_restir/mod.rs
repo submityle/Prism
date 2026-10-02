@@ -18,9 +18,24 @@
 //! stable ABI. This slice adds the resident ping-pong reservoir tables
 //! ([`resources`]), the fill compute pipeline ([`pipeline`]) and its bind
 //! group ([`bind_groups`]), and the `Core3d` dispatch ([`dispatch`]) that puts
-//! the fill pass on the render graph. The seed pass that populates the table
-//! from the frame's lights, and the water-surface `@group(9)` consumer, land in
-//! follow-up slices.
+//! the fill pass on the render graph.
+//!
+//! This slice also freezes the seed pass's device contract: the per-frame
+//! light record [`abi::GpuWorldRestirLight`], the seed immediate block
+//! [`abi::GpuWorldRestirSeedParams`] (plus the [`settings`] `candidate_count`
+//! budget and the seed workgroup / light-stride constants), and the WESL seed
+//! kernel `shaders/world_restir_seed.wesl` — the per-cell light `RIS` producer
+//! that streams `candidate_count` candidates through each occupied slot's
+//! reservoir, caps the confidence and finalises `W`. The kernel is compiled
+//! through the `ShaderCache` and asserted bit-equal to the golden
+//! [`prism_render_shading::gi::world_restir::world_reservoir`] estimator under
+//! a finite-input sweep (see [`shader_tests`]); the sandbox has no GPU, so this
+//! CPU parity is its device-equivalence proof.
+//!
+//! Wiring the seed pass onto the render graph (its pipeline, the `@binding(2)`
+//! light buffer fed by a real light extract, and the seed -> fill dispatch
+//! ordering), and the water-surface `@group(9)` consumer, land in follow-up
+//! slices.
 
 mod abi;
 mod bind_groups;

@@ -185,6 +185,130 @@ impl GpuWorldRestirFillParams {
     }
 }
 
+/// Workgroup size (1-D) of the world-space `ReSTIR` seed entry point.
+///
+/// Must match `@workgroup_size(N, 1, 1)` in `world_restir_seed.wesl`; the seed
+/// dispatch rounds the reservoir-table capacity up to a multiple of this and
+/// the shader bounds-checks every invocation against the live capacity, exactly
+/// as the fill pass does.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "seed dispatch extent constant; consumed once the seed pipeline is wired in a                   follow-up slice, so no host path reads it yet"
+    )
+)]
+pub(crate) const WORLD_RESTIR_SEED_WORKGROUP_SIZE: u32 = 64;
+
+/// Per-light candidate storage stride in bytes: two `vec4<f32>` lanes (a `vec3`
+/// payload plus one trailing scalar each) = 32 bytes, matching the WGSL
+/// `WorldRestirLight` struct's std430 layout and its 16-byte array stride.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "seed light-buffer stride; consumed once the seed bind group binds the light                   list in a follow-up slice, so no host path reads it yet"
+    )
+)]
+pub(crate) const WORLD_RESTIR_LIGHT_STRIDE: u64 = 32;
+
+/// `GPU` twin of one candidate light the seed pass's `RIS` stream draws from
+/// (the per-frame light-list record the seed bind group binds at `@binding(2)`).
+///
+/// The seed kernel reads the emitter world position and its scalar intensity
+/// from the first lane and the linear RGB colour from the second, builds a
+/// `GiSample` towards the cell's visible point, and resamples it under
+/// `ris_weight` (see `world_restir_seed.wesl`). The layout matches the WESL
+/// `WorldRestirLight` struct: two `vec4` lanes (a `vec3` payload plus one
+/// trailing scalar each) for 32 bytes, a multiple of the 16-byte std430 array
+/// stride with no implicit padding.
+///
+/// Layout (two `vec4` lanes, std430, no implicit padding):
+/// 0. `position.xyz` + `intensity`
+/// 1. `color.xyz` + one pad word
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq)]
+pub(crate) struct GpuWorldRestirLight {
+    /// Emitter world position; the secondary sample point `x_s` of the built
+    /// candidate.
+    pub position: [f32; 3],
+    /// Scalar radiant intensity scaling the emitter colour before the artistic
+    /// gain.
+    pub intensity: f32,
+    /// Linear RGB emitter colour.
+    pub color: [f32; 3],
+    /// Padding word rounding the record to the 16-byte std430 stride.
+    pub _pad0: f32,
+}
+
+/// Immediate (push-constant) block consumed by the `world_restir_seed` entry
+/// point.
+///
+/// One invocation per reservoir slot: an occupied slot streams
+/// `candidate_count` light candidates through its `RIS` reservoir (golden
+/// `stream_candidate`), caps the confidence at `m_cap` (golden
+/// `cap_confidence`) and finalises `W` (golden `finalize`); an empty slot is
+/// copied through so the ping-pong preserves vacancy. The `intensity` artistic
+/// gain and the `m_cap` mirror the fill block's so the two passes agree, and
+/// `frame` seeds the per-slot streaming `RNG`.
+///
+/// Layout (two `vec4` lanes, std430, no implicit padding):
+/// 0. (`capacity`, `light_count`, `candidate_count`, `frame`)
+/// 1. (`intensity`, `m_cap`, pad, pad)
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq)]
+pub(crate) struct GpuWorldRestirSeedParams {
+    /// Reservoir-table capacity in slots (`>= 1`), the dispatch extent and the
+    /// per-invocation bounds check.
+    pub capacity: u32,
+    /// Number of active lights the `RIS` candidate stream draws from; `0`
+    /// leaves every slot's reservoir empty.
+    pub light_count: u32,
+    /// Candidates streamed per occupied slot per frame (the `RIS` budget).
+    pub candidate_count: u32,
+    /// Monotonic frame index seeding the per-slot streaming `RNG`.
+    pub frame: u32,
+    /// Artistic gain baked into the candidate radiance before `W` is applied;
+    /// `1` reproduces the golden magnitude exactly.
+    pub intensity: f32,
+    /// `ReSTIR` `M`-cap bounding how much confidence a slot accumulates (golden
+    /// `Reservoir::cap_confidence`); negative disables the cap.
+    pub m_cap: f32,
+    /// Padding word rounding the second lane to the 16-byte std430 stride.
+    pub _pad0: f32,
+    /// Padding word rounding the second lane to the 16-byte std430 stride.
+    pub _pad1: f32,
+}
+
+impl GpuWorldRestirSeedParams {
+    /// Builds the seed immediate block from the per-frame light count + frame
+    /// index and the live settings (capacity floored at `1`, the candidate
+    /// budget / artistic gain / `M`-cap forwarded verbatim).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "seed immediate builder; called once the seed dispatch is wired in a                       follow-up slice, so no host path constructs it yet"
+        )
+    )]
+    pub(crate) fn from_settings(
+        light_count: u32,
+        frame: u32,
+        settings: &PrismWorldRestirSettings,
+    ) -> Self {
+        Self {
+            capacity: settings.capacity.max(1),
+            light_count,
+            candidate_count: settings.candidate_count,
+            frame,
+            intensity: settings.intensity,
+            m_cap: settings.m_cap,
+            _pad0: 0.0,
+            _pad1: 0.0,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,5 +382,54 @@ mod tests {
     #[test]
     fn workgroup_constant_matches_the_shader() {
         assert_eq!(WORLD_RESTIR_WORKGROUP_SIZE, 64);
+    }
+
+    #[test]
+    fn light_is_the_32_byte_two_lane_record() {
+        // Two `vec4` lanes (a `vec3` payload + trailing scalar each) = 32
+        // bytes, a multiple of the 16-byte std430 array stride.
+        assert_eq!(size_of::<GpuWorldRestirLight>(), 32);
+        assert_eq!(align_of::<GpuWorldRestirLight>(), 4);
+        assert_eq!(WORLD_RESTIR_LIGHT_STRIDE, 32);
+        assert_eq!(WORLD_RESTIR_LIGHT_STRIDE % 16, 0);
+        assert_eq!(
+            size_of::<GpuWorldRestirLight>() as u64,
+            WORLD_RESTIR_LIGHT_STRIDE
+        );
+    }
+
+    #[test]
+    fn seed_params_is_the_32_byte_two_lane_block() {
+        // Two `vec4` lanes = 32 bytes, a multiple of the 16-byte immediate
+        // alignment with no implicit padding.
+        assert_eq!(size_of::<GpuWorldRestirSeedParams>(), 32);
+        assert_eq!(align_of::<GpuWorldRestirSeedParams>(), 4);
+    }
+
+    #[test]
+    fn seed_workgroup_constant_matches_the_shader() {
+        assert_eq!(WORLD_RESTIR_SEED_WORKGROUP_SIZE, 64);
+    }
+
+    #[test]
+    fn seed_params_from_settings_forwards_the_tunables() {
+        let settings = PrismWorldRestirSettings::default();
+        let params = GpuWorldRestirSeedParams::from_settings(5, 11, &settings);
+        assert_eq!(params.capacity, settings.capacity);
+        assert_eq!(params.light_count, 5);
+        assert_eq!(params.candidate_count, settings.candidate_count);
+        assert_eq!(params.frame, 11);
+        assert_eq!(params.intensity, settings.intensity);
+        assert_eq!(params.m_cap, settings.m_cap);
+    }
+
+    #[test]
+    fn seed_params_floors_capacity_at_one() {
+        let settings = PrismWorldRestirSettings {
+            capacity: 0,
+            ..Default::default()
+        };
+        let params = GpuWorldRestirSeedParams::from_settings(0, 0, &settings);
+        assert_eq!(params.capacity, 1);
     }
 }
