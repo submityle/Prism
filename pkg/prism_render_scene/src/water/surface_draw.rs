@@ -39,6 +39,7 @@ use crate::shading::{
 
 use super::bind_groups::filtering_sampler;
 use super::resources::WaterGpuBodies;
+use super::surface_caustics::GpuWaterSurfaceCausticsConfig;
 use super::surface_gtao::GpuWaterGtaoConfig;
 use super::surface_mesh::{build_surface_view, surface_index_data};
 use super::surface_motion::ViewWaterMotionUniform;
@@ -66,6 +67,16 @@ struct PreparedSurfaceDraw<'a> {
     /// single-scatter + transmittance volume the surface fragment stage
     /// composites into its refraction.
     froxel_group: BindGroup,
+    #[expect(
+        dead_code,
+        reason = "RAII handle keeping the caustics config uniform alive for the                   `@group(9)` bind group that references it; the pass binds                   through `caustics_group` and never reads this field directly."
+    )]
+    caustics_params: Buffer,
+    /// The `@group(9)` projected-caustics group for this body: the light-space
+    /// caustic-intensity texture the `water_caustics_project` kernel filled this
+    /// frame plus the per-body config uniform. The fragment stage adds the
+    /// focused-sunlight term onto the underwater refraction.
+    caustics_group: BindGroup,
     index_count: u32,
 }
 
@@ -139,6 +150,7 @@ pub(crate) fn draw_water_surface(
 
     let layout = cache.get_bind_group_layout(&surface_pipeline.layout);
     let froxel_layout = cache.get_bind_group_layout(&surface_pipeline.froxel_layout);
+    let caustics_layout = cache.get_bind_group_layout(&surface_pipeline.caustics_layout);
     let sampler = filtering_sampler(&device, "prism water surface refraction");
 
     // Build every body's device resources before opening the pass: the index
@@ -203,12 +215,37 @@ pub(crate) fn draw_water_surface(
                 body.buffers.surface_froxel_params.as_entire_binding(),
             )),
         );
+        // The `@group(9)` projected caustics: the `water_caustics_project` kernel
+        // already folded the refractive `Jacobian` into this body's light-space
+        // caustic-intensity texture this frame; the fragment stage adds the
+        // focused-sunlight term onto the underwater refraction. Per-body (the
+        // caustic texture lives on the body), gated by the shared surface
+        // settings so a disabled or zero-strength body samples nothing.
+        let caustics_config = GpuWaterSurfaceCausticsConfig::new(
+            settings.enable_caustics,
+            settings.caustics_strength,
+        );
+        let caustics_params = device.create_buffer_with_data(&BufferInitDescriptor {
+            label: Some("prism water surface caustics params"),
+            contents: bytemuck::bytes_of(&caustics_config),
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+        });
+        let caustics_group = device.create_bind_group(
+            "prism water surface caustics",
+            &caustics_layout,
+            &BindGroupEntries::sequential((
+                &body.buffers.caustics_out,
+                caustics_params.as_entire_binding(),
+            )),
+        );
         prepared.push(PreparedSurfaceDraw {
             pipeline,
             uniform,
             index_buffer,
             bind_group,
             froxel_group,
+            caustics_params,
+            caustics_group,
             index_count: draw.grid.index_count(),
         });
     }
@@ -463,6 +500,7 @@ pub(crate) fn draw_water_surface(
         pass.set_bind_group(6, &gtao_group, &[]);
         pass.set_bind_group(7, &ssgi_group, &[]);
         pass.set_bind_group(8, &wsgi_group, &[]);
+        pass.set_bind_group(9, &draw.caustics_group, &[]);
         pass.set_index_buffer(draw.index_buffer.slice(..), IndexFormat::Uint32);
         pass.draw_indexed(0..draw.index_count, 0, 0..1);
     }

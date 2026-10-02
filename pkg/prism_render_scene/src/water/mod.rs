@@ -51,6 +51,7 @@ mod prepare;
 mod resources;
 #[cfg(test)]
 mod shader_tests;
+mod surface_caustics;
 mod surface_draw;
 mod surface_froxel;
 mod surface_gtao;

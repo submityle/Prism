@@ -252,6 +252,12 @@ pub(crate) struct WaterSurfacePipelines {
     /// gather far-field indirect diffuse the screen-space `SSGI` term cannot see
     /// (see [`super::surface_world_space_gi`]).
     pub(crate) wsgi_layout: BindGroupLayoutDescriptor,
+    /// The projected-caustics (`@group(9)`) layout: the light-space caustic
+    /// intensity texture the `water_caustics_project` kernel fills plus a
+    /// per-body config uniform. The draw node binds it here so the fragment
+    /// stage can brighten the underwater refraction with focused sunlight
+    /// (see [`super::surface_caustics`]).
+    pub(crate) caustics_layout: BindGroupLayoutDescriptor,
     /// The embedded `water_surface_raster.wesl` module both stages compile from.
     pub(crate) shader: Handle<Shader>,
 }
@@ -275,6 +281,7 @@ impl SpecializedRenderPipeline for WaterSurfacePipelines {
                 self.gtao_layout.clone(),
                 self.ssgi_layout.clone(),
                 self.wsgi_layout.clone(),
+                self.caustics_layout.clone(),
             ],
             immediate_size: 0,
             vertex: VertexState {
@@ -439,6 +446,10 @@ pub(crate) fn init_water_surface_pipelines(
         "prism water surface wsgi",
         &super::surface_world_space_gi::wsgi_layout_entries(),
     );
+    let caustics_layout = BindGroupLayoutDescriptor::new(
+        "prism water surface caustics",
+        &super::surface_caustics::caustics_layout_entries(),
+    );
 
     commands.insert_resource(WaterSurfacePipelines {
         layout,
@@ -450,6 +461,7 @@ pub(crate) fn init_water_surface_pipelines(
         gtao_layout,
         ssgi_layout,
         wsgi_layout,
+        caustics_layout,
         shader,
     });
 }
@@ -539,6 +551,10 @@ mod tests {
                 "prism water surface wsgi",
                 &crate::water::surface_world_space_gi::wsgi_layout_entries(),
             ),
+            caustics_layout: BindGroupLayoutDescriptor::new(
+                "prism water surface caustics",
+                &crate::water::surface_caustics::caustics_layout_entries(),
+            ),
             shader: Handle::default(),
         }
     }
@@ -619,15 +635,18 @@ mod tests {
         assert_eq!(depth.depth_compare, Some(CompareFunction::GreaterEqual));
         assert_eq!(desc.primitive.cull_mode, None);
         assert_eq!(desc.primitive.topology, PrimitiveTopology::TriangleList);
-        // Eight bind-group layouts: the per-body @group(0) surface layout, the
+        // Ten bind-group layouts: the per-body @group(0) surface layout, the
         // shared @group(1) engine light table the fragment stage samples, the
         // @group(2) virtual-shadow-map twin the primary directional light reads,
         // the @group(3) screen-space-reflection Hi-Z pyramid + march config, the
         // @group(4) motion-vector uniform feeding the second render target, the
         // @group(5) underwater froxel volume composited into refraction, the
         // @group(6) horizon-GTAO config occluding the image-based ambient term,
-        // and the @group(7) SSGI config gathering a one-bounce indirect diffuse.
-        assert_eq!(desc.layout.len(), 8);
+        // the @group(7) SSGI config gathering a one-bounce indirect diffuse, the
+        // @group(8) world-space GI config sampling the irradiance probe field,
+        // and the @group(9) caustics texture + config focusing sunlight through
+        // the surface into the transmitted radiance.
+        assert_eq!(desc.layout.len(), 10);
     }
 
     #[test]

@@ -723,6 +723,40 @@ struct WaterWorldSpaceGiConfig {
 @group(8) @binding(0) var<storage, read> wsgi_probes: array<WaterWorldSpaceGiProbe>;
 @group(8) @binding(1) var<uniform> wsgi_cfg: WaterWorldSpaceGiConfig;
 
+// Projected caustics base (`@group(9)`): the light-space caustic-intensity
+// texture the `water_caustics_project` kernel fills every frame plus the
+// per-body config. The `r32float` texture is not filterable, so the fragment
+// reads it with an integer `textureLoad` at the surface-simulation `UV` the
+// vertex stage already carries. Until this binding the caustic texture was
+// written and never read; now the lighting fork adds the focused-sunlight term
+// onto the underwater refraction (the `Frostbite` / `Crest` caustic-compositing
+// path).
+struct WaterCausticsConfig {
+    strength: f32,
+    sample_enable: u32,
+    _pad0: u32,
+    _pad1: u32,
+}
+
+@group(9) @binding(0) var caustics_tex: texture_2d<f32>;
+@group(9) @binding(1) var<uniform> caustics_cfg: WaterCausticsConfig;
+
+// Sample this fragment's projected caustic gain from the light-space intensity
+// texture. Returns zero (no focused light) when caustics are disabled or the
+// texture is degenerate, so the surface keeps its raw refraction untouched.
+fn water_caustic_gain(uv: vec2<f32>) -> f32 {
+    if caustics_cfg.sample_enable == 0u {
+        return 0.0;
+    }
+    let dims = vec2<f32>(textureDimensions(caustics_tex));
+    if dims.x < 1.0 || dims.y < 1.0 {
+        return 0.0;
+    }
+    let coord = vec2<i32>(clamp(uv * dims, vec2<f32>(0.0), dims - vec2<f32>(1.0)));
+    let intensity = textureLoad(caustics_tex, coord, 0).r;
+    return max(intensity, 0.0) * caustics_cfg.strength;
+}
+
 const GTAO_FRAC_PI_2: f32 = 1.5707964;
 const GTAO_PI: f32 = 3.1415927;
 
@@ -1542,7 +1576,14 @@ fn shade_pbr_core(in: VertexOutput) -> vec4<f32> {
     // extinction + phase-weighted in-scatter), not a raw screen-space grab.
     let screen_uv = in.clip_position.xy / max(view.viewport.xy, vec2<f32>(1.0));
     let eye_depth = length(in.world_position - view.world_camera_position.xyz);
-    let refracted = apply_underwater_volume(refracted_raw, screen_uv, eye_depth);
+    let refracted_lit = apply_underwater_volume(refracted_raw, screen_uv, eye_depth);
+    // Add the projected focused-sunlight caustics (`@group(9)`): the
+    // `water_caustics_project` kernel folded the refractive `Jacobian` into a
+    // light-space intensity this frame; brighten the already medium-attenuated
+    // transmission with it, tinted by the water colour. A disabled or
+    // zero-strength body returns zero gain and leaves the refraction untouched.
+    let caustic = water_caustic_gain(in.uv);
+    let refracted = refracted_lit + caustic * view.water_color.rgb;
 
     // Grazing angles reflect more and refract less (Fresnel-weighted alpha).
     let n_dot_v = clamp(dot(frame.normal, frame.view), 0.0, 1.0);

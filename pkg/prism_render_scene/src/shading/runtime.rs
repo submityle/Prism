@@ -116,6 +116,18 @@ pub struct PrismShadingSettings {
     /// neighbours more aggressively, keeping indirect radiance from creeping
     /// across creases.
     pub ssgi_denoise_normal_power: f32,
+    /// Enables the water-surface projected-caustics term: the fragment stage
+    /// samples the light-space caustic-intensity texture the
+    /// `water_caustics_project` kernel fills and adds the focused-sunlight
+    /// contribution onto the underwater refraction (the `Frostbite` / `Crest`
+    /// caustic-compositing path). Off by default; a disabled or zero-strength
+    /// body samples nothing and keeps the raw refraction.
+    pub enable_caustics: bool,
+    /// Scalar gain multiplied onto the sampled water caustic intensity before it
+    /// is added to the underwater refraction. `1.0` composites the kernel's
+    /// physically-folded intensity at face value; higher values exaggerate the
+    /// focused light for art direction. Non-positive values disable the term.
+    pub caustics_strength: f32,
     /// Enables the histogram auto-exposure + eye-adaptation compute passes.
     /// Requires the visibility buffer (it meters the resolved HDR `scene_color`).
     /// The per-view exposure state buffer is always created and always bound by
@@ -201,6 +213,8 @@ impl Default for PrismShadingSettings {
             ssgi_denoise_spatial_sigma: 2.0,
             ssgi_denoise_depth_sigma: 0.05,
             ssgi_denoise_normal_power: 8.0,
+            enable_caustics: false,
+            caustics_strength: 1.0,
             enable_exposure: false,
             enable_bloom: false,
             bloom_threshold: 1.0,

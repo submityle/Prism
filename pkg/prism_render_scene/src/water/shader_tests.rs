@@ -271,6 +271,25 @@ fn water_surface_raster_wesl_consumes_the_world_space_gi_binding() {
     );
 }
 
+/// Guards that the water surface shader actually *consumes* the projected
+/// caustic-intensity texture at `@group(9)` rather than merely declaring the
+/// binding. Pins the gain helper and its call from `shade_pbr_core`, so a
+/// refactor cannot silently regress the focused-sunlight term back to the
+/// dead-compute gap this slice closed (the `water_caustics_project` kernel
+/// writing a texture the surface never reads).
+#[test]
+fn water_surface_raster_wesl_consumes_the_caustics_binding() {
+    let src = include_str!("../shaders/water_surface_raster.wesl");
+    assert!(
+        src.contains("fn water_caustic_gain("),
+        "water_surface_raster.wesl must define the caustic gain helper",
+    );
+    assert!(
+        src.contains("water_caustic_gain(in.uv)"),
+        "shade_pbr_core must call water_caustic_gain so @group(9) is consumed",
+    );
+}
+
 /// Removes `//` line comments from a `WESL` source so a doc mention of a
 /// binding identifier can never be mistaken for a real read when counting its
 /// uses. The water shaders carry no block comments, so this is exhaustive.

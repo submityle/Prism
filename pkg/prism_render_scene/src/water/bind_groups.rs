@@ -631,7 +631,7 @@ impl WaterBodyGpuBuffers {
             "prism water caustics params",
             &upload.caustics_params,
         );
-        let caustics_out = storage_texture_2d(
+        let caustics_out = sampled_storage_texture_2d(
             device,
             "prism water caustics out",
             upload.caustics_extent,
