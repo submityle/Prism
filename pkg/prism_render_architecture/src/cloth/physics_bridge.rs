@@ -53,6 +53,43 @@ pub(crate) fn to_soa(particles: &[ClothParticle]) -> (Vec<GlamVec3>, Vec<f32>) {
     (positions, inverse_masses)
 }
 
+/// Extracts the full `(positions, velocities, inverse_masses)` columns the
+/// velocity-level physics passes (such as the aero pre-pass) consume from a
+/// render particle slice.
+///
+/// Pinned particles are mapped to a zero inverse mass, exactly as [`to_soa`]
+/// does, so a delegated pass leaves them fixed regardless of their stored
+/// `inverse_mass`.
+#[must_use]
+pub(crate) fn to_soa_full(
+    particles: &[ClothParticle],
+) -> (Vec<GlamVec3>, Vec<GlamVec3>, Vec<f32>) {
+    let mut positions = Vec::with_capacity(particles.len());
+    let mut velocities = Vec::with_capacity(particles.len());
+    let mut inverse_masses = Vec::with_capacity(particles.len());
+    for particle in particles {
+        positions.push(to_glam(particle.position));
+        velocities.push(to_glam(particle.velocity));
+        inverse_masses.push(if particle.is_pinned() {
+            0.0
+        } else {
+            particle.inverse_mass
+        });
+    }
+    (positions, velocities, inverse_masses)
+}
+
+/// Writes solved `glam` velocities back into a render particle slice.
+///
+/// Only `velocity` is updated; position and inverse mass are untouched. The
+/// slices are zipped, so a shorter `velocities` leaves the trailing particles
+/// unchanged.
+pub(crate) fn write_velocities_back(particles: &mut [ClothParticle], velocities: &[GlamVec3]) {
+    for (particle, velocity) in particles.iter_mut().zip(velocities.iter()) {
+        particle.velocity = from_glam(*velocity);
+    }
+}
+
 /// Writes solved `glam` positions back into a render particle slice.
 ///
 /// Only `position` is updated; velocity and inverse mass are untouched. The

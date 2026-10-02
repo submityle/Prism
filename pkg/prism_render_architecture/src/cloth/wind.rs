@@ -22,7 +22,7 @@
 //! transcendental) so the same mesh in the same wind always deforms
 //! identically and can be golden-tested.
 
-use super::{ClothParticle, Vec3, EPS_LEN_SQ};
+use super::{physics_bridge, ClothParticle, Vec3};
 
 /// Ambient wind sampled as a single world-space velocity plus a turbulence
 /// strength.
@@ -150,39 +150,24 @@ pub fn triangle_wind_force(
     wind: Vec3,
     aero: AeroParams,
 ) -> Vec3 {
-    let aero = aero.sanitized();
-    let cross = p1.sub(p0).cross(p2.sub(p0));
-    let cross_len_sq = cross.length_squared();
-    if cross_len_sq <= EPS_LEN_SQ {
-        return Vec3::ZERO;
-    }
-    let area = 0.5 * cross_len_sq.sqrt();
-    let normal = cross.normalize_or_zero();
-
-    let face_velocity = v0.add(v1).add(v2).scale(1.0 / 3.0);
-    let relative = wind.sub(face_velocity);
-
-    let normal_component = normal.scale(relative.dot(normal));
-    let tangent_component = relative.sub(normal_component);
-
-    // Directional force per unit pressure: drag along the normal, lift in-plane.
-    let directional = normal_component
-        .scale(aero.drag)
-        .add(tangent_component.scale(aero.lift));
-
-    // Pressure scale. The linear model (density <= 0) uses the triangle area
-    // directly, matching the historical `area * relative_wind` force. The
-    // quadratic model (density > 0) additionally scales by the dynamic pressure
-    // factor `0.5 * air_density * relative_wind_magnitude`, so the force grows
-    // with the square of the airspeed — the UE5 `Chaos` Cloth / `NvCloth` fluid
-    // model. Only `sqrt` is used; no transcendental is called.
-    let pressure = if aero.air_density > 0.0 {
-        area * (0.5 * aero.air_density * relative.length_squared().sqrt())
-    } else {
-        area
-    };
-
-    directional.scale(pressure)
+    // Delegate to the single-source physics-engine aerodynamics so the render
+    // and solver paths share one force model. The hand-rolled render `Vec3`
+    // columns are adapted to `glam` and the render coefficients are forwarded
+    // verbatim; `prism_physics_core` sanitizes them internally with the same
+    // clamp and runs the identical drag/lift/area math, so the result is
+    // bit-for-bit identical to the former inline implementation.
+    let force = prism_physics_core::soft::aero::triangle_aero_force(
+        physics_bridge::to_glam(p0),
+        physics_bridge::to_glam(p1),
+        physics_bridge::to_glam(p2),
+        physics_bridge::to_glam(v0),
+        physics_bridge::to_glam(v1),
+        physics_bridge::to_glam(v2),
+        physics_bridge::to_glam(wind),
+        prism_physics_core::soft::aero::AeroParams::new(aero.drag, aero.lift)
+            .with_air_density(aero.air_density),
+    );
+    physics_bridge::from_glam(force)
 }
 
 /// Applies wind-driven aerodynamic forces to `particles` over `dt` seconds.
@@ -203,44 +188,29 @@ pub fn apply_aero_forces(
     aero: AeroParams,
     dt: f32,
 ) {
-    if dt <= 0.0 || !dt.is_finite() || particles.is_empty() || triangles.is_empty() {
-        return;
-    }
-    let field = wind.sanitized();
-    let aero = aero.sanitized();
-    let count = particles.len();
-
-    for indices in triangles {
-        let i0 = indices[0] as usize;
-        let i1 = indices[1] as usize;
-        let i2 = indices[2] as usize;
-        if i0 >= count || i1 >= count || i2 >= count {
-            continue;
-        }
-
-        let p0 = particles[i0].position;
-        let p1 = particles[i1].position;
-        let p2 = particles[i2].position;
-        let v0 = particles[i0].velocity;
-        let v1 = particles[i1].velocity;
-        let v2 = particles[i2].velocity;
-
-        let wind_vec = field
-            .velocity
-            .add(turbulence_offset(*indices, field.turbulence));
-        let force = triangle_wind_force(p0, p1, p2, v0, v1, v2, wind_vec, aero);
-        let per_vertex = force.scale(1.0 / 3.0);
-
-        let targets = [i0, i1, i2];
-        for &index in &targets {
-            let particle = &mut particles[index];
-            if particle.is_pinned() {
-                continue;
-            }
-            let delta = per_vertex.scale(particle.inverse_mass * dt);
-            particle.velocity = particle.velocity.add(delta);
-        }
-    }
+    // Delegate to the single-source physics-engine aero pre-pass. The render
+    // particle slice is projected into the `(positions, velocities,
+    // inverse_masses)` columns the solver consumes (pinned particles map to a
+    // zero inverse mass), the wind and coefficients are forwarded verbatim, and
+    // the solved velocities are written back. `prism_physics_core` performs the
+    // same up-front sanitize, deterministic per-triangle turbulence, and
+    // per-vertex velocity increment, so the pass is bit-for-bit identical to
+    // the former inline loop (including the empty/degenerate no-ops).
+    let (positions, mut velocities, inverse_masses) = physics_bridge::to_soa_full(particles);
+    prism_physics_core::soft::aero::apply_aero_forces(
+        &positions,
+        &mut velocities,
+        &inverse_masses,
+        triangles,
+        &prism_physics_core::soft::aero::WindField::new(
+            physics_bridge::to_glam(wind.velocity),
+            wind.turbulence,
+        ),
+        prism_physics_core::soft::aero::AeroParams::new(aero.drag, aero.lift)
+            .with_air_density(aero.air_density),
+        dt,
+    );
+    physics_bridge::write_velocities_back(particles, &velocities);
 }
 
 /// Replaces a non-finite scalar with `0`, leaving finite values unchanged.
@@ -279,23 +249,6 @@ fn sanitize_non_negative(x: f32) -> f32 {
     }
 }
 
-/// Scrambles an integer seed into a reproducible value in `[-1, 1]`.
-///
-/// This is an integer avalanche (an `xorshift`-multiply mix) followed by a map
-/// from the high bits to a fraction, using only integer arithmetic and one
-/// multiply so the result is bit-identical on every platform. No transcendental
-/// function is called.
-fn hash_to_unit(seed: u32) -> f32 {
-    let mut h = seed.wrapping_mul(0x9E37_79B1);
-    h ^= h >> 15;
-    h = h.wrapping_mul(0x85EB_CA77);
-    h ^= h >> 13;
-    h = h.wrapping_mul(0xC2B2_AE3D);
-    h ^= h >> 16;
-    let unit = (h >> 8) as f32 * (1.0 / 16_777_216.0);
-    unit * 2.0 - 1.0
-}
-
 /// Builds a deterministic turbulence offset for one triangle from its vertex
 /// indices, scaled by `turbulence`.
 ///
@@ -303,18 +256,13 @@ fn hash_to_unit(seed: u32) -> f32 {
 /// indices are combined with the classic spatial-hash primes and hashed once
 /// per axis, so each triangle gets a stable, index-derived jitter direction.
 pub(super) fn turbulence_offset(indices: [u32; 3], turbulence: f32) -> Vec3 {
-    if turbulence <= 0.0 {
-        return Vec3::ZERO;
-    }
-    let base = indices[0].wrapping_mul(73_856_093)
-        ^ indices[1].wrapping_mul(19_349_663)
-        ^ indices[2].wrapping_mul(83_492_791);
-    Vec3::new(
-        hash_to_unit(base ^ 0x00A5_5A00),
-        hash_to_unit(base ^ 0x5A00_00A5),
-        hash_to_unit(base ^ 0x00FF_00FF),
-    )
-    .scale(turbulence)
+    // Delegate to the single-source physics-engine turbulence hash so the
+    // deterministic per-triangle jitter has exactly one definition. The physics
+    // function performs the same integer spatial hash and `[-1, 1]` avalanche,
+    // so the offset is bit-for-bit identical to the former inline hash.
+    physics_bridge::from_glam(prism_physics_core::soft::aero::turbulence_offset(
+        indices, turbulence,
+    ))
 }
 
 #[cfg(test)]
@@ -588,14 +536,6 @@ mod tests {
     }
 
     #[test]
-    fn hash_stays_in_unit_range() {
-        for seed in 0..256u32 {
-            let value = hash_to_unit(seed.wrapping_mul(2_654_435_761));
-            assert!((-1.0..=1.0).contains(&value));
-        }
-    }
-
-    #[test]
     fn turbulence_offset_is_zero_when_disabled() {
         assert_eq!(turbulence_offset([0, 1, 2], 0.0), Vec3::ZERO);
         assert_eq!(turbulence_offset([3, 4, 5], -1.0), Vec3::ZERO);
@@ -681,9 +621,13 @@ mod tests {
     fn aeroparams_sanitize_clamps_air_density() {
         let cleaned_negative = AeroParams::new(1.0, 1.0).with_air_density(-2.0).sanitized();
         assert!(cleaned_negative.air_density.abs() < 1.0e-6);
-        let cleaned_nan = AeroParams::new(1.0, 1.0).with_air_density(f32::NAN).sanitized();
+        let cleaned_nan = AeroParams::new(1.0, 1.0)
+            .with_air_density(f32::NAN)
+            .sanitized();
         assert!(cleaned_nan.air_density.abs() < 1.0e-6);
-        let kept = AeroParams::new(1.0, 1.0).with_air_density(1.225).sanitized();
+        let kept = AeroParams::new(1.0, 1.0)
+            .with_air_density(1.225)
+            .sanitized();
         assert!((kept.air_density - 1.225).abs() < 1.0e-6);
     }
 }
