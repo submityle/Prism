@@ -72,6 +72,14 @@
 //!   attractor: the autonomous flow `dx = sin(y) - b*x`, `dy = sin(z) - b*y`,
 //!   `dz = sin(x) - b*z` is integrated with oversampled fourth-order
 //!   Runge-Kutta and the `x` coordinate is soft-limited and read out.
+//! - [`chua_circuit::ChuaCircuitNode`] -- Chua's circuit: the only
+//!   nonlinearity is a three-segment piecewise-linear resistor `g(x)`, so the
+//!   oversampled Runge-Kutta flow winds around two foci and hops between them
+//!   to draw the double-scroll attractor read out from the `x` voltage. Its
+//!   non-smooth folds give a buzzier edge than the smooth polynomial
+//!   ([`lorenz_attractor`], [`rossler_attractor`]) or sinusoidal
+//!   ([`thomas_attractor`]) attractors, and `alpha` walks it from a stable
+//!   focus into the two-lobe double scroll.
 //!   `rate_hz` scales the integration speed while the single dissipation `b`
 //!   morphs the labyrinthine orbit from dense chaos (small `b`) toward a quiet
 //!   fixed point (large `b`). Unlike [`rossler_attractor`] its sinusoidal
@@ -462,6 +470,7 @@ pub mod wave_terrain;
 pub mod duffing_oscillator;
 pub mod rossler_attractor;
 pub mod thomas_attractor;
+pub mod chua_circuit;
 
 pub use air_jet_flute::{AirJetFluteNode, AirJetFluteParams};
 pub use additive_oscillator::{AdditiveOscillatorNode, AdditiveOscillatorParams};
@@ -474,6 +483,7 @@ pub use lorenz_attractor::{LorenzAttractorNode, LorenzAttractorParams};
 pub use duffing_oscillator::{DuffingOscillatorNode, DuffingOscillatorParams};
 pub use rossler_attractor::{RosslerAttractorNode, RosslerAttractorParams};
 pub use thomas_attractor::{ThomasAttractorNode, ThomasAttractorParams};
+pub use chua_circuit::{ChuaCircuitNode, ChuaCircuitParams};
 pub use conical_reed::{ConicalReedNode, ConicalReedParams};
 pub use dsf_oscillator::{DsfOscillatorNode, DsfOscillatorParams};
 pub use dust::{DustNode, DustParams, Polarity};
