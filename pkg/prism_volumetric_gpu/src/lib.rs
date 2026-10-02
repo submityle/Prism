@@ -225,6 +225,7 @@ pub mod volumetric_multiscatter;
 pub mod vorticity_confinement;
 pub mod wind_field;
 pub mod worley;
+pub mod ycbcr_bt709;
 
 pub use aabb_transform::{AabbTransformQuery, AabbTransformResult, GpuAabbTransform};
 pub use active_pixel::{ActivePixelQuery, GpuActivePixel};
@@ -437,3 +438,4 @@ pub use volumetric_multiscatter::{
 pub use vorticity_confinement::{GpuVorticityConfinement, VorticityResult};
 pub use wind_field::{GpuWindField, WindFieldQuery, WindFieldResult};
 pub use worley::{GpuWorley, WorleyQuery};
+pub use ycbcr_bt709::{GpuYcbcrBt709, YcbcrOp, YcbcrQuery, YcbcrResult};
