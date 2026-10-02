@@ -199,6 +199,7 @@ pub mod temporal_dither;
 pub mod temporal_reproject;
 pub mod terrain_occlusion;
 pub mod tetrahedron_volume;
+pub mod tonemap;
 pub mod total_coverage;
 pub mod tracking_transmittance;
 pub mod transcendental_approx;
@@ -399,6 +400,7 @@ pub use terrain_occlusion::{GpuTerrainOcclusion, TerrainOcclusionQuery};
 pub use tetrahedron_volume::{
     GpuTetrahedronVolume, TetrahedronVolumeQuery, TetrahedronVolumeResult,
 };
+pub use tonemap::{GpuTonemap, TonemapQuery, TonemapResult};
 pub use total_coverage::GpuTotalCoverage;
 pub use tracking_transmittance::{
     GpuTrackingTransmittance, TrackingEstimate, TrackingTransmittanceQuery,
