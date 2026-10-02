@@ -401,9 +401,12 @@ impl PathIntegrator {
                 let weight = if prev_delta {
                     1.0
                 } else {
-                    let light_pdf = scene
-                        .area_lights
-                        .pdf(origin_v, isect.position, isect.normal);
+                    let light_pdf = scene.area_lights.pdf(
+                        origin_v,
+                        isect.position,
+                        isect.normal,
+                        material.emission,
+                    );
                     if light_pdf > 0.0 {
                         power_heuristic(prev_bsdf_pdf, light_pdf)
                     } else {
