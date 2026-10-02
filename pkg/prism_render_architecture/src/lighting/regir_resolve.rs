@@ -29,8 +29,9 @@
 //! Two unbiased stages compose. The grid emits each initial candidate with
 //! `source_pdf = 1 / W_cell`, the density that makes the pixel's initial `RIS`
 //! an unbiased estimator of the full many-light sum (see [`super::regir`]); the
-//! resolve then folds temporal history and spatial neighbors with the unbiased
-//! normalization (see [`super::restir_di::combine_unbiased`]). The spatial gate
+//! resolve then folds temporal history and spatial neighbors with
+//! balance-heuristic multiple importance sampling (generalized `RIS`, see
+//! [`super::restir_di::combine_mis`]). The spatial gate
 //! depends only on surface geometry, never on the held light, so dropping
 //! inadmissible neighbors cannot bias the estimator — it only removes
 //! high-variance sources. Because the single threaded target guarantees the
