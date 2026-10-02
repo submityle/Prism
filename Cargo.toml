@@ -20,6 +20,8 @@ members = [
   # Prism's experimental next-generation rendering architecture.
   "pkg/prism_render_architecture",
   "pkg/prism_render_material",
+  # Prism GPU hardware-decode oracle validating the CPU block-compressed texture codecs.
+  "pkg/prism_render_material_gpu",
   "pkg/prism_render_scene",
   "pkg/prism_render_shading",
   "pkg/prism_render_visibility",

@@ -1,0 +1,21 @@
+[package]
+name = "prism_render_material_gpu"
+version = "0.1.0"
+edition = "2024"
+description = "Optional wgpu hardware-decode oracle for Prism's block-compressed texture codecs. Feeds a compressed block to the GPU's native BC/ETC2 texture-decompression unit (textureLoad) and reads the decoded texels back, giving a ground-truth oracle that validates the pure-CPU decoders in prism_render_material::texture_codec. Metal/Vulkan/DX12 ready. Contains no Unreal Engine source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_render_material = { path = "../prism_render_material" }
+wgpu = { version = "30", default-features = false, features = ["wgsl", "metal"] }
+futures-lite = "2"
+
+[dev-dependencies]
+prism_render_material_gpu = { path = "." }
+
+[features]
+default = []
+
+[lints]
+workspace = true
