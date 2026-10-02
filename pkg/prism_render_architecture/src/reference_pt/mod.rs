@@ -54,6 +54,7 @@
 pub mod bsdf;
 pub mod camera;
 pub mod compare;
+pub mod conductor;
 pub mod dielectric;
 pub mod estimator;
 pub mod film;

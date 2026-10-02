@@ -17,6 +17,7 @@
 //! the surface, and `normal` is the (viewer-facing) shading normal. All
 //! quantities are linear radiance scales, never gamma-encoded.
 
+use super::conductor::Conductor;
 use super::dielectric::{fresnel_dielectric, refract};
 use super::fresnel_blend::FresnelBlend;
 use super::microfacet::{fresnel_schlick, GgxIsotropic};
@@ -52,6 +53,22 @@ pub enum Bsdf {
     GgxConductor {
         /// Per-channel normal-incidence reflectance `F0`.
         reflectance: Vec3,
+        /// Perceptual roughness in `[0, 1]`.
+        roughness: f32,
+    },
+    /// Physically exact rough conductor driven by the metal's measured complex
+    /// index of refraction `eta + i*k` instead of a single `F0` tint (see
+    /// [`crate::reference_pt::conductor`]). The spectral `Fresnel` term
+    /// reproduces both the base colour and the grazing-angle hue shift of real
+    /// metals (gold warming to white, copper, aluminium) from first principles,
+    /// while the specular lobe is the same isotropic `GGX` microfacet statistics
+    /// as [`Bsdf::GgxConductor`]. It is glossy (non-delta), so it is sampled and
+    /// connected to lights like any rough surface.
+    GgxConductorComplex {
+        /// Per-channel real index of refraction `eta`.
+        eta: Vec3,
+        /// Per-channel extinction coefficient `k`.
+        k: Vec3,
         /// Perceptual roughness in `[0, 1]`.
         roughness: f32,
     },
@@ -186,6 +203,9 @@ impl Bsdf {
                 reflectance,
                 roughness,
             } => Self::ggx_evaluate(*reflectance, *roughness, wo, wi, normal),
+            Self::GgxConductorComplex { eta, k, roughness } => {
+                Conductor::new(*eta, *k, *roughness).evaluate(wo, wi, normal)
+            }
             Self::Plastic {
                 diffuse,
                 specular,
@@ -230,6 +250,9 @@ impl Bsdf {
                 }
                 let cos_h = normal.dot(half);
                 GgxIsotropic::from_roughness(*roughness).reflection_pdf(cos_o, cos_h)
+            }
+            Self::GgxConductorComplex { eta, k, roughness } => {
+                Conductor::new(*eta, *k, *roughness).pdf(wo, wi, normal)
             }
             Self::Plastic {
                 diffuse,
@@ -302,6 +325,14 @@ impl Bsdf {
                 reflectance,
                 roughness,
             } => Self::ggx_sample(*reflectance, *roughness, wo, normal, rng),
+            Self::GgxConductorComplex { eta, k, roughness } => Conductor::new(*eta, *k, *roughness)
+                .sample(wo, normal, rng)
+                .map(|s| BsdfSample {
+                    direction: s.direction,
+                    value: s.value,
+                    pdf: s.pdf,
+                    specular: false,
+                }),
             Self::Dielectric {
                 ior,
                 reflectance,
