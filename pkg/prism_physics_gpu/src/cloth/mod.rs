@@ -42,6 +42,7 @@ pub mod ccd;
 pub mod coupling;
 pub mod cpu;
 pub mod gpu;
+pub mod layers;
 pub mod layout;
 pub mod long_range;
 pub mod plasticity;
@@ -67,6 +68,7 @@ pub use ccd::{cpu_cloth_ccd, GpuClothCcd};
 pub use coupling::{cpu_cloth_coupling, GpuClothCoupling};
 pub use cpu::cpu_cloth_self_collision_jacobi;
 pub use gpu::GpuClothSelfCollision;
+pub use layers::{cpu_cloth_layer_coupling, GpuClothLayerCoupling};
 pub use long_range::{
     colour_long_range, cpu_cloth_long_range, ClothLongRangeConstraint, GpuClothLongRange,
     LongRangeColoring,
@@ -77,9 +79,7 @@ pub use pressure::{
     build_vertex_triangle_adjacency, cpu_cloth_pressure, GpuClothPressure, VertexTriangleAdjacency,
 };
 pub use self_ccd::{cpu_cloth_self_ccd, GpuClothSelfCcd};
-pub use self_collision_point::{
-    cpu_cloth_self_collision_point, GpuClothSelfCollisionPoint,
-};
+pub use self_collision_point::{cpu_cloth_self_collision_point, GpuClothSelfCollisionPoint};
 pub use strain_limit::{
     colour_strain_limit, cpu_cloth_strain_limit, ClothStrainLimitConstraint, GpuClothStrainLimit,
     StrainLimitColoring,
