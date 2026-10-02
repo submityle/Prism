@@ -13,8 +13,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::camera::PinholeCamera;
+use super::halton::HaltonPixelSampler;
 use super::integrator::{PathIntegrator, Scene};
-use super::sampler::{Rng, Sample2};
+use super::sampler::Rng;
 use super::Vec3;
 
 /// A row-major framebuffer of linear per-pixel radiance.
@@ -100,15 +101,14 @@ pub fn render(
             // A per-pixel stream keyed by the flat index keeps the render
             // deterministic and order-independent (each pixel is self-contained).
             let mut rng = Rng::with_stream(seed, index as u64 + 1);
+            // Low-discrepancy sub-pixel jitter (decorrelated per pixel) resolves
+            // primary-visibility edges far faster than independent jitter would.
+            let jitter_sampler = HaltonPixelSampler::new(seed, index as u64);
             let mut sum = Vec3::ZERO;
-            for _ in 0..samples_per_pixel {
-                let jitter = Sample2 {
-                    x: rng.next_f32(),
-                    y: rng.next_f32(),
-                };
+            for s in 0..samples_per_pixel {
+                let jitter = jitter_sampler.sample(u64::from(s));
                 // A finite aperture engages the thin-lens model (depth of
-                // field); a zero aperture keeps the cheaper pinhole path and its
-                // exact `RNG` stream unchanged.
+                // field); a zero aperture keeps the cheaper pinhole path.
                 let ray = if camera.aperture_radius() > 0.0 {
                     camera.primary_ray_lens(x, y, width, height, jitter, &mut rng)
                 } else {

@@ -21,6 +21,8 @@
 //! - [`sampler`] — the deterministic `PCG` random source, stratified sample
 //!   generation, cosine-weighted hemisphere sampling, and the orthonormal
 //!   basis used to orient local samples around a surface normal.
+//! - [`halton`] — the scrambled Halton low-discrepancy (`QMC`) sampler that
+//!   supplies the film's sub-pixel jitter for faster anti-aliasing convergence.
 //! - [`bsdf`] — the surface scattering models ([`bsdf::Bsdf`]): a Lambertian
 //!   diffuse lobe, a perfect specular mirror, a physically based GGX rough
 //!   conductor, and a smooth dielectric (glass/water), each exposing
@@ -86,6 +88,7 @@ pub mod estimator;
 pub mod film;
 pub mod fresnel_blend;
 pub mod ggx_energy;
+pub mod halton;
 pub mod integrator;
 pub mod metal;
 pub mod microfacet;
