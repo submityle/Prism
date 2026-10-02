@@ -64,6 +64,15 @@
 //!   `damping` the viscous loss. Unlike [`wavetable_oscillator`] the table is
 //!   live and not band-limited; unlike [`lorenz_attractor`] the whole spatial
 //!   profile is read as one pitched cycle rather than a single state variable.
+//! - [`wave_terrain::WaveTerrainNode`] -- wave-terrain synthesis: a fixed
+//!   analytic height surface `z = f(x, y)` over `[-1, 1] x [-1, 1]` read
+//!   along a moving Lissajous orbit whose rate sets the pitch. `radius`
+//!   sweeps the orbit from the quiet flat center toward the bright rippled
+//!   outer surface and `warp` blends a diagonal swell with a non-separable
+//!   `x * y` cross-term ripple. Unlike [`wavetable_oscillator`] the lookup is
+//!   two-dimensional, so the cross term sprays harmonics a one-dimensional
+//!   table cannot; unlike [`scanned_synthesis`] the surface is static and
+//!   carries no dynamical state.
 //! - [`fm_operator::FmOperatorNode`] -- phase-modulation (DX7-style)
 //!   operator: a sine core deflected by an optional modulation input and
 //!   two-sample-averaged self-feedback, the primitive voice of FM
@@ -421,6 +430,7 @@ pub mod swept_sine;
 pub mod tine_electric_piano;
 pub mod vosim;
 pub mod wavetable_oscillator;
+pub mod wave_terrain;
 
 pub use air_jet_flute::{AirJetFluteNode, AirJetFluteParams};
 pub use additive_oscillator::{AdditiveOscillatorNode, AdditiveOscillatorParams};
@@ -452,6 +462,7 @@ pub use pwm_oscillator::{PwmOscillatorNode, PwmOscillatorParams};
 pub use reed_woodwind::{ReedWoodwindNode, ReedWoodwindParams};
 pub use sample_player::{Interpolation, LoopMode, SamplePlayerNode};
 pub use scanned_synthesis::{ScannedSynthesisNode, ScannedSynthesisParams};
+pub use wave_terrain::{WaveTerrainNode, WaveTerrainParams};
 pub use shepard_tone::{
     ShepardToneNode, ShepardToneParams, DEFAULT_AMPLITUDE, DEFAULT_BASE_HZ, DEFAULT_SPEED,
     MAX_BASE_HZ, MAX_SPEED, MIN_BASE_HZ, MIN_SPEED, NYQUIST_GUARD, OUTPUT_GAIN, SPAN_OCTAVES,
