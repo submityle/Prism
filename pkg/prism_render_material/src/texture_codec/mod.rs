@@ -44,6 +44,7 @@ mod bc6h;
 mod bc7;
 mod bitio;
 mod color_block;
+mod eac;
 mod encode;
 mod etc2;
 mod formats;
@@ -61,6 +62,7 @@ pub use bc7::{
     decode_bc7_mode4, decode_bc7_mode5, decode_bc7_mode6, decode_bc7_mode7, Bc7Error,
 };
 pub use color_block::rgb565_to_rgb888;
+pub use eac::{decode_eac_r11_unorm, decode_eac_rg11_unorm};
 pub use encode::{
     encode_bc1, encode_bc2, encode_bc3, encode_bc4, encode_bc4_signed, encode_bc5,
     encode_bc5_signed, encode_bc6h_mode11_signed, encode_bc6h_mode11_unsigned, encode_bc7_mode4,
