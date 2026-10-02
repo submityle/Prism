@@ -24,6 +24,7 @@ mod mipmap;
 mod octahedral;
 mod reconstruct;
 mod spheremap;
+mod stereographic;
 mod strength;
 mod surface_gradient;
 mod triplanar;
@@ -50,6 +51,7 @@ pub use reconstruct::{decode_ag, decode_rg, reconstruct_z, unorm_to_snorm};
 pub use spheremap::{
     spheremap_decode, spheremap_decode_unorm, spheremap_encode, spheremap_encode_unorm,
 };
+pub use stereographic::{stereographic_decode, stereographic_encode};
 pub use strength::{normal_to_slope, scale_strength, slope_to_normal};
 pub use surface_gradient::{
     blend_surface_gradient, blend_surface_gradient_pair, resolve_surface_gradient, NormalLayer,

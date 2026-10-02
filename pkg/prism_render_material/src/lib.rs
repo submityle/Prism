@@ -48,9 +48,10 @@ pub use normal_map::{
     normal_to_slope, object_to_tangent, orthonormalize_basis, power_from_roughness, reconstruct_z,
     reduce_normal_roughness_2x, resolve_surface_gradient, roughness_from_power, scale_strength,
     slope_covariance_eigen, slope_covariance_from_eigen, slope_to_normal, spheremap_decode,
-    spheremap_decode_unorm, spheremap_encode, spheremap_encode_unorm, tangent_to_object,
-    toksvig_factor, toksvig_roughness, triplanar_weights, unorm_to_snorm, variance_to_ggx_alpha,
-    HeightGradient, LeanMoments, NormalLayer, SlopeEigen, TangentBasis,
+    spheremap_decode_unorm, spheremap_encode, spheremap_encode_unorm, stereographic_decode,
+    stereographic_encode, tangent_to_object, toksvig_factor, toksvig_roughness, triplanar_weights,
+    unorm_to_snorm, variance_to_ggx_alpha, HeightGradient, LeanMoments, NormalLayer, SlopeEigen,
+    TangentBasis,
 };
 pub use record::{
     fallback_material_header, fallback_material_record, inactive_material_header,
