@@ -30,9 +30,9 @@ use super::resources::WaterGpuBodies;
 /// Borrows the concrete bind group a kernel dispatches against from a body.
 ///
 /// Mirrors [`WaterComputePipelines::layout`](super::pipeline::WaterComputePipelines::layout)
-/// exactly: the ocean group serves the two ocean-surface kernels, the flip
-/// group serves the three collocated `FLIP` stages, the surface reconstruction
-/// binds its own standalone group, and every other kernel takes its own group. Kept
+/// exactly: the ocean group serves the two ocean-surface kernels, the surface
+/// reconstruction binds its own standalone group, and every other kernel takes
+/// its own group. Kept
 /// as one exhaustive match so a new kernel cannot compile without choosing a
 /// group, and so the mapping is unit-tested without a `GPU`.
 #[must_use]
@@ -42,9 +42,6 @@ fn bind_group_for<'a>(
 ) -> &'a bevy_render::render_resource::BindGroup {
     match kernel {
         WaterKernel::SpectrumIfft | WaterKernel::GerstnerDisplace => &groups.ocean,
-        WaterKernel::FlipP2G | WaterKernel::FlipPressureSolve | WaterKernel::FlipG2P => {
-            &groups.flip
-        }
         WaterKernel::SurfaceReconstruct => &groups.surface_reconstruct,
         WaterKernel::PbfDensitySolve => &groups.pbf,
         WaterKernel::SprayEmit => &groups.spray,
@@ -254,23 +251,22 @@ mod tests {
                 bind_group_slot_index(WaterKernel::SpectrumIfft)
             );
         }
-        // The three collocated FLIP stages share the flip group (they all
-        // address the same collocated MAC grid buffers).
+        // The three staggered `MAC` solve stages share the solve group.
         for kernel in [
-            WaterKernel::FlipP2G,
-            WaterKernel::FlipPressureSolve,
-            WaterKernel::FlipG2P,
+            WaterKernel::FlipMacDivergence,
+            WaterKernel::FlipMacPressure,
+            WaterKernel::FlipMacProject,
         ] {
             assert_eq!(
                 bind_group_slot_index(kernel),
-                bind_group_slot_index(WaterKernel::FlipP2G)
+                bind_group_slot_index(WaterKernel::FlipMacDivergence)
             );
         }
         // Surface reconstruction binds its own standalone group, distinct from
-        // the collocated FLIP group it used to share.
+        // the staggered `MAC` scatter group.
         assert_ne!(
             bind_group_slot_index(WaterKernel::SurfaceReconstruct),
-            bind_group_slot_index(WaterKernel::FlipP2G)
+            bind_group_slot_index(WaterKernel::FlipMacP2G)
         );
     }
 
@@ -289,7 +285,6 @@ mod tests {
     fn bind_group_slot_index(kernel: WaterKernel) -> usize {
         match kernel {
             WaterKernel::SpectrumIfft | WaterKernel::GerstnerDisplace => 0,
-            WaterKernel::FlipP2G | WaterKernel::FlipPressureSolve | WaterKernel::FlipG2P => 1,
             WaterKernel::SurfaceReconstruct => 17,
             WaterKernel::PbfDensitySolve => 2,
             WaterKernel::SprayEmit => 3,

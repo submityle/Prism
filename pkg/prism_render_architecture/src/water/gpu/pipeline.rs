@@ -46,14 +46,9 @@ pub struct WaterGpuExtract {
     pub swe: bool,
     /// Whether the `PBF` density solve runs.
     pub pbf: bool,
-    /// Whether the collocated `FLIP`/`APIC` three-pass grid solve runs. This is
-    /// the legacy cell-centered path kept until the staggered `MAC` chain is
-    /// proven end-to-end on real hardware (see [`Self::flip_mac`]).
-    pub flip: bool,
     /// Whether the face-centered staggered `MAC` `FLIP`/`APIC` chain runs
     /// (`P2G` scatter, face normalize, compact divergence, `Jacobi` pressure,
-    /// orthogonal projection, `G2P` gather). Mutually exclusive with
-    /// [`Self::flip`] in a correct body configuration.
+    /// orthogonal projection, `G2P` gather).
     pub flip_mac: bool,
     /// Whether the renderable-surface reconstruction runs.
     pub reconstruct: bool,
@@ -253,7 +248,6 @@ pub fn extract(
         gerstner: passes.gerstner,
         swe: passes.swe,
         pbf: passes.pbf,
-        flip: passes.flip,
         flip_mac: passes.flip_mac,
         reconstruct: passes.reconstruct,
         caustics: passes.caustics,
@@ -307,8 +301,6 @@ pub struct WaterPasses {
     pub swe: bool,
     /// `PBF` density solve.
     pub pbf: bool,
-    /// Collocated `FLIP`/`APIC` three-pass grid solve (legacy cell-centered).
-    pub flip: bool,
     /// Face-centered staggered `MAC` `FLIP`/`APIC` chain (`P2G`, face normalize,
     /// compact divergence, `Jacobi` pressure, orthogonal projection, `G2P`).
     pub flip_mac: bool,
@@ -366,19 +358,6 @@ pub fn prepare(extract: &WaterGpuExtract) -> WaterGpuPrepare {
         let step = Some(substep);
         if extract.swe {
             push(&mut dispatches, extract, WaterKernel::SweStep, step, None);
-        }
-        if extract.flip {
-            push(&mut dispatches, extract, WaterKernel::FlipP2G, step, None);
-            for iteration in 0..extract.solver_iterations {
-                push(
-                    &mut dispatches,
-                    extract,
-                    WaterKernel::FlipPressureSolve,
-                    step,
-                    Some(iteration),
-                );
-            }
-            push(&mut dispatches, extract, WaterKernel::FlipG2P, step, None);
         }
         // Face-centered staggered `MAC` chain: scatter to faces, normalize by
         // weight, take the compact divergence once, relax pressure for the
@@ -647,7 +626,7 @@ mod tests {
             WaterBufferCounts::default(),
             WaterPasses {
                 ocean_spectrum: true,
-                flip: true,
+                flip_mac: true,
                 ..WaterPasses::default()
             },
             0, // cascades → clamps to 1 because ocean_spectrum is live
@@ -709,64 +688,6 @@ mod tests {
     }
 
     #[test]
-    fn flip_expands_p2g_pressure_iterations_g2p_per_substep() {
-        let ex = extract(
-            WaterBufferCounts {
-                flip_particles: 40_000,
-                flip_grid_cells: 64 * 64 * 64,
-                ..WaterBufferCounts::default()
-            },
-            WaterPasses {
-                flip: true,
-                ..WaterPasses::default()
-            },
-            0,
-            2, // substeps
-            3, // pressure iterations
-            0,
-            0,
-            64 * 64 * 64,
-            0, // face_count (collocated path under test)
-            40_000,
-            1920 * 1080,
-            0, // vertex_count
-        );
-        let plan = prepare(&ex);
-        let p2g = plan
-            .dispatches
-            .iter()
-            .filter(|d| d.kernel == WaterKernel::FlipP2G)
-            .count();
-        let pressure = plan
-            .dispatches
-            .iter()
-            .filter(|d| d.kernel == WaterKernel::FlipPressureSolve)
-            .count();
-        let g2p = plan
-            .dispatches
-            .iter()
-            .filter(|d| d.kernel == WaterKernel::FlipG2P)
-            .count();
-        // Two substeps, each: 1 P2G + 3 pressure + 1 G2P.
-        assert_eq!(p2g, 2);
-        assert_eq!(pressure, 2 * 3);
-        assert_eq!(g2p, 2);
-        // Ordering within the first substep: P2G before its pressure solves
-        // before G2P.
-        let first_p2g = plan
-            .dispatches
-            .iter()
-            .position(|d| d.kernel == WaterKernel::FlipP2G)
-            .expect("p2g present");
-        let first_g2p = plan
-            .dispatches
-            .iter()
-            .position(|d| d.kernel == WaterKernel::FlipG2P)
-            .expect("g2p present");
-        assert!(first_p2g < first_g2p);
-    }
-
-    #[test]
     fn flip_mac_chain_expands_in_face_centered_order_per_substep() {
         let ex = extract(
             WaterBufferCounts {
@@ -799,8 +720,6 @@ mod tests {
         assert_eq!(count(WaterKernel::FlipMacPressure), 2 * 4);
         assert_eq!(count(WaterKernel::FlipMacProject), 2);
         assert_eq!(count(WaterKernel::FlipMacG2P), 2);
-        // The collocated path stays silent when only the MAC chain is live.
-        assert_eq!(count(WaterKernel::FlipP2G), 0);
         // Ordering within the first substep: scatter → normalize → divergence →
         // pressure → project → gather.
         let pos = |k: WaterKernel| {

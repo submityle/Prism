@@ -1,0 +1,19 @@
+[package]
+name = "prism_audio_bevy"
+version = "0.1.0"
+edition = "2024"
+description = "Bevy ECS front-end for Prism's next-generation audio engine: emitter/listener components and systems that drive the prism_audio_rt lock-free command ring and surface runtime telemetry as an ECS resource. Contains no Unreal Engine, Unity, Godot, Wwise, FMOD, Steam Audio, or Google Resonance Audio source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+bevy_app = { path = "../../crates/bevy_app", version = "0.20.0-dev" }
+bevy_ecs = { path = "../../crates/bevy_ecs", version = "0.20.0-dev" }
+bevy_math = { path = "../../crates/bevy_math", version = "0.20.0-dev" }
+bevy_transform = { path = "../../crates/bevy_transform", version = "0.20.0-dev" }
+
+prism_audio_rt = { path = "../prism_audio_rt" }
+prism_audio_core = { path = "../prism_audio_core" }
+
+[lints]
+workspace = true

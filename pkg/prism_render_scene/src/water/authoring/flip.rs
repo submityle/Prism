@@ -251,7 +251,7 @@ mod tests {
     /// The preset expands into a live `FLIP`/`APIC` body whose schedule runs the
     /// face-centered staggered `MAC` chain (scatter, face normalize, compact
     /// divergence, `Jacobi` pressure, orthogonal projection, gather) and
-    /// reconstructs a surface. The legacy collocated path stays off.
+    /// reconstructs a surface.
     #[test]
     fn flip_preset_builds_a_live_volume() {
         let preset = FlipPoolPreset {
@@ -270,7 +270,6 @@ mod tests {
 
         let ex = body.as_extract();
         assert!(ex.flip_mac);
-        assert!(!ex.flip);
         assert!(ex.reconstruct);
         let plan = prepare(&ex);
         let kinds: Vec<WaterKernel> = plan.dispatches.iter().map(|d| d.kernel).collect();

@@ -155,9 +155,9 @@ pub struct KernelDescriptor {
 ///
 /// The passes map one-to-one onto the solver and rendering stages the `CPU`
 /// contract layer schedules: the spectral and `Gerstner` displacement writers,
-/// the `SWE` height-field step, the `PBF` density solve, the three `FLIP`/`APIC`
-/// passes (`P2G` scatter, pressure projection, `G2P` gather), the surface
-/// reconstruction, the caustics projection, and the foam advection.
+/// the `SWE` height-field step, the `PBF` density solve, the staggered `MAC`
+/// `FLIP`/`APIC` chain, the surface reconstruction, the caustics projection,
+/// and the foam advection.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum WaterKernel {
     /// Spectral inverse-`FFT` (`Tessendorf`): evolve and transform the wave
@@ -169,12 +169,6 @@ pub enum WaterKernel {
     SweStep,
     /// The `PBF` density-constraint (`XPBD`) projection iteration.
     PbfDensitySolve,
-    /// `FLIP`/`APIC` particle-to-grid scatter (`P2G`).
-    FlipP2G,
-    /// `FLIP`/`APIC` grid pressure projection (the incompressibility solve).
-    FlipPressureSolve,
-    /// `FLIP`/`APIC` grid-to-particle gather (`G2P`).
-    FlipG2P,
     /// Face-centered `MAC` particle-to-grid scatter (`P2G`): accumulate particle
     /// momentum and weight into the staggered `u`/`v`/`w` faces (`atomic` sum).
     FlipMacP2G,
@@ -230,14 +224,11 @@ pub enum WaterKernel {
 impl WaterKernel {
     /// Every kernel, in a stable order, for descriptor-table iteration and
     /// exhaustiveness tests.
-    pub const ALL: [WaterKernel; 28] = [
+    pub const ALL: [WaterKernel; 25] = [
         WaterKernel::SpectrumIfft,
         WaterKernel::GerstnerDisplace,
         WaterKernel::SweStep,
         WaterKernel::PbfDensitySolve,
-        WaterKernel::FlipP2G,
-        WaterKernel::FlipPressureSolve,
-        WaterKernel::FlipG2P,
         WaterKernel::FlipMacP2G,
         WaterKernel::FlipMacFacesNormalize,
         WaterKernel::FlipMacDivergence,
@@ -273,9 +264,6 @@ impl WaterKernel {
             WaterKernel::GerstnerDisplace => "water_gerstner_displace",
             WaterKernel::SweStep => "water_swe_step",
             WaterKernel::PbfDensitySolve => "water_pbf_density_solve",
-            WaterKernel::FlipP2G => "water_flip_p2g",
-            WaterKernel::FlipPressureSolve => "water_flip_pressure_solve",
-            WaterKernel::FlipG2P => "water_flip_g2p",
             WaterKernel::FlipMacP2G => "water_flip_mac_p2g",
             WaterKernel::FlipMacFacesNormalize => "water_flip_mac_faces_normalize",
             WaterKernel::FlipMacDivergence => "mac_divergence",
@@ -340,11 +328,7 @@ impl WaterKernel {
                 WorkgroupSize { x: 8, y: 8, z: 1 },
                 DispatchDomain::Grid2d,
             ),
-            WaterKernel::PbfDensitySolve
-            | WaterKernel::FlipP2G
-            | WaterKernel::FlipG2P
-            | WaterKernel::FlipMacP2G
-            | WaterKernel::FlipMacG2P => (
+            WaterKernel::PbfDensitySolve | WaterKernel::FlipMacP2G | WaterKernel::FlipMacG2P => (
                 BindGroupLayout {
                     storage_buffers: 3,
                     uniform_buffers: 1,
@@ -353,16 +337,6 @@ impl WaterKernel {
                 },
                 WorkgroupSize { x: 64, y: 1, z: 1 },
                 DispatchDomain::Particle,
-            ),
-            WaterKernel::FlipPressureSolve => (
-                BindGroupLayout {
-                    storage_buffers: 3,
-                    uniform_buffers: 1,
-                    storage_textures: 0,
-                    sampled_textures: 0,
-                },
-                WorkgroupSize { x: 4, y: 4, z: 4 },
-                DispatchDomain::Grid3d,
             ),
             // Face-normalize shares the `P2G` scatter buffers (`face_scatter`
             // sum + `faces` output + `sim_params`) but sweeps the face family.

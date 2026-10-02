@@ -48,8 +48,7 @@ use bevy_render::{
 };
 use bytemuck::Pod;
 use prism_render_architecture::water::gpu::buffers::{
-    WaterBufferCounts, WaterPersistentBufferSet, FLIP_SCATTER_SLOTS_PER_CELL, GRID_SCALAR_STRIDE,
-    PBF_PARTICLE_STRIDE,
+    WaterBufferCounts, WaterPersistentBufferSet, GRID_SCALAR_STRIDE, PBF_PARTICLE_STRIDE,
 };
 use prism_render_architecture::water::gpu::fft_pass_ping_pong;
 use prism_render_architecture::water::gpu::pipeline::mac_face_count;
@@ -283,9 +282,6 @@ pub(crate) struct WaterBodyGpuBuffers {
     pub(crate) gerstner_normal: TextureView,
     // FLIP buffers + surface texture.
     pub(crate) flip_particles: Buffer,
-    pub(crate) flip_grid_scatter: Buffer,
-    pub(crate) flip_pressure_in: Buffer,
-    pub(crate) flip_pressure_out: Buffer,
     pub(crate) flip_params: Buffer,
     pub(crate) flip_surface_depth: Buffer,
     pub(crate) flip_surface_thickness: Buffer,
@@ -482,16 +478,9 @@ impl WaterBodyGpuBuffers {
         // ---- FLIP / APIC ----
         let flip_particles =
             readable_storage(device, "prism water flip particles", upload.flip_particles);
-        // Pressure/divergence hold one f32 per cell; the P2G scatter accumulator
-        // holds FLIP_SCATTER_SLOTS_PER_CELL fixed-point atomics per cell
-        // (momentum_x, momentum_y, momentum_z, mass), so it is four times larger.
-        // Sizing the scatter buffer at `grid_bytes` under-allocates it four-fold
-        // and lets the `water_flip` P2G kernel scatter past the buffer's end.
+        // The MAC projection's divergence and pressure ping-pong each hold one
+        // f32 per cell; `grid_bytes` sizes those cell-scalar working buffers.
         let grid_bytes = u64::from(upload.flip_grid_cells) * u64::from(GRID_SCALAR_STRIDE);
-        let scatter_bytes = grid_bytes * u64::from(FLIP_SCATTER_SLOTS_PER_CELL);
-        let flip_grid_scatter = zeroed_storage(device, "prism water flip scatter", scatter_bytes);
-        let flip_pressure_in = zeroed_storage(device, "prism water flip pressure in", grid_bytes);
-        let flip_pressure_out = zeroed_storage(device, "prism water flip pressure out", grid_bytes);
         let flip_params = uniform(device, "prism water flip params", &upload.flip_params);
         let surface_scalar_bytes = u64::from(upload.flip_surface_extent.width)
             * u64::from(upload.flip_surface_extent.height)
@@ -782,9 +771,6 @@ impl WaterBodyGpuBuffers {
             gerstner_displacement,
             gerstner_normal,
             flip_particles,
-            flip_grid_scatter,
-            flip_pressure_in,
-            flip_pressure_out,
             flip_params,
             flip_surface_depth,
             flip_surface_thickness,
@@ -869,13 +855,11 @@ impl WaterBodyGpuBuffers {
 ///
 /// Present only once its backing [`WaterBodyGpuBuffers`] exists; the dispatch
 /// node treats a present set as "safe to record". The kernel-to-group mapping
-/// (`ocean`/`swe`/`pbf`/`spray`/`flip` at `@group(0)`, the render-effect passes
+/// (`ocean`/`swe`/`pbf`/`spray` at `@group(0)`, the render-effect passes
 /// at `@group(1..=4)`) is owned by [`super::pipeline::wesl_group`].
 pub(crate) struct WaterBodyBindGroups {
     /// `@group(0)` for `spectrum_ifft` + `gerstner_displace`.
     pub(crate) ocean: BindGroup,
-    /// `@group(0)` for the three collocated `FLIP` solve passes.
-    pub(crate) flip: BindGroup,
     /// `@group(0)` for the standalone `water_surface_reconstruct` pass (the
     /// splatted depth + thickness buffers, the reconstructed-normal storage
     /// texture, and the filter/projection uniform).
@@ -935,7 +919,7 @@ pub(crate) struct WaterBodyBindGroups {
 }
 
 impl WaterBodyBindGroups {
-    /// Builds the twelve bind groups binding `buffers` against the shared
+    /// Builds the bind groups binding `buffers` against the shared
     /// pipeline layouts, in the exact `@binding` order declared by each `WESL`
     /// entry point.
     pub(crate) fn create(
@@ -956,21 +940,6 @@ impl WaterBodyBindGroups {
                 buffers.gerstner_params.as_entire_binding(),
                 &buffers.gerstner_displacement,
                 &buffers.gerstner_normal,
-            )),
-        );
-        let flip = device.create_bind_group(
-            "prism water flip",
-            &pipelines.flip_layout,
-            &BindGroupEntries::sequential((
-                buffers.flip_particles.as_entire_binding(),
-                buffers.flip_grid_scatter.as_entire_binding(),
-                buffers.flip_pressure_in.as_entire_binding(),
-                buffers.flip_pressure_out.as_entire_binding(),
-                buffers.flip_params.as_entire_binding(),
-                buffers.flip_surface_depth.as_entire_binding(),
-                buffers.flip_surface_thickness.as_entire_binding(),
-                &buffers.flip_surface_normal,
-                buffers.flip_surface_params.as_entire_binding(),
             )),
         );
         let surface_reconstruct = device.create_bind_group(
@@ -1211,7 +1180,6 @@ impl WaterBodyBindGroups {
         );
         Self {
             ocean,
-            flip,
             surface_reconstruct,
             pbf,
             spray,

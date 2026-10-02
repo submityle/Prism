@@ -3,7 +3,7 @@
 //! The `CPU`-golden solvers in `prism_render_architecture::water` decide *what*
 //! runs each frame; this slice builds the concrete `wgpu` compute pipelines and
 //! the bind-group layouts that the sixteen water kernels dispatch against. The
-//! kernels are authored across five `WESL` shaders, each declaring one or more
+//! kernels are authored across four `WESL` shaders, each declaring one or more
 //! `@group(N)` resource interfaces:
 //!
 //! * `shaders/water_ocean.wesl` — the spectral inverse-`FFT` (`Tessendorf`) and
@@ -12,12 +12,6 @@
 //!   uniform, two write-only displacement/normal storage textures, the read-only
 //!   `Gerstner` wave train, the `Gerstner` uniform, and two more write-only
 //!   displacement/normal textures.
-//! * `shaders/water_flip.wesl` — the three `FLIP`/`APIC` passes (`P2G` scatter,
-//!   pressure projection, `G2P` gather) and the surface reconstruction. All four
-//!   share one nine-binding `@group(0)`: the read-write particle pool and grid
-//!   scatter buffer, the read-only / read-write pressure ping-pong, the sim
-//!   uniform, the read-only surface depth/thickness buffers, the write-only
-//!   surface-normal texture, and the surface uniform.
 //! * `shaders/water_pbf.wesl` — the `PBF` density solve and the crest-spray
 //!   emitter. These two rebind `@group(0)` to *different* resource sets (a
 //!   four-binding density interface versus a three-binding spray interface), so
@@ -83,9 +77,6 @@ use prism_render_architecture::water::kernels::WaterKernel;
 pub(crate) struct WaterComputePipelines {
     /// `@group(0)` for both `water_ocean.wesl` entry points (nine bindings).
     pub(crate) ocean_layout: BindGroupLayout,
-    /// `@group(0)` for the three collocated `water_flip.wesl` solve passes
-    /// (nine bindings).
-    pub(crate) flip_layout: BindGroupLayout,
     /// `@group(0)` for the standalone `water_surface_reconstruct.wesl` pass
     /// (four bindings: the splatted surface depth + thickness storage buffers,
     /// the write-only reconstructed-normal storage texture, and the
@@ -139,12 +130,6 @@ pub(crate) struct WaterComputePipelines {
     pub(crate) swe_step: CachedComputePipelineId,
     /// `water_pbf_density_solve`: one `PBF` density-constraint iteration.
     pub(crate) pbf_density_solve: CachedComputePipelineId,
-    /// `water_flip_p2g`: `FLIP`/`APIC` particle-to-grid scatter.
-    pub(crate) flip_p2g: CachedComputePipelineId,
-    /// `water_flip_pressure_solve`: the grid incompressibility projection.
-    pub(crate) flip_pressure_solve: CachedComputePipelineId,
-    /// `water_flip_g2p`: `FLIP`/`APIC` grid-to-particle gather.
-    pub(crate) flip_g2p: CachedComputePipelineId,
     /// `water_flip_mac_p2g`: face-centered `MAC` particle-to-grid momentum sum.
     pub(crate) mac_p2g: CachedComputePipelineId,
     /// `water_flip_mac_faces_normalize`: divide the summed `MAC` momentum by
@@ -205,9 +190,6 @@ impl WaterComputePipelines {
             WaterKernel::GerstnerDisplace => self.gerstner_displace,
             WaterKernel::SweStep => self.swe_step,
             WaterKernel::PbfDensitySolve => self.pbf_density_solve,
-            WaterKernel::FlipP2G => self.flip_p2g,
-            WaterKernel::FlipPressureSolve => self.flip_pressure_solve,
-            WaterKernel::FlipG2P => self.flip_g2p,
             WaterKernel::FlipMacP2G => self.mac_p2g,
             WaterKernel::FlipMacFacesNormalize => self.mac_faces_normalize,
             WaterKernel::FlipMacDivergence => self.mac_divergence,
@@ -235,16 +217,12 @@ impl WaterComputePipelines {
     /// Returns the bind-group layout the given kernel's bind group must target.
     ///
     /// Mirrors the shader interface: the two `water_ocean.wesl` kernels share the
-    /// ocean layout, the three collocated `water_flip.wesl` kernels share the flip
-    /// layout while the surface reconstruction binds its own standalone layout,
+    /// ocean layout, the surface reconstruction binds its own standalone layout,
     /// and every other kernel binds its own distinct interface.
     #[must_use]
     pub(crate) fn layout(&self, kernel: WaterKernel) -> &BindGroupLayout {
         match kernel {
             WaterKernel::SpectrumIfft | WaterKernel::GerstnerDisplace => &self.ocean_layout,
-            WaterKernel::FlipP2G | WaterKernel::FlipPressureSolve | WaterKernel::FlipG2P => {
-                &self.flip_layout
-            }
             WaterKernel::SurfaceReconstruct => &self.surface_reconstruct_layout,
             WaterKernel::FlipMacP2G | WaterKernel::FlipMacFacesNormalize => &self.mac_p2g_layout,
             WaterKernel::FlipMacDivergence
@@ -290,9 +268,6 @@ pub(crate) fn wesl_group(kernel: WaterKernel) -> u32 {
         | WaterKernel::GerstnerDisplace
         | WaterKernel::SweStep
         | WaterKernel::PbfDensitySolve
-        | WaterKernel::FlipP2G
-        | WaterKernel::FlipPressureSolve
-        | WaterKernel::FlipG2P
         | WaterKernel::FlipMacP2G
         | WaterKernel::FlipMacFacesNormalize
         | WaterKernel::FlipMacDivergence
@@ -331,28 +306,6 @@ fn ocean_layout_entries() -> BindGroupLayoutEntries<9> {
             uniform_buffer_sized(false, None),
             texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::WriteOnly),
             texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::WriteOnly),
-        ),
-    )
-}
-
-/// Builds the `water_flip.wesl` `@group(0)` layout entries (nine bindings): the
-/// read-write particle pool and atomic grid-scatter buffer, the read-only /
-/// read-write pressure ping-pong, the sim uniform, the read-only surface
-/// depth/thickness buffers, the write-only surface-normal texture, and the
-/// surface uniform.
-fn flip_layout_entries() -> BindGroupLayoutEntries<9> {
-    BindGroupLayoutEntries::sequential(
-        ShaderStages::COMPUTE,
-        (
-            storage_buffer_sized(false, None),
-            storage_buffer_sized(false, None),
-            storage_buffer_read_only_sized(false, None),
-            storage_buffer_sized(false, None),
-            uniform_buffer_sized(false, None),
-            storage_buffer_read_only_sized(false, None),
-            storage_buffer_read_only_sized(false, None),
-            texture_storage_2d(TextureFormat::Rgba16Float, StorageTextureAccess::WriteOnly),
-            uniform_buffer_sized(false, None),
         ),
     )
 }
@@ -659,7 +612,6 @@ pub(crate) fn init_water_compute_pipelines(
     asset_server: Res<bevy_asset::AssetServer>,
 ) {
     let ocean_entries = ocean_layout_entries();
-    let flip_entries = flip_layout_entries();
     let surface_reconstruct_entries = surface_reconstruct_layout_entries();
     let pbf_entries = pbf_layout_entries();
     let spray_entries = spray_layout_entries();
@@ -679,7 +631,6 @@ pub(crate) fn init_water_compute_pipelines(
     let surface_mesh_entries = surface_mesh_layout_entries();
 
     let ocean_descriptor = BindGroupLayoutDescriptor::new("prism water ocean", &ocean_entries);
-    let flip_descriptor = BindGroupLayoutDescriptor::new("prism water flip", &flip_entries);
     let surface_reconstruct_descriptor = BindGroupLayoutDescriptor::new(
         "prism water surface reconstruct",
         &surface_reconstruct_entries,
@@ -719,7 +670,6 @@ pub(crate) fn init_water_compute_pipelines(
     let empty = BindGroupLayoutDescriptor::new("prism water empty", &[]);
 
     let ocean_layout = device.create_bind_group_layout("prism water ocean", &ocean_entries);
-    let flip_layout = device.create_bind_group_layout("prism water flip", &flip_entries);
     let surface_reconstruct_layout = device.create_bind_group_layout(
         "prism water surface reconstruct",
         &surface_reconstruct_entries,
@@ -752,8 +702,6 @@ pub(crate) fn init_water_compute_pipelines(
 
     let ocean_shader: Handle<Shader> =
         load_embedded_asset!(asset_server.as_ref(), "../shaders/water_ocean.wesl");
-    let flip_shader: Handle<Shader> =
-        load_embedded_asset!(asset_server.as_ref(), "../shaders/water_flip.wesl");
     let surface_reconstruct_shader: Handle<Shader> = load_embedded_asset!(
         asset_server.as_ref(),
         "../shaders/water_surface_reconstruct.wesl"
@@ -818,24 +766,6 @@ pub(crate) fn init_water_compute_pipelines(
         vec![pbf_descriptor.clone()],
         &pbf_shader,
         WaterKernel::PbfDensitySolve,
-    );
-    let flip_p2g = queue(
-        "prism water flip p2g",
-        vec![flip_descriptor.clone()],
-        &flip_shader,
-        WaterKernel::FlipP2G,
-    );
-    let flip_pressure_solve = queue(
-        "prism water flip pressure solve",
-        vec![flip_descriptor.clone()],
-        &flip_shader,
-        WaterKernel::FlipPressureSolve,
-    );
-    let flip_g2p = queue(
-        "prism water flip g2p",
-        vec![flip_descriptor.clone()],
-        &flip_shader,
-        WaterKernel::FlipG2P,
     );
     let surface_reconstruct = queue(
         "prism water surface reconstruct",
@@ -977,7 +907,6 @@ pub(crate) fn init_water_compute_pipelines(
 
     commands.insert_resource(WaterComputePipelines {
         ocean_layout,
-        flip_layout,
         surface_reconstruct_layout,
         pbf_layout,
         spray_layout,
@@ -993,9 +922,6 @@ pub(crate) fn init_water_compute_pipelines(
         gerstner_displace,
         swe_step,
         pbf_density_solve,
-        flip_p2g,
-        flip_pressure_solve,
-        flip_g2p,
         surface_reconstruct,
         caustics_project,
         foam_advect,
@@ -1040,9 +966,6 @@ mod tests {
         assert_eq!(wesl_group(WaterKernel::GerstnerDisplace), 0);
         assert_eq!(wesl_group(WaterKernel::SweStep), 0);
         assert_eq!(wesl_group(WaterKernel::PbfDensitySolve), 0);
-        assert_eq!(wesl_group(WaterKernel::FlipP2G), 0);
-        assert_eq!(wesl_group(WaterKernel::FlipPressureSolve), 0);
-        assert_eq!(wesl_group(WaterKernel::FlipG2P), 0);
         assert_eq!(wesl_group(WaterKernel::SurfaceReconstruct), 0);
         assert_eq!(wesl_group(WaterKernel::CausticsProject), 0);
         assert_eq!(wesl_group(WaterKernel::SprayEmit), 0);
@@ -1068,7 +991,6 @@ mod tests {
     #[test]
     fn layout_entries_match_the_declared_binding_counts() {
         assert_eq!(ocean_layout_entries().len(), 9);
-        assert_eq!(flip_layout_entries().len(), 9);
         assert_eq!(pbf_layout_entries().len(), 4);
         assert_eq!(spray_layout_entries().len(), 3);
         assert_eq!(swe_layout_entries().len(), 8);
@@ -1094,10 +1016,10 @@ mod tests {
         }
     }
 
-    /// The two `water_ocean.wesl` kernels and the four `water_flip.wesl` kernels
-    /// must each collapse onto one shared group interface, matching the shared
-    /// layout arms in [`WaterComputePipelines::layout`]. This exercises the
-    /// grouping through the golden storage-texture counts the contract declares.
+    /// The two `water_ocean.wesl` kernels must collapse onto one shared group
+    /// interface, matching the shared layout arm in
+    /// [`WaterComputePipelines::layout`]. This exercises the grouping through the
+    /// golden storage-texture counts the contract declares.
     #[test]
     fn shared_shader_kernels_agree_on_their_interface() {
         // Both ocean kernels write two displacement/normal storage textures.
@@ -1108,15 +1030,10 @@ mod tests {
                 "{kernel:?} ocean layout expects two storage textures"
             );
         }
-        // The three particle/grid flip solve kernels share three storage
-        // buffers and one uniform with no sampled textures.
-        for kernel in [
-            WaterKernel::PbfDensitySolve,
-            WaterKernel::FlipP2G,
-            WaterKernel::FlipG2P,
-        ] {
-            assert_eq!(kernel.descriptor().layout.storage_buffers, 3);
-            assert_eq!(kernel.descriptor().layout.sampled_textures, 0);
-        }
+        // The `PBF` density solve binds three storage buffers and one uniform
+        // with no sampled textures.
+        let pbf = WaterKernel::PbfDensitySolve;
+        assert_eq!(pbf.descriptor().layout.storage_buffers, 3);
+        assert_eq!(pbf.descriptor().layout.sampled_textures, 0);
     }
 }

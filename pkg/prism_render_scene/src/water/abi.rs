@@ -1,5 +1,7 @@
 //! ABI shared between the water compute passes and the sibling `WESL` shaders
-//! `shaders/water_ocean.wesl`, `shaders/water_flip.wesl`,
+//! `shaders/water_ocean.wesl`, the staggered `MAC` `FLIP`/`APIC` chain
+//! (`shaders/water_flip_mac_p2g.wesl`, `shaders/water_flip_mac.wesl`,
+//! `shaders/water_flip_mac_g2p.wesl`), `shaders/water_surface_reconstruct.wesl`,
 //! `shaders/water_pbf.wesl`, `shaders/water_surface.wesl` and
 //! `shaders/water_render_fx.wesl`.
 //!
@@ -152,12 +154,13 @@ pub(crate) struct GpuWaterGerstnerParams {
 }
 
 // ===========================================================================
-// Volume `FLIP`/`APIC` (water_flip.wesl)
+// Volume `FLIP`/`APIC` (water_flip_mac_p2g.wesl / water_flip_mac_g2p.wesl)
 // ===========================================================================
 
-/// One `FLIP`/`APIC` particle. Byte-compatible with `FlipParticle` in
-/// `water_flip.wesl` and the golden `FLIP_PARTICLE_STRIDE` (80 bytes: five
-/// `vec4<f32>` lanes).
+/// One `FLIP`/`APIC` particle. Byte-compatible with `FlipParticle` in the
+/// staggered `MAC` shaders (`water_flip_mac_p2g.wesl` /
+/// `water_flip_mac_g2p.wesl`) and the golden `FLIP_PARTICLE_STRIDE` (80 bytes:
+/// five `vec4<f32>` lanes).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq)]
 pub(crate) struct GpuFlipParticle {
@@ -174,7 +177,8 @@ pub(crate) struct GpuFlipParticle {
 }
 
 /// Global `FLIP`/`APIC` grid scalars. Byte-compatible with `FlipSimParams` in
-/// `water_flip.wesl` (two `vec4` rows + eight scalars = 64 bytes).
+/// the staggered `MAC` shaders (`water_flip_mac_p2g.wesl` /
+/// `water_flip_mac_g2p.wesl`) (two `vec4` rows + eight scalars = 64 bytes).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq)]
 pub(crate) struct GpuFlipSimParams {
@@ -237,8 +241,8 @@ impl GpuMacParams {
 }
 
 /// Screen-space reconstruction scalars. Byte-compatible with
-/// `FlipSurfaceParams` in `water_flip.wesl` (`van der Laan` smooth + normal),
-/// padded to the 32-byte uniform stride.
+/// `SurfaceReconstructParams` in `water_surface_reconstruct.wesl`
+/// (`van der Laan` smooth + normal), padded to the 32-byte uniform stride.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq)]
 pub(crate) struct GpuFlipSurfaceParams {

@@ -62,17 +62,6 @@ fn water_ocean_wesl_compiles_standalone() {
     );
 }
 
-/// The three `FLIP`/`APIC` passes (`P2G` scatter, pressure projection, `G2P`
-/// gather) and the screen-space surface reconstruction.
-#[test]
-fn water_flip_wesl_compiles_standalone() {
-    compile_standalone(
-        include_str!("../shaders/water_flip.wesl"),
-        "embedded://prism_render_scene/shaders/water_flip.wesl",
-        0x5052_4953_4d5f_5741_5445_5246_4c49_5001,
-    );
-}
-
 /// The `PBF` density solve and the crest-spray emitter (two distinct
 /// `@group(0)` resource sets in one file).
 #[test]
@@ -395,10 +384,6 @@ fn water_wesl_shaders_consume_every_binding() {
         (
             "water_butterfly.wesl",
             include_str!("../shaders/water_butterfly.wesl"),
-        ),
-        (
-            "water_flip.wesl",
-            include_str!("../shaders/water_flip.wesl"),
         ),
         (
             "water_flip_mac.wesl",

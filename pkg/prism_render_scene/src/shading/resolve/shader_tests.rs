@@ -1475,33 +1475,6 @@ fn water_pbf_wesl_compiles_standalone() {
         .unwrap_or_else(|error| panic!("water_pbf.wesl failed to compile: {error}"));
 }
 
-/// Compiles `water_flip.wesl` standalone. It has no imports, so a green result
-/// proves the four GPU `FLIP`/`APIC` compute entry points — `water_flip_p2g`
-/// (two's-complement fixed-point `atomicAdd` momentum/mass scatter),
-/// `water_flip_pressure_solve` (damped `Jacobi` pressure iteration toward a
-/// divergence-free field), `water_flip_g2p` (grid-to-particle gather with the
-/// projected velocity correction) and `water_surface_reconstruct` (screen-space
-/// / anisotropic surface field) — parse and type-check as WESL, in lock-step
-/// with the CPU goldens in `prism_render_architecture::water::{flip,
-/// reconstruct}`.
-#[test]
-fn water_flip_wesl_compiles_standalone() {
-    let mut cache = ShaderCache::new((), load_source);
-
-    let water_flip = shader_id(0x5052_4953_4d5f_5741_5445_525f_464c_5001);
-    cache.set_shader(
-        water_flip,
-        Shader::from_wesl(
-            include_str!("../../shaders/water_flip.wesl"),
-            "embedded://prism_render_scene/shaders/water_flip.wesl",
-        ),
-    );
-
-    cache
-        .get(0, water_flip, &[])
-        .unwrap_or_else(|error| panic!("water_flip.wesl failed to compile: {error}"));
-}
-
 /// Compiles `water_render_fx.wesl` standalone. It has no imports, so a green
 /// result proves the five GPU water render-effect compute entry points —
 /// `water_caustics_project` (refraction `Jacobian` focus gain plus photon

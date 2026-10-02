@@ -10,9 +10,10 @@
 //! ([`prism_render_architecture::water::gpu::buffers`]). This module is the
 //! `bevy`-render half that turns that schedule into real `wgpu` compute
 //! dispatches against the sibling `WESL` shaders (`shaders/water.wesl`,
-//! `shaders/water_ocean.wesl`, `shaders/water_flip.wesl`,
-//! `shaders/water_pbf.wesl`, `shaders/water_surface.wesl`,
-//! `shaders/water_render_fx.wesl`), which are already `naga`-validated.
+//! `shaders/water_ocean.wesl`, the staggered `MAC` `FLIP`/`APIC` chain,
+//! `shaders/water_surface_reconstruct.wesl`, `shaders/water_pbf.wesl`,
+//! `shaders/water_surface.wesl`, `shaders/water_render_fx.wesl`), which are
+//! already `naga`-validated.
 //!
 //! Mirroring the cloth compute subsystem, the module is split into cohesive
 //! files rather than one large module:

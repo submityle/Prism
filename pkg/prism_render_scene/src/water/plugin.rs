@@ -2,15 +2,16 @@
 //!
 //! This plugin wires the cohesive halves of the module into a running app:
 //!
-//! * It embeds the five `WESL` compute shaders (`water_ocean.wesl`,
-//!   `water_flip.wesl`, `water_pbf.wesl`, `water_surface.wesl`,
-//!   `water_render_fx.wesl`) so
+//! * It embeds the `WESL` compute shaders (`water_ocean.wesl`,
+//!   `water_surface_reconstruct.wesl`, `water_pbf.wesl`, `water_surface.wesl`,
+//!   `water_render_fx.wesl`, the ocean `FFT` pair, the staggered `MAC`
+//!   `FLIP`/`APIC` chain and the surface mesh/raster shaders) so
 //!   [`init_water_compute_pipelines`](super::pipeline::init_water_compute_pipelines)
-//!   can load them by their stable asset paths and `naga` validates all sixteen
-//!   compute entry points the moment the render app boots. (The `water.wesl`
+//!   can load them by their stable asset paths and `naga` validates every
+//!   compute entry point the moment the render app boots. (The `water.wesl`
 //!   surface `BSDF` library is a shading-side asset owned by the shading plugin,
 //!   not a compute kernel, so it is not embedded here.)
-//! * It builds the sixteen pipelines and twelve bind-group layouts once at
+//! * It builds every water pipeline and its bind-group layouts once at
 //!   `RenderStartup`, inserting the shared
 //!   [`WaterComputePipelines`](super::pipeline::WaterComputePipelines) resource.
 //! * It installs the [`WaterGpuBodies`](super::resources::WaterGpuBodies) and
@@ -25,7 +26,7 @@
 //!   [`WaterBody`](super::body::WaterBody)s into `ExtractedWater`, then
 //!   [`prepare_water_bodies`](super::prepare::prepare_water_bodies) in
 //!   [`RenderSystems::PrepareResources`] expands each body's golden dispatch
-//!   schedule, allocates its resident buffers and twelve bind groups and pushes
+//!   schedule, allocates its resident buffers and bind groups and pushes
 //!   the resident body the dispatch node records.
 //!
 //! When no water body is spawned every stage is an honest no-op: the extracted
@@ -76,7 +77,7 @@ impl Plugin for WaterPlugin {
         // at pipeline-init time on a real device even though the sandbox's
         // `include_str!`-based shader tests never exercise this path.
         embedded_asset!(app, "../shaders/water_ocean.wesl");
-        embedded_asset!(app, "../shaders/water_flip.wesl");
+        embedded_asset!(app, "../shaders/water_surface_reconstruct.wesl");
         embedded_asset!(app, "../shaders/water_pbf.wesl");
         embedded_asset!(app, "../shaders/water_surface.wesl");
         embedded_asset!(app, "../shaders/water_render_fx.wesl");

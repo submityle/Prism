@@ -216,7 +216,7 @@ impl WaterBody {
         // The staggered-`MAC` projection dispatches over velocity *faces*, not
         // cells, so the schedule's `DispatchDomain::Faces` loop count comes from
         // the per-axis face sum of the live `FLIP`/`APIC` grid. Derived from the
-        // same authored resolution the collocated path uses, so enabling
+        // authored grid resolution, so enabling
         // `passes.flip_mac` needs no second sizing input.
         let [nx, ny, nz, _] = self.flip_params.dim;
         let face_count = mac_face_count(nx, ny, nz);
@@ -331,7 +331,7 @@ mod tests {
             passes: WaterPasses {
                 ocean_spectrum: true,
                 gerstner: true,
-                flip: true,
+                flip_mac: true,
                 coupling_readback: true,
                 ..WaterPasses::default()
             },
@@ -353,7 +353,7 @@ mod tests {
         let ex = body.as_extract();
         assert_eq!(ex.ocean_cascades, 0);
         assert!(!ex.ocean_spectrum);
-        assert!(!ex.flip);
+        assert!(!ex.flip_mac);
         // No pass is live, so the golden prepare produces nothing.
         assert!(
             prism_render_architecture::water::gpu::pipeline::prepare(&ex)
@@ -368,7 +368,7 @@ mod tests {
         assert!(ex.ocean_spectrum);
         assert_eq!(ex.ocean_cascades, 4);
         assert!(ex.gerstner);
-        assert!(ex.flip);
+        assert!(ex.flip_mac);
         assert_eq!(ex.substeps, 2);
         assert_eq!(ex.solver_iterations, 3);
         assert!(ex.coupling_readback);
