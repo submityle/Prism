@@ -59,6 +59,9 @@ struct Toi {
 
 // Squared length below which a vector is treated as the zero vector.
 const ZERO_EPS2: f32 = 1.0e-12;
+// Relative volume tolerance below which a tetrahedron is treated as
+// degenerate (near-coplanar) and the containment test is distrusted.
+const DEGEN_REL: f32 = 1.0e-6;
 // Relative progress tolerance ending the GJK search when a support stops gaining.
 const PROGRESS_TOL: f32 = 1.0e-8;
 // Separation below which the surfaces are treated as touching.
@@ -370,6 +373,38 @@ fn apply_reduce(red: TriReduce) {
 
 // Reduces the one-to-four-point simplex to the sub-feature nearest the origin,
 // updating gjk_closest. Returns true when a tetrahedron encloses the origin.
+// Closest-feature reduction over all four tetrahedron faces, ignoring the
+// inner-side orientation test. Robust fallback mirroring the CPU
+// nearest_face_reduction used when the tetrahedron is degenerate.
+fn gjk_nearest_face() {
+    var fi0 = array<u32, 4>(0u, 0u, 0u, 1u);
+    var fi1 = array<u32, 4>(1u, 3u, 2u, 3u);
+    var fi2 = array<u32, 4>(2u, 1u, 3u, 2u);
+    var have_best = false;
+    var best_d2 = 0.0;
+    var best_red: TriReduce;
+    for (var f = 0u; f < 4u; f = f + 1u) {
+        let i0 = fi0[f];
+        let i1 = fi1[f];
+        let i2 = fi2[f];
+        let p0 = gjk_diff[i0];
+        let p1 = gjk_diff[i1];
+        let p2 = gjk_diff[i2];
+        let region = triangle_region(p0, p1, p2);
+        let red = reduction_from_region(p0, p1, p2, i0, i1, i2, region);
+        let d2 = dot(red.closest, red.closest);
+        if (!have_best || d2 < best_d2) {
+            have_best = true;
+            best_d2 = d2;
+            best_red = red;
+        }
+    }
+    if (have_best) {
+        gjk_closest = best_red.closest;
+        apply_reduce(best_red);
+    }
+}
+
 fn gjk_reduce() -> bool {
     if (gjk_len == 1u) {
         gjk_closest = gjk_diff[0];
@@ -440,6 +475,22 @@ fn gjk_reduce() -> bool {
         }
     }
     if (inside_all) {
+        // Degeneracy guard mirroring the CPU reduce_tetrahedron: a near-coplanar
+        // tetrahedron cannot reliably contain the origin, so fall back to the
+        // closest of all four faces instead of reporting containment.
+        let a = gjk_diff[0];
+        let b = gjk_diff[1];
+        let c = gjk_diff[2];
+        let d = gjk_diff[3];
+        let e0 = b - a;
+        let e1 = c - a;
+        let e2 = d - a;
+        let vol = abs(dot(e0, cross(e1, e2)));
+        let scale = length(e0) * length(e1) * length(e2);
+        if (vol <= DEGEN_REL * max(scale, ZERO_EPS2)) {
+            gjk_nearest_face();
+            return false;
+        }
         return true;
     }
     if (have_best) {
@@ -447,7 +498,10 @@ fn gjk_reduce() -> bool {
         apply_reduce(best_red);
         return false;
     }
-    return true;
+    // Not contained yet no outward face captured: fall back to the nearest face
+    // rather than wrongly claiming containment.
+    gjk_nearest_face();
+    return false;
 }
 
 // ----------------------------------------------------------------------------

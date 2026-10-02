@@ -302,9 +302,63 @@ fn reduce_tetrahedron(simplex: &[SupportPoint]) -> Reduction {
         }
     }
     if inside_all {
+        // A genuinely enclosing tetrahedron has non-negligible signed volume.
+        // When the four support points are near-coplanar the per-face
+        // inner-side test above becomes unreliable: every face can report the
+        // origin "inside", which would wrongly classify a widely separated pair
+        // as a containment (returning a zero-distance TOI). Guard that case by
+        // falling back to the closest of all four faces when the tetrahedron is
+        // degenerate instead of claiming containment.
+        if is_degenerate_tetrahedron(a, b, c, d) {
+            return nearest_face_reduction(simplex);
+        }
         return Reduction::Contained;
     }
-    best.map_or(Reduction::Contained, |(_, r)| r)
+    best.map_or_else(|| nearest_face_reduction(simplex), |(_, r)| r)
+}
+
+/// Relative tolerance for treating a tetrahedron as degenerate (near-coplanar).
+/// The absolute signed volume is compared against the product of the three edge
+/// lengths from the apex; below this fraction the four points are effectively
+/// flat and the signed-volume containment test can no longer be trusted.
+const DEGEN_REL: f32 = 1.0e-6;
+
+/// Whether the tetrahedron `(a, b, c, d)` is so close to coplanar that its
+/// signed volume cannot classify origin containment reliably.
+fn is_degenerate_tetrahedron(a: Vec3, b: Vec3, c: Vec3, d: Vec3) -> bool {
+    let e0 = b - a;
+    let e1 = c - a;
+    let e2 = d - a;
+    let vol = e0.dot(e1.cross(e2)).abs();
+    let scale = e0.length() * e1.length() * e2.length();
+    vol <= DEGEN_REL * scale.max(ZERO_EPS2)
+}
+
+/// Closest-feature reduction over all four faces of a tetrahedron, ignoring the
+/// inner-side orientation test. Robust fallback when the tetrahedron is
+/// degenerate and the signed-volume containment test is unreliable.
+fn nearest_face_reduction(simplex: &[SupportPoint]) -> Reduction {
+    let faces = [[0, 1, 2], [0, 3, 1], [0, 2, 3], [1, 3, 2]];
+    let mut best: Option<(f32, Reduction)> = None;
+    for idx in faces {
+        let face = [simplex[idx[0]], simplex[idx[1]], simplex[idx[2]]];
+        let region = triangle_region(face[0].diff, face[1].diff, face[2].diff);
+        let reduction = reduction_from_region(&face, region);
+        let dist2 = match &reduction {
+            Reduction::Sub { closest, .. } => closest.length_squared(),
+            Reduction::Contained => continue,
+        };
+        if best.as_ref().is_none_or(|(bd, _)| dist2 < *bd) {
+            best = Some((dist2, reduction));
+        }
+    }
+    best.map_or_else(
+        || Reduction::Sub {
+            kept: vec![simplex[0]],
+            closest: simplex[0].diff,
+        },
+        |(_, r)| r,
+    )
 }
 
 /// Whether the origin lies on the outward side of the face `(p0, p1, p2)`, i.e.
