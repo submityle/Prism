@@ -11,9 +11,12 @@
 //! without a usable adapter the oracle returns `None` and the test skips.
 
 use prism_render_material::{
-    decode_bc1, decode_bc3, decode_bc6h_unsigned, decode_bc7, decode_bc7_mode0, decode_bc7_mode1,
-    decode_bc7_mode2, decode_bc7_mode3, decode_bc7_mode7, encode_bc1, encode_bc3,
-    encode_bc6h_mode11_unsigned, encode_bc7_mode4, encode_bc7_mode5, encode_bc7_mode6,
+    decode_bc1, decode_bc3, decode_bc6h_mode12_signed, decode_bc6h_mode12_unsigned,
+    decode_bc6h_mode13_signed, decode_bc6h_mode13_unsigned, decode_bc6h_mode14_signed,
+    decode_bc6h_mode14_unsigned, decode_bc6h_signed, decode_bc6h_unsigned, decode_bc7,
+    decode_bc7_mode0, decode_bc7_mode1, decode_bc7_mode2, decode_bc7_mode3, decode_bc7_mode7,
+    encode_bc1, encode_bc3, encode_bc6h_mode11_unsigned, encode_bc7_mode4, encode_bc7_mode5,
+    encode_bc7_mode6,
 };
 use prism_render_material_gpu::BlockOracle;
 use wgpu::{Features, TextureFormat};
@@ -651,6 +654,184 @@ fn bc7_mode0_parity_against_gpu_hardware_decode() {
                 d <= 1,
                 "BC7 mode-0 CPU vs GPU diff {d} > 1 LSB, partition {partition}\n cpu={cpu:?}\n gpu={gpu:?}\n block={block:?}"
             );
+        }
+    }
+}
+
+/// Assemble a single-subset BC6H delta block (modes 12/13/14) directly from
+/// its fields: `mode_bits` is the 5-bit mode field, `base` the three
+/// `base_prec`-bit base endpoint components (low 10 bits inline, high bits
+/// relocated after each channel's delta), `delta` the three `delta_bits`-bit
+/// signed-delta fields, `idx` the sixteen indices (texel 0 is the 3-bit anchor
+/// with an implicit high zero, the other fifteen are 4-bit). There is no CPU
+/// encoder for these modes, so the parity test owns this spec-exact assembler.
+fn make_bc6h_delta_block(
+    mode_bits: u32,
+    base_prec: u32,
+    delta_bits: u32,
+    base: [u32; 3],
+    delta: [u32; 3],
+    idx: [u8; 16],
+) -> [u8; 16] {
+    let mut w = BlockWriter::new();
+    let hi_bits = base_prec - 10;
+    w.write(mode_bits, 5);
+    // Base low 10 bits inline, then per channel the delta immediately followed
+    // by that channel's relocated high base bits (bit 10..base_prec-1).
+    w.write(base[0] & 0x3FF, 10);
+    w.write(base[1] & 0x3FF, 10);
+    w.write(base[2] & 0x3FF, 10);
+    for c in 0..3 {
+        w.write(delta[c], delta_bits);
+        // High base bits most-significant-first.
+        for k in (0..hi_bits).rev() {
+            w.write((base[c] >> (10 + k)) & 1, 1);
+        }
+    }
+    w.write(u32::from(idx[0]), 3);
+    for &i in idx.iter().skip(1) {
+        w.write(u32::from(i), 4);
+    }
+    assert_eq!(w.pos, 128, "BC6H delta fields must fill the block exactly");
+    w.bytes
+}
+
+/// `(mode_bits, base_prec, delta_bits)` for the three single-subset delta modes.
+const BC6H_DELTA_LAYOUTS: [(u32, u32, u32); 3] = [
+    (0b00111, 11, 9), // mode 12
+    (0b01011, 12, 8), // mode 13
+    (0b01111, 16, 4), // mode 14
+];
+
+/// Compare `cpu` and `gpu` HDR texels with a relative tolerance (the hardware
+/// unquantize/interpolate rounding is implementation-defined within an LSB).
+fn assert_rgb_f32_close(cpu: &[[f32; 3]; 16], gpu: &[[f32; 3]; 16], ctx: &str) {
+    for (tc, tg) in cpu.iter().zip(gpu.iter()) {
+        for c in 0..3 {
+            let (a, b) = (tc[c], tg[c]);
+            let tol = 1e-2 * a.abs().max(b.abs()).max(1.0);
+            assert!(
+                (a - b).abs() <= tol,
+                "BC6H CPU {a} vs GPU {b} exceeds tol {tol} ({ctx})"
+            );
+        }
+    }
+}
+
+/// BC6H single-subset **unsigned** delta modes (12/13/14) parity against GPU
+/// hardware. Each mode's inverse transform reconstructs endpoint 1 as
+/// `(base + signed delta)` wrapped to the base precision; a wrong base/delta
+/// field width, wrap mask, or unquantize precision would mismatch hardware.
+#[test]
+fn bc6h_single_subset_delta_unsigned_parity_against_gpu() {
+    let Some(oracle) = BlockOracle::try_new() else {
+        #[expect(
+            clippy::print_stderr,
+            reason = "test diagnostic: GPU adapter unreachable in sandbox, graceful skip"
+        )]
+        {
+            eprintln!("no GPU adapter with BC support reachable; skipping BC6H delta unsigned");
+        }
+        return;
+    };
+    assert!(oracle.features().contains(Features::TEXTURE_COMPRESSION_BC));
+
+    let mut rng = Rng(0x6C12_0D01);
+    for &(mode_bits, base_prec, delta_bits) in &BC6H_DELTA_LAYOUTS {
+        let base_mask = if base_prec >= 32 {
+            u32::MAX
+        } else {
+            (1u32 << base_prec) - 1
+        };
+        let delta_mask = (1u32 << delta_bits) - 1;
+        for _ in 0..24 {
+            let base = [
+                rng.next_u32() & base_mask,
+                rng.next_u32() & base_mask,
+                rng.next_u32() & base_mask,
+            ];
+            let delta = [
+                rng.next_u32() & delta_mask,
+                rng.next_u32() & delta_mask,
+                rng.next_u32() & delta_mask,
+            ];
+            let mut idx = [0u8; 16];
+            for (t, slot) in idx.iter_mut().enumerate() {
+                *slot = if t == 0 {
+                    (rng.next_u32() & 0x7) as u8
+                } else {
+                    (rng.next_u32() & 0xf) as u8
+                };
+            }
+            let block = make_bc6h_delta_block(mode_bits, base_prec, delta_bits, base, delta, idx);
+            let cpu = decode_bc6h_unsigned(&block).expect("delta mode decodes");
+            let direct = match mode_bits {
+                0b00111 => decode_bc6h_mode12_unsigned(&block),
+                0b01011 => decode_bc6h_mode13_unsigned(&block),
+                _ => decode_bc6h_mode14_unsigned(&block),
+            };
+            assert_eq!(cpu, direct, "dispatch must match direct decode");
+            let gpu = oracle.decode_rgb_f32(TextureFormat::Bc6hRgbUfloat, &block);
+            assert_rgb_f32_close(&cpu, &gpu, &format!("unsigned mode {mode_bits:#07b}"));
+        }
+    }
+}
+
+/// BC6H single-subset **signed** (`SF16`) delta modes (12/13/14) parity against
+/// GPU hardware. Identical field layout to the unsigned path, but base and the
+/// wrapped endpoint are sign-extended at the base precision before the signed
+/// unquantize, so this isolates the signed transform + finish arithmetic.
+#[test]
+fn bc6h_single_subset_delta_signed_parity_against_gpu() {
+    let Some(oracle) = BlockOracle::try_new() else {
+        #[expect(
+            clippy::print_stderr,
+            reason = "test diagnostic: GPU adapter unreachable in sandbox, graceful skip"
+        )]
+        {
+            eprintln!("no GPU adapter with BC support reachable; skipping BC6H delta signed");
+        }
+        return;
+    };
+    assert!(oracle.features().contains(Features::TEXTURE_COMPRESSION_BC));
+
+    let mut rng = Rng(0x6C12_0D5E);
+    for &(mode_bits, base_prec, delta_bits) in &BC6H_DELTA_LAYOUTS {
+        let base_mask = if base_prec >= 32 {
+            u32::MAX
+        } else {
+            (1u32 << base_prec) - 1
+        };
+        let delta_mask = (1u32 << delta_bits) - 1;
+        for _ in 0..24 {
+            let base = [
+                rng.next_u32() & base_mask,
+                rng.next_u32() & base_mask,
+                rng.next_u32() & base_mask,
+            ];
+            let delta = [
+                rng.next_u32() & delta_mask,
+                rng.next_u32() & delta_mask,
+                rng.next_u32() & delta_mask,
+            ];
+            let mut idx = [0u8; 16];
+            for (t, slot) in idx.iter_mut().enumerate() {
+                *slot = if t == 0 {
+                    (rng.next_u32() & 0x7) as u8
+                } else {
+                    (rng.next_u32() & 0xf) as u8
+                };
+            }
+            let block = make_bc6h_delta_block(mode_bits, base_prec, delta_bits, base, delta, idx);
+            let cpu = decode_bc6h_signed(&block).expect("delta mode decodes");
+            let direct = match mode_bits {
+                0b00111 => decode_bc6h_mode12_signed(&block),
+                0b01011 => decode_bc6h_mode13_signed(&block),
+                _ => decode_bc6h_mode14_signed(&block),
+            };
+            assert_eq!(cpu, direct, "dispatch must match direct decode");
+            let gpu = oracle.decode_rgb_f32(TextureFormat::Bc6hRgbFloat, &block);
+            assert_rgb_f32_close(&cpu, &gpu, &format!("signed mode {mode_bits:#07b}"));
         }
     }
 }
