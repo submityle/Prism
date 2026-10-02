@@ -27,6 +27,8 @@ mod resolve;
 mod resources;
 mod runtime;
 mod shadow;
+mod sky;
+pub mod specular_aa;
 mod ssgi;
 mod ssr;
 mod taa;
