@@ -22,6 +22,13 @@
 //! Nothing here spawns tasks or blocks; the owner advances a [`Resource`] when
 //! real work completes and the reactive graph does the rest.
 //!
+//! Two further strategies build on this foundation:
+//!
+//! * [`RaceResource`]/[`RaceController`] implement "latest wins" cancellation,
+//!   dropping results from superseded requests via a monotonic [`RaceToken`].
+//! * [`Swr`] implements stale-while-revalidate caching: a cached value is
+//!   served immediately while a refresh is driven in the background.
+//!
 //! # Example
 //!
 //! ```
@@ -62,15 +69,19 @@ extern crate alloc;
 
 mod aggregate;
 mod boundary;
+mod race;
 mod resource;
 mod state;
 mod suspense;
+mod swr;
 
 pub use aggregate::{all, failed_count, pending_count, ready_count};
 pub use boundary::{error_boundary, guarded};
+pub use race::{RaceController, RaceResource, RaceToken};
 pub use resource::Resource;
 pub use state::AsyncState;
 pub use suspense::{ready_values, suspense, suspense_all};
+pub use swr::{Swr, SwrPhase, SwrRead};
 
 #[cfg(test)]
 mod tests {
