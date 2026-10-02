@@ -49,8 +49,8 @@
 use alloc::vec::Vec;
 
 use super::restir_gi::{
-    combine_unbiased, gather_spatial_sources, stream_initial, GiCandidate, GiReservoir,
-    GiReuseSource, GiSample, ShadingPoint,
+    combine_mis, gather_spatial_sources, stream_initial, GiCandidate, GiReservoir, GiReuseSource,
+    GiSample, ShadingPoint,
 };
 use super::ReservoirBudget;
 use crate::particle::reservoir_sample::Rng;
@@ -331,10 +331,11 @@ pub fn gather_admissible_gi_neighbors(
 ///   It is re-evaluated at the relevant shading point for every reuse source so
 ///   differing geometry / visibility stays unbiased.
 ///
-/// All combines use the unbiased normalization and carry the reconnection
-/// Jacobian, so the result is an unbiased estimator of the indirect
-/// illumination at `current` even when history and neighbors anchored their
-/// sample points to different shading geometry.
+/// All combines use balance-heuristic multiple importance sampling (generalized
+/// `RIS`) and carry the reconnection Jacobian, so the result is an unbiased,
+/// minimum-variance estimator of the indirect illumination at `current` even
+/// when history and neighbors anchored their sample points to different shading
+/// geometry.
 #[must_use]
 pub fn resolve_gi<T>(
     current: GiSurface,
@@ -366,7 +367,7 @@ where
                     GiReuseSource::new(initial, center),
                     GiReuseSource::new(prev, hist.surface.shading_point),
                 ];
-                combine_unbiased(&sources, center, |sp, sample| target(sp, sample), rng)
+                combine_mis(&sources, center, |sp, sample| target(sp, sample), rng)
             }
             None => initial,
         },
@@ -393,7 +394,7 @@ where
     }
 
     let sources = gather_spatial_sources(GiReuseSource::new(temporal, center), &neighbors, budget);
-    combine_unbiased(&sources, center, |sp, sample| target(sp, sample), rng)
+    combine_mis(&sources, center, |sp, sample| target(sp, sample), rng)
 }
 
 #[cfg(test)]
