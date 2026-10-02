@@ -132,16 +132,16 @@ fn sweep_face(origin: vec3<f32>, dir: vec3<f32>, max_dist: f32, r: f32,
     if (abs(d_n) < PARALLEL_EPS) {
         return res;
     }
-    var target = r;
+    var plane_r = r;
     if (dist0 < 0.0) {
-        target = -r;
+        plane_r = -r;
     }
-    let s = (target - dist0) / d_n;
+    let s = (plane_r - dist0) / d_n;
     if (s < 0.0 || s > max_dist) {
         return res;
     }
     let centre_s = origin + dir * s;
-    let contact = centre_s - n * target;
+    let contact = centre_s - n * plane_r;
     let q = closest_point_on_triangle(contact, a, b, c);
     if (dot(q - contact, q - contact) > ON_SURFACE_EPS2) {
         return res;
