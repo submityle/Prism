@@ -338,6 +338,18 @@
 //!   fills every sample, it leaves most samples silent so it reads as a rate
 //!   rather than a timbre -- the classic seed for granular clouds and
 //!   stochastic triggers.
+//! - [`pulsar::PulsarNode`] -- pulsar synthesis source: each fundamental
+//!   period emits one windowed `pulsaret` (a squared-sine Hann grain spanning
+//!   `[0, duty)`) that carries an independent formant sine, then falls
+//!   explicitly silent for the remainder of the period. The spectral peak
+//!   tracks the `formant` frequency while the repetition stays locked to the
+//!   `f0` harmonic series, so the formant glides free of pitch and `duty`
+//!   controls brightness and bandwidth (about `f0 / duty`). Unlike [`vosim`]
+//!   and [`fof_source`], whose grains carry a decaying or Gaussian-shaped
+//!   tone, its grain is a single symmetric Hann lobe; unlike
+//!   [`granular_source`], whose grains are asynchronous buffer slices, its
+//!   grains are strictly periodic; and unlike the flat band-limited
+//!   [`impulse_train`], it steers a movable formant peak.
 //!
 //!
 //! Every generator is real-time safe: `process` performs no allocation, no
@@ -367,6 +379,7 @@ pub mod oscillator;
 pub mod paf;
 pub mod phase_distortion_oscillator;
 pub mod plucked_body;
+pub mod pulsar;
 pub mod pwm_oscillator;
 pub mod reed_woodwind;
 pub mod sample_player;
@@ -403,6 +416,7 @@ pub use oscillator::{OscillatorNode, Waveform};
 pub use paf::{PafNode, PafParams};
 pub use phase_distortion_oscillator::{PhaseDistortionOscillatorNode, PhaseDistortionOscillatorParams};
 pub use plucked_body::{PluckedBodyNode, PluckedBodyParams, NUM_BODY_MODES};
+pub use pulsar::{PulsarNode, PulsarParams};
 pub use pwm_oscillator::{PwmOscillatorNode, PwmOscillatorParams};
 pub use reed_woodwind::{ReedWoodwindNode, ReedWoodwindParams};
 pub use sample_player::{Interpolation, LoopMode, SamplePlayerNode};
