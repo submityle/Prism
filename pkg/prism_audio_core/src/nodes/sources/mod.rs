@@ -65,6 +65,14 @@
 //!   `McIntyre`-Schumacher-Woodhouse bow-friction nonlinearity so the string
 //!   self-oscillates. Unlike the once-plucked `karplus_strong` it is
 //!   continuously bowed, sustaining as long as the bow moves.
+//! - [`reed_woodwind::ReedWoodwindNode`] -- single-reed woodwind
+//!   (clarinet-family) digital-waveguide physical model: a pair of pressure-
+//!   wave delay lines form a cylindrical bore closed at the mouthpiece by a
+//!   nonlinear pressure-controlled reed valve and opened at the bell by a
+//!   lossy inverting reflection. The single inversion per round trip resonates
+//!   only the odd harmonics, the physical origin of the hollow clarinet timbre.
+//!   Unlike the bow-driven `bowed_string` it is sustained by steady breath
+//!   pressure through the reed rather than bow friction.
 //!
 //! Every generator is real-time safe: `process` performs no allocation, no
 //! locking, and no panics, and reproducible generators are fully deterministic
@@ -80,6 +88,7 @@ pub mod karplus_strong;
 pub mod noise;
 pub mod oscillator;
 pub mod pwm_oscillator;
+pub mod reed_woodwind;
 pub mod sample_player;
 pub mod supersaw;
 pub mod wavetable_oscillator;
@@ -94,6 +103,7 @@ pub use karplus_strong::{KarplusStrongNode, KarplusStrongParams};
 pub use noise::{NoiseColor, NoiseNode};
 pub use oscillator::{OscillatorNode, Waveform};
 pub use pwm_oscillator::{PwmOscillatorNode, PwmOscillatorParams};
+pub use reed_woodwind::{ReedWoodwindNode, ReedWoodwindParams};
 pub use sample_player::{Interpolation, LoopMode, SamplePlayerNode};
 pub use supersaw::{SupersawNode, SupersawParams};
 pub use wavetable_oscillator::{WavetableOscillatorNode, WavetableOscillatorParams};
