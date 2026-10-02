@@ -146,6 +146,7 @@ pub mod line_line_closest_3d;
 pub mod luminance_hist;
 pub mod mask;
 pub mod microfacet_ggx;
+pub mod minkowski_sum_2d;
 pub mod modeling;
 pub mod morton_code;
 pub mod motion_blur;
@@ -358,6 +359,7 @@ pub use line_line_closest_3d::{GpuLineLineClosest3d, LineLineQuery, LineLineResu
 pub use luminance_hist::{GpuLuminanceHist, LuminanceHistQuery};
 pub use mask::{GpuScatteringMask, MaskQuery};
 pub use microfacet_ggx::{GpuMicrofacetGgx, MicrofacetSample};
+pub use minkowski_sum_2d::{GpuMinkowskiSum2d, MinkowskiSum2dQuery, MinkowskiSum2dResult};
 pub use modeling::{GpuModeling, ModelingQuery};
 pub use morton_code::GpuMortonCode;
 pub use motion_blur::{GpuMotionBlur, MotionBlurQuery, MotionBlurResult};
