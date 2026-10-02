@@ -303,10 +303,268 @@ pub fn encode_bc6h_mode11_unsigned(tile: &[[u16; 3]; 16]) -> [u8; 16] {
     best_block.expect("at least one pass runs").1
 }
 
+// ---------------------------------------------------------------------------
+// Signed profile (mode 11, SF16): sign-magnitude HDR endpoints.
+// ---------------------------------------------------------------------------
+
+/// Unquantise a signed 10-bit endpoint code to its signed 16-bit intermediate,
+/// mirroring [`decode_bc6h_mode11_signed`]'s `unquantize_signed`.
+fn unquantize_signed(comp: i32) -> i32 {
+    let (neg, v) = if comp < 0 {
+        (true, -comp)
+    } else {
+        (false, comp)
+    };
+    let unq = if v == 0 {
+        0
+    } else if v >= (1i32 << (PREC - 1)) - 1 {
+        0x7FFF
+    } else {
+        ((v << 15) + 0x4000) >> (PREC - 1)
+    };
+    if neg {
+        -unq
+    } else {
+        unq
+    }
+}
+
+/// Interpolate two signed 16-bit intermediates at a 1/64-unit weight, returning
+/// the pre-finish signed value the decoder would compute.
+fn interp_signed(e0: i32, e1: i32, weight: i32) -> i32 {
+    ((64 - weight) * e0 + weight * e1 + 32) >> 6
+}
+
+/// Apply the signed finish scale to a pre-finish intermediate, reproducing the
+/// decoder's sign-magnitude half-bit output exactly.
+fn finish_signed(q: i32) -> u16 {
+    let (sign, mag): (u16, u32) = if q < 0 {
+        #[expect(
+            clippy::cast_sign_loss,
+            reason = "magnitude is non-negative after negate"
+        )]
+        let m = ((-q) as u32 * 31) >> 5;
+        (0x8000, m)
+    } else {
+        #[expect(clippy::cast_sign_loss, reason = "non-negative branch")]
+        let m = (q as u32 * 31) >> 5;
+        (0, m)
+    };
+    sign | (mag & 0x7FFF) as u16
+}
+
+/// Clamp an arbitrary half-bit pattern to the signed-representable range and
+/// return its pre-finish signed intermediate `T` (inverse of the finish scale
+/// `(|q|*31) >> 5`), preserving the sign bit.
+fn target_intermediate_signed(half: u16) -> i32 {
+    let h = u32::from(half);
+    let mag_half = if (h & 0x7C00) == 0x7C00 {
+        MAX_HALF // inf/NaN collapse to the finite ceiling
+    } else {
+        (h & 0x7FFF).min(MAX_HALF)
+    };
+    let mag_t = (((mag_half * 32) + 15) / 31) as i32;
+    if h & 0x8000 != 0 {
+        -mag_t
+    } else {
+        mag_t
+    }
+}
+
+/// Quantise one signed 16-bit intermediate to a signed 10-bit code, returning
+/// `(code, reconstructed)` where `reconstructed == unquantize_signed(code)`.
+fn quantize_endpoint_signed(value: i32) -> (i32, i32) {
+    let v = value.clamp(-0x7FFF, 0x7FFF);
+    let mag = (v.abs() / 64).clamp(0, (1i32 << (PREC - 1)) - 1);
+    let code = if v < 0 { -mag } else { mag };
+    (code, unquantize_signed(code))
+}
+
+/// Nearest 4-bit index for one signed texel triple against the sixteen
+/// interpolated intermediates; returns `(index, squared_error)`.
+fn nearest_index_signed(target: [i32; 3], e0: [i32; 3], e1: [i32; 3]) -> (u8, u64) {
+    let mut best = 0u8;
+    let mut best_err = u64::MAX;
+    for (i, &w) in WEIGHT4.iter().enumerate() {
+        let err: u64 = (0..3)
+            .map(|c| {
+                let got = i64::from(interp_signed(e0[c], e1[c], w as i32));
+                let d = got - i64::from(target[c]);
+                (d * d) as u64
+            })
+            .sum();
+        if err < best_err {
+            best_err = err;
+            best = i as u8;
+        }
+    }
+    (best, best_err)
+}
+
+/// Assign indices to every signed texel and return `(indices, total_error)`.
+fn assign_signed(targets: &[[i32; 3]; 16], e0: [i32; 3], e1: [i32; 3]) -> ([u8; 16], u64) {
+    let mut idx = [0u8; 16];
+    let mut err = 0u64;
+    for (t, target) in targets.iter().enumerate() {
+        let (i, e) = nearest_index_signed(*target, e0, e1);
+        idx[t] = i;
+        err += e;
+    }
+    (idx, err)
+}
+
+/// Principal `RGB` axis of signed intermediate targets via power iteration.
+fn principal_axis_signed(points: &[[i32; 3]; 16]) -> [f64; 3] {
+    let mut mean = [0.0f64; 3];
+    for p in points {
+        for c in 0..3 {
+            mean[c] += f64::from(p[c]);
+        }
+    }
+    for m in &mut mean {
+        *m /= 16.0;
+    }
+    let mut cov = [[0.0f64; 3]; 3];
+    for p in points {
+        let d: [f64; 3] = core::array::from_fn(|c| f64::from(p[c]) - mean[c]);
+        for (i, row) in cov.iter_mut().enumerate() {
+            for (j, cell) in row.iter_mut().enumerate() {
+                *cell += d[i] * d[j];
+            }
+        }
+    }
+    let mut axis = [1.0f64, 1.0, 1.0];
+    for _ in 0..24 {
+        let next: [f64; 3] = core::array::from_fn(|i| (0..3).map(|j| cov[i][j] * axis[j]).sum());
+        let norm = next.iter().map(|v| v * v).sum::<f64>().sqrt();
+        if norm < 1e-9 {
+            break;
+        }
+        axis = core::array::from_fn(|c| next[c] / norm);
+    }
+    axis
+}
+
+/// Least-squares re-fit of two continuous signed endpoints given fixed indices.
+fn refit_signed(targets: &[[i32; 3]; 16], idx: &[u8; 16]) -> Option<([i32; 3], [i32; 3])> {
+    let mut saa = 0.0f64;
+    let mut sab = 0.0f64;
+    let mut sbb = 0.0f64;
+    let mut sat = [0.0f64; 3];
+    let mut sbt = [0.0f64; 3];
+    for (t, target) in targets.iter().enumerate() {
+        let w = f64::from(WEIGHT4[idx[t] as usize]);
+        let a = (64.0 - w) / 64.0;
+        let b = w / 64.0;
+        saa += a * a;
+        sab += a * b;
+        sbb += b * b;
+        for c in 0..3 {
+            sat[c] += a * f64::from(target[c]);
+            sbt[c] += b * f64::from(target[c]);
+        }
+    }
+    let det = saa * sbb - sab * sab;
+    if det.abs() < 1e-6 {
+        return None;
+    }
+    let inv = 1.0 / det;
+    let e0: [i32; 3] = core::array::from_fn(|c| {
+        let v = (sbb * sat[c] - sab * sbt[c]) * inv;
+        (v.floor() + if v >= 0.0 { 0.5 } else { -0.5 })
+            .trunc()
+            .clamp(-32767.0, 32767.0) as i32
+    });
+    let e1: [i32; 3] = core::array::from_fn(|c| {
+        let v = (saa * sbt[c] - sab * sat[c]) * inv;
+        (v.floor() + if v >= 0.0 { 0.5 } else { -0.5 })
+            .trunc()
+            .clamp(-32767.0, 32767.0) as i32
+    });
+    Some((e0, e1))
+}
+
+/// Encode one 4x4 tile of signed half-float `RGB` bit patterns as a 16-byte
+/// BC6H **signed mode 11** block (sign-magnitude HDR, e.g. signed data maps).
+#[must_use]
+pub fn encode_bc6h_mode11_signed(tile: &[[u16; 3]; 16]) -> [u8; 16] {
+    let targets: [[i32; 3]; 16] =
+        core::array::from_fn(|t| core::array::from_fn(|c| target_intermediate_signed(tile[t][c])));
+
+    let axis = principal_axis_signed(&targets);
+    let mut lo_t = 0usize;
+    let mut hi_t = 0usize;
+    let mut lo_p = f64::INFINITY;
+    let mut hi_p = f64::NEG_INFINITY;
+    for (t, target) in targets.iter().enumerate() {
+        let proj = (0..3).map(|c| f64::from(target[c]) * axis[c]).sum::<f64>();
+        if proj < lo_p {
+            lo_p = proj;
+            lo_t = t;
+        }
+        if proj > hi_p {
+            hi_p = proj;
+            hi_t = t;
+        }
+    }
+    let mut seed0 = targets[lo_t];
+    let mut seed1 = targets[hi_t];
+
+    let mut best_block: Option<(u64, [u8; 16])> = None;
+    for _pass in 0..3 {
+        let q0: [(i32, i32); 3] = core::array::from_fn(|c| quantize_endpoint_signed(seed0[c]));
+        let q1: [(i32, i32); 3] = core::array::from_fn(|c| quantize_endpoint_signed(seed1[c]));
+        let re0: [i32; 3] = core::array::from_fn(|c| q0[c].1);
+        let re1: [i32; 3] = core::array::from_fn(|c| q1[c].1);
+        let (mut idx, err) = assign_signed(&targets, re0, re1);
+
+        let (c0, c1) = if idx[0] & 0b1000 != 0 {
+            for i in &mut idx {
+                *i = 15 - *i;
+            }
+            ([q1[0].0, q1[1].0, q1[2].0], [q0[0].0, q0[1].0, q0[2].0])
+        } else {
+            ([q0[0].0, q0[1].0, q0[2].0], [q1[0].0, q1[1].0, q1[2].0])
+        };
+
+        let mut w = BitWriter::new();
+        w.write(0b00011, 5); // mode-11 marker.
+        for &code in &c0 {
+            #[expect(clippy::cast_sign_loss, reason = "two's-complement 10-bit field write")]
+            w.write((code as u32) & 0x3FF, PREC);
+        }
+        for &code in &c1 {
+            #[expect(clippy::cast_sign_loss, reason = "two's-complement 10-bit field write")]
+            w.write((code as u32) & 0x3FF, PREC);
+        }
+        w.write(u32::from(idx[0]), 3);
+        for &i in idx.iter().skip(1) {
+            w.write(u32::from(i), 4);
+        }
+
+        if best_block.is_none_or(|(be, _)| err < be) {
+            best_block = Some((err, w.bytes));
+        }
+
+        match refit_signed(&targets, &idx) {
+            Some((e0, e1)) => {
+                seed0 = e0;
+                seed1 = e1;
+            }
+            None => break,
+        }
+    }
+
+    best_block.expect("at least one pass runs").1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{decode_bc6h_mode11_unsigned, decode_bc6h_unsigned};
+    use crate::{
+        decode_bc6h_mode11_signed, decode_bc6h_mode11_unsigned, decode_bc6h_signed,
+        decode_bc6h_unsigned,
+    };
 
     /// IEEE round-to-nearest-even f32 -> half bit pattern, for building inputs.
     fn f32_to_half(value: f32) -> u16 {
@@ -441,5 +699,143 @@ mod tests {
             encode_bc6h_mode11_unsigned(&tile),
             encode_bc6h_mode11_unsigned(&tile)
         );
+    }
+
+    #[test]
+    fn signed_flat_positive_round_trips() {
+        let tile = [[f32_to_half(12.5); 3]; 16];
+        let out = decode_bc6h_mode11_signed(&encode_bc6h_mode11_signed(&tile));
+        for texel in &out {
+            for (c, &got) in texel.iter().enumerate() {
+                assert!((got - 12.5).abs() <= 0.5, "channel {c} = {got}");
+            }
+        }
+    }
+
+    #[test]
+    fn signed_flat_negative_round_trips() {
+        let tile = [[f32_to_half(-12.5); 3]; 16];
+        let out = decode_bc6h_mode11_signed(&encode_bc6h_mode11_signed(&tile));
+        for texel in &out {
+            for (c, &got) in texel.iter().enumerate() {
+                assert!(got < 0.0, "channel {c} should stay negative, got {got}");
+                assert!((got + 12.5).abs() <= 0.5, "channel {c} = {got}");
+            }
+        }
+    }
+
+    #[test]
+    fn signed_positive_gradient_tracks_input() {
+        // A positive HDR ramp 1.0 ..= 16.0 driven through the signed path: all
+        // samples share one relative-precision band, so the finish-chain index
+        // assignment tracks the input the same way the unsigned profile does.
+        let mut tile = [[0u16; 3]; 16];
+        for (t, texel) in tile.iter_mut().enumerate() {
+            let v = 1.0 + t as f32;
+            *texel = [f32_to_half(v); 3];
+        }
+        let out = decode_bc6h_mode11_signed(&encode_bc6h_mode11_signed(&tile));
+        for (t, texel) in out.iter().enumerate() {
+            let want = 1.0 + t as f32;
+            assert!(
+                (texel[0] - want).abs() <= 1.5,
+                "texel {t} = {} want {want}",
+                texel[0]
+            );
+        }
+    }
+
+    #[test]
+    fn signed_negative_gradient_tracks_input() {
+        // Mirror of the positive ramp: -1.0 ..= -16.0, verifying the signed
+        // endpoints, interpolation and sign-magnitude finish reproduce a
+        // monotonic negative HDR ramp within the log-domain tolerance.
+        let mut tile = [[0u16; 3]; 16];
+        for (t, texel) in tile.iter_mut().enumerate() {
+            let v = -(1.0 + t as f32);
+            *texel = [f32_to_half(v); 3];
+        }
+        let out = decode_bc6h_mode11_signed(&encode_bc6h_mode11_signed(&tile));
+        for (t, texel) in out.iter().enumerate() {
+            let want = -(1.0 + t as f32);
+            assert!(
+                texel[0] < 0.0,
+                "texel {t} should stay negative, got {}",
+                texel[0]
+            );
+            assert!(
+                (texel[0] - want).abs() <= 1.5,
+                "texel {t} = {} want {want}",
+                texel[0]
+            );
+        }
+    }
+
+    #[test]
+    fn signed_two_cluster_axis_is_reconstructed() {
+        let lo = f32_to_half(-30.0);
+        let hi = f32_to_half(30.0);
+        let mut tile = [[0u16; 3]; 16];
+        for (t, texel) in tile.iter_mut().enumerate() {
+            *texel = if t % 2 == 0 { [lo; 3] } else { [hi; 3] };
+        }
+        let out = decode_bc6h_mode11_signed(&encode_bc6h_mode11_signed(&tile));
+        for (t, texel) in out.iter().enumerate() {
+            let want = if t % 2 == 0 { -30.0 } else { 30.0 };
+            assert!(
+                (texel[0] - want).abs() <= 2.0,
+                "texel {t} = {} want {want}",
+                texel[0]
+            );
+        }
+    }
+
+    #[test]
+    fn signed_block_is_tagged_mode_11() {
+        let tile = [[f32_to_half(-7.0); 3]; 16];
+        let block = encode_bc6h_mode11_signed(&tile);
+        assert_eq!(block[0] & 0b1_1111, 0b00011);
+        // Dispatcher must accept it as signed mode 11.
+        assert!(decode_bc6h_signed(&block).is_ok());
+    }
+
+    #[test]
+    fn signed_anchor_index_high_bit_is_zero() {
+        let mut tile = [[0u16; 3]; 16];
+        for (t, texel) in tile.iter_mut().enumerate() {
+            let v = (t as f32) - 7.5;
+            *texel = [f32_to_half(v), f32_to_half(v * 0.5), f32_to_half(7.5 - v)];
+        }
+        let block = encode_bc6h_mode11_signed(&tile);
+        // Bits: 5 (mode) + 60 (6 x 10-bit endpoints) = 65; anchor is next 3.
+        let mut acc = 0u32;
+        for i in 0..3u32 {
+            let bitpos = 65 + i as usize;
+            acc |= u32::from((block[bitpos / 8] >> (bitpos % 8)) & 1) << i;
+        }
+        assert!(acc < 8, "anchor index {acc} must fit 3 bits");
+    }
+
+    #[test]
+    fn signed_encoding_is_deterministic() {
+        let mut tile = [[0u16; 3]; 16];
+        for (t, texel) in tile.iter_mut().enumerate() {
+            let v = (t as f32) * 1.3 - 10.0;
+            *texel = [f32_to_half(v), f32_to_half(v + 2.0), f32_to_half(v * 0.7)];
+        }
+        assert_eq!(
+            encode_bc6h_mode11_signed(&tile),
+            encode_bc6h_mode11_signed(&tile)
+        );
+    }
+
+    #[test]
+    fn finish_signed_preserves_sign_magnitude() {
+        assert_eq!(finish_signed(0), 0);
+        let pos = finish_signed(1000);
+        let neg = finish_signed(-1000);
+        assert_eq!(pos & 0x8000, 0, "positive input must clear the sign bit");
+        assert_eq!(neg & 0x8000, 0x8000, "negative input must set the sign bit");
+        assert_eq!(neg & 0x7FFF, pos & 0x7FFF, "magnitude is sign-symmetric");
     }
 }
