@@ -71,6 +71,7 @@ pub mod anvil_profile;
 pub mod ao_sample;
 pub mod aperture_blade;
 pub mod apply_carve;
+pub mod atlas_mip_padding;
 pub mod avsm_area;
 pub mod avsm_transmittance;
 pub mod backface_outline_expand;
@@ -86,6 +87,7 @@ pub mod blend_with_atmosphere;
 pub mod bloom_threshold;
 pub mod bloom_upsample;
 pub mod bounds;
+pub mod bresenham_line;
 pub mod camera;
 pub mod capsule_capsule_closest;
 pub mod capsule_sdf;
@@ -167,6 +169,7 @@ pub mod gpu_reduce;
 pub mod gpu_scan_segmented;
 pub mod gpu_scan_warp;
 pub mod gpu_stream_append;
+pub mod gpu_timer_query;
 pub mod gravity_wave;
 pub mod gray_code;
 pub mod half_float_f16;
@@ -214,6 +217,7 @@ pub mod mg_prolong;
 pub mod mg_remove_mean;
 pub mod mg_restrict;
 pub mod microfacet_ggx;
+pub mod midpoint_circle;
 pub mod minkowski_sum_2d;
 pub mod modeling;
 pub mod morton_code;
@@ -265,6 +269,7 @@ pub mod ray_sphere;
 pub mod ray_triangle;
 pub mod rayleigh_phase;
 pub mod raytrace;
+pub mod readback_reduce;
 pub mod reflect_refract_vec;
 pub mod relax_coverage;
 pub mod reservoir_sample;
@@ -364,6 +369,7 @@ pub use anvil_profile::{AnvilProfileQuery, GpuAnvilProfile};
 pub use ao_sample::GpuAoSample;
 pub use aperture_blade::{ApertureBladeQuery, ApertureBladeResult, GpuApertureBlade};
 pub use apply_carve::{ApplyCarveQuery, GpuApplyCarve};
+pub use atlas_mip_padding::{GpuAtlasMipPadding, GpuAtlasPadOp, GpuAtlasPadQuery, GpuPadMode};
 pub use avsm_area::GpuAvsmArea;
 pub use avsm_transmittance::{AvsmSampleNode, GpuAvsmTransmittance};
 pub use backface_outline_expand::{
@@ -384,6 +390,7 @@ pub use blend_with_atmosphere::{BlendQuery, BlendedColor, GpuBlendWithAtmosphere
 pub use bloom_threshold::{BloomThresholdQuery, GpuBloomThreshold};
 pub use bloom_upsample::{BloomUpsampleQuery, GpuBloomUpsample};
 pub use bounds::{GpuBounds, GpuBoundsQuery, GpuBoundsResult, AXIS_X, AXIS_Y, AXIS_Z};
+pub use bresenham_line::{GpuBresenhamLine, GpuBresenhamQuery, GpuBresenhamResult};
 pub use camera::{CameraQuery, CameraResult, GpuCamera};
 pub use capsule_capsule_closest::{
     CapsuleClosestQuery, CapsuleClosestResult, GpuCapsuleCapsuleClosest,
@@ -504,6 +511,9 @@ pub use gpu_stream_append::{
     GpuStreamAppend, GpuStreamAppendConfig, GpuStreamAppendCounter, GpuStreamAppendQuery,
     GpuStreamAppendResult, COUNTER_WORDS,
 };
+pub use gpu_timer_query::{
+    GpuTimerQueryLayout, GpuTimerQueryLayoutQuery, GpuTimerQueryLayoutResult, GpuTimerQueryOp,
+};
 pub use gravity_wave::{GpuGravityWave, GravityWaveQuery};
 pub use gray_code::GpuGrayCode;
 pub use half_float_f16::{GpuHalfFloatF16, HalfFloatQuery, HalfFloatResult};
@@ -566,6 +576,7 @@ pub use mg_prolong::{GpuMgProlong, GpuMgProlongQuery, GpuMgProlongResult};
 pub use mg_remove_mean::{GpuMgRemoveMean, GpuMgRemoveMeanQuery, GpuMgRemoveMeanResult};
 pub use mg_restrict::{GpuMgRestrict, GpuMgRestrictQuery, GpuMgRestrictResult};
 pub use microfacet_ggx::{GpuMicrofacetGgx, MicrofacetSample};
+pub use midpoint_circle::{GpuMidpointCircle, GpuMidpointCircleQuery, GpuMidpointCircleResult};
 pub use minkowski_sum_2d::{GpuMinkowskiSum2d, MinkowskiSum2dQuery, MinkowskiSum2dResult};
 pub use modeling::{GpuModeling, ModelingQuery};
 pub use morton_code::GpuMortonCode;
@@ -627,6 +638,7 @@ pub use raytrace::{
     GpuRaytrace, GpuRaytraceQuery, GpuRaytraceResult, METHOD_DEPTH_BUFFER, METHOD_RAYTRACE,
     METHOD_SDF, QUALITY_HIGH, QUALITY_LOW, QUALITY_MEDIUM,
 };
+pub use readback_reduce::{GpuReadbackReduce, GpuReadbackReduceQuery, GpuReadbackReduceResult};
 pub use reflect_refract_vec::{GpuReflectRefractVec, ReflectRefractQuery, ReflectRefractResult};
 pub use relax_coverage::{GpuRelaxCoverage, RelaxCoverageQuery};
 pub use reservoir_sample::{GpuReservoirSample, ReservoirValue};
