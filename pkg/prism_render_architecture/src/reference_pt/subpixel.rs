@@ -18,6 +18,16 @@ use super::halton::HaltonPixelSampler;
 use super::sampler::Sample2;
 use super::sobol::OwenScrambledSobolSampler;
 
+/// Seed salt mixed in to derive the thin-lens aperture's quasi-random stream
+/// from the sub-pixel jitter seed.
+///
+/// Reusing the same `(seed, pixel_index)` for both the sub-pixel jitter and the
+/// lens sample would couple the two dimensions and leave visible structure in
+/// the bokeh. Mixing this golden-ratio constant (`floor(2^64 / phi)`, odd, with
+/// a well-mixed bit pattern) into the seed yields a decorrelated but still
+/// low-discrepancy lens stream from the same sampler.
+pub(crate) const LENS_STREAM_SALT: u64 = 0x9E37_79B9_7F4A_7C15;
+
 /// Which low-discrepancy sequence drives the two sub-pixel jitter dimensions.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SubpixelSampler {

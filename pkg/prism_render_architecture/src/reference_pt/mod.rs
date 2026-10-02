@@ -58,6 +58,10 @@
 //! - [`camera`] — the pinhole camera ([`camera::PinholeCamera`]) that
 //!   generates primary rays through a virtual image plane, optionally with a
 //!   physically based thin-lens aperture for depth-of-field blur.
+//! - [`concentric`] — the Shirley-Chiu concentric square-to-disk map, an
+//!   area-preserving warp that keeps the discrepancy of its input sequence and
+//!   so lets the thin-lens aperture sample be driven by the same `QMC` stream as
+//!   the sub-pixel jitter instead of lens-disk rejection sampling.
 //! - [`film`] — the [`film::Film`] framebuffer and the [`film::render`]
 //!   driver that averages jittered primary rays into a reference image.
 //! - [`filter`] — the pixel reconstruction filter ([`filter::PixelFilter`])
@@ -78,6 +82,7 @@ pub mod clearcoat;
 pub mod clearcoat_diffuse;
 pub mod coat;
 pub mod compare;
+pub mod concentric;
 pub mod conductor;
 pub mod conductor_aniso;
 pub mod conductor_aniso_ms;

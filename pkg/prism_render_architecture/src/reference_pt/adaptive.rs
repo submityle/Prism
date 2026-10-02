@@ -32,7 +32,7 @@ use super::firefly::FireflyClamp;
 use super::integrator::{PathIntegrator, Scene};
 use super::outlier::OutlierFilter;
 use super::sampler::Rng;
-use super::subpixel::SubpixelSampler;
+use super::subpixel::{SubpixelSampler, LENS_STREAM_SALT};
 use super::Vec3;
 
 /// Luma weight for the red channel (standard luma coefficients, summing to one
@@ -259,12 +259,16 @@ pub fn render_adaptive(
             // renderer so a pixel's samples are identical for a given index.
             let mut rng = Rng::with_stream(seed, index as u64 + 1);
             let jitter_sampler = config.sampler.build(seed, index as u64);
+            // A salted second stream drives the aperture sample so depth of
+            // field is quasi-random too, decorrelated from the jitter.
+            let lens_sampler = config.sampler.build(seed ^ LENS_STREAM_SALT, index as u64);
             let mut estimator = VarianceEstimator::new();
             let mut s: u32 = 0;
             while s < config.max_samples {
                 let jitter = filter.warp(jitter_sampler.sample(u64::from(s)));
                 let ray = if camera.aperture_radius() > 0.0 {
-                    camera.primary_ray_lens(x, y, width, height, jitter, &mut rng)
+                    let lens = lens_sampler.sample(u64::from(s));
+                    camera.primary_ray_lens(x, y, width, height, jitter, lens)
                 } else {
                     camera.primary_ray(x, y, width, height, jitter)
                 };

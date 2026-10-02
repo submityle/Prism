@@ -16,7 +16,7 @@ use super::camera::PinholeCamera;
 use super::filter::PixelFilter;
 use super::integrator::{PathIntegrator, Scene};
 use super::sampler::Rng;
-use super::subpixel::SubpixelSampler;
+use super::subpixel::{SubpixelSampler, LENS_STREAM_SALT};
 use super::Vec3;
 
 /// A row-major framebuffer of linear per-pixel radiance.
@@ -203,6 +203,9 @@ pub fn render_sampled(
             // Low-discrepancy sub-pixel jitter (decorrelated per pixel) resolves
             // primary-visibility edges far faster than independent jitter would.
             let jitter_sampler = sampler.build(seed, index as u64);
+            // A second low-discrepancy stream (salted so it decorrelates from
+            // the sub-pixel jitter) drives the thin-lens aperture sample.
+            let lens_sampler = sampler.build(seed ^ LENS_STREAM_SALT, index as u64);
             let mut sum = Vec3::ZERO;
             for s in 0..samples_per_pixel {
                 // Warp the uniform jitter through the reconstruction filter so
@@ -211,7 +214,8 @@ pub fn render_sampled(
                 // A finite aperture engages the thin-lens model (depth of
                 // field); a zero aperture keeps the cheaper pinhole path.
                 let ray = if camera.aperture_radius() > 0.0 {
-                    camera.primary_ray_lens(x, y, width, height, jitter, &mut rng)
+                    let lens = lens_sampler.sample(u64::from(s));
+                    camera.primary_ray_lens(x, y, width, height, jitter, lens)
                 } else {
                     camera.primary_ray(x, y, width, height, jitter)
                 };

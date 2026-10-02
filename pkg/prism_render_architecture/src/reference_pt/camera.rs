@@ -9,7 +9,8 @@
 //! grows to the right and `y` grows downward, while the generated rays place
 //! `+up` toward the top of the image.
 
-use super::sampler::{uniform_disk, Rng, Sample2};
+use super::concentric::concentric_disk;
+use super::sampler::Sample2;
 use super::Vec3;
 use crate::ray_scene::traversal::Ray;
 
@@ -171,8 +172,13 @@ impl PinholeCamera {
     /// model, so the camera's finite aperture produces depth-of-field blur.
     ///
     /// `sample` jitters the sub-pixel position in `[0, 1)^2` exactly as
-    /// [`primary_ray`](Self::primary_ray), while `rng` is used to draw a uniform
-    /// point on the lens disk. The pinhole ray is intersected with the focus
+    /// [`primary_ray`](Self::primary_ray), while `lens` is a second `[0, 1)^2`
+    /// sample warped through the area-preserving concentric map
+    /// ([`concentric_disk`]) to a uniform point on the lens disk. Driving the
+    /// aperture from a dedicated low-discrepancy sample (rather than rejection
+    /// sampling an independent stream) keeps the bokeh distribution stratified
+    /// and the render deterministic. The pinhole ray is intersected with the
+    /// focus
     /// plane at [`focus_distance`](Self::focus_distance) to find the focal point;
     /// the ray is then re-anchored at the sampled lens point and re-aimed at that
     /// focal point. Every ray through a given pixel therefore converges on the
@@ -187,15 +193,16 @@ impl PinholeCamera {
         width: u32,
         height: u32,
         sample: Sample2,
-        rng: &mut Rng,
+        lens: Sample2,
     ) -> Ray {
         // The image-plane direction has a unit `forward` component, so scaling
         // it by `focus_distance` lands exactly on the focus plane (the plane
         // perpendicular to `forward` at that depth).
         let pinhole_dir = self.image_plane_direction(px, py, width, height, sample);
         let focal_point = self.origin.add(pinhole_dir.scale(self.focus_distance));
-        // Sample a uniform point on the aperture disk (trig-free rejection).
-        let (lens_x, lens_y) = uniform_disk(rng);
+        // Warp the dedicated lens sample onto the aperture disk with the
+        // area-preserving concentric map, preserving its low discrepancy.
+        let (lens_x, lens_y) = concentric_disk(lens);
         let lens_offset = self
             .right
             .scale(lens_x * self.aperture_radius)
@@ -214,6 +221,7 @@ impl PinholeCamera {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reference_pt::sampler::Rng;
 
     fn basic_camera() -> PinholeCamera {
         PinholeCamera::look_at(
@@ -324,7 +332,11 @@ mod tests {
         let focal_point = Vec3::new(0.0, 0.0, -focus_distance);
         let mut rng = Rng::seed(7);
         for _ in 0..256 {
-            let ray = cam.primary_ray_lens(0, 0, 1, 1, Sample2 { x: 0.5, y: 0.5 }, &mut rng);
+            let lens = Sample2 {
+                x: rng.next_f32(),
+                y: rng.next_f32(),
+            };
+            let ray = cam.primary_ray_lens(0, 0, 1, 1, Sample2 { x: 0.5, y: 0.5 }, lens);
             let origin = Vec3::from_array(ray.origin());
             let dir = Vec3::from_array(ray.direction());
             // March to the focus plane (perpendicular to -z at the focus depth).
@@ -346,8 +358,16 @@ mod tests {
         let mut spread_n = 0.0_f32;
         let mut spread_w = 0.0_f32;
         for _ in 0..512 {
-            let rn = narrow.primary_ray_lens(0, 0, 1, 1, Sample2 { x: 0.5, y: 0.5 }, &mut rng_n);
-            let rw = wide.primary_ray_lens(0, 0, 1, 1, Sample2 { x: 0.5, y: 0.5 }, &mut rng_w);
+            let lens_n = Sample2 {
+                x: rng_n.next_f32(),
+                y: rng_n.next_f32(),
+            };
+            let lens_w = Sample2 {
+                x: rng_w.next_f32(),
+                y: rng_w.next_f32(),
+            };
+            let rn = narrow.primary_ray_lens(0, 0, 1, 1, Sample2 { x: 0.5, y: 0.5 }, lens_n);
+            let rw = wide.primary_ray_lens(0, 0, 1, 1, Sample2 { x: 0.5, y: 0.5 }, lens_w);
             spread_n = spread_n.max(Vec3::from_array(rn.origin()).sub(narrow.origin()).length());
             spread_w = spread_w.max(Vec3::from_array(rw.origin()).sub(wide.origin()).length());
         }
@@ -358,9 +378,10 @@ mod tests {
     #[test]
     fn zero_aperture_matches_the_pinhole_ray() {
         let cam = basic_camera().with_thin_lens(0.0, 3.0).expect("valid lens");
-        let mut rng = Rng::seed(3);
         let jitter = Sample2 { x: 0.3, y: 0.6 };
-        let lens = cam.primary_ray_lens(5, 7, 16, 16, jitter, &mut rng);
+        // With a zero aperture the lens sample is scaled away, so any value
+        // reproduces the pinhole ray exactly.
+        let lens = cam.primary_ray_lens(5, 7, 16, 16, jitter, Sample2 { x: 0.2, y: 0.8 });
         let pin = cam.primary_ray(5, 7, 16, 16, jitter);
         let dl = Vec3::from_array(lens.direction());
         let dp = Vec3::from_array(pin.direction());
