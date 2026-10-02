@@ -55,7 +55,10 @@ use wgpu::{
 use prism_render_shading::gi::world_restir::spatial_hash::{self, HashGridParams};
 use prism_render_shading::gi::world_restir::world_reservoir::PROBE_LIMIT;
 
-use super::abi::{GpuWorldRestirInjectParams, GpuWorldRestirInjectPoint, GpuWorldRestirReservoir};
+use super::abi::{
+    GpuWorldRestirInjectParams, GpuWorldRestirInjectPoint, GpuWorldRestirLight,
+    GpuWorldRestirReservoir, GpuWorldRestirSeedParams, WORLD_RESTIR_SEED_WORKGROUP_SIZE,
+};
 
 /// Reservoir-table capacity exercised on device.
 ///
@@ -101,6 +104,25 @@ fn compile_inject_wgsl() -> String {
     (*module).clone()
 }
 
+/// Compiles `world_restir_seed.wesl` and returns its `Wgsl` translation.
+fn compile_seed_wgsl() -> String {
+    let mut cache = ShaderCache::new((), keep_wgsl);
+    let id = AssetId::Uuid {
+        uuid: Uuid::from_u128(0x5052_4953_4d5f_5753_5244_5f53_4544_0001),
+    };
+    cache.set_shader(
+        id,
+        Shader::from_wesl(
+            include_str!("../../shaders/world_restir_seed.wesl"),
+            "embedded://prism_render_scene/shaders/world_restir_seed.wesl",
+        ),
+    );
+    let module = cache
+        .get(0, id, &[])
+        .unwrap_or_else(|error| panic!("world_restir_seed.wesl failed to compile: {error}"));
+    (*module).clone()
+}
+
 /// Finds the compute entry point whose name contains `needle` in `wgsl`.
 ///
 /// The `WESL` compiler may prefix module-local names, so the parity test
@@ -121,15 +143,15 @@ fn find_entry_point(wgsl: &str, needle: &str) -> String {
     panic!("no compute entry point containing `{needle}` in compiled Wgsl");
 }
 
-/// Best-effort acquisition of a native compute device and queue with push
-/// constants.
+/// Best-effort acquisition of a native compute device and queue that exposes at
+/// least `min_immediate_bytes` of immediate data.
 ///
 /// Returns `None` (rather than panicking) when no adapter is available or the
-/// adapter cannot satisfy the `IMMEDIATES` feature / `48`-byte immediate block,
-/// so the suite stays green on headless hosts; on a machine with a real `GPU`
-/// that supports immediate data this yields a live device the parity test
-/// dispatches against.
-fn try_inject_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+/// adapter cannot satisfy the `IMMEDIATES` feature / the requested immediate
+/// block, so the suite stays green on headless hosts; on a machine with a real
+/// `GPU` that supports immediate data this yields a live device the parity
+/// tests dispatch against.
+fn try_immediate_device(min_immediate_bytes: u32) -> Option<(wgpu::Device, wgpu::Queue)> {
     let instance = Instance::new(InstanceDescriptor {
         backends: Backends::METAL | Backends::VULKAN | Backends::DX12,
         flags: InstanceFlags::default(),
@@ -142,7 +164,7 @@ fn try_inject_device() -> Option<(wgpu::Device, wgpu::Queue)> {
         return None;
     }
     let limits = adapter.limits();
-    if limits.max_immediate_size < size_of::<GpuWorldRestirInjectParams>() as u32 {
+    if limits.max_immediate_size < min_immediate_bytes {
         return None;
     }
     let (device, queue) = block_on(adapter.request_device(&DeviceDescriptor {
@@ -152,6 +174,12 @@ fn try_inject_device() -> Option<(wgpu::Device, wgpu::Queue)> {
     }))
     .ok()?;
     Some((device, queue))
+}
+
+/// Best-effort inject device: an immediate-data device whose immediate block
+/// fits the `48`-byte [`GpuWorldRestirInjectParams`].
+fn try_inject_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+    try_immediate_device(size_of::<GpuWorldRestirInjectParams>() as u32)
 }
 
 /// The deterministic visible-point stream shared by the `CPU` golden and the
@@ -469,5 +497,405 @@ fn inject_gpu_matches_cpu_golden() {
     assert!(
         gpu_reservoirs == golden_reservoir_bytes,
         "device reservoir table must match the CPU golden byte-for-byte"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Seed pass (`world_restir_seed.wesl` `seed_main`) real-device parity.
+// ---------------------------------------------------------------------------
+
+/// Reservoir-table capacity exercised by the seed parity dispatch.
+///
+/// The seed kernel is fully per-slot independent and order-independent (each
+/// invocation reads only its own `src` slot and writes only its own `dst`
+/// slot), so a tiny fixed table is enough to prove parity across both the
+/// occupied (streaming `RIS`) and the empty (copy-through) branches.
+const SEED_CAPACITY: u32 = 4;
+
+/// Absolute + relative tolerance for the seed `RIS` arithmetic.
+///
+/// The `CPU` mirror and the `GPU` kernel run the identical formulas, so
+/// cross-device `f32` rounding (`sqrt` / division / fused-multiply-add
+/// contraction) is the only expected divergence; `1e-3` scaled by the lane
+/// magnitude absorbs it while still catching a real serialisation or host
+/// wiring bug.
+const SEED_PARITY_EPS: f32 = 1e-3;
+
+/// The candidate lights the seed `RIS` stream draws from, shared verbatim by
+/// the device light buffer and the `CPU` mirror. All emitters sit at positive
+/// `z` so a `+Z`-facing cell lights up while a `-Z`-facing cell receives no
+/// front-facing candidate (exercising the not-selected branch).
+fn seed_lights() -> [(Vec3, f32, Vec3); 3] {
+    [
+        (Vec3::new(0.0, 0.0, 3.0), 2.0, Vec3::new(1.0, 0.8, 0.6)),
+        (Vec3::new(2.0, 1.0, 4.0), 1.5, Vec3::new(0.6, 0.7, 1.0)),
+        (Vec3::new(-1.0, 2.0, 2.0), 1.0, Vec3::new(0.9, 0.9, 0.9)),
+    ]
+}
+
+/// An occupied `src` slot carrying a cell's visible-point geometry and `SHARC`
+/// checksum, flagged valid, with every seeded energy / sample lane zeroed (the
+/// seed kernel overwrites them). Mirrors how the inject pass pre-seeds a slot.
+fn seed_occupied_src(
+    visible_point: Vec3,
+    visible_normal: Vec3,
+    checksum: u32,
+) -> GpuWorldRestirReservoir {
+    GpuWorldRestirReservoir {
+        visible_point: visible_point.to_array(),
+        w: 0.0,
+        visible_normal: visible_normal.to_array(),
+        m: 0.0,
+        sample_point: [0.0; 3],
+        checksum,
+        sample_normal: [0.0; 3],
+        valid: 1,
+        radiance: [0.0; 3],
+        _pad0: 0,
+    }
+}
+
+/// Asserts a single `f32` lane agrees within [`SEED_PARITY_EPS`].
+fn seed_approx_scalar(got: f32, expected: f32, slot: usize, lane: &str) {
+    let tol = SEED_PARITY_EPS * (1.0 + expected.abs().max(got.abs()));
+    assert!(
+        (got - expected).abs() <= tol,
+        "slot {slot} {lane}: device {got} vs CPU golden {expected} exceeds tolerance {tol}"
+    );
+}
+
+/// Asserts a `vec3` lane agrees componentwise within [`SEED_PARITY_EPS`].
+fn seed_approx_vec(got: [f32; 3], expected: Vec3, slot: usize, lane: &str) {
+    for (g, x) in got.iter().zip(expected.to_array()) {
+        seed_approx_scalar(*g, x, slot, lane);
+    }
+}
+
+/// Dispatches `seed_main` once over `src` + `lights` and reads the whole `dst`
+/// reservoir table back as raw bytes.
+///
+/// The pipeline uses an explicit layout (a read-only `src` storage binding, a
+/// read-write `dst` storage binding, a read-only light storage binding, and a
+/// `32`-byte immediate block) matching the `WESL` declarations exactly, because
+/// the seed tunables arrive through the `var<immediate>` path.
+fn dispatch_seed(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    wgsl: &str,
+    entry: &str,
+    src: &[GpuWorldRestirReservoir],
+    lights: &[GpuWorldRestirLight],
+    params: &GpuWorldRestirSeedParams,
+) -> Vec<GpuWorldRestirReservoir> {
+    let reservoir_bytes = (src.len() * size_of::<GpuWorldRestirReservoir>()) as u64;
+
+    let module = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("world_restir_seed_parity"),
+        source: ShaderSource::Wgsl(wgsl.into()),
+    });
+
+    let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+        label: Some("world_restir_seed_group0"),
+        entries: &[
+            storage_entry(0, true),
+            storage_entry(1, false),
+            storage_entry(2, true),
+        ],
+    });
+    let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+        label: Some("world_restir_seed_layout"),
+        bind_group_layouts: &[Some(&bind_group_layout)],
+        immediate_size: size_of::<GpuWorldRestirSeedParams>() as u32,
+    });
+    let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("world_restir_seed_parity"),
+        layout: Some(&pipeline_layout),
+        module: &module,
+        entry_point: Some(entry),
+        compilation_options: PipelineCompilationOptions::default(),
+        cache: None,
+    });
+
+    let src_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("seed_src_reservoirs"),
+        contents: bytemuck::cast_slice(src),
+        usage: BufferUsages::STORAGE,
+    });
+    let dst_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("seed_dst_reservoirs"),
+        contents: &vec![0u8; reservoir_bytes as usize],
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+    });
+    let lights_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("seed_lights"),
+        contents: bytemuck::cast_slice(lights),
+        usage: BufferUsages::STORAGE,
+    });
+
+    let bind_group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("seed_group0"),
+        layout: &bind_group_layout,
+        entries: &[
+            BindGroupEntry {
+                binding: 0,
+                resource: src_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 1,
+                resource: dst_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 2,
+                resource: lights_buf.as_entire_binding(),
+            },
+        ],
+    });
+
+    let dst_stage = device.create_buffer(&BufferDescriptor {
+        label: Some("seed_dst_stage"),
+        size: reservoir_bytes,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("seed_parity_encoder"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("seed_parity_pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.set_immediates(0, bytemuck::bytes_of(params));
+        pass.dispatch_workgroups(
+            params
+                .capacity
+                .max(1)
+                .div_ceil(WORLD_RESTIR_SEED_WORKGROUP_SIZE),
+            1,
+            1,
+        );
+    }
+    encoder.copy_buffer_to_buffer(&dst_buf, 0, &dst_stage, 0, reservoir_bytes);
+    queue.submit([encoder.finish()]);
+
+    dst_stage.slice(..).map_async(MapMode::Read, |_| {});
+    device
+        .poll(PollType::wait_indefinitely())
+        .expect("device poll should complete the submitted work");
+
+    let view = dst_stage
+        .slice(..)
+        .get_mapped_range()
+        .expect("mapped readback range should be available after poll");
+    let reservoirs = view
+        .chunks_exact(size_of::<GpuWorldRestirReservoir>())
+        .map(bytemuck::pod_read_unaligned::<GpuWorldRestirReservoir>)
+        .collect();
+    drop(view);
+    dst_stage.unmap();
+    reservoirs
+}
+
+/// One on-device `seed_main` dispatch must reproduce the authoritative seed
+/// `CPU` golden: each occupied slot's streaming-`RIS` reservoir within
+/// [`SEED_PARITY_EPS`], and each empty slot copied through byte-for-byte.
+///
+/// The expectation comes from [`super::shader_tests::seed_mirror::seed_cell`],
+/// the serial `CPU` twin the sibling `shader_tests` module already proves
+/// bit-equal to the authoritative `Reservoir` golden under a finite-input
+/// sweep. This test closes the remaining gap — that the host immediate-data /
+/// bind-group wiring and the on-device arithmetic agree with that twin — by
+/// binding the real compute pipeline on an actual device. Acquisition is
+/// best-effort (see [`try_immediate_device`]); a headless host prints a skip
+/// notice and stays green.
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice must reach the test log on hosts without a usable device"
+)]
+fn seed_gpu_matches_cpu_golden() {
+    use super::shader_tests::seed_mirror::{self, Light};
+
+    let Some((device, queue)) = try_immediate_device(size_of::<GpuWorldRestirSeedParams>() as u32)
+    else {
+        eprintln!(
+            "seed_gpu_matches_cpu_golden: no wgpu adapter with immediate data, skipping \
+             on-device parity"
+        );
+        return;
+    };
+
+    let light_src = seed_lights();
+    let gpu_lights: Vec<GpuWorldRestirLight> = light_src
+        .iter()
+        .map(|&(position, intensity, color)| GpuWorldRestirLight {
+            position: position.to_array(),
+            intensity,
+            color: color.to_array(),
+            _pad0: 0.0,
+        })
+        .collect();
+    let mirror_lights: Vec<Light> = light_src
+        .iter()
+        .map(|&(position, intensity, color)| Light {
+            position,
+            intensity,
+            color,
+        })
+        .collect();
+
+    // Occupied cells: slot 0 (`+Z`) and slot 1 (`+Y`) face the emitters and
+    // seed a surviving sample; slot 2 (`-Z`) faces away so every candidate's
+    // geometric term is zero and the slot keeps its geometry with no sample.
+    let occupied = [
+        (0usize, Vec3::new(0.0, 0.0, 0.0), Vec3::Z, 0x0000_1111u32),
+        (1usize, Vec3::new(2.0, 1.0, -1.0), Vec3::Y, 0x0000_2222u32),
+        (
+            2usize,
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::NEG_Z,
+            0x0000_3333u32,
+        ),
+    ];
+    let mut src = vec![GpuWorldRestirReservoir::zeroed(); SEED_CAPACITY as usize];
+    for &(slot, visible_point, visible_normal, checksum) in &occupied {
+        src[slot] = seed_occupied_src(visible_point, visible_normal, checksum);
+    }
+    // Slot 3 is empty but carries recognisable bytes so the copy-through branch
+    // is proven to preserve the whole slot verbatim.
+    src[3] = GpuWorldRestirReservoir {
+        visible_point: [1.0, 2.0, 3.0],
+        w: 4.0,
+        visible_normal: [5.0, 6.0, 7.0],
+        m: 8.0,
+        sample_point: [9.0, 10.0, 11.0],
+        checksum: 0x0000_DEAD,
+        sample_normal: [12.0, 13.0, 14.0],
+        valid: 0,
+        radiance: [15.0, 16.0, 17.0],
+        _pad0: 0x0000_BEEF,
+    };
+
+    let candidate_count = 8u32;
+    let frame = 7u32;
+    let intensity = 1.0f32;
+    let m_cap = 16.0f32;
+    let seed_params = GpuWorldRestirSeedParams {
+        capacity: SEED_CAPACITY,
+        light_count: gpu_lights.len() as u32,
+        candidate_count,
+        frame,
+        intensity,
+        m_cap,
+        _pad0: 0.0,
+        _pad1: 0.0,
+    };
+
+    let wgsl = compile_seed_wgsl();
+    let entry = find_entry_point(&wgsl, "seed_main");
+    let dst = dispatch_seed(
+        &device,
+        &queue,
+        &wgsl,
+        &entry,
+        &src,
+        &gpu_lights,
+        &seed_params,
+    );
+    assert_eq!(
+        dst.len(),
+        src.len(),
+        "device dst table length must match the src table"
+    );
+
+    let mut saw_selected = false;
+    let mut saw_not_selected = false;
+    for slot in 0..SEED_CAPACITY as usize {
+        let got = dst[slot];
+
+        if src[slot].valid == 0 {
+            assert_eq!(
+                bytemuck::bytes_of(&got),
+                bytemuck::bytes_of(&src[slot]),
+                "empty slot {slot} must be copied through byte-for-byte"
+            );
+            continue;
+        }
+
+        let visible_point = Vec3::from_array(src[slot].visible_point);
+        let visible_normal = Vec3::from_array(src[slot].visible_normal);
+        let result = seed_mirror::seed_cell(
+            visible_point,
+            visible_normal,
+            &mirror_lights,
+            candidate_count,
+            frame,
+            slot as u32,
+            intensity,
+            m_cap,
+        );
+
+        assert_eq!(got.valid, 1, "occupied slot {slot} must stay valid");
+        assert_eq!(
+            got.checksum, src[slot].checksum,
+            "occupied slot {slot} must preserve its SHARC checksum"
+        );
+        assert_eq!(got._pad0, 0, "occupied slot {slot} pad word must be zero");
+
+        match result.sample {
+            Some(sample) => {
+                saw_selected = true;
+                assert!(
+                    result.m > 0.0,
+                    "slot {slot} selected a candidate but reports zero confidence"
+                );
+                seed_approx_vec(
+                    got.visible_point,
+                    sample.visible_point,
+                    slot,
+                    "visible_point",
+                );
+                seed_approx_vec(
+                    got.visible_normal,
+                    sample.visible_normal,
+                    slot,
+                    "visible_normal",
+                );
+                seed_approx_vec(got.sample_point, sample.sample_point, slot, "sample_point");
+                seed_approx_vec(
+                    got.sample_normal,
+                    sample.sample_normal,
+                    slot,
+                    "sample_normal",
+                );
+                seed_approx_vec(got.radiance, sample.radiance, slot, "radiance");
+                seed_approx_scalar(got.w, result.w, slot, "w");
+                seed_approx_scalar(got.m, result.m, slot, "m");
+            }
+            None => {
+                saw_not_selected = true;
+                // Not-selected occupied slot: cell geometry preserved, every
+                // seeded energy / sample lane cleared.
+                seed_approx_vec(got.visible_point, visible_point, slot, "visible_point");
+                seed_approx_vec(got.visible_normal, visible_normal, slot, "visible_normal");
+                seed_approx_vec(got.sample_point, Vec3::ZERO, slot, "sample_point");
+                seed_approx_vec(got.sample_normal, Vec3::ZERO, slot, "sample_normal");
+                seed_approx_vec(got.radiance, Vec3::ZERO, slot, "radiance");
+                seed_approx_scalar(got.w, 0.0, slot, "w");
+                seed_approx_scalar(got.m, 0.0, slot, "m");
+            }
+        }
+    }
+
+    assert!(
+        saw_selected,
+        "the fixture must exercise the selected serialisation branch"
+    );
+    assert!(
+        saw_not_selected,
+        "the fixture must exercise the not-selected serialisation branch"
     );
 }

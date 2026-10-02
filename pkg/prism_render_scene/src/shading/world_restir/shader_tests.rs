@@ -356,7 +356,7 @@ fn assert_vec3_bits(
 /// proof that the kernel's inlined estimator matches the authoritative
 /// `Reservoir` golden it ports (`WGSL` has no 64-bit ints, so a CPU mirror is
 /// the only no-GPU check available).
-mod seed_mirror {
+pub(super) mod seed_mirror {
     use bevy_math::Vec3;
     use prism_render_shading::gi::screen_probe::restir::GiSample;
 
