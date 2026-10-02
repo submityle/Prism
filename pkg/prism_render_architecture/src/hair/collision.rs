@@ -16,12 +16,10 @@
 //! collider set is a no-op, so callers can pass `&[]` to disable collision
 //! without a branch.
 
-use super::dynamics::{StrandParticle, Vec3};
+use prism_physics_core::soft::collision::{closest_point_on_segment, project_out_of_sphere};
 
-/// Vectors shorter than the square root of this are treated as zero-length,
-/// matching the epsilon used by the dynamics solver so the two stages agree on
-/// what "degenerate" means.
-const EPS_LEN_SQ: f32 = 1.0e-24;
+use super::dynamics::{StrandParticle, Vec3};
+use super::physics_bridge::{from_glam, to_glam};
 
 /// An analytic collision proxy fitted to part of the body.
 ///
@@ -58,54 +56,28 @@ impl Collider {
     /// The result lies exactly on the surface when the point was inside, which
     /// is what lets the solver settle hair to rest against the body instead of
     /// jittering.
+    ///
+    /// The analytic sphere/capsule projection is delegated to the authoritative
+    /// physics engine ([`prism_physics_core::soft::collision`]) rather than
+    /// re-implemented here, so the strand collider shares the single copy of the
+    /// push-out math (the same delegation discipline as the edge-length solve in
+    /// [`super::physics_bridge`]). The hair `Collider` enum stays strand-side as
+    /// the compact, GPU-twin-facing proxy description; only the geometry call is
+    /// routed through the engine.
     #[must_use]
     pub fn push_out(self, point: Vec3) -> Vec3 {
-        match self {
-            Collider::Sphere { center, radius } => push_out_sphere(center, radius, point),
-            Collider::Capsule { a, b, radius } => {
-                let closest = closest_point_on_segment(a, b, point);
-                push_out_sphere(closest, radius, point)
+        let p = to_glam(point);
+        let pushed = match self {
+            Collider::Sphere { center, radius } => {
+                project_out_of_sphere(p, to_glam(center), radius)
             }
-        }
+            Collider::Capsule { a, b, radius } => {
+                let closest = closest_point_on_segment(to_glam(a), to_glam(b), p);
+                project_out_of_sphere(p, closest, radius)
+            }
+        };
+        from_glam(pushed)
     }
-}
-
-/// Pushes `point` out to the surface of the sphere `(center, radius)`.
-///
-/// When the point coincides with the center (no defined radial direction) it is
-/// nudged out along `+Y`, a deterministic fallback that avoids a NaN direction.
-/// A non-positive radius leaves the point untouched.
-fn push_out_sphere(center: Vec3, radius: f32, point: Vec3) -> Vec3 {
-    if radius <= 0.0 {
-        return point;
-    }
-    let delta = point.sub(center);
-    let dist_sq = delta.length_squared();
-    if dist_sq >= radius * radius {
-        return point;
-    }
-    if dist_sq <= EPS_LEN_SQ {
-        // Coincident with the center: pick a fixed axis so the result is
-        // deterministic rather than NaN.
-        return center.add(Vec3::new(0.0, radius, 0.0));
-    }
-    let dir = delta.normalize_or_zero();
-    center.add(dir.scale(radius))
-}
-
-/// Returns the point on segment `a`..`b` closest to `point`.
-///
-/// Degenerates gracefully: when `a` and `b` coincide the segment is a point and
-/// `a` is returned, so a zero-length capsule behaves like a sphere.
-fn closest_point_on_segment(a: Vec3, b: Vec3, point: Vec3) -> Vec3 {
-    let ab = b.sub(a);
-    let len_sq = ab.length_squared();
-    if len_sq <= EPS_LEN_SQ {
-        return a;
-    }
-    // Projection parameter clamped to the segment so we never leave `a`..`b`.
-    let t = (point.sub(a).dot(ab) / len_sq).clamp(0.0, 1.0);
-    a.add(ab.scale(t))
 }
 
 /// Projects every free particle out of every collider, in place.
