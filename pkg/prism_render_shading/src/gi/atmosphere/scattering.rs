@@ -141,6 +141,103 @@ pub fn aerial_perspective(
     )
 }
 
+/// Full sky-view radiance along a view ray: single scattering plus the
+/// LUT-sampled multiple-scattering contribution, per Hillaire 2020.
+///
+/// This is the reference golden for the GPU **sky-view LUT** bake, the consumer
+/// of the multiple-scattering LUT. It marches `samples` midpoint steps from
+/// `origin` along `view_dir` to the first atmosphere boundary. Each step adds
+/// two terms, both weighted by the view transmittance `T_view` accumulated to
+/// that step and the step length `ds`:
+///
+/// * **Single scattering** — identical to [`single_scattering`]'s integrand:
+///   `T_view \u00b7 T_sun \u00b7 (\u03c3_s^R\u00b7p_R + \u03c3_s^M\u00b7p_M) \u00b7 E_sun`, the sunlight scattered
+///   once toward the view (`T_sun` is the sun transmittance at the sample, zero
+///   below the local horizon; `sun_samples` sub-steps).
+/// * **Multiple scattering** — the isotropic higher-order energy sampled from
+///   the multiple-scattering LUT. On the CPU this evaluates
+///   [`multiscatter_estimate`] (`L_2 / (1 - f)`, the LUT's stored quantity) at
+///   the sample's altitude and local sun-zenith cosine, then couples it into
+///   the view ray by the local scattering coefficient `\u03c3_s(h)` exactly as
+///   Hillaire's sky-view raymarch does: `T_view \u00b7 \u03c3_s(h) \u00b7 L_ms \u00b7 ds`. The GPU
+///   twin replaces the `multiscatter_estimate` call with a texture fetch of the
+///   baked LUT at the same `(altitude, sun_cos_zenith)` coordinate.
+///
+/// # Multiscatter-LUT coupling choice
+/// Hillaire's sky-view LUT accumulates single scattering plus LUT-sampled
+/// multiple scattering *per march step*, with the multiscatter term entering as
+/// the local scattering coefficient times the LUT luminance. We adopt that
+/// formulation here: the LUT value `multiscatter_estimate` already folds in the
+/// sun irradiance and the geometric `1 / (1 - f)` coupling, so the per-step
+/// contribution is `T_view \u00b7 \u03c3_s(h) \u00b7 L_ms \u00b7 ds`. The sun-zenith cosine used for
+/// the lookup is `sun \u00b7 up` at the *sample* position (`up = pos.normalize`),
+/// matching the LUT's `+Y`-axis build parameterization. `ms_dir_samples` /
+/// `ms_march_samples` are forwarded to the LUT evaluation.
+///
+/// Every constant, clamp, sanitize and operation order mirrors the sibling
+/// integrators in this module; the result is spectral, finite and `\u2265 0`, and is
+/// never less than [`single_scattering`] with the same `samples` / `sun_samples`
+/// (multiple scattering only adds energy).
+#[inline]
+pub fn sky_view_radiance(
+    atmosphere: &Atmosphere,
+    origin: Vec3,
+    view_dir: Vec3,
+    sun_dir: Vec3,
+    sun_irradiance: Vec3,
+    samples: u32,
+    sun_samples: u32,
+    ms_dir_samples: u32,
+    ms_march_samples: u32,
+) -> Vec3 {
+    let dir = view_dir.normalize_or_zero();
+    if dir == Vec3::ZERO {
+        return Vec3::ZERO;
+    }
+    let distance = distance_to_boundary(atmosphere, origin, dir);
+    if !(distance > 0.0) || !distance.is_finite() {
+        return Vec3::ZERO;
+    }
+    let sun = sun_dir.normalize_or_zero();
+    let cos_theta = clamp_finite(dir.dot(sun), -1.0, 1.0);
+    let phase_r = rayleigh_phase(cos_theta);
+    let phase_m = cornette_shanks_phase(cos_theta, atmosphere.mie_g);
+
+    let steps = samples.max(1);
+    let ds = distance / steps as f32;
+    let mut optical_depth = Vec3::ZERO;
+    let mut radiance = Vec3::ZERO;
+    for i in 0..steps {
+        let t_mid = (i as f32 + 0.5) * ds;
+        let pos = origin + dir * t_mid;
+        let altitude = atmosphere.altitude_at(pos);
+        let ext = atmosphere.extinction(altitude);
+        let t_view = exp_neg(optical_depth + ext * (0.5 * ds));
+        // Single-scattering integrand (identical to `integrate_inscatter`).
+        let rayleigh_s = atmosphere.rayleigh_scattering_at(altitude);
+        let mie_s = atmosphere.mie_scattering_at(altitude);
+        let scatter_phase = rayleigh_s * phase_r + Vec3::splat(mie_s * phase_m);
+        let t_sun = sun_transmittance(atmosphere, pos, sun, sun_samples);
+        radiance += t_view * t_sun * scatter_phase * sun_irradiance * ds;
+        // Multiple-scattering term sampled from the LUT. The sun-zenith cosine
+        // is taken at the sample's local vertical, matching the LUT build.
+        let up = pos.normalize_or_zero();
+        let sun_cos_zenith = clamp_finite(sun.dot(up), -1.0, 1.0);
+        let l_ms = multiscatter_estimate(
+            atmosphere,
+            altitude,
+            sun_cos_zenith,
+            sun_irradiance,
+            ms_dir_samples,
+            ms_march_samples,
+        );
+        let scatter = atmosphere.scattering(altitude);
+        radiance += t_view * scatter * l_ms * ds;
+        optical_depth += ext * ds;
+    }
+    sanitize_rgb(radiance)
+}
+
 /// Higher-order multiple-scattering gain `L_2 · f / (1 - f)` (per channel).
 ///
 /// Models Hillaire's isotropic infinite series: given the second-order
@@ -405,9 +502,21 @@ fn clamp_finite(value: f32, lo: f32, hi: f32) -> f32 {
 #[inline]
 fn sanitize_rgb(rgb: Vec3) -> Vec3 {
     Vec3::new(
-        if rgb.x.is_finite() { rgb.x.max(0.0) } else { 0.0 },
-        if rgb.y.is_finite() { rgb.y.max(0.0) } else { 0.0 },
-        if rgb.z.is_finite() { rgb.z.max(0.0) } else { 0.0 },
+        if rgb.x.is_finite() {
+            rgb.x.max(0.0)
+        } else {
+            0.0
+        },
+        if rgb.y.is_finite() {
+            rgb.y.max(0.0)
+        } else {
+            0.0
+        },
+        if rgb.z.is_finite() {
+            rgb.z.max(0.0)
+        } else {
+            0.0
+        },
     )
 }
 
@@ -426,7 +535,10 @@ mod tests {
         let sun = Vec3::new(0.3, 0.95, 0.0);
         for view in [Vec3::Y, Vec3::new(0.5, 0.5, 0.0), Vec3::new(1.0, 0.1, 0.0)] {
             let l = single_scattering(&a, origin, view, sun, Vec3::splat(20.0), 48, 16);
-            assert!(l.is_finite() && l.min_element() >= 0.0, "view={view:?} l={l:?}");
+            assert!(
+                l.is_finite() && l.min_element() >= 0.0,
+                "view={view:?} l={l:?}"
+            );
             assert!(l.max_element() > 0.0, "expected some sky radiance: {l:?}");
         }
     }
@@ -439,7 +551,10 @@ mod tests {
         let sun = Vec3::new(0.3, 0.95, 0.0);
         let base = single_scattering(&a, origin, view, sun, Vec3::splat(1.0), 48, 16);
         let scaled = single_scattering(&a, origin, view, sun, Vec3::splat(5.0), 48, 16);
-        assert!((scaled - base * 5.0).length() < 1e-4, "base={base:?} scaled={scaled:?}");
+        assert!(
+            (scaled - base * 5.0).length() < 1e-4,
+            "base={base:?} scaled={scaled:?}"
+        );
     }
 
     #[test]
@@ -462,7 +577,10 @@ mod tests {
         let far = aerial_perspective(&a, origin, view, 40.0, sun, Vec3::splat(20.0), 48, 12);
         assert!(near.transmittance.min_element() > 0.0 && near.transmittance.max_element() <= 1.0);
         // Farther segment attenuates more and in-scatters more.
-        assert!(far.transmittance.x <= near.transmittance.x + 1e-6, "{far:?} {near:?}");
+        assert!(
+            far.transmittance.x <= near.transmittance.x + 1e-6,
+            "{far:?} {near:?}"
+        );
         assert!(far.in_scatter.max_element() >= near.in_scatter.max_element() - 1e-6);
     }
 
@@ -480,7 +598,10 @@ mod tests {
                 term *= f_val as f64;
             }
             let expected = l2 * partial as f32;
-            assert!((got - expected).length() < 1e-3, "f={f_val} got={got:?} exp={expected:?}");
+            assert!(
+                (got - expected).length() < 1e-3,
+                "f={f_val} got={got:?} exp={expected:?}"
+            );
         }
     }
 
@@ -493,14 +614,16 @@ mod tests {
     #[test]
     fn multiscatter_estimate_is_at_least_second_order_and_finite() {
         let a = Atmosphere::earth();
-        let (l2, f) =
-            multiscatter_terms(&a, 1.0, 0.9, Vec3::splat(20.0), 64, 16);
+        let (l2, f) = multiscatter_terms(&a, 1.0, 0.9, Vec3::splat(20.0), 64, 16);
         let total = multiscatter_estimate(&a, 1.0, 0.9, Vec3::splat(20.0), 64, 16);
         assert!(l2.is_finite() && f.is_finite() && total.is_finite());
         assert!(f.min_element() >= 0.0 && f.max_element() < 1.0, "f={f:?}");
         // Total (geometric sum) must dominate the raw second order.
         assert!(total.x >= l2.x - 1e-6, "total={total:?} l2={l2:?}");
-        assert!(l2.max_element() > 0.0, "expected non-trivial second order: {l2:?}");
+        assert!(
+            l2.max_element() > 0.0,
+            "expected non-trivial second order: {l2:?}"
+        );
     }
 
     #[test]
@@ -511,6 +634,83 @@ mod tests {
                 assert!((d.length() - 1.0).abs() < 1e-5, "n={n} i={i} d={d:?}");
             }
         }
+    }
+
+    #[test]
+    fn sky_view_radiance_is_finite_and_nonnegative() {
+        let a = Atmosphere::earth();
+        let origin = ground_origin(&a);
+        let sun = Vec3::new(0.3, 0.95, 0.0);
+        for view in [Vec3::Y, Vec3::new(0.5, 0.5, 0.0), Vec3::new(1.0, 0.1, 0.0)] {
+            let l = sky_view_radiance(&a, origin, view, sun, Vec3::splat(20.0), 48, 16, 64, 16);
+            assert!(
+                l.is_finite() && l.min_element() >= 0.0,
+                "view={view:?} l={l:?}"
+            );
+            assert!(l.max_element() > 0.0, "expected some sky radiance: {l:?}");
+        }
+    }
+
+    #[test]
+    fn sky_view_radiance_scales_linearly_with_sun_irradiance() {
+        let a = Atmosphere::earth();
+        let origin = ground_origin(&a);
+        let view = Vec3::new(0.4, 0.7, 0.0);
+        let sun = Vec3::new(0.3, 0.95, 0.0);
+        let base = sky_view_radiance(&a, origin, view, sun, Vec3::splat(1.0), 48, 16, 64, 16);
+        let scaled = sky_view_radiance(&a, origin, view, sun, Vec3::splat(5.0), 48, 16, 64, 16);
+        assert!(
+            (scaled - base * 5.0).length() < 1e-3,
+            "base={base:?} scaled={scaled:?}"
+        );
+    }
+
+    #[test]
+    fn sky_view_radiance_adds_energy_over_single_scatter_only() {
+        let a = Atmosphere::earth();
+        let origin = ground_origin(&a);
+        let sun = Vec3::new(0.3, 0.95, 0.0);
+        for view in [Vec3::Y, Vec3::new(0.5, 0.5, 0.0), Vec3::new(1.0, 0.2, 0.0)] {
+            let single = single_scattering(&a, origin, view, sun, Vec3::splat(20.0), 48, 16);
+            let full = sky_view_radiance(&a, origin, view, sun, Vec3::splat(20.0), 48, 16, 64, 16);
+            // The single-scatter integrand is identical, so the full radiance is
+            // never smaller per channel ...
+            assert!(
+                full.x >= single.x - 1e-6
+                    && full.y >= single.y - 1e-6
+                    && full.z >= single.z - 1e-6,
+                "full={full:?} single={single:?}"
+            );
+            // ... and the multiscatter term strictly adds energy.
+            assert!(
+                full.max_element() > single.max_element() + 1e-6,
+                "multiscatter did not add energy: full={full:?} single={single:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sky_view_radiance_degenerate_inputs_never_produce_nan() {
+        let a = Atmosphere::earth();
+        let origin = ground_origin(&a);
+        // Zero view direction -> zero radiance, no NaN.
+        assert_eq!(
+            sky_view_radiance(&a, origin, Vec3::ZERO, Vec3::Y, Vec3::splat(20.0), 16, 8, 32, 8),
+            Vec3::ZERO
+        );
+        // Non-finite irradiance / sun stay finite.
+        let l = sky_view_radiance(
+            &a,
+            origin,
+            Vec3::Y,
+            Vec3::splat(f32::NAN),
+            Vec3::splat(f32::NAN),
+            16,
+            8,
+            32,
+            8,
+        );
+        assert!(l.is_finite());
     }
 
     #[test]
