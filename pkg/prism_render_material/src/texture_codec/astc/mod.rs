@@ -20,6 +20,7 @@
 
 mod bise;
 mod block_reader;
+mod trit_quint;
 mod void_extent;
 mod weights;
 
@@ -36,8 +37,10 @@ pub enum AstcError {
     /// A non-void-extent block was passed to the void-extent-only 4x4 decoder;
     /// removed once the general single-partition path lands.
     UnsupportedBlockMode,
-    /// A BISE integer sequence used a trit or quint quantisation range, which
-    /// is parsed but not yet GPU-validated and so not yet emitted.
+    /// Reserved for a BISE integer sequence whose quantisation range is not
+    /// yet decodable. Trit and quint ranges now decode (see `trit_quint`), so
+    /// this is currently unused on the decode path and kept for forward
+    /// compatibility with future reserved encodings.
     UnsupportedIse,
 }
 

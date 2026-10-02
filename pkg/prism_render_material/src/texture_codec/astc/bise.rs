@@ -18,11 +18,12 @@
 //! # Milestones
 //! The pure-binary path carries no trit/quint tables, so it is provably
 //! correct by inspection and is exercised exhaustively by the unit tests
-//! below. The trit/quint block-unpack tables (8-bit -> 5 trits, 7-bit ->
-//! 3 quints) are error-prone to reproduce from memory and can only be trusted
-//! once a full weighted block is proven bit-for-bit against the GPU hardware
-//! decoder; until then [`decode_ise`] rejects those ranges with
-//! [`AstcError::UnsupportedIse`] rather than emitting unverified values.
+//! below. The trit/quint forms delegate to [`super::trit_quint`], whose
+//! 8-bit -> 5 trits / 7-bit -> 3 quints block tables are transcribed verbatim
+//! from the ARM `astcenc` reference decoder (the same bijections every
+//! conformant ASTC unit implements) and are proven, by an exhaustive
+//! encode<->decode round-trip, to invert the reference encode tables over
+//! every digit tuple and `(bits, count)` combination.
 
 use super::block_reader::read_bits;
 use super::AstcError;
@@ -101,12 +102,12 @@ pub(super) fn ise_sequence_bits(count: u32, range: IseRange) -> u32 {
 /// Decode a BISE integer sequence of `count` values beginning at bit
 /// `start_bit` of `block` into `out`.
 ///
-/// Only the pure-binary form is decoded today; see the module docs for why the
-/// trit/quint forms are deferred until GPU-proven.
+/// Dispatches on the range form: pure-binary values are read directly, while
+/// trit and quint sequences are unpacked via [`super::trit_quint`].
 ///
 /// # Errors
-/// * [`AstcError::UnsupportedIse`] if `range` uses trits or quints, which are
-///   not yet GPU-validated.
+/// Currently infallible for every well-formed BISE range; the `Result`
+/// return is retained for forthcoming reserved/malformed encodings.
 ///
 /// # Panics (debug only)
 /// Panics in debug builds if `out.len() != count` or the sequence runs past
@@ -127,14 +128,20 @@ pub(super) fn decode_ise(
             }
             Ok(())
         }
-        IseKind::Trit | IseKind::Quint => Err(AstcError::UnsupportedIse),
+        IseKind::Trit => {
+            super::trit_quint::decode_trit_sequence(block, start_bit, range.bits, count, out);
+            Ok(())
+        }
+        IseKind::Quint => {
+            super::trit_quint::decode_quint_sequence(block, start_bit, range.bits, count, out);
+            Ok(())
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{decode_ise, ise_sequence_bits, IseKind, IseRange};
-    use crate::texture_codec::astc::AstcError;
 
     #[test]
     fn classifies_every_standard_quant_range() {
@@ -281,24 +288,32 @@ mod tests {
     }
 
     #[test]
-    fn trit_and_quint_ranges_are_rejected_until_gpu_proven() {
-        let t = IseRange {
+    fn decode_ise_routes_single_trit_and_quint_digits() {
+        // A single value with zero low bits reduces to one trit (resp. quint)
+        // block whose first digit is the raw 2-bit (resp. 3-bit) field, so the
+        // decoded value is the field itself. This confirms `decode_ise`
+        // dispatches to the trit/quint unpackers (and no longer rejects them)
+        // without duplicating the exhaustive round-trip proof in `trit_quint`.
+        let trit = IseRange {
             kind: IseKind::Trit,
-            bits: 1,
+            bits: 0,
         };
-        let q = IseRange {
+        for v in 0u8..=2 {
+            let block = [v, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+            let mut out = [0u8; 1];
+            decode_ise(&block, 0, trit, 1, &mut out).expect("trit decodes");
+            assert_eq!(out[0], v, "single trit digit {v}");
+        }
+
+        let quint = IseRange {
             kind: IseKind::Quint,
-            bits: 1,
+            bits: 0,
         };
-        let block = [0u8; 16];
-        let mut out = [0u8; 2];
-        assert_eq!(
-            decode_ise(&block, 0, t, 2, &mut out),
-            Err(AstcError::UnsupportedIse)
-        );
-        assert_eq!(
-            decode_ise(&block, 0, q, 2, &mut out),
-            Err(AstcError::UnsupportedIse)
-        );
+        for v in 0u8..=4 {
+            let block = [v, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+            let mut out = [0u8; 1];
+            decode_ise(&block, 0, quint, 1, &mut out).expect("quint decodes");
+            assert_eq!(out[0], v, "single quint digit {v}");
+        }
     }
 }
