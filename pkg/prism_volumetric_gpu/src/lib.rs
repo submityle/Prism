@@ -214,6 +214,7 @@ pub mod total_coverage;
 pub mod tracking_transmittance;
 pub mod transcendental_approx;
 pub mod triangle_aabb_overlap;
+pub mod triangle_circumcircle;
 pub mod trig_approx;
 pub mod trilinear;
 pub mod unorm_snorm_pack;
@@ -430,6 +431,7 @@ pub use tracking_transmittance::{
 };
 pub use transcendental_approx::{GpuTranscendental, TranscendentalQuery, TranscendentalResult};
 pub use triangle_aabb_overlap::{GpuTriangleAabbOverlap, TriangleAabbQuery};
+pub use triangle_circumcircle::{GpuTriangleCircumcircle, TriangleCircumcircleResult};
 pub use trig_approx::{GpuTrigApprox, TrigApproxQuery, TrigApproxResult};
 pub use trilinear::{GpuTrilinear, TrilinearQuery};
 pub use unorm_snorm_pack::GpuUnormSnormPack;
