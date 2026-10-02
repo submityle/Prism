@@ -17,6 +17,7 @@
 
 mod blend;
 mod height;
+mod lean;
 mod mipmap;
 mod reconstruct;
 mod strength;
@@ -25,6 +26,10 @@ mod triplanar;
 
 pub use blend::{blend_linear, blend_rnm, blend_udn, blend_whiteout};
 pub use height::{height_to_normal, HeightGradient};
+pub use lean::{
+    lean_average, lean_covariance, lean_effective_variance, lean_from_normal, lean_from_slope,
+    lean_resolve_normal, LeanMoments,
+};
 pub use mipmap::{
     average_unit_normals, power_from_roughness, reduce_normal_roughness_2x, roughness_from_power,
     toksvig_factor, toksvig_roughness,

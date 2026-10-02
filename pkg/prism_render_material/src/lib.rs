@@ -42,10 +42,11 @@ pub use ir::{
 pub use normal_map::{
     average_unit_normals, blend_linear, blend_rnm, blend_surface_gradient,
     blend_surface_gradient_pair, blend_triplanar_whiteout, blend_udn, blend_whiteout, decode_ag,
-    decode_rg, height_to_normal, normal_to_slope, power_from_roughness, reconstruct_z,
-    reduce_normal_roughness_2x, resolve_surface_gradient, roughness_from_power, scale_strength,
-    slope_to_normal, toksvig_factor, toksvig_roughness, triplanar_weights, unorm_to_snorm,
-    HeightGradient, NormalLayer,
+    decode_rg, height_to_normal, lean_average, lean_covariance, lean_effective_variance,
+    lean_from_normal, lean_from_slope, lean_resolve_normal, normal_to_slope, power_from_roughness,
+    reconstruct_z, reduce_normal_roughness_2x, resolve_surface_gradient, roughness_from_power,
+    scale_strength, slope_to_normal, toksvig_factor, toksvig_roughness, triplanar_weights,
+    unorm_to_snorm, HeightGradient, LeanMoments, NormalLayer,
 };
 pub use record::{
     fallback_material_header, fallback_material_record, inactive_material_header,
