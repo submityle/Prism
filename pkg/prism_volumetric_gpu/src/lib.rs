@@ -66,6 +66,7 @@ pub mod alpha_hashed;
 pub mod analytic_single_scatter;
 pub mod analytic_transmittance;
 pub mod anamorphic_streak;
+pub mod anisotropic_clearcoat;
 pub mod anisotropic_footprint;
 pub mod anvil_profile;
 pub mod ao_sample;
@@ -102,6 +103,7 @@ pub mod classify_precip;
 pub mod closest_point_obb;
 pub mod cloud_shadow_modulation;
 pub mod cohen_sutherland_clip;
+pub mod collision;
 pub mod color_grade_lut;
 pub mod color_gradient;
 pub mod color_temperature;
@@ -160,6 +162,7 @@ pub mod fxaa;
 pub mod gamut_clip;
 pub mod gaussian_splat;
 pub mod ggx_energy_compensation;
+pub mod gi_probe;
 pub mod gjk_2d;
 pub mod gjk_3d;
 pub mod godray;
@@ -208,6 +211,7 @@ pub mod merge_sort_stable;
 pub mod mesh_aabb;
 pub mod mesh_bary_fold;
 pub mod mesh_cdf_sample;
+pub mod mesh_emission;
 pub mod mesh_ray_contains;
 pub mod mesh_renderer;
 pub mod mesh_skinning;
@@ -339,6 +343,7 @@ pub mod triangle_circumcircle;
 pub mod trig_approx;
 pub mod trilinear;
 pub mod triplanar_blend;
+pub mod two_way_coupling;
 pub mod unorm_snorm_pack;
 pub mod uv_animation;
 pub mod variance_clip;
@@ -350,6 +355,7 @@ pub mod velocity_dilate;
 pub mod vignette_mask;
 pub mod virga_fade;
 pub mod virga_veil;
+pub mod volume_march;
 pub mod volume_scene_shadow_cast;
 pub mod volumetric_multiscatter;
 pub mod vorticity_confinement;
@@ -371,6 +377,9 @@ pub use alpha_hashed::{AlphaHashedQuery, AlphaHashedResult, GpuAlphaHashed};
 pub use analytic_single_scatter::{AnalyticSingleScatterQuery, GpuAnalyticSingleScatter};
 pub use analytic_transmittance::{AnalyticTransmittanceQuery, GpuAnalyticTransmittance};
 pub use anamorphic_streak::{AnamorphicStreakQuery, AnamorphicStreakResult, GpuAnamorphicStreak};
+pub use anisotropic_clearcoat::{
+    AnisotropicClearcoatQuery, AnisotropicClearcoatResult, GpuAnisotropicClearcoat,
+};
 pub use anisotropic_footprint::{FootprintQuery, FootprintResult, GpuAnisotropicFootprint};
 pub use anvil_profile::{AnvilProfileQuery, GpuAnvilProfile};
 pub use ao_sample::GpuAoSample;
@@ -419,6 +428,7 @@ pub use cohen_sutherland_clip::{
     ClipSegmentQuery, ClipSegmentResult, GpuCohenSutherlandClip, OUTCODE_BOTTOM, OUTCODE_INSIDE,
     OUTCODE_LEFT, OUTCODE_RIGHT, OUTCODE_TOP,
 };
+pub use collision::{CollisionQuery, CollisionResult, GpuCollision};
 pub use color_grade_lut::{ColorGradeLutQuery, ColorGradeLutResult, GpuColorGradeLut};
 pub use color_gradient::{ColorGradientQuery, ColorGradientSample, GpuColorGradient};
 pub use color_temperature::{ColorTemperatureQuery, ColorTemperatureResult, GpuColorTemperature};
@@ -501,6 +511,7 @@ pub use gaussian_splat::{
 pub use ggx_energy_compensation::{
     GgxEnergyCompensationQuery, GgxEnergyCompensationResult, GpuGgxEnergyCompensation,
 };
+pub use gi_probe::{GiProbeQuery, GiProbeResult, GpuGiProbe};
 pub use gjk_2d::{GpuGjk2d, GpuGjk2dQuery, GpuGjk2dResult};
 pub use gjk_3d::{GpuGjk3d, GpuGjk3dQuery, GpuGjk3dResult};
 pub use godray::{GodRayWeightQuery, GpuGodRayWeight};
@@ -563,6 +574,7 @@ pub use merge_sort_stable::{GpuMergeSort, GpuMergeSortStable};
 pub use mesh_aabb::{GpuMeshAabb, GpuMeshAabbQuery, GpuMeshAabbResult};
 pub use mesh_bary_fold::{GpuMeshBaryFold, GpuMeshBaryFoldQuery, GpuMeshBaryFoldResult};
 pub use mesh_cdf_sample::{GpuMeshCdfSample, GpuMeshCdfSampleQuery, GpuMeshCdfSampleResult};
+pub use mesh_emission::{GpuMeshEmission, MeshEmissionQuery, MeshEmissionResult};
 pub use mesh_ray_contains::{GpuMeshContainsQuery, GpuMeshRayContains, GpuTriangle};
 pub use mesh_renderer::{
     GpuMeshRenderer, GpuMeshRendererQuery, GpuMeshRendererResult, LOCAL_AXIS_PLUS_X,
@@ -738,6 +750,7 @@ pub use triangle_circumcircle::{GpuTriangleCircumcircle, TriangleCircumcircleRes
 pub use trig_approx::{GpuTrigApprox, TrigApproxQuery, TrigApproxResult};
 pub use trilinear::{GpuTrilinear, TrilinearQuery};
 pub use triplanar_blend::{GpuTriplanarBlend, TriplanarBlendQuery, TriplanarBlendResult};
+pub use two_way_coupling::{GpuTwoWayCoupling, TwoWayCouplingQuery, TwoWayCouplingResult};
 pub use unorm_snorm_pack::GpuUnormSnormPack;
 pub use uv_animation::{GpuUvAnimation, UvAnimationQuery, UvAnimationResult};
 pub use variance_clip::{GpuVarianceClip, VarianceClipQuery};
@@ -749,6 +762,7 @@ pub use velocity_dilate::GpuVelocityDilate;
 pub use vignette_mask::{GpuVignetteMask, VignetteMaskQuery, VignetteMaskResult};
 pub use virga_fade::{GpuVirgaFade, VirgaFadeQuery};
 pub use virga_veil::{GpuVirgaVeil, VirgaVeilQuery};
+pub use volume_march::{GpuVolumeMarch, VolumeMarchQuery, VolumeMarchResult};
 pub use volume_scene_shadow_cast::{GpuVolumeShadowCast, ShadowMarch, VolumeShadowRay};
 pub use volumetric_multiscatter::{
     GpuVolumetricMultiScatter, MultiScatterQuery, VolumetricMultiScatterResponse,
