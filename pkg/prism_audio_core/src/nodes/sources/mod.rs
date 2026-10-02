@@ -59,12 +59,19 @@
 //!   raised-cosine skirt shape an independent formant peak. Unlike the
 //!   stochastic grain cloud of `granular_source` the schedule is
 //!   deterministic and pitch-synchronous, the classic sung-vowel voice.
+//! - [`bowed_string::BowedStringNode`] -- bowed-string digital-waveguide
+//!   physical model: a pair of velocity-wave delay lines (bridge-side and
+//!   nut-side) terminated by inverting reflections, driven every sample by the
+//!   `McIntyre`-Schumacher-Woodhouse bow-friction nonlinearity so the string
+//!   self-oscillates. Unlike the once-plucked `karplus_strong` it is
+//!   continuously bowed, sustaining as long as the bow moves.
 //!
 //! Every generator is real-time safe: `process` performs no allocation, no
 //! locking, and no panics, and reproducible generators are fully deterministic
 //! across platforms via [`bevy_math::ops`].
 
 pub mod additive_oscillator;
+pub mod bowed_string;
 pub mod fm_operator;
 pub mod fof_source;
 pub mod granular_source;
@@ -78,6 +85,7 @@ pub mod supersaw;
 pub mod wavetable_oscillator;
 
 pub use additive_oscillator::{AdditiveOscillatorNode, AdditiveOscillatorParams};
+pub use bowed_string::{BowedStringNode, BowedStringParams};
 pub use fm_operator::{FmOperatorNode, FmOperatorParams};
 pub use fof_source::{Formant, FofSourceNode, FofSourceParams, MAX_FOF_GRAINS, MAX_FORMANTS};
 pub use granular_source::{GranularSourceNode, GranularSourceParams, MAX_GRAINS};
