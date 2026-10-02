@@ -11,18 +11,19 @@
 //! without a usable adapter the oracle returns `None` and the test skips.
 
 use prism_render_material::{
-    decode_astc_void_extent_hdr, decode_astc_void_extent_ldr, decode_bc1, decode_bc3, decode_bc6h_mode10_signed, decode_bc6h_mode10_unsigned,
-    decode_bc6h_mode12_signed, decode_bc6h_mode12_unsigned, decode_bc6h_mode13_signed,
-    decode_bc6h_mode13_unsigned, decode_bc6h_mode14_signed, decode_bc6h_mode14_unsigned,
-    decode_bc6h_mode1_signed, decode_bc6h_mode1_unsigned, decode_bc6h_mode2_signed,
-    decode_bc6h_mode2_unsigned, decode_bc6h_mode3_signed, decode_bc6h_mode3_unsigned,
-    decode_bc6h_mode4_signed, decode_bc6h_mode4_unsigned, decode_bc6h_mode5_signed,
-    decode_bc6h_mode5_unsigned, decode_bc6h_mode6_signed, decode_bc6h_mode6_unsigned,
-    decode_bc6h_mode7_signed, decode_bc6h_mode7_unsigned, decode_bc6h_mode8_signed,
-    decode_bc6h_mode8_unsigned, decode_bc6h_mode9_signed, decode_bc6h_mode9_unsigned,
-    decode_bc6h_signed, decode_bc6h_unsigned, decode_bc7, decode_bc7_mode0, decode_bc7_mode1,
-    decode_bc7_mode2, decode_bc7_mode3, decode_bc7_mode7, encode_bc1, encode_bc3,
-    encode_bc6h_mode11_unsigned, encode_bc7_mode4, encode_bc7_mode5, encode_bc7_mode6,
+    decode_astc_4x4_weights, decode_astc_void_extent_hdr, decode_astc_void_extent_ldr, decode_bc1,
+    decode_bc3, decode_bc6h_mode10_signed, decode_bc6h_mode10_unsigned, decode_bc6h_mode12_signed,
+    decode_bc6h_mode12_unsigned, decode_bc6h_mode13_signed, decode_bc6h_mode13_unsigned,
+    decode_bc6h_mode14_signed, decode_bc6h_mode14_unsigned, decode_bc6h_mode1_signed,
+    decode_bc6h_mode1_unsigned, decode_bc6h_mode2_signed, decode_bc6h_mode2_unsigned,
+    decode_bc6h_mode3_signed, decode_bc6h_mode3_unsigned, decode_bc6h_mode4_signed,
+    decode_bc6h_mode4_unsigned, decode_bc6h_mode5_signed, decode_bc6h_mode5_unsigned,
+    decode_bc6h_mode6_signed, decode_bc6h_mode6_unsigned, decode_bc6h_mode7_signed,
+    decode_bc6h_mode7_unsigned, decode_bc6h_mode8_signed, decode_bc6h_mode8_unsigned,
+    decode_bc6h_mode9_signed, decode_bc6h_mode9_unsigned, decode_bc6h_signed, decode_bc6h_unsigned,
+    decode_bc7, decode_bc7_mode0, decode_bc7_mode1, decode_bc7_mode2, decode_bc7_mode3,
+    decode_bc7_mode7, encode_bc1, encode_bc3, encode_bc6h_mode11_unsigned, encode_bc7_mode4,
+    encode_bc7_mode5, encode_bc7_mode6,
 };
 use prism_render_material_gpu::BlockOracle;
 use wgpu::{Features, TextureFormat};
@@ -1720,14 +1721,13 @@ fn eac_rg11_snorm_parity_against_gpu_hardware_decode() {
     eprintln!("EAC RG11 snorm parity: {COUNT} blocks bit-exact (red+green)");
 }
 
-
 /// Build an LDR void-extent ASTC block carrying the given 16-bit UNORM channels
 /// and a degenerate (all-ones) extent, matching the CPU decoder's expectation.
 fn astc_void_extent_ldr(r: u16, g: u16, b: u16, a: u16) -> [u8; 16] {
     let mut blk = [0u8; 16];
     let mut lo: u64 = 0;
     lo |= 0b1_1111_1100u64; // void-extent signature, bits [0..9)
-    // bit 9 = 0 selects LDR.
+                            // bit 9 = 0 selects LDR.
     lo |= 0b11u64 << 10; // reserved, bits [10..12)
     lo |= ((1u64 << 52) - 1) << 12; // extent coordinates, bits [12..64)
     blk[0..8].copy_from_slice(&lo.to_le_bytes());
@@ -1780,7 +1780,6 @@ fn astc_void_extent_ldr_parity_against_gpu_hardware_decode() {
     eprintln!("ASTC void-extent LDR parity: {COUNT} blocks within 1 LSB of hardware");
 }
 
-
 /// Build an HDR void-extent ASTC block carrying the given FP16 channels.
 fn astc_void_extent_hdr(r: u16, g: u16, b: u16, a: u16) -> [u8; 16] {
     let mut blk = astc_void_extent_ldr(r, g, b, a);
@@ -1831,4 +1830,103 @@ fn astc_void_extent_hdr_parity_against_gpu_hardware_decode() {
         }
     }
     eprintln!("ASTC HDR void-extent parity: {COUNT} blocks match hardware (RGB FP16)");
+}
+
+// ---------------------------------------------------------------------------
+// ASTC single-plane 4x4 weight-grid parity.
+//
+// The weight read + unquantization is proven in isolation against the hardware
+// decoder by building a single-partition CEM8 (direct LDR RGB) block mode 578
+// whose endpoints are forced to black (e0) and white (e1); each unquantized
+// weight 0..=64 then renders as a pure gray level, so the GPU output is a
+// direct readout of `decode_astc_4x4_weights`.
+// ---------------------------------------------------------------------------
+
+/// Set `count` little-endian bits of `val` starting at bit `lo`.
+fn astc_set_bits(blk: &mut [u8; 16], lo: u32, count: u32, val: u32) {
+    for i in 0..count {
+        if (val >> i) & 1 == 1 {
+            let p = lo + i;
+            blk[(p >> 3) as usize] |= 1 << (p & 7);
+        }
+    }
+}
+
+/// Build a single-partition, CEM8 block of block mode `bm` with black (e0) and
+/// white (e1) endpoints. bits[0..11)=block mode, bits[11..13)=0 (one
+/// partition), bits[13..17)=CEM 8; endpoint ISE bits {25,40,55} drive the
+/// QUANT_96 endpoints to (0,0,0)->(255,255,255) (hardware-derived config).
+fn astc_bm578_black_white() -> [u8; 16] {
+    let mut b = [0u8; 16];
+    astc_set_bits(&mut b, 0, 11, 578);
+    astc_set_bits(&mut b, 13, 4, 8);
+    for p in [25u32, 40, 55] {
+        b[(p >> 3) as usize] |= 1 << (p & 7);
+    }
+    b
+}
+
+/// Lay texel `t`'s 4-bit weight `w` into the bit-reversed weight region: value
+/// bit `b` occupies block bit `127 - (4*t + b)`.
+fn astc_set_weight4(blk: &mut [u8; 16], t: u32, w: u32) {
+    for b in 0..4u32 {
+        if (w >> b) & 1 == 1 {
+            let pos = 127 - (4 * t + b);
+            blk[(pos >> 3) as usize] |= 1 << (pos & 7);
+        }
+    }
+}
+
+/// Interpolate the gray level a black->white LDR block produces for an
+/// unquantized weight `wu` in 0..=64: e0=0, e1=0xFFFF, UNORM16 lerp, then the
+/// UNORM16->UNORM8 round the hardware applies.
+fn astc_gray_from_weight(wu: u8) -> u8 {
+    let c16 = ((65535u32 * wu as u32) + 32) >> 6;
+    ((c16 * 255 + 32767) / 65535) as u8
+}
+
+#[test]
+fn astc_single_plane_weights_parity_against_gpu_hardware_decode() {
+    let Some(oracle) = BlockOracle::try_new() else {
+        eprintln!("no GPU adapter; skipping ASTC weight parity");
+        return;
+    };
+    if !oracle
+        .features()
+        .contains(Features::TEXTURE_COMPRESSION_ASTC)
+    {
+        eprintln!("adapter lacks ASTC support; skipping ASTC weight parity");
+        return;
+    }
+    let format = TextureFormat::Astc {
+        block: wgpu::AstcBlock::B4x4,
+        channel: wgpu::AstcChannel::Unorm,
+    };
+    let mut rng = Rng(0xA57C_11E6);
+    const COUNT: u32 = 256;
+    for _ in 0..COUNT {
+        let mut blk = astc_bm578_black_white();
+        let mut weights = [0u32; 16];
+        for (t, wt) in weights.iter_mut().enumerate() {
+            let w = rng.next_u32() & 0xF;
+            *wt = w;
+            astc_set_weight4(&mut blk, t as u32, w);
+        }
+        let unquant = decode_astc_4x4_weights(&blk, 4);
+        let gpu = oracle.decode_unorm8(format, &blk);
+        for t in 0..16 {
+            let expected = astc_gray_from_weight(unquant[t]);
+            for c in 0..3 {
+                let d = (expected as i32 - gpu[t][c] as i32).abs();
+                assert!(
+                    d <= 1,
+                    "ASTC weight block={blk:02x?} texel {t} chan {c}: raw_w={} unquant={} cpu_gray={expected} gpu={} (|d|={d})",
+                    weights[t],
+                    unquant[t],
+                    gpu[t][c]
+                );
+            }
+        }
+    }
+    eprintln!("ASTC single-plane weight parity: {COUNT} blocks within 1 LSB of hardware");
 }
