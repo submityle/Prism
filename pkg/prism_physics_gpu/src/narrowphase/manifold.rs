@@ -124,3 +124,101 @@ impl ContactManifold {
         }
     }
 }
+
+/// Reduces a set of coplanar contact points to at most
+/// [`MAX_MANIFOLD_POINTS`], keeping the widest, deepest quad.
+///
+/// Picks the deepest corner, the corner farthest from it, then the two corners
+/// that maximise the signed triangle area to either side of that diagonal
+/// (measured in the plane whose normal is `normal`). Four or fewer input
+/// points are returned unchanged, preserving order. This is the standard
+/// four-point manifold reduction every mesh and polyhedron collider in this
+/// crate shares, so the kept quad cannot drift between the per-pair clip and
+/// the cross-triangle merge.
+///
+/// Provenance: textbook four-point contact reduction (Ericson, *Real-Time
+/// Collision Detection*, 2004). No Unreal Engine source or derived code.
+#[must_use]
+pub(crate) fn reduce_to_four(points: &[ManifoldPoint], normal: Vec3) -> Vec<ManifoldPoint> {
+    if points.len() <= MAX_MANIFOLD_POINTS {
+        return points.to_vec();
+    }
+    // Deepest corner anchors the quad.
+    let mut i0 = 0;
+    for (i, pt) in points.iter().enumerate() {
+        if pt.depth > points[i0].depth {
+            i0 = i;
+        }
+    }
+    // Corner farthest from the anchor.
+    let p0 = points[i0].position;
+    let mut i1 = i0;
+    let mut best_d2 = -1.0;
+    for (i, pt) in points.iter().enumerate() {
+        let d2 = (pt.position - p0).length_squared();
+        if d2 > best_d2 {
+            best_d2 = d2;
+            i1 = i;
+        }
+    }
+    let p1 = points[i1].position;
+    let diag = p1 - p0;
+    // Corners that maximise signed area on either side of the diagonal.
+    let mut i2 = i0;
+    let mut i3 = i0;
+    let mut best_pos = 0.0f32;
+    let mut best_neg = 0.0f32;
+    for (i, pt) in points.iter().enumerate() {
+        let area = diag.cross(pt.position - p0).dot(normal);
+        if area > best_pos {
+            best_pos = area;
+            i2 = i;
+        } else if area < best_neg {
+            best_neg = area;
+            i3 = i;
+        }
+    }
+    let mut chosen = Vec::with_capacity(MAX_MANIFOLD_POINTS);
+    for &idx in &[i0, i1, i2, i3] {
+        if !chosen.contains(&idx) {
+            chosen.push(idx);
+        }
+    }
+    chosen.iter().map(|&i| points[i]).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EPS: f32 = 1.0e-4;
+
+    #[test]
+    fn reduce_passes_through_four_or_fewer() {
+        let pts = vec![
+            ManifoldPoint::new(Vec3::new(0.0, 0.0, 0.0), 0.1),
+            ManifoldPoint::new(Vec3::new(1.0, 0.0, 0.0), 0.2),
+        ];
+        let out = reduce_to_four(&pts, Vec3::Z);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0], pts[0]);
+        assert_eq!(out[1], pts[1]);
+    }
+
+    #[test]
+    fn reduce_keeps_bounding_quad_of_a_hexagon() {
+        let pts = vec![
+            ManifoldPoint::new(Vec3::new(-2.0, 0.0, 0.0), 0.3),
+            ManifoldPoint::new(Vec3::new(-1.0, 1.0, 0.0), 0.1),
+            ManifoldPoint::new(Vec3::new(1.0, 1.0, 0.0), 0.1),
+            ManifoldPoint::new(Vec3::new(2.0, 0.0, 0.0), 0.5),
+            ManifoldPoint::new(Vec3::new(1.0, -1.0, 0.0), 0.1),
+            ManifoldPoint::new(Vec3::new(-1.0, -1.0, 0.0), 0.1),
+        ];
+        let out = reduce_to_four(&pts, Vec3::Z);
+        assert_eq!(out.len(), 4);
+        // The deepest corner (2, 0) and the farthest from it (-2, 0) survive.
+        assert!(out.iter().any(|p| (p.position - Vec3::new(2.0, 0.0, 0.0)).length() < EPS));
+        assert!(out.iter().any(|p| (p.position - Vec3::new(-2.0, 0.0, 0.0)).length() < EPS));
+    }
+}

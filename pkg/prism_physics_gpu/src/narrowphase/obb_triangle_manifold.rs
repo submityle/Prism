@@ -59,7 +59,7 @@
 
 use glam::Vec3;
 
-use super::manifold::{ContactManifold, ManifoldPoint, MAX_MANIFOLD_POINTS};
+use super::manifold::{reduce_to_four, ContactManifold, ManifoldPoint, MAX_MANIFOLD_POINTS};
 use super::obb::Obb;
 use super::obb_triangle::{obb_triangle_sat, support_vertex, ObbTrianglePair};
 use super::sphere_triangle::{closest_point_on_triangle, Triangle};
@@ -203,60 +203,6 @@ fn penetrating_points(clipped: &[Vec3], ref_point: Vec3, ref_out: Vec3) -> Vec<M
     out
 }
 
-/// Reduces a set of coplanar manifold points to at most
-/// `MAX_MANIFOLD_POINTS`, keeping the widest, deepest quad.
-///
-/// Picks the deepest corner, the corner farthest from it, then the two corners
-/// maximising the signed triangle area to either side of that diagonal
-/// (measured in the plane whose normal is `normal`). Fewer than five input
-/// points are returned unchanged (order preserved).
-fn reduce_points(points: &[ManifoldPoint], normal: Vec3) -> Vec<ManifoldPoint> {
-    if points.len() <= MAX_MANIFOLD_POINTS {
-        return points.to_vec();
-    }
-    // Deepest corner anchors the quad.
-    let mut i0 = 0;
-    for (i, pt) in points.iter().enumerate() {
-        if pt.depth > points[i0].depth {
-            i0 = i;
-        }
-    }
-    // Corner farthest from the anchor.
-    let p0 = points[i0].position;
-    let mut i1 = i0;
-    let mut best_d2 = -1.0;
-    for (i, pt) in points.iter().enumerate() {
-        let d2 = (pt.position - p0).length_squared();
-        if d2 > best_d2 {
-            best_d2 = d2;
-            i1 = i;
-        }
-    }
-    let p1 = points[i1].position;
-    let diag = p1 - p0;
-    // Corners that maximise signed area on either side of the diagonal.
-    let mut i2 = i0;
-    let mut i3 = i0;
-    let mut best_pos = 0.0f32;
-    let mut best_neg = 0.0f32;
-    for (i, pt) in points.iter().enumerate() {
-        let area = diag.cross(pt.position - p0).dot(normal);
-        if area > best_pos {
-            best_pos = area;
-            i2 = i;
-        } else if area < best_neg {
-            best_neg = area;
-            i3 = i;
-        }
-    }
-    let mut chosen = Vec::with_capacity(MAX_MANIFOLD_POINTS);
-    for &idx in &[i0, i1, i2, i3] {
-        if !chosen.contains(&idx) {
-            chosen.push(idx);
-        }
-    }
-    chosen.iter().map(|&i| points[i]).collect()
-}
 
 /// Builds the single representative point used for the edge-edge contact and as
 /// the fallback when clipping leaves no penetrating corner.
@@ -335,7 +281,7 @@ pub(crate) fn obb_triangle_manifold(
         points.push(representative_point(obb, tri, normal, sat.depth));
     }
 
-    let reduced = reduce_points(&points, normal);
+    let reduced = reduce_to_four(&points, normal);
     debug_assert!(reduced.len() <= MAX_MANIFOLD_POINTS);
     debug_assert!(reduced.len() <= MAX_CLIP_POINTS);
     Some(ContactManifold::new(
@@ -465,26 +411,6 @@ mod tests {
             assert!(p.x >= -EPS, "x {}", p.x);
         }
         assert!(out.iter().any(|p| (p.x).abs() < EPS));
-    }
-
-    #[test]
-    fn reduce_keeps_four_extreme_corners() {
-        // Six coplanar points (a hexagon in z = 0); reduction keeps four that
-        // bound it, dropping the two interior-edge midpoints.
-        let pts = vec![
-            ManifoldPoint::new(Vec3::new(-2.0, 0.0, 0.0), 0.3),
-            ManifoldPoint::new(Vec3::new(-1.0, 1.0, 0.0), 0.1),
-            ManifoldPoint::new(Vec3::new(1.0, 1.0, 0.0), 0.1),
-            ManifoldPoint::new(Vec3::new(2.0, 0.0, 0.0), 0.5),
-            ManifoldPoint::new(Vec3::new(1.0, -1.0, 0.0), 0.1),
-            ManifoldPoint::new(Vec3::new(-1.0, -1.0, 0.0), 0.1),
-        ];
-        let reduced = reduce_points(&pts, Vec3::Z);
-        assert_eq!(reduced.len(), 4);
-        // The deepest corner (2, 0) must survive.
-        assert!(reduced.iter().any(|p| (p.position - Vec3::new(2.0, 0.0, 0.0)).length() < EPS));
-        // The farthest corner from it (-2, 0) must survive.
-        assert!(reduced.iter().any(|p| (p.position - Vec3::new(-2.0, 0.0, 0.0)).length() < EPS));
     }
 
     #[test]
