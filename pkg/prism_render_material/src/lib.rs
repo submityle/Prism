@@ -80,7 +80,10 @@ pub use texture_codec::{
     encode_etc2_rgb8, etc2_rgb8_mode, half_bits_to_f32, rgb565_to_rgb888, Bc6hError, Bc7Error,
     BcFormat, BcSourceError, BcTexelSource, Etc2Error, Etc2Mode,
 };
-pub use texture_color::{hsl_to_rgb, hsv_to_rgb, rgb_to_hsl, rgb_to_hsv};
+pub use texture_color::{
+    hsl_to_rgb, hsv_to_rgb, rgb_to_hsl, rgb_to_hsv, rgb_to_ycocg, rgb_to_ycocg_r, ycocg_r_to_rgb,
+    ycocg_to_rgb,
+};
 pub use texture_ewa::{ewa_sample_plane, ewa_sample_rgba8};
 pub use texture_filter::{
     bicubic_catmull_rom, bilinear, bspline_cubic, bspline_cubic_fast, bspline_cubic_weights,
