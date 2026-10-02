@@ -465,9 +465,115 @@ pub fn boiling_filter_di(tile: &mut [DiReservoir], filter_strength: f32) {
     }
 }
 
+/// Frame-level boiling-filter pass over a resolved DI reservoir framebuffer.
+///
+/// `reservoirs` is the row-major `width x height` grid of **finalized**
+/// per-pixel reservoirs produced by [`super::restir_temporal::resolve_di`]. The
+/// filter is applied independently to each `tile_size x tile_size` block so a
+/// firefly is only ever compared against its own screen neighborhood, matching
+/// the `GPU` twin's one-workgroup-per-tile launch (a bright pixel must not be
+/// averaged against the whole frame). Edge tiles are clipped to the framebuffer
+/// bounds.
+///
+/// A no-op when the filter is disabled (`filter_strength <= 0` / non-finite),
+/// when `tile_size == 0`, or when `reservoirs.len() < width * height` (a
+/// malformed buffer is left untouched rather than silently misread).
+///
+/// Pass [`DEFAULT_BOILING_FILTER_STRENGTH`] to enable with the standard `11x`
+/// threshold; see [`boiling_filter_di`] for the per-tile math.
+pub fn boiling_filter_di_framebuffer(
+    reservoirs: &mut [DiReservoir],
+    width: usize,
+    height: usize,
+    tile_size: usize,
+    filter_strength: f32,
+) {
+    if filter_strength <= 0.0
+        || !filter_strength.is_finite()
+        || tile_size == 0
+        || width == 0
+        || height == 0
+        || reservoirs.len() < width * height
+    {
+        return;
+    }
+
+    let mut scratch: Vec<DiReservoir> = Vec::with_capacity(tile_size * tile_size);
+    let mut ty = 0;
+    while ty < height {
+        let y_end = (ty + tile_size).min(height);
+        let mut tx = 0;
+        while tx < width {
+            let x_end = (tx + tile_size).min(width);
+
+            // Gather this tile's reservoirs (rows are not contiguous), filter the
+            // contiguous scratch copy, then scatter the survivors back.
+            scratch.clear();
+            for y in ty..y_end {
+                let row = y * width;
+                scratch.extend_from_slice(&reservoirs[row + tx..row + x_end]);
+            }
+            boiling_filter_di(&mut scratch, filter_strength);
+            let mut k = 0;
+            for y in ty..y_end {
+                let row = y * width;
+                for x in tx..x_end {
+                    reservoirs[row + x] = scratch[k];
+                    k += 1;
+                }
+            }
+
+            tx = x_end;
+        }
+        ty = y_end;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn boiling_filter_framebuffer_is_per_tile() {
+        // 16x16 framebuffer, 8x8 tiles (4 tiles). Unit weights everywhere plus a
+        // 100x firefly at the top-left pixel of tile (0,0).
+        let (w, h, ts) = (16usize, 16usize, 8usize);
+        let mut fb: Vec<DiReservoir> = (0..w * h).map(|i| di_with_w(i as u32, 1.0)).collect();
+        fb[0] = di_with_w(0, 100.0);
+        boiling_filter_di_framebuffer(&mut fb, w, h, ts, DEFAULT_BOILING_FILTER_STRENGTH);
+        // Firefly cleared within its own tile.
+        assert!(fb[0].is_empty());
+        // A neighbor in the same tile and any pixel in another tile survive.
+        assert!(!fb[1].is_empty());
+        assert!(!fb[8].is_empty()); // tile (1,0)
+        assert!(!fb[8 * w + 8].is_empty()); // tile (1,1)
+    }
+
+    #[test]
+    fn boiling_filter_framebuffer_clips_edge_tiles() {
+        // 10x10 with 8x8 tiles yields clipped 2-wide / 2-tall edge tiles; the
+        // pass must stay in bounds and still clear a firefly in an edge tile.
+        let (w, h, ts) = (10usize, 10usize, 8usize);
+        let mut fb: Vec<DiReservoir> = (0..w * h).map(|i| di_with_w(i as u32, 1.0)).collect();
+        // Fill the bottom-right 2x2 edge tile with units plus one firefly so the
+        // 4-sample tile has a neighborhood to compare against.
+        let corner = 8 * w + 8;
+        fb[corner] = di_with_w(999, 1000.0);
+        boiling_filter_di_framebuffer(&mut fb, w, h, ts, 1.0);
+        assert!(fb[corner].is_empty());
+        assert!(!fb[corner + 1].is_empty());
+    }
+
+    #[test]
+    fn boiling_filter_framebuffer_guards_malformed_input() {
+        let before = [di_with_w(0, 1.0), di_with_w(1, 1000.0)];
+        // tile_size 0, zero dims, and an undersized buffer are all no-ops.
+        for (w, h, ts) in [(2usize, 1usize, 0usize), (0, 0, 8), (4, 4, 8)] {
+            let mut fb = before.to_vec();
+            boiling_filter_di_framebuffer(&mut fb, w, h, ts, 1.0);
+            assert_eq!(fb.as_slice(), before.as_slice());
+        }
+    }
 
     /// A finalized reservoir holding `light` with contribution weight `w`.
     fn di_with_w(light: u32, w: f32) -> DiReservoir {
