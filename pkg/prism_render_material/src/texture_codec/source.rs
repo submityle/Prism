@@ -1,5 +1,7 @@
 //! A [`TexelSource`](crate::TexelSource) backed by in-memory block-compressed
-//! mip data, tying the [`decode_bc*`](super::formats) decoders to the manual
+//! mip data, tying the [`decode_bc*`](super::formats) decoders (plus the
+//! modern [`decode_bc7`](super::decode_bc7) and mobile
+//! [`decode_etc2_rgb8`](super::decode_etc2_rgb8) decoders) to the manual
 //! sampler/filter stack.
 //!
 //! This closes the CPU-golden texture pipeline: a streaming virtual-texture
@@ -18,6 +20,9 @@
 //!   (bilinear/trilinear) has already wrapped `(x, y)` into that range, and
 //!   `mip` is clamped to the available mip count.
 //! * Decoded `u8` RGBA is converted to `f32` in `[0, 1]` by dividing by 255.
+//! * Formats with undecodable modes (`BC7` partitioned, `ETC2` T/H/planar)
+//!   are fully validated at construction, so sampling never silently falls
+//!   back on an unsupported block.
 //!
 //! # References
 //! * Khronos Data Format Specification 1.3 (block memory layout).
@@ -26,6 +31,7 @@
 use alloc::vec::Vec;
 
 use super::formats::{decode_bc1, decode_bc2, decode_bc3, decode_bc4, decode_bc5};
+use super::{decode_bc7, decode_etc2_rgb8};
 use crate::TexelSource;
 
 /// The subset of block-compressed formats this source can decode.
@@ -41,6 +47,15 @@ pub enum BcFormat {
     Bc4,
     /// BC5 -- two channels (ch0 in `R`, ch1 in `G`), 16-byte blocks.
     Bc5,
+    /// BC7 -- modern LDR `RGBA`, 16-byte blocks. Only the single-subset modes
+    /// 4/5/6 are decodable; a block using a partitioned mode (0-3/7) is
+    /// rejected at [`BcTexelSource::new`] time rather than decoded wrongly.
+    Bc7,
+    /// `ETC2_RGB8` -- mobile `RGB` baseline, 8-byte blocks. Only the ETC1-
+    /// compatible base modes (individual/differential) are decodable; a block
+    /// using a T/H/planar extended mode is rejected at
+    /// [`BcTexelSource::new`] time rather than decoded wrongly.
+    Etc2Rgb8,
 }
 
 impl BcFormat {
@@ -49,16 +64,27 @@ impl BcFormat {
     #[must_use]
     pub const fn block_bytes(self) -> usize {
         match self {
-            BcFormat::Bc1 | BcFormat::Bc4 => 8,
-            BcFormat::Bc2 | BcFormat::Bc3 | BcFormat::Bc5 => 16,
+            BcFormat::Bc1 | BcFormat::Bc4 | BcFormat::Etc2Rgb8 => 8,
+            BcFormat::Bc2 | BcFormat::Bc3 | BcFormat::Bc5 | BcFormat::Bc7 => 16,
         }
     }
 
-    /// Decode one block at `bytes` (length already validated by the caller)
-    /// into 16 `RGBA8` texels in row-major order.
+    /// Whether this format has blocks that can legitimately be undecodable
+    /// (an unsupported mode), so [`BcTexelSource::new`] must pre-validate every
+    /// block. The classic S3TC/RGTC formats always decode.
     #[inline]
-    fn decode(self, bytes: &[u8]) -> [[u8; 4]; 16] {
-        match self {
+    #[must_use]
+    const fn can_fail(self) -> bool {
+        matches!(self, BcFormat::Bc7 | BcFormat::Etc2Rgb8)
+    }
+
+    /// Decode one block at `bytes` (length already validated by the caller)
+    /// into 16 `RGBA8` texels in row-major order, or `None` when the block uses
+    /// a mode this decoder does not support (only possible for [`can_fail`]
+    /// formats).
+    #[inline]
+    fn decode(self, bytes: &[u8]) -> Option<[[u8; 4]; 16]> {
+        Some(match self {
             BcFormat::Bc1 => {
                 let b: &[u8; 8] = bytes[..8].try_into().expect("bc1 block is 8 bytes");
                 decode_bc1(b)
@@ -66,6 +92,10 @@ impl BcFormat {
             BcFormat::Bc4 => {
                 let b: &[u8; 8] = bytes[..8].try_into().expect("bc4 block is 8 bytes");
                 decode_bc4(b)
+            }
+            BcFormat::Etc2Rgb8 => {
+                let b: &[u8; 8] = bytes[..8].try_into().expect("etc2 block is 8 bytes");
+                decode_etc2_rgb8(b).ok()?
             }
             BcFormat::Bc2 => {
                 let b: &[u8; 16] = bytes[..16].try_into().expect("bc2 block is 16 bytes");
@@ -79,7 +109,11 @@ impl BcFormat {
                 let b: &[u8; 16] = bytes[..16].try_into().expect("bc5 block is 16 bytes");
                 decode_bc5(b)
             }
-        }
+            BcFormat::Bc7 => {
+                let b: &[u8; 16] = bytes[..16].try_into().expect("bc7 block is 16 bytes");
+                decode_bc7(b).ok()?
+            }
+        })
     }
 }
 
@@ -113,6 +147,15 @@ pub enum BcSourceError {
         found: usize,
         /// Bytes the layout requires.
         expected: usize,
+    },
+    /// A block used a mode the decoder does not support (e.g. a BC7 partitioned
+    /// mode or an ETC2 T/H/planar extended mode), so the source would decode it
+    /// wrongly. Only raised for formats where [`BcFormat::can_fail`] holds.
+    UndecodableBlock {
+        /// Mip level containing the undecodable block.
+        mip: u32,
+        /// Row-major block index within that mip.
+        block: u32,
     },
 }
 
@@ -154,6 +197,18 @@ impl BcTexelSource {
                     found: blob.len(),
                     expected,
                 });
+            }
+            // For formats with undecodable modes, prove every block decodes now
+            // so `texel` can never silently fall back to black mid-sample.
+            if format.can_fail() {
+                for (b, chunk) in blob.chunks_exact(bb).enumerate() {
+                    if format.decode(chunk).is_none() {
+                        return Err(BcSourceError::UndecodableBlock {
+                            mip,
+                            block: b as u32,
+                        });
+                    }
+                }
             }
         }
         Ok(Self {
@@ -209,7 +264,9 @@ impl TexelSource for BcTexelSource {
             return [0.0, 0.0, 0.0, 1.0];
         };
 
-        let texels = self.format.decode(bytes);
+        // `new` validated every block for fallible formats, so decode always
+        // succeeds here; keep a defensive opaque-black fallback regardless.
+        let texels = self.format.decode(bytes).unwrap_or([[0, 0, 0, 255]; 16]);
         let local = ((y % 4) * 4 + (x % 4)) as usize;
         let px = texels[local];
         [
@@ -237,7 +294,9 @@ mod tests {
     fn new_rejects_wrong_byte_count() {
         let err = BcTexelSource::new(BcFormat::Bc1, 4, 4, vec![vec![0u8; 7]]).unwrap_err();
         match err {
-            BcSourceError::MipByteCount { expected, found, .. } => {
+            BcSourceError::MipByteCount {
+                expected, found, ..
+            } => {
                 assert_eq!(expected, 8);
                 assert_eq!(found, 7);
             }
@@ -305,5 +364,62 @@ mod tests {
         let src = BcTexelSource::new(BcFormat::Bc1, 8, 4, vec![blob]).unwrap();
         assert!(src.texel(0, 0, 0)[0] > 0.99, "left tile red");
         assert!(src.texel(0, 4, 0)[0] < 0.01, "right tile black");
+    }
+
+    #[test]
+    fn bc7_source_round_trips_a_mode6_block() {
+        use crate::encode_bc7_mode6;
+        // A flat opaque teal tile encodes to a decodable BC7 mode-6 block.
+        let tile = [[20u8, 180, 170, 255]; 16];
+        let block = encode_bc7_mode6(&tile).to_vec();
+        assert_eq!(block.len(), 16, "bc7 block is 16 bytes");
+        let src = BcTexelSource::new(BcFormat::Bc7, 4, 4, vec![block]).unwrap();
+        let t = src.texel(0, 1, 2);
+        // Flat endpoints -> decoded colour matches the input within BC7's
+        // 7-bit+p-bit endpoint quantization (within ~1/255).
+        assert!((t[0] - 20.0 / 255.0).abs() < 0.01, "R {t:?}");
+        assert!((t[1] - 180.0 / 255.0).abs() < 0.03, "G {t:?}");
+        assert!((t[2] - 170.0 / 255.0).abs() < 0.03, "B {t:?}");
+        assert!((t[3] - 1.0).abs() < 0.01, "A {t:?}");
+    }
+
+    #[test]
+    fn bc7_source_rejects_partitioned_mode_block() {
+        // First byte = 1 -> BC7 mode 0 (partitioned), which the decoder rejects.
+        let block = {
+            let mut b = vec![0u8; 16];
+            b[0] = 0x01;
+            b
+        };
+        let err = BcTexelSource::new(BcFormat::Bc7, 4, 4, vec![block]).unwrap_err();
+        assert_eq!(err, BcSourceError::UndecodableBlock { mip: 0, block: 0 });
+    }
+
+    #[test]
+    fn etc2_source_round_trips_a_base_mode_block() {
+        use crate::encode_etc2_rgb8;
+        // A flat tile encodes to an ETC2 base-mode (ETC1) block.
+        let tile = [[200u8, 60, 30, 255]; 16];
+        let block = encode_etc2_rgb8(&tile).to_vec();
+        assert_eq!(block.len(), 8, "etc2 block is 8 bytes");
+        let src = BcTexelSource::new(BcFormat::Etc2Rgb8, 4, 4, vec![block]).unwrap();
+        let t = src.texel(0, 2, 1);
+        // Base-mode quantization is coarse (RGB444/555); allow a wide tolerance.
+        assert!((t[0] - 200.0 / 255.0).abs() < 0.1, "R {t:?}");
+        assert!((t[1] - 60.0 / 255.0).abs() < 0.1, "G {t:?}");
+        assert!((t[2] - 30.0 / 255.0).abs() < 0.1, "B {t:?}");
+        assert!((t[3] - 1.0).abs() < 1e-6, "A {t:?}");
+    }
+
+    #[test]
+    fn new_reports_undecodable_block_index() {
+        use crate::encode_bc7_mode6;
+        // 8x4 BC7: block (0,0) valid, block (1,0) a rejected partitioned mode.
+        let mut blob = encode_bc7_mode6(&[[10u8, 10, 10, 255]; 16]).to_vec();
+        let mut bad = vec![0u8; 16];
+        bad[0] = 0x01; // mode 0
+        blob.append(&mut bad);
+        let err = BcTexelSource::new(BcFormat::Bc7, 8, 4, vec![blob]).unwrap_err();
+        assert_eq!(err, BcSourceError::UndecodableBlock { mip: 0, block: 1 });
     }
 }
