@@ -75,6 +75,7 @@
 //! Provenance: textbook collision-manifold construction; no Unreal Engine source
 //! or derived code.
 
+mod body_motion;
 mod capsule;
 mod capsule_capsule;
 mod capsule_capsule_gpu;
@@ -91,6 +92,7 @@ mod capsule_triangle;
 mod capsule_triangle_gpu;
 mod capsule_triangle_manifold;
 mod capsule_triangle_manifold_gpu;
+mod conservative_advancement;
 mod contact;
 mod convex_convex_manifold;
 mod convex_convex_manifold_gpu;
@@ -129,6 +131,7 @@ mod sphere;
 mod sphere_triangle;
 mod sphere_triangle_gpu;
 
+pub use body_motion::BodyMotion;
 pub use capsule::{cpu_capsule_narrowphase, Capsule, SphereCapsulePair};
 pub use capsule_capsule::{cpu_capsule_capsule_narrowphase, CapsuleCapsulePair};
 pub use capsule_capsule_gpu::GpuCapsuleCapsuleNarrowphase;
@@ -145,6 +148,9 @@ pub use capsule_triangle::{cpu_capsule_triangle_narrowphase, CapsuleTrianglePair
 pub use capsule_triangle_gpu::GpuCapsuleTriangleNarrowphase;
 pub use capsule_triangle_manifold::cpu_capsule_triangle_manifold;
 pub use capsule_triangle_manifold_gpu::GpuCapsuleTriangleManifoldNarrowphase;
+pub use conservative_advancement::{
+    conservative_advancement_toi, cpu_convex_convex_toi, ConvexConvexSweepPair, Toi,
+};
 pub use contact::Contact;
 pub use convex_convex_manifold::{cpu_convex_convex_manifold, ConvexConvexPair};
 pub use convex_convex_manifold_gpu::GpuConvexConvexManifoldNarrowphase;
