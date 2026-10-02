@@ -15,15 +15,19 @@
 //!   eight-value / six-value mode selection by block error).
 //! * [`bc5`] -- BC5/RGTC2 two-channel encoder (two BC4 blocks, tangent
 //!   normal `XY`).
+//! * [`bc7`] -- BC7/BPTC mode-6 single-subset encoder (4D `RGBA` PCA axis,
+//!   7-bit endpoints + p-bits, least-squares index refit).
 
 mod bc1;
 mod bc2;
 mod bc3;
 mod bc4;
 mod bc5;
+mod bc7;
 
 pub use bc1::encode_bc1;
 pub use bc2::encode_bc2;
 pub use bc3::encode_bc3;
 pub use bc4::encode_bc4;
 pub use bc5::encode_bc5;
+pub use bc7::encode_bc7_mode6;
