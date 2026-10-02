@@ -56,6 +56,14 @@
 //!   wavetable oscillator: an octave mipmap of additively synthesized tables
 //!   (saw/square/triangle presets or an arbitrary harmonic spectrum) read with
 //!   periodic Catmull-Rom interpolation.
+//! - [`scanned_synthesis::ScannedSynthesisNode`] -- scanned synthesis: a ring
+//!   of masses coupled by springs evolves slowly in its own scan time while a
+//!   phase accumulator scans the live displacement profile as a wavetable at
+//!   the audio `frequency`. `scan_rate` sets the lattice boil speed (zero
+//!   freezes it into a fixed wavetable), `brightness` the spring tension and
+//!   `damping` the viscous loss. Unlike [`wavetable_oscillator`] the table is
+//!   live and not band-limited; unlike [`lorenz_attractor`] the whole spatial
+//!   profile is read as one pitched cycle rather than a single state variable.
 //! - [`fm_operator::FmOperatorNode`] -- phase-modulation (DX7-style)
 //!   operator: a sine core deflected by an optional modulation input and
 //!   two-sample-averaged self-feedback, the primitive voice of FM
@@ -403,6 +411,7 @@ pub mod pulsar;
 pub mod pwm_oscillator;
 pub mod reed_woodwind;
 pub mod sample_player;
+pub mod scanned_synthesis;
 pub mod shepard_tone;
 pub mod tonewheel_organ;
 pub mod struck_bar;
@@ -442,6 +451,7 @@ pub use pulsar::{PulsarNode, PulsarParams};
 pub use pwm_oscillator::{PwmOscillatorNode, PwmOscillatorParams};
 pub use reed_woodwind::{ReedWoodwindNode, ReedWoodwindParams};
 pub use sample_player::{Interpolation, LoopMode, SamplePlayerNode};
+pub use scanned_synthesis::{ScannedSynthesisNode, ScannedSynthesisParams};
 pub use shepard_tone::{
     ShepardToneNode, ShepardToneParams, DEFAULT_AMPLITUDE, DEFAULT_BASE_HZ, DEFAULT_SPEED,
     MAX_BASE_HZ, MAX_SPEED, MIN_BASE_HZ, MIN_SPEED, NYQUIST_GUARD, OUTPUT_GAIN, SPAN_OCTAVES,
