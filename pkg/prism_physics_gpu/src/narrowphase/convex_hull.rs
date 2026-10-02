@@ -184,6 +184,33 @@ impl ConvexHull {
         }
     }
 
+    /// Builds a degenerate flat three-vertex triangle hull from its world (or
+    /// local) corners: the convex core a swept-shape mesh query tests one mesh
+    /// triangle against.
+    ///
+    /// A single mesh triangle is a zero-thickness convex set, so like
+    /// [`ConvexHull::from_point`] and [`ConvexHull::from_segment`] it carries no
+    /// enclosing faces or edges: the `GJK` distance query the conservative
+    /// advancement sweep runs needs only the support mapping over the three
+    /// corners, never a face loop. Keeping it face-free also means a degenerate
+    /// (collinear or zero-area) triangle never panics the way the general
+    /// [`ConvexHull::new`] face builder would, so a malformed mesh triangle
+    /// still produces a usable (if lower-dimensional) support set rather than a
+    /// crash.
+    ///
+    /// Pair it with a zero convex radius in the rounded shape cast (see
+    /// [`conservative_advancement_toi_rounded`](super::conservative_advancement::conservative_advancement_toi_rounded)):
+    /// a solid triangle has no rounding of its own; any cap radius belongs to
+    /// the moving shape swept against it.
+    #[must_use]
+    pub fn from_triangle(a: Vec3, b: Vec3, c: Vec3) -> ConvexHull {
+        ConvexHull {
+            vertices: vec![a, b, c],
+            faces: Vec::new(),
+            edges: Vec::new(),
+        }
+    }
+
     /// The hull's local-space vertices.
     #[must_use]
     pub fn vertices(&self) -> &[Vec3] {
@@ -392,5 +419,33 @@ mod tests {
         let hull = ConvexHull::from_segment(Vec3::new(0.0, 0.0, 10.0), 2.0);
         assert_eq!(hull.vertices()[0], Vec3::new(0.0, 0.0, 2.0));
         assert_eq!(hull.vertices()[1], Vec3::new(0.0, 0.0, -2.0));
+    }
+
+    #[test]
+    fn triangle_hull_is_three_corners_with_no_faces() {
+        let a = Vec3::new(0.0, 0.0, 0.0);
+        let b = Vec3::new(2.0, 0.0, 0.0);
+        let c = Vec3::new(0.0, 3.0, 0.0);
+        let hull = ConvexHull::from_triangle(a, b, c);
+        assert_eq!(hull.vertices(), &[a, b, c], "corners kept in order");
+        assert!(hull.faces().is_empty(), "a triangle core carries no faces");
+        assert!(hull.edges().is_empty(), "a triangle core carries no edges");
+        // Support resolves to the corner farthest along the query direction.
+        assert_eq!(hull.support_local(Vec3::X), 1, "+x corner is b");
+        assert_eq!(hull.support_local(Vec3::Y), 2, "+y corner is c");
+        assert_eq!(hull.support_local(Vec3::new(-1.0, -1.0, 0.0)), 0, "origin corner is a");
+    }
+
+    #[test]
+    fn degenerate_triangle_hull_does_not_panic() {
+        // Collinear corners would panic the general face builder; the flat core
+        // must still build and answer support queries.
+        let hull = ConvexHull::from_triangle(
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(2.0, 0.0, 0.0),
+        );
+        assert_eq!(hull.vertices().len(), 3);
+        assert_eq!(hull.support_local(Vec3::X), 2, "farthest +x corner wins");
     }
 }
