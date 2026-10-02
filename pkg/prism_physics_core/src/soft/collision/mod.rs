@@ -40,6 +40,7 @@ mod friction;
 mod self_ccd;
 mod self_ccd_jacobi;
 mod self_collision;
+mod self_collision_jacobi;
 mod virtual_particles;
 mod virtual_particles_jacobi;
 
@@ -55,6 +56,9 @@ pub use coupling::{
 pub use self_ccd::{resolve_self_ccd, swept_pair_toi, SelfCcdParams};
 pub use self_ccd_jacobi::resolve_self_ccd_jacobi;
 pub use self_collision::{resolve_self_collision, resolve_self_collision_with_friction};
+pub use self_collision_jacobi::{
+    resolve_self_collision_jacobi, resolve_self_collision_with_friction_jacobi,
+};
 pub use virtual_particles::{
     generate_virtual_particles, resolve_self_collision_virtual,
     resolve_self_collision_virtual_augment, VirtualParticle, VirtualParticlePattern,
