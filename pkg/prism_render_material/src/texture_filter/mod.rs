@@ -33,9 +33,11 @@
 //! * Akenine-Moller et al., *Real-Time Rendering* 4th ed., Section 6.2.
 //! * Williams, "Pyramidal Parametrics" (SIGGRAPH 1983) — trilinear mipmapping.
 
+mod bicubic;
 mod bilinear;
 mod texel_wrap;
 
+pub use bicubic::{bicubic_catmull_rom, catmull_rom_weights};
 pub use bilinear::{bilinear, TexelSource};
 pub use texel_wrap::{wrap_texel, TexelAddr};
 

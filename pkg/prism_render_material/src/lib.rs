@@ -53,7 +53,8 @@ pub use texture_lod::{
 };
 pub use texture_sample::{resolve_cone, resolve_differential, SampleRequest, SampleResolved};
 pub use texture_filter::{
-    bilinear, filter_resolved, trilinear, wrap_texel, TexelAddr, TexelSource,
+    bicubic_catmull_rom, bilinear, catmull_rom_weights, filter_resolved, trilinear, wrap_texel,
+    TexelAddr, TexelSource,
 };
 pub use texture_codec::{
     bc6h_mode_bits, bc7_mode, decode_bc1, decode_bc2, decode_bc3, decode_bc4, decode_bc5,
