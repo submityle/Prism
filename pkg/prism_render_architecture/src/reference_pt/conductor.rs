@@ -95,6 +95,29 @@ pub fn fresnel_conductor(eta: Vec3, k: Vec3, cos_theta_i: f32) -> Vec3 {
     )
 }
 
+/// Number of midpoint-quadrature nodes used to pre-integrate the average
+/// `Fresnel` reflectance over the cosine-weighted hemisphere.
+const AVG_FRESNEL_NODES: u32 = 32;
+
+/// The hemispherical cosine-weighted average `Fresnel` reflectance
+/// `F_avg = 2 * integral_0^1 F(mu) mu d mu`, evaluated by midpoint quadrature.
+///
+/// This is the per-channel reflectance a diffuse (`Lambertian`) distribution of
+/// micro-facets would show, and it drives the colour of the energy recovered by
+/// the Kulla-Conty multiple-scattering lobes in
+/// [`crate::reference_pt::conductor_ms`] and
+/// [`crate::reference_pt::conductor_aniso_ms`].
+#[must_use]
+pub fn average_fresnel_conductor(eta: Vec3, k: Vec3) -> Vec3 {
+    let mut acc = Vec3::ZERO;
+    for i in 0..AVG_FRESNEL_NODES {
+        let mu = (i as f32 + 0.5) / AVG_FRESNEL_NODES as f32;
+        let weight = 2.0 * mu / AVG_FRESNEL_NODES as f32;
+        acc = acc.add(fresnel_conductor(eta, k, mu).scale(weight));
+    }
+    acc
+}
+
 /// The outcome of importance-sampling a [`Conductor`] lobe.
 #[derive(Clone, Copy, Debug)]
 pub struct ConductorSample {

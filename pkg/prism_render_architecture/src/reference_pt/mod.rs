@@ -56,6 +56,7 @@ pub mod camera;
 pub mod compare;
 pub mod conductor;
 pub mod conductor_aniso;
+pub mod conductor_aniso_ms;
 pub mod conductor_ms;
 pub mod dielectric;
 pub mod estimator;

@@ -18,15 +18,11 @@
 //! multiple-scatter lobe, and always reports the combined density so the
 //! estimator stays unbiased.
 
-use super::conductor::{fresnel_conductor, Conductor};
+use super::conductor::{average_fresnel_conductor, Conductor};
 use super::ggx_energy::{average_albedo, multiscatter_fresnel, multiscatter_lobe};
 use super::microfacet::GgxIsotropic;
 use super::sampler::{cosine_hemisphere_pdf, cosine_sample_hemisphere, Rng};
 use super::Vec3;
-
-/// Number of quadrature nodes used to pre-integrate the average `Fresnel`
-/// reflectance over the cosine-weighted hemisphere.
-const FRESNEL_NODES: u32 = 32;
 
 /// The outcome of importance-sampling a [`MultiscatterConductor`] lobe.
 #[derive(Clone, Copy, Debug)]
@@ -52,18 +48,6 @@ pub struct MultiscatterConductor {
     f_avg: Vec3,
 }
 
-/// The hemispherical cosine-weighted average `Fresnel` reflectance
-/// `F_avg = 2 * integral_0^1 F(mu) mu d mu`, evaluated by midpoint quadrature.
-fn average_fresnel(eta: Vec3, k: Vec3) -> Vec3 {
-    let mut acc = Vec3::ZERO;
-    for i in 0..FRESNEL_NODES {
-        let mu = (i as f32 + 0.5) / FRESNEL_NODES as f32;
-        let weight = 2.0 * mu / FRESNEL_NODES as f32;
-        acc = acc.add(fresnel_conductor(eta, k, mu).scale(weight));
-    }
-    acc
-}
-
 impl MultiscatterConductor {
     /// Builds an energy-conserving conductor from its complex index `eta + i*k`
     /// and a perceptual `roughness` in `[0, 1]`.
@@ -72,7 +56,7 @@ impl MultiscatterConductor {
         Self {
             base: Conductor::new(eta, k, roughness),
             alpha: GgxIsotropic::from_roughness(roughness).alpha,
-            f_avg: average_fresnel(eta, k),
+            f_avg: average_fresnel_conductor(eta, k),
         }
     }
 
