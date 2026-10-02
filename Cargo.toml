@@ -49,6 +49,8 @@ members = [
   "pkg/prism_audio_content",
   # Prism next-generation audio engine output delivery layer (downmix matrix/bass management/delivery profiles).
   "pkg/prism_audio_output",
+  # Prism next-generation audio engine interactive music system (segments/playlists/quantized transitions/stingers/vertical layering/clip graph).
+  "pkg/prism_audio_music",
   # Prism Loom: next-generation declarative UI/scene notation.
   "pkg/prism_ui_reactive",
   "pkg/prism_ui_layout",
