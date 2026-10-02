@@ -139,6 +139,7 @@ pub mod interval_overlap_1d;
 pub mod kawase_blur;
 pub mod lens_distortion;
 pub mod liang_barsky_clip;
+pub mod line_line_closest_3d;
 pub mod luminance_hist;
 pub mod mask;
 pub mod microfacet_ggx;
@@ -328,6 +329,7 @@ pub use interval_overlap_1d::{GpuIntervalOverlap1d, IntervalOverlapQuery, Interv
 pub use kawase_blur::{GpuKawaseBlur, KawaseBlurQuery};
 pub use lens_distortion::GpuLensDistortion;
 pub use liang_barsky_clip::{GpuLiangBarskyClip, LiangBarskyQuery, LiangBarskyResult, CLIP_EPS};
+pub use line_line_closest_3d::{GpuLineLineClosest3d, LineLineQuery, LineLineResult};
 pub use luminance_hist::{GpuLuminanceHist, LuminanceHistQuery};
 pub use mask::{GpuScatteringMask, MaskQuery};
 pub use microfacet_ggx::{GpuMicrofacetGgx, MicrofacetSample};
