@@ -34,6 +34,8 @@
 //!   generates primary rays through a virtual image plane.
 //! - [`film`] — the [`film::Film`] framebuffer and the [`film::render`]
 //!   driver that averages jittered primary rays into a reference image.
+//! - [`compare`] — image-difference metrics ([`compare::ErrorMetrics`])
+//!   for validating a candidate render against this reference.
 //!
 //! All public math is `f32`; floating-point equality is never tested directly
 //! (an epsilon or ordering comparison is used instead), matching the crate's
@@ -41,6 +43,7 @@
 
 pub mod bsdf;
 pub mod camera;
+pub mod compare;
 pub mod estimator;
 pub mod film;
 pub mod integrator;
