@@ -29,6 +29,7 @@ use super::microfacet::{fresnel_schlick, GgxIsotropic};
 use super::oren_nayar::OrenNayar;
 use super::rough_dielectric::RoughDielectric;
 use super::rough_dielectric_aniso::AnisoRoughDielectric;
+use super::rough_dielectric_aniso_ms::AnisoMultiscatterDielectric;
 use super::sampler::{cosine_hemisphere_pdf, cosine_sample_hemisphere, Rng};
 use super::{Vec3, EPS_LEN_SQ, INV_PI};
 
@@ -261,6 +262,27 @@ pub enum Bsdf {
         /// `GGX` width along the local bitangent axis.
         alpha_y: f32,
     },
+    /// Energy-conserving anisotropic rough dielectric: the brushed or drawn
+    /// frosted glass of [`Bsdf::RoughDielectricAniso`] wrapped with the same
+    /// Turquin multiple-scattering compensation as
+    /// [`Bsdf::RoughDielectricMultiscatter`] (see
+    /// [`crate::reference_pt::rough_dielectric_aniso_ms`]). A single
+    /// view-dependent scalar restores the energy Smith masking drops between
+    /// micro-facets, so highly anisotropic rough glass keeps its brightness
+    /// without altering the sampling distribution.
+    RoughDielectricAnisoMultiscatter {
+        /// Relative index of refraction `eta_t / eta_i` of the interior medium
+        /// over the exterior (e.g. `1.5` for air-to-glass).
+        ior: f32,
+        /// Per-channel tint applied to the reflected microfacet lobe.
+        reflectance: Vec3,
+        /// Per-channel tint applied to the transmitted microfacet lobe.
+        transmittance: Vec3,
+        /// `GGX` width along the local tangent axis.
+        alpha_x: f32,
+        /// `GGX` width along the local bitangent axis.
+        alpha_y: f32,
+    },
 }
 
 /// The outcome of importance-sampling a [`Bsdf`].
@@ -369,6 +391,20 @@ impl Bsdf {
                 alpha_y,
             } => AnisoRoughDielectric::new(*ior, *reflectance, *transmittance, *alpha_x, *alpha_y)
                 .evaluate(wo, wi, normal),
+            Self::RoughDielectricAnisoMultiscatter {
+                ior,
+                reflectance,
+                transmittance,
+                alpha_x,
+                alpha_y,
+            } => AnisoMultiscatterDielectric::new(
+                *ior,
+                *reflectance,
+                *transmittance,
+                *alpha_x,
+                *alpha_y,
+            )
+            .evaluate(wo, wi, normal),
         }
     }
 
@@ -451,6 +487,20 @@ impl Bsdf {
                 alpha_y,
             } => AnisoRoughDielectric::new(*ior, *reflectance, *transmittance, *alpha_x, *alpha_y)
                 .pdf(wo, wi, normal),
+            Self::RoughDielectricAnisoMultiscatter {
+                ior,
+                reflectance,
+                transmittance,
+                alpha_x,
+                alpha_y,
+            } => AnisoMultiscatterDielectric::new(
+                *ior,
+                *reflectance,
+                *transmittance,
+                *alpha_x,
+                *alpha_y,
+            )
+            .pdf(wo, wi, normal),
         }
     }
 
@@ -632,6 +682,26 @@ impl Bsdf {
                     pdf: s.pdf,
                     specular: false,
                 }),
+            Self::RoughDielectricAnisoMultiscatter {
+                ior,
+                reflectance,
+                transmittance,
+                alpha_x,
+                alpha_y,
+            } => AnisoMultiscatterDielectric::new(
+                *ior,
+                *reflectance,
+                *transmittance,
+                *alpha_x,
+                *alpha_y,
+            )
+            .sample(wo, normal, rng)
+            .map(|s| BsdfSample {
+                direction: s.direction,
+                value: s.value,
+                pdf: s.pdf,
+                specular: false,
+            }),
         }
     }
 
@@ -1396,6 +1466,35 @@ mod tests {
         let a = iso_eq.evaluate(wo, wi, N);
         let b = iso.evaluate(wo, wi, N);
         assert!(a.sub(b).length() < 1e-3, "{a:?} vs {b:?}");
+    }
+
+    #[test]
+    fn rough_dielectric_aniso_multiscatter_brightens_and_keeps_pdf() {
+        // The compensated anisotropic lobe dispatches as glossy, carries more
+        // energy than its single-scatter sibling at high roughness for a
+        // reflected pair, and leaves the sampling density untouched.
+        let (ax, ay) = (0.9_f32, 0.5_f32);
+        let ms = Bsdf::RoughDielectricAnisoMultiscatter {
+            ior: 1.5,
+            reflectance: Vec3::ONE,
+            transmittance: Vec3::ONE,
+            alpha_x: ax,
+            alpha_y: ay,
+        };
+        let base = Bsdf::RoughDielectricAniso {
+            ior: 1.5,
+            reflectance: Vec3::ONE,
+            transmittance: Vec3::ONE,
+            alpha_x: ax,
+            alpha_y: ay,
+        };
+        assert!(!ms.is_specular());
+        let wo = Vec3::new(0.5, 0.86, 0.0).normalize_or_zero();
+        let wi = Vec3::new(-0.5, 0.86, 0.0).normalize_or_zero();
+        let a = ms.evaluate(wo, wi, N).max_component();
+        let b = base.evaluate(wo, wi, N).max_component();
+        assert!(a > b, "compensated {a} should exceed single-scatter {b}");
+        assert!((ms.pdf(wo, wi, N) - base.pdf(wo, wi, N)).abs() <= 1e-6);
     }
 
     #[test]

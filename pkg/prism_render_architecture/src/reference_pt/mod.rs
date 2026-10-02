@@ -73,6 +73,7 @@ pub mod microfacet_aniso;
 pub mod oren_nayar;
 pub mod rough_dielectric;
 pub mod rough_dielectric_aniso;
+pub mod rough_dielectric_aniso_ms;
 pub mod sampler;
 
 /// Mathematical constant pi, reused from `core` so no literal drifts.
