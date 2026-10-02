@@ -181,13 +181,23 @@ pub(crate) fn finalize_hit(
     }
 }
 
-/// Whether `candidate` should replace `best`: strictly nearer wins, so an exact
-/// distance tie keeps the earlier (lower-index) triangle. Shared by the `CPU`
-/// and `GPU` nearest-hit reductions.
+/// Whether `candidate` should replace `best` under a total order on
+/// `(distance, triangle)`: strictly nearer wins, and an exact distance tie
+/// resolves to the lower triangle index. The index tie-break is what keeps the
+/// traversal-order `BVH` walk and the `GPU` host reduction identical to the
+/// index-order brute golden when two triangles share the struck edge or vertex.
+/// Shared by the `CPU` and `GPU` nearest-hit reductions.
 #[must_use]
+#[expect(
+    clippy::float_cmp,
+    reason = "exact distance equality is the intended tie detector; the triangle index then gives a deterministic total order"
+)]
 pub(crate) fn closer_hit(candidate: &TrimeshRayHit, best: &Option<TrimeshRayHit>) -> bool {
     match best {
-        Some(b) => candidate.distance < b.distance,
+        Some(b) => {
+            candidate.distance < b.distance
+                || (candidate.distance == b.distance && candidate.triangle < b.triangle)
+        }
         None => true,
     }
 }

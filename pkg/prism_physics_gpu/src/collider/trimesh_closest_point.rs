@@ -37,6 +37,15 @@ use crate::bvh::{cpu_build_lbvh, Aabb, Lbvh};
 /// rather than an unstable near-zero difference.
 const ON_SURFACE_EPS2: f32 = 1e-12;
 
+/// Relative slack added to the branch-and-bound prune bound. The current best
+/// distance is stored as a `sqrt`, so squaring it back for the `AABB` test can
+/// shed a few ULPs; without this margin a subtree holding a triangle exactly as
+/// near as the best found so far (an equidistant tie) may be pruned, letting the
+/// `LBVH` walk's winner diverge from the brute golden's lowest-index tie-break.
+/// Widening the bound only ever visits extra leaves, so the pruned result stays
+/// identical to the brute sweep while still skipping genuinely farther subtrees.
+const PRUNE_REL_SLACK: f32 = 1.0e-5;
+
 /// A single closest-point result against a triangle mesh.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TrimeshClosestHit {
@@ -233,11 +242,15 @@ pub fn cpu_trimesh_closest_point_bvh(
     let mut stack: Vec<u32> = Vec::with_capacity(64);
     stack.push(lbvh.root);
     while let Some(encoded) = stack.pop() {
-        // Prune: skip when the node bound is no nearer than the current best.
-        if let Some(b) = best
-            && aabb_distance2(point, &node_aabb(lbvh, encoded)) > b.distance * b.distance
-        {
-            continue;
+        // Prune: skip when the node bound is strictly farther than the current
+        // best, with a relative slack so an equidistant subtree (modulo the
+        // `sqrt` round-trip) is still visited and ties resolve as the brute golden.
+        if let Some(b) = best {
+            let best_d2 = b.distance * b.distance;
+            if aabb_distance2(point, &node_aabb(lbvh, encoded)) > best_d2 * (1.0 + PRUNE_REL_SLACK)
+            {
+                continue;
+            }
         }
         if lbvh.is_leaf(encoded) {
             let slot = (encoded as usize) - lbvh.num_internal;

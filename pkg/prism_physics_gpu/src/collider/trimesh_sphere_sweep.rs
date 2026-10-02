@@ -315,9 +315,21 @@ pub(crate) fn sweep_sphere_triangle(
 /// time tie keeps the earlier (lower-index) triangle. Shared by the `CPU` and
 /// `GPU` earliest-contact reductions.
 #[must_use]
+#[expect(
+    clippy::float_cmp,
+    reason = "an exact time-of-impact equality is an intentional tie detector; the lower triangle index then wins so the brute, LBVH, and GPU reductions agree on the same triangle regardless of visitation order"
+)]
 pub(crate) fn closer_hit(candidate: &TrimeshSweepHit, best: &Option<TrimeshSweepHit>) -> bool {
     match best {
-        Some(b) => candidate.toi < b.toi,
+        // Lexicographic order on (time of impact, triangle index): a strictly
+        // earlier contact always wins, and an exact time tie resolves to the
+        // lower triangle index. This makes the reduction a total order, so the
+        // index-order brute sweep, the BVH-order LBVH sweep, and the GPU host
+        // reduction all converge on the identical triangle.
+        Some(b) => {
+            candidate.toi < b.toi
+                || (candidate.toi == b.toi && candidate.triangle < b.triangle)
+        }
         None => true,
     }
 }
