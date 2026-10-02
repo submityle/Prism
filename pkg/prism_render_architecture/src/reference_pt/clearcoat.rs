@@ -1,50 +1,19 @@
-//! Energy-aware clear-coat: a smooth-to-rough dielectric coat layered over a
-//! rough-conductor base, following the production `UE` clear-coat shading
-//! model.
+//! Energy-aware clear-coat over a rough conductor, following the production
+//! `UE` clear-coat shading model.
 //!
-//! A clear coat is the thin, near-colourless lacquer sprayed over car paint,
-//! lacquered wood, or carbon fibre: a second specular interface sitting above
-//! the pigmented or metallic base. Physically it is a dielectric slab, so it
-//! reflects a Fresnel fraction of the incident light with its own (usually
-//! very smooth) microfacet lobe and transmits the rest down to the base, which
-//! then reflects back up through the slab a second time.
-//!
-//! Rather than tracing light through the slab with a position-free random walk,
-//! this oracle uses the closed-form two-lobe model shipped by real-time
-//! engines: the coat contributes an additive `GGX` dielectric highlight, and
-//! the base lobe is attenuated by the Fresnel transmission entering and leaving
-//! the coat, `(1 - F_coat(cos_o)) * (1 - F_coat(cos_i))`. The coat is treated
-//! as optically thin, so it attenuates and tints but does not bend the base
-//! direction — the standard engine approximation that keeps the model a sum of
-//! two microfacet lobes with no extra sampling dimensions.
-//!
-//! Both lobes reflect into the upper hemisphere, so importance sampling draws
-//! one lobe by a Fresnel-weighted probability and reports the combined value
-//! and the combined one-sample density, exactly like the multi-lobe
-//! `FresnelBlend` plastic. Only `sqrt`-based arithmetic is used (through the
-//! Fresnel and `GGX` primitives), so the model stays within the transcendental
-//! budget of the reference path tracer.
+//! The reusable dielectric slab lives in [`super::coat`]; this module layers it
+//! over a metallic [`Conductor`] base. The coat contributes an additive `GGX`
+//! dielectric highlight and attenuates the base lobe by the Fresnel
+//! transmission entering and leaving the coat,
+//! `(1 - F_coat(cos_o)) * (1 - F_coat(cos_i))`. Both lobes reflect into the
+//! upper hemisphere, so importance sampling draws one lobe by a Fresnel-weighted
+//! probability and reports the combined value and the combined one-sample
+//! density, exactly like the multi-lobe `FresnelBlend` plastic.
 
+use super::coat::CoatLayer;
 use super::conductor::Conductor;
-use super::dielectric::fresnel_dielectric;
-use super::microfacet::GgxIsotropic;
 use super::sampler::Rng;
-use super::{Vec3, EPS_LEN_SQ};
-
-/// The smallest relative coat index the model accepts, keeping the coat a
-/// genuine dielectric interface (an index of exactly one would be invisible).
-const MIN_COAT_IOR: f32 = 1.0 + 1.0e-3;
-
-/// The clamp window for the coat-versus-base lobe-selection probability.
-///
-/// Selecting a lobe strictly in proportion to the coat Fresnel term would stop
-/// sampling the coat near normal incidence (where its reflectance is a few
-/// percent) and starve the base near grazing. Clamping the probability into a
-/// central window keeps both lobes alive, which lowers variance without biasing
-/// the estimator (the matching density is used in [`ClearcoatConductor::pdf`]).
-const MIN_COAT_PROB: f32 = 0.1;
-/// The upper bound of the lobe-selection window; see [`MIN_COAT_PROB`].
-const MAX_COAT_PROB: f32 = 0.9;
+use super::Vec3;
 
 /// The outcome of importance-sampling a [`ClearcoatConductor`].
 #[derive(Clone, Copy, Debug)]
@@ -59,22 +28,14 @@ pub struct ClearcoatSample {
 
 /// A rough conductor viewed through a dielectric clear coat.
 ///
-/// The base metal is an ordinary [`Conductor`]; the coat is an isotropic `GGX`
-/// dielectric interface of relative index [`ClearcoatConductor::coat_ior`] whose
-/// presence is scaled by [`ClearcoatConductor::coat_weight`] in `[0, 1]`.
+/// The base metal is an ordinary [`Conductor`]; the coat is a reusable
+/// [`CoatLayer`] dielectric interface scaled by its own weight in `[0, 1]`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ClearcoatConductor {
     /// The rough-conductor base layer seen through the coat.
     base: Conductor,
-    /// The isotropic `GGX` microfacet distribution of the coat highlight.
-    coat: GgxIsotropic,
-    /// Relative index of refraction `eta_t / eta_i` of the coat over the
-    /// exterior medium, clamped to at least [`MIN_COAT_IOR`].
-    coat_ior: f32,
-    /// Coat presence in `[0, 1]`: `0` is a bare conductor, `1` a full coat.
-    coat_weight: f32,
-    /// Per-channel tint of the coat highlight (usually white for clear lacquer).
-    coat_color: Vec3,
+    /// The thin dielectric clear coat layered over the base.
+    coat: CoatLayer,
 }
 
 impl ClearcoatConductor {
@@ -94,52 +55,8 @@ impl ClearcoatConductor {
     ) -> Self {
         Self {
             base: Conductor::new(eta, k, roughness),
-            coat: GgxIsotropic::from_roughness(coat_roughness),
-            coat_ior: coat_ior.max(MIN_COAT_IOR),
-            coat_weight: coat_weight.clamp(0.0, 1.0),
-            coat_color,
+            coat: CoatLayer::new(coat_roughness, coat_ior, coat_weight, coat_color),
         }
-    }
-
-    /// The effective macroscopic coat reflectance `weight * Fresnel(cos)` for a
-    /// direction whose cosine with the normal is `cos`.
-    fn coat_reflectance(&self, cos: f32) -> f32 {
-        self.coat_weight * fresnel_dielectric(cos, 1.0, self.coat_ior)
-    }
-
-    /// The probability of sampling the coat lobe for a view cosine `cos_o`,
-    /// clamped into the central window `[MIN_COAT_PROB, MAX_COAT_PROB]`.
-    ///
-    /// Returns zero for a weightless coat so a bare conductor always samples its
-    /// own lobe.
-    fn coat_selection_prob(&self, cos_o: f32) -> f32 {
-        if self.coat_weight <= 0.0 {
-            return 0.0;
-        }
-        self.coat_reflectance(cos_o)
-            .clamp(MIN_COAT_PROB, MAX_COAT_PROB)
-    }
-
-    /// The coat's additive `GGX` dielectric highlight
-    /// `weight * F * D * G2 / (4 cos_o cos_i)`.
-    ///
-    /// Returns [`Vec3::ZERO`] for a weightless coat or a degenerate half vector.
-    fn coat_lobe(&self, wo: Vec3, wi: Vec3, normal: Vec3, cos_o: f32, cos_i: f32) -> Vec3 {
-        if self.coat_weight <= 0.0 {
-            return Vec3::ZERO;
-        }
-        let half = wo.add(wi).normalize_or_zero();
-        if half.length_squared() <= EPS_LEN_SQ {
-            return Vec3::ZERO;
-        }
-        let cos_h = normal.dot(half);
-        if cos_h <= 0.0 {
-            return Vec3::ZERO;
-        }
-        let d = self.coat.distribution(cos_h);
-        let g2 = self.coat.g2(cos_o, cos_i);
-        let f = self.coat_weight * fresnel_dielectric(wo.dot(half).max(0.0), 1.0, self.coat_ior);
-        self.coat_color.scale(f * d * g2 / (4.0 * cos_o * cos_i))
     }
 
     /// Evaluates the combined clear-coat `BSDF`
@@ -153,10 +70,10 @@ impl ClearcoatConductor {
         if cos_o <= 0.0 || cos_i <= 0.0 {
             return Vec3::ZERO;
         }
-        let t_o = 1.0 - self.coat_reflectance(cos_o);
-        let t_i = 1.0 - self.coat_reflectance(cos_i);
+        let t_o = self.coat.transmission(cos_o);
+        let t_i = self.coat.transmission(cos_i);
         let base = self.base.evaluate(wo, wi, normal).scale(t_o * t_i);
-        base.add(self.coat_lobe(wo, wi, normal, cos_o, cos_i))
+        base.add(self.coat.lobe(wo, wi, normal, cos_o, cos_i))
     }
 
     /// The combined one-sample solid-angle density of `(wo, wi)`.
@@ -171,22 +88,15 @@ impl ClearcoatConductor {
         if cos_o <= 0.0 || cos_i <= 0.0 {
             return 0.0;
         }
-        let p_coat = self.coat_selection_prob(cos_o);
-        let coat_pdf = {
-            let half = wo.add(wi).normalize_or_zero();
-            if half.length_squared() <= EPS_LEN_SQ {
-                0.0
-            } else {
-                self.coat.reflection_pdf(cos_o, normal.dot(half))
-            }
-        };
+        let p_coat = self.coat.selection_prob(cos_o);
+        let coat_pdf = self.coat.pdf(wo, wi, normal, cos_o);
         let base_pdf = self.base.pdf(wo, wi, normal);
         p_coat * coat_pdf + (1.0 - p_coat) * base_pdf
     }
 
     /// Importance-samples the clear-coat lobe mixture.
     ///
-    /// Draws the coat lobe with probability [`Self::coat_selection_prob`] and the
+    /// Draws the coat lobe with probability [`CoatLayer::selection_prob`] and the
     /// base lobe otherwise, then reports the combined value and the combined
     /// density so the integrator's `value * cos_i / pdf` weight is correct for a
     /// one-sample multiple-importance mixture. Returns `None` for a degenerate
@@ -200,17 +110,9 @@ impl ClearcoatConductor {
         if cos_o <= 0.0 {
             return None;
         }
-        let p_coat = self.coat_selection_prob(cos_o);
+        let p_coat = self.coat.selection_prob(cos_o);
         let wi = if rng.next_f32() < p_coat {
-            let half = self.coat.sample_half_vector(wo, normal, rng)?;
-            if wo.dot(half) <= 0.0 {
-                return None;
-            }
-            let wi = wo.negate().reflect(half).normalize_or_zero();
-            if normal.dot(wi) <= 0.0 {
-                return None;
-            }
-            wi
+            self.coat.sample_direction(wo, normal, rng)?
         } else {
             self.base.sample(wo, normal, rng)?.direction
         };
