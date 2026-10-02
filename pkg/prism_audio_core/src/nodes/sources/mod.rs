@@ -307,6 +307,18 @@
 //!   partial bank of [`additive_oscillator`], the fixed `PolyBLEP` waveforms
 //!   of [`oscillator`], or the time warp of [`phase_distortion_oscillator`],
 //!   it sculpts a smoothly decaying harmonic series in constant time.
+//! - [`vosim::VosimNode`] -- VOSIM (voice-simulation) formant source: once
+//!   per fundamental period it emits a short train of `N` fixed-width
+//!   squared-sine pulses whose successive amplitudes decay by a `decay`
+//!   factor, then holds silence until the period wraps. The pulse rate sets
+//!   a formant peak, the fundamental sets the pitch, and the count and decay
+//!   shape the formant bandwidth, so the formant can glide independently of
+//!   pitch. Each squared-sine pulse starts and ends with zero value and
+//!   slope, so the pulse train and its trailing silence stay `C1`-continuous
+//!   across the period boundary. Unlike the single exponentially damped sine
+//!   grain of [`fof_source`], the glottal-flow model of [`glottal_pulse`], or
+//!   the flat-spectrum train of [`impulse_train`], it builds a vowel-like
+//!   spectrum purely from pulse width, count, and decay.
 //!
 //!
 //! Every generator is real-time safe: `process` performs no allocation, no
@@ -344,6 +356,7 @@ pub mod struck_plate;
 pub mod supersaw;
 pub mod swept_sine;
 pub mod tine_electric_piano;
+pub mod vosim;
 pub mod wavetable_oscillator;
 
 pub use air_jet_flute::{AirJetFluteNode, AirJetFluteParams};
@@ -380,4 +393,5 @@ pub use struck_plate::{StruckPlateNode, StruckPlateParams};
 pub use supersaw::{SupersawNode, SupersawParams};
 pub use swept_sine::{SweepMode, SweptSineNode, SweptSineParams};
 pub use tine_electric_piano::{TineElectricPianoNode, TineElectricPianoParams, NUM_TINE_MODES};
+pub use vosim::{VosimNode, VosimParams};
 pub use wavetable_oscillator::{WavetableOscillatorNode, WavetableOscillatorParams};
