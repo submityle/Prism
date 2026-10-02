@@ -24,8 +24,9 @@
 //! it is deterministic array-in / array-out, only uses `sqrt`, and skips
 //! degenerate or out-of-contact cases instead of panicking.
 
-use super::collision::BodyCollider;
-use super::{ClothParticle, Vec3, EPS_LEN_SQ};
+use super::collision::{from_physics_collider, to_physics_collider, BodyCollider};
+use super::physics_bridge;
+use super::{ClothParticle, Vec3};
 
 /// A rigid proxy that couples both ways with the cloth.
 ///
@@ -76,30 +77,6 @@ impl CouplingBody {
     }
 }
 
-/// Returns `collider` translated by `delta`.
-///
-/// Spheres and capsules move their centers/endpoints rigidly. A half-space is
-/// translated by shifting its `offset` along the normal (`normal.dot(delta)`),
-/// which is the plane displacement for a rigid translation; the normal itself
-/// is unchanged. Half-spaces are normally kinematic ground planes, so this
-/// branch is exercised only when an author gives one a non-zero inverse mass.
-fn translate_collider(collider: BodyCollider, delta: Vec3) -> BodyCollider {
-    match collider {
-        BodyCollider::Sphere { center, radius } => BodyCollider::Sphere {
-            center: center.add(delta),
-            radius,
-        },
-        BodyCollider::Capsule { p0, p1, radius } => BodyCollider::Capsule {
-            p0: p0.add(delta),
-            p1: p1.add(delta),
-            radius,
-        },
-        BodyCollider::HalfSpace { normal, offset } => BodyCollider::HalfSpace {
-            normal,
-            offset: offset + normal.dot(delta),
-        },
-    }
-}
 
 /// Resolves two-way cloth/rigid contact for every particle against every body.
 ///
@@ -115,6 +92,11 @@ fn translate_collider(collider: BodyCollider, delta: Vec3) -> BodyCollider {
 /// A non-positive `dt`, an empty particle or body list, a contact where both
 /// masses are infinite (`w_p + w_b == 0`, e.g. a pinned particle against a
 /// kinematic body), or a particle already outside the collider are all no-ops.
+///
+/// The contact mechanics are not reimplemented here: this is a thin adapter
+/// over the single-source physics resolver
+/// [`prism_physics_core::soft::collision::resolve_two_way_coupling`], which owns
+/// the Jacobi split, body translation, and reaction accumulation.
 pub fn resolve_two_way_coupling(
     particles: &mut [ClothParticle],
     bodies: &mut [CouplingBody],
@@ -124,35 +106,33 @@ pub fn resolve_two_way_coupling(
         return;
     }
 
-    for body in bodies.iter_mut() {
-        let collider = body.collider;
-        let w_body = body.inverse_mass.max(0.0);
-        // Jacobi accumulators against this body's pre-pass pose.
-        let mut body_delta = Vec3::ZERO;
-        let mut impulse = Vec3::ZERO;
+    // Hand the whole contact set to the single-source physics resolver: convert
+    // the render AoS particles to the SoA pair it consumes and lift each render
+    // proxy into its physics twin (shape converted, inverse mass and the
+    // running reaction accumulator carried across verbatim).
+    let (mut positions, inverse_masses) = physics_bridge::to_soa(particles);
+    let mut phys_bodies: Vec<prism_physics_core::soft::collision::CouplingBody> = bodies
+        .iter()
+        .map(|body| prism_physics_core::soft::collision::CouplingBody {
+            collider: to_physics_collider(body.collider),
+            inverse_mass: body.inverse_mass,
+            reaction_impulse: physics_bridge::to_glam(body.reaction_impulse),
+        })
+        .collect();
 
-        for particle in particles.iter_mut() {
-            let w_particle = particle.inverse_mass.max(0.0);
-            let w_sum = w_particle + w_body;
-            if w_sum <= 0.0 {
-                continue;
-            }
-            let projected = collider.project(particle.position);
-            let correction = projected.sub(particle.position);
-            if correction.length_squared() <= EPS_LEN_SQ {
-                continue;
-            }
-            // Mass-weighted split: the lighter side moves more.
-            particle.position = particle.position.add(correction.scale(w_particle / w_sum));
-            body_delta = body_delta.add(correction.scale(-(w_body / w_sum)));
-            // Newton reaction on the body (momentum), opposing the cloth push.
-            impulse = impulse.add(correction.scale(-(1.0 / (w_sum * dt))));
-        }
+    prism_physics_core::soft::collision::resolve_two_way_coupling(
+        &mut positions,
+        &inverse_masses,
+        &mut phys_bodies,
+        dt,
+    );
 
-        if w_body > 0.0 && body_delta.length_squared() > EPS_LEN_SQ {
-            body.collider = translate_collider(collider, body_delta);
-        }
-        body.reaction_impulse = body.reaction_impulse.add(impulse);
+    // Write the corrected particle positions and the translated body pose plus
+    // the accumulated reaction impulse back onto the render-side proxies.
+    physics_bridge::write_positions_back(particles, &positions);
+    for (body, phys) in bodies.iter_mut().zip(phys_bodies.iter()) {
+        body.collider = from_physics_collider(phys.collider);
+        body.reaction_impulse = physics_bridge::from_glam(phys.reaction_impulse);
     }
 }
 

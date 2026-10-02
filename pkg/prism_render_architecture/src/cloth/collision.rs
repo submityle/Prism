@@ -175,6 +175,30 @@ pub(super) fn to_physics_collider(collider: BodyCollider) -> prism_physics_core:
     }
 }
 
+/// Converts a physics-engine collider back into the render [`BodyCollider`],
+/// the inverse of [`to_physics_collider`]. Used to write a two-way-coupling
+/// body's translated pose back onto the render-side proxy after the
+/// single-source resolver has moved it.
+#[must_use]
+pub(super) fn from_physics_collider(collider: prism_physics_core::soft::collision::BodyCollider) -> BodyCollider {
+    use prism_physics_core::soft::collision::BodyCollider as Phys;
+    match collider {
+        Phys::Sphere { center, radius } => BodyCollider::Sphere {
+            center: physics_bridge::from_glam(center),
+            radius,
+        },
+        Phys::Capsule { p0, p1, radius } => BodyCollider::Capsule {
+            p0: physics_bridge::from_glam(p0),
+            p1: physics_bridge::from_glam(p1),
+            radius,
+        },
+        Phys::HalfSpace { normal, offset } => BodyCollider::HalfSpace {
+            normal: physics_bridge::from_glam(normal),
+            offset,
+        },
+    }
+}
+
 /// Projects every free particle out of every body collider, in place.
 ///
 /// Particles are visited in index order and, for each, every collider is
