@@ -12,11 +12,17 @@
 //! * [`windowed`] -- higher-quality separable Lanczos-2/3 reduction
 //!   ([`windowed_downsample`] / [`generate_mip_chain_windowed`]) that suppresses
 //!   mip shimmering better than the box filter.
+//! * [`kaiser`] -- a Kaiser-windowed sinc reduction ([`kaiser_downsample`] /
+//!   [`generate_mip_chain_kaiser`]) with a tunable `beta` shape parameter for
+//!   the sharpness/ringing trade-off, the texture-tool high-quality default.
 
 mod box_filter;
+mod kaiser;
+mod resample_core;
 mod srgb;
 mod windowed;
 
 pub use box_filter::{box_downsample, generate_mip_chain, ColorSpace, Rgba8Image};
 pub use srgb::{linear_to_srgb, srgb_to_linear};
+pub use kaiser::{generate_mip_chain_kaiser, kaiser_downsample, KaiserFilter};
 pub use windowed::{generate_mip_chain_windowed, windowed_downsample, WindowedKernel};

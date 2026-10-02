@@ -66,8 +66,9 @@ pub use texture_codec::{
     BcTexelSource,
 };
 pub use texture_mipgen::{
-    box_downsample, generate_mip_chain, generate_mip_chain_windowed, linear_to_srgb,
-    srgb_to_linear, windowed_downsample, ColorSpace, Rgba8Image, WindowedKernel,
+    box_downsample, generate_mip_chain, generate_mip_chain_kaiser, generate_mip_chain_windowed,
+    kaiser_downsample, linear_to_srgb, srgb_to_linear, windowed_downsample, ColorSpace,
+    KaiserFilter, Rgba8Image, WindowedKernel,
 };
 pub use normal_map::{
     blend_linear, blend_rnm, blend_udn, blend_whiteout, decode_ag, decode_rg, reconstruct_z,
