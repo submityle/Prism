@@ -132,6 +132,66 @@ const BPTC_ANCHORS_2: [usize; 64] = [
     15, 15, 15, 15, 15,  2,  2, 15,
 ];
 
+/// BPTC 3-subset partition table (Khronos Data Format Spec, "Partition Table
+/// for 3 Subsets"). `BPTC_PARTITIONS_3[p][t]` is the subset (`0`, `1`, or `2`)
+/// of texel `t = y*4 + x` under partition `p in 0..64`. Shared by BC7 modes
+/// 0 and 2. Every row has `partition[0] == 0`, so texel 0 is subset 0's anchor.
+#[rustfmt::skip]
+const BPTC_PARTITIONS_3: [[u8; 16]; 64] = [
+    [0,0,1,1,0,0,1,1,0,2,2,1,2,2,2,2], [0,0,0,1,0,0,1,1,2,2,1,1,2,2,2,1],
+    [0,0,0,0,2,0,0,1,2,2,1,1,2,2,1,1], [0,2,2,2,0,0,2,2,0,0,1,1,0,1,1,1],
+    [0,0,0,0,0,0,0,0,1,1,2,2,1,1,2,2], [0,0,1,1,0,0,1,1,0,0,2,2,0,0,2,2],
+    [0,0,2,2,0,0,2,2,1,1,1,1,1,1,1,1], [0,0,1,1,0,0,1,1,2,2,1,1,2,2,1,1],
+    [0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2], [0,0,0,0,1,1,1,1,1,1,1,1,2,2,2,2],
+    [0,0,0,0,1,1,1,1,2,2,2,2,2,2,2,2], [0,0,1,2,0,0,1,2,0,0,1,2,0,0,1,2],
+    [0,1,1,2,0,1,1,2,0,1,1,2,0,1,1,2], [0,1,2,2,0,1,2,2,0,1,2,2,0,1,2,2],
+    [0,0,1,1,0,1,1,2,1,1,2,2,1,2,2,2], [0,0,1,1,2,0,0,1,2,2,0,0,2,2,2,0],
+    [0,0,0,1,0,0,1,1,0,1,1,2,1,1,2,2], [0,1,1,1,0,0,1,1,2,0,0,1,2,2,0,0],
+    [0,0,0,0,1,1,2,2,1,1,2,2,1,1,2,2], [0,0,2,2,0,0,2,2,0,0,2,2,1,1,1,1],
+    [0,1,1,1,0,1,1,1,0,2,2,2,0,2,2,2], [0,0,0,1,0,0,0,1,2,2,2,1,2,2,2,1],
+    [0,0,0,0,0,0,1,1,0,1,2,2,0,1,2,2], [0,0,0,0,1,1,0,0,2,2,1,0,2,2,1,0],
+    [0,1,2,2,0,1,2,2,0,0,1,1,0,0,0,0], [0,0,1,2,0,0,1,2,1,1,2,2,2,2,2,2],
+    [0,1,1,0,1,2,2,1,1,2,2,1,0,1,1,0], [0,0,0,0,0,1,1,0,1,2,2,1,1,2,2,1],
+    [0,0,2,2,1,1,0,2,1,1,0,2,0,0,2,2], [0,1,1,0,0,1,1,0,2,0,0,2,2,2,2,2],
+    [0,0,1,1,0,1,2,2,0,1,2,2,0,0,1,1], [0,0,0,0,2,0,0,0,2,2,1,1,2,2,2,1],
+    [0,0,0,0,0,0,0,2,1,1,2,2,1,2,2,2], [0,2,2,2,0,0,2,2,0,0,1,2,0,0,1,1],
+    [0,0,1,1,0,0,1,2,0,0,2,2,0,2,2,2], [0,1,2,0,0,1,2,0,0,1,2,0,0,1,2,0],
+    [0,0,0,0,1,1,1,1,2,2,2,2,0,0,0,0], [0,1,2,0,1,2,0,1,2,0,1,2,0,1,2,0],
+    [0,1,2,0,2,0,1,2,1,2,0,1,0,1,2,0], [0,0,1,1,2,2,0,0,1,1,2,2,0,0,1,1],
+    [0,0,1,1,1,1,2,2,2,2,0,0,0,0,1,1], [0,1,0,1,0,1,0,1,2,2,2,2,2,2,2,2],
+    [0,0,0,0,0,0,0,0,2,1,2,1,2,1,2,1], [0,0,2,2,1,1,2,2,0,0,2,2,1,1,2,2],
+    [0,0,2,2,0,0,1,1,0,0,2,2,0,0,1,1], [0,2,2,0,1,2,2,1,0,2,2,0,1,2,2,1],
+    [0,1,0,1,2,2,2,2,2,2,2,2,0,1,0,1], [0,0,0,0,2,1,2,1,2,1,2,1,2,1,2,1],
+    [0,1,0,1,0,1,0,1,0,1,0,1,2,2,2,2], [0,2,2,2,0,1,1,1,0,2,2,2,0,1,1,1],
+    [0,0,0,2,1,1,1,2,0,0,0,2,1,1,1,2], [0,0,0,0,2,1,1,2,2,1,1,2,2,1,1,2],
+    [0,2,2,2,0,1,1,1,0,1,1,1,0,2,2,2], [0,0,0,2,1,1,1,2,1,1,1,2,0,0,0,2],
+    [0,1,1,0,0,1,1,0,0,1,1,0,2,2,2,2], [0,0,0,0,0,0,0,0,2,1,1,2,2,1,1,2],
+    [0,1,1,0,0,1,1,0,2,2,2,2,2,2,2,2], [0,0,2,2,0,0,1,1,0,0,1,1,0,0,2,2],
+    [0,0,2,2,1,1,2,2,1,1,2,2,0,0,2,2], [0,0,0,0,0,0,0,0,0,0,0,0,2,1,1,2],
+    [0,0,0,2,0,0,0,1,0,0,0,2,0,0,0,1], [0,2,2,2,1,2,2,2,0,2,2,2,1,2,2,2],
+    [0,1,0,1,2,2,2,2,2,2,2,2,2,2,2,2], [0,1,1,1,2,0,1,1,2,2,0,1,2,2,2,0],
+];
+
+/// Anchor index of the SECOND subset for 3-subset partitioning (Khronos
+/// "Fixup" table, subset 1). Subset 0's anchor is always texel 0.
+#[rustfmt::skip]
+const BPTC_ANCHORS_3_2: [usize; 64] = [
+     3, 3,15,15, 8, 3,15,15, 8, 8, 6, 6, 6, 5, 3, 3,
+     3, 3, 8,15, 3, 3, 6,10, 5, 8, 8, 6, 8, 5,15,15,
+     8,15, 3, 5, 6,10, 8,15,15, 3,15, 5,15,15,15,15,
+     3,15, 5, 5, 5, 8, 5,10, 5,10, 8,13,15,12, 3, 3,
+];
+
+/// Anchor index of the THIRD subset for 3-subset partitioning (Khronos
+/// "Fixup" table, subset 2).
+#[rustfmt::skip]
+const BPTC_ANCHORS_3_3: [usize; 64] = [
+    15, 8, 8, 3,15,15, 3, 8,15,15,15,15,15,15,15, 8,
+    15, 8,15, 3,15, 8,15, 8, 3,15, 6,10,15,15,10, 8,
+    15, 3,15,10,10, 8, 9,10, 6,15, 8,15, 3, 6, 6, 8,
+    15, 3,15,15,15,15,15,15,15,15,15,15, 3,15,15, 8,
+];
+
 /// Return the BC7 mode (`0..=7`) encoded in the block's unary prefix, or
 /// `None` when byte 0 is zero (a reserved/invalid encoding).
 #[inline]
@@ -588,15 +648,168 @@ pub fn decode_bc7_mode7(block: &[u8; 16]) -> [[u8; 4]; 16] {
     out
 }
 
+/// Decode one 16-byte **BC7 mode 2** block into sixteen `RGBA8` texels.
+///
+/// Mode 2 is a **three-subset, RGB-only** mode (opaque alpha `255`). A 6-bit
+/// partition selects one of 64 texel-to-subset maps ([`BPTC_PARTITIONS_3`]);
+/// six RGB endpoints (two per subset) are stored at 5 bits/channel with **no
+/// P-bits** (MSB-replicated to 8 bits), and the sixteen texels carry 2-bit
+/// interpolation indices. The three anchor texels -- texel 0 (subset 0),
+/// [`BPTC_ANCHORS_3_2`]`[partition]` (subset 1), and
+/// [`BPTC_ANCHORS_3_3`]`[partition]` (subset 2) -- store a 1-bit index with an
+/// implicit high `0`. Field order follows the Khronos spec: mode(3),
+/// partition(6), R0..R5, G0..G5, B0..B5 (5 bits each), indices.
+///
+/// The caller must have confirmed the block is mode 2 (see [`bc7_mode`]).
+#[must_use]
+pub fn decode_bc7_mode2(block: &[u8; 16]) -> [[u8; 4]; 16] {
+    let mut r = BitReader::new(block);
+    let _mode = r.read(3); // unary mode-2 marker: two 0s then a 1.
+    let partition = r.read(6) as usize;
+
+    // Six endpoints (subset s: e[2s], e[2s+1]), channel-major 5-bit.
+    let mut rc = [0u32; 6];
+    let mut gc = [0u32; 6];
+    let mut bc = [0u32; 6];
+    for v in &mut rc {
+        *v = r.read(5);
+    }
+    for v in &mut gc {
+        *v = r.read(5);
+    }
+    for v in &mut bc {
+        *v = r.read(5);
+    }
+
+    // No P-bits: expand each 5-bit channel to 8 bits by MSB replication.
+    let mut ep = [[0u8; 3]; 6];
+    for (e, slot) in ep.iter_mut().enumerate() {
+        slot[0] = expand_rep(rc[e], 5);
+        slot[1] = expand_rep(gc[e], 5);
+        slot[2] = expand_rep(bc[e], 5);
+    }
+
+    let partition_map = &BPTC_PARTITIONS_3[partition];
+    let anchor1 = BPTC_ANCHORS_3_2[partition];
+    let anchor2 = BPTC_ANCHORS_3_3[partition];
+
+    // Indices in texel order: the three anchors (texel 0, `anchor1`, `anchor2`)
+    // are 1-bit with an implicit high 0; the rest are 2-bit.
+    let mut idx = [0u8; 16];
+    for (t, slot) in idx.iter_mut().enumerate() {
+        let bits = if t == 0 || t == anchor1 || t == anchor2 {
+            1
+        } else {
+            2
+        };
+        *slot = r.read(bits) as u8;
+    }
+
+    let mut out = [[0u8; 4]; 16];
+    for (t, texel) in out.iter_mut().enumerate() {
+        let subset = usize::from(partition_map[t]);
+        let e0 = ep[subset * 2];
+        let e1 = ep[subset * 2 + 1];
+        let w = WEIGHT2[usize::from(idx[t])];
+        *texel = [
+            interp(e0[0], e1[0], w),
+            interp(e0[1], e1[1], w),
+            interp(e0[2], e1[2], w),
+            255,
+        ];
+    }
+    out
+}
+
+/// Decode one 16-byte **BC7 mode 0** block into sixteen `RGBA8` texels.
+///
+/// Mode 0 is a **three-subset, RGB-only** mode (opaque alpha `255`) and the
+/// only BC7 mode with a **4-bit partition** (just 16 partitions). Six RGB
+/// endpoints (two per subset) are stored at 4 bits/channel with **one P-bit per
+/// endpoint** (appended as the channel LSB for 5-bit precision, then
+/// MSB-replicated to 8 bits), and the sixteen texels carry 3-bit interpolation
+/// indices. The three anchor texels -- texel 0 (subset 0),
+/// [`BPTC_ANCHORS_3_2`]`[partition]` (subset 1), and
+/// [`BPTC_ANCHORS_3_3`]`[partition]` (subset 2) -- store a 2-bit index with an
+/// implicit high `0`. Field order follows the Khronos spec: mode(1),
+/// partition(4), R0..R5, G0..G5, B0..B5 (4 bits each), P0..P5, indices.
+///
+/// The caller must have confirmed the block is mode 0 (see [`bc7_mode`]).
+#[must_use]
+pub fn decode_bc7_mode0(block: &[u8; 16]) -> [[u8; 4]; 16] {
+    let mut r = BitReader::new(block);
+    let _mode = r.read(1); // unary mode-0 marker: a single 1.
+    let partition = r.read(4) as usize; // mode 0 uses only 16 partitions.
+
+    // Six endpoints (subset s: e[2s], e[2s+1]), channel-major 4-bit.
+    let mut rc = [0u32; 6];
+    let mut gc = [0u32; 6];
+    let mut bc = [0u32; 6];
+    for v in &mut rc {
+        *v = r.read(4);
+    }
+    for v in &mut gc {
+        *v = r.read(4);
+    }
+    for v in &mut bc {
+        *v = r.read(4);
+    }
+    // One P-bit per endpoint.
+    let mut pbit = [0u32; 6];
+    for p in &mut pbit {
+        *p = r.read(1);
+    }
+
+    // Expand each 4-bit channel + its endpoint P-bit (5-bit value) to 8 bits by
+    // Khronos MSB replication.
+    let mut ep = [[0u8; 3]; 6];
+    for (e, slot) in ep.iter_mut().enumerate() {
+        slot[0] = expand_rep((rc[e] << 1) | pbit[e], 5);
+        slot[1] = expand_rep((gc[e] << 1) | pbit[e], 5);
+        slot[2] = expand_rep((bc[e] << 1) | pbit[e], 5);
+    }
+
+    let partition_map = &BPTC_PARTITIONS_3[partition];
+    let anchor1 = BPTC_ANCHORS_3_2[partition];
+    let anchor2 = BPTC_ANCHORS_3_3[partition];
+
+    // Indices in texel order: the three anchors (texel 0, `anchor1`, `anchor2`)
+    // are 2-bit with an implicit high 0; the rest are 3-bit.
+    let mut idx = [0u8; 16];
+    for (t, slot) in idx.iter_mut().enumerate() {
+        let bits = if t == 0 || t == anchor1 || t == anchor2 {
+            2
+        } else {
+            3
+        };
+        *slot = r.read(bits) as u8;
+    }
+
+    let mut out = [[0u8; 4]; 16];
+    for (t, texel) in out.iter_mut().enumerate() {
+        let subset = usize::from(partition_map[t]);
+        let e0 = ep[subset * 2];
+        let e1 = ep[subset * 2 + 1];
+        let w = WEIGHT3[usize::from(idx[t])];
+        *texel = [
+            interp(e0[0], e1[0], w),
+            interp(e0[1], e1[1], w),
+            interp(e0[2], e1[2], w),
+            255,
+        ];
+    }
+    out
+}
+
 /// Error returned by [`decode_bc7`] for a BC7 block whose mode is not yet
 /// supported by this decoder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Bc7Error {
     /// Byte 0 was zero: a reserved/invalid mode encoding.
     ReservedMode,
-    /// A valid but unsupported mode. Decoded today: partition-free single-
-    /// subset modes 4/5/6, two-subset RGB modes 1/3, and two-subset RGBA
-    /// mode 7; modes 0/2 remain.
+    /// A valid but unsupported mode. With all eight BC7 modes (0-7) now
+    /// decoded, this variant is unreachable from [`decode_bc7`] and retained
+    /// only for forward compatibility / exhaustive matching.
     UnsupportedMode(u8),
 }
 
@@ -604,11 +817,12 @@ pub enum Bc7Error {
 ///
 /// Supported today: the partition-free single-subset modes 4
 /// ([`decode_bc7_mode4`]), 5 ([`decode_bc7_mode5`]), 6 ([`decode_bc7_mode6`]),
-/// the two-subset RGB modes 1 ([`decode_bc7_mode1`]) and 3 ([`decode_bc7_mode3`])
-/// and the two-subset RGBA mode 7 ([`decode_bc7_mode7`]), all validated against
-/// GPU hardware decode across all 64 partitions. The remaining partitioned modes
-/// (0, 2) return [`Bc7Error::UnsupportedMode`] rather than a wrong decode
-/// until their field layouts are likewise hardware-validated.
+/// the two-subset RGB modes 1 ([`decode_bc7_mode1`]) and 3 ([`decode_bc7_mode3`]),
+/// the two-subset RGBA mode 7 ([`decode_bc7_mode7`]), and the three-subset RGB
+/// modes 0 ([`decode_bc7_mode0`]) and 2 ([`decode_bc7_mode2`]) -- all eight
+/// modes are now covered and validated against GPU hardware decode (modes with
+/// a 6-bit partition across all 64 partitions, mode 0 across its 16). Any byte-0
+/// zero block returns [`Bc7Error::ReservedMode`].
 pub fn decode_bc7(block: &[u8; 16]) -> Result<[[u8; 4]; 16], Bc7Error> {
     match bc7_mode(block) {
         None => Err(Bc7Error::ReservedMode),
@@ -618,6 +832,8 @@ pub fn decode_bc7(block: &[u8; 16]) -> Result<[[u8; 4]; 16], Bc7Error> {
         Some(4) => Ok(decode_bc7_mode4(block)),
         Some(5) => Ok(decode_bc7_mode5(block)),
         Some(6) => Ok(decode_bc7_mode6(block)),
+        Some(0) => Ok(decode_bc7_mode0(block)),
+        Some(2) => Ok(decode_bc7_mode2(block)),
         Some(m) => Err(Bc7Error::UnsupportedMode(m)),
     }
 }
@@ -873,18 +1089,19 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_rejects_unsupported_and_reserved_modes() {
+    fn dispatch_accepts_all_modes_and_rejects_reserved() {
         let mode6 = make_block([0; 4], [0x7F; 4], 0, 1, [0u8; 16]);
         assert!(decode_bc7(&mode6).is_ok());
         let mode5 = make_block5([0; 3], [0x7F; 3], 0, 255, 0, [0u8; 16], [0u8; 16]);
         assert!(decode_bc7(&mode5).is_ok());
 
-        let mut m0 = [0u8; 16];
-        m0[0] = 0b0000_0001; // mode 0
-        assert_eq!(decode_bc7(&m0), Err(Bc7Error::UnsupportedMode(0)));
-        let mut m2 = [0u8; 16];
-        m2[0] = 0b0000_0100; // mode 2
-        assert_eq!(decode_bc7(&m2), Err(Bc7Error::UnsupportedMode(2)));
+        // All eight modes (0-7) decode; only a byte-0 zero block is reserved.
+        let m0 = make_block0(0, [[0; 3]; 6], [0; 6], [0u8; 16]);
+        assert_eq!(bc7_mode(&m0), Some(0));
+        assert!(decode_bc7(&m0).is_ok());
+        let m2 = make_block2(0, [[0; 3]; 6], [0u8; 16]);
+        assert_eq!(bc7_mode(&m2), Some(2));
+        assert!(decode_bc7(&m2).is_ok());
         let reserved = [0u8; 16];
         assert_eq!(decode_bc7(&reserved), Err(Bc7Error::ReservedMode));
     }
@@ -1280,6 +1497,212 @@ mod tests {
             );
             assert_eq!(bc7_mode(&block), Some(7), "partition {p}");
             let _ = decode_bc7_mode7(&block);
+        }
+    }
+
+    /// Assemble a three-subset RGB mode-2 block. `rgb[e]` is the 5-bit endpoint
+    /// `e in 0..6` (endpoints `2s`,`2s+1` belong to subset `s`); `idx` the
+    /// sixteen 2-bit indices (the three anchors must be `<= 1`). No P-bits.
+    fn make_block2(partition: u32, rgb: [[u32; 3]; 6], idx: [u8; 16]) -> [u8; 16] {
+        let mut w = BitWriter::new();
+        w.write(0b100, 3); // mode-2 unary marker: two 0s then a 1.
+        w.write(partition, 6);
+        for e in rgb {
+            w.write(e[0], 5);
+        }
+        for e in rgb {
+            w.write(e[1], 5);
+        }
+        for e in rgb {
+            w.write(e[2], 5);
+        }
+        let a1 = BPTC_ANCHORS_3_2[partition as usize];
+        let a2 = BPTC_ANCHORS_3_3[partition as usize];
+        for (t, &i) in idx.iter().enumerate() {
+            let n = if t == 0 || t == a1 || t == a2 { 1 } else { 2 };
+            w.write(u32::from(i), n);
+        }
+        assert_eq!(w.pos, 128, "mode-2 fields must fill the block exactly");
+        w.bytes
+    }
+
+    #[test]
+    fn make_block2_is_tagged_mode2() {
+        let block = make_block2(0, [[0; 3]; 6], [0u8; 16]);
+        assert_eq!(bc7_mode(&block), Some(2));
+    }
+
+    #[test]
+    fn mode2_subsets_select_distinct_endpoints() {
+        // Three subsets, three distinct endpoint colours at index 0 (anchor).
+        let s0 = [0u32; 3]; // -> 0
+        let s1 = [0x1Fu32; 3]; // 5-bit max -> 0xFF
+        let s2 = [0x10u32; 3]; // mid -> expand_rep(0x10,5)
+        let rgb = [s0, s0, s1, s1, s2, s2];
+        let block = make_block2(14, rgb, [0u8; 16]);
+        let out = decode_bc7_mode2(&block);
+        let map = &BPTC_PARTITIONS_3[14];
+        let mid = {
+            let v = 0x10u32;
+            (((v << 3) | (v >> 2)) & 0xFF) as u8
+        };
+        for (t, texel) in out.iter().enumerate() {
+            let expect = match map[t] {
+                0 => 0u8,
+                1 => 0xFF,
+                _ => mid,
+            };
+            assert_eq!(
+                [texel[0], texel[1], texel[2]],
+                [expect; 3],
+                "texel {t} subset {}",
+                map[t]
+            );
+            assert_eq!(texel[3], 255, "mode 2 is opaque");
+        }
+    }
+
+    #[test]
+    fn mode2_endpoint_weights_are_exact_at_bounds() {
+        // Subset 0: e0 black, e1 white (5-bit max -> 0xFF); index 0 -> e0,
+        // index 3 (WEIGHT2[3] = 64) -> e1 exactly.
+        let rgb = [
+            [0u32; 3], [0x1F; 3], [0u32; 3], [0u32; 3], [0u32; 3], [0u32; 3],
+        ];
+        let mut idx = [0u8; 16];
+        idx[1] = 3; // texel 1 is subset 0 under partition 0, weight 64 -> e1.
+        let block = make_block2(0, rgb, idx);
+        let out = decode_bc7_mode2(&block);
+        assert_eq!([out[0][0], out[0][1], out[0][2]], [0, 0, 0]);
+        assert_eq!([out[1][0], out[1][1], out[1][2]], [0xFF, 0xFF, 0xFF]);
+    }
+
+    #[test]
+    fn dispatch_decodes_mode2() {
+        let block = make_block2(20, [[0x0A; 3]; 6], [0u8; 16]);
+        assert_eq!(bc7_mode(&block), Some(2));
+        assert!(decode_bc7(&block).is_ok());
+    }
+
+    #[test]
+    fn mode2_every_partition_fills_the_block() {
+        // All 64 three-subset partition rows must assemble to exactly 128 bits:
+        // the two anchor tables and the partition table agree on index widths.
+        for p in 0..64u32 {
+            let block = make_block2(
+                p,
+                [
+                    [0x05; 3], [0x0A; 3], [0x15; 3], [0x1F; 3], [0x08; 3], [0; 3],
+                ],
+                [1u8; 16],
+            );
+            assert_eq!(bc7_mode(&block), Some(2), "partition {p}");
+            let _ = decode_bc7_mode2(&block);
+        }
+    }
+
+    /// Assemble a three-subset RGB mode-0 block. `rgb[e]` is the 4-bit endpoint
+    /// `e in 0..6`; `pbit` holds the six per-endpoint P-bits; `idx` the sixteen
+    /// 3-bit indices (the three anchors must be `<= 3`). Mode 0 uses only the
+    /// low 16 partitions (4-bit partition field).
+    fn make_block0(partition: u32, rgb: [[u32; 3]; 6], pbit: [u32; 6], idx: [u8; 16]) -> [u8; 16] {
+        let mut w = BitWriter::new();
+        w.write(0b1, 1); // mode-0 unary marker: a single 1.
+        w.write(partition, 4);
+        for e in rgb {
+            w.write(e[0], 4);
+        }
+        for e in rgb {
+            w.write(e[1], 4);
+        }
+        for e in rgb {
+            w.write(e[2], 4);
+        }
+        for p in pbit {
+            w.write(p, 1);
+        }
+        let a1 = BPTC_ANCHORS_3_2[partition as usize];
+        let a2 = BPTC_ANCHORS_3_3[partition as usize];
+        for (t, &i) in idx.iter().enumerate() {
+            let n = if t == 0 || t == a1 || t == a2 { 2 } else { 3 };
+            w.write(u32::from(i), n);
+        }
+        assert_eq!(w.pos, 128, "mode-0 fields must fill the block exactly");
+        w.bytes
+    }
+
+    #[test]
+    fn make_block0_is_tagged_mode0() {
+        let block = make_block0(0, [[0; 3]; 6], [0; 6], [0u8; 16]);
+        assert_eq!(bc7_mode(&block), Some(0));
+    }
+
+    #[test]
+    fn mode0_subsets_select_distinct_endpoints() {
+        // Three subsets, three distinct endpoint colours at index 0 (anchor).
+        // e1 is 4-bit max with its P-bit set -> (0xF<<1|1)=0x1F (5-bit) -> 0xFF.
+        let s0 = [0u32; 3];
+        let s1 = [0xFu32; 3];
+        let s2 = [0x8u32; 3];
+        let rgb = [s0, s0, s1, s1, s2, s2];
+        let pbit = [0, 0, 1, 1, 0, 0];
+        let block = make_block0(5, rgb, pbit, [0u8; 16]);
+        let out = decode_bc7_mode0(&block);
+        let map = &BPTC_PARTITIONS_3[5];
+        let s2v = {
+            let v = (0x8u32 << 1) | 0; // 4-bit + p=0 -> 5-bit 0x10
+            (((v << 3) | (v >> 2)) & 0xFF) as u8
+        };
+        for (t, texel) in out.iter().enumerate() {
+            let expect = match map[t] {
+                0 => 0u8,
+                1 => 0xFF,
+                _ => s2v,
+            };
+            assert_eq!(
+                [texel[0], texel[1], texel[2]],
+                [expect; 3],
+                "texel {t} subset {}",
+                map[t]
+            );
+            assert_eq!(texel[3], 255, "mode 0 is opaque");
+        }
+    }
+
+    #[test]
+    fn mode0_endpoint_weights_are_exact_at_bounds() {
+        // Subset 0: e0 black (p=0), e1 white (4-bit max + p=1 -> 0xFF);
+        // index 0 -> e0, index 7 (WEIGHT3[7] = 64) -> e1 exactly.
+        let rgb = [
+            [0u32; 3], [0xF; 3], [0u32; 3], [0u32; 3], [0u32; 3], [0u32; 3],
+        ];
+        let mut idx = [0u8; 16];
+        idx[1] = 7; // texel 1 subset 0 under partition 0, weight 64 -> e1.
+        let block = make_block0(0, rgb, [0, 1, 0, 0, 0, 0], idx);
+        let out = decode_bc7_mode0(&block);
+        assert_eq!([out[0][0], out[0][1], out[0][2]], [0, 0, 0]);
+        assert_eq!([out[1][0], out[1][1], out[1][2]], [0xFF, 0xFF, 0xFF]);
+    }
+
+    #[test]
+    fn dispatch_decodes_mode0() {
+        let block = make_block0(9, [[0x5; 3]; 6], [1, 0, 1, 0, 1, 0], [0u8; 16]);
+        assert_eq!(bc7_mode(&block), Some(0));
+        assert!(decode_bc7(&block).is_ok());
+    }
+
+    #[test]
+    fn mode0_every_partition_fills_the_block() {
+        // Mode 0 has only 16 partitions (4-bit field); each must fill 128 bits.
+        for p in 0..16u32 {
+            let block = make_block0(
+                p,
+                [[0x1; 3], [0x3; 3], [0x7; 3], [0xF; 3], [0x5; 3], [0; 3]],
+                [0, 1, 0, 1, 0, 1],
+                [2u8; 16],
+            );
+            assert_eq!(bc7_mode(&block), Some(0), "partition {p}");
+            let _ = decode_bc7_mode0(&block);
         }
     }
 }

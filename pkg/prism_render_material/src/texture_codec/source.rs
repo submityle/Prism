@@ -384,13 +384,11 @@ mod tests {
     }
 
     #[test]
-    fn bc7_source_rejects_partitioned_mode_block() {
-        // First byte = 1 -> BC7 mode 0 (partitioned), which the decoder rejects.
-        let block = {
-            let mut b = vec![0u8; 16];
-            b[0] = 0x01;
-            b
-        };
+    fn bc7_source_rejects_reserved_mode_block() {
+        // Byte 0 == 0 is BC7's reserved/invalid mode encoding (no unary 1), the
+        // one BC7 block the decoder rejects now that all eight modes (0-7) are
+        // supported.
+        let block = vec![0u8; 16];
         let err = BcTexelSource::new(BcFormat::Bc7, 4, 4, vec![block]).unwrap_err();
         assert_eq!(err, BcSourceError::UndecodableBlock { mip: 0, block: 0 });
     }
@@ -414,10 +412,9 @@ mod tests {
     #[test]
     fn new_reports_undecodable_block_index() {
         use crate::encode_bc7_mode6;
-        // 8x4 BC7: block (0,0) valid, block (1,0) a rejected partitioned mode.
+        // 8x4 BC7: block (0,0) valid, block (1,0) a reserved-mode block.
         let mut blob = encode_bc7_mode6(&[[10u8, 10, 10, 255]; 16]).to_vec();
-        let mut bad = vec![0u8; 16];
-        bad[0] = 0x01; // mode 0
+        let mut bad = vec![0u8; 16]; // byte 0 == 0 -> reserved/invalid mode.
         blob.append(&mut bad);
         let err = BcTexelSource::new(BcFormat::Bc7, 8, 4, vec![blob]).unwrap_err();
         assert_eq!(err, BcSourceError::UndecodableBlock { mip: 0, block: 1 });
