@@ -71,6 +71,26 @@ pub enum Bsdf {
         /// Per-channel tint applied to the refracted (transmitted) component.
         transmittance: Vec3,
     },
+    /// Thin-walled (parallel-slab) dielectric: a membrane so thin that the
+    /// two interfaces share the same incidence angle, so the ray exits
+    /// undeviated (no Snell bending, no `eta^2` radiance compression) and
+    /// only the Fresnel split and the geometric series of internal bounces
+    /// survive. The slab reflectance is `R' = 2R / (1 + R)` and its
+    /// transmittance `T' = (1 - R) / (1 + R)` with `R` the single front-
+    /// interface `Fresnel` reflectance; `R' + T' = 1`. Both lobes are Dirac
+    /// deltas, so [`Bsdf::evaluate`]/[`Bsdf::pdf`] are zero and the surface
+    /// is sampled, never connected to lights. Models window panes, bottles,
+    /// soap films, and foliage.
+    ThinDielectric {
+        /// Relative index of refraction of the membrane over its exterior
+        /// (e.g. `1.5` for a glass pane in air). `1` makes it invisible.
+        ior: f32,
+        /// Per-channel tint applied to the reflected component.
+        reflectance: Vec3,
+        /// Per-channel tint applied to the straight-through transmitted
+        /// component.
+        transmittance: Vec3,
+    },
     /// Coupled diffuse-specular "plastic": a dielectric specular coat over a
     /// diffuse substrate, modelled by the energy-conserving Ashikhmin-Shirley
     /// `Fresnel` blend (see [`crate::reference_pt::fresnel_blend`]). It is a
@@ -136,7 +156,10 @@ impl Bsdf {
     /// `true` when this lobe is a perfectly specular (delta) reflector.
     #[must_use]
     pub const fn is_specular(&self) -> bool {
-        matches!(self, Self::Mirror { .. } | Self::Dielectric { .. })
+        matches!(
+            self,
+            Self::Mirror { .. } | Self::Dielectric { .. } | Self::ThinDielectric { .. }
+        )
     }
 
     /// Evaluates the `BRDF` value `f_r(wo, wi)` for a fixed direction pair.
@@ -156,7 +179,9 @@ impl Bsdf {
             }
             // A perfect mirror and a specular dielectric both keep their energy
             // in Dirac deltas that an arbitrary `wi` misses.
-            Self::Mirror { .. } | Self::Dielectric { .. } => Vec3::ZERO,
+            Self::Mirror { .. } | Self::Dielectric { .. } | Self::ThinDielectric { .. } => {
+                Vec3::ZERO
+            }
             Self::GgxConductor {
                 reflectance,
                 roughness,
@@ -192,7 +217,7 @@ impl Bsdf {
                     0.0
                 }
             }
-            Self::Mirror { .. } | Self::Dielectric { .. } => 0.0,
+            Self::Mirror { .. } | Self::Dielectric { .. } | Self::ThinDielectric { .. } => 0.0,
             Self::GgxConductor { roughness, .. } => {
                 let cos_o = normal.dot(wo);
                 let cos_i = normal.dot(wi);
@@ -282,6 +307,11 @@ impl Bsdf {
                 reflectance,
                 transmittance,
             } => Self::dielectric_sample(*ior, *reflectance, *transmittance, wo, normal, rng),
+            Self::ThinDielectric {
+                ior,
+                reflectance,
+                transmittance,
+            } => Self::thin_dielectric_sample(*ior, *reflectance, *transmittance, wo, normal, rng),
             Self::Plastic {
                 diffuse,
                 specular,
@@ -452,6 +482,67 @@ impl Bsdf {
             Some(BsdfSample {
                 direction: wi,
                 value: transmittance.scale(factor),
+                pdf: 1.0,
+                specular: true,
+            })
+        }
+    }
+
+    /// Importance-samples a thin-walled (parallel-slab) dielectric.
+    ///
+    /// `R` is the single front-interface `Fresnel` reflectance at the view
+    /// angle; the slab reflectance `R' = 2R / (1 + R)` sums the infinite
+    /// series of internal bounces and the transmittance is `T' = 1 - R'`.
+    /// The transmitted ray exits undeviated (`wi = -wo`) into the same
+    /// exterior medium, so there is no `eta^2` radiance compression. Both
+    /// branches fold their selection probability into a unit-pdf delta so
+    /// the `Monte Carlo` weight is exactly the tint.
+    fn thin_dielectric_sample(
+        ior: f32,
+        reflectance: Vec3,
+        transmittance: Vec3,
+        wo: Vec3,
+        normal: Vec3,
+        rng: &mut Rng,
+    ) -> Option<BsdfSample> {
+        // Orient the normal to the incident (view) side; the slab is
+        // symmetric, so which face is hit does not change the result.
+        let n = normal.faced_toward(wo);
+        let cos_o = n.dot(wo);
+        if cos_o <= 0.0 {
+            return None;
+        }
+        // Single-interface `Fresnel` reflectance, then the thin-slab series
+        // `R' = 2R / (1 + R)` (clamped below 1 so transmission never
+        // vanishes for a finite index).
+        let r = fresnel_dielectric(cos_o, 1.0, ior);
+        let slab_r = (2.0 * r / (1.0 + r)).min(1.0);
+        if rng.next_f32() < slab_r {
+            // Reflect about the oriented normal; the branch probability
+            // `slab_r` cancels the reflectance, leaving only the tint.
+            let wi = wo.negate().reflect(n).normalize_or_zero();
+            let cos_i = n.dot(wi);
+            if cos_i <= 0.0 {
+                return None;
+            }
+            Some(BsdfSample {
+                direction: wi,
+                value: reflectance.scale(1.0 / cos_i),
+                pdf: 1.0,
+                specular: true,
+            })
+        } else {
+            // Straight-through transmission: the ray continues undeviated
+            // into the opposite hemisphere, so `wi = -wo` and `cos_i`
+            // matches `cos_o`. No `eta^2` factor (exterior == exterior).
+            let wi = wo.negate();
+            let cos_i = n.dot(wi).abs();
+            if cos_i <= 0.0 {
+                return None;
+            }
+            Some(BsdfSample {
+                direction: wi,
+                value: transmittance.scale(1.0 / cos_i),
                 pdf: 1.0,
                 specular: true,
             })
@@ -966,5 +1057,63 @@ mod tests {
         let a = flat.evaluate(wo, wi, N);
         let b = lambert.evaluate(wo, wi, N);
         assert!((a.x - b.x).abs() <= 1e-6 && (a.y - b.y).abs() <= 1e-6);
+    }
+
+    #[test]
+    fn thin_dielectric_is_specular_and_conserves_energy() {
+        let bsdf = Bsdf::ThinDielectric {
+            ior: 1.5,
+            reflectance: Vec3::ONE,
+            transmittance: Vec3::ONE,
+        };
+        // A smooth slab is a pair of Dirac deltas: no next-event estimation.
+        assert!(bsdf.is_specular());
+        let wo = Vec3::new(0.2, 0.98, 0.0).normalize_or_zero();
+        let wi = Vec3::new(-0.2, 0.98, 0.0).normalize_or_zero();
+        assert_eq!(bsdf.evaluate(wo, wi, N), Vec3::ZERO);
+        assert_eq!(bsdf.pdf(wo, wi, N), 0.0);
+        // With white tints the folded throughput is 1 on both branches, so
+        // the Monte Carlo estimate of total energy is 1 (R' + T' = 1).
+        let mut rng = Rng::seed(5);
+        let mut reflected = 0u32;
+        let mut transmitted = 0u32;
+        let mut energy = 0.0f32;
+        let n_samples = 20_000u32;
+        for _ in 0..n_samples {
+            if let Some(s) = bsdf.sample(wo, N, &mut rng) {
+                let cos_i = N.dot(s.direction).abs();
+                energy += s.value.x * cos_i / s.pdf;
+                if N.dot(s.direction) > 0.0 {
+                    reflected += 1;
+                } else {
+                    transmitted += 1;
+                }
+            }
+        }
+        let mean = energy / (n_samples as f32);
+        assert!((mean - 1.0).abs() <= 1e-3, "energy {mean}");
+        // Most light passes through a near-normal thin pane, but some
+        // reflects: both branches must fire.
+        assert!(
+            reflected > 50 && transmitted > reflected,
+            "{reflected}/{transmitted}"
+        );
+    }
+
+    #[test]
+    fn thin_dielectric_transmission_is_undeviated() {
+        // The straight-through branch must continue along -wo exactly.
+        let bsdf = Bsdf::ThinDielectric {
+            ior: 1.0001,
+            reflectance: Vec3::ZERO,
+            transmittance: Vec3::ONE,
+        };
+        let wo = Vec3::new(0.3, 0.9, 0.3).normalize_or_zero();
+        let mut rng = Rng::seed(11);
+        let s = bsdf.sample(wo, N, &mut rng).expect("sample");
+        let straight = wo.negate();
+        assert!((s.direction.x - straight.x).abs() <= 1e-6);
+        assert!((s.direction.y - straight.y).abs() <= 1e-6);
+        assert!((s.direction.z - straight.z).abs() <= 1e-6);
     }
 }
