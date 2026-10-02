@@ -39,7 +39,7 @@
 
 use alloc::vec::Vec;
 
-use super::restir_di::{DiCandidate, DiReservoir};
+use super::restir_di::{combine_biased, DiCandidate, DiReservoir};
 use crate::particle::reservoir_sample::Rng;
 
 /// Immutable description of the world-space grid: its origin, cell size, extent
@@ -216,6 +216,71 @@ impl RegirGrid {
                 }
                 reservoir.finalize();
                 self.cells.push(reservoir);
+            }
+        }
+    }
+
+    /// Rebuilds every cell slot like [`RegirGrid::rebuild`], but folds last
+    /// frame's presample back in (M-capped) so the grid accumulates samples
+    /// across frames.
+    ///
+    /// `RTXDI`-style temporal grid reuse: each slot still presamples the full
+    /// light set at the cell center this frame, then merges the previous
+    /// frame's finalized reservoir for the *same* slot. Because every frame's
+    /// presample shares the same cell center and the same light domain, the
+    /// biased reservoir merge ([`super::restir_di::combine_biased`]) is itself
+    /// unbiased here, so the finalized `W_cell` still satisfies
+    /// `E[p̂(y) · W_cell] = Σ_i p̂(i)` and the hand-off `source_pdf = 1 / W_cell`
+    /// stays valid. `m_cap` bounds how much history a slot may carry (clamping
+    /// the previous `M` before the merge) so the grid stays responsive when
+    /// lights move; pass `0` to disable reuse (equivalent to a fresh rebuild).
+    ///
+    /// `prev` is last frame's grid; it must share this grid's [`RegirConfig`]
+    /// (slots are matched by linear index). The build stays deterministic in
+    /// `rng`.
+    pub fn rebuild_temporal<T, S>(
+        &mut self,
+        prev: &RegirGrid,
+        light_count: u32,
+        mut target_at: T,
+        mut source_pdf: S,
+        m_cap: u32,
+        rng: &mut Rng,
+    ) where
+        T: FnMut([f32; 3], u32) -> f32,
+        S: FnMut(u32) -> f32,
+    {
+        let slots = self.config.slots();
+        self.cells.clear();
+        self.cells.reserve(self.config.slot_count());
+        for cell in 0..self.config.cell_count() {
+            let center = self.config.cell_center(self.config.coords_of(cell));
+            for slot in 0..slots {
+                // Fresh presample of the full light set at the cell center.
+                let mut fresh = DiReservoir::empty();
+                for light in 0..light_count {
+                    fresh.stream(
+                        DiCandidate {
+                            light_index: light,
+                            target_pdf: target_at(center, light),
+                            source_pdf: source_pdf(light),
+                        },
+                        rng.next_u01(),
+                    );
+                }
+                fresh.finalize();
+
+                // Merge last frame's slot (M-capped) when reuse is enabled.
+                let merged = match prev.slot(cell, slot) {
+                    Some(previous) if m_cap > 0 && !previous.is_empty() => {
+                        let mut carried = *previous;
+                        carried.cap_history(m_cap);
+                        let sources = [fresh, carried];
+                        combine_biased(&sources, |l| target_at(center, l), rng)
+                    }
+                    _ => fresh,
+                };
+                self.cells.push(merged);
             }
         }
     }
@@ -524,5 +589,121 @@ mod tests {
             assert!(c.source_pdf > 0.0);
             assert!((c.light_index as usize) < lights.pos.len());
         }
+    }
+
+    #[test]
+    fn rebuild_temporal_is_deterministic() {
+        let lights = Lights::demo();
+        let cfg = config([3, 3, 3], 2);
+        let run = |seed| {
+            let mut prev = RegirGrid::new(cfg);
+            let mut cur = RegirGrid::new(cfg);
+            let mut rng = Rng::new(seed);
+            for _ in 0..3 {
+                cur.rebuild_temporal(
+                    &prev,
+                    lights.count(),
+                    |center, l| lights.contribution(l, center),
+                    |_| 1.0 / lights.count() as f32,
+                    10,
+                    &mut rng,
+                );
+                core::mem::swap(&mut prev, &mut cur);
+            }
+            prev
+        };
+        let a = run(42);
+        let b = run(42);
+        for s in 0..cfg.slot_count() {
+            assert_eq!(a.cells[s], b.cells[s]);
+        }
+    }
+
+    #[test]
+    fn temporal_reuse_accumulates_and_caps_history() {
+        let lights = Lights::demo();
+        let cfg = config([2, 2, 2], 1);
+        let n = lights.count();
+        let m_cap = 10u32;
+        let mut prev = RegirGrid::new(cfg);
+        let mut cur = RegirGrid::new(cfg);
+        let mut rng = Rng::new(5);
+        // Frame 1: no history yet -> M equals the per-frame presample count.
+        cur.rebuild_temporal(
+            &prev,
+            n,
+            |c, l| lights.contribution(l, c),
+            |_| 1.0 / n as f32,
+            m_cap,
+            &mut rng,
+        );
+        core::mem::swap(&mut prev, &mut cur);
+        assert_eq!(prev.slot(0, 0).unwrap().reservoir.m, n);
+        // Several more frames -> history saturates at light_count + m_cap.
+        for _ in 0..5 {
+            cur.rebuild_temporal(
+                &prev,
+                n,
+                |c, l| lights.contribution(l, c),
+                |_| 1.0 / n as f32,
+                m_cap,
+                &mut rng,
+            );
+            core::mem::swap(&mut prev, &mut cur);
+        }
+        assert_eq!(prev.slot(0, 0).unwrap().reservoir.m, n + m_cap);
+        // m_cap = 0 disables reuse: the slot falls back to a fresh presample.
+        cur.rebuild_temporal(
+            &prev,
+            n,
+            |c, l| lights.contribution(l, c),
+            |_| 1.0 / n as f32,
+            0,
+            &mut rng,
+        );
+        assert_eq!(cur.slot(0, 0).unwrap().reservoir.m, n);
+    }
+
+    #[test]
+    fn temporal_reuse_stays_unbiased() {
+        // Accumulating the grid across frames must not bias the hand-off: a
+        // ReGIR candidate drawn from a temporally reused slot, streamed into a
+        // one-sample pixel reservoir, still estimates the full many-light sum.
+        let lights = Lights::demo();
+        let cfg = config([2, 2, 2], 1);
+        let pixel = [-0.5, -0.6, -0.4];
+        let exact = lights.sum_at(pixel);
+
+        let trials = 300_000u32;
+        let frames = 2u32;
+        let mut acc = 0.0f64;
+        for s in 0..trials {
+            let mut rng = Rng::new(s.wrapping_mul(2_246_822_519).wrapping_add(7));
+            let mut prev = RegirGrid::new(cfg);
+            let mut cur = RegirGrid::new(cfg);
+            for _ in 0..frames {
+                cur.rebuild_temporal(
+                    &prev,
+                    lights.count(),
+                    |center, l| lights.contribution(l, center),
+                    |_| 1.0 / lights.count() as f32,
+                    12,
+                    &mut rng,
+                );
+                core::mem::swap(&mut prev, &mut cur);
+            }
+            if let Some(cand) = prev.candidate_at(pixel, 0, |l| lights.contribution(l, pixel)) {
+                let mut r = DiReservoir::empty();
+                r.stream(cand, rng.next_u01());
+                r.finalize();
+                acc += f64::from(r.target_pdf * r.reservoir.w);
+            }
+        }
+        let mean = (acc / f64::from(trials)) as f32;
+        let rel = abs(mean - exact) / exact;
+        assert!(
+            rel < 0.02,
+            "temporal ReGIR mean {mean} vs exact {exact} ({rel})"
+        );
     }
 }
