@@ -38,13 +38,13 @@
 ## 规划中(PLANNED)
 
 ### M1 结构层(部分已交付)
-- [x] `loom!` 宏 + `Element` 构建器。
+- [x] `loom!` 宏 + `Element` 构建器,含 `$` **响应式读取语法糖**(`text($sig)` / `custom($sig)` 降级为受追踪的 `(sig).get()`——在 `ReactiveView` 的 effect 内构建时自动登记依赖、信号变更触发子树重算;纯 `.get()` 糖,无隐藏状态)(`prism_ui_macro`,已交付)。
 - [ ] 静态子树提升(无绑定子树编译期常量化)。
 - [x] 编译期稳定节点 ID(借 Compose 位置记忆):`StableId{path}` 由 `loom!` 宏按树下标(如 `"0/1"`)注入到每个节点 + `Element.stable_id`(手写 PartialEq 忽略此字段)+ 热重载 `NodeIdent::Stable`(身份优先级 **Stable > Keyed > Positional**),用于结构变更 / 热重载精确对齐(`prism_ui` / `prism_ui_macro` / `prism_ui_hotreload`,已交付)。
 
 ### M2 响应层到 ECS 的绑定(部分已交付)
 - [x] 独立的 Signal / Memo / Effect 运行时。
-- [x] 字段级 **双向** 绑定:ECS 组件字段 <-> `Signal` 的 `FieldBinding`/`EcsBridge`——读路径复用 `Ref` 的 tick 变更检测(仅变更帧才拉取),写路径用相等性守卫经 `Mut` 回写(不触发无谓 tick、不振荡),零 archetype 搬迁(`prism_ui_ecs`,已交付)。宏层 `$` 语法糖自动登记绑定仍规划中。
+- [x] 字段级 **双向** 绑定:ECS 组件字段 <-> `Signal` 的 `FieldBinding`/`EcsBridge`——读路径复用 `Ref` 的 tick 变更检测(仅变更帧才拉取),写路径用相等性守卫经 `Mut` 回写(不触发无谓 tick、不振荡),零 archetype 搬迁(`prism_ui_ecs`,已交付)。`$` 的 **响应式读取** 语法糖已在 `loom!` 交付(见 M1);其 **自动登记 `EcsBridge` 字段绑定** 的形态需宏层拿到桥/实体上下文,仍在设计。
 - [x] **Bevy 调度器集成**:`EcsBridge` 作为 `NonSend` 资源经 exclusive system 接入 `Schedule`——`LoomSyncSet{Pull, Push}`(derive `SystemSet`,`.chain()` 保证拉取先于回写)、`insert_bridge` / `remove_bridge`、`loom_pull_system` / `loom_push_system`、`add_loom_sync_systems`;安全的 remove→call→reinsert 模式(无 `unsafe`)(`prism_ui_ecs::schedule`,已交付)。
 - [x] `Show` / `For` **结构绑定**:信号驱动的条件挂载 / keyed 列表镜像——两阶段批量(`reconcile(&World)` 只读算 plan、`flush(&mut World)` 统一 spawn/despawn 到帧末),`ShowBinding`(相等守卫)、`ForBinding<T,K>`(借 `prism_ui_tree::diff_keyed` 的 LIS 最小移动跨重排复用实体 id,可选 `update` 原地刷新)、`StructuralScope` 聚合多绑定统一 reconcile/flush,返回 `StructuralStats{spawned,despawned}`(`prism_ui_ecs::structural`,已交付)。
 - [x] 可访问性(a11y)基线:角色 / 焦点 / 键盘导航 / 读屏标签(`prism_ui_a11y`,已交付)。

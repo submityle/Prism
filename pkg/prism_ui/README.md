@@ -91,7 +91,7 @@ Loom 以多个独立 crate 分层实现,每一层都可单独使用。下表为 
 | [`prism_ui_layout`](../prism_ui_layout) | 纯 Rust Flexbox 求解器 | ✅ 已交付 | 15 |
 | [`prism_ui_anim`](../prism_ui_anim) | 缓动、弹簧、时间线、过渡 | ✅ 已交付 | 33 |
 | [`prism_ui`](.) | 伞 crate:`Element` / `Ui` 运行时 / `Backend` | ✅ 已交付 | 28 |
-| [`prism_ui_macro`](../prism_ui_macro) | `loom!` 声明式 DSL(proc-macro) | ✅ 已交付 | 13 |
+| [`prism_ui_macro`](../prism_ui_macro) | `loom!` 声明式 DSL(proc-macro);`$` **响应式读取语法糖**(`$expr` → 受追踪 `Signal` 读取) | ✅ 已交付 | 17 |
 
 **高级层(Advanced)** — 对标 React/SolidJS/Vue 生态的一等能力,全部构建在上述核心层之上:
 
@@ -116,15 +116,17 @@ Loom 以多个独立 crate 分层实现,每一层都可单独使用。下表为 
 | [`prism_ui_hotreload`](../prism_ui_hotreload) | `.loom` / `.loom.style` 热重载:节点身份(`NodePath`)比对、`ReloadPlan`(保留/新增/移除/重建)、跨重载状态保留(`StateStore`)、样式 `StyleDiff` | ✅ 已交付 | 45 |
 | [`prism_ui_ecs`](../prism_ui_ecs) | **ECS 桥接(M2 headline)**:组件字段 <-> `Signal` 字段级双向绑定(`FieldBinding`/`EcsBridge`),复用 ECS tick 变更检测作传输、相等性守卫防振荡;Bevy 调度器集成(`LoomSyncSet` / `NonSend` + exclusive system);`Show`/`For` 信号驱动结构绑定(两阶段批量 spawn/despawn,`diff_keyed` LIS 最小移动,`StructuralScope`) | ✅ 已交付 | 64 |
 
-全部 25 个 crate 累计 **626 个 lib + 集成测试通过**(表中「测试」列为各 crate `--lib --tests` 计数;另有 42 个 doctest 通过,合计 668)。每个 crate 均:`#![forbid(unsafe_code)]`、
+全部 25 个 crate 累计 **630 个 lib + 集成测试通过**(表中「测试」列为各 crate `--lib --tests` 计数;另有 42 个 doctest 通过,合计 672)。每个 crate 均:`#![forbid(unsafe_code)]`、
 `no_std` 友好(`default = ["std"]`,proc-macro crate 除外)、通过严格 Clippy(零告警)。
 
-> **诚实声明**:仍为 **设计阶段(PLANNED)** 的能力包括:宏层 `$` 语法糖 **自动登记
-> ECS 绑定**、`.loom` / `.loom.style` 热重载的 **文件系统监听集成**、**静态子树提升**、
-> **双模式编译**(dev 解释 / release 宏固化)。
+> **诚实声明**:仍为 **设计阶段(PLANNED)** 的能力包括:宏层 `$` 语法糖的 **ECS 字段绑定登记**
+> 形态(当前已交付的 `$` 为 **响应式信号读取** 语法糖;自动登记 `EcsBridge` 字段绑定的形态尚需
+> 宏层拿到桥/实体上下文,仍在设计)、`.loom` / `.loom.style` 热重载的 **文件系统监听集成**、
+> **静态子树提升**、**双模式编译**(dev 解释 / release 宏固化)。
 > 已交付并通过测试的能力包括:字段级 **ECS ↔ Signal 双向绑定** 及其 **Bevy 调度器集成**
 > (`LoomSyncSet` / `NonSend` + exclusive system)、`Show` / `For` **信号驱动结构绑定**
-> (两阶段批量 spawn/despawn + `diff_keyed` LIS 最小移动)、**编译期稳定节点 ID**、`.loom` / `.loom.style`
+> (两阶段批量 spawn/despawn + `diff_keyed` LIS 最小移动)、`loom!` 宏 `$` **响应式读取语法糖**、
+> **编译期稳定节点 ID**、`.loom` / `.loom.style`
 > **热重载核心**(节点身份比对 + 状态保留 + 样式 diff)、列表 **虚拟化**、
 > **Suspense / Error Boundary**、**Portal / Overlay**、**表单校验**、**a11y 基线**、
 > **作用域样式 / 响应式 @media**、**隐式过渡 / FLIP 布局动画 / 共享元素过渡**,均为引擎弱耦合 crate。见
