@@ -16,6 +16,7 @@ mod registry;
 mod resources;
 mod surface;
 mod texture_addressing;
+mod texture_blend;
 mod texture_blur;
 mod texture_codec;
 mod texture_ewa;
@@ -56,6 +57,7 @@ pub use surface::{
     SURFACE_CORE_WORDS, SURFACE_LOBE_WORDS,
 };
 pub use texture_addressing::{address_uv, wrap_coord, AddressResult, WrapMode};
+pub use texture_blend::{blend_channel, blend_rgba8, BlendMode};
 pub use texture_blur::{
     bilateral_blur, bilateral_blur_plane, blur_plane, box_blur, box_blur_plane, gaussian_blur,
     gaussian_weights_1d, joint_bilateral_blur, joint_bilateral_blur_plane, unsharp_mask,
