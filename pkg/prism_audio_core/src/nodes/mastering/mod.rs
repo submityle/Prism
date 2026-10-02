@@ -25,6 +25,20 @@
 //!   normalizer that applies the static makeup gain implied by a measured
 //!   integrated loudness and a delivery target, bounded by a true-peak
 //!   ceiling. It applies gain only and performs no metering of its own.
+//! - [`true_peak_limiter::TruePeakLimiter`] /
+//!   [`true_peak_limiter::TruePeakLimiterNode`] -- an inter-sample-peak
+//!   (true-peak) brickwall limiter following the ITU-R BS.1770 / EBU R128
+//!   true-peak estimation: it oversamples (4x by default) to detect
+//!   reconstructed inter-sample peaks and applies look-ahead,
+//!   program-dependent gain reduction so the reconstructed true peak never
+//!   exceeds a configurable ceiling (default -1.0 dBTP). It reports its
+//!   look-ahead as processing latency.
+//! - [`hdr::HdrWindow`] / [`hdr::HdrNode`] -- a classic HDR-audio dynamic
+//!   window: a windowed loudness/max estimator tracks the loudest recent
+//!   signal and derives a broadband makeup gain that maps a wide input
+//!   dynamic range into a bounded output window (quiet passages lifted,
+//!   loud passages attenuated), with a configurable window width (dB),
+//!   attack/release, and output target.
 //!
 //! # Provenance
 //!
@@ -44,15 +58,27 @@
 //! degrades a signal for character rather than minimising audible loss.
 
 pub mod dither;
+pub mod hdr;
 pub mod loudness_normalizer;
 pub mod mastering_chain;
+pub mod true_peak_limiter;
 
 pub use dither::{
-    DEFAULT_DITHER_BITS, Dither, DitherNode, DitherParams, DitherType, MAX_DITHER_BITS,
-    MIN_DITHER_BITS, NoiseShaping,
+    Dither, DitherNode, DitherParams, DitherType, NoiseShaping, DEFAULT_DITHER_BITS,
+    MAX_DITHER_BITS, MIN_DITHER_BITS,
 };
 pub use loudness_normalizer::{
-    DEFAULT_MAX_GAIN_DB, DEFAULT_MAX_TRUE_PEAK_DBTP, DEFAULT_RAMP_SECONDS, DEFAULT_TARGET_LUFS,
-    LoudnessNormalizerNode, LoudnessNormalizerParams, SILENCE_GATE_LUFS, normalization_gain_db,
+    normalization_gain_db, LoudnessNormalizerNode, LoudnessNormalizerParams, DEFAULT_MAX_GAIN_DB,
+    DEFAULT_MAX_TRUE_PEAK_DBTP, DEFAULT_RAMP_SECONDS, DEFAULT_TARGET_LUFS, SILENCE_GATE_LUFS,
 };
 pub use mastering_chain::{MasteringChainNode, MasteringChainParams};
+pub use hdr::{
+    HdrNode, HdrParams, HdrWindow, DEFAULT_ATTACK_MS as DEFAULT_HDR_ATTACK_MS,
+    DEFAULT_RELEASE_MS as DEFAULT_HDR_RELEASE_MS, DEFAULT_TARGET_DB as DEFAULT_HDR_TARGET_DB,
+    DEFAULT_WINDOW_DB as DEFAULT_HDR_WINDOW_DB,
+};
+pub use true_peak_limiter::{
+    TruePeakLimiter, TruePeakLimiterNode, TruePeakLimiterParams, DEFAULT_CEILING_DBTP,
+    DEFAULT_LOOKAHEAD_MS, DEFAULT_OVERSAMPLE_FACTOR,
+    DEFAULT_RELEASE_MS as DEFAULT_TRUE_PEAK_RELEASE_MS,
+};
