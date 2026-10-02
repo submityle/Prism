@@ -122,6 +122,19 @@
 //!   construction; unlike the one-dimensional waveguide voices
 //!   (`karplus_strong`, `bowed_string`, `reed_woodwind`) its partials are
 //!   deliberately inharmonic.
+//! - [`membrane_drum::MembraneDrumNode`] -- struck circular-membrane modal
+//!   percussion source (timpani / tom / tabla / frame-drum family): the
+//!   two-dimensional counterpart of `struck_bar`. A unit-area raised-cosine
+//!   contact pulse drives a parallel bank of [`membrane_drum::NUM_MODES`]
+//!   decaying two-pole resonators tuned to the Bessel-zero vibration modes of
+//!   an ideal drumhead (`1 : 1.593 : 2.136 : ...`). The `inharmonicity` control
+//!   blends those ratios toward the near-harmonic air-loaded kettledrum set
+//!   (`1 : 1.5 : 2 : ...`) so one node spans the pitchless-tom-to-tuned-timpani
+//!   continuum, while `strike_position` weights each mode by the membrane
+//!   shape `|J_m(alpha_mn * r)|`: a centre strike excites only the deep
+//!   axisymmetric modes (a round "boom"), an edge strike lights the high modes
+//!   (a bright "slap"). Unlike the `modal_resonator` effect it carries its own
+//!   excitation and is struck at construction.
 //!
 //! Every generator is real-time safe: `process` performs no allocation, no
 //! locking, and no panics, and reproducible generators are fully deterministic
@@ -137,6 +150,7 @@ pub mod fof_source;
 pub mod granular_source;
 pub mod impulse_train;
 pub mod karplus_strong;
+pub mod membrane_drum;
 pub mod noise;
 pub mod oscillator;
 pub mod pwm_oscillator;
@@ -156,6 +170,7 @@ pub use fof_source::{FofSourceNode, FofSourceParams, Formant, MAX_FOF_GRAINS, MA
 pub use granular_source::{GranularSourceNode, GranularSourceParams, MAX_GRAINS};
 pub use impulse_train::{ImpulseTrainNode, ImpulseTrainParams};
 pub use karplus_strong::{KarplusStrongNode, KarplusStrongParams};
+pub use membrane_drum::{MembraneDrumNode, MembraneDrumParams};
 pub use noise::{NoiseColor, NoiseNode};
 pub use oscillator::{OscillatorNode, Waveform};
 pub use pwm_oscillator::{PwmOscillatorNode, PwmOscillatorParams};
