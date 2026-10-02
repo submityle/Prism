@@ -1,0 +1,17 @@
+[package]
+name = "prism_ui_sdui"
+version = "0.1.0"
+edition = "2024"
+description = "Loom server-driven UI: versioned node schema, capability-whitelist sandbox, version negotiation with graceful fallback, and safe decoding of untrusted remote descriptions into prism_ui Elements. Contains no Unreal Engine source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_ui = { path = "../prism_ui" }
+
+[features]
+default = ["std"]
+std = ["prism_ui/std"]
+
+[lints]
+workspace = true

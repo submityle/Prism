@@ -1,0 +1,17 @@
+[package]
+name = "prism_ui_input"
+version = "0.1.0"
+edition = "2024"
+description = "Loom input system: spatial hit-testing, capture/target/bubble event dispatch, declarative gesture arena (tap/drag/long-press/pinch) and focus traversal, over prism_ui's retained tree. Engine-agnostic. Contains no Unreal Engine source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_ui = { path = "../prism_ui" }
+
+[features]
+default = ["std"]
+std = ["prism_ui/std"]
+
+[lints]
+workspace = true

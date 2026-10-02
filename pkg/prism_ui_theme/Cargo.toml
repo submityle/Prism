@@ -1,0 +1,19 @@
+[package]
+name = "prism_ui_theme"
+version = "0.1.0"
+edition = "2024"
+description = "Loom theming pipeline: design-token compilation, semantic token mapping, dynamic light/dark/high-contrast themes driven by a reactive signal, and RTL logical-property resolution, over prism_ui_style. Contains no Unreal Engine source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_ui = { path = "../prism_ui" }
+prism_ui_style = { path = "../prism_ui_style" }
+prism_ui_reactive = { path = "../prism_ui_reactive" }
+
+[features]
+default = ["std"]
+std = ["prism_ui/std", "prism_ui_style/std", "prism_ui_reactive/std"]
+
+[lints]
+workspace = true

@@ -1,0 +1,19 @@
+[package]
+name = "prism_ui_render_backend"
+version = "0.1.0"
+edition = "2024"
+description = "Loom GPU-driven retained draw-stream backend: draw-command buffer, batching/instancing, SDF rounded-rect/shadow/border, layer compositing and a headless reference backend. Optional wgpu backend validated against the headless twin. Contains no Unreal Engine source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_ui = { path = "../prism_ui" }
+wgpu = { version = "30", default-features = false, features = ["wgsl", "metal"], optional = true }
+
+[features]
+default = ["std"]
+std = ["prism_ui/std"]
+gpu = ["dep:wgpu"]
+
+[lints]
+workspace = true

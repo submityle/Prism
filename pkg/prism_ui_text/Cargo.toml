@@ -1,0 +1,22 @@
+[package]
+name = "prism_ui_text"
+version = "0.1.0"
+edition = "2024"
+description = "Loom text stack: grapheme/word segmentation, UAX#14 line breaking, rich-text spans, paragraph layout (alignment/ellipsis), cursor/selection model and a pluggable shaper (deterministic metric default, optional swash font shaping). Contains no Unreal Engine source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_ui = { path = "../prism_ui" }
+unicode-segmentation = "1.13"
+unicode-linebreak = "0.1"
+unicode-width = "0.1"
+swash = { version = "0.2", optional = true }
+
+[features]
+default = ["std"]
+std = ["prism_ui/std"]
+shaping = ["dep:swash"]
+
+[lints]
+workspace = true
