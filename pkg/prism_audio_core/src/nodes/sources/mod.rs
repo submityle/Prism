@@ -109,6 +109,19 @@
 //!   the limit cycle. Distinct from the full-harmonic air jet of
 //!   `air_jet_flute` and the lip valve of `brass_lip_reed`, this voice is a
 //!   reed-driven cone.
+//! - [`struck_bar::StruckBarNode`] -- mallet-struck modal percussion source
+//!   (marimba / vibraphone / glockenspiel / tubular-bell family): a unit-area
+//!   raised-cosine contact pulse excites a parallel bank of [`NUM_MODES`]
+//!   decaying two-pole resonators tuned to the transverse bending partials of
+//!   a stiff bar. The `inharmonicity` control blends the mode ratios between a
+//!   tuned mallet set (`1 : 4 : 10 : ...`) and the ideal Euler-Bernoulli
+//!   free-free set (`1 : 2.756 : 5.404 : ...`), spanning the wooden-to-metallic
+//!   continuum, while `brightness` sets both pulse width and mode-gain rolloff
+//!   (hard vs soft mallet). Unlike the `modal_resonator` effect, which filters
+//!   an external input, this voice carries its own excitation and is struck at
+//!   construction; unlike the one-dimensional waveguide voices
+//!   (`karplus_strong`, `bowed_string`, `reed_woodwind`) its partials are
+//!   deliberately inharmonic.
 //!
 //! Every generator is real-time safe: `process` performs no allocation, no
 //! locking, and no panics, and reproducible generators are fully deterministic
@@ -129,6 +142,7 @@ pub mod oscillator;
 pub mod pwm_oscillator;
 pub mod reed_woodwind;
 pub mod sample_player;
+pub mod struck_bar;
 pub mod supersaw;
 pub mod wavetable_oscillator;
 
@@ -147,5 +161,6 @@ pub use oscillator::{OscillatorNode, Waveform};
 pub use pwm_oscillator::{PwmOscillatorNode, PwmOscillatorParams};
 pub use reed_woodwind::{ReedWoodwindNode, ReedWoodwindParams};
 pub use sample_player::{Interpolation, LoopMode, SamplePlayerNode};
+pub use struck_bar::{StruckBarNode, StruckBarParams, NUM_MODES};
 pub use supersaw::{SupersawNode, SupersawParams};
 pub use wavetable_oscillator::{WavetableOscillatorNode, WavetableOscillatorParams};
