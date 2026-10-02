@@ -25,6 +25,7 @@
 
 use alloc::vec::Vec;
 
+use super::area_light::AreaLights;
 use super::bsdf::Bsdf;
 use super::estimator::{Light, LightHit};
 use super::mis::power_heuristic;
@@ -100,6 +101,9 @@ pub struct Scene {
     geometry: TriangleMeshBvh,
     materials: Vec<Material>,
     lights: Vec<Light>,
+    /// Emissive mesh triangles gathered into one sampleable compound light for
+    /// next-event estimation; empty when no material emits.
+    area_lights: AreaLights,
     environment: Vec3,
 }
 
@@ -124,10 +128,23 @@ impl Scene {
                 triangles,
             });
         }
+        // Gather every emissive triangle into one compound area light so the
+        // integrator can connect to glowing mesh geometry by next-event
+        // estimation, not only by chance `BSDF`-sampled hits.
+        let mesh = geometry.mesh();
+        let area_lights = AreaLights::new((0..triangles).filter_map(|tri| {
+            let emission = materials[tri].emission;
+            if emission.max_component() > 0.0 {
+                Some((mesh.triangle_positions(tri), emission))
+            } else {
+                None
+            }
+        }));
         Ok(Self {
             geometry,
             materials,
             lights,
+            area_lights,
             environment,
         })
     }
@@ -287,8 +304,27 @@ impl PathIntegrator {
             };
             let material = scene.materials[isect.material];
 
-            // Surface emission is gathered on the arriving path (never via `NEE`).
-            radiance = radiance.add(throughput.mul(material.emission));
+            // Surface emission on an emissive mesh triangle. Because those
+            // triangles are also sampled explicitly by next-event estimation
+            // (via `scene.area_lights`), the `BSDF`-sampled arrival is weighted
+            // against light sampling with the power heuristic. A specular or
+            // camera bounce cannot be reached by `NEE`, so it claims the full
+            // emission (weight 1).
+            if material.emission.max_component() > 0.0 {
+                let weight = if prev_delta {
+                    1.0
+                } else {
+                    let light_pdf = scene
+                        .area_lights
+                        .pdf(origin_v, isect.position, isect.normal);
+                    if light_pdf > 0.0 {
+                        power_heuristic(prev_bsdf_pdf, light_pdf)
+                    } else {
+                        1.0
+                    }
+                };
+                radiance = radiance.add(throughput.mul(material.emission).scale(weight));
+            }
 
             // View direction, pointing away from the surface toward the sensor.
             let wo = Vec3::from_array(ray.direction())
@@ -315,6 +351,18 @@ impl PathIntegrator {
                     );
                     radiance = radiance.add(throughput.mul(contribution));
                 }
+                // Next-event estimation against emissive mesh triangles, the
+                // Strategy-A half of their `MIS` pair (the arrival above is
+                // Strategy B).
+                let mesh_direct = scene.area_lights.sample_direct(
+                    shadow_origin,
+                    shading_normal,
+                    wo,
+                    &material.bsdf,
+                    rng,
+                    &occluded,
+                );
+                radiance = radiance.add(throughput.mul(mesh_direct));
             }
 
             // Stop before exceeding the configured bounce budget.
@@ -652,6 +700,112 @@ mod tests {
             edge_v: Vec3::new(0.0, 0.0, 2.0),
             emission,
         }
+    }
+
+    /// A floor plus a small downward-facing emissive triangle overhead, as a
+    /// single mesh so the glowing triangle lives in the `BVH` alongside the
+    /// floor. The floor is triangle 0, the emitter triangle 1.
+    fn floor_with_overhead_emitter(
+        floor_albedo: Vec3,
+        emission: Vec3,
+    ) -> (TriangleMeshBvh, alloc::vec::Vec<Material>) {
+        let positions = alloc::vec![
+            // Floor (y = 0).
+            [-10.0_f32, 0.0, -10.0],
+            [10.0, 0.0, -10.0],
+            [0.0, 0.0, 10.0],
+            // Downward-facing emitter at y = 4, area 2.
+            [-1.0, 4.0, -1.0],
+            [1.0, 4.0, -1.0],
+            [-1.0, 4.0, 1.0],
+        ];
+        let indices = alloc::vec![[0u32, 1, 2], [3, 4, 5]];
+        let mesh = crate::ray_scene::triangle_mesh::TriangleMesh::new(
+            positions,
+            alloc::vec![],
+            alloc::vec![],
+            indices,
+        )
+        .expect("valid floor + emitter mesh");
+        let materials = alloc::vec![
+            Material::new(Bsdf::Lambert {
+                albedo: floor_albedo,
+            }),
+            Material::emissive(Bsdf::Lambert { albedo: Vec3::ZERO }, emission),
+        ];
+        (TriangleMeshBvh::build(mesh), materials)
+    }
+
+    #[test]
+    fn emissive_mesh_mean_matches_light_sampling() {
+        // The full integrator connects to the emissive triangle both by
+        // next-event estimation at the floor vertex (Strategy A) and by the
+        // `BSDF`-sampled continuation ray that strikes it (Strategy B), combined
+        // with the power heuristic. Their mean must equal a single-strategy
+        // light-sampling reference, proving the mesh-emitter wiring carries no
+        // bias and no double counting.
+        let floor_albedo = Vec3::splat(0.8);
+        let emission = Vec3::splat(5.0);
+        let (geometry, materials) = floor_with_overhead_emitter(floor_albedo, emission);
+        let scene = Scene::new(geometry, materials, alloc::vec![], Vec3::ZERO)
+            .expect("emissive mesh scene");
+        // Two bounces: the floor vertex plus the continuation ray that can reach
+        // the emitter. There is no other geometry, so the mean is the direct
+        // term at the floor point under the camera ray.
+        let integrator = PathIntegrator::new(2, 2);
+
+        // Shading point, normal and view direction for the camera ray onto the
+        // origin, shared by the brute-force reference below.
+        let point = Vec3::ZERO;
+        let normal = Vec3::new(0.0, 1.0, 0.0);
+        let wo = Vec3::new(0.0, 1.0, 0.0);
+        let bsdf = Bsdf::Lambert {
+            albedo: floor_albedo,
+        };
+        // The emitter triangle, with its uniform-area sampling parameters.
+        let em_anchor = Vec3::new(-1.0, 4.0, -1.0);
+        let em_edge1 = Vec3::new(2.0, 0.0, 0.0);
+        let em_edge2 = Vec3::new(0.0, 0.0, 2.0);
+        let em_area = 2.0f32;
+        let em_normal = Vec3::new(0.0, -1.0, 0.0);
+
+        let count = 200_000u32;
+        let mut path_sum = 0.0f64;
+        let mut ref_sum = 0.0f64;
+        let mut rng_ref = Rng::with_stream(31, 2);
+        for s in 0..count {
+            let mut rng = Rng::with_stream(31, u64::from(s) + 3);
+            path_sum += f64::from(integrator.radiance(&scene, down_ray(), &mut rng).x);
+
+            // Reference: a point drawn uniformly over the emitter triangle,
+            // converted to a solid-angle direct term, with no `MIS` weight.
+            let u0 = rng_ref.next_f32();
+            let u1 = rng_ref.next_f32();
+            let su0 = u0.sqrt();
+            let on_light = em_anchor
+                .add(em_edge1.scale(u1 * su0))
+                .add(em_edge2.scale(su0 * (1.0 - u1)));
+            let to_light = on_light.sub(point);
+            let dist_sq = to_light.length_squared();
+            if dist_sq > super::super::EPS_LEN_SQ {
+                let dist = dist_sq.sqrt();
+                let wi = to_light.scale(1.0 / dist);
+                let cos_surface = normal.dot(wi);
+                let cos_light = em_normal.dot(wi).abs();
+                if cos_surface > 0.0 && cos_light > 0.0 {
+                    let fr = bsdf.evaluate(wo, wi, normal);
+                    let geom = cos_surface * cos_light * em_area / dist_sq;
+                    ref_sum += f64::from(fr.mul(emission).scale(geom).x);
+                }
+            }
+        }
+        let path_mean = path_sum / f64::from(count);
+        let ref_mean = ref_sum / f64::from(count);
+        assert!(path_mean > 0.0, "floor should receive emitted light");
+        assert!(
+            (path_mean / ref_mean - 1.0).abs() < 3.0e-2,
+            "integrator mean {path_mean} vs light-sampling reference {ref_mean}"
+        );
     }
 
     #[test]

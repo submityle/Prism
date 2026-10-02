@@ -37,6 +37,10 @@
 //! - [`estimator`] — next-event estimation ([`estimator::Light`]) for direct
 //!   lighting from point, directional, and quad area lights with visibility
 //!   tested against the scene `BVH`.
+//! - [`area_light`] — the compound emissive-triangle area light
+//!   ([`area_light::AreaLights`]) that connects `BSDF`-sampled hits on glowing
+//!   mesh geometry with explicit next-event estimation under the power
+//!   heuristic.
 //! - [`integrator`] — the path-tracing loop ([`integrator::PathIntegrator`]):
 //!   `BSDF` importance sampling, direct-light `NEE`, Russian-roulette path
 //!   termination, and the [`integrator::Scene`] it traces.
@@ -51,6 +55,7 @@
 //! (an epsilon or ordering comparison is used instead), matching the crate's
 //! determinism conventions.
 
+pub mod area_light;
 pub mod bsdf;
 pub mod camera;
 pub mod clearcoat;
