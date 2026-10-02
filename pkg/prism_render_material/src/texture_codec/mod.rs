@@ -55,7 +55,8 @@ pub use bc6h::{
     decode_bc6h_unsigned, half_bits_to_f32, Bc6hError,
 };
 pub use bc7::{
-    bc7_mode, decode_bc7, decode_bc7_mode4, decode_bc7_mode5, decode_bc7_mode6, Bc7Error,
+    bc7_mode, decode_bc7, decode_bc7_mode1, decode_bc7_mode4, decode_bc7_mode5, decode_bc7_mode6,
+    Bc7Error,
 };
 pub use color_block::rgb565_to_rgb888;
 pub use encode::{
