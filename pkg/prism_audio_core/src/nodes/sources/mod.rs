@@ -189,6 +189,14 @@
 //!   Unlike the sparse one-dimensional `struck_bar` beam series or the dense
 //!   two-dimensional `struck_plate` grid, it rings at the bell's defining
 //!   sub-octave hum and minor-third tierce.
+//! - [`blown_pipe::BlownPipeNode`] -- a noise-excited resonant-pipe wind
+//!   voice (pan pipe / flue organ pipe / whistle / ocarina). Turbulent breath
+//!   noise is shaped by a bank of peak-normalized two-pole resonators tuned to
+//!   an air column: open-open pipes ring the full harmonic series, stopped
+//!   pipes only the odd harmonics. Unlike the four self-oscillating waveguide
+//!   winds it is linear and passive, never closing a nonlinear feedback loop,
+//!   and unlike the struck modal sources it is driven continuously so it
+//!   sustains instead of decaying.
 //!
 //!
 //! Every generator is real-time safe: `process` performs no allocation, no
@@ -198,6 +206,7 @@
 pub mod air_jet_flute;
 pub mod additive_oscillator;
 pub mod bell;
+pub mod blown_pipe;
 pub mod bowed_string;
 pub mod conical_reed;
 pub mod brass_lip_reed;
@@ -222,6 +231,7 @@ pub mod wavetable_oscillator;
 pub use air_jet_flute::{AirJetFluteNode, AirJetFluteParams};
 pub use additive_oscillator::{AdditiveOscillatorNode, AdditiveOscillatorParams};
 pub use bell::{BellNode, BellParams};
+pub use blown_pipe::{BlownPipeNode, BlownPipeParams, NUM_HARMONICS};
 pub use bowed_string::{BowedStringNode, BowedStringParams};
 pub use brass_lip_reed::{BrassLipReedNode, BrassLipReedParams};
 pub use conical_reed::{ConicalReedNode, ConicalReedParams};
