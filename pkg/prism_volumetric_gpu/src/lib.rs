@@ -169,6 +169,8 @@ pub mod plucker_coord;
 pub mod point_in_polygon;
 pub mod point_in_tetrahedron;
 pub mod point_triangle_closest_3d;
+pub mod polygon_area_2d;
+pub mod polyline_sdf_2d;
 pub mod popcount_hamming;
 pub mod powder;
 pub mod premultiply_alpha;
@@ -205,11 +207,13 @@ pub mod spatial_hash;
 pub mod spectral_to_rgb;
 pub mod specular_aa;
 pub mod sphere_aabb;
+pub mod sphere_sweep;
 pub mod spherical_harmonics_rotate;
 pub mod sprite_stretch;
 pub mod storm_vertical_profile;
 pub mod sunset_inscatter_tint;
 pub mod sunset_reddening;
+pub mod sutherland_hodgman_2d;
 pub mod sweep_aabb;
 pub mod temporal_dither;
 pub mod temporal_reproject;
@@ -377,6 +381,8 @@ pub use point_in_tetrahedron::{
     GpuPointInTetrahedron, PointInTetrahedronQuery, PointInTetrahedronResult,
 };
 pub use point_triangle_closest_3d::{GpuPointTriangleClosest3d, PointTriangleQuery};
+pub use polygon_area_2d::{GpuPolygonArea2d, GpuPolygonMetrics, MAX_POLYGON_VERTS};
+pub use polyline_sdf_2d::{GpuPolylineSdf, GpuPolylineSdf2d, PolylineSdf2dQuery};
 pub use popcount_hamming::GpuPopcountHamming;
 pub use powder::{GpuPowder, PowderQuery};
 pub use premultiply_alpha::GpuPremultiplyAlpha;
@@ -421,6 +427,7 @@ pub use specular_aa::{
     SpecularAaScalars,
 };
 pub use sphere_aabb::{GpuSphereAabb, SphereAabbQuery};
+pub use sphere_sweep::{GpuSphereSweep, SphereSweepOp, SphereSweepQuery};
 pub use spherical_harmonics_rotate::{
     GpuSphericalHarmonicsRotate, ShRotationProbe, ShRotationResult, L2_COEFF_COUNT,
 };
@@ -428,6 +435,9 @@ pub use sprite_stretch::{GpuSpriteStretch, SpriteStretchQuery, SpriteStretchResu
 pub use storm_vertical_profile::{GpuStormVerticalProfile, StormVerticalProfileQuery};
 pub use sunset_inscatter_tint::{GpuSunsetInscatterTint, InscatterTint, SunsetInscatterTintQuery};
 pub use sunset_reddening::{GpuSunsetReddening, SunsetReddeningQuery};
+pub use sutherland_hodgman_2d::{
+    GpuSutherlandHodgman2d, SutherlandHodgman2dQuery, SutherlandHodgman2dResult,
+};
 pub use sweep_aabb::{GpuSweepAabb, SweepAabbQuery};
 pub use temporal_dither::{DitherPixel, DitherQuery, DitherSample, GpuTemporalDither};
 pub use temporal_reproject::{
