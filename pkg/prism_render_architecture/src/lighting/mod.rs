@@ -7,6 +7,7 @@ pub mod restir_temporal;
 pub mod restir_gi;
 pub mod restir_gi_resolve;
 pub mod regir;
+pub mod regir_resolve;
 
 use crate::ray_scene::TraceBackend;
 
