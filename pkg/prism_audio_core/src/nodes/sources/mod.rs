@@ -319,6 +319,15 @@
 //!   grain of [`fof_source`], the glottal-flow model of [`glottal_pulse`], or
 //!   the flat-spectrum train of [`impulse_train`], it builds a vowel-like
 //!   spectrum purely from pulse width, count, and decay.
+//! - [`paf::PafNode`] -- phase-aligned formant (PAF) source: a carrier that
+//!   crossfades the two harmonics of `f0` bracketing the formant center is
+//!   multiplied by a strictly periodic von Mises bell window whose width sets
+//!   the formant bandwidth. Every carrier partial stays an exact harmonic of
+//!   `f0` (phase-aligned), so the formant center and bandwidth glide
+//!   independently of pitch and the smooth window keeps the waveform
+//!   `C`-infinity across the period boundary. Unlike the damped sine grain of
+//!   [`fof_source`] or the squared-sine pulse train of [`vosim`], it shapes a
+//!   single Gaussian formant over the harmonic series by crossfade and window.
 //!
 //!
 //! Every generator is real-time safe: `process` performs no allocation, no
@@ -344,6 +353,7 @@ pub mod karplus_strong;
 pub mod membrane_drum;
 pub mod noise;
 pub mod oscillator;
+pub mod paf;
 pub mod phase_distortion_oscillator;
 pub mod plucked_body;
 pub mod pwm_oscillator;
@@ -378,6 +388,7 @@ pub use karplus_strong::{KarplusStrongNode, KarplusStrongParams};
 pub use membrane_drum::{MembraneDrumNode, MembraneDrumParams};
 pub use noise::{NoiseColor, NoiseNode};
 pub use oscillator::{OscillatorNode, Waveform};
+pub use paf::{PafNode, PafParams};
 pub use phase_distortion_oscillator::{PhaseDistortionOscillatorNode, PhaseDistortionOscillatorParams};
 pub use plucked_body::{PluckedBodyNode, PluckedBodyParams, NUM_BODY_MODES};
 pub use pwm_oscillator::{PwmOscillatorNode, PwmOscillatorParams};
