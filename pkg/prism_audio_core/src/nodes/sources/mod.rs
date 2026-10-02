@@ -328,6 +328,16 @@
 //!   `C`-infinity across the period boundary. Unlike the damped sine grain of
 //!   [`fof_source`] or the squared-sine pulse train of [`vosim`], it shapes a
 //!   single Gaussian formant over the harmonic series by crossfade and window.
+//! - [`dust::DustNode`] -- random (Poisson) impulse source: every sample
+//!   fires an isolated single-sample click with probability `density / sample_rate`,
+//!   reusing the uniform draw as the impulse height (`[0, 1)` unipolar or
+//!   `[-1, 1)` bipolar). The mean firing rate equals `density` impulses per
+//!   second and the inter-impulse gaps follow a geometric distribution.
+//!   Unlike the periodic, band-limited train of [`impulse_train`], its clicks
+//!   are aperiodic with no harmonic structure, and unlike [`noise`], which
+//!   fills every sample, it leaves most samples silent so it reads as a rate
+//!   rather than a timbre -- the classic seed for granular clouds and
+//!   stochastic triggers.
 //!
 //!
 //! Every generator is real-time safe: `process` performs no allocation, no
@@ -342,6 +352,7 @@ pub mod bowed_string;
 pub mod conical_reed;
 pub mod brass_lip_reed;
 pub mod dsf_oscillator;
+pub mod dust;
 pub mod fm_operator;
 pub mod fof_source;
 pub mod glottal_pulse;
@@ -377,6 +388,7 @@ pub use bowed_string::{BowedStringNode, BowedStringParams};
 pub use brass_lip_reed::{BrassLipReedNode, BrassLipReedParams};
 pub use conical_reed::{ConicalReedNode, ConicalReedParams};
 pub use dsf_oscillator::{DsfOscillatorNode, DsfOscillatorParams};
+pub use dust::{DustNode, DustParams, Polarity};
 pub use fm_operator::{FmOperatorNode, FmOperatorParams};
 pub use fof_source::{FofSourceNode, FofSourceParams, Formant, MAX_FOF_GRAINS, MAX_FORMANTS};
 pub use glottal_pulse::{GlottalOutput, GlottalPulseNode, GlottalPulseParams};
