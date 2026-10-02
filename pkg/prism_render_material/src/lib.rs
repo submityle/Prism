@@ -26,6 +26,7 @@ mod texture_mipgen;
 mod texture_morphology;
 mod texture_resize;
 mod texture_sample;
+mod texture_upsample;
 mod validation;
 
 pub use authoring::FACE_SHADOW_SDF_SEMANTIC;
@@ -97,6 +98,7 @@ pub use texture_mipgen::{
 pub use texture_morphology::{close_plane, dilate_plane, erode_plane, open_plane};
 pub use texture_resize::{resize, ResizeFilter};
 pub use texture_sample::{resolve_cone, resolve_differential, SampleRequest, SampleResolved};
+pub use texture_upsample::joint_bilateral_upsample_plane;
 pub use validation::{validate_graph, MaterialValidationError};
 
 #[cfg(test)]
