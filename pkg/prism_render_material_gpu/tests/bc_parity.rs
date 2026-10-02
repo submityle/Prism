@@ -11,7 +11,7 @@
 //! without a usable adapter the oracle returns `None` and the test skips.
 
 use prism_render_material::{
-    decode_astc_void_extent_ldr, decode_bc1, decode_bc3, decode_bc6h_mode10_signed, decode_bc6h_mode10_unsigned,
+    decode_astc_void_extent_hdr, decode_astc_void_extent_ldr, decode_bc1, decode_bc3, decode_bc6h_mode10_signed, decode_bc6h_mode10_unsigned,
     decode_bc6h_mode12_signed, decode_bc6h_mode12_unsigned, decode_bc6h_mode13_signed,
     decode_bc6h_mode13_unsigned, decode_bc6h_mode14_signed, decode_bc6h_mode14_unsigned,
     decode_bc6h_mode1_signed, decode_bc6h_mode1_unsigned, decode_bc6h_mode2_signed,
@@ -1778,4 +1778,57 @@ fn astc_void_extent_ldr_parity_against_gpu_hardware_decode() {
         }
     }
     eprintln!("ASTC void-extent LDR parity: {COUNT} blocks within 1 LSB of hardware");
+}
+
+
+/// Build an HDR void-extent ASTC block carrying the given FP16 channels.
+fn astc_void_extent_hdr(r: u16, g: u16, b: u16, a: u16) -> [u8; 16] {
+    let mut blk = astc_void_extent_ldr(r, g, b, a);
+    blk[1] |= 1 << (9 - 8); // set bit 9: HDR dynamic-range flag
+    blk[8..10].copy_from_slice(&r.to_le_bytes());
+    blk[10..12].copy_from_slice(&g.to_le_bytes());
+    blk[12..14].copy_from_slice(&b.to_le_bytes());
+    blk[14..16].copy_from_slice(&a.to_le_bytes());
+    blk
+}
+
+#[test]
+fn astc_void_extent_hdr_parity_against_gpu_hardware_decode() {
+    let Some(oracle) = BlockOracle::try_new() else {
+        eprintln!("no GPU adapter; skipping ASTC HDR void-extent parity");
+        return;
+    };
+    if !oracle
+        .features()
+        .contains(Features::TEXTURE_COMPRESSION_ASTC_HDR)
+    {
+        eprintln!("adapter lacks ASTC HDR support; skipping ASTC HDR void-extent parity");
+        return;
+    }
+    let format = TextureFormat::Astc {
+        block: wgpu::AstcBlock::B4x4,
+        channel: wgpu::AstcChannel::Hdr,
+    };
+    let mut rng = Rng(0xA57C_7D11);
+    const COUNT: u32 = 256;
+    for _ in 0..COUNT {
+        let r = rng.half_bits();
+        let g = rng.half_bits();
+        let b = rng.half_bits();
+        let a = rng.half_bits();
+        let blk = astc_void_extent_hdr(r, g, b, a);
+        let cpu = decode_astc_void_extent_hdr(&blk).expect("valid HDR void-extent");
+        let gpu = oracle.decode_rgb_f32(format, &blk);
+        for t in 0..16 {
+            for c in 0..3 {
+                let (cv, gv) = (cpu[t][c], gpu[t][c]);
+                let tol = cv.abs() * 1e-3 + 1e-3;
+                assert!(
+                    (cv - gv).abs() <= tol,
+                    "ASTC HDR void-extent block={blk:02x?} texel {t} chan {c}: cpu={cv} gpu={gv}"
+                );
+            }
+        }
+    }
+    eprintln!("ASTC HDR void-extent parity: {COUNT} blocks match hardware (RGB FP16)");
 }
