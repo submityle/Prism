@@ -197,55 +197,6 @@ pub fn resolve_body_collisions(particles: &mut [ClothParticle], colliders: &[Bod
     physics_bridge::write_positions_back(particles, &positions);
 }
 
-/// Numerical floor below which a tangential slide is treated as zero, so a
-/// friction correction is never normalised from a ~0-length vector. Consumed by
-/// [`apply_coulomb_friction`], the standalone contact-friction projection the
-/// CCD pass still reuses from here.
-const EPS_FRICTION: f32 = 1e-12;
-
-/// Returns `pos` after applying position-level Coulomb friction against a
-/// contact whose outward unit `normal` and normal-correction magnitude
-/// `normal_push` are known.
-///
-/// This is the XPBD tangential-friction projection (Macklin et al. 2014,
-/// "Unified Particle Physics for Real-Time Applications"): the particle's
-/// tangential slide over the frame (`Dx_t`, i.e. `pos - prev` with its normal
-/// component removed) is cancelled entirely inside the static-friction cone
-/// (`||Dx_t|| <= mu * ||Dx_n||`) and otherwise shrunk by exactly
-/// `mu * ||Dx_n||`, leaving its direction unchanged. `mu` is the combined
-/// friction coefficient and `normal_push` is `||Dx_n||`, the depth the particle
-/// was pushed out along `normal`.
-///
-/// A non-positive `mu`, a non-positive `normal_push`, or a tangential slide at
-/// or below [`EPS_FRICTION`] leaves `pos` untouched, so a frictionless material
-/// or a purely normal contact is a no-op and no `NaN` is produced. `normal` is
-/// assumed unit length; the callers normalise it before calling.
-#[must_use]
-pub fn apply_coulomb_friction(
-    pos: Vec3,
-    prev: Vec3,
-    normal: Vec3,
-    normal_push: f32,
-    mu: f32,
-) -> Vec3 {
-    if mu <= 0.0 || normal_push <= 0.0 {
-        return pos;
-    }
-    let delta = pos.sub(prev);
-    let normal_amount = delta.dot(normal);
-    let tangent = delta.sub(normal.scale(normal_amount));
-    let tan_len_sq = tangent.length_squared();
-    if tan_len_sq <= EPS_FRICTION {
-        return pos;
-    }
-    let tan_len = tan_len_sq.sqrt();
-    // `scale` is `min(mu * ||Dx_n|| / ||Dx_t||, 1)`: it saturates at 1 inside
-    // the static cone (full cancellation) and is `< 1` in the dynamic regime
-    // (shrink the slide by `mu * ||Dx_n||`).
-    let scale = (mu * normal_push / tan_len).min(1.0);
-    pos.sub(tangent.scale(scale))
-}
-
 /// Projects every free particle out of every body collider like
 /// [`resolve_body_collisions`], then applies position-level Coulomb friction
 /// after each collider push so cloth grips the body instead of sliding
@@ -255,7 +206,8 @@ pub fn apply_coulomb_friction(
 /// For each collider the outward unit normal and push-out depth come straight
 /// from the projection displacement (`projected - before`); friction then rubs
 /// the particle's tangential slide since its frame-start position
-/// `prev_positions[i]` against that contact via [`apply_coulomb_friction`]. Body
+/// `prev_positions[i]` against that contact via the physics-engine Coulomb
+/// friction projection (Macklin et al. 2014). Body
 /// proxies are infinitely massive, so the whole tangential correction lands on
 /// the particle. `friction` is the material coefficient, clamped to `0..=1`; a
 /// value of `0` reproduces [`resolve_body_collisions`] exactly.
