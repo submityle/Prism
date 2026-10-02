@@ -38,18 +38,33 @@
 
 extern crate alloc;
 
+pub mod absolute;
+pub mod dirty;
 mod flex;
 pub mod geometry;
+pub mod grid;
+pub mod incremental;
 pub mod measure;
+pub mod modifier;
+pub mod protocol;
 pub mod result;
+pub mod stack;
 pub mod style;
 pub mod tree;
+pub mod wrap;
 
+pub use absolute::AbsoluteProtocol;
+pub use dirty::{is_relayout_boundary, DirtyFlags};
 pub use geometry::{AvailableSpace, Dimension, Edges, Point, Rect, Size};
+pub use grid::GridProtocol;
 pub use measure::Measure;
+pub use modifier::{Modifier, ModifierChain, Resolved};
+pub use protocol::{AlignX, AlignY, Alignment, Constraints, FlexProtocol, LayoutProtocol};
 pub use result::Layout;
+pub use stack::StackProtocol;
 pub use style::{
     AlignContent, AlignItems, Display, FlexDirection, FlexWrap, JustifyContent, LayoutStyle,
     Position,
 };
 pub use tree::{LayoutTree, NodeId};
+pub use wrap::WrapProtocol;
