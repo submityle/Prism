@@ -18,6 +18,7 @@
 //! quantities are linear radiance scales, never gamma-encoded.
 
 use super::conductor::Conductor;
+use super::conductor_aniso::AnisoConductor;
 use super::dielectric::{fresnel_dielectric, refract};
 use super::fresnel_blend::FresnelBlend;
 use super::microfacet::{fresnel_schlick, GgxIsotropic};
@@ -71,6 +72,26 @@ pub enum Bsdf {
         k: Vec3,
         /// Perceptual roughness in `[0, 1]`.
         roughness: f32,
+    },
+    /// Anisotropic rough conductor: brushed or machined metal whose highlight
+    /// is stretched into a streak along the surface grain (see
+    /// [`crate::reference_pt::conductor_aniso`]). It shares the exact spectral
+    /// `Fresnel` term of [`Bsdf::GgxConductorComplex`] but replaces the round
+    /// isotropic lobe with an anisotropic `GGX` distribution of independent
+    /// widths `alpha_x`/`alpha_y` along the local tangent and bitangent axes.
+    /// The anisotropy frame is derived from the shading normal, so this oracle
+    /// validates the `BRDF` mathematics independently of mesh `UV`s. It is
+    /// glossy (non-delta), so it is sampled and connected to lights like any
+    /// rough surface.
+    GgxConductorAniso {
+        /// Per-channel real index of refraction `eta`.
+        eta: Vec3,
+        /// Per-channel extinction coefficient `k`.
+        k: Vec3,
+        /// `GGX` width along the local tangent axis.
+        alpha_x: f32,
+        /// `GGX` width along the local bitangent axis.
+        alpha_y: f32,
     },
     /// Smooth (perfectly specular) dielectric interface: glass, water, or a
     /// clear coat. Light is either mirror-reflected or refracted through the
@@ -206,6 +227,12 @@ impl Bsdf {
             Self::GgxConductorComplex { eta, k, roughness } => {
                 Conductor::new(*eta, *k, *roughness).evaluate(wo, wi, normal)
             }
+            Self::GgxConductorAniso {
+                eta,
+                k,
+                alpha_x,
+                alpha_y,
+            } => AnisoConductor::new(*eta, *k, *alpha_x, *alpha_y).evaluate(wo, wi, normal),
             Self::Plastic {
                 diffuse,
                 specular,
@@ -254,6 +281,12 @@ impl Bsdf {
             Self::GgxConductorComplex { eta, k, roughness } => {
                 Conductor::new(*eta, *k, *roughness).pdf(wo, wi, normal)
             }
+            Self::GgxConductorAniso {
+                eta,
+                k,
+                alpha_x,
+                alpha_y,
+            } => AnisoConductor::new(*eta, *k, *alpha_x, *alpha_y).pdf(wo, wi, normal),
             Self::Plastic {
                 diffuse,
                 specular,
@@ -326,6 +359,19 @@ impl Bsdf {
                 roughness,
             } => Self::ggx_sample(*reflectance, *roughness, wo, normal, rng),
             Self::GgxConductorComplex { eta, k, roughness } => Conductor::new(*eta, *k, *roughness)
+                .sample(wo, normal, rng)
+                .map(|s| BsdfSample {
+                    direction: s.direction,
+                    value: s.value,
+                    pdf: s.pdf,
+                    specular: false,
+                }),
+            Self::GgxConductorAniso {
+                eta,
+                k,
+                alpha_x,
+                alpha_y,
+            } => AnisoConductor::new(*eta, *k, *alpha_x, *alpha_y)
                 .sample(wo, normal, rng)
                 .map(|s| BsdfSample {
                     direction: s.direction,
