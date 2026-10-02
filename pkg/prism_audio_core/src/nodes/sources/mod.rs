@@ -292,6 +292,21 @@
 //!   moving step edge of [`pwm_oscillator`], or the forced reset of
 //!   [`hard_sync_oscillator`], it recolours a single tone purely by warping
 //!   time.
+//! - [`dsf_oscillator::DsfOscillatorNode`] -- discrete summation formula
+//!   (DSF) oscillator: a closed-form evaluation of a geometric harmonic
+//!   series, so a single sine numerator term plus two correction terms
+//!   synthesize an entire `1, a, a^2, ...` stack of partials in O(1) per
+//!   sample instead of summing them one by one. A `brightness` control sets
+//!   the geometric ratio `a` (spectral tilt): at `brightness == 0` the
+//!   series collapses to a mathematically pure sine, and as it opens the
+//!   upper partials fill in and the tone brightens. The partial count is
+//!   recomputed each block from the fundamental so no partial ever crosses
+//!   Nyquist, making it naturally band-limited without an edge-correction
+//!   primitive. Unlike the flat-spectrum Dirichlet train of
+//!   [`impulse_train`] (its `a == 1` special case), the arbitrary O(N)
+//!   partial bank of [`additive_oscillator`], the fixed `PolyBLEP` waveforms
+//!   of [`oscillator`], or the time warp of [`phase_distortion_oscillator`],
+//!   it sculpts a smoothly decaying harmonic series in constant time.
 //!
 //!
 //! Every generator is real-time safe: `process` performs no allocation, no
@@ -305,6 +320,7 @@ pub mod blown_pipe;
 pub mod bowed_string;
 pub mod conical_reed;
 pub mod brass_lip_reed;
+pub mod dsf_oscillator;
 pub mod fm_operator;
 pub mod fof_source;
 pub mod glottal_pulse;
@@ -337,6 +353,7 @@ pub use blown_pipe::{BlownPipeNode, BlownPipeParams, NUM_HARMONICS};
 pub use bowed_string::{BowedStringNode, BowedStringParams};
 pub use brass_lip_reed::{BrassLipReedNode, BrassLipReedParams};
 pub use conical_reed::{ConicalReedNode, ConicalReedParams};
+pub use dsf_oscillator::{DsfOscillatorNode, DsfOscillatorParams};
 pub use fm_operator::{FmOperatorNode, FmOperatorParams};
 pub use fof_source::{FofSourceNode, FofSourceParams, Formant, MAX_FOF_GRAINS, MAX_FORMANTS};
 pub use glottal_pulse::{GlottalOutput, GlottalPulseNode, GlottalPulseParams};
