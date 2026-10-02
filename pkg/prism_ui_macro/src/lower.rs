@@ -4,6 +4,13 @@
 //! chain of builder methods. All emitted paths are fully qualified so the
 //! generated code does not depend on the caller's imports.
 //!
+//! This module is the **single shared lowerer** referenced by the dual-mode
+//! design (§9.1): both the development-time interpreter and the release-time
+//! freezer feed through [`lower_node`], so "interpret result == freeze result"
+//! holds by construction. Attribute emission follows the canonical order
+//! computed by [`crate::dualmode`], which makes the frozen token output
+//! reproducible regardless of the order attributes were written in source.
+//!
 //! # Stable node ids
 //!
 //! Every statically-known node is tagged with a compile-time
@@ -20,7 +27,8 @@
 use proc_macro2::{Ident, TokenStream};
 use quote::quote;
 
-use crate::ast::{Attr, Child, ContentExpr, Node, NodeKind, StyleVal};
+use crate::ast::{Attr, CallKind, Child, ContentExpr, Node, NodeKind, StyleVal};
+use crate::dualmode;
 
 /// Lowers a [`Node`] into the builder-call chain that constructs it.
 ///
@@ -41,7 +49,7 @@ pub(crate) fn lower_node(node: &Node, path: &str) -> TokenStream {
         }
     };
 
-    for attr in &node.attrs {
+    for attr in dualmode::canonical_attr_order(&node.attrs) {
         expr = lower_attr(expr, attr);
     }
 
@@ -125,12 +133,10 @@ fn lower_style_val(value: &StyleVal) -> TokenStream {
                 ::prism_ui::style::StyleValue::Keyword(::prism_ui::style::Keyword::#keyword)
             }
         }
-        StyleVal::Call { func, args } => match func.to_string().as_str() {
-            "px" => quote! { ::prism_ui::style::StyleValue::px(#args) },
-            "token" => quote! { ::prism_ui::style::StyleValue::token(#args) },
-            "rgba8" => quote! { ::prism_ui::style::StyleValue::rgba8(#args) },
-            // The parser only ever constructs the three cases above.
-            other => unreachable!("unexpected style constructor `{other}`"),
+        StyleVal::Call { kind, args, .. } => match kind {
+            CallKind::Px => quote! { ::prism_ui::style::StyleValue::px(#args) },
+            CallKind::Token => quote! { ::prism_ui::style::StyleValue::token(#args) },
+            CallKind::Rgba8 => quote! { ::prism_ui::style::StyleValue::rgba8(#args) },
         },
     }
 }

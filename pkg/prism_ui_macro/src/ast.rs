@@ -129,11 +129,28 @@ pub(crate) enum StyleVal {
     Keyword(Ident),
     /// A constructor call: `px(..)`, `token(..)` or `rgba8(..)`.
     Call {
-        /// The constructor name (one of `px`, `token`, `rgba8`).
+        /// Which of the three constructors this call selects.
+        kind: CallKind,
+        /// The constructor name token, kept for span-accurate diagnostics.
         func: Ident,
         /// The call arguments, spliced verbatim.
         args: Punctuated<Expr, Token![,]>,
     },
+}
+
+/// The constructor a [`StyleVal::Call`] selects.
+///
+/// Parsing validates the constructor name up front and records it as one of
+/// these variants, so lowering can match exhaustively without a fallible
+/// catch-all branch.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CallKind {
+    /// `px(..)` -> `StyleValue::px(..)`.
+    Px,
+    /// `token(..)` -> `StyleValue::token(..)`.
+    Token,
+    /// `rgba8(..)` -> `StyleValue::rgba8(..)`.
+    Rgba8,
 }
 
 impl Parse for Node {
@@ -291,13 +308,18 @@ impl Parse for StyleVal {
             let content;
             parenthesized!(content in input);
             let args = Punctuated::<Expr, Token![,]>::parse_terminated(&content)?;
-            match func.to_string().as_str() {
-                "px" | "token" | "rgba8" => Ok(StyleVal::Call { func, args }),
-                _ => Err(syn::Error::new(
-                    func.span(),
-                    "unknown style constructor: expected `px`, `token` or `rgba8`",
-                )),
-            }
+            let kind = match func.to_string().as_str() {
+                "px" => CallKind::Px,
+                "token" => CallKind::Token,
+                "rgba8" => CallKind::Rgba8,
+                _ => {
+                    return Err(syn::Error::new(
+                        func.span(),
+                        "unknown style constructor: expected `px`, `token` or `rgba8`",
+                    ));
+                }
+            };
+            Ok(StyleVal::Call { kind, func, args })
         } else {
             Ok(StyleVal::Keyword(func))
         }

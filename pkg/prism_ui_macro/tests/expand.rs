@@ -305,9 +305,9 @@ fn dollar_sigil_reads_signal_content() {
 fn dollar_sigil_tracks_dependency_in_effect() {
     // Because `$sig` lowers to a tracked `get()`, building the tree inside an
     // effect subscribes that effect to the signal, so a later `set` re-runs it.
+    use alloc::rc::Rc;
     use core::cell::RefCell;
     use prism_ui::reactive::Runtime;
-    use alloc::rc::Rc;
 
     let rt = Runtime::new();
     let label = rt.signal(String::from("first"));
@@ -318,10 +318,7 @@ fn dollar_sigil_tracks_dependency_in_effect() {
         let seen = Rc::clone(&seen);
         rt.effect(move || {
             let el = loom! { box { text($label); } };
-            let text = el.child_elements()[0]
-                .text_content()
-                .unwrap()
-                .to_string();
+            let text = el.child_elements()[0].text_content().unwrap().to_string();
             seen.borrow_mut().push(text);
         })
     };
