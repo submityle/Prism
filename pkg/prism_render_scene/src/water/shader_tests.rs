@@ -252,3 +252,165 @@ fn water_surface_raster_wesl_consumes_the_ssgi_binding() {
         "water_ibl must call the SSGI gather so the @group(7) uniform is consumed",
     );
 }
+
+/// Removes `//` line comments from a `WESL` source so a doc mention of a
+/// binding identifier can never be mistaken for a real read when counting its
+/// uses. The water shaders carry no block comments, so this is exhaustive.
+fn strip_line_comments(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    for line in src.lines() {
+        let keep = line.find("//").map_or(line, |idx| &line[..idx]);
+        out.push_str(keep);
+        out.push('\n');
+    }
+    out
+}
+
+/// Parses the unsigned integer immediately following `marker` (e.g. the `3` in
+/// `@group(3)`), returning `None` when the marker is absent or not numeric.
+fn paren_u32(line: &str, marker: &str) -> Option<u32> {
+    let start = line.find(marker)? + marker.len();
+    let digits: String = line[start..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse().ok()
+}
+
+/// Extracts the identifier bound by a `var[<address-space>] NAME` declaration on
+/// a single `@binding` line, skipping the optional `<...>` template, returning
+/// `None` when no identifier follows.
+fn var_identifier(line: &str) -> Option<String> {
+    let after_binding = &line[line.find("@binding(")?..];
+    let var_pos = after_binding.find("var")?;
+    let mut rest = &after_binding[var_pos + "var".len()..];
+    if let Some(stripped) = rest.trim_start().strip_prefix('<') {
+        let close = stripped.find('>')?;
+        rest = &stripped[close + 1..];
+    }
+    let ident: String = rest
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    if ident.is_empty() {
+        None
+    } else {
+        Some(ident)
+    }
+}
+
+/// Collects every `@group(G) @binding(B) var[<...>] NAME` declaration in a
+/// source as `(group, binding, name)`, skipping commented-out lines. The water
+/// shaders declare each binding on one line, matching this line-oriented parse.
+fn binding_declarations(src: &str) -> Vec<(u32, u32, String)> {
+    let mut out = Vec::new();
+    for line in src.lines() {
+        if line.trim_start().starts_with("//") {
+            continue;
+        }
+        if !(line.contains("@group(") && line.contains("@binding(")) {
+            continue;
+        }
+        let (Some(group), Some(binding), Some(name)) = (
+            paren_u32(line, "@group("),
+            paren_u32(line, "@binding("),
+            var_identifier(line),
+        ) else {
+            continue;
+        };
+        out.push((group, binding, name));
+    }
+    out
+}
+
+/// Whole-word occurrence count of `word` in `hay`, so `scene_color` never
+/// matches inside `scene_color_sampler` and over-counts a binding's reads.
+fn whole_word_count(hay: &str, word: &str) -> usize {
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let bytes = hay.as_bytes();
+    let mut count = 0;
+    let mut cursor = 0;
+    while let Some(found) = hay[cursor..].find(word) {
+        let start = cursor + found;
+        let end = start + word.len();
+        let before_ok = start == 0 || !is_ident(bytes[start - 1]);
+        let after_ok = end >= bytes.len() || !is_ident(bytes[end]);
+        if before_ok && after_ok {
+            count += 1;
+        }
+        cursor = end;
+    }
+    count
+}
+
+/// Guards every water `WESL` shader against the *inert binding* defect class: a
+/// `@group(G) @binding(B) var NAME` declaration whose `NAME` is never read in
+/// the body. That is exactly the fault the surface `SSGI` `@group(7)` uniform
+/// exhibited before `water_ssgi_gather` consumed it - a binding that reserves a
+/// bind-group slot and a resource on device yet contributes nothing, a silent
+/// fake implementation. Pinning it across all water sources stops any binding
+/// from regressing into that dead no-op.
+#[test]
+fn water_wesl_shaders_consume_every_binding() {
+    const SOURCES: &[(&str, &str)] = &[
+        ("water.wesl", include_str!("../shaders/water.wesl")),
+        (
+            "water_butterfly.wesl",
+            include_str!("../shaders/water_butterfly.wesl"),
+        ),
+        (
+            "water_flip.wesl",
+            include_str!("../shaders/water_flip.wesl"),
+        ),
+        (
+            "water_flip_mac.wesl",
+            include_str!("../shaders/water_flip_mac.wesl"),
+        ),
+        (
+            "water_flip_mac_g2p.wesl",
+            include_str!("../shaders/water_flip_mac_g2p.wesl"),
+        ),
+        (
+            "water_flip_mac_p2g.wesl",
+            include_str!("../shaders/water_flip_mac_p2g.wesl"),
+        ),
+        (
+            "water_ocean.wesl",
+            include_str!("../shaders/water_ocean.wesl"),
+        ),
+        ("water_pbf.wesl", include_str!("../shaders/water_pbf.wesl")),
+        (
+            "water_render_fx.wesl",
+            include_str!("../shaders/water_render_fx.wesl"),
+        ),
+        (
+            "water_spectrum_fft.wesl",
+            include_str!("../shaders/water_spectrum_fft.wesl"),
+        ),
+        (
+            "water_surface.wesl",
+            include_str!("../shaders/water_surface.wesl"),
+        ),
+        (
+            "water_surface_mesh.wesl",
+            include_str!("../shaders/water_surface_mesh.wesl"),
+        ),
+        (
+            "water_surface_raster.wesl",
+            include_str!("../shaders/water_surface_raster.wesl"),
+        ),
+    ];
+    for (name, src) in SOURCES {
+        let code = strip_line_comments(src);
+        for (group, binding, ident) in binding_declarations(src) {
+            let uses = whole_word_count(&code, &ident);
+            assert!(
+                uses >= 2,
+                "{name}: @group({group}) @binding({binding}) `{ident}` is declared \
+                 but never read ({uses} code reference(s)); an inert binding is a \
+                 fake implementation - consume it or drop the binding",
+            );
+        }
+    }
+}
