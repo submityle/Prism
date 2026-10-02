@@ -9,12 +9,17 @@
 //! gradient from a discrete height grid and feeds it through the same slope
 //! conversion, so the generator and the strength slider stay consistent.
 //!
-//! Two gradient estimators are offered:
+//! Three gradient estimators are offered:
 //! * [`HeightGradient::CentralDifference`] -- the 2-tap `(h[+1] - h[-1]) / 2`
 //!   estimator; cheapest and exact for a locally linear field.
 //! * [`HeightGradient::Sobel`] -- the 3x3 Sobel operator, which averages three
 //!   rows/columns so it is far less sensitive to single-texel noise while still
 //!   being exact for a planar ramp. This is the common content-pipeline choice.
+//! * [`HeightGradient::Scharr`] -- the 3x3 Scharr operator, an optimized
+//!   `{3, 10, 3}` weighting whose Fourier response best approximates an ideal
+//!   rotation-invariant gradient, so slanted and curved detail keeps a more
+//!   accurate normal direction than Sobel while remaining exact for a planar
+//!   ramp.
 //!
 //! The per-texel world spacing `texel_world_size` lets non-square texels and an
 //! explicit bump scale map to a physically meaningful slope; `strength` scales
@@ -30,6 +35,8 @@
 //!   (height-field gradient / bump-to-normal).
 //! * Sobel & Feldman, "A 3x3 Isotropic Gradient Operator for Image Processing"
 //!   (1968) -- the Sobel kernel.
+//! * Scharr, "Optimale Operatoren in der digitalen Bildverarbeitung" (2000)
+//!   -- the rotation-optimized `{3, 10, 3}` gradient kernel.
 
 use alloc::vec::Vec;
 
@@ -43,6 +50,8 @@ pub enum HeightGradient {
     CentralDifference,
     /// 3x3 Sobel operator (row/column averaged central difference).
     Sobel,
+    /// 3x3 Scharr operator (`{3, 10, 3}` rotation-optimized gradient).
+    Scharr,
 }
 
 /// Wrap an integer texel index into `[0, n)` for a gradient tap.
@@ -118,6 +127,19 @@ pub fn height_to_normal(
                         / (8.0 * dy);
                     (gx, gy)
                 }
+                HeightGradient::Scharr => {
+                    let gx = ((3.0 * at(x + 1, y - 1)
+                        + 10.0 * at(x + 1, y)
+                        + 3.0 * at(x + 1, y + 1))
+                        - (3.0 * at(x - 1, y - 1) + 10.0 * at(x - 1, y) + 3.0 * at(x - 1, y + 1)))
+                        / (32.0 * dx);
+                    let gy = ((3.0 * at(x - 1, y + 1)
+                        + 10.0 * at(x, y + 1)
+                        + 3.0 * at(x + 1, y + 1))
+                        - (3.0 * at(x - 1, y - 1) + 10.0 * at(x, y - 1) + 3.0 * at(x + 1, y - 1)))
+                        / (32.0 * dy);
+                    (gx, gy)
+                }
             };
             out.push(slope_to_normal([strength * gx, strength * gy]));
         }
@@ -130,7 +152,11 @@ mod tests {
     use super::*;
     use crate::scale_strength;
 
-    const KERNELS: [HeightGradient; 2] = [HeightGradient::CentralDifference, HeightGradient::Sobel];
+    const KERNELS: [HeightGradient; 3] = [
+        HeightGradient::CentralDifference,
+        HeightGradient::Sobel,
+        HeightGradient::Scharr,
+    ];
 
     fn idx(x: u32, y: u32, w: u32) -> usize {
         (y * w + x) as usize
@@ -430,6 +456,124 @@ mod tests {
                 for v in &n {
                     assert!(v[0].abs() < 1.0e-6, "{k:?} {wrap:?} nx={}", v[0]);
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn scharr_exact_on_planar_ramp() {
+        // On a planar ramp h = a*x + b*y the true slope is a constant (a, b),
+        // and the Scharr `{3,10,3}` weights are normalized so the interior
+        // gradient reproduces it exactly -- the primary anti-fake oracle.
+        let (w, hgt) = (6u32, 5u32);
+        let (a, b) = (0.37f32, -0.21f32);
+        let mut h = vec![0.0f32; (w * hgt) as usize];
+        for y in 0..hgt {
+            for x in 0..w {
+                h[idx(x, y, w)] = a * x as f32 + b * y as f32;
+            }
+        }
+        let n = height_to_normal(
+            &h,
+            w,
+            hgt,
+            1.0,
+            [1.0, 1.0],
+            HeightGradient::Scharr,
+            WrapMode::ClampToEdge,
+        )
+        .unwrap();
+        let want = slope_to_normal([a, b]);
+        for y in 1..hgt - 1 {
+            for x in 1..w - 1 {
+                let v = n[idx(x, y, w)];
+                for c in 0..3 {
+                    assert!(
+                        (v[c] - want[c]).abs() < 1.0e-5,
+                        "x={x} y={y} {v:?} vs {want:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scharr_agrees_with_other_kernels_on_planar() {
+        // Every estimator here is exact on a linear field, so Scharr must match
+        // central-difference and Sobel texel-for-texel in the interior.
+        let (w, hgt) = (7u32, 6u32);
+        let mut h = vec![0.0f32; (w * hgt) as usize];
+        for y in 0..hgt {
+            for x in 0..w {
+                h[idx(x, y, w)] = 0.5 * x as f32 - 0.3 * y as f32 + 2.0;
+            }
+        }
+        let args =
+            |k| height_to_normal(&h, w, hgt, 1.3, [1.1, 0.9], k, WrapMode::ClampToEdge).unwrap();
+        let sc = args(HeightGradient::Scharr);
+        let so = args(HeightGradient::Sobel);
+        let cd = args(HeightGradient::CentralDifference);
+        for y in 1..hgt - 1 {
+            for x in 1..w - 1 {
+                let (a, b, c) = (sc[idx(x, y, w)], so[idx(x, y, w)], cd[idx(x, y, w)]);
+                for k in 0..3 {
+                    assert!((a[k] - b[k]).abs() < 1.0e-5, "scharr vs sobel {a:?} {b:?}");
+                    assert!(
+                        (a[k] - c[k]).abs() < 1.0e-5,
+                        "scharr vs central {a:?} {c:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scharr_horizontal_mirror_flips_normal_x() {
+        // Mirroring the height field in x negates the x-gradient, so the Scharr
+        // normal x-component flips while y and z are preserved.
+        let (w, hgt) = (7u32, 4u32);
+        let mut h = vec![0.0f32; (w * hgt) as usize];
+        for y in 0..hgt {
+            for x in 0..w {
+                h[idx(x, y, w)] = (x * x + 3 * y) as f32 * 0.05;
+            }
+        }
+        let mut hm = vec![0.0f32; (w * hgt) as usize];
+        for y in 0..hgt {
+            for x in 0..w {
+                hm[idx(x, y, w)] = h[idx(w - 1 - x, y, w)];
+            }
+        }
+        let n = height_to_normal(
+            &h,
+            w,
+            hgt,
+            1.5,
+            [1.0, 1.0],
+            HeightGradient::Scharr,
+            WrapMode::ClampToEdge,
+        )
+        .unwrap();
+        let nm = height_to_normal(
+            &hm,
+            w,
+            hgt,
+            1.5,
+            [1.0, 1.0],
+            HeightGradient::Scharr,
+            WrapMode::ClampToEdge,
+        )
+        .unwrap();
+        for y in 0..hgt {
+            for x in 0..w {
+                let a = n[idx(x, y, w)];
+                let b = nm[idx(w - 1 - x, y, w)];
+                assert!(
+                    (a[0] + b[0]).abs() < 1.0e-5,
+                    "x flip x={x} y={y} {a:?} {b:?}"
+                );
+                assert!((a[1] - b[1]).abs() < 1.0e-5, "y keep x={x} y={y}");
+                assert!((a[2] - b[2]).abs() < 1.0e-5, "z keep x={x} y={y}");
             }
         }
     }
