@@ -992,3 +992,86 @@ fn eac_rg11_parity_against_gpu_hardware_decode() {
     }
     eprintln!("EAC RG11 parity: {COUNT} blocks bit-exact (red+green)");
 }
+
+/// Signed `EAC_R11` is bit-exact: the Metal hardware snorm decode normalises as
+/// `v / 1023.0`, so `round(f32 * 1023.0)` recovers the pure-CPU `[i16; 16]`
+/// output (`-1023..=1023`) exactly. Confirmed empirically for positive and
+/// negative base codewords, `-1024` clamp, and both formula paths (no `+4`).
+#[test]
+fn eac_r11_snorm_parity_against_gpu_hardware_decode() {
+    use prism_render_material::decode_eac_r11_snorm;
+    let Some(oracle) = BlockOracle::try_new() else {
+        eprintln!("no GPU adapter; skipping EAC R11 snorm parity");
+        return;
+    };
+    if !oracle
+        .features()
+        .contains(Features::TEXTURE_COMPRESSION_ETC2)
+    {
+        eprintln!("adapter lacks ETC2/EAC support; skipping EAC R11 snorm parity");
+        return;
+    }
+    let mut rng = Rng(0x5EAC_1111);
+    const COUNT: u32 = 200;
+    for _ in 0..COUNT {
+        let mut b = [0u8; 8];
+        for by in &mut b {
+            *by = rng.byte();
+        }
+        let cpu = decode_eac_r11_snorm(&b);
+        let gpu = oracle.decode_raw(TextureFormat::EacR11Snorm, &b);
+        for t in 0..16 {
+            let g = (gpu[t][0] * 1023.0).round() as i32;
+            assert_eq!(
+                cpu[t] as i32, g,
+                "R11_SNORM block={b:02x?} texel {t}: cpu={} gpu*1023={g} (raw {})",
+                cpu[t], gpu[t][0]
+            );
+        }
+    }
+    eprintln!("EAC R11 snorm parity: {COUNT} blocks bit-exact");
+}
+
+/// Signed `EAC_RG11` is two independent signed R11 channels (red = bytes
+/// `0..8`, green = bytes `8..16`), the ETC2 analogue of `BC5_SNORM`. Both
+/// channels must match the pure-CPU `[[i16; 2]; 16]` output bit-exactly.
+#[test]
+fn eac_rg11_snorm_parity_against_gpu_hardware_decode() {
+    use prism_render_material::decode_eac_rg11_snorm;
+    let Some(oracle) = BlockOracle::try_new() else {
+        eprintln!("no GPU adapter; skipping EAC RG11 snorm parity");
+        return;
+    };
+    if !oracle
+        .features()
+        .contains(Features::TEXTURE_COMPRESSION_ETC2)
+    {
+        eprintln!("adapter lacks ETC2/EAC support; skipping EAC RG11 snorm parity");
+        return;
+    }
+    let mut rng = Rng(0x5EAC_2222);
+    const COUNT: u32 = 200;
+    for _ in 0..COUNT {
+        let mut b = [0u8; 16];
+        for by in &mut b {
+            *by = rng.byte();
+        }
+        let cpu = decode_eac_rg11_snorm(&b);
+        let gpu = oracle.decode_raw(TextureFormat::EacRg11Snorm, &b);
+        for t in 0..16 {
+            let gr = (gpu[t][0] * 1023.0).round() as i32;
+            let gg = (gpu[t][1] * 1023.0).round() as i32;
+            assert_eq!(
+                cpu[t][0] as i32, gr,
+                "RG11_SNORM block={b:02x?} texel {t} RED: cpu={} gpu*1023={gr}",
+                cpu[t][0]
+            );
+            assert_eq!(
+                cpu[t][1] as i32, gg,
+                "RG11_SNORM block={b:02x?} texel {t} GREEN: cpu={} gpu*1023={gg}",
+                cpu[t][1]
+            );
+        }
+    }
+    eprintln!("EAC RG11 snorm parity: {COUNT} blocks bit-exact (red+green)");
+}
