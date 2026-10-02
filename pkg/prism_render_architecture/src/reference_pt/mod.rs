@@ -46,6 +46,10 @@
 //!   [`distribution::Distribution2D`]) that invert a tabulated cumulative
 //!   distribution to draw samples in proportion to a function, the importance
 //!   sampling core reused by image-based environment lighting.
+//! - [`environment`] — the image-based environment light
+//!   ([`environment::EnvironmentMap`]): an octahedral radiance dome sampled in
+//!   proportion to its brightness, with a matching solid-angle density for
+//!   multiple-importance weighting against `BSDF` sampling.
 //! - [`integrator`] — the path-tracing loop ([`integrator::PathIntegrator`]):
 //!   `BSDF` importance sampling, direct-light `NEE`, Russian-roulette path
 //!   termination, and the [`integrator::Scene`] it traces.
@@ -76,6 +80,7 @@ pub mod dielectric;
 pub mod dielectric_energy;
 pub mod dielectric_ms;
 pub mod distribution;
+pub mod environment;
 pub mod estimator;
 pub mod film;
 pub mod fresnel_blend;
