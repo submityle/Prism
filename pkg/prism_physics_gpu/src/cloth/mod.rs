@@ -48,6 +48,7 @@ pub mod plasticity;
 pub mod prep;
 pub mod pressure;
 pub mod self_ccd;
+pub mod self_collision_point;
 pub mod strain_limit;
 pub mod tearing;
 
@@ -76,6 +77,9 @@ pub use pressure::{
     build_vertex_triangle_adjacency, cpu_cloth_pressure, GpuClothPressure, VertexTriangleAdjacency,
 };
 pub use self_ccd::{cpu_cloth_self_ccd, GpuClothSelfCcd};
+pub use self_collision_point::{
+    cpu_cloth_self_collision_point, GpuClothSelfCollisionPoint,
+};
 pub use strain_limit::{
     colour_strain_limit, cpu_cloth_strain_limit, ClothStrainLimitConstraint, GpuClothStrainLimit,
     StrainLimitColoring,
