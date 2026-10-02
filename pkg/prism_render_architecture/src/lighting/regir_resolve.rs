@@ -2,52 +2,65 @@
 //!
 //! [`super::regir`] presamples the light set into per-cell reservoirs and
 //! [`super::restir_temporal::resolve_di`] runs the temporal + spatial
-//! resampling pipeline, but on their own they leave one seam to the caller: the
-//! initial candidates `resolve_di` resamples have to come from somewhere, and
-//! for the hand-off to stay unbiased the target function `ReGIR` evaluates when
-//! it emits a candidate (`p̂_pix`) must be *exactly* the one `resolve_di` uses at
-//! that pixel. Wiring the two stages by hand invites a quiet bug: a caller that
-//! passes an even slightly different target to
+//! resampling pipeline, but on their own they leave two seams to the caller:
+//! the initial candidates `resolve_di` resamples have to come from somewhere,
+//! and the spatial neighbors it folds in should first be screened for
+//! geometric compatibility. Wiring those by hand invites quiet bugs — most
+//! subtly, passing an even slightly different target to
 //! [`super::regir::RegirGrid::candidates_for`] than to
 //! [`super::restir_temporal::resolve_di`] silently biases the estimate without
 //! any test tripping.
 //!
-//! This module closes that seam with a single per-pixel entry point,
-//! [`resolve_di_from_regir`], that threads **one** target closure through both
-//! stages. It replaces `ReSTIR` DI's `O(lights)` initial scan with the grid's
-//! `O(1)` importance-aware cell lookup and feeds the resulting candidates
-//! straight into the full temporal / spatial resolve — the same structure
-//! `RTXDI` and `UE`'s `MegaLights` use to shade thousands of lights in real
-//! time, rebuilt here from scratch.
+//! This module closes both seams with a single per-pixel entry point,
+//! [`resolve_di_from_regir`], that
+//! 1. draws importance-aware initial candidates from the grid cell at the
+//!    pixel's world position (an `O(1)` lookup replacing `ReSTIR` DI's
+//!    `O(lights)` initial scan), threading **one** target closure so the grid's
+//!    `source_pdf = 1 / W_cell` hand-off stays consistent with the pixel target,
+//! 2. screens this frame's spatial neighbors through
+//!    [`super::restir_spatial::gather_admissible_neighbors`] so only
+//!    geometrically compatible surfaces are reused, and
+//! 3. runs the full temporal / spatial resolve.
+//!
+//! This is the same structure `RTXDI` and `UE`'s `MegaLights` use to shade
+//! thousands of lights in real time, rebuilt here from scratch.
 //!
 //! # Unbiasedness
 //! Two unbiased stages compose. The grid emits each initial candidate with
 //! `source_pdf = 1 / W_cell`, the density that makes the pixel's initial `RIS`
 //! an unbiased estimator of the full many-light sum (see [`super::regir`]); the
 //! resolve then folds temporal history and spatial neighbors with the unbiased
-//! normalization (see [`super::restir_di::combine_unbiased`]). Because the
-//! single threaded target guarantees the candidate's `p̂_pix` equals the
-//! resolve's target at the current surface, the composed estimator satisfies
-//! `E[contribution(y) · W] = Σ_i contribution_i` at the pixel — verified below
-//! by a brute-force Monte Carlo test against the exact many-light sum.
+//! normalization (see [`super::restir_di::combine_unbiased`]). The spatial gate
+//! depends only on surface geometry, never on the held light, so dropping
+//! inadmissible neighbors cannot bias the estimator — it only removes
+//! high-variance sources. Because the single threaded target guarantees the
+//! candidate's `p̂_pix` equals the resolve's target at the current surface, the
+//! composed estimator satisfies `E[contribution(y) · W] = Σ_i contribution_i`
+//! at the pixel — verified below by brute-force Monte Carlo against the exact
+//! many-light sum.
 //!
 //! Pure classical Monte Carlo, deterministic in the stateless [`Rng`]: no
 //! neural, learned, or data-driven components. A given seed reproduces the same
 //! selection for golden tests and a future `GPU` twin.
 
+use alloc::vec::Vec;
+
 use super::regir::RegirGrid;
 use super::restir_di::DiReservoir;
+use super::restir_spatial::{gather_admissible_neighbors, SpatialParams};
 use super::restir_temporal::{resolve_di, GeomReservoir, SurfaceGeometry, TemporalParams};
 use super::ReservoirBudget;
 use crate::particle::reservoir_sample::Rng;
 
 /// Resolves `ReSTIR` DI for one pixel, drawing its initial candidates from the
-/// `ReGIR` grid at the pixel's world position.
+/// `ReGIR` grid at the pixel's world position and reusing only geometrically
+/// admissible spatial neighbors.
 ///
-/// This is the end-to-end driver: it gathers up to `budget.initial_candidates`
-/// importance-aware candidates from the cell containing `position` (an `O(1)`
-/// lookup instead of scanning every light), then runs the full temporal +
-/// spatial resolve via [`super::restir_temporal::resolve_di`].
+/// This is the batteries-included end-to-end driver: it gathers up to
+/// `budget.initial_candidates` importance-aware candidates from the cell
+/// containing `position` (an `O(1)` lookup instead of scanning every light),
+/// screens `spatial` down to its geometrically compatible subset, then runs the
+/// full temporal + spatial resolve via [`super::restir_temporal::resolve_di`].
 ///
 /// * `grid` — the frame's presampled `ReGIR` grid (built with
 ///   [`super::regir::RegirGrid::rebuild`] or
@@ -59,13 +72,18 @@ use crate::particle::reservoir_sample::Rng;
 ///   cue to fall back to a global sampler.
 /// * `current` — the pixel's surface (depth / normal), used for reuse
 ///   admissibility and as the point at which the target is evaluated.
-/// * `history` / `spatial` — the reprojected previous-frame reservoir and this
-///   frame's neighbor reservoirs, forwarded unchanged to the resolve.
+/// * `history` — the reprojected previous-frame reservoir, forwarded unchanged.
+/// * `spatial` — this frame's candidate neighbor reservoirs (the caller chose
+///   which screen texels); they are screened by [`SpatialParams`] and capped at
+///   `budget.spatial_neighbors` before being folded in.
 /// * `params` — temporal reprojection tolerances (see [`TemporalParams`]).
+/// * `spatial_params` — spatial-neighbor admissibility tolerances (see
+///   [`SpatialParams`]).
 /// * `target` — the single target function `p̂(surface, light)` threaded to
-///   **both** stages: `ReGIR` evaluates it at `current` to weight each
-///   candidate, and the resolve re-evaluates it at every reuse surface. Passing
-///   one closure is exactly what keeps the composed estimator unbiased.
+///   **both** the grid lookup and the resolve: `ReGIR` evaluates it at `current`
+///   to weight each candidate, and the resolve re-evaluates it at every reuse
+///   surface. Passing one closure is exactly what keeps the composed estimator
+///   unbiased.
 #[must_use]
 pub fn resolve_di_from_regir<T>(
     grid: &RegirGrid,
@@ -75,6 +93,7 @@ pub fn resolve_di_from_regir<T>(
     spatial: &[GeomReservoir],
     budget: ReservoirBudget,
     params: TemporalParams,
+    spatial_params: SpatialParams,
     mut target: T,
     rng: &mut Rng,
 ) -> DiReservoir
@@ -90,11 +109,20 @@ where
             target(&current, light)
         });
 
+    // Screen spatial neighbors by geometry before reuse: dissimilar surfaces
+    // only add variance, and the gate is light-independent so it stays unbiased.
+    let admissible: Vec<GeomReservoir> = gather_admissible_neighbors(
+        current,
+        spatial,
+        budget.spatial_neighbors as usize,
+        spatial_params,
+    );
+
     resolve_di(
         current,
         &candidates,
         history,
-        spatial,
+        &admissible,
         budget,
         params,
         target,
@@ -106,6 +134,7 @@ where
 mod tests {
     use super::*;
     use crate::lighting::regir::RegirConfig;
+    use crate::lighting::restir_di::{DiCandidate, DiReservoir};
 
     const FRONT: [f32; 3] = [0.0, 0.0, 1.0];
 
@@ -209,6 +238,7 @@ mod tests {
                 &[],
                 b,
                 TemporalParams::default(),
+                SpatialParams::default(),
                 |_g, l| lights.contribution(l, pixel),
                 &mut rng,
             );
@@ -247,6 +277,7 @@ mod tests {
                 &[],
                 budget(4, 0, false),
                 TemporalParams::default(),
+                SpatialParams::default(),
                 |_g, l| lights.contribution(l, pixel),
                 &mut rng,
             );
@@ -260,6 +291,7 @@ mod tests {
                 &[],
                 b,
                 TemporalParams::default(),
+                SpatialParams::default(),
                 |_g, l| lights.contribution(l, pixel),
                 &mut rng,
             );
@@ -268,6 +300,114 @@ mod tests {
         let mean = (acc / f64::from(seeds)) as f32;
         let rel_err = (mean - exact).abs() / exact;
         assert!(rel_err < 0.02, "mean {mean} vs exact {exact} ({rel_err})");
+    }
+
+    #[test]
+    fn regir_with_spatial_is_unbiased() {
+        // Spatial reuse with admissible (matching-surface) neighbors, each
+        // produced by the driver on the same geometry: still unbiased.
+        let lights = Lights::demo();
+        let cfg = config([4, 4, 4], 4);
+        let pixel = [0.3, -0.2, 0.1];
+        let geom = SurfaceGeometry::new(8.0, FRONT);
+        let exact = lights.sum_at(pixel);
+        let b = budget(4, 2, false);
+
+        let seeds = 400_000u32;
+        let mut acc = 0.0f64;
+        for s in 0..seeds {
+            let grid = build_grid(&lights, cfg, s.wrapping_mul(2_654_435_761).wrapping_add(1));
+            let mut rng = Rng::new(s.wrapping_mul(40_503).wrapping_add(7));
+
+            let mk = |rng: &mut Rng| {
+                resolve_di_from_regir(
+                    &grid,
+                    pixel,
+                    geom,
+                    None,
+                    &[],
+                    budget(4, 0, false),
+                    TemporalParams::default(),
+                    SpatialParams::default(),
+                    |_g, l| lights.contribution(l, pixel),
+                    rng,
+                )
+            };
+            let n0 = GeomReservoir::new(mk(&mut rng), geom);
+            let n1 = GeomReservoir::new(mk(&mut rng), geom);
+
+            let out = resolve_di_from_regir(
+                &grid,
+                pixel,
+                geom,
+                None,
+                &[n0, n1],
+                b,
+                TemporalParams::default(),
+                SpatialParams::default(),
+                |_g, l| lights.contribution(l, pixel),
+                &mut rng,
+            );
+            acc += f64::from(out.target_pdf * out.reservoir.w);
+        }
+        let mean = (acc / f64::from(seeds)) as f32;
+        let rel_err = (mean - exact).abs() / exact;
+        assert!(rel_err < 0.02, "mean {mean} vs exact {exact} ({rel_err})");
+    }
+
+    #[test]
+    fn spatial_gate_drops_disoccluded_neighbor() {
+        // A neighbor on a mismatched surface must be screened out, yielding the
+        // exact same result as if no neighbor were supplied (identical rng path:
+        // the gate runs before any spatial rng draw).
+        let lights = Lights::demo();
+        let cfg = config([4, 4, 4], 4);
+        let grid = build_grid(&lights, cfg, 7);
+        let pixel = [0.3, -0.2, 0.1];
+        let geom = SurfaceGeometry::new(8.0, FRONT);
+        let far = SurfaceGeometry::new(80.0, FRONT); // across a silhouette
+
+        // A populated neighbor reservoir on the far surface.
+        let mut nr = DiReservoir::empty();
+        nr.stream(
+            DiCandidate {
+                light_index: 1,
+                target_pdf: 1.0,
+                source_pdf: 1.0,
+            },
+            0.5,
+        );
+        nr.finalize();
+        let bad = GeomReservoir::new(nr, far);
+
+        let mut a = Rng::new(2024);
+        let with_bad = resolve_di_from_regir(
+            &grid,
+            pixel,
+            geom,
+            None,
+            &[bad],
+            budget(4, 2, false),
+            TemporalParams::default(),
+            SpatialParams::default(),
+            |_g, l| lights.contribution(l, pixel),
+            &mut a,
+        );
+
+        let mut b = Rng::new(2024);
+        let none = resolve_di_from_regir(
+            &grid,
+            pixel,
+            geom,
+            None,
+            &[],
+            budget(4, 2, false),
+            TemporalParams::default(),
+            SpatialParams::default(),
+            |_g, l| lights.contribution(l, pixel),
+            &mut b,
+        );
+        assert_eq!(with_bad, none);
     }
 
     #[test]
@@ -289,6 +429,7 @@ mod tests {
             &[],
             budget(4, 0, true),
             TemporalParams::default(),
+            SpatialParams::default(),
             |_g, l| lights.contribution(l, far),
             &mut rng,
         );
@@ -315,6 +456,7 @@ mod tests {
                 &[],
                 budget(4, 0, true),
                 TemporalParams::default(),
+                SpatialParams::default(),
                 |_g, l| lights.contribution(l, pixel),
                 &mut rng,
             )
