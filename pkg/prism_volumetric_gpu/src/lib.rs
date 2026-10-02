@@ -216,6 +216,7 @@ pub mod velocity_dilate;
 pub mod virga_fade;
 pub mod virga_veil;
 pub mod volume_scene_shadow_cast;
+pub mod volumetric_multiscatter;
 pub mod vorticity_confinement;
 pub mod worley;
 
@@ -419,5 +420,8 @@ pub use velocity_dilate::GpuVelocityDilate;
 pub use virga_fade::{GpuVirgaFade, VirgaFadeQuery};
 pub use virga_veil::{GpuVirgaVeil, VirgaVeilQuery};
 pub use volume_scene_shadow_cast::{GpuVolumeShadowCast, ShadowMarch, VolumeShadowRay};
+pub use volumetric_multiscatter::{
+    GpuVolumetricMultiScatter, MultiScatterQuery, VolumetricMultiScatterResponse,
+};
 pub use vorticity_confinement::{GpuVorticityConfinement, VorticityResult};
 pub use worley::{GpuWorley, WorleyQuery};
