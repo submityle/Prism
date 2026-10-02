@@ -281,6 +281,9 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/composite.wesl");
         embedded_asset!(app, "../shaders/oit.wesl");
         embedded_asset!(app, "../shaders/transparent.wesl");
+        embedded_asset!(app, "../shaders/world_restir_seed.wesl");
+        embedded_asset!(app, "../shaders/world_restir_fill.wesl");
+        embedded_asset!(app, "../shaders/world_restir_inject.wesl");
         register_shadow_depth_shader(app);
         register_vsm_caster_depth_shader(app);
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {

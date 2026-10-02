@@ -335,6 +335,13 @@ pub(crate) const WORLD_RESTIR_INJECT_WORKGROUP_SIZE: u32 = 64;
 )]
 pub(crate) const WORLD_RESTIR_INJECT_POINT_STRIDE: u64 = 32;
 
+/// Per-slot inject claim-guard stride in bytes: one `atomic<u32>` checksum
+/// guard per reservoir slot, matching the WESL `slot_state: array<atomic<u32>>`
+/// binding the inject pass claims cells in. The guard array is sized one entry
+/// per reservoir slot (`capacity` entries) and cleared to [`EMPTY_SLOT`](0)
+/// each frame before the inject dispatch.
+pub(crate) const WORLD_RESTIR_SLOT_STATE_STRIDE: u64 = 4;
+
 /// `GPU` twin of one visible shading point the injection pass claims a slot for
 /// (the per-frame visible-point list the inject bind group binds at
 /// `@binding(0)`).
@@ -591,6 +598,16 @@ mod tests {
     #[test]
     fn inject_workgroup_constant_matches_the_shader() {
         assert_eq!(WORLD_RESTIR_INJECT_WORKGROUP_SIZE, 64);
+    }
+
+    #[test]
+    fn slot_state_stride_is_one_u32_per_slot() {
+        // The inject claim-guard array binds one `atomic<u32>` per reservoir
+        // slot; the resident slot-state buffer sizes with this stride, so a
+        // drift from `size_of::<u32>()` would mis-size the guard array against
+        // the WESL `array<atomic<u32>>`.
+        assert_eq!(WORLD_RESTIR_SLOT_STATE_STRIDE, size_of::<u32>() as u64);
+        assert_eq!(WORLD_RESTIR_SLOT_STATE_STRIDE, 4);
     }
 
     #[test]

@@ -62,6 +62,13 @@ pub(crate) struct ViewWorldRestir {
     /// [`WORLD_RESTIR_RESERVOIR_STRIDE`] bytes; [`frame`](Self::frame) selects
     /// which is this frame's read source and which is the write target.
     reservoirs: [Buffer; 2],
+    /// Resident inject claim-guard array: one `atomic<u32>` per reservoir slot
+    /// (not ping-ponged -- the inject pass clears it to the empty sentinel each
+    /// frame, then open-address claims a slot per visible point). Sized in
+    /// lockstep with each reservoir buffer so slot `i` of the table is guarded
+    /// by entry `i` here. Bound at the inject group's `@binding(2)` once the
+    /// inject bind group lands (a follow-up slice).
+    slot_state: Buffer,
     /// Resident slot count this pair was allocated for (clamped to at least
     /// `1`); the dispatch extent and the only reallocation trigger.
     pub(crate) capacity: u32,
@@ -81,6 +88,15 @@ impl ViewWorldRestir {
     /// This frame's read-write reservoir table (the fill pass's output).
     pub(crate) fn dst_buffer(&self) -> &Buffer {
         &self.reservoirs[reservoir_dst_index(self.frame)]
+    }
+
+    /// The resident inject claim-guard array (one `atomic<u32>` per slot).
+    #[expect(
+        dead_code,
+        reason = "the inject bind group binds this at @binding(2) in a follow-up slice; nothing reads it yet"
+    )]
+    pub(crate) fn slot_state_buffer(&self) -> &Buffer {
+        &self.slot_state
     }
 
     /// Monotonic frame index seeding the fill shader's per-slot `RNG`.
@@ -140,8 +156,20 @@ pub(crate) fn prepare_world_restir_reservoirs(
             make("prism world-space ReSTIR reservoirs B"),
         ];
 
+        // Inject claim-guard array: one `atomic<u32>` per slot, same slot count
+        // as each reservoir buffer. STORAGE so the inject pass binds it atomic
+        // read-write; COPY_DST so the per-frame empty-sentinel clear can be
+        // scheduled before the inject dispatch (a follow-up slice).
+        let slot_state = device.create_buffer(&BufferDescriptor {
+            label: Some("prism world-space ReSTIR slot state"),
+            size: settings.slot_state_buffer_size(),
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         commands.entity(entity).insert(ViewWorldRestir {
             reservoirs,
+            slot_state,
             capacity,
             frame: 0,
         });

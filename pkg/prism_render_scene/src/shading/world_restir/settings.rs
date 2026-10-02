@@ -17,7 +17,7 @@
 use bevy_ecs::prelude::Resource;
 use prism_render_shading::gi::world_restir::spatial_hash::HashGridParams;
 
-use super::abi::WORLD_RESTIR_RESERVOIR_STRIDE;
+use super::abi::{WORLD_RESTIR_RESERVOIR_STRIDE, WORLD_RESTIR_SLOT_STATE_STRIDE};
 
 /// Default resident reservoir-table capacity: `2^17` open-addressed world-cell
 /// slots, matching the `SHARC`-style cache size the fill dispatch rounds up to
@@ -136,6 +136,17 @@ impl PrismWorldRestirSettings {
     pub(crate) fn reservoir_buffer_size(&self) -> u64 {
         u64::from(self.capacity.max(1)) * WORLD_RESTIR_RESERVOIR_STRIDE
     }
+
+    /// Byte size of the resident inject slot-state guard array: one
+    /// `atomic<u32>` claim guard per `max(capacity, 1)` reservoir slot, at the
+    /// frozen [`WORLD_RESTIR_SLOT_STATE_STRIDE`]. The `max` mirrors
+    /// [`reservoir_buffer_size`](Self::reservoir_buffer_size) so the guard array
+    /// and the table it indexes are always the same slot count and the buffer
+    /// is never zero-sized. The inject pass clears this to the empty sentinel
+    /// each frame, then open-address claims a slot per visible point.
+    pub(crate) fn slot_state_buffer_size(&self) -> u64 {
+        u64::from(self.capacity.max(1)) * WORLD_RESTIR_SLOT_STATE_STRIDE
+    }
 }
 
 #[cfg(test)]
@@ -228,5 +239,35 @@ mod tests {
         let settings = PrismWorldRestirSettings::default();
         assert_eq!(settings.candidate_count, DEFAULT_RESTIR_CANDIDATE_COUNT);
         assert!(settings.candidate_count >= 1);
+    }
+
+    #[test]
+    fn slot_state_buffer_size_is_one_u32_per_slot() {
+        let settings = PrismWorldRestirSettings {
+            capacity: 1024,
+            ..Default::default()
+        };
+        // One `atomic<u32>` guard per slot, same slot count as the table.
+        assert_eq!(
+            settings.slot_state_buffer_size(),
+            1024 * WORLD_RESTIR_SLOT_STATE_STRIDE
+        );
+        assert_eq!(
+            settings.slot_state_buffer_size() / WORLD_RESTIR_SLOT_STATE_STRIDE,
+            settings.reservoir_buffer_size() / WORLD_RESTIR_RESERVOIR_STRIDE,
+            "the guard array must have exactly one entry per reservoir slot",
+        );
+    }
+
+    #[test]
+    fn slot_state_buffer_size_floors_capacity_at_one() {
+        let settings = PrismWorldRestirSettings {
+            capacity: 0,
+            ..Default::default()
+        };
+        assert_eq!(
+            settings.slot_state_buffer_size(),
+            WORLD_RESTIR_SLOT_STATE_STRIDE
+        );
     }
 }
