@@ -12,10 +12,11 @@
 //!
 //! The three ETC2-only extensions (`T`, `H`, planar), which a differential block
 //! signals by letting a `base + delta` channel fall outside `0..=31`, are
-//! classified by [`etc2_rgb8_mode`] but not yet decoded: [`decode_etc2_rgb8`]
-//! returns [`Etc2Error::UnsupportedMode`] for them rather than silently
-//! mis-decoding (the same explicit-error discipline the BC7 decoder uses for
-//! its partitioned modes). They are tracked as follow-ups.
+//! classified by [`etc2_rgb8_mode`] and fully decoded by [`decode_etc2_rgb8`].
+//! Every mode's bit layout was pinned bit-exactly against an M2 Metal hardware
+//! decode (see the `prism_render_material_gpu` ETC2 parity test); the
+//! [`Etc2Error`] type is retained for the format family's fallible decoders
+//! (future `EAC` / punch-through-alpha variants).
 //!
 //! Pure integer decode, no AI/ML path; a GPU hardware decode reproduces every
 //! texel bit-exactly (ETC has no interpolation tolerance -- outputs are exact).
@@ -147,20 +148,23 @@ pub fn etc2_rgb8_mode(block: &[u8; 8]) -> Etc2Mode {
 
 /// Decode one 8-byte `ETC2_RGB8` block into sixteen opaque `RGBA8` texels.
 ///
-/// The two ETC1-compatible base modes (individual, differential) are decoded;
-/// the ETC2 `T`/`H`/planar extensions return [`Etc2Error::UnsupportedMode`]
-/// (see [`etc2_rgb8_mode`]) instead of a wrong decode.
+/// All five sub-formats are decoded: the two ETC1-compatible base modes
+/// (individual, differential) and the three ETC2 extensions (`T`, `H`, planar),
+/// each selected by [`etc2_rgb8_mode`]. Output is bit-exact against hardware.
 ///
 /// # Errors
-/// Returns [`Etc2Error::UnsupportedMode`] when the block selects a `T`, `H` or
-/// planar sub-format, which are not yet implemented.
+/// Currently infallible for `ETC2_RGB8` (every bit pattern is a valid block);
+/// the [`Result`] is kept for API symmetry with the format family's fallible
+/// decoders (`EAC` / punch-through alpha).
+#[allow(clippy::unnecessary_wraps)]
 pub fn decode_etc2_rgb8(block: &[u8; 8]) -> Result<[[u8; 4]; 16], Etc2Error> {
-    match etc2_rgb8_mode(block) {
-        Etc2Mode::Individual | Etc2Mode::Differential => {
-            Ok(decode_base(u64::from_be_bytes(*block)))
-        }
-        other => Err(Etc2Error::UnsupportedMode(other)),
-    }
+    let bits = u64::from_be_bytes(*block);
+    Ok(match etc2_rgb8_mode(block) {
+        Etc2Mode::Individual | Etc2Mode::Differential => decode_base(bits),
+        Etc2Mode::T => decode_t(bits),
+        Etc2Mode::H => decode_h(bits),
+        Etc2Mode::Planar => decode_planar(bits),
+    })
 }
 
 /// Decode an ETC1-compatible base block (individual or differential) assuming
@@ -217,6 +221,144 @@ fn decode_base(bits: u64) -> [[u8; 4]; 16] {
             clamp8(base[2] + m),
             255,
         ];
+    }
+    out
+}
+
+/// ETC2 `T`/`H` distance table (Khronos). The 3-bit distance selector indexes
+/// the per-channel `+/-` offset applied to the paint colours.
+const ETC2_DISTANCE: [i32; 8] = [3, 6, 11, 16, 23, 32, 41, 64];
+
+/// Replicate a 6-bit channel to 8 bits (planar `R`/`B` expansion).
+fn ext6(v: u32) -> i32 {
+    let v = i32::try_from(v & 0x3F).unwrap_or(0);
+    (v << 2) | (v >> 4)
+}
+
+/// Replicate a 7-bit channel to 8 bits (planar `G` expansion).
+fn ext7(v: u32) -> i32 {
+    let v = i32::try_from(v & 0x7F).unwrap_or(0);
+    (v << 1) | (v >> 6)
+}
+
+/// Select the 2-bit paint index for texel `(x, y)` from the 32 pixel-index
+/// bits (identical layout to the ETC1 base modes).
+fn pixel_index(bits: u64, x: u32, y: u32) -> usize {
+    let p = x * 4 + y;
+    let lsb = field(bits, p, p);
+    let msb = field(bits, p + 16, p + 16);
+    ((msb << 1) | lsb) as usize
+}
+
+/// Decode an ETC2 `T`-mode block: two `RGB444` paint anchors plus a distance.
+///
+/// Paint palette is `{C0, C1 + d, C1, C1 - d}`; each texel's 2-bit index
+/// selects an entry. Reached when the differential red channel overflows.
+fn decode_t(bits: u64) -> [[u8; 4]; 16] {
+    let r1 = (field(bits, 60, 59) << 2) | field(bits, 57, 56);
+    let g1 = field(bits, 55, 52);
+    let b1 = field(bits, 51, 48);
+    let r2 = field(bits, 47, 44);
+    let g2 = field(bits, 43, 40);
+    let b2 = field(bits, 39, 36);
+    let dist = ((field(bits, 35, 34) << 1) | field(bits, 32, 32)) as usize;
+    let d = ETC2_DISTANCE[dist & 7];
+
+    let c0 = [ext4(r1), ext4(g1), ext4(b1)];
+    let c1 = [ext4(r2), ext4(g2), ext4(b2)];
+    let paint = [
+        [clamp8(c0[0]), clamp8(c0[1]), clamp8(c0[2])],
+        [clamp8(c1[0] + d), clamp8(c1[1] + d), clamp8(c1[2] + d)],
+        [clamp8(c1[0]), clamp8(c1[1]), clamp8(c1[2])],
+        [clamp8(c1[0] - d), clamp8(c1[1] - d), clamp8(c1[2] - d)],
+    ];
+
+    let mut out = [[0u8; 4]; 16];
+    for p in 0..16u32 {
+        let x = p >> 2;
+        let y = p & 3;
+        let c = paint[pixel_index(bits, x, y)];
+        out[(y * 4 + x) as usize] = [c[0], c[1], c[2], 255];
+    }
+    out
+}
+
+/// Decode an ETC2 `H`-mode block: two `RGB444` paint anchors, each split by a
+/// distance into `+d`/`-d`. The distance's low bit is derived from the ordering
+/// of the two 12-bit packed colours. Reached when the green channel overflows.
+fn decode_h(bits: u64) -> [[u8; 4]; 16] {
+    let r1 = field(bits, 62, 59);
+    let g1 = (field(bits, 58, 56) << 1) | field(bits, 52, 52);
+    let b1 = (field(bits, 51, 51) << 3) | field(bits, 49, 47);
+    let r2 = field(bits, 46, 43);
+    let g2 = field(bits, 42, 39);
+    let b2 = field(bits, 38, 35);
+
+    let c0_444 = (r1 << 8) | (g1 << 4) | b1;
+    let c1_444 = (r2 << 8) | (g2 << 4) | b2;
+    // Distance index: bit34 and bit32 give the upper two bits (bit33 is the
+    // mode-selection diff flag and is skipped); the low bit is derived from the
+    // ordering of the two packed 12-bit colours. Confirmed bit-exactly against
+    // an M2 Metal hardware decode via a single-bit distance probe.
+    let mut dist = ((field(bits, 34, 34) << 2) | (field(bits, 32, 32) << 1)) as usize;
+    if c0_444 >= c1_444 {
+        dist |= 1;
+    }
+    let d = ETC2_DISTANCE[dist & 7];
+
+    let c0 = [ext4(r1), ext4(g1), ext4(b1)];
+    let c1 = [ext4(r2), ext4(g2), ext4(b2)];
+    let paint = [
+        [clamp8(c0[0] + d), clamp8(c0[1] + d), clamp8(c0[2] + d)],
+        [clamp8(c0[0] - d), clamp8(c0[1] - d), clamp8(c0[2] - d)],
+        [clamp8(c1[0] + d), clamp8(c1[1] + d), clamp8(c1[2] + d)],
+        [clamp8(c1[0] - d), clamp8(c1[1] - d), clamp8(c1[2] - d)],
+    ];
+
+    let mut out = [[0u8; 4]; 16];
+    for p in 0..16u32 {
+        let x = p >> 2;
+        let y = p & 3;
+        let c = paint[pixel_index(bits, x, y)];
+        out[(y * 4 + x) as usize] = [c[0], c[1], c[2], 255];
+    }
+    out
+}
+
+/// Decode an ETC2 planar block: three `RGB676` corner colours (origin `O`,
+/// horizontal `H`, vertical `V`) bilinearly interpolated across the 4x4 tile.
+/// Reached when the blue channel overflows; carries no per-texel indices.
+fn decode_planar(bits: u64) -> [[u8; 4]; 16] {
+    // RGB676 corner colours. Bit layout per Khronos ETC2 planar (raw block).
+    // Corner colours in RGB676. Bit positions confirmed bit-exactly against an
+    // M2 Metal hardware decode (single-bit GPU probe); several fields are
+    // scattered because the planar block reuses the differential-mode overflow
+    // bit slots. `R`/`B` expand 6->8 by replication (`ext6`), `G` 7->8 (`ext7`).
+    let ro = field(bits, 62, 57);
+    let go = (field(bits, 56, 56) << 6) | field(bits, 54, 49);
+    let bo = (field(bits, 48, 48) << 5) | (field(bits, 44, 43) << 3) | field(bits, 41, 39);
+    let rh = (field(bits, 38, 34) << 1) | field(bits, 32, 32);
+    let gh = field(bits, 31, 25);
+    let bh = field(bits, 24, 19);
+    let rv = field(bits, 18, 13);
+    let gv = field(bits, 12, 6);
+    let bv = field(bits, 5, 0);
+
+    let o = [ext6(ro), ext7(go), ext6(bo)];
+    let h = [ext6(rh), ext7(gh), ext6(bh)];
+    let v = [ext6(rv), ext7(gv), ext6(bv)];
+
+    let mut out = [[0u8; 4]; 16];
+    for yy in 0..4i32 {
+        for xx in 0..4i32 {
+            let mut px = [0u8; 4];
+            for c in 0..3 {
+                let val = (xx * (h[c] - o[c]) + yy * (v[c] - o[c]) + 4 * o[c] + 2) >> 2;
+                px[c] = clamp8(val);
+            }
+            px[3] = 255;
+            out[(yy * 4 + xx) as usize] = px;
+        }
     }
     out
 }
@@ -286,33 +428,50 @@ mod tests {
     }
 
     #[test]
-    fn red_overflow_selects_t_mode_and_is_rejected() {
+    fn red_overflow_selects_and_decodes_t_mode() {
         // diff=1, R=31, dR=+1 -> 32 > 31 overflows red -> T mode.
-        // byte0 = 11111 001 = 0xF9; diff bit set in byte3 (0x02).
+        // byte0 = 11111 001 = 0xF9; diff bit set in byte3 (0x02). The extended
+        // modes now decode rather than returning an error; exact-texel parity
+        // against the GPU hardware decoder lives in the `prism_render_material_gpu`
+        // ETC2 parity test.
+        // T colours are RGB444: C0 = R1=0b1101=13 -> ext4 = 221 red, C1 = 0.
+        // dist index 0 -> d = 3; all texel indices 0 select paint[0] = C0.
         let block = [0xF9, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00];
         assert_eq!(etc2_rgb8_mode(&block), Etc2Mode::T);
-        assert_eq!(
-            decode_etc2_rgb8(&block),
-            Err(Etc2Error::UnsupportedMode(Etc2Mode::T))
-        );
+        let out = decode_etc2_rgb8(&block).unwrap();
+        for texel in &out {
+            assert_eq!(*texel, [221, 0, 0, 255]);
+        }
     }
 
     #[test]
     fn green_overflow_selects_h_mode() {
         // R in range (0,d0), G=31 dG=+1 overflow, B in range -> H mode.
         // byte0: R=00000 dR=000 -> 0x00; byte1: G=11111 dG=001 -> 0xF9.
+        // C0 = RGB444(0,1,10) -> (0,17,170); C1 = 0. c0 >= c1 so the distance
+        // LSB is set -> index 1 -> d = 6. All texel indices 0 select paint[0] =
+        // C0 + d = (6, 23, 176).
         let block = [0x00, 0xF9, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00];
         assert_eq!(etc2_rgb8_mode(&block), Etc2Mode::H);
-        assert!(decode_etc2_rgb8(&block).is_err());
+        let out = decode_etc2_rgb8(&block).unwrap();
+        for texel in &out {
+            assert_eq!(*texel, [6, 23, 176, 255]);
+        }
     }
 
     #[test]
     fn blue_overflow_selects_planar_mode() {
         // R,G in range, B=31 dB=+1 overflow -> planar.
         // byte2 holds B(47..43) and dB(42..40): 11111 001 = 0xF9.
+        // Only the origin blue is non-zero (O = (0,0,105); H = V = 0), so blue
+        // ramps down bilinearly from the top-left corner while red/green stay 0.
         let block = [0x00, 0x00, 0xF9, 0x02, 0x00, 0x00, 0x00, 0x00];
         assert_eq!(etc2_rgb8_mode(&block), Etc2Mode::Planar);
-        assert!(decode_etc2_rgb8(&block).is_err());
+        let out = decode_etc2_rgb8(&block).unwrap();
+        assert_eq!(out[0], [0, 0, 105, 255]); // (x=0, y=0)
+        assert_eq!(out[3], [0, 0, 26, 255]); // (x=3, y=0)
+        assert_eq!(out[12], [0, 0, 26, 255]); // (x=0, y=3)
+        assert_eq!(out[15], [0, 0, 0, 255]); // (x=3, y=3) clamps to 0
     }
 
     #[test]
