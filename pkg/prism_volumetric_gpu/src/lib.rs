@@ -150,7 +150,12 @@ pub mod godray;
 pub mod gpu_compact;
 pub mod gpu_dispatch;
 pub mod gpu_layout;
+pub mod gpu_prefix_scan;
 pub mod gpu_radix_histogram;
+pub mod gpu_reduce;
+pub mod gpu_scan_segmented;
+pub mod gpu_scan_warp;
+pub mod gpu_stream_append;
 pub mod gravity_wave;
 pub mod gray_code;
 pub mod half_float_f16;
@@ -169,6 +174,7 @@ pub mod inertia_tensor;
 pub mod integrate_segment;
 pub mod interval_overlap_1d;
 pub mod kawase_blur;
+pub mod kawase_dual_blur;
 pub mod lens_distortion;
 pub mod liang_barsky_clip;
 pub mod light_shaft;
@@ -440,7 +446,20 @@ pub use godray::{GodRayWeightQuery, GpuGodRayWeight};
 pub use gpu_compact::{GpuCompact, GpuCompactQuery, GpuCompactResult};
 pub use gpu_dispatch::{GpuDispatch, GpuDispatchQuery, GpuDispatchResult};
 pub use gpu_layout::{GpuLayout, GpuLayoutQuery, GpuLayoutResult};
+pub use gpu_prefix_scan::{GpuPrefixScan, GpuPrefixScanQuery, GpuScanResult};
 pub use gpu_radix_histogram::{GpuRadixHistogram, RadixHistogramQuery};
+pub use gpu_reduce::{GpuReduce, GpuReduceInput, GpuReduceOp, GpuReduceQuery, GpuReduceResult};
+pub use gpu_scan_segmented::{
+    GpuSegmentedScan, GpuSegmentedScanConfig, GpuSegmentedScanQuery, GpuSegmentedScanResult,
+};
+pub use gpu_scan_warp::{
+    GpuScanWarp, GpuWarpAggregateQuery, GpuWarpAppend, GpuWarpConfig, GpuWarpScanQuery,
+    GpuWarpScanResult, DEFAULT_LANE_COUNT, WARP_LANE_LIMIT,
+};
+pub use gpu_stream_append::{
+    GpuStreamAppend, GpuStreamAppendConfig, GpuStreamAppendCounter, GpuStreamAppendQuery,
+    GpuStreamAppendResult, COUNTER_WORDS,
+};
 pub use gravity_wave::{GpuGravityWave, GravityWaveQuery};
 pub use gray_code::GpuGrayCode;
 pub use half_float_f16::{GpuHalfFloatF16, HalfFloatQuery, HalfFloatResult};
@@ -463,6 +482,7 @@ pub use inertia_tensor::{BodyOpQuery, BodyOpResult, GpuInertiaTensor};
 pub use integrate_segment::{GpuIntegrateSegment, IntegrateSegmentQuery};
 pub use interval_overlap_1d::{GpuIntervalOverlap1d, IntervalOverlapQuery, IntervalOverlapResult};
 pub use kawase_blur::{GpuKawaseBlur, KawaseBlurQuery};
+pub use kawase_dual_blur::{GpuKawaseDualBlur, GpuKawaseDualBlurQuery, GpuKawaseDualBlurResult};
 pub use lens_distortion::GpuLensDistortion;
 pub use liang_barsky_clip::{GpuLiangBarskyClip, LiangBarskyQuery, LiangBarskyResult, CLIP_EPS};
 pub use light_shaft::{GpuLightShaft, GpuLightShaftParams, LightShaftResult};
