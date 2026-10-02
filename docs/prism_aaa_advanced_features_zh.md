@@ -497,7 +497,7 @@
 | 不透明微贴图 OMM | `ray_scene/` + `material/` | ⬜ 待建 | P2 | RT 遍历、alpha 掩码 |
 | 虚拟几何蒙皮/植被 | `prism_virtual_geometry_gpu` + `geometry/skinning` | 🟡 静态虚拟几何成规模，蒙皮簇待深化 | P1 | 虚拟几何、蒙皮 |
 | 解耦/物体空间着色 | `texture_space_shading/`（待建） | ⬜ 待建 | P2 | 帧图、shading atlas |
-| 镜面/法线抗锯齿 | `material/` `gi/env_brdf/` | 🟡 env_brdf 在，法线方差链待连 | P1 | 材质闭包 |
+| 镜面/法线抗锯齿 | `material/` `gi/env_brdf/` `gi/specular_aa/` | 🟡 env_brdf 在；几何镜面 AA（Tokuyoshi–Kaplanyan 2019）CPU golden + SSR repack 已接；主通道 resolve（需常驻法线 G-buffer）与 Toksvig 法线贴图 AA 待连 | P1 | 材质闭包 |
 | 运行期虚拟纹理 RVT | `virtual_texture/`（待建） | ⬜ 待建 | P2 | 贴花、材质合成 |
 | 输入延迟 + 动态分辨率 | `frame_graph/` `temporal_upscale/` | 🟡 帧图/时序在，延迟流水线+DRS 待连 | P1 | 帧图、时序上采样 |
 
