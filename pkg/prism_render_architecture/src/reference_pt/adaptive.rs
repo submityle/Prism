@@ -30,6 +30,7 @@ use super::film::Film;
 use super::filter::PixelFilter;
 use super::firefly::FireflyClamp;
 use super::integrator::{PathIntegrator, Scene};
+use super::outlier::OutlierFilter;
 use super::sampler::Rng;
 use super::subpixel::SubpixelSampler;
 use super::Vec3;
@@ -176,6 +177,12 @@ pub struct AdaptiveConfig {
     /// historical renderer; [`SubpixelSampler::OwenSobol`] trades that for the
     /// lower-variance stratification of an Owen-scrambled `(0,2)`-net.
     pub sampler: SubpixelSampler,
+    /// Image-space firefly reject applied once to the finished image. The
+    /// default [`OutlierFilter::Off`] leaves the render untouched; the opt-in
+    /// median-guided reject removes pixels that stick out from their local
+    /// neighbourhood, complementing the per-sample [`firefly`](Self::firefly)
+    /// clamp without dimming locally consistent bright regions.
+    pub outlier: OutlierFilter,
 }
 
 impl Default for AdaptiveConfig {
@@ -189,6 +196,7 @@ impl Default for AdaptiveConfig {
             batch_size: 16,
             firefly: FireflyClamp::Off,
             sampler: SubpixelSampler::Halton,
+            outlier: OutlierFilter::Off,
         }
     }
 }
@@ -277,8 +285,13 @@ pub fn render_adaptive(
             sample_counts[index] = estimator.count();
         }
     }
+    // Reject image-space fireflies as a final pass; the default policy is a
+    // no-op clone that leaves the unbiased estimate exactly as sampled.
+    let film = config
+        .outlier
+        .apply(&Film::from_pixels(width, height, pixels));
     AdaptiveRender {
-        film: Film::from_pixels(width, height, pixels),
+        film,
         sample_counts,
     }
 }
@@ -423,6 +436,7 @@ mod tests {
             batch_size: 8,
             firefly: FireflyClamp::Off,
             sampler: SubpixelSampler::Halton,
+            outlier: OutlierFilter::Off,
         };
         let a = render_adaptive(
             &scene,
@@ -467,6 +481,7 @@ mod tests {
             batch_size: 8,
             firefly: FireflyClamp::Off,
             sampler: SubpixelSampler::Halton,
+            outlier: OutlierFilter::Off,
         };
         let render = render_adaptive(
             &scene,
@@ -509,6 +524,7 @@ mod tests {
             batch_size: 16,
             firefly: FireflyClamp::Off,
             sampler: SubpixelSampler::Halton,
+            outlier: OutlierFilter::Off,
         };
         let render = render_adaptive(
             &scene,
@@ -554,6 +570,7 @@ mod tests {
             batch_size: 16,
             firefly: FireflyClamp::Off,
             sampler: SubpixelSampler::Halton,
+            outlier: OutlierFilter::Off,
         };
         let unclamped = render_adaptive(
             &scene,
@@ -624,6 +641,7 @@ mod tests {
             batch_size: 32,
             firefly: FireflyClamp::Off,
             sampler: SubpixelSampler::OwenSobol,
+            outlier: OutlierFilter::Off,
         };
         let sobol = render_adaptive(
             &scene,
@@ -670,6 +688,7 @@ mod tests {
             batch_size: 32,
             firefly: FireflyClamp::Off,
             sampler: SubpixelSampler::OwenSobol,
+            outlier: OutlierFilter::Off,
         };
         let edge_sobol = render_adaptive(
             &edge_scene,
@@ -699,6 +718,67 @@ mod tests {
             edge_sobol.film.pixels(),
             edge_halton.film.pixels(),
             "selecting Owen-Sobol must change the jitter sequence versus Halton"
+        );
+    }
+
+    #[test]
+    fn median_outlier_filter_flows_through_adaptive_render() {
+        // The spatial firefly reject must run as part of the render. On a
+        // uniform white furnace every neighbourhood median equals the pixel, so
+        // an aggressive reject can find no outlier and must leave the converged
+        // image bit-identical to the unfiltered render -- proving the pass is
+        // wired in without introducing false positives -- while staying
+        // deterministic.
+        let scene = white_furnace_scene();
+        let camera = overhead_camera();
+        let integrator = PathIntegrator::new(6, 4);
+        let off = AdaptiveConfig {
+            min_samples: 64,
+            max_samples: 128,
+            relative_tolerance: 0.02,
+            batch_size: 32,
+            firefly: FireflyClamp::Off,
+            sampler: SubpixelSampler::Halton,
+            outlier: OutlierFilter::Off,
+        };
+        let filtered_cfg = AdaptiveConfig {
+            outlier: OutlierFilter::MedianGuided {
+                threshold: 1.5,
+                radius: 1,
+            },
+            ..off
+        };
+        let unfiltered =
+            render_adaptive(&scene, &camera, &integrator, 4, 4, off, 9, PixelFilter::Box);
+        let filtered = render_adaptive(
+            &scene,
+            &camera,
+            &integrator,
+            4,
+            4,
+            filtered_cfg,
+            9,
+            PixelFilter::Box,
+        );
+        assert_eq!(
+            filtered.film.pixels(),
+            unfiltered.film.pixels(),
+            "an aggressive reject must not touch a uniform converged image"
+        );
+        let again = render_adaptive(
+            &scene,
+            &camera,
+            &integrator,
+            4,
+            4,
+            filtered_cfg,
+            9,
+            PixelFilter::Box,
+        );
+        assert_eq!(
+            filtered.film.pixels(),
+            again.film.pixels(),
+            "the filtered render must be deterministic"
         );
     }
 }

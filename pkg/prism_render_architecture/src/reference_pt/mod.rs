@@ -102,6 +102,7 @@ pub mod microfacet_aniso;
 pub mod mis;
 pub mod octahedral;
 pub mod oren_nayar;
+pub mod outlier;
 pub mod rough_dielectric;
 pub mod rough_dielectric_aniso;
 pub mod rough_dielectric_aniso_ms;
