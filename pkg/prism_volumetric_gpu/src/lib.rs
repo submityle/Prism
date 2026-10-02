@@ -123,7 +123,9 @@ pub mod dual_lobe_phase;
 pub mod dual_quaternion;
 pub mod ear_clip_triangulate;
 pub mod edge_detect;
+pub mod emitter_pass_buffers;
 pub mod epa_penetration_3d;
+pub mod event_pass_buffers;
 pub mod exposure_adapt;
 pub mod fibonacci_lfsr;
 pub mod film_grain;
@@ -184,6 +186,7 @@ pub mod nd_strides_index;
 pub mod noise_fbm;
 pub mod normal_reconstruct;
 pub mod obb_obb_sat_3d;
+pub mod occlusion;
 pub mod octave;
 pub mod oren_nayar;
 pub mod orientation_basis;
@@ -248,7 +251,9 @@ pub mod single_scatter_reference;
 pub mod sky_state_transition;
 pub mod soft_particle;
 pub mod sort_cull;
+pub mod sort_pass_buffers;
 pub mod spatial_hash;
+pub mod spawn_pass_buffers;
 pub mod spectral_to_rgb;
 pub mod specular_aa;
 pub mod sphere_aabb;
@@ -385,7 +390,13 @@ pub use dual_lobe_phase::{DualLobePhaseQuery, GpuDualLobePhase};
 pub use dual_quaternion::{DualQuatTransformQuery, GpuDualQuaternion};
 pub use ear_clip_triangulate::{EarClipAnswer, EarClipQuery, GpuEarClipTriangulate};
 pub use edge_detect::{EdgeDetectOutput, EdgeDetectQuery, EdgeFrame, EdgeResponse, GpuEdgeDetect};
+pub use emitter_pass_buffers::{
+    GpuEmitterPassBufferQuery, GpuEmitterPassBufferResult, GpuEmitterPassBuffers,
+};
 pub use epa_penetration_3d::{EpaPenetration3dQuery, GpuEpa, GpuEpaPenetration3d};
+pub use event_pass_buffers::{
+    GpuEventPassBufferQuery, GpuEventPassBufferResult, GpuEventPassBuffers,
+};
 pub use exposure_adapt::{ExposureAdaptQuery, ExposureAdaptResult, GpuExposureAdapt};
 pub use fibonacci_lfsr::GpuFibonacciLfsr;
 pub use film_grain::{FilmGrainPixel, FilmGrainQuery, GpuFilmGrain};
@@ -452,6 +463,7 @@ pub use nd_strides_index::{GpuNdStridesIndex, NdStridesQuery, MAX_RANK};
 pub use noise_fbm::{GpuNoiseFbm, NoiseFbmQuery, NoiseFbmResult};
 pub use normal_reconstruct::{GpuNormalReconstruct, NormalQuery, NormalResult};
 pub use obb_obb_sat_3d::{GpuObbSat3d, ObbSat3dQuery, ObbSat3dResult};
+pub use occlusion::{GpuOcclusion, GpuOcclusionQuery, GpuOcclusionResult};
 pub use octave::{GpuOctaveScatter, OctaveQuery, OctaveResult};
 pub use oren_nayar::{GpuOrenNayar, OrenNayarQuery, OrenNayarResult};
 pub use orientation_basis::{GpuOrientationBasis, OrientationQuery};
@@ -531,7 +543,11 @@ pub use single_scatter_reference::{GpuSingleScatterReference, SingleScatterRefer
 pub use sky_state_transition::{GpuSkyStateTransition, SkyStateTransition};
 pub use soft_particle::{GpuSoftParticle, LinearizeQuery, SoftParticleQuery, SoftParticleSample};
 pub use sort_cull::{GpuSortCull, GpuSortCullQuery, GpuSortCullResult};
+pub use sort_pass_buffers::{GpuSortPassBufferQuery, GpuSortPassBufferResult, GpuSortPassBuffers};
 pub use spatial_hash::GpuSpatialHash;
+pub use spawn_pass_buffers::{
+    GpuSpawnPassBuffers, GpuSpawnPassBuffersQuery, GpuSpawnPassBuffersResult,
+};
 pub use spectral_to_rgb::{GpuSpectralToRgb, SpectralRgb};
 pub use specular_aa::{
     GpuSpecularAa, SpecularAaBatchQuery, SpecularAaScalarQuery, SpecularAaScalarSample,
