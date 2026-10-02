@@ -20,6 +20,7 @@ mod height;
 mod mipmap;
 mod reconstruct;
 mod strength;
+mod surface_gradient;
 
 pub use blend::{blend_linear, blend_rnm, blend_udn, blend_whiteout};
 pub use height::{height_to_normal, HeightGradient};
@@ -29,3 +30,6 @@ pub use mipmap::{
 };
 pub use reconstruct::{decode_ag, decode_rg, reconstruct_z, unorm_to_snorm};
 pub use strength::{normal_to_slope, scale_strength, slope_to_normal};
+pub use surface_gradient::{
+    blend_surface_gradient, blend_surface_gradient_pair, resolve_surface_gradient, NormalLayer,
+};

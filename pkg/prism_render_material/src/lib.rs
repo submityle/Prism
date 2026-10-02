@@ -39,10 +39,11 @@ pub use ir::{
     MAX_CLOSURE_SLAB_DEPTH,
 };
 pub use normal_map::{
-    average_unit_normals, blend_linear, blend_rnm, blend_udn, blend_whiteout, decode_ag, decode_rg,
-    height_to_normal, normal_to_slope, power_from_roughness, reconstruct_z,
-    reduce_normal_roughness_2x, roughness_from_power, scale_strength, slope_to_normal,
-    toksvig_factor, toksvig_roughness, unorm_to_snorm, HeightGradient,
+    average_unit_normals, blend_linear, blend_rnm, blend_surface_gradient,
+    blend_surface_gradient_pair, blend_udn, blend_whiteout, decode_ag, decode_rg, height_to_normal,
+    normal_to_slope, power_from_roughness, reconstruct_z, reduce_normal_roughness_2x,
+    resolve_surface_gradient, roughness_from_power, scale_strength, slope_to_normal,
+    toksvig_factor, toksvig_roughness, unorm_to_snorm, HeightGradient, NormalLayer,
 };
 pub use record::{
     fallback_material_header, fallback_material_record, inactive_material_header,
