@@ -232,13 +232,6 @@ impl D6DriveSet {
     }
 
     /// Packs the drive set into its `GPU` storage-buffer representation.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "consumed by the D6 drive GPU twin landing in a later slice; exercised now by the round-trip tests"
-        )
-    )]
     #[must_use]
     pub(crate) fn to_gpu(self) -> GpuD6DriveSet {
         GpuD6DriveSet {

@@ -59,8 +59,8 @@ pub mod narrowphase;
 pub mod radix;
 pub mod rigid;
 pub mod scan;
-pub mod xpbd;
 pub mod vbd;
+pub mod xpbd;
 
 pub use broadphase::{cpu_broadphase, BroadphaseConfig, BroadphaseError, CandidatePair, Particle};
 pub use bvh::{
@@ -74,12 +74,14 @@ pub use cloth::{
     colour_strain_limit, cpu_cloth_aero, cpu_cloth_backstops, cpu_cloth_bending,
     cpu_cloth_body_collision, cpu_cloth_ccd, cpu_cloth_coupling, cpu_cloth_long_range,
     cpu_cloth_plasticity, cpu_cloth_pressure, cpu_cloth_self_ccd, cpu_cloth_self_collision_jacobi,
+    cpu_cloth_self_collision_point,
     cpu_cloth_strain_limit, cpu_cloth_tearing, pack_backstops, pack_body_colliders,
     BendingColoring, ClothAeroParams, ClothAeroPrep, ClothAeroTriangle, ClothBendingConstraint,
     ClothLongRangeConstraint, ClothPlasticEdge, ClothPrep, ClothSelfCollisionScope,
     ClothStrainLimitConstraint, ClothTearEdge, GpuBackstop, GpuBodyCollider, GpuClothAero,
     GpuClothBending, GpuClothBodyCollision, GpuClothCcd, GpuClothCoupling, GpuClothLongRange,
     GpuClothPlasticity, GpuClothPressure, GpuClothSelfCcd, GpuClothSelfCollision,
+    GpuClothSelfCollisionPoint,
     GpuClothStrainLimit, GpuClothTearing, LongRangeColoring, StrainLimitColoring,
     VertexTriangleAdjacency,
 };
@@ -133,24 +135,24 @@ pub use rigid::{
     ContactSolverConfig, CylindricalDriveJoint, CylindricalJoint, CylindricalLimitJoint, D6Drive,
     D6DriveSet, D6Joint, D6Motion, DistanceJoint, EllipticalConeTwistJoint, FixedJoint, GearJoint,
     GpuAngularSlerpDriveJointSolver, GpuCylindricalDriveJointSolver, GpuCylindricalJointSolver,
-    GpuCylindricalLimitJointSolver, GpuD6JointSolver, GpuDistanceJointSolver,
-    GpuEllipticalConeTwistJointSolver, GpuFixedJointSolver, GpuGearJointSolver,
-    GpuHingeLimitJointSolver, GpuPrismaticDriveJointSolver, GpuPrismaticJointSolver,
-    GpuPrismaticLimitJointSolver, GpuRackPinionJointSolver, GpuRevoluteDriveJointSolver,
-    GpuRevoluteJointSolver, GpuRevoluteMotorJointSolver, GpuRevoluteServoJointSolver,
-    GpuRigidContactSolver, GpuRigidIntegrator, GpuRigidTgsContactSolver, GpuSphericalJointSolver,
-    GpuSwingTwistJointSolver, GpuUniversalJointSolver, GyroscopicConfig, GyroscopicMode,
-    HingeLimitJoint, IntegratorConfig, JointColouring, JointSolverConfig, PrismaticDriveJoint,
-    PrismaticJoint, PrismaticLimitJoint, RackPinionJoint, RevoluteDriveJoint, RevoluteJoint,
-    RevoluteMotorJoint, RevoluteServoJoint, RigidBodyState, RigidContact, RigidContactColouring,
-    RigidError, SphericalJoint, SwingTwistJoint, TgsContactConfig, UniversalJoint,
-    MAX_JOINT_BATCHES,
+    GpuCylindricalLimitJointSolver, GpuD6DriveJointSolver, GpuD6JointSolver,
+    GpuDistanceJointSolver, GpuEllipticalConeTwistJointSolver, GpuFixedJointSolver,
+    GpuGearJointSolver, GpuHingeLimitJointSolver, GpuPrismaticDriveJointSolver,
+    GpuPrismaticJointSolver, GpuPrismaticLimitJointSolver, GpuRackPinionJointSolver,
+    GpuRevoluteDriveJointSolver, GpuRevoluteJointSolver, GpuRevoluteMotorJointSolver,
+    GpuRevoluteServoJointSolver, GpuRigidContactSolver, GpuRigidIntegrator,
+    GpuRigidTgsContactSolver, GpuSphericalJointSolver, GpuSwingTwistJointSolver,
+    GpuUniversalJointSolver, GyroscopicConfig, GyroscopicMode, HingeLimitJoint, IntegratorConfig,
+    JointColouring, JointSolverConfig, PrismaticDriveJoint, PrismaticJoint, PrismaticLimitJoint,
+    RackPinionJoint, RevoluteDriveJoint, RevoluteJoint, RevoluteMotorJoint, RevoluteServoJoint,
+    RigidBodyState, RigidContact, RigidContactColouring, RigidError, SphericalJoint,
+    SwingTwistJoint, TgsContactConfig, UniversalJoint, MAX_JOINT_BATCHES,
 };
 pub use scan::{cpu_compact, cpu_exclusive_scan, GpuScan};
+pub use vbd::{build_vbd_prep, cpu_vbd, GpuSpring, GpuVbd, VbdPrep};
 pub use xpbd::{
     cpu_solve, cpu_solve_warm, tgs_solve, Colouring, DistanceCache, DistanceConstraint,
     DistanceKey, GpuIslandedTgsSolver, GpuIslandedXpbdSolver, GpuTgsSolver, GpuXpbdSolver,
     GpuXpbdWarmSolver, IslandStep, IslandedSolver, IslandedTgsSolver, ParticleState, SoftParams,
     TgsConfig, XpbdConfig, XpbdError,
 };
-pub use vbd::{build_vbd_prep, cpu_vbd, GpuSpring, GpuVbd, VbdPrep};
