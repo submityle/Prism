@@ -79,7 +79,7 @@ pub(super) fn capsule_aabb(cap: &Capsule) -> Aabb {
 /// consumes, each group sorted ascending by triangle index so the reduction's
 /// strict-deeper rule breaks ties toward the smallest index. Returns the pairs
 /// and the per-capsule group lengths.
-fn build_pairs(candidates: &[Vec<u32>]) -> (Vec<CapsuleTrianglePair>, Vec<usize>) {
+pub(super) fn build_pairs(candidates: &[Vec<u32>]) -> (Vec<CapsuleTrianglePair>, Vec<usize>) {
     let mut pairs: Vec<CapsuleTrianglePair> = Vec::new();
     let mut group_len: Vec<usize> = Vec::with_capacity(candidates.len());
     for (capsule_index, hits) in candidates.iter().enumerate() {
