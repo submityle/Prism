@@ -51,6 +51,8 @@ members = [
   "pkg/prism_audio_output",
   # Prism next-generation audio engine interactive music system (segments/playlists/quantized transitions/stingers/vertical layering/clip graph).
   "pkg/prism_audio_music",
+  # Prism next-generation audio engine decoupled resampling + time/pitch scaling primitives (graded resamplers / WSOLA / phase vocoder).
+  "pkg/prism_audio_resample",
   # Prism next-generation audio engine Bevy ECS front-end (emitter/listener components -> prism_audio_rt command ring; telemetry resource).
   "pkg/prism_audio_bevy",
   # Prism Loom: next-generation declarative UI/scene notation.
