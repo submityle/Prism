@@ -21,8 +21,10 @@
 mod bise;
 mod block_reader;
 mod void_extent;
+mod weights;
 
 pub use void_extent::{decode_astc_void_extent_hdr, decode_astc_void_extent_ldr};
+pub use weights::decode_astc_4x4_weights;
 
 /// Errors returned by the ASTC decoders.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
