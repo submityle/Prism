@@ -22,6 +22,9 @@
 //! at magnification. The smoothing [`trilinear_bspline`] /
 //! [`filter_resolved_bspline`] pair mirrors them with the non-negative cubic
 //! B-spline, a zero-overshoot mode for height/terrain/SDF data textures.
+//! The parametric [`trilinear_mitchell`] / [`filter_resolved_mitchell`] pair
+//! generalises both: `(B, C)` sweeps continuously between the Catmull-Rom and
+//! B-spline modes, with the balanced `1/3, 1/3` the default high-quality pick.
 //! (no bilinear diamond seams under magnification) while keeping the same
 //! resolve -> fetch -> filter contract and the exact-linear-ramp guarantee.
 //!
@@ -254,6 +257,79 @@ pub fn filter_resolved_bspline<S: TexelSource>(
         acc[1] += c[1] * weight;
         acc[2] += c[2] * weight;
         acc[3] += c[3] * weight;
+    }
+    acc
+}
+
+/// Mitchell-Netravali `(B, C)` trilinear sample of `src` at continuous `lod`.
+///
+/// The general parametric cubic analogue of [`trilinear_bicubic`] /
+/// [`trilinear_bspline`]: evaluates the two-parameter Mitchell-Netravali 4x4
+/// fetch ([`cubic_mitchell`]) at the two mips bracketing the continuous LOD and
+/// blends them by the fractional level. `(B, C)` tunes the sharpness/ringing
+/// trade-off continuously: `(0, 1/2)` degenerates to the Catmull-Rom
+/// [`trilinear_bicubic`] (interpolating, maximal sharpness/ringing) and
+/// `(1, 0)` to the B-spline [`trilinear_bspline`] (smoothing, zero overshoot),
+/// while the recommended balanced [`MITCHELL_B`] = [`MITCHELL_C`] = `1/3`
+/// minimises visible postaliasing. This is the general-purpose high-quality
+/// magnification sampler mode; it reproduces linear ramps exactly within and
+/// across levels.
+///
+/// For `C > 0` the kernel has small negative lobes, so (like any sharpening
+/// cubic) the result is intentionally **not** clamped to the input range, to
+/// stay bit-close to a GPU twin.
+#[must_use]
+pub fn trilinear_mitchell<S: TexelSource>(
+    src: &S,
+    uv: [f32; 2],
+    lod: f32,
+    b: f32,
+    c: f32,
+    wrap_u: WrapMode,
+    wrap_v: WrapMode,
+    border_color: [f32; 4],
+) -> [f32; 4] {
+    let (w, h) = src.dimensions();
+    let tri = trilinear_mip(lod, max_mip_of(w, h));
+    let fine = cubic_mitchell(src, tri.fine, uv, b, c, wrap_u, wrap_v, border_color);
+    if tri.coarse == tri.fine || tri.frac == 0.0 {
+        return fine;
+    }
+    let coarse = cubic_mitchell(src, tri.coarse, uv, b, c, wrap_u, wrap_v, border_color);
+    lerp4(fine, coarse, tri.frac)
+}
+
+/// Mitchell-Netravali analogue of [`filter_resolved`]: anisotropic average of
+/// [`trilinear_mitchell`] taps.
+///
+/// Each anisotropic tap is evaluated with the parametric `(B, C)` cubic
+/// trilinear fetch, giving the tunable high-quality sampler mode the full
+/// resolve -> fetch -> filter pipeline (anisotropy plus parametric cubic
+/// magnification in one pass). The isotropic (single-tap) case degenerates to a
+/// plain [`trilinear_mitchell`] fetch; `border_color` is returned unchanged
+/// when [`SampleResolved::border`] is set.
+#[must_use]
+pub fn filter_resolved_mitchell<S: TexelSource>(
+    src: &S,
+    resolved: &SampleResolved,
+    b: f32,
+    c: f32,
+    wrap_u: WrapMode,
+    wrap_v: WrapMode,
+    border_color: [f32; 4],
+) -> [f32; 4] {
+    if resolved.border {
+        return border_color;
+    }
+    let lod = resolved.taps.lod();
+    let weight = resolved.taps.weight();
+    let mut acc = [0.0_f32; 4];
+    for &uv in resolved.taps.uvs() {
+        let col = trilinear_mitchell(src, uv, lod, b, c, wrap_u, wrap_v, border_color);
+        acc[0] += col[0] * weight;
+        acc[1] += col[1] * weight;
+        acc[2] += col[2] * weight;
+        acc[3] += col[3] * weight;
     }
     acc
 }
@@ -642,6 +718,161 @@ mod tests {
         let c = filter_resolved_bspline(
             &ramp(),
             &r,
+            WrapMode::ClampToBorder,
+            WrapMode::ClampToBorder,
+            border,
+        );
+        assert_eq!(c, border);
+    }
+
+    #[test]
+    fn trilinear_mitchell_integer_lod_matches_single_mip() {
+        let src = PlaneAll { bx: 0.3, by: -0.2 };
+        let uv = [0.3718, 0.6421];
+        let got = trilinear_mitchell(
+            &src,
+            uv,
+            2.0,
+            MITCHELL_B,
+            MITCHELL_C,
+            WrapMode::Repeat,
+            WrapMode::Repeat,
+            [0.0; 4],
+        );
+        let want = cubic_mitchell(
+            &src,
+            2,
+            uv,
+            MITCHELL_B,
+            MITCHELL_C,
+            WrapMode::Repeat,
+            WrapMode::Repeat,
+            [0.0; 4],
+        );
+        assert!((got[0] - want[0]).abs() < 1.0e-6, "{got:?} vs {want:?}");
+    }
+
+    #[test]
+    fn trilinear_mitchell_constant_per_mip_matches_trilinear() {
+        for &lod in &[0.0_f32, 2.25, 3.75, 7.0] {
+            let m = trilinear_mitchell(
+                &ramp(),
+                [0.5, 0.5],
+                lod,
+                MITCHELL_B,
+                MITCHELL_C,
+                WrapMode::Repeat,
+                WrapMode::Repeat,
+                [0.0; 4],
+            );
+            let t = trilinear(
+                &ramp(),
+                [0.5, 0.5],
+                lod,
+                WrapMode::Repeat,
+                WrapMode::Repeat,
+                [0.0; 4],
+            );
+            assert!((m[0] - t[0]).abs() < 1.0e-5, "lod {lod}: {m:?} vs {t:?}");
+        }
+    }
+
+    #[test]
+    fn trilinear_mitchell_catmull_rom_corner_matches_bicubic() {
+        // (B, C) = (0, 1/2) is Catmull-Rom, so the whole sampler mode must agree
+        // with the dedicated bicubic trilinear across the LOD blend.
+        let src = PlaneAll {
+            bx: 0.17,
+            by: -0.09,
+        };
+        for &lod in &[0.0_f32, 1.4, 3.6] {
+            let uv = [0.3718, 0.6421];
+            let m = trilinear_mitchell(
+                &src,
+                uv,
+                lod,
+                0.0,
+                0.5,
+                WrapMode::Repeat,
+                WrapMode::Repeat,
+                [0.0; 4],
+            );
+            let b = trilinear_bicubic(&src, uv, lod, WrapMode::Repeat, WrapMode::Repeat, [0.0; 4]);
+            assert!((m[0] - b[0]).abs() < 1.0e-6, "lod {lod}: {m:?} vs {b:?}");
+        }
+    }
+
+    #[test]
+    fn trilinear_mitchell_bspline_corner_matches_bspline() {
+        // (B, C) = (1, 0) is the cubic B-spline, so the sampler mode must agree
+        // with the dedicated B-spline trilinear across the LOD blend.
+        let src = PlaneAll {
+            bx: 0.17,
+            by: -0.09,
+        };
+        for &lod in &[0.0_f32, 1.4, 3.6] {
+            let uv = [0.3718, 0.6421];
+            let m = trilinear_mitchell(
+                &src,
+                uv,
+                lod,
+                1.0,
+                0.0,
+                WrapMode::Repeat,
+                WrapMode::Repeat,
+                [0.0; 4],
+            );
+            let b = trilinear_bspline(&src, uv, lod, WrapMode::Repeat, WrapMode::Repeat, [0.0; 4]);
+            assert!((m[0] - b[0]).abs() < 1.0e-6, "lod {lod}: {m:?} vs {b:?}");
+        }
+    }
+
+    #[test]
+    fn filter_resolved_mitchell_isotropic_matches_trilinear_mitchell() {
+        let vt = VirtualTexture::new(256, 256, 128);
+        let tri = TriangleLodConstant::new(
+            [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+            256,
+            256,
+        );
+        let req = SampleRequest::isotropic([0.5, 0.5], WrapMode::Repeat);
+        let r = resolve_cone(vt, &req, tri, 0.02, 1.0);
+        let via = filter_resolved_mitchell(
+            &ramp(),
+            &r,
+            MITCHELL_B,
+            MITCHELL_C,
+            WrapMode::Repeat,
+            WrapMode::Repeat,
+            [0.0; 4],
+        );
+        let direct = trilinear_mitchell(
+            &ramp(),
+            [0.5, 0.5],
+            r.lod,
+            MITCHELL_B,
+            MITCHELL_C,
+            WrapMode::Repeat,
+            WrapMode::Repeat,
+            [0.0; 4],
+        );
+        assert!((via[0] - direct[0]).abs() < 1.0e-6, "{via:?} vs {direct:?}");
+    }
+
+    #[test]
+    fn filter_resolved_mitchell_border_returns_border_color() {
+        let vt = VirtualTexture::new(256, 256, 128);
+        let rd = RayDifferential::new([1.0 / 256.0, 0.0], [0.0, 1.0 / 256.0]);
+        let req = SampleRequest::new([1.5, 0.5], WrapMode::ClampToBorder, 1.0);
+        let r = resolve_differential(vt, &req, rd);
+        assert!(r.border);
+        let border = [2.0, 4.0, 6.0, 8.0];
+        let c = filter_resolved_mitchell(
+            &ramp(),
+            &r,
+            MITCHELL_B,
+            MITCHELL_C,
             WrapMode::ClampToBorder,
             WrapMode::ClampToBorder,
             border,
