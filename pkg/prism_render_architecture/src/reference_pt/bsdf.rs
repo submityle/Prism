@@ -21,6 +21,7 @@ use super::conductor::Conductor;
 use super::conductor_aniso::AnisoConductor;
 use super::conductor_aniso_ms::MultiscatterAnisoConductor;
 use super::conductor_ms::MultiscatterConductor;
+use super::conductor_schlick_ms::SchlickMultiscatterConductor;
 use super::dielectric::{fresnel_dielectric, refract};
 use super::fresnel_blend::FresnelBlend;
 use super::microfacet::{fresnel_schlick, GgxIsotropic};
@@ -127,6 +128,20 @@ pub enum Bsdf {
         alpha_x: f32,
         /// `GGX` width along the local bitangent axis.
         alpha_y: f32,
+    },
+    /// Energy-conserving metallic-workflow conductor: the single-scatter
+    /// `Schlick`-`Fresnel` `GGX` lobe of [`Bsdf::GgxConductor`] plus the
+    /// Kulla-Conty multiple-scattering compensation (see
+    /// [`crate::reference_pt::conductor_schlick_ms`]). This is the
+    /// energy-conserving oracle for the real-time `F0` metallic parameterisation
+    /// and its average `Fresnel` term uses the closed-form `Schlick` result
+    /// `F_avg = (20 * F0 + 1) / 21`. It is glossy (non-delta), so it is sampled
+    /// and connected to lights like any rough surface.
+    GgxConductorSchlickMultiscatter {
+        /// Normal-incidence reflectance `F0` of the metal (per channel).
+        reflectance: Vec3,
+        /// Perceptual roughness in `[0, 1]`.
+        roughness: f32,
     },
     /// Smooth (perfectly specular) dielectric interface: glass, water, or a
     /// clear coat. Light is either mirror-reflected or refracted through the
@@ -278,6 +293,12 @@ impl Bsdf {
                 alpha_y,
             } => MultiscatterAnisoConductor::new(*eta, *k, *alpha_x, *alpha_y)
                 .evaluate(wo, wi, normal),
+            Self::GgxConductorSchlickMultiscatter {
+                reflectance,
+                roughness,
+            } => {
+                SchlickMultiscatterConductor::new(*reflectance, *roughness).evaluate(wo, wi, normal)
+            }
             Self::Plastic {
                 diffuse,
                 specular,
@@ -341,6 +362,10 @@ impl Bsdf {
                 alpha_x,
                 alpha_y,
             } => MultiscatterAnisoConductor::new(*eta, *k, *alpha_x, *alpha_y).pdf(wo, wi, normal),
+            Self::GgxConductorSchlickMultiscatter {
+                reflectance,
+                roughness,
+            } => SchlickMultiscatterConductor::new(*reflectance, *roughness).pdf(wo, wi, normal),
             Self::Plastic {
                 diffuse,
                 specular,
@@ -449,6 +474,17 @@ impl Bsdf {
                 alpha_x,
                 alpha_y,
             } => MultiscatterAnisoConductor::new(*eta, *k, *alpha_x, *alpha_y)
+                .sample(wo, normal, rng)
+                .map(|s| BsdfSample {
+                    direction: s.direction,
+                    value: s.value,
+                    pdf: s.pdf,
+                    specular: false,
+                }),
+            Self::GgxConductorSchlickMultiscatter {
+                reflectance,
+                roughness,
+            } => SchlickMultiscatterConductor::new(*reflectance, *roughness)
                 .sample(wo, normal, rng)
                 .map(|s| BsdfSample {
                     direction: s.direction,

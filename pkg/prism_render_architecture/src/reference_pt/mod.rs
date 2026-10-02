@@ -58,6 +58,7 @@ pub mod conductor;
 pub mod conductor_aniso;
 pub mod conductor_aniso_ms;
 pub mod conductor_ms;
+pub mod conductor_schlick_ms;
 pub mod dielectric;
 pub mod estimator;
 pub mod film;
