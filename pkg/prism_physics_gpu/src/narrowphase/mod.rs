@@ -137,6 +137,8 @@ mod ray_cast_bvh_gpu;
 mod shape_cast;
 mod shape_cast_bvh;
 mod shape_cast_bvh_gpu;
+mod box_cast_bvh;
+mod box_cast_bvh_gpu;
 mod capsule_cast_bvh;
 mod capsule_cast_bvh_gpu;
 mod sphere_cast_bvh;
@@ -187,6 +189,10 @@ pub use capsule_cast_bvh::{
     SceneCapsuleCast,
 };
 pub use capsule_cast_bvh_gpu::GpuSceneCapsuleCast;
+pub use box_cast_bvh::{
+    box_cast, box_cast_all, box_cast_all_bvh, box_cast_bvh, BoxCastHit, SceneBoxCast,
+};
+pub use box_cast_bvh_gpu::GpuSceneBoxCast;
 pub use shape_cast::{cast_shape, cast_shape_all, RoundedConvex, ShapeCastHit};
 pub use shape_cast_bvh::{cast_shape_all_bvh, cast_shape_bvh};
 pub use shape_cast_bvh_gpu::GpuBvhShapeCast;
