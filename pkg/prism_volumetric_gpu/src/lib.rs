@@ -144,6 +144,7 @@ pub mod ggx_energy_compensation;
 pub mod gjk_2d;
 pub mod gjk_3d;
 pub mod godray;
+pub mod gpu_compact;
 pub mod gpu_dispatch;
 pub mod gpu_layout;
 pub mod gpu_radix_histogram;
@@ -159,6 +160,7 @@ pub mod hilbert_curve;
 pub mod histogram_equalize;
 pub mod hue_shift;
 pub mod imposter_fade;
+pub mod indirect_dispatch;
 pub mod inertia_tensor;
 pub mod integrate_segment;
 pub mod interval_overlap_1d;
@@ -224,12 +226,14 @@ pub mod ray_obb;
 pub mod ray_sphere;
 pub mod ray_triangle;
 pub mod rayleigh_phase;
+pub mod raytrace;
 pub mod reflect_refract_vec;
 pub mod relax_coverage;
 pub mod reservoir_sample;
 pub mod rgb_ycocg;
 pub mod rgbe_encode;
 pub mod ribbon_geometry;
+pub mod ribbon_trail;
 pub mod ritter_bounding_sphere;
 pub mod sat_collision_2d;
 pub mod scanline_polygon_fill;
@@ -419,6 +423,7 @@ pub use ggx_energy_compensation::{
 pub use gjk_2d::{GpuGjk2d, GpuGjk2dQuery, GpuGjk2dResult};
 pub use gjk_3d::{GpuGjk3d, GpuGjk3dQuery, GpuGjk3dResult};
 pub use godray::{GodRayWeightQuery, GpuGodRayWeight};
+pub use gpu_compact::{GpuCompact, GpuCompactQuery, GpuCompactResult};
 pub use gpu_dispatch::{GpuDispatch, GpuDispatchQuery, GpuDispatchResult};
 pub use gpu_layout::{GpuLayout, GpuLayoutQuery, GpuLayoutResult};
 pub use gpu_radix_histogram::{GpuRadixHistogram, RadixHistogramQuery};
@@ -436,6 +441,9 @@ pub use histogram_equalize::{
 };
 pub use hue_shift::{GpuHueShift, HueShiftQuery, HueShiftResult};
 pub use imposter_fade::{GpuImposterFade, ImposterFadeQuery};
+pub use indirect_dispatch::{
+    GpuIndirectDispatch, GpuIndirectDispatchQuery, GpuIndirectDispatchResult,
+};
 pub use inertia_tensor::{BodyOpQuery, BodyOpResult, GpuInertiaTensor};
 pub use integrate_segment::{GpuIntegrateSegment, IntegrateSegmentQuery};
 pub use interval_overlap_1d::{GpuIntervalOverlap1d, IntervalOverlapQuery, IntervalOverlapResult};
@@ -508,12 +516,17 @@ pub use ray_obb::{GpuRayObb, RayObbQuery, RayObbResult};
 pub use ray_sphere::{GpuRaySphere, RaySphereProbe, RaySphereResult};
 pub use ray_triangle::{GpuRayTriangle, RayTriangleHit, RayTriangleQuery};
 pub use rayleigh_phase::{GpuRayleighPhase, RayleighPhaseQuery};
+pub use raytrace::{
+    GpuRaytrace, GpuRaytraceQuery, GpuRaytraceResult, METHOD_DEPTH_BUFFER, METHOD_RAYTRACE,
+    METHOD_SDF, QUALITY_HIGH, QUALITY_LOW, QUALITY_MEDIUM,
+};
 pub use reflect_refract_vec::{GpuReflectRefractVec, ReflectRefractQuery, ReflectRefractResult};
 pub use relax_coverage::{GpuRelaxCoverage, RelaxCoverageQuery};
 pub use reservoir_sample::{GpuReservoirSample, ReservoirValue};
 pub use rgb_ycocg::GpuRgbYCoCg;
 pub use rgbe_encode::{GpuRgbeEncode, RgbePrimQuery, RgbePrimResult};
 pub use ribbon_geometry::{GpuRibbonGeometry, RibbonStripQuery};
+pub use ribbon_trail::{GpuRibbonTrail, GpuRibbonTrailQuery, GpuRibbonTrailResult};
 pub use ritter_bounding_sphere::{GpuRitterBoundingSphere, GpuRitterSphere, RitterQuery};
 pub use sat_collision_2d::{GpuSatCollision2d, SatCollision2dQuery, SatCollision2dResult};
 pub use scanline_polygon_fill::{GpuScanlineFill, GpuScanlinePolygonFill, GpuSpan};
