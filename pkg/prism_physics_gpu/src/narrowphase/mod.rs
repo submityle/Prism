@@ -93,6 +93,7 @@ mod capsule_triangle_gpu;
 mod capsule_triangle_manifold;
 mod capsule_triangle_manifold_gpu;
 mod conservative_advancement;
+mod conservative_advancement_gpu;
 mod contact;
 mod convex_convex_manifold;
 mod convex_convex_manifold_gpu;
@@ -153,6 +154,7 @@ pub use conservative_advancement::{
 };
 pub use contact::Contact;
 pub use convex_convex_manifold::{cpu_convex_convex_manifold, ConvexConvexPair};
+pub use conservative_advancement_gpu::GpuConvexConvexToiNarrowphase;
 pub use convex_convex_manifold_gpu::GpuConvexConvexManifoldNarrowphase;
 pub use convex_hull::{ConvexEdge, ConvexFace, ConvexHull};
 pub use convex_pose::ConvexPose;
