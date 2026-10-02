@@ -18,22 +18,18 @@ use bevy_render::{
     renderer::{RenderContext, ViewQuery},
 };
 
+use super::super::resources::ViewVisibilityBuffer;
 use super::abi::VIGNETTE_WORKGROUP_SIZE;
 use super::bind_groups::ViewVignetteBindGroup;
 use super::pipeline::VignettePipeline;
 use super::resources::ViewVignette;
 use super::settings::PrismVignetteSettings;
-use super::super::resources::ViewVisibilityBuffer;
 
 /// `Core3d` scheduling system recording the `vignette_main` dispatch for every
 /// view whose vignette texture and bind group are resident.
 pub(crate) fn vignette_pass(
     settings: Res<PrismVignetteSettings>,
-    view: ViewQuery<(
-        &ViewVignette,
-        &ViewVignetteBindGroup,
-        &ViewVisibilityBuffer,
-    )>,
+    view: ViewQuery<(&ViewVignette, &ViewVignetteBindGroup, &ViewVisibilityBuffer)>,
     pipeline: Res<VignettePipeline>,
     cache: Res<PipelineCache>,
     mut ctx: RenderContext,

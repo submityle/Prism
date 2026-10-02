@@ -68,7 +68,11 @@ pub(crate) fn request_visibility_parity_readback(
     let work_size = state.views.len() as u64
         * buffers.gpu_slots_per_view() as u64
         * size_of::<super::rows::RenderVisibilityWorkItem>() as u64;
-    let bin_size = state.draw_bins.iter().map(|view| view.bins.len()).sum::<usize>() as u64
+    let bin_size = state
+        .draw_bins
+        .iter()
+        .map(|view| view.bins.len())
+        .sum::<usize>() as u64
         * size_of::<RenderDrawBinHeader>() as u64;
     let size = counter_size.saturating_mul(2) + work_size + bin_size.saturating_mul(2);
     let target = device.create_buffer(&BufferDescriptor {
@@ -189,14 +193,13 @@ pub(crate) fn collect_visibility_parity_readback(
     let mapped = pending.buffer.slice(..).get_mapped_range().unwrap();
     let counter_bytes = pending.view_count * size_of::<RenderVisibilityCounter>();
     let counters: &[RenderVisibilityCounter] = bytemuck::cast_slice(&mapped[..counter_bytes]);
-    let gpu_work: &[super::rows::RenderVisibilityWorkItem] =
-        bytemuck::cast_slice(
-            &mapped[counter_bytes
-                ..counter_bytes
-                    + pending.view_count
-                        * pending.slots_per_view
-                        * size_of::<super::rows::RenderVisibilityWorkItem>()],
-        );
+    let gpu_work: &[super::rows::RenderVisibilityWorkItem] = bytemuck::cast_slice(
+        &mapped[counter_bytes
+            ..counter_bytes
+                + pending.view_count
+                    * pending.slots_per_view
+                    * size_of::<super::rows::RenderVisibilityWorkItem>()],
+    );
     let bin_bytes = counter_bytes
         + pending.view_count
             * pending.slots_per_view
@@ -229,8 +232,14 @@ pub(crate) fn collect_visibility_parity_readback(
         }
         diagnostics.gpu_indexed_commands += counter.indexed_count as u64;
         diagnostics.gpu_non_indexed_commands += counter.non_indexed_count as u64;
-        let bounded_visible = counter.visible_count.min(in_flight.pending.slots_per_view as u32);
-        if counter.indexed_count.saturating_add(counter.non_indexed_count) != bounded_visible {
+        let bounded_visible = counter
+            .visible_count
+            .min(in_flight.pending.slots_per_view as u32);
+        if counter
+            .indexed_count
+            .saturating_add(counter.non_indexed_count)
+            != bounded_visible
+        {
             diagnostics.parity_mismatched_command_counts += 1;
         }
         let count = counter.visible_count.min(pending.slots_per_view as u32) as usize;
@@ -264,13 +273,9 @@ pub(crate) fn collect_visibility_parity_readback(
 
 fn bin_counts_match(gpu: &[RenderDrawBinHeader], expected: &[u32]) -> bool {
     gpu.len() == expected.len()
-        && gpu
-            .iter()
-            .zip(expected)
-            .all(|(header, expected)| {
-                header.command_count == *expected
-                    && header.command_count <= header.command_capacity
-            })
+        && gpu.iter().zip(expected).all(|(header, expected)| {
+            header.command_count == *expected && header.command_count <= header.command_capacity
+        })
 }
 
 #[derive(Debug, Default, Eq, PartialEq)]
@@ -305,10 +310,12 @@ fn late_counters_match_bins(
             let view_bins = bins
                 .iter()
                 .filter(|bin| bin.view_index == view.0 && bin.view_generation == view.1);
-            let bin_count = view_bins.clone()
+            let bin_count = view_bins
+                .clone()
                 .map(|bin| bin.command_count.min(bin.command_capacity))
                 .sum::<u32>();
-            let indexed_count = view_bins.clone()
+            let indexed_count = view_bins
+                .clone()
                 .filter(|bin| bin.indexed != 0)
                 .map(|bin| bin.command_count.min(bin.command_capacity))
                 .sum::<u32>();
@@ -374,7 +381,10 @@ mod tests {
             non_indexed_count: 3,
             ..Default::default()
         };
-        assert_eq!(counter.indexed_count + counter.non_indexed_count, counter.visible_count);
+        assert_eq!(
+            counter.indexed_count + counter.non_indexed_count,
+            counter.visible_count
+        );
     }
 
     #[test]

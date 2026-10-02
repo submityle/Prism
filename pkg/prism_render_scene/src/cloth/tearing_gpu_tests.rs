@@ -26,7 +26,9 @@ use wgpu::{
 };
 
 use prism_render_architecture::cloth::tearing::{tear_flags, TearingParams};
-use prism_render_architecture::cloth::{ClothParticle, Compliance, Constraint, ConstraintKind, Vec3};
+use prism_render_architecture::cloth::{
+    ClothParticle, Compliance, Constraint, ConstraintKind, Vec3,
+};
 
 use super::abi::{GpuClothConstraint, GpuClothTearingParams};
 use super::gpu_test_support::{compile_tearing_wgsl, find_entry_point, try_compute_device};
@@ -147,10 +149,22 @@ fn run_tearing_flags_on_gpu(
         label: Some("cloth_tearing_parity_bind"),
         layout: &layout,
         entries: &[
-            BindGroupEntry { binding: 0, resource: positions_buf.as_entire_binding() },
-            BindGroupEntry { binding: 1, resource: constraints_buf.as_entire_binding() },
-            BindGroupEntry { binding: 2, resource: flags_buf.as_entire_binding() },
-            BindGroupEntry { binding: 3, resource: params_buf.as_entire_binding() },
+            BindGroupEntry {
+                binding: 0,
+                resource: positions_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 1,
+                resource: constraints_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 2,
+                resource: flags_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 3,
+                resource: params_buf.as_entire_binding(),
+            },
         ],
     });
 
@@ -232,7 +246,10 @@ fn assert_tearing_parity(
 
     assert_eq!(gpu.len(), golden.len());
     for (i, (&g, &c)) in gpu.iter().zip(golden.iter()).enumerate() {
-        assert_eq!(g, c, "tear flag parity broke at edge {i}: gpu {g} golden {c}");
+        assert_eq!(
+            g, c,
+            "tear flag parity broke at edge {i}: gpu {g} golden {c}"
+        );
     }
 }
 

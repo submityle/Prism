@@ -284,8 +284,8 @@ pub fn coupling_impulse(
         return Vec3::ZERO;
     }
 
-    let effective_inv_mass = particle.inv_mass
-        + generalized_inverse_mass(body.inv_mass, body.inv_inertia_world, r, n);
+    let effective_inv_mass =
+        particle.inv_mass + generalized_inverse_mass(body.inv_mass, body.inv_inertia_world, r, n);
     // Both particle and body effectively immovable: no finite impulse exists.
     if effective_inv_mass <= MIN_EFFECTIVE_INV_MASS {
         return Vec3::ZERO;
@@ -403,11 +403,8 @@ mod tests {
     fn single_particle_single_body_conserves_linear_momentum() {
         // Particle (mass 2) falling onto a free body (mass 4) with its center of
         // mass offset so the lever arm is non-trivial.
-        let mut particle = CouplingParticle::new(
-            0.5,
-            Vec3::new(0.0, 1.0, 0.0),
-            Vec3::new(0.0, -3.0, 0.0),
-        );
+        let mut particle =
+            CouplingParticle::new(0.5, Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, -3.0, 0.0));
         let mut body = CouplingBody::new(
             0.25,
             Mat3::from_diagonal(Vec3::new(0.5, 0.5, 0.5)),
@@ -417,11 +414,13 @@ mod tests {
         );
         let normal = Vec3::new(0.0, 1.0, 0.0);
 
-        let before = linear_momentum(mass_of(particle.inv_mass), particle.velocity)
-            .add(linear_momentum(mass_of(body.inv_mass), body.linear_velocity));
+        let before = linear_momentum(mass_of(particle.inv_mass), particle.velocity).add(
+            linear_momentum(mass_of(body.inv_mass), body.linear_velocity),
+        );
         let impulse = resolve_coupling(&mut particle, &mut body, normal, 0.5);
-        let after = linear_momentum(mass_of(particle.inv_mass), particle.velocity)
-            .add(linear_momentum(mass_of(body.inv_mass), body.linear_velocity));
+        let after = linear_momentum(mass_of(particle.inv_mass), particle.velocity).add(
+            linear_momentum(mass_of(body.inv_mass), body.linear_velocity),
+        );
 
         // A real, non-zero impulse was exchanged, and total linear momentum is
         // unchanged to f32 tolerance.
@@ -433,11 +432,8 @@ mod tests {
     fn restitution_sets_the_post_contact_relative_velocity() {
         // The defining gold standard: after resolution the normal relative
         // velocity equals -e * vn, exercising the full linear + angular response.
-        let mut particle = CouplingParticle::new(
-            0.5,
-            Vec3::new(0.3, 0.8, -0.2),
-            Vec3::new(0.1, -2.0, 0.4),
-        );
+        let mut particle =
+            CouplingParticle::new(0.5, Vec3::new(0.3, 0.8, -0.2), Vec3::new(0.1, -2.0, 0.4));
         let mut body = CouplingBody::new(
             0.2,
             Mat3::from_diagonal(Vec3::new(0.7, 0.4, 0.9)),
@@ -468,13 +464,7 @@ mod tests {
     fn separating_and_degenerate_contacts_are_identities() {
         let base_particle =
             CouplingParticle::new(0.5, Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 2.0, 0.0));
-        let base_body = CouplingBody::new(
-            0.25,
-            Mat3::IDENTITY,
-            Vec3::ZERO,
-            Vec3::ZERO,
-            Vec3::ZERO,
-        );
+        let base_body = CouplingBody::new(0.25, Mat3::IDENTITY, Vec3::ZERO, Vec3::ZERO, Vec3::ZERO);
         let normal = Vec3::new(0.0, 1.0, 0.0);
 
         // Particle already receding along +normal: zero impulse, no state change.
@@ -506,13 +496,15 @@ mod tests {
         // Static body (inv_mass = 0, infinite inertia): the body never moves and
         // a unit-mass particle bounces with the full restitution response.
         {
-            let mut particle = CouplingParticle::new(
-                1.0,
-                Vec3::new(0.0, 1.0, 0.0),
-                Vec3::new(0.0, -2.0, 0.0),
+            let mut particle =
+                CouplingParticle::new(1.0, Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, -2.0, 0.0));
+            let mut body = CouplingBody::new(
+                0.0,
+                Mat3::from_diagonal(Vec3::ZERO),
+                Vec3::ZERO,
+                Vec3::ZERO,
+                Vec3::ZERO,
             );
-            let mut body =
-                CouplingBody::new(0.0, Mat3::from_diagonal(Vec3::ZERO), Vec3::ZERO, Vec3::ZERO, Vec3::ZERO);
             let before = body;
             resolve_coupling(&mut particle, &mut body, normal, 1.0);
             // Body is untouched; particle reflects (-2 -> +2 at e = 1).
@@ -523,11 +515,8 @@ mod tests {
         // Immovable particle (inv_mass = 0) hitting a free body: the particle is
         // unchanged and the body absorbs the whole exchange.
         {
-            let mut particle = CouplingParticle::new(
-                0.0,
-                Vec3::new(0.0, 1.0, 0.0),
-                Vec3::new(0.0, -2.0, 0.0),
-            );
+            let mut particle =
+                CouplingParticle::new(0.0, Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, -2.0, 0.0));
             let fixed_particle = particle;
             let mut body = CouplingBody::new(
                 0.5,
@@ -545,14 +534,16 @@ mod tests {
 
         // Both immovable: no finite impulse exists, so nothing changes.
         {
-            let mut particle = CouplingParticle::new(
-                0.0,
-                Vec3::new(0.0, 1.0, 0.0),
-                Vec3::new(0.0, -2.0, 0.0),
-            );
+            let mut particle =
+                CouplingParticle::new(0.0, Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, -2.0, 0.0));
             let fixed_particle = particle;
-            let mut body =
-                CouplingBody::new(0.0, Mat3::from_diagonal(Vec3::ZERO), Vec3::ZERO, Vec3::ZERO, Vec3::ZERO);
+            let mut body = CouplingBody::new(
+                0.0,
+                Mat3::from_diagonal(Vec3::ZERO),
+                Vec3::ZERO,
+                Vec3::ZERO,
+                Vec3::ZERO,
+            );
             let fixed_body = body;
             let impulse = resolve_coupling(&mut particle, &mut body, normal, 0.5);
             assert_eq!(impulse, Vec3::ZERO);

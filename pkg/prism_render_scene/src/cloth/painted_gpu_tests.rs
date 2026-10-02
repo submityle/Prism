@@ -199,8 +199,12 @@ fn run_painted_pass_on_gpu(
         anchor_positions,
         [0.0f32; 4],
     );
-    let anchor_normals_buf =
-        storage_from_slice(device, "cloth_painted_anchor_normals", anchor_normals, [0.0f32; 4]);
+    let anchor_normals_buf = storage_from_slice(
+        device,
+        "cloth_painted_anchor_normals",
+        anchor_normals,
+        [0.0f32; 4],
+    );
     let weights_buf = storage_from_slice(device, "cloth_painted_weights", weights, [0.0f32; 4]);
     let params_buf = device.create_buffer_init(&BufferInitDescriptor {
         label: Some("cloth_painted_params"),

@@ -63,8 +63,9 @@ pub use spot::{evaluate_spot_shadow, spot_view_projection, SpotShadowConfig, Spo
 pub use virtual_sm::{
     camera_move_invalidates_pages, decode_window_slot, filter_page_radius, generate_page_requests,
     generate_receiver, invalidate_casters, reconstruct_world_position, slot_to_page_key,
-    window_slot, window_slot_count, window_slots_per_level, Allocation, AllocatorStats, BudgetStats,
-    CasterMovement, ClipmapConfig, ClipmapLevel, FrameInput, FrameResult, Invalidation,
-    PageRequestSet, PageTableStats, PhysicalPageAllocator, Receiver, ReceiverProjection, Residency,
-    ShadowPageKey, VirtualPageTable, VirtualShadowMap, VirtualShadowSettings,
+    window_slot, window_slot_count, window_slots_per_level, Allocation, AllocatorStats,
+    BudgetStats, CasterMovement, ClipmapConfig, ClipmapLevel, FrameInput, FrameResult,
+    Invalidation, PageRequestSet, PageTableStats, PhysicalPageAllocator, Receiver,
+    ReceiverProjection, Residency, ShadowPageKey, VirtualPageTable, VirtualShadowMap,
+    VirtualShadowSettings,
 };

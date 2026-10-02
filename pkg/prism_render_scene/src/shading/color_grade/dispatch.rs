@@ -19,12 +19,12 @@ use bevy_render::{
     renderer::{RenderContext, ViewQuery},
 };
 
+use super::super::resources::ViewVisibilityBuffer;
 use super::abi::COLOR_GRADE_WORKGROUP_SIZE;
 use super::bind_groups::ViewColorGradeBindGroup;
 use super::pipeline::ColorGradePipeline;
 use super::resources::ViewColorGrade;
 use super::settings::PrismColorGradeSettings;
-use super::super::resources::ViewVisibilityBuffer;
 
 /// `Core3d` scheduling system recording the `color_grade_main` dispatch for
 /// every view whose grade texture and bind group are resident.

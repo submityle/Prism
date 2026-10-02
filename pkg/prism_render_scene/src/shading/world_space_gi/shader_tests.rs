@@ -47,9 +47,9 @@ fn probe_update_wesl_compiles_standalone() {
         ),
     );
 
-    cache
-        .get(0, probe_update, &[])
-        .unwrap_or_else(|error| panic!("world_space_gi_probe_update.wesl failed to compile: {error}"));
+    cache.get(0, probe_update, &[]).unwrap_or_else(|error| {
+        panic!("world_space_gi_probe_update.wesl failed to compile: {error}")
+    });
 }
 
 /// Compiles `world_space_gi_resolve.wesl`, proving the per-pixel probe

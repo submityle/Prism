@@ -196,7 +196,14 @@ mod tests {
         // history to the mean (== current), so the blend is a no-op regardless
         // of the feedback weight.
         let colour = Vec3::new(0.4, 0.55, 0.2);
-        let out = resolve_taa(colour, colour, &[colour; 9], &TaaParams::default(), true, 0.0);
+        let out = resolve_taa(
+            colour,
+            colour,
+            &[colour; 9],
+            &TaaParams::default(),
+            true,
+            0.0,
+        );
         assert!(
             approx(out, colour),
             "a still image must be a TAA fixed point: {out:?}"
@@ -211,7 +218,14 @@ mod tests {
         let current = Vec3::new(0.2, 0.2, 0.2);
         let neighbourhood = [current; 9];
         let stale = Vec3::new(1.0, 0.0, 0.0);
-        let out = resolve_taa(current, stale, &neighbourhood, &TaaParams::default(), true, 0.0);
+        let out = resolve_taa(
+            current,
+            stale,
+            &neighbourhood,
+            &TaaParams::default(),
+            true,
+            0.0,
+        );
         // With a zero-variance neighbourhood the clip pins history to `current`,
         // so the output must equal the current colour (no red bleed-through);
         // allow a small epsilon for the YCoCg clamp round trip.
@@ -239,7 +253,14 @@ mod tests {
             Vec3::new(0.14, 0.14, 0.14),
         ];
         let bright = Vec3::new(0.6, 0.6, 0.6);
-        let out = resolve_taa(current, bright, &neighbourhood, &TaaParams::default(), true, 0.0);
+        let out = resolve_taa(
+            current,
+            bright,
+            &neighbourhood,
+            &TaaParams::default(),
+            true,
+            0.0,
+        );
         // Output luma should not exceed the clipped-history luma, and the bright
         // sample must be reined in below a plain 0.9 feedback of the raw history.
         assert!(
@@ -260,7 +281,14 @@ mod tests {
         let current = Vec3::new(0.2, 0.5, 0.7);
         let history = Vec3::new(0.9, 0.1, 0.3);
         let neighbourhood = [current; 9];
-        let out = resolve_taa(current, history, &neighbourhood, &TaaParams::default(), true, 1.0);
+        let out = resolve_taa(
+            current,
+            history,
+            &neighbourhood,
+            &TaaParams::default(),
+            true,
+            1.0,
+        );
         assert!(
             approx(out, current),
             "reactive == 1 must yield the current frame: {out:?}"
@@ -305,6 +333,9 @@ mod tests {
             (zero - current).abs().max_element() > (one - current).abs().max_element(),
             "reactive == 0 must keep more history than reactive == 1"
         );
-        assert!(approx(one, current), "reactive == 1 collapses to current: {one:?}");
+        assert!(
+            approx(one, current),
+            "reactive == 1 collapses to current: {one:?}"
+        );
     }
 }

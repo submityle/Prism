@@ -44,12 +44,8 @@ pub(crate) fn ssr_prepass_pass(
     // the RH, camera-at-origin view frame; the projection then yields the
     // reverse-Z device depth the screen-space march compares against.
     let view_from_world = extracted.world_from_view.to_matrix().inverse();
-    let params = GpuSsrPrepassParams::new(
-        view_from_world,
-        extracted.clip_from_view,
-        size.x,
-        size.y,
-    );
+    let params =
+        GpuSsrPrepassParams::new(view_from_world, extracted.clip_from_view, size.x, size.y);
 
     let workgroups_x = size.x.div_ceil(SSR_WORKGROUP_SIZE);
     let workgroups_y = size.y.div_ceil(SSR_WORKGROUP_SIZE);

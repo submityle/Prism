@@ -288,8 +288,7 @@ fn sanitized_weight(weight: f32) -> f32 {
 #[must_use]
 fn float_literal(value: f32) -> String {
     let mut text = format!("{value}");
-    let has_fraction =
-        text.contains('.') || text.contains('e') || text.contains('E');
+    let has_fraction = text.contains('.') || text.contains('e') || text.contains('E');
     if !has_fraction {
         text.push_str(".0");
     }
@@ -384,7 +383,10 @@ mod tests {
         let ctx = emit(EmberShadingModel::Custom(7), false);
         let source = ctx.assembled_source();
         // The handle is encoded in the closure symbol, not in a binding name.
-        assert!(source.contains("shade_custom_7(particle_index)"), "{source}");
+        assert!(
+            source.contains("shade_custom_7(particle_index)"),
+            "{source}"
+        );
         assert!(
             source.contains("user WESL closure extension point"),
             "{source}"

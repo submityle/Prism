@@ -124,9 +124,10 @@ pub(crate) fn prepare_film_grain_textures(
             },
         );
 
-        commands
-            .entity(entity)
-            .insert(ViewFilmGrain { film_grain_out, size });
+        commands.entity(entity).insert(ViewFilmGrain {
+            film_grain_out,
+            size,
+        });
     }
 }
 

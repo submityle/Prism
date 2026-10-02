@@ -111,9 +111,10 @@ pub(crate) fn prepare_ordered_dither_textures(
             },
         );
 
-        commands
-            .entity(entity)
-            .insert(ViewOrderedDither { ordered_dither_out, size });
+        commands.entity(entity).insert(ViewOrderedDither {
+            ordered_dither_out,
+            size,
+        });
     }
 }
 

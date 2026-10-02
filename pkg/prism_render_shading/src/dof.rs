@@ -312,12 +312,7 @@ impl DofParams {
     /// Blends `sharp` toward `blurred` for an object at `object_distance_mm`.
     /// With the default (`enabled_scale == 0`) this returns `sharp` unchanged.
     #[must_use]
-    pub fn apply(
-        &self,
-        object_distance_mm: f32,
-        sharp: [f32; 3],
-        blurred: [f32; 3],
-    ) -> [f32; 3] {
+    pub fn apply(&self, object_distance_mm: f32, sharp: [f32; 3], blurred: [f32; 3]) -> [f32; 3] {
         let radius = self.coc_radius_px(object_distance_mm);
         let factor = dof_blend_factor(radius, self.max_coc_pixels, self.enabled_scale);
         apply_dof(sharp, blurred, factor)
@@ -383,7 +378,10 @@ mod tests {
         let mut prev = -1.0_f32;
         for d in [1900.0, 1500.0, 1000.0, 500.0, 200.0] {
             let coc = circle_of_confusion(2000.0, d, 50.0, 2.8, 1000.0);
-            assert!(coc > prev, "near CoC not increasing at {d}: {coc} <= {prev}");
+            assert!(
+                coc > prev,
+                "near CoC not increasing at {d}: {coc} <= {prev}"
+            );
             prev = coc;
         }
     }
@@ -393,7 +391,10 @@ mod tests {
         // A smaller f-number is a wider aperture -> a larger CoC.
         let wide = circle_of_confusion(2000.0, 5000.0, 50.0, 1.4, 1000.0);
         let narrow = circle_of_confusion(2000.0, 5000.0, 50.0, 8.0, 1000.0);
-        assert!(wide > narrow, "wider aperture should blur more: {wide} <= {narrow}");
+        assert!(
+            wide > narrow,
+            "wider aperture should blur more: {wide} <= {narrow}"
+        );
     }
 
     #[test]
@@ -401,7 +402,10 @@ mod tests {
         // A longer lens (kept below the sensor clamp) blurs more.
         let long = circle_of_confusion(2000.0, 5000.0, 85.0, 2.8, 1000.0);
         let short = circle_of_confusion(2000.0, 5000.0, 35.0, 2.8, 1000.0);
-        assert!(long > short, "longer focal length should blur more: {long} <= {short}");
+        assert!(
+            long > short,
+            "longer focal length should blur more: {long} <= {short}"
+        );
     }
 
     #[test]
@@ -469,7 +473,10 @@ mod tests {
         let mut prev = f32::INFINITY;
         for i in 0..=16 {
             let w = bokeh_weight(i as f32 * 0.5, 8.0);
-            assert!(w <= prev, "bokeh weight not decreasing at {i}: {w} > {prev}");
+            assert!(
+                w <= prev,
+                "bokeh weight not decreasing at {i}: {w} > {prev}"
+            );
             prev = w;
         }
     }
@@ -539,6 +546,9 @@ mod tests {
         let blurred = [1.0, 1.0, 1.0];
         // A far, strongly-defocused object pulls the result toward blurred.
         let out = p.apply(50_000.0, sharp, blurred);
-        assert!(out[0] > 0.0, "enabled DoF should blend some blur, got {out:?}");
+        assert!(
+            out[0] > 0.0,
+            "enabled DoF should blend some blur, got {out:?}"
+        );
     }
 }

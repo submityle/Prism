@@ -103,7 +103,10 @@ mod tests {
         let cur = clip_from_world(0.0);
         let world = Vec3::new(0.3, -0.2, -5.0);
         let motion = motion_vector(cur, cur, world, world).unwrap();
-        assert!(motion.length() < 1.0e-6, "static config must be zero: {motion:?}");
+        assert!(
+            motion.length() < 1.0e-6,
+            "static config must be zero: {motion:?}"
+        );
     }
 
     #[test]
@@ -120,7 +123,10 @@ mod tests {
         let cur = clip_from_world(0.0);
         let prev = clip_from_world(-0.5);
         let motion = motion_vector(cur, prev, world, world).unwrap();
-        assert!(motion.length() > 1.0e-4, "camera motion must be non-zero: {motion:?}");
+        assert!(
+            motion.length() > 1.0e-4,
+            "camera motion must be non-zero: {motion:?}"
+        );
         let cur_uv = project_world_to_screen(cur, world).unwrap().uv;
         let prev_uv = project_world_to_screen(prev, world).unwrap().uv;
         assert!((cur_uv - motion - prev_uv).length() < 1.0e-6);
@@ -132,8 +138,14 @@ mod tests {
         let world_prev = Vec3::new(0.0, 0.0, -5.0);
         let world_cur = Vec3::new(0.6, 0.0, -5.0);
         let motion = motion_vector(cam, cam, world_cur, world_prev).unwrap();
-        assert!(motion.x.abs() > 1.0e-4, "moved object must register: {motion:?}");
-        assert!(motion.y.abs() < 1.0e-6, "no vertical move => no vertical motion");
+        assert!(
+            motion.x.abs() > 1.0e-4,
+            "moved object must register: {motion:?}"
+        );
+        assert!(
+            motion.y.abs() < 1.0e-6,
+            "no vertical move => no vertical motion"
+        );
     }
 
     #[test]

@@ -58,7 +58,6 @@ fn shadow_wesl_compiles_standalone() {
         .unwrap_or_else(|error| panic!("shadow.wesl failed to compile: {error}"));
 }
 
-
 /// Compiles `shadow_depth.wesl` standalone — the depth-raster pass that fills
 /// the atlas `shadow.wesl` samples.  It has no imports, so a green result
 /// proves the per-view uniform, the GPU-scene instance / transform bindings,

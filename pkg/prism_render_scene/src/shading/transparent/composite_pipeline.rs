@@ -20,9 +20,7 @@ use bevy_asset::{load_embedded_asset, AssetServer, Handle};
 use bevy_ecs::prelude::*;
 use bevy_material::{
     bind_group_layout_entries::{binding_types::texture_2d, BindGroupLayoutEntries},
-    descriptor::{
-        BindGroupLayoutDescriptor, FragmentState, RenderPipelineDescriptor, VertexState,
-    },
+    descriptor::{BindGroupLayoutDescriptor, FragmentState, RenderPipelineDescriptor, VertexState},
 };
 use bevy_render::{
     render_resource::{
@@ -80,14 +78,10 @@ fn oit_composite_layout_entries() -> BindGroupLayoutEntries<2> {
 /// `RenderStartup` initializer: builds the group-0 layout descriptor and loads
 /// the embedded `oit.wesl` module. No device dependency beyond the shared asset
 /// server.
-pub(crate) fn init_oit_composite_pipeline(
-    mut commands: Commands,
-    asset_server: Res<AssetServer>,
-) {
+pub(crate) fn init_oit_composite_pipeline(mut commands: Commands, asset_server: Res<AssetServer>) {
     let entries = oit_composite_layout_entries();
     let layout = BindGroupLayoutDescriptor::new("prism oit composite", &entries);
-    let shader: Handle<Shader> =
-        load_embedded_asset!(asset_server.as_ref(), "../shaders/oit.wesl");
+    let shader: Handle<Shader> = load_embedded_asset!(asset_server.as_ref(), "../shaders/oit.wesl");
     commands.insert_resource(OitCompositePipeline { layout, shader });
 }
 

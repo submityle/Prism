@@ -26,9 +26,7 @@ use bevy_image::ToExtents;
 use bevy_math::UVec2;
 use bevy_render::{
     camera::ExtractedCamera,
-    render_resource::{
-        TextureDescriptor, TextureDimension, TextureUsages, TextureView,
-    },
+    render_resource::{TextureDescriptor, TextureDimension, TextureUsages, TextureView},
     renderer::RenderDevice,
     texture::{CachedTexture, TextureCache},
     view::Msaa,
@@ -217,6 +215,9 @@ mod tests {
 
     #[test]
     fn blur_output_shares_the_scene_colour_format() {
-        assert_eq!(SCENE_COLOR_FORMAT, bevy_render::render_resource::TextureFormat::Rgba16Float);
+        assert_eq!(
+            SCENE_COLOR_FORMAT,
+            bevy_render::render_resource::TextureFormat::Rgba16Float
+        );
     }
 }

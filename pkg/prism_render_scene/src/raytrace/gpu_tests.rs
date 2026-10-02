@@ -135,9 +135,7 @@ struct Rng {
 
 impl Rng {
     fn new(seed: u64) -> Self {
-        Self {
-            state: seed | 1,
-        }
+        Self { state: seed | 1 }
     }
 
     fn next_u32(&mut self) -> u32 {
@@ -213,7 +211,12 @@ fn build_rays(triangles: &[Triangle]) -> Vec<Ray> {
     // Guaranteed misses: a ray whose finite `t_max` stops well short of the
     // soup, and a ray pointing away from it.
     rays.push(Ray::new([20.0, 20.0, 20.0], [1.0, 1.0, 1.0], 0.0, 0.5));
-    rays.push(Ray::new([20.0, 20.0, 20.0], [1.0, 1.0, 1.0], 0.0, f32::INFINITY));
+    rays.push(Ray::new(
+        [20.0, 20.0, 20.0],
+        [1.0, 1.0, 1.0],
+        0.0,
+        f32::INFINITY,
+    ));
     rays.push(Ray::new([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], 100.0, 200.0));
 
     rays

@@ -27,8 +27,8 @@ use bevy_render::{
 };
 use bevy_shader::Shader;
 
-use super::abi::GpuTaaResolveParams;
 use super::super::resources::SCENE_COLOR_FORMAT;
+use super::abi::GpuTaaResolveParams;
 
 /// Compute pipeline, its owned group-0 layout, and the filtering sampler the
 /// resolve reads the reprojected history through.

@@ -277,7 +277,10 @@ mod tests {
             view_normals: &view_normals,
         };
         for value in denoise_gtao(&raw, buffers, GtaoDenoiseConfig::default()) {
-            assert!((0.0..=1.0).contains(&value), "denoised AO out of range: {value}");
+            assert!(
+                (0.0..=1.0).contains(&value),
+                "denoised AO out of range: {value}"
+            );
         }
     }
 
@@ -299,7 +302,10 @@ mod tests {
         };
         let out = denoise_gtao(&raw, buffers, config);
         for (o, r) in out.iter().zip(raw.iter()) {
-            assert!((o - r).abs() < 1.0e-6, "radius 0 must be identity: {o} vs {r}");
+            assert!(
+                (o - r).abs() < 1.0e-6,
+                "radius 0 must be identity: {o} vs {r}"
+            );
         }
     }
 }

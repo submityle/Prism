@@ -27,10 +27,9 @@ use prism_render_architecture::cloth::{Constraint, ConstraintKind};
 
 use super::abi::{
     GpuClothBackstop, GpuClothBendingConstraint, GpuClothCollider, GpuClothConstraint,
-    GpuClothEmbedBinding,
-    CLOTH_COLLIDER_CAPSULE,
-    CLOTH_COLLIDER_HALF_SPACE, CLOTH_COLLIDER_SPHERE, CLOTH_CONSTRAINT_BEND, CLOTH_CONSTRAINT_LRA,
-    CLOTH_CONSTRAINT_SHEAR, CLOTH_CONSTRAINT_STRETCH, CLOTH_CONSTRAINT_TETHER,
+    GpuClothEmbedBinding, CLOTH_COLLIDER_CAPSULE, CLOTH_COLLIDER_HALF_SPACE, CLOTH_COLLIDER_SPHERE,
+    CLOTH_CONSTRAINT_BEND, CLOTH_CONSTRAINT_LRA, CLOTH_CONSTRAINT_SHEAR, CLOTH_CONSTRAINT_STRETCH,
+    CLOTH_CONSTRAINT_TETHER,
 };
 
 /// Maps an architecture-layer [`ConstraintKind`] to its stable `GPU` tag

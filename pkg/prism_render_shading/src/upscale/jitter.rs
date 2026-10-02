@@ -88,7 +88,10 @@ mod tests {
     fn phase_count_is_monotonic_in_lower_scales() {
         let a = upscale_phase_count(0.75);
         let b = upscale_phase_count(0.5);
-        assert!(b >= a, "lower render scale must not need fewer phases: {a} vs {b}");
+        assert!(
+            b >= a,
+            "lower render scale must not need fewer phases: {a} vs {b}"
+        );
     }
 
     #[test]
@@ -141,7 +144,10 @@ mod tests {
         for frame in 0..BASE_UPSCALE_JITTER_LEN as u64 {
             let up = upscale_jitter(frame, 1.0);
             let taa = crate::taa_jitter(frame, BASE_UPSCALE_JITTER_LEN);
-            assert!((up - taa).length() < 1.0e-6, "frame {frame}: {up:?} vs {taa:?}");
+            assert!(
+                (up - taa).length() < 1.0e-6,
+                "frame {frame}: {up:?} vs {taa:?}"
+            );
         }
     }
 }

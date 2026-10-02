@@ -59,10 +59,7 @@ pub(crate) fn prepare_oit_composite_bind_groups(
             "prism oit composite",
             &layout,
             // Order mirrors oit.wesl: oit_accum(0), oit_revealage(1).
-            &BindGroupEntries::sequential((
-                targets.accum_view(),
-                targets.revealage_view(),
-            )),
+            &BindGroupEntries::sequential((targets.accum_view(), targets.revealage_view())),
         );
         commands
             .entity(entity)

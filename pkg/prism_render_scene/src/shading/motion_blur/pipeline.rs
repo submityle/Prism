@@ -38,8 +38,8 @@ use bevy_render::{
 };
 use bevy_shader::Shader;
 
-use super::abi::MotionBlurParams;
 use super::super::resources::SCENE_COLOR_FORMAT;
+use super::abi::MotionBlurParams;
 
 /// Half-float RG storage/sampled format of the `TileMax` and `NeighborMax` tile
 /// fields: two channels hold a pixel-space velocity, half precision is ample
@@ -117,7 +117,10 @@ fn neighbor_max_layout_entries() -> BindGroupLayoutEntries<2> {
     BindGroupLayoutEntries::with_indices(
         ShaderStages::COMPUTE,
         (
-            (2, texture_2d(TextureSampleType::Float { filterable: false })),
+            (
+                2,
+                texture_2d(TextureSampleType::Float { filterable: false }),
+            ),
             (
                 3,
                 texture_storage_2d(MOTION_BLUR_TILE_FORMAT, StorageTextureAccess::WriteOnly),
@@ -135,10 +138,22 @@ fn reconstruct_layout_entries() -> BindGroupLayoutEntries<5> {
     BindGroupLayoutEntries::with_indices(
         ShaderStages::COMPUTE,
         (
-            (0, texture_2d(TextureSampleType::Float { filterable: false })),
-            (4, texture_2d(TextureSampleType::Float { filterable: false })),
-            (5, texture_2d(TextureSampleType::Float { filterable: false })),
-            (6, texture_2d(TextureSampleType::Float { filterable: false })),
+            (
+                0,
+                texture_2d(TextureSampleType::Float { filterable: false }),
+            ),
+            (
+                4,
+                texture_2d(TextureSampleType::Float { filterable: false }),
+            ),
+            (
+                5,
+                texture_2d(TextureSampleType::Float { filterable: false }),
+            ),
+            (
+                6,
+                texture_2d(TextureSampleType::Float { filterable: false }),
+            ),
             (
                 7,
                 texture_storage_2d(SCENE_COLOR_FORMAT, StorageTextureAccess::WriteOnly),

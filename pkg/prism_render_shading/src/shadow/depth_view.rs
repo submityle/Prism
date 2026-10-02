@@ -138,7 +138,14 @@ pub fn plan_shadow_depth_draws(
                     });
                 }
             }
-            (ShadowKind::Point, ShadowViewGeometry::Point { position, near, far }) => {
+            (
+                ShadowKind::Point,
+                ShadowViewGeometry::Point {
+                    position,
+                    near,
+                    far,
+                },
+            ) => {
                 let faces = cube_face_view_projections(position, near, far);
                 let inv_range = far.max(1.0e-4).recip();
                 for (sub, view_projection) in faces.iter().enumerate() {
@@ -174,7 +181,9 @@ pub fn plan_shadow_depth_draws(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shadow::atlas::{allocate_shadow_atlas, AtlasConfig, ShadowRequest, POINT_LAYER_COUNT};
+    use crate::shadow::atlas::{
+        allocate_shadow_atlas, AtlasConfig, ShadowRequest, POINT_LAYER_COUNT,
+    };
 
     fn directional_geometry() -> ShadowViewGeometry {
         let mut cascades = [CascadeMatrix::identity(); MAX_CASCADE_COUNT];

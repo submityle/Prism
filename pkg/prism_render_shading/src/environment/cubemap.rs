@@ -221,7 +221,8 @@ mod tests {
         // Band 0 carries the DC radiance; higher bands cancel for a constant.
         for channel in 0..3 {
             assert!(
-                (probe.coefficients[0][channel] - reference.coefficients[0][channel]).abs() < 1.0e-2,
+                (probe.coefficients[0][channel] - reference.coefficients[0][channel]).abs()
+                    < 1.0e-2,
                 "band0 channel {channel}: {} vs {}",
                 probe.coefficients[0][channel],
                 reference.coefficients[0][channel]

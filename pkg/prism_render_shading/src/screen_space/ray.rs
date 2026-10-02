@@ -178,7 +178,10 @@ mod tests {
         let r = reflect(Vec3::new(0.0, -1.0, 0.0), Vec3::new(0.0, 1.0, 0.0));
         assert!((r - Vec3::new(0.0, 1.0, 0.0)).length() < 1.0e-6);
         // A 45-degree ray reflects to the mirror angle.
-        let r = reflect(Vec3::new(1.0, -1.0, 0.0).normalize(), Vec3::new(0.0, 1.0, 0.0));
+        let r = reflect(
+            Vec3::new(1.0, -1.0, 0.0).normalize(),
+            Vec3::new(0.0, 1.0, 0.0),
+        );
         assert!((r - Vec3::new(1.0, 1.0, 0.0).normalize()).length() < 1.0e-6);
     }
 
@@ -196,12 +199,7 @@ mod tests {
     #[test]
     fn build_ray_rejects_surfaces_behind_camera() {
         let camera = SsrCamera {
-            clip_from_view: reverse_z_perspective(
-                core::f32::consts::FRAC_PI_2,
-                1.0,
-                0.5,
-                100.0,
-            ),
+            clip_from_view: reverse_z_perspective(core::f32::consts::FRAC_PI_2, 1.0, 0.5, 100.0),
             near: 0.5,
         };
         // Surface behind the camera (positive z) -> no ray.
@@ -211,12 +209,7 @@ mod tests {
     #[test]
     fn build_ray_projects_endpoints_and_stays_in_front() {
         let camera = SsrCamera {
-            clip_from_view: reverse_z_perspective(
-                core::f32::consts::FRAC_PI_2,
-                1.0,
-                0.5,
-                100.0,
-            ),
+            clip_from_view: reverse_z_perspective(core::f32::consts::FRAC_PI_2, 1.0, 0.5, 100.0),
             near: 0.5,
         };
         // A point 5 units deep on a floor whose normal points up; the camera
@@ -234,12 +227,7 @@ mod tests {
     #[test]
     fn build_ray_clips_to_near_plane_when_reflection_returns() {
         let camera = SsrCamera {
-            clip_from_view: reverse_z_perspective(
-                core::f32::consts::FRAC_PI_2,
-                1.0,
-                0.5,
-                100.0,
-            ),
+            clip_from_view: reverse_z_perspective(core::f32::consts::FRAC_PI_2, 1.0, 0.5, 100.0),
             near: 0.5,
         };
         // Surface just in front of the camera whose reflection points back

@@ -217,7 +217,8 @@ fn run_layer_coupling_on_gpu(
     });
 
     let count = positions.len();
-    let positions_buf = storage_from_slice(device, "cloth_layers_positions", positions, [0.0f32; 4]);
+    let positions_buf =
+        storage_from_slice(device, "cloth_layers_positions", positions, [0.0f32; 4]);
     let layer_buf = storage_from_slice(device, "cloth_layers_layer_of", layer_of, 0u32);
     let normals_buf = storage_from_slice(device, "cloth_layers_normals", normals, [0.0f32; 4]);
     let offsets_buf = storage_from_slice(device, "cloth_layers_offsets", offsets, 0u32);
@@ -362,7 +363,11 @@ fn assert_layer_parity(
         gpu_params,
     );
 
-    assert_eq!(gpu.len(), golden.len(), "correction readback length mismatch");
+    assert_eq!(
+        gpu.len(),
+        golden.len(),
+        "correction readback length mismatch"
+    );
     for (i, (g, c)) in gpu.iter().zip(golden.iter()).enumerate() {
         for axis in 0..3 {
             assert!(
@@ -403,7 +408,9 @@ fn oriented_contact_like_golden() {
         thickness: 0.1,
         cell_size: 0.2,
     };
-    assert_layer_parity(&device, &queue, &wgsl, &particles, &layer_of, &normals, params);
+    assert_layer_parity(
+        &device, &queue, &wgsl, &particles, &layer_of, &normals, params,
+    );
 }
 
 /// The radial fallback (no usable inner normal) along an axis-aligned delta must
@@ -426,7 +433,9 @@ fn radial_contact_like_golden() {
         thickness: 0.1,
         cell_size: 0.2,
     };
-    assert_layer_parity(&device, &queue, &wgsl, &particles, &layer_of, &normals, params);
+    assert_layer_parity(
+        &device, &queue, &wgsl, &particles, &layer_of, &normals, params,
+    );
 }
 
 /// A pinned inner particle takes none of the correction; the whole push lands on
@@ -449,7 +458,9 @@ fn pinned_inner_like_golden() {
         thickness: 0.1,
         cell_size: 0.2,
     };
-    assert_layer_parity(&device, &queue, &wgsl, &particles, &layer_of, &normals, params);
+    assert_layer_parity(
+        &device, &queue, &wgsl, &particles, &layer_of, &normals, params,
+    );
 }
 
 /// Same-layer particles never couple: the golden leaves them untouched and the
@@ -472,5 +483,7 @@ fn same_layer_no_correction() {
         thickness: 0.1,
         cell_size: 0.2,
     };
-    assert_layer_parity(&device, &queue, &wgsl, &particles, &layer_of, &normals, params);
+    assert_layer_parity(
+        &device, &queue, &wgsl, &particles, &layer_of, &normals, params,
+    );
 }

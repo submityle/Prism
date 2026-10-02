@@ -1,4 +1,4 @@
-//! Contracts for Prism's Vulkan-first rendering architecture.
+//! Contracts for Prism's wgpu-runtime rendering architecture.
 //!
 //! ECS remains responsible for scene state, plugins, and CPU scheduling. The
 //! frame graph describes GPU resource access and submission dependencies.

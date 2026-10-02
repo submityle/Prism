@@ -18,12 +18,12 @@ use bevy_render::{
     renderer::{RenderContext, ViewQuery},
 };
 
+use super::super::resources::ViewVisibilityBuffer;
 use super::abi::POSTERIZE_WORKGROUP_SIZE;
 use super::bind_groups::ViewPosterizeBindGroup;
 use super::pipeline::PosterizePipeline;
 use super::resources::ViewPosterize;
 use super::settings::PrismPosterizeSettings;
-use super::super::resources::ViewVisibilityBuffer;
 
 /// `Core3d` scheduling system recording the `posterize_main` dispatch for every
 /// view whose posterize texture and bind group are resident.

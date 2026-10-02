@@ -58,7 +58,12 @@ pub(crate) fn prepare_upscale_bind_groups(
     mut commands: Commands,
     pipeline: Res<UpscalePipeline>,
     device: Res<RenderDevice>,
-    views: Query<(Entity, &ViewVisibilityBuffer, &ViewSsrTextures, &ViewUpscale)>,
+    views: Query<(
+        Entity,
+        &ViewVisibilityBuffer,
+        &ViewSsrTextures,
+        &ViewUpscale,
+    )>,
 ) {
     for (entity, visibility, ssr, upscale) in &views {
         // Order mirrors `upscale_reconstruct.wesl`: render_color(0),

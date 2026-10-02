@@ -22,15 +22,15 @@ use bevy_ecs::{prelude::*, world::FromWorld};
 use bevy_render::{
     render_resource::{
         AddressMode, Buffer, BufferUsages, Extent3d, FilterMode, RawBufferVec, Sampler,
-        SamplerDescriptor, TextureAspect, TextureDescriptor, TextureDimension,
-        TextureFormat, TextureUsages, TextureView, TextureViewDescriptor, TextureViewDimension,
+        SamplerDescriptor, TextureAspect, TextureDescriptor, TextureDimension, TextureFormat,
+        TextureUsages, TextureView, TextureViewDescriptor, TextureViewDimension,
     },
     renderer::{RenderDevice, RenderQueue},
 };
 
 use super::abi::{
-    GpuDirectionalShadow, GpuPointShadow, GpuShadowGlobals, GpuSpotShadow,
-    MAX_SHADOW_DIRECTIONALS, MAX_SHADOW_POINTS, MAX_SHADOW_SPOTS,
+    GpuDirectionalShadow, GpuPointShadow, GpuShadowGlobals, GpuSpotShadow, MAX_SHADOW_DIRECTIONALS,
+    MAX_SHADOW_POINTS, MAX_SHADOW_SPOTS,
 };
 use super::pipeline::SHADOW_DEPTH_FORMAT;
 
@@ -309,8 +309,7 @@ impl ShadowGpuBuffers {
             .extend(shadows.directionals[..directional_len].iter().copied());
         self.points
             .extend(shadows.points[..point_len].iter().copied());
-        self.spots
-            .extend(shadows.spots[..spot_len].iter().copied());
+        self.spots.extend(shadows.spots[..spot_len].iter().copied());
 
         // Keep the header counts authoritative against the clamped arrays so the
         // shader never reads past a populated slot even if extraction overfills.

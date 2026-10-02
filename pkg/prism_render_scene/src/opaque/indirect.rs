@@ -10,12 +10,12 @@ use bevy_render::{
     render_phase::{PhaseItem, RenderCommand, RenderCommandResult, TrackedRenderPass},
 };
 
-use crate::{
-    visibility::runtime::UnifiedVisibilityState, GpuSceneInstanceAddress, RenderGpuScene,
-};
+use crate::{visibility::runtime::UnifiedVisibilityState, GpuSceneInstanceAddress, RenderGpuScene};
 
-const INDEXED_COMMAND_SIZE: u64 = size_of::<bevy_render::render_resource::DrawIndexedIndirectArgs>() as u64;
-const NON_INDEXED_COMMAND_SIZE: u64 = size_of::<bevy_render::render_resource::DrawIndirectArgs>() as u64;
+const INDEXED_COMMAND_SIZE: u64 =
+    size_of::<bevy_render::render_resource::DrawIndexedIndirectArgs>() as u64;
+const NON_INDEXED_COMMAND_SIZE: u64 =
+    size_of::<bevy_render::render_resource::DrawIndirectArgs>() as u64;
 
 pub(crate) struct DrawGpuSceneIndirectBin;
 
@@ -70,9 +70,11 @@ impl RenderCommand<Opaque3d> for DrawGpuSceneIndirectBin {
         let Some(handle) = scene.handle_for_entity(item.entity()) else {
             return RenderCommandResult::Skip;
         };
-        let Some(view_bins) = visibility.draw_bins.iter().find(|bins| {
-            visibility.retained_view(bins.view) == Some(view.retained_view_entity)
-        }) else {
+        let Some(view_bins) = visibility
+            .draw_bins
+            .iter()
+            .find(|bins| visibility.retained_view(bins.view) == Some(view.retained_view_entity))
+        else {
             return RenderCommandResult::Skip;
         };
         if !bin_indirect_is_safe(view_bins, handle) {
@@ -85,7 +87,11 @@ impl RenderCommand<Opaque3d> for DrawGpuSceneIndirectBin {
                 pass,
             );
         }
-        let Some(bin) = view_bins.bins.iter().find(|bin| bin.representative_scene == handle) else {
+        let Some(bin) = view_bins
+            .bins
+            .iter()
+            .find(|bin| bin.representative_scene == handle)
+        else {
             return RenderCommandResult::Skip;
         };
         if bin.key.pass_mask & prism_render_visibility::RenderPassMask::OPAQUE.0 == 0 {
@@ -170,10 +176,7 @@ fn bin_indirect_is_safe(
 
 #[cfg(test)]
 mod tests {
-    use prism_render_architecture::{
-        abi::GenerationalHandle,
-        geometry::GeometryPrimitiveKind,
-    };
+    use prism_render_architecture::{abi::GenerationalHandle, geometry::GeometryPrimitiveKind};
     use prism_render_visibility::{
         build_view_draw_bins, DrawBinCandidate, DrawBinKey, RenderPassMask,
     };

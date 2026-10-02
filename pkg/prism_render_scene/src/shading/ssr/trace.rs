@@ -115,8 +115,7 @@ pub(crate) fn init_ssr_trace_pipeline(
         ..Default::default()
     });
 
-    let shader: Handle<Shader> =
-        load_embedded_asset!(asset_server.as_ref(), "../shaders/ssr.wesl");
+    let shader: Handle<Shader> = load_embedded_asset!(asset_server.as_ref(), "../shaders/ssr.wesl");
 
     let trace = cache.queue_compute_pipeline(ComputePipelineDescriptor {
         label: Some("prism SSR trace".into()),

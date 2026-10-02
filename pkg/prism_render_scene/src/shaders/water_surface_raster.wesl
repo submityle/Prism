@@ -1104,7 +1104,101 @@ fn water_horizon_occlusion(reflection_dir: vec3<f32>, bent_normal_view: vec3<f32
     return water_cone_cone_intersection(reflection_dir, rim, bent_normal_view, aperture);
 }
 
-fn water_ibl(surface: SurfaceSample, frame: ShadingFrame, ssr: vec4<f32>, bent_normal_view: vec3<f32>, cone_aperture: f32) -> vec3<f32> {
+// --- Screen-space one-bounce indirect diffuse (SSGI) -----------------------
+// The `ssgi_`-prefixed helpers below are the device twins of the `CPU` golden
+// in `water::surface_ssgi` (`rec709_luminance` / `karis_weight` /
+// `clamp_firefly` / `indirect_diffuse`), matched line-for-line so the firefly
+// clamp and the Lambert combine agree between host and shader by construction.
+
+// Rec.709 relative luminance of a linear-RGB colour (twin of `rec709_luminance`).
+fn ssgi_luminance(c: vec3<f32>) -> f32 {
+    return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+}
+
+// Karis anti-firefly accumulation weight `1 / (1 + max(luma, 0))` (twin of
+// `karis_weight`): bright outliers contribute proportionally less and a
+// negative luminance clamps to the black weight rather than exploding.
+fn ssgi_karis_weight(luma: f32) -> f32 {
+    return 1.0 / (1.0 + max(luma, 0.0));
+}
+
+// Luminance firefly clamp (twin of `clamp_firefly`): a colour whose Rec.709
+// luminance exceeds `max_luminance` is rescaled uniformly across `RGB` down to
+// that ceiling (chromaticity preserved); a non-positive ceiling disables it.
+fn ssgi_clamp_firefly(rgb: vec3<f32>, max_luminance: f32) -> vec3<f32> {
+    if max_luminance <= 0.0 {
+        return rgb;
+    }
+    let luma = ssgi_luminance(rgb);
+    if luma > max_luminance && luma > 1.0e-6 {
+        let scale = max_luminance / luma;
+        return rgb * scale;
+    }
+    return rgb;
+}
+
+// Physical one-bounce indirect diffuse (twin of `indirect_diffuse`): the
+// gathered incident radiance times the surface albedo and the Lambert `1/PI`
+// normalisation, scaled by the gain and clamped non-negative per channel so a
+// stray negative input cannot subtract light.
+fn ssgi_indirect_diffuse(radiance: vec3<f32>, albedo: vec3<f32>, intensity: f32) -> vec3<f32> {
+    let gain = max(intensity, 0.0) * INV_PI;
+    return max(radiance * max(albedo, vec3<f32>(0.0)) * gain, vec3<f32>(0.0));
+}
+
+// Gather a single bounce of near-field indirect diffuse out of the already
+// composited `@group(0)` `scene_color`, marching the `GTAO` bent normal across
+// the shared reverse-Z Hi-Z pyramid at `@group(3)`. Mirrors the cheap
+// screen-space half of `UE5` `Lumen`'s first bounce: the bent-normal segment is
+// projected to screen, each tapped texel's view position is reconstructed from
+// the Hi-Z depth (so real occluders are respected), samples below the bent
+// horizon or past the radius are rejected, and the surviving radiance is
+// accumulated with a cosine- and `Karis`-weighted mean before the Lambert
+// combine. Returns zero when the gather is disabled or finds no valid surface.
+fn water_ssgi_gather(world_position: vec3<f32>, bent_normal_view: vec3<f32>, albedo: vec3<f32>) -> vec3<f32> {
+    if ssgi_cfg.sample_enable == 0u {
+        return vec3<f32>(0.0);
+    }
+    let radius = max(ssgi_cfg.radius, 1.0e-3);
+    let p_view = (ssr_cfg.view_from_world * vec4<f32>(world_position, 1.0)).xyz;
+    let bent = normalize(bent_normal_view);
+    let origin = ssr_project_view(p_view);
+    let tip = ssr_project_view(p_view + bent * radius);
+    let delta_uv = tip.uv - origin.uv;
+    let steps = max(ssgi_cfg.step_count, 1u);
+    var accum = vec3<f32>(0.0);
+    var weight_sum = 0.0;
+    for (var i = 1u; i <= steps; i = i + 1u) {
+        let f = f32(i) / f32(steps);
+        let uv = origin.uv + delta_uv * f;
+        if uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 {
+            continue;
+        }
+        let depth = gtao_sample_depth(uv);
+        let hit_view = gtao_view_from_uv_depth(uv, depth);
+        let to_hit = hit_view - p_view;
+        let dist = length(to_hit);
+        if dist <= 1.0e-4 || dist > radius {
+            continue;
+        }
+        let cos_h = dot(bent, to_hit / dist);
+        if cos_h < ssgi_cfg.min_cosine {
+            continue;
+        }
+        var radiance = textureSampleLevel(scene_color, scene_sampler, uv, 0.0).rgb;
+        radiance = ssgi_clamp_firefly(radiance, ssgi_cfg.max_luminance);
+        let w = cos_h * ssgi_karis_weight(ssgi_luminance(radiance));
+        accum = accum + radiance * w;
+        weight_sum = weight_sum + w;
+    }
+    if weight_sum <= 1.0e-6 {
+        return vec3<f32>(0.0);
+    }
+    let mean_radiance = accum / weight_sum;
+    return ssgi_indirect_diffuse(mean_radiance, albedo, ssgi_cfg.intensity);
+}
+
+fn water_ibl(surface: SurfaceSample, frame: ShadingFrame, ssr: vec4<f32>, bent_normal_view: vec3<f32>, cone_aperture: f32, world_position: vec3<f32>) -> vec3<f32> {
     let env = light_env[0];
     let occlusion = clamp(surface.ambient_occlusion, 0.0, 1.0);
     let n = brdf_normalize_or(frame.normal, vec3<f32>(0.0, 1.0, 0.0));
@@ -1113,6 +1207,9 @@ fn water_ibl(surface: SurfaceSample, frame: ShadingFrame, ssr: vec4<f32>, bent_n
     let roughness = clamp(surface.perceptual_roughness, 0.0, 1.0);
     let metallic = clamp(surface.metallic, 0.0, 1.0);
     let reflectance = clamp(surface.reflectance, 0.0, 1.0);
+    // Near-field one-bounce screen-space GI, gathered along the bent normal
+    // and added to the diffuse ambient term (metals carry no diffuse bounce).
+    let ssgi = water_ssgi_gather(world_position, bent_normal_view, surface.base_color * (1.0 - metallic));
     let f0 = mix(vec3<f32>(0.16 * reflectance * reflectance), surface.base_color, metallic);
     let dfg = env_brdf_approx(n_dot_v, roughness);
     // Specular lobe integrates only a narrow cone, so weight it by the
@@ -1131,9 +1228,9 @@ fn water_ibl(surface: SurfaceSample, frame: ShadingFrame, ssr: vec4<f32>, bent_n
         let horizon = water_horizon_occlusion(reflection_view, bent_normal_view, cone_aperture);
         let prefiltered = max(sh_radiance(env, reflection), vec3<f32>(0.0)) * horizon;
         let env_specular = mix(prefiltered, ssr.rgb, ssr.a) * spec_weight;
-        return diffuse * occlusion + env_specular;
+        return diffuse * occlusion + ssgi + env_specular;
     }
-    return surface.base_color * env.ambient * (occlusion * (1.0 - metallic)) + ssr.rgb * spec_weight * ssr.a;
+    return surface.base_color * env.ambient * (occlusion * (1.0 - metallic)) + ssr.rgb * spec_weight * ssr.a + ssgi;
 }
 
 // Sample the scene color behind the surface, offset by the surface normal, for
@@ -1204,7 +1301,7 @@ fn shade_pbr_core(in: VertexOutput) -> vec4<f32> {
     let gtao_uv = in.clip_position.xy / max(view.viewport.xy, vec2<f32>(1.0));
     let gtao = water_gtao(in.world_position, frame.normal, gtao_uv);
     surface.ambient_occlusion = gtao.ao;
-    lit = lit + water_ibl(surface, frame, ssr, gtao.bent_normal_view, gtao.aperture);
+    lit = lit + water_ibl(surface, frame, ssr, gtao.bent_normal_view, gtao.aperture, in.world_position);
     let refracted_raw = refraction_color(in.clip_position, frame.normal);
     // Composite the underwater single-scatter froxel volume into the refracted
     // scene so the water body has a real participating medium (`Beer-Lambert`

@@ -64,31 +64,33 @@ mod dispatch;
 mod hzb;
 mod pipeline;
 mod reconstruct;
-mod temporal;
 mod repack;
-mod trace;
 mod resources;
+mod temporal;
+mod trace;
 
 #[cfg(test)]
 mod shader_tests;
 
 pub(crate) use bind_groups::prepare_ssr_prepass_bind_groups;
-pub(crate) use dispatch::ssr_prepass_pass;
-pub(crate) use hzb::{init_ssr_hzb_pipeline, prepare_ssr_hzb_bind_groups, ssr_hzb_pass};
 pub(crate) use color_mips::{
     init_ssr_color_mips_pipeline, prepare_ssr_color_mips_bind_groups, ssr_color_mips_pass,
 };
 pub(crate) use composite::{
     init_ssr_composite_pipeline, prepare_ssr_composite_bind_groups, ssr_composite_pass,
 };
-pub(crate) use trace::{init_ssr_trace_pipeline, prepare_ssr_trace_bind_groups, ssr_trace_pass};
+pub(crate) use dispatch::ssr_prepass_pass;
+pub(crate) use hzb::{init_ssr_hzb_pipeline, prepare_ssr_hzb_bind_groups, ssr_hzb_pass};
+pub(crate) use pipeline::init_ssr_prepass_pipeline;
 pub(crate) use reconstruct::{
     init_ssr_reconstruct_pipeline, prepare_ssr_reconstruct_bind_groups, ssr_reconstruct_pass,
 };
+pub(crate) use repack::{
+    init_ssr_repack_pipeline, prepare_ssr_repack_bind_groups, ssr_repack_pass,
+};
+pub(crate) use resources::{prepare_ssr_textures, ViewSsrTextures};
 pub(crate) use temporal::{
     init_ssr_temporal_pipeline, prepare_ssr_temporal_bind_groups, prepare_ssr_temporal_textures,
     ssr_temporal_pass,
 };
-pub(crate) use repack::{init_ssr_repack_pipeline, prepare_ssr_repack_bind_groups, ssr_repack_pass};
-pub(crate) use pipeline::init_ssr_prepass_pipeline;
-pub(crate) use resources::{prepare_ssr_textures, ViewSsrTextures};
+pub(crate) use trace::{init_ssr_trace_pipeline, prepare_ssr_trace_bind_groups, ssr_trace_pass};

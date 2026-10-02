@@ -26,8 +26,8 @@ use bevy_render::{
 };
 use bevy_shader::Shader;
 
-use super::abi::GpuKuwaharaParams;
 use super::super::resources::SCENE_COLOR_FORMAT;
+use super::abi::GpuKuwaharaParams;
 
 /// The Kuwahara compute pipeline and its owned group-0 layout.
 #[derive(Resource)]

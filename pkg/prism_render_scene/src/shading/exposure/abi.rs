@@ -167,8 +167,10 @@ mod tests {
 
     #[test]
     fn histogram_config_folds_in_the_golden_window_and_extent() {
-        let config =
-            GpuExposureHistogramConfig::from_view(HistogramRange::default(), UVec2::new(1920, 1080));
+        let config = GpuExposureHistogramConfig::from_view(
+            HistogramRange::default(),
+            UVec2::new(1920, 1080),
+        );
         assert_eq!(config.min_log2, -10.0);
         assert_eq!(config.max_log2, 12.0);
         assert_eq!(config.width, 1920);

@@ -166,7 +166,11 @@ pub struct SampledMaterial {
 #[must_use]
 pub fn sampled_material_defaults(params: &MaterialModulationParams) -> SampledMaterial {
     SampledMaterial {
-        base_color: [params.base_color[0], params.base_color[1], params.base_color[2]],
+        base_color: [
+            params.base_color[0],
+            params.base_color[1],
+            params.base_color[2],
+        ],
         base_alpha: params.base_color[3],
         emissive: params.emissive,
         metallic: params.metallic,
@@ -263,7 +267,12 @@ pub fn sample_material(
 ) -> SampledMaterial {
     let mut sampled = sampled_material_defaults(params);
     for binding in bindings {
-        sampled = fold_material_texel(binding.semantic, binding.texel, params.normal_scale, sampled);
+        sampled = fold_material_texel(
+            binding.semantic,
+            binding.texel,
+            params.normal_scale,
+            sampled,
+        );
     }
     sampled
 }
@@ -304,7 +313,10 @@ mod tests {
     #[test]
     fn flat_normal_texel_decodes_to_plus_z() {
         // The heap's FLAT_NORMAL default slot is (0.5, 0.5, 1.0).
-        assert!(approx3(decode_tangent_normal([0.5, 0.5, 1.0], 1.0), [0.0, 0.0, 1.0]));
+        assert!(approx3(
+            decode_tangent_normal([0.5, 0.5, 1.0], 1.0),
+            [0.0, 0.0, 1.0]
+        ));
     }
 
     #[test]
@@ -319,13 +331,19 @@ mod tests {
     #[test]
     fn normal_scale_flattens_the_tangent_plane() {
         // normal_scale = 0 removes all XY perturbation, leaving +Z.
-        assert!(approx3(decode_tangent_normal([1.0, 0.0, 0.5], 0.0), [0.0, 0.0, 1.0]));
+        assert!(approx3(
+            decode_tangent_normal([1.0, 0.0, 0.5], 0.0),
+            [0.0, 0.0, 1.0]
+        ));
     }
 
     #[test]
     fn degenerate_normal_texel_falls_back_to_plus_z() {
         // A (0.5, 0.5, 0.5) texel decodes to the zero vector before renormalize.
-        assert!(approx3(decode_tangent_normal([0.5, 0.5, 0.5], 1.0), [0.0, 0.0, 1.0]));
+        assert!(approx3(
+            decode_tangent_normal([0.5, 0.5, 0.5], 1.0),
+            [0.0, 0.0, 1.0]
+        ));
     }
 
     #[test]
@@ -346,7 +364,12 @@ mod tests {
         // sRGB(1.0) == 1.0, so a white base-color / emissive texel is identity.
         sampled = fold_material_texel(SEMANTIC_BASE_COLOR, [1.0, 1.0, 1.0, 1.0], 1.0, sampled);
         sampled = fold_material_texel(SEMANTIC_EMISSIVE, [1.0, 1.0, 1.0, 1.0], 1.0, sampled);
-        sampled = fold_material_texel(SEMANTIC_METALLIC_ROUGHNESS, [1.0, 1.0, 1.0, 1.0], 1.0, sampled);
+        sampled = fold_material_texel(
+            SEMANTIC_METALLIC_ROUGHNESS,
+            [1.0, 1.0, 1.0, 1.0],
+            1.0,
+            sampled,
+        );
         sampled = fold_material_texel(SEMANTIC_OCCLUSION, [1.0, 1.0, 1.0, 1.0], 1.0, sampled);
         sampled = fold_material_texel(SEMANTIC_NORMAL, [0.5, 0.5, 1.0, 1.0], 1.0, sampled);
 
@@ -373,7 +396,10 @@ mod tests {
             sampled_material_defaults(&params),
         );
         let linear = srgb_channel_to_linear(0.5);
-        assert!(approx3(sampled.base_color, [0.5 * linear, 0.5 * linear, 0.5 * linear]));
+        assert!(approx3(
+            sampled.base_color,
+            [0.5 * linear, 0.5 * linear, 0.5 * linear]
+        ));
         assert!(approx(sampled.base_alpha, 0.5));
     }
 
@@ -419,8 +445,18 @@ mod tests {
         };
         let mut sampled = sampled_material_defaults(&params);
         sampled = fold_material_texel(SEMANTIC_CLEAR_COAT, [0.5, 0.0, 0.0, 1.0], 1.0, sampled);
-        sampled = fold_material_texel(SEMANTIC_CLEAR_COAT_ROUGHNESS, [0.0, 0.4, 0.0, 1.0], 1.0, sampled);
-        sampled = fold_material_texel(SEMANTIC_CLEAR_COAT_NORMAL, [1.0, 0.5, 0.5, 1.0], 1.0, sampled);
+        sampled = fold_material_texel(
+            SEMANTIC_CLEAR_COAT_ROUGHNESS,
+            [0.0, 0.4, 0.0, 1.0],
+            1.0,
+            sampled,
+        );
+        sampled = fold_material_texel(
+            SEMANTIC_CLEAR_COAT_NORMAL,
+            [1.0, 0.5, 0.5, 1.0],
+            1.0,
+            sampled,
+        );
         assert!(approx(sampled.clearcoat, 0.4));
         assert!(approx(sampled.clearcoat_roughness, 0.2));
         assert!(sampled.has_clearcoat_normal);

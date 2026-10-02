@@ -162,7 +162,10 @@ impl Default for ChromaticAberrationParams {
 /// conversion so it is directly testable. With [`ChromaticAberrationParams::default`]
 /// (`intensity = 0`) all three equal `uv`, i.e. the identity.
 #[must_use]
-pub fn apply_chromatic_aberration(uv: [f32; 2], params: &ChromaticAberrationParams) -> [[f32; 2]; 3] {
+pub fn apply_chromatic_aberration(
+    uv: [f32; 2],
+    params: &ChromaticAberrationParams,
+) -> [[f32; 2]; 3] {
     let (dir, dist) = radial_offset(uv, params.center);
     [
         channel_uv(uv, dir, dist, params.intensity, 0),
@@ -311,7 +314,10 @@ mod tests {
     fn spectral_lut_midpoint_peaks_green() {
         let mid = spectral_lut(0.5);
         approx3(mid, [0.25, 1.0, 0.25]);
-        assert!(mid[1] > mid[0] && mid[1] > mid[2], "green should peak mid-band");
+        assert!(
+            mid[1] > mid[0] && mid[1] > mid[2],
+            "green should peak mid-band"
+        );
     }
 
     // --- spectral_offset ---
@@ -372,9 +378,18 @@ mod tests {
         let samples = apply_chromatic_aberration(uv, &params);
         // Green untouched, red/blue mirror about the source uv.
         approx2(samples[1], uv);
-        approx2([(samples[0][0] + samples[2][0]) * 0.5, (samples[0][1] + samples[2][1]) * 0.5], uv);
+        approx2(
+            [
+                (samples[0][0] + samples[2][0]) * 0.5,
+                (samples[0][1] + samples[2][1]) * 0.5,
+            ],
+            uv,
+        );
         assert!(samples[0][0] > uv[0], "red should push outward from centre");
-        assert!(samples[2][0] < uv[0], "blue should pull inward toward centre");
+        assert!(
+            samples[2][0] < uv[0],
+            "blue should pull inward toward centre"
+        );
     }
 
     #[test]

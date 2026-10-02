@@ -14,8 +14,8 @@ use bevy_render::{
     renderer::{RenderContext, ViewQuery},
 };
 
-use super::abi::{GpuTaaResolveParams, TAA_WORKGROUP_SIZE};
 use super::super::resources::ViewVisibilityBuffer;
+use super::abi::{GpuTaaResolveParams, TAA_WORKGROUP_SIZE};
 use super::bind_groups::ViewTaaBindGroup;
 use super::pipeline::TaaResolvePipeline;
 use super::resources::ViewTaa;

@@ -77,11 +77,7 @@ pub fn distance_from_achromatic(rgb: [f32; 3], ac: f32) -> [f32; 3] {
     if ac <= 0.0 {
         return [0.0, 0.0, 0.0];
     }
-    [
-        (ac - rgb[0]) / ac,
-        (ac - rgb[1]) / ac,
-        (ac - rgb[2]) / ac,
-    ]
+    [(ac - rgb[0]) / ac, (ac - rgb[1]) / ac, (ac - rgb[2]) / ac]
 }
 
 /// Compress a single relative distance along a rational knee.
@@ -396,7 +392,10 @@ mod tests {
         };
         let rgb = [1.2, 0.5, -0.2];
         let out = apply_gamut_compress(rgb, &params);
-        assert!(out[2] > rgb[2], "the negative channel is raised toward gamut");
+        assert!(
+            out[2] > rgb[2],
+            "the negative channel is raised toward gamut"
+        );
         assert!(out[2] >= 0.0, "and brought back into the displayable range");
         // The in-gamut middle channel (dist 0.5833 < threshold) is untouched.
         approx(out[1], 0.5);

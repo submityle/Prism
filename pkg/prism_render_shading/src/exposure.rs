@@ -86,8 +86,7 @@ impl PhysicalCamera {
         if self.aperture <= 0.0 || self.shutter_time <= 0.0 || self.iso <= 0.0 {
             return 0.0;
         }
-        ops::log2(self.aperture * self.aperture / self.shutter_time)
-            - ops::log2(self.iso / 100.0)
+        ops::log2(self.aperture * self.aperture / self.shutter_time) - ops::log2(self.iso / 100.0)
     }
 }
 
@@ -192,7 +191,10 @@ impl Default for HistogramPercentiles {
     /// Discard the darkest 50% and brightest 10%, a common AAA starting point
     /// that ignores dark background and tiny specular highlights.
     fn default() -> Self {
-        Self { low: 0.5, high: 0.1 }
+        Self {
+            low: 0.5,
+            high: 0.1,
+        }
     }
 }
 
@@ -463,7 +465,10 @@ mod tests {
         let mut bins = vec![0_u32; count as usize];
         bins[20] = 1000;
         // No trimming so the sole bin survives.
-        let none = HistogramPercentiles { low: 0.0, high: 0.0 };
+        let none = HistogramPercentiles {
+            low: 0.0,
+            high: 0.0,
+        };
         approx(
             average_luminance_from_histogram(&bins, range, none),
             range.bin_center_luminance(20, count),
@@ -496,11 +501,13 @@ mod tests {
         bins[1] = 10;
         bins[2] = 10;
         // low + high >= 1 collapses the window; fall back rather than return 0.
-        let collapse = HistogramPercentiles { low: 0.6, high: 0.6 };
+        let collapse = HistogramPercentiles {
+            low: 0.6,
+            high: 0.6,
+        };
         let avg = average_luminance_from_histogram(&bins, range, collapse);
-        let expect = (range.bin_center_luminance(1, count)
-            + range.bin_center_luminance(2, count))
-            / 2.0;
+        let expect =
+            (range.bin_center_luminance(1, count) + range.bin_center_luminance(2, count)) / 2.0;
         approx(avg, expect);
     }
 

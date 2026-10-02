@@ -55,10 +55,10 @@
 mod abi;
 
 #[cfg(test)]
+mod footprint_gpu_tests;
+#[cfg(test)]
 mod gpu_tests;
 #[cfg(test)]
 mod shader_tests;
 #[cfg(test)]
 mod tlas_gpu_tests;
-#[cfg(test)]
-mod footprint_gpu_tests;

@@ -35,7 +35,6 @@ pub(crate) struct GpuGtaoPrepassParams {
     pub _pad1: u32,
 }
 
-
 /// Workgroup size (per axis) of the `gtao` kernel compute entry point.
 ///
 /// Must match `@workgroup_size(N, N, 1)` in `shaders/gtao.wesl`; the dispatch

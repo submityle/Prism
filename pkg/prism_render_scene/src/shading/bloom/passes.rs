@@ -106,7 +106,13 @@ pub(crate) fn bloom_pass(
         });
 
     // 1. Full-res copy of scene_color into the base (dst guard only).
-    record(&mut pass, copy, &groups.copy, GpuBloomParams::new(full, full, bloom), full);
+    record(
+        &mut pass,
+        copy,
+        &groups.copy,
+        GpuBloomParams::new(full, full, bloom),
+        full,
+    );
 
     // 2. Prefilter + partial-Karis first downsample: full-res source -> mip 0.
     record(

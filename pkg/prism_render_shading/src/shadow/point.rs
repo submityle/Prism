@@ -292,7 +292,10 @@ mod tests {
         ] {
             let (face, uv) = cube_face_and_uv(dir);
             let clip = transform_point(&vps[face], dir);
-            assert!(clip[3] > 0.0, "direction {dir:?} projects behind face {face}");
+            assert!(
+                clip[3] > 0.0,
+                "direction {dir:?} projects behind face {face}"
+            );
             let inv_w = clip[3].recip();
             let ndc = [clip[0] * inv_w, clip[1] * inv_w];
             let fb_uv = [ndc[0] * 0.5 + 0.5, 0.5 - ndc[1] * 0.5];

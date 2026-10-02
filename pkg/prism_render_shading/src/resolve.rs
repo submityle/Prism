@@ -10,16 +10,20 @@ use prism_render_material::{GpuMaterialHeader, GpuSurfaceParameters};
 
 use crate::{
     apply_tangent_space_normal, classify_material_header, evaluate_image_based_light,
-    reconstruct_surface, sample_material, ClassificationError, DirectLightSample, GpuShadingPrimitive,
-    GpuShadingVertex, ImageBasedLight, MaterialModulationParams, MaterialShadingClass, PunctualLight,
-    SampledTextureBinding, ShadingFrame, SurfaceReconstructionError, SurfaceReconstructionFlags,
-    SurfaceReconstructionInput, StylizedParams, SurfaceSample, TangentBasis, VisibilityPixel,
+    reconstruct_surface, sample_material, ClassificationError, DirectLightSample,
+    GpuShadingPrimitive, GpuShadingVertex, ImageBasedLight, MaterialModulationParams,
+    MaterialShadingClass, PunctualLight, SampledTextureBinding, ShadingFrame, StylizedParams,
+    SurfaceReconstructionError, SurfaceReconstructionFlags, SurfaceReconstructionInput,
+    SurfaceSample, TangentBasis, VisibilityPixel,
 };
 
 /// Identity `world_from_local` (row-major affine) used when an instance carries
 /// no transform; lifting a local-space surface through it is a no-op.
-pub const IDENTITY_WORLD_FROM_LOCAL: [[f32; 4]; 3] =
-    [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]];
+pub const IDENTITY_WORLD_FROM_LOCAL: [[f32; 4]; 3] = [
+    [1.0, 0.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0, 0.0],
+    [0.0, 0.0, 1.0, 0.0],
+];
 
 /// Transforms a point by a row-major affine `world_from_local` (three rows of
 /// `[m0, m1, m2, translation]`).
@@ -284,8 +288,7 @@ pub fn resolve_pixel(
     geometry.normal = normalize_or(mat3_mul(&normal_basis, geometry.normal), geometry.normal);
     let linear = linear_part(&world_from_local);
     geometry.tangent = normalize_or(mat3_mul(&linear, geometry.tangent), geometry.tangent);
-    geometry.bitangent =
-        normalize_or(mat3_mul(&linear, geometry.bitangent), geometry.bitangent);
+    geometry.bitangent = normalize_or(mat3_mul(&linear, geometry.bitangent), geometry.bitangent);
 
     // Fold every bound texture over the authored factors *before* assembling
     // the BSDF sample so the indirect/ambient terms below see texture-modulated
@@ -307,8 +310,7 @@ pub fn resolve_pixel(
     // Fold the screen-space GTAO visibility into the material occlusion so the
     // indirect/ambient term (IBL or constant) is attenuated in geometric
     // creases; both factors are clamped so the product stays in `[0, 1]`.
-    let ambient_occlusion =
-        (surface.ambient_occlusion * input.screen_space_ao).clamp(0.0, 1.0);
+    let ambient_occlusion = (surface.ambient_occlusion * input.screen_space_ao).clamp(0.0, 1.0);
     let metallic = surface.metallic.clamp(0.0, 1.0);
 
     // A bound normal map rotates the tangent-space normal into world space
@@ -602,7 +604,10 @@ mod tests {
             _padding: 0,
         };
         (
-            [GpuShadingPrimitive { indices: [0, 1, 2], flags: 0 }],
+            [GpuShadingPrimitive {
+                indices: [0, 1, 2],
+                flags: 0,
+            }],
             [
                 vertex([0.0, 0.0, 0.0], [0.0, 0.0]),
                 vertex([1.0, 0.0, 0.0], [1.0, 0.0]),
@@ -671,7 +676,13 @@ mod tests {
         };
         let resolved = resolve_pixel(
             base_input(&primitives, &vertices, header, parameters),
-            LightingEnvironment { directional: &[light], punctual: &[], image_based: None, ambient: [5.0; 3], stylized: StylizedParams::with_bands(4) },
+            LightingEnvironment {
+                directional: &[light],
+                punctual: &[],
+                image_based: None,
+                ambient: [5.0; 3],
+                stylized: StylizedParams::with_bands(4),
+            },
         )
         .unwrap();
         assert_eq!(resolved.shading_class, MaterialShadingClass::Unlit);
@@ -694,13 +705,25 @@ mod tests {
         };
         let one = resolve_pixel(
             base_input(&primitives, &vertices, header, parameters),
-            LightingEnvironment { directional: &[light], punctual: &[], image_based: None, ambient: [0.0; 3], stylized: StylizedParams::with_bands(4) },
+            LightingEnvironment {
+                directional: &[light],
+                punctual: &[],
+                image_based: None,
+                ambient: [0.0; 3],
+                stylized: StylizedParams::with_bands(4),
+            },
         )
         .unwrap()
         .color;
         let two = resolve_pixel(
             base_input(&primitives, &vertices, header, parameters),
-            LightingEnvironment { directional: &[light, light], punctual: &[], image_based: None, ambient: [0.0; 3], stylized: StylizedParams::with_bands(4) },
+            LightingEnvironment {
+                directional: &[light, light],
+                punctual: &[],
+                image_based: None,
+                ambient: [0.0; 3],
+                stylized: StylizedParams::with_bands(4),
+            },
         )
         .unwrap()
         .color;
@@ -709,7 +732,10 @@ mod tests {
         for channel in 0..3 {
             let lit_once = one[channel] - 2.0;
             let lit_twice = two[channel] - 2.0;
-            assert!((lit_twice - 2.0 * lit_once).abs() < 1.0e-4, "channel {channel}");
+            assert!(
+                (lit_twice - 2.0 * lit_once).abs() < 1.0e-4,
+                "channel {channel}"
+            );
             assert!(lit_once > 0.0, "expected positive direct lighting");
         }
     }
@@ -718,14 +744,24 @@ mod tests {
     fn rejects_stale_material_and_invalid_pixels() {
         let (primitives, vertices) = unit_triangle();
         let header = principled_header();
-        let mut stale = base_input(&primitives, &vertices, header, GpuSurfaceParameters::default());
+        let mut stale = base_input(
+            &primitives,
+            &vertices,
+            header,
+            GpuSurfaceParameters::default(),
+        );
         stale.pixel.material_generation = header.generation + 1;
         assert_eq!(
             resolve_pixel(stale, LightingEnvironment::default()),
             Err(ResolveError::StaleMaterial)
         );
 
-        let mut invalid = base_input(&primitives, &vertices, header, GpuSurfaceParameters::default());
+        let mut invalid = base_input(
+            &primitives,
+            &vertices,
+            header,
+            GpuSurfaceParameters::default(),
+        );
         invalid.pixel = VisibilityPixel::INVALID;
         assert_eq!(
             resolve_pixel(invalid, LightingEnvironment::default()),
@@ -749,7 +785,13 @@ mod tests {
         };
         let resolved = resolve_pixel(
             base_input(&primitives, &vertices, header, parameters),
-            LightingEnvironment { directional: &[light], punctual: &[], image_based: None, ambient: [0.0; 3], stylized: StylizedParams::with_bands(4) },
+            LightingEnvironment {
+                directional: &[light],
+                punctual: &[],
+                image_based: None,
+                ambient: [0.0; 3],
+                stylized: StylizedParams::with_bands(4),
+            },
         )
         .unwrap();
         assert_eq!(resolved.shading_class, MaterialShadingClass::Npr);
@@ -783,7 +825,10 @@ mod tests {
         )
         .unwrap();
         assert!(lit.color.iter().all(|c| c.is_finite() && *c >= 0.0));
-        assert!(lit.color.iter().any(|c| *c > 0.0), "point light must add energy");
+        assert!(
+            lit.color.iter().any(|c| *c > 0.0),
+            "point light must add energy"
+        );
 
         // A light whose range window closes before it reaches the surface adds
         // nothing, so the resolved pixel collapses to the (zero) ambient term.
@@ -838,7 +883,11 @@ mod tests {
         assert!(lit.color.iter().all(|c| c.is_finite() && *c > 0.0));
         // A grey albedo under a 0.5 constant environment lands near albedo*env.
         for channel in 0..3 {
-            assert!((0.3..0.5).contains(&lit.color[channel]), "channel {channel} = {}", lit.color[channel]);
+            assert!(
+                (0.3..0.5).contains(&lit.color[channel]),
+                "channel {channel} = {}",
+                lit.color[channel]
+            );
         }
     }
 
@@ -855,14 +904,23 @@ mod tests {
         };
         // A mid-grey sRGB base-color texel decodes to linear ~0.214 and scales
         // the authored factor; the unlit path then adds emissive exactly once.
-        let textures = [SampledTextureBinding { semantic: SEMANTIC_BASE_COLOR, texel: [0.5, 0.5, 0.5, 1.0] }];
+        let textures = [SampledTextureBinding {
+            semantic: SEMANTIC_BASE_COLOR,
+            texel: [0.5, 0.5, 0.5, 1.0],
+        }];
         let input = ResolveInput {
             textures: &textures,
             ..base_input(&primitives, &vertices, header, parameters)
         };
         let resolved = resolve_pixel(
             input,
-            LightingEnvironment { directional: &[], punctual: &[], image_based: None, ambient: [0.0; 3], stylized: StylizedParams::with_bands(4) },
+            LightingEnvironment {
+                directional: &[],
+                punctual: &[],
+                image_based: None,
+                ambient: [0.0; 3],
+                stylized: StylizedParams::with_bands(4),
+            },
         )
         .unwrap();
         let decoded = srgb_channel_to_linear(0.5);
@@ -890,23 +948,42 @@ mod tests {
         // Offset the light from the geometric normal so a tilt in the shading
         // normal moves N.L (and therefore the lit response). The direction is
         // already unit length (0.6^2 + 0.8^2 == 1).
-        let light = DirectionalLight { direction: [0.6, 0.0, 0.8], illuminance: [4.0; 3], visibility: 1.0 };
+        let light = DirectionalLight {
+            direction: [0.6, 0.0, 0.8],
+            illuminance: [4.0; 3],
+            visibility: 1.0,
+        };
         let flat = resolve_pixel(
             base_input(&primitives, &vertices, header, parameters),
-            LightingEnvironment { directional: &[light], punctual: &[], image_based: None, ambient: [0.0; 3], stylized: StylizedParams::with_bands(4) },
+            LightingEnvironment {
+                directional: &[light],
+                punctual: &[],
+                image_based: None,
+                ambient: [0.0; 3],
+                stylized: StylizedParams::with_bands(4),
+            },
         )
         .unwrap()
         .color;
         // Tangent-space normal tilted toward +X (world +X here) via the R > 0.5
         // channel; the resolve must rotate it into world space and shift N.L.
-        let textures = [SampledTextureBinding { semantic: SEMANTIC_NORMAL, texel: [0.9, 0.5, 0.85, 1.0] }];
+        let textures = [SampledTextureBinding {
+            semantic: SEMANTIC_NORMAL,
+            texel: [0.9, 0.5, 0.85, 1.0],
+        }];
         let input = ResolveInput {
             textures: &textures,
             ..base_input(&primitives, &vertices, header, parameters)
         };
         let tilted = resolve_pixel(
             input,
-            LightingEnvironment { directional: &[light], punctual: &[], image_based: None, ambient: [0.0; 3], stylized: StylizedParams::with_bands(4) },
+            LightingEnvironment {
+                directional: &[light],
+                punctual: &[],
+                image_based: None,
+                ambient: [0.0; 3],
+                stylized: StylizedParams::with_bands(4),
+            },
         )
         .unwrap()
         .color;
@@ -930,26 +1007,52 @@ mod tests {
         };
         let untextured = resolve_pixel(
             base_input(&primitives, &vertices, header, parameters),
-            LightingEnvironment { directional: &[DirectionalLight { direction: [0.0, 0.0, 1.0], illuminance: [4.0; 3], visibility: 1.0 }], punctual: &[], image_based: None, ambient: [0.0; 3], stylized: StylizedParams::with_bands(4) },
+            LightingEnvironment {
+                directional: &[DirectionalLight {
+                    direction: [0.0, 0.0, 1.0],
+                    illuminance: [4.0; 3],
+                    visibility: 1.0,
+                }],
+                punctual: &[],
+                image_based: None,
+                ambient: [0.0; 3],
+                stylized: StylizedParams::with_bands(4),
+            },
         )
         .unwrap()
         .color;
         // glTF packs roughness in G and metalness in B; (G=0.25, B=0.5) must
         // quarter the authored roughness and halve metalness, shifting the
         // specular response away from the untextured baseline.
-        let textures = [SampledTextureBinding { semantic: SEMANTIC_METALLIC_ROUGHNESS, texel: [0.0, 0.25, 0.5, 1.0] }];
+        let textures = [SampledTextureBinding {
+            semantic: SEMANTIC_METALLIC_ROUGHNESS,
+            texel: [0.0, 0.25, 0.5, 1.0],
+        }];
         let input = ResolveInput {
             textures: &textures,
             ..base_input(&primitives, &vertices, header, parameters)
         };
         let textured = resolve_pixel(
             input,
-            LightingEnvironment { directional: &[DirectionalLight { direction: [0.0, 0.0, 1.0], illuminance: [4.0; 3], visibility: 1.0 }], punctual: &[], image_based: None, ambient: [0.0; 3], stylized: StylizedParams::with_bands(4) },
+            LightingEnvironment {
+                directional: &[DirectionalLight {
+                    direction: [0.0, 0.0, 1.0],
+                    illuminance: [4.0; 3],
+                    visibility: 1.0,
+                }],
+                punctual: &[],
+                image_based: None,
+                ambient: [0.0; 3],
+                stylized: StylizedParams::with_bands(4),
+            },
         )
         .unwrap()
         .color;
         assert!(
-            textured.iter().zip(untextured).any(|(a, b)| (a - b).abs() > 1.0e-4),
+            textured
+                .iter()
+                .zip(untextured)
+                .any(|(a, b)| (a - b).abs() > 1.0e-4),
             "metallic-roughness texture must change the output: {textured:?} vs {untextured:?}"
         );
         assert!(textured.iter().all(|c| c.is_finite() && *c >= 0.0));
@@ -967,10 +1070,20 @@ mod tests {
             ambient_occlusion: 1.0,
             ..Default::default()
         };
-        let light = DirectionalLight { direction: [0.0, 0.0, 1.0], illuminance: [3.0; 3], visibility: 1.0 };
+        let light = DirectionalLight {
+            direction: [0.0, 0.0, 1.0],
+            illuminance: [3.0; 3],
+            visibility: 1.0,
+        };
         let untextured = resolve_pixel(
             base_input(&primitives, &vertices, header, parameters),
-            LightingEnvironment { directional: &[light], punctual: &[], image_based: None, ambient: [0.5; 3], stylized: StylizedParams::with_bands(4) },
+            LightingEnvironment {
+                directional: &[light],
+                punctual: &[],
+                image_based: None,
+                ambient: [0.5; 3],
+                stylized: StylizedParams::with_bands(4),
+            },
         )
         .unwrap()
         .color;
@@ -978,9 +1091,18 @@ mod tests {
         // (G=B=1) and unit occlusion (R=1) are exact identities under the fold,
         // so the resolve must reproduce the untextured path bit for bit.
         let textures = [
-            SampledTextureBinding { semantic: SEMANTIC_BASE_COLOR, texel: [1.0, 1.0, 1.0, 1.0] },
-            SampledTextureBinding { semantic: SEMANTIC_METALLIC_ROUGHNESS, texel: [0.0, 1.0, 1.0, 0.0] },
-            SampledTextureBinding { semantic: SEMANTIC_OCCLUSION, texel: [1.0, 0.0, 0.0, 0.0] },
+            SampledTextureBinding {
+                semantic: SEMANTIC_BASE_COLOR,
+                texel: [1.0, 1.0, 1.0, 1.0],
+            },
+            SampledTextureBinding {
+                semantic: SEMANTIC_METALLIC_ROUGHNESS,
+                texel: [0.0, 1.0, 1.0, 0.0],
+            },
+            SampledTextureBinding {
+                semantic: SEMANTIC_OCCLUSION,
+                texel: [1.0, 0.0, 0.0, 0.0],
+            },
         ];
         let input = ResolveInput {
             textures: &textures,
@@ -988,11 +1110,20 @@ mod tests {
         };
         let textured = resolve_pixel(
             input,
-            LightingEnvironment { directional: &[light], punctual: &[], image_based: None, ambient: [0.5; 3], stylized: StylizedParams::with_bands(4) },
+            LightingEnvironment {
+                directional: &[light],
+                punctual: &[],
+                image_based: None,
+                ambient: [0.5; 3],
+                stylized: StylizedParams::with_bands(4),
+            },
         )
         .unwrap()
         .color;
-        assert_eq!(textured, untextured, "identity texels must not perturb the resolve");
+        assert_eq!(
+            textured, untextured,
+            "identity texels must not perturb the resolve"
+        );
     }
     #[test]
     fn screen_space_ao_darkens_the_ambient_term_but_spares_direct_light() {
@@ -1015,19 +1146,28 @@ mod tests {
         };
 
         let full = resolve_pixel(
-            ResolveInput { screen_space_ao: 1.0, ..base_input(&primitives, &vertices, header, parameters) },
+            ResolveInput {
+                screen_space_ao: 1.0,
+                ..base_input(&primitives, &vertices, header, parameters)
+            },
             ambient_only,
         )
         .unwrap()
         .color;
         let half = resolve_pixel(
-            ResolveInput { screen_space_ao: 0.5, ..base_input(&primitives, &vertices, header, parameters) },
+            ResolveInput {
+                screen_space_ao: 0.5,
+                ..base_input(&primitives, &vertices, header, parameters)
+            },
             ambient_only,
         )
         .unwrap()
         .color;
         let occluded = resolve_pixel(
-            ResolveInput { screen_space_ao: 0.0, ..base_input(&primitives, &vertices, header, parameters) },
+            ResolveInput {
+                screen_space_ao: 0.0,
+                ..base_input(&primitives, &vertices, header, parameters)
+            },
             ambient_only,
         )
         .unwrap()
@@ -1047,7 +1187,11 @@ mod tests {
 
         // Direct light does not flow through occlusion, so a lit-only surface
         // is identical regardless of the GTAO factor.
-        let light = DirectionalLight { direction: [0.0, 0.0, 1.0], illuminance: [4.0; 3], visibility: 1.0 };
+        let light = DirectionalLight {
+            direction: [0.0, 0.0, 1.0],
+            illuminance: [4.0; 3],
+            visibility: 1.0,
+        };
         let direct = LightingEnvironment {
             directional: &[light],
             punctual: &[],
@@ -1056,18 +1200,27 @@ mod tests {
             stylized: StylizedParams::with_bands(4),
         };
         let lit_full = resolve_pixel(
-            ResolveInput { screen_space_ao: 1.0, ..base_input(&primitives, &vertices, header, parameters) },
+            ResolveInput {
+                screen_space_ao: 1.0,
+                ..base_input(&primitives, &vertices, header, parameters)
+            },
             direct,
         )
         .unwrap()
         .color;
         let lit_occluded = resolve_pixel(
-            ResolveInput { screen_space_ao: 0.0, ..base_input(&primitives, &vertices, header, parameters) },
+            ResolveInput {
+                screen_space_ao: 0.0,
+                ..base_input(&primitives, &vertices, header, parameters)
+            },
             direct,
         )
         .unwrap()
         .color;
-        assert_eq!(lit_full, lit_occluded, "GTAO must not touch direct lighting");
+        assert_eq!(
+            lit_full, lit_occluded,
+            "GTAO must not touch direct lighting"
+        );
     }
 
     #[test]
@@ -1199,7 +1352,10 @@ mod tests {
         .unwrap()
         .color;
         assert!(
-            drifted.iter().zip(baseline).any(|(a, b)| (a - b).abs() > 1.0e-4),
+            drifted
+                .iter()
+                .zip(baseline)
+                .any(|(a, b)| (a - b).abs() > 1.0e-4),
             "translating only the instance must change the lit output"
         );
     }
@@ -1214,5 +1370,4 @@ mod tests {
         // test shifts by the exact same origin.
         [0.0, 0.0, 4.0]
     }
-
 }

@@ -246,7 +246,10 @@ mod tests {
         for step in 1..=8 {
             let r = step as f32 / 8.0;
             let w = disocclusion_history_weight(base, d, r);
-            assert!(w <= prev + 1.0e-6, "reactive {r} raised weight: {w} > {prev}");
+            assert!(
+                w <= prev + 1.0e-6,
+                "reactive {r} raised weight: {w} > {prev}"
+            );
             prev = w;
         }
     }

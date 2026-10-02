@@ -198,7 +198,7 @@ mod tests {
     fn soft_min_picks_the_darkest_tap() {
         let mut n = flat(0.6);
         n[0][0] = 0.1; // corner a
-        // cross min stays 0.6, corner min is 0.1 -> 0.7
+                       // cross min stays 0.6, corner min is 0.1 -> 0.7
         approx(soft_min_channel(&n, 0), 0.7);
     }
 
@@ -206,7 +206,7 @@ mod tests {
     fn soft_max_picks_the_brightest_tap() {
         let mut n = flat(0.4);
         n[5][0] = 0.9; // cross tap f
-        // cross max 0.9, corner max 0.4 -> 1.3
+                       // cross max 0.9, corner max 0.4 -> 1.3
         approx(soft_max_channel(&n, 0), 1.3);
     }
 
@@ -221,7 +221,10 @@ mod tests {
         // High soft_max (bright edge) reduces the limit and thus the amplitude.
         let edge = cas_amplitude(0.2, 1.9);
         let smooth = cas_amplitude(0.9, 1.1);
-        assert!(edge < smooth, "edge {edge} should sharpen less than smooth {smooth}");
+        assert!(
+            edge < smooth,
+            "edge {edge} should sharpen less than smooth {smooth}"
+        );
     }
 
     #[test]
@@ -240,7 +243,10 @@ mod tests {
         let gentle = cas_weight(1.0, 0.0);
         let strong = cas_weight(1.0, 1.0);
         assert!(gentle < 0.0 && strong < 0.0, "weights must be negative");
-        assert!(strong < gentle, "sharper knob should give a more negative weight");
+        assert!(
+            strong < gentle,
+            "sharper knob should give a more negative weight"
+        );
         approx(gentle, -1.0 / 8.0);
         approx(strong, -1.0 / 5.0);
     }
@@ -309,7 +315,10 @@ mod tests {
         n[4] = [0.6, 0.6, 0.6];
         let gentle = cas_sharpen(&n, 0.0)[0];
         let strong = cas_sharpen(&n, 1.0)[0];
-        assert!(strong > gentle, "strong {strong} should exceed gentle {gentle}");
+        assert!(
+            strong > gentle,
+            "strong {strong} should exceed gentle {gentle}"
+        );
     }
 
     #[test]

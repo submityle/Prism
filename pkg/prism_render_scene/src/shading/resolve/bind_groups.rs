@@ -20,9 +20,7 @@
 use bevy_ecs::prelude::*;
 use bevy_math::Vec3;
 use bevy_render::{
-    render_resource::{
-        BindGroup, BindGroupEntries, Buffer, BufferInitDescriptor, BufferUsages,
-    },
+    render_resource::{BindGroup, BindGroupEntries, Buffer, BufferInitDescriptor, BufferUsages},
     renderer::RenderDevice,
     texture::FallbackImage,
 };
@@ -33,6 +31,7 @@ use crate::{GpuSceneBuffers, RenderShadingGeometryBuffers};
 
 use super::super::ao::ViewGtaoTextures;
 use super::super::ibl::{DfgLutTexture, PrefilteredEnvironmentMap};
+use super::super::light_routing::ViewLightRouting;
 use super::super::resources::{ViewShadingBuffers, ViewVisibilityBuffer};
 use super::super::runtime::PrismShadingSettings;
 use super::super::virtual_shadow::{
@@ -114,6 +113,7 @@ pub(crate) fn prepare_shading_resolve_bind_groups(
         Option<&ViewGtaoTextures>,
         Option<&ViewVsmPhysicalAtlas>,
         Option<&ViewResolveVsmPageTable>,
+        Option<&ViewLightRouting>,
     )>,
 ) {
     // Scene/geometry tables are shared across all views; if either has not
@@ -130,15 +130,15 @@ pub(crate) fn prepare_shading_resolve_bind_groups(
         geometry.buffers(),
     )
     else {
-        for (entity, _, _, _, _, _, _) in &views {
-            commands
-                .entity(entity)
-                .remove::<ViewResolveBindGroups>();
+        for (entity, _, _, _, _, _, _, _) in &views {
+            commands.entity(entity).remove::<ViewResolveBindGroups>();
         }
         return;
     };
 
-    for (entity, visibility, buffers, motion, gtao, vsm_atlas, vsm_page_table) in &views {
+    for (entity, visibility, buffers, motion, gtao, vsm_atlas, vsm_page_table, light_routing) in
+        &views
+    {
         let (ids, metadata) = visibility.attachments();
         // Bind the view's GTAO visibility when present, else a 1x1 white
         // texture so the shader's multiply is a no-op (the dispatch also gates
@@ -187,6 +187,14 @@ pub(crate) fn prepare_shading_resolve_bind_groups(
                 // 8: matching previous-frame transforms, used only to place the
                 // surface in last frame's world space for the motion vector.
                 previous_transforms.as_entire_binding(),
+                // 9: the light-routing channel-gated visibility mask. Bound
+                // from this view's `ViewLightRouting` when the opt-in Lighting
+                // Channels subsystem is on; otherwise the pipeline's all-ones
+                // dummy keeps every punctual light visible.
+                light_routing.map_or_else(
+                    || pipeline.scene_dummy_visible_lights.as_entire_binding(),
+                    |routing| routing.visible_buffer().as_entire_binding(),
+                ),
             )),
         );
         // group 6: virtual-shadow-map sample bindings. The VSM branch fires
@@ -205,9 +213,10 @@ pub(crate) fn prepare_shading_resolve_bind_groups(
         // Clipmap addressing + atlas geometry: real values when the settings and
         // atlas are present, else the defaults / 1x1 dummy geometry that pair
         // with the fallback bindings (never sampled because `enable` is clear).
-        let clipmap = vsm_settings
-            .as_ref()
-            .map_or_else(|| PrismVirtualShadowSettings::default().clipmap(), |s| s.clipmap());
+        let clipmap = vsm_settings.as_ref().map_or_else(
+            || PrismVirtualShadowSettings::default().clipmap(),
+            |s| s.clipmap(),
+        );
         let pcf_radius = vsm_settings.as_ref().map_or(0, |s| s.pcf_radius);
         let (physical_pages, physical_pages_per_edge) = vsm_atlas.map_or((1, 1), |atlas| {
             (atlas.physical_pages(), atlas.physical_pages_per_edge())
@@ -249,11 +258,10 @@ pub(crate) fn prepare_shading_resolve_bind_groups(
         // sampler, but the layout declares a `NonFiltering` sampler (the twin
         // compares `R32Float` depth manually and must not require the optional
         // `FLOAT32_FILTERABLE` feature), so both paths bind `pipeline.vsm_sampler`.
-        let page_table_binding = vsm_page_table
-            .map_or_else(
-                || pipeline.vsm_dummy_page_table.as_entire_binding(),
-                |table| table.buffer.as_entire_binding(),
-            );
+        let page_table_binding = vsm_page_table.map_or_else(
+            || pipeline.vsm_dummy_page_table.as_entire_binding(),
+            |table| table.buffer.as_entire_binding(),
+        );
         let atlas_view = vsm_atlas.map_or(&pipeline.vsm_dummy_atlas, |atlas| atlas.atlas_view());
         let vsm = device.create_bind_group(
             "prism resolve vsm",

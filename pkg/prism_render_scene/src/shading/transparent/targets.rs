@@ -124,8 +124,10 @@ pub(crate) fn prepare_oit_targets(
                 view_formats: &[],
             },
         );
-        commands
-            .entity(entity)
-            .insert(ViewOitTargets { accum, revealage, size });
+        commands.entity(entity).insert(ViewOitTargets {
+            accum,
+            revealage,
+            size,
+        });
     }
 }

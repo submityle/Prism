@@ -10,7 +10,9 @@
 //! table) is owned by [`crate::buffers::GpuSceneBindGroup`] and reused verbatim,
 //! exactly as the classic shadow depth pass does.
 
-use bevy_material::bind_group_layout_entries::{binding_types::uniform_buffer, BindGroupLayoutEntries};
+use bevy_material::bind_group_layout_entries::{
+    binding_types::uniform_buffer, BindGroupLayoutEntries,
+};
 use bevy_render::render_resource::{BindGroupLayoutEntry, ShaderStages};
 
 use super::abi::GpuVsmCasterDepthView;

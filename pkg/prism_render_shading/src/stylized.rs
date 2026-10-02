@@ -194,7 +194,11 @@ pub fn evaluate_stylized_direct(
 
     let n_dot_l = dot(n, l);
     let lit_gate = n_dot_l.max(0.0);
-    let shadow = stylized_shadow(light.visibility, params.shadow_threshold, params.shadow_softness);
+    let shadow = stylized_shadow(
+        light.visibility,
+        params.shadow_threshold,
+        params.shadow_softness,
+    );
 
     // Diffuse cel ramp modulated by the base color, incident illuminance and
     // stylized shadow.
@@ -217,7 +221,10 @@ pub fn evaluate_stylized_direct(
             raw,
         );
         let weight = params.specular_intensity * blob * lit_gate * shadow;
-        color = add(color, mul(mul_scalar(params.specular_color, weight), light.illuminance));
+        color = add(
+            color,
+            mul(mul_scalar(params.specular_color, weight), light.illuminance),
+        );
     }
 
     // Rim / edge light: a view Fresnel gated to the lit hemisphere. It is
@@ -226,7 +233,10 @@ pub fn evaluate_stylized_direct(
         let n_dot_v = dot(n, v).max(0.0);
         let rim = ops::powf((1.0 - n_dot_v).max(0.0), params.rim_power.max(0.0));
         let weight = params.rim_intensity * rim * lit_gate;
-        color = add(color, mul(mul_scalar(params.rim_color, weight), light.illuminance));
+        color = add(
+            color,
+            mul(mul_scalar(params.rim_color, weight), light.illuminance),
+        );
     }
 
     add(color, surface.emissive)
@@ -362,10 +372,7 @@ mod tests {
         ] {
             for &view in &[[0.0, 1.0, 0.0], [0.9, 0.3, 0.3], [0.2, 0.2, 0.95]] {
                 for visibility in [0.0f32, 0.5, 1.0] {
-                    let f = ShadingFrame {
-                        view,
-                        ..frame()
-                    };
+                    let f = ShadingFrame { view, ..frame() };
                     let sample = DirectLightSample {
                         direction: dir,
                         illuminance: [1.0, 0.95, 0.9],
@@ -403,12 +410,8 @@ mod tests {
             base_color: [1.0; 3],
             ..Default::default()
         };
-        let hard = evaluate_stylized_direct(
-            surface,
-            frame(),
-            sample,
-            &StylizedParams::legacy_toon(4),
-        );
+        let hard =
+            evaluate_stylized_direct(surface, frame(), sample, &StylizedParams::legacy_toon(4));
         let soft = evaluate_stylized_direct(
             surface,
             frame(),
@@ -419,7 +422,10 @@ mod tests {
             },
         );
         assert_ne!(hard, soft, "softness must change the ramp near a band edge");
-        assert!(soft[0] >= hard[0], "softening blends up toward the next band");
+        assert!(
+            soft[0] >= hard[0],
+            "softening blends up toward the next band"
+        );
     }
 
     #[test]
@@ -437,12 +443,8 @@ mod tests {
         };
         // Enough bands that the wrapped cosine climbs into a higher cel step
         // than the near-terminator Lambert term (which snaps to the dark band).
-        let lambert = evaluate_stylized_direct(
-            surface,
-            frame(),
-            sample,
-            &StylizedParams::legacy_toon(4),
-        );
+        let lambert =
+            evaluate_stylized_direct(surface, frame(), sample, &StylizedParams::legacy_toon(4));
         let wrapped = evaluate_stylized_direct(
             surface,
             frame(),
@@ -471,12 +473,8 @@ mod tests {
             base_color: [1.0; 3],
             ..Default::default()
         };
-        let linear = evaluate_stylized_direct(
-            surface,
-            frame(),
-            sample,
-            &StylizedParams::legacy_toon(4),
-        );
+        let linear =
+            evaluate_stylized_direct(surface, frame(), sample, &StylizedParams::legacy_toon(4));
         let stepped = evaluate_stylized_direct(
             surface,
             frame(),
@@ -488,7 +486,10 @@ mod tests {
             },
         );
         assert!(linear[0] > 0.0, "linear shadow keeps partial light");
-        assert_eq!(stepped, [0.0; 3], "threshold above visibility cuts to black");
+        assert_eq!(
+            stepped, [0.0; 3],
+            "threshold above visibility cuts to black"
+        );
     }
 
     #[test]
@@ -500,12 +501,8 @@ mod tests {
             perceptual_roughness: 0.1,
             ..Default::default()
         };
-        let diffuse_only = evaluate_stylized_direct(
-            surface,
-            frame(),
-            light(),
-            &StylizedParams::legacy_toon(4),
-        );
+        let diffuse_only =
+            evaluate_stylized_direct(surface, frame(), light(), &StylizedParams::legacy_toon(4));
         let with_spec = evaluate_stylized_direct(
             surface,
             frame(),
@@ -542,12 +539,7 @@ mod tests {
             base_color: [0.3; 3],
             ..Default::default()
         };
-        let no_rim = evaluate_stylized_direct(
-            surface,
-            f,
-            sample,
-            &StylizedParams::legacy_toon(4),
-        );
+        let no_rim = evaluate_stylized_direct(surface, f, sample, &StylizedParams::legacy_toon(4));
         let with_rim = evaluate_stylized_direct(
             surface,
             f,
@@ -561,6 +553,9 @@ mod tests {
         );
         assert_eq!(no_rim, [0.0; 3], "shadowed diffuse is fully dark");
         let sum = |c: [f32; 3]| c[0] + c[1] + c[2];
-        assert!(sum(with_rim) > 0.0, "rim must light the shadowed silhouette");
+        assert!(
+            sum(with_rim) > 0.0,
+            "rim must light the shadowed silhouette"
+        );
     }
 }

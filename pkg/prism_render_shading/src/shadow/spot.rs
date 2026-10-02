@@ -225,7 +225,11 @@ mod tests {
             100.0,
         );
         let clip = transform_point(&vp, [0.0, 0.0, -10.0]);
-        assert!(clip[3] > 0.0, "point in front must have w > 0, got {}", clip[3]);
+        assert!(
+            clip[3] > 0.0,
+            "point in front must have w > 0, got {}",
+            clip[3]
+        );
         let inv_w = clip[3].recip();
         let uv = [clip[0] * inv_w * 0.5 + 0.5, clip[1] * inv_w * -0.5 + 0.5];
         assert!((uv[0] - 0.5).abs() < 1.0e-6, "u = {}", uv[0]);
@@ -248,13 +252,19 @@ mod tests {
         };
         let near_ndc = ndc_z(0.2);
         let far_ndc = ndc_z(1.0);
-        assert!(near_ndc < far_ndc, "near {near_ndc} should be < far {far_ndc}");
+        assert!(
+            near_ndc < far_ndc,
+            "near {near_ndc} should be < far {far_ndc}"
+        );
         let plane = 0.5 * (near_ndc + far_ndc);
 
         let field = PlaneAtlas { depth: plane };
         // Farther receiver is behind the occluder plane -> shadowed.
         let shadowed = evaluate_spot_shadow(&field, &axis_input(1.0), &cfg);
-        assert!((shadowed - 0.0).abs() < 1.0e-6, "expected shadow, got {shadowed}");
+        assert!(
+            (shadowed - 0.0).abs() < 1.0e-6,
+            "expected shadow, got {shadowed}"
+        );
 
         // Nearer receiver is in front of the occluder plane -> lit.
         let lit = evaluate_spot_shadow(&field, &axis_input(0.2), &cfg);
@@ -293,7 +303,9 @@ mod tests {
         let receiver = axis_input(50.0);
         let clip = transform_point(&receiver.light_view_projection, [0.0, 0.0, -50.0]);
         let ndc_z = clip[2] / clip[3];
-        let acne_field = PlaneAtlas { depth: ndc_z - 1.0e-4 };
+        let acne_field = PlaneAtlas {
+            depth: ndc_z - 1.0e-4,
+        };
 
         let no_bias = SpotShadowConfig {
             const_depth_bias: 0.0,
@@ -305,7 +317,10 @@ mod tests {
             const_depth_bias: 0.01,
             ..pcf_config(0)
         };
-        assert_eq!(evaluate_spot_shadow(&acne_field, &receiver, &with_bias), 1.0);
+        assert_eq!(
+            evaluate_spot_shadow(&acne_field, &receiver, &with_bias),
+            1.0
+        );
     }
 
     /// PCSS runs end to end over a mixed neighbourhood and returns a valid
@@ -351,7 +366,10 @@ mod tests {
             0.1,
             100.0,
         );
-        assert!(vp.iter().all(|c| c.is_finite()), "matrix had non-finite: {vp:?}");
+        assert!(
+            vp.iter().all(|c| c.is_finite()),
+            "matrix had non-finite: {vp:?}"
+        );
         // A point below the light on the axis projects in front (w > 0).
         let clip = transform_point(&vp, [0.0, 0.0, 0.0]);
         assert!(clip[3] > 0.0, "w = {}", clip[3]);

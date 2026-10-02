@@ -1,10 +1,10 @@
+use bevy_app::SubApp;
 use bevy_core_pipeline::mip_generation::experimental::depth::ViewDepthPyramid;
 use bevy_core_pipeline::{
     mip_generation::experimental::depth::early_downsample_depth,
     prepass::node::{early_prepass, late_prepass},
     schedule::Core3d,
 };
-use bevy_app::SubApp;
 use bevy_ecs::prelude::*;
 use bevy_platform::collections::{HashMap, HashSet};
 use bevy_render::view::RetainedViewEntity;
@@ -83,8 +83,7 @@ fn dispatch_previous_hzb(
     if !super::runtime::hzb_runtime_gate(*enabled, &settings) || !history.previous_valid {
         return;
     }
-    let Some(bind_group) = bindings
-        .and_then(|bindings| bindings.into_inner().bind_group.as_ref())
+    let Some(bind_group) = bindings.and_then(|bindings| bindings.into_inner().bind_group.as_ref())
     else {
         return;
     };
@@ -101,10 +100,12 @@ fn dispatch_previous_hzb(
         settings.hzb_depth_bias,
         settings.hzb_fast_motion_threshold,
     );
-    let mut pass = ctx.command_encoder().begin_compute_pass(&ComputePassDescriptor {
-        label: Some("prism previous hzb visibility"),
-        timestamp_writes: None,
-    });
+    let mut pass = ctx
+        .command_encoder()
+        .begin_compute_pass(&ComputePassDescriptor {
+            label: Some("prism previous hzb visibility"),
+            timestamp_writes: None,
+        });
     pass.set_pipeline(compute_pipeline);
     pass.set_bind_group(0, bind_group, &[]);
     pass.set_immediates(0, bytemuck::bytes_of(&immediates));
@@ -152,10 +153,12 @@ fn dispatch_current_hzb(
         settings.hzb_depth_bias,
         settings.hzb_fast_motion_threshold,
     );
-    let mut pass = ctx.command_encoder().begin_compute_pass(&ComputePassDescriptor {
-        label: Some("prism current hzb visibility"),
-        timestamp_writes: None,
-    });
+    let mut pass = ctx
+        .command_encoder()
+        .begin_compute_pass(&ComputePassDescriptor {
+            label: Some("prism current hzb visibility"),
+            timestamp_writes: None,
+        });
     pass.set_pipeline(compute_pipeline);
     pass.set_bind_group(0, bind_group, &[]);
     pass.set_immediates(0, bytemuck::bytes_of(&immediates));
@@ -251,7 +254,9 @@ pub(crate) fn prepare_hzb_history(
         let flags = state
             .handle_for_retained(retained_view)
             .and_then(|handle| state.view_record(handle))
-            .map_or(prism_render_visibility::ViewFlags::default(), |record| record.flags);
+            .map_or(prism_render_visibility::ViewFlags::default(), |record| {
+                record.flags
+            });
         let previous_valid = cached.as_ref().is_some_and(|previous| {
             history_is_valid(
                 previous.history_epoch,

@@ -158,16 +158,25 @@ mod tests {
     fn front_light_lights_every_texel() {
         // forward_cos == 1 -> threshold 0 -> any non-negative sdf is lit.
         for &sdf in &[0.0_f32, 0.25, 0.5, 1.0] {
-            assert_eq!(evaluate_face_shadow(sdf, 1.0, FaceShadowParams::default()), 1.0);
+            assert_eq!(
+                evaluate_face_shadow(sdf, 1.0, FaceShadowParams::default()),
+                1.0
+            );
         }
     }
 
     #[test]
     fn back_light_shadows_every_interior_texel() {
         // forward_cos == -1 -> threshold 1 -> hard step: only sdf >= 1 stays lit.
-        assert_eq!(evaluate_face_shadow(0.99, -1.0, FaceShadowParams::default()), 0.0);
+        assert_eq!(
+            evaluate_face_shadow(0.99, -1.0, FaceShadowParams::default()),
+            0.0
+        );
         // At the exact boundary the hard step includes the edge.
-        assert_eq!(evaluate_face_shadow(1.0, -1.0, FaceShadowParams::default()), 1.0);
+        assert_eq!(
+            evaluate_face_shadow(1.0, -1.0, FaceShadowParams::default()),
+            1.0
+        );
     }
 
     #[test]
@@ -187,7 +196,10 @@ mod tests {
     fn softness_produces_partial_visibility_at_the_terminator() {
         // threshold 0.5, sdf exactly on it -> smoothstep midpoint 0.5.
         let lit = evaluate_face_shadow(0.5, 0.0, FaceShadowParams::with_softness(0.2));
-        assert!((lit - 0.5).abs() < EPS, "expected 0.5 at terminator, got {lit}");
+        assert!(
+            (lit - 0.5).abs() < EPS,
+            "expected 0.5 at terminator, got {lit}"
+        );
         // Just inside the lit band.
         let brighter = evaluate_face_shadow(0.55, 0.0, FaceShadowParams::with_softness(0.2));
         assert!(brighter > lit);
@@ -195,22 +207,25 @@ mod tests {
 
     #[test]
     fn cosines_identity_frame_front_light() {
-        let (fwd, right) =
-            face_shadow_light_cosines(FaceFrame::default(), [0.0, 0.0, 1.0]);
+        let (fwd, right) = face_shadow_light_cosines(FaceFrame::default(), [0.0, 0.0, 1.0]);
         assert!((fwd - 1.0).abs() < EPS);
         assert!(right.abs() < EPS);
     }
 
     #[test]
     fn cosines_side_light_sets_right_axis() {
-        let (fwd, right) =
-            face_shadow_light_cosines(FaceFrame::default(), [1.0, 0.0, 0.0]);
+        let (fwd, right) = face_shadow_light_cosines(FaceFrame::default(), [1.0, 0.0, 0.0]);
         assert!(fwd.abs() < EPS);
         assert!((right - 1.0).abs() < EPS);
-        assert!(!face_shadow_flip_u(right), "light on the right samples directly");
-        let (_, left) =
-            face_shadow_light_cosines(FaceFrame::default(), [-1.0, 0.0, 0.0]);
-        assert!(face_shadow_flip_u(left), "light on the left mirrors the map");
+        assert!(
+            !face_shadow_flip_u(right),
+            "light on the right samples directly"
+        );
+        let (_, left) = face_shadow_light_cosines(FaceFrame::default(), [-1.0, 0.0, 0.0]);
+        assert!(
+            face_shadow_flip_u(left),
+            "light on the left mirrors the map"
+        );
     }
 
     #[test]
@@ -229,8 +244,7 @@ mod tests {
 
     #[test]
     fn light_along_up_axis_degrades_to_front_lit() {
-        let (fwd, _right) =
-            face_shadow_light_cosines(FaceFrame::default(), [0.0, 1.0, 0.0]);
+        let (fwd, _right) = face_shadow_light_cosines(FaceFrame::default(), [0.0, 1.0, 0.0]);
         assert!((fwd - 1.0).abs() < EPS);
     }
 }

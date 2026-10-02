@@ -167,7 +167,14 @@ pub fn pcss_visibility<S: ShadowDepthSampler>(
     let radius_texels = (penumbra_uv / texel).round() as i32;
     let radius = radius_texels.clamp(config.min_filter_radius.max(0), config.max_filter_radius);
 
-    pcf_visibility(sampler, layer, center_uv, reference_depth, texel_size, radius)
+    pcf_visibility(
+        sampler,
+        layer,
+        center_uv,
+        reference_depth,
+        texel_size,
+        radius,
+    )
 }
 
 #[cfg(test)]
@@ -230,7 +237,10 @@ mod tests {
         let field = StepField { near_depth: 0.2 };
         let ts = [0.1, 0.1]; // large texels so a small radius straddles the seam
         let narrow = pcf_visibility(&field, 0, [0.5, 0.5], 0.8, ts, 1);
-        assert!(narrow > 0.0 && narrow < 1.0, "edge should be soft: {narrow}");
+        assert!(
+            narrow > 0.0 && narrow < 1.0,
+            "edge should be soft: {narrow}"
+        );
         // Exactly on the seam with a symmetric grid -> about half lit.
         assert!((narrow - 0.5).abs() < 0.2, "seam ~= 0.5, got {narrow}");
     }
@@ -270,7 +280,10 @@ mod tests {
         let far_receiver = pcss_visibility(&field, 0, [0.46, 0.5], 0.95, ts, cfg);
         // Both are partially shadowed near the seam; the far receiver's wider
         // penumbra pulls in more lit taps from the u>0.5 half.
-        assert!(far_receiver >= near_receiver, "{far_receiver} !>= {near_receiver}");
+        assert!(
+            far_receiver >= near_receiver,
+            "{far_receiver} !>= {near_receiver}"
+        );
     }
 
     /// With no occluders in the search window PCSS returns fully lit.

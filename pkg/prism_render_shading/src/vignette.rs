@@ -107,7 +107,11 @@ pub fn artistic_falloff(
     let square = dx.abs().max(dy.abs());
     let dist = square + (circular - square) * roundness;
 
-    let s = if smoothness > 1.0e-4 { smoothness } else { 1.0e-4 };
+    let s = if smoothness > 1.0e-4 {
+        smoothness
+    } else {
+        1.0e-4
+    };
     let edge0 = 1.0 - s;
     let edge1 = 1.0 + s;
     let t = vignette_smoothstep(edge0, edge1, dist);
@@ -284,19 +288,28 @@ mod tests {
 
     #[test]
     fn artistic_zero_intensity_is_identity_center() {
-        approx(artistic_falloff([0.5, 0.5], [0.5, 0.5], 0.0, 0.5, 1.0, 1.0), 1.0);
+        approx(
+            artistic_falloff([0.5, 0.5], [0.5, 0.5], 0.0, 0.5, 1.0, 1.0),
+            1.0,
+        );
     }
 
     #[test]
     fn artistic_zero_intensity_is_identity_corner() {
-        approx(artistic_falloff([0.0, 0.0], [0.5, 0.5], 0.0, 0.5, 1.0, 1.0), 1.0);
+        approx(
+            artistic_falloff([0.0, 0.0], [0.5, 0.5], 0.0, 0.5, 1.0, 1.0),
+            1.0,
+        );
     }
 
     #[test]
     fn artistic_corner_darker_than_center() {
         let center = artistic_falloff([0.5, 0.5], [0.5, 0.5], 1.0, 0.5, 1.0, 1.0);
         let corner = artistic_falloff([0.0, 0.0], [0.5, 0.5], 1.0, 0.5, 1.0, 1.0);
-        assert!(corner < center, "corner should darken under the artistic model");
+        assert!(
+            corner < center,
+            "corner should darken under the artistic model"
+        );
     }
 
     #[test]
@@ -315,7 +328,10 @@ mod tests {
         // Square (0) vs circular (1) metric differ at the corner.
         let square = artistic_falloff([0.0, 0.0], [0.5, 0.5], 1.0, 0.5, 0.0, 1.0);
         let round = artistic_falloff([0.0, 0.0], [0.5, 0.5], 1.0, 0.5, 1.0, 1.0);
-        assert!((square - round).abs() > 1.0e-4, "roundness should change the corner");
+        assert!(
+            (square - round).abs() > 1.0e-4,
+            "roundness should change the corner"
+        );
     }
 
     #[test]
@@ -330,7 +346,10 @@ mod tests {
         // A wider aspect pushes more x-distance, darkening a horizontal offset.
         let square_aspect = artistic_falloff([0.1, 0.5], [0.5, 0.5], 1.0, 0.5, 1.0, 1.0);
         let wide_aspect = artistic_falloff([0.1, 0.5], [0.5, 0.5], 1.0, 0.5, 1.0, 2.0);
-        assert!(wide_aspect < square_aspect, "wider aspect should darken horizontal offset more");
+        assert!(
+            wide_aspect < square_aspect,
+            "wider aspect should darken horizontal offset more"
+        );
     }
 
     #[test]
@@ -386,7 +405,10 @@ mod tests {
             focal_ratio: 1.5,
             ..VignetteParams::default()
         };
-        approx(vignette_factor([0.2, 0.3], &p), natural_falloff([0.2, 0.3], 1.5));
+        approx(
+            vignette_factor([0.2, 0.3], &p),
+            natural_falloff([0.2, 0.3], 1.5),
+        );
     }
 
     #[test]

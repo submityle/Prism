@@ -52,7 +52,6 @@ fn chromatic_aberration_wesl_compiles_standalone() {
         .unwrap_or_else(|error| panic!("chromatic_aberration.wesl failed to compile: {error}"));
 }
 
-
 /// Guards the Rust immediate-block ABI against drift from the WESL struct: the
 /// aberration block is a tight 24 bytes (`vec2<f32>` centre + intensity +
 /// samples + `vec2<u32>` extent) matching `chromatic_aberration.wesl`'s single

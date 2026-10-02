@@ -21,18 +21,15 @@ mod systems;
 mod shader_tests;
 
 pub use abi::{
-    GpuDirectionalLight, GpuLightEnvironment, GpuPunctualLight,
-    LIGHT_ENVIRONMENT_FLAG_IMAGE_BASED,
+    GpuDirectionalLight, GpuLightEnvironment, GpuPunctualLight, LIGHT_ENVIRONMENT_FLAG_IMAGE_BASED,
 };
 pub use bindings::LightBindGroup;
+pub use buffers::LightGpuBuffers;
 pub use cluster::{
     build_cluster_data, ClusterBindGroup, ClusterConfig, ClusterCpuData, ClusterGpuBuffers,
     ClusterViewFit, ExtractedClusterView, GpuClusterGrid,
 };
-pub use buffers::LightGpuBuffers;
 pub use extract::ExtractedLights;
-pub use probe::{
-    cubemap_faces_from_image, project_image_to_sh, EnvironmentProbeCache,
-};
 pub use plugin::PrismLightingPlugin;
+pub use probe::{cubemap_faces_from_image, project_image_to_sh, EnvironmentProbeCache};
 pub use stylized_config::StylizedLighting;

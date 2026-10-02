@@ -163,13 +163,7 @@ mod tests {
         let params = HalftoneParams::default();
         assert!(!params.enabled);
         let scene = Vec3::new(0.2, 0.5, 0.9);
-        let out = apply_halftone(
-            scene,
-            Vec2::new(3.0, 7.0),
-            &params,
-            Vec3::ZERO,
-            Vec3::ONE,
-        );
+        let out = apply_halftone(scene, Vec2::new(3.0, 7.0), &params, Vec3::ZERO, Vec3::ONE);
         approx(out.x, scene.x);
         approx(out.y, scene.y);
         approx(out.z, scene.z);
@@ -225,8 +219,16 @@ mod tests {
             let x = i as f32 * 0.37;
             let y = i as f32 * -0.71 + 3.0;
             let c = cell_coord(Vec2::new(x, y), cs);
-            assert!(c.x >= -0.5 * cs - 1.0e-4 && c.x < 0.5 * cs + 1.0e-4, "x = {}", c.x);
-            assert!(c.y >= -0.5 * cs - 1.0e-4 && c.y < 0.5 * cs + 1.0e-4, "y = {}", c.y);
+            assert!(
+                c.x >= -0.5 * cs - 1.0e-4 && c.x < 0.5 * cs + 1.0e-4,
+                "x = {}",
+                c.x
+            );
+            assert!(
+                c.y >= -0.5 * cs - 1.0e-4 && c.y < 0.5 * cs + 1.0e-4,
+                "y = {}",
+                c.y
+            );
         }
     }
 

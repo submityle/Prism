@@ -260,10 +260,20 @@ mod tests {
     #[test]
     fn background_and_offscreen_reprojection_drops_history() {
         // Background: non-positive linear depth.
-        assert!(reproject_prev_uv_gtao(camera(), Mat4::IDENTITY, clip_from_world(0.0), Vec2::new(0.5, 0.5), 0.0).is_none());
+        assert!(reproject_prev_uv_gtao(
+            camera(),
+            Mat4::IDENTITY,
+            clip_from_world(0.0),
+            Vec2::new(0.5, 0.5),
+            0.0
+        )
+        .is_none());
         // A large sideways camera translation pushes the point off-screen.
         let prev = clip_from_world(0.0) * Mat4::from_translation(Vec3::new(100.0, 0.0, 0.0));
-        assert!(reproject_prev_uv_gtao(camera(), Mat4::IDENTITY, prev, Vec2::new(0.5, 0.5), 4.0).is_none());
+        assert!(
+            reproject_prev_uv_gtao(camera(), Mat4::IDENTITY, prev, Vec2::new(0.5, 0.5), 4.0)
+                .is_none()
+        );
     }
 
     #[test]

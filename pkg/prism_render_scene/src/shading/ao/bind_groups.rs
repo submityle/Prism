@@ -89,7 +89,6 @@ pub(crate) fn prepare_gtao_prepass_bind_groups(
     }
 }
 
-
 /// The single kernel bind group (group 0) for one view's GTAO compute pass:
 /// the linear-depth + view-normal inputs and the ambient-visibility output.
 /// Present only when the view has resident [`ViewGtaoTextures`].
@@ -123,7 +122,6 @@ pub(crate) fn prepare_gtao_kernel_bind_groups(
             .insert(ViewGtaoKernelBindGroup { view });
     }
 }
-
 
 /// The single denoise bind group (group 0) for one view's GTAO spatial denoise
 /// pass: the raw ambient-visibility, linear-depth, and view-normal inputs and

@@ -36,8 +36,8 @@ use bevy_ecs::prelude::*;
 use bevy_math::{UVec2, Vec2};
 use bevy_render::{
     render_resource::{
-        CachedRenderPipelineId, Extent3d, TextureDescriptor, TextureDimension,
-        TextureUsages, TextureView, TextureViewDescriptor,
+        CachedRenderPipelineId, Extent3d, TextureDescriptor, TextureDimension, TextureUsages,
+        TextureView, TextureViewDescriptor,
     },
     renderer::RenderDevice,
     sync_world::MainEntity,

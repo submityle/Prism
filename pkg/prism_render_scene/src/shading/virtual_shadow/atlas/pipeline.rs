@@ -181,8 +181,10 @@ pub(crate) struct VsmCasterDepthViewUniform {
 impl FromWorld for VsmCasterDepthViewUniform {
     fn from_world(world: &mut World) -> Self {
         let device = world.resource::<RenderDevice>();
-        let layout = device
-            .create_bind_group_layout("prism vsm caster depth view", &caster_depth_view_layout_entries());
+        let layout = device.create_bind_group_layout(
+            "prism vsm caster depth view",
+            &caster_depth_view_layout_entries(),
+        );
         let mut buffer = DynamicUniformBuffer::default();
         buffer.set_label(Some("prism vsm caster depth views"));
         Self {

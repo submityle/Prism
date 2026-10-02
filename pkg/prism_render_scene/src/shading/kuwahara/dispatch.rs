@@ -18,22 +18,18 @@ use bevy_render::{
     renderer::{RenderContext, ViewQuery},
 };
 
+use super::super::resources::ViewVisibilityBuffer;
 use super::abi::KUWAHARA_WORKGROUP_SIZE;
 use super::bind_groups::ViewKuwaharaBindGroup;
 use super::pipeline::KuwaharaPipeline;
 use super::resources::ViewKuwahara;
 use super::settings::PrismKuwaharaSettings;
-use super::super::resources::ViewVisibilityBuffer;
 
 /// `Core3d` scheduling system recording the `kuwahara_main` dispatch for every
 /// view whose Kuwahara texture and bind group are resident.
 pub(crate) fn kuwahara_pass(
     settings: Res<PrismKuwaharaSettings>,
-    view: ViewQuery<(
-        &ViewKuwahara,
-        &ViewKuwaharaBindGroup,
-        &ViewVisibilityBuffer,
-    )>,
+    view: ViewQuery<(&ViewKuwahara, &ViewKuwaharaBindGroup, &ViewVisibilityBuffer)>,
     pipeline: Res<KuwaharaPipeline>,
     cache: Res<PipelineCache>,
     mut ctx: RenderContext,

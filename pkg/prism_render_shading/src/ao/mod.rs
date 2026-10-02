@@ -59,10 +59,10 @@ impl GtaoBuffers<'_> {
         if !(0.0..=1.0).contains(&uv[0]) || !(0.0..=1.0).contains(&uv[1]) {
             return None;
         }
-        let x = ((uv[0] * self.width as f32 - 0.5).round() as i64)
-            .clamp(0, self.width as i64 - 1) as usize;
-        let y = ((uv[1] * self.height as f32 - 0.5).round() as i64)
-            .clamp(0, self.height as i64 - 1) as usize;
+        let x = ((uv[0] * self.width as f32 - 0.5).round() as i64).clamp(0, self.width as i64 - 1)
+            as usize;
+        let y = ((uv[1] * self.height as f32 - 0.5).round() as i64).clamp(0, self.height as i64 - 1)
+            as usize;
         self.depth_at(x, y)
     }
 
@@ -228,8 +228,7 @@ impl HorizonSearch<'_, '_> {
             if cos_angle <= 0.0 {
                 continue;
             }
-            let weighted =
-                cos_angle * distance_weight(dist, self.falloff_start, self.radius_world);
+            let weighted = cos_angle * distance_weight(dist, self.falloff_start, self.radius_world);
             cos_horizon = combine_horizon(cos_horizon, weighted);
         }
         cos_horizon

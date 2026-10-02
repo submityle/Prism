@@ -130,10 +130,7 @@ mod tests {
         let ours: UpscaleSettings = arch.into();
         assert_eq!(ours.render_scale, 0.5);
         assert_eq!(ours.sharpness, 0.8);
-        assert_eq!(
-            ours.invalidation_dependencies,
-            InvalidationMask::CAMERA_CUT
-        );
+        assert_eq!(ours.invalidation_dependencies, InvalidationMask::CAMERA_CUT);
 
         let back: TemporalUpscaleSettings = ours.into();
         assert_eq!(back.render_scale, arch.render_scale);

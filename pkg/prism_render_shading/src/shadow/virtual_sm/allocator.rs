@@ -259,7 +259,7 @@ mod tests {
         let mut pool = PhysicalPageAllocator::new(2);
         pool.request(&key(0), 1).unwrap(); // slot 0, frame 1
         pool.request(&key(1), 2).unwrap(); // slot 1, frame 2
-        // Refresh key 0 so key 1 becomes the LRU victim.
+                                           // Refresh key 0 so key 1 becomes the LRU victim.
         assert!(pool.touch(&key(0), 3));
 
         let evicting = pool.request(&key(2), 4).unwrap();

@@ -158,7 +158,7 @@ mod tests {
         let set = generate_page_requests(&c, 7, &[receiver, receiver, receiver]);
         assert_eq!(set.raw_count, 27); // 3 receivers * 9 cells
         assert_eq!(set.keys.len(), 9); // all identical footprints collapse
-        // Every key belongs to the requested light and is sorted/unique.
+                                       // Every key belongs to the requested light and is sorted/unique.
         assert!(set.keys.iter().all(|k| k.light == 7));
         let mut sorted = set.keys.clone();
         sorted.sort_by_key(page_order);

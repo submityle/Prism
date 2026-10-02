@@ -18,22 +18,18 @@ use bevy_render::{
     renderer::{RenderContext, ViewQuery},
 };
 
+use super::super::resources::ViewVisibilityBuffer;
 use super::abi::HALFTONE_WORKGROUP_SIZE;
 use super::bind_groups::ViewHalftoneBindGroup;
 use super::pipeline::HalftonePipeline;
 use super::resources::ViewHalftone;
 use super::settings::PrismHalftoneSettings;
-use super::super::resources::ViewVisibilityBuffer;
 
 /// `Core3d` scheduling system recording the `halftone_main` dispatch for every
 /// view whose halftone texture and bind group are resident.
 pub(crate) fn halftone_pass(
     settings: Res<PrismHalftoneSettings>,
-    view: ViewQuery<(
-        &ViewHalftone,
-        &ViewHalftoneBindGroup,
-        &ViewVisibilityBuffer,
-    )>,
+    view: ViewQuery<(&ViewHalftone, &ViewHalftoneBindGroup, &ViewVisibilityBuffer)>,
     pipeline: Res<HalftonePipeline>,
     cache: Res<PipelineCache>,
     mut ctx: RenderContext,

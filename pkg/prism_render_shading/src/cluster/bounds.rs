@@ -108,10 +108,7 @@ impl ClusterBoundsBuilder {
         let tile = grid.tile_size;
         let screen = grid.screen_size;
 
-        let min_px = [
-            (coords[0] * tile[0]) as f32,
-            (coords[1] * tile[1]) as f32,
-        ];
+        let min_px = [(coords[0] * tile[0]) as f32, (coords[1] * tile[1]) as f32];
         let max_px = [
             ((coords[0] + 1) * tile[0]).min(screen[0]) as f32,
             ((coords[1] + 1) * tile[1]).min(screen[1]) as f32,
@@ -178,8 +175,14 @@ mod tests {
         // With an even `x`/`y` count the two central columns straddle `x == 0`.
         let left = builder.cluster_aabb(&grid, [7, 8, 5]);
         let right = builder.cluster_aabb(&grid, [8, 8, 5]);
-        assert!(left.max[0] <= 1.0e-4, "left should end at the axis: {left:?}");
-        assert!(right.min[0] >= -1.0e-4, "right should start at the axis: {right:?}");
+        assert!(
+            left.max[0] <= 1.0e-4,
+            "left should end at the axis: {left:?}"
+        );
+        assert!(
+            right.min[0] >= -1.0e-4,
+            "right should start at the axis: {right:?}"
+        );
     }
 
     #[test]

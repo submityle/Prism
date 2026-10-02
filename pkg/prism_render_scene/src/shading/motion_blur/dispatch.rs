@@ -25,10 +25,10 @@ use bevy_render::{
     view::ExtractedView,
 };
 
+use super::super::resources::ViewVisibilityBuffer;
 use super::abi::{MotionBlurParams, MOTION_BLUR_WORKGROUP_SIZE};
 use super::bind_groups::ViewMotionBlurBindGroups;
 use super::pipeline::MotionBlurPipeline;
-use super::super::resources::ViewVisibilityBuffer;
 use super::resources::ViewMotionBlur;
 use super::settings::PrismMotionBlurSettings;
 

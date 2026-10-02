@@ -11,9 +11,8 @@ use bevy_ecs::prelude::*;
 use bevy_render::{
     render_resource::{
         AddressMode, Extent3d, FilterMode, MipmapFilterMode, Sampler, SamplerDescriptor, Texture,
-        TextureDescriptor,
-        TextureDimension, TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
-        TextureViewDimension,
+        TextureDescriptor, TextureDimension, TextureFormat, TextureUsages, TextureView,
+        TextureViewDescriptor, TextureViewDimension,
     },
     renderer::RenderDevice,
 };
@@ -284,13 +283,19 @@ mod tests {
             size >>= 1;
         }
         // The smallest mip (index 4) is 8 texels.
-        assert_eq!(PREFILTERED_ENV_BASE_RESOLUTION >> (PREFILTERED_ENV_MIP_COUNT - 1), 8);
+        assert_eq!(
+            PREFILTERED_ENV_BASE_RESOLUTION >> (PREFILTERED_ENV_MIP_COUNT - 1),
+            8
+        );
     }
 
     #[test]
     fn dfg_lut_resolution_is_a_multiple_of_the_workgroup_size() {
         // A resolution divisible by the 8x8 workgroup keeps the dispatch exact,
         // though the shader also bounds-checks each invocation.
-        assert_eq!(DFG_LUT_RESOLUTION % super::super::abi::BRDF_LUT_WORKGROUP_SIZE, 0);
+        assert_eq!(
+            DFG_LUT_RESOLUTION % super::super::abi::BRDF_LUT_WORKGROUP_SIZE,
+            0
+        );
     }
 }

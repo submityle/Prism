@@ -118,8 +118,12 @@ mod tests {
     #[test]
     fn probe_params_forwards_the_grid_and_tile() {
         let settings = PrismWorldSpaceGiSettings::default();
-        let params =
-            settings.probe_params(UVec2::new(1920, 1080), UVec2::new(120, 68), Mat4::IDENTITY, 0.1);
+        let params = settings.probe_params(
+            UVec2::new(1920, 1080),
+            UVec2::new(120, 68),
+            Mat4::IDENTITY,
+            0.1,
+        );
         assert_eq!(params.screen_size, [1920.0, 1080.0]);
         assert_eq!(params.probe_grid, [120, 68]);
         assert_eq!(params.tile, settings.tile);
@@ -129,7 +133,8 @@ mod tests {
     #[test]
     fn resolve_params_forwards_the_thresholds() {
         let settings = PrismWorldSpaceGiSettings::default();
-        let params = settings.resolve_params(UVec2::new(1280, 720), UVec2::new(80, 45), Mat4::IDENTITY);
+        let params =
+            settings.resolve_params(UVec2::new(1280, 720), UVec2::new(80, 45), Mat4::IDENTITY);
         assert_eq!(params.probe_grid, [80, 45]);
         assert_eq!(params.normal_threshold, settings.normal_threshold);
         assert_eq!(params.depth_rel_threshold, settings.depth_rel_threshold);

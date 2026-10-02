@@ -36,7 +36,11 @@ impl RenderShadingGeometryRegistry {
         revision: u32,
         geometry: RenderShadingGeometry,
     ) -> bool {
-        let entry = RenderShadingGeometryEntry { handle, revision, geometry };
+        let entry = RenderShadingGeometryEntry {
+            handle,
+            revision,
+            geometry,
+        };
         if self.entries.get(&handle.index) == Some(&entry) {
             return false;
         }
@@ -103,8 +107,14 @@ mod tests {
 
     fn geometry(marker: f32) -> RenderShadingGeometry {
         RenderShadingGeometry {
-            vertices: vec![RenderShadingVertex { position: [marker; 3], ..Default::default() }],
-            primitives: vec![RenderShadingPrimitive { indices: [0, 0, 0], flags: 0 }],
+            vertices: vec![RenderShadingVertex {
+                position: [marker; 3],
+                ..Default::default()
+            }],
+            primitives: vec![RenderShadingPrimitive {
+                indices: [0, 0, 0],
+                flags: 0,
+            }],
             flags: 0,
         }
     }
@@ -112,7 +122,10 @@ mod tests {
     #[test]
     fn upsert_tracks_change_and_dirty_state() {
         let mut registry = RenderShadingGeometryRegistry::default();
-        let handle = GenerationalHandle { index: 2, generation: 1 };
+        let handle = GenerationalHandle {
+            index: 2,
+            generation: 1,
+        };
         assert!(registry.upsert(handle, 1, geometry(1.0)));
         assert!(registry.is_dirty());
         assert!(registry.take_dirty());
@@ -129,9 +142,26 @@ mod tests {
     #[test]
     fn entries_are_returned_in_ascending_slot_order() {
         let mut registry = RenderShadingGeometryRegistry::default();
-        registry.upsert(GenerationalHandle { index: 7, generation: 1 }, 1, geometry(7.0));
-        registry.upsert(GenerationalHandle { index: 3, generation: 1 }, 1, geometry(3.0));
-        let indices: Vec<u32> = registry.entries_for_upload().map(|e| e.handle.index).collect();
+        registry.upsert(
+            GenerationalHandle {
+                index: 7,
+                generation: 1,
+            },
+            1,
+            geometry(7.0),
+        );
+        registry.upsert(
+            GenerationalHandle {
+                index: 3,
+                generation: 1,
+            },
+            1,
+            geometry(3.0),
+        );
+        let indices: Vec<u32> = registry
+            .entries_for_upload()
+            .map(|e| e.handle.index)
+            .collect();
         assert_eq!(indices, vec![3, 7]);
         assert!(registry.remove(3).is_some());
         assert_eq!(registry.len(), 1);

@@ -70,6 +70,56 @@ pub fn smooth_subtraction(a: f32, b: f32, k: f32) -> f32 {
     smooth_intersection(a, -b, k)
 }
 
+
+/// Smooth union with fillet radius `k` that additionally reports the material
+/// blend factor at the seam, for interpolating per-solid shading attributes
+/// (albedo, roughness, and so on) across the rounded join.
+///
+/// Returns `(distance, blend)` where `distance` matches [`smooth_union`]
+/// exactly and `blend` in `[0, 1]` is the weight of the *second* operand `b`:
+/// `0` means fully `a`, `1` means fully `b`, and `0.5` at the deepest point of
+/// the fillet where the two surfaces are equidistant. A non-positive `k` falls
+/// back to the hard [`union`] with a hard `0`/`1` selection.
+pub fn smooth_union_blend(a: f32, b: f32, k: f32) -> (f32, f32) {
+    if k <= 0.0 {
+        return (union(a, b), if a <= b { 0.0 } else { 1.0 });
+    }
+    let h = ((k - (a - b).abs()).max(0.0)) / k;
+    let m = h * h * 0.5;
+    let distance = a.min(b) - h * h * k * 0.25;
+    let blend = if a < b { m } else { 1.0 - m };
+    (distance, blend)
+}
+
+/// Smooth intersection with fillet radius `k` that additionally reports the
+/// material blend factor at the seam, the dual of [`smooth_union_blend`].
+///
+/// Returns `(distance, blend)` where `distance` matches [`smooth_intersection`]
+/// exactly and `blend` in `[0, 1]` is the weight of the *second* operand `b`.
+/// A non-positive `k` falls back to the hard [`intersection`] with a hard
+/// `0`/`1` selection.
+pub fn smooth_intersection_blend(a: f32, b: f32, k: f32) -> (f32, f32) {
+    if k <= 0.0 {
+        return (intersection(a, b), if a >= b { 0.0 } else { 1.0 });
+    }
+    let h = ((k - (a - b).abs()).max(0.0)) / k;
+    let m = h * h * 0.5;
+    let distance = a.max(b) + h * h * k * 0.25;
+    let blend = if a > b { m } else { 1.0 - m };
+    (distance, blend)
+}
+
+/// Smooth subtraction with fillet radius `k` that additionally reports the
+/// material blend factor at the seam, for shading the rounded groove where `b`
+/// is carved out of `a` (for example tinting worn edges).
+///
+/// Returns `(distance, blend)` where `distance` matches [`smooth_subtraction`]
+/// exactly and `blend` in `[0, 1]` is the weight of the carving tool `b`
+/// (reusing [`smooth_intersection_blend`] against the complement `-b`).
+pub fn smooth_subtraction_blend(a: f32, b: f32, k: f32) -> (f32, f32) {
+    smooth_intersection_blend(a, -b, k)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,5 +183,57 @@ mod tests {
             assert_eq!(smooth_union(a, b, k), smooth_union(b, a, k));
             assert_eq!(smooth_intersection(a, b, k), smooth_intersection(b, a, k));
         }
+    }
+
+    #[test]
+    fn blend_variants_match_scalar_distance_exactly() {
+        let k = 0.5;
+        for &(a, b) in &[(1.0f32, 3.0f32), (-2.0, 0.5), (4.0, 4.1), (1.0, 1.0)] {
+            assert_eq!(smooth_union_blend(a, b, k).0, smooth_union(a, b, k));
+            assert_eq!(smooth_intersection_blend(a, b, k).0, smooth_intersection(a, b, k));
+            assert_eq!(smooth_subtraction_blend(a, b, k).0, smooth_subtraction(a, b, k));
+        }
+    }
+
+    #[test]
+    fn union_blend_is_half_when_equidistant_and_leans_to_the_nearer() {
+        let k = 0.5;
+        // Deepest fillet point: equal weight.
+        assert!((smooth_union_blend(1.0, 1.0, k).1 - 0.5).abs() <= 1e-6);
+        // a is much nearer: weight of b is near zero.
+        assert!(smooth_union_blend(0.0, 5.0, k).1 <= 1e-6);
+        // b is much nearer: weight of b is near one.
+        assert!((smooth_union_blend(5.0, 0.0, k).1 - 1.0).abs() <= 1e-6);
+    }
+
+    #[test]
+    fn intersection_blend_is_half_when_equidistant_and_leans_to_the_farther() {
+        let k = 0.5;
+        assert!((smooth_intersection_blend(1.0, 1.0, k).1 - 0.5).abs() <= 1e-6);
+        // a governs (farther): weight of b near zero.
+        assert!(smooth_intersection_blend(5.0, 0.0, k).1 <= 1e-6);
+        // b governs: weight of b near one.
+        assert!((smooth_intersection_blend(0.0, 5.0, k).1 - 1.0).abs() <= 1e-6);
+    }
+
+    #[test]
+    fn blend_factor_stays_in_unit_range() {
+        let k = 0.75;
+        let mut x = -3.0f32;
+        while x <= 3.0 {
+            let (_, bu) = smooth_union_blend(x, 0.0, k);
+            let (_, bi) = smooth_intersection_blend(x, 0.0, k);
+            assert!((0.0..=1.0).contains(&bu));
+            assert!((0.0..=1.0).contains(&bi));
+            x += 0.25;
+        }
+    }
+
+    #[test]
+    fn non_positive_radius_blend_falls_back_to_hard_selection() {
+        // Hard union picks a, so blend weight of b is 0.
+        assert_eq!(smooth_union_blend(1.0, 3.0, 0.0), (union(1.0, 3.0), 0.0));
+        // Hard intersection picks a (farther), so blend weight of b is 0.
+        assert_eq!(smooth_intersection_blend(3.0, 1.0, 0.0), (intersection(3.0, 1.0), 0.0));
     }
 }

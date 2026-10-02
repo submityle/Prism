@@ -397,7 +397,10 @@ mod tests {
         probe.add_directional_radiance([0.0, 1.0, 0.0], [1.0; 3], 1.0);
         let toward = probe.irradiance([0.0, 1.0, 0.0]);
         let away = probe.irradiance([0.0, -1.0, 0.0]);
-        assert!(toward[0] > away[0], "irradiance should peak toward the sample");
+        assert!(
+            toward[0] > away[0],
+            "irradiance should peak toward the sample"
+        );
         assert!(toward.iter().all(|c| c.is_finite()));
     }
 
@@ -500,7 +503,10 @@ mod tests {
             let real = evaluate_image_based_light_specular(surface, frame, &light, &env);
             // The DFG LUT and analytic fit differ slightly; require the same
             // ballpark rather than bit equality.
-            assert!(approx(analytic, real, 0.05), "r={roughness} {analytic:?} vs {real:?}");
+            assert!(
+                approx(analytic, real, 0.05),
+                "r={roughness} {analytic:?} vs {real:?}"
+            );
         }
     }
 
@@ -566,8 +572,18 @@ mod tests {
             tangent: [0.0, 1.0, 0.0],
             bitangent: [0.0, 0.0, 1.0],
         };
-        let sharp = evaluate_image_based_light_specular(surface_for_specular(0.05, 1.0), frame, &light, &env);
-        let rough = evaluate_image_based_light_specular(surface_for_specular(0.9, 1.0), frame, &light, &env);
+        let sharp = evaluate_image_based_light_specular(
+            surface_for_specular(0.05, 1.0),
+            frame,
+            &light,
+            &env,
+        );
+        let rough = evaluate_image_based_light_specular(
+            surface_for_specular(0.9, 1.0),
+            frame,
+            &light,
+            &env,
+        );
         assert!(rough[0] < sharp[0], "sharp={sharp:?} rough={rough:?}");
     }
 }

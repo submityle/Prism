@@ -45,10 +45,7 @@ impl FromWorld for ClusterBindGroup {
                     false,
                     NonZero::new(size_of::<GpuClusterGrid>() as u64),
                 ),
-                storage_buffer_read_only_sized(
-                    false,
-                    NonZero::new(size_of::<[u32; 2]>() as u64),
-                ),
+                storage_buffer_read_only_sized(false, NonZero::new(size_of::<[u32; 2]>() as u64)),
                 storage_buffer_read_only_sized(false, NonZero::new(size_of::<u32>() as u64)),
             ),
         );

@@ -328,7 +328,10 @@ mod tests {
         // Only a corner lit -> weight 1/16.
         let mut corner = [[0.0, 0.0, 0.0]; 9];
         corner[0] = [1.0, 1.0, 1.0];
-        approx3(upsample_tent(&corner, 1.0), [1.0 / 16.0, 1.0 / 16.0, 1.0 / 16.0]);
+        approx3(
+            upsample_tent(&corner, 1.0),
+            [1.0 / 16.0, 1.0 / 16.0, 1.0 / 16.0],
+        );
     }
 
     #[test]
@@ -389,6 +392,9 @@ mod tests {
         approx(p.intensity, 0.0);
         approx(p.radius, 0.0);
         // Disabled intensity leaves the scene untouched regardless of bloom.
-        approx3(combine([0.3, 0.3, 0.3], [9.0, 9.0, 9.0], p.intensity), [0.3, 0.3, 0.3]);
+        approx3(
+            combine([0.3, 0.3, 0.3], [9.0, 9.0, 9.0], p.intensity),
+            [0.3, 0.3, 0.3],
+        );
     }
 }

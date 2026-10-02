@@ -47,8 +47,8 @@ impl RenderGeometryLod {
         index_buffer_class: u32,
     ) -> Self {
         let mut flags = GEOMETRY_FLAG_ACTIVE;
-        flags |= u32::from(lod.primitive_kind == GeometryPrimitiveKind::Indexed)
-            * GEOMETRY_FLAG_INDEXED;
+        flags |=
+            u32::from(lod.primitive_kind == GeometryPrimitiveKind::Indexed) * GEOMETRY_FLAG_INDEXED;
         flags |= u32::from(lod.resident) * GEOMETRY_FLAG_RESIDENT;
         flags |= u32::from(lod.fallback) * GEOMETRY_FLAG_FALLBACK;
         Self {

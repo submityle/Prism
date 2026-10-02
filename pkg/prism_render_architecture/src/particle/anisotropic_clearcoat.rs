@@ -494,7 +494,10 @@ mod tests {
     fn alphas_split_in_opposite_directions_with_anisotropy() {
         let a = anisotropic_alphas(0.5, 0.8);
         // alpha_t = alpha / aspect >= alpha >= alpha * aspect = alpha_b.
-        assert!(a.alpha_t > a.alpha_b, "tangent alpha widens, bitangent narrows");
+        assert!(
+            a.alpha_t > a.alpha_b,
+            "tangent alpha widens, bitangent narrows"
+        );
         // Product is preserved: (alpha/aspect)*(alpha*aspect) = alpha².
         let alpha = 0.5_f32 * 0.5;
         assert!(approx(a.alpha_t * a.alpha_b, alpha * alpha, EPS));
@@ -554,9 +557,7 @@ mod tests {
     #[test]
     fn aniso_visibility_is_positive_and_finite() {
         let a = anisotropic_alphas(0.5, 0.4);
-        let v = ggx_aniso_visibility(
-            a.alpha_t, a.alpha_b, 0.1, 0.2, 0.9, 0.15, 0.1, 0.8,
-        );
+        let v = ggx_aniso_visibility(a.alpha_t, a.alpha_b, 0.1, 0.2, 0.9, 0.15, 0.1, 0.8);
         assert!(v > 0.0, "visibility must be positive: {v}");
         assert!(v.is_finite(), "visibility must be finite: {v}");
     }
@@ -622,7 +623,10 @@ mod tests {
     fn clearcoat_ndf_and_visibility_are_positive_finite() {
         let d = clearcoat_ggx_ndf(0.8, 0.08);
         let v = clearcoat_visibility(0.7, 0.6, 0.08);
-        assert!(d > 0.0 && d.is_finite(), "clearcoat NDF positive finite: {d}");
+        assert!(
+            d > 0.0 && d.is_finite(),
+            "clearcoat NDF positive finite: {d}"
+        );
         assert!(v > 0.0 && v.is_finite(), "clearcoat V positive finite: {v}");
     }
 
@@ -635,8 +639,14 @@ mod tests {
         let v = Vec3::new(0.0, 0.3, 1.0);
         let l = Vec3::new(0.2, 0.0, 1.0);
         let s = params.evaluate(t, b, n, v, l);
-        assert!(approx(s.clearcoat_fresnel, 0.0, EPS), "zero strength kills Fc");
-        assert!(approx(s.base_attenuation, 1.0, EPS), "no coat, full base energy");
+        assert!(
+            approx(s.clearcoat_fresnel, 0.0, EPS),
+            "zero strength kills Fc"
+        );
+        assert!(
+            approx(s.base_attenuation, 1.0, EPS),
+            "no coat, full base energy"
+        );
         assert!(s.base_ndf > 0.0 && s.base_ndf.is_finite());
         assert!(s.base_visibility > 0.0 && s.base_visibility.is_finite());
     }
@@ -668,7 +678,11 @@ mod tests {
         let params = AnisotropicClearcoatParams::new(0.0, 0.0, 0.0, 1.0);
         let z = Vec3::ZERO;
         let s = params.evaluate(z, z, z, z, z);
-        assert!(s.base_ndf.is_finite(), "degenerate base NDF finite: {}", s.base_ndf);
+        assert!(
+            s.base_ndf.is_finite(),
+            "degenerate base NDF finite: {}",
+            s.base_ndf
+        );
         assert!(s.base_visibility.is_finite());
         assert!(s.clearcoat_ndf.is_finite());
         assert!(s.clearcoat_visibility.is_finite());
@@ -680,10 +694,22 @@ mod tests {
     fn params_pack_round_trips_bits() {
         let params = AnisotropicClearcoatParams::new(0.3, -0.4, 0.07, 0.9);
         let bits = params.to_std430_bits();
-        assert!(approx(f32::from_bits(bits[0]), 0.3, 0.0), "roughness round-trips");
-        assert!(approx(f32::from_bits(bits[1]), -0.4, 0.0), "anisotropy round-trips");
-        assert!(approx(f32::from_bits(bits[2]), 0.07, 0.0), "cc roughness round-trips");
-        assert!(approx(f32::from_bits(bits[3]), 0.9, 0.0), "cc strength round-trips");
+        assert!(
+            approx(f32::from_bits(bits[0]), 0.3, 0.0),
+            "roughness round-trips"
+        );
+        assert!(
+            approx(f32::from_bits(bits[1]), -0.4, 0.0),
+            "anisotropy round-trips"
+        );
+        assert!(
+            approx(f32::from_bits(bits[2]), 0.07, 0.0),
+            "cc roughness round-trips"
+        );
+        assert!(
+            approx(f32::from_bits(bits[3]), 0.9, 0.0),
+            "cc strength round-trips"
+        );
     }
 
     #[test]

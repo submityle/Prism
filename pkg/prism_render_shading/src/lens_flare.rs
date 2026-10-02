@@ -93,7 +93,11 @@ pub fn mix3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
 pub fn threshold_prefilter(rgb: [f32; 3], threshold: f32) -> [f32; 3] {
     let luma = luminance(rgb);
     let contribution = (luma - threshold).max(0.0) / luma.max(1.0e-6);
-    [rgb[0] * contribution, rgb[1] * contribution, rgb[2] * contribution]
+    [
+        rgb[0] * contribution,
+        rgb[1] * contribution,
+        rgb[2] * contribution,
+    ]
 }
 
 /// Sampling `uv` for the `ghost_index`-th `ghost`: step from `uv` toward the
@@ -105,10 +109,7 @@ pub fn threshold_prefilter(rgb: [f32; 3], threshold: f32) -> [f32; 3] {
 /// reflections.
 #[must_use]
 pub fn ghost_uv(uv: [f32; 2], ghost_index: f32, dispersal: f32) -> [f32; 2] {
-    let dir = [
-        LENS_FLARE_CENTER[0] - uv[0],
-        LENS_FLARE_CENTER[1] - uv[1],
-    ];
+    let dir = [LENS_FLARE_CENTER[0] - uv[0], LENS_FLARE_CENTER[1] - uv[1]];
     let step = dispersal * ghost_index;
     [uv[0] + dir[0] * step, uv[1] + dir[1] * step]
 }
@@ -118,10 +119,7 @@ pub fn ghost_uv(uv: [f32; 2], ghost_index: f32, dispersal: f32) -> [f32; 2] {
 /// centre has no direction and is returned unchanged.
 #[must_use]
 pub fn halo_uv(uv: [f32; 2], halo_width: f32) -> [f32; 2] {
-    let dir = [
-        LENS_FLARE_CENTER[0] - uv[0],
-        LENS_FLARE_CENTER[1] - uv[1],
-    ];
+    let dir = [LENS_FLARE_CENTER[0] - uv[0], LENS_FLARE_CENTER[1] - uv[1]];
     let len = (dir[0] * dir[0] + dir[1] * dir[1]).sqrt();
     if len < 1.0e-6 {
         return uv;
@@ -160,10 +158,7 @@ pub fn vignette_weight(uv: [f32; 2], strength: f32) -> f32 {
 /// offsets fringes the disc red/blue like real lens dispersion.
 #[must_use]
 pub fn chromatic_ghost_offset(uv: [f32; 2], distortion: f32, channel: u32) -> [f32; 2] {
-    let dir = [
-        LENS_FLARE_CENTER[0] - uv[0],
-        LENS_FLARE_CENTER[1] - uv[1],
-    ];
+    let dir = [LENS_FLARE_CENTER[0] - uv[0], LENS_FLARE_CENTER[1] - uv[1]];
     let lobe = channel as f32 - 1.0;
     let step = distortion * lobe;
     [uv[0] + dir[0] * step, uv[1] + dir[1] * step]
@@ -283,7 +278,10 @@ mod tests {
 
     #[test]
     fn mix3_midpoint_is_average() {
-        approx3(mix3([0.0, 0.0, 0.0], [1.0, 0.5, 0.25], 0.5), [0.5, 0.25, 0.125]);
+        approx3(
+            mix3([0.0, 0.0, 0.0], [1.0, 0.5, 0.25], 0.5),
+            [0.5, 0.25, 0.125],
+        );
     }
 
     // --- threshold_prefilter ---
@@ -298,7 +296,10 @@ mod tests {
     fn threshold_prefilter_at_threshold_is_zero() {
         // Exactly at the threshold the surplus is zero.
         let luma = 1.0;
-        approx3(threshold_prefilter([luma, luma, luma], 1.0), [0.0, 0.0, 0.0]);
+        approx3(
+            threshold_prefilter([luma, luma, luma], 1.0),
+            [0.0, 0.0, 0.0],
+        );
     }
 
     #[test]
@@ -434,7 +435,10 @@ mod tests {
         let uv = [0.2, 0.8];
         let r = chromatic_ghost_offset(uv, 0.3, 0);
         let b = chromatic_ghost_offset(uv, 0.3, 2);
-        approx2([r[0] - uv[0], r[1] - uv[1]], [-(b[0] - uv[0]), -(b[1] - uv[1])]);
+        approx2(
+            [r[0] - uv[0], r[1] - uv[1]],
+            [-(b[0] - uv[0]), -(b[1] - uv[1])],
+        );
     }
 
     // --- accumulate_ghosts ---
@@ -481,6 +485,9 @@ mod tests {
         approx(p.halo_width, 0.0);
         approx(p.distortion, 0.0);
         // Disabled intensity leaves the scene untouched regardless of flare.
-        approx3(apply_lens_flare([0.3, 0.3, 0.3], [9.0, 9.0, 9.0], p.intensity), [0.3, 0.3, 0.3]);
+        approx3(
+            apply_lens_flare([0.3, 0.3, 0.3], [9.0, 9.0, 9.0], p.intensity),
+            [0.3, 0.3, 0.3],
+        );
     }
 }

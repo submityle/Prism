@@ -64,17 +64,19 @@ use bevy_render::{
 use crate::{buffers::GpuSceneBindGroup, ExtractedSceneInstance, GpuSceneInstanceAddress};
 
 use super::abi::GpuVsmCasterDepthView;
-use super::pipeline::{VsmCasterDepthPipeline, VsmCasterDepthPipelineKey, VsmCasterDepthViewUniform};
+use super::pipeline::{
+    VsmCasterDepthPipeline, VsmCasterDepthPipelineKey, VsmCasterDepthViewUniform,
+};
 use super::projection::{caster_depth_half_extent, page_light_projection, page_viewport_rect};
 use super::raster::{
-    VsmCasterDepthDrawEntry, VsmCasterDepthDrawList, VsmCasterDepthEntry, VsmCasterDepthTargets,
-    ViewVsmCasterDepth, ViewVsmCasterPages,
+    ViewVsmCasterDepth, ViewVsmCasterPages, VsmCasterDepthDrawEntry, VsmCasterDepthDrawList,
+    VsmCasterDepthEntry, VsmCasterDepthTargets,
 };
 use super::resources::{physical_pages_per_edge, ViewVsmPhysicalAtlas};
 
+use super::super::super::runtime::PrismShadingSettings;
 use super::super::extract::VsmPrimaryLight;
 use super::super::settings::PrismVirtualShadowSettings;
-use super::super::super::runtime::PrismShadingSettings;
 
 /// Specializes the caster depth pipeline for every GPU-scene instance and
 /// records the flat draw list replayed into each resident page.
@@ -193,7 +195,9 @@ pub(crate) fn prepare_vsm_caster_depth_views(
                     atlas_tile_origin: page.atlas_tile_origin,
                 });
             }
-            commands.entity(entity).insert(ViewVsmCasterDepth { entries });
+            commands
+                .entity(entity)
+                .insert(ViewVsmCasterDepth { entries });
         }
     }
 

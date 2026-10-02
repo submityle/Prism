@@ -237,18 +237,18 @@ mod tests {
             camera_world: Vec3::new(100.0, 50.0, -80.0),
             ..a
         };
-        assert_eq!(a.project(world).light_space_xy, b.project(world).light_space_xy);
+        assert_eq!(
+            a.project(world).light_space_xy,
+            b.project(world).light_space_xy
+        );
     }
 
     /// View distance is the Euclidean camera-to-world distance and grows as the
     /// surface recedes, which is what drives coarser clip-level selection.
     #[test]
     fn view_distance_measures_from_the_camera() {
-        let p = ReceiverProjection::from_light_direction(
-            Vec3::NEG_Y,
-            Vec3::new(0.0, 0.0, 0.0),
-            0.5,
-        );
+        let p =
+            ReceiverProjection::from_light_direction(Vec3::NEG_Y, Vec3::new(0.0, 0.0, 0.0), 0.5);
         let near = p.project(Vec3::new(0.0, 0.0, 3.0));
         let far = p.project(Vec3::new(0.0, 0.0, 30.0));
         assert!((near.view_distance - 3.0).abs() < 1.0e-4);

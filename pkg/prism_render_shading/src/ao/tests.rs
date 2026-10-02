@@ -11,7 +11,10 @@ const CAMERA: GtaoCamera = GtaoCamera {
 
 /// Flat fronto-parallel plane at constant depth facing the camera.
 fn flat_plane(width: usize, height: usize, depth: f32) -> (Vec<f32>, Vec<[f32; 3]>) {
-    (vec![depth; width * height], vec![[0.0, 0.0, 1.0]; width * height])
+    (
+        vec![depth; width * height],
+        vec![[0.0, 0.0, 1.0]; width * height],
+    )
 }
 
 /// Left half is the floor at depth 10, right half a step raised 0.8 closer.
@@ -29,9 +32,17 @@ fn stepped_scene(width: usize, height: usize) -> (Vec<f32>, Vec<[f32; 3]>) {
 fn open_plane_is_fully_visible() {
     let (width, height) = (32, 32);
     let (depth, normals) = flat_plane(width, height, 10.0);
-    let buffers = GtaoBuffers { width, height, linear_depth: &depth, view_normals: &normals };
+    let buffers = GtaoBuffers {
+        width,
+        height,
+        linear_depth: &depth,
+        view_normals: &normals,
+    };
     let center = gtao_pixel(buffers, CAMERA, GtaoConfig::default(), 16, 16);
-    assert!(center > 0.98, "open plane center should be unoccluded, got {center}");
+    assert!(
+        center > 0.98,
+        "open plane center should be unoccluded, got {center}"
+    );
 }
 
 #[test]
@@ -40,19 +51,38 @@ fn background_pixels_are_unoccluded() {
     let mut depth = vec![10.0_f32; width * height];
     depth[3 * width + 3] = 0.0; // sky / no geometry
     let normals = vec![[0.0, 0.0, 1.0]; width * height];
-    let buffers = GtaoBuffers { width, height, linear_depth: &depth, view_normals: &normals };
-    assert_eq!(gtao_pixel(buffers, CAMERA, GtaoConfig::default(), 3, 3), 1.0);
+    let buffers = GtaoBuffers {
+        width,
+        height,
+        linear_depth: &depth,
+        view_normals: &normals,
+    };
+    assert_eq!(
+        gtao_pixel(buffers, CAMERA, GtaoConfig::default(), 3, 3),
+        1.0
+    );
 }
 
 #[test]
 fn nearer_step_darkens_adjacent_floor() {
     let (width, height) = (64, 64);
     let (depth, normals) = stepped_scene(width, height);
-    let buffers = GtaoBuffers { width, height, linear_depth: &depth, view_normals: &normals };
-    let config = GtaoConfig { world_radius: 1.5, ..GtaoConfig::default() };
+    let buffers = GtaoBuffers {
+        width,
+        height,
+        linear_depth: &depth,
+        view_normals: &normals,
+    };
+    let config = GtaoConfig {
+        world_radius: 1.5,
+        ..GtaoConfig::default()
+    };
     let near_seam = gtao_pixel(buffers, CAMERA, config, 30, 32);
     let far_floor = gtao_pixel(buffers, CAMERA, config, 2, 32);
-    assert!(far_floor > 0.9, "far floor should stay open, got {far_floor}");
+    assert!(
+        far_floor > 0.9,
+        "far floor should stay open, got {far_floor}"
+    );
     assert!(
         near_seam < far_floor - 0.05,
         "seam pixel should be more occluded: near={near_seam} far={far_floor}"
@@ -63,11 +93,22 @@ fn nearer_step_darkens_adjacent_floor() {
 fn larger_radius_reaches_more_occluders() {
     let (width, height) = (64, 64);
     let (depth, normals) = stepped_scene(width, height);
-    let buffers = GtaoBuffers { width, height, linear_depth: &depth, view_normals: &normals };
+    let buffers = GtaoBuffers {
+        width,
+        height,
+        linear_depth: &depth,
+        view_normals: &normals,
+    };
     // A pixel a few texels from the seam is only reached by the larger radius.
     let x = 26;
-    let small = GtaoConfig { world_radius: 0.8, ..GtaoConfig::default() };
-    let large = GtaoConfig { world_radius: 3.0, ..GtaoConfig::default() };
+    let small = GtaoConfig {
+        world_radius: 0.8,
+        ..GtaoConfig::default()
+    };
+    let large = GtaoConfig {
+        world_radius: 3.0,
+        ..GtaoConfig::default()
+    };
     let occ_small = gtao_pixel(buffers, CAMERA, small, x, 32);
     let occ_large = gtao_pixel(buffers, CAMERA, large, x, 32);
     assert!(
@@ -86,8 +127,17 @@ fn visibility_stays_in_unit_range() {
         }
     }
     let normals = vec![[0.0, 0.0, 1.0]; width * height];
-    let buffers = GtaoBuffers { width, height, linear_depth: &depth, view_normals: &normals };
-    let config = GtaoConfig { world_radius: 2.0, power: 1.5, ..GtaoConfig::default() };
+    let buffers = GtaoBuffers {
+        width,
+        height,
+        linear_depth: &depth,
+        view_normals: &normals,
+    };
+    let config = GtaoConfig {
+        world_radius: 2.0,
+        power: 1.5,
+        ..GtaoConfig::default()
+    };
     for value in compute_gtao(buffers, CAMERA, config) {
         assert!((0.0..=1.0).contains(&value), "AO out of range: {value}");
     }
@@ -97,8 +147,17 @@ fn visibility_stays_in_unit_range() {
 fn higher_power_darkens_occluded_pixels() {
     let (width, height) = (64, 64);
     let (depth, normals) = stepped_scene(width, height);
-    let buffers = GtaoBuffers { width, height, linear_depth: &depth, view_normals: &normals };
-    let soft = GtaoConfig { world_radius: 1.5, power: 1.0, ..GtaoConfig::default() };
+    let buffers = GtaoBuffers {
+        width,
+        height,
+        linear_depth: &depth,
+        view_normals: &normals,
+    };
+    let soft = GtaoConfig {
+        world_radius: 1.5,
+        power: 1.0,
+        ..GtaoConfig::default()
+    };
     let sharp = GtaoConfig { power: 3.0, ..soft };
     let seam_soft = gtao_pixel(buffers, CAMERA, soft, 30, 32);
     let seam_sharp = gtao_pixel(buffers, CAMERA, sharp, 30, 32);
@@ -111,7 +170,10 @@ fn higher_power_darkens_occluded_pixels() {
 #[test]
 fn slice_integral_open_hemisphere_is_unity() {
     let visibility = slice_visibility(0.0, 0.0, 0.0, 1.0);
-    assert!((visibility - 1.0).abs() < 1.0e-5, "expected 1.0, got {visibility}");
+    assert!(
+        (visibility - 1.0).abs() < 1.0e-5,
+        "expected 1.0, got {visibility}"
+    );
 }
 
 #[test]
@@ -125,7 +187,10 @@ fn slice_integral_is_monotonic_in_horizon() {
     let open = slice_visibility(0.0, 0.0, 0.0, 1.0);
     let half = slice_visibility(0.0, 0.5, 0.0, 1.0);
     let closed = slice_visibility(0.0, 1.0, 0.0, 1.0);
-    assert!(open > half && half > closed, "open={open} half={half} closed={closed}");
+    assert!(
+        open > half && half > closed,
+        "open={open} half={half} closed={closed}"
+    );
 }
 
 #[test]
@@ -151,7 +216,10 @@ fn distance_weight_eases_from_start_to_radius() {
     assert!((distance_weight(2.0, 1.0, 2.0)).abs() < 1.0e-6);
     assert!(distance_weight(3.0, 1.0, 2.0).abs() < 1.0e-6);
     let mid = distance_weight(1.5, 1.0, 2.0);
-    assert!(mid > 0.0 && mid < 1.0, "midpoint weight {mid} should be in (0, 1)");
+    assert!(
+        mid > 0.0 && mid < 1.0,
+        "midpoint weight {mid} should be in (0, 1)"
+    );
 }
 
 #[test]

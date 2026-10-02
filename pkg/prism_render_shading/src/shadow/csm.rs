@@ -164,8 +164,7 @@ fn fit_cascade(
 
     // Orthographic box tightly bounds the sphere; depth spans [0, 2r] so the
     // sphere centre lands at z = 0.5.
-    let mut proj =
-        orthographic_rh_01(-radius, radius, -radius, radius, 0.0, 2.0 * radius);
+    let mut proj = orthographic_rh_01(-radius, radius, -radius, radius, 0.0, 2.0 * radius);
 
     // Texel snap: project the centre, quantize its NDC x/y to whole texels, and
     // fold the residual back into the projection's translation columns so the

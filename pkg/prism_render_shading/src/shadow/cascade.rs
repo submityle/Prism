@@ -189,7 +189,7 @@ mod tests {
     #[test]
     fn blend_weight_ramps_in_band() {
         let s = compute_cascade_splits(0.0, 4.0, 4, 0.0); // near clamped, ~1,2,3,4
-        // Cascade 0 spans roughly [near, 1]; use cascade 1 spanning [1, 2].
+                                                          // Cascade 0 spans roughly [near, 1]; use cascade 1 spanning [1, 2].
         let far = s.cascade_far(1);
         let near = s.cascade_near(1);
         let range = far - near;

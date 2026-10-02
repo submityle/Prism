@@ -57,10 +57,12 @@
 
 use alloc::vec::Vec;
 
+use super::perf_budget::{
+    arbitrate, BudgetLedger, BudgetPressure, FrameStage, FrameTimeReport, TripleBudget,
+};
 use super::platform::{
     order_degradation_candidates, DegradationAction, DegradationCandidate, DEGRADATION_LADDER,
 };
-use super::perf_budget::{arbitrate, BudgetLedger, BudgetPressure, FrameStage, FrameTimeReport, TripleBudget};
 use super::{EmitterHandle, Vec3};
 
 /// Fixed-point denominator for reclaim fractions.
@@ -583,7 +585,11 @@ mod tests {
             max_vram_bytes: 1,
             max_gpu_ms: 0.5,
         };
-        let loads = [load(3, 1, EmitterRuntimeCost::new(100_000, 50_000_000, 100.0))];
+        let loads = [load(
+            3,
+            1,
+            EmitterRuntimeCost::new(100_000, 50_000_000, 100.0),
+        )];
         let plan = execute_degradation(budget, &loads);
         assert!(plan.resolved_within_budget);
 

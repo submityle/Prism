@@ -58,11 +58,10 @@ pub(crate) fn prepare_ssr_prepass_bind_groups(
         scene.instances(),
         scene.current_transforms(),
         geometry.buffers(),
-    ) else {
+    )
+    else {
         for (entity, _, _) in &views {
-            commands
-                .entity(entity)
-                .remove::<ViewSsrPrepassBindGroups>();
+            commands.entity(entity).remove::<ViewSsrPrepassBindGroups>();
         }
         return;
     };

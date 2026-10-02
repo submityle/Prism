@@ -38,8 +38,8 @@ use bevy_render::{
 };
 use bevy_shader::Shader;
 
-use super::abi::{GpuDofCocParams, GpuDofCompositeParams, GpuDofGatherParams};
 use super::super::resources::SCENE_COLOR_FORMAT;
+use super::abi::{GpuDofCocParams, GpuDofCompositeParams, GpuDofGatherParams};
 
 /// Half-float RG storage/sampled format of the `CoC` field: two channels hold the
 /// near/far gather radii in pixels, half precision is ample for the clamped
@@ -117,8 +117,14 @@ fn gather_layout_entries() -> BindGroupLayoutEntries<3> {
     BindGroupLayoutEntries::with_indices(
         ShaderStages::COMPUTE,
         (
-            (2, texture_2d(TextureSampleType::Float { filterable: false })),
-            (3, texture_2d(TextureSampleType::Float { filterable: false })),
+            (
+                2,
+                texture_2d(TextureSampleType::Float { filterable: false }),
+            ),
+            (
+                3,
+                texture_2d(TextureSampleType::Float { filterable: false }),
+            ),
             (
                 4,
                 texture_storage_2d(SCENE_COLOR_FORMAT, StorageTextureAccess::WriteOnly),
@@ -135,9 +141,18 @@ fn composite_layout_entries() -> BindGroupLayoutEntries<4> {
     BindGroupLayoutEntries::with_indices(
         ShaderStages::COMPUTE,
         (
-            (2, texture_2d(TextureSampleType::Float { filterable: false })),
-            (3, texture_2d(TextureSampleType::Float { filterable: false })),
-            (5, texture_2d(TextureSampleType::Float { filterable: false })),
+            (
+                2,
+                texture_2d(TextureSampleType::Float { filterable: false }),
+            ),
+            (
+                3,
+                texture_2d(TextureSampleType::Float { filterable: false }),
+            ),
+            (
+                5,
+                texture_2d(TextureSampleType::Float { filterable: false }),
+            ),
             (
                 6,
                 texture_storage_2d(SCENE_COLOR_FORMAT, StorageTextureAccess::WriteOnly),
@@ -167,8 +182,7 @@ pub(crate) fn init_dof_pipeline(
     let composite_layout =
         device.create_bind_group_layout("prism dof composite", &composite_entries);
 
-    let shader: Handle<Shader> =
-        load_embedded_asset!(asset_server.as_ref(), "../shaders/dof.wesl");
+    let shader: Handle<Shader> = load_embedded_asset!(asset_server.as_ref(), "../shaders/dof.wesl");
 
     let coc = cache.queue_compute_pipeline(ComputePipelineDescriptor {
         label: Some("prism dof coc".into()),

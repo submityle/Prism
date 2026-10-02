@@ -26,8 +26,8 @@ use bevy_render::{
 };
 use bevy_shader::Shader;
 
-use super::abi::GpuColorGradeParams;
 use super::super::resources::SCENE_COLOR_FORMAT;
+use super::abi::GpuColorGradeParams;
 
 /// The colour-grade compute pipeline and its owned group-0 layout.
 #[derive(Resource)]

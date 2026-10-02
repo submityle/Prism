@@ -21,6 +21,7 @@
 //!   ambient input, which the resolve pass folds into the indirect term.
 
 use bevy_asset::Assets;
+use bevy_camera::visibility::ViewVisibility;
 use bevy_color::{Color, ColorToComponents};
 use bevy_ecs::prelude::*;
 use bevy_image::Image;
@@ -28,15 +29,12 @@ use bevy_light::{
     DirectionalLight, EnvironmentMapLight, GlobalAmbientLight, PointLight, SpotLight,
 };
 use bevy_math::ops;
-use bevy_camera::visibility::ViewVisibility;
 use bevy_render::Extract;
 use bevy_transform::components::GlobalTransform;
 use core::f32::consts::{FRAC_PI_2, PI};
 use prism_render_shading::{PunctualLight, SphericalHarmonicsL2};
 
-use super::abi::{
-    GpuDirectionalLight, GpuLightEnvironment, GpuPunctualLight, GpuStylizedParams,
-};
+use super::abi::{GpuDirectionalLight, GpuLightEnvironment, GpuPunctualLight, GpuStylizedParams};
 use super::probe::EnvironmentProbeCache;
 use super::stylized_config::StylizedLighting;
 
@@ -100,9 +98,7 @@ pub(crate) fn extract_lights(
     mut extracted: ResMut<ExtractedLights>,
     ambient: Extract<Option<Res<GlobalAmbientLight>>>,
     stylized: Extract<Option<Res<StylizedLighting>>>,
-    directionals: Extract<
-        Query<(&DirectionalLight, &GlobalTransform, Option<&ViewVisibility>)>,
-    >,
+    directionals: Extract<Query<(&DirectionalLight, &GlobalTransform, Option<&ViewVisibility>)>>,
     points: Extract<Query<(&PointLight, &GlobalTransform, Option<&ViewVisibility>)>>,
     spots: Extract<Query<(&SpotLight, &GlobalTransform, Option<&ViewVisibility>)>>,
     environment_maps: Extract<Query<(&EnvironmentMapLight, Option<&ViewVisibility>)>>,
@@ -112,8 +108,7 @@ pub(crate) fn extract_lights(
     extracted.clear();
 
     if let Some(ambient) = ambient.as_deref() {
-        extracted.environment.ambient =
-            scale_rgb(linear_rgb(ambient.color), ambient.brightness);
+        extracted.environment.ambient = scale_rgb(linear_rgb(ambient.color), ambient.brightness);
     }
 
     // Frame-global stylized (NPR) look control.  When the resource is absent
@@ -157,11 +152,8 @@ pub(crate) fn extract_lights(
         }
         let intensity = scale_rgb(linear_rgb(light.color), light.intensity * INV_FOUR_PI);
         let position = transform.translation();
-        let point = PunctualLight::point(
-            [position.x, position.y, position.z],
-            intensity,
-            light.range,
-        );
+        let point =
+            PunctualLight::point([position.x, position.y, position.z], intensity, light.range);
         extracted.punctuals.push(GpuPunctualLight::from(point));
     }
 
@@ -315,7 +307,10 @@ mod tests {
         let mut lights = ExtractedLights::default();
         lights.environment.stylized = GpuStylizedParams::from(StylizedParams::with_bands(9));
         lights.clear();
-        assert_eq!(lights.environment.stylized.bands, 4, "clear resets to default");
+        assert_eq!(
+            lights.environment.stylized.bands, 4,
+            "clear resets to default"
+        );
 
         apply_stylized(
             &mut lights.environment,

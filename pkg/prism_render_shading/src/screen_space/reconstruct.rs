@@ -134,7 +134,13 @@ where
 mod tests {
     use super::*;
 
-    fn tap(reflected: Vec3, confidence: f32, normal: Vec3, depth: f32, dist_sq: f32) -> SsrResolveSample {
+    fn tap(
+        reflected: Vec3,
+        confidence: f32,
+        normal: Vec3,
+        depth: f32,
+        dist_sq: f32,
+    ) -> SsrResolveSample {
         SsrResolveSample {
             reflected,
             confidence,
@@ -163,9 +169,18 @@ mod tests {
             &params,
             n,
             1.0,
-            &tap(Vec3::ONE, 1.0, Vec3::new(0.7, 0.0, 0.7).normalize(), 1.0, 1.0),
+            &tap(
+                Vec3::ONE,
+                1.0,
+                Vec3::new(0.7, 0.0, 0.7).normalize(),
+                1.0,
+                1.0,
+            ),
         );
-        assert!(tilted < aligned * 0.25, "tilted {tilted} vs aligned {aligned}");
+        assert!(
+            tilted < aligned * 0.25,
+            "tilted {tilted} vs aligned {aligned}"
+        );
     }
 
     #[test]

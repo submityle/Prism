@@ -70,13 +70,17 @@ pub(crate) fn prepare_resolve_motion(
         // Same reconstruction the visibility pass uses: prefer the explicit
         // `clip_from_world`, else compose it from the projection and the
         // inverse view transform.
-        let clip: Mat4 = view.clip_from_world.unwrap_or_else(|| {
-            view.clip_from_view * view.world_from_view.to_matrix().inverse()
-        });
+        let clip: Mat4 = view
+            .clip_from_world
+            .unwrap_or_else(|| view.clip_from_view * view.world_from_view.to_matrix().inverse());
         let clip_array = clip.to_cols_array_2d();
         let retained = view.retained_view_entity;
         // No history on the first frame -> previous == current -> zero motion.
-        let previous = history.previous.get(&retained).copied().unwrap_or(clip_array);
+        let previous = history
+            .previous
+            .get(&retained)
+            .copied()
+            .unwrap_or(clip_array);
 
         let matrices = MotionMatrices {
             clip_from_world: clip_array,

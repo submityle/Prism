@@ -47,15 +47,9 @@ pub use gi::{
     build_hemisphere_ray, cosine_sample_direction, gather_indirect_diffuse, trace_indirect_ray,
     SsgiGather, SsgiParams, SsgiRaySample,
 };
-pub use gi_denoise::{
-    denoise_ssgi, denoise_ssgi_pixel, SsgiDenoiseBuffers, SsgiDenoiseConfig,
-};
-pub use march::{
-    march_hierarchical, DepthPyramid, SsrMarchConfig, SsrMarchResult,
-};
-pub use motion::{
-    motion_vector, project_world_to_screen, MotionSample,
-};
+pub use gi_denoise::{denoise_ssgi, denoise_ssgi_pixel, SsgiDenoiseBuffers, SsgiDenoiseConfig};
+pub use march::{march_hierarchical, DepthPyramid, SsrMarchConfig, SsrMarchResult};
+pub use motion::{motion_vector, project_world_to_screen, MotionSample};
 pub use ray::{
     build_screen_ray, project_view_to_screen, reflect, reverse_z_perspective, ScreenRay,
     ScreenSample, SsrCamera,
@@ -69,8 +63,7 @@ pub use sample::{
 pub use temporal::{
     accumulate_temporal, adaptive_history_weight, clip_history_to_aabb, clip_history_to_aabb_ex,
     expand_bounds, relax_box_for_confidence, reproject_prev_uv, reproject_prev_uv_motion,
-    variance_clip_box, ClipResult,
-    SsrTemporalParams,
+    variance_clip_box, ClipResult, SsrTemporalParams,
 };
 
 use bevy_math::Vec3;
@@ -153,12 +146,7 @@ mod tests {
         // surface midway along its device-depth span so the march is
         // guaranteed to straddle (and therefore hit) it.
         let camera = SsrCamera {
-            clip_from_view: reverse_z_perspective(
-                core::f32::consts::FRAC_PI_2,
-                1.0,
-                0.5,
-                100.0,
-            ),
+            clip_from_view: reverse_z_perspective(core::f32::consts::FRAC_PI_2, 1.0, 0.5, 100.0),
             near: 0.5,
         };
         let position = Vec3::new(0.0, -1.0, -4.0);
@@ -189,12 +177,7 @@ mod tests {
     #[test]
     fn rough_surface_falls_back_to_ibl() {
         let camera = SsrCamera {
-            clip_from_view: reverse_z_perspective(
-                core::f32::consts::FRAC_PI_2,
-                1.0,
-                0.5,
-                100.0,
-            ),
+            clip_from_view: reverse_z_perspective(core::f32::consts::FRAC_PI_2, 1.0, 0.5, 100.0),
             near: 0.5,
         };
         let mip0 = vec![0.95f32; 64 * 64];
@@ -215,12 +198,7 @@ mod tests {
     #[test]
     fn surface_behind_camera_is_a_zero_confidence_miss() {
         let camera = SsrCamera {
-            clip_from_view: reverse_z_perspective(
-                core::f32::consts::FRAC_PI_2,
-                1.0,
-                0.5,
-                100.0,
-            ),
+            clip_from_view: reverse_z_perspective(core::f32::consts::FRAC_PI_2, 1.0, 0.5, 100.0),
             near: 0.5,
         };
         let mip0 = vec![0.5f32; 16 * 16];

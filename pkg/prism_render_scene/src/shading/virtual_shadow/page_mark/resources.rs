@@ -34,11 +34,11 @@ use bevy_render::{
 };
 use prism_render_shading::ReceiverProjection;
 
+use super::super::super::runtime::PrismShadingSettings;
 use super::super::abi::{window_slot_count, GpuVsmPageMarkParams};
 use super::super::extract::VsmPrimaryLight;
 use super::super::resources::ViewVsmReceivers;
 use super::super::settings::PrismVirtualShadowSettings;
-use super::super::super::runtime::PrismShadingSettings;
 
 /// Light id whose pages this dispatch marks. The subsystem drives a single
 /// primary directional light (see [`VsmPrimaryLight`]); the id only rides the

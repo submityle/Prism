@@ -138,9 +138,8 @@ impl PrefilteredEnvMap {
                 (mip as f32) / denom
             };
             let inv = (size as f32).recip();
-            let mut faces: [Vec<[f32; 3]>; 6] = core::array::from_fn(|_| {
-                vec![[0.0f32; 3]; (size as usize) * (size as usize)]
-            });
+            let mut faces: [Vec<[f32; 3]>; 6] =
+                core::array::from_fn(|_| vec![[0.0f32; 3]; (size as usize) * (size as usize)]);
             for (face_index, face) in faces.iter_mut().enumerate().take(FACE_COUNT) {
                 for y in 0..size {
                     // Texel centres mapped to the in-face [-1, 1] extent.
@@ -242,7 +241,10 @@ mod tests {
                 [-0.4, 0.7, 0.3],
             ] {
                 let c = prefilter_radiance(&src, dir, roughness, 64);
-                assert!((c[0] - 0.3).abs() < 1.0e-3, "r={roughness} dir={dir:?} -> {c:?}");
+                assert!(
+                    (c[0] - 0.3).abs() < 1.0e-3,
+                    "r={roughness} dir={dir:?} -> {c:?}"
+                );
                 assert!((c[1] - 0.6).abs() < 1.0e-3);
                 assert!((c[2] - 0.9).abs() < 1.0e-3);
             }
@@ -360,7 +362,10 @@ mod tests {
         let mid = map.sample(dir, 0.5);
         let lo = sharp[0].min(rough[0]);
         let hi = sharp[0].max(rough[0]);
-        assert!(mid[0] >= lo - 1.0e-4 && mid[0] <= hi + 1.0e-4, "mid={mid:?} sharp={sharp:?} rough={rough:?}");
+        assert!(
+            mid[0] >= lo - 1.0e-4 && mid[0] <= hi + 1.0e-4,
+            "mid={mid:?} sharp={sharp:?} rough={rough:?}"
+        );
     }
 
     #[test]

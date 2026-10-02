@@ -30,8 +30,7 @@ use bevy_ecs::prelude::*;
 use bevy_platform::collections::{HashMap, HashSet};
 use bevy_render::{
     render_resource::{
-        Buffer, BufferAsyncError, BufferDescriptor, BufferUsages, CommandEncoderDescriptor,
-        MapMode,
+        Buffer, BufferAsyncError, BufferDescriptor, BufferUsages, CommandEncoderDescriptor, MapMode,
     },
     renderer::{PendingCommandBuffers, RenderDevice},
     view::{ExtractedView, RetainedViewEntity},
@@ -126,13 +125,7 @@ pub(crate) fn request_classification_readback(
         let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
             label: Some("prism classification diagnostics readback"),
         });
-        encoder.copy_buffer_to_buffer(
-            &buffers.diagnostics,
-            0,
-            &target,
-            0,
-            Some(DIAGNOSTICS_BYTES),
-        );
+        encoder.copy_buffer_to_buffer(&buffers.diagnostics, 0, &target, 0, Some(DIAGNOSTICS_BYTES));
         pending.push_encoder(encoder, "prism classification diagnostics readback");
         inner
             .states

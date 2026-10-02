@@ -140,7 +140,11 @@ pub(crate) fn prepare_ssr_reconstruct_bind_groups(
 /// shader bounds-checks every invocation and skips background pixels.
 pub(crate) fn ssr_reconstruct_pass(
     settings: Res<super::super::runtime::PrismShadingSettings>,
-    view: ViewQuery<(&ViewSsrTextures, &ViewSsrReconstructBindGroup, &ExtractedView)>,
+    view: ViewQuery<(
+        &ViewSsrTextures,
+        &ViewSsrReconstructBindGroup,
+        &ExtractedView,
+    )>,
     pipeline: Res<SsrReconstructPipeline>,
     cache: Res<PipelineCache>,
     mut ctx: RenderContext,

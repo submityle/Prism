@@ -168,7 +168,7 @@ mod tests {
     fn wide_caster_covers_a_page_rectangle() {
         let c = config();
         let pws = c.page_world_size(0); // 12.8
-        // Span ~2 pages in x and ~2 in y => a 3x3-or-so covered block.
+                                        // Span ~2 pages in x and ~2 in y => a 3x3-or-so covered block.
         let caster = CasterMovement {
             light_space_min: Vec2::new(0.5, 0.5),
             light_space_max: Vec2::new(pws * 2.0 + 0.5, pws * 2.0 + 0.5),
@@ -176,8 +176,7 @@ mod tests {
         let inv = invalidate_casters(&c, 0, &[caster], &[0]);
         let min_page = c.world_page_coords(0, caster.light_space_min);
         let max_page = c.world_page_coords(0, caster.light_space_max);
-        let expected =
-            ((max_page.x - min_page.x + 1) * (max_page.y - min_page.y + 1)) as usize;
+        let expected = ((max_page.x - min_page.x + 1) * (max_page.y - min_page.y + 1)) as usize;
         assert_eq!(inv.pages.len(), expected);
     }
 

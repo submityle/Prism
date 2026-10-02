@@ -61,8 +61,16 @@ impl GpuBloomParams {
     /// `dst_size` bounds the coverage guard.
     pub(crate) fn new(src_size: UVec2, dst_size: UVec2, bloom: BloomParams) -> Self {
         Self {
-            inv_src_width: if src_size.x == 0 { 0.0 } else { 1.0 / src_size.x as f32 },
-            inv_src_height: if src_size.y == 0 { 0.0 } else { 1.0 / src_size.y as f32 },
+            inv_src_width: if src_size.x == 0 {
+                0.0
+            } else {
+                1.0 / src_size.x as f32
+            },
+            inv_src_height: if src_size.y == 0 {
+                0.0
+            } else {
+                1.0 / src_size.y as f32
+            },
             threshold: bloom.threshold,
             knee: bloom.knee,
             intensity: bloom.intensity,

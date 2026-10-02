@@ -160,7 +160,10 @@ mod tests {
         // At normal incidence that means [scale, bias] == [1, 0]; at grazing
         // the bias carries the Fresnel rise.
         let [scale, bias] = integrate_brdf(1.0, 0.0, 1024);
-        assert!((scale - 1.0).abs() < 1.0e-3, "normal-incidence scale {scale}");
+        assert!(
+            (scale - 1.0).abs() < 1.0e-3,
+            "normal-incidence scale {scale}"
+        );
         assert!(bias.abs() < 1.0e-3, "normal-incidence bias {bias}");
 
         for &n_dot_v in &[0.15_f32, 0.4, 0.7, 1.0] {
@@ -185,7 +188,10 @@ mod tests {
             for &n_dot_v in &[0.05_f32, 0.25, 0.5, 0.75, 1.0] {
                 let [scale, bias] = integrate_brdf(n_dot_v, roughness, 512);
                 assert!(scale.is_finite() && bias.is_finite());
-                assert!(scale >= -1.0e-3 && bias >= -1.0e-3, "negative {scale}/{bias}");
+                assert!(
+                    scale >= -1.0e-3 && bias >= -1.0e-3,
+                    "negative {scale}/{bias}"
+                );
                 assert!(
                     scale + bias <= 1.0 + 1.0e-2,
                     "energy {scale}+{bias} at NoV {n_dot_v} r {roughness}"
@@ -259,8 +265,14 @@ mod tests {
             let roughness = ((y as f32) + 0.5) * inv;
             let sampled = lut.sample(n_dot_v, roughness);
             let stored = lut.texels[(y * 32 + x) as usize];
-            assert!((sampled[0] - stored[0]).abs() < 1.0e-5, "{sampled:?} vs {stored:?}");
-            assert!((sampled[1] - stored[1]).abs() < 1.0e-5, "{sampled:?} vs {stored:?}");
+            assert!(
+                (sampled[0] - stored[0]).abs() < 1.0e-5,
+                "{sampled:?} vs {stored:?}"
+            );
+            assert!(
+                (sampled[1] - stored[1]).abs() < 1.0e-5,
+                "{sampled:?} vs {stored:?}"
+            );
         }
     }
 

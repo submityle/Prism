@@ -2,7 +2,7 @@
 //!
 //! The visibility buffer identifies a scene instance, a geometry primitive and
 //! barycentrics.  It deliberately does not depend on Bevy's vertex-buffer
-//! layout.  These compact rows are the format consumed by the future Vulkan
+//! layout.  These compact rows are the format consumed by the future GPU
 //! resolve pass and by the CPU reference tests.
 
 use core::fmt;
@@ -157,15 +157,16 @@ pub fn reconstruct_surface(
     let weights = input.barycentrics;
     let position = interpolate3(va.position, vb.position, vc.position, weights);
     let uv = interpolate2(va.uv, vb.uv, vc.uv, weights);
-    let mut flags = SurfaceReconstructionFlags::from_bits(
-        va.flags | vb.flags | vc.flags | primitive.flags,
-    );
+    let mut flags =
+        SurfaceReconstructionFlags::from_bits(va.flags | vb.flags | vc.flags | primitive.flags);
     // Prefer the interpolated authored normal, then the geometric face
     // normal, and only as a last resort a canonical up vector.  A degenerate
     // last-resort fallback is always flagged so downstream passes can react.
     let normal = {
-        let interpolated =
-            normalize_or(interpolate3(va.normal, vb.normal, vc.normal, weights), [0.0; 3]);
+        let interpolated = normalize_or(
+            interpolate3(va.normal, vb.normal, vc.normal, weights),
+            [0.0; 3],
+        );
         if interpolated != [0.0; 3] {
             interpolated
         } else {
@@ -255,7 +256,10 @@ fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
 }
 
 fn normalize_or(value: [f32; 3], fallback: [f32; 3]) -> [f32; 3] {
-    let length_squared = value.into_iter().map(|component| component * component).sum::<f32>();
+    let length_squared = value
+        .into_iter()
+        .map(|component| component * component)
+        .sum::<f32>();
     if length_squared > 1.0e-12 && length_squared.is_finite() {
         let inverse = length_squared.sqrt().recip();
         [value[0] * inverse, value[1] * inverse, value[2] * inverse]
@@ -377,7 +381,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(sample.normal, [0.0, 0.0, 1.0]);
-        assert!(sample.flags.contains(SurfaceReconstructionFlags::MISSING_NORMAL));
+        assert!(sample
+            .flags
+            .contains(SurfaceReconstructionFlags::MISSING_NORMAL));
     }
 
     #[test]

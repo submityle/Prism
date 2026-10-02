@@ -108,9 +108,10 @@ pub(crate) fn prepare_posterize_textures(
             },
         );
 
-        commands
-            .entity(entity)
-            .insert(ViewPosterize { posterize_out, size });
+        commands.entity(entity).insert(ViewPosterize {
+            posterize_out,
+            size,
+        });
     }
 }
 

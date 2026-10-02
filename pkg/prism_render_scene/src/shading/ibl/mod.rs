@@ -38,8 +38,8 @@ mod resources;
 #[cfg(test)]
 mod shader_tests;
 
-pub(crate) use bind_groups::{prepare_dfg_lut_bind_group, prepare_env_prefilter_bind_groups};
 pub(crate) use bind_groups::EnvPrefilterBindGroups;
+pub(crate) use bind_groups::{prepare_dfg_lut_bind_group, prepare_env_prefilter_bind_groups};
 pub(crate) use dispatch::{dfg_lut_precompute_pass, env_prefilter_precompute_pass};
 pub(crate) use extract::{extract_ibl_source, ExtractedIblSource};
 pub(crate) use pipeline::{init_brdf_lut_pipeline, init_env_prefilter_pipeline};

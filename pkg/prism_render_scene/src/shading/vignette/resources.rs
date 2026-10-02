@@ -108,7 +108,9 @@ pub(crate) fn prepare_vignette_textures(
             },
         );
 
-        commands.entity(entity).insert(ViewVignette { vignette_out, size });
+        commands
+            .entity(entity)
+            .insert(ViewVignette { vignette_out, size });
     }
 }
 

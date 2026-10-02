@@ -22,8 +22,6 @@ pub mod assign;
 pub mod bounds;
 pub mod grid;
 
-pub use assign::{
-    assign_lights_to_clusters, ClusterAssignmentConfig, ClusterLightAssignment,
-};
+pub use assign::{assign_lights_to_clusters, ClusterAssignmentConfig, ClusterLightAssignment};
 pub use bounds::{ClusterAabb, ClusterBoundsBuilder};
 pub use grid::ClusterGrid;

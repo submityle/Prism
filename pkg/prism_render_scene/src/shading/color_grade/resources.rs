@@ -108,9 +108,10 @@ pub(crate) fn prepare_color_grade_textures(
             },
         );
 
-        commands
-            .entity(entity)
-            .insert(ViewColorGrade { color_grade_out, size });
+        commands.entity(entity).insert(ViewColorGrade {
+            color_grade_out,
+            size,
+        });
     }
 }
 

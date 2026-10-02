@@ -112,24 +112,33 @@ mod tests {
         let params = GpuColorGradeParams::from_settings(UVec2::new(1920, 1080), &settings);
         assert_eq!(params.screen_size, [1920, 1080]);
         // The CDL wheels and their packed scalar lanes round-trip.
-        assert_eq!(params.lift_temp, [
-            settings.lift[0],
-            settings.lift[1],
-            settings.lift[2],
-            settings.temperature,
-        ]);
-        assert_eq!(params.gamma_tint, [
-            settings.gamma[0],
-            settings.gamma[1],
-            settings.gamma[2],
-            settings.tint,
-        ]);
-        assert_eq!(params.gain_contrast, [
-            settings.gain[0],
-            settings.gain[1],
-            settings.gain[2],
-            settings.contrast,
-        ]);
+        assert_eq!(
+            params.lift_temp,
+            [
+                settings.lift[0],
+                settings.lift[1],
+                settings.lift[2],
+                settings.temperature,
+            ]
+        );
+        assert_eq!(
+            params.gamma_tint,
+            [
+                settings.gamma[0],
+                settings.gamma[1],
+                settings.gamma[2],
+                settings.tint,
+            ]
+        );
+        assert_eq!(
+            params.gain_contrast,
+            [
+                settings.gain[0],
+                settings.gain[1],
+                settings.gain[2],
+                settings.contrast,
+            ]
+        );
         assert_eq!(
             params.pivot_sat_scale,
             [settings.pivot, settings.saturation, settings.scale, 0.0]

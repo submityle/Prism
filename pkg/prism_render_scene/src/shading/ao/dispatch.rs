@@ -25,7 +25,11 @@ use super::resources::ViewGtaoTextures;
 
 pub(crate) fn gtao_prepass_pass(
     settings: Res<super::super::runtime::PrismShadingSettings>,
-    view: ViewQuery<(&ViewGtaoTextures, &ViewGtaoPrepassBindGroups, &ExtractedView)>,
+    view: ViewQuery<(
+        &ViewGtaoTextures,
+        &ViewGtaoPrepassBindGroups,
+        &ExtractedView,
+    )>,
     pipeline: Res<GtaoPrepassPipeline>,
     cache: Res<PipelineCache>,
     mut ctx: RenderContext,
@@ -70,7 +74,6 @@ pub(crate) fn gtao_prepass_pass(
     pass.set_immediates(0, bytemuck::bytes_of(&params));
     pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
 }
-
 
 /// `Core3d` graph node recording the GTAO kernel dispatch.
 ///
@@ -127,7 +130,6 @@ pub(crate) fn gtao_compute_pass(
     pass.set_immediates(0, bytemuck::bytes_of(&config));
     pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
 }
-
 
 /// `Core3d` graph node recording the GTAO spatial-denoise dispatch.
 ///

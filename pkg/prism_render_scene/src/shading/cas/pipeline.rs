@@ -26,8 +26,8 @@ use bevy_render::{
 };
 use bevy_shader::Shader;
 
-use super::abi::GpuCasParams;
 use super::super::resources::SCENE_COLOR_FORMAT;
+use super::abi::GpuCasParams;
 
 /// The `CAS` compute pipeline and its owned group-0 layout.
 #[derive(Resource)]
@@ -75,8 +75,7 @@ pub(crate) fn init_cas_pipeline(
     let descriptor = BindGroupLayoutDescriptor::new("prism cas", &entries);
     let layout = device.create_bind_group_layout("prism cas", &entries);
 
-    let shader: Handle<Shader> =
-        load_embedded_asset!(asset_server.as_ref(), "../shaders/cas.wesl");
+    let shader: Handle<Shader> = load_embedded_asset!(asset_server.as_ref(), "../shaders/cas.wesl");
 
     let pipeline = cache.queue_compute_pipeline(ComputePipelineDescriptor {
         label: Some("prism cas".into()),

@@ -41,7 +41,12 @@ pub(crate) fn prepare_outline_bind_groups(
     mut commands: Commands,
     pipeline: Res<OutlinePipeline>,
     device: Res<RenderDevice>,
-    views: Query<(Entity, &ViewVisibilityBuffer, &ViewSsrTextures, &ViewOutline)>,
+    views: Query<(
+        Entity,
+        &ViewVisibilityBuffer,
+        &ViewSsrTextures,
+        &ViewOutline,
+    )>,
 ) {
     for (entity, visibility, ssr, outline) in &views {
         // Read the pre-exposed scene colour (0), write the outlined output (1),

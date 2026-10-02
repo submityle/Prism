@@ -223,12 +223,7 @@ pub fn displace_along_normal(position: Vec3, normal: Vec3, distance: f32) -> Vec
 /// authored shading normal still gets a well-defined outward direction from its
 /// geometric normal. If both are degenerate the vertex is left unchanged.
 #[must_use]
-pub fn displace_with_fallback(
-    position: Vec3,
-    normal: Vec3,
-    fallback: Vec3,
-    distance: f32,
-) -> Vec3 {
+pub fn displace_with_fallback(position: Vec3, normal: Vec3, fallback: Vec3, distance: f32) -> Vec3 {
     let unit = normal.normalize_or_zero();
     let dir = if unit.length_squared() > 0.0 {
         unit
@@ -400,12 +395,36 @@ mod tests {
     /// closed-form answer.
     fn unit_octahedron() -> [MeshVertex; 6] {
         [
-            MeshVertex::new(Vec3::new(1.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), [0.0, 0.0]),
-            MeshVertex::new(Vec3::new(-1.0, 0.0, 0.0), Vec3::new(-1.0, 0.0, 0.0), [0.0, 0.0]),
-            MeshVertex::new(Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 1.0, 0.0), [0.0, 0.0]),
-            MeshVertex::new(Vec3::new(0.0, -1.0, 0.0), Vec3::new(0.0, -1.0, 0.0), [0.0, 0.0]),
-            MeshVertex::new(Vec3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 0.0, 1.0), [0.0, 0.0]),
-            MeshVertex::new(Vec3::new(0.0, 0.0, -1.0), Vec3::new(0.0, 0.0, -1.0), [0.0, 0.0]),
+            MeshVertex::new(
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                [0.0, 0.0],
+            ),
+            MeshVertex::new(
+                Vec3::new(-1.0, 0.0, 0.0),
+                Vec3::new(-1.0, 0.0, 0.0),
+                [0.0, 0.0],
+            ),
+            MeshVertex::new(
+                Vec3::new(0.0, 1.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+                [0.0, 0.0],
+            ),
+            MeshVertex::new(
+                Vec3::new(0.0, -1.0, 0.0),
+                Vec3::new(0.0, -1.0, 0.0),
+                [0.0, 0.0],
+            ),
+            MeshVertex::new(
+                Vec3::new(0.0, 0.0, 1.0),
+                Vec3::new(0.0, 0.0, 1.0),
+                [0.0, 0.0],
+            ),
+            MeshVertex::new(
+                Vec3::new(0.0, 0.0, -1.0),
+                Vec3::new(0.0, 0.0, -1.0),
+                [0.0, 0.0],
+            ),
         ]
     }
 
@@ -491,7 +510,10 @@ mod tests {
         let expanded_radius = 1.0 + d;
         for (orig, moved) in unit_octahedron().iter().zip(shell.iter()) {
             // Each shell vertex sits exactly d further out along its normal.
-            assert!(approx(outward_offset(orig.position, moved.position, orig.normal), d));
+            assert!(approx(
+                outward_offset(orig.position, moved.position, orig.normal),
+                d
+            ));
             // Shell vertex is strictly outside the original surface (support
             // value grew), proving outward growth / containment.
             let orig_support = orig.position.length();

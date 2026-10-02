@@ -156,7 +156,9 @@ impl RenderGpuScene {
     pub(crate) fn geometry_assets(
         &self,
     ) -> impl Iterator<Item = (AssetId<Mesh>, GeometryHandle)> + '_ {
-        self.geometry.iter().map(|(asset, handle)| (*asset, *handle))
+        self.geometry
+            .iter()
+            .map(|(asset, handle)| (*asset, *handle))
     }
 
     /// Registers an externally-owned material row and rejects stale reuse.

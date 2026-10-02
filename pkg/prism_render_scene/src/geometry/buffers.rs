@@ -72,7 +72,6 @@ impl RenderGeometryBuffers {
     pub(crate) fn buffers(&self) -> Option<(&Buffer, &Buffer)> {
         Some((self.headers.buffer()?, self.lods.buffer()?))
     }
-
 }
 
 #[cfg(test)]
@@ -89,12 +88,20 @@ mod tests {
         let mut world = World::new();
         let mut buffers = RenderGeometryBuffers::from_world(&mut world);
         let mut registry = RenderGeometryRegistry::default();
-        let handle = GenerationalHandle { index: 5, generation: 3 };
+        let handle = GenerationalHandle {
+            index: 5,
+            generation: 3,
+        };
         registry.upsert(
-            AssetId::Uuid { uuid: Uuid::from_u128(5) },
+            AssetId::Uuid {
+                uuid: Uuid::from_u128(5),
+            },
             GeometryRecord {
                 handle,
-                lods: vec![GeometryLodRecord { resident: true, ..Default::default() }],
+                lods: vec![GeometryLodRecord {
+                    resident: true,
+                    ..Default::default()
+                }],
                 ..Default::default()
             },
         );

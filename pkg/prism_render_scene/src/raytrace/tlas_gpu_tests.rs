@@ -31,8 +31,9 @@ use wgpu::util::{BufferInitDescriptor, DeviceExt};
 use wgpu::{
     BackendOptions, Backends, BindGroupDescriptor, BindGroupEntry, BufferDescriptor, BufferUsages,
     CommandEncoderDescriptor, ComputePassDescriptor, ComputePipelineDescriptor, DeviceDescriptor,
-    Instance as WgpuInstance, InstanceDescriptor, InstanceFlags, MapMode, PipelineCompilationOptions,
-    PollType, RequestAdapterOptions, ShaderModuleDescriptor, ShaderSource,
+    Instance as WgpuInstance, InstanceDescriptor, InstanceFlags, MapMode,
+    PipelineCompilationOptions, PollType, RequestAdapterOptions, ShaderModuleDescriptor,
+    ShaderSource,
 };
 
 use prism_render_architecture::ray_scene::{
@@ -122,9 +123,8 @@ fn build_scene() -> Scene {
     let placements: Vec<(Affine3, usize, u32)> = vec![
         (Affine3::from_translation([6.0, 0.0, 0.0]), 0, 10),
         (
-            Affine3::from_translation([-6.0, 0.0, 0.0]).compose(&Affine3::from_scale([
-                1.5, 0.75, 1.25,
-            ])),
+            Affine3::from_translation([-6.0, 0.0, 0.0])
+                .compose(&Affine3::from_scale([1.5, 0.75, 1.25])),
             0,
             20,
         ),
@@ -135,9 +135,8 @@ fn build_scene() -> Scene {
             30,
         ),
         (
-            Affine3::from_translation([0.0, -6.0, 3.0]).compose(&Affine3::from_scale([
-                2.0, 2.0, 2.0,
-            ])),
+            Affine3::from_translation([0.0, -6.0, 3.0])
+                .compose(&Affine3::from_scale([2.0, 2.0, 2.0])),
             1,
             40,
         ),
@@ -227,8 +226,18 @@ fn build_rays(scene: &Scene) -> Vec<Ray> {
 
     // Guaranteed misses.
     rays.push(Ray::new([40.0, 40.0, 40.0], [1.0, 1.0, 1.0], 0.0, 0.5));
-    rays.push(Ray::new([40.0, 40.0, 40.0], [1.0, 1.0, 1.0], 0.0, f32::INFINITY));
-    rays.push(Ray::new([0.0, 0.0, 40.0], [0.0, 0.0, 1.0], 0.0, f32::INFINITY));
+    rays.push(Ray::new(
+        [40.0, 40.0, 40.0],
+        [1.0, 1.0, 1.0],
+        0.0,
+        f32::INFINITY,
+    ));
+    rays.push(Ray::new(
+        [0.0, 0.0, 40.0],
+        [0.0, 0.0, 1.0],
+        0.0,
+        f32::INFINITY,
+    ));
 
     let _ = &scene.instance_blas;
     let _ = &scene.pool;

@@ -287,6 +287,8 @@ mod tests {
         assert_eq!(i32::from(key.y), 4 + c.page_coord_bias);
         // A page far outside the representable range is rejected.
         assert!(c.page_key(0, 0, IVec2::new(i32::MAX, 0)).is_none());
-        assert!(c.page_key(0, 0, IVec2::new(-c.page_coord_bias - 1, 0)).is_none());
+        assert!(c
+            .page_key(0, 0, IVec2::new(-c.page_coord_bias - 1, 0))
+            .is_none());
     }
 }

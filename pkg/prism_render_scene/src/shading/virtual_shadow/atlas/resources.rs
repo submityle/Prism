@@ -25,17 +25,17 @@ use bevy_math::UVec2;
 use bevy_platform::collections::{HashMap, HashSet};
 use bevy_render::{
     render_resource::{
-        Extent3d, Texture, TextureDescriptor,
-        TextureDimension, TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
+        Extent3d, Texture, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
+        TextureView, TextureViewDescriptor,
     },
     renderer::RenderDevice,
     view::{ExtractedView, RetainedViewEntity},
 };
 
+use super::super::super::runtime::PrismShadingSettings;
 use super::super::extract::VsmPrimaryLight;
 use super::super::resources::ViewVsmReceivers;
 use super::super::settings::PrismVirtualShadowSettings;
-use super::super::super::runtime::PrismShadingSettings;
 
 /// Depth format of the physical page atlas: one 32-bit float channel holding
 /// each resident page's stored NDC depth, matching the `.r` read in

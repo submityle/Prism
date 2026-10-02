@@ -96,7 +96,10 @@ pub fn build_shading_geometry(
     let indices: Vec<usize> = mesh
         .try_indices_option()
         .map_err(|_| ShadingGeometryBuildError::InvalidIndex)?
-        .map_or_else(|| (0..positions.len()).collect(), |indices| indices.iter().collect());
+        .map_or_else(
+            || (0..positions.len()).collect(),
+            |indices| indices.iter().collect(),
+        );
     let primitives = triangle_indices(mesh.primitive_topology(), &indices)?
         .into_iter()
         .map(|[a, b, c]| {
@@ -109,7 +112,11 @@ pub fn build_shading_geometry(
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(RenderShadingGeometry { vertices, primitives, flags })
+    Ok(RenderShadingGeometry {
+        vertices,
+        primitives,
+        flags,
+    })
 }
 
 fn optional_float3<'a>(
@@ -203,11 +210,11 @@ mod tests {
             PrimitiveTopology::TriangleList,
             RenderAssetUsages::MAIN_WORLD,
         )
-            .with_inserted_attribute(
-                Mesh::ATTRIBUTE_POSITION,
-                vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
-            )
-            .with_inserted_indices(Indices::U16(vec![0, 1, 2]));
+        .with_inserted_attribute(
+            Mesh::ATTRIBUTE_POSITION,
+            vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        )
+        .with_inserted_indices(Indices::U16(vec![0, 1, 2]));
         let table = build_shading_geometry(&mesh).unwrap();
         assert_eq!(table.vertices.len(), 3);
         assert_eq!(

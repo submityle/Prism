@@ -18,12 +18,12 @@ use bevy_render::{
     renderer::{RenderContext, ViewQuery},
 };
 
+use super::super::resources::ViewVisibilityBuffer;
 use super::abi::FILM_GRAIN_WORKGROUP_SIZE;
 use super::bind_groups::ViewFilmGrainBindGroup;
 use super::pipeline::FilmGrainPipeline;
 use super::resources::ViewFilmGrain;
 use super::settings::PrismFilmGrainSettings;
-use super::super::resources::ViewVisibilityBuffer;
 
 /// `Core3d` scheduling system recording the `film_grain_main` dispatch for every
 /// view whose film-grain texture and bind group are resident.

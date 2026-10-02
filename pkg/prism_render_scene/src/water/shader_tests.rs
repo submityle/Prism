@@ -233,3 +233,22 @@ fn water_surface_raster_wesl_compiles_and_resolves_imports() {
         panic!("water_surface_raster.wesl failed to compile/resolve imports: {error}")
     });
 }
+
+/// Regression guard for the water-surface `SSGI` wiring: the `@group(7)`
+/// uniform must be *consumed*, not merely declared. Before this slice the
+/// `ssgi_cfg` block was bound but inert (no gather, no call site), so this test
+/// pins both the gather definition and its call from `water_ibl`, preventing a
+/// refactor from silently regressing the near-field one-bounce back to a dead
+/// binding.
+#[test]
+fn water_surface_raster_wesl_consumes_the_ssgi_binding() {
+    let src = include_str!("../shaders/water_surface_raster.wesl");
+    assert!(
+        src.contains("fn water_ssgi_gather("),
+        "water_surface_raster.wesl must define the SSGI gather",
+    );
+    assert!(
+        src.contains("water_ssgi_gather(world_position, bent_normal_view"),
+        "water_ibl must call the SSGI gather so the @group(7) uniform is consumed",
+    );
+}

@@ -22,22 +22,18 @@ use bevy_render::{
     renderer::{RenderContext, ViewQuery},
 };
 
+use super::super::resources::ViewVisibilityBuffer;
 use super::abi::GAMUT_MAP_WORKGROUP_SIZE;
 use super::bind_groups::ViewGamutMapBindGroup;
 use super::pipeline::GamutMapPipeline;
 use super::resources::ViewGamutMap;
 use super::settings::PrismGamutMapSettings;
-use super::super::resources::ViewVisibilityBuffer;
 
 /// `Core3d` scheduling system recording the `gamut_map_main` dispatch for every
 /// view whose gamut-map texture and bind group are resident.
 pub(crate) fn gamut_map_pass(
     settings: Res<PrismGamutMapSettings>,
-    view: ViewQuery<(
-        &ViewGamutMap,
-        &ViewGamutMapBindGroup,
-        &ViewVisibilityBuffer,
-    )>,
+    view: ViewQuery<(&ViewGamutMap, &ViewGamutMapBindGroup, &ViewVisibilityBuffer)>,
     pipeline: Res<GamutMapPipeline>,
     cache: Res<PipelineCache>,
     mut ctx: RenderContext,

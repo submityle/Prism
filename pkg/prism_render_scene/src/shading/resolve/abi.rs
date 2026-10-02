@@ -7,8 +7,8 @@
 //! position used to build the shading frame.  Everything else is read from the
 //! storage buffers bound by [`super::bind_groups`].
 
-use bytemuck::{Pod, Zeroable};
 use bevy_math::Vec3;
+use bytemuck::{Pod, Zeroable};
 use prism_render_shading::ClipmapConfig;
 
 /// Workgroup size of the `shading_resolve` compute entry point.
@@ -49,7 +49,6 @@ pub(crate) const RESOLVE_FLAG_GTAO: u32 = 1 << 0;
 /// reflection instead of the low-frequency SH-radiance fallback.  Mirrors
 /// `RESOLVE_FLAG_IBL_SPECULAR` in `shading_resolve.wesl`.
 pub(crate) const RESOLVE_FLAG_IBL_SPECULAR: u32 = 1 << 1;
-
 
 /// Uniform block bound at group 6 of the shading-resolve pass, carrying the
 /// virtual-shadow-map (VSM) sampling state consumed by the inline
@@ -267,16 +266,7 @@ mod vsm_resolve_tests {
         // pages the same way the standalone sample pass does.
         let c = clipmap();
         let oracle = GpuVsmSampleParams::new(&c, 4096, 64, 1);
-        let params = GpuVsmResolveParams::new(
-            &c,
-            4096,
-            64,
-            1,
-            true,
-            Vec3::X,
-            Vec3::Y,
-            Vec3::NEG_Z,
-        );
+        let params = GpuVsmResolveParams::new(&c, 4096, 64, 1, true, Vec3::X, Vec3::Y, Vec3::NEG_Z);
         assert_eq!(params.levels, oracle.levels);
         assert_eq!(params.page_size, oracle.page_size);
         assert_eq!(params.pages_per_level_edge, oracle.pages_per_level_edge);
@@ -317,17 +307,14 @@ mod vsm_resolve_tests {
         assert_eq!(on.pad1, 0);
         assert_eq!(on.pad2, 0.0);
 
-        let off = GpuVsmResolveParams::new(
-            &c, 16, 4, 2, false, Vec3::X, Vec3::Y, Vec3::NEG_Z,
-        );
+        let off = GpuVsmResolveParams::new(&c, 16, 4, 2, false, Vec3::X, Vec3::Y, Vec3::NEG_Z);
         assert_eq!(off.enable, 0);
     }
 
     #[test]
     fn degenerate_geometry_is_clamped_like_the_oracle() {
         let c = clipmap();
-        let params =
-            GpuVsmResolveParams::new(&c, 0, 0, -3, true, Vec3::X, Vec3::Y, Vec3::NEG_Z);
+        let params = GpuVsmResolveParams::new(&c, 0, 0, -3, true, Vec3::X, Vec3::Y, Vec3::NEG_Z);
         // Atlas edge clamped to >= 1 and PCF radius to >= 0 so the shader never
         // divides by zero or loops with a negative bound.
         assert_eq!(params.physical_pages_per_edge, 1);
@@ -346,8 +333,7 @@ mod vsm_resolve_tests {
         // For this clipmap: page_world_size(3) = 0.1 * 2^3 * 128 = 102.4,
         // D = 102.4 * 8 = 819.2, so depth_scale = 1 / 1638.4, depth_bias = 0.5.
         let c = clipmap();
-        let params =
-            GpuVsmResolveParams::new(&c, 16, 4, 0, true, Vec3::X, Vec3::Y, Vec3::NEG_Z);
+        let params = GpuVsmResolveParams::new(&c, 16, 4, 0, true, Vec3::X, Vec3::Y, Vec3::NEG_Z);
         let d = c.page_world_size(c.level_count() - 1) * f32::from(c.pages_per_level_edge);
         assert!((d - 819.2).abs() < 1.0e-3, "D = {}", d);
         assert!((params.depth_scale - 1.0 / (2.0 * d)).abs() < 1.0e-9);

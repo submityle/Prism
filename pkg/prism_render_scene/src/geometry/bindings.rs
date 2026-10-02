@@ -1,8 +1,6 @@
 use bevy_ecs::{prelude::*, world::FromWorld};
 use bevy_material::{
-    bind_group_layout_entries::{
-        binding_types::storage_buffer_read_only, BindGroupLayoutEntries,
-    },
+    bind_group_layout_entries::{binding_types::storage_buffer_read_only, BindGroupLayoutEntries},
     descriptor::BindGroupLayoutDescriptor,
 };
 use bevy_render::{
@@ -54,10 +52,7 @@ pub(crate) fn prepare_geometry_bind_group(
     bindings.bind_group = Some(device.create_bind_group(
         "prism geometry ABI",
         &bindings.layout,
-        &BindGroupEntries::sequential((
-            headers.as_entire_binding(),
-            lods.as_entire_binding(),
-        )),
+        &BindGroupEntries::sequential((headers.as_entire_binding(), lods.as_entire_binding())),
     ));
     bindings.ids = Some(ids);
 }

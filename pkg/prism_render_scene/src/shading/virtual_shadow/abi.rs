@@ -259,8 +259,8 @@ pub(crate) fn window_slot_count(clipmap: &ClipmapConfig) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core::mem::offset_of;
     use bevy_math::{Vec2, Vec3};
+    use core::mem::offset_of;
 
     fn clipmap() -> ClipmapConfig {
         ClipmapConfig {
@@ -333,7 +333,10 @@ mod tests {
         // and basis shifted.
         assert_eq!(offset_of!(GpuVsmReceiverGenParams, inverse_view_proj), 0);
         assert_eq!(offset_of!(GpuVsmReceiverGenParams, light_right), 64);
-        assert_eq!(offset_of!(GpuVsmReceiverGenParams, filter_radius_texels), 76);
+        assert_eq!(
+            offset_of!(GpuVsmReceiverGenParams, filter_radius_texels),
+            76
+        );
         assert_eq!(offset_of!(GpuVsmReceiverGenParams, light_up), 80);
         assert_eq!(offset_of!(GpuVsmReceiverGenParams, viewport_width), 92);
         assert_eq!(offset_of!(GpuVsmReceiverGenParams, camera_world), 96);

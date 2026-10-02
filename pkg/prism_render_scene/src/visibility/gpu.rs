@@ -89,7 +89,18 @@ pub(crate) fn prepare_visibility_compute_bind_group(
     device: Res<RenderDevice>,
     mut bindings: ResMut<VisibilityComputeBindGroup>,
 ) {
-    let Some((views, counters, work, ranges, indexed, non_indexed, overflow, previous_lods, bins, candidate_bins)) = buffers.compute_buffers()
+    let Some((
+        views,
+        counters,
+        work,
+        ranges,
+        indexed,
+        non_indexed,
+        overflow,
+        previous_lods,
+        bins,
+        candidate_bins,
+    )) = buffers.compute_buffers()
     else {
         return;
     };

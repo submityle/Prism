@@ -29,8 +29,8 @@ use bevy_ecs::prelude::*;
 use bevy_material::{
     bind_group_layout_entries::{
         binding_types::{
-            sampler, storage_buffer_read_only_sized, texture_2d, texture_cube,
-            texture_storage_2d, uniform_buffer_sized,
+            sampler, storage_buffer_read_only_sized, texture_2d, texture_cube, texture_storage_2d,
+            uniform_buffer_sized,
         },
         BindGroupLayoutEntries,
     },
@@ -39,11 +39,10 @@ use bevy_material::{
 use bevy_render::{
     render_resource::{
         AddressMode, BindGroupLayout, Buffer, BufferInitDescriptor, BufferUsages,
-        CachedComputePipelineId, ComputePipelineDescriptor, Extent3d, FilterMode,
-        MipmapFilterMode, PipelineCache,
-        Sampler, SamplerBindingType, SamplerDescriptor, ShaderStages, StorageTextureAccess,
-        TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages,
-        TextureView, TextureViewDescriptor,
+        CachedComputePipelineId, ComputePipelineDescriptor, Extent3d, FilterMode, MipmapFilterMode,
+        PipelineCache, Sampler, SamplerBindingType, SamplerDescriptor, ShaderStages,
+        StorageTextureAccess, TextureDescriptor, TextureDimension, TextureFormat,
+        TextureSampleType, TextureUsages, TextureView, TextureViewDescriptor,
     },
     renderer::RenderDevice,
 };
@@ -53,8 +52,8 @@ use crate::{ClusterBindGroup, LightBindGroup, MaterialBindGroup};
 
 use super::super::shadow::ShadowBindGroup;
 
-use super::abi::GpuShadingResolveParams;
 use super::super::resources::{MOTION_VECTOR_FORMAT, SCENE_COLOR_FORMAT};
+use super::abi::GpuShadingResolveParams;
 
 /// Compute pipeline and the two owned bind-group layouts for the resolve pass.
 #[derive(Resource)]
@@ -83,6 +82,12 @@ pub(crate) struct ShadingResolvePipeline {
     /// Fallback 1x1 `R32Float` atlas view bound when a view has no physical
     /// atlas; format-matched to the real atlas so the bind group is always valid.
     pub(crate) vsm_dummy_atlas: TextureView,
+    /// Fallback light-routing visibility mask (group 2, binding 9) bound when a
+    /// view has no resident [`ViewLightRouting`](super::super::light_routing::ViewLightRouting)
+    /// (the opt-in Lighting Channels subsystem is off). A single all-ones `u32`
+    /// word so the resolve's channel gate treats every punctual light as
+    /// visible, preserving byte-for-byte behaviour when routing is disabled.
+    pub(crate) scene_dummy_visible_lights: Buffer,
 }
 
 /// Builds the group-0 layout entries:
@@ -147,7 +152,7 @@ fn view_layout_entries() -> BindGroupLayoutEntries<14> {
 /// in last frame's world space for the motion vector).
 /// `None` min-binding-size keeps the layout agnostic to the run-time array
 /// length; the shader guards every index.
-fn scene_layout_entries() -> BindGroupLayoutEntries<9> {
+fn scene_layout_entries() -> BindGroupLayoutEntries<10> {
     BindGroupLayoutEntries::sequential(
         ShaderStages::COMPUTE,
         (
@@ -159,6 +164,11 @@ fn scene_layout_entries() -> BindGroupLayoutEntries<9> {
             storage_buffer_read_only_sized(false, None),
             storage_buffer_read_only_sized(false, None),
             storage_buffer_read_only_sized(false, None),
+            storage_buffer_read_only_sized(false, None),
+            // 9: the light-routing channel-gated visibility mask (one `u32`
+            // per 32-light cluster word). Read-only here; the light-routing
+            // cull pass writes it. A pipeline-owned all-ones dummy is bound
+            // when the opt-in subsystem is off so every light stays visible.
             storage_buffer_read_only_sized(false, None),
         ),
     )
@@ -251,6 +261,16 @@ pub(crate) fn init_shading_resolve_pipeline(
     });
     let vsm_dummy_atlas = dummy_atlas.create_view(&TextureViewDescriptor::default());
 
+    // All-ones fallback for the light-routing channel gate: one 32-light word
+    // with every bit set, so a view without a resident `ViewLightRouting`
+    // (routing disabled) keeps every punctual light visible in the resolve's
+    // channel gate.
+    let scene_dummy_visible_lights = device.create_buffer_with_data(&BufferInitDescriptor {
+        label: Some("prism resolve light routing dummy visible"),
+        contents: bytemuck::cast_slice(&[u32::MAX]),
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+    });
+
     let shader: Handle<Shader> =
         load_embedded_asset!(asset_server.as_ref(), "../shaders/shading_resolve.wesl");
 
@@ -280,5 +300,6 @@ pub(crate) fn init_shading_resolve_pipeline(
         vsm_sampler,
         vsm_dummy_page_table,
         vsm_dummy_atlas,
+        scene_dummy_visible_lights,
     });
 }

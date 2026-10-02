@@ -332,8 +332,14 @@ mod tests {
             view_normals: &view_normals,
         };
         for px in denoise_ssgi(&raw, buffers, SsgiDenoiseConfig::default()) {
-            assert!(px[0] >= 0.0 && px[1] >= 0.0 && px[2] >= 0.0, "radiance negative: {px:?}");
-            assert!((0.0..=1.0).contains(&px[3]), "confidence out of range: {px:?}");
+            assert!(
+                px[0] >= 0.0 && px[1] >= 0.0 && px[2] >= 0.0,
+                "radiance negative: {px:?}"
+            );
+            assert!(
+                (0.0..=1.0).contains(&px[3]),
+                "confidence out of range: {px:?}"
+            );
         }
     }
 
@@ -361,7 +367,10 @@ mod tests {
         let out = denoise_ssgi(&raw, buffers, config);
         for (o, r) in out.iter().zip(raw.iter()) {
             for c in 0..4 {
-                assert!((o[c] - r[c]).abs() < 1.0e-6, "radius 0 must be identity: {o:?} vs {r:?}");
+                assert!(
+                    (o[c] - r[c]).abs() < 1.0e-6,
+                    "radius 0 must be identity: {o:?} vs {r:?}"
+                );
             }
         }
     }

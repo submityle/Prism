@@ -263,7 +263,9 @@ impl GpuClassificationCounters {
     /// into the single global [`PrismShadingDiagnostics`] resource.
     pub fn saturating_add(self, other: Self) -> Self {
         Self {
-            background_pixels: self.background_pixels.saturating_add(other.background_pixels),
+            background_pixels: self
+                .background_pixels
+                .saturating_add(other.background_pixels),
             stale_pixels: self.stale_pixels.saturating_add(other.stale_pixels),
             unsupported_pixels: self
                 .unsupported_pixels

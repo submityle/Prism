@@ -37,7 +37,7 @@ use wgpu::{
 
 use prism_render_architecture::ray_scene::RayFootprint;
 
-use super::abi::{FOOTPRINT_RESULT_WORDS, FOOTPRINT_WORDS, GpuFootprintParams};
+use super::abi::{GpuFootprintParams, FOOTPRINT_RESULT_WORDS, FOOTPRINT_WORDS};
 
 /// Absolute per-scalar tolerance for the `GPU`-versus-`CPU` comparison of the
 /// three `f32` result fields. Both paths run the same `float32` arithmetic, so
@@ -112,21 +112,61 @@ fn build_footprints() -> Vec<FootprintInput> {
     // Hand-picked deterministic edge cases.
     let edges = [
         // Sub-texel footprint clamps to mip 0.
-        FootprintInput { cone_width: 0.25, cone_spread: 0.0, hit_distance: 0.0, texel: 1.0 },
+        FootprintInput {
+            cone_width: 0.25,
+            cone_spread: 0.0,
+            hit_distance: 0.0,
+            texel: 1.0,
+        },
         // Exactly one texel -> mip 0.
-        FootprintInput { cone_width: 1.0, cone_spread: 0.0, hit_distance: 0.0, texel: 1.0 },
+        FootprintInput {
+            cone_width: 1.0,
+            cone_spread: 0.0,
+            hit_distance: 0.0,
+            texel: 1.0,
+        },
         // 16 texels -> mip 4 exactly.
-        FootprintInput { cone_width: 16.0, cone_spread: 0.0, hit_distance: 0.0, texel: 1.0 },
+        FootprintInput {
+            cone_width: 16.0,
+            cone_spread: 0.0,
+            hit_distance: 0.0,
+            texel: 1.0,
+        },
         // Far beyond the ceiling clamps to MAX_MIP.
-        FootprintInput { cone_width: 4096.0, cone_spread: 0.0, hit_distance: 0.0, texel: 1.0 },
+        FootprintInput {
+            cone_width: 4096.0,
+            cone_spread: 0.0,
+            hit_distance: 0.0,
+            texel: 1.0,
+        },
         // Guarded zero texel -> span 0 -> mip 0.
-        FootprintInput { cone_width: 2.0, cone_spread: 0.0, hit_distance: 0.0, texel: 0.0 },
+        FootprintInput {
+            cone_width: 2.0,
+            cone_spread: 0.0,
+            hit_distance: 0.0,
+            texel: 0.0,
+        },
         // Negative texel guards the same way.
-        FootprintInput { cone_width: 2.0, cone_spread: 0.0, hit_distance: 0.0, texel: -1.0 },
+        FootprintInput {
+            cone_width: 2.0,
+            cone_spread: 0.0,
+            hit_distance: 0.0,
+            texel: -1.0,
+        },
         // Non-finite / negative slopes sanitize to zero (projected_width 0).
-        FootprintInput { cone_width: -1.0, cone_spread: f32::NAN, hit_distance: f32::INFINITY, texel: 1.0 },
+        FootprintInput {
+            cone_width: -1.0,
+            cone_spread: f32::NAN,
+            hit_distance: f32::INFINITY,
+            texel: 1.0,
+        },
         // Growing distance drives coarser mips.
-        FootprintInput { cone_width: 0.1, cone_spread: 0.05, hit_distance: 30.0, texel: 0.1 },
+        FootprintInput {
+            cone_width: 0.1,
+            cone_spread: 0.05,
+            hit_distance: 30.0,
+            texel: 0.1,
+        },
     ];
     out.extend_from_slice(&edges);
     out
@@ -415,8 +455,14 @@ fn ray_footprint_matches_cpu_golden_on_device() {
         }
     }
 
-    assert!(mip0_count > 0, "batch must exercise the mip-0 / sub-texel path");
-    assert!(clamped_count > 0, "batch must exercise the max-mip clamp path");
+    assert!(
+        mip0_count > 0,
+        "batch must exercise the mip-0 / sub-texel path"
+    );
+    assert!(
+        clamped_count > 0,
+        "batch must exercise the max-mip clamp path"
+    );
     assert!(
         exact_floor_count > 0,
         "batch must exercise the discrete mip_floor bucket away from a boundary"

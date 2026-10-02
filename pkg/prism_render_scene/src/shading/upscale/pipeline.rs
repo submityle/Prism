@@ -34,8 +34,8 @@ use bevy_render::{
 };
 use bevy_shader::Shader;
 
-use super::abi::{GpuUpscaleRcasParams, GpuUpscaleReconstructParams};
 use super::super::resources::SCENE_COLOR_FORMAT;
+use super::abi::{GpuUpscaleRcasParams, GpuUpscaleReconstructParams};
 
 /// The display-resolution history depth format, matching the reconstruction
 /// shader's `depth_out` / `history_depth` (`r32float`, the SSR device-depth

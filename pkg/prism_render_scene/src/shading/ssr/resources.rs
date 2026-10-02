@@ -213,10 +213,7 @@ pub(crate) fn hzb_mip_count(size: bevy_math::UVec2) -> u32 {
 /// Texel extent of pyramid level `mip`: each axis is `max(size >> mip, 1)`,
 /// the floor-halving `wgpu` uses for texture mip dimensions.
 fn mip_size(size: bevy_math::UVec2, mip: u32) -> bevy_math::UVec2 {
-    bevy_math::UVec2::new(
-        (size.x >> mip).max(1),
-        (size.y >> mip).max(1),
-    )
+    bevy_math::UVec2::new((size.x >> mip).max(1), (size.y >> mip).max(1))
 }
 
 /// (Re)allocates [`ViewSsrTextures`] for every view that has a resident

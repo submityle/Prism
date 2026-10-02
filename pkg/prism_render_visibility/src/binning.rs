@@ -69,7 +69,17 @@ pub struct GpuDrawBinHeader {
 }
 
 impl GpuDrawBinHeader {
+    /// Builds a header with a stream-local command slot (`command_base = 0`).
     pub fn from_range(view: ViewHandle, range: DrawBinRange) -> Self {
+        Self::from_range_at(view, range, 0)
+    }
+
+    /// Builds a header whose `command_start` is resolved to the absolute slot
+    /// in a shared command buffer by adding `command_base` (typically a
+    /// stream's [`ViewDrawBins::command_buffer_start`] after
+    /// [`pack_draw_bin_streams`]) to the stream-local `range.command_start`.
+    /// The sum saturates so a pathological total cannot wrap.
+    pub fn from_range_at(view: ViewHandle, range: DrawBinRange, command_base: u32) -> Self {
         Self {
             geometry_index: range.key.geometry.index,
             geometry_generation: range.key.geometry.generation,
@@ -77,7 +87,7 @@ impl GpuDrawBinHeader {
             vertex_buffer_class: range.key.vertex_buffer_class,
             index_buffer_class: range.key.index_buffer_class,
             indexed: u32::from(range.key.indexed),
-            command_start: range.command_start,
+            command_start: command_base.saturating_add(range.command_start),
             command_capacity: range.command_capacity,
             command_count: 0,
             view_index: view.index,
@@ -184,6 +194,28 @@ impl TwoPhaseViewDrawBins {
     /// single bin/command/candidate buffer without overlap.
     pub fn pack(&mut self) {
         pack_draw_bin_streams([&mut self.early, &mut self.late]);
+    }
+
+    /// Emits the GPU draw-bin headers for both phases, each resolved to its
+    /// absolute command slot. Call after [`pack`](Self::pack) so the late
+    /// headers reflect their offset past the early stream.
+    pub fn gpu_headers(&self) -> (Vec<GpuDrawBinHeader>, Vec<GpuDrawBinHeader>) {
+        (self.early.gpu_headers(), self.late.gpu_headers())
+    }
+}
+
+impl ViewDrawBins {
+    /// Emits one [`GpuDrawBinHeader`] per bin with its `command_start` resolved
+    /// to the absolute slot in the shared command buffer
+    /// (`command_buffer_start + range.command_start`). Call after
+    /// [`pack_draw_bin_streams`] so the base reflects this stream's place in
+    /// the shared buffer; before packing `command_buffer_start` is zero and the
+    /// headers are stream-local.
+    pub fn gpu_headers(&self) -> Vec<GpuDrawBinHeader> {
+        self.bins
+            .iter()
+            .map(|&range| GpuDrawBinHeader::from_range_at(self.view, range, self.command_buffer_start))
+            .collect()
     }
 }
 
@@ -444,5 +476,85 @@ mod tests {
         assert_eq!((a.global_bin_start, a.command_buffer_start, a.global_candidate_start), (0, 0, 0));
         assert_eq!((b.global_bin_start, b.command_buffer_start, b.global_candidate_start), (2, 2, 4));
         assert_eq!((c.global_bin_start, c.command_buffer_start, c.global_candidate_start), (3, 3, 12));
+    }
+
+    #[test]
+    fn gpu_headers_resolve_absolute_command_slots_after_packing() {
+        let key = |geometry| DrawBinKey {
+            geometry: handle(geometry),
+            lod_or_cluster: 0,
+            pipeline_class: geometry,
+            vertex_buffer_class: 1,
+            index_buffer_class: 2,
+            indexed: true,
+            primitive_kind: GeometryPrimitiveKind::Indexed,
+            pass_mask: crate::RenderPassMask::OPAQUE.0,
+        };
+        let late =
+            crate::VisibilityStageMask::LATE_RETEST | crate::VisibilityStageMask::LATE_VISIBLE;
+        let mut bins = build_two_phase_view_draw_bins(
+            handle(9),
+            8,
+            [
+                DrawBinCandidate {
+                    scene: handle(1),
+                    key: key(1),
+                    visibility_stages: crate::VisibilityStageMask::EARLY,
+                },
+                DrawBinCandidate {
+                    scene: handle(2),
+                    key: key(2),
+                    visibility_stages: crate::VisibilityStageMask::EARLY,
+                },
+                DrawBinCandidate {
+                    scene: handle(3),
+                    key: key(3),
+                    visibility_stages: late,
+                },
+            ],
+        );
+        bins.pack();
+        let (early, late_headers) = bins.gpu_headers();
+        // Early pass: two bins, local slots 0 and 1 (base 0).
+        assert_eq!(early.len(), 2);
+        assert_eq!(early[0].command_start, 0);
+        assert_eq!(early[1].command_start, 1);
+        assert_eq!(early[0].view_index, 9);
+        // Late pass: one bin, resolved past the early stream (base = 2).
+        assert_eq!(late_headers.len(), 1);
+        assert_eq!(late_headers[0].command_start, bins.early.command_count);
+        assert_eq!(late_headers[0].command_start, 2);
+        assert_eq!(late_headers[0].command_capacity, 1);
+    }
+
+    #[test]
+    fn from_range_at_saturates_and_defaults_to_zero_base() {
+        let range = DrawBinRange {
+            key: DrawBinKey {
+                geometry: handle(1),
+                lod_or_cluster: 0,
+                pipeline_class: 1,
+                vertex_buffer_class: 1,
+                index_buffer_class: 2,
+                indexed: true,
+                primitive_kind: GeometryPrimitiveKind::Indexed,
+                pass_mask: crate::RenderPassMask::OPAQUE.0,
+            },
+            command_start: 5,
+            command_capacity: 3,
+            representative_scene: handle(1),
+            visibility_stages: crate::VisibilityStageMask::EARLY,
+        };
+        // Default base reproduces from_range exactly.
+        assert_eq!(
+            GpuDrawBinHeader::from_range(handle(9), range),
+            GpuDrawBinHeader::from_range_at(handle(9), range, 0)
+        );
+        // Non-zero base shifts the slot; overflow saturates instead of wrapping.
+        assert_eq!(GpuDrawBinHeader::from_range_at(handle(9), range, 10).command_start, 15);
+        assert_eq!(
+            GpuDrawBinHeader::from_range_at(handle(9), range, u32::MAX).command_start,
+            u32::MAX
+        );
     }
 }

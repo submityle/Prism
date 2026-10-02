@@ -110,7 +110,10 @@ pub fn evaluate_subsurface_direct(
         SSS_POWER,
     );
     let thickness_attenuation = 1.0 - thickness;
-    let transmitted = mul_scalar(surface.base_color, subsurface * back * thickness_attenuation);
+    let transmitted = mul_scalar(
+        surface.base_color,
+        subsurface * back * thickness_attenuation,
+    );
 
     let lit = add(add(diffuse, specular), transmitted);
     let radiance = mul_scalar(

@@ -230,10 +230,7 @@ pub fn march_hierarchical(
         }
 
         let size = pyramid.size(level);
-        let cell = IVec2::new(
-            (uv.x * size.x as f32) as i32,
-            (uv.y * size.y as f32) as i32,
-        );
+        let cell = IVec2::new((uv.x * size.x as f32) as i32, (uv.y * size.y as f32) as i32);
         let t_next = next_cell_boundary(start_uv, delta, size, t);
 
         let depth_near = depth_at(t); // largest ray depth (nearest) over segment

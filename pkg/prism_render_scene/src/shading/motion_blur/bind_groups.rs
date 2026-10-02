@@ -57,7 +57,12 @@ pub(crate) fn prepare_motion_blur_bind_groups(
     mut commands: Commands,
     pipeline: Res<MotionBlurPipeline>,
     device: Res<RenderDevice>,
-    views: Query<(Entity, &ViewVisibilityBuffer, &ViewSsrTextures, &ViewMotionBlur)>,
+    views: Query<(
+        Entity,
+        &ViewVisibilityBuffer,
+        &ViewSsrTextures,
+        &ViewMotionBlur,
+    )>,
 ) {
     for (entity, visibility, ssr, motion_blur) in &views {
         // TileMax: read the resolved motion-vector G-buffer, write the per-tile

@@ -110,9 +110,10 @@ pub(crate) fn prepare_lens_flare_textures(
             },
         );
 
-        commands
-            .entity(entity)
-            .insert(ViewLensFlare { lens_flare_out, size });
+        commands.entity(entity).insert(ViewLensFlare {
+            lens_flare_out,
+            size,
+        });
     }
 }
 

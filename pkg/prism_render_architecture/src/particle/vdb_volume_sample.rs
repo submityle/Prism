@@ -365,7 +365,8 @@ impl VdbTree {
         if internal_idx == NO_CHILD {
             return false;
         }
-        let leaf_idx = self.internals[internal_idx as usize].children[internal_child_index(cx, cy, cz)];
+        let leaf_idx =
+            self.internals[internal_idx as usize].children[internal_child_index(cx, cy, cz)];
         if leaf_idx == NO_CHILD {
             return false;
         }

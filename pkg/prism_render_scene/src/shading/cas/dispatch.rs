@@ -18,12 +18,12 @@ use bevy_render::{
     renderer::{RenderContext, ViewQuery},
 };
 
+use super::super::resources::ViewVisibilityBuffer;
 use super::abi::CAS_WORKGROUP_SIZE;
 use super::bind_groups::ViewCasBindGroup;
 use super::pipeline::CasPipeline;
 use super::resources::ViewCas;
 use super::settings::PrismCasSettings;
-use super::super::resources::ViewVisibilityBuffer;
 
 /// `Core3d` scheduling system recording the `cas_main` dispatch for every view
 /// whose sharpen texture and bind group are resident.

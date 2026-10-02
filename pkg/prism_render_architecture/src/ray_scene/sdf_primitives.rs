@@ -414,6 +414,56 @@ pub fn octahedron(point: [f32; 3], radius: f32) -> f32 {
     length([q[0], q[1] - radius + k, q[2] - k])
 }
 
+/// Exact surface normal (unit gradient) of [`octahedron`] at `point` for the
+/// octahedron of vertex `radius`.
+///
+/// Mirrors the SDF's own fold: the point is reflected into the positive octant
+/// (recording the per-axis sign), and the dominant-axis rotation picks the
+/// slanted face that solves the octant. Inside the central slab the field is
+/// the scaled `L1` excess, whose gradient is the constant face normal
+/// `(1, 1, 1) / sqrt 3` with the octant signs restored. On a slanted face the
+/// distance is `|u|` for the folded vector `u`, so the gradient in the rotated
+/// frame is `u / |u|`; because the clamp on `k` contributes a gradient that is
+/// already parallel to `u`, this holds across the clamped and interior cases
+/// alike. The rotated-frame gradient is then un-permuted back to the input axes
+/// and re-signed. The result is unit length away from the measure-zero
+/// fold creases.
+pub fn octahedron_gradient(point: [f32; 3], radius: f32) -> [f32; 3] {
+    const C: f32 = 0.577_350_26; // 1 / sqrt(3)
+    let sign = [
+        if point[0] < 0.0 { -1.0 } else { 1.0 },
+        if point[1] < 0.0 { -1.0 } else { 1.0 },
+        if point[2] < 0.0 { -1.0 } else { 1.0 },
+    ];
+    let p = [point[0].abs(), point[1].abs(), point[2].abs()];
+    let m = p[0] + p[1] + p[2] - radius;
+    // Gradient of `length(u)` in the rotated frame for a folded triple `q`.
+    let grad_q = |q: [f32; 3]| -> [f32; 3] {
+        let k = (0.5 * (q[2] - q[1] + radius)).clamp(0.0, radius);
+        let u = [q[0], q[1] - radius + k, q[2] - k];
+        let l = length(u);
+        if l > 0.0 {
+            [u[0] / l, u[1] / l, u[2] / l]
+        } else {
+            [0.0, 0.0, 0.0]
+        }
+    };
+    // Un-permute the rotated-frame gradient back onto (px, py, pz).
+    let gp = if 3.0 * p[0] < m {
+        grad_q([p[0], p[1], p[2]]) // identity
+    } else if 3.0 * p[1] < m {
+        let g = grad_q([p[1], p[2], p[0]]); // q=(py,pz,px)
+        [g[2], g[0], g[1]]
+    } else if 3.0 * p[2] < m {
+        let g = grad_q([p[2], p[0], p[1]]); // q=(pz,px,py)
+        [g[1], g[2], g[0]]
+    } else {
+        // Central slab: the face normal is the uniform (1,1,1)/sqrt(3).
+        [C, C, C]
+    };
+    [gp[0] * sign[0], gp[1] * sign[1], gp[2] * sign[2]]
+}
+
 /// Approximate signed distance from `point` to an axis-aligned ellipsoid with
 /// per-axis `radii`, centred at the origin.
 ///
@@ -2256,7 +2306,7 @@ mod tests {
     use super::{
         annulus_2d, arc, box_2d, box_2d_gradient, box_frame, box_frame_2d, box_gradient, box_sdf, capped_cone, capped_cone_segment, capped_cylinder, capped_cylinder_gradient, capped_torus, capsule, capsule_2d, capsule_gradient, circle_2d, circle_2d_gradient, cone_sdf, cross_2d, cut_disk_2d, cut_hollow_sphere,
         cut_sphere, cylinder_segment, death_star, egg_2d, ellipsoid_sdf, equilateral_triangle_2d, heart_2d, hex_prism, hexagram_2d, horseshoe_2d, infinite_cone, infinite_cylinder, isosceles_triangle_2d, length2, line_sdf, link, moon,
-        octagon_prism, octahedron, oriented_box_2d, oriented_vesica_2d, parallelogram, pentagram_2d, pie, plane, plane_gradient, polygon_2d, pyramid, quad_sdf, regular_hexagon_2d, regular_octagon_2d, regular_pentagon_2d, rhombus, rhombus_2d, round_box, round_cone_sdf,
+        octagon_prism, octahedron, octahedron_gradient, oriented_box_2d, oriented_vesica_2d, parallelogram, pentagram_2d, pie, plane, plane_gradient, polygon_2d, pyramid, quad_sdf, regular_hexagon_2d, regular_octagon_2d, regular_pentagon_2d, rhombus, rhombus_2d, round_box, round_cone_sdf,
         round_cone_segment, rounded_box_2d, rounded_box_2d_gradient, rounded_cross_2d, rounded_cylinder, rounded_x,
         segment_2d, segment_3d, solid_angle, sphere, sphere_gradient, star5_2d, torus, torus_gradient, trapezoid_isosceles, triangle_2d, triangle_sdf, triangular_prism, tunnel_2d,
         uneven_capsule_2d, vertical_capsule, vertical_capsule_gradient, vesica, vesica_2d, vesica_segment,
@@ -3332,6 +3382,32 @@ mod tests {
         // On the central axis above the cap the normal is the pure +y cap normal.
         assert_eq!(capped_cylinder_gradient([0.0, 1.0, 0.0], half_height, radius), [0.0, 1.0, 0.0]);
         assert_eq!(capped_cylinder_gradient([0.0, -1.0, 0.0], half_height, radius), [0.0, -1.0, 0.0]);
+    }
+
+    #[test]
+    fn octahedron_gradient_matches_central_difference_off_creases() {
+        let r = 1.0_f32;
+        // Points off the fold creases: slanted-face regions in several
+        // octants plus central-slab (near-face-centre) samples.
+        for &p in &[
+            [1.3_f32, 0.1, 0.05],   // face near +x vertex
+            [0.2, 1.2, 0.1],        // face near +y vertex
+            [0.1, 0.05, 1.25],      // face near +z vertex
+            [0.5, 0.45, 0.4],       // central slab
+            [0.7, 0.5, 0.3],        // central slab
+            [-1.1, -0.2, -0.15],    // face, negative octant
+            [0.9, 0.6, 0.05],       // near the face/slab transition
+        ] {
+            let g = octahedron_gradient(p, r);
+            assert!((unit_len3(g) - 1.0).abs() < 1e-5, "unit p={p:?}: {}", unit_len3(g));
+            let fd = central_grad3(&|q| octahedron(q, r), p);
+            for k in 0..3 {
+                assert!((g[k] - fd[k]).abs() < 2e-3, "octa grad p={p:?} axis {k}: {} vs {}", g[k], fd[k]);
+            }
+        }
+        // Central slab normal is the uniform face normal with octant signs.
+        let c = 0.577_350_26_f32;
+        assert_eq!(octahedron_gradient([0.1, 0.1, 0.1], r), [c, c, c]);
     }
 
     #[test]

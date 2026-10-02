@@ -214,11 +214,7 @@ mod tests {
             emissive: [0.02, 0.03, 0.04],
             ..base_surface()
         };
-        let dirs = [
-            [0.0, 1.0, 0.0],
-            [0.6, 0.8, 0.0],
-            [-0.4, 0.7, 0.59],
-        ];
+        let dirs = [[0.0, 1.0, 0.0], [0.6, 0.8, 0.0], [-0.4, 0.7, 0.59]];
         for dir in dirs {
             let sample = DirectLightSample {
                 direction: dir,

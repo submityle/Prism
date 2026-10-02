@@ -36,10 +36,10 @@ use bevy_math::{ops, Mat4};
 use bevy_render::Extract;
 use bevy_transform::components::GlobalTransform;
 use prism_render_shading::{
-    allocate_shadow_atlas, compute_cascade_matrices, compute_cascade_splits, plan_shadow_depth_draws,
-    spot_view_projection, AtlasConfig, CascadeMatrix, CascadeSplits, DirectionalShadowConfig,
-    PointShadowConfig, ShadowKind, ShadowRequest, ShadowViewGeometry, SpotShadowConfig,
-    MAX_CASCADE_COUNT,
+    allocate_shadow_atlas, compute_cascade_matrices, compute_cascade_splits,
+    plan_shadow_depth_draws, spot_view_projection, AtlasConfig, CascadeMatrix, CascadeSplits,
+    DirectionalShadowConfig, PointShadowConfig, ShadowKind, ShadowRequest, ShadowViewGeometry,
+    SpotShadowConfig, MAX_CASCADE_COUNT,
 };
 
 use super::abi::{GpuDirectionalShadow, GpuPointShadow, GpuShadowGlobals, GpuSpotShadow};
@@ -89,10 +89,22 @@ fn perspective_rh_01(fov_y_radians: f32, aspect: f32, near: f32, far: f32) -> Ma
     let w = h / aspect;
     let r = far / (near - far);
     Mat4::from_cols_array(&[
-        w, 0.0, 0.0, 0.0, //
-        0.0, h, 0.0, 0.0, //
-        0.0, 0.0, r, -1.0, //
-        0.0, 0.0, r * near, 0.0,
+        w,
+        0.0,
+        0.0,
+        0.0, //
+        0.0,
+        h,
+        0.0,
+        0.0, //
+        0.0,
+        0.0,
+        r,
+        -1.0, //
+        0.0,
+        0.0,
+        r * near,
+        0.0,
     ])
 }
 
@@ -391,14 +403,16 @@ pub(crate) fn assemble_shadows(
             ));
         } else {
             let caster = &dir_casters[slot.light_id as usize];
-            extracted.directionals.push(GpuDirectionalShadow::from_reference(
-                &caster.matrices,
-                &caster.splits,
-                &caster.config,
-                texel_uv_size,
-                slot.base_layer,
-                caster.light_index,
-            ));
+            extracted
+                .directionals
+                .push(GpuDirectionalShadow::from_reference(
+                    &caster.matrices,
+                    &caster.splits,
+                    &caster.config,
+                    texel_uv_size,
+                    slot.base_layer,
+                    caster.light_index,
+                ));
         }
     }
 
@@ -551,7 +565,10 @@ mod tests {
         assert_eq!(extracted.globals.atlas_resolution, 1024);
         // The point record inherits the live atlas texel size, not the base
         // config's placeholder zero.
-        assert_eq!(extracted.points[0].texel_uv_size, [1.0 / 1024.0, 1.0 / 1024.0]);
+        assert_eq!(
+            extracted.points[0].texel_uv_size,
+            [1.0 / 1024.0, 1.0 / 1024.0]
+        );
         assert_eq!(extracted.points[0].light_index, 0);
         assert_eq!(extracted.directionals[0].light_index, 0);
         assert_eq!(extracted.directionals[0].enabled, 1);
@@ -619,8 +636,11 @@ mod tests {
 
         // Point light_index values are preserved even though the brighter light
         // (importance 500) is allocated first.
-        let mut point_indices: Vec<u32> =
-            extracted.points.iter().map(|record| record.light_index).collect();
+        let mut point_indices: Vec<u32> = extracted
+            .points
+            .iter()
+            .map(|record| record.light_index)
+            .collect();
         point_indices.sort_unstable();
         assert_eq!(point_indices, vec![0, 1]);
     }
@@ -662,8 +682,11 @@ mod tests {
 
         // Every emitted draw targets a layer that also belongs to an emitted
         // record, and the draw layers are all distinct.
-        let mut draw_layers: Vec<u32> =
-            extracted.depth_draws.iter().map(|draw| draw.layer).collect();
+        let mut draw_layers: Vec<u32> = extracted
+            .depth_draws
+            .iter()
+            .map(|draw| draw.layer)
+            .collect();
         draw_layers.sort_unstable();
         let mut deduped = draw_layers.clone();
         deduped.dedup();
@@ -724,7 +747,14 @@ mod tests {
         let atlas = ShadowAtlasConfig::new(16, 1024);
         let mut extracted = ExtractedShadows::default();
 
-        assemble_shadows(&[], &points, &spots, &atlas, &point_config(), &mut extracted);
+        assemble_shadows(
+            &[],
+            &points,
+            &spots,
+            &atlas,
+            &point_config(),
+            &mut extracted,
+        );
 
         assert_eq!(extracted.spots.len(), 1);
         assert_eq!(extracted.globals.spot_count, 1);
@@ -769,13 +799,19 @@ mod tests {
         assemble_shadows(&[], &[], &spots, &atlas, &point_config(), &mut extracted);
 
         assert_eq!(extracted.spots.len(), 2);
-        let mut indices: Vec<u32> =
-            extracted.spots.iter().map(|record| record.light_index).collect();
+        let mut indices: Vec<u32> = extracted
+            .spots
+            .iter()
+            .map(|record| record.light_index)
+            .collect();
         indices.sort_unstable();
         assert_eq!(indices, vec![0, 1]);
 
-        let mut layers: Vec<u32> =
-            extracted.spots.iter().map(|record| record.base_layer).collect();
+        let mut layers: Vec<u32> = extracted
+            .spots
+            .iter()
+            .map(|record| record.base_layer)
+            .collect();
         layers.sort_unstable();
         layers.dedup();
         assert_eq!(layers.len(), 2, "each spot needs its own atlas layer");

@@ -140,10 +140,26 @@ mod tests {
         let c = config();
         let camera = Vec2::new(3.0, -5.0);
         let receivers = [
-            Receiver { light_space_xy: camera, view_distance: 1.0, filter_radius_texels: 0.0 },
-            Receiver { light_space_xy: camera + Vec2::new(40.0, 0.0), view_distance: 1.0, filter_radius_texels: 0.0 },
-            Receiver { light_space_xy: camera + Vec2::new(0.0, 30.0), view_distance: 120.0, filter_radius_texels: 1.0 },
-            Receiver { light_space_xy: camera - Vec2::new(25.0, 15.0), view_distance: 400.0, filter_radius_texels: 0.0 },
+            Receiver {
+                light_space_xy: camera,
+                view_distance: 1.0,
+                filter_radius_texels: 0.0,
+            },
+            Receiver {
+                light_space_xy: camera + Vec2::new(40.0, 0.0),
+                view_distance: 1.0,
+                filter_radius_texels: 0.0,
+            },
+            Receiver {
+                light_space_xy: camera + Vec2::new(0.0, 30.0),
+                view_distance: 120.0,
+                filter_radius_texels: 1.0,
+            },
+            Receiver {
+                light_space_xy: camera - Vec2::new(25.0, 15.0),
+                view_distance: 400.0,
+                filter_radius_texels: 0.0,
+            },
         ];
         let requests = generate_page_requests(&c, 0, &receivers);
         assert!(!requests.keys.is_empty());

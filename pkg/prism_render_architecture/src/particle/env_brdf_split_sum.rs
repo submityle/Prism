@@ -407,8 +407,16 @@ mod tests {
         assert!(b < a);
         assert!(c < b);
         // Out-of-range inputs clamp to the endpoints.
-        assert!(approx(exp2_grazing_falloff(-1.0), exp2_grazing_falloff(0.0), CMP_EPS));
-        assert!(approx(exp2_grazing_falloff(2.0), exp2_grazing_falloff(1.0), CMP_EPS));
+        assert!(approx(
+            exp2_grazing_falloff(-1.0),
+            exp2_grazing_falloff(0.0),
+            CMP_EPS
+        ));
+        assert!(approx(
+            exp2_grazing_falloff(2.0),
+            exp2_grazing_falloff(1.0),
+            CMP_EPS
+        ));
     }
 
     #[test]

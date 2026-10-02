@@ -289,7 +289,12 @@ pub fn tiled_depth_sort(params: TileGridParams, particles: &[TiledParticle]) -> 
     let mut keys: Vec<u16> = Vec::with_capacity(n);
     for particle in particles {
         tile_ids.push(tile_of(params, *particle).index);
-        keys.push(sort_key(particle.depth, params.near, params.far, params.back_to_front));
+        keys.push(sort_key(
+            particle.depth,
+            params.near,
+            params.far,
+            params.back_to_front,
+        ));
     }
 
     // Counting sort over `tile` ids: histogram, then exclusive prefix sum into
@@ -521,13 +526,29 @@ mod tests {
         };
         // Exactly on the lower edge -> bucket 0 on each axis -> tile 0.
         let low = tile_of(params, TiledParticle::new(0.0, 0.0, 0.0));
-        assert_eq!(low, TileCoord { x: 0, y: 0, z: 0, index: 0 });
+        assert_eq!(
+            low,
+            TileCoord {
+                x: 0,
+                y: 0,
+                z: 0,
+                index: 0
+            }
+        );
         // At/above the upper edge -> last bucket on each axis.
         let high = tile_of(params, TiledParticle::new(10.0, 10.0, 100.0));
         let nx = params.effective_tiles_x();
         let ny = params.effective_tiles_y();
         let expected = (ny + 1) * nx + 1;
-        assert_eq!(high, TileCoord { x: 1, y: 1, z: 1, index: expected });
+        assert_eq!(
+            high,
+            TileCoord {
+                x: 1,
+                y: 1,
+                z: 1,
+                index: expected
+            }
+        );
         // Just below the midpoint stays in the lower column; at the midpoint
         // crosses into the upper column.
         assert_eq!(tile_of(params, TiledParticle::new(4.999, 0.0, 0.0)).x, 0);

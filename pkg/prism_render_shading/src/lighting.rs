@@ -106,8 +106,12 @@ pub fn evaluate_principled_direct(
     // `anisotropy_rotation` before the Burley `aspect` split maps `alpha` onto
     // the two axes. With `anisotropy == 0` the axes collapse to `alpha` and the
     // anisotropic `D`/`V` reduce exactly to the isotropic GGX pair.
-    let (tangent, bitangent) =
-        anisotropic_axes(n, frame.tangent, frame.bitangent, surface.anisotropy_rotation);
+    let (tangent, bitangent) = anisotropic_axes(
+        n,
+        frame.tangent,
+        frame.bitangent,
+        surface.anisotropy_rotation,
+    );
     let anisotropy = surface.anisotropy.clamp(-1.0, 1.0);
     let aspect = (1.0 - 0.9 * anisotropy).sqrt();
     let ax = (alpha / aspect).max(MIN_ANISOTROPIC_ALPHA);
@@ -140,8 +144,7 @@ pub fn evaluate_principled_direct(
     let coat_f = fresnel_schlick([0.04; 3], v_dot_h);
     let coat_specular = mul_scalar(
         coat_f,
-        coat
-            * distribution_ggx(n_dot_h, coat_alpha)
+        coat * distribution_ggx(n_dot_h, coat_alpha)
             * visibility_smith_ggx_correlated(n_dot_v, n_dot_l, coat_alpha)
             * n_dot_l,
     );
@@ -222,7 +225,10 @@ fn anisotropic_axes(
     // Fall back to the canonical Duff basis when the interpolated tangent has
     // collapsed onto the normal.
     let (fallback_t, _fallback_b) = orthonormal_basis(normal);
-    let projected = sub(basis_tangent, mul_scalar(normal, dot(normal, basis_tangent)));
+    let projected = sub(
+        basis_tangent,
+        mul_scalar(normal, dot(normal, basis_tangent)),
+    );
     let tangent0 = normalize_or(projected, fallback_t);
     let handedness = if dot(cross(normal, tangent0), basis_bitangent) < 0.0 {
         -1.0
@@ -316,7 +322,9 @@ mod tests {
                     frame(),
                     light(),
                 );
-                assert!(value.into_iter().all(|channel| channel.is_finite() && channel >= 0.0));
+                assert!(value
+                    .into_iter()
+                    .all(|channel| channel.is_finite() && channel >= 0.0));
             }
         }
         let shadowed = evaluate_principled_direct(
@@ -342,7 +350,9 @@ mod tests {
                     },
                     2048,
                 );
-                assert!(response.into_iter().all(|channel| channel.is_finite() && channel <= 1.2));
+                assert!(response
+                    .into_iter()
+                    .all(|channel| channel.is_finite() && channel <= 1.2));
             }
         }
     }
@@ -367,7 +377,10 @@ mod tests {
                 let iso = distribution_ggx(n_dot_h, alpha);
                 let aniso =
                     distribution_ggx_anisotropic(dot(t, h), dot(b, h), n_dot_h, alpha, alpha);
-                assert!((iso - aniso).abs() <= 1.0e-4 * iso.max(1.0), "D {iso} vs {aniso}");
+                assert!(
+                    (iso - aniso).abs() <= 1.0e-4 * iso.max(1.0),
+                    "D {iso} vs {aniso}"
+                );
             }
         }
         for alpha in [0.1_f32, 0.5, 1.0] {
@@ -386,7 +399,10 @@ mod tests {
                 alpha,
                 alpha,
             );
-            assert!((iso - aniso).abs() <= 1.0e-4 * iso.max(1.0), "V {iso} vs {aniso}");
+            assert!(
+                (iso - aniso).abs() <= 1.0e-4 * iso.max(1.0),
+                "V {iso} vs {aniso}"
+            );
         }
     }
 

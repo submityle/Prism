@@ -89,7 +89,8 @@ pub(crate) fn init_ssr_prepass_pipeline(
     let view_entries = view_layout_entries();
     let scene_entries = scene_layout_entries();
     let view_descriptor = BindGroupLayoutDescriptor::new("prism SSR prepass view", &view_entries);
-    let scene_descriptor = BindGroupLayoutDescriptor::new("prism SSR prepass scene", &scene_entries);
+    let scene_descriptor =
+        BindGroupLayoutDescriptor::new("prism SSR prepass scene", &scene_entries);
     let view_layout = device.create_bind_group_layout("prism SSR prepass view", &view_entries);
     let scene_layout = device.create_bind_group_layout("prism SSR prepass scene", &scene_entries);
 

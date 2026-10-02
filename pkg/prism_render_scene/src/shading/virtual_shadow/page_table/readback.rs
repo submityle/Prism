@@ -24,17 +24,16 @@ use bevy_math::Vec2;
 use bevy_platform::collections::{HashMap, HashSet};
 use bevy_render::{
     render_resource::{
-        Buffer, BufferAsyncError, BufferDescriptor, BufferUsages, CommandEncoderDescriptor,
-        MapMode,
+        Buffer, BufferAsyncError, BufferDescriptor, BufferUsages, CommandEncoderDescriptor, MapMode,
     },
     renderer::{PendingCommandBuffers, RenderDevice, RenderQueue},
     view::{ExtractedView, RetainedViewEntity},
 };
 
 use super::super::super::runtime::PrismShadingSettings;
+use super::super::bridge::{BridgePage, VsmBridgeCache};
 use super::super::page_mark::ViewVsmPageRequests;
 use super::super::settings::PrismVirtualShadowSettings;
-use super::super::bridge::{BridgePage, VsmBridgeCache};
 use super::decode::request_keys;
 use super::pages::VsmRenderPage;
 use super::resources::{

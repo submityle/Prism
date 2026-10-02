@@ -44,9 +44,9 @@ use bevy_render::{
 };
 use bevy_shader::Shader;
 
+use super::super::resources::ViewVisibilityBuffer;
 use super::abi::{GpuSsrHzbParams, SSR_WORKGROUP_SIZE};
 use super::resources::{ViewSsrTextures, SSR_COLOR_FORMAT};
-use super::super::resources::ViewVisibilityBuffer;
 
 /// The three mip-build pipelines and the bind-group layout they share.
 #[derive(Resource)]

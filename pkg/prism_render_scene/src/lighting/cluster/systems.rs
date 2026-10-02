@@ -63,8 +63,8 @@ pub(crate) fn prepare_cluster_bind_group(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::build::ClusterCpuData;
+    use super::*;
     use crate::lighting::abi::GpuPunctualLight;
     use crate::lighting::cluster::extract::ClusterViewFit;
     use prism_render_shading::PunctualLight;
@@ -84,10 +84,22 @@ mod tests {
         let h = 1.0 / bevy_math::ops::tan(0.5);
         let r = far / (near - far);
         [
-            h, 0.0, 0.0, 0.0, //
-            0.0, h, 0.0, 0.0, //
-            0.0, 0.0, r, -1.0, //
-            0.0, 0.0, r * near, 0.0,
+            h,
+            0.0,
+            0.0,
+            0.0, //
+            0.0,
+            h,
+            0.0,
+            0.0, //
+            0.0,
+            0.0,
+            r,
+            -1.0, //
+            0.0,
+            0.0,
+            r * near,
+            0.0,
         ]
     }
 

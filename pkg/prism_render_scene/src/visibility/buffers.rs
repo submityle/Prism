@@ -50,7 +50,8 @@ impl FromWorld for UnifiedVisibilityBuffers {
         gpu_work.set_label(Some("prism visibility gpu parity work"));
         let mut gpu_ranges = RawBufferVec::new(BufferUsages::STORAGE | BufferUsages::COPY_SRC);
         gpu_ranges.set_label(Some("prism visibility gpu parity ranges"));
-        let mut indexed_indirect = RawBufferVec::new(BufferUsages::STORAGE | BufferUsages::INDIRECT);
+        let mut indexed_indirect =
+            RawBufferVec::new(BufferUsages::STORAGE | BufferUsages::INDIRECT);
         indexed_indirect.set_label(Some("prism visibility indexed indirect"));
         let mut non_indexed_indirect =
             RawBufferVec::new(BufferUsages::STORAGE | BufferUsages::INDIRECT);
@@ -154,9 +155,8 @@ impl UnifiedVisibilityBuffers {
             self.previous_lods.clear();
         }
         if self.previous_lods.len() < self.gpu_work_capacity {
-            self.previous_lods.extend(
-                (self.previous_lods.len()..self.gpu_work_capacity).map(|_| u32::MAX),
-            );
+            self.previous_lods
+                .extend((self.previous_lods.len()..self.gpu_work_capacity).map(|_| u32::MAX));
         }
         self.previous_lods.truncate(self.gpu_work_capacity);
         self.history_slots_per_view = gpu_slots_per_view;
@@ -173,17 +173,20 @@ impl UnifiedVisibilityBuffers {
         self.late_bin_headers.clear();
         self.candidate_bins.clear();
         for view in views {
-            self.bin_headers.extend(view.bins.iter().copied().map(|range| {
-                super::rows::RenderDrawBinHeader::from(
-                    prism_render_visibility::GpuDrawBinHeader::from_range(view.view, range),
-                )
-            }));
-            self.late_bin_headers.extend(view.bins.iter().copied().map(|range| {
-                super::rows::RenderDrawBinHeader::from(
-                    prism_render_visibility::GpuDrawBinHeader::from_range(view.view, range),
-                )
-            }));
-            self.candidate_bins.extend(view.candidate_bins.iter().copied());
+            self.bin_headers
+                .extend(view.bins.iter().copied().map(|range| {
+                    super::rows::RenderDrawBinHeader::from(
+                        prism_render_visibility::GpuDrawBinHeader::from_range(view.view, range),
+                    )
+                }));
+            self.late_bin_headers
+                .extend(view.bins.iter().copied().map(|range| {
+                    super::rows::RenderDrawBinHeader::from(
+                        prism_render_visibility::GpuDrawBinHeader::from_range(view.view, range),
+                    )
+                }));
+            self.candidate_bins
+                .extend(view.candidate_bins.iter().copied());
         }
     }
 
@@ -242,7 +245,18 @@ impl UnifiedVisibilityBuffers {
 
     pub(crate) fn compute_buffers(
         &self,
-    ) -> Option<(&Buffer, &Buffer, &Buffer, &Buffer, &Buffer, &Buffer, &Buffer, &Buffer, &Buffer, &Buffer)> {
+    ) -> Option<(
+        &Buffer,
+        &Buffer,
+        &Buffer,
+        &Buffer,
+        &Buffer,
+        &Buffer,
+        &Buffer,
+        &Buffer,
+        &Buffer,
+        &Buffer,
+    )> {
         Some((
             self.views.buffer()?,
             self.counters.buffer()?,
@@ -296,13 +310,14 @@ impl UnifiedVisibilityBuffers {
                 self.late_non_indexed_indirect.buffer()?,
             ))
         } else {
-            Some((self.indexed_indirect.buffer()?, self.non_indexed_indirect.buffer()?))
+            Some((
+                self.indexed_indirect.buffer()?,
+                self.non_indexed_indirect.buffer()?,
+            ))
         }
     }
 
-    pub(crate) fn late_compute_buffers(
-        &self,
-    ) -> Option<(&Buffer, &Buffer, &Buffer, &Buffer)> {
+    pub(crate) fn late_compute_buffers(&self) -> Option<(&Buffer, &Buffer, &Buffer, &Buffer)> {
         Some((
             self.late_counters.buffer()?,
             self.late_indexed_indirect.buffer()?,
@@ -310,7 +325,6 @@ impl UnifiedVisibilityBuffers {
             self.late_bin_headers.buffer()?,
         ))
     }
-
 }
 
 #[cfg(test)]
@@ -371,7 +385,11 @@ mod tests {
             [],
             4,
         );
-        assert!(buffers.previous_lods.values().iter().all(|lod| *lod == u32::MAX));
+        assert!(buffers
+            .previous_lods
+            .values()
+            .iter()
+            .all(|lod| *lod == u32::MAX));
     }
 
     #[test]
@@ -379,7 +397,10 @@ mod tests {
         let mut world = World::new();
         let mut buffers = UnifiedVisibilityBuffers::from_world(&mut world);
         let key = prism_render_visibility::DrawBinKey {
-            geometry: GenerationalHandle { index: 2, generation: 1 },
+            geometry: GenerationalHandle {
+                index: 2,
+                generation: 1,
+            },
             lod_or_cluster: 0,
             pipeline_class: 4,
             vertex_buffer_class: 5,
@@ -389,19 +410,31 @@ mod tests {
             pass_mask: prism_render_visibility::RenderPassMask::OPAQUE.0,
         };
         let mut first = prism_render_visibility::build_view_draw_bins(
-            GenerationalHandle { index: 10, generation: 1 },
+            GenerationalHandle {
+                index: 10,
+                generation: 1,
+            },
             4,
             [prism_render_visibility::DrawBinCandidate {
-                scene: GenerationalHandle { index: 1, generation: 1 },
+                scene: GenerationalHandle {
+                    index: 1,
+                    generation: 1,
+                },
                 key,
                 visibility_stages: prism_render_visibility::VisibilityStageMask::EARLY,
             }],
         );
         let mut second = prism_render_visibility::build_view_draw_bins(
-            GenerationalHandle { index: 11, generation: 1 },
+            GenerationalHandle {
+                index: 11,
+                generation: 1,
+            },
             4,
             [prism_render_visibility::DrawBinCandidate {
-                scene: GenerationalHandle { index: 2, generation: 1 },
+                scene: GenerationalHandle {
+                    index: 2,
+                    generation: 1,
+                },
                 key,
                 visibility_stages: prism_render_visibility::VisibilityStageMask::EARLY,
             }],
@@ -429,7 +462,10 @@ mod tests {
         let mut world = World::new();
         let mut buffers = UnifiedVisibilityBuffers::from_world(&mut world);
         buffers.stage(
-            [RenderVisibilityView::default(), RenderVisibilityView::default()],
+            [
+                RenderVisibilityView::default(),
+                RenderVisibilityView::default(),
+            ],
             [],
             [],
             4,

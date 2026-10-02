@@ -128,8 +128,22 @@ mod tests {
         let mut world = World::new();
         let mut buffers = RenderShadingGeometryBuffers::from_world(&mut world);
         let mut registry = RenderShadingGeometryRegistry::default();
-        registry.upsert(GenerationalHandle { index: 1, generation: 4 }, 2, geometry(3, 1));
-        registry.upsert(GenerationalHandle { index: 3, generation: 7 }, 5, geometry(4, 2));
+        registry.upsert(
+            GenerationalHandle {
+                index: 1,
+                generation: 4,
+            },
+            2,
+            geometry(3, 1),
+        );
+        registry.upsert(
+            GenerationalHandle {
+                index: 3,
+                generation: 7,
+            },
+            5,
+            geometry(4, 2),
+        );
         buffers.rebuild(&registry);
 
         // Slot 0 reserved + sparse growth up to slot 3 -> four headers.

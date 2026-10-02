@@ -1,12 +1,14 @@
 use bevy_app::{App, Plugin};
 use bevy_asset::embedded_asset;
+use bevy_core_pipeline::schedule::camera_driver;
 use bevy_ecs::schedule::IntoScheduleConfigs;
 use bevy_pbr::MeshPipelineSystems;
-use bevy_core_pipeline::schedule::camera_driver;
 use bevy_render::{
-    init_gpu_resource, ExtractSchedule, GpuResourceAppExt, render_phase::AddRenderCommand,
-    render_resource::SpecializedRenderPipelines, renderer::{RenderGraph, RenderGraphSystems},
-    Render, RenderApp, RenderStartup, RenderSystems,
+    init_gpu_resource,
+    render_phase::AddRenderCommand,
+    render_resource::SpecializedRenderPipelines,
+    renderer::{RenderGraph, RenderGraphSystems},
+    ExtractSchedule, GpuResourceAppExt, Render, RenderApp, RenderStartup, RenderSystems,
 };
 
 use super::{
@@ -17,130 +19,15 @@ use super::{
         prepare_gtao_kernel_bind_groups, prepare_gtao_prepass_bind_groups,
         prepare_gtao_temporal_bind_groups, prepare_gtao_temporal_textures, prepare_gtao_textures,
     },
-    ssr::{
-        init_ssr_color_mips_pipeline, init_ssr_composite_pipeline, init_ssr_hzb_pipeline,
-        init_ssr_prepass_pipeline, init_ssr_repack_pipeline, init_ssr_trace_pipeline,
-        init_ssr_reconstruct_pipeline, init_ssr_temporal_pipeline,
-        prepare_ssr_color_mips_bind_groups, prepare_ssr_composite_bind_groups,
-        prepare_ssr_hzb_bind_groups, prepare_ssr_prepass_bind_groups,
-        prepare_ssr_reconstruct_bind_groups, prepare_ssr_temporal_bind_groups,
-        prepare_ssr_temporal_textures,
-        prepare_ssr_repack_bind_groups, prepare_ssr_textures, prepare_ssr_trace_bind_groups,
-        ssr_color_mips_pass, ssr_composite_pass, ssr_hzb_pass, ssr_prepass_pass, ssr_reconstruct_pass,
-        ssr_repack_pass, ssr_temporal_pass, ssr_trace_pass,
-    },
-    ssgi::{
-        init_ssgi_composite_pipeline, init_ssgi_denoise_pipeline, init_ssgi_trace_pipeline,
-        prepare_ssgi_composite_bind_groups, prepare_ssgi_denoise_bind_groups,
-        prepare_ssgi_textures, prepare_ssgi_trace_bind_groups, ssgi_composite_pass,
-        ssgi_denoise_pass, ssgi_trace_pass,
-    },
-    world_space_gi::{
-        init_world_space_gi_composite_pipeline, init_world_space_gi_pipeline,
-        prepare_world_space_gi_bind_groups, prepare_world_space_gi_composite_bind_groups,
-        prepare_world_space_gi_textures, world_space_gi_composite_pass, world_space_gi_pass,
-        PrismWorldSpaceGiSettings,
-    },
-    taa::{
-        init_taa_resolve_pipeline, prepare_taa_bind_groups, prepare_taa_jitter,
-        prepare_taa_textures, taa_resolve_pass,
-    },
-    upscale::{
-        init_upscale_pipeline, prepare_upscale_bind_groups, prepare_upscale_textures,
-        upscale_pass,
-    },
-    virtual_shadow::{
-        bridge_vsm_view_resources, collect_vsm_page_readback, extract_vsm_primary_light,
-        init_vsm_caster_depth_pipeline, init_vsm_page_mark_pipeline,
-        init_vsm_receiver_gen_pipeline, map_submitted_vsm_page_readback,
-        prepare_vsm_page_mark_bind_groups, prepare_vsm_page_requests,
-        prepare_vsm_receiver_gen_bind_groups, prepare_vsm_receiver_resources,
-        request_vsm_page_readback, vsm_mark_pages_pass, vsm_receiver_gen_pass,
-        prepare_vsm_physical_atlas, PrismVirtualShadowSettings, VirtualShadowMapDriver,
-        VsmPageRequestBufferCache, VsmPageRequestReadback, VsmPageTableBufferCache,
-        VsmBridgeCache, VsmPhysicalAtlasCache, VsmPrimaryLight, VsmReceiverBufferCache,
-        prepare_vsm_caster_depth_targets, prepare_vsm_caster_depth_views,
-        queue_vsm_caster_depth, register_vsm_caster_depth_shader, vsm_caster_depth_pass,
-        VsmCasterDepthDrawList, VsmCasterDepthPipeline, VsmCasterDepthTargets,
-        VsmCasterDepthViewUniform,
+    bloom::{bloom_pass, init_bloom_pipelines, prepare_bloom_bind_groups, prepare_bloom_textures},
+    cas::{
+        cas_pass, init_cas_pipeline, prepare_cas_bind_groups, prepare_cas_textures,
+        PrismCasSettings,
     },
     chromatic_aberration::{
         chromatic_aberration_pass, init_chromatic_aberration_pipeline,
         prepare_chromatic_aberration_bind_groups, prepare_chromatic_aberration_textures,
         PrismChromaticAberrationSettings,
-    },
-    color_grade::{
-        color_grade_pass, init_color_grade_pipeline, prepare_color_grade_bind_groups,
-        prepare_color_grade_textures, PrismColorGradeSettings,
-    },
-    dof::{
-        dof_pass, init_dof_pipeline, prepare_dof_bind_groups, prepare_dof_textures,
-        PrismDofSettings,
-    },
-    film_grain::{
-        film_grain_pass, init_film_grain_pipeline, prepare_film_grain_bind_groups,
-        prepare_film_grain_textures, PrismFilmGrainSettings,
-    },
-    cas::{
-        cas_pass, init_cas_pipeline, prepare_cas_bind_groups, prepare_cas_textures,
-        PrismCasSettings,
-    },
-    posterize::{
-        init_posterize_pipeline, posterize_pass, prepare_posterize_bind_groups,
-        prepare_posterize_textures, PrismPosterizeSettings,
-    },
-    gamut_map::{
-        gamut_map_pass, init_gamut_map_pipeline, prepare_gamut_map_bind_groups,
-        prepare_gamut_map_textures, PrismGamutMapSettings,
-    },
-    ordered_dither::{
-        init_ordered_dither_pipeline, ordered_dither_pass, prepare_ordered_dither_bind_groups,
-        prepare_ordered_dither_textures, PrismOrderedDitherSettings,
-    },
-    lens_flare::{
-        init_lens_flare_pipeline, lens_flare_pass, prepare_lens_flare_bind_groups,
-        prepare_lens_flare_textures, PrismLensFlareSettings,
-    },
-    outline::{
-        init_outline_pipeline, outline_pass, prepare_outline_bind_groups,
-        prepare_outline_textures, PrismOutlineSettings,
-    },
-    kuwahara::{
-        init_kuwahara_pipeline, kuwahara_pass, prepare_kuwahara_bind_groups,
-        prepare_kuwahara_textures, PrismKuwaharaSettings,
-    },
-    hatching::{
-        hatching_pass, init_hatching_pipeline, prepare_hatching_bind_groups,
-        prepare_hatching_textures, PrismHatchingSettings,
-    },
-    halftone::{
-        halftone_pass, init_halftone_pipeline, prepare_halftone_bind_groups,
-        prepare_halftone_textures, PrismHalftoneSettings,
-    },
-    motion_blur::{
-        init_motion_blur_pipeline, motion_blur_pass, prepare_motion_blur_bind_groups,
-        prepare_motion_blur_textures, PrismMotionBlurSettings,
-    },
-    vignette::{
-        init_vignette_pipeline, prepare_vignette_bind_groups, prepare_vignette_textures,
-        vignette_pass, PrismVignetteSettings,
-    },
-    volumetrics::{
-        init_volumetrics_pipeline, prepare_volumetrics_bind_groups,
-        prepare_volumetrics_resources, volumetrics_pass, PrismVolumetricsSettings,
-        VolumetricsTextureCache,
-    },
-    volumetric_clouds::{
-        dispatch_volumetric_clouds, init_volumetric_cloud_pipelines,
-        prepare_volumetric_cloud_domain, prepare_volumetric_cloud_domain_bind_groups,
-        prepare_volumetric_cloud_view_bind_groups, prepare_volumetric_cloud_views,
-        PrismVolumetricCloudsSettings, VolumetricCloudViewCache,
-    },
-    ibl::{
-        dfg_lut_precompute_pass, env_prefilter_precompute_pass, extract_ibl_source,
-        init_brdf_lut_pipeline, init_dfg_lut_texture, init_env_prefilter_pipeline,
-        init_prefiltered_env_map, prepare_dfg_lut_bind_group,
-        prepare_env_prefilter_bind_groups, EnvPrefilterBindGroups, ExtractedIblSource,
     },
     classification_gpu::{
         dispatch_material_classification, init_material_classification_pipeline,
@@ -150,22 +37,120 @@ use super::{
         collect_classification_readback, map_submitted_classification_readback,
         request_classification_readback, ClassificationDiagnosticsReadback,
     },
+    color_grade::{
+        color_grade_pass, init_color_grade_pipeline, prepare_color_grade_bind_groups,
+        prepare_color_grade_textures, PrismColorGradeSettings,
+    },
     composite::{
-        composite_shading, init_shading_composite_pipeline,
-        prepare_shading_composite_bind_groups, prepare_shading_composite_pipelines,
-        ShadingCompositePipeline,
+        composite_shading, init_shading_composite_pipeline, prepare_shading_composite_bind_groups,
+        prepare_shading_composite_pipelines, ShadingCompositePipeline,
+    },
+    dof::{
+        dof_pass, init_dof_pipeline, prepare_dof_bind_groups, prepare_dof_textures,
+        PrismDofSettings,
     },
     exposure::{
         exposure_average_pass, exposure_histogram_pass, init_exposure_average_pipeline,
         init_exposure_histogram_pipeline, prepare_exposure_average_bind_groups,
         prepare_exposure_buffers, prepare_exposure_histogram_bind_groups,
     },
-    bloom::{
-        bloom_pass, init_bloom_pipelines, prepare_bloom_bind_groups, prepare_bloom_textures,
+    film_grain::{
+        film_grain_pass, init_film_grain_pipeline, prepare_film_grain_bind_groups,
+        prepare_film_grain_textures, PrismFilmGrainSettings,
+    },
+    gamut_map::{
+        gamut_map_pass, init_gamut_map_pipeline, prepare_gamut_map_bind_groups,
+        prepare_gamut_map_textures, PrismGamutMapSettings,
+    },
+    graph::shading_frame_graph,
+    halftone::{
+        halftone_pass, init_halftone_pipeline, prepare_halftone_bind_groups,
+        prepare_halftone_textures, PrismHalftoneSettings,
+    },
+    hatching::{
+        hatching_pass, init_hatching_pipeline, prepare_hatching_bind_groups,
+        prepare_hatching_textures, PrismHatchingSettings,
+    },
+    ibl::{
+        dfg_lut_precompute_pass, env_prefilter_precompute_pass, extract_ibl_source,
+        init_brdf_lut_pipeline, init_dfg_lut_texture, init_env_prefilter_pipeline,
+        init_prefiltered_env_map, prepare_dfg_lut_bind_group, prepare_env_prefilter_bind_groups,
+        EnvPrefilterBindGroups, ExtractedIblSource,
+    },
+    kuwahara::{
+        init_kuwahara_pipeline, kuwahara_pass, prepare_kuwahara_bind_groups,
+        prepare_kuwahara_textures, PrismKuwaharaSettings,
+    },
+    lens_flare::{
+        init_lens_flare_pipeline, lens_flare_pass, prepare_lens_flare_bind_groups,
+        prepare_lens_flare_textures, PrismLensFlareSettings,
+    },
+    light_routing::{
+        init_light_routing_pipeline, light_routing_cull_pass, prepare_light_routing_bind_groups,
+        prepare_light_routing_buffers, PrismLightRoutingSettings,
+    },
+    motion_blur::{
+        init_motion_blur_pipeline, motion_blur_pass, prepare_motion_blur_bind_groups,
+        prepare_motion_blur_textures, PrismMotionBlurSettings,
+    },
+    ordered_dither::{
+        init_ordered_dither_pipeline, ordered_dither_pass, prepare_ordered_dither_bind_groups,
+        prepare_ordered_dither_textures, PrismOrderedDitherSettings,
+    },
+    outline::{
+        init_outline_pipeline, outline_pass, prepare_outline_bind_groups, prepare_outline_textures,
+        PrismOutlineSettings,
+    },
+    posterize::{
+        init_posterize_pipeline, posterize_pass, prepare_posterize_bind_groups,
+        prepare_posterize_textures, PrismPosterizeSettings,
+    },
+    raster::{
+        init_visibility_raster, queue_visibility_raster, visibility_raster_pass,
+        DrawVisibilityRaster, Visibility3d, VisibilityRasterPipeline,
     },
     resolve::{
         dispatch_shading_resolve, init_shading_resolve_pipeline, prepare_resolve_motion,
         prepare_shading_resolve_bind_groups, ResolveMotionHistory,
+    },
+    resources::{prepare_shading_buffers, prepare_visibility_buffers},
+    runtime::{
+        detect_shading_capabilities, prepare_shading_work, PrismShadingDiagnostics,
+        PrismShadingSettings, ShadingFrameGraph,
+    },
+    shadow::{
+        ensure_shadow_atlas, extract_shadows, init_shadow_depth_pipeline,
+        prepare_shadow_bind_group, prepare_shadow_depth_uniform, queue_shadow_depth,
+        rebuild_shadow_buffers, register_shadow_depth_shader, shadow_depth_pass,
+        write_shadow_buffers, ExtractedShadows, PrismShadowSettings, ShadowAtlas,
+        ShadowAtlasConfig, ShadowBindGroup, ShadowDepthDrawList, ShadowDepthPipeline,
+        ShadowDepthViewOffsets, ShadowDepthViewUniform, ShadowGpuBuffers,
+        DEFAULT_SHADOW_ATLAS_LAYERS, DEFAULT_SHADOW_ATLAS_RESOLUTION,
+    },
+    ssgi::{
+        init_ssgi_composite_pipeline, init_ssgi_denoise_pipeline, init_ssgi_trace_pipeline,
+        prepare_ssgi_composite_bind_groups, prepare_ssgi_denoise_bind_groups,
+        prepare_ssgi_textures, prepare_ssgi_trace_bind_groups, ssgi_composite_pass,
+        ssgi_denoise_pass, ssgi_trace_pass,
+    },
+    ssr::{
+        init_ssr_color_mips_pipeline, init_ssr_composite_pipeline, init_ssr_hzb_pipeline,
+        init_ssr_prepass_pipeline, init_ssr_reconstruct_pipeline, init_ssr_repack_pipeline,
+        init_ssr_temporal_pipeline, init_ssr_trace_pipeline, prepare_ssr_color_mips_bind_groups,
+        prepare_ssr_composite_bind_groups, prepare_ssr_hzb_bind_groups,
+        prepare_ssr_prepass_bind_groups, prepare_ssr_reconstruct_bind_groups,
+        prepare_ssr_repack_bind_groups, prepare_ssr_temporal_bind_groups,
+        prepare_ssr_temporal_textures, prepare_ssr_textures, prepare_ssr_trace_bind_groups,
+        ssr_color_mips_pass, ssr_composite_pass, ssr_hzb_pass, ssr_prepass_pass,
+        ssr_reconstruct_pass, ssr_repack_pass, ssr_temporal_pass, ssr_trace_pass,
+    },
+    taa::{
+        init_taa_resolve_pipeline, prepare_taa_bind_groups, prepare_taa_jitter,
+        prepare_taa_textures, taa_resolve_pass,
+    },
+    tonemap::{
+        init_tonemap_pipeline, prepare_tonemap_bind_groups, prepare_tonemap_textures, tonemap_pass,
+        PrismTonemapSettings,
     },
     transparent::{
         init_oit_composite_pipeline, init_oit_forward_pipeline, oit_composite,
@@ -173,23 +158,42 @@ use super::{
         queue_transparent_oit, transparent_forward_pass, DrawTransparentOit, OitCompositePipeline,
         OitForwardPipeline, TransparentOit3d,
     },
-    shadow::{
-        ensure_shadow_atlas, extract_shadows, init_shadow_depth_pipeline, prepare_shadow_bind_group,
-        prepare_shadow_depth_uniform, queue_shadow_depth, rebuild_shadow_buffers,
-        register_shadow_depth_shader, shadow_depth_pass, write_shadow_buffers, ExtractedShadows,
-        PrismShadowSettings, ShadowAtlas, ShadowAtlasConfig, ShadowBindGroup, ShadowDepthDrawList,
-        ShadowDepthPipeline, ShadowDepthViewOffsets, ShadowDepthViewUniform,
-        ShadowGpuBuffers, DEFAULT_SHADOW_ATLAS_LAYERS, DEFAULT_SHADOW_ATLAS_RESOLUTION,
+    upscale::{
+        init_upscale_pipeline, prepare_upscale_bind_groups, prepare_upscale_textures, upscale_pass,
     },
-    graph::shading_frame_graph,
-    raster::{
-        init_visibility_raster, queue_visibility_raster, visibility_raster_pass,
-        DrawVisibilityRaster, Visibility3d, VisibilityRasterPipeline,
+    vignette::{
+        init_vignette_pipeline, prepare_vignette_bind_groups, prepare_vignette_textures,
+        vignette_pass, PrismVignetteSettings,
     },
-    resources::{prepare_shading_buffers, prepare_visibility_buffers},
-    runtime::{
-        detect_shading_capabilities, prepare_shading_work, PrismShadingDiagnostics,
-        PrismShadingSettings, ShadingFrameGraph,
+    virtual_shadow::{
+        bridge_vsm_view_resources, collect_vsm_page_readback, extract_vsm_primary_light,
+        init_vsm_caster_depth_pipeline, init_vsm_page_mark_pipeline,
+        init_vsm_receiver_gen_pipeline, map_submitted_vsm_page_readback,
+        prepare_vsm_caster_depth_targets, prepare_vsm_caster_depth_views,
+        prepare_vsm_page_mark_bind_groups, prepare_vsm_page_requests, prepare_vsm_physical_atlas,
+        prepare_vsm_receiver_gen_bind_groups, prepare_vsm_receiver_resources,
+        queue_vsm_caster_depth, register_vsm_caster_depth_shader, request_vsm_page_readback,
+        vsm_caster_depth_pass, vsm_mark_pages_pass, vsm_receiver_gen_pass,
+        PrismVirtualShadowSettings, VirtualShadowMapDriver, VsmBridgeCache, VsmCasterDepthDrawList,
+        VsmCasterDepthPipeline, VsmCasterDepthTargets, VsmCasterDepthViewUniform,
+        VsmPageRequestBufferCache, VsmPageRequestReadback, VsmPageTableBufferCache,
+        VsmPhysicalAtlasCache, VsmPrimaryLight, VsmReceiverBufferCache,
+    },
+    volumetric_clouds::{
+        dispatch_volumetric_clouds, init_volumetric_cloud_pipelines,
+        prepare_volumetric_cloud_domain, prepare_volumetric_cloud_domain_bind_groups,
+        prepare_volumetric_cloud_view_bind_groups, prepare_volumetric_cloud_views,
+        PrismVolumetricCloudsSettings, VolumetricCloudViewCache,
+    },
+    volumetrics::{
+        init_volumetrics_pipeline, prepare_volumetrics_bind_groups, prepare_volumetrics_resources,
+        volumetrics_pass, PrismVolumetricsSettings, VolumetricsTextureCache,
+    },
+    world_space_gi::{
+        init_world_space_gi_composite_pipeline, init_world_space_gi_pipeline,
+        prepare_world_space_gi_bind_groups, prepare_world_space_gi_composite_bind_groups,
+        prepare_world_space_gi_textures, world_space_gi_composite_pass, world_space_gi_pass,
+        PrismWorldSpaceGiSettings,
     },
 };
 
@@ -229,6 +233,7 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/world_space_gi_probe_update.wesl");
         embedded_asset!(app, "../shaders/world_space_gi_resolve.wesl");
         embedded_asset!(app, "../shaders/world_space_gi_composite.wesl");
+        embedded_asset!(app, "../shaders/light_routing.wesl");
         embedded_asset!(app, "../shaders/taa_resolve.wesl");
         embedded_asset!(app, "../shaders/vsm_receiver_gen.wesl");
         embedded_asset!(app, "../shaders/vsm_page_mark.wesl");
@@ -243,6 +248,7 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/cas.wesl");
         embedded_asset!(app, "../shaders/posterize.wesl");
         embedded_asset!(app, "../shaders/gamut_map.wesl");
+        embedded_asset!(app, "../shaders/tonemap.wesl");
         embedded_asset!(app, "../shaders/ordered_dither.wesl");
         embedded_asset!(app, "../shaders/lens_flare.wesl");
         embedded_asset!(app, "../shaders/outline.wesl");
@@ -314,6 +320,7 @@ impl Plugin for PrismShadingPlugin {
             .init_resource::<PrismCasSettings>()
             .init_resource::<PrismPosterizeSettings>()
             .init_resource::<PrismGamutMapSettings>()
+            .init_resource::<PrismTonemapSettings>()
             .init_resource::<PrismOrderedDitherSettings>()
             .init_resource::<PrismLensFlareSettings>()
             .init_resource::<PrismOutlineSettings>()
@@ -321,6 +328,7 @@ impl Plugin for PrismShadingPlugin {
             .init_resource::<PrismHatchingSettings>()
             .init_resource::<PrismHalftoneSettings>()
             .init_resource::<PrismWorldSpaceGiSettings>()
+            .init_resource::<PrismLightRoutingSettings>()
             .insert_resource(ShadingFrameGraph {
                 compiled: compiled_graph,
             })
@@ -391,6 +399,7 @@ impl Plugin for PrismShadingPlugin {
                         init_cas_pipeline,
                         init_posterize_pipeline,
                         init_gamut_map_pipeline,
+                        init_tonemap_pipeline,
                         init_ordered_dither_pipeline,
                         init_lens_flare_pipeline,
                         init_outline_pipeline,
@@ -426,6 +435,10 @@ impl Plugin for PrismShadingPlugin {
             // `add_systems` call so the eight-kernel initializer never forces the
             // already-full RenderStartup tuple past Bevy's 20-element limit.
             .add_systems(RenderStartup, init_volumetric_cloud_pipelines)
+            // Light-routing (Lighting Channels) cull pipeline. Its own
+            // `add_systems` call so the already-full RenderStartup tuples stay
+            // within Bevy's 20-element limit.
+            .add_systems(RenderStartup, init_light_routing_pipeline)
             // Volumetric-cloud domain + per-view resource and bind-group
             // preparation. Self-contained (its own resident textures + view
             // cache, gated on the opt-in settings), so it lives in its own
@@ -757,6 +770,12 @@ impl Plugin for PrismShadingPlugin {
                     prepare_gamut_map_bind_groups
                         .after(prepare_gamut_map_textures)
                         .in_set(RenderSystems::PrepareBindGroups),
+                    prepare_tonemap_textures
+                        .after(prepare_visibility_buffers)
+                        .in_set(RenderSystems::PrepareResources),
+                    prepare_tonemap_bind_groups
+                        .after(prepare_tonemap_textures)
+                        .in_set(RenderSystems::PrepareBindGroups),
                     prepare_ordered_dither_textures
                         .after(prepare_visibility_buffers)
                         .in_set(RenderSystems::PrepareResources),
@@ -811,6 +830,21 @@ impl Plugin for PrismShadingPlugin {
                         .in_set(RenderSystems::PrepareBindGroups),
                 ),
             )
+            // Light-routing (Lighting Channels) per-view buffers + cull bind
+            // group. `prepare_light_routing_buffers` allocates/uploads in
+            // `PrepareResources` (so it runs before the resolve's own
+            // `PrepareBindGroups` bind-group build reads `ViewLightRouting`),
+            // then `prepare_light_routing_bind_groups` builds the cull's group.
+            // Both no-op unless the opt-in subsystem is enabled.
+            .add_systems(
+                Render,
+                (
+                    prepare_light_routing_buffers.in_set(RenderSystems::PrepareResources),
+                    prepare_light_routing_bind_groups
+                        .after(prepare_light_routing_buffers)
+                        .in_set(RenderSystems::PrepareBindGroups),
+                ),
+            )
             .add_systems(
                 ExtractSchedule,
                 (extract_shadows, extract_ibl_source, extract_vsm_primary_light),
@@ -857,8 +891,18 @@ impl Plugin for PrismShadingPlugin {
                 ssr_repack_pass
                     .after(ssr_prepass_pass)
                     .before(dispatch_shading_resolve),
-                dfg_lut_precompute_pass.before(dispatch_shading_resolve),
-                env_prefilter_precompute_pass.before(dispatch_shading_resolve),
+                // Nested to keep the Core3d tuple within Bevy's 20-element
+                // limit: the IBL precomputes and the light-routing cull all
+                // feed the shading resolve and so must run before it.
+                (
+                    dfg_lut_precompute_pass.before(dispatch_shading_resolve),
+                    env_prefilter_precompute_pass.before(dispatch_shading_resolve),
+                    // Light-routing (Lighting Channels) cull refines the
+                    // per-word punctual-light visibility mask the resolve's
+                    // channel gate reads, so it must run before the resolve
+                    // dispatch. No-op unless the opt-in subsystem is enabled.
+                    light_routing_cull_pass.before(dispatch_shading_resolve),
+                ),
                 dispatch_shading_resolve
                     .after(dispatch_material_classification)
                     .before(bevy_core_pipeline::Core3dSystems::MainPass),
@@ -1044,8 +1088,11 @@ impl Plugin for PrismShadingPlugin {
                 lens_flare_pass
                     .after(outline_pass)
                     .before(bevy_core_pipeline::Core3dSystems::MainPass),
-                gamut_map_pass
+                tonemap_pass
                     .after(lens_flare_pass)
+                    .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                gamut_map_pass
+                    .after(tonemap_pass)
                     .before(bevy_core_pipeline::Core3dSystems::MainPass),
                 ordered_dither_pass
                     .after(gamut_map_pass)

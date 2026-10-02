@@ -163,29 +163,53 @@ mod tests {
     fn zero_sharpness_is_identity() {
         let taps = cross(0.2, 0.3, 0.7, 0.1, 0.4);
         let out = rcas(&taps, &RcasParams::default());
-        assert!(approx(out, taps[2]), "sharpness 0 must pass the centre through: {out:?}");
+        assert!(
+            approx(out, taps[2]),
+            "sharpness 0 must pass the centre through: {out:?}"
+        );
     }
 
     #[test]
     fn flat_ring_is_a_fixed_point_at_every_sharpness() {
         let taps = cross(0.5, 0.5, 0.5, 0.5, 0.5);
         for &s in &[0.0, 0.25, 0.5, 1.0] {
-            let out = rcas(&taps, &RcasParams { sharpness: s, denoise: false });
-            assert!(approx(out, Vec3::splat(0.5)), "flat must be fixed at s={s}: {out:?}");
+            let out = rcas(
+                &taps,
+                &RcasParams {
+                    sharpness: s,
+                    denoise: false,
+                },
+            );
+            assert!(
+                approx(out, Vec3::splat(0.5)),
+                "flat must be fixed at s={s}: {out:?}"
+            );
         }
     }
 
     #[test]
     fn black_flat_ring_is_identity_not_nan() {
         let taps = cross(0.0, 0.0, 0.0, 0.0, 0.0);
-        let out = rcas(&taps, &RcasParams { sharpness: 1.0, denoise: false });
+        let out = rcas(
+            &taps,
+            &RcasParams {
+                sharpness: 1.0,
+                denoise: false,
+            },
+        );
         assert!(out.x.is_finite() && approx(out, Vec3::ZERO), "{out:?}");
     }
 
     #[test]
     fn white_flat_ring_is_identity_not_nan() {
         let taps = cross(1.0, 1.0, 1.0, 1.0, 1.0);
-        let out = rcas(&taps, &RcasParams { sharpness: 1.0, denoise: false });
+        let out = rcas(
+            &taps,
+            &RcasParams {
+                sharpness: 1.0,
+                denoise: false,
+            },
+        );
         assert!(out.x.is_finite() && approx(out, Vec3::ONE), "{out:?}");
     }
 
@@ -193,31 +217,75 @@ mod tests {
     fn bright_centre_is_lifted() {
         // Centre brighter than the ring => sharpening should raise it further.
         let taps = cross(0.4, 0.4, 0.6, 0.4, 0.4);
-        let out = rcas(&taps, &RcasParams { sharpness: 1.0, denoise: false });
+        let out = rcas(
+            &taps,
+            &RcasParams {
+                sharpness: 1.0,
+                denoise: false,
+            },
+        );
         assert!(out.x > 0.6, "a bright centre must be lifted, got {out:?}");
     }
 
     #[test]
     fn dim_centre_is_pushed_down() {
         let taps = cross(0.6, 0.6, 0.4, 0.6, 0.6);
-        let out = rcas(&taps, &RcasParams { sharpness: 1.0, denoise: false });
-        assert!(out.x < 0.4, "a dim centre must be pushed darker, got {out:?}");
+        let out = rcas(
+            &taps,
+            &RcasParams {
+                sharpness: 1.0,
+                denoise: false,
+            },
+        );
+        assert!(
+            out.x < 0.4,
+            "a dim centre must be pushed darker, got {out:?}"
+        );
     }
 
     #[test]
     fn stronger_sharpness_lifts_more() {
         let taps = cross(0.4, 0.4, 0.6, 0.4, 0.4);
-        let gentle = rcas(&taps, &RcasParams { sharpness: 0.25, denoise: false }).x;
-        let strong = rcas(&taps, &RcasParams { sharpness: 1.0, denoise: false }).x;
-        assert!(strong > gentle, "stronger knob must sharpen more: {strong} vs {gentle}");
-        assert!(gentle > 0.6, "even a gentle knob lifts a bright centre: {gentle}");
+        let gentle = rcas(
+            &taps,
+            &RcasParams {
+                sharpness: 0.25,
+                denoise: false,
+            },
+        )
+        .x;
+        let strong = rcas(
+            &taps,
+            &RcasParams {
+                sharpness: 1.0,
+                denoise: false,
+            },
+        )
+        .x;
+        assert!(
+            strong > gentle,
+            "stronger knob must sharpen more: {strong} vs {gentle}"
+        );
+        assert!(
+            gentle > 0.6,
+            "even a gentle knob lifts a bright centre: {gentle}"
+        );
     }
 
     #[test]
     fn output_stays_finite_on_a_hard_edge() {
         let taps = cross(1.0, 0.0, 0.5, 1.0, 0.0);
-        let out = rcas(&taps, &RcasParams { sharpness: 1.0, denoise: false });
-        assert!(out.x.is_finite() && out.y.is_finite() && out.z.is_finite(), "{out:?}");
+        let out = rcas(
+            &taps,
+            &RcasParams {
+                sharpness: 1.0,
+                denoise: false,
+            },
+        );
+        assert!(
+            out.x.is_finite() && out.y.is_finite() && out.z.is_finite(),
+            "{out:?}"
+        );
     }
 
     #[test]
@@ -231,7 +299,10 @@ mod tests {
         // Centre spikes far above a flat ring => maximal departure => 0.5.
         let taps = cross(0.0, 0.0, 1.0, 0.0, 0.0);
         let nz = rcas_noise(&taps);
-        assert!((nz - 0.5).abs() < 1.0e-5, "a lone spike should halve sharpening, got {nz}");
+        assert!(
+            (nz - 0.5).abs() < 1.0e-5,
+            "a lone spike should halve sharpening, got {nz}"
+        );
     }
 
     #[test]
@@ -239,8 +310,22 @@ mod tests {
         // A noisy centre spike: denoise should pull the sharpened result back
         // toward the centre relative to the un-denoised pass.
         let taps = cross(0.2, 0.2, 0.8, 0.2, 0.2);
-        let plain = rcas(&taps, &RcasParams { sharpness: 1.0, denoise: false }).x;
-        let denoised = rcas(&taps, &RcasParams { sharpness: 1.0, denoise: true }).x;
+        let plain = rcas(
+            &taps,
+            &RcasParams {
+                sharpness: 1.0,
+                denoise: false,
+            },
+        )
+        .x;
+        let denoised = rcas(
+            &taps,
+            &RcasParams {
+                sharpness: 1.0,
+                denoise: true,
+            },
+        )
+        .x;
         assert!(
             (denoised - 0.8).abs() < (plain - 0.8).abs(),
             "denoise should temper sharpening: plain {plain}, denoised {denoised}"
@@ -256,16 +341,31 @@ mod tests {
             Vec3::new(0.4, 0.5, 0.6),
             Vec3::new(0.4, 0.5, 0.6),
         ];
-        let out = rcas(&taps, &RcasParams { sharpness: 1.0, denoise: false });
+        let out = rcas(
+            &taps,
+            &RcasParams {
+                sharpness: 1.0,
+                denoise: false,
+            },
+        );
         assert!(out.x > 0.6, "red centre above its ring is lifted: {out:?}");
-        assert!((out.y - 0.5).abs() < 1.0e-4, "flat green channel is identity: {out:?}");
-        assert!(out.z < 0.4, "blue centre below its ring is pushed down: {out:?}");
+        assert!(
+            (out.y - 0.5).abs() < 1.0e-4,
+            "flat green channel is identity: {out:?}"
+        );
+        assert!(
+            out.z < 0.4,
+            "blue centre below its ring is pushed down: {out:?}"
+        );
     }
 
     #[test]
     fn apply_matches_the_borrowed_kernel() {
         let taps = cross(0.4, 0.4, 0.6, 0.4, 0.4);
-        let params = RcasParams { sharpness: 0.8, denoise: true };
+        let params = RcasParams {
+            sharpness: 0.8,
+            denoise: true,
+        };
         assert!(approx(apply_rcas(taps, params), rcas(&taps, &params)));
     }
 }

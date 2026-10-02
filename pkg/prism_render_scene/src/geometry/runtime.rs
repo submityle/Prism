@@ -58,10 +58,7 @@ impl RenderGeometryRegistry {
         self.records.values()
     }
 
-    pub(crate) fn buffer_class(
-        &mut self,
-        buffer: &bevy_render::render_resource::Buffer,
-    ) -> u32 {
+    pub(crate) fn buffer_class(&mut self, buffer: &bevy_render::render_resource::Buffer) -> u32 {
         let id = buffer.id();
         if let Some(class) = self.buffer_classes.get(&id) {
             return *class;
@@ -93,11 +90,29 @@ mod tests {
             generation: 2,
         };
         let mut registry = RenderGeometryRegistry::default();
-        registry.upsert(asset, GeometryRecord { handle, ..Default::default() });
-        registry.upsert(asset, GeometryRecord { handle, revision: 2, ..Default::default() });
+        registry.upsert(
+            asset,
+            GeometryRecord {
+                handle,
+                ..Default::default()
+            },
+        );
+        registry.upsert(
+            asset,
+            GeometryRecord {
+                handle,
+                revision: 2,
+                ..Default::default()
+            },
+        );
         assert_eq!(registry.record(handle).unwrap().revision, 2);
         assert_eq!(registry.take_dirty(), vec![3]);
-        assert!(registry.record(GenerationalHandle { generation: 1, ..handle }).is_none());
+        assert!(registry
+            .record(GenerationalHandle {
+                generation: 1,
+                ..handle
+            })
+            .is_none());
         assert_eq!(registry.retire(asset), Some(handle));
         assert_eq!(registry.take_dirty(), vec![3]);
     }

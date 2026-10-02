@@ -32,8 +32,8 @@ use bevy_render::{
 };
 use bevy_shader::Shader;
 
-use super::abi::{GpuWorldSpaceGiProbeParams, GpuWorldSpaceGiResolveParams};
 use super::super::resources::SCENE_COLOR_FORMAT;
+use super::abi::{GpuWorldSpaceGiProbeParams, GpuWorldSpaceGiResolveParams};
 
 /// The two world-space GI compute pipelines and their owned group-0 layouts.
 #[derive(Resource)]
@@ -125,8 +125,10 @@ pub(crate) fn init_world_space_gi_pipeline(
         asset_server.as_ref(),
         "../shaders/world_space_gi_probe_update.wesl"
     );
-    let resolve_shader: Handle<Shader> =
-        load_embedded_asset!(asset_server.as_ref(), "../shaders/world_space_gi_resolve.wesl");
+    let resolve_shader: Handle<Shader> = load_embedded_asset!(
+        asset_server.as_ref(),
+        "../shaders/world_space_gi_resolve.wesl"
+    );
 
     let probe_update = cache.queue_compute_pipeline(ComputePipelineDescriptor {
         label: Some("prism world-space GI probe update".into()),

@@ -171,7 +171,10 @@ mod tests {
         assert_eq!(depth_disocclusion(10.0, 12.0, 0.025), 1.0);
         // A value inside the soft knee sits strictly between 0 and 1.
         let mid = depth_disocclusion(100.0, 103.75, 0.025);
-        assert!(mid > 0.0 && mid < 1.0, "expected a partial factor, got {mid}");
+        assert!(
+            mid > 0.0 && mid < 1.0,
+            "expected a partial factor, got {mid}"
+        );
     }
 
     #[test]

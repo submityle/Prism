@@ -267,24 +267,15 @@ mod tests {
         };
         // A side-scatter cosine where several octaves all contribute.
         let cos_theta = 0.5;
-        let r2 = MultiScatterParams {
-            octaves: 2,
-            ..base
-        }
-        .response_cos(cos_theta)
-        .x;
-        let r4 = MultiScatterParams {
-            octaves: 4,
-            ..base
-        }
-        .response_cos(cos_theta)
-        .x;
-        let r8 = MultiScatterParams {
-            octaves: 8,
-            ..base
-        }
-        .response_cos(cos_theta)
-        .x;
+        let r2 = MultiScatterParams { octaves: 2, ..base }
+            .response_cos(cos_theta)
+            .x;
+        let r4 = MultiScatterParams { octaves: 4, ..base }
+            .response_cos(cos_theta)
+            .x;
+        let r8 = MultiScatterParams { octaves: 8, ..base }
+            .response_cos(cos_theta)
+            .x;
         // Each added octave contributes strictly positive energy.
         assert!(r2 < r4);
         assert!(r4 < r8);

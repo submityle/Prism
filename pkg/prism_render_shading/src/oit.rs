@@ -195,8 +195,14 @@ mod tests {
         let forward = composite_transparency(&[a, b, c], background);
         let shuffled = composite_transparency(&[c, a, b], background);
         let reversed = composite_transparency(&[c, b, a], background);
-        assert!(approx(forward, shuffled, 1.0e-6), "{forward:?} vs {shuffled:?}");
-        assert!(approx(forward, reversed, 1.0e-6), "{forward:?} vs {reversed:?}");
+        assert!(
+            approx(forward, shuffled, 1.0e-6),
+            "{forward:?} vs {shuffled:?}"
+        );
+        assert!(
+            approx(forward, reversed, 1.0e-6),
+            "{forward:?} vs {reversed:?}"
+        );
     }
 
     #[test]
@@ -214,7 +220,10 @@ mod tests {
             }
             acc.revealage()
         };
-        assert!(three < one, "more layers must occlude more: {three} !< {one}");
+        assert!(
+            three < one,
+            "more layers must occlude more: {three} !< {one}"
+        );
         assert!((one - 0.5).abs() < 1.0e-6);
         assert!((three - 0.125).abs() < 1.0e-6);
     }
@@ -240,7 +249,10 @@ mod tests {
             [0.0, 0.0, 0.0],
         );
         for channel in result {
-            assert!((0.0..=1.0).contains(&channel), "channel {channel} out of range");
+            assert!(
+                (0.0..=1.0).contains(&channel),
+                "channel {channel} out of range"
+            );
         }
         // Half coverage of white over black is mid-grey.
         assert!(approx(result, [0.5, 0.5, 0.5], 1.0e-4), "{result:?}");
@@ -289,7 +301,10 @@ mod tests {
                     approx(blended, resolved, 1.0e-6),
                     "blend {blended:?} != resolve {resolved:?}"
                 );
-                assert!((0.0..=1.0).contains(&coverage), "coverage {coverage} out of range");
+                assert!(
+                    (0.0..=1.0).contains(&coverage),
+                    "coverage {coverage} out of range"
+                );
             }
         }
     }

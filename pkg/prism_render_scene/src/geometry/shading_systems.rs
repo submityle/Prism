@@ -173,8 +173,22 @@ mod tests {
     #[test]
     fn registry_retains_only_live_geometry() {
         let mut registry = RenderShadingGeometryRegistry::default();
-        registry.upsert(GenerationalHandle { index: 1, generation: 1 }, 1, geometry(1.0));
-        registry.upsert(GenerationalHandle { index: 4, generation: 1 }, 1, geometry(4.0));
+        registry.upsert(
+            GenerationalHandle {
+                index: 1,
+                generation: 1,
+            },
+            1,
+            geometry(1.0),
+        );
+        registry.upsert(
+            GenerationalHandle {
+                index: 4,
+                generation: 1,
+            },
+            1,
+            geometry(4.0),
+        );
         let _ = registry.take_dirty();
 
         let live: HashSet<u32> = [1u32].into_iter().collect();

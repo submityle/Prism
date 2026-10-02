@@ -236,7 +236,10 @@ mod tests {
     #[test]
     fn weights_collapse_to_the_centre_tap_at_zero_frac() {
         let w = lanczos2_weights(0.0);
-        assert!((w[1] - 1.0).abs() < 1.0e-6, "centre tap should dominate: {w:?}");
+        assert!(
+            (w[1] - 1.0).abs() < 1.0e-6,
+            "centre tap should dominate: {w:?}"
+        );
         assert!(w[0].abs() < 1.0e-6 && w[2].abs() < 1.0e-6 && w[3].abs() < 1.0e-6);
     }
 
@@ -259,7 +262,10 @@ mod tests {
     fn reconstruct_2d_is_flat_preserving() {
         let taps = [[Vec3::splat(0.4); 4]; 4];
         let out = reconstruct_lanczos2(&taps, Vec2::new(0.3, 0.7));
-        assert!((out - Vec3::splat(0.4)).abs().max_element() < 1.0e-5, "{out:?}");
+        assert!(
+            (out - Vec3::splat(0.4)).abs().max_element() < 1.0e-5,
+            "{out:?}"
+        );
     }
 
     #[test]
@@ -283,8 +289,15 @@ mod tests {
         let neighbourhood = [Vec3::new(0.2, 0.2, 0.2); 9];
         let clipped = clip_history_neighbourhood(Vec3::new(1.0, 0.0, 0.0), &neighbourhood, 1.0);
         // Zero-variance neighbourhood pins history to the mean (no red bleed).
-        assert!((clipped.color - Vec3::splat(0.2)).abs().max_element() < 1.0e-4, "{:?}", clipped.color);
-        assert!(clipped.overshoot > 0.0, "a stale sample must report overshoot");
+        assert!(
+            (clipped.color - Vec3::splat(0.2)).abs().max_element() < 1.0e-4,
+            "{:?}",
+            clipped.color
+        );
+        assert!(
+            clipped.overshoot > 0.0,
+            "a stale sample must report overshoot"
+        );
     }
 
     #[test]

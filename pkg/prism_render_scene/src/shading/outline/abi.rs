@@ -135,12 +135,15 @@ mod tests {
         // Golden `id_edges` default is on -> 1.
         assert_eq!(params.id_edges, 1);
         // Line colour + strength pack into the leading `vec4`.
-        assert_eq!(params.line_color, [
-            settings.line_color[0],
-            settings.line_color[1],
-            settings.line_color[2],
-            settings.line_strength,
-        ]);
+        assert_eq!(
+            params.line_color,
+            [
+                settings.line_color[0],
+                settings.line_color[1],
+                settings.line_color[2],
+                settings.line_strength,
+            ]
+        );
         assert_eq!(params._pad0, 0);
     }
 }

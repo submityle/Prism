@@ -8,7 +8,9 @@
 //! `DirectLightSample::visibility` for the directional light.
 
 use crate::shadow::bias::{apply_normal_offset, slope_scaled_depth_bias};
-use crate::shadow::cascade::{cascade_blend_weight, select_cascade, CascadeSplits, MAX_CASCADE_COUNT};
+use crate::shadow::cascade::{
+    cascade_blend_weight, select_cascade, CascadeSplits, MAX_CASCADE_COUNT,
+};
 use crate::shadow::filter::{pcf_visibility, pcss_visibility, PcssConfig, ShadowDepthSampler};
 use crate::shadow::math::{transform_point, Mat4};
 
@@ -226,7 +228,10 @@ mod tests {
 
         // Receiver at world z = 50 -> NDC 0.5 > 0.1 -> occluded.
         let shadowed = evaluate_directional_shadow(&field, &base_input(50.0), &cfg);
-        assert!((shadowed - 0.0).abs() < 1.0e-6, "expected shadow, got {shadowed}");
+        assert!(
+            (shadowed - 0.0).abs() < 1.0e-6,
+            "expected shadow, got {shadowed}"
+        );
 
         // Receiver at world z = 5 -> NDC 0.05 < 0.1 -> lit.
         let lit = evaluate_directional_shadow(&field, &base_input(5.0), &cfg);
@@ -260,13 +265,19 @@ mod tests {
             const_depth_bias: 0.0,
             ..pcf_config(0)
         };
-        assert_eq!(evaluate_directional_shadow(&acne_field, &input, &no_bias), 0.0);
+        assert_eq!(
+            evaluate_directional_shadow(&acne_field, &input, &no_bias),
+            0.0
+        );
 
         let with_bias = DirectionalShadowConfig {
             const_depth_bias: 0.01,
             ..pcf_config(0)
         };
-        assert_eq!(evaluate_directional_shadow(&acne_field, &input, &with_bias), 1.0);
+        assert_eq!(
+            evaluate_directional_shadow(&acne_field, &input, &with_bias),
+            1.0
+        );
         // Sanity: the well-lit plane case is unaffected.
         let _ = field;
     }

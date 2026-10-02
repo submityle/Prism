@@ -108,9 +108,10 @@ pub(crate) fn prepare_gamut_map_textures(
             },
         );
 
-        commands
-            .entity(entity)
-            .insert(ViewGamutMap { gamut_map_out, size });
+        commands.entity(entity).insert(ViewGamutMap {
+            gamut_map_out,
+            size,
+        });
     }
 }
 

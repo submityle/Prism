@@ -23,20 +23,37 @@ pub(crate) fn sync_geometry_registry(
     let assets: Vec<(AssetId<Mesh>, _)> = scene.geometry_assets().collect();
     let mut changed = false;
     for (asset, handle) in assets {
-        let Some(mesh) = meshes.get(asset) else { continue };
-        let Some(vertices) = allocator.mesh_vertex_slice(&asset) else { continue };
+        let Some(mesh) = meshes.get(asset) else {
+            continue;
+        };
+        let Some(vertices) = allocator.mesh_vertex_slice(&asset) else {
+            continue;
+        };
         let vertex_buffer_class = registry.buffer_class(vertices.buffer);
         let topology = mesh.primitive_topology();
-        let (primitive_kind, element_count, first_element, base_vertex, index_buffer_class) = match mesh.buffer_info {
-            RenderMeshBufferInfo::Indexed { count, .. } => {
-                let Some(indices) = allocator.mesh_index_slice(&asset) else { continue };
-                let index_buffer_class = registry.buffer_class(indices.buffer);
-                (GeometryPrimitiveKind::Indexed, count, indices.range.start, vertices.range.start as i32, index_buffer_class)
-            }
-            RenderMeshBufferInfo::NonIndexed => {
-                (GeometryPrimitiveKind::NonIndexed, mesh.vertex_count, vertices.range.start, 0, 0)
-            }
-        };
+        let (primitive_kind, element_count, first_element, base_vertex, index_buffer_class) =
+            match mesh.buffer_info {
+                RenderMeshBufferInfo::Indexed { count, .. } => {
+                    let Some(indices) = allocator.mesh_index_slice(&asset) else {
+                        continue;
+                    };
+                    let index_buffer_class = registry.buffer_class(indices.buffer);
+                    (
+                        GeometryPrimitiveKind::Indexed,
+                        count,
+                        indices.range.start,
+                        vertices.range.start as i32,
+                        index_buffer_class,
+                    )
+                }
+                RenderMeshBufferInfo::NonIndexed => (
+                    GeometryPrimitiveKind::NonIndexed,
+                    mesh.vertex_count,
+                    vertices.range.start,
+                    0,
+                    0,
+                ),
+            };
         let record = GeometryRecord {
             handle,
             revision: 1,
@@ -67,7 +84,10 @@ pub(crate) fn sync_geometry_registry(
     }
 }
 
-fn primitive_count(topology: bevy_render::render_resource::PrimitiveTopology, elements: u32) -> u32 {
+fn primitive_count(
+    topology: bevy_render::render_resource::PrimitiveTopology,
+    elements: u32,
+) -> u32 {
     use bevy_render::render_resource::PrimitiveTopology::*;
     match topology {
         PointList => elements,

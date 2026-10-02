@@ -70,7 +70,6 @@ fn gtao_prepass_wesl_compiles_and_resolves_imports() {
     });
 }
 
-
 /// Compiles `gtao_denoise.wesl` on its own.  The spatial denoiser is
 /// self-contained (no `import`s), so a green result proves the bilateral
 /// kernel, the immediate `GtaoDenoiseConfig` block and the storage-texture
@@ -92,7 +91,6 @@ fn gtao_denoise_wesl_compiles_standalone() {
         .get(0, denoise, &[])
         .unwrap_or_else(|error| panic!("gtao_denoise.wesl failed to compile: {error}"));
 }
-
 
 /// Compiles `gtao_temporal.wesl` on its own.  The temporal accumulation is
 /// self-contained (no `import`s), so a green result proves the reprojection

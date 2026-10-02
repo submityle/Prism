@@ -186,7 +186,10 @@ mod tests {
         assert!((decoded[1] - 0.5).abs() < 2.0 / 65535.0);
         assert!((decoded.into_iter().sum::<f32>() - 1.0).abs() < 2.0 / 65535.0);
         assert_eq!(pixel.coverage(), 0b1011);
-        assert_eq!(encode_barycentrics([f32::NAN, 0.0, 1.0]), Err(BarycentricError::NonFinite));
+        assert_eq!(
+            encode_barycentrics([f32::NAN, 0.0, 1.0]),
+            Err(BarycentricError::NonFinite)
+        );
         assert_eq!(
             encode_barycentrics([0.8, 0.8, -0.6]),
             Err(BarycentricError::OutsideTriangle)

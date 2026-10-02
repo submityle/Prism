@@ -16,6 +16,7 @@
 
 use core::ops::Range;
 
+use bevy_ecs::prelude::Entity;
 use bevy_material::labels::DrawFunctionId;
 use bevy_render::{
     render_phase::{
@@ -25,7 +26,6 @@ use bevy_render::{
     render_resource::CachedRenderPipelineId,
     sync_world::MainEntity,
 };
-use bevy_ecs::prelude::Entity;
 
 /// Batch-set key for a transparent forward draw: the cached pipeline, the draw
 /// function and whether the mesh is indexed. Mirrors

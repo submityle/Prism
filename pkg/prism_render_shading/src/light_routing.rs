@@ -428,7 +428,10 @@ mod tests {
     #[test]
     fn cull_of_empty_set_is_empty() {
         let masks = [LightingChannelMask::default()];
-        assert_eq!(cull_lights_by_channel(0, &masks, LightingChannelMask::default()), 0);
+        assert_eq!(
+            cull_lights_by_channel(0, &masks, LightingChannelMask::default()),
+            0
+        );
     }
 
     #[test]

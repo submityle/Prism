@@ -121,20 +121,21 @@ pub fn build_cluster_data(
     far: f32,
     config: ClusterConfig,
 ) -> Option<ClusterCpuData> {
-    let grid = ClusterGrid::from_tile_size(config.tile_size, screen_size, config.z_slices, near, far);
+    let grid =
+        ClusterGrid::from_tile_size(config.tile_size, screen_size, config.z_slices, near, far);
 
-    let lights: Vec<PunctualLight> =
-        punctuals.iter().copied().map(PunctualLight::from).collect();
+    let lights: Vec<PunctualLight> = punctuals.iter().copied().map(PunctualLight::from).collect();
 
-    let assignment =
-        assign_lights_to_clusters(&grid, view_from_world, projection, &lights, config.assignment())?;
+    let assignment = assign_lights_to_clusters(
+        &grid,
+        view_from_world,
+        projection,
+        &lights,
+        config.assignment(),
+    )?;
 
     Some(ClusterCpuData {
-        grid: GpuClusterGrid::from_grid(
-            &grid,
-            config.max_lights_per_cluster,
-            *view_from_world,
-        ),
+        grid: GpuClusterGrid::from_grid(&grid, config.max_lights_per_cluster, *view_from_world),
         offsets_and_counts: assignment.offsets_and_counts,
         light_indices: assignment.light_indices,
     })
@@ -152,10 +153,22 @@ mod tests {
         let w = h / aspect;
         let r = far / (near - far);
         [
-            w, 0.0, 0.0, 0.0, //
-            0.0, h, 0.0, 0.0, //
-            0.0, 0.0, r, -1.0, //
-            0.0, 0.0, r * near, 0.0,
+            w,
+            0.0,
+            0.0,
+            0.0, //
+            0.0,
+            h,
+            0.0,
+            0.0, //
+            0.0,
+            0.0,
+            r,
+            -1.0, //
+            0.0,
+            0.0,
+            r * near,
+            0.0,
         ]
     }
 
@@ -171,8 +184,16 @@ mod tests {
     #[test]
     fn empty_scene_builds_a_grid_with_all_zero_counts() {
         let projection = perspective(1.0, 16.0 / 9.0, 0.1, 100.0);
-        let data = build_cluster_data(&[], &identity(), &projection, [1280, 720], 0.1, 100.0, ClusterConfig::default())
-            .expect("finite projection");
+        let data = build_cluster_data(
+            &[],
+            &identity(),
+            &projection,
+            [1280, 720],
+            0.1,
+            100.0,
+            ClusterConfig::default(),
+        )
+        .expect("finite projection");
         assert_eq!(data.cluster_count(), data.grid.cluster_count as usize);
         assert!(data.light_indices.is_empty());
         assert!(data.offsets_and_counts.iter().all(|&[_, count]| count == 0));
@@ -181,7 +202,16 @@ mod tests {
     #[test]
     fn singular_projection_yields_none() {
         let zero: Mat4 = [0.0; 16];
-        assert!(build_cluster_data(&[], &identity(), &zero, [64, 64], 0.1, 100.0, ClusterConfig::default()).is_none());
+        assert!(build_cluster_data(
+            &[],
+            &identity(),
+            &zero,
+            [64, 64],
+            0.1,
+            100.0,
+            ClusterConfig::default()
+        )
+        .is_none());
     }
 
     #[test]
@@ -191,10 +221,25 @@ mod tests {
         // frustum, must be recorded by at least one cluster.
         let light = PunctualLight::point([0.0, 0.0, -1.0], [50.0; 3], 10.0);
         let punctuals = [GpuPunctualLight::from(light)];
-        let data = build_cluster_data(&punctuals, &identity(), &projection, [256, 256], 0.1, 100.0, ClusterConfig::default())
-            .expect("finite projection");
-        let touched: u32 = data.offsets_and_counts.iter().map(|&[_, count]| count).sum();
-        assert!(touched > 0, "a light inside the frustum must touch a cluster");
+        let data = build_cluster_data(
+            &punctuals,
+            &identity(),
+            &projection,
+            [256, 256],
+            0.1,
+            100.0,
+            ClusterConfig::default(),
+        )
+        .expect("finite projection");
+        let touched: u32 = data
+            .offsets_and_counts
+            .iter()
+            .map(|&[_, count]| count)
+            .sum();
+        assert!(
+            touched > 0,
+            "a light inside the frustum must touch a cluster"
+        );
         assert!(data.light_indices.iter().all(|&i| i == 0));
     }
 
@@ -209,19 +254,23 @@ mod tests {
         let punctuals: Vec<GpuPunctualLight> =
             lights.iter().copied().map(GpuPunctualLight::from).collect();
         let config = ClusterConfig::default();
-        let data = build_cluster_data(&punctuals, &view, &projection, [256, 256], 0.1, 100.0, config)
-            .expect("finite projection");
-
-        // Recompute the golden directly and compare the packed tables.
-        let grid = ClusterGrid::from_tile_size(config.tile_size, [256, 256], config.z_slices, 0.1, 100.0);
-        let reference = assign_lights_to_clusters(
-            &grid,
+        let data = build_cluster_data(
+            &punctuals,
             &view,
             &projection,
-            &lights,
-            config.assignment(),
+            [256, 256],
+            0.1,
+            100.0,
+            config,
         )
         .expect("finite projection");
+
+        // Recompute the golden directly and compare the packed tables.
+        let grid =
+            ClusterGrid::from_tile_size(config.tile_size, [256, 256], config.z_slices, 0.1, 100.0);
+        let reference =
+            assign_lights_to_clusters(&grid, &view, &projection, &lights, config.assignment())
+                .expect("finite projection");
         assert_eq!(data.offsets_and_counts, reference.offsets_and_counts);
         assert_eq!(data.light_indices, reference.light_indices);
         // The builder is used, so the froxel bounds path is exercised too.

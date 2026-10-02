@@ -124,10 +124,11 @@ impl ClusterGrid {
     pub fn xy_tile(&self, pixel: [f32; 2]) -> [u32; 2] {
         let tile_x = (pixel[0] / self.tile_size[0] as f32) as i64;
         let tile_y = (pixel[1] / self.tile_size[1] as f32) as i64;
-        let clamp = |value: i64, count: u32| -> u32 {
-            value.clamp(0, count as i64 - 1) as u32
-        };
-        [clamp(tile_x, self.dimensions[0]), clamp(tile_y, self.dimensions[1])]
+        let clamp = |value: i64, count: u32| -> u32 { value.clamp(0, count as i64 - 1) as u32 };
+        [
+            clamp(tile_x, self.dimensions[0]),
+            clamp(tile_y, self.dimensions[1]),
+        ]
     }
 
     /// Reciprocal of `ln(far / near)`, the shared denominator of the slicing.
@@ -161,7 +162,11 @@ impl ClusterGrid {
 
 /// Clamps the near/far planes so `0 < near < far`, guarding the logarithms.
 fn sanitize_planes(near: f32, far: f32) -> (f32, f32) {
-    let near = if near.is_finite() && near > 0.0 { near } else { 0.1 };
+    let near = if near.is_finite() && near > 0.0 {
+        near
+    } else {
+        0.1
+    };
     let far = if far.is_finite() && far > near {
         far
     } else {

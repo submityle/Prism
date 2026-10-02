@@ -49,7 +49,10 @@ pub(crate) struct BrdfLutPipeline {
 fn brdf_lut_layout_entries() -> BindGroupLayoutEntries<1> {
     BindGroupLayoutEntries::sequential(
         ShaderStages::COMPUTE,
-        (texture_storage_2d(DFG_LUT_FORMAT, StorageTextureAccess::WriteOnly),),
+        (texture_storage_2d(
+            DFG_LUT_FORMAT,
+            StorageTextureAccess::WriteOnly,
+        ),),
     )
 }
 

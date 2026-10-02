@@ -321,7 +321,10 @@ mod tests {
         let uv = Vec2::new(0.37, 0.62);
         // Any surface depth in (0,1]; reproject through the identical matrix.
         let prev = reproject_prev_uv(world_from_clip, cur, uv, 0.5).unwrap();
-        assert!(approx(prev, uv), "identity reprojection must be a no-op: {prev:?}");
+        assert!(
+            approx(prev, uv),
+            "identity reprojection must be a no-op: {prev:?}"
+        );
     }
 
     #[test]
@@ -330,10 +333,16 @@ mod tests {
         // pixel in place; a non-zero vector shifts the history UV by exactly its
         // negative, following the surface back to last frame's position.
         let uv = Vec2::new(0.4, 0.55);
-        assert!(approx(reproject_prev_uv_motion(uv, Vec2::ZERO).unwrap(), uv));
+        assert!(approx(
+            reproject_prev_uv_motion(uv, Vec2::ZERO).unwrap(),
+            uv
+        ));
         let motion = Vec2::new(0.05, -0.1);
         let prev = reproject_prev_uv_motion(uv, motion).unwrap();
-        assert!(approx(prev, uv - motion), "motion reproject must be uv - motion: {prev:?}");
+        assert!(
+            approx(prev, uv - motion),
+            "motion reproject must be uv - motion: {prev:?}"
+        );
     }
 
     #[test]
@@ -381,7 +390,10 @@ mod tests {
         // Centre (0.5), history pushed far past the +x face.
         let h = Vec3::new(3.0, 0.5, 0.5);
         let out = clip_history_to_aabb(h, Vec3::splat(0.0), Vec3::splat(1.0));
-        assert!((out.x - 1.0).abs() < 1.0e-5, "x must land on the box face: {out:?}");
+        assert!(
+            (out.x - 1.0).abs() < 1.0e-5,
+            "x must land on the box face: {out:?}"
+        );
         // y/z unchanged because the dominant axis drove the scale.
         assert!((out.y - 0.5).abs() < 1.0e-5 && (out.z - 0.5).abs() < 1.0e-5);
     }
@@ -416,7 +428,10 @@ mod tests {
         assert!(out.x >= 0.2 - 1.0e-4);
         // The history sat far outside the box, so the adaptive weight collapsed
         // to the floor (0.5): confidence EMA = 0.5*1.0 + 0.5*0.0 = 0.5.
-        assert!((out.w - 0.5).abs() < 1.0e-5, "adaptive confidence EMA: {out:?}");
+        assert!(
+            (out.w - 0.5).abs() < 1.0e-5,
+            "adaptive confidence EMA: {out:?}"
+        );
     }
 
     #[test]
@@ -425,16 +440,12 @@ mod tests {
         let cur = Vec4::new(0.2, 0.2, 0.2, 1.0);
         // History sits inside a wide box (overshoot 0) -> full history_weight.
         let hist = Vec4::new(0.25, 0.25, 0.25, 0.0);
-        let out = accumulate_temporal(
-            &params,
-            cur,
-            hist,
-            Vec3::splat(0.0),
-            Vec3::splat(1.0),
-            true,
-        );
+        let out = accumulate_temporal(&params, cur, hist, Vec3::splat(0.0), Vec3::splat(1.0), true);
         // Full weight 0.9: confidence EMA = 0.1*1.0 + 0.9*0.0 = 0.1.
-        assert!((out.w - 0.1).abs() < 1.0e-5, "full-weight confidence EMA: {out:?}");
+        assert!(
+            (out.w - 0.1).abs() < 1.0e-5,
+            "full-weight confidence EMA: {out:?}"
+        );
     }
 
     #[test]
@@ -527,15 +538,11 @@ mod tests {
         // clipped to the tight neighbourhood box (no ghost leaks in).
         let cur = Vec4::new(0.2, 0.2, 0.2, 1.0);
         let hist = Vec4::new(5.0, 5.0, 5.0, 1.0);
-        let out = accumulate_temporal(
-            &params,
-            cur,
-            hist,
-            Vec3::splat(0.1),
-            Vec3::splat(0.3),
-            true,
+        let out = accumulate_temporal(&params, cur, hist, Vec3::splat(0.1), Vec3::splat(0.3), true);
+        assert!(
+            out.x <= 0.3 + 1.0e-4,
+            "confident hit must still clamp: {out:?}"
         );
-        assert!(out.x <= 0.3 + 1.0e-4, "confident hit must still clamp: {out:?}");
     }
     #[test]
     fn clip_ex_reports_overshoot_outside_and_zero_inside() {
@@ -543,11 +550,7 @@ mod tests {
         assert_eq!(inside.overshoot, 0.0);
         // Centre 0.5, half-extent 0.5; history at 1.5 is one extent past +x face
         // -> max_unit = (1.5-0.5)/0.5 = 2.0 -> overshoot 1.0.
-        let outside = clip_history_to_aabb_ex(
-            Vec3::new(1.5, 0.5, 0.5),
-            Vec3::ZERO,
-            Vec3::ONE,
-        );
+        let outside = clip_history_to_aabb_ex(Vec3::new(1.5, 0.5, 0.5), Vec3::ZERO, Vec3::ONE);
         assert!((outside.overshoot - 1.0).abs() < 1.0e-5, "{outside:?}");
         assert!((outside.clipped.x - 1.0).abs() < 1.0e-5);
     }

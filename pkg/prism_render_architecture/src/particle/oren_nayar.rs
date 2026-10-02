@@ -137,13 +137,7 @@ pub fn oren_nayar(normal: Vec3, light: Vec3, view: Vec3, albedo: Vec3, sigma: f3
 /// rendering equation. Back-lit or back-facing geometry returns [`Vec3::ZERO`].
 /// At `roughness = 0` and head-on geometry it reduces to Lambert `albedo / pi`.
 #[must_use]
-pub fn burley_diffuse(
-    normal: Vec3,
-    light: Vec3,
-    view: Vec3,
-    albedo: Vec3,
-    roughness: f32,
-) -> Vec3 {
+pub fn burley_diffuse(normal: Vec3, light: Vec3, view: Vec3, albedo: Vec3, roughness: f32) -> Vec3 {
     let n_dot_l = normal.dot(light).max(0.0);
     let n_dot_v = normal.dot(view).max(0.0);
     if n_dot_l <= 0.0 || n_dot_v <= 0.0 {

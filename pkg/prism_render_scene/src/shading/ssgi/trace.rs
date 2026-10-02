@@ -53,9 +53,9 @@ use bevy_render::{
 use bevy_shader::Shader;
 
 use super::super::resources::ViewVisibilityBuffer;
+use super::super::ssr::ViewSsrTextures;
 use super::abi::{GpuSsgiConfig, SSGI_WORKGROUP_SIZE};
 use super::resources::{ViewSsgiTextures, SSGI_OUT_FORMAT};
-use super::super::ssr::ViewSsrTextures;
 
 /// Compute pipeline, its owned group-0 layout, and the filtering sampler the
 /// gather reads the colour pyramid through.

@@ -376,9 +376,19 @@ mod tests {
     fn apply_black_and_white_are_stable() {
         // Pure 0 and 1 quantise to themselves for any Bayer cell (offset aside,
         // the endpoints are fixed points of the two-level threshold here).
-        let params = OrderedDitherParams { levels: 4, strength: 1.0, enabled: true };
-        approx3(apply_ordered_dither([0.0, 0.0, 0.0], 2, 1, &params), [0.0, 0.0, 0.0]);
-        approx3(apply_ordered_dither([1.0, 1.0, 1.0], 2, 1, &params), [1.0, 1.0, 1.0]);
+        let params = OrderedDitherParams {
+            levels: 4,
+            strength: 1.0,
+            enabled: true,
+        };
+        approx3(
+            apply_ordered_dither([0.0, 0.0, 0.0], 2, 1, &params),
+            [0.0, 0.0, 0.0],
+        );
+        approx3(
+            apply_ordered_dither([1.0, 1.0, 1.0], 2, 1, &params),
+            [1.0, 1.0, 1.0],
+        );
     }
 
     // --- params ---
@@ -390,6 +400,9 @@ mod tests {
         assert_eq!(p.levels, 4);
         approx(p.strength, 1.0);
         // Disabled leaves the scene untouched regardless of levels/strength.
-        approx3(apply_ordered_dither([0.3, 0.3, 0.3], 2, 2, &p), [0.3, 0.3, 0.3]);
+        approx3(
+            apply_ordered_dither([0.3, 0.3, 0.3], 2, 2, &p),
+            [0.3, 0.3, 0.3],
+        );
     }
 }

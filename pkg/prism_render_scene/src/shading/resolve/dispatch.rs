@@ -26,10 +26,10 @@ use super::super::shadow::ShadowBindGroup;
 
 use super::super::classification_gpu::GpuShadingDispatchArgs;
 use super::super::ibl::EnvPrefilterBindGroups;
+use super::super::resources::ViewShadingBuffers;
 use super::abi::{GpuShadingResolveParams, RESOLVE_FLAG_GTAO, RESOLVE_FLAG_IBL_SPECULAR};
 use super::bind_groups::ViewResolveBindGroups;
 use super::pipeline::ShadingResolvePipeline;
-use super::super::resources::ViewShadingBuffers;
 
 // The resolve pass reuses the *same* indirect dispatch-argument buffer that
 // `material_classification.wesl` fills (one `GpuShadingDispatchArgs` per

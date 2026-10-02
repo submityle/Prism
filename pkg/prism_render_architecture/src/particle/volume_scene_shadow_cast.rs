@@ -312,7 +312,10 @@ mod tests {
     fn empty_volume_is_fully_lit() {
         let field = single_slab_field(0.0);
         let caster = VolumeShadowCaster::new(ParticleSystemHandle(0), &field, 1.0, 0.25, 16);
-        assert!(approx(caster.cast(backlit_receiver(), travel_plus_x()), 1.0));
+        assert!(approx(
+            caster.cast(backlit_receiver(), travel_plus_x()),
+            1.0
+        ));
     }
 
     #[test]
@@ -372,7 +375,10 @@ mod tests {
         let caster = VolumeShadowCaster::new(ParticleSystemHandle(5), &field, 1.0, 0.25, 16);
         let survival = 0.875;
         let expected = survival * survival * survival * survival;
-        assert!(approx(caster.cast(backlit_receiver(), travel_plus_x()), expected));
+        assert!(approx(
+            caster.cast(backlit_receiver(), travel_plus_x()),
+            expected
+        ));
     }
 
     #[test]

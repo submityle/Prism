@@ -24,6 +24,7 @@
 //! dedicated shared depth prepass would lift that coupling in a later slice.
 
 use bevy_ecs::prelude::*;
+use bevy_math::Mat4;
 use bevy_math::UVec2;
 use bevy_platform::collections::{HashMap, HashSet};
 use bevy_render::{
@@ -31,14 +32,13 @@ use bevy_render::{
     renderer::{RenderDevice, RenderQueue},
     view::{ExtractedView, RetainedViewEntity},
 };
-use bevy_math::Mat4;
 use prism_render_shading::ReceiverProjection;
 
+use super::super::runtime::PrismShadingSettings;
+use super::super::ssr::ViewSsrTextures;
 use super::abi::{GpuVsmReceiver, GpuVsmReceiverGenParams};
 use super::extract::VsmPrimaryLight;
 use super::settings::PrismVirtualShadowSettings;
-use super::super::runtime::PrismShadingSettings;
-use super::super::ssr::ViewSsrTextures;
 
 /// Per-view resources bound by the receiver-generation dispatch: the per-frame
 /// uniform and the persistent per-pixel receiver storage buffer.
@@ -175,9 +175,9 @@ pub(crate) fn prepare_vsm_receiver_resources(
         // explicit clip_from_world, else compose it from the projection and the
         // inverse view transform, then invert for the unproject matrix the
         // shader multiplies (column-major, matching GpuVsmReceiverGenParams).
-        let clip_from_world: Mat4 = view.clip_from_world.unwrap_or_else(|| {
-            view.clip_from_view * view.world_from_view.to_matrix().inverse()
-        });
+        let clip_from_world: Mat4 = view
+            .clip_from_world
+            .unwrap_or_else(|| view.clip_from_view * view.world_from_view.to_matrix().inverse());
         let inverse_view_proj = clip_from_world.inverse().to_cols_array();
         let camera_world = view.world_from_view.translation();
 
@@ -186,8 +186,7 @@ pub(crate) fn prepare_vsm_receiver_resources(
             camera_world,
             vsm_settings.pcf_radius as f32,
         );
-        let params =
-            GpuVsmReceiverGenParams::new(inverse_view_proj, &projection, [size.x, size.y]);
+        let params = GpuVsmReceiverGenParams::new(inverse_view_proj, &projection, [size.x, size.y]);
 
         let params_buffer = device.create_buffer(&BufferDescriptor {
             label: Some("prism VSM receiver-gen params"),

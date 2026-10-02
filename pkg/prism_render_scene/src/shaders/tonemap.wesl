@@ -168,20 +168,43 @@ fn apply_tonemap(op: u32, rgb: vec3<f32>, reinhard_white_point: f32) -> vec3<f32
     return tonemap_reinhard(rgb);
 }
 
-// Minimal entry so the module type-checks as a standalone compute kernel under
-// the WESL compile test; the real tone-map pass wires the HDR target and the
-// operator/white-point uniforms later.
-@compute @workgroup_size(64, 1, 1)
-fn tonemap_probe(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let hdr = vec3<f32>(0.2, 0.8, 1.6) + vec3<f32>(gid);
+// ABI twin of the Rust `GpuTonemapParams` (16 bytes): operator selector, the
+// extended-Reinhard white point and the framebuffer extent.
+struct GpuTonemapParams {
+    // Operator selector: 0 Reinhard, 1 ReinhardExtended, 2 AcesNarkowicz,
+    // 3 AcesFitted, 4 AgX — matching the CPU enum order and `apply_tonemap`.
+    // `operator` is a WGSL reserved word, so the shader field is `operator_code`;
+    // the byte layout still mirrors the Rust `GpuTonemapParams::operator`.
+    operator_code: u32,
+    // White point for the extended-Reinhard operator; ignored otherwise.
+    reinhard_white_point: f32,
+    // Full-resolution framebuffer extent in texels.
+    screen_size: vec2<u32>,
+}
 
-    let lum = tonemap_luminance(hdr);
-    let reinhard = tonemap_reinhard(hdr);
-    let reinhard_ext = tonemap_reinhard_extended(hdr, 4.0);
-    let narkowicz = tonemap_aces_narkowicz(hdr);
-    let fitted = tonemap_aces_fitted(hdr);
-    let agx = tonemap_agx(hdr);
-    let dispatched = apply_tonemap(4u, hdr, 4.0);
+// The pre-exposed, resolved linear HDR scene colour this pass maps.
+@group(0) @binding(0) var tonemap_scene_color: texture_2d<f32>;
+// The tone-mapped output; copied back over `scene_color` after the dispatch.
+@group(0) @binding(1) var tonemap_out: texture_storage_2d<rgba16float, write>;
 
-    _ = lum + reinhard.x + reinhard_ext.y + narkowicz.z + fitted.x + agx.y + dispatched.z;
+var<immediate> tonemap_immediate: GpuTonemapParams;
+
+// One invocation per pixel. Applies the golden operator to the pre-exposed
+// linear HDR radiance and writes the display-referred texel (alpha preserved).
+@compute @workgroup_size(8, 8, 1)
+fn tonemap_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let width = i32(tonemap_immediate.screen_size.x);
+    let height = i32(tonemap_immediate.screen_size.y);
+    let pc = vec2<i32>(i32(gid.x), i32(gid.y));
+    if (pc.x >= width || pc.y >= height) {
+        return;
+    }
+
+    let sample = textureLoad(tonemap_scene_color, pc, 0);
+    let mapped = apply_tonemap(
+        tonemap_immediate.operator_code,
+        sample.rgb,
+        tonemap_immediate.reinhard_white_point,
+    );
+    textureStore(tonemap_out, pc, vec4<f32>(mapped, sample.a));
 }

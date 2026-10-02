@@ -62,11 +62,11 @@ struct MaterialTexture { index: u32, generation: u32, semantic: u32, sampler_ind
 // See opaque.wesl: gather a material's packed block out of the shared u32 heap
 // and expand it, returning the neutral surface if the declared range overruns.
 fn load_surface_parameters(word_offset: u32, lobe_mask: u32) -> PrismSurfaceParameters {
-    let n = min(prism_packed_word_count(lobe_mask), 36u);
+    let n = min(prism_packed_word_count(lobe_mask), 40u);
     if word_offset + n > arrayLength(&material_parameters) {
         return prism_neutral_surface();
     }
-    var words: array<u32, 36>;
+    var words: array<u32, 40>;
     for (var i = 0u; i < n; i = i + 1u) {
         words[i] = material_parameters[word_offset + i];
     }

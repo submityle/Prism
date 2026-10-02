@@ -174,7 +174,10 @@ mod tests {
             direction: [0.0, -1.0, 0.0],
             ..light()
         };
-        assert_eq!(evaluate_cloth_direct(surface, frame(), away), surface.emissive);
+        assert_eq!(
+            evaluate_cloth_direct(surface, frame(), away),
+            surface.emissive
+        );
     }
 
     #[test]
@@ -207,12 +210,18 @@ mod tests {
             ..light()
         };
         let low = evaluate_cloth_direct(
-            SurfaceSample { sheen: 0.1, ..base_surface() },
+            SurfaceSample {
+                sheen: 0.1,
+                ..base_surface()
+            },
             grazing_frame,
             grazing_light,
         );
         let high = evaluate_cloth_direct(
-            SurfaceSample { sheen: 0.9, ..base_surface() },
+            SurfaceSample {
+                sheen: 0.9,
+                ..base_surface()
+            },
             grazing_frame,
             grazing_light,
         );
@@ -226,15 +235,24 @@ mod tests {
     #[test]
     fn subsurface_changes_the_diffuse_response() {
         let without = evaluate_cloth_direct(
-            SurfaceSample { subsurface: 0.0, ..base_surface() },
+            SurfaceSample {
+                subsurface: 0.0,
+                ..base_surface()
+            },
             frame(),
             light(),
         );
         let with = evaluate_cloth_direct(
-            SurfaceSample { subsurface: 1.0, ..base_surface() },
+            SurfaceSample {
+                subsurface: 1.0,
+                ..base_surface()
+            },
             frame(),
             light(),
         );
-        assert_ne!(without, with, "subsurface weight must alter the diffuse term");
+        assert_ne!(
+            without, with,
+            "subsurface weight must alter the diffuse term"
+        );
     }
 }

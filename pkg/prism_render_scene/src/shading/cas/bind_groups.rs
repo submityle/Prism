@@ -42,10 +42,7 @@ pub(crate) fn prepare_cas_bind_groups(
         let group = device.create_bind_group(
             "prism cas",
             pipeline.layout(),
-            &BindGroupEntries::sequential((
-                visibility.scene_color_view(),
-                cas.cas_out_view(),
-            )),
+            &BindGroupEntries::sequential((visibility.scene_color_view(), cas.cas_out_view())),
         );
 
         commands.entity(entity).insert(ViewCasBindGroup { group });

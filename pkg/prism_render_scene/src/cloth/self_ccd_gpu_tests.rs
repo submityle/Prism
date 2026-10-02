@@ -527,7 +527,9 @@ fn restitution_rebounds_the_closing_velocity() {
 )]
 fn pinned_partner_stays_put_and_only_the_free_particle_moves() {
     let Some((device, queue)) = try_compute_device() else {
-        eprintln!("pinned_partner_stays_put_and_only_the_free_particle_moves: no wgpu adapter, skipping");
+        eprintln!(
+            "pinned_partner_stays_put_and_only_the_free_particle_moves: no wgpu adapter, skipping"
+        );
         return;
     };
     let wgsl = compile_self_ccd_wgsl();

@@ -68,5 +68,8 @@ fn atlas_tile_origin_treats_a_zero_edge_as_one() {
     // divides / mods by zero; every page then stacks down column 0.
     let page_size = 64;
     assert_eq!(atlas_tile_origin(0, 0, page_size), UVec2::ZERO);
-    assert_eq!(atlas_tile_origin(3, 0, page_size), UVec2::new(0, 3 * page_size));
+    assert_eq!(
+        atlas_tile_origin(3, 0, page_size),
+        UVec2::new(0, 3 * page_size)
+    );
 }

@@ -107,7 +107,6 @@ pub(crate) fn init_gtao_prepass_pipeline(
     });
 }
 
-
 /// Compute pipeline and the single owned bind-group layout for the GTAO kernel.
 ///
 /// The kernel (`shaders/gtao.wesl`) reads the two view-space geometry targets
@@ -161,9 +160,11 @@ pub(crate) fn init_gtao_kernel_pipeline(
         ..Default::default()
     });
 
-    commands.insert_resource(GtaoKernelPipeline { kernel, view_layout });
+    commands.insert_resource(GtaoKernelPipeline {
+        kernel,
+        view_layout,
+    });
 }
-
 
 /// Compute pipeline and the single owned bind-group layout for the GTAO spatial
 /// denoiser.

@@ -21,8 +21,8 @@ use super::{
     GpuSceneOpaqueIndirectEnabled,
 };
 use crate::{
-    visibility::runtime::{UnifiedVisibilitySettings, UnifiedVisibilityState}, GpuSceneDiagnostics,
-    GpuSceneInstanceAddress, GpuSceneMode,
+    visibility::runtime::{UnifiedVisibilitySettings, UnifiedVisibilityState},
+    GpuSceneDiagnostics, GpuSceneInstanceAddress, GpuSceneMode,
 };
 
 #[derive(SystemParam)]
@@ -154,9 +154,7 @@ fn opaque_queue_entries(
     visibility.frame.work_items
         [visible.start as usize..visible.start.saturating_add(visible.count) as usize]
         .iter()
-        .filter(|work| {
-            work.pass_mask.0 & prism_render_visibility::RenderPassMask::OPAQUE.0 != 0
-        })
+        .filter(|work| work.pass_mask.0 & prism_render_visibility::RenderPassMask::OPAQUE.0 != 0)
         .filter_map(|work| scene.entity_binding_for_handle(work.scene))
         .collect()
 }

@@ -100,18 +100,24 @@ mod tests {
         let params = GpuGamutMapParams::from_settings(UVec2::new(1920, 1080), &settings);
         assert_eq!(params.screen_size, [1920, 1080]);
         // The per-channel wheels and their packed scalar lanes round-trip.
-        assert_eq!(params.threshold_power, [
-            settings.threshold[0],
-            settings.threshold[1],
-            settings.threshold[2],
-            settings.power,
-        ]);
-        assert_eq!(params.limit_scale, [
-            settings.limit[0],
-            settings.limit[1],
-            settings.limit[2],
-            settings.scale,
-        ]);
+        assert_eq!(
+            params.threshold_power,
+            [
+                settings.threshold[0],
+                settings.threshold[1],
+                settings.threshold[2],
+                settings.power,
+            ]
+        );
+        assert_eq!(
+            params.limit_scale,
+            [
+                settings.limit[0],
+                settings.limit[1],
+                settings.limit[2],
+                settings.scale,
+            ]
+        );
         assert_eq!(params._pad, [0, 0]);
     }
 }

@@ -38,7 +38,9 @@ use prism_render_architecture::cloth::pressure::{project_pressure, PressureParam
 use prism_render_architecture::cloth::{ClothParticle, Compliance, Vec3};
 
 use super::abi::GpuClothPressureParams;
-use super::gpu_test_support::{compile_pressure_wgsl, find_entry_point, try_compute_device, PARITY_EPS};
+use super::gpu_test_support::{
+    compile_pressure_wgsl, find_entry_point, try_compute_device, PARITY_EPS,
+};
 
 /// The eight corners of the axis-aligned unit cube `[0, 1]^3`, matching the
 /// golden's own pressure fixture.
@@ -75,7 +77,10 @@ fn unit_cube_triangles() -> Vec<[u32; 3]> {
 
 /// Builds a movable-particle array (unit inverse mass) from positions.
 fn free_particles(positions: &[Vec3]) -> Vec<ClothParticle> {
-    positions.iter().map(|p| ClothParticle::new(*p, 1.0)).collect()
+    positions
+        .iter()
+        .map(|p| ClothParticle::new(*p, 1.0))
+        .collect()
 }
 
 /// host upload layout for `pressure_positions`: xyz = position, w = inverse
@@ -313,7 +318,9 @@ fn assert_pressure_parity(
     let positions = upload_positions(particles);
     let tri_rows = upload_triangles(triangles);
     let entries = pressure_entry_points(wgsl);
-    let pos_out = run_pressure_on_gpu(device, queue, wgsl, &entries, &positions, &tri_rows, gpu_params);
+    let pos_out = run_pressure_on_gpu(
+        device, queue, wgsl, &entries, &positions, &tri_rows, gpu_params,
+    );
 
     assert_eq!(pos_out.len(), golden.len());
     for (i, cpu) in golden.iter().enumerate() {
@@ -343,7 +350,10 @@ fn assert_pressure_parity(
 /// its accumulated volume gradient; the GPU reduction must reproduce the
 /// golden's per-vertex displacement value-for-value.
 #[test]
-#[expect(clippy::print_stderr, reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志")]
+#[expect(
+    clippy::print_stderr,
+    reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志"
+)]
 fn inflation_single_step_matches_golden() {
     let Some((device, queue)) = try_compute_device() else {
         eprintln!("inflation_single_step_matches_golden: no wgpu adapter, skipping");
@@ -352,14 +362,25 @@ fn inflation_single_step_matches_golden() {
     let wgsl = compile_pressure_wgsl();
     let particles = free_particles(&unit_cube_positions());
     let params = PressureParams::new(1.0, 2.0, Compliance::RIGID);
-    assert_pressure_parity(&device, &queue, &wgsl, &particles, &unit_cube_triangles(), params, 1.0 / 60.0);
+    assert_pressure_parity(
+        &device,
+        &queue,
+        &wgsl,
+        &particles,
+        &unit_cube_triangles(),
+        params,
+        1.0 / 60.0,
+    );
 }
 
 /// One deflation step (overpressure 0.5) pulls every free corner inward; the
 /// sign of the volume error flips relative to inflation, exercising the other
 /// branch of `d_lambda`.
 #[test]
-#[expect(clippy::print_stderr, reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志")]
+#[expect(
+    clippy::print_stderr,
+    reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志"
+)]
 fn deflation_single_step_matches_golden() {
     let Some((device, queue)) = try_compute_device() else {
         eprintln!("deflation_single_step_matches_golden: no wgpu adapter, skipping");
@@ -368,14 +389,25 @@ fn deflation_single_step_matches_golden() {
     let wgsl = compile_pressure_wgsl();
     let particles = free_particles(&unit_cube_positions());
     let params = PressureParams::new(1.0, 0.5, Compliance::RIGID);
-    assert_pressure_parity(&device, &queue, &wgsl, &particles, &unit_cube_triangles(), params, 1.0 / 60.0);
+    assert_pressure_parity(
+        &device,
+        &queue,
+        &wgsl,
+        &particles,
+        &unit_cube_triangles(),
+        params,
+        1.0 / 60.0,
+    );
 }
 
 /// A non-zero compliance softens the response: `alpha_tilde = compliance / dt^2`
 /// enters the denominator, so the GPU must fold the same softened `d_lambda` the
 /// golden computes.
 #[test]
-#[expect(clippy::print_stderr, reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志")]
+#[expect(
+    clippy::print_stderr,
+    reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志"
+)]
 fn compliant_pressure_matches_golden() {
     let Some((device, queue)) = try_compute_device() else {
         eprintln!("compliant_pressure_matches_golden: no wgpu adapter, skipping");
@@ -384,14 +416,25 @@ fn compliant_pressure_matches_golden() {
     let wgsl = compile_pressure_wgsl();
     let particles = free_particles(&unit_cube_positions());
     let params = PressureParams::new(1.0, 2.0, Compliance(0.01));
-    assert_pressure_parity(&device, &queue, &wgsl, &particles, &unit_cube_triangles(), params, 1.0 / 60.0);
+    assert_pressure_parity(
+        &device,
+        &queue,
+        &wgsl,
+        &particles,
+        &unit_cube_triangles(),
+        params,
+        1.0 / 60.0,
+    );
 }
 
 /// Pinned corners (inverse mass 0) must never move and must never contribute to
 /// the denominator, exactly like the golden's zero-weight guard; the free
 /// corners still track the golden displacement.
 #[test]
-#[expect(clippy::print_stderr, reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志")]
+#[expect(
+    clippy::print_stderr,
+    reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志"
+)]
 fn pinned_corners_never_move() {
     let Some((device, queue)) = try_compute_device() else {
         eprintln!("pinned_corners_never_move: no wgpu adapter, skipping");
@@ -403,14 +446,25 @@ fn pinned_corners_never_move() {
     particles[0] = ClothParticle::pinned(positions[0]);
     particles[1] = ClothParticle::pinned(positions[1]);
     let params = PressureParams::new(1.0, 3.0, Compliance::RIGID);
-    assert_pressure_parity(&device, &queue, &wgsl, &particles, &unit_cube_triangles(), params, 1.0 / 60.0);
+    assert_pressure_parity(
+        &device,
+        &queue,
+        &wgsl,
+        &particles,
+        &unit_cube_triangles(),
+        params,
+        1.0 / 60.0,
+    );
 }
 
 /// A triangle indexing past the particle array is skipped by both paths (the
 /// solve pass's `i >= count` guard mirrors the golden's range check), so the
 /// junk face perturbs neither the volume nor the gradient.
 #[test]
-#[expect(clippy::print_stderr, reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志")]
+#[expect(
+    clippy::print_stderr,
+    reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志"
+)]
 fn out_of_range_triangle_is_skipped() {
     let Some((device, queue)) = try_compute_device() else {
         eprintln!("out_of_range_triangle_is_skipped: no wgpu adapter, skipping");
@@ -421,14 +475,25 @@ fn out_of_range_triangle_is_skipped() {
     let mut triangles = unit_cube_triangles();
     triangles.push([99, 100, 101]);
     let params = PressureParams::new(1.0, 2.0, Compliance::RIGID);
-    assert_pressure_parity(&device, &queue, &wgsl, &particles, &triangles, params, 1.0 / 60.0);
+    assert_pressure_parity(
+        &device,
+        &queue,
+        &wgsl,
+        &particles,
+        &triangles,
+        params,
+        1.0 / 60.0,
+    );
 }
 
 /// A shell already at its target volume (overpressure 1, rest volume 1) has zero
 /// volume error, so `d_lambda` is zero and no particle moves; the GPU must land
 /// on the golden's exact no-op.
 #[test]
-#[expect(clippy::print_stderr, reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志")]
+#[expect(
+    clippy::print_stderr,
+    reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志"
+)]
 fn at_target_volume_is_a_no_op() {
     let Some((device, queue)) = try_compute_device() else {
         eprintln!("at_target_volume_is_a_no_op: no wgpu adapter, skipping");
@@ -437,5 +502,13 @@ fn at_target_volume_is_a_no_op() {
     let wgsl = compile_pressure_wgsl();
     let particles = free_particles(&unit_cube_positions());
     let params = PressureParams::new(1.0, 1.0, Compliance::RIGID);
-    assert_pressure_parity(&device, &queue, &wgsl, &particles, &unit_cube_triangles(), params, 1.0 / 60.0);
+    assert_pressure_parity(
+        &device,
+        &queue,
+        &wgsl,
+        &particles,
+        &unit_cube_triangles(),
+        params,
+        1.0 / 60.0,
+    );
 }

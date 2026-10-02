@@ -77,7 +77,11 @@ pub fn resolve_tangent_basis(
             let unit = normalize_or(projected, normal);
             let handedness = if tangent[3] < 0.0 { -1.0 } else { 1.0 };
             let bitangent = mul_scalar(cross(normal, unit), handedness);
-            return TangentBasis { tangent: unit, bitangent, degenerate: false };
+            return TangentBasis {
+                tangent: unit,
+                bitangent,
+                degenerate: false,
+            };
         }
     }
     // 2. Analytic tangent from the triangle's position/UV gradients.
@@ -86,7 +90,11 @@ pub fn resolve_tangent_basis(
     }
     // 3. Canonical fallback from the normal alone.
     let (tangent, bitangent) = orthonormal_basis(normal);
-    TangentBasis { tangent, bitangent, degenerate: true }
+    TangentBasis {
+        tangent,
+        bitangent,
+        degenerate: true,
+    }
 }
 
 /// Derives a tangent basis from the triangle's edge and UV gradients.
@@ -122,7 +130,11 @@ fn analytic_tangent_basis(
         1.0
     };
     let bitangent = mul_scalar(cross(normal, unit), handedness);
-    Some(TangentBasis { tangent: unit, bitangent, degenerate: false })
+    Some(TangentBasis {
+        tangent: unit,
+        bitangent,
+        degenerate: false,
+    })
 }
 
 /// Rotates a tangent-space normal-map sample (`x` along T, `y` along B, `z`
@@ -161,8 +173,16 @@ mod tests {
             [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
         );
         assert!(!basis.degenerate);
-        assert!(approx(basis.tangent, [1.0, 0.0, 0.0]), "{:?}", basis.tangent);
-        assert!(approx(basis.bitangent, [0.0, 1.0, 0.0]), "{:?}", basis.bitangent);
+        assert!(
+            approx(basis.tangent, [1.0, 0.0, 0.0]),
+            "{:?}",
+            basis.tangent
+        );
+        assert!(
+            approx(basis.bitangent, [0.0, 1.0, 0.0]),
+            "{:?}",
+            basis.bitangent
+        );
     }
 
     #[test]
@@ -186,8 +206,18 @@ mod tests {
     #[test]
     fn authored_handedness_flips_the_bitangent() {
         let normal = [0.0, 0.0, 1.0];
-        let right = resolve_tangent_basis(normal, Some([1.0, 0.0, 0.0, 1.0]), [[0.0; 3]; 3], [[0.0; 2]; 3]);
-        let left = resolve_tangent_basis(normal, Some([1.0, 0.0, 0.0, -1.0]), [[0.0; 3]; 3], [[0.0; 2]; 3]);
+        let right = resolve_tangent_basis(
+            normal,
+            Some([1.0, 0.0, 0.0, 1.0]),
+            [[0.0; 3]; 3],
+            [[0.0; 2]; 3],
+        );
+        let left = resolve_tangent_basis(
+            normal,
+            Some([1.0, 0.0, 0.0, -1.0]),
+            [[0.0; 3]; 3],
+            [[0.0; 2]; 3],
+        );
         assert!(approx(right.tangent, left.tangent));
         assert!(approx(right.bitangent, mul_scalar(left.bitangent, -1.0)));
     }
@@ -230,7 +260,10 @@ mod tests {
         };
         let normal = [0.0, 0.0, 1.0];
         // A flat tangent-space normal (0,0,1) must return the surface normal.
-        assert!(approx(apply_tangent_space_normal(basis, normal, [0.0, 0.0, 1.0]), normal));
+        assert!(approx(
+            apply_tangent_space_normal(basis, normal, [0.0, 0.0, 1.0]),
+            normal
+        ));
         // A fully tilted sample (1,0,0) must return the tangent direction.
         assert!(approx(
             apply_tangent_space_normal(basis, normal, [1.0, 0.0, 0.0]),

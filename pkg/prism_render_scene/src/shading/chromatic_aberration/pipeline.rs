@@ -29,8 +29,8 @@ use bevy_render::{
 };
 use bevy_shader::Shader;
 
-use super::abi::GpuChromaticAberrationParams;
 use super::super::resources::SCENE_COLOR_FORMAT;
+use super::abi::GpuChromaticAberrationParams;
 
 /// The chromatic-aberration compute pipeline, its owned group-0 layout and the
 /// shared linear-clamp sampler the pass fetches the scene colour with.
@@ -104,8 +104,10 @@ pub(crate) fn init_chromatic_aberration_pipeline(
         ..Default::default()
     });
 
-    let shader: Handle<Shader> =
-        load_embedded_asset!(asset_server.as_ref(), "../shaders/chromatic_aberration.wesl");
+    let shader: Handle<Shader> = load_embedded_asset!(
+        asset_server.as_ref(),
+        "../shaders/chromatic_aberration.wesl"
+    );
 
     let pipeline = cache.queue_compute_pipeline(ComputePipelineDescriptor {
         label: Some("prism chromatic aberration".into()),

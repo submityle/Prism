@@ -26,8 +26,8 @@ use bevy_math::UVec2;
 use bevy_render::{
     camera::ExtractedCamera,
     render_resource::{
-        Buffer, BufferDescriptor, BufferUsages, TextureDescriptor, TextureDimension,
-        TextureUsages, TextureView,
+        Buffer, BufferDescriptor, BufferUsages, TextureDescriptor, TextureDimension, TextureUsages,
+        TextureView,
     },
     renderer::RenderDevice,
     texture::{CachedTexture, TextureCache},

@@ -32,9 +32,7 @@ use super::{
         PrismVisibilityDiagnostics, UnifiedVisibilityEnabled, UnifiedVisibilitySettings,
         UnifiedVisibilityState, VisibilityFrameGraph,
     },
-    systems::{
-        build_unified_visibility, rebuild_unified_visibility, upload_unified_visibility,
-    },
+    systems::{build_unified_visibility, rebuild_unified_visibility, upload_unified_visibility},
 };
 
 pub struct PrismVisibilityPlugin;

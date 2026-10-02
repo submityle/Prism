@@ -156,7 +156,11 @@ impl FilmGrainParams {
     /// (`resolution / size`, guarding a non-positive size).
     #[must_use]
     fn scaled_resolution(&self, resolution: [f32; 2]) -> [f32; 2] {
-        let inv_size = if self.size > 0.0 { 1.0 / self.size } else { 1.0 };
+        let inv_size = if self.size > 0.0 {
+            1.0 / self.size
+        } else {
+            1.0
+        };
         [resolution[0] * inv_size, resolution[1] * inv_size]
     }
 
@@ -391,6 +395,9 @@ mod tests {
         };
         // Must not divide by zero / produce NaN.
         let out = p.apply([0.3, 0.3, 0.3], [0.3, 0.7], [1920.0, 1080.0], 1.0);
-        assert!(out.iter().all(|c| c.is_finite()), "size 0 produced NaN: {out:?}");
+        assert!(
+            out.iter().all(|c| c.is_finite()),
+            "size 0 produced NaN: {out:?}"
+        );
     }
 }

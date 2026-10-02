@@ -161,8 +161,7 @@ mod tests {
             sample_count: 0,
             ..Default::default()
         };
-        let params =
-            MotionBlurParams::from_settings(Mat4::IDENTITY, UVec2::new(64, 64), &settings);
+        let params = MotionBlurParams::from_settings(Mat4::IDENTITY, UVec2::new(64, 64), &settings);
         assert_eq!(params.sample_count, 1);
     }
 }

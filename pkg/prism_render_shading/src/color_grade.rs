@@ -106,14 +106,14 @@ pub fn white_balance(rgb: [f32; 3], temperature: f32, tint: f32) -> [f32; 3] {
     let lms_s = 0.0030 * cie_x + 0.0136 * cie_y + 0.9834 * cie_z;
 
     // Diagonal von Kries transform toward the D65 reference white.
-    let balance = [
-        D65_LMS[0] / lms_l,
-        D65_LMS[1] / lms_m,
-        D65_LMS[2] / lms_s,
-    ];
+    let balance = [D65_LMS[0] / lms_l, D65_LMS[1] / lms_m, D65_LMS[2] / lms_s];
 
     let lms = lin_to_lms(rgb);
-    let adapted = [lms[0] * balance[0], lms[1] * balance[1], lms[2] * balance[2]];
+    let adapted = [
+        lms[0] * balance[0],
+        lms[1] * balance[1],
+        lms[2] * balance[2],
+    ];
     lms_to_lin(adapted)
 }
 
@@ -274,8 +274,14 @@ mod tests {
         let base = white_balance(grey, 0.0, 0.0);
         let magenta = white_balance(grey, 0.0, 0.4);
         let green = white_balance(grey, 0.0, -0.4);
-        assert!(magenta[1] < base[1], "green should fall with positive (magenta) tint");
-        assert!(green[1] > base[1], "green should rise with negative (green) tint");
+        assert!(
+            magenta[1] < base[1],
+            "green should fall with positive (magenta) tint"
+        );
+        assert!(
+            green[1] > base[1],
+            "green should rise with negative (green) tint"
+        );
     }
 
     // --- lift / gamma / gain ---
@@ -283,10 +289,7 @@ mod tests {
     #[test]
     fn lift_gamma_gain_neutral_is_identity() {
         let rgb = [0.2, 0.5, 0.9];
-        approx3(
-            lift_gamma_gain(rgb, [0.0; 3], [1.0; 3], [1.0; 3]),
-            rgb,
-        );
+        approx3(lift_gamma_gain(rgb, [0.0; 3], [1.0; 3], [1.0; 3]), rgb);
     }
 
     #[test]

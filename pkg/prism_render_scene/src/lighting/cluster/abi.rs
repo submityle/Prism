@@ -15,8 +15,8 @@
 //! arrays, matching [`ClusterLightAssignment`](prism_render_shading::ClusterLightAssignment)
 //! byte-for-byte.
 
-use bytemuck::{Pod, Zeroable};
 use bevy_math::ops;
+use bytemuck::{Pod, Zeroable};
 use prism_render_shading::ClusterGrid;
 
 /// Column-major identity matrix used as the neutral view for the fallback grid.
@@ -163,7 +163,11 @@ mod tests {
         let gpu = GpuClusterGrid::from_grid(&grid, 256, IDENTITY_COLS);
         for k in 0..24u32 {
             let mid_depth = 0.5 * (grid.slice_depth(k) + grid.slice_depth(k + 1));
-            assert_eq!(gpu.depth_slice(-mid_depth), grid.z_slice(-mid_depth), "slice {k}");
+            assert_eq!(
+                gpu.depth_slice(-mid_depth),
+                grid.z_slice(-mid_depth),
+                "slice {k}"
+            );
         }
     }
 

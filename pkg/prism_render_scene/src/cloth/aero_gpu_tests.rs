@@ -360,7 +360,13 @@ fn dispatch_aero(
 ///
 /// 抽出 `wind` / `aero` / `dt` 三个入参，供线性与二次（`air_density > 0`）两条
 /// 模型分别驱动同一条真机 dispatch + 对拍路径，避免重复。
-fn run_on_device_parity(device: &wgpu::Device, queue: &wgpu::Queue, wind: WindField, aero: AeroParams, dt: f32) {
+fn run_on_device_parity(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    wind: WindField,
+    aero: AeroParams,
+    dt: f32,
+) {
     const NX: usize = 12;
     const NZ: usize = 10;
     let (particles, triangles) = build_grid(NX, NZ);

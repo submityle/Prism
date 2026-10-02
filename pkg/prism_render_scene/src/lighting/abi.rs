@@ -328,15 +328,8 @@ mod tests {
 
     #[test]
     fn punctual_round_trips_through_the_reference_type() {
-        let cpu = PunctualLight::spot(
-            [1.0, 2.0, 3.0],
-            [10.0; 3],
-            25.0,
-            [0.0, 0.0, -1.0],
-            0.9,
-            0.5,
-        )
-        .with_visibility(0.75);
+        let cpu = PunctualLight::spot([1.0, 2.0, 3.0], [10.0; 3], 25.0, [0.0, 0.0, -1.0], 0.9, 0.5)
+            .with_visibility(0.75);
         let gpu = GpuPunctualLight::from(cpu);
         assert_eq!(gpu.position, cpu.position);
         assert_eq!(gpu.range, cpu.range);

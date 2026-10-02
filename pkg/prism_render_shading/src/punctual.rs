@@ -210,14 +210,7 @@ mod tests {
     #[test]
     fn spot_cone_is_bright_on_axis_and_dark_outside() {
         // Cone points down -Z; cosines encode a ~53 deg outer half-angle.
-        let light = PunctualLight::spot(
-            [0.0, 0.0, 0.0],
-            [8.0; 3],
-            0.0,
-            [0.0, 0.0, -1.0],
-            0.8,
-            0.5,
-        );
+        let light = PunctualLight::spot([0.0, 0.0, 0.0], [8.0; 3], 0.0, [0.0, 0.0, -1.0], 0.8, 0.5);
         // On-axis: full angular term.
         let on_axis = light.sample([0.0, 0.0, -1.0]).unwrap();
         assert!(on_axis.illuminance.iter().all(|c| *c > 0.0));
@@ -227,14 +220,8 @@ mod tests {
 
     #[test]
     fn spot_falloff_is_monotonic_between_inner_and_outer() {
-        let light = PunctualLight::spot(
-            [0.0, 0.0, 0.0],
-            [1.0; 3],
-            0.0,
-            [0.0, 0.0, -1.0],
-            0.99,
-            0.1,
-        );
+        let light =
+            PunctualLight::spot([0.0, 0.0, 0.0], [1.0; 3], 0.0, [0.0, 0.0, -1.0], 0.99, 0.1);
         // Points at increasing angle from the axis should not brighten.
         let mut previous = f32::INFINITY;
         for offset in [0.0_f32, 0.2, 0.4, 0.6] {

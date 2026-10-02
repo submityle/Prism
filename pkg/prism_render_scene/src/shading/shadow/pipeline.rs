@@ -217,8 +217,8 @@ pub(crate) struct ShadowDepthViewUniform {
 impl FromWorld for ShadowDepthViewUniform {
     fn from_world(world: &mut World) -> Self {
         let device = world.resource::<RenderDevice>();
-        let layout =
-            device.create_bind_group_layout("prism shadow depth view", &shadow_view_layout_entries());
+        let layout = device
+            .create_bind_group_layout("prism shadow depth view", &shadow_view_layout_entries());
         let mut buffer = DynamicUniformBuffer::default();
         buffer.set_label(Some("prism shadow depth views"));
         Self {

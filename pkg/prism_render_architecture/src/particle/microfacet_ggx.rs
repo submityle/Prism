@@ -655,10 +655,8 @@ mod tests {
         assert!(sharp > broad);
         // Off the mirror direction, the broad lobe carries more.
         let off_l = Vec3::new(0.6, 0.0, 0.8).normalize_or_zero();
-        let sharp_off =
-            specular_ggx_scalar(MicrofacetDirs::from_vectors(n, v, off_l), 0.05, 0.04);
-        let broad_off =
-            specular_ggx_scalar(MicrofacetDirs::from_vectors(n, v, off_l), 0.6, 0.04);
+        let sharp_off = specular_ggx_scalar(MicrofacetDirs::from_vectors(n, v, off_l), 0.05, 0.04);
+        let broad_off = specular_ggx_scalar(MicrofacetDirs::from_vectors(n, v, off_l), 0.6, 0.04);
         assert!(broad_off > sharp_off);
     }
 }

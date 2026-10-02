@@ -7,6 +7,8 @@ use bevy_material::{
     },
     descriptor::BindGroupLayoutDescriptor,
 };
+use bevy_math::{Mat4, Vec2, Vec3};
+use bevy_render::render_resource::ShaderType;
 use bevy_render::{
     render_resource::{
         BindGroup, BindGroupEntries, BindGroupLayout, Buffer, BufferDescriptor, BufferId,
@@ -15,8 +17,6 @@ use bevy_render::{
     },
     renderer::RenderDevice,
 };
-use bevy_render::render_resource::ShaderType;
-use bevy_math::{Mat4, Vec2, Vec3};
 use bevy_shader::Shader;
 
 #[repr(C)]
@@ -96,10 +96,8 @@ pub(crate) struct HzbVisibilityBuffers {
     candidates: Buffer,
     stages: Buffer,
     capacity: u32,
-    view_ranges: bevy_platform::collections::HashMap<
-        bevy_render::view::RetainedViewEntity,
-        (u32, u32),
-    >,
+    view_ranges:
+        bevy_platform::collections::HashMap<bevy_render::view::RetainedViewEntity, (u32, u32)>,
     active_slots: bevy_platform::collections::HashSet<u32>,
 }
 
@@ -353,8 +351,8 @@ pub(crate) fn init_hzb_visibility_pipeline(
 #[cfg(test)]
 mod tests {
     use super::{active_count_in_range, reset_view_partition, RenderHzbCullInput};
-    use bevy_render::render_resource::ShaderType;
     use bevy_asset::{uuid::Uuid, AssetId};
+    use bevy_render::render_resource::ShaderType;
     use bevy_shader::{Shader, ShaderCache, ShaderCacheSource};
 
     fn load_source(

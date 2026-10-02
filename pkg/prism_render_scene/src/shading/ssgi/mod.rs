@@ -46,6 +46,4 @@ pub(crate) use denoise::{
     init_ssgi_denoise_pipeline, prepare_ssgi_denoise_bind_groups, ssgi_denoise_pass,
 };
 pub(crate) use resources::prepare_ssgi_textures;
-pub(crate) use trace::{
-    init_ssgi_trace_pipeline, prepare_ssgi_trace_bind_groups, ssgi_trace_pass,
-};
+pub(crate) use trace::{init_ssgi_trace_pipeline, prepare_ssgi_trace_bind_groups, ssgi_trace_pass};

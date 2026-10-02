@@ -136,8 +136,11 @@ pub fn trace_confidence(sample: SsrTraceSample, params: SsrConfidenceParams) -> 
     }
     let edge = edge_fade(sample.hit_uv, params.edge_fade_start);
     let facing = facing_fade(sample.reflection, sample.camera_to_surface);
-    let roughness =
-        roughness_fade(sample.roughness, params.full_roughness, params.max_roughness);
+    let roughness = roughness_fade(
+        sample.roughness,
+        params.full_roughness,
+        params.max_roughness,
+    );
     let distance = distance_fade(sample.travel, params.distance_fade_start);
     saturate(edge * facing * roughness * distance)
 }
@@ -199,7 +202,10 @@ mod tests {
         // Reflection heading deeper into the scene is trusted.
         assert!(facing_fade(Vec3::new(0.0, 0.0, -1.0), camera_to_surface) > 0.99);
         // Reflection heading straight back at the camera is rejected.
-        assert_eq!(facing_fade(Vec3::new(0.0, 0.0, 1.0), camera_to_surface), 0.0);
+        assert_eq!(
+            facing_fade(Vec3::new(0.0, 0.0, 1.0), camera_to_surface),
+            0.0
+        );
     }
 
     #[test]
@@ -234,10 +240,7 @@ mod tests {
         };
         assert_eq!(trace_confidence(miss, params), 0.0);
 
-        let hit = SsrTraceSample {
-            hit: true,
-            ..miss
-        };
+        let hit = SsrTraceSample { hit: true, ..miss };
         assert!(trace_confidence(hit, params) > 0.5);
     }
 

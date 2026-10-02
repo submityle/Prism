@@ -39,5 +39,5 @@ mod shader_tests;
 pub(crate) use bind_groups::prepare_vsm_page_mark_bind_groups;
 pub(crate) use dispatch::vsm_mark_pages_pass;
 pub(crate) use pipeline::init_vsm_page_mark_pipeline;
-pub(crate) use resources::{prepare_vsm_page_requests, VsmPageRequestBufferCache};
 pub(crate) use resources::ViewVsmPageRequests;
+pub(crate) use resources::{prepare_vsm_page_requests, VsmPageRequestBufferCache};

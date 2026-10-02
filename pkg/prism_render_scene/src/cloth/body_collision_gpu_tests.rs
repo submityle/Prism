@@ -240,8 +240,9 @@ fn assert_body_collision_parity(
         .collect();
     let packed = pack_colliders(colliders);
     // frictionless 口径：prev == 当前位置 ⇒ 无切向滑移；friction = 0 ⇒ 摩擦段早退。
-    let out =
-        replay_body_collision_on_gpu(device, queue, wgsl, entry, &positions, &positions, &packed, 0.0);
+    let out = replay_body_collision_on_gpu(
+        device, queue, wgsl, entry, &positions, &positions, &packed, 0.0,
+    );
 
     assert_eq!(out.len(), golden.len());
     for (i, (gpu, cpu)) in out.iter().zip(golden.iter()).enumerate() {
@@ -300,11 +301,11 @@ fn sphere_projection_matches_cpu_golden() {
         radius: 1.0,
     }];
     let particles = [
-        free(0.3, 0.1, -0.2),  // 深在内部 → 推到表面
-        free(0.9, 0.0, 0.0),   // 恰在表面附近
-        free(2.0, 0.0, 0.0),   // 外部 → 不动
-        free(0.0, 0.0, 0.0),   // 圆心退化 → 沿 +Y 逃逸到 (0, r, 0)
-        pinned(0.2, -0.1, 0.1),// pinned 内部 → 永不移动
+        free(0.3, 0.1, -0.2),   // 深在内部 → 推到表面
+        free(0.9, 0.0, 0.0),    // 恰在表面附近
+        free(2.0, 0.0, 0.0),    // 外部 → 不动
+        free(0.0, 0.0, 0.0),    // 圆心退化 → 沿 +Y 逃逸到 (0, r, 0)
+        pinned(0.2, -0.1, 0.1), // pinned 内部 → 永不移动
     ];
     assert_body_collision_parity(&device, &queue, &wgsl, &entry, &particles, &colliders);
 }
@@ -332,11 +333,11 @@ fn capsule_projection_matches_cpu_golden() {
         radius: 0.5,
     }];
     let particles = [
-        free(0.0, 0.2, 0.0),   // 轴中段内部 → 径向推到 r
-        free(0.0, 0.6, 0.0),   // 轴中段外部 → 不动
-        free(1.3, 0.1, 0.0),   // 越过 p1 端 → 端帽半球投影
-        free(1.0, 0.0, 0.0),   // 落在端点轴上退化 → 沿 +Y 逃逸
-        free(-1.2, 0.0, 0.3),  // 越过 p0 端 → 另一端帽半球
+        free(0.0, 0.2, 0.0),  // 轴中段内部 → 径向推到 r
+        free(0.0, 0.6, 0.0),  // 轴中段外部 → 不动
+        free(1.3, 0.1, 0.0),  // 越过 p1 端 → 端帽半球投影
+        free(1.0, 0.0, 0.0),  // 落在端点轴上退化 → 沿 +Y 逃逸
+        free(-1.2, 0.0, 0.3), // 越过 p0 端 → 另一端帽半球
     ];
     assert_body_collision_parity(&device, &queue, &wgsl, &entry, &particles, &colliders);
 
@@ -373,9 +374,9 @@ fn half_space_projection_matches_cpu_golden() {
         offset: 0.0,
     }];
     let particles = [
-        free(0.2, -0.5, 0.1),  // 越界（下方）→ 推回平面 y=0
-        free(-0.3, 0.7, 0.4),  // 可行侧 → 不动
-        free(1.0, 0.0, -1.0),  // 恰在平面上 → 不动
+        free(0.2, -0.5, 0.1), // 越界（下方）→ 推回平面 y=0
+        free(-0.3, 0.7, 0.4), // 可行侧 → 不动
+        free(1.0, 0.0, -1.0), // 恰在平面上 → 不动
     ];
     assert_body_collision_parity(&device, &queue, &wgsl, &entry, &particles, &colliders);
 
@@ -417,9 +418,9 @@ fn multi_collider_order_matches_cpu_golden() {
         },
     ];
     let particles = [
-        free(0.1, -0.9, 0.0),  // 球把它推到下半球面(y<-0.3) → 半空间再抬回 y=-0.3
-        free(0.5, 0.5, 0.0),   // 球内 → 推到球面，位于 y>-0.3 → 半空间不动
-        free(0.2, 0.1, 0.15),  // 顺序叠加的一般点
+        free(0.1, -0.9, 0.0), // 球把它推到下半球面(y<-0.3) → 半空间再抬回 y=-0.3
+        free(0.5, 0.5, 0.0),  // 球内 → 推到球面，位于 y>-0.3 → 半空间不动
+        free(0.2, 0.1, 0.15), // 顺序叠加的一般点
     ];
     assert_body_collision_parity(&device, &queue, &wgsl, &entry, &particles, &colliders);
 }
@@ -440,7 +441,11 @@ fn empty_collider_set_is_noop_on_gpu() {
     let entry = find_entry_point(&wgsl, "cloth_body_collision");
 
     let colliders: [BodyCollider; 0] = [];
-    let particles = [free(0.3, -0.4, 0.5), pinned(1.0, 1.0, 1.0), free(-2.0, 0.0, 0.0)];
+    let particles = [
+        free(0.3, -0.4, 0.5),
+        pinned(1.0, 1.0, 1.0),
+        free(-2.0, 0.0, 0.0),
+    ];
     assert_body_collision_parity(&device, &queue, &wgsl, &entry, &particles, &colliders);
 }
 
@@ -479,7 +484,14 @@ fn assert_body_collision_friction_parity(
     let prev_packed: Vec<[f32; 4]> = prev.iter().map(|v| [v.x, v.y, v.z, 0.0]).collect();
     let packed = pack_colliders(colliders);
     let out = replay_body_collision_on_gpu(
-        device, queue, wgsl, entry, &positions, &prev_packed, &packed, friction,
+        device,
+        queue,
+        wgsl,
+        entry,
+        &positions,
+        &prev_packed,
+        &packed,
+        friction,
     );
 
     assert_eq!(out.len(), golden.len());
@@ -516,7 +528,9 @@ fn assert_body_collision_friction_parity(
 )]
 fn static_friction_locks_tangential_slide() {
     let Some((device, queue)) = try_compute_device() else {
-        eprintln!("static_friction_locks_tangential_slide: no wgpu adapter, skipping on-device parity");
+        eprintln!(
+            "static_friction_locks_tangential_slide: no wgpu adapter, skipping on-device parity"
+        );
         return;
     };
     let wgsl = compile_collision_wgsl();
@@ -529,7 +543,9 @@ fn static_friction_locks_tangential_slide() {
     // 内部点被推到 +X 球面 (1,0,0)；帧初在 (1,0.05,0) ⇒ 切向 0.05 落在 μ·push=0.5 锥内。
     let particles = [free(0.5, 0.0, 0.0)];
     let prev = [Vec3::new(1.0, 0.05, 0.0)];
-    assert_body_collision_friction_parity(&device, &queue, &wgsl, &entry, &particles, &prev, &colliders, 1.0);
+    assert_body_collision_friction_parity(
+        &device, &queue, &wgsl, &entry, &particles, &prev, &colliders, 1.0,
+    );
 }
 
 /// 动摩擦线性削减：切向滑移超出锥（`μ·||Δx_n|| < ||Δx_t||`）⇒ 切向按
@@ -541,7 +557,9 @@ fn static_friction_locks_tangential_slide() {
 )]
 fn dynamic_friction_shrinks_tangential_slide() {
     let Some((device, queue)) = try_compute_device() else {
-        eprintln!("dynamic_friction_shrinks_tangential_slide: no wgpu adapter, skipping on-device parity");
+        eprintln!(
+            "dynamic_friction_shrinks_tangential_slide: no wgpu adapter, skipping on-device parity"
+        );
         return;
     };
     let wgsl = compile_collision_wgsl();
@@ -553,7 +571,9 @@ fn dynamic_friction_shrinks_tangential_slide() {
     }];
     let particles = [free(0.5, 0.0, 0.0)];
     let prev = [Vec3::new(1.0, 0.4, 0.0)];
-    assert_body_collision_friction_parity(&device, &queue, &wgsl, &entry, &particles, &prev, &colliders, 0.25);
+    assert_body_collision_friction_parity(
+        &device, &queue, &wgsl, &entry, &particles, &prev, &colliders, 0.25,
+    );
 }
 
 /// 无接触即无摩擦：点已在碰撞体外 ⇒ correction≈0 ⇒ 内核对该碰撞体早退（直接取投影，
@@ -578,7 +598,9 @@ fn friction_is_noop_without_contact() {
     // 球外点：投影恒等 ⇒ 无 correction ⇒ 摩擦段跳过。
     let particles = [free(2.0, 0.0, 0.0)];
     let prev = [Vec3::new(2.0, 1.5, 0.5)];
-    assert_body_collision_friction_parity(&device, &queue, &wgsl, &entry, &particles, &prev, &colliders, 0.9);
+    assert_body_collision_friction_parity(
+        &device, &queue, &wgsl, &entry, &particles, &prev, &colliders, 0.9,
+    );
 }
 
 /// 被钉住的粒子（inverse mass `<= 0`）在摩擦路径下同样被跳过：即便深陷碰撞体且
@@ -602,7 +624,9 @@ fn friction_skips_pinned_particles() {
     }];
     let particles = [pinned(0.3, 0.0, 0.0), free(0.5, 0.0, 0.0)];
     let prev = [Vec3::new(1.0, 0.2, 0.0), Vec3::new(1.0, 0.1, 0.0)];
-    assert_body_collision_friction_parity(&device, &queue, &wgsl, &entry, &particles, &prev, &colliders, 1.0);
+    assert_body_collision_friction_parity(
+        &device, &queue, &wgsl, &entry, &particles, &prev, &colliders, 1.0,
+    );
 }
 
 /// `μ = 0` 退化为纯无摩擦投影：内核 `cloth_damp_tangential_slip` 立即早退返回投影，
@@ -626,7 +650,9 @@ fn zero_friction_matches_frictionless() {
     }];
     let particles = [free(0.5, 0.0, 0.0), free(0.2, 0.1, 0.15)];
     let prev = [Vec3::new(1.0, 0.4, 0.0), Vec3::new(0.9, 0.3, 0.2)];
-    assert_body_collision_friction_parity(&device, &queue, &wgsl, &entry, &particles, &prev, &colliders, 0.0);
+    assert_body_collision_friction_parity(
+        &device, &queue, &wgsl, &entry, &particles, &prev, &colliders, 0.0,
+    );
 }
 
 /// 多碰撞体逐个施摩擦：一个粒子先被球投影+施摩擦，其结果再喂给半空间投影+施摩擦，
@@ -657,5 +683,7 @@ fn multi_collider_applies_per_contact_friction() {
     ];
     let particles = [free(0.3, 0.2, 0.0)];
     let prev = [Vec3::new(0.9, 0.55, 0.1)];
-    assert_body_collision_friction_parity(&device, &queue, &wgsl, &entry, &particles, &prev, &colliders, 0.5);
+    assert_body_collision_friction_parity(
+        &device, &queue, &wgsl, &entry, &particles, &prev, &colliders, 0.5,
+    );
 }

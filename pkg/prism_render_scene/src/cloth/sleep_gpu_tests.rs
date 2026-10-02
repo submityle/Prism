@@ -213,7 +213,12 @@ fn run_sleep_on_gpu(
 
 /// Runs the CPU golden and the real-machine twin over the same particles, then
 /// asserts the folded indicator agrees within a value-scaled `PARITY_EPS`.
-fn assert_sleep_parity(device: &wgpu::Device, queue: &wgpu::Queue, wgsl: &str, particles: &[ClothParticle]) {
+fn assert_sleep_parity(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    wgsl: &str,
+    particles: &[ClothParticle],
+) {
     let golden = max_kinetic_indicator(particles);
     let velocities = upload_velocities(particles);
     let params = GpuClothSleepParams {

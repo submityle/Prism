@@ -19,9 +19,9 @@ use bevy_render::{
 };
 
 use super::super::super::runtime::PrismShadingSettings;
+use super::super::resources::ViewVsmReceivers;
 use super::pipeline::VsmPageMarkPipeline;
 use super::resources::ViewVsmPageRequests;
-use super::super::resources::ViewVsmReceivers;
 
 /// The page-mark pass's group-0 bind group for a single view. Present only when
 /// both the receiver buffer and the request bitmap are resident this frame.

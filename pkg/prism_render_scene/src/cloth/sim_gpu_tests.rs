@@ -507,6 +507,7 @@ fn sim_gpu_matches_cpu_golden() {
         wind_turbulence: 0.0,
         aero_drag: 0.0,
         aero_lift: 0.0,
+        aero_air_density: 0.0,
         friction: 0.0,
         colliders: &[],
         backstops: &[],
@@ -751,6 +752,7 @@ fn bending_gpu_matches_cpu_golden() {
         wind_turbulence: 0.0,
         aero_drag: 0.0,
         aero_lift: 0.0,
+        aero_air_density: 0.0,
         friction: 0.0,
         colliders: &[],
         backstops: &[],
@@ -827,10 +829,7 @@ fn bending_gpu_matches_cpu_golden() {
 /// [`plan_constraint_upload`](prism_render_architecture::cloth::gpu::upload) 按
 /// sidedness 分区时保序，两条路径（GPU 与黄金）都用同一序喂
 /// [`color_constraints`] ⇒ 着色完全一致。
-fn build_leash_constraints(
-    rows: u32,
-    cols: u32,
-) -> Vec<Constraint> {
+fn build_leash_constraints(rows: u32, cols: u32) -> Vec<Constraint> {
     let mut lra_leashes: Vec<AnchorLeash> = Vec::new();
     let mut tether_leashes: Vec<AnchorLeash> = Vec::new();
     for r in 1..rows {
@@ -927,6 +926,7 @@ fn long_range_gpu_matches_cpu_golden() {
         wind_turbulence: 0.0,
         aero_drag: 0.0,
         aero_lift: 0.0,
+        aero_air_density: 0.0,
         friction: 0.0,
         colliders: &[],
         backstops: &[],
@@ -1096,6 +1096,7 @@ fn strain_skips_non_stretch_edges_gpu_matches_cpu_golden() {
         wind_turbulence: 0.0,
         aero_drag: 0.0,
         aero_lift: 0.0,
+        aero_air_density: 0.0,
         friction: 0.0,
         colliders: &[],
         backstops: &[],

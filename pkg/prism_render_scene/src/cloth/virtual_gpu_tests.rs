@@ -45,7 +45,9 @@ use prism_render_architecture::cloth::virtual_particles_jacobi::{
 use prism_render_architecture::cloth::{ClothParticle, Vec3};
 
 use super::abi::{GpuClothHashCell, GpuClothVpParams, GpuClothVpSample};
-use super::gpu_test_support::{compile_virtual_wgsl, find_entry_point, try_compute_device, PARITY_EPS};
+use super::gpu_test_support::{
+    compile_virtual_wgsl, find_entry_point, try_compute_device, PARITY_EPS,
+};
 
 /// 链表终止哨兵，与 `cloth_self_collision_virtual.wesl` 的 `CLOTH_VP_SENTINEL` 一致。
 const SENTINEL: u32 = 0xffff_ffffu32;

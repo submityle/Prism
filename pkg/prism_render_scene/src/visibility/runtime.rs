@@ -297,6 +297,9 @@ mod diagnostics_tests {
         assert!(hzb_runtime_gate(UnifiedVisibilityEnabled(true), &settings));
         settings.indirect_first_instance = false;
         assert!(!hzb_runtime_gate(UnifiedVisibilityEnabled(true), &settings));
-        assert!(!hzb_runtime_gate(UnifiedVisibilityEnabled(false), &settings));
+        assert!(!hzb_runtime_gate(
+            UnifiedVisibilityEnabled(false),
+            &settings
+        ));
     }
 }

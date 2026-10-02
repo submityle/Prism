@@ -84,11 +84,9 @@ pub(crate) fn prepare_world_space_gi_bind_groups(
             )),
         );
 
-        commands
-            .entity(entity)
-            .insert(ViewWorldSpaceGiBindGroups {
-                probe_update,
-                resolve,
-            });
+        commands.entity(entity).insert(ViewWorldSpaceGiBindGroups {
+            probe_update,
+            resolve,
+        });
     }
 }

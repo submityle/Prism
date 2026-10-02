@@ -8,8 +8,8 @@ use bevy_render::{
     view::ExtractedView,
 };
 use prism_render_visibility::{
-    build_view_draw_bins, cull_view, DrawBinCandidate, DrawBinKey, GeometryLod,
-    GeometryLodChain, GpuViewRecord, ViewFlags, VisibilityFrame, VisibilityInput,
+    build_view_draw_bins, cull_view, DrawBinCandidate, DrawBinKey, GeometryLod, GeometryLodChain,
+    GpuViewRecord, ViewFlags, VisibilityFrame, VisibilityInput,
 };
 
 use crate::{
@@ -60,8 +60,7 @@ pub(crate) fn build_unified_visibility(
     let handles = scene.mirror().live_handles();
     let geometry = geometry_lods(scene.mirror(), &handles, &geometries);
     let material_records = material_records(&materials, scene.mirror(), &handles);
-    let gpu_slots_per_view =
-        (handles.len() as u32).min(settings.gpu_parity_max_items_per_view);
+    let gpu_slots_per_view = (handles.len() as u32).min(settings.gpu_parity_max_items_per_view);
     let previous_lods = state.previous_lods().clone();
     let occluded = state.occluded().clone();
 
@@ -134,14 +133,14 @@ pub(crate) fn build_unified_visibility(
             .iter()
             .filter_map(|work| draw_bin_candidate(work, &geometries, &material_records))
             .collect();
-        let mut bins = build_view_draw_bins(
-            handle,
-            scene.mirror().capacity() as u32,
-            candidates,
-        );
-        bins.command_buffer_start = (state.draw_bins.len() as u32)
-            .saturating_mul(gpu_slots_per_view);
-        bins.global_bin_start = state.draw_bins.iter().map(|view| view.bins.len() as u32).sum();
+        let mut bins = build_view_draw_bins(handle, scene.mirror().capacity() as u32, candidates);
+        bins.command_buffer_start =
+            (state.draw_bins.len() as u32).saturating_mul(gpu_slots_per_view);
+        bins.global_bin_start = state
+            .draw_bins
+            .iter()
+            .map(|view| view.bins.len() as u32)
+            .sum();
         bins.global_candidate_start = state
             .draw_bins
             .iter()
@@ -155,7 +154,11 @@ pub(crate) fn build_unified_visibility(
     diagnostics.views = state.views.len() as u32;
     diagnostics.work_items = state.frame.work_items.len() as u32;
     diagnostics.cpu_reference_frames = 1;
-    diagnostics.draw_bins = state.draw_bins.iter().map(|view| view.bins.len() as u32).sum();
+    diagnostics.draw_bins = state
+        .draw_bins
+        .iter()
+        .map(|view| view.bins.len() as u32)
+        .sum();
     diagnostics.draw_bin_capacity = state.draw_bins.iter().map(|view| view.command_count).sum();
     state.commit_lods();
     state.retire_missing_views();
@@ -196,8 +199,7 @@ fn draw_bin_candidate(
         key: DrawBinKey {
             geometry: work.geometry,
             lod_or_cluster: lod.level,
-            pipeline_class: ((material.illumination as u32) << 16)
-                | material.render_class as u32,
+            pipeline_class: ((material.illumination as u32) << 16) | material.render_class as u32,
             vertex_buffer_class: geometry.vertex_buffer_class,
             index_buffer_class: geometry.index_buffer_class,
             indexed: lod.primitive_kind
@@ -263,7 +265,8 @@ pub(crate) fn dispatch_unified_visibility_for_view(
         material_bindings.bind_group.as_ref(),
         geometry_bindings.bind_group.as_ref(),
         output_bindings.bind_group.as_ref(),
-    ) else {
+    )
+    else {
         return;
     };
     let retained = current_view.into_inner().retained_view_entity;
@@ -281,10 +284,12 @@ pub(crate) fn dispatch_unified_visibility_for_view(
     ) else {
         return;
     };
-    let mut pass = ctx.command_encoder().begin_compute_pass(&ComputePassDescriptor {
-        label: Some("prism unified visibility"),
-        timestamp_writes: None,
-    });
+    let mut pass = ctx
+        .command_encoder()
+        .begin_compute_pass(&ComputePassDescriptor {
+            label: Some("prism unified visibility"),
+            timestamp_writes: None,
+        });
     pass.set_pipeline(compute_pipeline);
     pass.set_bind_group(0, scene_bind_group, &[]);
     pass.set_bind_group(1, material_bind_group, &[]);
@@ -339,21 +344,18 @@ fn geometry_lods(
                 geometry,
                 GeometryLodChain {
                     geometry,
-                    lods: registry.record(geometry).map_or_else(
-                        Vec::new,
-                        |record| {
-                            record
-                                .lods
-                                .iter()
-                                .map(|lod| GeometryLod {
-                                    level: lod.level as u16,
-                                    screen_error: lod.screen_error,
-                                    resident: lod.resident,
-                                    fallback: lod.fallback,
-                                })
-                                .collect()
-                        },
-                    ),
+                    lods: registry.record(geometry).map_or_else(Vec::new, |record| {
+                        record
+                            .lods
+                            .iter()
+                            .map(|lod| GeometryLod {
+                                level: lod.level as u16,
+                                screen_error: lod.screen_error,
+                                resident: lod.resident,
+                                fallback: lod.fallback,
+                            })
+                            .collect()
+                    }),
                 },
             )
         })
@@ -434,7 +436,12 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert_eq!(geometry_lods(&scene, &handles, &geometries)[&geometry].lods.len(), 1);
+        assert_eq!(
+            geometry_lods(&scene, &handles, &geometries)[&geometry]
+                .lods
+                .len(),
+            1
+        );
 
         let materials = RenderMaterialRegistry::default();
         let table = material_records(&materials, &scene, &handles);
@@ -461,7 +468,10 @@ mod tests {
         let mut world = World::new();
         let mut buffers = UnifiedVisibilityBuffers::from_world(&mut world);
         buffers.stage(
-            [RenderVisibilityView::default(), RenderVisibilityView::default()],
+            [
+                RenderVisibilityView::default(),
+                RenderVisibilityView::default(),
+            ],
             [],
             [],
             8,
@@ -504,15 +514,8 @@ mod tests {
                 ..Default::default()
             },
         ];
-        let dispatch = visibility_dispatch_for_view(
-            &state,
-            &buffers,
-            second_retained,
-            64,
-            true,
-            128,
-        )
-        .unwrap();
+        let dispatch =
+            visibility_dispatch_for_view(&state, &buffers, second_retained, 64, true, 128).unwrap();
 
         assert_eq!(dispatch.view_index, 1);
         assert_eq!(dispatch.output_start, 8);

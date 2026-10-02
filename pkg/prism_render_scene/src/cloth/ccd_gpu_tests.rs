@@ -38,8 +38,8 @@ use wgpu::{
     ShaderSource, ShaderStages,
 };
 
-use prism_render_architecture::cloth::collision::BodyCollider;
 use prism_render_architecture::cloth::ccd::{resolve_ccd, CcdParams};
+use prism_render_architecture::cloth::collision::BodyCollider;
 use prism_render_architecture::cloth::{ClothParticle, Vec3};
 
 use super::abi::GpuClothCcdSweepParams;
@@ -277,7 +277,11 @@ fn assert_ccd_parity(
     dt: f32,
     friction: f32,
 ) {
-    assert_eq!(particles.len(), prev.len(), "fixture particle / prev length mismatch");
+    assert_eq!(
+        particles.len(),
+        prev.len(),
+        "fixture particle / prev length mismatch"
+    );
 
     let mut golden = particles.to_vec();
     resolve_ccd(&mut golden, prev, colliders, params, dt, friction);
@@ -340,7 +344,10 @@ fn assert_ccd_parity(
 /// to (0, -5, 0) is snapped to the skin offset and its downward normal velocity
 /// cancelled. The GPU must land on the golden's inelastic stop.
 #[test]
-#[expect(clippy::print_stderr, reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志")]
+#[expect(
+    clippy::print_stderr,
+    reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志"
+)]
 fn half_space_drop_is_inelastic_like_golden() {
     let Some((device, queue)) = try_compute_device() else {
         eprintln!("half_space_drop_is_inelastic_like_golden: no wgpu adapter, skipping");
@@ -358,14 +365,27 @@ fn half_space_drop_is_inelastic_like_golden() {
         restitution: 0.0,
         enabled: true,
     };
-    assert_ccd_parity(&device, &queue, &wgsl, &particles, &prev, &colliders, params, 1.0 / 60.0, 0.0);
+    assert_ccd_parity(
+        &device,
+        &queue,
+        &wgsl,
+        &particles,
+        &prev,
+        &colliders,
+        params,
+        1.0 / 60.0,
+        0.0,
+    );
 }
 
 /// The same plane with restitution 1: the inbound normal velocity is mirrored
 /// to a perfect bounce. This exercises the velocity write-back path, so the GPU
 /// velocity buffer must match the golden's reflected value.
 #[test]
-#[expect(clippy::print_stderr, reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志")]
+#[expect(
+    clippy::print_stderr,
+    reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志"
+)]
 fn half_space_bounce_is_elastic_like_golden() {
     let Some((device, queue)) = try_compute_device() else {
         eprintln!("half_space_bounce_is_elastic_like_golden: no wgpu adapter, skipping");
@@ -383,14 +403,27 @@ fn half_space_bounce_is_elastic_like_golden() {
         restitution: 1.0,
         enabled: true,
     };
-    assert_ccd_parity(&device, &queue, &wgsl, &particles, &prev, &colliders, params, 1.0 / 60.0, 0.0);
+    assert_ccd_parity(
+        &device,
+        &queue,
+        &wgsl,
+        &particles,
+        &prev,
+        &colliders,
+        params,
+        1.0 / 60.0,
+        0.0,
+    );
 }
 
 /// A particle sweeping (-2, 0, 0) -> (2, 0, 0) straight through a unit sphere at
 /// the origin: the quadratic `sphere_toi` entry root and radial outward
 /// normal drive the snap. The GPU must reproduce the golden's projected surface.
 #[test]
-#[expect(clippy::print_stderr, reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志")]
+#[expect(
+    clippy::print_stderr,
+    reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志"
+)]
 fn sphere_penetration_matches_golden() {
     let Some((device, queue)) = try_compute_device() else {
         eprintln!("sphere_penetration_matches_golden: no wgpu adapter, skipping");
@@ -408,14 +441,27 @@ fn sphere_penetration_matches_golden() {
         restitution: 0.0,
         enabled: true,
     };
-    assert_ccd_parity(&device, &queue, &wgsl, &particles, &prev, &colliders, params, 1.0 / 60.0, 0.0);
+    assert_ccd_parity(
+        &device,
+        &queue,
+        &wgsl,
+        &particles,
+        &prev,
+        &colliders,
+        params,
+        1.0 / 60.0,
+        0.0,
+    );
 }
 
 /// A particle crossing the cylindrical side of a capsule (axis (0,0,0)->(0,0,4),
 /// radius 1): the infinite-cylinder-slab TOI and segment-closest-point normal
 /// drive the snap. The GPU must match the golden's capsule side contact.
 #[test]
-#[expect(clippy::print_stderr, reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志")]
+#[expect(
+    clippy::print_stderr,
+    reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志"
+)]
 fn capsule_side_matches_golden() {
     let Some((device, queue)) = try_compute_device() else {
         eprintln!("capsule_side_matches_golden: no wgpu adapter, skipping");
@@ -434,14 +480,27 @@ fn capsule_side_matches_golden() {
         restitution: 0.0,
         enabled: true,
     };
-    assert_ccd_parity(&device, &queue, &wgsl, &particles, &prev, &colliders, params, 1.0 / 60.0, 0.0);
+    assert_ccd_parity(
+        &device,
+        &queue,
+        &wgsl,
+        &particles,
+        &prev,
+        &colliders,
+        params,
+        1.0 / 60.0,
+        0.0,
+    );
 }
 
 /// A particle diving onto a capsule end cap (sweep (0,0,7)->(0,0,3) beyond the
 /// p1 end at z=4): the end-cap sphere TOI wins over the cylinder slab. The GPU
 /// must match the golden's spherical end-cap contact.
 #[test]
-#[expect(clippy::print_stderr, reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志")]
+#[expect(
+    clippy::print_stderr,
+    reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志"
+)]
 fn capsule_end_cap_matches_golden() {
     let Some((device, queue)) = try_compute_device() else {
         eprintln!("capsule_end_cap_matches_golden: no wgpu adapter, skipping");
@@ -460,7 +519,17 @@ fn capsule_end_cap_matches_golden() {
         restitution: 0.0,
         enabled: true,
     };
-    assert_ccd_parity(&device, &queue, &wgsl, &particles, &prev, &colliders, params, 1.0 / 60.0, 0.0);
+    assert_ccd_parity(
+        &device,
+        &queue,
+        &wgsl,
+        &particles,
+        &prev,
+        &colliders,
+        params,
+        1.0 / 60.0,
+        0.0,
+    );
 }
 
 /// A diagonal sweep (0,1,0)->(2,-1,0) onto the y >= 0 plane hits at t = 0.5 with
@@ -468,7 +537,10 @@ fn capsule_end_cap_matches_golden() {
 /// slide to 0.5. This exercises the dynamic friction cone, so the GPU corrected
 /// position must match the golden's friction-damped landing.
 #[test]
-#[expect(clippy::print_stderr, reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志")]
+#[expect(
+    clippy::print_stderr,
+    reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志"
+)]
 fn diagonal_plane_friction_matches_golden() {
     let Some((device, queue)) = try_compute_device() else {
         eprintln!("diagonal_plane_friction_matches_golden: no wgpu adapter, skipping");
@@ -486,5 +558,15 @@ fn diagonal_plane_friction_matches_golden() {
         restitution: 0.0,
         enabled: true,
     };
-    assert_ccd_parity(&device, &queue, &wgsl, &particles, &prev, &colliders, params, 1.0 / 60.0, 0.5);
+    assert_ccd_parity(
+        &device,
+        &queue,
+        &wgsl,
+        &particles,
+        &prev,
+        &colliders,
+        params,
+        1.0 / 60.0,
+        0.5,
+    );
 }

@@ -312,13 +312,22 @@ mod tests {
             mean += cosine_sample_direction(hammersley(i, n), normal);
         }
         mean /= n as f32;
-        assert!(mean.dot(normal) > 0.4, "mean tilts toward the normal: {mean:?}");
-        assert!(mean.x.abs() < 0.05 && mean.y.abs() < 0.05, "azimuth cancels");
+        assert!(
+            mean.dot(normal) > 0.4,
+            "mean tilts toward the normal: {mean:?}"
+        );
+        assert!(
+            mean.x.abs() < 0.05 && mean.y.abs() < 0.05,
+            "azimuth cancels"
+        );
     }
 
     #[test]
     fn degenerate_normal_yields_zero_direction() {
-        assert_eq!(cosine_sample_direction(Vec2::new(0.3, 0.6), Vec3::ZERO), Vec3::ZERO);
+        assert_eq!(
+            cosine_sample_direction(Vec2::new(0.3, 0.6), Vec3::ZERO),
+            Vec3::ZERO
+        );
     }
 
     #[test]
@@ -342,17 +351,32 @@ mod tests {
     }
 
     fn hit(radiance: Vec3, travel: f32) -> SsgiRaySample {
-        SsgiRaySample { valid: true, hit: true, radiance, travel }
+        SsgiRaySample {
+            valid: true,
+            hit: true,
+            radiance,
+            travel,
+        }
     }
     fn miss() -> SsgiRaySample {
-        SsgiRaySample { valid: true, hit: false, radiance: Vec3::ZERO, travel: 1.0 }
+        SsgiRaySample {
+            valid: true,
+            hit: false,
+            radiance: Vec3::ZERO,
+            travel: 1.0,
+        }
     }
 
     #[test]
     fn full_hit_set_bleeds_colour_scaled_by_albedo() {
         let albedo = Vec3::new(0.5, 0.5, 0.5);
         let bounce = Vec3::new(1.0, 0.0, 0.0);
-        let samples = [hit(bounce, 0.0), hit(bounce, 0.0), hit(bounce, 0.0), hit(bounce, 0.0)];
+        let samples = [
+            hit(bounce, 0.0),
+            hit(bounce, 0.0),
+            hit(bounce, 0.0),
+            hit(bounce, 0.0),
+        ];
         let g = gather_indirect_diffuse(albedo, Vec3::ZERO, &samples, SsgiParams::default());
         // Near hits (travel 0) carry full weight: indirect = albedo * bounce.
         assert!((g.indirect - albedo * bounce).length() < 1.0e-5);
@@ -366,20 +390,33 @@ mod tests {
         let sky = Vec3::new(0.2, 0.4, 0.6);
         let samples = [miss(), miss(), miss(), miss()];
         let g = gather_indirect_diffuse(albedo, sky, &samples, SsgiParams::default());
-        assert!((g.indirect - albedo * sky).length() < 1.0e-5, "misses take the sky term");
-        assert!(g.occlusion.abs() < 1.0e-5, "no occlusion when every ray escapes");
+        assert!(
+            (g.indirect - albedo * sky).length() < 1.0e-5,
+            "misses take the sky term"
+        );
+        assert!(
+            g.occlusion.abs() < 1.0e-5,
+            "no occlusion when every ray escapes"
+        );
     }
 
     #[test]
     fn distant_hits_fade_toward_the_sky_not_to_black() {
         let albedo = Vec3::ONE;
         let sky = Vec3::splat(0.5);
-        let params = SsgiParams { distance_falloff: 1.0, ..Default::default() };
+        let params = SsgiParams {
+            distance_falloff: 1.0,
+            ..Default::default()
+        };
         // A hit at the far end (travel ~1) should have (near) zero hit weight and
         // read the sky, never darker than the sky floor.
         let far = [hit(Vec3::ZERO, 1.0)];
         let g = gather_indirect_diffuse(albedo, sky, &far, params);
-        assert!((g.indirect - sky).length() < 1.0e-4, "far hit degrades to sky: {:?}", g.indirect);
+        assert!(
+            (g.indirect - sky).length() < 1.0e-4,
+            "far hit degrades to sky: {:?}",
+            g.indirect
+        );
     }
 
     #[test]
@@ -388,9 +425,24 @@ mod tests {
         let sky = Vec3::splat(0.3);
         let samples = [
             hit(Vec3::new(1.0, 1.0, 1.0), 0.0),
-            SsgiRaySample { valid: false, hit: false, radiance: Vec3::ZERO, travel: 0.0 },
-            SsgiRaySample { valid: false, hit: false, radiance: Vec3::ZERO, travel: 0.0 },
-            SsgiRaySample { valid: false, hit: false, radiance: Vec3::ZERO, travel: 0.0 },
+            SsgiRaySample {
+                valid: false,
+                hit: false,
+                radiance: Vec3::ZERO,
+                travel: 0.0,
+            },
+            SsgiRaySample {
+                valid: false,
+                hit: false,
+                radiance: Vec3::ZERO,
+                travel: 0.0,
+            },
+            SsgiRaySample {
+                valid: false,
+                hit: false,
+                radiance: Vec3::ZERO,
+                travel: 0.0,
+            },
         ];
         let g = gather_indirect_diffuse(albedo, sky, &samples, SsgiParams::default());
         // Only one valid ray -> mean is that hit; confidence = 1/4.
@@ -402,7 +454,12 @@ mod tests {
     fn no_valid_rays_keeps_pure_ambient_with_zero_confidence() {
         let albedo = Vec3::splat(0.6);
         let sky = Vec3::new(0.1, 0.2, 0.3);
-        let samples = [SsgiRaySample { valid: false, hit: false, radiance: Vec3::ZERO, travel: 0.0 }];
+        let samples = [SsgiRaySample {
+            valid: false,
+            hit: false,
+            radiance: Vec3::ZERO,
+            travel: 0.0,
+        }];
         let g = gather_indirect_diffuse(albedo, sky, &samples, SsgiParams::default());
         assert!((g.indirect - albedo * sky).length() < 1.0e-5);
         assert_eq!(g.confidence, 0.0);
@@ -440,7 +497,10 @@ mod tests {
             albedo,
             Vec3::ZERO,
             &samples,
-            SsgiParams { intensity: 2.0, ..Default::default() },
+            SsgiParams {
+                intensity: 2.0,
+                ..Default::default()
+            },
         );
         assert!((boosted.indirect - base.indirect * 2.0).length() < 1.0e-5);
     }

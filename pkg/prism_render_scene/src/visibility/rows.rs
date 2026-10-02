@@ -152,7 +152,10 @@ pub struct RenderVisibilityNonIndexedIndirect {
     pub first_vertex: u32,
     pub first_instance: u32,
 }
-impl_atomic_pod!(RenderVisibilityNonIndexedIndirect, RenderVisibilityNonIndexedIndirectBlob);
+impl_atomic_pod!(
+    RenderVisibilityNonIndexedIndirect,
+    RenderVisibilityNonIndexedIndirectBlob
+);
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Pod, ShaderType, Zeroable)]

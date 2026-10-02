@@ -23,7 +23,9 @@
 )]
 
 use bytemuck::{Pod, Zeroable};
-use prism_render_architecture::ray_scene::{BLAS_OFFSET_WORDS, INSTANCE_WORDS, NODE_WORDS, TRIANGLE_WORDS};
+use prism_render_architecture::ray_scene::{
+    BLAS_OFFSET_WORDS, INSTANCE_WORDS, NODE_WORDS, TRIANGLE_WORDS,
+};
 
 /// `u32` words per packed `BVH` node, re-exported from the golden layout. Must
 /// match the `NODE_WORDS` constant in `shaders/ray_traverse.wesl`.
@@ -204,17 +206,17 @@ pub(crate) struct GpuFootprintParams {
 #[cfg(test)]
 mod tests {
     use super::{
-        BLAS_OFFSET_NODE_BASE_WORD, BLAS_OFFSET_NODE_COUNT_WORD, BLAS_OFFSET_TRIANGLE_BASE_WORD,
+        GpuFootprintParams, GpuRayTraverseParams, BLAS_OFFSET_NODE_BASE_WORD,
+        BLAS_OFFSET_NODE_COUNT_WORD, BLAS_OFFSET_TRIANGLE_BASE_WORD,
         BLAS_OFFSET_TRIANGLE_COUNT_WORD, FOOTPRINT_CONE_SPREAD_WORD, FOOTPRINT_CONE_WIDTH_WORD,
         FOOTPRINT_HIT_DISTANCE_WORD, FOOTPRINT_RESULT_MIP_FLOOR_WORD,
         FOOTPRINT_RESULT_MIP_LEVEL_WORD, FOOTPRINT_RESULT_PROJECTED_WIDTH_WORD,
         FOOTPRINT_RESULT_TEXEL_SPAN_WORD, FOOTPRINT_RESULT_WORDS, FOOTPRINT_TEXEL_SIZE_WORD,
-        FOOTPRINT_WORDS, GpuFootprintParams, GpuRayTraverseParams, HIT_WORDS,
-        INSTANCE_BLAS_INDEX_WORD, INSTANCE_ID_WORD, MISS_PRIMITIVE, NODE_AXIS_WORD,
-        NODE_FIRST_PRIMITIVE_WORD, NODE_PRIMITIVE_COUNT_WORD, NODE_SECOND_CHILD_WORD,
-        POSITIVE_INF_BITS, RAYTRACE_BLAS_OFFSET_WORDS, RAYTRACE_INSTANCE_WORDS, RAYTRACE_MODE_ANY,
-        RAYTRACE_MODE_CLOSEST, RAYTRACE_NODE_WORDS, RAYTRACE_TRIANGLE_WORDS, RAY_WORDS,
-        TLAS_HIT_WORDS, TRIANGLE_PRIMITIVE_WORD,
+        FOOTPRINT_WORDS, HIT_WORDS, INSTANCE_BLAS_INDEX_WORD, INSTANCE_ID_WORD, MISS_PRIMITIVE,
+        NODE_AXIS_WORD, NODE_FIRST_PRIMITIVE_WORD, NODE_PRIMITIVE_COUNT_WORD,
+        NODE_SECOND_CHILD_WORD, POSITIVE_INF_BITS, RAYTRACE_BLAS_OFFSET_WORDS,
+        RAYTRACE_INSTANCE_WORDS, RAYTRACE_MODE_ANY, RAYTRACE_MODE_CLOSEST, RAYTRACE_NODE_WORDS,
+        RAYTRACE_TRIANGLE_WORDS, RAY_WORDS, TLAS_HIT_WORDS, TRIANGLE_PRIMITIVE_WORD,
     };
     use prism_render_architecture::ray_scene::{
         BLAS_OFFSET_WORDS, INSTANCE_WORDS, NODE_WORDS, TRIANGLE_WORDS,
@@ -337,7 +339,10 @@ mod tests {
             BLAS_OFFSET_TRIANGLE_BASE_WORD,
             BLAS_OFFSET_TRIANGLE_COUNT_WORD,
         ] {
-            assert!(word < BLAS_OFFSET_WORDS, "offset field word {word} out of stride");
+            assert!(
+                word < BLAS_OFFSET_WORDS,
+                "offset field word {word} out of stride"
+            );
         }
         // The four fields occupy words 0..=3 in order, exactly as
         // `GpuBlasPool::from_blases` writes them and the kernel reads them.
@@ -372,7 +377,10 @@ mod tests {
             FOOTPRINT_HIT_DISTANCE_WORD,
             FOOTPRINT_TEXEL_SIZE_WORD,
         ] {
-            assert!(word < FOOTPRINT_WORDS, "input field word {word} out of stride");
+            assert!(
+                word < FOOTPRINT_WORDS,
+                "input field word {word} out of stride"
+            );
         }
         // Result fields occupy words 0..=3: three `f32` scalars then the raw
         // `u32` mip bucket.
@@ -386,7 +394,10 @@ mod tests {
             FOOTPRINT_RESULT_MIP_LEVEL_WORD,
             FOOTPRINT_RESULT_MIP_FLOOR_WORD,
         ] {
-            assert!(word < FOOTPRINT_RESULT_WORDS, "result field word {word} out of stride");
+            assert!(
+                word < FOOTPRINT_RESULT_WORDS,
+                "result field word {word} out of stride"
+            );
         }
     }
 

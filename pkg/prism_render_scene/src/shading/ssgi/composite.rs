@@ -100,11 +100,13 @@ pub(crate) fn init_ssgi_composite_pipeline(
     asset_server: Res<bevy_asset::AssetServer>,
 ) {
     let copy_entries = copy_layout_entries();
-    let copy_descriptor = BindGroupLayoutDescriptor::new("prism SSGI composite copy", &copy_entries);
+    let copy_descriptor =
+        BindGroupLayoutDescriptor::new("prism SSGI composite copy", &copy_entries);
     let copy_layout = device.create_bind_group_layout("prism SSGI composite copy", &copy_entries);
 
     let fold_entries = fold_layout_entries();
-    let fold_descriptor = BindGroupLayoutDescriptor::new("prism SSGI composite fold", &fold_entries);
+    let fold_descriptor =
+        BindGroupLayoutDescriptor::new("prism SSGI composite fold", &fold_entries);
     let fold_layout = device.create_bind_group_layout("prism SSGI composite fold", &fold_entries);
 
     let shader: Handle<Shader> =
@@ -156,10 +158,7 @@ pub(crate) fn prepare_ssgi_composite_bind_groups(
         let copy = device.create_bind_group(
             "prism SSGI composite copy",
             &pipeline.copy_layout,
-            &BindGroupEntries::sequential((
-                visibility.scene_color_view(),
-                textures.gi_base_view(),
-            )),
+            &BindGroupEntries::sequential((visibility.scene_color_view(), textures.gi_base_view())),
         );
         let fold = device.create_bind_group(
             "prism SSGI composite fold",

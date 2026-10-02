@@ -28,9 +28,7 @@ use bevy_material::{
         binding_types::{storage_buffer_read_only_sized, texture_2d},
         BindGroupLayoutEntries,
     },
-    descriptor::{
-        BindGroupLayoutDescriptor, FragmentState, RenderPipelineDescriptor, VertexState,
-    },
+    descriptor::{BindGroupLayoutDescriptor, FragmentState, RenderPipelineDescriptor, VertexState},
 };
 use bevy_render::{
     render_resource::{

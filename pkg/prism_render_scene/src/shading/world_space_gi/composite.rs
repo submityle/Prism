@@ -11,7 +11,9 @@
 //! already folded into `scene_color` for the world-space gather under its
 //! confidence:
 //!
-//!     scene = base + confidence * albedo * (gi_out - ambient)
+//! ```text
+//! scene = base + confidence * albedo * (gi_out - ambient)
+//! ```
 //!
 //! A fully confident pixel (`a == 1`) replaces the flat ambient with the
 //! world-space indirect irradiance; a miss (`a == 0`) leaves the shaded colour
@@ -126,8 +128,10 @@ pub(crate) fn init_world_space_gi_composite_pipeline(
     let fold_layout =
         device.create_bind_group_layout("prism world-space GI composite fold", &fold_entries);
 
-    let shader: Handle<Shader> =
-        load_embedded_asset!(asset_server.as_ref(), "../shaders/world_space_gi_composite.wesl");
+    let shader: Handle<Shader> = load_embedded_asset!(
+        asset_server.as_ref(),
+        "../shaders/world_space_gi_composite.wesl"
+    );
 
     let copy = cache.queue_compute_pipeline(ComputePipelineDescriptor {
         label: Some("prism world-space GI composite copy".into()),
@@ -179,10 +183,7 @@ pub(crate) fn prepare_world_space_gi_composite_bind_groups(
         let copy = device.create_bind_group(
             "prism world-space GI composite copy",
             &pipeline.copy_layout,
-            &BindGroupEntries::sequential((
-                visibility.scene_color_view(),
-                gi.gi_base_view(),
-            )),
+            &BindGroupEntries::sequential((visibility.scene_color_view(), gi.gi_base_view())),
         );
         let fold = device.create_bind_group(
             "prism world-space GI composite fold",

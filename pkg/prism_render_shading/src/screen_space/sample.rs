@@ -51,7 +51,11 @@ pub fn orthonormal_basis(normal: Vec3) -> (Vec3, Vec3) {
     let sign = if normal.z >= 0.0 { 1.0 } else { -1.0 };
     let a = -1.0 / (sign + normal.z);
     let b = normal.x * normal.y * a;
-    let tangent = Vec3::new(1.0 + sign * normal.x * normal.x * a, sign * b, -sign * normal.x);
+    let tangent = Vec3::new(
+        1.0 + sign * normal.x * normal.x * a,
+        sign * b,
+        -sign * normal.x,
+    );
     let bitangent = Vec3::new(b, sign + normal.y * normal.y * a, -normal.y);
     (tangent, bitangent)
 }
@@ -70,7 +74,11 @@ pub fn importance_sample_ggx(xi: Vec2, roughness: f32, normal: Vec3) -> Vec3 {
     // GGX NDF inverse-CDF for the half-vector polar angle.
     let cos_theta = ops::sqrt(((1.0 - xi.y) / (1.0 + (alpha * alpha - 1.0) * xi.y)).max(0.0));
     let sin_theta = ops::sqrt((1.0 - cos_theta * cos_theta).max(0.0));
-    let h_tangent = Vec3::new(sin_theta * ops::cos(phi), sin_theta * ops::sin(phi), cos_theta);
+    let h_tangent = Vec3::new(
+        sin_theta * ops::cos(phi),
+        sin_theta * ops::sin(phi),
+        cos_theta,
+    );
 
     let n = normal.normalize_or_zero();
     if n == Vec3::ZERO {
@@ -157,7 +165,10 @@ mod tests {
         let n = Vec3::new(0.2, 0.3, 0.9).normalize();
         for i in 0..8u32 {
             let h = importance_sample_ggx(hammersley(i, 8), 1.0e-3, n);
-            assert!((h - n).length() < 1.0e-2, "sample {i} should hug the normal");
+            assert!(
+                (h - n).length() < 1.0e-2,
+                "sample {i} should hug the normal"
+            );
         }
     }
 

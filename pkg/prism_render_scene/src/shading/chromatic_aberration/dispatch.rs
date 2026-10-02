@@ -20,12 +20,12 @@ use bevy_render::{
     renderer::{RenderContext, ViewQuery},
 };
 
+use super::super::resources::ViewVisibilityBuffer;
 use super::abi::CHROMATIC_ABERRATION_WORKGROUP_SIZE;
 use super::bind_groups::ViewChromaticAberrationBindGroups;
 use super::pipeline::ChromaticAberrationPipeline;
 use super::resources::ViewChromaticAberration;
 use super::settings::PrismChromaticAberrationSettings;
-use super::super::resources::ViewVisibilityBuffer;
 
 /// `Core3d` scheduling system recording the chromatic-aberration dispatch for
 /// every view whose aberration texture and bind group are resident, then

@@ -174,11 +174,7 @@ fn effective_radius(light: &PunctualLight, intensity_cutoff: f32) -> f32 {
     if light.range.is_finite() && light.range > 0.0 {
         return light.range;
     }
-    let max_intensity = light
-        .intensity
-        .iter()
-        .copied()
-        .fold(0.0_f32, f32::max);
+    let max_intensity = light.intensity.iter().copied().fold(0.0_f32, f32::max);
     if max_intensity <= 0.0 {
         return 0.0;
     }
@@ -252,9 +248,14 @@ mod tests {
     fn in_frustum_point_light_touches_some_clusters() {
         let (grid, view, proj) = setup();
         let light = PunctualLight::point([0.0, 0.0, -10.0], [50.0; 3], 4.0);
-        let assignment =
-            assign_lights_to_clusters(&grid, &view, &proj, &[light], ClusterAssignmentConfig::default())
-                .unwrap();
+        let assignment = assign_lights_to_clusters(
+            &grid,
+            &view,
+            &proj,
+            &[light],
+            ClusterAssignmentConfig::default(),
+        )
+        .unwrap();
         assert!(totals(&assignment) > 0);
     }
 
@@ -263,9 +264,14 @@ mod tests {
         let (grid, view, proj) = setup();
         // Positive `z` is behind a camera looking down `-z`.
         let light = PunctualLight::point([0.0, 0.0, 12.0], [50.0; 3], 5.0);
-        let assignment =
-            assign_lights_to_clusters(&grid, &view, &proj, &[light], ClusterAssignmentConfig::default())
-                .unwrap();
+        let assignment = assign_lights_to_clusters(
+            &grid,
+            &view,
+            &proj,
+            &[light],
+            ClusterAssignmentConfig::default(),
+        )
+        .unwrap();
         assert_eq!(totals(&assignment), 0);
         assert!(assignment.light_indices.is_empty());
     }
@@ -295,7 +301,10 @@ mod tests {
             )
             .unwrap(),
         );
-        assert!(large_total > small_total, "small {small_total} large {large_total}");
+        assert!(
+            large_total > small_total,
+            "small {small_total} large {large_total}"
+        );
     }
 
     #[test]
@@ -305,14 +314,7 @@ mod tests {
         let range = 30.0;
         let point = PunctualLight::point(position, [200.0; 3], range);
         // Narrow cone pointing further down `-z`.
-        let spot = PunctualLight::spot(
-            position,
-            [200.0; 3],
-            range,
-            [0.0, 0.0, -1.0],
-            0.98,
-            0.95,
-        );
+        let spot = PunctualLight::spot(position, [200.0; 3], range, [0.0, 0.0, -1.0], 0.98, 0.95);
         let point_total = totals(
             &assign_lights_to_clusters(
                 &grid,
@@ -351,8 +353,7 @@ mod tests {
             max_lights_per_cluster: 2,
             ..ClusterAssignmentConfig::default()
         };
-        let assignment =
-            assign_lights_to_clusters(&grid, &view, &proj, &lights, config).unwrap();
+        let assignment = assign_lights_to_clusters(&grid, &view, &proj, &lights, config).unwrap();
         for entry in &assignment.offsets_and_counts {
             assert!(entry[1] <= 2, "count {} exceeds cap", entry[1]);
         }
@@ -365,9 +366,14 @@ mod tests {
             PunctualLight::point([1.0, 0.0, -8.0], [80.0; 3], 6.0),
             PunctualLight::point([-2.0, 1.0, -14.0], [80.0; 3], 8.0),
         ];
-        let assignment =
-            assign_lights_to_clusters(&grid, &view, &proj, &lights, ClusterAssignmentConfig::default())
-                .unwrap();
+        let assignment = assign_lights_to_clusters(
+            &grid,
+            &view,
+            &proj,
+            &lights,
+            ClusterAssignmentConfig::default(),
+        )
+        .unwrap();
 
         let mut running = 0u32;
         for (linear, entry) in assignment.offsets_and_counts.iter().enumerate() {

@@ -288,11 +288,7 @@ fn embed_reconstructs_render_vertices_on_gpu() {
     let sim = host_triangle().to_vec();
     // 面内质心（无偏移）、单顶点（w0=1）、以及带正/负法线偏移的一般点。
     let bindings = vec![
-        BarycentricBinding::new(
-            [0, 1, 2],
-            (1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0),
-            0.0,
-        ),
+        BarycentricBinding::new([0, 1, 2], (1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0), 0.0),
         BarycentricBinding::new([0, 1, 2], (1.0, 0.0, 0.0), 0.5),
         BarycentricBinding::new([0, 1, 2], (0.2, 0.3, 0.5), -0.75),
         BarycentricBinding::new([0, 1, 2], (0.5, 0.25, 0.25), 1.25),
@@ -319,11 +315,7 @@ fn embed_degenerate_host_triangle_drops_offset_on_gpu() {
         Vec3::new(1.0, 0.0, 0.0),
         Vec3::new(2.0, 0.0, 0.0),
     ];
-    let bindings = vec![BarycentricBinding::new(
-        [0, 1, 2],
-        (0.25, 0.25, 0.5),
-        5.0,
-    )];
+    let bindings = vec![BarycentricBinding::new([0, 1, 2], (0.25, 0.25, 0.5), 5.0)];
     assert_embed_parity(&device, &queue, &wgsl, &entry, &sim, &bindings);
 }
 

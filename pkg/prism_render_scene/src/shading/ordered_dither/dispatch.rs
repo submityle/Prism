@@ -23,12 +23,12 @@ use bevy_render::{
     renderer::{RenderContext, ViewQuery},
 };
 
+use super::super::resources::ViewVisibilityBuffer;
 use super::abi::ORDERED_DITHER_WORKGROUP_SIZE;
 use super::bind_groups::ViewOrderedDitherBindGroup;
 use super::pipeline::OrderedDitherPipeline;
 use super::resources::ViewOrderedDither;
 use super::settings::PrismOrderedDitherSettings;
-use super::super::resources::ViewVisibilityBuffer;
 
 /// `Core3d` scheduling system recording the `ordered_dither_main` dispatch for
 /// every view whose ordered-dither texture and bind group are resident.

@@ -27,12 +27,12 @@ use bevy_render::{
     view::ExtractedView,
 };
 
+use super::super::resources::ViewVisibilityBuffer;
 use super::abi::{GpuDofCocParams, GpuDofCompositeParams, GpuDofGatherParams, DOF_WORKGROUP_SIZE};
 use super::bind_groups::ViewDofBindGroups;
 use super::pipeline::DofPipeline;
 use super::resources::ViewDof;
 use super::settings::PrismDofSettings;
-use super::super::resources::ViewVisibilityBuffer;
 
 /// `Core3d` scheduling system recording the
 /// `dof_coc` -> `dof_gather` -> `dof_composite` chain for every view whose `DoF`

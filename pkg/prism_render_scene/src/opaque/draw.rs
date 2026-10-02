@@ -75,36 +75,36 @@ pub(super) fn draw_direct_mesh<'w>(
     allocator: &'w MeshAllocator,
     pass: &mut TrackedRenderPass<'w>,
 ) -> RenderCommandResult {
-        let Some(address) = address else {
-            return RenderCommandResult::Skip;
-        };
-        let Some(mesh_id) = instances.mesh_asset_id(item.main_entity()) else {
-            return RenderCommandResult::Skip;
-        };
-        let Some(mesh) = meshes.get(mesh_id) else {
-            return RenderCommandResult::Skip;
-        };
-        let Some(vertices) = allocator.mesh_vertex_slice(&mesh_id) else {
-            return RenderCommandResult::Skip;
-        };
-        pass.set_vertex_buffer(0, vertices.buffer.slice(..));
-        let instances = address.index..address.index.saturating_add(1);
-        match mesh.buffer_info {
-            RenderMeshBufferInfo::Indexed {
-                index_format,
-                count,
-            } => {
-                let Some(indices) = allocator.mesh_index_slice(&mesh_id) else {
-                    return RenderCommandResult::Skip;
-                };
-                pass.set_index_buffer(indices.buffer.slice(..), index_format);
-                pass.draw_indexed(
-                    indices.range.start..indices.range.start + count,
-                    vertices.range.start as i32,
-                    instances,
-                );
-            }
-            RenderMeshBufferInfo::NonIndexed => pass.draw(vertices.range, instances),
+    let Some(address) = address else {
+        return RenderCommandResult::Skip;
+    };
+    let Some(mesh_id) = instances.mesh_asset_id(item.main_entity()) else {
+        return RenderCommandResult::Skip;
+    };
+    let Some(mesh) = meshes.get(mesh_id) else {
+        return RenderCommandResult::Skip;
+    };
+    let Some(vertices) = allocator.mesh_vertex_slice(&mesh_id) else {
+        return RenderCommandResult::Skip;
+    };
+    pass.set_vertex_buffer(0, vertices.buffer.slice(..));
+    let instances = address.index..address.index.saturating_add(1);
+    match mesh.buffer_info {
+        RenderMeshBufferInfo::Indexed {
+            index_format,
+            count,
+        } => {
+            let Some(indices) = allocator.mesh_index_slice(&mesh_id) else {
+                return RenderCommandResult::Skip;
+            };
+            pass.set_index_buffer(indices.buffer.slice(..), index_format);
+            pass.draw_indexed(
+                indices.range.start..indices.range.start + count,
+                vertices.range.start as i32,
+                instances,
+            );
         }
-        RenderCommandResult::Success
+        RenderMeshBufferInfo::NonIndexed => pass.draw(vertices.range, instances),
+    }
+    RenderCommandResult::Success
 }

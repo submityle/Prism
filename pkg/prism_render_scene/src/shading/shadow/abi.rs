@@ -171,7 +171,9 @@ impl GpuDirectionalShadow {
 
         let (filter_kind, pcf_radius, pcss) = match config.filter {
             ShadowFilter::Pcf { radius } => (SHADOW_FILTER_PCF, radius, None),
-            ShadowFilter::Pcss(cfg) => (SHADOW_FILTER_PCSS, cfg.min_filter_radius.max(1), Some(cfg)),
+            ShadowFilter::Pcss(cfg) => {
+                (SHADOW_FILTER_PCSS, cfg.min_filter_radius.max(1), Some(cfg))
+            }
         };
         let pcss = pcss.unwrap_or(PcssConfig {
             search_radius: 0,
@@ -365,7 +367,9 @@ impl GpuSpotShadow {
     ) -> Self {
         let (filter_kind, pcf_radius, pcss) = match config.filter {
             ShadowFilter::Pcf { radius } => (SHADOW_FILTER_PCF, radius, None),
-            ShadowFilter::Pcss(cfg) => (SHADOW_FILTER_PCSS, cfg.min_filter_radius.max(1), Some(cfg)),
+            ShadowFilter::Pcss(cfg) => {
+                (SHADOW_FILTER_PCSS, cfg.min_filter_radius.max(1), Some(cfg))
+            }
         };
         let pcss = pcss.unwrap_or(PcssConfig {
             search_radius: 0,
@@ -398,7 +402,9 @@ impl GpuSpotShadow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use prism_render_shading::{compute_cascade_splits, spot_view_projection, CascadeMatrix, SpotShadowConfig};
+    use prism_render_shading::{
+        compute_cascade_splits, spot_view_projection, CascadeMatrix, SpotShadowConfig,
+    };
 
     #[test]
     fn shadow_records_are_16_byte_aligned_and_sized() {
@@ -523,7 +529,8 @@ mod tests {
             }),
         };
 
-        let gpu = GpuSpotShadow::from_reference(vp, &config, 0.05, [1.0 / 256.0, 1.0 / 256.0], 5, 11);
+        let gpu =
+            GpuSpotShadow::from_reference(vp, &config, 0.05, [1.0 / 256.0, 1.0 / 256.0], 5, 11);
 
         assert_eq!(gpu.light_view_projection, vp);
         assert_eq!(gpu.filter_kind, SHADOW_FILTER_PCSS);
@@ -550,8 +557,7 @@ mod tests {
             max_depth_bias: 0.01,
             filter: ShadowFilter::Pcf { radius: 3 },
         };
-        let gpu =
-            GpuSpotShadow::from_reference([0.0; 16], &config, 0.0, [1.0, 1.0], 0, 0);
+        let gpu = GpuSpotShadow::from_reference([0.0; 16], &config, 0.0, [1.0, 1.0], 0, 0);
         assert_eq!(gpu.filter_kind, SHADOW_FILTER_PCF);
         assert_eq!(gpu.pcf_radius, 3);
         assert_eq!(gpu.pcss_search_radius, 0);

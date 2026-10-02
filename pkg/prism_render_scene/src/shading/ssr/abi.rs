@@ -53,7 +53,12 @@ impl GpuSsrPrepassParams {
     /// framebuffer extent. Both matrices are uploaded column-major (via
     /// [`Mat4::to_cols_array`]) so the WGSL `mat4x4<f32>` multiply agrees
     /// byte-for-byte.
-    pub(crate) fn new(view_from_world: Mat4, clip_from_view: Mat4, width: u32, height: u32) -> Self {
+    pub(crate) fn new(
+        view_from_world: Mat4,
+        clip_from_view: Mat4,
+        width: u32,
+        height: u32,
+    ) -> Self {
         Self {
             view_from_world: view_from_world.to_cols_array(),
             clip_from_view: clip_from_view.to_cols_array(),
@@ -407,8 +412,10 @@ mod tests {
         // alignment, and the fields round-trip in declaration order.
         assert_eq!(size_of::<GpuSsrHzbParams>(), 16);
         assert_eq!(align_of::<GpuSsrHzbParams>(), 4);
-        let params =
-            GpuSsrHzbParams::new(bevy_math::UVec2::new(960, 540), bevy_math::UVec2::new(1920, 1080));
+        let params = GpuSsrHzbParams::new(
+            bevy_math::UVec2::new(960, 540),
+            bevy_math::UVec2::new(1920, 1080),
+        );
         assert_eq!(params.dst_width, 960);
         assert_eq!(params.dst_height, 540);
         assert_eq!(params.src_width, 1920);
@@ -470,8 +477,15 @@ mod tests {
             17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0, 24.0, 25.0, 26.0, 27.0, 28.0, 29.0, 30.0,
             31.0, 32.0,
         ]);
-        let config =
-            GpuSsrConfig::from_view(clip, inv, 0.5, 100.0, bevy_math::UVec2::new(1920, 1080), 7.0, 8);
+        let config = GpuSsrConfig::from_view(
+            clip,
+            inv,
+            0.5,
+            100.0,
+            bevy_math::UVec2::new(1920, 1080),
+            7.0,
+            8,
+        );
         assert_eq!(config.clip_from_view, clip.to_cols_array());
         assert_eq!(config.view_from_clip, inv.to_cols_array());
         assert_eq!(config.near, 0.5);

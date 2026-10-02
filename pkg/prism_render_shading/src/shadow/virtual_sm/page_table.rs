@@ -34,12 +34,7 @@ pub fn page_order(key: &ShadowPageKey) -> PageOrder {
 /// [`page_order`]).
 pub fn key_from_order(order: PageOrder) -> ShadowPageKey {
     let (light, level, y, x) = order;
-    ShadowPageKey {
-        light,
-        level,
-        x,
-        y,
-    }
+    ShadowPageKey { light, level, x, y }
 }
 
 /// Residency state of a single virtual shadow page.
@@ -134,7 +129,9 @@ impl VirtualPageTable {
 
     /// Returns the residency of `key` without touching the hit/miss counters.
     pub fn get(&self, key: &ShadowPageKey) -> Option<Residency> {
-        self.entries.get(&page_order(key)).map(|entry| entry.residency)
+        self.entries
+            .get(&page_order(key))
+            .map(|entry| entry.residency)
     }
 
     /// Whether `key` is tracked (in any residency state).
@@ -265,12 +262,7 @@ mod tests {
     use super::*;
 
     fn key(light: u32, level: u16, x: u16, y: u16) -> ShadowPageKey {
-        ShadowPageKey {
-            light,
-            level,
-            x,
-            y,
-        }
+        ShadowPageKey { light, level, x, y }
     }
 
     /// `page_order` and `key_from_order` must round-trip every field.

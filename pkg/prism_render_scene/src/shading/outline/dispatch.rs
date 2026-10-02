@@ -20,12 +20,12 @@ use bevy_render::{
     view::ExtractedView,
 };
 
+use super::super::resources::ViewVisibilityBuffer;
 use super::abi::OUTLINE_WORKGROUP_SIZE;
 use super::bind_groups::ViewOutlineBindGroup;
 use super::pipeline::OutlinePipeline;
 use super::resources::ViewOutline;
 use super::settings::PrismOutlineSettings;
-use super::super::resources::ViewVisibilityBuffer;
 
 /// `Core3d` scheduling system recording the `outline_main` dispatch for every
 /// view whose outline texture and bind group are resident.

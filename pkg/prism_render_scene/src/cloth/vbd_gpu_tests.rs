@@ -320,14 +320,22 @@ fn run_vbd_on_gpu(
         usage: BufferUsages::STORAGE,
     });
     let entries_fallback = [0u32];
-    let entries_src: &[u32] = if csr_entries.is_empty() { &entries_fallback } else { csr_entries };
+    let entries_src: &[u32] = if csr_entries.is_empty() {
+        &entries_fallback
+    } else {
+        csr_entries
+    };
     let entries_buf = device.create_buffer_init(&BufferInitDescriptor {
         label: Some("cloth_vbd_csr_entries"),
         contents: bytemuck::cast_slice(entries_src),
         usage: BufferUsages::STORAGE,
     });
     let order_fallback = [0u32];
-    let order_src: &[u32] = if color_order.is_empty() { &order_fallback } else { color_order };
+    let order_src: &[u32] = if color_order.is_empty() {
+        &order_fallback
+    } else {
+        color_order
+    };
     let order_buf = device.create_buffer_init(&BufferInitDescriptor {
         label: Some("cloth_vbd_color_order"),
         contents: bytemuck::cast_slice(order_src),
@@ -344,15 +352,42 @@ fn run_vbd_on_gpu(
         label: Some("cloth_vbd_parity_bind"),
         layout: &layout,
         entries: &[
-            BindGroupEntry { binding: 0, resource: positions_buf.as_entire_binding() },
-            BindGroupEntry { binding: 1, resource: velocities_buf.as_entire_binding() },
-            BindGroupEntry { binding: 2, resource: previous_buf.as_entire_binding() },
-            BindGroupEntry { binding: 3, resource: targets_buf.as_entire_binding() },
-            BindGroupEntry { binding: 4, resource: constraints_buf.as_entire_binding() },
-            BindGroupEntry { binding: 5, resource: offsets_buf.as_entire_binding() },
-            BindGroupEntry { binding: 6, resource: entries_buf.as_entire_binding() },
-            BindGroupEntry { binding: 7, resource: order_buf.as_entire_binding() },
-            BindGroupEntry { binding: 8, resource: params_buf.as_entire_binding() },
+            BindGroupEntry {
+                binding: 0,
+                resource: positions_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 1,
+                resource: velocities_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 2,
+                resource: previous_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 3,
+                resource: targets_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 4,
+                resource: constraints_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 5,
+                resource: offsets_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 6,
+                resource: entries_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 7,
+                resource: order_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 8,
+                resource: params_buf.as_entire_binding(),
+            },
         ],
     });
 
@@ -376,9 +411,8 @@ fn run_vbd_on_gpu(
     };
 
     let dispatch = |pipeline: &wgpu::ComputePipeline, groups: u32, label: &str| {
-        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
-            label: Some(label),
-        });
+        let mut encoder =
+            device.create_command_encoder(&CommandEncoderDescriptor { label: Some(label) });
         {
             let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
                 label: Some(label),
@@ -394,7 +428,11 @@ fn run_vbd_on_gpu(
     let per_particle_groups = count.div_ceil(64);
     for _ in 0..params.substeps {
         queue.write_buffer(&params_buf, 0, bytemuck::bytes_of(&base));
-        dispatch(&predict_pipeline, per_particle_groups, "cloth_vbd_predict_submit");
+        dispatch(
+            &predict_pipeline,
+            per_particle_groups,
+            "cloth_vbd_predict_submit",
+        );
         for _ in 0..params.iterations {
             for color in 0..coloring.color_count() as usize {
                 let range = coloring.color_range(color);
@@ -410,7 +448,11 @@ fn run_vbd_on_gpu(
             }
         }
         queue.write_buffer(&params_buf, 0, bytemuck::bytes_of(&base));
-        dispatch(&velocity_pipeline, per_particle_groups, "cloth_vbd_velocity_submit");
+        dispatch(
+            &velocity_pipeline,
+            per_particle_groups,
+            "cloth_vbd_velocity_submit",
+        );
     }
 
     (

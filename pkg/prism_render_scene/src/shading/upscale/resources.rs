@@ -269,9 +269,8 @@ pub(crate) fn prepare_upscale_textures(
 
     let mut retained = HashSet::<RetainedViewEntity>::new();
     for (entity, view, msaa, visibility, ssr) in &views {
-        let resident = visibility.is_some()
-            && ssr.is_some()
-            && msaa.is_none_or(|value| value.samples() == 1);
+        let resident =
+            visibility.is_some() && ssr.is_some() && msaa.is_none_or(|value| value.samples() == 1);
         let Some(visibility) = visibility.filter(|_| resident) else {
             commands.entity(entity).remove::<ViewUpscale>();
             cache.views.remove(&view.retained_view_entity);

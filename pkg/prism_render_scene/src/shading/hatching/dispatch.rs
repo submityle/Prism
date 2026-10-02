@@ -19,22 +19,18 @@ use bevy_render::{
     renderer::{RenderContext, ViewQuery},
 };
 
+use super::super::resources::ViewVisibilityBuffer;
 use super::abi::HATCHING_WORKGROUP_SIZE;
 use super::bind_groups::ViewHatchingBindGroup;
 use super::pipeline::HatchingPipeline;
 use super::resources::ViewHatching;
 use super::settings::PrismHatchingSettings;
-use super::super::resources::ViewVisibilityBuffer;
 
 /// `Core3d` scheduling system recording the `hatching_main` dispatch for every
 /// view whose hatching texture and bind group are resident.
 pub(crate) fn hatching_pass(
     settings: Res<PrismHatchingSettings>,
-    view: ViewQuery<(
-        &ViewHatching,
-        &ViewHatchingBindGroup,
-        &ViewVisibilityBuffer,
-    )>,
+    view: ViewQuery<(&ViewHatching, &ViewHatchingBindGroup, &ViewVisibilityBuffer)>,
     pipeline: Res<HatchingPipeline>,
     cache: Res<PipelineCache>,
     mut ctx: RenderContext,

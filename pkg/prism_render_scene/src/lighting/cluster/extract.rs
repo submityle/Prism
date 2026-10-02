@@ -48,10 +48,22 @@ fn perspective_rh_01(fov_y_radians: f32, aspect: f32, near: f32, far: f32) -> Ma
     let w = h / aspect;
     let r = far / (near - far);
     Mat4::from_cols_array(&[
-        w, 0.0, 0.0, 0.0, //
-        0.0, h, 0.0, 0.0, //
-        0.0, 0.0, r, -1.0, //
-        0.0, 0.0, r * near, 0.0,
+        w,
+        0.0,
+        0.0,
+        0.0, //
+        0.0,
+        h,
+        0.0,
+        0.0, //
+        0.0,
+        0.0,
+        r,
+        -1.0, //
+        0.0,
+        0.0,
+        r * near,
+        0.0,
     ])
 }
 

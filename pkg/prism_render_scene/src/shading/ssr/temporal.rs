@@ -75,8 +75,8 @@ use bevy_render::{
 };
 use bevy_shader::Shader;
 
-use super::abi::{GpuSsrTemporalParams, SSR_WORKGROUP_SIZE};
 use super::super::resources::ViewVisibilityBuffer;
+use super::abi::{GpuSsrTemporalParams, SSR_WORKGROUP_SIZE};
 use super::resources::{ViewSsrTextures, SSR_OUT_FORMAT};
 
 /// Compute pipeline, its owned group-0 layout, and the filtering sampler the

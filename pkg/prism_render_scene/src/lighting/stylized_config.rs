@@ -55,7 +55,10 @@ mod tests {
 
     #[test]
     fn default_is_legacy_toon() {
-        assert_eq!(StylizedLighting::default().params, StylizedParams::default());
+        assert_eq!(
+            StylizedLighting::default().params,
+            StylizedParams::default()
+        );
     }
 
     #[test]

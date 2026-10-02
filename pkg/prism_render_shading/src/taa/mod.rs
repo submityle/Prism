@@ -21,9 +21,7 @@ mod jitter;
 mod resolve;
 
 pub use jitter::{halton, taa_jitter, DEFAULT_TAA_JITTER_LEN};
-pub use resolve::{
-    resolve_taa, rgb_to_ycocg, tonemap_weight, ycocg_to_rgb, TaaParams,
-};
+pub use resolve::{resolve_taa, rgb_to_ycocg, tonemap_weight, ycocg_to_rgb, TaaParams};
 
 #[cfg(test)]
 mod tests {

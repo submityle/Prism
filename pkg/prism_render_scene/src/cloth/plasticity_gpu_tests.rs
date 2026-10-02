@@ -33,7 +33,9 @@ use wgpu::{
 };
 
 use prism_render_architecture::cloth::tearing::{apply_plasticity, PlasticParams};
-use prism_render_architecture::cloth::{ClothParticle, Compliance, Constraint, ConstraintKind, Vec3};
+use prism_render_architecture::cloth::{
+    ClothParticle, Compliance, Constraint, ConstraintKind, Vec3,
+};
 
 use super::abi::{GpuClothConstraint, GpuClothPlasticityParams};
 use super::gpu_test_support::{
@@ -238,7 +240,15 @@ fn assert_plasticity_parity(
     let positions = upload_positions(particles);
     let gpu_constraints = upload_constraints(constraints);
     let entry = find_entry_point(wgsl, "cloth_apply_plasticity");
-    let out = run_plasticity_on_gpu(device, queue, wgsl, &entry, &positions, &gpu_constraints, gpu_params);
+    let out = run_plasticity_on_gpu(
+        device,
+        queue,
+        wgsl,
+        &entry,
+        &positions,
+        &gpu_constraints,
+        gpu_params,
+    );
 
     assert_eq!(out.len(), golden.len());
     for (i, cpu) in golden.iter().enumerate() {
@@ -262,53 +272,95 @@ fn assert_plasticity_parity(
 /// yield creeps its rest length toward the current length under the residual
 /// clamp; the GPU must land on the golden's new rest value.
 #[test]
-#[expect(clippy::print_stderr, reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志")]
+#[expect(
+    clippy::print_stderr,
+    reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志"
+)]
 fn stretched_edge_creeps_like_golden() {
     let Some((device, queue)) = try_compute_device() else {
         eprintln!("stretched_edge_creeps_like_golden: no wgpu adapter, skipping");
         return;
     };
     let wgsl = compile_plasticity_wgsl();
-    let particles = [free_particle(Vec3::ZERO), free_particle(Vec3::new(1.5, 0.0, 0.0))];
+    let particles = [
+        free_particle(Vec3::ZERO),
+        free_particle(Vec3::new(1.5, 0.0, 0.0)),
+    ];
     let constraints = [stretch(0, 1, 1.0)];
-    assert_plasticity_parity(&device, &queue, &wgsl, &particles, &constraints, PlasticParams::default());
+    assert_plasticity_parity(
+        &device,
+        &queue,
+        &wgsl,
+        &particles,
+        &constraints,
+        PlasticParams::default(),
+    );
 }
 
 /// A compressed edge (len 0.5, rest 1.0, strain -0.5) exercises the negative
 /// strain branch: the sign of the excess and the residual clamp both flip.
 #[test]
-#[expect(clippy::print_stderr, reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志")]
+#[expect(
+    clippy::print_stderr,
+    reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志"
+)]
 fn compressed_edge_creeps_like_golden() {
     let Some((device, queue)) = try_compute_device() else {
         eprintln!("compressed_edge_creeps_like_golden: no wgpu adapter, skipping");
         return;
     };
     let wgsl = compile_plasticity_wgsl();
-    let particles = [free_particle(Vec3::ZERO), free_particle(Vec3::new(0.5, 0.0, 0.0))];
+    let particles = [
+        free_particle(Vec3::ZERO),
+        free_particle(Vec3::new(0.5, 0.0, 0.0)),
+    ];
     let constraints = [stretch(0, 1, 1.0)];
-    assert_plasticity_parity(&device, &queue, &wgsl, &particles, &constraints, PlasticParams::default());
+    assert_plasticity_parity(
+        &device,
+        &queue,
+        &wgsl,
+        &particles,
+        &constraints,
+        PlasticParams::default(),
+    );
 }
 
 /// An edge within the yield band (len 1.05, rest 1.0, strain 0.05 < 0.1 yield)
 /// is untouched; the GPU must reproduce the golden's exact no-op.
 #[test]
-#[expect(clippy::print_stderr, reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志")]
+#[expect(
+    clippy::print_stderr,
+    reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志"
+)]
 fn within_yield_band_is_a_no_op() {
     let Some((device, queue)) = try_compute_device() else {
         eprintln!("within_yield_band_is_a_no_op: no wgpu adapter, skipping");
         return;
     };
     let wgsl = compile_plasticity_wgsl();
-    let particles = [free_particle(Vec3::ZERO), free_particle(Vec3::new(1.05, 0.0, 0.0))];
+    let particles = [
+        free_particle(Vec3::ZERO),
+        free_particle(Vec3::new(1.05, 0.0, 0.0)),
+    ];
     let constraints = [stretch(0, 1, 1.0)];
-    assert_plasticity_parity(&device, &queue, &wgsl, &particles, &constraints, PlasticParams::default());
+    assert_plasticity_parity(
+        &device,
+        &queue,
+        &wgsl,
+        &particles,
+        &constraints,
+        PlasticParams::default(),
+    );
 }
 
 /// A one-sided leash (LRA / tether) never creeps even when badly over-stretched,
 /// exactly like the golden `edge_strain` returning `None`; a stretched structural
 /// edge in the same batch still creeps, proving the per-kind guard is per-edge.
 #[test]
-#[expect(clippy::print_stderr, reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志")]
+#[expect(
+    clippy::print_stderr,
+    reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志"
+)]
 fn one_sided_leashes_never_creep() {
     let Some((device, queue)) = try_compute_device() else {
         eprintln!("one_sided_leashes_never_creep: no wgpu adapter, skipping");
@@ -325,41 +377,67 @@ fn one_sided_leashes_never_creep() {
         Constraint::new(1, 2, 1.0, Compliance::RIGID, ConstraintKind::Tether),
         stretch(0, 2, 1.0),
     ];
-    assert_plasticity_parity(&device, &queue, &wgsl, &particles, &constraints, PlasticParams::default());
+    assert_plasticity_parity(
+        &device,
+        &queue,
+        &wgsl,
+        &particles,
+        &constraints,
+        PlasticParams::default(),
+    );
 }
 
 /// A degenerate (near-zero rest) edge and an out-of-range endpoint are both
 /// skipped by the golden `edge_strain` guards; the GPU mirrors both, leaving a
 /// neighbouring valid stretched edge free to creep.
 #[test]
-#[expect(clippy::print_stderr, reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志")]
+#[expect(
+    clippy::print_stderr,
+    reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志"
+)]
 fn degenerate_and_out_of_range_edges_are_skipped() {
     let Some((device, queue)) = try_compute_device() else {
         eprintln!("degenerate_and_out_of_range_edges_are_skipped: no wgpu adapter, skipping");
         return;
     };
     let wgsl = compile_plasticity_wgsl();
-    let particles = [free_particle(Vec3::ZERO), free_particle(Vec3::new(1.5, 0.0, 0.0))];
+    let particles = [
+        free_particle(Vec3::ZERO),
+        free_particle(Vec3::new(1.5, 0.0, 0.0)),
+    ];
     let constraints = [
         stretch(0, 1, 1.0e-12),
         stretch(0, 9, 1.0),
         stretch(0, 1, 1.0),
     ];
-    assert_plasticity_parity(&device, &queue, &wgsl, &particles, &constraints, PlasticParams::default());
+    assert_plasticity_parity(
+        &device,
+        &queue,
+        &wgsl,
+        &particles,
+        &constraints,
+        PlasticParams::default(),
+    );
 }
 
 /// A high creep with a tight `max_strain` cap forces the residual-clamp branch:
 /// the first `new_rest` would leave more than `max_strain` residual, so both paths
 /// must re-solve `new_rest = len / (1 + sign * max_strain)` identically.
 #[test]
-#[expect(clippy::print_stderr, reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志")]
+#[expect(
+    clippy::print_stderr,
+    reason = "无合适 wgpu 设备的主机上，跳过提示需要进入测试日志"
+)]
 fn residual_clamp_branch_matches_golden() {
     let Some((device, queue)) = try_compute_device() else {
         eprintln!("residual_clamp_branch_matches_golden: no wgpu adapter, skipping");
         return;
     };
     let wgsl = compile_plasticity_wgsl();
-    let particles = [free_particle(Vec3::ZERO), free_particle(Vec3::new(2.0, 0.0, 0.0))];
+    let particles = [
+        free_particle(Vec3::ZERO),
+        free_particle(Vec3::new(2.0, 0.0, 0.0)),
+    ];
     let constraints = [stretch(0, 1, 1.0)];
     let params = PlasticParams {
         yield_strain: 0.1,

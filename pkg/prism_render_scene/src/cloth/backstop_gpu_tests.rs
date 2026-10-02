@@ -332,7 +332,9 @@ fn backstop_handles_non_unit_and_oblique_normals() {
 )]
 fn backstop_zero_normal_is_inert_on_gpu() {
     let Some((device, queue)) = try_compute_device() else {
-        eprintln!("backstop_zero_normal_is_inert_on_gpu: no wgpu adapter, skipping on-device parity");
+        eprintln!(
+            "backstop_zero_normal_is_inert_on_gpu: no wgpu adapter, skipping on-device parity"
+        );
         return;
     };
     let wgsl = compile_collision_wgsl();
@@ -389,6 +391,10 @@ fn empty_backstop_set_is_noop_on_gpu() {
     let entry = find_entry_point(&wgsl, "cloth_backstop");
 
     let backstops: [Backstop; 0] = [];
-    let particles = [free(0.3, -4.0, 0.5), pinned(1.0, 1.0, 1.0), free(-2.0, 0.0, 0.0)];
+    let particles = [
+        free(0.3, -4.0, 0.5),
+        pinned(1.0, 1.0, 1.0),
+        free(-2.0, 0.0, 0.0),
+    ];
     assert_backstop_parity(&device, &queue, &wgsl, &entry, &particles, &backstops);
 }

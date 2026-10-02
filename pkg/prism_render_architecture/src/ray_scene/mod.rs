@@ -526,7 +526,10 @@
 //!   contact resolution.
 //! - [`sdf_csg`] — constructive-solid-geometry operators on signed distances
 //!   ([`sdf_csg::union`], [`sdf_csg::intersection`], [`sdf_csg::subtraction`]
-//!   and their smooth, filleted variants) for composing distance fields.
+//!   and their smooth, filleted variants, plus blend-reporting
+//!   [`sdf_csg::smooth_union_blend`] / [`sdf_csg::smooth_intersection_blend`] /
+//!   [`sdf_csg::smooth_subtraction_blend`] for seam material interpolation)
+//!   for composing distance fields.
 //! - [`mesh_voxel_padding`] — margin padding of a voxel grid
 //!   ([`mesh_voxel_padding::pad_voxel_grid`]) that grows the lattice by a
 //!   fixed band of empty cells on every face, carving the exterior shell
@@ -911,7 +914,8 @@ pub use mesh_sdf_curvature_masks::{
 };
 pub use mesh_sdf_surface_projection::{project_to_surface, SurfaceProjection};
 pub use sdf_csg::{
-    intersection, smooth_intersection, smooth_subtraction, smooth_union, subtraction, union,
+    intersection, smooth_intersection, smooth_intersection_blend, smooth_subtraction,
+    smooth_subtraction_blend, smooth_union, smooth_union_blend, subtraction, union,
 };
 pub use mesh_voxel_padding::pad_voxel_grid;
 pub use mesh_sdf_soft_shadow::{sdf_soft_shadow, SoftShadow};

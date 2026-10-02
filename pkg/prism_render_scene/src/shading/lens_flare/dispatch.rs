@@ -18,12 +18,12 @@ use bevy_render::{
     renderer::{RenderContext, ViewQuery},
 };
 
+use super::super::resources::ViewVisibilityBuffer;
 use super::abi::LENS_FLARE_WORKGROUP_SIZE;
 use super::bind_groups::ViewLensFlareBindGroup;
 use super::pipeline::LensFlarePipeline;
 use super::resources::ViewLensFlare;
 use super::settings::PrismLensFlareSettings;
-use super::super::resources::ViewVisibilityBuffer;
 
 /// `Core3d` scheduling system recording the `lens_flare_main` dispatch for
 /// every view whose flare texture and bind group are resident.

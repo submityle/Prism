@@ -71,7 +71,10 @@ impl ViewExposureBuffers {
 pub(crate) fn prepare_exposure_buffers(
     mut commands: Commands,
     device: Res<RenderDevice>,
-    views: Query<(Entity, &ExtractedCamera), (With<ViewVisibilityBuffer>, Without<ViewExposureBuffers>)>,
+    views: Query<
+        (Entity, &ExtractedCamera),
+        (With<ViewVisibilityBuffer>, Without<ViewExposureBuffers>),
+    >,
 ) {
     for (entity, camera) in &views {
         // A view without a known viewport never dispatched the visibility path,
@@ -104,9 +107,6 @@ mod tests {
 
     #[test]
     fn histogram_buffer_is_one_u32_per_bin() {
-        assert_eq!(
-            u64::from(EXPOSURE_BIN_COUNT) * size_of::<u32>() as u64,
-            256
-        );
+        assert_eq!(u64::from(EXPOSURE_BIN_COUNT) * size_of::<u32>() as u64, 256);
     }
 }

@@ -133,7 +133,9 @@ pub(crate) fn prepare_shadow_depth_uniform(
     uniform.buffer.clear();
     offsets.0.clear();
     for draw in &extracted.depth_draws {
-        let offset = uniform.buffer.push(&GpuShadowDepthView::from_view(&draw.view));
+        let offset = uniform
+            .buffer
+            .push(&GpuShadowDepthView::from_view(&draw.view));
         offsets.0.push(offset);
     }
     if extracted.depth_draws.is_empty() {

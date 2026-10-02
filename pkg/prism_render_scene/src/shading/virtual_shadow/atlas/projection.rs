@@ -180,13 +180,29 @@ mod tests {
 
         // Lower-left world corner -> NDC top-left (-1, +1).
         let lower_left = project_to_ndc(&matrix, Vec3::new(2.0, 3.0, 0.0));
-        assert!((lower_left.x - -1.0).abs() < 1.0e-5, "ll.x = {}", lower_left.x);
-        assert!((lower_left.y - 1.0).abs() < 1.0e-5, "ll.y = {}", lower_left.y);
+        assert!(
+            (lower_left.x - -1.0).abs() < 1.0e-5,
+            "ll.x = {}",
+            lower_left.x
+        );
+        assert!(
+            (lower_left.y - 1.0).abs() < 1.0e-5,
+            "ll.y = {}",
+            lower_left.y
+        );
 
         // Upper-right world corner -> NDC bottom-right (+1, -1).
         let upper_right = project_to_ndc(&matrix, Vec3::new(6.0, 7.0, 0.0));
-        assert!((upper_right.x - 1.0).abs() < 1.0e-5, "ur.x = {}", upper_right.x);
-        assert!((upper_right.y - -1.0).abs() < 1.0e-5, "ur.y = {}", upper_right.y);
+        assert!(
+            (upper_right.x - 1.0).abs() < 1.0e-5,
+            "ur.x = {}",
+            upper_right.x
+        );
+        assert!(
+            (upper_right.y - -1.0).abs() < 1.0e-5,
+            "ur.y = {}",
+            upper_right.y
+        );
 
         // Page centre -> NDC origin.
         let centre = project_to_ndc(&matrix, Vec3::new(4.0, 5.0, 0.0));
@@ -247,7 +263,10 @@ mod tests {
     #[test]
     fn viewport_rect_is_the_page_sized_tile_at_the_origin() {
         assert_eq!(page_viewport_rect(UVec2::ZERO, 128), (0, 0, 128, 128));
-        assert_eq!(page_viewport_rect(UVec2::new(256, 384), 128), (256, 384, 128, 128));
+        assert_eq!(
+            page_viewport_rect(UVec2::new(256, 384), 128),
+            (256, 384, 128, 128)
+        );
         // A zero page size is clamped to one texel so the copy extent is valid.
         assert_eq!(page_viewport_rect(UVec2::new(10, 20), 0), (10, 20, 1, 1));
     }
@@ -263,10 +282,14 @@ mod tests {
             page_coord_bias: 32_768,
         };
         let coarsest = clipmap.level_count() - 1;
-        let expected =
-            clipmap.page_world_size(coarsest) * f32::from(clipmap.pages_per_level_edge);
+        let expected = clipmap.page_world_size(coarsest) * f32::from(clipmap.pages_per_level_edge);
         let extent = caster_depth_half_extent(&clipmap);
-        assert!((extent - expected).abs() < 1.0e-3, "extent {} vs {}", extent, expected);
+        assert!(
+            (extent - expected).abs() < 1.0e-3,
+            "extent {} vs {}",
+            extent,
+            expected
+        );
         assert!(extent >= MIN_DEPTH_HALF_EXTENT);
     }
 }

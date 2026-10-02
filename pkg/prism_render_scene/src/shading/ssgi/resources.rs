@@ -196,7 +196,10 @@ mod tests {
         // copy.
         assert_eq!(SSGI_OUT_FORMAT, TextureFormat::Rgba16Float);
         assert_eq!(SSGI_BASE_FORMAT, TextureFormat::Rgba16Float);
-        assert_eq!(SSGI_BASE_FORMAT, super::super::super::resources::SCENE_COLOR_FORMAT);
+        assert_eq!(
+            SSGI_BASE_FORMAT,
+            super::super::super::resources::SCENE_COLOR_FORMAT
+        );
         // The denoised gather shares the raw gather's wide-HDR encoding.
         assert_eq!(SSGI_DENOISED_FORMAT, TextureFormat::Rgba16Float);
         assert_eq!(SSGI_DENOISED_FORMAT, SSGI_OUT_FORMAT);

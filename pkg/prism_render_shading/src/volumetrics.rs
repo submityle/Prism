@@ -324,7 +324,10 @@ mod tests {
     fn clear_slices_pass_light_through_and_sum_sources() {
         // Vacuum froxels (no extinction) => transmittance stays 1, in-scatter
         // is just the sum of source * thickness.
-        let col = [clear_froxel([1.0, 0.0, 0.0], 1.0), clear_froxel([0.0, 2.0, 0.0], 0.5)];
+        let col = [
+            clear_froxel([1.0, 0.0, 0.0], 1.0),
+            clear_froxel([0.0, 2.0, 0.0], 0.5),
+        ];
         let out = integrate_froxel_column(&col);
         assert_eq!(out.transmittance, [1.0; 3]);
         assert!((out.in_scattering[0] - 1.0).abs() < 1.0e-6);
@@ -365,7 +368,11 @@ mod tests {
         // Transmittance after the opaque slice is ~0, so the far slice's 10.0
         // is almost entirely blocked.
         assert!(out.transmittance[0] < 1.0e-10);
-        assert!(out.in_scattering[0] < 0.2, "far slice leaked: {}", out.in_scattering[0]);
+        assert!(
+            out.in_scattering[0] < 0.2,
+            "far slice leaked: {}",
+            out.in_scattering[0]
+        );
     }
 
     #[test]
