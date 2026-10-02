@@ -79,6 +79,7 @@ pub mod metal;
 pub mod microfacet;
 pub mod microfacet_aniso;
 pub mod mis;
+pub mod octahedral;
 pub mod oren_nayar;
 pub mod rough_dielectric;
 pub mod rough_dielectric_aniso;
