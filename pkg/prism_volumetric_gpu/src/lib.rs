@@ -218,6 +218,7 @@ pub mod virga_veil;
 pub mod volume_scene_shadow_cast;
 pub mod volumetric_multiscatter;
 pub mod vorticity_confinement;
+pub mod wind_field;
 pub mod worley;
 
 pub use aabb_transform::{AabbTransformQuery, AabbTransformResult, GpuAabbTransform};
@@ -424,4 +425,5 @@ pub use volumetric_multiscatter::{
     GpuVolumetricMultiScatter, MultiScatterQuery, VolumetricMultiScatterResponse,
 };
 pub use vorticity_confinement::{GpuVorticityConfinement, VorticityResult};
+pub use wind_field::{GpuWindField, WindFieldQuery, WindFieldResult};
 pub use worley::{GpuWorley, WorleyQuery};
