@@ -10,21 +10,19 @@
 //! snapping the particle to the surface with a skin offset and reflecting its
 //! normal velocity by a restitution coefficient.
 //!
-//! The TOI solvers are exact closed forms: a sphere is a single quadratic, a
-//! half-space is linear, and a capsule is the union of an infinite cylinder
-//! (restricted to the segment slab) with a sphere at each end cap. Only
-//! [`f32::sqrt`] is used; there are no transcendental calls. Every routine is
-//! `O(1)` per (particle, collider) pair, so [`resolve_ccd`] is
-//! `O(particles * colliders)` with no hidden inner loops, and it is fully
-//! deterministic (particles in index order, colliders in slice order, the
-//! earliest valid hit wins).
+//! The authoritative closed-form TOI solvers and the sweep driver live in
+//! [`prism_physics_core`]; this module is a thin render-side façade that keeps
+//! the render particle layout and the public [`CcdParams`] API, converts
+//! through [`physics_bridge`](super::physics_bridge), and projects through the
+//! single physics-engine implementation so there is exactly one copy of the
+//! CCD math in the engine.
 
-use super::collision::{apply_coulomb_friction, closest_point_on_segment, BodyCollider};
-use super::{ClothParticle, Vec3, EPS_LEN_SQ};
+use alloc::vec::Vec;
 
-/// Numerical floor for treating a scalar coefficient as zero when classifying a
-/// quadratic as linear or a segment as degenerate.
-const EPS_COEF: f32 = 1e-12;
+use super::collision::{to_physics_collider, BodyCollider};
+use super::{physics_bridge, ClothParticle, Vec3};
+
+use prism_physics_core::soft::collision as physics_collision;
 
 /// Tuning for the continuous-collision sweep.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -78,216 +76,59 @@ impl CcdParams {
     }
 }
 
+/// Converts render [`CcdParams`] into the physics-engine params the
+/// single-source sweep consumes. The fields line up exactly; the physics
+/// resolver sanitizes internally, so this is a lossless field copy.
+#[must_use]
+fn to_physics_params(params: CcdParams) -> physics_collision::CcdParams {
+    physics_collision::CcdParams {
+        skin: params.skin,
+        restitution: params.restitution,
+        enabled: params.enabled,
+    }
+}
+
 /// Returns the earliest time `t` in `[0, 1]` at which the point moving along
 /// `prev -> curr` is on or inside the sphere `(center, radius)`, or `None` when
-/// the swept segment never reaches the sphere.
-///
-/// The point path is `p(t) = prev + t * (curr - prev)`. Substituting into
-/// `|p(t) - center|^2 = radius^2` gives a quadratic whose earlier root is the
-/// entry crossing. A point that already starts on or inside the sphere reports
-/// `t = 0`. A non-positive radius makes the sphere inert (`None`).
+/// the swept segment never reaches the sphere. Delegates to the physics-engine
+/// closed form.
 #[must_use]
 pub fn sphere_toi(prev: Vec3, curr: Vec3, center: Vec3, radius: f32) -> Option<f32> {
-    if radius <= 0.0 {
-        return None;
-    }
-    let m = curr.sub(prev);
-    let e = prev.sub(center);
-    let a = m.dot(m);
-    let b = 2.0 * e.dot(m);
-    let c = e.dot(e) - radius * radius;
-    first_entry_time(a, b, c)
+    physics_collision::sphere_toi(
+        physics_bridge::to_glam(prev),
+        physics_bridge::to_glam(curr),
+        physics_bridge::to_glam(center),
+        radius,
+    )
 }
 
 /// Returns the earliest time `t` in `[0, 1]` at which the point moving along
 /// `prev -> curr` crosses into the infeasible side of the half-space
 /// `normal.dot(x) >= offset`, or `None` when it stays in front for the whole
-/// segment.
-///
-/// The signed distance `s(t) = normal.dot(p(t)) - offset` is linear in `t`. The
-/// crossing is where `s(t) == 0` while `s` is decreasing. A point that starts
-/// behind the plane reports `t = 0`. A (near) zero normal has no defined plane
-/// and returns `None`.
+/// segment. Delegates to the physics-engine closed form.
 #[must_use]
 pub fn half_space_toi(prev: Vec3, curr: Vec3, normal: Vec3, offset: f32) -> Option<f32> {
-    if normal.length_squared() <= EPS_LEN_SQ {
-        return None;
-    }
-    let s0 = normal.dot(prev) - offset;
-    if s0 <= 0.0 {
-        return Some(0.0);
-    }
-    let ds = normal.dot(curr.sub(prev));
-    if ds >= -EPS_COEF {
-        // Moving away from or parallel to the plane: never crosses.
-        return None;
-    }
-    let t = -s0 / ds;
-    if t <= 1.0 {
-        Some(t.max(0.0))
-    } else {
-        None
-    }
+    physics_collision::half_space_toi(
+        physics_bridge::to_glam(prev),
+        physics_bridge::to_glam(curr),
+        physics_bridge::to_glam(normal),
+        offset,
+    )
 }
 
 /// Returns the earliest time `t` in `[0, 1]` at which the point moving along
-/// `prev -> curr` is on or inside the capsule (segment `p0`..`p1` inflated by
-/// `radius`), or `None` when the swept segment misses it.
-///
-/// A capsule is the union of an infinite cylinder about the segment axis with a
-/// sphere at each end cap. This computes the cylinder entry time restricted to
-/// the axis slab `[0, len]` and the entry time of each end-cap sphere, then
-/// returns the earliest of those. A collapsed capsule (`p0 == p1`) degenerates
-/// to a single sphere. A non-positive radius makes the capsule inert.
+/// `prev -> curr` enters the capsule (segment `p0 -> p1`, `radius`), or `None`
+/// when the swept segment never reaches it. Delegates to the physics-engine
+/// closed form (cylinder slab unioned with the two end-cap spheres).
 #[must_use]
 pub fn capsule_toi(prev: Vec3, curr: Vec3, p0: Vec3, p1: Vec3, radius: f32) -> Option<f32> {
-    if radius <= 0.0 {
-        return None;
-    }
-    let axis = p1.sub(p0);
-    let len_sq = axis.length_squared();
-    if len_sq <= EPS_LEN_SQ {
-        // Degenerate capsule behaves like a sphere at `p0`.
-        return sphere_toi(prev, curr, p0, radius);
-    }
-    let mut best = cylinder_slab_toi(prev, curr, p0, axis, radius);
-    best = earliest(best, sphere_toi(prev, curr, p0, radius));
-    best = earliest(best, sphere_toi(prev, curr, p1, radius));
-    best
-}
-
-/// Sweeps `prev -> curr` against the infinite cylinder about the axis through
-/// `p0` with (unnormalized) direction `axis`, and returns the earliest entry
-/// time whose contact projects onto the segment slab `[0, len]`, or `None`.
-///
-/// The perpendicular distance to the axis line is quadratic in `t`; its
-/// sub-`radius` interval is intersected with the time interval during which the
-/// axial projection lies within the slab and with `[0, 1]`. The lower bound of
-/// the resulting interval is the earliest cylindrical-side contact; the end
-/// caps are handled separately by [`capsule_toi`].
-fn cylinder_slab_toi(prev: Vec3, curr: Vec3, p0: Vec3, axis: Vec3, radius: f32) -> Option<f32> {
-    let len = axis.length();
-    if len <= EPS_COEF {
-        return None;
-    }
-    let u = axis.scale(1.0 / len);
-    let e0 = prev.sub(p0);
-    let m = curr.sub(prev);
-    let mu = m.dot(u);
-    let e0u = e0.dot(u);
-
-    // Radial interval [rad_lo, rad_hi] where perpendicular distance <= radius.
-    let a = m.dot(m) - mu * mu;
-    let b = 2.0 * (e0.dot(m) - e0u * mu);
-    let c = e0.dot(e0) - e0u * e0u - radius * radius;
-    let (rad_lo, rad_hi) = if a > EPS_COEF {
-        let disc = b * b - 4.0 * a * c;
-        if disc < 0.0 {
-            return None;
-        }
-        let root = disc.sqrt();
-        (((-b) - root) / (2.0 * a), ((-b) + root) / (2.0 * a))
-    } else if c <= 0.0 {
-        // Motion parallel to the axis and already within radius: radially
-        // inside for the entire segment.
-        (f32::NEG_INFINITY, f32::INFINITY)
-    } else {
-        return None;
-    };
-
-    // Axial interval [ax_lo, ax_hi] where the projection lies in [0, len].
-    let (ax_lo, ax_hi) = if mu.abs() > EPS_COEF {
-        let t_at_zero = -e0u / mu;
-        let t_at_len = (len - e0u) / mu;
-        (t_at_zero.min(t_at_len), t_at_zero.max(t_at_len))
-    } else if (0.0..=len).contains(&e0u) {
-        (f32::NEG_INFINITY, f32::INFINITY)
-    } else {
-        return None;
-    };
-
-    let lo = rad_lo.max(ax_lo).max(0.0);
-    let hi = rad_hi.min(ax_hi).min(1.0);
-    if lo <= hi {
-        Some(lo)
-    } else {
-        None
-    }
-}
-
-/// Returns the earliest root in `[0, 1]` of `a*t^2 + b*t + c <= 0` for a
-/// non-negative leading coefficient `a`, i.e. the first time the value becomes
-/// non-positive, or `None` when it stays positive over the interval.
-///
-/// A start value `c <= 0` means the point is already inside and reports
-/// `t = 0`. When `a` is (near) zero the equation is linear; otherwise the
-/// earlier quadratic root is the entry crossing.
-fn first_entry_time(a: f32, b: f32, c: f32) -> Option<f32> {
-    if c <= 0.0 {
-        return Some(0.0);
-    }
-    if a <= EPS_COEF {
-        // Linear: b*t + c <= 0. With c > 0 this needs b < 0.
-        if b >= -EPS_COEF {
-            return None;
-        }
-        let t = -c / b;
-        return if t <= 1.0 { Some(t.max(0.0)) } else { None };
-    }
-    let disc = b * b - 4.0 * a * c;
-    if disc < 0.0 {
-        return None;
-    }
-    let root = disc.sqrt();
-    // With c > 0 and a > 0 the earlier root is the entry into the region.
-    let t = ((-b) - root) / (2.0 * a);
-    if (0.0..=1.0).contains(&t) {
-        Some(t)
-    } else {
-        None
-    }
-}
-
-/// Returns whichever of the two optional times is earlier, preferring a present
-/// value over `None`.
-fn earliest(lhs: Option<f32>, rhs: Option<f32>) -> Option<f32> {
-    match (lhs, rhs) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (Some(a), None) => Some(a),
-        (None, rhs) => rhs,
-    }
-}
-
-/// Returns the unit outward normal of `collider` at the surface point `surf`,
-/// or `None` when the collider is degenerate and no direction is defined.
-///
-/// For a sphere this is the radial direction; for a capsule it is the direction
-/// from the nearest axis point; for a half-space it is the (normalized) plane
-/// normal.
-fn outward_normal(collider: BodyCollider, surf: Vec3) -> Option<Vec3> {
-    let n = match collider {
-        BodyCollider::Sphere { center, .. } => surf.sub(center).normalize_or_zero(),
-        BodyCollider::Capsule { p0, p1, .. } => {
-            let closest = closest_point_on_segment(p0, p1, surf);
-            surf.sub(closest).normalize_or_zero()
-        }
-        BodyCollider::HalfSpace { normal, .. } => normal.normalize_or_zero(),
-    };
-    if n.length_squared() <= EPS_LEN_SQ {
-        None
-    } else {
-        Some(n)
-    }
-}
-
-/// Returns the earliest time of impact of the swept segment `prev -> curr`
-/// against `collider`, dispatching to the matching closed-form solver.
-fn collider_toi(collider: BodyCollider, prev: Vec3, curr: Vec3) -> Option<f32> {
-    match collider {
-        BodyCollider::Sphere { center, radius } => sphere_toi(prev, curr, center, radius),
-        BodyCollider::Capsule { p0, p1, radius } => capsule_toi(prev, curr, p0, p1, radius),
-        BodyCollider::HalfSpace { normal, offset } => half_space_toi(prev, curr, normal, offset),
-    }
+    physics_collision::capsule_toi(
+        physics_bridge::to_glam(prev),
+        physics_bridge::to_glam(curr),
+        physics_bridge::to_glam(p0),
+        physics_bridge::to_glam(p1),
+        radius,
+    )
 }
 
 /// Sweeps every free particle from its previous position to its current
@@ -304,16 +145,14 @@ fn collider_toi(collider: BodyCollider, prev: Vec3, curr: Vec3) -> Option<f32> {
 ///
 /// After the normal velocity is reflected the particle's tangential slide
 /// across the swept segment is damped by Coulomb friction against the contact
-/// (Macklin et al. 2014): the tangential part of `placed - prev` is cancelled
-/// inside the static cone (`||Dx_t|| <= mu * ||Dx_n||`) and shrunk by
-/// `mu * ||Dx_n||` in the dynamic regime, where `||Dx_n||` is the depth the TOI
-/// snap pushed the particle out along the outward normal. `friction` is the
-/// fabric's `FabricMaterial::friction` coefficient, clamped to `0..=1` with a
-/// non-finite value treated as `0`; `0` reproduces the frictionless bounce
-/// exactly. The body proxy is infinitely massive, so the whole tangential
-/// correction lands on the particle.
+/// (Macklin et al. 2014); `friction` is the fabric's `FabricMaterial::friction`
+/// coefficient, clamped to `0..=1` with a non-finite value treated as `0`, so
+/// `0` reproduces the frictionless bounce exactly.
 ///
-/// Cost is `O(particles * colliders)`; visiting order is deterministic.
+/// This is a thin façade over the authoritative physics-engine sweep: the
+/// render particle columns are converted to structure-of-arrays, projected
+/// through [`physics_collision::resolve_ccd`], then written back. Cost is
+/// `O(particles * colliders)`; visiting order is deterministic.
 pub fn resolve_ccd(
     particles: &mut [ClothParticle],
     prev_positions: &[Vec3],
@@ -325,67 +164,25 @@ pub fn resolve_ccd(
     if !params.enabled || colliders.is_empty() {
         return;
     }
-    let params = params.sanitized();
-    // Clamp the friction coefficient to `[0, 1]`; a non-finite value is treated
-    // as frictionless so an unsanitised material can never inject a `NaN`.
-    let mu = if friction.is_finite() {
-        friction.clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-    let inv_dt = if dt.abs() <= EPS_COEF { 0.0 } else { 1.0 / dt };
-    let count = particles.len().min(prev_positions.len());
-    for i in 0..count {
-        let particle = &mut particles[i];
-        if particle.is_pinned() {
-            continue;
-        }
-        let prev = prev_positions[i];
-        let curr = particle.position;
-        if curr.distance_squared(prev) <= EPS_LEN_SQ {
-            continue;
-        }
-        // Find the earliest hit across all colliders.
-        let mut best_t: Option<f32> = None;
-        let mut best_collider = colliders[0];
-        for &collider in colliders {
-            if let Some(t) = collider_toi(collider, prev, curr) {
-                let take = match best_t {
-                    Some(b) => t < b,
-                    None => true,
-                };
-                if take {
-                    best_t = Some(t);
-                    best_collider = collider;
-                }
-            }
-        }
-        let Some(t) = best_t else {
-            continue;
-        };
-        // Contact point along the swept segment, then snap out to the surface.
-        let contact = prev.add(curr.sub(prev).scale(t));
-        let surface = best_collider.project(contact);
-        let surface = match outward_normal(best_collider, surface) {
-            Some(n) => {
-                let placed = surface.add(n.scale(params.skin));
-                // Reflect the inbound normal velocity by restitution.
-                let v = placed.sub(prev).scale(inv_dt);
-                let vn = v.dot(n);
-                if vn < 0.0 {
-                    let reflected = v.sub(n.scale((1.0 + params.restitution) * vn));
-                    particle.velocity = reflected;
-                }
-                // Damp the tangential slide against the contact. The push-out
-                // depth along the outward normal is the friction normal
-                // magnitude `||Dx_n||`; a non-positive depth is a no-op.
-                let push = placed.sub(curr).dot(n);
-                apply_coulomb_friction(placed, prev, n, push, mu)
-            }
-            None => surface,
-        };
-        particle.position = surface;
-    }
+    let (mut positions, mut velocities, inverse_masses) = physics_bridge::to_soa_full(particles);
+    let prev: Vec<_> = prev_positions
+        .iter()
+        .copied()
+        .map(physics_bridge::to_glam)
+        .collect();
+    let physics_colliders: Vec<_> = colliders.iter().copied().map(to_physics_collider).collect();
+    physics_collision::resolve_ccd(
+        &mut positions,
+        &prev,
+        &mut velocities,
+        &inverse_masses,
+        &physics_colliders,
+        to_physics_params(params),
+        dt,
+        friction,
+    );
+    physics_bridge::write_positions_back(particles, &positions);
+    physics_bridge::write_velocities_back(particles, &velocities);
 }
 
 #[cfg(test)]
@@ -639,3 +436,4 @@ mod tests {
         }
     }
 }
+

@@ -156,7 +156,7 @@ pub fn closest_point_on_segment(p0: Vec3, p1: Vec3, pos: Vec3) -> Vec3 {
 /// single-source resolver consumes. The variants and fields line up exactly;
 /// only the vector type differs, so this is a lossless component copy.
 #[must_use]
-fn to_physics_collider(collider: BodyCollider) -> prism_physics_core::soft::collision::BodyCollider {
+pub(super) fn to_physics_collider(collider: BodyCollider) -> prism_physics_core::soft::collision::BodyCollider {
     use prism_physics_core::soft::collision::BodyCollider as Phys;
     match collider {
         BodyCollider::Sphere { center, radius } => Phys::Sphere {
