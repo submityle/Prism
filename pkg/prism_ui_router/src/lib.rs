@@ -50,12 +50,18 @@
 
 extern crate alloc;
 
+mod guard;
 mod matcher;
+mod param;
 mod path;
 mod route;
 mod router;
 
+pub use guard::{
+    DeepLinkState, FnGuard, Guard, GuardOutcome, GuardPoll, ManualGuard, PendingNavigation,
+};
 pub use matcher::{RouteId, RouteTable};
+pub use param::{parse_param, parse_param_or, FromParam};
 pub use path::Location;
 pub use route::{RouteMatch, RoutePattern};
 pub use router::Router;
