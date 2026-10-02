@@ -38,10 +38,11 @@
 //! coincident particles separate along +X). Each endpoint receives only its own
 //! mass-weighted half, so applying both halves reproduces the two-sided move.
 //!
-//! normalize_or_zero mirrors the CPU exactly: unit = normal * (1.0 / sqrt(len_sq))
-//! when len_sq > EPS_LEN_SQ, else the zero vector. The scalar reciprocal-sqrt
-//! (not inverseSqrt) matches the golden's 1.0 / len_sq.sqrt() op order so the
-//! axis-aligned parity fixtures land bit-exact.
+//! normalize_or_zero mirrors the physics single source (glam::Vec3::
+//! normalize_or_zero): unit = normal * (1.0 / length(normal)) whenever that
+//! reciprocal length is finite and positive, else the zero vector. Only an
+//! exactly-zero or non-finite normal falls back to the radial push, matching
+//! prism_physics_core and its WGSL twin value-for-value.
 //!
 //! ## Determinism and validation
 //!
@@ -52,9 +53,28 @@
 //! cloth::layers_gpu_tests on oriented, radial, pinned-inner and same-layer
 //! fixtures.
 
-/// Squared-length floor below which a vector is treated as zero, mirroring the
-/// CPU EPS_LEN_SQ so normalize_or_zero and the radial coincidence test agree.
+/// Squared-length floor below which a vector is treated as zero. Used by the
+/// `dot(unit, unit)` oriented-branch test and the radial coincidence test,
+/// mirroring the CPU EPS_LEN_SQ.
 const CLOTH_LAYERS_EPS_LEN_SQ: f32 = 1.0e-12;
+
+/// Largest finite f32, used to reject non-finite reciprocal lengths in
+/// [`cloth_layers_normalize_or_zero`] exactly as glam does.
+const CLOTH_LAYERS_F32_MAX: f32 = 3.4028235e38;
+
+/// Normalizes `v`, returning the zero vector when `v` has zero or non-finite
+/// length — an exact mirror of `glam::Vec3::normalize_or_zero` (and the physics
+/// engine's WGSL twin), which keeps the result only when the reciprocal length
+/// is finite and positive. A tiny but nonzero normal is therefore still treated
+/// as a usable direction, matching prism_physics_core.
+fn cloth_layers_normalize_or_zero(v: vec3<f32>) -> vec3<f32> {
+    let len = length(v);
+    let rcp = 1.0 / len;
+    if rcp == rcp && rcp > 0.0 && rcp <= CLOTH_LAYERS_F32_MAX {
+        return v * rcp;
+    }
+    return vec3<f32>(0.0, 0.0, 0.0);
+}
 
 /// Uniform parameters for the inter-layer coupling pass. Flat 16-byte block: the
 /// sanitized separation thickness, the particle count bounding the dispatch, and
@@ -113,12 +133,8 @@ fn half_layer_correction(a: u32, b: u32, thickness: f32, thickness_sq: f32) -> v
     let p_outer = layer_positions[outer].xyz;
     let normal = layer_normals[inner].xyz;
 
-    // normalize_or_zero: unit = normal / sqrt(len_sq) when non-degenerate.
-    let len_sq = dot(normal, normal);
-    var unit = vec3<f32>(0.0);
-    if len_sq > CLOTH_LAYERS_EPS_LEN_SQ {
-        unit = normal * (1.0 / sqrt(len_sq));
-    }
+    // normalize_or_zero mirrors glam: a tiny but nonzero normal stays oriented.
+    let unit = cloth_layers_normalize_or_zero(normal);
 
     if dot(unit, unit) > CLOTH_LAYERS_EPS_LEN_SQ {
         // Oriented plane contact along the inner particle's outward normal.

@@ -9,8 +9,8 @@
 //!
 //! ## 为什么层间耦合可以做到真正逐位
 //! 层间 Jacobi 耦合全程只有「倒数乘」与「两侧同为除法」的除法：
-//! * 法线归一化 `unit = normal * (1.0 / sqrt(len_sq))`（当 `len_sq > EPS`），
-//!   与黄金 `normalize_or_zero` 的 `normal.scale(1.0 / len_sq.sqrt())` 同为
+//! * 法线归一化镜像黄金 `glam::Vec3::normalize_or_zero`：倒数长度有限且为正即
+//!   归一化，微小非零法线仍为可用方向，只有零/非有限长度回退径向，三者同为
 //!   **先取标量倒数再乘**，逐位一致（对齐既有 `inverseSqrt` 转写惯例）。
 //! * 径向回退方向 `dir = delta * (1.0 / dist)` 同为倒数乘。
 //! * 质量权重分配 `w_inner / w_sum` / `w_outer / w_sum` 在 WESL 与黄金**两侧
@@ -60,6 +60,20 @@ fn wesl_cell_of(p: [f32; 3], cell_size: f32) -> (i32, i32, i32) {
     (cx, cy, cz)
 }
 
+/// `glam::Vec3::normalize_or_zero` 的逐位转写，镜像 WESL
+/// `cloth_layers_normalize_or_zero` 与物理引擎 WGSL 孪生：倒数长度有限且为正时
+/// 归一化，否则返回零向量。只有恰为零或非有限长度的法线才回退径向，微小非零法线
+/// 仍保留为可用方向。
+fn wesl_normalize_or_zero(v: [f32; 3]) -> [f32; 3] {
+    let len = dot(v, v).sqrt();
+    let rcp = 1.0 / len;
+    if rcp.is_finite() && rcp > 0.0 {
+        scale(v, rcp)
+    } else {
+        [0.0; 3]
+    }
+}
+
 /// WESL `half_layer_correction` 的逐位转写：返回粒子 `a` 对抗跨层邻居 `b` 的
 /// 「本粒子那一半」分离修正。较低层号为内层（其外法线定向接触），外层沿法线被
 /// 推到至少 `thickness`；法线退化时回退到对称径向最小距离推开。
@@ -91,13 +105,9 @@ fn wesl_half_layer_correction(
     let p_outer = pos[outer];
     let normal = normals[inner];
 
-    // normalize_or_zero：len_sq > EPS 时 unit = normal * (1.0 / sqrt(len_sq))，否则零。
-    let len_sq = dot(normal, normal);
-    let mut unit = [0.0_f32; 3];
-    if len_sq > EPS_LEN_SQ {
-        let r = 1.0 / len_sq.sqrt();
-        unit = scale(normal, r);
-    }
+    // normalize_or_zero：镜像物理引擎单一真源 glam::Vec3::normalize_or_zero——
+    // 倒数长度有限且为正即归一化，否则零向量；微小但非零的法线仍视作可用方向。
+    let unit = wesl_normalize_or_zero(normal);
 
     if dot(unit, unit) > EPS_LEN_SQ {
         // 定向平面接触：沿内层外法线把外层推到至少 thickness。
@@ -219,9 +229,21 @@ fn run_wesl_layers(
 fn assert_bit_exact(golden: &[ClothParticle], wesl: &[[f32; 3]]) {
     assert_eq!(golden.len(), wesl.len(), "length mismatch");
     for (i, (g, w)) in golden.iter().zip(wesl.iter()).enumerate() {
-        assert_eq!(g.position.x.to_bits(), w[0].to_bits(), "x bits differ at {i}");
-        assert_eq!(g.position.y.to_bits(), w[1].to_bits(), "y bits differ at {i}");
-        assert_eq!(g.position.z.to_bits(), w[2].to_bits(), "z bits differ at {i}");
+        assert_eq!(
+            g.position.x.to_bits(),
+            w[0].to_bits(),
+            "x bits differ at {i}"
+        );
+        assert_eq!(
+            g.position.y.to_bits(),
+            w[1].to_bits(),
+            "y bits differ at {i}"
+        );
+        assert_eq!(
+            g.position.z.to_bits(),
+            w[2].to_bits(),
+            "z bits differ at {i}"
+        );
     }
 }
 
@@ -300,7 +322,10 @@ fn pinned_outer_keeps_inner_taking_push_bit_for_bit() {
         "pinned outer moved"
     );
     // 自由内层被沿法线反向推下，发生位移。
-    assert!(out[0].position.y < -1.0e-6, "free inner did not take the push");
+    assert!(
+        out[0].position.y < -1.0e-6,
+        "free inner did not take the push"
+    );
 }
 
 #[test]
@@ -360,9 +385,9 @@ fn degenerate_normal_falls_back_to_radial_bit_for_bit() {
 fn three_layer_stack_multi_neighbor_bit_for_bit() {
     // 中层粒子同时被内层与外层穿透（分处不同格），测跨格多邻居 own-slot 累加序。
     let base = [
-        free(0.0, 0.0, 0.0, 1.0),   // 内层 0
-        free(0.0, 0.06, 0.0, 1.0),  // 中层 1（被 0 与 2 夹）
-        free(0.0, 0.12, 0.0, 1.0),  // 外层 2
+        free(0.0, 0.0, 0.0, 1.0),  // 内层 0
+        free(0.0, 0.06, 0.0, 1.0), // 中层 1（被 0 与 2 夹）
+        free(0.0, 0.12, 0.0, 1.0), // 外层 2
     ];
     let layer_of = [0u32, 1u32, 2u32];
     let normals = [
@@ -429,11 +454,21 @@ fn dense_jittered_grid_bit_for_bit() {
             let bx = gx as f32 * 0.07;
             let bz = gz as f32 * 0.07;
             // 内层
-            base.push(free(bx + 0.01 * rng(), 0.0 + 0.01 * rng(), bz + 0.01 * rng(), 1.0));
+            base.push(free(
+                bx + 0.01 * rng(),
+                0.0 + 0.01 * rng(),
+                bz + 0.01 * rng(),
+                1.0,
+            ));
             layer_of.push(0u32);
             normals.push(Vec3::new(0.0, 1.0, 0.0));
             // 外层（略高于内层但在 thickness 内，制造穿透）
-            base.push(free(bx + 0.01 * rng(), 0.03 + 0.01 * rng(), bz + 0.01 * rng(), 1.0));
+            base.push(free(
+                bx + 0.01 * rng(),
+                0.03 + 0.01 * rng(),
+                bz + 0.01 * rng(),
+                1.0,
+            ));
             layer_of.push(1u32);
             normals.push(Vec3::ZERO);
         }

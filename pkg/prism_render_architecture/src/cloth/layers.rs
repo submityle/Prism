@@ -81,25 +81,11 @@ impl LayerParams {
 /// raw or already-sanitized value projects identically.
 #[inline]
 #[must_use]
-fn to_physics_params(params: LayerParams) -> physics_collision::LayerParams {
+pub(super) fn to_physics_params(params: LayerParams) -> physics_collision::LayerParams {
     physics_collision::LayerParams {
         thickness: params.thickness,
         cell_size: params.cell_size,
     }
-}
-
-/// Maps a world-space position to its integer spatial-hash cell.
-///
-/// `cell_size` is assumed positive (the caller guards this). The cast saturates
-/// rather than wrapping, so an extreme coordinate still buckets deterministically
-/// and never panics. Shared with [`super::layers_jacobi`] so both solvers bucket
-/// identically.
-pub(crate) fn cell_of(pos: Vec3, cell_size: f32) -> (i32, i32, i32) {
-    let inv = 1.0 / cell_size;
-    let cx = (pos.x * inv).floor() as i32;
-    let cy = (pos.y * inv).floor() as i32;
-    let cz = (pos.z * inv).floor() as i32;
-    (cx, cy, cz)
 }
 
 /// Keeps stacked garment layers from interpenetrating while preserving their
