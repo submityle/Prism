@@ -64,9 +64,9 @@ pub mod xpbd;
 
 pub use broadphase::{cpu_broadphase, BroadphaseConfig, BroadphaseError, CandidatePair, Particle};
 pub use bvh::{
-    cpu_build_lbvh, cpu_bvh_pairs, cpu_bvh_raycast_any, cpu_bvh_raycast_closest, Aabb,
-    BvhQueryError, GpuBvhQuery, GpuBvhRaycast, GpuLbvh, GpuResidentLbvh, Lbvh, Ray, RayHit,
-    SceneBounds, NO_PARENT,
+    cpu_build_lbvh, cpu_bvh_aabb_overlap, cpu_bvh_pairs, cpu_bvh_raycast_any,
+    cpu_bvh_raycast_closest, Aabb, BvhQueryError, GpuBvhOverlap, GpuBvhQuery, GpuBvhRaycast,
+    GpuLbvh, GpuResidentLbvh, Lbvh, OverlapQueryError, Ray, RayHit, SceneBounds, NO_PARENT,
 };
 pub use cfl::{cpu_cfl_dt, cpu_max_speed, CflConfig, GpuCflReduce};
 pub use cloth::{
@@ -112,16 +112,16 @@ pub use narrowphase::{
     cpu_capsule_triangle_narrowphase,
     cpu_halfspace_narrowphase, cpu_narrowphase, cpu_obb_halfspace_manifold,
     cpu_obb_halfspace_narrowphase, cpu_obb_narrowphase, cpu_obb_obb_manifold,
-    cpu_obb_obb_narrowphase, cpu_obb_triangle_narrowphase, cpu_sphere_triangle_narrowphase, Capsule, CapsuleCapsulePair,
+    cpu_obb_obb_narrowphase, cpu_obb_triangle_narrowphase, cpu_sphere_heightfield_narrowphase, cpu_sphere_triangle_narrowphase, Capsule, CapsuleCapsulePair, CellRange,
     CapsuleObbPair, CapsulePlanePair, CapsuleTrianglePair, Contact, ContactManifold,
     GpuCapsuleCapsuleManifoldNarrowphase, GpuCapsuleCapsuleNarrowphase,
     GpuCapsuleHalfspaceNarrowphase, GpuCapsuleNarrowphase, GpuCapsuleObbManifoldNarrowphase,
-    GpuCapsuleObbNarrowphase, GpuCapsuleTriangleNarrowphase, GpuHalfspaceNarrowphase, GpuNarrowphase,
+    GpuCapsuleObbNarrowphase, GpuCapsuleTriangleNarrowphase, GpuHalfspaceNarrowphase, GpuNarrowphase, GpuSphereHeightfieldNarrowphase,
     GpuObbHalfspaceManifoldNarrowphase, GpuObbHalfspaceNarrowphase, GpuObbNarrowphase,
     GpuObbObbManifoldNarrowphase, GpuObbObbNarrowphase, GpuObbTriangleNarrowphase, GpuSphereTriangleNarrowphase,
-    ManifoldPoint, Obb, ObbObbPair, ObbTrianglePair,
+    Heightfield, HeightfieldSpherePair, ManifoldPoint, Obb, ObbObbPair, ObbTrianglePair,
     ObbPlanePair, Plane, SphereCapsulePair, SphereObbPair, SpherePlanePair, SphereTrianglePair,
-    Triangle, MAX_MANIFOLD_POINTS,
+    Triangle, XzAabb, MAX_MANIFOLD_POINTS,
 };
 pub use radix::{cpu_radix_sort_keys, cpu_radix_sort_pairs, GpuRadixSort};
 pub use rigid::{
