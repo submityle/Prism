@@ -746,3 +746,191 @@ const _: () = assert!(size_of::<GpuSurfelDecodeRequest>() == SURFEL_DECODE_REQUE
 const _: () = assert!(align_of::<GpuSurfelDecodeRequest>() == 4);
 const _: () = assert!(size_of::<GpuSurfelDecodeResult>() == SURFEL_DECODE_RESULT_STRIDE);
 const _: () = assert!(align_of::<GpuSurfelDecodeResult>() == 4);
+
+// --- Coverage-gather producer ABI -------------------------------------------
+
+/// Threads per workgroup for the coverage-gather dispatch; mirrors the
+/// `@workgroup_size(64)` in `shaders/surfel_coverage.wesl`.
+pub const SURFEL_COVERAGE_WORKGROUP_SIZE: u32 = 64;
+
+/// `std430` byte size of [`GpuSurfelCoverageParams`] (the uniform block).
+pub const SURFEL_COVERAGE_PARAMS_SIZE: usize = 16;
+
+/// `std430` storage stride of one [`GpuCoveragePoint`].
+pub const SURFEL_COVERAGE_POINT_STRIDE: usize = 32;
+
+/// `std430` storage stride of one [`GpuCoverageSurfel`].
+pub const SURFEL_COVERAGE_SURFEL_STRIDE: usize = 40;
+
+/// `std430` storage stride of one [`GpuCoverageResult`].
+pub const SURFEL_COVERAGE_RESULT_STRIDE: usize = 16;
+
+/// Uniform parameters for one coverage-gather dispatch.
+///
+/// `repr(C)` `std430` uniform block mirrored by `struct CoverageParams` in
+/// `shaders/surfel_coverage.wesl`. `count` is the number of shading points
+/// (threads past it early-out); the two tunables are copied verbatim from
+/// [`CoverageParams`]. `reserved` pads the block to the 16-byte uniform
+/// granularity and must be zero.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+pub struct GpuSurfelCoverageParams {
+    /// Number of shading points in the `points` buffer.
+    pub count: u32,
+    /// Orientation exponent; larger values narrow the normal-agreement lobe.
+    pub normal_sharpness: f32,
+    /// Off-plane tolerance as a fraction of the surfel radius.
+    pub axial_tolerance: f32,
+    /// Reserved padding to the 16-byte uniform granularity; must be zero.
+    pub reserved: u32,
+}
+
+impl GpuSurfelCoverageParams {
+    /// Build the dispatch parameters from the coverage tunables and a shading
+    /// point count, copying [`CoverageParams`] verbatim.
+    #[must_use]
+    pub fn from_coverage(params: &CoverageParams, count: u32) -> Self {
+        Self {
+            count,
+            normal_sharpness: params.normal_sharpness,
+            axial_tolerance: params.axial_tolerance,
+            reserved: 0,
+        }
+    }
+
+    /// Number of workgroups needed to cover [`count`](Self::count) at
+    /// [`SURFEL_COVERAGE_WORKGROUP_SIZE`] threads each (ceil-divide).
+    #[must_use]
+    pub fn workgroup_count(&self) -> u32 {
+        self.count.div_ceil(SURFEL_COVERAGE_WORKGROUP_SIZE)
+    }
+}
+
+/// One shading point and the surfel slice that may cover it.
+///
+/// `repr(C)` `std430` element mirrored by `struct Point` in
+/// `shaders/surfel_coverage.wesl`. `surfel_offset`/`surfel_count` bound a
+/// `[offset, offset + count)` range into the shared `surfels` buffer that the
+/// kernel gathers in order.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+pub struct GpuCoveragePoint {
+    /// Shading point position `x` component.
+    pub pos_x: f32,
+    /// Shading point position `y` component.
+    pub pos_y: f32,
+    /// Shading point position `z` component.
+    pub pos_z: f32,
+    /// Shading point normal `x` component.
+    pub normal_x: f32,
+    /// Shading point normal `y` component.
+    pub normal_y: f32,
+    /// Shading point normal `z` component.
+    pub normal_z: f32,
+    /// Start index of this point's surfel slice in the `surfels` buffer.
+    pub surfel_offset: u32,
+    /// Number of candidate surfels in this point's slice.
+    pub surfel_count: u32,
+}
+
+impl GpuCoveragePoint {
+    /// Build a shading-point element from a world position, a surface normal,
+    /// and its candidate-surfel slice bounds in the shared surfel buffer.
+    #[must_use]
+    pub fn new(position: Vec3, normal: Vec3, surfel_offset: u32, surfel_count: u32) -> Self {
+        Self {
+            pos_x: position.x,
+            pos_y: position.y,
+            pos_z: position.z,
+            normal_x: normal.x,
+            normal_y: normal.y,
+            normal_z: normal.z,
+            surfel_offset,
+            surfel_count,
+        }
+    }
+}
+
+/// One candidate surfel and its cached radiance.
+///
+/// `repr(C)` `std430` element mirrored by `struct CandidateSurfel` in
+/// `shaders/surfel_coverage.wesl`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+pub struct GpuCoverageSurfel {
+    /// Candidate surfel anchor `x` component.
+    pub pos_x: f32,
+    /// Candidate surfel anchor `y` component.
+    pub pos_y: f32,
+    /// Candidate surfel anchor `z` component.
+    pub pos_z: f32,
+    /// Candidate surfel normal `x` component.
+    pub normal_x: f32,
+    /// Candidate surfel normal `y` component.
+    pub normal_y: f32,
+    /// Candidate surfel normal `z` component.
+    pub normal_z: f32,
+    /// Candidate surfel radius.
+    pub radius: f32,
+    /// Cached radiance `x` component.
+    pub radiance_x: f32,
+    /// Cached radiance `y` component.
+    pub radiance_y: f32,
+    /// Cached radiance `z` component.
+    pub radiance_z: f32,
+}
+
+impl GpuCoverageSurfel {
+    /// Build a candidate element from a surfel and its cached radiance.
+    #[must_use]
+    pub fn new(surfel: &Surfel, radiance: Vec3) -> Self {
+        Self {
+            pos_x: surfel.position.x,
+            pos_y: surfel.position.y,
+            pos_z: surfel.position.z,
+            normal_x: surfel.normal.x,
+            normal_y: surfel.normal.y,
+            normal_z: surfel.normal.z,
+            radius: surfel.radius,
+            radiance_x: radiance.x,
+            radiance_y: radiance.y,
+            radiance_z: radiance.z,
+        }
+    }
+}
+
+/// Gathered radiance for one shading point, plus the accumulated coverage
+/// weight.
+///
+/// `repr(C)` `std430` element mirrored by `struct CoverageResult` in
+/// `shaders/surfel_coverage.wesl`. A zero [`total_weight`](Self::total_weight)
+/// means no surfel covered the point and the radiance is all-zero.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+pub struct GpuCoverageResult {
+    /// Gathered radiance `x` component (finite, non-negative).
+    pub radiance_x: f32,
+    /// Gathered radiance `y` component (finite, non-negative).
+    pub radiance_y: f32,
+    /// Gathered radiance `z` component (finite, non-negative).
+    pub radiance_z: f32,
+    /// Accumulated coverage weight summed over every covering surfel.
+    pub total_weight: f32,
+}
+
+impl GpuCoverageResult {
+    /// The gathered radiance as a [`Vec3`].
+    #[must_use]
+    pub fn radiance(&self) -> Vec3 {
+        Vec3::new(self.radiance_x, self.radiance_y, self.radiance_z)
+    }
+}
+
+const _: () = assert!(size_of::<GpuSurfelCoverageParams>() == SURFEL_COVERAGE_PARAMS_SIZE);
+const _: () = assert!(align_of::<GpuSurfelCoverageParams>() == 4);
+const _: () = assert!(size_of::<GpuCoveragePoint>() == SURFEL_COVERAGE_POINT_STRIDE);
+const _: () = assert!(align_of::<GpuCoveragePoint>() == 4);
+const _: () = assert!(size_of::<GpuCoverageSurfel>() == SURFEL_COVERAGE_SURFEL_STRIDE);
+const _: () = assert!(align_of::<GpuCoverageSurfel>() == 4);
+const _: () = assert!(size_of::<GpuCoverageResult>() == SURFEL_COVERAGE_RESULT_STRIDE);
+const _: () = assert!(align_of::<GpuCoverageResult>() == 4);

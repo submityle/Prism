@@ -735,3 +735,245 @@ fn decode_slot_is_deterministic() {
     let request = GpuSurfelDecodeRequest::new(7, origin.x + 3, origin.y + 5);
     assert_eq!(decode_slot(&atlas, &request), decode_slot(&atlas, &request));
 }
+
+use crate::gi::surface_cache::gpu::abi::{
+    GpuCoveragePoint, GpuCoverageResult, GpuCoverageSurfel, GpuSurfelCoverageParams,
+    SURFEL_COVERAGE_PARAMS_SIZE, SURFEL_COVERAGE_POINT_STRIDE, SURFEL_COVERAGE_RESULT_STRIDE,
+    SURFEL_COVERAGE_SURFEL_STRIDE, SURFEL_COVERAGE_WORKGROUP_SIZE,
+};
+use crate::gi::surface_cache::gpu::coverage::gather_point;
+
+/// The `WESL` source compiled and validated by [`coverage_wesl_compiles`].
+const SURFEL_COVERAGE_WESL: &str = include_str!("shaders/surfel_coverage.wesl");
+
+/// `naga` parses and type-checks the coverage-gather kernel, proving it
+/// compiles exactly as it will on device (the sandbox cannot dispatch it).
+#[test]
+fn coverage_wesl_compiles() {
+    let module = naga::front::wgsl::parse_str(SURFEL_COVERAGE_WESL)
+        .unwrap_or_else(|error| panic!("surfel_coverage.wesl failed to parse: {error:?}"));
+    let mut validator = naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    );
+    validator
+        .validate(&module)
+        .unwrap_or_else(|error| panic!("surfel_coverage.wesl failed to validate: {error:?}"));
+}
+
+/// The coverage `repr(C)` `ABI` strides match the constants the kernel and host
+/// assume (the layout itself is additionally pinned by the `const` size
+/// assertions in `abi.rs`).
+#[test]
+fn coverage_abi_matches_shader_layout() {
+    assert_eq!(
+        size_of::<GpuSurfelCoverageParams>(),
+        SURFEL_COVERAGE_PARAMS_SIZE
+    );
+    assert_eq!(size_of::<GpuCoveragePoint>(), SURFEL_COVERAGE_POINT_STRIDE);
+    assert_eq!(
+        size_of::<GpuCoverageSurfel>(),
+        SURFEL_COVERAGE_SURFEL_STRIDE
+    );
+    assert_eq!(
+        size_of::<GpuCoverageResult>(),
+        SURFEL_COVERAGE_RESULT_STRIDE
+    );
+    assert_eq!(align_of::<GpuSurfelCoverageParams>(), 4);
+    assert_eq!(align_of::<GpuCoveragePoint>(), 4);
+    assert_eq!(align_of::<GpuCoverageSurfel>(), 4);
+    assert_eq!(align_of::<GpuCoverageResult>(), 4);
+}
+
+/// [`GpuSurfelCoverageParams::workgroup_count`] ceil-divides the point count by
+/// the workgroup size, covering every point with no empty trailing group.
+#[test]
+fn coverage_workgroup_count_covers_every_point() {
+    let cov = CoverageParams::default();
+    let wg = SURFEL_COVERAGE_WORKGROUP_SIZE;
+    for count in [0, 1, wg - 1, wg, wg + 1, 3 * wg, 3 * wg + 7] {
+        let params = GpuSurfelCoverageParams::from_coverage(&cov, count);
+        let groups = params.workgroup_count();
+        assert!(groups * wg >= count, "under-covered count {count}");
+        if count > 0 {
+            assert!((groups - 1) * wg < count, "over-covered count {count}");
+        } else {
+            assert_eq!(groups, 0, "empty dispatch for zero points");
+        }
+    }
+}
+
+/// [`GpuSurfelCoverageParams::from_coverage`] copies the coverage tunables
+/// verbatim and zeroes the reserved padding.
+#[test]
+fn coverage_params_from_coverage_copies_tunables() {
+    let cov = CoverageParams {
+        normal_sharpness: 6.0,
+        axial_tolerance: 0.3,
+    };
+    let params = GpuSurfelCoverageParams::from_coverage(&cov, 11);
+    assert_eq!(params.count, 11);
+    assert_eq!(params.normal_sharpness.to_bits(), 6.0_f32.to_bits());
+    assert_eq!(params.axial_tolerance.to_bits(), 0.3_f32.to_bits());
+    assert_eq!(params.reserved, 0);
+}
+
+/// The `CPU` mirror reproduces the [`Surfel::coverage`] golden bit-for-bit over
+/// a point/surfel sweep: for every shading point the mirror's coverage-weighted
+/// gather equals an independent gather built from the real golden coverage, in
+/// identical buffer order and associativity.
+#[test]
+fn gather_point_matches_coverage_golden() {
+    let cov = CoverageParams::default();
+    let params = GpuSurfelCoverageParams::from_coverage(&cov, 0);
+
+    // A shared candidate buffer of surfels with distinct, finite radiance.
+    let surfels = [
+        (
+            Surfel::new(Vec3::ZERO, Vec3::Z, 1.0),
+            Vec3::new(1.0, 0.2, 0.1),
+        ),
+        (
+            Surfel::new(Vec3::new(0.3, 0.0, 0.0), Vec3::Z, 1.0),
+            Vec3::new(0.4, 0.8, 0.3),
+        ),
+        (
+            Surfel::new(Vec3::new(0.0, 0.4, 0.1), Vec3::new(0.0, 1.0, 0.2), 1.5),
+            Vec3::new(0.2, 0.1, 0.9),
+        ),
+        (
+            Surfel::new(Vec3::new(-0.5, 0.2, 0.0), Vec3::new(1.0, 0.0, 1.0), 0.8),
+            Vec3::new(0.6, 0.6, 0.6),
+        ),
+        (
+            Surfel::new(Vec3::new(2.5, 0.0, 0.0), Vec3::Z, 0.5),
+            Vec3::new(0.9, 0.1, 0.5),
+        ),
+    ];
+    let gpu_surfels: Vec<GpuCoverageSurfel> = surfels
+        .iter()
+        .map(|(s, r)| GpuCoverageSurfel::new(s, *r))
+        .collect();
+
+    // Several shading points, each gathering the whole candidate buffer.
+    let points = [
+        (Vec3::ZERO, Vec3::Z),
+        (Vec3::new(0.2, 0.1, 0.03), Vec3::Z),
+        (Vec3::new(0.1, 0.3, 0.05), Vec3::new(0.0, 1.0, 0.1)),
+        (Vec3::new(-0.4, 0.2, 0.0), Vec3::new(1.0, 0.0, 1.0)),
+        (Vec3::new(5.0, 5.0, 5.0), Vec3::Z),
+    ];
+
+    for (pos, normal) in points {
+        let point = GpuCoveragePoint::new(pos, normal, 0, gpu_surfels.len() as u32);
+        let result = gather_point(&params, &point, &gpu_surfels);
+
+        // Independent golden gather driven by the real `Surfel::coverage`.
+        let mut sum = Vec3::ZERO;
+        let mut weight = 0.0_f32;
+        for (surfel, radiance) in &surfels {
+            let w = surfel.coverage(pos, normal, &cov);
+            if w <= 0.0 {
+                continue;
+            }
+            sum += *radiance * w;
+            weight += w;
+        }
+        let golden_rgb = if weight <= 1.0e-12 {
+            Vec3::ZERO
+        } else {
+            sum / weight
+        };
+
+        assert_eq!(result.radiance(), golden_rgb, "point {pos:?}");
+        assert_eq!(
+            result.total_weight.to_bits(),
+            weight.to_bits(),
+            "point {pos:?}"
+        );
+    }
+}
+
+/// A shading point that no surfel covers resolves to all-zero radiance with
+/// zero total weight; a sub-slice gathers only its own surfels.
+#[test]
+fn gather_point_uncovered_is_zero_and_slices_are_isolated() {
+    let cov = CoverageParams::default();
+    let params = GpuSurfelCoverageParams::from_coverage(&cov, 0);
+
+    let surfels = [
+        GpuCoverageSurfel::new(
+            &Surfel::new(Vec3::ZERO, Vec3::Z, 1.0),
+            Vec3::new(1.0, 0.0, 0.0),
+        ),
+        GpuCoverageSurfel::new(
+            &Surfel::new(Vec3::new(10.0, 0.0, 0.0), Vec3::Z, 1.0),
+            Vec3::new(0.0, 1.0, 0.0),
+        ),
+    ];
+
+    // Point far from every surfel: no coverage, zero result.
+    let far = GpuCoveragePoint::new(Vec3::new(100.0, 100.0, 100.0), Vec3::Z, 0, 2);
+    let far_result = gather_point(&params, &far, &surfels);
+    assert_eq!(far_result.radiance(), Vec3::ZERO);
+    assert_eq!(far_result.total_weight.to_bits(), 0.0_f32.to_bits());
+
+    // A point at the first surfel but restricted to the second surfel's slice
+    // gathers nothing: slices are isolated.
+    let foreign = GpuCoveragePoint::new(Vec3::ZERO, Vec3::Z, 1, 1);
+    let foreign_result = gather_point(&params, &foreign, &surfels);
+    assert_eq!(foreign_result.total_weight.to_bits(), 0.0_f32.to_bits());
+
+    // The same point gathering its own first-surfel slice resolves that surfel.
+    let own = GpuCoveragePoint::new(Vec3::ZERO, Vec3::Z, 0, 1);
+    let own_result = gather_point(&params, &own, &surfels);
+    assert!(own_result.total_weight > 0.0);
+    assert_eq!(own_result.radiance(), Vec3::new(1.0, 0.0, 0.0));
+}
+
+/// A non-finite shading point is sanitised to the origin, so the gather stays
+/// finite and matches the gather at the origin.
+#[test]
+fn gather_point_sanitizes_nonfinite_point() {
+    let cov = CoverageParams::default();
+    let params = GpuSurfelCoverageParams::from_coverage(&cov, 0);
+    let surfels = [GpuCoverageSurfel::new(
+        &Surfel::new(Vec3::ZERO, Vec3::Z, 1.0),
+        Vec3::new(0.5, 0.6, 0.7),
+    )];
+
+    let nan_point = GpuCoveragePoint::new(Vec3::new(f32::NAN, f32::INFINITY, 0.0), Vec3::Z, 0, 1);
+    let nan_result = gather_point(&params, &nan_point, &surfels);
+    assert!(nan_result.radiance().is_finite());
+    assert!(nan_result.total_weight.is_finite());
+
+    let origin_point = GpuCoveragePoint::new(Vec3::ZERO, Vec3::Z, 0, 1);
+    let origin_result = gather_point(&params, &origin_point, &surfels);
+    assert_eq!(nan_result.radiance(), origin_result.radiance());
+    assert_eq!(
+        nan_result.total_weight.to_bits(),
+        origin_result.total_weight.to_bits()
+    );
+}
+
+/// The mirror is deterministic: identical inputs yield an identical result.
+#[test]
+fn gather_point_is_deterministic() {
+    let cov = CoverageParams::default();
+    let params = GpuSurfelCoverageParams::from_coverage(&cov, 0);
+    let surfels = [
+        GpuCoverageSurfel::new(
+            &Surfel::new(Vec3::ZERO, Vec3::Z, 1.0),
+            Vec3::new(0.3, 0.4, 0.5),
+        ),
+        GpuCoverageSurfel::new(
+            &Surfel::new(Vec3::new(0.2, 0.0, 0.0), Vec3::Z, 1.0),
+            Vec3::new(0.7, 0.2, 0.1),
+        ),
+    ];
+    let point = GpuCoveragePoint::new(Vec3::new(0.1, 0.05, 0.02), Vec3::Z, 0, 2);
+    assert_eq!(
+        gather_point(&params, &point, &surfels),
+        gather_point(&params, &point, &surfels)
+    );
+}

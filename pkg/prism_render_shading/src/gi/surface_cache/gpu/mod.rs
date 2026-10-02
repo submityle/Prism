@@ -29,6 +29,10 @@
 //!   decode (gather) kernel `shaders/surfel_decode.wesl`, the inverse of
 //!   [`alloc`]: it octahedrally decodes a global atlas texel back to the unit
 //!   world direction stored there exactly as the kernel does.
+//! * [`coverage`] — the scalar `CPU` mirror [`gather_point`] of the
+//!   surfel coverage-gather (consumer) kernel `shaders/surfel_coverage.wesl`,
+//!   resolving a shading point's indirect radiance as the coverage-weighted
+//!   mean of the surfels that cover it exactly as the kernel does.
 //!
 //! # Validation model
 //!
@@ -45,10 +49,16 @@
 
 pub mod abi;
 pub mod alloc;
+pub mod coverage;
 pub mod decode;
 pub mod filter;
 pub mod update;
 
+pub use abi::{
+    GpuCoveragePoint, GpuCoverageResult, GpuCoverageSurfel, GpuSurfelCoverageParams,
+    SURFEL_COVERAGE_PARAMS_SIZE, SURFEL_COVERAGE_POINT_STRIDE, SURFEL_COVERAGE_RESULT_STRIDE,
+    SURFEL_COVERAGE_SURFEL_STRIDE, SURFEL_COVERAGE_WORKGROUP_SIZE,
+};
 pub use abi::{
     GpuSpatialCenter, GpuSpatialFilterParams, GpuSpatialNeighbor, GpuSpatialResult,
     SURFEL_SPATIAL_CENTER_STRIDE, SURFEL_SPATIAL_NEIGHBOR_STRIDE, SURFEL_SPATIAL_PARAMS_SIZE,
@@ -69,6 +79,7 @@ pub use abi::{
     SURFEL_UPDATE_PARAMS_SIZE, SURFEL_UPDATE_RESULT_STRIDE, SURFEL_UPDATE_WORKGROUP_SIZE,
 };
 pub use alloc::allocate_slot;
+pub use coverage::gather_point;
 pub use decode::decode_slot;
 pub use filter::filter_center;
 pub use update::update_entry;
