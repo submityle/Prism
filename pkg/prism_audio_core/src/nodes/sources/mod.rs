@@ -135,6 +135,18 @@
 //!   axisymmetric modes (a round "boom"), an edge strike lights the high modes
 //!   (a bright "slap"). Unlike the `modal_resonator` effect it carries its own
 //!   excitation and is struck at construction.
+//! - [`helmholtz_resonator::HelmholtzResonatorNode`] -- blown-bottle Helmholtz
+//!   resonator (bottle / ocarina / vessel-flute family): a breath-driven
+//!   *lumped* resonance rather than a distributed waveguide. A single
+//!   Chamberlin state-variable filter models the vessel's one Helmholtz mode,
+//!   and a Van der Pol negative resistance (the edge-tone pump, scaled by
+//!   `breath_pressure`) sustains it into a near-sinusoidal limit cycle whose
+//!   cubic saturation keeps it bounded. Because the pitch is the lumped
+//!   resonance it is pinned by the vessel and does not bend with breath,
+//!   unlike the delay-line pitch of `air_jet_flute`; `brightness` adds odd
+//!   harmonics through an out-of-loop `tanh` shaper and `breath_noise` mixes
+//!   in airy turbulence. The vessel only speaks once the breath exceeds a
+//!   `resonance`-dependent threshold.
 //!
 //! Every generator is real-time safe: `process` performs no allocation, no
 //! locking, and no panics, and reproducible generators are fully deterministic
@@ -148,6 +160,7 @@ pub mod brass_lip_reed;
 pub mod fm_operator;
 pub mod fof_source;
 pub mod granular_source;
+pub mod helmholtz_resonator;
 pub mod impulse_train;
 pub mod karplus_strong;
 pub mod membrane_drum;
@@ -168,6 +181,7 @@ pub use conical_reed::{ConicalReedNode, ConicalReedParams};
 pub use fm_operator::{FmOperatorNode, FmOperatorParams};
 pub use fof_source::{FofSourceNode, FofSourceParams, Formant, MAX_FOF_GRAINS, MAX_FORMANTS};
 pub use granular_source::{GranularSourceNode, GranularSourceParams, MAX_GRAINS};
+pub use helmholtz_resonator::{HelmholtzResonatorNode, HelmholtzResonatorParams};
 pub use impulse_train::{ImpulseTrainNode, ImpulseTrainParams};
 pub use karplus_strong::{KarplusStrongNode, KarplusStrongParams};
 pub use membrane_drum::{MembraneDrumNode, MembraneDrumParams};
