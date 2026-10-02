@@ -21,7 +21,9 @@
 use super::conductor::{average_fresnel_conductor, Conductor};
 use super::ggx_energy::{average_albedo, multiscatter_fresnel, multiscatter_lobe};
 use super::microfacet::GgxIsotropic;
-use super::sampler::{cosine_hemisphere_pdf, cosine_sample_hemisphere, Rng};
+#[cfg(test)]
+use super::sampler::Rng;
+use super::sampler::{cosine_hemisphere_pdf, cosine_sample_hemisphere, SampleSource};
 use super::Vec3;
 
 /// The outcome of importance-sampling a [`MultiscatterConductor`] lobe.
@@ -103,7 +105,12 @@ impl MultiscatterConductor {
     /// Returns `None` for a degenerate sample so the caller terminates the path
     /// rather than dividing by zero.
     #[must_use]
-    pub fn sample(&self, wo: Vec3, normal: Vec3, rng: &mut Rng) -> Option<MultiscatterSample> {
+    pub fn sample(
+        &self,
+        wo: Vec3,
+        normal: Vec3,
+        rng: &mut impl SampleSource,
+    ) -> Option<MultiscatterSample> {
         // The integrator passes the raw geometric normal; orient it toward the
         // viewer so a back-facing hit still scatters.
         let normal = normal.faced_toward(wo);

@@ -28,7 +28,9 @@ use alloc::vec::Vec;
 
 use super::bsdf::Bsdf;
 use super::mis::power_heuristic;
+#[cfg(test)]
 use super::sampler::Rng;
+use super::sampler::SampleSource;
 use super::{Vec3, EPS_LEN_SQ, RAY_EPS};
 
 /// Luma weight for the red channel, used to collapse an emitter's `RGB`
@@ -178,7 +180,7 @@ impl AreaLights {
         normal: Vec3,
         wo: Vec3,
         bsdf: &Bsdf,
-        rng: &mut Rng,
+        rng: &mut impl SampleSource,
         occluded: &F,
     ) -> Vec3
     where
@@ -220,7 +222,7 @@ impl AreaLights {
 
     /// Chooses an emitter in proportion to its emitted power (importance), or
     /// [`None`] when the light is empty.
-    fn select(&self, rng: &mut Rng) -> Option<TriangleEmitter> {
+    fn select(&self, rng: &mut impl SampleSource) -> Option<TriangleEmitter> {
         if self.is_empty() {
             return None;
         }
@@ -239,7 +241,7 @@ impl AreaLights {
 
     /// Draws a point uniformly inside `emitter` using the square-root barycentric
     /// warp (only `sqrt` is needed, honouring the determinism policy).
-    fn sample_point(emitter: TriangleEmitter, rng: &mut Rng) -> Vec3 {
+    fn sample_point(emitter: TriangleEmitter, rng: &mut impl SampleSource) -> Vec3 {
         let u0 = rng.next_f32();
         let u1 = rng.next_f32();
         let su0 = u0.sqrt();

@@ -25,7 +25,9 @@
 
 use super::ggx_energy::{average_albedo, multiscatter_fresnel, multiscatter_lobe};
 use super::microfacet::{fresnel_schlick, GgxIsotropic};
-use super::sampler::{cosine_hemisphere_pdf, cosine_sample_hemisphere, Rng};
+#[cfg(test)]
+use super::sampler::Rng;
+use super::sampler::{cosine_hemisphere_pdf, cosine_sample_hemisphere, SampleSource};
 use super::{Vec3, EPS_LEN_SQ};
 
 /// The outcome of importance-sampling a [`SchlickMultiscatterConductor`] lobe.
@@ -149,7 +151,7 @@ impl SchlickMultiscatterConductor {
         &self,
         wo: Vec3,
         normal: Vec3,
-        rng: &mut Rng,
+        rng: &mut impl SampleSource,
     ) -> Option<SchlickMultiscatterSample> {
         // The integrator passes the raw geometric normal; orient it toward the
         // viewer so a back-facing hit still scatters.

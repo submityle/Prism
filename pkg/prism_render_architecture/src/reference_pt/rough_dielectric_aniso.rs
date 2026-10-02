@@ -38,7 +38,9 @@
 
 use super::microfacet_aniso::GgxAnisotropic;
 use super::rough_dielectric::{fr_dielectric, refract_through, RoughDielectricSample};
-use super::sampler::{orthonormal_basis, Rng};
+#[cfg(test)]
+use super::sampler::Rng;
+use super::sampler::{orthonormal_basis, SampleSource};
 use super::{Vec3, EPS_LEN_SQ};
 
 /// A direction cosine below this magnitude is treated as a grazing degeneracy
@@ -290,7 +292,12 @@ impl AnisoRoughDielectric {
     /// [`None`] when the sample is degenerate (grazing, zero-length, or landing
     /// in the wrong hemisphere), so the caller terminates the path.
     #[must_use]
-    pub fn sample(&self, wo: Vec3, normal: Vec3, rng: &mut Rng) -> Option<RoughDielectricSample> {
+    pub fn sample(
+        &self,
+        wo: Vec3,
+        normal: Vec3,
+        rng: &mut impl SampleSource,
+    ) -> Option<RoughDielectricSample> {
         // Orient the frame into the view hemisphere so a back-facing hit still
         // scatters; the microfacet-relative Fresnel and refraction remain
         // correct because they key off the sign of `wo·wm`.

@@ -26,7 +26,9 @@
 use super::dielectric_energy::compensation_factor;
 use super::microfacet::GgxIsotropic;
 use super::rough_dielectric::{RoughDielectric, RoughDielectricSample};
+#[cfg(test)]
 use super::sampler::Rng;
+use super::sampler::SampleSource;
 use super::Vec3;
 
 /// A rough dielectric that adds Turquin multiple-scattering compensation on top
@@ -84,7 +86,12 @@ impl MultiscatterDielectric {
     /// its value by the compensation factor; the density is unchanged. Returns
     /// `None` for a degenerate base sample so the caller terminates the path.
     #[must_use]
-    pub fn sample(&self, wo: Vec3, normal: Vec3, rng: &mut Rng) -> Option<RoughDielectricSample> {
+    pub fn sample(
+        &self,
+        wo: Vec3,
+        normal: Vec3,
+        rng: &mut impl SampleSource,
+    ) -> Option<RoughDielectricSample> {
         let s = self.base.sample(wo, normal, rng)?;
         let k = self.factor(normal.dot(wo));
         Some(RoughDielectricSample {

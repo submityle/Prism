@@ -30,7 +30,7 @@ use super::bsdf::Bsdf;
 use super::environment::EnvironmentMap;
 use super::estimator::{Light, LightHit};
 use super::mis::power_heuristic;
-use super::sampler::Rng;
+use super::sampler::SampleSource;
 use super::{Vec3, RAY_EPS};
 use crate::ray_scene::traversal::Ray;
 use crate::ray_scene::triangle_mesh::TriangleMeshBvh;
@@ -140,7 +140,7 @@ impl Environment {
         normal: Vec3,
         wo: Vec3,
         bsdf: &Bsdf,
-        rng: &mut Rng,
+        rng: &mut impl SampleSource,
         occluded: &F,
     ) -> Vec3
     where
@@ -326,7 +326,7 @@ impl PathIntegrator {
     /// and empty scenes terminate the walk cleanly rather than panicking or
     /// producing `NaN`.
     #[must_use]
-    pub fn radiance(&self, scene: &Scene, primary: Ray, rng: &mut Rng) -> Vec3 {
+    pub fn radiance(&self, scene: &Scene, primary: Ray, rng: &mut impl SampleSource) -> Vec3 {
         let mut radiance = Vec3::ZERO;
         let mut throughput = Vec3::ONE;
         let mut ray = primary;

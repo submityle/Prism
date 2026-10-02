@@ -29,7 +29,7 @@
 //! `sin`/`cos`/`exp`).
 
 use super::microfacet::GgxIsotropic;
-use super::sampler::Rng;
+use super::sampler::SampleSource;
 use super::{Vec3, EPS_LEN_SQ};
 
 /// A direction cosine below this magnitude is treated as a grazing degeneracy
@@ -281,7 +281,12 @@ impl RoughDielectric {
     /// when the sample is degenerate (grazing, zero-length, or landing in the
     /// wrong hemisphere), so the caller terminates the path.
     #[must_use]
-    pub fn sample(&self, wo: Vec3, normal: Vec3, rng: &mut Rng) -> Option<RoughDielectricSample> {
+    pub fn sample(
+        &self,
+        wo: Vec3,
+        normal: Vec3,
+        rng: &mut impl SampleSource,
+    ) -> Option<RoughDielectricSample> {
         let cos_o = normal.dot(wo);
         if cos_o.abs() < COS_EPS {
             return None;

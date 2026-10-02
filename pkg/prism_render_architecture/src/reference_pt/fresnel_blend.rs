@@ -23,7 +23,9 @@
 //! quintics are spelled out as repeated multiplications.
 
 use super::microfacet::{fresnel_schlick, GgxIsotropic};
-use super::sampler::{cosine_hemisphere_pdf, cosine_sample_hemisphere, Rng};
+#[cfg(test)]
+use super::sampler::Rng;
+use super::sampler::{cosine_hemisphere_pdf, cosine_sample_hemisphere, SampleSource};
 use super::{Vec3, EPS_LEN_SQ};
 
 /// The normalization constant `28 / (23 * pi)` of the Ashikhmin-Shirley diffuse
@@ -149,7 +151,12 @@ impl FresnelBlend {
     /// coupled `BRDF` and the combined density are returned, so the integrator's
     /// generic `value * cos / pdf` weight stays unbiased.
     #[must_use]
-    pub fn sample(&self, wo: Vec3, normal: Vec3, rng: &mut Rng) -> Option<FresnelBlendSample> {
+    pub fn sample(
+        &self,
+        wo: Vec3,
+        normal: Vec3,
+        rng: &mut impl SampleSource,
+    ) -> Option<FresnelBlendSample> {
         // Orient the raw geometric normal into the view hemisphere.
         let normal = normal.faced_toward(wo);
         if normal.dot(wo) <= 0.0 {

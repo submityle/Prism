@@ -24,7 +24,9 @@
 //! are both symmetric in the two directions. Only `sqrt` (inside the shared
 //! cosine sampler) and division are used.
 
-use super::sampler::{cosine_hemisphere_pdf, cosine_sample_hemisphere, Rng};
+#[cfg(test)]
+use super::sampler::Rng;
+use super::sampler::{cosine_hemisphere_pdf, cosine_sample_hemisphere, SampleSource};
 use super::{Vec3, INV_PI};
 
 /// Denominator offset of the Oren-Nayar `A` (base) coefficient: the `0.33` in
@@ -144,7 +146,12 @@ impl OrenNayar {
     /// still scatters. Returns `None` for a degenerate (grazing/zero-length)
     /// sample so the caller can terminate the path instead of dividing by zero.
     #[must_use]
-    pub fn sample(&self, wo: Vec3, normal: Vec3, rng: &mut Rng) -> Option<OrenNayarSample> {
+    pub fn sample(
+        &self,
+        wo: Vec3,
+        normal: Vec3,
+        rng: &mut impl SampleSource,
+    ) -> Option<OrenNayarSample> {
         let normal = normal.faced_toward(wo);
         let cos_o = normal.dot(wo);
         if cos_o <= 0.0 {

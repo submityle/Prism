@@ -34,7 +34,9 @@ use super::dielectric_energy::compensation_factor;
 use super::microfacet_aniso::GgxAnisotropic;
 use super::rough_dielectric::RoughDielectricSample;
 use super::rough_dielectric_aniso::AnisoRoughDielectric;
+#[cfg(test)]
 use super::sampler::Rng;
+use super::sampler::SampleSource;
 use super::Vec3;
 
 /// The geometric-mean isotropic-equivalent width of an anisotropic lobe.
@@ -132,7 +134,12 @@ impl AnisoMultiscatterDielectric {
     /// its value by the compensation factor; the density is unchanged. Returns
     /// `None` for a degenerate base sample so the caller terminates the path.
     #[must_use]
-    pub fn sample(&self, wo: Vec3, normal: Vec3, rng: &mut Rng) -> Option<RoughDielectricSample> {
+    pub fn sample(
+        &self,
+        wo: Vec3,
+        normal: Vec3,
+        rng: &mut impl SampleSource,
+    ) -> Option<RoughDielectricSample> {
         let s = self.base.sample(wo, normal, rng)?;
         let k = self.factor(normal.dot(wo));
         Some(RoughDielectricSample {

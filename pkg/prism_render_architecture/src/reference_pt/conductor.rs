@@ -34,7 +34,9 @@
 //! next-event estimation like any rough surface.
 
 use super::microfacet::GgxIsotropic;
+#[cfg(test)]
 use super::sampler::Rng;
+use super::sampler::SampleSource;
 use super::{Vec3, EPS_LEN_SQ};
 
 /// The exact unpolarized `Fresnel` reflectance of a conductor interface for a
@@ -207,7 +209,12 @@ impl Conductor {
     /// `F * G2 / G1(wo)`. Returns `None` for a degenerate (grazing/zero-length)
     /// sample so the caller terminates the path rather than dividing by zero.
     #[must_use]
-    pub fn sample(&self, wo: Vec3, normal: Vec3, rng: &mut Rng) -> Option<ConductorSample> {
+    pub fn sample(
+        &self,
+        wo: Vec3,
+        normal: Vec3,
+        rng: &mut impl SampleSource,
+    ) -> Option<ConductorSample> {
         // The integrator passes the raw geometric normal; orient it into the
         // view hemisphere so a back-facing hit still scatters.
         let normal = normal.faced_toward(wo);

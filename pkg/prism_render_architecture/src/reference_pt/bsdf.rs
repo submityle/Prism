@@ -32,7 +32,7 @@ use super::oren_nayar::OrenNayar;
 use super::rough_dielectric::RoughDielectric;
 use super::rough_dielectric_aniso::AnisoRoughDielectric;
 use super::rough_dielectric_aniso_ms::AnisoMultiscatterDielectric;
-use super::sampler::{cosine_hemisphere_pdf, cosine_sample_hemisphere, Rng};
+use super::sampler::{cosine_hemisphere_pdf, cosine_sample_hemisphere, SampleSource};
 use super::{Vec3, EPS_LEN_SQ, INV_PI};
 
 /// A surface scattering model.
@@ -624,7 +624,12 @@ impl Bsdf {
     /// Returns `None` when the sample is degenerate (grazing/zero-length), so
     /// the caller terminates the path rather than dividing by zero.
     #[must_use]
-    pub fn sample(&self, wo: Vec3, normal: Vec3, rng: &mut Rng) -> Option<BsdfSample> {
+    pub fn sample(
+        &self,
+        wo: Vec3,
+        normal: Vec3,
+        rng: &mut impl SampleSource,
+    ) -> Option<BsdfSample> {
         match self {
             Self::Lambert { albedo } => {
                 // The integrator passes the raw geometric normal; orient it into
@@ -901,7 +906,7 @@ impl Bsdf {
         roughness: f32,
         wo: Vec3,
         normal: Vec3,
-        rng: &mut Rng,
+        rng: &mut impl SampleSource,
     ) -> Option<BsdfSample> {
         // Orient the raw geometric normal into the view hemisphere.
         let normal = normal.faced_toward(wo);
@@ -953,7 +958,7 @@ impl Bsdf {
         transmittance: Vec3,
         wo: Vec3,
         normal: Vec3,
-        rng: &mut Rng,
+        rng: &mut impl SampleSource,
     ) -> Option<BsdfSample> {
         // Decide which side of the interface the view ray is on, then orient the
         // normal to face the view direction (the incident side).
@@ -1020,7 +1025,7 @@ impl Bsdf {
         transmittance: Vec3,
         wo: Vec3,
         normal: Vec3,
-        rng: &mut Rng,
+        rng: &mut impl SampleSource,
     ) -> Option<BsdfSample> {
         // Orient the normal to the incident (view) side; the slab is
         // symmetric, so which face is hit does not change the result.

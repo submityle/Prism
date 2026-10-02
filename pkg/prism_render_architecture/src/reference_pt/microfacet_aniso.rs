@@ -25,7 +25,7 @@
 //! `alpha_x == alpha_y` every formula collapses exactly to the isotropic lobe.
 
 use super::microfacet::MIN_ALPHA;
-use super::sampler::uniform_disk;
+use super::sampler::{uniform_disk, SampleSource};
 use super::{Vec3, EPS_LEN_SQ, INV_PI};
 
 /// An anisotropic `GGX` microfacet distribution with independent widths
@@ -137,11 +137,7 @@ impl GgxAnisotropic {
     /// Returns [`None`] when the view direction is below the surface or the warp
     /// degenerates, so the caller terminates rather than producing a `NaN`.
     #[must_use]
-    pub fn sample_half_vector(
-        &self,
-        wo_local: Vec3,
-        rng: &mut super::sampler::Rng,
-    ) -> Option<Vec3> {
+    pub fn sample_half_vector(&self, wo_local: Vec3, rng: &mut impl SampleSource) -> Option<Vec3> {
         if wo_local.z <= 0.0 {
             return None;
         }

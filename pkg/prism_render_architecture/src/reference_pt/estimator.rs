@@ -18,7 +18,9 @@
 
 use super::bsdf::Bsdf;
 use super::mis::power_heuristic;
+#[cfg(test)]
 use super::sampler::Rng;
+use super::sampler::SampleSource;
 use super::{Vec3, EPS_LEN_SQ, RAY_EPS};
 
 /// A light source usable by next-event estimation.
@@ -89,7 +91,7 @@ impl Light {
         normal: Vec3,
         wo: Vec3,
         bsdf: &Bsdf,
-        rng: &mut Rng,
+        rng: &mut impl SampleSource,
         occluded: &F,
     ) -> Vec3
     where
@@ -191,7 +193,7 @@ impl Light {
         normal: Vec3,
         wo: Vec3,
         bsdf: &Bsdf,
-        rng: &mut Rng,
+        rng: &mut impl SampleSource,
         occluded: &F,
         origin: Vec3,
         edge_u: Vec3,

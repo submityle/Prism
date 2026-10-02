@@ -28,7 +28,7 @@
 //! roughness `r` maps to the GGX width `alpha = r^2`, which linearises the
 //! visual change in highlight size across the slider.
 
-use super::sampler::{orthonormal_basis, uniform_disk, Rng};
+use super::sampler::{orthonormal_basis, uniform_disk, SampleSource};
 use super::{Vec3, EPS_LEN_SQ, INV_PI};
 
 /// Smallest GGX width used for shading.
@@ -127,7 +127,12 @@ impl GgxIsotropic {
     /// Returns [`None`] when the view direction is below the surface or the warp
     /// degenerates, so the caller terminates rather than producing a `NaN`.
     #[must_use]
-    pub fn sample_half_vector(&self, wo: Vec3, normal: Vec3, rng: &mut Rng) -> Option<Vec3> {
+    pub fn sample_half_vector(
+        &self,
+        wo: Vec3,
+        normal: Vec3,
+        rng: &mut impl SampleSource,
+    ) -> Option<Vec3> {
         let cos_o = normal.dot(wo);
         if cos_o <= 0.0 {
             return None;
@@ -254,8 +259,8 @@ mod tests {
         // G1 is in [0, 1] and increases toward normal incidence.
         let grazing = ggx.g1(0.05);
         let normal_incidence = ggx.g1(1.0);
-        assert!(grazing >= 0.0 && grazing <= 1.0);
-        assert!(normal_incidence >= 0.0 && normal_incidence <= 1.0);
+        assert!((0.0..=1.0).contains(&grazing));
+        assert!((0.0..=1.0).contains(&normal_incidence));
         assert!(normal_incidence > grazing);
         // Height-correlated G2 never exceeds either single-direction G1.
         let g2 = ggx.g2(0.6, 0.4);

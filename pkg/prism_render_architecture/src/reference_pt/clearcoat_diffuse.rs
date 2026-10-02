@@ -17,7 +17,9 @@
 
 use super::coat::CoatLayer;
 use super::oren_nayar::OrenNayar;
+#[cfg(test)]
 use super::sampler::Rng;
+use super::sampler::SampleSource;
 use super::Vec3;
 
 /// The outcome of importance-sampling a [`ClearcoatDiffuse`].
@@ -106,7 +108,12 @@ impl ClearcoatDiffuse {
     /// one-sample multiple-importance mixture. Returns `None` for a degenerate
     /// sample so the caller terminates the path.
     #[must_use]
-    pub fn sample(&self, wo: Vec3, normal: Vec3, rng: &mut Rng) -> Option<ClearcoatDiffuseSample> {
+    pub fn sample(
+        &self,
+        wo: Vec3,
+        normal: Vec3,
+        rng: &mut impl SampleSource,
+    ) -> Option<ClearcoatDiffuseSample> {
         // The integrator passes the raw geometric normal; orient it into the
         // view hemisphere so a back-facing hit still scatters.
         let normal = normal.faced_toward(wo);

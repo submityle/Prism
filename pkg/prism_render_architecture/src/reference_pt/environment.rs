@@ -30,7 +30,9 @@ use super::bsdf::Bsdf;
 use super::distribution::Distribution2D;
 use super::mis::power_heuristic;
 use super::octahedral::{direction_to_square, solid_angle_jacobian, square_to_direction};
+#[cfg(test)]
 use super::sampler::Rng;
+use super::sampler::SampleSource;
 use super::Vec3;
 
 /// `Rec. 709` luminance weights used to collapse a radiance triple to the
@@ -171,7 +173,7 @@ impl EnvironmentMap {
     /// solid-angle density of the draw. A zero density signals a degenerate
     /// sample (an inert map or a direction on a seam) that the caller must skip.
     #[must_use]
-    pub fn sample(&self, rng: &mut Rng) -> EnvironmentSample {
+    pub fn sample(&self, rng: &mut impl SampleSource) -> EnvironmentSample {
         if self.is_empty() {
             return EnvironmentSample {
                 direction: Vec3::ZERO,
@@ -213,7 +215,7 @@ impl EnvironmentMap {
         normal: Vec3,
         wo: Vec3,
         bsdf: &Bsdf,
-        rng: &mut Rng,
+        rng: &mut impl SampleSource,
         occluded: &F,
     ) -> Vec3
     where

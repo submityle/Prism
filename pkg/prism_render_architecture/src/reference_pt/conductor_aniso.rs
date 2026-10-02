@@ -25,7 +25,9 @@
 
 use super::conductor::fresnel_conductor;
 use super::microfacet_aniso::GgxAnisotropic;
-use super::sampler::{orthonormal_basis, Rng};
+#[cfg(test)]
+use super::sampler::Rng;
+use super::sampler::{orthonormal_basis, SampleSource};
 use super::{Vec3, EPS_LEN_SQ};
 
 /// The outcome of importance-sampling an [`AnisoConductor`] lobe.
@@ -172,7 +174,12 @@ impl AnisoConductor {
     /// `F * G2 / G1(wo)`. Returns `None` for a degenerate (grazing/zero-length)
     /// sample so the caller terminates the path rather than dividing by zero.
     #[must_use]
-    pub fn sample(&self, wo: Vec3, normal: Vec3, rng: &mut Rng) -> Option<AnisoConductorSample> {
+    pub fn sample(
+        &self,
+        wo: Vec3,
+        normal: Vec3,
+        rng: &mut impl SampleSource,
+    ) -> Option<AnisoConductorSample> {
         // The integrator passes the raw geometric normal; orient it into the
         // view hemisphere so a back-facing hit still scatters.
         let frame = LocalFrame::new(normal.faced_toward(wo));

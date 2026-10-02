@@ -26,7 +26,7 @@
 
 use super::dielectric::fresnel_dielectric;
 use super::microfacet::GgxIsotropic;
-use super::sampler::Rng;
+use super::sampler::SampleSource;
 use super::{Vec3, EPS_LEN_SQ};
 
 /// The smallest relative coat index the layer accepts, keeping the coat a
@@ -154,7 +154,12 @@ impl CoatLayer {
     /// Returns `None` for a degenerate half vector or a direction that leaves
     /// the upper hemisphere so the caller terminates the path.
     #[must_use]
-    pub(super) fn sample_direction(&self, wo: Vec3, normal: Vec3, rng: &mut Rng) -> Option<Vec3> {
+    pub(super) fn sample_direction(
+        &self,
+        wo: Vec3,
+        normal: Vec3,
+        rng: &mut impl SampleSource,
+    ) -> Option<Vec3> {
         let half = self.coat.sample_half_vector(wo, normal, rng)?;
         if wo.dot(half) <= 0.0 {
             return None;
