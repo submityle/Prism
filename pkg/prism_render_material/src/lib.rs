@@ -81,7 +81,7 @@ pub use texture_codec::{
     decode_bc5, decode_bc5_signed, decode_bc6h_mode11_signed, decode_bc6h_mode11_unsigned,
     decode_bc6h_mode12_signed, decode_bc6h_mode12_unsigned, decode_bc6h_mode13_signed,
     decode_bc6h_mode13_unsigned, decode_bc6h_mode14_signed, decode_bc6h_mode14_unsigned,
-    decode_bc6h_mode1_signed, decode_bc6h_mode1_unsigned, decode_bc6h_signed, decode_bc6h_unsigned,
+    decode_bc6h_mode1_signed, decode_bc6h_mode1_unsigned, decode_bc6h_mode2_signed, decode_bc6h_mode2_unsigned, decode_bc6h_signed, decode_bc6h_unsigned,
     decode_bc7, decode_bc7_mode0, decode_bc7_mode1, decode_bc7_mode2, decode_bc7_mode3,
     decode_bc7_mode4, decode_bc7_mode5, decode_bc7_mode6, decode_bc7_mode7, decode_eac_r11_snorm,
     decode_eac_r11_unorm, decode_eac_rg11_snorm, decode_eac_rg11_unorm, decode_etc2_rgb8,

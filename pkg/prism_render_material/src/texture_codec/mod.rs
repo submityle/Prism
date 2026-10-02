@@ -56,7 +56,7 @@ pub use bc6h::{
     bc6h_mode_bits, decode_bc6h_mode11_signed, decode_bc6h_mode11_unsigned,
     decode_bc6h_mode12_signed, decode_bc6h_mode12_unsigned, decode_bc6h_mode13_signed,
     decode_bc6h_mode13_unsigned, decode_bc6h_mode14_signed, decode_bc6h_mode14_unsigned,
-    decode_bc6h_mode1_signed, decode_bc6h_mode1_unsigned, decode_bc6h_signed, decode_bc6h_unsigned,
+    decode_bc6h_mode1_signed, decode_bc6h_mode1_unsigned, decode_bc6h_mode2_signed, decode_bc6h_mode2_unsigned, decode_bc6h_signed, decode_bc6h_unsigned,
     half_bits_to_f32, Bc6hError,
 };
 pub use bc7::{

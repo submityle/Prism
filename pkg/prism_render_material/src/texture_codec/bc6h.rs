@@ -432,6 +432,7 @@ pub fn decode_bc6h_mode14_signed(block: &[u8; 16]) -> [[f32; 3]; 16] {
 pub fn decode_bc6h_unsigned(block: &[u8; 16]) -> Result<[[f32; 3]; 16], Bc6hError> {
     match bc6h_mode_bits(block) {
         0b00 => Ok(decode_bc6h_mode1_unsigned(block)),
+        0b01 => Ok(decode_bc6h_mode2_unsigned(block)),
         0b00011 => Ok(decode_bc6h_mode11_unsigned(block)),
         0b00111 => Ok(decode_bc6h_mode12_unsigned(block)),
         0b01011 => Ok(decode_bc6h_mode13_unsigned(block)),
@@ -448,6 +449,7 @@ pub fn decode_bc6h_unsigned(block: &[u8; 16]) -> Result<[[f32; 3]; 16], Bc6hErro
 pub fn decode_bc6h_signed(block: &[u8; 16]) -> Result<[[f32; 3]; 16], Bc6hError> {
     match bc6h_mode_bits(block) {
         0b00 => Ok(decode_bc6h_mode1_signed(block)),
+        0b01 => Ok(decode_bc6h_mode2_signed(block)),
         0b00011 => Ok(decode_bc6h_mode11_signed(block)),
         0b00111 => Ok(decode_bc6h_mode12_signed(block)),
         0b01011 => Ok(decode_bc6h_mode13_signed(block)),
@@ -652,6 +654,44 @@ pub fn decode_bc6h_mode1_unsigned(block: &[u8; 16]) -> [[f32; 3]; 16] {
 #[must_use]
 pub fn decode_bc6h_mode1_signed(block: &[u8; 16]) -> [[f32; 3]; 16] {
     decode_bc6h_two_subset(block, &BC6H_MODE1, true)
+}
+
+/// BC6H mode 2 (`0b01`, 2-bit mode): two subsets, 7-bit base, 6/6/6 deltas,
+/// transformed. Descriptor transcribed from the Khronos / `DirectXTex`
+/// `ModeDescriptor` and proved bit-exact against the GPU oracle.
+#[rustfmt::skip]
+const BC6H_MODE2: TwoSubsetMode = {
+    use Bc6hField::{Bw, Bx, By, Bz, D, Gw, Gx, Gy, Gz, M, Rw, Rx, Ry, Rz};
+    TwoSubsetMode {
+        transformed: true,
+        base_prec: 7,
+        delta_bits: [6, 6, 6],
+        descriptor: &[
+            (M, 0), (M, 1), (Gy, 5), (Gz, 4), (Gz, 5), (Rw, 0), (Rw, 1), (Rw, 2), (Rw, 3), (Rw, 4),
+            (Rw, 5), (Rw, 6), (Bz, 0), (Bz, 1), (By, 4), (Gw, 0), (Gw, 1), (Gw, 2), (Gw, 3), (Gw, 4),
+            (Gw, 5), (Gw, 6), (By, 5), (Bz, 2), (Gy, 4), (Bw, 0), (Bw, 1), (Bw, 2), (Bw, 3), (Bw, 4),
+            (Bw, 5), (Bw, 6), (Bz, 3), (Bz, 5), (Bz, 4), (Rx, 0), (Rx, 1), (Rx, 2), (Rx, 3), (Rx, 4),
+            (Rx, 5), (Gy, 0), (Gy, 1), (Gy, 2), (Gy, 3), (Gx, 0), (Gx, 1), (Gx, 2), (Gx, 3), (Gx, 4),
+            (Gx, 5), (Gz, 0), (Gz, 1), (Gz, 2), (Gz, 3), (Bx, 0), (Bx, 1), (Bx, 2), (Bx, 3), (Bx, 4),
+            (Bx, 5), (By, 0), (By, 1), (By, 2), (By, 3), (Ry, 0), (Ry, 1), (Ry, 2), (Ry, 3), (Ry, 4),
+            (Ry, 5), (Rz, 0), (Rz, 1), (Rz, 2), (Rz, 3), (Rz, 4), (Rz, 5), (D, 0), (D, 1), (D, 2),
+            (D, 3), (D, 4),
+        ],
+    }
+};
+
+/// Decode a **BC6H mode 2 (unsigned)** block (two subsets, 7-bit base, 6-bit
+/// deltas). See [`decode_bc6h_two_subset`].
+#[must_use]
+pub fn decode_bc6h_mode2_unsigned(block: &[u8; 16]) -> [[f32; 3]; 16] {
+    decode_bc6h_two_subset(block, &BC6H_MODE2, false)
+}
+
+/// Decode a **BC6H mode 2 (signed, `SF16`)** block (two subsets, 7-bit base,
+/// 6-bit deltas). See [`decode_bc6h_two_subset`].
+#[must_use]
+pub fn decode_bc6h_mode2_signed(block: &[u8; 16]) -> [[f32; 3]; 16] {
+    decode_bc6h_two_subset(block, &BC6H_MODE2, true)
 }
 
 #[cfg(test)]
