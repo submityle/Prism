@@ -19,6 +19,9 @@
 //! "high quality" sampler mode: [`trilinear_bicubic`] blends two bicubic mips by
 //! the fractional LOD, and [`filter_resolved_bicubic`] averages anisotropic
 //! [`trilinear_bicubic`] taps. These trade 16 taps per mip for C1 continuity
+//! at magnification. The smoothing [`trilinear_bspline`] /
+//! [`filter_resolved_bspline`] pair mirrors them with the non-negative cubic
+//! B-spline, a zero-overshoot mode for height/terrain/SDF data textures.
 //! (no bilinear diamond seams under magnification) while keeping the same
 //! resolve -> fetch -> filter contract and the exact-linear-ramp guarantee.
 //!
@@ -182,6 +185,71 @@ pub fn filter_resolved_bicubic<S: TexelSource>(
     let mut acc = [0.0_f32; 4];
     for &uv in resolved.taps.uvs() {
         let c = trilinear_bicubic(src, uv, lod, wrap_u, wrap_v, border_color);
+        acc[0] += c[0] * weight;
+        acc[1] += c[1] * weight;
+        acc[2] += c[2] * weight;
+        acc[3] += c[3] * weight;
+    }
+    acc
+}
+
+/// B-spline (smoothing) trilinear sample of `src` at continuous `lod`.
+///
+/// The non-interpolating analogue of [`trilinear_bicubic`]: evaluates the C2
+/// cubic B-spline 4x4 fetch ([`bspline_cubic`]) at the two mips bracketing the
+/// continuous LOD and blends them by the fractional level. Because the B-spline
+/// kernel is strictly non-negative, every fetch is a convex combination of its
+/// taps, so the result can never over- or under-shoot the local texel range --
+/// the zero-ringing counterpart to [`trilinear_bicubic`]. This is the sampler
+/// mode an AAA pipeline selects for smooth magnification of height fields,
+/// terrain, SDF/coverage, and other data textures where cubic overshoot would
+/// introduce spurious ridges. It reproduces linear ramps exactly within and
+/// across levels but, unlike Catmull-Rom, smooths rather than interpolates the
+/// original texels.
+#[must_use]
+pub fn trilinear_bspline<S: TexelSource>(
+    src: &S,
+    uv: [f32; 2],
+    lod: f32,
+    wrap_u: WrapMode,
+    wrap_v: WrapMode,
+    border_color: [f32; 4],
+) -> [f32; 4] {
+    let (w, h) = src.dimensions();
+    let tri = trilinear_mip(lod, max_mip_of(w, h));
+    let fine = bspline_cubic(src, tri.fine, uv, wrap_u, wrap_v, border_color);
+    if tri.coarse == tri.fine || tri.frac == 0.0 {
+        return fine;
+    }
+    let coarse = bspline_cubic(src, tri.coarse, uv, wrap_u, wrap_v, border_color);
+    lerp4(fine, coarse, tri.frac)
+}
+
+/// B-spline analogue of [`filter_resolved`]: anisotropic average of
+/// [`trilinear_bspline`] taps.
+///
+/// Each anisotropic tap is evaluated with the smoothing B-spline cubic
+/// trilinear fetch instead of the bilinear one, giving the no-overshoot cubic
+/// sampler mode the full resolve -> fetch -> filter pipeline (anisotropy plus
+/// non-negative cubic magnification in one pass). The isotropic (single-tap)
+/// case degenerates to a plain [`trilinear_bspline`] fetch; `border_color` is
+/// returned unchanged when [`SampleResolved::border`] is set.
+#[must_use]
+pub fn filter_resolved_bspline<S: TexelSource>(
+    src: &S,
+    resolved: &SampleResolved,
+    wrap_u: WrapMode,
+    wrap_v: WrapMode,
+    border_color: [f32; 4],
+) -> [f32; 4] {
+    if resolved.border {
+        return border_color;
+    }
+    let lod = resolved.taps.lod();
+    let weight = resolved.taps.weight();
+    let mut acc = [0.0_f32; 4];
+    for &uv in resolved.taps.uvs() {
+        let c = trilinear_bspline(src, uv, lod, wrap_u, wrap_v, border_color);
         acc[0] += c[0] * weight;
         acc[1] += c[1] * weight;
         acc[2] += c[2] * weight;
@@ -444,6 +512,134 @@ mod tests {
         assert!(r.border);
         let border = [5.0, 6.0, 7.0, 8.0];
         let c = filter_resolved_bicubic(
+            &ramp(),
+            &r,
+            WrapMode::ClampToBorder,
+            WrapMode::ClampToBorder,
+            border,
+        );
+        assert_eq!(c, border);
+    }
+
+    /// A per-mip alternating 0/1 red pattern in x; its 4x4 neighbourhood always
+    /// straddles both extremes, so a ringing (Catmull-Rom) kernel overshoots
+    /// outside [0, 1] while the non-negative B-spline must stay inside it.
+    struct AltX;
+    impl TexelSource for AltX {
+        fn dimensions(&self) -> (u32, u32) {
+            (256, 256)
+        }
+        fn texel(&self, _mip: u32, x: u32, _y: u32) -> [f32; 4] {
+            [(x % 2) as f32, 0.0, 0.0, 1.0]
+        }
+    }
+
+    #[test]
+    fn trilinear_bspline_integer_lod_matches_single_mip() {
+        // frac == 0 path must equal the bare B-spline fetch at that mip.
+        let src = PlaneAll { bx: 0.3, by: -0.2 };
+        let uv = [0.3718, 0.6421];
+        let got = trilinear_bspline(&src, uv, 2.0, WrapMode::Repeat, WrapMode::Repeat, [0.0; 4]);
+        let want = bspline_cubic(&src, 2, uv, WrapMode::Repeat, WrapMode::Repeat, [0.0; 4]);
+        assert!((got[0] - want[0]).abs() < 1.0e-6, "{got:?} vs {want:?}");
+    }
+
+    #[test]
+    fn trilinear_bspline_constant_per_mip_matches_trilinear() {
+        // On a per-mip constant source the B-spline is the constant (convex
+        // blend of equal taps), so the smooth trilinear blend equals bilinear.
+        for &lod in &[0.0_f32, 2.25, 3.75, 7.0] {
+            let b = trilinear_bspline(
+                &ramp(),
+                [0.5, 0.5],
+                lod,
+                WrapMode::Repeat,
+                WrapMode::Repeat,
+                [0.0; 4],
+            );
+            let t = trilinear(
+                &ramp(),
+                [0.5, 0.5],
+                lod,
+                WrapMode::Repeat,
+                WrapMode::Repeat,
+                [0.0; 4],
+            );
+            assert!((b[0] - t[0]).abs() < 1.0e-6, "lod {lod}: {b:?} vs {t:?}");
+        }
+    }
+
+    #[test]
+    fn trilinear_bspline_reproduces_plane_across_lod() {
+        // The cubic B-spline reconstructs linear functions exactly, so a texel
+        // plane is reproduced at each mip and the LOD blend of equal planes is
+        // still that plane -- matching the independent per-mip evaluations.
+        let src = PlaneAll { bx: 0.25, by: 0.0 };
+        let uv = [0.4, 0.4];
+        let lod = 1.5_f32;
+        let got = trilinear_bspline(&src, uv, lod, WrapMode::Repeat, WrapMode::Repeat, [0.0; 4]);
+        let fine = bspline_cubic(&src, 1, uv, WrapMode::Repeat, WrapMode::Repeat, [0.0; 4]);
+        let coarse = bspline_cubic(&src, 2, uv, WrapMode::Repeat, WrapMode::Repeat, [0.0; 4]);
+        let want = fine[0] + (coarse[0] - fine[0]) * 0.5;
+        assert!((got[0] - want).abs() < 1.0e-5, "{got:?} vs {want}");
+    }
+
+    #[test]
+    fn trilinear_bspline_never_overshoots_steep_edge() {
+        // Convex (non-negative) kernel: output must stay within the [0, 1] input
+        // range across the whole uv/LOD sweep, unlike the ringing Catmull-Rom.
+        for i in 0..32u32 {
+            let u = i as f32 / 31.0;
+            for &lod in &[0.0_f32, 1.4, 3.6] {
+                let c = trilinear_bspline(
+                    &AltX,
+                    [u, 0.5],
+                    lod,
+                    WrapMode::Repeat,
+                    WrapMode::Repeat,
+                    [0.0; 4],
+                );
+                assert!(
+                    c[0] >= -1.0e-6 && c[0] <= 1.0 + 1.0e-6,
+                    "overshoot at u={u} lod={lod}: {c:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn filter_resolved_bspline_isotropic_matches_trilinear_bspline() {
+        let vt = VirtualTexture::new(256, 256, 128);
+        let tri = TriangleLodConstant::new(
+            [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+            256,
+            256,
+        );
+        let req = SampleRequest::isotropic([0.5, 0.5], WrapMode::Repeat);
+        let r = resolve_cone(vt, &req, tri, 0.02, 1.0);
+        let via =
+            filter_resolved_bspline(&ramp(), &r, WrapMode::Repeat, WrapMode::Repeat, [0.0; 4]);
+        let direct = trilinear_bspline(
+            &ramp(),
+            [0.5, 0.5],
+            r.lod,
+            WrapMode::Repeat,
+            WrapMode::Repeat,
+            [0.0; 4],
+        );
+        assert!((via[0] - direct[0]).abs() < 1.0e-6, "{via:?} vs {direct:?}");
+    }
+
+    #[test]
+    fn filter_resolved_bspline_border_returns_border_color() {
+        let vt = VirtualTexture::new(256, 256, 128);
+        let rd = RayDifferential::new([1.0 / 256.0, 0.0], [0.0, 1.0 / 256.0]);
+        let req = SampleRequest::new([1.5, 0.5], WrapMode::ClampToBorder, 1.0);
+        let r = resolve_differential(vt, &req, rd);
+        assert!(r.border);
+        let border = [1.0, 2.0, 3.0, 4.0];
+        let c = filter_resolved_bspline(
             &ramp(),
             &r,
             WrapMode::ClampToBorder,

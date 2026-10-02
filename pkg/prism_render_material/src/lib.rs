@@ -64,8 +64,8 @@ pub use texture_codec::{
 pub use texture_filter::{
     bicubic_catmull_rom, bilinear, bspline_cubic, bspline_cubic_fast, bspline_cubic_weights,
     catmull_rom_weights, cubic_mitchell, filter_resolved, filter_resolved_bicubic,
-    mitchell_netravali_weights, trilinear, trilinear_bicubic, wrap_texel, TexelAddr, TexelSource,
-    MITCHELL_B, MITCHELL_C,
+    filter_resolved_bspline, mitchell_netravali_weights, trilinear, trilinear_bicubic,
+    trilinear_bspline, wrap_texel, TexelAddr, TexelSource, MITCHELL_B, MITCHELL_C,
 };
 pub use texture_lod::{
     anisotropic_taps, cone_mip_level, mip_from_isotropic_footprint, trilinear_mip, AnisoTaps,
