@@ -32,9 +32,11 @@
 //! of this crate's own spherecast query.
 
 pub mod config;
+pub mod support;
 pub mod sweep;
 
 pub use config::CcdConfig;
+pub use support::CcdSupport;
 
 use crate::query::QueryFilter;
 use crate::state::body::BodyKind;
