@@ -73,6 +73,7 @@ pub mod ao_sample;
 pub mod aperture_blade;
 pub mod apply_carve;
 pub mod atlas_mip_padding;
+pub mod audio_spectrum;
 pub mod avsm_area;
 pub mod avsm_transmittance;
 pub mod backface_outline_expand;
@@ -202,6 +203,7 @@ pub mod kawase_blur;
 pub mod kawase_dual_blur;
 pub mod lens_distortion;
 pub mod liang_barsky_clip;
+pub mod light_clustered;
 pub mod light_shaft;
 pub mod line_line_closest_3d;
 pub mod lod;
@@ -234,6 +236,7 @@ pub mod modeling;
 pub mod morton_code;
 pub mod motion_blur;
 pub mod motion_vectors;
+pub mod multigrid_pressure;
 pub mod multiscatter_lut_build;
 pub mod multiscatter_lut_sample;
 pub mod nd_strides_index;
@@ -263,6 +266,7 @@ pub mod point_cache;
 pub mod point_in_polygon;
 pub mod point_in_tetrahedron;
 pub mod point_triangle_closest_3d;
+pub mod poisson_disk;
 pub mod polygon_area_2d;
 pub mod polyline_sdf_2d;
 pub mod popcount_hamming;
@@ -337,6 +341,7 @@ pub mod temporal_reproject;
 pub mod temporal_reprojection;
 pub mod terrain_occlusion;
 pub mod tetrahedron_volume;
+pub mod tile_light_cull;
 pub mod tiled_depth_sort;
 pub mod time_control;
 pub mod tonemap;
@@ -364,6 +369,7 @@ pub mod virga_veil;
 pub mod volume_march;
 pub mod volume_scene_shadow_cast;
 pub mod volumetric_multiscatter;
+pub mod volumetrics;
 pub mod vorticity_confinement;
 pub mod voxel_traversal;
 pub mod welzl_min_sphere;
@@ -392,6 +398,7 @@ pub use ao_sample::GpuAoSample;
 pub use aperture_blade::{ApertureBladeQuery, ApertureBladeResult, GpuApertureBlade};
 pub use apply_carve::{ApplyCarveQuery, GpuApplyCarve};
 pub use atlas_mip_padding::{GpuAtlasMipPadding, GpuAtlasPadOp, GpuAtlasPadQuery, GpuPadMode};
+pub use audio_spectrum::{AudioSpectrumQuery, AudioSpectrumResult, GpuAudioSpectrum};
 pub use avsm_area::GpuAvsmArea;
 pub use avsm_transmittance::{AvsmSampleNode, GpuAvsmTransmittance};
 pub use backface_outline_expand::{
@@ -571,6 +578,9 @@ pub use kawase_blur::{GpuKawaseBlur, KawaseBlurQuery};
 pub use kawase_dual_blur::{GpuKawaseDualBlur, GpuKawaseDualBlurQuery, GpuKawaseDualBlurResult};
 pub use lens_distortion::GpuLensDistortion;
 pub use liang_barsky_clip::{GpuLiangBarskyClip, LiangBarskyQuery, LiangBarskyResult, CLIP_EPS};
+pub use light_clustered::{
+    GpuLightClustered, LightClusteredQuery, LightClusteredResult, MAX_SLICE_BOUNDARIES,
+};
 pub use light_shaft::{GpuLightShaft, GpuLightShaftParams, LightShaftResult};
 pub use line_line_closest_3d::{GpuLineLineClosest3d, LineLineQuery, LineLineResult};
 pub use lod::{GpuParticleLod, ParticleLodQuery, ParticleLodResult};
@@ -614,6 +624,9 @@ pub use modeling::{GpuModeling, ModelingQuery};
 pub use morton_code::GpuMortonCode;
 pub use motion_blur::{GpuMotionBlur, MotionBlurQuery, MotionBlurResult};
 pub use motion_vectors::{GpuMotionVectors, MotionVectorQuery};
+pub use multigrid_pressure::{
+    GpuMultigridPressure, MultigridPressureQuery, MultigridPressureResult,
+};
 pub use multiscatter_lut_build::GpuMultiScatterLutBuild;
 pub use multiscatter_lut_sample::{GpuMultiScatterLutSample, MultiScatterSampleQuery};
 pub use nd_strides_index::{GpuNdStridesIndex, NdStridesQuery, MAX_RANK};
@@ -650,6 +663,7 @@ pub use point_in_tetrahedron::{
     GpuPointInTetrahedron, PointInTetrahedronQuery, PointInTetrahedronResult,
 };
 pub use point_triangle_closest_3d::{GpuPointTriangleClosest3d, PointTriangleQuery};
+pub use poisson_disk::{GpuPoissonDisk, PoissonDiskQuery, PoissonDiskResult};
 pub use polygon_area_2d::{GpuPolygonArea2d, GpuPolygonMetrics, MAX_POLYGON_VERTS};
 pub use polyline_sdf_2d::{GpuPolylineSdf, GpuPolylineSdf2d, PolylineSdf2dQuery};
 pub use popcount_hamming::GpuPopcountHamming;
@@ -752,6 +766,7 @@ pub use terrain_occlusion::{GpuTerrainOcclusion, TerrainOcclusionQuery};
 pub use tetrahedron_volume::{
     GpuTetrahedronVolume, TetrahedronVolumeQuery, TetrahedronVolumeResult,
 };
+pub use tile_light_cull::{GpuTileLightCull, TileLightCullQuery, TileLightCullResult};
 pub use tiled_depth_sort::{GpuTileOf, TileOfQuery, TileOfResult};
 pub use time_control::{GpuTimeControl, TimeControlQuery, TimeControlResult};
 pub use tonemap::{GpuTonemap, TonemapQuery, TonemapResult};
@@ -783,6 +798,7 @@ pub use volume_scene_shadow_cast::{GpuVolumeShadowCast, ShadowMarch, VolumeShado
 pub use volumetric_multiscatter::{
     GpuVolumetricMultiScatter, MultiScatterQuery, VolumetricMultiScatterResponse,
 };
+pub use volumetrics::{GpuVolumetrics, VolumetricsQuery, VolumetricsResult};
 pub use vorticity_confinement::{GpuVorticityConfinement, VorticityResult};
 pub use voxel_traversal::{GpuVoxelTraversal, VoxelTraversalQuery, VoxelTraversalResult};
 pub use welzl_min_sphere::{GpuWelzlMinSphere, WelzlMinSphereQuery, WelzlMinSphereResult};
