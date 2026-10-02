@@ -271,3 +271,107 @@ fn tex_lod_aniso_tap_uv(
         center_uv.y + t * major_axis_uv.y
     );
 }
+
+// --- virtual-texture page residency: mirror texture_lod/residency.rs ---
+
+// The two mip levels bracketing a continuous LOD plus the trilinear blend.
+struct TrilinearMip {
+    fine: u32,
+    coarse: u32,
+    frac: f32,
+}
+
+// A request that a specific virtual-texture page be made resident.
+struct PageRequest {
+    mip: u32,
+    page_x: u32,
+    page_y: u32,
+}
+
+// Immutable description of a streaming virtual texture's tiling.
+struct VirtualTexture {
+    width: u32,
+    height: u32,
+    page_size: u32,
+    max_mip: u32,
+}
+
+// Decompose a continuous LOD into the trilinear mip pair + blend weight.
+fn tex_lod_trilinear_mip(lod: f32, max_mip: u32) -> TrilinearMip {
+    var clamped: f32;
+    if (tex_lod_is_finite(lod)) {
+        clamped = lod;
+    } else {
+        clamped = f32(max_mip);
+    }
+    clamped = clamp(clamped, 0.0, f32(max_mip));
+    let fine_f = floor(clamped);
+    var frac = clamped - fine_f;
+    let fine = u32(fine_f);
+    let coarse = min(fine + 1u, max_mip);
+    if (coarse == fine) {
+        frac = 0.0;
+    }
+    var result: TrilinearMip;
+    result.fine = fine;
+    result.coarse = coarse;
+    result.frac = frac;
+    return result;
+}
+
+// Build a descriptor from base dimensions and a square page size.
+// `max_mip = floor(log2(max(width, height)))` via `firstLeadingBit` (== ilog2
+// for a `>= 1` argument).
+fn tex_lod_vt_new(width: u32, height: u32, page_size: u32) -> VirtualTexture {
+    let w = max(width, 1u);
+    let h = max(height, 1u);
+    let ps = max(page_size, 1u);
+    let max_axis = max(w, h);
+    var vt: VirtualTexture;
+    vt.width = w;
+    vt.height = h;
+    vt.page_size = ps;
+    vt.max_mip = firstLeadingBit(max_axis);
+    return vt;
+}
+
+// Axis dimension (texels) at `mip`, floored to `>= 1`.
+fn tex_lod_vt_dim_at(dim: u32, mip: u32) -> u32 {
+    return max(dim >> min(mip, 31u), 1u);
+}
+
+// Pages along an axis of `dim_m` texels (ceil division), floored to `>= 1`.
+fn tex_lod_vt_pages_along(dim_m: u32, page_size: u32) -> u32 {
+    return max((dim_m + page_size - 1u) / page_size, 1u);
+}
+
+// Resolve the page covering `uv` at a single integer `mip` (clamp-to-edge).
+fn tex_lod_vt_page_at(vt: VirtualTexture, uv: vec2<f32>, mip_in: u32) -> PageRequest {
+    let mip = min(mip_in, vt.max_mip);
+    let w = tex_lod_vt_dim_at(vt.width, mip);
+    let h = tex_lod_vt_dim_at(vt.height, mip);
+    let pages_x = tex_lod_vt_pages_along(w, vt.page_size);
+    let pages_y = tex_lod_vt_pages_along(h, vt.page_size);
+
+    let u = clamp(uv.x, 0.0, 1.0);
+    let v = clamp(uv.y, 0.0, 1.0);
+    let tx = u32(max(min(u * f32(w), f32(w - 1u)), 0.0));
+    let ty = u32(max(min(v * f32(h), f32(h - 1u)), 0.0));
+
+    let page_x = min(tx / vt.page_size, pages_x - 1u);
+    let page_y = min(ty / vt.page_size, pages_y - 1u);
+    var req: PageRequest;
+    req.mip = mip;
+    req.page_x = page_x;
+    req.page_y = page_y;
+    return req;
+}
+
+// Resolve the trilinear page set (fine then coarse) for a shaded texel.
+fn tex_lod_vt_residency(vt: VirtualTexture, uv: vec2<f32>, lod: f32) -> array<PageRequest, 2> {
+    let tri = tex_lod_trilinear_mip(lod, vt.max_mip);
+    return array<PageRequest, 2>(
+        tex_lod_vt_page_at(vt, uv, tri.fine),
+        tex_lod_vt_page_at(vt, uv, tri.coarse)
+    );
+}

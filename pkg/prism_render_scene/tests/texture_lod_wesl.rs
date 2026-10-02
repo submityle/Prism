@@ -59,6 +59,15 @@ import prism_render_scene::shaders::texture_lod::{
     tex_lod_aniso_tap_count,
     tex_lod_aniso_tap_weight,
     tex_lod_aniso_tap_uv,
+    TrilinearMip,
+    PageRequest,
+    VirtualTexture,
+    tex_lod_trilinear_mip,
+    tex_lod_vt_new,
+    tex_lod_vt_dim_at,
+    tex_lod_vt_pages_along,
+    tex_lod_vt_page_at,
+    tex_lod_vt_residency,
 };
 
 @group(0) @binding(0)
@@ -127,6 +136,24 @@ fn texture_lod_link_test(@builtin(global_invocation_id) id: vec3<u32>) {
     output[22] = f32(n);
     output[23] = f32(TEX_LOD_MAX_ANISO_TAPS);
     output[24] = select(0.0, 1.0, tex_lod_is_finite(iso));
+
+    let vt: VirtualTexture = tex_lod_vt_new(256u, 256u, 128u);
+    let tri: TrilinearMip = tex_lod_trilinear_mip(3.25, vt.max_mip);
+    let dim = tex_lod_vt_dim_at(vt.width, 1u);
+    let along = tex_lod_vt_pages_along(dim, vt.page_size);
+    let page: PageRequest = tex_lod_vt_page_at(vt, vec2<f32>(0.5, 0.5), 0u);
+    let pages = tex_lod_vt_residency(vt, vec2<f32>(0.5, 0.5), 3.25);
+
+    output[25] = f32(vt.max_mip);
+    output[26] = f32(tri.fine);
+    output[27] = f32(tri.coarse);
+    output[28] = tri.frac;
+    output[29] = f32(dim);
+    output[30] = f32(along);
+    output[31] = f32(page.page_x);
+    output[32] = f32(page.page_y);
+    output[33] = f32(pages[0].mip);
+    output[34] = f32(pages[1].mip);
 }
 "#;
 
