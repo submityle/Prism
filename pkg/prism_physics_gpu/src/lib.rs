@@ -65,8 +65,8 @@ pub mod xpbd;
 
 pub use broadphase::{cpu_broadphase, BroadphaseConfig, BroadphaseError, CandidatePair, Particle};
 pub use bvh::{
-    cpu_build_lbvh, cpu_bvh_aabb_overlap, cpu_bvh_pairs, cpu_bvh_raycast_any,
-    cpu_bvh_raycast_closest, Aabb, BvhQueryError, GpuBvhOverlap, GpuBvhQuery, GpuBvhRaycast,
+    cpu_build_lbvh, cpu_bvh_aabb_overlap, cpu_refit_lbvh, cpu_bvh_pairs, cpu_bvh_raycast_any,
+    cpu_bvh_raycast_closest, Aabb, BvhQueryError, GpuBvhOverlap, GpuBvhQuery, GpuBvhRaycast, GpuBvhRefit,
     GpuLbvh, GpuResidentLbvh, Lbvh, OverlapQueryError, Ray, RayHit, SceneBounds, NO_PARENT,
 };
 pub use cfl::{cpu_cfl_dt, cpu_max_speed, CflConfig, GpuCflReduce};

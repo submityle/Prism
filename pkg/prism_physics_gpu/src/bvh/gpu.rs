@@ -383,8 +383,10 @@ impl GpuLbvh {
             .iter()
             .map(|b| [b.max.x, b.max.y, b.max.z, 0.0])
             .collect();
-        let aabb_min = buffer::storage_read(device, "prism_bvh_aabb_min", &packed_min);
-        let aabb_max = buffer::storage_read(device, "prism_bvh_aabb_max", &packed_max);
+        // Writable (COPY_DST) so an incremental refit can overwrite the primitive
+        // boxes in place on the resident tree; the bounds kernel only reads them.
+        let aabb_min = buffer::storage_rw_init(device, "prism_bvh_aabb_min", &packed_min);
+        let aabb_max = buffer::storage_rw_init(device, "prism_bvh_aabb_max", &packed_max);
 
         let key_bytes = (n * size_of::<u32>()) as u64;
         let keys_buf = buffer::storage_rw_zeroed(device, "prism_bvh_keys", key_bytes);
@@ -525,7 +527,7 @@ impl GpuLbvh {
 /// non-negative value (clear the sign bit), otherwise the value was negative
 /// (flip every bit).
 #[must_use]
-fn from_order(u: u32) -> f32 {
+pub(crate) fn from_order(u: u32) -> f32 {
     if u & 0x8000_0000 != 0 {
         f32::from_bits(u & 0x7fff_ffff)
     } else {

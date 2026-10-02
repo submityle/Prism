@@ -185,7 +185,7 @@ fn child_aabb(encoded: u32, num_internal: usize, internal: &[Aabb], leaf: &[Aabb
 /// Each leaf climbs toward the root; a node is finished (and its box written)
 /// only by the second child to arrive, so both subtrees are complete first.
 #[must_use]
-fn climb_bounds(
+pub(crate) fn climb_bounds(
     num_internal: usize,
     left: &[u32],
     right: &[u32],
