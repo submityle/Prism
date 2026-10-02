@@ -164,6 +164,7 @@ pub mod phase;
 pub mod plane_aabb_classify;
 pub mod plane_clip;
 pub mod plane_line_intersect;
+pub mod plucker_coord;
 pub mod point_in_polygon;
 pub mod point_in_tetrahedron;
 pub mod popcount_hamming;
@@ -359,6 +360,7 @@ pub use plane_line_intersect::{
     GpuPlaneLineIntersect, PlaneLineQuery, PlaneLineResult, CLASS_COINCIDENT, CLASS_PARALLEL,
     CLASS_POINT,
 };
+pub use plucker_coord::{GpuPluckerCoord, PluckerQuery, PluckerResult};
 pub use point_in_polygon::{GpuPointInPolygon, PointInPolygonResult};
 pub use point_in_tetrahedron::{
     GpuPointInTetrahedron, PointInTetrahedronQuery, PointInTetrahedronResult,
