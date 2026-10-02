@@ -27,13 +27,14 @@ use bevy_render::{
     view::{ExtractedView, Msaa, ViewDepthStencilTexture, ViewTarget},
 };
 
-use bevy_math::{Vec3, Vec4};
+use bevy_math::{UVec2, Vec3, Vec4};
 use prism_render_shading::ReceiverProjection;
 
 use crate::lighting::LightBindGroup;
 use crate::shading::{
-    GpuVsmResolveParams, PrismShadingSettings, PrismVirtualShadowSettings, ViewSsrTextures,
-    ViewVisibilityBuffer, ViewVsmPageTable, ViewVsmPhysicalAtlas, VsmPrimaryLight,
+    GpuVsmResolveParams, PrismShadingSettings, PrismVirtualShadowSettings,
+    PrismWorldSpaceGiSettings, ViewSsrTextures, ViewVisibilityBuffer, ViewVsmPageTable,
+    ViewVsmPhysicalAtlas, ViewWorldSpaceGi, VsmPrimaryLight,
 };
 
 use super::bind_groups::filtering_sampler;
@@ -46,6 +47,7 @@ use super::surface_shading::SurfaceViewInputs;
 use super::surface_ssgi::GpuWaterSsgiConfig;
 use super::surface_ssr::{GpuWaterSsrConfig, WaterSsrFallback};
 use super::surface_vsm::WaterVsmFallback;
+use super::surface_world_space_gi::{GpuWaterWorldSpaceGiConfig, WaterWorldSpaceGiFallback};
 
 /// One body's device resources, built before the pass so the index/uniform
 /// buffers and bind group outlive the single tracked pass that references them.
@@ -77,6 +79,8 @@ pub(crate) fn draw_water_surface(
     device: Res<RenderDevice>,
     vsm_fallback: Res<WaterVsmFallback>,
     ssr_fallback: Res<WaterSsrFallback>,
+    wsgi_fallback: Res<WaterWorldSpaceGiFallback>,
+    wsgi_settings: Res<PrismWorldSpaceGiSettings>,
     vsm_settings: Option<Res<PrismVirtualShadowSettings>>,
     primary_light: Option<Res<VsmPrimaryLight>>,
     view: ViewQuery<(
@@ -89,6 +93,7 @@ pub(crate) fn draw_water_surface(
         Option<&ViewSsrTextures>,
         Option<&ViewVsmPhysicalAtlas>,
         Option<&ViewVsmPageTable>,
+        Option<&ViewWorldSpaceGi>,
         Option<&Msaa>,
     )>,
     mut ctx: RenderContext,
@@ -109,6 +114,7 @@ pub(crate) fn draw_water_surface(
         ssr_textures,
         vsm_atlas,
         vsm_page_table,
+        view_wsgi,
         msaa,
     ) = view.into_inner();
     // The Prism visibility path is single-sample only; a multisampled view never
@@ -371,6 +377,44 @@ pub(crate) fn draw_water_surface(
         &BindGroupEntries::single(ssgi_params_buffer.as_entire_binding()),
     );
 
+    // The `@group(8)` world-space GI group: the engine's resident `Lumen`-style
+    // screen-probe field plus a per-view gather config. Unlike `SSGI`
+    // (`@group(7)`), which only sees the composited `scene_color`, this gathers
+    // the four screen probes around the shading pixel and blends their L1 `SH`
+    // irradiance — far-field indirect the near-field screen gather is blind to.
+    // Gated on both the opt-in world-space GI setting and a resident
+    // `ViewWorldSpaceGi` field this frame; otherwise the config's
+    // `sample_enable` bit is clear, the fallback probe buffer is bound, and the
+    // shader skips the gather. The probe `SH` is in view space, so the shader
+    // reconstructs its view-space normal/depth from the shared `@group(3)`
+    // `view_from_world` matrix, exactly like `SSGI`/`GTAO`.
+    let wsgi_layout = cache.get_bind_group_layout(&surface_pipeline.wsgi_layout);
+    let wsgi_enable = wsgi_settings.enabled && view_wsgi.is_some();
+    let wsgi_probe_grid = view_wsgi.map_or(UVec2::ONE, |gi| gi.probe_grid);
+    let wsgi_config = GpuWaterWorldSpaceGiConfig::new(
+        wsgi_enable,
+        wsgi_probe_grid,
+        wsgi_settings.tile,
+        wsgi_settings.normal_threshold,
+        wsgi_settings.depth_rel_threshold,
+        wsgi_settings.intensity,
+    );
+    let wsgi_params_buffer = device.create_buffer_with_data(&BufferInitDescriptor {
+        label: Some("prism water surface wsgi params"),
+        contents: bytemuck::bytes_of(&wsgi_config),
+        usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+    });
+    let wsgi_probe_buffer =
+        view_wsgi.map_or(&wsgi_fallback.probe_buffer, ViewWorldSpaceGi::probe_buffer);
+    let wsgi_group = device.create_bind_group(
+        "prism water surface wsgi",
+        &wsgi_layout,
+        &BindGroupEntries::sequential((
+            wsgi_probe_buffer.as_entire_binding(),
+            wsgi_params_buffer.as_entire_binding(),
+        )),
+    );
+
     // The `@group(4)` motion-vector group: the per-view current+previous
     // view-projection uniform `prepare_water_surface_motion` built this frame.
     // The fragment stage reprojects the surface's world position through both
@@ -418,6 +462,7 @@ pub(crate) fn draw_water_surface(
         pass.set_bind_group(5, &draw.froxel_group, &[]);
         pass.set_bind_group(6, &gtao_group, &[]);
         pass.set_bind_group(7, &ssgi_group, &[]);
+        pass.set_bind_group(8, &wsgi_group, &[]);
         pass.set_index_buffer(draw.index_buffer.slice(..), IndexFormat::Uint32);
         pass.draw_indexed(0..draw.index_count, 0, 0..1);
     }

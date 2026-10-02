@@ -38,7 +38,7 @@ pub(crate) use composite::{
 };
 pub(crate) use dispatch::world_space_gi_pass;
 pub(crate) use pipeline::init_world_space_gi_pipeline;
-pub(crate) use resources::prepare_world_space_gi_textures;
+pub(crate) use resources::{prepare_world_space_gi_textures, ViewWorldSpaceGi};
 pub(crate) use settings::PrismWorldSpaceGiSettings;
 
 #[cfg(test)]

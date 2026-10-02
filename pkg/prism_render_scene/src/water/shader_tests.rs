@@ -253,6 +253,24 @@ fn water_surface_raster_wesl_consumes_the_ssgi_binding() {
     );
 }
 
+/// Guards that the water surface shader actually *consumes* the world-space
+/// (`Lumen`-style) GI probe field at `@group(8)` rather than merely declaring
+/// the binding. Pins the gather definition and its call from `water_ibl`, so a
+/// refactor cannot silently regress the far-field indirect bounce back to a
+/// dead `@group(8)` storage/uniform pair.
+#[test]
+fn water_surface_raster_wesl_consumes_the_world_space_gi_binding() {
+    let src = include_str!("../shaders/water_surface_raster.wesl");
+    assert!(
+        src.contains("fn water_world_space_gi_gather("),
+        "water_surface_raster.wesl must define the world-space GI gather",
+    );
+    assert!(
+        src.contains("water_world_space_gi_gather(world_position, frame.normal"),
+        "water_ibl must call the world-space GI gather so @group(8) is consumed",
+    );
+}
+
 /// Removes `//` line comments from a `WESL` source so a doc mention of a
 /// binding identifier can never be mistaken for a real read when counting its
 /// uses. The water shaders carry no block comments, so this is exhaustive.

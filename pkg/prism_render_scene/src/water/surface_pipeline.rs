@@ -246,6 +246,12 @@ pub(crate) struct WaterSurfacePipelines {
     /// `GTAO` bent normal over the `@group(3)` Hi-Z pyramid (see
     /// [`super::surface_ssgi`]).
     pub(crate) ssgi_layout: BindGroupLayoutDescriptor,
+    /// The world-space global-illumination (`@group(8)`) layout: the shared
+    /// screen-probe storage buffer plus a per-view config uniform. The draw node
+    /// binds the opaque `Lumen`-style probe field here so the fragment stage can
+    /// gather far-field indirect diffuse the screen-space `SSGI` term cannot see
+    /// (see [`super::surface_world_space_gi`]).
+    pub(crate) wsgi_layout: BindGroupLayoutDescriptor,
     /// The embedded `water_surface_raster.wesl` module both stages compile from.
     pub(crate) shader: Handle<Shader>,
 }
@@ -268,6 +274,7 @@ impl SpecializedRenderPipeline for WaterSurfacePipelines {
                 self.froxel_layout.clone(),
                 self.gtao_layout.clone(),
                 self.ssgi_layout.clone(),
+                self.wsgi_layout.clone(),
             ],
             immediate_size: 0,
             vertex: VertexState {
@@ -424,6 +431,14 @@ pub(crate) fn init_water_surface_pipelines(
         "prism water surface ssgi",
         &super::surface_ssgi::ssgi_layout_entries(),
     );
+    // World-space GI base (@group(8)): the shared screen-probe storage buffer
+    // plus the per-view gather config. Binding this lets the water fragment pick
+    // up the engine's Lumen-style far-field indirect diffuse, closing the
+    // off-screen/behind-camera gap SSGI (@group(7)) is blind to.
+    let wsgi_layout = BindGroupLayoutDescriptor::new(
+        "prism water surface wsgi",
+        &super::surface_world_space_gi::wsgi_layout_entries(),
+    );
 
     commands.insert_resource(WaterSurfacePipelines {
         layout,
@@ -434,6 +449,7 @@ pub(crate) fn init_water_surface_pipelines(
         froxel_layout,
         gtao_layout,
         ssgi_layout,
+        wsgi_layout,
         shader,
     });
 }
@@ -518,6 +534,10 @@ mod tests {
             ssgi_layout: BindGroupLayoutDescriptor::new(
                 "prism water surface ssgi",
                 &crate::water::surface_ssgi::ssgi_layout_entries(),
+            ),
+            wsgi_layout: BindGroupLayoutDescriptor::new(
+                "prism water surface wsgi",
+                &crate::water::surface_world_space_gi::wsgi_layout_entries(),
             ),
             shader: Handle::default(),
         }

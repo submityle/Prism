@@ -64,6 +64,7 @@ mod surface_spec_occlusion;
 mod surface_ssgi;
 mod surface_ssr;
 mod surface_vsm;
+mod surface_world_space_gi;
 
 /// The high-level water authoring presets and the water body component they
 /// build, re-exported so a game can spawn an ocean, `FLIP`/`PBF` pool, or

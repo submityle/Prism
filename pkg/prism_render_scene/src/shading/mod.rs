@@ -61,6 +61,11 @@ pub(crate) use ssr::ViewSsrTextures;
 // Re-exports the water surface pass consumes to shadow its directional term
 // with the same demand-paged virtual shadow map the opaque resolve pass reads.
 pub(crate) use resolve::GpuVsmResolveParams;
+// Re-export the opt-in world-space (`Lumen`-style) GI settings and the per-view
+// resident screen-probe field so the transparent water surface pass can gather
+// the same far-field indirect diffuse the opaque resolve pass produces (see
+// `water::surface_world_space_gi`).
 pub(crate) use virtual_shadow::{
     PrismVirtualShadowSettings, ViewVsmPageTable, ViewVsmPhysicalAtlas, VsmPrimaryLight,
 };
+pub(crate) use world_space_gi::{PrismWorldSpaceGiSettings, ViewWorldSpaceGi};

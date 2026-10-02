@@ -681,6 +681,48 @@ struct WaterSsgiConfig {
 
 @group(7) @binding(0) var<uniform> ssgi_cfg: WaterSsgiConfig;
 
+// World-space (`Lumen`-style) GI base (`@group(8)`): the engine's resident
+// screen-probe field plus the per-view gather config. Where `SSGI`
+// (`@group(7)`) only sees the composited `scene_color`, this gathers the four
+// screen probes around the shading pixel and blends their L1 `SH` irradiance,
+// picking up far-field indirect light whose source is off-screen or behind the
+// camera. The `wsgi_`-prefixed twins below match the opaque golden
+// `world_space_gi_resolve.wesl` / `prism_render_shading::gi::world_space`
+// resolve arm-for-arm. Probe `SH` is in view space, so the gather reconstructs
+// its view-space normal/depth from the shared `@group(3)` `view_from_world`.
+const WSGI_K0: f32 = 0.282094800;
+const WSGI_K1: f32 = 0.488602500;
+// Cosine-lobe convolution band factors (golden `A0`/`A1`).
+const WSGI_A0: f32 = 3.141592700;
+const WSGI_A1: f32 = 2.094395200;
+
+// One stored screen probe, byte-identical to the opaque probe-update layout
+// (`6 x vec4<f32>` = 96 B): four L1 `SH` RGB coefficient vectors, the probe's
+// view-space normal (xyz) and view depth (w), and a flags vector whose x
+// carries the validity bit.
+struct WaterWorldSpaceGiProbe {
+    sh0: vec4<f32>,
+    sh1: vec4<f32>,
+    sh2: vec4<f32>,
+    sh3: vec4<f32>,
+    normal_depth: vec4<f32>,
+    flags: vec4<f32>,
+}
+
+// Mirrors the `GpuWaterWorldSpaceGiConfig` host uniform byte-for-byte (32 B).
+struct WaterWorldSpaceGiConfig {
+    probe_grid: vec2<u32>,
+    tile: u32,
+    normal_threshold: f32,
+    depth_rel_threshold: f32,
+    intensity: f32,
+    sample_enable: u32,
+    _pad0: u32,
+}
+
+@group(8) @binding(0) var<storage, read> wsgi_probes: array<WaterWorldSpaceGiProbe>;
+@group(8) @binding(1) var<uniform> wsgi_cfg: WaterWorldSpaceGiConfig;
+
 const GTAO_FRAC_PI_2: f32 = 1.5707964;
 const GTAO_PI: f32 = 3.1415927;
 
@@ -1198,7 +1240,196 @@ fn water_ssgi_gather(world_position: vec3<f32>, bent_normal_view: vec3<f32>, alb
     return ssgi_indirect_diffuse(mean_radiance, albedo, ssgi_cfg.intensity);
 }
 
-fn water_ibl(surface: SurfaceSample, frame: ShadingFrame, ssr: vec4<f32>, bent_normal_view: vec3<f32>, cone_aperture: f32, world_position: vec3<f32>) -> vec3<f32> {
+// --- World-space (`Lumen`-style) GI gather twins (`@group(8)`) ---
+// Arm-for-arm with the opaque golden `world_space_gi_resolve.wesl` /
+// `prism_render_shading::gi::world_space` resolve, prefixed `water_wsgi_` so
+// the water surface consumes the same resident screen-probe field. Probe `SH`
+// is stored in view space, so the gather reconstructs the shading point's
+// view-space normal/depth from the shared `@group(3)` `view_from_world`.
+fn water_wsgi_normalize_or_up(dir: vec3<f32>) -> vec3<f32> {
+    let len_sq = dot(dir, dir);
+    if (len_sq > 1.175494e-38) {
+        return dir * inverseSqrt(len_sq);
+    }
+    return vec3<f32>(0.0, 1.0, 0.0);
+}
+
+fn water_wsgi_sh_basis_l1(dir: vec3<f32>) -> vec4<f32> {
+    let d = water_wsgi_normalize_or_up(dir);
+    return vec4<f32>(WSGI_K0, WSGI_K1 * d.y, WSGI_K1 * d.z, WSGI_K1 * d.x);
+}
+
+// Bilinear weights for the 2x2 quad in [(0,0),(1,0),(0,1),(1,1)] order (golden
+// `bilinear_weights`); `frac` is clamped to [0, 1].
+fn water_wsgi_bilinear_weights(frac_x: f32, frac_y: f32) -> vec4<f32> {
+    let fx = clamp(frac_x, 0.0, 1.0);
+    let fy = clamp(frac_y, 0.0, 1.0);
+    return vec4<f32>(
+        (1.0 - fx) * (1.0 - fy),
+        fx * (1.0 - fy),
+        (1.0 - fx) * fy,
+        fx * fy,
+    );
+}
+
+// Splits a continuous probe coordinate into a clamped integer base and the
+// fraction toward the next probe (golden `clamp_base`).
+fn water_wsgi_clamp_base(coord: f32, dim: u32) -> vec2<f32> {
+    if (dim == 0u) {
+        return vec2<f32>(0.0, 0.0);
+    }
+    if (dim == 1u) {
+        return vec2<f32>(0.0, 0.0);
+    }
+    let max_base = f32(dim - 2u);
+    let fl = floor(coord);
+    if (fl < 0.0) {
+        return vec2<f32>(0.0, 0.0);
+    }
+    if (fl >= max_base) {
+        let frac = clamp(coord - max_base, 0.0, 1.0);
+        return vec2<f32>(max_base, frac);
+    }
+    return vec2<f32>(fl, coord - fl);
+}
+
+// Geometric acceptance weight (0 or 1) for a single probe (golden
+// `similarity_weight`), using the per-view normal/depth thresholds.
+fn water_wsgi_similarity_weight(
+    valid: bool,
+    probe_normal: vec3<f32>,
+    probe_depth: f32,
+    point_normal: vec3<f32>,
+    point_depth: f32,
+) -> f32 {
+    if (!valid) {
+        return 0.0;
+    }
+    let n_dot = dot(probe_normal, point_normal);
+    if (n_dot < wsgi_cfg.normal_threshold) {
+        return 0.0;
+    }
+    let denom = max(abs(point_depth), 1e-4);
+    let depth_rel = abs(probe_depth - point_depth) / denom;
+    if (depth_rel > wsgi_cfg.depth_rel_threshold) {
+        return 0.0;
+    }
+    return 1.0;
+}
+
+// Far-field indirect light for the shading pixel: reconstructs the view-space
+// normal/depth, gathers the four surrounding screen probes, resolves the
+// bilinear x geometric weights, blends their L1 `SH` and evaluates the
+// clamped-cosine irradiance, then folds it into the water ambient diffuse
+// (`albedo * E / PI`) with the authored intensity. Returns zero when disabled.
+fn water_world_space_gi_gather(
+    world_position: vec3<f32>,
+    world_normal: vec3<f32>,
+    albedo: vec3<f32>,
+    frag_pixel: vec2<f32>,
+) -> vec3<f32> {
+    if wsgi_cfg.sample_enable == 0u {
+        return vec3<f32>(0.0);
+    }
+    let point_view = (ssr_cfg.view_from_world * vec4<f32>(world_position, 1.0)).xyz;
+    let point_normal = normalize((ssr_cfg.view_from_world * vec4<f32>(world_normal, 0.0)).xyz);
+    let point_depth = -point_view.z;
+
+    let tile = f32(max(wsgi_cfg.tile, 1u));
+    let coord_x = frag_pixel.x / tile - 0.5;
+    let coord_y = frag_pixel.y / tile - 0.5;
+    let bx = water_wsgi_clamp_base(coord_x, wsgi_cfg.probe_grid.x);
+    let by = water_wsgi_clamp_base(coord_y, wsgi_cfg.probe_grid.y);
+    let base_x = u32(bx.x);
+    let base_y = u32(by.x);
+    let frac_x = bx.y;
+    let frac_y = by.y;
+
+    let coords = array<vec2<u32>, 4>(
+        vec2<u32>(base_x, base_y),
+        vec2<u32>(base_x + 1u, base_y),
+        vec2<u32>(base_x, base_y + 1u),
+        vec2<u32>(base_x + 1u, base_y + 1u),
+    );
+
+    let bw = water_wsgi_bilinear_weights(frac_x, frac_y);
+    var combined = vec4<f32>(0.0);
+    var sum = 0.0;
+    var n_sh0 = array<vec3<f32>, 4>();
+    var n_sh1 = array<vec3<f32>, 4>();
+    var n_sh2 = array<vec3<f32>, 4>();
+    var n_sh3 = array<vec3<f32>, 4>();
+    var n_valid = array<bool, 4>(false, false, false, false);
+    for (var i = 0u; i < 4u; i = i + 1u) {
+        let c = coords[i];
+        let in_range = c.x < wsgi_cfg.probe_grid.x && c.y < wsgi_cfg.probe_grid.y;
+        var s = 0.0;
+        if (in_range) {
+            let idx = c.y * wsgi_cfg.probe_grid.x + c.x;
+            let probe = wsgi_probes[idx];
+            let valid = probe.flags.x > 0.5;
+            n_valid[i] = valid;
+            n_sh0[i] = probe.sh0.xyz;
+            n_sh1[i] = probe.sh1.xyz;
+            n_sh2[i] = probe.sh2.xyz;
+            n_sh3[i] = probe.sh3.xyz;
+            s = water_wsgi_similarity_weight(valid, probe.normal_depth.xyz, probe.normal_depth.w, point_normal, point_depth);
+        }
+        let w = bw[i] * s;
+        combined[i] = w;
+        sum = sum + w;
+    }
+
+    var weights = vec4<f32>(0.0);
+    if (sum > 1.175494e-38) {
+        weights = combined * (1.0 / sum);
+    } else {
+        var best = -1;
+        var best_w = -1.0;
+        for (var i = 0; i < 4; i = i + 1) {
+            if (n_valid[i] && bw[i] > best_w) {
+                best_w = bw[i];
+                best = i;
+            }
+        }
+        if (best < 0) {
+            for (var i = 0; i < 4; i = i + 1) {
+                if (bw[i] > best_w) {
+                    best_w = bw[i];
+                    best = i;
+                }
+            }
+        }
+        if (best >= 0) {
+            weights[best] = 1.0;
+        }
+    }
+
+    var sh0 = vec3<f32>(0.0);
+    var sh1 = vec3<f32>(0.0);
+    var sh2 = vec3<f32>(0.0);
+    var sh3 = vec3<f32>(0.0);
+    for (var i = 0; i < 4; i = i + 1) {
+        let w = weights[i];
+        if (w > 0.0) {
+            sh0 = sh0 + n_sh0[i] * w;
+            sh1 = sh1 + n_sh1[i] * w;
+            sh2 = sh2 + n_sh2[i] * w;
+            sh3 = sh3 + n_sh3[i] * w;
+        }
+    }
+
+    let basis = water_wsgi_sh_basis_l1(point_normal);
+    var irradiance = sh0 * (WSGI_A0 * basis.x)
+        + sh1 * (WSGI_A1 * basis.y)
+        + sh2 * (WSGI_A1 * basis.z)
+        + sh3 * (WSGI_A1 * basis.w);
+    irradiance = max(irradiance, vec3<f32>(0.0));
+    irradiance = irradiance * wsgi_cfg.intensity;
+    return albedo * irradiance * INV_PI;
+}
+
+fn water_ibl(surface: SurfaceSample, frame: ShadingFrame, ssr: vec4<f32>, bent_normal_view: vec3<f32>, cone_aperture: f32, world_position: vec3<f32>, frag_pixel: vec2<f32>) -> vec3<f32> {
     let env = light_env[0];
     let occlusion = clamp(surface.ambient_occlusion, 0.0, 1.0);
     let n = brdf_normalize_or(frame.normal, vec3<f32>(0.0, 1.0, 0.0));
@@ -1210,6 +1441,9 @@ fn water_ibl(surface: SurfaceSample, frame: ShadingFrame, ssr: vec4<f32>, bent_n
     // Near-field one-bounce screen-space GI, gathered along the bent normal
     // and added to the diffuse ambient term (metals carry no diffuse bounce).
     let ssgi = water_ssgi_gather(world_position, bent_normal_view, surface.base_color * (1.0 - metallic));
+    // Far-field indirect light from the resident world-space probe field,
+    // added to the same ambient diffuse budget (metals carry no diffuse bounce).
+    let wsgi = water_world_space_gi_gather(world_position, frame.normal, surface.base_color * (1.0 - metallic), frag_pixel);
     let f0 = mix(vec3<f32>(0.16 * reflectance * reflectance), surface.base_color, metallic);
     let dfg = env_brdf_approx(n_dot_v, roughness);
     // Specular lobe integrates only a narrow cone, so weight it by the
@@ -1228,9 +1462,9 @@ fn water_ibl(surface: SurfaceSample, frame: ShadingFrame, ssr: vec4<f32>, bent_n
         let horizon = water_horizon_occlusion(reflection_view, bent_normal_view, cone_aperture);
         let prefiltered = max(sh_radiance(env, reflection), vec3<f32>(0.0)) * horizon;
         let env_specular = mix(prefiltered, ssr.rgb, ssr.a) * spec_weight;
-        return diffuse * occlusion + ssgi + env_specular;
+        return diffuse * occlusion + ssgi + wsgi + env_specular;
     }
-    return surface.base_color * env.ambient * (occlusion * (1.0 - metallic)) + ssr.rgb * spec_weight * ssr.a + ssgi;
+    return surface.base_color * env.ambient * (occlusion * (1.0 - metallic)) + ssr.rgb * spec_weight * ssr.a + ssgi + wsgi;
 }
 
 // Sample the scene color behind the surface, offset by the surface normal, for
@@ -1301,7 +1535,7 @@ fn shade_pbr_core(in: VertexOutput) -> vec4<f32> {
     let gtao_uv = in.clip_position.xy / max(view.viewport.xy, vec2<f32>(1.0));
     let gtao = water_gtao(in.world_position, frame.normal, gtao_uv);
     surface.ambient_occlusion = gtao.ao;
-    lit = lit + water_ibl(surface, frame, ssr, gtao.bent_normal_view, gtao.aperture, in.world_position);
+    lit = lit + water_ibl(surface, frame, ssr, gtao.bent_normal_view, gtao.aperture, in.world_position, in.clip_position.xy);
     let refracted_raw = refraction_color(in.clip_position, frame.normal);
     // Composite the underwater single-scatter froxel volume into the refracted
     // scene so the water body has a real participating medium (`Beer-Lambert`

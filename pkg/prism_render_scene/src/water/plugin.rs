@@ -55,6 +55,7 @@ use super::surface_pipeline::{
 };
 use super::surface_ssr::init_water_ssr_fallback;
 use super::surface_vsm::init_water_vsm_fallback;
+use super::surface_world_space_gi::init_water_world_space_gi_fallback;
 use crate::lighting::LightBindGroup;
 
 /// Installs the `GPU` water compute subsystem into an app.
@@ -124,6 +125,11 @@ impl Plugin for WaterPlugin {
             // resident depth pyramid, with the march's `sample_enable`
             // bit cleared so the shader keeps the image-based reflection.
             .add_systems(RenderStartup, init_water_ssr_fallback)
+            // And the world-space GI fallback probe buffer: a single dummy
+            // probe bound into `@group(8)` on any view without a resident
+            // `ViewWorldSpaceGi` field, with the gather's `sample_enable` bit
+            // cleared so the shader skips the probe gather entirely.
+            .add_systems(RenderStartup, init_water_world_space_gi_fallback)
             // Snapshot the main-world water bodies into the render world each
             // frame.
             .add_systems(ExtractSchedule, extract_water_bodies)
