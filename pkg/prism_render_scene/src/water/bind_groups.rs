@@ -874,8 +874,12 @@ impl WaterBodyGpuBuffers {
 pub(crate) struct WaterBodyBindGroups {
     /// `@group(0)` for `spectrum_ifft` + `gerstner_displace`.
     pub(crate) ocean: BindGroup,
-    /// `@group(0)` for the four `FLIP` passes.
+    /// `@group(0)` for the three collocated `FLIP` solve passes.
     pub(crate) flip: BindGroup,
+    /// `@group(0)` for the standalone `water_surface_reconstruct` pass (the
+    /// splatted depth + thickness buffers, the reconstructed-normal storage
+    /// texture, and the filter/projection uniform).
+    pub(crate) surface_reconstruct: BindGroup,
     /// `@group(0)` for `pbf_density_solve`.
     pub(crate) pbf: BindGroup,
     /// `@group(0)` for `spray_emit`.
@@ -963,6 +967,16 @@ impl WaterBodyBindGroups {
                 buffers.flip_pressure_in.as_entire_binding(),
                 buffers.flip_pressure_out.as_entire_binding(),
                 buffers.flip_params.as_entire_binding(),
+                buffers.flip_surface_depth.as_entire_binding(),
+                buffers.flip_surface_thickness.as_entire_binding(),
+                &buffers.flip_surface_normal,
+                buffers.flip_surface_params.as_entire_binding(),
+            )),
+        );
+        let surface_reconstruct = device.create_bind_group(
+            "prism water surface reconstruct",
+            &pipelines.surface_reconstruct_layout,
+            &BindGroupEntries::sequential((
                 buffers.flip_surface_depth.as_entire_binding(),
                 buffers.flip_surface_thickness.as_entire_binding(),
                 &buffers.flip_surface_normal,
@@ -1198,6 +1212,7 @@ impl WaterBodyBindGroups {
         Self {
             ocean,
             flip,
+            surface_reconstruct,
             pbf,
             spray,
             swe,

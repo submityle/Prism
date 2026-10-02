@@ -83,8 +83,14 @@ use prism_render_architecture::water::kernels::WaterKernel;
 pub(crate) struct WaterComputePipelines {
     /// `@group(0)` for both `water_ocean.wesl` entry points (nine bindings).
     pub(crate) ocean_layout: BindGroupLayout,
-    /// `@group(0)` for the four `water_flip.wesl` passes (nine bindings).
+    /// `@group(0)` for the three collocated `water_flip.wesl` solve passes
+    /// (nine bindings).
     pub(crate) flip_layout: BindGroupLayout,
+    /// `@group(0)` for the standalone `water_surface_reconstruct.wesl` pass
+    /// (four bindings: the splatted surface depth + thickness storage buffers,
+    /// the write-only reconstructed-normal storage texture, and the
+    /// filter/projection uniform).
+    pub(crate) surface_reconstruct_layout: BindGroupLayout,
     /// `@group(0)` for the `water_pbf_density_solve` pass (four bindings).
     pub(crate) pbf_layout: BindGroupLayout,
     /// `@group(0)` for the `water_spray_emit` pass (three bindings).
@@ -229,16 +235,17 @@ impl WaterComputePipelines {
     /// Returns the bind-group layout the given kernel's bind group must target.
     ///
     /// Mirrors the shader interface: the two `water_ocean.wesl` kernels share the
-    /// ocean layout, the four `water_flip.wesl` kernels share the flip layout,
+    /// ocean layout, the three collocated `water_flip.wesl` kernels share the flip
+    /// layout while the surface reconstruction binds its own standalone layout,
     /// and every other kernel binds its own distinct interface.
     #[must_use]
     pub(crate) fn layout(&self, kernel: WaterKernel) -> &BindGroupLayout {
         match kernel {
             WaterKernel::SpectrumIfft | WaterKernel::GerstnerDisplace => &self.ocean_layout,
-            WaterKernel::FlipP2G
-            | WaterKernel::FlipPressureSolve
-            | WaterKernel::FlipG2P
-            | WaterKernel::SurfaceReconstruct => &self.flip_layout,
+            WaterKernel::FlipP2G | WaterKernel::FlipPressureSolve | WaterKernel::FlipG2P => {
+                &self.flip_layout
+            }
+            WaterKernel::SurfaceReconstruct => &self.surface_reconstruct_layout,
             WaterKernel::FlipMacP2G | WaterKernel::FlipMacFacesNormalize => &self.mac_p2g_layout,
             WaterKernel::FlipMacDivergence
             | WaterKernel::FlipMacPressure
@@ -342,6 +349,24 @@ fn flip_layout_entries() -> BindGroupLayoutEntries<9> {
             storage_buffer_read_only_sized(false, None),
             storage_buffer_sized(false, None),
             uniform_buffer_sized(false, None),
+            storage_buffer_read_only_sized(false, None),
+            storage_buffer_read_only_sized(false, None),
+            texture_storage_2d(TextureFormat::Rgba16Float, StorageTextureAccess::WriteOnly),
+            uniform_buffer_sized(false, None),
+        ),
+    )
+}
+
+/// Builds the standalone `water_surface_reconstruct.wesl` `@group(0)` layout
+/// entries (four bindings): the read-only splatted surface depth and thickness
+/// storage buffers, the write-only reconstructed `(normal.xyz, depth)` storage
+/// texture, and the filter/projection uniform. This is the four-binding subset
+/// the retired collocated `FLIP` shader used to expose on bindings `5..9`, now
+/// renumbered `0..4` so the live surface pass owns a tight group.
+fn surface_reconstruct_layout_entries() -> BindGroupLayoutEntries<4> {
+    BindGroupLayoutEntries::sequential(
+        ShaderStages::COMPUTE,
+        (
             storage_buffer_read_only_sized(false, None),
             storage_buffer_read_only_sized(false, None),
             texture_storage_2d(TextureFormat::Rgba16Float, StorageTextureAccess::WriteOnly),
@@ -635,6 +660,7 @@ pub(crate) fn init_water_compute_pipelines(
 ) {
     let ocean_entries = ocean_layout_entries();
     let flip_entries = flip_layout_entries();
+    let surface_reconstruct_entries = surface_reconstruct_layout_entries();
     let pbf_entries = pbf_layout_entries();
     let spray_entries = spray_layout_entries();
     let swe_entries = swe_layout_entries();
@@ -654,6 +680,10 @@ pub(crate) fn init_water_compute_pipelines(
 
     let ocean_descriptor = BindGroupLayoutDescriptor::new("prism water ocean", &ocean_entries);
     let flip_descriptor = BindGroupLayoutDescriptor::new("prism water flip", &flip_entries);
+    let surface_reconstruct_descriptor = BindGroupLayoutDescriptor::new(
+        "prism water surface reconstruct",
+        &surface_reconstruct_entries,
+    );
     let pbf_descriptor = BindGroupLayoutDescriptor::new("prism water pbf", &pbf_entries);
     let spray_descriptor = BindGroupLayoutDescriptor::new("prism water spray", &spray_entries);
     let swe_descriptor = BindGroupLayoutDescriptor::new("prism water swe", &swe_entries);
@@ -690,6 +720,10 @@ pub(crate) fn init_water_compute_pipelines(
 
     let ocean_layout = device.create_bind_group_layout("prism water ocean", &ocean_entries);
     let flip_layout = device.create_bind_group_layout("prism water flip", &flip_entries);
+    let surface_reconstruct_layout = device.create_bind_group_layout(
+        "prism water surface reconstruct",
+        &surface_reconstruct_entries,
+    );
     let pbf_layout = device.create_bind_group_layout("prism water pbf", &pbf_entries);
     let spray_layout = device.create_bind_group_layout("prism water spray", &spray_entries);
     let swe_layout = device.create_bind_group_layout("prism water swe", &swe_entries);
@@ -720,6 +754,10 @@ pub(crate) fn init_water_compute_pipelines(
         load_embedded_asset!(asset_server.as_ref(), "../shaders/water_ocean.wesl");
     let flip_shader: Handle<Shader> =
         load_embedded_asset!(asset_server.as_ref(), "../shaders/water_flip.wesl");
+    let surface_reconstruct_shader: Handle<Shader> = load_embedded_asset!(
+        asset_server.as_ref(),
+        "../shaders/water_surface_reconstruct.wesl"
+    );
     let pbf_shader: Handle<Shader> =
         load_embedded_asset!(asset_server.as_ref(), "../shaders/water_pbf.wesl");
     let surface_shader: Handle<Shader> =
@@ -801,8 +839,8 @@ pub(crate) fn init_water_compute_pipelines(
     );
     let surface_reconstruct = queue(
         "prism water surface reconstruct",
-        vec![flip_descriptor.clone()],
-        &flip_shader,
+        vec![surface_reconstruct_descriptor.clone()],
+        &surface_reconstruct_shader,
         WaterKernel::SurfaceReconstruct,
     );
     let caustics_project = queue(
@@ -940,6 +978,7 @@ pub(crate) fn init_water_compute_pipelines(
     commands.insert_resource(WaterComputePipelines {
         ocean_layout,
         flip_layout,
+        surface_reconstruct_layout,
         pbf_layout,
         spray_layout,
         swe_layout,
