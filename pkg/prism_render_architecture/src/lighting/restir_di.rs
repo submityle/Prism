@@ -269,6 +269,90 @@ where
     out
 }
 
+/// Combines reservoirs with **balance-heuristic multiple importance sampling**
+/// (the generalized balance heuristic, a.k.a. Talbot `MIS`) — the
+/// reference-quality normalization used by production spatiotemporal
+/// resamplers.
+///
+/// Like [`combine_unbiased`] this stays unbiased when neighbors have different
+/// target functions, but instead of the `1/Z` count heuristic it weights each
+/// source `i`'s held sample `y` by
+/// `m_i(y) = M_i * p̂_i(y) / Σ_j M_j * p̂_j(y)` — the balance heuristic over the
+/// per-source candidate counts `M_j`. The balance heuristic is provably within
+/// a bounded term of the minimum-variance `MIS` combination (Veach), so in the
+/// heterogeneous-neighbor case (occlusion, grazing normals, disjoint light
+/// domains) it drives reuse variance below the `1/Z` path. The cost is
+/// evaluating every held sample's target at every source domain — `O(N^2)`
+/// target calls for `N` sources, cheap for the handful of neighbors reuse uses.
+///
+/// This is generalized `RIS` (`GRIS`, Lin et al. 2022): each source contributes
+/// its finalized sample `(y, W_i)` and the resampling weight at the result
+/// pixel is `w_i = m_i(y) * p̂(y) * W_i`, where `p̂` is the target at `center`.
+/// One sample is selected proportional to `w_i` and the finalized contribution
+/// weight is `W = (Σ_i w_i) / p̂(y_selected)` — no extra `1/M` or `1/Z` factor,
+/// because the `MIS` weights already sum to one and normalize the estimate.
+///
+/// `target_at(source_index, light)` returns the target density of `light` at the
+/// pixel that produced `sources[source_index]`; `center` selects which source's
+/// pixel owns the result. Every source must already be finalized
+/// ([`DiReservoir::finalize`]). Returns a finalized reservoir (its `W` is set).
+#[must_use]
+pub fn combine_mis<F>(
+    sources: &[DiReservoir],
+    center: usize,
+    mut target_at: F,
+    rng: &mut Rng,
+) -> DiReservoir
+where
+    F: FnMut(usize, u32) -> f32,
+{
+    let mut out = DiReservoir::empty();
+    let mut total_m: u32 = 0;
+    let mut w_sum = 0.0_f32;
+
+    for (i, source) in sources.iter().enumerate() {
+        if source.reservoir.m == 0 {
+            continue;
+        }
+        total_m += source.reservoir.m;
+        let light = source.reservoir.sample;
+
+        // Balance-heuristic denominator Σ_j M_j * p̂_j(light): re-evaluate this
+        // held light's target at every populated source's pixel.
+        let mut denom = 0.0_f32;
+        for (j, other) in sources.iter().enumerate() {
+            if other.reservoir.m == 0 {
+                continue;
+            }
+            denom += (other.reservoir.m as f32) * target_at(j, light);
+        }
+        if denom <= TARGET_PDF_EPS {
+            continue;
+        }
+
+        let p_source = target_at(i, light);
+        let mis = (source.reservoir.m as f32) * p_source / denom;
+        let p_center = target_at(center, light);
+        let weight = mis * p_center * source.reservoir.w;
+        w_sum += weight;
+
+        if out.reservoir.update(light, weight, rng.next_u01()) {
+            out.target_pdf = p_center;
+        }
+    }
+
+    out.reservoir.m = total_m;
+    out.reservoir.w_sum = w_sum;
+
+    if total_m == 0 || out.target_pdf <= TARGET_PDF_EPS || w_sum <= 0.0 {
+        out.reservoir.w = 0.0;
+        out.target_pdf = 0.0;
+    } else {
+        out.reservoir.w = w_sum / out.target_pdf;
+    }
+    out
+}
+
 /// Shared stream-and-select over `sources`, re-weighting each held sample for
 /// the destination pixel. Returns the accumulating reservoir (its `M` is a raw
 /// call count that callers overwrite with the true summed `M`) and the summed
@@ -584,5 +668,85 @@ mod tests {
         let neighbors = [DiReservoir::empty(); 5];
         let sources = gather_spatial_sources(center, &neighbors, budget(0, 3, true));
         assert_eq!(sources.len(), 4); // center + 3 neighbors
+    }
+
+    #[test]
+    fn mis_spatial_reuse_with_partial_domains_converges() {
+        // Balance-heuristic MIS must stay unbiased under the same partial-
+        // visibility setup as the Z-normalized combine: center sees all lights,
+        // neighbors see disjoint-ish subsets, yet the estimate converges to the
+        // center's full many-light sum.
+        let contribution = [0.5, 1.5, 2.5, 1.0, 3.0, 0.8];
+        let target_at = |src: usize, light: u32| -> f32 {
+            if visible(src, light) {
+                contribution[light as usize]
+            } else {
+                0.0
+            }
+        };
+        let exact: f32 = contribution.iter().sum();
+        let m = 12u32;
+
+        let seeds = 600_000u32;
+        let mut acc = 0.0f64;
+        for s in 0..seeds {
+            let mut rng = Rng::new(s.wrapping_mul(2_654_435_761).wrapping_add(11));
+            let sources = build_sources(&contribution, m, &mut rng);
+            let combined = combine_mis(&sources, 0, target_at, &mut rng);
+            acc += f64::from(combined.target_pdf * combined.reservoir.w);
+        }
+        let mean = (acc / f64::from(seeds)) as f32;
+        let rel_err = (mean - exact).abs() / exact;
+        assert!(rel_err < 0.03, "mean {mean} vs exact {exact} ({rel_err})");
+    }
+
+    #[test]
+    fn mis_combine_has_no_higher_variance_than_z_norm() {
+        // Both combines are unbiased, so their estimator means agree; the
+        // balance heuristic is the reference minimum-variance MIS weighting, so
+        // under heterogeneous (partial-domain) neighbors its per-seed estimator
+        // spread must not exceed the 1/Z path. Common random numbers (shared
+        // sources per seed) keep the comparison low-noise.
+        let contribution = [0.5, 1.5, 2.5, 1.0, 3.0, 0.8];
+        let target_at = |src: usize, light: u32| -> f32 {
+            if visible(src, light) {
+                contribution[light as usize]
+            } else {
+                0.0
+            }
+        };
+
+        let seeds = 400_000u32;
+        let mut sum_z = 0.0f64;
+        let mut sumsq_z = 0.0f64;
+        let mut sum_m = 0.0f64;
+        let mut sumsq_m = 0.0f64;
+        for s in 0..seeds {
+            let mut rng = Rng::new(s.wrapping_mul(2_246_822_519).wrapping_add(5));
+            let sources = build_sources(&contribution, 12, &mut rng);
+            let mut rng_z = Rng::new(s.wrapping_mul(747_796_405).wrapping_add(1));
+            let mut rng_m = Rng::new(s.wrapping_mul(747_796_405).wrapping_add(1));
+            let cz = combine_unbiased(&sources, 0, target_at, &mut rng_z);
+            let cm = combine_mis(&sources, 0, target_at, &mut rng_m);
+            let ez = f64::from(cz.target_pdf * cz.reservoir.w);
+            let em = f64::from(cm.target_pdf * cm.reservoir.w);
+            sum_z += ez;
+            sumsq_z += ez * ez;
+            sum_m += em;
+            sumsq_m += em * em;
+        }
+        let n = f64::from(seeds);
+        let mean_z = sum_z / n;
+        let mean_m = sum_m / n;
+        let var_z = sumsq_z / n - mean_z * mean_z;
+        let var_m = sumsq_m / n - mean_m * mean_m;
+        assert!(
+            (mean_z - mean_m).abs() < 0.02,
+            "unbiased means should agree: z {mean_z} m {mean_m}"
+        );
+        assert!(
+            var_m <= var_z * 1.02,
+            "MIS variance {var_m} should not exceed Z-norm variance {var_z}"
+        );
     }
 }
