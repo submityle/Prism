@@ -539,9 +539,115 @@ pub fn gather_spatial_sources(
     sources
 }
 
+/// Default boiling-filter strength for GI reservoirs (`RTXDI` convention): a
+/// reservoir is cleared only when its finalized weight exceeds `11x` the tile
+/// mean.
+pub const DEFAULT_BOILING_FILTER_STRENGTH: f32 = 0.5;
+
+/// Tile-local **boiling filter** for GI reservoirs: the GI twin of the direct
+/// illumination [`super::restir_di::boiling_filter_di`].
+///
+/// Indirect bounces are even more prone to fireflies than direct lighting (a
+/// single bright, rarely sampled bounce dominates `w_sum`), and temporal reuse
+/// keeps that outlier alive for several frames ("boiling"). This clears any
+/// reservoir whose finalized contribution weight `w` exceeds `multiplier *
+/// mean_w`, where `mean_w` averages `w` over the non-empty reservoirs of one
+/// screen tile and
+///
+/// ```text
+/// multiplier = 10 / clamp(filter_strength, eps, 1) - 9
+/// ```
+///
+/// so `filter_strength` lives in `(0, 1]` (`1` thresholds at the mean, the
+/// default `0.5` at `11x` the mean, `<= 0` or non-finite disables it).
+///
+/// A biased but standard real-time firefly suppressor: when nothing is clipped
+/// the per-pixel estimate is left exactly as the unbiased resample produced it.
+/// A tile with fewer than two non-empty reservoirs is left untouched. `tile`
+/// holds the **finalized** reservoirs (post-[`GiReservoir::finalize`]) of one
+/// screen tile.
+pub fn boiling_filter_gi(tile: &mut [GiReservoir], filter_strength: f32) {
+    if filter_strength <= 0.0 || !filter_strength.is_finite() {
+        return;
+    }
+    let strength = if filter_strength < 1.0 {
+        filter_strength
+    } else {
+        1.0
+    };
+    let multiplier = 10.0 / strength - 9.0;
+
+    let mut sum = 0.0_f32;
+    let mut count = 0_u32;
+    for r in tile.iter() {
+        if !r.is_empty() && r.w > 0.0 {
+            sum += r.w;
+            count += 1;
+        }
+    }
+    if count < 2 {
+        return;
+    }
+    let threshold = (sum / count as f32) * multiplier;
+    for r in tile.iter_mut() {
+        if !r.is_empty() && r.w > threshold {
+            *r = GiReservoir::empty();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A finalized GI reservoir holding a zero sample with contribution weight `w`.
+    fn gi_with_w(w: f32) -> GiReservoir {
+        GiReservoir {
+            sample: GiSample::zero(),
+            target_pdf: 1.0,
+            w_sum: w,
+            m: 1,
+            w,
+        }
+    }
+
+    #[test]
+    fn boiling_filter_gi_clears_single_outlier() {
+        // A representative 8x8 tile of unit-weight reservoirs plus one 200x
+        // firefly: mean ~= 4.1, threshold ~= 45, so only the firefly goes.
+        let mut tile: Vec<GiReservoir> = (0..63).map(|_| gi_with_w(1.0)).collect();
+        tile.push(gi_with_w(200.0));
+        boiling_filter_gi(&mut tile, DEFAULT_BOILING_FILTER_STRENGTH);
+        assert!(tile[63].is_empty());
+        for (i, r) in tile.iter().enumerate().take(63) {
+            assert!(!r.is_empty(), "reservoir {i} wrongly cleared");
+        }
+    }
+
+    #[test]
+    fn boiling_filter_gi_preserves_uniform_tile() {
+        let before = [gi_with_w(1.0), gi_with_w(2.0), gi_with_w(3.0)];
+        let mut tile = before;
+        boiling_filter_gi(&mut tile, DEFAULT_BOILING_FILTER_STRENGTH);
+        assert_eq!(tile, before);
+    }
+
+    #[test]
+    fn boiling_filter_gi_disabled_is_identity() {
+        let before = [gi_with_w(1.0), gi_with_w(5000.0)];
+        for strength in [0.0_f32, -2.0, f32::NAN, f32::INFINITY] {
+            let mut tile = before;
+            boiling_filter_gi(&mut tile, strength);
+            assert_eq!(tile, before, "strength {strength} should be a no-op");
+        }
+    }
+
+    #[test]
+    fn boiling_filter_gi_needs_two_samples() {
+        let mut tile = [gi_with_w(5000.0), GiReservoir::empty()];
+        boiling_filter_gi(&mut tile, DEFAULT_BOILING_FILTER_STRENGTH);
+        assert!(!tile[0].is_empty());
+    }
 
     fn budget(initial: u16, spatial: u16, temporal: bool) -> ReservoirBudget {
         ReservoirBudget {
