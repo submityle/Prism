@@ -687,6 +687,21 @@
 //!   frame one thread per strand, this twin emits only the bare tangent and is
 //!   embarrassingly parallel over the point stream (see [`frames`]).
 //!
+//! * [`GpuHairDeformedBounds`] evaluates
+//!   [`deformed_bounds`](prism_render_architecture::hair::gpu_scene_handoff::deformed_bounds),
+//!   the scene half of the sim -> render-graph handoff and the crate's second
+//!   many-inputs-to-one-output reduction: a single `256`-wide workgroup
+//!   grid-strides a groom's deformed world-space render points into private
+//!   per-axis `min` / `max` partials (with a `seen` flag so an invocation that
+//!   folded no finite point contributes nothing) and a shared-memory tree fold
+//!   collapses them to one
+//!   [`SceneBounds`](prism_render_architecture::gpu_scene::SceneBounds) row
+//!   (`center`, `half_extents`, half-diagonal `radius`). Unlike
+//!   [`GpuHairAnalysisReduce`], which reduces one chosen `vec4` lane with an
+//!   infinity identity, this folds a per-axis `AABB` and skips any non-finite
+//!   point so a diverged solve cannot poison the box (see
+//!   [`deformed_bounds`](prism_render_architecture::hair::gpu_scene_handoff)).
+//!
 //! # Portability
 //!
 //! The projection uses only `sqrt`, `min`, `max`, `clamp`, `dot` and
@@ -731,6 +746,7 @@ pub mod cosserat;
 pub mod decimation_priority;
 pub mod deep_opacity;
 pub mod deep_transmittance_sample;
+pub mod deformed_bounds;
 pub mod dftl;
 pub mod dither_alpha;
 pub mod dual_scatter_factors;
@@ -825,6 +841,7 @@ pub use cosserat::GpuCosserat;
 pub use decimation_priority::GpuDecimationPriority;
 pub use deep_opacity::GpuHairDeepOpacity;
 pub use deep_transmittance_sample::{GpuHairDeepTransmittanceSample, TransmittanceQuery};
+pub use deformed_bounds::{reference_deformed_bounds, GpuHairDeformedBounds};
 pub use dftl::GpuHairDftl;
 pub use dither_alpha::{reference_dither_alpha_map, GpuHairDitherAlpha};
 pub use dual_scatter_factors::{reference_dual_scatter_factors, GpuHairDualScatterFactors};
