@@ -67,7 +67,8 @@ pub use broadphase::{cpu_broadphase, BroadphaseConfig, BroadphaseError, Candidat
 pub use bvh::{
     cpu_build_lbvh, cpu_bvh_aabb_overlap, cpu_refit_lbvh, cpu_bvh_pairs, cpu_bvh_raycast_any,
     cpu_bvh_raycast_closest, lbvh_sah_cost, lbvh_sah_cost_weighted, surface_area, Aabb, BvhQueryError,
-    GpuBvhOverlap, GpuBvhQuery, GpuBvhRaycast, GpuBvhRefit, GpuLbvh, GpuResidentLbvh, Lbvh,
+    GpuBvhOverlap, GpuBvhQuery, GpuBvhRaycast, GpuBvhRefit, GpuBvhSahCost, GpuLbvh, GpuResidentLbvh,
+    Lbvh,
     OverlapQueryError, Ray, RayHit, RebuildDecision, RefitQualityTracker, SceneBounds, NO_PARENT,
 };
 pub use cfl::{cpu_cfl_dt, cpu_max_speed, CflConfig, GpuCflReduce};

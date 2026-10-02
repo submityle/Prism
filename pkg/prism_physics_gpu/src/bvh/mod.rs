@@ -41,6 +41,7 @@ pub mod refit_gpu;
 pub mod ray;
 pub mod ray_gpu;
 pub mod resident;
+pub mod sah_cost_gpu;
 
 pub use config::{Aabb, SceneBounds};
 pub use cpu::{cpu_build_lbvh, Lbvh, NO_PARENT};
@@ -55,6 +56,7 @@ pub use quality::{
     DEFAULT_TRAVERSAL_COST,
 };
 pub use refit_gpu::GpuBvhRefit;
+pub use sah_cost_gpu::GpuBvhSahCost;
 pub use query_gpu::GpuBvhQuery;
 pub use ray::{cpu_bvh_raycast_any, cpu_bvh_raycast_closest, Ray, RayHit};
 pub use ray_gpu::GpuBvhRaycast;
