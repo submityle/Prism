@@ -17,12 +17,15 @@
 //!   normal `XY`).
 //! * [`bc7`] -- BC7/BPTC mode-6 single-subset encoder (4D `RGBA` PCA axis,
 //!   7-bit endpoints + p-bits, least-squares index refit).
+//! * [`bc6h`] -- BC6H/BPTC unsigned mode-11 HDR encoder (half-float domain,
+//!   10-bit direct endpoints, finish-chain-aware index assignment).
 
 mod bc1;
 mod bc2;
 mod bc3;
 mod bc4;
 mod bc5;
+mod bc6h;
 mod bc7;
 
 pub use bc1::encode_bc1;
@@ -30,4 +33,5 @@ pub use bc2::encode_bc2;
 pub use bc3::encode_bc3;
 pub use bc4::encode_bc4;
 pub use bc5::encode_bc5;
+pub use bc6h::encode_bc6h_mode11_unsigned;
 pub use bc7::encode_bc7_mode6;
