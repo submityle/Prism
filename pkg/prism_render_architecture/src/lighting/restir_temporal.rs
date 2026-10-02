@@ -37,7 +37,7 @@
 
 use alloc::vec::Vec;
 
-use super::restir_di::{combine_unbiased, stream_initial, DiCandidate, DiReservoir};
+use super::restir_di::{combine_mis, stream_initial, DiCandidate, DiReservoir};
 use super::ReservoirBudget;
 use crate::particle::reservoir_sample::Rng;
 
@@ -201,9 +201,10 @@ pub fn reproject_history(
 ///   re-evaluated at the relevant surface for every reuse source so partial
 ///   visibility stays unbiased.
 ///
-/// All combines use the unbiased normalization, so the result is an unbiased
-/// estimator of the full many-light sum at `current` even when history and
-/// neighbors see different lights.
+/// All combines use balance-heuristic multiple importance sampling (generalized
+/// `RIS`), so the result is an unbiased, minimum-variance estimator of the full
+/// many-light sum at `current` even when history and neighbors see different
+/// lights.
 #[must_use]
 pub fn resolve_di<T>(
     current: SurfaceGeometry,
@@ -228,7 +229,7 @@ where
             Some(prev) => {
                 let sources = [initial, prev];
                 let geoms = [current, hist.geometry];
-                combine_unbiased(&sources, 0, |i, light| target(&geoms[i], light), rng)
+                combine_mis(&sources, 0, |i, light| target(&geoms[i], light), rng)
             }
             None => initial,
         },
@@ -257,7 +258,7 @@ where
         return temporal;
     }
 
-    combine_unbiased(&sources, 0, |i, light| target(&geoms[i], light), rng)
+    combine_mis(&sources, 0, |i, light| target(&geoms[i], light), rng)
 }
 
 #[cfg(test)]
