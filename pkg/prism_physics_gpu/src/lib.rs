@@ -126,7 +126,7 @@ pub use narrowphase::{
     GpuCapsuleCapsuleManifoldNarrowphase, GpuCapsuleCapsuleNarrowphase,
     GpuCapsuleHalfspaceNarrowphase, GpuCapsuleNarrowphase, GpuCapsuleObbManifoldNarrowphase,
     GpuCapsuleHeightfieldManifoldNarrowphase, GpuCapsuleObbNarrowphase, GpuCapsuleTriangleManifoldNarrowphase, GpuCapsuleTriangleNarrowphase, GpuHalfspaceNarrowphase, GpuNarrowphase, GpuSphereHeightfieldNarrowphase,
-    GpuObbHalfspaceManifoldNarrowphase, GpuObbHalfspaceNarrowphase, GpuObbNarrowphase,
+    GpuObbHalfspaceManifoldNarrowphase, GpuObbHalfspaceNarrowphase, GpuObbHeightfieldManifoldNarrowphase, GpuObbNarrowphase,
     GpuObbObbManifoldNarrowphase, GpuObbObbNarrowphase, GpuObbTriangleManifoldNarrowphase, GpuObbTriangleNarrowphase, GpuSphereTriangleNarrowphase,
     Heightfield, HeightfieldCapsulePair, HeightfieldObbPair, HeightfieldSpherePair, ManifoldPoint, Obb, ObbObbPair, ObbTrianglePair,
     ObbPlanePair, Plane, SphereCapsulePair, SphereObbPair, SpherePlanePair, SphereTrianglePair,
