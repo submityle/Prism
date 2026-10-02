@@ -67,9 +67,10 @@ pub use texture_codec::{
 };
 pub use texture_mipgen::{
     alpha_test_coverage, apply_alpha_scale, box_downsample, generate_mip_chain,
-    generate_mip_chain_kaiser, generate_mip_chain_windowed, kaiser_downsample, linear_to_srgb,
-    preserve_alpha_coverage, solve_alpha_scale, srgb_to_linear, windowed_downsample, ColorSpace,
-    KaiserFilter, Rgba8Image, WindowedKernel,
+    generate_mip_chain_kaiser, generate_mip_chain_premultiplied, generate_mip_chain_windowed,
+    kaiser_downsample, linear_to_srgb, premultiplied_box_downsample, preserve_alpha_coverage,
+    solve_alpha_scale, srgb_to_linear, windowed_downsample, ColorSpace, KaiserFilter,
+    Rgba8Image, WindowedKernel,
 };
 pub use normal_map::{
     average_unit_normals, blend_linear, blend_rnm, blend_udn, blend_whiteout, decode_ag,

@@ -18,10 +18,14 @@
 //! * [`alpha_coverage`] -- preserve alpha-test coverage across a mip chain
 //!   ([`preserve_alpha_coverage`]) so alpha-tested foliage/decals do not thin
 //!   out in the distance; a filter-agnostic post-pass.
+//! * [`premultiplied`] -- alpha-weighted (premultiplied) box reduction
+//!   ([`premultiplied_box_downsample`] / [`generate_mip_chain_premultiplied`])
+//!   so transparent texels do not bleed colour into alpha-blended edges.
 
 mod alpha_coverage;
 mod box_filter;
 mod kaiser;
+mod premultiplied;
 mod resample_core;
 mod srgb;
 mod windowed;
@@ -32,4 +36,5 @@ pub use alpha_coverage::{
     alpha_test_coverage, apply_alpha_scale, preserve_alpha_coverage, solve_alpha_scale,
 };
 pub use kaiser::{generate_mip_chain_kaiser, kaiser_downsample, KaiserFilter};
+pub use premultiplied::{generate_mip_chain_premultiplied, premultiplied_box_downsample};
 pub use windowed::{generate_mip_chain_windowed, windowed_downsample, WindowedKernel};
