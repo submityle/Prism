@@ -47,7 +47,8 @@ pub use normal_map::{
     lean_effective_variance, lean_from_normal, lean_from_slope, lean_resolve_normal,
     normal_to_slope, object_to_tangent, orthonormalize_basis, power_from_roughness, reconstruct_z,
     reduce_normal_roughness_2x, resolve_surface_gradient, roughness_from_power, scale_strength,
-    slope_covariance_eigen, slope_covariance_from_eigen, slope_to_normal, tangent_to_object,
+    slope_covariance_eigen, slope_covariance_from_eigen, slope_to_normal, spheremap_decode,
+    spheremap_decode_unorm, spheremap_encode, spheremap_encode_unorm, tangent_to_object,
     toksvig_factor, toksvig_roughness, triplanar_weights, unorm_to_snorm, variance_to_ggx_alpha,
     HeightGradient, LeanMoments, NormalLayer, SlopeEigen, TangentBasis,
 };
