@@ -25,6 +25,10 @@
 //!   surfel spatial-filter (bilateral neighbour reuse) kernel
 //!   `shaders/surfel_spatial_filter.wesl`, reducing a centre surfel's
 //!   neighbour slice by the geometric reuse weight exactly as the kernel does.
+//! * [`decode`] — the scalar `CPU` mirror [`decode_slot`] of the surfel-atlas
+//!   decode (gather) kernel `shaders/surfel_decode.wesl`, the inverse of
+//!   [`alloc`]: it octahedrally decodes a global atlas texel back to the unit
+//!   world direction stored there exactly as the kernel does.
 //!
 //! # Validation model
 //!
@@ -41,6 +45,7 @@
 
 pub mod abi;
 pub mod alloc;
+pub mod decode;
 pub mod filter;
 pub mod update;
 
@@ -55,10 +60,16 @@ pub use abi::{
     SURFEL_ALLOC_WORKGROUP_SIZE,
 };
 pub use abi::{
+    GpuSurfelDecodeParams, GpuSurfelDecodeRequest, GpuSurfelDecodeResult, SURFEL_DECODE_FLAG_VALID,
+    SURFEL_DECODE_PARAMS_SIZE, SURFEL_DECODE_REQUEST_STRIDE, SURFEL_DECODE_RESULT_STRIDE,
+    SURFEL_DECODE_WORKGROUP_SIZE,
+};
+pub use abi::{
     GpuSurfelUpdateInput, GpuSurfelUpdateParams, GpuSurfelUpdateResult, SURFEL_UPDATE_INPUT_STRIDE,
     SURFEL_UPDATE_PARAMS_SIZE, SURFEL_UPDATE_RESULT_STRIDE, SURFEL_UPDATE_WORKGROUP_SIZE,
 };
 pub use alloc::allocate_slot;
+pub use decode::decode_slot;
 pub use filter::filter_center;
 pub use update::update_entry;
 

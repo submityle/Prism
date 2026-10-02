@@ -585,3 +585,153 @@ fn filter_center_is_deterministic() {
         filter_center(&params, &center, &neighbours)
     );
 }
+
+use crate::gi::surface_cache::atlas::AtlasTexel;
+use crate::gi::surface_cache::gpu::abi::{
+    GpuSurfelDecodeParams, GpuSurfelDecodeRequest, GpuSurfelDecodeResult,
+    SURFEL_DECODE_PARAMS_SIZE, SURFEL_DECODE_REQUEST_STRIDE, SURFEL_DECODE_RESULT_STRIDE,
+    SURFEL_DECODE_WORKGROUP_SIZE,
+};
+use crate::gi::surface_cache::gpu::decode::decode_slot;
+
+/// The `WESL` source compiled and validated by [`decode_wesl_compiles`].
+const SURFEL_DECODE_WESL: &str = include_str!("shaders/surfel_decode.wesl");
+
+/// `naga` parses and type-checks the decode kernel, proving it compiles exactly
+/// as it will on device (the sandbox cannot dispatch it).
+#[test]
+fn decode_wesl_compiles() {
+    let module = naga::front::wgsl::parse_str(SURFEL_DECODE_WESL)
+        .unwrap_or_else(|error| panic!("surfel_decode.wesl failed to parse: {error:?}"));
+    let mut validator = naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    );
+    validator
+        .validate(&module)
+        .unwrap_or_else(|error| panic!("surfel_decode.wesl failed to validate: {error:?}"));
+}
+
+/// The decode `repr(C)` `ABI` strides match the constants the kernel and host
+/// assume (the layout itself is additionally pinned by the `const` size
+/// assertions in `abi.rs`).
+#[test]
+fn decode_abi_matches_shader_layout() {
+    assert_eq!(
+        size_of::<GpuSurfelDecodeParams>(),
+        SURFEL_DECODE_PARAMS_SIZE
+    );
+    assert_eq!(
+        size_of::<GpuSurfelDecodeRequest>(),
+        SURFEL_DECODE_REQUEST_STRIDE
+    );
+    assert_eq!(
+        size_of::<GpuSurfelDecodeResult>(),
+        SURFEL_DECODE_RESULT_STRIDE
+    );
+    assert_eq!(align_of::<GpuSurfelDecodeParams>(), 4);
+    assert_eq!(align_of::<GpuSurfelDecodeRequest>(), 4);
+    assert_eq!(align_of::<GpuSurfelDecodeResult>(), 4);
+}
+
+/// [`GpuSurfelDecodeParams::workgroup_count`] ceil-divides the request count by
+/// the workgroup size, covering every request with no empty trailing group.
+#[test]
+fn decode_workgroup_count_covers_every_request() {
+    let atlas = SurfelAtlas::new(4, 4, 8);
+    let wg = SURFEL_DECODE_WORKGROUP_SIZE;
+    for count in [0, 1, wg - 1, wg, wg + 1, 3 * wg, 3 * wg + 7] {
+        let params = GpuSurfelDecodeParams::from_atlas(&atlas, count);
+        let groups = params.workgroup_count();
+        assert!(groups * wg >= count, "under-covered count {count}");
+        if count > 0 {
+            assert!((groups - 1) * wg < count, "over-covered count {count}");
+        } else {
+            assert_eq!(groups, 0, "empty dispatch for zero requests");
+        }
+    }
+}
+
+/// [`GpuSurfelDecodeParams::from_atlas`] copies the atlas's already-clamped
+/// dimensions verbatim.
+#[test]
+fn decode_params_from_atlas_copies_clamped_dimensions() {
+    let atlas = SurfelAtlas::new(0, 0, 0);
+    let params = GpuSurfelDecodeParams::from_atlas(&atlas, 5);
+    assert_eq!(params.count, 5);
+    assert_eq!(params.tiles_per_row, 1);
+    assert_eq!(params.tile_rows, 1);
+    assert_eq!(params.tile_resolution, 1);
+}
+
+/// The `CPU` mirror reproduces the [`SurfelAtlas::texel_to_dir`] golden
+/// bit-for-bit for every in-tile texel across several atlas shapes: a valid
+/// decode matches the golden direction exactly, and the decode is the exact
+/// inverse of the encode (`dir_to_texel` of the decoded direction returns the
+/// same texel).
+#[test]
+fn decode_slot_matches_atlas_golden() {
+    let atlases = [
+        SurfelAtlas::new(1, 1, 8),
+        SurfelAtlas::new(4, 3, 16),
+        SurfelAtlas::new(2, 2, 32),
+    ];
+    for atlas in atlases {
+        for id in 0..atlas.capacity() {
+            let origin = atlas.tile_origin(id).expect("in range");
+            for ly in 0..atlas.tile_resolution {
+                for lx in 0..atlas.tile_resolution {
+                    let texel = AtlasTexel {
+                        x: origin.x + lx,
+                        y: origin.y + ly,
+                    };
+                    let request = GpuSurfelDecodeRequest::new(id, texel.x, texel.y);
+                    let slot = decode_slot(&atlas, &request);
+                    let golden = atlas.texel_to_dir(id, texel).expect("in-tile texel");
+                    assert!(slot.valid(), "id {id} texel {texel:?} should decode");
+                    assert_eq!(slot.direction(), golden, "id {id} texel {texel:?}");
+                    // Encode of the decoded direction returns the same texel:
+                    // the decode truly inverts the atlas addressing.
+                    assert_eq!(atlas.dir_to_texel(id, slot.direction()), Some(texel));
+                }
+            }
+        }
+    }
+}
+
+/// Out-of-range ids and texels that fall outside the surfel's own tile decode
+/// to the all-zero invalid result, matching the golden `None`.
+#[test]
+fn decode_slot_rejects_out_of_range_and_foreign_texels() {
+    let atlas = SurfelAtlas::new(3, 3, 8);
+
+    // Out-of-range id: invalid, golden `None`.
+    for id in [atlas.capacity(), atlas.capacity() + 5, u32::MAX] {
+        let request = GpuSurfelDecodeRequest::new(id, 0, 0);
+        let slot = decode_slot(&atlas, &request);
+        assert_eq!(slot, GpuSurfelDecodeResult::invalid(), "id {id}");
+        assert!(!slot.valid());
+        assert!(atlas.texel_to_dir(id, AtlasTexel { x: 0, y: 0 }).is_none());
+    }
+
+    // A texel from a neighbouring tile is outside this surfel's tile: invalid.
+    let id = 0;
+    let foreign = AtlasTexel {
+        x: atlas.tile_resolution,
+        y: 0,
+    };
+    let request = GpuSurfelDecodeRequest::new(id, foreign.x, foreign.y);
+    let slot = decode_slot(&atlas, &request);
+    assert!(!slot.valid());
+    assert_eq!(slot, GpuSurfelDecodeResult::invalid());
+    assert!(atlas.texel_to_dir(id, foreign).is_none());
+}
+
+/// The mirror is deterministic: identical inputs yield an identical result.
+#[test]
+fn decode_slot_is_deterministic() {
+    let atlas = SurfelAtlas::new(4, 4, 16);
+    let origin = atlas.tile_origin(7).expect("in range");
+    let request = GpuSurfelDecodeRequest::new(7, origin.x + 3, origin.y + 5);
+    assert_eq!(decode_slot(&atlas, &request), decode_slot(&atlas, &request));
+}

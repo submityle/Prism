@@ -600,3 +600,149 @@ const _: () = assert!(size_of::<GpuSpatialNeighbor>() == SURFEL_SPATIAL_NEIGHBOR
 const _: () = assert!(align_of::<GpuSpatialNeighbor>() == 4);
 const _: () = assert!(size_of::<GpuSpatialResult>() == SURFEL_SPATIAL_RESULT_STRIDE);
 const _: () = assert!(align_of::<GpuSpatialResult>() == 4);
+
+// --- Surfel-atlas decode (gather) producer ------------------------------------
+//
+// The sampling-side twin of the allocation slice: given a surfel id and a
+// global atlas texel the kernel decodes the unit world direction stored at that
+// texel centre (octahedral decode of the tile-local offset), the on-device twin
+// of `SurfelAtlas::texel_to_dir`. The host fills a [`GpuSurfelDecodeParams`]
+// uniform plus a `requests` storage array of [`GpuSurfelDecodeRequest`] and the
+// kernel writes one [`GpuSurfelDecodeResult`] per request. Every field is a
+// 4-byte scalar so the layout stays 4-byte aligned with no interior padding.
+
+/// Threads per workgroup for the surfel-decode dispatch; mirrors the
+/// `@workgroup_size(64)` in `shaders/surfel_decode.wesl`.
+pub const SURFEL_DECODE_WORKGROUP_SIZE: u32 = 64;
+
+/// `std430` byte size of [`GpuSurfelDecodeParams`] (the uniform block).
+pub const SURFEL_DECODE_PARAMS_SIZE: usize = 16;
+
+/// `std430` storage stride of one [`GpuSurfelDecodeRequest`].
+pub const SURFEL_DECODE_REQUEST_STRIDE: usize = 12;
+
+/// `std430` storage stride of one [`GpuSurfelDecodeResult`].
+pub const SURFEL_DECODE_RESULT_STRIDE: usize = 16;
+
+/// Valid-result bit inside [`GpuSurfelDecodeResult::flags`] (`bit 0`); clear
+/// when the id is out of range or the texel falls outside the surfel's tile.
+pub const SURFEL_DECODE_FLAG_VALID: u32 = 1;
+
+/// Uniform parameters for one surfel-decode dispatch.
+///
+/// `repr(C)` `std430` uniform block mirrored by `struct DecodeParams` in
+/// `shaders/surfel_decode.wesl`. `count` is the number of live requests; the
+/// remaining three fields are the atlas dimensions, already clamped to at least
+/// `1` by [`SurfelAtlas::new`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable)]
+pub struct GpuSurfelDecodeParams {
+    /// Number of valid decode requests in the `requests` buffer.
+    pub count: u32,
+    /// Tile columns across the atlas (`>= 1`).
+    pub tiles_per_row: u32,
+    /// Tile rows down the atlas (`>= 1`).
+    pub tile_rows: u32,
+    /// Side length in texels of each square tile (`>= 1`).
+    pub tile_resolution: u32,
+}
+
+impl GpuSurfelDecodeParams {
+    /// Build the dispatch parameters from an atlas descriptor and a live
+    /// request count, copying the atlas's already-clamped dimensions verbatim.
+    #[must_use]
+    pub fn from_atlas(atlas: &SurfelAtlas, count: u32) -> Self {
+        Self {
+            count,
+            tiles_per_row: atlas.tiles_per_row,
+            tile_rows: atlas.tile_rows,
+            tile_resolution: atlas.tile_resolution,
+        }
+    }
+
+    /// Number of workgroups needed to cover [`count`](Self::count) at
+    /// [`SURFEL_DECODE_WORKGROUP_SIZE`] threads each (ceil-divide).
+    #[must_use]
+    pub fn workgroup_count(&self) -> u32 {
+        self.count.div_ceil(SURFEL_DECODE_WORKGROUP_SIZE)
+    }
+}
+
+/// One decode request: a surfel id and the global atlas texel to decode.
+///
+/// `repr(C)` `std430` element mirrored by `struct DecodeRequest` in
+/// `shaders/surfel_decode.wesl`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable)]
+pub struct GpuSurfelDecodeRequest {
+    /// Surfel id whose tile owns the texel.
+    pub surfel_id: u32,
+    /// Global atlas texel column to decode.
+    pub texel_x: u32,
+    /// Global atlas texel row to decode.
+    pub texel_y: u32,
+}
+
+impl GpuSurfelDecodeRequest {
+    /// Build a decode request from a surfel id and a global atlas texel.
+    #[must_use]
+    pub fn new(surfel_id: u32, texel_x: u32, texel_y: u32) -> Self {
+        Self {
+            surfel_id,
+            texel_x,
+            texel_y,
+        }
+    }
+}
+
+/// Decoded unit direction for one request, plus the valid flag.
+///
+/// `repr(C)` `std430` element mirrored by `struct DecodeResult` in
+/// `shaders/surfel_decode.wesl`. When [`flags`](Self::flags) has
+/// [`SURFEL_DECODE_FLAG_VALID`] clear the direction is all-zero and must be
+/// ignored (out-of-range id or a texel outside the surfel's tile).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+pub struct GpuSurfelDecodeResult {
+    /// Decoded direction `x` component.
+    pub dir_x: f32,
+    /// Decoded direction `y` component.
+    pub dir_y: f32,
+    /// Decoded direction `z` component.
+    pub dir_z: f32,
+    /// Flag word; bit 0 ([`SURFEL_DECODE_FLAG_VALID`]) marks a valid decode.
+    pub flags: u32,
+}
+
+impl GpuSurfelDecodeResult {
+    /// The all-zero result returned for an out-of-range id or a texel that
+    /// falls outside the surfel's own tile.
+    #[must_use]
+    pub fn invalid() -> Self {
+        Self {
+            dir_x: 0.0,
+            dir_y: 0.0,
+            dir_z: 0.0,
+            flags: 0,
+        }
+    }
+
+    /// Whether this result carries a valid decoded direction.
+    #[must_use]
+    pub fn valid(&self) -> bool {
+        self.flags & SURFEL_DECODE_FLAG_VALID != 0
+    }
+
+    /// The decoded direction as a [`Vec3`].
+    #[must_use]
+    pub fn direction(&self) -> Vec3 {
+        Vec3::new(self.dir_x, self.dir_y, self.dir_z)
+    }
+}
+
+const _: () = assert!(size_of::<GpuSurfelDecodeParams>() == SURFEL_DECODE_PARAMS_SIZE);
+const _: () = assert!(align_of::<GpuSurfelDecodeParams>() == 4);
+const _: () = assert!(size_of::<GpuSurfelDecodeRequest>() == SURFEL_DECODE_REQUEST_STRIDE);
+const _: () = assert!(align_of::<GpuSurfelDecodeRequest>() == 4);
+const _: () = assert!(size_of::<GpuSurfelDecodeResult>() == SURFEL_DECODE_RESULT_STRIDE);
+const _: () = assert!(align_of::<GpuSurfelDecodeResult>() == 4);
