@@ -48,13 +48,9 @@
 //! (indirectly, via [`super::Vec3`]); no transcendental functions are called and
 //! no `NaN` is produced from well-formed input.
 
-use alloc::vec;
 use alloc::vec::Vec;
 
-use super::{ClothParticle, Compliance, Vec3, EPS_LEN_SQ};
-
-/// One sixth, the constant factor in the tetra-volume and gradient formulas.
-const INV_SIX: f32 = 1.0 / 6.0;
+use super::{physics_bridge, ClothParticle, Compliance, Vec3};
 
 /// Computes the signed enclosed volume of a closed triangle mesh.
 ///
@@ -63,16 +59,16 @@ const INV_SIX: f32 = 1.0 / 6.0;
 /// a positive volume. Triangles whose indices fall outside `positions` are
 /// skipped rather than panicking, which keeps the function total for partial or
 /// malformed meshes. The result is `0.0` for an empty mesh.
+///
+/// This delegates to the authoritative volume accumulator in
+/// [`prism_physics_core`]; the render crate only adapts the vector layout so a
+/// single implementation of the divergence-theorem sum is maintained
+/// engine-wide.
 #[must_use]
 pub fn mesh_volume(positions: &[Vec3], triangles: &[[u32; 3]]) -> f32 {
-    let mut sum = 0.0;
-    for tri in triangles {
-        let Some((p0, p1, p2)) = fetch_triangle_positions(positions, *tri) else {
-            continue;
-        };
-        sum += p0.dot(p1.cross(p2));
-    }
-    sum * INV_SIX
+    let glam_positions: Vec<glam::Vec3> =
+        positions.iter().map(|p| physics_bridge::to_glam(*p)).collect();
+    prism_physics_core::soft::constraint::mesh_volume(&glam_positions, triangles)
 }
 
 /// Tuning for one pressure (volume) projection.
@@ -171,55 +167,23 @@ pub fn project_pressure(
     params: PressureParams,
     dt: f32,
 ) {
-    if dt <= 0.0 || particles.is_empty() || triangles.is_empty() {
-        return;
-    }
     let params = params.sanitized();
-    let count = particles.len();
-
-    // Accumulate the signed volume and the per-vertex gradient in one pass.
-    let mut gradients: Vec<Vec3> = vec![Vec3::ZERO; count];
-    let mut volume = 0.0;
-    for tri in triangles {
-        let (i0, i1, i2) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
-        if i0 >= count || i1 >= count || i2 >= count {
-            continue;
-        }
-        let p0 = particles[i0].position;
-        let p1 = particles[i1].position;
-        let p2 = particles[i2].position;
-        volume += p0.dot(p1.cross(p2));
-        gradients[i0] = gradients[i0].add(p1.cross(p2).scale(INV_SIX));
-        gradients[i1] = gradients[i1].add(p2.cross(p0).scale(INV_SIX));
-        gradients[i2] = gradients[i2].add(p0.cross(p1).scale(INV_SIX));
-    }
-    volume *= INV_SIX;
-
-    let error = volume - params.target_volume();
-
-    // Denominator: Σ w_i |∇_i|² + α̃.
-    let mut denom = 0.0;
-    for (i, grad) in gradients.iter().enumerate() {
-        let w = particle_weight(particles[i]);
-        if w <= 0.0 {
-            continue;
-        }
-        denom += w * grad.length_squared();
-    }
-    let alpha_tilde = params.compliance.value() / (dt * dt);
-    denom += alpha_tilde;
-    if denom < EPS_LEN_SQ {
-        return;
-    }
-
-    let d_lambda = -error / denom;
-    for (i, grad) in gradients.iter().enumerate() {
-        let w = particle_weight(particles[i]);
-        if w <= 0.0 {
-            continue;
-        }
-        particles[i].position = particles[i].position.add(grad.scale(w * d_lambda));
-    }
+    let (mut positions, inverse_masses) = physics_bridge::to_soa(particles);
+    // Single XPBD iteration per substep: the Lagrange multiplier starts at zero
+    // and is discarded afterward, so this matches the render convention of one
+    // compliant pressure projection per call. The projection math itself lives
+    // once in `prism_physics_core`.
+    let mut lambda = 0.0;
+    prism_physics_core::soft::constraint::project_pressure(
+        &mut positions,
+        &inverse_masses,
+        triangles,
+        params.target_volume(),
+        params.compliance.value(),
+        dt,
+        &mut lambda,
+    );
+    physics_bridge::write_positions_back(particles, &positions);
 }
 
 /// Pipeline hook: applies the pressure constraint for one solver substep.
@@ -238,28 +202,10 @@ pub fn apply_pressure(
     project_pressure(particles, triangles, params, dt_sub);
 }
 
-/// Fetches the three vertex positions of a triangle, or `None` when any index
-/// is out of range.
-fn fetch_triangle_positions(positions: &[Vec3], tri: [u32; 3]) -> Option<(Vec3, Vec3, Vec3)> {
-    let p0 = positions.get(tri[0] as usize)?;
-    let p1 = positions.get(tri[1] as usize)?;
-    let p2 = positions.get(tri[2] as usize)?;
-    Some((*p0, *p1, *p2))
-}
-
-/// Effective inverse mass of a particle: zero when pinned, otherwise its stored
-/// inverse mass.
-fn particle_weight(particle: ClothParticle) -> f32 {
-    if particle.is_pinned() {
-        0.0
-    } else {
-        particle.inverse_mass
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     /// Absolute tolerance for volume comparisons.
     const EPS: f32 = 1.0e-4;
