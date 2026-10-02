@@ -67,13 +67,16 @@ pub const FLIP_PARTICLE_STRIDE: u32 = 80;
 /// entry), a single `u32`/`f32` at 4 bytes.
 pub const GRID_SCALAR_STRIDE: u32 = 4;
 
-/// Number of signed fixed-point `atomic<u32>` slots each `FLIP`/`APIC` `MAC`
-/// cell owns in the `P2G` scatter accumulator: three momentum components plus
-/// one mass lane (`[momentum_x, momentum_y, momentum_z, mass]`). The `water_flip`
-/// `P2G` kernel scatters into `grid_scatter[cell * 4 + {0..3}]`, so the scatter
-/// buffer needs four `GRID_SCALAR_STRIDE`-wide slots per cell — one scalar per
-/// cell (as for pressure/divergence) under-allocates it four-fold.
-pub const FLIP_SCATTER_SLOTS_PER_CELL: u32 = 4;
+/// Number of signed fixed-point `atomic<u32>` slots each staggered-`MAC`
+/// velocity face owns in the `P2G` scatter accumulator: one summed momentum
+/// lane plus one mass lane (`[momentum, mass]`). The `water_flip_mac_p2g`
+/// kernel scatters into `face_scatter[face_flat * 2 + {0, 1}]` over the
+/// `[u | v | w]` face blocks, so the scatter buffer needs two
+/// `GRID_SCALAR_STRIDE`-wide slots per face — one scalar per face
+/// under-allocates it two-fold. The retired collocated path owned four slots
+/// per cell (`[momentum_x, momentum_y, momentum_z, mass]`); the staggered grid
+/// scatters a single momentum component per face instead.
+pub const FLIP_MAC_SCATTER_SLOTS: u32 = 2;
 
 /// Byte stride of one foam coverage cell, a single `f32` density at 4 bytes.
 /// The foam field is semi-Lagrangian advected, so it is double-buffered.
@@ -113,6 +116,13 @@ pub struct WaterBufferCounts {
     /// Number of `FLIP`/`APIC` `MAC` grid scalar cells (pressure/divergence,
     /// one scalar buffer's worth).
     pub flip_grid_cells: u32,
+    /// Number of staggered-`MAC` velocity faces, summed over the `u`/`v`/`w`
+    /// face families (`(nx+1)*ny*nz + nx*(ny+1)*nz + nx*ny*(nz+1)`). The caller
+    /// derives it with `pipeline::mac_face_count`. It sizes the face velocity
+    /// buffer, its pre-projection snapshot and the `P2G` face scatter
+    /// accumulator, all of which the staggered projection stores per face, not
+    /// per cell.
+    pub flip_mac_faces: u32,
     /// Number of foam coverage cells (semi-Lagrangian, double-buffered).
     pub foam_cells: u32,
     /// Number of surface wetness cells.
@@ -216,18 +226,30 @@ impl WaterPersistentBufferSet {
             .saturating_mul(GRID_SCALAR_STRIDE)
     }
 
-    /// Bytes for the `FLIP`/`APIC` `P2G` scatter accumulator. Each `MAC` cell
-    /// owns [`FLIP_SCATTER_SLOTS_PER_CELL`] signed fixed-point atomics
-    /// (`momentum_x`, `momentum_y`, `momentum_z`, `mass`), so this buffer is
-    /// four times the single-scalar `flip_grid_bytes`. It is cleared and
-    /// re-accumulated every frame rather than ping-ponged, so it is a single
-    /// (not double-buffered) allocation.
+    /// Bytes for one staggered-`MAC` velocity face buffer: one `f32` per face
+    /// at [`GRID_SCALAR_STRIDE`]. Both the resident face velocity field and its
+    /// pre-projection snapshot are sized at this width, and the
+    /// divergence-free projection reads the snapshot while writing the
+    /// projected faces.
+    #[must_use]
+    pub fn flip_faces_bytes(self) -> u32 {
+        self.counts
+            .flip_mac_faces
+            .saturating_mul(GRID_SCALAR_STRIDE)
+    }
+
+    /// Bytes for the `FLIP`/`APIC` `P2G` scatter accumulator. Each staggered-
+    /// `MAC` velocity face owns [`FLIP_MAC_SCATTER_SLOTS`] signed fixed-point
+    /// atomics (`[momentum, mass]`), so this buffer is two times the
+    /// single-scalar [`flip_faces_bytes`](Self::flip_faces_bytes). It is
+    /// cleared and re-accumulated every frame rather than ping-ponged, so it is
+    /// a single (not double-buffered) allocation.
     #[must_use]
     pub fn flip_scatter_bytes(self) -> u32 {
         self.counts
-            .flip_grid_cells
+            .flip_mac_faces
             .saturating_mul(GRID_SCALAR_STRIDE)
-            .saturating_mul(FLIP_SCATTER_SLOTS_PER_CELL)
+            .saturating_mul(FLIP_MAC_SCATTER_SLOTS)
     }
 
     /// Bytes for one foam coverage field. Semi-Lagrangian advection reads the
@@ -253,15 +275,27 @@ impl WaterPersistentBufferSet {
 
     /// Total resident bytes for every persistent water buffer. The
     /// double-buffered pools — the spectrum `h0`/conjugate pair, the `PBF`
-    /// position pool, the `FLIP` pressure buffer and the foam field — are
-    /// counted twice; the single-buffered `FLIP` `P2G` scatter accumulator is
-    /// counted once at its full four-slot-per-cell size. Saturating throughout.
+    /// position pool and the foam field — are counted twice. The staggered-
+    /// `MAC` projection state is counted at its true per-face/per-cell split:
+    /// the face velocity buffer plus its pre-projection snapshot (two
+    /// [`flip_faces_bytes`](Self::flip_faces_bytes)), the single-buffered `P2G`
+    /// face scatter accumulator
+    /// ([`flip_scatter_bytes`](Self::flip_scatter_bytes), two slots per face),
+    /// and the per-cell divergence plus the pressure in/out ping-pong (three
+    /// [`flip_grid_bytes`](Self::flip_grid_bytes)). Saturating throughout.
     #[must_use]
     pub fn total_bytes(self) -> u32 {
         let spectrum_pair = self.spectrum_amplitude_bytes().saturating_mul(2);
         let pbf_double = self.pbf_particle_bytes().saturating_mul(2);
-        let pressure_double = self.flip_grid_bytes().saturating_mul(2);
         let foam_double = self.foam_bytes().saturating_mul(2);
+        // Face velocity field + its pre-projection snapshot (one `f32`/face
+        // each) plus the two-slot `P2G` face scatter accumulator.
+        let mac_faces = self
+            .flip_faces_bytes()
+            .saturating_mul(2)
+            .saturating_add(self.flip_scatter_bytes());
+        // Per-cell divergence plus the pressure in/out ping-pong.
+        let mac_grid = self.flip_grid_bytes().saturating_mul(3);
         spectrum_pair
             .saturating_add(self.displacement_bytes())
             .saturating_add(self.normal_bytes())
@@ -270,8 +304,8 @@ impl WaterPersistentBufferSet {
             .saturating_add(pbf_double)
             .saturating_add(self.pbf_hash_bytes())
             .saturating_add(self.flip_particle_bytes())
-            .saturating_add(self.flip_scatter_bytes())
-            .saturating_add(pressure_double)
+            .saturating_add(mac_faces)
+            .saturating_add(mac_grid)
             .saturating_add(foam_double)
             .saturating_add(self.wetness_bytes())
             .saturating_add(self.froxel_bytes())
@@ -521,9 +555,10 @@ impl AsyncFrameState {
 
 #[cfg(test)]
 mod tests {
+    use super::super::pipeline::mac_face_count;
     use super::{
         AsyncFrameState, BufferParity, PipelineError, SlotState, WaterBufferCounts,
-        WaterPersistentBufferSet, FLIP_PARTICLE_STRIDE, FLIP_SCATTER_SLOTS_PER_CELL,
+        WaterPersistentBufferSet, FLIP_MAC_SCATTER_SLOTS, FLIP_PARTICLE_STRIDE,
         GERSTNER_WAVE_STRIDE, GRID_SCALAR_STRIDE, PBF_PARTICLE_STRIDE, SPECTRUM_AMPLITUDE_STRIDE,
     };
 
@@ -536,6 +571,7 @@ mod tests {
             pbf_hash_entries: 20_000,
             flip_particles: 40_000,
             flip_grid_cells: 64 * 64 * 64,
+            flip_mac_faces: mac_face_count(64, 64, 64),
             foam_cells: 512 * 512,
             wetness_cells: 256 * 256,
             froxels: 160 * 90 * 64,
@@ -584,8 +620,9 @@ mod tests {
             + set.pbf_particle_bytes() * 2
             + set.pbf_hash_bytes()
             + set.flip_particle_bytes()
+            + set.flip_faces_bytes() * 2
             + set.flip_scatter_bytes()
-            + set.flip_grid_bytes() * 2
+            + set.flip_grid_bytes() * 3
             + set.foam_bytes() * 2
             + set.wetness_bytes()
             + set.froxel_bytes();
@@ -593,22 +630,26 @@ mod tests {
     }
 
     #[test]
-    fn flip_scatter_is_four_slots_per_cell() {
-        // The P2G scatter accumulator owns four fixed-point atomics per MAC
-        // cell (momentum_x, momentum_y, momentum_z, mass), so it must be four
-        // times the single-scalar pressure/divergence buffer. Sizing it at
-        // flip_grid_bytes (one scalar per cell) under-allocates it four-fold and
-        // lets the `water_flip` P2G kernel scatter past the buffer's end.
-        assert_eq!(FLIP_SCATTER_SLOTS_PER_CELL, 4);
+    fn flip_scatter_is_two_slots_per_face() {
+        // The P2G scatter accumulator owns two fixed-point atomics per
+        // staggered-MAC velocity face (`[momentum, mass]`), so it must be two
+        // times the single-scalar face buffer. Sizing it per cell (the retired
+        // collocated path) mis-sizes it and lets the `water_flip_mac_p2g`
+        // kernel scatter past the buffer's end at
+        // `face_scatter[face_flat * 2 + {0, 1}]`.
+        assert_eq!(FLIP_MAC_SCATTER_SLOTS, 2);
         let set = WaterPersistentBufferSet::new(counts());
         assert_eq!(
             set.flip_scatter_bytes(),
-            counts().flip_grid_cells * GRID_SCALAR_STRIDE * FLIP_SCATTER_SLOTS_PER_CELL
+            counts().flip_mac_faces * GRID_SCALAR_STRIDE * FLIP_MAC_SCATTER_SLOTS
         );
-        assert_eq!(set.flip_scatter_bytes(), set.flip_grid_bytes() * 4);
-        // The kernel writes grid_scatter[cell * 4 + 3] for the last cell, so the
-        // buffer must hold at least flip_grid_cells * 4 u32 slots.
-        let max_index_plus_one = counts().flip_grid_cells * FLIP_SCATTER_SLOTS_PER_CELL;
+        assert_eq!(set.flip_scatter_bytes(), set.flip_faces_bytes() * 2);
+        // The face total exceeds the cell total on any grid, so the scatter
+        // buffer is strictly larger than the per-cell divergence/pressure one.
+        assert!(set.flip_scatter_bytes() > set.flip_grid_bytes());
+        // The kernel writes face_scatter[(faces - 1) * 2 + 1], so the buffer
+        // must hold at least flip_mac_faces * 2 u32 slots.
+        let max_index_plus_one = counts().flip_mac_faces * FLIP_MAC_SCATTER_SLOTS;
         assert!(set.flip_scatter_bytes() >= max_index_plus_one * GRID_SCALAR_STRIDE);
     }
 
@@ -632,6 +673,7 @@ mod tests {
             pbf_hash_entries: u32::MAX,
             flip_particles: u32::MAX,
             flip_grid_cells: u32::MAX,
+            flip_mac_faces: u32::MAX,
             foam_cells: u32::MAX,
             wetness_cells: u32::MAX,
             froxels: u32::MAX,

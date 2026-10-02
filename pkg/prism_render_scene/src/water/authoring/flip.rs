@@ -15,7 +15,7 @@
 
 use prism_render_architecture::water::flip::{plan_flip, FlipParams, PressureSolverThresholds};
 use prism_render_architecture::water::gpu::buffers::WaterBufferCounts;
-use prism_render_architecture::water::gpu::pipeline::WaterPasses;
+use prism_render_architecture::water::gpu::pipeline::{mac_face_count, WaterPasses};
 
 use crate::water::abi::{GpuFlipParticle, GpuFlipSimParams, GpuFlipSurfaceParams};
 use crate::water::bind_groups::WaterSurfaceExtent;
@@ -235,6 +235,7 @@ impl WaterBody {
             counts: WaterBufferCounts {
                 flip_particles: particle_count,
                 flip_grid_cells: cell_count,
+                flip_mac_faces: mac_face_count(gx, gy, gz),
                 ..WaterBufferCounts::default()
             },
             ..Self::default()
