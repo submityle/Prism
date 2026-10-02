@@ -76,6 +76,16 @@ use super::shape_cast::RoundedConvex;
 /// inside the rounded surface rather than outside it.
 const SURFACE_EPS: f32 = 1.0e-6;
 
+/// Relative slack applied to the BVH prune bound. `aabb_point_distance` is a
+/// true lower bound on a node's surface distance, but it is computed with a
+/// `sqrt`; when the nearest surface point lies exactly on the node's AABB face
+/// the rounded lower bound can land one ULP above the best distance and wrongly
+/// prune a tied, lower-index target sharing that distance. Scaling the best
+/// distance by `1 + PRUNE_REL_SLACK` keeps such equidistant subtrees in the
+/// walk so the lower-index tie rule in [`better`] still decides the winner,
+/// mirroring the collider trimesh closest-point query's prune guard.
+const PRUNE_REL_SLACK: f32 = 1.0e-5;
+
 /// A world-space query point for a closest-point distance query.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SceneClosestPoint {
@@ -272,7 +282,7 @@ pub fn closest_point_bvh(targets: &[RoundedConvex], query: &SceneClosestPoint) -
     while let Some(node) = stack.pop() {
         let lower_bound = aabb_point_distance(&node_aabb(&tree, node), query.position);
         if let Some(b) = best
-            && lower_bound > b.distance
+            && lower_bound > b.distance * (1.0 + PRUNE_REL_SLACK)
         {
             continue;
         }
