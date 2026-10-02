@@ -38,6 +38,7 @@ use super::config::Aabb;
 use super::cpu::Lbvh;
 use super::layout::{buffer_entry, entry};
 use super::overlap::OverlapQueryError;
+use super::resident::GpuResidentLbvh;
 
 /// Lanes per workgroup; must match `@workgroup_size` in `bvh_overlap.wgsl`.
 const WORKGROUP: u32 = 64;
@@ -60,14 +61,33 @@ struct Params {
 }
 
 /// A compiled, reusable `GPU` batched `AABB`-versus-`BVH` overlap query.
+///
+/// It carries two pipelines over one shared bind-group layout: [`query`] binds
+/// a host-re-uploaded [`Lbvh`], and [`query_resident`] binds a tree left
+/// resident on device by the build, with no host round-trip between build and
+/// traversal. The two kernels differ only in how internal-node bounds and leaf
+/// boxes are laid out (plain floats versus order-encoded `u32`s read through
+/// `sorted_indices`); both bind the same count and types of buffers, so one
+/// layout serves both.
+///
+/// [`query`]: GpuBvhOverlap::query
+/// [`query_resident`]: GpuBvhOverlap::query_resident
 pub struct GpuBvhOverlap {
     #[expect(
         dead_code,
         reason = "kept alive so the pipeline it produced stays valid"
     )]
     module: ShaderModule,
+    /// Kept alive so the resident-tree pipeline it produced stays valid.
+    #[expect(
+        dead_code,
+        reason = "kept alive so the resident pipeline it produced stays valid"
+    )]
+    resident_module: ShaderModule,
     layout: BindGroupLayout,
     pipeline: ComputePipeline,
+    /// Overlap-gather kernel binding a device-resident tree's buffers directly.
+    resident: ComputePipeline,
 }
 
 impl GpuBvhOverlap {
@@ -110,10 +130,27 @@ impl GpuBvhOverlap {
             compilation_options: PipelineCompilationOptions::default(),
             cache: None,
         });
+        // The resident kernel binds the same count and types of buffers (only
+        // the internal-bounds and leaf-box layouts differ, both still read-only
+        // storage), so it reuses the one bind-group and pipeline layout above.
+        let resident_module = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("prism_bvh_overlap_resident"),
+            source: ShaderSource::Wgsl(include_str!("../shaders/bvh_overlap_resident.wgsl").into()),
+        });
+        let resident = device.create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some("prism_bvh_overlap_resident_pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &resident_module,
+            entry_point: Some("find_overlaps"),
+            compilation_options: PipelineCompilationOptions::default(),
+            cache: None,
+        });
         GpuBvhOverlap {
             module,
+            resident_module,
             layout,
             pipeline,
+            resident,
         }
     }
 
@@ -226,6 +263,143 @@ impl GpuBvhOverlap {
             label: Some("prism_bvh_overlap_encoder"),
         });
         dispatch(&mut encoder, &self.pipeline, &bind, groups);
+        buffer::copy(&mut encoder, &counts_buf, &counts_stage, counts_bytes);
+        buffer::copy(&mut encoder, &hits_buf, &hits_stage, hits_bytes.max(4));
+        ctx.queue().submit([encoder.finish()]);
+
+        let counts = buffer::read_back::<u32>(ctx, &counts_stage);
+        for (query_index, &count) in counts.iter().enumerate() {
+            if count > capacity_per_query {
+                return Err(OverlapQueryError::CapacityExceeded {
+                    capacity_per_query,
+                    query: u32::try_from(query_index).unwrap_or(u32::MAX),
+                });
+            }
+        }
+
+        let flat = buffer::read_back::<u32>(ctx, &hits_stage);
+        let cap = capacity_per_query as usize;
+        let mut out: Vec<Vec<u32>> = Vec::with_capacity(queries.len());
+        for (query_index, &count) in counts.iter().enumerate() {
+            let base = query_index * cap;
+            let n = count as usize;
+            out.push(flat[base..base + n].to_vec());
+        }
+        Ok(out)
+    }
+
+    /// Gathers, for every box in `queries`, the original indices of the
+    /// primitives in a device-resident `lbvh` whose leaf box overlaps it,
+    /// binding the built tree's device buffers directly with no host round-trip
+    /// between build and traversal.
+    ///
+    /// Behaves exactly like [`query`](GpuBvhOverlap::query) over the same scene:
+    /// the returned outer vector has one entry per query in query order, each
+    /// inner vector lists the overlapping primitives' original indices in the
+    /// device's atomic-append order (sort to compare against the twin), and an
+    /// empty `queries` slice yields an empty outer vector. A resident tree with
+    /// fewer than two leaves owns no traversable hierarchy, so every query's
+    /// hit list is empty.
+    ///
+    /// The resident tree carries its internal-node bounds order-encoded (the
+    /// exact `u32`s the build's bounds pass wrote) and its leaf boxes as the
+    /// original-order primitive floats gathered through `sorted_indices`; the
+    /// resident kernel decodes the former with the integer inverse of that
+    /// encoding, so its overlap tests, and thus every query's hit set, match
+    /// [`query`](GpuBvhOverlap::query) and the
+    /// [`cpu_bvh_aabb_overlap`](super::overlap::cpu_bvh_aabb_overlap) twin
+    /// exactly.
+    ///
+    /// `capacity_per_query` bounds each query's region of the output buffer; a
+    /// query overlapping more leaves than that reports overflow rather than
+    /// silently truncating, matching the twin's contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OverlapQueryError::CapacityExceeded`] naming the first query
+    /// whose overlap count exceeded `capacity_per_query`.
+    pub fn query_resident(
+        &self,
+        ctx: &GpuContext,
+        lbvh: &GpuResidentLbvh,
+        queries: &[Aabb],
+        capacity_per_query: u32,
+    ) -> Result<Vec<Vec<u32>>, OverlapQueryError> {
+        // A resident tree with fewer than two leaves owns no buffers and
+        // overlaps nothing, so every query's hit list is empty.
+        let Some(inner) = lbvh.buffers() else {
+            return Ok(vec![Vec::new(); queries.len()]);
+        };
+        // An empty query batch has nothing to dispatch.
+        if queries.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let device = ctx.device();
+
+        let query_min = pack_min(queries);
+        let query_max = pack_max(queries);
+
+        let num_queries = u32::try_from(queries.len()).unwrap_or(u32::MAX);
+        let params = Params {
+            num_internal: u32::try_from(inner.num_internal).unwrap_or(u32::MAX),
+            num_leaves: u32::try_from(lbvh.num_leaves()).unwrap_or(u32::MAX),
+            root: inner.root,
+            num_queries,
+            capacity_per_query,
+        };
+
+        let params_buf = buffer::uniform(device, "prism_bvh_overlap_resident_params", &params);
+        let query_min_buf =
+            buffer::storage_read(device, "prism_bvh_overlap_resident_query_min", &query_min);
+        let query_max_buf =
+            buffer::storage_read(device, "prism_bvh_overlap_resident_query_max", &query_max);
+
+        let counts_bytes = u64::from(num_queries) * 4;
+        let counts_buf =
+            buffer::storage_rw_zeroed(device, "prism_bvh_overlap_resident_counts", counts_bytes);
+        let hits_bytes = u64::from(num_queries) * u64::from(capacity_per_query) * 4;
+        // capacity_per_query may legitimately be zero (overflow-probe); keep the
+        // buffer non-empty so the bind group is valid even then.
+        let hits_buf = buffer::storage_rw_zeroed(
+            device,
+            "prism_bvh_overlap_resident_hits",
+            hits_bytes.max(4),
+        );
+
+        let bind = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("prism_bvh_overlap_resident_bind"),
+            layout: &self.layout,
+            entries: &[
+                entry(0, &params_buf),
+                entry(1, &inner.left),
+                entry(2, &inner.right),
+                entry(3, &inner.parent),
+                entry(4, &inner.node_min),
+                entry(5, &inner.node_max),
+                entry(6, &inner.aabb_min),
+                entry(7, &inner.aabb_max),
+                entry(8, inner.sorted.values()),
+                entry(9, &query_min_buf),
+                entry(10, &query_max_buf),
+                entry(11, &counts_buf),
+                entry(12, &hits_buf),
+            ],
+        });
+
+        let counts_stage =
+            buffer::staging(device, "prism_bvh_overlap_resident_counts_stage", counts_bytes);
+        let hits_stage = buffer::staging(
+            device,
+            "prism_bvh_overlap_resident_hits_stage",
+            hits_bytes.max(4),
+        );
+
+        let groups = num_queries.div_ceil(WORKGROUP);
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("prism_bvh_overlap_resident_encoder"),
+        });
+        dispatch(&mut encoder, &self.resident, &bind, groups);
         buffer::copy(&mut encoder, &counts_buf, &counts_stage, counts_bytes);
         buffer::copy(&mut encoder, &hits_buf, &hits_stage, hits_bytes.max(4));
         ctx.queue().submit([encoder.finish()]);
