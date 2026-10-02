@@ -201,8 +201,9 @@ use super::{
         volumetrics_pass, PrismVolumetricsSettings, VolumetricsTextureCache,
     },
     world_restir::{
-        init_world_restir_pipeline, prepare_world_restir_bind_groups,
+        init_world_restir_pipeline, prepare_world_restir_bind_groups, prepare_world_restir_lights,
         prepare_world_restir_reservoirs, world_restir_fill_pass, PrismWorldRestirSettings,
+        WorldRestirLights,
     },
     world_space_gi::{
         init_world_space_gi_composite_pipeline, init_world_space_gi_pipeline,
@@ -346,6 +347,7 @@ impl Plugin for PrismShadingPlugin {
             .init_resource::<PrismHatchingSettings>()
             .init_resource::<PrismHalftoneSettings>()
             .init_resource::<PrismWorldRestirSettings>()
+            .init_resource::<WorldRestirLights>()
             .init_resource::<PrismWorldSpaceGiSettings>()
             .init_resource::<PrismLightRoutingSettings>()
             .insert_resource(ShadingFrameGraph {
@@ -914,6 +916,10 @@ impl Plugin for PrismShadingPlugin {
             Render,
             (
                 prepare_world_restir_reservoirs.in_set(RenderSystems::PrepareResources),
+                // The seed pass's candidate light list is a world-space table
+                // producer like the reservoirs: repacked from the extracted
+                // lights in PrepareResources, independent of the ping-pong flip.
+                prepare_world_restir_lights.in_set(RenderSystems::PrepareResources),
                 prepare_world_restir_bind_groups
                     .after(prepare_world_restir_reservoirs)
                     .in_set(RenderSystems::PrepareBindGroups),

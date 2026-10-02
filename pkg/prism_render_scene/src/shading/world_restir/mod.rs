@@ -32,20 +32,28 @@
 //! a finite-input sweep (see [`shader_tests`]); the sandbox has no GPU, so this
 //! CPU parity is its device-equivalence proof.
 //!
+//! This slice adds the per-frame candidate light list ([`lights`]): the
+//! render world's extracted punctual lights (prism [`crate::lighting`]) are
+//! repacked into the frozen [`abi::GpuWorldRestirLight`] layout and kept in a
+//! resident storage buffer ([`WorldRestirLights`]) ready for the seed group's
+//! `@binding(2)`, uploaded every frame by [`prepare_world_restir_lights`] while
+//! the subsystem is enabled.
+//!
 //! Wiring the seed pass onto the render graph (its pipeline, the `@binding(2)`
-//! light buffer fed by a real light extract, and the seed -> fill dispatch
-//! ordering), and the water-surface `@group(9)` consumer, land in follow-up
-//! slices.
+//! bind of [`WorldRestirLights`], and the seed -> fill dispatch ordering), and
+//! the water-surface `@group(9)` consumer, land in follow-up slices.
 
 mod abi;
 mod bind_groups;
 mod dispatch;
+mod lights;
 mod pipeline;
 mod resources;
 mod settings;
 
 pub(crate) use bind_groups::prepare_world_restir_bind_groups;
 pub(crate) use dispatch::world_restir_fill_pass;
+pub(crate) use lights::{prepare_world_restir_lights, WorldRestirLights};
 pub(crate) use pipeline::init_world_restir_pipeline;
 pub(crate) use resources::prepare_world_restir_reservoirs;
 pub(crate) use settings::PrismWorldRestirSettings;
