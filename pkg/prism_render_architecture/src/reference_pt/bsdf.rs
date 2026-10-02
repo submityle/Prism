@@ -20,6 +20,7 @@
 use super::dielectric::{fresnel_dielectric, refract};
 use super::fresnel_blend::FresnelBlend;
 use super::microfacet::{fresnel_schlick, GgxIsotropic};
+use super::oren_nayar::OrenNayar;
 use super::rough_dielectric::RoughDielectric;
 use super::sampler::{cosine_hemisphere_pdf, cosine_sample_hemisphere, Rng};
 use super::{Vec3, EPS_LEN_SQ, INV_PI};
@@ -82,6 +83,18 @@ pub enum Bsdf {
         specular: Vec3,
         /// Perceptual roughness of the specular coat in `[0, 1]`.
         roughness: f32,
+    },
+    /// Rough Lambertian diffuse (Oren-Nayar): a field of Lambertian
+    /// V-cavity microfacets whose masking, shadowing, and single
+    /// inter-reflection flatten the limb and add a grazing retro-reflection
+    /// Lambert lacks (see [`crate::reference_pt::oren_nayar`]). It is a
+    /// non-delta diffuse lobe, so it is cosine-sampled and connected to
+    /// lights by next-event estimation like [`Bsdf::Lambert`].
+    OrenNayar {
+        /// Per-channel diffuse reflectance (hemispherical albedo).
+        albedo: Vec3,
+        /// Micro-slope standard deviation (radians); `0` is Lambert.
+        sigma: f32,
     },
     /// Rough dielectric interface (frosted glass): the reflect-and-refract
     /// behaviour of [`Bsdf::Dielectric`] blurred by a GGX microfacet lobe (see
@@ -153,6 +166,9 @@ impl Bsdf {
                 specular,
                 roughness,
             } => FresnelBlend::new(*diffuse, *specular, *roughness).evaluate(wo, wi, normal),
+            Self::OrenNayar { albedo, sigma } => {
+                OrenNayar::new(*albedo, *sigma).evaluate(wo, wi, normal)
+            }
             Self::RoughDielectric {
                 ior,
                 reflectance,
@@ -195,6 +211,9 @@ impl Bsdf {
                 specular,
                 roughness,
             } => FresnelBlend::new(*diffuse, *specular, *roughness).pdf(wo, wi, normal),
+            Self::OrenNayar { albedo, sigma } => {
+                OrenNayar::new(*albedo, *sigma).pdf(wo, wi, normal)
+            }
             Self::RoughDielectric {
                 ior,
                 reflectance,
@@ -268,6 +287,14 @@ impl Bsdf {
                 specular,
                 roughness,
             } => FresnelBlend::new(*diffuse, *specular, *roughness)
+                .sample(wo, normal, rng)
+                .map(|s| BsdfSample {
+                    direction: s.direction,
+                    value: s.value,
+                    pdf: s.pdf,
+                    specular: false,
+                }),
+            Self::OrenNayar { albedo, sigma } => OrenNayar::new(*albedo, *sigma)
                 .sample(wo, normal, rng)
                 .map(|s| BsdfSample {
                     direction: s.direction,
@@ -901,5 +928,43 @@ mod tests {
         let wi = Vec3::new(-0.15, 0.98, 0.0).normalize_or_zero();
         assert!(bsdf.pdf(wo, wi, N) > 0.0);
         assert!(bsdf.evaluate(wo, wi, N).max_component() > 0.0);
+    }
+
+    #[test]
+    fn oren_nayar_is_glossy_diffuse_and_matches_lambert_at_zero_sigma() {
+        // Oren-Nayar dispatches as a non-delta diffuse lobe: next-event
+        // estimation stays enabled, it scatters into the view hemisphere,
+        // and sampling agrees with evaluate/pdf.
+        let rough = Bsdf::OrenNayar {
+            albedo: Vec3::new(0.7, 0.5, 0.3),
+            sigma: 0.6,
+        };
+        assert!(!rough.is_specular());
+        let mut rng = Rng::seed(99);
+        let wo = Vec3::new(0.3, 0.95, 0.0).normalize_or_zero();
+        let mut hits = 0u32;
+        for _ in 0..2_000 {
+            if let Some(s) = rough.sample(wo, N, &mut rng) {
+                assert!(N.dot(s.direction) > 0.0);
+                let p = rough.pdf(wo, s.direction, N);
+                assert!((s.pdf - p).abs() <= 1e-5);
+                let v = rough.evaluate(wo, s.direction, N);
+                assert!((s.value.x - v.x).abs() <= 1e-5);
+                hits += 1;
+            }
+        }
+        assert!(hits > 1_900, "{hits}");
+        // At sigma = 0 the enum lobe must coincide with the Lambert variant.
+        let flat = Bsdf::OrenNayar {
+            albedo: Vec3::new(0.7, 0.5, 0.3),
+            sigma: 0.0,
+        };
+        let lambert = Bsdf::Lambert {
+            albedo: Vec3::new(0.7, 0.5, 0.3),
+        };
+        let wi = Vec3::new(-0.2, 0.9, 0.1).normalize_or_zero();
+        let a = flat.evaluate(wo, wi, N);
+        let b = lambert.evaluate(wo, wi, N);
+        assert!((a.x - b.x).abs() <= 1e-6 && (a.y - b.y).abs() <= 1e-6);
     }
 }
