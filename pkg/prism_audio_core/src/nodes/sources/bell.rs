@@ -668,7 +668,11 @@ mod tests {
                 }
             }
         }
-        assert!(worst > 0.1, "grid should actually produce sound: {worst}");
+        // Pin the calibrated worst-case headroom so OUTPUT_GAIN drift is caught.
+        assert!(
+            (0.80..0.95).contains(&worst),
+            "grid worst-case peak should stay in the calibrated band: {worst}"
+        );
     }
 
     #[test]
