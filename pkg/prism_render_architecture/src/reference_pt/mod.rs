@@ -70,6 +70,7 @@
 //! (an epsilon or ordering comparison is used instead), matching the crate's
 //! determinism conventions.
 
+pub mod adaptive;
 pub mod area_light;
 pub mod bsdf;
 pub mod camera;

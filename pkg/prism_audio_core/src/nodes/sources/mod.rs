@@ -103,6 +103,15 @@
 //!   it is a direct subtractive oscillator cluster, and unlike the random
 //!   noise burst of [`analog_snare`] it is fully deterministic. Triggered by
 //!   [`analog_hihat::AnalogHiHatNode::trigger`].
+//! - [`analog_tom::AnalogTomNode`] -- analog-style tom-tom voice: a pair of
+//!   tuned sine partials (a fundamental plus a membrane overtone) whose pitch
+//!   sweeps gently down toward a sustained musical fundamental, shaped by an
+//!   exponential VCA and a `tanh` saturator. Unlike the modal physical drums
+//!   ([`membrane_drum`], [`struck_bar`]) it is a direct two-partial
+//!   subtractive voice; unlike [`analog_kick`] it adds a tuned overtone and a
+//!   gentler sweep that settles on pitch with no click; and unlike
+//!   [`analog_snare`] it has no noise layer and is purely tonal. Triggered by
+//!   [`analog_tom::AnalogTomNode::trigger`].
 //!   `rate_hz` scales the integration speed while the single dissipation `b`
 //!   morphs the labyrinthine orbit from dense chaos (small `b`) toward a quiet
 //!   fixed point (large `b`). Unlike [`rossler_attractor`] its sinusoidal
@@ -497,6 +506,7 @@ pub mod chua_circuit;
 pub mod analog_kick;
 pub mod analog_snare;
 pub mod analog_hihat;
+pub mod analog_tom;
 
 pub use air_jet_flute::{AirJetFluteNode, AirJetFluteParams};
 pub use additive_oscillator::{AdditiveOscillatorNode, AdditiveOscillatorParams};
@@ -513,6 +523,7 @@ pub use chua_circuit::{ChuaCircuitNode, ChuaCircuitParams};
 pub use analog_kick::{AnalogKickNode, AnalogKickParams};
 pub use analog_snare::{AnalogSnareNode, AnalogSnareParams};
 pub use analog_hihat::{AnalogHiHatNode, AnalogHiHatParams};
+pub use analog_tom::{AnalogTomNode, AnalogTomParams};
 pub use conical_reed::{ConicalReedNode, ConicalReedParams};
 pub use dsf_oscillator::{DsfOscillatorNode, DsfOscillatorParams};
 pub use dust::{DustNode, DustParams, Polarity};

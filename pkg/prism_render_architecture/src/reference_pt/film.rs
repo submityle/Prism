@@ -69,6 +69,31 @@ impl Film {
     pub fn pixels(&self) -> &[Vec3] {
         &self.pixels
     }
+
+    /// Builds a film from an already-accumulated row-major pixel buffer.
+    ///
+    /// `pixels` must hold exactly `width * height` entries in row-major order
+    /// (`index = y * width + x`), making this the inverse of [`Film::pixels`].
+    /// It lets an external sampling driver (such as the adaptive renderer in
+    /// [`super::adaptive`]) assemble a film from radiance it integrated itself
+    /// instead of mutating the film pixel by pixel.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `pixels.len()` differs from `width * height`.
+    #[must_use]
+    pub fn from_pixels(width: u32, height: u32, pixels: Vec<Vec3>) -> Self {
+        assert_eq!(
+            pixels.len(),
+            (width as usize) * (height as usize),
+            "pixel count must equal width * height"
+        );
+        Self {
+            width,
+            height,
+            pixels,
+        }
+    }
 }
 
 /// Renders `scene` through `camera` with `integrator`, averaging
