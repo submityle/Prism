@@ -41,6 +41,11 @@
 //!   ([`area_light::AreaLights`]) that connects `BSDF`-sampled hits on glowing
 //!   mesh geometry with explicit next-event estimation under the power
 //!   heuristic.
+//! - [`distribution`] — piecewise-constant one- and two-dimensional sampling
+//!   distributions ([`distribution::Distribution1D`] /
+//!   [`distribution::Distribution2D`]) that invert a tabulated cumulative
+//!   distribution to draw samples in proportion to a function, the importance
+//!   sampling core reused by image-based environment lighting.
 //! - [`integrator`] — the path-tracing loop ([`integrator::PathIntegrator`]):
 //!   `BSDF` importance sampling, direct-light `NEE`, Russian-roulette path
 //!   termination, and the [`integrator::Scene`] it traces.
@@ -70,6 +75,7 @@ pub mod conductor_schlick_ms;
 pub mod dielectric;
 pub mod dielectric_energy;
 pub mod dielectric_ms;
+pub mod distribution;
 pub mod estimator;
 pub mod film;
 pub mod fresnel_blend;
