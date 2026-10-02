@@ -18,6 +18,7 @@
 //! * Khronos Data Format Specification 1.3, "ASTC Compressed Texture Formats".
 //! * Vulkan `VK_FORMAT_ASTC_4x4_UNORM_BLOCK`.
 
+mod bise;
 mod block_reader;
 mod void_extent;
 
@@ -33,6 +34,9 @@ pub enum AstcError {
     /// A non-void-extent block was passed to the void-extent-only 4x4 decoder;
     /// removed once the general single-partition path lands.
     UnsupportedBlockMode,
+    /// A BISE integer sequence used a trit or quint quantisation range, which
+    /// is parsed but not yet GPU-validated and so not yet emitted.
+    UnsupportedIse,
 }
 
 /// Decode a single 4x4 ASTC **LDR** block to sixteen `RGBA8` texels.
