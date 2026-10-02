@@ -35,9 +35,11 @@
 
 mod bicubic;
 mod bilinear;
+mod bspline;
 mod texel_wrap;
 
 pub use bicubic::{bicubic_catmull_rom, catmull_rom_weights};
+pub use bspline::{bspline_cubic, bspline_cubic_fast, bspline_cubic_weights};
 pub use bilinear::{bilinear, TexelSource};
 pub use texel_wrap::{wrap_texel, TexelAddr};
 
