@@ -69,7 +69,8 @@ pub use bvh::{
     cpu_bvh_raycast_closest, lbvh_sah_cost, lbvh_sah_cost_weighted, surface_area, Aabb, BvhQueryError,
     GpuBvhOverlap, GpuBvhQuery, GpuBvhRaycast, GpuBvhRefit, GpuBvhSahCost, GpuLbvh, GpuResidentLbvh,
     Lbvh,
-    OverlapQueryError, Ray, RayHit, RebuildDecision, RefitQualityTracker, SceneBounds, NO_PARENT,
+    OverlapQueryError, Ray, RayHit, FrameUpdate, RebuildDecision, RefitQualityTracker, ResidentBvhDriver, SceneBounds,
+    UpdateAction, NO_PARENT,
 };
 pub use cfl::{cpu_cfl_dt, cpu_max_speed, CflConfig, GpuCflReduce};
 pub use cloth::{

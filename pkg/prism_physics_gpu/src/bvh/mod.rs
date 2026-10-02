@@ -41,6 +41,7 @@ pub mod refit_gpu;
 pub mod ray;
 pub mod ray_gpu;
 pub mod resident;
+pub mod resident_driver;
 pub mod sah_cost_gpu;
 
 pub use config::{Aabb, SceneBounds};
@@ -61,3 +62,4 @@ pub use query_gpu::GpuBvhQuery;
 pub use ray::{cpu_bvh_raycast_any, cpu_bvh_raycast_closest, Ray, RayHit};
 pub use ray_gpu::GpuBvhRaycast;
 pub use resident::GpuResidentLbvh;
+pub use resident_driver::{FrameUpdate, ResidentBvhDriver, UpdateAction};
