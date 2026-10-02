@@ -11,19 +11,20 @@
 //! without a usable adapter the oracle returns `None` and the test skips.
 
 use prism_render_material::{
-    decode_astc_4x4_weights, decode_astc_void_extent_hdr, decode_astc_void_extent_ldr, decode_bc1,
-    decode_bc3, decode_bc6h_mode10_signed, decode_bc6h_mode10_unsigned, decode_bc6h_mode12_signed,
-    decode_bc6h_mode12_unsigned, decode_bc6h_mode13_signed, decode_bc6h_mode13_unsigned,
-    decode_bc6h_mode14_signed, decode_bc6h_mode14_unsigned, decode_bc6h_mode1_signed,
-    decode_bc6h_mode1_unsigned, decode_bc6h_mode2_signed, decode_bc6h_mode2_unsigned,
-    decode_bc6h_mode3_signed, decode_bc6h_mode3_unsigned, decode_bc6h_mode4_signed,
-    decode_bc6h_mode4_unsigned, decode_bc6h_mode5_signed, decode_bc6h_mode5_unsigned,
-    decode_bc6h_mode6_signed, decode_bc6h_mode6_unsigned, decode_bc6h_mode7_signed,
-    decode_bc6h_mode7_unsigned, decode_bc6h_mode8_signed, decode_bc6h_mode8_unsigned,
-    decode_bc6h_mode9_signed, decode_bc6h_mode9_unsigned, decode_bc6h_signed, decode_bc6h_unsigned,
-    decode_bc7, decode_bc7_mode0, decode_bc7_mode1, decode_bc7_mode2, decode_bc7_mode3,
-    decode_bc7_mode7, encode_bc1, encode_bc3, encode_bc6h_mode11_unsigned, encode_bc7_mode4,
-    encode_bc7_mode5, encode_bc7_mode6,
+    decode_astc_4x4_weights, decode_astc_4x4_weights_ise, decode_astc_void_extent_hdr,
+    decode_astc_void_extent_ldr, decode_bc1, decode_bc3, decode_bc6h_mode10_signed,
+    decode_bc6h_mode10_unsigned, decode_bc6h_mode12_signed, decode_bc6h_mode12_unsigned,
+    decode_bc6h_mode13_signed, decode_bc6h_mode13_unsigned, decode_bc6h_mode14_signed,
+    decode_bc6h_mode14_unsigned, decode_bc6h_mode1_signed, decode_bc6h_mode1_unsigned,
+    decode_bc6h_mode2_signed, decode_bc6h_mode2_unsigned, decode_bc6h_mode3_signed,
+    decode_bc6h_mode3_unsigned, decode_bc6h_mode4_signed, decode_bc6h_mode4_unsigned,
+    decode_bc6h_mode5_signed, decode_bc6h_mode5_unsigned, decode_bc6h_mode6_signed,
+    decode_bc6h_mode6_unsigned, decode_bc6h_mode7_signed, decode_bc6h_mode7_unsigned,
+    decode_bc6h_mode8_signed, decode_bc6h_mode8_unsigned, decode_bc6h_mode9_signed,
+    decode_bc6h_mode9_unsigned, decode_bc6h_signed, decode_bc6h_unsigned, decode_bc7,
+    decode_bc7_mode0, decode_bc7_mode1, decode_bc7_mode2, decode_bc7_mode3, decode_bc7_mode7,
+    encode_bc1, encode_bc3, encode_bc6h_mode11_unsigned, encode_bc7_mode4, encode_bc7_mode5,
+    encode_bc7_mode6,
 };
 use prism_render_material_gpu::BlockOracle;
 use wgpu::{Features, TextureFormat};
@@ -1929,4 +1930,266 @@ fn astc_single_plane_weights_parity_against_gpu_hardware_decode() {
         }
     }
     eprintln!("ASTC single-plane weight parity: {COUNT} blocks within 1 LSB of hardware");
+}
+
+// ---------------------------------------------------------------------------
+// ASTC single-plane 4x4 TRIT/QUINT weight-grid parity.
+//
+// Extends the bit-only (QUANT_16) proof above to the trit- and quint-form
+// weight ranges, which unquantize through the astcenc `unscramble_and_unquant_map`
+// tables rather than by bit replication. We synthesise single-partition CEM8
+// (direct LDR RGB) blocks with black (e0) / white (e1) 8-bit (QUANT_256)
+// endpoints so each unquantized weight 0..=64 renders as a pure gray level,
+// then compare `decode_astc_4x4_weights_ise` against the Metal hardware
+// decoder.
+//
+// Block modes (wx=wy=4, single plane, D=0). The endpoint quant is derived as
+// `color_bits = 111 - weight_bits`, which clamps to QUANT_256 (8-bit, identity
+// unquant) for both modes:
+//   * QUANT_6  trit  (bits=1): block mode 67,  weight_bits = 42
+//   * QUANT_10 quint (bits=1): block mode 577, weight_bits = 54
+// ---------------------------------------------------------------------------
+
+/// astcenc `INTEGER_OF_TRITS` packing table (inverse of the decoder table),
+/// transcribed from `prism_render_material`'s own verified round-trip fixtures.
+/// Used here only to *synthesise* valid trit weight ISE streams.
+#[rustfmt::skip]
+const INTEGER_OF_TRITS: [u8; 243] = [
+    0, 1, 2, 4, 5, 6, 8, 9, 10, 16, 17, 18,
+    20, 21, 22, 24, 25, 26, 3, 7, 15, 19, 23, 27,
+    12, 13, 14, 32, 33, 34, 36, 37, 38, 40, 41, 42,
+    48, 49, 50, 52, 53, 54, 56, 57, 58, 35, 39, 47,
+    51, 55, 59, 44, 45, 46, 64, 65, 66, 68, 69, 70,
+    72, 73, 74, 80, 81, 82, 84, 85, 86, 88, 89, 90,
+    67, 71, 79, 83, 87, 91, 76, 77, 78, 128, 129, 130,
+    132, 133, 134, 136, 137, 138, 144, 145, 146, 148, 149, 150,
+    152, 153, 154, 131, 135, 143, 147, 151, 155, 140, 141, 142,
+    160, 161, 162, 164, 165, 166, 168, 169, 170, 176, 177, 178,
+    180, 181, 182, 184, 185, 186, 163, 167, 175, 179, 183, 187,
+    172, 173, 174, 192, 193, 194, 196, 197, 198, 200, 201, 202,
+    208, 209, 210, 212, 213, 214, 216, 217, 218, 195, 199, 207,
+    211, 215, 219, 204, 205, 206, 96, 97, 98, 100, 101, 102,
+    104, 105, 106, 112, 113, 114, 116, 117, 118, 120, 121, 122,
+    99, 103, 111, 115, 119, 123, 108, 109, 110, 224, 225, 226,
+    228, 229, 230, 232, 233, 234, 240, 241, 242, 244, 245, 246,
+    248, 249, 250, 227, 231, 239, 243, 247, 251, 236, 237, 238,
+    28, 29, 30, 60, 61, 62, 92, 93, 94, 156, 157, 158,
+    188, 189, 190, 220, 221, 222, 31, 63, 127, 159, 191, 255,
+    252, 253, 254,
+];
+
+/// astcenc `INTEGER_OF_QUINTS` packing table (inverse of the decoder table).
+#[rustfmt::skip]
+const INTEGER_OF_QUINTS: [u8; 125] = [
+    0, 1, 2, 3, 4, 8, 9, 10, 11, 12, 16, 17,
+    18, 19, 20, 24, 25, 26, 27, 28, 5, 13, 21, 29,
+    6, 32, 33, 34, 35, 36, 40, 41, 42, 43, 44, 48,
+    49, 50, 51, 52, 56, 57, 58, 59, 60, 37, 45, 53,
+    61, 14, 64, 65, 66, 67, 68, 72, 73, 74, 75, 76,
+    80, 81, 82, 83, 84, 88, 89, 90, 91, 92, 69, 77,
+    85, 93, 22, 96, 97, 98, 99, 100, 104, 105, 106, 107,
+    108, 112, 113, 114, 115, 116, 120, 121, 122, 123, 124, 101,
+    109, 117, 125, 30, 102, 103, 70, 71, 38, 110, 111, 78,
+    79, 46, 118, 119, 86, 87, 54, 126, 127, 94, 95, 62,
+    39, 47, 55, 63, 31,
+];
+
+fn enc_trit(t: [u8; 5]) -> u8 {
+    INTEGER_OF_TRITS[((((t[4] as usize * 3 + t[3] as usize) * 3 + t[2] as usize) * 3
+        + t[1] as usize)
+        * 3)
+        + t[0] as usize]
+}
+
+fn enc_quint(q: [u8; 3]) -> u8 {
+    INTEGER_OF_QUINTS[(q[2] as usize * 5 + q[1] as usize) * 5 + q[0] as usize]
+}
+
+/// astcenc-order trit ISE encoder (mirror of the decoder's bit-collection
+/// order). `vals` are raw BISE values `low | (trit << bits)`.
+fn astc_encode_trit(block: &mut [u8; 16], start: u32, bits: u32, vals: &[u8]) {
+    let mask = if bits == 0 { 0 } else { (1u32 << bits) - 1 };
+    let count = vals.len();
+    let mut off = start;
+    let mut i = 0usize;
+    let full = count / 5;
+    for _ in 0..full {
+        let t = enc_trit([
+            vals[i] >> bits,
+            vals[i + 1] >> bits,
+            vals[i + 2] >> bits,
+            vals[i + 3] >> bits,
+            vals[i + 4] >> bits,
+        ]) as u32;
+        let shifts = [0u32, 2, 4, 5, 7];
+        let tb = [2u32, 2, 1, 2, 1];
+        for e in 0..5 {
+            let pack =
+                ((vals[i] as u32) & mask) | (((t >> shifts[e]) & ((1 << tb[e]) - 1)) << bits);
+            astc_set_bits(block, off, bits + tb[e], pack);
+            off += bits + tb[e];
+            i += 1;
+        }
+    }
+    if i != count {
+        let g = |k: usize| {
+            if i + k >= count {
+                0
+            } else {
+                vals[i + k] >> bits
+            }
+        };
+        let t = enc_trit([g(0), g(1), g(2), g(3), 0]) as u32;
+        let tbits = [2u32, 2, 1, 2];
+        let tshift = [0u32, 2, 4, 5];
+        let mut j = 0usize;
+        while i < count {
+            let pack =
+                ((vals[i] as u32) & mask) | (((t >> tshift[j]) & ((1 << tbits[j]) - 1)) << bits);
+            astc_set_bits(block, off, bits + tbits[j], pack);
+            off += bits + tbits[j];
+            i += 1;
+            j += 1;
+        }
+    }
+}
+
+/// astcenc-order quint ISE encoder (mirror of the decoder's bit-collection
+/// order). `vals` are raw BISE values `low | (quint << bits)`.
+fn astc_encode_quint(block: &mut [u8; 16], start: u32, bits: u32, vals: &[u8]) {
+    let mask = if bits == 0 { 0 } else { (1u32 << bits) - 1 };
+    let count = vals.len();
+    let mut off = start;
+    let mut i = 0usize;
+    let full = count / 3;
+    for _ in 0..full {
+        let t = enc_quint([vals[i] >> bits, vals[i + 1] >> bits, vals[i + 2] >> bits]) as u32;
+        let shifts = [0u32, 3, 5];
+        let tb = [3u32, 2, 2];
+        for e in 0..3 {
+            let pack =
+                ((vals[i] as u32) & mask) | (((t >> shifts[e]) & ((1 << tb[e]) - 1)) << bits);
+            astc_set_bits(block, off, bits + tb[e], pack);
+            off += bits + tb[e];
+            i += 1;
+        }
+    }
+    if i != count {
+        let g = |k: usize| {
+            if i + k >= count {
+                0
+            } else {
+                vals[i + k] >> bits
+            }
+        };
+        let t = enc_quint([g(0), g(1), 0]) as u32;
+        let tbits = [3u32, 2];
+        let tshift = [0u32, 3];
+        let mut j = 0usize;
+        while i < count {
+            let pack =
+                ((vals[i] as u32) & mask) | (((t >> tshift[j]) & ((1 << tbits[j]) - 1)) << bits);
+            astc_set_bits(block, off, bits + tbits[j], pack);
+            off += bits + tbits[j];
+            i += 1;
+            j += 1;
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum WeightForm {
+    Trit,
+    Quint,
+}
+
+/// Lay sixteen raw weight values into the bit-reversed weight region (the top
+/// `weight_bits` bits) by encoding them LSB-first into a scratch "reversed"
+/// block, then mirroring that block end-for-end into `blk` (logical stream bit
+/// `p` -> real block bit `127 - p`). This is the exact inverse of the mirror +
+/// `decode_ise` read in `decode_astc_4x4_weights_ise`.
+fn astc_set_weights_ise(blk: &mut [u8; 16], form: WeightForm, bits: u32, weights: &[u8; 16]) {
+    let mut tmp = [0u8; 16];
+    match form {
+        WeightForm::Trit => astc_encode_trit(&mut tmp, 0, bits, weights),
+        WeightForm::Quint => astc_encode_quint(&mut tmp, 0, bits, weights),
+    }
+    for p in 0..128u32 {
+        if (tmp[(p >> 3) as usize] >> (p & 7)) & 1 == 1 {
+            let real = 127 - p;
+            blk[(real >> 3) as usize] |= 1 << (real & 7);
+        }
+    }
+}
+
+/// Build a single-partition CEM8 block of block mode `bm` with black (e0) and
+/// white (e1) 8-bit (QUANT_256) endpoints. The six 8-bit endpoint values sit
+/// at bits [17..65): v0=v2=v4=0 (e0 black) and v1=v3=v5=255 (e1 white). Since
+/// sum(e0)=0 < sum(e1)=765 there is no blue-contraction swap.
+fn astc_bw_quant256(bm: u32) -> [u8; 16] {
+    let mut b = [0u8; 16];
+    astc_set_bits(&mut b, 0, 11, bm);
+    astc_set_bits(&mut b, 13, 4, 8);
+    for off in [25u32, 41, 57] {
+        astc_set_bits(&mut b, off, 8, 255);
+    }
+    b
+}
+
+/// Modes exercised by the trit/quint weight parity test: `(block_mode, form,
+/// low_bits, level_count)`.
+const TRIT_QUINT_MODES: [(u32, WeightForm, u32, u32); 2] = [
+    (67, WeightForm::Trit, 1, 6),
+    (577, WeightForm::Quint, 1, 10),
+];
+
+#[test]
+fn astc_trit_quint_weights_parity_against_gpu_hardware_decode() {
+    let Some(oracle) = BlockOracle::try_new() else {
+        eprintln!("no GPU adapter; skipping ASTC trit/quint weight parity");
+        return;
+    };
+    if !oracle
+        .features()
+        .contains(Features::TEXTURE_COMPRESSION_ASTC)
+    {
+        eprintln!("adapter lacks ASTC support; skipping ASTC trit/quint weight parity");
+        return;
+    }
+    let format = TextureFormat::Astc {
+        block: wgpu::AstcBlock::B4x4,
+        channel: wgpu::AstcChannel::Unorm,
+    };
+    let mut rng = Rng(0x7217_0a1c);
+    const PER_MODE: u32 = 128;
+    for (bm, form, bits, levels) in TRIT_QUINT_MODES {
+        for _ in 0..PER_MODE {
+            let mut blk = astc_bw_quant256(bm);
+            let mut raw = [0u8; 16];
+            for r in raw.iter_mut() {
+                *r = (rng.next_u32() % levels) as u8;
+            }
+            astc_set_weights_ise(&mut blk, form, bits, &raw);
+            let unquant =
+                decode_astc_4x4_weights_ise(&blk, levels).expect("level count is a valid range");
+            let gpu = oracle.decode_unorm8(format, &blk);
+            for t in 0..16 {
+                let expected = astc_gray_from_weight(unquant[t]);
+                for c in 0..3 {
+                    let d = (expected as i32 - gpu[t][c] as i32).abs();
+                    assert!(
+                        d <= 1,
+                        "ASTC trit/quint weight bm={bm} block={blk:02x?} texel {t} chan {c}: raw={} unquant={} cpu_gray={expected} gpu={} (|d|={d})",
+                        raw[t],
+                        unquant[t],
+                        gpu[t][c]
+                    );
+                }
+            }
+        }
+    }
+    eprintln!(
+        "ASTC trit/quint weight parity: {} blocks within 1 LSB of hardware",
+        PER_MODE * 2
+    );
 }
