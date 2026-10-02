@@ -18,17 +18,40 @@
 //!    functions) so the `CPU` reference and a future `GPU` kernel agree exactly.
 //! 3. **Resolution** ([`resolution`]) — integer render-dimension derivation and
 //!    the render <-> display pixel / clip-space mapping.
+//! 4. **Color** ([`color`]) — the Rec. 709 luma, the reversible `YCoCg`
+//!    transform, and the exactly-invertible Karis tone-map pair that bound the
+//!    domain history and current color are blended in.
+//! 5. **Neighborhood** ([`neighborhood`]) — the current-frame window statistics
+//!    and the variance clip box, with the line-vs-box "clip toward center"
+//!    primitive that pulls stale history back toward plausible colors.
+//! 6. **Reprojection** ([`reproject`]) — the current-to-previous motion-vector
+//!    reprojection, the Catmull-Rom bicubic history fetch, and the relative
+//!    depth disocclusion test.
+//! 7. **Reconstruction** ([`reconstruct`]) — the per-pixel temporal
+//!    accumulation resolve that composes the above into the final color and the
+//!    updated history confidence.
 //!
-//! The `GPU` reconstruction kernel and its `WESL` shader codegen are out of
-//! scope for this contract layer and are pending the `GPU` backend; the types
-//! here fix the exact numeric behavior those kernels must reproduce.
+//! The `GPU` reconstruction kernel and its `WESL` shader codegen are the
+//! bit-exact twin of [`reconstruct::resolve`] and are pending the `GPU`
+//! backend; the `CPU` resolve here fixes the exact numeric behavior that kernel
+//! must reproduce.
 
 use crate::history::InvalidationMask;
 
+pub mod color;
 pub mod jitter;
+pub mod neighborhood;
+pub mod reconstruct;
+pub mod reproject;
 pub mod resolution;
 
+pub use color::{luminance, rgb_to_ycocg, tonemap, tonemap_weight, untonemap, ycocg_to_rgb};
 pub use jitter::{radical_inverse, JitterSequence};
+pub use neighborhood::{clip_to_aabb, NeighborhoodStats};
+pub use reconstruct::{resolve, ResolveOutput, ResolveParams};
+pub use reproject::{
+    catmull_rom_weights, depth_disoccluded, on_screen, reproject_pixel, sample_catmull_rom,
+};
 pub use resolution::UpscaleResolution;
 
 /// Minimum render scale the contract will clamp to.
