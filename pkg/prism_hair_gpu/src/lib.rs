@@ -571,6 +571,16 @@
 //!   (sanitised, non-negative) rest length, a degenerate edge splitting along
 //!   `+x`. A pure per-edge map matched within the fma tolerance for the
 //!   `rest / length` divide (see [`projective_edge`]).
+//! * [`GpuHairGlobalMatvec`] evaluates
+//!   [`GlobalSystem::mul`](prism_render_architecture::hair::projective_global::GlobalSystem::mul),
+//!   the Projective-Dynamics *global* step's dense matrix-vector product
+//!   `out[i] = sum_j A[i*n+j] * x[j]` on the constant `SPD` system matrix:
+//!   one thread per row sweeps all `n` columns and accumulates the three
+//!   coordinate components in the golden's fixed order, the host zero-padding a
+//!   short `x` to `n` particles. The complementary *global* half of the
+//!   local/global split that [`GpuProjectiveEdge`] covers locally, and the hot
+//!   per-iteration primitive of the on-device conjugate-gradient solve, matched
+//!   within the fma tolerance (see [`global_matvec`]).
 //! * [`GpuHairScatterBlend`] evaluates
 //!   [`scatter_blend`](prism_render_architecture::hair::scatter_lod::scatter_blend),
 //!   the `d'Eon` 2011 near-/far-field scatter crossfade: one thread per
@@ -733,6 +743,7 @@ pub mod forward_scatter_accumulate;
 pub mod forward_scatter_power;
 pub mod forward_scatter_sample;
 pub mod frames;
+pub mod global_matvec;
 pub mod guide_solver;
 pub mod hero_wavelengths;
 pub mod importance;
@@ -828,6 +839,7 @@ pub use forward_scatter_power::{
 };
 pub use forward_scatter_sample::{GpuHairForwardScatterSample, ScatterQuery};
 pub use frames::{GpuStrandFrame, GpuStrandFrames};
+pub use global_matvec::{reference_global_matvec, GpuHairGlobalMatvec};
 pub use guide_solver::GpuGuideSolver;
 pub use hero_wavelengths::GpuHairHeroWavelengths;
 pub use importance::GpuHairImportance;

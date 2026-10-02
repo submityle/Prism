@@ -457,6 +457,17 @@ impl GlobalSystem {
         self.n
     }
 
+    /// The assembled (un-factored) `SPD` matrix `A`, row-major `n * n`.
+    ///
+    /// Exposed so a `GPU` twin can upload the identical system [`Self::mul`]
+    /// multiplies against: the production projective-dynamics solve streams this
+    /// matrix to the device whenever the constraint graph changes, then runs the
+    /// dense matrix-vector product on-device every conjugate-gradient iteration.
+    #[must_use]
+    pub fn matrix(&self) -> &[f32] {
+        &self.a
+    }
+
     /// Solves `A x = rhs` with the stored `Cholesky` factor.
     ///
     /// `rhs` is a per-particle vector; the scalar factor is applied to each of
