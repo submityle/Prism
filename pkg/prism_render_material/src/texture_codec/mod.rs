@@ -53,12 +53,16 @@ mod snorm_block;
 mod source;
 
 pub use bc6h::{
-    bc6h_mode_bits, decode_bc6h_mode11_signed, decode_bc6h_mode11_unsigned,
-    decode_bc6h_mode12_signed, decode_bc6h_mode12_unsigned, decode_bc6h_mode13_signed,
-    decode_bc6h_mode13_unsigned, decode_bc6h_mode14_signed, decode_bc6h_mode14_unsigned,
-    decode_bc6h_mode1_signed, decode_bc6h_mode1_unsigned, decode_bc6h_mode2_signed,
-    decode_bc6h_mode2_unsigned, decode_bc6h_mode3_signed, decode_bc6h_mode3_unsigned,
-    decode_bc6h_mode4_signed, decode_bc6h_mode4_unsigned, decode_bc6h_signed, decode_bc6h_unsigned,
+    bc6h_mode_bits, decode_bc6h_mode10_signed, decode_bc6h_mode10_unsigned,
+    decode_bc6h_mode11_signed, decode_bc6h_mode11_unsigned, decode_bc6h_mode12_signed,
+    decode_bc6h_mode12_unsigned, decode_bc6h_mode13_signed, decode_bc6h_mode13_unsigned,
+    decode_bc6h_mode14_signed, decode_bc6h_mode14_unsigned, decode_bc6h_mode1_signed,
+    decode_bc6h_mode1_unsigned, decode_bc6h_mode2_signed, decode_bc6h_mode2_unsigned,
+    decode_bc6h_mode3_signed, decode_bc6h_mode3_unsigned, decode_bc6h_mode4_signed,
+    decode_bc6h_mode4_unsigned, decode_bc6h_mode5_signed, decode_bc6h_mode5_unsigned,
+    decode_bc6h_mode6_signed, decode_bc6h_mode6_unsigned, decode_bc6h_mode7_signed,
+    decode_bc6h_mode7_unsigned, decode_bc6h_mode8_signed, decode_bc6h_mode8_unsigned,
+    decode_bc6h_mode9_signed, decode_bc6h_mode9_unsigned, decode_bc6h_signed, decode_bc6h_unsigned,
     half_bits_to_f32, Bc6hError,
 };
 pub use bc7::{
