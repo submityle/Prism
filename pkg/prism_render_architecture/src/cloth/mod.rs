@@ -52,6 +52,7 @@ pub mod panel;
 pub mod pipeline;
 pub mod polygon_garment;
 pub mod polygon_panel;
+pub(crate) mod physics_bridge;
 pub mod pressure;
 pub mod self_ccd;
 pub mod sleep;

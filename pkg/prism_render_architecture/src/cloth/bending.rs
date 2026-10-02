@@ -26,7 +26,7 @@
 
 use alloc::vec::Vec;
 
-use super::{ClothParticle, Compliance, Vec3, EPS_LEN_SQ};
+use super::{physics_bridge, ClothParticle, Compliance, Vec3};
 
 /// One four-vertex bending hinge across an interior edge.
 ///
@@ -71,75 +71,6 @@ impl BendingConstraint {
     }
 }
 
-/// Cotangent of the angle between `a` and `b`, `cot θ = (a·b) / |a×b|`.
-///
-/// Returns `0` for a degenerate (collinear or zero-length) pair so a sliver
-/// triangle can never produce a non-finite weight.
-fn cot_angle(a: Vec3, b: Vec3) -> f32 {
-    let cross_len_sq = a.cross(b).length_squared();
-    if cross_len_sq <= EPS_LEN_SQ {
-        return 0.0;
-    }
-    a.dot(b) / cross_len_sq.sqrt()
-}
-
-/// Builds the isometric-bending stencil for one interior edge from rest
-/// positions, or `None` when the hinge is degenerate (zero total area).
-///
-/// `edge0`/`edge1` are the shared-edge endpoints; `apex_a`/`apex_b` are the
-/// opposite vertices of the two triangles. The returned constraint stores the
-/// cotangent weights and area scale evaluated at this rest pose.
-fn build_hinge(
-    positions: &[Vec3],
-    edge0: u32,
-    edge1: u32,
-    apex_a: u32,
-    apex_b: u32,
-    compliance: Compliance,
-) -> Option<BendingConstraint> {
-    let x0 = *positions.get(edge0 as usize)?;
-    let x1 = *positions.get(edge1 as usize)?;
-    let x2 = *positions.get(apex_a as usize)?;
-    let x3 = *positions.get(apex_b as usize)?;
-
-    let e0 = x1.sub(x0);
-    let e1 = x2.sub(x0);
-    let e2 = x3.sub(x0);
-    let e3 = x2.sub(x1);
-    let e4 = x3.sub(x1);
-    let neg_e0 = Vec3::ZERO.sub(e0);
-
-    let c01 = cot_angle(e0, e1);
-    let c02 = cot_angle(e0, e2);
-    let c03 = cot_angle(neg_e0, e3);
-    let c04 = cot_angle(neg_e0, e4);
-
-    let area_a = 0.5 * e0.cross(e1).length();
-    let area_b = 0.5 * e0.cross(e2).length();
-    let area = area_a + area_b;
-    if area <= EPS_LEN_SQ.sqrt() {
-        return None;
-    }
-
-    let weights = [c03 + c04, c01 + c02, -c01 - c03, -c02 - c04];
-    let scale = 3.0 / area;
-    Some(BendingConstraint {
-        vertices: [edge0, edge1, apex_a, apex_b],
-        weights,
-        scale,
-        compliance,
-    })
-}
-
-/// Normalizes an unordered edge into a `(min, max)` key for adjacency lookup.
-fn edge_key(a: u32, b: u32) -> (u32, u32) {
-    if a <= b {
-        (a, b)
-    } else {
-        (b, a)
-    }
-}
-
 /// Builds one isometric bending hinge per interior edge of a triangle mesh.
 ///
 /// `positions` are the rest-pose particle positions; `triangles` are index
@@ -149,98 +80,59 @@ fn edge_key(a: u32, b: u32) -> (u32, u32) {
 /// authored mesh degrades gracefully instead of panicking. Degenerate hinges
 /// (zero area) are dropped. The output order is deterministic: hinges are
 /// emitted in ascending `(min, max)` edge order.
+///
+/// This delegates to the authoritative isometric-bending builder in
+/// [`prism_physics_core`]; the render crate only adapts the particle layout so
+/// a single implementation of the stencil math is maintained engine-wide.
 #[must_use]
 pub fn build_dihedral_bending(
     positions: &[Vec3],
     triangles: &[[u32; 3]],
     compliance: Compliance,
 ) -> Vec<BendingConstraint> {
-    use alloc::collections::BTreeMap;
-
-    // Map each undirected edge to the apex vertices of its incident triangles.
-    let mut edges: BTreeMap<(u32, u32), Vec<u32>> = BTreeMap::new();
-    for tri in triangles {
-        let [a, b, c] = *tri;
-        // Skip degenerate triangles with a repeated vertex.
-        if a == b || b == c || a == c {
-            continue;
-        }
-        edges.entry(edge_key(a, b)).or_default().push(c);
-        edges.entry(edge_key(b, c)).or_default().push(a);
-        edges.entry(edge_key(a, c)).or_default().push(b);
-    }
-
-    let mut constraints = Vec::new();
-    for ((edge0, edge1), apexes) in &edges {
-        if apexes.len() != 2 {
-            continue;
-        }
-        if let Some(hinge) =
-            build_hinge(positions, *edge0, *edge1, apexes[0], apexes[1], compliance)
-        {
-            constraints.push(hinge);
-        }
-    }
-    constraints
+    let glam_positions: Vec<glam::Vec3> =
+        positions.iter().map(|p| physics_bridge::to_glam(*p)).collect();
+    prism_physics_core::soft::constraint::build_dihedral_bending(
+        &glam_positions,
+        triangles,
+        compliance.value(),
+    )
+    .into_iter()
+    .map(|hinge| BendingConstraint {
+        vertices: hinge.vertices,
+        weights: hinge.weights,
+        scale: hinge.scale,
+        compliance,
+    })
+    .collect()
 }
 
 /// Projects one bending constraint in place with a single stateless XPBD step.
 ///
-/// Mirrors the distance projection in [`super::dynamics`]: the constraint value
-/// is the bending energy `C = ½ · scale · |S|²`, its per-vertex gradient is
-/// `scale · wᵢ · S`, and the mass-weighted XPBD correction
-/// `Δxᵢ = wᵢ⁻¹ · Δλ · gradᵢ` pulls the stencil back toward flat. Pinned
-/// particles (`inverse_mass ≤ 0`) never move, and a flat or degenerate stencil
-/// is a no-op. Returns the energy that was corrected (before the step) so a
-/// caller can monitor convergence.
+/// Pinned particles (`inverse_mass <= 0`) never move, and a flat or degenerate
+/// stencil is a no-op. Returns the energy that was corrected (before the step)
+/// so a caller can monitor convergence.
+///
+/// The projection math lives once in
+/// [`prism_physics_core::soft::constraint::project_isometric_bending`]; this
+/// wrapper converts the render particle slice to structure-of-arrays, projects,
+/// and writes the solved positions back.
 pub fn project_bending(
     particles: &mut [ClothParticle],
     constraint: BendingConstraint,
     dt_sub: f32,
 ) -> f32 {
-    if dt_sub <= 0.0 {
-        return 0.0;
-    }
-    let s = constraint.bend_vector(particles);
-    let s_len_sq = s.length_squared();
-    if s_len_sq <= EPS_LEN_SQ {
-        return 0.0;
-    }
-    let energy = 0.5 * constraint.scale * s_len_sq;
-
-    // Accumulate the denominator Σ wmassᵢ · |gradᵢ|² where gradᵢ = scale·wᵢ·S.
-    let mut sum_w_grad = 0.0;
-    for (idx, weight) in constraint.vertices.iter().zip(constraint.weights.iter()) {
-        let Some(particle) = particles.get(*idx as usize) else {
-            continue;
-        };
-        let inv_mass = effective_inverse_mass(*particle);
-        if inv_mass <= 0.0 {
-            continue;
-        }
-        let grad_scalar = constraint.scale * *weight;
-        sum_w_grad += inv_mass * grad_scalar * grad_scalar * s_len_sq;
-    }
-    let alpha_tilde = constraint.compliance.value() / (dt_sub * dt_sub);
-    let denom = sum_w_grad + alpha_tilde;
-    if denom <= 0.0 {
-        return energy;
-    }
-    let d_lambda = -energy / denom;
-
-    for (idx, weight) in constraint.vertices.iter().zip(constraint.weights.iter()) {
-        let index = *idx as usize;
-        let Some(particle) = particles.get(index) else {
-            continue;
-        };
-        let inv_mass = effective_inverse_mass(*particle);
-        if inv_mass <= 0.0 {
-            continue;
-        }
-        // gradᵢ = scale·wᵢ·S ; Δxᵢ = wmassᵢ·Δλ·gradᵢ.
-        let correction = s.scale(inv_mass * d_lambda * constraint.scale * *weight);
-        particles[index].position = particles[index].position.add(correction);
-    }
+    let (mut positions, inverse_masses) = physics_bridge::to_soa(particles);
+    let energy = prism_physics_core::soft::constraint::project_isometric_bending(
+        &mut positions,
+        &inverse_masses,
+        constraint.vertices,
+        constraint.weights,
+        constraint.scale,
+        constraint.compliance.value(),
+        dt_sub,
+    );
+    physics_bridge::write_positions_back(particles, &positions);
     energy
 }
 
@@ -249,33 +141,36 @@ pub fn project_bending(
 ///
 /// This is the batch entry point the pipeline calls per substep after the
 /// stretch/shear projection. `iterations` is clamped to at least one; the sweep
-/// order follows the constraint slice, so the result is deterministic.
+/// order follows the constraint slice, so the result is deterministic. The
+/// sweep schedule and projection both live in the physics engine; the render
+/// crate only adapts the particle layout.
 pub fn apply_bending(
     particles: &mut [ClothParticle],
     constraints: &[BendingConstraint],
     iterations: u32,
     dt_sub: f32,
 ) -> f32 {
-    let iterations = iterations.max(1);
-    let mut first_energy = 0.0;
-    for iteration in 0..iterations {
-        for constraint in constraints {
-            let energy = project_bending(particles, *constraint, dt_sub);
-            if iteration == 0 {
-                first_energy += energy;
-            }
-        }
-    }
+    let (mut positions, inverse_masses) = physics_bridge::to_soa(particles);
+    let hinges: Vec<prism_physics_core::soft::constraint::IsometricBendingConstraint> = constraints
+        .iter()
+        .map(
+            |c| prism_physics_core::soft::constraint::IsometricBendingConstraint {
+                vertices: c.vertices,
+                weights: c.weights,
+                scale: c.scale,
+                compliance: c.compliance.value(),
+            },
+        )
+        .collect();
+    let first_energy = prism_physics_core::soft::constraint::apply_isometric_bending(
+        &mut positions,
+        &inverse_masses,
+        &hinges,
+        iterations,
+        dt_sub,
+    );
+    physics_bridge::write_positions_back(particles, &positions);
     first_energy
-}
-
-/// Effective inverse mass of a particle: zero when pinned.
-fn effective_inverse_mass(particle: ClothParticle) -> f32 {
-    if particle.is_pinned() {
-        0.0
-    } else {
-        particle.inverse_mass
-    }
 }
 
 #[cfg(test)]

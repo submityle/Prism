@@ -6,6 +6,13 @@ description = "Architecture contracts for Prism's cross-platform renderer (wgpu 
 license = "MIT OR Apache-2.0"
 publish = false
 
+[dependencies]
+# The physics engine owns the authoritative cloth-physics algorithms; the
+# render architecture delegates to it so there is a single implementation
+# (no render/physics double-implementation of the same solver math).
+prism_physics_core = { path = "../prism_physics_core" }
+glam = { version = "0.33.2", default-features = false }
+
 [lints]
 workspace = true
 
