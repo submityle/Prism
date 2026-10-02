@@ -20,6 +20,7 @@
 use super::dielectric::{fresnel_dielectric, refract};
 use super::fresnel_blend::FresnelBlend;
 use super::microfacet::{fresnel_schlick, GgxIsotropic};
+use super::rough_dielectric::RoughDielectric;
 use super::sampler::{cosine_hemisphere_pdf, cosine_sample_hemisphere, Rng};
 use super::{Vec3, EPS_LEN_SQ, INV_PI};
 
@@ -82,6 +83,23 @@ pub enum Bsdf {
         /// Perceptual roughness of the specular coat in `[0, 1]`.
         roughness: f32,
     },
+    /// Rough dielectric interface (frosted glass): the reflect-and-refract
+    /// behaviour of [`Bsdf::Dielectric`] blurred by a GGX microfacet lobe (see
+    /// [`crate::reference_pt::rough_dielectric`]). It is glossy (non-delta), so
+    /// it is sampled and connected to lights like any rough surface, and its
+    /// transmitted lobe carries the generalized half-vector Jacobian and the
+    /// radiance-mode `eta^2` compression.
+    RoughDielectric {
+        /// Relative index of refraction `eta_t / eta_i` of the interior medium
+        /// over the exterior (e.g. `1.5` for air-to-glass).
+        ior: f32,
+        /// Per-channel tint applied to the reflected microfacet lobe.
+        reflectance: Vec3,
+        /// Per-channel tint applied to the transmitted microfacet lobe.
+        transmittance: Vec3,
+        /// Perceptual roughness in `[0, 1]`.
+        roughness: f32,
+    },
 }
 
 /// The outcome of importance-sampling a [`Bsdf`].
@@ -135,6 +153,13 @@ impl Bsdf {
                 specular,
                 roughness,
             } => FresnelBlend::new(*diffuse, *specular, *roughness).evaluate(wo, wi, normal),
+            Self::RoughDielectric {
+                ior,
+                reflectance,
+                transmittance,
+                roughness,
+            } => RoughDielectric::new(*ior, *reflectance, *transmittance, *roughness)
+                .evaluate(wo, wi, normal),
         }
     }
 
@@ -170,6 +195,13 @@ impl Bsdf {
                 specular,
                 roughness,
             } => FresnelBlend::new(*diffuse, *specular, *roughness).pdf(wo, wi, normal),
+            Self::RoughDielectric {
+                ior,
+                reflectance,
+                transmittance,
+                roughness,
+            } => RoughDielectric::new(*ior, *reflectance, *transmittance, *roughness)
+                .pdf(wo, wi, normal),
         }
     }
 
@@ -236,6 +268,19 @@ impl Bsdf {
                 specular,
                 roughness,
             } => FresnelBlend::new(*diffuse, *specular, *roughness)
+                .sample(wo, normal, rng)
+                .map(|s| BsdfSample {
+                    direction: s.direction,
+                    value: s.value,
+                    pdf: s.pdf,
+                    specular: false,
+                }),
+            Self::RoughDielectric {
+                ior,
+                reflectance,
+                transmittance,
+                roughness,
+            } => RoughDielectric::new(*ior, *reflectance, *transmittance, *roughness)
                 .sample(wo, normal, rng)
                 .map(|s| BsdfSample {
                     direction: s.direction,
@@ -821,5 +866,40 @@ mod tests {
         let s = sample.expect("a smooth conductor must yield a valid sample");
         // Near normal incidence the Fresnel tint keeps red brightest, blue dimmest.
         assert!(s.value.x > s.value.y && s.value.y > s.value.z);
+    }
+
+    #[test]
+    fn rough_dielectric_is_glossy_and_scatters_both_ways() {
+        // The rough dielectric dispatches through the enum as a non-delta lobe:
+        // next-event estimation stays enabled and it both reflects and refracts.
+        let bsdf = Bsdf::RoughDielectric {
+            ior: 1.5,
+            reflectance: Vec3::ONE,
+            transmittance: Vec3::ONE,
+            roughness: 0.25,
+        };
+        assert!(!bsdf.is_specular());
+        let mut rng = Rng::seed(2024);
+        let wo = Vec3::new(0.15, 0.98, 0.0).normalize_or_zero();
+        let mut reflected = 0u32;
+        let mut transmitted = 0u32;
+        for _ in 0..5_000 {
+            if let Some(s) = bsdf.sample(wo, N, &mut rng) {
+                if N.dot(s.direction) > 0.0 {
+                    reflected += 1;
+                } else {
+                    transmitted += 1;
+                }
+            }
+        }
+        assert!(
+            reflected > 50 && transmitted > 50,
+            "{reflected}/{transmitted}"
+        );
+        // A glossy lobe exposes a finite, positive density and value for the
+        // reflection half-space (unlike the smooth dielectric, which is zero).
+        let wi = Vec3::new(-0.15, 0.98, 0.0).normalize_or_zero();
+        assert!(bsdf.pdf(wo, wi, N) > 0.0);
+        assert!(bsdf.evaluate(wo, wi, N).max_component() > 0.0);
     }
 }

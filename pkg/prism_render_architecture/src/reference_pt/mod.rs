@@ -60,6 +60,7 @@ pub mod film;
 pub mod fresnel_blend;
 pub mod integrator;
 pub mod microfacet;
+pub mod rough_dielectric;
 pub mod sampler;
 
 /// Mathematical constant pi, reused from `core` so no literal drifts.
