@@ -30,6 +30,9 @@
 //! 7. **Reconstruction** ([`reconstruct`]) — the per-pixel temporal
 //!    accumulation resolve that composes the above into the final color and the
 //!    updated history confidence.
+//! 8. **Sharpening** ([`sharpen`]) — the `RCAS` contrast-adaptive sharpening
+//!    pass that restores the high-frequency detail the reconstruction filter
+//!    unavoidably softens.
 //!
 //! The `GPU` reconstruction kernel and its `WESL` shader codegen are the
 //! bit-exact twin of [`reconstruct::resolve`] and are pending the `GPU`
@@ -44,6 +47,7 @@ pub mod neighborhood;
 pub mod reconstruct;
 pub mod reproject;
 pub mod resolution;
+pub mod sharpen;
 
 pub use color::{luminance, rgb_to_ycocg, tonemap, tonemap_weight, untonemap, ycocg_to_rgb};
 pub use jitter::{radical_inverse, JitterSequence};
@@ -53,6 +57,7 @@ pub use reproject::{
     catmull_rom_weights, depth_disoccluded, on_screen, reproject_pixel, sample_catmull_rom,
 };
 pub use resolution::UpscaleResolution;
+pub use sharpen::{rcas, CrossTaps, RCAS_LIMIT};
 
 /// Minimum render scale the contract will clamp to.
 ///
