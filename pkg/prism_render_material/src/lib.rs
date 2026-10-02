@@ -85,8 +85,9 @@ pub use texture_codec::{
     BcFormat, BcSourceError, BcTexelSource, Etc2Error, Etc2Mode,
 };
 pub use texture_color::{
-    hsl_to_rgb, hsv_to_rgb, rgb_to_hsl, rgb_to_hsv, rgb_to_ycbcr, rgb_to_ycocg, rgb_to_ycocg_r,
-    ycbcr_to_rgb, ycocg_r_to_rgb, ycocg_to_rgb, YCbCrMatrix,
+    downsample as chroma_downsample, hsl_to_rgb, hsv_to_rgb, rgb_to_hsl, rgb_to_hsv, rgb_to_ycbcr,
+    rgb_to_ycocg, rgb_to_ycocg_r, upsample as chroma_upsample, ycbcr_to_rgb, ycocg_r_to_rgb,
+    ycocg_to_rgb, ChromaPlane, ChromaSubsampling, YCbCrMatrix,
 };
 pub use texture_ewa::{ewa_sample_plane, ewa_sample_rgba8};
 pub use texture_filter::{
