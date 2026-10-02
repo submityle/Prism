@@ -90,6 +90,80 @@ const SEMANTIC_METALLIC_ROUGHNESS: u32 = 2u;
 // geometric normal.
 const SEMANTIC_NORMAL: u32 = 3u;
 
+// --- Geometric specular anti-aliasing (Tokuyoshi-Kaplanyan 2019) ---
+//
+// Mirrors the CPU golden
+// `prism_render_shading::gi::specular_aa::normal_variance::`
+// `geometric_specular_aa_roughness` bit-for-bit. A curved or bumpy surface packs
+// many micro-orientations into one shaded pixel, so a tight GGX lobe flickers
+// between frames under motion. We estimate the *screen-space normal variance*
+// from the geometric view-normal's finite differences and widen the lobe just
+// enough to cover it (additive-variance rule with the Tokuyoshi kappa cap).
+//
+// The derivatives are taken on the *geometric* `view_normal_in` only, so this
+// captures curvature/silhouette aliasing. High-frequency normal-*map* aliasing
+// lives in the Toksvig domain and is deliberately NOT folded here; do not
+// over-claim it covers texture-detail aliasing.
+const SPEC_AA_MIN_ALPHA: f32 = 1.0e-3;
+const SPEC_AA_SIGMA2: f32 = 0.15915494;
+const SPEC_AA_KAPPA_MAX: f32 = 0.18;
+
+// Perceptual roughness -> GGX alpha = clamp(r,0,1)^2, floored at MIN_ALPHA,
+// matching `roughness_to_alpha` in `gi::spec_gi::ggx_lobe`.
+fn spec_aa_roughness_to_alpha(roughness: f32) -> f32 {
+    let r = clamp(roughness, 0.0, 1.0);
+    return max(r * r, SPEC_AA_MIN_ALPHA);
+}
+
+// WGSL has no isFinite; `x - x == 0.0` is true only for finite x (NaN and inf
+// both yield NaN here), matching the golden's `Vec3::is_finite` sanitisation.
+fn spec_aa_is_finite(x: f32) -> bool {
+    return (x - x) == 0.0;
+}
+
+// Squared length of a normal-derivative vector; any non-finite component makes
+// the whole vector contribute zero variance (golden `safe_sq_len`).
+fn spec_aa_safe_sq_len(v: vec3<f32>) -> f32 {
+    let finite = spec_aa_is_finite(v.x) && spec_aa_is_finite(v.y) && spec_aa_is_finite(v.z);
+    if (!finite) {
+        return 0.0;
+    }
+    return max(dot(v, v), 0.0);
+}
+
+// Central differences of the geometric view-normal, coords clamped into the
+// framebuffer so edge texels reuse the border sample.
+fn spec_aa_normal_derivatives(coord: vec2<i32>) -> array<vec3<f32>, 2> {
+    let max_x = i32(params.width) - 1;
+    let max_y = i32(params.height) - 1;
+    let xl = clamp(coord.x - 1, 0, max_x);
+    let xr = clamp(coord.x + 1, 0, max_x);
+    let yu = clamp(coord.y - 1, 0, max_y);
+    let yd = clamp(coord.y + 1, 0, max_y);
+    let nxl = textureLoad(view_normal_in, vec2<i32>(xl, coord.y), 0).xyz;
+    let nxr = textureLoad(view_normal_in, vec2<i32>(xr, coord.y), 0).xyz;
+    let nyu = textureLoad(view_normal_in, vec2<i32>(coord.x, yu), 0).xyz;
+    let nyd = textureLoad(view_normal_in, vec2<i32>(coord.x, yd), 0).xyz;
+    return array<vec3<f32>, 2>(nxr - nxl, nyd - nyu);
+}
+
+// Full filter mirroring `geometric_specular_aa_roughness`:
+//   alpha        = roughness_to_alpha(r)            (= r^2, floored MIN_ALPHA)
+//   variance     = SIGMA2 * (|ddx|^2 + |ddy|^2)
+//   kernel       = min(2 * variance, KAPPA_MAX)
+//   eff_alpha_sq = clamp(alpha^2 + kernel, MIN_ALPHA^2, 1)
+//   roughness'   = (eff_alpha_sq)^(1/4)             (alpha = r^2, so ^(1/4))
+// The injected variance is non-negative, so the output never sharpens the lobe.
+fn spec_aa_filter_roughness(base_roughness: f32, ddx: vec3<f32>, ddy: vec3<f32>) -> f32 {
+    let alpha = spec_aa_roughness_to_alpha(base_roughness);
+    let base_alpha_sq = alpha * alpha;
+    let variance = SPEC_AA_SIGMA2 * (spec_aa_safe_sq_len(ddx) + spec_aa_safe_sq_len(ddy));
+    let kernel = min(2.0 * variance, SPEC_AA_KAPPA_MAX);
+    let floor = SPEC_AA_MIN_ALPHA * SPEC_AA_MIN_ALPHA;
+    let eff = clamp(base_alpha_sq + kernel, floor, 1.0);
+    return clamp(sqrt(sqrt(eff)), 0.0, 1.0);
+}
+
 // Immediate (push-constant) block. Mirrors `GpuSsrRepackParams` in
 // `shading/ssr/abi.rs` (80 bytes: the `view_from_world` matrix, the framebuffer
 // extent, plus two padding scalars to satisfy the 16-byte immediate alignment).
@@ -356,6 +430,13 @@ fn ssr_repack(@builtin(global_invocation_id) id: vec3<u32>) {
         view_normal = normalize(view_dir);
     }
 
+    // Geometric specular AA: widen the packed roughness by the screen-space
+    // variance of the geometric view-normal so curvature/silhouette aliasing
+    // stops the SSR specular lobe from flickering. Uses `view_normal_in`
+    // (geometric) derivatives even when a normal map overrode `view_normal`.
+    let dn = spec_aa_normal_derivatives(coord);
+    let aa_roughness = spec_aa_filter_roughness(sample.roughness, dn[0], dn[1]);
+
     let encoded_normal = view_normal * 0.5 + vec3<f32>(0.5);
-    textureStore(normal_roughness_out, coord, vec4<f32>(encoded_normal, sample.roughness));
+    textureStore(normal_roughness_out, coord, vec4<f32>(encoded_normal, aa_roughness));
 }

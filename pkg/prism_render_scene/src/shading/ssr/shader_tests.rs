@@ -138,7 +138,13 @@ fn ssr_hzb_wesl_compiles_standalone() {
 /// `enable`s `wgpu_binding_array` and imports `material`) -- parses,
 /// type-checks and links, and that packing the normal-mapped view normal plus
 /// the texture-modulated roughness into the trace's `normal_roughness` output
-/// is well-formed.
+/// is well-formed. The packed roughness is additionally run through the
+/// geometric specular-AA filter (Tokuyoshi-Kaplanyan 2019), which folds the
+/// screen-space variance of the geometric `view_normal_in` into the roughness
+/// via the same math as the `specular_aa::normal_variance` CPU golden; a green
+/// result proves that fold and its `array`/`clamp`/`textureLoad` helpers
+/// type-check too. (The CPU golden carries the numeric parity; this test only
+/// guards WESL compilation/linking.)
 #[test]
 fn ssr_repack_wesl_compiles_and_resolves_imports() {
     let mut cache = ShaderCache::new((), load_source);
