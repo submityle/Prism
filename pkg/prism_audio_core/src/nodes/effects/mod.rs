@@ -187,6 +187,18 @@
 //!   from the explicit `tanh` clamps of [`tube::TubeNode`],
 //!   [`saturation::SaturationNode`], and [`waveshaper::WaveshaperNode`],
 //!   and from the reflective [`wavefolder::WavefolderNode`].
+//! - [`chebyshev_shaper::ChebyshevShaperNode`] -- precise harmonic generator
+//!   built from first-kind Chebyshev polynomials (`T_n(costheta) = cos(ntheta)`): the
+//!   driven input is clamped to `[-1, 1]` and run through a weighted sum of
+//!   `T_1..T_N` evaluated with the stable `T_{k+1} = 2*x*T_k - T_{k-1}`
+//!   recurrence, so each harmonic amplitude is dialled in directly; a one-pole
+//!   `DC` blocker removes the offset injected by even-order terms. Unlike the
+//!   fixed `tanh`/diode curves of [`waveshaper::WaveshaperNode`],
+//!   [`saturation::SaturationNode`], [`tube::TubeNode`], and
+//!   [`diode_clipper::DiodeClipperNode`] (whose spectra are a by-product of the
+//!   shape) its transfer curve is built *from* the requested harmonics, and
+//!   unlike [`wavefolder::WavefolderNode`] / [`exciter::ExciterNode`] it emits
+//!   strictly integer, full-band harmonics with per-partial weights.
 //! - [`modal_resonator::ModalResonatorNode`] -- modal-synthesis resonator
 //!   bank: up to [`modal_resonator::MAX_MODES`] parallel high-`Q` two-pole
 //!   band-pass modes summed together, each with its own frequency, `-60 dB`
@@ -225,6 +237,7 @@
 
 pub mod auto_wah;
 pub mod bitcrusher;
+pub mod chebyshev_shaper;
 pub mod chorus;
 pub mod clipper;
 pub mod comb_filter;
@@ -271,6 +284,7 @@ pub mod waveshaper;
 
 pub use auto_wah::{AutoWah, AutoWahNode, AutoWahParams, SweepDirection, WahMode};
 pub use bitcrusher::{BitcrusherNode, BitcrusherParams, MAX_BIT_DEPTH, MIN_BIT_DEPTH};
+pub use chebyshev_shaper::{ChebyshevShaperNode, ChebyshevShaperParams, MAX_HARMONICS};
 pub use chorus::{ChorusNode, ChorusParams};
 pub use clipper::{
     ClipperMode, ClipperNode, ClipperParams, DEFAULT_CLIPPER_CEILING_DB, DEFAULT_CLIPPER_KNEE,
