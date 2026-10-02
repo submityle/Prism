@@ -66,7 +66,7 @@ fn core_bounding_radius(shape: &RoundedConvex) -> f32 {
 /// swept region is that segment's box grown by the ball radius. `extra` adds the
 /// speculative separation margin so a target reached only within `target_sep` is
 /// still gathered.
-fn swept_aabb(shape: &RoundedConvex, dt: f32, extra: f32) -> Aabb {
+pub(super) fn swept_aabb(shape: &RoundedConvex, dt: f32, extra: f32) -> Aabb {
     let c0 = shape.pose.translation;
     let c1 = shape.pose.translation + shape.motion.linear * dt;
     let r = core_bounding_radius(shape) + shape.radius + extra;

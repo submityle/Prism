@@ -41,7 +41,7 @@
 //! (van den Bergen 2004; Gilbert-Johnson-Keerthi 1988). No Unreal Engine source
 //! or derived code.
 
-use crate::bvh::{cpu_build_lbvh, GpuBvhOverlap};
+use crate::bvh::{cpu_build_lbvh, Aabb, GpuBvhOverlap, GpuResidentLbvh};
 use crate::GpuContext;
 
 use super::body_motion::BodyMotion;
@@ -49,7 +49,7 @@ use super::conservative_advancement_gpu::GpuConvexConvexToiNarrowphase;
 use super::convex_hull::ConvexHull;
 use super::convex_pose::ConvexPose;
 use super::shape_cast::{RoundedConvex, ShapeCastHit};
-use super::shape_cast_bvh::{consider, gather_boxes, sort_hits};
+use super::shape_cast_bvh::{consider, gather_boxes, sort_hits, swept_aabb};
 use super::{ConvexConvexSweepPair, Toi};
 
 /// Composes the `BVH` overlap gather and the convex-convex time-of-impact
@@ -198,6 +198,142 @@ impl GpuBvhShapeCast {
         }
         let (shape, targets) = Self::views(hulls, poses, motions, radii);
         let candidates = self.gather(ctx, &shape, &targets, dt, target_sep);
+        let mut hits =
+            self.sweep_candidates(ctx, hulls, poses, motions, radii, &candidates, dt, target_sep);
+        sort_hits(&mut hits);
+        hits
+    }
+
+    /// Builds the per-target static bounding boxes that seed a resident `BVH`
+    /// for repeated casts against an unchanging scene — the persistent
+    /// broad-phase pattern Jolt (`NarrowPhaseQuery` against the `BroadPhase`),
+    /// `PhysX` (`PxScene` sweeps against the pruning structure), and Unreal
+    /// `Chaos` all run. Feed the result to
+    /// [`GpuLbvh::build_resident`](crate::bvh::GpuLbvh::build_resident) or
+    /// [`ResidentBvhDriver::build`](crate::bvh::ResidentBvhDriver::build): the
+    /// box order is the resident tree's leaf order, which is exactly the
+    /// `0`-based target index [`cast_resident`](Self::cast_resident) and
+    /// [`cast_all_resident`](Self::cast_all_resident) return.
+    ///
+    /// The targets must be static. [`swept_aabb`](super::shape_cast_bvh::swept_aabb)
+    /// of a still rounded convex does not depend on `dt`, so a tree built here
+    /// stays valid across every frame the targets do not move; only the moving
+    /// cast shape's query box is re-swept per cast.
+    #[must_use]
+    pub fn scene_boxes(
+        target_hulls: &[ConvexHull],
+        target_poses: &[ConvexPose],
+        target_radii: &[f32],
+    ) -> Vec<Aabb> {
+        (0..target_hulls.len())
+            .map(|i| {
+                let target =
+                    RoundedConvex::still(&target_hulls[i], target_poses[i], target_radii[i]);
+                swept_aabb(&target, 0.0, 0.0)
+            })
+            .collect()
+    }
+
+    /// Gathers candidate target indices by descending a resident `BVH` already
+    /// built from [`scene_boxes`](Self::scene_boxes) with the moving shape's
+    /// swept query box, all on the `GPU`. Unlike [`gather`](Self::gather) this
+    /// reuses the on-device tree instead of rebuilding one per cast, which is
+    /// the whole point of the persistent broad-phase query path.
+    ///
+    /// The returned indices are a conservative superset of every truly-struck
+    /// target. The gather can never report more hits than the leaf count, so the
+    /// per-query capacity is that count; the `Err` arm falls back to the whole
+    /// scene so correctness never depends on the gather succeeding.
+    fn gather_resident(
+        &self,
+        ctx: &GpuContext,
+        lbvh: &GpuResidentLbvh,
+        shape: &RoundedConvex,
+        dt: f32,
+        target_sep: f32,
+    ) -> Vec<u32> {
+        let query = swept_aabb(shape, dt, target_sep.max(0.0));
+        let capacity = u32::try_from(lbvh.num_leaves()).unwrap_or(u32::MAX);
+        match self.overlap.query_resident(ctx, lbvh, &[query], capacity) {
+            Ok(mut per_query) => per_query.pop().unwrap_or_default(),
+            Err(_) => (0..capacity).collect(),
+        }
+    }
+
+    /// Resident-tree form of [`cast`](Self::cast): the earliest contact of the
+    /// moving shape (body `0`) against the static targets (bodies `1..`), or
+    /// `None` when nothing is reached within `dt`, reusing a `BVH` built once
+    /// instead of rebuilding per cast.
+    ///
+    /// # Contract
+    ///
+    /// `lbvh` must be the resident tree built from
+    /// [`scene_boxes`](Self::scene_boxes) over the targets' `hulls[1..]`,
+    /// `poses[1..]`, `radii[1..]` in that order, so its leaf count equals the
+    /// target count and leaf `i` is target `i` (body `i + 1`). Build it from a
+    /// mismatched or reordered scene and the returned target indices are
+    /// meaningless. The result — struck target index, impact time, contact
+    /// point, and normal — matches the `CPU`
+    /// [`cast_shape_bvh`](super::shape_cast_bvh::cast_shape_bvh) golden,
+    /// including the lower-index rule on an exact time tie.
+    #[must_use]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the resident tree, the body-indexed kernel tables (hulls, poses, motions, radii), the context, and the two step scalars are each distinct inputs"
+    )]
+    pub fn cast_resident(
+        &self,
+        ctx: &GpuContext,
+        lbvh: &GpuResidentLbvh,
+        hulls: &[ConvexHull],
+        poses: &[ConvexPose],
+        motions: &[BodyMotion],
+        radii: &[f32],
+        dt: f32,
+        target_sep: f32,
+    ) -> Option<ShapeCastHit> {
+        if hulls.is_empty() {
+            return None;
+        }
+        let shape = RoundedConvex::new(&hulls[0], poses[0], motions[0], radii[0]);
+        let candidates = self.gather_resident(ctx, lbvh, &shape, dt, target_sep);
+        let hits =
+            self.sweep_candidates(ctx, hulls, poses, motions, radii, &candidates, dt, target_sep);
+        let mut best: Option<ShapeCastHit> = None;
+        for hit in hits {
+            consider(&mut best, hit);
+        }
+        best
+    }
+
+    /// Resident-tree form of [`cast_all`](Self::cast_all): every contact within
+    /// `dt`, ordered by increasing time of impact with ties broken by ascending
+    /// target index, matching the `CPU`
+    /// [`cast_shape_all_bvh`](super::shape_cast_bvh::cast_shape_all_bvh) exactly,
+    /// reusing a `BVH` built once instead of rebuilding per cast.
+    ///
+    /// The `lbvh` contract is identical to [`cast_resident`](Self::cast_resident).
+    #[must_use]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the resident tree, the body-indexed kernel tables (hulls, poses, motions, radii), the context, and the two step scalars are each distinct inputs"
+    )]
+    pub fn cast_all_resident(
+        &self,
+        ctx: &GpuContext,
+        lbvh: &GpuResidentLbvh,
+        hulls: &[ConvexHull],
+        poses: &[ConvexPose],
+        motions: &[BodyMotion],
+        radii: &[f32],
+        dt: f32,
+        target_sep: f32,
+    ) -> Vec<ShapeCastHit> {
+        if hulls.is_empty() {
+            return Vec::new();
+        }
+        let shape = RoundedConvex::new(&hulls[0], poses[0], motions[0], radii[0]);
+        let candidates = self.gather_resident(ctx, lbvh, &shape, dt, target_sep);
         let mut hits =
             self.sweep_candidates(ctx, hulls, poses, motions, radii, &candidates, dt, target_sep);
         sort_hits(&mut hits);
