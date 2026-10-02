@@ -82,6 +82,19 @@
 //!   harmonic series an octave higher; deterministic breath turbulence breaks
 //!   the symmetry to start the tone. Driven by an air jet rather than the
 //!   `bowed_string` bow or `karplus_strong` pluck.
+//! - [`brass_lip_reed::BrassLipReedNode`] -- brass lip-reed (trumpet /
+//!   trombone / horn family) digital-waveguide physical model: two
+//!   cross-coupled pressure-wave delay lines form an open-open flaring bore
+//!   whose two inverting end reflections cancel per round trip, so like
+//!   `air_jet_flute` it sounds the full harmonic series. It is excited by an
+//!   outward-striking lip valve -- a damped second-order resonator driven by
+//!   the high-passed pressure drop (`dp - dp_z1`, zero at DC) so a steady
+//!   breath cannot rail the aperture -- whose mechanical resonance, tuned by
+//!   `lip_tension`, selects which bore partial sounds (the physics of bugle
+//!   calls and lip slurs). A clamped-linear lip flow self-limits the limit
+//!   cycle. Unlike the odd-only inward reed of `reed_woodwind`, the air jet of
+//!   `air_jet_flute`, or the bow of `bowed_string`, the tunable lip resonance
+//!   picking the partial is unique to this brass voice.
 //!
 //! Every generator is real-time safe: `process` performs no allocation, no
 //! locking, and no panics, and reproducible generators are fully deterministic
@@ -90,6 +103,7 @@
 pub mod air_jet_flute;
 pub mod additive_oscillator;
 pub mod bowed_string;
+pub mod brass_lip_reed;
 pub mod fm_operator;
 pub mod fof_source;
 pub mod granular_source;
@@ -106,6 +120,7 @@ pub mod wavetable_oscillator;
 pub use air_jet_flute::{AirJetFluteNode, AirJetFluteParams};
 pub use additive_oscillator::{AdditiveOscillatorNode, AdditiveOscillatorParams};
 pub use bowed_string::{BowedStringNode, BowedStringParams};
+pub use brass_lip_reed::{BrassLipReedNode, BrassLipReedParams};
 pub use fm_operator::{FmOperatorNode, FmOperatorParams};
 pub use fof_source::{FofSourceNode, FofSourceParams, Formant, MAX_FOF_GRAINS, MAX_FORMANTS};
 pub use granular_source::{GranularSourceNode, GranularSourceParams, MAX_GRAINS};
