@@ -25,7 +25,8 @@
 //! operation is `+`, `-`, `*`, `/`, `min`/`max`, so a `GPU` kernel reproduces
 //! the resolve bit-for-bit.
 
-use super::color::{rgb_to_ycocg, tonemap, untonemap, ycocg_to_rgb};
+use super::color::{luminance, rgb_to_ycocg, tonemap, untonemap, ycocg_to_rgb};
+use super::lock::{advance_lock, rejection_scale, LockState};
 use super::neighborhood::{clip_to_aabb, NeighborhoodStats};
 use alloc::vec::Vec;
 
@@ -121,6 +122,68 @@ pub fn resolve(
     history_confidence: f32,
     disoccluded: bool,
 ) -> ResolveOutput {
+    resolve_core(
+        params,
+        current_color,
+        neighborhood,
+        history_color,
+        history_confidence,
+        disoccluded,
+        1.0,
+    )
+}
+
+/// Resolves one output pixel, advancing a thin-feature [`LockState`] alongside.
+///
+/// This is the lock-aware entry point: it detects a shading change / disocclusion,
+/// advances `previous_lock` using the current luma and the caller-supplied
+/// `thin_strength` (from [`super::lock::thin_feature_strength`]), and uses the
+/// resulting lock to suppress color rejection on a thin feature so the clamp
+/// cannot eat its accumulated detail (see [`super::lock`]). Returns the resolved
+/// pixel together with the lock to store for next frame.
+#[must_use]
+pub fn resolve_with_lock(
+    params: ResolveParams,
+    current_color: [f32; 3],
+    neighborhood: &[[f32; 3]],
+    history_color: [f32; 3],
+    history_confidence: f32,
+    disoccluded: bool,
+    previous_lock: LockState,
+    thin_strength: f32,
+) -> (ResolveOutput, LockState) {
+    let lock = advance_lock(
+        previous_lock,
+        luminance(sanitize_color(current_color)),
+        thin_strength,
+        disoccluded,
+    );
+    let output = resolve_core(
+        params,
+        current_color,
+        neighborhood,
+        history_color,
+        history_confidence,
+        disoccluded,
+        rejection_scale(lock),
+    );
+    (output, lock)
+}
+
+/// The shared resolve body, parameterized by a `rejection_scale` in `[0, 1]`
+/// that attenuates the color rejection (see [`resolve`] for the full
+/// algorithm). A scale of `1` is the plain resolve; a locked thin feature
+/// passes a smaller scale so its history survives the clamp.
+#[must_use]
+fn resolve_core(
+    params: ResolveParams,
+    current_color: [f32; 3],
+    neighborhood: &[[f32; 3]],
+    history_color: [f32; 3],
+    history_confidence: f32,
+    disoccluded: bool,
+    rejection_scale: f32,
+) -> ResolveOutput {
     let params = params.sanitized();
 
     // Reset path: a disocclusion, missing/invalid history, or an empty
@@ -155,7 +218,19 @@ pub fn resolve(
     // current color.
     let box_half_width_y = 0.5 * (hi[0] - lo[0]);
     let clip_dist_y = (history_t[0] - history_clipped[0]).abs();
-    let rejection = (clip_dist_y / (box_half_width_y + 1e-3)).clamp(0.0, 1.0);
+    let rejection =
+        (clip_dist_y / (box_half_width_y + 1e-3)).clamp(0.0, 1.0) * rejection_scale.clamp(0.0, 1.0);
+
+    // Lock influence relaxes the clamp itself: a thin-feature lock
+    // (`rejection_scale` below 1) blends the clamped history back toward the
+    // raw reprojected history so a one-pixel feature survives a neighborhood
+    // too coarse to contain it. Unlocked pixels (scale 1) use the clamped
+    // history unchanged.
+    let lock_influence = (1.0 - rejection_scale).clamp(0.0, 1.0);
+    let mut history_eff = [0.0f32; 3];
+    for c in 0..3 {
+        history_eff[c] = history_clipped[c] + (history_t[c] - history_clipped[c]) * lock_influence;
+    }
 
     // Exponential-moving-average weight from the accumulated confidence, raised
     // toward 1 (take current) as rejection grows.
@@ -166,7 +241,7 @@ pub fn resolve(
     // Blend in the bounded domain, then map back to linear HDR.
     let mut blended_t = [0.0f32; 3];
     for c in 0..3 {
-        blended_t[c] = history_clipped[c] + (current_t[c] - history_clipped[c]) * alpha;
+        blended_t[c] = history_eff[c] + (current_t[c] - history_eff[c]) * alpha;
     }
     let color = untonemap(ycocg_to_rgb(blended_t));
 
@@ -365,5 +440,60 @@ mod tests {
             false,
         );
         assert!(approx(out.color[0], 8.0), "{}", out.color[0]);
+    }
+
+    #[test]
+    fn lock_preserves_thin_feature_history_against_the_clamp() {
+        use super::super::lock::LockState;
+        // A bright one-pixel feature in history sits outside the (darker)
+        // current neighborhood, so the plain resolve clamps it away. A fresh
+        // lock (full thin-feature strength) must retain more of that history.
+        let params = ResolveParams::default();
+        let current = [0.2, 0.2, 0.2];
+        let neighborhood = tight_window(current);
+        let history = [0.9, 0.9, 0.9];
+        let confidence = 8.0;
+
+        let plain = resolve(params, current, &neighborhood, history, confidence, false);
+        let (locked, lock) = resolve_with_lock(
+            params,
+            current,
+            &neighborhood,
+            history,
+            confidence,
+            false,
+            LockState::default(),
+            1.0,
+        );
+
+        assert!(lock.is_locked(), "a full-strength thin feature should lock");
+        assert!(
+            locked.color[0] > plain.color[0],
+            "lock should keep more bright history: locked {} vs plain {}",
+            locked.color[0],
+            plain.color[0]
+        );
+    }
+
+    #[test]
+    fn lock_is_dropped_on_disocclusion() {
+        use super::super::lock::LockState;
+        // Even a strong thin feature cannot lock across a disocclusion.
+        let (out, lock) = resolve_with_lock(
+            ResolveParams::default(),
+            [0.5, 0.5, 0.5],
+            &tight_window([0.5, 0.5, 0.5]),
+            [0.9, 0.9, 0.9],
+            8.0,
+            true,
+            LockState {
+                lifetime: 3.0,
+                luma: 0.5,
+            },
+            1.0,
+        );
+        assert!(!lock.is_locked());
+        // Disocclusion resets to the current color.
+        assert!(approx(out.color[0], 0.5));
     }
 }

@@ -33,6 +33,8 @@
 //! 8. **Sharpening** ([`sharpen`]) — the `RCAS` contrast-adaptive sharpening
 //!    pass that restores the high-frequency detail the reconstruction filter
 //!    unavoidably softens.
+//! 9. **Locks** ([`lock`]) — the thin-feature lock lifecycle that protects
+//!    one-pixel features from being clamped away by the neighborhood rejection.
 //!
 //! The `GPU` reconstruction kernel and its `WESL` shader codegen are the
 //! bit-exact twin of [`reconstruct::resolve`] and are pending the `GPU`
@@ -43,6 +45,7 @@ use crate::history::InvalidationMask;
 
 pub mod color;
 pub mod jitter;
+pub mod lock;
 pub mod neighborhood;
 pub mod reconstruct;
 pub mod reproject;
@@ -51,8 +54,9 @@ pub mod sharpen;
 
 pub use color::{luminance, rgb_to_ycocg, tonemap, tonemap_weight, untonemap, ycocg_to_rgb};
 pub use jitter::{radical_inverse, JitterSequence};
+pub use lock::{advance_lock, thin_feature_strength, LockState};
 pub use neighborhood::{clip_to_aabb, NeighborhoodStats};
-pub use reconstruct::{resolve, ResolveOutput, ResolveParams};
+pub use reconstruct::{resolve, resolve_with_lock, ResolveOutput, ResolveParams};
 pub use reproject::{
     catmull_rom_weights, depth_disoccluded, on_screen, reproject_pixel, sample_catmull_rom,
 };
