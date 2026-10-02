@@ -689,6 +689,15 @@
 //! - [`gpu_layout`] — flat, `GPU`-uploadable `BVH`/`TLAS` buffer layout (the
 //!   authoritative `WESL` kernel `ABI`) plus a packed traversal that reproduces
 //!   the in-memory walk bit-for-bit as the `CPU`↔`GPU` parity reference.
+//! - [`gpu_trace_io`] — `std430` ray/hit storage-buffer `ABI` for the
+//!   traversal kernel: one [`gpu_trace_io::TRACE_RAY_WORDS`]-word ray record
+//!   in, one [`gpu_trace_io::TRACE_HIT_WORDS`]-word hit record out per
+//!   invocation.
+//! - [`gpu_trace_kernel`] — the software stackless `BVH`-on-compute
+//!   traversal kernel (`WESL` source
+//!   [`gpu_trace_kernel::SOFTWARE_BVH_TRACE_WESL`]) plus its bit-exact `CPU`
+//!   dispatch twin, the software fallback of the ray-tracing backend and the
+//!   first real `GPU` traversal kernel in `ray_scene`.
 
 pub mod acceleration;
 pub mod backend;
@@ -795,6 +804,8 @@ pub mod sdf_brick;
 pub mod sdf_brick_gpu_layout;
 pub mod footprint;
 pub mod gpu_layout;
+pub mod gpu_trace_io;
+pub mod gpu_trace_kernel;
 pub mod motion;
 pub mod motion_gpu_layout;
 pub mod ray_offset;
