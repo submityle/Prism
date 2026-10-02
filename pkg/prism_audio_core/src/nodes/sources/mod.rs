@@ -86,6 +86,14 @@
 //!   transient click, and a `tanh` saturator. Unlike the modal physical drums
 //!   ([`membrane_drum`], [`struck_bar`], [`struck_plate`]) it is a direct
 //!   subtractive one-shot voice triggered by [`analog_kick::AnalogKickNode::trigger`].
+//! - [`analog_snare::AnalogSnareNode`] -- analog-style snare-drum voice: a pair
+//!   of tuned sine shell partials summed with an enveloped band-passed noise
+//!   burst (the snare wires), balanced by `tone_noise_mix` and driven through a
+//!   `tanh` saturator before the output gain. Unlike the modal physical drums
+//!   ([`membrane_drum`], [`struck_bar`], [`struck_plate`]) it is a direct
+//!   two-layer subtractive voice, and unlike [`analog_kick`] it adds a second
+//!   tuned partial and a dominant deterministic noise layer instead of a pitch
+//!   sweep. Triggered by [`analog_snare::AnalogSnareNode::trigger`].
 //!   `rate_hz` scales the integration speed while the single dissipation `b`
 //!   morphs the labyrinthine orbit from dense chaos (small `b`) toward a quiet
 //!   fixed point (large `b`). Unlike [`rossler_attractor`] its sinusoidal
@@ -478,6 +486,7 @@ pub mod rossler_attractor;
 pub mod thomas_attractor;
 pub mod chua_circuit;
 pub mod analog_kick;
+pub mod analog_snare;
 
 pub use air_jet_flute::{AirJetFluteNode, AirJetFluteParams};
 pub use additive_oscillator::{AdditiveOscillatorNode, AdditiveOscillatorParams};
@@ -492,6 +501,7 @@ pub use rossler_attractor::{RosslerAttractorNode, RosslerAttractorParams};
 pub use thomas_attractor::{ThomasAttractorNode, ThomasAttractorParams};
 pub use chua_circuit::{ChuaCircuitNode, ChuaCircuitParams};
 pub use analog_kick::{AnalogKickNode, AnalogKickParams};
+pub use analog_snare::{AnalogSnareNode, AnalogSnareParams};
 pub use conical_reed::{ConicalReedNode, ConicalReedParams};
 pub use dsf_oscillator::{DsfOscillatorNode, DsfOscillatorParams};
 pub use dust::{DustNode, DustParams, Polarity};
