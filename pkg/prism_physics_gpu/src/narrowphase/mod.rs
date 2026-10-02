@@ -137,6 +137,7 @@ pub use halfspace_gpu::GpuHalfspaceNarrowphase;
 pub use heightfield::{cpu_sphere_heightfield_narrowphase, CellRange, Heightfield, HeightfieldSpherePair, XzAabb};
 pub use heightfield_gpu::GpuSphereHeightfieldNarrowphase;
 pub use manifold::{ContactManifold, ManifoldPoint, MAX_MANIFOLD_POINTS};
+pub(crate) use manifold::reduce_to_four;
 pub use obb::{cpu_obb_narrowphase, Obb, SphereObbPair};
 pub use obb_gpu::GpuObbNarrowphase;
 pub use obb_halfspace::{cpu_obb_halfspace_narrowphase, ObbPlanePair};

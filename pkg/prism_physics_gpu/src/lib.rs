@@ -85,8 +85,9 @@ pub use cloth::{
     LongRangeColoring, StrainLimitColoring, VertexTriangleAdjacency,
 };
 pub use collider::{
-    cpu_capsule_trimesh_collide, cpu_obb_trimesh_collide, cpu_sphere_trimesh_collide,
-    GpuCapsuleTrimeshCollider, GpuObbTrimeshCollider, GpuSphereTrimeshCollider, Trimesh,
+    cpu_capsule_trimesh_collide, cpu_obb_trimesh_collide, cpu_obb_trimesh_manifold_collide,
+    cpu_sphere_trimesh_collide, GpuCapsuleTrimeshCollider, GpuObbTrimeshCollider,
+    GpuSphereTrimeshCollider, Trimesh,
 };
 pub use contacts::{
     contact_constraints, contact_constraints_with_friction, cpu_resolve_contacts,
