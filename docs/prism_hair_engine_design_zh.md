@@ -243,7 +243,7 @@ fallback:
 - **正确性模型**：核心为闭式几何、无超越调用，`CPU`/`GPU` 算同一公式，但**非位精确**（`GPU` 可 fuse mul-add，扰动低位 mantissa 几 `ULP`），故每分量断言容差 `abs_diff<1e-4` 或 `rel_diff<1e-3`；迭代类 kernel 参数保守以控 fma 累积。每个 parity 测试均带物理断言 + 非平凡断言（防 no-op 蒙混）+ 空/退化输入用例。
 - **可移植性**：只用 `sqrt`/`min`/`max`/`clamp`/`dot`/mul-add 的 core-`WGSL` 子集——无 `exp`/`pow`/可选 device feature——故孪生在 Metal/Vulkan/DX12 不改即跑。
 
-当前已落 **81 个真机对拍孪生**（Apple M2 Metal 全绿 **557 passed**）：
+当前已落 **82 个真机对拍孪生**（Apple M2 Metal 全绿 **565 passed**）：
 
 | kernel | 对拍的 `CPU` golden | 语义 | 真机单测 |
 |---|---|---|---|
@@ -328,6 +328,7 @@ fallback:
 | `dftl` | `simulate_guides_dftl` | Dynamic Follow-The-Leader 不可伸长 guide 积分（Müller 2012，`TressFX` strand 快速档：单趟 root→tip 位置传播令 guide 一次扫定长 + Müller 速度校正防单趟投影泵入伪能量；一线程一 strand 在扁平粒子池 disjoint range 原地积分，无跨线程竞争、无 barrier，有别于迭代 XPBD 的 `guide_solver`） | 5 |
 | `dual_scatter_factors` | `dual_scatter_factors` | `Zinke` 2008 双散射前/后向因子（一批 `TransmittanceSample` 按半球分裂平均成两衰减因子：`a_f`（+z 前向、驱动全局多重前散 `a_f^n`）/`a_b`（-z 后向、驱动局部回散），均落 `[0,1]`；是 `SH` 投影孪生 `project_sh` 与 `eval_sh` 的姊妹却算子迥异的半球平均归约） | 9 |
 | `contact_distance` | `point_plane_signed_distance` / `point_point_distance` | 发丝屏障接触的点/面闭式距离（一线程一 query：归一化法线 dot 投影得带符号平面距、零法线无朝向时退化 bit-exact `0`；点点欧氏距离；各 query 只读自身九标量写自身输出行、embarrassingly parallel 无共享可变态）；plane 距含乘加（`GPU` 可 fuse）故 `abs<1e-4\|\|rel<1e-3` 容差、零法线守卫位精确 | 5 |
+| `adaptive_accumulate` | `adaptive_transmittance::accumulate` | **首个自适应透射曲线 build 侧孪生**（区别于 lookup 侧 `sample_transmittance`(`adaptive_transmittance`)：那个按深度查已建曲线，本孪生把一批 `TransmittanceSample` 累积**建出**变长 [`TransmittanceCurve`] 节点）：深阴影 groom 把每条光线命中的 alpha 样本沿深度累积成 running 透射曲线 `T=Π(1-alpha)`（`UE5` Groom / Salvi 自适应变节点透射的 build 半程）。host 侧严格复刻 golden 的 sanitize（`TransmittanceSample::new` 钳 alpha/深度）+ 稳定 `total_cmp` 深度升序排序 + 同深度分组折叠（本地 `DEPTH_EPS=1e-6` 复刻），再扁平化成共享 `alphas` 池 + 每节点 `(alpha_start,alpha_count)` ranges + 每光线 `(node_start,node_count)` ranges；kernel 一线程一光线 fold 自己 disjoint 的 node 切片、每 node 边界 `running *= 1 - clamp(alpha,0,1)` + `clamp(0,1)` 续乘积，不在 `GPU` 排序/分组（host 关注点）。**有别于 `deep_opacity`**（定长等宽层 slab）：本孪生产**变长**节点列表（节点数据依赖）。node depth 为 host passthrough（readback 后重接、位精确），透射值含乘加 `GPU` 可 fuse 故 `abs<1e-4\|\|rel<1e-3` 容差。空批/全空光线 host 短路不发 dispatch、全空 pad dummy 防零尺寸 buffer；dispatch `ray_count.div_ceil(64)`。8 用例真机对拍（running 乘积单调递减 + golden 0.168 / 同深度折叠 0.125 / shuffle 验 host 排序 / 越界字段 re-sanitize / 空批 / 全空光线 / 混合多光线 / 100 光线跨 64 `workgroup` 边界），Apple M2 Metal 8/8 全绿 | 8 |
 
 **已落（本轮新增第 8 个）**：guide XPBD 求解器（`simulate_guides`，每 strand 独立跑整条 substeps×iterations 的核心 sim 阶段，`UE5` Groom/`TressFX` 都在 `GPU` 跑）——`guide_solver.wesl` 5 bindings（uniform `Params` 48B / 只读 `strands` / 读写 `state` stride8 / 只读 `goals` / 只读 `colliders`），host 严格照 golden 派生序算 `sub_dt`/`sub_dt_sq`/`alpha`/`velocity_retain`/预乘 `gravity_step`；kernel 逐位对齐 golden 的 `is_pinned`(inv_mass≤0)、all-or-nothing per-strand rest/goal 门控（`has_rest`/`has_goal`）、`EPS_LEN`/`EPS_LEN_SQ`；6 用例真机对拍（单 strand 重力+约束、kinked bending+`LRA`、sphere+capsule 碰撞、多 strand 截断+门控、缺 goal slice 禁全局、no-op guards），Apple M2 Metal 6/6 全绿。至此核心 XPBD sim 阶段已在真机 `GPU` 落地。
 

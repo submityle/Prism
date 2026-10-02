@@ -497,6 +497,14 @@
 //!   sibling of the analytic gust-superposition [`GpuWindField`] twin
 //!   (procedural curl-noise versus steady + gust + turbulent model), checked
 //!   within the fma tolerance (see [`curl_wind_map`]).
+//! * [`GpuHairAdaptiveAccumulate`] builds
+//!   [`accumulate`](prism_render_architecture::hair::adaptive_transmittance::accumulate),
+//!   the deep-shadow transmittance *build* step, folding each light ray's
+//!   strand samples into the full `(depth, transmittance)` curve — one thread
+//!   per ray composites its depth-sorted, same-depth-grouped alphas into the
+//!   running product `product(1 - alpha)` (the host owns the sort/grouping);
+//!   the build counterpart of the [`GpuHairAdaptiveTransmittance`] lookup,
+//!   checked within the fma tolerance.
 //! * [`GpuHairAdaptiveTransmittance`] samples
 //!   [`sample_transmittance`](prism_render_architecture::hair::adaptive_transmittance::sample_transmittance),
 //!   the adaptive variable-node deep-shadow transmittance curve, mapping a
@@ -669,6 +677,7 @@
 //! compute dispatch; no Unreal Engine source or derived code.
 #![forbid(unsafe_code)]
 
+pub mod adaptive_accumulate;
 pub mod adaptive_transmittance;
 pub mod analysis_reduce;
 pub mod apply_wind;
@@ -752,6 +761,7 @@ pub mod wetness;
 pub mod wind;
 pub mod wind_field;
 
+pub use adaptive_accumulate::GpuHairAdaptiveAccumulate;
 pub use adaptive_transmittance::{
     reference_adaptive_transmittance_sample, GpuHairAdaptiveTransmittance,
 };
