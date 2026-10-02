@@ -1,6 +1,7 @@
 //! Unified lighting, GI, reflection, and stochastic-light contracts.
 
 pub mod culling;
+pub mod stochastic;
 
 use crate::ray_scene::TraceBackend;
 
