@@ -91,6 +91,7 @@ pub mod environment;
 pub mod estimator;
 pub mod film;
 pub mod filter;
+pub mod firefly;
 pub mod fresnel_blend;
 pub mod ggx_energy;
 pub mod halton;

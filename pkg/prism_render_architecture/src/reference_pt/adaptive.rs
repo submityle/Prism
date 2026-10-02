@@ -28,6 +28,7 @@ use alloc::vec::Vec;
 use super::camera::PinholeCamera;
 use super::film::Film;
 use super::filter::PixelFilter;
+use super::firefly::FireflyClamp;
 use super::halton::HaltonPixelSampler;
 use super::integrator::{PathIntegrator, Scene};
 use super::sampler::Rng;
@@ -164,6 +165,12 @@ pub struct AdaptiveConfig {
     /// the test and lets the variance estimate settle; it never changes the
     /// result beyond the sample count rounding to a batch boundary.
     pub batch_size: u32,
+    /// Per-sample firefly clamp applied to each radiance sample before it is
+    /// accumulated. The default [`FireflyClamp::Off`] keeps the estimate
+    /// exactly unbiased and bit-identical to the fixed-budget renderer; an
+    /// opt-in luminance clamp trades a small bounded bias for far fewer
+    /// isolated bright outlier pixels.
+    pub firefly: FireflyClamp,
 }
 
 impl Default for AdaptiveConfig {
@@ -175,6 +182,7 @@ impl Default for AdaptiveConfig {
             max_samples: 256,
             relative_tolerance: 0.05,
             batch_size: 16,
+            firefly: FireflyClamp::Off,
         }
     }
 }
@@ -246,7 +254,8 @@ pub fn render_adaptive(
                 } else {
                     camera.primary_ray(x, y, width, height, jitter)
                 };
-                estimator.add_sample(integrator.radiance(scene, ray, &mut rng));
+                let radiance = integrator.radiance(scene, ray, &mut rng);
+                estimator.add_sample(config.firefly.apply(radiance));
                 s += 1;
                 // Test convergence only on batch boundaries and never before the
                 // minimum-sample floor, so a brief run of similar early samples
@@ -406,6 +415,7 @@ mod tests {
             max_samples: 64,
             relative_tolerance: 0.05,
             batch_size: 8,
+            firefly: FireflyClamp::Off,
         };
         let a = render_adaptive(
             &scene,
@@ -448,6 +458,7 @@ mod tests {
             max_samples: 1024,
             relative_tolerance: 0.002,
             batch_size: 8,
+            firefly: FireflyClamp::Off,
         };
         let render = render_adaptive(
             &scene,
@@ -488,6 +499,7 @@ mod tests {
             max_samples: 4096,
             relative_tolerance: 0.05,
             batch_size: 16,
+            firefly: FireflyClamp::Off,
         };
         let render = render_adaptive(
             &scene,
@@ -512,6 +524,76 @@ mod tests {
         assert!(
             max_count < config.max_samples,
             "a converging image should stop before the cap, got max {max_count}"
+        );
+    }
+
+    #[test]
+    fn firefly_clamp_caps_per_pixel_luminance_through_the_render() {
+        // Render the emitter scene once unclamped and once with a luminance cap
+        // set below the brightest unclamped pixel. Because the clamp caps every
+        // sample's luminance before accumulation, each clamped pixel's mean
+        // luminance must stay within the cap, and the brightest pixel must drop
+        // below the unclamped peak -- proving the clamp flows through the whole
+        // adaptive render path and is not a vacuous no-op.
+        let scene = floor_with_overhead_emitter();
+        let camera = overhead_camera();
+        let integrator = PathIntegrator::new(5, 3);
+        let base = AdaptiveConfig {
+            min_samples: 16,
+            max_samples: 128,
+            relative_tolerance: 0.01,
+            batch_size: 16,
+            firefly: FireflyClamp::Off,
+        };
+        let unclamped = render_adaptive(
+            &scene,
+            &camera,
+            &integrator,
+            8,
+            8,
+            base,
+            3,
+            PixelFilter::Box,
+        );
+        let max_unclamped = unclamped
+            .film
+            .pixels()
+            .iter()
+            .map(|p| luminance(*p))
+            .fold(0.0f32, f32::max);
+        // Cap strictly below the brightest unclamped pixel so the clamp engages.
+        let cap = max_unclamped * 0.5;
+        assert!(
+            cap > 0.0,
+            "the scene must produce some radiance for the clamp test, got {max_unclamped}"
+        );
+        let clamped_cfg = AdaptiveConfig {
+            firefly: FireflyClamp::MaxLuminance(cap),
+            ..base
+        };
+        let clamped = render_adaptive(
+            &scene,
+            &camera,
+            &integrator,
+            8,
+            8,
+            clamped_cfg,
+            3,
+            PixelFilter::Box,
+        );
+        let max_clamped = clamped
+            .film
+            .pixels()
+            .iter()
+            .map(|p| luminance(*p))
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_clamped <= cap + 1.0e-4,
+            "every clamped pixel mean luminance must stay within the cap {cap}, got {max_clamped}"
+        );
+        assert!(
+            max_clamped < max_unclamped,
+            "the clamp must pull the brightest pixel below the unclamped peak {max_unclamped}, got {max_clamped}"
         );
     }
 }
