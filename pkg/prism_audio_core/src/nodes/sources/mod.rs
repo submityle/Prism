@@ -95,6 +95,20 @@
 //!   cycle. Unlike the odd-only inward reed of `reed_woodwind`, the air jet of
 //!   `air_jet_flute`, or the bow of `bowed_string`, the tunable lip resonance
 //!   picking the partial is unique to this brass voice.
+//! - [`conical_reed::ConicalReedNode`] -- conical double-reed (oboe /
+//!   bassoon / saxophone family) digital-waveguide physical model: two
+//!   cross-coupled pressure-wave delay lines form a bore that is driven at
+//!   the mouthpiece by the same inward-striking nonlinear reed valve as
+//!   `reed_woodwind`, but whose far end is a cone rather than a cylinder. The
+//!   conical apex is modelled as a *high-pass* spherical-wave reflection
+//!   (zero at DC, corner tracking `f0 / APEX_CORNER_RATIO`) that suppresses
+//!   the sub-fundamental relaxation mode, so the net in-phase round trip
+//!   resonates the full harmonic series like a cone-equivalent open pipe --
+//!   unlike the odd-only cylindrical `reed_woodwind` it sounds every partial
+//!   (the reedy oboe timbre). A `tanh` soft-limiter plus a DC blocker bound
+//!   the limit cycle. Distinct from the full-harmonic air jet of
+//!   `air_jet_flute` and the lip valve of `brass_lip_reed`, this voice is a
+//!   reed-driven cone.
 //!
 //! Every generator is real-time safe: `process` performs no allocation, no
 //! locking, and no panics, and reproducible generators are fully deterministic
@@ -103,6 +117,7 @@
 pub mod air_jet_flute;
 pub mod additive_oscillator;
 pub mod bowed_string;
+pub mod conical_reed;
 pub mod brass_lip_reed;
 pub mod fm_operator;
 pub mod fof_source;
@@ -121,6 +136,7 @@ pub use air_jet_flute::{AirJetFluteNode, AirJetFluteParams};
 pub use additive_oscillator::{AdditiveOscillatorNode, AdditiveOscillatorParams};
 pub use bowed_string::{BowedStringNode, BowedStringParams};
 pub use brass_lip_reed::{BrassLipReedNode, BrassLipReedParams};
+pub use conical_reed::{ConicalReedNode, ConicalReedParams};
 pub use fm_operator::{FmOperatorNode, FmOperatorParams};
 pub use fof_source::{FofSourceNode, FofSourceParams, Formant, MAX_FOF_GRAINS, MAX_FORMANTS};
 pub use granular_source::{GranularSourceNode, GranularSourceParams, MAX_GRAINS};
