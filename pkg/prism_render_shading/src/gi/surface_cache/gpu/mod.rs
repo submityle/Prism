@@ -1,0 +1,45 @@
+//! `GPU` surface-cache producers: on-device twins of the surface-cache `CPU`
+//! golden, built to the Lumen-style surfel-atlas model.
+//!
+//! A Lumen-style surface cache keeps every surfel's directional outgoing
+//! radiance in a shared octahedral atlas and refreshes it from the `GPU` every
+//! frame. The host-side golden in [`super::atlas`] / [`super::integration`]
+//! owns the addressing and temporal-integration maths; this module hosts the
+//! compute-kernel twins that actually run on device plus the `repr(C)` `ABI`
+//! and the scalar `CPU` mirrors that pin each kernel to its golden.
+//!
+//! # Slices
+//!
+//! * [`abi`] — the `repr(C)` `std430` host/device layout shared with the
+//!   `WESL` kernels (parameters, requests, resolved slots) and the stride
+//!   constants and compile-time size assertions that guard it.
+//! * [`alloc`] — the scalar `CPU` mirror [`allocate_slot`] of the
+//!   surfel-allocation (atlas-addressing) kernel
+//!   `shaders/surfel_alloc.wesl`, resolving each request's global atlas texel
+//!   and tile exactly as the kernel does.
+//!
+//! # Validation model
+//!
+//! The sandbox has no `GPU` (Metal is unavailable), so the kernels are not
+//! dispatched here. Instead each slice is validated two ways, mirroring the
+//! no-`GPU` paradigm the sibling render crates use: `naga` parses and
+//! type-checks the `WESL` source (proving it compiles exactly as it will on
+//! device), and a `CPU` mirror reproduces the kernel's arithmetic and is
+//! cross-checked bit-for-bit against the host golden over a direction/id sweep.
+//! Both live in the `#[cfg(test)]` [`mod@tests`] module.
+//!
+//! Provenance: standard octahedral surfel-atlas addressing; no Unreal Engine
+//! source or derived code.
+
+pub mod abi;
+pub mod alloc;
+
+pub use abi::{
+    GpuSurfelAllocParams, GpuSurfelAllocRequest, GpuSurfelAllocSlot, SURFEL_ALLOC_FLAG_VALID,
+    SURFEL_ALLOC_PARAMS_SIZE, SURFEL_ALLOC_REQUEST_STRIDE, SURFEL_ALLOC_SLOT_STRIDE,
+    SURFEL_ALLOC_WORKGROUP_SIZE,
+};
+pub use alloc::allocate_slot;
+
+#[cfg(test)]
+mod tests;

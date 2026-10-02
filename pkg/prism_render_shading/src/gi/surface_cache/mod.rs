@@ -15,8 +15,12 @@
 //!   reuses [`crate::gi::world_space::octahedral`].
 //! * [`integration`] — confidence-weighted temporal EMA with disocclusion reset
 //!   and a bilateral spatial filter over geometrically compatible neighbours.
+//! * [`gpu`] — on-device producer twins (`WESL` compute kernels), their
+//!   `repr(C)` host/device `ABI`, and the scalar `CPU` mirrors that pin each
+//!   kernel bit-for-bit to the golden above.
 
 pub mod atlas;
+pub mod gpu;
 pub mod integration;
 pub mod surfel;
 

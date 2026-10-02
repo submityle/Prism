@@ -12,5 +12,8 @@ bevy_math = { path = "../../crates/bevy_math", version = "0.20.0-dev", default-f
 prism_render_architecture = { path = "../prism_render_architecture" }
 prism_render_material = { path = "../prism_render_material" }
 
+[dev-dependencies]
+naga = { version = "30", features = ["wgsl-in"] }
+
 [lints]
 workspace = true
