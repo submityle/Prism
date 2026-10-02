@@ -24,11 +24,16 @@ mod manifest;
 mod permutation;
 mod registry;
 mod state;
+mod pso_cache;
 
 pub use manifest::{ManifestExpectation, RejectionReason, ValidationOutcome};
 pub use permutation::{PermutationKey, PermutationSelector, PermutationSpace};
 pub use registry::{RegisterError, RegistryEntry, ShaderPackageRegistry};
 pub use state::TransitionError;
+pub use pso_cache::{
+    AdmitOutcome, DeviceFingerprint, FingerprintMismatch, GraphicsBackend, LruPsoCache,
+    PipelineStateHash, PsoCacheKey, WarmPriority, WarmRequest, WarmSetPlan, WarmSetPlanner,
+};
 
 /// Stable, human-readable identifier for a shader package.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]

@@ -658,6 +658,15 @@
 //!   the real per-pass fold with its pinned skip and collider ordering (see
 //!   [`collision`]).
 //!
+//! * [`GpuHairStrandRestLengths`] evaluates
+//!   [`strand_rest_lengths`](prism_render_architecture::hair::groom_import::strand_rest_lengths),
+//!   the per-segment rest lengths an XPBD edge constraint targets: one thread
+//!   per edge over a flattened batch of strands emits `sqrt(dot(d, d))` of each
+//!   edge vector, yielding `n - 1` lengths for an `n`-point strand and an empty
+//!   list for a strand shorter than two points. Unlike [`GpuStrandMetrics`],
+//!   which sums the segment lengths into one scalar arc length per strand, this
+//!   twin keeps the bare per-edge lengths (see [`strand_rest_lengths`]).
+//!
 //! * [`GpuHairStrandTangents`] evaluates
 //!   [`strand_tangents`](prism_render_architecture::hair::frames::strand_tangents),
 //!   the per-control-point finite-difference tangents: one thread per control
@@ -764,6 +773,7 @@ pub mod spectrum_sample_map;
 pub mod strand_collision_resolve;
 pub mod strand_keep_ratio;
 pub mod strand_metrics;
+pub mod strand_rest_lengths;
 pub mod strand_tangents;
 pub mod stratified_allocation;
 pub mod stratified_weights;
@@ -860,6 +870,7 @@ pub use strand_collision_resolve::{
 };
 pub use strand_keep_ratio::{reference_strand_keep_ratio, GpuHairStrandKeepRatio};
 pub use strand_metrics::{GpuStrandMetric, GpuStrandMetrics};
+pub use strand_rest_lengths::{reference_strand_rest_lengths, GpuHairStrandRestLengths};
 pub use strand_tangents::{reference_strand_tangents, GpuHairStrandTangents};
 pub use stratified_allocation::{reference_stratified_allocation, GpuHairStratifiedAllocation};
 pub use stratified_weights::{reference_stratified_weights, GpuHairStratifiedWeights};
