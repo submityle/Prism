@@ -60,6 +60,7 @@ members = [
   "pkg/prism_ui_form",
   "pkg/prism_ui_virtual",
   "pkg/prism_ui_async",
+  "pkg/prism_ui_scheduler",
   "pkg/prism_ui_a11y",
   "pkg/prism_ui_motion",
   "pkg/prism_ui_scoped",
