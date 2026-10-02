@@ -36,6 +36,8 @@ mod reduce;
 mod sphere_trimesh;
 mod sphere_trimesh_gpu;
 mod trimesh;
+mod trimesh_raycast;
+mod trimesh_raycast_gpu;
 
 pub use capsule_trimesh::cpu_capsule_trimesh_collide;
 pub use capsule_trimesh_gpu::GpuCapsuleTrimeshCollider;
@@ -45,3 +47,7 @@ pub use obb_trimesh_manifold::cpu_obb_trimesh_manifold_collide;
 pub use sphere_trimesh::cpu_sphere_trimesh_collide;
 pub use sphere_trimesh_gpu::GpuSphereTrimeshCollider;
 pub use trimesh::Trimesh;
+pub use trimesh_raycast::{
+    cpu_trimesh_raycast, cpu_trimesh_raycast_built, cpu_trimesh_raycast_bvh, MeshRay, TrimeshRayHit,
+};
+pub use trimesh_raycast_gpu::GpuTrimeshRayCast;
