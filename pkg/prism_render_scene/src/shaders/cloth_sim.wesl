@@ -349,7 +349,7 @@ fn cloth_strain_limit(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let dist = sqrt(dist_sq);
     let excess = dist - max_len;
-    let direction = delta * (1.0 / dist);
+    let direction = delta / dist;
     let correction = direction * excess;
     positions[a] = vec4<f32>(positions[a].xyz - correction * (wa / w_sum), positions[a].w);
     positions[b] = vec4<f32>(positions[b].xyz + correction * (wb / w_sum), positions[b].w);

@@ -36,9 +36,15 @@
 //!   口径一致）。单侧内核多一道 `error <= 0.0` 早退门，恰为黄金 `project_distance`
 //!   里 `is_one_sided() && error <= 0.0` 的同序分支（该门仍留在 render 侧，门后
 //!   才调委托）。
-//! * **应变限制**：`direction = delta * (1.0 / dist)`、`correction = direction *
-//!   excess`、`pos_a -= correction * (wa / w_sum)`、`pos_b += correction *
-//!   (wb / w_sum)`，与黄金 `apply_strain_limit` 完全同序。
+//! * **应变限制**：现已统一委托物理引擎单一真源
+//!   [`prism_physics_core::soft::constraint::project_strain_limit`]
+//!   （`min_scale = 0`，最大拉伸硬夹）：分离方向 `direction = delta / dist`
+//!   （**逐分量除**，与物理 `direction = delta / length` 及更新后的
+//!   `cloth_sim.wesl` 应变内核逐位同序）、`correction = direction * excess`、
+//!   `pos_a -= correction * (wa / w_sum)`、`pos_b += correction * (wb / w_sum)`，
+//!   与黄金 `apply_strain_limit`（亦已改为委托）完全同序。黄金侧保留
+//!   `dist_sq <= max_sq || dist_sq <= EPS_LEN_SQ` 的 band / 退化门，门后才调委托，
+//!   故物理自由函数内更紧的 `length < f32::EPSILON` 退化门永不改变已过门边的结果。
 //! * **速度回收**：`delta * (1.0 / dt_sub)`（倒数乘），与黄金
 //!   `position.sub(prev).scale(1.0 / dt_sub)` 同序；pinned 清零亦一致。
 //!   （`cloth_sim.wesl` 现已把回收从早期的逐分量除法改为倒数乘，故速度现亦可
@@ -196,11 +202,14 @@ fn wesl_strain_limit(
     }
     let dist = dist_sq.sqrt();
     let excess = dist - max_len;
-    let inv_dist = 1.0 / dist;
+    // Separation direction is a component-wise divide (`delta / dist`),
+    // matching the physics `project_strain_limit` single source and the
+    // updated `cloth_sim.wesl` strain-limit kernel.
+    let direction = [delta[0] / dist, delta[1] / dist, delta[2] / dist];
     let correction = [
-        delta[0] * inv_dist * excess,
-        delta[1] * inv_dist * excess,
-        delta[2] * inv_dist * excess,
+        direction[0] * excess,
+        direction[1] * excess,
+        direction[2] * excess,
     ];
     let ka = wa / w_sum;
     let kb = wb / w_sum;

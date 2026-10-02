@@ -237,12 +237,31 @@ fn apply_strain_limit(particles: &mut [ClothParticle], graph: &ConstraintGraph, 
             if dist_sq <= max_sq || dist_sq <= EPS_LEN_SQ {
                 continue;
             }
-            let dist = dist_sq.sqrt();
-            let excess = dist - max_len;
-            let direction = delta.scale(1.0 / dist);
-            let correction = direction.scale(excess);
-            particles[a].position = pa.position.sub(correction.scale(wa / w_sum));
-            particles[b].position = pb.position.add(correction.scale(wb / w_sum));
+            // Delegate the geometric clamp arithmetic to the single
+            // authoritative physics step
+            // (`prism_physics_core::soft::constraint::project_strain_limit`,
+            // `min_scale = 0` for a max-stretch-only limiter). The render-side
+            // kind / self / bounds / mass / band / degeneracy guards above gate
+            // the call so the delegated step only runs on the exact
+            // overstretched structural edges the golden clamps, and the
+            // separation direction stays a component-wise `delta / length`
+            // divide — bit-identical to the `cloth_sim.wesl` GPU twin.
+            let mut positions = [
+                physics_bridge::to_glam(pa.position),
+                physics_bridge::to_glam(pb.position),
+            ];
+            let inverse_masses = [wa, wb];
+            prism_physics_core::soft::constraint::project_strain_limit(
+                &mut positions,
+                &inverse_masses,
+                0,
+                1,
+                constraint.rest_length,
+                max_scale,
+                0.0,
+            );
+            particles[a].position = physics_bridge::from_glam(positions[0]);
+            particles[b].position = physics_bridge::from_glam(positions[1]);
         }
     }
 }
