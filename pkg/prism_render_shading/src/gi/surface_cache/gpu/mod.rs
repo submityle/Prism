@@ -17,6 +17,10 @@
 //!   surfel-allocation (atlas-addressing) kernel
 //!   `shaders/surfel_alloc.wesl`, resolving each request's global atlas texel
 //!   and tile exactly as the kernel does.
+//! * [`update`] — the scalar `CPU` mirror [`update_entry`] of the
+//!   surfel-update (temporal-integration) kernel `shaders/surfel_update.wesl`,
+//!   advancing a surfel's cached radiance by one frame (confidence-weighted
+//!   `EMA` + disocclusion reset) exactly as the kernel does.
 //!
 //! # Validation model
 //!
@@ -33,13 +37,19 @@
 
 pub mod abi;
 pub mod alloc;
+pub mod update;
 
 pub use abi::{
     GpuSurfelAllocParams, GpuSurfelAllocRequest, GpuSurfelAllocSlot, SURFEL_ALLOC_FLAG_VALID,
     SURFEL_ALLOC_PARAMS_SIZE, SURFEL_ALLOC_REQUEST_STRIDE, SURFEL_ALLOC_SLOT_STRIDE,
     SURFEL_ALLOC_WORKGROUP_SIZE,
 };
+pub use abi::{
+    GpuSurfelUpdateInput, GpuSurfelUpdateParams, GpuSurfelUpdateResult, SURFEL_UPDATE_INPUT_STRIDE,
+    SURFEL_UPDATE_PARAMS_SIZE, SURFEL_UPDATE_RESULT_STRIDE, SURFEL_UPDATE_WORKGROUP_SIZE,
+};
 pub use alloc::allocate_slot;
+pub use update::update_entry;
 
 #[cfg(test)]
 mod tests;
