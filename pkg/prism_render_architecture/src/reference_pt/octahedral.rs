@@ -81,9 +81,11 @@ pub fn square_to_direction(u: f32, v: f32) -> Vec3 {
 /// The solid-angle-to-area Jacobian `d_omega / dA = |d|_1^3` of the octahedral
 /// map at unit direction `dir`.
 ///
-/// Multiplying a square-space (area-measure) density by this value yields the
-/// solid-angle density of the same sample, and dividing does the inverse; this
-/// is the only measure correction the environment importance sampler applies.
+/// A density expressed per unit area on the octahedral square maps to a density
+/// per unit solid angle by *dividing* by this value (and the inverse direction
+/// multiplies by it), since `p_omega d_omega = p_area dA` with `d_omega / dA`
+/// equal to this Jacobian; this is the only measure correction the environment
+/// importance sampler applies.
 #[must_use]
 pub fn solid_angle_jacobian(dir: Vec3) -> f32 {
     let l1 = dir.x.abs() + dir.y.abs() + dir.z.abs();
