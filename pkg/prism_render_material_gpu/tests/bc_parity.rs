@@ -14,10 +14,11 @@ use prism_render_material::{
     decode_bc1, decode_bc3, decode_bc6h_mode12_signed, decode_bc6h_mode12_unsigned,
     decode_bc6h_mode13_signed, decode_bc6h_mode13_unsigned, decode_bc6h_mode14_signed,
     decode_bc6h_mode14_unsigned, decode_bc6h_mode1_signed, decode_bc6h_mode1_unsigned,
-    decode_bc6h_mode2_signed, decode_bc6h_mode2_unsigned, decode_bc6h_signed, decode_bc6h_unsigned,
-    decode_bc7, decode_bc7_mode0, decode_bc7_mode1, decode_bc7_mode2, decode_bc7_mode3,
-    decode_bc7_mode7, encode_bc1, encode_bc3, encode_bc6h_mode11_unsigned, encode_bc7_mode4,
-    encode_bc7_mode5, encode_bc7_mode6,
+    decode_bc6h_mode2_signed, decode_bc6h_mode2_unsigned, decode_bc6h_mode3_signed,
+    decode_bc6h_mode3_unsigned, decode_bc6h_signed, decode_bc6h_unsigned, decode_bc7,
+    decode_bc7_mode0, decode_bc7_mode1, decode_bc7_mode2, decode_bc7_mode3, decode_bc7_mode7,
+    encode_bc1, encode_bc3, encode_bc6h_mode11_unsigned, encode_bc7_mode4, encode_bc7_mode5,
+    encode_bc7_mode6,
 };
 use prism_render_material_gpu::BlockOracle;
 use wgpu::{Features, TextureFormat};
@@ -1057,14 +1058,14 @@ fn random_two_subset_block(
     partition: u32,
     mode_bits: u32,
     base_mask: u32,
-    delta_mask: u32,
+    delta_mask: [u32; 3],
 ) -> [u8; 16] {
     let mut fv = [0u32; 14];
     for c in 0..3 {
         fv[c] = rng.next_u32() & base_mask;
     }
     for d in 3..12 {
-        fv[d] = rng.next_u32() & delta_mask;
+        fv[d] = rng.next_u32() & delta_mask[(d - 3) % 3];
     }
     fv[12] = partition;
     fv[13] = mode_bits;
@@ -1108,8 +1109,14 @@ fn bc6h_mode2_unsigned_parity_against_gpu() {
     let mut rng = Rng(0x6C12_2001);
     for partition in 0..32u32 {
         for _ in 0..8 {
-            let block =
-                random_two_subset_block(&mut rng, BC6H_MODE2_DESC, partition, 0b01, 0x7F, 0x3F);
+            let block = random_two_subset_block(
+                &mut rng,
+                BC6H_MODE2_DESC,
+                partition,
+                0b01,
+                0x7F,
+                [0x3F; 3],
+            );
             let cpu = decode_bc6h_unsigned(&block).expect("mode-2 block decodes");
             let direct = decode_bc6h_mode2_unsigned(&block);
             assert_eq!(cpu, direct, "dispatch must match direct mode-2 decode");
@@ -1130,13 +1137,164 @@ fn bc6h_mode2_signed_parity_against_gpu() {
     let mut rng = Rng(0x6C12_2051);
     for partition in 0..32u32 {
         for _ in 0..8 {
-            let block =
-                random_two_subset_block(&mut rng, BC6H_MODE2_DESC, partition, 0b01, 0x7F, 0x3F);
+            let block = random_two_subset_block(
+                &mut rng,
+                BC6H_MODE2_DESC,
+                partition,
+                0b01,
+                0x7F,
+                [0x3F; 3],
+            );
             let cpu = decode_bc6h_signed(&block).expect("mode-2 block decodes");
             let direct = decode_bc6h_mode2_signed(&block);
             assert_eq!(cpu, direct, "dispatch must match direct mode-2 decode");
             let gpu = oracle.decode_rgb_f32(TextureFormat::Bc6hRgbFloat, &block);
             assert_rgb_f32_close(&cpu, &gpu, &format!("mode2 signed partition {partition}"));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BC6H two-subset modes 3-10 GPU parity (parametric).
+//
+// Each 5-bit mode carries its own DirectXTex ModeDescriptor (scrambled bit
+// order), base precision and per-channel delta widths. The table below drives
+// the shared assembler + both signed/unsigned decoders against the hardware
+// oracle; a wrong descriptor diverges from the GPU decode.
+// ---------------------------------------------------------------------------
+
+/// One BC6H two-subset mode under test: name, 5-bit mode field, base precision,
+/// per-channel (R,G,B) delta widths (0 == non-transformed raw endpoints), and
+/// the 82-entry descriptor.
+struct TwoSubsetSpec {
+    name: &'static str,
+    mode_bits: u32,
+    base_prec: u32,
+    delta: [u32; 3],
+    desc: &'static [(F6, u8)],
+}
+
+#[rustfmt::skip]
+const BC6H_MODE3_DESC: &[(F6, u8)] = {
+    use F6::{Bw, Bx, By, Bz, D, Gw, Gx, Gy, Gz, M, Rw, Rx, Ry, Rz};
+    &[
+        (M, 0), (M, 1), (M, 2), (M, 3), (M, 4), (Rw, 0), (Rw, 1), (Rw, 2), (Rw, 3), (Rw, 4),
+        (Rw, 5), (Rw, 6), (Rw, 7), (Rw, 8), (Rw, 9), (Gw, 0), (Gw, 1), (Gw, 2), (Gw, 3), (Gw, 4),
+        (Gw, 5), (Gw, 6), (Gw, 7), (Gw, 8), (Gw, 9), (Bw, 0), (Bw, 1), (Bw, 2), (Bw, 3), (Bw, 4),
+        (Bw, 5), (Bw, 6), (Bw, 7), (Bw, 8), (Bw, 9), (Rx, 0), (Rx, 1), (Rx, 2), (Rx, 3), (Rx, 4),
+        (Rw, 10), (Gy, 0), (Gy, 1), (Gy, 2), (Gy, 3), (Gx, 0), (Gx, 1), (Gx, 2), (Gx, 3), (Gw, 10),
+        (Bz, 0), (Gz, 0), (Gz, 1), (Gz, 2), (Gz, 3), (Bx, 0), (Bx, 1), (Bx, 2), (Bx, 3), (Bw, 10),
+        (Bz, 1), (By, 0), (By, 1), (By, 2), (By, 3), (Ry, 0), (Ry, 1), (Ry, 2), (Ry, 3), (Ry, 4),
+        (Bz, 2), (Rz, 0), (Rz, 1), (Rz, 2), (Rz, 3), (Rz, 4), (Bz, 3), (D, 0), (D, 1), (D, 2),
+        (D, 3), (D, 4),
+    ]
+};
+
+const BC6H_TWO_SUBSET_SPECS: &[TwoSubsetSpec] = &[TwoSubsetSpec {
+    name: "mode3",
+    mode_bits: 0b00010,
+    base_prec: 11,
+    delta: [5, 4, 4],
+    desc: BC6H_MODE3_DESC,
+}];
+
+/// Dispatch to the direct per-mode decoder so the parametric test also proves
+/// the exported single-mode entry points match the generic dispatcher.
+fn decode_two_subset_direct(mode_bits: u32, block: &[u8; 16], signed: bool) -> [[f32; 3]; 16] {
+    match (mode_bits, signed) {
+        (0b00010, false) => decode_bc6h_mode3_unsigned(block),
+        (0b00010, true) => decode_bc6h_mode3_signed(block),
+        _ => unreachable!("unhandled two-subset spec mode {mode_bits:#07b}"),
+    }
+}
+
+fn delta_mask(delta: [u32; 3]) -> [u32; 3] {
+    let m = |w: u32| {
+        if w == 0 {
+            (1u32 << 6) - 1
+        } else {
+            (1u32 << w) - 1
+        }
+    };
+    [m(delta[0]), m(delta[1]), m(delta[2])]
+}
+
+/// BC6H two-subset modes 3-10 **unsigned** parity against GPU hardware.
+#[test]
+fn bc6h_two_subset_modes_unsigned_parity_against_gpu() {
+    let Some(oracle) = BlockOracle::try_new() else {
+        eprintln!("no GPU adapter with BC support reachable; skipping BC6H two-subset unsigned");
+        return;
+    };
+    assert!(oracle.features().contains(Features::TEXTURE_COMPRESSION_BC));
+    for (si, spec) in BC6H_TWO_SUBSET_SPECS.iter().enumerate() {
+        let mut rng = Rng(0x6C13_0000 ^ (si as u32).wrapping_mul(0x9E37_79B1));
+        let base_mask = (1u32 << spec.base_prec) - 1;
+        let dmask = delta_mask(spec.delta);
+        for partition in 0..32u32 {
+            for _ in 0..8 {
+                let block = random_two_subset_block(
+                    &mut rng,
+                    spec.desc,
+                    partition,
+                    spec.mode_bits,
+                    base_mask,
+                    dmask,
+                );
+                let cpu = decode_bc6h_unsigned(&block).expect("two-subset block decodes");
+                let direct = decode_two_subset_direct(spec.mode_bits, &block, false);
+                assert_eq!(
+                    cpu, direct,
+                    "dispatch must match direct {} decode",
+                    spec.name
+                );
+                let gpu = oracle.decode_rgb_f32(TextureFormat::Bc6hRgbUfloat, &block);
+                assert_rgb_f32_close(
+                    &cpu,
+                    &gpu,
+                    &format!("{} unsigned partition {partition}", spec.name),
+                );
+            }
+        }
+    }
+}
+
+/// BC6H two-subset modes 3-10 **signed** (`SF16`) parity against GPU hardware.
+#[test]
+fn bc6h_two_subset_modes_signed_parity_against_gpu() {
+    let Some(oracle) = BlockOracle::try_new() else {
+        eprintln!("no GPU adapter with BC support reachable; skipping BC6H two-subset signed");
+        return;
+    };
+    assert!(oracle.features().contains(Features::TEXTURE_COMPRESSION_BC));
+    for (si, spec) in BC6H_TWO_SUBSET_SPECS.iter().enumerate() {
+        let mut rng = Rng(0x6C13_5000 ^ (si as u32).wrapping_mul(0x9E37_79B1));
+        let base_mask = (1u32 << spec.base_prec) - 1;
+        let dmask = delta_mask(spec.delta);
+        for partition in 0..32u32 {
+            for _ in 0..8 {
+                let block = random_two_subset_block(
+                    &mut rng,
+                    spec.desc,
+                    partition,
+                    spec.mode_bits,
+                    base_mask,
+                    dmask,
+                );
+                let cpu = decode_bc6h_signed(&block).expect("two-subset block decodes");
+                let direct = decode_two_subset_direct(spec.mode_bits, &block, true);
+                assert_eq!(
+                    cpu, direct,
+                    "dispatch must match direct {} decode",
+                    spec.name
+                );
+                let gpu = oracle.decode_rgb_f32(TextureFormat::Bc6hRgbFloat, &block);
+                assert_rgb_f32_close(
+                    &cpu,
+                    &gpu,
+                    &format!("{} signed partition {partition}", spec.name),
+                );
+            }
         }
     }
 }
