@@ -26,7 +26,9 @@
 
 use alloc::vec::Vec;
 
+use super::bsdf::Bsdf;
 use super::distribution::Distribution2D;
+use super::mis::power_heuristic;
 use super::octahedral::{direction_to_square, solid_angle_jacobian, square_to_direction};
 use super::sampler::Rng;
 use super::Vec3;
@@ -194,6 +196,46 @@ impl EnvironmentMap {
             radiance,
             pdf,
         }
+    }
+
+    /// Estimates direct lighting from the dome by next-event estimation.
+    ///
+    /// Importance-samples a dome direction, evaluates the surface `BSDF` toward
+    /// it, tests visibility to infinity with `occluded`, and returns the
+    /// power-heuristic-weighted contribution (the Strategy-A half of the dome's
+    /// multiple-importance pair; `BSDF`-sampled escapes are Strategy B). The
+    /// result is black for an inert map, a sample below the horizon, an occluded
+    /// connection, or a vanishing `BSDF`.
+    #[must_use]
+    pub fn sample_direct<F>(
+        &self,
+        point: Vec3,
+        normal: Vec3,
+        wo: Vec3,
+        bsdf: &Bsdf,
+        rng: &mut Rng,
+        occluded: &F,
+    ) -> Vec3
+    where
+        F: Fn(Vec3, Vec3, f32) -> bool,
+    {
+        let sample = self.sample(rng);
+        if sample.pdf <= 0.0 {
+            return Vec3::ZERO;
+        }
+        let wi = sample.direction;
+        let cos_surface = normal.dot(wi);
+        if cos_surface <= 0.0 {
+            return Vec3::ZERO;
+        }
+        let fr = bsdf.evaluate(wo, wi, normal);
+        if fr.max_component() <= 0.0 || occluded(point, wi, f32::INFINITY) {
+            return Vec3::ZERO;
+        }
+        let bsdf_pdf = bsdf.pdf(wo, wi, normal);
+        let weight = power_heuristic(sample.pdf, bsdf_pdf);
+        fr.mul(sample.radiance)
+            .scale(cos_surface * weight / sample.pdf)
     }
 
     /// Fetches the nearest texel for a point on the unit square `[0, 1)^2`.

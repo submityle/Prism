@@ -27,6 +27,7 @@ use alloc::vec::Vec;
 
 use super::area_light::AreaLights;
 use super::bsdf::Bsdf;
+use super::environment::EnvironmentMap;
 use super::estimator::{Light, LightHit};
 use super::mis::power_heuristic;
 use super::sampler::Rng;
@@ -94,8 +95,72 @@ impl core::fmt::Display for SceneError {
     }
 }
 
+/// The distant lighting returned by rays that escape the geometry.
+///
+/// A `Constant` dome is uniform radiance with no light-sampling strategy, so
+/// escaped rays claim it in full (its [`Environment::pdf`] is zero and
+/// multiple-importance weighting falls back to the `BSDF` arrival). A `Map`
+/// dome is an image-based [`EnvironmentMap`] that is importance-sampled by
+/// next-event estimation and weighted against `BSDF`-sampled escapes.
+#[derive(Clone, Debug)]
+pub enum Environment {
+    /// A spatially uniform radiance dome.
+    Constant(Vec3),
+    /// An image-based radiance dome in octahedral layout.
+    Map(EnvironmentMap),
+}
+
+impl Environment {
+    /// The radiance arriving from the dome along the unit direction `dir`.
+    #[must_use]
+    pub fn radiance(&self, dir: Vec3) -> Vec3 {
+        match self {
+            Self::Constant(radiance) => *radiance,
+            Self::Map(map) => map.radiance(dir),
+        }
+    }
+
+    /// The solid-angle density of drawing `dir` from this dome's next-event
+    /// estimator, or zero when the dome offers no light-sampling strategy.
+    #[must_use]
+    pub fn pdf(&self, dir: Vec3) -> f32 {
+        match self {
+            Self::Constant(_) => 0.0,
+            Self::Map(map) => map.pdf(dir),
+        }
+    }
+
+    /// Estimates direct lighting from the dome by next-event estimation,
+    /// returning black for a `Constant` dome (which has no light-sampling
+    /// strategy and is gathered only through `BSDF`-sampled escapes).
+    #[must_use]
+    fn sample_direct<F>(
+        &self,
+        point: Vec3,
+        normal: Vec3,
+        wo: Vec3,
+        bsdf: &Bsdf,
+        rng: &mut Rng,
+        occluded: &F,
+    ) -> Vec3
+    where
+        F: Fn(Vec3, Vec3, f32) -> bool,
+    {
+        match self {
+            Self::Constant(_) => Vec3::ZERO,
+            Self::Map(map) => map.sample_direct(point, normal, wo, bsdf, rng, occluded),
+        }
+    }
+}
+
+impl From<Vec3> for Environment {
+    fn from(radiance: Vec3) -> Self {
+        Self::Constant(radiance)
+    }
+}
+
 /// A traced scene: geometry, a per-triangle material table, analytic lights, and
-/// a constant environment radiance for rays that escape to infinity.
+/// a distant environment dome for rays that escape to infinity.
 #[derive(Clone, Debug)]
 pub struct Scene {
     geometry: TriangleMeshBvh,
@@ -104,12 +169,17 @@ pub struct Scene {
     /// Emissive mesh triangles gathered into one sampleable compound light for
     /// next-event estimation; empty when no material emits.
     area_lights: AreaLights,
-    environment: Vec3,
+    environment: Environment,
 }
 
 impl Scene {
     /// Builds a scene, binding one [`Material`] to each triangle (indexed by the
-    /// mesh's original triangle id) and a constant `environment` radiance.
+    /// mesh's original triangle id) and a distant `environment` dome.
+    ///
+    /// `environment` accepts anything convertible into an [`Environment`]: a
+    /// [`Vec3`] becomes a uniform [`Environment::Constant`] dome, while an
+    /// [`EnvironmentMap`] can be passed as [`Environment::Map`] for an
+    /// importance-sampled image-based dome.
     ///
     /// # Errors
     ///
@@ -119,7 +189,7 @@ impl Scene {
         geometry: TriangleMeshBvh,
         materials: Vec<Material>,
         lights: Vec<Light>,
-        environment: Vec3,
+        environment: impl Into<Environment>,
     ) -> Result<Self, SceneError> {
         let triangles = geometry.mesh().triangle_count();
         if materials.len() != triangles {
@@ -145,14 +215,14 @@ impl Scene {
             materials,
             lights,
             area_lights,
-            environment,
+            environment: environment.into(),
         })
     }
 
-    /// The constant radiance returned by rays that leave the scene.
+    /// The distant dome returned by rays that leave the scene.
     #[must_use]
-    pub fn environment(&self) -> Vec3 {
-        self.environment
+    pub fn environment(&self) -> &Environment {
+        &self.environment
     }
 
     /// Finds the closest surface hit by `ray`, resolved into a shading record.
@@ -299,7 +369,24 @@ impl PathIntegrator {
             }
 
             let Some(isect) = geo else {
-                radiance = radiance.add(throughput.mul(scene.environment));
+                // An escaped ray gathers the environment dome. This is the
+                // `BSDF`-sampling half of the dome's `MIS` pair: a specular or
+                // camera bounce claims it in full, while a diffuse/glossy bounce
+                // shares it with the dome's next-event estimation (which only
+                // exists for an importance-sampled map) under the power
+                // heuristic.
+                let env_radiance = scene.environment.radiance(dir_v);
+                let weight = if prev_delta {
+                    1.0
+                } else {
+                    let env_pdf = scene.environment.pdf(dir_v);
+                    if env_pdf > 0.0 {
+                        power_heuristic(prev_bsdf_pdf, env_pdf)
+                    } else {
+                        1.0
+                    }
+                };
+                radiance = radiance.add(throughput.mul(env_radiance).scale(weight));
                 break;
             };
             let material = scene.materials[isect.material];
@@ -363,6 +450,19 @@ impl PathIntegrator {
                     &occluded,
                 );
                 radiance = radiance.add(throughput.mul(mesh_direct));
+                // Next-event estimation against the environment dome, the
+                // Strategy-A half of its `MIS` pair (an importance-sampled map
+                // only; a constant dome contributes nothing here and is gathered
+                // through `BSDF`-sampled escapes instead).
+                let env_direct = scene.environment.sample_direct(
+                    shadow_origin,
+                    shading_normal,
+                    wo,
+                    &material.bsdf,
+                    rng,
+                    &occluded,
+                );
+                radiance = radiance.add(throughput.mul(env_direct));
             }
 
             // Stop before exceeding the configured bounce budget.
@@ -708,7 +808,7 @@ mod tests {
     fn floor_with_overhead_emitter(
         floor_albedo: Vec3,
         emission: Vec3,
-    ) -> (TriangleMeshBvh, alloc::vec::Vec<Material>) {
+    ) -> (TriangleMeshBvh, Vec<Material>) {
         let positions = alloc::vec![
             // Floor (y = 0).
             [-10.0_f32, 0.0, -10.0],
@@ -903,5 +1003,129 @@ mod tests {
             (path_mean / ref_mean - 1.0).abs() < 4.0e-2,
             "path-traced mean {path_mean} vs light-sampling reference {ref_mean}"
         );
+    }
+
+    /// Builds a smoothly varying octahedral radiance dome for the environment
+    /// integration tests.
+    fn gradient_env() -> EnvironmentMap {
+        let width = 16;
+        let height = 16;
+        let mut texels = Vec::with_capacity(width * height);
+        for row in 0..height {
+            for col in 0..width {
+                let u = (col as f32 + 0.5) / width as f32;
+                let v = (row as f32 + 0.5) / height as f32;
+                let brightness = 0.2 + 3.0 * u * u + 1.5 * v;
+                texels.push(Vec3::new(brightness, 0.6 * brightness, 0.3 * brightness));
+            }
+        }
+        EnvironmentMap::new(width, height, texels)
+    }
+
+    /// Rejection-samples a direction uniformly over the upper hemisphere about
+    /// `+y`, returning the direction and its cosine with the normal.
+    fn uniform_upper_hemisphere(rng: &mut Rng) -> Vec3 {
+        loop {
+            let x = 2.0 * rng.next_f32() - 1.0;
+            let y = 2.0 * rng.next_f32() - 1.0;
+            let z = 2.0 * rng.next_f32() - 1.0;
+            let len_sq = x * x + y * y + z * z;
+            if len_sq > 1e-6 && len_sq <= 1.0 {
+                let inv = 1.0 / len_sq.sqrt();
+                let dir = Vec3::new(x * inv, y * inv, z * inv);
+                return if dir.y >= 0.0 {
+                    dir
+                } else {
+                    Vec3::new(dir.x, -dir.y, dir.z)
+                };
+            }
+        }
+    }
+
+    #[test]
+    fn environment_map_visible_on_escape() {
+        // A camera ray into empty geometry is a delta vertex, so it claims the
+        // dome radiance along its direction in full.
+        let map = gradient_env();
+        let dir = Vec3::new(0.0, -1.0, 0.0);
+        let expected = map.radiance(dir);
+        let scene = Scene::new(
+            empty_geometry(),
+            alloc::vec![],
+            alloc::vec![],
+            Environment::Map(map),
+        )
+        .expect("environment scene");
+        let integrator = PathIntegrator::new(8, 5);
+        let mut rng = Rng::seed(5);
+        let value = integrator.radiance(&scene, down_ray(), &mut rng);
+        assert!(value.sub(expected).length() < 1e-5, "got {value:?}");
+    }
+
+    #[test]
+    fn environment_map_lights_lambert_floor() {
+        // A Lambertian floor under an image-based dome must return the same
+        // single-bounce reflected radiance the integrator's two sampling
+        // strategies estimate and an independent hemisphere integral predicts.
+        let albedo = 0.5f32;
+        let map = gradient_env();
+
+        // Reference reflected radiance L_o = (albedo / pi) * integral over the
+        // upper hemisphere of L(w) cos(theta) dw, estimated with uniform
+        // hemisphere sampling (density 1 / (2 pi)); the (albedo/pi)*(2 pi)
+        // prefactor collapses to 2 * albedo.
+        let mut ref_rng = Rng::with_stream(2, 9);
+        let ref_samples = 400_000;
+        let mut sum = [0.0f64; 3];
+        for _ in 0..ref_samples {
+            let dir = uniform_upper_hemisphere(&mut ref_rng);
+            let radiance = map.radiance(dir);
+            let cos = f64::from(dir.y);
+            sum[0] += f64::from(radiance.x) * cos;
+            sum[1] += f64::from(radiance.y) * cos;
+            sum[2] += f64::from(radiance.z) * cos;
+        }
+        let scale = 2.0 * f64::from(albedo) / f64::from(ref_samples);
+        let reference = [sum[0] * scale, sum[1] * scale, sum[2] * scale];
+
+        // Integrator estimate: a single scattering event (camera -> floor ->
+        // escape) with next-event estimation against the dome plus the
+        // `BSDF`-sampled escape, combined under multiple importance sampling.
+        let materials = alloc::vec![Material::new(Bsdf::Lambert {
+            albedo: Vec3::splat(albedo),
+        })];
+        let scene = Scene::new(
+            ground_plane(),
+            materials,
+            alloc::vec![],
+            Environment::Map(map.clone()),
+        )
+        .expect("floor under environment");
+        let integrator = PathIntegrator::new(2, 8);
+        let path_samples = 200_000u32;
+        let mut path_sum = [0.0f64; 3];
+        for s in 0..path_samples {
+            let mut rng = Rng::with_stream(41, u64::from(s) + 1);
+            let value = integrator.radiance(&scene, down_ray(), &mut rng);
+            path_sum[0] += f64::from(value.x);
+            path_sum[1] += f64::from(value.y);
+            path_sum[2] += f64::from(value.z);
+        }
+        let path = [
+            path_sum[0] / f64::from(path_samples),
+            path_sum[1] / f64::from(path_samples),
+            path_sum[2] / f64::from(path_samples),
+        ];
+
+        for channel in 0..3 {
+            assert!(reference[channel] > 0.0);
+            let rel = (path[channel] - reference[channel]).abs() / reference[channel];
+            assert!(
+                rel < 3e-2,
+                "channel {channel}: path {} vs reference {}",
+                path[channel],
+                reference[channel]
+            );
+        }
     }
 }
