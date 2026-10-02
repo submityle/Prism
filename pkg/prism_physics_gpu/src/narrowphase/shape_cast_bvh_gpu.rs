@@ -252,8 +252,17 @@ impl GpuBvhShapeCast {
         dt: f32,
         target_sep: f32,
     ) -> Vec<u32> {
-        let query = swept_aabb(shape, dt, target_sep.max(0.0));
         let capacity = u32::try_from(lbvh.num_leaves()).unwrap_or(u32::MAX);
+        // A resident tree with fewer than two leaves owns no traversable
+        // internal hierarchy, so the device descent can never reach its lone
+        // leaf and would spuriously report an empty candidate set. Fall back to
+        // the trivial scene (every leaf) exactly as the per-call gather does for
+        // a single-leaf CPU tree; the exact sweep then accepts or rejects it, so
+        // correctness never depends on the degenerate descent.
+        if lbvh.num_internal() == 0 {
+            return (0..capacity).collect();
+        }
+        let query = swept_aabb(shape, dt, target_sep.max(0.0));
         match self.overlap.query_resident(ctx, lbvh, &[query], capacity) {
             Ok(mut per_query) => per_query.pop().unwrap_or_default(),
             Err(_) => (0..capacity).collect(),

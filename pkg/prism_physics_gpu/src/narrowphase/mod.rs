@@ -137,6 +137,8 @@ mod ray_cast_bvh_gpu;
 mod shape_cast;
 mod shape_cast_bvh;
 mod shape_cast_bvh_gpu;
+mod sphere_cast_bvh;
+mod sphere_cast_bvh_gpu;
 mod sphere;
 mod sphere_triangle;
 mod sphere_triangle_gpu;
@@ -173,6 +175,11 @@ pub use ray_cast_bvh::{
     ray_cast, ray_cast_all, ray_cast_all_bvh, ray_cast_bvh, RayCastHit, SceneRay,
 };
 pub use ray_cast_bvh_gpu::GpuSceneRayCast;
+pub use sphere_cast_bvh::{
+    sphere_cast, sphere_cast_all, sphere_cast_all_bvh, sphere_cast_bvh, SceneSphereCast,
+    SphereCastHit,
+};
+pub use sphere_cast_bvh_gpu::GpuSceneSphereCast;
 pub use shape_cast::{cast_shape, cast_shape_all, RoundedConvex, ShapeCastHit};
 pub use shape_cast_bvh::{cast_shape_all_bvh, cast_shape_bvh};
 pub use shape_cast_bvh_gpu::GpuBvhShapeCast;
