@@ -335,6 +335,12 @@ pub trait LayoutProtocol {
 - **IME / 文本编辑**:输入法预编辑(composition)区间、光标 / 选区模型、命中测试到字形。
 - **成本控制**:整形结果按 `(文本, 样式, 宽度)` 缓存;只有脏文本重整形,接入 §9.3 的 `needs_layout`。
 
+> **实现状态(✅ `prism_ui_text`)**:分词/字素/UAX#14 换行/富文本/光标/选区/整形缓存全部落地;
+> 默认 `MetricShaper` 纯四则运算确定可复现,`shaping` feature 下 `SwashShaper` 借 swash Unicode 属性
+> 细化簇合并(不加载字体/不光栅化);BiDi 为 UAX#9 **最小子集**(基方向 + 强类型 even/odd level +
+> 中性继承 + run 合并),显式格式码/isolates/括号配对/完整 W/N 规则明确越界,留待对接 conformant 引擎。
+> 51 测试(shaping 53),clippy `-D warnings` 干净,no_std 通过。
+
 ### 9.7 输入 / 命中测试 / 声明式手势竞技场
 
 **借鉴**:Flutter 的 **手势竞技场(gesture arena)**、SwiftUI 手势组合子、浏览器事件捕获/冒泡。
@@ -346,6 +352,12 @@ pub trait LayoutProtocol {
 - **声明式手势**:`on_tap / on_drag / on_long_press / on_pinch`,多手势**竞技场仲裁**
   (如「水平拖动」胜出则「点击」出局),避免手势冲突的经典噩梦。
 - **焦点系统**:与已交付的 `prism_ui_a11y` 焦点/键盘导航合流,统一焦点环与 Tab 序。
+
+> **实现状态(✅ `prism_ui_input`)**:裁剪式命中测试(z-index + `pointer-events` 透传,返回 root→target 路径)、
+> 捕获/目标/冒泡三阶段分发(`stop_propagation`/`prevent_default`)、Flutter 式手势竞技场
+> (Tap/LongPress/Drag/Pinch,拖动胜出则点击出局)、tabindex 焦点环均落地。偏离说明:Pinch 比例用
+> 曼哈顿跨度近似(规避非确定性 `sqrt`),与缩放单调;命中采用空间裁剪而非 BVH(规模增大再引索引)。
+> 37 测试,clippy `-D warnings` 干净,no_std 通过。
 
 ### 9.8 GPU 驱动的保留绘制流
 
@@ -359,6 +371,12 @@ pub trait LayoutProtocol {
 - **与 Prism 渲染器集成**:复用 `prism_render_*` 的 wgpu 管线,UI 作为最终合成层;离屏/无头后端用于测试。
 
 **安全提示**:GPU 后端涉及 `unsafe` 的最小面(缓冲映射),隔离在该 crate 内并以 parity 测试对拍。
+
+> **实现状态(✅ `prism_ui_render_backend` — CPU 参考后端)**:SDF 圆角/边框/阴影(纯 f32,无超越函数,确定性)、
+> `RetainedScene` 吸收 `BackendOp` 增量并按需 lower 为绝对坐标 `DrawList`(成本 ∝ 变更)、同类命令合批实例化、
+> `Push/PopLayer` 分层合成(乘性不透明度折叠)、无头 CPU 栅格器(linear RGBA)均落地,后者作为 GPU 后端的
+> **金色孪生**。38 测试,clippy `-D warnings` 干净,no_std 通过。wgpu/Metal GPU 后端(WGSL SDF 镜像 + 回读
+> parity 对拍,参照 `prism_physics_gpu` 的 CPU 孪生模式,M2 Metal 真机验证)作为后续独立增量。
 
 ### 9.9 `$` 自动字段绑定糖(宏层闭环)
 
@@ -380,6 +398,11 @@ pub trait LayoutProtocol {
 - **版本协商**:客户端声明支持的 schema 版本,服务端按版本降级;未知节点优雅回退占位。
 - **校验**:下发内容经 schema 校验 + 结构沙箱裁剪后才进协调器;失败走错误边界(`prism_ui_async`)。
 
+> **实现状态(✅ `prism_ui_sdui`)**:三命名空间能力白名单(kinds/styles/events,默认零信任)、沙箱净化
+> (非白名单 kind 整个子树剪除为占位、剥离越权 style/event、`max_depth` 封顶防爆栈)、版本协商(同族优雅降级、
+> 无共同 major 则拒绝)、解码为 `prism_ui::Element`,全链路对不可信输入 **no-panic**。43 测试(含 5000 层敌意
+> 深度、伪装占位 kind 被拒等),clippy `-D warnings` 干净,no_std 通过。
+
 ### 9.11 组件生命周期钩子 / 并发资源
 
 现状组件模型(`prism_ui_component`)无生命周期钩子;路由(`prism_ui_router`)无守卫/深链接。v2 补齐:
@@ -399,6 +422,11 @@ pub trait LayoutProtocol {
   避免组件硬编码具体色值。
 - **RTL / 国际化联动**:逻辑属性(`inline-start` 而非 `left`)随 BiDi(§9.6)自动镜像。
 - 复用已交付的 `prism_ui_scoped`(作用域样式 + `@media` 断点)与 token 环检测。
+
+> **实现状态(✅ `prism_ui_theme`)**:令牌表(复用 `prism_ui_style::TokenStore` 引用链解析/环检测)、语义令牌层叠
+> (支持 semantic→palette→semantic 跨层环检测,返回 `StyleError::CycleDetected` 而非爆栈)、`compile_theme` 折叠为
+> `CompiledTheme`、`ReactiveTheme`(Signal 驱动,仅变更令牌触发重算)、RTL 逻辑属性(inline 轴 start/end↔left/right
+> 镜像)均落地。54 测试,clippy `-D warnings` 干净,no_std 通过。
 
 ---
 
@@ -451,15 +479,19 @@ pub trait LayoutProtocol {
 | `prism_ui_snapshot` | Jest 快照 | ✅ 已交付 | 29 |
 | `prism_ui_workbench` | Storybook | ✅ 已交付 | 27 |
 
-**v2 规划 crate(本设计新增)**
+**v2 真实 UI 栈 crate(本设计新增 — 已交付首批)**
 
-| Crate | 职责 | 对应专题 | 状态 |
-|---|---|---|---|
-| `prism_ui_text` | 整形 / 富文本 / BiDi / IME | §9.6 | 🔜 规划 |
-| `prism_ui_input` | 命中测试 / 事件分发 / 手势竞技场 / 焦点 | §9.7 | 🔜 规划 |
-| `prism_ui_render_backend` | GPU 保留绘制流 / 合批 / 分层合成 | §9.8 | 🔜 规划 |
-| `prism_ui_sdui` | 服务端驱动 UI 沙箱 + 版本协商 | §9.10 | 🔜 规划 |
-| `prism_ui_theme` | 令牌编译 / 语义令牌 / 动态主题 / RTL | §9.12 | 🔜 规划 |
+| Crate | 职责 | 对应专题 | 状态 | 测试≈ |
+|---|---|---|---|---|
+| `prism_ui_text` | 分词/字素/UAX#14 换行/富文本/可插拔整形(swash 可选)/光标/BiDi 最小子集/整形缓存 | §9.6 | ✅ 已交付 | 51(shaping 53) |
+| `prism_ui_input` | 裁剪命中测试/三阶段事件分发/Flutter 式手势竞技场/焦点环 | §9.7 | ✅ 已交付 | 37 |
+| `prism_ui_render_backend` | SDF 圆角/边框/阴影、保留场景 lower、合批实例化、分层合成、无头 CPU 参考栅格器(GPU 金色孪生) | §9.8 | ✅ 已交付 | 38 |
+| `prism_ui_sdui` | 零信任 schema/能力白名单/沙箱净化/版本协商/解码,全程 no-panic | §9.10 | ✅ 已交付 | 43 |
+| `prism_ui_theme` | 令牌编译/语义令牌/Signal 驱动动态主题/环检测/RTL 逻辑属性 | §9.12 | ✅ 已交付 | 54 |
+
+> 五个 crate 均 `cargo test` / `cargo clippy --all-targets -- -D warnings` / `--no-default-features`(no_std)
+> 全绿,一文件一关注点,无 `todo!/unimplemented!/panic!/#[allow]`、无 f32 超越函数。`prism_ui_render_backend`
+> 的 GPU 后端(wgpu, Metal)作为后续增量,以 CPU 栅格器为金色孪生做像素级 parity 对拍。
 
 > `prism_ui_layout`(增量布局 §9.3、布局协议 §9.4)、`prism_ui_macro`(双模式 §9.1、静态提升 §9.2、
 > `$` 绑定闭环 §9.9)、`prism_ui_component`/`prism_ui_router`/`prism_ui_async`(生命周期/守卫/竞态 §9.11)
@@ -487,12 +519,12 @@ Loom 不取代 BSN,而是**在其之上/之侧**提供成本可控、可内省�
 - **M1 结构层**:✅ `loom!` 宏 + 构建器 + `$` 读取糖 + 编译期稳定节点 ID。🔜 静态子树提升(§9.2)。
 - **M2 响应→ECS 绑定**:✅ Signal/Memo/Effect、字段级双向绑定、调度器集成、`Show`/`For`、a11y 基线。
   🔜 `$` 自动字段绑定糖闭环(§9.9)。
-- **M3 样式层**:✅ token/class/级联/scoped/@media/热重载核心。🔜 文件系统监听集成、主题管线(§9.12)。
+- **M3 样式层**:✅ token/class/级联/scoped/@media/热重载核心、主题管线(§9.12,`prism_ui_theme`)。🔜 文件系统监听集成。
 - **M4 效果层**:✅ 缓动/弹簧/时间线/过渡/隐式过渡/FLIP/共享元素/编排。
 - **M5 高级功能**:✅ 组件/Store/虚拟化/异步/Overlay/表单/路由/i18n。🔜 生命周期钩子、路由守卫、竞态取消(§9.11)。
 - **M6 工具链**:✅ DevTools/检查器/时间旅行/依赖图/快照/工作台。🔜 双模式编译(§9.1)。
-- **M7 真实 UI 栈(v2 新增)**:🔜 文本栈(§9.6)、输入/手势(§9.7)、增量布局(§9.3)、布局协议(§9.4)。
-- **M8 渲染与分发(v2 新增)**:🔜 GPU 保留绘制流(§9.8)、可中断渲染(§9.5)、SDUI 沙箱(§9.10)。
+- **M7 真实 UI 栈(v2 新增)**:✅ 文本栈(§9.6,`prism_ui_text`)、输入/手势(§9.7,`prism_ui_input`)。🔜 增量布局(§9.3)、布局协议(§9.4)。
+- **M8 渲染与分发(v2 新增)**:✅ 保留绘制流 CPU 参考后端(§9.8,`prism_ui_render_backend`)、SDUI 沙箱(§9.10,`prism_ui_sdui`)。🔜 wgpu/Metal GPU 后端 parity、可中断渲染(§9.5)。
 
 **v2 建议优先级**:M7 文本栈与输入系统是「真实可用」的前置硬需求,优先于 M8;增量布局(§9.3)
 与双模式编译(§9.1)是性能/体验的高杠杆项,可并行推进。
