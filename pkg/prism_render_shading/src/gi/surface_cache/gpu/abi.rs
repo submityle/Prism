@@ -31,7 +31,7 @@ use bytemuck::{Pod, Zeroable};
 
 use crate::gi::surface_cache::atlas::SurfelAtlas;
 use crate::gi::surface_cache::integration::{SurfelCacheEntry, TemporalParams};
-use crate::gi::surface_cache::surfel::Surfel;
+use crate::gi::surface_cache::surfel::{CoverageParams, Surfel};
 
 /// Threads per workgroup for the surfel-allocation dispatch; mirrors the
 /// `@workgroup_size(64)` in `shaders/surfel_alloc.wesl`.
@@ -390,3 +390,213 @@ const _: () = assert!(size_of::<GpuSurfelUpdateInput>() == SURFEL_UPDATE_INPUT_S
 const _: () = assert!(align_of::<GpuSurfelUpdateInput>() == 4);
 const _: () = assert!(size_of::<GpuSurfelUpdateResult>() == SURFEL_UPDATE_RESULT_STRIDE);
 const _: () = assert!(align_of::<GpuSurfelUpdateResult>() == 4);
+
+// ---------------------------------------------------------------------------
+// Surfel spatial-filter slice
+// ---------------------------------------------------------------------------
+//
+// Host/device `ABI` for the surfel spatial-filter producer kernel
+// `shaders/surfel_spatial_filter.wesl`, the on-device twin of the `CPU` golden
+// `spatial_filter` in [`crate::gi::surface_cache::integration`]. The host fills
+// a [`GpuSpatialFilterParams`] uniform, a `centers` storage array of
+// [`GpuSpatialCenter`] (each carrying a slice into the shared neighbour buffer)
+// and a `neighbors` storage array of [`GpuSpatialNeighbor`]; the kernel writes
+// one [`GpuSpatialResult`] per centre. Every field is a 4-byte scalar so the
+// layout is naturally 4-byte aligned and `vec3` straddling cannot occur under
+// `std430`.
+
+/// Threads per workgroup for the spatial-filter dispatch; mirrors the
+/// `@workgroup_size(64)` in `shaders/surfel_spatial_filter.wesl`.
+pub const SURFEL_SPATIAL_WORKGROUP_SIZE: u32 = 64;
+
+/// `std430` byte size of [`GpuSpatialFilterParams`] (the uniform block).
+pub const SURFEL_SPATIAL_PARAMS_SIZE: usize = 16;
+
+/// `std430` storage stride of one [`GpuSpatialCenter`].
+pub const SURFEL_SPATIAL_CENTER_STRIDE: usize = 48;
+
+/// `std430` storage stride of one [`GpuSpatialNeighbor`].
+pub const SURFEL_SPATIAL_NEIGHBOR_STRIDE: usize = 40;
+
+/// `std430` storage stride of one [`GpuSpatialResult`].
+pub const SURFEL_SPATIAL_RESULT_STRIDE: usize = 16;
+
+/// Uniform parameters for one spatial-filter dispatch.
+///
+/// `repr(C)` `std430` uniform block mirrored by `struct FilterParams` in
+/// `shaders/surfel_spatial_filter.wesl`. `count` is the number of centre
+/// surfels; the two tunables are copied verbatim from [`CoverageParams`].
+/// `reserved` pads the block to the 16-byte uniform granularity and must be
+/// zero.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+pub struct GpuSpatialFilterParams {
+    /// Number of centre surfels in the `centers` buffer.
+    pub count: u32,
+    /// Orientation exponent; larger values narrow the normal-agreement lobe.
+    pub normal_sharpness: f32,
+    /// Off-plane tolerance as a fraction of the surfel radius.
+    pub axial_tolerance: f32,
+    /// Reserved padding to the 16-byte uniform granularity; must be zero.
+    pub reserved: u32,
+}
+
+impl GpuSpatialFilterParams {
+    /// Build the dispatch parameters from the coverage tunables and a centre
+    /// count, copying [`CoverageParams`] verbatim.
+    #[must_use]
+    pub fn from_coverage(params: &CoverageParams, count: u32) -> Self {
+        Self {
+            count,
+            normal_sharpness: params.normal_sharpness,
+            axial_tolerance: params.axial_tolerance,
+            reserved: 0,
+        }
+    }
+
+    /// Number of workgroups needed to cover [`count`](Self::count) at
+    /// [`SURFEL_SPATIAL_WORKGROUP_SIZE`] threads each (ceil-divide).
+    #[must_use]
+    pub fn workgroup_count(&self) -> u32 {
+        self.count.div_ceil(SURFEL_SPATIAL_WORKGROUP_SIZE)
+    }
+}
+
+/// One centre surfel, its radiance, and its neighbour slice.
+///
+/// `repr(C)` `std430` element mirrored by `struct Center` in
+/// `shaders/surfel_spatial_filter.wesl`. `neighbor_offset`/`neighbor_count`
+/// bound a `[offset, offset + count)` range into the shared `neighbors` buffer
+/// that the kernel reduces in order.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+pub struct GpuSpatialCenter {
+    /// Centre surfel anchor `x` component.
+    pub pos_x: f32,
+    /// Centre surfel anchor `y` component.
+    pub pos_y: f32,
+    /// Centre surfel anchor `z` component.
+    pub pos_z: f32,
+    /// Centre surfel normal `x` component.
+    pub normal_x: f32,
+    /// Centre surfel normal `y` component.
+    pub normal_y: f32,
+    /// Centre surfel normal `z` component.
+    pub normal_z: f32,
+    /// Centre surfel radius.
+    pub radius: f32,
+    /// Centre radiance `x` component.
+    pub radiance_x: f32,
+    /// Centre radiance `y` component.
+    pub radiance_y: f32,
+    /// Centre radiance `z` component.
+    pub radiance_z: f32,
+    /// Start index of this centre's neighbour slice in the `neighbors` buffer.
+    pub neighbor_offset: u32,
+    /// Number of neighbours in this centre's slice.
+    pub neighbor_count: u32,
+}
+
+impl GpuSpatialCenter {
+    /// Build a centre element from a surfel, its radiance, and its neighbour
+    /// slice bounds in the shared neighbour buffer.
+    #[must_use]
+    pub fn new(surfel: &Surfel, radiance: Vec3, neighbor_offset: u32, neighbor_count: u32) -> Self {
+        Self {
+            pos_x: surfel.position.x,
+            pos_y: surfel.position.y,
+            pos_z: surfel.position.z,
+            normal_x: surfel.normal.x,
+            normal_y: surfel.normal.y,
+            normal_z: surfel.normal.z,
+            radius: surfel.radius,
+            radiance_x: radiance.x,
+            radiance_y: radiance.y,
+            radiance_z: radiance.z,
+            neighbor_offset,
+            neighbor_count,
+        }
+    }
+}
+
+/// One neighbour surfel and its radiance.
+///
+/// `repr(C)` `std430` element mirrored by `struct Neighbor` in
+/// `shaders/surfel_spatial_filter.wesl`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+pub struct GpuSpatialNeighbor {
+    /// Neighbour surfel anchor `x` component.
+    pub pos_x: f32,
+    /// Neighbour surfel anchor `y` component.
+    pub pos_y: f32,
+    /// Neighbour surfel anchor `z` component.
+    pub pos_z: f32,
+    /// Neighbour surfel normal `x` component.
+    pub normal_x: f32,
+    /// Neighbour surfel normal `y` component.
+    pub normal_y: f32,
+    /// Neighbour surfel normal `z` component.
+    pub normal_z: f32,
+    /// Neighbour surfel radius.
+    pub radius: f32,
+    /// Neighbour radiance `x` component.
+    pub radiance_x: f32,
+    /// Neighbour radiance `y` component.
+    pub radiance_y: f32,
+    /// Neighbour radiance `z` component.
+    pub radiance_z: f32,
+}
+
+impl GpuSpatialNeighbor {
+    /// Build a neighbour element from a surfel and its radiance.
+    #[must_use]
+    pub fn new(surfel: &Surfel, radiance: Vec3) -> Self {
+        Self {
+            pos_x: surfel.position.x,
+            pos_y: surfel.position.y,
+            pos_z: surfel.position.z,
+            normal_x: surfel.normal.x,
+            normal_y: surfel.normal.y,
+            normal_z: surfel.normal.z,
+            radius: surfel.radius,
+            radiance_x: radiance.x,
+            radiance_y: radiance.y,
+            radiance_z: radiance.z,
+        }
+    }
+}
+
+/// Filtered radiance for one centre, plus the accumulated total weight.
+///
+/// `repr(C)` `std430` element mirrored by `struct FilterResult` in
+/// `shaders/surfel_spatial_filter.wesl`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+pub struct GpuSpatialResult {
+    /// Filtered radiance `x` component (finite, non-negative).
+    pub radiance_x: f32,
+    /// Filtered radiance `y` component (finite, non-negative).
+    pub radiance_y: f32,
+    /// Filtered radiance `z` component (finite, non-negative).
+    pub radiance_z: f32,
+    /// Accumulated total weight (centre unit weight plus every kept neighbour).
+    pub total_weight: f32,
+}
+
+impl GpuSpatialResult {
+    /// The filtered radiance as a [`Vec3`].
+    #[must_use]
+    pub fn radiance(&self) -> Vec3 {
+        Vec3::new(self.radiance_x, self.radiance_y, self.radiance_z)
+    }
+}
+
+const _: () = assert!(size_of::<GpuSpatialFilterParams>() == SURFEL_SPATIAL_PARAMS_SIZE);
+const _: () = assert!(align_of::<GpuSpatialFilterParams>() == 4);
+const _: () = assert!(size_of::<GpuSpatialCenter>() == SURFEL_SPATIAL_CENTER_STRIDE);
+const _: () = assert!(align_of::<GpuSpatialCenter>() == 4);
+const _: () = assert!(size_of::<GpuSpatialNeighbor>() == SURFEL_SPATIAL_NEIGHBOR_STRIDE);
+const _: () = assert!(align_of::<GpuSpatialNeighbor>() == 4);
+const _: () = assert!(size_of::<GpuSpatialResult>() == SURFEL_SPATIAL_RESULT_STRIDE);
+const _: () = assert!(align_of::<GpuSpatialResult>() == 4);

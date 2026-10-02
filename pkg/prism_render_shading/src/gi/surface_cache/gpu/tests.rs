@@ -374,3 +374,214 @@ fn update_entry_is_deterministic() {
         GpuSurfelUpdateInput::from_states(Some((&entry, &surfel)), &surfel, Vec3::splat(1.0));
     assert_eq!(update_entry(&params, &input), update_entry(&params, &input));
 }
+
+use crate::gi::surface_cache::gpu::abi::{
+    GpuSpatialCenter, GpuSpatialFilterParams, GpuSpatialNeighbor, GpuSpatialResult,
+    SURFEL_SPATIAL_CENTER_STRIDE, SURFEL_SPATIAL_NEIGHBOR_STRIDE, SURFEL_SPATIAL_PARAMS_SIZE,
+    SURFEL_SPATIAL_RESULT_STRIDE, SURFEL_SPATIAL_WORKGROUP_SIZE,
+};
+use crate::gi::surface_cache::gpu::filter::filter_center;
+use crate::gi::surface_cache::integration::spatial_filter;
+use crate::gi::surface_cache::surfel::CoverageParams;
+
+/// The `WESL` source compiled and validated by [`spatial_filter_wesl_compiles`].
+const SURFEL_SPATIAL_WESL: &str = include_str!("shaders/surfel_spatial_filter.wesl");
+
+/// `naga` parses and type-checks the spatial-filter kernel, proving it compiles
+/// exactly as it will on device (the sandbox cannot dispatch it).
+#[test]
+fn spatial_filter_wesl_compiles() {
+    let module = naga::front::wgsl::parse_str(SURFEL_SPATIAL_WESL)
+        .unwrap_or_else(|error| panic!("surfel_spatial_filter.wesl failed to parse: {error:?}"));
+    let mut validator = naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    );
+    validator
+        .validate(&module)
+        .unwrap_or_else(|error| panic!("surfel_spatial_filter.wesl failed to validate: {error:?}"));
+}
+
+/// The spatial-filter `repr(C)` `ABI` strides match the constants the kernel and
+/// host assume (the layout itself is additionally pinned by the `const` size
+/// assertions in `abi.rs`).
+#[test]
+fn spatial_abi_matches_shader_layout() {
+    assert_eq!(
+        size_of::<GpuSpatialFilterParams>(),
+        SURFEL_SPATIAL_PARAMS_SIZE
+    );
+    assert_eq!(size_of::<GpuSpatialCenter>(), SURFEL_SPATIAL_CENTER_STRIDE);
+    assert_eq!(
+        size_of::<GpuSpatialNeighbor>(),
+        SURFEL_SPATIAL_NEIGHBOR_STRIDE
+    );
+    assert_eq!(size_of::<GpuSpatialResult>(), SURFEL_SPATIAL_RESULT_STRIDE);
+    assert_eq!(align_of::<GpuSpatialFilterParams>(), 4);
+    assert_eq!(align_of::<GpuSpatialCenter>(), 4);
+    assert_eq!(align_of::<GpuSpatialNeighbor>(), 4);
+    assert_eq!(align_of::<GpuSpatialResult>(), 4);
+}
+
+/// [`GpuSpatialFilterParams::workgroup_count`] ceil-divides the centre count by
+/// the workgroup size, covering every centre with no empty trailing group.
+#[test]
+fn spatial_workgroup_count_covers_every_center() {
+    let params = CoverageParams::default();
+    let wg = SURFEL_SPATIAL_WORKGROUP_SIZE;
+    for count in [0, 1, wg - 1, wg, wg + 1, 4 * wg, 4 * wg + 5] {
+        let p = GpuSpatialFilterParams::from_coverage(&params, count);
+        let groups = p.workgroup_count();
+        assert!(groups * wg >= count, "under-covered count {count}");
+        if count > 0 {
+            assert!((groups - 1) * wg < count, "over-covered count {count}");
+        } else {
+            assert_eq!(groups, 0, "empty dispatch for zero centres");
+        }
+    }
+}
+
+/// [`GpuSpatialFilterParams::from_coverage`] copies the coverage tunables
+/// verbatim and zeroes the reserved padding.
+#[test]
+fn spatial_params_from_coverage_copies_fields() {
+    let params = CoverageParams {
+        normal_sharpness: 12.0,
+        axial_tolerance: 0.4,
+    };
+    let p = GpuSpatialFilterParams::from_coverage(&params, 11);
+    assert_eq!(p.count, 11);
+    assert!((p.normal_sharpness - 12.0).abs() < 1e-7);
+    assert!((p.axial_tolerance - 0.4).abs() < 1e-7);
+    assert_eq!(p.reserved, 0);
+}
+
+/// Run both the `CPU` mirror and the host golden on one centre and its
+/// neighbour list, asserting the filtered radiance agrees bit-for-bit.
+fn assert_filter_parity(
+    center: &Surfel,
+    center_radiance: Vec3,
+    neighbours: &[(Surfel, Vec3)],
+    params: &CoverageParams,
+) -> GpuSpatialResult {
+    let golden = spatial_filter(center, center_radiance, neighbours, params);
+
+    let gpu_params = GpuSpatialFilterParams::from_coverage(params, 1);
+    let gpu_center = GpuSpatialCenter::new(center, center_radiance, 0, neighbours.len() as u32);
+    let gpu_neighbours: Vec<GpuSpatialNeighbor> = neighbours
+        .iter()
+        .map(|(surfel, radiance)| GpuSpatialNeighbor::new(surfel, *radiance))
+        .collect();
+    let mirror = filter_center(&gpu_params, &gpu_center, &gpu_neighbours);
+    assert_eq!(
+        mirror.radiance(),
+        golden,
+        "radiance drift (centre {center_radiance:?}, neighbours {neighbours:?})"
+    );
+    mirror
+}
+
+/// The `CPU` mirror reproduces the `spatial_filter` golden bit-for-bit across a
+/// constant signal, the empty / incompatible identity cases, a genuine pull
+/// toward a compatible neighbour, and `NaN` sanitisation.
+#[test]
+fn filter_center_matches_spatial_golden() {
+    let params = CoverageParams::default();
+    let center = Surfel::new(Vec3::ZERO, Vec3::Z, 1.0);
+
+    // Locally constant signal: reproduced exactly, weight accumulates.
+    let signal = Vec3::new(0.3, 0.6, 0.9);
+    let constant = [
+        (Surfel::new(Vec3::new(0.1, 0.0, 0.0), Vec3::Z, 1.0), signal),
+        (Surfel::new(Vec3::new(0.0, 0.2, 0.0), Vec3::Z, 1.0), signal),
+    ];
+    let out = assert_filter_parity(&center, signal, &constant, &params);
+    assert!(out.total_weight > 1.0);
+
+    // No neighbours: identity, unit weight.
+    let empty = assert_filter_parity(&center, signal, &[], &params);
+    assert!((empty.total_weight - 1.0).abs() < 1e-7);
+
+    // Incompatible neighbour (far off the disc): dropped, weight stays unit.
+    let far = [(
+        Surfel::new(Vec3::new(50.0, 0.0, 0.0), Vec3::Z, 1.0),
+        Vec3::splat(9.0),
+    )];
+    let dropped = assert_filter_parity(&center, signal, &far, &params);
+    assert!((dropped.total_weight - 1.0).abs() < 1e-7);
+
+    // Back-facing neighbour: normal agreement kills the weight.
+    let flipped = [(
+        Surfel::new(Vec3::new(0.1, 0.0, 0.0), Vec3::NEG_Z, 1.0),
+        Vec3::splat(9.0),
+    )];
+    let back = assert_filter_parity(&center, signal, &flipped, &params);
+    assert!((back.total_weight - 1.0).abs() < 1e-7);
+
+    // Genuine pull: a compatible brighter neighbour raises the centre value.
+    let pull = [(
+        Surfel::new(Vec3::new(0.1, 0.0, 0.0), Vec3::Z, 1.0),
+        Vec3::splat(4.0),
+    )];
+    let pulled = assert_filter_parity(&center, Vec3::ZERO, &pull, &params);
+    assert!(pulled.radiance().x > 0.0);
+    assert!(pulled.total_weight > 1.0);
+
+    // NaN / negative radiance: sanitised finite and non-negative.
+    let nan = [(
+        Surfel::new(Vec3::new(0.1, 0.0, 0.0), Vec3::Z, 1.0),
+        Vec3::new(f32::NAN, -3.0, f32::INFINITY),
+    )];
+    let cleaned = assert_filter_parity(&center, Vec3::splat(1.0), &nan, &params);
+    assert!(cleaned.radiance().is_finite());
+    assert!(
+        cleaned.radiance().x >= 0.0 && cleaned.radiance().y >= 0.0 && cleaned.radiance().z >= 0.0
+    );
+}
+
+/// A longer neighbour slice (mixing kept and dropped neighbours) stays
+/// bit-for-bit with the golden, exercising the in-order running sum.
+#[test]
+fn filter_center_matches_golden_over_mixed_slice() {
+    let params = CoverageParams::default();
+    let center = Surfel::new(Vec3::ZERO, Vec3::Z, 2.0);
+    let neighbours = [
+        (
+            Surfel::new(Vec3::new(0.3, 0.0, 0.0), Vec3::Z, 1.0),
+            Vec3::new(1.0, 0.5, 0.25),
+        ),
+        (
+            Surfel::new(Vec3::new(99.0, 0.0, 0.0), Vec3::Z, 1.0),
+            Vec3::splat(5.0),
+        ),
+        (
+            Surfel::new(Vec3::new(0.0, 0.4, 0.1), Vec3::new(0.1, 0.1, 0.98), 1.0),
+            Vec3::new(0.2, 0.8, 1.3),
+        ),
+        (
+            Surfel::new(Vec3::new(0.0, 0.0, 0.0), Vec3::NEG_Z, 1.0),
+            Vec3::splat(7.0),
+        ),
+    ];
+    assert_filter_parity(&center, Vec3::new(0.1, 0.2, 0.3), &neighbours, &params);
+}
+
+/// The mirror is deterministic: identical inputs yield an identical result.
+#[test]
+fn filter_center_is_deterministic() {
+    let params = GpuSpatialFilterParams::from_coverage(&CoverageParams::default(), 1);
+    let center = GpuSpatialCenter::new(
+        &Surfel::new(Vec3::ZERO, Vec3::Z, 1.0),
+        Vec3::splat(0.5),
+        0,
+        1,
+    );
+    let neighbours = [GpuSpatialNeighbor::new(
+        &Surfel::new(Vec3::new(0.2, 0.0, 0.0), Vec3::Z, 1.0),
+        Vec3::splat(1.0),
+    )];
+    assert_eq!(
+        filter_center(&params, &center, &neighbours),
+        filter_center(&params, &center, &neighbours)
+    );
+}

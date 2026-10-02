@@ -21,6 +21,10 @@
 //!   surfel-update (temporal-integration) kernel `shaders/surfel_update.wesl`,
 //!   advancing a surfel's cached radiance by one frame (confidence-weighted
 //!   `EMA` + disocclusion reset) exactly as the kernel does.
+//! * [`filter`] — the scalar `CPU` mirror [`filter_center`] of the
+//!   surfel spatial-filter (bilateral neighbour reuse) kernel
+//!   `shaders/surfel_spatial_filter.wesl`, reducing a centre surfel's
+//!   neighbour slice by the geometric reuse weight exactly as the kernel does.
 //!
 //! # Validation model
 //!
@@ -37,8 +41,14 @@
 
 pub mod abi;
 pub mod alloc;
+pub mod filter;
 pub mod update;
 
+pub use abi::{
+    GpuSpatialCenter, GpuSpatialFilterParams, GpuSpatialNeighbor, GpuSpatialResult,
+    SURFEL_SPATIAL_CENTER_STRIDE, SURFEL_SPATIAL_NEIGHBOR_STRIDE, SURFEL_SPATIAL_PARAMS_SIZE,
+    SURFEL_SPATIAL_RESULT_STRIDE, SURFEL_SPATIAL_WORKGROUP_SIZE,
+};
 pub use abi::{
     GpuSurfelAllocParams, GpuSurfelAllocRequest, GpuSurfelAllocSlot, SURFEL_ALLOC_FLAG_VALID,
     SURFEL_ALLOC_PARAMS_SIZE, SURFEL_ALLOC_REQUEST_STRIDE, SURFEL_ALLOC_SLOT_STRIDE,
@@ -49,6 +59,7 @@ pub use abi::{
     SURFEL_UPDATE_PARAMS_SIZE, SURFEL_UPDATE_RESULT_STRIDE, SURFEL_UPDATE_WORKGROUP_SIZE,
 };
 pub use alloc::allocate_slot;
+pub use filter::filter_center;
 pub use update::update_entry;
 
 #[cfg(test)]
