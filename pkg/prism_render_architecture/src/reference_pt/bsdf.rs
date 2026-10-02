@@ -28,6 +28,7 @@ use super::fresnel_blend::FresnelBlend;
 use super::microfacet::{fresnel_schlick, GgxIsotropic};
 use super::oren_nayar::OrenNayar;
 use super::rough_dielectric::RoughDielectric;
+use super::rough_dielectric_aniso::AnisoRoughDielectric;
 use super::sampler::{cosine_hemisphere_pdf, cosine_sample_hemisphere, Rng};
 use super::{Vec3, EPS_LEN_SQ, INV_PI};
 
@@ -237,6 +238,29 @@ pub enum Bsdf {
         /// Perceptual roughness in `[0, 1]`.
         roughness: f32,
     },
+    /// Anisotropic rough dielectric (brushed or drawn frosted glass): the
+    /// reflect-and-refract behaviour of [`Bsdf::RoughDielectric`] with both
+    /// lobes stretched along the surface grain by an anisotropic `GGX`
+    /// distribution of independent widths `alpha_x`/`alpha_y` (see
+    /// [`crate::reference_pt::rough_dielectric_aniso`]). The anisotropy frame is
+    /// derived from the shading normal, so this oracle validates the
+    /// `BRDF`/`BTDF` mathematics independently of mesh `UV`s. It is glossy
+    /// (non-delta), so it is sampled and connected to lights like any rough
+    /// surface, and its transmitted lobe carries the generalized half-vector
+    /// Jacobian and the radiance-mode `eta^2` compression.
+    RoughDielectricAniso {
+        /// Relative index of refraction `eta_t / eta_i` of the interior medium
+        /// over the exterior (e.g. `1.5` for air-to-glass).
+        ior: f32,
+        /// Per-channel tint applied to the reflected microfacet lobe.
+        reflectance: Vec3,
+        /// Per-channel tint applied to the transmitted microfacet lobe.
+        transmittance: Vec3,
+        /// `GGX` width along the local tangent axis.
+        alpha_x: f32,
+        /// `GGX` width along the local bitangent axis.
+        alpha_y: f32,
+    },
 }
 
 /// The outcome of importance-sampling a [`Bsdf`].
@@ -337,6 +361,14 @@ impl Bsdf {
                 roughness,
             } => MultiscatterDielectric::new(*ior, *reflectance, *transmittance, *roughness)
                 .evaluate(wo, wi, normal),
+            Self::RoughDielectricAniso {
+                ior,
+                reflectance,
+                transmittance,
+                alpha_x,
+                alpha_y,
+            } => AnisoRoughDielectric::new(*ior, *reflectance, *transmittance, *alpha_x, *alpha_y)
+                .evaluate(wo, wi, normal),
         }
     }
 
@@ -410,6 +442,14 @@ impl Bsdf {
                 transmittance,
                 roughness,
             } => MultiscatterDielectric::new(*ior, *reflectance, *transmittance, *roughness)
+                .pdf(wo, wi, normal),
+            Self::RoughDielectricAniso {
+                ior,
+                reflectance,
+                transmittance,
+                alpha_x,
+                alpha_y,
+            } => AnisoRoughDielectric::new(*ior, *reflectance, *transmittance, *alpha_x, *alpha_y)
                 .pdf(wo, wi, normal),
         }
     }
@@ -571,6 +611,20 @@ impl Bsdf {
                 transmittance,
                 roughness,
             } => MultiscatterDielectric::new(*ior, *reflectance, *transmittance, *roughness)
+                .sample(wo, normal, rng)
+                .map(|s| BsdfSample {
+                    direction: s.direction,
+                    value: s.value,
+                    pdf: s.pdf,
+                    specular: false,
+                }),
+            Self::RoughDielectricAniso {
+                ior,
+                reflectance,
+                transmittance,
+                alpha_x,
+                alpha_y,
+            } => AnisoRoughDielectric::new(*ior, *reflectance, *transmittance, *alpha_x, *alpha_y)
                 .sample(wo, normal, rng)
                 .map(|s| BsdfSample {
                     direction: s.direction,
@@ -1280,6 +1334,68 @@ mod tests {
         assert!(a > b, "compensated {a} should exceed single-scatter {b}");
         // The density is untouched by the scalar compensation.
         assert!((ms.pdf(wo, wi, N) - base.pdf(wo, wi, N)).abs() <= 1e-6);
+    }
+
+    #[test]
+    fn rough_dielectric_aniso_is_glossy_and_azimuth_dependent() {
+        // The anisotropic rough dielectric dispatches as a non-delta lobe that
+        // both reflects and refracts, and whose reflected highlight varies with
+        // azimuth (the defining anisotropy signature). With equal widths it must
+        // collapse onto the isotropic variant of the same width.
+        let bsdf = Bsdf::RoughDielectricAniso {
+            ior: 1.5,
+            reflectance: Vec3::ONE,
+            transmittance: Vec3::ONE,
+            alpha_x: 0.5,
+            alpha_y: 0.08,
+        };
+        assert!(!bsdf.is_specular());
+        let mut rng = Rng::seed(4242);
+        let wo = Vec3::new(0.0, 0.98, 0.0).normalize_or_zero();
+        let mut reflected = 0u32;
+        let mut transmitted = 0u32;
+        for _ in 0..6_000 {
+            if let Some(s) = bsdf.sample(wo, N, &mut rng) {
+                if N.dot(s.direction) > 0.0 {
+                    reflected += 1;
+                } else {
+                    transmitted += 1;
+                }
+            }
+        }
+        assert!(
+            reflected > 50 && transmitted > 50,
+            "{reflected}/{transmitted}"
+        );
+        // Azimuthal dependence of the reflected lobe.
+        let wi_x = Vec3::new(0.5, 0.86, 0.0).normalize_or_zero();
+        let wi_z = Vec3::new(0.0, 0.86, 0.5).normalize_or_zero();
+        let fx = bsdf.evaluate(wo, wi_x, N).max_component();
+        let fz = bsdf.evaluate(wo, wi_z, N).max_component();
+        assert!(
+            (fx - fz).abs() > 1e-3 * fx.max(fz).max(1e-3),
+            "{fx} vs {fz}"
+        );
+
+        // Equal widths reduce to the isotropic dielectric for a fixed pair.
+        let alpha = 0.3_f32 * 0.3_f32;
+        let iso_eq = Bsdf::RoughDielectricAniso {
+            ior: 1.5,
+            reflectance: Vec3::ONE,
+            transmittance: Vec3::ONE,
+            alpha_x: alpha,
+            alpha_y: alpha,
+        };
+        let iso = Bsdf::RoughDielectric {
+            ior: 1.5,
+            reflectance: Vec3::ONE,
+            transmittance: Vec3::ONE,
+            roughness: 0.3,
+        };
+        let wi = Vec3::new(-0.2, 0.95, 0.1).normalize_or_zero();
+        let a = iso_eq.evaluate(wo, wi, N);
+        let b = iso.evaluate(wo, wi, N);
+        assert!(a.sub(b).length() < 1e-3, "{a:?} vs {b:?}");
     }
 
     #[test]

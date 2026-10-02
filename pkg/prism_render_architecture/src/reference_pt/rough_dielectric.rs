@@ -50,7 +50,7 @@ fn sqr(x: f32) -> f32 {
 /// back of the microfacet, so the index ratio is inverted and the cosine
 /// flipped before the standard formula is applied. Beyond the critical angle
 /// (total internal reflection, `TIR`) the function returns `1`.
-fn fr_dielectric(cos_i: f32, eta: f32) -> f32 {
+pub(super) fn fr_dielectric(cos_i: f32, eta: f32) -> f32 {
     let mut cos_i = cos_i.clamp(-1.0, 1.0);
     let mut eta = eta;
     if cos_i < 0.0 {
@@ -78,7 +78,7 @@ fn fr_dielectric(cos_i: f32, eta: f32) -> f32 {
 /// or [`None`] under total internal reflection (`TIR`). A back-facing incidence
 /// (`n·wi < 0`) inverts the index ratio and flips the normal so the refraction
 /// is always computed from the incident side.
-fn refract_through(wi: Vec3, n: Vec3, eta: f32) -> Option<(Vec3, f32)> {
+pub(super) fn refract_through(wi: Vec3, n: Vec3, eta: f32) -> Option<(Vec3, f32)> {
     let mut cos_i = n.dot(wi);
     let mut eta = eta;
     let mut n = n;
