@@ -59,6 +59,15 @@
 //!   this is a driven oscillator locked loosely to the drive; unlike
 //!   [`chaotic_oscillator`] it is a continuous forced flow, not a discrete
 //!   map.
+//! - [`rossler_attractor::RosslerAttractorNode`] -- Rossler attractor: the
+//!   single-nonlinearity autonomous flow `dx = -y - z`, `dy = x + a*y`,
+//!   `dz = b + z*(x - c)` is integrated with oversampled fourth-order
+//!   Runge-Kutta and the `x` coordinate is soft-limited and read out.
+//!   `rate_hz` scales the integration speed while `c` morphs the single
+//!   funnel-shaped scroll through period-doubling into chaos. Unlike
+//!   [`lorenz_attractor`] (two nonlinear terms forming a double scroll) this
+//!   has one nonlinearity and a smoother, more pitched funnel; unlike
+//!   [`duffing_oscillator`] it is autonomous rather than periodically driven.
 //! - [`sample_player::SamplePlayerNode`] -- pitch/rate-resampling PCM player with
 //!   [`sample_player::LoopMode`] loop points and selectable
 //!   [`sample_player::Interpolation`] (linear / Catmull-Rom).
@@ -442,6 +451,7 @@ pub mod vosim;
 pub mod wavetable_oscillator;
 pub mod wave_terrain;
 pub mod duffing_oscillator;
+pub mod rossler_attractor;
 
 pub use air_jet_flute::{AirJetFluteNode, AirJetFluteParams};
 pub use additive_oscillator::{AdditiveOscillatorNode, AdditiveOscillatorParams};
@@ -452,6 +462,7 @@ pub use brass_lip_reed::{BrassLipReedNode, BrassLipReedParams};
 pub use chaotic_oscillator::{ChaoticOscillatorNode, ChaoticOscillatorParams};
 pub use lorenz_attractor::{LorenzAttractorNode, LorenzAttractorParams};
 pub use duffing_oscillator::{DuffingOscillatorNode, DuffingOscillatorParams};
+pub use rossler_attractor::{RosslerAttractorNode, RosslerAttractorParams};
 pub use conical_reed::{ConicalReedNode, ConicalReedParams};
 pub use dsf_oscillator::{DsfOscillatorNode, DsfOscillatorParams};
 pub use dust::{DustNode, DustParams, Polarity};
