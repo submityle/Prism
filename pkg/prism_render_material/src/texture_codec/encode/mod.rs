@@ -9,7 +9,11 @@
 //!
 //! * [`bc1`] -- BC1/DXT1 colour encoder (PCA endpoint fit + least-squares
 //!   refinement, opaque 4-colour and 1-bit punch-through modes).
+//! * [`bc4`] -- BC4/RGTC single-channel encoder (min/max endpoints,
+//!   eight-value / six-value mode selection by block error).
 
 mod bc1;
+mod bc4;
 
 pub use bc1::encode_bc1;
+pub use bc4::encode_bc4;

@@ -129,8 +129,16 @@ fn palette4(c0: u16, c1: u16) -> [[u8; 3]; 4] {
     [
         e0,
         e1,
-        [third(e0[0], e1[0]), third(e0[1], e1[1]), third(e0[2], e1[2])],
-        [third(e1[0], e0[0]), third(e1[1], e0[1]), third(e1[2], e0[2])],
+        [
+            third(e0[0], e1[0]),
+            third(e0[1], e1[1]),
+            third(e0[2], e1[2]),
+        ],
+        [
+            third(e1[0], e0[0]),
+            third(e1[1], e0[1]),
+            third(e1[2], e0[2]),
+        ],
     ]
 }
 
@@ -257,7 +265,11 @@ fn encode_opaque(colors: &[[u8; 3]; 16]) -> ([u8; 8], u64) {
 
 /// Quantise a pair of float endpoints, force 4-colour ordering (`c0 > c1`), and
 /// assign nearest indices. Returns `(c0, c1, indices, error)`.
-fn fit_endpoints(colors: &[[u8; 3]; 16], ep0: [f32; 3], ep1: [f32; 3]) -> (u16, u16, [u8; 16], u64) {
+fn fit_endpoints(
+    colors: &[[u8; 3]; 16],
+    ep0: [f32; 3],
+    ep1: [f32; 3],
+) -> (u16, u16, [u8; 16], u64) {
     let mut c0 = pack_565(ep0);
     let mut c1 = pack_565(ep1);
     // 4-colour opaque mode requires c0 > c1. If equal, nudge so the mode and
@@ -418,7 +430,9 @@ mod tests {
         }
         let decoded = decode_bc1(&encode_bc1(&tile));
         // Pure black and white must survive as near-exact endpoints.
-        let has_white = decoded.iter().any(|t| t[0] > 240 && t[1] > 240 && t[2] > 240);
+        let has_white = decoded
+            .iter()
+            .any(|t| t[0] > 240 && t[1] > 240 && t[2] > 240);
         let has_black = decoded.iter().any(|t| t[0] < 16 && t[1] < 16 && t[2] < 16);
         assert!(has_white && has_black, "endpoints lost: {decoded:?}");
     }
@@ -436,7 +450,11 @@ mod tests {
         }
         let decoded = decode_bc1(&encode_bc1(&tile));
         // 16 texels * 3 channels; a well-fit ramp stays well under ~20 LSB RMS.
-        assert!(ssd(tile, decoded) < 16 * 3 * 400, "gradient ssd {}", ssd(tile, decoded));
+        assert!(
+            ssd(tile, decoded) < 16 * 3 * 400,
+            "gradient ssd {}",
+            ssd(tile, decoded)
+        );
     }
 
     #[test]
