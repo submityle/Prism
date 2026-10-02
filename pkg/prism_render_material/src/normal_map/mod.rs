@@ -16,11 +16,13 @@
 //! * Barre-Brisebois & Hill, "Blending in Detail" (reoriented normal mapping).
 
 mod blend;
+mod height;
 mod mipmap;
 mod reconstruct;
 mod strength;
 
 pub use blend::{blend_linear, blend_rnm, blend_udn, blend_whiteout};
+pub use height::{height_to_normal, HeightGradient};
 pub use mipmap::{
     average_unit_normals, power_from_roughness, reduce_normal_roughness_2x, roughness_from_power,
     toksvig_factor, toksvig_roughness,
