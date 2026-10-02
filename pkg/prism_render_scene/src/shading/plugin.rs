@@ -127,6 +127,10 @@ use super::{
         ShadowDepthViewOffsets, ShadowDepthViewUniform, ShadowGpuBuffers,
         DEFAULT_SHADOW_ATLAS_LAYERS, DEFAULT_SHADOW_ATLAS_RESOLUTION,
     },
+    sky::multiscatter::{
+        init_sky_multiscatter_lut, init_sky_multiscatter_pipeline,
+        prepare_sky_multiscatter_bind_group, sky_multiscatter_lut_pass,
+    },
     ssgi::{
         init_ssgi_composite_pipeline, init_ssgi_denoise_pipeline, init_ssgi_trace_pipeline,
         prepare_ssgi_composite_bind_groups, prepare_ssgi_denoise_bind_groups,
@@ -228,6 +232,7 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/ssr_temporal.wesl");
         embedded_asset!(app, "../shaders/ssr_composite.wesl");
         embedded_asset!(app, "../shaders/ssgi.wesl");
+        embedded_asset!(app, "../shaders/sky_multiscatter_lut.wesl");
         embedded_asset!(app, "../shaders/ssgi_denoise.wesl");
         embedded_asset!(app, "../shaders/ssgi_composite.wesl");
         embedded_asset!(app, "../shaders/world_space_gi_probe_update.wesl");
@@ -434,6 +439,7 @@ impl Plugin for PrismShadingPlugin {
             // Volumetric-cloud compute pipelines. Kept in their own
             // `add_systems` call so the eight-kernel initializer never forces the
             // already-full RenderStartup tuple past Bevy's 20-element limit.
+            .add_systems(RenderStartup, (init_sky_multiscatter_lut, init_sky_multiscatter_pipeline))
             .add_systems(RenderStartup, init_volumetric_cloud_pipelines)
             // Light-routing (Lighting Channels) cull pipeline. Its own
             // `add_systems` call so the already-full RenderStartup tuples stay
@@ -460,6 +466,7 @@ impl Plugin for PrismShadingPlugin {
                         .in_set(RenderSystems::PrepareBindGroups),
                 ),
             )
+            .add_systems(Render, sky_multiscatter_lut_pass.before(bevy_core_pipeline::Core3dSystems::MainPass))
             .add_systems(
                 Render,
                 (
@@ -740,6 +747,7 @@ impl Plugin for PrismShadingPlugin {
                     prepare_film_grain_bind_groups
                         .after(prepare_film_grain_textures)
                         .in_set(RenderSystems::PrepareBindGroups),
+                    prepare_sky_multiscatter_bind_group.in_set(RenderSystems::PrepareBindGroups),
                 ),
             )
             // The nine additional post-process subsystems (display-referred
