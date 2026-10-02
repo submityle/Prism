@@ -37,18 +37,17 @@ pub use aero::{
 pub use body::SoftBody;
 pub use build::{Cloth, ClothGrid, Rope, RopeGrid, SoftBox, SoftBoxGrid};
 pub use collision::{
-    apply_backstop, capsule_toi, closest_point_on_segment, generate_virtual_particles,
-    half_space_toi, project_out_of_half_space, project_out_of_sphere, resolve_backstops,
-    resolve_body_collisions, resolve_body_collisions_with_friction, resolve_ccd, resolve_self_ccd, resolve_self_ccd_jacobi,
+    accumulate_vertex_normals, apply_backstop, capsule_toi, closest_point_on_segment,
+    couple_particle_against_body, generate_virtual_particles, half_space_toi,
+    project_out_of_half_space, project_out_of_sphere, resolve_backstops, resolve_body_collisions,
+    resolve_body_collisions_with_friction, resolve_ccd, resolve_layer_coupling,
+    resolve_layer_coupling_jacobi, resolve_self_ccd, resolve_self_ccd_jacobi,
     resolve_self_collision, resolve_self_collision_jacobi, resolve_self_collision_virtual,
-    resolve_self_collision_virtual_augment,
-    resolve_self_collision_virtual_augment_jacobi, resolve_self_collision_virtual_jacobi,
-    accumulate_vertex_normals, resolve_layer_coupling, resolve_layer_coupling_jacobi, LayerParams,
-    couple_particle_against_body, resolve_self_collision_with_friction,
-    resolve_self_collision_with_friction_jacobi, resolve_two_way_coupling,
-    sphere_toi, swept_pair_toi, Backstop, BodyCollider, CcdParams, CouplingBody,
-    CouplingContribution, SelfCcdParams, VirtualParticle,
-    VirtualParticlePattern,
+    resolve_self_collision_virtual_augment, resolve_self_collision_virtual_augment_jacobi,
+    resolve_self_collision_virtual_jacobi, resolve_self_collision_with_friction,
+    resolve_self_collision_with_friction_jacobi, resolve_two_way_coupling, sphere_toi,
+    swept_pair_toi, Backstop, BodyCollider, CcdParams, CouplingBody, CouplingContribution,
+    LayerParams, SelfCcdParams, VirtualParticle, VirtualParticlePattern,
 };
 pub use constraint::{
     mesh_volume, AttachmentConstraint, BendingConstraint, ConstraintSet, DistanceConstraint,
@@ -61,8 +60,9 @@ pub use damage::{
 };
 pub use particle::{ParticleHandle, ParticleStorage};
 pub use rigid_coupling::{
-    couple_cloth_to_rigid, gather_rigid_proxies, Aabb as CouplingAabb, ClothRigidCouplingConfig,
-    CouplingReport, RigidProxy,
+    couple_cloth_to_rigid, couple_cloth_to_rigid_angular, gather_rigid_proxies,
+    Aabb as CouplingAabb, AngularCouplingReport, ClothRigidCouplingConfig, CouplingReport,
+    RigidProxy,
 };
 pub use solver::{
     SelfCollisionParams, SoftContacts, SoftSolver, SoftSolverConfig, VirtualSelfCollisionParams,

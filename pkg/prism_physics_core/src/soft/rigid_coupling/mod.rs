@@ -17,18 +17,26 @@
 //!   the AABB overlap cull.
 //! * [`driver`] — the per-substep gather / resolve / write-back driver.
 //!
-//! Coupling is **linear only**; angular response is an explicit, documented
-//! `TODO(angular)` hook in [`driver`], never faked.
+//! * [`angular`] — an opt-in per-contact driver
+//!   ([`couple_cloth_to_rigid_angular`]) that layers a real analytic torque
+//!   (`Σ arm × impulse` mapped through the body's world inverse inertia) on top
+//!   of the linear bridge, replacing the old `TODO(angular)` stub. It is gated
+//!   on [`ClothRigidCouplingConfig::angular`] and off by default, so the linear
+//!   bridge stays bit-identical.
 //!
 //! # Provenance
 //!
 //! This module contains **no Unreal Engine source or derived code**. It is
 //! pipeline wiring over textbook position-based-dynamics coupling.
 
+pub mod angular;
 pub mod config;
 pub mod driver;
 pub mod proxy;
 
+pub use angular::{
+    couple_cloth_to_rigid_angular, world_inverse_inertia_apply, AngularCouplingReport,
+};
 pub use config::ClothRigidCouplingConfig;
 pub use driver::{couple_cloth_to_rigid, gather_rigid_proxies, CouplingReport};
 pub use proxy::{

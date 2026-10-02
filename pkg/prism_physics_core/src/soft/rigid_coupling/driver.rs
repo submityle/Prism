@@ -17,11 +17,12 @@
 //!    translate the rigid body by exactly the displacement the pass applied to
 //!    its proxy collider, then clear the proxy's reaction accumulator.
 //!
-//! The write-back is **linear only**. The kernel reduces every particle contact
-//! on a body down to one net linear impulse without retaining the per-contact
-//! lever arms, so there is no honest torque to apply yet; see the explicit
-//! `TODO(angular)` at the write-back site for the hook a future per-contact
-//! kernel would fill in. Nothing here fakes an angular response.
+//! The write-back of *this* driver is **linear only**. The kernel reduces every
+//! particle contact on a body down to one net linear impulse without retaining
+//! the per-contact lever arms, so there is no honest torque to apply at this
+//! site; nothing here fakes an angular response. The opt-in per-contact angular
+//! bridge in [`super::angular`] ([`super::couple_cloth_to_rigid_angular`]) adds
+//! a real `Σ arm × impulse` torque on top of this linear pass.
 //!
 //! The whole stage is a no-op unless [`PhysicsWorld::cloth_coupling`] is
 //! enabled, so a world that never opts in keeps a bit-identical rigid-only
@@ -178,13 +179,15 @@ pub fn couple_cloth_to_rigid(
             report.applied_count += 1;
             report.applied_impulse += body.reaction_impulse;
 
-            // TODO(angular): a torque of `arm.cross(reaction_impulse)` (arm =
-            // contact point - center of mass) belongs here, but the Jacobi
-            // kernel reduces every particle contact to a single net linear
-            // impulse and discards the per-contact arms, so there is no honest
-            // torque to apply. A future per-contact coupling kernel that keeps
-            // the contact arms would accumulate angular impulse here and write
-            // it onto the body's angular velocity via its inverse inertia.
+            // Angular response is intentionally not applied here: this
+            // linear driver reduces every particle contact on a body to a
+            // single net linear impulse and discards the per-contact arms, so
+            // there is no honest torque at this site. The opt-in per-contact
+            // angular bridge in `super::angular`
+            // ([`super::couple_cloth_to_rigid_angular`]) re-derives the arms
+            // from the pre-pass contacts and writes `Σ arm × impulse` onto the
+            // body's angular velocity; it layers on top of this linear pass so
+            // the linear path here stays bit-identical.
         }
         body.clear_reaction();
     }
