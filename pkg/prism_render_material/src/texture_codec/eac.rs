@@ -109,6 +109,72 @@ pub fn decode_eac_rg11_unorm(block: &[u8; 16]) -> [[u16; 2]; 16] {
     out
 }
 
+/// Clamp an intermediate value to the signed 11-bit range `-1023..=1023`.
+#[inline]
+fn clamp11_signed(v: i32) -> i16 {
+    v.clamp(-1023, 1023) as i16
+}
+
+/// Decode one 8-byte **signed** `EAC_R11` block into sixteen 11-bit signed
+/// values (`-1023..=1023`), row-major with texel `t = y*4 + x`.
+///
+/// The base codeword is read as a two's-complement `i8`; the reserved value
+/// `-128` is clamped to `-127` (Khronos Data Format Specification). Unlike the
+/// unsigned path there is **no `+4` rounding bias**:
+/// ```text
+/// value = base * 8 + m * mult * 8   (mult != 0)
+/// value = base * 8 + m              (mult == 0)
+/// value = clamp(value, -1023, 1023)
+/// ```
+/// Hardware normalises the result as `v / 1023.0`.
+#[must_use]
+pub fn decode_eac_r11_snorm(block: &[u8; 8]) -> [i16; 16] {
+    let bits = u64::from_be_bytes(*block);
+    let mut base = ((bits >> 56) & 0xFF) as u8 as i8 as i32;
+    if base == -128 {
+        base = -127;
+    }
+    let mult = ((bits >> 52) & 0x0F) as i32;
+    let table = ((bits >> 48) & 0x0F) as usize;
+    let row = &MODIFIER[table];
+
+    let mut out = [0i16; 16];
+    for x in 0..4u32 {
+        for y in 0..4u32 {
+            let p = x * 4 + y;
+            let shift = 45 - 3 * p;
+            let index = ((bits >> shift) & 0x7) as usize;
+            let m = row[index];
+            let value = if mult != 0 {
+                base * 8 + m * mult * 8
+            } else {
+                base * 8 + m
+            };
+            out[(y * 4 + x) as usize] = clamp11_signed(value);
+        }
+    }
+    out
+}
+
+/// Decode one 16-byte **signed** `EAC_RG11` block into sixteen `[r, g]` pairs
+/// of signed 11-bit values. Red occupies bytes `0..8`, green bytes `8..16`;
+/// each is an independent [`decode_eac_r11_snorm`] block (the signed ETC2
+/// analogue of `BC5_SNORM`, for object-space / signed tangent data).
+#[must_use]
+pub fn decode_eac_rg11_snorm(block: &[u8; 16]) -> [[i16; 2]; 16] {
+    let mut r_block = [0u8; 8];
+    let mut g_block = [0u8; 8];
+    r_block.copy_from_slice(&block[0..8]);
+    g_block.copy_from_slice(&block[8..16]);
+    let r = decode_eac_r11_snorm(&r_block);
+    let g = decode_eac_r11_snorm(&g_block);
+    let mut out = [[0i16; 2]; 16];
+    for t in 0..16 {
+        out[t] = [r[t], g[t]];
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,6 +209,51 @@ mod tests {
         let out = decode_eac_r11_unorm(&block);
         for v in &out {
             assert_eq!(*v, 2047);
+        }
+    }
+
+    #[test]
+    fn signed_positive_base_no_rounding_bias() {
+        // base = 10, mult = 0, table 0, index 0 -> modifier -3.
+        // signed value = 10*8 + (-3) = 77 (no +4 bias on the signed path).
+        let block = [10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let out = decode_eac_r11_snorm(&block);
+        for v in &out {
+            assert_eq!(*v, 77);
+        }
+    }
+
+    #[test]
+    fn signed_negative_base_decodes_below_zero() {
+        // base = 0xF6 = -10 (i8), mult = 0, index 0 -> -3. value = -83.
+        let block = [0xF6, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let out = decode_eac_r11_snorm(&block);
+        for v in &out {
+            assert_eq!(*v, -83);
+        }
+    }
+
+    #[test]
+    fn signed_clamps_and_remaps_minus_128_base() {
+        // base = 0x80 -> remapped to -127; mult = 15, table 0, all indices 0
+        // -> modifier -3. value = -127*8 + (-3)*15*8 = -1016 - 360 = -1376,
+        // clamps to -1023.
+        let block = [0x80, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let out = decode_eac_r11_snorm(&block);
+        for v in &out {
+            assert_eq!(*v, -1023);
+        }
+    }
+
+    #[test]
+    fn signed_rg11_splits_into_two_independent_channels() {
+        // Red = positive-base case (77); green = negative-base case (-83).
+        let mut block = [0u8; 16];
+        block[0] = 10; // red base
+        block[8] = 0xF6; // green base = -10
+        let out = decode_eac_rg11_snorm(&block);
+        for pair in &out {
+            assert_eq!(*pair, [77, -83]);
         }
     }
 
