@@ -210,6 +210,7 @@ pub mod sprite_stretch;
 pub mod storm_vertical_profile;
 pub mod sunset_inscatter_tint;
 pub mod sunset_reddening;
+pub mod sweep_aabb;
 pub mod temporal_dither;
 pub mod temporal_reproject;
 pub mod terrain_occlusion;
@@ -427,6 +428,7 @@ pub use sprite_stretch::{GpuSpriteStretch, SpriteStretchQuery, SpriteStretchResu
 pub use storm_vertical_profile::{GpuStormVerticalProfile, StormVerticalProfileQuery};
 pub use sunset_inscatter_tint::{GpuSunsetInscatterTint, InscatterTint, SunsetInscatterTintQuery};
 pub use sunset_reddening::{GpuSunsetReddening, SunsetReddeningQuery};
+pub use sweep_aabb::{GpuSweepAabb, SweepAabbQuery};
 pub use temporal_dither::{DitherPixel, DitherQuery, DitherSample, GpuTemporalDither};
 pub use temporal_reproject::{
     GpuTemporalReproject, TemporalReprojectQuery, TemporalReprojectResult, NEIGHBORHOOD_TAPS,
