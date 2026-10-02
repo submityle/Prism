@@ -72,8 +72,9 @@ pub use texture_mipgen::{
     KaiserFilter, Rgba8Image, WindowedKernel,
 };
 pub use normal_map::{
-    blend_linear, blend_rnm, blend_udn, blend_whiteout, decode_ag, decode_rg, reconstruct_z,
-    unorm_to_snorm,
+    average_unit_normals, blend_linear, blend_rnm, blend_udn, blend_whiteout, decode_ag,
+    decode_rg, power_from_roughness, reconstruct_z, reduce_normal_roughness_2x,
+    roughness_from_power, toksvig_factor, toksvig_roughness, unorm_to_snorm,
 };
 pub use validation::{validate_graph, MaterialValidationError};
 
