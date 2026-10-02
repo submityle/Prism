@@ -60,9 +60,9 @@ pub use damage::{
 };
 pub use particle::{ParticleHandle, ParticleStorage};
 pub use rigid_coupling::{
-    couple_cloth_to_rigid, couple_cloth_to_rigid_angular, gather_rigid_proxies,
-    Aabb as CouplingAabb, AngularCouplingReport, ClothRigidCouplingConfig, CouplingReport,
-    RigidProxy,
+    couple_cloth_to_rigid, couple_cloth_to_rigid_angular, couple_cloth_to_rigid_friction,
+    gather_rigid_proxies, Aabb as CouplingAabb, AngularCouplingReport, ClothRigidCouplingConfig,
+    CouplingReport, FrictionCouplingReport, RigidProxy,
 };
 pub use solver::{
     SelfCollisionParams, SoftContacts, SoftSolver, SoftSolverConfig, VirtualSelfCollisionParams,

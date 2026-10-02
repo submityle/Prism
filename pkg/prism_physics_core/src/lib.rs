@@ -156,8 +156,9 @@ pub use soft::damage::{
 };
 pub use soft::particle::{ParticleHandle, ParticleStorage};
 pub use soft::rigid_coupling::{
-    couple_cloth_to_rigid, couple_cloth_to_rigid_angular, gather_rigid_proxies,
-    AngularCouplingReport, ClothRigidCouplingConfig, CouplingReport, RigidProxy,
+    couple_cloth_to_rigid, couple_cloth_to_rigid_angular, couple_cloth_to_rigid_friction,
+    gather_rigid_proxies, AngularCouplingReport, ClothRigidCouplingConfig, CouplingReport,
+    FrictionCouplingReport, RigidProxy,
 };
 pub use soft::solver::{
     SelfCollisionParams, SoftContacts, SoftSolver, SoftSolverConfig, VirtualSelfCollisionParams,

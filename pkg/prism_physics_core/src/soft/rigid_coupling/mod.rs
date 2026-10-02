@@ -32,6 +32,7 @@
 pub mod angular;
 pub mod config;
 pub mod driver;
+pub mod friction;
 pub mod proxy;
 
 pub use angular::{
@@ -39,6 +40,7 @@ pub use angular::{
 };
 pub use config::ClothRigidCouplingConfig;
 pub use driver::{couple_cloth_to_rigid, gather_rigid_proxies, CouplingReport};
+pub use friction::{couple_cloth_to_rigid_friction, FrictionCouplingReport};
 pub use proxy::{
     body_collider_from_shape, collider_anchor, collider_overlaps, collider_world_aabb,
     proxy_inverse_mass, Aabb, RigidProxy,
