@@ -56,8 +56,9 @@ use prism_render_shading::gi::world_restir::spatial_hash::{self, HashGridParams}
 use prism_render_shading::gi::world_restir::world_reservoir::PROBE_LIMIT;
 
 use super::abi::{
-    GpuWorldRestirInjectParams, GpuWorldRestirInjectPoint, GpuWorldRestirLight,
-    GpuWorldRestirReservoir, GpuWorldRestirSeedParams, WORLD_RESTIR_SEED_WORKGROUP_SIZE,
+    GpuWorldRestirFillParams, GpuWorldRestirInjectParams, GpuWorldRestirInjectPoint,
+    GpuWorldRestirLight, GpuWorldRestirReservoir, GpuWorldRestirSeedParams,
+    WORLD_RESTIR_SEED_WORKGROUP_SIZE, WORLD_RESTIR_WORKGROUP_SIZE,
 };
 
 /// Reservoir-table capacity exercised on device.
@@ -587,7 +588,7 @@ fn dispatch_seed(
     lights: &[GpuWorldRestirLight],
     params: &GpuWorldRestirSeedParams,
 ) -> Vec<GpuWorldRestirReservoir> {
-    let reservoir_bytes = (src.len() * size_of::<GpuWorldRestirReservoir>()) as u64;
+    let reservoir_bytes = size_of_val(src) as u64;
 
     let module = device.create_shader_module(ShaderModuleDescriptor {
         label: Some("world_restir_seed_parity"),
@@ -897,5 +898,611 @@ fn seed_gpu_matches_cpu_golden() {
     assert!(
         saw_not_selected,
         "the fixture must exercise the not-selected serialisation branch"
+    );
+}
+
+/// Reservoir-table capacity exercised by the fill parity fixture.
+///
+/// `256` slots keep the dispatch tiny (four `64`-wide workgroups) while giving
+/// the handful of occupied cells pairwise-disjoint buckets, so the parallel
+/// on-device result is order-independent and byte-comparable to the serial
+/// `CPU` twin.
+const FILL_CAPACITY: u32 = 256;
+
+/// Serial `CPU` twin of `world_restir_fill.wesl`'s `fill_main`: the
+/// authoritative expectation the on-device fill dispatch is checked against.
+///
+/// This is an arm-for-arm port of the `WESL` kernel's `GRIS` spatial-reuse
+/// pass. The hash/`checksum`/bucket math reuses the authoritative golden
+/// [`prism_render_shading::gi::world_restir::spatial_hash`] (proven bit-equal
+/// to the `WESL` 2x32 port by the sibling `shader_tests`), and the `RIS`
+/// estimator (`luminance`, `geometric_term`, `target_function`) is copied from
+/// the seed twin verbatim so both kernels resolve the same density.
+mod fill_mirror {
+    use super::super::shader_tests::seed_mirror::{fmix32, rng01};
+    use super::{GpuWorldRestirReservoir, PROBE_LIMIT};
+    use bevy_math::{IVec3, Vec3};
+    use prism_render_shading::gi::screen_probe::restir::GiSample;
+    use prism_render_shading::gi::world_restir::spatial_hash::{self, HashGridKey, HashGridParams};
+
+    /// Smallest positive normal `f32` (golden `f32::MIN_POSITIVE`, `WESL` `MIN_POSITIVE`).
+    const MIN_POSITIVE: f32 = f32::MIN_POSITIVE;
+    /// Rec. 709 luminance weights (golden/`WESL` `LUMA_R` / `LUMA_G` / `LUMA_B`).
+    const LUMA_R: f32 = 0.212_639;
+    const LUMA_G: f32 = 0.715_169;
+    const LUMA_B: f32 = 0.072_192;
+
+    /// Rec. 709 luminance of a linear RGB triple (`WESL` `luminance`).
+    fn luminance(rgb: Vec3) -> f32 {
+        LUMA_R * rgb.x.max(0.0) + LUMA_G * rgb.y.max(0.0) + LUMA_B * rgb.z.max(0.0)
+    }
+
+    /// Surface-to-surface geometry factor `cos_v * cos_s / dist^2` (`WESL`
+    /// `geometric_term`); zero for degenerate / back-facing / `NaN` pairs. Uses
+    /// `dist_sq.sqrt().recip()` to reproduce the golden's exact IEEE reciprocal
+    /// square root bit-for-bit.
+    fn geometric_term(
+        visible_point: Vec3,
+        visible_normal: Vec3,
+        sample_point: Vec3,
+        sample_normal: Vec3,
+    ) -> f32 {
+        let delta = sample_point - visible_point;
+        let dist_sq = delta.length_squared();
+        if dist_sq > MIN_POSITIVE {
+            let inv_dist = dist_sq.sqrt().recip();
+            let dir = delta * inv_dist;
+            let cos_v = visible_normal.dot(dir).max(0.0);
+            let cos_s = sample_normal.dot(-dir).max(0.0);
+            let term = cos_v * cos_s / dist_sq;
+            // `!term.is_nan()` mirrors the `WESL` `term == term` NaN reject.
+            if !term.is_nan() {
+                return term.max(0.0);
+            }
+        }
+        0.0
+    }
+
+    /// Scalar resampling target `p_hat` (`WESL` `target_function`).
+    fn target_function(s: &GiSample) -> f32 {
+        let g = geometric_term(
+            s.visible_point,
+            s.visible_normal,
+            s.sample_point,
+            s.sample_normal,
+        );
+        let t = luminance(s.radiance) * g;
+        if t.is_nan() {
+            0.0
+        } else {
+            t.max(0.0)
+        }
+    }
+
+    /// Reconnection-shift target: keep the neighbour's secondary point / normal
+    /// / radiance, re-evaluate from the destination's visible point (`WESL`
+    /// `reconnection_target`).
+    fn reconnection_target(neighbor: &GiSample, visible_point: Vec3, visible_normal: Vec3) -> f32 {
+        let mut shifted = *neighbor;
+        shifted.visible_point = visible_point;
+        shifted.visible_normal = visible_normal;
+        target_function(&shifted)
+    }
+
+    /// Deserialises a reservoir slot's five vec3 lanes into a `GiSample` (`WESL`
+    /// `load_sample`).
+    fn load_sample(r: &GpuWorldRestirReservoir) -> GiSample {
+        GiSample {
+            visible_point: Vec3::from_array(r.visible_point),
+            visible_normal: Vec3::from_array(r.visible_normal),
+            sample_point: Vec3::from_array(r.sample_point),
+            sample_normal: Vec3::from_array(r.sample_normal),
+            radiance: Vec3::from_array(r.radiance),
+        }
+    }
+
+    /// Jittered non-zero integer neighbour offset in `[-radius, radius]^3`
+    /// (`WESL` `fill_main` ring step); nudged off-center so a neighbour is
+    /// always distinct.
+    pub fn neighbor_offset(frame: u32, slot: u32, k: u32, radius: i32) -> IVec3 {
+        let span = (2 * radius + 1) as u32;
+        let rx = (fmix32(
+            frame
+                .wrapping_mul(0x27d4_eb4f)
+                .wrapping_add(slot.wrapping_mul(0x9e37_79b9))
+                .wrapping_add(k.wrapping_mul(0x1656_67b1)),
+        ) % span) as i32
+            - radius;
+        let ry = (fmix32(
+            frame
+                .wrapping_mul(0x85eb_ca6b)
+                .wrapping_add(slot.wrapping_mul(0xc2b2_ae35))
+                .wrapping_add(k.wrapping_mul(0x27d4_eb2f)),
+        ) % span) as i32
+            - radius;
+        let rz = (fmix32(
+            frame
+                .wrapping_mul(0xc2b2_ae35)
+                .wrapping_add(slot.wrapping_mul(0x1656_67b1))
+                .wrapping_add(k.wrapping_mul(0x85eb_ca6b)),
+        ) % span) as i32
+            - radius;
+        let mut offset = IVec3::new(rx, ry, rz);
+        if offset == IVec3::ZERO {
+            offset.x = 1;
+        }
+        offset
+    }
+
+    /// Pools one occupied reservoir slot with a jittered ring of spatial
+    /// neighbours under `GRIS` reuse and re-finalises `W` (`WESL` `fill_main`);
+    /// an invalid slot is returned unchanged (copy-through).
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "arm-for-arm port of the WESL fill_main tunable set keeps each immediate mapping explicit"
+    )]
+    pub fn fill_slot(
+        src: &[GpuWorldRestirReservoir],
+        slot: u32,
+        camera: Vec3,
+        params: &HashGridParams,
+        frame: u32,
+        spatial_samples: u32,
+        spatial_radius: i32,
+        m_cap: f32,
+    ) -> GpuWorldRestirReservoir {
+        let capacity = src.len() as u32;
+        let center = src[slot as usize];
+        if center.valid == 0 {
+            return center;
+        }
+
+        let visible_point = Vec3::from_array(center.visible_point);
+        let visible_normal = Vec3::from_array(center.visible_normal);
+        let center_key = spatial_hash::compute_key(visible_point, visible_normal, camera, params);
+
+        let mut acc_sample = load_sample(&center);
+        let mut acc_m = center.m;
+        let center_w = center.w;
+        let center_p_hat = target_function(&acc_sample);
+        let mut acc_w_sum = center_w * acc_m * center_p_hat;
+
+        let radius = spatial_radius.max(0);
+        for k in 0..spatial_samples {
+            if radius <= 0 {
+                break;
+            }
+            let offset = neighbor_offset(frame, slot, k, radius);
+            let nkey = HashGridKey {
+                cell_coord: center_key.cell_coord + offset,
+                level: center_key.level,
+                normal_bin: center_key.normal_bin,
+            };
+            let ncs = spatial_hash::checksum(&nkey);
+            let base = spatial_hash::bucket_index(&nkey, capacity);
+
+            let steps = PROBE_LIMIT.min(capacity);
+            let mut found: Option<GpuWorldRestirReservoir> = None;
+            for i in 0..steps {
+                let idx = ((base + i) % capacity) as usize;
+                let cand = src[idx];
+                if cand.valid == 0 {
+                    break;
+                }
+                if cand.checksum == ncs {
+                    found = Some(cand);
+                    break;
+                }
+            }
+            let Some(neighbor) = found else {
+                continue;
+            };
+
+            let neighbor_m = neighbor.m;
+            if neighbor_m <= 0.0 || neighbor_m.is_nan() {
+                continue;
+            }
+            acc_m += neighbor_m;
+            let neighbor_sample = load_sample(&neighbor);
+            let p_hat = reconnection_target(&neighbor_sample, visible_point, visible_normal);
+            let rw = neighbor_m * p_hat.max(0.0) * neighbor.w.max(0.0);
+            if rw <= 0.0 || rw.is_nan() {
+                continue;
+            }
+            acc_w_sum += rw;
+            let u = rng01(frame, slot, k);
+            if u * acc_w_sum <= rw {
+                acc_sample = neighbor_sample;
+            }
+        }
+
+        if m_cap >= 0.0 && acc_m > m_cap {
+            acc_m = m_cap;
+        }
+        let final_p_hat = target_function(&acc_sample);
+        let mut final_w = 0.0;
+        if acc_m > 0.0 && !acc_w_sum.is_nan() && final_p_hat > 0.0 {
+            let w = (acc_w_sum / acc_m) / final_p_hat;
+            final_w = if !w.is_nan() && w >= 0.0 { w } else { 0.0 };
+        }
+
+        GpuWorldRestirReservoir {
+            visible_point: acc_sample.visible_point.to_array(),
+            w: final_w,
+            visible_normal: acc_sample.visible_normal.to_array(),
+            m: acc_m,
+            sample_point: acc_sample.sample_point.to_array(),
+            checksum: center.checksum,
+            sample_normal: acc_sample.sample_normal.to_array(),
+            valid: 1,
+            radiance: acc_sample.radiance.to_array(),
+            _pad0: 0,
+        }
+    }
+}
+
+/// Compiles `world_restir_fill.wesl` and returns its `Wgsl` translation.
+fn compile_fill_wgsl() -> String {
+    let mut cache = ShaderCache::new((), keep_wgsl);
+    let id = AssetId::Uuid {
+        uuid: Uuid::from_u128(0x5052_4953_4d5f_5753_5244_5f46_494c_0001),
+    };
+    cache.set_shader(
+        id,
+        Shader::from_wesl(
+            include_str!("../../shaders/world_restir_fill.wesl"),
+            "embedded://prism_render_scene/shaders/world_restir_fill.wesl",
+        ),
+    );
+    let module = cache
+        .get(0, id, &[])
+        .unwrap_or_else(|error| panic!("world_restir_fill.wesl failed to compile: {error}"));
+    (*module).clone()
+}
+
+/// Dispatches `fill_main` once over `src` and reads the whole `dst` reservoir
+/// table back as raw bytes.
+///
+/// The pipeline uses an explicit layout (a read-only `src` storage binding, a
+/// read-write `dst` storage binding, and a `64`-byte immediate block) matching
+/// the `WESL` declarations exactly; unlike the seed pass the fill kernel pools
+/// resident reservoirs only, so it binds no light list.
+fn dispatch_fill(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    wgsl: &str,
+    entry: &str,
+    src: &[GpuWorldRestirReservoir],
+    params: &GpuWorldRestirFillParams,
+) -> Vec<GpuWorldRestirReservoir> {
+    let reservoir_bytes = size_of_val(src) as u64;
+
+    let module = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("world_restir_fill_parity"),
+        source: ShaderSource::Wgsl(wgsl.into()),
+    });
+
+    let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+        label: Some("world_restir_fill_group0"),
+        entries: &[storage_entry(0, true), storage_entry(1, false)],
+    });
+    let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+        label: Some("world_restir_fill_layout"),
+        bind_group_layouts: &[Some(&bind_group_layout)],
+        immediate_size: size_of::<GpuWorldRestirFillParams>() as u32,
+    });
+    let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("world_restir_fill_parity"),
+        layout: Some(&pipeline_layout),
+        module: &module,
+        entry_point: Some(entry),
+        compilation_options: PipelineCompilationOptions::default(),
+        cache: None,
+    });
+
+    let src_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("fill_src_reservoirs"),
+        contents: bytemuck::cast_slice(src),
+        usage: BufferUsages::STORAGE,
+    });
+    let dst_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("fill_dst_reservoirs"),
+        contents: &vec![0u8; reservoir_bytes as usize],
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+    });
+
+    let bind_group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("fill_group0"),
+        layout: &bind_group_layout,
+        entries: &[
+            BindGroupEntry {
+                binding: 0,
+                resource: src_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 1,
+                resource: dst_buf.as_entire_binding(),
+            },
+        ],
+    });
+
+    let dst_stage = device.create_buffer(&BufferDescriptor {
+        label: Some("fill_dst_stage"),
+        size: reservoir_bytes,
+        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+        label: Some("fill_parity_encoder"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("fill_parity_pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.set_immediates(0, bytemuck::bytes_of(params));
+        pass.dispatch_workgroups(
+            params.capacity.max(1).div_ceil(WORLD_RESTIR_WORKGROUP_SIZE),
+            1,
+            1,
+        );
+    }
+    encoder.copy_buffer_to_buffer(&dst_buf, 0, &dst_stage, 0, reservoir_bytes);
+    queue.submit([encoder.finish()]);
+
+    dst_stage.slice(..).map_async(MapMode::Read, |_| {});
+    device
+        .poll(PollType::wait_indefinitely())
+        .expect("device poll should complete the submitted work");
+
+    let view = dst_stage
+        .slice(..)
+        .get_mapped_range()
+        .expect("mapped readback range should be available after poll");
+    let reservoirs = view
+        .chunks_exact(size_of::<GpuWorldRestirReservoir>())
+        .map(bytemuck::pod_read_unaligned::<GpuWorldRestirReservoir>)
+        .collect();
+    drop(view);
+    dst_stage.unmap();
+    reservoirs
+}
+
+/// One on-device `fill_main` dispatch must reproduce the authoritative fill
+/// `CPU` golden: each occupied slot's `GRIS`-pooled reservoir within
+/// [`SEED_PARITY_EPS`], and each empty slot copied through byte-for-byte.
+///
+/// The expectation comes from [`fill_mirror::fill_slot`], the serial `CPU` twin
+/// built on the authoritative golden
+/// [`prism_render_shading::gi::world_restir::spatial_hash`] and the seed-twin
+/// `RIS` estimator. The fixture plants a center cell plus a matching-checksum
+/// neighbour at the exact bucket the center's spatial ring probes, so the merge
+/// branch (confidence growth + reconnection-shift replacement) and the empty
+/// copy-through branch are both exercised. Acquisition is best-effort (see
+/// [`try_immediate_device`]); a headless host prints a skip notice and stays
+/// green.
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice must reach the test log on hosts without a usable device"
+)]
+fn fill_gpu_matches_cpu_golden() {
+    use prism_render_shading::gi::world_restir::spatial_hash::HashGridKey;
+
+    let Some((device, queue)) = try_immediate_device(size_of::<GpuWorldRestirFillParams>() as u32)
+    else {
+        eprintln!(
+            "fill_gpu_matches_cpu_golden: no wgpu adapter with immediate data, skipping \
+             on-device parity"
+        );
+        return;
+    };
+
+    let camera = Vec3::ZERO;
+    let params = HashGridParams::DEFAULT;
+    let frame = 7u32;
+    let spatial_samples = 1u32;
+    let spatial_radius = 1i32;
+    let m_cap = 16.0f32;
+    let center_slot = 10u32;
+    let witness_slot = 20usize;
+
+    // Center cell geometry: a +Z normal at the origin.
+    let center_vp = Vec3::ZERO;
+    let center_vn = Vec3::Z;
+
+    // Resolve the neighbour's open-addressed home slot from the authoritative
+    // golden hash so the fixture plants a matching-checksum neighbour exactly
+    // where the center's spatial ring will probe for it.
+    let center_key = spatial_hash::compute_key(center_vp, center_vn, camera, &params);
+    let offset = fill_mirror::neighbor_offset(frame, center_slot, 0, spatial_radius);
+    let nkey = HashGridKey {
+        cell_coord: center_key.cell_coord + offset,
+        level: center_key.level,
+        normal_bin: center_key.normal_bin,
+    };
+    let ncs = spatial_hash::checksum(&nkey);
+    let base = spatial_hash::bucket_index(&nkey, FILL_CAPACITY);
+    assert_ne!(
+        base, center_slot,
+        "neighbour must not alias the center slot"
+    );
+    assert_ne!(
+        base as usize, witness_slot,
+        "neighbour must not alias the witness slot"
+    );
+
+    let mut src = vec![GpuWorldRestirReservoir::zeroed(); FILL_CAPACITY as usize];
+    src[center_slot as usize] = GpuWorldRestirReservoir {
+        visible_point: center_vp.to_array(),
+        w: 1.0,
+        visible_normal: center_vn.to_array(),
+        m: 1.0,
+        sample_point: [0.0, 0.0, 0.0],
+        checksum: 0x0000_ABCD,
+        sample_normal: Vec3::Z.to_array(),
+        valid: 1,
+        radiance: [0.0, 0.0, 0.0],
+        _pad0: 0,
+    };
+    // Neighbour: a radiant off-axis sample whose reconnection target is
+    // positive (so it wins the center's resampling test), with stored visible
+    // geometry that makes the pooled reservoir's final target zero.
+    src[base as usize] = GpuWorldRestirReservoir {
+        visible_point: [7.0, 8.0, 9.0],
+        w: 3.0,
+        visible_normal: [0.0, 0.0, 0.0],
+        m: 2.0,
+        sample_point: [0.0, 0.0, 2.0],
+        checksum: ncs,
+        sample_normal: Vec3::NEG_Z.to_array(),
+        valid: 1,
+        radiance: [1.0, 1.0, 1.0],
+        _pad0: 0,
+    };
+    // Empty witness slot carrying recognisable bytes so the copy-through branch
+    // is proven to preserve the whole slot verbatim.
+    src[witness_slot] = GpuWorldRestirReservoir {
+        visible_point: [1.0, 2.0, 3.0],
+        w: 4.0,
+        visible_normal: [5.0, 6.0, 7.0],
+        m: 8.0,
+        sample_point: [9.0, 10.0, 11.0],
+        checksum: 0x0000_DEAD,
+        sample_normal: [12.0, 13.0, 14.0],
+        valid: 0,
+        radiance: [15.0, 16.0, 17.0],
+        _pad0: 0x0000_BEEF,
+    };
+
+    let fill_params = GpuWorldRestirFillParams {
+        camera_position: camera.to_array(),
+        capacity: FILL_CAPACITY,
+        jitter: params.jitter.to_array(),
+        light_count: 0,
+        base_cell_size: params.base_cell_size,
+        level_scale: params.level_scale,
+        normal_resolution: params.normal_resolution,
+        m_cap,
+        intensity: 1.0,
+        frame,
+        spatial_samples,
+        spatial_radius: spatial_radius as u32,
+    };
+
+    let golden: Vec<GpuWorldRestirReservoir> = (0..FILL_CAPACITY)
+        .map(|slot| {
+            fill_mirror::fill_slot(
+                &src,
+                slot,
+                camera,
+                &params,
+                frame,
+                spatial_samples,
+                spatial_radius,
+                m_cap,
+            )
+        })
+        .collect();
+
+    // Sanity: the fixture must actually exercise a GRIS merge at the center
+    // (confidence 1 + 2 = 3, and the neighbour's visible geometry won).
+    seed_approx_scalar(
+        golden[center_slot as usize].m,
+        3.0,
+        center_slot as usize,
+        "m",
+    );
+    seed_approx_vec(
+        golden[center_slot as usize].visible_point,
+        Vec3::new(7.0, 8.0, 9.0),
+        center_slot as usize,
+        "visible_point",
+    );
+
+    let wgsl = compile_fill_wgsl();
+    let entry = find_entry_point(&wgsl, "fill_main");
+    let dst = dispatch_fill(&device, &queue, &wgsl, &entry, &src, &fill_params);
+    assert_eq!(
+        dst.len(),
+        src.len(),
+        "device dst table length must match the src table"
+    );
+
+    let mut saw_copy_through = false;
+    let mut saw_merged = false;
+    for slot in 0..FILL_CAPACITY as usize {
+        let got = dst[slot];
+        let want = golden[slot];
+
+        if src[slot].valid == 0 {
+            assert_eq!(
+                bytemuck::bytes_of(&got),
+                bytemuck::bytes_of(&src[slot]),
+                "empty slot {slot} must be copied through byte-for-byte"
+            );
+            assert_eq!(
+                bytemuck::bytes_of(&want),
+                bytemuck::bytes_of(&src[slot]),
+                "golden empty slot {slot} must also copy through"
+            );
+            saw_copy_through = true;
+            continue;
+        }
+
+        assert_eq!(got.valid, 1, "occupied slot {slot} must stay valid");
+        assert_eq!(
+            got.checksum, want.checksum,
+            "occupied slot {slot} must preserve its SHARC checksum"
+        );
+        assert_eq!(got._pad0, 0, "occupied slot {slot} pad word must be zero");
+        seed_approx_vec(
+            got.visible_point,
+            Vec3::from_array(want.visible_point),
+            slot,
+            "visible_point",
+        );
+        seed_approx_vec(
+            got.visible_normal,
+            Vec3::from_array(want.visible_normal),
+            slot,
+            "visible_normal",
+        );
+        seed_approx_vec(
+            got.sample_point,
+            Vec3::from_array(want.sample_point),
+            slot,
+            "sample_point",
+        );
+        seed_approx_vec(
+            got.sample_normal,
+            Vec3::from_array(want.sample_normal),
+            slot,
+            "sample_normal",
+        );
+        seed_approx_vec(
+            got.radiance,
+            Vec3::from_array(want.radiance),
+            slot,
+            "radiance",
+        );
+        seed_approx_scalar(got.w, want.w, slot, "w");
+        seed_approx_scalar(got.m, want.m, slot, "m");
+
+        if slot == center_slot as usize {
+            saw_merged = true;
+        }
+    }
+
+    assert!(
+        saw_copy_through,
+        "the fixture must exercise the copy-through branch"
+    );
+    assert!(
+        saw_merged,
+        "the fixture must exercise the GRIS merge branch"
     );
 }

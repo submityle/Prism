@@ -406,7 +406,12 @@ fn reservoir_checksum(r: WorldRestirReservoir) -> u32 {
 
 @compute @workgroup_size(64, 1, 1)
 fn fill_main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let capacity = u32(params.camera_capacity.w);
+    // Integer tunables share the float lanes of the frozen `FillParams`
+    // ABI (`abi::GpuWorldRestirFillParams`), which the host sends as raw
+    // u32/i32 bit patterns; reinterpret the bits with `bitcast` rather than
+    // a numeric `u32(...)` conversion (which would truncate the float value
+    // of the bit pattern to a wrong count).
+    let capacity = bitcast<u32>(params.camera_capacity.w);
     let slot = gid.x;
     if (slot >= capacity) {
         return;
@@ -425,11 +430,11 @@ fn fill_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let jitter = params.jitter_lights.xyz;
     let base_cell_size = params.grid_tunables.x;
     let level_scale = params.grid_tunables.y;
-    let normal_resolution = u32(params.grid_tunables.z);
+    let normal_resolution = bitcast<u32>(params.grid_tunables.z);
     let m_cap = params.grid_tunables.w;
-    let frame = u32(params.reuse_tunables.y);
-    let spatial_samples = u32(params.reuse_tunables.z);
-    let spatial_radius = i32(params.reuse_tunables.w);
+    let frame = bitcast<u32>(params.reuse_tunables.y);
+    let spatial_samples = bitcast<u32>(params.reuse_tunables.z);
+    let spatial_radius = bitcast<i32>(params.reuse_tunables.w);
 
     // Recompute this cell's SHARC key from its stored geometry so neighbour
     // keys can be addressed in the ring below.
