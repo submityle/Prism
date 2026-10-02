@@ -3,6 +3,7 @@
 pub mod culling;
 pub mod stochastic;
 pub mod restir_di;
+pub mod restir_temporal;
 
 use crate::ray_scene::TraceBackend;
 
