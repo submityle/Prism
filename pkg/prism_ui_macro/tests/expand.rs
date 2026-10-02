@@ -7,6 +7,8 @@ use prism_ui::style::{Color, Keyword, Length, StyleProp, StyleValue};
 use prism_ui::{Element, ElementKind, Key, StableId};
 use prism_ui_macro::loom;
 
+extern crate alloc;
+
 #[test]
 fn box_with_classes_key_and_styles() {
     let el = loom! {
@@ -283,4 +285,73 @@ fn for_each_items_carry_no_stable_id() {
     assert!(children[1].stable_id().is_none());
     assert_eq!(children[2].text_content(), Some("y"));
     assert!(children[2].stable_id().is_none());
+}
+
+#[test]
+fn dollar_sigil_reads_signal_content() {
+    // `$sig` in a `text(..)` slot lowers to `sig.get()`: the macro reads the
+    // signal's current value when the tree is built.
+    use prism_ui::reactive::Runtime;
+
+    let rt = Runtime::new();
+    let label = rt.signal(String::from("hello"));
+
+    let el = loom! { text($label) };
+    assert_eq!(el.kind(), &ElementKind::Text);
+    assert_eq!(el.text_content(), Some("hello"));
+}
+
+#[test]
+fn dollar_sigil_tracks_dependency_in_effect() {
+    // Because `$sig` lowers to a tracked `get()`, building the tree inside an
+    // effect subscribes that effect to the signal, so a later `set` re-runs it.
+    use core::cell::RefCell;
+    use prism_ui::reactive::Runtime;
+    use alloc::rc::Rc;
+
+    let rt = Runtime::new();
+    let label = rt.signal(String::from("first"));
+
+    let seen = Rc::new(RefCell::new(Vec::<String>::new()));
+    let effect = {
+        let label = label.clone();
+        let seen = Rc::clone(&seen);
+        rt.effect(move || {
+            let el = loom! { box { text($label); } };
+            let text = el.child_elements()[0]
+                .text_content()
+                .unwrap()
+                .to_string();
+            seen.borrow_mut().push(text);
+        })
+    };
+
+    label.set(String::from("second"));
+    effect.dispose();
+
+    assert_eq!(
+        *seen.borrow(),
+        vec![String::from("first"), String::from("second")]
+    );
+}
+
+#[test]
+fn dollar_sigil_on_custom_name() {
+    // The sigil also works for `custom(..)` names.
+    use prism_ui::reactive::Runtime;
+
+    let rt = Runtime::new();
+    let name = rt.signal(String::from("my_widget"));
+
+    let el = loom! { custom($name) {} };
+    assert_eq!(el.kind(), &ElementKind::Custom("my_widget".to_string()));
+}
+
+#[test]
+fn bare_expression_is_spliced_without_get() {
+    // Without `$`, the expression is spliced verbatim (no `.get()`), so a plain
+    // owned value still works as content.
+    let text = String::from("plain");
+    let el = loom! { text(text.clone()) };
+    assert_eq!(el.text_content(), Some("plain"));
 }

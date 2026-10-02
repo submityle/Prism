@@ -44,10 +44,53 @@ pub(crate) struct Node {
 pub(crate) enum NodeKind {
     /// `box` -> `Element::box_()`.
     Box,
-    /// `text(EXPR)` -> `Element::text(EXPR)`.
-    Text(Expr),
-    /// `custom(EXPR)` -> `Element::custom(EXPR)`.
-    Custom(Expr),
+    /// `text(EXPR)` -> `Element::text(EXPR)` (EXPR may carry the `$` sigil).
+    Text(ContentExpr),
+    /// `custom(EXPR)` -> `Element::custom(EXPR)` (EXPR may carry the `$` sigil).
+    Custom(ContentExpr),
+}
+
+/// An expression that fills a `text(..)` or `custom(..)` slot, optionally
+/// prefixed with the `$` **reactive-read** sigil.
+///
+/// A bare expression is spliced verbatim. A `$`-prefixed expression is lowered
+/// to `(expr).get()`, reading a [`Signal`](prism_ui::reactive::Signal) so that
+/// the enclosing reactive view (an [`Effect`](prism_ui::reactive::Effect) run by
+/// [`ReactiveView`](prism_ui::ReactiveView)) records a dependency and re-runs
+/// whenever that signal changes. `$` is pure sugar: `text($label)` is exactly
+/// `text(label.get())`.
+pub(crate) struct ContentExpr {
+    /// Whether the leading `$` reactive-read sigil was present.
+    pub(crate) reactive: bool,
+    /// The underlying expression (with any `$` already stripped).
+    pub(crate) expr: Expr,
+}
+
+impl Parse for ContentExpr {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let reactive = peek_dollar(input);
+        if reactive {
+            eat_dollar(input)?;
+        }
+        let expr: Expr = input.parse()?;
+        Ok(Self { reactive, expr })
+    }
+}
+
+/// Returns `true` when the next token is the `$` reactive-read sigil.
+fn peek_dollar(input: ParseStream) -> bool {
+    input
+        .cursor()
+        .punct()
+        .is_some_and(|(punct, _)| punct.as_char() == '$')
+}
+
+/// Consumes a leading `$` sigil (callers gate this behind [`peek_dollar`]).
+fn eat_dollar(input: ParseStream) -> syn::Result<()> {
+    input.step(|cursor| match cursor.punct() {
+        Some((punct, rest)) if punct.as_char() == '$' => Ok(((), rest)),
+        _ => Err(cursor.error("expected `$` reactive-read sigil")),
+    })
 }
 
 /// A child statement inside a node block.

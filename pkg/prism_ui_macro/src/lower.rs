@@ -20,7 +20,7 @@
 use proc_macro2::{Ident, TokenStream};
 use quote::quote;
 
-use crate::ast::{Attr, Child, Node, NodeKind, StyleVal};
+use crate::ast::{Attr, Child, ContentExpr, Node, NodeKind, StyleVal};
 
 /// Lowers a [`Node`] into the builder-call chain that constructs it.
 ///
@@ -31,8 +31,14 @@ use crate::ast::{Attr, Child, Node, NodeKind, StyleVal};
 pub(crate) fn lower_node(node: &Node, path: &str) -> TokenStream {
     let mut expr = match &node.kind {
         NodeKind::Box => quote! { ::prism_ui::Element::box_() },
-        NodeKind::Text(content) => quote! { ::prism_ui::Element::text(#content) },
-        NodeKind::Custom(name) => quote! { ::prism_ui::Element::custom(#name) },
+        NodeKind::Text(content) => {
+            let value = lower_content(content);
+            quote! { ::prism_ui::Element::text(#value) }
+        }
+        NodeKind::Custom(name) => {
+            let value = lower_content(name);
+            quote! { ::prism_ui::Element::custom(#value) }
+        }
     };
 
     for attr in &node.attrs {
@@ -64,6 +70,20 @@ fn child_path(parent: &str, index: usize) -> String {
         index.to_string()
     } else {
         format!("{parent}/{index}")
+    }
+}
+
+/// Lowers a `text(..)` / `custom(..)` [`ContentExpr`] to its value token stream.
+///
+/// A plain expression is spliced verbatim; a `$`-prefixed one becomes
+/// `(expr).get()`, performing a tracked [`Signal`](prism_ui::reactive::Signal)
+/// read so the enclosing reactive view re-runs when the signal changes.
+fn lower_content(content: &ContentExpr) -> TokenStream {
+    let expr = &content.expr;
+    if content.reactive {
+        quote! { (#expr).get() }
+    } else {
+        quote! { #expr }
     }
 }
 

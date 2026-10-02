@@ -54,6 +54,17 @@ use crate::ast::LoomInput;
 /// `::custom(..)` followed by chained `.class(..)`, `.key_int(..)` /
 /// `.key_str(..)`, `.style(..)`, `.child(..)` and `.children(..)` calls.
 ///
+/// # Reactive-read sigil `$`
+///
+/// A `text(..)` or `custom(..)` content expression may be prefixed with `$` to
+/// mark a **reactive read**: `text($label)` lowers to `text(label.get())`,
+/// performing a tracked [`Signal`](prism_ui::reactive::Signal) read. When the
+/// `loom!` tree is built inside a reactive view (an effect driven by
+/// [`ReactiveView`](prism_ui::ReactiveView)), that read records a dependency so
+/// the view re-runs — and the subtree reconciles — whenever the signal changes.
+/// Without `$` the expression is spliced verbatim. `$` is pure sugar for an
+/// explicit `.get()`; it adds no hidden state.
+///
 /// [`prism_ui::Element`]: https://docs.rs/prism_ui
 #[proc_macro]
 pub fn loom(input: TokenStream) -> TokenStream {
