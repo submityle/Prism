@@ -54,7 +54,8 @@
 //!   `BSDF` importance sampling, direct-light `NEE`, Russian-roulette path
 //!   termination, and the [`integrator::Scene`] it traces.
 //! - [`camera`] — the pinhole camera ([`camera::PinholeCamera`]) that
-//!   generates primary rays through a virtual image plane.
+//!   generates primary rays through a virtual image plane, optionally with a
+//!   physically based thin-lens aperture for depth-of-field blur.
 //! - [`film`] — the [`film::Film`] framebuffer and the [`film::render`]
 //!   driver that averages jittered primary rays into a reference image.
 //! - [`compare`] — image-difference metrics ([`compare::ErrorMetrics`])
