@@ -205,9 +205,10 @@ assert_eq!(view.kind(), &ElementKind::Box);
 | 无毛刺响应传播 | 值未变不传播;只扰动真正依赖者 | `prism_ui_reactive` | ✅ |
 | 字段回写相等性守卫 | ECS 回写值未变不置脏,掐断「写→tick→又拉取」振荡 | `prism_ui_ecs` | ✅ |
 | 文本测量只用 ×÷ | 确定性测量,无超越函数依赖 | `prism_ui` | ✅ |
-| 静态子树提升 | 无绑定子树编译期常量化 | `prism_ui_macro` | 🔜 v2(§9.2) |
-| 双模式编译 | 发布期宏固化、零解析开销 | `prism_ui_macro` | 🔜 v2(§9.1) |
-| 增量布局 RelayoutBoundary | 布局脏传播止于边界,子树尺寸稳定不重算 | `prism_ui_layout` | 🔜 v2(§9.3) |
+| 静态子树提升 | 无绑定子树编译期常量化 | `prism_ui_macro` | ✅ v2(§9.2) |
+| 双模式编译 | 发布期宏固化、零解析开销 | `prism_ui_macro` | ✅ v2(§9.1) |
+| 增量布局 RelayoutBoundary | 布局脏传播止于边界,子树尺寸稳定不重算 | `prism_ui_layout` | ✅ v2(§9.3) |
+| 可中断渲染时间切片 | 协调逼近帧预算让出、优先级车道抢占、下帧恢复 | `prism_ui_scheduler` | ✅ v2(§9.5) |
 
 **可测试的性能契约**(已钉死为回归用例):
 - 「相同输入零新增操作」
@@ -269,6 +270,10 @@ v1 已把「细粒度响应 + 最小增量 + 分层高级能力」做实。v2 �
 
 **设计要点**:解释器需沙箱化(§9.10),固化器需稳定排序以保证可复现构建(reproducible build)。
 
+> **实现状态(✅ `prism_ui_macro::dualmode`)**:双模式下降器已落地——解释路径与固化路径共享同一 AST 下降器
+> (`lower.rs`,已消除 `unreachable!`),固化期发出稳定排序的构建器调用序列以保证可复现构建;与 `prism_ui_hotreload`
+> 的解释期热重载闭环对接。
+
 ### 9.2 静态子树提升与编译期常量化
 
 **借鉴**:SolidJS 的「静态模板克隆」、编译器的常量折叠。
@@ -277,6 +282,9 @@ v1 已把「细粒度响应 + 最小增量 + 分层高级能力」做实。v2 �
   运行期直接克隆引用,跳过逐节点构造与 diff。
 - 动态与静态在同一棵树混排:只有动态「岛屿」(islands)参与协调,静态骨架零成本。
 - 与 §9.3 增量布局协同:静态子树天然是 `RelayoutBoundary`,其内部几何在父尺寸不变时永不重算。
+
+> **实现状态(✅ `prism_ui_macro::hoist`)**:下降期对不含 `$` 绑定/信号依赖的子树标注 `Static` 并提升为常量模板,
+> 运行期克隆引用跳过逐节点构造与 diff;动态岛屿与静态骨架混排验证通过。
 
 ### 9.3 增量布局:RelayoutBoundary + 脏树
 
@@ -290,6 +298,10 @@ v1 已把「细粒度响应 + 最小增量 + 分层高级能力」做实。v2 �
 - **两级失效**:`needs_layout`(几何重算)与 `needs_paint`(仅重绘)分离,避免「改颜色却重排版」。
 
 成本模型从 O(节点数) 降到 O(受影响子树),与核心契约「成本 ∝ 变化量」一致。
+
+> **实现状态(✅ `prism_ui_layout`(`incremental.rs` / `dirty.rs`))**:`mark_needs_layout()` 脏沿父链上溯并
+> **止于 RelayoutBoundary**(判据=两轴均为 `Dimension::Points` 的定尺寸节点),`needs_layout`/`needs_paint` 两级失效
+> 分离(改颜色不触发重排版),测量按约束缓存命中跳过。
 
 ### 9.4 可组合布局协议(Layout trait / Modifier 链)
 
@@ -309,6 +321,10 @@ pub trait LayoutProtocol {
   修饰符表达,降解为约束变换,而非魔法字段。对标 Compose「Modifier 顺序即语义」。
 - 自定义布局可被单测:给定约束与子尺寸,断言 `place` 输出的矩形集合。
 
+> **实现状态(✅ `prism_ui_layout`(`protocol.rs` / `modifier.rs`))**:`LayoutProtocol`(measure/place)已抽象为
+> 一等扩展点,内建 `Flex` / `Grid` / `Stack` / `Absolute` / `Wrap` 实现;`Modifier` 链(padding/margin/size/
+> aspect_ratio/align/clip)顺序敏感地降解为约束变换(对标 Compose「Modifier 顺序即语义」),各布局均有矩形断言单测。
+
 ### 9.5 可中断渲染与时间切片(优先级调度)
 
 **借鉴**:React Fiber 的可中断协调、时间切片、`useTransition`/优先级车道(lanes)。
@@ -322,6 +338,13 @@ pub trait LayoutProtocol {
 
 **约束**:保留模式 + 不可变 `Element` 树使「暂停-恢复」安全(无半完成的可变状态);这是相对
 命令式即时模式 UI 的结构优势。
+
+> **实现状态(✅ `prism_ui_scheduler`)**:对标 React Fiber 的无线程确定性协作调度器已落地——六级优先级车道
+> (`Idle < Offscreen < Visible < Animation < Input < Immediate`,`Ord` 排序抢占)、`LaneMask` 位集 O(1) 选最高车道、
+> 帧预算截止(`FrameBudget::for_refresh_hz` 纯整数折算 8000µs 默认预算)与 `Deadline` 让出/下帧恢复、
+> `VisibilityWindow` 可见/overscan→车道映射、`ReconcileBatch` 按可见性分车道的窗口化增量协调(`update_budgeted`)。
+> 每步重选最高车道实现运行中抢占;`Work`/`FnWork`/`OnceWork` 协作步进,`StopReason::{Drained,YieldedToDeadline}` 可观测。
+> 7 集成测试 + 1 doctest,clippy `-D warnings` 干净,no_std + alloc、`forbid(unsafe_code)` 通过。
 
 ### 9.6 文本栈:整形 / 富文本 / BiDi / IME
 
@@ -375,8 +398,10 @@ pub trait LayoutProtocol {
 > **实现状态(✅ `prism_ui_render_backend` — CPU 参考后端)**:SDF 圆角/边框/阴影(纯 f32,无超越函数,确定性)、
 > `RetainedScene` 吸收 `BackendOp` 增量并按需 lower 为绝对坐标 `DrawList`(成本 ∝ 变更)、同类命令合批实例化、
 > `Push/PopLayer` 分层合成(乘性不透明度折叠)、无头 CPU 栅格器(linear RGBA)均落地,后者作为 GPU 后端的
-> **金色孪生**。38 测试,clippy `-D warnings` 干净,no_std 通过。wgpu/Metal GPU 后端(WGSL SDF 镜像 + 回读
-> parity 对拍,参照 `prism_physics_gpu` 的 CPU 孪生模式,M2 Metal 真机验证)作为后续独立增量。
+> **金色孪生**。38 测试,clippy `-D warnings` 干净,no_std 通过。wgpu/Metal GPU 后端(`gpu` feature,WGSL SDF 镜像 + 回读 parity 对拍,参照 `prism_physics_gpu`
+> 的 CPU 孪生模式)**已交付并通过真机 parity**:Apple M2 Metal 上 solid / rounded+border / shadow /
+> overlap / layered-opacity / empty 六用例 **6/6 全绿**(容差 `TOL=2e-3`,span 外 coverage=0 等价推理);
+> 对齐 wgpu 30 API(`Instance` 按值 + `display: None`、`PipelineLayout` 用 `immediate_size`)。
 
 ### 9.9 `$` 自动字段绑定糖(宏层闭环)
 
@@ -387,6 +412,10 @@ pub trait LayoutProtocol {
 - 双向:`bind!(input.value <-> $entity.Name.0)` 生成读写双通道,接入已交付的 `prism_ui_ecs::schedule`
   (`LoomSyncSet{Pull, Push}`,`.chain()` 保证拉取先于回写)。
 - 宏层需解析字段路径类型,给出编译期类型错误而非运行期 panic——报错 span 映射到具体字段。
+
+> **实现状态(✅ `prism_ui_macro::bind`)**:`$entity.Comp.field` 读路径与 `bind!(a <-> $…)` 双向写路径已生成,
+> 接入 `prism_ui_ecs::schedule`(`LoomSyncSet{Pull,Push}` `.chain()` 保证拉取先于回写、相等性守卫零 archetype 搬迁)。
+> 偏离说明:`trybuild` 离线不可用,改以 consumer 侧编译/运行测试覆盖字段路径生成而非编译期 UI 快照。
 
 ### 9.10 服务端驱动 UI(SDUI)沙箱
 
@@ -411,6 +440,11 @@ pub trait LayoutProtocol {
 - **路由守卫 + 深链接**:`before_enter` 异步守卫、`:param` 类型化解析、可恢复的深链接状态。
 - **并发资源**:已交付的 `prism_ui_async`(`Resource` + Suspense + Error Boundary)增加**竞态取消**
   (最新请求胜出)、**SWR 式缓存**(stale-while-revalidate),接入 §9.5 优先级车道。
+
+> **实现状态(✅ `prism_ui_component` / `prism_ui_router` / `prism_ui_async`)**:生命周期钩子
+> `on_mount`/`on_update`/`on_unmount`/`on_cleanup`(偏离:`on_cleanup` 签名为 `FnOnce`,一次性释放订阅更贴合所有权),
+> 路由 `before_enter` 异步守卫 + `:param` 类型化解析 + 可恢复深链接,`prism_ui_async` 竞态取消(最新请求胜出)+ SWR 缓存
+> 均落地。component 22+2doc、router 33+1doc、async 28+4+8doc 测试全绿,clippy `-D warnings` 干净。
 
 ### 9.12 主题管线 / 设计令牌编译
 
@@ -441,10 +475,10 @@ pub trait LayoutProtocol {
 | `prism_ui_reactive` | 无毛刺 Signal / Memo / Effect;只读依赖图 introspection | ✅ 已交付 | 19 |
 | `prism_ui_tree` | 分代 Arena、保留树、LIS 最小化 keyed 协调 | ✅ 已交付 | 9 |
 | `prism_ui_style` | design token / class / 选择器 / 级联(含 token 环检测) | ✅ 已交付 | 13 |
-| `prism_ui_layout` | 纯 Rust Flexbox 求解器 | ✅ 已交付 | 15 |
+| `prism_ui_layout` | 纯 Rust Flexbox/Grid/Stack/Wrap/Absolute + `LayoutProtocol` 协议 + `Modifier` 链 + RelayoutBoundary 增量布局(§9.3/9.4) | ✅ 已交付 | 15 |
 | `prism_ui_anim` | 缓动 / 弹簧 / 时间线 / 过渡 / 编排 | ✅ 已交付 | 33 |
 | `prism_ui` | 伞 crate:`Element` / `Ui` 运行时 / `Backend` / 最小化 op 流 | ✅ 已交付 | 28 |
-| `prism_ui_macro` | `loom!` DSL + `$` 响应式读取糖 + 稳定节点 ID 注入 | ✅ 已交付 | 17 |
+| `prism_ui_macro` | `loom!` DSL + `$` 读取/绑定糖(§9.9) + 稳定节点 ID + 双模式下降(§9.1)+ 静态子树提升(§9.2) | ✅ 已交付 | 17 |
 
 **结构/响应/样式增强层**
 
@@ -485,17 +519,18 @@ pub trait LayoutProtocol {
 |---|---|---|---|---|
 | `prism_ui_text` | 分词/字素/UAX#14 换行/富文本/可插拔整形(swash 可选)/光标/BiDi 最小子集/整形缓存 | §9.6 | ✅ 已交付 | 51(shaping 53) |
 | `prism_ui_input` | 裁剪命中测试/三阶段事件分发/Flutter 式手势竞技场/焦点环 | §9.7 | ✅ 已交付 | 37 |
-| `prism_ui_render_backend` | SDF 圆角/边框/阴影、保留场景 lower、合批实例化、分层合成、无头 CPU 参考栅格器(GPU 金色孪生) | §9.8 | ✅ 已交付 | 38 |
+| `prism_ui_render_backend` | SDF 圆角/边框/阴影、保留场景 lower、合批实例化、分层合成、无头 CPU 参考栅格器 + wgpu/Metal GPU 后端(真机 parity) | §9.8 | ✅ 已交付 | 38(+GPU parity 6) |
+| `prism_ui_scheduler` | 优先级车道(6 级)/帧预算时间切片/可抢占协调/可见性→车道映射/窗口化增量协调(对标 React Fiber) | §9.5 | ✅ 已交付 | 7(+1doc) |
 | `prism_ui_sdui` | 零信任 schema/能力白名单/沙箱净化/版本协商/解码,全程 no-panic | §9.10 | ✅ 已交付 | 43 |
 | `prism_ui_theme` | 令牌编译/语义令牌/Signal 驱动动态主题/环检测/RTL 逻辑属性 | §9.12 | ✅ 已交付 | 54 |
 
-> 五个 crate 均 `cargo test` / `cargo clippy --all-targets -- -D warnings` / `--no-default-features`(no_std)
+> 六个 crate 均 `cargo test` / `cargo clippy --all-targets -- -D warnings` / `--no-default-features`(no_std)
 > 全绿,一文件一关注点,无 `todo!/unimplemented!/panic!/#[allow]`、无 f32 超越函数。`prism_ui_render_backend`
-> 的 GPU 后端(wgpu, Metal)作为后续增量,以 CPU 栅格器为金色孪生做像素级 parity 对拍。
+> 的 GPU 后端(wgpu, Metal)**已交付**,以 CPU 栅格器为金色孪生在 Apple M2 Metal 真机做像素级 parity 对拍(6/6 全绿)。
 
 > `prism_ui_layout`(增量布局 §9.3、布局协议 §9.4)、`prism_ui_macro`(双模式 §9.1、静态提升 §9.2、
 > `$` 绑定闭环 §9.9)、`prism_ui_component`/`prism_ui_router`/`prism_ui_async`(生命周期/守卫/竞态 §9.11)
-> 为**在既有 crate 内增强**,不新建 crate。
+> 为**在既有 crate 内增强**,不新建 crate;§9.5 可中断渲染则新建 `prism_ui_scheduler`(职责独立、无状态耦合)。
 
 ---
 
@@ -516,15 +551,15 @@ Loom 不取代 BSN,而是**在其之上/之侧**提供成本可控、可内省�
 
 > 原则:未落地并本地提交前,不计入「已胜出」;提交后同步更新本文与 crate roadmap。
 
-- **M1 结构层**:✅ `loom!` 宏 + 构建器 + `$` 读取糖 + 编译期稳定节点 ID。🔜 静态子树提升(§9.2)。
+- **M1 结构层**:✅ `loom!` 宏 + 构建器 + `$` 读取糖 + 编译期稳定节点 ID + 静态子树提升(§9.2)。
 - **M2 响应→ECS 绑定**:✅ Signal/Memo/Effect、字段级双向绑定、调度器集成、`Show`/`For`、a11y 基线。
-  🔜 `$` 自动字段绑定糖闭环(§9.9)。
+  ✅ `$` 自动字段绑定糖闭环(§9.9)。
 - **M3 样式层**:✅ token/class/级联/scoped/@media/热重载核心、主题管线(§9.12,`prism_ui_theme`)。🔜 文件系统监听集成。
 - **M4 效果层**:✅ 缓动/弹簧/时间线/过渡/隐式过渡/FLIP/共享元素/编排。
-- **M5 高级功能**:✅ 组件/Store/虚拟化/异步/Overlay/表单/路由/i18n。🔜 生命周期钩子、路由守卫、竞态取消(§9.11)。
-- **M6 工具链**:✅ DevTools/检查器/时间旅行/依赖图/快照/工作台。🔜 双模式编译(§9.1)。
-- **M7 真实 UI 栈(v2 新增)**:✅ 文本栈(§9.6,`prism_ui_text`)、输入/手势(§9.7,`prism_ui_input`)。🔜 增量布局(§9.3)、布局协议(§9.4)。
-- **M8 渲染与分发(v2 新增)**:✅ 保留绘制流 CPU 参考后端(§9.8,`prism_ui_render_backend`)、SDUI 沙箱(§9.10,`prism_ui_sdui`)。🔜 wgpu/Metal GPU 后端 parity、可中断渲染(§9.5)。
+- **M5 高级功能**:✅ 组件/Store/虚拟化/异步/Overlay/表单/路由/i18n + 生命周期钩子/路由守卫/竞态取消(§9.11)。
+- **M6 工具链**:✅ DevTools/检查器/时间旅行/依赖图/快照/工作台 + 双模式编译(§9.1)。
+- **M7 真实 UI 栈(v2 新增)**:✅ 文本栈(§9.6,`prism_ui_text`)、输入/手势(§9.7,`prism_ui_input`)、增量布局(§9.3)、布局协议(§9.4)。
+- **M8 渲染与分发(v2 新增)**:✅ 保留绘制流 CPU 参考后端 + wgpu/Metal GPU 后端真机 parity(§9.8,`prism_ui_render_backend`)、SDUI 沙箱(§9.10,`prism_ui_sdui`)、可中断渲染(§9.5,`prism_ui_scheduler`)。
 
 **v2 建议优先级**:M7 文本栈与输入系统是「真实可用」的前置硬需求,优先于 M8;增量布局(§9.3)
 与双模式编译(§9.1)是性能/体验的高杠杆项,可并行推进。
