@@ -1,4 +1,5 @@
-//! `NvCloth`-style virtual particles for cloth self-collision.
+//! `NvCloth`-style virtual particles for cloth self-collision — render-side
+//! thin wrapper that delegates to the physics engine single source of truth.
 //!
 //! The discrete self-collision tier in [`collision`](super::collision) is a
 //! point-to-point spatial hash: it separates cloth *vertices* that come within
@@ -17,25 +18,14 @@
 //! the virtual particle is scattered back onto the triangle's three real
 //! vertices by the barycentric weights so momentum and mass are conserved.
 //!
-//! This module owns that tier as pure array-in/array-out math, mirroring the
-//! determinism guarantees of [`collision`](super::collision):
-//!
-//! * The sample list has a fixed order — every real particle first (index
-//!   `0..n`), then the virtual particles in generation order — so the spatial
-//!   hash buckets, the ascending [`BTreeMap`] cell traversal and the `b > a`
-//!   pair test are all deterministic.
-//! * Corrections are Gauss-Seidel (applied in place as pairs are found) and
-//!   sample positions are recomputed from the live vertex positions each time,
-//!   so the same inputs always produce bit-identical outputs.
-//! * A sample pair that shares any *active* real vertex (a vertex carrying
-//!   positive barycentric weight in either sample) is skipped, which suppresses
-//!   a triangle colliding with its own vertices or with an adjacent triangle
-//!   that shares an edge/corner — only genuinely non-incident geometry is
-//!   separated.
-//! * Pinned vertices (`inverse_mass <= 0`) never move; a sample whose active
-//!   vertices are all pinned is immovable and its free partner takes the whole
-//!   correction. Coincident samples separate along a fixed `+X` axis, and every
-//!   degenerate input falls back deterministically and never produces `NaN`.
+//! The algorithm (sample ordering, deterministic spatial hash, Gauss-Seidel
+//! scatter, incident-pair suppression, pinned handling and degenerate
+//! fallbacks) now lives once in
+//! [`prism_physics_core::soft::collision`]. The [`VirtualParticle`] and
+//! [`VirtualParticlePattern`] data types are re-exported from physics so there
+//! is a single definition, and the render-facing [`ClothParticle`]-based
+//! entry points below simply convert to the physics SoA layout, delegate, and
+//! write the solved positions back.
 //!
 //! Passing an empty virtual-particle slice makes
 //! [`resolve_self_collision_virtual`] behave exactly like the point-to-point
@@ -43,115 +33,18 @@
 //! real-vertex samples still collide with one another, so this is a strict
 //! superset of the base tier rather than a replacement.
 
-use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
-use super::{ClothParticle, Vec3, EPS_LEN_SQ};
+use super::{physics_bridge, ClothParticle};
+use prism_physics_core::soft::collision as physics_collision;
 
-/// A reusable table of barycentric sample weights applied to every triangle.
-///
-/// Each row is a `[w0, w1, w2]` barycentric coordinate on the triangle
-/// `[v0, v1, v2]`; the entries are sanitized on construction so every row is
-/// finite, non-negative and sums to exactly `1.0`. One
-/// [`VirtualParticle`](VirtualParticle) is emitted per `(triangle, row)` pair by
-/// [`generate_virtual_particles`], so a four-row pattern turns a `t`-triangle
-/// mesh into `4 * t` virtual particles.
-#[derive(Clone, Debug, PartialEq)]
-pub struct VirtualParticlePattern {
-    weights: Vec<[f32; 3]>,
-}
+/// The `NvCloth` barycentric sample pattern — re-exported from the physics
+/// engine so the render tier and the solver share a single definition.
+pub use physics_collision::VirtualParticlePattern;
 
-impl VirtualParticlePattern {
-    /// The `NvCloth` default: the face centroid plus the three edge midpoints.
-    ///
-    /// These four samples are the classic `NvCloth` seeding — the centroid
-    /// guards the middle of the face and the three edge midpoints guard the
-    /// thin strips near each edge, which is where a vertex is most likely to
-    /// tunnel between two corner vertices.
-    #[must_use]
-    pub fn nvcloth_default() -> Self {
-        Self::from_weights(&[
-            [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0],
-            [0.5, 0.5, 0.0],
-            [0.0, 0.5, 0.5],
-            [0.5, 0.0, 0.5],
-        ])
-    }
-
-    /// Builds a pattern from raw barycentric rows, sanitizing each row.
-    ///
-    /// Every row is clamped to non-negative finite components and then
-    /// renormalized to sum to `1.0`; a row that cannot be normalized (all zero,
-    /// negative or non-finite) falls back to the centroid `[1/3, 1/3, 1/3]` so
-    /// the pattern never carries a degenerate weight triple. An empty input
-    /// yields an empty pattern (which generates no virtual particles).
-    #[must_use]
-    pub fn from_weights(rows: &[[f32; 3]]) -> Self {
-        let weights = rows.iter().map(|row| sanitize_weights(*row)).collect();
-        Self { weights }
-    }
-
-    /// The number of sample rows (virtual particles emitted per triangle).
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.weights.len()
-    }
-
-    /// Returns `true` when the pattern has no rows and generates nothing.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.weights.is_empty()
-    }
-
-    /// The sanitized barycentric rows, in table order.
-    #[must_use]
-    pub fn rows(&self) -> &[[f32; 3]] {
-        &self.weights
-    }
-}
-
-impl Default for VirtualParticlePattern {
-    fn default() -> Self {
-        Self::nvcloth_default()
-    }
-}
-
-/// Clamps a barycentric row to finite non-negative components summing to `1.0`.
-///
-/// Non-finite or negative components are treated as `0.0`; if the surviving
-/// components sum to a positive value the row is scaled to sum to `1.0`,
-/// otherwise the row falls back to the centroid so it is never degenerate.
-fn sanitize_weights(row: [f32; 3]) -> [f32; 3] {
-    let mut clamped = [0.0f32; 3];
-    let mut sum = 0.0f32;
-    for (out, &w) in clamped.iter_mut().zip(row.iter()) {
-        let value = if w.is_finite() && w > 0.0 { w } else { 0.0 };
-        *out = value;
-        sum += value;
-    }
-    if sum > 0.0 {
-        let inv = 1.0 / sum;
-        [clamped[0] * inv, clamped[1] * inv, clamped[2] * inv]
-    } else {
-        [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0]
-    }
-}
-
-/// A barycentric sample point bound to one triangle's three real vertices.
-///
-/// The sample's world position is `Σ weights[k] * position[verts[k]]`, and any
-/// correction the solver applies to that position is scattered back onto the
-/// three vertices by [`resolve_self_collision_virtual`]. `verts` are always the
-/// three distinct corner indices of a non-degenerate triangle; `weights` come
-/// straight from the [`VirtualParticlePattern`] row that produced this particle
-/// and therefore sum to `1.0`.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct VirtualParticle {
-    /// The triangle's three real vertex indices.
-    pub verts: [u32; 3],
-    /// The barycentric weights of this sample on `verts` (sum `1.0`).
-    pub weights: [f32; 3],
-}
+/// A barycentric sample bound to one triangle's three real vertices —
+/// re-exported from the physics engine so there is a single definition.
+pub use physics_collision::VirtualParticle;
 
 /// Seeds every triangle with the pattern's virtual particles.
 ///
@@ -161,165 +54,18 @@ pub struct VirtualParticle {
 /// equal) are skipped: their zero-area face cannot host a meaningful
 /// barycentric sample and would break the mass-conserving scatter, so they
 /// contribute no virtual particles and the result may be shorter.
+///
+/// This is a straight delegation to
+/// [`prism_physics_core::soft::collision::generate_virtual_particles`].
 #[must_use]
 pub fn generate_virtual_particles(
     triangles: &[[u32; 3]],
     pattern: &VirtualParticlePattern,
 ) -> Vec<VirtualParticle> {
-    let mut out = Vec::with_capacity(triangles.len().saturating_mul(pattern.len()));
-    for &tri in triangles {
-        if tri[0] == tri[1] || tri[1] == tri[2] || tri[0] == tri[2] {
-            continue;
-        }
-        for &weights in pattern.rows() {
-            out.push(VirtualParticle {
-                verts: tri,
-                weights,
-            });
-        }
-    }
-    out
+    physics_collision::generate_virtual_particles(triangles, pattern)
 }
 
-/// A unified collision sample: either a real particle or a virtual particle.
-///
-/// Real particles are encoded as `verts = [i, i, i]`, `weights = [1, 0, 0]` so
-/// they flow through the exact same position/inverse-mass/scatter math as
-/// virtual particles: their single active vertex is `i`, their sample position
-/// is `position[i]`, and a correction scatters entirely back onto `i`.
-#[derive(Clone, Copy)]
-pub(crate) struct Sample {
-    pub(crate) verts: [u32; 3],
-    pub(crate) weights: [f32; 3],
-}
-
-impl Sample {
-    /// The real-particle sample for vertex `index`.
-    pub(crate) fn real(index: u32) -> Self {
-        Self {
-            verts: [index, index, index],
-            weights: [1.0, 0.0, 0.0],
-        }
-    }
-
-    /// The virtual-particle sample for `virtual`.
-    pub(crate) fn virtual_particle(vp: VirtualParticle) -> Self {
-        Self {
-            verts: vp.verts,
-            weights: vp.weights,
-        }
-    }
-
-    /// The live world position `Σ weights[k] * position[verts[k]]`.
-    pub(crate) fn position(&self, particles: &[ClothParticle]) -> Vec3 {
-        let mut pos = Vec3::ZERO;
-        for k in 0..3 {
-            let w = self.weights[k];
-            if w == 0.0 {
-                continue;
-            }
-            pos = pos.add(particles[self.verts[k] as usize].position.scale(w));
-        }
-        pos
-    }
-
-    /// The effective inverse mass `Σ weights[k]^2 * inverse_mass[verts[k]]`.
-    ///
-    /// This is the inverse mass the sample presents to a normal push: moving
-    /// the sample by `dP` costs the least energy when each vertex `k` moves by
-    /// `(weights[k] * inverse_mass / eff) * dP`, and the resulting sample
-    /// displacement is exactly `dP` (see [`Sample::scatter`]).
-    pub(crate) fn inverse_mass_eff(&self, particles: &[ClothParticle]) -> f32 {
-        let mut eff = 0.0f32;
-        for k in 0..3 {
-            let w = self.weights[k];
-            if w == 0.0 {
-                continue;
-            }
-            let im = particles[self.verts[k] as usize].inverse_mass.max(0.0);
-            eff += w * w * im;
-        }
-        eff
-    }
-
-    /// Scatters a sample-space displacement `dp` back onto the real vertices.
-    ///
-    /// Each active vertex `k` receives `(weights[k] * inverse_mass / eff) * dp`,
-    /// which is the mass-weighted distribution whose weighted sum reproduces
-    /// `dp` at the sample. A sample whose active vertices are all pinned has
-    /// `eff <= 0` and does not move.
-    fn scatter(&self, particles: &mut [ClothParticle], dp: Vec3) {
-        let eff = self.inverse_mass_eff(particles);
-        if eff <= 0.0 {
-            return;
-        }
-        for k in 0..3 {
-            let w = self.weights[k];
-            if w == 0.0 {
-                continue;
-            }
-            let j = self.verts[k] as usize;
-            let im = particles[j].inverse_mass.max(0.0);
-            if im <= 0.0 {
-                continue;
-            }
-            let coeff = w * im / eff;
-            particles[j].position = particles[j].position.add(dp.scale(coeff));
-        }
-    }
-}
-
-/// The integer cell of `pos` in a uniform grid of side `cell_size`.
-///
-/// Kept local to this module (the sibling [`collision`](super::collision) cell
-/// helper is private) so the virtual-particle hash bins identically to the
-/// point-to-point tier.
-pub(crate) fn cell_of(pos: Vec3, cell_size: f32) -> (i32, i32, i32) {
-    let inv = 1.0 / cell_size;
-    (
-        (pos.x * inv).floor() as i32,
-        (pos.y * inv).floor() as i32,
-        (pos.z * inv).floor() as i32,
-    )
-}
-
-/// Returns `true` when two samples share any active (positive-weight) vertex.
-///
-/// Incident samples — a vertex against a triangle it belongs to, or two
-/// triangles sharing an edge or corner — must not be separated, because the
-/// spatial hash would otherwise fight the mesh's own topology. Only the active
-/// vertices (weight `> 0`) participate, so a real particle `[i, i, i]` with
-/// weights `[1, 0, 0]` counts as touching just vertex `i`.
-pub(crate) fn shares_active_vertex(a: &Sample, b: &Sample) -> bool {
-    for ka in 0..3 {
-        if a.weights[ka] <= 0.0 {
-            continue;
-        }
-        for kb in 0..3 {
-            if b.weights[kb] <= 0.0 {
-                continue;
-            }
-            if a.verts[ka] == b.verts[kb] {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-/// Which sample pairs a virtual-particle self-collision sweep resolves.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PairScope {
-    /// Every pair, including real-vertex versus real-vertex, so the sweep is a
-    /// self-contained self-collision tier.
-    All,
-    /// Only pairs where at least one sample is a virtual particle, so the sweep
-    /// augments an existing point-to-point pass without re-resolving (and thereby
-    /// stripping the friction from) its real-vertex pairs.
-    VirtualOnly,
-}
-
-/// Runs the full virtual-particle self-collision tier (see [`resolve_core`]).
+/// Runs the full virtual-particle self-collision tier.
 ///
 /// This resolves every sample pair — real-vertex versus real-vertex included —
 /// so with an empty `virtuals` slice it reduces exactly to the point-to-point
@@ -328,13 +74,30 @@ pub(crate) enum PairScope {
 /// triangle interiors. Use this when the virtual tier is the *only*
 /// self-collision pass; use [`resolve_self_collision_virtual_augment`] to layer
 /// it on top of the friction point-to-point pass.
+///
+/// The particles are converted to the physics SoA layout (pinned particles map
+/// to inverse mass `0`), resolved by
+/// [`prism_physics_core::soft::collision::resolve_self_collision_virtual`], and
+/// the solved positions are written back. A non-positive `cell_size` or
+/// `thickness` is a cheap no-op that skips the conversion entirely.
 pub fn resolve_self_collision_virtual(
     particles: &mut [ClothParticle],
     virtuals: &[VirtualParticle],
     cell_size: f32,
     thickness: f32,
 ) {
-    resolve_core(particles, virtuals, cell_size, thickness, PairScope::All);
+    if cell_size <= 0.0 || thickness <= 0.0 {
+        return;
+    }
+    let (mut positions, inverse_masses) = physics_bridge::to_soa(particles);
+    physics_collision::resolve_self_collision_virtual(
+        &mut positions,
+        &inverse_masses,
+        virtuals,
+        cell_size,
+        thickness,
+    );
+    physics_bridge::write_positions_back(particles, &positions);
 }
 
 /// Augments an existing point-to-point self-collision pass with virtual
@@ -347,172 +110,34 @@ pub fn resolve_self_collision_virtual(
 /// real-vertex pairs and adds only the vertex-versus-face and face-versus-face
 /// coverage the point tier cannot see (design §6.2). An empty `virtuals` slice
 /// is a no-op.
+///
+/// Delegates to
+/// [`prism_physics_core::soft::collision::resolve_self_collision_virtual_augment`]
+/// after the same SoA conversion as [`resolve_self_collision_virtual`].
 pub fn resolve_self_collision_virtual_augment(
     particles: &mut [ClothParticle],
     virtuals: &[VirtualParticle],
     cell_size: f32,
     thickness: f32,
 ) {
-    resolve_core(
-        particles,
-        virtuals,
-        cell_size,
-        thickness,
-        PairScope::VirtualOnly,
-    );
-}
-
-/// Resolves cloth self-collision with `NvCloth`-style virtual particles.
-///
-/// Real particles (`0..particles.len()`) and the supplied `virtuals` are folded
-/// into one sample list — reals first, then virtuals in order — and bucketed
-/// into a deterministic uniform spatial hash of side `cell_size`. Each sample
-/// tests only its 27-cell neighborhood, every unordered pair is visited once
-/// (`b > a`), and a pair closer than `thickness` is separated along the line
-/// joining the two sample positions, split by effective inverse mass. The
-/// per-sample correction is then scattered back onto that sample's real
-/// vertices by its barycentric weights, so a virtual particle's push moves the
-/// three triangle corners rather than a phantom point.
-///
-/// Pairs that share an active vertex are skipped (a triangle never fights its
-/// own or an adjacent triangle's corners). Coincident samples separate along
-/// `+X`. Pinned vertices never move; if both samples of a pair are immovable
-/// the pair is a no-op. A non-positive `cell_size` or `thickness`, or fewer than
-/// two samples, is a no-op. With an empty `virtuals` slice this reduces exactly
-/// to the point-to-point
-/// [`resolve_self_collision`](super::collision::resolve_self_collision).
-fn resolve_core(
-    particles: &mut [ClothParticle],
-    virtuals: &[VirtualParticle],
-    cell_size: f32,
-    thickness: f32,
-    scope: PairScope,
-) {
     if cell_size <= 0.0 || thickness <= 0.0 {
         return;
     }
-    let real_count = particles.len();
-
-    // Fixed sample order: every real particle first, then the virtual
-    // particles in generation order. Out-of-range virtual particles are
-    // dropped so the scatter never indexes past the vertex buffer.
-    let mut samples: Vec<Sample> = Vec::with_capacity(real_count.saturating_add(virtuals.len()));
-    for i in 0..real_count {
-        samples.push(Sample::real(i as u32));
-    }
-    for &vp in virtuals {
-        let in_range = vp.verts.iter().all(|&v| (v as usize) < real_count);
-        if in_range {
-            samples.push(Sample::virtual_particle(vp));
-        }
-    }
-    if samples.len() < 2 {
-        return;
-    }
-
-    // Bucket samples by their initial position. Indices are pushed in ascending
-    // order, so both the cell traversal and per-bucket traversal are stable.
-    let mut grid: BTreeMap<(i32, i32, i32), Vec<u32>> = BTreeMap::new();
-    for (index, sample) in samples.iter().enumerate() {
-        let cell = cell_of(sample.position(particles), cell_size);
-        grid.entry(cell).or_default().push(index as u32);
-    }
-
-    let thickness_sq = thickness * thickness;
-    for (&cell, bucket) in &grid {
-        for &a in bucket {
-            let ai = a as usize;
-            for dx in -1..=1 {
-                for dy in -1..=1 {
-                    for dz in -1..=1 {
-                        let neighbor = (cell.0 + dx, cell.1 + dy, cell.2 + dz);
-                        let Some(nbucket) = grid.get(&neighbor) else {
-                            continue;
-                        };
-                        for &b in nbucket {
-                            if b <= a {
-                                continue;
-                            }
-                            let bi = b as usize;
-                            if scope == PairScope::VirtualOnly && ai < real_count && bi < real_count
-                            {
-                                // Both samples are real vertices; the friction
-                                // point-to-point tier already resolved this
-                                // pair, so the augment sweep skips it.
-                                continue;
-                            }
-                            resolve_sample_pair(
-                                particles,
-                                &samples,
-                                ai,
-                                bi,
-                                thickness,
-                                thickness_sq,
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Separates sample pair `(ai, bi)` if closer than `thickness`.
-///
-/// Positions are recomputed from the live vertex buffer (Gauss-Seidel), the
-/// penetration is split by effective inverse mass so pinned samples stay put,
-/// and each half is scattered back onto its real vertices. Incident pairs and
-/// zero-mobility pairs are skipped; coincident samples separate along `+X`.
-fn resolve_sample_pair(
-    particles: &mut [ClothParticle],
-    samples: &[Sample],
-    ai: usize,
-    bi: usize,
-    thickness: f32,
-    thickness_sq: f32,
-) {
-    let sample_a = samples[ai];
-    let sample_b = samples[bi];
-    if shares_active_vertex(&sample_a, &sample_b) {
-        return;
-    }
-
-    let pa = sample_a.position(particles);
-    let pb = sample_b.position(particles);
-    let delta = pb.sub(pa);
-    let dist_sq = delta.length_squared();
-    if dist_sq >= thickness_sq {
-        return;
-    }
-
-    let wa = sample_a.inverse_mass_eff(particles);
-    let wb = sample_b.inverse_mass_eff(particles);
-    let w_sum = wa + wb;
-    if w_sum <= 0.0 {
-        // Both samples immovable (all active vertices pinned).
-        return;
-    }
-
-    let (dir, penetration) = if dist_sq <= EPS_LEN_SQ {
-        // Coincident samples: separate along a fixed axis by the full
-        // thickness so the result is deterministic and never `NaN`.
-        (Vec3::new(1.0, 0.0, 0.0), thickness)
-    } else {
-        let dist = dist_sq.sqrt();
-        (delta.scale(1.0 / dist), thickness - dist)
-    };
-
-    // `dir` points from A toward B; push the samples apart along it, weighted
-    // so the lighter (larger inverse mass) sample yields more.
-    let dp_a = dir.scale(-penetration * (wa / w_sum));
-    let dp_b = dir.scale(penetration * (wb / w_sum));
-    sample_a.scatter(particles, dp_a);
-    sample_b.scatter(particles, dp_b);
+    let (mut positions, inverse_masses) = physics_bridge::to_soa(particles);
+    physics_collision::resolve_self_collision_virtual_augment(
+        &mut positions,
+        &inverse_masses,
+        virtuals,
+        cell_size,
+        thickness,
+    );
+    physics_bridge::write_positions_back(particles, &positions);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::Vec3;
 
     fn particle(x: f32, y: f32, z: f32, inverse_mass: f32) -> ClothParticle {
         ClothParticle::new(Vec3::new(x, y, z), inverse_mass)
