@@ -5,6 +5,7 @@ pub mod stochastic;
 pub mod restir_di;
 pub mod restir_temporal;
 pub mod restir_gi;
+pub mod restir_gi_resolve;
 
 use crate::ray_scene::TraceBackend;
 
