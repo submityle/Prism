@@ -31,6 +31,9 @@
 //! - [`dielectric`] — the smooth-dielectric building blocks: the unpolarized
 //!   `Fresnel` reflectance (including total internal reflection) and Snell's-law
 //!   refraction used by the [`bsdf::Bsdf::Dielectric`] lobe.
+//! - [`fresnel_blend`] — the Ashikhmin-Shirley coupled diffuse-specular
+//!   reflector behind the [`bsdf::Bsdf::Plastic`] lobe, an energy-conserving
+//!   dielectric coat over a diffuse substrate.
 //! - [`estimator`] — next-event estimation ([`estimator::Light`]) for direct
 //!   lighting from point, directional, and quad area lights with visibility
 //!   tested against the scene `BVH`.
@@ -54,6 +57,7 @@ pub mod compare;
 pub mod dielectric;
 pub mod estimator;
 pub mod film;
+pub mod fresnel_blend;
 pub mod integrator;
 pub mod microfacet;
 pub mod sampler;

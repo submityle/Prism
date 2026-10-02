@@ -1,7 +1,9 @@
 //! Surface scattering models for the reference path tracer.
 //!
-//! Two classical lobes are provided, each exposing the same three operations a
-//! `Monte Carlo` integrator needs:
+//! Several classical lobes are provided (Lambertian diffuse, perfect mirror,
+//! GGX rough conductor, smooth dielectric, and the Ashikhmin-Shirley plastic
+//! blend), each exposing the same three operations a `Monte Carlo` integrator
+//! needs:
 //!
 //! - **evaluate** — the `BRDF` value `f_r(wo, wi)` for a fixed pair of
 //!   directions (zero for a perfectly specular lobe, whose energy lives in a
@@ -16,6 +18,7 @@
 //! quantities are linear radiance scales, never gamma-encoded.
 
 use super::dielectric::{fresnel_dielectric, refract};
+use super::fresnel_blend::FresnelBlend;
 use super::microfacet::{fresnel_schlick, GgxIsotropic};
 use super::sampler::{cosine_hemisphere_pdf, cosine_sample_hemisphere, Rng};
 use super::{Vec3, EPS_LEN_SQ, INV_PI};
@@ -66,6 +69,19 @@ pub enum Bsdf {
         /// Per-channel tint applied to the refracted (transmitted) component.
         transmittance: Vec3,
     },
+    /// Coupled diffuse-specular "plastic": a dielectric specular coat over a
+    /// diffuse substrate, modelled by the energy-conserving Ashikhmin-Shirley
+    /// `Fresnel` blend (see [`crate::reference_pt::fresnel_blend`]). It is a
+    /// glossy (non-delta) lobe, so it is sampled and connected to lights like
+    /// any rough surface.
+    Plastic {
+        /// Diffuse (substrate) reflectance `R_d` per channel.
+        diffuse: Vec3,
+        /// Specular normal-incidence reflectance `R_s` per channel.
+        specular: Vec3,
+        /// Perceptual roughness of the specular coat in `[0, 1]`.
+        roughness: f32,
+    },
 }
 
 /// The outcome of importance-sampling a [`Bsdf`].
@@ -114,6 +130,11 @@ impl Bsdf {
                 reflectance,
                 roughness,
             } => Self::ggx_evaluate(*reflectance, *roughness, wo, wi, normal),
+            Self::Plastic {
+                diffuse,
+                specular,
+                roughness,
+            } => FresnelBlend::new(*diffuse, *specular, *roughness).evaluate(wo, wi, normal),
         }
     }
 
@@ -144,6 +165,11 @@ impl Bsdf {
                 let cos_h = normal.dot(half);
                 GgxIsotropic::from_roughness(*roughness).reflection_pdf(cos_o, cos_h)
             }
+            Self::Plastic {
+                diffuse,
+                specular,
+                roughness,
+            } => FresnelBlend::new(*diffuse, *specular, *roughness).pdf(wo, wi, normal),
         }
     }
 
@@ -205,6 +231,18 @@ impl Bsdf {
                 reflectance,
                 transmittance,
             } => Self::dielectric_sample(*ior, *reflectance, *transmittance, wo, normal, rng),
+            Self::Plastic {
+                diffuse,
+                specular,
+                roughness,
+            } => FresnelBlend::new(*diffuse, *specular, *roughness)
+                .sample(wo, normal, rng)
+                .map(|s| BsdfSample {
+                    direction: s.direction,
+                    value: s.value,
+                    pdf: s.pdf,
+                    specular: false,
+                }),
         }
     }
 
@@ -633,6 +671,27 @@ mod tests {
             roughness: 0.3,
         };
         assert!(!bsdf.is_specular());
+    }
+
+    #[test]
+    fn plastic_is_glossy_not_specular() {
+        // The coupled plastic lobe is glossy (sampled and connected to lights),
+        // never a Dirac delta, and its sampled density matches the evaluated one.
+        let bsdf = Bsdf::Plastic {
+            diffuse: Vec3::splat(0.6),
+            specular: Vec3::splat(0.04),
+            roughness: 0.3,
+        };
+        assert!(!bsdf.is_specular());
+        let mut rng = Rng::seed(5150);
+        let wo = Vec3::new(0.25, 1.0, 0.0).normalize_or_zero();
+        let s = bsdf.sample(wo, N, &mut rng).expect("plastic sample valid");
+        assert!(!s.specular);
+        let pdf = bsdf.pdf(wo, s.direction, N);
+        assert!((pdf - s.pdf).abs() <= 1e-4 * s.pdf.max(1.0));
+        // The evaluated BRDF agrees with the value returned by `sample`.
+        let f = bsdf.evaluate(wo, s.direction, N);
+        assert!((f.x - s.value.x).abs() < 1e-5);
     }
 
     #[test]
