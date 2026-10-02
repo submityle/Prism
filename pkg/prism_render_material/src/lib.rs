@@ -34,8 +34,9 @@ pub use ir::{
 };
 pub use normal_map::{
     average_unit_normals, blend_linear, blend_rnm, blend_udn, blend_whiteout, decode_ag, decode_rg,
-    power_from_roughness, reconstruct_z, reduce_normal_roughness_2x, roughness_from_power,
-    toksvig_factor, toksvig_roughness, unorm_to_snorm,
+    normal_to_slope, power_from_roughness, reconstruct_z, reduce_normal_roughness_2x,
+    roughness_from_power, scale_strength, slope_to_normal, toksvig_factor, toksvig_roughness,
+    unorm_to_snorm,
 };
 pub use record::{
     fallback_material_header, fallback_material_record, inactive_material_header,
