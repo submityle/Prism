@@ -68,7 +68,7 @@ fn fill_wesl_compiles_standalone() {
 /// 1)`.
 #[test]
 fn world_restir_abi_matches_the_shader_layout() {
-    use super::{
+    use super::abi::{
         GpuWorldRestirFillParams, GpuWorldRestirReservoir, WORLD_RESTIR_RESERVOIR_STRIDE,
         WORLD_RESTIR_WORKGROUP_SIZE,
     };

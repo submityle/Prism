@@ -100,6 +100,17 @@ impl PrismWorldRestirSettings {
     /// dispatch-time input (not persisted in the settings), so this returns the
     /// zero-jitter grid; the caller folds the live jitter into the immediate
     /// block via [`super::abi::GpuWorldRestirFillParams::from_settings`].
+    ///
+    /// The fill pass reads the grid tunables straight off the immediate block,
+    /// so this host-side reconstruction has no non-test consumer until the seed
+    /// pass (a follow-up slice) hashes CPU-side visible points against it.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "host-side golden grid reconstruction consumed by the seed pass in a                       follow-up slice; the fill pass reads the tunables via the immediate block"
+        )
+    )]
     pub(crate) fn grid_params(&self) -> HashGridParams {
         HashGridParams {
             base_cell_size: self.base_cell_size,

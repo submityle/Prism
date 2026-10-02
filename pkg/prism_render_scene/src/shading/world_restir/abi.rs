@@ -85,6 +85,19 @@ pub(crate) struct GpuWorldRestirReservoir {
 
 impl GpuWorldRestirReservoir {
     /// An empty, zeroed reservoir slot carrying no energy and flagged invalid.
+    ///
+    /// `wgpu` zero-initialises a freshly created storage buffer, so the resident
+    /// tables already start as all-`EMPTY` slots without the host ever writing
+    /// one; this named constant documents that frozen zero-slot ABI and anchors
+    /// the layout tests. The seed pass (a follow-up slice) is the first host
+    /// path to construct it explicitly, so off-test it is intentionally unused.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "frozen GPU zero-slot ABI; wgpu zero-init yields it on the device and the                       seed pass constructs it in a follow-up slice, so no host path reads it yet"
+        )
+    )]
     pub(crate) const EMPTY: Self = Self {
         visible_point: [0.0; 3],
         w: 0.0,

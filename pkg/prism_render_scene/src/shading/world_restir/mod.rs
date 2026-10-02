@@ -15,16 +15,25 @@
 //! byte layout and the fill immediate block ([`abi`]) plus the opt-in
 //! render-world resource ([`settings`]) — so the fill compute pass, its WESL
 //! twin, and the water-surface `@group(9)` consumer can be built against a
-//! stable ABI. The resident buffers, the fill pipeline / dispatch, and the
-//! render-graph wiring land in follow-up slices.
+//! stable ABI. This slice adds the resident ping-pong reservoir tables
+//! ([`resources`]), the fill compute pipeline ([`pipeline`]) and its bind
+//! group ([`bind_groups`]), and the `Core3d` dispatch ([`dispatch`]) that puts
+//! the fill pass on the render graph. The seed pass that populates the table
+//! from the frame's lights, and the water-surface `@group(9)` consumer, land in
+//! follow-up slices.
 
 mod abi;
+mod bind_groups;
+mod dispatch;
+mod pipeline;
+mod resources;
 mod settings;
+
+pub(crate) use bind_groups::prepare_world_restir_bind_groups;
+pub(crate) use dispatch::world_restir_fill_pass;
+pub(crate) use pipeline::init_world_restir_pipeline;
+pub(crate) use resources::prepare_world_restir_reservoirs;
+pub(crate) use settings::PrismWorldRestirSettings;
+
 #[cfg(test)]
 mod shader_tests;
-
-pub(crate) use abi::{
-    GpuWorldRestirFillParams, GpuWorldRestirReservoir, WORLD_RESTIR_RESERVOIR_STRIDE,
-    WORLD_RESTIR_WORKGROUP_SIZE,
-};
-pub(crate) use settings::PrismWorldRestirSettings;

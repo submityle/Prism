@@ -132,8 +132,7 @@ use super::{
         prepare_sky_multiscatter_bind_group, sky_multiscatter_lut_pass,
     },
     sky::sky_view::{
-        init_sky_view_lut, init_sky_view_pipeline, prepare_sky_view_bind_group,
-        sky_view_lut_pass,
+        init_sky_view_lut, init_sky_view_pipeline, prepare_sky_view_bind_group, sky_view_lut_pass,
     },
     sky::transmittance::{
         init_sky_transmittance_lut, init_sky_transmittance_pipeline,
@@ -200,6 +199,10 @@ use super::{
     volumetrics::{
         init_volumetrics_pipeline, prepare_volumetrics_bind_groups, prepare_volumetrics_resources,
         volumetrics_pass, PrismVolumetricsSettings, VolumetricsTextureCache,
+    },
+    world_restir::{
+        init_world_restir_pipeline, prepare_world_restir_bind_groups,
+        prepare_world_restir_reservoirs, world_restir_fill_pass, PrismWorldRestirSettings,
     },
     world_space_gi::{
         init_world_space_gi_composite_pipeline, init_world_space_gi_pipeline,
@@ -342,6 +345,7 @@ impl Plugin for PrismShadingPlugin {
             .init_resource::<PrismKuwaharaSettings>()
             .init_resource::<PrismHatchingSettings>()
             .init_resource::<PrismHalftoneSettings>()
+            .init_resource::<PrismWorldRestirSettings>()
             .init_resource::<PrismWorldSpaceGiSettings>()
             .init_resource::<PrismLightRoutingSettings>()
             .insert_resource(ShadingFrameGraph {
@@ -898,6 +902,29 @@ impl Plugin for PrismShadingPlugin {
         render_app.add_systems(
             Render,
             prepare_taa_jitter.in_set(RenderSystems::PrepareViews),
+        );
+        // World-space ReSTIR DI fill. Its RenderStartup pipeline init, the
+        // per-view resident ping-pong reservoir tables + fill bind group, and
+        // the Core3d fill dispatch each live in their own `add_systems` call so
+        // the already-full primary tuples stay within Bevy's 20-element limit.
+        // Opt-in: a no-op unless `PrismWorldRestirSettings::enabled`, so the
+        // default renderer allocates and dispatches nothing.
+        render_app.add_systems(RenderStartup, init_world_restir_pipeline);
+        render_app.add_systems(
+            Render,
+            (
+                prepare_world_restir_reservoirs.in_set(RenderSystems::PrepareResources),
+                prepare_world_restir_bind_groups
+                    .after(prepare_world_restir_reservoirs)
+                    .in_set(RenderSystems::PrepareBindGroups),
+            ),
+        );
+        render_app.add_systems(
+            bevy_core_pipeline::Core3d,
+            // Pure world-space table producer: it reads last frame's reservoirs
+            // and writes this frame's, touching no screen targets, so it only
+            // has to finish before the main pass samples the table.
+            world_restir_fill_pass.before(bevy_core_pipeline::Core3dSystems::MainPass),
         );
         render_app.add_systems(
             bevy_core_pipeline::Core3d,
