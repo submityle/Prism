@@ -246,6 +246,22 @@
 //!   excitation, and unlike the near-harmonic waveguide voices
 //!   [`karplus_strong`]/[`bowed_string`] or the steady [`additive_oscillator`]
 //!   its spectrum is struck, inharmonic, and shaped by the pickup.
+//! - [`swept_sine::SweptSineNode`] -- swept-sine (chirp) *measurement*
+//!   source: a single sine whose frequency glides from a start to an end
+//!   frequency over a fixed duration, then falls silent. The frequency law
+//!   is one of two [`swept_sine::SweepMode`]s -- the logarithmic
+//!   exponential sine sweep (ESS, equal time per octave) used for
+//!   impulse-response measurement because its harmonic-distortion orders
+//!   deconvolve into separable pre-sweep echoes, or the constant-slope
+//!   linear chirp (equal time per hertz, the radar/sonar excitation). Both
+//!   are driven by a per-sample recurrence (`f *= k` or `f += step` with
+//!   phase accumulation) so the progression stays exact without a logarithm
+//!   on the hot path, and a raised-cosine edge taper suppresses the start/
+//!   stop click. It pairs with the [`super::reverb::convolver::Convolver`]
+//!   to perform a system impulse-response measurement, and unlike the
+//!   steady [`oscillator`]/[`additive_oscillator`] tones, the perpetual
+//!   octave illusion of [`shepard_tone`], or a [`noise`] excitation it is a
+//!   deterministic, phase-coherent, one-shot glissando across the band.
 //!
 //!
 //! Every generator is real-time safe: `process` performs no allocation, no
@@ -278,6 +294,7 @@ pub mod tonewheel_organ;
 pub mod struck_bar;
 pub mod struck_plate;
 pub mod supersaw;
+pub mod swept_sine;
 pub mod tine_electric_piano;
 pub mod wavetable_oscillator;
 
@@ -310,5 +327,6 @@ pub use tonewheel_organ::{TonewheelOrganNode, TonewheelOrganParams, NUM_DRAWBARS
 pub use struck_bar::{StruckBarNode, StruckBarParams, NUM_MODES};
 pub use struck_plate::{StruckPlateNode, StruckPlateParams};
 pub use supersaw::{SupersawNode, SupersawParams};
+pub use swept_sine::{SweepMode, SweptSineNode, SweptSineParams};
 pub use tine_electric_piano::{TineElectricPianoNode, TineElectricPianoParams, NUM_TINE_MODES};
 pub use wavetable_oscillator::{WavetableOscillatorNode, WavetableOscillatorParams};
