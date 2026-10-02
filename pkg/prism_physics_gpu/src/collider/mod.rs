@@ -36,6 +36,8 @@ mod reduce;
 mod sphere_trimesh;
 mod sphere_trimesh_gpu;
 mod trimesh;
+mod trimesh_closest_point;
+mod trimesh_closest_point_gpu;
 mod trimesh_raycast;
 mod trimesh_raycast_gpu;
 
@@ -47,6 +49,11 @@ pub use obb_trimesh_manifold::cpu_obb_trimesh_manifold_collide;
 pub use sphere_trimesh::cpu_sphere_trimesh_collide;
 pub use sphere_trimesh_gpu::GpuSphereTrimeshCollider;
 pub use trimesh::Trimesh;
+pub use trimesh_closest_point::{
+    cpu_trimesh_closest_point, cpu_trimesh_closest_point_built, cpu_trimesh_closest_point_bvh,
+    TrimeshClosestHit,
+};
+pub use trimesh_closest_point_gpu::GpuTrimeshClosestPoint;
 pub use trimesh_raycast::{
     cpu_trimesh_raycast, cpu_trimesh_raycast_built, cpu_trimesh_raycast_bvh, MeshRay, TrimeshRayHit,
 };
