@@ -48,6 +48,17 @@ import prism_render_scene::shaders::texture_lod::{
     tex_lod_ray_cone_advanced,
     tex_lod_ray_cone_scattered,
     tex_lod_ray_cone_reflected,
+    tex_lod_is_finite,
+    RayDifferential,
+    AnisotropicMip,
+    tex_lod_ray_diff_axis_lengths,
+    tex_lod_ray_diff_isotropic_mip,
+    tex_lod_ray_diff_major_axis_uv,
+    tex_lod_ray_diff_anisotropic_mip,
+    TEX_LOD_MAX_ANISO_TAPS,
+    tex_lod_aniso_tap_count,
+    tex_lod_aniso_tap_weight,
+    tex_lod_aniso_tap_uv,
 };
 
 @group(0) @binding(0)
@@ -96,6 +107,26 @@ fn texture_lod_link_test(@builtin(global_invocation_id) id: vec3<u32>) {
     output[12] = TEX_LOD_DELTA_CLAMP;
     output[13] = TEX_LOD_MIN_COS_INCIDENCE;
     output[14] = TEX_LOD_F32_MIN_POSITIVE;
+
+    let rd = RayDifferential(vec2<f32>(2.0 / 256.0, 0.0), vec2<f32>(0.0, 1.0 / 256.0));
+    let lengths = tex_lod_ray_diff_axis_lengths(rd.d_dx, rd.d_dy, 256.0, 256.0);
+    let iso = tex_lod_ray_diff_isotropic_mip(rd.d_dx, rd.d_dy, 256.0, 256.0, 8.0);
+    let major = tex_lod_ray_diff_major_axis_uv(rd.d_dx, rd.d_dy, 256.0, 256.0);
+    let aniso: AnisotropicMip = tex_lod_ray_diff_anisotropic_mip(rd.d_dx, rd.d_dy, 256.0, 256.0, 8.0, 16.0);
+    let n = tex_lod_aniso_tap_count(aniso.anisotropy);
+    let w = tex_lod_aniso_tap_weight(n);
+    let tap = tex_lod_aniso_tap_uv(vec2<f32>(0.5, 0.5), major, 0u, n);
+
+    output[15] = lengths.x;
+    output[16] = iso;
+    output[17] = major.x;
+    output[18] = aniso.lod;
+    output[19] = aniso.anisotropy;
+    output[20] = w;
+    output[21] = tap.x;
+    output[22] = f32(n);
+    output[23] = f32(TEX_LOD_MAX_ANISO_TAPS);
+    output[24] = select(0.0, 1.0, tex_lod_is_finite(iso));
 }
 "#;
 
