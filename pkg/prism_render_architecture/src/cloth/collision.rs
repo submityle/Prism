@@ -42,7 +42,7 @@
 
 use alloc::vec::Vec;
 
-use super::{physics_bridge, ClothParticle, Vec3, EPS_LEN_SQ};
+use super::{physics_bridge, ClothParticle, Vec3};
 
 /// An analytic collision proxy fitted to part of the body.
 ///
@@ -113,21 +113,11 @@ impl BodyCollider {
 /// along `+Y`: a fixed, deterministic fallback that avoids a `NaN` direction.
 #[must_use]
 pub fn project_out_of_sphere(pos: Vec3, center: Vec3, radius: f32) -> Vec3 {
-    if radius <= 0.0 {
-        return pos;
-    }
-    let delta = pos.sub(center);
-    let dist_sq = delta.length_squared();
-    if dist_sq >= radius * radius {
-        return pos;
-    }
-    if dist_sq <= EPS_LEN_SQ {
-        // Coincident with the center: pick a fixed axis for a deterministic,
-        // non-`NaN` result.
-        return center.add(Vec3::new(0.0, radius, 0.0));
-    }
-    let dir = delta.normalize_or_zero();
-    center.add(dir.scale(radius))
+    physics_bridge::from_glam(prism_physics_core::soft::collision::project_out_of_sphere(
+        physics_bridge::to_glam(pos),
+        physics_bridge::to_glam(center),
+        radius,
+    ))
 }
 
 /// Projects `pos` onto the half-space plane `normal.dot(x) == offset` when it
@@ -140,17 +130,11 @@ pub fn project_out_of_sphere(pos: Vec3, center: Vec3, radius: f32) -> Vec3 {
 /// untouched rather than producing a `NaN`.
 #[must_use]
 pub fn project_out_of_half_space(pos: Vec3, normal: Vec3, offset: f32) -> Vec3 {
-    let len_sq = normal.length_squared();
-    if len_sq <= EPS_LEN_SQ {
-        return pos;
-    }
-    let signed = normal.dot(pos) - offset;
-    if signed >= 0.0 {
-        return pos;
-    }
-    // Move along `normal` by `t` so that `normal.dot(pos + t*normal) == offset`.
-    let t = -signed / len_sq;
-    pos.add(normal.scale(t))
+    physics_bridge::from_glam(prism_physics_core::soft::collision::project_out_of_half_space(
+        physics_bridge::to_glam(pos),
+        physics_bridge::to_glam(normal),
+        offset,
+    ))
 }
 
 /// Returns the point on segment `p0`..`p1` closest to `pos`.
@@ -161,13 +145,34 @@ pub fn project_out_of_half_space(pos: Vec3, normal: Vec3, offset: f32) -> Vec3 {
 /// collapsed capsule behaves like a sphere.
 #[must_use]
 pub fn closest_point_on_segment(p0: Vec3, p1: Vec3, pos: Vec3) -> Vec3 {
-    let axis = p1.sub(p0);
-    let len_sq = axis.length_squared();
-    if len_sq <= EPS_LEN_SQ {
-        return p0;
+    physics_bridge::from_glam(prism_physics_core::soft::collision::closest_point_on_segment(
+        physics_bridge::to_glam(p0),
+        physics_bridge::to_glam(p1),
+        physics_bridge::to_glam(pos),
+    ))
+}
+
+/// Converts a render [`BodyCollider`] into the physics-engine collider the
+/// single-source resolver consumes. The variants and fields line up exactly;
+/// only the vector type differs, so this is a lossless component copy.
+#[must_use]
+fn to_physics_collider(collider: BodyCollider) -> prism_physics_core::soft::collision::BodyCollider {
+    use prism_physics_core::soft::collision::BodyCollider as Phys;
+    match collider {
+        BodyCollider::Sphere { center, radius } => Phys::Sphere {
+            center: physics_bridge::to_glam(center),
+            radius,
+        },
+        BodyCollider::Capsule { p0, p1, radius } => Phys::Capsule {
+            p0: physics_bridge::to_glam(p0),
+            p1: physics_bridge::to_glam(p1),
+            radius,
+        },
+        BodyCollider::HalfSpace { normal, offset } => Phys::HalfSpace {
+            normal: physics_bridge::to_glam(normal),
+            offset,
+        },
     }
-    let t = (pos.sub(p0).dot(axis) / len_sq).clamp(0.0, 1.0);
-    p0.add(axis.scale(t))
 }
 
 /// Projects every free particle out of every body collider, in place.
@@ -182,31 +187,21 @@ pub fn resolve_body_collisions(particles: &mut [ClothParticle], colliders: &[Bod
     if colliders.is_empty() {
         return;
     }
-    for particle in particles.iter_mut() {
-        if particle.is_pinned() {
-            continue;
-        }
-        for collider in colliders {
-            particle.position = collider.project(particle.position);
-        }
-    }
+    let physics_colliders: Vec<_> = colliders.iter().copied().map(to_physics_collider).collect();
+    let (mut positions, inverse_masses) = physics_bridge::to_soa(particles);
+    prism_physics_core::soft::collision::resolve_body_collisions(
+        &mut positions,
+        &inverse_masses,
+        &physics_colliders,
+    );
+    physics_bridge::write_positions_back(particles, &positions);
 }
 
 /// Numerical floor below which a tangential slide is treated as zero, so a
-/// friction correction is never normalised from a ~0-length vector. Shared by
-/// the body-collision and self-collision friction passes.
+/// friction correction is never normalised from a ~0-length vector. Consumed by
+/// [`apply_coulomb_friction`], the standalone contact-friction projection the
+/// CCD pass still reuses from here.
 const EPS_FRICTION: f32 = 1e-12;
-
-/// Returns `mu` clamped to `0..=1`, mapping any non-finite input to `0` so a
-/// mis-authored coefficient can never inject a `NaN` into a friction pass.
-#[must_use]
-fn sanitize_friction(mu: f32) -> f32 {
-    if mu.is_finite() {
-        mu.clamp(0.0, 1.0)
-    } else {
-        0.0
-    }
-}
 
 /// Returns `pos` after applying position-level Coulomb friction against a
 /// contact whose outward unit `normal` and normal-correction magnitude
@@ -280,37 +275,21 @@ pub fn resolve_body_collisions_with_friction(
     if colliders.is_empty() {
         return;
     }
-    let mu = sanitize_friction(friction);
-    if mu <= 0.0 {
-        resolve_body_collisions(particles, colliders);
-        return;
-    }
-    for (index, particle) in particles.iter_mut().enumerate() {
-        if particle.is_pinned() {
-            continue;
-        }
-        // Frame-start position for this particle; the current position (no
-        // tangential slide, hence no friction) is the safe fallback when the
-        // snapshot is missing.
-        let prev = prev_positions
-            .get(index)
-            .copied()
-            .unwrap_or(particle.position);
-        for collider in colliders {
-            let before = particle.position;
-            let projected = collider.project(before);
-            let correction = projected.sub(before);
-            let push_sq = correction.length_squared();
-            if push_sq <= EPS_LEN_SQ {
-                // Already outside this collider: no contact, no friction.
-                particle.position = projected;
-                continue;
-            }
-            let push = push_sq.sqrt();
-            let normal = correction.scale(1.0 / push);
-            particle.position = apply_coulomb_friction(projected, prev, normal, push, mu);
-        }
-    }
+    let physics_colliders: Vec<_> = colliders.iter().copied().map(to_physics_collider).collect();
+    let (mut positions, inverse_masses) = physics_bridge::to_soa(particles);
+    let prev: Vec<_> = prev_positions
+        .iter()
+        .copied()
+        .map(physics_bridge::to_glam)
+        .collect();
+    prism_physics_core::soft::collision::resolve_body_collisions_with_friction(
+        &mut positions,
+        &prev,
+        &inverse_masses,
+        &physics_colliders,
+        friction,
+    );
+    physics_bridge::write_positions_back(particles, &positions);
 }
 
 /// A per-particle backstop plane anchored to the skinned pose.
@@ -336,6 +315,17 @@ pub struct Backstop {
     pub distance: f32,
 }
 
+/// Converts a render [`Backstop`] into the physics-engine backstop the
+/// single-source resolver consumes (a lossless component copy).
+#[must_use]
+fn to_physics_backstop(backstop: Backstop) -> prism_physics_core::soft::collision::Backstop {
+    prism_physics_core::soft::collision::Backstop {
+        origin: physics_bridge::to_glam(backstop.origin),
+        normal: physics_bridge::to_glam(backstop.normal),
+        distance: backstop.distance,
+    }
+}
+
 /// Returns `pos` clamped to the front side of `backstop`.
 ///
 /// When the signed distance `normal.dot(pos - origin)` drops below `-distance`
@@ -344,18 +334,10 @@ pub struct Backstop {
 /// plane, so the point is returned untouched rather than producing a `NaN`.
 #[must_use]
 pub fn apply_backstop(pos: Vec3, backstop: Backstop) -> Vec3 {
-    let len_sq = backstop.normal.length_squared();
-    if len_sq <= EPS_LEN_SQ {
-        return pos;
-    }
-    let n = backstop.normal.normalize_or_zero();
-    let s = n.dot(pos.sub(backstop.origin));
-    let min_s = -backstop.distance;
-    if s < min_s {
-        pos.add(n.scale(min_s - s))
-    } else {
-        pos
-    }
+    physics_bridge::from_glam(prism_physics_core::soft::collision::apply_backstop(
+        physics_bridge::to_glam(pos),
+        to_physics_backstop(backstop),
+    ))
 }
 
 /// Applies each backstop to its matching particle, in place.
@@ -365,12 +347,15 @@ pub fn apply_backstop(pos: Vec3, backstop: Backstop) -> Vec3 {
 /// particles unconstrained (and never panics). Pinned particles are skipped. An
 /// empty `backstops` slice is a no-op.
 pub fn resolve_backstops(particles: &mut [ClothParticle], backstops: &[Backstop]) {
-    for (particle, backstop) in particles.iter_mut().zip(backstops.iter()) {
-        if particle.is_pinned() {
-            continue;
-        }
-        particle.position = apply_backstop(particle.position, *backstop);
-    }
+    let physics_backstops: Vec<_> =
+        backstops.iter().copied().map(to_physics_backstop).collect();
+    let (mut positions, inverse_masses) = physics_bridge::to_soa(particles);
+    prism_physics_core::soft::collision::resolve_backstops(
+        &mut positions,
+        &inverse_masses,
+        &physics_backstops,
+    );
+    physics_bridge::write_positions_back(particles, &positions);
 }
 
 /// Resolves cloth self-collision with a deterministic uniform spatial hash.
