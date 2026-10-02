@@ -141,6 +141,8 @@ mod box_cast_bvh;
 mod box_cast_bvh_gpu;
 mod convex_cast_bvh;
 mod convex_cast_bvh_gpu;
+mod closest_point_bvh;
+mod closest_point_bvh_gpu;
 mod capsule_cast_bvh;
 mod capsule_cast_bvh_gpu;
 mod sphere_cast_bvh;
@@ -200,6 +202,8 @@ pub use convex_cast_bvh::{
     SceneConvexCast,
 };
 pub use convex_cast_bvh_gpu::GpuSceneConvexCast;
+pub use closest_point_bvh::{closest_point, closest_point_bvh, ClosestPointHit, SceneClosestPoint};
+pub use closest_point_bvh_gpu::GpuSceneClosestPoint;
 pub use shape_cast::{cast_shape, cast_shape_all, RoundedConvex, ShapeCastHit};
 pub use shape_cast_bvh::{cast_shape_all_bvh, cast_shape_bvh};
 pub use shape_cast_bvh_gpu::GpuBvhShapeCast;
