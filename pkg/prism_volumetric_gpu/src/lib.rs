@@ -152,6 +152,7 @@ pub mod multiscatter_lut_sample;
 pub mod nd_strides_index;
 pub mod noise_fbm;
 pub mod normal_reconstruct;
+pub mod obb_obb_sat_3d;
 pub mod octave;
 pub mod oren_nayar;
 pub mod orientation_basis;
@@ -347,6 +348,7 @@ pub use multiscatter_lut_sample::{GpuMultiScatterLutSample, MultiScatterSampleQu
 pub use nd_strides_index::{GpuNdStridesIndex, NdStridesQuery, MAX_RANK};
 pub use noise_fbm::{GpuNoiseFbm, NoiseFbmQuery, NoiseFbmResult};
 pub use normal_reconstruct::{GpuNormalReconstruct, NormalQuery, NormalResult};
+pub use obb_obb_sat_3d::{GpuObbSat3d, ObbSat3dQuery, ObbSat3dResult};
 pub use octave::{GpuOctaveScatter, OctaveQuery, OctaveResult};
 pub use oren_nayar::{GpuOrenNayar, OrenNayarQuery, OrenNayarResult};
 pub use orientation_basis::{GpuOrientationBasis, OrientationQuery};
