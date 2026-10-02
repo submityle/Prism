@@ -60,3 +60,6 @@ pub(crate) use settings::PrismWorldRestirSettings;
 
 #[cfg(test)]
 mod shader_tests;
+
+#[cfg(test)]
+mod gpu_tests;
