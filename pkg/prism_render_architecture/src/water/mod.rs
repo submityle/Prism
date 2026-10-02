@@ -71,6 +71,7 @@ pub mod reconstruct;
 pub mod shading;
 pub mod shoreline;
 pub mod simulation;
+pub mod sparse_volume;
 pub mod spectrum;
 pub mod spray_bridge;
 pub mod surface_fx;
