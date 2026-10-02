@@ -163,6 +163,18 @@
 //!   built-in body; unlike the `modal_resonator` effect it is self-excited;
 //!   unlike the struck modal sources `struck_bar` / `membrane_drum` the modal
 //!   bank is a passive body rather than the sounding object itself.
+//! - [`struck_plate::StruckPlateNode`] -- mallet-struck two-dimensional
+//!   plate modal percussion source (gong / plate-bell / metal-sheet family).
+//!   A unit-area raised-cosine contact pulse excites a parallel bank of
+//!   [`struck_plate::NUM_MODES`] decaying two-pole resonators tuned to the
+//!   lowest simply-supported Kirchhoff thin-plate partials, whose *paired*
+//!   `(i, j)` index gives a far denser, beating grid than the single series
+//!   of `struck_bar`. The `aspect_ratio` control stretches the plate from a
+//!   square (degenerate pairs) to an oblong sheet (split, shimmering
+//!   doublets), while `brightness` sets both pulse width and mode-gain
+//!   rolloff. Unlike the tension-restored, fast-decaying circular membrane
+//!   of `membrane_drum`, the plate is stiffness-restored and rings on; like
+//!   the sibling struck sources it carries its own excitation.
 //!
 //! Every generator is real-time safe: `process` performs no allocation, no
 //! locking, and no panics, and reproducible generators are fully deterministic
@@ -187,6 +199,7 @@ pub mod pwm_oscillator;
 pub mod reed_woodwind;
 pub mod sample_player;
 pub mod struck_bar;
+pub mod struck_plate;
 pub mod supersaw;
 pub mod wavetable_oscillator;
 
@@ -209,5 +222,6 @@ pub use pwm_oscillator::{PwmOscillatorNode, PwmOscillatorParams};
 pub use reed_woodwind::{ReedWoodwindNode, ReedWoodwindParams};
 pub use sample_player::{Interpolation, LoopMode, SamplePlayerNode};
 pub use struck_bar::{StruckBarNode, StruckBarParams, NUM_MODES};
+pub use struck_plate::{StruckPlateNode, StruckPlateParams};
 pub use supersaw::{SupersawNode, SupersawParams};
 pub use wavetable_oscillator::{WavetableOscillatorNode, WavetableOscillatorParams};
