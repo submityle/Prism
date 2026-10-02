@@ -16,6 +16,7 @@ mod registry;
 mod resources;
 mod surface;
 mod texture_addressing;
+mod texture_blur;
 mod texture_codec;
 mod texture_filter;
 mod texture_lod;
@@ -53,6 +54,7 @@ pub use surface::{
     SURFACE_CORE_WORDS, SURFACE_LOBE_WORDS,
 };
 pub use texture_addressing::{address_uv, wrap_coord, AddressResult, WrapMode};
+pub use texture_blur::{blur_plane, gaussian_blur, gaussian_weights_1d};
 pub use texture_codec::{
     bc6h_mode_bits, bc7_mode, decode_bc1, decode_bc2, decode_bc3, decode_bc4, decode_bc4_signed,
     decode_bc5, decode_bc5_signed, decode_bc6h_mode11_signed, decode_bc6h_mode11_unsigned,
