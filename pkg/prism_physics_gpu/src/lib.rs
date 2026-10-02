@@ -91,11 +91,13 @@ pub use collider::{
     cpu_capsule_trimesh_collide, cpu_obb_trimesh_collide, cpu_obb_trimesh_manifold_collide,
     cpu_sphere_trimesh_collide, cpu_trimesh_capsule_sweep, cpu_trimesh_capsule_sweep_built,
     cpu_trimesh_capsule_sweep_bvh, cpu_trimesh_closest_point, cpu_trimesh_closest_point_built,
-    cpu_trimesh_closest_point_bvh, cpu_trimesh_raycast, cpu_trimesh_raycast_built,
+    cpu_trimesh_closest_point_bvh, cpu_trimesh_obb_sweep, cpu_trimesh_obb_sweep_built,
+    cpu_trimesh_obb_sweep_bvh, cpu_trimesh_raycast, cpu_trimesh_raycast_built,
     cpu_trimesh_raycast_bvh, cpu_trimesh_sphere_sweep, cpu_trimesh_sphere_sweep_built,
     cpu_trimesh_sphere_sweep_bvh, CapsuleSweep, CapsuleSweepHit, GpuCapsuleTrimeshCollider,
     GpuObbTrimeshCollider, GpuSphereTrimeshCollider, GpuTrimeshCapsuleSweep, GpuTrimeshClosestPoint,
-    GpuTrimeshRayCast, GpuTrimeshSphereSweep, MeshRay, SphereSweep, Trimesh, TrimeshClosestHit,
+    GpuTrimeshObbSweep, GpuTrimeshRayCast, GpuTrimeshSphereSweep, MeshRay, ObbSweep, ObbSweepHit,
+    SphereSweep, Trimesh, TrimeshClosestHit,
     TrimeshRayHit, TrimeshSweepHit,
 };
 pub use contacts::{

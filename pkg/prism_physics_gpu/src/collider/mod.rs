@@ -40,6 +40,8 @@ mod trimesh_capsule_sweep;
 mod trimesh_capsule_sweep_gpu;
 mod trimesh_closest_point;
 mod trimesh_closest_point_gpu;
+mod trimesh_obb_sweep;
+mod trimesh_obb_sweep_gpu;
 mod trimesh_raycast;
 mod trimesh_raycast_gpu;
 mod trimesh_sphere_sweep;
@@ -63,6 +65,11 @@ pub use trimesh_closest_point::{
     TrimeshClosestHit,
 };
 pub use trimesh_closest_point_gpu::GpuTrimeshClosestPoint;
+pub use trimesh_obb_sweep::{
+    cpu_trimesh_obb_sweep, cpu_trimesh_obb_sweep_built, cpu_trimesh_obb_sweep_bvh, ObbSweep,
+    ObbSweepHit,
+};
+pub use trimesh_obb_sweep_gpu::GpuTrimeshObbSweep;
 pub use trimesh_raycast::{
     cpu_trimesh_raycast, cpu_trimesh_raycast_built, cpu_trimesh_raycast_bvh, MeshRay, TrimeshRayHit,
 };
