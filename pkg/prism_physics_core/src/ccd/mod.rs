@@ -11,14 +11,18 @@
 //!
 //! # Approach
 //!
-//! Between prediction and contact detection, [`resolve_ccd`] sweeps the core
-//! sphere (see [`sweep::sweep_radius`]) of each opt-in body along its sub-step
-//! displacement using the world's existing [`spherecast`](crate::world::PhysicsWorld::spherecast).
-//! If the sweep hits something before the body reaches its predicted pose, the
-//! body is clamped back to the point of first contact. The very same sub-step's
-//! discrete detection then resolves the touch normally and velocity recovery
-//! bleeds off the excess speed, so the body comes to rest against the surface
-//! instead of passing through it.
+//! Between prediction and contact detection, [`resolve_ccd`] sweeps each opt-in
+//! body's *true convex shape* along its sub-step displacement (see
+//! [`shape_sweep`]). A fast mover's real
+//! [`ColliderShape`](crate::collider::ColliderShape) is advanced against nearby
+//! geometry with a conservative-advancement time-of-impact query, so an
+//! oriented box or capsule clamps exactly where its own surface would touch
+//! rather than where a bounding sphere would. If the sweep hits something
+//! before the body reaches its predicted pose, the body is clamped back to the
+//! point of first contact. The very same sub-step's discrete detection then
+//! resolves the touch normally and velocity recovery bleeds off the excess
+//! speed, so the body comes to rest against the surface instead of passing
+//! through it.
 //!
 //! Only CCD-flagged, awake, dynamic bodies whose displacement exceeds
 //! [`CcdConfig::min_motion_ratio`] times their core radius are swept, so the
@@ -27,23 +31,22 @@
 //! # Provenance
 //!
 //! This module contains **no Unreal Engine source or derived code**. The
-//! speculative core-sphere sweep and time-of-impact clamp is a standard,
-//! publicly documented continuous-collision technique, implemented here on top
-//! of this crate's own spherecast query.
+//! shape-aware conservative-advancement sweep and time-of-impact clamp is a
+//! standard, publicly documented continuous-collision technique, implemented
+//! here on top of this workspace's own support maps and geometry queries.
 
 pub mod config;
 pub mod support;
 pub mod sweep;
+mod shape_sweep;
 
 pub use config::CcdConfig;
 pub use support::CcdSupport;
 
-use crate::query::QueryFilter;
 use crate::state::body::BodyKind;
 use crate::state::handle::BodyHandle;
 use crate::world::PhysicsWorld;
-use glam::Vec3;
-use prism_physics_geometry::Ray;
+use glam::{Quat, Vec3};
 
 /// Sweeps every opt-in fast-moving body and clamps it to the first surface it
 /// would cross during this sub-step of length `h`.
@@ -97,23 +100,26 @@ pub fn resolve_ccd(world: &mut PhysicsWorld, h: f32) {
         let Some(curr) = world.bodies.position(handle) else {
             continue;
         };
+        let orientation = world.bodies.orientation(handle).unwrap_or(Quat::IDENTITY);
 
         let displacement = curr - prev;
         let distance = displacement.length();
-        // Motion gate: only sweep genuine fast movers. This also guarantees
-        // `distance > 0.0` so the direction below is well defined.
+        // Motion gate: only sweep genuine fast movers whose sub-step travel
+        // exceeds a fraction of their core radius. This also guarantees
+        // `distance > 0.0` so the sweep direction below is well defined.
         if distance <= config.min_motion_ratio * radius {
             continue;
         }
 
-        let direction = displacement / distance;
-        let ray = Ray::with_tmax(prev, direction, distance);
-        let filter = QueryFilter::excluding(handle);
-        if let Some(hit) = world.spherecast(&ray, radius, &filter)
-            && hit.time_of_impact < distance
+        // Shape-aware sweep of the body's true convex geometry against the
+        // scene; falls back to no clamp when nothing is hit this sub-step.
+        if let Some(hit_distance) =
+            shape_sweep::sweep_distance(world, handle, shape, prev, orientation, displacement)
+            && hit_distance < distance
         {
-            let toi = (hit.time_of_impact - config.skin).max(0.0);
-            clamps.push((handle, prev + direction * toi));
+            let direction = displacement / distance;
+            let clamped = (hit_distance - config.skin).max(0.0);
+            clamps.push((handle, prev + direction * clamped));
         }
     }
 
@@ -129,7 +135,7 @@ mod tests {
     use crate::solver::{Solver, XpbdSolver};
     use crate::state::body::BodyDesc;
     use crate::world::PhysicsWorld;
-    use glam::Vec3;
+    use glam::{Quat, Vec3};
 
     /// Builds a world with zero gravity and a thin static wall in the `x = 0`
     /// plane, then fires a small fast sphere at it from `x = -2`. The sphere is
@@ -193,5 +199,89 @@ mod tests {
         world.config.ccd.enabled = false;
         // Should not panic and should leave an empty world untouched.
         super::resolve_ccd(&mut world, 1.0 / 60.0);
+    }
+
+    /// Fires a CCD-enabled dynamic body carrying `shape` (rotated by
+    /// `orientation`) from `x = -2` at 300 m/s toward the thin static wall in
+    /// the `x = 0` plane, steps once, and returns the body's final x position.
+    ///
+    /// Shares the wall setup with [`fire_bullet_at_wall`] but exercises the
+    /// shape-aware sweep for non-spherical movers.
+    fn fire_shape_at_wall(shape: ColliderShape, orientation: Quat) -> f32 {
+        let mut world = PhysicsWorld::with_gravity(Vec3::ZERO);
+
+        let wall = world.shapes.insert(ColliderShape::Cuboid {
+            half_extents: Vec3::new(0.05, 5.0, 5.0),
+        });
+        world.spawn(
+            BodyDesc::static_at(Vec3::ZERO)
+                .with_collider(wall)
+                .with_material(PhysicsMaterial::DEFAULT),
+        );
+
+        let collider = world.shapes.insert(shape);
+        let mp = shape.mass_properties(1.0);
+        let mut desc = BodyDesc::dynamic_at(Vec3::new(-2.0, 0.0, 0.0))
+            .with_collider(collider)
+            .with_mass_properties(mp)
+            .with_material(PhysicsMaterial::DEFAULT)
+            .with_linear_velocity(Vec3::new(300.0, 0.0, 0.0))
+            .with_ccd(true);
+        desc.orientation = orientation;
+        let bullet = world.spawn(desc);
+
+        let mut solver = XpbdSolver::new();
+        solver.step(&mut world, 1.0 / 60.0, 1);
+        world.bodies.position(bullet).unwrap().x
+    }
+
+    #[test]
+    fn ccd_box_bullet_does_not_tunnel_through_thin_wall() {
+        let x = fire_shape_at_wall(
+            ColliderShape::Cuboid {
+                half_extents: Vec3::splat(0.1),
+            },
+            Quat::IDENTITY,
+        );
+        assert!(
+            x < 0.0,
+            "CCD box bullet should stop on the near side of the wall, got x = {x}"
+        );
+    }
+
+    #[test]
+    fn ccd_capsule_bullet_does_not_tunnel_through_thin_wall() {
+        let x = fire_shape_at_wall(
+            ColliderShape::Capsule {
+                half_height: 0.3,
+                radius: 0.1,
+            },
+            Quat::IDENTITY,
+        );
+        assert!(
+            x < 0.0,
+            "CCD capsule bullet should stop on the near side of the wall, got x = {x}"
+        );
+    }
+
+    #[test]
+    fn ccd_respects_true_box_face_not_inscribed_sphere() {
+        // A long thin box travelling along its own long axis. Its front face
+        // sits 0.4 m ahead of the centre, so a shape-aware sweep must stop the
+        // centre near x = -0.45 (front face against the wall's -0.05 face).
+        // The old inscribed-sphere sweep used only the 0.05 m core radius and
+        // would have let the centre advance to about x = -0.10, driving the
+        // front face 0.35 m into the wall. Checking x < -0.3 proves the true
+        // geometry — not a bounding sphere — governs the clamp.
+        let x = fire_shape_at_wall(
+            ColliderShape::Cuboid {
+                half_extents: Vec3::new(0.4, 0.05, 0.05),
+            },
+            Quat::IDENTITY,
+        );
+        assert!(
+            (-0.6..-0.3).contains(&x),
+            "shape-aware clamp should respect the box's front face, got x = {x}"
+        );
     }
 }
