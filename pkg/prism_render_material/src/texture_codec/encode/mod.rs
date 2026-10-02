@@ -16,9 +16,11 @@
 //! * [`bc5`] -- BC5/RGTC2 two-channel encoder (two BC4 blocks, tangent
 //!   normal `XY`).
 //! * [`bc7`] -- BC7/BPTC single-subset encoders: mode 6 (4D `RGBA` PCA axis,
-//!   7-bit endpoints + p-bits, shared index) and mode 5 (3D `RGB` PCA +
-//!   separate 8-bit alpha, independent 2-bit colour/alpha indices, rotation),
-//!   both with least-squares index refit.
+//!   7-bit endpoints + p-bits, shared index), mode 5 (3D `RGB` PCA + separate
+//!   8-bit alpha, independent 2-bit colour/alpha indices, rotation), and mode 4
+//!   (5-bit `RGB` + 6-bit alpha with dual 2-bit/3-bit index sets and an
+//!   index-selection flag that routes precision to colour or alpha), all with
+//!   least-squares index refit.
 //! * [`bc6h`] -- BC6H/BPTC unsigned and signed mode-11 HDR encoders (half-float
 //!   domain, 10-bit direct endpoints, finish-chain-aware index assignment).
 
@@ -36,4 +38,4 @@ pub use bc3::encode_bc3;
 pub use bc4::encode_bc4;
 pub use bc5::encode_bc5;
 pub use bc6h::{encode_bc6h_mode11_signed, encode_bc6h_mode11_unsigned};
-pub use bc7::{encode_bc7_mode5, encode_bc7_mode6};
+pub use bc7::{encode_bc7_mode4, encode_bc7_mode5, encode_bc7_mode6};

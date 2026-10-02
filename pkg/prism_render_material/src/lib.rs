@@ -56,8 +56,9 @@ pub use texture_codec::{
     decode_bc6h_mode11_signed, decode_bc6h_mode11_unsigned, decode_bc6h_signed,
     decode_bc6h_unsigned, decode_bc7, decode_bc7_mode4, decode_bc7_mode5, decode_bc7_mode6,
     encode_bc1, encode_bc2, encode_bc3, encode_bc4, encode_bc5, encode_bc6h_mode11_signed,
-    encode_bc6h_mode11_unsigned, encode_bc7_mode5, encode_bc7_mode6, half_bits_to_f32,
-    rgb565_to_rgb888, Bc6hError, Bc7Error, BcFormat, BcSourceError, BcTexelSource,
+    encode_bc6h_mode11_unsigned, encode_bc7_mode4, encode_bc7_mode5, encode_bc7_mode6,
+    half_bits_to_f32, rgb565_to_rgb888, Bc6hError, Bc7Error, BcFormat, BcSourceError,
+    BcTexelSource,
 };
 pub use texture_filter::{
     bicubic_catmull_rom, bilinear, bspline_cubic, bspline_cubic_fast, bspline_cubic_weights,
