@@ -230,6 +230,22 @@
 //!   source and pairs with the `formant_filter`; unlike `impulse_train`'s
 //!   ideal equal-amplitude harmonic spikes and `oscillator`'s geometric
 //!   saw/square it is a physiologically shaped volume-velocity waveform.
+//! - [`tine_electric_piano::TineElectricPianoNode`] -- struck tine
+//!   electric-piano voice (Rhodes/Wurlitzer family): a felt hammer strikes a
+//!   stiff *clamped-free* (cantilever) steel tine whose inharmonic bending
+//!   modes sit at `1 : 6.267 : 17.55` (a different boundary condition from the
+//!   *free-free* bar of [`struck_bar`], so the bright partials ring far
+//!   higher), plus a slightly detuned tonebar partner that beats against the
+//!   fundamental for the sustained shimmer. Its defining feature is the
+//!   nonlinear electromagnetic *pickup*: the tine displacement is read through
+//!   the bounded rational transfer `V(x) = (x + asymmetry*x^2) / (1 + (x/sat)^2)`,
+//!   whose even-harmonic term is the "growl" and whose saturating denominator
+//!   is the velocity-dependent "bark", so a harder strike swings the tine
+//!   further into the nonlinearity and sounds dirtier. Unlike the
+//!   [`super::effects::modal_resonator`] *effect* it supplies its own hammer
+//!   excitation, and unlike the near-harmonic waveguide voices
+//!   [`karplus_strong`]/[`bowed_string`] or the steady [`additive_oscillator`]
+//!   its spectrum is struck, inharmonic, and shaped by the pickup.
 //!
 //!
 //! Every generator is real-time safe: `process` performs no allocation, no
@@ -262,6 +278,7 @@ pub mod tonewheel_organ;
 pub mod struck_bar;
 pub mod struck_plate;
 pub mod supersaw;
+pub mod tine_electric_piano;
 pub mod wavetable_oscillator;
 
 pub use air_jet_flute::{AirJetFluteNode, AirJetFluteParams};
@@ -293,4 +310,5 @@ pub use tonewheel_organ::{TonewheelOrganNode, TonewheelOrganParams, NUM_DRAWBARS
 pub use struck_bar::{StruckBarNode, StruckBarParams, NUM_MODES};
 pub use struck_plate::{StruckPlateNode, StruckPlateParams};
 pub use supersaw::{SupersawNode, SupersawParams};
+pub use tine_electric_piano::{TineElectricPianoNode, TineElectricPianoParams, NUM_TINE_MODES};
 pub use wavetable_oscillator::{WavetableOscillatorNode, WavetableOscillatorParams};
