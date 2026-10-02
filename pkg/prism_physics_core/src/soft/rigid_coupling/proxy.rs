@@ -17,8 +17,9 @@
 //! * [`ColliderShape::Plane`] (feasible region `dot(normal, x) >= offset` in the
 //!   rigid convention, with the world plane shifted by the body position) →
 //!   [`BodyCollider::HalfSpace`] with the same feasible-region convention.
-//! * [`ColliderShape::Cuboid`] has no analytic soft proxy and is skipped
-//!   ([`None`]); a box prop simply does not participate in coupling yet.
+//! * [`ColliderShape::Cuboid`] → [`BodyCollider::Obb`] at the body's world pose
+//!   (center = position, orientation = body orientation, matching half-extents),
+//!   so a box prop collides against cloth via its true oriented-box faces.
 //!
 //! # Provenance
 //!
@@ -52,8 +53,9 @@ pub struct RigidProxy {
 ///
 /// `position` is the body's world-space origin and `orientation` its world
 /// orientation. See the module docs for the per-shape mapping. A
-/// [`ColliderShape::Cuboid`] returns [`None`] because the coupling kernel has no
-/// box primitive.
+/// [`ColliderShape::Cuboid`] maps to a [`BodyCollider::Obb`] carrying the body's
+/// orientation and half-extents. The function still returns [`None`] for any
+/// future shape that has no analytic proxy.
 #[must_use]
 pub fn body_collider_from_shape(
     shape: &ColliderShape,
@@ -87,7 +89,11 @@ pub fn body_collider_from_shape(
                 offset: offset + world_normal.dot(position),
             })
         }
-        ColliderShape::Cuboid { .. } => None,
+        ColliderShape::Cuboid { half_extents } => Some(BodyCollider::Obb {
+            center: position,
+            orientation,
+            half_extents,
+        }),
     }
 }
 
@@ -114,7 +120,7 @@ pub fn proxy_inverse_mass(kind: BodyKind, inv_mass: Real) -> Real {
 #[must_use]
 pub fn collider_anchor(collider: BodyCollider) -> Vec3 {
     match collider {
-        BodyCollider::Sphere { center, .. } => center,
+        BodyCollider::Sphere { center, .. } | BodyCollider::Obb { center, .. } => center,
         BodyCollider::Capsule { p0, p1, .. } => (p0 + p1) * 0.5,
         BodyCollider::HalfSpace { .. } => Vec3::ZERO,
     }
@@ -176,6 +182,24 @@ pub fn collider_world_aabb(collider: BodyCollider) -> Option<Aabb> {
             Some(Aabb {
                 min: p0.min(p1) - r,
                 max: p0.max(p1) + r,
+            })
+        }
+        BodyCollider::Obb {
+            center,
+            orientation,
+            half_extents,
+        } => {
+            // World AABB of the oriented box: the world half-extent along each
+            // world axis is the sum over the local axes of
+            // `|rotation_component| * half_extent`, i.e. `|R| * he` with the
+            // component-wise absolute rotation matrix. Negative extents are
+            // clamped to zero so a collapsed axis contributes nothing.
+            let m = glam::Mat3::from_quat(orientation);
+            let abs = glam::Mat3::from_cols(m.x_axis.abs(), m.y_axis.abs(), m.z_axis.abs());
+            let world_half = abs * half_extents.max(Vec3::ZERO);
+            Some(Aabb {
+                min: center - world_half,
+                max: center + world_half,
             })
         }
         BodyCollider::HalfSpace { .. } => None,
@@ -245,13 +269,20 @@ mod tests {
     }
 
     #[test]
-    fn cuboid_shape_has_no_proxy() {
+    fn cuboid_shape_maps_to_obb_at_pose() {
         let shape = ColliderShape::Cuboid {
-            half_extents: Vec3::splat(0.5),
+            half_extents: Vec3::new(0.5, 0.25, 1.0),
         };
+        let orientation = Quat::from_rotation_y(std::f32::consts::FRAC_PI_4);
+        let got = body_collider_from_shape(&shape, Vec3::new(1.0, 2.0, 3.0), orientation)
+            .expect("cuboid proxy");
         assert_eq!(
-            body_collider_from_shape(&shape, Vec3::ZERO, Quat::IDENTITY),
-            None
+            got,
+            BodyCollider::Obb {
+                center: Vec3::new(1.0, 2.0, 3.0),
+                orientation,
+                half_extents: Vec3::new(0.5, 0.25, 1.0),
+            }
         );
     }
 
@@ -280,6 +311,14 @@ mod tests {
                 radius: 1.0,
             }),
             Vec3::new(0.0, 1.0, 0.0)
+        );
+        assert_eq!(
+            collider_anchor(BodyCollider::Obb {
+                center: Vec3::new(-2.0, 1.0, 4.0),
+                orientation: Quat::from_rotation_x(0.3),
+                half_extents: Vec3::new(0.5, 0.5, 0.5),
+            }),
+            Vec3::new(-2.0, 1.0, 4.0)
         );
     }
 
@@ -322,6 +361,58 @@ mod tests {
         };
         assert_eq!(collider_world_aabb(hs), None);
         assert!(collider_overlaps(hs, &soft));
+    }
+
+    #[test]
+    fn obb_world_aabb_is_axis_aligned_when_unrotated() {
+        let obb = BodyCollider::Obb {
+            center: Vec3::new(1.0, 2.0, 3.0),
+            orientation: Quat::IDENTITY,
+            half_extents: Vec3::new(0.5, 0.25, 2.0),
+        };
+        let aabb = collider_world_aabb(obb).expect("bounded");
+        assert!((aabb.min - Vec3::new(0.5, 1.75, 1.0)).length() < 1e-6);
+        assert!((aabb.max - Vec3::new(1.5, 2.25, 5.0)).length() < 1e-6);
+    }
+
+    #[test]
+    fn obb_world_aabb_grows_when_rotated() {
+        // A 45-degree yaw grows the XZ footprint of a square base from
+        // half-extent 1 to half-extent sqrt(2); the Y extent is unchanged.
+        let obb = BodyCollider::Obb {
+            center: Vec3::ZERO,
+            orientation: Quat::from_rotation_y(std::f32::consts::FRAC_PI_4),
+            half_extents: Vec3::new(1.0, 0.5, 1.0),
+        };
+        let aabb = collider_world_aabb(obb).expect("bounded");
+        let expected = 2.0_f32.sqrt();
+        assert!((aabb.max.x - expected).abs() < 1e-6, "x: {}", aabb.max.x);
+        assert!((aabb.max.z - expected).abs() < 1e-6, "z: {}", aabb.max.z);
+        assert!((aabb.max.y - 0.5).abs() < 1e-6, "y: {}", aabb.max.y);
+        assert!(
+            (aabb.min + aabb.max).length() < 1e-6,
+            "symmetric about center"
+        );
+    }
+
+    #[test]
+    fn obb_overlaps_soft_box_when_near() {
+        let soft = Aabb {
+            min: Vec3::splat(-1.0),
+            max: Vec3::splat(1.0),
+        };
+        let near = BodyCollider::Obb {
+            center: Vec3::new(1.4, 0.0, 0.0),
+            orientation: Quat::IDENTITY,
+            half_extents: Vec3::splat(0.5),
+        };
+        let far = BodyCollider::Obb {
+            center: Vec3::new(10.0, 0.0, 0.0),
+            orientation: Quat::IDENTITY,
+            half_extents: Vec3::splat(0.5),
+        };
+        assert!(collider_overlaps(near, &soft));
+        assert!(!collider_overlaps(far, &soft));
     }
 
     #[test]

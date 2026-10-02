@@ -71,8 +71,8 @@ pub struct CouplingReport {
 ///
 /// Bodies are visited in storage slot order for determinism. A body is skipped
 /// when it has no collider, its shape has no analytic proxy
-/// ([`body_collider_from_shape`] returns [`None`], e.g. a cuboid), or its proxy
-/// does not overlap the soft body's AABB. Static and kinematic bodies are kept
+/// ([`body_collider_from_shape`] returns [`None`]), or its proxy does not
+/// overlap the soft body's AABB. Static and kinematic bodies are kept
 /// (they record reaction impulse for force feedback) but given a zero inverse
 /// mass so they never move.
 #[must_use]
@@ -197,6 +197,7 @@ mod tests {
     use super::*;
     use crate::collider::ColliderShape;
     use crate::soft::rigid_coupling::ClothRigidCouplingConfig;
+    use crate::soft::BodyCollider;
     use crate::state::body::{BodyDesc, BodyKind, MassProperties};
     use crate::world::PhysicsWorld;
     use crate::WorldConfig;
@@ -244,7 +245,7 @@ mod tests {
     }
 
     #[test]
-    fn cuboid_proxy_is_skipped() {
+    fn cuboid_proxy_is_gathered_as_obb() {
         let mut world = PhysicsWorld::new(WorldConfig::default());
         world.cloth_coupling = ClothRigidCouplingConfig::active();
         let shape = world.shapes.insert(ColliderShape::Cuboid {
@@ -265,7 +266,12 @@ mod tests {
             min: Vec3::splat(-1.0),
             max: Vec3::splat(1.0),
         };
-        assert!(gather_rigid_proxies(&world, &aabb).is_empty());
+        // A cuboid now yields exactly one movable OBB proxy that overlaps the
+        // soft AABB (it used to be skipped as unsupported).
+        let proxies = gather_rigid_proxies(&world, &aabb);
+        assert_eq!(proxies.len(), 1);
+        assert!(matches!(proxies[0].body.collider, BodyCollider::Obb { .. }));
+        assert!(proxies[0].body.inverse_mass > 0.0);
     }
 
     #[test]

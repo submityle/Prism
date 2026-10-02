@@ -26,7 +26,7 @@
 //! published by Macklin et al. (2014), "Unified Particle Physics for Real-Time
 //! Applications".
 
-use glam::Vec3;
+use glam::{Quat, Vec3};
 
 use crate::math::scalar::Real;
 
@@ -70,6 +70,19 @@ pub enum BodyCollider {
         /// points `x` with `normal.dot(x) == offset`.
         offset: Real,
     },
+    /// A solid oriented box (OBB): interior points are pushed out along the
+    /// local axis of least penetration to the nearest face. `orientation` maps
+    /// box-local axes to world space (assumed unit); `half_extents` are the box
+    /// half-sizes along its local x/y/z. A non-positive half extent collapses
+    /// that axis and makes the box inert along it.
+    Obb {
+        /// World-space box center.
+        center: Vec3,
+        /// Orientation mapping box-local axes to world space (assumed unit).
+        orientation: Quat,
+        /// Half-extents along the box's local x/y/z axes.
+        half_extents: Vec3,
+    },
 }
 
 impl BodyCollider {
@@ -90,6 +103,11 @@ impl BodyCollider {
             BodyCollider::HalfSpace { normal, offset } => {
                 project_out_of_half_space(pos, normal, offset)
             }
+            BodyCollider::Obb {
+                center,
+                orientation,
+                half_extents,
+            } => project_out_of_obb(pos, center, orientation, half_extents),
         }
     }
 }
@@ -140,6 +158,63 @@ pub fn project_out_of_half_space(pos: Vec3, normal: Vec3, offset: Real) -> Vec3 
     // Move along `normal` by `t` so that `normal.dot(pos + t*normal) == offset`.
     let t = -signed / len_sq;
     pos + normal * t
+}
+
+/// Projects `pos` out to the nearest face of the oriented box
+/// `(center, orientation, half_extents)` when it lies inside, otherwise returns
+/// `pos` unchanged.
+///
+/// The point is taken into the box's local frame (`orientation` maps local →
+/// world, so its conjugate maps world → local for a unit quaternion). A point
+/// strictly inside all three local slabs is pushed along the axis of *least*
+/// penetration out to that face: the minimal translation that puts it on the
+/// surface, matching the "push interior points to the surface" semantics of the
+/// sphere and capsule arms. A point on or outside any slab is already outside
+/// the solid and is returned untouched (the `>=` test mirrors the sphere arm's
+/// `dist_sq >= r*r` early-out). A non-positive half extent collapses that axis
+/// (its slab test is always "outside"), and an all-non-positive box is inert.
+/// The transform is multiplies plus the quaternion rotation only, and the
+/// center fallback picks fixed `+` faces, so no path yields a [`f32::NAN`].
+#[must_use]
+pub fn project_out_of_obb(pos: Vec3, center: Vec3, orientation: Quat, half_extents: Vec3) -> Vec3 {
+    // No positive extent means there is no interior to project out of.
+    if half_extents.x <= 0.0 && half_extents.y <= 0.0 && half_extents.z <= 0.0 {
+        return pos;
+    }
+    // World -> local. For a unit quaternion the conjugate is the inverse
+    // rotation; body orientations are unit, matching the capsule-axis path.
+    let local = orientation.conjugate() * (pos - center);
+    // Outside any slab => already outside the solid box (a collapsed axis with
+    // a non-positive half extent is always "outside", making the box inert).
+    if local.x.abs() >= half_extents.x
+        || local.y.abs() >= half_extents.y
+        || local.z.abs() >= half_extents.z
+    {
+        return pos;
+    }
+    // Interior: push to the face of least penetration (smallest `he - |local|`).
+    let pen = half_extents - local.abs();
+    let mut local_out = local;
+    if pen.x <= pen.y && pen.x <= pen.z {
+        local_out.x = if local.x >= 0.0 {
+            half_extents.x
+        } else {
+            -half_extents.x
+        };
+    } else if pen.y <= pen.z {
+        local_out.y = if local.y >= 0.0 {
+            half_extents.y
+        } else {
+            -half_extents.y
+        };
+    } else {
+        local_out.z = if local.z >= 0.0 {
+            half_extents.z
+        } else {
+            -half_extents.z
+        };
+    }
+    center + orientation * local_out
 }
 
 /// Returns the point on segment `p0`..`p1` closest to `pos`.
@@ -217,11 +292,7 @@ pub fn resolve_body_collisions_with_friction(
         resolve_body_collisions(positions, inverse_masses, colliders);
         return;
     }
-    for (index, (pos, &inv_mass)) in positions
-        .iter_mut()
-        .zip(inverse_masses.iter())
-        .enumerate()
-    {
+    for (index, (pos, &inv_mass)) in positions.iter_mut().zip(inverse_masses.iter()).enumerate() {
         if inv_mass <= 0.0 {
             continue;
         }
@@ -300,11 +371,7 @@ pub fn apply_backstop(pos: Vec3, backstop: Backstop) -> Vec3 {
 /// `backstops` slice simply leaves the trailing particles unconstrained (and
 /// never panics). Pinned particles are skipped. An empty `backstops` slice, or
 /// an `inverse_masses` slice whose length differs from `positions`, is a no-op.
-pub fn resolve_backstops(
-    positions: &mut [Vec3],
-    inverse_masses: &[Real],
-    backstops: &[Backstop],
-) {
+pub fn resolve_backstops(positions: &mut [Vec3], inverse_masses: &[Real], backstops: &[Backstop]) {
     if inverse_masses.len() != positions.len() {
         return;
     }
@@ -383,8 +450,14 @@ mod tests {
     fn closest_point_clamps_to_endpoints() {
         let p0 = Vec3::new(-1.0, 0.0, 0.0);
         let p1 = Vec3::new(1.0, 0.0, 0.0);
-        approx_eq(closest_point_on_segment(p0, p1, Vec3::new(-5.0, 1.0, 0.0)), p0);
-        approx_eq(closest_point_on_segment(p0, p1, Vec3::new(5.0, 1.0, 0.0)), p1);
+        approx_eq(
+            closest_point_on_segment(p0, p1, Vec3::new(-5.0, 1.0, 0.0)),
+            p0,
+        );
+        approx_eq(
+            closest_point_on_segment(p0, p1, Vec3::new(5.0, 1.0, 0.0)),
+            p1,
+        );
         approx_eq(
             closest_point_on_segment(p0, p1, Vec3::new(0.0, 1.0, 0.0)),
             Vec3::ZERO,
@@ -409,7 +482,10 @@ mod tests {
             normal: Vec3::Y,
             offset: 0.0,
         };
-        approx_eq(plane.project(Vec3::new(0.3, -0.5, 0.2)), Vec3::new(0.3, 0.0, 0.2));
+        approx_eq(
+            plane.project(Vec3::new(0.3, -0.5, 0.2)),
+            Vec3::new(0.3, 0.0, 0.2),
+        );
     }
 
     #[test]
@@ -429,7 +505,10 @@ mod tests {
             normal: Vec3::new(0.0, 2.0, 0.0),
             offset: 2.0,
         };
-        approx_eq(plane.project(Vec3::new(0.0, 0.0, 0.0)), Vec3::new(0.0, 1.0, 0.0));
+        approx_eq(
+            plane.project(Vec3::new(0.0, 0.0, 0.0)),
+            Vec3::new(0.0, 1.0, 0.0),
+        );
     }
 
     #[test]
@@ -440,6 +519,93 @@ mod tests {
         };
         let p = Vec3::new(0.1, 0.2, 0.3);
         approx_eq(plane.project(p), p);
+    }
+
+    fn unit_obb() -> BodyCollider {
+        BodyCollider::Obb {
+            center: Vec3::ZERO,
+            orientation: Quat::IDENTITY,
+            half_extents: Vec3::new(1.0, 0.5, 2.0),
+        }
+    }
+
+    #[test]
+    fn obb_pushes_interior_point_to_nearest_face() {
+        // Point just below the top face (local axis of least penetration is +Y,
+        // the thinnest half-extent of 0.5). It should land on y = 0.5, keeping
+        // x and z, because that face is nearer than the x or z faces.
+        let obb = unit_obb();
+        let out = obb.project(Vec3::new(0.2, 0.4, -0.3));
+        approx_eq(out, Vec3::new(0.2, 0.5, -0.3));
+    }
+
+    #[test]
+    fn obb_leaves_exterior_point_untouched() {
+        let obb = unit_obb();
+        // Outside along x (|x| = 1.5 > 1.0): untouched.
+        let p = Vec3::new(1.5, 0.0, 0.0);
+        approx_eq(obb.project(p), p);
+    }
+
+    #[test]
+    fn obb_point_on_face_is_treated_as_outside() {
+        let obb = unit_obb();
+        // Exactly on the +Y face (y = 0.5): the `>=` slab test leaves it put.
+        let p = Vec3::new(0.0, 0.5, 0.0);
+        approx_eq(obb.project(p), p);
+    }
+
+    #[test]
+    fn obb_center_point_escapes_along_a_fixed_face() {
+        // At the exact center the penetration along each axis equals that
+        // axis's half-extent, so the least-penetration axis is the thinnest
+        // one — Y (0.5) for this box — and the point exits to the +Y face
+        // deterministically (`local.y >= 0.0` picks the `+` side).
+        let obb = unit_obb();
+        let out = obb.project(Vec3::ZERO);
+        approx_eq(out, Vec3::new(0.0, 0.5, 0.0));
+    }
+
+    #[test]
+    fn obb_respects_orientation_true_face_not_inscribed_sphere() {
+        // A box rotated 45° about Z. A particle sitting just inside the top
+        // (local +Y) face at a world point must be pushed to the *rotated*
+        // face, not to where an axis-aligned or inscribed-sphere proxy would
+        // put it. Build a known interior local point, map it to world, project,
+        // and confirm it lands on the oriented +Y face.
+        let orientation = Quat::from_rotation_z(std::f32::consts::FRAC_PI_4);
+        let half_extents = Vec3::new(1.0, 0.5, 2.0);
+        let obb = BodyCollider::Obb {
+            center: Vec3::new(3.0, 1.0, -2.0),
+            orientation,
+            half_extents,
+        };
+        // Interior local point near the +Y face (least-penetration axis).
+        let local_in = Vec3::new(0.1, 0.45, 0.3);
+        let world_in = Vec3::new(3.0, 1.0, -2.0) + orientation * local_in;
+        let out = obb.project(world_in);
+        // Expected: same local point snapped to y = +0.5, mapped back to world.
+        let local_out = Vec3::new(0.1, 0.5, 0.3);
+        let world_out = Vec3::new(3.0, 1.0, -2.0) + orientation * local_out;
+        approx_eq(out, world_out);
+        // Sanity: an inscribed-sphere proxy (radius = min half extent 0.5) would
+        // have produced a different point, so the face really governs.
+        let sphere_out = project_out_of_sphere(world_in, Vec3::new(3.0, 1.0, -2.0), 0.5);
+        assert!(
+            (sphere_out - out).length() > 1.0e-3,
+            "box face must differ from inscribed-sphere projection"
+        );
+    }
+
+    #[test]
+    fn obb_degenerate_box_is_inert() {
+        let obb = BodyCollider::Obb {
+            center: Vec3::ZERO,
+            orientation: Quat::IDENTITY,
+            half_extents: Vec3::ZERO,
+        };
+        let p = Vec3::new(0.1, -0.2, 0.3);
+        approx_eq(obb.project(p), p);
     }
 
     #[test]
@@ -535,7 +701,11 @@ mod tests {
         // Normal component is resolved onto the plane (y = 0).
         assert!(positions[0].y.abs() < TOL, "y: {}", positions[0].y);
         // Tangential slide (x) is fully removed back to the frame-start x.
-        assert!((positions[0].x - prev[0].x).abs() < TOL, "x: {}", positions[0].x);
+        assert!(
+            (positions[0].x - prev[0].x).abs() < TOL,
+            "x: {}",
+            positions[0].x
+        );
     }
 
     #[test]

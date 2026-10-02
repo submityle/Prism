@@ -29,7 +29,7 @@
 //! shared primitive published by Macklin et al. (2014), "Unified Particle
 //! Physics for Real-Time Applications".
 
-use glam::Vec3;
+use glam::{Quat, Vec3};
 
 use crate::math::scalar::Real;
 
@@ -279,7 +279,8 @@ fn earliest(lhs: Option<Real>, rhs: Option<Real>) -> Option<Real> {
 ///
 /// For a sphere this is the radial direction; for a capsule it is the direction
 /// from the nearest axis point; for a half-space it is the (normalized) plane
-/// normal.
+/// normal; for an oriented box it is the outward normal of the face the surface
+/// point lies on.
 fn outward_normal(collider: BodyCollider, surf: Vec3) -> Option<Vec3> {
     let n = match collider {
         BodyCollider::Sphere { center, .. } => (surf - center).normalize_or_zero(),
@@ -288,6 +289,11 @@ fn outward_normal(collider: BodyCollider, surf: Vec3) -> Option<Vec3> {
             (surf - closest).normalize_or_zero()
         }
         BodyCollider::HalfSpace { normal, .. } => normal.normalize_or_zero(),
+        BodyCollider::Obb {
+            center,
+            orientation,
+            half_extents,
+        } => obb_face_normal(center, orientation, half_extents, surf),
     };
     if n.length_squared() <= EPS_LEN_SQ {
         None
@@ -303,7 +309,104 @@ fn collider_toi(collider: BodyCollider, prev: Vec3, curr: Vec3) -> Option<Real> 
         BodyCollider::Sphere { center, radius } => sphere_toi(prev, curr, center, radius),
         BodyCollider::Capsule { p0, p1, radius } => capsule_toi(prev, curr, p0, p1, radius),
         BodyCollider::HalfSpace { normal, offset } => half_space_toi(prev, curr, normal, offset),
+        BodyCollider::Obb {
+            center,
+            orientation,
+            half_extents,
+        } => obb_toi(prev, curr, center, orientation, half_extents),
     }
+}
+
+/// Returns the outward unit normal of the oriented box face the surface point
+/// `surf` lies on, or the zero vector when the box is degenerate.
+///
+/// The point is taken into the box's local frame; the face is the local axis on
+/// which `surf` is most extended relative to that axis's half-extent (the axis
+/// whose `|local| / half_extent` ratio is largest, which is `1` for the face
+/// the point sits on). The local axis normal, signed by that coordinate, is
+/// rotated back to world space. Axes with a non-positive half-extent are
+/// ignored so a collapsed box never divides by zero.
+fn obb_face_normal(center: Vec3, orientation: Quat, half_extents: Vec3, surf: Vec3) -> Vec3 {
+    let local = orientation.conjugate() * (surf - center);
+    let mut best_axis = usize::MAX;
+    let mut best_ratio = Real::NEG_INFINITY;
+    for axis in 0..3 {
+        let he = half_extents[axis];
+        if he <= 0.0 {
+            continue;
+        }
+        let ratio = local[axis].abs() / he;
+        if ratio > best_ratio {
+            best_ratio = ratio;
+            best_axis = axis;
+        }
+    }
+    if best_axis == usize::MAX {
+        return Vec3::ZERO;
+    }
+    let mut local_normal = Vec3::ZERO;
+    local_normal[best_axis] = if local[best_axis] >= 0.0 { 1.0 } else { -1.0 };
+    (orientation * local_normal).normalize_or_zero()
+}
+
+/// Returns the earliest time in `0..=1` at which the segment `prev -> curr`
+/// enters the oriented box `(center, orientation, half_extents)`, or [`None`]
+/// when the segment misses it.
+///
+/// The segment is taken into the box's local frame, where the box is the
+/// axis-aligned slab `[-half_extents, half_extents]`, and solved with the
+/// standard three-slab ray/box intersection restricted to the unit segment.
+/// A segment that runs parallel to and outside any slab misses; a non-positive
+/// half-extent collapses that slab so the box is inert along it. Only
+/// multiplies and comparisons are used, so no path yields a [`f32::NAN`].
+fn obb_toi(
+    prev: Vec3,
+    curr: Vec3,
+    center: Vec3,
+    orientation: Quat,
+    half_extents: Vec3,
+) -> Option<Real> {
+    if half_extents.x <= 0.0 || half_extents.y <= 0.0 || half_extents.z <= 0.0 {
+        return None;
+    }
+    let inv = orientation.conjugate();
+    let p = inv * (prev - center);
+    let d = inv * (curr - prev);
+    // Standard slab clip: `t_enter` is the latest per-axis entry, `t_exit` the
+    // earliest per-axis exit. Starting unbounded (not at 0) keeps the true
+    // entry time, so a segment that *starts inside* the box yields a negative
+    // entry and is rejected below, matching the sphere/capsule solvers which
+    // leave an already-penetrating particle to the discrete projection.
+    let mut t_enter = Real::NEG_INFINITY;
+    let mut t_exit = Real::INFINITY;
+    for axis in 0..3 {
+        let he = half_extents[axis];
+        let pa = p[axis];
+        let da = d[axis];
+        if da.abs() <= EPS_COEF {
+            // Parallel to this slab: a start outside the slab can never enter.
+            if pa < -he || pa > he {
+                return None;
+            }
+            continue;
+        }
+        let inv_d = 1.0 / da;
+        let t1 = (-he - pa) * inv_d;
+        let t2 = (he - pa) * inv_d;
+        let (t_near, t_far) = if t1 <= t2 { (t1, t2) } else { (t2, t1) };
+        t_enter = t_enter.max(t_near);
+        t_exit = t_exit.min(t_far);
+        if t_enter > t_exit {
+            return None;
+        }
+    }
+    // The segment must reach the box (`t_exit >= 0`) and the entry must fall on
+    // the forward unit segment; an entry outside `0..=1` means the box is only
+    // reached before the start or after the end, or the start is already inside.
+    if t_exit < 0.0 || !(0.0..=1.0).contains(&t_enter) {
+        return None;
+    }
+    Some(t_enter)
 }
 
 /// Sweeps every free particle from its previous position to its current
@@ -471,7 +574,13 @@ mod tests {
 
     #[test]
     fn sphere_toi_inert_for_non_positive_radius() {
-        assert!(sphere_toi(Vec3::new(-2.0, 0.0, 0.0), Vec3::new(2.0, 0.0, 0.0), Vec3::ZERO, 0.0).is_none());
+        assert!(sphere_toi(
+            Vec3::new(-2.0, 0.0, 0.0),
+            Vec3::new(2.0, 0.0, 0.0),
+            Vec3::ZERO,
+            0.0
+        )
+        .is_none());
     }
 
     #[test]

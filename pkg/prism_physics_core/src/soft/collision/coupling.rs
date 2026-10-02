@@ -91,6 +91,8 @@ impl CouplingBody {
 /// which is the plane displacement for a rigid translation; the normal itself
 /// is unchanged. Half-spaces are normally kinematic ground planes, so this
 /// branch is exercised only when an author gives one a non-zero inverse mass.
+/// An oriented box moves its center rigidly, keeping its orientation and
+/// half-extents.
 fn translate_collider(collider: BodyCollider, delta: Vec3) -> BodyCollider {
     match collider {
         BodyCollider::Sphere { center, radius } => BodyCollider::Sphere {
@@ -105,6 +107,15 @@ fn translate_collider(collider: BodyCollider, delta: Vec3) -> BodyCollider {
         BodyCollider::HalfSpace { normal, offset } => BodyCollider::HalfSpace {
             normal,
             offset: offset + normal.dot(delta),
+        },
+        BodyCollider::Obb {
+            center,
+            orientation,
+            half_extents,
+        } => BodyCollider::Obb {
+            center: center + delta,
+            orientation,
+            half_extents,
         },
     }
 }
@@ -230,7 +241,8 @@ pub fn resolve_two_way_coupling(
         for i in 0..count {
             // Delegate the per-particle contact to the shared scalar kernel so
             // this pass and the GPU twin agree up to floating-point rounding.
-            let c = couple_particle_against_body(positions[i], inverse_masses[i], collider, w_body, dt);
+            let c =
+                couple_particle_against_body(positions[i], inverse_masses[i], collider, w_body, dt);
             // Mass-weighted split: the lighter side moves more.
             positions[i] += c.particle_delta;
             body_delta += c.body_delta;
@@ -465,13 +477,8 @@ mod tests {
         }
         assert!(impulse.distance(bodies[0].reaction_impulse) < 1e-9);
         // The outside particle contributes nothing.
-        let outside = couple_particle_against_body(
-            Vec3::new(2.0, 0.0, 0.0),
-            1.0,
-            collider,
-            w_body,
-            dt,
-        );
+        let outside =
+            couple_particle_against_body(Vec3::new(2.0, 0.0, 0.0), 1.0, collider, w_body, dt);
         assert_eq!(outside, CouplingContribution::ZERO);
     }
 
