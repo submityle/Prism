@@ -26,6 +26,9 @@
 //! * [`etc2`] -- ETC2 `RGB8` base-mode (individual + differential) encoder
 //!   (iPACKMAN/ETC1-style per-sub-block average fit + brute-forced codeword
 //!   and per-texel index search, deltas clamped to stay in base mode).
+//! * [`snorm`] -- BC4/BC5 `SNORM` signed single-/two-channel encoders (signed
+//!   sibling of [`bc4`]/[`bc5`]: two's-complement endpoints, eight-value /
+//!   six-value mode selection, inputs clamped to `-127..=127`).
 
 mod bc1;
 mod bc2;
@@ -35,6 +38,7 @@ mod bc5;
 mod bc6h;
 mod bc7;
 mod etc2;
+mod snorm;
 
 pub use bc1::encode_bc1;
 pub use bc2::encode_bc2;
@@ -44,3 +48,4 @@ pub use bc5::encode_bc5;
 pub use bc6h::{encode_bc6h_mode11_signed, encode_bc6h_mode11_unsigned};
 pub use bc7::{encode_bc7_mode4, encode_bc7_mode5, encode_bc7_mode6};
 pub use etc2::encode_etc2_rgb8;
+pub use snorm::{encode_bc4_signed, encode_bc5_signed};
