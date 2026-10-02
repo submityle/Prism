@@ -182,7 +182,7 @@ fn projected_radius(axis: Vec3, x: &[Vec3; 3], he: Vec3) -> f32 {
 
 /// Support vertex of a box in direction `dir`: the box corner furthest along
 /// `dir`, `center + Σ x_k * sign(dot(dir, x_k)) * he_k`.
-fn support_vertex(center: Vec3, x: &[Vec3; 3], he: Vec3, dir: Vec3) -> Vec3 {
+pub(crate) fn support_vertex(center: Vec3, x: &[Vec3; 3], he: Vec3, dir: Vec3) -> Vec3 {
     center
         + x[0] * (sign_pos(dir.dot(x[0])) * he.x)
         + x[1] * (sign_pos(dir.dot(x[1])) * he.y)
@@ -191,11 +191,18 @@ fn support_vertex(center: Vec3, x: &[Vec3; 3], he: Vec3, dir: Vec3) -> Vec3 {
 
 /// The winning separating axis and the oriented minimum-translation data.
 #[derive(Clone, Copy, Debug)]
-struct SatQuery {
+pub(crate) struct SatQuery {
     /// Unit contact normal oriented from the triangle toward the box.
-    normal: Vec3,
+    pub(crate) normal: Vec3,
     /// Penetration depth along [`normal`](Self::normal); always positive.
-    depth: f32,
+    pub(crate) depth: f32,
+    /// Index of the winning candidate axis in the fixed thirteen-axis order:
+    /// `0..=2` are the box face normals (local axes), `3` is the triangle face
+    /// normal, and `4..=12` are the nine edge-edge crosses. A manifold builder
+    /// reads this to classify the contact (box-face reference, triangle-face
+    /// reference, or edge-edge) and so pick the clipping that yields multiple
+    /// coplanar points.
+    pub(crate) axis_index: usize,
 }
 
 /// Runs the thirteen-axis separating-axis test on the box and triangle.
@@ -205,7 +212,7 @@ struct SatQuery {
 /// overlaps, or [`None`] when any axis separates the shapes or they exactly
 /// graze (`overlap <= 0`).
 #[must_use]
-fn obb_triangle_sat(obb: &Obb, tri: &Triangle) -> Option<SatQuery> {
+pub(crate) fn obb_triangle_sat(obb: &Obb, tri: &Triangle) -> Option<SatQuery> {
     let x = obb.axes;
     let he = obb.half_extents;
 
@@ -256,6 +263,7 @@ fn obb_triangle_sat(obb: &Obb, tri: &Triangle) -> Option<SatQuery> {
     let mut best_overlap = SKIP_OVERLAP;
     let mut best_cmp = SKIP_OVERLAP;
     let mut best_normal = Vec3::ZERO;
+    let mut best_axis = 0usize;
     let mut separated = false;
     for idx in 0..13 {
         if !valid[idx] {
@@ -296,6 +304,7 @@ fn obb_triangle_sat(obb: &Obb, tri: &Triangle) -> Option<SatQuery> {
             best_cmp = cmp;
             best_overlap = overlap;
             best_normal = oriented;
+            best_axis = idx;
         }
     }
 
@@ -306,6 +315,7 @@ fn obb_triangle_sat(obb: &Obb, tri: &Triangle) -> Option<SatQuery> {
     Some(SatQuery {
         normal: best_normal,
         depth: best_overlap,
+        axis_index: best_axis,
     })
 }
 
