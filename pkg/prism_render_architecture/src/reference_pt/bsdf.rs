@@ -18,6 +18,7 @@
 //! quantities are linear radiance scales, never gamma-encoded.
 
 use super::clearcoat::ClearcoatConductor;
+use super::clearcoat_diffuse::ClearcoatDiffuse;
 use super::conductor::Conductor;
 use super::conductor_aniso::AnisoConductor;
 use super::conductor_aniso_ms::MultiscatterAnisoConductor;
@@ -307,6 +308,27 @@ pub enum Bsdf {
         /// Per-channel tint of the coat highlight (usually white).
         coat_color: Vec3,
     },
+    /// Clear-coated diffuse: a matte pigmented base (lacquered car paint,
+    /// varnished wood) viewed through a dielectric clear coat. The coat adds an
+    /// isotropic `GGX` dielectric highlight and attenuates the Oren-Nayar base
+    /// by the Fresnel transmission into and out of the coat (see
+    /// [`crate::reference_pt::clearcoat_diffuse`]). It is glossy and reflects
+    /// into the upper hemisphere, so it is sampled as a two-lobe mixture.
+    ClearcoatDiffuse {
+        /// Per-channel diffuse albedo of the base in `[0, 1]`.
+        albedo: Vec3,
+        /// Oren-Nayar surface roughness `sigma` in radians (`0` is Lambertian).
+        sigma: f32,
+        /// Perceptual roughness of the coat highlight in `[0, 1]`.
+        coat_roughness: f32,
+        /// Relative index of refraction of the coat over the exterior medium
+        /// (e.g. `1.5` for a typical lacquer over air).
+        coat_ior: f32,
+        /// Coat presence in `[0, 1]`: `0` is a bare diffuse, `1` a full coat.
+        coat_weight: f32,
+        /// Per-channel tint of the coat highlight (usually white).
+        coat_color: Vec3,
+    },
 }
 
 /// The outcome of importance-sampling a [`Bsdf`].
@@ -447,6 +469,22 @@ impl Bsdf {
                 *coat_color,
             )
             .evaluate(wo, wi, normal),
+            Self::ClearcoatDiffuse {
+                albedo,
+                sigma,
+                coat_roughness,
+                coat_ior,
+                coat_weight,
+                coat_color,
+            } => ClearcoatDiffuse::new(
+                *albedo,
+                *sigma,
+                *coat_roughness,
+                *coat_ior,
+                *coat_weight,
+                *coat_color,
+            )
+            .evaluate(wo, wi, normal),
         }
     }
 
@@ -555,6 +593,22 @@ impl Bsdf {
                 *eta,
                 *k,
                 *roughness,
+                *coat_roughness,
+                *coat_ior,
+                *coat_weight,
+                *coat_color,
+            )
+            .pdf(wo, wi, normal),
+            Self::ClearcoatDiffuse {
+                albedo,
+                sigma,
+                coat_roughness,
+                coat_ior,
+                coat_weight,
+                coat_color,
+            } => ClearcoatDiffuse::new(
+                *albedo,
+                *sigma,
                 *coat_roughness,
                 *coat_ior,
                 *coat_weight,
@@ -774,6 +828,28 @@ impl Bsdf {
                 *eta,
                 *k,
                 *roughness,
+                *coat_roughness,
+                *coat_ior,
+                *coat_weight,
+                *coat_color,
+            )
+            .sample(wo, normal, rng)
+            .map(|s| BsdfSample {
+                direction: s.direction,
+                value: s.value,
+                pdf: s.pdf,
+                specular: false,
+            }),
+            Self::ClearcoatDiffuse {
+                albedo,
+                sigma,
+                coat_roughness,
+                coat_ior,
+                coat_weight,
+                coat_color,
+            } => ClearcoatDiffuse::new(
+                *albedo,
+                *sigma,
                 *coat_roughness,
                 *coat_ior,
                 *coat_weight,
@@ -1621,6 +1697,44 @@ mod tests {
             coat_color: Vec3::ONE,
         };
         let wi2 = Vec3::new(-0.3, 0.92, 0.1).normalize_or_zero();
+        let a = uncoated.evaluate(wo, wi2, N);
+        let d = bare.evaluate(wo, wi2, N);
+        assert!(a.sub(d).length() < 1e-6, "{a:?} vs {d:?}");
+    }
+
+    #[test]
+    fn clearcoat_diffuse_is_glossy_and_adds_highlight() {
+        // The clear-coated diffuse dispatches as a non-delta lobe. With a full
+        // coat it gains a specular highlight the matte base lacks, and with a
+        // weightless coat it collapses back onto the bare Oren-Nayar base.
+        let albedo = Vec3::new(0.6, 0.5, 0.4);
+        let coated = Bsdf::ClearcoatDiffuse {
+            albedo,
+            sigma: 0.0,
+            coat_roughness: 0.02,
+            coat_ior: 1.5,
+            coat_weight: 1.0,
+            coat_color: Vec3::ONE,
+        };
+        assert!(!coated.is_specular());
+        let bare = Bsdf::OrenNayar { albedo, sigma: 0.0 };
+        let wo = Vec3::new(0.6, 0.8, 0.0).normalize_or_zero();
+        // Mirror direction about the `+y` normal picks up the coat highlight.
+        let wi = Vec3::new(-0.6, 0.8, 0.0).normalize_or_zero();
+        let c = coated.evaluate(wo, wi, N).max_component();
+        let b = bare.evaluate(wo, wi, N).max_component();
+        assert!(c > b, "coated {c} should exceed bare {b}");
+
+        // A weightless coat reduces to the bare diffuse base.
+        let uncoated = Bsdf::ClearcoatDiffuse {
+            albedo,
+            sigma: 0.0,
+            coat_roughness: 0.02,
+            coat_ior: 1.5,
+            coat_weight: 0.0,
+            coat_color: Vec3::ONE,
+        };
+        let wi2 = Vec3::new(0.4, 0.9, 0.15).normalize_or_zero();
         let a = uncoated.evaluate(wo, wi2, N);
         let d = bare.evaluate(wo, wi2, N);
         assert!(a.sub(d).length() < 1e-6, "{a:?} vs {d:?}");

@@ -54,6 +54,7 @@
 pub mod bsdf;
 pub mod camera;
 pub mod clearcoat;
+pub mod clearcoat_diffuse;
 pub mod coat;
 pub mod compare;
 pub mod conductor;
