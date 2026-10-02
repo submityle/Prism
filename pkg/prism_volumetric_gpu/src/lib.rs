@@ -76,6 +76,7 @@ pub mod avsm_transmittance;
 pub mod backface_outline_expand;
 pub mod barycentric_coord;
 pub mod bicubic_sample;
+pub mod billboard_atlas;
 pub mod binary_search_range;
 pub mod bit_pack_u32;
 pub mod bit_reversal_u32;
@@ -84,6 +85,7 @@ pub mod blend_state;
 pub mod blend_with_atmosphere;
 pub mod bloom_threshold;
 pub mod bloom_upsample;
+pub mod bounds;
 pub mod camera;
 pub mod capsule_capsule_closest;
 pub mod capsule_sdf;
@@ -132,6 +134,7 @@ pub mod film_grain;
 pub mod flipbook_blend;
 pub mod fluid_diffusion;
 pub mod fog;
+pub mod forces;
 pub mod fresnel_rim;
 pub mod froxel_injection;
 pub mod frustum_aabb_cull;
@@ -161,6 +164,7 @@ pub mod histogram_equalize;
 pub mod hue_shift;
 pub mod imposter_fade;
 pub mod indirect_dispatch;
+pub mod indirect_draw;
 pub mod inertia_tensor;
 pub mod integrate_segment;
 pub mod interval_overlap_1d;
@@ -176,6 +180,7 @@ pub mod marching_squares;
 pub mod mask;
 pub mod matrix_decompose;
 pub mod merge_sort_stable;
+pub mod mesh_renderer;
 pub mod microfacet_ggx;
 pub mod minkowski_sum_2d;
 pub mod modeling;
@@ -185,6 +190,7 @@ pub mod motion_vectors;
 pub mod multiscatter_lut_build;
 pub mod multiscatter_lut_sample;
 pub mod nd_strides_index;
+pub mod noise;
 pub mod noise_fbm;
 pub mod normal_reconstruct;
 pub mod obb_obb_sat_3d;
@@ -333,6 +339,7 @@ pub use backface_outline_expand::{
 };
 pub use barycentric_coord::{BarycentricQuery, BarycentricResult, GpuBarycentricCoord};
 pub use bicubic_sample::GpuBicubicSample;
+pub use billboard_atlas::{GpuBillboardAtlas, GpuBillboardAtlasQuery, GpuBillboardAtlasResult};
 pub use binary_search_range::GpuBinarySearchRange;
 pub use bit_pack_u32::{packed_len_words, GpuBitPackU32};
 pub use bit_reversal_u32::{
@@ -344,6 +351,7 @@ pub use blend_state::{BlendStateQuery, GpuBlendState};
 pub use blend_with_atmosphere::{BlendQuery, BlendedColor, GpuBlendWithAtmosphere};
 pub use bloom_threshold::{BloomThresholdQuery, GpuBloomThreshold};
 pub use bloom_upsample::{BloomUpsampleQuery, GpuBloomUpsample};
+pub use bounds::{GpuBounds, GpuBoundsQuery, GpuBoundsResult, AXIS_X, AXIS_Y, AXIS_Z};
 pub use camera::{CameraQuery, CameraResult, GpuCamera};
 pub use capsule_capsule_closest::{
     CapsuleClosestQuery, CapsuleClosestResult, GpuCapsuleCapsuleClosest,
@@ -407,6 +415,12 @@ pub use film_grain::{FilmGrainPixel, FilmGrainQuery, GpuFilmGrain};
 pub use flipbook_blend::{FlipbookQuery, FlipbookResult, FlipbookSample, GpuFlipbookBlend};
 pub use fluid_diffusion::{GpuDiffusionResult, GpuFluidDiffusion};
 pub use fog::{FogQuery, GpuFogTransmittance};
+pub use forces::{
+    GpuForces, GpuForcesQuery, GpuForcesResult, FALLOFF_CONSTANT, FALLOFF_INVERSE_SQUARE,
+    FALLOFF_LINEAR, FALLOFF_SMOOTHSTEP, FORCE_EXPLOSION, FORCE_GRAVITY_WELL, FORCE_IMPLOSION,
+    FORCE_LINE_ATTRACTOR, FORCE_ORBITAL, FORCE_POINT_ATTRACTOR, FORCE_QUADRATIC_DRAG, FORCE_RADIAL,
+    FORCE_SPRING_DAMPER, FORCE_TURBULENCE,
+};
 pub use fresnel_rim::{FresnelRimQuery, FresnelRimSample, GpuFresnelRim};
 pub use froxel_injection::{FroxelInjectionQuery, GpuFroxelInjection};
 pub use frustum_aabb_cull::{FrustumAabbCullPrimitive, FrustumAabbCullQuery, GpuFrustumAabbCull};
@@ -444,6 +458,7 @@ pub use imposter_fade::{GpuImposterFade, ImposterFadeQuery};
 pub use indirect_dispatch::{
     GpuIndirectDispatch, GpuIndirectDispatchQuery, GpuIndirectDispatchResult,
 };
+pub use indirect_draw::{GpuIndirectDraw, GpuIndirectDrawQuery, GpuIndirectDrawResult};
 pub use inertia_tensor::{BodyOpQuery, BodyOpResult, GpuInertiaTensor};
 pub use integrate_segment::{GpuIntegrateSegment, IntegrateSegmentQuery};
 pub use interval_overlap_1d::{GpuIntervalOverlap1d, IntervalOverlapQuery, IntervalOverlapResult};
@@ -459,6 +474,11 @@ pub use marching_squares::{GpuMarchingSquares, MarchingSquaresQuery, MarchingSqu
 pub use mask::{GpuScatteringMask, MaskQuery};
 pub use matrix_decompose::{GpuMatrixDecompose, MatrixDecomposeQuery, MatrixDecomposeResult};
 pub use merge_sort_stable::{GpuMergeSort, GpuMergeSortStable};
+pub use mesh_renderer::{
+    GpuMeshRenderer, GpuMeshRendererQuery, GpuMeshRendererResult, LOCAL_AXIS_PLUS_X,
+    LOCAL_AXIS_PLUS_Y, LOCAL_AXIS_PLUS_Z, MAX_LOD_THRESHOLDS, ORIENTATION_ALIGN_TO_AXIS,
+    ORIENTATION_FIXED_ROTATION, ORIENTATION_IDENTITY, ORIENTATION_VELOCITY_ALIGNED,
+};
 pub use microfacet_ggx::{GpuMicrofacetGgx, MicrofacetSample};
 pub use minkowski_sum_2d::{GpuMinkowskiSum2d, MinkowskiSum2dQuery, MinkowskiSum2dResult};
 pub use modeling::{GpuModeling, ModelingQuery};
@@ -468,6 +488,7 @@ pub use motion_vectors::{GpuMotionVectors, MotionVectorQuery};
 pub use multiscatter_lut_build::GpuMultiScatterLutBuild;
 pub use multiscatter_lut_sample::{GpuMultiScatterLutSample, MultiScatterSampleQuery};
 pub use nd_strides_index::{GpuNdStridesIndex, NdStridesQuery, MAX_RANK};
+pub use noise::{GpuFbmParams, GpuNoise, GpuTurbulenceParams, NoiseQuery, NoiseResult};
 pub use noise_fbm::{GpuNoiseFbm, NoiseFbmQuery, NoiseFbmResult};
 pub use normal_reconstruct::{GpuNormalReconstruct, NormalQuery, NormalResult};
 pub use obb_obb_sat_3d::{GpuObbSat3d, ObbSat3dQuery, ObbSat3dResult};
