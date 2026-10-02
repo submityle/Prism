@@ -79,6 +79,14 @@
 //!   the image through time decorrelation while staying mono-compatible.
 //!   Distinct from [`stereo_width::StereoWidthNode`] (side-gain) and
 //!   [`mid_side_matrix::MidSideMatrixNode`] (static M/S trim).
+//! - [`ladder_filter::LadderFilterNode`] -- Moog-style transistor-ladder
+//!   low-pass: four cascaded one-pole TPT stages closed by a global
+//!   zero-delay feedback loop for a 24 dB/oct (`FourPole`) or 12 dB/oct
+//!   (`TwoPole`) resonant response with `tanh` input drive and
+//!   self-oscillation near maximum resonance. Distinct from the two-pole
+//!   state-variable [`svf::SvfNode`](crate::nodes::svf::SvfNode) (single
+//!   12 dB/oct section with independent `Q`, no global feedback) and from the
+//!   cookbook-biquad EQ nodes.
 //! - [`leslie::LeslieNode`] -- rotary-speaker (Leslie-style) cabinet that
 //!   splits the signal into a slow bass rotor and a fast treble horn and
 //!   imposes coupled Doppler pitch wobble, amplitude tremolo, and antiphase
@@ -261,6 +269,7 @@ pub mod frequency_shifter;
 pub mod granular;
 pub mod graphic_eq;
 pub mod haas_widener;
+pub mod ladder_filter;
 pub mod leslie;
 pub mod mid_side_matrix;
 pub mod modal_resonator;
@@ -323,6 +332,10 @@ pub use granular::{
 };
 pub use graphic_eq::{GraphicEqNode, GraphicEqSpacing};
 pub use haas_widener::{HaasWidenerNode, HaasWidenerParams};
+pub use ladder_filter::{
+    DEFAULT_CUTOFF_HZ, DEFAULT_DRIVE, DEFAULT_RESONANCE, LadderFilterNode, LadderFilterParams,
+    LadderSlope, MAX_CUTOFF_HZ, MAX_DRIVE, MAX_RESONANCE_K, MIN_CUTOFF_HZ, MIN_DRIVE, NYQUIST_GUARD,
+};
 pub use leslie::{
     DEFAULT_CROSSOVER_HZ, DRUM_ACCEL_SECONDS, DRUM_DECEL_SECONDS, DRUM_FAST_HZ, DRUM_SLOW_HZ,
     HORN_ACCEL_SECONDS, HORN_DECEL_SECONDS, HORN_FAST_HZ, HORN_SLOW_HZ, LeslieNode, LeslieParams,
