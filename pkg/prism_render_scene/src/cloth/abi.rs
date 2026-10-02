@@ -46,6 +46,11 @@ pub(crate) const CLOTH_COLLIDER_CAPSULE: u32 = 1;
 /// `CLOTH_COLLIDER_HALF_SPACE` in `cloth_collision.wesl`.
 pub(crate) const CLOTH_COLLIDER_HALF_SPACE: u32 = 2;
 
+/// Oriented bounding box: `a` = world-space center, `b` = local half-extents,
+/// `q` = orientation quaternion `(x, y, z, w)` mapping local axes to world.
+/// Mirrors `CLOTH_COLLIDER_OBB` in `cloth_collision.wesl`.
+pub(crate) const CLOTH_COLLIDER_OBB: u32 = 3;
+
 /// Empty-cell sentinel for the self-collision spatial hash linked list.
 /// Mirrors `CLOTH_COL_SENTINEL` in `cloth_collision.wesl`.
 #[cfg_attr(
@@ -168,8 +173,17 @@ pub(crate) struct GpuClothCollider {
     pub by: f32,
     /// Second point `z`.
     pub bz: f32,
-    /// Radius (sphere / capsule) or signed offset (half-space).
+    /// Radius (sphere / capsule) or signed offset (half-space); unused (0) for
+    /// the oriented box.
     pub radius: f32,
+    /// Orientation quaternion `x` (oriented box only, else ignored).
+    pub qx: f32,
+    /// Orientation quaternion `y`.
+    pub qy: f32,
+    /// Orientation quaternion `z`.
+    pub qz: f32,
+    /// Orientation quaternion `w`.
+    pub qw: f32,
 }
 
 /// One spatial-hash cell header. Byte-compatible with `ClothHashCell` in
@@ -593,10 +607,12 @@ mod tests {
         assert_eq!(size_of::<GpuClothSimParams>() % 16, 0);
     }
 
-    /// A collider proxy is eight 4-byte words (32 bytes).
+    /// A collider proxy is twelve 4-byte words (48 bytes): a kind tag, two
+    /// `vec3`-worth of points, a radius/offset, and the orientation quaternion
+    /// the oriented box uses.
     #[test]
-    fn collider_is_thirty_two_bytes() {
-        assert_eq!(size_of::<GpuClothCollider>(), 32);
+    fn collider_is_forty_eight_bytes() {
+        assert_eq!(size_of::<GpuClothCollider>(), 48);
     }
 
     /// The hash-cell header equals the golden hash-cell stride.

@@ -27,9 +27,9 @@ use prism_render_architecture::cloth::{Constraint, ConstraintKind};
 
 use super::abi::{
     GpuClothBackstop, GpuClothBendingConstraint, GpuClothCollider, GpuClothConstraint,
-    GpuClothEmbedBinding, CLOTH_COLLIDER_CAPSULE, CLOTH_COLLIDER_HALF_SPACE, CLOTH_COLLIDER_SPHERE,
-    CLOTH_CONSTRAINT_BEND, CLOTH_CONSTRAINT_LRA, CLOTH_CONSTRAINT_SHEAR, CLOTH_CONSTRAINT_STRETCH,
-    CLOTH_CONSTRAINT_TETHER,
+    GpuClothEmbedBinding, CLOTH_COLLIDER_CAPSULE, CLOTH_COLLIDER_HALF_SPACE, CLOTH_COLLIDER_OBB,
+    CLOTH_COLLIDER_SPHERE, CLOTH_CONSTRAINT_BEND, CLOTH_CONSTRAINT_LRA, CLOTH_CONSTRAINT_SHEAR,
+    CLOTH_CONSTRAINT_STRETCH, CLOTH_CONSTRAINT_TETHER,
 };
 
 /// Maps an architecture-layer [`ConstraintKind`] to its stable `GPU` tag
@@ -114,7 +114,7 @@ pub(crate) fn pack_bending(plan: &BendingUploadPlan) -> Vec<GpuClothBendingConst
 }
 
 /// Packs one authored architecture-layer [`BodyCollider`] into its
-/// byte-compatible [`GpuClothCollider`] mirror, the flat 32-byte `std430`
+/// byte-compatible [`GpuClothCollider`] mirror, the flat 48-byte `std430`
 /// record `cloth_collision.wesl` reads.
 ///
 /// This is the missing host bridge between the `CPU`-golden authoring type
@@ -129,6 +129,9 @@ pub(crate) fn pack_bending(plan: &BendingUploadPlan) -> Vec<GpuClothBendingConst
 ///   `b` = `p1`, `radius` = inflation radius.
 /// - [`BodyCollider::HalfSpace`]: `kind = `[`CLOTH_COLLIDER_HALF_SPACE`], `a` =
 ///   plane normal (need not be unit), `radius` = signed offset, `b` unused.
+/// - [`BodyCollider::Obb`]: `kind = `[`CLOTH_COLLIDER_OBB`], `a` = world center,
+///   `b` = local half-extents, `q` = orientation quaternion `(x, y, z, w)`,
+///   `radius` unused (left zero).
 ///
 /// No value is clamped or normalised here: the projection kernels
 /// (`cloth_project_out_of_sphere` / `cloth_project_out_of_half_space`) reproduce the CPU
@@ -146,6 +149,10 @@ pub(crate) fn pack_collider(collider: &BodyCollider) -> GpuClothCollider {
             by: 0.0,
             bz: 0.0,
             radius,
+            qx: 0.0,
+            qy: 0.0,
+            qz: 0.0,
+            qw: 0.0,
         },
         BodyCollider::Capsule { p0, p1, radius } => GpuClothCollider {
             kind: CLOTH_COLLIDER_CAPSULE,
@@ -156,6 +163,10 @@ pub(crate) fn pack_collider(collider: &BodyCollider) -> GpuClothCollider {
             by: p1.y,
             bz: p1.z,
             radius,
+            qx: 0.0,
+            qy: 0.0,
+            qz: 0.0,
+            qw: 0.0,
         },
         BodyCollider::HalfSpace { normal, offset } => GpuClothCollider {
             kind: CLOTH_COLLIDER_HALF_SPACE,
@@ -166,6 +177,28 @@ pub(crate) fn pack_collider(collider: &BodyCollider) -> GpuClothCollider {
             by: 0.0,
             bz: 0.0,
             radius: offset,
+            qx: 0.0,
+            qy: 0.0,
+            qz: 0.0,
+            qw: 0.0,
+        },
+        BodyCollider::Obb {
+            center,
+            orientation,
+            half_extents,
+        } => GpuClothCollider {
+            kind: CLOTH_COLLIDER_OBB,
+            ax: center.x,
+            ay: center.y,
+            az: center.z,
+            bx: half_extents.x,
+            by: half_extents.y,
+            bz: half_extents.z,
+            radius: 0.0,
+            qx: orientation.x,
+            qy: orientation.y,
+            qz: orientation.z,
+            qw: orientation.w,
         },
     }
 }

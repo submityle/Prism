@@ -64,6 +64,8 @@ const CLOTH_COLLIDER_SPHERE: u32 = 0u;
 const CLOTH_COLLIDER_CAPSULE: u32 = 1u;
 /// Analytic body-collider tag: half-space. Mirrors `BodyCollider::HalfSpace`.
 const CLOTH_COLLIDER_HALF_SPACE: u32 = 2u;
+/// Analytic body-collider tag: oriented bounding box. Mirrors `BodyCollider::Obb`.
+const CLOTH_COLLIDER_OBB: u32 = 3u;
 
 /// One analytic body-collision proxy. A tagged union mirroring the CPU
 /// `prism_render_architecture::cloth::collision::BodyCollider`; `kind` selects
@@ -92,8 +94,18 @@ struct ClothCollider {
     by: f32,
     /// Second point `z`.
     bz: f32,
-    /// Radius (sphere / capsule) or signed offset (half-space).
+    /// Radius (sphere / capsule) or signed offset (half-space); unused for the
+    /// oriented box.
     radius: f32,
+    /// Orientation quaternion `x` (oriented box only), mapping box-local axes
+    /// to world space.
+    qx: f32,
+    /// Orientation quaternion `y`.
+    qy: f32,
+    /// Orientation quaternion `z`.
+    qz: f32,
+    /// Orientation quaternion `w`.
+    qw: f32,
 }
 
 /// One spatial-hash cell header. `head` is the index of the first particle in
@@ -205,6 +217,56 @@ fn cloth_closest_point_on_segment(p0: vec3<f32>, p1: vec3<f32>, pos: vec3<f32>) 
     return p0 + axis * t;
 }
 
+/// Rotates `v` by the quaternion `q = (x, y, z, w)` (assumed unit), mapping
+/// box-local coordinates to world space. Uses glam's scalar factorization
+/// `v*(w*w - b.b) + b*(2*(v.b)) + (b x v)*(2*w)` with `b = q.xyz`, so the
+/// algebra matches the host golden; the SIMD host path differs only by a few
+/// `ULP` of rounding (the body-collision parity suite bounds that gap).
+fn cloth_quat_rotate(q: vec4<f32>, v: vec3<f32>) -> vec3<f32> {
+    let b = q.xyz;
+    let w = q.w;
+    let b2 = dot(b, b);
+    return v * (w * w - b2) + b * (2.0 * dot(v, b)) + cross(b, v) * (2.0 * w);
+}
+
+/// Rotates `v` by the conjugate (inverse, for a unit quaternion) of `q`,
+/// mapping world coordinates into the box's local frame.
+fn cloth_quat_rotate_inv(q: vec4<f32>, v: vec3<f32>) -> vec3<f32> {
+    return cloth_quat_rotate(vec4<f32>(-q.x, -q.y, -q.z, q.w), v);
+}
+
+/// Projects `pos` out of the oriented box `(center, half_extents, orientation)`.
+/// Bit-faithful port of the host `project_out_of_obb`: rotate world -> local,
+/// run the slab test (any `|local| >= he` axis means the point is already
+/// outside the solid box), else push to the face of least penetration
+/// (`he - |local|`) and rotate back. A box whose every half-extent is
+/// non-positive has no interior and is inert.
+fn cloth_project_out_of_obb(
+    pos: vec3<f32>,
+    center: vec3<f32>,
+    half_extents: vec3<f32>,
+    orientation: vec4<f32>,
+) -> vec3<f32> {
+    if half_extents.x <= 0.0 && half_extents.y <= 0.0 && half_extents.z <= 0.0 {
+        return pos;
+    }
+    let local = cloth_quat_rotate_inv(orientation, pos - center);
+    let a = abs(local);
+    if a.x >= half_extents.x || a.y >= half_extents.y || a.z >= half_extents.z {
+        return pos;
+    }
+    let pen = half_extents - a;
+    var local_out = local;
+    if pen.x <= pen.y && pen.x <= pen.z {
+        local_out.x = select(-half_extents.x, half_extents.x, local.x >= 0.0);
+    } else if pen.y <= pen.z {
+        local_out.y = select(-half_extents.y, half_extents.y, local.y >= 0.0);
+    } else {
+        local_out.z = select(-half_extents.z, half_extents.z, local.z >= 0.0);
+    }
+    return center + cloth_quat_rotate(orientation, local_out);
+}
+
 /// Projects `pos` out of one collider. Mirrors `BodyCollider::project`: the
 /// capsule reduces to a sphere about the closest point on its segment axis.
 fn cloth_project_collider(col: ClothCollider, pos: vec3<f32>) -> vec3<f32> {
@@ -217,8 +279,15 @@ fn cloth_project_collider(col: ClothCollider, pos: vec3<f32>) -> vec3<f32> {
         let closest = cloth_closest_point_on_segment(a, b, pos);
         return cloth_project_out_of_sphere(pos, closest, col.radius);
     }
-    // Half-space: `a` is the normal, `radius` is the offset.
-    return cloth_project_out_of_half_space(pos, a, col.radius);
+    if col.kind == CLOTH_COLLIDER_HALF_SPACE {
+        // Half-space: `a` is the normal, `radius` is the offset.
+        return cloth_project_out_of_half_space(pos, a, col.radius);
+    }
+    // Oriented box: `a` is the world center, `b` the local half-extents, and
+    // `(qx, qy, qz, qw)` the orientation quaternion.
+    let he = vec3<f32>(col.bx, col.by, col.bz);
+    let q = vec4<f32>(col.qx, col.qy, col.qz, col.qw);
+    return cloth_project_out_of_obb(pos, a, he, q);
 }
 
 /// Removes up to `friction * depth` of tangential slip from a projected

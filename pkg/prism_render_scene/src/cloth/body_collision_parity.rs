@@ -24,6 +24,7 @@
 //! 的 `scale(1.0 / len_sq.sqrt())` 完全同序；`sqrt`/`fdiv` 在 GPU 与 CPU 上均为
 //! IEEE-754 正确舍入，故 `body_collision_gpu_tests` 的真机输出与黄金也逐位吻合。
 
+use glam::Quat;
 use prism_render_architecture::cloth::collision::{
     resolve_body_collisions, resolve_body_collisions_with_friction, BodyCollider,
 };
@@ -65,7 +66,11 @@ fn wesl_project_out_of_half_space(pos: [f32; 3], normal: [f32; 3], offset: f32) 
         return pos;
     }
     let t = -signed / len_sq;
-    [pos[0] + normal[0] * t, pos[1] + normal[1] * t, pos[2] + normal[2] * t]
+    [
+        pos[0] + normal[0] * t,
+        pos[1] + normal[1] * t,
+        pos[2] + normal[2] * t,
+    ]
 }
 
 /// WESL `cloth_closest_point_on_segment` 的逐位转写：零长线段退化为 `p0`；否则投影
@@ -79,7 +84,89 @@ fn wesl_closest_point_on_segment(p0: [f32; 3], p1: [f32; 3], pos: [f32; 3]) -> [
     let dp = [pos[0] - p0[0], pos[1] - p0[1], pos[2] - p0[2]];
     let t = (dp[0] * axis[0] + dp[1] * axis[1] + dp[2] * axis[2]) / len_sq;
     let t = t.clamp(0.0, 1.0);
-    [p0[0] + axis[0] * t, p0[1] + axis[1] * t, p0[2] + axis[2] * t]
+    [
+        p0[0] + axis[0] * t,
+        p0[1] + axis[1] * t,
+        p0[2] + axis[2] * t,
+    ]
+}
+
+/// WESL `cloth_quat_rotate` 的逐位转写：按单位四元数 `q = (x, y, z, w)` 旋转 `v`，
+/// 用 glam 标量因式 `v*(w*w - b.b) + b*(2*(v.b)) + (b x v)*(2*w)`（`b = q.xyz`）。
+/// 本机黄金走 glam 的 `neon` SIMD 路径，代数同式但舍入次序不同，故 OBB 路径以带
+/// 容差断言比对（见 `assert_body_close`），而非 `to_bits` 逐位。
+fn wesl_quat_rotate(q: [f32; 4], v: [f32; 3]) -> [f32; 3] {
+    let (bx, by, bz, w) = (q[0], q[1], q[2], q[3]);
+    let b2 = bx * bx + by * by + bz * bz;
+    let vb = v[0] * bx + v[1] * by + v[2] * bz;
+    let cx = by * v[2] - bz * v[1];
+    let cy = bz * v[0] - bx * v[2];
+    let cz = bx * v[1] - by * v[0];
+    let s = w * w - b2;
+    let t = 2.0 * vb;
+    let tw = 2.0 * w;
+    [
+        v[0] * s + bx * t + cx * tw,
+        v[1] * s + by * t + cy * tw,
+        v[2] * s + bz * t + cz * tw,
+    ]
+}
+
+/// WESL `cloth_quat_rotate_inv` 的逐位转写：按 `q` 的共轭（单位四元数即逆）旋转，
+/// 把世界坐标带入盒体局部系。
+fn wesl_quat_rotate_inv(q: [f32; 4], v: [f32; 3]) -> [f32; 3] {
+    wesl_quat_rotate([-q[0], -q[1], -q[2], q[3]], v)
+}
+
+/// WESL `cloth_project_out_of_obb` 的逐位转写：旋入局部系做 slab 测试（任一轴
+/// `|local| >= he` 即已在实心盒外），否则沿最小穿透面（`he - |local|`）顶出再旋回。
+/// 所有半长非正的盒无内部、惰性直通。
+fn wesl_project_out_of_obb(
+    pos: [f32; 3],
+    center: [f32; 3],
+    half_extents: [f32; 3],
+    orientation: [f32; 4],
+) -> [f32; 3] {
+    if half_extents[0] <= 0.0 && half_extents[1] <= 0.0 && half_extents[2] <= 0.0 {
+        return pos;
+    }
+    let delta = [pos[0] - center[0], pos[1] - center[1], pos[2] - center[2]];
+    let local = wesl_quat_rotate_inv(orientation, delta);
+    let a = [local[0].abs(), local[1].abs(), local[2].abs()];
+    if a[0] >= half_extents[0] || a[1] >= half_extents[1] || a[2] >= half_extents[2] {
+        return pos;
+    }
+    let pen = [
+        half_extents[0] - a[0],
+        half_extents[1] - a[1],
+        half_extents[2] - a[2],
+    ];
+    let mut local_out = local;
+    if pen[0] <= pen[1] && pen[0] <= pen[2] {
+        local_out[0] = if local[0] >= 0.0 {
+            half_extents[0]
+        } else {
+            -half_extents[0]
+        };
+    } else if pen[1] <= pen[2] {
+        local_out[1] = if local[1] >= 0.0 {
+            half_extents[1]
+        } else {
+            -half_extents[1]
+        };
+    } else {
+        local_out[2] = if local[2] >= 0.0 {
+            half_extents[2]
+        } else {
+            -half_extents[2]
+        };
+    }
+    let world = wesl_quat_rotate(orientation, local_out);
+    [
+        center[0] + world[0],
+        center[1] + world[1],
+        center[2] + world[2],
+    ]
 }
 
 /// WESL `cloth_project_collider` 的逐位转写：镜像 `BodyCollider::project` 的变体分派，
@@ -90,16 +177,23 @@ fn wesl_project_collider(col: &BodyCollider, pos: [f32; 3]) -> [f32; 3] {
             wesl_project_out_of_sphere(pos, [center.x, center.y, center.z], radius)
         }
         BodyCollider::Capsule { p0, p1, radius } => {
-            let closest = wesl_closest_point_on_segment(
-                [p0.x, p0.y, p0.z],
-                [p1.x, p1.y, p1.z],
-                pos,
-            );
+            let closest =
+                wesl_closest_point_on_segment([p0.x, p0.y, p0.z], [p1.x, p1.y, p1.z], pos);
             wesl_project_out_of_sphere(pos, closest, radius)
         }
         BodyCollider::HalfSpace { normal, offset } => {
             wesl_project_out_of_half_space(pos, [normal.x, normal.y, normal.z], offset)
         }
+        BodyCollider::Obb {
+            center,
+            orientation,
+            half_extents,
+        } => wesl_project_out_of_obb(
+            pos,
+            [center.x, center.y, center.z],
+            [half_extents.x, half_extents.y, half_extents.z],
+            [orientation.x, orientation.y, orientation.z, orientation.w],
+        ),
     }
 }
 
@@ -111,7 +205,11 @@ fn wesl_resolve_body(particles: &[ClothParticle], colliders: &[BodyCollider]) ->
     particles
         .iter()
         .map(|particle| {
-            let mut pos = [particle.position.x, particle.position.y, particle.position.z];
+            let mut pos = [
+                particle.position.x,
+                particle.position.y,
+                particle.position.z,
+            ];
             if particle.inverse_mass <= 0.0 {
                 return pos;
             }
@@ -415,7 +513,11 @@ fn wesl_damp_tangential_slip(
     }
     let depth = depth_sq.sqrt();
     let inv = 1.0_f32 / depth;
-    let normal = [correction[0] * inv, correction[1] * inv, correction[2] * inv];
+    let normal = [
+        correction[0] * inv,
+        correction[1] * inv,
+        correction[2] * inv,
+    ];
     let disp = [
         projected[0] - prev[0],
         projected[1] - prev[1],
@@ -459,7 +561,11 @@ fn wesl_resolve_body_with_friction(
         .iter()
         .enumerate()
         .map(|(i, particle)| {
-            let mut pos = [particle.position.x, particle.position.y, particle.position.z];
+            let mut pos = [
+                particle.position.x,
+                particle.position.y,
+                particle.position.z,
+            ];
             if particle.inverse_mass <= 0.0 {
                 return pos;
             }
@@ -670,4 +776,107 @@ fn friction_jittered_particles_and_colliders_bit_for_bit() {
         let mu = (round as f32 / 47.0).clamp(0.0, 1.0);
         assert_body_friction_bit_exact(&particles, &prev, &colliders, mu);
     }
+}
+
+/// OBB 四元数旋转在手写标量式（GPU/WESL 的逐词转写）与黄金 glam（本机 `neon` SIMD）
+/// 之间代数等价、仅差几个 `ULP`，无法 `to_bits` 逐位，故按分量绝对误差 `<= eps` 比对，
+/// 同时校验钉住粒子的直通字段不被改动。恒等四元数时标量式塌缩为 `v*(1-0)`，与黄金完全
+/// 相同，故轴对齐用例取极小 `eps`；旋转用例取 `1e-5`。
+#[track_caller]
+fn assert_body_close(particles: &[ClothParticle], colliders: &[BodyCollider], eps: f32) {
+    let mut golden = particles.to_vec();
+    resolve_body_collisions(&mut golden, colliders);
+    let wesl = wesl_resolve_body(particles, colliders);
+    assert_eq!(wesl.len(), golden.len());
+    for (i, (w, g)) in wesl.iter().zip(golden.iter()).enumerate() {
+        assert!(
+            (w[0] - g.position.x).abs() <= eps,
+            "particle {i}: x 偏离: wesl={} golden={}",
+            w[0],
+            g.position.x
+        );
+        assert!(
+            (w[1] - g.position.y).abs() <= eps,
+            "particle {i}: y 偏离: wesl={} golden={}",
+            w[1],
+            g.position.y
+        );
+        assert!(
+            (w[2] - g.position.z).abs() <= eps,
+            "particle {i}: z 偏离: wesl={} golden={}",
+            w[2],
+            g.position.z
+        );
+    }
+}
+
+/// 轴对齐盒（恒等朝向）内部点顶到最近面：恒等四元数下旋转为恒等，WESL 与黄金逐位一致，
+/// 故取极小 `eps`。
+#[test]
+fn obb_axis_aligned_interior_pushed_to_nearest_face() {
+    let colliders = [BodyCollider::Obb {
+        center: Vec3::new(0.0, 0.0, 0.0),
+        orientation: Quat::IDENTITY,
+        half_extents: Vec3::new(1.0, 1.0, 1.0),
+    }];
+    // 距 +x 面最近（穿透 0.4 最小），黄金应把 x 顶到 +1。
+    let particles = [free(0.6, 0.1, -0.1)];
+    let mut golden = particles.to_vec();
+    resolve_body_collisions(&mut golden, &colliders);
+    assert!(
+        (golden[0].position.x - 1.0).abs() <= 1.0e-6,
+        "黄金应把内部点顶到 +x 面: {}",
+        golden[0].position.x
+    );
+    assert_body_close(&particles, &colliders, 1.0e-6);
+}
+
+/// 绕 Y 轴旋转 45° 的盒：内部点顶出一个局部面，验证四元数旋入/旋出与黄金 glam 带容差一致。
+#[test]
+fn obb_oriented_interior_matches_golden_within_tolerance() {
+    let orientation = Quat::from_axis_angle(glam::Vec3::Y, core::f32::consts::FRAC_PI_4);
+    let colliders = [BodyCollider::Obb {
+        center: Vec3::new(0.5, -0.25, 1.0),
+        orientation,
+        half_extents: Vec3::new(1.5, 0.75, 2.0),
+    }];
+    // 盒中心附近的几个自由点，均落在实心盒内部，强制走顶出分支。
+    let particles = [
+        free(0.5, -0.25, 1.0),
+        free(0.7, -0.1, 1.2),
+        free(0.2, -0.4, 0.6),
+    ];
+    let mut golden = particles.to_vec();
+    resolve_body_collisions(&mut golden, &colliders);
+    // 确认内部点确实被投影（而非恒等直通），这样容差断言才有意义。
+    let moved = (golden[0].position.x - 0.5).abs()
+        + (golden[0].position.y + 0.25).abs()
+        + (golden[0].position.z - 1.0).abs();
+    assert!(moved > 1.0e-3, "内部点应被顶出，位移={moved}");
+    assert_body_close(&particles, &colliders, 1.0e-5);
+}
+
+/// 盒外点原样返回：两条路径都早退 `pos`，与朝向无关，故逐位一致。
+#[test]
+fn obb_exterior_point_untouched() {
+    let orientation = Quat::from_axis_angle(glam::Vec3::new(0.3, 1.0, 0.2).normalize(), 0.9);
+    let colliders = [BodyCollider::Obb {
+        center: Vec3::new(0.0, 0.0, 0.0),
+        orientation,
+        half_extents: Vec3::new(0.5, 0.5, 0.5),
+    }];
+    let particles = [free(5.0, -4.0, 3.0)];
+    assert_body_close(&particles, &colliders, 0.0);
+}
+
+/// 所有半长非正的盒无内部，惰性直通，与朝向无关。
+#[test]
+fn obb_all_nonpositive_half_extents_inert() {
+    let colliders = [BodyCollider::Obb {
+        center: Vec3::new(1.0, 2.0, 3.0),
+        orientation: Quat::from_axis_angle(glam::Vec3::X, 0.5),
+        half_extents: Vec3::new(0.0, -1.0, -2.0),
+    }];
+    let particles = [free(1.0, 2.0, 3.0)];
+    assert_body_close(&particles, &colliders, 0.0);
 }

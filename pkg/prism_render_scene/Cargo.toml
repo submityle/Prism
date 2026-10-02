@@ -35,6 +35,9 @@ prism_render_visibility = { path = "../prism_render_visibility" }
 # Real-device GPU parity tests bind the water compute kernels on the same
 # `wgpu` 30 the render world uses; feature-unified with `bevy_render`.
 wgpu = { version = "30", default-features = false, features = ["wgsl", "metal"] }
+# Cloth OBB body-collision parity constructs `BodyCollider::Obb` orientations,
+# whose field is a `glam::Quat`; pin the same glam the architecture layer uses.
+glam = { version = "0.33.2", default-features = false }
 
 [lints]
 workspace = true

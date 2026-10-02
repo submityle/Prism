@@ -62,6 +62,15 @@ impl WeslCollider {
                 b: [0.0; 3],
                 radius: offset,
             },
+            // The CCD sweep kernel (`cloth_ccd.wesl`) ships only sphere /
+            // capsule / half-space time-of-impact solvers; it has no oriented-box
+            // TOI, and this parity suite never constructs an OBB collider, so the
+            // arm is genuinely unreachable rather than silently mis-packed.
+            BodyCollider::Obb { .. } => {
+                unreachable!(
+                    "CCD kernel has no OBB TOI solver; parity suite never builds an OBB collider"
+                )
+            }
         }
     }
 }
@@ -460,7 +469,10 @@ fn assert_ccd_bit_exact(
     );
 
     // WESL 镜像。
-    let wcol: Vec<WeslCollider> = colliders.iter().map(|&c| WeslCollider::from_body(c)).collect();
+    let wcol: Vec<WeslCollider> = colliders
+        .iter()
+        .map(|&c| WeslCollider::from_body(c))
+        .collect();
     let count = initial.len().min(prev.len());
     for i in 0..count {
         let (pos, im, vel) = initial[i];
@@ -787,13 +799,29 @@ fn jittered_particles_and_colliders_bit_for_bit() {
                 offset: next() * 2.0 - 1.0,
             },
         ];
-        let prev = [Vec3::new(next() * 6.0 - 3.0, next() * 6.0 - 3.0, next() * 6.0 - 3.0)];
+        let prev = [Vec3::new(
+            next() * 6.0 - 3.0,
+            next() * 6.0 - 3.0,
+            next() * 6.0 - 3.0,
+        )];
         let curr = Vec3::new(next() * 6.0 - 3.0, next() * 6.0 - 3.0, next() * 6.0 - 3.0);
-        let vel = Vec3::new(next() * 10.0 - 5.0, next() * 10.0 - 5.0, next() * 10.0 - 5.0);
+        let vel = Vec3::new(
+            next() * 10.0 - 5.0,
+            next() * 10.0 - 5.0,
+            next() * 10.0 - 5.0,
+        );
         let initial = [free(curr, vel)];
         let skin = next() * 3e-3;
         let restitution = next();
         let friction = next();
-        assert_ccd_bit_exact(&initial, &prev, &colliders, skin, restitution, 1.0 / 60.0, friction);
+        assert_ccd_bit_exact(
+            &initial,
+            &prev,
+            &colliders,
+            skin,
+            restitution,
+            1.0 / 60.0,
+            friction,
+        );
     }
 }
