@@ -15,6 +15,8 @@
 //!   by BC1 and the colour half of BC3.
 //! * [`alpha_block`] -- the 8-byte single-channel + 3-bit-index block shared by
 //!   BC4, the alpha half of BC3, and both channels of BC5.
+//! * [`snorm_block`] -- the signed BC4/BC5 (`SNORM`) single-channel block,
+//!   decoding to `i8` for signed tangent-space data.
 //! * [`formats`] -- the public per-format decoders that compose the two.
 //! * [`bc7`] -- the standalone BC7 single-subset (`RGBA`) block decoder.
 //! * [`bc6h`] -- the BC6H HDR single-subset (`RGB` half-float) decoder.
@@ -45,6 +47,7 @@ mod color_block;
 mod encode;
 mod etc2;
 mod formats;
+mod snorm_block;
 mod source;
 
 pub use bc6h::{
@@ -61,5 +64,8 @@ pub use encode::{
     encode_etc2_rgb8,
 };
 pub use etc2::{decode_etc2_rgb8, etc2_rgb8_mode, Etc2Error, Etc2Mode};
-pub use formats::{decode_bc1, decode_bc2, decode_bc3, decode_bc4, decode_bc5};
+pub use formats::{
+    decode_bc1, decode_bc2, decode_bc3, decode_bc4, decode_bc4_signed, decode_bc5,
+    decode_bc5_signed,
+};
 pub use source::{BcFormat, BcSourceError, BcTexelSource};

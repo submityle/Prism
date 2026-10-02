@@ -17,12 +17,16 @@
 //! * Channel mapping: BC4 -> value in `R`, `G=B=0`, `A=255`; BC5 -> channel 0
 //!   in `R`, channel 1 in `G`, `B=0`, `A=255` (callers reconstruct normal `Z`).
 //! * Block sizes: BC1/BC4 are 8 bytes; BC2/BC3/BC5 are 16 bytes.
+//! * Signed variants (`BC4_SNORM`/`BC5_SNORM`) decode to raw `i8` channel
+//!   arrays in `-127..=127` rather than `RGBA8`, since signed normalized
+//!   data has no natural opaque-alpha packing.
 //!
 //! # References
 //! * Khronos Data Format Spec 1.3 (S3TC/RGTC); Vulkan `VK_FORMAT_BC*`.
 
 use super::alpha_block::decode_channel_block;
 use super::color_block::decode_color_block;
+use super::snorm_block::decode_signed_channel_block;
 
 /// Decode one 8-byte BC1 block to 16 `RGBA8` texels (1-bit punch-through alpha).
 #[must_use]
@@ -105,6 +109,38 @@ pub fn decode_bc5(block: &[u8; 16]) -> [[u8; 4]; 16] {
     out
 }
 
+/// Decode one 8-byte `BC4_SNORM` block to 16 signed `i8` channel values
+/// (row-major, texel `t = y*4 + x`), each in `-127..=127`.
+///
+/// Signed sibling of [`decode_bc4`]; see [`super::snorm_block`] for the signed
+/// endpoint interpretation (`-128` remapped to `-127`, `-127`/`127` six-value
+/// terminals).
+#[must_use]
+pub fn decode_bc4_signed(block: &[u8; 8]) -> [i8; 16] {
+    decode_signed_channel_block(block)
+}
+
+/// Decode one 16-byte `BC5_SNORM` block to 16 signed `[R, G]` texels, each
+/// channel in `-127..=127` (signed tangent-space normal `XY`).
+///
+/// Signed sibling of [`decode_bc5`]: the first 8 bytes are the `R` channel and
+/// the last 8 the `G` channel, each a signed BC4 block.
+#[must_use]
+pub fn decode_bc5_signed(block: &[u8; 16]) -> [[i8; 2]; 16] {
+    let mut ch0 = [0u8; 8];
+    ch0.copy_from_slice(&block[0..8]);
+    let mut ch1 = [0u8; 8];
+    ch1.copy_from_slice(&block[8..16]);
+
+    let r = decode_signed_channel_block(&ch0);
+    let g = decode_signed_channel_block(&ch1);
+    let mut out = [[0i8; 2]; 16];
+    for (t, texel) in out.iter_mut().enumerate() {
+        *texel = [r[t], g[t]];
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,7 +182,10 @@ mod tests {
         block[10] = 0xFF;
         block[11] = 0xFF;
         let out = decode_bc3(&block);
-        assert!(out.iter().all(|t| t[3] == 255), "alpha not uniform: {out:?}");
+        assert!(
+            out.iter().all(|t| t[3] == 255),
+            "alpha not uniform: {out:?}"
+        );
     }
 
     #[test]
@@ -161,7 +200,7 @@ mod tests {
         // Alpha nibbles: texel 0 -> 0x0 (->0), texel 1 -> 0xF (->255); rest 0.
         let mut block = [0u8; 16];
         block[0] = 0xF0; // nibble0=0x0, nibble1=0xF
-        // opaque white colour block (c0 > c1, indices 0).
+                         // opaque white colour block (c0 > c1, indices 0).
         block[8] = 0xFF;
         block[9] = 0xFF;
         let out = decode_bc2(&block);
@@ -179,5 +218,27 @@ mod tests {
         block[9] = 50; // ch1 r1 (flat 50)
         let out = decode_bc5(&block);
         assert!(out.iter().all(|t| t == &[200, 50, 0, 255]));
+    }
+
+    #[test]
+    fn bc4_signed_flat_block_decodes_endpoint() {
+        // r0 == r1 == -40 (six-value branch, non-terminal indices = -40).
+        let mut block = [0u8; 8];
+        block[0] = u8::from_le_bytes((-40i8).to_le_bytes());
+        block[1] = u8::from_le_bytes((-40i8).to_le_bytes());
+        let out = decode_bc4_signed(&block);
+        assert!(out.iter().all(|&v| v == -40));
+    }
+
+    #[test]
+    fn bc5_signed_splits_r_and_g_channels() {
+        // Flat R = 60, flat G = -90; first 8 bytes = R block, last 8 = G block.
+        let mut block = [0u8; 16];
+        block[0] = 60;
+        block[1] = 60;
+        block[8] = u8::from_le_bytes((-90i8).to_le_bytes());
+        block[9] = u8::from_le_bytes((-90i8).to_le_bytes());
+        let out = decode_bc5_signed(&block);
+        assert!(out.iter().all(|t| t == &[60, -90]));
     }
 }
