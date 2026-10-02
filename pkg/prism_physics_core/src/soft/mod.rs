@@ -27,6 +27,7 @@ pub mod collision;
 pub mod constraint;
 pub mod damage;
 pub mod particle;
+pub mod rigid_coupling;
 pub mod solver;
 
 pub use aero::{
@@ -59,6 +60,10 @@ pub use damage::{
     TearingParams,
 };
 pub use particle::{ParticleHandle, ParticleStorage};
+pub use rigid_coupling::{
+    couple_cloth_to_rigid, gather_rigid_proxies, Aabb as CouplingAabb, ClothRigidCouplingConfig,
+    CouplingReport, RigidProxy,
+};
 pub use solver::{
     SelfCollisionParams, SoftContacts, SoftSolver, SoftSolverConfig, VirtualSelfCollisionParams,
 };

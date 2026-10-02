@@ -8,7 +8,9 @@ use crate::collider::ShapeRegistry;
 use crate::config::WorldConfig;
 use crate::events::{ContactEventTracker, PhysicsEvent};
 use crate::joint::{JointDesc, JointHandle, JointStorage};
+use crate::math::scalar::Real;
 use crate::pipeline::detect_contacts;
+use crate::soft::rigid_coupling::{couple_cloth_to_rigid, ClothRigidCouplingConfig, CouplingReport};
 use crate::state::body::BodyDesc;
 use crate::state::handle::BodyHandle;
 use crate::state::storage::BodyStorage;
@@ -28,6 +30,9 @@ pub struct PhysicsWorld {
     /// Frame-to-frame contact/trigger event tracker. Updated by
     /// [`PhysicsWorld::drain_contact_events`].
     pub contact_events: ContactEventTracker,
+    /// Opt-in configuration for the cloth-rigid two-way coupling stage.
+    /// Defaults to disabled so rigid-only worlds stay bit-identical.
+    pub cloth_coupling: ClothRigidCouplingConfig,
 }
 
 impl PhysicsWorld {
@@ -40,6 +45,7 @@ impl PhysicsWorld {
             joints: JointStorage::new(),
             config,
             contact_events: ContactEventTracker::new(),
+            cloth_coupling: ClothRigidCouplingConfig::disabled(),
         }
     }
 
@@ -58,6 +64,28 @@ impl PhysicsWorld {
     /// Spawns a joint described by `desc`, returning its handle.
     pub fn spawn_joint(&mut self, desc: JointDesc) -> JointHandle {
         self.joints.insert(desc)
+    }
+
+    /// Runs one substep of the opt-in cloth↔rigid two-way coupling stage.
+    ///
+    /// `positions` is a soft body's particle position column (corrected in
+    /// place) and `inverse_masses` its index-aligned inverse-mass column; `dt`
+    /// is the substep. The soft particles and the rigid proxies they rest
+    /// against exchange a mass-weighted push, and each rigid body receives the
+    /// linear reaction impulse the particles exerted on it. When
+    /// [`cloth_coupling`](Self::cloth_coupling) is disabled (the default) this
+    /// is a no-op and the rigid-only path is untouched, so existing goldens stay
+    /// bit-identical.
+    ///
+    /// Returns a [`CouplingReport`] summarising the pass (participating proxy
+    /// count, bodies written back, and the total applied impulse).
+    pub fn resolve_cloth_coupling(
+        &mut self,
+        positions: &mut [Vec3],
+        inverse_masses: &[Real],
+        dt: Real,
+    ) -> CouplingReport {
+        couple_cloth_to_rigid(self, positions, inverse_masses, dt)
     }
 
     /// Detects the current contacts and diffs them against the previous call to

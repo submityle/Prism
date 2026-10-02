@@ -156,6 +156,10 @@ pub use soft::damage::{
     PlasticParams, TearReport, TearingParams,
 };
 pub use soft::particle::{ParticleHandle, ParticleStorage};
+pub use soft::rigid_coupling::{
+    couple_cloth_to_rigid, gather_rigid_proxies, ClothRigidCouplingConfig, CouplingReport,
+    RigidProxy,
+};
 pub use soft::solver::{
     SelfCollisionParams, SoftContacts, SoftSolver, SoftSolverConfig, VirtualSelfCollisionParams,
 };
