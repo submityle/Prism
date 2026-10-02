@@ -45,6 +45,10 @@ members = [
   "pkg/prism_audio_spatial",
   # Prism next-generation audio engine HRTF binaural layer (SOFA/AES69 HRIR datasets, ITD-aligned interpolation, partitioned convolution, near-field ILD/parallax).
   "pkg/prism_audio_hrtf",
+  # Prism next-generation audio engine content/authoring model (Event/Action/RTPC/State/Switch/Container).
+  "pkg/prism_audio_content",
+  # Prism next-generation audio engine output delivery layer (downmix matrix/bass management/delivery profiles).
+  "pkg/prism_audio_output",
   # Prism Loom: next-generation declarative UI/scene notation.
   "pkg/prism_ui_reactive",
   "pkg/prism_ui_layout",
