@@ -8,6 +8,7 @@ pub mod restir_gi;
 pub mod restir_gi_resolve;
 pub mod regir;
 pub mod regir_resolve;
+pub mod restir_spatial;
 
 use crate::ray_scene::TraceBackend;
 
