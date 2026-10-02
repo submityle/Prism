@@ -26,10 +26,14 @@
 
 mod eviction;
 mod fingerprint;
+mod persist;
 mod warm_enumerate;
 mod warm_set;
 
 pub use eviction::{AdmitOutcome, LruPsoCache};
+pub use persist::{
+    PersistError, PersistLoadError, PersistedPipeline, PersistedPsoCache,
+};
 pub use fingerprint::{DeviceFingerprint, FingerprintMismatch, GraphicsBackend};
 pub use warm_enumerate::{PackageWarmSpec, WarmEnumerationError};
 pub use warm_set::{WarmPriority, WarmRequest, WarmSetPlan, WarmSetPlanner};

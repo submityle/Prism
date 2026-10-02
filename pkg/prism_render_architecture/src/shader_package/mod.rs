@@ -32,8 +32,9 @@ pub use registry::{RegisterError, RegistryEntry, ShaderPackageRegistry};
 pub use state::TransitionError;
 pub use pso_cache::{
     AdmitOutcome, DeviceFingerprint, FingerprintMismatch, GraphicsBackend, LruPsoCache,
-    PackageWarmSpec, PipelineStateHash, PsoCacheKey, WarmEnumerationError, WarmPriority,
-    WarmRequest, WarmSetPlan, WarmSetPlanner,
+    PackageWarmSpec, PersistError, PersistLoadError, PersistedPipeline, PersistedPsoCache,
+    PipelineStateHash, PsoCacheKey, WarmEnumerationError, WarmPriority, WarmRequest, WarmSetPlan,
+    WarmSetPlanner,
 };
 
 /// Stable, human-readable identifier for a shader package.
