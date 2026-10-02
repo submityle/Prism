@@ -106,6 +106,7 @@ mod obb_obb_manifold;
 mod obb_obb_manifold_gpu;
 mod sphere;
 mod sphere_triangle;
+mod sphere_triangle_gpu;
 
 pub use capsule::{cpu_capsule_narrowphase, Capsule, SphereCapsulePair};
 pub use capsule_capsule::{cpu_capsule_capsule_narrowphase, CapsuleCapsulePair};
@@ -136,3 +137,4 @@ pub use obb_obb_gpu::GpuObbObbNarrowphase;
 pub use obb_obb_manifold::cpu_obb_obb_manifold;
 pub use obb_obb_manifold_gpu::GpuObbObbManifoldNarrowphase;
 pub use sphere_triangle::{cpu_sphere_triangle_narrowphase, SphereTrianglePair, Triangle};
+pub use sphere_triangle_gpu::GpuSphereTriangleNarrowphase;
