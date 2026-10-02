@@ -31,6 +31,16 @@
 //! - [`noise::NoiseNode`] -- deterministic white/pink/brown generator
 //!   ([`noise::NoiseColor`]) built on a reproducible `xorshift64`/`SplitMix64`
 //!   stream with Paul-Kellet pink shaping and a leaky-integrator brown filter.
+//! - [`chaotic_oscillator::ChaoticOscillatorNode`] -- chaotic (logistic-map)
+//!   oscillator: a normalized phase advances at `frequency` and iterates the
+//!   logistic map `x -> r * x * (1 - x)` once per cycle, linearly
+//!   interpolating successive iterates so the output is piecewise-linear and
+//!   click-free. The `chaos` control selects the map rate `r`, morphing the
+//!   timbre from a steady period-two subharmonic tone to broadband,
+//!   noise-like deterministic chaos. Unlike [`noise`], whose stream is
+//!   stochastic and unpitched, this source is deterministic and pitched;
+//!   unlike the fixed waveshape of [`oscillator`], its per-cycle shape
+//!   evolves with the orbit.
 //! - [`sample_player::SamplePlayerNode`] -- pitch/rate-resampling PCM player with
 //!   [`sample_player::LoopMode`] loop points and selectable
 //!   [`sample_player::Interpolation`] (linear / Catmull-Rom).
@@ -363,6 +373,7 @@ pub mod blown_pipe;
 pub mod bowed_string;
 pub mod conical_reed;
 pub mod brass_lip_reed;
+pub mod chaotic_oscillator;
 pub mod dsf_oscillator;
 pub mod dust;
 pub mod fm_operator;
@@ -399,6 +410,7 @@ pub use bell::{BellNode, BellParams};
 pub use blown_pipe::{BlownPipeNode, BlownPipeParams, NUM_HARMONICS};
 pub use bowed_string::{BowedStringNode, BowedStringParams};
 pub use brass_lip_reed::{BrassLipReedNode, BrassLipReedParams};
+pub use chaotic_oscillator::{ChaoticOscillatorNode, ChaoticOscillatorParams};
 pub use conical_reed::{ConicalReedNode, ConicalReedParams};
 pub use dsf_oscillator::{DsfOscillatorNode, DsfOscillatorParams};
 pub use dust::{DustNode, DustParams, Polarity};
