@@ -75,6 +75,32 @@ impl Rng {
     }
 }
 
+/// An abstract source of uniform samples in the half-open interval `[0, 1)`.
+///
+/// Decoupling the sampling helpers from a concrete generator lets the same
+/// Malley/concentric warps serve two very different drivers:
+///
+/// * the pseudo-random [`Rng`] (`PCG`-`XSH`-`RR`), used for decorrelated
+///   fallback dimensions and for tests, and
+/// * a low-discrepancy path sampler (Owen-scrambled Sobol / scrambled Halton)
+///   that feeds stratified, quasi-Monte-Carlo (`QMC`) dimensions into the first
+///   few bounces where they reduce variance the most.
+///
+/// Every helper that previously took `&mut Rng` is generic over this trait, so
+/// a path driven by a `QMC` sequence keeps the sequence's good coverage instead
+/// of destroying it by routing through an unrelated generator.
+pub trait SampleSource {
+    /// Draws the next uniform sample in `[0, 1)` and advances the source.
+    fn next_f32(&mut self) -> f32;
+}
+
+impl SampleSource for Rng {
+    #[inline]
+    fn next_f32(&mut self) -> f32 {
+        Rng::next_f32(self)
+    }
+}
+
 /// A single stratified 2D sample in the unit square `[0, 1)^2`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Sample2 {
@@ -90,7 +116,7 @@ pub struct Sample2 {
 /// the cell, which drives down variance relative to purely random sampling
 /// while remaining unbiased. Returns an empty vector when `dim` is zero.
 #[must_use]
-pub fn stratified_grid(dim: u32, rng: &mut Rng) -> Vec<Sample2> {
+pub fn stratified_grid(dim: u32, src: &mut impl SampleSource) -> Vec<Sample2> {
     let mut out = Vec::new();
     if dim == 0 {
         return out;
@@ -98,8 +124,8 @@ pub fn stratified_grid(dim: u32, rng: &mut Rng) -> Vec<Sample2> {
     let inv = 1.0 / (dim as f32);
     for sy in 0..dim {
         for sx in 0..dim {
-            let jx = rng.next_f32();
-            let jy = rng.next_f32();
+            let jx = src.next_f32();
+            let jy = src.next_f32();
             out.push(Sample2 {
                 x: ((sx as f32) + jx) * inv,
                 y: ((sy as f32) + jy) * inv,
@@ -130,11 +156,11 @@ pub fn orthonormal_basis(normal: Vec3) -> (Vec3, Vec3) {
 ///
 /// Returns the `(x, y)` offset and the squared radius `x^2 + y^2 <= 1`. Falls
 /// back to the origin after [`MAX_REJECT`] rejected attempts.
-fn concentric_disk_rejection(rng: &mut Rng) -> (f32, f32, f32) {
+fn concentric_disk_rejection(src: &mut impl SampleSource) -> (f32, f32, f32) {
     let mut attempts = 0;
     loop {
-        let x = 2.0 * rng.next_f32() - 1.0;
-        let y = 2.0 * rng.next_f32() - 1.0;
+        let x = 2.0 * src.next_f32() - 1.0;
+        let y = 2.0 * src.next_f32() - 1.0;
         let r2 = x * x + y * y;
         if r2 > 0.0 && r2 <= 1.0 {
             return (x, y, r2);
@@ -154,8 +180,8 @@ fn concentric_disk_rejection(rng: &mut Rng) -> (f32, f32, f32) {
 /// Falls back to the disk centre `(0, 0)` after [`MAX_REJECT`] rejected draws,
 /// bounding worst-case work without introducing bias in practice.
 #[must_use]
-pub fn uniform_disk(rng: &mut Rng) -> (f32, f32) {
-    let (x, y, _r2) = concentric_disk_rejection(rng);
+pub fn uniform_disk(src: &mut impl SampleSource) -> (f32, f32) {
+    let (x, y, _r2) = concentric_disk_rejection(src);
     (x, y)
 }
 
@@ -206,10 +232,10 @@ pub fn cosine_hemisphere_from_sample(sample: Sample2, normal: Vec3) -> Hemispher
 /// the cosine-hemisphere math (Shirley-Chiu concentric map plus Malley's
 /// method). The returned `pdf` is `cos(theta) / pi`.
 #[must_use]
-pub fn cosine_sample_hemisphere(normal: Vec3, rng: &mut Rng) -> HemisphereSample {
+pub fn cosine_sample_hemisphere(normal: Vec3, src: &mut impl SampleSource) -> HemisphereSample {
     let sample = Sample2 {
-        x: rng.next_f32(),
-        y: rng.next_f32(),
+        x: src.next_f32(),
+        y: src.next_f32(),
     };
     cosine_hemisphere_from_sample(sample, normal)
 }
