@@ -596,9 +596,99 @@ pub fn boiling_filter_gi(tile: &mut [GiReservoir], filter_strength: f32) {
     }
 }
 
+/// Frame-level boiling-filter pass over a resolved GI reservoir framebuffer.
+///
+/// The GI twin of [`super::restir_di::boiling_filter_di_framebuffer`].
+/// `reservoirs` is the row-major `width x height` grid of **finalized**
+/// per-pixel GI reservoirs from [`super::restir_gi_resolve::resolve_gi`]; the
+/// filter runs independently per `tile_size x tile_size` block (edge tiles
+/// clipped), matching the `GPU` twin's one-workgroup-per-tile launch.
+///
+/// A no-op when disabled (`filter_strength <= 0` / non-finite), when
+/// `tile_size == 0`, or when `reservoirs.len() < width * height`. See
+/// [`boiling_filter_gi`] for the per-tile math.
+pub fn boiling_filter_gi_framebuffer(
+    reservoirs: &mut [GiReservoir],
+    width: usize,
+    height: usize,
+    tile_size: usize,
+    filter_strength: f32,
+) {
+    if filter_strength <= 0.0
+        || !filter_strength.is_finite()
+        || tile_size == 0
+        || width == 0
+        || height == 0
+        || reservoirs.len() < width * height
+    {
+        return;
+    }
+
+    let mut scratch: Vec<GiReservoir> = Vec::with_capacity(tile_size * tile_size);
+    let mut ty = 0;
+    while ty < height {
+        let y_end = (ty + tile_size).min(height);
+        let mut tx = 0;
+        while tx < width {
+            let x_end = (tx + tile_size).min(width);
+
+            scratch.clear();
+            for y in ty..y_end {
+                let row = y * width;
+                scratch.extend_from_slice(&reservoirs[row + tx..row + x_end]);
+            }
+            boiling_filter_gi(&mut scratch, filter_strength);
+            let mut k = 0;
+            for y in ty..y_end {
+                let row = y * width;
+                for x in tx..x_end {
+                    reservoirs[row + x] = scratch[k];
+                    k += 1;
+                }
+            }
+
+            tx = x_end;
+        }
+        ty = y_end;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn boiling_filter_gi_framebuffer_is_per_tile() {
+        let (w, h, ts) = (16usize, 16usize, 8usize);
+        let mut fb: Vec<GiReservoir> = (0..w * h).map(|_| gi_with_w(1.0)).collect();
+        fb[0] = gi_with_w(200.0);
+        boiling_filter_gi_framebuffer(&mut fb, w, h, ts, DEFAULT_BOILING_FILTER_STRENGTH);
+        assert!(fb[0].is_empty());
+        assert!(!fb[1].is_empty());
+        assert!(!fb[8].is_empty());
+        assert!(!fb[8 * w + 8].is_empty());
+    }
+
+    #[test]
+    fn boiling_filter_gi_framebuffer_clips_edge_tiles() {
+        let (w, h, ts) = (10usize, 10usize, 8usize);
+        let mut fb: Vec<GiReservoir> = (0..w * h).map(|_| gi_with_w(1.0)).collect();
+        let corner = 8 * w + 8;
+        fb[corner] = gi_with_w(1000.0);
+        boiling_filter_gi_framebuffer(&mut fb, w, h, ts, 1.0);
+        assert!(fb[corner].is_empty());
+        assert!(!fb[corner + 1].is_empty());
+    }
+
+    #[test]
+    fn boiling_filter_gi_framebuffer_guards_malformed_input() {
+        let before = [gi_with_w(1.0), gi_with_w(1000.0)];
+        for (w, h, ts) in [(2usize, 1usize, 0usize), (0, 0, 8), (4, 4, 8)] {
+            let mut fb = before.to_vec();
+            boiling_filter_gi_framebuffer(&mut fb, w, h, ts, 1.0);
+            assert_eq!(fb.as_slice(), before.as_slice());
+        }
+    }
 
     /// A finalized GI reservoir holding a zero sample with contribution weight `w`.
     fn gi_with_w(w: f32) -> GiReservoir {
