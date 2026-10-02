@@ -20,6 +20,7 @@ mod texture_codec;
 mod texture_filter;
 mod texture_lod;
 mod texture_mipgen;
+mod texture_resize;
 mod texture_sample;
 mod validation;
 
@@ -82,6 +83,7 @@ pub use texture_mipgen::{
     solve_alpha_scale, srgb_to_linear, tent_downsample, windowed_downsample, ColorSpace,
     GaussianFilter, KaiserFilter, Rgba8Image, TentFilter, WindowedKernel,
 };
+pub use texture_resize::{resize, ResizeFilter};
 pub use texture_sample::{resolve_cone, resolve_differential, SampleRequest, SampleResolved};
 pub use validation::{validate_graph, MaterialValidationError};
 
