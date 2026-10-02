@@ -87,6 +87,7 @@ pub mod classify_precip;
 pub mod closest_point_obb;
 pub mod cloud_shadow_modulation;
 pub mod cohen_sutherland_clip;
+pub mod color_temperature;
 pub mod composite_motion_vector;
 pub mod contact_shadow;
 pub mod context;
@@ -263,6 +264,7 @@ pub use cohen_sutherland_clip::{
     ClipSegmentQuery, ClipSegmentResult, GpuCohenSutherlandClip, OUTCODE_BOTTOM, OUTCODE_INSIDE,
     OUTCODE_LEFT, OUTCODE_RIGHT, OUTCODE_TOP,
 };
+pub use color_temperature::{ColorTemperatureQuery, ColorTemperatureResult, GpuColorTemperature};
 pub use composite_motion_vector::{
     CompositeMotionVectorQuery, GpuCompositeMotionVector, MotionVector,
 };
