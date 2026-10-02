@@ -8,25 +8,24 @@
 //! stacking order: the higher-numbered (outer) layer always ends up on the
 //! outward side of the lower-numbered (inner) one.
 //!
-//! [`resolve_layer_coupling`] implements that as a deterministic uniform
-//! spatial-hash pass over a *combined* particle buffer, filtered so only
-//! cross-layer pairs interact (intra-layer contacts are the job of
-//! [`super::collision::resolve_self_collision`]). Each cross-layer contact is
-//! resolved along the inner particle's outward normal, so the constraint is a
-//! one-sided plane that forces the outer layer to the `+normal` side at least
-//! `thickness` away — separation and ordering in one projection. When the
-//! inner normal is unavailable (zero length), the pass falls back to a
-//! symmetric radial minimum-distance push so it still prevents interpenetration
-//! without a preferred side.
+//! The contact kernel itself lives in the physics engine
+//! ([`prism_physics_core::soft::collision::resolve_layer_coupling`]) as the
+//! single source of truth. This module keeps the render-side public API and
+//! parameter guards, converts the compact particle layout to the engine's
+//! structure-of-arrays columns through [`physics_bridge`](super::physics_bridge),
+//! and projects through that one implementation — there is no second copy of the
+//! spatial-hash sweep or the per-pair projection here.
 //!
-//! Like every collision pass in this module it is stateless array-in /
-//! array-out, only uses `sqrt`, skips out-of-range indices instead of
-//! panicking, and iterates in a fixed cell / index order for determinism.
+//! Like every collision pass it is stateless array-in / array-out, only uses
+//! `sqrt`, skips out-of-range indices instead of panicking, and iterates in a
+//! fixed cell / index order for determinism.
 
-use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
-use super::{ClothParticle, Vec3, EPS_LEN_SQ};
+use glam::Vec3 as GlamVec3;
+
+use super::{physics_bridge, ClothParticle, Vec3};
+use prism_physics_core::soft::collision as physics_collision;
 
 /// Tuning for the inter-layer coupling pass.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -77,11 +76,24 @@ impl LayerParams {
     }
 }
 
+/// Converts the render-side [`LayerParams`] into the physics engine's
+/// field-identical parameter struct. The engine re-sanitizes internally, so a
+/// raw or already-sanitized value projects identically.
+#[inline]
+#[must_use]
+fn to_physics_params(params: LayerParams) -> physics_collision::LayerParams {
+    physics_collision::LayerParams {
+        thickness: params.thickness,
+        cell_size: params.cell_size,
+    }
+}
+
 /// Maps a world-space position to its integer spatial-hash cell.
 ///
 /// `cell_size` is assumed positive (the caller guards this). The cast saturates
 /// rather than wrapping, so an extreme coordinate still buckets deterministically
-/// and never panics.
+/// and never panics. Shared with [`super::layers_jacobi`] so both solvers bucket
+/// identically.
 pub(crate) fn cell_of(pos: Vec3, cell_size: f32) -> (i32, i32, i32) {
     let inv = 1.0 / cell_size;
     let cx = (pos.x * inv).floor() as i32;
@@ -99,6 +111,13 @@ pub(crate) fn cell_of(pos: Vec3, cell_size: f32) -> (i32, i32, i32) {
 /// missing a layer number or normal entry is skipped. The pass is a no-op when
 /// `thickness`/`cell_size` are non-positive or there are fewer than two
 /// particles.
+///
+/// The projection itself is delegated to
+/// [`prism_physics_core::soft::collision::resolve_layer_coupling`]; this wrapper
+/// only guards the cheap disabled cases (to skip the structure-of-arrays
+/// allocation), converts to the engine's columns, and writes the solved
+/// positions back. Pinned particles map to a zero inverse mass through
+/// [`physics_bridge::to_soa`], so the engine leaves them fixed.
 pub fn resolve_layer_coupling(
     particles: &mut [ClothParticle],
     layer_of: &[u32],
@@ -110,113 +129,16 @@ pub fn resolve_layer_coupling(
         return;
     }
 
-    let mut grid: BTreeMap<(i32, i32, i32), Vec<u32>> = BTreeMap::new();
-    for (index, particle) in particles.iter().enumerate() {
-        // Only particles that carry a layer number participate.
-        if index < layer_of.len() {
-            let cell = cell_of(particle.position, params.cell_size);
-            grid.entry(cell).or_default().push(index as u32);
-        }
-    }
-
-    let thickness_sq = params.thickness * params.thickness;
-    for (&cell, bucket) in &grid {
-        for &a in bucket {
-            let ai = a as usize;
-            for dx in -1..=1 {
-                for dy in -1..=1 {
-                    for dz in -1..=1 {
-                        let neighbor = (cell.0 + dx, cell.1 + dy, cell.2 + dz);
-                        let Some(nbucket) = grid.get(&neighbor) else {
-                            continue;
-                        };
-                        for &b in nbucket {
-                            if b <= a {
-                                continue;
-                            }
-                            let bi = b as usize;
-                            // Same-layer contacts belong to self-collision.
-                            if layer_of[ai] == layer_of[bi] {
-                                continue;
-                            }
-                            resolve_layer_pair(
-                                particles,
-                                layer_of,
-                                normals,
-                                ai,
-                                bi,
-                                params.thickness,
-                                thickness_sq,
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Resolves one cross-layer contact, orienting the push by the inner particle's
-/// outward normal so the outer layer is driven to the outward side.
-///
-/// Falls back to a symmetric radial minimum-distance push when the inner normal
-/// is (near) zero, which still separates the pair but without a preferred side.
-/// Two pinned particles cannot move, so the contact is left as-is.
-fn resolve_layer_pair(
-    particles: &mut [ClothParticle],
-    layer_of: &[u32],
-    normals: &[Vec3],
-    ai: usize,
-    bi: usize,
-    thickness: f32,
-    thickness_sq: f32,
-) {
-    // Lower layer number is the inner surface whose normal orients the contact.
-    let (inner, outer) = if layer_of[ai] < layer_of[bi] {
-        (ai, bi)
-    } else {
-        (bi, ai)
-    };
-
-    let w_inner = particles[inner].inverse_mass.max(0.0);
-    let w_outer = particles[outer].inverse_mass.max(0.0);
-    let w_sum = w_inner + w_outer;
-    if w_sum <= 0.0 {
-        return;
-    }
-
-    let p_inner = particles[inner].position;
-    let p_outer = particles[outer].position;
-    let normal = normals.get(inner).copied().unwrap_or(Vec3::ZERO);
-    let unit = normal.normalize_or_zero();
-
-    if unit.length_squared() > EPS_LEN_SQ {
-        // Oriented plane contact: force the outer particle to at least
-        // `thickness` along the inner's outward normal.
-        let signed = p_outer.sub(p_inner).dot(unit);
-        if signed >= thickness {
-            return;
-        }
-        let penetration = thickness - signed;
-        particles[inner].position = p_inner.add(unit.scale(-penetration * (w_inner / w_sum)));
-        particles[outer].position = p_outer.add(unit.scale(penetration * (w_outer / w_sum)));
-        return;
-    }
-
-    // No usable normal: symmetric radial separation.
-    let delta = p_outer.sub(p_inner);
-    let dist_sq = delta.length_squared();
-    if dist_sq >= thickness_sq {
-        return;
-    }
-    let (dir, penetration) = if dist_sq <= EPS_LEN_SQ {
-        (Vec3::new(1.0, 0.0, 0.0), thickness)
-    } else {
-        let dist = dist_sq.sqrt();
-        (delta.scale(1.0 / dist), thickness - dist)
-    };
-    particles[inner].position = p_inner.add(dir.scale(-penetration * (w_inner / w_sum)));
-    particles[outer].position = p_outer.add(dir.scale(penetration * (w_outer / w_sum)));
+    let (mut positions, inverse_masses) = physics_bridge::to_soa(particles);
+    let glam_normals: Vec<GlamVec3> = normals.iter().map(|n| physics_bridge::to_glam(*n)).collect();
+    physics_collision::resolve_layer_coupling(
+        &mut positions,
+        &inverse_masses,
+        layer_of,
+        &glam_normals,
+        to_physics_params(params),
+    );
+    physics_bridge::write_positions_back(particles, &positions);
 }
 
 /// Accumulates an area-weighted outward vertex normal for every particle from a
@@ -232,24 +154,18 @@ fn resolve_layer_pair(
 /// assumed consistent (counter-clockwise seen from outside) so the normals face
 /// outward, matching the pressure pass. Out-of-range indices are skipped and
 /// never panic, so a truncated triangle set is safe.
+///
+/// The geometry is computed by
+/// [`prism_physics_core::soft::collision::accumulate_vertex_normals`]; this
+/// wrapper only bridges the compact and `glam` vector layouts.
 pub fn accumulate_vertex_normals(positions: &[Vec3], triangles: &[[u32; 3]], out: &mut Vec<Vec3>) {
+    let glam_positions: Vec<GlamVec3> =
+        positions.iter().map(|p| physics_bridge::to_glam(*p)).collect();
+    let mut glam_out: Vec<GlamVec3> = Vec::new();
+    physics_collision::accumulate_vertex_normals(&glam_positions, triangles, &mut glam_out);
     out.clear();
-    out.resize(positions.len(), Vec3::ZERO);
-    for tri in triangles {
-        let (i0, i1, i2) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
-        if i0 >= positions.len() || i1 >= positions.len() || i2 >= positions.len() {
-            continue;
-        }
-        let face = positions[i1]
-            .sub(positions[i0])
-            .cross(positions[i2].sub(positions[i0]));
-        out[i0] = out[i0].add(face);
-        out[i1] = out[i1].add(face);
-        out[i2] = out[i2].add(face);
-    }
-    for normal in out.iter_mut() {
-        *normal = normal.normalize_or_zero();
-    }
+    out.reserve(glam_out.len());
+    out.extend(glam_out.iter().map(|n| physics_bridge::from_glam(*n)));
 }
 
 #[cfg(test)]
