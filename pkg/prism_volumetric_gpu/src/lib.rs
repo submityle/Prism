@@ -193,15 +193,20 @@ pub mod marching_squares;
 pub mod mask;
 pub mod matrix_decompose;
 pub mod merge_sort_stable;
+pub mod mesh_aabb;
 pub mod mesh_bary_fold;
 pub mod mesh_cdf_sample;
 pub mod mesh_ray_contains;
 pub mod mesh_renderer;
 pub mod mesh_skinning;
+pub mod mesh_triangle_eval;
 pub mod mg_coarsen;
 pub mod mg_divergence_gradient;
+pub mod mg_is_coarsest;
 pub mod mg_jacobi_smooth;
+pub mod mg_level_residual;
 pub mod mg_prolong;
+pub mod mg_remove_mean;
 pub mod mg_restrict;
 pub mod microfacet_ggx;
 pub mod minkowski_sum_2d;
@@ -524,6 +529,7 @@ pub use marching_squares::{GpuMarchingSquares, MarchingSquaresQuery, MarchingSqu
 pub use mask::{GpuScatteringMask, MaskQuery};
 pub use matrix_decompose::{GpuMatrixDecompose, MatrixDecomposeQuery, MatrixDecomposeResult};
 pub use merge_sort_stable::{GpuMergeSort, GpuMergeSortStable};
+pub use mesh_aabb::{GpuMeshAabb, GpuMeshAabbQuery, GpuMeshAabbResult};
 pub use mesh_bary_fold::{GpuMeshBaryFold, GpuMeshBaryFoldQuery, GpuMeshBaryFoldResult};
 pub use mesh_cdf_sample::{GpuMeshCdfSample, GpuMeshCdfSampleQuery, GpuMeshCdfSampleResult};
 pub use mesh_ray_contains::{GpuMeshContainsQuery, GpuMeshRayContains, GpuTriangle};
@@ -533,13 +539,21 @@ pub use mesh_renderer::{
     ORIENTATION_FIXED_ROTATION, ORIENTATION_IDENTITY, ORIENTATION_VELOCITY_ALIGNED,
 };
 pub use mesh_skinning::{GpuMeshSkinning, GpuSkinResult};
+pub use mesh_triangle_eval::{
+    GpuMeshTriangleEval, GpuMeshTriangleEvalQuery, GpuMeshTriangleEvalResult,
+};
 pub use mg_coarsen::{GpuMgCoarsen, GpuMgCoarsenQuery, GpuMgCoarsenResult};
 pub use mg_divergence_gradient::{GpuDivergenceQuery, GpuMgDivergenceGradient, GpuProjectionQuery};
+pub use mg_is_coarsest::{GpuMgIsCoarsest, GpuMgIsCoarsestQuery, GpuMgIsCoarsestResult};
 pub use mg_jacobi_smooth::{
     GpuMgJacobiSmooth, GpuMgJacobiSmoothQuery, GpuMgJacobiSmoothResult,
     PRESSURE_BOUNDARY_DIRICHLET, PRESSURE_BOUNDARY_NEUMANN,
 };
+pub use mg_level_residual::{
+    GpuMgLevelResidual, GpuMgLevelResidualQuery, GpuMgLevelResidualResult,
+};
 pub use mg_prolong::{GpuMgProlong, GpuMgProlongQuery, GpuMgProlongResult};
+pub use mg_remove_mean::{GpuMgRemoveMean, GpuMgRemoveMeanQuery, GpuMgRemoveMeanResult};
 pub use mg_restrict::{GpuMgRestrict, GpuMgRestrictQuery, GpuMgRestrictResult};
 pub use microfacet_ggx::{GpuMicrofacetGgx, MicrofacetSample};
 pub use minkowski_sum_2d::{GpuMinkowskiSum2d, MinkowskiSum2dQuery, MinkowskiSum2dResult};
