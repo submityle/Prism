@@ -434,6 +434,7 @@ pub fn decode_bc6h_unsigned(block: &[u8; 16]) -> Result<[[f32; 3]; 16], Bc6hErro
         0b00 => Ok(decode_bc6h_mode1_unsigned(block)),
         0b01 => Ok(decode_bc6h_mode2_unsigned(block)),
         0b00010 => Ok(decode_bc6h_mode3_unsigned(block)),
+        0b00110 => Ok(decode_bc6h_mode4_unsigned(block)),
         0b00011 => Ok(decode_bc6h_mode11_unsigned(block)),
         0b00111 => Ok(decode_bc6h_mode12_unsigned(block)),
         0b01011 => Ok(decode_bc6h_mode13_unsigned(block)),
@@ -452,6 +453,7 @@ pub fn decode_bc6h_signed(block: &[u8; 16]) -> Result<[[f32; 3]; 16], Bc6hError>
         0b00 => Ok(decode_bc6h_mode1_signed(block)),
         0b01 => Ok(decode_bc6h_mode2_signed(block)),
         0b00010 => Ok(decode_bc6h_mode3_signed(block)),
+        0b00110 => Ok(decode_bc6h_mode4_signed(block)),
         0b00011 => Ok(decode_bc6h_mode11_signed(block)),
         0b00111 => Ok(decode_bc6h_mode12_signed(block)),
         0b01011 => Ok(decode_bc6h_mode13_signed(block)),
@@ -734,6 +736,42 @@ pub fn decode_bc6h_mode3_signed(block: &[u8; 16]) -> [[f32; 3]; 16] {
     decode_bc6h_two_subset(block, &BC6H_MODE3, true)
 }
 
+/// BC6H mode 4 (`0b00110`, 5-bit mode): two subsets, 11-bit base, 4/5/4 deltas,
+/// transformed. Descriptor from the Khronos / `DirectXTex` `ModeDescriptor`,
+/// proved bit-exact against the GPU oracle.
+#[rustfmt::skip]
+const BC6H_MODE4: TwoSubsetMode = {
+    use Bc6hField::{Bw, Bx, By, Bz, D, Gw, Gx, Gy, Gz, M, Rw, Rx, Ry, Rz};
+    TwoSubsetMode {
+        transformed: true,
+        base_prec: 11,
+        delta_bits: [4, 5, 4],
+        descriptor: &[
+        (M, 0), (M, 1), (M, 2), (M, 3), (M, 4), (Rw, 0), (Rw, 1), (Rw, 2), (Rw, 3), (Rw, 4),
+        (Rw, 5), (Rw, 6), (Rw, 7), (Rw, 8), (Rw, 9), (Gw, 0), (Gw, 1), (Gw, 2), (Gw, 3), (Gw, 4),
+        (Gw, 5), (Gw, 6), (Gw, 7), (Gw, 8), (Gw, 9), (Bw, 0), (Bw, 1), (Bw, 2), (Bw, 3), (Bw, 4),
+        (Bw, 5), (Bw, 6), (Bw, 7), (Bw, 8), (Bw, 9), (Rx, 0), (Rx, 1), (Rx, 2), (Rx, 3), (Rw, 10),
+        (Gz, 4), (Gy, 0), (Gy, 1), (Gy, 2), (Gy, 3), (Gx, 0), (Gx, 1), (Gx, 2), (Gx, 3), (Gx, 4),
+        (Gw, 10), (Gz, 0), (Gz, 1), (Gz, 2), (Gz, 3), (Bx, 0), (Bx, 1), (Bx, 2), (Bx, 3), (Bw, 10),
+        (Bz, 1), (By, 0), (By, 1), (By, 2), (By, 3), (Ry, 0), (Ry, 1), (Ry, 2), (Ry, 3), (Bz, 0),
+        (Bz, 2), (Rz, 0), (Rz, 1), (Rz, 2), (Rz, 3), (Gy, 4), (Bz, 3), (D, 0), (D, 1), (D, 2),
+        (D, 3), (D, 4),
+        ],
+    }
+};
+
+/// Decode a **BC6H mode 4 (unsigned)** block (11-bit base, 4/5/4 deltas).
+#[must_use]
+pub fn decode_bc6h_mode4_unsigned(block: &[u8; 16]) -> [[f32; 3]; 16] {
+    decode_bc6h_two_subset(block, &BC6H_MODE4, false)
+}
+
+/// Decode a **BC6H mode 4 (signed, `SF16`)** block (11-bit base, 4/5/4 deltas).
+#[must_use]
+pub fn decode_bc6h_mode4_signed(block: &[u8; 16]) -> [[f32; 3]; 16] {
+    decode_bc6h_two_subset(block, &BC6H_MODE4, true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -893,14 +931,14 @@ mod tests {
         let m1 = [0u8; 16];
         assert_eq!(bc6h_mode_bits(&m1), 0);
         assert_eq!(decode_bc6h_unsigned(&m1), Ok([[0.0f32; 3]; 16]));
-        // Mode-4 block (5-bit 0b00110) is a two-subset partitioned mode that is
+        // Mode-5 block (5-bit 0b01010) is a two-subset partitioned mode that is
         // not wired up yet, so it must still report the error rather than guess.
-        let mut m4 = [0u8; 16];
-        m4[0] = 0b0_0110;
-        assert_eq!(bc6h_mode_bits(&m4), 0b00110);
+        let mut m5 = [0u8; 16];
+        m5[0] = 0b0_1010;
+        assert_eq!(bc6h_mode_bits(&m5), 0b01010);
         assert_eq!(
-            decode_bc6h_unsigned(&m4),
-            Err(Bc6hError::UnsupportedMode(0b00110))
+            decode_bc6h_unsigned(&m5),
+            Err(Bc6hError::UnsupportedMode(0b01010))
         );
     }
 
