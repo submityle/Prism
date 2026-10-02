@@ -75,10 +75,10 @@ pub use texture_lod::{
 pub use texture_mipgen::{
     alpha_test_coverage, apply_alpha_scale, box_downsample, gaussian_downsample,
     generate_mip_chain, generate_mip_chain_gaussian, generate_mip_chain_kaiser,
-    generate_mip_chain_premultiplied, generate_mip_chain_windowed, kaiser_downsample,
-    linear_to_srgb, premultiplied_box_downsample, preserve_alpha_coverage, solve_alpha_scale,
-    srgb_to_linear, windowed_downsample, ColorSpace, GaussianFilter, KaiserFilter, Rgba8Image,
-    WindowedKernel,
+    generate_mip_chain_premultiplied, generate_mip_chain_tent, generate_mip_chain_windowed,
+    kaiser_downsample, linear_to_srgb, premultiplied_box_downsample, preserve_alpha_coverage,
+    solve_alpha_scale, srgb_to_linear, tent_downsample, windowed_downsample, ColorSpace,
+    GaussianFilter, KaiserFilter, Rgba8Image, TentFilter, WindowedKernel,
 };
 pub use texture_sample::{resolve_cone, resolve_differential, SampleRequest, SampleResolved};
 pub use validation::{validate_graph, MaterialValidationError};

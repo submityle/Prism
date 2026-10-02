@@ -19,6 +19,9 @@
 //!   ([`gaussian_downsample`] / [`generate_mip_chain_gaussian`]) that never
 //!   over- or under-shoots (no ringing), the soft prefilter for roughness,
 //!   height, and coverage maps where sinc side-lobes are unacceptable.
+//! * [`tent`] -- a parameter-free triangle / Bartlett (linear B-spline)
+//!   reduction ([`tent_downsample`] / [`generate_mip_chain_tent`]), a
+//!   non-negative tent that is softer than the box with no shape parameter.
 //! * [`alpha_coverage`] -- preserve alpha-test coverage across a mip chain
 //!   ([`preserve_alpha_coverage`]) so alpha-tested foliage/decals do not thin
 //!   out in the distance; a filter-agnostic post-pass.
@@ -33,6 +36,7 @@ mod kaiser;
 mod premultiplied;
 mod resample_core;
 mod srgb;
+mod tent;
 mod windowed;
 
 pub use alpha_coverage::{
@@ -43,4 +47,5 @@ pub use gaussian::{gaussian_downsample, generate_mip_chain_gaussian, GaussianFil
 pub use kaiser::{generate_mip_chain_kaiser, kaiser_downsample, KaiserFilter};
 pub use premultiplied::{generate_mip_chain_premultiplied, premultiplied_box_downsample};
 pub use srgb::{linear_to_srgb, srgb_to_linear};
+pub use tent::{generate_mip_chain_tent, tent_downsample, TentFilter};
 pub use windowed::{generate_mip_chain_windowed, windowed_downsample, WindowedKernel};
