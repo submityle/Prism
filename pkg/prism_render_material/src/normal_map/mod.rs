@@ -21,6 +21,7 @@ mod mipmap;
 mod reconstruct;
 mod strength;
 mod surface_gradient;
+mod triplanar;
 
 pub use blend::{blend_linear, blend_rnm, blend_udn, blend_whiteout};
 pub use height::{height_to_normal, HeightGradient};
@@ -33,3 +34,4 @@ pub use strength::{normal_to_slope, scale_strength, slope_to_normal};
 pub use surface_gradient::{
     blend_surface_gradient, blend_surface_gradient_pair, resolve_surface_gradient, NormalLayer,
 };
+pub use triplanar::{blend_triplanar_whiteout, triplanar_weights};
