@@ -147,7 +147,7 @@ mod tests {
     fn bessel_i0_known_values() {
         // Reference values of the modified Bessel function I0.
         assert!((bessel_i0(0.0) - 1.0).abs() < 1e-6);
-        assert!((bessel_i0(1.0) - 1.266_065_9).abs() < 1e-4);
+        assert!((bessel_i0(1.0) - 1.266_066).abs() < 1e-4);
         assert!((bessel_i0(2.0) - 2.279_585_3).abs() < 1e-4);
         assert!((bessel_i0(3.0) - 4.880_792_6).abs() < 1e-3);
     }
@@ -202,8 +202,8 @@ mod tests {
         let mip = kaiser_downsample(&img, ColorSpace::Linear, KaiserFilter::DEFAULT).unwrap();
         assert_eq!((mip.width(), mip.height()), (4, 4));
         for t in mip.as_slice() {
-            for c in 0..4 {
-                let d = i16::from(t[c]) - i16::from(img.as_slice()[0][c]);
+            for (c, &tc) in t.iter().enumerate() {
+                let d = i16::from(tc) - i16::from(img.as_slice()[0][c]);
                 assert!(d.abs() <= 1, "channel {c} drifted by {d}");
             }
         }
@@ -214,8 +214,8 @@ mod tests {
         let img = solid(8, 8, [200, 100, 25, 255]);
         let mip = kaiser_downsample(&img, ColorSpace::Srgb, KaiserFilter::new(2.0, 6.0)).unwrap();
         for t in mip.as_slice() {
-            for c in 0..3 {
-                let d = i16::from(t[c]) - i16::from(img.as_slice()[0][c]);
+            for (c, &tc) in t.iter().take(3).enumerate() {
+                let d = i16::from(tc) - i16::from(img.as_slice()[0][c]);
                 assert!(d.abs() <= 1, "srgb channel {c} drifted by {d}");
             }
             assert_eq!(t[3], 255);

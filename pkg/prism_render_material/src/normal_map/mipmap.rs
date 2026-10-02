@@ -287,7 +287,7 @@ mod tests {
         // normals disagree, so Toksvig must push roughness up.
         let a = reconstruct_z([0.8, 0.0]);
         let b = reconstruct_z([-0.8, 0.0]);
-        let mut normals = alloc::vec::Vec::new();
+        let mut normals = Vec::new();
         for y in 0..4u32 {
             for x in 0..4u32 {
                 normals.push(if (x + y) % 2 == 0 { a } else { b });

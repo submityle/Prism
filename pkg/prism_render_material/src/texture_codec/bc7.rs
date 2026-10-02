@@ -336,7 +336,6 @@ mod tests {
 
     /// Assemble a mode-6 block from field values; `idx` holds the sixteen
     /// 4-bit indices (index 0 must be `<= 7` so its high bit is implicit 0).
-    #[allow(clippy::too_many_arguments)]
     fn make_block(
         rgba0: [u32; 4],
         rgba1: [u32; 4],
@@ -479,7 +478,6 @@ mod tests {
 
     /// Assemble a mode-5 block: `rgb0/rgb1` are 7-bit, `a0/a1` 8-bit; `cidx`
     /// and `aidx` are the sixteen 2-bit colour/alpha indices (index 0 <= 1).
-    #[allow(clippy::too_many_arguments)]
     fn make_block5(
         rgb0: [u32; 3],
         rgb1: [u32; 3],
@@ -591,7 +589,7 @@ mod tests {
     /// Assemble a mode-4 block: `rgb0/rgb1` are 5-bit, `a0/a1` 6-bit; `idx2`
     /// are the sixteen 2-bit indices (index 0 <= 1), `idx3` the sixteen 3-bit
     /// indices (index 0 <= 3); `idx_mode` selects colour/alpha index routing.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "test block assembler mirrors the BC7 bit-field layout")]
     fn make_block4(
         rgb0: [u32; 3],
         rgb1: [u32; 3],

@@ -112,8 +112,8 @@ mod tests {
         let mip = windowed_downsample(&img, ColorSpace::Linear, WindowedKernel::Lanczos3).unwrap();
         assert_eq!((mip.width(), mip.height()), (4, 4));
         for t in mip.as_slice() {
-            for c in 0..4 {
-                let d = i16::from(t[c]) - i16::from(img.as_slice()[0][c]);
+            for (c, &tc) in t.iter().enumerate() {
+                let d = i16::from(tc) - i16::from(img.as_slice()[0][c]);
                 assert!(d.abs() <= 1, "channel {c} drifted by {d}");
             }
         }
@@ -124,8 +124,8 @@ mod tests {
         let img = solid(8, 8, [128, 64, 200, 255]);
         let mip = windowed_downsample(&img, ColorSpace::Srgb, WindowedKernel::Lanczos2).unwrap();
         for t in mip.as_slice() {
-            for c in 0..3 {
-                let d = i16::from(t[c]) - i16::from(img.as_slice()[0][c]);
+            for (c, &tc) in t.iter().take(3).enumerate() {
+                let d = i16::from(tc) - i16::from(img.as_slice()[0][c]);
                 assert!(d.abs() <= 1, "srgb channel {c} drifted by {d}");
             }
             assert_eq!(t[3], 255);

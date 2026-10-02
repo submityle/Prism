@@ -106,8 +106,8 @@ mod tests {
         let head_on = cone_mip_level(tri, 1.0, 1.0, 20.0);
         let grazing = cone_mip_level(tri, 1.0, 0.1, 20.0);
         assert!(grazing > head_on, "grazing={grazing} head_on={head_on}");
-        // -log2(0.1) ~= 3.3219 above the head-on value.
-        assert!((grazing - head_on - 3.321928).abs() < 1.0e-3);
+        // -log2(0.1) == LOG2_10 above the head-on value.
+        assert!((grazing - head_on - core::f32::consts::LOG2_10).abs() < 1.0e-3);
     }
 
     #[test]
