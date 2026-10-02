@@ -147,6 +147,22 @@
 //!   harmonics through an out-of-loop `tanh` shaper and `breath_noise` mixes
 //!   in airy turbulence. The vessel only speaks once the breath exceeds a
 //!   `resonance`-dependent threshold.
+//! - [`plucked_body::PluckedBodyNode`] -- plucked acoustic-string source
+//!   coupled to a parallel instrument-body modal bank (guitar / lute family).
+//!   The extended Karplus-Strong string loop of `karplus_strong` (integer
+//!   delay line, one-zero brightness filter, allpass sub-sample tuning, and
+//!   `60 dB` loop gain) drives a bank of [`plucked_body::NUM_BODY_MODES`]
+//!   two-pole resonators tuned to the documented air-cavity and plate
+//!   resonances of a soundbox. Each body mode is normalized to a fixed
+//!   resonant gain so the box adds sub-fundamental bloom and plate formants
+//!   without ringing up; `body_level` crossfades raw string to body-filtered
+//!   and `body_size` divides every body-mode frequency (a larger box
+//!   resonates lower). Placing the body at the output is, by linearity, the
+//!   commuted-synthesis equivalent of pre-convolving the body impulse
+//!   response into the pluck. Unlike the bare `karplus_strong` it carries a
+//!   built-in body; unlike the `modal_resonator` effect it is self-excited;
+//!   unlike the struck modal sources `struck_bar` / `membrane_drum` the modal
+//!   bank is a passive body rather than the sounding object itself.
 //!
 //! Every generator is real-time safe: `process` performs no allocation, no
 //! locking, and no panics, and reproducible generators are fully deterministic
@@ -166,6 +182,7 @@ pub mod karplus_strong;
 pub mod membrane_drum;
 pub mod noise;
 pub mod oscillator;
+pub mod plucked_body;
 pub mod pwm_oscillator;
 pub mod reed_woodwind;
 pub mod sample_player;
@@ -187,6 +204,7 @@ pub use karplus_strong::{KarplusStrongNode, KarplusStrongParams};
 pub use membrane_drum::{MembraneDrumNode, MembraneDrumParams};
 pub use noise::{NoiseColor, NoiseNode};
 pub use oscillator::{OscillatorNode, Waveform};
+pub use plucked_body::{PluckedBodyNode, PluckedBodyParams, NUM_BODY_MODES};
 pub use pwm_oscillator::{PwmOscillatorNode, PwmOscillatorParams};
 pub use reed_woodwind::{ReedWoodwindNode, ReedWoodwindParams};
 pub use sample_player::{Interpolation, LoopMode, SamplePlayerNode};
