@@ -904,3 +904,91 @@ fn etc2_extended_mode_parity() {
     );
     eprintln!("ETC2 extended-mode parity: {checked} blocks (T={nt} H={nh} Planar={np})");
 }
+
+// ---------------------------------------------------------------------------
+// EAC R11 / RG11 (11-bit scalar) GPU parity.
+// ---------------------------------------------------------------------------
+
+/// EAC is a bit-exact 11-bit format. The Metal hardware decode returns the
+/// unorm value normalised as `v / 2047.0`; recovering the integer with
+/// `round(f32 * 2047.0)` reproduces the pure-CPU `[u16; 16]` output exactly
+/// (verified empirically: normalisation, texel orientation `t = y*4 + x`, and
+/// both the `mult == 0` and `mult != 0` formula paths all match with tol 0).
+#[test]
+fn eac_r11_parity_against_gpu_hardware_decode() {
+    use prism_render_material::decode_eac_r11_unorm;
+    let Some(oracle) = BlockOracle::try_new() else {
+        eprintln!("no GPU adapter; skipping EAC R11 parity");
+        return;
+    };
+    if !oracle
+        .features()
+        .contains(Features::TEXTURE_COMPRESSION_ETC2)
+    {
+        eprintln!("adapter lacks ETC2/EAC support; skipping EAC R11 parity");
+        return;
+    }
+    let mut rng = Rng(0xEAC_1111);
+    const COUNT: u32 = 200;
+    for _ in 0..COUNT {
+        let mut b = [0u8; 8];
+        for by in &mut b {
+            *by = rng.byte();
+        }
+        let cpu = decode_eac_r11_unorm(&b);
+        let gpu = oracle.decode_raw(TextureFormat::EacR11Unorm, &b);
+        for t in 0..16 {
+            let g = (gpu[t][0] * 2047.0).round() as i32;
+            assert_eq!(
+                cpu[t] as i32, g,
+                "R11 block={b:02x?} texel {t}: cpu={} gpu*2047={g} (raw {})",
+                cpu[t], gpu[t][0]
+            );
+        }
+    }
+    eprintln!("EAC R11 parity: {COUNT} blocks bit-exact");
+}
+
+/// `EAC_RG11` is two independent R11 channels (red = bytes `0..8`, green =
+/// bytes `8..16`). The GPU returns red in channel 0 and green in channel 1;
+/// both must match the pure-CPU `[[u16; 2]; 16]` output bit-exactly.
+#[test]
+fn eac_rg11_parity_against_gpu_hardware_decode() {
+    use prism_render_material::decode_eac_rg11_unorm;
+    let Some(oracle) = BlockOracle::try_new() else {
+        eprintln!("no GPU adapter; skipping EAC RG11 parity");
+        return;
+    };
+    if !oracle
+        .features()
+        .contains(Features::TEXTURE_COMPRESSION_ETC2)
+    {
+        eprintln!("adapter lacks ETC2/EAC support; skipping EAC RG11 parity");
+        return;
+    }
+    let mut rng = Rng(0xEAC_2222);
+    const COUNT: u32 = 200;
+    for _ in 0..COUNT {
+        let mut b = [0u8; 16];
+        for by in &mut b {
+            *by = rng.byte();
+        }
+        let cpu = decode_eac_rg11_unorm(&b);
+        let gpu = oracle.decode_raw(TextureFormat::EacRg11Unorm, &b);
+        for t in 0..16 {
+            let gr = (gpu[t][0] * 2047.0).round() as i32;
+            let gg = (gpu[t][1] * 2047.0).round() as i32;
+            assert_eq!(
+                cpu[t][0] as i32, gr,
+                "RG11 block={b:02x?} texel {t} RED: cpu={} gpu*2047={gr}",
+                cpu[t][0]
+            );
+            assert_eq!(
+                cpu[t][1] as i32, gg,
+                "RG11 block={b:02x?} texel {t} GREEN: cpu={} gpu*2047={gg}",
+                cpu[t][1]
+            );
+        }
+    }
+    eprintln!("EAC RG11 parity: {COUNT} blocks bit-exact (red+green)");
+}
