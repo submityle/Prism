@@ -256,9 +256,14 @@ pub fn simulate_strand(
         integrate(particles, gravity_step, velocity_retain);
         for _ in 0..params.iterations {
             super::physics_bridge::solve_edges(particles, rest_lengths, edge_compliance, sub_dt);
-            solve_local(particles, local_stiffness);
-            solve_global(particles, goal_positions, global_stiffness);
-            solve_lra(particles, rest_lengths, lra_stiffness);
+            super::physics_bridge::solve_local_smooth(particles, local_stiffness);
+            super::physics_bridge::solve_global_pull(particles, goal_positions, global_stiffness);
+            super::physics_bridge::solve_lra_tether(
+                particles,
+                rest_lengths,
+                lra_stiffness,
+                EPS_LEN,
+            );
         }
         // Collision is projected once per substep, after the constraint sweeps,
         // so hair settles against the body without fighting the shape solve.
@@ -284,97 +289,6 @@ fn integrate(particles: &mut [StrandParticle], gravity_step: Vec3, velocity_reta
             .scale(velocity_retain);
         particle.prev_position = particle.position;
         particle.position = particle.position.add(velocity).add(gravity_step);
-    }
-}
-
-/// Projects the local bending constraint over every interior particle once.
-///
-/// Each free interior particle is drawn a `stiffness` fraction of the way to
-/// the midpoint of its two neighbors. This discrete Laplacian penalizes sharp
-/// bends and keeps the strand from folding onto itself. Endpoints have only one
-/// neighbor and are left to the edge and global constraints.
-fn solve_local(particles: &mut [StrandParticle], stiffness: f32) {
-    let count = particles.len();
-    if count < 3 || stiffness <= 0.0 {
-        return;
-    }
-    let mut i = 1;
-    while i + 1 < count {
-        let prev_pos = particles[i - 1].position;
-        let next_pos = particles[i + 1].position;
-        let particle = &mut particles[i];
-        if !particle.is_pinned() {
-            let midpoint = prev_pos.add(next_pos).scale(0.5);
-            let correction = midpoint.sub(particle.position).scale(stiffness);
-            particle.position = particle.position.add(correction);
-        }
-        i += 1;
-    }
-}
-
-/// Projects the global shape constraint over every particle once.
-///
-/// Each free particle with a goal is pulled a `stiffness` fraction toward it; a
-/// stiffness of `1` snaps it exactly onto the goal. Particles without a goal
-/// entry (short `goal_positions` slice) are left untouched.
-fn solve_global(particles: &mut [StrandParticle], goal_positions: &[Vec3], stiffness: f32) {
-    if stiffness <= 0.0 {
-        return;
-    }
-    let count = particles.len();
-    let mut i = 0;
-    while i < count {
-        if let Some(&goal) = goal_positions.get(i) {
-            let particle = &mut particles[i];
-            if !particle.is_pinned() {
-                let correction = goal.sub(particle.position).scale(stiffness);
-                particle.position = particle.position.add(correction);
-            }
-        }
-        i += 1;
-    }
-}
-
-/// Projects the long-range attachment (LRA / tether) constraint once.
-///
-/// Each free particle is tethered to the strand *root* (particle `0`, which
-/// rides the skinned scalp): its distance from the root may not exceed the
-/// cumulative rest length of the segments between them. When a particle has
-/// been flung past that radius by fast motion, it is pulled a `stiffness`
-/// fraction of the way back onto the tether sphere; a stiffness of `1` snaps
-/// it exactly onto the radius. The constraint is one-sided — a particle
-/// closer than its tether length is never pushed outward — so it removes
-/// over-stretch without adding energy. A missing `rest_lengths` entry stops
-/// the cumulative walk (later particles then have no tether), and degenerate
-/// (zero-radius or coincident) cases are skipped.
-fn solve_lra(particles: &mut [StrandParticle], rest_lengths: &[f32], stiffness: f32) {
-    let count = particles.len();
-    if count < 2 || stiffness <= 0.0 {
-        return;
-    }
-    let root = particles[0].position;
-    let mut max_distance = 0.0f32;
-    let mut i = 1;
-    while i < count {
-        // The tether radius grows by the rest length of the segment leaving
-        // the previous particle; a missing entry ends the reachable chain.
-        let Some(&segment) = rest_lengths.get(i - 1) else {
-            break;
-        };
-        max_distance += segment.max(0.0);
-        let particle = &mut particles[i];
-        if !particle.is_pinned() && max_distance > EPS_LEN {
-            let delta = particle.position.sub(root);
-            let distance = delta.length();
-            if distance > max_distance && distance > EPS_LEN {
-                // Target point on the tether sphere along the current radial
-                // direction, then move a `stiffness` fraction toward it.
-                let target = root.add(delta.scale(max_distance / distance));
-                let correction = target.sub(particle.position).scale(stiffness);
-                particle.position = particle.position.add(correction);
-            }
-        }
-        i += 1;
     }
 }
 

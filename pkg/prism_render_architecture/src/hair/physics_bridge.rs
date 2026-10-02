@@ -114,6 +114,86 @@ pub(crate) fn solve_edges(
     write_positions_back(particles, &positions);
 }
 
+/// Projects the discrete-Laplacian bending smooth over one guide strand by
+/// delegating to the authoritative physics-engine linear-stiffness primitive.
+///
+/// Each free interior particle is drawn a `stiffness` fraction of the way to
+/// the midpoint of its neighbours; endpoints are left to the edge and shape
+/// constraints. Pinned particles (zero inverse mass) never move. The single,
+/// shared arithmetic lives in
+/// [`prism_physics_core::soft::constraint::project_laplacian_smooth`].
+pub(crate) fn solve_local_smooth(particles: &mut [StrandParticle], stiffness: f32) {
+    let count = particles.len();
+    if count < 3 {
+        return;
+    }
+    let (mut positions, inverse_masses) = to_soa(particles);
+    prism_physics_core::soft::constraint::project_laplacian_smooth(
+        &mut positions,
+        &inverse_masses,
+        stiffness,
+    );
+    write_positions_back(particles, &positions);
+}
+
+/// Projects the global shape-goal pull-back over one guide strand by delegating
+/// to the authoritative physics-engine linear-stiffness primitive.
+///
+/// Each free particle with a `goal_positions` entry is pulled a `stiffness`
+/// fraction toward it (a `stiffness` of `1` snaps it exactly onto the goal);
+/// particles without an entry are left untouched. Pinned particles never move.
+/// The single, shared arithmetic lives in
+/// [`prism_physics_core::soft::constraint::project_pull_to_target`].
+pub(crate) fn solve_global_pull(
+    particles: &mut [StrandParticle],
+    goal_positions: &[Vec3],
+    stiffness: f32,
+) {
+    if particles.is_empty() {
+        return;
+    }
+    let (mut positions, inverse_masses) = to_soa(particles);
+    let targets: Vec<GlamVec3> = goal_positions.iter().copied().map(to_glam).collect();
+    prism_physics_core::soft::constraint::project_pull_to_target(
+        &mut positions,
+        &inverse_masses,
+        &targets,
+        stiffness,
+    );
+    write_positions_back(particles, &positions);
+}
+
+/// Projects the one-sided long-range-attachment (LRA / tether) step over one
+/// guide strand by delegating to the authoritative physics-engine
+/// linear-stiffness primitive.
+///
+/// Every free particle is tethered to the strand root (index `0`): once flung
+/// past the cumulative rest-length radius it is pulled a `stiffness` fraction
+/// back onto the tether sphere, and a particle still within reach is never
+/// pushed outward. `eps_len` guards degenerate (zero-radius / coincident)
+/// cases. The single, shared arithmetic lives in
+/// [`prism_physics_core::soft::constraint::project_linear_tether`].
+pub(crate) fn solve_lra_tether(
+    particles: &mut [StrandParticle],
+    rest_lengths: &[f32],
+    stiffness: f32,
+    eps_len: f32,
+) {
+    let count = particles.len();
+    if count < 2 {
+        return;
+    }
+    let (mut positions, inverse_masses) = to_soa(particles);
+    prism_physics_core::soft::constraint::project_linear_tether(
+        &mut positions,
+        &inverse_masses,
+        rest_lengths,
+        stiffness,
+        eps_len,
+    );
+    write_positions_back(particles, &positions);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

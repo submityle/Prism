@@ -28,6 +28,7 @@ pub mod attachment;
 pub mod bending;
 pub mod distance;
 pub mod isometric_bending;
+pub mod linear_stiffness;
 pub mod long_range;
 pub mod pressure;
 pub mod set;
@@ -40,6 +41,9 @@ pub use distance::{project_distance_constraint, DistanceConstraint};
 pub use isometric_bending::{
     apply_isometric_bending, build_dihedral_bending, project_isometric_bending,
     IsometricBendingConstraint,
+};
+pub use linear_stiffness::{
+    project_laplacian_smooth, project_linear_tether, project_pull_to_target,
 };
 pub use long_range::{project_long_range, LongRangeConstraint};
 pub use pressure::{mesh_volume, project_pressure, PressureConstraint};
