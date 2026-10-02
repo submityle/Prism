@@ -8,11 +8,13 @@ publish = false
 
 [dependencies]
 prism_ui = { path = "../prism_ui" }
+prism_ui_layout = { path = "../prism_ui_layout" }
+prism_ui_style = { path = "../prism_ui_style" }
 wgpu = { version = "30", default-features = false, features = ["wgsl", "metal"], optional = true }
 
 [features]
 default = ["std"]
-std = ["prism_ui/std"]
+std = ["prism_ui/std", "prism_ui_layout/std", "prism_ui_style/std"]
 gpu = ["dep:wgpu"]
 
 [lints]
