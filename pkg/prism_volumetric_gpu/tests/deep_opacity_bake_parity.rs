@@ -94,7 +94,7 @@ fn gpu_bake_matches_cpu_golden_across_densities() {
         |depth| 0.2 + 0.1 * depth,
         |depth| depth - 2.0, // negative near the start; the baker floors it to 0.
         |depth| {
-            if depth >= 1.0 && depth <= 3.0 {
+            if (1.0..=3.0).contains(&depth) {
                 0.8
             } else {
                 0.0
