@@ -43,6 +43,7 @@ mod alpha_block;
 mod bc6h;
 mod bc7;
 mod bitio;
+mod bptc_tables;
 mod color_block;
 mod eac;
 mod encode;
