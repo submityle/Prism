@@ -216,6 +216,20 @@
 //!   it has a sub-octave footage, non-integer tempered ratios, octave
 //!   foldback, and partials that gently beat; it pairs naturally with the
 //!   `leslie` rotary cabinet.
+//! - [`glottal_pulse::GlottalPulseNode`] -- Rosenberg-model glottal pulse
+//!   source: the periodic vocal-fold airflow that drives the vocal tract in
+//!   the classic source-filter model of speech. Within each period the
+//!   glottis opens, peaks, and closes under the open quotient (fraction of
+//!   the period that is open) and speed quotient (how much faster it closes
+//!   than it opens, which sets the brightness); the single step at the
+//!   glottal-closure instant is band-limited with the shared `PolyBLEP`.
+//!   [`glottal_pulse::GlottalOutput`] emits either the DC-free flow
+//!   derivative (the default excitation) or the raw unipolar flow. Unlike
+//!   `fof_source`, which synthesizes an already-*filtered* vowel grain per
+//!   period (source and tract fused), this node is only the *unfiltered*
+//!   source and pairs with the `formant_filter`; unlike `impulse_train`'s
+//!   ideal equal-amplitude harmonic spikes and `oscillator`'s geometric
+//!   saw/square it is a physiologically shaped volume-velocity waveform.
 //!
 //!
 //! Every generator is real-time safe: `process` performs no allocation, no
@@ -231,6 +245,7 @@ pub mod conical_reed;
 pub mod brass_lip_reed;
 pub mod fm_operator;
 pub mod fof_source;
+pub mod glottal_pulse;
 pub mod granular_source;
 pub mod helmholtz_resonator;
 pub mod impulse_train;
@@ -258,6 +273,7 @@ pub use brass_lip_reed::{BrassLipReedNode, BrassLipReedParams};
 pub use conical_reed::{ConicalReedNode, ConicalReedParams};
 pub use fm_operator::{FmOperatorNode, FmOperatorParams};
 pub use fof_source::{FofSourceNode, FofSourceParams, Formant, MAX_FOF_GRAINS, MAX_FORMANTS};
+pub use glottal_pulse::{GlottalOutput, GlottalPulseNode, GlottalPulseParams};
 pub use granular_source::{GranularSourceNode, GranularSourceParams, MAX_GRAINS};
 pub use helmholtz_resonator::{HelmholtzResonatorNode, HelmholtzResonatorParams};
 pub use impulse_train::{ImpulseTrainNode, ImpulseTrainParams};
