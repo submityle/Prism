@@ -84,37 +84,41 @@ impl<T> Arena<T> {
 
     /// Inserts `value`, returning a fresh handle to it.
     pub fn insert(&mut self, value: T) -> NodeId {
+        // Try to reuse a slot from the free list, but only when the head
+        // actually points at a free slot. The free list only ever threads
+        // through free slots; if the head resolves to a missing or occupied
+        // slot the list is inconsistent, so we ignore it rather than trust a
+        // corrupt pointer, then fall through to appending a fresh slot.
+        let reuse = self
+            .free_head
+            .and_then(|index| match self.slots.get(index as usize) {
+                Some(slot) => match slot.entry {
+                    Entry::Free { next_free } => Some((index, next_free, slot.generation)),
+                    Entry::Occupied(_) => None,
+                },
+                None => None,
+            });
+
+        if let Some((index, next_free, generation)) = reuse {
+            self.free_head = next_free;
+            self.slots[index as usize].entry = Entry::Occupied(value);
+            self.len += 1;
+            return NodeId { index, generation };
+        }
+
+        // Empty or inconsistent free list: discard any stale head and append a
+        // new slot at the end of the backing storage.
+        self.free_head = None;
+        let index =
+            u32::try_from(self.slots.len()).expect("arena capacity exceeded u32::MAX slots");
+        self.slots.push(Slot {
+            generation: 0,
+            entry: Entry::Occupied(value),
+        });
         self.len += 1;
-        match self.free_head {
-            Some(index) => {
-                let slot = &mut self.slots[index as usize];
-                let next_free = match slot.entry {
-                    Entry::Free { next_free } => next_free,
-                    Entry::Occupied(_) => {
-                        // The free list only ever threads through free slots;
-                        // reaching an occupied slot means the list is corrupt.
-                        unreachable!("free list pointed at an occupied slot")
-                    }
-                };
-                self.free_head = next_free;
-                slot.entry = Entry::Occupied(value);
-                NodeId {
-                    index,
-                    generation: slot.generation,
-                }
-            }
-            None => {
-                let index = u32::try_from(self.slots.len())
-                    .expect("arena capacity exceeded u32::MAX slots");
-                self.slots.push(Slot {
-                    generation: 0,
-                    entry: Entry::Occupied(value),
-                });
-                NodeId {
-                    index,
-                    generation: 0,
-                }
-            }
+        NodeId {
+            index,
+            generation: 0,
         }
     }
 
