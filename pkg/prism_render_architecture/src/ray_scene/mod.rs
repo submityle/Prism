@@ -698,6 +698,11 @@
 //!   [`gpu_trace_kernel::SOFTWARE_BVH_TRACE_WESL`]) plus its bit-exact `CPU`
 //!   dispatch twin, the software fallback of the ray-tracing backend and the
 //!   first real `GPU` traversal kernel in `ray_scene`.
+//! - [`hardware_ray_query`] — the hardware-ray-tracing (`HWRT`) tier: the
+//!   first real `rayQuery` `WESL` kernel
+//!   ([`hardware_ray_query::HARDWARE_RAY_QUERY_WESL`]), which delegates
+//!   traversal to the device `acceleration_structure` and writes the shared
+//!   [`gpu_trace_io`] hit record, aligning with `Lumen`-style `HWRT`.
 
 pub mod acceleration;
 pub mod backend;
@@ -806,6 +811,7 @@ pub mod footprint;
 pub mod gpu_layout;
 pub mod gpu_trace_io;
 pub mod gpu_trace_kernel;
+pub mod hardware_ray_query;
 pub mod motion;
 pub mod motion_gpu_layout;
 pub mod ray_offset;
