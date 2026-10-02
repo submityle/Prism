@@ -30,6 +30,13 @@
 //!   along the rotation-minimizing bitangent, with an arc-length `v` coordinate
 //!   (see [`ribbon`]).
 //!
+//! * [`GpuRibbonTapered`] evaluates
+//!   [`build_ribbon_tapered`](prism_render_architecture::hair::ribbon::build_ribbon_tapered),
+//!   the tapered sibling of [`GpuRibbon`]: it derives each control point's
+//!   half-width from the authored root/tip radii
+//!   (`radius_at(i / (n - 1))`) so the `Cards` proxy narrows root→tip, then
+//!   meshes it one thread per strand (see [`ribbon_tapered`]).
+//!
 //! * [`GpuSdfCollider`] evaluates
 //!   [`push_out_of_field`](prism_render_architecture::hair::sdf_collision::push_out_of_field),
 //!   pushing a batch of query points out of a union SDF (sphere, capsule,
@@ -727,6 +734,7 @@ pub mod resample;
 pub mod rest_darboux;
 pub mod rest_helix;
 pub mod ribbon;
+pub mod ribbon_tapered;
 pub mod root_bind;
 pub mod root_resolve;
 pub mod rt_curve_aabb;
@@ -819,6 +827,7 @@ pub use resample::{reference_resample_groom, reference_resample_strand, GpuHairR
 pub use rest_darboux::{reference_rest_darboux, DarbouxStrand, GpuRestDarboux};
 pub use rest_helix::{GpuRestHelix, GpuRestHelixOut, GpuRestHelixStrand};
 pub use ribbon::{GpuRibbon, GpuRibbonMesh, RibbonStrandInput};
+pub use ribbon_tapered::{GpuRibbonTapered, TaperedRibbonStrandInput};
 pub use root_bind::GpuHairRootBind;
 pub use root_resolve::GpuHairRootResolve;
 pub use rt_curve_aabb::{reference_segment_aabb, GpuHairRtCurveAabb};

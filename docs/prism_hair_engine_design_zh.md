@@ -243,7 +243,7 @@ fallback:
 - **正确性模型**：核心为闭式几何、无超越调用，`CPU`/`GPU` 算同一公式，但**非位精确**（`GPU` 可 fuse mul-add，扰动低位 mantissa 几 `ULP`），故每分量断言容差 `abs_diff<1e-4` 或 `rel_diff<1e-3`；迭代类 kernel 参数保守以控 fma 累积。每个 parity 测试均带物理断言 + 非平凡断言（防 no-op 蒙混）+ 空/退化输入用例。
 - **可移植性**：只用 `sqrt`/`min`/`max`/`clamp`/`dot`/mul-add 的 core-`WGSL` 子集——无 `exp`/`pow`/可选 device feature——故孪生在 Metal/Vulkan/DX12 不改即跑。
 
-当前已落 **82 个真机对拍孪生**（Apple M2 Metal 全绿 **565 passed**）：
+当前已落 **83 个真机对拍孪生**（Apple M2 Metal 全绿 **572 passed**）：
 
 | kernel | 对拍的 `CPU` golden | 语义 | 真机单测 |
 |---|---|---|---|
@@ -251,6 +251,7 @@ fallback:
 | `wind` | `wind_acceleration` | 稳态 + 阵风 + 湍流风场耦合（一线程一 sample point/time/field 三元组） | 4 |
 | `frames` | `build_strand_frames` | double-reflection `RMF` 传输（一线程一 strand，逐控制点正交 tangent/normal/bitangent 基） | 3 |
 | `ribbon` | `build_ribbon` | `Cards` LOD ribbon 代理网格化（一线程一 strand，每控制点 ±radius 沿 bitangent 两边顶点 + 弧长 `v`） | 4 |
+| `ribbon_tapered` | `build_ribbon_tapered` | `Cards` LOD ribbon 代理的**锥形姊妹**（`ribbon` 之于 `mesh_shell_tapered` 的 ribbon 对应）：半宽不再由外部逐点 radius 给定，而是 kernel 内每控制点取 `StrandAttributes::radius_at(t=i/(n-1))`=`clamp(t,0,1)` 后 `root_radius+(tip_radius-root_radius)·t` 的线性 taper，使 Cards 代理从发根到发梢按授权半径收窄；一线程一 strand，每控制点 ±r 沿 bitangent 两边顶点、携带切线、弧长 `v`（零长股退化均匀 `v`），三角 winding 纯整数 host 重建 `assert_eq!` 精确、positions/tangents/uvs 含乘加 fma 故 `abs<1e-4\|\|rel<1e-3` 容差；attrs stride 9（pos3+tangent3+bitangent3，无 radius），`TaperedRibbonStrand` 描述符 32B 携 root/tip 半径；复用 `GpuRibbonMesh` 输出，空批/全无效不 dispatch。7 用例 Apple M2 全绿 | 7 |
 | `sdf_collision` | `push_out_of_field` | union `SDF`（sphere/capsule/half-space/box）沿梯度推出（一线程一 point，更紧的体碰撞档） | 3 |
 | `self_collision_jacobi` | `accumulate_jacobi_corrections` | 并行安全（Jacobi）自碰撞修正累加（一线程一 particle，host 建 per-particle 邻居切片保 reduction 序） | 3 |
 | `strand_metrics` | `strand_arc_length` / `strand_curvature` | 每 render strand 折线折叠成弧长 + 无超越转角（一线程一 strand，density/decimation LOD 排序消费的两个廉价标量） | 5 |
