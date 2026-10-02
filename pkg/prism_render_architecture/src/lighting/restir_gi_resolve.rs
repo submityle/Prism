@@ -217,6 +217,100 @@ pub fn reproject_gi_history(
     Some(reservoir)
 }
 
+/// Default relative view-depth tolerance for accepting a GI spatial neighbor.
+/// A neighbor is rejected when `|z_n − z_c| > tol · z_c`.
+pub const DEFAULT_GI_SPATIAL_DEPTH_REL_TOLERANCE: f32 = 0.1;
+
+/// Default minimum normal agreement (cosine) for accepting a GI spatial
+/// neighbor, ≈25°.
+pub const DEFAULT_GI_SPATIAL_NORMAL_COS_TOLERANCE: f32 = 0.906;
+
+/// Tunables for the GI spatial-neighbor admissibility gate.
+///
+/// These mirror the temporal gate's tolerances but apply between two same-frame
+/// pixels rather than across a reprojection. Spatial reuse stays unbiased for
+/// *any* neighbor set (the combine retargets each sample via the reconnection
+/// Jacobian), so this gate is purely variance reduction / quality control: it
+/// drops neighbors straddling a depth silhouette or normal crease whose samples
+/// would almost always be rejected at this pixel.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GiSpatialParams {
+    /// Relative view-depth tolerance: a neighbor is rejected when its depth
+    /// differs from the center's by more than `depth_rel_tolerance · z_center`.
+    pub depth_rel_tolerance: f32,
+    /// Minimum normal agreement (cosine) between center and neighbor normals.
+    pub normal_cos_tolerance: f32,
+}
+
+impl Default for GiSpatialParams {
+    fn default() -> Self {
+        Self {
+            depth_rel_tolerance: DEFAULT_GI_SPATIAL_DEPTH_REL_TOLERANCE,
+            normal_cos_tolerance: DEFAULT_GI_SPATIAL_NORMAL_COS_TOLERANCE,
+        }
+    }
+}
+
+/// Whether a neighbor GI surface is geometrically compatible with the center
+/// pixel and may be folded into its reservoir.
+///
+/// A neighbor is admissible when both surfaces are valid (finite, in front of
+/// the camera), their view depths agree to within `params.depth_rel_tolerance`
+/// (relative to the center depth), and their normals agree to within
+/// `params.normal_cos_tolerance`. This is the same disocclusion-style test
+/// [`reproject_gi_history`] applies to temporal history, evaluated here between
+/// two same-frame pixels. It inspects surface geometry only — never the held
+/// sample — so it cannot bias the estimator.
+#[must_use]
+pub fn gi_spatial_admissible(
+    center: GiSurface,
+    neighbor: GiSurface,
+    params: GiSpatialParams,
+) -> bool {
+    if !center.is_valid() || !neighbor.is_valid() {
+        return false;
+    }
+    let depth_diff = abs_f32(neighbor.view_depth - center.view_depth);
+    if depth_diff > params.depth_rel_tolerance * center.view_depth {
+        return false;
+    }
+    dot3(center.shading_point.normal, neighbor.shading_point.normal) >= params.normal_cos_tolerance
+}
+
+/// Selects up to `max` geometrically admissible, non-empty GI neighbors for the
+/// center pixel, preserving the caller's neighbor order.
+///
+/// `neighbors` is this frame's candidate neighbor set (each a finalized
+/// reservoir paired with its surface); the caller chose *which* screen texels
+/// those are. We keep only the ones that pass [`gi_spatial_admissible`] and
+/// still hold a sample, stopping once `max` have been collected (typically
+/// `budget.spatial_neighbors`). The returned reservoirs are ready to fold into
+/// [`resolve_gi`]'s spatial stage.
+#[must_use]
+pub fn gather_admissible_gi_neighbors(
+    center: GiSurface,
+    neighbors: &[GiGeomReservoir],
+    max: usize,
+    params: GiSpatialParams,
+) -> Vec<GiGeomReservoir> {
+    let mut out: Vec<GiGeomReservoir> = Vec::with_capacity(max.min(neighbors.len()));
+    if max == 0 {
+        return out;
+    }
+    for neighbor in neighbors {
+        if out.len() >= max {
+            break;
+        }
+        if neighbor.reservoir.is_empty() {
+            continue;
+        }
+        if gi_spatial_admissible(center, neighbor.surface, params) {
+            out.push(*neighbor);
+        }
+    }
+    out
+}
+
 /// Runs the full `ReSTIR` GI resolve for one pixel and returns a finalized
 /// reservoir.
 ///
@@ -228,7 +322,10 @@ pub fn reproject_gi_history(
 ///   vector, or `None` on a first frame / off-screen reprojection. Reuse is
 ///   skipped entirely unless `budget.temporal_reuse` is set.
 /// * `spatial` — this frame's neighbor reservoirs; up to
-///   `budget.spatial_neighbors` non-empty ones are folded in.
+///   `budget.spatial_neighbors` geometrically admissible, non-empty ones are
+///   folded in (screened by `spatial_params`).
+/// * `spatial_params` — geometric admissibility tolerances applied to the
+///   spatial neighbors before they are folded in (see [`GiSpatialParams`]).
 /// * `target` — the target function `p̂`: `target(shading_point, sample)`
 ///   returns the indirect contribution estimate of `sample` at `shading_point`.
 ///   It is re-evaluated at the relevant shading point for every reuse source so
@@ -246,6 +343,7 @@ pub fn resolve_gi<T>(
     spatial: &[GiGeomReservoir],
     budget: ReservoirBudget,
     params: GiTemporalParams,
+    spatial_params: GiSpatialParams,
     mut target: T,
     rng: &mut Rng,
 ) -> GiReservoir
@@ -275,21 +373,23 @@ where
         _ => initial,
     };
 
-    // 3. Spatial reuse: fold in this frame's neighbor reservoirs.
-    let take = (budget.spatial_neighbors as usize).min(spatial.len());
-    if take == 0 {
+    // 3. Spatial reuse: fold in this frame's geometrically admissible
+    //    neighbors. The gate screens by surface geometry only (never the held
+    //    sample), so dropping disoccluded neighbors removes variance without
+    //    biasing the estimator, and it runs before any spatial RNG draw.
+    let admissible = gather_admissible_gi_neighbors(
+        current,
+        spatial,
+        budget.spatial_neighbors as usize,
+        spatial_params,
+    );
+    if admissible.is_empty() {
         return temporal;
     }
 
-    let mut neighbors: Vec<GiReuseSource> = Vec::with_capacity(take);
-    for neighbor in &spatial[..take] {
-        if neighbor.reservoir.is_empty() {
-            continue;
-        }
+    let mut neighbors: Vec<GiReuseSource> = Vec::with_capacity(admissible.len());
+    for neighbor in &admissible {
         neighbors.push(neighbor.as_source());
-    }
-    if neighbors.is_empty() {
-        return temporal;
     }
 
     let sources = gather_spatial_sources(GiReuseSource::new(temporal, center), &neighbors, budget);
@@ -507,6 +607,7 @@ mod tests {
                 &[],
                 budget(16, 0, false),
                 GiTemporalParams::default(),
+                GiSpatialParams::default(),
                 target_pdf_at,
                 &mut rng,
             );
@@ -546,6 +647,7 @@ mod tests {
                 &[],
                 budget(16, 0, true),
                 GiTemporalParams::default(),
+                GiSpatialParams::default(),
                 target_pdf_at,
                 &mut rng,
             );
@@ -591,6 +693,7 @@ mod tests {
                 &spatial,
                 budget(16, 2, true),
                 GiTemporalParams::default(),
+                GiSpatialParams::default(),
                 target_pdf_at,
                 &mut rng,
             );
@@ -621,6 +724,7 @@ mod tests {
             &[],
             budget(16, 0, true),
             GiTemporalParams::default(),
+            GiSpatialParams::default(),
             target_pdf_at,
             &mut rng1,
         );
@@ -633,6 +737,7 @@ mod tests {
             &[],
             budget(16, 0, true),
             GiTemporalParams::default(),
+            GiSpatialParams::default(),
             target_pdf_at,
             &mut rng2,
         );
@@ -651,6 +756,7 @@ mod tests {
             &[],
             budget(16, 2, true),
             GiTemporalParams::default(),
+            GiSpatialParams::default(),
             target_pdf_at,
             &mut rng,
         );
@@ -676,6 +782,7 @@ mod tests {
             &[neighbor],
             budget(16, 0, false),
             GiTemporalParams::default(),
+            GiSpatialParams::default(),
             target_pdf_at,
             &mut rng1,
         );
@@ -688,6 +795,7 @@ mod tests {
             &[],
             budget(16, 0, false),
             GiTemporalParams::default(),
+            GiSpatialParams::default(),
             target_pdf_at,
             &mut rng2,
         );
@@ -698,6 +806,192 @@ mod tests {
     fn default_params_are_sane() {
         let p = GiTemporalParams::default();
         assert_eq!(p.max_history_m, DEFAULT_GI_MAX_HISTORY_M);
+        assert!(p.depth_rel_tolerance > 0.0 && p.depth_rel_tolerance < 1.0);
+        assert!(p.normal_cos_tolerance > 0.0 && p.normal_cos_tolerance < 1.0);
+    }
+
+    // ---------- spatial admissibility gate ----------
+
+    #[test]
+    fn gi_spatial_admits_matching_surface() {
+        let c = surface([0.0, 0.0, 0.0]);
+        // Within 10% depth and well inside the normal cone.
+        let n = GiSurface::new(
+            c.view_depth * 1.05,
+            ShadingPoint::new([0.3, 0.0, 0.0], FRONT),
+        );
+        assert!(gi_spatial_admissible(c, n, GiSpatialParams::default()));
+    }
+
+    #[test]
+    fn gi_spatial_rejects_depth_silhouette() {
+        let c = surface([0.0, 0.0, 0.0]);
+        // 50% deeper than the default 10% tolerance allows.
+        let n = GiSurface::new(
+            c.view_depth * 1.5,
+            ShadingPoint::new([0.3, 0.0, 0.0], FRONT),
+        );
+        assert!(!gi_spatial_admissible(c, n, GiSpatialParams::default()));
+    }
+
+    #[test]
+    fn gi_spatial_rejects_normal_crease() {
+        let c = surface([0.0, 0.0, 0.0]);
+        // Orthogonal normal (90°) is far outside the ≈25° cone.
+        let n = GiSurface::new(
+            c.view_depth,
+            ShadingPoint::new([0.3, 0.0, 0.0], [1.0, 0.0, 0.0]),
+        );
+        assert!(!gi_spatial_admissible(c, n, GiSpatialParams::default()));
+    }
+
+    #[test]
+    fn gi_spatial_rejects_background() {
+        let c = surface([0.0, 0.0, 0.0]);
+        // Sky / background neighbor (non-positive depth) never reuses.
+        let bg = GiSurface::new(0.0, ShadingPoint::new([0.3, 0.0, 0.0], FRONT));
+        assert!(!gi_spatial_admissible(c, bg, GiSpatialParams::default()));
+        // A center that is itself background rejects everything.
+        assert!(!gi_spatial_admissible(
+            GiSurface::new(-1.0, c.shading_point),
+            surface([0.3, 0.0, 0.0]),
+            GiSpatialParams::default()
+        ));
+    }
+
+    #[test]
+    fn gather_gi_filters_empty_and_inadmissible_and_caps() {
+        let center = surface([0.0, 0.0, 0.0]);
+        let mut rng = Rng::new(71);
+        let good0 = GiGeomReservoir::new(
+            build_reservoir(ShadingPoint::new([0.2, 0.0, 0.0], FRONT), 8, &mut rng),
+            GiSurface::new(
+                center.view_depth * 1.02,
+                ShadingPoint::new([0.2, 0.0, 0.0], FRONT),
+            ),
+        );
+        let empty = GiGeomReservoir::new(GiReservoir::empty(), center);
+        let deep = GiGeomReservoir::new(
+            build_reservoir(ShadingPoint::new([0.4, 0.0, 0.0], FRONT), 8, &mut rng),
+            GiSurface::new(
+                center.view_depth * 3.0,
+                ShadingPoint::new([0.4, 0.0, 0.0], FRONT),
+            ),
+        );
+        let good1 = GiGeomReservoir::new(
+            build_reservoir(ShadingPoint::new([-0.2, 0.0, 0.0], FRONT), 8, &mut rng),
+            GiSurface::new(
+                center.view_depth * 0.98,
+                ShadingPoint::new([-0.2, 0.0, 0.0], FRONT),
+            ),
+        );
+        let neighbors = [good0, empty, deep, good1];
+        let kept =
+            gather_admissible_gi_neighbors(center, &neighbors, 8, GiSpatialParams::default());
+        assert_eq!(kept.len(), 2);
+        // Order preserved: good0 then good1 (empty and deep screened out).
+        assert_eq!(kept[0].surface, good0.surface);
+        assert_eq!(kept[1].surface, good1.surface);
+        // Cap honored, and max = 0 selects nothing.
+        let capped =
+            gather_admissible_gi_neighbors(center, &neighbors, 1, GiSpatialParams::default());
+        assert_eq!(capped.len(), 1);
+        assert_eq!(capped[0].surface, good0.surface);
+        assert!(
+            gather_admissible_gi_neighbors(center, &neighbors, 0, GiSpatialParams::default())
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn disoccluded_spatial_neighbor_is_dropped() {
+        // A neighbor across a depth silhouette is screened out before any
+        // spatial RNG draw, so the resolve matches the no-neighbor estimate for
+        // the same seed.
+        let sp = ShadingPoint::new([0.0, 0.0, 0.0], FRONT);
+        let current = surface(sp.position);
+        let mut rng_n = Rng::new(21);
+        let bad = GiGeomReservoir::new(
+            build_reservoir(ShadingPoint::new([0.3, 0.0, 0.0], FRONT), 16, &mut rng_n),
+            GiSurface::new(
+                current.view_depth * 3.0,
+                ShadingPoint::new([0.3, 0.0, 0.0], FRONT),
+            ),
+        );
+        let mut rng1 = Rng::new(321);
+        let cands1 = candidates_at(sp, 16, &mut rng1);
+        let with_bad = resolve_gi(
+            current,
+            &cands1,
+            None,
+            &[bad],
+            budget(16, 4, false),
+            GiTemporalParams::default(),
+            GiSpatialParams::default(),
+            target_pdf_at,
+            &mut rng1,
+        );
+        let mut rng2 = Rng::new(321);
+        let cands2 = candidates_at(sp, 16, &mut rng2);
+        let without = resolve_gi(
+            current,
+            &cands2,
+            None,
+            &[],
+            budget(16, 4, false),
+            GiTemporalParams::default(),
+            GiSpatialParams::default(),
+            target_pdf_at,
+            &mut rng2,
+        );
+        assert!(abs(with_bad.w - without.w) < 1e-6);
+        assert_eq!(with_bad.m, without.m);
+    }
+
+    #[test]
+    fn admissible_spatial_neighbor_changes_estimate() {
+        // Sanity companion to the drop test: a geometrically compatible
+        // neighbor is actually folded in, so the resolve differs from the
+        // no-neighbor estimate for the same seed.
+        let sp = ShadingPoint::new([0.0, 0.0, 0.0], FRONT);
+        let current = surface(sp.position);
+        let mut rng_n = Rng::new(22);
+        let good = GiGeomReservoir::new(
+            build_reservoir(ShadingPoint::new([0.3, 0.0, 0.0], FRONT), 16, &mut rng_n),
+            surface([0.3, 0.0, 0.0]),
+        );
+        let mut rng1 = Rng::new(321);
+        let cands1 = candidates_at(sp, 16, &mut rng1);
+        let with_good = resolve_gi(
+            current,
+            &cands1,
+            None,
+            &[good],
+            budget(16, 4, false),
+            GiTemporalParams::default(),
+            GiSpatialParams::default(),
+            target_pdf_at,
+            &mut rng1,
+        );
+        let mut rng2 = Rng::new(321);
+        let cands2 = candidates_at(sp, 16, &mut rng2);
+        let without = resolve_gi(
+            current,
+            &cands2,
+            None,
+            &[],
+            budget(16, 4, false),
+            GiTemporalParams::default(),
+            GiSpatialParams::default(),
+            target_pdf_at,
+            &mut rng2,
+        );
+        assert!(with_good.m > without.m);
+    }
+
+    #[test]
+    fn gi_spatial_default_params_are_sane() {
+        let p = GiSpatialParams::default();
         assert!(p.depth_rel_tolerance > 0.0 && p.depth_rel_tolerance < 1.0);
         assert!(p.normal_cos_tolerance > 0.0 && p.normal_cos_tolerance < 1.0);
     }
