@@ -501,7 +501,7 @@ mod tests {
 
     #[inline]
     fn ops_sin(x: Sample) -> Sample {
-        bevy_math::ops::sin(x)
+        ops::sin(x)
     }
 
     fn sine_buffer(freq: Sample, amp: Sample, frames: usize) -> AudioBuffer {

@@ -447,7 +447,7 @@ mod tests {
 
     #[inline]
     fn ops_sin(x: Sample) -> Sample {
-        bevy_math::ops::sin(x)
+        ops::sin(x)
     }
 
     /// Fills a mono buffer with `frames` samples of a sine at `freq` Hz and
