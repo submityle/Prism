@@ -15,6 +15,7 @@
 //! the surface, and `normal` is the (viewer-facing) shading normal. All
 //! quantities are linear radiance scales, never gamma-encoded.
 
+use super::dielectric::{fresnel_dielectric, refract};
 use super::microfacet::{fresnel_schlick, GgxIsotropic};
 use super::sampler::{cosine_hemisphere_pdf, cosine_sample_hemisphere, Rng};
 use super::{Vec3, EPS_LEN_SQ, INV_PI};
@@ -49,6 +50,22 @@ pub enum Bsdf {
         /// Perceptual roughness in `[0, 1]`.
         roughness: f32,
     },
+    /// Smooth (perfectly specular) dielectric interface: glass, water, or a
+    /// clear coat. Light is either mirror-reflected or refracted through the
+    /// surface, with the split governed by the angle-dependent `Fresnel`
+    /// equations (see [`crate::reference_pt::dielectric`]). Both outgoing lobes
+    /// are Dirac deltas, so [`Bsdf::evaluate`]/[`Bsdf::pdf`] are zero and the
+    /// surface is sampled, never connected to lights by next-event estimation.
+    Dielectric {
+        /// Relative index of refraction `eta_t / eta_i` of the interior medium
+        /// over the exterior (e.g. `1.5` for air-to-glass). Must be positive
+        /// and not equal to `1` for the interface to refract.
+        ior: f32,
+        /// Per-channel tint applied to the mirror-reflected component.
+        reflectance: Vec3,
+        /// Per-channel tint applied to the refracted (transmitted) component.
+        transmittance: Vec3,
+    },
 }
 
 /// The outcome of importance-sampling a [`Bsdf`].
@@ -72,7 +89,7 @@ impl Bsdf {
     /// `true` when this lobe is a perfectly specular (delta) reflector.
     #[must_use]
     pub const fn is_specular(&self) -> bool {
-        matches!(self, Self::Mirror { .. })
+        matches!(self, Self::Mirror { .. } | Self::Dielectric { .. })
     }
 
     /// Evaluates the `BRDF` value `f_r(wo, wi)` for a fixed direction pair.
@@ -90,7 +107,9 @@ impl Bsdf {
                     Vec3::ZERO
                 }
             }
-            Self::Mirror { .. } => Vec3::ZERO,
+            // A perfect mirror and a specular dielectric both keep their energy
+            // in Dirac deltas that an arbitrary `wi` misses.
+            Self::Mirror { .. } | Self::Dielectric { .. } => Vec3::ZERO,
             Self::GgxConductor {
                 reflectance,
                 roughness,
@@ -111,7 +130,7 @@ impl Bsdf {
                     0.0
                 }
             }
-            Self::Mirror { .. } => 0.0,
+            Self::Mirror { .. } | Self::Dielectric { .. } => 0.0,
             Self::GgxConductor { roughness, .. } => {
                 let cos_o = normal.dot(wo);
                 let cos_i = normal.dot(wi);
@@ -137,6 +156,9 @@ impl Bsdf {
     pub fn sample(&self, wo: Vec3, normal: Vec3, rng: &mut Rng) -> Option<BsdfSample> {
         match self {
             Self::Lambert { albedo } => {
+                // The integrator passes the raw geometric normal; orient it into
+                // the view hemisphere so a back-facing hit still scatters.
+                let normal = normal.faced_toward(wo);
                 if normal.dot(wo) <= 0.0 {
                     return None;
                 }
@@ -153,6 +175,8 @@ impl Bsdf {
                 })
             }
             Self::Mirror { reflectance } => {
+                // Orient the raw geometric normal into the view hemisphere.
+                let normal = normal.faced_toward(wo);
                 let cos_o = normal.dot(wo);
                 if cos_o <= 0.0 {
                     return None;
@@ -176,6 +200,11 @@ impl Bsdf {
                 reflectance,
                 roughness,
             } => Self::ggx_sample(*reflectance, *roughness, wo, normal, rng),
+            Self::Dielectric {
+                ior,
+                reflectance,
+                transmittance,
+            } => Self::dielectric_sample(*ior, *reflectance, *transmittance, wo, normal, rng),
         }
     }
 
@@ -217,6 +246,8 @@ impl Bsdf {
         normal: Vec3,
         rng: &mut Rng,
     ) -> Option<BsdfSample> {
+        // Orient the raw geometric normal into the view hemisphere.
+        let normal = normal.faced_toward(wo);
         let cos_o = normal.dot(wo);
         if cos_o <= 0.0 {
             return None;
@@ -248,6 +279,73 @@ impl Bsdf {
             pdf,
             specular: false,
         })
+    }
+
+    /// Importance-samples a smooth dielectric by stochastically choosing the
+    /// reflected or refracted lobe in proportion to the `Fresnel` reflectance.
+    ///
+    /// The interface side is recovered from the *raw* geometric `normal`: a
+    /// positive `normal . wo` means the ray is outside entering the medium, a
+    /// negative one means it is inside leaving it. The randomly chosen branch
+    /// probability (`fr` for reflection, `1 - fr` for transmission) cancels the
+    /// matching `Fresnel` factor, so the returned `value` carries only the tint
+    /// and the radiance-space solid-angle compression `eta^2` for transmission.
+    fn dielectric_sample(
+        ior: f32,
+        reflectance: Vec3,
+        transmittance: Vec3,
+        wo: Vec3,
+        normal: Vec3,
+        rng: &mut Rng,
+    ) -> Option<BsdfSample> {
+        // Decide which side of the interface the view ray is on, then orient the
+        // normal to face the view direction (the incident side).
+        let entering = normal.dot(wo) > 0.0;
+        let n = if entering { normal } else { normal.negate() };
+        let cos_o = n.dot(wo);
+        if cos_o <= 0.0 {
+            return None;
+        }
+        // Exterior index is 1 (vacuum/air); interior index is `ior`.
+        let (eta_i, eta_t) = if entering { (1.0, ior) } else { (ior, 1.0) };
+        let fr = fresnel_dielectric(cos_o, eta_i, eta_t);
+        if rng.next_f32() < fr {
+            // Reflect: mirror the view direction about the oriented normal. The
+            // chosen-branch probability `fr` cancels the Fresnel reflectance, so
+            // only the tint survives in the folded delta weight.
+            let wi = wo.negate().reflect(n).normalize_or_zero();
+            let cos_i = n.dot(wi);
+            if cos_i <= 0.0 {
+                return None;
+            }
+            Some(BsdfSample {
+                direction: wi,
+                value: reflectance.scale(1.0 / cos_i),
+                pdf: 1.0,
+                specular: true,
+            })
+        } else {
+            // Refract through the interface. `eta` is the incident-over-
+            // transmitted index ratio; `refract` returns `None` under total
+            // internal reflection (handled above by `fr == 1`, but guarded).
+            let eta = eta_i / eta_t;
+            let wi = refract(wo, n, eta)?;
+            let cos_i = n.dot(wi).abs();
+            if cos_i <= 0.0 {
+                return None;
+            }
+            // Radiance transport across an index change is compressed by the
+            // square of the relative index (`PBRT` radiance-mode `eta^2`). The
+            // `(1 - fr)` branch probability cancels the transmitted Fresnel
+            // factor `1 - fr`.
+            let factor = eta * eta / cos_i;
+            Some(BsdfSample {
+                direction: wi,
+                value: transmittance.scale(factor),
+                pdf: 1.0,
+                specular: true,
+            })
+        }
     }
 }
 
@@ -383,11 +481,149 @@ mod tests {
     }
 
     #[test]
-    fn sample_below_surface_returns_none() {
+    fn sample_degenerate_view_returns_none() {
+        // The sampler now orients the raw normal toward `wo`, so a back-facing
+        // view still scatters; only a zero-length view direction is degenerate
+        // (cos_o == 0) and must terminate the path.
         let bsdf = Bsdf::Lambert { albedo: Vec3::ONE };
         let mut rng = Rng::seed(3);
+        assert!(bsdf.sample(Vec3::ZERO, N, &mut rng).is_none());
+        // A back-facing geometric normal is re-oriented and still yields a valid
+        // diffuse sample for a legitimate view direction.
         let wo = Vec3::new(0.0, -1.0, 0.0);
-        assert!(bsdf.sample(wo, N, &mut rng).is_none());
+        let back = Vec3::new(0.0, 1.0, 0.0);
+        assert!(bsdf.sample(wo, back, &mut rng).is_some());
+    }
+
+    #[test]
+    fn dielectric_is_specular() {
+        let glass = Bsdf::Dielectric {
+            ior: 1.5,
+            reflectance: Vec3::ONE,
+            transmittance: Vec3::ONE,
+        };
+        assert!(glass.is_specular());
+        // Delta lobes never evaluate or report a density for an arbitrary pair.
+        assert_eq!(glass.evaluate(N, N, N), Vec3::ZERO);
+        assert!(glass.pdf(N, N, N) < 1e-9);
+    }
+
+    #[test]
+    fn dielectric_normal_incidence_mostly_transmits() {
+        // At normal incidence only ~4% of air->glass energy reflects, so the
+        // overwhelming majority of samples refract straight through.
+        let glass = Bsdf::Dielectric {
+            ior: 1.5,
+            reflectance: Vec3::ONE,
+            transmittance: Vec3::ONE,
+        };
+        let mut rng = Rng::seed(321);
+        let wo = N;
+        let count = 200_000u32;
+        let mut transmitted = 0u32;
+        for _ in 0..count {
+            let s = glass.sample(wo, N, &mut rng).expect("glass always samples");
+            assert!(s.specular);
+            if s.direction.y < 0.0 {
+                transmitted += 1;
+            }
+        }
+        let frac = f64::from(transmitted) / f64::from(count);
+        assert!(
+            (frac - 0.96).abs() < 1e-2,
+            "transmitted fraction {frac} should be ~0.96 at normal incidence"
+        );
+    }
+
+    #[test]
+    fn dielectric_total_internal_reflection_never_transmits() {
+        // From inside glass (ior reversed) a shallow view angle is past the
+        // critical angle, so every sample reflects back into the medium.
+        let glass = Bsdf::Dielectric {
+            ior: 1.5,
+            reflectance: Vec3::ONE,
+            transmittance: Vec3::ONE,
+        };
+        let mut rng = Rng::seed(654);
+        // View from below the surface at a shallow angle (inside the medium).
+        let wo = Vec3::new(0.95, -0.3122499, 0.0).normalize_or_zero();
+        for _ in 0..50_000 {
+            let s = glass.sample(wo, N, &mut rng).expect("TIR still reflects");
+            // Reflection stays on the incident (below-surface) side.
+            assert!(
+                s.direction.y < 0.0,
+                "TIR must reflect, got {:?}",
+                s.direction
+            );
+            assert!(s.specular);
+        }
+    }
+
+    #[test]
+    fn dielectric_reflection_carries_reflectance_tint() {
+        // Force the reflection branch via a grazing view (high Fresnel) and a
+        // distinct tint, then confirm the folded delta weight equals the tint.
+        let tint = Vec3::new(0.8, 0.6, 0.4);
+        let glass = Bsdf::Dielectric {
+            ior: 1.5,
+            reflectance: tint,
+            transmittance: Vec3::ONE,
+        };
+        let mut rng = Rng::seed(42);
+        let wo = Vec3::new(0.9998, 0.02, 0.0).normalize_or_zero();
+        let mut saw_reflection = false;
+        for _ in 0..5_000 {
+            let s = glass.sample(wo, N, &mut rng).expect("sample");
+            if s.direction.y > 0.0 {
+                // Reflected lobe: weight value*cos/pdf must equal the tint.
+                let cos_i = N.dot(s.direction);
+                let weight = s.value.scale(cos_i / s.pdf);
+                assert!((weight.x - tint.x).abs() < 1e-5);
+                assert!((weight.y - tint.y).abs() < 1e-5);
+                assert!((weight.z - tint.z).abs() < 1e-5);
+                saw_reflection = true;
+                break;
+            }
+        }
+        assert!(
+            saw_reflection,
+            "a grazing view should reflect at least once"
+        );
+    }
+
+    #[test]
+    fn dielectric_transmission_weight_includes_radiance_compression() {
+        // Entering a denser medium at normal incidence, the transmitted
+        // radiance weight is transmittance * eta^2 / cos_i; with eta = 1/1.5
+        // and cos_i = 1 that is below one (radiance is compressed into a
+        // narrower solid angle).
+        let tint = Vec3::splat(0.9);
+        let glass = Bsdf::Dielectric {
+            ior: 1.5,
+            reflectance: Vec3::ONE,
+            transmittance: tint,
+        };
+        let mut rng = Rng::seed(7);
+        let wo = N;
+        let mut saw_transmission = false;
+        for _ in 0..5_000 {
+            let s = glass.sample(wo, N, &mut rng).expect("sample");
+            if s.direction.y < 0.0 {
+                let cos_i = N.negate().dot(s.direction);
+                let weight = s.value.scale(cos_i / s.pdf);
+                let eta = 1.0f32 / 1.5;
+                let expected = tint.x * eta * eta;
+                assert!(
+                    (weight.x - expected).abs() < 1e-5,
+                    "transmission weight {} should equal {expected}",
+                    weight.x
+                );
+                assert!(weight.x < tint.x, "radiance compression must dim the tint");
+                saw_transmission = true;
+                break;
+            }
+        }
+        assert!(saw_transmission, "normal incidence should transmit");
     }
 
     #[test]

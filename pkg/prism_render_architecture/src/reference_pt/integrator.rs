@@ -234,18 +234,25 @@ impl PathIntegrator {
             let wo = Vec3::from_array(ray.direction())
                 .normalize_or_zero()
                 .negate();
-            // Orient the shading normal into the viewer's hemisphere.
-            let normal = isect.normal.faced_toward(wo);
+            // Shading normal oriented into the viewer's hemisphere, used for
+            // the hemispherical operations (`NEE` and ray-origin offsets).
+            let shading_normal = isect.normal.faced_toward(wo);
 
             // Direct lighting by next-event estimation (skipped on specular lobes).
             if !material.bsdf.is_specular() {
-                let shadow_origin = isect.position.add(normal.scale(RAY_EPS));
+                let shadow_origin = isect.position.add(shading_normal.scale(RAY_EPS));
                 let occluded = |origin: Vec3, direction: Vec3, max_distance: f32| {
                     scene.occluded(origin, direction, max_distance)
                 };
                 for light in &scene.lights {
-                    let contribution =
-                        light.direct(shadow_origin, normal, wo, &material.bsdf, rng, &occluded);
+                    let contribution = light.direct(
+                        shadow_origin,
+                        shading_normal,
+                        wo,
+                        &material.bsdf,
+                        rng,
+                        &occluded,
+                    );
                     radiance = radiance.add(throughput.mul(contribution));
                 }
             }
@@ -255,18 +262,24 @@ impl PathIntegrator {
                 break;
             }
 
-            // Extend the path by importance-sampling the surface lobe.
-            let Some(sample) = material.bsdf.sample(wo, normal, rng) else {
+            // Extend the path by importance-sampling the surface lobe. The raw
+            // geometric normal is handed to `sample`: reflective lobes orient it
+            // internally, while the dielectric needs the unoriented side to tell
+            // whether the ray is entering or leaving the medium.
+            let Some(sample) = material.bsdf.sample(wo, isect.normal, rng) else {
                 break;
             };
             if sample.pdf <= 0.0 {
                 break;
             }
-            let cos_i = normal.dot(sample.direction);
-            if cos_i <= 0.0 {
+            // Transmission puts `wi` on the far side of the geometric normal, so
+            // the cosine is taken in absolute value (reflection keeps the sign).
+            let cos_i = isect.normal.dot(sample.direction);
+            let cos_abs = cos_i.abs();
+            if cos_abs <= 0.0 {
                 break;
             }
-            throughput = throughput.mul(sample.value).scale(cos_i / sample.pdf);
+            throughput = throughput.mul(sample.value).scale(cos_abs / sample.pdf);
             if !throughput.is_finite() {
                 break;
             }
@@ -282,8 +295,17 @@ impl PathIntegrator {
                 throughput = throughput.scale(1.0 / survive);
             }
 
-            // Offset the bounce origin off the surface to avoid self-intersection.
-            let next_origin = isect.position.add(normal.scale(RAY_EPS));
+            // Offset the bounce origin along the geometric normal, on whichever
+            // side the sampled direction leaves (reflection stays above, a
+            // transmitted ray drops below), to avoid self-intersection.
+            let offset_sign = if isect.normal.dot(sample.direction) >= 0.0 {
+                1.0
+            } else {
+                -1.0
+            };
+            let next_origin = isect
+                .position
+                .add(isect.normal.scale(RAY_EPS * offset_sign));
             ray = Ray::new(
                 next_origin.to_array(),
                 sample.direction.to_array(),
