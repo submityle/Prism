@@ -206,6 +206,16 @@
 //!   illusion is loudness-stable. Unlike `additive_oscillator`'s static
 //!   integer-harmonic series the partials are octave-spaced (geometric) and
 //!   drift continuously; `speed == 0` degenerates to a static Shepard chord.
+//! - [`tonewheel_organ::TonewheelOrganNode`] -- electromechanical drawbar
+//!   organ (Hammond-family): [`tonewheel_organ::NUM_DRAWBARS`] fixed musical
+//!   footages above the played key, each its own phase accumulator running at
+//!   the historically *tempered* gear ratio (notably the sharp seventeenth
+//!   ~5.04x), summed under per-drawbar smoothed levels with the octave
+//!   *foldback* a finite tonewheel generator imposes on the brightest
+//!   footages. Unlike `additive_oscillator`'s phase-locked integer harmonics
+//!   it has a sub-octave footage, non-integer tempered ratios, octave
+//!   foldback, and partials that gently beat; it pairs naturally with the
+//!   `leslie` rotary cabinet.
 //!
 //!
 //! Every generator is real-time safe: `process` performs no allocation, no
@@ -233,6 +243,7 @@ pub mod pwm_oscillator;
 pub mod reed_woodwind;
 pub mod sample_player;
 pub mod shepard_tone;
+pub mod tonewheel_organ;
 pub mod struck_bar;
 pub mod struck_plate;
 pub mod supersaw;
@@ -262,6 +273,7 @@ pub use shepard_tone::{
     ShepardToneNode, ShepardToneParams, DEFAULT_AMPLITUDE, DEFAULT_BASE_HZ, DEFAULT_SPEED,
     MAX_BASE_HZ, MAX_SPEED, MIN_BASE_HZ, MIN_SPEED, NYQUIST_GUARD, OUTPUT_GAIN, SPAN_OCTAVES,
 };
+pub use tonewheel_organ::{TonewheelOrganNode, TonewheelOrganParams, NUM_DRAWBARS};
 pub use struck_bar::{StruckBarNode, StruckBarParams, NUM_MODES};
 pub use struck_plate::{StruckPlateNode, StruckPlateParams};
 pub use supersaw::{SupersawNode, SupersawParams};
