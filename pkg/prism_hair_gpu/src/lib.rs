@@ -171,6 +171,15 @@
 //!   that a dual-scattering shading pass decodes for the multiple-scattering
 //!   terms `a_f^n` and `n * beta_f^2` (see [`forward_scatter`]).
 //!
+//! * [`GpuForwardScatterAccumulate`] evaluates
+//!   [`accumulate_forward_scatter`](prism_render_architecture::hair::dual_scattering::accumulate_forward_scatter),
+//!   the unlayered coverage-weighted crossing count: one thread per ray
+//!   sums `clamp(opacity, 0, 1)` over every sample at or in front of the
+//!   receiver depth, giving the `n` the dual-scattering shading side raises
+//!   into `a_f^n` and `n * beta_f^2`. An infinitely deep receiver recovers
+//!   [`total_crossings`](prism_render_architecture::hair::dual_scattering::total_crossings)
+//!   (see [`forward_scatter_accumulate`]).
+//!
 //! * [`GpuHairForwardScatterSample`] evaluates
 //!   [`sample_forward_scatter`](prism_render_architecture::hair::dual_scattering::sample_forward_scatter),
 //!   the read side of the [`forward_scatter`] packing — one thread per
@@ -711,6 +720,7 @@ pub mod eval_sh;
 pub mod far_field_gain;
 pub mod follicle_bind;
 pub mod forward_scatter;
+pub mod forward_scatter_accumulate;
 pub mod forward_scatter_power;
 pub mod forward_scatter_sample;
 pub mod frames;
@@ -802,6 +812,7 @@ pub use eval_sh::{reference_eval_sh, GpuHairEvalSh};
 pub use far_field_gain::{reference_far_field_gain, GpuHairFarFieldGain};
 pub use follicle_bind::{reference_transfer_root_map, GpuHairFollicleBind};
 pub use forward_scatter::GpuHairForwardScatter;
+pub use forward_scatter_accumulate::{ForwardScatterRay, GpuForwardScatterAccumulate};
 pub use forward_scatter_power::{
     reference_forward_scatter_power, GpuHairForwardScatterPower, PowerQuery,
 };
