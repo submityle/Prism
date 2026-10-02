@@ -15,18 +15,21 @@
 //! body's *true convex shape* along its sub-step displacement (see
 //! [`shape_sweep`]). A fast mover's real
 //! [`ColliderShape`](crate::collider::ColliderShape) is advanced against nearby
-//! geometry with a conservative-advancement time-of-impact query, so an
+//! geometry with a *rotational* conservative-advancement time-of-impact query
+//! that accounts for both its linear displacement and its sub-step spin, so an
 //! oriented box or capsule clamps exactly where its own surface would touch
-//! rather than where a bounding sphere would. If the sweep hits something
-//! before the body reaches its predicted pose, the body is clamped back to the
-//! point of first contact. The very same sub-step's discrete detection then
+//! rather than where a bounding sphere would, and a fast-spinning body is
+//! caught by the arc its corner sweeps even when its centre barely moves. If
+//! the sweep hits something before the body reaches its predicted pose, the
+//! body is rewound to the interpolated pose at the time of first contact --
+//! both its position and its orientation. The very same sub-step's discrete detection then
 //! resolves the touch normally and velocity recovery bleeds off the excess
 //! speed, so the body comes to rest against the surface instead of passing
 //! through it.
 //!
-//! Only CCD-flagged, awake, dynamic bodies whose displacement exceeds
-//! [`CcdConfig::min_motion_ratio`] times their core radius are swept, so the
-//! slow-moving majority pay no cost.
+//! Only CCD-flagged, awake, dynamic bodies whose linear displacement *or*
+//! angular arc exceeds [`CcdConfig::min_motion_ratio`] times their core radius
+//! are swept, so the slow-moving majority pay no cost.
 //!
 //! # Provenance
 //!
@@ -56,9 +59,9 @@ use glam::{Quat, Vec3};
 /// ([`CcdConfig::enabled`]) or when `h` is not positive.
 ///
 /// The work is split into two passes so the read-only sweep query and the
-/// position write never borrow the world at the same time: the first pass
-/// gathers the clamped position for each affected body, and the second pass
-/// applies them.
+/// pose write never borrow the world at the same time: the first pass gathers
+/// the clamped pose (position and orientation) for each affected body, and the
+/// second pass applies them.
 pub fn resolve_ccd(world: &mut PhysicsWorld, h: f32) {
     let config = world.config.ccd;
     if !config.enabled || h <= 0.0 {
@@ -66,8 +69,8 @@ pub fn resolve_ccd(world: &mut PhysicsWorld, h: f32) {
     }
 
     // Pass 1: gather clamps. Every access here is read-only, so the immutable
-    // borrow taken by `spherecast` is safe.
-    let mut clamps: Vec<(BodyHandle, Vec3)> = Vec::new();
+    // borrow taken by the shape sweep is safe.
+    let mut clamps: Vec<(BodyHandle, Vec3, Quat)> = Vec::new();
     for slot in 0..world.bodies.slot_count() {
         let Some(handle) = world.bodies.handle_at_slot(slot) else {
             continue;
@@ -100,32 +103,62 @@ pub fn resolve_ccd(world: &mut PhysicsWorld, h: f32) {
         let Some(curr) = world.bodies.position(handle) else {
             continue;
         };
-        let orientation = world.bodies.orientation(handle).unwrap_or(Quat::IDENTITY);
+        let prev_rot = world
+            .bodies
+            .prev_orientation(handle)
+            .or_else(|| world.bodies.orientation(handle))
+            .unwrap_or(Quat::IDENTITY);
+        let curr_rot = world.bodies.orientation(handle).unwrap_or(prev_rot);
 
         let displacement = curr - prev;
         let distance = displacement.length();
-        // Motion gate: only sweep genuine fast movers whose sub-step travel
-        // exceeds a fraction of their core radius. This also guarantees
-        // `distance > 0.0` so the sweep direction below is well defined.
-        if distance <= config.min_motion_ratio * radius {
+
+        // Motion gate: only sweep genuine fast movers. A body qualifies when
+        // either its linear travel or the arc swept by its farthest point
+        // exceeds a fraction of its core radius, so a body that tunnels purely
+        // by spinning (zero translation) is still caught.
+        let gate = config.min_motion_ratio * radius;
+        let (_, delta_angle) = (curr_rot * prev_rot.inverse()).normalize().to_axis_angle();
+        let angular_arc = delta_angle.abs() * shape_sweep::bounding_radius(shape);
+        if distance <= gate && angular_arc <= gate {
             continue;
         }
 
-        // Shape-aware sweep of the body's true convex geometry against the
-        // scene; falls back to no clamp when nothing is hit this sub-step.
-        if let Some(hit_distance) =
-            shape_sweep::sweep_distance(world, handle, shape, prev, orientation, displacement)
-            && hit_distance < distance
+        // Shape-aware rotational sweep of the body's true convex geometry
+        // against the scene; falls back to no clamp when nothing is hit this
+        // sub-step. The returned value is the sub-step fraction of first
+        // contact, so a value < 1 means the predicted pose overshoots a surface.
+        if let Some(toi) = shape_sweep::sweep_toi(
+            world,
+            handle,
+            shape,
+            prev,
+            prev_rot,
+            curr_rot,
+            displacement,
+        )
+            && toi < 1.0
         {
-            let direction = displacement / distance;
-            let clamped = (hit_distance - config.skin).max(0.0);
-            clamps.push((handle, prev + direction * clamped));
+            // Convert the skin back-off into a sub-step fraction over the total
+            // point travel (linear + angular) so the body stops just short of
+            // the surface, then rewind both pose components to that fraction.
+            let travel = distance + angular_arc;
+            let skin_frac = if travel > 0.0 {
+                (config.skin / travel).min(toi)
+            } else {
+                0.0
+            };
+            let clamped_toi = (toi - skin_frac).max(0.0);
+            let clamped_pos = prev + displacement * clamped_toi;
+            let clamped_rot = prev_rot.slerp(curr_rot, clamped_toi);
+            clamps.push((handle, clamped_pos, clamped_rot));
         }
     }
 
     // Pass 2: apply the clamps. This is the only mutable access.
-    for (handle, position) in clamps {
+    for (handle, position, orientation) in clamps {
         world.bodies.set_position(handle, position);
+        world.bodies.set_orientation(handle, orientation);
     }
 }
 
