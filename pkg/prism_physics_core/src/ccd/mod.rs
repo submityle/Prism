@@ -39,9 +39,9 @@
 //! here on top of this workspace's own support maps and geometry queries.
 
 pub mod config;
+mod shape_sweep;
 pub mod support;
 pub mod sweep;
-mod shape_sweep;
 
 pub use config::CcdConfig;
 pub use support::CcdSupport;
@@ -128,15 +128,8 @@ pub fn resolve_ccd(world: &mut PhysicsWorld, h: f32) {
         // against the scene; falls back to no clamp when nothing is hit this
         // sub-step. The returned value is the sub-step fraction of first
         // contact, so a value < 1 means the predicted pose overshoots a surface.
-        if let Some(toi) = shape_sweep::sweep_toi(
-            world,
-            handle,
-            shape,
-            prev,
-            prev_rot,
-            curr_rot,
-            displacement,
-        )
+        if let Some(toi) =
+            shape_sweep::sweep_toi(world, handle, shape, prev, prev_rot, curr_rot, displacement)
             && toi < 1.0
         {
             // Convert the skin back-off into a sub-step fraction over the total

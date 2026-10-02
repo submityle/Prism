@@ -459,14 +459,30 @@ mod tests {
 
         // Pure-translation sweep sees no motion and misses the tunnelling spin.
         assert_eq!(
-            sweep_toi(&world, mover, &shape, center, prev_rot, prev_rot, Vec3::ZERO),
+            sweep_toi(
+                &world,
+                mover,
+                &shape,
+                center,
+                prev_rot,
+                prev_rot,
+                Vec3::ZERO
+            ),
             None,
             "a non-spinning, non-translating plank must not be clamped"
         );
 
         // The rotational sweep catches it before the step completes.
-        let toi = sweep_toi(&world, mover, &shape, center, prev_rot, curr_rot, Vec3::ZERO)
-            .expect("the spinning corner must register a time of impact");
+        let toi = sweep_toi(
+            &world,
+            mover,
+            &shape,
+            center,
+            prev_rot,
+            curr_rot,
+            Vec3::ZERO,
+        )
+        .expect("the spinning corner must register a time of impact");
         assert!(
             (0.0..1.0).contains(&toi),
             "rotational toi should clamp before the end of the sub-step, got {toi}"

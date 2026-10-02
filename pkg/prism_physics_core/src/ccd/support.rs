@@ -54,9 +54,11 @@ impl CcdSupport {
             ColliderShape::Sphere { radius } => {
                 Some(CcdSupport::Sphere(BoundingSphere::new(position, radius)))
             }
-            ColliderShape::Cuboid { half_extents } => {
-                Some(CcdSupport::Cuboid(Obb::new(position, half_extents, rotation)))
-            }
+            ColliderShape::Cuboid { half_extents } => Some(CcdSupport::Cuboid(Obb::new(
+                position,
+                half_extents,
+                rotation,
+            ))),
             ColliderShape::Capsule {
                 half_height,
                 radius,
@@ -107,7 +109,10 @@ mod tests {
         let support = CcdSupport::from_shape(&shape, Vec3::new(1.0, 0.0, 0.0), Quat::IDENTITY)
             .expect("sphere is a bounded convex volume");
         let p = support.support_point(Vec3::X);
-        assert!((p - Vec3::new(3.0, 0.0, 0.0)).length() < 1e-5, "support was {p:?}");
+        assert!(
+            (p - Vec3::new(3.0, 0.0, 0.0)).length() < 1e-5,
+            "support was {p:?}"
+        );
     }
 
     #[test]
