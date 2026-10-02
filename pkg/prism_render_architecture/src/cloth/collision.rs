@@ -42,6 +42,8 @@
 
 use alloc::vec::Vec;
 
+use glam::Quat;
+
 use super::{physics_bridge, ClothParticle, Vec3};
 
 /// An analytic collision proxy fitted to part of the body.
@@ -82,6 +84,23 @@ pub enum BodyCollider {
         /// points `x` with `normal.dot(x) == offset`.
         offset: f32,
     },
+    /// A solid oriented box (OBB): interior points are pushed out along the
+    /// local axis of least penetration to the nearest face. `orientation` maps
+    /// box-local axes to world space (assumed unit); `half_extents` are the box
+    /// half-sizes along its local x/y/z. This mirrors
+    /// [`prism_physics_core::soft::collision::BodyCollider::Obb`] so a
+    /// two-way-coupling body round-trips losslessly through the bridge, and it
+    /// fits tight torso/limb volumes a sphere or capsule cannot (chests,
+    /// shoulder pads, prop boxes) the way UE5 Chaos Cloth's convex colliders do.
+    Obb {
+        /// World-space box center.
+        center: Vec3,
+        /// Orientation mapping box-local axes to world space (assumed unit).
+        orientation: Quat,
+        /// Half-extents along the box's local x/y/z axes; a non-positive extent
+        /// collapses that axis and makes the box inert along it.
+        half_extents: Vec3,
+    },
 }
 
 impl BodyCollider {
@@ -102,6 +121,11 @@ impl BodyCollider {
             BodyCollider::HalfSpace { normal, offset } => {
                 project_out_of_half_space(pos, normal, offset)
             }
+            BodyCollider::Obb {
+                center,
+                orientation,
+                half_extents,
+            } => project_out_of_obb(pos, center, orientation, half_extents),
         }
     }
 }
@@ -130,10 +154,30 @@ pub fn project_out_of_sphere(pos: Vec3, center: Vec3, radius: f32) -> Vec3 {
 /// untouched rather than producing a `NaN`.
 #[must_use]
 pub fn project_out_of_half_space(pos: Vec3, normal: Vec3, offset: f32) -> Vec3 {
-    physics_bridge::from_glam(prism_physics_core::soft::collision::project_out_of_half_space(
+    physics_bridge::from_glam(
+        prism_physics_core::soft::collision::project_out_of_half_space(
+            physics_bridge::to_glam(pos),
+            physics_bridge::to_glam(normal),
+            offset,
+        ),
+    )
+}
+
+/// Projects `pos` out to the nearest face of the oriented box when it lies
+/// inside, otherwise returns `pos` unchanged.
+///
+/// Delegates to the single physics-engine implementation
+/// [`prism_physics_core::soft::collision::project_out_of_obb`]: the point is
+/// rotated into box-local space, tested against the three slabs, and (when
+/// interior) pushed to the face of least penetration before being rotated back.
+/// A box with all non-positive half-extents has no interior and is inert.
+#[must_use]
+pub fn project_out_of_obb(pos: Vec3, center: Vec3, orientation: Quat, half_extents: Vec3) -> Vec3 {
+    physics_bridge::from_glam(prism_physics_core::soft::collision::project_out_of_obb(
         physics_bridge::to_glam(pos),
-        physics_bridge::to_glam(normal),
-        offset,
+        physics_bridge::to_glam(center),
+        orientation,
+        physics_bridge::to_glam(half_extents),
     ))
 }
 
@@ -145,18 +189,22 @@ pub fn project_out_of_half_space(pos: Vec3, normal: Vec3, offset: f32) -> Vec3 {
 /// collapsed capsule behaves like a sphere.
 #[must_use]
 pub fn closest_point_on_segment(p0: Vec3, p1: Vec3, pos: Vec3) -> Vec3 {
-    physics_bridge::from_glam(prism_physics_core::soft::collision::closest_point_on_segment(
-        physics_bridge::to_glam(p0),
-        physics_bridge::to_glam(p1),
-        physics_bridge::to_glam(pos),
-    ))
+    physics_bridge::from_glam(
+        prism_physics_core::soft::collision::closest_point_on_segment(
+            physics_bridge::to_glam(p0),
+            physics_bridge::to_glam(p1),
+            physics_bridge::to_glam(pos),
+        ),
+    )
 }
 
 /// Converts a render [`BodyCollider`] into the physics-engine collider the
 /// single-source resolver consumes. The variants and fields line up exactly;
 /// only the vector type differs, so this is a lossless component copy.
 #[must_use]
-pub(super) fn to_physics_collider(collider: BodyCollider) -> prism_physics_core::soft::collision::BodyCollider {
+pub(super) fn to_physics_collider(
+    collider: BodyCollider,
+) -> prism_physics_core::soft::collision::BodyCollider {
     use prism_physics_core::soft::collision::BodyCollider as Phys;
     match collider {
         BodyCollider::Sphere { center, radius } => Phys::Sphere {
@@ -172,6 +220,15 @@ pub(super) fn to_physics_collider(collider: BodyCollider) -> prism_physics_core:
             normal: physics_bridge::to_glam(normal),
             offset,
         },
+        BodyCollider::Obb {
+            center,
+            orientation,
+            half_extents,
+        } => Phys::Obb {
+            center: physics_bridge::to_glam(center),
+            orientation,
+            half_extents: physics_bridge::to_glam(half_extents),
+        },
     }
 }
 
@@ -180,7 +237,9 @@ pub(super) fn to_physics_collider(collider: BodyCollider) -> prism_physics_core:
 /// body's translated pose back onto the render-side proxy after the
 /// single-source resolver has moved it.
 #[must_use]
-pub(super) fn from_physics_collider(collider: prism_physics_core::soft::collision::BodyCollider) -> BodyCollider {
+pub(super) fn from_physics_collider(
+    collider: prism_physics_core::soft::collision::BodyCollider,
+) -> BodyCollider {
     use prism_physics_core::soft::collision::BodyCollider as Phys;
     match collider {
         Phys::Sphere { center, radius } => BodyCollider::Sphere {
@@ -195,6 +254,15 @@ pub(super) fn from_physics_collider(collider: prism_physics_core::soft::collisio
         Phys::HalfSpace { normal, offset } => BodyCollider::HalfSpace {
             normal: physics_bridge::from_glam(normal),
             offset,
+        },
+        Phys::Obb {
+            center,
+            orientation,
+            half_extents,
+        } => BodyCollider::Obb {
+            center: physics_bridge::from_glam(center),
+            orientation,
+            half_extents: physics_bridge::from_glam(half_extents),
         },
     }
 }
@@ -323,8 +391,7 @@ pub fn apply_backstop(pos: Vec3, backstop: Backstop) -> Vec3 {
 /// particles unconstrained (and never panics). Pinned particles are skipped. An
 /// empty `backstops` slice is a no-op.
 pub fn resolve_backstops(particles: &mut [ClothParticle], backstops: &[Backstop]) {
-    let physics_backstops: Vec<_> =
-        backstops.iter().copied().map(to_physics_backstop).collect();
+    let physics_backstops: Vec<_> = backstops.iter().copied().map(to_physics_backstop).collect();
     let (mut positions, inverse_masses) = physics_bridge::to_soa(particles);
     prism_physics_core::soft::collision::resolve_backstops(
         &mut positions,
@@ -1006,5 +1073,75 @@ mod tests {
         for (pa, pb) in a.iter().zip(b.iter()) {
             assert_eq!(pa.position, pb.position);
         }
+    }
+
+    #[test]
+    fn obb_round_trips_through_physics_bridge() {
+        // The render Obb must survive a to-physics/from-physics round trip
+        // losslessly, so a two-way-coupling body written back onto the proxy
+        // keeps its oriented pose.
+        let orientation = Quat::from_rotation_z(core::f32::consts::FRAC_PI_4);
+        let collider = BodyCollider::Obb {
+            center: Vec3::new(1.0, 2.0, -3.0),
+            orientation,
+            half_extents: Vec3::new(0.5, 1.0, 1.5),
+        };
+        let back = from_physics_collider(to_physics_collider(collider));
+        assert_eq!(back, collider);
+    }
+
+    #[test]
+    fn obb_pushes_interior_point_to_nearest_axis_aligned_face() {
+        // Unit box at the origin; a point just inside the +X face (x = 0.9) is
+        // closest to that face, so it is pushed out to x = 1 with y/z intact.
+        let obb = BodyCollider::Obb {
+            center: Vec3::ZERO,
+            orientation: Quat::IDENTITY,
+            half_extents: Vec3::new(1.0, 1.0, 1.0),
+        };
+        approx_eq(
+            obb.project(Vec3::new(0.9, 0.2, -0.1)),
+            Vec3::new(1.0, 0.2, -0.1),
+        );
+    }
+
+    #[test]
+    fn obb_leaves_exterior_point_untouched() {
+        // A point outside every slab is already clear of the solid box.
+        let obb = BodyCollider::Obb {
+            center: Vec3::ZERO,
+            orientation: Quat::IDENTITY,
+            half_extents: Vec3::new(1.0, 1.0, 1.0),
+        };
+        let outside = Vec3::new(2.0, 0.0, 0.0);
+        approx_eq(obb.project(outside), outside);
+    }
+
+    #[test]
+    fn oriented_obb_pushes_out_along_rotated_face() {
+        // Box rotated 90 deg about Z swaps its local x/y axes in world space, so
+        // a point at world (0.1, 0.9, 0) is inside and nearest the rotated face
+        // that now points along world +Y, landing on y = 1.
+        let obb = BodyCollider::Obb {
+            center: Vec3::ZERO,
+            orientation: Quat::from_rotation_z(core::f32::consts::FRAC_PI_2),
+            half_extents: Vec3::new(1.0, 1.0, 1.0),
+        };
+        approx_eq(
+            obb.project(Vec3::new(0.1, 0.9, 0.0)),
+            Vec3::new(0.1, 1.0, 0.0),
+        );
+    }
+
+    #[test]
+    fn collapsed_obb_is_inert() {
+        // All non-positive half extents means no interior to project out of.
+        let obb = BodyCollider::Obb {
+            center: Vec3::ZERO,
+            orientation: Quat::IDENTITY,
+            half_extents: Vec3::ZERO,
+        };
+        let p = Vec3::new(0.1, 0.2, 0.3);
+        approx_eq(obb.project(p), p);
     }
 }

@@ -47,22 +47,22 @@ mod virtual_particles;
 mod virtual_particles_jacobi;
 
 pub use body::{
-    apply_backstop, closest_point_on_segment, project_out_of_half_space, project_out_of_sphere,
-    resolve_backstops, resolve_body_collisions, resolve_body_collisions_with_friction, Backstop,
-    BodyCollider,
+    apply_backstop, closest_point_on_segment, project_out_of_half_space, project_out_of_obb,
+    project_out_of_sphere, resolve_backstops, resolve_body_collisions,
+    resolve_body_collisions_with_friction, Backstop, BodyCollider,
 };
 pub use ccd::{capsule_toi, half_space_toi, resolve_ccd, sphere_toi, CcdParams};
 pub use coupling::{
     couple_particle_against_body, resolve_two_way_coupling, CouplingBody, CouplingContribution,
 };
+pub use layers::{accumulate_vertex_normals, resolve_layer_coupling, LayerParams};
+pub use layers_jacobi::resolve_layer_coupling_jacobi;
 pub use self_ccd::{resolve_self_ccd, swept_pair_toi, SelfCcdParams};
 pub use self_ccd_jacobi::resolve_self_ccd_jacobi;
 pub use self_collision::{resolve_self_collision, resolve_self_collision_with_friction};
 pub use self_collision_jacobi::{
     resolve_self_collision_jacobi, resolve_self_collision_with_friction_jacobi,
 };
-pub use layers::{accumulate_vertex_normals, resolve_layer_coupling, LayerParams};
-pub use layers_jacobi::resolve_layer_coupling_jacobi;
 pub use virtual_particles::{
     generate_virtual_particles, resolve_self_collision_virtual,
     resolve_self_collision_virtual_augment, VirtualParticle, VirtualParticlePattern,
