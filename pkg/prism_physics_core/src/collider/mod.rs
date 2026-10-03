@@ -173,6 +173,10 @@ pub mod orientation;
 pub use orientation::{orient_outward, OrientedMesh};
 pub mod tetrahedralize;
 pub use tetrahedralize::{tetrahedralize, TetMesh, TetMeshParams};
+pub mod tet_quality;
+pub use tet_quality::{
+    analyze_tet_mesh_quality, tet_quality, TetMeshQualityReport, TetQuality, TetQualityParams,
+};
 
 /// A handle into a [`ShapeRegistry`].
 ///
