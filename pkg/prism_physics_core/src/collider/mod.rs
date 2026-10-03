@@ -138,6 +138,8 @@ pub use hausdorff::{
     measure_directed_distance, measure_mesh_distance, DirectedMeshDistance, MeshDistance,
     MeshDistanceParams,
 };
+pub mod diameter;
+pub use diameter::{mesh_diameter, MeshDiameter};
 
 /// A handle into a [`ShapeRegistry`].
 ///
