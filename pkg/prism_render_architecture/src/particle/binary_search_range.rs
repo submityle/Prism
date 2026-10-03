@@ -416,6 +416,10 @@ mod tests {
     #[derive(Clone, Copy, Debug)]
     struct Particle {
         depth_key: u32,
+        #[expect(
+            dead_code,
+            reason = "payload rides alongside the key to prove the search orders on the key field only"
+        )]
         payload: u16,
     }
 

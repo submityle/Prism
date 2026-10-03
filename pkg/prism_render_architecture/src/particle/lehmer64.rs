@@ -396,7 +396,7 @@ mod tests {
         let mut rng = Lehmer64::from_seed(99);
         let before = rng.state();
         let empty: [u64; 0] = rng.next_array();
-        assert!(empty == []);
+        assert!(empty.is_empty());
         assert!(rng.state() == before);
     }
 

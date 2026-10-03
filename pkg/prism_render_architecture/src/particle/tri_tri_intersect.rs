@@ -594,13 +594,13 @@ mod tests {
     fn tiny_scaled_triangles_intersect() {
         let s = 1.0e-2;
         let t1 = Tri::new(
-            v(0.0, -1.0 * s, 0.0),
-            v(2.0 * s, -1.0 * s, 0.0),
+            v(0.0, -s, 0.0),
+            v(2.0 * s, -s, 0.0),
             v(1.0 * s, 1.0 * s, 0.0),
         );
         let t2 = Tri::new(
-            v(0.0, 0.0, -1.0 * s),
-            v(2.0 * s, 0.0, -1.0 * s),
+            v(0.0, 0.0, -s),
+            v(2.0 * s, 0.0, -s),
             v(1.0 * s, 0.0, 1.0 * s),
         );
         assert!(tri_tri_intersect(&t1, &t2));

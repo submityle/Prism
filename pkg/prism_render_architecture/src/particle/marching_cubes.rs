@@ -1022,6 +1022,10 @@ mod tests {
         }
     }
 
+    #[expect(
+        clippy::needless_range_loop,
+        reason = "the case index also labels assertion messages, so an explicit 0..256 walk reads clearer"
+    )]
     #[test]
     fn triangle_table_rows_are_well_formed() {
         for case in 0..256 {

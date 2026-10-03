@@ -343,6 +343,10 @@ mod tests {
         }
     }
 
+    #[expect(
+        clippy::needless_range_loop,
+        reason = "loop index is the selection rank passed to quickselect, not merely an array cursor"
+    )]
     #[test]
     fn large_random_every_rank_small() {
         let mut rng = Lcg::new(0x1234_5678);
@@ -368,6 +372,10 @@ mod tests {
         }
     }
 
+    #[expect(
+        clippy::needless_range_loop,
+        reason = "loop index is the selection rank passed to quickselect, not merely an array cursor"
+    )]
     #[test]
     fn multiple_ks_same_source_independent() {
         let base = [30u32, 10, 20, 50, 40, 60, 0, 70];

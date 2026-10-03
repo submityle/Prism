@@ -288,7 +288,7 @@ mod tests {
     }
 
     /// A tight neighborhood centered on `color` (nine near-identical samples).
-    fn tight_window(color: [f32; 3]) -> alloc::vec::Vec<[f32; 3]> {
+    fn tight_window(color: [f32; 3]) -> Vec<[f32; 3]> {
         alloc::vec![color; 9]
     }
 

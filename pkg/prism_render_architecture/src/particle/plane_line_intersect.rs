@@ -439,6 +439,10 @@ mod tests {
         assert!(approx_vec(v_scale([1.0, -2.0, 3.0], 2.0), [2.0, -4.0, 6.0]));
     }
 
+    #[expect(
+        clippy::assertions_on_constants,
+        reason = "pins the intersection epsilon bounds as compile-time regression guards"
+    )]
     #[test]
     fn eps_is_small_positive() {
         assert!(EPS > 0.0);

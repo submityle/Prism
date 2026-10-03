@@ -516,6 +516,10 @@ mod tests {
         assert!(approx(v_dot([1.0, 2.0, 3.0], [4.0, 5.0, 6.0]), 32.0));
     }
 
+    #[expect(
+        clippy::assertions_on_constants,
+        reason = "pins the comparison epsilon bounds as compile-time regression guards"
+    )]
     #[test]
     fn cmp_eps_is_small_positive() {
         assert!(CMP_EPS > 0.0);

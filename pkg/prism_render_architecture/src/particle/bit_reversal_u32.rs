@@ -566,6 +566,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::assertions_on_constants,
+        reason = "pins a compile-time-evaluated palindrome constant as a regression guard"
+    )]
     fn const_evaluation_in_const_context() {
         const RB8: u8 = reverse_bits_u8(0b0000_0001);
         const RB16: u16 = reverse_bits_u16(0x0001);

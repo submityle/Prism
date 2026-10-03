@@ -481,6 +481,10 @@ mod tests {
         for i in 0..n {
             for j in (i + 1)..n {
                 for k in (j + 1)..n {
+                    #[expect(
+                        clippy::collapsible_if,
+                        reason = "paired geometric predicate and containment test read clearer kept nested in this brute-force reference"
+                    )]
                     if let Some(c) = circumcircle_2(points[i], points[j], points[k]) {
                         if points.iter().all(|&p| c.contains(p)) {
                             keep_smaller_2(&mut best, c);
@@ -513,6 +517,10 @@ mod tests {
         for i in 0..n {
             for j in (i + 1)..n {
                 for k in (j + 1)..n {
+                    #[expect(
+                        clippy::collapsible_if,
+                        reason = "paired geometric predicate and containment test read clearer kept nested in this brute-force reference"
+                    )]
                     if let Some(c) = circumcircle_3(points[i], points[j], points[k]) {
                         if points.iter().all(|&p| c.contains(p)) {
                             keep_smaller_3(&mut best, c);
@@ -525,6 +533,10 @@ mod tests {
             for j in (i + 1)..n {
                 for k in (j + 1)..n {
                     for l in (k + 1)..n {
+                        #[expect(
+                            clippy::collapsible_if,
+                            reason = "paired geometric predicate and containment test read clearer kept nested in this brute-force reference"
+                        )]
                         if let Some(c) = circumsphere_4(points[i], points[j], points[k], points[l])
                         {
                             if points.iter().all(|&p| c.contains(p)) {

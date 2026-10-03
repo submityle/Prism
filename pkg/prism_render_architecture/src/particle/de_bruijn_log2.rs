@@ -542,6 +542,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::assertions_on_constants,
+        reason = "pins a compile-time-evaluated power-of-two constant as a regression guard"
+    )]
     fn const_evaluation_in_const_context() {
         const FLOOR: u32 = floor_log2_u32(1000);
         const CEIL: u32 = ceil_log2_u32(1000);

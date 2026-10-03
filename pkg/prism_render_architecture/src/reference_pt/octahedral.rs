@@ -131,8 +131,8 @@ mod tests {
         for _ in 0..5_000 {
             let dir = random_direction(&mut rng);
             let (u, v) = direction_to_square(dir);
-            assert!(u >= -1.0 - 1e-5 && u <= 1.0 + 1e-5);
-            assert!(v >= -1.0 - 1e-5 && v <= 1.0 + 1e-5);
+            assert!((-1.0 - 1e-5..=1.0 + 1e-5).contains(&u));
+            assert!((-1.0 - 1e-5..=1.0 + 1e-5).contains(&v));
             let back = square_to_direction(u, v);
             let drift = back.sub(dir).length();
             assert!(drift < 1e-4, "round trip drifted by {drift}");

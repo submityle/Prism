@@ -240,6 +240,11 @@ mod tests {
     /// Regenerates the baked table from a fresh furnace integral and checks it
     /// matches the committed constants. Run with `--nocapture` to print a fresh
     /// literal when the sampler changes.
+    #[expect(
+        clippy::print_stdout,
+        clippy::needless_range_loop,
+        reason = "test regenerates and prints a paste-ready baked LUT literal under --nocapture; the LUT is indexed on two axes"
+    )]
     #[test]
     fn lut_matches_monte_carlo() {
         let mut rng = Rng::seed(0x5eed_1234);

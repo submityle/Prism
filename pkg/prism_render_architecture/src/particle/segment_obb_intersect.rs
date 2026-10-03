@@ -669,6 +669,10 @@ mod tests {
             for k in 0..=steps {
                 let t = k as f32 / steps as f32;
                 let pt = point_at(p0, p1, t);
+                #[expect(
+                    clippy::collapsible_if,
+                    reason = "two guards read clearer kept nested in this densely sampled interior-point check"
+                )]
                 if point_in_obb(pt, center, IDENTITY, half) {
                     if let Some(h) = hit {
                         assert!(t >= h.t_enter - 1.0e-2 && t <= h.t_exit + 1.0e-2);

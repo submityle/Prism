@@ -255,6 +255,13 @@ fn sanitize_non_negative(x: f32) -> f32 {
 /// A zero (or negative) turbulence yields [`Vec3::ZERO`]; otherwise the three
 /// indices are combined with the classic spatial-hash primes and hashed once
 /// per axis, so each triangle gets a stable, index-derived jitter direction.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "thin deterministic bridge over prism_physics_core turbulence; exercised by tests and reserved for the wind solver"
+    )
+)]
 pub(super) fn turbulence_offset(indices: [u32; 3], turbulence: f32) -> Vec3 {
     // Delegate to the single-source physics-engine turbulence hash so the
     // deterministic per-triangle jitter has exactly one definition. The physics
