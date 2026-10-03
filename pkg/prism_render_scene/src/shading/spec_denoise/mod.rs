@@ -14,3 +14,6 @@ mod reproject_tests;
 
 #[cfg(test)]
 mod spatial_tests;
+
+#[cfg(test)]
+mod history_clamp_tests;
