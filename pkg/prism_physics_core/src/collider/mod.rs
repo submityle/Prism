@@ -209,6 +209,10 @@ pub mod tet_fem_basis;
 pub use tet_fem_basis::{
     build_tet_fem_basis, TetFemBasis, TetFemBasisParams, TetFemElement,
 };
+pub mod tet_embedding;
+pub use tet_embedding::{
+    build_tet_embedding, locate_point, TetBinding, TetEmbedding, TetEmbeddingParams,
+};
 
 /// A handle into a [`ShapeRegistry`].
 ///
