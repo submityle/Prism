@@ -42,6 +42,19 @@ pub const DEFAULT_SURFACE_EPSILON_M: Sample = 1.0e-3;
 /// reference used across the spatial crate's helpers.
 pub const DEFAULT_DIFFRACTION_FREQ_HZ: Sample = 1_000.0;
 
+/// Hard ceiling on the specular reflection order the backend will trace. Beyond
+/// a few bounces the specular image-source contribution is both vanishingly
+/// quiet and combinatorially expensive, so the recursive resolver in
+/// [`crate::higher_order_reflection`] is clamped to this depth regardless of the
+/// configured [`GeometricConfig::max_reflection_order`]. Steam Audio caps its
+/// real-time image-source method at a comparable low single-digit order.
+pub const MAX_SUPPORTED_REFLECTION_ORDER: usize = 4;
+
+/// Default specular reflection order: first-order only. Higher orders are opt-in
+/// through [`GeometricConfig::with_max_reflection_order`] so existing callers
+/// keep the original single-bounce behaviour.
+pub const DEFAULT_MAX_REFLECTION_ORDER: usize = 1;
+
 /// Which edge-diffraction model the backend evaluates for shadowed arrivals.
 ///
 /// Both models consume the same resolved detour geometry (the least-detour
@@ -77,6 +90,10 @@ pub struct GeometricConfig {
     pub transmission_enabled: bool,
     /// Maximum first-order reflectors retained per query (strongest kept).
     pub max_reflections: usize,
+    /// Maximum specular reflection order traced (`1` = first-order only; `2` or
+    /// more adds the recursive higher-order image-source bounces, clamped to
+    /// [`MAX_SUPPORTED_REFLECTION_ORDER`]).
+    pub max_reflection_order: usize,
     /// Maximum diffraction edges retained per query (least-detour kept).
     pub max_diffractions: usize,
     /// Linear-gain floor below which an arrival is dropped.
@@ -103,6 +120,7 @@ impl GeometricConfig {
             diffraction_enabled: true,
             transmission_enabled: true,
             max_reflections: DEFAULT_MAX_REFLECTIONS,
+            max_reflection_order: DEFAULT_MAX_REFLECTION_ORDER,
             max_diffractions: DEFAULT_MAX_DIFFRACTIONS,
             min_gain: DEFAULT_MIN_GAIN,
             surface_epsilon_m: DEFAULT_SURFACE_EPSILON_M,
@@ -134,6 +152,17 @@ impl GeometricConfig {
     #[must_use]
     pub fn with_max_reflections(mut self, max: usize) -> Self {
         self.max_reflections = max;
+        self
+    }
+
+    /// Returns a copy with the maximum specular reflection order set to `order`
+    /// (clamped at query time to [`MAX_SUPPORTED_REFLECTION_ORDER`]). An order of
+    /// `1` keeps only first-order bounces; `2` or more enables the recursive
+    /// higher-order image-source arrivals from [`crate::higher_order_reflection`].
+    #[inline]
+    #[must_use]
+    pub fn with_max_reflection_order(mut self, order: usize) -> Self {
+        self.max_reflection_order = order;
         self
     }
 
@@ -219,5 +248,15 @@ mod tests {
         );
         let utd = GeometricConfig::new(48_000).with_diffraction_model(DiffractionModel::Utd);
         assert_eq!(utd.diffraction_model, DiffractionModel::Utd);
+    }
+
+    #[test]
+    fn reflection_order_defaults_to_first_order_and_is_selectable() {
+        assert_eq!(
+            GeometricConfig::new(48_000).max_reflection_order,
+            super::DEFAULT_MAX_REFLECTION_ORDER
+        );
+        let cfg = GeometricConfig::new(48_000).with_max_reflection_order(3);
+        assert_eq!(cfg.max_reflection_order, 3);
     }
 }

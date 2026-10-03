@@ -35,6 +35,7 @@ use prism_audio_spatial::propagation::{PropagationBackend, PropagationPath, Prop
 use crate::config::GeometricConfig;
 use crate::diffraction_path::resolve_diffraction;
 use crate::direct_path::resolve_direct;
+use crate::higher_order_reflection::resolve_higher_order_reflections;
 use crate::reflection_path::resolve_reflections;
 use crate::scene::AcousticScene;
 
@@ -105,6 +106,15 @@ impl PropagationBackend for GeometricBackend {
         // at least partly blocked, so gate it on measured occlusion.
         let mut secondary: Vec<PropagationPath> =
             resolve_reflections(&self.scene, listener, emitter, &self.config, base_distance);
+        if self.config.max_reflection_order >= 2 {
+            secondary.extend(resolve_higher_order_reflections(
+                &self.scene,
+                listener,
+                emitter,
+                &self.config,
+                base_distance,
+            ));
+        }
         if direct.occlusion.direct_factor() > 0.0 {
             secondary.extend(resolve_diffraction(
                 &self.scene,

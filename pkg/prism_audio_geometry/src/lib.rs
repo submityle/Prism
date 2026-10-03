@@ -35,6 +35,10 @@
 //! - [`reflection_path`] resolves first-order specular reflections with the
 //!   image-source method: mirror the source across each reflector, validate the
 //!   reflection point lies on the face, and check both sub-segments are clear.
+//! - [`higher_order_reflection`] resolves the second- and higher-order specular
+//!   bounces with the recursive image-source method, complementing (never
+//!   duplicating) the single bounce from [`reflection_path`]; enabled by
+//!   [`config::GeometricConfig::with_max_reflection_order`].
 //! - [`diffraction_path`] resolves edge diffraction when the direct path is
 //!   shadowed: it finds the least-detour silhouette edge and applies the
 //!   Maekawa barrier model via the spatial crate's Fresnel helpers.
@@ -72,6 +76,7 @@ pub mod backend;
 pub mod config;
 pub mod diffraction_path;
 pub mod direct_path;
+pub mod higher_order_reflection;
 pub mod material_map;
 pub mod reflection_path;
 pub mod scene;
