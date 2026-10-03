@@ -80,6 +80,7 @@ pub mod synthesis;
 pub mod tile_stream;
 pub mod transition;
 pub mod underwater;
+pub mod wake;
 pub mod waterline;
 pub mod wetness;
 
