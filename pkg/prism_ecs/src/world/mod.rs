@@ -18,7 +18,7 @@ use alloc::vec::Vec;
 
 use crate::archetype::Archetypes;
 use crate::bundle::Bundle;
-use crate::change::Tick;
+use crate::change::{Mut, Ref, Tick};
 use crate::component::{
     Component, ComponentId, ComponentSet, Components, RequiredCtor, StorageType,
 };
@@ -1155,33 +1155,105 @@ impl World {
         Some(unsafe { col.get::<T>(row) })
     }
 
-    /// Mutably borrow component `T` of `entity`, or `None` if the entity is
-    /// dead or lacks the component.
-    pub fn get_mut<T: Component>(&mut self, entity: Entity) -> Option<&mut T> {
-        let change_tick = self.change_tick;
+    /// Change-detecting shared borrow of component `T` of `entity`, or `None`
+    /// if the entity is dead or lacks the component.
+    ///
+    /// The returned [`Ref`] reports `is_added`/`is_changed`/`is_changed_after`
+    /// against the world's current observer window
+    /// (`last_change_tick`..=`change_tick`). This is the `bevy_ecs`-style
+    /// change-aware counterpart to [`get`](World::get); it is the entry point
+    /// external observers (e.g. `prism_ui_ecs` bindings) use to poll per-value
+    /// writes without a running system.
+    pub fn get_ref<T: Component>(&self, entity: Entity) -> Option<Ref<'_, T>> {
+        let last_run = self.last_change_tick;
+        let this_run = self.change_tick;
         let id = self.components.id_of::<T>()?;
         let loc = self.entities.location(entity)?;
         if self.components.info(id)?.storage() == StorageType::SparseSet {
-            let set = self.sparse_sets.get_mut(id)?;
-            // Handing out `&mut T` is an unconditional write for change-detection
-            // purposes; stamp the changed tick (no-op if the entity is absent).
-            set.set_changed_tick(entity, change_tick);
-            // SAFETY: `T` matches `id` and `&mut self` gives exclusive access,
-            // so the formed `&mut T` cannot alias.
-            return unsafe { set.get_mut::<T>(entity) };
+            let set = self.sparse_sets.get(id)?;
+            // SAFETY: `T` is exactly the type registered for `id`.
+            let value = unsafe { set.get::<T>(entity)? };
+            let ticks = set.component_ticks(entity)?;
+            return Some(Ref::new(
+                value,
+                ticks.added,
+                ticks.changed,
+                last_run,
+                this_run,
+            ));
         }
-        let arch = self.archetypes.get_mut(loc.archetype_id)?;
-        let col = arch.table_mut().column_mut(id)?;
+        let arch = self.archetypes.get(loc.archetype_id)?;
+        let col = arch.table().column(id)?;
         let row = loc.row as usize;
         if row >= col.len() {
             return None;
         }
-        // Handing out `&mut T` is an unconditional write for change-detection
-        // purposes, so stamp the changed tick (mirrors `Mut<T>` deref).
-        col.set_changed_tick(row, change_tick);
-        // SAFETY: `row < col.len()`, `T` matches `id`, and `&mut self` gives us
-        // exclusive access, so forming a unique `&mut T` cannot alias.
-        Some(unsafe { col.get_mut::<T>(row) })
+        // SAFETY: `row < col.len()` and `T` matches `id`.
+        let value = unsafe { col.get::<T>(row) };
+        let ticks = col.component_ticks(row);
+        Some(Ref::new(
+            value,
+            ticks.added,
+            ticks.changed,
+            last_run,
+            this_run,
+        ))
+    }
+
+    /// Change-detecting exclusive borrow of component `T` of `entity`, or
+    /// `None` if the entity is dead or lacks the component.
+    ///
+    /// Returns a [`Mut`] that stamps the changed tick **lazily** on
+    /// [`DerefMut`](core::ops::DerefMut) (or
+    /// [`into_inner`](crate::change::Mut::into_inner)), mirroring query
+    /// `&mut T` semantics. This enables the equal-value guard
+    /// ([`bypass_change_detection`](crate::change::Mut::bypass_change_detection)
+    /// / [`set_if_neq`](crate::change::DetectChangesMut::set_if_neq)): a borrow
+    /// that is never written does not advance any tick.
+    pub fn get_mut<T: Component>(&mut self, entity: Entity) -> Option<Mut<'_, T>> {
+        let last_run = self.last_change_tick;
+        let this_run = self.change_tick;
+        let id = self.components.id_of::<T>()?;
+        let loc = self.entities.location(entity)?;
+        if self.components.info(id)?.storage() == StorageType::SparseSet {
+            let set = self.sparse_sets.get_mut(id)?;
+            if !set.contains(entity) {
+                return None;
+            }
+            let added = set.added_tick(entity)?;
+            // SAFETY: `entity` is present (checked above); `T` matches `id`; the
+            // value bytes and the changed-tick cell are distinct allocations, so
+            // the two `&mut` below never alias. `&mut self` gives exclusive
+            // access, so each is unique.
+            let value = unsafe { set.get_mut::<T>(entity)? };
+            // SAFETY: as above — unique access to this entity's changed-tick cell.
+            let changed = unsafe { &mut *set.changed_tick_ptr(entity)? };
+            return Some(Mut::new(value, changed, None, added, last_run, this_run));
+        }
+        let arch = self.archetypes.get(loc.archetype_id)?;
+        let col = arch.table().column(id)?;
+        let row = loc.row as usize;
+        if row >= col.len() {
+            return None;
+        }
+        let added = col.added_tick(row);
+        // SAFETY: `row < col.len()`, `T` matches `id`, and `&mut self` gives
+        // exclusive access, so the `&mut T` and `&mut Tick` formed below are
+        // unique and live in distinct allocations (value bytes vs. tick cell).
+        let value = unsafe { &mut *col.get_ptr(row).cast::<T>() };
+        // SAFETY: as above — unique access to this row's changed-tick cell.
+        let changed = unsafe { &mut *col.changed_tick_ptr(row) };
+        // SAFETY: `row < col.len()`; the chunk-version pointer is only ever
+        // written (never aliased as `&mut`) by `Mut`'s change recording.
+        let chunk_changed = unsafe { col.chunk_changed_ptr(row) };
+        Some(Mut::new(
+            value,
+            changed,
+            Some(chunk_changed),
+            added,
+            last_run,
+            this_run,
+        ))
     }
 
     /// The change-detection [`ComponentTicks`](crate::change::ComponentTicks)

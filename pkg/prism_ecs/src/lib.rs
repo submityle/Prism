@@ -74,7 +74,9 @@ pub mod world;
 pub mod prelude {
     pub use crate::blob::{BlobHandle, BlobStore};
     pub use crate::bundle::Bundle;
-    pub use crate::change::{ComponentTicks, Mut, Ref, Tick};
+    pub use crate::change::{
+        ComponentTicks, DetectChanges, DetectChangesMut, Mut, Ref, Tick,
+    };
     pub use crate::command::{CommandQueue, Commands};
     pub use crate::component::Component;
     pub use crate::component_hooks::{ComponentHook, ComponentHooks, HookContext};

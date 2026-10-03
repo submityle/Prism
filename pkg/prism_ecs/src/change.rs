@@ -208,6 +208,29 @@ impl<'w, T: ?Sized> Ref<'w, T> {
         self.changed
     }
 
+    /// The tick at which the value was most recently changed.
+    ///
+    /// `bevy_ecs`-compatible alias for [`changed_tick`](Ref::changed_tick);
+    /// migration shims (e.g. `prism_ui_ecs`) store this value and later feed it
+    /// back to [`is_changed_after`](Ref::is_changed_after) to detect writes that
+    /// happened since an arbitrary earlier observation.
+    #[inline]
+    pub fn last_changed(&self) -> Tick {
+        self.changed
+    }
+
+    /// Whether the value was changed strictly *after* `tick`, measured against
+    /// this borrow's `this_run`.
+    ///
+    /// Unlike [`is_changed`](Ref::is_changed), which uses the querying system's
+    /// `last_run`, this compares against a caller-supplied baseline tick. It is
+    /// the building block for external observers that latch a
+    /// [`last_changed`](Ref::last_changed) tick and poll for later writes.
+    #[inline]
+    pub fn is_changed_after(&self, tick: Tick) -> bool {
+        self.changed.is_newer_than(tick, self.this_run)
+    }
+
     /// Consume the wrapper, returning the underlying shared reference.
     #[inline]
     pub fn into_inner(self) -> &'w T {
@@ -322,6 +345,44 @@ impl<'w, T: ?Sized> Mut<'w, T> {
         self.value
     }
 
+    /// The tick at which the value was first added to its entity.
+    #[inline]
+    pub fn added_tick(&self) -> Tick {
+        self.added
+    }
+
+    /// The tick at which the value was most recently changed (reflecting writes
+    /// recorded *before* this call).
+    #[inline]
+    pub fn changed_tick(&self) -> Tick {
+        *self.changed
+    }
+
+    /// `bevy_ecs`-compatible alias for [`changed_tick`](Mut::changed_tick).
+    #[inline]
+    pub fn last_changed(&self) -> Tick {
+        *self.changed
+    }
+
+    /// Overwrite the stored changed tick, bypassing [`DerefMut`] detection.
+    ///
+    /// `bevy_ecs`-compatible escape hatch used when a caller needs to stamp an
+    /// explicit tick (e.g. replaying a recorded write) rather than `this_run`.
+    #[inline]
+    pub fn set_last_changed(&mut self, last_changed: Tick) {
+        *self.changed = last_changed;
+        if let Some(chunk_changed) = self.chunk_changed {
+            // SAFETY: same invariant as `record_change` — `chunk_changed` is a
+            // live per-chunk cell for `'w` and we only raise it monotonically to
+            // the newest observed tick, never tearing or lowering it.
+            unsafe {
+                if last_changed.is_newer_than(*chunk_changed, self.this_run) {
+                    *chunk_changed = last_changed;
+                }
+            }
+        }
+    }
+
     /// Consume the wrapper, recording a write and returning the exclusive
     /// reference bound to `'w`.
     #[inline]
@@ -343,6 +404,118 @@ impl<T: ?Sized> core::ops::DerefMut for Mut<'_, T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut T {
         self.record_change();
+        self.value
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DetectChanges / DetectChangesMut — bevy_ecs-compatible change-detection traits
+// ---------------------------------------------------------------------------
+
+/// Read-only change-detection surface shared by [`Ref`] and [`Mut`].
+///
+/// This mirrors the `bevy_ecs::change_detection::DetectChanges` trait so
+/// migration layers (e.g. `prism_ui_ecs`) can be generic over any
+/// change-detecting borrow. Methods report against the borrow's own observer
+/// window `(last_run, this_run]`.
+pub trait DetectChanges {
+    /// Whether the value was added within the observer window.
+    fn is_added(&self) -> bool;
+    /// Whether the value was changed (or added) within the observer window.
+    fn is_changed(&self) -> bool;
+    /// The tick at which the value was most recently changed.
+    fn last_changed(&self) -> Tick;
+    /// The tick at which the value was first added to its entity.
+    fn added(&self) -> Tick;
+}
+
+/// Mutable change-detection surface for [`Mut`].
+///
+/// Mirrors `bevy_ecs::change_detection::DetectChangesMut`, exposing the
+/// equal-value guard ([`set_if_neq`](DetectChangesMut::set_if_neq)) and the
+/// explicit change controls needed by reactive bridges.
+pub trait DetectChangesMut: DetectChanges {
+    /// The wrapped value type.
+    type Inner: ?Sized;
+
+    /// Flag the value as changed at `this_run` without going through `DerefMut`.
+    fn set_changed(&mut self);
+
+    /// Overwrite the stored changed tick directly.
+    fn set_last_changed(&mut self, last_changed: Tick);
+
+    /// Access the value mutably without flagging a change.
+    fn bypass_change_detection(&mut self) -> &mut Self::Inner;
+
+    /// Assign `value` and flag a change *only if* it differs from the current
+    /// value, avoiding spurious change propagation (design §10 equal-value
+    /// guard). Returns `true` when a write (and change flag) occurred.
+    fn set_if_neq(&mut self, value: Self::Inner) -> bool
+    where
+        Self::Inner: Sized + PartialEq,
+    {
+        let old = self.bypass_change_detection();
+        if *old != value {
+            *old = value;
+            self.set_changed();
+            true
+        } else {
+            false
+        }
+    }
+}
+
+impl<T: ?Sized> DetectChanges for Ref<'_, T> {
+    #[inline]
+    fn is_added(&self) -> bool {
+        Ref::is_added(self)
+    }
+    #[inline]
+    fn is_changed(&self) -> bool {
+        Ref::is_changed(self)
+    }
+    #[inline]
+    fn last_changed(&self) -> Tick {
+        self.changed
+    }
+    #[inline]
+    fn added(&self) -> Tick {
+        self.added
+    }
+}
+
+impl<T: ?Sized> DetectChanges for Mut<'_, T> {
+    #[inline]
+    fn is_added(&self) -> bool {
+        Mut::is_added(self)
+    }
+    #[inline]
+    fn is_changed(&self) -> bool {
+        Mut::is_changed(self)
+    }
+    #[inline]
+    fn last_changed(&self) -> Tick {
+        *self.changed
+    }
+    #[inline]
+    fn added(&self) -> Tick {
+        self.added
+    }
+}
+
+impl<'w, T: ?Sized> DetectChangesMut for Mut<'w, T> {
+    type Inner = T;
+
+    #[inline]
+    fn set_changed(&mut self) {
+        self.record_change();
+    }
+    #[inline]
+    fn set_last_changed(&mut self, last_changed: Tick) {
+        Mut::set_last_changed(self, last_changed);
+    }
+    #[inline]
+    fn bypass_change_detection(&mut self) -> &mut T {
         self.value
     }
 }
