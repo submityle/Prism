@@ -34,6 +34,7 @@ pub mod caustics_kernel;
 pub mod coupling_readback_kernel;
 pub mod dispersion_kernel;
 pub mod fft_bitrev_kernel;
+pub mod fft_normalize_kernel;
 pub mod fft_plan;
 pub mod pipeline;
 pub mod render_fx_kernel;
@@ -119,4 +120,8 @@ pub use caustics_kernel::{
 
 pub use fft_bitrev_kernel::{
     dispatch_fft_bit_reverse, FftBitReverseParams, FFT_COMPLEX_FLOATS, WATER_FFT_BITREV_WESL,
+};
+
+pub use fft_normalize_kernel::{
+    dispatch_fft_normalize, FftNormalizeParams, WATER_FFT_NORMALIZE_WESL,
 };
