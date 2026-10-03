@@ -6,7 +6,7 @@
 //! generic `Time` resource), so a system can read `delta_secs()` and get the
 //! value for whichever phase is running, without naming a context.
 
-use crate::{Fixed, Real, Time, TimeKind, Virtual};
+use crate::{Fixed, Real, TickClock, Time, TimeKind, Virtual};
 
 impl Time<()> {
     /// Overwrite the shared accessors from another clock's current readings.
@@ -31,7 +31,8 @@ pub enum DefaultSource {
     Fixed,
 }
 
-/// Bundle of the three clocks plus the context-less default clock.
+/// Bundle of the three clocks, the context-less default clock, and the
+/// deterministic [`TickClock`] (M4) for drift-free fixed stepping and replay.
 #[derive(Clone, Copy, Debug)]
 pub struct Clocks {
     real: Time<Real>,
@@ -39,6 +40,7 @@ pub struct Clocks {
     fixed: Time<Fixed>,
     default: Time<()>,
     source: DefaultSource,
+    tick: TickClock,
 }
 
 impl Default for Clocks {
@@ -58,6 +60,7 @@ impl Clocks {
             fixed: Time::<Fixed>::new(),
             default: Time::default(),
             source: DefaultSource::Virtual,
+            tick: TickClock::default(),
         }
     }
 
@@ -92,6 +95,18 @@ impl Clocks {
     #[inline]
     pub fn fixed_mut(&mut self) -> &mut Time<Fixed> {
         &mut self.fixed
+    }
+
+    /// The deterministic [`TickClock`] (M4): drift-free integer-tick fixed
+    /// stepping used by deterministic physics/rollback and replay.
+    #[inline]
+    pub fn tick_clock(&self) -> &TickClock {
+        &self.tick
+    }
+    /// Mutable access to the deterministic [`TickClock`].
+    #[inline]
+    pub fn tick_clock_mut(&mut self) -> &mut TickClock {
+        &mut self.tick
     }
 
     /// The context-less default clock, mirroring the active source.

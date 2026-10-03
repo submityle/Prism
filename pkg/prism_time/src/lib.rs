@@ -33,13 +33,17 @@
 //!   death-spiral + max-delta clamps (see [`Fixed`] and [`Virtual`]).
 //! - **M3 (this crate, done):** [`Stopwatch`], [`Timer`]/[`TimerMode`],
 //!   [`Cooldown`]/[`Throttle`], and [`SmoothedDelta`] (see the [`timer`] module).
-//! - **M4+ (planned):** rational/fixed-point deterministic stepping and
-//!   network clocks.
+//! - **M4 (this crate, done):** exact rational/fixed-point deterministic
+//!   stepping, an integer tick counter, and replay/restore via the
+//!   [`determinism`] module ([`RationalStep`], [`TickClock`],
+//!   [`TickSnapshot`]).
+//! - **M5+ (planned):** network clocks and per-world local time domains.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
 
 mod clock;
+pub mod determinism;
 mod fixed;
 mod instant;
 pub mod timer;
@@ -47,6 +51,7 @@ mod virtual_time;
 
 pub use clock::{Clocks, DefaultSource};
 pub use core::time::Duration;
+pub use determinism::{RationalStep, TickClock, TickSnapshot};
 pub use fixed::Fixed;
 pub use instant::Instant;
 pub use timer::{Cooldown, SmoothedDelta, Stopwatch, Throttle, Timer, TimerMode};
@@ -194,8 +199,9 @@ impl Time<Real> {
 /// Common imports.
 pub mod prelude {
     pub use crate::{
-        Clocks, Cooldown, DefaultSource, Duration, Fixed, Instant, Real, SmoothedDelta,
-        Stopwatch, Throttle, Time, Timer, TimerMode, Virtual,
+        Clocks, Cooldown, DefaultSource, Duration, Fixed, Instant, RationalStep, Real,
+        SmoothedDelta, Stopwatch, Throttle, TickClock, TickSnapshot, Time, Timer,
+        TimerMode, Virtual,
     };
 }
 
