@@ -34,6 +34,8 @@
 //! Position Based Dynamics* (2020). This file contains no Unreal Engine source
 //! or derived code.
 
+#[cfg(feature = "parallel")]
+pub mod color_solve;
 pub mod config;
 pub mod contact_constraint;
 pub mod graph_color;

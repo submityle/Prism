@@ -170,7 +170,7 @@ impl ContactConstraint {
 /// it stays inside the Coulomb cone.
 /// Returns the compliant position-solve stiffness `alpha_tilde` for a
 /// sub-step of length `h`.
-fn contact_alpha_tilde(config: &XpbdConfig, h: f32) -> f32 {
+pub(crate) fn contact_alpha_tilde(config: &XpbdConfig, h: f32) -> f32 {
     if h > 0.0 {
         config.contact_compliance / (h * h)
     } else {
@@ -179,7 +179,7 @@ fn contact_alpha_tilde(config: &XpbdConfig, h: f32) -> f32 {
 }
 
 /// Runs one position-solve iteration over a single contact constraint.
-fn solve_constraint_positions(
+pub(crate) fn solve_constraint_positions(
     view: &mut BodySolverView<'_>,
     constraint: &mut ContactConstraint,
     alpha_tilde: f32,

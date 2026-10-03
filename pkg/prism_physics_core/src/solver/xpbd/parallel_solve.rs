@@ -28,6 +28,7 @@
 //! original scatter/gather parallelisation layer over the crate's own
 //! per-island XPBD solve.
 
+use super::color_solve;
 use super::config::XpbdConfig;
 use super::contact_constraint::{self, ContactConstraint};
 use super::graph_color::{self, DynamicBodies};
@@ -235,16 +236,17 @@ impl IslandScratch {
                         joint_constraint::solve_joint(&mut view, &self.joints[ji], h);
                     }
                 }
-                for colour in 0..contact_coloring.color_count() as usize {
-                    let members = &contact_order[contact_coloring.color_range(colour)];
-                    contact_constraint::solve_positions_indexed(
-                        &mut view,
-                        &mut self.contacts,
-                        members,
-                        config,
-                        h,
-                    );
-                }
+                // Contacts in a colour write disjoint dynamic bodies, so the
+                // whole colour is relaxed across worker threads. This is
+                // bit-identical to the serial colour sweep (see `color_solve`).
+                let alpha_tilde = contact_constraint::contact_alpha_tilde(config, h);
+                color_solve::solve_contacts_parallel(
+                    &mut view,
+                    &mut self.contacts,
+                    &contact_coloring,
+                    &contact_order,
+                    alpha_tilde,
+                );
             }
         } else {
             for _ in 0..iterations {
