@@ -104,8 +104,11 @@ pub mod cielab;
 pub mod clamp_history;
 pub mod classify_precip;
 pub mod closest_point_obb;
+pub mod cloth_aero_gather;
+pub mod cloth_bending_apply;
 pub mod cloth_bending_project;
 pub mod cloth_mesh_volume;
+pub mod cloth_pressure_project;
 pub mod cloth_wind_force;
 pub mod cloud_shadow_modulation;
 pub mod cohen_sutherland_clip;
@@ -310,6 +313,7 @@ pub mod quickselect_u32;
 pub mod radix_sort_u32;
 pub mod raster_cluster_vis;
 pub mod raster_triangle_vis;
+pub mod raster_vis_pack;
 pub mod ray_aabb;
 pub mod ray_capsule;
 pub mod ray_cone;
@@ -449,6 +453,7 @@ pub mod water_pbf_correction;
 pub mod water_pbf_density;
 pub mod water_pbf_kernels;
 pub mod water_pbf_neighbors;
+pub mod water_pbf_plan;
 pub mod water_shading_npr;
 pub mod water_shading_pbr;
 pub mod water_swe_cfl;
@@ -529,10 +534,17 @@ pub use cielab::{CielabQuery, CielabResult, GpuCielab};
 pub use clamp_history::{ClampHistoryQuery, GpuClampHistory};
 pub use classify_precip::{ClassifyPrecipQuery, GpuClassifyPrecip};
 pub use closest_point_obb::{ClosestPointObbQuery, ClosestPointObbResult, GpuClosestPointObb};
+pub use cloth_aero_gather::{ClothAeroGatherQuery, ClothAeroGatherResult, GpuClothAeroGather};
+pub use cloth_bending_apply::{
+    ClothBendingApplyQuery, ClothBendingApplyResult, GpuClothBendingApply,
+};
 pub use cloth_bending_project::{
     ClothBendingProjectQuery, ClothBendingProjectResult, GpuClothBendingProject,
 };
 pub use cloth_mesh_volume::{ClothMeshVolumeQuery, ClothMeshVolumeResult, GpuClothMeshVolume};
+pub use cloth_pressure_project::{
+    ClothPressureProjectQuery, ClothPressureProjectResult, GpuClothPressureProject,
+};
 pub use cloth_wind_force::{ClothWindForceQuery, ClothWindForceResult, GpuClothWindForce};
 pub use cloud_shadow_modulation::{CloudShadowModulationQuery, GpuCloudShadowModulation};
 pub use cohen_sutherland_clip::{
@@ -835,6 +847,7 @@ pub use raster_cluster_vis::{GpuRasterClusterVis, RasterClusterVisQuery, RasterC
 pub use raster_triangle_vis::{
     GpuRasterTriangleVis, RasterTriangleVisQuery, RasterTriangleVisResult,
 };
+pub use raster_vis_pack::{GpuRasterVisPack, RasterVisPackQuery, RasterVisPackResult};
 pub use ray_aabb::{GpuRayAabb, RayAabbQuery, RayAabbResult};
 pub use ray_capsule::{GpuRayCapsule, RayCapsuleQuery, RayCapsuleResult};
 pub use ray_cone::{GpuRayCone, RayConeQuery, RayConeResult};
@@ -1061,6 +1074,7 @@ pub use water_pbf_kernels::{GpuWaterPbfKernels, WaterPbfKernelsQuery, WaterPbfKe
 pub use water_pbf_neighbors::{
     GpuWaterPbfNeighbors, WaterPbfNeighborsQuery, WaterPbfNeighborsResult,
 };
+pub use water_pbf_plan::{GpuWaterPbfPlan, WaterPbfPlanQuery, WaterPbfPlanResult};
 pub use water_shading_npr::{GpuWaterShadingNpr, WaterShadingNprQuery, WaterShadingNprResult};
 pub use water_shading_pbr::{GpuWaterShadingPbr, WaterShadingPbrQuery, WaterShadingPbrResult};
 pub use water_swe_cfl::{GpuWaterSweCfl, WaterSweCflQuery, WaterSweCflResult};
