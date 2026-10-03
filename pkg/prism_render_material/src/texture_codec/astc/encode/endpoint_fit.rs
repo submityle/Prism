@@ -41,9 +41,15 @@ pub(super) fn fit_rgb_endpoints<const N: usize>(texels: &[[u8; 4]; N]) -> ([u8; 
         }
     }
 
-    // Dominant eigenvector via power iteration; a degenerate (constant) block
-    // yields a near-zero `next`, so we fall back to the current axis.
-    let mut axis = [1.0f64, 1.0, 1.0];
+    // Dominant eigenvector via power iteration. Seed with the covariance column
+    // of largest norm rather than a fixed [1,1,1]: a fixed seed that happens to
+    // be orthogonal to the dominant eigenvector collapses `cov * seed` to zero
+    // and loses the axis. The classic failure is a pure two-colour split whose
+    // variance axis is orthogonal to (1,1,1) -- e.g. red (255,0,0) vs blue
+    // (0,0,255), whose axis is (1,0,-1) with (1,0,-1)·(1,1,1) = 0. The
+    // largest-norm column of a symmetric PSD covariance always carries a
+    // non-zero component along the dominant eigenvector, so it is a safe seed.
+    let mut axis = seed_axis3(&cov);
     for _ in 0..24 {
         let next: [f64; 3] =
             core::array::from_fn(|i| (0..3).map(|j| cov[i][j] * axis[j]).sum::<f64>());
@@ -119,9 +125,10 @@ pub(super) fn fit_rgba_endpoints(texels: &[[u8; 4]; 16]) -> ([u8; 4], [u8; 4]) {
         }
     }
 
-    // Dominant eigenvector via power iteration; a degenerate (constant) block
-    // yields a near-zero `next`, so we fall back to the current axis.
-    let mut axis = [1.0f64, 1.0, 1.0, 1.0];
+    // Dominant eigenvector via power iteration, seeded with the largest-norm
+    // covariance column (see [`seed_axis3`] for why a fixed [1,1,1,1] seed can
+    // be orthogonal to the variance axis and collapse to zero).
+    let mut axis = seed_axis4(&cov);
     for _ in 0..24 {
         let next: [f64; 4] =
             core::array::from_fn(|i| (0..4).map(|j| cov[i][j] * axis[j]).sum::<f64>());
@@ -198,4 +205,50 @@ fn round_rgb(c: [f64; 3]) -> [u8; 3] {
 /// `r + g + b`, the ordering key the CEM-8 decoder uses for blue contraction.
 fn hadd(c: [u8; 3]) -> u32 {
     u32::from(c[0]) + u32::from(c[1]) + u32::from(c[2])
+}
+
+/// Seed the 3x3 power iteration with the covariance column of largest norm.
+///
+/// A fixed `[1, 1, 1]` seed collapses to zero whenever it is orthogonal to the
+/// dominant eigenvector (e.g. a red/blue split whose variance axis is
+/// `(1, 0, -1)`). For a symmetric PSD covariance the column of greatest norm
+/// always carries a non-zero component along the dominant eigenvector, so it is
+/// a robust starting vector. Degenerate (near-constant) blocks fall back to the
+/// classic `[1, 1, 1]` seed; their projections are ~0 regardless, so the
+/// endpoints collapse to the constant colour either way.
+fn seed_axis3(cov: &[[f64; 3]; 3]) -> [f64; 3] {
+    let mut best_col = 0usize;
+    let mut best_norm2 = f64::NEG_INFINITY;
+    for j in 0..3 {
+        let norm2 = (0..3).map(|i| cov[i][j] * cov[i][j]).sum::<f64>();
+        if norm2 > best_norm2 {
+            best_norm2 = norm2;
+            best_col = j;
+        }
+    }
+    if best_norm2 < 1e-9 {
+        return [1.0, 1.0, 1.0];
+    }
+    let norm = best_norm2.sqrt();
+    core::array::from_fn(|i| cov[i][best_col] / norm)
+}
+
+/// Seed the 4x4 power iteration with the covariance column of largest norm.
+///
+/// See [`seed_axis3`] for the rationale; the 4D fallback is `[1, 1, 1, 1]`.
+fn seed_axis4(cov: &[[f64; 4]; 4]) -> [f64; 4] {
+    let mut best_col = 0usize;
+    let mut best_norm2 = f64::NEG_INFINITY;
+    for j in 0..4 {
+        let norm2 = (0..4).map(|i| cov[i][j] * cov[i][j]).sum::<f64>();
+        if norm2 > best_norm2 {
+            best_norm2 = norm2;
+            best_col = j;
+        }
+    }
+    if best_norm2 < 1e-9 {
+        return [1.0, 1.0, 1.0, 1.0];
+    }
+    let norm = best_norm2.sqrt();
+    core::array::from_fn(|i| cov[i][best_col] / norm)
 }

@@ -138,3 +138,51 @@ pub(super) fn quantize_weights_ise_rgba(
         best_raw
     })
 }
+
+/// Choose the best raw weight level per texel over a **trit/quint** BISE range
+/// (RGB, CEM 8), the const-generic counterpart of [`quantize_weights_ise_rgba`]
+/// for alpha-free CEM-8 encoders on arbitrary footprints `N`.
+///
+/// `num_levels` must be a valid BISE level count (e.g. 3 = one trit, 6 = one
+/// trit + one low bit, 5/10/20 = quint ranges). Each candidate `v` in
+/// `0..num_levels` is the raw BISE value as read by the decoder
+/// (`low | (digit << bits)`), reconstructed with the exact decode-side
+/// `weight_unquant::unquant_weight` + `single_partition::lerp_component`, so the
+/// chosen levels feed straight into `trit_quint::encode_trit_sequence` /
+/// `encode_quint_sequence` + `bits::BlockWriter::mirror_weight_stream`.
+///
+/// The squared error is summed over RGB only (alpha is forced to 255 by CEM 8).
+/// On a full weight grid (grid == footprint) the chosen levels decode back
+/// exactly up to the endpoint and weight-step rounding -- no bilinear infill.
+pub(super) fn quantize_weights_ise<const N: usize>(
+    texels: &[[u8; 4]; N],
+    e0: [u8; 3],
+    e1: [u8; 3],
+    num_levels: u32,
+) -> [u8; N] {
+    let range = IseRange::from_num_levels(num_levels)
+        .expect("weight level count must be a valid BISE range");
+    core::array::from_fn(|t| {
+        let texel = texels[t];
+        let mut best_raw = 0u8;
+        let mut best_err = u32::MAX;
+        for v in 0..num_levels {
+            let w = u32::from(unquant_weight(v, range));
+            let mut err = 0u32;
+            for c in 0..3 {
+                let got = i32::from(lerp_component(e0[c], e1[c], w));
+                let want = i32::from(texel[c]);
+                let d = got - want;
+                err += (d * d) as u32;
+            }
+            if err < best_err {
+                best_err = err;
+                best_raw = v as u8;
+                if err == 0 {
+                    break;
+                }
+            }
+        }
+        best_raw
+    })
+}
