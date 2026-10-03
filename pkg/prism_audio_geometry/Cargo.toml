@@ -1,0 +1,40 @@
+[package]
+name = "prism_audio_geometry"
+version = "0.1.0"
+edition = "2024"
+description = "Geometric acoustics propagation backend for Prism's next-generation audio engine (design section 14): a real PropagationBackend that ray-traces a triangle-mesh scene for direct-path transmission/occlusion, image-source specular reflections, and Maekawa edge diffraction, feeding classic acoustics (transmission loss, Fresnel/Maekawa, reflection coefficients) into the spatial crate's bounded path set. Classic deterministic DSP driven by geometry truth, no AI/ML. Contains no Unreal Engine, Unity, Godot, Wwise, FMOD, Steam Audio, Dolby, or Google Resonance Audio source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_audio_core = { path = "../prism_audio_core", default-features = false }
+prism_audio_spatial = { path = "../prism_audio_spatial", default-features = false }
+prism_physics_geometry = { path = "../prism_physics_geometry", default-features = false }
+bevy_math = { path = "../../crates/bevy_math", default-features = false, features = [
+  "nostd-libm",
+] }
+serde = { version = "1", default-features = false, features = [
+  "derive",
+], optional = true }
+
+[dev-dependencies]
+prism_audio_geometry = { path = ".", features = ["serialize"] }
+
+[features]
+default = ["std"]
+std = [
+  "prism_audio_core/std",
+  "prism_audio_spatial/std",
+  "prism_physics_geometry/std",
+  "bevy_math/std",
+]
+serialize = [
+  "dep:serde",
+  "prism_audio_core/serialize",
+  "prism_audio_spatial/serialize",
+  "prism_physics_geometry/serialize",
+  "bevy_math/serialize",
+]
+
+[lints]
+workspace = true
