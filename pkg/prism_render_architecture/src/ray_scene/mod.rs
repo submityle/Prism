@@ -824,6 +824,7 @@ pub mod tlas;
 pub mod traversal;
 pub mod traversal_stackless;
 pub mod traversal_stackless_gpu_layout;
+pub mod reorder;
 
 pub use acceleration::{
     update_scratch_bytes, AccelerationUpdate, AccelerationUpdatePolicy, GeometryChange,
@@ -978,6 +979,10 @@ pub use sphere_gpu_layout::{GpuSphereBvhBuffers, SPHERE_WORDS};
 pub use traversal::{Hit, Ray};
 pub use traversal_stackless::{BvhEscapeTable, ESCAPE_SENTINEL};
 pub use traversal_stackless_gpu_layout::GpuStacklessBvh;
+pub use reorder::{
+    plan_reorder, CoherenceKey, CoherenceKeyLayout, CoherentBatch, LayoutError, ReorderPlan,
+    ReorderStats, SpatialBounds,
+};
 pub use gpu_layout::{
     GpuBlasPool, GpuBvhBuffers, GpuTlasBuffers, TlasPackedHit, BLAS_OFFSET_WORDS, INSTANCE_WORDS,
     NODE_WORDS, TRIANGLE_WORDS,
