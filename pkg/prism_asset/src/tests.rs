@@ -1,0 +1,329 @@
+//! Unit tests for the asset kernel.
+//!
+//! These exercise identity, path parsing, generational storage, handle
+//! lifetime, change events, dependency ordering, and load-state folding.
+
+use crate::{
+    AssetEvent, AssetId, AssetIndex, AssetPath, Assets, DependencyError, DependencyGraph,
+    LoadState, RecursiveDependencyLoadState, UntypedAssetId,
+};
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
+
+/// A deliberately non-`Clone`, non-`Default` payload to prove storage never
+/// imposes bounds on the stored type.
+struct Mesh {
+    verts: u32,
+}
+
+#[test]
+fn asset_index_round_trips_parts() {
+    let index = AssetIndex::from_parts(7, 3);
+    assert_eq!(index.index(), 7);
+    assert_eq!(index.generation(), 3);
+}
+
+#[test]
+fn asset_id_untyped_round_trip() {
+    let index = AssetIndex::from_parts(2, 5);
+    let typed: AssetId<Mesh> = AssetId::new(index);
+    let untyped = typed.untyped();
+    assert_eq!(untyped.index(), index);
+    let back: AssetId<Mesh> = untyped.typed();
+    assert_eq!(back, typed);
+    assert_eq!(UntypedAssetId::from(typed), untyped);
+}
+
+#[test]
+fn asset_path_parses_label() {
+    let path = AssetPath::parse("models/hero.gltf#Mesh0");
+    assert_eq!(path.path(), "models/hero.gltf");
+    assert_eq!(path.label(), Some("Mesh0"));
+    assert!(path.has_label());
+    assert_eq!(path.to_string(), "models/hero.gltf#Mesh0");
+}
+
+#[test]
+fn asset_path_without_label() {
+    let path = AssetPath::parse("textures/stone.png");
+    assert_eq!(path.path(), "textures/stone.png");
+    assert_eq!(path.label(), None);
+    assert!(!path.has_label());
+
+    let empty_label = AssetPath::parse("file#");
+    assert_eq!(empty_label.path(), "file");
+    assert_eq!(empty_label.label(), None);
+
+    let relabeled = path.with_label("mip0");
+    assert_eq!(relabeled.label(), Some("mip0"));
+    assert_eq!(relabeled.without_label().label(), None);
+}
+
+#[test]
+fn insert_get_and_contains() {
+    let mut assets = Assets::<Mesh>::new();
+    assert!(assets.is_empty());
+    let handle = assets.insert(Mesh { verts: 12 });
+    assert_eq!(assets.len(), 1);
+    assert!(assets.contains(handle.id()));
+    assert_eq!(assets.get(handle.id()).map(|m| m.verts), Some(12));
+}
+
+#[test]
+fn get_mut_mutates_and_emits_modified() {
+    let mut assets = Assets::<Mesh>::new();
+    let handle = assets.insert(Mesh { verts: 1 });
+    let _ = assets.drain_events();
+    if let Some(mesh) = assets.get_mut(handle.id()) {
+        mesh.verts = 99;
+    }
+    assert_eq!(assets.get(handle.id()).map(|m| m.verts), Some(99));
+    let events = assets.drain_events();
+    assert_eq!(events, vec![AssetEvent::Modified { id: handle.id() }]);
+}
+
+#[test]
+fn remove_returns_value_and_frees_slot() {
+    let mut assets = Assets::<Mesh>::new();
+    let handle = assets.insert(Mesh { verts: 4 });
+    let id = handle.id();
+    let removed = assets.remove(id);
+    assert!(removed.is_some_and(|m| m.verts == 4));
+    assert!(!assets.contains(id));
+    assert!(assets.get(id).is_none());
+    assert!(assets.is_empty());
+}
+
+#[test]
+fn stale_id_does_not_alias_recycled_slot() {
+    let mut assets = Assets::<Mesh>::new();
+    let first = assets.insert(Mesh { verts: 1 });
+    let stale = first.id();
+    assets.remove(stale);
+    // Reusing the freed slot bumps its generation.
+    let second = assets.insert(Mesh { verts: 2 });
+    assert_eq!(second.id().index().index(), stale.index().index());
+    assert_ne!(second.id().index().generation(), stale.index().generation());
+    assert!(assets.get(stale).is_none());
+    assert_eq!(assets.get(second.id()).map(|m| m.verts), Some(2));
+}
+
+#[test]
+fn insert_emits_added_and_remove_emits_removed() {
+    let mut assets = Assets::<Mesh>::new();
+    let handle = assets.insert(Mesh { verts: 1 });
+    let added = assets.drain_events();
+    assert_eq!(added, vec![AssetEvent::Added { id: handle.id() }]);
+    // Draining clears the queue.
+    assert_eq!(assets.pending_event_count(), 0);
+
+    let id = handle.id();
+    assets.remove(id);
+    let removed = assets.drain_events();
+    assert_eq!(removed, vec![AssetEvent::Removed { id }]);
+}
+
+#[test]
+fn remove_unused_reclaims_only_abandoned_assets() {
+    let mut assets = Assets::<Mesh>::new();
+    let kept = assets.insert(Mesh { verts: 1 });
+    let dropped = assets.insert(Mesh { verts: 2 });
+    let dropped_id = dropped.id();
+    let _ = assets.drain_events();
+
+    // While a strong handle lives, nothing is reclaimed.
+    drop(dropped);
+    assert_eq!(assets.remove_unused(), 1);
+    assert!(!assets.contains(dropped_id));
+    assert!(assets.contains(kept.id()));
+    assert_eq!(assets.len(), 1);
+
+    let events = assets.drain_events();
+    assert_eq!(events, vec![AssetEvent::Removed { id: dropped_id }]);
+
+    // Dropping the last handle makes the final asset reclaimable too.
+    let kept_id = kept.id();
+    drop(kept);
+    assert_eq!(assets.remove_unused(), 1);
+    assert!(assets.is_empty());
+    assert_eq!(assets.drain_events(), vec![AssetEvent::Removed { id: kept_id }]);
+}
+
+#[test]
+fn iter_yields_live_pairs() {
+    let mut assets = Assets::<Mesh>::new();
+    let a = assets.insert(Mesh { verts: 1 });
+    let b = assets.insert(Mesh { verts: 2 });
+    let mut seen: Vec<(AssetId<Mesh>, u32)> =
+        assets.iter().map(|(id, mesh)| (id, mesh.verts)).collect();
+    seen.sort_by_key(|(id, _)| *id);
+    assert_eq!(seen, vec![(a.id(), 1), (b.id(), 2)]);
+}
+
+#[test]
+fn handle_clone_shares_identity() {
+    let mut assets = Assets::<Mesh>::new();
+    let handle = assets.insert(Mesh { verts: 1 });
+    let clone = handle.clone();
+    assert_eq!(handle, clone);
+    assert_eq!(handle.id(), clone.id());
+    assert_eq!(handle.handle_id(), clone.handle_id());
+    assert_eq!(handle.strong_count(), 2);
+}
+
+#[test]
+fn independent_handles_share_asset_but_differ_in_handle_id() {
+    let mut assets = Assets::<Mesh>::new();
+    let a = assets.insert(Mesh { verts: 1 });
+    let b = assets.insert(Mesh { verts: 2 });
+    assert_ne!(a.id(), b.id());
+    assert_ne!(a.handle_id(), b.handle_id());
+}
+
+#[test]
+fn downgrade_and_upgrade_track_strong_count() {
+    let mut assets = Assets::<Mesh>::new();
+    let handle = assets.insert(Mesh { verts: 1 });
+    let weak = handle.downgrade();
+    assert!(weak.upgrade().is_some());
+    assert_eq!(weak.strong_count(), 1);
+    drop(handle);
+    assert_eq!(weak.strong_count(), 0);
+    assert!(weak.upgrade().is_none());
+}
+
+#[test]
+fn untyped_handle_round_trips() {
+    let mut assets = Assets::<Mesh>::new();
+    let handle = assets.insert(Mesh { verts: 1 });
+    let untyped = handle.untyped();
+    assert_eq!(untyped.id(), handle.untyped_id());
+    assert_eq!(untyped.handle_id(), handle.handle_id());
+    let typed: crate::Handle<Mesh> = untyped.typed();
+    assert_eq!(typed.id(), handle.id());
+}
+
+#[test]
+fn load_state_helpers() {
+    assert!(LoadState::Loaded.is_loaded());
+    assert!(LoadState::Loading.is_loading());
+    assert!(LoadState::Failed("io".to_string()).is_failed());
+    assert_eq!(LoadState::default(), LoadState::NotLoaded);
+}
+
+#[test]
+fn recursive_load_state_combine_precedence() {
+    use RecursiveDependencyLoadState as R;
+    // Failed dominates everything.
+    assert!(R::Loaded
+        .combine(R::Failed("x".to_string()))
+        .is_failed());
+    assert!(R::Failed("x".to_string()).combine(R::Loading).is_failed());
+    // Then Loading beats NotLoaded and Loaded.
+    assert_eq!(R::Loaded.combine(R::Loading), R::Loading);
+    // Then NotLoaded beats Loaded.
+    assert_eq!(R::Loaded.combine(R::NotLoaded), R::NotLoaded);
+    // All-loaded stays loaded.
+    assert_eq!(R::Loaded.combine(R::Loaded), R::Loaded);
+}
+
+#[test]
+fn recursive_load_state_from_load_state() {
+    use RecursiveDependencyLoadState as R;
+    assert_eq!(R::from(&LoadState::NotLoaded), R::NotLoaded);
+    assert_eq!(R::from(&LoadState::Loading), R::Loading);
+    assert_eq!(R::from(&LoadState::Loaded), R::Loaded);
+    let failed = R::from(&LoadState::Failed("disk".to_string()));
+    assert_eq!(failed, R::Failed("disk".to_string()));
+}
+
+/// Builds an [`UntypedAssetId`] for graph tests from a raw index.
+fn node(index: u32) -> UntypedAssetId {
+    UntypedAssetId::new(AssetIndex::from_parts(index, 0))
+}
+
+#[test]
+fn topological_order_places_dependencies_first() {
+    let mut graph = DependencyGraph::new();
+    let (material, texture, shader) = (node(0), node(1), node(2));
+    graph.add_dependency(material, texture);
+    graph.add_dependency(material, shader);
+
+    let order = graph.topological_order().expect("acyclic");
+    let pos = |id: UntypedAssetId| order.iter().position(|&n| n == id).unwrap();
+    assert_eq!(order.len(), 3);
+    assert!(pos(texture) < pos(material));
+    assert!(pos(shader) < pos(material));
+}
+
+#[test]
+fn topological_order_is_deterministic() {
+    let mut graph = DependencyGraph::new();
+    for i in 0..5 {
+        graph.add_asset(node(i));
+    }
+    let first = graph.topological_order().expect("acyclic");
+    let second = graph.topological_order().expect("acyclic");
+    assert_eq!(first, second);
+    // Independent nodes come out in ascending id order.
+    assert_eq!(first, vec![node(0), node(1), node(2), node(3), node(4)]);
+}
+
+#[test]
+fn dependencies_and_dependents_are_sorted() {
+    let mut graph = DependencyGraph::new();
+    let root = node(10);
+    graph.add_dependency(root, node(3));
+    graph.add_dependency(root, node(1));
+    graph.add_dependency(root, node(2));
+    assert_eq!(graph.dependencies(root), vec![node(1), node(2), node(3)]);
+    assert_eq!(graph.dependents(node(1)), vec![root]);
+    assert_eq!(graph.len(), 4);
+}
+
+#[test]
+fn remove_asset_cleans_edges() {
+    let mut graph = DependencyGraph::new();
+    let (a, b, c) = (node(0), node(1), node(2));
+    graph.add_dependency(a, b);
+    graph.add_dependency(b, c);
+    graph.remove_asset(b);
+    assert_eq!(graph.len(), 2);
+    assert!(graph.dependencies(a).is_empty());
+    assert!(graph.dependents(c).is_empty());
+}
+
+#[test]
+fn self_edge_is_ignored() {
+    let mut graph = DependencyGraph::new();
+    let a = node(0);
+    graph.add_dependency(a, a);
+    assert_eq!(graph.len(), 1);
+    assert!(graph.dependencies(a).is_empty());
+    assert_eq!(graph.topological_order().expect("acyclic"), vec![a]);
+}
+
+#[test]
+fn cycle_is_detected() {
+    let mut graph = DependencyGraph::new();
+    let (a, b, c) = (node(0), node(1), node(2));
+    graph.add_dependency(a, b);
+    graph.add_dependency(b, c);
+    graph.add_dependency(c, a);
+    match graph.topological_order() {
+        Err(DependencyError::Cycle { participants }) => {
+            assert_eq!(participants, vec![a, b, c]);
+        }
+        Ok(order) => panic!("expected cycle, got order {order:?}"),
+    }
+}
+
+#[test]
+fn dependency_error_display_is_readable() {
+    let err = DependencyError::Cycle {
+        participants: vec![node(0), node(1)],
+    };
+    let text: String = err.to_string();
+    assert!(text.contains('2'));
+}

@@ -1,0 +1,19 @@
+[package]
+name = "prism_asset"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.0"
+description = "Prism asset kernel: stable asset identity (generational AssetIndex + typed AssetId), reference-counted Handle/weak handles, generational Assets<A> storage with change events and unused-asset reclamation, an asset-path model with sub-labels, a dependency graph with topological load ordering and cycle detection, and per-asset load-state tracking. M0 delivers the in-house identity/storage/dependency core (the bevy_asset replacement's deterministic heart); loaders, async IO, the dependency processor, hot-reload, and the bake pipeline land in later milestones. no_std + alloc core; no bevy_* crate and no Unreal/Unity source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+
+[features]
+default = ["std"]
+# `std` is reserved for later milestones (async loader IO, filesystem watch).
+# The M0 identity/storage/dependency core is fully `no_std + alloc`.
+std = []
+
+[lints]
+workspace = true
