@@ -233,6 +233,10 @@ pub mod tet_fem_corotational;
 pub use tet_fem_corotational::{
     corotational_internal_force, corotational_stiffness, element_rotation,
 };
+pub mod tet_fem_corotational_assembly;
+pub use tet_fem_corotational_assembly::{
+    assemble_corotational_forces, assemble_corotational_stiffness,
+};
 
 /// A handle into a [`ShapeRegistry`].
 ///
