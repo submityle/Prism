@@ -42,8 +42,10 @@ pub mod context;
 pub mod dilation;
 pub mod tile;
 pub mod encode;
+pub mod disocclusion;
 
 pub use context::GpuContext;
 pub use dilation::GpuDilate;
 pub use tile::{GpuNeighborMax, GpuTileMax, TileField};
 pub use encode::GpuEncodeMotion;
+pub use disocclusion::{DisocclusionResult, GpuDisocclusion};
