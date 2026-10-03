@@ -277,6 +277,10 @@ pub mod tet_fem_fiber_strain_limit;
 pub use tet_fem_fiber_strain_limit::{
     project_fiber_strain_limits, FiberStrainLimitParams, FiberStrainLimitReport,
 };
+pub mod tet_fem_orthotropic_strain_limit;
+pub use tet_fem_orthotropic_strain_limit::{
+    project_orthotropic_strain_limits, OrthotropicStrainLimitParams, OrthotropicStrainLimitReport,
+};
 pub mod tet_fem_anisotropic;
 pub use tet_fem_anisotropic::{
     orthotropic_fiber_energy, orthotropic_fiber_first_piola, FiberDirection, FiberFamily,

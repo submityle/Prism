@@ -129,17 +129,21 @@ pub struct FiberStrainLimitReport {
 
 /// Per-element fiber geometry: the deformed fiber vector written as a linear
 /// combination of the four vertices, plus the barycentric weights `w_j`.
-struct FiberGeometry {
+pub(crate) struct FiberGeometry {
     /// `fa = Σ w_j p_j`.
-    fa: Vec3,
+    pub(crate) fa: Vec3,
     /// Weights `[w0, w1, w2, w3]` with `Σ w_j = 0`.
-    weights: [f32; 4],
+    pub(crate) weights: [f32; 4],
 }
 
 /// Computes the deformed fiber vector `fa = F a0` for one element and the
 /// barycentric weights that express it as `Σ w_j p_j`.
 #[inline]
-fn fiber_geometry(dm_inverse: &glam::Mat3, fiber: FiberDirection, p: &[Vec3; 4]) -> FiberGeometry {
+pub(crate) fn fiber_geometry(
+    dm_inverse: &glam::Mat3,
+    fiber: FiberDirection,
+    p: &[Vec3; 4],
+) -> FiberGeometry {
     // b = Dm⁻¹ a0 (standard matrix–vector product).
     let b = *dm_inverse * fiber.get();
     let w0 = -(b.x + b.y + b.z);
@@ -147,6 +151,166 @@ fn fiber_geometry(dm_inverse: &glam::Mat3, fiber: FiberDirection, p: &[Vec3; 4])
     // fa = Σ w_j p_j = b.x (p1-p0) + b.y (p2-p0) + b.z (p3-p0).
     let fa = b.x * (p[1] - p[0]) + b.y * (p[2] - p[0]) + b.z * (p[3] - p[0]);
     FiberGeometry { fa, weights }
+}
+
+/// A validated fiber-stretch band `[min_stretch, max_stretch]`, the geometric
+/// core shared by the single-family and orthotropic limiters.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct FiberBand {
+    pub(crate) min_stretch: f32,
+    pub(crate) max_stretch: f32,
+}
+
+impl FiberBand {
+    /// Signed band violation of a fiber stretch: `max(λ−max, min−λ, 0)`.
+    #[inline]
+    pub(crate) fn violation(self, lambda: f32) -> f32 {
+        let over = (lambda - self.max_stretch).max(0.0);
+        let under = (self.min_stretch - lambda).max(0.0);
+        over.max(under)
+    }
+}
+
+/// Measures one fiber family against `band` without moving any vertex.
+///
+/// Returns `(max_violation, violating_elements)` over all elements. When
+/// `violated` is supplied, each violating element's slot is set to `true`
+/// (existing `true` slots are preserved so callers can OR several families).
+///
+/// All slices are assumed pre-validated by the public entry point.
+pub(crate) fn measure_fiber_family(
+    basis: &TetFemBasis,
+    tets: &[[u32; 4]],
+    fibers: &[FiberDirection],
+    positions: &[Vec3],
+    band: FiberBand,
+    mut violated: Option<&mut [bool]>,
+) -> (f32, usize) {
+    let mut max_violation = 0.0f32;
+    let mut count = 0usize;
+    for (idx, ((element, tet), fiber)) in basis
+        .elements
+        .iter()
+        .zip(tets.iter())
+        .zip(fibers.iter())
+        .enumerate()
+    {
+        let [i0, i1, i2, i3] = tet.map(|v| v as usize);
+        let p = [positions[i0], positions[i1], positions[i2], positions[i3]];
+        let geom = fiber_geometry(&element.dm_inverse, *fiber, &p);
+        let lambda = geom.fa.length();
+        if lambda < MIN_FIBER_STRETCH {
+            continue;
+        }
+        let violation = band.violation(lambda);
+        if violation > 0.0 {
+            count += 1;
+            max_violation = max_violation.max(violation);
+            if let Some(flags) = violated.as_deref_mut() {
+                flags[idx] = true;
+            }
+        }
+    }
+    (max_violation, count)
+}
+
+/// Runs one momentum-preserving Jacobi sweep of fiber strain limiting for a
+/// single family and applies it to `positions`.
+///
+/// `accum` and `counts` are caller-owned scratch buffers of length
+/// `positions.len()`; they are reset internally. All slices are assumed
+/// pre-validated by the public entry point.
+pub(crate) fn apply_fiber_jacobi_sweep(
+    basis: &TetFemBasis,
+    tets: &[[u32; 4]],
+    fibers: &[FiberDirection],
+    positions: &mut [Vec3],
+    inv_mass: Option<&[f32]>,
+    pinned: Option<&[bool]>,
+    band: FiberBand,
+    accum: &mut [[f32; 3]],
+    counts: &mut [u32],
+) {
+    let is_pinned = |v: usize| -> bool {
+        let pin_flag = pinned.is_some_and(|p| p[v]);
+        let zero_inv = inv_mass.is_some_and(|w| w[v] <= 0.0);
+        pin_flag || zero_inv
+    };
+    // Effective inverse mass used by the correction: pinned vertices get 0 so
+    // they neither move nor contribute to the denominator.
+    let effective_inv_mass = |v: usize| -> f32 {
+        if is_pinned(v) {
+            0.0
+        } else {
+            match inv_mass {
+                Some(w) => w[v],
+                None => 1.0,
+            }
+        }
+    };
+
+    for a in accum.iter_mut() {
+        *a = [0.0; 3];
+    }
+    for c in counts.iter_mut() {
+        *c = 0;
+    }
+
+    for ((element, tet), fiber) in basis.elements.iter().zip(tets.iter()).zip(fibers.iter()) {
+        let [i0, i1, i2, i3] = tet.map(|v| v as usize);
+        let verts = [i0, i1, i2, i3];
+        let p = [positions[i0], positions[i1], positions[i2], positions[i3]];
+
+        let geom = fiber_geometry(&element.dm_inverse, *fiber, &p);
+        let lambda = geom.fa.length();
+        if lambda < MIN_FIBER_STRETCH {
+            continue;
+        }
+
+        let clamped = lambda.clamp(band.min_stretch, band.max_stretch);
+        let c = lambda - clamped;
+        // Already inside the band: nothing to project for this element.
+        if c == 0.0 {
+            continue;
+        }
+
+        let n_hat = geom.fa / lambda;
+
+        // denom = Σ_k invMass_k w_k².
+        let mut denom = 0.0f32;
+        for (k, &v) in verts.iter().enumerate() {
+            let wk = geom.weights[k];
+            denom += effective_inv_mass(v) * wk * wk;
+        }
+        if denom < MIN_DENOM {
+            continue;
+        }
+
+        // Lagrange multiplier scalar: lambda_mul = C / denom.
+        let lambda_mul = c / denom;
+
+        for (k, &v) in verts.iter().enumerate() {
+            let inv_m = effective_inv_mass(v);
+            if inv_m <= 0.0 {
+                continue;
+            }
+            // Δp_k = -(invMass_k · w_k · C / denom) · n̂.
+            let scale = -lambda_mul * inv_m * geom.weights[k];
+            let delta = scale * n_hat;
+            accum[v][0] += delta.x;
+            accum[v][1] += delta.y;
+            accum[v][2] += delta.z;
+            counts[v] += 1;
+        }
+    }
+
+    for v in 0..positions.len() {
+        if counts[v] == 0 {
+            continue;
+        }
+        let inv = 1.0 / counts[v] as f32;
+        positions[v] += Vec3::new(accum[v][0] * inv, accum[v][1] * inv, accum[v][2] * inv);
+    }
 }
 
 /// Projects every element's fiber stretch into the band in `params`, mutating
@@ -196,105 +360,33 @@ pub fn project_fiber_strain_limits(
         }
     }
 
-    let is_pinned = |v: usize| -> bool {
-        let pin_flag = pinned.is_some_and(|p| p[v]);
-        let zero_inv = inv_mass.is_some_and(|w| w[v] <= 0.0);
-        pin_flag || zero_inv
-    };
-    // Effective inverse mass used by the correction: pinned vertices get 0 so
-    // they neither move nor contribute to the denominator.
-    let effective_inv_mass = |v: usize| -> f32 {
-        if is_pinned(v) {
-            0.0
-        } else {
-            match inv_mass {
-                Some(w) => w[v],
-                None => 1.0,
-            }
-        }
+    let band = FiberBand {
+        min_stretch: params.min_stretch,
+        max_stretch: params.max_stretch,
     };
 
-    let mut report = FiberStrainLimitReport {
-        max_violation: 0.0,
-        projected_elements: 0,
+    // Report is measured on the untouched input, before any correction.
+    let (max_violation, projected_elements) =
+        measure_fiber_family(basis, tets, fibers, positions, band, None);
+    let report = FiberStrainLimitReport {
+        max_violation,
+        projected_elements,
     };
+
     let mut accum = vec![[0.0f32; 3]; n];
     let mut counts = vec![0u32; n];
-
-    for sweep in 0..params.iterations {
-        for a in accum.iter_mut() {
-            *a = [0.0; 3];
-        }
-        for c in counts.iter_mut() {
-            *c = 0;
-        }
-
-        for ((element, tet), fiber) in basis.elements.iter().zip(tets.iter()).zip(fibers.iter()) {
-            let [i0, i1, i2, i3] = tet.map(|v| v as usize);
-            let verts = [i0, i1, i2, i3];
-            let p = [positions[i0], positions[i1], positions[i2], positions[i3]];
-
-            let geom = fiber_geometry(&element.dm_inverse, *fiber, &p);
-            let lambda = geom.fa.length();
-            if lambda < MIN_FIBER_STRETCH {
-                continue;
-            }
-
-            let clamped = lambda.clamp(params.min_stretch, params.max_stretch);
-            let c = lambda - clamped;
-
-            if sweep == 0 {
-                let over = (lambda - params.max_stretch).max(0.0);
-                let under = (params.min_stretch - lambda).max(0.0);
-                let violation = over.max(under);
-                if violation > 0.0 {
-                    report.projected_elements += 1;
-                    report.max_violation = report.max_violation.max(violation);
-                }
-            }
-
-            // Already inside the band: nothing to project for this element.
-            if c == 0.0 {
-                continue;
-            }
-
-            let n_hat = geom.fa / lambda;
-
-            // denom = Σ_k invMass_k w_k².
-            let mut denom = 0.0f32;
-            for (k, &v) in verts.iter().enumerate() {
-                let wk = geom.weights[k];
-                denom += effective_inv_mass(v) * wk * wk;
-            }
-            if denom < MIN_DENOM {
-                continue;
-            }
-
-            // Lagrange multiplier scalar: lambda_mul = C / denom.
-            let lambda_mul = c / denom;
-
-            for (k, &v) in verts.iter().enumerate() {
-                let inv_m = effective_inv_mass(v);
-                if inv_m <= 0.0 {
-                    continue;
-                }
-                // Δp_k = -(invMass_k · w_k · C / denom) · n̂.
-                let scale = -lambda_mul * inv_m * geom.weights[k];
-                let delta = scale * n_hat;
-                accum[v][0] += delta.x;
-                accum[v][1] += delta.y;
-                accum[v][2] += delta.z;
-                counts[v] += 1;
-            }
-        }
-
-        for v in 0..n {
-            if counts[v] == 0 {
-                continue;
-            }
-            let inv = 1.0 / counts[v] as f32;
-            positions[v] += Vec3::new(accum[v][0] * inv, accum[v][1] * inv, accum[v][2] * inv);
-        }
+    for _ in 0..params.iterations {
+        apply_fiber_jacobi_sweep(
+            basis,
+            tets,
+            fibers,
+            positions,
+            inv_mass,
+            pinned,
+            band,
+            &mut accum,
+            &mut counts,
+        );
     }
 
     Some(report)
