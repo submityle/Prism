@@ -93,6 +93,12 @@ pub mod vertex_normals;
 
 pub use vertex_normals::{face_normals, vertex_normals};
 
+pub mod feature_edges;
+
+pub use feature_edges::{
+    extract_feature_edges, EdgeKind, FeatureEdge, FeatureEdgeParams, FeatureEdges,
+};
+
 /// A handle into a [`ShapeRegistry`].
 ///
 /// This is a plain index handle; shapes are immutable once inserted, so no
