@@ -58,6 +58,10 @@ pub struct World {
     /// The tick a one-shot read via [`World::query`] / [`World::get`] treats as
     /// its `last_run` baseline. Advanced by the schedule executor per run.
     last_change_tick: Tick,
+    /// Thread-origin-guarded store for non-`Send` singletons the world owns but
+    /// that may not cross threads (design §16 / §18 bevy-compat). `std`-only.
+    #[cfg(feature = "std")]
+    non_send: non_send::NonSendResources,
 }
 
 impl Default for World {
@@ -84,6 +88,8 @@ impl World {
             next_observer_id: 0,
             change_tick: Tick::new(1),
             last_change_tick: Tick::ZERO,
+            #[cfg(feature = "std")]
+            non_send: non_send::NonSendResources::new(),
         }
     }
 
@@ -235,6 +241,62 @@ impl World {
     #[inline]
     pub fn remove_resource<R: Resource>(&mut self) -> Option<R> {
         self.resources.remove::<R>()
+    }
+
+    /// Insert (or replace) a non-`Send` resource of type `T`, returning the
+    /// previous value if one was present (design §16 / §18 bevy-compat).
+    ///
+    /// Unlike [`insert_resource`](World::insert_resource), `T` need not be
+    /// `Send + Sync`: the value is parked in a thread-origin-guarded store and
+    /// may only ever be accessed from the thread that inserted it.
+    ///
+    /// # Panics
+    /// Panics if called from a thread other than the one that first inserted a
+    /// non-`Send` resource into this world.
+    #[cfg(feature = "std")]
+    #[inline]
+    pub fn insert_non_send<T: 'static>(&mut self, value: T) -> Option<T> {
+        self.non_send.insert(value)
+    }
+
+    /// Borrow the non-`Send` resource of type `T`, or `None` if absent.
+    ///
+    /// # Panics
+    /// Panics if called off the origin thread (see [`insert_non_send`](World::insert_non_send)).
+    #[cfg(feature = "std")]
+    #[inline]
+    pub fn get_non_send<T: 'static>(&self) -> Option<&T> {
+        self.non_send.get::<T>()
+    }
+
+    /// Mutably borrow the non-`Send` resource of type `T`, or `None` if absent.
+    ///
+    /// # Panics
+    /// Panics if called off the origin thread (see [`insert_non_send`](World::insert_non_send)).
+    #[cfg(feature = "std")]
+    #[inline]
+    pub fn get_non_send_mut<T: 'static>(&mut self) -> Option<&mut T> {
+        self.non_send.get_mut::<T>()
+    }
+
+    /// Whether a non-`Send` resource of type `T` is currently present.
+    ///
+    /// # Panics
+    /// Panics if called off the origin thread (see [`insert_non_send`](World::insert_non_send)).
+    #[cfg(feature = "std")]
+    #[inline]
+    pub fn contains_non_send<T: 'static>(&self) -> bool {
+        self.non_send.contains::<T>()
+    }
+
+    /// Remove and return the non-`Send` resource of type `T`, if present.
+    ///
+    /// # Panics
+    /// Panics if called off the origin thread (see [`insert_non_send`](World::insert_non_send)).
+    #[cfg(feature = "std")]
+    #[inline]
+    pub fn remove_non_send<T: 'static>(&mut self) -> Option<T> {
+        self.non_send.remove::<T>()
     }
 
     /// Number of currently-live entities.
@@ -1335,6 +1397,10 @@ impl World {
 }
 
 mod relations;
+
+/// Non-`Send` resource store (design §16 / §18 bevy-compat); `std`-only.
+#[cfg(feature = "std")]
+mod non_send;
 
 /// Structured, differential world snapshots (design §14 / §16.5).
 pub mod snapshot;
