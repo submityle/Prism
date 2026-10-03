@@ -974,6 +974,87 @@ pub fn encode_astc_single_partition_10x5_ldr_mode373(texels: &[[u8; 4]; 50]) -> 
     w.into_block()
 }
 
+/// Encode thirty LDR RGBA texels (6 wide x 5 tall) into one 16-byte ASTC block
+/// using single-partition block **mode 371**: a full 6x5 weight grid (no
+/// bilinear infill) with a QUANT_8 bit weight range (three bit-only bits ->
+/// eight interpolation levels, 30 * 3 = 90 weight bits) paired with **QUANT_10
+/// quint colour** (`color_bits = 111 - 90 = 21`, six quint-BISE endpoint
+/// integers packed into 20 bits) and CEM 8 (RGB direct, alpha forced to 255).
+///
+/// This is the first encoder in the *fifth* recipe family: it fuses the
+/// pre-swap bit-colour endpoint fit (quantise each channel, reconstruct the
+/// decoded endpoints, and pre-swap so the CEM-8 blue-contraction path is
+/// bypassed) with a **quint** colour BISE packed via
+/// `trit_quint::encode_quint_sequence` and a plain bit weight stream
+/// (`write_weights_reversed`). The 6x5 weight grid equals the footprint, so
+/// there is no infill -- weight `t` maps 1:1 to texel `t` in row-major order
+/// (`texel = y * 6 + x`). Eight weight levels over ten-level endpoints trade a
+/// coarser colour palette for the finest weight gradient 6x5 admits under a
+/// quint colour budget.
+///
+/// Colour is **not** written as plain bit fields: the six QUANT_10 endpoint
+/// values (each packed as `low | (quint << 1)`) are emitted through
+/// `trit_quint::encode_quint_sequence` at block bit 17 so the quint BISE packing
+/// matches the decoder. Colour occupies bits 17..37 and the 90-bit weight
+/// stream occupies bits 38..128, so the two regions do not overlap.
+///
+/// CEM 8 carries no alpha, so the decoded block has alpha 255 for every texel
+/// and the input alpha channel is ignored.
+#[must_use]
+pub fn encode_astc_single_partition_6x5_ldr_mode371(texels: &[[u8; 4]; 30]) -> [u8; 16] {
+    const BLOCK_MODE: u32 = 371;
+    const CEM_RGB_DIRECT: u32 = 8;
+    const WEIGHT_BITS: u32 = 3; // QUANT_8, bit-only (eight levels)
+    const COLOR_LEVEL: usize = 2; // QUANT_10 (quint + one low bit)
+    const COLOR_LOW_BITS: u32 = 1;
+
+    // Fit the principal-axis RGB endpoints over all thirty texels, then quantise
+    // each channel into the QUANT_10 packed representation (quint + one low bit).
+    let (e0_raw, e1_raw) = endpoint_fit::fit_rgb_endpoints(texels);
+    let mut p0: [u8; 3] =
+        core::array::from_fn(|c| color_quant::quantize_color_channel(COLOR_LEVEL, e0_raw[c]));
+    let mut p1: [u8; 3] =
+        core::array::from_fn(|c| color_quant::quantize_color_channel(COLOR_LEVEL, e1_raw[c]));
+
+    // Reconstruct the decoded endpoints the hardware interpolates between.
+    let unq = |p: [u8; 3]| -> [u8; 3] {
+        core::array::from_fn(|c| super::color_unquant::unquant_color(COLOR_LEVEL, p[c]))
+    };
+    let mut d0 = unq(p0);
+    let mut d1 = unq(p1);
+
+    // CEM 8 applies blue-contraction + endpoint swap when `hadd(e0) > hadd(e1)`
+    // on the *decoded* colours. Pre-swap the packed endpoints so the decoder
+    // interpolates d0..d1 directly; weights are fitted after the swap so the
+    // texel mapping stays correct.
+    let hadd = |c: [u8; 3]| u32::from(c[0]) + u32::from(c[1]) + u32::from(c[2]);
+    if hadd(d0) > hadd(d1) {
+        core::mem::swap(&mut p0, &mut p1);
+        core::mem::swap(&mut d0, &mut d1);
+    }
+
+    // Fit the thirty 3-bit weights against the *decoded* endpoints (no infill on
+    // a full grid): each texel picks the nearest of eight levels.
+    let raw = weight_fit::quantize_weights_bits(texels, d0, d1, WEIGHT_BITS);
+
+    let mut w = bits::BlockWriter::new();
+    w.write_bits(0, 11, BLOCK_MODE);
+    w.write_bits(13, 4, CEM_RGB_DIRECT);
+    // Thirty 3-bit weights packed bit-reversed from the top of the block
+    // (bits 38..128).
+    w.write_weights_reversed(&raw, WEIGHT_BITS);
+    let mut block = w.into_block();
+
+    // Six QUANT_10 colour values (each packed `low | (quint << 1)`) in the
+    // decoder's read order [e0.r, e1.r, e0.g, e1.g, e0.b, e1.b], emitted as a
+    // quint BISE at block bit 17 (bits 17..37, disjoint from the weight stream
+    // at 38..128). `encode_quint_sequence` re-splits each packed value into its
+    // quint digit (`>> 1`) and low bit (`& 1`) exactly as the decoder reads it.
+    let packed = [p0[0], p1[0], p0[1], p1[1], p0[2], p1[2]];
+    super::trit_quint::encode_quint_sequence(&mut block, 17, COLOR_LOW_BITS, &packed);
+    block
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::decode_astc_4x4_ldr;
@@ -990,6 +1071,7 @@ mod tests {
     use super::encode_astc_single_partition_5x5_ldr;
     use super::encode_astc_single_partition_6x5_ldr;
     use super::encode_astc_single_partition_6x5_ldr_mode369;
+    use super::encode_astc_single_partition_6x5_ldr_mode371;
     use super::encode_astc_single_partition_6x6_ldr;
     use super::encode_astc_single_partition_8x5_ldr;
     use super::encode_astc_single_partition_8x6_ldr;
@@ -1980,6 +2062,70 @@ mod tests {
         assert!(
             max_rgb_err_50(&src, &dec) <= 16,
             "10x5 mode373 three-level block must resolve the midpoint within QUANT_32 + trit budget"
+        );
+    }
+
+    #[test]
+    fn six_by_five_mode371_constant_block_round_trips_within_quant10() {
+        // Mode 371 uses QUANT_10 (quint, ten-level) colour, so a constant block
+        // reconstructs within the QUANT_10 quantisation budget (step ~255/9).
+        let src = [[41u8, 173, 98, 255]; 30];
+        let blk = encode_astc_single_partition_6x5_ldr_mode371(&src);
+        let (dec144, count) = decode_astc_ldr(&blk, 6, 5).expect("decode 6x5 m371 constant");
+        assert_eq!(count, 30, "6x5 footprint must decode 30 texels");
+        let dec: [[u8; 4]; 30] = core::array::from_fn(|t| dec144[t]);
+        assert!(
+            max_rgb_err_30(&src, &dec) <= 16,
+            "6x5 mode371 constant block must round-trip within the QUANT_10 budget"
+        );
+        for d in &dec {
+            assert_eq!(d[3], 255, "CEM 8 forces alpha 255");
+        }
+    }
+
+    #[test]
+    fn six_by_five_mode371_two_colour_endpoints_within_quant10() {
+        // A hard split: every texel sits on one of the two endpoints, reached
+        // exactly by the bit weight extremes (0 / max), so the only error is the
+        // QUANT_10 endpoint quantisation.
+        let a = [15u8, 35, 55, 255];
+        let b = [210u8, 190, 170, 255];
+        let src: [[u8; 4]; 30] = core::array::from_fn(|t| if t % 2 == 0 { a } else { b });
+        let blk = encode_astc_single_partition_6x5_ldr_mode371(&src);
+        let (dec144, count) = decode_astc_ldr(&blk, 6, 5).expect("decode 6x5 m371 two-colour");
+        assert_eq!(count, 30);
+        let dec: [[u8; 4]; 30] = core::array::from_fn(|t| dec144[t]);
+        assert!(
+            max_rgb_err_30(&src, &dec) <= 16,
+            "6x5 mode371 two-colour block must hit both endpoints within QUANT_10"
+        );
+    }
+
+    #[test]
+    fn six_by_five_mode371_gradient_resolves_eight_levels() {
+        // Eight bit weight levels give the finest gradient 6x5 admits under a
+        // quint colour budget: a per-row ramp reconstructs within the combined
+        // QUANT_10 endpoint and eight-level weight budget.
+        let a = [10u8, 20, 30, 255];
+        let b = [220u8, 210, 200, 255];
+        let src: [[u8; 4]; 30] = core::array::from_fn(|t| {
+            let x = (t % 6) as u16; // 0..5 across the row
+            let num = x;
+            let den = 5u16;
+            [
+                (a[0] as u16 + (b[0] as u16 - a[0] as u16) * num / den) as u8,
+                (a[1] as u16 + (b[1] as u16 - a[1] as u16) * num / den) as u8,
+                (a[2] as u16 + (b[2] as u16 - a[2] as u16) * num / den) as u8,
+                255,
+            ]
+        });
+        let blk = encode_astc_single_partition_6x5_ldr_mode371(&src);
+        let (dec144, count) = decode_astc_ldr(&blk, 6, 5).expect("decode 6x5 m371 gradient");
+        assert_eq!(count, 30);
+        let dec: [[u8; 4]; 30] = core::array::from_fn(|t| dec144[t]);
+        assert!(
+            max_rgb_err_30(&src, &dec) <= 32,
+            "6x5 mode371 eight-level gradient must stay within the QUANT_10 + weight budget"
         );
     }
 }
