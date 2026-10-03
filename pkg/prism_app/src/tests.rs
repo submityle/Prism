@@ -3025,7 +3025,7 @@ mod state_depth_tests {
 
     use prism_ecs::entity::Entity;
 
-    use crate::state::{ComputedStates, StateScoped, SubStates};
+    use crate::state::{ComputedStates, OnTransition, StateScoped, SubStates};
 
     /// Shared edge log: records `OnEnter`/`OnExit` tags in the order they fire.
     type Log = Arc<Mutex<Vec<&'static str>>>;
@@ -3400,6 +3400,132 @@ mod state_depth_tests {
             "once the first mode settles, mismatched tags are cleaned up"
         );
     }
+
+    // ---- transition hooks (OnTransition from -> to) --------------------------
+
+    /// Register an [`OnTransition`] edge that pushes `tag` to `log` when it runs.
+    fn log_transition<S: States>(app: &mut App, from: S, to: S, log: &Log, tag: &'static str) {
+        let l = log.clone();
+        app.add_systems(OnTransition { from, to }, move || l.lock().unwrap().push(tag));
+    }
+
+    /// A base-state `from -> to` edge runs its `OnTransition` schedule, and only
+    /// for the specific edge that actually occurred.
+    #[test]
+    fn transition_hook_fires_on_specific_base_edge() {
+        let log = log();
+        let mut app = App::new();
+        app.insert_state(AppState::Menu)
+            .add_state_transition_hooks::<AppState>();
+        log_transition(&mut app, AppState::Menu, AppState::InGame, &log, "menu->ingame");
+        log_transition(&mut app, AppState::InGame, AppState::Paused, &log, "ingame->paused");
+        log_transition(&mut app, AppState::Menu, AppState::Paused, &log, "menu->paused");
+
+        // Frame 1: first entry into Menu is not an edge (no `from`): no hook.
+        app.update();
+        assert!(drain(&log).is_empty(), "first entry fires no transition hook");
+
+        // Menu -> InGame fires only the matching edge.
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::InGame);
+        app.update();
+        assert_eq!(drain(&log), vec!["menu->ingame"]);
+
+        // InGame -> Paused fires only its edge (not menu->paused).
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::Paused);
+        app.update();
+        assert_eq!(drain(&log), vec!["ingame->paused"]);
+    }
+
+    /// The transition hook runs *after* the `OnExit`/`OnEnter` edges of the same
+    /// transition (App-layer ordering; see `state::transition` docs).
+    #[test]
+    fn transition_hook_runs_after_exit_and_enter_edges() {
+        let log = log();
+        let mut app = App::new();
+        app.insert_state(AppState::Menu)
+            .add_state_transition_hooks::<AppState>();
+        let l = log.clone();
+        app.add_systems(OnExit(AppState::Menu), move || l.lock().unwrap().push("exit:menu"));
+        let l = log.clone();
+        app.add_systems(OnEnter(AppState::InGame), move || {
+            l.lock().unwrap().push("enter:ingame");
+        });
+        log_transition(&mut app, AppState::Menu, AppState::InGame, &log, "transition");
+
+        app.update(); // settle into Menu (no edge yet)
+        drain(&log);
+
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::InGame);
+        app.update();
+        assert_eq!(
+            drain(&log),
+            vec!["exit:menu", "enter:ingame", "transition"],
+            "OnTransition observes the fully settled edge, after exit and enter"
+        );
+    }
+
+    /// Transition hooks also observe a computed state's `from -> to` edge, but
+    /// not its appearance (`None -> value`) or disappearance (`value -> None`).
+    #[test]
+    fn transition_hook_fires_for_computed_state_edge_only() {
+        let log = log();
+        let mut app = App::new();
+        app.insert_state(AppState::Menu)
+            .add_computed_state::<Activity>()
+            .add_state_transition_hooks::<Activity>();
+        log_transition(&mut app, Activity::Playing, Activity::Halted, &log, "play->halt");
+
+        app.update(); // Menu: Activity absent, no edge
+        assert!(drain(&log).is_empty());
+
+        // Menu -> InGame: Activity *appears* (None -> Playing): no transition hook.
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::InGame);
+        app.update();
+        assert!(drain(&log).is_empty(), "appearance is not a from->to edge");
+
+        // InGame -> Paused: Activity Playing -> Halted: the hook fires.
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::Paused);
+        app.update();
+        assert_eq!(drain(&log), vec!["play->halt"]);
+
+        // Paused -> Menu: Activity *disappears* (Halted -> None): no hook.
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::Menu);
+        app.update();
+        assert!(drain(&log).is_empty(), "disappearance is not a from->to edge");
+    }
+
+    /// Transition hooks are opt-in: without `add_state_transition_hooks`, an
+    /// `OnTransition` schedule is never driven even across real edges.
+    #[test]
+    fn transition_hook_requires_opt_in() {
+        let log = log();
+        let mut app = App::new();
+        app.insert_state(AppState::Menu); // no add_state_transition_hooks
+        log_transition(&mut app, AppState::Menu, AppState::InGame, &log, "menu->ingame");
+
+        app.update();
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::InGame);
+        app.update();
+        assert!(
+            drain(&log).is_empty(),
+            "without opt-in the transition driver is not wired"
+        );
+    }
+
 }
 
 /// Capability tiering (design §3, §24.4): `Capabilities` / `QualityTier` /

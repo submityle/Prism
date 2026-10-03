@@ -16,6 +16,10 @@
 //! - **[State-scoped entities](scoped)** — [`App::enable_state_scoped_entities`]
 //!   despawns entities tagged with [`StateScoped<S>`] once their owning mode is
 //!   no longer current, so switching scenes leaves no stragglers.
+//! - **[Transition hooks](transition)** — [`App::add_state_transition_hooks`]
+//!   enables [`OnTransition`] `from -> to` edges so
+//!   logic can key off *both* endpoints of a specific transition (cross-fades,
+//!   directional load/unload), complementing the one-sided `OnEnter`/`OnExit`.
 //!
 //! The underlying machinery ([`State`], [`NextState`], [`OnEnter`], [`OnExit`],
 //! [`in_state`], [`apply_state_transition`]) lives in [`prism_ecs`] and is
@@ -28,7 +32,7 @@
 //!
 //! Everything the state machine does happens in the [`StateTransition`] phase
 //! (design §7: between `PreUpdate` and `Update`). Within that phase the work is
-//! split into two ordered groups via [`StateTransitionSet`]:
+//! split into three ordered groups via [`StateTransitionSet`]:
 //!
 //! 1. [`StateTransitionSet::Apply`] — base-state transitions
 //!    ([`apply_state_transition::<S>`]). The authoritative [`State<S>`] values
@@ -37,6 +41,11 @@
 //!    base states: computed-state recomputation, sub-state existence/transition,
 //!    and state-scoped despawn. Ordered strictly `after` `Apply` so it always
 //!    observes the current frame's base modes.
+//! 3. [`StateTransitionSet::Notify`] — observation hooks that read the fully
+//!    settled state: [`OnTransition`] `from -> to`
+//!    edges. Ordered strictly `after` `Compute`, so a transition hook fires for
+//!    base, computed, and sub states alike (and, by consequence, *after* the
+//!    `OnExit`/`OnEnter` edges of that transition — see [`transition`]).
 //!
 //! Computed and sub states derive from **base** [`States`] (their
 //! `SourceStates` is a `States`), so a single `Compute` tier after `Apply` is
@@ -89,10 +98,12 @@ use crate::schedule::StateTransition;
 pub mod computed;
 pub mod scoped;
 pub mod sub;
+pub mod transition;
 
 pub use computed::ComputedStates;
 pub use scoped::StateScoped;
 pub use sub::SubStates;
+pub use transition::OnTransition;
 
 /// Ordering anchors inside the [`StateTransition`] phase (design §7, §11).
 ///
@@ -108,6 +119,11 @@ pub enum StateTransitionSet {
     /// Derived state work that reads the settled base states: computed-state
     /// recomputation, sub-state existence/transition, and state-scoped despawn.
     Compute,
+    /// Observation hooks that read the fully settled state for the frame:
+    /// [`OnTransition`] `from -> to` edges. Ordered
+    /// strictly after [`Compute`](StateTransitionSet::Compute) so it sees base,
+    /// computed, and sub states alike.
+    Notify,
 }
 
 impl SystemSet for StateTransitionSet {
