@@ -242,6 +242,8 @@ pub mod minkowski_sum_2d;
 pub mod modeling;
 pub mod morton_code;
 pub mod motion_blur;
+pub mod motion_disocclusion;
+pub mod motion_vector_dilate;
 pub mod motion_vectors;
 pub mod multigrid_pressure;
 pub mod multiscatter_lut_build;
@@ -346,6 +348,10 @@ pub mod sunset_inscatter_tint;
 pub mod sunset_reddening;
 pub mod sutherland_hodgman_2d;
 pub mod sweep_aabb;
+pub mod taau_color_transform;
+pub mod taau_neighborhood_clip;
+pub mod taau_rcas_sharpen;
+pub mod taau_thin_feature_lock;
 pub mod temporal_dither;
 pub mod temporal_reproject;
 pub mod temporal_reprojection;
@@ -642,6 +648,13 @@ pub use minkowski_sum_2d::{GpuMinkowskiSum2d, MinkowskiSum2dQuery, MinkowskiSum2
 pub use modeling::{GpuModeling, ModelingQuery};
 pub use morton_code::GpuMortonCode;
 pub use motion_blur::{GpuMotionBlur, MotionBlurQuery, MotionBlurResult};
+pub use motion_disocclusion::{
+    GpuMotionDisocclusion, MotionDisocclusionParams, MotionDisocclusionQuery,
+    MotionDisocclusionResult, MotionSurfacePoint,
+};
+pub use motion_vector_dilate::{
+    GpuMotionVectorDilate, MotionVectorDilateInput, MotionVectorDilateOrder,
+};
 pub use motion_vectors::{GpuMotionVectors, MotionVectorQuery};
 pub use multigrid_pressure::{
     GpuMultigridPressure, MultigridPressureQuery, MultigridPressureResult,
@@ -777,6 +790,16 @@ pub use sutherland_hodgman_2d::{
     GpuSutherlandHodgman2d, SutherlandHodgman2dQuery, SutherlandHodgman2dResult,
 };
 pub use sweep_aabb::{GpuSweepAabb, SweepAabbQuery};
+pub use taau_color_transform::{
+    GpuTaauColorTransform, TaauColorTransformQuery, TaauColorTransformResult,
+};
+pub use taau_neighborhood_clip::{
+    GpuTaauNeighborhoodClip, TaauNeighborhoodClipQuery, TaauNeighborhoodClipResult,
+};
+pub use taau_rcas_sharpen::{GpuTaauRcasSharpen, TaauRcasSharpenQuery, TaauRcasSharpenResult};
+pub use taau_thin_feature_lock::{
+    GpuTaauThinFeatureLock, TaauThinFeatureLockQuery, TaauThinFeatureLockResult,
+};
 pub use temporal_dither::{DitherPixel, DitherQuery, DitherSample, GpuTemporalDither};
 pub use temporal_reproject::{
     GpuTemporalReproject, TemporalReprojectQuery, TemporalReprojectResult, NEIGHBORHOOD_TAPS,
