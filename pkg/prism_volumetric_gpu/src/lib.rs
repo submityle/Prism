@@ -78,6 +78,7 @@ pub mod audio_spectrum;
 pub mod avsm_area;
 pub mod avsm_transmittance;
 pub mod backface_outline_expand;
+pub mod barrier_contact_force;
 pub mod barycentric_coord;
 pub mod bicubic_sample;
 pub mod billboard_atlas;
@@ -143,6 +144,7 @@ pub mod depth_linearize;
 pub mod depth_of_field;
 pub mod display_tonemap_target;
 pub mod distance_field_shadow;
+pub mod draine_phase_blend;
 pub mod draw_pass_buffers;
 pub mod dual_lobe_phase;
 pub mod dual_quaternion;
@@ -170,6 +172,7 @@ pub mod fluid_pressure_jacobi;
 pub mod fluid_vorticity;
 pub mod fog;
 pub mod forces;
+pub mod fresnel_dielectric;
 pub mod fresnel_rim;
 pub mod froxel_injection;
 pub mod frustum_aabb_cull;
@@ -256,6 +259,7 @@ pub mod microfacet_ggx;
 pub mod midpoint_circle;
 pub mod minkowski_sum_2d;
 pub mod mip_error;
+pub mod mis_heuristics;
 pub mod modeling;
 pub mod morton_code;
 pub mod motion_blur;
@@ -324,6 +328,7 @@ pub mod ray_disk;
 pub mod ray_obb;
 pub mod ray_sphere;
 pub mod ray_triangle;
+pub mod ray_triangle_reconstruct;
 pub mod rayleigh_phase;
 pub mod raytrace;
 pub mod readback_reduce;
@@ -346,6 +351,7 @@ pub mod sat_collision_2d;
 pub mod scanline_polygon_fill;
 pub mod screen_space_reflection;
 pub mod sdf;
+pub mod sdf_smooth_ops;
 pub mod segment_closest_point_3d;
 pub mod segment_intersect_2d;
 pub mod segment_obb_intersect;
@@ -507,6 +513,9 @@ pub use avsm_transmittance::{AvsmSampleNode, GpuAvsmTransmittance};
 pub use backface_outline_expand::{
     GpuBackfaceOutlineExpand, OutlineExpandResult, OutlineExpandVertex,
 };
+pub use barrier_contact_force::{
+    BarrierContactForceQuery, BarrierContactForceResult, GpuBarrierContactForce,
+};
 pub use barycentric_coord::{BarycentricQuery, BarycentricResult, GpuBarycentricCoord};
 pub use bicubic_sample::GpuBicubicSample;
 pub use billboard_atlas::{GpuBillboardAtlas, GpuBillboardAtlasQuery, GpuBillboardAtlasResult};
@@ -602,6 +611,7 @@ pub use display_tonemap_target::{
     DisplayTonemapTargetQuery, DisplayTonemapTargetResult, GpuDisplayTonemapTarget,
 };
 pub use distance_field_shadow::{GpuDistanceFieldShadow, GpuSdfGrid, SdfShadowRay};
+pub use draine_phase_blend::{DrainePhaseBlendQuery, DrainePhaseBlendResult, GpuDrainePhaseBlend};
 pub use draw_pass_buffers::{GpuDrawPassBufferQuery, GpuDrawPassBufferResult, GpuDrawPassBuffers};
 pub use dual_lobe_phase::{DualLobePhaseQuery, GpuDualLobePhase};
 pub use dual_quaternion::{DualQuatTransformQuery, GpuDualQuaternion};
@@ -640,6 +650,9 @@ pub use forces::{
     FALLOFF_LINEAR, FALLOFF_SMOOTHSTEP, FORCE_EXPLOSION, FORCE_GRAVITY_WELL, FORCE_IMPLOSION,
     FORCE_LINE_ATTRACTOR, FORCE_ORBITAL, FORCE_POINT_ATTRACTOR, FORCE_QUADRATIC_DRAG, FORCE_RADIAL,
     FORCE_SPRING_DAMPER, FORCE_TURBULENCE,
+};
+pub use fresnel_dielectric::{
+    FresnelDielectricQuery, FresnelDielectricResult, GpuFresnelDielectric,
 };
 pub use fresnel_rim::{FresnelRimQuery, FresnelRimSample, GpuFresnelRim};
 pub use froxel_injection::{FroxelInjectionQuery, GpuFroxelInjection};
@@ -772,6 +785,7 @@ pub use microfacet_ggx::{GpuMicrofacetGgx, MicrofacetSample};
 pub use midpoint_circle::{GpuMidpointCircle, GpuMidpointCircleQuery, GpuMidpointCircleResult};
 pub use minkowski_sum_2d::{GpuMinkowskiSum2d, MinkowskiSum2dQuery, MinkowskiSum2dResult};
 pub use mip_error::{GpuMipError, MipErrorQuery, MipErrorResult};
+pub use mis_heuristics::{GpuMisHeuristics, MisHeuristicsQuery, MisHeuristicsResult};
 pub use modeling::{GpuModeling, ModelingQuery};
 pub use morton_code::GpuMortonCode;
 pub use motion_blur::{GpuMotionBlur, MotionBlurQuery, MotionBlurResult};
@@ -868,6 +882,9 @@ pub use ray_disk::{GpuRayDisk, GpuRayDiskHit, RayDiskQuery, RayDiskTarget, FACE_
 pub use ray_obb::{GpuRayObb, RayObbQuery, RayObbResult};
 pub use ray_sphere::{GpuRaySphere, RaySphereProbe, RaySphereResult};
 pub use ray_triangle::{GpuRayTriangle, RayTriangleHit, RayTriangleQuery};
+pub use ray_triangle_reconstruct::{
+    GpuRayTriangleReconstruct, RayTriangleReconstructQuery, RayTriangleReconstructResult,
+};
 pub use rayleigh_phase::{GpuRayleighPhase, RayleighPhaseQuery};
 pub use raytrace::{
     GpuRaytrace, GpuRaytraceQuery, GpuRaytraceResult, METHOD_DEPTH_BUFFER, METHOD_RAYTRACE,
@@ -906,6 +923,7 @@ pub use screen_space_reflection::{
     GpuScreenSpaceReflection, ScreenSpaceReflectionQuery, ScreenSpaceReflectionResult,
 };
 pub use sdf::{GpuSignedDistanceField, SdfQuery, SdfResult};
+pub use sdf_smooth_ops::{GpuSdfSmoothOps, SdfSmoothOpsQuery, SdfSmoothOpsResult};
 pub use segment_closest_point_3d::{
     GpuSegmentClosestPoint3d, SegmentClosestQuery, SegmentClosestResult,
 };
