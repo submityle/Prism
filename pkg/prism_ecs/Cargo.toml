@@ -23,6 +23,14 @@ std = []
 # onto a `prism_tasks` work-stealing pool. Pulls in `prism_tasks` and `std`.
 multi_thread = ["std", "dep:prism_tasks"]
 
+# SIMD-accelerated bulk column kernels (design §7/§17). Hot component columns
+# are iterated through per-arch `core::arch` intrinsics (SSE2 on x86_64, NEON on
+# aarch64) with a portable scalar reference fallback — the same backend-selection
+# discipline as `prism_math`. The scalar path is the behavioural ground truth;
+# every SIMD kernel is cross-checked value-for-value against it in a golden
+# dual-run test. No `portable_simd`/nightly: the crate stays on stable.
+simd = []
+
 # NOTE: this crate intentionally does NOT inherit `[lints] workspace = true`.
 # A type-erased columnar ECS fundamentally requires `unsafe` for component
 # storage, so the workspace-wide `unsafe_code = "deny"` cannot apply here.

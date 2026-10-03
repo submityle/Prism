@@ -129,6 +129,37 @@ impl BlobVec {
         unsafe { self.data.as_ptr().add(index * self.item_layout.size()) }
     }
 
+    /// Borrow the live elements as a typed slice `&[T]`.
+    ///
+    /// The backing allocation is contiguous, so the `len()` live elements form
+    /// one slice — the contiguity the SIMD column kernels (design §7/§17) rely
+    /// on to vectorize a whole column in one pass.
+    ///
+    /// # Safety
+    /// `T` must be the exact type this column stores (so `item_layout` matches
+    /// `Layout::new::<T>()`), and the caller must hold shared access to every
+    /// live element for the slice's lifetime.
+    #[inline]
+    pub unsafe fn as_slice<T>(&self) -> &[T] {
+        // SAFETY: the allocation holds `len` contiguous `T` (forwarded type
+        // contract); for `len == 0` the dangling-but-aligned base is a valid
+        // empty-slice pointer.
+        unsafe { core::slice::from_raw_parts(self.data.as_ptr().cast::<T>(), self.len) }
+    }
+
+    /// Borrow the live elements as a typed mutable slice `&mut [T]`.
+    ///
+    /// # Safety
+    /// `T` must be the exact type this column stores, and the caller must hold
+    /// unique access to every live element for the slice's lifetime.
+    #[inline]
+    #[allow(clippy::mut_from_ref)]
+    pub unsafe fn as_mut_slice<T>(&self) -> &mut [T] {
+        // SAFETY: as [`BlobVec::as_slice`], plus the caller's unique-access
+        // guarantee makes forming a `&mut [T]` non-aliasing.
+        unsafe { core::slice::from_raw_parts_mut(self.data.as_ptr().cast::<T>(), self.len) }
+    }
+
     /// Append a value by copying `item_layout.size()` bytes from `value`.
     ///
     /// Ownership of the value is transferred into the column (a bitwise move);

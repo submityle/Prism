@@ -104,6 +104,38 @@ impl Column {
         unsafe { &mut *self.get_ptr(row).cast::<T>() }
     }
 
+    /// Borrow the whole column as a typed slice `&[T]`.
+    ///
+    /// Every row of this column is contiguous (M0/M2 keep one table per
+    /// archetype), so this exposes the entire column as a single slice for the
+    /// SIMD bulk kernels (design §7/§17) and other whole-column scans.
+    ///
+    /// # Safety
+    /// `T` must be the exact component type stored here, and the caller must
+    /// hold shared access to the column's rows for the slice's lifetime.
+    #[inline]
+    pub unsafe fn as_slice<T>(&self) -> &[T] {
+        // SAFETY: forwarded type contract; delegates to `BlobVec::as_slice`.
+        unsafe { self.data.as_slice::<T>() }
+    }
+
+    /// Borrow the whole column as a typed mutable slice `&mut [T]`.
+    ///
+    /// Note this stamps no change ticks: callers that mutate through the slice
+    /// must bump the relevant ticks themselves (e.g. via
+    /// [`Column::set_changed_tick`]) or treat the write as tick-neutral.
+    ///
+    /// # Safety
+    /// `T` must be the exact component type stored here, and the caller must
+    /// hold unique access to the column's rows for the slice's lifetime.
+    #[inline]
+    #[allow(clippy::mut_from_ref)]
+    pub unsafe fn as_mut_slice<T>(&self) -> &mut [T] {
+        // SAFETY: forwarded type + unique-access contract; delegates to
+        // `BlobVec::as_mut_slice`.
+        unsafe { self.data.as_mut_slice::<T>() }
+    }
+
     /// Append a value by moving `size` bytes from `value`, stamping both its
     /// added and changed ticks with `change_tick` (a brand-new value).
     ///

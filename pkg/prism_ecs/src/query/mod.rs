@@ -22,6 +22,8 @@ mod dirty;
 mod fetch;
 mod filter;
 mod iter;
+#[cfg(feature = "simd")]
+mod simd;
 mod state;
 
 pub use access::Access;
@@ -29,6 +31,8 @@ pub use dirty::DirtyChunk;
 pub use fetch::{QueryData, ReadOnlyQueryData};
 pub use filter::{Added, Changed, Or, QueryFilter, With, Without};
 pub use iter::QueryIter;
+#[cfg(feature = "simd")]
+pub use simd::{active, add_assign, axpy_assign, scale_assign, sum, Backend};
 pub use state::QueryState;
 
 #[cfg(test)]
