@@ -56,6 +56,9 @@ pub use weld::{weld_mesh, WeldParams, WeldedMesh};
 pub mod mesh_bvh;
 
 pub use mesh_bvh::{MeshBvh, MeshClosestPoint, MeshRayHit};
+pub mod quadric;
+
+pub use quadric::Quadric;
 
 /// A handle into a [`ShapeRegistry`].
 ///
