@@ -51,6 +51,7 @@ pub mod spectral_plan;
 pub mod spectrum_assemble_kernel;
 pub mod surface_bindings;
 pub mod surface_mesh;
+pub mod surface_mesh_kernel;
 pub mod surface_pass;
 pub mod swe_kernel;
 pub mod underwater_kernel;
@@ -106,6 +107,11 @@ pub use surface_bindings::{
 pub use surface_mesh::{
     plan_surface_mesh_dispatch, surface_mesh_output_bytes, SurfaceMeshDispatch, SurfaceMeshOutput,
     SurfaceMeshSource, SURFACE_MESH_LANES,
+};
+
+pub use surface_mesh_kernel::{
+    dispatch_surface_mesh, MeshParams, SurfaceMeshFields, SURFACE_MESH_VERTEX_FLOATS,
+    SURFACE_TEXEL_FLOATS, WATER_SURFACE_MESH_WESL,
 };
 
 pub use surface_pass::{
