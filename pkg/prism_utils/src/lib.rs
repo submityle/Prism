@@ -28,8 +28,16 @@
 //!   `O(1)` whole-frame [`reset`](alloc_::FrameAllocator::reset).
 //! - [`AllocBox`](alloc_::AllocBox): an allocator-aware owning box.
 //!
-//! Later milestones add interning, concurrent containers, determinism, and
-//! SIMD hashing.
+//! ## M3 scope (this build): interning + stable hashing
+//! - [`Interner`](intern::Interner)/[`Istr`](intern::Istr): domain-separated
+//!   string interning with `O(1)` handle comparison ([`FName`](intern::FName)
+//!   is the default tag alias).
+//! - [`StableHasher`](hash::StableHasher)/[`StableBuildHasher`](hash::StableBuildHasher):
+//!   seed-free FNV-1a hashing that is identical across runs of the same build.
+//! - [`ContentHash`](hash::ContentHash): a 128-bit content hash for
+//!   content-addressed deduplication.
+//!
+//! Later milestones add concurrent containers, determinism, and SIMD hashing.
 //!
 //! The crate contains no Unreal Engine source or derived code and depends on
 //! no `bevy_*` crate.
@@ -47,6 +55,7 @@ pub mod array_vec;
 pub mod arena;
 pub mod bit_set;
 pub mod hash;
+pub mod intern;
 pub mod prelude;
 pub mod slot_map;
 pub mod small_vec;
@@ -56,7 +65,11 @@ pub use alloc_::{AllocBox, AllocError, Allocator, FrameAllocator, Global, Pool};
 pub use array_vec::ArrayVec;
 pub use arena::{Arena, ArenaIndex};
 pub use bit_set::BitSet;
-pub use hash::{FxBuildHasher, FxHasher, HashMap, HashSet};
+pub use hash::{
+    stable_hash, stable_hash_bytes, stable_hash_str, ContentHash, FxBuildHasher, FxHasher,
+    HashMap, HashSet, StableBuildHasher, StableHasher,
+};
+pub use intern::{domain, FName, Interner, Istr};
 pub use slot_map::{SlotKey, SlotMap};
 pub use small_vec::SmallVec;
 pub use sparse_set::SparseSet;
