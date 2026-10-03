@@ -5511,8 +5511,8 @@ mod cvar_tests {
     use super::*;
 
     use crate::cvar::{
-        CvarBounds, CvarCategory, CvarChanged, CvarCliRejection, CvarError, CvarFlags,
-        CvarRegistry, CvarSpec, ValidatedWrite,
+        ConsoleOutcome, CvarBounds, CvarCategory, CvarChanged, CvarCliRejection, CvarError,
+        CvarFlags, CvarRegistry, CvarSpec, ValidatedWrite,
     };
 
     /// Registering a cvar seeds its default into the `EngineDefault` settings
@@ -6106,5 +6106,209 @@ mod cvar_tests {
         let mut app = App::new();
         let report = app.apply_cvar_cli_overrides(["--", "=value", ""]);
         assert!(report.is_empty());
+    }
+
+    /// A blank line, a whitespace-only line, and a `//` comment are all no-ops.
+    #[test]
+    fn console_blank_and_comment_lines_are_noops() {
+        let mut app = App::new();
+        assert_eq!(app.exec_console(""), ConsoleOutcome::Empty);
+        assert_eq!(app.exec_console("   \t "), ConsoleOutcome::Empty);
+        assert_eq!(app.exec_console("// just a comment"), ConsoleOutcome::Empty);
+        // A no-op line must not even install the cvar machinery.
+        assert!(app.world().get_resource::<CvarRegistry>().is_none());
+    }
+
+    /// A bare registered cvar name queries its current resolved value.
+    #[test]
+    fn console_bare_name_queries_resolved_value() {
+        let mut app = App::new();
+        app.register_cvar(CvarSpec::new("r.shadows", 2_i64).bounds(CvarBounds::Int(0, 4)))
+            .unwrap();
+
+        assert_eq!(
+            app.exec_console("r.shadows"),
+            ConsoleOutcome::Queried {
+                name: "r.shadows".to_owned(),
+                value: SettingValue::Int(2),
+            },
+        );
+
+        // Leading/trailing whitespace around a bare name is still a query.
+        assert_eq!(
+            app.exec_console("  r.shadows  "),
+            ConsoleOutcome::Queried {
+                name: "r.shadows".to_owned(),
+                value: SettingValue::Int(2),
+            },
+        );
+    }
+
+    /// Querying an unregistered name reports `Unknown`, not a resolved value.
+    #[test]
+    fn console_query_unknown_cvar_is_unknown() {
+        let mut app = App::new();
+        assert_eq!(
+            app.exec_console("r.nope"),
+            ConsoleOutcome::Unknown("r.nope".to_owned()),
+        );
+    }
+
+    /// A declared-only front door: an undeclared settings key that happens to
+    /// be set is still `Unknown` from the console, never silently resolved.
+    #[test]
+    fn console_query_ignores_undeclared_settings_key() {
+        let mut app = App::new();
+        // Register an unrelated cvar so the `Settings` cascade exists, then set
+        // an *undeclared* key directly in it.
+        app.register_cvar(CvarSpec::new("r.shadows", 2_i64)).unwrap();
+        app.world_mut().resource_mut::<Settings>().set(
+            SettingsLayer::User,
+            "window.title".to_owned(),
+            SettingValue::Str("Prism".to_owned()),
+        );
+        assert_eq!(
+            app.world().resource::<Settings>().get("window.title"),
+            Some(&SettingValue::Str("Prism".to_owned())),
+        );
+        assert_eq!(
+            app.exec_console("window.title"),
+            ConsoleOutcome::Unknown("window.title".to_owned()),
+        );
+    }
+
+    /// `name value` writes the cvar at the `Runtime` layer and the typed getter
+    /// reflects it (the design's `r.shadows 2` form).
+    #[test]
+    fn console_sets_cvar_at_runtime_layer() {
+        let mut app = App::new();
+        app.register_cvar(CvarSpec::new("r.shadows", 2_i64).bounds(CvarBounds::Int(0, 4)))
+            .unwrap();
+
+        let outcome = app.exec_console("r.shadows 3");
+        match outcome {
+            ConsoleOutcome::Set(set) => {
+                assert!(set.changed);
+                assert!(!set.clamped);
+                assert_eq!(set.resolved, SettingValue::Int(3));
+            }
+            other => panic!("expected Set, got {other:?}"),
+        }
+        assert_eq!(app.cvar_int("r.shadows"), Some(3));
+        assert_eq!(
+            app.world().resource::<Settings>().resolved_layer("r.shadows"),
+            Some(SettingsLayer::Runtime),
+        );
+
+        // A subsequent bare-name query now reflects the runtime write.
+        assert_eq!(
+            app.exec_console("r.shadows"),
+            ConsoleOutcome::Queried {
+                name: "r.shadows".to_owned(),
+                value: SettingValue::Int(3),
+            },
+        );
+    }
+
+    /// Out-of-range numeric console input is clamped into bounds, not rejected.
+    #[test]
+    fn console_set_out_of_bounds_is_clamped_not_rejected() {
+        let mut app = App::new();
+        app.register_cvar(CvarSpec::new("r.shadows", 1_i64).bounds(CvarBounds::Int(0, 3)))
+            .unwrap();
+
+        match app.exec_console("r.shadows 99") {
+            ConsoleOutcome::Set(set) => {
+                assert!(set.changed);
+                assert!(set.clamped);
+                assert_eq!(set.resolved, SettingValue::Int(3));
+            }
+            other => panic!("expected clamped Set, got {other:?}"),
+        }
+        assert_eq!(app.cvar_int("r.shadows"), Some(3));
+    }
+
+    /// The whole remainder after the first token is the value, so a multi-word
+    /// console line sets a string containing the interior whitespace.
+    #[test]
+    fn console_multiword_value_is_a_single_string() {
+        let mut app = App::new();
+        app.register_cvar(CvarSpec::new("sv.motd", "welcome")).unwrap();
+
+        match app.exec_console("sv.motd  hello   brave  world  ") {
+            ConsoleOutcome::Set(set) => {
+                assert_eq!(set.resolved, SettingValue::Str("hello   brave  world".to_owned()));
+            }
+            other => panic!("expected Set, got {other:?}"),
+        }
+        assert_eq!(app.cvar_str("sv.motd"), Some("hello   brave  world"));
+    }
+
+    /// Writing an unregistered cvar from the console reports `Unknown` and
+    /// leaves the cascade untouched.
+    #[test]
+    fn console_set_unknown_cvar_is_unknown() {
+        let mut app = App::new();
+        assert_eq!(
+            app.exec_console("does.not.exist 1"),
+            ConsoleOutcome::Unknown("does.not.exist".to_owned()),
+        );
+        assert_eq!(app.cvar("does.not.exist"), None);
+    }
+
+    /// A type-incompatible write is rejected at the boundary with the write's
+    /// `CvarError`, leaving the resolved value unchanged.
+    #[test]
+    fn console_type_mismatch_is_rejected() {
+        let mut app = App::new();
+        app.register_cvar(CvarSpec::new("r.shadows", 2_i64)).unwrap();
+
+        match app.exec_console("r.shadows high") {
+            ConsoleOutcome::Rejected(CvarError::TypeMismatch { name, .. }) => {
+                assert_eq!(name, "r.shadows");
+            }
+            other => panic!("expected Rejected(TypeMismatch), got {other:?}"),
+        }
+        // Rejection left the value untouched.
+        assert_eq!(app.cvar_int("r.shadows"), Some(2));
+    }
+
+    /// A read-only cvar refuses a console write.
+    #[test]
+    fn console_read_only_cvar_is_rejected() {
+        let mut app = App::new();
+        app.register_cvar(CvarSpec::new("sys.version", "1.0").flag(CvarFlags::READ_ONLY))
+            .unwrap();
+
+        assert_eq!(
+            app.exec_console("sys.version 2.0"),
+            ConsoleOutcome::Rejected(CvarError::ReadOnly("sys.version".to_owned())),
+        );
+        assert_eq!(app.cvar_str("sys.version"), Some("1.0"));
+    }
+
+    /// A cheat-protected cvar is refused while cheats are disabled, then
+    /// accepted once cheats are enabled.
+    #[test]
+    fn console_cheat_protected_cvar_is_gated() {
+        let mut app = App::new();
+        app.register_cvar(CvarSpec::new("g.godmode", false).flag(CvarFlags::CHEAT))
+            .unwrap();
+
+        assert_eq!(
+            app.exec_console("g.godmode true"),
+            ConsoleOutcome::Rejected(CvarError::CheatProtected("g.godmode".to_owned())),
+        );
+        assert_eq!(app.cvar_bool("g.godmode"), Some(false));
+
+        app.set_cheats_enabled(true);
+        match app.exec_console("g.godmode true") {
+            ConsoleOutcome::Set(set) => {
+                assert!(set.changed);
+                assert_eq!(set.resolved, SettingValue::Bool(true));
+            }
+            other => panic!("expected Set once cheats are enabled, got {other:?}"),
+        }
+        assert_eq!(app.cvar_bool("g.godmode"), Some(true));
     }
 }

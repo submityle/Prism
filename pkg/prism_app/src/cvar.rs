@@ -477,6 +477,41 @@ pub struct CvarSetOutcome {
     pub resolved: SettingValue,
 }
 
+/// The outcome of executing one console command line via
+/// [`App::exec_console`] (design §24.6, a Quake/Source-style `r.shadows 2`
+/// command line).
+///
+/// A console line is either a **query** (a bare cvar name, which reports the
+/// current resolved value) or a **write** (`name value`, which sets the cvar at
+/// the [`Runtime`](crate::settings::SettingsLayer::Runtime) layer). This enum
+/// captures every outcome so a console front end can echo an accurate response
+/// without panicking, mirroring the reject-at-the-boundary contract of
+/// [`CvarError`] (design §25.3).
+#[derive(Clone, Debug, PartialEq)]
+pub enum ConsoleOutcome {
+    /// The line was empty or a `//` comment, so nothing happened.
+    Empty,
+    /// A bare cvar name queried its current resolved value.
+    Queried {
+        /// The queried cvar name.
+        name: String,
+        /// The cvar's resolved value from the cascade.
+        value: SettingValue,
+    },
+    /// A `name value` line wrote the cvar; carries the [`CvarSetOutcome`]
+    /// describing whether the resolved value changed and whether the written
+    /// value was clamped into the declared [bounds](CvarBounds).
+    Set(CvarSetOutcome),
+    /// The named cvar is not registered. The console is the *declared* front
+    /// door (like the rest of this module), so an undeclared name is reported
+    /// here rather than silently creating an untyped setting.
+    Unknown(String),
+    /// The write was rejected by validation: a type mismatch, a
+    /// [read-only](CvarFlags::READ_ONLY) cvar, or a
+    /// [cheat-protected](CvarFlags::CHEAT) cvar while cheats are disabled.
+    Rejected(CvarError),
+}
+
 /// The result of [`CvarRegistry::validate_set`]: the value that should be
 /// written to the cascade (type-coerced into the declared kind and clamped into
 /// the declared [bounds](CvarBounds)), plus whether clamping altered it.
@@ -896,6 +931,71 @@ impl App {
         value: impl Into<SettingValue>,
     ) -> Result<CvarSetOutcome, CvarError> {
         self.set_cvar_at(SettingsLayer::Runtime, name, value)
+    }
+
+    /// Execute one Quake/Source-style console command `line` against the cvar
+    /// registry (design §24.6, which quotes the console form `r.shadows 2`).
+    ///
+    /// The line is tokenised exactly as a shipping console would: it is trimmed,
+    /// and an empty line or one beginning with `//` is a no-op
+    /// ([`ConsoleOutcome::Empty`]). Otherwise the first whitespace-delimited
+    /// token is the cvar name and the remainder (trimmed) is the value:
+    ///
+    /// * a **bare name** (no remainder) is a *query* — a registered cvar reports
+    ///   its resolved value as [`Queried`](ConsoleOutcome::Queried), an
+    ///   unregistered one is [`Unknown`](ConsoleOutcome::Unknown);
+    /// * a **`name value`** form *writes* the cvar at the
+    ///   [`Runtime`](crate::settings::SettingsLayer::Runtime) layer (the
+    ///   highest-precedence console layer) via [`set_cvar`](App::set_cvar),
+    ///   after inferring the value's type with
+    ///   [`SettingValue::parse`](crate::settings::SettingValue::parse). The
+    ///   whole remainder is the value, so `name a b c` sets the string `a b c`.
+    ///   A successful write yields [`Set`](ConsoleOutcome::Set); an unregistered
+    ///   cvar is [`Unknown`](ConsoleOutcome::Unknown); any other validation
+    ///   failure (type mismatch, read-only, cheat-gated) is
+    ///   [`Rejected`](ConsoleOutcome::Rejected). Out-of-range numeric input is
+    ///   *not* an error: it is clamped into bounds and reported through
+    ///   [`CvarSetOutcome::clamped`].
+    ///
+    /// Like every mutating entry point in this module, a rejected line leaves
+    /// all state untouched and never panics (design §25.3). A successful write
+    /// broadcasts the same [`SettingChanged`](crate::settings::SettingChanged)
+    /// (and, for a [`NOTIFY`](CvarFlags::NOTIFY) cvar whose value changed,
+    /// [`CvarChanged`]) events as [`set_cvar`](App::set_cvar).
+    pub fn exec_console(&mut self, line: &str) -> ConsoleOutcome {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with("//") {
+            return ConsoleOutcome::Empty;
+        }
+        let (name, rest) = match line.split_once(char::is_whitespace) {
+            Some((name, rest)) => (name, rest.trim()),
+            None => (line, ""),
+        };
+        self.init_cvars();
+        if rest.is_empty() {
+            // Query form: a bare cvar name reports its resolved value. The
+            // console is the declared front door, so an undeclared name is
+            // Unknown rather than resolving an arbitrary settings key.
+            if !self.world().resource::<CvarRegistry>().contains(name) {
+                return ConsoleOutcome::Unknown(name.to_owned());
+            }
+            let value = self.cvar(name).cloned().unwrap_or_else(|| {
+                self.world()
+                    .resource::<CvarRegistry>()
+                    .get(name)
+                    .map(|cvar| cvar.default.clone())
+                    .expect("cvar is registered")
+            });
+            return ConsoleOutcome::Queried {
+                name: name.to_owned(),
+                value,
+            };
+        }
+        match self.set_cvar(name, SettingValue::parse(rest)) {
+            Ok(outcome) => ConsoleOutcome::Set(outcome),
+            Err(CvarError::Unregistered(name)) => ConsoleOutcome::Unknown(name),
+            Err(error) => ConsoleOutcome::Rejected(error),
+        }
     }
 
     /// Clear the cvar `name`'s [`Runtime`](crate::settings::SettingsLayer::Runtime)

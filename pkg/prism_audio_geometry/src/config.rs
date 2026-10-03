@@ -42,6 +42,27 @@ pub const DEFAULT_SURFACE_EPSILON_M: Sample = 1.0e-3;
 /// reference used across the spatial crate's helpers.
 pub const DEFAULT_DIFFRACTION_FREQ_HZ: Sample = 1_000.0;
 
+/// Which edge-diffraction model the backend evaluates for shadowed arrivals.
+///
+/// Both models consume the same resolved detour geometry (the least-detour
+/// corner on a diffracting edge and the clear two-leg bent route); they differ
+/// only in how the shadow attenuation and its spectral colour are computed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
+pub enum DiffractionModel {
+    /// Maekawa's semi-empirical barrier model: one broadband gain from the
+    /// Fresnel number of the detour plus a detour-dependent single-pole
+    /// low-pass corner. Cheap, robust, and the backward-compatible default.
+    #[default]
+    Maekawa,
+    /// The Kouyoumjian-Pathak Uniform Theory of Diffraction for a sound-hard
+    /// wedge: a frequency-dependent complex coefficient sampled per propagation
+    /// band, capturing the wedge opening angle and incidence geometry that the
+    /// barrier model ignores. Physically grounded at the cost of more work,
+    /// evaluated through [`UtdWedge`](prism_audio_spatial::UtdWedge).
+    Utd,
+}
+
 /// Control-rate budget and feature switches for a geometric propagation query.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
@@ -67,6 +88,8 @@ pub struct GeometricConfig {
     pub sample_rate: u32,
     /// Reference frequency (Hz) for broadband diffraction attenuation.
     pub diffraction_freq_hz: Sample,
+    /// Which diffraction model to evaluate for shadowed arrivals.
+    pub diffraction_model: DiffractionModel,
 }
 
 impl GeometricConfig {
@@ -85,6 +108,7 @@ impl GeometricConfig {
             surface_epsilon_m: DEFAULT_SURFACE_EPSILON_M,
             sample_rate,
             diffraction_freq_hz: DEFAULT_DIFFRACTION_FREQ_HZ,
+            diffraction_model: DiffractionModel::Maekawa,
         }
     }
 
@@ -121,6 +145,15 @@ impl GeometricConfig {
         self
     }
 
+    /// Returns a copy that evaluates edge diffraction with `model` (the default
+    /// is [`DiffractionModel::Maekawa`]).
+    #[inline]
+    #[must_use]
+    pub fn with_diffraction_model(mut self, model: DiffractionModel) -> Self {
+        self.diffraction_model = model;
+        self
+    }
+
     /// Returns a copy with the audibility floor set to `gain` (clamped to be
     /// non-negative).
     #[inline]
@@ -141,7 +174,7 @@ impl Default for GeometricConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::GeometricConfig;
+    use super::{DiffractionModel, GeometricConfig};
 
     #[test]
     fn new_enables_all_mechanisms() {
@@ -176,5 +209,15 @@ mod tests {
     #[test]
     fn default_is_48k() {
         assert_eq!(GeometricConfig::default().sample_rate, 48_000);
+    }
+
+    #[test]
+    fn diffraction_model_defaults_to_maekawa_and_is_selectable() {
+        assert_eq!(
+            GeometricConfig::new(48_000).diffraction_model,
+            DiffractionModel::Maekawa
+        );
+        let utd = GeometricConfig::new(48_000).with_diffraction_model(DiffractionModel::Utd);
+        assert_eq!(utd.diffraction_model, DiffractionModel::Utd);
     }
 }

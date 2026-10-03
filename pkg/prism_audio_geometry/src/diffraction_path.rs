@@ -34,18 +34,19 @@
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
+use core::f32::consts::PI;
 
 use bevy_math::ops;
 use bevy_math::Vec3;
 use prism_audio_core::math::Sample;
-use prism_audio_spatial::BandGains;
+use prism_audio_spatial::{BandGains, PROPAGATION_BAND_COUNT, UtdWedge};
 use prism_audio_spatial::doppler::SPEED_OF_SOUND_MPS;
 use prism_audio_spatial::geometry::{Emitter, Listener};
 use prism_audio_spatial::propagation::{
     diffraction_cutoff_hz, diffraction_gain, edge_path_difference, PathKind, PropagationPath,
 };
 
-use crate::config::GeometricConfig;
+use crate::config::{DiffractionModel, GeometricConfig};
 use crate::scene::AcousticScene;
 
 /// Number of golden-section-style narrowing steps used to locate the
@@ -107,23 +108,41 @@ pub fn resolve_diffraction(
         }
 
         let delta = edge_path_difference(listener.position, corner, emitter.position);
-        let barrier = diffraction_gain(delta, config.diffraction_freq_hz);
         let spreading = (base_distance / path_length).clamp(0.0, 1.0);
-        let gain = (barrier * spreading).clamp(0.0, 1.0);
+        // Both models carry the detour-dependent single-pole corner for legacy
+        // consumers that read only `cutoff_hz`; the authoritative spectral
+        // shaping lives in `bands`.
+        let cutoff_hz = diffraction_cutoff_hz(delta, config.sample_rate);
+
+        let (gain, bands) = match config.diffraction_model {
+            DiffractionModel::Maekawa => {
+                let barrier = diffraction_gain(delta, config.diffraction_freq_hz);
+                let gain = (barrier * spreading).clamp(0.0, 1.0);
+                (gain, BandGains::from_lowpass_cutoff(cutoff_hz))
+            }
+            DiffractionModel::Utd => {
+                let wedge = utd_wedge(&edge, corner, emitter.position, listener.position);
+                let gain =
+                    (wedge.relative_gain(config.diffraction_freq_hz) * spreading).clamp(0.0, 1.0);
+                let raw = wedge.band_gains().bands();
+                let mut shaped = [0.0; PROPAGATION_BAND_COUNT];
+                for (out, &band_gain) in shaped.iter_mut().zip(raw.iter()) {
+                    *out = (band_gain * spreading).clamp(0.0, 1.0);
+                }
+                (gain, BandGains::new(shaped))
+            }
+        };
         if gain <= config.min_gain {
             continue;
         }
 
         let local = listener.localize(&Emitter::point(corner, Vec3::ZERO));
-        // The edge low-passes the shadowed arrival; carry both the scalar
-        // corner (legacy single-pole consumers) and its three-band form.
-        let cutoff_hz = diffraction_cutoff_hz(delta, config.sample_rate);
         let candidate = PropagationPath {
             kind: PathKind::Diffraction,
             delay_seconds: path_length / SPEED_OF_SOUND_MPS,
             gain,
             cutoff_hz,
-            bands: BandGains::from_lowpass_cutoff(cutoff_hz),
+            bands,
             direction: local.direction,
         };
         if !is_duplicate(&paths, &candidate) {
@@ -236,15 +255,61 @@ fn distance(a: Vec3, b: Vec3) -> Sample {
     ops::sqrt(d.dot(d))
 }
 
+/// Builds a [`UtdWedge`] for the diffracting `edge` at the resolved `corner`.
+///
+/// The wedge opening is inferred from the edge's adjacent face normals (see
+/// [`utd_wedge_index`]); the reference face axis is taken perpendicular to the
+/// edge within the first face's plane as `edge_dir x n0`, which
+/// [`UtdWedge::from_geometry`] re-orthogonalises, falling back to a safe
+/// default when degenerate.
+#[must_use]
+fn utd_wedge(edge: &EdgeData, corner: Vec3, source: Vec3, receiver: Vec3) -> UtdWedge {
+    let edge_dir = edge.end - edge.start;
+    let face_ref = match edge.normals.first() {
+        Some(&n0) => edge_dir.cross(n0),
+        None => Vec3::ZERO,
+    };
+    UtdWedge::from_geometry(
+        source,
+        corner,
+        edge_dir,
+        receiver,
+        face_ref,
+        utd_wedge_index(&edge.normals),
+        SPEED_OF_SOUND_MPS,
+    )
+}
+
+/// The UTD wedge index `n` inferred from an edge's adjacent face normals.
+///
+/// Returns `2` (a thin screen) for a silhouette edge with a single face. For a
+/// crease, `n = 1 + acos(n0 . n1) / pi`, so coplanar faces give `n = 1` (no
+/// real wedge) and anti-parallel outward normals give `n = 2`, matching the
+/// convex opening between the two half-planes. The result is further clamped to
+/// `[1, 2]` by [`UtdWedge::new`].
+#[must_use]
+fn utd_wedge_index(normals: &[Vec3]) -> Sample {
+    match (normals.first(), normals.get(1)) {
+        (Some(&n0), Some(&n1)) => {
+            let dot = n0
+                .normalize_or_zero()
+                .dot(n1.normalize_or_zero())
+                .clamp(-1.0, 1.0);
+            (1.0 + ops::acos(dot) / PI).clamp(1.0, 2.0)
+        }
+        _ => 2.0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{diffracting_edges, least_detour_point, resolve_diffraction};
+    use super::{diffracting_edges, least_detour_point, resolve_diffraction, utd_wedge_index};
     use alloc::vec;
     use bevy_math::{Quat, Vec3};
     use prism_audio_spatial::geometry::{Emitter, Listener};
     use prism_audio_spatial::propagation::{AcousticMaterial, PathKind};
 
-    use crate::config::GeometricConfig;
+    use crate::config::{DiffractionModel, GeometricConfig};
     use crate::material_map::MaterialTable;
     use crate::scene::AcousticScene;
 
@@ -321,5 +386,62 @@ mod tests {
         let emitter = Vec3::new(3.0, 0.0, 0.0);
         let p = least_detour_point(start, end, listener, emitter);
         assert!(p.z.abs() < 1.0e-2);
+    }
+
+    #[test]
+    fn utd_wedge_index_matches_the_geometry() {
+        // A single face is a thin screen (n = 2).
+        assert!((utd_wedge_index(&[Vec3::X]) - 2.0).abs() < 1.0e-4);
+        // Anti-parallel outward normals (both sides of a thin screen) also n = 2.
+        assert!((utd_wedge_index(&[Vec3::X, -Vec3::X]) - 2.0).abs() < 1.0e-4);
+        // Perpendicular faces (a right-angle convex corner) give n = 1.5.
+        assert!((utd_wedge_index(&[Vec3::X, Vec3::Y]) - 1.5).abs() < 1.0e-4);
+        // Coplanar faces are not a real wedge (n = 1).
+        assert!((utd_wedge_index(&[Vec3::X, Vec3::X]) - 1.0).abs() < 1.0e-4);
+    }
+
+    #[test]
+    fn utd_model_shadows_highs_more_than_lows() {
+        let scene = barrier();
+        let listener = Listener::new(Vec3::new(-3.0, 0.0, 0.0), Quat::IDENTITY, Vec3::ZERO);
+        let emitter = Emitter::point(Vec3::new(3.0, 0.0, 0.0), Vec3::ZERO);
+        let cfg = GeometricConfig::new(48_000).with_diffraction_model(DiffractionModel::Utd);
+        let base = (emitter.position - listener.position).length();
+        let paths = resolve_diffraction(&scene, &listener, &emitter, &cfg, base);
+        assert!(!paths.is_empty());
+        let path = paths[0];
+        assert_eq!(path.kind, PathKind::Diffraction);
+        // Bending over the edge is longer than the straight line: delayed.
+        assert!(path.delay_seconds > base / 343.0);
+        // Every band gain stays in the physical [0, 1] range.
+        for band in path.bands.bands() {
+            assert!(band.is_finite() && (0.0..=1.0).contains(&band));
+        }
+        assert!(path.gain.is_finite() && path.gain > 0.0 && path.gain <= 1.0);
+        // The |D| ~ 1/sqrt(k) UTD roll-off attenuates highs at least as much as
+        // lows inside the geometric shadow.
+        assert!(path.bands.high() <= path.bands.low() + 1.0e-4);
+    }
+
+    #[test]
+    fn utd_and_maekawa_share_geometry_but_differ_in_colour() {
+        let scene = barrier();
+        let listener = Listener::new(Vec3::new(-3.0, 0.0, 0.0), Quat::IDENTITY, Vec3::ZERO);
+        let emitter = Emitter::point(Vec3::new(3.0, 0.0, 0.0), Vec3::ZERO);
+        let base = (emitter.position - listener.position).length();
+
+        let maekawa = GeometricConfig::new(48_000);
+        let utd = maekawa.with_diffraction_model(DiffractionModel::Utd);
+        let m = resolve_diffraction(&scene, &listener, &emitter, &maekawa, base);
+        let u = resolve_diffraction(&scene, &listener, &emitter, &utd, base);
+        assert!(!m.is_empty() && !u.is_empty());
+        // Same resolved detour geometry: identical delay and arrival direction.
+        assert!((m[0].delay_seconds - u[0].delay_seconds).abs() < 1.0e-6);
+        assert!(m[0].direction.dot(u[0].direction) > 0.9999);
+        // Different models shape the three bands differently.
+        let same = (m[0].bands.low() - u[0].bands.low()).abs() < 1.0e-6
+            && (m[0].bands.mid() - u[0].bands.mid()).abs() < 1.0e-6
+            && (m[0].bands.high() - u[0].bands.high()).abs() < 1.0e-6;
+        assert!(!same);
     }
 }
