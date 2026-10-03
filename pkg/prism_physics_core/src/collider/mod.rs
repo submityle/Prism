@@ -225,6 +225,8 @@ pub use tet_fem_constitutive::{
 };
 pub mod tet_fem_internal_force;
 pub use tet_fem_internal_force::{element_energy, element_internal_force};
+pub mod tet_fem_force_assembly;
+pub use tet_fem_force_assembly::{assemble_internal_forces, total_elastic_energy};
 
 /// A handle into a [`ShapeRegistry`].
 ///
