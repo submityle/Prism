@@ -109,6 +109,12 @@ pub use self_intersection::{
     detect_self_intersections, IntersectingPair, SelfIntersectionParams, SelfIntersectionReport,
 };
 
+pub mod surface_sampling;
+
+pub use surface_sampling::{
+    sample_surface, total_surface_area, SurfaceSample, SurfaceSampleParams,
+};
+
 /// A handle into a [`ShapeRegistry`].
 ///
 /// This is a plain index handle; shapes are immutable once inserted, so no
