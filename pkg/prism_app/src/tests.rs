@@ -1027,3 +1027,194 @@ fn paused_virtual_time_freezes_fixed_steps() {
 
     assert_eq!(fixed.load(Ordering::Relaxed), 0, "paused clock feeds no fixed steps");
 }
+
+// ---- M3 Inc1: secondary sub-apps + one-way extract seam -------------------
+
+use crate::sub_app::SubApp;
+
+/// A tiny counter resource used to probe sub-app / extract behavior.
+#[derive(Default)]
+struct Counter(u64);
+impl Resource for Counter {}
+
+/// A marker label for a secondary "render" sub-app in these tests.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+struct RenderApp;
+
+/// Another distinct label, to prove labels of different values don't collide.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+struct ServerApp;
+
+/// A secondary sub-app updates every frame alongside the main sub-app.
+#[test]
+fn secondary_sub_app_updates_each_frame() {
+    let main_frames = Arc::new(AtomicU64::new(0));
+    let sub_frames = Arc::new(AtomicU64::new(0));
+    let mf = main_frames.clone();
+    let sf = sub_frames.clone();
+
+    let mut app = App::new();
+    app.add_systems(Update, move || {
+        mf.fetch_add(1, Ordering::Relaxed);
+    });
+
+    let mut render = SubApp::new();
+    render
+        .world
+        .resource_mut::<prism_ecs::schedule::Schedules>()
+        .insert(Update, prism_ecs::schedule::Schedule::new());
+    render
+        .world
+        .resource_mut::<prism_ecs::schedule::Schedules>()
+        .get_mut(Update)
+        .unwrap()
+        .add_systems(move || {
+            sf.fetch_add(1, Ordering::Relaxed);
+        });
+    app.insert_sub_app(RenderApp, render);
+
+    app.set_runner(|app| HeadlessRunner::with_max_frames(3).run(app));
+    app.run();
+
+    assert_eq!(main_frames.load(Ordering::Relaxed), 3);
+    assert_eq!(sub_frames.load(Ordering::Relaxed), 3);
+}
+
+/// Extract runs one-way main → sub, before the sub-app updates, and sees the
+/// main world's just-finished frame.
+#[test]
+fn extract_copies_main_into_sub_before_sub_update() {
+    let mut app = App::new();
+    // Main world owns the authoritative counter; bump it in Update.
+    app.world_mut().insert_resource(Counter::default());
+    app.add_systems(Update, |mut c: ResMut<Counter>| {
+        c.0 += 10;
+    });
+
+    let mut render = SubApp::new();
+    render.world.insert_resource(Counter::default());
+    app.insert_sub_app(RenderApp, render);
+
+    // Extract copies the main counter into the sub counter (read-only on main).
+    app.set_extract(RenderApp, |main: &mut prism_ecs::world::World, sub: &mut prism_ecs::world::World| {
+        let value = main.resource::<Counter>().0;
+        sub.resource_mut::<Counter>().0 = value;
+    });
+
+    // Drive two frames directly (keeping ownership so we can inspect state;
+    // `App::run` would move the app into its runner).
+    app.update();
+    app.update();
+
+    // After 2 frames the main counter is 20; extract ran after each main
+    // update, so the sub-app sees the latest value.
+    assert_eq!(app.get_sub_app(RenderApp).unwrap().world.resource::<Counter>().0, 20);
+    assert_eq!(app.world().resource::<Counter>().0, 20);
+}
+
+/// Ordering invariant: the main sub-app updates before any secondary sub-app,
+/// and each secondary's extract runs before its own update.
+#[test]
+fn main_runs_before_secondary_and_extract_before_sub_update() {
+    let order = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+
+    let mut app = App::new();
+    {
+        let o = order.clone();
+        app.add_systems(Update, move || o.lock().unwrap().push("main_update"));
+    }
+
+    let mut render = SubApp::new();
+    render
+        .world
+        .resource_mut::<prism_ecs::schedule::Schedules>()
+        .insert(Update, prism_ecs::schedule::Schedule::new());
+    {
+        let o = order.clone();
+        render
+            .world
+            .resource_mut::<prism_ecs::schedule::Schedules>()
+            .get_mut(Update)
+            .unwrap()
+            .add_systems(move || o.lock().unwrap().push("sub_update"));
+    }
+    app.insert_sub_app(RenderApp, render);
+    {
+        let o = order.clone();
+        app.set_extract(RenderApp, move |_main: &mut prism_ecs::world::World, _sub: &mut prism_ecs::world::World| {
+            o.lock().unwrap().push("extract");
+        });
+    }
+
+    app.update();
+
+    assert_eq!(
+        *order.lock().unwrap(),
+        vec!["main_update", "extract", "sub_update"]
+    );
+}
+
+/// A secondary sub-app without an extract fn still updates (extract is optional).
+#[test]
+fn secondary_without_extract_still_updates() {
+    let ran = Arc::new(AtomicU64::new(0));
+    let r = ran.clone();
+
+    let mut app = App::new();
+    let mut sub = SubApp::new();
+    sub.world
+        .resource_mut::<prism_ecs::schedule::Schedules>()
+        .insert(Update, prism_ecs::schedule::Schedule::new());
+    sub.world
+        .resource_mut::<prism_ecs::schedule::Schedules>()
+        .get_mut(Update)
+        .unwrap()
+        .add_systems(move || {
+            r.fetch_add(1, Ordering::Relaxed);
+        });
+    assert!(!sub.has_extract());
+    app.insert_sub_app(ServerApp, sub);
+
+    app.update();
+    assert_eq!(ran.load(Ordering::Relaxed), 1);
+}
+
+/// Labels of different concrete values address different sub-apps; insertion
+/// order is preserved and re-inserting a label replaces it in place.
+#[test]
+fn labeled_lookup_and_insertion_order() {
+    let mut app = App::new();
+    app.insert_sub_app(RenderApp, SubApp::new());
+    app.insert_sub_app(ServerApp, SubApp::new());
+
+    // Both resolve independently.
+    assert!(app.get_sub_app(RenderApp).is_some());
+    assert!(app.get_sub_app(ServerApp).is_some());
+
+    // Tag each sub-app's world with a distinct resource to prove lookup maps to
+    // the right instance.
+    app.sub_app_mut(RenderApp)
+        .unwrap()
+        .world
+        .insert_resource(Counter(1));
+    app.sub_app_mut(ServerApp)
+        .unwrap()
+        .world
+        .insert_resource(Counter(2));
+    assert_eq!(app.get_sub_app(RenderApp).unwrap().world.resource::<Counter>().0, 1);
+    assert_eq!(app.get_sub_app(ServerApp).unwrap().world.resource::<Counter>().0, 2);
+
+    // Re-inserting RenderApp replaces it in place (fresh world has no Counter).
+    app.insert_sub_app(RenderApp, SubApp::new());
+    assert!(app.get_sub_app(RenderApp).unwrap().world.get_resource::<Counter>().is_none());
+    // ServerApp is untouched.
+    assert_eq!(app.get_sub_app(ServerApp).unwrap().world.resource::<Counter>().0, 2);
+}
+
+/// `set_extract` on a missing label panics with a clear message.
+#[test]
+#[should_panic(expected = "no sub-app registered")]
+fn set_extract_on_missing_sub_app_panics() {
+    let mut app = App::new();
+    app.set_extract(RenderApp, |_m: &mut prism_ecs::world::World, _s: &mut prism_ecs::world::World| {});
+}

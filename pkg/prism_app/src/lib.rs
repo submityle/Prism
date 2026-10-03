@@ -18,9 +18,16 @@
 //!
 //! - [`App`] with a monotonic [`PluginsState`] assembly
 //!   state machine and a swappable [runner].
-//! - A single main [`SubApp`] = one [`World`](prism_ecs::world::World) whose
-//!   world-owned [`Schedules`](prism_ecs::schedule::Schedules) resource holds
-//!   the phase schedules (design §5: reuse the `prism_ecs` scheduling graph).
+//! - A [`SubApps`] collection: a main [`SubApp`] = one
+//!   [`World`](prism_ecs::world::World) whose world-owned
+//!   [`Schedules`](prism_ecs::schedule::Schedules) resource holds the phase
+//!   schedules (design §5: reuse the `prism_ecs` scheduling graph), plus an
+//!   ordered set of labeled secondary sub-apps keyed by [`SubAppLabel`]. Each
+//!   frame, after the main sub-app updates, every secondary sub-app runs its
+//!   one-way [`ExtractFn`] (`main world → sub world`, design §9/§25.2) and then
+//!   updates — **serially** for now (design §23 risk #1: serial extract first,
+//!   `pipelined` later). Cross-thread pipelined overlap is M3 Inc2 and honestly
+//!   absent, not stubbed.
 //! - The [`Plugin`] trait (`build` / `ready` / `finish` / `cleanup`, plus
 //!   declared [`dependencies`](crate::plugin::Plugin::dependencies)) and an
 //!   editable [`PluginGroup`]: [`PluginGroupBuilder`] supports ordered,
@@ -83,6 +90,7 @@ pub mod runner;
 pub mod schedule;
 pub mod state;
 pub mod sub_app;
+pub mod sub_app_label;
 pub mod time;
 
 #[cfg(test)]
@@ -98,7 +106,8 @@ pub use fixed::{FixedFirst, FixedLast, FixedPostUpdate, FixedPreUpdate, FixedUpd
 pub use schedule::{
     First, Last, PostStartup, PostUpdate, PreStartup, PreUpdate, StateTransition, Startup, Update,
 };
-pub use sub_app::SubApp;
+pub use sub_app::{ExtractFn, SubApp, SubApps};
+pub use sub_app_label::{BoxedSubAppLabel, SubAppLabel};
 pub use time::{EngineClocks, TimeUpdateStrategy};
 
 /// Commonly used exports. Mirrors `bevy_app::prelude` ergonomics to keep the
@@ -116,7 +125,8 @@ pub mod prelude {
         First, Last, PostStartup, PostUpdate, PreStartup, PreUpdate, StateTransition, Startup,
         Update,
     };
-    pub use crate::sub_app::SubApp;
+    pub use crate::sub_app::{ExtractFn, SubApp, SubApps};
+    pub use crate::sub_app_label::{BoxedSubAppLabel, SubAppLabel};
     pub use crate::time::{EngineClocks, TimeUpdateStrategy};
 
     pub use prism_ecs::prelude::*;

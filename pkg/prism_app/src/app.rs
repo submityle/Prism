@@ -28,7 +28,8 @@ use crate::plugin_group::PluginGroup;
 use crate::schedule::{
     First, Last, PostStartup, PostUpdate, PreStartup, PreUpdate, StateTransition, Startup, Update,
 };
-use crate::sub_app::SubApp;
+use crate::sub_app::{SubApp, SubApps};
+use crate::sub_app_label::SubAppLabel;
 use crate::time::{EngineClocks, TimeUpdateStrategy};
 
 /// The monotonic plugin-assembly state machine (design §21).
@@ -54,7 +55,7 @@ type RunnerFn = Box<dyn FnOnce(App) -> AppExit>;
 
 /// The top-level engine instance.
 pub struct App {
-    main: SubApp,
+    sub_apps: SubApps,
     runner: Option<RunnerFn>,
     plugins: Vec<Box<dyn Plugin>>,
     plugin_names: HashSet<String>,
@@ -82,12 +83,12 @@ impl App {
     pub fn new() -> Self {
         let mut app = Self::empty();
         app.init_core_schedules();
-        app.main.world.insert_resource(AppExitRequest::default());
+        app.sub_apps.main.world.insert_resource(AppExitRequest::default());
         // The time context (design §8, §25.1): the clocks bundle plus the
         // real-clock advancement strategy. Installed on the main world so the
         // frame loop can drive the fixed-step accumulator from frame one.
-        app.main.world.insert_resource(EngineClocks::new());
-        app.main
+        app.sub_apps.main.world.insert_resource(EngineClocks::new());
+        app.sub_apps.main
             .world
             .insert_resource(TimeUpdateStrategy::default());
         app
@@ -100,7 +101,7 @@ impl App {
     /// [`Schedules`](prism_ecs::schedule::Schedules) resource (design §5), run
     /// by label through [`World::run_schedule`](prism_ecs::world::World::run_schedule).
     fn init_core_schedules(&mut self) {
-        let schedules = self.main.world.resource_mut::<Schedules>();
+        let schedules = self.sub_apps.main.world.resource_mut::<Schedules>();
         schedules.insert(PreStartup, Schedule::new());
         schedules.insert(Startup, Schedule::new());
         schedules.insert(PostStartup, Schedule::new());
@@ -125,7 +126,7 @@ impl App {
     /// [`run`](App::run); prefer [`new`](App::new) for real use.
     pub fn empty() -> Self {
         Self {
-            main: SubApp::new(),
+            sub_apps: SubApps::new(),
             runner: None,
             plugins: Vec::new(),
             plugin_names: HashSet::new(),
@@ -177,7 +178,7 @@ impl App {
         label: impl ScheduleLabel + Clone,
         systems: impl IntoSystemConfigs<M>,
     ) -> &mut Self {
-        let schedules = self.main.world.resource_mut::<Schedules>();
+        let schedules = self.sub_apps.main.world.resource_mut::<Schedules>();
         if !schedules.contains(label.clone()) {
             schedules.insert(label.clone(), Schedule::new());
         }
@@ -191,13 +192,55 @@ impl App {
     /// Insert a resource into the main world, returning `&mut self` for
     /// chaining.
     pub fn insert_resource<R: Resource>(&mut self, value: R) -> &mut Self {
-        self.main.world.insert_resource(value);
+        self.sub_apps.main.world.insert_resource(value);
         self
     }
 
     /// Insert a resource via [`Default`] if absent, returning `&mut self`.
     pub fn init_resource<R: Resource + Default>(&mut self) -> &mut Self {
-        self.main.world.init_resource::<R>();
+        self.sub_apps.main.world.init_resource::<R>();
+        self
+    }
+
+    // ---- sub-apps ---------------------------------------------------------
+
+    /// Insert (or replace) a labeled secondary [`SubApp`] (design §5, §9).
+    ///
+    /// Secondary sub-apps update after the main sub-app each frame, in
+    /// insertion order; see [`SubApps::update`](crate::sub_app::SubApps::update).
+    pub fn insert_sub_app(&mut self, label: impl SubAppLabel, sub_app: SubApp) -> &mut Self {
+        self.sub_apps.insert(label, sub_app);
+        self
+    }
+
+    /// Shared access to a labeled secondary sub-app, if present.
+    pub fn get_sub_app(&self, label: impl SubAppLabel) -> Option<&SubApp> {
+        self.sub_apps.get(label)
+    }
+
+    /// Mutable access to a labeled secondary sub-app, if present.
+    pub fn sub_app_mut(&mut self, label: impl SubAppLabel) -> Option<&mut SubApp> {
+        self.sub_apps.get_mut(label)
+    }
+
+    /// Install the one-way [`ExtractFn`](crate::sub_app::ExtractFn) on a labeled
+    /// secondary sub-app (design §9, §25.2): the one-way `main world → sub world`
+    /// data pump run before that sub-app updates each frame.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no sub-app is registered under `label`; insert the sub-app
+    /// with [`insert_sub_app`](App::insert_sub_app) first.
+    pub fn set_extract<F>(&mut self, label: impl SubAppLabel, extract: F) -> &mut Self
+    where
+        F: FnMut(&mut World, &mut World) + Send + Sync + 'static,
+    {
+        let desc = format!("{label:?}");
+        let sub_app = self
+            .sub_apps
+            .get_mut(label)
+            .unwrap_or_else(|| panic!("set_extract: no sub-app registered under {desc}"));
+        sub_app.set_extract(extract);
         self
     }
 
@@ -210,7 +253,7 @@ impl App {
     /// (design §15); the default [`TimeUpdateStrategy::Automatic`] paces from
     /// the platform monotonic clock.
     pub fn set_time_update_strategy(&mut self, strategy: TimeUpdateStrategy) -> &mut Self {
-        self.main.world.insert_resource(strategy);
+        self.sub_apps.main.world.insert_resource(strategy);
         self
     }
 
@@ -219,7 +262,7 @@ impl App {
     /// 1/60 s step. Panics only if the main world has no [`EngineClocks`]
     /// resource, which [`App::new`] always installs.
     pub fn set_fixed_timestep_hz(&mut self, hz: f64) -> &mut Self {
-        self.main
+        self.sub_apps.main
             .world
             .resource_mut::<EngineClocks>()
             .fixed_mut()
@@ -294,12 +337,12 @@ impl App {
     /// Run the startup schedules exactly once, in order
     /// (`PreStartup → Startup → PostStartup`).
     fn run_startup(&mut self) {
-        self.main.run_startup();
+        self.sub_apps.run_startup();
     }
 
     /// Run one variable-step frame of the main sub-app (design §7 M0 subset).
     pub fn update(&mut self) {
-        self.main.update();
+        self.sub_apps.update();
     }
 
     /// Finalize plugins, run startup once, then hand the app to its runner.
@@ -322,7 +365,7 @@ impl App {
     /// The pending exit request, if a system has signalled shutdown via
     /// [`AppExitRequest`].
     pub fn should_exit(&self) -> Option<AppExit> {
-        self.main
+        self.sub_apps.main
             .world
             .get_resource::<AppExitRequest>()
             .and_then(AppExitRequest::get)
@@ -332,22 +375,22 @@ impl App {
 
     /// Shared access to the main sub-app.
     pub fn main(&self) -> &SubApp {
-        &self.main
+        &self.sub_apps.main
     }
 
     /// Mutable access to the main sub-app.
     pub fn main_mut(&mut self) -> &mut SubApp {
-        &mut self.main
+        &mut self.sub_apps.main
     }
 
     /// Shared access to the main world.
     pub fn world(&self) -> &World {
-        &self.main.world
+        &self.sub_apps.main.world
     }
 
     /// Mutable access to the main world.
     pub fn world_mut(&mut self) -> &mut World {
-        &mut self.main.world
+        &mut self.sub_apps.main.world
     }
 }
 
