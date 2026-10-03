@@ -142,6 +142,8 @@ pub mod diameter;
 pub use diameter::{mesh_diameter, MeshDiameter};
 pub mod lod_error;
 pub use lod_error::{evaluate_lod_errors, LodErrorReport, LodLevelError, LodMeshRef};
+pub mod symmetry;
+pub use symmetry::{detect_mirror_symmetry, MeshSymmetry, SymmetryParams, SymmetryPlane};
 
 /// A handle into a [`ShapeRegistry`].
 ///
