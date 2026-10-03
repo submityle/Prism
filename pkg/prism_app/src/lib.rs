@@ -149,6 +149,8 @@
 
 pub mod app;
 pub mod capability;
+#[cfg(feature = "std")]
+pub mod crash;
 pub mod event;
 pub mod exit;
 pub mod fixed;
@@ -179,6 +181,8 @@ mod tests;
 
 pub use app::{App, Plugins, PluginsState};
 pub use capability::{Capabilities, QualityTier};
+#[cfg(feature = "std")]
+pub use crash::{CrashReport, CrashReporter, CrashSink, CrashSnapshot};
 pub use exit::{AppExit, AppExitRequest};
 pub use plugin::{Plugin, PluginDependency};
 pub use plugin_graph::PluginGraphError;
@@ -220,6 +224,8 @@ pub use time::{EngineClocks, TimeUpdateStrategy};
 pub mod prelude {
     pub use crate::app::{App, Plugins, PluginsState};
     pub use crate::capability::{Capabilities, QualityTier};
+    #[cfg(feature = "std")]
+    pub use crate::crash::{CrashReport, CrashReporter, CrashSink, CrashSnapshot};
     pub use crate::exit::{AppExit, AppExitRequest};
     pub use crate::plugin::{Plugin, PluginDependency};
     pub use crate::plugin_graph::PluginGraphError;

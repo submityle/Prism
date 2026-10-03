@@ -3575,3 +3575,241 @@ mod platform_tier_tests {
         assert!(!profile.suspend_resume_lifecycle);
     }
 }
+
+// The crash-report module (design §24.7) is `std`-gated, so its tests are too.
+// They exercise the pure, deterministic surface — snapshot capture from live
+// `App` state, `CrashSnapshot`/`CrashReport` rendering, the `report` body that
+// the panic hook runs, and the `publish`/`snapshot` shared slot — plus one
+// guarded end-to-end `install` + `catch_unwind` check. Nothing here depends on
+// `RUST_BACKTRACE`, and only the single `install` test touches the process
+// panic hook (saving and restoring it) so the suite stays deterministic.
+#[cfg(feature = "std")]
+mod crash_tests {
+    use super::*;
+
+    use std::panic;
+    use std::sync::{Arc, Mutex};
+
+    use crate::capability::QualityTier;
+    use crate::crash::{CrashReport, CrashReporter, CrashSink, CrashSnapshot};
+    use crate::run_mode::RunMode;
+    use crate::settings::SettingsLayer;
+
+    /// Serializes the two tests that mutate the process-global panic hook,
+    /// so their save/install/restore windows never overlap under the
+    /// parallel test harness.
+    static HOOK_GUARD: Mutex<()> = Mutex::new(());
+
+    /// A `CrashSink` that appends every dump into a shared buffer, so a test can
+    /// assert exactly what the reporter wrote without going through stderr.
+    fn capturing_sink() -> (CrashSink, Arc<Mutex<Vec<String>>>) {
+        let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let log_for_sink = log.clone();
+        let sink: CrashSink = Arc::new(move |dump: &str| {
+            log_for_sink.lock().unwrap().push(dump.to_string());
+        });
+        (sink, log)
+    }
+
+    /// `capture_crash_snapshot` reads real shell state: the seeded `RunMode`, the
+    /// resolved `QualityTier`, the live main-world entity count, and an empty
+    /// settings list when no store is installed.
+    #[test]
+    fn capture_reads_live_shell_state() {
+        let mut app = App::new();
+        app.set_run_mode(RunMode::DedicatedServer);
+
+        let snapshot = app.capture_crash_snapshot();
+        assert_eq!(snapshot.run_mode, Some(RunMode::DedicatedServer));
+        assert_eq!(snapshot.quality_tier, Some(app.quality_tier()));
+        assert_eq!(snapshot.main_entity_count, 0);
+        assert!(snapshot.settings.is_empty());
+    }
+
+    /// Spawning entities and installing settings is reflected in a freshly
+    /// captured snapshot, and the settings are sorted by key.
+    #[test]
+    fn capture_reflects_entities_and_sorted_settings() {
+        let mut app = App::new();
+        app.insert_setting(SettingsLayer::User, "r.shadows", 2_i64);
+        app.insert_setting(SettingsLayer::EngineDefault, "net.tickrate", 60_i64);
+        app.world_mut().spawn(());
+        app.world_mut().spawn(());
+        app.world_mut().spawn(());
+
+        let snapshot = app.capture_crash_snapshot();
+        assert_eq!(snapshot.main_entity_count, 3);
+        let keys: Vec<&str> = snapshot
+            .settings
+            .iter()
+            .map(|(k, _)| k.as_str())
+            .collect();
+        assert_eq!(keys, ["net.tickrate", "r.shadows"]);
+    }
+
+    /// `CrashSnapshot::render` lays every field out, including the `<unset>` /
+    /// `<none installed>` fallbacks for the empty default snapshot.
+    #[test]
+    fn snapshot_render_covers_unset_fallbacks() {
+        let rendered = CrashSnapshot::default().render();
+        assert!(rendered.contains("run mode:      <unset>"));
+        assert!(rendered.contains("quality tier:  <unset>"));
+        assert!(rendered.contains("main entities: 0"));
+        assert!(rendered.contains("settings:      <none installed>"));
+    }
+
+    /// A populated snapshot renders each setting on its own line and reports the
+    /// key count.
+    #[test]
+    fn snapshot_render_lists_populated_settings() {
+        let snapshot = CrashSnapshot {
+            run_mode: Some(RunMode::Client),
+            quality_tier: Some(QualityTier::Desktop),
+            main_entity_count: 7,
+            settings: vec![
+                ("net.tickrate".to_string(), 60_i64.into()),
+                ("r.shadows".to_string(), 2_i64.into()),
+            ],
+        };
+        let rendered = snapshot.render();
+        assert!(rendered.contains("run mode:      Client"));
+        assert!(rendered.contains("quality tier:  Desktop"));
+        assert!(rendered.contains("main entities: 7"));
+        assert!(rendered.contains("settings:      2 key(s)"));
+        assert!(rendered.contains("  - net.tickrate = Int(60)"));
+        assert!(rendered.contains("  - r.shadows = Int(2)"));
+    }
+
+    /// `CrashReport::render` frames the dump with headers and prints the panic
+    /// message, location, and the `<unavailable>` backtrace hint when none was
+    /// captured.
+    #[test]
+    fn report_render_frames_the_dump() {
+        let report = CrashReport {
+            message: "it exploded".to_string(),
+            location: Some("src/sim.rs:42:9".to_string()),
+            backtrace: None,
+            snapshot: CrashSnapshot::default(),
+        };
+        let rendered = report.render();
+        assert!(rendered.starts_with("=== prism_app crash report ===\n"));
+        assert!(rendered.contains("panic:         it exploded"));
+        assert!(rendered.contains("location:      src/sim.rs:42:9"));
+        assert!(rendered.contains("backtrace:     <unavailable; set RUST_BACKTRACE=1>"));
+        assert!(rendered.trim_end().ends_with("=== end crash report ==="));
+    }
+
+    /// A present backtrace is embedded under its own header, with a trailing
+    /// newline added when the captured text lacks one.
+    #[test]
+    fn report_render_embeds_backtrace() {
+        let report = CrashReport {
+            message: "boom".to_string(),
+            location: None,
+            backtrace: Some("frame#0\nframe#1".to_string()),
+            snapshot: CrashSnapshot::default(),
+        };
+        let rendered = report.render();
+        assert!(rendered.contains("location:      <unknown>"));
+        assert!(rendered.contains("backtrace:\nframe#0\nframe#1\n"));
+    }
+
+    /// `publish` / `snapshot` round-trip the shared slot, and the clone the app
+    /// keeps sees updates published through any other clone.
+    #[test]
+    fn publish_and_snapshot_share_one_slot() {
+        let reporter = CrashReporter::new();
+        assert_eq!(reporter.snapshot(), CrashSnapshot::default());
+
+        let snapshot = CrashSnapshot {
+            run_mode: Some(RunMode::Headless),
+            quality_tier: Some(QualityTier::Server),
+            main_entity_count: 11,
+            settings: Vec::new(),
+        };
+        let clone = reporter.clone();
+        clone.publish(snapshot.clone());
+        assert_eq!(reporter.snapshot(), snapshot);
+    }
+
+    /// `report` writes the rendered dump to the sink and returns the identical
+    /// text, embedding the last-published snapshot.
+    #[test]
+    fn report_writes_to_sink_and_returns_dump() {
+        let (sink, log) = capturing_sink();
+        let reporter = CrashReporter::with_sink(sink);
+        reporter.publish(CrashSnapshot {
+            run_mode: Some(RunMode::Client),
+            quality_tier: Some(QualityTier::Desktop),
+            main_entity_count: 5,
+            settings: Vec::new(),
+        });
+
+        let returned = reporter.report("manual boom", Some("here:1:1".to_string()), None);
+
+        let captured = log.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0], returned);
+        assert!(returned.contains("panic:         manual boom"));
+        assert!(returned.contains("location:      here:1:1"));
+        assert!(returned.contains("run mode:      Client"));
+        assert!(returned.contains("main entities: 5"));
+    }
+
+    /// `install_crash_reporter` stores the reporter as a resource seeded with the
+    /// current snapshot, and `refresh_crash_snapshot` republishes the latest
+    /// state to it. Restores the process panic hook afterward.
+    #[test]
+    fn install_and_refresh_publish_app_state() {
+        let _guard = HOOK_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = panic::take_hook();
+
+        let mut app = App::new();
+        app.set_run_mode(RunMode::EditorEmbedded);
+        let reporter = app.install_crash_reporter();
+
+        // Seeded with the state at install time.
+        let seeded = reporter.snapshot();
+        assert_eq!(seeded.run_mode, Some(RunMode::EditorEmbedded));
+        assert_eq!(seeded.main_entity_count, 0);
+
+        // Mutate the world, then refresh: the stored reporter sees it.
+        app.world_mut().spawn(());
+        app.refresh_crash_snapshot();
+        assert_eq!(reporter.snapshot().main_entity_count, 1);
+
+        panic::set_hook(previous);
+    }
+
+    /// End-to-end: an installed hook turns a real caught panic into a dump on the
+    /// reporter's sink. This is the only test that mutates the global panic hook,
+    /// and it saves and restores the previous hook so the suite stays clean.
+    #[test]
+    fn installed_hook_reports_a_real_panic() {
+        let _guard = HOOK_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let (sink, log) = capturing_sink();
+        let reporter = CrashReporter::with_sink(sink);
+        reporter.publish(CrashSnapshot {
+            run_mode: Some(RunMode::Client),
+            quality_tier: Some(QualityTier::Desktop),
+            main_entity_count: 0,
+            settings: Vec::new(),
+        });
+
+        let previous = panic::take_hook();
+        reporter.install();
+
+        let result = panic::catch_unwind(|| {
+            panic!("sentinel-crash-xyz");
+        });
+        assert!(result.is_err());
+
+        panic::set_hook(previous);
+
+        let captured = log.lock().unwrap();
+        assert!(
+            captured.iter().any(|dump| dump.contains("sentinel-crash-xyz")),
+            "installed hook should have written the panic dump to the sink",
+        );
+    }
+}
