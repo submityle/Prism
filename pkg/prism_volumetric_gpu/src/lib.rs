@@ -255,12 +255,17 @@ pub mod mesh_aabb;
 pub mod mesh_bary_fold;
 pub mod mesh_cdf_sample;
 pub mod mesh_dihedral_cosine;
+pub mod mesh_edge_length;
 pub mod mesh_emission;
 pub mod mesh_ray_contains;
 pub mod mesh_renderer;
 pub mod mesh_sdf_ambient_occlusion;
+pub mod mesh_sdf_cone_occlusion;
 pub mod mesh_sdf_curvature;
+pub mod mesh_sdf_curvature_masks;
+pub mod mesh_sdf_enhanced_trace;
 pub mod mesh_sdf_normal;
+pub mod mesh_sdf_raymarch;
 pub mod mesh_sdf_soft_shadow;
 pub mod mesh_sdf_surface_projection;
 pub mod mesh_sdf_tetrahedron_normal;
@@ -269,6 +274,7 @@ pub mod mesh_skinning;
 pub mod mesh_tangents;
 pub mod mesh_triangle_eval;
 pub mod mesh_triangle_quality;
+pub mod mesh_volume_contribution;
 pub mod mg_coarsen;
 pub mod mg_divergence_gradient;
 pub mod mg_is_coarsest;
@@ -836,6 +842,7 @@ pub use mesh_aabb::{GpuMeshAabb, GpuMeshAabbQuery, GpuMeshAabbResult};
 pub use mesh_bary_fold::{GpuMeshBaryFold, GpuMeshBaryFoldQuery, GpuMeshBaryFoldResult};
 pub use mesh_cdf_sample::{GpuMeshCdfSample, GpuMeshCdfSampleQuery, GpuMeshCdfSampleResult};
 pub use mesh_dihedral_cosine::{DihedralCosineQuery, DihedralCosineResult, GpuDihedralCosine};
+pub use mesh_edge_length::{GpuMeshEdgeLength, MeshEdgeLengthQuery, MeshEdgeLengthResult};
 pub use mesh_emission::{GpuMeshEmission, MeshEmissionQuery, MeshEmissionResult};
 pub use mesh_ray_contains::{GpuMeshContainsQuery, GpuMeshRayContains, GpuTriangle};
 pub use mesh_renderer::{
@@ -847,10 +854,22 @@ pub use mesh_sdf_ambient_occlusion::{
     GpuSdfAmbientOcclusion, SdfAmbientOcclusionField, SdfAmbientOcclusionQuery,
     SdfAmbientOcclusionResult,
 };
+pub use mesh_sdf_cone_occlusion::{
+    GpuSdfConeOcclusion, SdfConeOcclusionField, SdfConeOcclusionQuery, SdfConeOcclusionResult,
+};
 pub use mesh_sdf_curvature::{
     GpuSdfCurvature, SdfCurvatureField, SdfCurvatureQuery, SdfCurvatureResult,
 };
+pub use mesh_sdf_curvature_masks::{
+    GpuSdfCurvatureMasks, SdfCurvatureMasksQuery, SdfCurvatureMasksResult,
+};
+pub use mesh_sdf_enhanced_trace::{
+    GpuSdfEnhancedTrace, SdfEnhancedTraceField, SdfEnhancedTraceQuery, SdfEnhancedTraceResult,
+};
 pub use mesh_sdf_normal::{GpuSdfNormal, SdfNormalField, SdfNormalQuery, SdfNormalResult};
+pub use mesh_sdf_raymarch::{
+    GpuSdfSphereTrace, SdfSphereTraceField, SdfSphereTraceQuery, SdfSphereTraceResult,
+};
 pub use mesh_sdf_soft_shadow::{
     GpuSdfSoftShadow, SdfSoftShadowField, SdfSoftShadowQuery, SdfSoftShadowResult,
 };
@@ -874,6 +893,9 @@ pub use mesh_triangle_eval::{
 };
 pub use mesh_triangle_quality::{
     GpuMeshTriangleQuality, MeshTriangleQualityQuery, MeshTriangleQualityResult,
+};
+pub use mesh_volume_contribution::{
+    GpuMeshVolumeContribution, MeshVolumeContributionQuery, MeshVolumeContributionResult,
 };
 pub use mg_coarsen::{GpuMgCoarsen, GpuMgCoarsenQuery, GpuMgCoarsenResult};
 pub use mg_divergence_gradient::{GpuDivergenceQuery, GpuMgDivergenceGradient, GpuProjectionQuery};
