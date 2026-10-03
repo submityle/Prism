@@ -18,7 +18,7 @@
 //! No Unreal Engine source or derived code.
 
 use glam::Vec3;
-use prism_physics_core::{BodyCollider, CouplingBody};
+use prism_physics_core::{BodyCollider, ConvexProxy, CouplingBody, Plane};
 use prism_physics_gpu::context::GpuContext;
 use prism_physics_gpu::{cpu_cloth_coupling, GpuClothCoupling};
 
@@ -142,6 +142,29 @@ fn assert_parity(
                     &format!("body[{k}].obb.orientation.xyz"),
                 );
                 assert!((cq.w - gq.w).abs() <= TOL, "body[{k}].obb.orientation.w");
+            }
+            (BodyCollider::ConvexHull(cp), BodyCollider::ConvexHull(gp)) => {
+                assert_vec_close(
+                    cp.center(),
+                    gp.center(),
+                    &format!("body[{k}].convex.center"),
+                );
+                let cf = cp.planes();
+                let gf = gp.planes();
+                assert_eq!(cf.len(), gf.len(), "body[{k}] convex face-count mismatch");
+                for (f, (cfp, gfp)) in cf.iter().zip(gf).enumerate() {
+                    assert_vec_close(
+                        cfp.normal,
+                        gfp.normal,
+                        &format!("body[{k}].convex.face[{f}].normal"),
+                    );
+                    assert!(
+                        (cfp.offset - gfp.offset).abs() <= TOL * cfp.offset.abs().max(1.0),
+                        "body[{k}].convex.face[{f}].offset: cpu={} gpu={}",
+                        cfp.offset,
+                        gfp.offset
+                    );
+                }
             }
             (c_other, g_other) => {
                 panic!("body[{k}] collider kind diverged: cpu={c_other:?} gpu={g_other:?}");
@@ -392,4 +415,129 @@ fn empty_inputs_return_unchanged() {
     let (pos2, out2) = kernel.solve(&ctx, &positions, &[1.0], &[], 1.0 / 60.0);
     assert_eq!(pos2, positions.to_vec());
     assert!(out2.is_empty());
+}
+
+/// A translated/rotated convex box proxy coupled against the cloth must move
+/// (two-way) and project particles identically to the CPU golden, exercising
+/// the new `COLLIDER_CONVEX` arm in the coupling kernel end to end.
+#[test]
+fn convex_box_coupling_matches_cpu() {
+    let Some(ctx) = headless() else {
+        return;
+    };
+    let kernel = GpuClothCoupling::new(&ctx);
+    let proxy = ConvexProxy::from_box(
+        Vec3::new(0.2, -0.1, 0.3),
+        glam::Quat::from_rotation_y(0.6) * glam::Quat::from_rotation_x(0.3),
+        Vec3::new(0.8, 0.5, 0.6),
+    );
+    // Several particles driven inside the hull plus one safely outside.
+    let positions = [
+        Vec3::new(0.2, -0.1, 0.3),
+        Vec3::new(0.4, 0.1, 0.1),
+        Vec3::new(-0.1, -0.3, 0.5),
+        Vec3::new(0.35, -0.25, 0.2),
+        Vec3::new(2.5, 2.5, 2.5),
+    ];
+    let inverse_masses = [1.0, 1.0, 1.5, 0.75, 1.0];
+    let bodies = [CouplingBody::new(BodyCollider::ConvexHull(proxy), 0.8)];
+    assert_parity(
+        &ctx,
+        &kernel,
+        &positions,
+        &inverse_masses,
+        &bodies,
+        1.0 / 60.0,
+    );
+}
+
+/// A bevelled (seven-face) convex hull stresses the least-penetration tie-break
+/// across more than six faces while the body is also free to recoil.
+#[test]
+fn convex_bevelled_coupling_matches_cpu() {
+    let Some(ctx) = headless() else {
+        return;
+    };
+    let kernel = GpuClothCoupling::new(&ctx);
+    let planes = [
+        Plane {
+            normal: Vec3::X,
+            offset: 1.0,
+        },
+        Plane {
+            normal: -Vec3::X,
+            offset: 1.0,
+        },
+        Plane {
+            normal: Vec3::Y,
+            offset: 1.0,
+        },
+        Plane {
+            normal: -Vec3::Y,
+            offset: 1.0,
+        },
+        Plane {
+            normal: Vec3::Z,
+            offset: 1.0,
+        },
+        Plane {
+            normal: -Vec3::Z,
+            offset: 1.0,
+        },
+        Plane {
+            normal: Vec3::new(1.0, 1.0, 1.0),
+            offset: 2.2,
+        },
+    ];
+    let proxy = ConvexProxy::from_planes(Vec3::ZERO, 1.8, &planes)
+        .expect("bevelled hull is within the plane budget");
+    let positions = [
+        Vec3::new(0.1, 0.2, -0.1),
+        Vec3::new(-0.3, 0.4, 0.2),
+        Vec3::new(0.5, 0.5, 0.5),
+        Vec3::new(0.6, 0.6, 0.6),
+        Vec3::new(-0.5, -0.5, 0.1),
+        Vec3::new(3.0, 0.0, 0.0),
+    ];
+    let inverse_masses = [1.0, 0.8, 1.2, 1.0, 1.4, 1.0];
+    let bodies = [CouplingBody::new(BodyCollider::ConvexHull(proxy), 1.1)];
+    assert_parity(
+        &ctx,
+        &kernel,
+        &positions,
+        &inverse_masses,
+        &bodies,
+        1.0 / 90.0,
+    );
+}
+
+/// A kinematic (zero inverse-mass) convex hull never moves but still projects
+/// particles and records a reaction, matching the CPU golden.
+#[test]
+fn convex_kinematic_coupling_matches_cpu() {
+    let Some(ctx) = headless() else {
+        return;
+    };
+    let kernel = GpuClothCoupling::new(&ctx);
+    let proxy = ConvexProxy::from_box(
+        Vec3::ZERO,
+        glam::Quat::from_rotation_z(0.4),
+        Vec3::new(0.6, 0.9, 0.5),
+    );
+    let positions = [
+        Vec3::new(0.1, 0.1, 0.1),
+        Vec3::new(-0.2, 0.3, -0.1),
+        Vec3::new(0.3, -0.4, 0.2),
+        Vec3::new(2.0, 2.0, 2.0),
+    ];
+    let inverse_masses = [1.0, 1.0, 1.0, 1.0];
+    let bodies = [CouplingBody::kinematic(BodyCollider::ConvexHull(proxy))];
+    assert_parity(
+        &ctx,
+        &kernel,
+        &positions,
+        &inverse_masses,
+        &bodies,
+        1.0 / 60.0,
+    );
 }

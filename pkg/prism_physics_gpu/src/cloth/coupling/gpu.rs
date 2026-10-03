@@ -44,7 +44,7 @@ use crate::buffer;
 use crate::cloth::layout::{buffer_entry, entry};
 use crate::context::GpuContext;
 
-use super::super::body::collider::GpuBodyCollider;
+use super::super::body::collider::{pack_convex_planes, GpuBodyCollider, GpuConvexPlane};
 
 /// Scalar type shared with [`prism_physics_core`] (`f32`).
 type Real = f32;
@@ -111,6 +111,7 @@ impl GpuClothCoupling {
                 buffer_entry(2, read),
                 buffer_entry(3, write),
                 buffer_entry(4, write),
+                buffer_entry(6, read),
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
@@ -195,6 +196,20 @@ impl GpuClothCoupling {
             };
             let params_buf = buffer::uniform(device, "prism_cloth_coupling_params", &params);
 
+            // The convex-hull arm reads its face planes from a storage pool;
+            // this dispatch handles exactly one body, so the planes live at
+            // offset 0 (an empty 1-element dummy keeps the binding legal for
+            // the analytic primitives, which never index it).
+            let convex_planes = pack_convex_planes(&[collider]);
+            let convex_dummy = [GpuConvexPlane::zeroed()];
+            let convex_slice: &[GpuConvexPlane] = if convex_planes.is_empty() {
+                &convex_dummy
+            } else {
+                &convex_planes
+            };
+            let convex_buf =
+                buffer::storage_read(device, "prism_cloth_coupling_convex", convex_slice);
+
             let bind = device.create_bind_group(&BindGroupDescriptor {
                 label: Some("prism_cloth_coupling_bind"),
                 layout: &self.layout,
@@ -204,6 +219,7 @@ impl GpuClothCoupling {
                     entry(2, &inv_mass_buf),
                     entry(3, &body_delta_buf),
                     entry(4, &impulse_buf),
+                    entry(6, &convex_buf),
                 ],
             });
 

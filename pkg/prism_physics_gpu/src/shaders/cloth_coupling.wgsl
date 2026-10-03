@@ -30,6 +30,7 @@ const COLLIDER_SPHERE: u32 = 0u;
 const COLLIDER_CAPSULE: u32 = 1u;
 const COLLIDER_HALF_SPACE: u32 = 2u;
 const COLLIDER_OBB: u32 = 3u;
+const COLLIDER_CONVEX: u32 = 4u;
 
 // kind: COLLIDER_* discriminant.
 // radius: sphere/capsule radius, or half-space offset.
@@ -65,6 +66,16 @@ struct Params {
 @group(0) @binding(2) var<storage, read> inv_mass: array<f32>;
 @group(0) @binding(3) var<storage, read_write> body_delta: array<vec4<f32>>;
 @group(0) @binding(4) var<storage, read_write> impulse: array<vec4<f32>>;
+
+// Face planes of the (single) convex-hull body for this dispatch: xyz =
+// outward unit normal, w = plane offset. The collider's `pad0`/`pad1` carry
+// the run offset/count; the coupling kernel handles one body per dispatch,
+// so offset is 0 and count is the live-face count (see pack_convex_planes).
+struct ConvexPlane {
+    plane: vec4<f32>,
+};
+
+@group(0) @binding(6) var<storage, read> convex_planes: array<ConvexPlane>;
 
 // Projects `pos` out to the surface of the sphere `(center, radius)`.
 //
@@ -168,6 +179,38 @@ fn project_out_of_obb(
     return center + quat_rotate(orientation, local_out);
 }
 
+// Projects `pos` out to the nearest face of the convex solid whose faces
+// occupy `convex_planes[plane_offset .. plane_offset + plane_count]` when it
+// lies strictly inside, otherwise returns `pos`. Real-device twin of
+// `ConvexProxy::project_out` in prism_physics_core (least-penetrating face;
+// a non-negative signed distance on any face proves the point is outside).
+fn project_out_of_convex(pos: vec3<f32>, plane_offset: u32, plane_count: u32) -> vec3<f32> {
+    var best_pen = 0.0;
+    var best_normal = vec3<f32>(0.0, 0.0, 0.0);
+    var found = false;
+    for (var i = 0u; i < plane_count; i = i + 1u) {
+        let plane = convex_planes[plane_offset + i].plane;
+        let normal = plane.xyz;
+        if (dot(normal, normal) <= EPS_LEN_SQ) {
+            continue;
+        }
+        let signed = dot(normal, pos) - plane.w;
+        if (signed >= 0.0) {
+            return pos;
+        }
+        let pen = -signed;
+        if (!found || pen < best_pen) {
+            best_pen = pen;
+            best_normal = normal;
+            found = true;
+        }
+    }
+    if (!found) {
+        return pos;
+    }
+    return pos + best_normal * best_pen;
+}
+
 fn project_collider(c: Collider, pos: vec3<f32>) -> vec3<f32> {
     if (c.kind == COLLIDER_SPHERE) {
         return project_out_of_sphere(pos, c.p0.xyz, c.radius);
@@ -178,6 +221,9 @@ fn project_collider(c: Collider, pos: vec3<f32>) -> vec3<f32> {
     }
     if (c.kind == COLLIDER_OBB) {
         return project_out_of_obb(pos, c.p0.xyz, c.p2, c.p1.xyz);
+    }
+    if (c.kind == COLLIDER_CONVEX) {
+        return project_out_of_convex(pos, c.pad0, c.pad1);
     }
     // COLLIDER_HALF_SPACE
     return project_out_of_half_space(pos, c.p0.xyz, c.radius);
