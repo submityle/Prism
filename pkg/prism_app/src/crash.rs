@@ -35,9 +35,11 @@
 //!   per-system call site; `prism_app` cannot catch a panic *around one system*
 //!   from the outside without the executor's cooperation, so it is not faked
 //!   here.
-//! - **Watchdog / frame-timeout detection** (design §24.7 "主循环卡死检测")
-//!   needs a background thread observing a main-loop heartbeat; it is a later
-//!   tooling-milestone (M6) increment and is documented as absent, not stubbed.
+//! - **Watchdog / frame-timeout detection** (design §24.7 "主循环卡死检测") now
+//!   lives in the sibling [`watchdog`](crate::watchdog) module: a background
+//!   thread observes a per-frame heartbeat and reports a stall. Its stall
+//!   handler pairs naturally with the published-snapshot discipline here (dump
+//!   the last [`CrashSnapshot`] when the loop wedges).
 //! - **"Recent logs" capture** depends on a `prism_log` ring buffer that does
 //!   not exist in this crate; the report carries the state `prism_app` actually
 //!   owns (run mode, tier, world size, settings) rather than inventing a log

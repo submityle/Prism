@@ -5,6 +5,8 @@ use crate::exit::AppExit;
 #[cfg(feature = "std")]
 use crate::pacing::{AdaptiveFrameLimiter, FrameLimit, FramePacer, FrameRateLadder};
 #[cfg(feature = "std")]
+use crate::watchdog::WatchdogConfig;
+#[cfg(feature = "std")]
 use prism_time::Instant;
 
 /// A runner that repeatedly drives frames with no windowing or presentation,
@@ -41,6 +43,14 @@ pub struct HeadlessRunner {
     /// tier ladder. `None` (the default) keeps the fixed `frame_limit`.
     #[cfg(feature = "std")]
     adaptive: Option<AdaptiveFrameLimiter>,
+    /// Optional main-loop hang watchdog (design §24.7). When set, a background
+    /// thread is started in [`run`](HeadlessRunner::run) and beaten once per
+    /// frame; a timeout's worth of missing beats fires the configured stall
+    /// handler. `None` (the default) runs no watchdog. Stored as cloneable
+    /// config so the runner stays `Clone`; the live thread is spun up inside
+    /// `run`.
+    #[cfg(feature = "std")]
+    watchdog: Option<WatchdogConfig>,
 }
 
 impl HeadlessRunner {
@@ -52,6 +62,8 @@ impl HeadlessRunner {
             frame_limit: FrameLimit::Off,
             #[cfg(feature = "std")]
             adaptive: None,
+            #[cfg(feature = "std")]
+            watchdog: None,
         }
     }
 
@@ -64,6 +76,8 @@ impl HeadlessRunner {
             frame_limit: FrameLimit::Off,
             #[cfg(feature = "std")]
             adaptive: None,
+            #[cfg(feature = "std")]
+            watchdog: None,
         }
     }
 
@@ -93,6 +107,20 @@ impl HeadlessRunner {
         self
     }
 
+    /// Attach a main-loop hang watchdog (design §24.7). A background thread is
+    /// started when the loop begins and beaten once per completed frame; if a
+    /// frame wedges for the config's [`timeout`](WatchdogConfig::timeout) the
+    /// stall handler fires (defaulting to a notice on standard error). The
+    /// watchdog is stopped before the graceful-shutdown phase so a deliberately
+    /// slow teardown is not mistaken for a hang. Builder-style; the default is
+    /// no watchdog.
+    #[cfg(feature = "std")]
+    #[must_use]
+    pub fn with_watchdog(mut self, config: WatchdogConfig) -> Self {
+        self.watchdog = Some(config);
+        self
+    }
+
     /// Drive `app` frame by frame until exit or the frame cap is hit.
     ///
     /// Returns the requested [`AppExit`] if a system asked to stop, otherwise
@@ -105,6 +133,10 @@ impl HeadlessRunner {
         let mut pacer = FramePacer::new(self.frame_limit);
         #[cfg(feature = "std")]
         let mut adaptive = self.adaptive;
+        // Start the hang watchdog (if configured) for the duration of the loop
+        // only; it is stopped before shutdown below.
+        #[cfg(feature = "std")]
+        let watchdog = self.watchdog.map(WatchdogConfig::start);
         let mut frame: u64 = 0;
         let exit = loop {
             // Time only the frame's work (not the pacing sleep) so the adaptive
@@ -112,6 +144,12 @@ impl HeadlessRunner {
             #[cfg(feature = "std")]
             let work_start = adaptive.as_ref().map(|_| Instant::now());
             app.update();
+            // One beat per completed frame; a frame that wedges inside
+            // `app.update()` beats late (or never) and trips the watchdog.
+            #[cfg(feature = "std")]
+            if let Some(dog) = watchdog.as_ref() {
+                dog.beat();
+            }
             // Poll for a *confirmed* exit, running the exit-veto gate when a
             // request is pending (design §24.5); a confirmation system may cancel.
             if let Some(exit) = app.poll_exit() {
@@ -134,6 +172,10 @@ impl HeadlessRunner {
             #[cfg(feature = "std")]
             pacer.throttle();
         };
+        // Stop watching before the (potentially slow but intentional) shutdown
+        // path so teardown is never flagged as a stall.
+        #[cfg(feature = "std")]
+        drop(watchdog);
         // Bring any pipelined render frame home before returning so the final
         // frame's render has completed (no-op in the serial / feature-off case).
         app.sync_sub_apps();

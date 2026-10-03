@@ -134,6 +134,80 @@ fn headless_runner_adaptive_frame_limit_paces_the_loop() {
     );
 }
 
+/// A watchdog attached to a *healthy* fast loop never fires: every frame beats
+/// well within the timeout, so the stall handler is not invoked (design §24.7).
+#[cfg(feature = "std")]
+#[test]
+fn headless_runner_watchdog_stays_quiet_on_a_healthy_loop() {
+    use crate::watchdog::WatchdogConfig;
+    use prism_time::Duration;
+
+    let stalls = Arc::new(AtomicU64::new(0));
+    let s = stalls.clone();
+
+    let mut app = App::new();
+    app.add_systems(Update, || {});
+    app.set_runner(move |app| {
+        let config = WatchdogConfig::new(Duration::from_secs(30))
+            .with_poll_interval(Duration::from_millis(5))
+            .with_handler(move |_| {
+                s.fetch_add(1, Ordering::Relaxed);
+            });
+        HeadlessRunner::with_max_frames(50)
+            .with_watchdog(config)
+            .run(app)
+    });
+
+    let exit = app.run();
+    assert_eq!(exit, AppExit::Success);
+    assert_eq!(
+        stalls.load(Ordering::Relaxed),
+        0,
+        "watchdog fired on a healthy loop"
+    );
+}
+
+/// A frame that wedges inside `app.update()` for longer than the watchdog
+/// timeout trips the watchdog: the beat for that frame lands late, so the
+/// background thread reports a stall (design §24.7). A one-shot sleep models the
+/// hang; the loop then recovers and finishes.
+#[cfg(feature = "std")]
+#[test]
+fn headless_runner_watchdog_detects_a_wedged_frame() {
+    use crate::watchdog::WatchdogConfig;
+    use prism_ecs::system::Local;
+    use prism_time::Duration;
+
+    let stalls = Arc::new(AtomicU64::new(0));
+    let s = stalls.clone();
+
+    let mut app = App::new();
+    // Sleep past the timeout on the very first frame only, then run normally.
+    app.add_systems(Update, |mut done: Local<bool>| {
+        if !*done {
+            *done = true;
+            std::thread::sleep(Duration::from_millis(160));
+        }
+    });
+    app.set_runner(move |app| {
+        let config = WatchdogConfig::new(Duration::from_millis(40))
+            .with_poll_interval(Duration::from_millis(5))
+            .with_handler(move |_| {
+                s.fetch_add(1, Ordering::Relaxed);
+            });
+        HeadlessRunner::with_max_frames(3)
+            .with_watchdog(config)
+            .run(app)
+    });
+
+    let exit = app.run();
+    assert_eq!(exit, AppExit::Success);
+    assert!(
+        stalls.load(Ordering::Relaxed) >= 1,
+        "watchdog did not detect the wedged frame"
+    );
+}
+
 /// Startup schedules run exactly once; frame schedules run every frame.
 #[test]
 fn startup_runs_once_update_runs_each_frame() {

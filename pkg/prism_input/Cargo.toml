@@ -1,0 +1,19 @@
+[package]
+name = "prism_input"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.0"
+description = "Prism input kernel: the deterministic, backend-agnostic input state layer. M0 delivers the generic ButtonInput<T> press/release tracker with per-frame just_pressed/just_released edges, the generic Axis<T> continuous store, physical KeyCode and logical modifier state, mouse buttons/motion/wheel, gamepad buttons/axes with radial+per-axis deadzone settings, multi-touch tracking, and a unified InputEvent model. Pure, deterministic, no_std + alloc, no unsafe; windowing/OS backends feed events in from separate crates. Borrows the shape of mature input layers without copying their source."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+
+[features]
+default = ["std"]
+# `std` is reserved for host-side backends and helpers; the M0 state model,
+# edge tracking, axis math, and event types are fully no_std + alloc.
+std = []
+
+[lints]
+workspace = true

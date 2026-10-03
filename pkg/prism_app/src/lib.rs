@@ -183,6 +183,8 @@ pub mod state;
 pub mod sub_app;
 pub mod sub_app_label;
 pub mod time;
+#[cfg(feature = "std")]
+pub mod watchdog;
 
 #[cfg(test)]
 mod tests;
@@ -195,6 +197,8 @@ pub use cvar::{
 };
 #[cfg(feature = "std")]
 pub use crash::{CrashReport, CrashReporter, CrashSink, CrashSnapshot};
+#[cfg(feature = "std")]
+pub use watchdog::{FrameStall, FrameWatchdog, StallHandler, WatchdogConfig};
 pub use exit::{AppExit, AppExitRequest};
 pub use plugin::{Plugin, PluginDependency};
 pub use plugin_graph::PluginGraphError;
@@ -247,6 +251,8 @@ pub mod prelude {
     };
     #[cfg(feature = "std")]
     pub use crate::crash::{CrashReport, CrashReporter, CrashSink, CrashSnapshot};
+    #[cfg(feature = "std")]
+    pub use crate::watchdog::{FrameStall, FrameWatchdog, StallHandler, WatchdogConfig};
     pub use crate::exit::{AppExit, AppExitRequest};
     pub use crate::plugin::{Plugin, PluginDependency};
     pub use crate::plugin_graph::PluginGraphError;
