@@ -1,0 +1,16 @@
+[package]
+name = "prism_gdeflate_gpu"
+version = "0.1.0"
+edition = "2024"
+description = "Optional wgpu compute backend for Prism's GDeflate asset-streaming decompressor. A real-device twin of the embarrassingly-parallel stage of the prism_render_architecture compression::gdeflate CPU golden: a compute kernel reverses the 32-lane warp-interleave word transpose (logical word r*32+lane is stored at lane*rounds+r) so the recovered linear DEFLATE word stream matches the golden de-interleave bit-for-bit; the serial Huffman inflate and container parsing stay on the host. Integer/word-move only, no floating point, exact-equality parity. Contains no Unreal Engine or NVIDIA GDeflate source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_render_architecture = { path = "../prism_render_architecture" }
+wgpu = { version = "30", default-features = false, features = ["wgsl", "metal"] }
+bytemuck = { version = "1.5", features = ["derive"] }
+futures-lite = "2"
+
+[lints]
+workspace = true

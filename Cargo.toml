@@ -37,6 +37,8 @@ members = [
   "pkg/prism_radiance_cascades_gpu",
   # Prism runtime virtual-texturing GPU page-table lookup twin (device search vs CPU golden).
   "pkg/prism_virtual_texture_gpu",
+  # Prism GDeflate asset-streaming GPU de-interleave twin (device word transpose vs CPU golden).
+  "pkg/prism_gdeflate_gpu",
   # Prism experimental virtual-geometry GPU software-raster twin.
   "pkg/prism_virtual_geometry_gpu",
   # Prism experimental volumetric-cloud scattering GPU twin.
