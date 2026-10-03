@@ -57,7 +57,9 @@ mod component_hooks_tests;
 pub mod entity;
 pub mod event;
 pub mod observer;
+pub mod prefab;
 pub mod query;
+pub mod reaction;
 pub mod relation;
 pub mod resource;
 pub mod schedule;
@@ -79,6 +81,8 @@ pub mod prelude {
     pub use crate::observer::{
         EventContext, LifecycleEvent, ObserverContext, ObserverId, Observers,
     };
+    pub use crate::prefab::IsA;
+    pub use crate::reaction::{NodeId, ReactionGraph};
     pub use crate::resource::{Resource, ResourceId, Resources};
     pub use crate::query::{Added, Changed, Or, With, Without};
     pub use crate::relation::{
