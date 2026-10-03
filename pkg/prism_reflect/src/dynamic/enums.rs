@@ -5,9 +5,9 @@ use crate::reflect::Reflect;
 use crate::type_info::{EnumInfo, TypeInfo};
 use crate::{ReflectMut, ReflectRef};
 use core::any::Any;
-use std::boxed::Box;
+use alloc::boxed::Box;
 use std::sync::OnceLock;
-use std::vec::Vec;
+use alloc::vec::Vec;
 
 /// The payload shape of a [`DynamicEnum`]'s active variant.
 #[derive(Default)]

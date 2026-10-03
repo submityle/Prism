@@ -44,9 +44,9 @@
 
 use crate::type_data::TypeData;
 use core::any::Any;
-use std::boxed::Box;
-use std::string::String;
-use std::vec::Vec;
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::vec::Vec;
 
 /// A single typed metadata attribute value.
 ///

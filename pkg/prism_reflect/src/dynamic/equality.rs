@@ -1,7 +1,7 @@
 //! Structural value equality used by [`DynamicMap`](super::DynamicMap) keys.
 
 use crate::reflect::Reflect;
-use std::string::String;
+use alloc::string::String;
 
 /// Best-effort equality for two reflected leaf values.
 ///

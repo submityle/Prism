@@ -12,8 +12,8 @@ use crate::reflect::Reflect;
 use crate::schema::metadata::TypeMetadata;
 use crate::schema::version::{SchemaRegistry, TypeSchema};
 use crate::ReflectRef;
-use std::string::String;
-use std::vec::Vec;
+use alloc::string::String;
+use alloc::vec::Vec;
 
 /// A single schema/metadata validation failure.
 #[derive(Debug, Clone, PartialEq)]
@@ -107,7 +107,7 @@ pub fn validate(
     metadata: Option<&TypeMetadata>,
 ) -> Result<(), Vec<ValidationError>> {
     let ReflectRef::Struct(source) = value.reflect_ref() else {
-        return Err(std::vec![ValidationError::NotAStruct]);
+        return Err(alloc::vec![ValidationError::NotAStruct]);
     };
 
     let mut errors = Vec::new();
@@ -170,7 +170,7 @@ pub fn validate_version(
 ) -> Result<(), ValidationError> {
     let current = schema
         .current_version(logical)
-        .map(|v| v.value())
+        .map(super::version::SchemaVersion::value)
         .unwrap_or(found);
     if found > current {
         return Err(ValidationError::VersionTooNew { found, current });

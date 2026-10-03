@@ -17,7 +17,7 @@ macro_rules! impl_reflect_value {
                 }
                 fn as_any(&self) -> &dyn ::core::any::Any { self }
                 fn as_any_mut(&mut self) -> &mut dyn ::core::any::Any { self }
-                fn into_any(self: ::std::boxed::Box<Self>) -> ::std::boxed::Box<dyn ::core::any::Any> { self }
+                fn into_any(self: ::alloc::boxed::Box<Self>) -> ::alloc::boxed::Box<dyn ::core::any::Any> { self }
                 fn as_reflect(&self) -> &dyn $crate::Reflect { self }
                 fn as_reflect_mut(&mut self) -> &mut dyn $crate::Reflect { self }
                 fn reflect_ref(&self) -> $crate::ReflectRef<'_> {
@@ -26,8 +26,8 @@ macro_rules! impl_reflect_value {
                 fn reflect_mut(&mut self) -> $crate::ReflectMut<'_> {
                     $crate::ReflectMut::Value(self)
                 }
-                fn reflect_clone(&self) -> ::std::boxed::Box<dyn $crate::Reflect> {
-                    ::std::boxed::Box::new(::core::clone::Clone::clone(self))
+                fn reflect_clone(&self) -> ::alloc::boxed::Box<dyn $crate::Reflect> {
+                    ::alloc::boxed::Box::new(::core::clone::Clone::clone(self))
                 }
                 fn apply(
                     &mut self,

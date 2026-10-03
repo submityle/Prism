@@ -5,7 +5,7 @@
 //! `Value` leaf kinds plus the M1 container kinds `Enum`, `List`, `Array`,
 //! `Map`, and `Set` (design roadmap §22).
 
-use std::vec::Vec;
+use alloc::vec::Vec;
 
 /// The reflected shape of a type.
 ///

@@ -46,10 +46,10 @@ pub fn resolve<'a>(
 /// [`Schema::Info`] without a registry round-trip.
 #[must_use]
 pub fn root_schema(target: &TypeInfo) -> Schema<'_> {
-    if let TypeInfo::Value(info) = target {
-        if let Some(primitive) = leaf_primitive(info.type_name()) {
-            return Schema::Primitive(primitive);
-        }
+    if let TypeInfo::Value(info) = target
+        && let Some(primitive) = leaf_primitive(info.type_name())
+    {
+        return Schema::Primitive(primitive);
     }
     Schema::Info(target)
 }

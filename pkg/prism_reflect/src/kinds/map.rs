@@ -3,8 +3,9 @@
 use crate::reflect::Reflect;
 use crate::type_info::{MapInfo, TypeInfo};
 use crate::{ReflectMut, ReflectRef, Typed};
-use std::boxed::Box;
-use std::collections::{BTreeMap, HashMap};
+use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
+use std::collections::HashMap;
 
 /// A boxed key/value pair in dynamic form.
 type ReflectPair = Box<dyn Reflect>;

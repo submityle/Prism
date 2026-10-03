@@ -3,8 +3,9 @@
 use crate::reflect::Reflect;
 use crate::type_info::{SetInfo, TypeInfo};
 use crate::{ReflectMut, ReflectRef, Typed};
-use std::boxed::Box;
-use std::collections::{BTreeSet, HashSet};
+use alloc::boxed::Box;
+use alloc::collections::BTreeSet;
+use std::collections::HashSet;
 
 /// Reflected access to a unique-value set (`HashSet`/`BTreeSet`).
 pub trait Set: Reflect {

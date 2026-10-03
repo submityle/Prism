@@ -7,7 +7,7 @@
 //! varints, implemented here alongside a bounds-checked [`ByteReader`].
 
 use crate::ser::error::DeserializeError;
-use std::vec::Vec;
+use alloc::vec::Vec;
 
 /// The classification of a reflected leaf (`Value`-kind) type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,7 +178,7 @@ impl Primitive {
             Primitive::Usize => ::core::any::type_name::<usize>(),
             Primitive::F32 => ::core::any::type_name::<f32>(),
             Primitive::F64 => ::core::any::type_name::<f64>(),
-            Primitive::String => ::core::any::type_name::<::std::string::String>(),
+            Primitive::String => ::core::any::type_name::<::alloc::string::String>(),
         }
     }
 }

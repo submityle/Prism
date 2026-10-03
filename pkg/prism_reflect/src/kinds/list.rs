@@ -3,8 +3,8 @@
 use crate::reflect::Reflect;
 use crate::type_info::{ListInfo, TypeInfo};
 use crate::{ReflectMut, ReflectRef, Typed};
-use std::boxed::Box;
-use std::vec::Vec;
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 
 /// Reflected access to a growable, homogeneous list (`Vec<T>`).
 pub trait List: Reflect {

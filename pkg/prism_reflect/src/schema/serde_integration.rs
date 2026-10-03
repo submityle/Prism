@@ -21,9 +21,9 @@ use crate::schema::migration::MigrateError;
 use crate::schema::version::SchemaRegistry;
 use crate::ser::{from_binary, from_ron, to_binary, to_ron};
 use crate::TypeRegistry;
-use std::boxed::Box;
-use std::string::String;
-use std::vec::Vec;
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::vec::Vec;
 
 /// The 4-byte magic opening a versioned binary envelope.
 const BINARY_MAGIC: [u8; 4] = *b"PRVB";

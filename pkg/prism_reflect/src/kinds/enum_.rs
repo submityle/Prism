@@ -3,8 +3,8 @@
 use crate::reflect::Reflect;
 use crate::type_info::{EnumInfo, TypeInfo, UnnamedField, VariantInfo, VariantKind};
 use crate::{ReflectMut, ReflectRef, Typed};
-use std::boxed::Box;
-use std::vec;
+use alloc::boxed::Box;
+use alloc::vec;
 
 /// The structural shape of the currently-active enum variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

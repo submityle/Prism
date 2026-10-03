@@ -6,9 +6,9 @@ use crate::reflect::Reflect;
 use crate::type_info::{MapInfo, TypeInfo};
 use crate::{ReflectMut, ReflectRef};
 use core::any::Any;
-use std::boxed::Box;
+use alloc::boxed::Box;
 use std::sync::OnceLock;
-use std::vec::Vec;
+use alloc::vec::Vec;
 
 /// A boxed key/value pair in dynamic form.
 type ReflectPair = Box<dyn Reflect>;

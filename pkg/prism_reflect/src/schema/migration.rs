@@ -10,8 +10,8 @@
 
 use crate::dynamic::DynamicStruct;
 use crate::ser::{DeserializeError, SerializeError};
-use std::boxed::Box;
-use std::string::String;
+use alloc::boxed::Box;
+use alloc::string::String;
 
 /// The transform run by a single migration step.
 ///

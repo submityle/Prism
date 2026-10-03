@@ -7,7 +7,7 @@
 //! tag, and every leaf payload are validated against the target schema so that
 //! corruption or a schema mismatch is reported rather than silently accepted.
 
-use std::string::String;
+use alloc::string::String;
 
 /// An error raised while serializing a `&dyn Reflect` value.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -12,8 +12,8 @@ use crate::reflect::Reflect;
 use crate::ser::error::SerializeError;
 use crate::type_info::{TypeInfo, VariantKind};
 use crate::{DynamicEnum, DynamicVariant, ReflectRef};
-use std::string::String;
-use std::vec::Vec;
+use alloc::string::String;
+use alloc::vec::Vec;
 
 /// A format back-end that turns structural traversal callbacks into output.
 ///
@@ -290,17 +290,16 @@ pub fn encode_leaf(leaf: &dyn Reflect, encoder: &mut dyn Encoder) -> Result<(), 
 /// directly. Returns `None` only when neither source can supply names, which
 /// the driver reports as an unsupported value.
 fn enum_struct_field_names(value: &dyn Reflect, variant_name: &str) -> Option<Vec<&'static str>> {
-    if let TypeInfo::Enum(info) = value.type_info() {
-        if let Some(variant) = info.variant(variant_name) {
-            if let VariantKind::Struct(fields) = variant.kind() {
-                return Some(fields.iter().map(|f| f.name()).collect());
-            }
-        }
+    if let TypeInfo::Enum(info) = value.type_info()
+        && let Some(variant) = info.variant(variant_name)
+        && let VariantKind::Struct(fields) = variant.kind()
+    {
+        return Some(fields.iter().map(crate::type_info::NamedField::name).collect());
     }
-    if let Some(dynamic) = value.as_any().downcast_ref::<DynamicEnum>() {
-        if let DynamicVariant::Struct(fields) = dynamic.variant() {
-            return Some(fields.iter().map(|(name, _)| *name).collect());
-        }
+    if let Some(dynamic) = value.as_any().downcast_ref::<DynamicEnum>()
+        && let DynamicVariant::Struct(fields) = dynamic.variant()
+    {
+        return Some(fields.iter().map(|(name, _)| *name).collect());
     }
     None
 }

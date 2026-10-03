@@ -4,9 +4,9 @@ use crate::reflect::{Reflect, Struct};
 use crate::type_info::{StructInfo, TypeInfo};
 use crate::{ReflectMut, ReflectRef};
 use core::any::Any;
-use std::boxed::Box;
+use alloc::boxed::Box;
 use std::sync::OnceLock;
-use std::vec::Vec;
+use alloc::vec::Vec;
 
 /// A named-field struct assembled at runtime without a concrete Rust type.
 ///
@@ -68,7 +68,7 @@ impl DynamicStruct {
     /// Whether a field with the given name is present.
     #[must_use]
     pub fn contains(&self, name: &str) -> bool {
-        self.names.iter().any(|existing| *existing == name)
+        self.names.contains(&name)
     }
 }
 

@@ -9,7 +9,7 @@
 
 use crate::reflect::Reflect;
 use core::any::Any;
-use std::boxed::Box;
+use alloc::boxed::Box;
 
 /// A cloneable, type-erased payload attached to a registered type.
 pub trait TypeData: Any + Send + Sync {

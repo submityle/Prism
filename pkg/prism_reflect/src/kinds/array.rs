@@ -3,7 +3,7 @@
 use crate::reflect::Reflect;
 use crate::type_info::{ArrayInfo, TypeInfo};
 use crate::{ReflectMut, ReflectRef, Typed};
-use std::boxed::Box;
+use alloc::boxed::Box;
 
 /// Reflected access to a fixed-length array (`[T; N]`).
 pub trait Array: Reflect {

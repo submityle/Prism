@@ -10,7 +10,7 @@ use crate::reflect::{Reflect, Typed};
 use crate::type_data::TypeData;
 use crate::type_info::TypeInfo;
 use core::any::TypeId;
-use std::boxed::Box;
+use alloc::boxed::Box;
 use std::collections::HashMap;
 
 /// A type that can produce its own [`TypeRegistration`] without an instance.

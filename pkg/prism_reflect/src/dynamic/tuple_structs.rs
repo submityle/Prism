@@ -4,9 +4,9 @@ use crate::reflect::{Reflect, TupleStruct};
 use crate::type_info::{TupleStructInfo, TypeInfo};
 use crate::{ReflectMut, ReflectRef};
 use core::any::Any;
-use std::boxed::Box;
+use alloc::boxed::Box;
 use std::sync::OnceLock;
-use std::vec::Vec;
+use alloc::vec::Vec;
 
 /// A tuple struct (positional fields) assembled at runtime without a concrete
 /// Rust type.

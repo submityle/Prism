@@ -17,8 +17,8 @@
 use crate::reflect::Reflect;
 use crate::{ReflectMut, ReflectRef};
 use core::fmt;
-use std::string::String;
-use std::vec::Vec;
+use alloc::string::String;
+use alloc::vec::Vec;
 
 /// A single navigation step into a reflected value.
 #[derive(Debug, Clone, PartialEq, Eq)]

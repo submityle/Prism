@@ -8,7 +8,7 @@
 //! `&'static`.
 
 use crate::type_info::TypeInfo;
-use std::boxed::Box;
+use alloc::boxed::Box;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 

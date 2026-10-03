@@ -17,7 +17,7 @@ use crate::reflect::{Reflect, Struct, TupleStruct};
 use crate::type_info::{TypeInfo, VariantKind};
 use crate::{ReflectMut, ReflectRef};
 use core::fmt;
-use std::vec::Vec;
+use alloc::vec::Vec;
 
 /// An error produced while [`apply`](crate::Reflect::apply)-ing one reflected
 /// value onto another.
@@ -144,12 +144,11 @@ fn apply_tuple_struct(dst: &mut dyn TupleStruct, source: &dyn Reflect) -> Result
 
 /// Build the field names of the source enum's active struct variant.
 fn struct_variant_field_names(src: &dyn Enum) -> Vec<&'static str> {
-    if let TypeInfo::Enum(info) = src.type_info() {
-        if let Some(variant) = info.variant_at(src.variant_index()) {
-            if let VariantKind::Struct(fields) = variant.kind() {
-                return fields.iter().map(crate::NamedField::name).collect();
-            }
-        }
+    if let TypeInfo::Enum(info) = src.type_info()
+        && let Some(variant) = info.variant_at(src.variant_index())
+        && let VariantKind::Struct(fields) = variant.kind()
+    {
+        return fields.iter().map(crate::NamedField::name).collect();
     }
     Vec::new()
 }
@@ -213,10 +212,10 @@ fn apply_enum(dst: &mut dyn Enum, source: &dyn Reflect) -> Result<(), ApplyError
         });
     }
     for index in 0..src.field_count() {
-        if let Some(src_field) = src.field_at(index) {
-            if let Some(dst_field) = dst.field_at_mut(index) {
-                dst_field.apply(src_field)?;
-            }
+        if let Some(src_field) = src.field_at(index)
+            && let Some(dst_field) = dst.field_at_mut(index)
+        {
+            dst_field.apply(src_field)?;
         }
     }
     Ok(())
@@ -234,10 +233,10 @@ fn apply_list(dst: &mut dyn List, source: &dyn Reflect) -> Result<(), ApplyError
     let src_len = src.len();
     let shared = src_len.min(dst.len());
     for index in 0..shared {
-        if let Some(src_el) = src.get(index) {
-            if let Some(dst_el) = dst.get_mut(index) {
-                dst_el.apply(src_el)?;
-            }
+        if let Some(src_el) = src.get(index)
+            && let Some(dst_el) = dst.get_mut(index)
+        {
+            dst_el.apply(src_el)?;
         }
     }
     for index in dst.len()..src_len {
@@ -263,10 +262,10 @@ fn apply_array(dst: &mut dyn Array, source: &dyn Reflect) -> Result<(), ApplyErr
     };
     let shared = src.len().min(dst.len());
     for index in 0..shared {
-        if let Some(src_el) = src.get(index) {
-            if let Some(dst_el) = dst.get_mut(index) {
-                dst_el.apply(src_el)?;
-            }
+        if let Some(src_el) = src.get(index)
+            && let Some(dst_el) = dst.get_mut(index)
+        {
+            dst_el.apply(src_el)?;
         }
     }
     Ok(())

@@ -53,6 +53,8 @@
 // crate's own tests and doctests.
 extern crate self as prism_reflect;
 
+extern crate alloc;
+
 mod apply;
 mod cache;
 mod dynamic;

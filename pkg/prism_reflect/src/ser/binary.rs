@@ -28,9 +28,9 @@ use crate::{
     DynamicArray, DynamicEnum, DynamicList, DynamicMap, DynamicSet, DynamicStruct,
     DynamicTupleStruct, DynamicVariant, TypeRegistry,
 };
-use std::boxed::Box;
-use std::string::String;
-use std::vec::Vec;
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::vec::Vec;
 
 /// The 4-byte magic that opens every binary stream (`PRB1` = Prism Reflect
 /// Binary v1).

@@ -102,9 +102,9 @@ fn value_leaf_impls_report_value_kind() {
 
 mod list_kind {
     use crate::{List, Reflect, ReflectRef, TypeInfo, Typed};
-    use std::boxed::Box;
-    use std::vec;
-    use std::vec::Vec;
+    use alloc::boxed::Box;
+    use alloc::vec;
+    use alloc::vec::Vec;
 
     #[test]
     fn vec_type_info_is_list_kind() {
@@ -157,7 +157,7 @@ mod list_kind {
 
 mod array_kind {
     use crate::{Array, Reflect, ReflectRef, TypeInfo, Typed};
-    use std::vec::Vec;
+    use alloc::vec::Vec;
 
     #[test]
     fn array_type_info_reports_capacity() {
@@ -203,10 +203,10 @@ mod array_kind {
 
 mod map_kind {
     use crate::{Map, Reflect, ReflectRef, TypeInfo, Typed};
-    use std::boxed::Box;
-    use std::collections::BTreeMap;
-    use std::string::String;
-    use std::string::ToString;
+    use alloc::boxed::Box;
+    use alloc::collections::BTreeMap;
+    use alloc::string::String;
+    use alloc::string::ToString;
 
     #[test]
     fn map_type_info_is_map_kind() {
@@ -264,8 +264,8 @@ mod map_kind {
 
 mod set_kind {
     use crate::{Reflect, ReflectRef, Set, TypeInfo, Typed};
-    use std::boxed::Box;
-    use std::collections::BTreeSet;
+    use alloc::boxed::Box;
+    use alloc::collections::BTreeSet;
 
     #[test]
     fn set_type_info_is_set_kind() {
@@ -548,7 +548,7 @@ mod m2_dynamic {
     use crate::prelude::*;
     #[cfg(feature = "math")]
     use prism_math::Vec3;
-    use std::boxed::Box;
+    use alloc::boxed::Box;
     use std::collections::HashMap;
 
     #[derive(Reflect, Debug, PartialEq, Clone)]
@@ -782,7 +782,8 @@ mod m2_dynamic {
 /// `StableTypeId` determinism, and the deserializer's validation errors.
 mod serialization {
     use crate::prelude::*;
-    use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+    use alloc::collections::{BTreeMap, BTreeSet};
+    use std::collections::{HashMap, HashSet};
     use std::fmt::Debug;
 
     #[derive(Reflect, Debug, PartialEq, Clone)]

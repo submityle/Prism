@@ -28,9 +28,9 @@ use crate::{
     DynamicArray, DynamicEnum, DynamicList, DynamicMap, DynamicSet, DynamicStruct,
     DynamicTupleStruct, DynamicVariant, TypeRegistry,
 };
-use std::boxed::Box;
-use std::string::{String, ToString};
-use std::vec::Vec;
+use alloc::boxed::Box;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 
 /// A single open composite scope in the RON writer.
 ///
@@ -62,10 +62,10 @@ impl RonEncoder {
 
     /// Close the current composite scope with the given closing delimiter.
     fn close(&mut self, delimiter: char) {
-        if let Some(frame) = self.stack.pop() {
-            if frame.delimited {
-                self.out.push(delimiter);
-            }
+        if let Some(frame) = self.stack.pop()
+            && frame.delimited
+        {
+            self.out.push(delimiter);
         }
     }
 
@@ -366,10 +366,10 @@ impl<'a> RonParser<'a> {
                 self.pos += 1;
                 Ok(())
             }
-            Some(ch) => Err(DeserializeError::RonSyntax(std::format!(
+            Some(ch) => Err(DeserializeError::RonSyntax(alloc::format!(
                 "expected `{expected}`, found `{ch}`"
             ))),
-            None => Err(DeserializeError::RonSyntax(std::format!(
+            None => Err(DeserializeError::RonSyntax(alloc::format!(
                 "expected `{expected}`, found end of input"
             ))),
         }
@@ -383,7 +383,7 @@ impl<'a> RonParser<'a> {
             if ch.is_ascii_alphabetic() || ch == '_' {
                 self.pos += 1;
             } else {
-                return Err(DeserializeError::RonSyntax(std::format!(
+                return Err(DeserializeError::RonSyntax(alloc::format!(
                     "expected identifier, found `{ch}`"
                 )));
             }
@@ -627,10 +627,10 @@ impl<'a> RonParser<'a> {
                     Ok(true)
                 }
             }
-            Some(ch) => Err(DeserializeError::RonSyntax(std::format!(
+            Some(ch) => Err(DeserializeError::RonSyntax(alloc::format!(
                 "expected `,` or `{close}`, found `{ch}`"
             ))),
-            None => Err(DeserializeError::RonSyntax(std::format!(
+            None => Err(DeserializeError::RonSyntax(alloc::format!(
                 "expected `,` or `{close}`, found end of input"
             ))),
         }
@@ -647,7 +647,7 @@ impl<'a> RonParser<'a> {
                 match token.as_str() {
                     "true" => Ok(Box::new(true)),
                     "false" => Ok(Box::new(false)),
-                    other => Err(DeserializeError::RonSyntax(std::format!(
+                    other => Err(DeserializeError::RonSyntax(alloc::format!(
                         "expected `true` or `false`, found `{other}`"
                     ))),
                 }
@@ -675,14 +675,14 @@ impl<'a> RonParser<'a> {
             Primitive::F32 => {
                 let token = self.parse_scalar_token();
                 let value = token.parse::<f32>().map_err(|_| {
-                    DeserializeError::RonSyntax(std::format!("invalid f32 literal `{token}`"))
+                    DeserializeError::RonSyntax(alloc::format!("invalid f32 literal `{token}`"))
                 })?;
                 Ok(Box::new(value))
             }
             Primitive::F64 => {
                 let token = self.parse_scalar_token();
                 let value = token.parse::<f64>().map_err(|_| {
-                    DeserializeError::RonSyntax(std::format!("invalid f64 literal `{token}`"))
+                    DeserializeError::RonSyntax(alloc::format!("invalid f64 literal `{token}`"))
                 })?;
                 Ok(Box::new(value))
             }
@@ -696,7 +696,7 @@ impl<'a> RonParser<'a> {
     {
         let token = self.parse_scalar_token();
         let value = token.parse::<T>().map_err(|_| {
-            DeserializeError::RonSyntax(std::format!("invalid integer literal `{token}`"))
+            DeserializeError::RonSyntax(alloc::format!("invalid integer literal `{token}`"))
         })?;
         Ok(Box::new(value))
     }
@@ -750,7 +750,7 @@ impl<'a> RonParser<'a> {
             Some('n') => Ok('\n'),
             Some('r') => Ok('\r'),
             Some('t') => Ok('\t'),
-            Some(other) => Err(DeserializeError::RonSyntax(std::format!(
+            Some(other) => Err(DeserializeError::RonSyntax(alloc::format!(
                 "unsupported escape `\\{other}`"
             ))),
             None => Err(DeserializeError::RonSyntax(

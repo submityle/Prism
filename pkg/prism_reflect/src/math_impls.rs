@@ -9,9 +9,9 @@ use crate::reflect::{Reflect, Struct, Typed};
 use crate::type_info::{NamedField, StructInfo, TypeInfo};
 use crate::{ReflectMut, ReflectRef};
 use prism_math::{Mat4, Quat, Vec2, Vec3, Vec3A, Vec4};
-use std::boxed::Box;
+use alloc::boxed::Box;
 use std::sync::OnceLock;
-use std::vec;
+use alloc::vec;
 
 macro_rules! impl_reflect_math_struct {
     ($ty:ty { $($field:ident : $fty:ty),+ $(,)? }) => {

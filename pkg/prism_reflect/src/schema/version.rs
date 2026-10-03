@@ -14,10 +14,10 @@
 
 use crate::schema::migration::{MigrateError, Migration};
 use crate::type_info::TypeInfo;
-use std::collections::BTreeMap;
+use alloc::collections::BTreeMap;
 use std::collections::HashMap;
-use std::string::String;
-use std::vec::Vec;
+use alloc::string::String;
+use alloc::vec::Vec;
 
 /// A schema version number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

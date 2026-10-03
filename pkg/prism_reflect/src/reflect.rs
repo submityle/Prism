@@ -4,7 +4,7 @@ use crate::apply::ApplyError;
 use crate::kinds::{Array, Enum, List, Map, Set};
 use crate::type_info::TypeInfo;
 use core::any::Any;
-use std::boxed::Box;
+use alloc::boxed::Box;
 
 /// The universal reflection trait: a bridge from Rust's static type world to
 /// the dynamic data-driven world (editor/scripting/serialization/network).
