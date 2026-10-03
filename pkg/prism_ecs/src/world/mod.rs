@@ -26,6 +26,7 @@ use crate::component_hooks::{ComponentHook, HookContext};
 use crate::entity::{Entities, Entity, EntityLocation};
 use crate::query::{QueryData, QueryFilter, QueryState, ReadOnlyQueryData};
 use crate::storage::SparseSets;
+use crate::relation::Relations;
 use crate::resource::{Resource, Resources};
 
 /// The authoritative container of all ECS state.
@@ -37,6 +38,10 @@ pub struct World {
     /// by [`Entity`], never fragmenting the archetype graph.
     sparse_sets: SparseSets,
     resources: Resources,
+    /// The flecs-style relation registry (design §11): relation-kind metadata
+    /// plus the non-fragmenting bidirectional edge index. High-cardinality
+    /// relations route here instead of fragmenting the archetype graph.
+    relations: Relations,
     /// Monotonically increasing change counter (design §10). Stamped onto
     /// component writes and compared against each system's `last_run` to drive
     /// `Added`/`Changed` detection.
@@ -65,6 +70,7 @@ impl World {
             archetypes: Archetypes::new(),
             sparse_sets: SparseSets::new(),
             resources: Resources::new(),
+            relations: Relations::new(),
             change_tick: Tick::new(1),
             last_change_tick: Tick::ZERO,
         }
@@ -968,8 +974,41 @@ impl World {
     /// Despawn `entity`, dropping all of its components. Returns `false` if the
     /// entity was already dead.
     pub fn despawn(&mut self, entity: Entity) -> bool {
-        let Some(loc) = self.entities.location(entity) else {
+        if self.entities.location(entity).is_none() {
             return false;
+        }
+
+        // Relation cascade (design §11 / §23.2): before tearing `entity` down,
+        // plan how its despawn propagates over the relation graph, then unlink
+        // every planned edge and recursively despawn holders governed by
+        // `CleanupPolicy::Delete`. Planning is side-effect-free; `World` applies
+        // the plan here. The index-empty fast path keeps relation-free worlds
+        // allocation-free.
+        if !self.relations.index().is_empty() {
+            let plan = self.relations.plan_cascade(entity);
+            debug_assert!(
+                plan.panics.is_empty(),
+                "despawn of a relation target violated a `CleanupPolicy::Panic` policy",
+            );
+            for edge in &plan.removals {
+                self.relations
+                    .index_mut()
+                    .remove(edge.relation, edge.source, edge.target);
+            }
+            // Edges are already unlinked, so each recursive despawn re-plans to
+            // an empty cascade and cannot loop back into `entity`.
+            for holder in plan.deletions {
+                self.despawn(holder);
+            }
+            // Drop any surviving index entries for `entity` (e.g. `Panic` edges
+            // left intact above) so no dead entity lingers in the index.
+            self.relations.index_mut().remove_all_for_entity(entity);
+        }
+
+        // Re-fetch the location: a recursive cascade despawn above may have
+        // swap-moved `entity`'s row within its archetype table.
+        let Some(loc) = self.entities.location(entity) else {
+            return true;
         };
 
         // Lifecycle hooks (design §12): fire on_replace then on_remove for every
@@ -1179,6 +1218,8 @@ impl World {
         }
     }
 }
+
+mod relations;
 
 #[cfg(test)]
 mod tests {
@@ -1650,9 +1691,9 @@ mod tests {
     struct RqHookLog {
         health_adds: u32,
     }
-    impl crate::resource::Resource for RqHookLog {}
+    impl Resource for RqHookLog {}
 
-    fn rq_health_on_add(ctx: crate::component_hooks::HookContext<'_>) {
+    fn rq_health_on_add(ctx: HookContext<'_>) {
         ctx.world.resource_mut::<RqHookLog>().health_adds += 1;
     }
 
