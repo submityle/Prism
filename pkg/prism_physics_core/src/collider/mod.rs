@@ -239,6 +239,11 @@ pub use tet_fem_corotational_assembly::{
 };
 pub mod tet_fem_block_jacobi;
 pub use tet_fem_block_jacobi::solve_implicit_system_block_jacobi;
+pub mod tet_fem_integrator;
+pub use tet_fem_integrator::{
+    step_implicit_corotational, FemPreconditioner, FemStepResult, ImplicitStepParams,
+    RayleighDamping,
+};
 
 /// A handle into a [`ShapeRegistry`].
 ///
