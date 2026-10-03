@@ -36,11 +36,21 @@ mod bind_groups;
 // composite) by the plugin slice that follows.
 mod dispatch;
 
+// Compute pipeline, group-0 layout, per-view bind group and the `Core3d` node
+// recording the energy-conserving composite that folds the reuse pass's
+// resolved specular back over the shaded scene (UE-style option C). Owns the
+// specular substitution whenever the subsystem is enabled; the SSR composite
+// early-returns under the same gate so `env_specular` is swapped exactly once.
+mod composite;
+
 // Plugin-facing wiring surface for the reuse pass. Re-exported `pub(crate)`
 // so `shading::plugin` can register the `RenderStartup` pipeline init, the
 // `PrepareResources`/`PrepareBindGroups` systems and the `Core3d` dispatch
 // node, mirroring the `ssgi` module's export surface.
 pub(crate) use bind_groups::prepare_spec_gi_reuse_bind_groups;
+pub(crate) use composite::{
+    init_spec_gi_composite_pipeline, prepare_spec_gi_composite_bind_groups, spec_gi_composite_pass,
+};
 pub(crate) use dispatch::spec_gi_reuse_pass;
 pub(crate) use pipeline::init_spec_gi_reuse_pipeline;
 pub(crate) use resources::prepare_spec_gi_reuse_resources;
@@ -56,3 +66,6 @@ mod brdf_mis_tests;
 
 #[cfg(test)]
 mod reuse_tests;
+
+#[cfg(test)]
+mod composite_tests;

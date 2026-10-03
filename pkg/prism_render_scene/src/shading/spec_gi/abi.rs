@@ -132,6 +132,38 @@ impl GpuSpecGiReuseConfig {
     }
 }
 
+/// Immediate (push-constant) block consumed by `shaders/spec_gi_composite.wesl`
+/// (one per composite dispatch).
+///
+/// Carries only the framebuffer extent used to bounds-check each 8x8-tiled
+/// invocation; the fold maths read everything else from the bound textures. The
+/// two trailing pad words satisfy the 16-byte immediate alignment, mirroring
+/// the SSR composite's `GpuSsrCompositeParams`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq)]
+pub(crate) struct GpuSpecGiCompositeParams {
+    /// Framebuffer width in texels.
+    pub width: u32,
+    /// Framebuffer height in texels.
+    pub height: u32,
+    /// Padding to satisfy the 16-byte immediate alignment.
+    pub _pad0: u32,
+    /// Padding to satisfy the 16-byte immediate alignment.
+    pub _pad1: u32,
+}
+
+impl GpuSpecGiCompositeParams {
+    /// Builds the composite params from the framebuffer extent.
+    pub(crate) fn new(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            _pad0: 0,
+            _pad1: 0,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,5 +208,15 @@ mod tests {
         assert_eq!(cfg.view_from_clip, m.to_cols_array());
         assert_eq!((cfg.width, cfg.height), (1920, 1080));
         assert_eq!((cfg.temporal_enabled, cfg.spatial_enabled), (1, 0));
+    }
+
+    #[test]
+    fn gpu_spec_gi_composite_params_layout() {
+        // 16-byte immediate block: two extent words + two pad words.
+        assert_eq!(size_of::<GpuSpecGiCompositeParams>(), 16);
+        assert_eq!(align_of::<GpuSpecGiCompositeParams>(), 4);
+        let params = GpuSpecGiCompositeParams::new(1920, 1080);
+        assert_eq!((params.width, params.height), (1920, 1080));
+        assert_eq!((params._pad0, params._pad1), (0, 0));
     }
 }

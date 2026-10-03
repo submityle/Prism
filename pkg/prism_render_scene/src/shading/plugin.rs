@@ -148,8 +148,9 @@ use super::{
         prepare_sky_transmittance_bind_group, sky_transmittance_lut_pass,
     },
     spec_gi::{
-        init_spec_gi_reuse_pipeline, prepare_spec_gi_reuse_bind_groups,
-        prepare_spec_gi_reuse_resources, spec_gi_reuse_pass,
+        init_spec_gi_composite_pipeline, init_spec_gi_reuse_pipeline,
+        prepare_spec_gi_composite_bind_groups, prepare_spec_gi_reuse_bind_groups,
+        prepare_spec_gi_reuse_resources, spec_gi_composite_pass, spec_gi_reuse_pass,
     },
     ssgi::{
         init_ssgi_composite_pipeline, init_ssgi_denoise_pipeline, init_ssgi_trace_pipeline,
@@ -264,6 +265,7 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/ssr_composite.wesl");
         embedded_asset!(app, "../shaders/spec_gi_reservoir.wesl");
         embedded_asset!(app, "../shaders/spec_gi_reuse.wesl");
+        embedded_asset!(app, "../shaders/spec_gi_composite.wesl");
         embedded_asset!(app, "../shaders/ssgi.wesl");
         embedded_asset!(app, "../shaders/sky_multiscatter_lut.wesl");
         embedded_asset!(app, "../shaders/sky_transmittance_lut.wesl");
@@ -519,7 +521,10 @@ impl Plugin for PrismShadingPlugin {
             // tuples stay within Bevy's 20-element limit; the dispatch it
             // feeds is gated on `enable_spec_gi` + the SSR/visibility
             // prerequisites in resource prep.
-            .add_systems(RenderStartup, init_spec_gi_reuse_pipeline)
+            .add_systems(
+                RenderStartup,
+                (init_spec_gi_reuse_pipeline, init_spec_gi_composite_pipeline),
+            )
             // Volumetric-cloud domain + per-view resource and bind-group
             // preparation. Self-contained (its own resident textures + view
             // cache, gated on the opt-in settings), so it lives in its own
@@ -698,6 +703,14 @@ impl Plugin for PrismShadingPlugin {
                             .after(prepare_ssr_textures)
                             .in_set(RenderSystems::PrepareResources),
                         prepare_spec_gi_reuse_bind_groups
+                            .after(prepare_spec_gi_reuse_resources)
+                            .in_set(RenderSystems::PrepareBindGroups),
+                        // The energy-conserving composite's per-view group binds
+                        // the resolved specular target (after the reuse flip)
+                        // plus the colour-pyramid base copy and IBL specular; it
+                        // folds the glossy reflection into scene_color in the
+                        // Core3d node below under `enable_spec_gi`.
+                        prepare_spec_gi_composite_bind_groups
                             .after(prepare_spec_gi_reuse_resources)
                             .in_set(RenderSystems::PrepareBindGroups),
                     ),
@@ -1140,6 +1153,22 @@ impl Plugin for PrismShadingPlugin {
                         .after(ssr_trace_pass)
                         .after(ssr_repack_pass)
                         .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                    // Glossy-specular ReSTIR composite (UE option C): folds
+                    // the reuse pass's resolved specular back over scene_color,
+                    // substituting the screen-space glossy reflection for the
+                    // IBL specular under reservoir confidence (falling back to
+                    // IBL on a miss). Owns the specular slot whenever
+                    // `enable_spec_gi` holds; `ssr_composite_pass` early-returns
+                    // under the same gate so `env_specular` is swapped exactly
+                    // once. Reads the colour-pyramid base copy (built by
+                    // `ssr_color_mips_pass`) and the resolved reuse target, so
+                    // it orders after both; the SSR composite ordering keeps the
+                    // two mutually-exclusive scene_color writers serialised.
+                    spec_gi_composite_pass
+                        .after(spec_gi_reuse_pass)
+                        .after(ssr_color_mips_pass)
+                        .after(ssr_composite_pass)
+                        .before(bevy_core_pipeline::Core3dSystems::MainPass),
                     ssgi_trace_pass
                         .after(ssr_color_mips_pass)
                         .after(ssr_hzb_pass)
@@ -1150,6 +1179,7 @@ impl Plugin for PrismShadingPlugin {
                         .before(bevy_core_pipeline::Core3dSystems::MainPass),
                     ssgi_composite_pass
                         .after(ssr_composite_pass)
+                        .after(spec_gi_composite_pass)
                         .after(ssgi_trace_pass)
                         .after(ssgi_denoise_pass)
                         .before(bevy_core_pipeline::Core3dSystems::MainPass),
@@ -1198,6 +1228,7 @@ impl Plugin for PrismShadingPlugin {
                         .before(bevy_core_pipeline::Core3dSystems::MainPass),
                     taa_resolve_pass
                         .after(ssr_composite_pass)
+                        .after(spec_gi_composite_pass)
                         .after(ssgi_composite_pass)
                         .after(world_space_gi_composite_pass)
                         .after(ddgi_composite_pass)

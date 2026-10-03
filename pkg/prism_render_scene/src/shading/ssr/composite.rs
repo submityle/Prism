@@ -173,6 +173,14 @@ pub(crate) fn ssr_composite_pass(
     if !settings.enable_ssr {
         return;
     }
+    // When the glossy-specular ReSTIR subsystem is enabled it owns the specular
+    // substitution (`spec_gi_composite_pass` folds its resolved reflection into
+    // scene_color under the same energy-conserving `env_specular` subtract).
+    // Yield the specular slot so the IBL specular is replaced exactly once and
+    // `env_specular` is never double-subtracted.
+    if settings.enable_spec_gi {
+        return;
+    }
     let (textures, group) = view.into_inner();
 
     let Some(composite) = cache.get_compute_pipeline(pipeline.composite) else {
