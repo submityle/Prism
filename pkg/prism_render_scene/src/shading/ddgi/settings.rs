@@ -35,6 +35,19 @@ pub(crate) const DEFAULT_DEPTH_INTERIOR: u32 = 16;
 /// (RTXGI's slow, stable `0.97` blend).
 pub(crate) const DEFAULT_HYSTERESIS: f32 = 0.97;
 
+/// Default back-face hit fraction above which the probe-update pass relocates a
+/// probe out of geometry and deactivates it (RTXGI's conservative quarter).
+pub(crate) const DEFAULT_BACKFACE_THRESHOLD: f32 = 0.25;
+
+/// Default minimum world-space stand-off kept between a relocated probe and the
+/// closest front face (a fraction of the one-metre default cell).
+pub(crate) const DEFAULT_MIN_FRONTFACE_DISTANCE: f32 = 0.3;
+
+/// Default front-face distance within which a probe counts as active (just past
+/// the diagonal of the one-metre default cell, so a probe adjacent to any
+/// surface contributes to interpolation).
+pub(crate) const DEFAULT_ACTIVITY_DISTANCE: f32 = 2.0;
+
 /// Global DDGI settings consumed by the irradiance-volume sample pass.
 ///
 /// Disabled by default (the subsystem is opt-in; when `false` the pass
@@ -64,6 +77,15 @@ pub(crate) struct PrismDdgiSettings {
     pub depth_sharpness: f32,
     /// Bounded probe relocation fraction (golden [`DEFAULT_RELOCATION_LIMIT`]).
     pub relocation_limit: f32,
+    /// Back-face hit fraction above which the probe-update pass relocates the
+    /// probe out of geometry and deactivates it (RTXGI relocation threshold).
+    pub backface_threshold: f32,
+    /// Minimum world-space stand-off the probe-update pass keeps between a
+    /// relocated probe and the closest front face (reduces self-occlusion).
+    pub min_frontface_distance: f32,
+    /// Front-face distance within which the probe-update pass classifies a probe
+    /// as active (typically a small multiple of the cell diagonal).
+    pub activity_distance: f32,
     /// Artistic gain applied to the resolved GI irradiance. `1` reproduces the
     /// golden magnitude exactly.
     pub intensity: f32,
@@ -97,6 +119,13 @@ impl Default for PrismDdgiSettings {
             hysteresis: DEFAULT_HYSTERESIS,
             depth_sharpness: DEFAULT_DEPTH_SHARPNESS,
             relocation_limit: DEFAULT_RELOCATION_LIMIT,
+            // RTXGI relocation / classification defaults: a quarter of the
+            // sampled rays hitting back faces relocates the probe out of
+            // geometry; the stand-off and activity distances are a fraction and
+            // a small multiple of the one-metre default cell respectively.
+            backface_threshold: DEFAULT_BACKFACE_THRESHOLD,
+            min_frontface_distance: DEFAULT_MIN_FRONTFACE_DISTANCE,
+            activity_distance: DEFAULT_ACTIVITY_DISTANCE,
             intensity: 1.0,
             // Anchor at the world origin; a later block re-centres on the
             // camera. A 16 x 8 x 16 lattice at one-metre spacing is a sane,
@@ -165,6 +194,18 @@ mod tests {
         // Sane, non-degenerate octahedral resolutions.
         assert!(settings.irradiance_interior >= 1);
         assert!(settings.depth_interior >= settings.irradiance_interior);
+        // Relocation / classification tunables fold the module defaults and are
+        // self-consistent: a fractional back-face threshold, a non-negative
+        // stand-off below the activity reach.
+        assert_eq!(settings.backface_threshold, DEFAULT_BACKFACE_THRESHOLD);
+        assert_eq!(
+            settings.min_frontface_distance,
+            DEFAULT_MIN_FRONTFACE_DISTANCE
+        );
+        assert_eq!(settings.activity_distance, DEFAULT_ACTIVITY_DISTANCE);
+        assert!(settings.backface_threshold > 0.0 && settings.backface_threshold < 1.0);
+        assert!(settings.min_frontface_distance >= 0.0);
+        assert!(settings.activity_distance >= settings.min_frontface_distance);
     }
 
     #[test]

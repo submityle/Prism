@@ -421,9 +421,21 @@ pub fn transition_state(prev: ProbeState, raw: ProbeState) -> ProbeState {
 fn sanitize_spacing(spacing: Vec3) -> Vec3 {
     const MIN: f32 = 1.0e-6;
     Vec3::new(
-        if spacing.x.is_finite() { spacing.x.abs().max(MIN) } else { MIN },
-        if spacing.y.is_finite() { spacing.y.abs().max(MIN) } else { MIN },
-        if spacing.z.is_finite() { spacing.z.abs().max(MIN) } else { MIN },
+        if spacing.x.is_finite() {
+            spacing.x.abs().max(MIN)
+        } else {
+            MIN
+        },
+        if spacing.y.is_finite() {
+            spacing.y.abs().max(MIN)
+        } else {
+            MIN
+        },
+        if spacing.z.is_finite() {
+            spacing.z.abs().max(MIN)
+        } else {
+            MIN
+        },
     )
 }
 
@@ -461,7 +473,10 @@ mod tests {
     #[test]
     fn probe_positions_follow_origin_and_spacing() {
         let g = grid();
-        assert_eq!(g.probe_base_position(IVec3::new(1, 2, 3)), Vec3::new(2.0, 4.0, 6.0));
+        assert_eq!(
+            g.probe_base_position(IVec3::new(1, 2, 3)),
+            Vec3::new(2.0, 4.0, 6.0)
+        );
         assert_eq!(
             g.probe_position(IVec3::new(1, 0, 0), Vec3::new(0.1, 0.0, 0.0)),
             Vec3::new(2.1, 0.0, 0.0)
@@ -501,7 +516,12 @@ mod tests {
 
     #[test]
     fn trilinear_weights_are_partition_of_unity() {
-        for frac in [Vec3::ZERO, Vec3::ONE, Vec3::splat(0.5), Vec3::new(0.2, 0.7, 0.9)] {
+        for frac in [
+            Vec3::ZERO,
+            Vec3::ONE,
+            Vec3::splat(0.5),
+            Vec3::new(0.2, 0.7, 0.9),
+        ] {
             let w = trilinear_weights(frac);
             let sum: f32 = w.iter().sum();
             assert!((sum - 1.0).abs() < 1e-6, "sum {sum} for {frac:?}");
@@ -560,7 +580,10 @@ mod tests {
         }; 8];
         let w = interpolation_weights(&corners, Vec3::splat(0.5), Vec3::splat(5.0), Vec3::Y, 0.0);
         for x in w {
-            assert!((x - 0.125).abs() < 1e-6, "expected uniform fallback, got {x}");
+            assert!(
+                (x - 0.125).abs() < 1e-6,
+                "expected uniform fallback, got {x}"
+            );
         }
     }
 
@@ -574,12 +597,18 @@ mod tests {
         stats.closest_backface_distance = 0.1;
         let off = relocate_offset(Vec3::ZERO, &stats, spacing, 0.5, 0.25, 0.45);
         assert!(off.x > 0.0, "should move along +X, got {off:?}");
-        assert!(off.x <= 2.0 * 0.45 + 1e-6, "offset exceeds cell limit: {off:?}");
+        assert!(
+            off.x <= 2.0 * 0.45 + 1e-6,
+            "offset exceeds cell limit: {off:?}"
+        );
 
         // Open space: offset relaxes toward zero.
         let open = ProbeRayStats::open();
         let relaxed = relocate_offset(Vec3::new(0.4, 0.0, 0.0), &open, spacing, 0.5, 0.25, 0.45);
-        assert!(relaxed.x < 0.4 && relaxed.x >= 0.0, "should relax, got {relaxed:?}");
+        assert!(
+            relaxed.x < 0.4 && relaxed.x >= 0.0,
+            "should relax, got {relaxed:?}"
+        );
     }
 
     #[test]
@@ -646,7 +675,11 @@ mod tests {
 
     #[test]
     fn sanitize_handles_degenerate_spacing() {
-        let g = ProbeGrid::new(Vec3::ZERO, Vec3::new(0.0, -2.0, f32::NAN), IVec3::new(0, 0, 0));
+        let g = ProbeGrid::new(
+            Vec3::ZERO,
+            Vec3::new(0.0, -2.0, f32::NAN),
+            IVec3::new(0, 0, 0),
+        );
         assert!(g.spacing.x > 0.0 && g.spacing.y > 0.0 && g.spacing.z > 0.0);
         assert_eq!(g.counts, IVec3::new(1, 1, 1));
         // world_to_cell never panics on a single-probe axis.

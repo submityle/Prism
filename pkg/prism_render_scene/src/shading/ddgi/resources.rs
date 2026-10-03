@@ -102,6 +102,16 @@ pub(crate) struct ViewDdgi {
     /// bound at group(0) binding 2 of `sample_main`. Re-uploaded whenever the
     /// configured lattice changes (static for the view's lifetime otherwise).
     volume_uniform: Buffer,
+    /// Per-probe irradiance temporal-blend history (`vec4<f32>` per interior
+    /// octahedral texel: `rgb` = irradiance, `a` reserved): `probe_count` x
+    /// `irradiance_interior^2` elements. Written and read by `probe_update_main`
+    /// as `storage, read_write`; survives across frames to drive hysteresis.
+    irradiance_history: Buffer,
+    /// Per-probe depth-moment temporal-blend history (`vec2<f32>` per interior
+    /// octahedral texel: `[mean, mean_sq]`): `probe_count` x
+    /// `depth_interior^2` elements. Written and read by `probe_update_main` as
+    /// `storage, read_write`; survives across frames to drive hysteresis.
+    depth_history: Buffer,
     /// Full-resolution diffuse GI irradiance export (`rgba16float`): `rgb` =
     /// irradiance, `a` = blend confidence. Written by `sample_main` and sampled
     /// by the composite; never copied over `scene_color`.
@@ -138,6 +148,16 @@ impl ViewDdgi {
     /// Uniform buffer carrying the [`GpuDdgiVolume`] lattice + field metadata.
     pub(crate) fn volume_uniform(&self) -> &Buffer {
         &self.volume_uniform
+    }
+
+    /// Per-probe irradiance temporal-blend history buffer.
+    pub(crate) fn irradiance_history(&self) -> &Buffer {
+        &self.irradiance_history
+    }
+
+    /// Per-probe depth-moment temporal-blend history buffer.
+    pub(crate) fn depth_history(&self) -> &Buffer {
+        &self.depth_history
     }
 
     /// Storage/texture view of the GI irradiance export written by `sample_main`.
@@ -261,6 +281,26 @@ pub(crate) fn prepare_ddgi_textures(
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
         });
 
+        // Per-probe temporal-blend histories, `storage, read_write` scratch the
+        // probe update reads last frame's accumulation from and writes this
+        // frame's blended result back into. One `vec4<f32>` per interior
+        // irradiance texel and one `vec2<f32>` per interior depth texel. COPY_DST
+        // so a zero-init clear can be scheduled on (re)allocation.
+        let irradiance_interior = settings.irradiance_interior as u64;
+        let depth_interior = settings.depth_interior as u64;
+        let irradiance_history = device.create_buffer(&BufferDescriptor {
+            label: Some("prism DDGI irradiance history"),
+            size: probe_count as u64 * irradiance_interior * irradiance_interior * 16,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let depth_history = device.create_buffer(&BufferDescriptor {
+            label: Some("prism DDGI depth history"),
+            size: probe_count as u64 * depth_interior * depth_interior * 8,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         // GI export: full-resolution wide HDR, written by `sample_main`
         // (storage) and sampled by the composite (texture).
         let gi_out = texture_cache.get(
@@ -299,6 +339,8 @@ pub(crate) fn prepare_ddgi_textures(
             depth_atlas,
             probe_meta,
             volume_uniform,
+            irradiance_history,
+            depth_history,
             gi_out,
             gi_base,
             size,

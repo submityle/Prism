@@ -422,7 +422,10 @@ mod tests {
 
     #[test]
     fn results_are_deterministic() {
-        let rays = [(Vec3::new(0.1, 0.2, 0.9), 4.0), (Vec3::new(-0.7, 0.3, 0.6), 2.0)];
+        let rays = [
+            (Vec3::new(0.1, 0.2, 0.9), 4.0),
+            (Vec3::new(-0.7, 0.3, 0.6), 2.0),
+        ];
         let build = || {
             let mut m = DdgiDepthOct::new(6);
             m.update(&rays, 0.3, 50.0, 100.0);

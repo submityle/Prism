@@ -26,6 +26,13 @@ use bytemuck::{Pod, Zeroable};
 /// shader bounds-checks every invocation.
 pub(crate) const DDGI_WORKGROUP_SIZE: u32 = 8;
 
+/// Workgroup size of the DDGI probe-update compute entry point.
+///
+/// Must match `@workgroup_size(64)` in `ddgi_probe_update.wesl`; the pass
+/// dispatches one workgroup per probe (`dispatch_workgroups(probe_count, 1, 1)`)
+/// and the 64 cooperative threads each trace one Fibonacci-sphere ray.
+pub(crate) const DDGI_PROBE_UPDATE_WORKGROUP_SIZE: u32 = 64;
+
 /// Uniform-buffer twin of the WESL `DdgiVolume` struct: the probe lattice plus
 /// the octahedral field metadata and the Majercik/RTXGI tunables.
 ///
@@ -154,6 +161,71 @@ impl GpuDdgiSampleParams {
     }
 }
 
+/// Immediate (push-constant) twin of the WESL `UpdateParams` struct consumed by
+/// `probe_update_main` in `ddgi_probe_update.wesl`.
+///
+/// Carries the two reconstruction transforms the probe-update ray march needs:
+/// `world_to_clip` projects a marched world-space ray point to the screen to
+/// sample the depth / colour / normal G-buffers, and `clip_to_world` lifts the
+/// recorded surface back to world space for the hit distance. The trailing
+/// scalars are the relocation / classification tunables plus the world-space
+/// ray-march length. Two leading `mat4x4` blocks give the required 16-byte
+/// alignment, so the layout is `64 + 64 + 8 * 4 = 160` bytes with no implicit
+/// padding (asserted by the tests).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable, PartialEq)]
+pub(crate) struct GpuDdgiUpdateParams {
+    /// World -> clip transform, column-major via [`Mat4::to_cols_array`]; leads
+    /// the block for its 16-byte alignment.
+    pub world_to_clip: [f32; 16],
+    /// Clip -> world transform, column-major via [`Mat4::to_cols_array`].
+    pub clip_to_world: [f32; 16],
+    /// Back-face fraction above which the probe relocates / deactivates.
+    pub backface_threshold: f32,
+    /// Minimum world-space stand-off distance kept from the closest front face.
+    pub min_frontface_distance: f32,
+    /// Front-face distance within which the probe counts as active.
+    pub activity_distance: f32,
+    /// Bounded per-axis relocation fraction of the cell spacing.
+    pub relocation_limit: f32,
+    /// World-space ray-march length (`spacing.length() * 2`).
+    pub max_ray_distance: f32,
+    /// Padding to the 16-byte immediate boundary.
+    pub _pad0: f32,
+    /// Padding to the 16-byte immediate boundary.
+    pub _pad1: f32,
+    /// Padding to the 16-byte immediate boundary.
+    pub _pad2: f32,
+}
+
+impl GpuDdgiUpdateParams {
+    /// Builds the immediate block from the two reconstruction transforms and
+    /// the relocation / classification / ray-march tunables.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        world_to_clip: Mat4,
+        clip_to_world: Mat4,
+        backface_threshold: f32,
+        min_frontface_distance: f32,
+        activity_distance: f32,
+        relocation_limit: f32,
+        max_ray_distance: f32,
+    ) -> Self {
+        Self {
+            world_to_clip: world_to_clip.to_cols_array(),
+            clip_to_world: clip_to_world.to_cols_array(),
+            backface_threshold,
+            min_frontface_distance,
+            activity_distance,
+            relocation_limit,
+            max_ray_distance,
+            _pad0: 0.0,
+            _pad1: 0.0,
+            _pad2: 0.0,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,5 +279,33 @@ mod tests {
         assert_eq!(params.screen_size, [1920.0, 1080.0]);
         assert_eq!(params.near, 0.1);
         assert_eq!(params.intensity, 1.0);
+    }
+
+    #[test]
+    fn update_params_is_the_160_byte_immediate_block() {
+        // mat4x4 (64) x2 + five scalars + three pads (32) = 160 bytes.
+        assert_eq!(size_of::<GpuDdgiUpdateParams>(), 160);
+        assert_eq!(align_of::<GpuDdgiUpdateParams>(), 4);
+    }
+
+    #[test]
+    fn probe_update_workgroup_constant_matches_the_shader() {
+        assert_eq!(DDGI_PROBE_UPDATE_WORKGROUP_SIZE, 64);
+    }
+
+    #[test]
+    fn update_params_round_trips_the_matrices_and_tunables() {
+        let params =
+            GpuDdgiUpdateParams::new(Mat4::IDENTITY, Mat4::IDENTITY, 0.25, 0.3, 2.0, 0.45, 4.0);
+        assert_eq!(params.world_to_clip, Mat4::IDENTITY.to_cols_array());
+        assert_eq!(params.clip_to_world, Mat4::IDENTITY.to_cols_array());
+        assert_eq!(params.backface_threshold, 0.25);
+        assert_eq!(params.min_frontface_distance, 0.3);
+        assert_eq!(params.activity_distance, 2.0);
+        assert_eq!(params.relocation_limit, 0.45);
+        assert_eq!(params.max_ray_distance, 4.0);
+        assert_eq!(params._pad0, 0.0);
+        assert_eq!(params._pad1, 0.0);
+        assert_eq!(params._pad2, 0.0);
     }
 }

@@ -50,8 +50,8 @@ use super::{
         prepare_shading_composite_pipelines, ShadingCompositePipeline,
     },
     ddgi::{
-        ddgi_sample_pass, init_ddgi_pipeline, prepare_ddgi_bind_groups, prepare_ddgi_textures,
-        PrismDdgiSettings,
+        ddgi_probe_update_pass, ddgi_sample_pass, init_ddgi_pipeline, prepare_ddgi_bind_groups,
+        prepare_ddgi_textures, PrismDdgiSettings,
     },
     dof::{
         dof_pass, init_dof_pipeline, prepare_dof_bind_groups, prepare_dof_textures,
@@ -264,6 +264,7 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/ssgi_denoise.wesl");
         embedded_asset!(app, "../shaders/ssgi_composite.wesl");
         embedded_asset!(app, "../shaders/ddgi_sample.wesl");
+        embedded_asset!(app, "../shaders/ddgi_probe_update.wesl");
         embedded_asset!(app, "../shaders/world_space_gi_probe_update.wesl");
         embedded_asset!(app, "../shaders/world_space_gi_resolve.wesl");
         embedded_asset!(app, "../shaders/world_space_gi_composite.wesl");
@@ -1121,6 +1122,13 @@ impl Plugin for PrismShadingPlugin {
                     // the energy-conserving composite folding it back over
                     // scene_color lands in a later DDGI block, so for now the
                     // export is produced after the world-space GI composite.
+                    // Probe-update populates the octahedral irradiance + depth
+                    // atlases this frame (one workgroup per probe, tracing the
+                    // screen-space G-buffer). It must run before the sample
+                    // pass reads those atlases.
+                    ddgi_probe_update_pass
+                        .after(world_space_gi_composite_pass)
+                        .before(ddgi_sample_pass),
                     ddgi_sample_pass
                         .after(world_space_gi_composite_pass)
                         .before(bevy_core_pipeline::Core3dSystems::MainPass),

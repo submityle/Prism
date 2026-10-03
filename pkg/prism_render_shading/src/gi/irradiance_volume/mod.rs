@@ -25,10 +25,12 @@
 //! * All helpers are deterministic CPU golden pure functions (no RNG/IO/GPU/unsafe).
 
 pub mod ddgi_probe;
+pub mod rays;
 pub mod relocation;
 pub mod visibility;
 
 pub use ddgi_probe::{cosine_weighted_irradiance, IrradianceOct};
+pub use rays::{fibonacci_sphere_dir, probe_ray_stats, ProbeRay, RayHit};
 pub use relocation::{
     classify_probe, interpolation_weights, normal_backface_weight, relocate_offset,
     transition_state, trilinear_weights, ProbeGrid, ProbeRayStats, ProbeSample, ProbeState,

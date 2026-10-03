@@ -19,7 +19,8 @@ use bevy_ecs::prelude::*;
 use bevy_material::{
     bind_group_layout_entries::{
         binding_types::{
-            storage_buffer_read_only_sized, texture_2d, texture_storage_2d, uniform_buffer_sized,
+            storage_buffer_read_only_sized, storage_buffer_sized, texture_2d, texture_storage_2d,
+            uniform_buffer_sized,
         },
         BindGroupLayoutEntries,
     },
@@ -35,7 +36,8 @@ use bevy_render::{
 use bevy_shader::Shader;
 
 use super::super::resources::SCENE_COLOR_FORMAT;
-use super::abi::GpuDdgiSampleParams;
+use super::abi::{GpuDdgiSampleParams, GpuDdgiUpdateParams};
+use super::resources::DDGI_ATLAS_FORMAT;
 
 /// The DDGI sample compute pipeline and its owned group-0 layout.
 #[derive(Resource)]
@@ -46,6 +48,14 @@ pub(crate) struct DdgiPipeline {
     /// the probe-meta storage buffer (read-only), the two octahedral atlases
     /// and the GI export storage write.
     sample_layout: BindGroupLayout,
+    /// `probe_update_main` entry: one workgroup per probe, traces 64 rays,
+    /// temporally blends irradiance + depth moments, relocates / classifies the
+    /// probe and writes the two octahedral atlases.
+    probe_update: CachedComputePipelineId,
+    /// group 0 for `probe_update_main`: depth / normal / scene-colour reads, the
+    /// lattice uniform, the probe-meta + irradiance / depth history storage
+    /// buffers (read_write) and the two octahedral atlas storage writes.
+    probe_update_layout: BindGroupLayout,
 }
 
 impl DdgiPipeline {
@@ -57,6 +67,16 @@ impl DdgiPipeline {
     /// group-0 layout for the `sample_main` dispatch.
     pub(crate) fn sample_layout(&self) -> &BindGroupLayout {
         &self.sample_layout
+    }
+
+    /// The `probe_update_main` compute pipeline id.
+    pub(crate) fn probe_update(&self) -> CachedComputePipelineId {
+        self.probe_update
+    }
+
+    /// group-0 layout for the `probe_update_main` dispatch.
+    pub(crate) fn probe_update_layout(&self) -> &BindGroupLayout {
+        &self.probe_update_layout
     }
 }
 
@@ -76,6 +96,29 @@ fn sample_layout_entries() -> BindGroupLayoutEntries<7> {
             texture_2d(TextureSampleType::Float { filterable: false }),
             texture_2d(TextureSampleType::Float { filterable: false }),
             texture_storage_2d(SCENE_COLOR_FORMAT, StorageTextureAccess::WriteOnly),
+        ),
+    )
+}
+
+/// `probe_update_main` group-0 layout: reverse-Z scene depth (0), packed
+/// `normal_roughness` (1) and the pre-exposed scene colour (2) — all
+/// non-filterable float, `textureLoad`ed — the lattice + field metadata uniform
+/// (3), the [`ProbeMeta`] (4) + irradiance history (5) + depth history (6)
+/// `read_write` storage buffers, and the write-only `rgba16float` octahedral
+/// irradiance (7) + depth / visibility (8) atlases.
+fn probe_update_layout_entries() -> BindGroupLayoutEntries<9> {
+    BindGroupLayoutEntries::sequential(
+        ShaderStages::COMPUTE,
+        (
+            texture_2d(TextureSampleType::Float { filterable: false }),
+            texture_2d(TextureSampleType::Float { filterable: false }),
+            texture_2d(TextureSampleType::Float { filterable: false }),
+            uniform_buffer_sized(false, None),
+            storage_buffer_sized(false, None),
+            storage_buffer_sized(false, None),
+            storage_buffer_sized(false, None),
+            texture_storage_2d(DDGI_ATLAS_FORMAT, StorageTextureAccess::WriteOnly),
+            texture_storage_2d(DDGI_ATLAS_FORMAT, StorageTextureAccess::WriteOnly),
         ),
     )
 }
@@ -103,8 +146,28 @@ pub(crate) fn init_ddgi_pipeline(
         ..Default::default()
     });
 
+    let probe_update_entries = probe_update_layout_entries();
+    let probe_update_descriptor =
+        BindGroupLayoutDescriptor::new("prism DDGI probe update", &probe_update_entries);
+    let probe_update_layout =
+        device.create_bind_group_layout("prism DDGI probe update", &probe_update_entries);
+
+    let probe_update_shader: Handle<Shader> =
+        load_embedded_asset!(asset_server.as_ref(), "../shaders/ddgi_probe_update.wesl");
+
+    let probe_update = cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        label: Some("prism DDGI probe update".into()),
+        layout: vec![probe_update_descriptor],
+        immediate_size: size_of::<GpuDdgiUpdateParams>() as u32,
+        shader: probe_update_shader,
+        entry_point: Some("probe_update_main".into()),
+        ..Default::default()
+    });
+
     commands.insert_resource(DdgiPipeline {
         sample,
         sample_layout,
+        probe_update,
+        probe_update_layout,
     });
 }

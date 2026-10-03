@@ -203,11 +203,8 @@ impl IrradianceOct {
                 let idx = self.index(ix + 1, iy + 1);
                 let prev = self.texels[idx];
                 let blended = fresh + (prev - fresh) * hysteresis;
-                self.texels[idx] = Vec3::new(
-                    blended.x.max(0.0),
-                    blended.y.max(0.0),
-                    blended.z.max(0.0),
-                );
+                self.texels[idx] =
+                    Vec3::new(blended.x.max(0.0), blended.y.max(0.0), blended.z.max(0.0));
             }
         }
         self.copy_border();
@@ -231,7 +228,7 @@ impl IrradianceOct {
     pub fn copy_border(&mut self) {
         let n = self.interior;
         let last = self.padded - 1; // == n + 1
-        // Edges (interior run i in 1..=n, mirrored to n + 1 - i).
+                                    // Edges (interior run i in 1..=n, mirrored to n + 1 - i).
         for i in 1..=n {
             let m = n + 1 - i;
             // Top / bottom rows mirror along x.
@@ -328,9 +325,18 @@ mod tests {
         }
         let mut field = IrradianceOct::new(6);
         field.update(&rays, 0.0);
-        for normal in [Vec3::X, Vec3::Y, Vec3::Z, Vec3::NEG_X, Vec3::new(0.3, -0.5, 0.8)] {
+        for normal in [
+            Vec3::X,
+            Vec3::Y,
+            Vec3::Z,
+            Vec3::NEG_X,
+            Vec3::new(0.3, -0.5, 0.8),
+        ] {
             let e = field.sample(normal);
-            assert!((e - Vec3::new(0.4, 0.6, 0.8)).length() < 2e-2, "e {e:?} for {normal:?}");
+            assert!(
+                (e - Vec3::new(0.4, 0.6, 0.8)).length() < 2e-2,
+                "e {e:?} for {normal:?}"
+            );
         }
     }
 
@@ -341,7 +347,10 @@ mod tests {
         let rays = [(Vec3::Z, Vec3::splat(2.0))];
         let front = cosine_weighted_irradiance(Vec3::Z, &rays);
         let back = cosine_weighted_irradiance(Vec3::NEG_Z, &rays);
-        assert!((front - Vec3::splat(2.0)).length() < 1e-6, "front {front:?}");
+        assert!(
+            (front - Vec3::splat(2.0)).length() < 1e-6,
+            "front {front:?}"
+        );
         assert_eq!(back, Vec3::ZERO);
     }
 
@@ -357,16 +366,26 @@ mod tests {
 
     #[test]
     fn hysteresis_blends_toward_history() {
-        let rays_a = [(Vec3::Z, Vec3::splat(1.0)), (Vec3::NEG_Z, Vec3::splat(1.0)),
-                      (Vec3::X, Vec3::splat(1.0)), (Vec3::NEG_X, Vec3::splat(1.0)),
-                      (Vec3::Y, Vec3::splat(1.0)), (Vec3::NEG_Y, Vec3::splat(1.0))];
+        let rays_a = [
+            (Vec3::Z, Vec3::splat(1.0)),
+            (Vec3::NEG_Z, Vec3::splat(1.0)),
+            (Vec3::X, Vec3::splat(1.0)),
+            (Vec3::NEG_X, Vec3::splat(1.0)),
+            (Vec3::Y, Vec3::splat(1.0)),
+            (Vec3::NEG_Y, Vec3::splat(1.0)),
+        ];
         let mut field = IrradianceOct::new(4);
         field.update(&rays_a, 0.0); // establish history ~ 1.0
         let before = field.sample(Vec3::Z);
         // New brighter batch with high hysteresis moves only a little.
-        let rays_b = [(Vec3::Z, Vec3::splat(5.0)), (Vec3::NEG_Z, Vec3::splat(5.0)),
-                      (Vec3::X, Vec3::splat(5.0)), (Vec3::NEG_X, Vec3::splat(5.0)),
-                      (Vec3::Y, Vec3::splat(5.0)), (Vec3::NEG_Y, Vec3::splat(5.0))];
+        let rays_b = [
+            (Vec3::Z, Vec3::splat(5.0)),
+            (Vec3::NEG_Z, Vec3::splat(5.0)),
+            (Vec3::X, Vec3::splat(5.0)),
+            (Vec3::NEG_X, Vec3::splat(5.0)),
+            (Vec3::Y, Vec3::splat(5.0)),
+            (Vec3::NEG_Y, Vec3::splat(5.0)),
+        ];
         field.update(&rays_b, 0.9);
         let after = field.sample(Vec3::Z);
         assert!(after.x > before.x, "{} !> {}", after.x, before.x);
@@ -404,9 +423,17 @@ mod tests {
     #[test]
     fn uniform_fill_samples_back_to_fill_value() {
         let field = IrradianceOct::filled(8, Vec3::new(0.2, 0.5, 0.9));
-        for normal in [Vec3::X, Vec3::NEG_Y, Vec3::new(0.5, 0.5, -0.7), Vec3::new(-0.9, 0.1, 0.3)] {
+        for normal in [
+            Vec3::X,
+            Vec3::NEG_Y,
+            Vec3::new(0.5, 0.5, -0.7),
+            Vec3::new(-0.9, 0.1, 0.3),
+        ] {
             let e = field.sample(normal);
-            assert!((e - Vec3::new(0.2, 0.5, 0.9)).length() < 1e-5, "e {e:?} for {normal:?}");
+            assert!(
+                (e - Vec3::new(0.2, 0.5, 0.9)).length() < 1e-5,
+                "e {e:?} for {normal:?}"
+            );
         }
     }
 
@@ -428,8 +455,10 @@ mod tests {
 
     #[test]
     fn results_are_deterministic() {
-        let rays = [(Vec3::new(0.1, 0.2, 0.9), Vec3::splat(1.0)),
-                    (Vec3::new(-0.7, 0.3, 0.6), Vec3::new(0.5, 0.2, 0.1))];
+        let rays = [
+            (Vec3::new(0.1, 0.2, 0.9), Vec3::splat(1.0)),
+            (Vec3::new(-0.7, 0.3, 0.6), Vec3::new(0.5, 0.2, 0.1)),
+        ];
         let build = || {
             let mut f = IrradianceOct::new(6);
             f.update(&rays, 0.3);

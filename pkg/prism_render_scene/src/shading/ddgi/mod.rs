@@ -46,9 +46,12 @@ mod pipeline;
 mod resources;
 mod settings;
 
-pub(crate) use abi::{GpuDdgiSampleParams, GpuDdgiVolume, DDGI_WORKGROUP_SIZE};
+pub(crate) use abi::{
+    GpuDdgiSampleParams, GpuDdgiUpdateParams, GpuDdgiVolume, DDGI_PROBE_UPDATE_WORKGROUP_SIZE,
+    DDGI_WORKGROUP_SIZE,
+};
 pub(crate) use bind_groups::prepare_ddgi_bind_groups;
-pub(crate) use dispatch::ddgi_sample_pass;
+pub(crate) use dispatch::{ddgi_probe_update_pass, ddgi_sample_pass};
 pub(crate) use pipeline::init_ddgi_pipeline;
 pub(crate) use resources::{prepare_ddgi_textures, ViewDdgi};
 pub(crate) use settings::PrismDdgiSettings;

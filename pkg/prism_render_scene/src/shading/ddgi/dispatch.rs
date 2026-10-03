@@ -18,7 +18,7 @@ use bevy_render::{
     view::ExtractedView,
 };
 
-use super::abi::{GpuDdgiSampleParams, DDGI_WORKGROUP_SIZE};
+use super::abi::{GpuDdgiSampleParams, GpuDdgiUpdateParams, DDGI_WORKGROUP_SIZE};
 use super::bind_groups::ViewDdgiBindGroups;
 use super::pipeline::DdgiPipeline;
 use super::resources::ViewDdgi;
@@ -83,4 +83,66 @@ pub(crate) fn ddgi_sample_pass(
     pass.set_bind_group(0, groups.sample_group(), &[]);
     pass.set_immediates(0, bytemuck::bytes_of(&params));
     pass.dispatch_workgroups(groups_x, groups_y, 1);
+}
+
+/// `Core3d` scheduling system recording the `probe_update_main` dispatch for
+/// every view whose DDGI resources and bind group are resident.
+///
+/// One workgroup per probe (64 cooperative threads): trace 64 rays against the
+/// screen-space G-buffer, temporally blend the octahedral irradiance + depth
+/// moments against the per-probe history, relocate / classify the probe and
+/// write both octahedral atlases. Scheduled *before* `ddgi_sample_pass` so the
+/// atlases the sample pass reads are populated this frame.
+pub(crate) fn ddgi_probe_update_pass(
+    settings: Res<PrismDdgiSettings>,
+    view: ViewQuery<(&ViewDdgi, &ViewDdgiBindGroups, &ExtractedView)>,
+    pipeline: Res<DdgiPipeline>,
+    cache: Res<PipelineCache>,
+    mut ctx: RenderContext,
+) {
+    if !settings.enabled {
+        return;
+    }
+    let (gi, groups, extracted) = view.into_inner();
+
+    let probe_count = gi.probe_count();
+    if probe_count == 0 {
+        return;
+    }
+
+    let Some(update_pipeline) = cache.get_compute_pipeline(pipeline.probe_update()) else {
+        return;
+    };
+
+    // Reverse-Z clip<->world transforms. `clip_to_world` reconstructs the world
+    // position of a sampled G-buffer texel; `world_to_clip` projects a traced
+    // ray endpoint back to screen space for the depth / colour fetch.
+    let view_from_clip = extracted.clip_from_view.inverse();
+    let world_from_view = extracted.world_from_view.to_matrix();
+    let clip_to_world = world_from_view * view_from_clip;
+    let world_to_clip = clip_to_world.inverse();
+
+    // Rays march up to two probe spacings before giving up — far enough to find
+    // the neighbouring surface, short enough to stay in the screen-space cache.
+    let max_ray_distance = settings.spacing.length() * 2.0;
+
+    let params = GpuDdgiUpdateParams::new(
+        world_to_clip,
+        clip_to_world,
+        settings.backface_threshold,
+        settings.min_frontface_distance,
+        settings.activity_distance,
+        settings.relocation_limit,
+        max_ray_distance,
+    );
+
+    let encoder = ctx.command_encoder();
+    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+        label: Some("prism DDGI probe update"),
+        timestamp_writes: None,
+    });
+    pass.set_pipeline(update_pipeline);
+    pass.set_bind_group(0, groups.probe_update_group(), &[]);
+    pass.set_immediates(0, bytemuck::bytes_of(&params));
+    pass.dispatch_workgroups(probe_count, 1, 1);
 }
