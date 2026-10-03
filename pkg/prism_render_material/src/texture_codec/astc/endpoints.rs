@@ -15,6 +15,7 @@
 //! Decode is pure integer arithmetic -- no AI/ML path.
 
 use super::bise::{decode_ise, IseRange};
+use super::color_unquant::{color_quant_num_levels, unquant_color};
 use super::AstcError;
 
 /// A pair of unquantized 8-bit LDR endpoint colours, RGBA.
@@ -26,6 +27,11 @@ pub(super) struct Endpoints {
 
 /// `astcenc` quant_mode index for QUANT_256 (identity 8-bit colour unquant).
 const QUANT_256: i8 = 20;
+
+/// `astcenc` quant_mode index for QUANT_6, the smallest colour quant level
+/// the reference accepts for endpoints; anything below is an error block.
+/// The colour unquant table index is `level - QUANT_6`.
+const QUANT_6: i8 = 4;
 
 /// `quant_mode_table[integer_count / 2][color_bits]` from the reference
 /// decoder: given the number of colour integers (here fixed at six, so row
@@ -69,10 +75,9 @@ fn hadd_rgb(c: [u8; 4]) -> i32 {
 /// the 11-bit mode, 2-bit partition field and 4-bit CEM).
 ///
 /// # Errors
-/// Returns [`AstcError::UnsupportedIse`] when the derived colour quantisation
-/// level is not QUANT_256; the non-identity colour unquant tables land in a
-/// later milestone. Returns [`AstcError::Reserved`] when the colour budget is
-/// too small to hold the endpoints (reference "error block").
+/// Returns [`AstcError::Reserved`] when the derived colour quantisation level
+/// is below QUANT_6 -- either the colour budget is too small to hold the
+/// endpoints, or the reference decoder would flag an "error block".
 pub(super) fn decode_cem8_endpoints(
     block: &[u8; 16],
     weight_bits: u32,
@@ -87,21 +92,27 @@ pub(super) fn decode_cem8_endpoints(
 
     // CEM 8 -> six colour integers -> quant_mode_table row index 3.
     let level = *QUANT_MODE_TABLE_ROW3.get(color_bits).unwrap_or(&QUANT_256);
-    if level < 0 {
+    // The reference treats any colour quant level below QUANT_6 (including the
+    // `-1` "budget too small" sentinel) as an error block.
+    if level < QUANT_6 {
         return Err(AstcError::Reserved);
     }
-    if level != QUANT_256 {
-        // Only the identity (8-bit) colour unquant is implemented so far.
-        return Err(AstcError::UnsupportedIse);
+
+    // Classify the colour integer sequence from its level count, decode the six
+    // "scrambled packed quant" integers, then unquantize each to 8-bit through
+    // the per-level `color_scrambled_pquant_to_uquant` table (identity for
+    // QUANT_256). The table index is `level - QUANT_6`, matching the reference.
+    let level_index = (level - QUANT_6) as usize;
+    let num_levels = color_quant_num_levels(level_index);
+    let range = IseRange::from_num_levels(num_levels).ok_or(AstcError::Reserved)?;
+    let mut packed = [0u8; 6];
+    decode_ise(block, 17, range, 6, &mut packed)?;
+    let mut vals = [0u8; 6];
+    for (v, p) in vals.iter_mut().zip(packed.iter()) {
+        *v = unquant_color(level_index, *p);
     }
 
-    // QUANT_256 is the pure-binary 8-bit range: decode six raw bytes.
-    let range = IseRange::from_num_levels(256).ok_or(AstcError::Reserved)?;
-    let mut vals = [0u8; 6];
-    decode_ise(block, 17, range, 6, &mut vals)?;
-
     // CEM 8 LDR direct RGB: (v0,v2,v4) = endpoint0 RGB, (v1,v3,v5) = endpoint1.
-    // QUANT_256 unquant is the identity, so the values are already 8-bit.
     let mut e0 = [vals[0], vals[2], vals[4], 255];
     let mut e1 = [vals[1], vals[3], vals[5], 255];
 
@@ -160,14 +171,30 @@ mod tests {
     }
 
     #[test]
-    fn non_quant256_budget_is_unsupported_for_now() {
-        // weight_bits = 96 -> color_bits = 15 -> QUANT_mode_table_row3[15] = 3,
-        // a non-identity range not yet implemented.
+    fn quant192_budget_decodes_rather_than_rejecting() {
+        // weight_bits = 64 (mode 578) -> color_bits = 47 -> row3[47] = 19 =
+        // QUANT_192 (idx 15): a non-identity colour range now decodes.
+        assert_eq!(QUANT_MODE_TABLE_ROW3[47], 19);
+        // All-zero QUANT_192 (trit, 6 low bits) packs to 0 -> Q192[0] = 0.
+        let ep = decode_cem8_endpoints(&[0u8; 16], 64).expect("QUANT_192 decodes");
+        assert_eq!(ep.e0, [0, 0, 0, 255]);
+        assert_eq!(ep.e1, [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn budget_below_quant6_is_an_error_block() {
+        // weight_bits = 96 -> color_bits = 15 -> row3[15] = 3 = QUANT_5, which
+        // is below QUANT_6: the reference flags an error block.
         assert_eq!(QUANT_MODE_TABLE_ROW3[15], 3);
-        let block = [0u8; 16];
         assert_eq!(
-            decode_cem8_endpoints(&block, 96),
-            Err(AstcError::UnsupportedIse)
+            decode_cem8_endpoints(&[0u8; 16], 96),
+            Err(AstcError::Reserved)
+        );
+        // color_bits = 5 (weight_bits = 106) -> row3[5] = -1 sentinel.
+        assert_eq!(QUANT_MODE_TABLE_ROW3[5], -1);
+        assert_eq!(
+            decode_cem8_endpoints(&[0u8; 16], 106),
+            Err(AstcError::Reserved)
         );
     }
 
