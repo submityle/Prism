@@ -233,3 +233,226 @@ fn scope_propagates_child_panic() {
     }));
     assert!(result.is_err());
 }
+
+// ---------------------------------------------------------------------------
+// M2: fibers (feature `fibers`)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "fibers")]
+mod fiber_tests {
+    use super::*;
+    use crate::fiber::{run_fiber_switch, spawn_fiber};
+    use crate::job::Job;
+    use crate::scheduler::Shared;
+    use std::time::{Duration, Instant};
+
+    /// A fiber runs its job to completion on its own stack and switches a value
+    /// back out: driving `spawn_fiber` + `run_fiber_switch` directly on a bare
+    /// `Shared` must round-trip the write the job performs.
+    #[test]
+    fn fiber_switch_round_trips_value() {
+        let shared = Shared::new(1);
+        let out = Arc::new(AtomicUsize::new(0));
+        let o = Arc::clone(&out);
+        let job: Job = Box::new(move || {
+            o.store(42, Ordering::SeqCst);
+        });
+        let fiber = spawn_fiber(&shared, job);
+        run_fiber_switch(&shared, fiber);
+        assert_eq!(out.load(Ordering::SeqCst), 42);
+    }
+
+    /// Several independent fibers driven one after another on the same `Shared`
+    /// each run to completion and reuse pooled stacks without corruption.
+    #[test]
+    fn many_sequential_fibers_reuse_stacks() {
+        let shared = Shared::new(1);
+        let sum = Arc::new(AtomicUsize::new(0));
+        for i in 0..1000usize {
+            let s = Arc::clone(&sum);
+            let job: Job = Box::new(move || {
+                // Touch a chunk of stack to exercise real stack usage.
+                let buf = [i as u8; 1024];
+                s.fetch_add(buf[i % 1024] as usize, Ordering::Relaxed);
+            });
+            let fiber = spawn_fiber(&shared, job);
+            run_fiber_switch(&shared, fiber);
+        }
+        let expected: usize = (0..1000usize).map(|i| (i as u8) as usize).sum();
+        assert_eq!(sum.load(Ordering::Relaxed), expected);
+    }
+
+    /// A job that `wait`s on a counter completed by *another* job must suspend
+    /// its fiber (yielding the worker) and resume once the counter hits zero,
+    /// with no deadlock even with a single worker thread.
+    #[test]
+    fn waiting_job_yields_and_resumes() {
+        let pool = TaskPool::with_threads(1);
+        let order = Arc::new(AtomicUsize::new(0));
+        let outer = Counter::new();
+
+        let p = pool.clone();
+        let ord = Arc::clone(&order);
+        pool.spawn(&outer, move || {
+            let inner = Counter::new();
+            let ord2 = Arc::clone(&ord);
+            p.spawn(&inner, move || {
+                // Give the waiter a chance to actually suspend first.
+                std::thread::sleep(Duration::from_millis(10));
+                ord2.fetch_add(1, Ordering::SeqCst);
+            });
+            // Single worker: this must suspend so the inner job can run.
+            p.wait(&inner);
+            // Resumed only after inner completed.
+            assert_eq!(ord.load(Ordering::SeqCst), 1);
+            ord.fetch_add(10, Ordering::SeqCst);
+        });
+        pool.wait(&outer);
+        assert_eq!(order.load(Ordering::SeqCst), 11);
+    }
+
+    /// Nested waits: an outer fiber waits on a middle job that itself waits on
+    /// an inner job. Each level suspends; the chain must unwind without wedging.
+    #[test]
+    fn nested_waits_resume_in_order() {
+        let pool = TaskPool::with_threads(2);
+        let steps = Arc::new(AtomicUsize::new(0));
+        let top = Counter::new();
+
+        let p0 = pool.clone();
+        let s0 = Arc::clone(&steps);
+        pool.spawn(&top, move || {
+            let mid = Counter::new();
+            let p1 = p0.clone();
+            let s1 = Arc::clone(&s0);
+            p0.spawn(&mid, move || {
+                let inner = Counter::new();
+                let s2 = Arc::clone(&s1);
+                p1.spawn(&inner, move || {
+                    std::thread::sleep(Duration::from_millis(5));
+                    s2.fetch_add(1, Ordering::SeqCst);
+                });
+                p1.wait(&inner);
+                s1.fetch_add(1, Ordering::SeqCst);
+            });
+            p0.wait(&mid);
+            s0.fetch_add(1, Ordering::SeqCst);
+        });
+        pool.wait(&top);
+        assert_eq!(steps.load(Ordering::SeqCst), 3);
+    }
+
+    /// Stress: many jobs each suspend on their own sub-counter completed by a
+    /// spawned sub-job. With far fewer workers than concurrent waiters, this
+    /// only completes if suspension frees the worker to run other fibers.
+    #[test]
+    fn stress_many_suspending_fibers() {
+        let pool = TaskPool::with_threads(3);
+        let completed = Arc::new(AtomicUsize::new(0));
+        let outer = Counter::new();
+        const N: usize = 500;
+        for i in 0..N {
+            let p = pool.clone();
+            let done = Arc::clone(&completed);
+            pool.spawn(&outer, move || {
+                let inner = Counter::new();
+                p.spawn(&inner, move || {
+                    // tiny variable work
+                    let mut acc = 0u64;
+                    for k in 0..(i as u64 % 32) {
+                        acc = acc.wrapping_add(k);
+                    }
+                    std::hint::black_box(acc);
+                });
+                p.wait(&inner);
+                done.fetch_add(1, Ordering::SeqCst);
+            });
+        }
+        pool.wait(&outer);
+        assert_eq!(completed.load(Ordering::SeqCst), N);
+    }
+
+    /// Deep recursive fork-join on a single worker: every `join` on the worker's
+    /// fiber suspends, so correctness here proves the suspend/resume machinery
+    /// composes recursively without a per-level worker.
+    #[test]
+    fn single_worker_deep_recursion_via_fibers() {
+        let pool = TaskPool::with_threads(1);
+
+        fn fib(pool: &TaskPool, n: u64) -> u64 {
+            if n < 2 {
+                return n;
+            }
+            let p = pool.clone();
+            let (a, b) = pool.join(move || fib(&p, n - 1), {
+                let p2 = pool.clone();
+                move || fib(&p2, n - 2)
+            });
+            a + b
+        }
+
+        assert_eq!(fib(&pool, 13), 233);
+    }
+
+    /// Micro-measurement of a full spawn + switch-in + run + teardown cycle.
+    /// Not an ns assertion; just a generous ceiling that would only trip on a
+    /// gross regression (e.g. accidental blocking in the switch path).
+    #[test]
+    fn micro_measure_fiber_cycle_cost() {
+        let shared = Shared::new(1);
+        const ITERS: usize = 20_000;
+        let count = Arc::new(AtomicUsize::new(0));
+        let start = Instant::now();
+        for _ in 0..ITERS {
+            let c = Arc::clone(&count);
+            let job: Job = Box::new(move || {
+                c.fetch_add(1, Ordering::Relaxed);
+            });
+            let fiber = spawn_fiber(&shared, job);
+            run_fiber_switch(&shared, fiber);
+        }
+        let elapsed = start.elapsed();
+        assert_eq!(count.load(Ordering::Relaxed), ITERS);
+        // Generous: < 100 µs per full cycle on any sane machine.
+        let ceiling = Duration::from_micros(100) * ITERS as u32;
+        assert!(elapsed < ceiling, "fiber cycle unexpectedly slow: {elapsed:?}");
+    }
+
+    /// A panic inside a fiber job is captured across the asm boundary and
+    /// re-raised on the worker, matching the non-fiber propagation semantics.
+    #[test]
+    fn fiber_job_panic_propagates() {
+        let shared = Shared::new(1);
+        let job: Job = Box::new(|| panic!("boom in fiber"));
+        let fiber = spawn_fiber(&shared, job);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_fiber_switch(&shared, fiber);
+        }));
+        assert!(result.is_err());
+    }
+}
+
+/// With the `fibers` feature OFF, `wait` must keep using the help-on-wait
+/// fallback: deep nested fork-join still completes on few workers.
+#[cfg(not(feature = "fibers"))]
+#[test]
+fn help_on_wait_fallback_handles_nested_waits() {
+    let pool = TaskPool::with_threads(2);
+    let steps = Arc::new(AtomicUsize::new(0));
+    let top = Counter::new();
+
+    let p0 = pool.clone();
+    let s0 = Arc::clone(&steps);
+    pool.spawn(&top, move || {
+        let mid = Counter::new();
+        let s1 = Arc::clone(&s0);
+        p0.spawn(&mid, move || {
+            s1.fetch_add(1, Ordering::SeqCst);
+        });
+        // In the fallback this busy-helps rather than suspending.
+        p0.wait(&mid);
+        s0.fetch_add(1, Ordering::SeqCst);
+    });
+    pool.wait(&top);
+    assert_eq!(steps.load(Ordering::SeqCst), 2);
+}

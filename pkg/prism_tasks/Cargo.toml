@@ -3,7 +3,7 @@ name = "prism_tasks"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.96.0"
-description = "Prism parallel-runtime kernel: a work-stealing thread pool with per-worker deques, a global injector queue, and atomic Counter fork-join dependencies. M0 delivers the std thread pool (spawn/wait with help-on-wait, join, no deadlock) plus a single-threaded synchronous fallback; fibers, structured parallelism, async executor, NUMA, and determinism land in later milestones. Contains no Unreal Engine source or derived code and depends on no bevy_* crate."
+description = "Prism parallel-runtime kernel: a work-stealing thread pool with per-worker deques, a global injector queue, and atomic Counter fork-join dependencies. M0 delivers the std thread pool (spawn/wait with help-on-wait, join, no deadlock) plus a single-threaded synchronous fallback; M1 adds structured parallelism (scope/join/parallel_for/reduce/prefix_sum); M2 adds real stackful fibers (a reusable stack pool, arch-specific x86_64/aarch64 context switching, and a wait-set so a job that waits yields its worker instead of blocking it) behind the off-by-default `fibers` feature, falling back to help-on-wait when it is off. Async executor, NUMA, and determinism land in later milestones. Contains no Unreal Engine source or derived code and depends on no bevy_* crate."
 license = "MIT OR Apache-2.0"
 publish = false
 
@@ -16,6 +16,11 @@ std = []
 multi_thread = ["std"]
 # Force the synchronous single-threaded fallback: jobs run inline on spawn.
 single = ["std"]
+# M2: real stackful fibers. `wait` on a non-zero counter suspends the running
+# job's fiber (saving its register/stack context) and yields the OS worker to
+# other jobs/fibers instead of busy-helping. Off by default; implies the
+# multi-threaded pool. When off, `wait` keeps the help-on-wait fallback.
+fibers = ["multi_thread"]
 
 [lints]
 workspace = true

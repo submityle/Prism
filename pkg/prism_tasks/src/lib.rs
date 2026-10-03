@@ -28,11 +28,15 @@
 //! The crate contains no Unreal Engine source or derived code and depends on
 //! no `bevy_*` crate.
 
-// This crate is safe except for one audited lifetime erasure in `scope`; see
-// `scope.rs` for the soundness argument. The workspace denies `unsafe_code`, so
-// that single site carries a local `#[expect(unsafe_code, reason = ...)]`.
+// This crate is safe apart from two audited areas, each guarded by a local
+// `#[expect(unsafe_code, reason = ...)]` (the workspace denies `unsafe_code`):
+// the lifetime erasure in `scope` (see `scope.rs` for its soundness argument),
+// and the stackful-fiber context switching behind the off-by-default `fibers`
+// feature (see the `fiber` module, especially `fiber::context`).
 
 mod counter;
+#[cfg(feature = "fibers")]
+mod fiber;
 mod job;
 mod parallel;
 mod scheduler;
@@ -158,6 +162,17 @@ impl TaskPool {
         if self.single {
             debug_assert!(counter.is_complete());
             return;
+        }
+        // With fibers on, a job that waits suspends its fiber (yielding the OS
+        // worker) instead of busy-helping. Only the running fiber takes this
+        // path; external/top-level waiters fall through to help-on-wait, which
+        // in the fiber build drives fibers rather than running jobs inline.
+        #[cfg(feature = "fibers")]
+        {
+            if fiber::on_fiber() {
+                fiber::suspend_current(counter);
+                return;
+            }
         }
         self.shared.help_until(|| counter.is_complete());
     }
