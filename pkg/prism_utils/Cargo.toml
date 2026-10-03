@@ -10,8 +10,12 @@ publish = false
 [dependencies]
 
 [features]
-default = ["std"]
+default = ["std", "determinism"]
 std = []
+# Deterministic (insertion-ordered) containers. Like `std`, this is a declared
+# capability flag: the determinism tier is pure safe code with no extra cost
+# when unused, so it is always compiled (mirroring the crate's `std` feature).
+determinism = []
 
 [lints]
 workspace = true

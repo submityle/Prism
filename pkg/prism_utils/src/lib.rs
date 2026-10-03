@@ -37,7 +37,18 @@
 //! - [`ContentHash`](hash::ContentHash): a 128-bit content hash for
 //!   content-addressed deduplication.
 //!
-//! Later milestones add concurrent containers, determinism, and SIMD hashing.
+//! ## M4 scope (this build): determinism tier (done)
+//! - [`OrderedMap`](determinism::OrderedMap)/[`OrderedSet`](determinism::OrderedSet):
+//!   deterministic, insertion-ordered containers whose iteration order is
+//!   bit-identical across runs and platforms (seed-free, address-independent).
+//!   They back the four-way determinism contract and reuse the M3
+//!   [`StableHasher`](hash::StableHasher) for their lookup index. See the
+//!   [`determinism`] module for the full determinism contract, including why
+//!   the existing [`FrameAllocator`](alloc_::FrameAllocator)/[`Arena`](arena::Arena)
+//!   already provide deterministic allocation.
+//!
+//! Later milestones add concurrent containers (M5) and advanced layout/migration
+//! helpers (M6).
 //!
 //! The crate contains no Unreal Engine source or derived code and depends on
 //! no `bevy_*` crate.
@@ -54,6 +65,7 @@ pub mod alloc_;
 pub mod array_vec;
 pub mod arena;
 pub mod bit_set;
+pub mod determinism;
 pub mod hash;
 pub mod intern;
 pub mod prelude;
@@ -65,6 +77,7 @@ pub use alloc_::{AllocBox, AllocError, Allocator, FrameAllocator, Global, Pool};
 pub use array_vec::ArrayVec;
 pub use arena::{Arena, ArenaIndex};
 pub use bit_set::BitSet;
+pub use determinism::{OrderedMap, OrderedSet};
 pub use hash::{
     stable_hash, stable_hash_bytes, stable_hash_str, ContentHash, FxBuildHasher, FxHasher,
     HashMap, HashSet, StableBuildHasher, StableHasher,
