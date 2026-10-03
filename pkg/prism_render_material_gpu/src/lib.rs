@@ -252,6 +252,157 @@ impl BlockOracle {
         texels
     }
 
+    /// Decode one compressed `block` of the given `format` through the GPU for
+    /// an arbitrary `bx` x `by` texel footprint (e.g. ASTC 5x5..12x12),
+    /// returning the raw `vec4<f32>` texels row-major (`t = y*bx + x`).
+    ///
+    /// Unlike [`decode_raw`](Self::decode_raw) (hardwired to 4x4), this creates
+    /// a `bx` x `by` single-block texture and a footprint-sized compute shader,
+    /// so it can prove non-4x4 ASTC footprints against the native decoder.
+    /// `block` is the single 16-byte ASTC block covering the whole footprint.
+    ///
+    /// # Panics
+    /// Panics if `bx`/`by` are outside `1..=12` (max 144 texels / 256 compute
+    /// invocations), matching the 2D ASTC footprint envelope.
+    #[must_use]
+    pub fn decode_raw_footprint(
+        &self,
+        format: TextureFormat,
+        block: &[u8],
+        bx: u32,
+        by: u32,
+    ) -> Vec<[f32; 4]> {
+        assert!(
+            (1..=12).contains(&bx) && (1..=12).contains(&by),
+            "footprint {bx}x{by} outside the supported 1..=12 envelope"
+        );
+        let texels = (bx * by) as usize;
+        let buf_bytes = (texels * 16) as u64;
+
+        // Footprint-sized shader: storage array of `texels` vec4<f32>, a
+        // workgroup covering bx*by (<=144 <= 256 invocations), one texel each.
+        let shader = format!(
+            "@group(0) @binding(0) var src: texture_2d<f32>;\n             @group(0) @binding(1) var<storage, read_write> dst: array<vec4<f32>, {texels}>;\n             @compute @workgroup_size({bx}, {by}, 1)\n             fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{\n                 if (gid.x < {bx}u && gid.y < {by}u) {{\n                     let texel = textureLoad(src, vec2<i32>(i32(gid.x), i32(gid.y)), 0);\n                     dst[gid.y * {bx}u + gid.x] = texel;\n                 }}\n             }}\n"
+        );
+        let module = self.device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("prism_block_oracle_footprint"),
+            source: ShaderSource::Wgsl(shader.into()),
+        });
+        let pipeline_layout = self
+            .device
+            .create_pipeline_layout(&PipelineLayoutDescriptor {
+                label: Some("prism_block_oracle_footprint_pl"),
+                bind_group_layouts: &[Some(&self.layout)],
+                immediate_size: 0,
+            });
+        let pipeline = self
+            .device
+            .create_compute_pipeline(&ComputePipelineDescriptor {
+                label: Some("prism_block_oracle_footprint_pipeline"),
+                layout: Some(&pipeline_layout),
+                module: &module,
+                entry_point: Some("main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                cache: None,
+            });
+
+        let texture = self.device.create_texture(&TextureDescriptor {
+            label: Some("prism_block_oracle_footprint_tex"),
+            size: Extent3d {
+                width: bx,
+                height: by,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format,
+            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.queue.write_texture(
+            TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: Origin3d::ZERO,
+                aspect: TextureAspect::All,
+            },
+            block,
+            TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(block.len() as u32),
+                rows_per_image: Some(1),
+            },
+            Extent3d {
+                width: bx,
+                height: by,
+                depth_or_array_layers: 1,
+            },
+        );
+        let view = texture.create_view(&TextureViewDescriptor::default());
+
+        let out = self.device.create_buffer(&BufferDescriptor {
+            label: Some("prism_block_oracle_footprint_out"),
+            size: buf_bytes,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let staging = self.device.create_buffer(&BufferDescriptor {
+            label: Some("prism_block_oracle_footprint_staging"),
+            size: buf_bytes,
+            usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let bind_group = self.device.create_bind_group(&BindGroupDescriptor {
+            label: Some("prism_block_oracle_footprint_bg"),
+            layout: &self.layout,
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: BindingResource::TextureView(&view),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: out.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: None,
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+        }
+        encoder.copy_buffer_to_buffer(&out, 0, &staging, 0, buf_bytes);
+        self.queue.submit([encoder.finish()]);
+
+        let slice = staging.slice(..);
+        slice.map_async(MapMode::Read, |_| {});
+        let _ = self.device.poll(PollType::wait_indefinitely());
+        let data = slice
+            .get_mapped_range()
+            .expect("mapped readback range should be available after poll");
+
+        let mut out_texels = vec![[0.0f32; 4]; texels];
+        for (t, texel) in out_texels.iter_mut().enumerate() {
+            for (c, chan) in texel.iter_mut().enumerate() {
+                let o = (t * 4 + c) * 4;
+                *chan = f32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]);
+            }
+        }
+        drop(data);
+        staging.unmap();
+        out_texels
+    }
+
     /// Decode an LDR unorm block and quantise back to 8-bit `RGBA` texels,
     /// matching the `[[u8; 4]; 16]` convention of the CPU decoders.
     #[must_use]
