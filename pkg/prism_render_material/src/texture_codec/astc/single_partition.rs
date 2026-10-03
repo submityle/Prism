@@ -5,14 +5,14 @@
 //! opaque case:
 //!
 //! * single partition,
-//! * single weight plane,
-//! * any single-plane weight grid (resampled to the 4x4 texel footprint by
-//!   the Khronos bilinear infill; the identity 4x4 grid is the degenerate
-//!   case),
+//! * single **or** dual weight plane (the dual-plane colour component selector
+//!   routes one channel to the second plane; the other three use the first),
+//! * any weight grid (resampled to the 4x4 texel footprint by the Khronos
+//!   bilinear infill; the identity 4x4 grid is the degenerate case),
 //! * any of the ten LDR Colour Endpoint Modes (0/1/4/5/6/8/9/10/12/13).
 //!
-//! Everything else (multi-partition, dual-plane and the six HDR CEMs) returns
-//! an [`AstcError`] until its own GPU-validated milestone lands, so no path
+//! Everything else (multi-partition and the six HDR CEMs) returns an
+//! [`AstcError`] until its own GPU-validated milestone lands, so no path
 //! silently produces wrong pixels.
 //!
 //! Decode is pure integer arithmetic -- no AI/ML path.
@@ -20,7 +20,7 @@
 use super::block_mode::decode_block_mode_2d;
 use super::cem::cem_is_ldr;
 use super::endpoints::decode_cem_endpoints;
-use super::infill::infill_weights_4x4;
+use super::infill::{infill_dual_plane_4x4, infill_weights_4x4};
 use super::AstcError;
 
 /// Interpolate one 8-bit LDR colour component between endpoints `e0` and `e1`
@@ -68,10 +68,6 @@ pub(super) fn decode_single_partition_4x4_ldr(
     if partition_count != 1 {
         return Err(AstcError::UnsupportedBlockMode);
     }
-    if bm.dual_plane {
-        return Err(AstcError::UnsupportedBlockMode);
-    }
-
     // CEM is the 4-bit field at block bits [13, 17): the low three bits are
     // byte 1 bits 5..8 and the high bit is byte 2 bit 0 (block bit 16). The ten
     // LDR CEMs decode here; the six HDR CEMs return an error from
@@ -81,18 +77,42 @@ pub(super) fn decode_single_partition_4x4_ldr(
         return Err(AstcError::UnsupportedBlockMode);
     }
 
-    let endpoints = decode_cem_endpoints(block, bm.weight_bits, cem)?;
-    let weights = infill_weights_4x4(block, bm.weights_x, bm.weights_y, bm.weight_levels)?;
+    let endpoints = decode_cem_endpoints(block, bm.weight_bits, cem, bm.dual_plane)?;
 
     let mut out = [[0u8; 4]; 16];
-    for (texel, w) in weights.iter().enumerate() {
-        let w = u32::from(*w);
-        out[texel] = [
-            lerp_component(endpoints.e0[0], endpoints.e1[0], w),
-            lerp_component(endpoints.e0[1], endpoints.e1[1], w),
-            lerp_component(endpoints.e0[2], endpoints.e1[2], w),
-            lerp_component(endpoints.e0[3], endpoints.e1[3], w),
-        ];
+    if bm.dual_plane {
+        // Dual plane: two independent weight planes plus a 2-bit colour
+        // component selector (CCS) that names the channel driven by plane 1;
+        // the remaining three channels use plane 0. The CCS sits immediately
+        // below the weight region in the normal (non-reversed) block
+        // orientation (astcenc `read_bits(block, below_weights_pos - 2, 2)`).
+        let below_weights_pos = 128 - bm.weight_bits;
+        let ccs = super::block_reader::read_bits(block, below_weights_pos - 2, 2);
+        let (plane0, plane1) =
+            infill_dual_plane_4x4(block, bm.weights_x, bm.weights_y, bm.weight_levels)?;
+        for texel in 0..16usize {
+            let mut px = [0u8; 4];
+            for (c, p) in px.iter_mut().enumerate() {
+                let w = u32::from(if c as u32 == ccs {
+                    plane1[texel]
+                } else {
+                    plane0[texel]
+                });
+                *p = lerp_component(endpoints.e0[c], endpoints.e1[c], w);
+            }
+            out[texel] = px;
+        }
+    } else {
+        let weights = infill_weights_4x4(block, bm.weights_x, bm.weights_y, bm.weight_levels)?;
+        for (texel, w) in weights.iter().enumerate() {
+            let w = u32::from(*w);
+            out[texel] = [
+                lerp_component(endpoints.e0[0], endpoints.e1[0], w),
+                lerp_component(endpoints.e0[1], endpoints.e1[1], w),
+                lerp_component(endpoints.e0[2], endpoints.e1[2], w),
+                lerp_component(endpoints.e0[3], endpoints.e1[3], w),
+            ];
+        }
     }
     Ok(out)
 }

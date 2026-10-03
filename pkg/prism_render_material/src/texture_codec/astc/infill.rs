@@ -50,6 +50,49 @@ pub(super) fn infill_weights_4x4(
     Ok(expand(&grid, weights_x, weights_y))
 }
 
+/// Decode a **dual-plane** weight grid of `weights_x` x `weights_y` grid points
+/// from `block`. Dual-plane blocks store `2 * weights_x * weights_y` weights,
+/// interleaved so that grid point `i` contributes `plane0 = seq[2*i]` and
+/// `plane1 = seq[2*i + 1]`. Each plane is then bilinearly resampled to the
+/// sixteen 4x4 texel positions independently (same decimation as the
+/// single-plane path), and the two resampled planes are returned on the
+/// `0..=64` scale in row-major texel order (`texel = y * 4 + x`).
+///
+/// This mirrors the ARM `astcenc` reference de-interleave in
+/// `unpack_weights`/`decode_ise` (Apache-2.0): the ISE sequence is a single
+/// stream of `2 * N` indices; even indices feed plane 0 and odd indices feed
+/// plane 1, after which each plane decimates exactly like a single-plane grid.
+///
+/// # Errors
+/// Returns [`AstcError::Reserved`] if the stored weight range is not a valid
+/// BISE level count, or if the doubled weight count exceeds the ASTC budget.
+pub(super) fn infill_dual_plane_4x4(
+    block: &[u8; 16],
+    weights_x: u32,
+    weights_y: u32,
+    levels: u32,
+) -> Result<([u8; 16], [u8; 16]), AstcError> {
+    let grid_points = (weights_x * weights_y) as usize;
+    let total = grid_points * 2;
+    let mut interleaved = [0u8; 64];
+    if total > interleaved.len() {
+        return Err(AstcError::Reserved);
+    }
+    decode_grid_weights_ise(block, total as u32, levels, &mut interleaved[..total])
+        .ok_or(AstcError::Reserved)?;
+
+    let mut grid0 = [0u8; 64];
+    let mut grid1 = [0u8; 64];
+    for i in 0..grid_points {
+        grid0[i] = interleaved[2 * i];
+        grid1[i] = interleaved[2 * i + 1];
+    }
+    Ok((
+        expand(&grid0, weights_x, weights_y),
+        expand(&grid1, weights_x, weights_y),
+    ))
+}
+
 /// Bilinearly resample the first `n * m` entries of `grid` (an `n` x `m` weight
 /// grid, `n` = weights_x, `m` = weights_y) up to the sixteen texel positions of
 /// a 4x4 block, following the Khronos decimation formula. Returns weights on

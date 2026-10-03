@@ -54,12 +54,13 @@ pub enum AstcError {
 
 /// Decode a single 4x4 ASTC **LDR** block to sixteen `RGBA8` texels.
 ///
-/// Dispatches void-extent (constant-colour) blocks and single-partition,
-/// single-plane LDR weighted blocks: all ten LDR Colour Endpoint Modes, any
-/// colour quantisation, and any single-plane weight grid (resampled to the
-/// 4x4 footprint by the Khronos bilinear infill). Blocks outside that subset
-/// (multi-partition, dual-plane, and the six HDR CEMs) return an [`AstcError`]
-/// rather than approximate pixels, until their own milestones land.
+/// Dispatches void-extent (constant-colour) blocks and single-partition LDR
+/// weighted blocks: all ten LDR Colour Endpoint Modes, any colour
+/// quantisation, any weight grid (resampled to the 4x4 footprint by the
+/// Khronos bilinear infill), and both single- and dual-plane weights. Blocks
+/// outside that subset (multi-partition and the six HDR CEMs) return an
+/// [`AstcError`] rather than approximate pixels, until their own milestones
+/// land.
 ///
 /// # Errors
 /// Propagates [`AstcError`] from the selected decode path, or
