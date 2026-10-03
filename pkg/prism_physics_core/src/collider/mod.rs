@@ -179,6 +179,8 @@ pub use tet_quality::{
 };
 pub mod tet_smooth;
 pub use tet_smooth::{smooth_tet_mesh, TetSmoothParams, TetSmoothResult};
+pub mod tet_boundary;
+pub use tet_boundary::{extract_tet_boundary, TetBoundary};
 
 /// A handle into a [`ShapeRegistry`].
 ///
