@@ -420,12 +420,20 @@ pub mod vorticity_confinement;
 pub mod voxel_traversal;
 pub mod water_breaking_classify;
 pub mod water_caustics_intensity;
+pub mod water_coupling_forces;
 pub mod water_dispersion_offsets;
 pub mod water_foam_decay;
+pub mod water_multigrid_level;
+pub mod water_ocean_clipmap;
 pub mod water_optics_plan;
+pub mod water_pbf_constraint;
+pub mod water_pbf_correction;
 pub mod water_pbf_kernels;
 pub mod water_shading_npr;
 pub mod water_shading_pbr;
+pub mod water_swe_cfl;
+pub mod water_swe_inject;
+pub mod water_transition_blend;
 pub mod water_underwater_depth_color;
 pub mod water_underwater_scatter;
 pub mod water_underwater_transmittance;
@@ -969,14 +977,34 @@ pub use water_breaking_classify::{
 pub use water_caustics_intensity::{
     GpuWaterCausticsIntensity, WaterCausticsIntensityQuery, WaterCausticsIntensityResult,
 };
+pub use water_coupling_forces::{
+    GpuWaterCouplingForces, WaterCouplingForcesQuery, WaterCouplingForcesResult,
+};
 pub use water_dispersion_offsets::{
     GpuWaterDispersionOffsets, WaterDispersionOffsetsQuery, WaterDispersionOffsetsResult,
 };
 pub use water_foam_decay::{GpuWaterFoamDecay, WaterFoamDecayQuery, WaterFoamDecayResult};
+pub use water_multigrid_level::{
+    GpuWaterMultigridLevel, WaterMultigridLevelQuery, WaterMultigridLevelResult,
+};
+pub use water_ocean_clipmap::{
+    GpuWaterOceanClipmap, WaterOceanClipmapQuery, WaterOceanClipmapResult,
+};
 pub use water_optics_plan::{GpuWaterOpticsPlan, WaterOpticsPlanQuery, WaterOpticsPlanResult};
+pub use water_pbf_constraint::{
+    GpuWaterPbfConstraint, WaterPbfConstraintQuery, WaterPbfConstraintResult,
+};
+pub use water_pbf_correction::{
+    GpuWaterPbfCorrection, WaterPbfCorrectionQuery, WaterPbfCorrectionResult,
+};
 pub use water_pbf_kernels::{GpuWaterPbfKernels, WaterPbfKernelsQuery, WaterPbfKernelsResult};
 pub use water_shading_npr::{GpuWaterShadingNpr, WaterShadingNprQuery, WaterShadingNprResult};
 pub use water_shading_pbr::{GpuWaterShadingPbr, WaterShadingPbrQuery, WaterShadingPbrResult};
+pub use water_swe_cfl::{GpuWaterSweCfl, WaterSweCflQuery, WaterSweCflResult};
+pub use water_swe_inject::{GpuWaterSweInject, WaterSweInjectQuery, WaterSweInjectResult};
+pub use water_transition_blend::{
+    GpuWaterTransitionBlend, WaterTransitionBlendQuery, WaterTransitionBlendResult,
+};
 pub use water_underwater_depth_color::{
     GpuWaterUnderwaterDepthColor, WaterUnderwaterDepthColorQuery, WaterUnderwaterDepthColorResult,
 };
