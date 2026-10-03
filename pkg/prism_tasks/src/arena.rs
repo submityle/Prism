@@ -325,9 +325,9 @@ mod tests {
         let b = arena.alloc(2u64).unwrap();
         assert_eq!(*a, 1);
         assert_eq!(*b, 2);
-        assert_ne!(a as *mut u64, b as *mut u64);
-        assert_eq!((a as *mut u64).align_offset(align_of::<u64>()), 0);
-        assert_eq!((b as *mut u64).align_offset(align_of::<u64>()), 0);
+        assert_ne!(core::ptr::from_mut(a), core::ptr::from_mut(b));
+        assert_eq!(core::ptr::from_mut(a).align_offset(align_of::<u64>()), 0);
+        assert_eq!(core::ptr::from_mut(b).align_offset(align_of::<u64>()), 0);
     }
 
     #[test]
@@ -351,11 +351,11 @@ mod tests {
     #[test]
     fn reset_rewinds_and_reuses_storage() {
         let mut arena = FrameArena::with_capacity(128);
-        let p1 = arena.alloc(7u32).unwrap() as *mut u32;
+        let p1 = core::ptr::from_mut(arena.alloc(7u32).unwrap());
         assert!(arena.used() >= 4);
         arena.reset();
         assert_eq!(arena.used(), 0);
-        let p2 = arena.alloc(9u32).unwrap() as *mut u32;
+        let p2 = core::ptr::from_mut(arena.alloc(9u32).unwrap());
         // After reset the first allocation of the new frame reuses the base.
         assert_eq!(p1, p2);
     }
@@ -386,7 +386,7 @@ mod tests {
 
     #[test]
     fn concurrent_allocs_are_disjoint() {
-        use std::sync::Arc;
+        use ::alloc::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         let arena = Arc::new(FrameArena::with_capacity(1 << 20));

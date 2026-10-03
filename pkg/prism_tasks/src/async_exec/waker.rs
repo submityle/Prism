@@ -12,7 +12,7 @@
 //! use it: the async task harness (re-enqueues itself) and `block_on`'s
 //! thread-notify (unparks the blocked thread).
 
-use std::sync::Arc;
+use alloc::sync::Arc;
 use std::task::{RawWaker, RawWakerVTable, Waker};
 
 /// A target that a [`Waker`] can re-schedule by reference to its `Arc`.

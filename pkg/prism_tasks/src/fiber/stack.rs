@@ -124,13 +124,13 @@ impl Stack {
     }
 
     /// This stack's size class.
-    #[cfg_attr(not(test), allow(dead_code, reason = "diagnostic accessor, used in tests"))]
+    #[cfg_attr(not(test), expect(dead_code, reason = "diagnostic accessor, used in tests"))]
     pub(crate) fn class(&self) -> StackClass {
         self.class
     }
 
     /// The NUMA node this stack is associated with.
-    #[cfg_attr(not(test), allow(dead_code, reason = "diagnostic accessor, used in tests"))]
+    #[cfg_attr(not(test), expect(dead_code, reason = "diagnostic accessor, used in tests"))]
     pub(crate) fn node(&self) -> NumaNodeId {
         self.node
     }
@@ -239,13 +239,13 @@ impl StackPool {
     }
 
     /// Current number of live (acquired, not yet released) stacks of `class`.
-    #[cfg_attr(not(test), allow(dead_code, reason = "diagnostic accessor, used in tests"))]
+    #[cfg_attr(not(test), expect(dead_code, reason = "diagnostic accessor, used in tests"))]
     pub(crate) fn live(&self, class: StackClass) -> usize {
         self.class_pool(class).live.load(Ordering::Acquire)
     }
 
     /// Number of idle stacks currently retained on `class`'s free list.
-    #[cfg_attr(not(test), allow(dead_code, reason = "diagnostic accessor, used in tests"))]
+    #[cfg_attr(not(test), expect(dead_code, reason = "diagnostic accessor, used in tests"))]
     pub(crate) fn free_len(&self, class: StackClass) -> usize {
         self.class_pool(class).free.lock().unwrap().len()
     }
@@ -262,7 +262,7 @@ mod tests {
         let large = pool.acquire_class(StackClass::Large, NumaNodeId::ZERO);
         assert_eq!(small.class(), StackClass::Small);
         assert_eq!(large.class(), StackClass::Large);
-        assert!(SMALL_STACK_SIZE < LARGE_STACK_SIZE);
+        const { assert!(SMALL_STACK_SIZE < LARGE_STACK_SIZE) };
         pool.release(small);
         pool.release(large);
     }

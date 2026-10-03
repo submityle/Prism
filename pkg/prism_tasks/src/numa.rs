@@ -29,7 +29,7 @@
 //! [`Topology::numa_enabled`] reflects it. Without a platform NUMA map the
 //! feature cannot change the *detected* node count, which stays honest at 1.
 
-use std::fmt;
+use core::fmt;
 
 /// Identifier of a NUMA node. A plain index; node 0 always exists.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]

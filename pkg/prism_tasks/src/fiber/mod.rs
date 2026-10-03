@@ -196,7 +196,7 @@ pub(crate) fn run_fiber_switch(shared: &Shared, fiber: *mut FiberInner) {
 /// worker's scheduler loop. Returns only once the fiber is resumed, which the
 /// wait-set guarantees happens only after `counter` has reached zero.
 pub(crate) fn suspend_current(counter: &Counter) {
-    let fiber = CURRENT.with(|c| c.get());
+    let fiber = CURRENT.with(Cell::get);
     debug_assert!(!fiber.is_null(), "suspend_current called off a fiber");
 
     // SAFETY: `fiber` is the fiber running on this stack and is exclusively

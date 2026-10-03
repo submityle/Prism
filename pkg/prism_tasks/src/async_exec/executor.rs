@@ -21,7 +21,8 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Condvar, Mutex};
+use alloc::sync::Arc;
+use std::sync::{Condvar, Mutex};
 use std::task::{Context, Poll};
 
 use super::task::{ResultCell, Task};

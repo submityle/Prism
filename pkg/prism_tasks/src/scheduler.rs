@@ -16,9 +16,10 @@
 //! off, `wait` keeps the help-on-wait busy loop unchanged.
 
 use std::cell::Cell;
-use std::collections::VecDeque;
+use alloc::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use alloc::sync::Arc;
+use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
 use crate::async_exec::RunnableTask;
@@ -108,13 +109,13 @@ impl Shared {
     }
 
     fn pool_id(&self) -> usize {
-        self as *const Shared as usize
+        core::ptr::from_ref::<Shared>(self) as usize
     }
 
     /// Push a job onto the local worker deque if the caller is a worker of this
     /// pool, otherwise onto the global injector. Wakes one idle worker.
     pub(crate) fn push(&self, job: Job) {
-        let local = WORKER.with(|w| w.get());
+        let local = WORKER.with(Cell::get);
         match local {
             Some((pid, idx)) if pid == self.pool_id() && idx < self.deques.len() => {
                 self.deques[idx].lock().unwrap().push_back(job);
@@ -129,13 +130,12 @@ impl Shared {
 
     /// Try to obtain one job: local LIFO, then injector FIFO, then steal.
     pub(crate) fn find_task(&self, hint: Option<usize>) -> Option<Job> {
-        if let Some(idx) = hint {
-            if let Some(dq) = self.deques.get(idx) {
-                if let Some(job) = dq.lock().unwrap().pop_back() {
-                    self.queued.fetch_sub(1, Ordering::Release);
-                    return Some(job);
-                }
-            }
+        if let Some(idx) = hint
+            && let Some(dq) = self.deques.get(idx)
+            && let Some(job) = dq.lock().unwrap().pop_back()
+        {
+            self.queued.fetch_sub(1, Ordering::Release);
+            return Some(job);
         }
         if let Some(job) = self.injector.lock().unwrap().pop_front() {
             self.queued.fetch_sub(1, Ordering::Release);
@@ -278,7 +278,7 @@ impl Shared {
 
     /// The caller's worker index within this pool, if any (steal hint).
     fn local_hint(&self) -> Option<usize> {
-        WORKER.with(|w| w.get()).and_then(|(pid, idx)| {
+        WORKER.with(Cell::get).and_then(|(pid, idx)| {
             if pid == self.pool_id() {
                 Some(idx)
             } else {

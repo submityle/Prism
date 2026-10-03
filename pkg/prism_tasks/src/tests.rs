@@ -1,5 +1,5 @@
 use crate::{Counter, TaskPool};
-use std::sync::Arc;
+use alloc::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[test]
@@ -471,7 +471,8 @@ mod m3 {
     use std::pin::Pin;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc;
-    use std::sync::{Arc, Condvar, Mutex};
+    use alloc::sync::Arc;
+    use std::sync::{Condvar, Mutex};
     use std::task::{Context, Poll};
     #[cfg(not(feature = "single"))]
     use std::task::Waker;

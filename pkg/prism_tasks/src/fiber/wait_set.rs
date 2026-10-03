@@ -21,7 +21,7 @@
 //! observe the counter under it, no wakeup can be missed: either `park` sees the
 //! completion directly, or the fiber is parked and a subsequent `flush` sees it.
 
-use std::collections::VecDeque;
+use alloc::collections::VecDeque;
 use std::sync::Mutex;
 
 use super::FiberPtr;

@@ -15,7 +15,7 @@
 //! | [`AsyncCompute`](ThreadCategory::AsyncCompute) | blocking pool | background compute |
 //!
 //! ## Coherence with the scheduler
-//! The Render / IO / AsyncCompute lanes are *independent* OS threads, kept off
+//! The Render / IO / `AsyncCompute` lanes are *independent* OS threads, kept off
 //! the compute worker pool so blocking work there never starves (or is starved
 //! by) the job graph. `Main` has no owned thread: it is a queue the application
 //! drains with [`NamedThreads::run_main_pending`], respecting the existing
@@ -29,9 +29,10 @@
 //! dispatched job uses a [`Counter`], which composes with help-on-wait and the
 //! async bridge exactly like any other job.
 
-use std::collections::VecDeque;
+use alloc::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use alloc::sync::Arc;
+use std::sync::{Condvar, Mutex};
 use std::thread::JoinHandle;
 
 use crate::Counter;
@@ -89,7 +90,7 @@ struct Inner {
 
 impl NamedThreads {
     /// Build the lanes with the default configuration (1 render thread, plus
-    /// the IO and AsyncCompute blocking pools from [`NamedThreadsConfig`]).
+    /// the IO and `AsyncCompute` blocking pools from [`NamedThreadsConfig`]).
     pub fn new() -> Self {
         Self::with_config(NamedThreadsConfig::default())
     }

@@ -11,7 +11,7 @@
 //!   / [`TaskPool::block_on`](crate::TaskPool::block_on) entry points and the
 //!   re-schedulable task harness.
 //! - [`task`]: the [`Task`] join handle and its shared result cell.
-//! - [`counter_bridge`]: [`Counter::wait_async`](crate::Counter::wait_async),
+//! - [`counter_bridge`][]: [`Counter::wait_async`](crate::Counter::wait_async),
 //!   wiring counter completion to future wakeups.
 
 mod counter_bridge;

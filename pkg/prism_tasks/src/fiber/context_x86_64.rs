@@ -80,7 +80,7 @@ pub(crate) unsafe fn init_stack(stack_top: *mut u8, fiber: *mut FiberInner) -> C
     // SAFETY: `sp` lies inside the caller-provided stack region with FRAME
     // bytes of headroom; we initialize every slot the switch/trampoline reads.
     unsafe {
-        let slots = sp as *mut u64;
+        let slots = sp.cast::<u64>();
         // r15, r14, r13 at offsets 0, 8, 16 -> zero.
         slots.add(0).write(0);
         slots.add(1).write(0);

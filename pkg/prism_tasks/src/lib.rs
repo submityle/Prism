@@ -1,4 +1,4 @@
-//! # prism_tasks
+//! # `prism_tasks`
 //!
 //! Prism's parallel-runtime kernel: a single work-stealing thread pool that
 //! every subsystem feeds fine-grained jobs into.
@@ -28,7 +28,7 @@
 //!   hand-rolled [`RawWaker`](std::task::RawWaker) vtable.
 //! - [`Counter::wait_async`] / [`CounterFuture`]: bridge counter completion to
 //!   future wakeups (and, via [`Task::counter`], async results back to jobs).
-//! - [`NamedThreads`] / [`ThreadCategory`]: Main / Render / IO / AsyncCompute
+//! - [`NamedThreads`] / [`ThreadCategory`]: Main / Render / IO / `AsyncCompute`
 //!   lanes dispatched independently of the compute pool.
 //!
 //! Later milestones add NUMA/affinity and deterministic replay.
@@ -41,6 +41,8 @@
 // the lifetime erasure in `scope` (see `scope.rs` for its soundness argument),
 // and the stackful-fiber context switching behind the off-by-default `fibers`
 // feature (see the `fiber` module, especially `fiber::context`).
+
+extern crate alloc;
 
 mod affinity;
 mod arena;
@@ -55,7 +57,7 @@ mod parallel;
 mod scheduler;
 mod scope;
 
-use std::sync::Arc;
+use alloc::sync::Arc;
 use std::thread::JoinHandle;
 
 pub use affinity::{
