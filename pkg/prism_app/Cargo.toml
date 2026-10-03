@@ -1,0 +1,33 @@
+[package]
+name = "prism_app"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.0"
+description = "Prism's application shell: App / SubApp / Plugin / labeled schedules / main-frame loop / Runner. The in-house replacement for bevy_app, sitting above prism_ecs and below the game runtime framework. Contains no Unreal Engine or Unity source or derived code and depends on no bevy_* crate."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_ecs = { path = "../prism_ecs" }
+
+[features]
+# `std` is on by default: the Runner / main loop needs std (design §1). The
+# App graph + plugin registry are no_std+alloc-capable in principle, but M0
+# ships the std runner, so std is required for now. This is an honest current
+# constraint, not a permanent design decision.
+default = ["std"]
+std = []
+
+# AAA lint bar. prism_app contains no `unsafe`, so unlike prism_ecs it can keep
+# the workspace-strength lints as warnings and still hit zero warnings.
+[lints.rust]
+missing_docs = "warn"
+unsafe_op_in_unsafe_fn = "warn"
+unused_qualifications = "warn"
+
+[lints.clippy]
+semicolon_if_nothing_returned = "warn"
+ptr_as_ptr = "warn"
+type_complexity = "allow"
+too_many_arguments = "allow"
+needless_lifetimes = "allow"
