@@ -2753,3 +2753,105 @@ fn astc_dual_plane_single_partition_parity_against_gpu_hardware_decode() {
         DUAL_PLANE_MODES.len()
     );
 }
+
+// -------------------------------------------------------------------------
+// ASTC multi-partition single-plane LDR parity (Milestone #8, shared CEM class).
+//
+// A multi-partition block splits the 4x4 footprint into 2/3/4 regions via the
+// procedural partition hash (10-bit seed in bits [13,23)); each region carries
+// its own endpoint pair while a single weight stream (bit-reversed at the top)
+// is shared. We exercise the "all partitions share one colour class" CEM form
+// (base class 0) at QUANT_256, so every colour integer is a raw 8-bit value
+// written forward from bit 29. Across 2/3/4 partitions and the luminance
+// (CEM0), luminance+alpha (CEM4) and RGB base+scale (CEM6) formats, we confirm
+// the CPU `decode_astc_4x4_ldr` matches the Metal ASTC hardware decoder within
+// 1 LSB on every texel and channel.
+//
+// Each tuple is (block_mode, weights_x, weights_y, weight_levels, weight_bits,
+// partition_count, cem, color_integer_count). color_bits = 99 - weight_bits
+// (the shared class spends no CEM high part); every config keeps
+// color_integer_count*8 <= color_bits so the colour ISE stays at QUANT_256, and
+// the raw 8-bit endpoint run [29, 29 + 8*n) never overlaps the top weight
+// region [128 - weight_bits, 128). All seven modes are single-plane grids drawn
+// from the committed infill set (weight_bits == 24).
+const MULTI_PART_MODES: [(u32, u32, u32, u32, u32, u32, u32, u32); 7] = [
+    (19, 4, 2, 8, 24, 2, 0, 4),
+    (814, 2, 3, 16, 24, 2, 0, 4),
+    (431, 3, 3, 6, 24, 3, 0, 6),
+    (34, 4, 3, 4, 24, 2, 6, 8),
+    (351, 2, 4, 8, 24, 2, 4, 8),
+    (462, 3, 4, 4, 24, 4, 0, 8),
+    (910, 3, 2, 16, 24, 4, 0, 8),
+];
+
+#[test]
+fn astc_multi_partition_single_plane_parity_against_gpu_hardware_decode() {
+    let Some(oracle) = BlockOracle::try_new() else {
+        eprintln!("no GPU adapter; skipping ASTC multi-partition parity");
+        return;
+    };
+    if !oracle
+        .features()
+        .contains(Features::TEXTURE_COMPRESSION_ASTC)
+    {
+        eprintln!("adapter lacks ASTC support; skipping ASTC multi-partition parity");
+        return;
+    }
+    let format = TextureFormat::Astc {
+        block: wgpu::AstcBlock::B4x4,
+        channel: wgpu::AstcChannel::Unorm,
+    };
+    let mut rng = Rng(0x6A17_2C0B);
+    const PER_MODE: u32 = 128;
+    for (mode, wx, wy, levels, weight_bits, pc, cem, n_int) in MULTI_PART_MODES {
+        let _ = weight_bits; // documented invariant; weights placed by grid form
+        let (form, bits) = levels_to_grid_form(levels);
+        let weight_count = (wx * wy) as usize;
+        for _ in 0..PER_MODE {
+            let mut blk = [0u8; 16];
+            astc_set_bits(&mut blk, 0, 11, mode);
+            astc_set_bits(&mut blk, 11, 2, pc - 1); // partition count minus one
+            astc_set_bits(&mut blk, 13, 10, rng.next_u32() & 0x3FF); // partition seed
+
+            // Shared CEM class (base class 0): the 6-bit field at [23,29) holds
+            // the colour format in bits 2..6, so the two low base-class bits are
+            // zero and no CEM high part is spent.
+            astc_set_bits(&mut blk, 23, 6, cem << 2);
+
+            // n_int raw 8-bit (QUANT_256) colour integers written forward from
+            // bit 29 (= 19 + PARTITION_INDEX_BITS).
+            for i in 0..n_int {
+                astc_set_bits(&mut blk, 29 + i * 8, 8, rng.byte() as u32);
+            }
+
+            // Shared single-plane weight stream (bit-reversed at the top).
+            let mut weights = [0u8; 64];
+            for w in weights.iter_mut().take(weight_count) {
+                *w = rand_grid_weight(&mut rng, form, bits);
+            }
+            astc_set_grid_weights(&mut blk, form, bits, &weights[..weight_count]);
+
+            let cpu = decode_astc_4x4_ldr(&blk).unwrap_or_else(|e| {
+                panic!(
+                    "multi-part mode {mode} ({wx}x{wy}, pc {pc}, cem {cem}) block {blk:02x?} rejected: {e:?}"
+                )
+            });
+            let gpu = oracle.decode_unorm8(format, &blk);
+            for t in 0..16 {
+                for c in 0..4 {
+                    let d = (cpu[t][c] as i32 - gpu[t][c] as i32).abs();
+                    assert!(
+                        d <= 1,
+                        "ASTC multi-part mode {mode} ({wx}x{wy}, pc {pc}, cem {cem}) block={blk:02x?} texel {t} chan {c}: cpu={} gpu={} (|d|={d})",
+                        cpu[t][c],
+                        gpu[t][c]
+                    );
+                }
+            }
+        }
+    }
+    eprintln!(
+        "ASTC multi-partition single-plane parity: {} configs x {PER_MODE} blocks within 1 LSB of hardware",
+        MULTI_PART_MODES.len()
+    );
+}
