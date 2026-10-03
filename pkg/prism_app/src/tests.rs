@@ -1258,6 +1258,263 @@ fn set_extract_on_missing_sub_app_panics() {
     app.set_extract(RenderApp, |_m: &mut prism_ecs::world::World, _s: &mut prism_ecs::world::World| {});
 }
 
+// ---- §24.9 / §25.4: per-sub-app independent time domains -----------------
+//
+// A secondary sub-app opts into its own `EngineClocks` via
+// `App::init_sub_app_time_domain`; from then on `advance_time` steps that
+// sub-app's clocks independently every frame. These tests prove the design
+// §25.4 invariant: each world holds an independent time context, so pausing or
+// re-rating one world's `Time<Virtual>` never disturbs another.
+
+/// Build a secondary sub-app with an `Update` schedule that bumps `counter`
+/// each frame, so a test can prove its phases keep running regardless of its
+/// time domain.
+fn secondary_counting_update(counter: Arc<AtomicU64>) -> SubApp {
+    let mut sub = SubApp::new();
+    sub.world
+        .resource_mut::<prism_ecs::schedule::Schedules>()
+        .insert(Update, prism_ecs::schedule::Schedule::new());
+    sub.world
+        .resource_mut::<prism_ecs::schedule::Schedules>()
+        .get_mut(Update)
+        .unwrap()
+        .add_systems(move || {
+            counter.fetch_add(1, Ordering::Relaxed);
+        });
+    sub
+}
+
+/// Virtual elapsed seconds of a sub-app that owns a time domain.
+fn virtual_elapsed(sub: &SubApp) -> f64 {
+    sub.world
+        .resource::<EngineClocks>()
+        .virtual_time()
+        .elapsed_secs_f64()
+}
+
+/// A secondary sub-app with its own time domain advances its clocks each frame,
+/// independently of (and in lock-step rate with) the main sub-app.
+#[test]
+fn secondary_time_domain_advances_each_frame() {
+    let mut app = App::new();
+    app.set_time_update_strategy(TimeUpdateStrategy::ManualDelta(Duration::from_millis(10)));
+
+    app.insert_sub_app(RenderApp, SubApp::new());
+    assert!(
+        !app.get_sub_app(RenderApp).unwrap().has_time_domain(),
+        "a fresh secondary sub-app owns no time domain"
+    );
+    app.init_sub_app_time_domain(RenderApp);
+    app.set_sub_app_time_update_strategy(
+        RenderApp,
+        TimeUpdateStrategy::ManualDelta(Duration::from_millis(10)),
+    );
+    assert!(app.get_sub_app(RenderApp).unwrap().has_time_domain());
+
+    for _ in 0..3 {
+        app.update();
+    }
+
+    let main_elapsed = app
+        .world()
+        .resource::<EngineClocks>()
+        .virtual_time()
+        .elapsed_secs_f64();
+    let sub_elapsed = virtual_elapsed(app.get_sub_app(RenderApp).unwrap());
+    assert!((main_elapsed - 0.03).abs() < 1e-6, "main={main_elapsed}");
+    assert!((sub_elapsed - 0.03).abs() < 1e-6, "sub={sub_elapsed}");
+}
+
+/// Pausing the secondary world's virtual time freezes only that world; the main
+/// world keeps advancing (design §25.4: "一个暂停不冻结另一个").
+#[test]
+fn pausing_secondary_does_not_freeze_main() {
+    let mut app = App::new();
+    app.set_time_update_strategy(TimeUpdateStrategy::ManualDelta(Duration::from_millis(10)));
+    app.insert_sub_app(RenderApp, SubApp::new());
+    app.init_sub_app_time_domain(RenderApp);
+    app.set_sub_app_time_update_strategy(
+        RenderApp,
+        TimeUpdateStrategy::ManualDelta(Duration::from_millis(10)),
+    );
+
+    // Two frames with both running.
+    app.update();
+    app.update();
+    let sub_frozen_at = virtual_elapsed(app.get_sub_app(RenderApp).unwrap());
+
+    // Pause only the secondary world's virtual clock.
+    app.sub_app_mut(RenderApp)
+        .unwrap()
+        .world
+        .resource_mut::<EngineClocks>()
+        .virtual_time_mut()
+        .pause();
+
+    // Three more frames.
+    for _ in 0..3 {
+        app.update();
+    }
+
+    let main_elapsed = app
+        .world()
+        .resource::<EngineClocks>()
+        .virtual_time()
+        .elapsed_secs_f64();
+    let sub_elapsed = virtual_elapsed(app.get_sub_app(RenderApp).unwrap());
+
+    // Main advanced through all 5 frames; the secondary stayed frozen at frame 2.
+    assert!((main_elapsed - 0.05).abs() < 1e-6, "main={main_elapsed}");
+    assert!(
+        (sub_elapsed - sub_frozen_at).abs() < 1e-9,
+        "secondary should stay frozen: {sub_elapsed} vs {sub_frozen_at}"
+    );
+    assert!((sub_frozen_at - 0.02).abs() < 1e-6, "frozen_at={sub_frozen_at}");
+}
+
+/// The mirror case: pausing the main world's virtual time freezes only the main
+/// world; a secondary world with its own domain keeps advancing.
+#[test]
+fn pausing_main_does_not_freeze_secondary() {
+    let mut app = App::new();
+    app.set_time_update_strategy(TimeUpdateStrategy::ManualDelta(Duration::from_millis(10)));
+    app.insert_sub_app(RenderApp, SubApp::new());
+    app.init_sub_app_time_domain(RenderApp);
+    app.set_sub_app_time_update_strategy(
+        RenderApp,
+        TimeUpdateStrategy::ManualDelta(Duration::from_millis(10)),
+    );
+
+    app.update();
+    app.update();
+    let main_frozen_at = app
+        .world()
+        .resource::<EngineClocks>()
+        .virtual_time()
+        .elapsed_secs_f64();
+
+    // Pause only the main world's virtual clock.
+    app.world_mut()
+        .resource_mut::<EngineClocks>()
+        .virtual_time_mut()
+        .pause();
+
+    for _ in 0..3 {
+        app.update();
+    }
+
+    let main_elapsed = app
+        .world()
+        .resource::<EngineClocks>()
+        .virtual_time()
+        .elapsed_secs_f64();
+    let sub_elapsed = virtual_elapsed(app.get_sub_app(RenderApp).unwrap());
+
+    assert!(
+        (main_elapsed - main_frozen_at).abs() < 1e-9,
+        "main should stay frozen: {main_elapsed} vs {main_frozen_at}"
+    );
+    assert!((sub_elapsed - 0.05).abs() < 1e-6, "sub={sub_elapsed}");
+}
+
+/// A secondary sub-app without a time domain still runs its `Update` phase each
+/// frame, but owns no clock and advances none (honest no-op fallthrough in
+/// `advance_time`).
+#[test]
+fn secondary_without_time_domain_runs_update_but_owns_no_clock() {
+    let ran = Arc::new(AtomicU64::new(0));
+    let mut app = App::new();
+    app.insert_sub_app(RenderApp, secondary_counting_update(ran.clone()));
+
+    assert!(!app.get_sub_app(RenderApp).unwrap().has_time_domain());
+
+    app.update();
+    app.update();
+
+    assert_eq!(ran.load(Ordering::Relaxed), 2, "Update must still run each frame");
+    assert!(
+        app.get_sub_app(RenderApp)
+            .unwrap()
+            .world
+            .get_resource::<EngineClocks>()
+            .is_none(),
+        "no time domain was opted into, so no clock exists"
+    );
+}
+
+/// `init_sub_app_time_domain` is idempotent: a second call never rewinds an
+/// already-running world's elapsed time.
+#[test]
+fn init_sub_app_time_domain_is_idempotent() {
+    let mut app = App::new();
+    app.set_time_update_strategy(TimeUpdateStrategy::ManualDelta(Duration::from_millis(10)));
+    app.insert_sub_app(RenderApp, SubApp::new());
+    app.init_sub_app_time_domain(RenderApp);
+    app.set_sub_app_time_update_strategy(
+        RenderApp,
+        TimeUpdateStrategy::ManualDelta(Duration::from_millis(10)),
+    );
+
+    app.update();
+    app.update();
+    let before = virtual_elapsed(app.get_sub_app(RenderApp).unwrap());
+
+    // Re-init must preserve the running clock.
+    app.init_sub_app_time_domain(RenderApp);
+    let after = virtual_elapsed(app.get_sub_app(RenderApp).unwrap());
+    assert!((before - after).abs() < 1e-9, "re-init rewound time: {before} vs {after}");
+    assert!((before - 0.02).abs() < 1e-6, "before={before}");
+}
+
+/// A secondary sub-app can run its fixed step at a different rate than the main
+/// world, and setting one does not touch the other.
+#[test]
+fn secondary_fixed_timestep_is_independent() {
+    let mut app = App::new();
+    app.set_fixed_timestep_hz(60.0);
+    app.insert_sub_app(RenderApp, SubApp::new());
+    app.init_sub_app_time_domain(RenderApp);
+    app.set_sub_app_fixed_timestep_hz(RenderApp, 20.0);
+
+    let main_step = app
+        .world()
+        .resource::<EngineClocks>()
+        .fixed()
+        .timestep();
+    let sub_step = app
+        .get_sub_app(RenderApp)
+        .unwrap()
+        .world
+        .resource::<EngineClocks>()
+        .fixed()
+        .timestep();
+
+    assert_eq!(main_step, Duration::from_secs_f64(1.0 / 60.0));
+    assert_eq!(sub_step, Duration::from_secs_f64(1.0 / 20.0));
+    assert_ne!(main_step, sub_step);
+}
+
+/// Setting a time-domain strategy on a sub-app that never opted in panics
+/// loudly rather than silently doing nothing.
+#[test]
+#[should_panic(expected = "no time domain")]
+fn set_sub_app_time_strategy_without_domain_panics() {
+    let mut app = App::new();
+    app.insert_sub_app(RenderApp, SubApp::new());
+    app.set_sub_app_time_update_strategy(
+        RenderApp,
+        TimeUpdateStrategy::ManualDelta(Duration::from_millis(10)),
+    );
+}
+
+/// Addressing a missing label for a time-domain op panics with a clear message.
+#[test]
+#[should_panic(expected = "no sub-app registered")]
+fn init_sub_app_time_domain_missing_label_panics() {
+    let mut app = App::new();
+    app.init_sub_app_time_domain(RenderApp);
+}
+
 // ---- M3 Inc2: cross-thread sub-app pipelining -----------------------------
 //
 // These tests are gated on the `pipelined` feature. They assert that the

@@ -27,6 +27,8 @@
 use prism_ecs::schedule::{ScheduleLabel, Schedules};
 use prism_ecs::world::World;
 
+use crate::time::{EngineClocks, TimeUpdateStrategy};
+
 use crate::schedule::{
     First, Last, PostStartup, PostUpdate, PreStartup, PreUpdate, StateTransition, Startup, Update,
 };
@@ -125,6 +127,112 @@ impl SubApp {
         self.run_schedule(PostStartup);
     }
 
+    // ---- time domain (design §24.9 / §25.4) -------------------------------
+
+    /// Whether this sub-app owns an independent time domain.
+    ///
+    /// A time domain here means an [`EngineClocks`] resource on this sub-app's
+    /// world: [`advance_time`](crate::time::advance_time) only steps a world
+    /// that owns one. The main sub-app is given a domain by
+    /// [`App::new`](crate::app::App::new); a secondary sub-app has **none** by
+    /// default and must opt in via [`init_time_domain`](SubApp::init_time_domain).
+    ///
+    /// This is the mechanism behind the design §25.4 invariant that *"each
+    /// world holds an independent time context … pausing one does not freeze
+    /// another"*: because every sub-app advances its **own** clocks, pausing
+    /// [`Time<Virtual>`](prism_time::Time) on one world leaves every other
+    /// world's clocks untouched.
+    #[must_use]
+    pub fn has_time_domain(&self) -> bool {
+        self.world.get_resource::<EngineClocks>().is_some()
+    }
+
+    /// Give this sub-app its own independent time domain (design §24.9 / §25.4).
+    ///
+    /// Installs a fresh [`EngineClocks`] bundle and a default
+    /// [`TimeUpdateStrategy`] on this world, so from the next frame on
+    /// [`advance_time`](crate::time::advance_time) steps this sub-app's clocks
+    /// independently of every other sub-app. This is what lets a secondary
+    /// world (an editor-preview world, an embedded-server world) run, pause or
+    /// time-dilate on its own without disturbing the main simulation.
+    ///
+    /// **Idempotent**: if this sub-app already owns a domain the existing
+    /// clocks are left untouched, so calling it on an already-running world
+    /// never rewinds elapsed time. A missing [`TimeUpdateStrategy`] is still
+    /// filled in, so a domain is always fully formed afterwards.
+    pub fn init_time_domain(&mut self) -> &mut Self {
+        if self.world.get_resource::<EngineClocks>().is_none() {
+            self.world.insert_resource(EngineClocks::new());
+        }
+        if self.world.get_resource::<TimeUpdateStrategy>().is_none() {
+            self.world.insert_resource(TimeUpdateStrategy::default());
+        }
+        self
+    }
+
+    /// Set this sub-app's [`TimeUpdateStrategy`] (design §24.9 / §25.4).
+    ///
+    /// Controls how *this* world's real clock advances each frame, independent
+    /// of other sub-apps: a secondary world can step on
+    /// [`ManualDelta`](TimeUpdateStrategy::ManualDelta) while the main world
+    /// paces from the wall clock, or vice versa.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this sub-app has no time domain yet; call
+    /// [`init_time_domain`](SubApp::init_time_domain) first. (A strategy with
+    /// no clock to drive would be silently inert, so this fails loudly rather
+    /// than pretending to take effect.)
+    pub fn set_time_update_strategy(&mut self, strategy: TimeUpdateStrategy) -> &mut Self {
+        assert!(
+            self.has_time_domain(),
+            "set_time_update_strategy: sub-app has no time domain; call init_time_domain first"
+        );
+        self.world.insert_resource(strategy);
+        self
+    }
+
+    /// Set this sub-app's fixed-timestep rate in hertz (design §24.9 / §25.4).
+    ///
+    /// For example `30.0` runs this world's `FixedUpdate` at a 1/30 s step —
+    /// an embedded server world can tick at a different rate than the client's
+    /// main world.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this sub-app has no time domain yet; call
+    /// [`init_time_domain`](SubApp::init_time_domain) first.
+    pub fn set_fixed_timestep_hz(&mut self, hz: f64) -> &mut Self {
+        self.world
+            .get_resource_mut::<EngineClocks>()
+            .expect(
+                "set_fixed_timestep_hz: sub-app has no time domain; call init_time_domain first",
+            )
+            .fixed_mut()
+            .set_timestep_hz(hz);
+        self
+    }
+
+    /// Set this sub-app's fixed-timestep period to an exact
+    /// [`Duration`](prism_time::Duration) (design §24.9 / §25.4).
+    ///
+    /// Prefer this over [`set_fixed_timestep_hz`](SubApp::set_fixed_timestep_hz)
+    /// when the step must match another duration bit-for-bit (see the note on
+    /// [`App::set_fixed_timestep`](crate::app::App::set_fixed_timestep)).
+    ///
+    /// # Panics
+    ///
+    /// Panics if this sub-app has no time domain yet; call
+    /// [`init_time_domain`](SubApp::init_time_domain) first.
+    pub fn set_fixed_timestep(&mut self, timestep: prism_time::Duration) -> &mut Self {
+        self.world
+            .get_resource_mut::<EngineClocks>()
+            .expect("set_fixed_timestep: sub-app has no time domain; call init_time_domain first")
+            .fixed_mut()
+            .set_timestep(timestep);
+        self
+    }
+
     /// Run one frame in the full main-frame order (design §7, §21 invariant):
     /// `First → RunFixedMainLoop → PreUpdate → StateTransition → Update →
     /// PostUpdate → Last`.
@@ -134,7 +242,7 @@ impl SubApp {
     /// drains the fixed accumulator via
     /// [`run_fixed_main_loop`](crate::fixed::run_fixed_main_loop), running the
     /// `FixedMain` tick group once per fixed step. A sub-app without an
-    /// [`EngineClocks`](crate::time::EngineClocks) resource simply skips the
+    /// [`EngineClocks`] resource simply skips the
     /// time and fixed-loop steps, so a clock-less secondary sub-app still runs
     /// its variable-step phases.
     pub fn update(&mut self) {

@@ -298,7 +298,7 @@ impl App {
     /// (design §15); the default [`TimeUpdateStrategy::Automatic`] paces from
     /// the platform monotonic clock.
     pub fn set_time_update_strategy(&mut self, strategy: TimeUpdateStrategy) -> &mut Self {
-        self.sub_apps.main.world.insert_resource(strategy);
+        self.sub_apps.main.set_time_update_strategy(strategy);
         self
     }
 
@@ -307,11 +307,7 @@ impl App {
     /// 1/60 s step. Panics only if the main world has no [`EngineClocks`]
     /// resource, which [`App::new`] always installs.
     pub fn set_fixed_timestep_hz(&mut self, hz: f64) -> &mut Self {
-        self.sub_apps.main
-            .world
-            .resource_mut::<EngineClocks>()
-            .fixed_mut()
-            .set_timestep_hz(hz);
+        self.sub_apps.main.set_fixed_timestep_hz(hz);
         self
     }
 
@@ -329,11 +325,107 @@ impl App {
     /// Panics only if the main world has no [`EngineClocks`] resource, which
     /// [`App::new`] always installs.
     pub fn set_fixed_timestep(&mut self, timestep: prism_time::Duration) -> &mut Self {
-        self.sub_apps.main
-            .world
-            .resource_mut::<EngineClocks>()
-            .fixed_mut()
-            .set_timestep(timestep);
+        self.sub_apps.main.set_fixed_timestep(timestep);
+        self
+    }
+
+    // ---- sub-app time domains (design §24.9 / §25.4) ----------------------
+
+    /// Give the secondary sub-app registered under `label` its own independent
+    /// time domain (design §24.9 / §25.4).
+    ///
+    /// By default only the main sub-app owns a time domain (installed by
+    /// [`App::new`]); a secondary sub-app advances no clock until it opts in
+    /// here. Once initialized, that sub-app steps its own
+    /// [`EngineClocks`] every frame, so it can run, pause or time-dilate
+    /// independently of the main world — the design §25.4 invariant that *"each
+    /// world holds an independent time context … pausing one does not freeze
+    /// another"*.
+    ///
+    /// Reach the resulting clocks through
+    /// [`sub_app_mut`](App::sub_app_mut)`(label)` then
+    /// [`SubApp::world`](crate::sub_app::SubApp::world) to pause or scale that
+    /// world's [`Time<Virtual>`](prism_time::Time) in isolation.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no sub-app is registered under `label`.
+    pub fn init_sub_app_time_domain(&mut self, label: impl SubAppLabel) -> &mut Self {
+        let desc = format!("{label:?}");
+        self.sub_apps
+            .get_mut(label)
+            .unwrap_or_else(|| {
+                panic!("init_sub_app_time_domain: no sub-app registered under {desc}")
+            })
+            .init_time_domain();
+        self
+    }
+
+    /// Set a secondary sub-app's [`TimeUpdateStrategy`] (design §24.9 / §25.4).
+    ///
+    /// # Panics
+    ///
+    /// Panics if no sub-app is registered under `label`, or if that sub-app has
+    /// no time domain yet (call
+    /// [`init_sub_app_time_domain`](App::init_sub_app_time_domain) first).
+    pub fn set_sub_app_time_update_strategy(
+        &mut self,
+        label: impl SubAppLabel,
+        strategy: TimeUpdateStrategy,
+    ) -> &mut Self {
+        let desc = format!("{label:?}");
+        self.sub_apps
+            .get_mut(label)
+            .unwrap_or_else(|| {
+                panic!("set_sub_app_time_update_strategy: no sub-app registered under {desc}")
+            })
+            .set_time_update_strategy(strategy);
+        self
+    }
+
+    /// Set a secondary sub-app's fixed-timestep rate in hertz
+    /// (design §24.9 / §25.4).
+    ///
+    /// # Panics
+    ///
+    /// Panics if no sub-app is registered under `label`, or if that sub-app has
+    /// no time domain yet (call
+    /// [`init_sub_app_time_domain`](App::init_sub_app_time_domain) first).
+    pub fn set_sub_app_fixed_timestep_hz(
+        &mut self,
+        label: impl SubAppLabel,
+        hz: f64,
+    ) -> &mut Self {
+        let desc = format!("{label:?}");
+        self.sub_apps
+            .get_mut(label)
+            .unwrap_or_else(|| {
+                panic!("set_sub_app_fixed_timestep_hz: no sub-app registered under {desc}")
+            })
+            .set_fixed_timestep_hz(hz);
+        self
+    }
+
+    /// Set a secondary sub-app's fixed-timestep period to an exact
+    /// [`Duration`](prism_time::Duration) (design §24.9 / §25.4).
+    ///
+    /// # Panics
+    ///
+    /// Panics if no sub-app is registered under `label`, or if that sub-app has
+    /// no time domain yet (call
+    /// [`init_sub_app_time_domain`](App::init_sub_app_time_domain) first).
+    pub fn set_sub_app_fixed_timestep(
+        &mut self,
+        label: impl SubAppLabel,
+        timestep: prism_time::Duration,
+    ) -> &mut Self {
+        let desc = format!("{label:?}");
+        self.sub_apps
+            .get_mut(label)
+            .unwrap_or_else(|| {
+                panic!("set_sub_app_fixed_timestep: no sub-app registered under {desc}")
+            })
+            .set_fixed_timestep(timestep);
         self
     }
 
