@@ -2392,3 +2392,97 @@ fn astc_cem8_color_quant192_parity_against_gpu_hardware_decode() {
         "ASTC QUANT_192 colour parity: {COUNT} blocks within 1 LSB of hardware ({contracted} exercised blue-contraction)"
     );
 }
+
+// ---------------------------------------------------------------------------
+// ASTC single-partition multi-CEM LDR endpoint parity (Milestone #5).
+//
+// The earlier ASTC colour tests only exercised CEM 8 (direct LDR RGB). This
+// proves every one of the ten LDR Colour Endpoint Modes
+// (0/1/4/5/6/8/9/10/12/13) against the Metal hardware decoder. Each block uses
+// block mode 67 (4x4, single plane, QUANT_6 trit weights, weight_bits = 42),
+// whose single-partition colour budget is `color_bits = 111 - 42 = 69`. At 69
+// colour bits every `quant_mode_table` row maps to QUANT_256, so the N colour
+// integers for each CEM are plain 8-bit binary values at bits [17..17+8N),
+// with no colour-unquantization table in the path. The weights remain a
+// genuine 6-level trit ISE stream, so endpoint interpolation is still
+// exercised end-to-end. Random endpoint integers naturally drive the
+// blue-contraction, delta sign-extension and RGB-scale branches on both the
+// CPU and hardware sides; parity is checked on all four channels to 1 LSB.
+// ---------------------------------------------------------------------------
+
+/// `(cem, integer_count)` for the ten LDR Colour Endpoint Modes.
+const LDR_CEMS: [(u32, u32); 10] = [
+    (0, 2),  // LUM
+    (1, 2),  // LUM_DELTA
+    (4, 4),  // LUM_ALPHA
+    (5, 4),  // LUM_ALPHA_DELTA
+    (6, 4),  // RGB_SCALE
+    (8, 6),  // RGB
+    (9, 6),  // RGB_DELTA
+    (10, 6), // RGB_SCALE_ALPHA
+    (12, 8), // RGBA
+    (13, 8), // RGBA_DELTA
+];
+
+#[test]
+fn astc_multi_cem_ldr_parity_against_gpu_hardware_decode() {
+    let Some(oracle) = BlockOracle::try_new() else {
+        eprintln!("no GPU adapter; skipping ASTC multi-CEM LDR parity");
+        return;
+    };
+    if !oracle
+        .features()
+        .contains(Features::TEXTURE_COMPRESSION_ASTC)
+    {
+        eprintln!("adapter lacks ASTC support; skipping ASTC multi-CEM LDR parity");
+        return;
+    }
+    let format = TextureFormat::Astc {
+        block: wgpu::AstcBlock::B4x4,
+        channel: wgpu::AstcChannel::Unorm,
+    };
+    let mut rng = Rng(0x05EC_0DE5);
+    const PER_CEM: u32 = 128;
+    for (cem, integer_count) in LDR_CEMS {
+        for _ in 0..PER_CEM {
+            // Mode 67 (4x4, single plane, QUANT_6 trit weights) + this CEM.
+            let mut blk = [0u8; 16];
+            astc_set_bits(&mut blk, 0, 11, 67);
+            astc_set_bits(&mut blk, 13, 4, cem);
+
+            // N raw 8-bit (QUANT_256) colour integers at bits [17..17+8N).
+            for i in 0..integer_count {
+                let v = rng.byte() as u32;
+                astc_set_bits(&mut blk, 17 + i * 8, 8, v);
+            }
+
+            // Sixteen 6-level trit weights (low in 0..2, trit in 0..3).
+            let mut weights = [0u8; 16];
+            for w in weights.iter_mut() {
+                let low = (rng.next_u32() % 2) as u8;
+                let trit = (rng.next_u32() % 3) as u8;
+                *w = low | (trit << 1);
+            }
+            astc_set_weights_ise(&mut blk, WeightForm::Trit, 1, &weights);
+
+            let cpu = decode_astc_4x4_ldr(&blk)
+                .unwrap_or_else(|e| panic!("CEM {cem} block {blk:02x?} rejected: {e:?}"));
+            let gpu = oracle.decode_unorm8(format, &blk);
+            for t in 0..16 {
+                for c in 0..4 {
+                    let d = (cpu[t][c] as i32 - gpu[t][c] as i32).abs();
+                    assert!(
+                        d <= 1,
+                        "ASTC CEM {cem} block={blk:02x?} texel {t} chan {c}: cpu={} gpu={} (|d|={d})",
+                        cpu[t][c],
+                        gpu[t][c]
+                    );
+                }
+            }
+        }
+    }
+    eprintln!(
+        "ASTC multi-CEM LDR parity: {} LDR CEMs x {PER_CEM} blocks within 1 LSB of hardware",
+        LDR_CEMS.len()
+    );
+}
