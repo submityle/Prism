@@ -41,14 +41,26 @@
 //!   via a temp copy and a per-load version (`dlopen` family on Unix,
 //!   `LoadLibrary` family on Windows). Requires the `dynlib` feature.
 //!
-//! Later milestones add process control and crash/minidump backends per OS.
+//! ## M5 scope — process, environment, standard streams, and wall clock
+//! - [`process`]: raw command-line arguments ([`process::args`]), environment
+//!   variable read/iterate/set/remove ([`process::env`]), and child-process
+//!   spawning with pipes/wait/exit-status/kill ([`process::child`]). Requires
+//!   the `std` feature.
+//! - [`stdio`]: standard stdin/stdout/stderr handles plus `is_terminal`
+//!   probes for wiring the app CLI and diagnostic logging. Requires `std`.
+//! - [`wallclock`]: a real system wall-clock source (UTC / Unix epoch) kept
+//!   type-distinct from the monotonic [`clock`], with a paired
+//!   wall+monotonic [`wallclock::sample`] for log timestamps. Requires `std`.
+//!
+//! Later milestones add crash/minidump backends and signal hooks per OS.
 //!
 //! The crate contains no Unreal Engine source or derived code and depends on
 //! no `bevy_*` crate.
 //!
 //! The crate uses no `unsafe` except narrowly scoped, documented FFI in
-//! [`thread::affinity`], the [`vm`] virtual-memory backends, and the M4
-//! [`fs::mmap`] / [`fs::watch`] / [`dynlib`] backends; the workspace-level
+//! [`thread::affinity`], the [`vm`] virtual-memory backends, the M4
+//! [`fs::mmap`] / [`fs::watch`] / [`dynlib`] backends, and the two edition-2024
+//! `unsafe` environment mutators in [`process::env`]; the workspace-level
 //! `unsafe_code = "deny"` lint stays in force and is overridden only there via
 //! per-site `#[expect(unsafe_code, reason)]` with a `// SAFETY:` comment on
 //! every `unsafe` block.
@@ -65,6 +77,26 @@ pub mod cpu;
 pub mod fs;
 pub mod platform;
 pub mod prelude;
+
+/// Real system wall-clock time source (UTC / Unix epoch), kept type-distinct
+/// from the monotonic [`clock`].
+///
+/// Requires the `std` feature; absent in `no_std` builds.
+#[cfg(feature = "std")]
+pub mod wallclock;
+
+/// Process, environment, and command-line facade (`argv`, env vars, child
+/// processes).
+///
+/// Requires the `std` feature; absent in `no_std` builds.
+#[cfg(feature = "std")]
+pub mod process;
+
+/// Standard stream handles (stdin/stdout/stderr) with `is_terminal` probes.
+///
+/// Requires the `std` feature; absent in `no_std` builds.
+#[cfg(feature = "std")]
+pub mod stdio;
 /// Threads, thread-local storage, affinity, lightweight sync, and park/unpark.
 ///
 /// Requires the `std` feature; absent in `no_std` builds.
@@ -92,6 +124,8 @@ pub use fs::{mmap_supported, FsError, Mmap, MmapError, MmapMut, Result as FsResu
 pub use fs::{Event, EventKind, WatchBackend, WatchError, Watcher};
 pub use platform::{Os, Platform, PlatformCaps};
 #[cfg(feature = "std")]
+pub use wallclock::{now as wall_now, sample as wall_sample, WallClock, WallClockSample, WallTime};
+#[cfg(feature = "std")]
 pub use thread::{
     affinity_supported, current_id, hardware_concurrency, set_current_thread_affinity,
     set_current_thread_affinity_mask, sleep as thread_sleep, spawn, yield_now, AffinityError,
@@ -103,6 +137,10 @@ pub use vm::{
     huge_pages_supported, large_page_size, memory_info, page_size, virtual_memory_supported,
     MemoryInfo, Protection, Reservation, VmError,
 };
+#[cfg(feature = "std")]
+pub use process::{Child, Command, ExitStatus, Output, Stdio};
+#[cfg(feature = "std")]
+pub use stdio::{Stream, StandardError, StandardInput, StandardOutput};
 #[cfg(feature = "dynlib")]
 pub use dynlib::{supported as dynlib_supported, DynlibError, Library, Symbol};
 

@@ -4,6 +4,8 @@ pub use crate::atomics::{full_fence, spin_hint, Ordering};
 pub use crate::clock::{now as clock_now, MonotonicNanos};
 pub use crate::cpu::CpuInfo;
 pub use crate::platform::{Os, Platform, PlatformCaps};
+#[cfg(feature = "std")]
+pub use crate::wallclock::{self, now as wall_now, WallClock, WallClockSample, WallTime};
 
 #[cfg(feature = "std")]
 pub use crate::fs::{self, DirEntry, FsError, Metadata, OpenOptions, Result as FsResult};
@@ -19,3 +21,9 @@ pub use crate::vm::{
     self, huge_pages_supported as vm_huge_pages_supported, memory_info as vm_memory_info,
     page_size as vm_page_size, MemoryInfo, Protection, Reservation, VmError,
 };
+
+#[cfg(feature = "std")]
+pub use crate::process::{self, args as process_args, env as process_env, Child, Command, ExitStatus, Output, Stdio};
+
+#[cfg(feature = "std")]
+pub use crate::stdio::{self, Stream};

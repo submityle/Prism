@@ -66,6 +66,19 @@ pub struct PlatformCaps {
     /// [`crate::dynlib::DynlibError::Unsupported`]; some platforms (notably the
     /// Web target, design doc §10) have no runtime loader at all.
     pub has_dynlib_unload: bool,
+    /// Child processes can be spawned (design doc §11 子进程).
+    ///
+    /// Requires `std` and a target with a process model. `true` on the desktop
+    /// OSes; `false` on `wasm` targets, which have no `fork`/`exec` facility.
+    /// When `false`, [`crate::process::Command`] (if compiled) still exists but
+    /// every spawn attempt fails at the OS layer.
+    pub has_subprocess: bool,
+    /// A real system wall clock is available (design doc §7 墙钟, §11).
+    ///
+    /// Requires `std`; backs [`crate::wallclock`]. Distinct from
+    /// [`PlatformCaps::has_monotonic_clock`]: the wall clock is UTC/calendar
+    /// time (can step), the monotonic clock is for measuring elapsed time.
+    pub has_wall_clock: bool,
 }
 
 impl PlatformCaps {
@@ -84,6 +97,8 @@ impl PlatformCaps {
                     target_os = "dragonfly"
                 )),
             has_dynlib_unload: cfg!(feature = "dynlib") && cfg!(any(unix, windows)),
+            has_subprocess: cfg!(feature = "std") && cfg!(not(target_family = "wasm")),
+            has_wall_clock: cfg!(feature = "std"),
         }
     }
 }
