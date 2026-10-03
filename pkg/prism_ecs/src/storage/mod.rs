@@ -8,8 +8,10 @@
 
 mod blob_vec;
 mod chunk;
+mod sparse;
 mod table;
 
 pub use blob_vec::BlobVec;
 pub use chunk::{rows_per_chunk, ChunkVersions, TARGET_CHUNK_BYTES};
+pub use sparse::ComponentSparseSet;
 pub use table::{Column, Table};
