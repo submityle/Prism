@@ -293,10 +293,6 @@ impl HoaBinauralDecoder {
     /// and allocates the per-channel renderers. Call off the audio thread. An
     /// empty layout yields a decoder that renders silence.
     #[must_use]
-    #[expect(
-        clippy::needless_range_loop,
-        reason = "the filter-baking and renderer-build loops index parallel flat buffers by channel and tap"
-    )]
     pub fn new(
         dataset: &HrtfDataset,
         order: usize,
@@ -329,21 +325,27 @@ impl HoaBinauralDecoder {
             // prism_audio_spatial::decode_hoa: dot(coeffs, encode) / (order + 1)).
             encode_hoa(dir, order, &mut enc);
 
-            for c in 0..channels {
-                let gain = enc[c] * inv_norm;
-                let base = c * hrir_len;
-                for t in 0..hrir_len {
-                    fl[base + t] += gain * spk_l[t];
-                    fr[base + t] += gain * spk_r[t];
+            for ((fl_chan, fr_chan), &coeff) in fl
+                .chunks_mut(hrir_len)
+                .zip(fr.chunks_mut(hrir_len))
+                .zip(enc.iter())
+            {
+                let gain = coeff * inv_norm;
+                for ((l, r), (&sl, &sr)) in fl_chan
+                    .iter_mut()
+                    .zip(fr_chan.iter_mut())
+                    .zip(spk_l.iter().zip(spk_r.iter()))
+                {
+                    *l += gain * sl;
+                    *r += gain * sr;
                 }
             }
         }
 
         let mut renderers = Vec::with_capacity(channels);
-        for c in 0..channels {
-            let base = c * hrir_len;
+        for (fl_chan, fr_chan) in fl.chunks(hrir_len).zip(fr.chunks(hrir_len)) {
             let mut renderer = BinauralRenderer::new(hrir_len, max_block);
-            renderer.set_hrir_immediate(&fl[base..base + hrir_len], &fr[base..base + hrir_len]);
+            renderer.set_hrir_immediate(fl_chan, fr_chan);
             renderers.push(renderer);
         }
 
@@ -409,10 +411,6 @@ impl HoaBinauralDecoder {
     ///
     /// Returns the number of frames written. **Real-time**: allocation, lock,
     /// and panic free.
-    #[expect(
-        clippy::needless_range_loop,
-        reason = "the mix loops index parallel output and scratch buffers by frame and channel"
-    )]
     pub fn process_block(
         &mut self,
         hoa_channels: &[&[Sample]],
@@ -422,13 +420,13 @@ impl HoaBinauralDecoder {
         let active = self.channels.min(hoa_channels.len());
 
         let mut frames = out_l.len().min(out_r.len()).min(self.max_block);
-        for c in 0..active {
-            frames = frames.min(hoa_channels[c].len());
+        for ch in &hoa_channels[..active] {
+            frames = frames.min(ch.len());
         }
 
-        for i in 0..frames {
-            out_l[i] = 0.0;
-            out_r[i] = 0.0;
+        for (l, r) in out_l[..frames].iter_mut().zip(out_r[..frames].iter_mut()) {
+            *l = 0.0;
+            *r = 0.0;
         }
         if frames == 0 {
             return 0;
@@ -436,11 +434,18 @@ impl HoaBinauralDecoder {
 
         let sl = &mut self.scratch_l[..frames];
         let sr = &mut self.scratch_r[..frames];
-        for c in 0..active {
-            let produced = self.renderers[c].process_block(&hoa_channels[c][..frames], sl, sr);
-            for i in 0..produced {
-                out_l[i] += sl[i];
-                out_r[i] += sr[i];
+        for (renderer, ch) in self.renderers[..active]
+            .iter_mut()
+            .zip(hoa_channels[..active].iter())
+        {
+            let produced = renderer.process_block(&ch[..frames], sl, sr);
+            for ((l, r), (&s_l, &s_r)) in out_l[..produced]
+                .iter_mut()
+                .zip(out_r[..produced].iter_mut())
+                .zip(sl[..produced].iter().zip(sr[..produced].iter()))
+            {
+                *l += s_l;
+                *r += s_r;
             }
         }
 
