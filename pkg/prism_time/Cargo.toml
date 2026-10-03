@@ -14,6 +14,10 @@ default = ["std"]
 # Enable the platform monotonic clock (`Instant::now`). The generic Time<T>
 # math is no_std and can be driven by explicit deltas without `std`.
 std = []
+# Re-export the clocks/timers under `bevy_time`'s prelude names so code
+# written against `bevy_time` can swap in prism_time without renaming call
+# sites. Adds no behaviour and pulls in no `bevy_*` crate.
+compat-bevy = []
 
 [lints]
 workspace = true

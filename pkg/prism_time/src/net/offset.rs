@@ -339,15 +339,23 @@ impl Default for ClockSync {
 }
 
 /// Round a finite `f64` nanosecond value to the nearest `i64`, saturating.
+///
+/// Uses round-half-away-from-zero via a `+/- 0.5` bias and a saturating
+/// float-to-int cast, so it needs no `f64::round` (unavailable in pure
+/// `no_std`). The `as i64` cast truncates toward zero and saturates on
+/// overflow, which also covers non-finite inputs defensively.
 #[inline]
 fn round_to_i64(v: f64) -> i64 {
-    let r = v.round();
-    if r >= i64::MAX as f64 {
+    if !v.is_finite() {
+        return if v > 0.0 { i64::MAX } else { 0 };
+    }
+    let biased = if v >= 0.0 { v + 0.5 } else { v - 0.5 };
+    if biased >= i64::MAX as f64 {
         i64::MAX
-    } else if r <= i64::MIN as f64 {
+    } else if biased <= i64::MIN as f64 {
         i64::MIN
     } else {
-        r as i64
+        biased as i64
     }
 }
 

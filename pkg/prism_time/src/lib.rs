@@ -43,19 +43,31 @@
 //!   timeline, per-world/local [`TimeScaleDomain`] scopes, and eased
 //!   time-scale [`ScaleTransition`]s (see the [`net`], [`domain`], and
 //!   [`easing`] modules).
-//! - **M6+ (planned):** app/ECS/physics integration, addressable timeline
-//!   source, frame-step debugging, and the `bevy_time` compatibility prelude.
+//! - **M6 (this crate, done):** engine-agnostic integration wiring — an
+//!   addressable/seekable [`Timeline`] source with a marker [`Sequencer`],
+//!   [`FrameStepper`] frame-step debugging, [`FrameBudget`]/[`FrameStats`]
+//!   frame diagnostics, the [`TimeDriver`] frame-advance pipeline, and (behind
+//!   the `compat-bevy` feature) a `bevy_time`-shaped compatibility prelude (see
+//!   the [`timeline`], [`frame_step`], [`diagnostics`], and [`driver`]
+//!   modules). The crate stays ECS-agnostic: it provides the building blocks,
+//!   not the ECS glue.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
 
 mod clock;
+#[cfg(feature = "compat-bevy")]
+pub mod compat_bevy;
 pub mod determinism;
+pub mod diagnostics;
 mod domain;
+pub mod driver;
 mod easing;
 mod fixed;
+pub mod frame_step;
 mod instant;
 pub mod net;
+pub mod timeline;
 pub mod timer;
 mod virtual_time;
 
@@ -64,6 +76,10 @@ pub use core::time::Duration;
 pub use determinism::{RationalStep, TickClock, TickSnapshot};
 pub use domain::{TimeScaleDomain, composite_scale};
 pub use easing::{Easing, ScaleTransition};
+pub use diagnostics::{FrameBudget, FrameStats};
+pub use driver::{FrameReport, TimeDriver};
+pub use frame_step::{FrameStepper, StepState};
+pub use timeline::{PlaybackMode, Sequencer, SequencerFull, Timeline, TimelineMarker, TimelineTick};
 pub use fixed::Fixed;
 pub use instant::Instant;
 pub use net::{
@@ -215,11 +231,15 @@ impl Time<Real> {
 pub mod prelude {
     pub use crate::{
         Clocks, ClockOffsetEstimator, ClockSync, Cooldown, DefaultSource, Duration, Easing, Fixed,
-        Instant, InterpolationBuffer, Lerp, OffsetSample, RationalStep, Real, Sampled,
-        ScaleTransition, ServerTick, SmoothedDelta, Stopwatch, Throttle, TickClock, TickSnapshot,
-        Time, TimeScaleDomain, Timer, TimerMode, Virtual, composite_scale,
+        FrameBudget, FrameReport, FrameStats, FrameStepper, Instant, InterpolationBuffer, Lerp,
+        OffsetSample, PlaybackMode, RationalStep, Real, Sampled, ScaleTransition, Sequencer,
+        ServerTick, SmoothedDelta, StepState, Stopwatch, Throttle, TickClock, TickSnapshot, Time,
+        TimeDriver, TimeScaleDomain, Timeline, TimelineMarker, TimelineTick, Timer, TimerMode,
+        Virtual, composite_scale,
     };
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests;
+#[cfg(test)]
+mod tests_m6;
