@@ -1,8 +1,6 @@
 //! Content-specific transparency strategies.
 
-pub mod moment_oit;
 pub mod routing;
-pub mod weighted_oit;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TransparencyPath {
