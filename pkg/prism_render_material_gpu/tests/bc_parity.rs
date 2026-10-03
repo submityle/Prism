@@ -2284,3 +2284,111 @@ fn astc_full_single_partition_cem8_parity_against_gpu_hardware_decode() {
         PER_MODE * 2
     );
 }
+
+// ---------------------------------------------------------------------------
+// ASTC single-partition CEM8 (direct LDR RGB) parity with a NON-QUANT_256
+// colour range.
+//
+// The three ASTC colour tests above all drive QUANT_256 (8-bit identity)
+// endpoints, so they never exercise the colour *unquantization* tables. This
+// test uses block mode 578 (4x4, QUANT_16 bit-only weights, 64 weight bits),
+// whose single-partition single-plane colour budget is
+// `color_bits = 111 - 64 = 47`, which the reference `quant_mode_table` maps to
+// QUANT_192 (colour level index 15, a trit-form range with 6 low bits). The
+// six colour integers are therefore encoded as a trit ISE stream at bit 17 and
+// decoded through the `color_scrambled_pquant_to_uquant_q192` table on the CPU
+// side, then compared against the Metal hardware decoder on all four channels
+// (CEM8 forces alpha = 255 on both paths). Random packed endpoints drive the
+// blue-contraction + swap branch on roughly half the blocks.
+// ---------------------------------------------------------------------------
+
+/// `color_scrambled_pquant_to_uquant_q192` (QUANT_192, colour level index 15),
+/// transcribed verbatim from astcenc. Mirrors `color_unquant::Q192` in the
+/// CPU decoder; duplicated here only to count blue-contracted blocks for the
+/// diagnostic, so a drift between the two is itself a useful tripwire.
+#[rustfmt::skip]
+const COLOR_Q192: [u8; 192] = [
+    0, 255, 4, 251, 8, 247, 12, 243, 16, 239, 20, 235, 24, 231, 28, 227, 32, 223, 36, 219, 40, 215,
+    44, 211, 48, 207, 52, 203, 56, 199, 60, 195, 64, 191, 68, 187, 72, 183, 76, 179, 80, 175, 84,
+    171, 88, 167, 92, 163, 96, 159, 100, 155, 104, 151, 108, 147, 112, 143, 116, 139, 120, 135,
+    124, 131, 1, 254, 5, 250, 9, 246, 13, 242, 17, 238, 21, 234, 25, 230, 29, 226, 33, 222, 37,
+    218, 41, 214, 45, 210, 49, 206, 53, 202, 57, 198, 61, 194, 65, 190, 69, 186, 73, 182, 77, 178,
+    81, 174, 85, 170, 89, 166, 93, 162, 97, 158, 101, 154, 105, 150, 109, 146, 113, 142, 117, 138,
+    121, 134, 125, 130, 2, 253, 6, 249, 10, 245, 14, 241, 18, 237, 22, 233, 26, 229, 30, 225, 34,
+    221, 38, 217, 42, 213, 46, 209, 50, 205, 54, 201, 58, 197, 62, 193, 66, 189, 70, 185, 74, 181,
+    78, 177, 82, 173, 86, 169, 90, 165, 94, 161, 98, 157, 102, 153, 106, 149, 110, 145, 114, 141,
+    118, 137, 122, 133, 126, 129,
+];
+
+#[test]
+fn astc_cem8_color_quant192_parity_against_gpu_hardware_decode() {
+    let Some(oracle) = BlockOracle::try_new() else {
+        eprintln!("no GPU adapter; skipping ASTC QUANT_192 colour parity");
+        return;
+    };
+    if !oracle
+        .features()
+        .contains(Features::TEXTURE_COMPRESSION_ASTC)
+    {
+        eprintln!("adapter lacks ASTC support; skipping ASTC QUANT_192 colour parity");
+        return;
+    }
+    let format = TextureFormat::Astc {
+        block: wgpu::AstcBlock::B4x4,
+        channel: wgpu::AstcChannel::Unorm,
+    };
+    let mut rng = Rng(0x1992_C01E);
+    const COUNT: u32 = 256;
+    let mut contracted = 0u32;
+    for _ in 0..COUNT {
+        // Mode 578 (4x4 QUANT_16 weights, 64 weight bits) + CEM 8.
+        let mut blk = [0u8; 16];
+        astc_set_bits(&mut blk, 0, 11, 578);
+        astc_set_bits(&mut blk, 13, 4, 8);
+
+        // Six QUANT_192 packed colour integers: `low | (trit << 6)` with
+        // `low` in 0..64 and `trit` in 0..3, encoded as a trit ISE at bit 17.
+        let mut packed = [0u8; 6];
+        for p in packed.iter_mut() {
+            let low = rng.next_u32() % 64;
+            let trit = rng.next_u32() % 3;
+            *p = (low | (trit << 6)) as u8;
+        }
+        astc_encode_trit(&mut blk, 17, 6, &packed);
+
+        // Sixteen random 4-bit (QUANT_16) weights, bit-reversed from the top.
+        let mut weights = [0u32; 16];
+        for (t, wt) in weights.iter_mut().enumerate() {
+            let w = rng.next_u32() & 0xF;
+            *wt = w;
+            astc_set_weight4(&mut blk, t as u32, w);
+        }
+
+        // Count blocks that drive blue-contraction + swap, computed on the
+        // *unquantized* colours exactly as the CPU decoder does.
+        let u = |i: usize| COLOR_Q192[packed[i] as usize] as u32;
+        let s0 = u(0) + u(2) + u(4);
+        let s1 = u(1) + u(3) + u(5);
+        if s0 > s1 {
+            contracted += 1;
+        }
+
+        let cpu = decode_astc_4x4_ldr(&blk).expect("supported QUANT_192 CEM8 block");
+        let gpu = oracle.decode_unorm8(format, &blk);
+        for t in 0..16 {
+            for c in 0..4 {
+                let d = (cpu[t][c] as i32 - gpu[t][c] as i32).abs();
+                assert!(
+                    d <= 1,
+                    "ASTC QUANT_192 CEM8 block={blk:02x?} texel {t} chan {c}: packed={packed:?} raw_w={} cpu={} gpu={} (|d|={d})",
+                    weights[t],
+                    cpu[t][c],
+                    gpu[t][c]
+                );
+            }
+        }
+    }
+    eprintln!(
+        "ASTC QUANT_192 colour parity: {COUNT} blocks within 1 LSB of hardware ({contracted} exercised blue-contraction)"
+    );
+}
