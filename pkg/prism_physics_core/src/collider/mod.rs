@@ -263,6 +263,10 @@ pub mod tet_fem_volume_projection;
 pub use tet_fem_volume_projection::{
     project_volume, VolumeProjectionParams, VolumeProjectionReport,
 };
+pub mod tet_fem_adaptive_substep;
+pub use tet_fem_adaptive_substep::{
+    step_newmark_adaptive, AdaptiveSubstepParams, AdaptiveSubstepResult,
+};
 pub mod tet_fem_anisotropic;
 pub use tet_fem_anisotropic::{
     orthotropic_fiber_energy, orthotropic_fiber_first_piola, FiberDirection, FiberFamily,
