@@ -195,6 +195,8 @@ pub mod tet_partition;
 pub use tet_partition::{
     partition_tet_adjacency, partition_tet_mesh, TetPartition, TetPartitionParams,
 };
+pub mod tet_vertex_adjacency;
+pub use tet_vertex_adjacency::{build_tet_vertex_adjacency, TetVertexAdjacency};
 
 /// A handle into a [`ShapeRegistry`].
 ///
