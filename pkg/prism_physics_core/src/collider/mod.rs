@@ -177,6 +177,8 @@ pub mod tet_quality;
 pub use tet_quality::{
     analyze_tet_mesh_quality, tet_quality, TetMeshQualityReport, TetQuality, TetQualityParams,
 };
+pub mod tet_smooth;
+pub use tet_smooth::{smooth_tet_mesh, TetSmoothParams, TetSmoothResult};
 
 /// A handle into a [`ShapeRegistry`].
 ///
