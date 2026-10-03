@@ -1,0 +1,16 @@
+[package]
+name = "prism_dmm_gpu"
+version = "0.1.0"
+edition = "2024"
+description = "Optional wgpu compute backend for Prism's Displaced Micro-Map (DMM) baker. Samples, quantizes, and bit-packs per-micro-vertex 11-bit unorm displacement on the GPU and is validated element-for-element against the prism_dmm CPU golden on a real device. Pure classical numerics (barycentric micro-vertex lattice + bilinear height sampling + per-triangle scale/bias + 11-bit unorm quantization + raw little-endian bit packing); no AI/ML and no Unreal Engine source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_dmm = { path = "../prism_dmm" }
+wgpu = { version = "30", default-features = false, features = ["wgsl", "metal"] }
+bytemuck = { version = "1.5", features = ["derive"] }
+futures-lite = "2"
+
+[lints]
+workspace = true

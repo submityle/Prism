@@ -73,6 +73,8 @@ members = [
   "pkg/prism_dmm",
   # Prism real-device wgpu twin of the Opacity Micromap (OMM) baker.
   "pkg/prism_micromap_gpu",
+  # Prism real-device wgpu twin of the Displaced Micro-Map (DMM) baker.
+  "pkg/prism_dmm_gpu",
   # Prism experimental next-generation audio engine.
   "pkg/prism_audio_core",
   # Prism next-generation audio engine real-time runtime bridge (command/telemetry rings + epoch reclamation).
