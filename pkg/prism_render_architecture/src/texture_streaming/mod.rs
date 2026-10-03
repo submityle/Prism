@@ -10,6 +10,8 @@
 //! * [`feedback`] — turns per-page streaming feedback (desired vs resident mip,
 //!   screen importance, [`TextureSemantic`]) into a fixed-point priority using
 //!   only integer arithmetic, so the ordering is exact and deterministic.
+//! * [`feedback_decode`] — decodes a `GPU` min-mip sampler-feedback grid into
+//!   the deduplicated [`feedback::PageDemand`] records that drive it.
 //! * [`scheduler`] — a byte-budget-constrained greedy pass that picks the
 //!   resident set and reports the frame's uploads and evictions.
 //!
@@ -31,12 +33,14 @@
 //! [`indirection::GpuPageTable::words`]; this crate computes both deterministically.
 
 pub mod feedback;
+pub mod feedback_decode;
 pub mod indirection;
 pub mod pool;
 pub mod residency;
 pub mod scheduler;
 
 pub use feedback::{PageDemand, SemanticWeights, MAX_SCREEN_IMPORTANCE, MIP_URGENCY};
+pub use feedback_decode::{decode_feedback, FeedbackTextureDesc, NOT_REQUESTED};
 pub use indirection::{GpuPageTable, PAGE_TABLE_ENTRY_WORDS};
 pub use pool::{PageUpload, PhysicalPagePool};
 pub use residency::{PageRecord, PageResidency, TextureResidencyTable};
