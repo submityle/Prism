@@ -2486,3 +2486,169 @@ fn astc_multi_cem_ldr_parity_against_gpu_hardware_decode() {
         LDR_CEMS.len()
     );
 }
+
+/// Weight ISE forms spanning every single-plane range the infill test needs:
+/// pure-binary ranges in addition to the trit/quint ranges [`WeightForm`]
+/// already covers.
+#[derive(Clone, Copy)]
+enum GridWeightForm {
+    Bits,
+    Trit,
+    Quint,
+}
+
+/// Map a BISE weight level count to its ISE form and low (pure-binary) bit
+/// width, matching `IseRange::from_num_levels` on the decode side.
+fn levels_to_grid_form(levels: u32) -> (GridWeightForm, u32) {
+    match levels {
+        2 => (GridWeightForm::Bits, 1),
+        3 => (GridWeightForm::Trit, 0),
+        4 => (GridWeightForm::Bits, 2),
+        5 => (GridWeightForm::Quint, 0),
+        6 => (GridWeightForm::Trit, 1),
+        8 => (GridWeightForm::Bits, 3),
+        10 => (GridWeightForm::Quint, 1),
+        12 => (GridWeightForm::Trit, 2),
+        16 => (GridWeightForm::Bits, 4),
+        20 => (GridWeightForm::Quint, 2),
+        24 => (GridWeightForm::Trit, 3),
+        32 => (GridWeightForm::Bits, 5),
+        _ => panic!("unsupported weight level count {levels}"),
+    }
+}
+
+/// Draw a random raw weight for `form`/`bits`: a `bits`-wide binary value, or a
+/// `low | (digit << bits)` trit/quint pack, exactly what the encoders consume.
+fn rand_grid_weight(rng: &mut Rng, form: GridWeightForm, bits: u32) -> u8 {
+    match form {
+        GridWeightForm::Bits => (rng.next_u32() % (1 << bits)) as u8,
+        GridWeightForm::Trit => {
+            let low = rng.next_u32() % (1 << bits);
+            let trit = rng.next_u32() % 3;
+            (low | (trit << bits)) as u8
+        }
+        GridWeightForm::Quint => {
+            let low = rng.next_u32() % (1 << bits);
+            let quint = rng.next_u32() % 5;
+            (low | (quint << bits)) as u8
+        }
+    }
+}
+
+/// Lay `vals` (a single-plane weight grid of arbitrary length) into the
+/// bit-reversed weight region: encode LSB-first into a scratch block at bit 0
+/// using `form`/`bits`, then mirror end-for-end (logical bit `p` -> real block
+/// bit `127 - p`), the exact inverse of the decoder's mirror + `decode_ise`.
+fn astc_set_grid_weights(blk: &mut [u8; 16], form: GridWeightForm, bits: u32, vals: &[u8]) {
+    let mut tmp = [0u8; 16];
+    match form {
+        GridWeightForm::Bits => {
+            let mut off = 0u32;
+            for &v in vals {
+                astc_set_bits(&mut tmp, off, bits, v as u32);
+                off += bits;
+            }
+        }
+        GridWeightForm::Trit => astc_encode_trit(&mut tmp, 0, bits, vals),
+        GridWeightForm::Quint => astc_encode_quint(&mut tmp, 0, bits, vals),
+    }
+    for p in 0..128u32 {
+        if (tmp[(p >> 3) as usize] >> (p & 7)) & 1 == 1 {
+            let real = 127 - p;
+            blk[(real >> 3) as usize] |= 1 << (real & 7);
+        }
+    }
+}
+
+/// Non-4x4 single-plane modes exercised by the bilinear-infill parity test:
+/// `(block_mode, weights_x, weights_y, weight_levels)`. Each uses CEM8 with six
+/// raw 8-bit (QUANT_256) colour integers, and a weight grid that is resampled
+/// to the 4x4 footprint by the Khronos bilinear infill. The grids span wide,
+/// tall and square shapes and all three weight ISE forms (bits/trit/quint).
+// Every grid here fits inside the 4x4 texel footprint (wx<=4 && wy<=4) and is
+// NOT the 4x4 baseline, so each is a LEGAL non-4x4 single-plane block mode that
+// conformant ASTC hardware accepts. Grids larger than the footprint (e.g. 8x2,
+// 5x2, 4x8) are illegal for a 4x4 block and the hardware rejects them, so they
+// are intentionally excluded. Shapes cover 4x2/4x3/2x4/3x4/2x3/3x2/3x3 and the
+// weight ISE forms span pure-bit (4/8/16), trit (6/24), and quint (5/10) ranges.
+const INFILL_MODES: [(u32, u32, u32, u32); 12] = [
+    (19, 4, 2, 8),
+    (34, 4, 3, 4),
+    (35, 4, 3, 6),
+    (50, 4, 3, 5),
+    (351, 2, 4, 8),
+    (431, 3, 3, 6),
+    (462, 3, 4, 4),
+    (478, 3, 4, 5),
+    (814, 2, 3, 16),
+    (910, 3, 2, 16),
+    (941, 3, 3, 10),
+    (943, 3, 3, 24),
+];
+
+/// GPU parity for the non-4x4 single-plane weight-grid bilinear infill: for a
+/// spread of grid shapes and all three weight ISE forms, build CEM8 QUANT_256
+/// blocks with random endpoints and random grid weights, then confirm the CPU
+/// `decode_astc_4x4_ldr` matches the Metal ASTC hardware decoder within 1 LSB
+/// on every texel and channel.
+#[test]
+fn astc_infill_non44_single_plane_parity_against_gpu_hardware_decode() {
+    let Some(oracle) = BlockOracle::try_new() else {
+        eprintln!("no GPU adapter; skipping ASTC non-4x4 infill parity");
+        return;
+    };
+    if !oracle
+        .features()
+        .contains(Features::TEXTURE_COMPRESSION_ASTC)
+    {
+        eprintln!("adapter lacks ASTC support; skipping ASTC non-4x4 infill parity");
+        return;
+    }
+    let format = TextureFormat::Astc {
+        block: wgpu::AstcBlock::B4x4,
+        channel: wgpu::AstcChannel::Unorm,
+    };
+    let mut rng = Rng(0x14F1_11AB);
+    const PER_MODE: u32 = 128;
+    for (mode, wx, wy, levels) in INFILL_MODES {
+        let (form, bits) = levels_to_grid_form(levels);
+        let weight_count = (wx * wy) as usize;
+        for _ in 0..PER_MODE {
+            let mut blk = [0u8; 16];
+            astc_set_bits(&mut blk, 0, 11, mode);
+            astc_set_bits(&mut blk, 13, 4, 8); // CEM 8 (LDR direct RGB)
+
+            // Six raw 8-bit (QUANT_256) colour integers at bits [17..65).
+            for i in 0..6u32 {
+                astc_set_bits(&mut blk, 17 + i * 8, 8, rng.byte() as u32);
+            }
+
+            // weights_x * weights_y random grid weights in the mode's range.
+            let mut weights = [0u8; 64];
+            for w in weights.iter_mut().take(weight_count) {
+                *w = rand_grid_weight(&mut rng, form, bits);
+            }
+            astc_set_grid_weights(&mut blk, form, bits, &weights[..weight_count]);
+
+            let cpu = decode_astc_4x4_ldr(&blk).unwrap_or_else(|e| {
+                panic!("mode {mode} ({wx}x{wy}, {levels} levels) block {blk:02x?} rejected: {e:?}")
+            });
+            let gpu = oracle.decode_unorm8(format, &blk);
+            for t in 0..16 {
+                for c in 0..4 {
+                    let d = (cpu[t][c] as i32 - gpu[t][c] as i32).abs();
+                    assert!(
+                        d <= 1,
+                        "ASTC infill mode {mode} ({wx}x{wy}) block={blk:02x?} texel {t} chan {c}: cpu={} gpu={} (|d|={d})",
+                        cpu[t][c],
+                        gpu[t][c]
+                    );
+                }
+            }
+        }
+    }
+    eprintln!(
+        "ASTC non-4x4 infill parity: {} grid modes x {PER_MODE} blocks within 1 LSB of hardware",
+        INFILL_MODES.len()
+    );
+}
