@@ -281,6 +281,28 @@ impl App {
         self
     }
 
+    /// Set the fixed-timestep period for the [`FixedMain`](crate::fixed) tick
+    /// group to an exact [`Duration`](prism_time::Duration) (design §8).
+    ///
+    /// Prefer this over [`set_fixed_timestep_hz`](App::set_fixed_timestep_hz)
+    /// when the step must match another duration *bit-for-bit* — e.g. a
+    /// dedicated server aligning the fixed step to its tick period so each tick
+    /// drives exactly one `FixedUpdate`. Deriving both from the same `Duration`
+    /// avoids the sub-nanosecond mismatch between truncating and rounding
+    /// `hz`-to-`Duration` conversions, which would otherwise drop one step
+    /// every time the accumulator drifts a nanosecond short.
+    ///
+    /// Panics only if the main world has no [`EngineClocks`] resource, which
+    /// [`App::new`] always installs.
+    pub fn set_fixed_timestep(&mut self, timestep: prism_time::Duration) -> &mut Self {
+        self.sub_apps.main
+            .world
+            .resource_mut::<EngineClocks>()
+            .fixed_mut()
+            .set_timestep(timestep);
+        self
+    }
+
     /// Set the runner that drives this app in [`run`](App::run).
     pub fn set_runner(&mut self, runner: impl FnOnce(App) -> AppExit + 'static) -> &mut Self {
         self.runner = Some(Box::new(runner));

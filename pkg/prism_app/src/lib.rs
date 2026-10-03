@@ -91,12 +91,16 @@
 //!   [`Plugin::shutdown`] — distinct from the post-startup, forward-order
 //!   [`cleanup`](crate::plugin::Plugin::cleanup). The runners invoke it once the
 //!   frame loop ends.
-//! - Platform-free runners: [`HeadlessRunner`] and
-//!   [`ScheduleRunnerOnce`].
+//! - Platform-free runners: [`HeadlessRunner`], [`ScheduleRunnerOnce`],
+//!   and the [`DedicatedServerRunner`] (design §10 / §24.4, M5): an
+//!   authoritative fixed-tickrate, deterministic simulation heartbeat with
+//!   no rendering, publishing live [`ServerTickDiagnostics`] so server
+//!   systems can detect tick overload. Networking stays in the
+//!   `prism_replication` layer (injected as a plugin), not this runner.
 //!
 //! Everything on the public surface is a **real, working implementation** —
 //! no `todo!()`, `unimplemented!()`, or hollow stubs. Later milestones (sub-app
-//! pipelining, windowed / dedicated-server runners, determinism) layer on top
+//! pipelining, the windowed runner, record/replay determinism) layer on top
 //! without rewriting these foundations. Deferred features are documented as
 //! absent, never faked.
 //!
@@ -139,6 +143,8 @@ pub use exit::{AppExit, AppExitRequest};
 pub use plugin::{Plugin, PluginDependency};
 pub use plugin_graph::PluginGraphError;
 pub use plugin_group::{PluginGroup, PluginGroupBuilder};
+#[cfg(feature = "std")]
+pub use runner::{DedicatedServerRunner, ServerTickDiagnostics};
 pub use runner::{HeadlessRunner, ScheduleRunnerOnce, run_once};
 pub use fixed::{FixedFirst, FixedLast, FixedPostUpdate, FixedPreUpdate, FixedUpdate};
 pub use lifecycle::{
@@ -165,6 +171,8 @@ pub mod prelude {
     pub use crate::plugin::{Plugin, PluginDependency};
     pub use crate::plugin_graph::PluginGraphError;
     pub use crate::plugin_group::{PluginGroup, PluginGroupBuilder};
+    #[cfg(feature = "std")]
+    pub use crate::runner::{DedicatedServerRunner, ServerTickDiagnostics};
     pub use crate::runner::{HeadlessRunner, ScheduleRunnerOnce};
     pub use crate::fixed::{FixedFirst, FixedLast, FixedPostUpdate, FixedPreUpdate, FixedUpdate};
     pub use crate::lifecycle::{

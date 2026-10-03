@@ -7,21 +7,26 @@
 //! loop from the app is what lets the same engine shell drive a windowed
 //! client, a headless server, or a single-frame test.
 //!
-//! M0 ships two platform-free runners:
+//! Platform-free runners ship today:
 //!
 //! - [`run_once`] / [`ScheduleRunnerOnce`] — exactly one frame.
 //! - [`HeadlessRunner`] — loop until exit (optionally bounded by a frame
 //!   cap, and optionally paced to a [`FrameLimit`](crate::pacing::FrameLimit)
 //!   under `std`, design §13).
+//! - [`DedicatedServerRunner`] — an authoritative fixed-tickrate, deterministic
+//!   simulation heartbeat with no rendering (design §10 / §24.4, `std`-only).
 //!
 //! # Honestly deferred
 //!
-//! The windowed `WinitRunner` and `DedicatedServerRunner` (design §10 / §24.4)
-//! need `prism_window` and the network stack respectively; they are M4/M5 and
-//! are intentionally absent, not stubbed.
+//! The windowed `WinitRunner` (design §10) needs `prism_window`; it is M4's
+//! final increment and is intentionally absent, not stubbed.
 
+#[cfg(feature = "std")]
+mod dedicated_server;
 mod headless;
 mod once;
 
+#[cfg(feature = "std")]
+pub use dedicated_server::{DedicatedServerRunner, ServerTickDiagnostics};
 pub use headless::HeadlessRunner;
 pub use once::{run_once, ScheduleRunnerOnce};

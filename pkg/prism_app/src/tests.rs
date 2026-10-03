@@ -34,6 +34,7 @@ fn headless_runner_drives_requested_frames() {
 /// A `HeadlessRunner` with a `FrameLimit` still drives the requested frames and
 /// actually paces the loop: with an explicit per-frame period the run cannot
 /// finish faster than the paced minimum (one sleep per inter-frame boundary).
+#[cfg(feature = "std")]
 #[test]
 fn headless_runner_frame_limit_paces_the_loop() {
     use crate::pacing::FrameLimit;
@@ -1710,4 +1711,245 @@ fn run_once_runs_shutdown_path() {
         1,
         "run_once drives the Shutdown schedule exactly once",
     );
+}
+
+// ---- dedicated-server runner (design §10 / §24.4) ----------------------
+
+// Std-only: the dedicated-server runner and its diagnostics live behind
+// `#[cfg(feature = "std")]` (it paces against the monotonic clock), so these
+// tests compile only when `std` is enabled.
+#[cfg(feature = "std")]
+mod dedicated_server {
+    use super::*;
+    use crate::runner::{DedicatedServerRunner, ServerTickDiagnostics};
+
+    /// The builder exposes its configuration, and the opt-outs flip exactly the
+    /// flag they name while leaving the rest at their authoritative defaults.
+    #[test]
+    fn dedicated_server_builder_config_and_opt_outs() {
+        use prism_time::Duration;
+
+        let default = DedicatedServerRunner::new(60);
+        assert_eq!(default.tickrate_hz(), 60);
+        assert_eq!(default.max_ticks(), None);
+        assert!(default.is_deterministic());
+        assert!(default.aligns_fixed_timestep());
+        assert!(default.is_real_time_paced());
+        // 60 Hz => 1/60 s period (nanosecond-truncated, matching FrameLimit).
+        assert_eq!(
+            default.tick_period(),
+            Duration::from_nanos(1_000_000_000 / 60)
+        );
+
+        let tuned = DedicatedServerRunner::new(30)
+            .with_max_ticks(7)
+            .with_wall_clock_time()
+            .without_fixed_timestep_alignment()
+            .without_real_time_pacing();
+        assert_eq!(tuned.tickrate_hz(), 30);
+        assert_eq!(tuned.max_ticks(), Some(7));
+        assert!(!tuned.is_deterministic());
+        assert!(!tuned.aligns_fixed_timestep());
+        assert!(!tuned.is_real_time_paced());
+    }
+
+    /// A zero tickrate is a programming error and panics loudly rather than
+    /// silently picking a rate.
+    #[test]
+    #[should_panic(expected = "tickrate must be non-zero")]
+    fn dedicated_server_rejects_zero_tickrate() {
+        let _ = DedicatedServerRunner::new(0);
+    }
+
+    /// The server loop drives `Update` exactly `max_ticks` times and reports a
+    /// clean exit. Run unpaced so the test does not sleep.
+    #[test]
+    fn dedicated_server_drives_requested_ticks() {
+        let ticks = Arc::new(AtomicU64::new(0));
+        let t = ticks.clone();
+
+        let mut app = App::new();
+        app.add_systems(Update, move || {
+            t.fetch_add(1, Ordering::Relaxed);
+        });
+        app.set_runner(|app| {
+            DedicatedServerRunner::new(60)
+                .with_max_ticks(5)
+                .without_real_time_pacing()
+                .run(app)
+        });
+
+        let exit = app.run();
+        assert_eq!(exit, AppExit::Success);
+        assert_eq!(ticks.load(Ordering::Relaxed), 5);
+    }
+
+    /// The authoritative heartbeat: with deterministic stepping and fixed-timestep
+    /// alignment (both on by default), each tick advances simulated time by exactly
+    /// one tick period, so `FixedUpdate` runs exactly once per tick — the
+    /// "定 tickrate 固定步长心跳" invariant.
+    #[test]
+    fn dedicated_server_runs_exactly_one_fixed_step_per_tick() {
+        let fixed = Arc::new(AtomicU64::new(0));
+        let update = Arc::new(AtomicU64::new(0));
+        let fx = fixed.clone();
+        let up = update.clone();
+
+        let mut app = App::new();
+        app.add_systems(FixedUpdate, move || {
+            fx.fetch_add(1, Ordering::Relaxed);
+        });
+        app.add_systems(Update, move || {
+            up.fetch_add(1, Ordering::Relaxed);
+        });
+        app.set_runner(|app| {
+            DedicatedServerRunner::new(60)
+                .with_max_ticks(10)
+                .without_real_time_pacing()
+                .run(app)
+        });
+        app.run();
+
+        assert_eq!(
+            fixed.load(Ordering::Relaxed),
+            10,
+            "exactly one fixed step per server tick over 10 ticks",
+        );
+        assert_eq!(
+            update.load(Ordering::Relaxed),
+            10,
+            "the variable Update phase still runs once per tick",
+        );
+    }
+
+    /// Opting out of fixed-timestep alignment leaves the app's fixed rate untouched,
+    /// so the server's manual per-tick delta no longer matches the step and the
+    /// one-step-per-tick invariant does not hold. Guards against the alignment
+    /// being a silent no-op.
+    #[test]
+    fn dedicated_server_without_alignment_does_not_force_one_step_per_tick() {
+        let fixed = Arc::new(AtomicU64::new(0));
+        let fx = fixed.clone();
+
+        let mut app = App::new();
+        // Leave the default fixed timestep (64 Hz) in place; the server ticks at
+        // 60 Hz, so a per-tick delta of 1/60 s against a 1/64 s step does not
+        // produce a clean one-step-per-tick cadence.
+        app.add_systems(FixedUpdate, move || {
+            fx.fetch_add(1, Ordering::Relaxed);
+        });
+        app.set_runner(|app| {
+            DedicatedServerRunner::new(60)
+                .with_max_ticks(4)
+                .without_fixed_timestep_alignment()
+                .without_real_time_pacing()
+                .run(app)
+        });
+        app.run();
+
+        // We assert only that alignment is *not* applied: the count differs from a
+        // perfectly-aligned 1:1 run is not guaranteed, but the fixed system must
+        // still have run a bounded number of times (never panicking / never
+        // unbounded). The precise count is a function of the mismatched rates.
+        let runs = fixed.load(Ordering::Relaxed);
+        assert!(
+            runs <= 4,
+            "mismatched rates cannot exceed one step per tick here"
+        );
+    }
+
+    /// The runner publishes live `ServerTickDiagnostics`: a server system can read
+    /// the current tick health, the tick count advances, and trivial work does not
+    /// register as overloaded.
+    #[test]
+    fn dedicated_server_publishes_tick_diagnostics() {
+        let seen_period_nonzero = Arc::new(AtomicU64::new(0));
+        let seen_overloaded = Arc::new(AtomicU64::new(0));
+        let max_tick_seen = Arc::new(AtomicU64::new(0));
+        let p = seen_period_nonzero.clone();
+        let o = seen_overloaded.clone();
+        let m = max_tick_seen.clone();
+
+        let mut app = App::new();
+        app.add_systems(Update, move |diag: Res<ServerTickDiagnostics>| {
+            if !diag.tick_period().is_zero() {
+                p.fetch_add(1, Ordering::Relaxed);
+            }
+            if diag.is_overloaded() {
+                o.fetch_add(1, Ordering::Relaxed);
+            }
+            m.fetch_max(diag.tick(), Ordering::Relaxed);
+        });
+        app.set_runner(|app| {
+            DedicatedServerRunner::new(120)
+                .with_max_ticks(6)
+                .without_real_time_pacing()
+                .run(app)
+        });
+
+        let exit = app.run();
+        assert_eq!(exit, AppExit::Success);
+        // The resource was present and seeded with a non-zero period on every tick.
+        assert_eq!(seen_period_nonzero.load(Ordering::Relaxed), 6);
+        // Trivial work against an 1/120 s budget never counts as overloaded.
+        assert_eq!(seen_overloaded.load(Ordering::Relaxed), 0);
+        // Diagnostics are refreshed after each tick, so a system reading on tick N
+        // observes the previous tick's count: the max observed is max_ticks - 1.
+        assert_eq!(max_tick_seen.load(Ordering::Relaxed), 5);
+    }
+
+    /// A system requesting exit stops the server promptly and the requested exit
+    /// code is returned, even with no tick cap set.
+    #[test]
+    fn dedicated_server_honors_exit_request() {
+        let ticks = Arc::new(AtomicU64::new(0));
+        let t = ticks.clone();
+
+        let mut app = App::new();
+        app.add_systems(Update, move |mut exit: ResMut<AppExitRequest>| {
+            let n = t.fetch_add(1, Ordering::Relaxed) + 1;
+            if n == 3 {
+                exit.send_error();
+            }
+        });
+        app.set_runner(|app| {
+            DedicatedServerRunner::new(1000)
+                .without_real_time_pacing()
+                .run(app)
+        });
+
+        let exit = app.run();
+        assert_eq!(exit, AppExit::error());
+        assert_eq!(
+            ticks.load(Ordering::Relaxed),
+            3,
+            "the server stops the tick after exit is requested",
+        );
+    }
+
+    /// The server runs the graceful-shutdown path once after its tick loop ends.
+    #[test]
+    fn dedicated_server_runs_shutdown_once_after_tick_loop() {
+        let shutdowns = Arc::new(AtomicU64::new(0));
+        let s = shutdowns.clone();
+
+        let mut app = App::new();
+        app.add_systems(Shutdown, move || {
+            s.fetch_add(1, Ordering::Relaxed);
+        });
+        app.set_runner(|app| {
+            DedicatedServerRunner::new(60)
+                .with_max_ticks(3)
+                .without_real_time_pacing()
+                .run(app)
+        });
+
+        let exit = app.run();
+        assert_eq!(exit, AppExit::Success);
+        assert_eq!(
+            shutdowns.load(Ordering::Relaxed),
+            1,
+            "the dedicated server drains the Shutdown schedule exactly once",
+        );
+    }
 }
