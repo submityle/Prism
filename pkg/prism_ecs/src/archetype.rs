@@ -164,6 +164,12 @@ impl Archetypes {
         self.archetypes.iter()
     }
 
+    /// All archetypes mutably, in id order.
+    #[inline]
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Archetype> {
+        self.archetypes.iter_mut()
+    }
+
     /// Get the id for `set`, creating the archetype (and its empty table) if it
     /// does not yet exist. `components` supplies the layout/drop metadata needed
     /// to build the table columns.

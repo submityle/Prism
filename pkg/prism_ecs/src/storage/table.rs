@@ -10,21 +10,44 @@
 
 use alloc::vec::Vec;
 use core::alloc::Layout;
+use core::cell::UnsafeCell;
 
+use crate::change::{ComponentTicks, Tick};
 use crate::collections::HashMap;
 use crate::component::{ComponentId, DropFn};
 use crate::entity::Entity;
 use crate::storage::blob_vec::BlobVec;
 
 /// A single type-erased component column within a [`Table`].
+///
+/// Alongside the component bytes in `data`, every row carries two change-
+/// detection ticks (design §10): `added_ticks[row]` records when the value was
+/// first inserted and `changed_ticks[row]` when it was last written. All three
+/// vectors stay in lockstep with the owning table's `entities` vector.
+///
+/// The ticks live behind [`UnsafeCell`] so the `&mut T` / `Mut<T>` query fetch
+/// can stamp the changed tick through a shared `&Column` while iterating,
+/// mirroring the interior-mutability discipline already used for the component
+/// bytes themselves.
 pub struct Column {
     data: BlobVec,
+    added_ticks: Vec<UnsafeCell<Tick>>,
+    changed_ticks: Vec<UnsafeCell<Tick>>,
 }
+
+// SAFETY: `UnsafeCell<Tick>` makes `Column` `!Sync` by default. The tick cells
+// are mutated only under the same unique-access discipline that governs the
+// component bytes in `BlobVec` (itself `unsafe impl Sync`): a writer stamping a
+// row holds unique access to that row, and no reader observes a cell mid-write.
+// Sharing a `&Column` across threads is therefore sound.
+unsafe impl Sync for Column {}
 
 impl Column {
     fn new(layout: Layout, drop: Option<DropFn>) -> Self {
         Self {
             data: BlobVec::new(layout, drop),
+            added_ticks: Vec::new(),
+            changed_ticks: Vec::new(),
         }
     }
 
@@ -74,26 +97,98 @@ impl Column {
         unsafe { &mut *self.get_ptr(row).cast::<T>() }
     }
 
-    /// Append a value by moving `size` bytes from `value`.
+    /// Append a value by moving `size` bytes from `value`, stamping both its
+    /// added and changed ticks with `change_tick` (a brand-new value).
     ///
     /// # Safety
     /// `value` points to a valid, initialized value of this column's type;
     /// ownership transfers into the column.
     #[inline]
-    pub unsafe fn push(&mut self, value: *const u8) {
+    pub unsafe fn push(&mut self, value: *const u8, change_tick: Tick) {
         // SAFETY: forwarded contract.
         unsafe { self.data.push(value) }
+        self.added_ticks.push(UnsafeCell::new(change_tick));
+        self.changed_ticks.push(UnsafeCell::new(change_tick));
     }
 
-    /// Overwrite the value at `row`, dropping the previous one (last-wins).
+    /// Overwrite the value at `row`, dropping the previous one (last-wins), and
+    /// advance its changed tick to `change_tick`. The added tick is preserved:
+    /// the value has existed since its original insertion, it was merely
+    /// written again.
     ///
     /// # Safety
     /// `row < len()` and `value` points to a valid value of this column's
     /// type whose ownership transfers into the column.
     #[inline]
-    pub unsafe fn replace(&mut self, row: usize, value: *const u8) {
+    pub unsafe fn replace(&mut self, row: usize, value: *const u8, change_tick: Tick) {
         // SAFETY: forwarded contract.
         unsafe { self.data.replace(row, value) }
+        *self.changed_ticks[row].get_mut() = change_tick;
+    }
+
+    /// The tick at which the value at `row` was first added.
+    ///
+    /// # Panics
+    /// Panics if `row >= len()`.
+    #[inline]
+    pub fn added_tick(&self, row: usize) -> Tick {
+        // SAFETY: shared read of the cell; any writer holds unique access to
+        // this row per the column's access discipline, so no `&mut` aliases.
+        unsafe { *self.added_ticks[row].get() }
+    }
+
+    /// The tick at which the value at `row` was last changed.
+    ///
+    /// # Panics
+    /// Panics if `row >= len()`.
+    #[inline]
+    pub fn changed_tick(&self, row: usize) -> Tick {
+        // SAFETY: shared read of the cell; see [`Column::added_tick`].
+        unsafe { *self.changed_ticks[row].get() }
+    }
+
+    /// The added/changed [`ComponentTicks`] pair for the value at `row`.
+    ///
+    /// # Panics
+    /// Panics if `row >= len()`.
+    #[inline]
+    pub fn component_ticks(&self, row: usize) -> ComponentTicks {
+        ComponentTicks {
+            added: self.added_tick(row),
+            changed: self.changed_tick(row),
+        }
+    }
+
+    /// Raw pointer to the changed-tick cell at `row`, for interior-mutable
+    /// stamping through a shared `&Column` (the `&mut T` / `Mut<T>` fetch).
+    ///
+    /// # Safety
+    /// `row < len()` and the caller must hold unique access to this row (the
+    /// same discipline as [`Column::get_mut`]).
+    #[inline]
+    pub unsafe fn changed_tick_ptr(&self, row: usize) -> *mut Tick {
+        self.changed_ticks[row].get()
+    }
+
+    /// Stamp the changed tick of the value at `row` (used by structural writes
+    /// that already hold `&mut Column`, e.g. [`crate::world::World::get_mut`]).
+    ///
+    /// # Panics
+    /// Panics if `row >= len()`.
+    #[inline]
+    pub fn set_changed_tick(&mut self, row: usize, change_tick: Tick) {
+        *self.changed_ticks[row].get_mut() = change_tick;
+    }
+
+    /// Clamp every stored tick against `this_run` so none can wrap around and
+    /// masquerade as recent (see [`Tick::check_tick`]). Run periodically.
+    pub fn check_change_ticks(&mut self, this_run: Tick) {
+        for cell in &mut self.added_ticks {
+            cell.get_mut().check_tick(this_run);
+        }
+        for cell in &mut self.changed_ticks {
+            cell.get_mut().check_tick(this_run);
+        }
     }
 }
 
@@ -181,6 +276,14 @@ impl Table {
             .expect("archetype column must exist for fill")
     }
 
+    /// Clamp every column's stored change-detection ticks against `this_run`
+    /// (see [`Column::check_change_ticks`]). Run periodically from the world.
+    pub fn check_change_ticks(&mut self, this_run: Tick) {
+        for col in self.columns.values_mut() {
+            col.check_change_ticks(this_run);
+        }
+    }
+
     /// Move every column value shared between `src` (at `src_row`) and `self`
     /// into a freshly-[`allocate`](Self::allocate)d row of `self`.
     ///
@@ -198,9 +301,10 @@ impl Table {
         for (id, dst_col) in self.columns.iter_mut() {
             if let Some(src_col) = src.columns.get(id) {
                 // SAFETY: shared layouts (same registry) and `src_row` in-bounds
-                // per the caller's contract; `push_from` copies one value out
-                // and leaves the source slot for `swap_remove_row` to forget.
-                unsafe { dst_col.data_push_from(&src_col.data, src_row) };
+                // per the caller's contract; `push_from_column` copies one value
+                // (and its ticks) out and leaves the source slot for
+                // `swap_remove_row` to forget.
+                unsafe { dst_col.push_from_column(src_col, src_row) };
             }
         }
     }
@@ -250,26 +354,36 @@ impl Table {
 // Internal column plumbing kept here so the `BlobVec` surface stays minimal and
 // the table is the only place that drives structural moves.
 impl Column {
-    /// Copy the value at `src_row` of `src` into a fresh slot of this column.
+    /// Copy the value at `src_row` of `src` into a fresh slot of this column,
+    /// carrying its change-detection ticks along unchanged (a relocation
+    /// preserves the value's identity, so it is neither re-added nor changed).
     ///
     /// # Safety
     /// Same contract as [`BlobVec::push_from`]: identical layouts and
     /// `src_row < src.len()`.
-    unsafe fn data_push_from(&mut self, src: &BlobVec, src_row: usize) {
+    unsafe fn push_from_column(&mut self, src: &Column, src_row: usize) {
         // SAFETY: forwarded contract from `Table::move_shared_columns_from`.
-        unsafe { self.data.push_from(src, src_row) }
+        unsafe { self.data.push_from(&src.data, src_row) }
+        self.added_ticks
+            .push(UnsafeCell::new(src.added_tick(src_row)));
+        self.changed_ticks
+            .push(UnsafeCell::new(src.changed_tick(src_row)));
     }
 
-    /// Swap-remove and drop the value at `row`.
+    /// Swap-remove and drop the value at `row`, keeping the tick vectors in
+    /// lockstep.
     ///
     /// # Safety
     /// `row < len()`; the value at `row` is still owned by this column.
     unsafe fn data_swap_remove_and_drop(&mut self, row: usize) {
         // SAFETY: forwarded contract from `Table::swap_remove_row`.
         unsafe { self.data.swap_remove_and_drop(row) }
+        self.added_ticks.swap_remove(row);
+        self.changed_ticks.swap_remove(row);
     }
 
-    /// Swap-remove the value at `row` without dropping it.
+    /// Swap-remove the value at `row` without dropping it, keeping the tick
+    /// vectors in lockstep.
     ///
     /// # Safety
     /// `row < len()`; the value at `row` must already have been moved out, so
@@ -278,5 +392,7 @@ impl Column {
         // SAFETY: forwarded contract; the value at `row` was already moved out,
         // so swapping the last element over it (without drop) leaves one owner.
         unsafe { self.data.swap_remove_forget(row) }
+        self.added_ticks.swap_remove(row);
+        self.changed_ticks.swap_remove(row);
     }
 }

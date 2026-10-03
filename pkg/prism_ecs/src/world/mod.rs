@@ -17,29 +17,88 @@ use alloc::vec::Vec;
 
 use crate::archetype::Archetypes;
 use crate::bundle::Bundle;
+use crate::change::Tick;
 use crate::component::{Component, ComponentId, ComponentSet, Components};
 use crate::entity::{Entities, Entity, EntityLocation};
 use crate::query::{QueryData, QueryFilter, QueryState, ReadOnlyQueryData};
 use crate::resource::{Resource, Resources};
 
 /// The authoritative container of all ECS state.
-#[derive(Default)]
 pub struct World {
     entities: Entities,
     components: Components,
     archetypes: Archetypes,
     resources: Resources,
+    /// Monotonically increasing change counter (design §10). Stamped onto
+    /// component writes and compared against each system's `last_run` to drive
+    /// `Added`/`Changed` detection.
+    change_tick: Tick,
+    /// The tick a one-shot read via [`World::query`] / [`World::get`] treats as
+    /// its `last_run` baseline. Advanced by the schedule executor per run.
+    last_change_tick: Tick,
+}
+
+impl Default for World {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl World {
     /// Create an empty world (with just the empty archetype allocated).
+    ///
+    /// The change counter starts at `1` so that `0` can mean "never run": a
+    /// freshly spawned value stamped at tick `1` reads as added/changed to a
+    /// system whose `last_run` defaults to [`Tick::ZERO`].
     pub fn new() -> Self {
         Self {
             entities: Entities::new(),
             components: Components::new(),
             archetypes: Archetypes::new(),
             resources: Resources::new(),
+            change_tick: Tick::new(1),
+            last_change_tick: Tick::ZERO,
         }
+    }
+
+    /// The world's current change tick (the tick new writes are stamped with).
+    #[inline]
+    pub fn change_tick(&self) -> Tick {
+        self.change_tick
+    }
+
+    /// Advance the change tick by one and return the new value.
+    ///
+    /// The schedule executor calls this around each system run so writes made
+    /// by different systems carry distinct ticks.
+    #[inline]
+    pub fn increment_change_tick(&mut self) -> Tick {
+        let next = Tick::new(self.change_tick.get().wrapping_add(1));
+        self.change_tick = next;
+        next
+    }
+
+    /// The baseline `last_run` tick used by one-shot reads.
+    #[inline]
+    pub fn last_change_tick(&self) -> Tick {
+        self.last_change_tick
+    }
+
+    /// Overwrite the baseline `last_run` tick (used by the executor).
+    #[inline]
+    pub fn set_last_change_tick(&mut self, tick: Tick) {
+        self.last_change_tick = tick;
+    }
+
+    /// Clamp every stored component tick (and the world baseline) against the
+    /// current change tick so no tick can wrap past [`Tick::MAX_CHANGE_AGE`]
+    /// and alias a recent one. Cheap to run periodically (design §10).
+    pub fn check_change_ticks(&mut self) {
+        let this_run = self.change_tick;
+        for arch in self.archetypes.iter_mut() {
+            arch.table_mut().check_change_ticks(this_run);
+        }
+        self.last_change_tick.check_tick(this_run);
     }
 
     /// The entity allocator / location table.
@@ -193,6 +252,7 @@ impl World {
     /// values into the columns, and record `entity`'s location. `entity` must be
     /// live and currently unplaced.
     fn place_new_entity<B: Bundle>(&mut self, entity: Entity, bundle: B) {
+        let change_tick = self.change_tick;
         let mut ids = Vec::new();
         B::component_ids(&mut self.components, &mut ids);
         let set = ComponentSet::from_ids(ids.iter().copied());
@@ -218,7 +278,7 @@ impl World {
                 bundle.get_components(&mut |ptr| {
                     let id = ids[i];
                     i += 1;
-                    table.column_for_fill(id).push(ptr);
+                    table.column_for_fill(id).push(ptr, change_tick);
                 });
             }
             debug_assert_eq!(i, ids.len());
@@ -243,6 +303,7 @@ impl World {
     /// # Panics
     /// Panics if `bundle` contains the same component type more than once.
     pub fn insert<B: Bundle>(&mut self, entity: Entity, bundle: B) -> bool {
+        let change_tick = self.change_tick;
         let mut ids = Vec::new();
         B::component_ids(&mut self.components, &mut ids);
         {
@@ -289,7 +350,7 @@ impl World {
                     table
                         .column_mut(id)
                         .expect("overwrite column exists")
-                        .replace(row, ptr);
+                        .replace(row, ptr, change_tick);
                 });
             }
             return true;
@@ -338,9 +399,9 @@ impl World {
                         table
                             .column_mut(id)
                             .expect("moved column exists")
-                            .replace(dst_row, ptr);
+                            .replace(dst_row, ptr, change_tick);
                     } else {
-                        table.column_for_fill(id).push(ptr);
+                        table.column_for_fill(id).push(ptr, change_tick);
                     }
                 });
             }
@@ -486,6 +547,7 @@ impl World {
     /// Mutably borrow component `T` of `entity`, or `None` if the entity is
     /// dead or lacks the component.
     pub fn get_mut<T: Component>(&mut self, entity: Entity) -> Option<&mut T> {
+        let change_tick = self.change_tick;
         let id = self.components.id_of::<T>()?;
         let loc = self.entities.location(entity)?;
         let arch = self.archetypes.get_mut(loc.archetype_id)?;
@@ -494,9 +556,27 @@ impl World {
         if row >= col.len() {
             return None;
         }
+        // Handing out `&mut T` is an unconditional write for change-detection
+        // purposes, so stamp the changed tick (mirrors `Mut<T>` deref).
+        col.set_changed_tick(row, change_tick);
         // SAFETY: `row < col.len()`, `T` matches `id`, and `&mut self` gives us
         // exclusive access, so forming a unique `&mut T` cannot alias.
         Some(unsafe { col.get_mut::<T>(row) })
+    }
+
+    /// The change-detection [`ComponentTicks`](crate::change::ComponentTicks)
+    /// recorded for `entity`'s component `T`, or `None` if the entity is dead
+    /// or lacks the component.
+    pub fn get_ticks<T: Component>(&self, entity: Entity) -> Option<crate::change::ComponentTicks> {
+        let id = self.components.id_of::<T>()?;
+        let loc = self.entities.location(entity)?;
+        let arch = self.archetypes.get(loc.archetype_id)?;
+        let col = arch.table().column(id)?;
+        let row = loc.row as usize;
+        if row >= col.len() {
+            return None;
+        }
+        Some(col.component_ticks(row))
     }
 
     /// Whether `entity` currently has component `T`.
@@ -641,6 +721,92 @@ mod tests {
     #[derive(Debug, PartialEq, Default)]
     struct FrameCount(u32);
     impl Resource for FrameCount {}
+
+    #[test]
+    fn spawn_stamps_added_and_changed_ticks() {
+        use crate::change::Tick;
+        let mut w = World::new();
+        // Fresh world starts at change tick 1.
+        assert_eq!(w.change_tick(), Tick::new(1));
+        let e = w.spawn(Position(1.0, 2.0));
+        let ticks = w.get_ticks::<Position>(e).unwrap();
+        assert_eq!(ticks.added, Tick::new(1));
+        assert_eq!(ticks.changed, Tick::new(1));
+        // Visible as added/changed to a system whose last_run is ZERO.
+        assert!(ticks.is_added(Tick::ZERO, w.change_tick()));
+        assert!(ticks.is_changed(Tick::ZERO, w.change_tick()));
+    }
+
+    #[test]
+    fn get_mut_bumps_changed_but_not_added() {
+        use crate::change::Tick;
+        let mut w = World::new();
+        let e = w.spawn(Position(1.0, 2.0)); // added=changed=1
+        w.increment_change_tick(); // -> 2
+        w.increment_change_tick(); // -> 3
+        w.get_mut::<Position>(e).unwrap().0 = 9.0;
+        let ticks = w.get_ticks::<Position>(e).unwrap();
+        assert_eq!(ticks.added, Tick::new(1), "added tick preserved");
+        assert_eq!(ticks.changed, Tick::new(3), "changed bumped to current");
+        // A system that last ran at tick 2 sees the change but not an add.
+        assert!(!ticks.is_added(Tick::new(2), w.change_tick()));
+        assert!(ticks.is_changed(Tick::new(2), w.change_tick()));
+    }
+
+    #[test]
+    fn insert_new_component_stamps_current_tick_structural() {
+        use crate::change::Tick;
+        let mut w = World::new();
+        let e = w.spawn(Position(1.0, 1.0)); // Position added=changed=1
+        w.increment_change_tick(); // -> 2
+        // Structural move: Velocity is new, Position is relocated unchanged.
+        assert!(w.insert(e, Velocity(5.0, 5.0)));
+        let pos = w.get_ticks::<Position>(e).unwrap();
+        assert_eq!(pos.added, Tick::new(1), "relocation preserves Position ticks");
+        assert_eq!(pos.changed, Tick::new(1));
+        let vel = w.get_ticks::<Velocity>(e).unwrap();
+        assert_eq!(vel.added, Tick::new(2), "new component added at current tick");
+        assert_eq!(vel.changed, Tick::new(2));
+    }
+
+    #[test]
+    fn insert_overwrite_bumps_changed_preserves_added() {
+        use crate::change::Tick;
+        let mut w = World::new();
+        let e = w.spawn(Position(1.0, 1.0)); // added=changed=1
+        w.increment_change_tick(); // -> 2
+        assert!(w.insert(e, Position(2.0, 2.0))); // in-place overwrite
+        let p = w.get_ticks::<Position>(e).unwrap();
+        assert_eq!(p.added, Tick::new(1));
+        assert_eq!(p.changed, Tick::new(2));
+    }
+
+    #[test]
+    fn structural_move_on_remove_preserves_kept_ticks() {
+        use crate::change::Tick;
+        let mut w = World::new();
+        let e = w.spawn((Position(1.0, 1.0), Velocity(2.0, 2.0))); // both at 1
+        w.increment_change_tick(); // -> 2
+        assert!(w.remove::<Velocity>(e));
+        let p = w.get_ticks::<Position>(e).unwrap();
+        assert_eq!(p.added, Tick::new(1), "kept component ticks survive the move");
+        assert_eq!(p.changed, Tick::new(1));
+    }
+
+    #[test]
+    fn check_change_ticks_clamps_stale_component_ticks() {
+        use crate::change::Tick;
+        let mut w = World::new();
+        let e = w.spawn(Position(1.0, 1.0)); // added=changed=1
+        // Fast-forward the world tick far past MAX_CHANGE_AGE.
+        w.set_last_change_tick(Tick::new(1));
+        w.change_tick = Tick::new(Tick::MAX_CHANGE_AGE.wrapping_add(100));
+        w.check_change_ticks();
+        let ticks = w.get_ticks::<Position>(e).unwrap();
+        // The stale added/changed ticks are clamped to exactly MAX_CHANGE_AGE old.
+        assert_eq!(ticks.added.age_since(w.change_tick()), Tick::MAX_CHANGE_AGE);
+        assert_eq!(ticks.changed.age_since(w.change_tick()), Tick::MAX_CHANGE_AGE);
+    }
 
     #[test]
     fn world_resource_lifecycle() {
