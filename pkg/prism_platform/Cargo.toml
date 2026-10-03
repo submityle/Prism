@@ -1,0 +1,17 @@
+[package]
+name = "prism_platform"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.0"
+description = "Prism platform-abstraction kernel (L1 root, peer of prism_math/prism_utils): atomics/pause facade, CPU instruction-set and topology probing, a monotonic clock, and a Platform/PlatformCaps skeleton. M0 delivers the no-OS probe layer (atomics + cpu + clock + caps); filesystem, threads, vmem, dynlib, and crash backends land in later milestones. Contains no Unreal Engine source or derived code and depends on no bevy_* crate."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+
+[features]
+default = ["std"]
+std = []
+
+[lints]
+workspace = true

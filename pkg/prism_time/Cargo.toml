@@ -1,0 +1,19 @@
+[package]
+name = "prism_time"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.0"
+description = "Prism time kernel: monotonic Instant source and the generic Time<T> clock with delta/elapsed accessors. M0 delivers the real-time clock; virtual/fixed clocks, fixed-step accumulation, timers, and determinism land in later milestones. no_std core; no bevy_* crate."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+
+[features]
+default = ["std"]
+# Enable the platform monotonic clock (`Instant::now`). The generic Time<T>
+# math is no_std and can be driven by explicit deltas without `std`.
+std = []
+
+[lints]
+workspace = true

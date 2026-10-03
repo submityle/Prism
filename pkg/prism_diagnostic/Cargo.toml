@@ -1,0 +1,26 @@
+[package]
+name = "prism_diagnostic"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.0"
+description = "Prism diagnostic kernel: structured logging/event model with Level, logging macros, pluggable sinks (console/file/capture), and compile-time + runtime level filtering. M0 delivers the logging skeleton; CPU/GPU timing scopes, counters, Tracy/Chrome sinks, crash/minidump, and the on-screen HUD land in later milestones. Depends on prism_utils + prism_platform; contains no Unreal Engine source or derived code and depends on no bevy_* crate."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_utils = { path = "../prism_utils" }
+prism_platform = { path = "../prism_platform" }
+
+[features]
+default = ["std"]
+std = []
+# Compile-time maximum verbosity floors (anything more verbose is removed).
+max_level_off = []
+max_level_error = []
+max_level_warn = []
+max_level_info = []
+max_level_debug = []
+max_level_trace = []
+
+[lints]
+workspace = true

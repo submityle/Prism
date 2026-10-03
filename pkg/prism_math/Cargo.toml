@@ -1,0 +1,19 @@
+[package]
+name = "prism_math"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.0"
+description = "Prism's numerical-truth kernel: SIMD-shaped vector/matrix/quaternion/affine math with a scalar reference backend. no_std + alloc. L0 root of the Prism dependency graph. Contains no Unreal Engine source or derived code and depends on no bevy_* crate."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+libm = "0.2"
+
+[features]
+default = ["std"]
+# Light up std-only conveniences and tests. The core facade is no_std.
+std = []
+
+[lints]
+workspace = true

@@ -175,6 +175,16 @@ impl<K: Copy + Ord> PagePool<K> {
     pub fn entries(&self) -> Vec<(K, u32)> {
         self.slots.iter().map(|(&k, &s)| (k, s)).collect()
     }
+
+    /// Iterates resident `(key, slot)` bindings in ascending key order, without
+    /// allocating.
+    ///
+    /// Same contents and order as [`entries`](Self::entries); a borrowing
+    /// iterator for callers that only need to stream the key-ordered table (for
+    /// example a GPU indirection-table builder).
+    pub fn iter(&self) -> impl Iterator<Item = (K, u32)> + '_ {
+        self.slots.iter().map(|(&k, &s)| (k, s))
+    }
 }
 
 #[cfg(test)]
@@ -232,7 +242,10 @@ mod tests {
         pool.allocate(10).unwrap();
         pool.allocate(20).unwrap();
         assert!(pool.is_full());
-        assert_eq!(pool.allocate(30), Err(PagePoolError::PoolFull { capacity: 2 }));
+        assert_eq!(
+            pool.allocate(30),
+            Err(PagePoolError::PoolFull { capacity: 2 })
+        );
         // A resident key is still fine even when full.
         assert_eq!(pool.allocate(10), Ok(0));
     }

@@ -20,7 +20,7 @@
 
 use super::scheduler::StreamingPlan;
 use super::TexturePageKey;
-use alloc::collections::{BTreeMap, BTreeSet};
+use crate::paging::PagePool;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -44,61 +44,73 @@ pub struct PageUpload {
 /// caller sizes `capacity` to the physical pool byte budget divided by the fixed
 /// tile byte cost so a slot-bounded pool and the byte-bounded
 /// [`schedule`](super::scheduler::schedule) agree on how many pages fit.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct PhysicalPagePool {
+    /// Key -> slot bookkeeping and lowest-free-slot allocation, delegated to the
+    /// generic [`PagePool`] that every virtualized stream (geometry / shadow
+    /// pages) shares, so this crate keeps exactly one slot allocator.
+    slots: PagePool<TexturePageKey>,
     /// `occupants[slot]` is the page bound to that slot, or `None` when free.
+    /// The reverse slot -> key map is the texture-streaming-specific addition the
+    /// generic pool does not carry; the indirection builder relies on it.
     occupants: Vec<Option<TexturePageKey>>,
-    /// Reverse map from resident page to its slot, iterated in key order.
-    index: BTreeMap<TexturePageKey, u32>,
-    /// Free slot indices; the lowest is always allocated first.
-    free: BTreeSet<u32>,
 }
+
+impl PartialEq for PhysicalPagePool {
+    /// Two pools are equal iff the same page occupies each physical slot. The
+    /// generic pool's internal free-list is fully determined by that mapping, so
+    /// comparing occupants alone is both necessary and sufficient.
+    fn eq(&self, other: &Self) -> bool {
+        self.occupants == other.occupants
+    }
+}
+
+impl Eq for PhysicalPagePool {}
 
 impl PhysicalPagePool {
     /// Creates an empty pool of `capacity` physical tile slots.
     #[must_use]
     pub fn new(capacity: u32) -> Self {
         Self {
+            slots: PagePool::new(capacity),
             occupants: vec![None; capacity as usize],
-            index: BTreeMap::new(),
-            free: (0..capacity).collect(),
         }
     }
 
     /// Total number of physical slots.
     #[must_use]
     pub fn capacity(&self) -> u32 {
-        self.occupants.len() as u32
+        self.slots.capacity()
     }
 
     /// Number of slots currently bound to a resident page.
     #[must_use]
     pub fn resident_count(&self) -> u32 {
-        self.index.len() as u32
+        self.slots.len() as u32
     }
 
     /// Number of free slots available for admission.
     #[must_use]
     pub fn free_count(&self) -> u32 {
-        self.free.len() as u32
+        self.capacity() - self.resident_count()
     }
 
     /// Whether every slot is bound to a resident page.
     #[must_use]
     pub fn is_full(&self) -> bool {
-        self.free.is_empty()
+        self.slots.is_full()
     }
 
     /// Whether the pool backs no pages at all.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.index.is_empty()
+        self.slots.is_empty()
     }
 
     /// Physical slot `key` is bound to, if resident.
     #[must_use]
     pub fn slot_of(&self, key: TexturePageKey) -> Option<u32> {
-        self.index.get(&key).copied()
+        self.slots.slot_of(key)
     }
 
     /// Page currently bound to physical slot `slot`, if any.
@@ -110,7 +122,7 @@ impl PhysicalPagePool {
     /// Whether `key` is currently backed by a physical slot.
     #[must_use]
     pub fn contains(&self, key: TexturePageKey) -> bool {
-        self.index.contains_key(&key)
+        self.slots.slot_of(key).is_some()
     }
 
     /// Binds a not-yet-resident page to the lowest free slot and returns it.
@@ -120,32 +132,25 @@ impl PhysicalPagePool {
     /// free index so the slot layout is a deterministic function of the
     /// admit/evict history.
     pub fn admit(&mut self, key: TexturePageKey) -> Option<u32> {
-        if let Some(&slot) = self.index.get(&key) {
-            return Some(slot);
-        }
-        let slot = *self.free.iter().next()?;
-        self.free.remove(&slot);
+        let slot = self.slots.allocate(key).ok()?;
         self.occupants[slot as usize] = Some(key);
-        self.index.insert(key, slot);
         Some(slot)
     }
 
     /// Drops a page's physical backing, freeing its slot, and returns the freed
     /// slot index. A no-op (returning `None`) for a page that is not resident.
     pub fn evict(&mut self, key: TexturePageKey) -> Option<u32> {
-        let slot = self.index.remove(&key)?;
+        let slot = self.slots.free(key)?;
         self.occupants[slot as usize] = None;
-        self.free.insert(slot);
         Some(slot)
     }
 
     /// Drops every resident page, returning the pool to fully free.
     pub fn clear(&mut self) {
+        self.slots = PagePool::new(self.capacity());
         for occupant in &mut self.occupants {
             *occupant = None;
         }
-        self.index.clear();
-        self.free = (0..self.capacity()).collect();
     }
 
     /// Applies a scheduler [`StreamingPlan`]: frees each evicted page's slot,
@@ -180,7 +185,7 @@ impl PhysicalPagePool {
     /// [`super::indirection`] relies on this ordering to emit a sorted,
     /// binary-searchable page table.
     pub fn iter(&self) -> impl Iterator<Item = (TexturePageKey, u32)> + '_ {
-        self.index.iter().map(|(k, s)| (*k, *s))
+        self.slots.iter()
     }
 }
 

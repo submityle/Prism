@@ -1,0 +1,21 @@
+[package]
+name = "prism_tasks"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.0"
+description = "Prism parallel-runtime kernel: a work-stealing thread pool with per-worker deques, a global injector queue, and atomic Counter fork-join dependencies. M0 delivers the std thread pool (spawn/wait with help-on-wait, join, no deadlock) plus a single-threaded synchronous fallback; fibers, structured parallelism, async executor, NUMA, and determinism land in later milestones. Contains no Unreal Engine source or derived code and depends on no bevy_* crate."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_platform = { path = "../prism_platform" }
+
+[features]
+default = ["std", "multi_thread"]
+std = []
+multi_thread = ["std"]
+# Force the synchronous single-threaded fallback: jobs run inline on spawn.
+single = ["std"]
+
+[lints]
+workspace = true

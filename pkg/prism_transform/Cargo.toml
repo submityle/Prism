@@ -1,0 +1,18 @@
+[package]
+name = "prism_transform"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.0"
+description = "Prism transform algebra: local Transform (TRS) and world GlobalTransform (Affine3) with composition, inverse, and helpers. M0 is the standalone algebra layer; ECS-driven hierarchy propagation lands in later milestones. Depends only on prism_math; no bevy_* crate."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_math = { path = "../prism_math" }
+
+[features]
+default = ["std"]
+std = ["prism_math/std"]
+
+[lints]
+workspace = true
