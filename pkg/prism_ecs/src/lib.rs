@@ -56,6 +56,7 @@ pub mod component_hooks;
 mod component_hooks_tests;
 pub mod entity;
 pub mod event;
+pub mod observer;
 pub mod query;
 pub mod relation;
 pub mod resource;
@@ -75,6 +76,9 @@ pub mod prelude {
     pub use crate::component_hooks::{ComponentHook, ComponentHooks, HookContext};
     pub use crate::entity::Entity;
     pub use crate::event::{Event, EventCursor, EventId, Events};
+    pub use crate::observer::{
+        EventContext, LifecycleEvent, ObserverContext, ObserverId, Observers,
+    };
     pub use crate::resource::{Resource, ResourceId, Resources};
     pub use crate::query::{Added, Changed, Or, With, Without};
     pub use crate::relation::{

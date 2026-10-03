@@ -27,6 +27,7 @@ use crate::entity::{Entities, Entity, EntityLocation};
 use crate::query::{QueryData, QueryFilter, QueryState, ReadOnlyQueryData};
 use crate::storage::SparseSets;
 use crate::relation::Relations;
+use crate::observer::{LifecycleEvent, Observers};
 use crate::resource::{Resource, Resources};
 
 /// The authoritative container of all ECS state.
@@ -42,6 +43,14 @@ pub struct World {
     /// plus the non-fragmenting bidirectional edge index. High-cardinality
     /// relations route here instead of fragmenting the archetype graph.
     relations: Relations,
+    /// The observer registry (design §12): dynamically registered,
+    /// event-driven reactions fired at structural-change sites, layered on
+    /// top of the low-level component-hook layer. Empty by default.
+    pub(crate) observers: Observers,
+    /// Monotonic counter backing [`ObserverId`](crate::observer::ObserverId)
+    /// allocation so every registered observer gets a stable, process-unique
+    /// id even across remove/re-add churn.
+    pub(crate) next_observer_id: u64,
     /// Monotonically increasing change counter (design §10). Stamped onto
     /// component writes and compared against each system's `last_run` to drive
     /// `Added`/`Changed` detection.
@@ -71,6 +80,8 @@ impl World {
             sparse_sets: SparseSets::new(),
             resources: Resources::new(),
             relations: Relations::new(),
+            observers: Observers::new(),
+            next_observer_id: 0,
             change_tick: Tick::new(1),
             last_change_tick: Tick::ZERO,
         }
@@ -465,12 +476,19 @@ impl World {
         // component (explicit and required), so fire on_add then on_insert for
         // all of them with the world fully consistent. Gated so hook-free
         // spawns pay nothing.
-        if self.any_hooks(&all_ids) {
+        let fire_obs = self.observers.watches_any_lifecycle(&all_ids);
+        if self.any_hooks(&all_ids) || fire_obs {
             let add = self.collect_hooks(&all_ids, crate::component_hooks::ComponentHooks::on_add);
             let insert =
                 self.collect_hooks(&all_ids, crate::component_hooks::ComponentHooks::on_insert);
             self.run_hooks(entity, &add);
+            if fire_obs {
+                self.fire_lifecycle_observers(LifecycleEvent::Add, entity, &all_ids);
+            }
             self.run_hooks(entity, &insert);
+            if fire_obs {
+                self.fire_lifecycle_observers(LifecycleEvent::Insert, entity, &all_ids);
+            }
         }
     }
 
@@ -620,11 +638,15 @@ impl World {
         // post-replace present set so on_add fires only for genuinely new
         // components. Gated so hook-free inserts pay nothing.
         let hooks_active = self.any_hooks(&ids);
-        let had: Vec<ComponentId> = if hooks_active {
+        let obs_active = self.observers.watches_any_lifecycle(&ids);
+        let had: Vec<ComponentId> = if hooks_active || obs_active {
             let present = self.present_ids(entity, &ids, &storages);
             let replace =
                 self.collect_hooks(&present, crate::component_hooks::ComponentHooks::on_replace);
             self.run_hooks(entity, &replace);
+            if obs_active {
+                self.fire_lifecycle_observers(LifecycleEvent::Replace, entity, &present);
+            }
             // A hook may have despawned the entity; abort without writing.
             if !self.entities.contains(entity) {
                 return false;
@@ -855,7 +877,8 @@ impl World {
         // newly added to the entity on this call, then on_insert for every
         // written component. Both observe a fully consistent world.
         let req_ids: Vec<ComponentId> = required.iter().map(|(id, _, _)| *id).collect();
-        if hooks_active || self.any_hooks(&req_ids) {
+        let obs_post = obs_active || self.observers.watches_any_lifecycle(&req_ids);
+        if hooks_active || self.any_hooks(&req_ids) || obs_post {
             // on_add fires for every component newly resident on this call:
             // explicit ids not already present (`had`) plus the required
             // additions (always new). When `hooks_active` is false `had` is
@@ -871,7 +894,13 @@ impl World {
             let insert =
                 self.collect_hooks(&inserted, crate::component_hooks::ComponentHooks::on_insert);
             self.run_hooks(entity, &add);
+            if obs_post {
+                self.fire_lifecycle_observers(LifecycleEvent::Add, entity, &added);
+            }
             self.run_hooks(entity, &insert);
+            if obs_post {
+                self.fire_lifecycle_observers(LifecycleEvent::Insert, entity, &inserted);
+            }
         }
         true
     }
@@ -893,14 +922,21 @@ impl World {
         // actually holds, fire on_replace then on_remove *before* the value is
         // dropped, so a hook can still read the outgoing value. Gated so
         // hook-free removes pay nothing.
-        if self.any_hooks(&ids) {
+        let obs_active = self.observers.watches_any_lifecycle(&ids);
+        if self.any_hooks(&ids) || obs_active {
             let present = self.present_ids(entity, &ids, &storages);
             let replace =
                 self.collect_hooks(&present, crate::component_hooks::ComponentHooks::on_replace);
             let remove =
                 self.collect_hooks(&present, crate::component_hooks::ComponentHooks::on_remove);
             self.run_hooks(entity, &replace);
+            if obs_active {
+                self.fire_lifecycle_observers(LifecycleEvent::Replace, entity, &present);
+            }
             self.run_hooks(entity, &remove);
+            if obs_active {
+                self.fire_lifecycle_observers(LifecycleEvent::Remove, entity, &present);
+            }
             // A hook may have despawned the entity; nothing remains to remove.
             if !self.entities.contains(entity) {
                 return false;
@@ -1015,15 +1051,22 @@ impl World {
         // component the entity holds while it is still fully live, so hooks can
         // read outgoing values. The global `has_hooks` gate keeps hook-free
         // despawns allocation-free.
-        if self.components.has_hooks() {
+        if self.components.has_hooks() || !self.observers.is_empty() {
             let ids = self.entity_component_ids(entity, loc);
-            if self.any_hooks(&ids) {
+            let obs_active = self.observers.watches_any_lifecycle(&ids);
+            if self.any_hooks(&ids) || obs_active {
                 let replace = self
                     .collect_hooks(&ids, crate::component_hooks::ComponentHooks::on_replace);
                 let remove =
                     self.collect_hooks(&ids, crate::component_hooks::ComponentHooks::on_remove);
                 self.run_hooks(entity, &replace);
+                if obs_active {
+                    self.fire_lifecycle_observers(LifecycleEvent::Replace, entity, &ids);
+                }
                 self.run_hooks(entity, &remove);
+                if obs_active {
+                    self.fire_lifecycle_observers(LifecycleEvent::Remove, entity, &ids);
+                }
                 // A hook may already have despawned the entity; it is gone.
                 if !self.entities.contains(entity) {
                     return true;
