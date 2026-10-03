@@ -160,6 +160,8 @@ pub mod bounding_capsule;
 pub use bounding_capsule::{fit_bounding_capsule, BoundingCapsule};
 pub mod component_cleanup;
 pub use component_cleanup::{remove_small_components, CleanedMesh, CleanupParams};
+pub mod curvature_tensor;
+pub use curvature_tensor::{estimate_curvature_tensor, CurvatureTensorReport, PrincipalCurvature};
 
 /// A handle into a [`ShapeRegistry`].
 ///
