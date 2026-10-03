@@ -259,6 +259,10 @@ pub mod tet_fem_diagnostics;
 pub use tet_fem_diagnostics::{angular_momentum, elastic_energy, kinetic_energy, linear_momentum};
 pub mod tet_fem_strain_limit;
 pub use tet_fem_strain_limit::{project_strain_limits, StrainLimitParams, StrainLimitReport};
+pub mod tet_fem_volume_projection;
+pub use tet_fem_volume_projection::{
+    project_volume, VolumeProjectionParams, VolumeProjectionReport,
+};
 pub mod tet_fem_anisotropic;
 pub use tet_fem_anisotropic::{
     orthotropic_fiber_energy, orthotropic_fiber_first_piola, FiberDirection, FiberFamily,
