@@ -11,20 +11,20 @@
 //! without a usable adapter the oracle returns `None` and the test skips.
 
 use prism_render_material::{
-    decode_astc_4x4_weights, decode_astc_4x4_weights_ise, decode_astc_void_extent_hdr,
-    decode_astc_void_extent_ldr, decode_bc1, decode_bc3, decode_bc6h_mode10_signed,
-    decode_bc6h_mode10_unsigned, decode_bc6h_mode12_signed, decode_bc6h_mode12_unsigned,
-    decode_bc6h_mode13_signed, decode_bc6h_mode13_unsigned, decode_bc6h_mode14_signed,
-    decode_bc6h_mode14_unsigned, decode_bc6h_mode1_signed, decode_bc6h_mode1_unsigned,
-    decode_bc6h_mode2_signed, decode_bc6h_mode2_unsigned, decode_bc6h_mode3_signed,
-    decode_bc6h_mode3_unsigned, decode_bc6h_mode4_signed, decode_bc6h_mode4_unsigned,
-    decode_bc6h_mode5_signed, decode_bc6h_mode5_unsigned, decode_bc6h_mode6_signed,
-    decode_bc6h_mode6_unsigned, decode_bc6h_mode7_signed, decode_bc6h_mode7_unsigned,
-    decode_bc6h_mode8_signed, decode_bc6h_mode8_unsigned, decode_bc6h_mode9_signed,
-    decode_bc6h_mode9_unsigned, decode_bc6h_signed, decode_bc6h_unsigned, decode_bc7,
-    decode_bc7_mode0, decode_bc7_mode1, decode_bc7_mode2, decode_bc7_mode3, decode_bc7_mode7,
-    encode_bc1, encode_bc3, encode_bc6h_mode11_unsigned, encode_bc7_mode4, encode_bc7_mode5,
-    encode_bc7_mode6,
+    decode_astc_4x4_ldr, decode_astc_4x4_weights, decode_astc_4x4_weights_ise,
+    decode_astc_void_extent_hdr, decode_astc_void_extent_ldr, decode_bc1, decode_bc3,
+    decode_bc6h_mode10_signed, decode_bc6h_mode10_unsigned, decode_bc6h_mode12_signed,
+    decode_bc6h_mode12_unsigned, decode_bc6h_mode13_signed, decode_bc6h_mode13_unsigned,
+    decode_bc6h_mode14_signed, decode_bc6h_mode14_unsigned, decode_bc6h_mode1_signed,
+    decode_bc6h_mode1_unsigned, decode_bc6h_mode2_signed, decode_bc6h_mode2_unsigned,
+    decode_bc6h_mode3_signed, decode_bc6h_mode3_unsigned, decode_bc6h_mode4_signed,
+    decode_bc6h_mode4_unsigned, decode_bc6h_mode5_signed, decode_bc6h_mode5_unsigned,
+    decode_bc6h_mode6_signed, decode_bc6h_mode6_unsigned, decode_bc6h_mode7_signed,
+    decode_bc6h_mode7_unsigned, decode_bc6h_mode8_signed, decode_bc6h_mode8_unsigned,
+    decode_bc6h_mode9_signed, decode_bc6h_mode9_unsigned, decode_bc6h_signed, decode_bc6h_unsigned,
+    decode_bc7, decode_bc7_mode0, decode_bc7_mode1, decode_bc7_mode2, decode_bc7_mode3,
+    decode_bc7_mode7, encode_bc1, encode_bc3, encode_bc6h_mode11_unsigned, encode_bc7_mode4,
+    encode_bc7_mode5, encode_bc7_mode6,
 };
 use prism_render_material_gpu::BlockOracle;
 use wgpu::{Features, TextureFormat};
@@ -2190,6 +2190,97 @@ fn astc_trit_quint_weights_parity_against_gpu_hardware_decode() {
     }
     eprintln!(
         "ASTC trit/quint weight parity: {} blocks within 1 LSB of hardware",
+        PER_MODE * 2
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ASTC full single-partition CEM8 (direct LDR RGB) parity.
+//
+// The two tests above isolate the weight path by pinning the endpoints to
+// black/white. This test exercises the complete single-partition pipeline:
+// six *random* 8-bit (QUANT_256) endpoint integers decoded into the two RGB
+// endpoint colours (with the astcenc blue-contraction + endpoint-swap applied
+// when sum(e0_rgb) > sum(e1_rgb)), then interpolated per texel by random
+// trit/quint weights. We compare the full `decode_astc_4x4_ldr` output against
+// the Metal hardware decoder on all four channels (CEM8 forces alpha = 255 on
+// both paths). Random endpoints mean ~half the blocks drive the hardware
+// blue-contraction path, so that branch is proven here too.
+// ---------------------------------------------------------------------------
+
+/// Build a single-partition CEM8 block of block mode `bm` with six explicit
+/// 8-bit (QUANT_256) endpoint integers at bits [17..65):
+/// `ep = [v0, v1, v2, v3, v4, v5]` where (v0,v2,v4) is endpoint 0's RGB and
+/// (v1,v3,v5) is endpoint 1's RGB (CEM8 interleave).
+fn astc_cem8_block(bm: u32, ep: [u8; 6]) -> [u8; 16] {
+    let mut b = [0u8; 16];
+    astc_set_bits(&mut b, 0, 11, bm);
+    astc_set_bits(&mut b, 13, 4, 8);
+    for (i, v) in ep.iter().enumerate() {
+        astc_set_bits(&mut b, 17 + i as u32 * 8, 8, u32::from(*v));
+    }
+    b
+}
+
+#[test]
+fn astc_full_single_partition_cem8_parity_against_gpu_hardware_decode() {
+    let Some(oracle) = BlockOracle::try_new() else {
+        eprintln!("no GPU adapter; skipping ASTC full single-partition parity");
+        return;
+    };
+    if !oracle
+        .features()
+        .contains(Features::TEXTURE_COMPRESSION_ASTC)
+    {
+        eprintln!("adapter lacks ASTC support; skipping ASTC full single-partition parity");
+        return;
+    }
+    let format = TextureFormat::Astc {
+        block: wgpu::AstcBlock::B4x4,
+        channel: wgpu::AstcChannel::Unorm,
+    };
+    let mut rng = Rng(0x0C7A_5EED);
+    const PER_MODE: u32 = 128;
+    let mut contracted = 0u32;
+    for (bm, form, bits, levels) in TRIT_QUINT_MODES {
+        for _ in 0..PER_MODE {
+            let mut ep = [0u8; 6];
+            for e in ep.iter_mut() {
+                *e = (rng.next_u32() & 0xFF) as u8;
+            }
+            let mut blk = astc_cem8_block(bm, ep);
+            let mut raw = [0u8; 16];
+            for r in raw.iter_mut() {
+                *r = (rng.next_u32() % levels) as u8;
+            }
+            astc_set_weights_ise(&mut blk, form, bits, &raw);
+
+            // sum(e0_rgb) > sum(e1_rgb) drives the blue-contraction + swap path
+            // on both the CPU decoder and the hardware.
+            let s0 = u32::from(ep[0]) + u32::from(ep[2]) + u32::from(ep[4]);
+            let s1 = u32::from(ep[1]) + u32::from(ep[3]) + u32::from(ep[5]);
+            if s0 > s1 {
+                contracted += 1;
+            }
+
+            let cpu = decode_astc_4x4_ldr(&blk).expect("supported single-partition CEM8 block");
+            let gpu = oracle.decode_unorm8(format, &blk);
+            for t in 0..16 {
+                for c in 0..4 {
+                    let d = (cpu[t][c] as i32 - gpu[t][c] as i32).abs();
+                    assert!(
+                        d <= 1,
+                        "ASTC full CEM8 bm={bm} block={blk:02x?} texel {t} chan {c}: ep={ep:?} raw_w={} cpu={} gpu={} (|d|={d})",
+                        raw[t],
+                        cpu[t][c],
+                        gpu[t][c]
+                    );
+                }
+            }
+        }
+    }
+    eprintln!(
+        "ASTC full single-partition CEM8 parity: {} blocks within 1 LSB of hardware ({contracted} exercised blue-contraction)",
         PER_MODE * 2
     );
 }
