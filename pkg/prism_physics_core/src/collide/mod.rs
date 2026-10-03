@@ -29,4 +29,4 @@ pub mod contact;
 pub mod primitives;
 
 pub use contact::{ContactManifold, ContactPoint, MAX_MANIFOLD_POINTS};
-pub use primitives::generate_contact;
+pub use primitives::{generate_contact, generate_contact_in};

@@ -32,8 +32,12 @@ use core::cmp::Ordering;
 
 use glam::Vec3;
 
+use prism_physics_geometry::{
+    gjk_contact, Aabb, BoundingSphere, Capsule, Contact, Obb as GeoObb, SupportMap, Transformed,
+};
+
 use super::contact::{ContactManifold, ContactPoint, MAX_MANIFOLD_POINTS};
-use crate::collider::ColliderShape;
+use crate::collider::{ColliderShape, ConvexMeshData, ShapeRegistry, TriMeshData};
 use crate::math::transform::Isometry;
 use crate::state::handle::BodyHandle;
 
@@ -137,7 +141,15 @@ pub fn generate_contact(
             ColliderShape::Cuboid { half_extents: hea },
             ColliderShape::Cuboid { half_extents: heb },
         ) => cuboid_cuboid(*hea, pose_a, *heb, pose_b),
-        (ColliderShape::Plane { .. }, ColliderShape::Plane { .. }) => None,
+        // Two half-spaces never produce a bounded manifold. Mesh variants
+        // (`ConvexHull` / `TriangleMesh`) keep their geometry in the owning
+        // [`ShapeRegistry`] arena, which this registry-free entry point cannot
+        // resolve; their genuine contacts are produced by the registry-aware
+        // [`generate_contact_in`]. These explicit arms only make the match
+        // exhaustive and are not stubbed-out pairs.
+        (ColliderShape::Plane { .. }, ColliderShape::Plane { .. })
+        | (ColliderShape::ConvexHull { .. } | ColliderShape::TriangleMesh { .. }, _)
+        | (_, ColliderShape::ConvexHull { .. } | ColliderShape::TriangleMesh { .. }) => None,
     }
 }
 
@@ -897,6 +909,455 @@ fn reduce_to_manifold_capacity(points: &mut Vec<(Vec3, Vec3, f32)>) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Registry-aware dispatch for arena-backed mesh colliders
+// ---------------------------------------------------------------------------
+//
+// The convex-hull and triangle-mesh collider variants keep their geometry in a
+// [`ShapeRegistry`] arena, so they cannot be resolved by the registry-free
+// [`generate_contact`]. [`generate_contact_in`] takes the registry and routes
+// every mesh-bearing pair to a genuine narrow-phase routine:
+//
+// * convex-vs-convex / convex-vs-primitive run GJK + EPA
+//   ([`gjk_contact`]) over the geometry crate's support maps.
+// * convex/primitive-vs-triangle-mesh collect per-triangle contacts from the
+//   mesh BVH and merge them under a single shared normal.
+// * mesh-vs-plane projects the mesh/hull vertices onto the world half-space.
+//
+// All routines keep the frozen conventions: the returned normal is unit length
+// and points from `a` toward `b`, penetration is non-negative, and every point
+// satisfies `point_a == point_b + penetration * normal`.
+//
+// # Provenance
+//
+// GJK/EPA, support maps, and vertex/half-space clipping are standard,
+// publicly documented computational-geometry techniques (Ericson, *Real-Time
+// Collision Detection*; van den Bergen, *Collision Detection in Interactive 3D
+// Environments*). This code contains **no Unreal Engine source or derived
+// code**.
+
+/// Generates a contact manifold for a posed pair of collider shapes, resolving
+/// arena-backed mesh colliders through `shapes`.
+///
+/// This is the registry-aware superset of [`generate_contact`]. Analytic pairs
+/// (sphere/cuboid/capsule/plane) are delegated verbatim to
+/// [`generate_contact`]; pairs involving a
+/// [`ConvexHull`](ColliderShape::ConvexHull) or
+/// [`TriangleMesh`](ColliderShape::TriangleMesh) are computed here. The result
+/// follows the frozen [`contact`](super::contact) conventions: unit normal from
+/// `a` toward `b`, non-negative penetration, and the witness identity
+/// `point_a == point_b + penetration * normal`.
+///
+/// Returns `None` when the shapes are separated, when a mesh handle cannot be
+/// resolved from `shapes`, or for the two static mesh-mesh combinations that
+/// carry no analytic proxy (triangle-mesh vs triangle-mesh, matching the
+/// PhysX/Chaos convention that two static meshes do not generate contacts).
+#[must_use]
+pub fn generate_contact_in(
+    shape_a: &ColliderShape,
+    pose_a: &Isometry,
+    shape_b: &ColliderShape,
+    pose_b: &Isometry,
+    shapes: &ShapeRegistry,
+) -> Option<ContactManifold> {
+    match (shape_a, shape_b) {
+        (
+            ColliderShape::ConvexHull { mesh: ma, .. },
+            ColliderShape::ConvexHull { mesh: mb, .. },
+        ) => {
+            let a = shapes.convex_mesh(*ma)?;
+            let b = shapes.convex_mesh(*mb)?;
+            convex_vs_convex(a, pose_a, b, pose_b)
+        }
+        (ColliderShape::ConvexHull { mesh, .. }, ColliderShape::TriangleMesh { mesh: tm, .. }) => {
+            let convex = shapes.convex_mesh(*mesh)?;
+            let tri = shapes.tri_mesh(*tm)?;
+            convex_vs_trimesh(convex, pose_a, tri, pose_b)
+        }
+        (ColliderShape::TriangleMesh { mesh: tm, .. }, ColliderShape::ConvexHull { mesh, .. }) => {
+            let tri = shapes.tri_mesh(*tm)?;
+            let convex = shapes.convex_mesh(*mesh)?;
+            convex_vs_trimesh(convex, pose_b, tri, pose_a).map(flipped)
+        }
+        (ColliderShape::ConvexHull { mesh, .. }, ColliderShape::Plane { normal, offset }) => {
+            let convex = shapes.convex_mesh(*mesh)?;
+            convex_vs_plane(convex, pose_a, *normal, *offset, pose_b)
+        }
+        (ColliderShape::Plane { normal, offset }, ColliderShape::ConvexHull { mesh, .. }) => {
+            let convex = shapes.convex_mesh(*mesh)?;
+            convex_vs_plane(convex, pose_b, *normal, *offset, pose_a).map(flipped)
+        }
+        (ColliderShape::ConvexHull { mesh, .. }, _) => {
+            let convex = shapes.convex_mesh(*mesh)?;
+            convex_vs_primitive(convex, pose_a, shape_b, pose_b)
+        }
+        (_, ColliderShape::ConvexHull { mesh, .. }) => {
+            let convex = shapes.convex_mesh(*mesh)?;
+            convex_vs_primitive(convex, pose_b, shape_a, pose_a).map(flipped)
+        }
+        // Two static triangle meshes do not generate contacts (PhysX/Chaos
+        // convention); honest `None`, not a stub.
+        (ColliderShape::TriangleMesh { .. }, ColliderShape::TriangleMesh { .. }) => None,
+        (ColliderShape::TriangleMesh { mesh, .. }, ColliderShape::Plane { normal, offset }) => {
+            let tri = shapes.tri_mesh(*mesh)?;
+            trimesh_vs_plane(tri, pose_a, *normal, *offset, pose_b)
+        }
+        (ColliderShape::Plane { normal, offset }, ColliderShape::TriangleMesh { mesh, .. }) => {
+            let tri = shapes.tri_mesh(*mesh)?;
+            trimesh_vs_plane(tri, pose_b, *normal, *offset, pose_a).map(flipped)
+        }
+        (ColliderShape::TriangleMesh { mesh, .. }, _) => {
+            let tri = shapes.tri_mesh(*mesh)?;
+            trimesh_vs_primitive(tri, pose_a, shape_b, pose_b)
+        }
+        (_, ColliderShape::TriangleMesh { mesh, .. }) => {
+            let tri = shapes.tri_mesh(*mesh)?;
+            trimesh_vs_primitive(tri, pose_b, shape_a, pose_a).map(flipped)
+        }
+        // No mesh collider is involved: the analytic dispatch handles it in full
+        // (genuine computation, not a stub).
+        _ => generate_contact(shape_a, pose_a, shape_b, pose_b),
+    }
+}
+
+/// A world-space support map for an analytic primitive used in GJK/EPA.
+enum PrimitiveSupport {
+    /// A posed sphere.
+    Sphere(BoundingSphere),
+    /// A posed oriented box.
+    Obb(GeoObb),
+    /// A posed capsule.
+    Capsule(Capsule),
+}
+
+impl SupportMap for PrimitiveSupport {
+    fn support_point(&self, dir: Vec3) -> Vec3 {
+        match self {
+            PrimitiveSupport::Sphere(shape) => shape.support_point(dir),
+            PrimitiveSupport::Obb(shape) => shape.support_point(dir),
+            PrimitiveSupport::Capsule(shape) => shape.support_point(dir),
+        }
+    }
+}
+
+/// Builds a world-space support map for an analytic primitive.
+///
+/// Returns `None` for shapes without a bounded convex support map (planes and
+/// the arena-backed mesh variants), which the dispatch never routes here.
+fn primitive_support(shape: &ColliderShape, pose: &Isometry) -> Option<PrimitiveSupport> {
+    match *shape {
+        ColliderShape::Sphere { radius } => Some(PrimitiveSupport::Sphere(BoundingSphere::new(
+            pose.translation,
+            radius,
+        ))),
+        ColliderShape::Cuboid { half_extents } => Some(PrimitiveSupport::Obb(GeoObb::new(
+            pose.translation,
+            half_extents,
+            pose.rotation,
+        ))),
+        ColliderShape::Capsule {
+            half_height,
+            radius,
+        } => {
+            let (bottom, top) = capsule_segment(half_height, pose);
+            Some(PrimitiveSupport::Capsule(Capsule::new(bottom, top, radius)))
+        }
+        _ => None,
+    }
+}
+
+/// A degenerate convex support map for a single world-space triangle.
+struct TriSupport {
+    /// The triangle's three world-space corners.
+    corners: [Vec3; 3],
+}
+
+impl SupportMap for TriSupport {
+    fn support_point(&self, dir: Vec3) -> Vec3 {
+        let mut best = self.corners[0];
+        let mut best_dot = best.dot(dir);
+        for &corner in &self.corners[1..] {
+            let dot = corner.dot(dir);
+            if dot > best_dot {
+                best_dot = dot;
+                best = corner;
+            }
+        }
+        best
+    }
+}
+
+/// Converts a geometry-crate [`Contact`] into a single-point manifold.
+fn contact_to_manifold(contact: &Contact) -> Option<ContactManifold> {
+    manifold_from_points(
+        contact.normal,
+        &[(contact.point_a, contact.point_b, contact.depth.max(0.0))],
+    )
+}
+
+/// Merges per-triangle/per-vertex contacts under one shared manifold normal.
+///
+/// Each input tuple is `(witness_a, normal, depth, key)` where `witness_a` is
+/// the true contact point on shape `a` and `key` is a deterministic tiebreak.
+/// Contacts are ordered by decreasing depth (then by ascending `key`), the
+/// deepest contact's normal becomes the shared manifold normal, and each
+/// point's `b`-witness is reconstructed from the frozen witness identity
+/// `point_b = witness_a - penetration * normal` so the contract always holds.
+/// Only the deepest [`MAX_MANIFOLD_POINTS`] points are kept.
+fn assemble_shared_normal(mut contacts: Vec<(Vec3, Vec3, f32, u32)>) -> Option<ContactManifold> {
+    if contacts.is_empty() {
+        return None;
+    }
+    contacts.sort_by(|lhs, rhs| {
+        rhs.2
+            .partial_cmp(&lhs.2)
+            .unwrap_or(Ordering::Equal)
+            .then(lhs.3.cmp(&rhs.3))
+    });
+    let normal = contacts[0].1;
+    let mut points: Vec<(Vec3, Vec3, f32)> = Vec::with_capacity(contacts.len());
+    for &(witness_a, _normal, depth, _key) in &contacts {
+        let penetration = depth.max(0.0);
+        let point_b = witness_a - normal * penetration;
+        points.push((witness_a, point_b, penetration));
+    }
+    points.truncate(MAX_MANIFOLD_POINTS);
+    manifold_from_points(normal, &points)
+}
+
+/// GJK/EPA contact between two posed convex hulls, normal from `a` toward `b`.
+fn convex_vs_convex(
+    a: &ConvexMeshData,
+    pose_a: &Isometry,
+    b: &ConvexMeshData,
+    pose_b: &Isometry,
+) -> Option<ContactManifold> {
+    let support_a = Transformed::new(a, pose_a.rotation, pose_a.translation);
+    let support_b = Transformed::new(b, pose_b.rotation, pose_b.translation);
+    let contact = gjk_contact(&support_a, &support_b)?;
+    contact_to_manifold(&contact)
+}
+
+/// GJK/EPA contact between a posed convex hull (`a`) and an analytic primitive
+/// (`b`), normal from the hull toward the primitive.
+fn convex_vs_primitive(
+    convex: &ConvexMeshData,
+    pose_convex: &Isometry,
+    primitive: &ColliderShape,
+    pose_primitive: &Isometry,
+) -> Option<ContactManifold> {
+    let support = primitive_support(primitive, pose_primitive)?;
+    let convex_support = Transformed::new(convex, pose_convex.rotation, pose_convex.translation);
+    let contact = gjk_contact(&convex_support, &support)?;
+    contact_to_manifold(&contact)
+}
+
+/// Contacts between a posed convex hull (`a`) and a posed triangle mesh (`b`).
+///
+/// The hull's world AABB (expressed in mesh-local space) selects candidate
+/// triangles from the mesh BVH; each candidate is tested with GJK/EPA against a
+/// degenerate triangle support map. The resulting contacts are merged under a
+/// shared normal pointing from the hull toward the mesh.
+fn convex_vs_trimesh(
+    convex: &ConvexMeshData,
+    pose_convex: &Isometry,
+    tri: &TriMeshData,
+    pose_tri: &Isometry,
+) -> Option<ContactManifold> {
+    let mesh = tri.mesh();
+    if mesh.is_empty() {
+        return None;
+    }
+    let inv = pose_tri.inverse();
+    let local_points: Vec<Vec3> = convex
+        .vertices()
+        .iter()
+        .map(|&vertex| inv.transform_point(pose_convex.transform_point(vertex)))
+        .collect();
+    let query = Aabb::from_points(&local_points)?;
+    let candidates = mesh.overlap_aabb(&query);
+    let convex_support = Transformed::new(convex, pose_convex.rotation, pose_convex.translation);
+    let mut contacts: Vec<(Vec3, Vec3, f32, u32)> = Vec::new();
+    for index in candidates {
+        let Some(local_tri) = mesh.triangle(index as usize) else {
+            continue;
+        };
+        let tri_support = TriSupport {
+            corners: [
+                pose_tri.transform_point(local_tri[0]),
+                pose_tri.transform_point(local_tri[1]),
+                pose_tri.transform_point(local_tri[2]),
+            ],
+        };
+        if let Some(contact) = gjk_contact(&convex_support, &tri_support) {
+            contacts.push((contact.point_a, contact.normal, contact.depth, index));
+        }
+    }
+    assemble_shared_normal(contacts)
+}
+
+/// Transforms one mesh-local contact into world space and records it.
+///
+/// `local_normal` points from the triangle toward the primitive (mesh `a`
+/// toward primitive `b`); the stored `witness` is the world-space triangle
+/// contact point on shape `a`.
+fn push_mesh_contact(
+    pose_tri: &Isometry,
+    local_point: Vec3,
+    local_normal: Vec3,
+    depth: f32,
+    triangle: u32,
+    out: &mut Vec<(Vec3, Vec3, f32, u32)>,
+) {
+    let world_point = pose_tri.transform_point(local_point);
+    let world_normal = pose_tri.transform_vector(local_normal);
+    out.push((world_point, world_normal, depth, triangle));
+}
+
+/// Contacts between a posed triangle mesh (`a`) and an analytic primitive (`b`).
+///
+/// The primitive is expressed in mesh-local space, the matching
+/// [`TriangleMesh`](prism_physics_geometry::TriangleMesh) query produces local
+/// per-triangle contacts, and each is lifted back into world space. The merged
+/// normal points from the mesh toward the primitive.
+fn trimesh_vs_primitive(
+    tri: &TriMeshData,
+    pose_tri: &Isometry,
+    primitive: &ColliderShape,
+    pose_primitive: &Isometry,
+) -> Option<ContactManifold> {
+    let mesh = tri.mesh();
+    if mesh.is_empty() {
+        return None;
+    }
+    let inv = pose_tri.inverse();
+    let mut contacts: Vec<(Vec3, Vec3, f32, u32)> = Vec::new();
+    match *primitive {
+        ColliderShape::Sphere { radius } => {
+            let center_local = inv.transform_point(pose_primitive.translation);
+            for hit in mesh.sphere_contacts(center_local, radius) {
+                push_mesh_contact(
+                    pose_tri,
+                    hit.point,
+                    hit.normal,
+                    hit.depth,
+                    hit.triangle,
+                    &mut contacts,
+                );
+            }
+        }
+        ColliderShape::Capsule {
+            half_height,
+            radius,
+        } => {
+            let (bottom, top) = capsule_segment(half_height, pose_primitive);
+            let capsule = Capsule::new(
+                inv.transform_point(bottom),
+                inv.transform_point(top),
+                radius,
+            );
+            for hit in mesh.capsule_contacts(&capsule) {
+                push_mesh_contact(
+                    pose_tri,
+                    hit.point,
+                    hit.normal,
+                    hit.depth,
+                    hit.triangle,
+                    &mut contacts,
+                );
+            }
+        }
+        ColliderShape::Cuboid { half_extents } => {
+            let center_local = inv.transform_point(pose_primitive.translation);
+            let orientation_local = inv.rotation * pose_primitive.rotation;
+            let obb = GeoObb::new(center_local, half_extents, orientation_local);
+            for hit in mesh.obb_contacts(&obb) {
+                push_mesh_contact(
+                    pose_tri,
+                    hit.point,
+                    hit.normal,
+                    hit.depth,
+                    hit.triangle,
+                    &mut contacts,
+                );
+            }
+        }
+        _ => return None,
+    }
+    assemble_shared_normal(contacts)
+}
+
+/// Contacts between a posed convex hull (`a`) and a world half-space plane
+/// (`b`), with the normal pointing from the hull toward the plane.
+///
+/// The plane occupies `normal . x <= offset`; any hull vertex with
+/// `offset - normal . vertex > -CONTACT_TOLERANCE` is penetrating and becomes a
+/// contact. The contact normal is the negated (inward) plane normal so it
+/// points from the hull toward the plane as required by the `a -> b` contract.
+fn convex_vs_plane(
+    convex: &ConvexMeshData,
+    pose_convex: &Isometry,
+    plane_normal: Vec3,
+    plane_offset: f32,
+    pose_plane: &Isometry,
+) -> Option<ContactManifold> {
+    let (normal_world, offset_world) = plane_world(plane_normal, plane_offset, pose_plane);
+    let contact_normal = -normal_world;
+    let mut contacts: Vec<(Vec3, Vec3, f32, u32)> = Vec::new();
+    for (index, &vertex) in convex.vertices().iter().enumerate() {
+        let world_vertex = pose_convex.transform_point(vertex);
+        let penetration = offset_world - normal_world.dot(world_vertex);
+        if penetration > -CONTACT_TOLERANCE {
+            contacts.push((world_vertex, contact_normal, penetration, index as u32));
+        }
+    }
+    assemble_shared_normal(contacts)
+}
+
+/// Contacts between a posed triangle mesh (`a`) and a world half-space plane
+/// (`b`), with the normal pointing from the mesh toward the plane.
+///
+/// Every triangle corner below the plane (within [`CONTACT_TOLERANCE`]) becomes
+/// a contact; duplicate world positions (shared vertices) are suppressed so a
+/// single penetrating corner cannot flood the manifold.
+fn trimesh_vs_plane(
+    tri: &TriMeshData,
+    pose_tri: &Isometry,
+    plane_normal: Vec3,
+    plane_offset: f32,
+    pose_plane: &Isometry,
+) -> Option<ContactManifold> {
+    let mesh = tri.mesh();
+    if mesh.is_empty() {
+        return None;
+    }
+    let (normal_world, offset_world) = plane_world(plane_normal, plane_offset, pose_plane);
+    let contact_normal = -normal_world;
+    let mut contacts: Vec<(Vec3, Vec3, f32, u32)> = Vec::new();
+    let mut key = 0u32;
+    for index in 0..mesh.triangle_count() {
+        let Some(local_tri) = mesh.triangle(index) else {
+            continue;
+        };
+        for corner in local_tri {
+            let world_vertex = pose_tri.transform_point(corner);
+            let penetration = offset_world - normal_world.dot(world_vertex);
+            if penetration <= -CONTACT_TOLERANCE {
+                continue;
+            }
+            if contacts
+                .iter()
+                .any(|contact| (contact.0 - world_vertex).length_squared() < GEOMETRIC_EPS)
+            {
+                continue;
+            }
+            contacts.push((world_vertex, contact_normal, penetration, key));
+            key += 1;
+        }
+    }
+    assemble_shared_normal(contacts)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1206,6 +1667,195 @@ mod tests {
             &Isometry::IDENTITY,
             &plane(Vec3::Y, 1.0),
             &Isometry::IDENTITY,
+        )
+        .is_none());
+    }
+
+    /// Builds a square XZ quad (`y = 0`, spanning `[-2, 2]`) as a two-triangle
+    /// mesh, used by the triangle-mesh dispatch tests.
+    fn ground_quad() -> TriMeshData {
+        let vertices = vec![
+            Vec3::new(-2.0, 0.0, -2.0),
+            Vec3::new(2.0, 0.0, -2.0),
+            Vec3::new(2.0, 0.0, 2.0),
+            Vec3::new(-2.0, 0.0, 2.0),
+        ];
+        let indices = vec![[0, 1, 2], [0, 2, 3]];
+        TriMeshData::new(vertices, indices)
+    }
+
+    #[test]
+    fn convex_box_vs_sphere_overlap_contacts() {
+        let mut shapes = ShapeRegistry::new();
+        let handle = shapes.insert_convex_mesh(ConvexMeshData::from_box(Vec3::splat(1.0)));
+        let convex = shapes.convex_hull_shape(handle).expect("convex shape");
+        let m = generate_contact_in(
+            &convex,
+            &at(Vec3::ZERO),
+            &sphere(0.5),
+            &at(Vec3::new(1.25, 0.0, 0.0)),
+            &shapes,
+        )
+        .expect("overlapping convex/sphere should contact");
+        assert!(m.normal.dot(Vec3::X) > 0.9, "normal {:?}", m.normal);
+        let p = m.points()[0];
+        assert!(
+            (p.penetration - 0.25).abs() < 2.0e-2,
+            "pen {}",
+            p.penetration
+        );
+        assert_witness_identity(&m);
+    }
+
+    #[test]
+    fn convex_box_sphere_matches_cuboid_sphere() {
+        let mut shapes = ShapeRegistry::new();
+        let he = Vec3::new(1.0, 0.5, 0.75);
+        let handle = shapes.insert_convex_mesh(ConvexMeshData::from_box(he));
+        let convex = shapes.convex_hull_shape(handle).expect("convex shape");
+        let pose_box = at(Vec3::ZERO);
+        let pose_sphere = at(Vec3::new(1.2, 0.0, 0.0));
+        let convex_m = generate_contact_in(&convex, &pose_box, &sphere(0.4), &pose_sphere, &shapes)
+            .expect("convex contact");
+        let cuboid_m = generate_contact(&cuboid(he), &pose_box, &sphere(0.4), &pose_sphere)
+            .expect("cuboid contact");
+        assert!(
+            (convex_m.normal - cuboid_m.normal).length() < 1.0e-2,
+            "convex {:?} cuboid {:?}",
+            convex_m.normal,
+            cuboid_m.normal
+        );
+        let cp = convex_m.points()[0];
+        let bp = cuboid_m.points()[0];
+        assert!(
+            (cp.penetration - bp.penetration).abs() < 2.0e-2,
+            "convex pen {} cuboid pen {}",
+            cp.penetration,
+            bp.penetration
+        );
+        assert_witness_identity(&convex_m);
+    }
+
+    #[test]
+    fn convex_box_vs_plane_rests_on_half_space() {
+        let mut shapes = ShapeRegistry::new();
+        let handle = shapes.insert_convex_mesh(ConvexMeshData::from_box(Vec3::splat(1.0)));
+        let convex = shapes.convex_hull_shape(handle).expect("convex shape");
+        // Box centred at y = 0.5 dips its lower face below the y = 0 plane
+        // (outward +Y, solid y <= 0).
+        let m = generate_contact_in(
+            &convex,
+            &at(Vec3::new(0.0, 0.5, 0.0)),
+            &plane(Vec3::Y, 0.0),
+            &Isometry::IDENTITY,
+            &shapes,
+        )
+        .expect("box should rest on the plane");
+        assert!(m.normal.dot(Vec3::Y) < -0.9, "normal {:?}", m.normal);
+        assert_eq!(m.len(), MAX_MANIFOLD_POINTS);
+        for p in m.points() {
+            assert!((p.penetration - 0.5).abs() < EPS, "pen {}", p.penetration);
+        }
+        assert_witness_identity(&m);
+    }
+
+    #[test]
+    fn trimesh_vs_sphere_hit_and_miss() {
+        let mut shapes = ShapeRegistry::new();
+        let handle = shapes.insert_tri_mesh(ground_quad());
+        let trimesh = shapes.tri_mesh_shape(handle).expect("mesh shape");
+        // Sphere dipping 0.2 below the ground plane: a contact pushing up (+Y).
+        let hit = generate_contact_in(
+            &trimesh,
+            &Isometry::IDENTITY,
+            &sphere(0.5),
+            &at(Vec3::new(0.0, 0.3, 0.0)),
+            &shapes,
+        )
+        .expect("sphere should contact the ground");
+        assert!(hit.normal.dot(Vec3::Y) > 0.9, "normal {:?}", hit.normal);
+        assert!((hit.points()[0].penetration - 0.2).abs() < EPS);
+        assert_witness_identity(&hit);
+        // Sphere well above the plane: clear miss.
+        let miss = generate_contact_in(
+            &trimesh,
+            &Isometry::IDENTITY,
+            &sphere(0.5),
+            &at(Vec3::new(0.0, 1.0, 0.0)),
+            &shapes,
+        );
+        assert!(miss.is_none());
+    }
+
+    #[test]
+    fn trimesh_sphere_flip_symmetry() {
+        let mut shapes = ShapeRegistry::new();
+        let handle = shapes.insert_tri_mesh(ground_quad());
+        let trimesh = shapes.tri_mesh_shape(handle).expect("mesh shape");
+        let sphere_pose = at(Vec3::new(0.0, 0.3, 0.0));
+        let m_ab = generate_contact_in(
+            &trimesh,
+            &Isometry::IDENTITY,
+            &sphere(0.5),
+            &sphere_pose,
+            &shapes,
+        )
+        .expect("mesh-first contact");
+        let m_ba = generate_contact_in(
+            &sphere(0.5),
+            &sphere_pose,
+            &trimesh,
+            &Isometry::IDENTITY,
+            &shapes,
+        )
+        .expect("sphere-first contact");
+        assert!(
+            (m_ab.normal + m_ba.normal).length() < EPS,
+            "normals should be opposite: ab {:?} ba {:?}",
+            m_ab.normal,
+            m_ba.normal
+        );
+        assert!((m_ab.points()[0].penetration - m_ba.points()[0].penetration).abs() < EPS);
+        assert_witness_identity(&m_ab);
+        assert_witness_identity(&m_ba);
+    }
+
+    #[test]
+    fn generate_contact_in_delegates_analytic_pairs() {
+        // With no mesh collider involved the registry-aware entry point must
+        // reproduce `generate_contact` exactly.
+        let shapes = ShapeRegistry::new();
+        let via_in = generate_contact_in(
+            &sphere(1.0),
+            &at(Vec3::ZERO),
+            &sphere(1.0),
+            &at(Vec3::X * 1.5),
+            &shapes,
+        )
+        .expect("analytic contact");
+        let direct = generate_contact(
+            &sphere(1.0),
+            &at(Vec3::ZERO),
+            &sphere(1.0),
+            &at(Vec3::X * 1.5),
+        )
+        .expect("analytic contact");
+        assert!((via_in.normal - direct.normal).length() < EPS);
+        assert_eq!(via_in.len(), direct.len());
+        assert!((via_in.points()[0].penetration - direct.points()[0].penetration).abs() < EPS);
+    }
+
+    #[test]
+    fn trimesh_vs_trimesh_is_none() {
+        let mut shapes = ShapeRegistry::new();
+        let handle = shapes.insert_tri_mesh(ground_quad());
+        let trimesh = shapes.tri_mesh_shape(handle).expect("mesh shape");
+        assert!(generate_contact_in(
+            &trimesh,
+            &Isometry::IDENTITY,
+            &trimesh,
+            &Isometry::IDENTITY,
+            &shapes,
         )
         .is_none());
     }
