@@ -7,3 +7,4 @@ pub use crate::hash::{FxBuildHasher, FxHasher, HashMap, HashSet};
 pub use crate::slot_map::{SlotKey, SlotMap};
 pub use crate::small_vec::SmallVec;
 pub use crate::sparse_set::SparseSet;
+pub use crate::alloc_::{AllocBox, AllocError, Allocator, FrameAllocator, Global, Pool};

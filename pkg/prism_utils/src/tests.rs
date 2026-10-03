@@ -190,3 +190,174 @@ fn bit_set_operations_and_iteration() {
     assert!(b.is_empty());
     assert_eq!(b.count_ones(), 0);
 }
+
+// ---------------------------------------------------------------------------
+// M2: allocators
+// ---------------------------------------------------------------------------
+
+use core::alloc::Layout;
+
+#[test]
+fn global_allocator_round_trip_varied_layouts() {
+    let global = Global;
+    // A spread of sizes and alignments, including over-aligned and zero-sized.
+    let layouts = [
+        Layout::from_size_align(1, 1).unwrap(),
+        Layout::from_size_align(8, 8).unwrap(),
+        Layout::from_size_align(64, 32).unwrap(),
+        Layout::from_size_align(4096, 4096).unwrap(),
+        Layout::from_size_align(0, 16).unwrap(),
+    ];
+    for layout in layouts {
+        let block = global.allocate(layout).expect("allocation must succeed");
+        assert!(block.len() >= layout.size());
+        let addr = block.as_ptr().cast::<u8>() as usize;
+        assert_eq!(addr % layout.align(), 0, "returned block must be aligned");
+        #[expect(unsafe_code, reason = "test exercises the raw allocator deallocation path")]
+        // SAFETY: `block` was just produced by `global.allocate(layout)` and is
+        // handed straight back with the same layout, used nowhere else.
+        unsafe {
+            global.deallocate(block.cast::<u8>(), layout);
+        }
+    }
+}
+
+#[test]
+fn pool_recycles_the_same_block() {
+    let pool = Pool::new(Layout::from_size_align(32, 8).unwrap(), 4);
+    assert!(pool.block_size() >= 32);
+    assert_eq!(pool.live(), 0);
+
+    let a = pool.allocate_block().unwrap();
+    assert_eq!(pool.live(), 1);
+    #[expect(unsafe_code, reason = "test exercises the raw allocator deallocation path")]
+    // SAFETY: `a` is a live block from this pool, freed exactly once.
+    unsafe {
+        pool.deallocate_block(a);
+    }
+    assert_eq!(pool.live(), 0);
+
+    // The very next allocation must reuse the block we just freed.
+    let b = pool.allocate_block().unwrap();
+    assert_eq!(a, b, "freed block should be recycled");
+    #[expect(unsafe_code, reason = "test exercises the raw allocator deallocation path")]
+    // SAFETY: `b` is live and freed exactly once.
+    unsafe {
+        pool.deallocate_block(b);
+    }
+}
+
+#[test]
+fn pool_grows_across_chunks() {
+    // 2 blocks per chunk: allocating 5 blocks must force 3 chunks.
+    let pool = Pool::new(Layout::from_size_align(16, 8).unwrap(), 2);
+    let mut blocks = Vec::new();
+    for _ in 0..5 {
+        blocks.push(pool.allocate_block().unwrap());
+    }
+    assert_eq!(pool.live(), 5);
+    assert_eq!(pool.chunk_count(), 3, "5 blocks / 2 per chunk => 3 chunks");
+
+    // All handed-out blocks must be distinct, non-overlapping addresses.
+    let mut addrs: Vec<usize> = blocks.iter().map(|p| p.as_ptr() as usize).collect();
+    addrs.sort_unstable();
+    addrs.dedup();
+    assert_eq!(addrs.len(), 5, "blocks must not alias");
+
+    for b in blocks {
+        #[expect(unsafe_code, reason = "test exercises the raw allocator deallocation path")]
+        // SAFETY: each block is live and freed exactly once here.
+        unsafe {
+            pool.deallocate_block(b);
+        }
+    }
+    assert_eq!(pool.live(), 0);
+    // Freeing does not release chunks; capacity is retained for reuse.
+    assert_eq!(pool.chunk_count(), 3);
+}
+
+#[test]
+fn frame_allocator_alignment_and_reset() {
+    let mut frame = FrameAllocator::new(1024);
+    assert_eq!(frame.used(), 0);
+
+    // A 1-byte allocation, then an over-aligned one: the second must be padded
+    // up to its alignment.
+    let one = frame.allocate(Layout::from_size_align(1, 1).unwrap()).unwrap();
+    assert_eq!(one.len(), 1);
+
+    let aligned = frame
+        .allocate(Layout::from_size_align(32, 64).unwrap())
+        .unwrap();
+    let addr = aligned.as_ptr().cast::<u8>() as usize;
+    assert_eq!(addr % 64, 0, "block must honor requested alignment");
+    assert!(frame.used() >= 33);
+
+    // reset reclaims the whole frame in O(1).
+    frame.reset();
+    assert_eq!(frame.used(), 0);
+
+    // After reset the cursor restarts, so the first block address repeats.
+    let again = frame.allocate(Layout::from_size_align(1, 1).unwrap()).unwrap();
+    assert_eq!(
+        again.as_ptr().cast::<u8>() as usize,
+        one.as_ptr().cast::<u8>() as usize,
+        "reset must rewind to the start of the frame"
+    );
+}
+
+#[test]
+fn frame_allocator_reports_exhaustion() {
+    let frame = FrameAllocator::with_align(64, 16);
+    assert!(
+        frame
+            .allocate(Layout::from_size_align(128, 1).unwrap())
+            .is_err(),
+        "requests larger than capacity must fail cleanly"
+    );
+}
+
+#[test]
+fn alloc_box_over_global_and_pool() {
+    // Over the global heap.
+    let mut boxed = AllocBox::new_in(1234u64, Global);
+    assert_eq!(*boxed, 1234);
+    *boxed += 1;
+    assert_eq!(*boxed, 1235);
+    drop(boxed);
+
+    // Over a shared pool: the box borrows `&pool`, so one pool backs many boxes.
+    let pool = Pool::new(Layout::new::<u64>(), 8);
+    {
+        let a = AllocBox::new_in(7u64, &pool);
+        let b = AllocBox::new_in(8u64, &pool);
+        assert_eq!(*a + *b, 15);
+        assert_eq!(pool.live(), 2);
+    }
+    // Both boxes dropped: their blocks returned to the pool.
+    assert_eq!(pool.live(), 0);
+
+    // Dropped blocks are recycled on the next allocation.
+    let c = AllocBox::new_in(99u64, &pool);
+    assert_eq!(*c, 99);
+    assert_eq!(pool.live(), 1);
+}
+
+#[test]
+fn alloc_box_runs_destructors() {
+    use core::cell::Cell;
+
+    // A payload that bumps a borrowed counter when dropped.
+    struct Dropper<'a>(&'a Cell<u32>);
+    impl Drop for Dropper<'_> {
+        fn drop(&mut self) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+
+    let counter = Cell::new(0u32);
+    let boxed = AllocBox::new_in(Dropper(&counter), Global);
+    assert_eq!(counter.get(), 0);
+    drop(boxed);
+    assert_eq!(counter.get(), 1, "AllocBox must run the value's destructor once");
+}

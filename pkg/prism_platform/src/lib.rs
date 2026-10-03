@@ -16,13 +16,21 @@
 //! - [`fs`]: cross-platform file/dir/path helpers and per-OS standard
 //!   directories, gated behind the `std` feature.
 //!
-//! Later milestones add threads/affinity/sync, virtual memory, dynamic
-//! libraries, process control, and crash/minidump backends per OS.
+//! ## M2 scope — threads and synchronization
+//! - [`thread`]: thread spawning/join, a registry-based thread-local, CPU-core
+//!   affinity (Linux/Windows pinning, honest `Unsupported` on macOS), a spin
+//!   lock + backoff + one-time init, and a token-based parker, all gated behind
+//!   the `std` feature.
+//!
+//! Later milestones add virtual memory, dynamic libraries, process control,
+//! and crash/minidump backends per OS.
 //!
 //! The crate contains no Unreal Engine source or derived code and depends on
 //! no `bevy_*` crate.
-
-#![forbid(unsafe_code)]
+//!
+//! The crate uses no `unsafe` except narrowly scoped, documented FFI in
+//! [`thread::affinity`]; the workspace-level `unsafe_code = "deny"` lint stays
+//! in force and is overridden only there via `#[expect(unsafe_code, reason)]`.
 
 pub mod atomics;
 pub mod clock;
@@ -34,12 +42,24 @@ pub mod cpu;
 pub mod fs;
 pub mod platform;
 pub mod prelude;
+/// Threads, thread-local storage, affinity, lightweight sync, and park/unpark.
+///
+/// Requires the `std` feature; absent in `no_std` builds.
+#[cfg(feature = "std")]
+pub mod thread;
 
 pub use clock::{now, MonotonicNanos};
 pub use cpu::CpuInfo;
 #[cfg(feature = "std")]
 pub use fs::{FsError, Result as FsResult};
 pub use platform::{Os, Platform, PlatformCaps};
+#[cfg(feature = "std")]
+pub use thread::{
+    affinity_supported, current_id, hardware_concurrency, set_current_thread_affinity,
+    set_current_thread_affinity_mask, sleep as thread_sleep, spawn, yield_now, AffinityError,
+    Backoff, Builder as ThreadBuilder, JoinHandle, Once, Parker, SpinLock, SpinLockGuard,
+    ThreadId, ThreadLocal, Unparker,
+};
 
 #[cfg(test)]
 mod tests;
