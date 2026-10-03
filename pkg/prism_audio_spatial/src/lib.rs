@@ -73,6 +73,7 @@ pub mod initial_time_delay_gap;
 pub mod interaural_time_difference;
 pub mod late_lateral_sound_level;
 pub mod material_library;
+pub mod material_spectrum;
 pub mod multi_position;
 pub mod nfc;
 pub mod occlusion;
@@ -156,6 +157,7 @@ pub use late_lateral_sound_level::{LATE_LATERAL_START_MS, LateLateralSoundLevel,
 pub use material_library::{
     Material, MaterialAbsorption, OCTAVE_BAND_CENTERS, OCTAVE_BAND_COUNT,
 };
+pub use material_spectrum::{BandedAcousticMaterial, transmission_from_loss_db};
 pub use multi_position::{
     MAX_POSITIONS, MultiPositionMode, PositionInput, resolve_multi,
 };
