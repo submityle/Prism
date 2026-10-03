@@ -14,6 +14,9 @@ use glam::Vec3;
 pub mod material;
 
 pub use material::PhysicsMaterial;
+pub mod convex_mesh;
+
+pub use convex_mesh::{ConvexMeshData, ConvexMeshHandle, ConvexProjection, ConvexRayHit};
 
 /// A handle into a [`ShapeRegistry`].
 ///
@@ -149,6 +152,7 @@ fn mass_props_from_diagonal(mass: f32, inertia: Vec3) -> MassProperties {
 #[derive(Clone, Debug, Default)]
 pub struct ShapeRegistry {
     shapes: Vec<ColliderShape>,
+    convex_meshes: Vec<ConvexMeshData>,
 }
 
 impl ShapeRegistry {
@@ -182,6 +186,26 @@ impl ShapeRegistry {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.shapes.is_empty()
+    }
+
+    /// Inserts a convex mesh into the convex-mesh arena and returns a handle.
+    pub fn insert_convex_mesh(&mut self, mesh: ConvexMeshData) -> ConvexMeshHandle {
+        let handle = ConvexMeshHandle(self.convex_meshes.len() as u32);
+        self.convex_meshes.push(mesh);
+        handle
+    }
+
+    /// Returns a reference to the convex mesh for `handle`, or `None` if the
+    /// handle is out of range.
+    #[must_use]
+    pub fn convex_mesh(&self, handle: ConvexMeshHandle) -> Option<&ConvexMeshData> {
+        self.convex_meshes.get(handle.0 as usize)
+    }
+
+    /// Returns the number of convex meshes stored in the arena.
+    #[must_use]
+    pub fn convex_mesh_count(&self) -> usize {
+        self.convex_meshes.len()
     }
 }
 
