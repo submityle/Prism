@@ -1,9 +1,14 @@
 //! Integration tests for the schedule core: insertion-order execution, chained
 //! configs, tuple grouping, run-condition gating (including whole-group gating),
-//! and the one-shot [`run_once`] latch.
+//! the one-shot [`run_once`] latch, fixed-phase ordering, `before`/`after`
+//! against a user [`SystemSet`], set-level condition gating via
+//! [`configure_set`](Schedule::configure_set), and cycle detection.
 
 use crate::resource::Resource;
-use crate::schedule::{resource_exists, run_once, IntoSystemConfigs, Schedule};
+use crate::schedule::{
+    resource_exists, run_once, IntoSystemConfigs, Phase, Schedule, SetConfig, SystemSet,
+    SystemSetId,
+};
 use crate::system::ResMut;
 use crate::world::World;
 use alloc::vec::Vec;
@@ -107,4 +112,67 @@ fn run_once_fires_exactly_once() {
         alloc::vec![1],
         "run_once must gate every run after the first"
     );
+}
+
+
+/// A user-defined [`SystemSet`] label for ordering/condition tests.
+struct Physics;
+impl SystemSet for Physics {
+    fn set_id(&self) -> SystemSetId {
+        SystemSetId::of::<Self>()
+    }
+}
+
+#[test]
+fn phase_orders_systems_regardless_of_add_order() {
+    let mut world = fresh();
+    let mut schedule = Schedule::new();
+    // Add the default-phase (Update) system first and the First-phase system
+    // second; phase ordering must still run First before Update.
+    schedule.add_systems(push_b);
+    schedule.add_systems(push_a.in_phase(Phase::First));
+    schedule.run(&mut world);
+    assert_eq!(world.resource::<Log>().0, alloc::vec![1, 2]);
+}
+
+#[test]
+fn before_after_against_a_user_set() {
+    let mut world = fresh();
+    let mut schedule = Schedule::new();
+    // push_b anchors the Physics set; push_a must precede it, push_c follow it,
+    // even though they are added out of order.
+    schedule.add_systems(push_c.after(Physics));
+    schedule.add_systems(push_b.in_set(Physics));
+    schedule.add_systems(push_a.before(Physics));
+    schedule.run(&mut world);
+    assert_eq!(world.resource::<Log>().0, alloc::vec![1, 2, 3]);
+}
+
+#[test]
+fn configure_set_condition_gates_all_members() {
+    let mut world = fresh();
+    let mut schedule = Schedule::new();
+    schedule.add_systems((push_a, push_b).in_set(Physics));
+    schedule.configure_set(Physics, SetConfig::new().run_if(resource_exists::<Gate>()));
+
+    // Gate absent → neither member runs.
+    schedule.run(&mut world);
+    assert_eq!(world.resource::<Log>().0, Vec::<u32>::new());
+
+    // Gate present → both members run, in order.
+    world.insert_resource(Gate);
+    schedule.run(&mut world);
+    assert_eq!(world.resource::<Log>().0, alloc::vec![1, 2]);
+}
+
+#[test]
+#[should_panic(expected = "cycle")]
+fn contradictory_order_panics() {
+    let mut world = fresh();
+    let mut schedule = Schedule::new();
+    // push_a is a member of Physics; push_b asks to run both before AND after
+    // Physics, which is an unsatisfiable cycle (push_b → push_a → push_b).
+    schedule.add_systems(push_a.in_set(Physics));
+    schedule.add_systems(push_b.before(Physics).after(Physics));
+    schedule.run(&mut world);
 }

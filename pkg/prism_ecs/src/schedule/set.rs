@@ -89,3 +89,27 @@ pub trait SystemSet: Send + Sync + 'static {
     /// This label's stable identity.
     fn set_id(&self) -> SystemSetId;
 }
+
+/// Private label type backing anonymous group sets (see
+/// [`SystemConfigs`](crate::schedule::SystemConfigs) collective conditions).
+struct AnonymousGroup;
+
+/// Monotonic source of discriminants for anonymous group sets. `u32` is ample:
+/// one tick back-to-back for 136 years at 1e9 groups/s would be needed to wrap.
+static ANONYMOUS_COUNTER: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(1);
+
+impl SystemSetId {
+    /// Mint a fresh, process-unique anonymous set id. Used by the schedule to
+    /// anchor a group's collective run-conditions onto a real set so they are
+    /// evaluated once per run and cached.
+    #[must_use]
+    pub(crate) fn anonymous() -> Self {
+        let discriminant =
+            ANONYMOUS_COUNTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed) as u64;
+        Self {
+            type_id: TypeId::of::<AnonymousGroup>(),
+            discriminant,
+            name: "«anonymous group»",
+        }
+    }
+}

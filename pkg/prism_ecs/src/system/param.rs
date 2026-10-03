@@ -220,6 +220,83 @@ unsafe impl<T: Resource> SystemParam for ResMut<'_, T> {
 }
 
 // ---------------------------------------------------------------------------
+// Option<Res> / Option<ResMut>
+// ---------------------------------------------------------------------------
+
+// SAFETY: declares the same resource *read* as `Res<T>`; `get_param` forms only
+// `&T` through `get_ptr` and yields `None` when the resource is absent, so no
+// `&mut` aliasing can arise.
+unsafe impl<T: Resource> SystemParam for Option<Res<'_, T>> {
+    type State = ResourceId;
+    type Item<'w, 's> = Option<Res<'w, T>>;
+
+    #[inline]
+    fn init_state(world: &mut World) -> ResourceId {
+        world.resources_mut().register::<T>()
+    }
+
+    #[inline]
+    fn update_access(state: &ResourceId, access: &mut Access) {
+        access.add_resource_read(*state);
+    }
+
+    #[inline]
+    unsafe fn get_param<'w, 's>(
+        state: &'s mut ResourceId,
+        world: UnsafeWorldCell<'w>,
+    ) -> Option<Res<'w, T>> {
+        // SAFETY: the caller guarantees nothing aliases this read; we form only
+        // a shared `&World` from the cell.
+        let world: &'w World = unsafe { world.world() };
+        // SAFETY: `state` is the id minted for `T`; the declared read means no
+        // `ResMut<T>` aliases it. A missing resource simply yields `None`.
+        let ptr = unsafe { world.resources().get_ptr::<T>(*state) };
+        ptr.map(|ptr| {
+            // SAFETY: `ptr` points at the live `T`; the declared read means no
+            // `&mut T` is live.
+            let value = unsafe { &*ptr };
+            Res { value }
+        })
+    }
+}
+
+// SAFETY: declares the same resource *write* as `ResMut<T>`; `get_param` forms
+// `&mut T` through `get_ptr` only when present (else `None`), and the declared
+// exclusive write guarantees it is the sole live borrow.
+unsafe impl<T: Resource> SystemParam for Option<ResMut<'_, T>> {
+    type State = ResourceId;
+    type Item<'w, 's> = Option<ResMut<'w, T>>;
+
+    #[inline]
+    fn init_state(world: &mut World) -> ResourceId {
+        world.resources_mut().register::<T>()
+    }
+
+    #[inline]
+    fn update_access(state: &ResourceId, access: &mut Access) {
+        access.add_resource_write(*state);
+    }
+
+    #[inline]
+    unsafe fn get_param<'w, 's>(
+        state: &'s mut ResourceId,
+        world: UnsafeWorldCell<'w>,
+    ) -> Option<ResMut<'w, T>> {
+        // SAFETY: the caller guarantees nothing aliases this exclusive write; we
+        // form only a shared `&World` and reach through `get_ptr`.
+        let world: &'w World = unsafe { world.world() };
+        // SAFETY: `state` is the id minted for `T`; the declared exclusive write
+        // means no other borrow of this resource is live. Absent yields `None`.
+        let ptr = unsafe { world.resources().get_ptr::<T>(*state) };
+        ptr.map(|ptr| {
+            // SAFETY: `ptr` is the sole live route to this resource's `T`.
+            let value = unsafe { &mut *ptr };
+            ResMut { value }
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
 

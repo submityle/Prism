@@ -1,93 +1,101 @@
-//! The runnable [`Schedule`] and the single-threaded executor that drives it.
+//! The single-threaded [`Schedule`](crate::schedule::Schedule) executor
+//! (design §8.2).
 //!
-//! A [`Schedule`] owns an ordered list of [`SystemConfigs`] root nodes (one per
-//! `add_systems` call). Running it lazily initializes every system, then hands
-//! the roots to [`SingleThreadedExecutor`], which walks them in insertion order
-//! and runs each (honouring run conditions and applying deferred commands via
-//! each system's `run`).
+//! [`SingleThreadedExecutor`] walks a schedule's precomputed, deterministic
+//! topological [`order`](crate::schedule::Schedule) and runs each system via
+//! [`System::run`](crate::system::System::run) — which fetches the system's
+//! params, runs its body, and immediately applies its deferred
+//! [`Commands`](crate::command::Commands), i.e. a sync point after every
+//! system.
+//!
+//! Run-conditions gate execution at two levels:
+//!
+//! * **set conditions** — the conditions configured on each [`SystemSet`] a
+//!   system belongs to (including a group's anonymous collective-condition set)
+//!   are evaluated at most once per run and cached, so a shared condition fires
+//!   once no matter how many members reference it;
+//! * **system conditions** — a system's own `run_if` conditions, evaluated
+//!   in order with short-circuit AND.
+//!
+//! A system runs only when every gate passes.
 //!
 //! # Honestly deferred
 //!
-//! The parallel, conflict-graph executor and fiber job graph (design §8.2–§8.3)
-//! are deferred until `prism_tasks` lands; this module runs strictly
-//! single-threaded. `SystemSet`s and run-conditions-expressed-as-systems are
-//! also future work. None of that is stubbed here — the pieces are simply
-//! absent, and the per-system `Access` recorded by the system layer is already
-//! sufficient to drop a parallel executor in later without touching this API.
+//! The parallel conflict-graph executor and fiber job graph (design §8.2–§8.3,
+//! which need `prism_tasks`) are future milestones. They are absent, not
+//! stubbed; the per-system [`Access`](crate::query::Access) recorded by the
+//! system layer already carries everything a parallel executor needs, and it
+//! will become a sibling of this type selected by the schedule.
 
-use crate::schedule::config::{IntoSystemConfigs, SystemConfigs};
+use hashbrown::HashMap;
+
+use crate::schedule::graph::Schedule;
+use crate::schedule::set::SystemSetId;
 use crate::world::World;
-use alloc::vec::Vec;
 
-/// An ordered collection of configured systems that can be run against a
-/// [`World`].
-///
-/// Add work with [`add_systems`](Schedule::add_systems); run it with
-/// [`run`](Schedule::run). Initialization is lazy and idempotent: the first run
-/// (or an explicit [`initialize`](Schedule::initialize)) builds each system's
-/// parameter state, and adding more systems re-arms initialization for the new
-/// nodes.
-#[derive(Default)]
-pub struct Schedule {
-    configs: Vec<SystemConfigs>,
-    initialized: bool,
-}
-
-impl Schedule {
-    /// Create an empty schedule.
-    pub fn new() -> Self {
-        Self {
-            configs: Vec::new(),
-            initialized: false,
-        }
-    }
-
-    /// Append systems to this schedule.
-    ///
-    /// Accepts a single system, a tuple of systems, or any pre-built
-    /// [`SystemConfigs`] (so `.chain()` / `.run_if(..)` results work directly).
-    /// Adding systems marks the schedule uninitialized so the new nodes are
-    /// initialized on the next run.
-    pub fn add_systems<Marker>(&mut self, systems: impl IntoSystemConfigs<Marker>) -> &mut Self {
-        self.configs.push(systems.into_configs());
-        self.initialized = false;
-        self
-    }
-
-    /// Initialize every not-yet-initialized system against `world`.
-    ///
-    /// Idempotent: a no-op once initialized until more systems are added.
-    pub fn initialize(&mut self, world: &mut World) {
-        if self.initialized {
-            return;
-        }
-        for config in self.configs.iter_mut() {
-            config.initialize(world);
-        }
-        self.initialized = true;
-    }
-
-    /// Run every configured system once, in insertion order, honouring run
-    /// conditions. Initializes lazily if needed.
-    pub fn run(&mut self, world: &mut World) {
-        self.initialize(world);
-        SingleThreadedExecutor::run(&mut self.configs, world);
-    }
-}
-
-/// The default executor: runs configuration roots sequentially on the calling
-/// thread, in insertion order.
+/// The default executor: runs a [`Schedule`]'s systems sequentially on the
+/// calling thread, in the schedule's deterministic topological order, honouring
+/// per-set and per-system run-conditions.
 ///
 /// This is a zero-sized dispatcher rather than a stored strategy so a
-/// [`Schedule`] stays trivially movable; a future parallel executor will be a
-/// sibling type selected by the schedule.
+/// [`Schedule`] stays trivially movable; the future parallel conflict-graph
+/// executor (§8.2) will be a sibling type selected by the schedule.
 pub struct SingleThreadedExecutor;
 
 impl SingleThreadedExecutor {
-    /// Run each root configuration in order against `world`.
-    pub fn run(configs: &mut [SystemConfigs], world: &mut World) {
-        for config in configs.iter_mut() {
-            config.run(world);
+    /// Run every system in `schedule` once against `world`, in dependency
+    /// order.
+    ///
+    /// The schedule must already be initialised (see
+    /// [`Schedule::initialize`](crate::schedule::Schedule::initialize)); the
+    /// public [`Schedule::run`](crate::schedule::Schedule::run) entry point
+    /// does that before delegating here. This routine deliberately uses the
+    /// schedule's lower-level fields rather than calling back into
+    /// [`Schedule::run`], which would recurse forever.
+    pub fn run(schedule: &mut Schedule, world: &mut World) {
+        // Set-condition results are memoised for the whole run so a set's
+        // shared conditions are evaluated at most once even when many members
+        // reference the same set.
+        let mut set_cache: HashMap<SystemSetId, bool> = HashMap::new();
+
+        for i in 0..schedule.order.len() {
+            let idx = schedule.order[i];
+
+            // Evaluate every set this system belongs to. Clone the id list so
+            // the immutable borrow of `nodes` is released before
+            // `eval_set_conditions` takes a mutable borrow of the schedule.
+            let node_sets = schedule.nodes[idx].sets.clone();
+            let mut should_run = true;
+            for set in node_sets {
+                let value = match set_cache.get(&set) {
+                    Some(&cached) => cached,
+                    None => {
+                        // Evaluate all of the set's conditions (no
+                        // short-circuit) so their internal state advances
+                        // deterministically, then cache the AND.
+                        let value = schedule.eval_set_conditions(set, world);
+                        set_cache.insert(set, value);
+                        value
+                    }
+                };
+                // Keep evaluating remaining sets even once gated off, so every
+                // set-condition's state advances exactly once this run.
+                should_run &= value;
+            }
+
+            // Evaluate the system's own conditions with short-circuit AND.
+            if should_run {
+                for condition in &mut schedule.nodes[idx].conditions {
+                    if !condition.run(world) {
+                        should_run = false;
+                        break;
+                    }
+                }
+            }
+
+            if should_run {
+                schedule.nodes[idx].system.run(world);
+            }
         }
     }
 }
