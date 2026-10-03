@@ -258,7 +258,13 @@ pub mod mesh_dihedral_cosine;
 pub mod mesh_emission;
 pub mod mesh_ray_contains;
 pub mod mesh_renderer;
+pub mod mesh_sdf_ambient_occlusion;
+pub mod mesh_sdf_curvature;
 pub mod mesh_sdf_normal;
+pub mod mesh_sdf_soft_shadow;
+pub mod mesh_sdf_surface_projection;
+pub mod mesh_sdf_tetrahedron_normal;
+pub mod mesh_sdf_thickness;
 pub mod mesh_skinning;
 pub mod mesh_tangents;
 pub mod mesh_triangle_eval;
@@ -520,6 +526,7 @@ pub mod water_pbf_neighbors;
 pub mod water_pbf_plan;
 pub mod water_shading_npr;
 pub mod water_shading_pbr;
+pub mod water_spectrum_advance;
 pub mod water_swe_cfl;
 pub mod water_swe_inject;
 pub mod water_swe_step;
@@ -835,7 +842,28 @@ pub use mesh_renderer::{
     LOCAL_AXIS_PLUS_Y, LOCAL_AXIS_PLUS_Z, MAX_LOD_THRESHOLDS, ORIENTATION_ALIGN_TO_AXIS,
     ORIENTATION_FIXED_ROTATION, ORIENTATION_IDENTITY, ORIENTATION_VELOCITY_ALIGNED,
 };
+pub use mesh_sdf_ambient_occlusion::{
+    GpuSdfAmbientOcclusion, SdfAmbientOcclusionField, SdfAmbientOcclusionQuery,
+    SdfAmbientOcclusionResult,
+};
+pub use mesh_sdf_curvature::{
+    GpuSdfCurvature, SdfCurvatureField, SdfCurvatureQuery, SdfCurvatureResult,
+};
 pub use mesh_sdf_normal::{GpuSdfNormal, SdfNormalField, SdfNormalQuery, SdfNormalResult};
+pub use mesh_sdf_soft_shadow::{
+    GpuSdfSoftShadow, SdfSoftShadowField, SdfSoftShadowQuery, SdfSoftShadowResult,
+};
+pub use mesh_sdf_surface_projection::{
+    GpuSdfSurfaceProjection, SdfSurfaceProjectionField, SdfSurfaceProjectionQuery,
+    SdfSurfaceProjectionResult,
+};
+pub use mesh_sdf_tetrahedron_normal::{
+    GpuSdfTetrahedronNormal, SdfTetrahedronNormalField, SdfTetrahedronNormalQuery,
+    SdfTetrahedronNormalResult,
+};
+pub use mesh_sdf_thickness::{
+    GpuSdfThickness, SdfThicknessField, SdfThicknessQuery, SdfThicknessResult,
+};
 pub use mesh_skinning::{GpuMeshSkinning, GpuSkinResult};
 pub use mesh_tangents::{
     GpuMeshTriangleTangent, MeshTriangleTangentQuery, MeshTriangleTangentResult,
@@ -1231,6 +1259,9 @@ pub use water_pbf_neighbors::{
 pub use water_pbf_plan::{GpuWaterPbfPlan, WaterPbfPlanQuery, WaterPbfPlanResult};
 pub use water_shading_npr::{GpuWaterShadingNpr, WaterShadingNprQuery, WaterShadingNprResult};
 pub use water_shading_pbr::{GpuWaterShadingPbr, WaterShadingPbrQuery, WaterShadingPbrResult};
+pub use water_spectrum_advance::{
+    GpuWaterSpectrumAdvance, WaterSpectrumAdvanceQuery, WaterSpectrumAdvanceResult,
+};
 pub use water_swe_cfl::{GpuWaterSweCfl, WaterSweCflQuery, WaterSweCflResult};
 pub use water_swe_inject::{GpuWaterSweInject, WaterSweInjectQuery, WaterSweInjectResult};
 pub use water_swe_step::{GpuWaterSweStep, WaterSweStepQuery, WaterSweStepResult};
