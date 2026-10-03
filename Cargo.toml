@@ -63,6 +63,8 @@ members = [
   "pkg/prism_audio_procedural",
   # Prism next-generation audio engine asset banks, streaming, codecs and dialogue/localization.
   "pkg/prism_audio_assets",
+  # Prism next-generation audio engine real-time communication (uplink DSP/jitter buffer/PLC/positional voice).
+  "pkg/prism_audio_comm",
   # Prism next-generation audio engine expressive control and MIDI 2.0 / MPE.
   "pkg/prism_audio_midi",
   # Prism next-generation audio engine Bevy ECS front-end (emitter/listener components -> prism_audio_rt command ring; telemetry resource).
