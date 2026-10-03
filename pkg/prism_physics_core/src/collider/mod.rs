@@ -158,6 +158,8 @@ pub mod concavity;
 pub use concavity::{measure_concavity, MeshConcavity, DEFAULT_CONCAVITY_TOLERANCE};
 pub mod bounding_capsule;
 pub use bounding_capsule::{fit_bounding_capsule, BoundingCapsule};
+pub mod component_cleanup;
+pub use component_cleanup::{remove_small_components, CleanedMesh, CleanupParams};
 
 /// A handle into a [`ShapeRegistry`].
 ///
