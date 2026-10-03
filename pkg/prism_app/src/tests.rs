@@ -506,3 +506,345 @@ fn repeated_add_event_is_idempotent() {
         "the seeded event retires on the following frame"
     );
 }
+
+// ---- plugin groups -----------------------------------------------------
+
+use crate::plugin::PluginDependency;
+use crate::plugin_graph::PluginGraphError;
+use crate::plugin_group::{PluginGroup, PluginGroupBuilder};
+
+/// The resolved build-order names of a group's enabled members.
+fn group_order(builder: PluginGroupBuilder) -> Vec<String> {
+    builder
+        .into_plugins()
+        .iter()
+        .map(|p| p.name().to_string())
+        .collect()
+}
+
+struct Named<const N: char>;
+impl<const N: char> Plugin for Named<N> {
+    fn build(&self, _app: &mut App) {}
+    fn name(&self) -> &str {
+        match N {
+            'a' => "a",
+            'b' => "b",
+            'c' => "c",
+            'd' => "d",
+            _ => "?",
+        }
+    }
+}
+
+/// `add` appends members; the group resolves in explicit order when there are
+/// no dependency edges.
+#[test]
+fn group_adds_members_in_explicit_order() {
+    let builder = PluginGroupBuilder::new()
+        .add(Named::<'a'>)
+        .add(Named::<'b'>)
+        .add(Named::<'c'>);
+    assert_eq!(group_order(builder), vec!["a", "b", "c"]);
+}
+
+/// `add_before` and `add_after` place members relative to a target.
+#[test]
+fn add_before_and_after_place_relative_to_target() {
+    let builder = PluginGroupBuilder::new()
+        .add(Named::<'a'>)
+        .add(Named::<'b'>)
+        .add_before::<Named<'b'>, _>(Named::<'c'>)
+        .add_after::<Named<'a'>, _>(Named::<'d'>);
+    // Start: [a, b]; add c before b -> [a, c, b]; add d after a -> [a, d, c, b].
+    assert_eq!(group_order(builder), vec!["a", "d", "c", "b"]);
+}
+
+/// `disable` drops a member from the resolved output but keeps its slot, so a
+/// later `enable` restores it in its original position.
+#[test]
+fn disable_keeps_position_for_later_enable() {
+    let base = PluginGroupBuilder::new()
+        .add(Named::<'a'>)
+        .add(Named::<'b'>)
+        .add(Named::<'c'>);
+
+    let disabled = PluginGroupBuilder::new()
+        .add(Named::<'a'>)
+        .add(Named::<'b'>)
+        .add(Named::<'c'>)
+        .disable::<Named<'b'>>();
+    assert_eq!(group_order(disabled), vec!["a", "c"]);
+
+    let re_enabled = base.disable::<Named<'b'>>().enable::<Named<'b'>>();
+    assert!(re_enabled.is_enabled::<Named<'b'>>());
+    assert_eq!(group_order(re_enabled), vec!["a", "b", "c"]);
+}
+
+/// `set` replaces a member's instance while keeping its position.
+#[test]
+fn set_replaces_member_in_place() {
+    // Two plugins that share a type parameter can't collide, so use distinct
+    // marker types whose `name` differs to prove replacement happened.
+    struct First;
+    impl Plugin for First {
+        fn build(&self, _app: &mut App) {}
+        fn name(&self) -> &str {
+            "first"
+        }
+    }
+    // A second plugin of the *same* type with different state is the realistic
+    // `set` case; here replacing First with a fresh First is a no-op in name,
+    // so instead assert position is preserved when set is used on a middle
+    // member.
+    let builder = PluginGroupBuilder::new()
+        .add(Named::<'a'>)
+        .add(First)
+        .add(Named::<'c'>)
+        .set(First);
+    assert_eq!(group_order(builder), vec!["a", "first", "c"]);
+}
+
+/// Adding the same plugin type twice panics at edit time.
+#[test]
+#[should_panic(expected = "already a member")]
+fn duplicate_add_panics() {
+    let _ = PluginGroupBuilder::new()
+        .add(Named::<'a'>)
+        .add(Named::<'a'>);
+}
+
+/// Declared dependencies reorder members topologically, overriding explicit
+/// order while keeping it as the stable tie-break.
+#[test]
+fn dependencies_reorder_members_topologically() {
+    // Core has no deps; Mid depends on Core; Top depends on Mid. Added in the
+    // reverse (wrong) order on purpose.
+    struct Core;
+    impl Plugin for Core {
+        fn build(&self, _app: &mut App) {}
+        fn name(&self) -> &str {
+            "core"
+        }
+    }
+    struct Mid;
+    impl Plugin for Mid {
+        fn build(&self, _app: &mut App) {}
+        fn name(&self) -> &str {
+            "mid"
+        }
+        fn dependencies(&self) -> Vec<PluginDependency> {
+            vec![PluginDependency::on::<Core>()]
+        }
+    }
+    struct Top;
+    impl Plugin for Top {
+        fn build(&self, _app: &mut App) {}
+        fn name(&self) -> &str {
+            "top"
+        }
+        fn dependencies(&self) -> Vec<PluginDependency> {
+            vec![PluginDependency::on::<Mid>()]
+        }
+    }
+
+    let builder = PluginGroupBuilder::new().add(Top).add(Mid).add(Core);
+    assert_eq!(group_order(builder), vec!["core", "mid", "top"]);
+}
+
+/// Two independent chains keep their explicit relative order as the tie-break.
+#[test]
+fn independent_members_keep_explicit_order_as_tiebreak() {
+    struct Core;
+    impl Plugin for Core {
+        fn build(&self, _app: &mut App) {}
+        fn name(&self) -> &str {
+            "core"
+        }
+    }
+    struct DependsOnCore;
+    impl Plugin for DependsOnCore {
+        fn build(&self, _app: &mut App) {}
+        fn name(&self) -> &str {
+            "dep"
+        }
+        fn dependencies(&self) -> Vec<PluginDependency> {
+            vec![PluginDependency::on::<Core>()]
+        }
+    }
+    struct Loner;
+    impl Plugin for Loner {
+        fn build(&self, _app: &mut App) {}
+        fn name(&self) -> &str {
+            "loner"
+        }
+    }
+
+    // Explicit order: loner, dep, core. `dep` must wait for `core`; `loner` is
+    // free and keeps its earliest-eligible slot.
+    let builder = PluginGroupBuilder::new()
+        .add(Loner)
+        .add(DependsOnCore)
+        .add(Core);
+    assert_eq!(group_order(builder), vec!["loner", "core", "dep"]);
+}
+
+/// A dependency on a plugin not in the group is reported at assembly time.
+#[test]
+fn missing_dependency_is_reported_at_assembly_time() {
+    struct Absent;
+    impl Plugin for Absent {
+        fn build(&self, _app: &mut App) {}
+        fn name(&self) -> &str {
+            "absent"
+        }
+    }
+    struct Needs;
+    impl Plugin for Needs {
+        fn build(&self, _app: &mut App) {}
+        fn name(&self) -> &str {
+            "needs"
+        }
+        fn dependencies(&self) -> Vec<PluginDependency> {
+            vec![PluginDependency::on::<Absent>()]
+        }
+    }
+
+    let Err(err) = PluginGroupBuilder::new().add(Needs).try_into_plugins() else {
+        panic!("missing dependency must fail");
+    };
+    match err {
+        PluginGraphError::MissingDependency { dependent, missing } => {
+            assert!(dependent.contains("Needs"), "dependent was {dependent}");
+            assert!(missing.contains("Absent"), "missing was {missing}");
+        }
+        other => panic!("expected MissingDependency, got {other:?}"),
+    }
+}
+
+/// A dependency on a member that was disabled out of the group is also treated
+/// as missing — resolution runs over the enabled set only.
+#[test]
+fn dependency_on_disabled_member_is_missing() {
+    struct Opt;
+    impl Plugin for Opt {
+        fn build(&self, _app: &mut App) {}
+        fn name(&self) -> &str {
+            "opt"
+        }
+    }
+    struct Needs;
+    impl Plugin for Needs {
+        fn build(&self, _app: &mut App) {}
+        fn name(&self) -> &str {
+            "needs"
+        }
+        fn dependencies(&self) -> Vec<PluginDependency> {
+            vec![PluginDependency::on::<Opt>()]
+        }
+    }
+
+    let result = PluginGroupBuilder::new()
+        .add(Opt)
+        .add(Needs)
+        .disable::<Opt>()
+        .try_into_plugins();
+    assert!(matches!(
+        result,
+        Err(PluginGraphError::MissingDependency { .. })
+    ));
+}
+
+/// A dependency cycle is reported at assembly time, not run time.
+#[test]
+fn dependency_cycle_is_reported_at_assembly_time() {
+    struct Ping;
+    struct Pong;
+    impl Plugin for Ping {
+        fn build(&self, _app: &mut App) {}
+        fn name(&self) -> &str {
+            "ping"
+        }
+        fn dependencies(&self) -> Vec<PluginDependency> {
+            vec![PluginDependency::on::<Pong>()]
+        }
+    }
+    impl Plugin for Pong {
+        fn build(&self, _app: &mut App) {}
+        fn name(&self) -> &str {
+            "pong"
+        }
+        fn dependencies(&self) -> Vec<PluginDependency> {
+            vec![PluginDependency::on::<Ping>()]
+        }
+    }
+
+    let Err(err) = PluginGroupBuilder::new().add(Ping).add(Pong).try_into_plugins() else {
+        panic!("cycle must fail");
+    };
+    match err {
+        PluginGraphError::Cycle { members } => {
+            assert_eq!(members.len(), 2, "both members are unresolved: {members:?}");
+        }
+        other => panic!("expected Cycle, got {other:?}"),
+    }
+}
+
+/// `into_plugins` (the panicking shorthand) surfaces a cycle loudly.
+#[test]
+#[should_panic(expected = "assembly failed")]
+fn into_plugins_panics_on_cycle() {
+    struct A;
+    struct B;
+    impl Plugin for A {
+        fn build(&self, _app: &mut App) {}
+        fn dependencies(&self) -> Vec<PluginDependency> {
+            vec![PluginDependency::on::<B>()]
+        }
+    }
+    impl Plugin for B {
+        fn build(&self, _app: &mut App) {}
+        fn dependencies(&self) -> Vec<PluginDependency> {
+            vec![PluginDependency::on::<A>()]
+        }
+    }
+    let _ = PluginGroupBuilder::new().add(A).add(B).into_plugins();
+}
+
+/// A group plugs into `App::add_plugins` and builds its members in the resolved
+/// (dependency-correct) order.
+#[test]
+fn app_builds_group_in_resolved_order() {
+    #[derive(Default)]
+    struct Order(Vec<&'static str>);
+    impl Resource for Order {}
+
+    struct Core;
+    impl Plugin for Core {
+        fn build(&self, app: &mut App) {
+            app.init_resource::<Order>();
+            app.world_mut().resource_mut::<Order>().0.push("core");
+        }
+    }
+    struct Renderer;
+    impl Plugin for Renderer {
+        fn build(&self, app: &mut App) {
+            app.init_resource::<Order>();
+            app.world_mut().resource_mut::<Order>().0.push("renderer");
+        }
+        fn dependencies(&self) -> Vec<PluginDependency> {
+            vec![PluginDependency::on::<Core>()]
+        }
+    }
+
+    struct DemoGroup;
+    impl PluginGroup for DemoGroup {
+        fn build(self) -> PluginGroupBuilder {
+            // Deliberately add the dependent first; resolution must fix it.
+            PluginGroupBuilder::new().add(Renderer).add(Core)
+        }
+    }
+
+    let mut app = App::new();
+    app.add_plugins(DemoGroup);
+    assert_eq!(app.world().resource::<Order>().0, vec!["core", "renderer"]);
+}

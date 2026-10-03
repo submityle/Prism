@@ -20,8 +20,13 @@
 //! - A single main [`SubApp`] = one [`World`](prism_ecs::world::World) whose
 //!   world-owned [`Schedules`](prism_ecs::schedule::Schedules) resource holds
 //!   the phase schedules (design §5: reuse the `prism_ecs` scheduling graph).
-//! - The [`Plugin`] trait (`build` / `ready` / `finish` / `cleanup`) and a
-//!   minimal [`PluginGroup`].
+//! - The [`Plugin`] trait (`build` / `ready` / `finish` / `cleanup`, plus
+//!   declared [`dependencies`](crate::plugin::Plugin::dependencies)) and an
+//!   editable [`PluginGroup`]: [`PluginGroupBuilder`] supports ordered,
+//!   idempotent `add` / `add_before` / `add_after` / `set` / `disable` /
+//!   `enable`, and resolves members by a topological sort over declared
+//!   dependencies with **assembly-time** cycle and missing-dependency
+//!   detection (design §24.1, §23 risk #5).
 //! - The built-in core [phase labels](crate::schedule) and the variable-step
 //!   main-frame loop
 //!   (`First → PreUpdate → StateTransition → Update → PostUpdate → Last`), plus
@@ -39,9 +44,7 @@
 //!   [`ScheduleRunnerOnce`].
 //!
 //! Everything on the public surface is a **real, working implementation** —
-//! no `todo!()`, `unimplemented!()`, or hollow stubs. The remaining M1 work
-//! (plugin dependency graphs with topological ordering
-//! and `PluginGroup` reordering/disable editing) and later milestones (fixed
+//! no `todo!()`, `unimplemented!()`, or hollow stubs. Later milestones (fixed
 //! timestep with `RunFixedMainLoop`, sub-app pipelining, windowed /
 //! dedicated-server runners, determinism) layer on top without rewriting these
 //! foundations. Deferred features are documented as absent, never faked.
@@ -63,6 +66,7 @@ pub mod event;
 pub mod exit;
 pub mod plugin;
 pub mod plugin_group;
+pub mod plugin_graph;
 pub mod runner;
 pub mod schedule;
 pub mod state;
@@ -73,7 +77,8 @@ mod tests;
 
 pub use app::{App, Plugins, PluginsState};
 pub use exit::{AppExit, AppExitRequest};
-pub use plugin::Plugin;
+pub use plugin::{Plugin, PluginDependency};
+pub use plugin_graph::PluginGraphError;
 pub use plugin_group::{PluginGroup, PluginGroupBuilder};
 pub use runner::{HeadlessRunner, ScheduleRunnerOnce, run_once};
 pub use schedule::{
@@ -87,7 +92,8 @@ pub use sub_app::SubApp;
 pub mod prelude {
     pub use crate::app::{App, Plugins, PluginsState};
     pub use crate::exit::{AppExit, AppExitRequest};
-    pub use crate::plugin::Plugin;
+    pub use crate::plugin::{Plugin, PluginDependency};
+    pub use crate::plugin_graph::PluginGraphError;
     pub use crate::plugin_group::{PluginGroup, PluginGroupBuilder};
     pub use crate::runner::{HeadlessRunner, ScheduleRunnerOnce};
     pub use crate::schedule::{
