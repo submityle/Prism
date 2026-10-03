@@ -14,12 +14,16 @@
 //! This module owns the *scheduling and per-cell/per-particle numerics* of that
 //! loop — the transfer weights, the blend, the affine reconstruction, the
 //! divergence measure, the pressure-solver choice, and the sub-step budget — as
-//! pure, deterministic functions. The heavy Poisson solve itself is a shared
-//! GPU service; here we only decide how it is driven. Trilinear weights form a
+//! pure, deterministic functions. The large-grid `Multigrid` path drives the
+//! deterministic CPU reference solve in [`super::pressure_multigrid`]; the
+//! small/mid `Jacobi` and `Conjugate-Gradient` paths stay shared GPU services,
+//! so here we choose the solver and, when `Multigrid` is chosen, dispatch the
+//! projection to that reference solver. Trilinear weights form a
 //! partition of unity, the blend and affine transfers reproduce constant and
 //! linear fields exactly, and only `sqrt` is used. No `f32` equality tests and
 //! no AI/ML.
 
+use super::pressure_multigrid::{self, MultigridConfig, SolveReport};
 use super::{Vec3, EPS};
 
 /// Tuning for one `FLIP`/`APIC` fluid domain's step.
@@ -226,9 +230,67 @@ pub fn plan_flip(
     }
 }
 
+/// Builds a `Multigrid` V-cycle schedule from the `FLIP` quality bias.
+///
+/// Starts from [`MultigridConfig::balanced`] and, as `quality_bias` rises in
+/// `0..=1`, adds V-cycles and tightens the residual tolerance so film-grade
+/// domains converge further while interactive domains stay cheap. The result
+/// always satisfies [`MultigridConfig::is_valid`], so it can be handed to
+/// [`super::pressure_multigrid::solve`] directly.
+#[must_use]
+pub fn multigrid_schedule(quality_bias: f32) -> MultigridConfig {
+    let bias = quality_bias.clamp(0.0, 1.0);
+    let base = MultigridConfig::balanced();
+    // Up to +40 extra V-cycles and a 100x tighter tolerance at full quality.
+    let extra_cycles = (40.0 * bias) as u32;
+    let tol_scale = 1.0 / (1.0 + 99.0 * bias);
+    MultigridConfig {
+        max_cycles: base.max_cycles + extra_cycles,
+        tolerance: base.tolerance * tol_scale,
+        ..base
+    }
+}
+
+/// Dispatches the pressure projection chosen by [`plan_flip`].
+///
+/// Only the large-grid [`PressureSolver::Multigrid`] path runs on the CPU here,
+/// driving [`super::pressure_multigrid::solve`] over the divergence right-hand
+/// side on a vertex-centred `grid_size^3` grid with node spacing
+/// `cell_spacing`. The `Jacobi` and `Conjugate-Gradient` paths are the
+/// small/mid shared GPU services and return `None`, so a caller can tell a CPU
+/// reference solve ran from a dispatched GPU path. An invalid grid size or a
+/// right-hand side whose length is not `grid_size^3` also yields `None` rather
+/// than panicking.
+#[must_use]
+pub fn project_pressure(
+    plan: FlipPlan,
+    divergence_rhs: &[f32],
+    grid_size: usize,
+    cell_spacing: f32,
+    quality_bias: f32,
+) -> Option<SolveReport> {
+    match plan.solver {
+        PressureSolver::Multigrid => {
+            if !pressure_multigrid::is_valid_level_size(grid_size)
+                || divergence_rhs.len() != grid_size * grid_size * grid_size
+            {
+                return None;
+            }
+            Some(pressure_multigrid::solve(
+                divergence_rhs,
+                grid_size,
+                cell_spacing,
+                multigrid_schedule(quality_bias),
+            ))
+        }
+        PressureSolver::Jacobi | PressureSolver::ConjugateGradient => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     const THRESHOLDS: PressureSolverThresholds = PressureSolverThresholds {
         jacobi_max_cells: 10_000,
@@ -372,5 +434,96 @@ mod tests {
         assert!((plan.blend - 1.0).abs() < EPS);
         assert_eq!(plan.solver, PressureSolver::Jacobi);
         assert_eq!(plan_flip(params, 500, 0.0, THRESHOLDS), plan);
+    }
+
+    #[test]
+    fn multigrid_schedule_is_valid_and_monotonic() {
+        let mut prev = multigrid_schedule(0.0);
+        assert!(prev.is_valid());
+        let mut bias = 0.1f32;
+        while bias <= 1.0 + EPS {
+            let cfg = multigrid_schedule(bias);
+            assert!(cfg.is_valid(), "schedule must stay valid at bias {bias}");
+            assert!(
+                cfg.max_cycles >= prev.max_cycles,
+                "cycle budget never shrinks"
+            );
+            assert!(
+                cfg.tolerance <= prev.tolerance + EPS,
+                "tolerance never loosens with higher quality"
+            );
+            prev = cfg;
+            bias += 0.1;
+        }
+    }
+
+    #[test]
+    fn project_pressure_routes_multigrid_to_a_cpu_solve() {
+        let n = 9usize;
+        let h = 1.0f32 / (n as f32 - 1.0);
+        // Smooth manufactured solution, zero on the boundary.
+        let denom = (n - 1) as f32;
+        let mut exact = vec![0.0f32; n * n * n];
+        for z in 1..n - 1 {
+            let zf = z as f32 / denom;
+            for y in 1..n - 1 {
+                let yf = y as f32 / denom;
+                for x in 1..n - 1 {
+                    let xf = x as f32 / denom;
+                    let v = (xf * (1.0 - xf)) * (yf * (1.0 - yf)) * (zf * (1.0 - zf));
+                    exact[(z * n + y) * n + x] = v;
+                }
+            }
+        }
+        let rhs = pressure_multigrid::apply_operator(&exact, n, h);
+        let params = FlipParams {
+            flip_blend: 0.95,
+            use_affine: true,
+            cfl: 1.0,
+            dx: h,
+        };
+        // A huge cell count forces the Multigrid branch.
+        let plan = plan_flip(params, 50_000_000, 1.0, THRESHOLDS);
+        assert_eq!(plan.solver, PressureSolver::Multigrid);
+        let report =
+            project_pressure(plan, &rhs, n, h, 1.0).expect("multigrid must dispatch a CPU solve");
+        assert_eq!(report.pressure.len(), n * n * n);
+        assert!(report.cycles > 0 && report.cycles <= multigrid_schedule(1.0).max_cycles);
+        assert!(report.residual <= multigrid_schedule(1.0).tolerance);
+    }
+
+    #[test]
+    fn project_pressure_leaves_small_solvers_to_gpu() {
+        let n = 9usize;
+        let rhs = vec![0.0f32; n * n * n];
+        let params = FlipParams {
+            flip_blend: 0.5,
+            use_affine: false,
+            cfl: 1.0,
+            dx: 0.1,
+        };
+        let jacobi = plan_flip(params, 500, 0.0, THRESHOLDS);
+        assert_eq!(jacobi.solver, PressureSolver::Jacobi);
+        assert!(project_pressure(jacobi, &rhs, n, 0.1, 0.0).is_none());
+        let cg = plan_flip(params, 100_000, 0.0, THRESHOLDS);
+        assert_eq!(cg.solver, PressureSolver::ConjugateGradient);
+        assert!(project_pressure(cg, &rhs, n, 0.1, 0.0).is_none());
+    }
+
+    #[test]
+    fn project_pressure_rejects_a_bad_grid() {
+        let n = 10usize; // not 2^L + 1
+        let rhs = vec![1.0f32; n * n * n];
+        let params = FlipParams {
+            flip_blend: 0.9,
+            use_affine: true,
+            cfl: 1.0,
+            dx: 0.1,
+        };
+        let plan = plan_flip(params, 50_000_000, 1.0, THRESHOLDS);
+        assert_eq!(plan.solver, PressureSolver::Multigrid);
+        assert!(project_pressure(plan, &rhs, n, 0.1, 1.0).is_none());
+        // A valid grid size but a mismatched RHS length also yields None.
+        assert!(project_pressure(plan, &rhs, 9, 0.1, 1.0).is_none());
     }
 }
