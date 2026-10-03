@@ -55,6 +55,21 @@ impl DynamicStruct {
     pub fn insert<T: Reflect>(&mut self, name: &'static str, value: T) {
         self.insert_boxed(name, Box::new(value));
     }
+
+    /// Remove a field by name, returning its boxed value when present.
+    ///
+    /// Used by schema migrations to drop or rename fields on a decoded payload.
+    pub fn remove(&mut self, name: &str) -> Option<Box<dyn Reflect>> {
+        let index = self.names.iter().position(|existing| *existing == name)?;
+        self.names.remove(index);
+        Some(self.values.remove(index))
+    }
+
+    /// Whether a field with the given name is present.
+    #[must_use]
+    pub fn contains(&self, name: &str) -> bool {
+        self.names.iter().any(|existing| *existing == name)
+    }
 }
 
 impl Struct for DynamicStruct {

@@ -546,6 +546,7 @@ mod math_kind {
 
 mod m2_dynamic {
     use crate::prelude::*;
+    #[cfg(feature = "math")]
     use prism_math::Vec3;
     use std::boxed::Box;
     use std::collections::HashMap;
@@ -661,13 +662,16 @@ mod m2_dynamic {
             map
         );
 
-        let v = Vec3 {
-            x: 1.0,
-            y: 2.0,
-            z: 3.0,
-        };
-        assert_eq!(Vec3::from_reflect(&v as &dyn Reflect).unwrap(), v);
-        assert_eq!(Vec3::from_reflect(&*v.reflect_clone()).unwrap(), v);
+        #[cfg(feature = "math")]
+        {
+            let v = Vec3 {
+                x: 1.0,
+                y: 2.0,
+                z: 3.0,
+            };
+            assert_eq!(Vec3::from_reflect(&v as &dyn Reflect).unwrap(), v);
+            assert_eq!(Vec3::from_reflect(&*v.reflect_clone()).unwrap(), v);
+        }
     }
 
     #[test]
@@ -1172,5 +1176,372 @@ mod serialization {
         // Smoke-check the Display impls stay wired (no panics / empty output).
         assert!(!format!("{err}").is_empty());
         assert!(!format!("{}", SerializeError::UnsupportedLeaf { type_name: "T" }).is_empty());
+    }
+}
+
+/// M4 schema tests: attribute metadata attach+query through the registry, a
+/// composable multi-step migration chain (v1 -> v2 -> v3 payload upgrade),
+/// validation success + failure, and versioned (de)serialization layered on
+/// the M3 serializer (current-version round-trip and old-payload migration).
+mod m4_schema {
+    use crate::prelude::*;
+    use core::any::type_name;
+
+    // Three successive shapes of one *logical* type ("Monster"), each backed by
+    // a distinct Rust type so the migration chain can rewrite fields between
+    // versions. v1 -> v2 adds `armor`; v2 -> v3 renames `hp` -> `health` and
+    // adds `mana`.
+    #[derive(Reflect, Debug, PartialEq, Clone)]
+    struct MonsterV1 {
+        hp: i32,
+        name: String,
+    }
+
+    #[derive(Reflect, Debug, PartialEq, Clone)]
+    struct MonsterV2 {
+        hp: i32,
+        name: String,
+        armor: i32,
+    }
+
+    #[derive(Reflect, Debug, PartialEq, Clone)]
+    struct Monster {
+        health: i32,
+        name: String,
+        armor: i32,
+        mana: i32,
+    }
+
+    /// A registry able to decode every monster version's payload shape.
+    fn type_registry() -> TypeRegistry {
+        let mut registry = TypeRegistry::new();
+        registry.register::<MonsterV1>();
+        registry.register::<MonsterV2>();
+        registry.register::<Monster>();
+        registry
+    }
+
+    /// A schema registry recording the three versions and the two `vN -> vN+1`
+    /// migration steps between them.
+    fn schema_registry() -> SchemaRegistry {
+        let mut schema = SchemaRegistry::new();
+        schema.register_version(
+            "Monster",
+            TypeSchema::new(
+                type_name::<MonsterV1>(),
+                1,
+                <MonsterV1 as Typed>::type_info(),
+            )
+            .with_required_fields(&["hp", "name"]),
+        );
+        schema.register_version(
+            "Monster",
+            TypeSchema::new(
+                type_name::<MonsterV2>(),
+                2,
+                <MonsterV2 as Typed>::type_info(),
+            )
+            .with_required_fields(&["hp", "name", "armor"]),
+        );
+        schema.register_version(
+            "Monster",
+            TypeSchema::new(type_name::<Monster>(), 3, <Monster as Typed>::type_info())
+                .with_required_fields(&["health", "name", "armor", "mana"]),
+        );
+
+        // v1 -> v2: new `armor` field defaulting to 0.
+        schema
+            .register_migration(
+                "Monster",
+                Migration::new(1, 2, |d| {
+                    d.insert("armor", 0i32);
+                    Ok(())
+                }),
+            )
+            .expect("register v1->v2");
+
+        // v2 -> v3: rename `hp` -> `health`, add `mana` defaulting to 100.
+        schema
+            .register_migration(
+                "Monster",
+                Migration::new(2, 3, |d| {
+                    let hp = d
+                        .remove("hp")
+                        .ok_or_else(|| MigrateError::MissingField("hp".into()))?;
+                    d.insert_boxed("health", hp);
+                    d.insert("mana", 100i32);
+                    Ok(())
+                }),
+            )
+            .expect("register v2->v3");
+
+        schema
+    }
+
+    #[test]
+    fn metadata_attaches_and_queries_through_registry() {
+        let mut registry = type_registry();
+        registry.register_type_data::<Monster, _>(
+            TypeMetadata::new()
+                .with_docs("A hostile creature.")
+                .with_custom("icon", AttributeValue::Text("skull".into()))
+                .with_field(
+                    FieldMetadata::new("health")
+                        .with_docs("Current hit points.")
+                        .with_category("Combat")
+                        .with_range(0.0, 1000.0)
+                        .with_default(AttributeValue::Int(100)),
+                )
+                .with_field(FieldMetadata::new("name").required(true))
+                .with_field(FieldMetadata::new("mana").hidden(true)),
+        );
+
+        let meta = registry
+            .get_with_name(type_name::<Monster>())
+            .and_then(|r| r.data::<TypeMetadata>())
+            .expect("metadata attached to Monster");
+
+        assert_eq!(meta.docs(), Some("A hostile creature."));
+        assert_eq!(meta.custom("icon"), Some(&AttributeValue::Text("skull".into())));
+        let health = meta.field("health").expect("health metadata");
+        assert_eq!(health.docs(), Some("Current hit points."));
+        assert_eq!(health.category(), Some("Combat"));
+        assert_eq!(health.range(), Some((0.0, 1000.0)));
+        assert_eq!(health.default_value(), Some(&AttributeValue::Int(100)));
+        assert!(meta.field("name").unwrap().is_required());
+        assert!(meta.field("mana").unwrap().is_hidden());
+        assert!(meta.field("missing").is_none());
+    }
+
+    #[test]
+    fn schema_registry_tracks_versions_and_chains() {
+        let schema = schema_registry();
+
+        assert_eq!(schema.current_version("Monster"), Some(SchemaVersion::new(3)));
+        assert_eq!(schema.current_version("Ghost"), None);
+        assert_eq!(schema.locate(type_name::<MonsterV1>()), Some(("Monster", 1)));
+        assert_eq!(schema.locate(type_name::<Monster>()), Some(("Monster", 3)));
+        assert_eq!(
+            schema.current_schema("Monster").map(TypeSchema::version),
+            Some(3)
+        );
+
+        // Full chain from the oldest version has two steps; from current, none.
+        let chain = schema.chain("Monster", 1).expect("chain from v1");
+        assert_eq!(chain.len(), 2);
+        assert_eq!(chain[0].from_version(), 1);
+        assert_eq!(chain[0].to_version(), 2);
+        assert_eq!(chain[1].from_version(), 2);
+        assert_eq!(chain[1].to_version(), 3);
+        assert!(schema.chain("Monster", 3).expect("chain from v3").is_empty());
+
+        // Unknown type and too-new version are reported distinctly.
+        assert!(matches!(
+            schema.chain("Ghost", 1),
+            Err(MigrateError::UnknownType(_))
+        ));
+        assert!(matches!(
+            schema.chain("Monster", 9),
+            Err(MigrateError::VersionTooNew { found: 9, current: 3 })
+        ));
+    }
+
+    #[test]
+    #[should_panic(expected = "advance exactly one version")]
+    fn migration_must_advance_one_version() {
+        // A migration that skips a version is a construction error: the chain
+        // walker relies on every step advancing exactly one version.
+        let _ = Migration::new(1, 3, |_| Ok(()));
+    }
+
+    #[test]
+    fn validation_success_and_failures() {
+        let schema =
+            TypeSchema::new(type_name::<Monster>(), 3, <Monster as Typed>::type_info())
+                .with_required_fields(&["health", "name"]);
+        let meta = TypeMetadata::new()
+            .with_field(FieldMetadata::new("health").with_range(0.0, 1000.0))
+            .with_field(FieldMetadata::new("name").required(true));
+
+        // Success: all required fields present, health within range.
+        let good = Monster {
+            health: 250,
+            name: "dragon".into(),
+            armor: 10,
+            mana: 60,
+        };
+        assert!(validate(&good, &schema, Some(&meta)).is_ok());
+
+        // Out-of-range numeric field.
+        let hot = Monster {
+            health: 5000,
+            name: "inferno".into(),
+            armor: 0,
+            mana: 0,
+        };
+        let errs = validate(&hot, &schema, Some(&meta)).expect_err("range violation");
+        assert!(errs.iter().any(|e| matches!(
+            e,
+            ValidationError::OutOfRange { field, min, max, .. }
+                if field == "health" && *min == 0.0 && *max == 1000.0
+        )));
+
+        // Missing required field (DynamicStruct without `name`).
+        let mut partial = DynamicStruct::new();
+        partial.insert("health", 10i32);
+        let errs = validate(&partial, &schema, Some(&meta)).expect_err("missing field");
+        assert!(errs.iter().any(|e| matches!(
+            e,
+            ValidationError::MissingRequiredField { field } if field == "name"
+        )));
+
+        // A non-struct value cannot satisfy field rules.
+        let errs = validate(&7i32, &schema, Some(&meta)).expect_err("not a struct");
+        assert_eq!(errs, vec![ValidationError::NotAStruct]);
+    }
+
+    #[test]
+    fn version_validation_against_registry() {
+        let schema = schema_registry();
+        assert!(validate_version(1, &schema, "Monster").is_ok());
+        assert!(validate_version(3, &schema, "Monster").is_ok());
+        assert!(matches!(
+            validate_version(9, &schema, "Monster"),
+            Err(ValidationError::VersionTooNew { found: 9, current: 3 })
+        ));
+    }
+
+    #[test]
+    fn versioned_binary_round_trips_current_version() {
+        let schema = schema_registry();
+        let registry = type_registry();
+        let monster = Monster {
+            health: 320,
+            name: "wyrm".into(),
+            armor: 15,
+            mana: 90,
+        };
+
+        let bytes = to_versioned_binary(&monster, &schema).expect("versioned serialize");
+        // Envelope stamps the current version (3) ahead of the M3 body.
+        assert_eq!(&bytes[..4], b"PRVB");
+        assert_eq!(u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]), 3);
+
+        let decoded = from_versioned_binary(&bytes, &registry, &schema, "Monster")
+            .expect("versioned deserialize");
+        let back = Monster::from_reflect(&*decoded).expect("rebuild Monster");
+        assert_eq!(back, monster);
+    }
+
+    #[test]
+    fn versioned_ron_round_trips_current_version() {
+        let schema = schema_registry();
+        let registry = type_registry();
+        let monster = Monster {
+            health: 11,
+            name: "imp".into(),
+            armor: 1,
+            mana: 7,
+        };
+
+        let text = to_versioned_ron(&monster, &schema).expect("versioned RON serialize");
+        assert!(text.starts_with("#prism-schema v3\n"));
+
+        let decoded = from_versioned_ron(&text, &registry, &schema, "Monster")
+            .expect("versioned RON deserialize");
+        let back = Monster::from_reflect(&*decoded).expect("rebuild Monster from RON");
+        assert_eq!(back, monster);
+    }
+
+    #[test]
+    fn old_version_payload_migrates_through_full_chain() {
+        let schema = schema_registry();
+        let registry = type_registry();
+
+        // A payload written by the v1 shape (hp + name only).
+        let legacy = MonsterV1 {
+            hp: 42,
+            name: "goblin".into(),
+        };
+        let bytes = to_versioned_binary(&legacy, &schema).expect("serialize v1 payload");
+        assert_eq!(u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]), 1);
+
+        // Reading as the logical "Monster" walks v1 -> v2 -> v3 before rebuild.
+        let decoded = from_versioned_binary(&bytes, &registry, &schema, "Monster")
+            .expect("migrate v1 payload to current");
+        let migrated = Monster::from_reflect(&*decoded).expect("rebuild migrated Monster");
+        assert_eq!(
+            migrated,
+            Monster {
+                health: 42,          // renamed from hp
+                name: "goblin".into(),
+                armor: 0,            // added by v1 -> v2
+                mana: 100,           // added by v2 -> v3
+            }
+        );
+
+        // The same migration works through the RON back-end too.
+        let text = to_versioned_ron(&legacy, &schema).expect("serialize v1 RON payload");
+        let decoded = from_versioned_ron(&text, &registry, &schema, "Monster")
+            .expect("migrate v1 RON payload");
+        let migrated = Monster::from_reflect(&*decoded).expect("rebuild migrated Monster from RON");
+        assert_eq!(migrated.health, 42);
+        assert_eq!(migrated.armor, 0);
+        assert_eq!(migrated.mana, 100);
+    }
+
+    #[test]
+    fn intermediate_version_payload_migrates_remaining_steps() {
+        let schema = schema_registry();
+        let registry = type_registry();
+
+        // A v2 payload only needs the v2 -> v3 step.
+        let mid = MonsterV2 {
+            hp: 5,
+            name: "slime".into(),
+            armor: 3,
+        };
+        let bytes = to_versioned_binary(&mid, &schema).expect("serialize v2 payload");
+        assert_eq!(u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]), 2);
+
+        let decoded = from_versioned_binary(&bytes, &registry, &schema, "Monster")
+            .expect("migrate v2 payload");
+        let migrated = Monster::from_reflect(&*decoded).expect("rebuild migrated Monster");
+        assert_eq!(
+            migrated,
+            Monster {
+                health: 5,
+                name: "slime".into(),
+                armor: 3,
+                mana: 100,
+            }
+        );
+    }
+
+    #[test]
+    fn versioned_binary_rejects_bad_envelope_and_unknown_type() {
+        let schema = schema_registry();
+        let registry = type_registry();
+
+        // Too short / wrong magic.
+        assert!(matches!(
+            from_versioned_binary(b"PR", &registry, &schema, "Monster"),
+            Err(MigrateError::BadEnvelope)
+        ));
+        assert!(matches!(
+            from_versioned_binary(b"XXXX\x01\x00\x00\x00", &registry, &schema, "Monster"),
+            Err(MigrateError::BadEnvelope)
+        ));
+
+        // Serializing a type with no schema entry is an unknown type.
+        let orphan = MonsterV1 {
+            hp: 1,
+            name: "x".into(),
+        };
+        let empty = SchemaRegistry::new();
+        assert!(matches!(
+            to_versioned_binary(&orphan, &empty),
+            Err(MigrateError::UnknownType(_))
+        ));
     }
 }

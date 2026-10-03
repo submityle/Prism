@@ -31,9 +31,18 @@
 //!   (self-contained RON text), plus [`StableTypeId`], a deterministic
 //!   cross-build type id derived from the type path.
 //!
-//! Later milestones (design §22): attribute metadata + schema migration (M4),
-//! function reflection + `reflect_trait` (M5), and ECS/scene/editor/script/
-//! network integration (M6).
+//! - **M4 metadata + schema:** attribute/field [`metadata`](schema::metadata)
+//!   ([`TypeMetadata`](schema::TypeMetadata)) queryable through the registry,
+//!   schema [`version`](schema::version)ing ([`SchemaRegistry`](schema::SchemaRegistry)),
+//!   composable [`migration`](schema::migration) chains
+//!   ([`Migration`](schema::Migration)), [`validate`](schema::validate)ion, and
+//!   versioned serialization
+//!   ([`to_versioned_binary`](schema::to_versioned_binary)/
+//!   [`from_versioned_binary`](schema::from_versioned_binary)) layered on the
+//!   M3 serializer so an old payload migrates step-by-step before deserialization.
+//!
+//! Later milestones (design §22): function reflection + `reflect_trait` (M5),
+//! and ECS/scene/editor/script/network integration (M6).
 //!
 //! This crate contains no Unreal Engine source or derived code and depends on
 //! no `bevy_*` crate.
@@ -55,6 +64,7 @@ mod math_impls;
 mod path;
 mod reflect;
 mod registry;
+pub mod schema;
 mod ser;
 mod type_data;
 mod type_info;
@@ -79,6 +89,10 @@ pub use type_info::{
 pub use ser::{
     DeserializeError, SerializeError, StableTypeId, from_binary, from_ron, to_binary, to_ron,
 };
+pub use schema::{
+    AttributeValue, FieldMetadata, MigrateError, Migration, SchemaRegistry, SchemaVersion,
+    TypeMetadata, TypeSchema, ValidationError,
+};
 
 /// Convenient re-exports for downstream crates.
 pub mod prelude {
@@ -91,6 +105,11 @@ pub mod prelude {
         TupleStructInfo, TypeData, TypeInfo, TypeRegistration, TypeRegistry, Typed, UnnamedField,
         ValueInfo, VariantInfo, VariantKind, VariantType, from_binary, from_ron, reflect_path,
         reflect_path_mut, to_binary, to_ron,
+    };
+    pub use crate::schema::{
+        AttributeValue, FieldMetadata, MigrateError, Migration, SchemaRegistry, SchemaVersion,
+        TypeMetadata, TypeSchema, ValidationError, from_versioned_binary, from_versioned_ron,
+        to_versioned_binary, to_versioned_ron, validate, validate_version,
     };
 }
 
