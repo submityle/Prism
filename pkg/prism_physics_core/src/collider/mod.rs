@@ -219,6 +219,10 @@ pub use tet_fem_stiffness::{
 };
 pub mod tet_fem_assembly;
 pub use tet_fem_assembly::{assemble_global_stiffness, GlobalStiffness};
+pub mod tet_lumped_mass;
+pub use tet_lumped_mass::{
+    build_lumped_mass, build_lumped_mass_from_mesh, LumpedMass,
+};
 
 /// A handle into a [`ShapeRegistry`].
 ///
