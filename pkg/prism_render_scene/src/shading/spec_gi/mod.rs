@@ -20,6 +20,11 @@ mod abi;
 // reservoir storage buffers and the resolved specular+confidence target.
 mod resources;
 
+// Compute pipeline, group-0 layout and the `RenderStartup` initializer for the
+// reuse dispatch. The per-view bind group and the `Core3d` dispatch node that
+// consume them arrive in the following slices.
+mod pipeline;
+
 #[cfg(test)]
 mod shader_tests;
 
