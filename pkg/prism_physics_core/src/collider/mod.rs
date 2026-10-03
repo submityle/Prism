@@ -103,6 +103,12 @@ pub mod quality_report;
 
 pub use quality_report::{analyze_mesh_quality, MeshQualityParams, MeshQualityReport};
 
+pub mod self_intersection;
+
+pub use self_intersection::{
+    detect_self_intersections, IntersectingPair, SelfIntersectionParams, SelfIntersectionReport,
+};
+
 /// A handle into a [`ShapeRegistry`].
 ///
 /// This is a plain index handle; shapes are immutable once inserted, so no
