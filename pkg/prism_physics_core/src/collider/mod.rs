@@ -119,6 +119,10 @@ pub mod curvature;
 
 pub use curvature::{estimate_curvature, CurvatureParams, CurvatureReport, VertexCurvature};
 
+pub mod boundary_loops;
+
+pub use boundary_loops::{extract_boundary_loops, BoundaryLoopParams, BoundaryLoops};
+
 /// A handle into a [`ShapeRegistry`].
 ///
 /// This is a plain index handle; shapes are immutable once inserted, so no
