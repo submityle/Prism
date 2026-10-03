@@ -226,6 +226,39 @@ impl GpuDdgiUpdateParams {
     }
 }
 
+/// Immediate (push-constant) twin of the WESL `CompositeParams` struct consumed
+/// by both entry points of `ddgi_composite.wesl`.
+///
+/// Carries only the framebuffer extent (to bounds-check each 8x8 tile
+/// invocation); the trailing `u32`s pad the block to the 16-byte immediate
+/// alignment with no implicit padding (asserted by the tests). The composite
+/// is a pure screen-space fold, so unlike the sample / probe-update blocks it
+/// needs no reconstruction transform.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable, PartialEq)]
+pub(crate) struct GpuDdgiCompositeParams {
+    /// Framebuffer width in texels.
+    pub width: u32,
+    /// Framebuffer height in texels.
+    pub height: u32,
+    /// Padding to satisfy the 16-byte immediate alignment.
+    pub _pad0: u32,
+    /// Padding to satisfy the 16-byte immediate alignment.
+    pub _pad1: u32,
+}
+
+impl GpuDdgiCompositeParams {
+    /// Builds the composite params from the framebuffer extent.
+    pub(crate) fn new(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            _pad0: 0,
+            _pad1: 0,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,6 +276,23 @@ mod tests {
         // mat4x4 (64) + vec2<f32> (8) + two scalars (8) = 80 bytes.
         assert_eq!(size_of::<GpuDdgiSampleParams>(), 80);
         assert_eq!(align_of::<GpuDdgiSampleParams>(), 4);
+    }
+
+    #[test]
+    fn composite_params_is_the_16_byte_immediate_block() {
+        // Two u32 extents + two u32 pads = 16 bytes, a multiple of 16 with no
+        // implicit padding, matching `ddgi_composite.wesl`'s `CompositeParams`.
+        assert_eq!(size_of::<GpuDdgiCompositeParams>(), 16);
+        assert_eq!(align_of::<GpuDdgiCompositeParams>(), 4);
+    }
+
+    #[test]
+    fn composite_params_round_trips_the_extent() {
+        let p = GpuDdgiCompositeParams::new(1920, 1080);
+        assert_eq!(p.width, 1920);
+        assert_eq!(p.height, 1080);
+        assert_eq!(p._pad0, 0);
+        assert_eq!(p._pad1, 0);
     }
 
     #[test]

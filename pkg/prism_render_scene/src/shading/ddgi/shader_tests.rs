@@ -372,6 +372,38 @@ fn ddgi_probe_update_wesl_compiles_standalone() {
         .unwrap_or_else(|error| panic!("ddgi_probe_update.wesl failed to compile: {error}"));
 }
 
+/// Compiles `ddgi_composite.wesl` standalone through the shared WESL -> naga
+/// path. The composite is a self-contained screen-space fold with no imports,
+/// so a successful compile validates both entry points (`ddgi_copy_base` lifts
+/// scene_color into the base scratch; `ddgi_composite` folds the gather back
+/// in) and the `rgba16float` storage write against the immediate `params`.
+#[test]
+fn ddgi_composite_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+
+    let composite = shader_id(0x4444_4749_5f43_4f4d_504f_5349_5445_0003);
+    cache.set_shader(
+        composite,
+        Shader::from_wesl(
+            include_str!("../../shaders/ddgi_composite.wesl"),
+            "embedded://prism_render_scene/shaders/ddgi_composite.wesl",
+        ),
+    );
+
+    cache
+        .get(0, composite, &[])
+        .unwrap_or_else(|error| panic!("ddgi_composite.wesl failed to compile: {error}"));
+}
+
+/// Guards the composite immediate ABI against drift from the WESL
+/// `CompositeParams` struct: two `u32` extents + two `u32` pads = 16 bytes.
+#[test]
+fn ddgi_composite_abi_matches_the_shader_layout() {
+    use super::abi::GpuDdgiCompositeParams;
+    assert_eq!(size_of::<GpuDdgiCompositeParams>(), 16);
+    assert_eq!(align_of::<GpuDdgiCompositeParams>(), 4);
+}
+
 /// Guards the probe-update immediate ABI against drift from the WESL
 /// `UpdateParams` struct: two `mat4x4<f32>` (128) + five scalars (20) + three
 /// pads (12) = 160 bytes, and the workgroup constant matches

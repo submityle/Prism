@@ -50,7 +50,8 @@ use super::{
         prepare_shading_composite_pipelines, ShadingCompositePipeline,
     },
     ddgi::{
-        ddgi_probe_update_pass, ddgi_sample_pass, init_ddgi_pipeline, prepare_ddgi_bind_groups,
+        ddgi_composite_pass, ddgi_probe_update_pass, ddgi_sample_pass, init_ddgi_composite_pipeline,
+        init_ddgi_pipeline, prepare_ddgi_bind_groups, prepare_ddgi_composite_bind_groups,
         prepare_ddgi_textures, PrismDdgiSettings,
     },
     dof::{
@@ -265,6 +266,7 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/ssgi_composite.wesl");
         embedded_asset!(app, "../shaders/ddgi_sample.wesl");
         embedded_asset!(app, "../shaders/ddgi_probe_update.wesl");
+        embedded_asset!(app, "../shaders/ddgi_composite.wesl");
         embedded_asset!(app, "../shaders/world_space_gi_probe_update.wesl");
         embedded_asset!(app, "../shaders/world_space_gi_resolve.wesl");
         embedded_asset!(app, "../shaders/world_space_gi_composite.wesl");
@@ -461,6 +463,7 @@ impl Plugin for PrismShadingPlugin {
                         init_surface_cache_pipeline,
                         init_surface_cache_composite_pipeline,
                         init_ddgi_pipeline,
+                        init_ddgi_composite_pipeline,
                     ),
                     init_dfg_lut_texture,
                     init_brdf_lut_pipeline,
@@ -925,6 +928,9 @@ impl Plugin for PrismShadingPlugin {
                     prepare_ddgi_bind_groups
                         .after(prepare_ddgi_textures)
                         .in_set(RenderSystems::PrepareBindGroups),
+                    prepare_ddgi_composite_bind_groups
+                        .after(prepare_ddgi_bind_groups)
+                        .in_set(RenderSystems::PrepareBindGroups),
                 ),
             )
             // Surface cache (persistent surfel radiance cache): the surfel
@@ -1117,27 +1123,34 @@ impl Plugin for PrismShadingPlugin {
                         .after(world_space_gi_pass)
                         .after(ssgi_composite_pass)
                         .before(bevy_core_pipeline::Core3dSystems::MainPass),
-                    // DDGI samples the persistent octahedral probe field into
-                    // its GI export buffer off the SSR prepass depth/normal;
-                    // the energy-conserving composite folding it back over
-                    // scene_color lands in a later DDGI block, so for now the
-                    // export is produced after the world-space GI composite.
+                    // DDGI resolves the persistent octahedral probe field.
                     // Probe-update populates the octahedral irradiance + depth
                     // atlases this frame (one workgroup per probe, tracing the
-                    // screen-space G-buffer). It must run before the sample
-                    // pass reads those atlases.
+                    // screen-space G-buffer); it must run before the sample
+                    // pass reads those atlases. The sample pass reconstructs
+                    // each pixel's probe gather into the GI export off the SSR
+                    // prepass depth/normal, then the energy-conserving composite
+                    // folds that export back over scene_color (UE option C:
+                    // DDGI replaces the IBL diffuse ambient under confidence,
+                    // falling back to IBL on a miss) before the surface cache
+                    // gather and TAA.
                     ddgi_probe_update_pass
                         .after(world_space_gi_composite_pass)
                         .before(ddgi_sample_pass),
                     ddgi_sample_pass
                         .after(world_space_gi_composite_pass)
+                        .before(ddgi_composite_pass),
+                    ddgi_composite_pass
+                        .after(ddgi_sample_pass)
+                        .after(world_space_gi_composite_pass)
                         .before(bevy_core_pipeline::Core3dSystems::MainPass),
-                    // Surface cache gathers its persistent surfels off the
-                    // fully SSR/SSGI/world-space-GI-composited scene_color, then
+                    // Surface cache gathers its persistent surfels off the fully
+                    // SSR/SSGI/world-space-GI/DDGI-composited scene_color, then
                     // its own composite folds the surfel diffuse back in
                     // (energy-conserving ambient substitution) before TAA.
                     surface_cache_pass
                         .after(world_space_gi_composite_pass)
+                        .after(ddgi_composite_pass)
                         .before(bevy_core_pipeline::Core3dSystems::MainPass),
                     surface_cache_composite_pass
                         .after(surface_cache_pass)
@@ -1146,6 +1159,7 @@ impl Plugin for PrismShadingPlugin {
                         .after(ssr_composite_pass)
                         .after(ssgi_composite_pass)
                         .after(world_space_gi_composite_pass)
+                        .after(ddgi_composite_pass)
                         .after(surface_cache_composite_pass)
                         .before(bevy_core_pipeline::Core3dSystems::MainPass),
                 ),

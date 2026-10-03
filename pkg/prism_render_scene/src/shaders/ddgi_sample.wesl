@@ -339,5 +339,21 @@ fn sample_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let gain = volume.intensity * params.intensity;
-    textureStore(gi_out, coord, vec4<f32>(irradiance * gain, 1.0));
+
+    // Blend confidence for the energy-conserving composite. A valid gather
+    // needs at least one active, visible corner probe (`weight_sum > 0`);
+    // otherwise the pixel keeps its IBL ambient rather than substituting black.
+    // On top of validity we fade over the outermost cell of the probe cage so
+    // DDGI never substitutes a hard edge just beyond the volume bounds
+    // (RTXGI-style boundary fade): `g` is the shading point in cell units, so
+    // the signed distance outside `[0, counts - 1]` on any axis drives the fade.
+    var edge_fade = 1.0;
+    for (var a = 0; a < 3; a = a + 1) {
+        let hi = f32(max(volume.counts[a] - 1, 0));
+        let outside = max(max(-g[a], g[a] - hi), 0.0);
+        edge_fade = edge_fade * clamp(1.0 - outside, 0.0, 1.0);
+    }
+    let valid = select(0.0, 1.0, weight_sum > 1.175494e-38);
+    let confidence = clamp(valid * edge_fade, 0.0, 1.0);
+    textureStore(gi_out, coord, vec4<f32>(irradiance * gain, confidence));
 }

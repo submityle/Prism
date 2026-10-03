@@ -41,6 +41,7 @@
 
 mod abi;
 mod bind_groups;
+mod composite;
 mod dispatch;
 mod pipeline;
 mod resources;
@@ -51,6 +52,9 @@ pub(crate) use abi::{
     DDGI_WORKGROUP_SIZE,
 };
 pub(crate) use bind_groups::prepare_ddgi_bind_groups;
+pub(crate) use composite::{
+    ddgi_composite_pass, init_ddgi_composite_pipeline, prepare_ddgi_composite_bind_groups,
+};
 pub(crate) use dispatch::{ddgi_probe_update_pass, ddgi_sample_pass};
 pub(crate) use pipeline::init_ddgi_pipeline;
 pub(crate) use resources::{prepare_ddgi_textures, ViewDdgi};
