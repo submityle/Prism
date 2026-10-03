@@ -115,6 +115,11 @@ pub(crate) fn dispatch_shading_resolve(
     // this view, else the pass-owned fallbacks with the uniform's `enable`
     // bit clear so the shader stays on the cascaded-shadow path.
     pass.set_bind_group(6, &groups.vsm, &[]);
+    // group 7: polygonal area-light `LTC` bindings. Always bound (the pipeline
+    // layout includes group 7); real storage buffer + baked `LUT` when the
+    // opt-in subsystem is on, else the pass-owned identity dummies which the
+    // shader sanitizes to a zero contribution.
+    pass.set_bind_group(7, &groups.area, &[]);
 
     let stride = size_of::<GpuShadingDispatchArgs>() as u64;
     for class in 0..MAX_SHADING_CLASSES as u32 {

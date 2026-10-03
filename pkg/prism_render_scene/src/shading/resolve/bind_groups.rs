@@ -30,6 +30,7 @@ use prism_render_shading::ReceiverProjection;
 use crate::{GpuSceneBuffers, RenderShadingGeometryBuffers};
 
 use super::super::ao::ViewGtaoTextures;
+use super::super::area_light::{AreaLightGpuBuffer, AreaLightLtcLut};
 use super::super::ibl::{DfgLutTexture, PrefilteredEnvironmentMap};
 use super::super::light_routing::ViewLightRouting;
 use super::super::resources::{ViewShadingBuffers, ViewVisibilityBuffer};
@@ -88,6 +89,12 @@ pub(crate) struct ViewResolveBindGroups {
     /// [`GpuVsmResolveParams`] uniform. Always built with real or fallback
     /// resources so the pipeline's group 6 is bound every dispatch.
     pub(crate) vsm: BindGroup,
+    /// group 7: polygonal area lights (`LTC`). The storage array plus the two
+    /// baked `LTC`-`LUT` textures (coeffs + amplitude). Always built with real
+    /// or pipeline-owned dummy resources so the pipeline's group 7 is bound
+    /// every dispatch; the shader skips degenerate records when the subsystem
+    /// is off.
+    pub(crate) area: BindGroup,
 }
 
 /// `PrepareBindGroups` system building [`ViewResolveBindGroups`] for every view
@@ -105,6 +112,8 @@ pub(crate) fn prepare_shading_resolve_bind_groups(
     shading_settings: Res<PrismShadingSettings>,
     vsm_settings: Option<Res<PrismVirtualShadowSettings>>,
     primary_light: Option<Res<VsmPrimaryLight>>,
+    area_lut: Option<Res<AreaLightLtcLut>>,
+    area_buffer: Option<Res<AreaLightGpuBuffer>>,
     views: Query<(
         Entity,
         &ViewVisibilityBuffer,
@@ -274,10 +283,32 @@ pub(crate) fn prepare_shading_resolve_bind_groups(
             )),
         );
 
+        // group 7: polygonal area-light `LTC` bindings. Real storage buffer +
+        // baked `LUT` views when the opt-in subsystem is on and both the buffer
+        // and the LUT are resident; otherwise the pipeline's degenerate 1x1
+        // identity dummies, which the shader sanitizes to a zero contribution.
+        let (area_lights_binding, area_coeffs, area_amp) = match (
+            area_lut.as_ref(),
+            area_buffer.as_ref().and_then(|b| b.buffer()),
+        ) {
+            (Some(lut), Some(buf)) => (buf.as_entire_binding(), lut.coeffs_view(), lut.amp_view()),
+            _ => (
+                pipeline.area_dummy_lights.as_entire_binding(),
+                &pipeline.area_dummy_coeffs,
+                &pipeline.area_dummy_amp,
+            ),
+        };
+        let area = device.create_bind_group(
+            "prism resolve area lights",
+            &pipeline.area_layout,
+            &BindGroupEntries::sequential((area_lights_binding, area_coeffs, area_amp)),
+        );
+
         commands.entity(entity).insert(ViewResolveBindGroups {
             view,
             scene: scene_group,
             vsm,
+            area,
         });
     }
 }

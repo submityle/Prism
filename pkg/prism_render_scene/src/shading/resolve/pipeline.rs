@@ -41,10 +41,10 @@ use bevy_render::{
         AddressMode, BindGroupLayout, Buffer, BufferInitDescriptor, BufferUsages,
         CachedComputePipelineId, ComputePipelineDescriptor, Extent3d, FilterMode, MipmapFilterMode,
         PipelineCache, Sampler, SamplerBindingType, SamplerDescriptor, ShaderStages,
-        StorageTextureAccess, TextureDescriptor, TextureDimension, TextureFormat,
+        StorageTextureAccess, TextureDataOrder, TextureDescriptor, TextureDimension, TextureFormat,
         TextureSampleType, TextureUsages, TextureView, TextureViewDescriptor,
     },
-    renderer::RenderDevice,
+    renderer::{RenderDevice, RenderQueue},
 };
 use bevy_shader::Shader;
 
@@ -52,6 +52,7 @@ use crate::{ClusterBindGroup, LightBindGroup, MaterialBindGroup};
 
 use super::super::shadow::ShadowBindGroup;
 
+use super::super::area_light::GpuAreaLight;
 use super::super::resources::{MOTION_VECTOR_FORMAT, SCENE_COLOR_FORMAT};
 use super::abi::GpuShadingResolveParams;
 
@@ -88,6 +89,20 @@ pub(crate) struct ShadingResolvePipeline {
     /// word so the resolve's channel gate treats every punctual light as
     /// visible, preserving byte-for-byte behaviour when routing is disabled.
     pub(crate) scene_dummy_visible_lights: Buffer,
+    /// group 7: the per-frame `GpuAreaLight` storage array + the two baked
+    /// Linearly Transformed Cosines (`LTC`) `Rgba32Float` coefficient LUTs the
+    /// `accumulate_area_lights` twin fetches with a manual bilinear `textureLoad`.
+    pub(crate) area_layout: BindGroupLayout,
+    /// Fallback one-element area-light buffer bound when the opt-in subsystem is
+    /// off or the per-frame buffer has not uploaded yet. Holds a single
+    /// degenerate record (`half_width == 0`) the shader's extent guard skips.
+    pub(crate) area_dummy_lights: Buffer,
+    /// Fallback 1x1 `Rgba32Float` `LTC` coeffs LUT (one identity `M⁻¹` texel)
+    /// bound when no real `AreaLightLtcLut` is resident.
+    pub(crate) area_dummy_coeffs: TextureView,
+    /// Fallback 1x1 `Rgba32Float` `LTC` amplitude LUT (identity amplitude texel)
+    /// bound when no real `AreaLightLtcLut` is resident.
+    pub(crate) area_dummy_amp: TextureView,
 }
 
 /// Builds the group-0 layout entries:
@@ -197,6 +212,57 @@ fn vsm_layout_entries() -> BindGroupLayoutEntries<4> {
     )
 }
 
+/// Builds the group-7 layout entries for the polygonal area lights:
+///
+/// 0. the per-frame `GpuAreaLight` storage array (read-only), and
+/// 1-2. the two baked `LTC` `Rgba32Float` coefficient LUTs.
+///
+/// The LUTs are declared non-filterable: the resolve twin fetches them with a
+/// manual bilinear `textureLoad` because the device may lack the optional
+/// `FLOAT32_FILTERABLE` feature a linear `Rgba32Float` sampler would need.
+/// `None` min-binding-size keeps the layout agnostic to the array length; the
+/// shader guards every index with `arrayLength`.
+fn area_light_layout_entries() -> BindGroupLayoutEntries<3> {
+    BindGroupLayoutEntries::sequential(
+        ShaderStages::COMPUTE,
+        (
+            storage_buffer_read_only_sized(false, None),
+            texture_2d(TextureSampleType::Float { filterable: false }),
+            texture_2d(TextureSampleType::Float { filterable: false }),
+        ),
+    )
+}
+
+/// Builds a 1x1 `Rgba32Float` fallback `LTC` LUT view carrying one identity
+/// texel, bound at group 7 when no real baked [`AreaLightLtcLut`] is resident.
+fn create_area_dummy_lut(
+    device: &RenderDevice,
+    queue: &RenderQueue,
+    label: &'static str,
+    texel: &[f32; 4],
+) -> TextureView {
+    let texture = device.create_texture_with_data(
+        queue,
+        &TextureDescriptor {
+            label: Some(label),
+            size: Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Rgba32Float,
+            usage: TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        },
+        TextureDataOrder::default(),
+        bytemuck::cast_slice(texel),
+    );
+    texture.create_view(&TextureViewDescriptor::default())
+}
+
 /// `RenderStartup` initializer.  Must run after both [`MaterialBindGroup`] and
 /// [`LightBindGroup`] exist so their reflected layout descriptors are available
 /// to clone into the pipeline's layout list.
@@ -209,6 +275,7 @@ pub(crate) fn init_shading_resolve_pipeline(
     shadow_bindings: Res<ShadowBindGroup>,
     cluster_bindings: Res<ClusterBindGroup>,
     asset_server: Res<bevy_asset::AssetServer>,
+    queue: Res<RenderQueue>,
 ) {
     let view_entries = view_layout_entries();
     let scene_entries = scene_layout_entries();
@@ -219,6 +286,10 @@ pub(crate) fn init_shading_resolve_pipeline(
     let view_layout = device.create_bind_group_layout("prism resolve view", &view_entries);
     let scene_layout = device.create_bind_group_layout("prism resolve scene", &scene_entries);
     let vsm_layout = device.create_bind_group_layout("prism resolve vsm", &vsm_entries);
+    let area_entries = area_light_layout_entries();
+    let area_descriptor =
+        BindGroupLayoutDescriptor::new("prism resolve area lights", &area_entries);
+    let area_layout = device.create_bind_group_layout("prism resolve area lights", &area_entries);
 
     // Fallback VSM resources bound when a view has no resident page table /
     // physical atlas (feature off, or the upload bridge / raster fill has not
@@ -271,6 +342,39 @@ pub(crate) fn init_shading_resolve_pipeline(
         usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
     });
 
+    // Fallback area-light resources bound when the opt-in subsystem is off (no
+    // `AreaLightLtcLut` baked) or the per-frame buffer has not uploaded yet.
+    // One degenerate record (`half_width == 0`, skipped by the shader's extent
+    // guard) plus two 1x1 identity LUTs, so group 7 is always valid and
+    // contributes nothing when disabled.
+    let area_dummy_lights = device.create_buffer_with_data(&BufferInitDescriptor {
+        label: Some("prism resolve area lights dummy"),
+        contents: bytemuck::bytes_of(&GpuAreaLight::rect(
+            [0.0; 3],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            0.0,
+            0.0,
+            [0.0; 3],
+            0.0,
+        )),
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+    });
+    // Identity `M⁻¹` row (a00=1, a02=0, a11=1, a20=0) and identity amplitude
+    // (a22=1, amplitude=1), matching the shader's non-finite sanitize fallback.
+    let area_dummy_coeffs = create_area_dummy_lut(
+        &device,
+        &queue,
+        "prism resolve area ltc coeffs dummy",
+        &[1.0, 0.0, 1.0, 0.0],
+    );
+    let area_dummy_amp = create_area_dummy_lut(
+        &device,
+        &queue,
+        "prism resolve area ltc amp dummy",
+        &[1.0, 1.0, 0.0, 0.0],
+    );
+
     let shader: Handle<Shader> =
         load_embedded_asset!(asset_server.as_ref(), "../shaders/shading_resolve.wesl");
 
@@ -285,6 +389,8 @@ pub(crate) fn init_shading_resolve_pipeline(
             cluster_bindings.layout_descriptor.clone(),
             // group 6: virtual-shadow-map sample bindings.
             vsm_descriptor,
+            // group 7: polygonal area lights (LTC) storage array + two LUTs.
+            area_descriptor,
         ],
         immediate_size: size_of::<GpuShadingResolveParams>() as u32,
         shader,
@@ -301,5 +407,9 @@ pub(crate) fn init_shading_resolve_pipeline(
         vsm_dummy_page_table,
         vsm_dummy_atlas,
         scene_dummy_visible_lights,
+        area_layout,
+        area_dummy_lights,
+        area_dummy_coeffs,
+        area_dummy_amp,
     });
 }

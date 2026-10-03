@@ -25,10 +25,18 @@
 //! touches the lighting hot path.
 
 mod abi;
+mod buffers;
+mod component;
+mod extract;
 mod resources;
 mod settings;
 
-pub(crate) use resources::init_area_light_ltc_lut;
+pub(crate) use abi::GpuAreaLight;
+pub(crate) use buffers::{
+    rebuild_area_light_buffers, write_area_light_buffers, AreaLightGpuBuffer,
+};
+pub(crate) use extract::{extract_area_lights, ExtractedAreaLights};
+pub(crate) use resources::{init_area_light_ltc_lut, AreaLightLtcLut};
 pub(crate) use settings::PrismAreaLightSettings;
 
 #[cfg(test)]

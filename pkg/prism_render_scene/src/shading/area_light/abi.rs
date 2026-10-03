@@ -19,13 +19,34 @@ use bytemuck::{Pod, Zeroable};
 /// Workgroup size (x) of the standalone `area_light_ltc_main` compute entry.
 ///
 /// Must match `@workgroup_size(N, 1, 1)` in `area_light_ltc.wesl`.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "standalone `area_light_ltc_main` compute entry is baked but not yet dispatched by the scene plugin; the kernel-parity test pins it against the WESL `@workgroup_size`"
+    )
+)]
 pub(crate) const AREA_LIGHT_LTC_WORKGROUP_SIZE: u32 = 64;
 
 /// Shape tag: a planar rectangle (quad) area light.
 pub(crate) const AREA_LIGHT_SHAPE_RECT: u32 = 0;
 /// Shape tag: a planar disk area light.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "disk/tube shapes are reserved shape tags; only the rectangle path is integrated so far"
+    )
+)]
 pub(crate) const AREA_LIGHT_SHAPE_DISK: u32 = 1;
 /// Shape tag: a capsule / tube (line) area light.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "disk/tube shapes are reserved shape tags; only the rectangle path is integrated so far"
+    )
+)]
 pub(crate) const AREA_LIGHT_SHAPE_TUBE: u32 = 2;
 
 /// One area-light storage-buffer record: the std430 twin of the `WESL`

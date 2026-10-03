@@ -822,6 +822,337 @@ fn image_based_prefiltered(
     return out;
 }
 
+
+// --- group 7: polygonal area lights (Linearly Transformed Cosines) ---
+//
+// `area_lights` is the pass-owned storage array of `GpuAreaLight` records
+// (mirrors `shading/area_light/abi.rs`); the two `Rgba32Float` LUTs carry the
+// baked `LTC` inverse-transform coefficients fit by the CPU golden
+// `prism_render_shading::gi::area_light::ltc_lut`. The `al_*` maths below is a
+// byte-exact inline twin of `shaders/area_light_ltc.wesl` (re-parameterised to
+// take the coefficients as arguments instead of an immediate block), pinned to
+// the golden by `shading/area_light/shader_tests.rs`.
+//
+// The device lacks `FLOAT32_FILTERABLE`, so the LUT is sampled with a manual
+// bilinear fetch through `textureLoad` (no sampler). When the subsystem is off
+// the pass binds a one-element degenerate light (`half_width == 0`, skipped)
+// plus a 1x1 dummy LUT, so this group is always valid and contributes nothing.
+struct AreaLight {
+    pos_x: f32,
+    pos_y: f32,
+    pos_z: f32,
+    range: f32,
+    color_x: f32,
+    color_y: f32,
+    color_z: f32,
+    intensity: f32,
+    axis_u_x: f32,
+    axis_u_y: f32,
+    axis_u_z: f32,
+    half_width: f32,
+    axis_v_x: f32,
+    axis_v_y: f32,
+    axis_v_z: f32,
+    half_height: f32,
+    shape: u32,
+    two_sided: u32,
+    radius: f32,
+    pad0: u32,
+}
+
+@group(7) @binding(0) var<storage, read> area_lights: array<AreaLight>;
+@group(7) @binding(1) var area_light_ltc_coeffs: texture_2d<f32>;
+@group(7) @binding(2) var area_light_ltc_amp: texture_2d<f32>;
+
+// Near-parallel edge directions span zero solid angle (golden `MIN_SIN`).
+const AL_MIN_SIN: f32 = 1.0e-7;
+// Vertices this close to the shaded point are dropped (golden `MIN_LEN_SQ`).
+const AL_MIN_LEN_SQ: f32 = 1.0e-18;
+const AL_TWO_PI: f32 = 6.28318530717958648;
+const AL_F32_FINITE_MAX: f32 = 3.40282347e38;
+// Shape tag for a planar rectangle (quad); mirrors `AREA_LIGHT_SHAPE_RECT`.
+const AL_SHAPE_RECT: u32 = 0u;
+
+// The two packed `LTC` inverse-matrix rows sampled from the LUT:
+// `coeffs0 = (a00, a02, a11, a20)`, `coeffs1 = (a22, amplitude, 0, 0)`.
+struct AlCoeffs {
+    coeffs0: vec4<f32>,
+    coeffs1: vec4<f32>,
+}
+
+fn al_is_finite(x: f32) -> bool {
+    return x == x && abs(x) <= AL_F32_FINITE_MAX;
+}
+
+fn al_vec_is_finite(v: vec3<f32>) -> bool {
+    return al_is_finite(v.x) && al_is_finite(v.y) && al_is_finite(v.z);
+}
+
+// Vector edge integral of a clamped-cosine distribution (golden
+// `integrate_edge_vec`): `(acos(v1.v2) / |v1 x v2|) * (v1 x v2)`.
+fn al_integrate_edge_vec(v1: vec3<f32>, v2: vec3<f32>) -> vec3<f32> {
+    let cos_theta = clamp(dot(v1, v2), -1.0, 1.0);
+    let theta = acos(cos_theta);
+    let cross_v = cross(v1, v2);
+    let sin_theta = length(cross_v);
+    if (sin_theta < AL_MIN_SIN) {
+        return vec3<f32>(0.0, 0.0, 0.0);
+    }
+    let result = cross_v * (theta / sin_theta);
+    if (al_vec_is_finite(result)) {
+        return result;
+    }
+    return vec3<f32>(0.0, 0.0, 0.0);
+}
+
+fn al_integrate_edge(v1: vec3<f32>, v2: vec3<f32>) -> f32 {
+    return al_integrate_edge_vec(v1, v2).z;
+}
+
+// Intersection of segment `a -> b` with the `z = 0` plane (golden
+// `intersect_horizon`); `w = 1` marks a valid finite hit, `w = 0` none.
+fn al_intersect_horizon(a: vec3<f32>, b: vec3<f32>) -> vec4<f32> {
+    let dz = a.z - b.z;
+    if (abs(dz) < 1.0e-12) {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
+    let t = a.z / dz;
+    if (!(t >= 0.0 && t <= 1.0)) {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
+    let p = a + (b - a) * t;
+    if (al_vec_is_finite(p)) {
+        return vec4<f32>(p, 1.0);
+    }
+    return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+}
+
+// Normalised clamped-cosine form factor `F` in `[0, 1]` of the quad (golden
+// `polygon_form_factor`): Sutherland-Hodgman horizon clip against `z = 0`,
+// project survivors onto the unit sphere, sum the edge integrals, `/ 2*pi`.
+fn al_polygon_form_factor_quad(input: array<vec3<f32>, 4>) -> f32 {
+    let n = 4u;
+    var clipped: array<vec3<f32>, 8>;
+    var cc = 0u;
+    for (var i = 0u; i < n; i = i + 1u) {
+        let cur = input[i];
+        let prev = input[(i + n - 1u) % n];
+        let cur_in = cur.z >= 0.0;
+        let prev_in = prev.z >= 0.0;
+        if (cur_in) {
+            if (!prev_in) {
+                let hit = al_intersect_horizon(prev, cur);
+                if (hit.w > 0.5) {
+                    clipped[cc] = hit.xyz;
+                    cc = cc + 1u;
+                }
+            }
+            clipped[cc] = cur;
+            cc = cc + 1u;
+        } else if (prev_in) {
+            let hit = al_intersect_horizon(prev, cur);
+            if (hit.w > 0.5) {
+                clipped[cc] = hit.xyz;
+                cc = cc + 1u;
+            }
+        }
+    }
+    if (cc < 3u) {
+        return 0.0;
+    }
+    var dirs: array<vec3<f32>, 8>;
+    var k = 0u;
+    for (var i = 0u; i < cc; i = i + 1u) {
+        let p = clipped[i];
+        let len_sq = dot(p, p);
+        if (len_sq <= AL_MIN_LEN_SQ) {
+            continue;
+        }
+        let d = p / sqrt(len_sq);
+        if (dot(d, d) > 0.5) {
+            dirs[k] = d;
+            k = k + 1u;
+        }
+    }
+    if (k < 3u) {
+        return 0.0;
+    }
+    var sum = 0.0;
+    for (var i = 0u; i < k; i = i + 1u) {
+        let v1 = dirs[i];
+        let v2 = dirs[(i + 1u) % k];
+        sum = sum + al_integrate_edge(v1, v2);
+    }
+    let f = sum / AL_TWO_PI;
+    if (al_is_finite(f)) {
+        return clamp(f, 0.0, 1.0);
+    }
+    return 0.0;
+}
+
+// Applies the `LTC` inverse transform `M-inverse` to a direction (golden
+// `LtcCoeffs::apply`), re-parameterised to take the sampled coefficients.
+fn al_apply(c: AlCoeffs, d: vec3<f32>) -> vec3<f32> {
+    let a00 = c.coeffs0.x;
+    let a02 = c.coeffs0.y;
+    let a11 = c.coeffs0.z;
+    let a20 = c.coeffs0.w;
+    let a22 = c.coeffs1.x;
+    return vec3<f32>(
+        a00 * d.x + a02 * d.z,
+        a11 * d.y,
+        a20 * d.x + a22 * d.z,
+    );
+}
+
+// `LTC` specular response of the quad (golden `quad_ltc_evaluate`): transform
+// each corner by `M-inverse`, evaluate the form factor, scale by amplitude.
+fn al_ltc_evaluate_quad(c: AlCoeffs, p0: vec3<f32>, p1: vec3<f32>, p2: vec3<f32>, p3: vec3<f32>) -> f32 {
+    var pts: array<vec3<f32>, 4>;
+    pts[0] = al_apply(c, p0);
+    pts[1] = al_apply(c, p1);
+    pts[2] = al_apply(c, p2);
+    pts[3] = al_apply(c, p3);
+    for (var i = 0u; i < 4u; i = i + 1u) {
+        if (!al_vec_is_finite(pts[i])) {
+            pts[i] = vec3<f32>(0.0, 0.0, 0.0);
+        }
+    }
+    let f = al_polygon_form_factor_quad(pts);
+    let amplitude = clamp(c.coeffs1.y, 0.0, 1.0);
+    let r = amplitude * f;
+    if (al_is_finite(r)) {
+        return max(r, 0.0);
+    }
+    return 0.0;
+}
+
+// Manual bilinear fetch of the `LTC` LUT (the device lacks `FLOAT32_FILTERABLE`
+// so no sampler is bound): column (x) indexes `n.v`, row (y) indexes roughness,
+// matching the row-major bake in `shading/area_light/resources.rs`. The result
+// is sanitised to the identity transform if any channel is non-finite.
+fn al_sample_lut(n_dot_v: f32, roughness: f32) -> AlCoeffs {
+    let dims = textureDimensions(area_light_ltc_coeffs);
+    let w = f32(dims.x);
+    let h = f32(dims.y);
+    let nv = clamp(n_dot_v, 0.0, 1.0);
+    let rough = clamp(roughness, 0.0, 1.0);
+    let fx = clamp(nv * w - 0.5, 0.0, w - 1.0);
+    let fy = clamp(rough * h - 0.5, 0.0, h - 1.0);
+    let x0 = u32(floor(fx));
+    let y0 = u32(floor(fy));
+    let x1 = min(x0 + 1u, dims.x - 1u);
+    let y1 = min(y0 + 1u, dims.y - 1u);
+    let tx = fx - floor(fx);
+    let ty = fy - floor(fy);
+
+    let c00 = textureLoad(area_light_ltc_coeffs, vec2<u32>(x0, y0), 0);
+    let c10 = textureLoad(area_light_ltc_coeffs, vec2<u32>(x1, y0), 0);
+    let c01 = textureLoad(area_light_ltc_coeffs, vec2<u32>(x0, y1), 0);
+    let c11 = textureLoad(area_light_ltc_coeffs, vec2<u32>(x1, y1), 0);
+    let coeffs0 = mix(mix(c00, c10, tx), mix(c01, c11, tx), ty);
+
+    let a00 = textureLoad(area_light_ltc_amp, vec2<u32>(x0, y0), 0);
+    let a10 = textureLoad(area_light_ltc_amp, vec2<u32>(x1, y0), 0);
+    let a01 = textureLoad(area_light_ltc_amp, vec2<u32>(x0, y1), 0);
+    let a11v = textureLoad(area_light_ltc_amp, vec2<u32>(x1, y1), 0);
+    let amp = mix(mix(a00, a10, tx), mix(a01, a11v, tx), ty);
+
+    var out: AlCoeffs;
+    if (al_vec_is_finite(coeffs0.xyz) && al_is_finite(coeffs0.w) && al_is_finite(amp.x) && al_is_finite(amp.y)) {
+        out.coeffs0 = coeffs0;
+        out.coeffs1 = vec4<f32>(amp.x, clamp(amp.y, 0.0, 1.0), 0.0, 0.0);
+    } else {
+        out.coeffs0 = vec4<f32>(1.0, 0.0, 1.0, 0.0);
+        out.coeffs1 = vec4<f32>(1.0, 1.0, 0.0, 0.0);
+    }
+    return out;
+}
+
+// Projects a world-space offset into the orthonormal shading frame whose
+// normal is `+Z` (the LTC convention).
+fn al_to_frame(w: vec3<f32>, t1: vec3<f32>, t2: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(dot(t1, w), dot(t2, w), dot(n, w));
+}
+
+// Returns `vec2(specular_form_factor, diffuse_form_factor)` for one rectangle
+// light at shaded point `p` with normal `n`, view `v` and sampled coefficients.
+fn al_evaluate(n: vec3<f32>, v: vec3<f32>, p: vec3<f32>, light: AreaLight, coeffs: AlCoeffs) -> vec2<f32> {
+    let t1 = normalize(v - n * dot(n, v));
+    let t2 = cross(n, t1);
+    let center = vec3<f32>(light.pos_x, light.pos_y, light.pos_z);
+    let axis_u = vec3<f32>(light.axis_u_x, light.axis_u_y, light.axis_u_z);
+    let axis_v = vec3<f32>(light.axis_v_x, light.axis_v_y, light.axis_v_z);
+    let eu = axis_u * light.half_width;
+    let ev = axis_v * light.half_height;
+    // Counter-clockwise corners: c-u-v, c+u-v, c+u+v, c-u+v.
+    let p0 = al_to_frame(center - eu - ev - p, t1, t2, n);
+    let p1 = al_to_frame(center + eu - ev - p, t1, t2, n);
+    let p2 = al_to_frame(center + eu + ev - p, t1, t2, n);
+    let p3 = al_to_frame(center - eu + ev - p, t1, t2, n);
+    let spec = al_ltc_evaluate_quad(coeffs, p0, p1, p2, p3);
+    var dpts: array<vec3<f32>, 4>;
+    dpts[0] = p0;
+    dpts[1] = p1;
+    dpts[2] = p2;
+    dpts[3] = p3;
+    let diff = al_polygon_form_factor_quad(dpts);
+    return vec2<f32>(spec, diff);
+}
+
+// Accumulates every resident rectangle area light at the shaded surface. The
+// specular lobe uses the `LTC`-fit transform (so it tracks roughness), the
+// diffuse lobe the identity clamped-cosine form factor; both are weighted by
+// the material response exactly like the clustered-lighting loops. Non-rect
+// shapes and degenerate / disabled records are skipped. No `env_brdf` factor is
+// applied so this never double-counts the image-based specular already folded
+// into the indirect term.
+fn accumulate_area_lights(lit: SurfaceSample, frame: ShadingFrame, world_position: vec3<f32>) -> vec3<f32> {
+    let count = arrayLength(&area_lights);
+    let n = brdf_normalize_or(frame.normal, vec3<f32>(0.0, 1.0, 0.0));
+    let v = brdf_normalize_or(frame.view, n);
+    let n_dot_v = max(dot(n, v), 1.0e-4);
+    let roughness = clamp(lit.perceptual_roughness, 0.0, 1.0);
+    let f0 = indirect_f0(lit);
+    let diffuse_color = lit.base_color * (1.0 - clamp(lit.metallic, 0.0, 1.0));
+    let coeffs = al_sample_lut(n_dot_v, roughness);
+
+    var total = vec3<f32>(0.0, 0.0, 0.0);
+    for (var i = 0u; i < count; i = i + 1u) {
+        let light = area_lights[i];
+        if (light.shape != AL_SHAPE_RECT) {
+            continue;
+        }
+        // Degenerate / disabled record (the pass binds one of these when the
+        // subsystem is off), skip it.
+        if (light.half_width <= 0.0 || light.half_height <= 0.0) {
+            continue;
+        }
+        let center = vec3<f32>(light.pos_x, light.pos_y, light.pos_z);
+        let axis_u = vec3<f32>(light.axis_u_x, light.axis_u_y, light.axis_u_z);
+        let axis_v = vec3<f32>(light.axis_v_x, light.axis_v_y, light.axis_v_z);
+        // One-sided emitters cull receivers behind the emitter plane.
+        let lnormal = normalize(cross(axis_u, axis_v));
+        if (light.two_sided == 0u && dot(world_position - center, lnormal) < 0.0) {
+            continue;
+        }
+        // Optional smooth range window (`range <= 0` disables it).
+        var atten = 1.0;
+        if (light.range > 0.0) {
+            let dist = length(center - world_position);
+            if (dist >= light.range) {
+                continue;
+            }
+            let x = clamp(1.0 - dist / light.range, 0.0, 1.0);
+            atten = x * x;
+        }
+        let ff = al_evaluate(n, v, world_position, light, coeffs);
+        let radiance = vec3<f32>(light.color_x, light.color_y, light.color_z) * light.intensity;
+        total = total + radiance * (f0 * ff.x + diffuse_color * ff.y) * atten;
+    }
+    return total;
+}
+
 // Physically based integrator shared by every lit closure. Accumulates the
 // principled GGX lobe over all analytic lights, then adds the indirect and
 // emissive terms exactly once. Mirrors the CPU `_ =>` principled branch.
@@ -859,6 +1190,7 @@ fn shade_principled(
         accumulated = accumulated + principled_direct(lit, frame, to_direct_sample(sample));
     }
 
+    accumulated = accumulated + accumulate_area_lights(lit, frame, world_position);
     return accumulated + indirect + emissive;
 }
 
@@ -1001,6 +1333,7 @@ fn shade_cloth(
         accumulated = accumulated + cloth_direct(lit, frame, to_direct_sample(sample));
     }
 
+    accumulated = accumulated + accumulate_area_lights(lit, frame, world_position);
     return accumulated + indirect + emissive;
 }
 
@@ -1041,6 +1374,7 @@ fn shade_subsurface(
         accumulated = accumulated + subsurface_direct(lit, frame, to_direct_sample(sample));
     }
 
+    accumulated = accumulated + accumulate_area_lights(lit, frame, world_position);
     return accumulated + indirect + emissive;
 }
 
@@ -1160,6 +1494,7 @@ fn shade_clearcoat(
         accumulated = accumulated + clearcoat_direct(lit, frame, to_direct_sample(sample));
     }
 
+    accumulated = accumulated + accumulate_area_lights(lit, frame, world_position);
     return accumulated + indirect + emissive;
 }
 

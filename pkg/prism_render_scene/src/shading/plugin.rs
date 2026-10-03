@@ -19,7 +19,10 @@ use super::{
         prepare_gtao_kernel_bind_groups, prepare_gtao_prepass_bind_groups,
         prepare_gtao_temporal_bind_groups, prepare_gtao_temporal_textures, prepare_gtao_textures,
     },
-    area_light::{init_area_light_ltc_lut, PrismAreaLightSettings},
+    area_light::{
+        extract_area_lights, init_area_light_ltc_lut, rebuild_area_light_buffers,
+        write_area_light_buffers, AreaLightGpuBuffer, ExtractedAreaLights, PrismAreaLightSettings,
+    },
     bloom::{bloom_pass, init_bloom_pipelines, prepare_bloom_bind_groups, prepare_bloom_textures},
     cas::{
         cas_pass, init_cas_pipeline, prepare_cas_bind_groups, prepare_cas_textures,
@@ -369,6 +372,7 @@ impl Plugin for PrismShadingPlugin {
             .init_resource::<SurfaceCacheBuffers>()
             .init_resource::<PrismLightRoutingSettings>()
             .init_resource::<PrismAreaLightSettings>()
+            .init_resource::<ExtractedAreaLights>()
             .insert_resource(ShadingFrameGraph {
                 compiled: compiled_graph,
             })
@@ -958,6 +962,22 @@ impl Plugin for PrismShadingPlugin {
         // Opt-in: a no-op unless `PrismWorldRestirSettings::enabled`, so the
         // default renderer allocates and dispatches nothing.
         render_app.add_systems(RenderStartup, init_world_restir_pipeline);
+        // Area-light `LTC` render-world systems. The `GpuAreaLight` storage
+        // buffer, the per-frame extract from the main world, and the
+        // rebuild/upload pair each live in their own `add_systems` call so the
+        // already-full primary tuples stay within Bevy's 20-element limit. The
+        // buffer is always resident (padded with a degenerate record when
+        // empty) so the resolve bind group's group 7 can bind it every frame;
+        // the baked `LUT` is only present when the opt-in subsystem is enabled.
+        render_app.add_systems(RenderStartup, init_gpu_resource::<AreaLightGpuBuffer>);
+        render_app.add_systems(ExtractSchedule, extract_area_lights);
+        render_app.add_systems(
+            Render,
+            (
+                rebuild_area_light_buffers.in_set(RenderSystems::PrepareResources),
+                write_area_light_buffers.in_set(RenderSystems::PrepareResourcesFlush),
+            ),
+        );
         render_app.add_systems(
             Render,
             (

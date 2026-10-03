@@ -86,34 +86,46 @@ pub(crate) fn pack_ltc_lut(lut: &LtcLut) -> AreaLightLtcTexels {
 pub(crate) struct AreaLightLtcLut {
     #[expect(
         dead_code,
-        reason = "retains the coeffs texture; the view is bound by the block-2 resolve wiring"
+        reason = "retains the coeffs texture alive; the resolve binds its view, not the texture"
     )]
     coeffs_texture: Texture,
     #[expect(
         dead_code,
-        reason = "retains the amplitude texture; the view is bound by the block-2 resolve wiring"
+        reason = "retains the amplitude texture alive; the resolve binds its view, not the texture"
     )]
     amp_texture: Texture,
-    #[expect(
-        dead_code,
-        reason = "bound by the block-2 clustered-lighting resolve integration"
-    )]
+    /// `coeffs` texture view bound at group 7, binding 1 of the resolve pass.
     coeffs_view: TextureView,
-    #[expect(
-        dead_code,
-        reason = "bound by the block-2 clustered-lighting resolve integration"
-    )]
+    /// `amp` texture view bound at group 7, binding 2 of the resolve pass.
     amp_view: TextureView,
     #[expect(
         dead_code,
-        reason = "bound by the block-2 clustered-lighting resolve integration"
+        reason = "the resolve path fetches the LUT with manual bilinear `textureLoad` (the device lacks FLOAT32_FILTERABLE), so no sampler is bound"
     )]
     sampler: Sampler,
+    /// Grid resolution of the baked LUT (`size x size`); read for diagnostics.
+    size: UVec2,
+}
+
+impl AreaLightLtcLut {
+    /// The `coeffs` texture view (group 7, binding 1 of the resolve pass).
+    pub(crate) fn coeffs_view(&self) -> &TextureView {
+        &self.coeffs_view
+    }
+
+    /// The `amp` texture view (group 7, binding 2 of the resolve pass).
+    pub(crate) fn amp_view(&self) -> &TextureView {
+        &self.amp_view
+    }
+
+    /// The baked LUT grid resolution (`size x size`).
     #[expect(
         dead_code,
-        reason = "read by the block-2 clustered-lighting resolve integration"
+        reason = "exposed for diagnostics / future LUT re-bake invalidation"
     )]
-    size: UVec2,
+    pub(crate) fn size(&self) -> UVec2 {
+        self.size
+    }
 }
 
 /// Uploads one `Rgba32Float` `size x size` `LUT` texture from packed `f32`
