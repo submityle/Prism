@@ -1,0 +1,19 @@
+[package]
+name = "prism_render_driver"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.0"
+description = "Prism render hardware interface (RHI): the backend-agnostic GPU abstraction that decouples Prism's renderer from any single graphics API. M0 delivers the type system (texture/vertex formats and their layout math, usage/stage bitflag sets, texture/buffer/sampler descriptors, vertex layouts, blend/depth/stencil/multisample pipeline state, bind-group layouts, shader-module and render/compute pipeline descriptors, render-pass attachments and draw/dispatch command model), generational GPU resource handles, device capabilities (features + limits with validation), and the RenderDevice/RenderQueue/CommandEncoder trait surface backends implement. Pure, deterministic, no_std + alloc, no unsafe; concrete wgpu/vulkan backends live in separate crates. Borrows the shape of mature RHIs without copying their source."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+
+[features]
+default = ["std"]
+# `std` is reserved for backend crates and host-side helpers; the M0 type
+# system, handles, capabilities, and trait surface are fully `no_std + alloc`.
+std = []
+
+[lints]
+workspace = true
