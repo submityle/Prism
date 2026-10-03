@@ -7,21 +7,19 @@
 //! * single partition,
 //! * single weight plane,
 //! * a 4x4 weight grid (identity texel->weight mapping, no bilinear infill),
-//! * Colour Endpoint Mode 8 (LDR direct RGB) with QUANT_256 endpoints.
+//! * any of the ten LDR Colour Endpoint Modes (0/1/4/5/6/8/9/10/12/13).
 //!
-//! Everything else (multi-partition, dual-plane, non-4x4 grids, other CEMs and
-//! non-identity colour quantisation) returns an [`AstcError`] until its own
-//! GPU-validated milestone lands, so no path silently produces wrong pixels.
+//! Everything else (multi-partition, dual-plane, non-4x4 grids and the six
+//! HDR CEMs) returns an [`AstcError`] until its own GPU-validated milestone
+//! lands, so no path silently produces wrong pixels.
 //!
 //! Decode is pure integer arithmetic -- no AI/ML path.
 
 use super::block_mode::decode_block_mode_2d;
-use super::endpoints::decode_cem8_endpoints;
+use super::cem::cem_is_ldr;
+use super::endpoints::decode_cem_endpoints;
 use super::weights::decode_astc_4x4_weights_ise;
 use super::AstcError;
-
-/// Colour Endpoint Mode for LDR direct RGB.
-const CEM_LDR_RGB_DIRECT: u32 = 8;
 
 /// Interpolate one 8-bit LDR colour component between endpoints `e0` and `e1`
 /// using an ASTC weight `w` in `0..=64`, producing an 8-bit UNORM result.
@@ -66,13 +64,15 @@ pub(super) fn decode_single_partition_4x4_ldr(
     }
 
     // CEM is the 4-bit field at block bits [13, 17): the low three bits are
-    // byte 1 bits 5..8 and the high bit is byte 2 bit 0 (block bit 16).
+    // byte 1 bits 5..8 and the high bit is byte 2 bit 0 (block bit 16). The ten
+    // LDR CEMs decode here; the six HDR CEMs return an error from
+    // `decode_cem_endpoints` until the HDR milestone lands.
     let cem = ((u32::from(block[1]) >> 5) & 0x7) | ((u32::from(block[2]) & 1) << 3);
-    if cem != CEM_LDR_RGB_DIRECT {
+    if !cem_is_ldr(cem) {
         return Err(AstcError::UnsupportedBlockMode);
     }
 
-    let endpoints = decode_cem8_endpoints(block, bm.weight_bits)?;
+    let endpoints = decode_cem_endpoints(block, bm.weight_bits, cem)?;
     let weights =
         decode_astc_4x4_weights_ise(block, bm.weight_levels).ok_or(AstcError::Reserved)?;
 

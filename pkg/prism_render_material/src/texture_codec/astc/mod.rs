@@ -21,8 +21,10 @@
 mod bise;
 mod block_mode;
 mod block_reader;
+mod cem;
 mod color_unquant;
 mod endpoints;
+mod quant_mode;
 mod single_partition;
 mod trit_quint;
 mod void_extent;
