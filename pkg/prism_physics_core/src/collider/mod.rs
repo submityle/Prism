@@ -35,6 +35,9 @@ pub use simplify::{simplify_convex_hull, SimplifiedHull, MIN_HULL_VERTICES};
 pub mod kdop;
 
 pub use kdop::{DopKind, KDop};
+pub mod obb;
+
+pub use obb::{fit_obb, Obb};
 
 /// A handle into a [`ShapeRegistry`].
 ///
