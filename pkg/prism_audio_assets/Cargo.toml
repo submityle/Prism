@@ -1,0 +1,27 @@
+[package]
+name = "prism_audio_assets"
+version = "0.1.0"
+edition = "2024"
+description = "Asset banks, streaming media, codec matrix (section 20 and 44.1) and dialogue/localization/caption resolution (section 35) for Prism's next-generation audio engine. Deterministic bank model, lock-free streaming prefetch, and real self-contained PCM/ADPCM decoders behind a pluggable SourceDecoder trait. Contains no Unreal Engine, Unity, Godot, Wwise, FMOD, Steam Audio, or Google Resonance Audio source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_audio_core = { path = "../prism_audio_core" }
+bevy_math = { path = "../../crates/bevy_math", default-features = false, features = [
+  "nostd-libm",
+] }
+serde = { version = "1", default-features = false, features = [
+  "derive",
+], optional = true }
+
+[dev-dependencies]
+prism_audio_assets = { path = ".", features = ["serialize"] }
+
+[features]
+default = ["std"]
+std = ["prism_audio_core/std", "bevy_math/std"]
+serialize = ["dep:serde", "prism_audio_core/serialize", "bevy_math/serialize"]
+
+[lints]
+workspace = true
