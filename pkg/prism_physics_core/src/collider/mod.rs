@@ -197,6 +197,10 @@ pub use tet_partition::{
 };
 pub mod tet_vertex_adjacency;
 pub use tet_vertex_adjacency::{build_tet_vertex_adjacency, TetVertexAdjacency};
+pub mod tet_vertex_coloring;
+pub use tet_vertex_coloring::{
+    colour_tet_vertex_graph, colour_tet_vertices, TetVertexColoring,
+};
 
 /// A handle into a [`ShapeRegistry`].
 ///
