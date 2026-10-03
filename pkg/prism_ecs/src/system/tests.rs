@@ -39,7 +39,7 @@ fn function_system_runs_with_mixed_params() {
     world.spawn(Health(2));
 
     fn tick(cfg: Res<Config>, mut tally: ResMut<Tally>, mut q: Query<&mut Health>, mut cmd: Commands) {
-        for h in q.iter_mut() {
+        for mut h in q.iter_mut() {
             h.0 += cfg.0;
             tally.0 += 1;
         }

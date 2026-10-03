@@ -146,6 +146,175 @@ impl ComponentTicks {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Ref / Mut — change-detecting component borrows
+// ---------------------------------------------------------------------------
+
+/// A shared borrow of a component value together with its change-detection
+/// metadata (design §10).
+///
+/// Yielded by a `Ref<T>` query term. Derefs to `&T`; additionally reports
+/// [`is_added`](Ref::is_added) / [`is_changed`](Ref::is_changed) relative to the
+/// querying system's half-open observer window `(last_run, this_run]`.
+pub struct Ref<'w, T: ?Sized> {
+    value: &'w T,
+    added: Tick,
+    changed: Tick,
+    last_run: Tick,
+    this_run: Tick,
+}
+
+impl<'w, T: ?Sized> Ref<'w, T> {
+    /// Wrap a shared borrow with its ticks and the observer window.
+    #[inline]
+    pub(crate) fn new(
+        value: &'w T,
+        added: Tick,
+        changed: Tick,
+        last_run: Tick,
+        this_run: Tick,
+    ) -> Self {
+        Self {
+            value,
+            added,
+            changed,
+            last_run,
+            this_run,
+        }
+    }
+
+    /// Whether the value was added within the observer window
+    /// `(last_run, this_run]`.
+    #[inline]
+    pub fn is_added(&self) -> bool {
+        self.added.is_newer_than(self.last_run, self.this_run)
+    }
+
+    /// Whether the value was changed (or added) within `(last_run, this_run]`.
+    #[inline]
+    pub fn is_changed(&self) -> bool {
+        self.changed.is_newer_than(self.last_run, self.this_run)
+    }
+
+    /// The tick at which the value was first added to its entity.
+    #[inline]
+    pub fn added_tick(&self) -> Tick {
+        self.added
+    }
+
+    /// The tick at which the value was most recently changed.
+    #[inline]
+    pub fn changed_tick(&self) -> Tick {
+        self.changed
+    }
+
+    /// Consume the wrapper, returning the underlying shared reference.
+    #[inline]
+    pub fn into_inner(self) -> &'w T {
+        self.value
+    }
+}
+
+impl<T: ?Sized> core::ops::Deref for Ref<'_, T> {
+    type Target = T;
+    #[inline]
+    fn deref(&self) -> &T {
+        self.value
+    }
+}
+
+/// An exclusive borrow of a component value that **bumps its changed tick** on
+/// mutable access (design §10).
+///
+/// Yielded by a `&mut T` or `Option<&mut T>` query term. Derefs to `&T`
+/// immutably and to `&mut T` mutably; any [`DerefMut`](core::ops::DerefMut) (or
+/// [`into_inner`](Mut::into_inner)) records a write at `this_run`, which is what
+/// later makes [`Changed<T>`](crate::query::Changed) fire. An equal-value guard
+/// can avoid the bump via [`bypass_change_detection`](Mut::bypass_change_detection).
+pub struct Mut<'w, T: ?Sized> {
+    value: &'w mut T,
+    changed: &'w mut Tick,
+    added: Tick,
+    last_run: Tick,
+    this_run: Tick,
+}
+
+impl<'w, T: ?Sized> Mut<'w, T> {
+    /// Wrap an exclusive borrow with a mutable handle to its changed tick, the
+    /// added tick, and the observer window.
+    #[inline]
+    pub(crate) fn new(
+        value: &'w mut T,
+        changed: &'w mut Tick,
+        added: Tick,
+        last_run: Tick,
+        this_run: Tick,
+    ) -> Self {
+        Self {
+            value,
+            changed,
+            added,
+            last_run,
+            this_run,
+        }
+    }
+
+    /// Whether the value was added within the observer window
+    /// `(last_run, this_run]`.
+    #[inline]
+    pub fn is_added(&self) -> bool {
+        self.added.is_newer_than(self.last_run, self.this_run)
+    }
+
+    /// Whether the value was changed (or added) within `(last_run, this_run]`.
+    ///
+    /// Reflects writes recorded *before* this call; a subsequent `DerefMut` in
+    /// the same run will of course make it return `true` afterwards.
+    #[inline]
+    pub fn is_changed(&self) -> bool {
+        self.changed.is_newer_than(self.last_run, self.this_run)
+    }
+
+    /// Record a write at `this_run` without going through `DerefMut`.
+    #[inline]
+    pub fn set_changed(&mut self) {
+        *self.changed = self.this_run;
+    }
+
+    /// Access the value mutably **without** bumping the changed tick.
+    ///
+    /// Use when a write is known to be a no-op (an equal-value guard, design
+    /// §10) to avoid spurious change propagation.
+    #[inline]
+    pub fn bypass_change_detection(&mut self) -> &mut T {
+        self.value
+    }
+
+    /// Consume the wrapper, recording a write and returning the exclusive
+    /// reference bound to `'w`.
+    #[inline]
+    pub fn into_inner(self) -> &'w mut T {
+        *self.changed = self.this_run;
+        self.value
+    }
+}
+
+impl<T: ?Sized> core::ops::Deref for Mut<'_, T> {
+    type Target = T;
+    #[inline]
+    fn deref(&self) -> &T {
+        self.value
+    }
+}
+
+impl<T: ?Sized> core::ops::DerefMut for Mut<'_, T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut T {
+        *self.changed = self.this_run;
+        self.value
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

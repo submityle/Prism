@@ -9,6 +9,9 @@
 //! - [`Entity`] — the entity id of the current row (no component access).
 //! - `Option<&T>` / `Option<&mut T>` — the component if the archetype has it,
 //!   else `None` (the term never excludes an archetype).
+//! - [`Ref<T>`](crate::change::Ref) — shared access plus per-value change
+//!   detection (`is_added`/`is_changed`), the read-only companion of the
+//!   change-detecting [`Mut<T>`](crate::change::Mut) yielded by `&mut T`.
 //! - tuples of the above, up to 12 elements.
 //!
 //! Each term exposes three cooperating pieces: a world-static `State` (resolved
@@ -16,6 +19,7 @@
 //! references), and the leaf [`QueryData::fetch`] that reads one row.
 
 use crate::archetype::Archetype;
+use crate::change::{Mut, Ref, Tick};
 use crate::component::{Component, ComponentId, Components};
 use crate::entity::Entity;
 use crate::query::access::Access;
@@ -58,9 +62,19 @@ pub unsafe trait QueryData {
 
     /// Resolve the per-archetype fetch cursor.
     ///
+    /// `last_run`/`this_run` are the querying system's observer window; terms
+    /// that report change detection (`&mut T`, `Option<&mut T>`, [`Ref<T>`])
+    /// thread them into their [`Item`](QueryData::Item), while plain reads
+    /// ignore them.
+    ///
     /// # Safety
     /// `archetype` must satisfy [`QueryData::matches`] for `state`.
-    unsafe fn init_fetch<'w>(state: &Self::State, archetype: &'w Archetype) -> Self::Fetch<'w>;
+    unsafe fn init_fetch<'w>(
+        state: &Self::State,
+        archetype: &'w Archetype,
+        last_run: Tick,
+        this_run: Tick,
+    ) -> Self::Fetch<'w>;
 
     /// Read the item at `row` of the archetype the `fetch` was built for.
     ///
@@ -93,7 +107,12 @@ unsafe impl<T: Component> QueryData for &T {
         access.add_read(*state);
     }
 
-    unsafe fn init_fetch<'w>(state: &Self::State, archetype: &'w Archetype) -> Self::Fetch<'w> {
+    unsafe fn init_fetch<'w>(
+        state: &Self::State,
+        archetype: &'w Archetype,
+        _last_run: Tick,
+        _this_run: Tick,
+    ) -> Self::Fetch<'w> {
         archetype
             .table()
             .column(*state)
@@ -115,9 +134,9 @@ unsafe impl<T: Component> QueryData for &T {
 // or write the same component); `matches`/`init_fetch` mirror `&T`; `fetch`
 // forms a `&mut T` that is unique because the driver yields each row once.
 unsafe impl<T: Component> QueryData for &mut T {
-    type Item<'w> = &'w mut T;
+    type Item<'w> = Mut<'w, T>;
     type State = ComponentId;
-    type Fetch<'w> = &'w Column;
+    type Fetch<'w> = (&'w Column, Tick, Tick);
 
     fn init_state(components: &mut Components) -> Self::State {
         components.register::<T>()
@@ -131,19 +150,31 @@ unsafe impl<T: Component> QueryData for &mut T {
         access.add_write(*state);
     }
 
-    unsafe fn init_fetch<'w>(state: &Self::State, archetype: &'w Archetype) -> Self::Fetch<'w> {
-        archetype
+    unsafe fn init_fetch<'w>(
+        state: &Self::State,
+        archetype: &'w Archetype,
+        last_run: Tick,
+        this_run: Tick,
+    ) -> Self::Fetch<'w> {
+        let column = archetype
             .table()
             .column(*state)
-            .expect("matches() guaranteed the column exists")
+            .expect("matches() guaranteed the column exists");
+        (column, last_run, this_run)
     }
 
     unsafe fn fetch<'w>(fetch: Self::Fetch<'w>, _entity: Entity, row: usize) -> Self::Item<'w> {
+        let (col, last_run, this_run) = fetch;
+        let added = col.added_tick(row);
         // SAFETY: `row < len`; the column stores `T`; the write is exclusive
         // (access check rejects any other borrow of this component) and the
         // driver fetches each `(archetype, row)` at most once, so this `&mut T`
-        // is unique for `'w`.
-        unsafe { &mut *fetch.get_ptr(row).cast::<T>() }
+        // is unique for `'w`. The value bytes and the changed-tick cell live in
+        // separate allocations, so the two `&mut` below never alias.
+        let value = unsafe { &mut *col.get_ptr(row).cast::<T>() };
+        // SAFETY: as above — unique access to this row's changed-tick cell.
+        let changed = unsafe { &mut *col.changed_tick_ptr(row) };
+        Mut::new(value, changed, added, last_run, this_run)
     }
 }
 
@@ -163,7 +194,13 @@ unsafe impl QueryData for Entity {
 
     fn update_access(_state: &Self::State, _access: &mut Access) {}
 
-    unsafe fn init_fetch<'w>(_state: &Self::State, _archetype: &'w Archetype) -> Self::Fetch<'w> {}
+    unsafe fn init_fetch<'w>(
+        _state: &Self::State,
+        _archetype: &'w Archetype,
+        _last_run: Tick,
+        _this_run: Tick,
+    ) -> Self::Fetch<'w> {
+    }
 
     unsafe fn fetch<'w>(_fetch: Self::Fetch<'w>, entity: Entity, _row: usize) -> Self::Item<'w> {
         entity
@@ -192,7 +229,12 @@ unsafe impl<T: Component> QueryData for Option<&T> {
         access.add_read(*state);
     }
 
-    unsafe fn init_fetch<'w>(state: &Self::State, archetype: &'w Archetype) -> Self::Fetch<'w> {
+    unsafe fn init_fetch<'w>(
+        state: &Self::State,
+        archetype: &'w Archetype,
+        _last_run: Tick,
+        _this_run: Tick,
+    ) -> Self::Fetch<'w> {
         archetype.table().column(*state)
     }
 
@@ -206,9 +248,9 @@ unsafe impl<T: Component> QueryData for Option<&T> {
 // SAFETY: as `Option<&T>` but exclusive; `update_access` registers a write so
 // no other term may touch the component, and `fetch` forms a unique `&mut`.
 unsafe impl<T: Component> QueryData for Option<&mut T> {
-    type Item<'w> = Option<&'w mut T>;
+    type Item<'w> = Option<Mut<'w, T>>;
     type State = ComponentId;
-    type Fetch<'w> = Option<&'w Column>;
+    type Fetch<'w> = (Option<&'w Column>, Tick, Tick);
 
     fn init_state(components: &mut Components) -> Self::State {
         components.register::<T>()
@@ -222,14 +264,73 @@ unsafe impl<T: Component> QueryData for Option<&mut T> {
         access.add_write(*state);
     }
 
-    unsafe fn init_fetch<'w>(state: &Self::State, archetype: &'w Archetype) -> Self::Fetch<'w> {
-        archetype.table().column(*state)
+    unsafe fn init_fetch<'w>(
+        state: &Self::State,
+        archetype: &'w Archetype,
+        last_run: Tick,
+        this_run: Tick,
+    ) -> Self::Fetch<'w> {
+        (archetype.table().column(*state), last_run, this_run)
     }
 
     unsafe fn fetch<'w>(fetch: Self::Fetch<'w>, _entity: Entity, row: usize) -> Self::Item<'w> {
-        // SAFETY: when `Some`, `row < len`, the column stores `T`, the write is
-        // exclusive, and each row is fetched once — so the `&mut T` is unique.
-        fetch.map(|col| unsafe { &mut *col.get_ptr(row).cast::<T>() })
+        let (column, last_run, this_run) = fetch;
+        column.map(|col| {
+            let added = col.added_tick(row);
+            // SAFETY: when `Some`, `row < len`, the column stores `T`, the write
+            // is exclusive, and each row is fetched once — so the `&mut T` is
+            // unique. Value bytes and the changed-tick cell are distinct
+            // allocations, so the two `&mut` below do not alias.
+            let value = unsafe { &mut *col.get_ptr(row).cast::<T>() };
+            // SAFETY: as above — unique access to this row's changed-tick cell.
+            let changed = unsafe { &mut *col.changed_tick_ptr(row) };
+            Mut::new(value, changed, added, last_run, this_run)
+        })
+    }
+}
+
+// --- Ref<T> -----------------------------------------------------------------
+
+// SAFETY: `Ref<T>` reads a single component immutably (registering only a read)
+// and additionally reads that component's change ticks; `matches` requires the
+// column to exist so `init_fetch` always finds it; `fetch` forms a `&T` plus
+// `Copy` tick snapshots, never a `&mut` into storage.
+unsafe impl<T: Component> QueryData for Ref<'_, T> {
+    type Item<'w> = Ref<'w, T>;
+    type State = ComponentId;
+    type Fetch<'w> = (&'w Column, Tick, Tick);
+
+    fn init_state(components: &mut Components) -> Self::State {
+        components.register::<T>()
+    }
+
+    fn matches(state: &Self::State, archetype: &Archetype) -> bool {
+        archetype.contains(*state)
+    }
+
+    fn update_access(state: &Self::State, access: &mut Access) {
+        access.add_read(*state);
+    }
+
+    unsafe fn init_fetch<'w>(
+        state: &Self::State,
+        archetype: &'w Archetype,
+        last_run: Tick,
+        this_run: Tick,
+    ) -> Self::Fetch<'w> {
+        let column = archetype
+            .table()
+            .column(*state)
+            .expect("matches() guaranteed the column exists");
+        (column, last_run, this_run)
+    }
+
+    unsafe fn fetch<'w>(fetch: Self::Fetch<'w>, _entity: Entity, row: usize) -> Self::Item<'w> {
+        let (col, last_run, this_run) = fetch;
+        // SAFETY: `row < len`; the column stores `T`; shared `&T` access cannot
+        // alias a mutable borrow (the access check rejects a conflicting write).
+        let value = unsafe { &*col.get_ptr(row).cast::<T>() };
+        Ref::new(value, col.added_tick(row), col.changed_tick(row), last_run, this_run)
     }
 }
 
@@ -261,10 +362,15 @@ macro_rules! impl_query_data_tuple {
                 $($T::update_access($T, access);)+
             }
 
-            unsafe fn init_fetch<'w>(state: &Self::State, archetype: &'w Archetype) -> Self::Fetch<'w> {
+            unsafe fn init_fetch<'w>(
+                state: &Self::State,
+                archetype: &'w Archetype,
+                last_run: Tick,
+                this_run: Tick,
+            ) -> Self::Fetch<'w> {
                 let ($($T,)+) = state;
                 // SAFETY: forwarded — `matches` held for every element.
-                unsafe { ($($T::init_fetch($T, archetype),)+) }
+                unsafe { ($($T::init_fetch($T, archetype, last_run, this_run),)+) }
             }
 
             unsafe fn fetch<'w>(fetch: Self::Fetch<'w>, entity: Entity, row: usize) -> Self::Item<'w> {
@@ -309,6 +415,10 @@ unsafe impl ReadOnlyQueryData for Entity {}
 
 // SAFETY: `Option<&T>` reads a single component immutably when present.
 unsafe impl<T: Component> ReadOnlyQueryData for Option<&T> {}
+
+// SAFETY: `Ref<T>` reads a single component immutably (plus its ticks); it
+// forms no `&mut` into storage and registers only a read.
+unsafe impl<T: Component> ReadOnlyQueryData for Ref<'_, T> {}
 
 macro_rules! impl_read_only_query_data_tuple {
     ($($T:ident),+) => {

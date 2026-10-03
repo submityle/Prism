@@ -47,7 +47,13 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         // `&mut` fetch is ever formed, and this system's declared read access
         // (upheld by the scheduler's conflict analysis) guarantees nothing
         // writes the columns we read for the duration of the iteration.
-        unsafe { self.state.iter_from_ptr(self.world.as_ptr()) }
+        unsafe {
+            self.state.iter_from_ptr(
+                self.world.as_ptr(),
+                self.world.last_run(),
+                self.world.this_run(),
+            )
+        }
     }
 
     /// Iterate the matched rows with exclusive access, permitting `&mut T` data
@@ -59,7 +65,13 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         // live iterator of this query, and the system's declared write access
         // (upheld by the scheduler's conflict analysis) guarantees nothing else
         // touches the columns we write for the duration of the iteration.
-        unsafe { self.state.iter_from_ptr(self.world.as_ptr()) }
+        unsafe {
+            self.state.iter_from_ptr(
+                self.world.as_ptr(),
+                self.world.last_run(),
+                self.world.this_run(),
+            )
+        }
     }
 
     /// Visit every matched row with shared access.
@@ -108,7 +120,13 @@ impl<'w, 's, D: ReadOnlyQueryData, F: QueryFilter> IntoIterator for &Query<'w, '
     fn into_iter(self) -> Self::IntoIter {
         // SAFETY: identical to `Query::iter` — read-only data over a live world
         // cell under the scheduler's conflict discipline.
-        unsafe { self.state.iter_from_ptr(self.world.as_ptr()) }
+        unsafe {
+            self.state.iter_from_ptr(
+                self.world.as_ptr(),
+                self.world.last_run(),
+                self.world.this_run(),
+            )
+        }
     }
 }
 
@@ -120,7 +138,13 @@ impl<'w, 's, D: QueryData, F: QueryFilter> IntoIterator for &mut Query<'w, 's, D
     fn into_iter(self) -> Self::IntoIter {
         // SAFETY: identical to `Query::iter_mut` — exclusive access via `&mut`
         // over a live world cell under the scheduler's conflict discipline.
-        unsafe { self.state.iter_from_ptr(self.world.as_ptr()) }
+        unsafe {
+            self.state.iter_from_ptr(
+                self.world.as_ptr(),
+                self.world.last_run(),
+                self.world.this_run(),
+            )
+        }
     }
 }
 

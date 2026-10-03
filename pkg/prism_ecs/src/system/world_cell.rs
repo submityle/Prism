@@ -25,6 +25,7 @@
 
 use core::marker::PhantomData;
 
+use crate::change::Tick;
 use crate::world::World;
 
 /// A `Copy` capability token wrapping a `*mut World` valid for `'w`.
@@ -37,6 +38,14 @@ use crate::world::World;
 #[derive(Clone, Copy)]
 pub struct UnsafeWorldCell<'w> {
     ptr: *mut World,
+    /// Start of the running system's change-detection window (the tick it last
+    /// completed), exclusive. Threaded into every [`Query`](crate::system::Query)
+    /// so `Added`/`Changed` observe exactly the writes since this system last
+    /// ran.
+    last_run: Tick,
+    /// The current world tick, i.e. the upper bound of the change-detection
+    /// window.
+    this_run: Tick,
     _marker: PhantomData<&'w mut World>,
 }
 
@@ -46,10 +55,27 @@ impl<'w> UnsafeWorldCell<'w> {
     /// live `&mut World`.
     #[inline]
     pub(crate) fn new_mutable(world: &'w mut World) -> Self {
+        let last_run = world.last_change_tick();
+        let this_run = world.change_tick();
         Self {
             ptr: world as *mut World,
+            last_run,
+            this_run,
             _marker: PhantomData,
         }
+    }
+
+
+    /// Start of the running system's change-detection window (exclusive).
+    #[inline]
+    pub fn last_run(self) -> Tick {
+        self.last_run
+    }
+
+    /// The current world tick (upper bound of the change-detection window).
+    #[inline]
+    pub fn this_run(self) -> Tick {
+        self.this_run
     }
 
     /// The raw world pointer, for params (such as the query driver) that need to

@@ -11,6 +11,7 @@ use alloc::vec::Vec;
 use core::marker::PhantomData;
 
 use crate::archetype::ArchetypeId;
+use crate::change::Tick;
 use crate::component::Components;
 use crate::query::access::Access;
 use crate::query::fetch::{QueryData, ReadOnlyQueryData};
@@ -38,6 +39,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         let filter_state = F::init_state(components);
         let mut access = Access::new();
         D::update_access(&data_state, &mut access);
+        F::update_access(&filter_state, &mut access);
         Self {
             data_state,
             filter_state,
@@ -76,26 +78,48 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
     where
         D: ReadOnlyQueryData,
     {
+        let last_run = world.last_change_tick();
+        let this_run = world.change_tick();
         let archetypes = self.matched_archetypes(world);
         let world_ptr = (world as *const World).cast_mut();
         // SAFETY: `D: ReadOnlyQueryData`, so no `&mut` fetch is ever formed and
         // the shared `&'w World` borrow is sufficient; `world_ptr` stays valid
         // for `'w`. Every id in `archetypes` came from `matched_archetypes`, so
-        // it satisfies `D::matches` for `self.data_state`.
-        unsafe { QueryIter::new(world_ptr, &self.data_state, archetypes) }
+        // it satisfies `D::matches`/`F::matches` for the respective states.
+        unsafe {
+            QueryIter::new(
+                world_ptr,
+                &self.data_state,
+                &self.filter_state,
+                archetypes,
+                last_run,
+                this_run,
+            )
+        }
     }
 
     /// Iterate the rows matched by this query over an exclusive view of `world`,
     /// permitting `&mut T` terms.
     #[inline]
     pub fn iter_mut<'w, 's>(&'s self, world: &'w mut World) -> QueryIter<'w, 's, D, F> {
+        let last_run = world.last_change_tick();
+        let this_run = world.change_tick();
         let archetypes = self.matched_archetypes(world);
         let world_ptr = world as *mut World;
         // SAFETY: `world` is exclusively borrowed for `'w`, so the raw pointer
         // is the sole route to the world during iteration; `&mut` fetches are
         // therefore unique. Every id in `archetypes` came from
-        // `matched_archetypes`, so it satisfies `D::matches`.
-        unsafe { QueryIter::new(world_ptr, &self.data_state, archetypes) }
+        // `matched_archetypes`, so it satisfies `D::matches`/`F::matches`.
+        unsafe {
+            QueryIter::new(
+                world_ptr,
+                &self.data_state,
+                &self.filter_state,
+                archetypes,
+                last_run,
+                this_run,
+            )
+        }
     }
 
     /// Iterate the rows matched by this query from a raw `*mut World`.
@@ -114,6 +138,8 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
     pub(crate) unsafe fn iter_from_ptr<'w, 's>(
         &'s self,
         world: *mut World,
+        last_run: Tick,
+        this_run: Tick,
     ) -> QueryIter<'w, 's, D, F> {
         // SAFETY: the caller guarantees `world` is live for `'w`. Forming a
         // shared `&World` (never `&mut`) matches the kernel discipline and is
@@ -121,8 +147,17 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         let world_ref: &World = unsafe { &*world };
         let archetypes = self.matched_archetypes(world_ref);
         // SAFETY: every id in `archetypes` came from `matched_archetypes`, so it
-        // satisfies `D::matches`; the caller upholds non-aliasing of the fetched
-        // columns for `'w`.
-        unsafe { QueryIter::new(world, &self.data_state, archetypes) }
+        // satisfies `D::matches`/`F::matches`; the caller upholds non-aliasing
+        // of the fetched columns for `'w`.
+        unsafe {
+            QueryIter::new(
+                world,
+                &self.data_state,
+                &self.filter_state,
+                archetypes,
+                last_run,
+                this_run,
+            )
+        }
     }
 }

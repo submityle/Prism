@@ -63,13 +63,13 @@ pub mod world;
 /// the eventual migration a near "change-the-import" exercise.
 pub mod prelude {
     pub use crate::bundle::Bundle;
-    pub use crate::change::{ComponentTicks, Tick};
+    pub use crate::change::{ComponentTicks, Mut, Ref, Tick};
     pub use crate::command::{CommandQueue, Commands};
     pub use crate::component::Component;
     pub use crate::entity::Entity;
     pub use crate::event::{Event, EventCursor, EventId, Events};
     pub use crate::resource::{Resource, ResourceId, Resources};
-    pub use crate::query::{With, Without};
+    pub use crate::query::{Added, Changed, Or, With, Without};
     pub use crate::schedule::{
         apply_state_transition, in_state, resource_equals, resource_exists, run_once,
         IntoSystemConfigs, NextState, OnEnter, OnExit, Phase, Schedule, ScheduleLabel, Schedules,

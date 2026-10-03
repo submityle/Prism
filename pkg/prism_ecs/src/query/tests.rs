@@ -42,7 +42,7 @@ fn iter_mut_mutates_in_place() {
     let b = w.spawn((Position(3, 4), Velocity(10, 20)));
 
     let state = w.query::<&mut Position>();
-    for p in state.iter_mut(&mut w) {
+    for mut p in state.iter_mut(&mut w) {
         p.0 += 100;
         p.1 += 1;
     }

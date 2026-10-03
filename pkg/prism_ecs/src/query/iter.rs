@@ -25,6 +25,7 @@ use alloc::vec::Vec;
 use core::marker::PhantomData;
 
 use crate::archetype::{Archetype, ArchetypeId};
+use crate::change::Tick;
 use crate::entity::Entity;
 use crate::query::fetch::QueryData;
 use crate::query::filter::QueryFilter;
@@ -45,6 +46,10 @@ pub struct QueryIter<'w, 's, D: QueryData, F: QueryFilter = ()> {
     /// Resolved component ids for the data terms, borrowed from the owning
     /// [`QueryState`] so it can be reused after iteration ends.
     data_state: &'s D::State,
+    /// Resolved component ids for the filter terms, borrowed from the owning
+    /// [`QueryState`]. Drives per-row [`Added`](crate::query::Added) /
+    /// [`Changed`](crate::query::Changed) acceptance.
+    filter_state: &'s F::State,
     /// Ids of the archetypes this query matches, computed once at creation.
     archetypes: Vec<ArchetypeId>,
     /// Index into `archetypes` of the archetype currently being walked.
@@ -56,8 +61,16 @@ pub struct QueryIter<'w, 's, D: QueryData, F: QueryFilter = ()> {
     /// The current archetype's resolved fetch cursor (`None` before the first
     /// archetype is entered, or for a zero-row archetype that is skipped).
     current_fetch: Option<D::Fetch<'w>>,
+    /// The current archetype's resolved filter fetch cursor (parallel to
+    /// `current_fetch`). `None` before the first archetype is entered.
+    current_filter_fetch: Option<F::Fetch<'w>>,
     /// The current archetype's entity column, used to supply the row entity.
     current_entities: &'w [Entity],
+    /// Start of the querying observer's change-detection window (exclusive).
+    last_run: Tick,
+    /// End of the querying observer's change-detection window (the current
+    /// world/system tick).
+    this_run: Tick,
     _marker: PhantomData<(&'w mut World, fn() -> F)>,
 }
 
@@ -70,21 +83,29 @@ impl<'w, 's, D: QueryData, F: QueryFilter> QueryIter<'w, 's, D, F> {
     ///   borrowed for `'w` (the caller holds `&'w mut World`), so no other
     ///   access occurs during iteration.
     /// - every id in `archetypes` must name an archetype that satisfies
-    ///   `D::matches` for `data_state` (so `D::init_fetch` is sound).
+    ///   `D::matches` **and** `F::matches` for the respective states (so
+    ///   `D::init_fetch` / `F::init_fetch` are sound).
     pub(crate) unsafe fn new(
         world: *mut World,
         data_state: &'s D::State,
+        filter_state: &'s F::State,
         archetypes: Vec<ArchetypeId>,
+        last_run: Tick,
+        this_run: Tick,
     ) -> Self {
         Self {
             world,
             data_state,
+            filter_state,
             archetypes,
             arch_cursor: 0,
             row: 0,
             row_len: 0,
             current_fetch: None,
+            current_filter_fetch: None,
             current_entities: &[],
+            last_run,
+            this_run,
             _marker: PhantomData,
         }
     }
@@ -99,6 +120,17 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Iterator for QueryIter<'w, 's, D, F> 
                 let row = self.row;
                 self.row += 1;
                 let entity = self.current_entities[row];
+                let filter_fetch = self
+                    .current_filter_fetch
+                    .expect("current_filter_fetch is Some whenever row_len > 0");
+                // SAFETY: `row < self.row_len == archetype.len()` and
+                // `filter_fetch` was built for this archetype. `F::Fetch` is
+                // `Copy`, so passing it by value does not disturb the cursor.
+                if !unsafe { F::filter_fetch(filter_fetch, entity, row) } {
+                    // Row rejected by `Added`/`Changed`/`With`/`Without`; the
+                    // cursor already advanced, so just skip it.
+                    continue;
+                }
                 let fetch = self
                     .current_fetch
                     .expect("current_fetch is Some whenever row_len > 0");
@@ -131,7 +163,14 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Iterator for QueryIter<'w, 's, D, F> 
             // SAFETY: `arch_id` came from the matched list, so the archetype
             // satisfies `D::matches` for `data_state` — the contract of
             // `init_fetch`.
-            self.current_fetch = Some(unsafe { D::init_fetch(self.data_state, archetype) });
+            self.current_fetch =
+                Some(unsafe { D::init_fetch(self.data_state, archetype, self.last_run, self.this_run) });
+            // SAFETY: the same `arch_id` also satisfies `F::matches` for
+            // `filter_state` (guaranteed by `matched_archetypes`), the contract
+            // of `F::init_fetch`.
+            self.current_filter_fetch = Some(unsafe {
+                F::init_fetch(self.filter_state, archetype, self.last_run, self.this_run)
+            });
         }
     }
 }

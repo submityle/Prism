@@ -95,6 +95,22 @@ impl Access {
         self.reads.push(id);
     }
 
+    /// Register a shared read of component `id` performed by a *filter* term
+    /// (`Added<T>` / `Changed<T>`), which inspects the component's change ticks
+    /// but yields no data.
+    ///
+    /// Unlike [`add_read`](Access::add_read) this never panics: a filter may
+    /// legitimately read the ticks of a component the query also writes (e.g.
+    /// `Query<&mut A, Changed<A>>`), and a filter read already covered by an
+    /// existing read or write adds no new borrow. The id is pushed only when it
+    /// is not already present in `reads`/`writes`, keeping the access set tidy.
+    #[inline]
+    pub fn add_filter_read(&mut self, id: ComponentId) {
+        if !self.reads.contains(&id) && !self.writes.contains(&id) {
+            self.reads.push(id);
+        }
+    }
+
     /// Register an exclusive write of component `id`.
     ///
     /// # Panics
