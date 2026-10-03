@@ -1,0 +1,28 @@
+[package]
+name = "prism_audio_geometry_gpu"
+version = "0.1.0"
+edition = "2024"
+description = "Optional wgpu compute backend for Prism's next-generation geometric acoustics (design section 31): GPU ray/path tracing of a triangle-mesh scene for batched direct-path transmission/occlusion and image-source specular reflections, mirroring the CPU prism_audio_geometry backend. Every kernel is validated against a CPU golden twin. Classic deterministic DSP driven by geometry truth, no AI/ML. Contains no Unreal Engine, Unity, Godot, Wwise, FMOD, Steam Audio, Dolby, or Google Resonance Audio source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_audio_core = { path = "../prism_audio_core" }
+prism_audio_spatial = { path = "../prism_audio_spatial" }
+prism_audio_geometry = { path = "../prism_audio_geometry" }
+glam = { version = "0.33.2", default-features = false, features = ["std"] }
+bevy_math = { path = "../../crates/bevy_math", default-features = false, features = [
+  "nostd-libm",
+] }
+wgpu = { version = "30", default-features = false, features = ["wgsl", "metal"] }
+bytemuck = { version = "1.5", features = ["derive"] }
+futures-lite = "2"
+
+[dev-dependencies]
+prism_audio_geometry_gpu = { path = "." }
+
+[features]
+default = []
+
+[lints]
+workspace = true
