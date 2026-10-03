@@ -19,12 +19,12 @@ use super::super::weights::unquant_weight_bits;
 ///
 /// Returns the sixteen raw levels in row-major texel order, ready to pack with
 /// `bits::BlockWriter::write_weights_reversed`.
-pub(super) fn quantize_weights_bits(
-    texels: &[[u8; 4]; 16],
+pub(super) fn quantize_weights_bits<const N: usize>(
+    texels: &[[u8; 4]; N],
     e0: [u8; 3],
     e1: [u8; 3],
     bits: u32,
-) -> [u8; 16] {
+) -> [u8; N] {
     let levels = 1u32 << bits;
     core::array::from_fn(|t| {
         let texel = texels[t];

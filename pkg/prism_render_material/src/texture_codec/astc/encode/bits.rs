@@ -31,10 +31,10 @@ impl BlockWriter {
         }
     }
 
-    /// Pack the sixteen `raw` weight levels (`bits` bits each) bit-reversed from
+    /// Pack the `N` `raw` weight levels (`bits` bits each) bit-reversed from
     /// the top of the block, so texel `t` bit `b` lands at block bit
     /// `127 - (bits * t + b)` -- the inverse of `weights::read_weight_raw`.
-    pub(super) fn write_weights_reversed(&mut self, raw: &[u8; 16], bits: u32) {
+    pub(super) fn write_weights_reversed<const N: usize>(&mut self, raw: &[u8; N], bits: u32) {
         for (t, &v) in raw.iter().enumerate() {
             for b in 0..bits {
                 if (u32::from(v) >> b) & 1 == 1 {

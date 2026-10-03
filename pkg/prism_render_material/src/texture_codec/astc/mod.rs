@@ -40,7 +40,7 @@ mod weights;
 pub use encode::{
     encode_astc_single_partition_4x4_ldr, encode_astc_single_partition_4x4_ldr_q192,
     encode_astc_single_partition_4x4_ldr_quality, encode_astc_single_partition_4x4_ldr_rgba,
-    encode_astc_single_partition_4x4_ldr_rgba_q6,
+    encode_astc_single_partition_4x4_ldr_rgba_q6, encode_astc_single_partition_5x5_ldr,
 };
 pub use void_extent::{decode_astc_void_extent_hdr, decode_astc_void_extent_ldr};
 pub use weights::{decode_astc_4x4_weights, decode_astc_4x4_weights_ise};

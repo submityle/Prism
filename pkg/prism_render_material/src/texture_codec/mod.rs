@@ -58,7 +58,7 @@ pub use astc::{
     decode_astc_hdr, decode_astc_ldr, decode_astc_void_extent_hdr, decode_astc_void_extent_ldr,
     encode_astc_single_partition_4x4_ldr, encode_astc_single_partition_4x4_ldr_q192,
     encode_astc_single_partition_4x4_ldr_quality, encode_astc_single_partition_4x4_ldr_rgba,
-    encode_astc_single_partition_4x4_ldr_rgba_q6, AstcError,
+    encode_astc_single_partition_4x4_ldr_rgba_q6, encode_astc_single_partition_5x5_ldr, AstcError,
 };
 pub use bc6h::{
     bc6h_mode_bits, decode_bc6h_mode10_signed, decode_bc6h_mode10_unsigned,

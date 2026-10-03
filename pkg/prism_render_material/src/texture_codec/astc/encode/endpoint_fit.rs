@@ -9,13 +9,14 @@
 //!
 //! Pure analytic `f64` arithmetic -- no AI/ML path.
 
-/// Fit two RGB endpoints for a single-partition CEM-8 block.
+/// Fit two RGB endpoints for a single-partition CEM-8 block over any
+/// footprint of `N` texels (4x4 = 16, 5x5 = 25, ...).
 ///
 /// Returns `(e0, e1)` as 8-bit RGB with `hadd(e0) <= hadd(e1)` so the decoder
 /// (`cem::decode`, CEM 8) reads them back directly. Alpha is implicitly 255 for
 /// CEM 8, so the input alpha channel is ignored.
-pub(super) fn fit_rgb_endpoints(texels: &[[u8; 4]; 16]) -> ([u8; 3], [u8; 3]) {
-    let points: [[f64; 3]; 16] =
+pub(super) fn fit_rgb_endpoints<const N: usize>(texels: &[[u8; 4]; N]) -> ([u8; 3], [u8; 3]) {
+    let points: [[f64; 3]; N] =
         core::array::from_fn(|t| core::array::from_fn(|c| f64::from(texels[t][c])));
 
     // Mean colour.
@@ -26,7 +27,7 @@ pub(super) fn fit_rgb_endpoints(texels: &[[u8; 4]; 16]) -> ([u8; 3], [u8; 3]) {
         }
     }
     for m in &mut mean {
-        *m /= 16.0;
+        *m /= N as f64;
     }
 
     // 3x3 covariance.

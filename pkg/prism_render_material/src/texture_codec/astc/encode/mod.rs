@@ -271,14 +271,90 @@ pub fn encode_astc_single_partition_4x4_ldr_rgba_q6(texels: &[[u8; 4]; 16]) -> [
     w.into_block()
 }
 
+/// Encode twenty-five `RGBA8` texels (row-major, `texel = y * 5 + x`) into a
+/// single **5x5** ASTC LDR block -- the first larger-footprint encoder.
+///
+/// Configuration (verified against the authoritative block-mode scan):
+/// * **block mode 243** (`0b011110011`): a 5x5 weight grid, single plane,
+///   weight range QUANT_8 (3-bit, bit-only) -- 25 weights x 3 = 75 weight bits;
+/// * **single partition**, **CEM 8** (RGB direct, alpha forced to 255);
+/// * **QUANT_64 colour** (`color_bits = 111 - 75 = 36`, six CEM-8 integers ->
+///   colour quant level QUANT_64, a 6-bit bit-only range): each endpoint
+///   channel is quantised to 6 bits and the decoded (unquantised) endpoints are
+///   fed to the weight fit so the levels reconstruct the intended colours.
+///
+/// A 5x5 full weight grid needs **no bilinear infill** -- weight `t` maps 1:1 to
+/// texel `t` in row-major order -- so the chosen levels decode back exactly up
+/// to the QUANT_64 endpoint rounding (<= 2 LSB) and the 3-bit weight step. This
+/// mirrors [`encode_astc_single_partition_4x4_ldr`] but on the larger footprint
+/// where the colour range necessarily drops from identity to QUANT_64.
+///
+/// CEM 8 carries no alpha, so the decoded block has alpha 255 for every texel
+/// and the input alpha channel is ignored.
+#[must_use]
+pub fn encode_astc_single_partition_5x5_ldr(texels: &[[u8; 4]; 25]) -> [u8; 16] {
+    const BLOCK_MODE: u32 = 243;
+    const CEM_RGB_DIRECT: u32 = 8;
+    const WEIGHT_BITS: u32 = 3; // QUANT_8, bit-only
+    const COLOR_LEVEL: usize = 10; // QUANT_64 (6-bit, bit-only)
+    const COLOR_BITS: u32 = 6;
+
+    // Fit the principal-axis RGB endpoints over all twenty-five texels, then
+    // quantise each channel into the QUANT_64 packed representation.
+    let (e0_raw, e1_raw) = endpoint_fit::fit_rgb_endpoints(texels);
+    let mut p0: [u8; 3] =
+        core::array::from_fn(|c| color_quant::quantize_color_channel(COLOR_LEVEL, e0_raw[c]));
+    let mut p1: [u8; 3] =
+        core::array::from_fn(|c| color_quant::quantize_color_channel(COLOR_LEVEL, e1_raw[c]));
+
+    // Reconstruct the decoded endpoints the hardware interpolates between.
+    let unq = |p: [u8; 3]| -> [u8; 3] {
+        core::array::from_fn(|c| super::color_unquant::unquant_color(COLOR_LEVEL, p[c]))
+    };
+    let mut d0 = unq(p0);
+    let mut d1 = unq(p1);
+
+    // CEM 8 applies blue-contraction + endpoint swap when `hadd(e0) > hadd(e1)`
+    // on the *decoded* colours. Pre-swap the packed endpoints so the decoder
+    // takes the plain path and interpolates d0..d1 directly; weights are fitted
+    // after the swap so the texel mapping stays correct.
+    let hadd = |c: [u8; 3]| u32::from(c[0]) + u32::from(c[1]) + u32::from(c[2]);
+    if hadd(d0) > hadd(d1) {
+        core::mem::swap(&mut p0, &mut p1);
+        core::mem::swap(&mut d0, &mut d1);
+    }
+
+    // Fit the twenty-five 3-bit weights against the *decoded* endpoints so the
+    // chosen levels reconstruct the intended colours (no infill on a full grid).
+    let raw = weight_fit::quantize_weights_bits(texels, d0, d1, WEIGHT_BITS);
+
+    let mut w = bits::BlockWriter::new();
+    // Block mode occupies block bits 0..11; single partition leaves the
+    // partition-count field (bits 11,12) at 0.
+    w.write_bits(0, 11, BLOCK_MODE);
+    // CEM field: 4 bits at block bit 13. CEM 8 sets only block bit 16.
+    w.write_bits(13, 4, CEM_RGB_DIRECT);
+    // Six QUANT_64 colour integers (6-bit bit-only) at block bit 17, LSB-first,
+    // in the decoder's read order [e0.r, e1.r, e0.g, e1.g, e0.b, e1.b].
+    let packed = [p0[0], p1[0], p0[1], p1[1], p0[2], p1[2]];
+    for (i, &v) in packed.iter().enumerate() {
+        w.write_bits(17 + i as u32 * COLOR_BITS, COLOR_BITS, u32::from(v));
+    }
+    // Twenty-five 3-bit weights packed bit-reversed from the top of the block.
+    w.write_weights_reversed(&raw, WEIGHT_BITS);
+    w.into_block()
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::decode_astc_4x4_ldr;
+    use super::super::decode_astc_ldr;
     use super::encode_astc_single_partition_4x4_ldr;
     use super::encode_astc_single_partition_4x4_ldr_q192;
     use super::encode_astc_single_partition_4x4_ldr_quality;
     use super::encode_astc_single_partition_4x4_ldr_rgba;
     use super::encode_astc_single_partition_4x4_ldr_rgba_q6;
+    use super::encode_astc_single_partition_5x5_ldr;
 
     /// Max per-channel RGB error over the sixteen texels after a round trip.
     fn max_rgb_err(src: &[[u8; 4]; 16], dec: &[[u8; 4]; 16]) -> i32 {
@@ -565,6 +641,71 @@ mod tests {
         assert!(
             err_q6 < err_m4,
             "six-level weights ({err_q6}) did not beat four-level weights ({err_m4})"
+        );
+    }
+    /// Max per-channel RGB error over twenty-five texels after a round trip.
+    fn max_rgb_err_25(src: &[[u8; 4]; 25], dec: &[[u8; 4]; 25]) -> i32 {
+        let mut m = 0i32;
+        for (s, d) in src.iter().zip(dec.iter()) {
+            for c in 0..3 {
+                m = m.max((i32::from(s[c]) - i32::from(d[c])).abs());
+            }
+        }
+        m
+    }
+
+    #[test]
+    fn five_by_five_constant_block_round_trips_within_two_lsb() {
+        let src = [[73u8, 150, 211, 255]; 25];
+        let blk = encode_astc_single_partition_5x5_ldr(&src);
+        let (dec144, count) = decode_astc_ldr(&blk, 5, 5).expect("decode 5x5 constant");
+        assert_eq!(count, 25, "5x5 footprint must decode 25 texels");
+        let dec: [[u8; 4]; 25] = core::array::from_fn(|t| dec144[t]);
+        // Coincident endpoints quantised to QUANT_64: reconstructed within the
+        // 6-bit colour step (<= 2 LSB on the evenly spaced 64-level ramp).
+        assert!(
+            max_rgb_err_25(&src, &dec) <= 2,
+            "5x5 constant block exceeds QUANT_64 colour step"
+        );
+        for d in &dec {
+            assert_eq!(d[3], 255, "CEM 8 forces alpha 255");
+        }
+    }
+
+    #[test]
+    fn five_by_five_gray_ramp_round_trips_within_tolerance() {
+        // A smooth gray ramp lies on a single colour axis; the 3-bit weights
+        // (eight levels) track the twenty-five-step ramp with a bounded error.
+        let src: [[u8; 4]; 25] =
+            core::array::from_fn(|t| [(t * 10) as u8, (t * 10) as u8, (t * 10) as u8, 255]);
+        let blk = encode_astc_single_partition_5x5_ldr(&src);
+        let (dec144, count) = decode_astc_ldr(&blk, 5, 5).expect("decode 5x5 gray ramp");
+        assert_eq!(count, 25);
+        let dec: [[u8; 4]; 25] = core::array::from_fn(|t| dec144[t]);
+        // Eight weight levels across a 25-step ramp cannot be exact; the worst
+        // texel lands within one weight step (~1/7 of the range) plus the
+        // QUANT_64 endpoint rounding.
+        assert!(
+            max_rgb_err_25(&src, &dec) <= 20,
+            "5x5 gray ramp error too large"
+        );
+    }
+
+    #[test]
+    fn five_by_five_rgb_gradient_round_trips_within_tolerance() {
+        // A colour gradient along the R/G/B diagonal: endpoints capture the
+        // extremes and the 3-bit weights interpolate between them.
+        let src: [[u8; 4]; 25] = core::array::from_fn(|t| {
+            let f = (t * 10) as u8;
+            [f, 255 - f, (f / 2) + 20, 255]
+        });
+        let blk = encode_astc_single_partition_5x5_ldr(&src);
+        let (dec144, count) = decode_astc_ldr(&blk, 5, 5).expect("decode 5x5 rgb gradient");
+        assert_eq!(count, 25);
+        let dec: [[u8; 4]; 25] = core::array::from_fn(|t| dec144[t]);
+        assert!(
+            max_rgb_err_25(&src, &dec) <= 28,
+            "5x5 rgb gradient error too large"
         );
     }
 }
