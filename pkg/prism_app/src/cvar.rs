@@ -1061,17 +1061,21 @@ impl App {
         if line.is_empty() || line.starts_with("//") {
             return ConsoleOutcome::Empty;
         }
-        let (name, rest) = match line.split_once(char::is_whitespace) {
-            Some((name, rest)) => (name, rest.trim()),
-            None => (line, ""),
-        };
+        let first = line
+            .split_once(char::is_whitespace)
+            .map_or(line, |(name, _)| name);
         self.init_cvars();
-        if name == "reset" {
-            // `reset` is a reserved console command (it shadows cvar get/set for
-            // that first token): `reset <name>` reverts one cvar's runtime
+        if first == "reset" {
+            // `reset` is a reserved *console* command (it shadows cvar get/set
+            // for that first token): `reset <name>` reverts one cvar's runtime
             // override, and a bare `reset` reverts every cvar's. A target name
             // never contains whitespace, so only the first remaining token is
-            // taken.
+            // taken. This keyword is interactive-only — it is deliberately *not*
+            // honoured by [`load_user_config`](App::load_user_config), whose
+            // lines are declarative assignments rather than commands.
+            let rest = line
+                .split_once(char::is_whitespace)
+                .map_or("", |(_, rest)| rest.trim());
             return match rest.split_whitespace().next() {
                 None => ConsoleOutcome::ResetAll {
                     changed: self.reset_all_runtime_cvars(),
@@ -1086,6 +1090,41 @@ impl App {
                 },
             };
         }
+        // The query/assignment grammar is shared with config loading; the
+        // console writes successful assignments into the highest-precedence
+        // [`Runtime`](crate::settings::SettingsLayer::Runtime) layer.
+        self.apply_config_line(line, SettingsLayer::Runtime)
+    }
+
+    /// Apply one line of the shared cvar config grammar, writing a successful
+    /// assignment into `layer` (design §24.6 console/config-file form, §14
+    /// config layering).
+    ///
+    /// This is the common core of [`exec_console`](App::exec_console) (which
+    /// targets [`Runtime`](crate::settings::SettingsLayer::Runtime) and layers
+    /// the `reset` command on top) and
+    /// [`load_user_config`](App::load_user_config) (which targets
+    /// [`User`](crate::settings::SettingsLayer::User)). The line is trimmed; an
+    /// empty line or one beginning with `//` is a no-op
+    /// ([`ConsoleOutcome::Empty`]). Otherwise the first whitespace-delimited
+    /// token is the cvar name and the trimmed remainder is the value: a bare
+    /// name is a *query* (resolved value as [`Queried`](ConsoleOutcome::Queried),
+    /// or [`Unknown`](ConsoleOutcome::Unknown) when undeclared), and a
+    /// `name value` form *writes* the cvar at `layer` via
+    /// [`set_cvar_at`](App::set_cvar_at) after inferring the value's type with
+    /// [`SettingValue::parse`](crate::settings::SettingValue::parse). Validation
+    /// is identical regardless of layer; a rejected line leaves all state
+    /// untouched (design §25.3).
+    fn apply_config_line(&mut self, line: &str, layer: SettingsLayer) -> ConsoleOutcome {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with("//") {
+            return ConsoleOutcome::Empty;
+        }
+        let (name, rest) = match line.split_once(char::is_whitespace) {
+            Some((name, rest)) => (name, rest.trim()),
+            None => (line, ""),
+        };
+        self.init_cvars();
         if rest.is_empty() {
             // Query form: a bare cvar name reports its resolved value. The
             // console is the declared front door, so an undeclared name is
@@ -1105,7 +1144,7 @@ impl App {
                 value,
             };
         }
-        match self.set_cvar(name, SettingValue::parse(rest)) {
+        match self.set_cvar_at(layer, name, SettingValue::parse(rest)) {
             Ok(outcome) => ConsoleOutcome::Set(outcome),
             Err(CvarError::Unregistered(name)) => ConsoleOutcome::Unknown(name),
             Err(error) => ConsoleOutcome::Rejected(error),
@@ -1131,6 +1170,45 @@ impl App {
     /// entry in a config file cannot discard the rest of it.
     pub fn exec_console_script(&mut self, script: &str) -> Vec<ConsoleOutcome> {
         script.lines().map(|line| self.exec_console(line)).collect()
+    }
+
+    /// Load a persisted user configuration, routing each cvar assignment into
+    /// the [`User`](crate::settings::SettingsLayer::User) cascade layer rather
+    /// than `Runtime` (design §14 config layering `默认 → 平台 → 用户 → 命令行
+    /// → 运行时`, §24.6).
+    ///
+    /// This is the layer-correct counterpart to
+    /// [`exec_console_script`](App::exec_console_script): an interactive console
+    /// writes the highest-precedence `Runtime` layer, but a user config file is
+    /// a *persistent preference* that should sit below launch flags
+    /// ([`CommandLine`](crate::settings::SettingsLayer::CommandLine), set by
+    /// [`apply_cvar_cli_overrides`](App::apply_cvar_cli_overrides)) and runtime
+    /// console tweaks. Loading into `User` therefore keeps the full cascade
+    /// precedence intact: a `--r.shadows=0` launch flag or a live `r.shadows 0`
+    /// console write still wins over the config file, and clearing a `Runtime`
+    /// override with [`reset`](App::reset_cvar) falls back to the user config
+    /// value rather than the engine default.
+    ///
+    /// Each line uses the same `name value` grammar as the console and as
+    /// [`write_archive_config`](App::write_archive_config) output, so a config
+    /// previously written to disk reloads cleanly; blank lines and `//`
+    /// comments are ignored, and a bare cvar name is a harmless query. Unlike
+    /// [`exec_console`](App::exec_console) a config is declarative, so the
+    /// `reset` command keyword is **not** special here — a line beginning with
+    /// `reset` is treated as an ordinary (and almost certainly
+    /// [`Unknown`](ConsoleOutcome::Unknown)) cvar name. Each line is applied
+    /// independently through the shared config applier: a
+    /// rejected or unknown entry leaves all state untouched (design §25.3) and
+    /// never aborts the remaining lines, so one stale key cannot discard the
+    /// rest of the file.
+    ///
+    /// This crate performs no file I/O: callers read the config file themselves
+    /// and pass its contents here.
+    pub fn load_user_config(&mut self, script: &str) -> Vec<ConsoleOutcome> {
+        script
+            .lines()
+            .map(|line| self.apply_config_line(line, SettingsLayer::User))
+            .collect()
     }
 
     /// Serialise every [`ARCHIVE`](CvarFlags::ARCHIVE) cvar as console lines

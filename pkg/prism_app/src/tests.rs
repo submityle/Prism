@@ -5512,7 +5512,7 @@ mod cvar_tests {
 
     use crate::cvar::{
         ConsoleOutcome, CvarBounds, CvarCategory, CvarChanged, CvarCliRejection, CvarError,
-        CvarFlags, CvarListing, CvarRegistry, CvarSpec, ValidatedWrite,
+        CvarFlags, CvarListing, CvarRegistry, CvarSetOutcome, CvarSpec, ValidatedWrite,
     };
 
     /// Registering a cvar seeds its default into the `EngineDefault` settings
@@ -6775,5 +6775,145 @@ mod cvar_tests {
         // A fresh App with no registry resets nothing.
         let mut empty = App::new();
         assert!(empty.reset_all_runtime_cvars().is_empty());
+    }
+
+    #[test]
+    fn load_user_config_writes_user_layer() {
+        let mut app = App::new();
+        app.register_cvar(
+            CvarSpec::new("r.quality", 1_i64)
+                .category(CvarCategory::Render)
+                .bounds(CvarBounds::Int(0, 3)),
+        )
+        .unwrap();
+
+        let outcomes = app.load_user_config("r.quality 2\n");
+        assert!(matches!(outcomes.as_slice(), [ConsoleOutcome::Set(_)]));
+        assert_eq!(app.cvar_int("r.quality"), Some(2));
+        assert_eq!(
+            app.world().resource::<Settings>().resolved_layer("r.quality"),
+            Some(SettingsLayer::User)
+        );
+    }
+
+    #[test]
+    fn load_user_config_sits_below_commandline_and_runtime() {
+        let mut app = App::new();
+        app.register_cvar(
+            CvarSpec::new("r.quality", 1_i64)
+                .category(CvarCategory::Render)
+                .bounds(CvarBounds::Int(0, 3)),
+        )
+        .unwrap();
+        // A launch flag (CommandLine) and a live console tweak (Runtime) both
+        // outrank a persisted user config.
+        app.set_cvar_at(SettingsLayer::CommandLine, "r.quality", 2_i64)
+            .unwrap();
+        app.set_cvar("r.quality", 3_i64).unwrap();
+
+        app.load_user_config("r.quality 0");
+        // The user-config value is recorded but does not win the cascade.
+        assert_eq!(app.cvar_int("r.quality"), Some(3));
+        assert_eq!(
+            app.world().resource::<Settings>().resolved_layer("r.quality"),
+            Some(SettingsLayer::Runtime)
+        );
+    }
+
+    #[test]
+    fn load_user_config_reset_runtime_falls_back_to_user_not_default() {
+        let mut app = App::new();
+        app.register_cvar(
+            CvarSpec::new("r.quality", 1_i64)
+                .category(CvarCategory::Render)
+                .bounds(CvarBounds::Int(0, 3)),
+        )
+        .unwrap();
+        app.load_user_config("r.quality 0");
+        app.set_cvar("r.quality", 3_i64).unwrap();
+        assert_eq!(app.cvar_int("r.quality"), Some(3));
+
+        // Clearing the Runtime override reveals the user config, not the
+        // engine default (which would be 1).
+        app.reset_cvar("r.quality").unwrap();
+        assert_eq!(app.cvar_int("r.quality"), Some(0));
+        assert_eq!(
+            app.world().resource::<Settings>().resolved_layer("r.quality"),
+            Some(SettingsLayer::User)
+        );
+    }
+
+    #[test]
+    fn load_user_config_ignores_comments_and_blanks() {
+        let mut app = App::new();
+        app.register_cvar(CvarSpec::new("r.vsync", true).category(CvarCategory::Render))
+            .unwrap();
+
+        let outcomes = app.load_user_config("// header\n\nr.vsync false\n");
+        assert_eq!(
+            outcomes,
+            vec![
+                ConsoleOutcome::Empty,
+                ConsoleOutcome::Empty,
+                ConsoleOutcome::Set(CvarSetOutcome {
+                    changed: true,
+                    clamped: false,
+                    resolved: SettingValue::Bool(false),
+                }),
+            ]
+        );
+        assert_eq!(app.cvar_bool("r.vsync"), Some(false));
+    }
+
+    #[test]
+    fn load_user_config_bad_line_does_not_abort_rest() {
+        let mut app = App::new();
+        app.register_cvar(CvarSpec::new("r.vsync", true).category(CvarCategory::Render))
+            .unwrap();
+
+        // An unknown cvar in the middle must not discard the trailing good line.
+        let outcomes = app.load_user_config("r.unknown 1\nr.vsync false\n");
+        assert!(matches!(outcomes[0], ConsoleOutcome::Unknown(_)));
+        assert!(matches!(outcomes[1], ConsoleOutcome::Set(_)));
+        assert_eq!(app.cvar_bool("r.vsync"), Some(false));
+    }
+
+    #[test]
+    fn load_user_config_reset_keyword_is_not_special() {
+        let mut app = App::new();
+        app.register_cvar(CvarSpec::new("r.vsync", true).category(CvarCategory::Render))
+            .unwrap();
+        app.set_cvar("r.vsync", false).unwrap();
+
+        // In a declarative config `reset` is an ordinary (unregistered) name,
+        // not the interactive reset command, so the Runtime override survives.
+        let outcomes = app.load_user_config("reset r.vsync");
+        assert_eq!(outcomes, vec![ConsoleOutcome::Unknown("reset".to_owned())]);
+        assert_eq!(app.cvar_bool("r.vsync"), Some(false));
+    }
+
+    #[test]
+    fn load_user_config_bare_name_is_query() {
+        let mut app = App::new();
+        app.register_cvar(
+            CvarSpec::new("r.quality", 1_i64)
+                .category(CvarCategory::Render)
+                .bounds(CvarBounds::Int(0, 3)),
+        )
+        .unwrap();
+
+        let outcomes = app.load_user_config("r.quality");
+        assert_eq!(
+            outcomes,
+            vec![ConsoleOutcome::Queried {
+                name: "r.quality".to_owned(),
+                value: SettingValue::Int(1),
+            }]
+        );
+        // A query changes nothing: the User layer stays empty.
+        assert_eq!(
+            app.world().resource::<Settings>().resolved_layer("r.quality"),
+            Some(SettingsLayer::EngineDefault)
+        );
     }
 }
