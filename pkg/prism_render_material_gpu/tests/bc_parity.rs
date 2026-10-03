@@ -4677,3 +4677,104 @@ fn astc_dual_plane_single_partition_hdr_larger_footprint_parity_against_gpu_hard
         HDR_CEMS.len()
     );
 }
+
+// ---------------------------------------------------------------------------
+// ASTC multi-partition dual-plane (shared CEM) LDR parity on LARGER FOOTPRINTS.
+//
+// The last uncovered combination in the 2D decode surface: 2/3 partitions with
+// dual-plane weights, decoded on footprints other than 4x4. It reuses the
+// committed MULTI_PART_DUAL_PLANE_SHARED layout (partition count/seed, shared
+// CEM class, forward QUANT_256 colour integers, interleaved two-plane weights,
+// CCS below the weight region) and decodes under 5x5..12x12 footprint formats
+// via the footprint-generic decode_astc_ldr(block, bx, by). The reference is
+// the native Metal ASTC decoder. This proves the full interaction of
+// multi-partition selection + dual-plane infill + CCS routing + weight-grid
+// decimation on non-4x4 footprints bit-for-bit against hardware.
+// ---------------------------------------------------------------------------
+#[test]
+fn astc_multi_partition_dual_plane_larger_footprint_parity_against_gpu_hardware_decode() {
+    let Some(oracle) = BlockOracle::try_new() else {
+        eprintln!("no GPU adapter; skipping ASTC mp dual-plane larger-footprint parity");
+        return;
+    };
+    if !oracle
+        .features()
+        .contains(Features::TEXTURE_COMPRESSION_ASTC)
+    {
+        eprintln!(
+            "adapter lacks ASTC support; skipping ASTC mp dual-plane larger-footprint parity"
+        );
+        return;
+    }
+
+    const FOOTPRINTS: [(u32, u32); 8] = [
+        (5, 5),
+        (6, 6),
+        (8, 8),
+        (10, 10),
+        (12, 12),
+        (8, 5),
+        (10, 6),
+        (12, 10),
+    ];
+    const PER_COMBO: u32 = 32;
+    let mut rng = Rng(0x6F31_9ADC);
+    let mut compared = 0u64;
+
+    for (bx, by) in FOOTPRINTS {
+        let format = TextureFormat::Astc {
+            block: astc_block_for_footprint(bx, by),
+            channel: wgpu::AstcChannel::Unorm,
+        };
+        let texels = (bx * by) as usize;
+        for (mode, wx, wy, levels, weight_bits, pc, cem, n_int) in MULTI_PART_DUAL_PLANE_SHARED {
+            let (form, bits) = levels_to_grid_form(levels);
+            let seq_count = (wx * wy * 2) as usize;
+            let ccs_pos = 128 - weight_bits - 2;
+            for n in 0..PER_COMBO {
+                let mut blk = [0u8; 16];
+                astc_set_bits(&mut blk, 0, 11, mode);
+                astc_set_bits(&mut blk, 11, 2, pc - 1); // partition count minus one
+                astc_set_bits(&mut blk, 13, 10, rng.next_u32() & 0x3FF); // partition seed
+                astc_set_bits(&mut blk, 23, 6, cem << 2); // shared CEM class
+                for i in 0..n_int {
+                    astc_set_bits(&mut blk, 29 + i * 8, 8, rng.byte() as u32);
+                }
+                let mut seq = [0u8; 64];
+                for w in seq.iter_mut().take(seq_count) {
+                    *w = rand_grid_weight(&mut rng, form, bits);
+                }
+                astc_set_grid_weights(&mut blk, form, bits, &seq[..seq_count]);
+                let ccs = n % 4;
+                astc_set_bits(&mut blk, ccs_pos, 2, ccs);
+
+                let (cpu, count) = decode_astc_ldr(&blk, bx, by).unwrap_or_else(|e| {
+                    panic!(
+                        "mp dp {bx}x{by} mode {mode} (pc {pc}, cem {cem}, ccs {ccs}) block {blk:02x?} rejected: {e:?}"
+                    )
+                });
+                assert_eq!(count, texels, "{bx}x{by} texel count");
+                let gpu = oracle.decode_raw_footprint(format, &blk, bx, by);
+                assert_eq!(gpu.len(), texels, "{bx}x{by} GPU texel count");
+
+                for t in 0..texels {
+                    for c in 0..4 {
+                        let gv = (gpu[t][c].clamp(0.0, 1.0) * 255.0 + 0.5) as i32;
+                        let d = (cpu[t][c] as i32 - gv).abs();
+                        assert!(
+                            d <= 1,
+                            "ASTC mp dp {bx}x{by} mode {mode} (pc {pc}, cem {cem}, ccs {ccs}) block={blk:02x?} texel {t} chan {c}: cpu={} gpu={gv} (|d|={d})",
+                            cpu[t][c]
+                        );
+                        compared += 1;
+                    }
+                }
+            }
+        }
+    }
+    eprintln!(
+        "ASTC multi-partition dual-plane larger-footprint parity: {compared} RGBA lanes match hardware across {} footprints x {} configs x {PER_COMBO} blocks",
+        FOOTPRINTS.len(),
+        MULTI_PART_DUAL_PLANE_SHARED.len()
+    );
+}
