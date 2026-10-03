@@ -232,6 +232,28 @@ impl Schedule {
         crate::schedule::executor::SingleThreadedExecutor::run(self, world);
     }
 
+    /// Initialise if needed, then run every system using the **parallel
+    /// conflict-graph executor** (design §8.2), dispatching compatible systems
+    /// across `pool`'s worker threads while preserving single-threaded-
+    /// equivalent results for an ambiguity-free schedule.
+    ///
+    /// Systems whose [`Access`](crate::query::Access) is pairwise compatible run
+    /// concurrently within one *wave*; exclusive (whole-world) systems run
+    /// alone. Deferred [`Commands`](crate::command::Commands) are flushed at the
+    /// end of each wave (a sync point), not after each system — so a command's
+    /// effect is visible to a later system only when an ordering edge
+    /// (`before`/`after`/`chain`) puts that system in a later wave. This differs
+    /// intentionally from [`run`](Self::run), whose single-threaded executor
+    /// applies each system's deferred effects immediately; both are valid
+    /// deferred-command semantics.
+    ///
+    /// Available only with the `multi_thread` feature.
+    #[cfg(feature = "multi_thread")]
+    pub fn run_parallel(&mut self, pool: &prism_tasks::TaskPool, world: &mut World) {
+        self.initialize(world);
+        crate::schedule::parallel_executor::MultiThreadedExecutor::run(self, pool, world);
+    }
+
     /// Evaluate (AND) all conditions configured on `set`. A set with no
     /// configured conditions is always `true`.
     pub(crate) fn eval_set_conditions(&mut self, set: SystemSetId, world: &mut World) -> bool {
@@ -253,7 +275,7 @@ impl Schedule {
     /// self-edges are dropped. Shared by [`compute_order`](Self::compute_order)
     /// and [`ambiguities`](Self::ambiguities) so both see exactly the same
     /// ordering relation.
-    fn build_edges(&self) -> hashbrown::HashSet<(usize, usize)> {
+    pub(crate) fn build_edges(&self) -> hashbrown::HashSet<(usize, usize)> {
         use hashbrown::HashSet;
 
         // Membership: set id -> member node indices.

@@ -21,13 +21,18 @@
 //! * a [`SingleThreadedExecutor`] that drives the resolved order, honouring set
 //!   and system run-conditions.
 //!
+//! * (with the `multi_thread` feature) a [`MultiThreadedExecutor`] that
+//!   partitions the resolved order into conflict-free *waves* and dispatches
+//!   each wave onto a [`prism_tasks::TaskPool`] (§8.2 conflict-graph executor,
+//!   §24.1 dispatch base), preserving the single-threaded result for
+//!   ambiguity-free schedules.
+//!
 //! # Honestly deferred
 //!
-//! The parallel conflict-graph executor and fiber job graph (§8.2–§8.3, which
-//! need `prism_tasks`) are future milestones. They are absent, not stubbed; the
-//! per-system
+//! The fiber job graph for *intra*-system chunk parallelism (§8.3) is a future
+//! milestone (M3). It is absent, not stubbed; the per-system
 //! [`Access`](crate::query::Access) recorded by the system layer already
-//! carries the information a parallel executor will need.
+//! carries the information both executors need.
 
 pub mod ambiguity;
 pub mod condition;
@@ -35,6 +40,8 @@ pub mod config;
 pub mod executor;
 pub mod graph;
 pub mod label;
+#[cfg(feature = "multi_thread")]
+pub mod parallel_executor;
 pub mod phase;
 pub mod schedules;
 pub mod set;
@@ -48,6 +55,8 @@ pub use config::{IntoSystemConfigs, SetConfig, SystemConfig, SystemConfigs};
 pub use executor::SingleThreadedExecutor;
 pub use graph::Schedule;
 pub use label::{BoxedScheduleLabel, ScheduleLabel};
+#[cfg(feature = "multi_thread")]
+pub use parallel_executor::MultiThreadedExecutor;
 pub use phase::Phase;
 pub use schedules::Schedules;
 pub use set::{SystemSet, SystemSetId};
@@ -55,3 +64,6 @@ pub use state::{apply_state_transition, in_state, NextState, OnEnter, OnExit, St
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, feature = "multi_thread"))]
+mod parallel_tests;

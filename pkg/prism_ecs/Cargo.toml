@@ -9,15 +9,19 @@ publish = false
 
 [dependencies]
 hashbrown = { version = "0.15", default-features = false, features = ["default-hasher", "inline-more"] }
+prism_tasks = { path = "../prism_tasks", optional = true }
 
 [dev-dependencies]
 prism_ecs = { path = "." }
 
 [features]
 default = ["std"]
-# Enable std-backed facilities (currently only used to light up std-only tests
-# and future multi-threaded executors). The core kernel is no_std + alloc.
+# Enable std-backed facilities (used to light up std-only tests and the
+# multi-threaded executor). The core kernel is no_std + alloc.
 std = []
+# The parallel conflict-graph executor (§8.2): dispatches conflict-free waves
+# onto a `prism_tasks` work-stealing pool. Pulls in `prism_tasks` and `std`.
+multi_thread = ["std", "dep:prism_tasks"]
 
 # NOTE: this crate intentionally does NOT inherit `[lints] workspace = true`.
 # A type-erased columnar ECS fundamentally requires `unsafe` for component

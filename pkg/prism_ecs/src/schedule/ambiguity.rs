@@ -116,22 +116,23 @@ impl Ambiguities {
     }
 }
 
-/// Core detection: given each node's [`Access`], its display name, and the
-/// resolved ordering edges `(from, to)`, report every conflicting unordered
-/// pair. The graph is assumed acyclic (the caller computes the order first,
-/// which panics on a cycle).
-pub(crate) fn detect(accesses: &[&Access], names: &[String], edges: &[(usize, usize)]) -> Ambiguities {
-    let n = accesses.len();
-    debug_assert_eq!(n, names.len());
-
+/// Build the transitive reachability matrix for the ordering edges `(from, to)`
+/// over `n` nodes. `reach[s][t]` is `true` when `t` is reachable from `s` —
+/// i.e. `s` is ordered before `t`, directly or transitively. `reach[s][s]`
+/// stays `false` because the ordering graph is acyclic (the caller computes the
+/// topological order first, which panics on a cycle).
+///
+/// Shared by [`detect`] (schedule ambiguity analysis, §23.4) and the parallel
+/// conflict-graph executor's wave assignment (§8.2) so both reason over exactly
+/// the same ordering relation.
+pub(crate) fn reachability(edges: &[(usize, usize)], n: usize) -> Vec<Vec<bool>> {
     // Adjacency list from the edge set.
     let mut adj: Vec<Vec<usize>> = alloc::vec![Vec::new(); n];
     for &(from, to) in edges {
         adj[from].push(to);
     }
 
-    // Transitive reachability per source node via iterative DFS. `reach[s][t]`
-    // is true when `t` is ordered after `s` (directly or transitively).
+    // Iterative DFS from each source, marking everything it can reach.
     let mut reach: Vec<Vec<bool>> = alloc::vec![alloc::vec![false; n]; n];
     let mut stack: Vec<usize> = Vec::new();
     for (s, row) in reach.iter_mut().enumerate() {
@@ -146,6 +147,20 @@ pub(crate) fn detect(accesses: &[&Access], names: &[String], edges: &[(usize, us
             }
         }
     }
+    reach
+}
+
+/// Core detection: given each node's [`Access`], its display name, and the
+/// resolved ordering edges `(from, to)`, report every conflicting unordered
+/// pair. The graph is assumed acyclic (the caller computes the order first,
+/// which panics on a cycle).
+pub(crate) fn detect(accesses: &[&Access], names: &[String], edges: &[(usize, usize)]) -> Ambiguities {
+    let n = accesses.len();
+    debug_assert_eq!(n, names.len());
+
+    // Transitive reachability per source node. `reach[s][t]` is true when `t`
+    // is ordered after `s` (directly or transitively).
+    let reach = reachability(edges, n);
 
     let mut pairs: Vec<Ambiguity> = Vec::new();
     for first in 0..n {
