@@ -19,7 +19,10 @@
 //! * Vulkan `VK_FORMAT_ASTC_4x4_UNORM_BLOCK`.
 
 mod bise;
+mod block_mode;
 mod block_reader;
+mod endpoints;
+mod single_partition;
 mod trit_quint;
 mod void_extent;
 mod weight_unquant;
@@ -47,9 +50,11 @@ pub enum AstcError {
 
 /// Decode a single 4x4 ASTC **LDR** block to sixteen `RGBA8` texels.
 ///
-/// Currently dispatches void-extent (constant-colour) blocks; general
-/// single-partition weighted blocks return [`AstcError::UnsupportedBlockMode`]
-/// until that milestone lands.
+/// Dispatches void-extent (constant-colour) blocks and single-partition,
+/// single-plane 4x4-grid CEM 8 (LDR direct RGB, QUANT_256) weighted blocks.
+/// Blocks outside that subset (multi-partition, dual-plane, non-4x4 grids,
+/// other CEMs or non-identity colour quantisation) return an [`AstcError`]
+/// rather than approximate pixels, until their own milestones land.
 ///
 /// # Errors
 /// Propagates [`AstcError`] from the selected decode path, or
@@ -58,6 +63,6 @@ pub fn decode_astc_4x4_ldr(block: &[u8; 16]) -> Result<[[u8; 4]; 16], AstcError>
     if void_extent::is_void_extent(block) {
         decode_astc_void_extent_ldr(block)
     } else {
-        Err(AstcError::UnsupportedBlockMode)
+        single_partition::decode_single_partition_4x4_ldr(block)
     }
 }
