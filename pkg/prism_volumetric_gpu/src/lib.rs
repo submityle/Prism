@@ -80,6 +80,8 @@ pub mod avsm_transmittance;
 pub mod backface_outline_expand;
 pub mod barrier_contact_force;
 pub mod barycentric_coord;
+pub mod bezier_patch;
+pub mod bezier_surface;
 pub mod bicubic_sample;
 pub mod billboard_atlas;
 pub mod binary_search_range;
@@ -93,10 +95,12 @@ pub mod bloom_upsample;
 pub mod boids;
 pub mod bounds;
 pub mod bresenham_line;
+pub mod bspline_patch;
 pub mod bvh;
 pub mod camera;
 pub mod capsule_capsule_closest;
 pub mod capsule_sdf;
+pub mod catmull_rom_patch;
 pub mod checkerboard_resolve;
 pub mod chromatic_aberration;
 pub mod cie_luv;
@@ -253,6 +257,7 @@ pub mod mesh_ray_contains;
 pub mod mesh_renderer;
 pub mod mesh_skinning;
 pub mod mesh_triangle_eval;
+pub mod mesh_triangle_quality;
 pub mod mg_coarsen;
 pub mod mg_divergence_gradient;
 pub mod mg_is_coarsest;
@@ -327,6 +332,7 @@ pub mod radix_sort_u32;
 pub mod raster_cluster_vis;
 pub mod raster_triangle_vis;
 pub mod raster_vis_pack;
+pub mod rational_bezier_patch;
 pub mod ray_aabb;
 pub mod ray_bilinear_patch;
 pub mod ray_capsule;
@@ -559,6 +565,8 @@ pub use barrier_contact_force::{
     BarrierContactForceQuery, BarrierContactForceResult, GpuBarrierContactForce,
 };
 pub use barycentric_coord::{BarycentricQuery, BarycentricResult, GpuBarycentricCoord};
+pub use bezier_patch::{BezierPatchQuery, BezierPatchResult, GpuBezierPatch};
+pub use bezier_surface::{BezierSurfaceQuery, BezierSurfaceResult, GpuBezierSurface};
 pub use bicubic_sample::GpuBicubicSample;
 pub use billboard_atlas::{GpuBillboardAtlas, GpuBillboardAtlasQuery, GpuBillboardAtlasResult};
 pub use binary_search_range::GpuBinarySearchRange;
@@ -575,12 +583,14 @@ pub use bloom_upsample::{BloomUpsampleQuery, GpuBloomUpsample};
 pub use boids::{BoidsQuery, BoidsResult, GpuBoids, MAX_NEIGHBORS};
 pub use bounds::{GpuBounds, GpuBoundsQuery, GpuBoundsResult, AXIS_X, AXIS_Y, AXIS_Z};
 pub use bresenham_line::{GpuBresenhamLine, GpuBresenhamQuery, GpuBresenhamResult};
+pub use bspline_patch::{BsplinePatchQuery, BsplinePatchResult, GpuBsplinePatch};
 pub use bvh::{BvhQuery, BvhResult, GpuBvh};
 pub use camera::{CameraQuery, CameraResult, GpuCamera};
 pub use capsule_capsule_closest::{
     CapsuleClosestQuery, CapsuleClosestResult, GpuCapsuleCapsuleClosest,
 };
 pub use capsule_sdf::{CapsuleSdfQuery, CapsuleSdfResult, GpuCapsuleSdf};
+pub use catmull_rom_patch::{CatmullRomPatchQuery, CatmullRomPatchResult, GpuCatmullRomPatch};
 pub use checkerboard_resolve::{CheckerboardResolveQuery, GpuCheckerboardResolve};
 pub use chromatic_aberration::{
     ChromaticAberrationQuery, ChromaticAberrationResult, GpuChromaticAberration,
@@ -820,6 +830,9 @@ pub use mesh_skinning::{GpuMeshSkinning, GpuSkinResult};
 pub use mesh_triangle_eval::{
     GpuMeshTriangleEval, GpuMeshTriangleEvalQuery, GpuMeshTriangleEvalResult,
 };
+pub use mesh_triangle_quality::{
+    GpuMeshTriangleQuality, MeshTriangleQualityQuery, MeshTriangleQualityResult,
+};
 pub use mg_coarsen::{GpuMgCoarsen, GpuMgCoarsenQuery, GpuMgCoarsenResult};
 pub use mg_divergence_gradient::{GpuDivergenceQuery, GpuMgDivergenceGradient, GpuProjectionQuery};
 pub use mg_is_coarsest::{GpuMgIsCoarsest, GpuMgIsCoarsestQuery, GpuMgIsCoarsestResult};
@@ -927,6 +940,9 @@ pub use raster_triangle_vis::{
     GpuRasterTriangleVis, RasterTriangleVisQuery, RasterTriangleVisResult,
 };
 pub use raster_vis_pack::{GpuRasterVisPack, RasterVisPackQuery, RasterVisPackResult};
+pub use rational_bezier_patch::{
+    GpuRationalBezierPatch, RationalBezierPatchQuery, RationalBezierPatchResult,
+};
 pub use ray_aabb::{GpuRayAabb, RayAabbQuery, RayAabbResult};
 pub use ray_bilinear_patch::{GpuRayBilinearPatch, RayBilinearPatchQuery, RayBilinearPatchResult};
 pub use ray_capsule::{GpuRayCapsule, RayCapsuleQuery, RayCapsuleResult};
