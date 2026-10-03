@@ -30,6 +30,7 @@
 //! `water_surface`) and mirror the `CPU` golden reference byte-for-byte.
 
 pub mod buffers;
+pub mod coupling_readback_kernel;
 pub mod dispersion_kernel;
 pub mod fft_plan;
 pub mod pipeline;
@@ -102,4 +103,9 @@ pub use dispersion_kernel::{
 pub use underwater_kernel::{
     dispatch_underwater_volume, UnderwaterParams, UNDERWATER_FROXEL_FLOATS, UNDERWATER_OUT_FLOATS,
     WATER_UNDERWATER_VOLUME_WESL,
+};
+
+pub use coupling_readback_kernel::{
+    dispatch_coupling_readback, CouplingReadbackParams, COUPLING_BODY_FLOATS,
+    COUPLING_FORCE_FLOATS, WATER_COUPLING_READBACK_WESL,
 };
