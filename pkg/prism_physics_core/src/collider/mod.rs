@@ -125,6 +125,9 @@ pub use boundary_loops::{extract_boundary_loops, BoundaryLoopParams, BoundaryLoo
 pub mod hole_fill;
 
 pub use hole_fill::{fill_boundary_loops, FillHolesParams, HoleFill};
+pub mod solidity;
+
+pub use solidity::{measure_solidity, MeshSolidity, DEFAULT_CONVEX_TOLERANCE};
 
 /// A handle into a [`ShapeRegistry`].
 ///
