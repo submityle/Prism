@@ -47,6 +47,9 @@ pub use inertia::{full_inertia_tensor, principal_axes, MeshInertia, PrincipalIne
 pub mod heightfield;
 
 pub use heightfield::{HeightField, HeightFieldRayHit};
+pub mod sdf;
+
+pub use sdf::{MeshSdf, SdfBuildParams};
 
 /// A handle into a [`ShapeRegistry`].
 ///
