@@ -19,6 +19,7 @@ mod enums;
 mod equality;
 mod lists;
 mod maps;
+mod sets;
 mod structs;
 mod tuple_structs;
 
@@ -26,6 +27,7 @@ pub use arrays::DynamicArray;
 pub use enums::{DynamicEnum, DynamicVariant};
 pub use lists::DynamicList;
 pub use maps::DynamicMap;
+pub use sets::DynamicSet;
 pub use structs::DynamicStruct;
 pub use tuple_structs::DynamicTupleStruct;
 

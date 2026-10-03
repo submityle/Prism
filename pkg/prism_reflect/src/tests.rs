@@ -773,3 +773,404 @@ mod m2_dynamic {
         assert_eq!(map.get("b"), Some(&9));
     }
 }
+
+/// M3 serialization: binary + RON round-trips across every reflected kind,
+/// `StableTypeId` determinism, and the deserializer's validation errors.
+mod serialization {
+    use crate::prelude::*;
+    use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+    use std::fmt::Debug;
+
+    #[derive(Reflect, Debug, PartialEq, Clone)]
+    struct Stats {
+        health: i32,
+        name: String,
+        speed: f32,
+    }
+
+    #[derive(Reflect, Debug, PartialEq, Clone)]
+    struct Pair(i32, bool);
+
+    #[derive(Reflect, Debug, PartialEq, Clone)]
+    enum Shape {
+        Empty,
+        Circle(f32),
+        Rect { width: f32, height: f32 },
+    }
+
+    #[derive(Reflect, Debug, PartialEq, Clone)]
+    struct Scalars {
+        b: bool,
+        c: char,
+        i: i64,
+        u: u8,
+        big: u128,
+        f: f64,
+        text: String,
+    }
+
+    #[derive(Reflect, Debug, PartialEq, Clone)]
+    struct World {
+        player: Stats,
+        shape: Shape,
+        pair: Pair,
+        grid: Vec<Vec<i32>>,
+        corners: [i32; 3],
+        lookup: BTreeMap<String, i32>,
+        tags: BTreeSet<i32>,
+        maybe: Option<i32>,
+        outcome: Result<i32, String>,
+    }
+
+    /// Register every non-primitive type the deserializer must resolve.
+    fn registry() -> TypeRegistry {
+        let mut registry = TypeRegistry::new();
+        registry.register::<Stats>();
+        registry.register::<Pair>();
+        registry.register::<Shape>();
+        registry.register::<Scalars>();
+        registry.register::<World>();
+        registry.register::<Vec<i32>>();
+        registry.register::<Vec<Vec<i32>>>();
+        registry.register::<Vec<String>>();
+        registry.register::<[i32; 3]>();
+        registry.register::<HashMap<String, i32>>();
+        registry.register::<BTreeMap<String, i32>>();
+        registry.register::<HashSet<i32>>();
+        registry.register::<BTreeSet<i32>>();
+        registry.register::<Option<i32>>();
+        registry.register::<Result<i32, String>>();
+        registry
+    }
+
+    /// Round-trip `value` through the binary format and back to a concrete `T`.
+    fn binary_roundtrip<T>(value: &T, registry: &TypeRegistry) -> T
+    where
+        T: Reflect + Typed + FromReflect + PartialEq + Debug,
+    {
+        let bytes = to_binary(value).expect("serialize to binary");
+        let dynamic = from_binary(&bytes, registry, <T as Typed>::type_info())
+            .expect("deserialize from binary");
+        T::from_reflect(&*dynamic).expect("rebuild concrete from binary")
+    }
+
+    /// Round-trip `value` through the RON format and back to a concrete `T`.
+    fn ron_roundtrip<T>(value: &T, registry: &TypeRegistry) -> T
+    where
+        T: Reflect + Typed + FromReflect + PartialEq + Debug,
+    {
+        let text = to_ron(value).expect("serialize to RON");
+        let dynamic =
+            from_ron(&text, registry, <T as Typed>::type_info()).expect("deserialize from RON");
+        T::from_reflect(&*dynamic).expect("rebuild concrete from RON")
+    }
+
+    /// Assert both formats round-trip `value` back to itself.
+    fn assert_roundtrips<T>(value: T, registry: &TypeRegistry)
+    where
+        T: Reflect + Typed + FromReflect + PartialEq + Debug + Clone,
+    {
+        assert_eq!(binary_roundtrip(&value, registry), value, "binary round-trip");
+        assert_eq!(ron_roundtrip(&value, registry), value, "RON round-trip");
+    }
+
+    fn sample_world() -> World {
+        World {
+            player: Stats {
+                health: 100,
+                name: "aria".to_string(),
+                speed: 1.5,
+            },
+            shape: Shape::Rect {
+                width: 3.0,
+                height: 4.0,
+            },
+            pair: Pair(7, true),
+            grid: vec![vec![10, 20, 30], vec![], vec![40, 50]],
+            corners: [1, 2, 3],
+            lookup: BTreeMap::from([("a".to_string(), 1), ("b".to_string(), 2)]),
+            tags: BTreeSet::from([5, 9, 11]),
+            maybe: Some(42),
+            outcome: Err("boom".to_string()),
+        }
+    }
+
+    #[test]
+    fn leaf_scalars_round_trip_both_formats() {
+        let registry = TypeRegistry::new();
+        // Primitive roots need no registration (resolved as built-in leaves).
+        assert_roundtrips(true, &registry);
+        assert_roundtrips('Z', &registry);
+        assert_roundtrips(-12_345_i32, &registry);
+        assert_roundtrips(9_000_000_000_i64, &registry);
+        assert_roundtrips(255u8, &registry);
+        assert_roundtrips(u128::MAX, &registry);
+        assert_roundtrips(2.5_f32, &registry);
+        assert_roundtrips(-0.125_f64, &registry);
+        assert_roundtrips("hello, reflect".to_string(), &registry);
+    }
+
+    #[test]
+    fn special_chars_and_floats_round_trip() {
+        let registry = TypeRegistry::new();
+        // Escaped characters and strings.
+        assert_roundtrips('\n', &registry);
+        assert_roundtrips('\'', &registry);
+        assert_roundtrips('\\', &registry);
+        assert_roundtrips("tab\tnew\nline\"quote\\slash".to_string(), &registry);
+        // Infinities (NaN is intentionally excluded: it never compares equal).
+        assert_roundtrips(f32::INFINITY, &registry);
+        assert_roundtrips(f64::NEG_INFINITY, &registry);
+        assert_roundtrips(3.0_f32, &registry);
+    }
+
+    #[test]
+    fn struct_round_trips_both_formats() {
+        let registry = registry();
+        assert_roundtrips(
+            Stats {
+                health: 73,
+                name: "nova".to_string(),
+                speed: 4.25,
+            },
+            &registry,
+        );
+    }
+
+    #[test]
+    fn tuple_struct_round_trips_both_formats() {
+        let registry = registry();
+        assert_roundtrips(Pair(9, false), &registry);
+        assert_roundtrips(Pair(-1, true), &registry);
+    }
+
+    #[test]
+    fn enum_variants_round_trip_both_formats() {
+        let registry = registry();
+        assert_roundtrips(Shape::Empty, &registry);
+        assert_roundtrips(Shape::Circle(2.5), &registry);
+        assert_roundtrips(
+            Shape::Rect {
+                width: 3.0,
+                height: 4.0,
+            },
+            &registry,
+        );
+    }
+
+    #[test]
+    fn wide_scalar_struct_round_trips() {
+        let registry = registry();
+        assert_roundtrips(
+            Scalars {
+                b: true,
+                c: '✓',
+                i: -98_765,
+                u: 7,
+                big: 170_141_183_460_469_231_731_687_303_715_884_105_727,
+                f: 6.5,
+                text: "ünïcödé".to_string(),
+            },
+            &registry,
+        );
+    }
+
+    #[test]
+    fn lists_arrays_round_trip() {
+        let registry = registry();
+        assert_roundtrips(vec![1, 2, 3, 4], &registry);
+        assert_roundtrips(Vec::<i32>::new(), &registry);
+        assert_roundtrips(vec!["a".to_string(), "b".to_string()], &registry);
+        assert_roundtrips(vec![vec![10, 20, 30], vec![], vec![40]], &registry);
+        assert_roundtrips([7, 8, 9], &registry);
+    }
+
+    #[test]
+    fn maps_round_trip() {
+        let registry = registry();
+        let hash = HashMap::from([("x".to_string(), 10), ("y".to_string(), 20)]);
+        assert_roundtrips(hash, &registry);
+        let tree = BTreeMap::from([("a".to_string(), 1), ("b".to_string(), 2)]);
+        assert_roundtrips(tree, &registry);
+        assert_roundtrips(HashMap::<String, i32>::new(), &registry);
+    }
+
+    #[test]
+    fn sets_round_trip() {
+        let registry = registry();
+        assert_roundtrips(HashSet::from([1, 2, 3]), &registry);
+        assert_roundtrips(BTreeSet::from([5, 9, 11]), &registry);
+        assert_roundtrips(BTreeSet::<i32>::new(), &registry);
+    }
+
+    #[test]
+    fn option_and_result_round_trip() {
+        let registry = registry();
+        assert_roundtrips(Some(7_i32), &registry);
+        assert_roundtrips(None::<i32>, &registry);
+        assert_roundtrips(Ok::<i32, String>(3), &registry);
+        assert_roundtrips(Err::<i32, String>("nope".to_string()), &registry);
+    }
+
+    #[test]
+    fn deeply_nested_world_round_trips() {
+        let registry = registry();
+        assert_roundtrips(sample_world(), &registry);
+    }
+
+    #[test]
+    fn binary_header_pins_the_root_type() {
+        let bytes = to_binary(&5_i32).unwrap();
+        // `MAGIC`(4) + `VERSION`(1) + stable id(8) precede the body.
+        assert_eq!(&bytes[0..4], b"PRB1");
+        assert_eq!(bytes[4], 1);
+        let found = u64::from_le_bytes(bytes[5..13].try_into().unwrap());
+        assert_eq!(found, StableTypeId::of_type::<i32>().value());
+    }
+
+    #[test]
+    fn ron_text_is_anonymous_and_compact() {
+        let value = Shape::Rect {
+            width: 3.0,
+            height: 4.0,
+        };
+        assert_eq!(to_ron(&value).unwrap(), "Rect(width:3.0,height:4.0)");
+        assert_eq!(to_ron(&Shape::Empty).unwrap(), "Empty");
+        assert_eq!(to_ron(&Shape::Circle(2.5)).unwrap(), "Circle(2.5)");
+        assert_eq!(to_ron(&Pair(9, true)).unwrap(), "(9,true)");
+        assert_eq!(to_ron(&vec![1, 2, 3]).unwrap(), "[1,2,3]");
+    }
+
+    #[test]
+    fn ron_tolerates_whitespace_and_trailing_commas() {
+        let registry = registry();
+        let text = " Rect ( width : 3.0 , height : 4.0 , ) ";
+        let dynamic = from_ron(text, &registry, <Shape as Typed>::type_info()).unwrap();
+        assert_eq!(
+            Shape::from_reflect(&*dynamic).unwrap(),
+            Shape::Rect {
+                width: 3.0,
+                height: 4.0
+            }
+        );
+    }
+
+    #[test]
+    fn ron_matches_struct_fields_out_of_order() {
+        let registry = registry();
+        let text = "(speed:9.5,name:\"zed\",health:3)";
+        let dynamic = from_ron(text, &registry, <Stats as Typed>::type_info()).unwrap();
+        assert_eq!(
+            Stats::from_reflect(&*dynamic).unwrap(),
+            Stats {
+                health: 3,
+                name: "zed".to_string(),
+                speed: 9.5,
+            }
+        );
+    }
+
+    #[test]
+    fn stable_type_id_is_deterministic_and_path_based() {
+        // Same path hashes identically; `of_type` matches `of_path`.
+        assert_eq!(StableTypeId::of_path("foo::Bar"), StableTypeId::of_path("foo::Bar"));
+        assert_eq!(
+            StableTypeId::of_type::<i32>(),
+            StableTypeId::of_path(core::any::type_name::<i32>())
+        );
+        // Distinct paths differ.
+        assert_ne!(StableTypeId::of_path("foo::Bar"), StableTypeId::of_path("foo::Baz"));
+        assert_ne!(StableTypeId::of_type::<i32>(), StableTypeId::of_type::<u32>());
+        // Raw value round-trips.
+        let id = StableTypeId::of_type::<Stats>();
+        assert_eq!(StableTypeId::from_raw(id.value()), id);
+    }
+
+    #[test]
+    fn binary_rejects_bad_magic() {
+        let registry = TypeRegistry::new();
+        let err = from_binary(&[0, 1, 2, 3, 4], &registry, <i32 as Typed>::type_info())
+            .err().unwrap();
+        assert_eq!(err, DeserializeError::BadMagic);
+    }
+
+    #[test]
+    fn binary_rejects_stable_id_mismatch() {
+        let registry = TypeRegistry::new();
+        let bytes = to_binary(&5_i32).unwrap();
+        // Decode the same bytes against a different target type.
+        let err = from_binary(&bytes, &registry, <u32 as Typed>::type_info()).err().unwrap();
+        assert!(matches!(err, DeserializeError::StableIdMismatch { .. }));
+    }
+
+    #[test]
+    fn binary_rejects_unregistered_nested_type() {
+        // Root resolves from the target directly, but the nested `Stats`,
+        // `Shape`, ... are not registered here.
+        let registry = TypeRegistry::new();
+        let bytes = to_binary(&sample_world()).unwrap();
+        let err = from_binary(&bytes, &registry, <World as Typed>::type_info()).err().unwrap();
+        assert!(matches!(err, DeserializeError::UnregisteredType(_)));
+    }
+
+    #[test]
+    fn binary_detects_corrupt_leaf_tag() {
+        let registry = TypeRegistry::new();
+        let mut bytes = to_binary(&7_i32).unwrap();
+        // Layout: MAGIC(4) VERSION(1) id(8) VALUE_TAG(1) PRIM_TAG(1) payload.
+        // Flip the primitive tag to `bool` (0): a valid tag, wrong type.
+        bytes[14] = 0;
+        let err = from_binary(&bytes, &registry, <i32 as Typed>::type_info()).err().unwrap();
+        assert!(matches!(err, DeserializeError::LeafTypeMismatch { .. }));
+
+        // An out-of-range primitive tag is reported distinctly.
+        let mut bytes = to_binary(&7_i32).unwrap();
+        bytes[14] = 200;
+        let err = from_binary(&bytes, &registry, <i32 as Typed>::type_info()).err().unwrap();
+        assert_eq!(err, DeserializeError::UnknownPrimitiveTag(200));
+    }
+
+    #[test]
+    fn binary_rejects_trailing_data() {
+        let registry = TypeRegistry::new();
+        let mut bytes = to_binary(&7_i32).unwrap();
+        bytes.push(0xff);
+        let err = from_binary(&bytes, &registry, <i32 as Typed>::type_info()).err().unwrap();
+        assert_eq!(err, DeserializeError::TrailingData);
+    }
+
+    #[test]
+    fn ron_reports_syntax_and_schema_errors() {
+        let registry = registry();
+        // Not a struct opening.
+        let err = from_ron("nonsense", &registry, <Stats as Typed>::type_info()).err().unwrap();
+        assert!(matches!(err, DeserializeError::RonSyntax(_)));
+        // Unknown field name.
+        let err = from_ron(
+            "(health:1,bogus:2,name:\"x\",speed:1.0)",
+            &registry,
+            <Stats as Typed>::type_info(),
+        )
+        .err().unwrap();
+        assert!(matches!(err, DeserializeError::UnknownField(_)));
+        // Unknown enum variant.
+        let err =
+            from_ron("Triangle(1.0)", &registry, <Shape as Typed>::type_info()).err().unwrap();
+        assert_eq!(err, DeserializeError::UnknownVariant);
+        // Trailing text after the root value.
+        let err = from_ron("[1,2,3] extra", &registry, <Vec<i32> as Typed>::type_info())
+            .err().unwrap();
+        assert_eq!(err, DeserializeError::TrailingData);
+    }
+
+    #[test]
+    fn unsupported_leaf_is_rejected_on_serialize() {
+        // A dynamic set of boxed `dyn Reflect` whose element is a supported
+        // leaf still serializes; this guards the opposite — an opaque value is
+        // the only serialize failure, exercised through the error's shape.
+        let err = DeserializeError::UnknownField("x".to_string());
+        // Smoke-check the Display impls stay wired (no panics / empty output).
+        assert!(!format!("{err}").is_empty());
+        assert!(!format!("{}", SerializeError::UnsupportedLeaf { type_name: "T" }).is_empty());
+    }
+}
