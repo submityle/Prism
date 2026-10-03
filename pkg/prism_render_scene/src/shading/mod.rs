@@ -31,6 +31,7 @@ mod runtime;
 mod shadow;
 mod sky;
 mod spec_gi;
+mod spec_denoise;
 pub mod specular_aa;
 mod ssgi;
 mod ssr;
