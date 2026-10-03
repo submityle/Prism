@@ -353,6 +353,21 @@ fn finish_signed(q: i32) -> u16 {
     sign | (mag & 0x7FFF) as u16
 }
 
+/// Finished signed intermediate as a *linear* signed integer (sign-magnitude
+/// collapsed to two's-complement) so squared error is meaningful across the
+/// sign boundary. This is the signed counterpart of the unsigned path's
+/// finished half output and is what the decoder ultimately emits for a given
+/// pre-finish intermediate `q`.
+fn finished_signed_linear(q: i32) -> i32 {
+    let fs = finish_signed(q);
+    let mag = i32::from(fs & 0x7FFF);
+    if fs & 0x8000 != 0 {
+        -mag
+    } else {
+        mag
+    }
+}
+
 /// Clamp an arbitrary half-bit pattern to the signed-representable range and
 /// return its pre-finish signed intermediate `T` (inverse of the finish scale
 /// `(|q|*31) >> 5`), preserving the sign bit.
@@ -388,8 +403,13 @@ fn nearest_index_signed(target: [i32; 3], e0: [i32; 3], e1: [i32; 3]) -> (u8, u6
     for (i, &w) in WEIGHT4.iter().enumerate() {
         let err: u64 = (0..3)
             .map(|c| {
-                let got = i64::from(interp_signed(e0[c], e1[c], w as i32));
-                let d = got - i64::from(target[c]);
+                // Compare in the decoder's *finished* output domain (as the
+                // unsigned path does via `interp_finish`), not the pre-finish
+                // intermediate, so the chosen index minimises the error the
+                // hardware actually produces.
+                let got = i64::from(finished_signed_linear(interp_signed(e0[c], e1[c], w as i32)));
+                let want = i64::from(finished_signed_linear(target[c]));
+                let d = got - want;
                 (d * d) as u64
             })
             .sum();
