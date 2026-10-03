@@ -167,6 +167,8 @@ pub use auto_collision::{
     cook_auto_collision, select_representation, AutoCollisionParams, AutoCollisionResult,
     CollisionRepresentation, ConvexHullPiece, RepresentationKind, ShellCollision,
 };
+pub mod mesh_offset;
+pub use mesh_offset::{offset_mesh, MeshOffsetParams, OffsetMesh};
 
 /// A handle into a [`ShapeRegistry`].
 ///
