@@ -1,5 +1,5 @@
 //! A [`SubApp`]: one [`World`] whose world-owned
-//! [`Schedules`](prism_ecs::schedule::Schedules) resource holds the phase
+//! [`Schedules`] resource holds the phase
 //! schedules that drive it.
 //!
 //! An [`App`](crate::app::App) owns a *main* `SubApp` and (in later
@@ -20,7 +20,7 @@ use crate::schedule::{
 };
 
 /// A self-contained unit of simulation: a [`World`] whose
-/// [`Schedules`](prism_ecs::schedule::Schedules) resource drives it.
+/// [`Schedules`] resource drives it.
 pub struct SubApp {
     /// The ECS world this sub-app simulates. Its [`Schedules`] resource owns
     /// the phase schedules.

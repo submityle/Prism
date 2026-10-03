@@ -1,14 +1,14 @@
-//! The core phase labels an [`App`] runs each startup and each frame.
+//! The core phase labels an [`App`](crate::app::App) runs each startup and each frame.
 //!
 //! # Reusing the `prism_ecs` schedule graph
 //!
-//! Unlike M0 (which hand-rolled its own label id + registry), a [`SubApp`]
+//! Unlike M0 (which hand-rolled its own label id + registry), a [`SubApp`](crate::sub_app::SubApp)
 //! now stores its phase schedules directly in the world-owned
 //! [`Schedules`](prism_ecs::schedule::Schedules) resource and runs them by
 //! label through [`World::run_schedule`](prism_ecs::world::World::run_schedule)
 //! (design §5: *"Schedule reuses the `prism_ecs` scheduling graph"*). Each
 //! core phase below is a tiny unit struct that derives the standard traits, so
-//! the blanket [`ScheduleLabel`](prism_ecs::schedule::ScheduleLabel) impl applies
+//! the blanket [`ScheduleLabel`] impl applies
 //! automatically — no bespoke id type, and user phases work the same way.
 //!
 //! # Fixed order invariant (design §21)
@@ -21,7 +21,7 @@
 //!
 //! # Honestly deferred
 //!
-//! - [`RunFixedMainLoop`] (the fixed-timestep inner loop, design §8) needs
+//! - `RunFixedMainLoop` (the fixed-timestep inner loop, design §8) needs
 //!   `prism_time` and lands in **M2**. It is intentionally **absent** from the
 //!   frame order below rather than stubbed as an empty phase that silently does
 //!   nothing — adding it before its accumulator machinery exists would be a
@@ -92,7 +92,8 @@ core_phase! {
 /// [`App::run`](crate::app::App::run) before the first frame.
 ///
 /// These are runtime markers for documentation and tests; the actual run is a
-/// straight-line sequence of concrete [`World::run_schedule`] calls in
+/// straight-line sequence of concrete
+/// [`World::run_schedule`](prism_ecs::world::World::run_schedule) calls in
 /// [`SubApp::run_startup`](crate::sub_app::SubApp::run_startup) (labels are
 /// distinct types and cannot share one array).
 pub const STARTUP_PHASES: [&str; 3] = ["PreStartup", "Startup", "PostStartup"];

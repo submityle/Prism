@@ -211,3 +211,155 @@ fn tuple_of_plugins_all_build() {
     app.add_plugins((A, B));
     assert_eq!(app.world().resource::<Marks>().0, vec!["a", "b"]);
 }
+
+// ---- states ------------------------------------------------------------
+
+use prism_ecs::schedule::{in_state, IntoSystemConfigs, NextState, OnEnter, OnExit, State, States};
+
+/// A tiny two-mode state machine used by the state tests.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+enum Mode {
+    #[default]
+    Menu,
+    Game,
+}
+impl States for Mode {}
+
+/// `insert_state` uses the deferred-entry model: no `State<S>` resource exists
+/// until the first `StateTransition` phase, and that first phase inserts the
+/// initial state and runs its `OnEnter`.
+#[test]
+fn insert_state_enters_initial_on_first_frame() {
+    let log = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+
+    let mut app = App::new();
+    app.insert_state(Mode::Menu);
+    {
+        let l = log.clone();
+        app.add_systems(OnEnter(Mode::Menu), move || {
+            l.lock().unwrap().push("enter_menu");
+        });
+    }
+
+    // Deferred: nothing is live before the first frame.
+    assert!(
+        app.world().get_resource::<State<Mode>>().is_none(),
+        "State<Mode> must not exist before the first StateTransition"
+    );
+    assert!(log.lock().unwrap().is_empty());
+
+    app.update();
+
+    assert_eq!(
+        app.world().get_resource::<State<Mode>>().map(|s| *s.get()),
+        Some(Mode::Menu),
+        "first frame installs the initial state"
+    );
+    assert_eq!(*log.lock().unwrap(), vec!["enter_menu"]);
+}
+
+/// A queued `NextState` transition runs `OnExit(old)` then `OnEnter(new)` on the
+/// next `StateTransition`, in that order, and updates `State<S>`.
+#[test]
+fn queued_transition_runs_exit_then_enter() {
+    let log = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+
+    let mut app = App::new();
+    app.insert_state(Mode::Menu);
+    for (label_mode, tag) in [(Mode::Menu, "enter_menu"), (Mode::Game, "enter_game")] {
+        let l = log.clone();
+        app.add_systems(OnEnter(label_mode), move || l.lock().unwrap().push(tag));
+    }
+    for (label_mode, tag) in [(Mode::Menu, "exit_menu"), (Mode::Game, "exit_game")] {
+        let l = log.clone();
+        app.add_systems(OnExit(label_mode), move || l.lock().unwrap().push(tag));
+    }
+
+    app.update(); // first entry -> Menu
+    assert_eq!(*log.lock().unwrap(), vec!["enter_menu"]);
+
+    app.world_mut()
+        .resource_mut::<NextState<Mode>>()
+        .set(Mode::Game);
+    app.update(); // transition Menu -> Game
+
+    assert_eq!(
+        app.world().get_resource::<State<Mode>>().map(|s| *s.get()),
+        Some(Mode::Game)
+    );
+    assert_eq!(
+        *log.lock().unwrap(),
+        vec!["enter_menu", "exit_menu", "enter_game"]
+    );
+}
+
+/// `run_if(in_state(..))` gates a system on the current mode. Because
+/// `StateTransition` runs before `Update` in a frame, a transition requested
+/// before `update()` is visible to that same frame's gated `Update` systems.
+#[test]
+fn in_state_gates_update_systems() {
+    let runs = Arc::new(AtomicU64::new(0));
+    let r = runs.clone();
+
+    let mut app = App::new();
+    app.insert_state(Mode::Menu);
+    app.add_systems(
+        Update,
+        (move || {
+            r.fetch_add(1, Ordering::Relaxed);
+        })
+        .run_if(in_state(Mode::Game)),
+    );
+
+    app.update(); // enters Menu this frame; Update gate (Game) is false
+    assert_eq!(runs.load(Ordering::Relaxed), 0, "gated out while in Menu");
+
+    app.world_mut()
+        .resource_mut::<NextState<Mode>>()
+        .set(Mode::Game);
+    app.update(); // StateTransition -> Game, then gated Update runs
+    assert_eq!(runs.load(Ordering::Relaxed), 1, "runs once now in Game");
+}
+
+/// `init_state` seeds the machine from `S::default()` (here `Mode::Menu`).
+#[test]
+fn init_state_uses_default_mode() {
+    let mut app = App::new();
+    app.init_state::<Mode>();
+    app.update();
+    assert_eq!(
+        app.world().get_resource::<State<Mode>>().map(|s| *s.get()),
+        Some(Mode::Menu)
+    );
+}
+
+/// Inserting the same state type twice wires the transition system only once
+/// (so the initial `OnEnter` fires exactly once), while re-queuing the latest
+/// initial value.
+#[test]
+fn repeated_insert_state_wires_transition_once() {
+    let enters = Arc::new(AtomicU64::new(0));
+    let e = enters.clone();
+
+    let mut app = App::new();
+    app.insert_state(Mode::Menu);
+    app.insert_state(Mode::Game); // re-queues initial as Game; no second system
+    {
+        let e = e.clone();
+        app.add_systems(OnEnter(Mode::Game), move || {
+            e.fetch_add(1, Ordering::Relaxed);
+        });
+    }
+
+    app.update();
+    assert_eq!(
+        app.world().get_resource::<State<Mode>>().map(|s| *s.get()),
+        Some(Mode::Game),
+        "latest insert_state wins as the initial mode"
+    );
+    assert_eq!(
+        enters.load(Ordering::Relaxed),
+        1,
+        "OnEnter(Game) fires exactly once (transition system not double-wired)"
+    );
+}

@@ -14,6 +14,7 @@
 //!     .run();
 //! ```
 
+use std::any::TypeId;
 use std::collections::HashSet;
 
 use prism_ecs::resource::Resource;
@@ -56,6 +57,10 @@ pub struct App {
     plugins: Vec<Box<dyn Plugin>>,
     plugin_names: HashSet<String>,
     plugins_state: PluginsState,
+    /// State types already wired into the [`StateTransition`](crate::schedule::StateTransition)
+    /// schedule, so a repeated `insert_state`/`init_state` only re-queues the
+    /// initial value instead of registering a second transition system.
+    pub(crate) initialized_states: HashSet<TypeId>,
 }
 
 impl Default for App {
@@ -104,6 +109,7 @@ impl App {
             plugins: Vec::new(),
             plugin_names: HashSet::new(),
             plugins_state: PluginsState::Adding,
+            initialized_states: HashSet::new(),
         }
     }
 

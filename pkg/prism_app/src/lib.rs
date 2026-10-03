@@ -11,8 +11,9 @@
 //!
 //! # Milestone status
 //!
-//! This crate is built in milestones (design §22). **M0 (this module set)** is
-//! the shell:
+//! This crate is built in milestones (design §22). **M0** shipped the shell;
+//! **M1 (in progress)** layers the full phase order and the state machine on
+//! top. Currently implemented:
 //!
 //! - [`App`] with a monotonic [`PluginsState`] assembly
 //!   state machine and a swappable [runner].
@@ -25,13 +26,19 @@
 //!   main-frame loop
 //!   (`First → PreUpdate → StateTransition → Update → PostUpdate → Last`), plus
 //!   a one-time startup (`PreStartup → Startup → PostStartup`).
+//! - A finite [state machine](crate::state): [`App::insert_state`] /
+//!   [`App::init_state`] wire a [`States`](prism_ecs::schedule::States) type
+//!   into the [`StateTransition`] phase, with
+//!   `OnEnter`/`OnExit` edges and the [`in_state`](prism_ecs::schedule::in_state)
+//!   run condition (design §11).
 //! - Platform-free runners: [`HeadlessRunner`] and
 //!   [`ScheduleRunnerOnce`].
 //!
-//! Everything on the M0 public surface is a **real, working implementation** —
-//! no `todo!()`, `unimplemented!()`, or hollow stubs. Later milestones (full
-//! phase order with `RunFixedMainLoop`/`StateTransition`, plugin dependency
-//! graphs and groups editing, fixed timestep, sub-app pipelining, windowed /
+//! Everything on the public surface is a **real, working implementation** —
+//! no `todo!()`, `unimplemented!()`, or hollow stubs. The remaining M1 work
+//! (buffered event updates, plugin dependency graphs with topological ordering,
+//! and `PluginGroup` reordering/disable editing) and later milestones (fixed
+//! timestep with `RunFixedMainLoop`, sub-app pipelining, windowed /
 //! dedicated-server runners, determinism) layer on top without rewriting these
 //! foundations. Deferred features are documented as absent, never faked.
 //!
@@ -53,6 +60,7 @@ pub mod plugin;
 pub mod plugin_group;
 pub mod runner;
 pub mod schedule;
+pub mod state;
 pub mod sub_app;
 
 #[cfg(test)]
