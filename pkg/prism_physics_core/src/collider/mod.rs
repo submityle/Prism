@@ -237,6 +237,8 @@ pub mod tet_fem_corotational_assembly;
 pub use tet_fem_corotational_assembly::{
     assemble_corotational_forces, assemble_corotational_stiffness,
 };
+pub mod tet_fem_block_jacobi;
+pub use tet_fem_block_jacobi::solve_implicit_system_block_jacobi;
 
 /// A handle into a [`ShapeRegistry`].
 ///
