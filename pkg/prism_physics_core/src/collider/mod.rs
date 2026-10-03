@@ -229,6 +229,10 @@ pub mod tet_fem_force_assembly;
 pub use tet_fem_force_assembly::{assemble_internal_forces, total_elastic_energy};
 pub mod tet_fem_pcg;
 pub use tet_fem_pcg::{preconditioned_conjugate_gradient, solve_implicit_system_jacobi};
+pub mod tet_fem_corotational;
+pub use tet_fem_corotational::{
+    corotational_internal_force, corotational_stiffness, element_rotation,
+};
 
 /// A handle into a [`ShapeRegistry`].
 ///
