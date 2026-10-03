@@ -18,12 +18,14 @@
 //! driven by the per-column ticks on [`Column`](crate::storage::Column).
 
 mod access;
+mod dirty;
 mod fetch;
 mod filter;
 mod iter;
 mod state;
 
 pub use access::Access;
+pub use dirty::DirtyChunk;
 pub use fetch::{QueryData, ReadOnlyQueryData};
 pub use filter::{Added, Changed, Or, QueryFilter, With, Without};
 pub use iter::QueryIter;
@@ -31,5 +33,7 @@ pub use state::QueryState;
 
 #[cfg(test)]
 mod change_detection_tests;
+#[cfg(test)]
+mod dirty_tests;
 #[cfg(test)]
 mod tests;

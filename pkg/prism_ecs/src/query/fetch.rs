@@ -174,7 +174,10 @@ unsafe impl<T: Component> QueryData for &mut T {
         let value = unsafe { &mut *col.get_ptr(row).cast::<T>() };
         // SAFETY: as above — unique access to this row's changed-tick cell.
         let changed = unsafe { &mut *col.changed_tick_ptr(row) };
-        Mut::new(value, changed, added, last_run, this_run)
+        // SAFETY: `row < len`; the raw chunk-version pointer is only written
+        // (with `this_run`) by `Mut`, never turned into an aliasing `&mut`.
+        let chunk_changed = unsafe { col.chunk_changed_ptr(row) };
+        Mut::new(value, changed, chunk_changed, added, last_run, this_run)
     }
 }
 
@@ -284,7 +287,10 @@ unsafe impl<T: Component> QueryData for Option<&mut T> {
             let value = unsafe { &mut *col.get_ptr(row).cast::<T>() };
             // SAFETY: as above — unique access to this row's changed-tick cell.
             let changed = unsafe { &mut *col.changed_tick_ptr(row) };
-            Mut::new(value, changed, added, last_run, this_run)
+            // SAFETY: `row < len`; the raw chunk-version pointer is only written
+            // (with `this_run`) by `Mut`, never turned into an aliasing `&mut`.
+            let chunk_changed = unsafe { col.chunk_changed_ptr(row) };
+            Mut::new(value, changed, chunk_changed, added, last_run, this_run)
         })
     }
 }

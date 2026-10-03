@@ -7,7 +7,9 @@
 //! change-versions, SparseSet columns, and SIMD iteration (design §6).
 
 mod blob_vec;
+mod chunk;
 mod table;
 
 pub use blob_vec::BlobVec;
+pub use chunk::{rows_per_chunk, ChunkVersions, TARGET_CHUNK_BYTES};
 pub use table::{Column, Table};

@@ -17,6 +17,7 @@ use crate::collections::HashMap;
 use crate::component::{ComponentId, DropFn};
 use crate::entity::Entity;
 use crate::storage::blob_vec::BlobVec;
+use crate::storage::chunk::{rows_per_chunk, ChunkVersions};
 
 /// A single type-erased component column within a [`Table`].
 ///
@@ -33,6 +34,11 @@ pub struct Column {
     data: BlobVec,
     added_ticks: Vec<UnsafeCell<Tick>>,
     changed_ticks: Vec<UnsafeCell<Tick>>,
+    /// Coarse per-chunk changed-versions (design §7/§10). Each cell upper-bounds
+    /// the newest `changed_ticks` entry in its row window, letting a query skip
+    /// an entire unchanged window without touching per-row ticks. Kept in
+    /// lockstep with the row count by the same push/replace/swap-remove paths.
+    chunk: ChunkVersions,
 }
 
 // SAFETY: `UnsafeCell<Tick>` makes `Column` `!Sync` by default. The tick cells
@@ -43,11 +49,12 @@ pub struct Column {
 unsafe impl Sync for Column {}
 
 impl Column {
-    fn new(layout: Layout, drop: Option<DropFn>) -> Self {
+    fn new(layout: Layout, drop: Option<DropFn>, rows_per_chunk: usize) -> Self {
         Self {
             data: BlobVec::new(layout, drop),
             added_ticks: Vec::new(),
             changed_ticks: Vec::new(),
+            chunk: ChunkVersions::new(rows_per_chunk),
         }
     }
 
@@ -109,6 +116,7 @@ impl Column {
         unsafe { self.data.push(value) }
         self.added_ticks.push(UnsafeCell::new(change_tick));
         self.changed_ticks.push(UnsafeCell::new(change_tick));
+        self.chunk.on_push(self.data.len(), change_tick);
     }
 
     /// Overwrite the value at `row`, dropping the previous one (last-wins), and
@@ -124,6 +132,7 @@ impl Column {
         // SAFETY: forwarded contract.
         unsafe { self.data.replace(row, value) }
         *self.changed_ticks[row].get_mut() = change_tick;
+        self.chunk.bump_row(row, change_tick);
     }
 
     /// The tick at which the value at `row` was first added.
@@ -170,6 +179,41 @@ impl Column {
         self.changed_ticks[row].get()
     }
 
+    /// Raw pointer to the per-chunk changed-version cell owning `row`, for
+    /// interior-mutable stamping through a shared `&Column` (the coarse half of
+    /// the `&mut T` / `Mut<T>` fetch's write; see [`ChunkVersions`]).
+    ///
+    /// # Safety
+    /// `row < len()` and the caller must hold unique access to this row (the
+    /// same discipline as [`Column::changed_tick_ptr`]). The pointer must only
+    /// be written with `this_run`, which upholds the chunk upper-bound invariant.
+    #[inline]
+    pub unsafe fn chunk_changed_ptr(&self, row: usize) -> *mut Tick {
+        // SAFETY: forwarded contract (`row < len`, unique access to the row).
+        unsafe { self.chunk.chunk_changed_ptr(row) }
+    }
+
+    /// The changed-version of chunk `chunk` within this column.
+    ///
+    /// # Panics
+    /// Panics if `chunk >= chunk_count()`.
+    #[inline]
+    pub fn chunk_version(&self, chunk: usize) -> Tick {
+        self.chunk.version(chunk)
+    }
+
+    /// Number of logical chunk windows this column currently spans.
+    #[inline]
+    pub fn chunk_count(&self) -> usize {
+        self.chunk.chunk_count()
+    }
+
+    /// Rows per logical chunk window (constant for the column's lifetime).
+    #[inline]
+    pub fn rows_per_chunk(&self) -> usize {
+        self.chunk.rows_per_chunk()
+    }
+
     /// Stamp the changed tick of the value at `row` (used by structural writes
     /// that already hold `&mut Column`, e.g. [`crate::world::World::get_mut`]).
     ///
@@ -178,6 +222,7 @@ impl Column {
     #[inline]
     pub fn set_changed_tick(&mut self, row: usize, change_tick: Tick) {
         *self.changed_ticks[row].get_mut() = change_tick;
+        self.chunk.bump_row(row, change_tick);
     }
 
     /// Clamp every stored tick against `this_run` so none can wrap around and
@@ -189,6 +234,7 @@ impl Column {
         for cell in &mut self.changed_ticks {
             cell.get_mut().check_tick(this_run);
         }
+        self.chunk.check_ticks(this_run);
     }
 }
 
@@ -196,19 +242,48 @@ impl Column {
 pub struct Table {
     entities: Vec<Entity>,
     columns: HashMap<ComponentId, Column>,
+    /// Shared logical chunk window size for every column (design §7). Stored on
+    /// the table so chunk-index/row-window math is identical across columns.
+    rows_per_chunk: usize,
 }
 
 impl Table {
     /// Create an empty table with a column per `(id, layout, drop)` descriptor.
+    ///
+    /// The logical chunk window size (rows per chunk, design §5.3/§7) is derived
+    /// from the combined per-row byte size of all columns so one chunk's worth
+    /// of a row is roughly [`TARGET_CHUNK_BYTES`](crate::storage::TARGET_CHUNK_BYTES).
+    /// The *same* window size is handed to every column, so chunk index `c` maps
+    /// to the identical row range `[c * rpc, (c + 1) * rpc)` across all columns —
+    /// the invariant the dirty-chunk accessor relies on to slice a whole table
+    /// row-window at once.
     pub fn new(columns: impl IntoIterator<Item = (ComponentId, Layout, Option<DropFn>)>) -> Self {
+        let descriptors: Vec<(ComponentId, Layout, Option<DropFn>)> = columns.into_iter().collect();
+        let bytes_per_row: usize = descriptors.iter().map(|(_, layout, _)| layout.size()).sum();
+        let rpc = rows_per_chunk(bytes_per_row);
         let mut map = HashMap::default();
-        for (id, layout, drop) in columns {
-            map.insert(id, Column::new(layout, drop));
+        for (id, layout, drop) in descriptors {
+            map.insert(id, Column::new(layout, drop, rpc));
         }
         Self {
             entities: Vec::new(),
             columns: map,
+            rows_per_chunk: rpc,
         }
+    }
+
+    /// Rows per logical chunk window, shared by every column (design §7).
+    #[inline]
+    pub fn rows_per_chunk(&self) -> usize {
+        self.rows_per_chunk
+    }
+
+    /// Number of logical chunk windows spanning the current rows
+    /// (`ceil(len / rows_per_chunk)`), i.e. the valid chunk-index range for
+    /// [`Table::column`]-level chunk-version queries.
+    #[inline]
+    pub fn chunk_count(&self) -> usize {
+        self.entities.len().div_ceil(self.rows_per_chunk)
     }
 
     /// Number of rows (live entities) in the table.
@@ -366,8 +441,12 @@ impl Column {
         unsafe { self.data.push_from(&src.data, src_row) }
         self.added_ticks
             .push(UnsafeCell::new(src.added_tick(src_row)));
-        self.changed_ticks
-            .push(UnsafeCell::new(src.changed_tick(src_row)));
+        let moved_changed = src.changed_tick(src_row);
+        self.changed_ticks.push(UnsafeCell::new(moved_changed));
+        // A relocation preserves the value's identity, so its changed tick
+        // carries over unchanged; fold it into the destination chunk so the
+        // upper-bound invariant holds for the grown window.
+        self.chunk.on_push(self.data.len(), moved_changed);
     }
 
     /// Swap-remove and drop the value at `row`, keeping the tick vectors in
@@ -376,10 +455,14 @@ impl Column {
     /// # Safety
     /// `row < len()`; the value at `row` is still owned by this column.
     unsafe fn data_swap_remove_and_drop(&mut self, row: usize) {
+        let last = self.changed_ticks.len() - 1;
+        let moved_changed = self.changed_tick(last);
         // SAFETY: forwarded contract from `Table::swap_remove_row`.
         unsafe { self.data.swap_remove_and_drop(row) }
         self.added_ticks.swap_remove(row);
         self.changed_ticks.swap_remove(row);
+        self.chunk
+            .on_swap_remove(row, self.changed_ticks.len(), moved_changed);
     }
 
     /// Swap-remove the value at `row` without dropping it, keeping the tick
@@ -389,10 +472,14 @@ impl Column {
     /// `row < len()`; the value at `row` must already have been moved out, so
     /// forgetting it here avoids a double drop.
     unsafe fn data_swap_remove_forget(&mut self, row: usize) {
+        let last = self.changed_ticks.len() - 1;
+        let moved_changed = self.changed_tick(last);
         // SAFETY: forwarded contract; the value at `row` was already moved out,
         // so swapping the last element over it (without drop) leaves one owner.
         unsafe { self.data.swap_remove_forget(row) }
         self.added_ticks.swap_remove(row);
         self.changed_ticks.swap_remove(row);
+        self.chunk
+            .on_swap_remove(row, self.changed_ticks.len(), moved_changed);
     }
 }
