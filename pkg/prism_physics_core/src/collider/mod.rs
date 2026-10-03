@@ -227,6 +227,8 @@ pub mod tet_fem_internal_force;
 pub use tet_fem_internal_force::{element_energy, element_internal_force};
 pub mod tet_fem_force_assembly;
 pub use tet_fem_force_assembly::{assemble_internal_forces, total_elastic_energy};
+pub mod tet_fem_pcg;
+pub use tet_fem_pcg::{preconditioned_conjugate_gradient, solve_implicit_system_jacobi};
 
 /// A handle into a [`ShapeRegistry`].
 ///
