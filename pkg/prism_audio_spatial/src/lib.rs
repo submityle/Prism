@@ -52,6 +52,7 @@ pub mod air;
 pub mod ambisonics;
 pub mod articulation_loss;
 pub mod attenuation;
+pub mod band_spectrum;
 pub mod center_time;
 pub mod cone;
 pub mod convex_room;
@@ -109,6 +110,10 @@ pub use articulation_loss::{
     articulation_loss_percent,
 };
 pub use attenuation::{Attenuation, DistanceModel};
+pub use band_spectrum::{
+    BandGains, PROPAGATION_BAND_CENTERS, PROPAGATION_BAND_COUNT, PROPAGATION_BAND_EDGES,
+    PROPAGATION_BAND_HIGH_HZ, PROPAGATION_BAND_LOW_HZ,
+};
 pub use center_time::{CenterTime, center_time_ms, center_time_seconds};
 pub use cone::Cone;
 pub use convex_room::{
