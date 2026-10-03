@@ -184,6 +184,59 @@ impl ModulationRate {
     }
 }
 
+/// Propagation-backend tier the governor selects per voice under the CPU
+/// budget, following design section 43's hybrid-propagation ladder.
+///
+/// The tiers trade physical fidelity for cost. A geometric ray model is cheap
+/// and fully dynamic but inaccurate for low frequencies and diffraction. A
+/// baked wave field is a cheap runtime table lookup that is physically correct
+/// for low-frequency, diffraction, soft-occlusion, room-coupling, and
+/// reverb-tail behaviour but static. The hybrid tier runs both and crossfades
+/// their shared parameters so the wave field supplies the baseline while
+/// geometric rays add the dynamic high-frequency increment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
+pub enum PropagationTier {
+    /// Geometric ray propagation only (fully dynamic, no baked data).
+    Geometric,
+    /// Baked wave-field lookup only (cheapest at runtime, static physics).
+    Wave,
+    /// Wave-field baseline plus a geometric dynamic increment (richest).
+    Hybrid,
+}
+
+impl PropagationTier {
+    /// Relative CPU cost of this tier in `[0, 1]`, normalised so `Hybrid` is
+    /// `1.0`. The wave tier is a cheap runtime table lookup; the geometric tier
+    /// traces dynamic rays; the hybrid tier pays for both the lookup and the
+    /// geometric increment.
+    #[must_use]
+    #[inline]
+    pub fn relative_cost(self) -> Sample {
+        match self {
+            PropagationTier::Wave => 0.25,
+            PropagationTier::Geometric => 0.5,
+            PropagationTier::Hybrid => 1.0,
+        }
+    }
+
+    /// Whether this tier consumes the baked wave field for its baseline
+    /// (low-frequency, diffraction, soft occlusion, room coupling, reverb tail).
+    #[must_use]
+    #[inline]
+    pub fn uses_wave_field(self) -> bool {
+        matches!(self, PropagationTier::Wave | PropagationTier::Hybrid)
+    }
+
+    /// Whether this tier adds a dynamic geometric increment on top of its
+    /// baseline (high-frequency specular paths, dynamic occlusion, Doppler).
+    #[must_use]
+    #[inline]
+    pub fn uses_geometric_increment(self) -> bool {
+        matches!(self, PropagationTier::Geometric | PropagationTier::Hybrid)
+    }
+}
+
 /// Highest Ambisonic order considered rich enough to never be exceeded by the
 /// ladder. Third order is a common production ceiling for interactive audio.
 pub const MAX_HOA_ORDER: u8 = 3;
@@ -202,6 +255,9 @@ pub struct LodProfile {
     pub hoa_order: u8,
     /// Modulation/automation control rate.
     pub modulation: ModulationRate,
+    /// Propagation-backend tier (geometric / wave / hybrid) selected for the
+    /// source's spatial propagation.
+    pub propagation: PropagationTier,
     /// Effective-importance level below which a voice is virtualised. Rises as
     /// budget tightens so more low-contribution voices are culled.
     pub virtualization_threshold: Importance,
@@ -228,9 +284,10 @@ impl LodProfile {
         let sum = self.oversampling.relative_cost()
             + self.reverb.relative_cost()
             + self.spatial.relative_cost()
+            + self.propagation.relative_cost()
             + self.modulation.relative_cost()
             + hoa;
-        sum / 5.0
+        sum / 6.0
     }
 }
 
@@ -279,6 +336,7 @@ impl QualityLadder {
                 spatial: SpatialMode::Stereo,
                 hoa_order: 0,
                 modulation: ModulationRate::PerBlock,
+                propagation: PropagationTier::Geometric,
                 virtualization_threshold: 0.5,
             },
             // Tier 1.
@@ -288,6 +346,7 @@ impl QualityLadder {
                 spatial: SpatialMode::Vbap,
                 hoa_order: 1,
                 modulation: ModulationRate::PerBlock,
+                propagation: PropagationTier::Geometric,
                 virtualization_threshold: 0.35,
             },
             // Tier 2.
@@ -297,6 +356,7 @@ impl QualityLadder {
                 spatial: SpatialMode::Vbap,
                 hoa_order: 2,
                 modulation: ModulationRate::PerBlock,
+                propagation: PropagationTier::Wave,
                 virtualization_threshold: 0.2,
             },
             // Tier 3.
@@ -306,6 +366,7 @@ impl QualityLadder {
                 spatial: SpatialMode::Hrtf,
                 hoa_order: 2,
                 modulation: ModulationRate::PerSample,
+                propagation: PropagationTier::Hybrid,
                 virtualization_threshold: 0.1,
             },
             // Tier 4: reference quality -- keep nearly everything audible.
@@ -315,6 +376,7 @@ impl QualityLadder {
                 spatial: SpatialMode::Hrtf,
                 hoa_order: 3,
                 modulation: ModulationRate::PerSample,
+                propagation: PropagationTier::Hybrid,
                 virtualization_threshold: 0.03,
             },
         ];
@@ -405,6 +467,38 @@ mod tests {
     #[test]
     fn modulation_rate_cost() {
         assert!(ModulationRate::PerBlock.relative_cost() < ModulationRate::PerSample.relative_cost());
+    }
+
+    #[test]
+    fn propagation_tier_cost_ranks_wave_cheapest_hybrid_dearest() {
+        // The baked wave lookup is the cheapest at runtime, a dynamic geometric
+        // trace is dearer, and the hybrid tier that runs both is the most
+        // expensive.
+        assert!(PropagationTier::Wave.relative_cost() < PropagationTier::Geometric.relative_cost());
+        assert!(PropagationTier::Geometric.relative_cost() < PropagationTier::Hybrid.relative_cost());
+        assert!((PropagationTier::Hybrid.relative_cost() - 1.0).abs() < EPS);
+    }
+
+    #[test]
+    fn propagation_tier_backend_composition() {
+        // Geometric uses only the dynamic increment; wave uses only the baked
+        // field; hybrid uses both.
+        assert!(!PropagationTier::Geometric.uses_wave_field());
+        assert!(PropagationTier::Geometric.uses_geometric_increment());
+        assert!(PropagationTier::Wave.uses_wave_field());
+        assert!(!PropagationTier::Wave.uses_geometric_increment());
+        assert!(PropagationTier::Hybrid.uses_wave_field());
+        assert!(PropagationTier::Hybrid.uses_geometric_increment());
+    }
+
+    #[test]
+    fn standard_ladder_enriches_propagation_with_tier() {
+        // The cheapest rung runs geometric-only; the reference rung runs the
+        // hybrid backend; and the baked wave field is engaged before the top.
+        let ladder = QualityLadder::standard();
+        assert_eq!(ladder.profile(QualityTier(0)).propagation, PropagationTier::Geometric);
+        assert_eq!(ladder.profile(QualityTier(4)).propagation, PropagationTier::Hybrid);
+        assert!(ladder.profile(QualityTier(2)).propagation.uses_wave_field());
     }
 
     #[test]

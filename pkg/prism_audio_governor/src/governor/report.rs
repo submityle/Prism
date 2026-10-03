@@ -55,6 +55,8 @@ pub struct LodSavings {
     pub reverb: Sample,
     /// Savings from cheaper spatialisation.
     pub spatial: Sample,
+    /// Savings from a cheaper propagation-backend tier.
+    pub propagation: Sample,
     /// Savings from a coarser modulation/automation rate.
     pub modulation: Sample,
 }
@@ -67,15 +69,17 @@ impl LodSavings {
             oversampling: 1.0 - profile.oversampling.relative_cost(),
             reverb: 1.0 - profile.reverb.relative_cost(),
             spatial: 1.0 - profile.spatial.relative_cost(),
+            propagation: 1.0 - profile.propagation.relative_cost(),
             modulation: 1.0 - profile.modulation.relative_cost(),
         }
     }
 
-    /// Returns the mean savings across the four dimensions, a single headline
+    /// Returns the mean savings across the five dimensions, a single headline
     /// number for the profiler.
     #[must_use]
     pub fn mean(&self) -> Sample {
-        (self.oversampling + self.reverb + self.spatial + self.modulation) / 4.0
+        (self.oversampling + self.reverb + self.spatial + self.propagation + self.modulation)
+            / 5.0
     }
 }
 
@@ -149,6 +153,7 @@ mod tests {
             reverb: ReverbQuality::Low,
             spatial: SpatialMode::Stereo,
             hoa_order: 0,
+            propagation: crate::governor::lod::PropagationTier::Geometric,
             modulation: crate::governor::lod::ModulationRate::PerBlock,
             virtualization_threshold: 0.5,
         };
