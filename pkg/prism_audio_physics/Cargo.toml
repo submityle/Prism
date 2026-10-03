@@ -1,0 +1,41 @@
+[package]
+name = "prism_audio_physics"
+version = "0.1.0"
+edition = "2024"
+description = "Physics-engine coupling bridge for Prism's next-generation audio engine (design section 47): translates rigid-body contact manifolds, kinematics, and collision start/persist/end facts into sample-accurate procedural contact drive (impact/sustain/separation events), with deterministic impulse estimation, near-coincident merge, far-impact clustering, and acoustic material resolution. Classic deterministic DSP driven by physics truth, no AI/ML. Contains no Unreal Engine, Unity, Godot, Wwise, FMOD, Steam Audio, Dolby, or Google Resonance Audio source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_audio_core = { path = "../prism_audio_core" }
+prism_audio_procedural = { path = "../prism_audio_procedural" }
+bevy_math = { path = "../../crates/bevy_math", default-features = false, features = [
+  "nostd-libm",
+] }
+prism_physics_core = { path = "../prism_physics_core", optional = true }
+serde = { version = "1", default-features = false, features = [
+  "derive",
+], optional = true }
+
+[dev-dependencies]
+prism_audio_physics = { path = ".", features = ["serialize"] }
+
+[features]
+default = ["std"]
+std = [
+  "prism_audio_core/std",
+  "prism_audio_procedural/std",
+  "bevy_math/std",
+]
+serialize = [
+  "dep:serde",
+  "prism_audio_core/serialize",
+  "prism_audio_procedural/serialize",
+  "bevy_math/serialize",
+]
+# Concrete adapters that read `prism_physics_core` contact manifolds and
+# physics events. Pulls in the std physics core, so it implies `std`.
+physics-core = ["std", "dep:prism_physics_core"]
+
+[lints]
+workspace = true
