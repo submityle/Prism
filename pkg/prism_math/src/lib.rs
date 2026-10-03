@@ -18,8 +18,11 @@
 //! - **M2 (this crate, done):** geometry primitives ([`geom`]), intersection
 //!   and culling queries ([`intersect`]), and interpolation/easing/spline
 //!   helpers ([`curve`]), cross-checked against analytic references.
-//! - **M3+ (planned):** `f64` big-world, `fixed` determinism, and the
-//!   color/rand/noise toolboxes.
+//! - **M3 (this crate, done):** `f64` big-world types ([`f64`] module:
+//!   `DVec*/DMat*/DQuat/DAffine3`) plus grid-cell origin rebasing
+//!   ([`bigworld`]) for jitter-free coordinates out to ±100 km.
+//! - **M4+ (planned):** `fixed` determinism and the color/rand/noise
+//!   toolboxes.
 //!
 //! The scalar backend here is the behavioural reference that later SIMD
 //! backends must match within documented tolerances.
@@ -33,6 +36,8 @@
 
 mod affine;
 mod backend;
+mod bigworld;
+mod f64;
 mod float;
 mod mat;
 mod quat;
@@ -50,6 +55,11 @@ pub use vec::{Vec2, Vec3, Vec3A, Vec4, vec2, vec3, vec3a, vec4};
 
 pub use geom::{Aabb3, BoundingSphere, Frustum, Plane, Ray3, Segment3};
 pub use intersect::{Containment, RayHit};
+
+pub use self::bigworld::{GridCell, GridPosition};
+pub use self::f64::{
+    DAffine3, DMat2, DMat3, DMat4, DQuat, DVec2, DVec3, DVec4, dvec2, dvec3, dvec4,
+};
 
 /// Mathematical constant helpers (`f32`).
 pub mod consts {
@@ -147,9 +157,10 @@ fn detect_wasm_simd() -> bool {
 /// Glob-import the common types and helpers.
 pub mod prelude {
     pub use crate::{
-        Aabb3, Affine3, Backend, BoundingSphere, Containment, Frustum, Mat2, Mat3, Mat4, MathCaps,
-        Plane, Quat, Ray3, RayHit, Segment3, Vec2, Vec3, Vec3A, Vec4, consts, curve, geom,
-        intersect, lerp, to_degrees, to_radians, vec2, vec3, vec3a, vec4,
+        Aabb3, Affine3, Backend, BoundingSphere, Containment, DAffine3, DMat2, DMat3, DMat4, DQuat,
+        DVec2, DVec3, DVec4, Frustum, GridCell, GridPosition, Mat2, Mat3, Mat4, MathCaps, Plane,
+        Quat, Ray3, RayHit, Segment3, Vec2, Vec3, Vec3A, Vec4, consts, curve, dvec2, dvec3, dvec4,
+        geom, intersect, lerp, to_degrees, to_radians, vec2, vec3, vec3a, vec4,
     };
 }
 
@@ -157,3 +168,5 @@ pub mod prelude {
 mod tests;
 #[cfg(test)]
 mod m2_tests;
+#[cfg(test)]
+mod m3_tests;

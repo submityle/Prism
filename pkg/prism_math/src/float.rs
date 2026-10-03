@@ -71,3 +71,67 @@ pub mod f32 {
         (sin(x), cos(x))
     }
 }
+
+/// `f64` scalar math used by the big-world (M3) facade. Mirrors [`f32`] but at
+/// double precision, routed through `libm` so the core facade stays `no_std`
+/// and deterministic across `std`/`no_std` builds.
+pub mod f64 {
+    #[inline]
+    pub fn sqrt(x: f64) -> f64 {
+        libm::sqrt(x)
+    }
+    #[inline]
+    pub fn sin(x: f64) -> f64 {
+        libm::sin(x)
+    }
+    #[inline]
+    pub fn cos(x: f64) -> f64 {
+        libm::cos(x)
+    }
+    #[inline]
+    pub fn tan(x: f64) -> f64 {
+        libm::tan(x)
+    }
+    #[inline]
+    pub fn asin(x: f64) -> f64 {
+        libm::asin(x)
+    }
+    #[inline]
+    pub fn acos(x: f64) -> f64 {
+        libm::acos(x)
+    }
+    #[inline]
+    pub fn atan2(y: f64, x: f64) -> f64 {
+        libm::atan2(y, x)
+    }
+    #[inline]
+    pub fn abs(x: f64) -> f64 {
+        libm::fabs(x)
+    }
+    #[inline]
+    pub fn copysign(x: f64, sign: f64) -> f64 {
+        libm::copysign(x, sign)
+    }
+    #[inline]
+    pub fn floor(x: f64) -> f64 {
+        libm::floor(x)
+    }
+    #[inline]
+    pub fn ceil(x: f64) -> f64 {
+        libm::ceil(x)
+    }
+    #[inline]
+    pub fn round(x: f64) -> f64 {
+        libm::round(x)
+    }
+    #[inline]
+    pub fn powf(x: f64, y: f64) -> f64 {
+        libm::pow(x, y)
+    }
+
+    /// `sin` and `cos` evaluated together (M3 computes them separately).
+    #[inline]
+    pub fn sin_cos(x: f64) -> (f64, f64) {
+        (sin(x), cos(x))
+    }
+}
