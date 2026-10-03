@@ -11,3 +11,6 @@
 
 #[cfg(test)]
 mod shader_tests;
+
+#[cfg(test)]
+mod reservoir_tests;
