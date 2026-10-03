@@ -39,6 +39,7 @@ pub mod surface_bindings;
 pub mod surface_mesh;
 pub mod surface_pass;
 pub mod swe_kernel;
+pub mod underwater_kernel;
 pub mod waterline_kernel;
 
 pub use buffers::{
@@ -96,4 +97,9 @@ pub use surface_pass::{
 pub use dispersion_kernel::{
     dispatch_dispersion_refract, DispersionRefractParams, DISPERSION_GBUFFER_FLOATS,
     DISPERSION_OUT_FLOATS, DISPERSION_SCENE_FLOATS, WATER_DISPERSION_REFRACT_WESL,
+};
+
+pub use underwater_kernel::{
+    dispatch_underwater_volume, UnderwaterParams, UNDERWATER_FROXEL_FLOATS, UNDERWATER_OUT_FLOATS,
+    WATER_UNDERWATER_VOLUME_WESL,
 };
