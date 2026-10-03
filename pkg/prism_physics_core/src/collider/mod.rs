@@ -26,6 +26,9 @@ pub use hull::convex_hull;
 pub mod decompose;
 
 pub use decompose::{convex_decompose, DecompositionParams};
+pub mod simplify;
+
+pub use simplify::{simplify_convex_hull, SimplifiedHull};
 
 /// A handle into a [`ShapeRegistry`].
 ///
