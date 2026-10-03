@@ -201,6 +201,10 @@ pub mod tet_vertex_coloring;
 pub use tet_vertex_coloring::{
     colour_tet_vertex_graph, colour_tet_vertices, TetVertexColoring,
 };
+pub mod tet_vertex_reorder;
+pub use tet_vertex_reorder::{
+    reorder_tet_vertex_graph, reorder_tet_vertices, vertex_bandwidth, TetVertexReorder,
+};
 
 /// A handle into a [`ShapeRegistry`].
 ///
