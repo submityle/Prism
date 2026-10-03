@@ -222,6 +222,24 @@ impl Entities {
         }
     }
 
+    /// Collect every live entity whose location is still the
+    /// [`EntityLocation::EMPTY`] sentinel (design §14 restore): after a
+    /// [`restore_state`](Entities::restore_state) + table rebuild, these are the
+    /// component-less live entities a snapshot did not capture a column for, and
+    /// the world re-materialises them into the empty archetype.
+    pub(crate) fn live_unplaced(&self) -> Vec<Entity> {
+        let mut out = Vec::new();
+        for (index, meta) in self.meta.iter().enumerate() {
+            if meta.alive && meta.location.is_empty() {
+                out.push(Entity {
+                    index: index as u32,
+                    generation: meta.generation,
+                });
+            }
+        }
+        out
+    }
+
     /// Record a new storage location for a live entity.
     ///
     /// # Panics
@@ -339,6 +357,84 @@ impl Entities {
             });
         }
         self.len += reserved as u32;
+    }
+
+    /// Capture the allocator's per-slot generation/liveness and free list as an
+    /// opaque [`EntitiesState`], for world snapshotting (design §14/§16.5).
+    ///
+    /// Storage *locations* are deliberately omitted: on
+    /// [`restore_state`](Entities::restore_state) they are reset to
+    /// [`EntityLocation::EMPTY`] and re-stamped as the archetype tables are
+    /// rebuilt, so a snapshot stays valid regardless of row ordering.
+    ///
+    /// # Panics
+    /// Panics (debug) if there are outstanding reservations; flush first.
+    pub(crate) fn capture_state(&self) -> EntitiesState {
+        debug_assert_eq!(
+            self.reserved.load(Ordering::Relaxed),
+            0,
+            "capture_state() called with outstanding reservations; flush() first"
+        );
+        EntitiesState {
+            slots: self
+                .meta
+                .iter()
+                .map(|m| SlotState {
+                    generation: m.generation,
+                    alive: m.alive,
+                })
+                .collect(),
+            free: self.free.clone(),
+            len: self.len,
+        }
+    }
+
+    /// Overwrite the allocator from a previously
+    /// [`capture`](Entities::capture_state)d [`EntitiesState`], restoring exact
+    /// per-slot generations, liveness, and free list (design §14/§16.5).
+    ///
+    /// Every live slot is given an [`EntityLocation::EMPTY`] location; callers
+    /// re-stamp real locations via [`set_location`](Entities::set_location) as
+    /// they repopulate the archetype tables. Any outstanding reservations are
+    /// cleared.
+    pub(crate) fn restore_state(&mut self, state: &EntitiesState) {
+        self.meta.clear();
+        self.meta.reserve(state.slots.len());
+        for slot in &state.slots {
+            self.meta.push(EntityMeta {
+                generation: slot.generation,
+                location: EntityLocation::EMPTY,
+                alive: slot.alive,
+            });
+        }
+        self.free.clone_from(&state.free);
+        self.len = state.len;
+        *self.reserved.get_mut() = 0;
+    }
+}
+
+/// Per-slot generation + liveness captured by [`Entities::capture_state`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct SlotState {
+    generation: NonZeroU32,
+    alive: bool,
+}
+
+/// An opaque, owned snapshot of an [`Entities`] allocator's slot generations
+/// and free list (design §14/§16.5). Produced by
+/// [`Entities::capture_state`] and consumed by [`Entities::restore_state`].
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct EntitiesState {
+    slots: Vec<SlotState>,
+    free: Vec<u32>,
+    len: u32,
+}
+
+impl EntitiesState {
+    /// The number of live entities this captured allocator state represents.
+    #[inline]
+    pub(crate) fn live_len(&self) -> u32 {
+        self.len
     }
 }
 

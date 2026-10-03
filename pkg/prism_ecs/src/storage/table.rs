@@ -151,6 +151,27 @@ impl Column {
         self.chunk.on_push(self.data.len(), change_tick);
     }
 
+    /// Append a value by moving its bytes from `value`, stamping its added and
+    /// changed ticks *independently* with `added` and `changed`.
+    ///
+    /// Unlike [`Column::push`] (which stamps a brand-new value with a single
+    /// tick for both), this preserves the exact original tick pair of a value
+    /// being re-materialized, so a world [`restore`](crate::World::restore)
+    /// reproduces change-detection state bit-for-bit (design §14).
+    ///
+    /// # Safety
+    /// `value` points to a valid, initialized value of this column's type;
+    /// ownership transfers into the column.
+    #[inline]
+    pub unsafe fn push_with_ticks(&mut self, value: *const u8, added: Tick, changed: Tick) {
+        // SAFETY: forwarded contract.
+        unsafe { self.data.push(value) }
+        self.added_ticks.push(UnsafeCell::new(added));
+        self.changed_ticks.push(UnsafeCell::new(changed));
+        // Coarse per-chunk version upper-bounds the newest changed tick.
+        self.chunk.on_push(self.data.len(), changed);
+    }
+
     /// Overwrite the value at `row`, dropping the previous one (last-wins), and
     /// advance its changed tick to `change_tick`. The added tick is preserved:
     /// the value has existed since its original insertion, it was merely

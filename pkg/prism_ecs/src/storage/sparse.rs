@@ -195,6 +195,38 @@ impl ComponentSparseSet {
         true
     }
 
+    /// Insert `entity`'s value stamping its added and changed ticks
+    /// *independently*, for exact world [`restore`](crate::World::restore)
+    /// (design §14). `entity` must be absent (a fresh snapshot restore places
+    /// each entity exactly once); unlike [`insert`](Self::insert) this never
+    /// overwrites.
+    ///
+    /// # Safety
+    /// `value` points to a valid, initialized value of this set's component
+    /// type; ownership transfers into the set. `entity` must not already be
+    /// present.
+    pub unsafe fn insert_with_ticks(
+        &mut self,
+        entity: Entity,
+        value: *const u8,
+        added: Tick,
+        changed: Tick,
+    ) {
+        debug_assert!(
+            !self.contains(entity),
+            "insert_with_ticks requires an absent entity"
+        );
+        let index = entity.index() as usize;
+        self.ensure_sparse(index);
+        let dense = self.dense.len();
+        // SAFETY: `value` is a valid owned value of the stored type (forwarded).
+        unsafe { self.dense.push(value) };
+        self.entities.push(entity);
+        self.added_ticks.push(UnsafeCell::new(added));
+        self.changed_ticks.push(UnsafeCell::new(changed));
+        self.sparse[index] = dense as u32;
+    }
+
     /// Remove and drop `entity`'s value if present. Returns `true` if a value
     /// was removed.
     pub fn remove(&mut self, entity: Entity) -> bool {

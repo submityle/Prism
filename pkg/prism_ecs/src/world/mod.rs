@@ -1264,6 +1264,9 @@ impl World {
 
 mod relations;
 
+/// Structured, differential world snapshots (design §14 / §16.5).
+pub mod snapshot;
+
 #[cfg(test)]
 mod tests {
     use super::*;

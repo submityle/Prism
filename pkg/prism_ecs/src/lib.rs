@@ -110,6 +110,7 @@ pub mod prelude {
     pub use crate::system::{
         IntoSystem, Local, Query, Res, ResMut, System, SystemParam,
     };
+    pub use crate::world::snapshot::{FnvHasher, SnapshotDelta, SnapshotRing, WorldSnapshot};
     pub use crate::world::World;
 }
 

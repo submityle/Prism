@@ -71,6 +71,30 @@ impl ComponentId {
 /// this function was created for, and the value must not be used afterwards.
 pub type DropFn = unsafe fn(*mut u8);
 
+/// Type-erased clone glue for snapshot capture/restore (design §14 / §16.5).
+///
+/// Clones the component value at `src` into the uninitialized destination
+/// `dst`, producing an independently-owned copy.
+///
+/// # Safety
+/// `src` must point at a valid, initialized value of this component type.
+/// `dst` must point at writable, correctly-aligned memory of at least the
+/// component [`Layout`]'s size, currently uninitialized; on return it holds a
+/// fully-initialized, separately-owned clone that the caller takes ownership of
+/// (and must eventually drop via the component's [`DropFn`]).
+pub type CloneFn = unsafe fn(src: *const u8, dst: *mut u8);
+
+/// Type-erased deterministic hash glue for state hashing (design §14: 逐帧状态
+/// 哈希去同步).
+///
+/// Folds the component value at `ptr` into `hasher` via the component type's
+/// [`core::hash::Hash`] implementation, giving a build-stable contribution to a
+/// world state hash.
+///
+/// # Safety
+/// `ptr` must point at a valid, initialized value of this component type.
+pub type SnapshotHashFn = unsafe fn(ptr: *const u8, hasher: &mut dyn core::hash::Hasher);
+
 /// Type-erased constructor for a required component's default value (design
 /// §16.1).
 ///
@@ -114,6 +138,12 @@ pub struct ComponentInfo {
     storage: StorageType,
     type_id: Option<TypeId>,
     drop: Option<DropFn>,
+    /// Type-erased clone glue, present once the component is registered for
+    /// snapshotting via [`Components::register_cloneable`] (design §14/§16.5).
+    clone: Option<CloneFn>,
+    /// Type-erased deterministic hash glue, present once the component is
+    /// registered via [`Components::register_hashable`] (design §14).
+    snapshot_hash: Option<SnapshotHashFn>,
     hooks: ComponentHooks,
     /// Flattened (transitive, first-wins) required components (design §16.1).
     required: Vec<RequiredComponent>,
@@ -159,6 +189,20 @@ impl ComponentInfo {
         self.drop
     }
 
+    /// The type-erased clone function, present once this component has been
+    /// registered for snapshotting (design §14/§16.5), otherwise `None`.
+    #[inline]
+    pub fn clone_fn(&self) -> Option<CloneFn> {
+        self.clone
+    }
+
+    /// The type-erased deterministic hash function, present once this component
+    /// has been registered as hashable (design §14), otherwise `None`.
+    #[inline]
+    pub fn snapshot_hash_fn(&self) -> Option<SnapshotHashFn> {
+        self.snapshot_hash
+    }
+
     /// The lifecycle [`ComponentHooks`] registered for this component (design
     /// §12). Empty unless hooks were attached via
     /// [`Components::set_hooks`] or
@@ -195,6 +239,53 @@ fn drop_fn_of<T>() -> Option<DropFn> {
         Some(drop_ptr::<T> as DropFn)
     } else {
         None
+    }
+}
+
+/// Build type-erased clone glue for `T: Clone`.
+fn clone_fn_of<T: Clone>() -> CloneFn {
+    /// Clone `T` from `src` into uninitialized `dst`.
+    ///
+    /// # Safety
+    /// Honors the [`CloneFn`] contract: `src` is a valid `&T`; `dst` is
+    /// uninitialized, aligned storage for one `T` that this write initializes.
+    unsafe fn clone_ptr<T: Clone>(src: *const u8, dst: *mut u8) {
+        // SAFETY: `src` points at a valid, initialized `T` (caller contract).
+        let value: T = unsafe { (*src.cast::<T>()).clone() };
+        // SAFETY: `dst` is aligned, writable storage for one `T` and is
+        // currently uninitialized, so a plain write (no drop of old) is correct
+        // and transfers ownership of `value` into the destination.
+        unsafe { dst.cast::<T>().write(value) }
+    }
+    clone_ptr::<T>
+}
+
+/// Build type-erased deterministic hash glue for `T: Hash`.
+fn snapshot_hash_fn_of<T: core::hash::Hash>() -> SnapshotHashFn {
+    /// Fold the `T` at `ptr` into `hasher`.
+    ///
+    /// # Safety
+    /// Honors the [`SnapshotHashFn`] contract: `ptr` is a valid `&T`.
+    unsafe fn hash_ptr<T: core::hash::Hash>(ptr: *const u8, hasher: &mut dyn core::hash::Hasher) {
+        // SAFETY: `ptr` points at a valid, initialized `T` (caller contract).
+        let value: &T = unsafe { &*ptr.cast::<T>() };
+        value.hash(&mut HasherShim(hasher));
+    }
+    hash_ptr::<T>
+}
+
+/// Adapts a `&mut dyn Hasher` so `Hash::hash` (generic over `H: Hasher`) can
+/// drive it; forwards every write through the trait object.
+struct HasherShim<'a>(&'a mut dyn core::hash::Hasher);
+
+impl core::hash::Hasher for HasherShim<'_> {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0.finish()
+    }
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        self.0.write(bytes);
     }
 }
 
@@ -258,11 +349,52 @@ impl Components {
             storage: T::STORAGE,
             type_id: Some(type_id),
             drop: drop_fn_of::<T>(),
+            clone: None,
+            snapshot_hash: None,
             hooks: ComponentHooks::new(),
             required: Vec::new(),
         });
         self.by_type.insert(type_id, id);
         id
+    }
+
+    /// Register `T` (idempotently) and attach type-erased clone glue so it can
+    /// participate in world [`snapshot`](crate::world::World::snapshot) /
+    /// [`restore`](crate::world::World::restore) (design §14/§16.5). Re-calling
+    /// is idempotent and refreshes the glue. Returns the component id.
+    pub fn register_cloneable<T: Component + Clone>(&mut self) -> ComponentId {
+        let id = self.register::<T>();
+        let info = &mut self.infos[id.index() as usize];
+        info.clone = Some(clone_fn_of::<T>());
+        id
+    }
+
+    /// Register `T` (idempotently) with both clone glue and deterministic hash
+    /// glue, so it contributes to a world
+    /// [`state_hash`](crate::world::snapshot::WorldSnapshot::state_hash) (design
+    /// §14). Re-calling is idempotent and refreshes the glue. Returns the
+    /// component id.
+    pub fn register_hashable<T: Component + Clone + core::hash::Hash>(
+        &mut self,
+    ) -> ComponentId {
+        let id = self.register_cloneable::<T>();
+        let info = &mut self.infos[id.index() as usize];
+        info.snapshot_hash = Some(snapshot_hash_fn_of::<T>());
+        id
+    }
+
+    /// Attach type-erased clone glue to an already-registered dynamic component
+    /// `id` (design §16.2 dynamic components + §14 snapshot). Returns `false`
+    /// if `id` is not registered. `clone` must honor the [`CloneFn`] contract
+    /// for this component's [`Layout`].
+    pub fn set_clone_fn(&mut self, id: ComponentId, clone: CloneFn) -> bool {
+        match self.infos.get_mut(id.index() as usize) {
+            Some(info) => {
+                info.clone = Some(clone);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Register a dynamically-described component (no Rust `TypeId`).
@@ -286,6 +418,8 @@ impl Components {
             storage,
             type_id: None,
             drop,
+            clone: None,
+            snapshot_hash: None,
             hooks: ComponentHooks::new(),
             required: Vec::new(),
         });
