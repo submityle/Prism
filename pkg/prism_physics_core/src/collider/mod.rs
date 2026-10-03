@@ -81,6 +81,10 @@ pub mod cook_shells;
 
 pub use cook_shells::{cook_collision_shells, CookReport, CookShellParams, CookedShells};
 
+pub mod topology;
+
+pub use topology::{analyze_topology, MeshTopology};
+
 /// A handle into a [`ShapeRegistry`].
 ///
 /// This is a plain index handle; shapes are immutable once inserted, so no
