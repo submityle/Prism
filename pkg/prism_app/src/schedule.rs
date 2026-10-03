@@ -99,6 +99,22 @@ core_phase! {
     /// file" system cannot double-fire.
     Shutdown
 }
+core_phase! {
+    /// Runs **once per pending exit request**, before [`Shutdown`], as the
+    /// exit *veto* gate (design §24.5: *"退出可被系统取消"* — exit may be
+    /// cancelled by a system).
+    ///
+    /// Driven by [`App::poll_exit`](crate::app::App::poll_exit) when a system
+    /// has signalled shutdown via
+    /// [`AppExitRequest`](crate::exit::AppExitRequest): a system here that holds
+    /// `ResMut<AppExitRequest>` can call
+    /// [`cancel`](crate::exit::AppExitRequest::cancel) to withdraw the request
+    /// (the classic "unsaved changes — really quit?" prompt). If the request
+    /// survives this schedule, the app commits to exiting and [`Shutdown`]
+    /// runs. The gate fires at most once per distinct pending request, so a
+    /// request left standing does not re-run the veto systems every poll.
+    ExitConfirmation
+}
 
 /// The startup phases, in run order. Driven exactly once by
 /// [`App::run`](crate::app::App::run) before the first frame.
@@ -139,4 +155,5 @@ const _: fn() = || {
     assert_label::<PostUpdate>();
     assert_label::<Last>();
     assert_label::<Shutdown>();
+    assert_label::<ExitConfirmation>();
 };

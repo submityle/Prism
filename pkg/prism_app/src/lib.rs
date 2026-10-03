@@ -100,6 +100,11 @@
 //!   [`Plugin::shutdown`] — distinct from the post-startup, forward-order
 //!   [`cleanup`](crate::plugin::Plugin::cleanup). The runners invoke it once the
 //!   frame loop ends.
+//! - A vetoable exit gate (design §24.5): a pending [`AppExitRequest`] passes
+//!   through the [`ExitConfirmation`] schedule that [`App::poll_exit`] runs, so
+//!   a confirmation system may [`cancel`](crate::exit::AppExitRequest::cancel)
+//!   it ("unsaved changes — really quit?") and keep the app running; the gate
+//!   prompts at most once per distinct request.
 //! - Platform-free runners: [`HeadlessRunner`], [`ScheduleRunnerOnce`],
 #![cfg_attr(feature = "std", doc = "  and the [`DedicatedServerRunner`] (design §10 / §24.4, M5): an")]
 #![cfg_attr(not(feature = "std"), doc = "  and the `DedicatedServerRunner` (design §10 / §24.4, M5): an")]
@@ -211,8 +216,8 @@ pub use diagnostics::{
 #[cfg(feature = "std")]
 pub use pacing::{FrameLimit, FramePacer, FrameStats};
 pub use schedule::{
-    First, Last, PostStartup, PostUpdate, PreStartup, PreUpdate, Shutdown, StateTransition, Startup,
-    Update,
+    ExitConfirmation, First, Last, PostStartup, PostUpdate, PreStartup, PreUpdate, Shutdown,
+    StateTransition, Startup, Update,
 };
 pub use platform_tier::PlatformTierProfile;
 pub use settings::{SettingChange, SettingChanged, SettingValue, Settings, SettingsLayer};
@@ -258,8 +263,8 @@ pub mod prelude {
     #[cfg(feature = "std")]
     pub use crate::pacing::{FrameLimit, FramePacer, FrameStats};
     pub use crate::schedule::{
-        First, Last, PostStartup, PostUpdate, PreStartup, PreUpdate, Shutdown, StateTransition,
-        Startup, Update,
+        ExitConfirmation, First, Last, PostStartup, PostUpdate, PreStartup, PreUpdate, Shutdown,
+        StateTransition, Startup, Update,
     };
     pub use crate::platform_tier::PlatformTierProfile;
     pub use crate::settings::{

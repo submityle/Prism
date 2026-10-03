@@ -77,7 +77,9 @@ impl HeadlessRunner {
         let mut frame: u64 = 0;
         let exit = loop {
             app.update();
-            if let Some(exit) = app.should_exit() {
+            // Poll for a *confirmed* exit, running the exit-veto gate when a
+            // request is pending (design §24.5); a confirmation system may cancel.
+            if let Some(exit) = app.poll_exit() {
                 break exit;
             }
             frame = frame.saturating_add(1);

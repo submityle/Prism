@@ -294,7 +294,9 @@ impl DedicatedServerRunner {
             // Refresh the published copy so systems read this tick's health.
             app.insert_resource(diagnostics);
 
-            if let Some(exit) = app.should_exit() {
+            // Confirmed-exit poll (runs the exit-veto gate on a pending request,
+            // design §24.5) rather than the raw observer.
+            if let Some(exit) = app.poll_exit() {
                 break exit;
             }
             if self.max_ticks.is_some_and(|max| diagnostics.tick >= max) {

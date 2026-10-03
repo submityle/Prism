@@ -1713,6 +1713,148 @@ fn run_once_runs_shutdown_path() {
     );
 }
 
+// ---- exit veto gate (design §24.5: 退出可被系统取消) --------------------
+
+use crate::schedule::ExitConfirmation;
+
+/// `AppExitRequest::cancel` withdraws a pending request and clears the
+/// confirmation flag, so `get` reports nothing again.
+#[test]
+fn app_exit_request_cancel_withdraws_pending_request() {
+    let mut req = AppExitRequest::default();
+    assert_eq!(req.get(), None);
+    assert!(!req.is_confirmed());
+
+    req.send(AppExit::error());
+    assert_eq!(req.get(), Some(AppExit::error()));
+
+    req.cancel();
+    assert_eq!(req.get(), None, "cancel withdraws the pending request");
+    assert!(!req.is_confirmed(), "cancel clears any confirmation");
+}
+
+/// A fresh `send` after a `cancel` re-arms the request so the confirmation gate
+/// gets another chance (the first-wins rule only applies while a request is
+/// still pending).
+#[test]
+fn app_exit_request_send_after_cancel_rearms() {
+    let mut req = AppExitRequest::default();
+    req.send(AppExit::Success);
+    // First-wins while pending: a second send does not overwrite the code.
+    req.send(AppExit::error());
+    assert_eq!(req.get(), Some(AppExit::Success));
+
+    req.cancel();
+    // After cancel, a new send takes effect.
+    req.send(AppExit::error());
+    assert_eq!(req.get(), Some(AppExit::error()));
+    assert!(!req.is_confirmed());
+}
+
+/// `poll_exit` returns `None` and does not run the `ExitConfirmation` gate when
+/// no system has requested exit.
+#[test]
+fn poll_exit_is_none_and_skips_gate_without_request() {
+    let mut app = App::new();
+    let gate_runs = Arc::new(AtomicU64::new(0));
+    let g = gate_runs.clone();
+    app.add_systems(ExitConfirmation, move || {
+        g.fetch_add(1, Ordering::Relaxed);
+    });
+
+    assert_eq!(app.poll_exit(), None);
+    assert_eq!(
+        gate_runs.load(Ordering::Relaxed),
+        0,
+        "the veto gate must not run while no exit is pending",
+    );
+}
+
+/// `poll_exit` runs the `ExitConfirmation` gate once for a pending request and,
+/// when a confirmation system cancels it, returns `None` so the loop keeps
+/// running — the "don't quit" path.
+#[test]
+fn poll_exit_veto_cancels_pending_exit() {
+    let mut app = App::new();
+    app.world_mut()
+        .resource_mut::<AppExitRequest>()
+        .send(AppExit::error());
+
+    let gate_runs = Arc::new(AtomicU64::new(0));
+    let g = gate_runs.clone();
+    app.add_systems(ExitConfirmation, move |mut req: ResMut<AppExitRequest>| {
+        g.fetch_add(1, Ordering::Relaxed);
+        req.cancel();
+    });
+
+    assert_eq!(app.poll_exit(), None, "a vetoed request does not exit");
+    assert_eq!(gate_runs.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        app.should_exit(),
+        None,
+        "the pending request was withdrawn by the gate",
+    );
+}
+
+/// `poll_exit` confirms a request the gate leaves standing: it returns the exit
+/// code, marks the request confirmed, and does not re-run the gate on a later
+/// poll (prompt-at-most-once).
+#[test]
+fn poll_exit_confirms_and_gate_runs_at_most_once() {
+    let mut app = App::new();
+    app.world_mut()
+        .resource_mut::<AppExitRequest>()
+        .send(AppExit::error());
+
+    let gate_runs = Arc::new(AtomicU64::new(0));
+    let g = gate_runs.clone();
+    app.add_systems(ExitConfirmation, move || {
+        g.fetch_add(1, Ordering::Relaxed);
+    });
+
+    assert_eq!(app.poll_exit(), Some(AppExit::error()));
+    assert!(app.world().resource::<AppExitRequest>().is_confirmed());
+    // A second poll short-circuits: same answer, gate not re-run.
+    assert_eq!(app.poll_exit(), Some(AppExit::error()));
+    assert_eq!(
+        gate_runs.load(Ordering::Relaxed),
+        1,
+        "the veto gate runs at most once per confirmed request",
+    );
+}
+
+/// Integration: a confirmation system that vetoes the *first* exit request
+/// keeps an otherwise-unbounded `HeadlessRunner` looping; once it stops
+/// vetoing, the app exits. Proves the veto actually prevents a frame-loop stop.
+#[test]
+fn headless_runner_honors_exit_veto_then_exits() {
+    let mut app = App::new();
+
+    // Every frame, request a clean exit (first-wins while pending; re-armed
+    // after a cancel).
+    app.add_systems(Update, move |mut req: ResMut<AppExitRequest>| {
+        req.send_success();
+    });
+
+    // Veto only the first pending request; let the second through.
+    let gate_runs = Arc::new(AtomicU64::new(0));
+    let g = gate_runs.clone();
+    app.add_systems(ExitConfirmation, move |mut req: ResMut<AppExitRequest>| {
+        let n = g.fetch_add(1, Ordering::Relaxed);
+        if n == 0 {
+            req.cancel();
+        }
+    });
+
+    let exit = app.set_runner(|app| HeadlessRunner::new().run(app)).run();
+    assert_eq!(exit, AppExit::Success);
+    assert_eq!(
+        gate_runs.load(Ordering::Relaxed),
+        2,
+        "the gate ran twice: once vetoed (loop continued), once confirmed (exit)",
+    );
+}
+
 // ---- dedicated-server runner (design §10 / §24.4) ----------------------
 
 // Std-only: the dedicated-server runner and its diagnostics live behind

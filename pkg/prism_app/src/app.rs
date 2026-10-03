@@ -31,8 +31,8 @@ use crate::lifecycle::{
     AppLifecycle, FocusChanged, LowMemory, Resumed, Suspended, WillRenderFirstFrame,
 };
 use crate::schedule::{
-    First, Last, PostStartup, PostUpdate, PreStartup, PreUpdate, Shutdown, StateTransition, Startup,
-    Update,
+    ExitConfirmation, First, Last, PostStartup, PostUpdate, PreStartup, PreUpdate, Shutdown,
+    StateTransition, Startup, Update,
 };
 use crate::sub_app::{SubApp, SubApps};
 use crate::sub_app_label::SubAppLabel;
@@ -134,6 +134,10 @@ impl App {
         // The graceful-exit schedule (design §12/§21/§24.5): run once by
         // `run_shutdown`, never per frame.
         schedules.insert(Shutdown, Schedule::new());
+        // The exit veto gate (design §24.5): run by `poll_exit` once per
+        // pending exit request, before `Shutdown`, so a confirmation system can
+        // cancel the request ("unsaved changes — really quit?").
+        schedules.insert(ExitConfirmation, Schedule::new());
         // The FixedMain tick group (design §8, §22 M2). RunFixedMainLoop itself
         // is a native driver (see crate::fixed), not a schedule, so only the
         // five fixed sub-phases get empty schedules here.
@@ -489,6 +493,60 @@ impl App {
             .world
             .get_resource::<AppExitRequest>()
             .and_then(AppExitRequest::get)
+    }
+
+    /// Poll for a *confirmed* exit, running the exit-veto gate when needed
+    /// (design §24.5: *"退出可被系统取消"*).
+    ///
+    /// This is what the runner loops call between frames (rather than the raw
+    /// [`should_exit`](App::should_exit) observer) to decide whether to stop:
+    ///
+    /// 1. If no system has requested exit, returns `None` and the loop keeps
+    ///    running.
+    /// 2. If a request is pending but has not yet cleared the veto gate, run the
+    ///    [`ExitConfirmation`] schedule once.
+    ///    A confirmation system there may [`cancel`](AppExitRequest::cancel) the
+    ///    request — if it does, this returns `None` and the loop continues (the
+    ///    user chose "don't quit"). Otherwise the request is marked
+    ///    [`confirmed`](AppExitRequest::is_confirmed) and its [`AppExit`] is
+    ///    returned.
+    /// 3. An already-confirmed request short-circuits straight to its
+    ///    [`AppExit`] without re-running the gate, so the veto systems prompt at
+    ///    most once per distinct request.
+    ///
+    /// The gate runs on the main world, draining each confirmation system's
+    /// deferred commands at the schedule's sync points. It costs nothing while
+    /// no exit is pending (the schedule is only run when a request exists).
+    pub fn poll_exit(&mut self) -> Option<AppExit> {
+        // Fast path: nothing requested, or already confirmed on a prior poll.
+        let request = self
+            .sub_apps
+            .main
+            .world
+            .get_resource::<AppExitRequest>()?;
+        let exit = request.get()?;
+        if request.is_confirmed() {
+            return Some(exit);
+        }
+
+        // Run the veto gate exactly once for this pending request. A
+        // confirmation system may `cancel()` here.
+        self.sub_apps.main.run_schedule(ExitConfirmation);
+
+        // Re-read: the request may have been withdrawn (or re-raised with a
+        // different code) during the gate.
+        let request = self
+            .sub_apps
+            .main
+            .world
+            .get_resource_mut::<AppExitRequest>()?;
+        match request.get() {
+            Some(exit) => {
+                request.confirm();
+                Some(exit)
+            }
+            None => None,
+        }
     }
 
     /// Run the graceful-shutdown path exactly once (design §12 / §21 / §24.5).

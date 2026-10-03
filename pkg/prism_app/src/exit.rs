@@ -15,6 +15,12 @@
 //! entities, and tears plugins down in reverse registration order via
 //! [`Plugin::shutdown`](crate::plugin::Plugin::shutdown).
 //!
+//! Before that teardown, a pending exit request first passes the
+//! [`ExitConfirmation`](crate::schedule::ExitConfirmation) veto gate
+//! ([`App::poll_exit`](crate::app::App::poll_exit)), so a confirmation system
+//! may [`cancel`](AppExitRequest::cancel) it and keep the app running
+//! (design §24.5: *"退出可被系统取消"*).
+//!
 //! # Honestly deferred
 //!
 //! Bevy-style `EventWriter<AppExit>` ergonomics (modelling exit as an event
@@ -56,9 +62,25 @@ impl AppExit {
 /// takes `ResMut<AppExitRequest>` and calls [`send`](AppExitRequest::send) (or
 /// [`send_success`](AppExitRequest::send_success)); the runner observes the
 /// request between frames via [`App::should_exit`](crate::app::App::should_exit).
+///
+/// # Vetoable exit (design §24.5)
+///
+/// A request is not final the instant it is raised: it first passes through the
+/// [`ExitConfirmation`](crate::schedule::ExitConfirmation) veto gate that
+/// [`App::poll_exit`](crate::app::App::poll_exit) runs. A confirmation system
+/// holding `ResMut<AppExitRequest>` may call [`cancel`](AppExitRequest::cancel)
+/// to withdraw a pending request (the classic "unsaved changes — really quit?"
+/// prompt), keeping the app running. Once the gate has run and the request is
+/// still standing it is [`confirmed`](AppExitRequest::is_confirmed): the app
+/// commits to exiting and the gate will not re-prompt for that same request.
 #[derive(Default)]
 pub struct AppExitRequest {
     requested: Option<AppExit>,
+    /// Whether the current pending request has already passed the
+    /// [`ExitConfirmation`](crate::schedule::ExitConfirmation) veto gate. Reset
+    /// whenever the pending request changes (new [`send`](AppExitRequest::send)
+    /// after a [`cancel`](AppExitRequest::cancel)).
+    confirmed: bool,
 }
 
 impl Resource for AppExitRequest {}
@@ -66,10 +88,13 @@ impl Resource for AppExitRequest {}
 impl AppExitRequest {
     /// Request exit with the given code. The first request wins; later requests
     /// are ignored so a specific error code is not overwritten by a later
-    /// success.
+    /// success. A fresh request (after a [`cancel`](AppExitRequest::cancel))
+    /// re-arms the [`ExitConfirmation`](crate::schedule::ExitConfirmation) veto
+    /// gate so confirmation systems get another chance to run.
     pub fn send(&mut self, exit: AppExit) {
         if self.requested.is_none() {
             self.requested = Some(exit);
+            self.confirmed = false;
         }
     }
 
@@ -86,5 +111,38 @@ impl AppExitRequest {
     /// The pending exit request, if any.
     pub fn get(&self) -> Option<AppExit> {
         self.requested
+    }
+
+    /// Withdraw a pending exit request (design §24.5 *"退出可被系统取消"*).
+    ///
+    /// Intended for a confirmation system running in the
+    /// [`ExitConfirmation`](crate::schedule::ExitConfirmation) veto gate: if the
+    /// user chooses "don't quit", calling this keeps the app running. Clearing
+    /// the request also resets the confirmation flag, so a later
+    /// [`send`](AppExitRequest::send) starts a fresh, vetoable request.
+    pub fn cancel(&mut self) {
+        self.requested = None;
+        self.confirmed = false;
+    }
+
+    /// Whether the current pending request has already cleared the
+    /// [`ExitConfirmation`](crate::schedule::ExitConfirmation) veto gate.
+    ///
+    /// `false` when there is no pending request.
+    #[must_use]
+    pub fn is_confirmed(&self) -> bool {
+        self.requested.is_some() && self.confirmed
+    }
+
+    /// Mark the pending request as having cleared the veto gate.
+    ///
+    /// Called by [`App::poll_exit`](crate::app::App::poll_exit) after the
+    /// [`ExitConfirmation`](crate::schedule::ExitConfirmation) schedule has run
+    /// and left the request standing, so the gate is not re-run on the next
+    /// poll. A no-op when there is no pending request.
+    pub(crate) fn confirm(&mut self) {
+        if self.requested.is_some() {
+            self.confirmed = true;
+        }
     }
 }
