@@ -48,6 +48,7 @@ pub mod pbf_density_kernel;
 pub mod pipeline;
 pub mod render_fx_kernel;
 pub mod spectral_plan;
+pub mod spectrum_assemble_kernel;
 pub mod surface_bindings;
 pub mod surface_mesh;
 pub mod surface_pass;
@@ -90,6 +91,11 @@ pub use spectral_plan::{
     cascade_spectral_stage_count, field_slot, ocean_spectral_pass_count, plan_cascade_spectral,
     plan_ocean_spectral, ComplexPart, FieldSlot, SpectralPass, SpectralRealField, SpectralStage,
     SPECTRAL_COMPLEX_FIELD_COUNT, SPECTRAL_REAL_FIELD_COUNT,
+};
+
+pub use spectrum_assemble_kernel::{
+    dispatch_spectrum_assemble, AssembleFields, AssembleParams, ASSEMBLE_MAX_CASCADES,
+    ASSEMBLE_OUT_FLOATS, CASCADE_TEXEL_FLOATS, WATER_SPECTRUM_ASSEMBLE_WESL,
 };
 
 pub use surface_bindings::{
