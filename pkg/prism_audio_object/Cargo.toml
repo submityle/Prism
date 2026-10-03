@@ -1,0 +1,37 @@
+[package]
+name = "prism_audio_object"
+version = "0.1.0"
+edition = "2024"
+description = "Object-based and immersive output for Prism's next-generation audio engine: bed-plus-objects model, object metadata streams, hardware-object-budget clustering fallback, downmix of objects into beds/binaural, and Ambisonics (AmbiX) transport. Classic data-driven rendering, no AI/ML. Contains no Unreal Engine, Unity, Godot, Wwise, FMOD, Steam Audio, Dolby, or Google Resonance Audio source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_audio_core = { path = "../prism_audio_core" }
+prism_audio_spatial = { path = "../prism_audio_spatial" }
+bevy_math = { path = "../../crates/bevy_math", default-features = false, features = [
+  "nostd-libm",
+] }
+serde = { version = "1", default-features = false, features = [
+  "derive",
+], optional = true }
+
+[dev-dependencies]
+prism_audio_object = { path = ".", features = ["serialize"] }
+
+[features]
+default = ["std"]
+std = [
+  "prism_audio_core/std",
+  "prism_audio_spatial/std",
+  "bevy_math/std",
+]
+serialize = [
+  "dep:serde",
+  "prism_audio_core/serialize",
+  "prism_audio_spatial/serialize",
+  "bevy_math/serialize",
+]
+
+[lints]
+workspace = true
