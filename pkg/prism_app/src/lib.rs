@@ -149,6 +149,7 @@
 
 pub mod app;
 pub mod capability;
+pub mod cvar;
 #[cfg(feature = "std")]
 pub mod crash;
 pub mod event;
@@ -181,6 +182,10 @@ mod tests;
 
 pub use app::{App, Plugins, PluginsState};
 pub use capability::{Capabilities, QualityTier};
+pub use cvar::{
+    Cvar, CvarBounds, CvarCategory, CvarChanged, CvarError, CvarFlags, CvarRegistry,
+    CvarSetOutcome, CvarSpec, ValidatedWrite,
+};
 #[cfg(feature = "std")]
 pub use crash::{CrashReport, CrashReporter, CrashSink, CrashSnapshot};
 pub use exit::{AppExit, AppExitRequest};
@@ -224,6 +229,10 @@ pub use time::{EngineClocks, TimeUpdateStrategy};
 pub mod prelude {
     pub use crate::app::{App, Plugins, PluginsState};
     pub use crate::capability::{Capabilities, QualityTier};
+    pub use crate::cvar::{
+        Cvar, CvarBounds, CvarCategory, CvarChanged, CvarError, CvarFlags, CvarRegistry,
+        CvarSetOutcome, CvarSpec, ValidatedWrite,
+    };
     #[cfg(feature = "std")]
     pub use crate::crash::{CrashReport, CrashReporter, CrashSink, CrashSnapshot};
     pub use crate::exit::{AppExit, AppExitRequest};

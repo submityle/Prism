@@ -3813,3 +3813,389 @@ mod crash_tests {
         );
     }
 }
+
+// ---- cvar (design §24.6 console variables + §25.3 validation) ----
+//
+// The cvar registry is a declared, validated front door over the existing
+// settings cascade: registering seeds the `EngineDefault` layer, a runtime
+// write lands in `Runtime`, and validation (type coercion, bounds clamping,
+// read-only / cheat gating) rejects illegal input at the boundary rather than
+// panicking. The module is ungated (it mirrors `settings`), so these tests are
+// ungated too.
+mod cvar_tests {
+    use super::*;
+
+    use crate::cvar::{
+        CvarBounds, CvarCategory, CvarChanged, CvarError, CvarFlags, CvarRegistry, CvarSpec,
+        ValidatedWrite,
+    };
+
+    /// Registering a cvar seeds its default into the `EngineDefault` settings
+    /// layer, and the typed getters resolve it. A fresh `App` installs nothing.
+    #[test]
+    fn register_seeds_default_into_engine_default_layer() {
+        let mut app = App::new();
+        assert!(app.world().get_resource::<CvarRegistry>().is_none());
+        assert!(app.world().get_resource::<Settings>().is_none());
+
+        app.register_cvar(
+            CvarSpec::new("r.shadows", 2_i64)
+                .category(CvarCategory::Render)
+                .bounds(CvarBounds::Int(0, 4))
+                .description("shadow quality"),
+        )
+        .expect("fresh registration succeeds");
+
+        // The registry now holds the schema and the cascade holds the value.
+        let registry = app.world().resource::<CvarRegistry>();
+        assert!(registry.contains("r.shadows"));
+        assert_eq!(registry.len(), 1);
+        let schema = registry.get("r.shadows").unwrap();
+        assert_eq!(schema.category(), CvarCategory::Render);
+        assert_eq!(schema.kind(), "int");
+        assert_eq!(schema.default_value(), &SettingValue::Int(2));
+
+        assert_eq!(app.cvar_int("r.shadows"), Some(2));
+        assert_eq!(
+            app.world().resource::<Settings>().resolved_layer("r.shadows"),
+            Some(SettingsLayer::EngineDefault),
+        );
+    }
+
+    /// A runtime `set_cvar` write lands in the highest-precedence `Runtime`
+    /// layer and wins over the seeded default.
+    #[test]
+    fn set_cvar_runtime_override_wins_cascade() {
+        let mut app = App::new();
+        app.register_cvar(CvarSpec::new("net.tickrate", 30_i64).bounds(CvarBounds::Int(1, 240)))
+            .unwrap();
+        assert_eq!(app.cvar_int("net.tickrate"), Some(30));
+
+        let outcome = app.set_cvar("net.tickrate", 128_i64).unwrap();
+        assert!(outcome.changed);
+        assert!(!outcome.clamped);
+        assert_eq!(outcome.resolved, SettingValue::Int(128));
+        assert_eq!(app.cvar_int("net.tickrate"), Some(128));
+        assert_eq!(
+            app.world().resource::<Settings>().resolved_layer("net.tickrate"),
+            Some(SettingsLayer::Runtime),
+        );
+    }
+
+    /// A write past the declared bounds is clamped, and the outcome's `clamped`
+    /// flag reports it (regression guard: the flag must not be hard-wired false).
+    #[test]
+    fn out_of_range_writes_are_clamped_both_ends() {
+        let mut app = App::new();
+        app.register_cvar(CvarSpec::new("r.shadows", 1_i64).bounds(CvarBounds::Int(0, 3)))
+            .unwrap();
+
+        let high = app.set_cvar("r.shadows", 9_i64).unwrap();
+        assert!(high.changed);
+        assert!(high.clamped, "9 clamps down to the max 3");
+        assert_eq!(high.resolved, SettingValue::Int(3));
+        assert_eq!(app.cvar_int("r.shadows"), Some(3));
+
+        let low = app.set_cvar("r.shadows", -5_i64).unwrap();
+        assert!(low.changed);
+        assert!(low.clamped, "-5 clamps up to the min 0");
+        assert_eq!(low.resolved, SettingValue::Int(0));
+
+        // An in-range write is not reported as clamped.
+        let mid = app.set_cvar("r.shadows", 2_i64).unwrap();
+        assert!(mid.changed);
+        assert!(!mid.clamped);
+        assert_eq!(mid.resolved, SettingValue::Int(2));
+    }
+
+    /// An integer written to a float cvar is losslessly coerced to float; the
+    /// coerced value is still clamped into the float bounds.
+    #[test]
+    fn int_is_coerced_to_float_cvar() {
+        let mut app = App::new();
+        app.register_cvar(CvarSpec::new("r.gain", 1.0_f64).bounds(CvarBounds::Float(0.0, 2.0)))
+            .unwrap();
+
+        let ok = app.set_cvar("r.gain", 2_i64).unwrap();
+        assert!(!ok.clamped);
+        assert_eq!(ok.resolved, SettingValue::Float(2.0));
+        assert_eq!(app.cvar_float("r.gain"), Some(2.0));
+
+        let clamped = app.set_cvar("r.gain", 5_i64).unwrap();
+        assert!(clamped.clamped);
+        assert_eq!(clamped.resolved, SettingValue::Float(2.0));
+    }
+
+    /// A value of an incompatible kind (string into an int cvar) is rejected and
+    /// no state changes. Note cvars do not parse strings the way `Settings` does.
+    #[test]
+    fn type_mismatch_is_rejected() {
+        let mut app = App::new();
+        app.register_cvar(CvarSpec::new("r.shadows", 2_i64)).unwrap();
+
+        let err = app.set_cvar("r.shadows", "high").unwrap_err();
+        assert_eq!(
+            err,
+            CvarError::TypeMismatch {
+                name: "r.shadows".to_owned(),
+                expected: "int",
+                found: "string",
+            }
+        );
+        // Rejected write leaves the resolved value untouched.
+        assert_eq!(app.cvar_int("r.shadows"), Some(2));
+    }
+
+    /// A non-finite float is rejected at the boundary before it can poison
+    /// clamping / comparisons.
+    #[test]
+    fn non_finite_float_is_rejected() {
+        let mut app = App::new();
+        app.register_cvar(CvarSpec::new("r.gain", 1.0_f64)).unwrap();
+
+        let err = app.set_cvar("r.gain", f64::NAN).unwrap_err();
+        assert_eq!(
+            err,
+            CvarError::TypeMismatch {
+                name: "r.gain".to_owned(),
+                expected: "finite float",
+                found: "non-finite float",
+            }
+        );
+        assert_eq!(app.cvar_float("r.gain"), Some(1.0));
+
+        assert!(app.set_cvar("r.gain", f64::INFINITY).is_err());
+    }
+
+    /// Writing an unregistered cvar fails with `Unregistered`.
+    #[test]
+    fn writing_unregistered_cvar_fails() {
+        let mut app = App::new();
+        app.init_cvars();
+        let err = app.set_cvar("does.not.exist", 1_i64).unwrap_err();
+        assert_eq!(err, CvarError::Unregistered("does.not.exist".to_owned()));
+    }
+
+    /// A read-only cvar cannot be written at runtime (nor reset).
+    #[test]
+    fn read_only_cvar_cannot_be_written() {
+        let mut app = App::new();
+        app.register_cvar(
+            CvarSpec::new("sys.version", "1.0").flag(CvarFlags::READ_ONLY),
+        )
+        .unwrap();
+
+        assert_eq!(
+            app.set_cvar("sys.version", "2.0").unwrap_err(),
+            CvarError::ReadOnly("sys.version".to_owned())
+        );
+        assert_eq!(
+            app.reset_cvar("sys.version").unwrap_err(),
+            CvarError::ReadOnly("sys.version".to_owned())
+        );
+        assert_eq!(app.cvar_str("sys.version"), Some("1.0"));
+    }
+
+    /// A cheat-protected cvar is blocked while cheats are disabled and allowed
+    /// once they are enabled.
+    #[test]
+    fn cheat_protected_cvar_is_gated() {
+        let mut app = App::new();
+        app.register_cvar(
+            CvarSpec::new("g.godmode", false).flag(CvarFlags::CHEAT),
+        )
+        .unwrap();
+
+        assert_eq!(
+            app.set_cvar("g.godmode", true).unwrap_err(),
+            CvarError::CheatProtected("g.godmode".to_owned())
+        );
+        assert_eq!(app.cvar_bool("g.godmode"), Some(false));
+
+        app.set_cheats_enabled(true);
+        let ok = app.set_cvar("g.godmode", true).unwrap();
+        assert!(ok.changed);
+        assert_eq!(app.cvar_bool("g.godmode"), Some(true));
+    }
+
+    /// A `NOTIFY` cvar broadcasts a `CvarChanged` event on a resolved change; a
+    /// non-notify cvar changing broadcasts none (the `SettingChanged` still goes
+    /// out, but that is a separate channel).
+    #[test]
+    fn notify_flag_controls_cvar_changed_event() {
+        let mut app = App::new();
+        app.register_cvar(
+            CvarSpec::new("r.vsync", true)
+                .category(CvarCategory::Render)
+                .flag(CvarFlags::NOTIFY),
+        )
+        .unwrap();
+        app.register_cvar(CvarSpec::new("r.quiet", 1_i64)).unwrap();
+
+        let seen = Arc::new(Mutex::new(Vec::<(String, Option<bool>, Option<bool>)>::new()));
+        let seen_sys = seen.clone();
+        app.add_systems(
+            Update,
+            move |mut cursor: Local<EventCursor<CvarChanged>>,
+                  events: Res<Events<CvarChanged>>| {
+                for ev in cursor.read(&events) {
+                    seen_sys.lock().unwrap().push((
+                        ev.name.clone(),
+                        ev.previous.as_ref().and_then(SettingValue::as_bool),
+                        ev.current.as_bool(),
+                    ));
+                }
+            },
+        );
+
+        app.set_cvar("r.vsync", false).unwrap();
+        app.set_cvar("r.quiet", 7_i64).unwrap();
+        // A no-op write (same resolved value) must not notify.
+        app.set_cvar("r.vsync", false).unwrap();
+
+        app.update();
+        app.update();
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(
+            seen.as_slice(),
+            [("r.vsync".to_owned(), Some(true), Some(false))],
+            "only the NOTIFY cvar's real change fires CvarChanged",
+        );
+    }
+
+    /// `reset_cvar` clears only the `Runtime` override, so the value falls back
+    /// to the next-highest layer still present (here a `User` setting).
+    #[test]
+    fn reset_cvar_falls_back_to_lower_layer() {
+        let mut app = App::new();
+        app.register_cvar(CvarSpec::new("r.shadows", 1_i64).bounds(CvarBounds::Int(0, 4)))
+            .unwrap();
+        // A user-layer preference sits above the engine default.
+        app.set_cvar_at(SettingsLayer::User, "r.shadows", 2_i64).unwrap();
+        // A runtime console write sits above the user layer.
+        app.set_cvar("r.shadows", 3_i64).unwrap();
+        assert_eq!(app.cvar_int("r.shadows"), Some(3));
+
+        let outcome = app.reset_cvar("r.shadows").unwrap();
+        assert!(outcome.changed);
+        assert!(!outcome.clamped);
+        assert_eq!(outcome.resolved, SettingValue::Int(2));
+        assert_eq!(app.cvar_int("r.shadows"), Some(2));
+        assert_eq!(
+            app.world().resource::<Settings>().resolved_layer("r.shadows"),
+            Some(SettingsLayer::User),
+        );
+    }
+
+    /// `iter_category` filters by category and `archived` lists only ARCHIVE
+    /// cvars; both walk ascending-name order deterministically.
+    #[test]
+    fn iter_category_and_archived_are_filtered_and_ordered() {
+        let mut app = App::new();
+        app.register_cvar(
+            CvarSpec::new("r.shadows", 1_i64).category(CvarCategory::Render),
+        )
+        .unwrap();
+        app.register_cvar(
+            CvarSpec::new("r.bloom", true)
+                .category(CvarCategory::Render)
+                .flag(CvarFlags::ARCHIVE),
+        )
+        .unwrap();
+        app.register_cvar(
+            CvarSpec::new("net.tickrate", 60_i64).category(CvarCategory::Network),
+        )
+        .unwrap();
+
+        let registry = app.world().resource::<CvarRegistry>();
+        let render: Vec<&str> = registry
+            .iter_category(CvarCategory::Render)
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(render, ["r.bloom", "r.shadows"]);
+
+        let archived: Vec<&str> = registry.archived().collect();
+        assert_eq!(archived, ["r.bloom"]);
+    }
+
+    /// Registration rejects bounds whose kind disagrees with the default, and
+    /// inverted bounds, both with `InvalidBounds` — and no state is seeded.
+    #[test]
+    fn register_rejects_invalid_bounds() {
+        let mut app = App::new();
+
+        let kind_mismatch = app
+            .register_cvar(CvarSpec::new("r.gain", 1_i64).bounds(CvarBounds::Float(0.0, 1.0)))
+            .unwrap_err();
+        assert_eq!(kind_mismatch, CvarError::InvalidBounds("r.gain".to_owned()));
+
+        let inverted = app
+            .register_cvar(CvarSpec::new("r.shadows", 1_i64).bounds(CvarBounds::Int(4, 0)))
+            .unwrap_err();
+        assert_eq!(inverted, CvarError::InvalidBounds("r.shadows".to_owned()));
+
+        // Nothing was registered or seeded.
+        assert!(!app.world().resource::<CvarRegistry>().contains("r.gain"));
+        assert_eq!(app.cvar_int("r.shadows"), None);
+    }
+
+    /// Registering the same name twice is a `Redeclared` error and leaves the
+    /// first registration intact.
+    #[test]
+    fn register_rejects_redeclaration() {
+        let mut app = App::new();
+        app.register_cvar(CvarSpec::new("r.shadows", 1_i64)).unwrap();
+        let err = app
+            .register_cvar(CvarSpec::new("r.shadows", 9_i64))
+            .unwrap_err();
+        assert_eq!(err, CvarError::Redeclared("r.shadows".to_owned()));
+        // The original default is untouched.
+        assert_eq!(app.cvar_int("r.shadows"), Some(1));
+    }
+
+    /// `CvarRegistry::validate_set` is a pure check returning the coerced,
+    /// clamped value plus whether clamping altered it — no cascade needed.
+    #[test]
+    fn validate_set_is_pure_and_reports_clamping() {
+        let mut registry = CvarRegistry::new();
+        let (name, default) = registry
+            .register(CvarSpec::new("r.shadows", 1_i64).bounds(CvarBounds::Int(0, 3)))
+            .unwrap();
+        assert_eq!(name, "r.shadows");
+        assert_eq!(default, SettingValue::Int(1));
+
+        let in_range = registry
+            .validate_set("r.shadows", SettingValue::Int(2))
+            .unwrap();
+        assert_eq!(
+            in_range,
+            ValidatedWrite {
+                value: SettingValue::Int(2),
+                clamped: false,
+            }
+        );
+
+        let clamped = registry
+            .validate_set("r.shadows", SettingValue::Int(99))
+            .unwrap();
+        assert_eq!(
+            clamped,
+            ValidatedWrite {
+                value: SettingValue::Int(3),
+                clamped: true,
+            }
+        );
+
+        // Cheat gating is observable through the pure path too.
+        registry
+            .register(CvarSpec::new("g.noclip", false).flag(CvarFlags::CHEAT))
+            .unwrap();
+        assert_eq!(
+            registry.validate_set("g.noclip", SettingValue::Bool(true)),
+            Err(CvarError::CheatProtected("g.noclip".to_owned()))
+        );
+        registry.set_cheats_enabled(true);
+        assert!(registry.validate_set("g.noclip", SettingValue::Bool(true)).is_ok());
+    }
+}
