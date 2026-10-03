@@ -22,8 +22,16 @@
 //!   combine order.
 //! - [`TaskPool::prefix_sum`]: parallel inclusive scan.
 //!
-//! Later milestones add fibers (wait-without-blocking-a-worker), an async
-//! executor, named threads, NUMA/affinity, and deterministic replay.
+//! ## M3 scope (this build) — async + named threads
+//! - [`TaskPool::spawn_async`] / [`TaskPool::block_on`] / [`Task`]: a minimal
+//!   `Future` executor that polls futures as jobs on the same pool, with a
+//!   hand-rolled [`RawWaker`](std::task::RawWaker) vtable.
+//! - [`Counter::wait_async`] / [`CounterFuture`]: bridge counter completion to
+//!   future wakeups (and, via [`Task::counter`], async results back to jobs).
+//! - [`NamedThreads`] / [`ThreadCategory`]: Main / Render / IO / AsyncCompute
+//!   lanes dispatched independently of the compute pool.
+//!
+//! Later milestones add NUMA/affinity and deterministic replay.
 //!
 //! The crate contains no Unreal Engine source or derived code and depends on
 //! no `bevy_*` crate.
@@ -34,10 +42,12 @@
 // and the stackful-fiber context switching behind the off-by-default `fibers`
 // feature (see the `fiber` module, especially `fiber::context`).
 
+mod async_exec;
 mod counter;
 #[cfg(feature = "fibers")]
 mod fiber;
 mod job;
+mod named;
 mod parallel;
 mod scheduler;
 mod scope;
@@ -45,7 +55,9 @@ mod scope;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
+pub use async_exec::{CounterFuture, Task};
 pub use counter::Counter;
+pub use named::{NamedThreads, NamedThreadsConfig, ThreadCategory};
 pub use scope::Scope;
 use scheduler::Shared;
 
@@ -206,6 +218,11 @@ impl TaskPool {
     /// by the structured-parallelism scope, which manages its own counter.
     pub(crate) fn push_job(&self, job: job::Job) {
         self.shared.push(job);
+    }
+
+    /// Shared scheduler state, used by the async executor to enqueue task polls.
+    pub(crate) fn shared_state(&self) -> &Arc<Shared> {
+        &self.shared
     }
 }
 

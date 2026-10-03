@@ -18,9 +18,10 @@
 use std::cell::Cell;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
+use crate::async_exec::RunnableTask;
 use crate::job::Job;
 
 #[cfg(feature = "fibers")]
@@ -40,6 +41,10 @@ pub(crate) struct Shared {
     deques: Vec<Mutex<VecDeque<Job>>>,
     /// Global MPMC injection queue for jobs spawned off-pool.
     injector: Mutex<VecDeque<Job>>,
+    /// Ready-to-poll async task harnesses for the single-threaded fallback,
+    /// drained by [`crate::TaskPool::block_on`] (multi-threaded pools re-enqueue
+    /// harnesses as ordinary jobs instead).
+    async_ready: Mutex<VecDeque<Arc<dyn RunnableTask>>>,
     /// Count of jobs currently queued anywhere (for park/wake decisions).
     queued: AtomicUsize,
     /// Set during shutdown to drain workers.
@@ -64,6 +69,7 @@ impl Shared {
         Self {
             deques,
             injector: Mutex::new(VecDeque::new()),
+            async_ready: Mutex::new(VecDeque::new()),
             queued: AtomicUsize::new(0),
             shutdown: AtomicBool::new(false),
             park: Mutex::new(()),
@@ -285,6 +291,21 @@ impl Shared {
     pub(crate) fn begin_shutdown(&self) {
         self.shutdown.store(true, Ordering::Release);
         self.cvar.notify_all();
+    }
+
+    /// Enqueue a ready async task harness (single-threaded fallback only).
+    pub(crate) fn push_async_ready(&self, task: Arc<dyn RunnableTask>) {
+        self.async_ready.lock().unwrap().push_back(task);
+    }
+
+    /// Pop one ready async task harness, if any (single-threaded fallback).
+    pub(crate) fn pop_async_ready(&self) -> Option<Arc<dyn RunnableTask>> {
+        self.async_ready.lock().unwrap().pop_front()
+    }
+
+    /// Whether the single-threaded async ready queue is empty.
+    pub(crate) fn async_ready_is_empty(&self) -> bool {
+        self.async_ready.lock().unwrap().is_empty()
     }
 
     pub(crate) fn id(&self) -> usize {

@@ -456,3 +456,435 @@ fn help_on_wait_fallback_handles_nested_waits() {
     pool.wait(&top);
     assert_eq!(steps.load(Ordering::SeqCst), 2);
 }
+
+// ---------------------------------------------------------------------------
+// M3: async executor + named threads
+// ---------------------------------------------------------------------------
+
+/// Async-executor and named-thread tests. These are written to pass in every
+/// feature combo the crate ships (default `std`+`multi_thread`, `fibers`, and
+/// `--no-default-features --features single`); the few that need true worker
+/// concurrency are gated out of the single-threaded fallback.
+mod m3 {
+    use crate::{Counter, NamedThreads, NamedThreadsConfig, TaskPool, ThreadCategory};
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc;
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::task::{Context, Poll};
+    #[cfg(not(feature = "single"))]
+    use std::task::Waker;
+
+    /// Spin until `counter` drains. Combo-independent (works with or without
+    /// workers), used where `TaskPool::wait` is unavailable (e.g. waiting on a
+    /// named-lane job from the single-threaded fallback, whose `wait` asserts
+    /// the counter is already complete).
+    fn spin_until_complete(counter: &Counter) {
+        while !counter.is_complete() {
+            std::thread::yield_now();
+        }
+    }
+
+    /// A future that returns `Pending` (re-waking itself) `n` times before
+    /// yielding `n`. Exercises the waker's "wake while being polled" path.
+    struct YieldN {
+        remaining: usize,
+        total: usize,
+        polls: Arc<AtomicUsize>,
+    }
+
+    impl Future for YieldN {
+        type Output = usize;
+
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<usize> {
+            self.polls.fetch_add(1, Ordering::Relaxed);
+            if self.remaining == 0 {
+                return Poll::Ready(self.total);
+            }
+            self.remaining -= 1;
+            // Re-schedule ourselves: the harness must poll us again.
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    }
+
+    /// A single-shot channel future: resolves once another thread calls
+    /// [`OneShot::send`], which registers-and-fires a stored waker. Exercises
+    /// the harness's "wake after poll returned Pending" re-enqueue path. Only
+    /// the worker-backed tests use it; the single-threaded fallback cannot
+    /// `block_on` an event that only an external thread delivers.
+    #[cfg(not(feature = "single"))]
+    struct OneShot<T> {
+        state: Mutex<OneShotState<T>>,
+    }
+
+    #[cfg(not(feature = "single"))]
+    struct OneShotState<T> {
+        value: Option<T>,
+        waker: Option<Waker>,
+    }
+
+    #[cfg(not(feature = "single"))]
+    impl<T> OneShot<T> {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                state: Mutex::new(OneShotState {
+                    value: None,
+                    waker: None,
+                }),
+            })
+        }
+
+        fn send(&self, value: T) {
+            let waker = {
+                let mut state = self.state.lock().unwrap();
+                state.value = Some(value);
+                state.waker.take()
+            };
+            if let Some(waker) = waker {
+                waker.wake();
+            }
+        }
+
+        fn recv(self: &Arc<Self>) -> OneShotRecv<T> {
+            OneShotRecv {
+                shared: Arc::clone(self),
+            }
+        }
+    }
+
+    #[cfg(not(feature = "single"))]
+    struct OneShotRecv<T> {
+        shared: Arc<OneShot<T>>,
+    }
+
+    #[cfg(not(feature = "single"))]
+    impl<T> Future for OneShotRecv<T> {
+        type Output = T;
+
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<T> {
+            let mut state = self.shared.state.lock().unwrap();
+            if let Some(value) = state.value.take() {
+                return Poll::Ready(value);
+            }
+            state.waker = Some(cx.waker().clone());
+            Poll::Pending
+        }
+    }
+
+    #[test]
+    fn block_on_returns_immediate_value() {
+        let pool = TaskPool::new();
+        let out = pool.block_on(async { 2 + 40 });
+        assert_eq!(out, 42);
+    }
+
+    #[test]
+    fn spawn_async_output_via_block_on() {
+        let pool = TaskPool::new();
+        let task = pool.spawn_async(async { 7 * 6 });
+        let out = pool.block_on(task);
+        assert_eq!(out, 42);
+    }
+
+    #[test]
+    fn block_on_awaits_nested_spawn() {
+        let pool = TaskPool::new();
+        let p = pool.clone();
+        let out = pool.block_on(async move {
+            let a = p.spawn_async(async { 10usize });
+            let b = p.spawn_async(async { 32usize });
+            a.await + b.await
+        });
+        assert_eq!(out, 42);
+    }
+
+    #[test]
+    fn waker_reschedules_yielding_future() {
+        let pool = TaskPool::new();
+        let polls = Arc::new(AtomicUsize::new(0));
+        let task = pool.spawn_async(YieldN {
+            remaining: 5,
+            total: 5,
+            polls: Arc::clone(&polls),
+        });
+        let out = pool.block_on(task);
+        assert_eq!(out, 5);
+        // One poll per yield (5) plus the final `Ready` poll.
+        assert_eq!(polls.load(Ordering::Relaxed), 6);
+    }
+
+    #[test]
+    fn counter_completion_wakes_future() {
+        // In the multi-threaded pool the jobs run on workers while `block_on`
+        // parks; in the single-threaded fallback `spawn` runs them inline, so
+        // the counter is already drained when the future first polls. Either
+        // way the awaiting future must observe completion.
+        let pool = TaskPool::new();
+        let counter = Counter::new();
+        let hits = Arc::new(AtomicUsize::new(0));
+        for _ in 0..16 {
+            let hits = Arc::clone(&hits);
+            pool.spawn(&counter, move || {
+                hits.fetch_add(1, Ordering::Relaxed);
+            });
+        }
+        pool.block_on(counter.wait_async());
+        assert!(counter.is_complete());
+        assert_eq!(hits.load(Ordering::Relaxed), 16);
+    }
+
+    #[test]
+    fn await_many_spawned_tasks() {
+        let pool = TaskPool::new();
+        let p = pool.clone();
+        let out = pool.block_on(async move {
+            let tasks: Vec<_> = (0..64u64).map(|i| p.spawn_async(async move { i * i })).collect();
+            let mut sum = 0u64;
+            for task in tasks {
+                sum += task.await;
+            }
+            sum
+        });
+        assert_eq!(out, (0..64u64).map(|i| i * i).sum());
+    }
+
+    #[test]
+    fn task_is_finished_reports_completion() {
+        let pool = TaskPool::new();
+        let task = pool.spawn_async(async { 1u8 });
+        let value = pool.block_on(task);
+        assert_eq!(value, 1);
+    }
+
+    // --- Named threads (combo-independent: lanes are their own OS threads) ---
+
+    #[test]
+    fn dispatch_render_io_async_compute_run_off_pool() {
+        let named = NamedThreads::new();
+        for category in [
+            ThreadCategory::Render,
+            ThreadCategory::Io,
+            ThreadCategory::AsyncCompute,
+        ] {
+            let (tx, rx) = mpsc::channel();
+            let counter = named.dispatch(category, move || {
+                tx.send(category).unwrap();
+            });
+            // The job's side effect arrives via the channel from the lane
+            // thread; then the tracking counter drains.
+            assert_eq!(rx.recv().unwrap(), category);
+            spin_until_complete(&counter);
+            assert!(counter.is_complete());
+        }
+    }
+
+    #[test]
+    fn dispatch_io_fans_out_across_lane_threads() {
+        let named = NamedThreads::with_config(NamedThreadsConfig {
+            io_threads: 4,
+            async_compute_threads: 1,
+        });
+        let done = Arc::new(AtomicUsize::new(0));
+        let mut counters = Vec::new();
+        for _ in 0..64 {
+            let done = Arc::clone(&done);
+            counters.push(named.dispatch(ThreadCategory::Io, move || {
+                done.fetch_add(1, Ordering::Relaxed);
+            }));
+        }
+        for c in &counters {
+            spin_until_complete(c);
+        }
+        assert_eq!(done.load(Ordering::Relaxed), 64);
+    }
+
+    #[test]
+    fn main_lane_runs_only_when_pumped() {
+        let named = NamedThreads::new();
+        let ran = Arc::new(AtomicUsize::new(0));
+        let r = Arc::clone(&ran);
+        let counter = named.dispatch(ThreadCategory::Main, move || {
+            r.fetch_add(1, Ordering::Relaxed);
+        });
+        // Nothing runs the Main lane until we pump it.
+        assert_eq!(named.main_pending(), 1);
+        assert_eq!(ran.load(Ordering::Relaxed), 0);
+        assert!(!counter.is_complete());
+
+        let executed = named.run_main_pending();
+        assert_eq!(executed, 1);
+        assert_eq!(ran.load(Ordering::Relaxed), 1);
+        assert_eq!(named.main_pending(), 0);
+        assert!(counter.is_complete());
+    }
+
+    #[test]
+    fn main_lane_pump_is_batched_against_self_enqueue() {
+        // A Main job that re-dispatches to Main must not spin the pump forever:
+        // `run_main_pending` only runs the jobs queued at entry.
+        let named = Arc::new(NamedThreads::new());
+        let ran = Arc::new(AtomicUsize::new(0));
+        let n2 = Arc::clone(&named);
+        let r = Arc::clone(&ran);
+        named.dispatch(ThreadCategory::Main, move || {
+            r.fetch_add(1, Ordering::Relaxed);
+            let r2 = Arc::clone(&r);
+            n2.dispatch(ThreadCategory::Main, move || {
+                r2.fetch_add(1, Ordering::Relaxed);
+            });
+        });
+        let first = named.run_main_pending();
+        assert_eq!(first, 1);
+        assert_eq!(ran.load(Ordering::Relaxed), 1);
+        // The re-dispatched job waits for the next pump.
+        assert_eq!(named.main_pending(), 1);
+        let second = named.run_main_pending();
+        assert_eq!(second, 1);
+        assert_eq!(ran.load(Ordering::Relaxed), 2);
+    }
+
+    #[cfg(not(feature = "single"))]
+    #[test]
+    fn counter_wait_async_bridges_named_dispatch() {
+        // A named-lane job's completion counter resolves a future.
+        let pool = TaskPool::new();
+        let named = NamedThreads::new();
+        let flag = Arc::new(AtomicUsize::new(0));
+        let f = Arc::clone(&flag);
+        let counter = named.dispatch(ThreadCategory::AsyncCompute, move || {
+            f.fetch_add(99, Ordering::Relaxed);
+        });
+        pool.block_on(counter.wait_async());
+        assert_eq!(flag.load(Ordering::Relaxed), 99);
+    }
+
+    // --- Tests that require true worker concurrency (not the inline fallback) ---
+
+    /// External wake (from another OS thread) must re-enqueue a parked harness.
+    /// Skipped under `single`, whose `block_on` fails fast rather than waiting
+    /// on an event only an external thread can deliver.
+    #[cfg(not(feature = "single"))]
+    #[test]
+    fn external_wake_reenqueues_parked_task() {
+        let pool = TaskPool::new();
+        let channel = OneShot::<u64>::new();
+        let producer = Arc::clone(&channel);
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            producer.send(1234);
+        });
+        let recv = channel.recv();
+        let task = pool.spawn_async(async move { recv.await });
+        let out = pool.block_on(task);
+        assert_eq!(out, 1234);
+    }
+
+    /// A *job* can wait on an async task's completion counter, bridging the
+    /// async result back into the fork-join world. Needs real workers to drive
+    /// the spawned future while the waiting job helps.
+    #[cfg(not(feature = "single"))]
+    #[test]
+    fn job_waits_on_task_counter() {
+        let pool = TaskPool::new();
+        let shared = Arc::new(AtomicUsize::new(0));
+        let s = Arc::clone(&shared);
+        let task = pool.spawn_async(async move {
+            s.store(55, Ordering::SeqCst);
+        });
+        let task_counter = task.counter();
+        task.detach();
+
+        let outer = Counter::new();
+        let p = pool.clone();
+        let probe = Arc::clone(&shared);
+        pool.spawn(&outer, move || {
+            // Wait on the async task from inside a job.
+            p.wait(&task_counter);
+            assert_eq!(probe.load(Ordering::SeqCst), 55);
+        });
+        pool.wait(&outer);
+    }
+
+    /// Stress: many independent futures resolved by a counter completed on the
+    /// pool, driven by `block_on` while workers run the jobs. Must not deadlock.
+    #[cfg(not(feature = "single"))]
+    #[test]
+    fn stress_many_counter_futures_no_deadlock() {
+        let pool = TaskPool::with_threads(3);
+        let p = pool.clone();
+        let total = pool.block_on(async move {
+            let mut sum = 0usize;
+            for round in 0..50 {
+                let counter = Counter::new();
+                let hits = Arc::new(AtomicUsize::new(0));
+                for _ in 0..8 {
+                    let hits = Arc::clone(&hits);
+                    p.spawn(&counter, move || {
+                        hits.fetch_add(1, Ordering::Relaxed);
+                    });
+                }
+                counter.wait_async().await;
+                assert_eq!(hits.load(Ordering::Relaxed), 8, "round {round}");
+                sum += hits.load(Ordering::Relaxed);
+            }
+            sum
+        });
+        assert_eq!(total, 50 * 8);
+    }
+
+    /// A oneshot completed by a pool job must wake a future blocked in
+    /// `block_on` on the main thread. Exercises cross-worker wakeups.
+    #[cfg(not(feature = "single"))]
+    #[test]
+    fn pool_job_wakes_block_on() {
+        let pool = TaskPool::with_threads(2);
+        let channel = OneShot::<&'static str>::new();
+        let producer = Arc::clone(&channel);
+        let counter = Counter::new();
+        pool.spawn(&counter, move || {
+            producer.send("ready");
+        });
+        let recv = channel.recv();
+        let out = pool.block_on(recv);
+        assert_eq!(out, "ready");
+        pool.wait(&counter);
+    }
+
+    /// Condvar-backed sanity: dispatch to every lane and confirm all run,
+    /// ordering-independent, using a shared tally guarded by a condvar.
+    #[test]
+    fn all_categories_execute() {
+        let named = NamedThreads::new();
+        let state = Arc::new((Mutex::new(0usize), Condvar::new()));
+        let categories = [
+            ThreadCategory::Render,
+            ThreadCategory::Io,
+            ThreadCategory::AsyncCompute,
+        ];
+        for category in categories {
+            let state = Arc::clone(&state);
+            named.dispatch(category, move || {
+                let (lock, cvar) = &*state;
+                *lock.lock().unwrap() += 1;
+                cvar.notify_all();
+            });
+        }
+        // Main runs inline on pump.
+        let state_main = Arc::clone(&state);
+        named.dispatch(ThreadCategory::Main, move || {
+            let (lock, cvar) = &*state_main;
+            *lock.lock().unwrap() += 1;
+            cvar.notify_all();
+        });
+        named.run_main_pending();
+
+        let (lock, cvar) = &*state;
+        let mut done = lock.lock().unwrap();
+        while *done < 4 {
+            done = cvar.wait(done).unwrap();
+        }
+        assert_eq!(*done, 4);
+    }
+}
