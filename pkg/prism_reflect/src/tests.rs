@@ -543,3 +543,233 @@ mod math_kind {
         assert!(registry.contains(TypeId::of::<Vec3>()));
     }
 }
+
+mod m2_dynamic {
+    use crate::prelude::*;
+    use prism_math::Vec3;
+    use std::boxed::Box;
+    use std::collections::HashMap;
+
+    #[derive(Reflect, Debug, PartialEq, Clone)]
+    struct Stats {
+        health: i32,
+        name: String,
+        speed: f32,
+    }
+
+    #[derive(Reflect, Debug, PartialEq, Clone)]
+    struct Pair(i32, bool);
+
+    #[derive(Reflect, Debug, PartialEq, Clone)]
+    enum Shape {
+        Empty,
+        Circle(f32),
+        Rect { width: f32, height: f32 },
+    }
+
+    #[derive(Reflect, Debug, PartialEq, Clone)]
+    struct World {
+        player: Stats,
+        pair: Pair,
+        grid: Vec<Vec<i32>>,
+        lookup: HashMap<String, i32>,
+    }
+
+    fn sample_world() -> World {
+        let mut lookup = HashMap::new();
+        lookup.insert("a".to_string(), 1);
+        lookup.insert("b".to_string(), 2);
+        World {
+            player: Stats {
+                health: 100,
+                name: "aria".to_string(),
+                speed: 1.5,
+            },
+            pair: Pair(7, true),
+            grid: vec![vec![10, 20, 30], vec![40, 50]],
+            lookup,
+        }
+    }
+
+    #[test]
+    fn dynamic_struct_apply_patches_concrete_by_name() {
+        let mut stats = Stats {
+            health: 100,
+            name: "aria".to_string(),
+            speed: 1.0,
+        };
+
+        let mut patch = DynamicStruct::new();
+        patch.insert("health", 42i32);
+        patch.insert("speed", 9.5f32);
+
+        stats.apply(&patch).expect("dynamic struct patch applies");
+
+        assert_eq!(stats.health, 42);
+        assert_eq!(stats.speed, 9.5);
+        // `name` was not present in the patch and stays untouched.
+        assert_eq!(stats.name, "aria");
+    }
+
+    #[test]
+    fn from_reflect_round_trips_struct_direct_and_via_clone() {
+        let stats = Stats {
+            health: 73,
+            name: "nova".to_string(),
+            speed: 4.25,
+        };
+
+        let direct = Stats::from_reflect(&stats as &dyn Reflect).expect("direct round-trip");
+        assert_eq!(direct, stats);
+
+        let cloned = stats.reflect_clone();
+        let via_clone = Stats::from_reflect(&*cloned).expect("round-trip via DynamicStruct");
+        assert_eq!(via_clone, stats);
+    }
+
+    #[test]
+    fn from_reflect_round_trips_tuple_struct_and_enum() {
+        let pair = Pair(9, false);
+        assert_eq!(Pair::from_reflect(&pair as &dyn Reflect).unwrap(), pair);
+        assert_eq!(Pair::from_reflect(&*pair.reflect_clone()).unwrap(), pair);
+
+        for shape in [
+            Shape::Empty,
+            Shape::Circle(2.5),
+            Shape::Rect {
+                width: 3.0,
+                height: 4.0,
+            },
+        ] {
+            let direct = Shape::from_reflect(&shape as &dyn Reflect).unwrap();
+            assert_eq!(direct, shape);
+            let via_clone = Shape::from_reflect(&*shape.reflect_clone()).unwrap();
+            assert_eq!(via_clone, shape);
+        }
+    }
+
+    #[test]
+    fn from_reflect_round_trips_collections_and_math() {
+        let list = vec![1, 2, 3, 4];
+        assert_eq!(Vec::<i32>::from_reflect(&list as &dyn Reflect).unwrap(), list);
+
+        let mut map = HashMap::new();
+        map.insert("x".to_string(), 10);
+        map.insert("y".to_string(), 20);
+        assert_eq!(
+            HashMap::<String, i32>::from_reflect(&map as &dyn Reflect).unwrap(),
+            map
+        );
+
+        let v = Vec3 {
+            x: 1.0,
+            y: 2.0,
+            z: 3.0,
+        };
+        assert_eq!(Vec3::from_reflect(&v as &dyn Reflect).unwrap(), v);
+        assert_eq!(Vec3::from_reflect(&*v.reflect_clone()).unwrap(), v);
+    }
+
+    #[test]
+    fn concrete_enum_apply_patches_matching_variant() {
+        let mut shape = Shape::Rect {
+            width: 1.0,
+            height: 1.0,
+        };
+        let patch = DynamicEnum::new(
+            2,
+            "Rect",
+            DynamicVariant::Struct(vec![
+                ("width", Box::new(5.0f32) as Box<dyn Reflect>),
+                ("height", Box::new(6.0f32) as Box<dyn Reflect>),
+            ]),
+        );
+        shape.apply(&patch).expect("same-variant enum patch applies");
+        assert_eq!(
+            shape,
+            Shape::Rect {
+                width: 5.0,
+                height: 6.0
+            }
+        );
+
+        // A different variant cannot be forced onto a concrete enum.
+        let mismatch = DynamicEnum::new(0, "Empty", DynamicVariant::Unit);
+        assert!(shape.apply(&mismatch).is_err());
+    }
+
+    #[test]
+    fn dynamic_enum_switches_variant_on_apply_then_from_reflect() {
+        let mut dynamic = DynamicEnum::new(0, "Empty", DynamicVariant::Unit);
+        assert_eq!(dynamic.variant_name(), "Empty");
+
+        let circle = Shape::Circle(3.5);
+        dynamic
+            .apply(&circle)
+            .expect("DynamicEnum switches to the source variant");
+        assert_eq!(dynamic.variant_name(), "Circle");
+        assert_eq!(dynamic.field_at(0).unwrap().downcast_ref::<f32>(), Some(&3.5));
+
+        let rebuilt = Shape::from_reflect(&dynamic).expect("rebuild concrete from switched enum");
+        assert_eq!(rebuilt, Shape::Circle(3.5));
+    }
+
+    #[test]
+    fn parsed_path_navigates_nested_struct_list_and_map() {
+        let world = sample_world();
+
+        let health = reflect_path(&world, &ParsedPath::parse(".player.health").unwrap()).unwrap();
+        assert_eq!(health.downcast_ref::<i32>(), Some(&100));
+
+        let flag = reflect_path(&world, &ParsedPath::parse(".pair#1").unwrap()).unwrap();
+        assert_eq!(flag.downcast_ref::<bool>(), Some(&true));
+
+        let cell = reflect_path(&world, &ParsedPath::parse(".grid[0][2]").unwrap()).unwrap();
+        assert_eq!(cell.downcast_ref::<i32>(), Some(&30));
+
+        let mapped = reflect_path(&world, &ParsedPath::parse(r#".lookup["b"]"#).unwrap()).unwrap();
+        assert_eq!(mapped.downcast_ref::<i32>(), Some(&2));
+
+        // A path that does not match the shape resolves to `None`.
+        assert!(reflect_path(&world, &ParsedPath::parse(".player.missing").unwrap()).is_none());
+    }
+
+    #[test]
+    fn parsed_path_mut_mutates_through_nested_shapes() {
+        let mut world = sample_world();
+
+        let cell = reflect_path_mut(&mut world, &ParsedPath::parse(".grid[1][0]").unwrap()).unwrap();
+        *cell.downcast_mut::<i32>().unwrap() = 400;
+        assert_eq!(world.grid[1][0], 400);
+
+        let speed = reflect_path_mut(&mut world, &ParsedPath::parse(".player.speed").unwrap()).unwrap();
+        *speed.downcast_mut::<f32>().unwrap() = 9.0;
+        assert_eq!(world.player.speed, 9.0);
+
+        let entry = reflect_path_mut(&mut world, &ParsedPath::parse(r#".lookup["a"]"#).unwrap()).unwrap();
+        *entry.downcast_mut::<i32>().unwrap() = 111;
+        assert_eq!(world.lookup["a"], 111);
+    }
+
+    #[test]
+    fn apply_patches_and_grows_lists() {
+        let mut list = vec![1, 2, 3];
+        let source = vec![10, 20, 30, 40];
+        list.apply(&source as &dyn Reflect).expect("list apply");
+        assert_eq!(list, vec![10, 20, 30, 40]);
+    }
+
+    #[test]
+    fn apply_patches_existing_and_inserts_new_map_entries() {
+        let mut map = HashMap::new();
+        map.insert("a".to_string(), 1);
+
+        let mut source = HashMap::new();
+        source.insert("a".to_string(), 5);
+        source.insert("b".to_string(), 9);
+
+        map.apply(&source as &dyn Reflect).expect("map apply");
+        assert_eq!(map.get("a"), Some(&5));
+        assert_eq!(map.get("b"), Some(&9));
+    }
+}

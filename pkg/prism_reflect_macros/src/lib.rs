@@ -95,6 +95,36 @@ fn derive_named_struct(ident: &syn::Ident, fields: &Fields) -> TokenStream2 {
             fn reflect_mut(&mut self) -> ::prism_reflect::ReflectMut<'_> {
                 ::prism_reflect::ReflectMut::Struct(self)
             }
+            fn reflect_clone(&self) -> ::std::boxed::Box<dyn ::prism_reflect::Reflect> {
+                let mut __dynamic = ::prism_reflect::DynamicStruct::new();
+                __dynamic.set_represented_type_name(::core::any::type_name::<#ident>());
+                #(
+                    __dynamic.insert_boxed(
+                        #name_strs,
+                        ::prism_reflect::Reflect::reflect_clone(&self.#names),
+                    );
+                )*
+                ::std::boxed::Box::new(__dynamic)
+            }
+        }
+
+        impl ::prism_reflect::FromReflect for #ident {
+            fn from_reflect(
+                reflect: &dyn ::prism_reflect::Reflect,
+            ) -> ::core::option::Option<Self> {
+                let ::prism_reflect::ReflectRef::Struct(__source) =
+                    ::prism_reflect::Reflect::reflect_ref(reflect)
+                else {
+                    return ::core::option::Option::None;
+                };
+                ::core::option::Option::Some(Self {
+                    #(
+                        #names: <#types as ::prism_reflect::FromReflect>::from_reflect(
+                            ::prism_reflect::Struct::field(__source, #name_strs)?,
+                        )?,
+                    )*
+                })
+            }
         }
 
         impl ::prism_reflect::Struct for #ident {
@@ -175,6 +205,35 @@ fn derive_tuple_struct(ident: &syn::Ident, fields: &Fields) -> TokenStream2 {
             fn reflect_mut(&mut self) -> ::prism_reflect::ReflectMut<'_> {
                 ::prism_reflect::ReflectMut::TupleStruct(self)
             }
+            fn reflect_clone(&self) -> ::std::boxed::Box<dyn ::prism_reflect::Reflect> {
+                let mut __dynamic = ::prism_reflect::DynamicTupleStruct::new();
+                __dynamic.set_represented_type_name(::core::any::type_name::<#ident>());
+                #(
+                    __dynamic.insert_boxed(
+                        ::prism_reflect::Reflect::reflect_clone(&self.#tuple_indices),
+                    );
+                )*
+                ::std::boxed::Box::new(__dynamic)
+            }
+        }
+
+        impl ::prism_reflect::FromReflect for #ident {
+            fn from_reflect(
+                reflect: &dyn ::prism_reflect::Reflect,
+            ) -> ::core::option::Option<Self> {
+                let ::prism_reflect::ReflectRef::TupleStruct(__source) =
+                    ::prism_reflect::Reflect::reflect_ref(reflect)
+                else {
+                    return ::core::option::Option::None;
+                };
+                ::core::option::Option::Some(Self(
+                    #(
+                        <#types as ::prism_reflect::FromReflect>::from_reflect(
+                            ::prism_reflect::TupleStruct::field(__source, #indices)?,
+                        )?,
+                    )*
+                ))
+            }
         }
 
         impl ::prism_reflect::TupleStruct for #ident {
@@ -227,6 +286,8 @@ fn derive_enum(ident: &syn::Ident, data: &syn::DataEnum) -> TokenStream2 {
     let mut field_at_mut_arms = Vec::new();
     let mut count_arms = Vec::new();
     let mut variant_infos = Vec::new();
+    let mut clone_arms = Vec::new();
+    let mut from_arms = Vec::new();
 
     for (vindex, variant) in data.variants.iter().enumerate() {
         let vident = &variant.ident;
@@ -243,6 +304,16 @@ fn derive_enum(ident: &syn::Ident, data: &syn::DataEnum) -> TokenStream2 {
                 field_at_arms.push(quote! { Self::#vident => ::core::option::Option::None, });
                 field_at_mut_arms.push(quote! { Self::#vident => ::core::option::Option::None, });
                 count_arms.push(quote! { Self::#vident => 0usize, });
+                clone_arms.push(quote! {
+                    Self::#vident => ::prism_reflect::DynamicEnum::new(
+                        #vindex,
+                        #vname,
+                        ::prism_reflect::DynamicVariant::Unit,
+                    ),
+                });
+                from_arms.push(quote! {
+                    #vname => ::core::option::Option::Some(Self::#vident),
+                });
                 variant_infos.push(quote! {
                     ::prism_reflect::VariantInfo::new(
                         #vname,
@@ -273,6 +344,22 @@ fn derive_enum(ident: &syn::Ident, data: &syn::DataEnum) -> TokenStream2 {
                     },
                 });
                 count_arms.push(quote! { Self::#vident(..) => #fcount, });
+                clone_arms.push(quote! {
+                    Self::#vident( #( #binds ),* ) => ::prism_reflect::DynamicEnum::new(
+                        #vindex,
+                        #vname,
+                        ::prism_reflect::DynamicVariant::Tuple(::std::vec![
+                            #( ::prism_reflect::Reflect::reflect_clone(#binds), )*
+                        ]),
+                    ),
+                });
+                from_arms.push(quote! {
+                    #vname => ::core::option::Option::Some(Self::#vident(
+                        #( <#types as ::prism_reflect::FromReflect>::from_reflect(
+                            ::prism_reflect::Enum::field_at(__source, #idxs)?,
+                        )?, )*
+                    )),
+                });
                 variant_infos.push(quote! {
                     ::prism_reflect::VariantInfo::new(
                         #vname,
@@ -323,6 +410,22 @@ fn derive_enum(ident: &syn::Ident, data: &syn::DataEnum) -> TokenStream2 {
                     },
                 });
                 count_arms.push(quote! { Self::#vident { .. } => #fcount, });
+                clone_arms.push(quote! {
+                    Self::#vident { #( #fidents ),* } => ::prism_reflect::DynamicEnum::new(
+                        #vindex,
+                        #vname,
+                        ::prism_reflect::DynamicVariant::Struct(::std::vec![
+                            #( (#fnames, ::prism_reflect::Reflect::reflect_clone(#fidents)), )*
+                        ]),
+                    ),
+                });
+                from_arms.push(quote! {
+                    #vname => ::core::option::Option::Some(Self::#vident {
+                        #( #fidents: <#types as ::prism_reflect::FromReflect>::from_reflect(
+                            ::prism_reflect::Enum::field(__source, #fnames)?,
+                        )?, )*
+                    }),
+                });
                 variant_infos.push(quote! {
                     ::prism_reflect::VariantInfo::new(
                         #vname,
@@ -357,6 +460,27 @@ fn derive_enum(ident: &syn::Ident, data: &syn::DataEnum) -> TokenStream2 {
             }
             fn reflect_mut(&mut self) -> ::prism_reflect::ReflectMut<'_> {
                 ::prism_reflect::ReflectMut::Enum(self)
+            }
+            fn reflect_clone(&self) -> ::std::boxed::Box<dyn ::prism_reflect::Reflect> {
+                let mut __dynamic = match self { #( #clone_arms )* };
+                __dynamic.set_represented_type_name(::core::any::type_name::<#ident>());
+                ::std::boxed::Box::new(__dynamic)
+            }
+        }
+
+        impl ::prism_reflect::FromReflect for #ident {
+            fn from_reflect(
+                reflect: &dyn ::prism_reflect::Reflect,
+            ) -> ::core::option::Option<Self> {
+                let ::prism_reflect::ReflectRef::Enum(__source) =
+                    ::prism_reflect::Reflect::reflect_ref(reflect)
+                else {
+                    return ::core::option::Option::None;
+                };
+                match ::prism_reflect::Enum::variant_name(__source) {
+                    #( #from_arms )*
+                    _ => ::core::option::Option::None,
+                }
             }
         }
 

@@ -133,6 +133,17 @@ macro_rules! impl_reflect_map {
             fn reflect_mut(&mut self) -> ReflectMut<'_> {
                 ReflectMut::Map(self)
             }
+            fn reflect_clone(&self) -> Box<dyn Reflect> {
+                let mut cloned = crate::DynamicMap::new();
+                cloned.set_represented_type_name(::core::any::type_name::<Self>());
+                for (key, value) in self.iter() {
+                    cloned.insert_boxed(
+                        Reflect::reflect_clone(key),
+                        Reflect::reflect_clone(value),
+                    );
+                }
+                Box::new(cloned)
+            }
         }
 
         impl<K, V> Typed for $map<K, V>

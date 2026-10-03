@@ -115,6 +115,14 @@ impl<T: Reflect + Typed> Reflect for Vec<T> {
     fn reflect_mut(&mut self) -> ReflectMut<'_> {
         ReflectMut::List(self)
     }
+    fn reflect_clone(&self) -> Box<dyn Reflect> {
+        let mut cloned = crate::DynamicList::new();
+        cloned.set_represented_type_name(::core::any::type_name::<Self>());
+        for item in self.as_slice() {
+            cloned.push_boxed(Reflect::reflect_clone(item));
+        }
+        Box::new(cloned)
+    }
 }
 
 impl<T: Reflect + Typed> Typed for Vec<T> {

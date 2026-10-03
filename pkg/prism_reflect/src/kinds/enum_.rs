@@ -118,6 +118,21 @@ impl<T: Reflect + Typed> Reflect for Option<T> {
     fn reflect_mut(&mut self) -> ReflectMut<'_> {
         ReflectMut::Enum(self)
     }
+    fn reflect_clone(&self) -> Box<dyn Reflect> {
+        let variant = match self {
+            None => crate::DynamicVariant::Unit,
+            Some(value) => {
+                crate::DynamicVariant::Tuple(vec![Reflect::reflect_clone(value)])
+            }
+        };
+        let mut cloned = crate::DynamicEnum::new(
+            Enum::variant_index(self),
+            Enum::variant_name(self),
+            variant,
+        );
+        cloned.set_represented_type_name(::core::any::type_name::<Self>());
+        Box::new(cloned)
+    }
 }
 
 impl<T: Reflect + Typed> Typed for Option<T> {
@@ -216,6 +231,19 @@ impl<T: Reflect + Typed, E: Reflect + Typed> Reflect for Result<T, E> {
     }
     fn reflect_mut(&mut self) -> ReflectMut<'_> {
         ReflectMut::Enum(self)
+    }
+    fn reflect_clone(&self) -> Box<dyn Reflect> {
+        let variant = match self {
+            Ok(value) => crate::DynamicVariant::Tuple(vec![Reflect::reflect_clone(value)]),
+            Err(value) => crate::DynamicVariant::Tuple(vec![Reflect::reflect_clone(value)]),
+        };
+        let mut cloned = crate::DynamicEnum::new(
+            Enum::variant_index(self),
+            Enum::variant_name(self),
+            variant,
+        );
+        cloned.set_represented_type_name(::core::any::type_name::<Self>());
+        Box::new(cloned)
     }
 }
 

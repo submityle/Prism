@@ -52,7 +52,7 @@ macro_rules! impl_reflect_set {
     ($set:ident, $($value_bound:tt)+) => {
         impl<T> Set for $set<T>
         where
-            T: Reflect + Typed + $($value_bound)+,
+            T: Reflect + Typed + ::core::clone::Clone + $($value_bound)+,
         {
             fn contains(&self, value: &dyn Reflect) -> bool {
                 match value.downcast_ref::<T>() {
@@ -77,7 +77,7 @@ macro_rules! impl_reflect_set {
 
         impl<T> Reflect for $set<T>
         where
-            T: Reflect + Typed + $($value_bound)+,
+            T: Reflect + Typed + ::core::clone::Clone + $($value_bound)+,
         {
             fn type_name(&self) -> &'static str {
                 ::core::any::type_name::<Self>()
@@ -106,11 +106,14 @@ macro_rules! impl_reflect_set {
             fn reflect_mut(&mut self) -> ReflectMut<'_> {
                 ReflectMut::Set(self)
             }
+            fn reflect_clone(&self) -> Box<dyn Reflect> {
+                Box::new(::core::clone::Clone::clone(self))
+            }
         }
 
         impl<T> Typed for $set<T>
         where
-            T: Reflect + Typed + $($value_bound)+,
+            T: Reflect + Typed + ::core::clone::Clone + $($value_bound)+,
         {
             fn type_info() -> &'static TypeInfo {
                 crate::cache::intern::<Self, _>(|| {
@@ -124,7 +127,7 @@ macro_rules! impl_reflect_set {
 
         impl<T> crate::registry::GetTypeRegistration for $set<T>
         where
-            T: Reflect + Typed + $($value_bound)+,
+            T: Reflect + Typed + ::core::clone::Clone + $($value_bound)+,
         {
             fn get_type_registration() -> crate::registry::TypeRegistration {
                 crate::registry::TypeRegistration::of::<Self>()

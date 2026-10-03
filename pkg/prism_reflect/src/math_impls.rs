@@ -67,6 +67,15 @@ macro_rules! impl_reflect_math_struct {
             fn reflect_mut(&mut self) -> ReflectMut<'_> {
                 ReflectMut::Struct(self)
             }
+            fn reflect_clone(&self) -> Box<dyn Reflect> {
+                Box::new(::core::clone::Clone::clone(self))
+            }
+        }
+
+        impl crate::FromReflect for $ty {
+            fn from_reflect(reflect: &dyn Reflect) -> Option<Self> {
+                reflect.as_any().downcast_ref::<$ty>().cloned()
+            }
         }
 
         impl Typed for $ty {

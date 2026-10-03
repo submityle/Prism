@@ -1,8 +1,10 @@
 //! The core `Reflect` trait and its down-casting views.
 
+use crate::apply::ApplyError;
 use crate::kinds::{Array, Enum, List, Map, Set};
 use crate::type_info::TypeInfo;
 use core::any::Any;
+use std::boxed::Box;
 
 /// The universal reflection trait: a bridge from Rust's static type world to
 /// the dynamic data-driven world (editor/scripting/serialization/network).
@@ -10,7 +12,8 @@ use core::any::Any;
 /// The trait exposes static `TypeInfo`, `Any`-based downcasting, owned
 /// `Box<dyn Any>` recovery, and the `ReflectRef`/`ReflectMut` views used to
 /// walk every reflected shape (struct/tuple-struct/enum/list/array/map/set and
-/// leaf values). `apply`/`reflect_hash`/`reflect_partial_eq` (design §5/§8)
+/// leaf values), plus the M2 [`apply`](Reflect::apply)/[`reflect_clone`](Reflect::reflect_clone)
+/// state-transfer operations. `reflect_hash`/`reflect_partial_eq` (design §8)
 /// land in later milestones.
 pub trait Reflect: Any + Send + Sync {
     /// The runtime type name of `self`.
@@ -40,6 +43,32 @@ pub trait Reflect: Any + Send + Sync {
 
     /// Down-explore the value into a typed mutable view.
     fn reflect_mut(&mut self) -> ReflectMut<'_>;
+
+    /// Recursively copy the state of `source` into `self`.
+    ///
+    /// Container kinds patch by name/index/key and recurse; leaf values
+    /// clone-assign. A [`DynamicEnum`](crate::DynamicEnum) target may switch to
+    /// the source's active variant, while a concrete enum requires the variant
+    /// to already match. The default implementation dispatches on
+    /// [`reflect_mut`](Reflect::reflect_mut); leaf value types override it with
+    /// a direct clone-assign.
+    ///
+    /// # Errors
+    /// Returns an [`ApplyError`] when the two values' kinds disagree, a leaf
+    /// type mismatch occurs, a concrete enum variant cannot be switched, or a
+    /// container rejects an element.
+    fn apply(&mut self, source: &dyn Reflect) -> Result<(), ApplyError> {
+        crate::apply::apply_impl(self.as_reflect_mut(), source)
+    }
+
+    /// Produce an owned, deep clone of this value as a boxed `dyn Reflect`.
+    ///
+    /// Leaf and `Copy` types clone/copy directly; container and derived types
+    /// rebuild an equivalent [`Dynamic*`](crate::dynamic) value whose elements
+    /// are themselves `reflect_clone`d. The result can be
+    /// [`apply`](Reflect::apply)-ed onto a concrete value or converted back with
+    /// [`FromReflect`](crate::FromReflect).
+    fn reflect_clone(&self) -> Box<dyn Reflect>;
 }
 
 impl dyn Reflect {
