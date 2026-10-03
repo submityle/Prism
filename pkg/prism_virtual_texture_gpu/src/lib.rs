@@ -30,9 +30,13 @@
 //! search; no neural, learned, or data-driven components. No Unreal Engine
 //! source or derived code.
 
+extern crate alloc;
+
 pub mod buffer;
 pub mod context;
+pub mod feedback;
 pub mod lookup;
 
 pub use context::GpuContext;
+pub use feedback::{CellMap, GpuFeedbackDecode, REQ_NONE};
 pub use lookup::{GpuPageLookup, MISS};
