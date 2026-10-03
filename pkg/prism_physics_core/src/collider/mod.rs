@@ -154,6 +154,8 @@ pub mod min_area_fill;
 pub use min_area_fill::{triangulate_min_area, MinAreaFill, MAX_LOOP_VERTICES};
 pub mod smoothing;
 pub use smoothing::{taubin_smooth, SmoothingParams};
+pub mod concavity;
+pub use concavity::{measure_concavity, MeshConcavity, DEFAULT_CONCAVITY_TOLERANCE};
 
 /// A handle into a [`ShapeRegistry`].
 ///
