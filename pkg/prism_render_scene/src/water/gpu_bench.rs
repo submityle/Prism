@@ -45,7 +45,7 @@ use wgpu::{
     TextureViewDescriptor,
 };
 
-use super::abi::GpuWaterSpectrumParams;
+use super::abi::{GpuWaterSpectrumParams, GpuWaterSweParams};
 
 /// Generous upper bound (microseconds) for a single water compute pass over the
 /// benchmarked tile sizes. A real dispatch over an `N <= 512` grid completes far
@@ -584,5 +584,234 @@ fn spectrum_pass_gpu_budget_is_measured() {
                 "{label} @ {n}x{n} measured {us} us is not a healthy bounded timing"
             );
         }
+    }
+}
+
+/// Compiles `water_surface.wesl` and returns its `Wgsl` translation. The
+/// shallow-water (`SWE`) step and the foam advection kernels both live in this
+/// module, so the surface benches share one compiled translation.
+fn compile_surface_wgsl() -> String {
+    let mut cache = ShaderCache::new((), keep_wgsl);
+    let id = AssetId::Uuid {
+        uuid: Uuid::from_u128(0x5052_4953_4d5f_4245_4e43_4842_5357_0001),
+    };
+    cache.set_shader(
+        id,
+        Shader::from_wesl(
+            include_str!("../shaders/water_surface.wesl"),
+            "embedded://prism_render_scene/shaders/water_surface.wesl",
+        ),
+    );
+    let module = cache
+        .get(0, id, &[])
+        .unwrap_or_else(|error| panic!("water_surface.wesl failed to compile: {error}"));
+    (*module).clone()
+}
+
+/// Builds a deterministic, non-trivial shallow-water state for an `N x N` tile:
+/// a raised algebraic bump over an otherwise still `1 m` sheet with sheared
+/// velocities, plus a couple of interaction sources. This exercises every
+/// branch of the step (interior flux, reflective walls, pressure gradient,
+/// upwind advection, damping, source injection) so the timed dispatch does the
+/// same work a production frame would. Timing does not depend on the exact
+/// amplitudes, only on the full domain being exercised.
+fn swe_bench_state(n: u32) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<[f32; 4]>) {
+    let nx = n as usize;
+    let nz = n as usize;
+    let count = nx * nz;
+    let mut h = vec![0.0_f32; count];
+    let mut u = vec![0.0_f32; count];
+    let mut v = vec![0.0_f32; count];
+    let cx = (nx as f32 - 1.0) * 0.5;
+    let cz = (nz as f32 - 1.0) * 0.5;
+    let mut z = 0usize;
+    while z < nz {
+        let mut x = 0usize;
+        while x < nx {
+            let i = z * nx + x;
+            let fx = x as f32 - cx;
+            let fz = z as f32 - cz;
+            let r2 = fx * fx + fz * fz;
+            let bump = (1.0 - r2 * 0.002).max(0.0);
+            h[i] = 1.0 + 0.5 * bump;
+            u[i] = 0.005 * fx;
+            v[i] = -0.004 * fz;
+            x += 1;
+        }
+        z += 1;
+    }
+    let mut sources = vec![[0.0_f32; 4]; count];
+    let center = (nz / 2) * nx + (nx / 2);
+    sources[center] = [0.2, 0.0, 0.0, 0.0];
+    let off = (nz / 4) * nx + (nx / 4);
+    sources[off] = [0.0, 0.15, -0.1, 0.0];
+    (h, u, v, sources)
+}
+
+/// Times one `water_swe_step` pass over an `N x N` tile and returns the median
+/// measured microseconds across [`TIMED_RUNS`] runs. The eight bindings are
+/// assembled from the pipeline's reflected `group(0)` layout in the exact order
+/// the sibling parity test (`gpu_tests::dispatch_swe`) uses, so the timed pass
+/// is the same dispatch the parity suite already proved numerically faithful.
+fn measure_swe_step(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    wgsl: &str,
+    entry: &str,
+    n: u32,
+) -> f64 {
+    let (h, u, v, sources) = swe_bench_state(n);
+    let scalar_bytes = (h.len() * size_of::<f32>()) as u64;
+
+    let module = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("bench_swe_step"),
+        source: ShaderSource::Wgsl(wgsl.into()),
+    });
+    let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("bench_swe_step"),
+        layout: None,
+        module: &module,
+        entry_point: Some(entry),
+        compilation_options: PipelineCompilationOptions::default(),
+        cache: None,
+    });
+
+    let storage_read = BufferUsages::STORAGE;
+    let h_in = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("bench_swe_h_in"),
+        contents: bytemuck::cast_slice(&h),
+        usage: storage_read,
+    });
+    let u_in = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("bench_swe_u_in"),
+        contents: bytemuck::cast_slice(&u),
+        usage: storage_read,
+    });
+    let v_in = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("bench_swe_v_in"),
+        contents: bytemuck::cast_slice(&v),
+        usage: storage_read,
+    });
+    let make_out = |label: &str| {
+        device.create_buffer(&BufferDescriptor {
+            label: Some(label),
+            size: scalar_bytes,
+            usage: BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        })
+    };
+    let h_out = make_out("bench_swe_h_out");
+    let u_out = make_out("bench_swe_u_out");
+    let v_out = make_out("bench_swe_v_out");
+    let src_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("bench_swe_sources"),
+        contents: bytemuck::cast_slice(&sources),
+        usage: storage_read,
+    });
+
+    let params = GpuWaterSweParams {
+        nx: n,
+        nz: n,
+        dx: 0.5,
+        gravity: 9.81,
+        damping: 0.2,
+        dt: 0.016,
+        cfl_number: 0.5,
+        // A fixed positive signal speed keeps the explicit step inside its
+        // `CFL` bound without needing the host `swe::max_wave_speed` scan; the
+        // kernel's branch work is identical for any finite positive value.
+        max_wave_speed: 4.0,
+    };
+    let param_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("bench_swe_params"),
+        contents: bytemuck::bytes_of(&params),
+        usage: BufferUsages::UNIFORM,
+    });
+
+    let layout = pipeline.get_bind_group_layout(0);
+    let bind_group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("bench_swe_bind_group"),
+        layout: &layout,
+        entries: &[
+            BindGroupEntry {
+                binding: 0,
+                resource: h_in.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 1,
+                resource: u_in.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 2,
+                resource: v_in.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 3,
+                resource: h_out.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 4,
+                resource: u_out.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 5,
+                resource: v_out.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 6,
+                resource: src_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 7,
+                resource: param_buf.as_entire_binding(),
+            },
+        ],
+    });
+
+    let groups = n.div_ceil(8);
+    let timer = PassTimer::new(device);
+    time_dispatch(
+        device,
+        queue,
+        &pipeline,
+        &bind_group,
+        groups,
+        groups,
+        &timer,
+    )
+}
+
+/// Measures the shallow-water step kernel (`water_swe_step`) on a real device
+/// across [`BENCH_GRIDS`] and asserts each pass takes a finite, strictly
+/// positive, bounded time. The design doc (`docs/prism_water_engine_design_zh.md`
+/// §12) budgets `SWE` height-field stepping at `<= 0.3 ms/domain` as a **design
+/// target, not a measured value**; this turns that line into an actual
+/// on-device measurement. The printed medians are the numbers the design-target
+/// budget should be re-tuned against.
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the measured budget (and the skip notice) must reach the test log so it can be captured"
+)]
+fn swe_step_pass_gpu_budget_is_measured() {
+    let Some((device, queue)) = try_timing_device() else {
+        eprintln!(
+            "swe_step_pass_gpu_budget_is_measured: no timestamp-capable wgpu adapter, skipping on-device timing"
+        );
+        return;
+    };
+
+    let wgsl = compile_surface_wgsl();
+    let entry = find_entry_point(&wgsl, "swe_step");
+
+    for n in BENCH_GRIDS {
+        let step_us = measure_swe_step(&device, &queue, &wgsl, &entry, n);
+        eprintln!(
+            "water SWE step budget @ {n}x{n}: step = {step_us:.2} us (measured, median of {TIMED_RUNS})"
+        );
+        assert!(
+            step_us.is_finite() && step_us > 0.0 && step_us < MAX_PASS_MICROS,
+            "SWE step @ {n}x{n} measured {step_us} us is not a healthy bounded timing"
+        );
     }
 }
