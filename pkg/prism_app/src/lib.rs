@@ -106,9 +106,10 @@
 //!
 //! Everything on the public surface is a **real, working implementation** —
 //! no `todo!()`, `unimplemented!()`, or hollow stubs. Later milestones (sub-app
-//! pipelining, the windowed runner, record/replay determinism) layer on top
-//! without rewriting these foundations. Deferred features are documented as
-//! absent, never faked.
+//! pipelining, the windowed runner) layer on top without rewriting these
+//! foundations. For record/replay determinism, the seeded RNG, frame hash, and
+//! input record/replay have landed, while World-snapshot rollback stays
+//! deferred. Deferred features are documented as absent, never faked.
 //!
 //! # `std`
 //!
@@ -127,6 +128,8 @@ pub mod event;
 pub mod exit;
 pub mod fixed;
 pub mod lifecycle;
+#[cfg(feature = "determinism")]
+pub mod determinism;
 #[cfg(feature = "std")]
 pub mod diagnostics;
 #[cfg(feature = "std")]
@@ -158,6 +161,10 @@ pub use runner::{HeadlessRunner, ScheduleRunnerOnce, run_once};
 pub use fixed::{FixedFirst, FixedLast, FixedPostUpdate, FixedPreUpdate, FixedUpdate};
 pub use lifecycle::{
     AppLifecycle, FocusChanged, LowMemory, Resumed, Suspended, WillRenderFirstFrame,
+};
+#[cfg(feature = "determinism")]
+pub use determinism::{
+    DeterministicRng, FrameHash, InputRecording, RecordedInput, ReplayMode,
 };
 #[cfg(feature = "std")]
 pub use diagnostics::{
@@ -191,6 +198,10 @@ pub mod prelude {
     pub use crate::fixed::{FixedFirst, FixedLast, FixedPostUpdate, FixedPreUpdate, FixedUpdate};
     pub use crate::lifecycle::{
         AppLifecycle, FocusChanged, LowMemory, Resumed, Suspended, WillRenderFirstFrame,
+    };
+    #[cfg(feature = "determinism")]
+    pub use crate::determinism::{
+        DeterministicRng, FrameHash, InputRecording, RecordedInput, ReplayMode,
     };
     #[cfg(feature = "std")]
     pub use crate::diagnostics::{

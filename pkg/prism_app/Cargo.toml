@@ -27,6 +27,14 @@ std = ["prism_time/std"]
 # (threads), so it implies it.
 pipelined = ["std"]
 
+# Determinism & replay (design §15, §22 M5): a seeded reproducible RNG, a
+# per-frame state hash for dual-run divergence detection, and transparent
+# per-step input record/replay. The primitives are pure core+alloc logic
+# (no clocks/threads), so this feature is additive and does not imply `std`;
+# an app opts in only when it needs reproducible runs. World-snapshot rollback
+# stays out until `prism_ecs` grows a snapshot API (documented in the module).
+determinism = []
+
 # AAA lint bar. prism_app contains no `unsafe`, so unlike prism_ecs it can keep
 # the workspace-strength lints as warnings and still hit zero warnings.
 [lints.rust]

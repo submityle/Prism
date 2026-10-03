@@ -2444,3 +2444,428 @@ mod diagnostics_tests {
         assert_eq!(w.total_samples(), 2);
     }
 }
+
+/// Determinism & replay primitives (design §15, §22 M5): the seeded RNG, the
+/// per-frame FNV-1a frame hash (including the dual-run divergence check), and
+/// transparent input record/replay. Gated on the `determinism` feature so the
+/// default build neither compiles nor pays for them.
+#[cfg(feature = "determinism")]
+mod determinism_tests {
+    use super::*;
+
+    use crate::determinism::{
+        DeterministicRng, FrameHash, InputRecording, RecordedInput, ReplayMode,
+        DEFAULT_HASH_HISTORY,
+    };
+
+    // ---- DeterministicRng -------------------------------------------------
+
+    /// The whole point of a seeded RNG: two generators from the same seed that
+    /// draw in the same order observe the identical stream, and the seed is
+    /// recoverable for logging/reproduction.
+    #[test]
+    fn rng_same_seed_reproduces_the_stream() {
+        let mut a = DeterministicRng::seeded(0x1234_5678_9ABC_DEF0);
+        let mut b = DeterministicRng::seeded(0x1234_5678_9ABC_DEF0);
+        assert_eq!(a.seed(), 0x1234_5678_9ABC_DEF0);
+        assert_eq!(b.seed(), a.seed());
+
+        let sa: Vec<u64> = (0..64).map(|_| a.next_u64()).collect();
+        let sb: Vec<u64> = (0..64).map(|_| b.next_u64()).collect();
+        assert_eq!(sa, sb, "same seed must reproduce the exact stream");
+        // A non-trivial generator does not just echo its seed back.
+        assert_ne!(sa[0], 0x1234_5678_9ABC_DEF0);
+    }
+
+    /// Different seeds produce different streams (sanity: the generator mixes
+    /// the seed rather than ignoring it).
+    #[test]
+    fn rng_different_seeds_diverge() {
+        let mut a = DeterministicRng::seeded(1);
+        let mut b = DeterministicRng::seeded(2);
+        let sa: Vec<u64> = (0..32).map(|_| a.next_u64()).collect();
+        let sb: Vec<u64> = (0..32).map(|_| b.next_u64()).collect();
+        assert_ne!(sa, sb);
+    }
+
+    /// `fork` yields an independent, reproducible child stream and perturbs the
+    /// parent by exactly the single draw it consumes.
+    #[test]
+    fn rng_fork_is_reproducible_and_consumes_one_draw() {
+        // The child is seeded from the parent's next draw: forking twice from
+        // equal parents yields equal children.
+        let mut p1 = DeterministicRng::seeded(99);
+        let mut p2 = DeterministicRng::seeded(99);
+        let mut c1 = p1.fork();
+        let mut c2 = p2.fork();
+        let s1: Vec<u64> = (0..16).map(|_| c1.next_u64()).collect();
+        let s2: Vec<u64> = (0..16).map(|_| c2.next_u64()).collect();
+        assert_eq!(s1, s2, "forked children from equal parents match");
+
+        // Forking consumes exactly one parent draw: a parent that forked once
+        // is where an un-forked peer is after a single `next_u64`.
+        let mut forked = DeterministicRng::seeded(7);
+        let child_seed = {
+            let mut peek = forked.clone();
+            peek.next_u64()
+        };
+        let actual_child = forked.fork();
+        assert_eq!(
+            actual_child.seed(),
+            child_seed,
+            "child seed is the parent's next draw"
+        );
+
+        let mut plain = DeterministicRng::seeded(7);
+        plain.next_u64(); // consume the one draw fork used
+        assert_eq!(forked.next_u64(), plain.next_u64());
+    }
+
+    /// `next_bounded_u64` stays in range for a variety of bounds, returns `0`
+    /// for a zero bound, and covers the full range for a small bound.
+    #[test]
+    fn rng_bounded_is_in_range_and_handles_zero() {
+        let mut rng = DeterministicRng::seeded(0xDEAD_BEEF);
+        assert_eq!(rng.next_bounded_u64(0), 0, "bound 0 => 0");
+        assert_eq!(rng.next_bounded_u64(1), 0, "bound 1 => only 0");
+
+        let mut seen = [false; 6];
+        for _ in 0..4096 {
+            let v = rng.next_bounded_u64(6);
+            assert!(v < 6, "value {v} must be < bound");
+            seen[v as usize] = true;
+        }
+        assert!(seen.iter().all(|&s| s), "a fair die should hit every face");
+    }
+
+    /// The float draws land in `[0, 1)` and reproduce from the same seed.
+    #[test]
+    fn rng_floats_are_unit_interval_and_reproducible() {
+        let mut a = DeterministicRng::seeded(42);
+        let mut b = DeterministicRng::seeded(42);
+        for _ in 0..1000 {
+            let fa = a.next_f64();
+            assert!((0.0..1.0).contains(&fa), "f64 {fa} not in [0,1)");
+            assert_eq!(fa.to_bits(), b.next_f64().to_bits(), "f64 reproducible");
+        }
+        let mut c = DeterministicRng::seeded(42);
+        let mut d = DeterministicRng::seeded(42);
+        for _ in 0..1000 {
+            let fc = c.next_f32();
+            assert!((0.0..1.0).contains(&fc), "f32 {fc} not in [0,1)");
+            assert_eq!(fc.to_bits(), d.next_f32().to_bits(), "f32 reproducible");
+        }
+    }
+
+    // ---- FrameHash --------------------------------------------------------
+
+    /// Folding then finalizing produces a stable, order-sensitive digest, and
+    /// an empty frame finalizes to the FNV-1a offset basis.
+    #[test]
+    fn frame_hash_folds_finalizes_and_is_order_sensitive() {
+        // Equal inputs in equal order => equal finalized hash.
+        let mut a = FrameHash::new();
+        let mut b = FrameHash::new();
+        a.write_u64(1);
+        a.write_u64(2);
+        b.write_u64(1);
+        b.write_u64(2);
+        assert_eq!(a.finalize_frame(), b.finalize_frame());
+
+        // Reversed order => different hash (FNV-1a is order-sensitive).
+        let mut c = FrameHash::new();
+        let mut d = FrameHash::new();
+        c.write_u64(1);
+        c.write_u64(2);
+        d.write_u64(2);
+        d.write_u64(1);
+        assert_ne!(c.finalize_frame(), d.finalize_frame());
+
+        // An empty frame finalizes to the offset basis (0xcbf2_9ce4_8422_2325).
+        let mut e = FrameHash::new();
+        assert_eq!(e.finalize_frame(), 0xcbf2_9ce4_8422_2325);
+    }
+
+    /// `current` accumulates during a frame and resets to the offset basis
+    /// after finalize; `frame_index` counts total finalized frames.
+    #[test]
+    fn frame_hash_current_resets_and_index_advances() {
+        let mut h = FrameHash::new();
+        assert_eq!(h.frame_index(), 0);
+        assert!(h.is_empty());
+        assert_eq!(h.last(), None);
+
+        h.write_u8(0xAB);
+        assert_ne!(h.current(), 0xcbf2_9ce4_8422_2325, "folding changed current");
+        let f0 = h.finalize_frame();
+        assert_eq!(h.current(), 0xcbf2_9ce4_8422_2325, "current reset after finalize");
+        assert_eq!(h.frame_index(), 1);
+        assert_eq!(h.last(), Some(f0));
+        assert_eq!(h.len(), 1);
+        assert!(!h.is_empty());
+    }
+
+    /// The rolling history is bounded by the window: the oldest finalized hash
+    /// is evicted once the window is full, while `frame_index` keeps climbing.
+    #[test]
+    fn frame_hash_window_bounds_history() {
+        let mut h = FrameHash::with_window(3);
+        assert_eq!(h.window(), 3);
+        for i in 0..5u64 {
+            h.write_u64(i);
+            h.finalize_frame();
+        }
+        assert_eq!(h.len(), 3, "history stays within the window");
+        assert_eq!(h.frame_index(), 5, "frame_index counts every finalized frame");
+
+        // The retained hashes are the last three frames (i = 2,3,4), oldest
+        // first. Recompute the expected digests independently.
+        let expected: Vec<u64> = (2..5u64)
+            .map(|i| {
+                let mut g = FrameHash::new();
+                g.write_u64(i);
+                g.finalize_frame()
+            })
+            .collect();
+        let got: Vec<u64> = h.history().collect();
+        assert_eq!(got, expected);
+    }
+
+    /// A `0` window is clamped to `1`, so `last` always reflects the most
+    /// recent finalized frame.
+    #[test]
+    fn frame_hash_zero_window_clamped_to_one() {
+        let mut h = FrameHash::with_window(0);
+        assert_eq!(h.window(), 1);
+        h.write_u64(10);
+        h.finalize_frame();
+        h.write_u64(20);
+        let last = h.finalize_frame();
+        assert_eq!(h.len(), 1);
+        assert_eq!(h.last(), Some(last));
+        assert_eq!(h.frame_index(), 2);
+    }
+
+    /// `write_f64`/`write_f32` fold by raw bits, so distinct bit patterns
+    /// (notably `+0.0` vs `-0.0`) hash differently — the hash reports
+    /// divergence rather than papering over it.
+    #[test]
+    fn frame_hash_floats_fold_by_bits() {
+        let mut pos = FrameHash::new();
+        let mut neg = FrameHash::new();
+        pos.write_f64(0.0);
+        neg.write_f64(-0.0);
+        assert_ne!(pos.finalize_frame(), neg.finalize_frame());
+
+        let mut a = FrameHash::new();
+        let mut b = FrameHash::new();
+        a.write_f32(1.5);
+        b.write_f32(1.5);
+        assert_eq!(a.finalize_frame(), b.finalize_frame());
+    }
+
+    // ---- App integration --------------------------------------------------
+
+    /// Determinism resources are opt-in: a fresh `App` installs none of them.
+    #[test]
+    fn determinism_absent_by_default() {
+        let app = App::new();
+        assert!(app.deterministic_rng().is_none());
+        assert!(app.frame_hash().is_none());
+        assert!(app.input_recording::<u32>().is_none());
+    }
+
+    /// `init_determinism` installs both the RNG and the frame hash, and the
+    /// scheduled `Last` finalize records one frame per `update()`.
+    #[test]
+    fn init_determinism_installs_and_finalizes_each_frame() {
+        let mut app = App::new();
+        app.set_time_update_strategy(TimeUpdateStrategy::ManualDelta(Duration::from_millis(10)));
+        app.set_fixed_timestep_hz(100.0);
+        app.init_determinism(7);
+
+        assert_eq!(app.deterministic_rng().unwrap().seed(), 7);
+        assert_eq!(app.frame_hash().unwrap().window(), DEFAULT_HASH_HISTORY);
+        // Nothing finalized before the first frame.
+        assert!(app.frame_hash().unwrap().last().is_none());
+
+        const FRAMES: u64 = 4;
+        for _ in 0..FRAMES {
+            app.update();
+        }
+        let hash = app.frame_hash().unwrap();
+        assert_eq!(hash.frame_index(), FRAMES, "one finalize per frame");
+        assert!(hash.last().is_some());
+    }
+
+    /// The init helpers are idempotent: a second call never reseeds the RNG,
+    /// replaces the frame hash (losing history), or double-schedules finalize.
+    #[test]
+    fn init_helpers_are_idempotent() {
+        let mut app = App::new();
+        app.set_time_update_strategy(TimeUpdateStrategy::ManualDelta(Duration::from_millis(10)));
+        app.set_fixed_timestep_hz(100.0);
+        app.init_determinism(7);
+        app.update();
+
+        // Re-init with a different seed/window must be ignored.
+        app.init_determinism(999);
+        app.init_frame_hash_with_window(1);
+        assert_eq!(app.deterministic_rng().unwrap().seed(), 7, "seed preserved");
+        assert_eq!(
+            app.frame_hash().unwrap().window(),
+            DEFAULT_HASH_HISTORY,
+            "window preserved"
+        );
+
+        // Exactly one finalize per frame despite repeated init calls.
+        let before = app.frame_hash().unwrap().frame_index();
+        app.update();
+        assert_eq!(
+            app.frame_hash().unwrap().frame_index(),
+            before + 1,
+            "finalize scheduled exactly once"
+        );
+    }
+
+    /// Design §22 acceptance check: two independent apps with the same seed,
+    /// driven by the same deltas and the same per-frame RNG folding, produce
+    /// bit-identical frame-hash histories (dual-run determinism), while a
+    /// different seed diverges.
+    #[test]
+    fn dual_run_frame_hashes_match_for_equal_seeds() {
+        fn hashing_app(seed: u64) -> App {
+            let mut app = App::new();
+            app.set_time_update_strategy(TimeUpdateStrategy::ManualDelta(
+                Duration::from_millis(10),
+            ));
+            app.set_fixed_timestep_hz(100.0);
+            app.init_determinism(seed);
+            app.add_systems(
+                Update,
+                |mut rng: ResMut<DeterministicRng>, mut hash: ResMut<FrameHash>| {
+                    // Fold a reproducible per-frame draw into the digest.
+                    let draw = rng.next_u64();
+                    hash.write_u64(draw);
+                },
+            );
+            app
+        }
+
+        const FRAMES: u64 = 8;
+        let mut a = hashing_app(0xABCD_1234);
+        let mut b = hashing_app(0xABCD_1234);
+        for _ in 0..FRAMES {
+            a.update();
+            b.update();
+        }
+        let ha: Vec<u64> = a.frame_hash().unwrap().history().collect();
+        let hb: Vec<u64> = b.frame_hash().unwrap().history().collect();
+        assert_eq!(ha.len(), FRAMES as usize);
+        assert_eq!(ha, hb, "equal seeds => bit-identical frame-hash history");
+
+        // A different seed diverges.
+        let mut c = hashing_app(0x9999_0000);
+        for _ in 0..FRAMES {
+            c.update();
+        }
+        let hc: Vec<u64> = c.frame_hash().unwrap().history().collect();
+        assert_ne!(ha, hc, "different seed => divergent history");
+    }
+
+    // ---- InputRecording ---------------------------------------------------
+
+    /// A record session captures each advanced frame tagged with its step; the
+    /// captured buffer replays the exact same sequence.
+    #[test]
+    fn input_record_then_replay_round_trips() {
+        let mut rec: InputRecording<u32> = InputRecording::recording();
+        assert_eq!(rec.mode(), ReplayMode::Record);
+        assert!(rec.is_empty());
+
+        let live = [10u32, 20, 30, 40];
+        for &v in &live {
+            // Record mode returns the live frame unchanged.
+            assert_eq!(rec.advance(v), v);
+        }
+        assert_eq!(rec.len(), live.len());
+        assert_eq!(rec.step(), live.len() as u64);
+        assert!(!rec.is_exhausted(), "recording is never 'exhausted'");
+
+        // Each frame is tagged with its zero-based step index.
+        for (i, captured) in rec.frames().iter().enumerate() {
+            assert_eq!(
+                captured,
+                &RecordedInput {
+                    step: i as u64,
+                    frame: live[i]
+                }
+            );
+        }
+
+        // Replay the captured buffer: it reproduces the recorded sequence
+        // regardless of what "live" input is fed.
+        let frames = rec.into_frames();
+        let mut replay = InputRecording::replaying(frames);
+        assert_eq!(replay.mode(), ReplayMode::Replay);
+        for &expected in &live {
+            // Feed a bogus live value; replay must ignore it.
+            assert_eq!(replay.advance(u32::MAX), expected);
+        }
+    }
+
+    /// Once a replay is exhausted it reports `is_exhausted` and transparently
+    /// falls back to the live input.
+    #[test]
+    fn replay_exhaustion_falls_back_to_live() {
+        let frames = vec![
+            RecordedInput { step: 0, frame: 1u8 },
+            RecordedInput { step: 1, frame: 2u8 },
+        ];
+        let mut replay = InputRecording::replaying(frames);
+        assert!(!replay.is_exhausted());
+        assert_eq!(replay.advance(100), 1);
+        assert_eq!(replay.advance(100), 2);
+        assert!(replay.is_exhausted(), "all recorded frames consumed");
+        // Past the end, the live frame passes through.
+        assert_eq!(replay.advance(100), 100);
+        assert_eq!(replay.advance(101), 101);
+        // The step counter keeps advancing across the boundary.
+        assert_eq!(replay.step(), 4);
+    }
+
+    /// Idle mode is a pure pass-through that still advances the step counter and
+    /// never records.
+    #[test]
+    fn idle_recording_passes_through() {
+        let mut idle: InputRecording<&'static str> = InputRecording::idle();
+        assert_eq!(idle.mode(), ReplayMode::Idle);
+        assert_eq!(idle.advance("a"), "a");
+        assert_eq!(idle.advance("b"), "b");
+        assert_eq!(idle.step(), 2);
+        assert!(idle.is_empty(), "idle never records");
+        assert!(!idle.is_exhausted());
+    }
+
+    /// `App::init_input_recording` installs a recorder for a frame type `F` and
+    /// is idempotent per `F` (an existing recorder is never replaced).
+    #[test]
+    fn app_input_recording_install_is_idempotent() {
+        let mut app = App::new();
+        assert!(app.input_recording::<u16>().is_none());
+
+        app.init_input_recording::<u16>(InputRecording::recording());
+        assert_eq!(app.input_recording::<u16>().unwrap().mode(), ReplayMode::Record);
+
+        // A second call with a different mode must be ignored for the same `F`.
+        app.init_input_recording::<u16>(InputRecording::idle());
+        assert_eq!(
+            app.input_recording::<u16>().unwrap().mode(),
+            ReplayMode::Record,
+            "existing recorder preserved"
+        );
+
+        // A different frame type is tracked independently.
+        assert!(app.input_recording::<i8>().is_none());
+    }
+}
