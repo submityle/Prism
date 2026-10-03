@@ -25,8 +25,9 @@ use prism_render_material::{
     decode_bc6h_signed, decode_bc6h_unsigned, decode_bc7, decode_bc7_mode0, decode_bc7_mode1,
     decode_bc7_mode2, decode_bc7_mode3, decode_bc7_mode7, encode_astc_single_partition_4x4_ldr,
     encode_astc_single_partition_4x4_ldr_q192, encode_astc_single_partition_4x4_ldr_quality,
-    encode_astc_single_partition_4x4_ldr_rgba, encode_bc1, encode_bc3, encode_bc6h_mode11_unsigned,
-    encode_bc7_mode4, encode_bc7_mode5, encode_bc7_mode6,
+    encode_astc_single_partition_4x4_ldr_rgba, encode_astc_single_partition_4x4_ldr_rgba_q6,
+    encode_bc1, encode_bc3, encode_bc6h_mode11_unsigned, encode_bc7_mode4, encode_bc7_mode5,
+    encode_bc7_mode6,
 };
 use prism_render_material_gpu::BlockOracle;
 use wgpu::{Features, TextureFormat};
@@ -5308,5 +5309,116 @@ fn astc_encoder_rgba_cem12_alpha_parity_against_gpu_hardware_decode() {
     );
     eprintln!(
         "ASTC CEM12 RGBA encoder parity: {compared} tiles decode within 1 LSB of hardware on all four channels (alpha genuinely carried, not forced 255)"
+    );
+}
+
+/// GPU parity for the finer-weight CEM-12 encoder (mode 67, QUANT_6 trit
+/// weights -> six interpolation levels). Proves two things against the real
+/// hardware ASTC decoder: (1) the trit weight bitstream round-trips within
+/// 1 LSB on all four channels (so `mirror_weight_stream` + `encode_trit_sequence`
+/// are the exact inverse of the hardware's reversed-ISE weight read), and
+/// (2) six levels reconstruct a smooth ramp strictly tighter than the four
+/// levels of the M4 CEM-12 encoder.
+#[test]
+fn astc_encoder_rgba_cem12_q6_parity_against_gpu_hardware_decode() {
+    let Some(oracle) = BlockOracle::try_new() else {
+        eprintln!("no GPU adapter; skipping ASTC CEM12 q6 parity");
+        return;
+    };
+    if !oracle
+        .features()
+        .contains(Features::TEXTURE_COMPRESSION_ASTC)
+    {
+        eprintln!("adapter lacks ASTC support; skipping ASTC CEM12 q6 parity");
+        return;
+    }
+    let format = TextureFormat::Astc {
+        block: wgpu::AstcBlock::B4x4,
+        channel: wgpu::AstcChannel::Unorm,
+    };
+
+    let mut tiles: Vec<[[u8; 4]; 16]> = Vec::new();
+    // Constant RGBA with a real sub-255 alpha (exact under QUANT_256 identity).
+    for &a in &[0u8, 1, 64, 128, 200, 254] {
+        tiles.push([[73, 150, 211, a]; 16]);
+    }
+    // Fixed RGB, linear alpha ramp 0..255 (alpha must vary across the block).
+    tiles.push(core::array::from_fn(|t| [40, 90, 160, (t * 17) as u8]));
+    // Grayscale ramp (used below to prove six levels beat four).
+    tiles.push(core::array::from_fn(|t| {
+        let v = (t * 17) as u8;
+        [v, v, v, 255]
+    }));
+    // Colour gradient with an opposing alpha gradient.
+    tiles.push(core::array::from_fn(|t| {
+        let f = t as u8 * 16;
+        [f, 255 - f, (f / 2) + 40, 255 - t as u8 * 17]
+    }));
+    // Random RGBA tiles (independent per-channel alpha).
+    let mut rng = Rng(0x0A5C_00C6);
+    for _ in 0..16 {
+        tiles.push(core::array::from_fn(|_| {
+            [rng.byte(), rng.byte(), rng.byte(), rng.byte()]
+        }));
+    }
+
+    let mut compared = 0usize;
+    let mut saw_varying_alpha = false;
+    for src in &tiles {
+        let blk = encode_astc_single_partition_4x4_ldr_rgba_q6(src);
+        let cpu = decode_astc_4x4_ldr(&blk).expect("CEM12 q6 encoder emits a decodable block");
+        let gpu = oracle.decode_unorm8(format, &blk);
+
+        let mut amin = 255i32;
+        let mut amax = 0i32;
+        for t in 0..16 {
+            for c in 0..4 {
+                let d = (cpu[t][c] as i32 - gpu[t][c] as i32).abs();
+                assert!(
+                    d <= 1,
+                    "ASTC CEM12 q6 block={blk:02x?} texel {t} chan {c}: cpu={} gpu={} (|d|={d})",
+                    cpu[t][c],
+                    gpu[t][c]
+                );
+            }
+            amin = amin.min(gpu[t][3] as i32);
+            amax = amax.max(gpu[t][3] as i32);
+        }
+        if amax - amin >= 64 {
+            saw_varying_alpha = true;
+        }
+        compared += 1;
+    }
+    assert!(
+        saw_varying_alpha,
+        "hardware never produced a varying alpha -- CEM12 q6 alpha path not exercised"
+    );
+
+    // Six-level weights must reconstruct the grayscale ramp strictly tighter
+    // than the four-level M4 encoder, verified on hardware output.
+    let ramp: [[u8; 4]; 16] = core::array::from_fn(|t| {
+        let v = (t * 17) as u8;
+        [v, v, v, 255]
+    });
+    let gpu_m4 = oracle.decode_unorm8(format, &encode_astc_single_partition_4x4_ldr_rgba(&ramp));
+    let gpu_q6 = oracle.decode_unorm8(format, &encode_astc_single_partition_4x4_ldr_rgba_q6(&ramp));
+    let max_err = |dec: &[[u8; 4]; 16]| -> i32 {
+        let mut m = 0i32;
+        for t in 0..16 {
+            for c in 0..4 {
+                m = m.max((ramp[t][c] as i32 - dec[t][c] as i32).abs());
+            }
+        }
+        m
+    };
+    let err_m4 = max_err(&gpu_m4);
+    let err_q6 = max_err(&gpu_q6);
+    assert!(
+        err_q6 < err_m4,
+        "on hardware, six-level weights ({err_q6}) did not beat four-level weights ({err_m4})"
+    );
+
+    eprintln!(
+        "ASTC CEM12 q6 encoder parity: {compared} tiles within 1 LSB of hardware on all four channels; ramp max err q6={err_q6} < m4={err_m4}"
     );
 }
