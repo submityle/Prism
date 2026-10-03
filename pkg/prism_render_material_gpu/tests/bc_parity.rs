@@ -28,10 +28,10 @@ use prism_render_material::{
     encode_astc_single_partition_4x4_ldr_q192, encode_astc_single_partition_4x4_ldr_quality,
     encode_astc_single_partition_4x4_ldr_rgba, encode_astc_single_partition_4x4_ldr_rgba_q6,
     encode_astc_single_partition_5x4_ldr, encode_astc_single_partition_5x5_ldr,
-    encode_astc_single_partition_6x5_ldr, encode_astc_single_partition_6x6_ldr,
-    encode_astc_single_partition_8x5_ldr, encode_astc_single_partition_8x6_ldr,
-    encode_astc_single_partition_8x8_ldr, encode_bc1, encode_bc3, encode_bc6h_mode11_unsigned,
-    encode_bc7_mode4, encode_bc7_mode5, encode_bc7_mode6,
+    encode_astc_single_partition_6x5_ldr, encode_astc_single_partition_6x5_ldr_mode369,
+    encode_astc_single_partition_6x6_ldr, encode_astc_single_partition_8x5_ldr,
+    encode_astc_single_partition_8x6_ldr, encode_astc_single_partition_8x8_ldr, encode_bc1,
+    encode_bc3, encode_bc6h_mode11_unsigned, encode_bc7_mode4, encode_bc7_mode5, encode_bc7_mode6,
 };
 use prism_render_material_gpu::BlockOracle;
 use wgpu::{Features, TextureFormat};
@@ -6384,5 +6384,112 @@ fn astc_encoder_6x5_round_trip_parity_against_gpu_hardware_decode() {
     assert!(compared >= 7, "expected all 6x5 tiles to be compared");
     eprintln!(
         "ASTC 6x5 encoder round-trip parity: {compared} tiles decode within 1 LSB of hardware (mode-354 QUANT_4 two-bit weights, QUANT_256 identity colour, non-square legal B6x5 full grid)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ASTC 6x5 trit-weight single-partition LDR encoder parity (block mode 369).
+// Same `AstcBlock::B6x5` footprint (30 texels) as mode 354 but with a QUANT_3
+// one-trit weight range (three interpolation levels, 48 weight bits) + QUANT_256
+// identity colour. Three levels add a middle grey the one-bit identity modes
+// cannot reach, while endpoints stay bit-exact. The trit BISE weight stream is a
+// different packing path from the bit-only modes, so this independently proves
+// the trit encode/mirror against the Metal hardware decoder via
+// `decode_raw_footprint(.., 6, 5)` within 1 LSB.
+// ---------------------------------------------------------------------------
+#[test]
+fn astc_encoder_6x5_mode369_round_trip_parity_against_gpu_hardware_decode() {
+    let Some(oracle) = BlockOracle::try_new() else {
+        eprintln!("no GPU adapter; skipping ASTC 6x5 mode369 encoder parity");
+        return;
+    };
+    if !oracle
+        .features()
+        .contains(Features::TEXTURE_COMPRESSION_ASTC)
+    {
+        eprintln!("adapter lacks ASTC support; skipping ASTC 6x5 mode369 encoder parity");
+        return;
+    }
+    let format = TextureFormat::Astc {
+        block: wgpu::AstcBlock::B6x5,
+        channel: wgpu::AstcChannel::Unorm,
+    };
+
+    // Four constant + two two-colour (exact) + one thirds tile (low/mid/high)
+    // exercising the three trit levels. The thirds tile's midpoint lands within
+    // a trit step of the true average.
+    let mut tiles: Vec<([[u8; 4]; 30], i32)> = Vec::new();
+    for &rgb in &[[0u8, 0, 0], [255, 255, 255], [41, 173, 98], [240, 12, 90]] {
+        tiles.push(([[rgb[0], rgb[1], rgb[2], 255]; 30], 1));
+    }
+    for &(a, b) in &[
+        ([15u8, 35, 55], [210u8, 190, 170]),
+        ([255u8, 0, 0], [0u8, 0, 255]),
+    ] {
+        tiles.push((
+            core::array::from_fn(|t| {
+                if t % 2 == 0 {
+                    [a[0], a[1], a[2], 255]
+                } else {
+                    [b[0], b[1], b[2], 255]
+                }
+            }),
+            1,
+        ));
+    }
+    let a = [10u8, 20, 30];
+    let b = [220u8, 210, 200];
+    tiles.push((
+        core::array::from_fn(|t| match t % 3 {
+            0 => [a[0], a[1], a[2], 255],
+            1 => [
+                ((a[0] as u16 + b[0] as u16) / 2) as u8,
+                ((a[1] as u16 + b[1] as u16) / 2) as u8,
+                ((a[2] as u16 + b[2] as u16) / 2) as u8,
+                255,
+            ],
+            _ => [b[0], b[1], b[2], 255],
+        }),
+        8,
+    ));
+
+    let mut compared = 0u32;
+    for (src, quality_tol) in &tiles {
+        let blk = encode_astc_single_partition_6x5_ldr_mode369(src);
+        let (cpu, count) = decode_astc_ldr(&blk, 6, 5).expect("encoder emits a decodable block");
+        assert_eq!(count, 30, "6x5 footprint must decode 30 texels");
+        let gpu = oracle.decode_raw_footprint(format, &blk, 6, 5);
+        assert_eq!(gpu.len(), 30, "6x5 GPU texel count");
+        for t in 0..30 {
+            let gpu_u8: [i32; 4] =
+                core::array::from_fn(|c| (gpu[t][c].clamp(0.0, 1.0) * 255.0 + 0.5) as i32);
+            for c in 0..4 {
+                let d = (cpu[t][c] as i32 - gpu_u8[c]).abs();
+                assert!(
+                    d <= 1,
+                    "ASTC 6x5 mode369 block={blk:02x?} texel {t} chan {c}: cpu={} gpu={} (|d|={d})",
+                    cpu[t][c],
+                    gpu_u8[c]
+                );
+            }
+            for c in 0..3 {
+                let d = (gpu_u8[c] - src[t][c] as i32).abs();
+                assert!(
+                    d <= *quality_tol,
+                    "ASTC 6x5 mode369 quality block={blk:02x?} texel {t} chan {c}: src={} gpu={} (|d|={d} > {quality_tol})",
+                    src[t][c],
+                    gpu_u8[c]
+                );
+            }
+            assert_eq!(gpu_u8[3], 255, "CEM 8 alpha must be 255");
+        }
+        compared += 1;
+    }
+    assert!(
+        compared >= 7,
+        "expected all 6x5 mode369 tiles to be compared"
+    );
+    eprintln!(
+        "ASTC 6x5 mode369 encoder round-trip parity: {compared} tiles decode within 1 LSB of hardware (QUANT_3 one-trit weights, QUANT_256 identity colour, non-square legal B6x5 full grid, trit BISE weight stream)"
     );
 }
