@@ -244,6 +244,8 @@ pub use tet_fem_integrator::{
     step_implicit_corotational, FemPreconditioner, FemStepResult, ImplicitStepParams,
     RayleighDamping,
 };
+pub mod tet_fem_body;
+pub use tet_fem_body::TetFemBody;
 
 /// A handle into a [`ShapeRegistry`].
 ///
