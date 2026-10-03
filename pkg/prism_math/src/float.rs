@@ -65,6 +65,21 @@ pub mod f32 {
         libm::powf(x, y)
     }
 
+    #[inline]
+    pub fn cbrt(x: f32) -> f32 {
+        libm::cbrtf(x)
+    }
+
+    #[inline]
+    pub fn exp(x: f32) -> f32 {
+        libm::expf(x)
+    }
+
+    #[inline]
+    pub fn ln(x: f32) -> f32 {
+        libm::logf(x)
+    }
+
     /// `sin` and `cos` evaluated together (M0 computes them separately).
     #[inline]
     pub fn sin_cos(x: f32) -> (f32, f32) {
@@ -127,6 +142,11 @@ pub mod f64 {
     #[inline]
     pub fn powf(x: f64, y: f64) -> f64 {
         libm::pow(x, y)
+    }
+
+    #[inline]
+    pub fn cbrt(x: f64) -> f64 {
+        libm::cbrt(x)
     }
 
     /// `sin` and `cos` evaluated together (M3 computes them separately).

@@ -26,7 +26,15 @@
 //!   `sqrt`/`sin`/`cos`/`atan2`/`exp`/`ln`, `FxVec*` vectors,
 //!   `StateHasher`, and `KahanSum`/`NeumaierSum` compensated reduction),
 //!   with cross-platform bit-exact golden-hash tests.
-//! - **M5+ (planned):** the color/rand/noise toolboxes.
+//! - **M5 (this crate, done):** color spaces ([`color`]:
+//!   `Srgba`/`LinearRgba`/`Xyza`/`Oklaba`/`Oklcha`/`Hsla`/`Hsva` plus
+//!   color-temperature), deterministic PRNGs ([`rng`]:
+//!   `SplitMix64`/`Pcg32`/`Xoshiro256StarStar` with uniform/range/bool and
+//!   disk/sphere/Gaussian sampling), Perlin/Simplex noise with fractal
+//!   helpers ([`noise`]), and AVX2-accelerated batched transforms
+//!   ([`batch`]) with a scalar reference and parity tests.
+//! - **M6+ (planned):** dual-quaternions, `f16`, octahedral/SoA, and the
+//!   `compat-bevy` migration aliases.
 //!
 //! The scalar backend here is the behavioural reference that later SIMD
 //! backends must match within documented tolerances.
@@ -47,6 +55,11 @@ mod float;
 mod mat;
 mod quat;
 mod vec;
+
+pub mod batch;
+pub mod color;
+pub mod noise;
+pub mod rng;
 
 pub mod curve;
 pub mod geom;
@@ -69,6 +82,9 @@ pub use self::fixed::{
     CompensableFloat, Fixed, FxVec2, FxVec3, FxVec4, I16F16, KahanSum, NeumaierSum, StateHasher,
     fxvec2, fxvec3, fxvec4, kahan_sum, neumaier_sum,
 };
+pub use self::color::{Hsla, Hsva, LinearRgba, Oklaba, Oklcha, Srgba, Xyza};
+pub use self::noise::{Fractal, Noise2, Noise3, Perlin, Simplex};
+pub use self::rng::{Pcg32, Rng, SplitMix64, Xoshiro256StarStar};
 
 /// Mathematical constant helpers (`f32`).
 pub mod consts {
@@ -173,6 +189,10 @@ pub mod prelude {
         fxvec2, fxvec3, fxvec4, geom, intersect, kahan_sum, lerp, neumaier_sum, to_degrees,
         to_radians, vec2, vec3, vec3a, vec4,
     };
+    pub use crate::{
+        Fractal, Hsla, Hsva, LinearRgba, Noise2, Noise3, Oklaba, Oklcha, Pcg32, Perlin, Rng,
+        Simplex, SplitMix64, Srgba, Xoshiro256StarStar, Xyza, batch, color, noise, rng,
+    };
 }
 
 #[cfg(test)]
@@ -183,3 +203,5 @@ mod m2_tests;
 mod m3_tests;
 #[cfg(test)]
 mod m4_tests;
+#[cfg(test)]
+mod m5_tests;
