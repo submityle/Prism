@@ -24,6 +24,7 @@ mod block_reader;
 mod cem;
 mod color_unquant;
 mod endpoints;
+mod hdr_endpoints;
 mod infill;
 mod multi_partition;
 mod partition;
@@ -79,6 +80,37 @@ pub fn decode_astc_4x4_ldr(block: &[u8; 16]) -> Result<[[u8; 4]; 16], AstcError>
             single_partition::decode_single_partition_4x4_ldr(block)
         } else {
             multi_partition::decode_multi_partition_4x4_ldr(block)
+        }
+    }
+}
+
+/// Decode a single 4x4 ASTC **HDR** block to sixteen `RGBA` texels in `f32`.
+///
+/// Dispatches HDR void-extent (constant-colour FP16) blocks and single-
+/// partition HDR weighted blocks: the six HDR Colour Endpoint Modes (2, 3, 7,
+/// 11, 14, 15), any colour quantisation, any weight grid resampled to the 4x4
+/// footprint by the Khronos bilinear infill, and both single- and dual-plane
+/// weights. RGB lanes are logarithmic (LNS); alpha is logarithmic except for
+/// CEM 14 (linear LDR alpha).
+///
+/// Blocks outside that subset -- multi-partition HDR, or an LDR Colour
+/// Endpoint Mode routed here by mistake -- return an [`AstcError`] rather than
+/// approximate pixels, until their own milestones land.
+///
+/// # Errors
+/// Propagates [`AstcError`] from the selected decode path, or
+/// [`AstcError::UnsupportedBlockMode`] for block types not yet implemented.
+pub fn decode_astc_4x4_hdr(block: &[u8; 16]) -> Result<[[f32; 4]; 16], AstcError> {
+    if void_extent::is_void_extent(block) {
+        decode_astc_void_extent_hdr(block)
+    } else {
+        // Partition count is the 2-bit field at block bits [11, 13); 0 => a
+        // single partition. Multi-partition HDR is a later milestone.
+        let partition_count = ((u32::from(block[1]) >> 3) & 0x3) + 1;
+        if partition_count == 1 {
+            hdr_endpoints::decode_single_partition_4x4_hdr(block)
+        } else {
+            Err(AstcError::UnsupportedBlockMode)
         }
     }
 }

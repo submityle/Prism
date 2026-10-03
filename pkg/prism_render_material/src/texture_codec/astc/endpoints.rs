@@ -57,6 +57,31 @@ pub(super) fn decode_cem_endpoints(
     if !cem_is_ldr(cem) {
         return Err(AstcError::UnsupportedHdr);
     }
+    let (vals, integer_count) = decode_cem_color_vals(block, weight_bits, cem, dual_plane)?;
+    Ok(unpack_endpoints(cem, &vals[..integer_count as usize]))
+}
+
+/// Decode and unquantize the colour integer sequence of a **single-partition**
+/// block, returning the 8-bit unquantized integers plus their count.
+///
+/// This is the profile-agnostic half of the single-partition endpoint
+/// pipeline: it performs the colour quant-level selection, Integer Sequence
+/// Encoding decode and per-level unquantization, but does *not* assemble the
+/// integers into endpoint colours. The LDR path (`decode_cem_endpoints`) and
+/// the HDR path (`super::hdr_endpoints`) share this stage and then diverge on
+/// `unpack_endpoints` vs `unpack_hdr_endpoints`. HDR and LDR CEMs use the
+/// identical quant/unquant machinery, so no profile branch is needed here.
+///
+/// # Errors
+/// [`AstcError::Reserved`] when the colour budget cannot hold the endpoints
+/// (quant level below QUANT_6), or an [`AstcError`] propagated from the ISE
+/// decode.
+pub(super) fn decode_cem_color_vals(
+    block: &[u8; 16],
+    weight_bits: u32,
+    cem: u32,
+    dual_plane: bool,
+) -> Result<([u8; 8], u32), AstcError> {
     let integer_count = cem_integer_count(cem);
 
     // Single partition: color_bits = 111 - weight_bits (color_bits_arr[1] ==
@@ -100,7 +125,7 @@ pub(super) fn decode_cem_endpoints(
         *v = unquant_color(level_index, *p);
     }
 
-    Ok(unpack_endpoints(cem, &vals[..integer_count as usize]))
+    Ok((vals, integer_count))
 }
 
 #[cfg(test)]
