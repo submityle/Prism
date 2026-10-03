@@ -94,11 +94,10 @@ pub fn decode_astc_4x4_ldr(block: &[u8; 16]) -> Result<[[u8; 4]; 16], AstcError>
 /// weights. RGB lanes are logarithmic (LNS); alpha is logarithmic except for
 /// CEM 14 (linear LDR alpha).
 ///
-/// Multi-partition HDR blocks (2/3/4 partitions) decode when every partition
-/// uses an HDR Colour Endpoint Mode; a block that mixes LDR and HDR partitions
-/// is a later milestone. Blocks outside that subset -- a mixed LDR/HDR
-/// multi-partition block, or an LDR Colour Endpoint Mode routed here by mistake
-/// -- return an [`AstcError`] rather than approximate pixels.
+/// Multi-partition HDR blocks (2/3/4 partitions) decode under the HDR profile
+/// with any mix of partition Colour Endpoint Modes -- all-HDR, all-LDR, and
+/// mixed LDR/HDR -- the LDR partitions being widened into the 16-bit linear
+/// HDR domain (`x257`) exactly as the reference HDR-profile decode does.
 ///
 /// # Errors
 /// Propagates [`AstcError`] from the selected decode path, or
@@ -108,7 +107,7 @@ pub fn decode_astc_4x4_hdr(block: &[u8; 16]) -> Result<[[f32; 4]; 16], AstcError
         decode_astc_void_extent_hdr(block)
     } else {
         // Partition count is the 2-bit field at block bits [11, 13); 0 => a
-        // single partition, 1..=3 => 2..=4 partitions (all-HDR partitions).
+        // single partition, 1..=3 => 2..=4 partitions (any LDR/HDR mix).
         let partition_count = ((u32::from(block[1]) >> 3) & 0x3) + 1;
         if partition_count == 1 {
             hdr_endpoints::decode_single_partition_4x4_hdr(block)

@@ -28,7 +28,7 @@
 
 use super::block_mode::decode_block_mode_2d;
 use super::cem::cem_is_ldr;
-use super::endpoints::decode_cem_color_vals;
+use super::endpoints::{decode_cem_color_vals, Endpoints};
 use super::infill::{infill_dual_plane_4x4, infill_weights_4x4};
 use super::AstcError;
 use crate::texture_codec::half_bits_to_f32;
@@ -492,6 +492,40 @@ pub(super) fn lerp_hdr_lane(e0: i32, e1: i32, w: u32, lns: bool) -> f32 {
         unorm16_to_sf16(color)
     };
     half_bits_to_f32(half)
+}
+
+/// Widen a pair of 8-bit LDR endpoint colours into the 16-bit internal HDR
+/// representation used by the HDR-profile decode, as a **linear** (non-LNS)
+/// pair.
+///
+/// Under `ASTCENC_PRF_HDR` a lane that is not flagged HDR is widened by bit
+/// replication (`value * 257`, so `0xFF` maps to `0xFFFF`) and interpolated as
+/// a linear UNORM16 lane (`lns = false`), i.e. through [`unorm16_to_sf16`]
+/// rather than the logarithmic [`lns_to_sf16`]. This mirrors the reference
+/// `unpack_color_endpoints` expansion block (astcenc
+/// `astcenc_color_unquantize.cpp`): in the HDR profile
+/// `output_scale = select(257, 1, hdr_lanes)`, and an all-LDR CEM leaves every
+/// lane non-HDR, so every lane is scaled by 257. This is the per-partition
+/// bridge that lets a multi-partition HDR block mix LDR and HDR partitions:
+/// each LDR partition is expanded here while HDR partitions keep their native
+/// logarithmic lanes.
+#[inline]
+pub(super) fn expand_ldr_endpoints_to_hdr(ep: &Endpoints) -> HdrEndpoints {
+    HdrEndpoints {
+        e0: [
+            i32::from(ep.e0[0]) * 257,
+            i32::from(ep.e0[1]) * 257,
+            i32::from(ep.e0[2]) * 257,
+            i32::from(ep.e0[3]) * 257,
+        ],
+        e1: [
+            i32::from(ep.e1[0]) * 257,
+            i32::from(ep.e1[1]) * 257,
+            i32::from(ep.e1[2]) * 257,
+            i32::from(ep.e1[3]) * 257,
+        ],
+        lns: [false; 4],
+    }
 }
 
 /// Decode a single-partition 4x4 ASTC **HDR** `block` to sixteen `RGBA` texels
