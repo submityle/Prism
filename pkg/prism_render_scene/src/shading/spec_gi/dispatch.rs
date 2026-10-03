@@ -40,7 +40,6 @@ use super::resources::ViewSpecGiReuse;
 /// sufficient to dispatch. Dispatches one workgroup per
 /// [`SPEC_GI_WORKGROUP_SIZE`]×[`SPEC_GI_WORKGROUP_SIZE`] tile; the kernel
 /// bounds-checks every invocation against the config extent.
-#[allow(dead_code)] // added to the Core3d schedule by the plugin slice (next).
 pub(crate) fn spec_gi_reuse_pass(
     settings: Res<super::super::runtime::PrismShadingSettings>,
     view: ViewQuery<(&ViewSpecGiReuse, &ViewSpecGiReuseBindGroup)>,

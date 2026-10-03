@@ -36,7 +36,6 @@ use bytemuck::{Pod, Zeroable};
 /// Must match `@workgroup_size(N, N, 1)` in `spec_gi_reuse.wesl`; the dispatch
 /// rounds its target extent up to a multiple of this on both axes and the
 /// kernel bounds-checks every invocation.
-#[allow(dead_code)] // consumed by the reuse dispatch slice (next).
 pub(crate) const SPEC_GI_WORKGROUP_SIZE: u32 = 8;
 
 /// Per-pixel glossy reservoir *storage* record (the ping-pong buffer element).
@@ -78,7 +77,6 @@ pub(crate) struct GpuSpecrReservoir {
 /// follow the matrix with no extra padding (96 bytes total).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq)]
-#[allow(dead_code)] // fields read by `spec_gi_reuse.wesl` via the bind-group slice (next).
 pub(crate) struct GpuSpecGiReuseConfig {
     /// Clip -> view (inverse projection); rebuilds the view-space glossy point
     /// from the SSR prepass reverse-Z depth. Uploaded column-major.
@@ -103,7 +101,6 @@ pub(crate) struct GpuSpecGiReuseConfig {
     pub spatial_enabled: u32,
 }
 
-#[allow(dead_code)] // ctor used by the bind-group/dispatch slice (next) and the tests.
 impl GpuSpecGiReuseConfig {
     /// Builds the reuse config from the inverse projection, framebuffer extent
     /// and reuse parameters. `view_from_clip` is uploaded column-major (via

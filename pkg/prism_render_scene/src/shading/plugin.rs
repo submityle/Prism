@@ -50,9 +50,9 @@ use super::{
         prepare_shading_composite_pipelines, ShadingCompositePipeline,
     },
     ddgi::{
-        ddgi_composite_pass, ddgi_probe_update_pass, ddgi_sample_pass, init_ddgi_composite_pipeline,
-        init_ddgi_pipeline, prepare_ddgi_bind_groups, prepare_ddgi_composite_bind_groups,
-        prepare_ddgi_textures, PrismDdgiSettings,
+        ddgi_composite_pass, ddgi_probe_update_pass, ddgi_sample_pass,
+        init_ddgi_composite_pipeline, init_ddgi_pipeline, prepare_ddgi_bind_groups,
+        prepare_ddgi_composite_bind_groups, prepare_ddgi_textures, PrismDdgiSettings,
     },
     dof::{
         dof_pass, init_dof_pipeline, prepare_dof_bind_groups, prepare_dof_textures,
@@ -146,6 +146,10 @@ use super::{
     sky::transmittance::{
         init_sky_transmittance_lut, init_sky_transmittance_pipeline,
         prepare_sky_transmittance_bind_group, sky_transmittance_lut_pass,
+    },
+    spec_gi::{
+        init_spec_gi_reuse_pipeline, prepare_spec_gi_reuse_bind_groups,
+        prepare_spec_gi_reuse_resources, spec_gi_reuse_pass,
     },
     ssgi::{
         init_ssgi_composite_pipeline, init_ssgi_denoise_pipeline, init_ssgi_trace_pipeline,
@@ -258,6 +262,8 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/ssr_resolve.wesl");
         embedded_asset!(app, "../shaders/ssr_temporal.wesl");
         embedded_asset!(app, "../shaders/ssr_composite.wesl");
+        embedded_asset!(app, "../shaders/spec_gi_reservoir.wesl");
+        embedded_asset!(app, "../shaders/spec_gi_reuse.wesl");
         embedded_asset!(app, "../shaders/ssgi.wesl");
         embedded_asset!(app, "../shaders/sky_multiscatter_lut.wesl");
         embedded_asset!(app, "../shaders/sky_transmittance_lut.wesl");
@@ -508,6 +514,12 @@ impl Plugin for PrismShadingPlugin {
             // stay within Bevy's 20-element limit; gated on the settings
             // `enabled` flag, so disabled it bakes and uploads nothing.
             .add_systems(RenderStartup, init_area_light_ltc_lut)
+            // Glossy-specular ReSTIR reuse compute pipeline (spec_gi).
+            // Own `add_systems` call so the already-full RenderStartup
+            // tuples stay within Bevy's 20-element limit; the dispatch it
+            // feeds is gated on `enable_spec_gi` + the SSR/visibility
+            // prerequisites in resource prep.
+            .add_systems(RenderStartup, init_spec_gi_reuse_pipeline)
             // Volumetric-cloud domain + per-view resource and bind-group
             // preparation. Self-contained (its own resident textures + view
             // cache, gated on the opt-in settings), so it lives in its own
@@ -672,6 +684,21 @@ impl Plugin for PrismShadingPlugin {
                             .in_set(RenderSystems::PrepareBindGroups),
                         prepare_ssgi_composite_bind_groups
                             .after(prepare_ssgi_textures)
+                            .in_set(RenderSystems::PrepareBindGroups),
+                    ),
+                    // Glossy-specular ReSTIR reuse prep (spec_gi). Nested
+                    // to keep this Render tuple within Bevy's 20-element
+                    // limit. The resident ping-pong reservoir buffers +
+                    // resolved target flip in PrepareResources (after the
+                    // SSR textures that supply the depth/normal/candidate
+                    // inputs); the per-view group binds them in
+                    // PrepareBindGroups after that flip.
+                    (
+                        prepare_spec_gi_reuse_resources
+                            .after(prepare_ssr_textures)
+                            .in_set(RenderSystems::PrepareResources),
+                        prepare_spec_gi_reuse_bind_groups
+                            .after(prepare_spec_gi_reuse_resources)
                             .in_set(RenderSystems::PrepareBindGroups),
                     ),
                     // Nested to keep this Render tuple within Bevy's 20-element
@@ -1098,6 +1125,20 @@ impl Plugin for PrismShadingPlugin {
                 (
                     ssr_composite_pass
                         .after(ssr_temporal_pass)
+                        .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                    // Glossy-specular ReSTIR reuse: reconstructs each
+                    // pixel's glossy point off the SSR prepass depth +
+                    // repacked `normal_roughness`, streams the SSR trace's
+                    // raw screen-space candidate radiance into a reservoir
+                    // and temporally merges the same-pixel prior, writing
+                    // the resolved specular + confidence target the denoise
+                    // / energy-conserving composite consume. Orders after
+                    // the SSR trace + repack that fill its inputs; no-op
+                    // unless `enable_spec_gi` and the SSR/visibility gate
+                    // held in resource prep.
+                    spec_gi_reuse_pass
+                        .after(ssr_trace_pass)
+                        .after(ssr_repack_pass)
                         .before(bevy_core_pipeline::Core3dSystems::MainPass),
                     ssgi_trace_pass
                         .after(ssr_color_mips_pass)

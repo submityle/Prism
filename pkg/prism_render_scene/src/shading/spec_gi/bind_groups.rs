@@ -88,7 +88,6 @@ fn reuse_config(
 /// The reuse dispatch's group-0 bind group for a single view. Present only when
 /// both the view's SSR textures and its resident reuse resources are live.
 #[derive(Component)]
-#[allow(dead_code)] // consumed by the dispatch node (next slice) once wired in the plugin.
 pub(crate) struct ViewSpecGiReuseBindGroup {
     /// group 0 for `spec_gi_reuse`: the config uniform (0), the ping-pong
     /// reservoir pair (prior read-only 1, out read-write 2), the SSR-rebuilt
@@ -99,7 +98,6 @@ pub(crate) struct ViewSpecGiReuseBindGroup {
 
 impl ViewSpecGiReuseBindGroup {
     /// group-0 bind group the dispatch node records against (next slice).
-    #[allow(dead_code)] // recorded by the dispatch node once wired in the plugin.
     pub(crate) fn group(&self) -> &BindGroup {
         &self.group
     }
@@ -114,7 +112,6 @@ impl ViewSpecGiReuseBindGroup {
 /// every frame to follow that flip. Uploads the per-view config uniform via the
 /// render queue; the `wgpu` bind group keeps the buffer alive after the local
 /// handle drops.
-#[allow(dead_code)] // registered in `PrepareBindGroups` by the plugin slice (next).
 pub(crate) fn prepare_spec_gi_reuse_bind_groups(
     mut commands: Commands,
     pipeline: Res<SpecGiReusePipeline>,

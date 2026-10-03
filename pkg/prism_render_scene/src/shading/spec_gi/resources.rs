@@ -49,7 +49,6 @@ use super::abi::GpuSpecrReservoir;
 /// history clamp and the energy-conserving composite consume. Wide HDR so the
 /// resolved reflection keeps its range up to the composite, matching
 /// [`super::super::ssr::resources`]' reflection output and the SSGI gather.
-#[allow(dead_code)] // bound by the bind-group slice (next).
 pub(crate) const SPEC_GI_RESOLVED_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
 
 /// Byte stride of one resident reservoir slot. One slot per framebuffer texel;
@@ -76,7 +75,6 @@ const fn reservoir_dst_index(frame: u32) -> usize {
 
 /// Per-pixel reservoir-slot count for a viewport, clamped to at least one so a
 /// zero-area or not-yet-sized view still allocates a valid (if trivial) buffer.
-#[allow(dead_code)] // used by `prepare_spec_gi_reuse_resources` (wired by the plugin slice, next).
 const fn reservoir_slot_count(size: UVec2) -> u64 {
     let texels = (size.x as u64) * (size.y as u64);
     if texels == 0 {
@@ -103,7 +101,6 @@ pub(crate) struct ViewSpecGiReuse {
     resolved: CachedTexture,
     /// Viewport extent this view's buffers + target were allocated for; the only
     /// reallocation trigger.
-    #[allow(dead_code)] // read by the realloc check once the prepare system is wired (next).
     pub(crate) size: UVec2,
     /// Monotonic frame counter driving the ping-pong flip (`frame & 1`). The
     /// crate does not link Bevy's `FrameCount`, so the counter lives here and
@@ -115,7 +112,6 @@ pub(crate) struct ViewSpecGiReuse {
 impl ViewSpecGiReuse {
     /// This frame's read-only reservoir buffer (last frame's finalised output),
     /// bound at `@binding(1)` (`prior_reservoirs`).
-    #[allow(dead_code)] // bound by the bind-group slice (next).
     pub(crate) fn src_buffer(&self) -> &Buffer {
         &self.reservoirs[reservoir_src_index(self.frame)]
     }
@@ -123,7 +119,6 @@ impl ViewSpecGiReuse {
     /// This frame's read-write reservoir buffer (the reuse kernel's output),
     /// bound at `@binding(2)` (`out_reservoirs`). Next frame the pair swaps, so
     /// this becomes the following dispatch's `src`.
-    #[allow(dead_code)] // bound by the bind-group slice (next).
     pub(crate) fn dst_buffer(&self) -> &Buffer {
         &self.reservoirs[reservoir_dst_index(self.frame)]
     }
@@ -131,15 +126,8 @@ impl ViewSpecGiReuse {
     /// Storage/sampling view of the resolved specular+confidence target. The
     /// reuse kernel writes it (`@binding(6)`, storage) and the denoise/composite
     /// read it (`textureLoad`).
-    #[allow(dead_code)] // bound by the bind-group slice (next).
     pub(crate) fn resolved_view(&self) -> &TextureView {
         &self.resolved.default_view
-    }
-
-    /// Monotonic frame index selecting this dispatch's ping-pong source/target.
-    #[allow(dead_code)] // read by the bind-group/dispatch slice (next).
-    pub(crate) fn frame(&self) -> u32 {
-        self.frame
     }
 }
 
@@ -153,7 +141,6 @@ impl ViewSpecGiReuse {
 /// decode is itself single-sample. The buffers + target are recreated whenever
 /// the viewport size changes; the steady-state per-frame work is the cheap
 /// ping-pong flip (advancing `frame`).
-#[allow(dead_code)] // registered in `PrepareBindGroups` by the plugin slice (next).
 pub(crate) fn prepare_spec_gi_reuse_resources(
     mut commands: Commands,
     settings: Res<PrismShadingSettings>,

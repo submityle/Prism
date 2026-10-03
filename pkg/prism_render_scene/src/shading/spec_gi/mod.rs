@@ -36,6 +36,15 @@ mod bind_groups;
 // composite) by the plugin slice that follows.
 mod dispatch;
 
+// Plugin-facing wiring surface for the reuse pass. Re-exported `pub(crate)`
+// so `shading::plugin` can register the `RenderStartup` pipeline init, the
+// `PrepareResources`/`PrepareBindGroups` systems and the `Core3d` dispatch
+// node, mirroring the `ssgi` module's export surface.
+pub(crate) use bind_groups::prepare_spec_gi_reuse_bind_groups;
+pub(crate) use dispatch::spec_gi_reuse_pass;
+pub(crate) use pipeline::init_spec_gi_reuse_pipeline;
+pub(crate) use resources::prepare_spec_gi_reuse_resources;
+
 #[cfg(test)]
 mod shader_tests;
 

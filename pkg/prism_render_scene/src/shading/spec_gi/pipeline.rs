@@ -73,14 +73,12 @@ pub(crate) struct SpecGiReusePipeline {
 impl SpecGiReusePipeline {
     /// The `spec_gi_reuse` compute pipeline id. Recorded by the dispatch node in
     /// a follow-up slice.
-    #[allow(dead_code)] // the dispatch node records this pipeline in a follow-up slice.
     pub(crate) fn reuse(&self) -> CachedComputePipelineId {
         self.reuse
     }
 
     /// group-0 layout the per-view bind group builds against in a follow-up
     /// slice.
-    #[allow(dead_code)] // the bind-group slice builds against this layout next.
     pub(crate) fn layout(&self) -> &BindGroupLayout {
         &self.layout
     }
@@ -108,7 +106,6 @@ fn layout_entries() -> BindGroupLayoutEntries<7> {
 }
 
 /// `RenderStartup` initializer for [`SpecGiReusePipeline`].
-#[allow(dead_code)] // registered in `RenderStartup` by the plugin slice (next).
 pub(crate) fn init_spec_gi_reuse_pipeline(
     mut commands: Commands,
     device: Res<RenderDevice>,
