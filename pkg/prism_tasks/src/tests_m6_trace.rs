@@ -8,7 +8,9 @@
 //! names match the recorded spans.
 
 use crate::TaskPool;
+#[cfg(feature = "trace")]
 use alloc::string::String;
+#[cfg(feature = "trace")]
 use alloc::vec::Vec;
 use std::sync::atomic::{AtomicUsize, Ordering};
 

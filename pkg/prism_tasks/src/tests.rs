@@ -777,7 +777,7 @@ mod m3 {
             producer.send(1234);
         });
         let recv = channel.recv();
-        let task = pool.spawn_async(async move { recv.await });
+        let task = pool.spawn_async(recv);
         let out = pool.block_on(task);
         assert_eq!(out, 1234);
     }
@@ -906,7 +906,9 @@ mod m4 {
     #[cfg(not(feature = "single"))]
     use std::sync::atomic::{AtomicUsize, Ordering};
     #[cfg(not(feature = "single"))]
-    use std::sync::{Arc, Mutex};
+    use alloc::sync::Arc;
+    #[cfg(not(feature = "single"))]
+    use std::sync::Mutex;
 
     /// Drain `counter` by spinning *without* helping, so queued jobs run only
     /// on the pool's worker threads (never inline on this external thread).
@@ -1040,12 +1042,12 @@ mod m4 {
             let p = pool.clone();
             let arenas = Arc::clone(&arenas);
             pool.spawn(&counter, move || {
-                if let Some(idx) = p.current_worker_index() {
-                    if let Some(arena) = arenas.arena(idx) {
-                        // Bump a small per-job record; overflow just falls back
-                        // to the heap (alloc returns Err), which is also fine.
-                        let _ = arena.alloc([0u8; 128]);
-                    }
+                // Bump a small per-job record; overflow just falls back
+                // to the heap (alloc returns Err), which is also fine.
+                if let Some(idx) = p.current_worker_index()
+                    && let Some(arena) = arenas.arena(idx)
+                {
+                    let _ = arena.alloc([0u8; 128]);
                 }
             });
         }
