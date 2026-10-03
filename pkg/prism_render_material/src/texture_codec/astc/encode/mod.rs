@@ -120,11 +120,66 @@ pub fn encode_astc_single_partition_4x4_ldr_q192(texels: &[[u8; 4]; 16]) -> [u8;
     block
 }
 
+/// Encode sixteen `RGBA8` texels into a single 4x4 ASTC LDR block, choosing the
+/// block configuration that minimises reconstruction error for *this* block.
+///
+/// Both landed single-partition encoders are tried --
+/// [`encode_astc_single_partition_4x4_ldr`] (mode 83: 8-bit identity colour,
+/// 3-bit weights) and [`encode_astc_single_partition_4x4_ldr_q192`] (mode 578:
+/// QUANT_192 colour, 4-bit weights) -- each candidate is decoded with the exact
+/// hardware decode path ([`super::decode_astc_4x4_ldr`]), and the candidate with
+/// the smallest sum-of-squared RGB error against the source is returned.
+///
+/// This is an honest per-block quality search: smooth gradients favour the
+/// finer 4-bit weights of mode 578, while blocks that need exact 8-bit endpoints
+/// (few distinct colours, hard edges) favour mode 83's identity colour. The
+/// returned block always decodes to error no worse than either individual mode,
+/// so callers get the better of the two with no quality regression.
+///
+/// CEM 8 carries no alpha, so the decoded block has alpha 255 for every texel
+/// and the input alpha channel is ignored.
+#[must_use]
+pub fn encode_astc_single_partition_4x4_ldr_quality(texels: &[[u8; 4]; 16]) -> [u8; 16] {
+    let candidates = [
+        encode_astc_single_partition_4x4_ldr(texels),
+        encode_astc_single_partition_4x4_ldr_q192(texels),
+    ];
+
+    // Sum of squared RGB error of a decoded block against the source texels.
+    // Alpha is forced to 255 by CEM 8, so it is excluded from the metric.
+    let ssd = |dec: &[[u8; 4]; 16]| -> u64 {
+        let mut e = 0u64;
+        for (s, d) in texels.iter().zip(dec.iter()) {
+            for c in 0..3 {
+                let v = i64::from(s[c]) - i64::from(d[c]);
+                e += (v * v) as u64;
+            }
+        }
+        e
+    };
+
+    let mut best = candidates[0];
+    let mut best_err = u64::MAX;
+    for blk in candidates {
+        // Every candidate is produced by a proven encoder, so the decode always
+        // succeeds; skip any that somehow fail rather than panicking.
+        if let Ok(dec) = super::decode_astc_4x4_ldr(&blk) {
+            let err = ssd(&dec);
+            if err < best_err {
+                best_err = err;
+                best = blk;
+            }
+        }
+    }
+    best
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::decode_astc_4x4_ldr;
     use super::encode_astc_single_partition_4x4_ldr;
     use super::encode_astc_single_partition_4x4_ldr_q192;
+    use super::encode_astc_single_partition_4x4_ldr_quality;
 
     /// Max per-channel RGB error over the sixteen texels after a round trip.
     fn max_rgb_err(src: &[[u8; 4]; 16], dec: &[[u8; 4]; 16]) -> i32 {
@@ -229,6 +284,84 @@ mod tests {
         assert!(
             max_rgb_err(&src, &dec) <= 8,
             "QUANT_192 rgb gradient error too large"
+        );
+    }
+
+    /// Sum of squared RGB error over the sixteen texels (alpha excluded),
+    /// matching the metric the quality encoder minimises.
+    fn ssd_rgb(src: &[[u8; 4]; 16], dec: &[[u8; 4]; 16]) -> u64 {
+        let mut e = 0u64;
+        for (s, d) in src.iter().zip(dec.iter()) {
+            for c in 0..3 {
+                let v = i64::from(s[c]) - i64::from(d[c]);
+                e += (v * v) as u64;
+            }
+        }
+        e
+    }
+
+    #[test]
+    fn quality_never_worse_than_either_mode() {
+        // Diverse tiles so the two modes trade wins: constant, gray ramp, rgb
+        // gradient, two-colour checker, and a pseudo-random noise block.
+        let tiles: [[[u8; 4]; 16]; 5] = [
+            [[73, 150, 211, 255]; 16],
+            core::array::from_fn(|t| [(t * 17) as u8, (t * 17) as u8, (t * 17) as u8, 255]),
+            core::array::from_fn(|t| {
+                let f = t as u8 * 16;
+                [f, 255 - f, (f / 2) + 40, 255]
+            }),
+            core::array::from_fn(|t| {
+                if (t / 4 + t % 4) % 2 == 0 {
+                    [240, 20, 30, 255]
+                } else {
+                    [10, 200, 60, 255]
+                }
+            }),
+            core::array::from_fn(|t| {
+                let r = (t.wrapping_mul(97).wrapping_add(13) & 0xff) as u8;
+                let g = (t.wrapping_mul(53).wrapping_add(7) & 0xff) as u8;
+                let b = (t.wrapping_mul(29).wrapping_add(1) & 0xff) as u8;
+                [r, g, b, 255]
+            }),
+        ];
+
+        for (i, src) in tiles.iter().enumerate() {
+            let blk83 = encode_astc_single_partition_4x4_ldr(src);
+            let blk578 = encode_astc_single_partition_4x4_ldr_q192(src);
+            let blkq = encode_astc_single_partition_4x4_ldr_quality(src);
+
+            let e83 = ssd_rgb(src, &decode_astc_4x4_ldr(&blk83).expect("decode mode 83"));
+            let e578 = ssd_rgb(src, &decode_astc_4x4_ldr(&blk578).expect("decode mode 578"));
+            let decq = decode_astc_4x4_ldr(&blkq).expect("decode quality block");
+            let eq = ssd_rgb(src, &decq);
+
+            // The chosen block must be no worse than the better individual mode.
+            assert!(
+                eq <= e83.min(e578),
+                "tile {i}: quality SSD {eq} worse than min(mode83 {e83}, mode578 {e578})"
+            );
+            // And it must be exactly one of the two candidates.
+            assert!(
+                blkq == blk83 || blkq == blk578,
+                "tile {i}: quality block is not one of the candidates"
+            );
+            for d in &decq {
+                assert_eq!(d[3], 255, "tile {i}: CEM 8 forces alpha 255");
+            }
+        }
+    }
+
+    #[test]
+    fn quality_picks_mode578_on_gray_ramp() {
+        // Smooth ramp: the 4-bit weights of mode 578 win, so quality selects it.
+        let src: [[u8; 4]; 16] =
+            core::array::from_fn(|t| [(t * 17) as u8, (t * 17) as u8, (t * 17) as u8, 255]);
+        let blk578 = encode_astc_single_partition_4x4_ldr_q192(&src);
+        let blkq = encode_astc_single_partition_4x4_ldr_quality(&src);
+        assert_eq!(
+            blkq, blk578,
+            "gray ramp should select the mode-578 candidate"
         );
     }
 }
