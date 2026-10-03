@@ -22,6 +22,8 @@ mod dirty;
 mod fetch;
 mod filter;
 mod iter;
+#[cfg(feature = "multi_thread")]
+mod par;
 #[cfg(feature = "simd")]
 mod simd;
 mod state;
@@ -43,3 +45,5 @@ mod sparse_tests;
 mod dirty_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(all(test, feature = "multi_thread"))]
+mod par_tests;

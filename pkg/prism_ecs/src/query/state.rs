@@ -224,4 +224,88 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
             )
         }
     }
+
+    /// Visit every matched row in parallel over a shared view of `world`
+    /// (design §7 par_iter), calling `func` once per row.
+    ///
+    /// Rows are partitioned into disjoint batches of at most `batch_size`
+    /// (clamped to `>= 1`) and dispatched onto `pool`'s work-stealing threads;
+    /// the call returns only after every batch has completed. Only read-only
+    /// data terms are reachable (the `D: `[`ReadOnlyQueryData`] bound), so the
+    /// shared borrow is sufficient and several parallel passes may coexist.
+    #[cfg(feature = "multi_thread")]
+    pub fn par_for_each<Func>(
+        &self,
+        world: &World,
+        pool: &prism_tasks::TaskPool,
+        batch_size: usize,
+        func: Func,
+    ) where
+        D: ReadOnlyQueryData,
+        Func: Fn(D::Item<'_>) + Send + Sync,
+    {
+        let last_run = world.last_change_tick();
+        let this_run = world.change_tick();
+        let archetypes = self.matched_archetypes(world);
+        let world_ptr = (world as *const World).cast_mut();
+        // SAFETY: `D: ReadOnlyQueryData`, so no `&mut` term is ever formed and
+        // the shared `&World` borrow is sufficient for every batch task; the
+        // pointer stays valid for the whole (scope-joined) call. Every id in
+        // `archetypes` came from `matched_archetypes`, satisfying the match
+        // contract required by the driver.
+        unsafe {
+            crate::query::par::par_for_each_raw::<D, F, Func>(
+                world_ptr,
+                &self.data_state,
+                &self.filter_state,
+                &archetypes,
+                last_run,
+                this_run,
+                pool,
+                batch_size,
+                &func,
+            );
+        }
+    }
+
+    /// Visit every matched row in parallel over an exclusive view of `world`,
+    /// permitting `&mut T` terms (design §7 par_iter / §8.3 chunk 子作业).
+    ///
+    /// Rows are partitioned into disjoint batches of at most `batch_size`
+    /// (clamped to `>= 1`) and dispatched onto `pool`; because the batches never
+    /// overlap, the `&mut` references different threads form never alias the
+    /// same column slot. The call returns only after every batch has completed.
+    #[cfg(feature = "multi_thread")]
+    pub fn par_for_each_mut<Func>(
+        &self,
+        world: &mut World,
+        pool: &prism_tasks::TaskPool,
+        batch_size: usize,
+        func: Func,
+    ) where
+        Func: Fn(D::Item<'_>) + Send + Sync,
+    {
+        let last_run = world.last_change_tick();
+        let this_run = world.change_tick();
+        let archetypes = self.matched_archetypes(world);
+        let world_ptr = world as *mut World;
+        // SAFETY: `world` is exclusively borrowed, so the raw pointer is the
+        // sole route to the world for the whole dispatch; disjoint batches make
+        // each `&mut` term unique. Every id in `archetypes` came from
+        // `matched_archetypes`, satisfying the match contract required by the
+        // driver.
+        unsafe {
+            crate::query::par::par_for_each_raw::<D, F, Func>(
+                world_ptr,
+                &self.data_state,
+                &self.filter_state,
+                &archetypes,
+                last_run,
+                this_run,
+                pool,
+                batch_size,
+                &func,
+            );
+        }
+    }
 }
