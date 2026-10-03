@@ -28,10 +28,17 @@
 //!   a page coordinate with the same comparison sequence as the golden
 //!   [`indirection::GpuPageTable::lookup`].
 //!
+//! * [`atlas`] — the [`atlas::plan_atlas_copies`] layout planner that resolves
+//!   each [`pool::PageUpload`] slot into a concrete atlas-array destination and
+//!   `wgpu`-aligned staging-buffer region, so the scene twin only records the
+//!   copies this crate has already laid out.
+//!
 //! The only device-side work left to a scene-layer twin is recording the
-//! staging-to-atlas copies described by [`pool::PageUpload`] and uploading
-//! [`indirection::GpuPageTable::words`]; this crate computes both deterministically.
+//! staging-to-atlas copies laid out by [`atlas::plan_atlas_copies`] and
+//! uploading [`indirection::GpuPageTable::words`]; this crate computes both
+//! deterministically.
 
+pub mod atlas;
 pub mod feedback;
 pub mod feedback_decode;
 pub mod indirection;
@@ -39,6 +46,10 @@ pub mod pool;
 pub mod residency;
 pub mod scheduler;
 
+pub use atlas::{
+    plan_atlas_copies, AtlasCopy, AtlasCopyPlan, AtlasGeometry, AtlasTileFormat, SlotPlacement,
+    COPY_BYTES_PER_ROW_ALIGNMENT,
+};
 pub use feedback::{PageDemand, SemanticWeights, MAX_SCREEN_IMPORTANCE, MIP_URGENCY};
 pub use feedback_decode::{decode_feedback, FeedbackTextureDesc, NOT_REQUESTED};
 pub use indirection::{GpuPageTable, PAGE_TABLE_ENTRY_WORDS};
