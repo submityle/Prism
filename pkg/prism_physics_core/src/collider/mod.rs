@@ -115,6 +115,10 @@ pub use surface_sampling::{
     sample_surface, total_surface_area, SurfaceSample, SurfaceSampleParams,
 };
 
+pub mod curvature;
+
+pub use curvature::{estimate_curvature, CurvatureParams, CurvatureReport, VertexCurvature};
+
 /// A handle into a [`ShapeRegistry`].
 ///
 /// This is a plain index handle; shapes are immutable once inserted, so no
