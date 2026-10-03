@@ -238,8 +238,10 @@ pub struct Mut<'w, T: ?Sized> {
     // (design §7/§10 coarse layer). It is shared by every row in the chunk, so
     // two `Mut`s into one chunk would alias a `&mut`; a raw write of `this_run`
     // is sound because the value written is identical and monotonic. `None`
-    // when the fetch has no chunk layer (never, for column-backed terms).
-    chunk_changed: *mut Tick,
+    // when the fetch has no chunk layer — i.e. a SparseSet-backed term (design
+    // §6), whose change detection is purely the per-row ticks with no coarse
+    // chunk-version layer.
+    chunk_changed: Option<*mut Tick>,
     added: Tick,
     last_run: Tick,
     this_run: Tick,
@@ -252,7 +254,7 @@ impl<'w, T: ?Sized> Mut<'w, T> {
     pub(crate) fn new(
         value: &'w mut T,
         changed: &'w mut Tick,
-        chunk_changed: *mut Tick,
+        chunk_changed: Option<*mut Tick>,
         added: Tick,
         last_run: Tick,
         this_run: Tick,
@@ -273,15 +275,19 @@ impl<'w, T: ?Sized> Mut<'w, T> {
     #[inline]
     fn record_change(&mut self) {
         *self.changed = self.this_run;
-        // SAFETY: `chunk_changed` was handed to us by the column fetch for this
-        // row and stays valid for `'w` (no structural change occurs while the
-        // `Mut` is live). We only ever *write* `this_run`, the newest tick, so
-        // concurrent `Mut`s into the same chunk (single-threaded iteration, or a
-        // parallel split over disjoint chunks) write the identical value to the
-        // same cell — never a torn or lowered value — upholding the chunk
-        // upper-bound invariant without forming an aliasing `&mut`.
-        unsafe {
-            *self.chunk_changed = self.this_run;
+        if let Some(chunk_changed) = self.chunk_changed {
+            // SAFETY: `chunk_changed` was handed to us by the column fetch for
+            // this row and stays valid for `'w` (no structural change occurs
+            // while the `Mut` is live). We only ever *write* `this_run`, the
+            // newest tick, so concurrent `Mut`s into the same chunk
+            // (single-threaded iteration, or a parallel split over disjoint
+            // chunks) write the identical value to the same cell — never a torn
+            // or lowered value — upholding the chunk upper-bound invariant
+            // without forming an aliasing `&mut`. SparseSet-backed terms pass
+            // `None` here (no chunk layer) and skip this write entirely.
+            unsafe {
+                *chunk_changed = self.this_run;
+            }
         }
     }
 

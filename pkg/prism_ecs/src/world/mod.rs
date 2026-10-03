@@ -125,6 +125,17 @@ impl World {
         &self.archetypes
     }
 
+    /// The out-of-band sparse-component registry (design §6).
+    ///
+    /// Sparse components live here keyed by [`Entity`], not inside archetype
+    /// tables, so the query layer resolves their per-entity membership from
+    /// this registry during iteration rather than from the archetype component
+    /// set.
+    #[inline]
+    pub(crate) fn sparse_sets(&self) -> &SparseSets {
+        &self.sparse_sets
+    }
+
     /// The global resource registry.
     #[inline]
     pub fn resources(&self) -> &Resources {

@@ -34,6 +34,8 @@ pub use state::QueryState;
 #[cfg(test)]
 mod change_detection_tests;
 #[cfg(test)]
+mod sparse_tests;
+#[cfg(test)]
 mod dirty_tests;
 #[cfg(test)]
 mod tests;

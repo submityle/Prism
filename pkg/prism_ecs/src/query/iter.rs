@@ -134,6 +134,14 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Iterator for QueryIter<'w, 's, D, F> 
                 let fetch = self
                     .current_fetch
                     .expect("current_fetch is Some whenever row_len > 0");
+                // SAFETY: same row/archetype invariants as the filter gate above.
+                // A sparse-backed required data term (design §6) resolves its
+                // per-entity membership here; table-backed terms always pass.
+                // `D::Fetch` is `Copy`, so this read does not disturb the cursor.
+                if !unsafe { D::filter_fetch(fetch, entity, row) } {
+                    // Entity lacks a required sparse component; skip the row.
+                    continue;
+                }
                 // SAFETY: `row < self.row_len == archetype.len()`, `fetch` was
                 // built for this archetype, and the row cursor only advances —
                 // so this `(archetype, row)` is fetched exactly once. Any `&mut`
@@ -156,6 +164,9 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Iterator for QueryIter<'w, 's, D, F> 
                 .archetypes()
                 .get(arch_id)
                 .expect("matched archetype id must resolve");
+            // Out-of-band sparse storage consulted per row by sparse-backed terms
+            // (design §6); shares the `'w` world borrow.
+            let sparse_sets = world.sparse_sets();
 
             self.row = 0;
             self.row_len = archetype.len();
@@ -164,12 +175,12 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Iterator for QueryIter<'w, 's, D, F> 
             // satisfies `D::matches` for `data_state` — the contract of
             // `init_fetch`.
             self.current_fetch =
-                Some(unsafe { D::init_fetch(self.data_state, archetype, self.last_run, self.this_run) });
+                Some(unsafe { D::init_fetch(self.data_state, archetype, sparse_sets, self.last_run, self.this_run) });
             // SAFETY: the same `arch_id` also satisfies `F::matches` for
             // `filter_state` (guaranteed by `matched_archetypes`), the contract
             // of `F::init_fetch`.
             self.current_filter_fetch = Some(unsafe {
-                F::init_fetch(self.filter_state, archetype, self.last_run, self.this_run)
+                F::init_fetch(self.filter_state, archetype, sparse_sets, self.last_run, self.this_run)
             });
         }
     }

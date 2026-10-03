@@ -7,23 +7,54 @@
 //! - `&T` — shared access to component `T`.
 //! - `&mut T` — exclusive access to component `T`.
 //! - [`Entity`] — the entity id of the current row (no component access).
-//! - `Option<&T>` / `Option<&mut T>` — the component if the archetype has it,
+//! - `Option<&T>` / `Option<&mut T>` — the component if the entity has it,
 //!   else `None` (the term never excludes an archetype).
 //! - [`Ref<T>`](crate::change::Ref) — shared access plus per-value change
 //!   detection (`is_added`/`is_changed`), the read-only companion of the
 //!   change-detecting [`Mut<T>`](crate::change::Mut) yielded by `&mut T`.
 //! - tuples of the above, up to 12 elements.
 //!
-//! Each term exposes three cooperating pieces: a world-static `State` (resolved
-//! [`ComponentId`]s), a per-archetype `Fetch` cursor (resolved column
-//! references), and the leaf [`QueryData::fetch`] that reads one row.
+//! Each term exposes four cooperating pieces: a world-static `State` (resolved
+//! [`ComponentId`]s), a per-archetype `Fetch` cursor (resolved storage
+//! references), a per-row [`QueryData::filter_fetch`] presence gate, and the
+//! leaf [`QueryData::fetch`] that reads one row.
+//!
+//! # Table vs SparseSet (design §6)
+//!
+//! A term abstracts over the two storage states its component may use:
+//!
+//! - A **table** component lives in the archetype's columnar table, so its
+//!   presence is a property of the *archetype* — [`QueryData::matches`] decides
+//!   it once per archetype and [`QueryData::filter_fetch`] always passes.
+//! - A **sparse** component ([`StorageType::SparseSet`]) lives out of band in
+//!   the world's [`SparseSets`] registry keyed by [`Entity`], so toggling it
+//!   never moves the entity between archetypes. Its presence is therefore
+//!   *per-entity, not per-archetype*: [`QueryData::matches`] must admit **every**
+//!   archetype and [`QueryData::filter_fetch`] resolves membership per row.
+//!
+//! [`StorageFetch`] carries whichever cursor the term resolved for the current
+//! archetype so a single `Fetch` type covers both paths.
 
 use crate::archetype::Archetype;
 use crate::change::{Mut, Ref, Tick};
-use crate::component::{Component, ComponentId, Components};
+use crate::component::{Component, ComponentId, Components, StorageType};
 use crate::entity::Entity;
 use crate::query::access::Access;
-use crate::storage::Column;
+use crate::storage::{Column, ComponentSparseSet, SparseSets};
+
+/// Resolved per-archetype storage cursor for one component term, abstracting
+/// over table-backed and sparse-backed storage (design §6).
+#[derive(Clone, Copy)]
+pub enum StorageFetch<'w> {
+    /// Table-backed column. `None` only for an `Option<&T>`/`Option<&mut T>`
+    /// term in an archetype that lacks the column; required terms always carry
+    /// `Some` because [`QueryData::matches`] guaranteed the column exists.
+    Table(Option<&'w Column>),
+    /// Sparse-backed set. `None` if the sparse component has never been written
+    /// (its set was never allocated); otherwise membership is still resolved
+    /// per entity by [`QueryData::filter_fetch`].
+    Sparse(Option<&'w ComponentSparseSet>),
+}
 
 /// A query term describing the typed data read from each matched row.
 ///
@@ -38,6 +69,10 @@ use crate::storage::Column;
 /// - [`QueryData::matches`] must return `true` only for archetypes from which
 ///   [`QueryData::init_fetch`] can build a valid fetch, and
 ///   [`QueryData::fetch`] reads only components covered by `update_access`.
+/// - [`QueryData::filter_fetch`] must return `false` for any row where
+///   [`QueryData::fetch`] could not produce a valid item (e.g. a sparse
+///   component the entity does not have), so a required term never fetches an
+///   absent value.
 /// - For a `&mut`/`Option<&mut>` term, [`QueryData::fetch`] forms a unique
 ///   `&mut` into the row; the driver guarantees each `(archetype, row)` is
 ///   fetched at most once per iteration, so these borrows never alias.
@@ -46,7 +81,7 @@ pub unsafe trait QueryData {
     type Item<'w>;
     /// World-static resolved state (component ids), computed once.
     type State: Send + Sync;
-    /// Per-archetype resolved cursor (column references). Must be `Copy` so the
+    /// Per-archetype resolved cursor (storage references). Must be `Copy` so the
     /// iterator can read it per row without consuming it.
     type Fetch<'w>: Copy;
 
@@ -54,7 +89,10 @@ pub unsafe trait QueryData {
     /// types it names.
     fn init_state(components: &mut Components) -> Self::State;
 
-    /// Whether `archetype` can satisfy this term (has the required columns).
+    /// Whether `archetype` can satisfy this term. A table term requires the
+    /// column; a sparse term admits every archetype (membership is resolved per
+    /// row by [`filter_fetch`](QueryData::filter_fetch)); an optional term
+    /// admits every archetype.
     fn matches(state: &Self::State, archetype: &Archetype) -> bool;
 
     /// Record this term's component reads/writes into `access`.
@@ -62,45 +100,70 @@ pub unsafe trait QueryData {
 
     /// Resolve the per-archetype fetch cursor.
     ///
-    /// `last_run`/`this_run` are the querying system's observer window; terms
-    /// that report change detection (`&mut T`, `Option<&mut T>`, [`Ref<T>`])
-    /// thread them into their [`Item`](QueryData::Item), while plain reads
-    /// ignore them.
+    /// `sparse_sets` is the world's out-of-band registry (design §6), consulted
+    /// by sparse-backed terms. `last_run`/`this_run` are the querying system's
+    /// observer window; terms that report change detection (`&mut T`,
+    /// `Option<&mut T>`, [`Ref<T>`]) thread them into their
+    /// [`Item`](QueryData::Item), while plain reads ignore them.
     ///
     /// # Safety
     /// `archetype` must satisfy [`QueryData::matches`] for `state`.
     unsafe fn init_fetch<'w>(
         state: &Self::State,
         archetype: &'w Archetype,
+        sparse_sets: &'w SparseSets,
         last_run: Tick,
         this_run: Tick,
     ) -> Self::Fetch<'w>;
+
+    /// Per-row presence gate, evaluated **before** [`fetch`](QueryData::fetch).
+    ///
+    /// Table-backed terms always pass (matching the archetype already proves the
+    /// column is present), so the default returns `true`. SparseSet-backed
+    /// required terms (design §6) override this to resolve per-entity
+    /// membership, because a sparse component's presence is not encoded in the
+    /// archetype component set. Optional terms keep the default (`true`) and
+    /// surface absence as `None` from `fetch` instead.
+    ///
+    /// # Safety
+    /// `row` must be `< archetype.len()` for the archetype `fetch` was built
+    /// for.
+    unsafe fn filter_fetch<'w>(_fetch: Self::Fetch<'w>, _entity: Entity, _row: usize) -> bool {
+        true
+    }
 
     /// Read the item at `row` of the archetype the `fetch` was built for.
     ///
     /// # Safety
     /// `row` must be `< archetype.len()` for the archetype `fetch` was built
-    /// for, and for any `&mut` term the driver must not fetch the same
+    /// for, [`filter_fetch`](QueryData::filter_fetch) must have admitted this
+    /// row, and for any `&mut` term the driver must not fetch the same
     /// `(archetype, row)` more than once while a prior item is still alive.
     unsafe fn fetch<'w>(fetch: Self::Fetch<'w>, entity: Entity, row: usize) -> Self::Item<'w>;
 }
 
 // --- &T ---------------------------------------------------------------------
 
-// SAFETY: `update_access` registers the single read; `matches` requires the
-// column to exist so `init_fetch` always finds it; `fetch` reads only that
-// column as `T`, the exact type registered for the id.
+// SAFETY: `update_access` registers the single read; `matches` admits only
+// archetypes/rows `filter_fetch` can satisfy (table column present, or sparse
+// membership checked per row); `fetch` reads only that component as `T`, the
+// exact type registered for the id.
 unsafe impl<T: Component> QueryData for &T {
     type Item<'w> = &'w T;
     type State = ComponentId;
-    type Fetch<'w> = &'w Column;
+    type Fetch<'w> = StorageFetch<'w>;
 
     fn init_state(components: &mut Components) -> Self::State {
         components.register::<T>()
     }
 
     fn matches(state: &Self::State, archetype: &Archetype) -> bool {
-        archetype.contains(*state)
+        match T::STORAGE {
+            // Sparse components live out of band, so every archetype may hold
+            // entities that have one; membership is resolved per row below.
+            StorageType::SparseSet => true,
+            StorageType::Table => archetype.contains(*state),
+        }
     }
 
     fn update_access(state: &Self::State, access: &mut Access) {
@@ -110,40 +173,69 @@ unsafe impl<T: Component> QueryData for &T {
     unsafe fn init_fetch<'w>(
         state: &Self::State,
         archetype: &'w Archetype,
+        sparse_sets: &'w SparseSets,
         _last_run: Tick,
         _this_run: Tick,
     ) -> Self::Fetch<'w> {
-        archetype
-            .table()
-            .column(*state)
-            .expect("matches() guaranteed the column exists")
+        match T::STORAGE {
+            StorageType::Table => StorageFetch::Table(Some(
+                archetype
+                    .table()
+                    .column(*state)
+                    .expect("matches() guaranteed the column exists"),
+            )),
+            StorageType::SparseSet => StorageFetch::Sparse(sparse_sets.get(*state)),
+        }
     }
 
-    unsafe fn fetch<'w>(fetch: Self::Fetch<'w>, _entity: Entity, row: usize) -> Self::Item<'w> {
-        // SAFETY: `row < len` per the caller's contract, the column stores `T`,
-        // and shared `&T` access cannot alias a mutable borrow (enforced by the
-        // access conflict check). The lifetime is tied to `'w` — the world
-        // borrow held for the whole iteration.
-        unsafe { &*fetch.get_ptr(row).cast::<T>() }
+    unsafe fn filter_fetch<'w>(fetch: Self::Fetch<'w>, entity: Entity, _row: usize) -> bool {
+        match fetch {
+            // Table term already matched the whole archetype.
+            StorageFetch::Table(_) => true,
+            // Sparse term is present only where the entity has a dense row.
+            StorageFetch::Sparse(set) => set.is_some_and(|s| s.contains(entity)),
+        }
+    }
+
+    unsafe fn fetch<'w>(fetch: Self::Fetch<'w>, entity: Entity, row: usize) -> Self::Item<'w> {
+        match fetch {
+            // SAFETY: `row < len` per the caller's contract, the column stores
+            // `T`, and shared `&T` access cannot alias a mutable borrow
+            // (enforced by the access conflict check). The lifetime is tied to
+            // `'w` — the world borrow held for the whole iteration.
+            StorageFetch::Table(Some(col)) => unsafe { &*col.get_ptr(row).cast::<T>() },
+            // SAFETY: `filter_fetch` admitted this row only when the set holds
+            // `entity`, so `get` is `Some`; the set stores `T`, and shared `&T`
+            // access cannot alias a mutable borrow.
+            StorageFetch::Sparse(Some(set)) => unsafe { set.get::<T>(entity) }
+                .expect("filter_fetch gate guaranteed the sparse component is present"),
+            StorageFetch::Table(None) | StorageFetch::Sparse(None) => {
+                unreachable!("required `&T` fetched a row without the component")
+            }
+        }
     }
 }
 
 // --- &mut T -----------------------------------------------------------------
 
 // SAFETY: `update_access` registers the single write (so no other term may read
-// or write the same component); `matches`/`init_fetch` mirror `&T`; `fetch`
-// forms a `&mut T` that is unique because the driver yields each row once.
+// or write the same component); `matches`/`init_fetch`/`filter_fetch` mirror
+// `&T`; `fetch` forms a `&mut T` that is unique because the driver yields each
+// row once.
 unsafe impl<T: Component> QueryData for &mut T {
     type Item<'w> = Mut<'w, T>;
     type State = ComponentId;
-    type Fetch<'w> = (&'w Column, Tick, Tick);
+    type Fetch<'w> = (StorageFetch<'w>, Tick, Tick);
 
     fn init_state(components: &mut Components) -> Self::State {
         components.register::<T>()
     }
 
     fn matches(state: &Self::State, archetype: &Archetype) -> bool {
-        archetype.contains(*state)
+        match T::STORAGE {
+            StorageType::SparseSet => true,
+            StorageType::Table => archetype.contains(*state),
+        }
     }
 
     fn update_access(state: &Self::State, access: &mut Access) {
@@ -153,31 +245,76 @@ unsafe impl<T: Component> QueryData for &mut T {
     unsafe fn init_fetch<'w>(
         state: &Self::State,
         archetype: &'w Archetype,
+        sparse_sets: &'w SparseSets,
         last_run: Tick,
         this_run: Tick,
     ) -> Self::Fetch<'w> {
-        let column = archetype
-            .table()
-            .column(*state)
-            .expect("matches() guaranteed the column exists");
-        (column, last_run, this_run)
+        let storage = match T::STORAGE {
+            StorageType::Table => StorageFetch::Table(Some(
+                archetype
+                    .table()
+                    .column(*state)
+                    .expect("matches() guaranteed the column exists"),
+            )),
+            StorageType::SparseSet => StorageFetch::Sparse(sparse_sets.get(*state)),
+        };
+        (storage, last_run, this_run)
     }
 
-    unsafe fn fetch<'w>(fetch: Self::Fetch<'w>, _entity: Entity, row: usize) -> Self::Item<'w> {
-        let (col, last_run, this_run) = fetch;
-        let added = col.added_tick(row);
-        // SAFETY: `row < len`; the column stores `T`; the write is exclusive
-        // (access check rejects any other borrow of this component) and the
-        // driver fetches each `(archetype, row)` at most once, so this `&mut T`
-        // is unique for `'w`. The value bytes and the changed-tick cell live in
-        // separate allocations, so the two `&mut` below never alias.
-        let value = unsafe { &mut *col.get_ptr(row).cast::<T>() };
-        // SAFETY: as above — unique access to this row's changed-tick cell.
-        let changed = unsafe { &mut *col.changed_tick_ptr(row) };
-        // SAFETY: `row < len`; the raw chunk-version pointer is only written
-        // (with `this_run`) by `Mut`, never turned into an aliasing `&mut`.
-        let chunk_changed = unsafe { col.chunk_changed_ptr(row) };
-        Mut::new(value, changed, chunk_changed, added, last_run, this_run)
+    unsafe fn filter_fetch<'w>(fetch: Self::Fetch<'w>, entity: Entity, _row: usize) -> bool {
+        match fetch.0 {
+            StorageFetch::Table(_) => true,
+            StorageFetch::Sparse(set) => set.is_some_and(|s| s.contains(entity)),
+        }
+    }
+
+    unsafe fn fetch<'w>(fetch: Self::Fetch<'w>, entity: Entity, row: usize) -> Self::Item<'w> {
+        let (storage, last_run, this_run) = fetch;
+        match storage {
+            StorageFetch::Table(Some(col)) => {
+                let added = col.added_tick(row);
+                // SAFETY: `row < len`; the column stores `T`; the write is
+                // exclusive (access check rejects any other borrow) and the
+                // driver fetches each `(archetype, row)` at most once, so this
+                // `&mut T` is unique for `'w`. The value bytes and the
+                // changed-tick cell live in separate allocations, so the two
+                // `&mut` below never alias.
+                let value = unsafe { &mut *col.get_ptr(row).cast::<T>() };
+                // SAFETY: as above — unique access to this row's changed-tick
+                // cell.
+                let changed = unsafe { &mut *col.changed_tick_ptr(row) };
+                // SAFETY: `row < len`; the raw chunk-version pointer is only
+                // written (with `this_run`) by `Mut`, never turned into an
+                // aliasing `&mut`.
+                let chunk_changed = unsafe { col.chunk_changed_ptr(row) };
+                Mut::new(value, changed, Some(chunk_changed), added, last_run, this_run)
+            }
+            StorageFetch::Sparse(Some(set)) => {
+                // SAFETY: `filter_fetch` admitted this row only when the set
+                // holds `entity`, so these lookups are `Some`.
+                let ptr = unsafe { set.get_ptr(entity) }
+                    .expect("filter_fetch gate guaranteed the sparse component is present");
+                // SAFETY: the set stores `T`; the write is exclusive (access
+                // check) and each entity is fetched once, so this `&mut T` is
+                // unique for `'w`. The value bytes and the changed-tick cell are
+                // distinct allocations, so the two `&mut` below never alias.
+                let value = unsafe { &mut *ptr.cast::<T>() };
+                // SAFETY: unique per-row access to the changed-tick cell.
+                let changed_ptr = unsafe { set.changed_tick_ptr(entity) }
+                    .expect("filter_fetch gate guaranteed the sparse component is present");
+                // SAFETY: as above — unique access to this entity's tick cell.
+                let changed = unsafe { &mut *changed_ptr };
+                let added = set
+                    .added_tick(entity)
+                    .expect("filter_fetch gate guaranteed the sparse component is present");
+                // A sparse set has no coarse chunk-version layer (design §6), so
+                // `Mut` carries `None` and skips the chunk-version write.
+                Mut::new(value, changed, None, added, last_run, this_run)
+            }
+            StorageFetch::Table(None) | StorageFetch::Sparse(None) => {
+                unreachable!("required `&mut T` fetched a row without the component")
+            }
+        }
     }
 }
 
@@ -200,6 +337,7 @@ unsafe impl QueryData for Entity {
     unsafe fn init_fetch<'w>(
         _state: &Self::State,
         _archetype: &'w Archetype,
+        _sparse_sets: &'w SparseSets,
         _last_run: Tick,
         _this_run: Tick,
     ) -> Self::Fetch<'w> {
@@ -214,11 +352,12 @@ unsafe impl QueryData for Entity {
 
 // SAFETY: optional terms never exclude an archetype; access is registered
 // unconditionally (the component may be read/written where present); `fetch`
-// yields `None` when the column is absent and otherwise behaves like `&T`.
+// yields `None` when the component is absent and otherwise behaves like `&T`.
+// `filter_fetch` keeps the default (`true`): an optional term never gates a row.
 unsafe impl<T: Component> QueryData for Option<&T> {
     type Item<'w> = Option<&'w T>;
     type State = ComponentId;
-    type Fetch<'w> = Option<&'w Column>;
+    type Fetch<'w> = StorageFetch<'w>;
 
     fn init_state(components: &mut Components) -> Self::State {
         components.register::<T>()
@@ -235,16 +374,26 @@ unsafe impl<T: Component> QueryData for Option<&T> {
     unsafe fn init_fetch<'w>(
         state: &Self::State,
         archetype: &'w Archetype,
+        sparse_sets: &'w SparseSets,
         _last_run: Tick,
         _this_run: Tick,
     ) -> Self::Fetch<'w> {
-        archetype.table().column(*state)
+        match T::STORAGE {
+            StorageType::Table => StorageFetch::Table(archetype.table().column(*state)),
+            StorageType::SparseSet => StorageFetch::Sparse(sparse_sets.get(*state)),
+        }
     }
 
-    unsafe fn fetch<'w>(fetch: Self::Fetch<'w>, _entity: Entity, row: usize) -> Self::Item<'w> {
-        // SAFETY: when `Some`, `row < len` and the column stores `T`; shared
-        // access cannot alias a mutable borrow.
-        fetch.map(|col| unsafe { &*col.get_ptr(row).cast::<T>() })
+    unsafe fn fetch<'w>(fetch: Self::Fetch<'w>, entity: Entity, row: usize) -> Self::Item<'w> {
+        match fetch {
+            // SAFETY: when `Some`, `row < len` and the column stores `T`; shared
+            // access cannot alias a mutable borrow.
+            StorageFetch::Table(opt) => opt.map(|col| unsafe { &*col.get_ptr(row).cast::<T>() }),
+            // SAFETY: the set stores `T`; `get` validates membership and returns
+            // `None` for an absent entity. Shared access cannot alias a mutable
+            // borrow.
+            StorageFetch::Sparse(opt) => opt.and_then(|set| unsafe { set.get::<T>(entity) }),
+        }
     }
 }
 
@@ -253,7 +402,7 @@ unsafe impl<T: Component> QueryData for Option<&T> {
 unsafe impl<T: Component> QueryData for Option<&mut T> {
     type Item<'w> = Option<Mut<'w, T>>;
     type State = ComponentId;
-    type Fetch<'w> = (Option<&'w Column>, Tick, Tick);
+    type Fetch<'w> = (StorageFetch<'w>, Tick, Tick);
 
     fn init_state(components: &mut Components) -> Self::State {
         components.register::<T>()
@@ -270,48 +419,81 @@ unsafe impl<T: Component> QueryData for Option<&mut T> {
     unsafe fn init_fetch<'w>(
         state: &Self::State,
         archetype: &'w Archetype,
+        sparse_sets: &'w SparseSets,
         last_run: Tick,
         this_run: Tick,
     ) -> Self::Fetch<'w> {
-        (archetype.table().column(*state), last_run, this_run)
+        let storage = match T::STORAGE {
+            StorageType::Table => StorageFetch::Table(archetype.table().column(*state)),
+            StorageType::SparseSet => StorageFetch::Sparse(sparse_sets.get(*state)),
+        };
+        (storage, last_run, this_run)
     }
 
-    unsafe fn fetch<'w>(fetch: Self::Fetch<'w>, _entity: Entity, row: usize) -> Self::Item<'w> {
-        let (column, last_run, this_run) = fetch;
-        column.map(|col| {
-            let added = col.added_tick(row);
-            // SAFETY: when `Some`, `row < len`, the column stores `T`, the write
-            // is exclusive, and each row is fetched once — so the `&mut T` is
-            // unique. Value bytes and the changed-tick cell are distinct
-            // allocations, so the two `&mut` below do not alias.
-            let value = unsafe { &mut *col.get_ptr(row).cast::<T>() };
-            // SAFETY: as above — unique access to this row's changed-tick cell.
-            let changed = unsafe { &mut *col.changed_tick_ptr(row) };
-            // SAFETY: `row < len`; the raw chunk-version pointer is only written
-            // (with `this_run`) by `Mut`, never turned into an aliasing `&mut`.
-            let chunk_changed = unsafe { col.chunk_changed_ptr(row) };
-            Mut::new(value, changed, chunk_changed, added, last_run, this_run)
-        })
+    unsafe fn fetch<'w>(fetch: Self::Fetch<'w>, entity: Entity, row: usize) -> Self::Item<'w> {
+        let (storage, last_run, this_run) = fetch;
+        match storage {
+            StorageFetch::Table(opt) => opt.map(|col| {
+                let added = col.added_tick(row);
+                // SAFETY: when `Some`, `row < len`, the column stores `T`, the
+                // write is exclusive, and each row is fetched once — so the
+                // `&mut T` is unique. Value bytes and the changed-tick cell are
+                // distinct allocations, so the two `&mut` below do not alias.
+                let value = unsafe { &mut *col.get_ptr(row).cast::<T>() };
+                // SAFETY: as above — unique access to this row's changed-tick
+                // cell.
+                let changed = unsafe { &mut *col.changed_tick_ptr(row) };
+                // SAFETY: `row < len`; the raw chunk-version pointer is only
+                // written (with `this_run`) by `Mut`, never turned into an
+                // aliasing `&mut`.
+                let chunk_changed = unsafe { col.chunk_changed_ptr(row) };
+                Mut::new(value, changed, Some(chunk_changed), added, last_run, this_run)
+            }),
+            StorageFetch::Sparse(opt) => opt.and_then(|set| {
+                // SAFETY: `get_ptr` validates membership and returns `None` for
+                // an absent entity, so the `?` surfaces absence as `None`.
+                let ptr = unsafe { set.get_ptr(entity) }?;
+                // SAFETY: the set stores `T`; the write is exclusive (access
+                // check) and each entity is fetched once, so this `&mut T` is
+                // unique. Value bytes and the changed-tick cell are distinct
+                // allocations, so the two `&mut` below do not alias.
+                let value = unsafe { &mut *ptr.cast::<T>() };
+                // SAFETY: unique per-row access to the changed-tick cell; the
+                // entity is present (checked above).
+                let changed_ptr = unsafe { set.changed_tick_ptr(entity) }
+                    .expect("entity present: get_ptr returned Some");
+                // SAFETY: as above — unique access to this entity's tick cell.
+                let changed = unsafe { &mut *changed_ptr };
+                let added = set
+                    .added_tick(entity)
+                    .expect("entity present: get_ptr returned Some");
+                // A sparse set has no coarse chunk-version layer (design §6).
+                Some(Mut::new(value, changed, None, added, last_run, this_run))
+            }),
+        }
     }
 }
 
 // --- Ref<T> -----------------------------------------------------------------
 
 // SAFETY: `Ref<T>` reads a single component immutably (registering only a read)
-// and additionally reads that component's change ticks; `matches` requires the
-// column to exist so `init_fetch` always finds it; `fetch` forms a `&T` plus
-// `Copy` tick snapshots, never a `&mut` into storage.
+// and additionally reads that component's change ticks; `matches`/`filter_fetch`
+// mirror `&T`; `fetch` forms a `&T` plus `Copy` tick snapshots, never a `&mut`
+// into storage.
 unsafe impl<T: Component> QueryData for Ref<'_, T> {
     type Item<'w> = Ref<'w, T>;
     type State = ComponentId;
-    type Fetch<'w> = (&'w Column, Tick, Tick);
+    type Fetch<'w> = (StorageFetch<'w>, Tick, Tick);
 
     fn init_state(components: &mut Components) -> Self::State {
         components.register::<T>()
     }
 
     fn matches(state: &Self::State, archetype: &Archetype) -> bool {
-        archetype.contains(*state)
+        match T::STORAGE {
+            StorageType::SparseSet => true,
+            StorageType::Table => archetype.contains(*state),
+        }
     }
 
     fn update_access(state: &Self::State, access: &mut Access) {
@@ -321,22 +503,65 @@ unsafe impl<T: Component> QueryData for Ref<'_, T> {
     unsafe fn init_fetch<'w>(
         state: &Self::State,
         archetype: &'w Archetype,
+        sparse_sets: &'w SparseSets,
         last_run: Tick,
         this_run: Tick,
     ) -> Self::Fetch<'w> {
-        let column = archetype
-            .table()
-            .column(*state)
-            .expect("matches() guaranteed the column exists");
-        (column, last_run, this_run)
+        let storage = match T::STORAGE {
+            StorageType::Table => StorageFetch::Table(Some(
+                archetype
+                    .table()
+                    .column(*state)
+                    .expect("matches() guaranteed the column exists"),
+            )),
+            StorageType::SparseSet => StorageFetch::Sparse(sparse_sets.get(*state)),
+        };
+        (storage, last_run, this_run)
     }
 
-    unsafe fn fetch<'w>(fetch: Self::Fetch<'w>, _entity: Entity, row: usize) -> Self::Item<'w> {
-        let (col, last_run, this_run) = fetch;
-        // SAFETY: `row < len`; the column stores `T`; shared `&T` access cannot
-        // alias a mutable borrow (the access check rejects a conflicting write).
-        let value = unsafe { &*col.get_ptr(row).cast::<T>() };
-        Ref::new(value, col.added_tick(row), col.changed_tick(row), last_run, this_run)
+    unsafe fn filter_fetch<'w>(fetch: Self::Fetch<'w>, entity: Entity, _row: usize) -> bool {
+        match fetch.0 {
+            StorageFetch::Table(_) => true,
+            StorageFetch::Sparse(set) => set.is_some_and(|s| s.contains(entity)),
+        }
+    }
+
+    unsafe fn fetch<'w>(fetch: Self::Fetch<'w>, entity: Entity, row: usize) -> Self::Item<'w> {
+        let (storage, last_run, this_run) = fetch;
+        match storage {
+            StorageFetch::Table(Some(col)) => {
+                // SAFETY: `row < len`; the column stores `T`; shared `&T` access
+                // cannot alias a mutable borrow (the access check rejects a
+                // conflicting write).
+                let value = unsafe { &*col.get_ptr(row).cast::<T>() };
+                Ref::new(
+                    value,
+                    col.added_tick(row),
+                    col.changed_tick(row),
+                    last_run,
+                    this_run,
+                )
+            }
+            StorageFetch::Sparse(Some(set)) => {
+                // SAFETY: `filter_fetch` admitted this row only when the set
+                // holds `entity`, so these lookups are `Some`.
+                let ptr = unsafe { set.get_ptr(entity) }
+                    .expect("filter_fetch gate guaranteed the sparse component is present");
+                // SAFETY: the set stores `T`; shared `&T` access cannot alias a
+                // mutable borrow.
+                let value = unsafe { &*ptr.cast::<T>() };
+                let added = set
+                    .added_tick(entity)
+                    .expect("filter_fetch gate guaranteed the sparse component is present");
+                let changed = set
+                    .changed_tick(entity)
+                    .expect("filter_fetch gate guaranteed the sparse component is present");
+                Ref::new(value, added, changed, last_run, this_run)
+            }
+            StorageFetch::Table(None) | StorageFetch::Sparse(None) => {
+                unreachable!("required `Ref<T>` fetched a row without the component")
+            }
+        }
     }
 }
 
@@ -346,8 +571,9 @@ macro_rules! impl_query_data_tuple {
     ($($T:ident),+) => {
         // SAFETY: each element is a `QueryData` upholding the trait contract;
         // the tuple registers the union of their accesses, matches only when
-        // all elements match, and fetches each element at the same row — so the
-        // per-element soundness arguments compose.
+        // all elements match, gates a row only when every element admits it,
+        // and fetches each element at the same row — so the per-element
+        // soundness arguments compose.
         #[allow(non_snake_case)]
         unsafe impl<$($T: QueryData),+> QueryData for ($($T,)+) {
             type Item<'w> = ($($T::Item<'w>,)+);
@@ -371,12 +597,21 @@ macro_rules! impl_query_data_tuple {
             unsafe fn init_fetch<'w>(
                 state: &Self::State,
                 archetype: &'w Archetype,
+                sparse_sets: &'w SparseSets,
                 last_run: Tick,
                 this_run: Tick,
             ) -> Self::Fetch<'w> {
                 let ($($T,)+) = state;
                 // SAFETY: forwarded — `matches` held for every element.
-                unsafe { ($($T::init_fetch($T, archetype, last_run, this_run),)+) }
+                unsafe { ($($T::init_fetch($T, archetype, sparse_sets, last_run, this_run),)+) }
+            }
+
+            unsafe fn filter_fetch<'w>(fetch: Self::Fetch<'w>, entity: Entity, row: usize) -> bool {
+                let ($($T,)+) = fetch;
+                // SAFETY: forwarded — same row for every element. A tuple admits
+                // a row only when every element's per-row gate admits it, so a
+                // sparse element the entity lacks excludes the whole row.
+                $((unsafe { $T::filter_fetch($T, entity, row) }))&&+
             }
 
             unsafe fn fetch<'w>(fetch: Self::Fetch<'w>, entity: Entity, row: usize) -> Self::Item<'w> {

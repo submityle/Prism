@@ -27,10 +27,10 @@ use core::marker::PhantomData;
 
 use crate::archetype::Archetype;
 use crate::change::Tick;
-use crate::component::{Component, ComponentId, Components};
+use crate::component::{Component, ComponentId, Components, StorageType};
 use crate::entity::Entity;
 use crate::query::access::Access;
-use crate::storage::Column;
+use crate::storage::{Column, ComponentSparseSet, SparseSets};
 
 /// A predicate that narrows the rows a query visits (design §7, §10).
 ///
@@ -67,11 +67,17 @@ pub unsafe trait QueryFilter {
     /// Resolve the per-archetype fetch cursor for the observer window
     /// `(last_run, this_run]`.
     ///
+    /// `sparse_sets` is the world's out-of-band registry (design §6), consulted
+    /// by sparse-backed membership (`With`/`Without`) and change-detection
+    /// (`Added`/`Changed`) filters, whose presence is per-entity rather than
+    /// encoded in the archetype component set.
+    ///
     /// # Safety
     /// `archetype` must satisfy [`QueryFilter::matches`] for `state`.
     unsafe fn init_fetch<'w>(
         state: &Self::State,
         archetype: &'w Archetype,
+        sparse_sets: &'w SparseSets,
         last_run: Tick,
         this_run: Tick,
     ) -> Self::Fetch<'w>;
@@ -82,6 +88,33 @@ pub unsafe trait QueryFilter {
     /// `row` must be `< archetype.len()` for the archetype `fetch` was built
     /// for.
     unsafe fn filter_fetch<'w>(fetch: Self::Fetch<'w>, entity: Entity, row: usize) -> bool;
+}
+
+/// Per-archetype cursor for the membership filters [`With`]/[`Without`]
+/// (design §6).
+///
+/// A table-backed component resolves its archetype-wide verdict once (encoded
+/// in [`Table`](MembershipFetch::Table)); a sparse-backed component carries its
+/// [`ComponentSparseSet`] so membership is resolved per entity.
+#[derive(Clone, Copy)]
+pub enum MembershipFetch<'w> {
+    /// Table-backed verdict resolved once for the whole archetype.
+    Table(bool),
+    /// Sparse-backed source; `None` when the component's set was never
+    /// allocated. Membership is resolved per entity by `filter_fetch`.
+    Sparse(Option<&'w ComponentSparseSet>),
+}
+
+/// Per-archetype cursor for the change-detection filters [`Added`]/[`Changed`]
+/// (design §6, §10), carrying the observer window `(last_run, this_run]`.
+#[derive(Clone, Copy)]
+pub enum ChangeFilterFetch<'w> {
+    /// Table-backed column plus the observer window, or `None` when the
+    /// archetype lacks the column (only reachable through [`Or`]).
+    Table(Option<(&'w Column, Tick, Tick)>),
+    /// Sparse-backed source plus the observer window; the source is `None` when
+    /// the component's set was never allocated. The tick is resolved per entity.
+    Sparse(Option<&'w ComponentSparseSet>, Tick, Tick),
 }
 
 /// Matches archetypes that **have** component `T` (without reading it).
@@ -113,18 +146,25 @@ pub struct Changed<T>(PhantomData<fn() -> T>);
 /// `F` is a tuple of filters, e.g. `Or<(With<A>, Changed<B>)>`.
 pub struct Or<F>(PhantomData<fn() -> F>);
 
-// SAFETY: `With<T>` reads no data and no ticks; its verdict is a pure archetype
-// membership test encoded into the `Copy` `bool` fetch, so `Or` can compose it.
+// SAFETY: `With<T>` reads no component data and forms no reference into it. Its
+// verdict is a membership test: a table component is resolved once per archetype
+// in the `Copy` fetch; a sparse component carries its `ComponentSparseSet` and
+// is resolved per entity in `filter_fetch`, so `Or` can still compose it.
 unsafe impl<T: Component> QueryFilter for With<T> {
     type State = ComponentId;
-    type Fetch<'w> = bool;
+    type Fetch<'w> = MembershipFetch<'w>;
 
     fn init_state(components: &mut Components) -> Self::State {
         components.register::<T>()
     }
 
     fn matches(state: &Self::State, archetype: &Archetype) -> bool {
-        archetype.contains(*state)
+        match T::STORAGE {
+            // A sparse component is routed out of archetypes, so its presence is
+            // per-entity: admit the archetype and resolve membership per row.
+            StorageType::SparseSet => true,
+            StorageType::Table => archetype.contains(*state),
+        }
     }
 
     fn update_access(_state: &Self::State, _access: &mut Access) {}
@@ -132,29 +172,43 @@ unsafe impl<T: Component> QueryFilter for With<T> {
     unsafe fn init_fetch<'w>(
         state: &Self::State,
         archetype: &'w Archetype,
+        sparse_sets: &'w SparseSets,
         _last_run: Tick,
         _this_run: Tick,
     ) -> Self::Fetch<'w> {
-        archetype.contains(*state)
+        match T::STORAGE {
+            StorageType::Table => MembershipFetch::Table(archetype.contains(*state)),
+            StorageType::SparseSet => MembershipFetch::Sparse(sparse_sets.get(*state)),
+        }
     }
 
-    unsafe fn filter_fetch<'w>(fetch: Self::Fetch<'w>, _entity: Entity, _row: usize) -> bool {
-        fetch
+    unsafe fn filter_fetch<'w>(fetch: Self::Fetch<'w>, entity: Entity, _row: usize) -> bool {
+        match fetch {
+            MembershipFetch::Table(present) => present,
+            MembershipFetch::Sparse(set) => set.is_some_and(|s| s.contains(entity)),
+        }
     }
 }
 
-// SAFETY: `Without<T>` reads no data and no ticks; verdict is `!contains`
-// encoded into the `Copy` `bool` fetch.
+// SAFETY: `Without<T>` reads no component data and forms no reference into it.
+// Its verdict is `!membership`: resolved once per archetype for a table
+// component, or per entity through the carried `ComponentSparseSet` for a sparse
+// component. The `Copy` fetch lets `Or` compose it.
 unsafe impl<T: Component> QueryFilter for Without<T> {
     type State = ComponentId;
-    type Fetch<'w> = bool;
+    type Fetch<'w> = MembershipFetch<'w>;
 
     fn init_state(components: &mut Components) -> Self::State {
         components.register::<T>()
     }
 
     fn matches(state: &Self::State, archetype: &Archetype) -> bool {
-        !archetype.contains(*state)
+        match T::STORAGE {
+            // A sparse component can be present or absent on entities sharing one
+            // archetype, so admit it and resolve the negation per row.
+            StorageType::SparseSet => true,
+            StorageType::Table => !archetype.contains(*state),
+        }
     }
 
     fn update_access(_state: &Self::State, _access: &mut Access) {}
@@ -162,31 +216,42 @@ unsafe impl<T: Component> QueryFilter for Without<T> {
     unsafe fn init_fetch<'w>(
         state: &Self::State,
         archetype: &'w Archetype,
+        sparse_sets: &'w SparseSets,
         _last_run: Tick,
         _this_run: Tick,
     ) -> Self::Fetch<'w> {
-        !archetype.contains(*state)
+        match T::STORAGE {
+            StorageType::Table => MembershipFetch::Table(!archetype.contains(*state)),
+            StorageType::SparseSet => MembershipFetch::Sparse(sparse_sets.get(*state)),
+        }
     }
 
-    unsafe fn filter_fetch<'w>(fetch: Self::Fetch<'w>, _entity: Entity, _row: usize) -> bool {
-        fetch
+    unsafe fn filter_fetch<'w>(fetch: Self::Fetch<'w>, entity: Entity, _row: usize) -> bool {
+        match fetch {
+            MembershipFetch::Table(absent) => absent,
+            MembershipFetch::Sparse(set) => !set.is_some_and(|s| s.contains(entity)),
+        }
     }
 }
 
 // SAFETY: `Added<T>` reads only `T`'s added tick (registered as a filter read)
-// and forms no reference into component data. The `Fetch` is `None` when the
-// column is absent, so the row never matches there (consistent with `matches`
-// also allowing the archetype only when it contains `T`).
+// and forms no reference into component data. A table-backed `Fetch` is `None`
+// when the column is absent (only reachable via `Or`); a sparse-backed `Fetch`
+// carries the component's `ComponentSparseSet` so the added tick is resolved per
+// entity (`None` set, or an entity the set lacks, never matches).
 unsafe impl<T: Component> QueryFilter for Added<T> {
     type State = ComponentId;
-    type Fetch<'w> = Option<(&'w Column, Tick, Tick)>;
+    type Fetch<'w> = ChangeFilterFetch<'w>;
 
     fn init_state(components: &mut Components) -> Self::State {
         components.register::<T>()
     }
 
     fn matches(state: &Self::State, archetype: &Archetype) -> bool {
-        archetype.contains(*state)
+        match T::STORAGE {
+            StorageType::SparseSet => true,
+            StorageType::Table => archetype.contains(*state),
+        }
     }
 
     fn update_access(state: &Self::State, access: &mut Access) {
@@ -196,35 +261,54 @@ unsafe impl<T: Component> QueryFilter for Added<T> {
     unsafe fn init_fetch<'w>(
         state: &Self::State,
         archetype: &'w Archetype,
+        sparse_sets: &'w SparseSets,
         last_run: Tick,
         this_run: Tick,
     ) -> Self::Fetch<'w> {
-        archetype
-            .table()
-            .column(*state)
-            .map(|col| (col, last_run, this_run))
+        match T::STORAGE {
+            StorageType::Table => ChangeFilterFetch::Table(
+                archetype
+                    .table()
+                    .column(*state)
+                    .map(|col| (col, last_run, this_run)),
+            ),
+            StorageType::SparseSet => {
+                ChangeFilterFetch::Sparse(sparse_sets.get(*state), last_run, this_run)
+            }
+        }
     }
 
-    unsafe fn filter_fetch<'w>(fetch: Self::Fetch<'w>, _entity: Entity, row: usize) -> bool {
+    unsafe fn filter_fetch<'w>(fetch: Self::Fetch<'w>, entity: Entity, row: usize) -> bool {
         match fetch {
-            Some((col, last_run, this_run)) => col.added_tick(row).is_newer_than(last_run, this_run),
-            None => false,
+            ChangeFilterFetch::Table(Some((col, last_run, this_run))) => {
+                col.added_tick(row).is_newer_than(last_run, this_run)
+            }
+            ChangeFilterFetch::Table(None) => false,
+            ChangeFilterFetch::Sparse(set, last_run, this_run) => set
+                .and_then(|s| s.added_tick(entity))
+                .is_some_and(|tick| tick.is_newer_than(last_run, this_run)),
         }
     }
 }
 
 // SAFETY: `Changed<T>` reads only `T`'s changed tick (registered as a filter
-// read) and forms no reference into component data; `None` fetch => no match.
+// read) and forms no reference into component data. A table-backed `Fetch` is
+// `None` when the column is absent (only reachable via `Or`); a sparse-backed
+// `Fetch` carries the component's `ComponentSparseSet` so the changed tick is
+// resolved per entity (`None` set, or an entity the set lacks, never matches).
 unsafe impl<T: Component> QueryFilter for Changed<T> {
     type State = ComponentId;
-    type Fetch<'w> = Option<(&'w Column, Tick, Tick)>;
+    type Fetch<'w> = ChangeFilterFetch<'w>;
 
     fn init_state(components: &mut Components) -> Self::State {
         components.register::<T>()
     }
 
     fn matches(state: &Self::State, archetype: &Archetype) -> bool {
-        archetype.contains(*state)
+        match T::STORAGE {
+            StorageType::SparseSet => true,
+            StorageType::Table => archetype.contains(*state),
+        }
     }
 
     fn update_access(state: &Self::State, access: &mut Access) {
@@ -234,21 +318,32 @@ unsafe impl<T: Component> QueryFilter for Changed<T> {
     unsafe fn init_fetch<'w>(
         state: &Self::State,
         archetype: &'w Archetype,
+        sparse_sets: &'w SparseSets,
         last_run: Tick,
         this_run: Tick,
     ) -> Self::Fetch<'w> {
-        archetype
-            .table()
-            .column(*state)
-            .map(|col| (col, last_run, this_run))
+        match T::STORAGE {
+            StorageType::Table => ChangeFilterFetch::Table(
+                archetype
+                    .table()
+                    .column(*state)
+                    .map(|col| (col, last_run, this_run)),
+            ),
+            StorageType::SparseSet => {
+                ChangeFilterFetch::Sparse(sparse_sets.get(*state), last_run, this_run)
+            }
+        }
     }
 
-    unsafe fn filter_fetch<'w>(fetch: Self::Fetch<'w>, _entity: Entity, row: usize) -> bool {
+    unsafe fn filter_fetch<'w>(fetch: Self::Fetch<'w>, entity: Entity, row: usize) -> bool {
         match fetch {
-            Some((col, last_run, this_run)) => {
+            ChangeFilterFetch::Table(Some((col, last_run, this_run))) => {
                 col.changed_tick(row).is_newer_than(last_run, this_run)
             }
-            None => false,
+            ChangeFilterFetch::Table(None) => false,
+            ChangeFilterFetch::Sparse(set, last_run, this_run) => set
+                .and_then(|s| s.changed_tick(entity))
+                .is_some_and(|tick| tick.is_newer_than(last_run, this_run)),
         }
     }
 }
@@ -270,6 +365,7 @@ unsafe impl QueryFilter for () {
     unsafe fn init_fetch<'w>(
         _state: &Self::State,
         _archetype: &'w Archetype,
+        _sparse_sets: &'w SparseSets,
         _last_run: Tick,
         _this_run: Tick,
     ) -> Self::Fetch<'w> {
@@ -307,12 +403,13 @@ macro_rules! impl_filter_tuple {
             unsafe fn init_fetch<'w>(
                 state: &Self::State,
                 archetype: &'w Archetype,
+                sparse_sets: &'w SparseSets,
                 last_run: Tick,
                 this_run: Tick,
             ) -> Self::Fetch<'w> {
                 let ($($F,)+) = state;
                 // SAFETY: forwarded — `matches` held for every element.
-                unsafe { ($($F::init_fetch($F, archetype, last_run, this_run),)+) }
+                unsafe { ($($F::init_fetch($F, archetype, sparse_sets, last_run, this_run),)+) }
             }
 
             unsafe fn filter_fetch<'w>(fetch: Self::Fetch<'w>, entity: Entity, row: usize) -> bool {
@@ -351,6 +448,7 @@ macro_rules! impl_filter_tuple {
             unsafe fn init_fetch<'w>(
                 state: &Self::State,
                 archetype: &'w Archetype,
+                sparse_sets: &'w SparseSets,
                 last_run: Tick,
                 this_run: Tick,
             ) -> Self::Fetch<'w> {
@@ -359,7 +457,7 @@ macro_rules! impl_filter_tuple {
                 // archetype builds a "no-match" fetch (e.g. `None`) rather than
                 // being unsound, because each leaf `init_fetch` tolerates a
                 // missing column for the `Or` case.
-                unsafe { ($($F::init_fetch($F, archetype, last_run, this_run),)+) }
+                unsafe { ($($F::init_fetch($F, archetype, sparse_sets, last_run, this_run),)+) }
             }
 
             unsafe fn filter_fetch<'w>(fetch: Self::Fetch<'w>, entity: Entity, row: usize) -> bool {
