@@ -61,6 +61,10 @@ pub struct App {
     /// schedule, so a repeated `insert_state`/`init_state` only re-queues the
     /// initial value instead of registering a second transition system.
     pub(crate) initialized_states: HashSet<TypeId>,
+    /// Event types already registered via [`App::add_event`](crate::App::add_event),
+    /// so a repeated `add_event` neither reinserts the `Events` resource (which
+    /// would discard buffered events) nor schedules a second rotation system.
+    pub(crate) added_events: HashSet<TypeId>,
 }
 
 impl Default for App {
@@ -110,6 +114,7 @@ impl App {
             plugin_names: HashSet::new(),
             plugins_state: PluginsState::Adding,
             initialized_states: HashSet::new(),
+            added_events: HashSet::new(),
         }
     }
 

@@ -20,6 +20,9 @@ pub use convex_mesh::{ConvexMeshData, ConvexMeshHandle, ConvexProjection, Convex
 pub mod tri_mesh;
 
 pub use tri_mesh::{TriMeshData, TriMeshHandle};
+pub mod hull;
+
+pub use hull::convex_hull;
 
 /// A handle into a [`ShapeRegistry`].
 ///

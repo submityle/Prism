@@ -363,3 +363,146 @@ fn repeated_insert_state_wires_transition_once() {
         "OnEnter(Game) fires exactly once (transition system not double-wired)"
     );
 }
+
+// ---- events ----
+
+use prism_ecs::event::{Event, EventCursor, Events};
+use prism_ecs::system::{Local, Res};
+
+/// A trivial buffered event carrying a payload for the event tests.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Ping(u32);
+impl Event for Ping {}
+
+/// `add_event` installs an empty `Events<E>` resource immediately, before any
+/// frame has run.
+#[test]
+fn add_event_installs_empty_resource() {
+    let mut app = App::new();
+    app.add_event::<Ping>();
+    let events = app
+        .world()
+        .get_resource::<Events<Ping>>()
+        .expect("add_event should install the Events<Ping> resource");
+    assert!(events.is_empty(), "freshly added event buffer is empty");
+}
+
+/// An event sent during a frame stays buffered that frame and the next, then is
+/// retired by the `First`-phase rotation on the following frame.
+#[test]
+fn event_is_readable_for_one_frame_of_grace_then_retired() {
+    let mut app = App::new();
+    app.add_event::<Ping>();
+
+    // Send exactly one Ping, on the first `Update` only.
+    let sent = Arc::new(AtomicU64::new(0));
+    let s = sent.clone();
+    app.add_systems(Update, move |mut events: ResMut<Events<Ping>>| {
+        if s.fetch_add(1, Ordering::Relaxed) == 0 {
+            events.send(Ping(7));
+        }
+    });
+
+    // Frame 1: First rotates empty buffers, then Update sends the Ping.
+    app.update();
+    assert_eq!(
+        app.world().get_resource::<Events<Ping>>().unwrap().len(),
+        1,
+        "the event is buffered the frame it is sent"
+    );
+
+    // Frame 2: First rotates it into the read buffer; still readable.
+    app.update();
+    assert_eq!(
+        app.world().get_resource::<Events<Ping>>().unwrap().len(),
+        1,
+        "the event survives one frame of grace"
+    );
+
+    // Frame 3: First rotation retires it.
+    app.update();
+    assert_eq!(
+        app.world().get_resource::<Events<Ping>>().unwrap().len(),
+        0,
+        "the event is retired on the following frame"
+    );
+}
+
+/// A reader cursor observes every sent event exactly once across frames and
+/// never re-observes retired events.
+#[test]
+fn reader_cursor_sees_each_event_once() {
+    let mut app = App::new();
+    app.add_event::<Ping>();
+
+    // Send two pings on the first `Update` only.
+    let sent = Arc::new(AtomicU64::new(0));
+    let s = sent.clone();
+    app.add_systems(Update, move |mut events: ResMut<Events<Ping>>| {
+        if s.fetch_add(1, Ordering::Relaxed) == 0 {
+            events.send(Ping(1));
+            events.send(Ping(2));
+        }
+    });
+
+    // A reader in `PostUpdate` (after the `Update` sender) accumulates what it
+    // observes, carrying its cursor across frames via `Local`.
+    let seen = Arc::new(Mutex::new(Vec::<u32>::new()));
+    let seen_sys = seen.clone();
+    app.add_systems(
+        PostUpdate,
+        move |mut cursor: Local<EventCursor<Ping>>, events: Res<Events<Ping>>| {
+            for ping in cursor.read(&events) {
+                seen_sys.lock().unwrap().push(ping.0);
+            }
+        },
+    );
+
+    for _ in 0..3 {
+        app.update();
+    }
+
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![1, 2],
+        "each event is observed exactly once, in send order, with no duplicates"
+    );
+}
+
+/// Calling `add_event` twice for the same type neither resets the buffer (losing
+/// already-sent events) nor double-registers the rotation system.
+#[test]
+fn repeated_add_event_is_idempotent() {
+    let mut app = App::new();
+    app.add_event::<Ping>();
+
+    // Seed one event directly, then re-register the type.
+    app.world_mut()
+        .resource_mut::<Events<Ping>>()
+        .send(Ping(99));
+    app.add_event::<Ping>();
+
+    assert_eq!(
+        app.world().get_resource::<Events<Ping>>().unwrap().len(),
+        1,
+        "re-adding the event type must not reset the buffer"
+    );
+
+    // One frame: a single rotation moves the event into the read buffer (still
+    // present). If the rotation system were double-wired, two `update()` calls
+    // this frame would retire it immediately.
+    app.update();
+    assert_eq!(
+        app.world().get_resource::<Events<Ping>>().unwrap().len(),
+        1,
+        "exactly one rotation per frame (rotation system wired once)"
+    );
+
+    // Next frame retires it.
+    app.update();
+    assert_eq!(
+        app.world().get_resource::<Events<Ping>>().unwrap().len(),
+        0,
+        "the seeded event retires on the following frame"
+    );
+}

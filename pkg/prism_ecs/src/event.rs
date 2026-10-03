@@ -37,6 +37,8 @@
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
+use crate::resource::Resource;
+
 /// Marker trait for a type that can be sent as an event.
 ///
 /// Events must be thread-shareable and own all of their data (`'static`) so the
@@ -225,6 +227,12 @@ impl<E: Event> Events<E> {
         self.events_b.start_event_count = self.event_count;
     }
 }
+
+/// [`Events<E>`] is stored in a [`World`](crate::world::World) as a resource so
+/// that systems can send and read events through [`Res`](crate::system::Res) /
+/// [`ResMut`](crate::system::ResMut). The per-frame buffer rotation is driven by
+/// a system calling [`Events::update`] (wired up by the application shell).
+impl<E: Event> Resource for Events<E> {}
 
 /// A manual reader cursor into an [`Events`] queue.
 ///

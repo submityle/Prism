@@ -31,12 +31,16 @@
 //!   into the [`StateTransition`] phase, with
 //!   `OnEnter`/`OnExit` edges and the [`in_state`](prism_ecs::schedule::in_state)
 //!   run condition (design §11).
+//! - Buffered cross-frame [events](crate::event): [`App::add_event`] installs
+//!   an [`Events<E>`](prism_ecs::event::Events) resource and rotates its double
+//!   buffer once per frame in [`First`], so events are readable for the frame
+//!   they are sent and the frame after (design §22 M1).
 //! - Platform-free runners: [`HeadlessRunner`] and
 //!   [`ScheduleRunnerOnce`].
 //!
 //! Everything on the public surface is a **real, working implementation** —
 //! no `todo!()`, `unimplemented!()`, or hollow stubs. The remaining M1 work
-//! (buffered event updates, plugin dependency graphs with topological ordering,
+//! (plugin dependency graphs with topological ordering
 //! and `PluginGroup` reordering/disable editing) and later milestones (fixed
 //! timestep with `RunFixedMainLoop`, sub-app pipelining, windowed /
 //! dedicated-server runners, determinism) layer on top without rewriting these
@@ -55,6 +59,7 @@
 //! only publicly documented architectural shapes.
 
 pub mod app;
+pub mod event;
 pub mod exit;
 pub mod plugin;
 pub mod plugin_group;

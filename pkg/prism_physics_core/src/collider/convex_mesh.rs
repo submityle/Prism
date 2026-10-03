@@ -156,6 +156,22 @@ impl ConvexMeshData {
         ConvexMeshData::from_surface(vertices, triangles)
     }
 
+    /// Cooks a convex-mesh collider directly from an arbitrary point cloud by
+    /// building its convex hull.
+    ///
+    /// This is the content-pipeline entry point (the analogue of `PhysX` convex
+    /// cooking or Jolt's `ConvexHullShapeSettings`): pass a render mesh's
+    /// vertices or any point set and receive the bounded convex solid, with mass
+    /// properties integrated over the hull surface. Strictly interior points are
+    /// discarded by the hull builder. Returns [`None`] for a degenerate cloud
+    /// (fewer than four points, or all points collinear/coplanar) for which no
+    /// convex solid exists; see [`convex_hull`](super::convex_hull).
+    #[must_use]
+    pub fn from_points(points: &[Vec3]) -> Option<ConvexMeshData> {
+        let (vertices, triangles) = super::convex_hull(points)?;
+        Some(ConvexMeshData::from_surface(vertices, triangles))
+    }
+
     /// Returns the hull vertices in local space.
     #[must_use]
     pub fn vertices(&self) -> &[Vec3] {
