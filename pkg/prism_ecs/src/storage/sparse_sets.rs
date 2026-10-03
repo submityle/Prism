@@ -81,6 +81,22 @@ impl SparseSets {
         self.get(id).is_some_and(|set| set.contains(entity))
     }
 
+    /// Collect every sparse [`ComponentId`] that currently holds a value for
+    /// `entity`, in ascending id order. Used by the despawn/removal paths to
+    /// enumerate an entity's out-of-band components for lifecycle hooks
+    /// (design §12).
+    pub fn ids_for(&self, entity: Entity) -> Vec<ComponentId> {
+        self.sets
+            .iter()
+            .enumerate()
+            .filter_map(|(i, slot)| {
+                slot.as_ref()
+                    .filter(|set| set.contains(entity))
+                    .map(|_| ComponentId::new(i as u32))
+            })
+            .collect()
+    }
+
     /// Remove `entity`'s value from the set for `id`, dropping it. Returns
     /// `true` if a value was present and removed.
     #[inline]

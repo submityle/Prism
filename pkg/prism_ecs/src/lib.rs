@@ -46,10 +46,14 @@ extern crate alloc;
 extern crate std;
 
 pub mod archetype;
+pub mod blob;
 pub mod bundle;
 pub mod change;
 pub mod command;
 pub mod component;
+pub mod component_hooks;
+#[cfg(test)]
+mod component_hooks_tests;
 pub mod entity;
 pub mod event;
 pub mod query;
@@ -62,10 +66,12 @@ pub mod world;
 /// Commonly used exports. Mirrors the ergonomics of `bevy_ecs::prelude` to keep
 /// the eventual migration a near "change-the-import" exercise.
 pub mod prelude {
+    pub use crate::blob::{BlobHandle, BlobStore};
     pub use crate::bundle::Bundle;
     pub use crate::change::{ComponentTicks, Mut, Ref, Tick};
     pub use crate::command::{CommandQueue, Commands};
     pub use crate::component::Component;
+    pub use crate::component_hooks::{ComponentHook, ComponentHooks, HookContext};
     pub use crate::entity::Entity;
     pub use crate::event::{Event, EventCursor, EventId, Events};
     pub use crate::resource::{Resource, ResourceId, Resources};

@@ -15,6 +15,7 @@ use core::alloc::Layout;
 use core::any::{TypeId, type_name};
 
 use crate::collections::HashMap;
+use crate::component_hooks::ComponentHooks;
 
 /// A type that can be stored on entities as a component.
 ///
@@ -77,6 +78,7 @@ pub struct ComponentInfo {
     storage: StorageType,
     type_id: Option<TypeId>,
     drop: Option<DropFn>,
+    hooks: ComponentHooks,
 }
 
 impl ComponentInfo {
@@ -118,6 +120,15 @@ impl ComponentInfo {
     pub fn drop_fn(&self) -> Option<DropFn> {
         self.drop
     }
+
+    /// The lifecycle [`ComponentHooks`] registered for this component (design
+    /// §12). Empty unless hooks were attached via
+    /// [`Components::set_hooks`] or
+    /// [`World::register_component_hooks`](crate::world::World::register_component_hooks).
+    #[inline]
+    pub fn hooks(&self) -> &ComponentHooks {
+        &self.hooks
+    }
 }
 
 /// Build an [`unsafe`] drop function for `T`, or `None` if `T` needs no drop.
@@ -148,6 +159,10 @@ fn drop_fn_of<T>() -> Option<DropFn> {
 pub struct Components {
     infos: Vec<ComponentInfo>,
     by_type: HashMap<TypeId, ComponentId>,
+    /// Set once any component gains a non-empty [`ComponentHooks`] set, letting
+    /// the structural paths skip all hook bookkeeping with a single branch in
+    /// the overwhelmingly common hook-free case (design §12).
+    hooks_registered: bool,
 }
 
 impl Components {
@@ -156,6 +171,7 @@ impl Components {
         Self {
             infos: Vec::new(),
             by_type: HashMap::default(),
+            hooks_registered: false,
         }
     }
 
@@ -185,6 +201,7 @@ impl Components {
             storage: T::STORAGE,
             type_id: Some(type_id),
             drop: drop_fn_of::<T>(),
+            hooks: ComponentHooks::new(),
         });
         self.by_type.insert(type_id, id);
         id
@@ -211,8 +228,33 @@ impl Components {
             storage,
             type_id: None,
             drop,
+            hooks: ComponentHooks::new(),
         });
         id
+    }
+
+    /// Attach (replacing any existing) the lifecycle [`ComponentHooks`] for an
+    /// already-registered component `id` (design §12). Returns `false` if `id`
+    /// is not registered.
+    pub fn set_hooks(&mut self, id: ComponentId, hooks: ComponentHooks) -> bool {
+        match self.infos.get_mut(id.index() as usize) {
+            Some(info) => {
+                let non_empty = !hooks.is_empty();
+                info.hooks = hooks;
+                self.hooks_registered |= non_empty;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Whether any registered component currently carries a non-empty
+    /// [`ComponentHooks`] set. A cheap global gate for the structural paths
+    /// (design §12). Monotonic: clearing a component's hooks does not reset it,
+    /// which only risks a redundant (still correct) per-id hook scan.
+    #[inline]
+    pub fn has_hooks(&self) -> bool {
+        self.hooks_registered
     }
 
     /// Look up the id previously assigned to Rust type `T`, without

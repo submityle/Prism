@@ -19,6 +19,7 @@ use crate::archetype::Archetypes;
 use crate::bundle::Bundle;
 use crate::change::Tick;
 use crate::component::{Component, ComponentId, ComponentSet, Components, StorageType};
+use crate::component_hooks::{ComponentHook, HookContext};
 use crate::entity::{Entities, Entity, EntityLocation};
 use crate::query::{QueryData, QueryFilter, QueryState, ReadOnlyQueryData};
 use crate::storage::SparseSets;
@@ -228,6 +229,20 @@ impl World {
         self.components.register::<T>()
     }
 
+    /// Register component type `T` (idempotent) and attach its lifecycle
+    /// [`ComponentHooks`](crate::component_hooks::ComponentHooks) (design §12),
+    /// replacing any previously registered hooks. Returns `T`'s [`ComponentId`].
+    #[inline]
+    pub fn register_component_hooks<T: Component>(
+        &mut self,
+        hooks: crate::component_hooks::ComponentHooks,
+    ) -> ComponentId {
+        let id = self.components.register::<T>();
+        let ok = self.components.set_hooks(id, hooks);
+        debug_assert!(ok, "component just registered must accept hooks");
+        id
+    }
+
     /// Whether `entity` is live.
     #[inline]
     pub fn contains(&self, entity: Entity) -> bool {
@@ -340,6 +355,105 @@ impl World {
                 row: row as u32,
             },
         );
+
+        // Lifecycle hooks (design §12): a fresh spawn newly adds every
+        // component, so fire on_add then on_insert for all of them with the
+        // world fully consistent. Gated so hook-free spawns pay nothing.
+        if self.any_hooks(&ids) {
+            let add = self.collect_hooks(&ids, crate::component_hooks::ComponentHooks::on_add);
+            let insert =
+                self.collect_hooks(&ids, crate::component_hooks::ComponentHooks::on_insert);
+            self.run_hooks(entity, &add);
+            self.run_hooks(entity, &insert);
+        }
+    }
+
+    /// Gather the `(id, hook)` pairs for every id in `ids` whose component has
+    /// the lifecycle hook selected by `select` registered (design §12). The
+    /// hook fn pointers are copied out so the returned batch borrows nothing
+    /// from `self`, letting the caller fire them with `&mut self`.
+    fn collect_hooks(
+        &self,
+        ids: &[ComponentId],
+        select: fn(&crate::component_hooks::ComponentHooks) -> Option<ComponentHook>,
+    ) -> Vec<(ComponentId, ComponentHook)> {
+        ids.iter()
+            .filter_map(|&id| {
+                let info = self.components.info(id)?;
+                select(info.hooks()).map(|hook| (id, hook))
+            })
+            .collect()
+    }
+
+    /// Fire a previously-collected batch of lifecycle hooks for `entity`, in
+    /// order. Each hook sees a fully consistent world; see
+    /// [`crate::component_hooks`] for the re-entrancy contract.
+    fn run_hooks(&mut self, entity: Entity, hooks: &[(ComponentId, ComponentHook)]) {
+        for &(component, hook) in hooks {
+            hook(HookContext {
+                world: self,
+                entity,
+                component,
+            });
+        }
+    }
+
+    /// Whether any component in `ids` has *any* lifecycle hook registered —
+    /// a cheap gate that lets the structural paths skip all hook bookkeeping
+    /// for the overwhelmingly common hook-free case.
+    fn any_hooks(&self, ids: &[ComponentId]) -> bool {
+        // Global short-circuit first: if the world has never registered a hook,
+        // skip the per-id scan entirely.
+        self.components.has_hooks()
+            && ids.iter().any(|&id| {
+                self.components
+                    .info(id)
+                    .is_some_and(|info| !info.hooks().is_empty())
+            })
+    }
+
+    /// Every [`ComponentId`] currently resident on `entity`: the table columns
+    /// of its archetype plus any out-of-band sparse components, in no
+    /// particular order. Used by the despawn path to drive on_replace/on_remove
+    /// hooks (design §12).
+    fn entity_component_ids(&self, entity: Entity, loc: EntityLocation) -> Vec<ComponentId> {
+        let mut out = Vec::new();
+        if !loc.is_empty()
+            && let Some(arch) = self.archetypes.get(loc.archetype_id)
+        {
+            out.extend(arch.components().ids().iter().copied());
+        }
+        out.extend(self.sparse_sets.ids_for(entity));
+        out
+    }
+
+    /// The subset of `ids` (paired with their `storages`) that `entity`
+    /// currently holds — table ids present in its archetype, sparse ids present
+    /// in their set. Used by the insert path to decide on_replace vs on_add
+    /// (design §12).
+    fn present_ids(
+        &self,
+        entity: Entity,
+        ids: &[ComponentId],
+        storages: &[StorageType],
+    ) -> Vec<ComponentId> {
+        let loc = self.entities.location(entity);
+        ids.iter()
+            .zip(storages)
+            .filter_map(|(&id, &storage)| {
+                let present = match storage {
+                    StorageType::Table => loc.is_some_and(|l| {
+                        !l.is_empty()
+                            && self
+                                .archetypes
+                                .get(l.archetype_id)
+                                .is_some_and(|a| a.contains(id))
+                    }),
+                    StorageType::SparseSet => self.sparse_sets.contains(id, entity),
+                };
+                present.then_some(id)
+            })
+            .collect()
     }
 
     /// The declared [`StorageType`] of each id in `ids`, in order.
@@ -388,12 +502,36 @@ impl World {
             );
         }
         // Liveness is resolved before any sparse set is touched.
-        let Some(loc) = self.entities.location(entity) else {
+        if self.entities.location(entity).is_none() {
             return false;
-        };
+        }
 
         let storages = self.classify_storages(&ids);
         self.ensure_sparse_sets(&ids, &storages);
+
+        // Lifecycle hooks (design §12): fire on_replace for every currently
+        // present component *before* its value is overwritten, then capture the
+        // post-replace present set so on_add fires only for genuinely new
+        // components. Gated so hook-free inserts pay nothing.
+        let hooks_active = self.any_hooks(&ids);
+        let had: Vec<ComponentId> = if hooks_active {
+            let present = self.present_ids(entity, &ids, &storages);
+            let replace =
+                self.collect_hooks(&present, crate::component_hooks::ComponentHooks::on_replace);
+            self.run_hooks(entity, &replace);
+            // A hook may have despawned the entity; abort without writing.
+            if !self.entities.contains(entity) {
+                return false;
+            }
+            self.present_ids(entity, &ids, &storages)
+        } else {
+            Vec::new()
+        };
+
+        // Resolve the (possibly hook-mutated) location fresh before planning.
+        let Some(loc) = self.entities.location(entity) else {
+            return false;
+        };
 
         let src_id = loc.archetype_id;
         let current = self
@@ -452,10 +590,8 @@ impl World {
                     }
                 });
             }
-            return true;
-        }
-
-        // At least one new table component: move into `current ∪ table add_ids`.
+        } else {
+            // At least one new table component: move into `current ∪ table add_ids`.
         let mut new_set = current.clone();
         for &id in &add_ids {
             new_set = new_set.with(id);
@@ -521,7 +657,21 @@ impl World {
             }
         }
 
-        self.finish_move(entity, loc, src_id, current.ids(), dst_id, dst_row);
+            self.finish_move(entity, loc, src_id, current.ids(), dst_id, dst_row);
+        }
+
+        // Post-write lifecycle hooks (design §12): on_add fires for components
+        // newly added to the entity on this call, then on_insert for every
+        // written component. Both observe a fully consistent world.
+        if hooks_active {
+            let added: Vec<ComponentId> =
+                ids.iter().copied().filter(|id| !had.contains(id)).collect();
+            let add = self.collect_hooks(&added, crate::component_hooks::ComponentHooks::on_add);
+            let insert =
+                self.collect_hooks(&ids, crate::component_hooks::ComponentHooks::on_insert);
+            self.run_hooks(entity, &add);
+            self.run_hooks(entity, &insert);
+        }
         true
     }
 
@@ -532,11 +682,34 @@ impl World {
     pub fn remove<B: Bundle>(&mut self, entity: Entity) -> bool {
         let mut ids = Vec::new();
         B::component_ids(&mut self.components, &mut ids);
+        if self.entities.location(entity).is_none() {
+            return false;
+        }
+
+        let storages = self.classify_storages(&ids);
+
+        // Lifecycle hooks (design §12): for every named component the entity
+        // actually holds, fire on_replace then on_remove *before* the value is
+        // dropped, so a hook can still read the outgoing value. Gated so
+        // hook-free removes pay nothing.
+        if self.any_hooks(&ids) {
+            let present = self.present_ids(entity, &ids, &storages);
+            let replace =
+                self.collect_hooks(&present, crate::component_hooks::ComponentHooks::on_replace);
+            let remove =
+                self.collect_hooks(&present, crate::component_hooks::ComponentHooks::on_remove);
+            self.run_hooks(entity, &replace);
+            self.run_hooks(entity, &remove);
+            // A hook may have despawned the entity; nothing remains to remove.
+            if !self.entities.contains(entity) {
+                return false;
+            }
+        }
+
+        // Resolve the (possibly hook-mutated) location fresh before removal.
         let Some(loc) = self.entities.location(entity) else {
             return false;
         };
-
-        let storages = self.classify_storages(&ids);
 
         // Sparse components are removed out of band with no archetype move.
         let mut removed_any = false;
@@ -600,8 +773,33 @@ impl World {
     /// Despawn `entity`, dropping all of its components. Returns `false` if the
     /// entity was already dead.
     pub fn despawn(&mut self, entity: Entity) -> bool {
-        let Some(loc) = self.entities.free(entity) else {
+        let Some(loc) = self.entities.location(entity) else {
             return false;
+        };
+
+        // Lifecycle hooks (design §12): fire on_replace then on_remove for every
+        // component the entity holds while it is still fully live, so hooks can
+        // read outgoing values. The global `has_hooks` gate keeps hook-free
+        // despawns allocation-free.
+        if self.components.has_hooks() {
+            let ids = self.entity_component_ids(entity, loc);
+            if self.any_hooks(&ids) {
+                let replace = self
+                    .collect_hooks(&ids, crate::component_hooks::ComponentHooks::on_replace);
+                let remove =
+                    self.collect_hooks(&ids, crate::component_hooks::ComponentHooks::on_remove);
+                self.run_hooks(entity, &replace);
+                self.run_hooks(entity, &remove);
+                // A hook may already have despawned the entity; it is gone.
+                if !self.entities.contains(entity) {
+                    return true;
+                }
+            }
+        }
+
+        // Re-fetch and free the (possibly hook-mutated) location.
+        let Some(loc) = self.entities.free(entity) else {
+            return true;
         };
         // Drop out-of-band sparse components regardless of archetype shape; even
         // an empty-archetype entity may still hold sparse components (§6).
