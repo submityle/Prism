@@ -77,6 +77,10 @@ pub mod connectivity;
 
 pub use connectivity::{split_connected_components, ConnectivityParams, MeshComponent};
 
+pub mod cook_shells;
+
+pub use cook_shells::{cook_collision_shells, CookReport, CookShellParams, CookedShells};
+
 /// A handle into a [`ShapeRegistry`].
 ///
 /// This is a plain index handle; shapes are immutable once inserted, so no
