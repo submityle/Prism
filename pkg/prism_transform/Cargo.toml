@@ -21,5 +21,9 @@ determinism = []
 # Bevy-shaped prelude: glam-named re-exports and compatibility helpers (design doc §19).
 compat-bevy = []
 
+[[bench]]
+name = "hierarchy_propagation"
+harness = false
+
 [lints]
 workspace = true
