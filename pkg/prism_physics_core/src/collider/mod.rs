@@ -185,6 +185,8 @@ pub mod tet_conform;
 pub use tet_conform::{conform_tet_boundary, TetConformParams, TetConformResult};
 pub mod tet_mass;
 pub use tet_mass::{compute_tet_mass_properties, TetMassParams, TetMassProperties};
+pub mod tet_adjacency;
+pub use tet_adjacency::{build_tet_adjacency, TetAdjacency};
 
 /// A handle into a [`ShapeRegistry`].
 ///
