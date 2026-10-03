@@ -48,7 +48,7 @@ fn fixed_int_round_trip() {
 
 #[test]
 fn fixed_float_round_trip_is_tight() {
-    for &v in &[0.0f64, 1.0, -1.0, 0.5, -0.25, 3.14159, -123.456, 1000.0] {
+    for &v in &[0.0f64, 1.0, -1.0, 0.5, -0.25, 42.123, -123.456, 1000.0] {
         let f = Fixed::from_f64(v);
         assert!(approx(f.to_f64(), v, 1e-9), "{v} -> {}", f.to_f64());
     }
@@ -307,9 +307,7 @@ fn compensated_sum_beats_naive() {
     // 1.0 + 1e6 * 1e-3 = 1001.0 (choose terms that cancel the naive drift).
     let mut data: Vec<f32> = Vec::new();
     data.push(1.0e8f32);
-    for _ in 0..1_000_000 {
-        data.push(1.0f32);
-    }
+    data.extend(core::iter::repeat_n(1.0f32, 1_000_000));
     data.push(-1.0e8f32);
     let exact = 1_000_000.0f32;
 

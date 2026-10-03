@@ -40,7 +40,7 @@ impl StateHasher {
         let mut v = value;
         let mut i = 0;
         while i < 8 {
-            let byte = (v & 0xff) as u64;
+            let byte = v & 0xff;
             self.state = (self.state ^ byte).wrapping_mul(FNV_PRIME);
             v >>= 8;
             i += 1;
