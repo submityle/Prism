@@ -77,13 +77,18 @@ pub struct DirtyPropagator {
     roots: Vec<NodeId>,
     /// Explicit DFS stack used to sweep a dirty root's subtree.
     stack: Vec<NodeId>,
+    /// The nodes whose world transform this pass actually (re)wrote, in sweep
+    /// order. Recorded so an incremental GPU uploader can re-emit exactly these
+    /// entries (see [`crate::gpu_upload`]); cleared at the start of every pass,
+    /// so it is empty after a static (no-change) frame.
+    swept: Vec<NodeId>,
 }
 
 impl DirtyPropagator {
     /// Create a propagator with empty scratch buffers.
     #[inline]
     pub const fn new() -> Self {
-        Self { marked: Vec::new(), roots: Vec::new(), stack: Vec::new() }
+        Self { marked: Vec::new(), roots: Vec::new(), stack: Vec::new(), swept: Vec::new() }
     }
 
     /// Run one incremental pass, recomputing only the dirty subtrees and
@@ -113,6 +118,8 @@ impl DirtyPropagator {
         if locals.len() != n || globals.len() != n || ticks.len() != n {
             return Err(HierarchyError::LengthMismatch);
         }
+        // A fresh pass records a fresh swept set; a static frame leaves it empty.
+        self.swept.clear();
 
         // Cheap dirty-set scan. For a static scene every slot is clean and we
         // return here having done no world-matrix work at all.
@@ -171,6 +178,7 @@ impl DirtyPropagator {
                     Some(parent) => globals[parent.index()].mul_transform(local),
                 };
                 globals[node.index()] = world;
+                self.swept.push(node);
                 recomputed += 1;
                 for &child in hierarchy.children(node) {
                     self.stack.push(child);
@@ -179,5 +187,17 @@ impl DirtyPropagator {
         }
 
         Ok(DirtyStats { recomputed, dirty_roots })
+    }
+
+    /// The nodes whose world transform the most recent
+    /// [`DirtyPropagator::propagate`] call (re)wrote, in sweep order.
+    ///
+    /// This is the authoritative "what changed this frame" set an incremental
+    /// GPU uploader consumes to re-emit only the dirty transform columns (see
+    /// [`crate::gpu_upload::GpuColumnBuffer::pack_dirty`]). It is empty after a
+    /// static frame, so a clean frame uploads nothing.
+    #[inline]
+    pub fn recomputed_nodes(&self) -> &[NodeId] {
+        &self.swept
     }
 }

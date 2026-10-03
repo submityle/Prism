@@ -68,8 +68,28 @@
 //!   platforms and reproduce exactly on a re-run, with
 //!   [`determinism::hash_globals`] folding a world into a 64-bit desync digest
 //!   (design §12). Both default OFF.
-//! - **M6 (planned):** GPU transform-column upload, 2D variants, and bevy
-//!   compatibility prelude.
+//! - **M6 (this update, done):** `GPU` tooling and ergonomics. The
+//!   [`gpu_upload`] module is a device-free `CPU`-side packer: it packs each
+//!   [`GlobalTransform`] into a row-major `f32` byte buffer
+//!   ([`gpu_upload::MatrixLayout`] — 48-byte 3x4 or 64-byte 4x4, matching a
+//!   `std140`/`std430` instance binding) and, reusing the M2 dirty set
+//!   surfaced by [`TransformGraph::recomputed_entries`], re-emits only the
+//!   entries that changed this frame as merged [`gpu_upload::UploadRange`]
+//!   byte spans so a renderer feeds the per-frame delta to its `RHI` instead
+//!   of re-uploading the whole scene. The [`transform_2d`] module adds the
+//!   planar variants [`transform_2d::Transform2d`] /
+//!   [`transform_2d::GlobalTransform2d`] (a [`prism_math::Vec2`] translation,
+//!   a scalar rotation angle, and a `Vec2` scale, composed through an
+//!   [`transform_2d::Affine2`]) with hierarchy propagation that reuses the
+//!   same forest and parent-before-child order as 3D. The [`stats`] module
+//!   adds [`stats::PropagationStats`] (nodes visited vs skipped, dirty roots,
+//!   forest depth levels, by-root parallel grain, and a caller-filled timing
+//!   hook) derived from a real pass, wired through
+//!   [`TransformGraph::propagate_incremental_stats`]. Finally the
+//!   `compat-bevy` feature exposes [`compat_bevy`], a glam-shaped prelude of
+//!   aliases/re-exports easing a Bevy-codebase port. The packer, 2D, and
+//!   stats are default (no `GPU` device needed); only the Bevy prelude is
+//!   feature-gated.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
@@ -91,6 +111,11 @@ pub mod large_world;
 #[cfg(feature = "std")]
 pub mod parallel;
 pub mod propagation;
+pub mod gpu_upload;
+pub mod stats;
+pub mod transform_2d;
+#[cfg(feature = "compat-bevy")]
+pub mod compat_bevy;
 
 use change::ChangeTicks;
 use dirty::{DirtyPropagator, DirtyStats};
@@ -466,6 +491,48 @@ impl TransformGraph {
         stats
     }
 
+    /// Borrow the cached world transforms, one per node in node-index order.
+    ///
+    /// This is the array a `GPU` uploader packs; see
+    /// [`crate::gpu_upload::GpuColumnBuffer`].
+    #[inline]
+    pub fn globals(&self) -> &[GlobalTransform] {
+        &self.globals
+    }
+
+    /// The nodes whose world transform the most recent
+    /// [`TransformGraph::propagate_incremental`] (or
+    /// [`TransformGraph::propagate_incremental_stats`]) pass (re)wrote, in
+    /// sweep order — the authoritative dirty set for incremental `GPU` upload.
+    ///
+    /// Empty after a static frame. Pass these (as entry indices via
+    /// [`NodeId::index`]) to
+    /// [`crate::gpu_upload::GpuColumnBuffer::pack_dirty`].
+    #[inline]
+    pub fn recomputed_entries(&self) -> &[NodeId] {
+        self.dirty.recomputed_nodes()
+    }
+
+    /// Run an incremental propagation pass and return
+    /// [`stats::PropagationStats`] describing the work done (nodes visited vs
+    /// skipped, dirty roots, forest depth, by-root parallel grain).
+    ///
+    /// Propagation is identical to
+    /// [`TransformGraph::propagate_incremental`]; this variant also derives
+    /// the observability metrics from the same pass.
+    ///
+    /// # Panics
+    /// Panics only if the internal buffers desynchronize from the hierarchy,
+    /// which cannot happen through this type's safe API.
+    pub fn propagate_incremental_stats(&mut self) -> stats::PropagationStats {
+        let dirty = self
+            .dirty
+            .propagate(&self.hierarchy, &self.ticks, &self.locals, &mut self.globals)
+            .expect("TransformGraph buffers stay in sync with the hierarchy");
+        self.ticks.end_pass();
+        stats::PropagationStats::from_incremental(&self.hierarchy, dirty)
+    }
+
     /// Re-parent `child` under `new_parent` (or detach to a root with `None`),
     /// keeping its *local* transform unchanged. The world pose generally moves;
     /// call [`TransformGraph::propagate`] to recompute it.
@@ -543,6 +610,11 @@ pub mod prelude {
     };
     #[cfg(feature = "determinism")]
     pub use crate::determinism::{FxAffine3, FxMat3, hash_globals, propagate_fixed};
+    pub use crate::gpu_upload::{GpuColumnBuffer, MatrixLayout, UploadRange};
+    pub use crate::stats::PropagationStats;
+    pub use crate::transform_2d::{
+        Affine2, GlobalTransform2d, Transform2d, TransformGraph2d, propagate_2d,
+    };
     pub use crate::{GlobalTransform, Transform, TransformGraph};
 }
 
@@ -566,3 +638,15 @@ mod tests_m5_large_world;
 
 #[cfg(all(test, feature = "determinism"))]
 mod tests_m5_determinism;
+
+#[cfg(test)]
+mod tests_m6_gpu;
+
+#[cfg(test)]
+mod tests_m6_2d;
+
+#[cfg(test)]
+mod tests_m6_stats;
+
+#[cfg(all(test, feature = "compat-bevy"))]
+mod tests_m6_compat;

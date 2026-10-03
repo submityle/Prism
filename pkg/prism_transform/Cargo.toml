@@ -18,6 +18,8 @@ std = ["prism_math/std", "dep:prism_tasks"]
 f64 = []
 # Deterministic fixed-point propagation for rollback/lockstep netcode (design doc §12).
 determinism = []
+# Bevy-shaped prelude: glam-named re-exports and compatibility helpers (design doc §19).
+compat-bevy = []
 
 [lints]
 workspace = true
