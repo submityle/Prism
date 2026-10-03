@@ -23,6 +23,9 @@ pub use tri_mesh::{TriMeshData, TriMeshHandle};
 pub mod hull;
 
 pub use hull::convex_hull;
+pub mod faces;
+
+pub use faces::{merge_coplanar_faces, PolygonFace, DEFAULT_COPLANAR_DOT};
 pub mod decompose;
 
 pub use decompose::{convex_decompose, DecompositionParams};
