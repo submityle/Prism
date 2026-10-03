@@ -25,6 +25,8 @@ use crate::exit::{AppExit, AppExitRequest};
 use crate::fixed::{FixedFirst, FixedLast, FixedPostUpdate, FixedPreUpdate, FixedUpdate};
 use crate::plugin::Plugin;
 use crate::plugin_group::PluginGroup;
+use crate::capability::{Capabilities, QualityTier};
+use crate::run_mode::RunMode;
 use crate::lifecycle::{
     AppLifecycle, FocusChanged, LowMemory, Resumed, Suspended, WillRenderFirstFrame,
 };
@@ -98,6 +100,17 @@ impl App {
         app.sub_apps.main
             .world
             .insert_resource(TimeUpdateStrategy::default());
+        // Capability tiering (design §3, §24.4): probe the environment once at
+        // construction and install the derived profile as resources so
+        // capability-driven assembly (design §17) and the run-mode default can
+        // read real hardware facts. `Capabilities::default()` is the real probe
+        // on std and a conservative constant on no_std.
+        let capabilities = Capabilities::default();
+        let quality_tier = QualityTier::from_capabilities(&capabilities);
+        let run_mode = RunMode::detect(&capabilities);
+        app.sub_apps.main.world.insert_resource(capabilities);
+        app.sub_apps.main.world.insert_resource(quality_tier);
+        app.sub_apps.main.world.insert_resource(run_mode);
         app
     }
 
@@ -575,6 +588,54 @@ impl App {
     /// Mutable access to the main world.
     pub fn world_mut(&mut self) -> &mut World {
         &mut self.sub_apps.main.world
+    }
+
+    // ---- capability tiering (design §3, §24.4) ----------------------------
+
+    /// The capabilities probed at construction (design §3).
+    ///
+    /// Installed by [`new`](App::new) as a main-world resource; this is a
+    /// convenience accessor. Panics only if the resource was manually removed.
+    pub fn capabilities(&self) -> &Capabilities {
+        self.sub_apps
+            .main
+            .world
+            .get_resource::<Capabilities>()
+            .expect("Capabilities resource is installed by App::new")
+    }
+
+    /// The [`QualityTier`] derived from the probed capabilities (design §3).
+    pub fn quality_tier(&self) -> QualityTier {
+        *self
+            .sub_apps
+            .main
+            .world
+            .get_resource::<QualityTier>()
+            .expect("QualityTier resource is installed by App::new")
+    }
+
+    /// The current [`RunMode`] (design §24.4).
+    ///
+    /// Defaults to [`RunMode::detect`] from the probed capabilities; override
+    /// with [`set_run_mode`](App::set_run_mode).
+    pub fn run_mode(&self) -> RunMode {
+        *self
+            .sub_apps
+            .main
+            .world
+            .get_resource::<RunMode>()
+            .expect("RunMode resource is installed by App::new")
+    }
+
+    /// Override the [`RunMode`] (design §24.4).
+    ///
+    /// The capability default guesses only the observable [`Client`](RunMode::Client)
+    /// / [`Headless`](RunMode::Headless) roles; a [`DedicatedServer`](RunMode::DedicatedServer)
+    /// or [`EditorEmbedded`](RunMode::EditorEmbedded) launch declares its role
+    /// here. Returns `&mut self` for chaining.
+    pub fn set_run_mode(&mut self, mode: RunMode) -> &mut Self {
+        self.sub_apps.main.world.insert_resource(mode);
+        self
     }
 }
 

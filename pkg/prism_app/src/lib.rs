@@ -108,6 +108,16 @@
 //!   (`build`/`finish` wall time). Neither is installed by default, so an
 //!   un-observed frame pays only a single resource-presence check. Extract
 //!   cost, pipeline-overlap rate, and present latency are honestly deferred.
+//! - Capability [tiering](crate::capability) (design §3, §17, §24.4):
+//!   [`App::new`] probes the environment into a [`Capabilities`] resource
+//!   (logical cores, a documented display heuristic, mobile OS, a measured
+//!   timer granularity), derives a [`QualityTier`]
+//!   (`Server`/`Mobile`/`Desktop`), and seeds a [`RunMode`]
+//!   (`Client`/`DedicatedServer`/`EditorEmbedded`/`Headless`, default picked
+//!   from the probe), so assembly can gate on real facts rather than
+//!   compile-time guesses. The display probe is an honest, overridable
+//!   heuristic (true platform display queries belong to the absent
+//!   `prism_window`).
 //!
 //! Everything on the public surface is a **real, working implementation** —
 //! no `todo!()`, `unimplemented!()`, or hollow stubs. Later milestones (sub-app
@@ -129,6 +139,7 @@
 //! only publicly documented architectural shapes.
 
 pub mod app;
+pub mod capability;
 pub mod event;
 pub mod exit;
 pub mod fixed;
@@ -144,6 +155,7 @@ pub mod plugin_group;
 pub mod plugin_graph;
 #[cfg(feature = "pipelined")]
 pub mod pipelined;
+pub mod run_mode;
 pub mod runner;
 pub mod schedule;
 pub mod settings;
@@ -156,6 +168,7 @@ pub mod time;
 mod tests;
 
 pub use app::{App, Plugins, PluginsState};
+pub use capability::{Capabilities, QualityTier};
 pub use exit::{AppExit, AppExitRequest};
 pub use plugin::{Plugin, PluginDependency};
 pub use plugin_graph::PluginGraphError;
@@ -163,6 +176,7 @@ pub use plugin_group::{PluginGroup, PluginGroupBuilder};
 #[cfg(feature = "std")]
 pub use runner::{DedicatedServerRunner, ServerTickDiagnostics};
 pub use runner::{HeadlessRunner, ScheduleRunnerOnce, run_once};
+pub use run_mode::RunMode;
 pub use fixed::{FixedFirst, FixedLast, FixedPostUpdate, FixedPreUpdate, FixedUpdate};
 pub use lifecycle::{
     AppLifecycle, FocusChanged, LowMemory, Resumed, Suspended, WillRenderFirstFrame,
@@ -194,6 +208,7 @@ pub use time::{EngineClocks, TimeUpdateStrategy};
 /// `prism_ecs` prelude so a user needs only one `use`.
 pub mod prelude {
     pub use crate::app::{App, Plugins, PluginsState};
+    pub use crate::capability::{Capabilities, QualityTier};
     pub use crate::exit::{AppExit, AppExitRequest};
     pub use crate::plugin::{Plugin, PluginDependency};
     pub use crate::plugin_graph::PluginGraphError;
@@ -201,6 +216,7 @@ pub mod prelude {
     #[cfg(feature = "std")]
     pub use crate::runner::{DedicatedServerRunner, ServerTickDiagnostics};
     pub use crate::runner::{HeadlessRunner, ScheduleRunnerOnce};
+    pub use crate::run_mode::RunMode;
     pub use crate::fixed::{FixedFirst, FixedLast, FixedPostUpdate, FixedPreUpdate, FixedUpdate};
     pub use crate::lifecycle::{
         AppLifecycle, FocusChanged, LowMemory, Resumed, Suspended, WillRenderFirstFrame,

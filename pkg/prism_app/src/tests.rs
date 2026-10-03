@@ -3259,3 +3259,108 @@ mod state_depth_tests {
         );
     }
 }
+
+/// Capability tiering (design §3, §24.4): `Capabilities` / `QualityTier` /
+/// `RunMode` derivation and their installation on the app.
+mod capability_tests {
+    use super::*;
+    use crate::capability::{Capabilities, QualityTier};
+    use crate::run_mode::RunMode;
+
+    /// A desktop-shaped probe (display, many cores, not mobile) derives the
+    /// desktop tier and the client run mode.
+    #[test]
+    fn desktop_capabilities_tier_and_mode() {
+        let caps = Capabilities {
+            logical_cores: 16,
+            has_display: true,
+            is_mobile: false,
+            high_resolution_timer: true,
+        };
+        assert_eq!(QualityTier::from_capabilities(&caps), QualityTier::Desktop);
+        assert_eq!(RunMode::detect(&caps), RunMode::Client);
+        assert!(caps.is_multicore());
+        assert!(QualityTier::Desktop.presents());
+    }
+
+    /// No display derives the headless server tier and the headless run mode.
+    #[test]
+    fn headless_capabilities_tier_and_mode() {
+        let caps = Capabilities::headless();
+        assert_eq!(QualityTier::from_capabilities(&caps), QualityTier::Server);
+        assert_eq!(RunMode::detect(&caps), RunMode::Headless);
+        assert!(!caps.is_multicore());
+        assert!(!QualityTier::Server.presents());
+        assert!(RunMode::Headless.is_headless());
+        assert!(!RunMode::Headless.drives_rendering());
+    }
+
+    /// Mobile wins over display: a phone with a screen is still the mobile tier.
+    #[test]
+    fn mobile_capabilities_select_mobile_tier() {
+        let caps = Capabilities {
+            logical_cores: 8,
+            has_display: true,
+            is_mobile: true,
+            high_resolution_timer: true,
+        };
+        assert_eq!(QualityTier::from_capabilities(&caps), QualityTier::Mobile);
+        assert!(QualityTier::Mobile.presents());
+        // The mode default still keys off the display, not the tier.
+        assert_eq!(RunMode::detect(&caps), RunMode::Client);
+    }
+
+    /// `with_display` overrides the heuristic field before tier derivation, so a
+    /// window plugin can correct an assume-present default to headless.
+    #[test]
+    fn with_display_override_flips_tier() {
+        let caps = Capabilities::headless().with_display(true);
+        assert!(caps.has_display);
+        assert_eq!(QualityTier::from_capabilities(&caps), QualityTier::Desktop);
+
+        let caps = caps.with_display(false);
+        assert_eq!(QualityTier::from_capabilities(&caps), QualityTier::Server);
+    }
+
+    /// The explicit-choice modes are never auto-selected but describe their
+    /// roles honestly.
+    #[test]
+    fn explicit_modes_report_their_roles() {
+        assert!(RunMode::DedicatedServer.is_headless());
+        assert!(!RunMode::DedicatedServer.drives_rendering());
+        assert!(RunMode::EditorEmbedded.drives_rendering());
+        assert!(RunMode::EditorEmbedded.is_externally_driven());
+        assert!(!RunMode::Client.is_externally_driven());
+    }
+
+    /// `App::new` installs all three tiering resources, and `set_run_mode`
+    /// overrides the capability default (design §24.4).
+    #[test]
+    fn app_installs_tiering_resources_and_allows_mode_override() {
+        let mut app = App::new();
+        // Resources are present and mutually consistent.
+        let caps = *app.capabilities();
+        assert_eq!(QualityTier::from_capabilities(&caps), app.quality_tier());
+        assert_eq!(RunMode::detect(&caps), app.run_mode());
+        // At least one core is always reported.
+        assert!(app.capabilities().logical_cores >= 1);
+
+        // The explicit role is a deliberate override the probe never guesses.
+        app.set_run_mode(RunMode::DedicatedServer);
+        assert_eq!(app.run_mode(), RunMode::DedicatedServer);
+        assert!(app.run_mode().is_headless());
+    }
+
+    /// The real std probe reports a plausible, self-consistent profile.
+    #[cfg(feature = "std")]
+    #[test]
+    fn detect_probe_is_self_consistent() {
+        use core::time::Duration;
+
+        let caps = Capabilities::detect();
+        assert!(caps.logical_cores >= 1, "always at least one core");
+        // The timer resolution probe returns a finite, sub-second measurement.
+        let res = Capabilities::probe_timer_resolution();
+        assert!(res < Duration::from_secs(1));
+    }
+}
