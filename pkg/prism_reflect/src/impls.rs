@@ -84,6 +84,9 @@ impl_reflect_value!(i8, i16, i32, i64, i128, isize);
 impl_reflect_value!(u8, u16, u32, u64, u128, usize);
 impl_reflect_value!(f32, f64);
 impl_reflect_value!(String);
+// The unit type is a leaf so that void-returning reflected functions can
+// box their `()` result as a `dyn Reflect` value.
+impl_reflect_value!(());
 
 // Compile-time check that the leaf impls satisfy the core traits.
 const _: fn() = || {

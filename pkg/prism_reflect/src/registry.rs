@@ -19,6 +19,10 @@ pub trait GetTypeRegistration {
     fn get_type_registration() -> TypeRegistration;
 }
 
+/// Sentinel Rust type used to source the shared [`TypeId`] for every
+/// runtime-defined [`TypeRegistration`] (which has no concrete Rust type).
+struct RuntimeTypePlaceholder;
+
 /// The registry entry for a single reflected type.
 pub struct TypeRegistration {
     type_id: TypeId,
@@ -35,6 +39,24 @@ impl TypeRegistration {
             type_id: TypeId::of::<T>(),
             type_name: ::core::any::type_name::<T>(),
             type_info: <T as Typed>::type_info(),
+            data: HashMap::new(),
+        }
+    }
+
+    /// Build a registration for a type defined at runtime (design §17,
+    /// §22): one whose shape is a runtime-built `&'static TypeInfo` rather
+    /// than a concrete Rust type.
+    ///
+    /// Runtime registrations share a single sentinel [`TypeId`] (they have no
+    /// distinct Rust `TypeId`), so they are keyed by name only and are *not*
+    /// reachable through [`TypeRegistry::get`] or [`TypeRegistry::contains`];
+    /// use [`TypeRegistry::get_with_name`] instead. They carry no type data.
+    #[must_use]
+    pub fn runtime(type_name: &'static str, type_info: &'static TypeInfo) -> Self {
+        Self {
+            type_id: TypeId::of::<RuntimeTypePlaceholder>(),
+            type_name,
+            type_info,
             data: HashMap::new(),
         }
     }
@@ -97,6 +119,7 @@ impl Clone for TypeRegistration {
 pub struct TypeRegistry {
     registrations: HashMap<TypeId, TypeRegistration>,
     name_to_id: HashMap<&'static str, TypeId>,
+    runtime_by_name: HashMap<&'static str, TypeRegistration>,
 }
 
 impl TypeRegistry {
@@ -119,6 +142,20 @@ impl TypeRegistry {
             .insert(registration.type_id(), registration);
     }
 
+    /// Register a runtime-defined type (design §17/§22), indexing it by
+    /// name only.
+    ///
+    /// Runtime types share a sentinel [`TypeId`], so they are stored in a
+    /// name-keyed side table and resolved through
+    /// [`get_with_name`](Self::get_with_name)/[`get_with_name_mut`](Self::get_with_name_mut).
+    /// Registering the same name again replaces the previous runtime entry.
+    /// Prefer [`StructTypeBuilder`](crate::StructTypeBuilder)/[`EnumTypeBuilder`](crate::EnumTypeBuilder)
+    /// to build the registration.
+    pub fn register_runtime(&mut self, registration: TypeRegistration) {
+        self.runtime_by_name
+            .insert(registration.type_name(), registration);
+    }
+
     /// Look up a registration by `TypeId`.
     #[must_use]
     pub fn get(&self, type_id: TypeId) -> Option<&TypeRegistration> {
@@ -131,16 +168,32 @@ impl TypeRegistry {
     }
 
     /// Look up a registration by fully-qualified type name.
+    ///
+    /// Falls back to the runtime-defined type table (see
+    /// [`register_runtime`](Self::register_runtime)) when no concrete type
+    /// matches the name.
     #[must_use]
     pub fn get_with_name(&self, type_name: &str) -> Option<&TypeRegistration> {
-        let type_id = self.name_to_id.get(type_name)?;
-        self.registrations.get(type_id)
+        if let Some(type_id) = self.name_to_id.get(type_name)
+            && let Some(registration) = self.registrations.get(type_id)
+        {
+            return Some(registration);
+        }
+        self.runtime_by_name.get(type_name)
     }
 
     /// Mutably look up a registration by fully-qualified type name.
+    ///
+    /// Falls back to the runtime-defined type table (see
+    /// [`register_runtime`](Self::register_runtime)) when no concrete type
+    /// matches the name.
     pub fn get_with_name_mut(&mut self, type_name: &str) -> Option<&mut TypeRegistration> {
-        let type_id = *self.name_to_id.get(type_name)?;
-        self.registrations.get_mut(&type_id)
+        if let Some(type_id) = self.name_to_id.get(type_name).copied()
+            && self.registrations.contains_key(&type_id)
+        {
+            return self.registrations.get_mut(&type_id);
+        }
+        self.runtime_by_name.get_mut(type_name)
     }
 
     /// Attach a type-data payload to the already-registered type `T`.

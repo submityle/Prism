@@ -41,8 +41,20 @@
 //!   [`from_versioned_binary`](schema::from_versioned_binary)) layered on the
 //!   M3 serializer so an old payload migrates step-by-step before deserialization.
 //!
-//! Later milestones (design §22): function reflection + `reflect_trait` (M5),
-//! and ECS/scene/editor/script/network integration (M6).
+//! - **M5 function reflection + trait objects:** register free functions and
+//!   methods into a [`FunctionRegistry`] and [`call`](FunctionRegistry::call)
+//!   them **by name** with a type-erased [`ArgList`], returning a reflected
+//!   result; strict arity/argument-type validation surfaces a typed
+//!   [`FunctionError`] instead of undefined behaviour (design §23's
+//!   "函数反射安全"). The [`reflect_trait!`] macro generates a
+//!   [`TypeData`] accessor that recovers a `&dyn Trait` from a `&dyn Reflect`
+//!   for data-driven dispatch. [`StructTypeBuilder`]/[`EnumTypeBuilder`]
+//!   construct and register [`TypeInfo`] for types defined at runtime, and
+//!   [`diff`]/[`merge`] compute and apply a minimal [`Patch`] between two
+//!   reflected values (design §24.4).
+//!
+//! Later milestones (design §22): ECS/scene/editor/script/network integration
+//! (M6).
 //!
 //! This crate contains no Unreal Engine source or derived code and depends on
 //! no `bevy_*` crate.
@@ -57,21 +69,31 @@ extern crate alloc;
 
 mod apply;
 mod cache;
+mod diff;
 mod dynamic;
 mod from_reflect;
+mod func;
 mod impls;
 mod kinds;
 #[cfg(feature = "math")]
 mod math_impls;
 mod path;
 mod reflect;
+mod reflect_trait;
 mod registry;
+mod runtime_type;
 pub mod schema;
 mod ser;
 mod type_data;
 mod type_info;
 
 pub use prism_reflect_macros::Reflect;
+
+#[doc(hidden)]
+pub mod __macro_exports {
+    //! Internal re-exports used by `reflect_trait!`; not a stable public API.
+    pub use alloc::boxed::Box;
+}
 
 pub use kinds::{Array, ArrayIter, Enum, List, ListIter, Map, MapIter, Set, SetIter, VariantType};
 pub use apply::ApplyError;
@@ -91,6 +113,13 @@ pub use type_info::{
 pub use ser::{
     DeserializeError, SerializeError, StableTypeId, from_binary, from_ron, to_binary, to_ron,
 };
+pub use diff::{DiffError, Patch, diff, merge};
+pub use func::{
+    ArgList, DynamicFunction, FunctionError, FunctionInfo, FunctionRegistry, IntoFunction,
+};
+pub use runtime_type::{EnumTypeBuilder, StructTypeBuilder};
+// `reflect_trait!` is `#[macro_export]`, so it is already available at the
+// crate root; nothing to re-export here.
 pub use schema::{
     AttributeValue, FieldMetadata, MigrateError, Migration, SchemaRegistry, SchemaVersion,
     TypeMetadata, TypeSchema, ValidationError,
@@ -99,15 +128,18 @@ pub use schema::{
 /// Convenient re-exports for downstream crates.
 pub mod prelude {
     pub use crate::{
-        Access, Array, ArrayInfo, ApplyError, DeserializeError, DynamicArray, DynamicEnum,
-        DynamicList, DynamicMap, DynamicSet, DynamicStruct, DynamicTupleStruct, DynamicVariant,
-        Enum, EnumInfo, FromReflect, GetTypeRegistration, List, ListInfo, Map, MapInfo, NamedField,
-        ParsePathError, ParsedPath, Reflect, ReflectDefault, ReflectMut, ReflectRef,
-        SerializeError, Set, SetInfo, StableTypeId, Struct, StructInfo, TupleStruct,
-        TupleStructInfo, TypeData, TypeInfo, TypeRegistration, TypeRegistry, Typed, UnnamedField,
-        ValueInfo, VariantInfo, VariantKind, VariantType, from_binary, from_ron, reflect_path,
-        reflect_path_mut, to_binary, to_ron,
+        Access, ApplyError, ArgList, Array, ArrayInfo, DeserializeError, DiffError, DynamicArray,
+        DynamicEnum, DynamicFunction, DynamicList, DynamicMap, DynamicSet, DynamicStruct,
+        DynamicTupleStruct, DynamicVariant, Enum, EnumInfo, EnumTypeBuilder, FromReflect,
+        FunctionError, FunctionInfo, FunctionRegistry, GetTypeRegistration, IntoFunction, List,
+        ListInfo, Map, MapInfo, NamedField, ParsePathError, ParsedPath, Patch, Reflect,
+        ReflectDefault, ReflectMut, ReflectRef, SerializeError, Set, SetInfo, StableTypeId, Struct,
+        StructInfo, StructTypeBuilder, TupleStruct, TupleStructInfo, TypeData, TypeInfo,
+        TypeRegistration, TypeRegistry, Typed, UnnamedField, ValueInfo, VariantInfo, VariantKind,
+        VariantType, diff, from_binary, from_ron, merge, reflect_path, reflect_path_mut, to_binary,
+        to_ron,
     };
+    pub use crate::reflect_trait;
     pub use crate::schema::{
         AttributeValue, FieldMetadata, MigrateError, Migration, SchemaRegistry, SchemaVersion,
         TypeMetadata, TypeSchema, ValidationError, from_versioned_binary, from_versioned_ron,
