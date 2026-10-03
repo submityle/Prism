@@ -28,7 +28,7 @@ pub mod decompose;
 pub use decompose::{convex_decompose, DecompositionParams};
 pub mod simplify;
 
-pub use simplify::{simplify_convex_hull, SimplifiedHull};
+pub use simplify::{simplify_convex_hull, SimplifiedHull, MIN_HULL_VERTICES};
 
 /// A handle into a [`ShapeRegistry`].
 ///
@@ -387,6 +387,33 @@ impl ShapeRegistry {
         }
         out
     }
+
+    /// Cooks a point cloud into a *vertex-limited* convex collider: builds the
+    /// exact convex hull, reduces it to at most `max_vertices` vertices via
+    /// [`simplify_convex_hull`], inserts the simplified mesh into this registry,
+    /// and returns the handle paired with a ready
+    /// [`ColliderShape::ConvexHull`].
+    ///
+    /// This is the content-pipeline entry point for capping a cooked convex
+    /// collider's complexity (the analogue of `PhysX` `PxConvexMeshDesc`'s
+    /// `vertexLimit` or Jolt's convex-hull vertex budget): dense render meshes
+    /// are reduced to a solver-friendly proxy. The simplified hull is an *inner*
+    /// approximation of the full hull; see [`simplify_convex_hull`] for the
+    /// contract and `removed_volume` accounting.
+    ///
+    /// Returns [`None`] when `max_vertices` is below [`MIN_HULL_VERTICES`] or the
+    /// cloud is degenerate and cannot form a single solid hull.
+    pub fn cook_simplified_convex(
+        &mut self,
+        points: &[Vec3],
+        max_vertices: usize,
+    ) -> Option<(ConvexMeshHandle, ColliderShape, f32)> {
+        let simplified = simplify_convex_hull(points, max_vertices)?;
+        let removed_volume = simplified.removed_volume;
+        let handle = self.insert_convex_mesh(simplified.to_convex_mesh());
+        let shape = self.convex_hull_shape(handle)?;
+        Some((handle, shape, removed_volume))
+    }
 }
 
 #[cfg(test)]
@@ -514,6 +541,52 @@ mod tests {
         let mut reg = ShapeRegistry::new();
         let parts = reg.cook_convex_decomposition(&[], &[], DecompositionParams::default());
         assert!(parts.is_empty());
+        assert_eq!(reg.convex_mesh_count(), 0);
+    }
+
+    #[test]
+    fn cook_simplified_convex_caps_vertex_count() {
+        // A box plus small near-coplanar bumps: the bumps are the lowest-volume
+        // vertices, so a budget of 8 recovers a near-box proxy registered as a
+        // ready convex-hull shape.
+        let mut reg = ShapeRegistry::new();
+        let mut points = Vec::new();
+        for sx in [-1.0_f32, 1.0] {
+            for sy in [-1.0_f32, 1.0] {
+                for sz in [-1.0_f32, 1.0] {
+                    points.push(Vec3::new(sx, sy, sz));
+                }
+            }
+        }
+        points.push(Vec3::new(0.0, 0.0, 1.02));
+        points.push(Vec3::new(0.0, 0.0, -1.02));
+
+        let (handle, shape, removed) = reg
+            .cook_simplified_convex(&points, 8)
+            .expect("cooks a proxy");
+        assert!(matches!(shape, ColliderShape::ConvexHull { .. }));
+        assert_eq!(reg.convex_mesh_count(), 1);
+        let mesh = reg.convex_mesh(handle).expect("handle resolves");
+        assert!(mesh.vertices().len() <= 8);
+        assert!(mesh.volume() > 0.0);
+        assert!(removed >= 0.0);
+    }
+
+    #[test]
+    fn cook_simplified_convex_rejects_bad_input() {
+        let mut reg = ShapeRegistry::new();
+        let cube: Vec<Vec3> = [-1.0_f32, 1.0]
+            .into_iter()
+            .flat_map(|x| {
+                [-1.0_f32, 1.0]
+                    .into_iter()
+                    .flat_map(move |y| [-1.0_f32, 1.0].into_iter().map(move |z| Vec3::new(x, y, z)))
+            })
+            .collect();
+        // Below a tetrahedron budget is rejected and nothing is registered.
+        assert!(reg.cook_simplified_convex(&cube, 3).is_none());
+        // Degenerate cloud is rejected too.
+        assert!(reg.cook_simplified_convex(&[], 8).is_none());
         assert_eq!(reg.convex_mesh_count(), 0);
     }
 }
