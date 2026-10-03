@@ -78,7 +78,7 @@ pub use texture_blur::{
 };
 pub use texture_codec::{
     bc6h_mode_bits, bc7_mode, decode_astc_4x4_hdr, decode_astc_4x4_ldr, decode_astc_4x4_weights,
-    decode_astc_4x4_weights_ise, decode_astc_ldr, decode_astc_void_extent_hdr,
+    decode_astc_4x4_weights_ise, decode_astc_hdr, decode_astc_ldr, decode_astc_void_extent_hdr,
     decode_astc_void_extent_ldr, decode_bc1, decode_bc2, decode_bc3, decode_bc4, decode_bc4_signed,
     decode_bc5, decode_bc5_signed, decode_bc6h_mode10_signed, decode_bc6h_mode10_unsigned,
     decode_bc6h_mode11_signed, decode_bc6h_mode11_unsigned, decode_bc6h_mode12_signed,

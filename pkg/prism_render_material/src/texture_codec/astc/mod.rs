@@ -165,3 +165,53 @@ pub fn decode_astc_ldr(
     }
     Ok((out, texels))
 }
+
+/// Decode a single ASTC **HDR** block for an arbitrary 2D footprint `bx` x `by`
+/// (4..=12 per axis) to `bx * by` `RGBA` `f32` texels.
+///
+/// Returns a fixed 144-entry array (the largest 12x12 footprint) together with
+/// the number of valid texels (`bx * by`); callers read `out[..count]` in
+/// row-major order (`texel = y * bx + x`). This avoids a heap allocation on the
+/// decode hot path.
+///
+/// Dispatches HDR void-extent (constant-colour FP16, replicated to the
+/// footprint) and single-partition HDR weighted blocks (the six HDR CEMs, any
+/// colour quantisation, any legal weight grid, single- or dual-plane). At the
+/// 4x4 footprint multi-partition blocks route through the dedicated 4x4 HDR
+/// decoder; multi-partition HDR decode for larger footprints is not yet
+/// implemented and returns [`AstcError::UnsupportedBlockMode`] rather than
+/// approximate pixels.
+///
+/// # Errors
+/// Returns [`AstcError::Reserved`] for an out-of-range footprint, or propagates
+/// [`AstcError`] from the selected decode path.
+pub fn decode_astc_hdr(
+    block: &[u8; 16],
+    bx: u32,
+    by: u32,
+) -> Result<([[f32; 4]; 144], usize), AstcError> {
+    let texels = (bx as usize) * (by as usize);
+    if texels == 0 || texels > 144 {
+        return Err(AstcError::Reserved);
+    }
+    let mut out = [[0.0f32; 4]; 144];
+    if void_extent::is_void_extent(block) {
+        // Void-extent blocks are a single constant colour; replicate it across
+        // the whole footprint.
+        let c = decode_astc_void_extent_hdr(block)?[0];
+        for slot in out[..texels].iter_mut() {
+            *slot = c;
+        }
+    } else {
+        let partition_count = ((u32::from(block[1]) >> 3) & 0x3) + 1;
+        if partition_count == 1 {
+            hdr_endpoints::decode_single_partition_hdr(block, bx, by, &mut out[..texels])?;
+        } else if bx == 4 && by == 4 {
+            let fixed = multi_partition_hdr::decode_multi_partition_4x4_hdr(block)?;
+            out[..16].copy_from_slice(&fixed);
+        } else {
+            return Err(AstcError::UnsupportedBlockMode);
+        }
+    }
+    Ok((out, texels))
+}
