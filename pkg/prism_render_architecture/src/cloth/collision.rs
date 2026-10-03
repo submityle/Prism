@@ -264,6 +264,16 @@ pub(super) fn from_physics_collider(
             orientation,
             half_extents: physics_bridge::from_glam(half_extents),
         },
+        // The physics-side bounded convex-hull proxy has no render-side
+        // counterpart (the render `BodyCollider` cannot author one), so this
+        // arm is unreachable through the render coupling path. It is mapped to
+        // an inert, zero-radius sphere at the proxy center purely to keep the
+        // match exhaustive and non-panicking after the physics enum gained the
+        // `ConvexHull` variant.
+        Phys::ConvexHull(proxy) => BodyCollider::Sphere {
+            center: physics_bridge::from_glam(proxy.center()),
+            radius: 0.0,
+        },
     }
 }
 
