@@ -23,6 +23,9 @@ pub use tri_mesh::{TriMeshData, TriMeshHandle};
 pub mod hull;
 
 pub use hull::convex_hull;
+pub mod decompose;
+
+pub use decompose::{convex_decompose, DecompositionParams};
 
 /// A handle into a [`ShapeRegistry`].
 ///
