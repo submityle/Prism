@@ -26,7 +26,8 @@ use prism_render_material::{
     decode_bc7_mode2, decode_bc7_mode3, decode_bc7_mode7, encode_astc_single_partition_4x4_ldr,
     encode_astc_single_partition_4x4_ldr_q192, encode_astc_single_partition_4x4_ldr_quality,
     encode_astc_single_partition_4x4_ldr_rgba, encode_astc_single_partition_4x4_ldr_rgba_q6,
-    encode_astc_single_partition_5x5_ldr, encode_bc1, encode_bc3, encode_bc6h_mode11_unsigned,
+    encode_astc_single_partition_5x5_ldr, encode_astc_single_partition_6x6_ldr, encode_bc1,
+    encode_bc3, encode_bc6h_mode11_unsigned,
     encode_bc7_mode4, encode_bc7_mode5, encode_bc7_mode6,
 };
 use prism_render_material_gpu::BlockOracle;
@@ -4940,6 +4941,21 @@ fn astc_encoder_round_trip_parity_against_gpu_hardware_decode() {
         }),
         24,
     ));
+    // Red/blue checkerboard: a two-colour split whose variance axis (1,0,-1) is
+    // orthogonal to (1,1,1). This is the regression case for the endpoint-fit
+    // power-iteration seed bug (a fixed [1,1,1] seed collapsed both endpoints to
+    // red). Each texel sits exactly on an endpoint, so the 3-bit weights track
+    // it; the only error is the colour quantiser rounding the two endpoints.
+    tiles.push((
+        core::array::from_fn(|t| {
+            if (t + t / 4) % 2 == 0 {
+                [255, 0, 0, 255]
+            } else {
+                [0, 0, 255, 255]
+            }
+        }),
+        40,
+    ));
     // Pseudo-random tiles projected onto a single axis: pick two endpoints and
     // place every texel on the segment between them, so the 3-bit weights can
     // track them to a few LSB.
@@ -5525,5 +5541,128 @@ fn astc_encoder_5x5_round_trip_parity_against_gpu_hardware_decode() {
     }
     eprintln!(
         "ASTC 5x5 encoder round-trip parity: {compared} tiles decode within 1 LSB of hardware (mode-243 QUANT_8 weights, QUANT_64 colour)"
+    );
+}
+
+
+// ---------------------------------------------------------------------------
+// ASTC 6x6 single-partition LDR encoder parity (block mode 276). This is the
+// second larger-footprint encoder and the first on a 6x6 grid. Mode 276 pairs
+// QUANT_3 trit weights (three interpolation levels, 58 weight bits) with
+// QUANT_256 identity colour (six 8-bit endpoint bytes written straight into the
+// block, color_bits = 111 - 58 = 53). The 6x6 weight grid equals the footprint
+// so it needs no bilinear infill (weight t maps 1:1 to texel t). Unlike the 5x5
+// encoder's QUANT_64 endpoints, the endpoints here are exact; the trade is a
+// coarse three-level weight range. We prove the emitted bitstream decodes
+// identically on the Metal hardware ASTC decoder via
+// `decode_raw_footprint(.., 6, 6)` (within 1 LSB of the CPU footprint-generic
+// decode), that constant/two-colour tiles reconstruct exactly (exact
+// endpoints), and that gradients stay within the three-level weight budget.
+// ---------------------------------------------------------------------------
+#[test]
+fn astc_encoder_6x6_round_trip_parity_against_gpu_hardware_decode() {
+    let Some(oracle) = BlockOracle::try_new() else {
+        eprintln!("no GPU adapter; skipping ASTC 6x6 encoder parity");
+        return;
+    };
+    if !oracle
+        .features()
+        .contains(Features::TEXTURE_COMPRESSION_ASTC)
+    {
+        eprintln!("adapter lacks ASTC support; skipping ASTC 6x6 encoder parity");
+        return;
+    }
+    let format = TextureFormat::Astc {
+        block: wgpu::AstcBlock::B6x6,
+        channel: wgpu::AstcChannel::Unorm,
+    };
+
+    // Each tile pairs a thirty-six-texel source with its RGB quality budget.
+    // `exact` marks tiles whose texels all sit on the two exact endpoints, so
+    // the three-level weight range reconstructs them with zero error.
+    let mut tiles: Vec<([[u8; 4]; 36], i32, bool)> = Vec::new();
+    // Constant colours: coincident, identity colour => exact reconstruction.
+    for &rgb in &[[0u8, 0, 0], [255, 255, 255], [73, 150, 211], [12, 240, 90]] {
+        tiles.push(([[rgb[0], rgb[1], rgb[2], 255]; 36], 0, true));
+    }
+    // Two-colour checkerboards: every texel lands on one exact endpoint.
+    for &(a, b) in &[
+        ([20u8, 40, 60], [200u8, 180, 160]),
+        ([255u8, 0, 0], [0u8, 0, 255]),
+    ] {
+        tiles.push((
+            core::array::from_fn(|t| {
+                if t % 2 == 0 {
+                    [a[0], a[1], a[2], 255]
+                } else {
+                    [b[0], b[1], b[2], 255]
+                }
+            }),
+            0,
+            true,
+        ));
+    }
+    // Gray ramp over thirty-six steps: only three weight levels, so mid-ramp
+    // texels snap to the nearest of three steps (~quarter-range worst case).
+    tiles.push((
+        core::array::from_fn(|t| [(t * 7) as u8, (t * 7) as u8, (t * 7) as u8, 255]),
+        70,
+        false,
+    ));
+    // Axis-aligned RGB gradient: endpoints exact, weights coarse.
+    tiles.push((
+        core::array::from_fn(|t| {
+            let f = ((t * 7).min(255)) as u8;
+            [f, 255 - f, (f / 2) + 20, 255]
+        }),
+        70,
+        false,
+    ));
+
+    let mut compared = 0u32;
+    let mut exact_tiles = 0u32;
+    for (src, quality_tol, exact) in &tiles {
+        let blk = encode_astc_single_partition_6x6_ldr(src);
+        let (cpu, count) = decode_astc_ldr(&blk, 6, 6).expect("encoder emits a decodable block");
+        assert_eq!(count, 36, "6x6 footprint must decode 36 texels");
+        let gpu = oracle.decode_raw_footprint(format, &blk, 6, 6);
+        assert_eq!(gpu.len(), 36, "6x6 GPU texel count");
+        for t in 0..36 {
+            let gpu_u8: [i32; 4] =
+                core::array::from_fn(|c| (gpu[t][c].clamp(0.0, 1.0) * 255.0 + 0.5) as i32);
+            // (1) CPU/GPU bitstream parity on all four channels.
+            for c in 0..4 {
+                let d = (cpu[t][c] as i32 - gpu_u8[c]).abs();
+                assert!(
+                    d <= 1,
+                    "ASTC 6x6 encoder block={blk:02x?} texel {t} chan {c}: cpu={} gpu={} (|d|={d})",
+                    cpu[t][c],
+                    gpu_u8[c]
+                );
+            }
+            // (2) Encoder faithfulness: GPU RGB within the quantisation budget.
+            for c in 0..3 {
+                let d = (gpu_u8[c] - src[t][c] as i32).abs();
+                assert!(
+                    d <= *quality_tol,
+                    "ASTC 6x6 encoder quality block={blk:02x?} texel {t} chan {c}: src={} gpu={} (|d|={d} > {quality_tol})",
+                    src[t][c],
+                    gpu_u8[c]
+                );
+            }
+            // CEM 8 forces alpha to 255 on hardware.
+            assert_eq!(gpu_u8[3], 255, "CEM 8 alpha must be 255");
+        }
+        if *exact {
+            exact_tiles += 1;
+        }
+        compared += 1;
+    }
+    assert!(
+        exact_tiles >= 6,
+        "expected the constant/two-colour tiles to prove exact identity-colour endpoints"
+    );
+    eprintln!(
+        "ASTC 6x6 encoder round-trip parity: {compared} tiles decode within 1 LSB of hardware ({exact_tiles} exact; mode-276 QUANT_3 trit weights, QUANT_256 identity colour)"
     );
 }
