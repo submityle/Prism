@@ -129,6 +129,7 @@ pub mod curves;
 pub mod de_bruijn_log2;
 pub mod decal;
 pub mod deep_opacity_bake;
+pub mod deform_schedule_plan;
 pub mod density_delta;
 pub mod depth_downsample;
 pub mod depth_linearize;
@@ -394,6 +395,7 @@ pub mod total_coverage;
 pub mod tracking_transmittance;
 pub mod transcendental_approx;
 pub mod transparency_path_select;
+pub mod transparency_route_select;
 pub mod tri_tri_intersect;
 pub mod triangle_aabb_overlap;
 pub mod triangle_circumcircle;
@@ -431,14 +433,18 @@ pub mod water_mg_smooth;
 pub mod water_multigrid_level;
 pub mod water_ocean_cascade;
 pub mod water_ocean_clipmap;
+pub mod water_ocean_patch;
 pub mod water_optics_plan;
 pub mod water_pbf_constraint;
 pub mod water_pbf_correction;
+pub mod water_pbf_density;
 pub mod water_pbf_kernels;
 pub mod water_shading_npr;
 pub mod water_shading_pbr;
 pub mod water_swe_cfl;
 pub mod water_swe_inject;
+pub mod water_swe_volume;
+pub mod water_swe_wavespeed;
 pub mod water_transition_blend;
 pub mod water_underwater_depth_color;
 pub mod water_underwater_scatter;
@@ -548,6 +554,9 @@ pub use curves::{CurveSampleQuery, GpuCurve, GpuKeyframe};
 pub use de_bruijn_log2::{DeBruijnLog2Result, GpuDeBruijnLog2};
 pub use decal::{DecalProjection, DecalQuery, GpuDecal};
 pub use deep_opacity_bake::{march_centers, GpuDeepOpacityBake};
+pub use deform_schedule_plan::{
+    DeformSchedulePlanQuery, DeformSchedulePlanResult, GpuDeformSchedulePlan,
+};
 pub use density_delta::{CarveBrush, DensityDeltaQuery, GpuDensityDelta};
 pub use depth_downsample::{DepthDownsampleQuery, GpuDepthDownsample};
 pub use depth_linearize::{DepthLinearizeQuery, DepthLinearizeResult, GpuDepthLinearize};
@@ -953,6 +962,9 @@ pub use transcendental_approx::{GpuTranscendental, TranscendentalQuery, Transcen
 pub use transparency_path_select::{
     GpuTransparencyPathSelect, TransparencyPathSelectQuery, TransparencyPathSelectResult,
 };
+pub use transparency_route_select::{
+    GpuTransparencyRouteSelect, TransparencyRouteSelectQuery, TransparencyRouteSelectResult,
+};
 pub use tri_tri_intersect::{GpuTriTriIntersect, TriTriQuery};
 pub use triangle_aabb_overlap::{GpuTriangleAabbOverlap, TriangleAabbQuery};
 pub use triangle_circumcircle::{GpuTriangleCircumcircle, TriangleCircumcircleResult};
@@ -1006,6 +1018,7 @@ pub use water_ocean_cascade::{
 pub use water_ocean_clipmap::{
     GpuWaterOceanClipmap, WaterOceanClipmapQuery, WaterOceanClipmapResult,
 };
+pub use water_ocean_patch::{GpuWaterOceanPatch, WaterOceanPatchQuery, WaterOceanPatchResult};
 pub use water_optics_plan::{GpuWaterOpticsPlan, WaterOpticsPlanQuery, WaterOpticsPlanResult};
 pub use water_pbf_constraint::{
     GpuWaterPbfConstraint, WaterPbfConstraintQuery, WaterPbfConstraintResult,
@@ -1013,11 +1026,16 @@ pub use water_pbf_constraint::{
 pub use water_pbf_correction::{
     GpuWaterPbfCorrection, WaterPbfCorrectionQuery, WaterPbfCorrectionResult,
 };
+pub use water_pbf_density::{GpuWaterPbfDensity, WaterPbfDensityQuery, WaterPbfDensityResult};
 pub use water_pbf_kernels::{GpuWaterPbfKernels, WaterPbfKernelsQuery, WaterPbfKernelsResult};
 pub use water_shading_npr::{GpuWaterShadingNpr, WaterShadingNprQuery, WaterShadingNprResult};
 pub use water_shading_pbr::{GpuWaterShadingPbr, WaterShadingPbrQuery, WaterShadingPbrResult};
 pub use water_swe_cfl::{GpuWaterSweCfl, WaterSweCflQuery, WaterSweCflResult};
 pub use water_swe_inject::{GpuWaterSweInject, WaterSweInjectQuery, WaterSweInjectResult};
+pub use water_swe_volume::{GpuWaterSweVolume, WaterSweVolumeQuery, WaterSweVolumeResult};
+pub use water_swe_wavespeed::{
+    GpuWaterSweWavespeed, WaterSweWavespeedQuery, WaterSweWavespeedResult,
+};
 pub use water_transition_blend::{
     GpuWaterTransitionBlend, WaterTransitionBlendQuery, WaterTransitionBlendResult,
 };
