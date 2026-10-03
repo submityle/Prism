@@ -1,0 +1,26 @@
+[package]
+name = "prism_bevy"
+version = "0.1.0"
+edition = "2024"
+description = "Bevy ECS integration for Prism's next-generation renderer (GPU-driven visibility)"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+bevy_app = { path = "../../crates/bevy_app", version = "0.20.0-dev" }
+bevy_ecs = { path = "../../crates/bevy_ecs", version = "0.20.0-dev" }
+bevy_math = { path = "../../crates/bevy_math", version = "0.20.0-dev" }
+bevy_camera = { path = "../../crates/bevy_camera", version = "0.20.0-dev" }
+bevy_transform = { path = "../../crates/bevy_transform", version = "0.20.0-dev" }
+
+prism_render_architecture = { path = "../prism_render_architecture" }
+prism_render_material = { path = "../prism_render_material" }
+prism_render_visibility = { path = "../prism_render_visibility", features = ["bevy"] }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+bevy_shape = { path = "../../crates/bevy_shape", version = "0.20.0-dev" }
+prism_render_architecture = { path = "../prism_render_architecture" }
+prism_render_material = { path = "../prism_render_material" }

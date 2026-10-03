@@ -30,6 +30,8 @@ members = [
   "pkg/prism_ecs",
   # Derive macros (Component/Bundle/SystemSet) for the ECS kernel.
   "pkg/prism_ecs_macros",
+  # Prism in-house application shell (App/SubApp/Plugin/schedules/runner), replaces bevy_app.
+  "pkg/prism_app",
   # Prism's experimental next-generation rendering architecture.
   "pkg/prism_render_architecture",
   "pkg/prism_render_material",
@@ -38,6 +40,8 @@ members = [
   "pkg/prism_render_scene",
   "pkg/prism_render_shading",
   "pkg/prism_render_visibility",
+  # Prism Bevy integration bridge for the GPU-driven renderer (phased-out once prism_app lands).
+  "pkg/prism_bevy",
   # Prism experimental next-generation physics engine.
   "pkg/prism_physics_core",
   "pkg/prism_physics_geometry",
