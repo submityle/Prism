@@ -144,6 +144,10 @@ pub mod lod_error;
 pub use lod_error::{evaluate_lod_errors, LodErrorReport, LodLevelError, LodMeshRef};
 pub mod symmetry;
 pub use symmetry::{detect_mirror_symmetry, MeshSymmetry, SymmetryParams, SymmetryPlane};
+pub mod rotational_symmetry;
+pub use rotational_symmetry::{
+    detect_rotational_symmetry, MeshRotationalSymmetry, RotationalAxis, RotationalSymmetryParams,
+};
 
 /// A handle into a [`ShapeRegistry`].
 ///
