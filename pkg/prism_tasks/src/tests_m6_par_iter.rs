@@ -8,7 +8,8 @@
 use crate::TaskPool;
 use alloc::vec::Vec;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Barrier;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// Tiny deterministic xorshift64 PRNG so tests seed data without a dependency.
 struct Rng(u64);
@@ -130,18 +131,44 @@ fn par_iter_mut_for_each_and_enumerate_equal_serial() {
 
 #[test]
 fn par_iter_spreads_across_multiple_workers() {
-    // With a tiny grain and many elements, several distinct workers must each
-    // run at least one chunk — proving the work actually fans out.
+    // With a tiny grain and many elements, work must fan out across several
+    // concurrently-active workers. A plain "did >= 2 workers run?" count is
+    // racy: under heavy machine load one worker can drain the whole deque
+    // before its peers wake, so the property holds in principle yet flakes in
+    // practice. We make it deterministic by forcing a rendezvous — the first
+    // two *distinct* executors to pick up a chunk must meet at a width-2
+    // barrier before either may finish. That cannot deadlock (the scope-owning
+    // thread always participates as a helper, so at least two executors exist
+    // whenever `worker_count >= 2`) and it still exercises the real property:
+    // the pool is genuinely running chunks on two threads at the same time.
     let pool = TaskPool::with_threads(4);
     if pool.worker_count() < 2 {
         return;
     }
     let n = 10_000usize;
-    let buckets: Vec<AtomicUsize> = (0..pool.worker_count() + 1).map(|_| AtomicUsize::new(0)).collect();
+    let slots = pool.worker_count() + 1;
+    let buckets: Vec<AtomicUsize> = (0..slots).map(|_| AtomicUsize::new(0)).collect();
+    // One flag per executor index (`worker_count` is the "not a pool worker"
+    // slot used by the participating caller) so each thread rendezvouses at
+    // most once, before it has done any work.
+    let first_touch: Vec<AtomicBool> = (0..slots).map(|_| AtomicBool::new(false)).collect();
+    let arrivals = AtomicUsize::new(0);
+    let rendezvous = Barrier::new(2);
+
     pool.par_iter_range(0..n).with_min_len(1).for_each(|_| {
         let w = pool.current_worker_index().unwrap_or(pool.worker_count());
+        // The first time this executor runs a chunk, join the rendezvous. Only
+        // the first two distinct executors block; later ones (and all later
+        // chunks on an already-synced executor) skip straight through, so the
+        // barrier is reached by exactly two different threads and releases.
+        if !first_touch[w].swap(true, Ordering::Relaxed)
+            && arrivals.fetch_add(1, Ordering::Relaxed) < 2
+        {
+            rendezvous.wait();
+        }
         buckets[w].fetch_add(1, Ordering::Relaxed);
     });
+
     let total: usize = buckets.iter().map(|b| b.load(Ordering::Relaxed)).sum();
     assert_eq!(total, n, "every element visited exactly once");
     let active = buckets.iter().filter(|b| b.load(Ordering::Relaxed) > 0).count();
