@@ -58,6 +58,52 @@ pub enum ColliderShape {
         /// Signed distance of the plane from the origin along `normal`.
         offset: f32,
     },
+    /// A bounded convex hull, stored in the owning [`ShapeRegistry`]'s
+    /// convex-mesh arena and referenced here by [`ConvexMeshHandle`].
+    ///
+    /// The geometric quantities needed for the broad phase and mass setup
+    /// ([`local_aabb`](ColliderShape::local_aabb),
+    /// [`mass_properties`](ColliderShape::mass_properties)) are cached inline so
+    /// those two methods stay registry-free and `Copy`; the full vertex/face
+    /// data (needed by the narrow phase, scene queries, and CCD) is resolved
+    /// from the arena via `mesh`. Build one with
+    /// [`ShapeRegistry::convex_hull_shape`], which fills the cache from the
+    /// stored [`ConvexMeshData`].
+    ConvexHull {
+        /// Handle into the registry's convex-mesh arena.
+        mesh: ConvexMeshHandle,
+        /// Cached local-space AABB minimum.
+        local_aabb_min: Vec3,
+        /// Cached local-space AABB maximum.
+        local_aabb_max: Vec3,
+        /// Cached enclosed volume (cubic metres).
+        volume: f32,
+        /// Cached unit-density diagonal inertia (scales linearly with density).
+        unit_density_inertia: Vec3,
+    },
+    /// A static triangle mesh (concave allowed), stored in the owning
+    /// [`ShapeRegistry`]'s triangle-mesh arena and referenced by
+    /// [`TriMeshHandle`].
+    ///
+    /// Like [`ConvexHull`](ColliderShape::ConvexHull) the AABB and mass cache is
+    /// inline so the two registry-free methods stay `Copy`; the triangle soup
+    /// (needed by queries and the narrow phase) is resolved from the arena via
+    /// `mesh`. Build one with [`ShapeRegistry::tri_mesh_shape`]. A triangle mesh
+    /// is intended as immovable scene geometry: its cached mass is the
+    /// closed-solid mass of the (possibly open) surface and callers typically
+    /// pair it with a static body.
+    TriangleMesh {
+        /// Handle into the registry's triangle-mesh arena.
+        mesh: TriMeshHandle,
+        /// Cached local-space AABB minimum.
+        local_aabb_min: Vec3,
+        /// Cached local-space AABB maximum.
+        local_aabb_max: Vec3,
+        /// Cached unit-density mass (scales linearly with density).
+        unit_density_mass: f32,
+        /// Cached unit-density diagonal inertia (scales linearly with density).
+        unit_density_inertia: Vec3,
+    },
 }
 
 impl ColliderShape {
@@ -82,6 +128,16 @@ impl ColliderShape {
                 let big = Vec3::splat(f32::MAX);
                 (-big, big)
             }
+            ColliderShape::ConvexHull {
+                local_aabb_min,
+                local_aabb_max,
+                ..
+            }
+            | ColliderShape::TriangleMesh {
+                local_aabb_min,
+                local_aabb_max,
+                ..
+            } => (local_aabb_min, local_aabb_max),
         }
     }
 
@@ -135,6 +191,29 @@ impl ColliderShape {
                 mass_props_from_diagonal(total, Vec3::new(iperp, iy, iperp))
             }
             ColliderShape::Plane { .. } => MassProperties::zero(),
+            ColliderShape::ConvexHull {
+                volume,
+                unit_density_inertia,
+                ..
+            } => {
+                if volume <= 0.0 || density <= 0.0 {
+                    return MassProperties::zero();
+                }
+                mass_props_from_diagonal(density * volume, unit_density_inertia * density)
+            }
+            ColliderShape::TriangleMesh {
+                unit_density_mass,
+                unit_density_inertia,
+                ..
+            } => {
+                if unit_density_mass <= 0.0 || density <= 0.0 {
+                    return MassProperties::zero();
+                }
+                mass_props_from_diagonal(
+                    density * unit_density_mass,
+                    unit_density_inertia * density,
+                )
+            }
         }
     }
 }
@@ -230,6 +309,47 @@ impl ShapeRegistry {
     #[must_use]
     pub fn tri_mesh_count(&self) -> usize {
         self.tri_meshes.len()
+    }
+
+    /// Builds a [`ColliderShape::ConvexHull`] referring to the convex mesh at
+    /// `handle`, filling the inline broad-phase / mass cache from the stored
+    /// [`ConvexMeshData`].
+    ///
+    /// Returns [`None`] when `handle` is out of range. The cached AABB, volume,
+    /// and unit-density inertia are read once here so that
+    /// [`ColliderShape::local_aabb`] and [`ColliderShape::mass_properties`] stay
+    /// registry-free and `Copy`.
+    #[must_use]
+    pub fn convex_hull_shape(&self, handle: ConvexMeshHandle) -> Option<ColliderShape> {
+        let mesh = self.convex_meshes.get(handle.0 as usize)?;
+        let (local_aabb_min, local_aabb_max) = mesh.local_aabb();
+        Some(ColliderShape::ConvexHull {
+            mesh: handle,
+            local_aabb_min,
+            local_aabb_max,
+            volume: mesh.volume(),
+            unit_density_inertia: mesh.unit_density_inertia(),
+        })
+    }
+
+    /// Builds a [`ColliderShape::TriangleMesh`] referring to the triangle mesh
+    /// at `handle`, filling the inline broad-phase / mass cache from the stored
+    /// [`TriMeshData`].
+    ///
+    /// Returns [`None`] when `handle` is out of range. A triangle mesh is
+    /// intended as immovable scene geometry; the cached closed-solid mass is
+    /// kept so callers that make it dynamic still receive a finite inertia.
+    #[must_use]
+    pub fn tri_mesh_shape(&self, handle: TriMeshHandle) -> Option<ColliderShape> {
+        let mesh = self.tri_meshes.get(handle.0 as usize)?;
+        let (local_aabb_min, local_aabb_max) = mesh.local_aabb();
+        Some(ColliderShape::TriangleMesh {
+            mesh: handle,
+            local_aabb_min,
+            local_aabb_max,
+            unit_density_mass: mesh.unit_density_mass(),
+            unit_density_inertia: mesh.unit_density_inertia(),
+        })
     }
 }
 

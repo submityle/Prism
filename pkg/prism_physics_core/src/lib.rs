@@ -73,7 +73,9 @@ pub use cache::{
     PlaybackConfig, Player, PositionQuantizer,
 };
 pub use ccd::CcdConfig;
-pub use collide::{generate_contact, ContactManifold, ContactPoint, MAX_MANIFOLD_POINTS};
+pub use collide::{
+    generate_contact, generate_contact_in, ContactManifold, ContactPoint, MAX_MANIFOLD_POINTS,
+};
 pub use collider::material::PhysicsMaterial;
 pub use collider::{ColliderHandle, ColliderShape, ShapeRegistry};
 pub use command::{CommandQueue, PhysicsCommand};

@@ -26,13 +26,18 @@
 //! narrow-phase routines; the underlying geometric tests are standard and
 //! contain no Unreal Engine source or derived code.
 
+pub(crate) mod convex_sweep;
+pub(crate) mod dispatch;
+pub(crate) mod mesh;
+pub(crate) mod multi;
 pub(crate) mod overlap;
 pub(crate) mod project;
 pub(crate) mod ray;
 pub(crate) mod shape;
-pub(crate) mod convex_sweep;
-pub(crate) mod multi;
 pub(crate) mod test;
+
+#[cfg(test)]
+mod mesh_tests;
 
 use crate::collider::{ColliderHandle, ColliderShape};
 use crate::math::transform::Isometry;
@@ -199,7 +204,8 @@ impl PhysicsWorld {
     pub fn raycast(&self, ray: &Ray, filter: &QueryFilter) -> Option<RayHit> {
         let mut best: Option<RayHit> = None;
         for body in self.query_bodies(filter) {
-            if let Some(hit) = ray::raycast_shape(body.shape, &body.pose, ray) {
+            if let Some(hit) = dispatch::raycast_shape_in(body.shape, &body.pose, ray, &self.shapes)
+            {
                 let candidate = RayHit {
                     body: body.handle,
                     collider: body.collider,
@@ -220,7 +226,9 @@ impl PhysicsWorld {
     pub fn spherecast(&self, ray: &Ray, radius: f32, filter: &QueryFilter) -> Option<SweepHit> {
         let mut best: Option<SweepHit> = None;
         for body in self.query_bodies(filter) {
-            if let Some(hit) = shape::spherecast_shape(body.shape, &body.pose, ray, radius) {
+            if let Some(hit) =
+                dispatch::spherecast_shape_in(body.shape, &body.pose, ray, radius, &self.shapes)
+            {
                 let candidate = SweepHit {
                     body: body.handle,
                     collider: body.collider,
@@ -258,9 +266,14 @@ impl PhysicsWorld {
     ) -> Option<SweepHit> {
         let mut best: Option<SweepHit> = None;
         for body in self.query_bodies(filter) {
-            if let Some(hit) =
-                convex_sweep::shapecast_shape(shape, &pose, body.shape, &body.pose, motion)
-            {
+            if let Some(hit) = dispatch::shapecast_shape_in(
+                shape,
+                &pose,
+                body.shape,
+                &body.pose,
+                motion,
+                &self.shapes,
+            ) {
                 let candidate = SweepHit {
                     body: body.handle,
                     collider: body.collider,
@@ -281,7 +294,8 @@ impl PhysicsWorld {
     pub fn project_point(&self, point: Vec3, filter: &QueryFilter) -> Option<PointProjection> {
         let mut best: Option<PointProjection> = None;
         for body in self.query_bodies(filter) {
-            let proj = project::project_point_shape(body.shape, &body.pose, point);
+            let proj =
+                dispatch::project_point_shape_in(body.shape, &body.pose, point, &self.shapes);
             let candidate = PointProjection {
                 body: body.handle,
                 collider: body.collider,
@@ -307,7 +321,7 @@ impl PhysicsWorld {
     ) -> Vec<BodyHandle> {
         let mut out = Vec::new();
         for body in self.query_bodies(filter) {
-            if overlap::shapes_overlap(shape, pose, body.shape, &body.pose) {
+            if overlap::shapes_overlap_in(shape, pose, body.shape, &body.pose, &self.shapes) {
                 out.push(body.handle);
             }
         }
@@ -331,7 +345,9 @@ impl PhysicsWorld {
     pub fn overlap_point(&self, point: Vec3, filter: &QueryFilter) -> Vec<BodyHandle> {
         let mut out = Vec::new();
         for body in self.query_bodies(filter) {
-            if project::project_point_shape(body.shape, &body.pose, point).is_inside {
+            if dispatch::project_point_shape_in(body.shape, &body.pose, point, &self.shapes)
+                .is_inside
+            {
                 out.push(body.handle);
             }
         }

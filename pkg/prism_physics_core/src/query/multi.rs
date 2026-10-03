@@ -26,7 +26,7 @@ use prism_physics_geometry::Ray;
 
 use crate::collider::ColliderShape;
 use crate::math::transform::Isometry;
-use crate::query::{convex_sweep, ray, shape, QueryFilter, RayHit, SweepHit};
+use crate::query::{dispatch, QueryFilter, RayHit, SweepHit};
 use crate::world::PhysicsWorld;
 
 /// Orders hits near-to-far by `time_of_impact`, keeping ties in slot order.
@@ -54,7 +54,8 @@ impl PhysicsWorld {
     pub fn raycast_all(&self, ray: &Ray, filter: &QueryFilter) -> Vec<RayHit> {
         let mut hits = Vec::new();
         for body in self.query_bodies(filter) {
-            if let Some(hit) = ray::raycast_shape(body.shape, &body.pose, ray) {
+            if let Some(hit) = dispatch::raycast_shape_in(body.shape, &body.pose, ray, &self.shapes)
+            {
                 hits.push(RayHit {
                     body: body.handle,
                     collider: body.collider,
@@ -76,7 +77,9 @@ impl PhysicsWorld {
     pub fn spherecast_all(&self, ray: &Ray, radius: f32, filter: &QueryFilter) -> Vec<SweepHit> {
         let mut hits = Vec::new();
         for body in self.query_bodies(filter) {
-            if let Some(hit) = shape::spherecast_shape(body.shape, &body.pose, ray, radius) {
+            if let Some(hit) =
+                dispatch::spherecast_shape_in(body.shape, &body.pose, ray, radius, &self.shapes)
+            {
                 hits.push(SweepHit {
                     body: body.handle,
                     collider: body.collider,
@@ -105,9 +108,14 @@ impl PhysicsWorld {
     ) -> Vec<SweepHit> {
         let mut hits = Vec::new();
         for body in self.query_bodies(filter) {
-            if let Some(hit) =
-                convex_sweep::shapecast_shape(shape, &pose, body.shape, &body.pose, motion)
-            {
+            if let Some(hit) = dispatch::shapecast_shape_in(
+                shape,
+                &pose,
+                body.shape,
+                &body.pose,
+                motion,
+                &self.shapes,
+            ) {
                 hits.push(SweepHit {
                     body: body.handle,
                     collider: body.collider,

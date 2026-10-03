@@ -70,6 +70,12 @@ pub(crate) fn raycast_shape(
             let (t, n_local) = ray_capsule(o, d, a, b, radius, ray.tmax)?;
             Some(finish(ray, pose, t, n_local))
         }
+        // Mesh colliders store only an arena handle, so they cannot be solved
+        // from the `ColliderShape` alone. The registry-aware
+        // [`dispatch`](crate::query::dispatch) layer resolves the handle and
+        // routes them to [`crate::query::mesh`]; this analytic leaf is never
+        // called for them. The arm exists only to keep the match exhaustive.
+        ColliderShape::ConvexHull { .. } | ColliderShape::TriangleMesh { .. } => None,
     }
 }
 

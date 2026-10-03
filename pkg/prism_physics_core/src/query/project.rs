@@ -50,6 +50,13 @@ pub(crate) fn project_point_shape(
             radius,
         } => project_capsule(local, half_height, radius),
         ColliderShape::Plane { normal, offset } => project_plane(local, normal, offset),
+        // Mesh colliders store only an arena handle, so they are projected by
+        // the registry-aware [`dispatch`](crate::query::dispatch) layer via
+        // [`crate::query::mesh`]. This analytic leaf never sees them; the arm
+        // returns a degenerate witness purely to keep the match exhaustive.
+        ColliderShape::ConvexHull { .. } | ColliderShape::TriangleMesh { .. } => {
+            (local, Vec3::Y, false)
+        }
     };
     let surface = pose.transform_point(surface_local);
     let normal = pose.transform_vector(normal_local).normalize_or_zero();

@@ -31,7 +31,7 @@ use prism_physics_geometry::Ray;
 
 use crate::collider::ColliderShape;
 use crate::math::transform::Isometry;
-use crate::query::{convex_sweep, overlap, ray, shape, QueryFilter};
+use crate::query::{dispatch, overlap, QueryFilter};
 use crate::world::PhysicsWorld;
 
 impl PhysicsWorld {
@@ -43,9 +43,9 @@ impl PhysicsWorld {
     /// line-of-sight and "is this clear?" checks.
     #[must_use]
     pub fn raycast_test(&self, ray: &Ray, filter: &QueryFilter) -> bool {
-        self.query_bodies(filter)
-            .iter()
-            .any(|body| ray::raycast_shape(body.shape, &body.pose, ray).is_some())
+        self.query_bodies(filter).iter().any(|body| {
+            dispatch::raycast_shape_in(body.shape, &body.pose, ray, &self.shapes).is_some()
+        })
     }
 
     /// Returns `true` as soon as a sphere of `radius` swept along `ray` touches
@@ -55,9 +55,10 @@ impl PhysicsWorld {
     /// but stops at the first contact.
     #[must_use]
     pub fn spherecast_test(&self, ray: &Ray, radius: f32, filter: &QueryFilter) -> bool {
-        self.query_bodies(filter)
-            .iter()
-            .any(|body| shape::spherecast_shape(body.shape, &body.pose, ray, radius).is_some())
+        self.query_bodies(filter).iter().any(|body| {
+            dispatch::spherecast_shape_in(body.shape, &body.pose, ray, radius, &self.shapes)
+                .is_some()
+        })
     }
 
     /// Returns `true` as soon as the bounded convex `shape` posed at `pose` and
@@ -77,7 +78,8 @@ impl PhysicsWorld {
         filter: &QueryFilter,
     ) -> bool {
         self.query_bodies(filter).iter().any(|body| {
-            convex_sweep::shapecast_shape(shape, &pose, body.shape, &body.pose, motion).is_some()
+            dispatch::shapecast_shape_in(shape, &pose, body.shape, &body.pose, motion, &self.shapes)
+                .is_some()
         })
     }
 
@@ -93,9 +95,9 @@ impl PhysicsWorld {
         pose: &Isometry,
         filter: &QueryFilter,
     ) -> bool {
-        self.query_bodies(filter)
-            .iter()
-            .any(|body| overlap::shapes_overlap(shape, pose, body.shape, &body.pose))
+        self.query_bodies(filter).iter().any(|body| {
+            overlap::shapes_overlap_in(shape, pose, body.shape, &body.pose, &self.shapes)
+        })
     }
 }
 

@@ -186,6 +186,57 @@ impl ConvexMeshData {
         self.volume
     }
 
+    /// Returns the unit-density diagonal inertia tensor (about the local axes).
+    ///
+    /// The returned vector scales linearly with density: the inertia at a given
+    /// `density` is this value times `density`. It is cached inline in
+    /// [`ColliderShape::ConvexHull`](crate::collider::ColliderShape::ConvexHull)
+    /// so the shape's registry-free `mass_properties` stays `Copy`.
+    #[must_use]
+    pub fn unit_density_inertia(&self) -> Vec3 {
+        self.unit_density_inertia
+    }
+
+    /// Returns the radius of the largest sphere centred on the local origin
+    /// that fits inside the hull (its *inscribed* / core radius about the
+    /// body origin).
+    ///
+    /// This is the minimum signed distance from the local origin to any face
+    /// plane. When the local origin lies inside the hull every face offset is
+    /// positive and this is a genuine inscribed radius; when the origin lies on
+    /// or outside the hull the value is clamped to `0.0`. Continuous-collision
+    /// detection uses it only as the *motion-gate* core radius (a smaller value
+    /// merely sweeps more eagerly, never less), so the clamp stays conservative:
+    /// a thin or off-origin hull is swept at least as often as its true
+    /// geometry requires.
+    #[must_use]
+    pub fn inscribed_radius(&self) -> f32 {
+        let mut r = f32::INFINITY;
+        for face in &self.faces {
+            // Signed distance from the local origin to the outward face plane
+            // `normal . x = offset`: distance = offset - normal . 0 = offset.
+            r = r.min(face.offset);
+        }
+        if r.is_finite() {
+            r.max(0.0)
+        } else {
+            0.0
+        }
+    }
+
+    /// Returns the hull's outward-facing face half-spaces as
+    /// `(outward_unit_normal, offset)` pairs, where a point `x` is inside the
+    /// hull when `normal . x <= offset` for every face.
+    ///
+    /// The planes are expressed in the hull's local frame; callers that need
+    /// them in world space transform each normal by the body orientation and
+    /// shift each offset by `normal . position`. This is the bridge used by the
+    /// soft-body coupling layer to build a bounded convex proxy from a hull.
+    #[must_use]
+    pub fn face_half_spaces(&self) -> Vec<(Vec3, f32)> {
+        self.faces.iter().map(|f| (f.normal, f.offset)).collect()
+    }
+
     /// Returns the mass properties for the given uniform `density`.
     ///
     /// Mass scales with volume and the inertia tensor scales linearly with

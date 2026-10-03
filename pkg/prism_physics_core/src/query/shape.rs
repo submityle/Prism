@@ -70,6 +70,12 @@ pub(crate) fn spherecast_shape(
                 spherecast_cuboid_local(o, d, half_extents, radius, ray.tmax)?;
             Some(finish(pose, t, contact_local, normal))
         }
+        // Mesh colliders carry only an arena handle; the registry-aware
+        // [`dispatch`](crate::query::dispatch) layer resolves them and routes
+        // sphere sweeps to [`crate::query::mesh`] (triangle mesh) or the CCD
+        // conservative-advancement path (convex hull). This analytic leaf never
+        // sees them; the arm keeps the match exhaustive.
+        ColliderShape::ConvexHull { .. } | ColliderShape::TriangleMesh { .. } => None,
     }
 }
 

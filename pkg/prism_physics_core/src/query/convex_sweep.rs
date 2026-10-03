@@ -33,10 +33,11 @@
 //! Detection*). This file contains no Unreal Engine source or derived code.
 
 use glam::Vec3;
-use prism_physics_geometry::{conservative_advancement, SupportMap};
+use prism_physics_geometry::{conservative_advancement, Aabb, SupportMap, TimeOfImpact};
 
+use crate::ccd::triangle_support::TriangleSupport;
 use crate::ccd::CcdSupport;
-use crate::collider::ColliderShape;
+use crate::collider::{ColliderShape, ShapeRegistry, TriMeshHandle};
 use crate::math::scalar::Real;
 use crate::math::transform::Isometry;
 use crate::query::ray::RayShapeHit;
@@ -64,6 +65,7 @@ pub(crate) fn shapecast_shape(
     target: &ColliderShape,
     target_pose: &Isometry,
     motion: Vec3,
+    shapes: &ShapeRegistry,
 ) -> Option<RayShapeHit> {
     if motion.length_squared() <= MIN_MOTION_SQ {
         return None;
@@ -72,12 +74,32 @@ pub(crate) fn shapecast_shape(
     // A plane target is an unbounded half-space with no support map; solve it
     // analytically. (A plane can never be the mover, so this ordering is safe.)
     if let ColliderShape::Plane { normal, offset } = *target {
-        return sweep_convex_vs_plane(mover, mover_pose, target_pose, normal, offset, motion);
+        return sweep_convex_vs_plane(
+            mover,
+            mover_pose,
+            target_pose,
+            normal,
+            offset,
+            motion,
+            shapes,
+        );
     }
 
-    let mover_support = CcdSupport::from_shape(mover, mover_pose.translation, mover_pose.rotation)?;
-    let target_support =
-        CcdSupport::from_shape(target, target_pose.translation, target_pose.rotation)?;
+    // A triangle-mesh target is concave and has no single support map; sweep
+    // the mover against each candidate triangle (broad-phase culled by the
+    // mover's swept AABB) and keep the earliest contact.
+    if let ColliderShape::TriangleMesh { mesh, .. } = *target {
+        return sweep_convex_vs_trimesh(mover, mover_pose, target_pose, mesh, motion, shapes);
+    }
+
+    let mover_support =
+        CcdSupport::from_shape_in(mover, mover_pose.translation, mover_pose.rotation, shapes)?;
+    let target_support = CcdSupport::from_shape_in(
+        target,
+        target_pose.translation,
+        target_pose.rotation,
+        shapes,
+    )?;
 
     let toi = conservative_advancement(
         &mover_support,
@@ -110,8 +132,10 @@ fn sweep_convex_vs_plane(
     plane_normal_local: Vec3,
     plane_offset: Real,
     motion: Vec3,
+    shapes: &ShapeRegistry,
 ) -> Option<RayShapeHit> {
-    let mover_support = CcdSupport::from_shape(mover, mover_pose.translation, mover_pose.rotation)?;
+    let mover_support =
+        CcdSupport::from_shape_in(mover, mover_pose.translation, mover_pose.rotation, shapes)?;
 
     let n = plane_pose
         .transform_vector(plane_normal_local)
@@ -171,6 +195,80 @@ fn sweep_convex_vs_plane(
     })
 }
 
+/// Sweeps a bounded convex `mover` against a concave triangle-mesh target.
+///
+/// The mesh exposes no single support map, so the mover's swept AABB (its local
+/// box translated along `motion`, pulled into the target's local frame) selects
+/// candidate triangles via the mesh broad phase. Each candidate becomes a
+/// [`TriangleSupport`] in world space and is advanced against with the same
+/// [`conservative_advancement`] reduction used for convex targets; the earliest
+/// contact over all triangles wins.
+fn sweep_convex_vs_trimesh(
+    mover: &ColliderShape,
+    mover_pose: &Isometry,
+    target_pose: &Isometry,
+    mesh: TriMeshHandle,
+    motion: Vec3,
+    shapes: &ShapeRegistry,
+) -> Option<RayShapeHit> {
+    let mover_support =
+        CcdSupport::from_shape_in(mover, mover_pose.translation, mover_pose.rotation, shapes)?;
+    let tri_data = shapes.tri_mesh(mesh)?;
+    let mesh_geom = tri_data.mesh();
+    if mesh_geom.is_empty() {
+        return None;
+    }
+
+    // Build the mover's swept AABB in world space, then pull its corners into
+    // the target's local frame for the triangle broad phase.
+    let (local_min, local_max) = mover.local_aabb();
+    let local_corners = [
+        Vec3::new(local_min.x, local_min.y, local_min.z),
+        Vec3::new(local_max.x, local_min.y, local_min.z),
+        Vec3::new(local_min.x, local_max.y, local_min.z),
+        Vec3::new(local_max.x, local_max.y, local_min.z),
+        Vec3::new(local_min.x, local_min.y, local_max.z),
+        Vec3::new(local_max.x, local_min.y, local_max.z),
+        Vec3::new(local_min.x, local_max.y, local_max.z),
+        Vec3::new(local_max.x, local_max.y, local_max.z),
+    ];
+    let inv_target = target_pose.inverse();
+    let mut query_points = [Vec3::ZERO; 16];
+    for (i, corner) in local_corners.iter().enumerate() {
+        let world = mover_pose.transform_point(*corner);
+        query_points[i] = inv_target.transform_point(world);
+        query_points[i + 8] = inv_target.transform_point(world + motion);
+    }
+    let query_aabb = Aabb::from_points(&query_points)?;
+
+    let mut best: Option<TimeOfImpact> = None;
+    for tri_index in mesh_geom.overlap_aabb(&query_aabb) {
+        let Some([a, b, c]) = mesh_geom.triangle(tri_index as usize) else {
+            continue;
+        };
+        let tri = TriangleSupport::new(
+            target_pose.transform_point(a),
+            target_pose.transform_point(b),
+            target_pose.transform_point(c),
+        );
+        if let Some(toi) =
+            conservative_advancement(&mover_support, &tri, motion, SWEEP_CONTACT_TOLERANCE)
+            && best.is_none_or(|current| toi.toi < current.toi)
+        {
+            best = Some(toi);
+        }
+    }
+
+    let toi = best?;
+    Some(RayShapeHit {
+        time_of_impact: toi.toi * motion.length(),
+        point: toi.point,
+        // The solver normal points from the mover toward the triangle; the query
+        // contract reports the target's outward normal (toward the mover).
+        normal: -toi.normal,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,6 +295,7 @@ mod tests {
             &target,
             &iso(Vec3::new(5.0, 0.0, 0.0)),
             Vec3::new(10.0, 0.0, 0.0),
+            &ShapeRegistry::new(),
         )
         .expect("a box swept along +X must hit a box ahead of it");
 
@@ -229,6 +328,7 @@ mod tests {
             &target,
             &iso(Vec3::new(5.0, 10.0, 0.0)),
             Vec3::new(10.0, 0.0, 0.0),
+            &ShapeRegistry::new(),
         );
         assert!(hit.is_none(), "a sideways-offset box must be missed");
     }
@@ -246,6 +346,7 @@ mod tests {
             &target,
             &iso(Vec3::new(6.0, 0.0, 0.0)),
             Vec3::new(10.0, 0.0, 0.0),
+            &ShapeRegistry::new(),
         )
         .expect("a capsule swept +X must hit a sphere ahead of it");
 
@@ -274,6 +375,7 @@ mod tests {
             &target,
             &iso(Vec3::ZERO),
             Vec3::new(0.0, -10.0, 0.0),
+            &ShapeRegistry::new(),
         )
         .expect("a box falling onto a ground plane must hit it");
 
@@ -309,8 +411,12 @@ mod tests {
             &target,
             &iso(Vec3::ZERO),
             Vec3::new(0.0, 10.0, 0.0),
+            &ShapeRegistry::new(),
         );
-        assert!(hit.is_none(), "a mover receding from the plane cannot hit it");
+        assert!(
+            hit.is_none(),
+            "a mover receding from the plane cannot hit it"
+        );
     }
 
     #[test]
@@ -323,6 +429,7 @@ mod tests {
             &target,
             &iso(Vec3::new(1.0, 0.0, 0.0)),
             Vec3::ZERO,
+            &ShapeRegistry::new(),
         );
         assert!(hit.is_none(), "a zero-length cast is not a sweep");
     }
@@ -342,6 +449,7 @@ mod tests {
             &target,
             &Isometry::new(Vec3::new(5.0, 0.0, 0.0), rot),
             Vec3::new(10.0, 0.0, 0.0),
+            &ShapeRegistry::new(),
         )
         .expect("sphere swept +X must hit the rotated box");
 

@@ -4,7 +4,7 @@
 //! [`PhysicsWorld`](crate::world::PhysicsWorld), finds candidate overlapping
 //! pairs with the geometry crate's [`DynamicBvh`], and turns each candidate
 //! into a [`ContactManifold`] via the narrow-phase
-//! [`generate_contact`](crate::collide::generate_contact) dispatch. The
+//! [`generate_contact_in`](crate::collide::generate_contact_in) dispatch. The
 //! resulting manifolds carry stable [`BodyHandle`]s so the solver can address
 //! bodies by storage slot.
 //!
@@ -28,8 +28,8 @@
 //! standard collision-detection engineering (see Ericson, *Real-Time Collision
 //! Detection*). This file contains no Unreal Engine source or derived code.
 
-use crate::collide::{generate_contact, ContactManifold};
-use crate::collider::ColliderShape;
+use crate::collide::{generate_contact_in, ContactManifold};
+use crate::collider::{ColliderShape, ShapeRegistry};
 use crate::math::transform::Isometry;
 use crate::state::body::BodyKind;
 use crate::state::handle::BodyHandle;
@@ -77,8 +77,8 @@ pub fn detect_contacts(world: &PhysicsWorld) -> Vec<ContactManifold> {
     }
 
     let mut manifolds = Vec::new();
-    broad_phase_finite(&bodies, &finite, &mut manifolds);
-    pair_finite_with_planes(&bodies, &finite, &planes, &mut manifolds);
+    broad_phase_finite(&bodies, &finite, &world.shapes, &mut manifolds);
+    pair_finite_with_planes(&bodies, &finite, &planes, &world.shapes, &mut manifolds);
     manifolds
 }
 
@@ -112,6 +112,7 @@ fn collect_bodies(world: &PhysicsWorld) -> Vec<PosedBody<'_>> {
 fn broad_phase_finite(
     bodies: &[PosedBody<'_>],
     finite: &[usize],
+    shapes: &ShapeRegistry,
     manifolds: &mut Vec<ContactManifold>,
 ) {
     if finite.len() < 2 {
@@ -127,7 +128,7 @@ fn broad_phase_finite(
         if !bodies[a].is_dynamic() && !bodies[b].is_dynamic() {
             continue;
         }
-        push_contact(&bodies[a], &bodies[b], manifolds);
+        push_contact(&bodies[a], &bodies[b], shapes, manifolds);
     }
 }
 
@@ -136,6 +137,7 @@ fn pair_finite_with_planes(
     bodies: &[PosedBody<'_>],
     finite: &[usize],
     planes: &[usize],
+    shapes: &ShapeRegistry,
     manifolds: &mut Vec<ContactManifold>,
 ) {
     for &p in planes {
@@ -143,14 +145,19 @@ fn pair_finite_with_planes(
             if !bodies[p].is_dynamic() && !bodies[f].is_dynamic() {
                 continue;
             }
-            push_contact(&bodies[p], &bodies[f], manifolds);
+            push_contact(&bodies[p], &bodies[f], shapes, manifolds);
         }
     }
 }
 
 /// Runs the narrow phase for one ordered body pair and appends the manifold.
-fn push_contact(a: &PosedBody<'_>, b: &PosedBody<'_>, manifolds: &mut Vec<ContactManifold>) {
-    if let Some(manifold) = generate_contact(a.shape, &a.pose, b.shape, &b.pose) {
+fn push_contact(
+    a: &PosedBody<'_>,
+    b: &PosedBody<'_>,
+    shapes: &ShapeRegistry,
+    manifolds: &mut Vec<ContactManifold>,
+) {
+    if let Some(manifold) = generate_contact_in(a.shape, &a.pose, b.shape, &b.pose, shapes) {
         manifolds.push(manifold.with_bodies(a.handle, b.handle));
     }
 }

@@ -41,7 +41,8 @@
 //! conservative advancement, and broad-phase overlap query.
 
 use crate::ccd::support::CcdSupport;
-use crate::collider::ColliderShape;
+use crate::ccd::triangle_support::TriangleSupport;
+use crate::collider::{ColliderShape, TriMeshHandle};
 use crate::query::QueryFilter;
 use crate::state::handle::BodyHandle;
 use crate::world::PhysicsWorld;
@@ -110,7 +111,7 @@ pub(super) fn sweep_toi(
     // immovable and are never movers, so this only rejects nonsensical input.
     // The support map is built in the *start* pose; rotational advancement
     // applies the sub-step spin on top of it.
-    let mover_support = CcdSupport::from_shape(mover_shape, prev_pos, prev_rot)?;
+    let mover_support = CcdSupport::from_shape_in(mover_shape, prev_pos, prev_rot, &world.shapes)?;
 
     // Conservative box enclosing every intermediate pose. The mover's origin
     // travels the segment prev_pos -> curr_pos, and every point of the body
@@ -153,7 +154,7 @@ pub(super) fn sweep_toi(
 fn target_toi(
     world: &PhysicsWorld,
     target: BodyHandle,
-    mover_support: &CcdSupport,
+    mover_support: &CcdSupport<'_>,
     motion: &MoverMotion,
 ) -> Option<f32> {
     let collider = world.bodies.collider(target)?;
@@ -182,8 +183,12 @@ fn target_toi(
             normal,
             offset,
         ),
+        ColliderShape::TriangleMesh { mesh, .. } => {
+            trimesh_toi(world, mesh, mover_support, motion, target_pos, target_rot)
+        }
         _ => {
-            let target_support = CcdSupport::from_shape(shape, target_pos, target_rot)?;
+            let target_support =
+                CcdSupport::from_shape_in(shape, target_pos, target_rot, &world.shapes)?;
             // Fold the target's own linear sub-step motion into the relative
             // motion so the query can treat the target as stationary. (A moving
             // target's own spin is not folded in; the bodies being tunnelled
@@ -225,7 +230,7 @@ fn target_toi(
 /// plus the linear descent, so `(height - band) / closing` never steps past a
 /// real contact even as the spin changes which corner is deepest.
 fn plane_toi(
-    mover_support: &CcdSupport,
+    mover_support: &CcdSupport<'_>,
     motion: Vec3,
     angular_speed: f32,
     plane_pos: Vec3,
@@ -264,6 +269,90 @@ fn plane_toi(
     (toi <= 1.0).then_some(toi.max(0.0))
 }
 
+/// Returns the sub-step fraction `[0, 1]` at which the mover first contacts the
+/// static triangle mesh `mesh` placed at `target_pos`/`target_rot`, or [`None`]
+/// when no triangle is touched during the sub-step.
+///
+/// A triangle mesh is concave, so it cannot be support-mapped as one convex
+/// body. The mover's swept world bounds are transformed into the mesh's local
+/// frame to gather candidate triangles through the mesh broad-phase; each
+/// candidate is then transformed back to world space as a degenerate convex
+/// [`TriangleSupport`] and advanced against with the same rotational
+/// conservative-advancement query used for convex targets. The minimum
+/// time of impact across all candidates is the mesh contact time.
+///
+/// Triangle meshes are immovable scene geometry, so the target contributes no
+/// motion of its own: only the mover's linear displacement and spin close the
+/// gap.
+fn trimesh_toi(
+    world: &PhysicsWorld,
+    mesh: TriMeshHandle,
+    mover_support: &CcdSupport<'_>,
+    motion: &MoverMotion,
+    target_pos: Vec3,
+    target_rot: Quat,
+) -> Option<f32> {
+    let data = world.shapes.tri_mesh(mesh)?;
+    let tri_mesh = data.mesh();
+    if tri_mesh.is_empty() {
+        return None;
+    }
+
+    // Conservative world-space box covering every intermediate mover pose: the
+    // origin travels prev -> curr and every point stays within `radius` of it,
+    // so pad the segment by the bounding radius plus the contact band.
+    let curr_pivot = motion.pivot + motion.displacement;
+    let pad = motion.radius + CONTACT_TOLERANCE;
+    let world_min = motion.pivot.min(curr_pivot) - Vec3::splat(pad);
+    let world_max = motion.pivot.max(curr_pivot) + Vec3::splat(pad);
+
+    // Transform the eight swept-box corners into the mesh's local frame and take
+    // their AABB. For a static identity target pose this is the box itself; a
+    // rotated target still yields a conservative local query box.
+    let inv_rot = target_rot.conjugate();
+    let corners = [
+        Vec3::new(world_min.x, world_min.y, world_min.z),
+        Vec3::new(world_max.x, world_min.y, world_min.z),
+        Vec3::new(world_min.x, world_max.y, world_min.z),
+        Vec3::new(world_max.x, world_max.y, world_min.z),
+        Vec3::new(world_min.x, world_min.y, world_max.z),
+        Vec3::new(world_max.x, world_min.y, world_max.z),
+        Vec3::new(world_min.x, world_max.y, world_max.z),
+        Vec3::new(world_max.x, world_max.y, world_max.z),
+    ];
+    let local_corners: [Vec3; 8] = corners.map(|c| inv_rot * (c - target_pos));
+    let local_aabb = Aabb::from_points(&local_corners)?;
+
+    let mut best_toi: Option<f32> = None;
+    for tri_index in tri_mesh.overlap_aabb(&local_aabb) {
+        let Some([a, b, c]) = tri_mesh.triangle(tri_index as usize) else {
+            continue;
+        };
+        // Place the triangle in world space at the target pose.
+        let tri = TriangleSupport::new(
+            target_pos + target_rot * a,
+            target_pos + target_rot * b,
+            target_pos + target_rot * c,
+        );
+        let Some(hit) = rotational_conservative_advancement(
+            mover_support,
+            &tri,
+            motion.pivot,
+            motion.displacement,
+            motion.rotation,
+            motion.radius,
+            CONTACT_TOLERANCE,
+        ) else {
+            continue;
+        };
+        if best_toi.is_none_or(|b| hit.toi < b) {
+            best_toi = Some(hit.toi);
+        }
+    }
+
+    best_toi
+}
+
 /// Radius of the smallest sphere centred on the body origin that encloses
 /// `shape`, used both to pad the broad-phase swept box and as the lever arm
 /// that converts the sub-step spin into a worst-case point speed.
@@ -276,6 +365,20 @@ pub(super) fn bounding_radius(shape: &ColliderShape) -> f32 {
             radius,
         } => half_height + radius,
         ColliderShape::Cuboid { half_extents } => half_extents.length(),
+        // Mesh colliders cache their local AABB; the farthest corner from the
+        // body origin bounds every vertex, which is conservative for the swept
+        // pad and the angular lever arm. This stays registry-free so the sweep
+        // broad-phase can pad without resolving the arena.
+        ColliderShape::ConvexHull {
+            local_aabb_min,
+            local_aabb_max,
+            ..
+        }
+        | ColliderShape::TriangleMesh {
+            local_aabb_min,
+            local_aabb_max,
+            ..
+        } => local_aabb_min.abs().max(local_aabb_max.abs()).length(),
         // Planes are never movers; a zero pad is harmless if one is ever passed.
         ColliderShape::Plane { .. } => 0.0,
     }

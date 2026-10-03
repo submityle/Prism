@@ -42,6 +42,7 @@ pub mod config;
 mod shape_sweep;
 pub mod support;
 pub mod sweep;
+pub(crate) mod triangle_support;
 
 pub use config::CcdConfig;
 pub use support::CcdSupport;
@@ -94,7 +95,7 @@ pub fn resolve_ccd(world: &mut PhysicsWorld, h: f32) {
         let Some(shape) = world.shapes.get(collider) else {
             continue;
         };
-        let Some(radius) = sweep::sweep_radius(shape) else {
+        let Some(radius) = sweep::sweep_radius_in(shape, &world.shapes) else {
             continue;
         };
         let Some(prev) = world.bodies.prev_position(handle) else {
