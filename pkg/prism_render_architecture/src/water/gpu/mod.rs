@@ -30,6 +30,7 @@
 //! `water_surface`) and mirror the `CPU` golden reference byte-for-byte.
 
 pub mod buffers;
+pub mod dispersion_kernel;
 pub mod fft_plan;
 pub mod pipeline;
 pub mod render_fx_kernel;
@@ -90,4 +91,9 @@ pub use surface_mesh::{
 pub use surface_pass::{
     plan_surface_draw, DepthTest, SurfaceBlend, SurfaceDepth, SurfaceDrawDescriptor,
     WaterRenderTarget,
+};
+
+pub use dispersion_kernel::{
+    dispatch_dispersion_refract, DispersionRefractParams, DISPERSION_GBUFFER_FLOATS,
+    DISPERSION_OUT_FLOATS, DISPERSION_SCENE_FLOATS, WATER_DISPERSION_REFRACT_WESL,
 };
