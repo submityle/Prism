@@ -19,5 +19,9 @@ std = []
 # sites. Adds no behaviour and pulls in no `bevy_*` crate.
 compat-bevy = []
 
+[[bench]]
+name = "fixed_step_determinism"
+harness = false
+
 [lints]
 workspace = true
