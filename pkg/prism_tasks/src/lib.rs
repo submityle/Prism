@@ -54,6 +54,24 @@
 //! - [`JobHandle`] / [`TaskPool::spawn_catch`]: panic propagation — a panicking
 //!   job is caught and re-raised at the join point without poisoning the pool.
 //!
+//! ## M6 scope (this build) — integration & tooling
+//! Layered entirely on the M0/M1 pool, scope, and join APIs:
+//! - [`TaskPool::par_iter`] / [`TaskPool::par_iter_mut`] /
+//!   [`TaskPool::par_iter_range`] ([`ParSlice`] / [`ParSliceMut`] /
+//!   [`ParRange`]): an ECS-style data-parallel iterator with adaptive
+//!   granularity whose `map_collect` is bit-for-bit equal to the serial map.
+//! - [`Pipeline`] / [`Stage`] ([`TaskPool::pipeline`]): an ordered
+//!   stage/schedule pipeline — the hook an App uses to drive subapp
+//!   pipelines, running each stage's jobs in parallel but strictly in
+//!   stage order.
+//! - [`JobTrace`] / [`Span`] ([`TaskPool::new_job_trace`]): per-worker job
+//!   tracing with real steal-rate / occupancy counters and a chrome-tracing
+//!   (flamegraph-compatible) JSON export (the `trace` feature gates the
+//!   JSON export only; span recording is always available).
+//! - A `bevy_tasks`-compatible prelude (`ComputeTaskPool` / `TaskPool`-shaped
+//!   aliases plus scope/spawn) behind the off-by-default `compat-bevy`
+//!   feature.
+//!
 //! The crate contains no Unreal Engine source or derived code and depends on
 //! no `bevy_*` crate.
 
@@ -76,14 +94,19 @@ mod job;
 mod named;
 mod numa;
 mod panic;
+mod par_iter;
 mod parallel;
 mod partition;
+mod pipeline;
 mod priority;
 mod reduce;
 mod replay;
 mod scheduler;
 mod scope;
 mod throttle;
+mod trace;
+#[cfg(feature = "compat-bevy")]
+mod compat_bevy;
 
 use alloc::sync::Arc;
 use std::thread::JoinHandle;
@@ -104,6 +127,14 @@ pub use named::{NamedThreads, NamedThreadsConfig, ThreadCategory};
 pub use cancel::{CancelOutcome, CancelToken, Cancelled};
 pub use panic::JobHandle;
 pub use partition::{FixedPartition, DEFAULT_TARGET_CHUNKS};
+pub use par_iter::{ParRange, ParSlice, ParSliceMut, DEFAULT_MIN_LEN};
+pub use pipeline::{Pipeline, Stage};
+pub use trace::{JobTrace, Span};
+#[cfg(feature = "compat-bevy")]
+pub use compat_bevy::{
+    prelude as bevy_prelude, AsyncComputeTaskPool, CompatScope, CompatTaskPool, ComputeTaskPool,
+    IoTaskPool, TaskPoolBuilder,
+};
 pub use priority::{Priority, PriorityCell, PriorityGroup};
 pub use reduce::tree_combine;
 pub use replay::{DeterministicSession, ReplayError, ReplayRecord, SplitEvent};
@@ -389,3 +420,12 @@ impl Drop for TaskPool {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod tests_m6_par_iter;
+#[cfg(test)]
+mod tests_m6_pipeline;
+#[cfg(test)]
+mod tests_m6_trace;
+#[cfg(all(test, feature = "compat-bevy"))]
+mod tests_m6_compat;

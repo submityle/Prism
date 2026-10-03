@@ -27,6 +27,16 @@ fibers = ["multi_thread"]
 # node, so enabling this does not fabricate nodes — it only flips the
 # `numa_enabled` request flag and compiles the NUMA scheduling paths.
 numa = []
+# M6: enable the chrome-tracing (flamegraph-compatible) JSON export on
+# `JobTrace`. Span recording and the steal-rate / occupancy counters are
+# always available; this feature only compiles the `to_chrome_json` serializer
+# and its JSON-escaping helper, so it adds a meaningful opt-in feature combo.
+trace = []
+# M6: a `bevy_tasks`-compatible prelude (global `ComputeTaskPool` /
+# `AsyncComputeTaskPool` / `IoTaskPool` accessors, a `TaskPoolBuilder`, and a
+# scope/spawn-shaped pool) mapped onto this crate's `TaskPool`. Off by default;
+# adds no scheduling, only re-shapes the existing pool API.
+compat-bevy = []
 
 [lints]
 workspace = true

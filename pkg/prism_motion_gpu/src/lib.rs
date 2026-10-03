@@ -40,6 +40,8 @@ extern crate alloc;
 pub mod buffer;
 pub mod context;
 pub mod dilation;
+pub mod tile;
 
 pub use context::GpuContext;
 pub use dilation::GpuDilate;
+pub use tile::{GpuNeighborMax, GpuTileMax, TileField};
