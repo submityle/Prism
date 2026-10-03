@@ -112,6 +112,7 @@ pub mod cloth_mesh_volume;
 pub mod cloth_pressure_project;
 pub mod cloth_vertex_normals;
 pub mod cloth_wind_force;
+pub mod cloud_coverage_remap;
 pub mod cloud_shadow_modulation;
 pub mod cohen_sutherland_clip;
 pub mod collision;
@@ -120,6 +121,7 @@ pub mod color_gradient;
 pub mod color_temperature;
 pub mod composite_motion_vector;
 pub mod compression;
+pub mod conductor_fresnel;
 pub mod conservative_raster;
 pub mod constraints;
 pub mod contact_shadow;
@@ -156,8 +158,10 @@ pub mod env_brdf_split_sum;
 pub mod epa_penetration_3d;
 pub mod event_pass_buffers;
 pub mod exposure_adapt;
+pub mod exposure_log2;
 pub mod fibonacci_lfsr;
 pub mod film_grain;
+pub mod film_grain_luma;
 pub mod fixed_point_q16;
 pub mod fixed_point_q16_muldiv;
 pub mod fixed_point_q24_8;
@@ -183,6 +187,7 @@ pub mod gamut_clip;
 pub mod gaussian_splat;
 pub mod geom_raster_project;
 pub mod ggx_energy_compensation;
+pub mod ggx_ms_albedo;
 pub mod gi_probe;
 pub mod gjk_2d;
 pub mod gjk_3d;
@@ -314,6 +319,7 @@ pub mod premultiply_alpha;
 pub mod probe_grid_sample;
 pub mod pyrocumulus_buoyancy;
 pub mod quality_decision;
+pub mod quaternion_nlerp;
 pub mod quaternion_rotate;
 pub mod quickselect_u32;
 pub mod radix_sort_u32;
@@ -564,6 +570,9 @@ pub use cloth_vertex_normals::{
     ClothVertexNormalsQuery, ClothVertexNormalsResult, GpuClothVertexNormals,
 };
 pub use cloth_wind_force::{ClothWindForceQuery, ClothWindForceResult, GpuClothWindForce};
+pub use cloud_coverage_remap::{
+    CloudCoverageRemapQuery, CloudCoverageRemapResult, GpuCloudCoverageRemap,
+};
 pub use cloud_shadow_modulation::{CloudShadowModulationQuery, GpuCloudShadowModulation};
 pub use cohen_sutherland_clip::{
     ClipSegmentQuery, ClipSegmentResult, GpuCohenSutherlandClip, OUTCODE_BOTTOM, OUTCODE_INSIDE,
@@ -577,6 +586,7 @@ pub use composite_motion_vector::{
     CompositeMotionVectorQuery, GpuCompositeMotionVector, MotionVector,
 };
 pub use compression::{CompressionQuery, CompressionResult, GpuCompression};
+pub use conductor_fresnel::{ConductorFresnelQuery, ConductorFresnelResult, GpuConductorFresnel};
 pub use conservative_raster::{
     ConservativeRasterQuery, ConservativeRasterResult, GpuConservativeRaster,
 };
@@ -627,8 +637,10 @@ pub use event_pass_buffers::{
     GpuEventPassBufferQuery, GpuEventPassBufferResult, GpuEventPassBuffers,
 };
 pub use exposure_adapt::{ExposureAdaptQuery, ExposureAdaptResult, GpuExposureAdapt};
+pub use exposure_log2::{ExposureLog2Query, ExposureLog2Result, GpuExposureLog2};
 pub use fibonacci_lfsr::GpuFibonacciLfsr;
 pub use film_grain::{FilmGrainPixel, FilmGrainQuery, GpuFilmGrain};
+pub use film_grain_luma::{FilmGrainLumaQuery, FilmGrainLumaResult, GpuFilmGrainLuma};
 pub use fixed_point_q16::{GpuFixedPointQ16, GpuQ16Op, GpuQ16Query};
 pub use fixed_point_q16_muldiv::{GpuQ16MulDiv, GpuQ16MulDivQuery, GpuQ16MulOp};
 pub use fixed_point_q24_8::{GpuFixedPointQ24_8, GpuQ24Op, GpuQ24Query};
@@ -670,6 +682,7 @@ pub use geom_raster_project::{
 pub use ggx_energy_compensation::{
     GgxEnergyCompensationQuery, GgxEnergyCompensationResult, GpuGgxEnergyCompensation,
 };
+pub use ggx_ms_albedo::{GgxMsAlbedoQuery, GgxMsAlbedoResult, GpuGgxMsAlbedo};
 pub use gi_probe::{GiProbeQuery, GiProbeResult, GpuGiProbe};
 pub use gjk_2d::{GpuGjk2d, GpuGjk2dQuery, GpuGjk2dResult};
 pub use gjk_3d::{GpuGjk3d, GpuGjk3dQuery, GpuGjk3dResult};
@@ -866,6 +879,7 @@ pub use premultiply_alpha::GpuPremultiplyAlpha;
 pub use probe_grid_sample::{GpuProbeGridSample, ProbeSampleQuery, PROBE_BANDS};
 pub use pyrocumulus_buoyancy::{GpuPyrocumulusBuoyancy, PyrocumulusBuoyancyQuery};
 pub use quality_decision::{GpuQualityDecision, QualityDecisionQuery, QualityDecisionResult};
+pub use quaternion_nlerp::{GpuQuaternionNlerp, QuaternionNlerpQuery, QuaternionNlerpResult};
 pub use quaternion_rotate::{GpuQuaternionRotate, QuatRotateQuery, QuatRotateResult};
 pub use quickselect_u32::{GpuQuickselect, GpuQuickselectU32, QuickselectQuery};
 pub use radix_sort_u32::{GpuRadixSort, GpuRadixSortU32};
