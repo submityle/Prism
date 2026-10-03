@@ -96,6 +96,7 @@ pub mod boids;
 pub mod bounds;
 pub mod bresenham_line;
 pub mod bspline_patch;
+pub mod bspline_surface;
 pub mod bvh;
 pub mod camera;
 pub mod capsule_capsule_closest;
@@ -217,6 +218,7 @@ pub mod hash_rng;
 pub mod heap_sort_u32;
 pub mod heat_distortion;
 pub mod height_fog;
+pub mod heightfield_cell;
 pub mod hilbert_curve;
 pub mod histogram_equalize;
 pub mod hue_shift;
@@ -252,10 +254,13 @@ pub mod merge_sort_stable;
 pub mod mesh_aabb;
 pub mod mesh_bary_fold;
 pub mod mesh_cdf_sample;
+pub mod mesh_dihedral_cosine;
 pub mod mesh_emission;
 pub mod mesh_ray_contains;
 pub mod mesh_renderer;
+pub mod mesh_sdf_normal;
 pub mod mesh_skinning;
+pub mod mesh_tangents;
 pub mod mesh_triangle_eval;
 pub mod mesh_triangle_quality;
 pub mod mg_coarsen;
@@ -289,6 +294,7 @@ pub mod nd_strides_index;
 pub mod noise;
 pub mod noise_fbm;
 pub mod normal_reconstruct;
+pub mod nurbs_surface;
 pub mod obb_obb_sat_3d;
 pub mod occlusion;
 pub mod octave;
@@ -584,6 +590,7 @@ pub use boids::{BoidsQuery, BoidsResult, GpuBoids, MAX_NEIGHBORS};
 pub use bounds::{GpuBounds, GpuBoundsQuery, GpuBoundsResult, AXIS_X, AXIS_Y, AXIS_Z};
 pub use bresenham_line::{GpuBresenhamLine, GpuBresenhamQuery, GpuBresenhamResult};
 pub use bspline_patch::{BsplinePatchQuery, BsplinePatchResult, GpuBsplinePatch};
+pub use bspline_surface::{BsplineSurfaceQuery, BsplineSurfaceResult, GpuBsplineSurface};
 pub use bvh::{BvhQuery, BvhResult, GpuBvh};
 pub use camera::{CameraQuery, CameraResult, GpuCamera};
 pub use capsule_capsule_closest::{
@@ -770,6 +777,7 @@ pub use hash_rng::{GpuHashRng, HashRngSample};
 pub use heap_sort_u32::{GpuHeapSort, GpuHeapSortU32, HeapSortU32Query};
 pub use heat_distortion::{GpuHeatDistortion, HeatQuery, HeatResult};
 pub use height_fog::{GpuHeightFog, HeightFogQuery};
+pub use heightfield_cell::{GpuHeightfieldCell, HeightfieldCellQuery, HeightfieldCellResult};
 pub use hilbert_curve::{GpuHilbertCurve, MAX_ORDER};
 pub use histogram_equalize::{
     GpuHistogramEqualize, HistogramEqualizeQuery, HistogramEqualizeResult,
@@ -819,6 +827,7 @@ pub use merge_sort_stable::{GpuMergeSort, GpuMergeSortStable};
 pub use mesh_aabb::{GpuMeshAabb, GpuMeshAabbQuery, GpuMeshAabbResult};
 pub use mesh_bary_fold::{GpuMeshBaryFold, GpuMeshBaryFoldQuery, GpuMeshBaryFoldResult};
 pub use mesh_cdf_sample::{GpuMeshCdfSample, GpuMeshCdfSampleQuery, GpuMeshCdfSampleResult};
+pub use mesh_dihedral_cosine::{DihedralCosineQuery, DihedralCosineResult, GpuDihedralCosine};
 pub use mesh_emission::{GpuMeshEmission, MeshEmissionQuery, MeshEmissionResult};
 pub use mesh_ray_contains::{GpuMeshContainsQuery, GpuMeshRayContains, GpuTriangle};
 pub use mesh_renderer::{
@@ -826,7 +835,11 @@ pub use mesh_renderer::{
     LOCAL_AXIS_PLUS_Y, LOCAL_AXIS_PLUS_Z, MAX_LOD_THRESHOLDS, ORIENTATION_ALIGN_TO_AXIS,
     ORIENTATION_FIXED_ROTATION, ORIENTATION_IDENTITY, ORIENTATION_VELOCITY_ALIGNED,
 };
+pub use mesh_sdf_normal::{GpuSdfNormal, SdfNormalField, SdfNormalQuery, SdfNormalResult};
 pub use mesh_skinning::{GpuMeshSkinning, GpuSkinResult};
+pub use mesh_tangents::{
+    GpuMeshTriangleTangent, MeshTriangleTangentQuery, MeshTriangleTangentResult,
+};
 pub use mesh_triangle_eval::{
     GpuMeshTriangleEval, GpuMeshTriangleEvalQuery, GpuMeshTriangleEvalResult,
 };
@@ -886,6 +899,7 @@ pub use nd_strides_index::{GpuNdStridesIndex, NdStridesQuery, MAX_RANK};
 pub use noise::{GpuFbmParams, GpuNoise, GpuTurbulenceParams, NoiseQuery, NoiseResult};
 pub use noise_fbm::{GpuNoiseFbm, NoiseFbmQuery, NoiseFbmResult};
 pub use normal_reconstruct::{GpuNormalReconstruct, NormalQuery, NormalResult};
+pub use nurbs_surface::{GpuNurbsSurface, NurbsSurfaceQuery, NurbsSurfaceResult};
 pub use obb_obb_sat_3d::{GpuObbSat3d, ObbSat3dQuery, ObbSat3dResult};
 pub use occlusion::{GpuOcclusion, GpuOcclusionQuery, GpuOcclusionResult};
 pub use octave::{GpuOctaveScatter, OctaveQuery, OctaveResult};
