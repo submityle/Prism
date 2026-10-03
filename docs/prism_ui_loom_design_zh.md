@@ -554,7 +554,7 @@ Loom 不取代 BSN,而是**在其之上/之侧**提供成本可控、可内省�
 - **M1 结构层**:✅ `loom!` 宏 + 构建器 + `$` 读取糖 + 编译期稳定节点 ID + 静态子树提升(§9.2)。
 - **M2 响应→ECS 绑定**:✅ Signal/Memo/Effect、字段级双向绑定、调度器集成、`Show`/`For`、a11y 基线。
   ✅ `$` 自动字段绑定糖闭环(§9.9)。
-- **M3 样式层**:✅ token/class/级联/scoped/@media/热重载核心、主题管线(§9.12,`prism_ui_theme`)。🔜 文件系统监听集成。
+- **M3 样式层**:✅ token/class/级联/scoped/@media/热重载核心、主题管线(§9.12,`prism_ui_theme`)、文件系统监听集成(`prism_ui_hotreload` `watch` feature:`classify`/`Coalescer`/`LoomWatcher`,包裹 `prism_platform::Watcher`,把 `.loom`/`.loom.style` 变更合并为去重的 `ReloadRequest`)。
 - **M4 效果层**:✅ 缓动/弹簧/时间线/过渡/隐式过渡/FLIP/共享元素/编排。
 - **M5 高级功能**:✅ 组件/Store/虚拟化/异步/Overlay/表单/路由/i18n + 生命周期钩子/路由守卫/竞态取消(§9.11)。
 - **M6 工具链**:✅ DevTools/检查器/时间旅行/依赖图/快照/工作台 + 双模式编译(§9.1)。
