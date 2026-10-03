@@ -47,7 +47,8 @@ use wgpu::{
 };
 
 use super::abi::{
-    GpuMacParams, GpuPbfParams, GpuWaterFoamParams, GpuWaterSpectrumParams, GpuWaterSweParams,
+    GpuFlipParticle, GpuFlipSimParams, GpuMacParams, GpuPbfParams, GpuWaterFoamParams,
+    GpuWaterSpectrumParams, GpuWaterSweParams,
 };
 
 /// Generous upper bound (microseconds) for a single water compute pass over the
@@ -1814,6 +1815,462 @@ fn mac_projection_pass_gpu_budget_is_measured() {
             assert!(
                 micros.is_finite() && micros > 0.0 && micros < MAX_PASS_MICROS,
                 "flip {label} @ {cells} cells measured {micros} us is not a healthy bounded timing"
+            );
+        }
+    }
+}
+
+/// Compiles `water_flip_mac_p2g.wesl` (the face-centered particle-to-grid
+/// scatter plus its mass-normalize pass) and returns its `Wgsl` translation,
+/// mirroring [`compile_flip_mac_wgsl`].
+fn compile_flip_mac_p2g_wgsl() -> String {
+    let mut cache = ShaderCache::new((), keep_wgsl);
+    let id = AssetId::Uuid {
+        uuid: Uuid::from_u128(0x5052_4953_4d5f_5741_5445_5246_4c50_0004),
+    };
+    cache.set_shader(
+        id,
+        Shader::from_wesl(
+            include_str!("../shaders/water_flip_mac_p2g.wesl"),
+            "embedded://prism_render_scene/shaders/water_flip_mac_p2g.wesl",
+        ),
+    );
+    let module = cache
+        .get(0, id, &[])
+        .unwrap_or_else(|error| panic!("water_flip_mac_p2g.wesl failed to compile: {error}"));
+    (*module).clone()
+}
+
+/// Compiles `water_flip_mac_g2p.wesl` (the face-centered grid-to-particle
+/// gather) and returns its `Wgsl` translation, mirroring [`compile_flip_mac_wgsl`].
+fn compile_flip_mac_g2p_wgsl() -> String {
+    let mut cache = ShaderCache::new((), keep_wgsl);
+    let id = AssetId::Uuid {
+        uuid: Uuid::from_u128(0x5052_4953_4d5f_5741_5445_5246_4c50_0005),
+    };
+    cache.set_shader(
+        id,
+        Shader::from_wesl(
+            include_str!("../shaders/water_flip_mac_g2p.wesl"),
+            "embedded://prism_render_scene/shaders/water_flip_mac_g2p.wesl",
+        ),
+    );
+    let module = cache
+        .get(0, id, &[])
+        .unwrap_or_else(|error| panic!("water_flip_mac_g2p.wesl failed to compile: {error}"));
+    (*module).clone()
+}
+
+/// Cubic grid resolutions (`dim = [D, D, D]`) the staggered-`MAC` particle-grid
+/// transfer kernels are timed at. The interior is filled at half-cell spacing
+/// (eight particles per cell), so `D = 12` is a `23^3 = 12167`-particle
+/// interactive splash and `D = 24` a `47^3 = 103823`-particle domain — the
+/// `~1e5` particle figure the design doc
+/// (`docs/prism_water_engine_design_zh.md` §12) budgets the `FLIP`/`PBF`
+/// solver against. Timing all three resolutions shows how the scatter/gather
+/// passes scale with the particle count (`P2G`/`G2P`) and the face count
+/// (`faces_normalize`) the kernels launch over.
+const FLIP_TRANSFER_DIMS: [u32; 3] = [12, 18, 24];
+
+/// Builds a deterministic `FLIP`/`APIC` particle cube filling the interior of a
+/// `dim` staggered-`MAC` grid at half-cell spacing (eight particles per cell),
+/// so every particle scatters to a fully populated eight-corner stencil on all
+/// three staggered face lattices. Each particle is active (`pos.w = 1`), carries
+/// a smooth divergent velocity, and a non-zero `APIC` affine field so both the
+/// `P2G` scatter and the `G2P` gather walk their full affine path. Positions sit
+/// a quarter-cell inside the low corner and stop three-quarters of a cell short
+/// of the far wall, so every staggered corner stays in bounds (no silent
+/// skips). Timing depends only on the full population being exercised, not on
+/// the exact values.
+fn flip_bench_particles(dim: [u32; 3]) -> Vec<GpuFlipParticle> {
+    let spacing = 0.5_f32;
+    let base = 0.25_f32;
+    let nx = 2 * dim[0] - 1;
+    let ny = 2 * dim[1] - 1;
+    let nz = 2 * dim[2] - 1;
+    let mut particles = Vec::with_capacity((nx * ny * nz) as usize);
+    let mut k = 0u32;
+    while k < nz {
+        let mut j = 0u32;
+        while j < ny {
+            let mut i = 0u32;
+            while i < nx {
+                let fi = i as f32;
+                let fj = j as f32;
+                let fk = k as f32;
+                particles.push(GpuFlipParticle {
+                    pos: [
+                        base + fi * spacing,
+                        base + fj * spacing,
+                        base + fk * spacing,
+                        1.0,
+                    ],
+                    vel: [
+                        0.1 * bevy_math::ops::sin(0.3 * fi + 0.2 * fk),
+                        0.1 * bevy_math::ops::cos(0.25 * fj - 0.15 * fi),
+                        0.1 * bevy_math::ops::sin(0.2 * fk + 0.1 * fj),
+                        0.0,
+                    ],
+                    c0: [0.05, 0.0, 0.0, 0.0],
+                    c1: [0.0, 0.05, 0.0, 0.0],
+                    c2: [0.0, 0.0, 0.05, 0.0],
+                });
+                i += 1;
+            }
+            j += 1;
+        }
+        k += 1;
+    }
+    particles
+}
+
+/// Builds the host-side [`GpuFlipSimParams`] uniform for a cubic bench domain.
+/// The grid spacing is unit (`dx = inv_dx = 1`), the `APIC` affine field is
+/// enabled, and representative `FLIP`/`Jacobi` blend factors are set; the
+/// measured dispatch time is independent of these values, only of the particle
+/// and cell counts driving the launch sizes.
+fn flip_bench_params(dim: [u32; 3], particle_count: u32) -> GpuFlipSimParams {
+    let cell_count = dim[0] * dim[1] * dim[2];
+    GpuFlipSimParams {
+        origin: [0.0, 0.0, 0.0, 0.0],
+        dim: [dim[0], dim[1], dim[2], 0],
+        dx: 1.0,
+        inv_dx: 1.0,
+        flip_blend: 0.95,
+        particle_mass: 1.0,
+        jacobi_omega: 0.8,
+        use_affine: 1,
+        particle_count,
+        cell_count,
+    }
+}
+
+/// Times the staggered-`MAC` particle-to-grid transfer over a cubic `dim`
+/// domain, returning `(p2g_us, normalize_us)` measured medians in microseconds.
+///
+/// Both kernels share one explicit four-binding `@group(0)` layout
+/// (`particles`, `face_scatter` atomics, `faces`, `sim_params`):
+/// `water_flip_mac_p2g` scatters each particle's `APIC` velocity onto the three
+/// staggered face grids as `[momentum, mass]` signed fixed-point pairs (touching
+/// bindings 0, 1, 3), then `water_flip_mac_faces_normalize` divides each face's
+/// momentum by its mass into the `f32` velocity buffer (touching bindings 1, 2,
+/// 3). An auto-derived (`layout: None`) layout would omit, per entry point, the
+/// bindings that entry does not touch, so the two entries would reject a shared
+/// bind group; the explicit superset layout lets one bind group feed both (a
+/// `WGSL` entry may bind a superset of what it reads). The scatter runs one
+/// invocation per particle and the normalize one per face, both at
+/// `@workgroup_size(64)`.
+fn measure_flip_p2g(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    wgsl: &str,
+    p2g_entry: &str,
+    norm_entry: &str,
+    dim: [u32; 3],
+) -> (f64, f64) {
+    let particles = flip_bench_particles(dim);
+    let params = flip_bench_params(dim, particles.len() as u32);
+    let face_count = mac_face_count(dim) as usize;
+    let scatter_zero = vec![0u32; face_count * 2];
+    let faces_zero = vec![0.0_f32; face_count];
+
+    let particle_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("bench_flip_p2g_particles"),
+        contents: bytemuck::cast_slice(&particles),
+        usage: BufferUsages::STORAGE,
+    });
+    let scatter_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("bench_flip_p2g_scatter"),
+        contents: bytemuck::cast_slice(&scatter_zero),
+        usage: BufferUsages::STORAGE,
+    });
+    let faces_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("bench_flip_p2g_faces"),
+        contents: bytemuck::cast_slice(&faces_zero),
+        usage: BufferUsages::STORAGE,
+    });
+    let param_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("bench_flip_p2g_params"),
+        contents: bytemuck::bytes_of(&params),
+        usage: BufferUsages::UNIFORM,
+    });
+
+    // One explicit four-binding group-0 layout shared by both passes: particles
+    // (read-only), the scatter atomics (read-write), the normalized faces
+    // (read-write), and the sim params uniform. A per-entry auto-derived layout
+    // would drop the bindings each entry skips, so declare the full superset.
+    let storage_ro = BindingType::Buffer {
+        ty: BufferBindingType::Storage { read_only: true },
+        has_dynamic_offset: false,
+        min_binding_size: None,
+    };
+    let storage_rw = BindingType::Buffer {
+        ty: BufferBindingType::Storage { read_only: false },
+        has_dynamic_offset: false,
+        min_binding_size: None,
+    };
+    let uniform = BindingType::Buffer {
+        ty: BufferBindingType::Uniform,
+        has_dynamic_offset: false,
+        min_binding_size: None,
+    };
+    let entry = |binding: u32, ty: BindingType| BindGroupLayoutEntry {
+        binding,
+        visibility: ShaderStages::COMPUTE,
+        ty,
+        count: None,
+    };
+    let bind_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+        label: Some("bench_flip_p2g_layout"),
+        entries: &[
+            entry(0, storage_ro),
+            entry(1, storage_rw),
+            entry(2, storage_rw),
+            entry(3, uniform),
+        ],
+    });
+    let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+        label: Some("bench_flip_p2g_pipeline_layout"),
+        bind_group_layouts: &[Some(&bind_layout)],
+        immediate_size: 0,
+    });
+
+    let build = |ep: &str| {
+        let module = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("bench_flip_p2g"),
+            source: ShaderSource::Wgsl(wgsl.into()),
+        });
+        let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some("bench_flip_p2g"),
+            layout: Some(&pipeline_layout),
+            module: &module,
+            entry_point: Some(ep),
+            compilation_options: PipelineCompilationOptions::default(),
+            cache: None,
+        });
+        let bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("bench_flip_p2g_bind_group"),
+            layout: &bind_layout,
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: particle_buf.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: scatter_buf.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 2,
+                    resource: faces_buf.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 3,
+                    resource: param_buf.as_entire_binding(),
+                },
+            ],
+        });
+        (pipeline, bind_group)
+    };
+
+    let (p2g_pipeline, p2g_bind) = build(p2g_entry);
+    let p2g_groups = params.particle_count.div_ceil(64);
+    let p2g_timer = PassTimer::new(device);
+    let p2g_us = time_dispatch(
+        device,
+        queue,
+        &p2g_pipeline,
+        &p2g_bind,
+        p2g_groups,
+        1,
+        &p2g_timer,
+    );
+
+    let (norm_pipeline, norm_bind) = build(norm_entry);
+    let norm_groups = (face_count as u32).div_ceil(64);
+    let norm_timer = PassTimer::new(device);
+    let normalize_us = time_dispatch(
+        device,
+        queue,
+        &norm_pipeline,
+        &norm_bind,
+        norm_groups,
+        1,
+        &norm_timer,
+    );
+
+    (p2g_us, normalize_us)
+}
+
+/// Times the staggered-`MAC` grid-to-particle gather (`water_flip_mac_g2p`) over
+/// a cubic `dim` domain, returning the measured median microseconds. The gather
+/// reads the projected and the pre-projection face fields, blends the `PIC` and
+/// `FLIP` updates, and writes the particle velocities (plus the `APIC` affine
+/// rows) back, so its `@group(0)` touches the particles (read-write, binding 0),
+/// the projected faces (binding 1), the pre-projection faces (binding 2), and
+/// the params (binding 3). The seed face fields reuse [`mac_bench_faces`]; the
+/// gather dispatches one invocation per particle at `@workgroup_size(64)`.
+fn measure_flip_g2p(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    wgsl: &str,
+    entry: &str,
+    dim: [u32; 3],
+) -> f64 {
+    let particles = flip_bench_particles(dim);
+    let params = flip_bench_params(dim, particles.len() as u32);
+    let projected = mac_bench_faces(dim);
+    let preprojection = mac_bench_faces(dim);
+
+    let particle_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("bench_flip_g2p_particles"),
+        contents: bytemuck::cast_slice(&particles),
+        usage: BufferUsages::STORAGE,
+    });
+    let projected_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("bench_flip_g2p_projected"),
+        contents: bytemuck::cast_slice(&projected),
+        usage: BufferUsages::STORAGE,
+    });
+    let preproj_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("bench_flip_g2p_preprojection"),
+        contents: bytemuck::cast_slice(&preprojection),
+        usage: BufferUsages::STORAGE,
+    });
+    let param_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("bench_flip_g2p_params"),
+        contents: bytemuck::bytes_of(&params),
+        usage: BufferUsages::UNIFORM,
+    });
+
+    // Explicit group-0 layout: particles (read-write), projected faces
+    // (read-only), pre-projection faces (read-only), params uniform. The single
+    // gather entry binds every slot, but declaring the layout explicitly keeps
+    // the harness consistent with the P2G and projection benches.
+    let storage_ro = BindingType::Buffer {
+        ty: BufferBindingType::Storage { read_only: true },
+        has_dynamic_offset: false,
+        min_binding_size: None,
+    };
+    let storage_rw = BindingType::Buffer {
+        ty: BufferBindingType::Storage { read_only: false },
+        has_dynamic_offset: false,
+        min_binding_size: None,
+    };
+    let uniform = BindingType::Buffer {
+        ty: BufferBindingType::Uniform,
+        has_dynamic_offset: false,
+        min_binding_size: None,
+    };
+    let entry_desc = |binding: u32, ty: BindingType| BindGroupLayoutEntry {
+        binding,
+        visibility: ShaderStages::COMPUTE,
+        ty,
+        count: None,
+    };
+    let bind_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+        label: Some("bench_flip_g2p_layout"),
+        entries: &[
+            entry_desc(0, storage_rw),
+            entry_desc(1, storage_ro),
+            entry_desc(2, storage_ro),
+            entry_desc(3, uniform),
+        ],
+    });
+    let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+        label: Some("bench_flip_g2p_pipeline_layout"),
+        bind_group_layouts: &[Some(&bind_layout)],
+        immediate_size: 0,
+    });
+
+    let module = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("bench_flip_g2p"),
+        source: ShaderSource::Wgsl(wgsl.into()),
+    });
+    let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("bench_flip_g2p"),
+        layout: Some(&pipeline_layout),
+        module: &module,
+        entry_point: Some(entry),
+        compilation_options: PipelineCompilationOptions::default(),
+        cache: None,
+    });
+    let bind_group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("bench_flip_g2p_bind_group"),
+        layout: &bind_layout,
+        entries: &[
+            BindGroupEntry {
+                binding: 0,
+                resource: particle_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 1,
+                resource: projected_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 2,
+                resource: preproj_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 3,
+                resource: param_buf.as_entire_binding(),
+            },
+        ],
+    });
+
+    let groups = params.particle_count.div_ceil(64);
+    let timer = PassTimer::new(device);
+    time_dispatch(device, queue, &pipeline, &bind_group, groups, 1, &timer)
+}
+
+/// Measures the staggered-`MAC` particle-grid transfer kernels
+/// (`water_flip_mac_p2g` -> `water_flip_mac_faces_normalize` in
+/// `water_flip_mac_p2g.wesl`, then `water_flip_mac_g2p` in
+/// `water_flip_mac_g2p.wesl`) on a real device across [`FLIP_TRANSFER_DIMS`] and
+/// asserts each pass takes a finite, strictly positive, bounded time. The design
+/// doc (`docs/prism_water_engine_design_zh.md` §12) budgets the `FLIP`/`PBF` sim
+/// at `<= 2-4 ms` for a local `~1e5` particle domain as a **design target, not a
+/// measured value**; together with the pressure-projection bench this turns the
+/// remaining `FLIP` transfer half of that line into actual on-device
+/// measurements. The printed medians are the numbers the design-target budget
+/// should be re-tuned against.
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the measured budget (and the skip notice) must reach the test log so it can be captured"
+)]
+fn flip_transfer_pass_gpu_budget_is_measured() {
+    let Some((device, queue)) = try_timing_device() else {
+        eprintln!(
+            "flip_transfer_pass_gpu_budget_is_measured: no timestamp-capable wgpu adapter, skipping on-device timing"
+        );
+        return;
+    };
+
+    let p2g_wgsl = compile_flip_mac_p2g_wgsl();
+    let p2g_entry = find_entry_point(&p2g_wgsl, "water_flip_mac_p2g");
+    let norm_entry = find_entry_point(&p2g_wgsl, "faces_normalize");
+    let g2p_wgsl = compile_flip_mac_g2p_wgsl();
+    let g2p_entry = find_entry_point(&g2p_wgsl, "water_flip_mac_g2p");
+
+    for side in FLIP_TRANSFER_DIMS {
+        let dim = [side, side, side];
+        let particle_count = (2 * side - 1).pow(3);
+        let faces = mac_face_count(dim);
+        let (p2g_us, normalize_us) =
+            measure_flip_p2g(&device, &queue, &p2g_wgsl, &p2g_entry, &norm_entry, dim);
+        let g2p_us = measure_flip_g2p(&device, &queue, &g2p_wgsl, &g2p_entry, dim);
+        eprintln!(
+            "water FLIP MAC transfer budget @ {particle_count} particles / {faces} faces (dim {side}^3): p2g scatter = {p2g_us:.2} us, faces_normalize = {normalize_us:.2} us, g2p gather = {g2p_us:.2} us (measured, median of {TIMED_RUNS})"
+        );
+        for (label, micros) in [
+            ("water_flip_mac_p2g", p2g_us),
+            ("water_flip_mac_faces_normalize", normalize_us),
+            ("water_flip_mac_g2p", g2p_us),
+        ] {
+            assert!(
+                micros.is_finite() && micros > 0.0 && micros < MAX_PASS_MICROS,
+                "flip {label} @ {particle_count} particles measured {micros} us is not a healthy bounded timing"
             );
         }
     }
