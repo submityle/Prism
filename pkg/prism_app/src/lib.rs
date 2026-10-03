@@ -219,7 +219,9 @@ pub use diagnostics::{
     CountWindow, FrameDiagnostics, PluginStartupTiming, StartupDiagnostics,
 };
 #[cfg(feature = "std")]
-pub use pacing::{FrameLimit, FramePacer, FrameStats};
+pub use pacing::{
+    AdaptiveAction, AdaptiveFrameLimiter, FrameLimit, FramePacer, FrameRateLadder, FrameStats,
+};
 pub use schedule::{
     ExitConfirmation, First, Last, PostStartup, PostUpdate, PreStartup, PreUpdate, Shutdown,
     StateTransition, Startup, Update,
@@ -269,7 +271,10 @@ pub mod prelude {
         CountWindow, FrameDiagnostics, PluginStartupTiming, StartupDiagnostics,
     };
     #[cfg(feature = "std")]
-    pub use crate::pacing::{FrameLimit, FramePacer, FrameStats};
+    pub use crate::pacing::{
+        AdaptiveAction, AdaptiveFrameLimiter, FrameLimit, FramePacer, FrameRateLadder,
+        FrameStats,
+    };
     pub use crate::schedule::{
         ExitConfirmation, First, Last, PostStartup, PostUpdate, PreStartup, PreUpdate, Shutdown,
         StateTransition, Startup, Update,

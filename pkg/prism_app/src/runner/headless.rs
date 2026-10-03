@@ -3,7 +3,9 @@
 use crate::app::App;
 use crate::exit::AppExit;
 #[cfg(feature = "std")]
-use crate::pacing::{FrameLimit, FramePacer};
+use crate::pacing::{AdaptiveFrameLimiter, FrameLimit, FramePacer, FrameRateLadder};
+#[cfg(feature = "std")]
+use prism_time::Instant;
 
 /// A runner that repeatedly drives frames with no windowing or presentation,
 /// stopping when a system signals exit (via
@@ -24,7 +26,7 @@ use crate::pacing::{FrameLimit, FramePacer};
 #[cfg_attr(not(feature = "std"), doc = "tickrate. The cap is applied by a drift-free `FramePacer` built inside")]
 /// [`run`](HeadlessRunner::run); it paces to a moving cadence so the achieved
 /// rate does not drift (design §13).
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct HeadlessRunner {
     /// Stop after this many frames even if no exit was requested. `None` loops
     /// until exit.
@@ -33,6 +35,12 @@ pub struct HeadlessRunner {
     /// (the default) keeps the loop uncapped.
     #[cfg(feature = "std")]
     frame_limit: FrameLimit,
+    /// Optional histogram-driven adaptive cap selector (design §13). When set,
+    /// each frame's work time is fed to it and the resulting cap drives the
+    /// pacer, so the loop tracks the highest cadence it can sustain within a
+    /// tier ladder. `None` (the default) keeps the fixed `frame_limit`.
+    #[cfg(feature = "std")]
+    adaptive: Option<AdaptiveFrameLimiter>,
 }
 
 impl HeadlessRunner {
@@ -42,6 +50,8 @@ impl HeadlessRunner {
             max_frames: None,
             #[cfg(feature = "std")]
             frame_limit: FrameLimit::Off,
+            #[cfg(feature = "std")]
+            adaptive: None,
         }
     }
 
@@ -52,6 +62,8 @@ impl HeadlessRunner {
             max_frames: Some(max_frames),
             #[cfg(feature = "std")]
             frame_limit: FrameLimit::Off,
+            #[cfg(feature = "std")]
+            adaptive: None,
         }
     }
 
@@ -65,6 +77,22 @@ impl HeadlessRunner {
         self
     }
 
+    /// Drive the frame cap adaptively over `ladder` (design §13): each frame's
+    /// measured work time is fed to an [`AdaptiveFrameLimiter`], which nudges
+    /// the cap up or down a rung so the loop targets the highest cadence it can
+    /// sustain. The initial cap is the limiter's starting rung (the most
+    /// demanding by default). Builder-style; overrides any fixed
+    #[cfg_attr(feature = "std", doc = "[`with_frame_limit`](HeadlessRunner::with_frame_limit).")]
+    #[cfg_attr(not(feature = "std"), doc = "`with_frame_limit`.")]
+    #[cfg(feature = "std")]
+    #[must_use]
+    pub fn with_adaptive_frame_limit(mut self, ladder: FrameRateLadder) -> Self {
+        let limiter = AdaptiveFrameLimiter::new(ladder);
+        self.frame_limit = limiter.current_limit();
+        self.adaptive = Some(limiter);
+        self
+    }
+
     /// Drive `app` frame by frame until exit or the frame cap is hit.
     ///
     /// Returns the requested [`AppExit`] if a system asked to stop, otherwise
@@ -72,10 +100,17 @@ impl HeadlessRunner {
     #[cfg_attr(feature = "std", doc = "[`FrameLimit`] is set (via [`with_frame_limit`](HeadlessRunner::with_frame_limit)) the loop is paced to it with a drift-free [`FramePacer`].")]
     #[cfg_attr(not(feature = "std"), doc = "`FrameLimit` is set (via `with_frame_limit`) the loop is paced to it with a drift-free `FramePacer`.")]
     pub fn run(self, mut app: App) -> AppExit {
+        let max_frames = self.max_frames;
         #[cfg(feature = "std")]
         let mut pacer = FramePacer::new(self.frame_limit);
+        #[cfg(feature = "std")]
+        let mut adaptive = self.adaptive;
         let mut frame: u64 = 0;
         let exit = loop {
+            // Time only the frame's work (not the pacing sleep) so the adaptive
+            // limiter sees headroom, not the cadence already in force.
+            #[cfg(feature = "std")]
+            let work_start = adaptive.as_ref().map(|_| Instant::now());
             app.update();
             // Poll for a *confirmed* exit, running the exit-veto gate when a
             // request is pending (design §24.5); a confirmation system may cancel.
@@ -83,8 +118,17 @@ impl HeadlessRunner {
                 break exit;
             }
             frame = frame.saturating_add(1);
-            if self.max_frames.is_some_and(|max| frame >= max) {
+            if max_frames.is_some_and(|max| frame >= max) {
                 break AppExit::Success;
+            }
+            // Feed this frame's work time to the adaptive limiter; a rung change
+            // retargets the pacer before it throttles (design §13).
+            #[cfg(feature = "std")]
+            if let (Some(limiter), Some(start)) = (adaptive.as_mut(), work_start) {
+                let work = Instant::now().saturating_duration_since(start);
+                if let Some(new_limit) = limiter.record(work) {
+                    pacer.set_limit(new_limit);
+                }
             }
             // Pace the loop to the configured cap (no-op when unlimited).
             #[cfg(feature = "std")]

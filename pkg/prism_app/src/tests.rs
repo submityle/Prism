@@ -70,6 +70,70 @@ fn headless_runner_frame_limit_paces_the_loop() {
     );
 }
 
+/// The adaptive limiter and the real `FramePacer` compose: feeding sustained
+/// work that misses the top rungs walks the cap down the ladder and retargets
+/// the pacer at each step (design §13, the feed → recommend → apply path).
+#[cfg(feature = "std")]
+#[test]
+fn adaptive_limiter_retargets_a_real_pacer() {
+    use crate::pacing::{AdaptiveFrameLimiter, FrameLimit, FramePacer, FrameRateLadder};
+    use prism_time::Duration;
+
+    let ladder = FrameRateLadder::from_fps([30, 60, 120]).expect("non-empty ladder");
+    let mut limiter = AdaptiveFrameLimiter::new(ladder).with_window(2);
+    let mut pacer = FramePacer::new(limiter.current_limit());
+    // Starts at the most demanding rung.
+    assert_eq!(pacer.limit(), FrameLimit::from_fps(120));
+
+    // 20ms sustained work misses 120fps (~8.3ms) then 60fps (~16.6ms); the
+    // limiter steps down twice and the pacer tracks each recommendation.
+    for _ in 0..8 {
+        if let Some(new_limit) = limiter.record(Duration::from_millis(20)) {
+            pacer.set_limit(new_limit);
+        }
+    }
+    assert_eq!(limiter.current_limit(), FrameLimit::from_fps(30));
+    assert_eq!(pacer.limit(), FrameLimit::from_fps(30));
+}
+
+/// A `HeadlessRunner` with an adaptive frame limit drives the requested frames
+/// and actually paces them: the limiter's starting rung becomes the pacer's cap
+/// so the loop cannot finish faster than that cadence (end-to-end wiring).
+#[cfg(feature = "std")]
+#[test]
+fn headless_runner_adaptive_frame_limit_paces_the_loop() {
+    use crate::pacing::FrameRateLadder;
+    use prism_time::Duration;
+
+    let frames = Arc::new(AtomicU64::new(0));
+    let f = frames.clone();
+
+    let mut app = App::new();
+    app.add_systems(Update, move || {
+        f.fetch_add(1, Ordering::Relaxed);
+    });
+    // A two-rung ladder; with near-instant work the limiter holds at its top
+    // rung (500fps => 2ms period), so 4 frames pace through two interior
+    // boundaries and the run takes at least ~3ms.
+    let ladder = FrameRateLadder::from_fps([250, 500]).expect("non-empty ladder");
+    app.set_runner(move |app| {
+        HeadlessRunner::with_max_frames(4)
+            .with_adaptive_frame_limit(ladder)
+            .run(app)
+    });
+
+    let start = std::time::Instant::now();
+    let exit = app.run();
+    let elapsed = start.elapsed();
+
+    assert_eq!(exit, AppExit::Success);
+    assert_eq!(frames.load(Ordering::Relaxed), 4);
+    assert!(
+        elapsed >= Duration::from_millis(3),
+        "adaptive frame limiter did not pace the loop: {elapsed:?}"
+    );
+}
+
 /// Startup schedules run exactly once; frame schedules run every frame.
 #[test]
 fn startup_runs_once_update_runs_each_frame() {

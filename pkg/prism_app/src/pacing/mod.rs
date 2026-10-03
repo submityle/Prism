@@ -42,6 +42,10 @@ use std::collections::VecDeque;
 
 use prism_time::{Duration, Instant};
 
+mod adaptive;
+
+pub use adaptive::{AdaptiveAction, AdaptiveFrameLimiter, FrameRateLadder};
+
 /// How aggressively the main loop caps its frame rate (design §13).
 ///
 /// This is pure policy; [`FramePacer`] turns it into actual sleeps. `Off` is
