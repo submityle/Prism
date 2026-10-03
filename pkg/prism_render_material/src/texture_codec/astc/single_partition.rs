@@ -32,7 +32,7 @@ use super::AstcError;
 /// UNORM. For black/white endpoints this reduces exactly to the GPU-proven
 /// gray-ramp formula.
 #[inline]
-fn lerp_component(e0: u8, e1: u8, w: u32) -> u8 {
+pub(super) fn lerp_component(e0: u8, e1: u8, w: u32) -> u8 {
     let c0 = u32::from(e0) * 257;
     let c1 = u32::from(e1) * 257;
     let c16 = (c0 * (64 - w) + c1 * w + 32) >> 6;

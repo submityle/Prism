@@ -25,6 +25,8 @@ mod cem;
 mod color_unquant;
 mod endpoints;
 mod infill;
+mod multi_partition;
+mod partition;
 mod quant_mode;
 mod single_partition;
 mod trit_quint;
@@ -69,6 +71,14 @@ pub fn decode_astc_4x4_ldr(block: &[u8; 16]) -> Result<[[u8; 4]; 16], AstcError>
     if void_extent::is_void_extent(block) {
         decode_astc_void_extent_ldr(block)
     } else {
-        single_partition::decode_single_partition_4x4_ldr(block)
+        // Partition count is the 2-bit field at block bits [11, 13); 0 => a
+        // single partition, 1..=3 => 2..=4 partitions. Route each to its
+        // dedicated decoder.
+        let partition_count = ((u32::from(block[1]) >> 3) & 0x3) + 1;
+        if partition_count == 1 {
+            single_partition::decode_single_partition_4x4_ldr(block)
+        } else {
+            multi_partition::decode_multi_partition_4x4_ldr(block)
+        }
     }
 }
