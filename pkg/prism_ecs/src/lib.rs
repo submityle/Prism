@@ -47,6 +47,7 @@ extern crate std;
 
 pub mod archetype;
 pub mod bundle;
+pub mod change;
 pub mod command;
 pub mod component;
 pub mod entity;
@@ -62,6 +63,7 @@ pub mod world;
 /// the eventual migration a near "change-the-import" exercise.
 pub mod prelude {
     pub use crate::bundle::Bundle;
+    pub use crate::change::{ComponentTicks, Tick};
     pub use crate::command::{CommandQueue, Commands};
     pub use crate::component::Component;
     pub use crate::entity::Entity;
