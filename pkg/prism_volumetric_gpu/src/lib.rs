@@ -221,6 +221,7 @@ pub mod luminance_hist;
 pub mod marching_cubes;
 pub mod marching_squares;
 pub mod mask;
+pub mod material_resolve_bin;
 pub mod matrix_decompose;
 pub mod merge_sort_stable;
 pub mod mesh_aabb;
@@ -242,10 +243,12 @@ pub mod mg_restrict;
 pub mod microfacet_ggx;
 pub mod midpoint_circle;
 pub mod minkowski_sum_2d;
+pub mod mip_error;
 pub mod modeling;
 pub mod morton_code;
 pub mod motion_blur;
 pub mod motion_disocclusion;
+pub mod motion_reproject_ndc_pixel;
 pub mod motion_tile_classify;
 pub mod motion_vector_dilate;
 pub mod motion_vector_quantize;
@@ -309,6 +312,8 @@ pub mod reflect_refract_vec;
 pub mod regir_grid_index;
 pub mod relax_coverage;
 pub mod reservoir_sample;
+pub mod restir_di_finalize;
+pub mod restir_gi_reconnection_jacobian;
 pub mod restir_spatial_admissible;
 pub mod rgb_ycocg;
 pub mod rgbe_encode;
@@ -361,6 +366,7 @@ pub mod taau_color_transform;
 pub mod taau_jitter_offset;
 pub mod taau_neighborhood_clip;
 pub mod taau_rcas_sharpen;
+pub mod taau_reconstruct_sanitize_params;
 pub mod taau_resolution_map;
 pub mod taau_thin_feature_lock;
 pub mod temporal_dither;
@@ -634,6 +640,9 @@ pub use luminance_hist::{GpuLuminanceHist, LuminanceHistQuery};
 pub use marching_cubes::{GpuMarchingCubes, MarchingCubesCellQuery, MarchingCubesCellResult};
 pub use marching_squares::{GpuMarchingSquares, MarchingSquaresQuery, MarchingSquaresResult};
 pub use mask::{GpuScatteringMask, MaskQuery};
+pub use material_resolve_bin::{
+    GpuMaterialResolveBin, MaterialResolveBinQuery, MaterialResolveBinResult,
+};
 pub use matrix_decompose::{GpuMatrixDecompose, MatrixDecomposeQuery, MatrixDecomposeResult};
 pub use merge_sort_stable::{GpuMergeSort, GpuMergeSortStable};
 pub use mesh_aabb::{GpuMeshAabb, GpuMeshAabbQuery, GpuMeshAabbResult};
@@ -666,12 +675,16 @@ pub use mg_restrict::{GpuMgRestrict, GpuMgRestrictQuery, GpuMgRestrictResult};
 pub use microfacet_ggx::{GpuMicrofacetGgx, MicrofacetSample};
 pub use midpoint_circle::{GpuMidpointCircle, GpuMidpointCircleQuery, GpuMidpointCircleResult};
 pub use minkowski_sum_2d::{GpuMinkowskiSum2d, MinkowskiSum2dQuery, MinkowskiSum2dResult};
+pub use mip_error::{GpuMipError, MipErrorQuery, MipErrorResult};
 pub use modeling::{GpuModeling, ModelingQuery};
 pub use morton_code::GpuMortonCode;
 pub use motion_blur::{GpuMotionBlur, MotionBlurQuery, MotionBlurResult};
 pub use motion_disocclusion::{
     GpuMotionDisocclusion, MotionDisocclusionParams, MotionDisocclusionQuery,
     MotionDisocclusionResult, MotionSurfacePoint,
+};
+pub use motion_reproject_ndc_pixel::{
+    GpuMotionReprojectNdcPixel, MotionReprojectNdcPixelQuery, MotionReprojectNdcPixelResult,
 };
 pub use motion_tile_classify::{
     GpuMotionTileClassify, MotionTileClassifyQuery, MotionTileClassifyResult,
@@ -754,6 +767,11 @@ pub use reflect_refract_vec::{GpuReflectRefractVec, ReflectRefractQuery, Reflect
 pub use regir_grid_index::{GpuRegirGridIndex, RegirGridIndexQuery, RegirGridIndexResult};
 pub use relax_coverage::{GpuRelaxCoverage, RelaxCoverageQuery};
 pub use reservoir_sample::{GpuReservoirSample, ReservoirValue};
+pub use restir_di_finalize::{GpuRestirDiFinalize, RestirDiFinalizeQuery, RestirDiFinalizeResult};
+pub use restir_gi_reconnection_jacobian::{
+    GpuRestirGiReconnectionJacobian, RestirGiReconnectionJacobianQuery,
+    RestirGiReconnectionJacobianResult,
+};
 pub use restir_spatial_admissible::{
     GpuRestirSpatialAdmissible, RestirSpatialAdmissibleQuery, RestirSpatialAdmissibleResult,
 };
@@ -831,6 +849,10 @@ pub use taau_neighborhood_clip::{
     GpuTaauNeighborhoodClip, TaauNeighborhoodClipQuery, TaauNeighborhoodClipResult,
 };
 pub use taau_rcas_sharpen::{GpuTaauRcasSharpen, TaauRcasSharpenQuery, TaauRcasSharpenResult};
+pub use taau_reconstruct_sanitize_params::{
+    GpuTaauReconstructSanitizeParams, TaauReconstructSanitizeParamsQuery,
+    TaauReconstructSanitizeParamsResult,
+};
 pub use taau_resolution_map::{
     GpuTaauResolutionMap, TaauResolutionMapQuery, TaauResolutionMapResult,
 };
