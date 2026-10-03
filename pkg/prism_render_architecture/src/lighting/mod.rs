@@ -1,6 +1,7 @@
 //! Unified lighting, GI, reflection, and stochastic-light contracts.
 
 pub mod culling;
+pub mod radiance_cascades;
 pub mod stochastic;
 pub mod restir_di;
 pub mod restir_temporal;
