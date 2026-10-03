@@ -140,6 +140,8 @@ pub use hausdorff::{
 };
 pub mod diameter;
 pub use diameter::{mesh_diameter, MeshDiameter};
+pub mod lod_error;
+pub use lod_error::{evaluate_lod_errors, LodErrorReport, LodLevelError, LodMeshRef};
 
 /// A handle into a [`ShapeRegistry`].
 ///
