@@ -418,7 +418,13 @@ pub mod volumetric_multiscatter;
 pub mod volumetrics;
 pub mod vorticity_confinement;
 pub mod voxel_traversal;
+pub mod water_breaking_classify;
+pub mod water_caustics_intensity;
+pub mod water_dispersion_offsets;
+pub mod water_shading_npr;
 pub mod water_shading_pbr;
+pub mod water_waterline_weight;
+pub mod water_wetness_response;
 pub mod welzl_min_sphere;
 pub mod wind_field;
 pub mod worley;
@@ -951,7 +957,23 @@ pub use volumetric_multiscatter::{
 pub use volumetrics::{GpuVolumetrics, VolumetricsQuery, VolumetricsResult};
 pub use vorticity_confinement::{GpuVorticityConfinement, VorticityResult};
 pub use voxel_traversal::{GpuVoxelTraversal, VoxelTraversalQuery, VoxelTraversalResult};
+pub use water_breaking_classify::{
+    GpuWaterBreakingClassify, WaterBreakingClassifyQuery, WaterBreakingClassifyResult,
+};
+pub use water_caustics_intensity::{
+    GpuWaterCausticsIntensity, WaterCausticsIntensityQuery, WaterCausticsIntensityResult,
+};
+pub use water_dispersion_offsets::{
+    GpuWaterDispersionOffsets, WaterDispersionOffsetsQuery, WaterDispersionOffsetsResult,
+};
+pub use water_shading_npr::{GpuWaterShadingNpr, WaterShadingNprQuery, WaterShadingNprResult};
 pub use water_shading_pbr::{GpuWaterShadingPbr, WaterShadingPbrQuery, WaterShadingPbrResult};
+pub use water_waterline_weight::{
+    GpuWaterWaterlineWeight, WaterWaterlineWeightQuery, WaterWaterlineWeightResult,
+};
+pub use water_wetness_response::{
+    GpuWaterWetnessResponse, WaterWetnessResponseQuery, WaterWetnessResponseResult,
+};
 pub use welzl_min_sphere::{GpuWelzlMinSphere, WelzlMinSphereQuery, WelzlMinSphereResult};
 pub use wind_field::{GpuWindField, WindFieldQuery, WindFieldResult};
 pub use worley::{GpuWorley, WorleyQuery};
