@@ -27,10 +27,14 @@
 //! ## Milestone status (per the design-doc roadmap)
 //! - **M0 (done):** monotonic [`Instant`]/[`Duration`], unit conversions, and
 //!   [`Time<Real>`] with monotonic/advancement tests.
-//! - **M1 (this crate, done):** [`Time<Virtual>`] (scale/pause/clamp),
+//! - **M1 (done):** [`Time<Virtual>`] (scale/pause/clamp),
 //!   [`Time<Fixed>`] (accumulator + overstep), and the default-context switch.
-//! - **M2+ (planned):** timers/stopwatch, rational/fixed-point deterministic
-//!   stepping, smoothing, and network clocks.
+//! - **M2 (done):** fixed-step accumulator with alpha/overstep and the
+//!   death-spiral + max-delta clamps (see [`Fixed`] and [`Virtual`]).
+//! - **M3 (this crate, done):** [`Stopwatch`], [`Timer`]/[`TimerMode`],
+//!   [`Cooldown`]/[`Throttle`], and [`SmoothedDelta`] (see the [`timer`] module).
+//! - **M4+ (planned):** rational/fixed-point deterministic stepping and
+//!   network clocks.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
@@ -38,12 +42,14 @@
 mod clock;
 mod fixed;
 mod instant;
+pub mod timer;
 mod virtual_time;
 
 pub use clock::{Clocks, DefaultSource};
 pub use core::time::Duration;
 pub use fixed::Fixed;
 pub use instant::Instant;
+pub use timer::{Cooldown, SmoothedDelta, Stopwatch, Throttle, Timer, TimerMode};
 pub use virtual_time::Virtual;
 
 /// Marker for a time context, selecting advancement semantics.
@@ -187,7 +193,10 @@ impl Time<Real> {
 
 /// Common imports.
 pub mod prelude {
-    pub use crate::{Clocks, DefaultSource, Duration, Fixed, Instant, Real, Time, Virtual};
+    pub use crate::{
+        Clocks, Cooldown, DefaultSource, Duration, Fixed, Instant, Real, SmoothedDelta,
+        Stopwatch, Throttle, Time, Timer, TimerMode, Virtual,
+    };
 }
 
 #[cfg(test)]
