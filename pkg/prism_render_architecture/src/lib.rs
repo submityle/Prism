@@ -15,6 +15,7 @@ pub mod abi;
 pub mod backend;
 pub mod capture;
 pub mod cloth;
+pub mod compression;
 pub mod deformation;
 pub mod descriptor_heap;
 pub mod diagnostics;

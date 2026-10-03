@@ -13,6 +13,11 @@ publish = false
 prism_physics_core = { path = "../prism_physics_core" }
 glam = { version = "0.33.2", default-features = false }
 
+[dev-dependencies]
+# Reference DEFLATE encoder, used only as a round-trip oracle in
+# `compression::deflate` tests; never linked into the shipped library.
+flate2 = "1.0"
+
 [lints]
 workspace = true
 
