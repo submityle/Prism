@@ -36,12 +36,13 @@ use bevy_platform::future::block_on;
 use bevy_shader::{Shader, ShaderCache, ShaderCacheError, ShaderCacheSource, ValidateShader};
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
 use wgpu::{
-    BackendOptions, Backends, BindGroupDescriptor, BindGroupEntry, BindingResource,
-    BufferDescriptor, BufferUsages, CommandEncoderDescriptor, ComputePassDescriptor,
-    ComputePassTimestampWrites, ComputePipelineDescriptor, DeviceDescriptor, Extent3d, Features,
-    Instance, InstanceDescriptor, InstanceFlags, MapMode, PipelineCompilationOptions, PollType,
+    BackendOptions, Backends, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
+    BindGroupLayoutEntry, BindingResource, BindingType, BufferBindingType, BufferDescriptor,
+    BufferUsages, CommandEncoderDescriptor, ComputePassDescriptor, ComputePassTimestampWrites,
+    ComputePipelineDescriptor, DeviceDescriptor, Extent3d, Features, Instance, InstanceDescriptor,
+    InstanceFlags, MapMode, PipelineCompilationOptions, PipelineLayoutDescriptor, PollType,
     QuerySet, QuerySetDescriptor, QueryType, RequestAdapterOptions, ShaderModuleDescriptor,
-    ShaderSource, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
+    ShaderSource, ShaderStages, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
     TextureViewDescriptor,
 };
 
@@ -1547,6 +1548,49 @@ fn measure_mac_projection(
         usage: BufferUsages::UNIFORM,
     });
 
+    // The three MAC entries each touch a different subset of the five group(0)
+    // bindings (`mac_divergence` skips the pressure buffers, `mac_project` skips
+    // `divergence`), so an auto-derived (`layout: None`) layout would differ per
+    // entry and reject a shared five-entry bind group. Declare the full layout
+    // explicitly so one bind group feeds all three pipelines; a WGSL entry is
+    // allowed to bind a superset of what it reads.
+    let storage_rw = BindingType::Buffer {
+        ty: BufferBindingType::Storage { read_only: false },
+        has_dynamic_offset: false,
+        min_binding_size: None,
+    };
+    let storage_ro = BindingType::Buffer {
+        ty: BufferBindingType::Storage { read_only: true },
+        has_dynamic_offset: false,
+        min_binding_size: None,
+    };
+    let uniform = BindingType::Buffer {
+        ty: BufferBindingType::Uniform,
+        has_dynamic_offset: false,
+        min_binding_size: None,
+    };
+    let entry = |binding: u32, ty: BindingType| BindGroupLayoutEntry {
+        binding,
+        visibility: ShaderStages::COMPUTE,
+        ty,
+        count: None,
+    };
+    let bind_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+        label: Some("bench_flip_mac_layout"),
+        entries: &[
+            entry(0, storage_rw),
+            entry(1, storage_rw),
+            entry(2, storage_ro),
+            entry(3, storage_rw),
+            entry(4, uniform),
+        ],
+    });
+    let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+        label: Some("bench_flip_mac_pipeline_layout"),
+        bind_group_layouts: &[Some(&bind_layout)],
+        immediate_size: 0,
+    });
+
     let build = |entry: &str| {
         let module = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("bench_flip_mac"),
@@ -1554,16 +1598,15 @@ fn measure_mac_projection(
         });
         let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
             label: Some("bench_flip_mac"),
-            layout: None,
+            layout: Some(&pipeline_layout),
             module: &module,
             entry_point: Some(entry),
             compilation_options: PipelineCompilationOptions::default(),
             cache: None,
         });
-        let layout = pipeline.get_bind_group_layout(0);
         let bind_group = device.create_bind_group(&BindGroupDescriptor {
             label: Some("bench_flip_mac_bind_group"),
-            layout: &layout,
+            layout: &bind_layout,
             entries: &[
                 BindGroupEntry {
                     binding: 0,
