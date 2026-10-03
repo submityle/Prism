@@ -39,6 +39,7 @@ pub mod fft_plan;
 pub mod fft_stage_kernel;
 pub mod flip_mac_divergence_kernel;
 pub mod flip_mac_pressure_kernel;
+pub mod flip_mac_project_kernel;
 pub mod pbf_density_kernel;
 pub mod pipeline;
 pub mod render_fx_kernel;
@@ -138,6 +139,10 @@ pub use flip_mac_divergence_kernel::{
 
 pub use flip_mac_pressure_kernel::{
     dispatch_mac_pressure, MacPressureParams, WATER_FLIP_MAC_PRESSURE_WESL,
+};
+
+pub use flip_mac_project_kernel::{
+    dispatch_mac_project, MacProjectParams, WATER_FLIP_MAC_PROJECT_WESL,
 };
 
 pub use pbf_density_kernel::{
