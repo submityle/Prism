@@ -138,6 +138,25 @@ impl SubApp {
     /// time and fixed-loop steps, so a clock-less secondary sub-app still runs
     /// its variable-step phases.
     pub fn update(&mut self) {
+        // Opt-in observability (design §16): when a `FrameDiagnostics` resource
+        // is present on this world, run the timed path; otherwise run the plain
+        // phase sequence so an un-observed frame pays nothing.
+        #[cfg(feature = "std")]
+        if self
+            .world
+            .get_resource::<crate::diagnostics::FrameDiagnostics>()
+            .is_some()
+        {
+            self.update_instrumented();
+            return;
+        }
+        self.update_phases();
+    }
+
+    /// The plain, un-instrumented per-frame phase sequence (design §7). This is
+    /// the hot path when no [`FrameDiagnostics`](crate::diagnostics::FrameDiagnostics)
+    /// is installed, and the body the instrumented path mirrors.
+    fn update_phases(&mut self) {
         crate::time::advance_time(&mut self.world);
         self.run_schedule(First);
         crate::fixed::run_fixed_main_loop(&mut self.world);
@@ -146,6 +165,55 @@ impl SubApp {
         self.run_schedule(Update);
         self.run_schedule(PostUpdate);
         self.run_schedule(Last);
+    }
+
+    /// The frame sequence wrapped in wall-clock timing, taken only when a
+    /// [`FrameDiagnostics`](crate::diagnostics::FrameDiagnostics) resource is
+    /// present on this world. Records the whole-frame work time plus each
+    /// phase's duration; the fixed loop records its own substep count (see
+    /// [`run_fixed_main_loop`](crate::fixed::run_fixed_main_loop)).
+    #[cfg(feature = "std")]
+    fn update_instrumented(&mut self) {
+        use crate::diagnostics::FrameDiagnostics;
+        use std::time::Instant;
+
+        let frame_start = Instant::now();
+        crate::time::advance_time(&mut self.world);
+
+        self.run_phase_timed(First, "First");
+
+        let fixed_start = Instant::now();
+        crate::fixed::run_fixed_main_loop(&mut self.world);
+        let fixed_elapsed = fixed_start.elapsed();
+        if let Some(diag) = self.world.get_resource_mut::<FrameDiagnostics>() {
+            diag.record_phase("RunFixedMainLoop", fixed_elapsed);
+        }
+
+        self.run_phase_timed(PreUpdate, "PreUpdate");
+        self.run_phase_timed(StateTransition, "StateTransition");
+        self.run_phase_timed(Update, "Update");
+        self.run_phase_timed(PostUpdate, "PostUpdate");
+        self.run_phase_timed(Last, "Last");
+
+        let frame_elapsed = frame_start.elapsed();
+        if let Some(diag) = self.world.get_resource_mut::<FrameDiagnostics>() {
+            diag.record_frame(frame_elapsed);
+        }
+    }
+
+    /// Run one phase schedule, recording its wall-clock duration into the
+    /// present [`FrameDiagnostics`](crate::diagnostics::FrameDiagnostics).
+    #[cfg(feature = "std")]
+    fn run_phase_timed(&mut self, label: impl ScheduleLabel, phase: &'static str) {
+        let start = std::time::Instant::now();
+        self.run_schedule(label);
+        let elapsed = start.elapsed();
+        if let Some(diag) = self
+            .world
+            .get_resource_mut::<crate::diagnostics::FrameDiagnostics>()
+        {
+            diag.record_phase(phase, elapsed);
+        }
     }
 }
 

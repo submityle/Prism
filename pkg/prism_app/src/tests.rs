@@ -2198,3 +2198,249 @@ fn app_apply_cli_overrides_and_typed_getters() {
     // Unset key resolves to None through the App getter.
     assert_eq!(app.setting("missing"), None);
 }
+
+// ---- diagnostics (design §16: frame stats / phase timing / startup cost) ----
+//
+// The whole observability module and all five instrumentation hooks live behind
+// `#[cfg(feature = "std")]` (they need a wall clock), with zero-overhead plain
+// fallbacks, so these tests compile only when `std` is enabled. They assert the
+// opt-in contract (nothing is installed by default), the per-frame / per-phase /
+// substep collection, per-plugin startup timing, and the `CountWindow` helper.
+#[cfg(feature = "std")]
+mod diagnostics_tests {
+    use super::*;
+
+    use crate::diagnostics::{CountWindow, FrameDiagnostics, TIMED_FRAME_PHASES};
+
+    /// Diagnostics are opt-in: a fresh `App` installs neither resource, and the
+    /// plain (un-instrumented) frame path still drives `Update` normally.
+    #[test]
+    fn diagnostics_absent_by_default() {
+        let ran = Arc::new(AtomicU64::new(0));
+        let r = ran.clone();
+
+        let mut app = App::new();
+        assert!(app.frame_diagnostics().is_none());
+        assert!(app.startup_diagnostics().is_none());
+
+        app.add_systems(Update, move || {
+            r.fetch_add(1, Ordering::Relaxed);
+        });
+        app.update();
+
+        // Plain path ran the frame, and still nothing was installed.
+        assert_eq!(ran.load(Ordering::Relaxed), 1);
+        assert!(app.frame_diagnostics().is_none());
+    }
+
+    /// After `init_frame_diagnostics` the instrumented path records one frame per
+    /// `update()` and times every core phase (see `TIMED_FRAME_PHASES`).
+    #[test]
+    fn frame_diagnostics_records_frames_and_every_core_phase() {
+        let mut app = App::new();
+        // A clock so the fixed loop actually runs (and `RunFixedMainLoop` times).
+        app.set_time_update_strategy(TimeUpdateStrategy::ManualDelta(Duration::from_millis(10)));
+        app.set_fixed_timestep_hz(100.0);
+        app.init_frame_diagnostics();
+
+        const FRAMES: u64 = 4;
+        for _ in 0..FRAMES {
+            app.update();
+        }
+
+        let diag = app.frame_diagnostics().expect("installed");
+        assert_eq!(diag.frame_time().total_frames(), FRAMES);
+        // Every core phase was timed, including the fixed loop, every frame.
+        for phase in TIMED_FRAME_PHASES {
+            let stats = diag
+                .phase(phase)
+                .unwrap_or_else(|| panic!("phase {phase} should be timed"));
+            assert_eq!(stats.total_frames(), FRAMES, "phase {phase} per-frame count");
+        }
+        // The deterministic phase iterator yields exactly the core phases.
+        assert_eq!(diag.phases().count(), TIMED_FRAME_PHASES.len());
+    }
+
+    /// The substep counter records how many fixed steps ran each frame: one step
+    /// when the frame delta equals the fixed period, three when it is triple.
+    #[test]
+    fn frame_diagnostics_counts_fixed_substeps() {
+        // 100 Hz => 10 ms period; feed exactly one period per frame.
+        let mut app = App::new();
+        app.set_time_update_strategy(TimeUpdateStrategy::ManualDelta(Duration::from_millis(10)));
+        app.set_fixed_timestep_hz(100.0);
+        app.init_frame_diagnostics();
+        app.update();
+        assert_eq!(app.frame_diagnostics().unwrap().fixed_substeps().last(), Some(1));
+
+        // 30 ms per frame => three 10 ms substeps.
+        let mut app = App::new();
+        app.set_time_update_strategy(TimeUpdateStrategy::ManualDelta(Duration::from_millis(30)));
+        app.set_fixed_timestep_hz(100.0);
+        app.init_frame_diagnostics();
+        app.update();
+        let subs = app.frame_diagnostics().unwrap().fixed_substeps();
+        assert_eq!(subs.last(), Some(3));
+        assert_eq!(subs.total_samples(), 1);
+        assert_eq!(subs.max(), Some(3));
+    }
+
+    /// The rolling window bounds memory: after more frames than the window, the
+    /// per-metric sample count saturates at the window while the lifetime frame
+    /// total keeps climbing.
+    #[test]
+    fn frame_diagnostics_window_bounds_memory() {
+        let mut app = App::new();
+        app.set_time_update_strategy(TimeUpdateStrategy::ManualDelta(Duration::from_millis(10)));
+        app.set_fixed_timestep_hz(100.0);
+        app.init_frame_diagnostics_with_window(3);
+
+        for _ in 0..7 {
+            app.update();
+        }
+
+        let diag = app.frame_diagnostics().unwrap();
+        assert_eq!(diag.window(), 3);
+        assert_eq!(diag.frame_time().len(), 3, "window caps live samples");
+        assert_eq!(diag.frame_time().total_frames(), 7, "lifetime total is unbounded");
+        assert_eq!(diag.fixed_substeps().len(), 3);
+        assert_eq!(diag.fixed_substeps().total_samples(), 7);
+    }
+
+    /// `init_frame_diagnostics` is idempotent: a second call keeps the resource
+    /// (and its accumulated history) rather than resetting it.
+    #[test]
+    fn init_frame_diagnostics_is_idempotent() {
+        let mut app = App::new();
+        app.set_time_update_strategy(TimeUpdateStrategy::ManualDelta(Duration::from_millis(10)));
+        app.set_fixed_timestep_hz(100.0);
+        app.init_frame_diagnostics();
+        app.update();
+        app.update();
+        assert_eq!(app.frame_diagnostics().unwrap().frame_time().total_frames(), 2);
+
+        // A redundant init (even with a different window) must not wipe history.
+        app.init_frame_diagnostics_with_window(999);
+        let diag = app.frame_diagnostics().unwrap();
+        assert_eq!(diag.frame_time().total_frames(), 2, "history preserved");
+        assert_eq!(diag.window(), FrameDiagnostics::DEFAULT_WINDOW, "window unchanged");
+    }
+
+    struct NoopBuild;
+    impl Plugin for NoopBuild {
+        fn build(&self, _app: &mut App) {}
+        fn name(&self) -> &str {
+            "noop"
+        }
+    }
+
+    struct SlowBuild;
+    impl Plugin for SlowBuild {
+        fn build(&self, _app: &mut App) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        fn name(&self) -> &str {
+            "slow-build"
+        }
+    }
+
+    struct SlowFinish;
+    impl Plugin for SlowFinish {
+        fn build(&self, _app: &mut App) {}
+        fn finish(&self, _app: &mut App) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        fn name(&self) -> &str {
+            "slow-finish"
+        }
+    }
+
+    /// With `StartupDiagnostics` installed before `add_plugins`, each plugin's
+    /// build is timed in registration order, and `slowest_build` fingers the
+    /// deliberately slow one.
+    #[test]
+    fn startup_diagnostics_times_plugin_builds() {
+        let mut app = App::new();
+        app.init_startup_diagnostics();
+        app.add_plugins(NoopBuild);
+        app.add_plugins(SlowBuild);
+
+        let diag = app.startup_diagnostics().expect("installed");
+        let names: Vec<&str> = diag.plugins().iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["noop", "slow-build"], "timed in registration order");
+
+        let slowest = diag.slowest_build().expect("non-empty");
+        assert_eq!(slowest.name, "slow-build");
+        assert!(slowest.build >= Duration::from_millis(5), "slow build measured");
+        assert!(diag.total_build() >= Duration::from_millis(5));
+    }
+
+    /// `finish` timings are filled in against the matching build entry when
+    /// `App::finish` runs; a plugin that overrides nothing stays at `ZERO`.
+    #[test]
+    fn startup_diagnostics_records_finish() {
+        let mut app = App::new();
+        app.init_startup_diagnostics();
+        app.add_plugins(NoopBuild);
+        app.add_plugins(SlowFinish);
+        app.finish();
+
+        let diag = app.startup_diagnostics().expect("installed");
+        let noop = diag.plugins().iter().find(|p| p.name == "noop").unwrap();
+        let slow = diag.plugins().iter().find(|p| p.name == "slow-finish").unwrap();
+        // Every plugin's finish is timed, so a no-op finish records a tiny (not
+        // literally zero) duration; the deliberately slow one dwarfs it.
+        assert!(slow.finish >= Duration::from_millis(5), "slow finish measured");
+        assert!(slow.finish > noop.finish, "slow finish outweighs the no-op");
+        assert!(diag.total_finish() >= Duration::from_millis(5));
+    }
+
+    /// Without `init_startup_diagnostics`, adding plugins installs nothing and
+    /// no build timings are retroactively invented.
+    #[test]
+    fn startup_diagnostics_absent_before_init() {
+        let mut app = App::new();
+        app.add_plugins(NoopBuild);
+        assert!(app.startup_diagnostics().is_none());
+    }
+
+    /// `CountWindow` reports last/average/max/min over its live window, evicts
+    /// the oldest sample past the window, and keeps a lifetime total.
+    #[test]
+    fn count_window_records_evicts_and_summarises() {
+        let mut w = CountWindow::new(3);
+        assert!(w.is_empty());
+        assert_eq!(w.last(), None);
+        assert_eq!(w.average(), None);
+
+        w.record(10);
+        w.record(20);
+        w.record(30);
+        assert_eq!(w.len(), 3);
+        assert_eq!(w.total_samples(), 3);
+        assert_eq!(w.last(), Some(30));
+        assert_eq!(w.min(), Some(10));
+        assert_eq!(w.max(), Some(30));
+        assert_eq!(w.average(), Some(20.0));
+
+        // Fourth sample evicts the oldest (10); the lifetime total still grows.
+        w.record(40);
+        assert_eq!(w.len(), 3, "window stays bounded");
+        assert_eq!(w.total_samples(), 4);
+        assert_eq!(w.last(), Some(40));
+        assert_eq!(w.min(), Some(20));
+        assert_eq!(w.max(), Some(40));
+        assert_eq!(w.average(), Some(30.0));
+    }
+
+    /// A `0` window is clamped to `1`, so the last sample is always retained.
+    #[test]
+    fn count_window_zero_window_clamped_to_one() {
+        let mut w = CountWindow::new(0);
+        w.record(7);
+        w.record(9);
+        assert_eq!(w.len(), 1);
+        assert_eq!(w.last(), Some(9));
+        assert_eq!(w.total_samples(), 2);
+    }
+}

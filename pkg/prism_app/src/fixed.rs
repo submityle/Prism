@@ -113,6 +113,16 @@ pub fn run_fixed_main_loop(world: &mut World) {
         .resource_mut::<EngineClocks>()
         .set_source(DefaultSource::Fixed);
 
+    // Count substeps only when frame diagnostics are being collected (design
+    // §16: fixed-step substep count), so the un-observed path pays nothing but
+    // a single resource presence check per frame.
+    #[cfg(feature = "std")]
+    let instrument = world
+        .get_resource::<crate::diagnostics::FrameDiagnostics>()
+        .is_some();
+    #[cfg(feature = "std")]
+    let mut substeps: u32 = 0;
+
     loop {
         let stepped = {
             let clocks = world.resource_mut::<EngineClocks>();
@@ -126,6 +136,11 @@ pub fn run_fixed_main_loop(world: &mut World) {
             break;
         }
 
+        #[cfg(feature = "std")]
+        if instrument {
+            substeps = substeps.saturating_add(1);
+        }
+
         world.run_schedule(FixedFirst);
         world.run_schedule(FixedPreUpdate);
         world.run_schedule(FixedUpdate);
@@ -136,6 +151,13 @@ pub fn run_fixed_main_loop(world: &mut World) {
     let clocks = world.resource_mut::<EngineClocks>();
     clocks.set_source(DefaultSource::Virtual);
     clocks.sync_default();
+
+    #[cfg(feature = "std")]
+    if instrument
+        && let Some(diag) = world.get_resource_mut::<crate::diagnostics::FrameDiagnostics>()
+    {
+        diag.record_substeps(substeps);
+    }
 }
 
 // Compile-time proof that every fixed phase satisfies the ECS `ScheduleLabel`

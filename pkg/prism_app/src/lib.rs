@@ -97,6 +97,12 @@
 //!   no rendering, publishing live [`ServerTickDiagnostics`] so server
 //!   systems can detect tick overload. Networking stays in the
 //!   `prism_replication` layer (injected as a plugin), not this runner.
+//! - Opt-in [observability](crate::diagnostics) (design §16, §22 M6): rolling
+//!   [`FrameDiagnostics`] (whole-frame work time, per-phase timing, and the
+//!   fixed-step substep count) plus per-plugin [`StartupDiagnostics`]
+//!   (`build`/`finish` wall time). Neither is installed by default, so an
+//!   un-observed frame pays only a single resource-presence check. Extract
+//!   cost, pipeline-overlap rate, and present latency are honestly deferred.
 //!
 //! Everything on the public surface is a **real, working implementation** —
 //! no `todo!()`, `unimplemented!()`, or hollow stubs. Later milestones (sub-app
@@ -121,6 +127,8 @@ pub mod event;
 pub mod exit;
 pub mod fixed;
 pub mod lifecycle;
+#[cfg(feature = "std")]
+pub mod diagnostics;
 #[cfg(feature = "std")]
 pub mod pacing;
 pub mod plugin;
@@ -152,6 +160,10 @@ pub use lifecycle::{
     AppLifecycle, FocusChanged, LowMemory, Resumed, Suspended, WillRenderFirstFrame,
 };
 #[cfg(feature = "std")]
+pub use diagnostics::{
+    CountWindow, FrameDiagnostics, PluginStartupTiming, StartupDiagnostics,
+};
+#[cfg(feature = "std")]
 pub use pacing::{FrameLimit, FramePacer, FrameStats};
 pub use schedule::{
     First, Last, PostStartup, PostUpdate, PreStartup, PreUpdate, Shutdown, StateTransition, Startup,
@@ -179,6 +191,10 @@ pub mod prelude {
     pub use crate::fixed::{FixedFirst, FixedLast, FixedPostUpdate, FixedPreUpdate, FixedUpdate};
     pub use crate::lifecycle::{
         AppLifecycle, FocusChanged, LowMemory, Resumed, Suspended, WillRenderFirstFrame,
+    };
+    #[cfg(feature = "std")]
+    pub use crate::diagnostics::{
+        CountWindow, FrameDiagnostics, PluginStartupTiming, StartupDiagnostics,
     };
     #[cfg(feature = "std")]
     pub use crate::pacing::{FrameLimit, FramePacer, FrameStats};

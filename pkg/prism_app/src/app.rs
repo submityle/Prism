@@ -178,6 +178,23 @@ impl App {
                 plugin.name()
             );
         }
+        // Time this plugin's build when startup diagnostics are being
+        // collected (design §16: "启动耗时"); otherwise just build.
+        #[cfg(feature = "std")]
+        {
+            let start = std::time::Instant::now();
+            plugin.build(self);
+            let elapsed = start.elapsed();
+            if let Some(diag) = self
+                .sub_apps
+                .main
+                .world
+                .get_resource_mut::<crate::diagnostics::StartupDiagnostics>()
+            {
+                diag.record_build(plugin.name(), elapsed);
+            }
+        }
+        #[cfg(not(feature = "std"))]
         plugin.build(self);
         self.plugins.push(plugin);
     }
@@ -342,6 +359,23 @@ impl App {
         self.plugins_state = PluginsState::Ready;
         let plugins = core::mem::take(&mut self.plugins);
         for plugin in &plugins {
+            // Time this plugin's finish when startup diagnostics are present
+            // (design §16); otherwise just finish.
+            #[cfg(feature = "std")]
+            {
+                let start = std::time::Instant::now();
+                plugin.finish(self);
+                let elapsed = start.elapsed();
+                if let Some(diag) = self
+                    .sub_apps
+                    .main
+                    .world
+                    .get_resource_mut::<crate::diagnostics::StartupDiagnostics>()
+                {
+                    diag.record_finish(plugin.name(), elapsed);
+                }
+            }
+            #[cfg(not(feature = "std"))]
             plugin.finish(self);
         }
         self.plugins = plugins;
