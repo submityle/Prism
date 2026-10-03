@@ -25,6 +25,11 @@ mod resources;
 // consume them arrive in the following slices.
 mod pipeline;
 
+// Per-view group-0 bind group + per-frame config-uniform upload for the reuse
+// dispatch. Consumes `pipeline`'s layout and `resources`' ping-pong accessors;
+// the `Core3d` dispatch node that records against it arrives in the next slice.
+mod bind_groups;
+
 #[cfg(test)]
 mod shader_tests;
 

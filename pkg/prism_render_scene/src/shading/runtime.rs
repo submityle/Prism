@@ -74,6 +74,26 @@ pub struct PrismShadingSettings {
     /// specular estimate (+ confidence) the `spec_denoise` passes and the
     /// energy-conserving composite consume. Off by default.
     pub enable_spec_gi: bool,
+    /// Temporal confidence cap `M` the glossy-specular reuse pass clamps the
+    /// reprojected prior-frame reservoir to before merging this frame's
+    /// candidate (the ReSTIR history clamp; feeds `GpuSpecGiReuseConfig::m_cap`
+    /// and the golden `glossy_reservoir` M-cap). Higher values trust more
+    /// history (less noise, slower to react); lower values react faster at more
+    /// variance. Mirrors the golden base M-cap of `32.0`.
+    pub spec_gi_temporal_m_cap: f32,
+    /// Base confidence cap fed to the golden `roughness_confidence_cap(roughness,
+    /// base_cap)` the reuse merge applies: sharp (low-roughness) surfaces have
+    /// their effective cap tightened below this so stale glossy history is
+    /// dropped faster where it would smear a crisp reflection, while rough
+    /// surfaces keep the full base cap. Mirrors the golden base of `32.0`.
+    pub spec_gi_roughness_cap_base: f32,
+    /// Roughness reuse tolerance `sigma` the golden `merge_glossy` divides the
+    /// roughness delta by when deciding whether two reservoirs describe a
+    /// compatible lobe: a smaller sigma rejects neighbours/history whose
+    /// roughness differs even slightly (sharper, noisier), a larger one reuses
+    /// across a wider roughness band (smoother, risks over-blur). Feeds
+    /// `GpuSpecGiReuseConfig::sigma_roughness`.
+    pub spec_gi_sigma_roughness: f32,
     /// Enables the temporal anti-aliasing (TAA) resolve compute pass. Requires
     /// the visibility buffer (for the composited `scene_color` and the
     /// motion-vector G-buffer); the pass motion-reprojects and YCoCg-variance
@@ -213,6 +233,9 @@ impl Default for PrismShadingSettings {
             ibl_prefilter_sample_count: 256,
             enable_ssr: false,
             enable_spec_gi: false,
+            spec_gi_temporal_m_cap: 32.0,
+            spec_gi_roughness_cap_base: 32.0,
+            spec_gi_sigma_roughness: 0.25,
             enable_taa: false,
             enable_virtual_shadow: false,
             enable_ssgi: false,
