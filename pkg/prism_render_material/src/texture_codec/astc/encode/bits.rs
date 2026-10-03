@@ -45,6 +45,25 @@ impl BlockWriter {
         }
     }
 
+    /// OR a fully-ISE-encoded weight stream (held LSB-first from bit 0 of
+    /// `scratch`) into the top of the block in bit-reversed order: scratch bit
+    /// `p` lands at block bit `127 - p`. This is the exact inverse of the
+    /// decoder's `weights::reverse_block_bits` + `decode_ise(.., 0, ..)` path,
+    /// so it packs trit/quint weight ranges (e.g. QUANT_6) that the per-weight
+    /// [`Self::write_weights_reversed`] bit-only writer cannot express.
+    ///
+    /// `scratch` must hold only the weight stream (zero elsewhere); the block's
+    /// mode/CEM/colour fields never collide because the reversed stream lands
+    /// in the high bits above the colour region.
+    pub(super) fn mirror_weight_stream(&mut self, scratch: &[u8; 16]) {
+        for p in 0..128u32 {
+            if (scratch[(p >> 3) as usize] >> (p & 7)) & 1 == 1 {
+                let q = 127 - p;
+                self.block[(q >> 3) as usize] |= 1 << (q & 7);
+            }
+        }
+    }
+
     /// Consume the writer and return the packed block.
     pub(super) fn into_block(self) -> [u8; 16] {
         self.block

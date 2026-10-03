@@ -219,6 +219,58 @@ pub fn encode_astc_single_partition_4x4_ldr_rgba(texels: &[[u8; 4]; 16]) -> [u8;
     w.into_block()
 }
 
+/// Encode sixteen `RGBA8` texels into a single 4x4 ASTC LDR block using a
+/// **finer-weight CEM-12** configuration:
+///
+/// * **block mode 67** (`0b1000011`): a 4x4 weight grid, single plane, weight
+///   range QUANT_6 (one trit + one low bit -> **six** interpolation levels) --
+///   42 weight bits;
+/// * **single partition**, **CEM 12** (RGBA direct, eight colour integers);
+/// * **QUANT_256 colour**: `color_bits = 111 - 42 = 69` with eight CEM-12
+///   integers gives colour quant level QUANT_256 (8-bit identity), so the eight
+///   endpoint bytes -- including both alphas -- are written straight into the
+///   block and decode back bit-for-bit.
+///
+/// Six weight levels (vs the four of [`encode_astc_single_partition_4x4_ldr_rgba`])
+/// reconstruct smooth gradients more tightly while still carrying real alpha.
+/// The weight stream is a trit BISE sequence, so it is packed with
+/// `trit_quint::encode_trit_sequence` + `bits::BlockWriter::mirror_weight_stream`
+/// (the exact inverse of the decoder's reversed-ISE weight path) rather than the
+/// bit-only `write_weights_reversed`.
+#[must_use]
+pub fn encode_astc_single_partition_4x4_ldr_rgba_q6(texels: &[[u8; 4]; 16]) -> [u8; 16] {
+    const BLOCK_MODE: u32 = 67;
+    const CEM_RGBA_DIRECT: u32 = 12;
+    const WEIGHT_LEVELS: u32 = 6; // QUANT_6: one trit + one low bit
+    const WEIGHT_LOW_BITS: u32 = 1; // trit range low bits (bits==1)
+
+    // Fit RGBA endpoints ordered so hadd_rgb(e0) <= hadd_rgb(e1); the CEM-12
+    // decoder then takes its plain (no blue-contraction swap) path and, with
+    // QUANT_256 identity colour, reconstructs these bytes exactly. Weights are
+    // fitted against the same endpoints over all four channels using the full
+    // trit-aware unquantiser.
+    let (e0, e1) = endpoint_fit::fit_rgba_endpoints(texels);
+    let raw = weight_fit::quantize_weights_ise_rgba(texels, e0, e1, WEIGHT_LEVELS);
+
+    let mut w = bits::BlockWriter::new();
+    w.write_bits(0, 11, BLOCK_MODE);
+    // CEM field (4 bits at block bit 13): value 12.
+    w.write_bits(13, 4, CEM_RGBA_DIRECT);
+    // Eight 8-bit colour values at block bit 17, LSB-first, in the decoder's
+    // read order [e0.r, e1.r, e0.g, e1.g, e0.b, e1.b, e0.a, e1.a].
+    let vals = [e0[0], e1[0], e0[1], e1[1], e0[2], e1[2], e0[3], e1[3]];
+    for (i, v) in vals.iter().enumerate() {
+        w.write_bits(17 + i as u32 * 8, 8, u32::from(*v));
+    }
+    // Encode the sixteen trit weights into a scratch block LSB-first from bit 0,
+    // then mirror the 42-bit stream into the top of the block (bit p -> 127-p),
+    // which is the exact inverse of the decoder's reversed-ISE weight read.
+    let mut scratch = [0u8; 16];
+    super::trit_quint::encode_trit_sequence(&mut scratch, 0, WEIGHT_LOW_BITS, &raw);
+    w.mirror_weight_stream(&scratch);
+    w.into_block()
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::decode_astc_4x4_ldr;
@@ -226,6 +278,7 @@ mod tests {
     use super::encode_astc_single_partition_4x4_ldr_q192;
     use super::encode_astc_single_partition_4x4_ldr_quality;
     use super::encode_astc_single_partition_4x4_ldr_rgba;
+    use super::encode_astc_single_partition_4x4_ldr_rgba_q6;
 
     /// Max per-channel RGB error over the sixteen texels after a round trip.
     fn max_rgb_err(src: &[[u8; 4]; 16], dec: &[[u8; 4]; 16]) -> i32 {
@@ -469,6 +522,49 @@ mod tests {
         assert!(
             dec.iter().any(|d| d[3] < 200),
             "every decoded alpha was >= 200 -- alpha looks forced, not carried"
+        );
+    }
+
+    #[test]
+    fn rgba_q6_constant_block_round_trips_exactly_incl_alpha() {
+        // Coincident endpoints => QUANT_256 identity reproduces the colour and
+        // the real alpha exactly, exactly as the four-level CEM-12 encoder does.
+        let src = [[73u8, 150, 211, 128]; 16];
+        let blk = encode_astc_single_partition_4x4_ldr_rgba_q6(&src);
+        let dec = decode_astc_4x4_ldr(&blk).expect("decode constant RGBA q6 block");
+        assert_eq!(
+            max_rgba_err(&src, &dec),
+            0,
+            "constant RGBA q6 block mismatch"
+        );
+        for d in &dec {
+            assert_eq!(d[3], 128, "CEM 12 q6 must carry the real alpha, not 255");
+        }
+    }
+
+    #[test]
+    fn rgba_q6_reconstructs_gradient_tighter_than_four_levels() {
+        // A smooth on-axis grayscale ramp: both encoders fit identical RGBA
+        // endpoints (same `fit_rgba_endpoints`), so the only difference is weight
+        // resolution. Six trit levels must bracket the ramp more tightly than the
+        // four bit-only levels of the M4 CEM-12 encoder.
+        let src: [[u8; 4]; 16] = core::array::from_fn(|t| {
+            let v = (t * 17) as u8; // 0..255 across the 16 texels
+            [v, v, v, 255]
+        });
+
+        let blk_m4 = encode_astc_single_partition_4x4_ldr_rgba(&src);
+        let blk_q6 = encode_astc_single_partition_4x4_ldr_rgba_q6(&src);
+
+        let dec_m4 = decode_astc_4x4_ldr(&blk_m4).expect("decode M4 gradient");
+        let dec_q6 = decode_astc_4x4_ldr(&blk_q6).expect("decode q6 gradient");
+
+        let err_m4 = max_rgba_err(&src, &dec_m4);
+        let err_q6 = max_rgba_err(&src, &dec_q6);
+
+        assert!(
+            err_q6 < err_m4,
+            "six-level weights ({err_q6}) did not beat four-level weights ({err_m4})"
         );
     }
 }
