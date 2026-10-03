@@ -36,6 +36,22 @@ pub struct Retirer {
 }
 
 impl Retirer {
+    /// Creates a retirement queue with `capacity` pre-allocated slots and
+    /// returns the paired [`Retirer`] (audio thread) and [`Collector`] (task
+    /// thread).
+    ///
+    /// `capacity` is clamped up to `1`.
+    #[must_use]
+    pub fn new(capacity: usize) -> (Self, Collector) {
+        let queue = Arc::new(ArrayQueue::new(capacity.max(1)));
+        (
+            Retirer {
+                queue: Arc::clone(&queue),
+            },
+            Collector { queue },
+        )
+    }
+
     /// Hands `resource` off to be dropped by a [`Collector`].
     ///
     /// This does not run the resource's destructor; it only moves ownership
@@ -105,30 +121,9 @@ impl Collector {
 
 /// A bounded queue for deferred reclamation. Construct with [`RetireQueue::new`]
 /// to obtain the paired [`Retirer`] (audio thread) and [`Collector`] (task
-/// thread).
-#[derive(Debug)]
-pub struct RetireQueue;
-
-impl RetireQueue {
-    /// Creates a retirement queue with `capacity` pre-allocated slots and
-    /// returns the paired [`Retirer`] and [`Collector`].
-    ///
-    /// `capacity` is clamped up to `1`.
-    #[must_use]
-    #[expect(
-        clippy::new_ret_no_self,
-        reason = "constructor returns the paired producer/consumer halves, like a channel"
-    )]
-    pub fn new(capacity: usize) -> (Retirer, Collector) {
-        let queue = Arc::new(ArrayQueue::new(capacity.max(1)));
-        (
-            Retirer {
-                queue: Arc::clone(&queue),
-            },
-            Collector { queue },
-        )
-    }
-}
+/// thread). This names the audio-thread [`Retirer`] half, whose
+/// [`new`](Retirer::new) also yields the paired [`Collector`].
+pub type RetireQueue = Retirer;
 
 /// The task-thread half of a [`GraphHandoff`]: publishes a compiled graph to
 /// the audio thread.
@@ -139,6 +134,19 @@ pub struct GraphProducer {
 }
 
 impl GraphProducer {
+    /// Creates the paired [`GraphProducer`] (task thread) and [`GraphConsumer`]
+    /// (audio thread).
+    #[must_use]
+    pub fn new() -> (Self, GraphConsumer) {
+        let slot = Arc::new(ArrayQueue::new(1));
+        (
+            GraphProducer {
+                slot: Arc::clone(&slot),
+            },
+            GraphConsumer { slot },
+        )
+    }
+
     /// Publishes `graph` for the audio thread to swap in on its next block.
     ///
     /// The slot holds a single pending graph. If a previously published graph
@@ -183,28 +191,10 @@ impl GraphConsumer {
 }
 
 /// A capacity-one hand-off channel that publishes a compiled [`AudioGraph`] to
-/// the audio thread. Construct with [`GraphHandoff::new`].
-#[derive(Debug)]
-pub struct GraphHandoff;
-
-impl GraphHandoff {
-    /// Creates the paired [`GraphProducer`] (task thread) and [`GraphConsumer`]
-    /// (audio thread).
-    #[must_use]
-    #[expect(
-        clippy::new_ret_no_self,
-        reason = "constructor returns the paired producer/consumer halves, like a channel"
-    )]
-    pub fn new() -> (GraphProducer, GraphConsumer) {
-        let slot = Arc::new(ArrayQueue::new(1));
-        (
-            GraphProducer {
-                slot: Arc::clone(&slot),
-            },
-            GraphConsumer { slot },
-        )
-    }
-}
+/// the audio thread. Construct with [`GraphHandoff::new`]. This names the
+/// task-thread [`GraphProducer`] half, whose [`new`](GraphProducer::new) also
+/// yields the paired [`GraphConsumer`].
+pub type GraphHandoff = GraphProducer;
 
 #[cfg(test)]
 mod tests {
