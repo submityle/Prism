@@ -26,6 +26,9 @@ use crate::client_resource::{AudioClient, AudioRuntimeHost};
 use crate::emitter::AudioEmitter;
 use crate::listener::AudioListener;
 use crate::master_gain::MasterGain;
+use crate::playback::PlaybackSettings;
+use crate::player::AudioPlayer;
+use crate::player_systems::{apply_player_disposition, sync_audio_players};
 use crate::systems::{
     apply_master_gain, apply_physical_budget, flush_pending_stops, pump_telemetry, spawn_voices,
     stop_flagged_voices, stop_removed_voices, update_importance, AudioSystems,
@@ -75,16 +78,20 @@ impl Plugin for AudioRuntimePlugin {
             let world = app.world_mut();
             world.register_component::<AudioEmitter>();
             world.register_component::<AudioListener>();
+            world.register_component::<AudioPlayer>();
+            world.register_component::<PlaybackSettings>();
         }
 
         app.add_systems(
             Update,
             (
+                sync_audio_players,
                 flush_pending_stops,
                 spawn_voices,
                 update_importance,
                 stop_flagged_voices,
                 stop_removed_voices,
+                apply_player_disposition,
                 apply_master_gain,
                 apply_physical_budget,
                 pump_telemetry,

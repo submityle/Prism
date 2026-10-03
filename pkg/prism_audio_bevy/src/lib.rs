@@ -55,20 +55,28 @@ pub mod commands;
 pub mod emitter;
 pub mod listener;
 pub mod master_gain;
+pub mod playback;
+pub mod player;
+pub mod player_systems;
 pub mod plugin;
 pub mod systems;
 pub mod telemetry;
 pub mod voice_registry;
+pub mod volume;
 
 pub use budget::PhysicalVoiceBudget;
 pub use client_resource::{AudioClient, AudioRuntimeHost};
 pub use emitter::AudioEmitter;
 pub use listener::AudioListener;
 pub use master_gain::MasterGain;
+pub use playback::{PlaybackMode, PlaybackSettings};
+pub use player::AudioPlayer;
+pub use player_systems::{apply_player_disposition, sync_audio_players};
 pub use plugin::AudioRuntimePlugin;
 pub use systems::AudioSystems;
 pub use telemetry::AudioTelemetry;
 pub use voice_registry::{LiveVoices, PendingStops, VoiceMirror};
+pub use volume::Volume;
 
 /// Commonly used items, re-exported for convenient glob import.
 pub mod prelude {
@@ -77,8 +85,11 @@ pub mod prelude {
     pub use crate::emitter::AudioEmitter;
     pub use crate::listener::AudioListener;
     pub use crate::master_gain::MasterGain;
+    pub use crate::playback::{PlaybackMode, PlaybackSettings};
+    pub use crate::player::AudioPlayer;
     pub use crate::plugin::AudioRuntimePlugin;
     pub use crate::systems::AudioSystems;
     pub use crate::telemetry::AudioTelemetry;
     pub use crate::voice_registry::{LiveVoices, PendingStops, VoiceMirror};
+    pub use crate::volume::Volume;
 }
