@@ -32,6 +32,7 @@ pub(crate) mod ray;
 pub(crate) mod shape;
 pub(crate) mod convex_sweep;
 pub(crate) mod multi;
+pub(crate) mod test;
 
 use crate::collider::{ColliderHandle, ColliderShape};
 use crate::math::transform::Isometry;
