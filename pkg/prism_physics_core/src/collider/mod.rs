@@ -32,6 +32,9 @@ pub use decompose::{convex_decompose, DecompositionParams};
 pub mod simplify;
 
 pub use simplify::{simplify_convex_hull, SimplifiedHull, MIN_HULL_VERTICES};
+pub mod kdop;
+
+pub use kdop::{DopKind, KDop};
 
 /// A handle into a [`ShapeRegistry`].
 ///
