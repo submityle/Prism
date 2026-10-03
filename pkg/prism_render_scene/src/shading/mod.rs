@@ -7,6 +7,7 @@ mod classification_gpu;
 mod classification_readback;
 mod color_grade;
 mod composite;
+mod ddgi;
 mod dof;
 mod exposure;
 mod film_grain;
