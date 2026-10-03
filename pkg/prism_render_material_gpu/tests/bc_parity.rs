@@ -24,8 +24,9 @@ use prism_render_material::{
     decode_bc6h_mode8_unsigned, decode_bc6h_mode9_signed, decode_bc6h_mode9_unsigned,
     decode_bc6h_signed, decode_bc6h_unsigned, decode_bc7, decode_bc7_mode0, decode_bc7_mode1,
     decode_bc7_mode2, decode_bc7_mode3, decode_bc7_mode7, encode_astc_single_partition_4x4_ldr,
-    encode_astc_single_partition_4x4_ldr_q192, encode_bc1, encode_bc3, encode_bc6h_mode11_unsigned,
-    encode_bc7_mode4, encode_bc7_mode5, encode_bc7_mode6,
+    encode_astc_single_partition_4x4_ldr_q192, encode_astc_single_partition_4x4_ldr_quality,
+    encode_bc1, encode_bc3, encode_bc6h_mode11_unsigned, encode_bc7_mode4, encode_bc7_mode5,
+    encode_bc7_mode6,
 };
 use prism_render_material_gpu::BlockOracle;
 use wgpu::{Features, TextureFormat};
@@ -5086,5 +5087,138 @@ fn astc_encoder_q192_round_trip_parity_against_gpu_hardware_decode() {
     }
     eprintln!(
         "ASTC q192 encoder round-trip parity: {compared} tiles decode within 1 LSB of hardware (CEM8 mode-578 QUANT_192 colour + QUANT_16 weights)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ASTC per-block quality-search encoder parity (mode 83 vs mode 578).
+//
+// `encode_astc_single_partition_4x4_ldr_quality` encodes each block with both
+// landed single-partition encoders, decodes each on the CPU, and keeps the
+// lower sum-of-squared-RGB-error candidate. We prove on real Metal hardware
+// that (1) the chosen block decodes identically on the GPU within 1 LSB and
+// (2) its GPU reconstruction error is no worse than *either* individual mode
+// decoded on the GPU -- i.e. the selection genuinely picks the better block.
+// ---------------------------------------------------------------------------
+#[test]
+fn astc_encoder_quality_round_trip_parity_against_gpu_hardware_decode() {
+    let Some(oracle) = BlockOracle::try_new() else {
+        eprintln!("no GPU adapter; skipping ASTC quality encoder parity");
+        return;
+    };
+    if !oracle
+        .features()
+        .contains(Features::TEXTURE_COMPRESSION_ASTC)
+    {
+        eprintln!("adapter lacks ASTC support; skipping ASTC quality encoder parity");
+        return;
+    }
+    let format = TextureFormat::Astc {
+        block: wgpu::AstcBlock::B4x4,
+        channel: wgpu::AstcChannel::Unorm,
+    };
+
+    // GPU-side sum of squared RGB error of a decoded block against the source.
+    let gpu_ssd = |src: &[[u8; 4]; 16], dec: &[[u8; 4]; 16]| -> u64 {
+        let mut e = 0u64;
+        for (s, d) in src.iter().zip(dec.iter()) {
+            for c in 0..3 {
+                let v = s[c] as i64 - d[c] as i64;
+                e += (v * v) as u64;
+            }
+        }
+        e
+    };
+
+    let mut tiles: Vec<[[u8; 4]; 16]> = Vec::new();
+    // Constant blocks (few distinct colours -> mode 83's exact 8-bit endpoints
+    // often win).
+    for &rgb in &[[0u8, 0, 0], [255, 255, 255], [73, 150, 211], [12, 240, 90]] {
+        tiles.push([[rgb[0], rgb[1], rgb[2], 255]; 16]);
+    }
+    // Smooth gray ramp (fine 4-bit weights of mode 578 win).
+    tiles.push(core::array::from_fn(|t| {
+        [(t * 17) as u8, (t * 17) as u8, (t * 17) as u8, 255]
+    }));
+    // RGB gradient.
+    tiles.push(core::array::from_fn(|t| {
+        let f = t as u8 * 16;
+        [f, 255 - f, (f / 2) + 40, 255]
+    }));
+    // Two-colour checker (hard edges).
+    tiles.push(core::array::from_fn(|t| {
+        if (t / 4 + t % 4) % 2 == 0 {
+            [240, 20, 30, 255]
+        } else {
+            [10, 200, 60, 255]
+        }
+    }));
+    // Random single-axis gradient tiles.
+    let mut rng = Rng(0x0A5C_0003);
+    for _ in 0..16 {
+        let a = [rng.byte(), rng.byte(), rng.byte()];
+        let b = [rng.byte(), rng.byte(), rng.byte()];
+        tiles.push(core::array::from_fn(|t| {
+            let num = (t as u32 * 64 + 7) / 15;
+            let mix = |x: u8, y: u8| -> u8 {
+                ((u32::from(x) * (64 - num) + u32::from(y) * num + 32) / 64) as u8
+            };
+            [mix(a[0], b[0]), mix(a[1], b[1]), mix(a[2], b[2]), 255]
+        }));
+    }
+    // Fully random noise tiles.
+    for _ in 0..8 {
+        tiles.push(core::array::from_fn(|_| {
+            [rng.byte(), rng.byte(), rng.byte(), 255]
+        }));
+    }
+
+    let mut compared = 0u32;
+    let mut mode578_wins = 0u32;
+    for src in &tiles {
+        let blk83 = encode_astc_single_partition_4x4_ldr(src);
+        let blk578 = encode_astc_single_partition_4x4_ldr_q192(src);
+        let blkq = encode_astc_single_partition_4x4_ldr_quality(src);
+
+        // The chosen block must be exactly one of the two candidates.
+        assert!(
+            blkq == blk83 || blkq == blk578,
+            "quality block is not one of the mode-83/578 candidates"
+        );
+        if blkq == blk578 {
+            mode578_wins += 1;
+        }
+
+        let cpu = decode_astc_4x4_ldr(&blkq).expect("quality encoder emits a decodable block");
+        let gpu_q = oracle.decode_unorm8(format, &blkq);
+        let gpu_83 = oracle.decode_unorm8(format, &blk83);
+        let gpu_578 = oracle.decode_unorm8(format, &blk578);
+
+        for t in 0..16 {
+            // (1) CPU/GPU bitstream parity on all four channels.
+            for c in 0..4 {
+                let d = (cpu[t][c] as i32 - gpu_q[t][c] as i32).abs();
+                assert!(
+                    d <= 1,
+                    "ASTC quality encoder block={blkq:02x?} texel {t} chan {c}: cpu={} gpu={} (|d|={d})",
+                    cpu[t][c],
+                    gpu_q[t][c]
+                );
+            }
+            assert_eq!(gpu_q[t][3], 255, "CEM 8 alpha must be 255");
+        }
+
+        // (2) The selected block's GPU error is no worse than either mode.
+        let eq = gpu_ssd(src, &gpu_q);
+        let e83 = gpu_ssd(src, &gpu_83);
+        let e578 = gpu_ssd(src, &gpu_578);
+        assert!(
+            eq <= e83.min(e578),
+            "ASTC quality selection: GPU SSD {eq} worse than min(mode83 {e83}, mode578 {e578})"
+        );
+        compared += 1;
+    }
+    eprintln!(
+        "ASTC quality encoder parity: {compared} tiles decode within 1 LSB of hardware and never exceed the better of mode 83/578 (mode 578 chosen for {mode578_wins}/{compared})"
     );
 }
