@@ -6661,4 +6661,119 @@ mod cvar_tests {
         assert!(app.list_cvars_in_category(CvarCategory::Render).is_empty());
         assert!(app.find_cvars("r.").is_empty());
     }
+
+    /// `reset <name>` is a reserved console command that reverts one cvar's
+    /// runtime override, letting it fall back to the seeded default.
+    #[test]
+    fn console_reset_single_reverts_runtime_override() {
+        let mut app = App::new();
+        app.register_cvar(
+            CvarSpec::new("r.shadows", 2_i64)
+                .category(CvarCategory::Render)
+                .bounds(CvarBounds::Int(0, 4)),
+        )
+        .unwrap();
+        app.set_cvar("r.shadows", 4_i64).unwrap();
+        assert_eq!(app.cvar_int("r.shadows"), Some(4));
+
+        let outcome = app.exec_console("reset r.shadows");
+        match outcome {
+            ConsoleOutcome::Reset { name, outcome } => {
+                assert_eq!(name, "r.shadows");
+                assert!(outcome.changed);
+                assert!(!outcome.clamped);
+                assert_eq!(outcome.resolved, SettingValue::Int(2));
+            }
+            other => panic!("expected Reset, got {other:?}"),
+        }
+        // The value has fallen back to the seeded default.
+        assert_eq!(app.cvar_int("r.shadows"), Some(2));
+    }
+
+    /// A bare `reset` reverts every cvar's runtime override and reports the
+    /// changed names in ascending order.
+    #[test]
+    fn console_reset_all_reverts_every_override() {
+        let mut app = App::new();
+        app.register_cvar(CvarSpec::new("r.shadows", 2_i64).category(CvarCategory::Render))
+            .unwrap();
+        app.register_cvar(CvarSpec::new("net.tickrate", 30_i64).category(CvarCategory::Network))
+            .unwrap();
+        app.register_cvar(CvarSpec::new("r.vsync", true).category(CvarCategory::Render))
+            .unwrap();
+        // Override two of the three at runtime; leave `r.vsync` at its default.
+        app.set_cvar("r.shadows", 4_i64).unwrap();
+        app.set_cvar("net.tickrate", 128_i64).unwrap();
+
+        match app.exec_console("reset") {
+            ConsoleOutcome::ResetAll { changed } => {
+                // Only the two overridden cvars changed, ascending by name.
+                assert_eq!(changed, ["net.tickrate", "r.shadows"]);
+            }
+            other => panic!("expected ResetAll, got {other:?}"),
+        }
+        assert_eq!(app.cvar_int("r.shadows"), Some(2));
+        assert_eq!(app.cvar_int("net.tickrate"), Some(30));
+
+        // A second bare `reset` is now a no-op: nothing has an override.
+        match app.exec_console("reset") {
+            ConsoleOutcome::ResetAll { changed } => assert!(changed.is_empty()),
+            other => panic!("expected ResetAll, got {other:?}"),
+        }
+    }
+
+    /// `reset <name>` on an unregistered cvar is reported as `Unknown`, not a
+    /// panic or a silent no-op.
+    #[test]
+    fn console_reset_unknown_cvar_is_unknown() {
+        let mut app = App::new();
+        app.register_cvar(CvarSpec::new("r.shadows", 2_i64).category(CvarCategory::Render))
+            .unwrap();
+        match app.exec_console("reset no.such.cvar") {
+            ConsoleOutcome::Unknown(name) => assert_eq!(name, "no.such.cvar"),
+            other => panic!("expected Unknown, got {other:?}"),
+        }
+    }
+
+    /// `reset <name>` on a read-only cvar is rejected at the boundary.
+    #[test]
+    fn console_reset_readonly_is_rejected() {
+        let mut app = App::new();
+        app.register_cvar(
+            CvarSpec::new("sys.build", "release")
+                .category(CvarCategory::System)
+                .flag(CvarFlags::READ_ONLY),
+        )
+        .unwrap();
+        match app.exec_console("reset sys.build") {
+            ConsoleOutcome::Rejected(CvarError::ReadOnly(name)) => assert_eq!(name, "sys.build"),
+            other => panic!("expected Rejected(ReadOnly), got {other:?}"),
+        }
+    }
+
+    /// The `reset_all_runtime_cvars` API returns only the cvars whose resolved
+    /// value changed, in ascending-name order, and skips read-only cvars.
+    #[test]
+    fn reset_all_runtime_cvars_api_returns_changed_names() {
+        let mut app = App::new();
+        app.register_cvar(CvarSpec::new("r.shadows", 2_i64).category(CvarCategory::Render))
+            .unwrap();
+        app.register_cvar(CvarSpec::new("r.vsync", true).category(CvarCategory::Render))
+            .unwrap();
+        app.register_cvar(
+            CvarSpec::new("sys.build", "release")
+                .category(CvarCategory::System)
+                .flag(CvarFlags::READ_ONLY),
+        )
+        .unwrap();
+        // Only `r.shadows` gets a runtime override.
+        app.set_cvar("r.shadows", 4_i64).unwrap();
+
+        let changed = app.reset_all_runtime_cvars();
+        assert_eq!(changed, ["r.shadows"]);
+        assert_eq!(app.cvar_int("r.shadows"), Some(2));
+        // A fresh App with no registry resets nothing.
+        let mut empty = App::new();
+        assert!(empty.reset_all_runtime_cvars().is_empty());
+    }
 }

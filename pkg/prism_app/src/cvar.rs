@@ -481,12 +481,14 @@ pub struct CvarSetOutcome {
 /// [`App::exec_console`] (design §24.6, a Quake/Source-style `r.shadows 2`
 /// command line).
 ///
-/// A console line is either a **query** (a bare cvar name, which reports the
-/// current resolved value) or a **write** (`name value`, which sets the cvar at
-/// the [`Runtime`](crate::settings::SettingsLayer::Runtime) layer). This enum
-/// captures every outcome so a console front end can echo an accurate response
-/// without panicking, mirroring the reject-at-the-boundary contract of
-/// [`CvarError`] (design §25.3).
+/// A console line is one of: a **query** (a bare cvar name, which reports the
+/// current resolved value); a **write** (`name value`, which sets the cvar at
+/// the [`Runtime`](crate::settings::SettingsLayer::Runtime) layer); or the
+/// reserved **`reset`** command (`reset <name>` to revert one cvar's runtime
+/// override, or a bare `reset` to revert them all). This enum captures every
+/// outcome so a console front end can echo an accurate response without
+/// panicking, mirroring the reject-at-the-boundary contract of [`CvarError`]
+/// (design §25.3).
 #[derive(Clone, Debug, PartialEq)]
 pub enum ConsoleOutcome {
     /// The line was empty or a `//` comment, so nothing happened.
@@ -510,6 +512,23 @@ pub enum ConsoleOutcome {
     /// [read-only](CvarFlags::READ_ONLY) cvar, or a
     /// [cheat-protected](CvarFlags::CHEAT) cvar while cheats are disabled.
     Rejected(CvarError),
+    /// The `reset <name>` command cleared one cvar's
+    /// [`Runtime`](crate::settings::SettingsLayer::Runtime) override; carries
+    /// the [`CvarSetOutcome`] describing whether the resolved value fell back to
+    /// a lower cascade layer.
+    Reset {
+        /// The reset cvar's name.
+        name: String,
+        /// The outcome of clearing the runtime override.
+        outcome: CvarSetOutcome,
+    },
+    /// The bare `reset` command cleared **every** cvar's
+    /// [`Runtime`](crate::settings::SettingsLayer::Runtime) override; carries
+    /// the ascending-name list of cvars whose resolved value actually changed.
+    ResetAll {
+        /// The names of the cvars whose resolved value changed, ascending.
+        changed: Vec<String>,
+    },
 }
 
 /// A read-only snapshot of one cvar, joining its immutable [schema](Cvar) with
@@ -1047,6 +1066,26 @@ impl App {
             None => (line, ""),
         };
         self.init_cvars();
+        if name == "reset" {
+            // `reset` is a reserved console command (it shadows cvar get/set for
+            // that first token): `reset <name>` reverts one cvar's runtime
+            // override, and a bare `reset` reverts every cvar's. A target name
+            // never contains whitespace, so only the first remaining token is
+            // taken.
+            return match rest.split_whitespace().next() {
+                None => ConsoleOutcome::ResetAll {
+                    changed: self.reset_all_runtime_cvars(),
+                },
+                Some(target) => match self.reset_cvar(target) {
+                    Ok(outcome) => ConsoleOutcome::Reset {
+                        name: target.to_owned(),
+                        outcome,
+                    },
+                    Err(CvarError::Unregistered(name)) => ConsoleOutcome::Unknown(name),
+                    Err(error) => ConsoleOutcome::Rejected(error),
+                },
+            };
+        }
         if rest.is_empty() {
             // Query form: a bare cvar name reports its resolved value. The
             // console is the declared front door, so an undeclared name is
@@ -1262,6 +1301,40 @@ impl App {
             clamped: false,
             resolved,
         })
+    }
+
+    /// Clear **every** cvar's [`Runtime`](crate::settings::SettingsLayer::Runtime)
+    /// override at once, letting each fall back to its lower cascade layer — the
+    /// bulk form of [`reset_cvar`](App::reset_cvar) and the engine for the bare
+    /// `reset` console command (design §24.6).
+    ///
+    /// Each registered cvar is reset in ascending-name order via
+    /// [`reset_cvar`](App::reset_cvar), so the per-cvar event broadcast
+    /// ([`SettingChanged`](crate::settings::SettingChanged) and any
+    /// [`CvarChanged`]) and the fall-back semantics are identical to resetting
+    /// each by hand. [`Read-only`](CvarFlags::READ_ONLY) cvars never carry a
+    /// runtime override (writes to them are rejected at the boundary), so they
+    /// are skipped silently rather than reported as errors. Returns the
+    /// ascending-name list of cvars whose resolved value actually changed; an
+    /// empty vector means nothing had a runtime override (or no cvar is
+    /// registered).
+    pub fn reset_all_runtime_cvars(&mut self) -> Vec<String> {
+        self.init_cvars();
+        let names: Vec<String> = self
+            .world()
+            .resource::<CvarRegistry>()
+            .iter()
+            .map(|(name, _)| name.to_owned())
+            .collect();
+        let mut changed = Vec::new();
+        for name in names {
+            if let Ok(outcome) = self.reset_cvar(&name)
+                && outcome.changed
+            {
+                changed.push(name);
+            }
+        }
+        changed
     }
 
     /// Resolve the cvar `name`'s effective [`SettingValue`] from the cascade,
