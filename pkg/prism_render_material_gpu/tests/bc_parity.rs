@@ -26,9 +26,9 @@ use prism_render_material::{
     decode_bc7_mode2, decode_bc7_mode3, decode_bc7_mode7, encode_astc_single_partition_4x4_ldr,
     encode_astc_single_partition_4x4_ldr_q192, encode_astc_single_partition_4x4_ldr_quality,
     encode_astc_single_partition_4x4_ldr_rgba, encode_astc_single_partition_4x4_ldr_rgba_q6,
-    encode_astc_single_partition_5x5_ldr, encode_astc_single_partition_6x6_ldr,
-    encode_astc_single_partition_8x8_ldr, encode_bc1, encode_bc3, encode_bc6h_mode11_unsigned,
-    encode_bc7_mode4, encode_bc7_mode5, encode_bc7_mode6,
+    encode_astc_single_partition_5x4_ldr, encode_astc_single_partition_5x5_ldr,
+    encode_astc_single_partition_6x6_ldr, encode_astc_single_partition_8x8_ldr, encode_bc1,
+    encode_bc3, encode_bc6h_mode11_unsigned, encode_bc7_mode4, encode_bc7_mode5, encode_bc7_mode6,
 };
 use prism_render_material_gpu::BlockOracle;
 use wgpu::{Features, TextureFormat};
@@ -5770,5 +5770,109 @@ fn astc_encoder_8x8_round_trip_parity_against_gpu_hardware_decode() {
     assert!(compared >= 7, "expected all 8x8 tiles to be compared");
     eprintln!(
         "ASTC 8x8 encoder round-trip parity: {compared} tiles decode within 1 LSB of hardware (mode-1348 QUANT_2 one-bit weights, QUANT_192 trit colour, legal B8x8 full grid)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ASTC 5x4 single-partition LDR encoder parity (block mode 706). This is the
+// first *non-square* legal footprint encoder (`AstcBlock::B5x4`, 5 wide x 4
+// tall, 20 texels). Mode 706 pairs a QUANT_16 bit-only weight range (four
+// bits, sixteen interpolation levels, 20*4 = 80 weight bits) with QUANT_32
+// bit-only colour (six 5-bit endpoint integers, color_bits = 111 - 80 = 31).
+// The 5x4 weight grid equals the footprint so it needs no bilinear infill
+// (weight t maps 1:1 to texel t). It reuses the const-generic endpoint/weight
+// primitives (N = 20) proven on the square footprints, extending the encoder to
+// the non-square footprint family. We prove the emitted bitstream decodes
+// identically on the Metal hardware ASTC decoder via
+// `decode_raw_footprint(.., 5, 4)` (within 1 LSB of the CPU footprint-generic
+// decode) and that every tile stays within its RGB quality budget.
+// ---------------------------------------------------------------------------
+#[test]
+fn astc_encoder_5x4_round_trip_parity_against_gpu_hardware_decode() {
+    let Some(oracle) = BlockOracle::try_new() else {
+        eprintln!("no GPU adapter; skipping ASTC 5x4 encoder parity");
+        return;
+    };
+    if !oracle
+        .features()
+        .contains(Features::TEXTURE_COMPRESSION_ASTC)
+    {
+        eprintln!("adapter lacks ASTC support; skipping ASTC 5x4 encoder parity");
+        return;
+    }
+    let format = TextureFormat::Astc {
+        block: wgpu::AstcBlock::B5x4,
+        channel: wgpu::AstcChannel::Unorm,
+    };
+
+    // Each tile pairs a twenty-texel source with its RGB quality budget.
+    // Constant/two-colour tiles land on the endpoints so their only error is
+    // the QUANT_32 endpoint quantisation (<= 5 LSB); the gradient interpolates
+    // over sixteen weight levels (<= 24 LSB combined budget).
+    let mut tiles: Vec<([[u8; 4]; 20], i32)> = Vec::new();
+    for &rgb in &[[0u8, 0, 0], [255, 255, 255], [41, 173, 98], [240, 12, 90]] {
+        tiles.push(([[rgb[0], rgb[1], rgb[2], 255]; 20], 5));
+    }
+    for &(a, b) in &[
+        ([15u8, 35, 55], [210u8, 190, 170]),
+        ([255u8, 0, 0], [0u8, 0, 255]),
+    ] {
+        tiles.push((
+            core::array::from_fn(|t| {
+                if t % 2 == 0 {
+                    [a[0], a[1], a[2], 255]
+                } else {
+                    [b[0], b[1], b[2], 255]
+                }
+            }),
+            5,
+        ));
+    }
+    tiles.push((
+        core::array::from_fn(|t| {
+            let v = (t * 12) as u8;
+            [v, 255 - v, (v / 2).wrapping_add(40), 255]
+        }),
+        24,
+    ));
+
+    let mut compared = 0u32;
+    for (src, quality_tol) in &tiles {
+        let blk = encode_astc_single_partition_5x4_ldr(src);
+        let (cpu, count) = decode_astc_ldr(&blk, 5, 4).expect("encoder emits a decodable block");
+        assert_eq!(count, 20, "5x4 footprint must decode 20 texels");
+        let gpu = oracle.decode_raw_footprint(format, &blk, 5, 4);
+        assert_eq!(gpu.len(), 20, "5x4 GPU texel count");
+        for t in 0..20 {
+            let gpu_u8: [i32; 4] =
+                core::array::from_fn(|c| (gpu[t][c].clamp(0.0, 1.0) * 255.0 + 0.5) as i32);
+            // (1) CPU/GPU bitstream parity on all four channels.
+            for c in 0..4 {
+                let d = (cpu[t][c] as i32 - gpu_u8[c]).abs();
+                assert!(
+                    d <= 1,
+                    "ASTC 5x4 encoder block={blk:02x?} texel {t} chan {c}: cpu={} gpu={} (|d|={d})",
+                    cpu[t][c],
+                    gpu_u8[c]
+                );
+            }
+            // (2) Encoder faithfulness: GPU RGB within the quality budget.
+            for c in 0..3 {
+                let d = (gpu_u8[c] - src[t][c] as i32).abs();
+                assert!(
+                    d <= *quality_tol,
+                    "ASTC 5x4 encoder quality block={blk:02x?} texel {t} chan {c}: src={} gpu={} (|d|={d} > {quality_tol})",
+                    src[t][c],
+                    gpu_u8[c]
+                );
+            }
+            // CEM 8 forces alpha to 255 on hardware.
+            assert_eq!(gpu_u8[3], 255, "CEM 8 alpha must be 255");
+        }
+        compared += 1;
+    }
+    assert!(compared >= 7, "expected all 5x4 tiles to be compared");
+    eprintln!(
+        "ASTC 5x4 encoder round-trip parity: {compared} tiles decode within 1 LSB of hardware (mode-706 QUANT_16 four-bit weights, QUANT_32 bit-only colour, first non-square legal B5x4 full grid)"
     );
 }
