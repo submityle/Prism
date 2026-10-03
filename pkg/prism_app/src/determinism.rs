@@ -339,6 +339,89 @@ impl FrameHash {
     pub fn window(&self) -> usize {
         self.window
     }
+
+    /// Absolute frame index (see [`frame_index`](FrameHash::frame_index)) of
+    /// the oldest finalized hash still retained in the rolling window, or
+    /// `None` if no frame has finalized yet.
+    ///
+    /// Because the history is a bounded window, the retained hashes cover the
+    /// absolute frame-index range `oldest_frame_index()..frame_index()`.
+    #[inline]
+    #[must_use]
+    pub fn oldest_frame_index(&self) -> Option<u64> {
+        if self.history.is_empty() {
+            None
+        } else {
+            Some(self.frame_index - self.history.len() as u64)
+        }
+    }
+
+    /// The finalized hash recorded at absolute frame index `frame`, if that
+    /// frame is still retained in the rolling window.
+    ///
+    /// Returns `None` for a frame that has not finalized yet or that has
+    /// already been evicted past the [`window`](FrameHash::window). Indexing by
+    /// absolute frame index (not window offset) is what lets two runs whose
+    /// windows have slid apart still be aligned and compared.
+    #[inline]
+    #[must_use]
+    pub fn hash_at(&self, frame: u64) -> Option<u64> {
+        let oldest = self.oldest_frame_index()?;
+        if frame < oldest || frame >= self.frame_index {
+            return None;
+        }
+        self.history.get((frame - oldest) as usize).copied()
+    }
+
+    /// Find the first frame at which this run's finalized hashes diverge from
+    /// `other`'s, scanning only the absolute frame-index range both runs still
+    /// retain (design §22's dual-run frame-hash equality acceptance check).
+    ///
+    /// Returns the [`HashDivergence`] at the earliest differing frame, or
+    /// `None` when every jointly retained frame agrees. `None` therefore means
+    /// *"no divergence within the comparable window"*, which is not the same as
+    /// *"identical for all time"*: if the two windows do not overlap — because
+    /// one run advanced so far that the other's retained frames were all
+    /// evicted — there is nothing to compare and the result is `None`. Keep a
+    /// [`window`](FrameHash::window) wide enough to retain the frames a dual-run
+    /// needs to compare before draining the histories.
+    #[must_use]
+    pub fn first_divergence(&self, other: &FrameHash) -> Option<HashDivergence> {
+        let (Some(self_oldest), Some(other_oldest)) =
+            (self.oldest_frame_index(), other.oldest_frame_index())
+        else {
+            return None;
+        };
+        let start = self_oldest.max(other_oldest);
+        let end = self.frame_index.min(other.frame_index);
+        for frame in start..end {
+            if let (Some(left), Some(right)) = (self.hash_at(frame), other.hash_at(frame))
+                && left != right
+            {
+                return Some(HashDivergence { frame, left, right });
+            }
+        }
+        None
+    }
+}
+
+/// The first frame at which two runs' finalized hashes disagree, as reported by
+/// [`FrameHash::first_divergence`] (design §22: *"deterministic dual-run
+/// frame-hash equality"*).
+///
+/// A dual-run regression check runs the same session twice (or a recorded run
+/// against a live one), finalizes a [`FrameHash`] per frame on each, and asks
+/// for the first mismatch: that frame index is where determinism broke, and the
+/// two hashes are the smoking gun that the runs' authoritative state diverged.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct HashDivergence {
+    /// Absolute frame index (see [`FrameHash::frame_index`]) of the first
+    /// finalized frame whose hashes differ between the two runs.
+    pub frame: u64,
+    /// The finalized hash this run recorded at [`frame`](HashDivergence::frame).
+    pub left: u64,
+    /// The finalized hash the other run recorded at [`frame`](HashDivergence::frame).
+    pub right: u64,
 }
 
 impl Default for FrameHash {

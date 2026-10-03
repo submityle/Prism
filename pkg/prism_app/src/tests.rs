@@ -3531,7 +3531,7 @@ mod determinism_tests {
     use super::*;
 
     use crate::determinism::{
-        DeterministicRng, FrameHash, InputRecording, RecordedInput, ReplayMode,
+        DeterministicRng, FrameHash, HashDivergence, InputRecording, RecordedInput, ReplayMode,
         DEFAULT_HASH_HISTORY,
     };
 
@@ -3739,6 +3739,115 @@ mod determinism_tests {
         a.write_f32(1.5);
         b.write_f32(1.5);
         assert_eq!(a.finalize_frame(), b.finalize_frame());
+    }
+
+    // ---- FrameHash divergence (dual-run acceptance check) -----------------
+
+    /// `first_divergence` finds the earliest differing frame and pinpoints both
+    /// hashes; two identical runs report `None` (design §22 dual-run equality).
+    #[test]
+    fn frame_hash_first_divergence_detects_mismatch() {
+        let mut a = FrameHash::new();
+        let mut b = FrameHash::new();
+        // Frames 0 and 1 stay in lockstep.
+        for v in [10u64, 20] {
+            a.write_u64(v);
+            a.finalize_frame();
+            b.write_u64(v);
+            b.finalize_frame();
+        }
+        assert_eq!(a.first_divergence(&b), None, "lockstep runs agree");
+
+        // Frame 2 diverges.
+        a.write_u64(30);
+        let a2 = a.finalize_frame();
+        b.write_u64(31);
+        let b2 = b.finalize_frame();
+        assert_ne!(a2, b2, "distinct inputs produce distinct hashes");
+
+        let d = a.first_divergence(&b).expect("divergence at frame 2");
+        assert_eq!(
+            d,
+            HashDivergence {
+                frame: 2,
+                left: a2,
+                right: b2
+            }
+        );
+        // Viewed from the other run the sides swap but the frame is the same.
+        let d2 = b
+            .first_divergence(&a)
+            .expect("divergence seen from the other run");
+        assert_eq!(
+            d2,
+            HashDivergence {
+                frame: 2,
+                left: b2,
+                right: a2
+            }
+        );
+    }
+
+    /// Divergence detection aligns by absolute frame index, so it still works
+    /// after the rolling windows have slid; disjoint windows compare nothing
+    /// and report `None`.
+    #[test]
+    fn frame_hash_divergence_aligns_sliding_windows() {
+        let mut a = FrameHash::with_window(2);
+        let mut b = FrameHash::with_window(2);
+        for v in 0..5u64 {
+            a.write_u64(v);
+            a.finalize_frame();
+            b.write_u64(v);
+            b.finalize_frame();
+        }
+        // Both retain only frames 3 and 4; the evicted frames are gone.
+        assert_eq!(a.oldest_frame_index(), Some(3));
+        assert_eq!(a.frame_index(), 5);
+        assert_eq!(a.first_divergence(&b), None, "lockstep across slid windows");
+
+        // Diverge only on the latest frame (index 5).
+        a.write_u64(99);
+        let a5 = a.finalize_frame();
+        b.write_u64(100);
+        let b5 = b.finalize_frame();
+        let d = a.first_divergence(&b).expect("latest frame diverges");
+        assert_eq!(
+            d,
+            HashDivergence {
+                frame: 5,
+                left: a5,
+                right: b5
+            }
+        );
+
+        // `hash_at` only answers for retained, finalized frames.
+        assert_eq!(a.hash_at(5), Some(a5));
+        assert_eq!(a.hash_at(3), None, "frame 3 evicted past the window");
+        assert_eq!(a.hash_at(6), None, "frame 6 not finalized yet");
+
+        // Advance only `a` until its retained window no longer intersects `b`'s.
+        for v in 0..2u64 {
+            a.write_u64(v);
+            a.finalize_frame();
+        }
+        assert_eq!(a.oldest_frame_index(), Some(6));
+        assert_eq!(b.oldest_frame_index(), Some(4));
+        assert_eq!(
+            a.first_divergence(&b),
+            None,
+            "disjoint windows have nothing to compare"
+        );
+    }
+
+    /// Before any frame finalizes there is nothing to compare or index.
+    #[test]
+    fn frame_hash_divergence_empty_is_none() {
+        let a = FrameHash::new();
+        let b = FrameHash::new();
+        assert_eq!(a.oldest_frame_index(), None);
+        assert_eq!(a.hash_at(0), None);
+        assert_eq!(a.first_divergence(&b), None);
     }
 
     // ---- App integration --------------------------------------------------
