@@ -37,23 +37,38 @@
 //!   stepping, an integer tick counter, and replay/restore via the
 //!   [`determinism`] module ([`RationalStep`], [`TickClock`],
 //!   [`TickSnapshot`]).
-//! - **M5+ (planned):** network clocks and per-world local time domains.
+//! - **M5 (this crate, done):** network time sync and local time domains —
+//!   an authoritative [`ServerTick`], NTP-style [`ClockOffsetEstimator`] with
+//!   smooth [`ClockSync`] convergence, the [`InterpolationBuffer`] snapshot
+//!   timeline, per-world/local [`TimeScaleDomain`] scopes, and eased
+//!   time-scale [`ScaleTransition`]s (see the [`net`], [`domain`], and
+//!   [`easing`] modules).
+//! - **M6+ (planned):** app/ECS/physics integration, addressable timeline
+//!   source, frame-step debugging, and the `bevy_time` compatibility prelude.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
 
 mod clock;
 pub mod determinism;
+mod domain;
+mod easing;
 mod fixed;
 mod instant;
+pub mod net;
 pub mod timer;
 mod virtual_time;
 
 pub use clock::{Clocks, DefaultSource};
 pub use core::time::Duration;
 pub use determinism::{RationalStep, TickClock, TickSnapshot};
+pub use domain::{TimeScaleDomain, composite_scale};
+pub use easing::{Easing, ScaleTransition};
 pub use fixed::Fixed;
 pub use instant::Instant;
+pub use net::{
+    ClockOffsetEstimator, ClockSync, InterpolationBuffer, Lerp, OffsetSample, Sampled, ServerTick,
+};
 pub use timer::{Cooldown, SmoothedDelta, Stopwatch, Throttle, Timer, TimerMode};
 pub use virtual_time::Virtual;
 
@@ -199,9 +214,10 @@ impl Time<Real> {
 /// Common imports.
 pub mod prelude {
     pub use crate::{
-        Clocks, Cooldown, DefaultSource, Duration, Fixed, Instant, RationalStep, Real,
-        SmoothedDelta, Stopwatch, Throttle, TickClock, TickSnapshot, Time, Timer,
-        TimerMode, Virtual,
+        Clocks, ClockOffsetEstimator, ClockSync, Cooldown, DefaultSource, Duration, Easing, Fixed,
+        Instant, InterpolationBuffer, Lerp, OffsetSample, RationalStep, Real, Sampled,
+        ScaleTransition, ServerTick, SmoothedDelta, Stopwatch, Throttle, TickClock, TickSnapshot,
+        Time, TimeScaleDomain, Timer, TimerMode, Virtual, composite_scale,
     };
 }
 
