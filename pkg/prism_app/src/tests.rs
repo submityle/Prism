@@ -2179,6 +2179,170 @@ fn run_once_runs_shutdown_path() {
     );
 }
 
+// ---- lifecycle run-state + virtual-clock wiring (design §12, §25.1) ----
+
+/// A `Suspended` event flips `AppLifecycle` to `Suspended` and pauses the main
+/// world's virtual clock, so the fixed accumulator is fed zero delta and
+/// simulation freezes while backgrounded.
+#[test]
+fn suspend_event_pauses_simulation_and_sets_suspended_state() {
+    let mut app = App::new();
+    app.add_lifecycle_events();
+    app.set_time_update_strategy(TimeUpdateStrategy::ManualDelta(Duration::from_millis(10)));
+
+    // A baseline running frame advances the virtual clock.
+    app.update();
+    let before = app
+        .world()
+        .resource::<EngineClocks>()
+        .virtual_time()
+        .elapsed_secs_f64();
+    assert!(before > 0.0, "a running frame advances the virtual clock");
+
+    // Suspend, then run the frame that processes the event.
+    app.send_event(Suspended);
+    app.update();
+    assert_eq!(
+        *app.world().resource::<AppLifecycle>(),
+        AppLifecycle::Suspended,
+        "the Suspended event moves the run state to Suspended",
+    );
+    assert!(
+        app.world().resource::<EngineClocks>().virtual_time().is_paused(),
+        "suspending pauses the virtual clock",
+    );
+
+    // Subsequent frames while suspended do not advance virtual time.
+    let after_suspend = app
+        .world()
+        .resource::<EngineClocks>()
+        .virtual_time()
+        .elapsed_secs_f64();
+    app.update();
+    app.update();
+    let frozen = app
+        .world()
+        .resource::<EngineClocks>()
+        .virtual_time()
+        .elapsed_secs_f64();
+    assert_eq!(
+        frozen, after_suspend,
+        "virtual time stays frozen across suspended frames",
+    );
+}
+
+/// A `Resumed` event flips `AppLifecycle` back to `Running` and unpauses the
+/// virtual clock, so simulation advances again.
+#[test]
+fn resume_event_unpauses_and_restores_running() {
+    let mut app = App::new();
+    app.add_lifecycle_events();
+    app.set_time_update_strategy(TimeUpdateStrategy::ManualDelta(Duration::from_millis(10)));
+
+    app.send_event(Suspended);
+    app.update();
+    assert!(app.world().resource::<EngineClocks>().virtual_time().is_paused());
+
+    app.send_event(Resumed);
+    app.update();
+    assert_eq!(
+        *app.world().resource::<AppLifecycle>(),
+        AppLifecycle::Running,
+        "the Resumed event restores the Running state",
+    );
+    assert!(
+        !app.world().resource::<EngineClocks>().virtual_time().is_paused(),
+        "resuming unpauses the virtual clock",
+    );
+
+    let before = app
+        .world()
+        .resource::<EngineClocks>()
+        .virtual_time()
+        .elapsed_secs_f64();
+    app.update();
+    let after = app
+        .world()
+        .resource::<EngineClocks>()
+        .virtual_time()
+        .elapsed_secs_f64();
+    assert!(after > before, "virtual time advances again after resume");
+}
+
+/// The handler only unpauses a clock *it* paused: a pause the game set itself
+/// (a pause menu) survives a full suspend/resume cycle rather than being
+/// silently cleared on resume.
+#[test]
+fn resume_preserves_a_user_pause_it_did_not_set() {
+    let mut app = App::new();
+    app.add_lifecycle_events();
+    app.set_time_update_strategy(TimeUpdateStrategy::ManualDelta(Duration::from_millis(10)));
+
+    // The game pauses the virtual clock for its own reasons.
+    app.world_mut()
+        .resource_mut::<EngineClocks>()
+        .virtual_time_mut()
+        .pause();
+
+    app.send_event(Suspended);
+    app.update();
+    assert_eq!(*app.world().resource::<AppLifecycle>(), AppLifecycle::Suspended);
+    assert!(
+        app.world().resource::<EngineClocks>().virtual_time().is_paused(),
+        "an already-paused clock stays paused through suspend",
+    );
+
+    app.send_event(Resumed);
+    app.update();
+    assert_eq!(*app.world().resource::<AppLifecycle>(), AppLifecycle::Running);
+    assert!(
+        app.world().resource::<EngineClocks>().virtual_time().is_paused(),
+        "a user-owned pause survives the suspend/resume cycle",
+    );
+}
+
+/// When both a `Suspended` and a `Resumed` event land in one frame, resume
+/// wins so a transient background blip can never wedge the app suspended.
+#[test]
+fn resume_wins_when_both_edges_land_in_one_frame() {
+    let mut app = App::new();
+    app.add_lifecycle_events();
+
+    // Drive into the suspended state first.
+    app.send_event(Suspended);
+    app.update();
+    assert_eq!(*app.world().resource::<AppLifecycle>(), AppLifecycle::Suspended);
+
+    // Same frame: both edges. Resume must win.
+    app.send_event(Suspended);
+    app.send_event(Resumed);
+    app.update();
+    assert_eq!(
+        *app.world().resource::<AppLifecycle>(),
+        AppLifecycle::Running,
+        "resume wins when both edges arrive in one frame",
+    );
+    assert!(!app.world().resource::<EngineClocks>().virtual_time().is_paused());
+}
+
+/// A graceful exit in progress (`WillExit`) is terminal: lifecycle events do
+/// not pull the run state back to `Running`/`Suspended`.
+#[test]
+fn exiting_state_is_not_resurrected_by_lifecycle_events() {
+    let mut app = App::new();
+    app.add_lifecycle_events();
+    *app.world_mut().resource_mut::<AppLifecycle>() = AppLifecycle::WillExit;
+
+    app.send_event(Resumed);
+    app.send_event(Suspended);
+    app.update();
+    assert_eq!(
+        *app.world().resource::<AppLifecycle>(),
+        AppLifecycle::WillExit,
+        "a graceful exit in progress is not resurrected",
+    );
+}
+
 // ---- exit veto gate (design §24.5: 退出可被系统取消) --------------------
 
 use crate::schedule::ExitConfirmation;

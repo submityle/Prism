@@ -710,9 +710,17 @@ impl App {
     /// After this, systems can read [`Suspended`] / [`Resumed`] /
     /// [`LowMemory`] / [`FocusChanged`] / [`WillRenderFirstFrame`] with an
     /// [`EventCursor`](prism_ecs::event::EventCursor), and a platform runner
-    /// (or a test) can emit them via [`send_event`](App::send_event). Idempotent
-    /// per event type; calling it again does not reset an already-advanced
-    /// [`AppLifecycle`].
+    /// (or a test) can emit them via [`send_event`](App::send_event).
+    ///
+    /// It also registers the
+    /// `drive_app_lifecycle` system
+    /// into [`First`], which folds each frame's [`Suspended`] / [`Resumed`]
+    /// events into the [`AppLifecycle`] run state and pauses/unpauses the main
+    /// world's virtual clock so simulation freezes while backgrounded
+    /// (design §12, §25.1).
+    ///
+    /// Idempotent per event type; calling it again does not reset an
+    /// already-advanced [`AppLifecycle`] nor register a second handler.
     pub fn add_lifecycle_events(&mut self) -> &mut Self {
         self.add_event::<Suspended>()
             .add_event::<Resumed>()
@@ -721,6 +729,10 @@ impl App {
             .add_event::<WillRenderFirstFrame>();
         if self.sub_apps.main.world.get_resource::<AppLifecycle>().is_none() {
             self.insert_resource(AppLifecycle::Running);
+            // Wire the suspend/resume -> run-state + virtual-clock-pause
+            // handler exactly once, alongside the first install of the
+            // run-state resource it drives (design §12, §25.1).
+            self.add_systems(First, crate::lifecycle::drive_app_lifecycle);
         }
         self
     }
