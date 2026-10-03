@@ -33,6 +33,8 @@ members = [
   "pkg/prism_physics_gpu",
   # Prism SER ray-coherence GPU radix twin (device sort validated vs CPU golden).
   "pkg/prism_ray_reorder_gpu",
+  # Prism Radiance Cascades GI GPU twin (gather/merge/resolve validated vs CPU golden).
+  "pkg/prism_radiance_cascades_gpu",
   # Prism experimental virtual-geometry GPU software-raster twin.
   "pkg/prism_virtual_geometry_gpu",
   # Prism experimental volumetric-cloud scattering GPU twin.

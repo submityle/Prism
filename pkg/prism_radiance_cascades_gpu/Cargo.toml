@@ -1,0 +1,17 @@
+[package]
+name = "prism_radiance_cascades_gpu"
+version = "0.1.0"
+edition = "2024"
+description = "Optional wgpu compute backend for Prism's Radiance Cascades global illumination. A real-device gather/merge/resolve twin of the prism_render_architecture Radiance Cascades CPU golden, validated against it with a pure-arithmetic scene sampler so CPU f32 and WGSL f32 agree within FMA tolerance. Contains no Unreal Engine source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_render_architecture = { path = "../prism_render_architecture" }
+wgpu = { version = "30", default-features = false, features = ["wgsl", "metal"] }
+bytemuck = { version = "1.5", features = ["derive"] }
+futures-lite = "2"
+glam = { version = "0.33.2", default-features = false }
+
+[lints]
+workspace = true
