@@ -14,13 +14,18 @@
 //! * **OwningGroup** — EnTT-style perfectly-packed membership for a super-hot
 //!   query ([`OwningGroup`]); the packing structure and its O(1)
 //!   pack/unpack transitions are complete and tested here.
-//!
-//! The fourth state, Unity-style *SharedComponent* value-clustering (design
-//! §6), is not yet present; it is honestly absent rather than stubbed.
+//! * **SharedComponent** — Unity-style value de-duplication (design §6, §15 GPU
+//!   批次键). The de-duplicating, reference-counted *value store*
+//!   ([`SharedComponents`], [`SharedValuePool`], [`SharedValueId`]) that maps
+//!   each distinct shared value to a stable dense id is complete and tested
+//!   here. The archetype split that routes entities by that id — splitting an
+//!   archetype into one variant per distinct shared-value binding — is still
+//!   pending; the store is the substrate it builds on.
 
 mod blob_vec;
 mod chunk;
 mod owning_group;
+mod shared;
 mod sparse;
 mod sparse_sets;
 mod table;
@@ -28,6 +33,7 @@ mod table;
 pub use blob_vec::BlobVec;
 pub use chunk::{rows_per_chunk, ChunkVersions, TARGET_CHUNK_BYTES};
 pub use owning_group::{OwningGroup, OwningGroupId, OwningGroupIter};
+pub use shared::{SharedComponents, SharedValue, SharedValueId, SharedValuePool};
 pub use sparse::ComponentSparseSet;
 pub use sparse_sets::SparseSets;
 pub use table::{Column, Table};
