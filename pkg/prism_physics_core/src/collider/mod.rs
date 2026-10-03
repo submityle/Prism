@@ -223,6 +223,8 @@ pub use tet_fem_constitutive::{
     stable_neo_hookean_strain_energy_density, stvk_first_piola, stvk_strain_energy_density,
     HyperelasticModel, LameParameters,
 };
+pub mod tet_fem_internal_force;
+pub use tet_fem_internal_force::{element_energy, element_internal_force};
 
 /// A handle into a [`ShapeRegistry`].
 ///
