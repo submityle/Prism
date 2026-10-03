@@ -41,7 +41,9 @@ pub mod buffer;
 pub mod context;
 pub mod dilation;
 pub mod tile;
+pub mod encode;
 
 pub use context::GpuContext;
 pub use dilation::GpuDilate;
 pub use tile::{GpuNeighborMax, GpuTileMax, TileField};
+pub use encode::GpuEncodeMotion;
