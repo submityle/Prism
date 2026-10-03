@@ -1,8 +1,11 @@
-//! `Reflect` + `Typed` implementations for leaf (`Value`-kind) std types.
+//! `Reflect` + `Typed` + `GetTypeRegistration` implementations for leaf
+//! (`Value`-kind) std types.
 
 use crate::reflect::{Reflect, Typed};
+use crate::registry::GetTypeRegistration;
 
-/// Implement `Reflect` + `Typed` (as a `Value` leaf) for the given types.
+/// Implement `Reflect` + `Typed` + `GetTypeRegistration` (as a `Value` leaf)
+/// for each given type.
 #[macro_export]
 macro_rules! impl_reflect_value {
     ($($ty:ty),* $(,)?) => {
@@ -14,6 +17,7 @@ macro_rules! impl_reflect_value {
                 }
                 fn as_any(&self) -> &dyn ::core::any::Any { self }
                 fn as_any_mut(&mut self) -> &mut dyn ::core::any::Any { self }
+                fn into_any(self: ::std::boxed::Box<Self>) -> ::std::boxed::Box<dyn ::core::any::Any> { self }
                 fn as_reflect(&self) -> &dyn $crate::Reflect { self }
                 fn as_reflect_mut(&mut self) -> &mut dyn $crate::Reflect { self }
                 fn reflect_ref(&self) -> $crate::ReflectRef<'_> {
@@ -35,6 +39,12 @@ macro_rules! impl_reflect_value {
                     })
                 }
             }
+
+            impl $crate::registry::GetTypeRegistration for $ty {
+                fn get_type_registration() -> $crate::registry::TypeRegistration {
+                    $crate::registry::TypeRegistration::of::<$ty>()
+                }
+            }
         )*
     };
 }
@@ -47,7 +57,7 @@ impl_reflect_value!(String);
 
 // Compile-time check that the leaf impls satisfy the core traits.
 const _: fn() = || {
-    fn _assert<T: Reflect + Typed>() {}
+    fn _assert<T: Reflect + Typed + GetTypeRegistration>() {}
     _assert::<i32>();
     _assert::<bool>();
     _assert::<String>();

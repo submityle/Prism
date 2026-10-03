@@ -3,17 +3,20 @@ name = "prism_reflect"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.96.0"
-description = "Prism reflection kernel (type-truth layer): the Reflect trait with ReflectRef/Mut down-casting, static OnceLock-cached TypeInfo, and the Struct/TupleStruct/Value kinds, driven by the #[derive(Reflect)] macro. M0 ships the reflection core (struct/tuple-struct/value + field traversal + Typed); registry, dynamic values, FromReflect, serialization, schema migration, and function reflection land in later milestones. Contains no Unreal Engine source or derived code and depends on no bevy_* crate."
+description = "Prism reflection kernel (type-truth layer): the Reflect trait with ReflectRef/Mut down-casting, static OnceLock-cached TypeInfo, and the full kind set (struct/tuple-struct/enum/list/array/map/set/value) driven by the #[derive(Reflect)] macro. M1 adds the TypeRegistry + TypeData catalogue, std collection + Option/Result impls, and (behind the `math` feature) prism_math value-type reflection; dynamic values, FromReflect, serialization, schema migration, and function reflection land in later milestones. Contains no Unreal Engine source or derived code and depends on no bevy_* crate."
 license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
 prism_reflect_macros = { path = "../prism_reflect_macros" }
 prism_utils = { path = "../prism_utils" }
+prism_math = { path = "../prism_math", optional = true }
 
 [features]
-default = ["std"]
+default = ["std", "math"]
 std = ["prism_utils/std"]
+# Reflect prism_math value types (Vec2/Vec3/Vec3A/Vec4/Quat/Mat4).
+math = ["dep:prism_math"]
 
 [lints]
 workspace = true

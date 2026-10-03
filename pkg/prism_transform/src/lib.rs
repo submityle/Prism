@@ -10,18 +10,38 @@
 //!   introduce shear that a pure TRS cannot represent.
 //!
 //! ## Milestone status (per the design-doc roadmap)
-//! - **M0 (this crate, done):** the standalone algebra — `Transform`,
-//!   `GlobalTransform`, composition, inverse, and direction/helper methods,
-//!   with round-trip and associativity tests.
-//! - **M1+ (planned):** ECS-relation hierarchy propagation, dirty-subtree
-//!   incremental updates, parallel propagation via `prism_tasks`, fixed-step
-//!   interpolation, big-world/deterministic paths, and GPU upload. Those
-//!   require `prism_ecs`/`prism_tasks` and are intentionally not part of M0.
+//! - **M0 (done):** the standalone algebra — `Transform`, `GlobalTransform`,
+//!   composition, inverse, and direction/helper methods, with round-trip and
+//!   associativity tests.
+//! - **M1 (this update, done):** single-threaded full-pass hierarchy
+//!   propagation driven by change detection. The pieces live in dedicated
+//!   modules: [`hierarchy`] (the index-based forest and its stable
+//!   parent-before-child order), [`propagation`] (the parent-before-child world
+//!   sweep that composes `global[node] = global[parent] * local[node]` in
+//!   affine space so non-uniform scale survives), and [`change`] (per-node
+//!   change ticks so a pass knows what changed and a later pass can skip clean
+//!   subtrees). [`TransformGraph`] ties them together. The hierarchy here is a
+//!   self-contained computational core; binding it to `prism_ecs` `ChildOf`
+//!   relations is deferred to M6.
+//! - **M2+ (planned):** dirty-subtree incremental updates, parallel propagation
+//!   via `prism_tasks`, fixed-step interpolation, big-world/deterministic
+//!   paths, and GPU upload.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
 
+extern crate alloc;
+
+use alloc::vec::Vec;
+
 use prism_math::{Affine3, Mat4, Quat, Vec3};
+
+pub mod change;
+pub mod hierarchy;
+pub mod propagation;
+
+use change::ChangeTicks;
+use hierarchy::{Hierarchy, HierarchyError, NodeId};
 
 /// A node's local transform: translation, rotation, and scale relative to its
 /// parent (or to the world when it has no parent).
@@ -240,10 +260,201 @@ impl From<Transform> for GlobalTransform {
     }
 }
 
+/// An ergonomic owner of a transform hierarchy: the forest, the authoritative
+/// local [`Transform`] of every node, the cached world [`GlobalTransform`]s,
+/// and the [`ChangeTicks`] that drive propagation, all kept in lock-step.
+///
+/// This is the M1 facade over [`hierarchy`], [`propagation`], and [`change`].
+/// Callers spawn nodes, edit locals (which marks them changed), and call
+/// [`TransformGraph::propagate`] to refresh every world transform.
+#[derive(Clone, Debug, Default)]
+pub struct TransformGraph {
+    hierarchy: Hierarchy,
+    locals: Vec<Transform>,
+    globals: Vec<GlobalTransform>,
+    ticks: ChangeTicks,
+}
+
+impl TransformGraph {
+    /// Create an empty graph.
+    #[inline]
+    pub const fn new() -> Self {
+        Self {
+            hierarchy: Hierarchy::new(),
+            locals: Vec::new(),
+            globals: Vec::new(),
+            ticks: ChangeTicks::new(),
+        }
+    }
+
+    /// Number of nodes in the graph.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.locals.len()
+    }
+
+    /// Whether the graph has no nodes.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.locals.is_empty()
+    }
+
+    /// Borrow the underlying [`Hierarchy`].
+    #[inline]
+    pub fn hierarchy(&self) -> &Hierarchy {
+        &self.hierarchy
+    }
+
+    /// Borrow the change-tick bookkeeping.
+    #[inline]
+    pub fn ticks(&self) -> &ChangeTicks {
+        &self.ticks
+    }
+
+    /// Spawn a root node carrying `local` and return its id. The node's world
+    /// transform is seeded from `local` and marked changed for the next pass.
+    pub fn spawn_root(&mut self, local: Transform) -> NodeId {
+        let id = self.hierarchy.spawn_root();
+        self.locals.push(local);
+        self.globals.push(GlobalTransform::from_transform(&local));
+        self.ticks.push();
+        id
+    }
+
+    /// Spawn a child of `parent` carrying `local` and return its id.
+    ///
+    /// # Panics
+    /// Panics if `parent` is out of bounds (see [`Hierarchy::spawn_child`]).
+    pub fn spawn_child(&mut self, parent: NodeId, local: Transform) -> NodeId {
+        let id = self.hierarchy.spawn_child(parent);
+        self.locals.push(local);
+        self.globals.push(GlobalTransform::IDENTITY);
+        self.ticks.push();
+        id
+    }
+
+    /// The authoritative local transform of `node`.
+    ///
+    /// # Panics
+    /// Panics if `node` is out of bounds.
+    #[inline]
+    pub fn local(&self, node: NodeId) -> Transform {
+        self.locals[node.index()]
+    }
+
+    /// The cached world transform of `node` (valid as of the last
+    /// [`TransformGraph::propagate`]).
+    ///
+    /// # Panics
+    /// Panics if `node` is out of bounds.
+    #[inline]
+    pub fn global(&self, node: NodeId) -> GlobalTransform {
+        self.globals[node.index()]
+    }
+
+    /// Overwrite `node`'s local transform and mark it changed. Never writes to
+    /// any world transform — that is the propagation pass's job.
+    ///
+    /// # Panics
+    /// Panics if `node` is out of bounds.
+    pub fn set_local(&mut self, node: NodeId, local: Transform) {
+        self.locals[node.index()] = local;
+        self.ticks.mark(node);
+    }
+
+    /// Whether `node`'s local changed since the last pass.
+    ///
+    /// # Panics
+    /// Panics if `node` is out of bounds.
+    #[inline]
+    pub fn is_changed(&self, node: NodeId) -> bool {
+        self.ticks.is_changed(node)
+    }
+
+    /// Run a full propagation pass, refreshing every world transform, then
+    /// close the change epoch so all nodes read as clean until the next edit.
+    ///
+    /// # Panics
+    /// Panics only if the internal buffers desynchronize from the hierarchy,
+    /// which cannot happen through this type's safe API.
+    pub fn propagate(&mut self) {
+        propagation::propagate(&self.hierarchy, &self.locals, &mut self.globals)
+            .expect("TransformGraph buffers stay in sync with the hierarchy");
+        self.ticks.end_pass();
+    }
+
+    /// Re-parent `child` under `new_parent` (or detach to a root with `None`),
+    /// keeping its *local* transform unchanged. The world pose generally moves;
+    /// call [`TransformGraph::propagate`] to recompute it.
+    ///
+    /// # Errors
+    /// Propagates the errors of [`Hierarchy::set_parent`].
+    pub fn reparent(
+        &mut self,
+        child: NodeId,
+        new_parent: Option<NodeId>,
+    ) -> Result<(), HierarchyError> {
+        self.hierarchy.set_parent(child, new_parent)?;
+        self.ticks.mark(child);
+        Ok(())
+    }
+
+    /// Re-parent `child` under `new_parent` while preserving its **world**
+    /// pose: the local transform is recomputed as
+    /// `inverse(parent_world) * child_world`.
+    ///
+    /// This runs a propagation pass first (to read current world poses) and a
+    /// second one afterwards (to refresh the moved subtree). The new local is
+    /// recovered via [`GlobalTransform::compute_transform`], so the round-trip
+    /// is exact only when the resulting local has no shear (e.g. no mix of
+    /// non-uniform parent scale with child rotation); otherwise the world pose
+    /// is preserved only to within TRS-representable precision, consistent with
+    /// the "Local is authoritative" invariant.
+    ///
+    /// # Errors
+    /// - [`HierarchyError::InvalidNode`] if `child` or `new_parent` is out of
+    ///   bounds.
+    /// - [`HierarchyError::Cycle`] if the edge would form a cycle.
+    pub fn reparent_keeping_world(
+        &mut self,
+        child: NodeId,
+        new_parent: Option<NodeId>,
+    ) -> Result<(), HierarchyError> {
+        if !self.hierarchy.contains(child) {
+            return Err(HierarchyError::InvalidNode);
+        }
+        if let Some(parent) = new_parent {
+            if !self.hierarchy.contains(parent) {
+                return Err(HierarchyError::InvalidNode);
+            }
+        }
+
+        self.propagate();
+        let child_world = self.globals[child.index()].affine();
+        let parent_world = match new_parent {
+            Some(parent) => self.globals[parent.index()].affine(),
+            None => Affine3::IDENTITY,
+        };
+        let new_local_affine = parent_world.inverse() * child_world;
+
+        self.hierarchy.set_parent(child, new_parent)?;
+        self.locals[child.index()] = GlobalTransform(new_local_affine).compute_transform();
+        self.ticks.mark(child);
+        self.propagate();
+        Ok(())
+    }
+}
+
 /// Common imports.
 pub mod prelude {
-    pub use crate::{GlobalTransform, Transform};
+    pub use crate::change::{ChangeTicks, Tick};
+    pub use crate::hierarchy::{Hierarchy, HierarchyError, NodeId};
+    pub use crate::propagation::propagate;
+    pub use crate::{GlobalTransform, Transform, TransformGraph};
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod tests_m1;
