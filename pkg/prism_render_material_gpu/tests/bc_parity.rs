@@ -2855,3 +2855,362 @@ fn astc_multi_partition_single_plane_parity_against_gpu_hardware_decode() {
         MULTI_PART_MODES.len()
     );
 }
+
+// ---------------------------------------------------------------------------
+// ASTC multi-partition low-quant colour + per-partition CEM parity (M#8-ext).
+//
+// The committed multi-partition test only drives shared-class CEM at the
+// identity QUANT_256 colour level, so two decode paths that are already
+// implemented in `multi_partition.rs` remained unproven on hardware:
+//   (A) non-identity colour ISE levels (QUANT_16/24/40/48/64 and the trit and
+//       quint colour forms), exercising `quant_mode::color_quant_level`
+//       ROW5-ROW9 and `color_unquant` for low-quant colour on 2/3/4 partitions;
+//   (B) the per-partition colour-endpoint-mode class field (base class != 0),
+//       exercising the per-partition CEM decode branch and its high-part bits
+//       just below the weight stream.
+// Both tests build whole blocks by hand and compare the CPU
+// `decode_astc_4x4_ldr` against the Metal ASTC hardware decoder within 1 LSB.
+// ---------------------------------------------------------------------------
+
+/// Number of colour integers a given LDR colour-endpoint-mode consumes
+/// (`cem_integer_count` in the CPU decoder): `((cem >> 2) + 1) * 2`.
+fn cem_int_count(cem: u32) -> u32 {
+    ((cem >> 2) + 1) * 2
+}
+
+/// Reference `quant_mode_table[integer_count / 2][color_bits]` restricted to
+/// the 10/12/14/16/18-integer rows (ROW5-ROW9), transcribed verbatim from the
+/// CPU `quant_mode` module so the test derives the exact same colour quant
+/// level the decoder will use. A colour-bits value past the table saturates at
+/// QUANT_256 (level 20).
+#[rustfmt::skip]
+fn color_quant_level_test(integer_count: u32, color_bits: usize) -> i8 {
+    const ROW5: [i8; 128] = [
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0, 0, 0,
+        1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 4, 4, 4, 4, 5, 5,
+        5, 5, 6, 6, 7, 7, 7, 7, 8, 8, 8, 8, 9, 9, 10, 10,
+        10, 10, 11, 11, 11, 11, 12, 12, 13, 13, 13, 13, 14, 14, 14, 14,
+        15, 15, 16, 16, 16, 16, 17, 17, 17, 17, 18, 18, 19, 19, 19, 19,
+        20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20,
+        20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20,
+        20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20,
+    ];
+    const ROW6: [i8; 128] = [
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0,
+        0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3,
+        4, 4, 4, 4, 5, 5, 5, 5, 6, 6, 6, 6, 7, 7, 7, 7,
+        8, 8, 8, 8, 9, 9, 9, 9, 10, 10, 10, 10, 11, 11, 11, 11,
+        12, 12, 12, 12, 13, 13, 13, 13, 14, 14, 14, 14, 15, 15, 15, 15,
+        16, 16, 16, 16, 17, 17, 17, 17, 18, 18, 18, 18, 19, 19, 19, 19,
+        20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20,
+        20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20,
+    ];
+    const ROW7: [i8; 128] = [
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 2,
+        2, 3, 3, 3, 3, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 6,
+        6, 6, 6, 7, 7, 7, 7, 7, 8, 8, 8, 8, 8, 9, 9, 9,
+        9, 10, 10, 10, 10, 10, 11, 11, 11, 11, 11, 12, 12, 12, 12, 13,
+        13, 13, 13, 13, 14, 14, 14, 14, 14, 15, 15, 15, 15, 16, 16, 16,
+        16, 16, 17, 17, 17, 17, 17, 18, 18, 18, 18, 19, 19, 19, 19, 19,
+        20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20,
+    ];
+    const ROW8: [i8; 128] = [
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1,
+        2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4,
+        5, 5, 5, 5, 5, 5, 6, 6, 6, 6, 7, 7, 7, 7, 7, 7,
+        8, 8, 8, 8, 8, 8, 9, 9, 9, 9, 10, 10, 10, 10, 10, 10,
+        11, 11, 11, 11, 11, 11, 12, 12, 12, 12, 13, 13, 13, 13, 13, 13,
+        14, 14, 14, 14, 14, 14, 15, 15, 15, 15, 16, 16, 16, 16, 16, 16,
+        17, 17, 17, 17, 17, 17, 18, 18, 18, 18, 19, 19, 19, 19, 19, 19,
+    ];
+    const ROW9: [i8; 128] = [
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1,
+        1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 4,
+        4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 6, 6, 6, 6,
+        6, 7, 7, 7, 7, 7, 7, 7, 8, 8, 8, 8, 8, 8, 9, 9,
+        9, 9, 9, 10, 10, 10, 10, 10, 10, 10, 11, 11, 11, 11, 11, 11,
+        12, 12, 12, 12, 12, 13, 13, 13, 13, 13, 13, 13, 14, 14, 14, 14,
+        14, 14, 15, 15, 15, 15, 15, 16, 16, 16, 16, 16, 16, 16, 17, 17,
+    ];
+    let row: &[i8; 128] = match integer_count >> 1 {
+        5 => &ROW5,
+        6 => &ROW6,
+        7 => &ROW7,
+        8 => &ROW8,
+        9 => &ROW9,
+        other => panic!("test only exercises 10/12/14/16/18 colour integers, got {other} halves"),
+    };
+    *row.get(color_bits).unwrap_or(&20)
+}
+
+/// (low bit width, is-trit, is-quint) for colour quant level `0..=20`, the exact
+/// inverse of `color_unquant::NUM_LEVELS` so endpoints can be ISE-encoded in the
+/// level the decoder expects.
+fn color_btq(level: i8) -> (u32, bool, bool) {
+    match level {
+        0 => (1, false, false),
+        1 => (0, true, false),
+        2 => (2, false, false),
+        3 => (0, false, true),
+        4 => (1, true, false),
+        5 => (3, false, false),
+        6 => (1, false, true),
+        7 => (2, true, false),
+        8 => (4, false, false),
+        9 => (2, false, true),
+        10 => (3, true, false),
+        11 => (5, false, false),
+        12 => (3, false, true),
+        13 => (4, true, false),
+        14 => (6, false, false),
+        15 => (4, false, true),
+        16 => (5, true, false),
+        17 => (7, false, false),
+        18 => (5, false, true),
+        19 => (6, true, false),
+        20 => (8, false, false),
+        other => panic!("unsupported colour quant level {other}"),
+    }
+}
+
+/// Number of distinct quant steps at colour level `level`.
+fn color_num_levels(level: i8) -> u32 {
+    let (bits, trit, quint) = color_btq(level);
+    if trit {
+        3 << bits
+    } else if quint {
+        5 << bits
+    } else {
+        1 << bits
+    }
+}
+
+/// Write `ic` random colour endpoint integers forward from bit `start` at colour
+/// quant `level`, in astcenc ISE order (the exact inverse of the decoder's
+/// `decode_ise` over the concatenated endpoint run). Each raw value is a valid
+/// packed `low | (digit << bits)` because it is drawn modulo the level's step
+/// count.
+fn set_color_endpoints(blk: &mut [u8; 16], start: u32, level: i8, ic: usize, rng: &mut Rng) {
+    let (bits, trit, quint) = color_btq(level);
+    let nl = color_num_levels(level);
+    let mut vals = [0u8; 18];
+    for v in vals.iter_mut().take(ic) {
+        *v = (rng.next_u32() % nl) as u8;
+    }
+    if trit {
+        astc_encode_trit(blk, start, bits, &vals[..ic]);
+    } else if quint {
+        astc_encode_quint(blk, start, bits, &vals[..ic]);
+    } else {
+        for (i, &v) in vals[..ic].iter().enumerate() {
+            astc_set_bits(blk, start + (i as u32) * bits, bits, v as u32);
+        }
+    }
+}
+
+/// Encode a per-partition colour-endpoint-mode field (base class != 0) for the
+/// `cems` list. The low 6 bits land at [23, 29); the `3*pc - 4` high bits land
+/// just below the weight stream at `128 - weight_bits - highpart`, exactly where
+/// `multi_partition::decode_multi_partition_4x4_ldr` reads them back. All CEM
+/// classes must lie within one step of the minimum class so the shared base-class
+/// encoding is representable.
+fn set_cem_per_partition(blk: &mut [u8; 16], cems: &[u32], weight_bits: u32) {
+    let pc = cems.len() as u32;
+    let base = cems
+        .iter()
+        .map(|&c| c >> 2)
+        .min()
+        .expect("non-empty CEM list");
+    let baseclass = base + 1;
+    assert!(
+        (1..=3).contains(&baseclass),
+        "base class {baseclass} out of range"
+    );
+    let highpart = 3 * pc - 4;
+    let mut enc: u32 = baseclass & 0x3;
+    for (i, &c) in cems.iter().enumerate() {
+        let diff = (c >> 2) - base;
+        assert!(diff <= 1, "CEM classes must differ by <= 1");
+        enc |= diff << (2 + i as u32);
+    }
+    for (i, &c) in cems.iter().enumerate() {
+        enc |= (c & 0x3) << (2 + pc + 2 * i as u32);
+    }
+    astc_set_bits(blk, 23, 6, enc & 0x3F);
+    astc_set_bits(blk, 128 - weight_bits - highpart, highpart, enc >> 6);
+}
+
+/// Shared-class low-quant colour configs:
+/// `(block_mode, weights_x, weights_y, weight_levels, weight_bits, partition_count, cem)`.
+/// Each exercises a non-identity colour quant level across 2/3/4 partitions and
+/// all three colour ISE forms (bit / trit / quint).
+const LOWQUANT_SHARED: [(u32, u32, u32, u32, u32, u32, u32); 6] = [
+    (19, 4, 2, 8, 24, 2, 8),    // ic12, cb75 -> QUANT_64  (bits)  ROW6
+    (50, 4, 3, 5, 28, 2, 8),    // ic12, cb71 -> QUANT_48  (trit)  ROW6
+    (35, 4, 3, 6, 32, 2, 8),    // ic12, cb67 -> QUANT_40  (quint) ROW6
+    (19, 4, 2, 8, 24, 3, 8),    // ic18, cb75 -> QUANT_16  (bits)  ROW9
+    (814, 2, 3, 16, 24, 2, 12), // ic16, cb75 -> QUANT_24  (trit)  ROW8
+    (462, 3, 4, 4, 24, 4, 6),   // ic16, cb75 -> QUANT_24  (trit)  ROW8, 4 partitions
+];
+
+/// GPU parity for multi-partition single-plane LDR blocks whose colour endpoints
+/// use a non-identity (low) quant level in a shared CEM class. Proves the
+/// `color_quant_level` ROW5-ROW9 path and the trit/quint colour ISE forms match
+/// the Metal ASTC hardware decoder within 1 LSB on every texel and channel.
+#[test]
+fn astc_multi_partition_lowquant_shared_cem_parity_against_gpu_hardware_decode() {
+    let Some(oracle) = BlockOracle::try_new() else {
+        eprintln!("no GPU adapter; skipping ASTC multi-partition low-quant parity");
+        return;
+    };
+    if !oracle
+        .features()
+        .contains(Features::TEXTURE_COMPRESSION_ASTC)
+    {
+        eprintln!("adapter lacks ASTC support; skipping ASTC multi-partition low-quant parity");
+        return;
+    }
+    let format = TextureFormat::Astc {
+        block: wgpu::AstcBlock::B4x4,
+        channel: wgpu::AstcChannel::Unorm,
+    };
+    let mut rng = Rng(0x4C51_A17C);
+    const PER_MODE: u32 = 128;
+    for (mode, wx, wy, levels, weight_bits, pc, cem) in LOWQUANT_SHARED {
+        let (form, bits) = levels_to_grid_form(levels);
+        let weight_count = (wx * wy) as usize;
+        let ic = (pc * cem_int_count(cem)) as usize;
+        let color_bits = 99 - weight_bits as i32; // COLOR_BITS_ARR[2..=4] == 99, shared class
+        assert!(color_bits >= 0);
+        let level = color_quant_level_test(ic as u32, color_bits as usize);
+        assert!(
+            level >= 4,
+            "config mode {mode} pc {pc} cem {cem} derived level {level} below QUANT_6"
+        );
+        for _ in 0..PER_MODE {
+            let mut blk = [0u8; 16];
+            astc_set_bits(&mut blk, 0, 11, mode);
+            astc_set_bits(&mut blk, 11, 2, pc - 1);
+            astc_set_bits(&mut blk, 13, 10, rng.next_u32() & 0x3FF);
+            astc_set_bits(&mut blk, 23, 6, cem << 2); // shared class (base class 0)
+            set_color_endpoints(&mut blk, 29, level, ic, &mut rng);
+
+            let mut weights = [0u8; 64];
+            for w in weights.iter_mut().take(weight_count) {
+                *w = rand_grid_weight(&mut rng, form, bits);
+            }
+            astc_set_grid_weights(&mut blk, form, bits, &weights[..weight_count]);
+
+            let cpu = decode_astc_4x4_ldr(&blk).unwrap_or_else(|e| {
+                panic!(
+                    "low-quant mode {mode} (pc {pc}, cem {cem}, level {level}) block {blk:02x?} rejected: {e:?}"
+                )
+            });
+            let gpu = oracle.decode_unorm8(format, &blk);
+            for t in 0..16 {
+                for c in 0..4 {
+                    let d = (cpu[t][c] as i32 - gpu[t][c] as i32).abs();
+                    assert!(
+                        d <= 1,
+                        "ASTC low-quant mode {mode} (pc {pc}, cem {cem}, level {level}) block={blk:02x?} texel {t} chan {c}: cpu={} gpu={} (|d|={d})",
+                        cpu[t][c],
+                        gpu[t][c]
+                    );
+                }
+            }
+        }
+    }
+    eprintln!(
+        "ASTC multi-partition low-quant shared-CEM parity: {} configs x {PER_MODE} blocks within 1 LSB of hardware",
+        LOWQUANT_SHARED.len()
+    );
+}
+
+/// Per-partition CEM-class configs:
+/// `(block_mode, weights_x, weights_y, weight_levels, weight_bits, &[cem_per_partition])`.
+/// Every class pair differs by at most one step so the base-class encoding is
+/// representable; all use weight_bits == 24.
+const PER_PARTITION_CEM: [(u32, u32, u32, u32, u32, &[u32]); 4] = [
+    (19, 4, 2, 8, 24, &[8, 4]),     // ic10 classes {2,1} base1 -> ROW5
+    (814, 2, 3, 16, 24, &[12, 8]),  // ic14 classes {3,2} base2 -> ROW7
+    (431, 3, 3, 6, 24, &[8, 8, 8]), // ic18 classes {2,2,2} base2, highpart 5 -> ROW9
+    (34, 4, 3, 4, 24, &[8, 8]),     // ic12 classes {2,2} base2 -> ROW6
+];
+
+/// GPU parity for multi-partition single-plane LDR blocks that use the
+/// per-partition colour-endpoint-mode class field (base class != 0). Proves the
+/// per-partition CEM decode branch and its high-part bit placement match the
+/// Metal ASTC hardware decoder within 1 LSB on every texel and channel.
+#[test]
+fn astc_multi_partition_per_partition_cem_parity_against_gpu_hardware_decode() {
+    let Some(oracle) = BlockOracle::try_new() else {
+        eprintln!("no GPU adapter; skipping ASTC per-partition CEM parity");
+        return;
+    };
+    if !oracle
+        .features()
+        .contains(Features::TEXTURE_COMPRESSION_ASTC)
+    {
+        eprintln!("adapter lacks ASTC support; skipping ASTC per-partition CEM parity");
+        return;
+    }
+    let format = TextureFormat::Astc {
+        block: wgpu::AstcBlock::B4x4,
+        channel: wgpu::AstcChannel::Unorm,
+    };
+    let mut rng = Rng(0x9E_C0DE11);
+    const PER_MODE: u32 = 128;
+    for (mode, wx, wy, levels, weight_bits, cems) in PER_PARTITION_CEM {
+        let pc = cems.len() as u32;
+        let (form, bits) = levels_to_grid_form(levels);
+        let weight_count = (wx * wy) as usize;
+        let ic = cems.iter().map(|&c| cem_int_count(c)).sum::<u32>() as usize;
+        let highpart = 3 * pc - 4;
+        let color_bits = 99 - weight_bits as i32 - highpart as i32;
+        assert!(color_bits >= 0);
+        let level = color_quant_level_test(ic as u32, color_bits as usize);
+        assert!(
+            level >= 4,
+            "config mode {mode} cems {cems:?} derived level {level} below QUANT_6"
+        );
+        for _ in 0..PER_MODE {
+            let mut blk = [0u8; 16];
+            astc_set_bits(&mut blk, 0, 11, mode);
+            astc_set_bits(&mut blk, 11, 2, pc - 1);
+            astc_set_bits(&mut blk, 13, 10, rng.next_u32() & 0x3FF);
+            set_cem_per_partition(&mut blk, cems, weight_bits);
+            set_color_endpoints(&mut blk, 29, level, ic, &mut rng);
+
+            let mut weights = [0u8; 64];
+            for w in weights.iter_mut().take(weight_count) {
+                *w = rand_grid_weight(&mut rng, form, bits);
+            }
+            astc_set_grid_weights(&mut blk, form, bits, &weights[..weight_count]);
+
+            let cpu = decode_astc_4x4_ldr(&blk).unwrap_or_else(|e| {
+                panic!(
+                    "per-partition mode {mode} (cems {cems:?}, level {level}) block {blk:02x?} rejected: {e:?}"
+                )
+            });
+            let gpu = oracle.decode_unorm8(format, &blk);
+            for t in 0..16 {
+                for c in 0..4 {
+                    let d = (cpu[t][c] as i32 - gpu[t][c] as i32).abs();
+                    assert!(
+                        d <= 1,
+                        "ASTC per-partition mode {mode} (cems {cems:?}, level {level}) block={blk:02x?} texel {t} chan {c}: cpu={} gpu={} (|d|={d})",
+                        cpu[t][c],
+                        gpu[t][c]
+                    );
+                }
+            }
+        }
+    }
+    eprintln!(
+        "ASTC multi-partition per-partition-CEM parity: {} configs x {PER_MODE} blocks within 1 LSB of hardware",
+        PER_PARTITION_CEM.len()
+    );
+}
