@@ -271,6 +271,8 @@ pub mod tet_fem_projection_pass;
 pub use tet_fem_projection_pass::{
     run_projection_pass, ProjectionOrder, ProjectionPassParams, ProjectionPassReport,
 };
+pub mod tet_fem_prescribed_substep;
+pub use tet_fem_prescribed_substep::step_newmark_prescribed_substeps;
 pub mod tet_fem_anisotropic;
 pub use tet_fem_anisotropic::{
     orthotropic_fiber_energy, orthotropic_fiber_first_piola, FiberDirection, FiberFamily,
