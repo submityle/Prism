@@ -19,8 +19,7 @@
 //! value just written equals the signal), and after a `pull_all` the next
 //! `push_all` finds the component already equal to the signal.
 
-use bevy_ecs::component::Mutable;
-use bevy_ecs::prelude::{Component, Entity, World};
+use prism_ecs::prelude::{Component, Entity, World};
 use prism_ui_reactive::Signal;
 
 use crate::binding::FieldBinding;
@@ -48,7 +47,7 @@ impl EcsBridge {
         signal: Signal<T>,
         reader: impl Fn(&C) -> T + 'static,
     ) where
-        C: Component<Mutability = Mutable>,
+        C: Component,
         T: Clone + PartialEq + 'static,
     {
         let binding = FieldBinding::read_only(signal, reader);
@@ -65,7 +64,7 @@ impl EcsBridge {
         reader: impl Fn(&C) -> T + 'static,
         writer: impl Fn(&mut C, &T) + 'static,
     ) where
-        C: Component<Mutability = Mutable>,
+        C: Component,
         T: Clone + PartialEq + 'static,
     {
         let binding = FieldBinding::read_write(signal, reader, writer);
@@ -127,7 +126,7 @@ mod tests {
     #[test]
     fn bind_registers_binding() {
         let mut world = World::new();
-        let entity = world.spawn(Position { x: 1, y: 2 }).id();
+        let entity = world.spawn(Position { x: 1, y: 2 });
         let rt = Runtime::new();
         let mut bridge = EcsBridge::new();
         bridge.bind::<Position, i32>(entity, rt.signal(0), |p| p.x);
@@ -138,7 +137,7 @@ mod tests {
     #[test]
     fn pull_all_counts_changed_bindings() {
         let mut world = World::new();
-        let entity = world.spawn(Position { x: 10, y: 20 }).id();
+        let entity = world.spawn(Position { x: 10, y: 20 });
         let rt = Runtime::new();
         let x = rt.signal(0i32);
         let y = rt.signal(0i32);
@@ -156,7 +155,7 @@ mod tests {
     #[test]
     fn push_all_counts_written_bindings() {
         let mut world = World::new();
-        let entity = world.spawn(Position { x: 0, y: 0 }).id();
+        let entity = world.spawn(Position { x: 0, y: 0 });
         let rt = Runtime::new();
         let x = rt.signal(3i32);
         let y = rt.signal(4i32);
@@ -174,7 +173,7 @@ mod tests {
     #[test]
     fn read_only_bindings_do_not_push() {
         let mut world = World::new();
-        let entity = world.spawn(Position { x: 1, y: 2 }).id();
+        let entity = world.spawn(Position { x: 1, y: 2 });
         let rt = Runtime::new();
         let mut bridge = EcsBridge::new();
         bridge.bind::<Position, i32>(entity, rt.signal(99), |p| p.x);
@@ -186,8 +185,8 @@ mod tests {
     #[test]
     fn multiple_entities_sync_independently() {
         let mut world = World::new();
-        let a = world.spawn(Position { x: 1, y: 0 }).id();
-        let b = world.spawn(Position { x: 2, y: 0 }).id();
+        let a = world.spawn(Position { x: 1, y: 0 });
+        let b = world.spawn(Position { x: 2, y: 0 });
         let rt = Runtime::new();
         let sa = rt.signal(0i32);
         let sb = rt.signal(0i32);
@@ -203,7 +202,7 @@ mod tests {
     #[test]
     fn two_way_round_trip_does_not_oscillate() {
         let mut world = World::new();
-        let entity = world.spawn(Position { x: 0, y: 0 }).id();
+        let entity = world.spawn(Position { x: 0, y: 0 });
         let rt = Runtime::new();
         let x = rt.signal(0i32);
         let mut bridge = EcsBridge::new();

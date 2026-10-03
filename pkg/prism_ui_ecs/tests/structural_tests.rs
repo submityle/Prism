@@ -1,10 +1,10 @@
 //! Integration tests for signal-driven structural bindings (`Show` / `For`).
 //!
-//! These exercise the public API against a real Bevy [`World`] and a real
+//! These exercise the public API against a real Prism ECS [`World`] and a real
 //! reactive [`Runtime`], covering conditional mounting, keyed reuse across
 //! reorders, and batched flushing through a [`StructuralScope`].
 
-use bevy_ecs::prelude::{Component, Entity, World};
+use prism_ecs::prelude::{Component, Entity, World};
 use prism_ui_ecs::{ForBinding, ShowBinding, StructuralBinding, StructuralScope};
 use prism_ui_reactive::Runtime;
 
@@ -13,11 +13,12 @@ struct Label {
     id: i32,
 }
 
-// `World::new()` seeds an internal entity for the default query filters,
-// so user-spawned entities are counted relative to that baseline.
+// Count user-spawned entities relative to a fresh `World` baseline. A fresh
+// prism_ecs `World` has zero live entities, so this reduces to the live count,
+// but keeping the subtraction preserves the original test semantics.
 fn count_entities(world: &mut World) -> usize {
-    let baseline = World::new().iter_entities().count();
-    world.iter_entities().count() - baseline
+    let baseline = World::new().entity_count() as usize;
+    world.entity_count() as usize - baseline
 }
 
 #[test]
@@ -26,7 +27,7 @@ fn show_full_lifecycle_true_false_true() {
     let rt = Runtime::new();
     let visible = rt.signal(false);
 
-    let mut show = ShowBinding::new(visible.clone(), |w| w.spawn(Label { id: 0 }).id());
+    let mut show = ShowBinding::new(visible.clone(), |w| w.spawn(Label { id: 0 }));
 
     // Hidden initially: nothing spawned.
     show.reconcile(&world);
@@ -71,7 +72,7 @@ fn for_reorder_reuses_entities_minimally() {
     let mut binding = ForBinding::new(
         items.clone(),
         |value: &i32| *value,
-        |w, value: &i32| w.spawn(Label { id: *value }).id(),
+        |w, value: &i32| w.spawn(Label { id: *value }),
     );
 
     binding.reconcile(&world);
@@ -106,7 +107,7 @@ fn for_add_and_remove_minimal_set() {
     let mut binding = ForBinding::new(
         items.clone(),
         |value: &i32| *value,
-        |w, value: &i32| w.spawn(Label { id: *value }).id(),
+        |w, value: &i32| w.spawn(Label { id: *value }),
     );
     binding.reconcile(&world);
     binding.flush(&mut world);
@@ -136,12 +137,12 @@ fn scope_batches_until_flush_and_counts() {
 
     let mut scope = StructuralScope::new();
     scope.add(ShowBinding::new(visible.clone(), |w| {
-        w.spawn(Label { id: -1 }).id()
+        w.spawn(Label { id: -1 })
     }));
     scope.add(ForBinding::new(
         items.clone(),
         |value: &i32| *value,
-        |w, value: &i32| w.spawn(Label { id: *value }).id(),
+        |w, value: &i32| w.spawn(Label { id: *value }),
     ));
 
     // Reconcile alone must not touch the world.
@@ -173,7 +174,7 @@ fn for_with_update_refreshes_reused_entities() {
     let mut binding = ForBinding::with_update(
         items.clone(),
         |pair: &(i32, i32)| pair.0,
-        |w, pair: &(i32, i32)| w.spawn(Label { id: pair.1 }).id(),
+        |w, pair: &(i32, i32)| w.spawn(Label { id: pair.1 }),
         |w, entity: Entity, pair: &(i32, i32)| {
             if let Some(mut label) = w.get_mut::<Label>(entity) {
                 label.id = pair.1;

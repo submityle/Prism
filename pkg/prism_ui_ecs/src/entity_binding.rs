@@ -6,8 +6,7 @@
 //! [`SyncBinding`] trait, so a registry can hold `Box<dyn SyncBinding>` values
 //! of differing component/field types in one collection.
 
-use bevy_ecs::component::Mutable;
-use bevy_ecs::prelude::{Component, Entity, World};
+use prism_ecs::prelude::{Component, Entity, World};
 
 use crate::binding::FieldBinding;
 
@@ -50,7 +49,7 @@ impl<C: Component, T: Clone + PartialEq + 'static> EntityBinding<C, T> {
 
 impl<C, T> SyncBinding for EntityBinding<C, T>
 where
-    C: Component<Mutability = Mutable>,
+    C: Component,
     T: Clone + PartialEq + 'static,
 {
     fn pull(&mut self, world: &World) -> bool {
@@ -75,7 +74,7 @@ mod tests {
     #[test]
     fn forwards_pull_to_inner_binding() {
         let mut world = World::new();
-        let entity = world.spawn(Counter { value: 11 }).id();
+        let entity = world.spawn(Counter { value: 11 });
         let rt = Runtime::new();
         let signal = rt.signal(0i32);
         let binding = FieldBinding::<Counter, i32>::read_only(signal.clone(), |c| c.value);
@@ -89,7 +88,7 @@ mod tests {
     #[test]
     fn forwards_push_to_inner_binding() {
         let mut world = World::new();
-        let entity = world.spawn(Counter { value: 0 }).id();
+        let entity = world.spawn(Counter { value: 0 });
         let rt = Runtime::new();
         let signal = rt.signal(77i32);
         let binding =
@@ -103,7 +102,7 @@ mod tests {
     #[test]
     fn stored_as_trait_object() {
         let mut world = World::new();
-        let entity = world.spawn(Counter { value: 5 }).id();
+        let entity = world.spawn(Counter { value: 5 });
         let rt = Runtime::new();
         let signal = rt.signal(0i32);
         let binding = FieldBinding::<Counter, i32>::read_only(signal.clone(), |c| c.value);

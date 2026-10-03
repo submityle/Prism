@@ -35,7 +35,7 @@
 //! # Example
 //!
 //! ```
-//! use bevy_ecs::prelude::World;
+//! use prism_ecs::prelude::World;
 //! use prism_ui_ecs::{ShowBinding, StructuralBinding};
 //! use prism_ui_reactive::Runtime;
 //!
@@ -43,7 +43,7 @@
 //! let rt = Runtime::new();
 //! let visible = rt.signal(false);
 //!
-//! let mut show = ShowBinding::new(visible.clone(), |w| w.spawn(()).id());
+//! let mut show = ShowBinding::new(visible.clone(), |w| w.spawn(()));
 //!
 //! // Hidden: reconcile + flush spawn nothing.
 //! show.reconcile(&world);
@@ -65,7 +65,7 @@
 //! assert!(show.current_entity().is_none());
 //! ```
 
-use bevy_ecs::prelude::{Entity, World};
+use prism_ecs::prelude::{Entity, World};
 use prism_ui_reactive::Signal;
 use prism_ui_tree::{diff_keyed, Diff, DiffOp};
 
@@ -382,7 +382,7 @@ impl StructuralScope {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy_ecs::prelude::Component;
+    use prism_ecs::prelude::Component;
     use prism_ui_reactive::Runtime;
 
     #[derive(Component)]
@@ -390,12 +390,12 @@ mod tests {
         value: i32,
     }
 
-    // `World::new()` seeds an internal entity for the default query
-    // filters, so user-spawned entities are counted relative to that
-    // baseline.
+    // Count user-spawned entities relative to a fresh `World` baseline. A
+    // fresh prism_ecs `World` has zero live entities, so this reduces to the
+    // live count, but keeping the subtraction preserves the test semantics.
     fn count_entities(world: &mut World) -> usize {
-        let baseline = World::new().iter_entities().count();
-        world.iter_entities().count() - baseline
+        let baseline = World::new().entity_count() as usize;
+        world.entity_count() as usize - baseline
     }
 
     #[test]
@@ -403,7 +403,7 @@ mod tests {
         let mut world = World::new();
         let rt = Runtime::new();
         let visible = rt.signal(true);
-        let mut show = ShowBinding::new(visible, |w| w.spawn(()).id());
+        let mut show = ShowBinding::new(visible, |w| w.spawn(()));
         show.reconcile(&world);
         let stats = show.flush(&mut world);
         assert_eq!(stats.spawned, 1);
@@ -416,7 +416,7 @@ mod tests {
         let mut world = World::new();
         let rt = Runtime::new();
         let visible = rt.signal(false);
-        let mut show = ShowBinding::new(visible, |w| w.spawn(()).id());
+        let mut show = ShowBinding::new(visible, |w| w.spawn(()));
         show.reconcile(&world);
         let stats = show.flush(&mut world);
         assert_eq!(stats, StructuralStats::default());
@@ -428,7 +428,7 @@ mod tests {
         let mut world = World::new();
         let rt = Runtime::new();
         let visible = rt.signal(false);
-        let mut show = ShowBinding::new(visible.clone(), |w| w.spawn(()).id());
+        let mut show = ShowBinding::new(visible.clone(), |w| w.spawn(()));
 
         visible.set(true);
         show.reconcile(&world);
@@ -453,7 +453,7 @@ mod tests {
         let mut world = World::new();
         let rt = Runtime::new();
         let visible = rt.signal(true);
-        let mut show = ShowBinding::new(visible, |w| w.spawn(()).id());
+        let mut show = ShowBinding::new(visible, |w| w.spawn(()));
         show.reconcile(&world);
         show.flush(&mut world);
         // Reconcile again without changing the signal.
@@ -471,7 +471,7 @@ mod tests {
         let mut binding = ForBinding::new(
             items,
             |value: &i32| *value,
-            |w, value: &i32| w.spawn(Item { value: *value }).id(),
+            |w, value: &i32| w.spawn(Item { value: *value }),
         );
         binding.reconcile(&world);
         let stats = binding.flush(&mut world);
@@ -488,7 +488,7 @@ mod tests {
         let mut binding = ForBinding::new(
             items.clone(),
             |value: &i32| *value,
-            |w, value: &i32| w.spawn(Item { value: *value }).id(),
+            |w, value: &i32| w.spawn(Item { value: *value }),
         );
         binding.reconcile(&world);
         binding.flush(&mut world);
@@ -511,7 +511,7 @@ mod tests {
         let mut binding = ForBinding::new(
             items.clone(),
             |value: &i32| *value,
-            |w, value: &i32| w.spawn(Item { value: *value }).id(),
+            |w, value: &i32| w.spawn(Item { value: *value }),
         );
         binding.reconcile(&world);
         binding.flush(&mut world);
@@ -535,7 +535,7 @@ mod tests {
         let mut binding = ForBinding::new(
             items.clone(),
             |value: &i32| *value,
-            |w, value: &i32| w.spawn(Item { value: *value }).id(),
+            |w, value: &i32| w.spawn(Item { value: *value }),
         );
         binding.reconcile(&world);
         binding.flush(&mut world);
@@ -560,7 +560,7 @@ mod tests {
         let mut binding = ForBinding::new(
             items.clone(),
             |value: &i32| *value,
-            |w, value: &i32| w.spawn(Item { value: *value }).id(),
+            |w, value: &i32| w.spawn(Item { value: *value }),
         );
         binding.reconcile(&world);
         binding.flush(&mut world);
@@ -586,7 +586,7 @@ mod tests {
         let mut binding = ForBinding::new(
             items.clone(),
             |value: &i32| *value,
-            |w, value: &i32| w.spawn(Item { value: *value }).id(),
+            |w, value: &i32| w.spawn(Item { value: *value }),
         );
         binding.reconcile(&world);
         binding.flush(&mut world);
@@ -608,7 +608,7 @@ mod tests {
         let mut binding = ForBinding::with_update(
             items.clone(),
             |pair: &(i32, i32)| pair.0,
-            |w, pair: &(i32, i32)| w.spawn(Item { value: pair.1 }).id(),
+            |w, pair: &(i32, i32)| w.spawn(Item { value: pair.1 }),
             |w, entity, pair: &(i32, i32)| {
                 if let Some(mut item) = w.get_mut::<Item>(entity) {
                     item.value = pair.1;
@@ -635,7 +635,7 @@ mod tests {
         let mut binding = ForBinding::new(
             items.clone(),
             |value: &i32| *value,
-            |w, value: &i32| w.spawn(Item { value: *value }).id(),
+            |w, value: &i32| w.spawn(Item { value: *value }),
         );
         binding.reconcile(&world);
         assert_eq!(binding.flush(&mut world), StructuralStats::default());
@@ -659,11 +659,11 @@ mod tests {
         let items = rt.signal(vec![1i32, 2]);
 
         let mut scope = StructuralScope::new();
-        scope.add(ShowBinding::new(visible.clone(), |w| w.spawn(()).id()));
+        scope.add(ShowBinding::new(visible.clone(), |w| w.spawn(())));
         scope.add(ForBinding::new(
             items.clone(),
             |value: &i32| *value,
-            |w, value: &i32| w.spawn(Item { value: *value }).id(),
+            |w, value: &i32| w.spawn(Item { value: *value }),
         ));
         assert_eq!(scope.len(), 2);
 
@@ -681,7 +681,7 @@ mod tests {
         scope.add(ForBinding::new(
             items,
             |value: &i32| *value,
-            |w, value: &i32| w.spawn(Item { value: *value }).id(),
+            |w, value: &i32| w.spawn(Item { value: *value }),
         ));
 
         // Reconcile alone must not spawn anything.
@@ -702,7 +702,7 @@ mod tests {
         scope.add(ForBinding::new(
             items.clone(),
             |value: &i32| *value,
-            |w, value: &i32| w.spawn(Item { value: *value }).id(),
+            |w, value: &i32| w.spawn(Item { value: *value }),
         ));
 
         assert_eq!(scope.run(&mut world).spawned, 2);

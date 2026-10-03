@@ -10,7 +10,7 @@ publish = false
 prism_ui = { path = "../prism_ui" }
 prism_ui_reactive = { path = "../prism_ui_reactive" }
 prism_ui_tree = { path = "../prism_ui_tree" }
-bevy_ecs = { path = "../../crates/bevy_ecs", version = "0.20.0-dev", default-features = false, features = ["std"] }
+prism_ecs = { path = "../prism_ecs", default-features = false, features = ["std"] }
 
 [features]
 default = ["std"]

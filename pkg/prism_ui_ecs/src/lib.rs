@@ -30,14 +30,14 @@
 //! # `std`-only exception
 //!
 //! Unlike the other Loom crates, this is an **engine-integration bridge** and is
-//! deliberately `std`-only: it links `bevy_ecs`, which itself requires `std`, so
+//! deliberately `std`-only: it links `prism_ecs`, which itself requires `std`, so
 //! there is no `no_std` build to support and the crate omits the usual
 //! `no_std`/`alloc` crate attributes.
 //!
 //! # Example
 //!
 //! ```
-//! use bevy_ecs::prelude::{Component, World};
+//! use prism_ecs::prelude::{Component, World};
 //! use prism_ui_ecs::EcsBridge;
 //! use prism_ui_reactive::Runtime;
 //!
@@ -47,7 +47,7 @@
 //! }
 //!
 //! let mut world = World::new();
-//! let entity = world.spawn(Counter { value: 1 }).id();
+//! let entity = world.spawn(Counter { value: 1 });
 //!
 //! let rt = Runtime::new();
 //! let value = rt.signal(0i32);

@@ -3,7 +3,7 @@
 //!
 //! The bridge owns `Box<dyn Fn>` reader/writer closures that are **not**
 //! `Send + Sync`, so it cannot be stored as an ordinary parallel
-//! [`Resource`](bevy_ecs::prelude::Resource). Instead it is installed as a
+//! [`Resource`](prism_ecs::prelude::Resource). Instead it is installed as a
 //! **non-send resource** (via [`World::insert_non_send`]) and driven by two
 //! **exclusive systems** (`fn(&mut World)`): the pull pass only needs `&World`,
 //! but the push pass needs `&mut World`, and an exclusive system is the only
@@ -11,7 +11,7 @@
 //!
 //! # Why remove-then-reinsert instead of `resource_scope`
 //!
-//! [`World::resource_scope`](bevy_ecs::prelude::World::resource_scope) is only
+//! [`World::resource_scope`](prism_ecs::prelude::World::resource_scope) is only
 //! defined for `R: Resource` and therefore cannot temporarily take out a
 //! non-send resource. To obtain both the bridge *and* the rest of the world at
 //! once we use the safe `remove -> call -> reinsert` pattern: taking ownership
@@ -30,7 +30,7 @@
 //! # Example
 //!
 //! ```
-//! use bevy_ecs::prelude::{Component, Schedule, World};
+//! use prism_ecs::prelude::{Component, Schedule, World};
 //! use prism_ui_ecs::schedule::{add_loom_sync_systems, insert_bridge};
 //! use prism_ui_ecs::EcsBridge;
 //! use prism_ui_reactive::Runtime;
@@ -41,7 +41,7 @@
 //! }
 //!
 //! let mut world = World::new();
-//! let entity = world.spawn(Counter { value: 1 }).id();
+//! let entity = world.spawn(Counter { value: 1 });
 //!
 //! let rt = Runtime::new();
 //! let signal = rt.signal(0i32);
@@ -69,7 +69,7 @@
 //! assert_eq!(world.get::<Counter>(entity).unwrap().value, 7);
 //! ```
 
-use bevy_ecs::prelude::{IntoScheduleConfigs, Schedule, SystemSet, World};
+use prism_ecs::prelude::{IntoScheduleConfigs, SetConfig, Schedule, SystemSet, World};
 
 use crate::bridge::EcsBridge;
 
@@ -136,7 +136,9 @@ pub fn loom_push_system(world: &mut World) {
 /// that `Pull` always runs before `Push`. The schedule is returned by mutable
 /// reference to allow further chained configuration.
 pub fn add_loom_sync_systems(schedule: &mut Schedule) -> &mut Schedule {
-    schedule.configure_sets((LoomSyncSet::Pull, LoomSyncSet::Push).chain());
+    // Chain the two sets: Pull always completes before Push within a frame.
+    schedule.configure_set(LoomSyncSet::Pull, SetConfig::new());
+    schedule.configure_set(LoomSyncSet::Push, SetConfig::new().after(LoomSyncSet::Pull));
     schedule.add_systems((
         loom_pull_system.in_set(LoomSyncSet::Pull),
         loom_push_system.in_set(LoomSyncSet::Push),
@@ -147,7 +149,7 @@ pub fn add_loom_sync_systems(schedule: &mut Schedule) -> &mut Schedule {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy_ecs::prelude::{Component, Entity, World};
+    use prism_ecs::prelude::{Component, Entity, World};
     use prism_ui_reactive::{Runtime, Signal};
 
     #[derive(Component)]
@@ -161,7 +163,7 @@ mod tests {
     }
 
     fn setup_two_way(world: &mut World, rt: &Runtime, start: i32) -> (Entity, Signal<i32>) {
-        let entity = world.spawn(Counter { value: start }).id();
+        let entity = world.spawn(Counter { value: start });
         let signal = rt.signal(0i32);
         let mut bridge = EcsBridge::new();
         bridge.bind_two_way::<Counter, i32>(
@@ -309,8 +311,8 @@ mod tests {
     fn multiple_entities_sync_independently() {
         let mut world = World::new();
         let rt = Runtime::new();
-        let e1 = world.spawn(Counter { value: 1 }).id();
-        let e2 = world.spawn(Counter { value: 2 }).id();
+        let e1 = world.spawn(Counter { value: 1 });
+        let e2 = world.spawn(Counter { value: 2 });
         let s1 = rt.signal(0i32);
         let s2 = rt.signal(0i32);
         let mut bridge = EcsBridge::new();
@@ -332,7 +334,7 @@ mod tests {
     fn multiple_bindings_on_one_entity() {
         let mut world = World::new();
         let rt = Runtime::new();
-        let entity = world.spawn((Counter { value: 1 }, Label { text: 2 })).id();
+        let entity = world.spawn((Counter { value: 1 }, Label { text: 2 }));
         let counter_sig = rt.signal(0i32);
         let label_sig = rt.signal(0i32);
         let mut bridge = EcsBridge::new();
@@ -392,7 +394,7 @@ mod tests {
     fn one_way_binding_pulls_but_does_not_push() {
         let mut world = World::new();
         let rt = Runtime::new();
-        let entity = world.spawn(Counter { value: 4 }).id();
+        let entity = world.spawn(Counter { value: 4 });
         let signal = rt.signal(0i32);
         let mut bridge = EcsBridge::new();
         bridge.bind::<Counter, i32>(entity, signal.clone(), |c| c.value);
@@ -416,7 +418,8 @@ mod tests {
     fn add_loom_sync_systems_returns_schedule() {
         let mut schedule = Schedule::default();
         let returned = add_loom_sync_systems(&mut schedule);
-        // The returned reference points at the same schedule and can be reused.
-        returned.set_apply_final_deferred(true);
+        // The returned reference points at the same schedule and can be reused:
+        // both loom-sync systems (pull + push) were registered on it.
+        assert!(!returned.is_empty());
     }
 }

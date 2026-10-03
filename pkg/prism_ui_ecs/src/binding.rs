@@ -8,9 +8,8 @@
 //! [`FieldBinding::push`] only mutates the component when the projected field
 //! differs from the signal's value, so it never sets a spurious change tick.
 
-use bevy_ecs::change_detection::Tick;
-use bevy_ecs::component::Mutable;
-use bevy_ecs::prelude::{Component, DetectChanges, Entity, World};
+use prism_ecs::prelude::Tick;
+use prism_ecs::prelude::{Component, Entity, World};
 use prism_ui_reactive::Signal;
 
 /// A projection binding tying one field of component `C` to a `Signal<T>`.
@@ -104,7 +103,7 @@ impl<C: Component, T: Clone + PartialEq + 'static> FieldBinding<C, T> {
     /// equality guard that prevents feedback oscillation).
     pub fn push(&self, world: &mut World, entity: Entity) -> bool
     where
-        C: Component<Mutability = Mutable>,
+        C: Component,
     {
         let Some(writer) = self.writer.as_ref() else {
             return false;
@@ -129,7 +128,6 @@ impl<C: Component, T: Clone + PartialEq + 'static> FieldBinding<C, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy_ecs::prelude::DetectChangesMut;
     use prism_ui_reactive::Runtime;
 
     #[derive(Component)]
@@ -139,7 +137,7 @@ mod tests {
     }
 
     fn spawn(world: &mut World, value: i32, label: u32) -> Entity {
-        world.spawn(Counter { value, label }).id()
+        world.spawn(Counter { value, label })
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Integration tests for the ECS <-> reactive bridge.
 
-use bevy_ecs::prelude::{Component, World};
+use prism_ecs::prelude::{Component, World};
 use prism_ui_ecs::{EcsBridge, EntityBinding, FieldBinding};
 use prism_ui_reactive::Runtime;
 
@@ -23,7 +23,7 @@ fn one_way_pull_propagates_component_to_signal() {
             current: 30,
             max: 100,
         })
-        .id();
+        ;
     let rt = Runtime::new();
     let current = rt.signal(0i32);
 
@@ -42,7 +42,7 @@ fn unchanged_component_does_not_repropagate() {
             current: 50,
             max: 100,
         })
-        .id();
+        ;
     let rt = Runtime::new();
     let current = rt.signal(0i32);
 
@@ -64,7 +64,7 @@ fn two_way_push_writes_back_to_component() {
             current: 0,
             max: 100,
         })
-        .id();
+        ;
     let rt = Runtime::new();
     let current = rt.signal(80i32);
 
@@ -88,7 +88,7 @@ fn round_trip_does_not_oscillate() {
             current: 10,
             max: 100,
         })
-        .id();
+        ;
     let rt = Runtime::new();
     let current = rt.signal(0i32);
 
@@ -116,8 +116,8 @@ fn round_trip_does_not_oscillate() {
 #[test]
 fn multiple_bindings_over_multiple_entities() {
     let mut world = World::new();
-    let hero = world.spawn(Health { current: 7, max: 7 }).id();
-    let foe = world.spawn(Health { current: 3, max: 9 }).id();
+    let hero = world.spawn(Health { current: 7, max: 7 });
+    let foe = world.spawn(Health { current: 3, max: 9 });
     let rt = Runtime::new();
     let hero_cur = rt.signal(0i32);
     let hero_max = rt.signal(0i32);
@@ -139,7 +139,7 @@ fn multiple_bindings_over_multiple_entities() {
 fn missing_component_is_safe() {
     let mut world = World::new();
     // Entity without a `Name` component bound below.
-    let entity = world.spawn(Health { current: 1, max: 1 }).id();
+    let entity = world.spawn(Health { current: 1, max: 1 });
     let rt = Runtime::new();
     let name = rt.signal(0u64);
 
@@ -159,7 +159,7 @@ fn direct_entity_binding_without_bridge() {
             current: 42,
             max: 50,
         })
-        .id();
+        ;
     let rt = Runtime::new();
     let current = rt.signal(0i32);
 
