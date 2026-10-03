@@ -107,6 +107,14 @@ struct PbfParams {
 @group(0) @binding(2) var<storage, read> hash: array<u32>;
 // Density-solve tuning + grid description.
 @group(0) @binding(3) var<uniform> params: PbfParams;
+// Per-particle XPBD scaling factor `lambda_i`, written by the `pbf_compute_lambda`
+// pass and read by the `water_pbf_density_solve` pass. Splitting lambda into its
+// own pass turns the position solve from O(n * k^2) (every neighbour re-gathered
+// its own 27-cell neighbourhood to recompute `lambda_j`) into O(n * k): each
+// particle's lambda is evaluated exactly once, then shared by all neighbours.
+// Access is `read_write` so the single module-scope binding serves both the
+// writing lambda pass and the reading solve pass under one bind-group layout.
+@group(0) @binding(4) var<storage, read_write> lambdas: array<f32>;
 
 /// `Poly6` smoothing kernel `W(r, h)` from the squared distance.
 ///
@@ -340,10 +348,27 @@ fn pbf_lambda_at(i: u32) -> f32 {
 ///
 /// Computes `lambda_i`, then accumulates the position correction
 /// `delta_p_i = (1 / rho_0) * sum_j (lambda_i + lambda_j + s_corr) * grad W_ij`
-/// over the neighbourhood (re-gathering `lambda_j` from the frozen input, which
-/// keeps the pass deterministic), and writes `positions_in[i] + delta_p_i` to
+/// over the neighbourhood (reading each `lambda_j` from the `lambdas` buffer the
+/// `pbf_compute_lambda` pass filled, which keeps the pass deterministic and
+/// linear in the neighbour count), and writes `positions_in[i] + delta_p_i` to
 /// `positions_out[i]`. Out-of-range invocations and out-of-grid particles pass
 /// the position through unchanged.
+/// Lambda pass: one invocation per particle writes `lambdas[i] = lambda_i`.
+///
+/// This is the first of the two `PBF` density-solve passes. Evaluating every
+/// particle's `XPBD` scaling factor once here (rather than recomputing a
+/// neighbour's factor on demand inside the correction loop) is what keeps the
+/// solve linear in the neighbour count. Out-of-range invocations are skipped;
+/// `pbf_lambda_at` already returns `0` for out-of-grid or degenerate particles.
+@compute @workgroup_size(64)
+fn pbf_compute_lambda(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x;
+    if i >= params.particle_count {
+        return;
+    }
+    lambdas[i] = pbf_lambda_at(i);
+}
+
 @compute @workgroup_size(64)
 fn water_pbf_density_solve(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = gid.x;
@@ -366,7 +391,9 @@ fn water_pbf_density_solve(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let h = params.smoothing_radius;
     let radius_sq = params.cell_size * params.cell_size;
-    let lambda_i = pbf_lambda_at(i);
+    // Precomputed by the `pbf_compute_lambda` pass (bit-identical to the former
+    // inline `pbf_lambda_at(i)`; both read the same frozen `positions_in`).
+    let lambda_i = lambdas[i];
     let index_base = 2u * cell_count;
 
     let z_lo = select(cell.cz - 1u, 0u, cell.cz == 0u);
@@ -411,7 +438,7 @@ fn water_pbf_density_solve(@builtin(global_invocation_id) gid: vec3<u32>) {
                         continue;
                     }
                     let grad = pbf_spiky_gradient(r_vec, h);
-                    let lambda_j = pbf_lambda_at(j);
+                    let lambda_j = lambdas[j];
                     let scorr = pbf_artificial_pressure(r2);
                     let weight = lambda_i + lambda_j + scorr;
                     delta = delta + grad * weight;

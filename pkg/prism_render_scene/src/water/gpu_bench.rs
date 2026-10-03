@@ -1184,20 +1184,24 @@ fn pbf_bench_state(side: u32) -> (Vec<[f32; 4]>, Vec<u32>, GpuPbfParams) {
     (positions, hash, params)
 }
 
-/// Times one `water_pbf_density_solve` pass over a `side^3` particle cube and
-/// returns the median measured microseconds across [`TIMED_RUNS`] runs. The
-/// kernel declares its four resources on `@group(0)` (`positions_in`,
-/// `positions_out`, `hash`, `params`) and runs one invocation per particle at
-/// `@workgroup_size(64)`, so the dispatch is `ceil(count / 64)` workgroups — the
-/// same launch the sibling parity test (`gpu_tests::dispatch_pbf`) already
-/// proved numerically faithful.
+/// Times the two-pass `PBF` density solve over a `side^3` particle cube and
+/// returns the median measured microseconds across [`TIMED_RUNS`] runs for each
+/// pass as `(lambda_us, solve_us)`. Both passes share one explicit five-binding
+/// `@group(0)` layout (`positions_in`, `positions_out`, `hash`, `params`,
+/// `lambdas`): the `pbf_compute_lambda` pre-pass fills every particle's `XPBD`
+/// scaling factor `lambda_i` once, then `water_pbf_density_solve` reads each
+/// neighbour's cached `lambda_j` instead of re-deriving it — turning the former
+/// O(n * k^2) neighbourhood blow-up into O(n * k). Each pass runs one invocation
+/// per particle at `@workgroup_size(64)`, so each dispatch is `ceil(count / 64)`
+/// workgroups — the same launch the sibling parity test
+/// (`gpu_tests::dispatch_pbf`) already proved numerically faithful.
 fn measure_pbf_density(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     wgsl: &str,
     entry: &str,
     side: u32,
-) -> f64 {
+) -> (f64, f64) {
     let (positions, hash, params) = pbf_bench_state(side);
     let vec4_bytes = (positions.len() * size_of::<[f32; 4]>()) as u64;
 
@@ -1205,9 +1209,70 @@ fn measure_pbf_density(
         label: Some("bench_pbf_density_solve"),
         source: ShaderSource::Wgsl(wgsl.into()),
     });
+
+    // One explicit five-binding group-0 layout shared by both passes. An
+    // auto-derived layout would omit, per entry point, the bindings that entry
+    // happens not to touch, so the lambda pre-pass and solve pass would end up
+    // with incompatible subsets and could not share a single bind group.
+    let storage = |read_only: bool| BindGroupLayoutEntry {
+        binding: 0,
+        visibility: ShaderStages::COMPUTE,
+        ty: BindingType::Buffer {
+            ty: BufferBindingType::Storage { read_only },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    };
+    let bind_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+        label: Some("bench_pbf_layout"),
+        entries: &[
+            BindGroupLayoutEntry {
+                binding: 0,
+                ..storage(true)
+            },
+            BindGroupLayoutEntry {
+                binding: 1,
+                ..storage(false)
+            },
+            BindGroupLayoutEntry {
+                binding: 2,
+                ..storage(true)
+            },
+            BindGroupLayoutEntry {
+                binding: 3,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            BindGroupLayoutEntry {
+                binding: 4,
+                ..storage(false)
+            },
+        ],
+    });
+    let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+        label: Some("bench_pbf_pipeline_layout"),
+        bind_group_layouts: &[Some(&bind_layout)],
+        ..Default::default()
+    });
+
+    let lambda_entry = find_entry_point(wgsl, "pbf_compute_lambda");
+    let lambda_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("bench_pbf_compute_lambda"),
+        layout: Some(&pipeline_layout),
+        module: &module,
+        entry_point: Some(&lambda_entry),
+        compilation_options: PipelineCompilationOptions::default(),
+        cache: None,
+    });
     let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
         label: Some("bench_pbf_density_solve"),
-        layout: None,
+        layout: Some(&pipeline_layout),
         module: &module,
         entry_point: Some(entry),
         compilation_options: PipelineCompilationOptions::default(),
@@ -1235,11 +1300,16 @@ fn measure_pbf_density(
         contents: bytemuck::bytes_of(&params),
         usage: BufferUsages::UNIFORM,
     });
+    let lambdas = device.create_buffer(&BufferDescriptor {
+        label: Some("bench_pbf_lambdas"),
+        size: (positions.len() as u64) * size_of::<f32>() as u64,
+        usage: BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    });
 
-    let layout = pipeline.get_bind_group_layout(0);
     let bind_group = device.create_bind_group(&BindGroupDescriptor {
         label: Some("bench_pbf_bind_group"),
-        layout: &layout,
+        layout: &bind_layout,
         entries: &[
             BindGroupEntry {
                 binding: 0,
@@ -1257,12 +1327,37 @@ fn measure_pbf_density(
                 binding: 3,
                 resource: param_buf.as_entire_binding(),
             },
+            BindGroupEntry {
+                binding: 4,
+                resource: lambdas.as_entire_binding(),
+            },
         ],
     });
 
     let groups = params.particle_count.div_ceil(64);
-    let timer = PassTimer::new(device);
-    time_dispatch(device, queue, &pipeline, &bind_group, groups, 1, &timer)
+    // Time the lambda pre-pass first; its warm-up and timed runs leave the
+    // shared `lambdas` buffer populated for the solve measurement that follows.
+    let lambda_timer = PassTimer::new(device);
+    let lambda_us = time_dispatch(
+        device,
+        queue,
+        &lambda_pipeline,
+        &bind_group,
+        groups,
+        1,
+        &lambda_timer,
+    );
+    let solve_timer = PassTimer::new(device);
+    let solve_us = time_dispatch(
+        device,
+        queue,
+        &pipeline,
+        &bind_group,
+        groups,
+        1,
+        &solve_timer,
+    );
+    (lambda_us, solve_us)
 }
 
 /// Measures the `PBF` density-constraint solve (`water_pbf_density_solve`) on a
@@ -1291,9 +1386,14 @@ fn pbf_density_solve_pass_gpu_budget_is_measured() {
 
     for side in PBF_BENCH_SIDES {
         let count = side * side * side;
-        let solve_us = measure_pbf_density(&device, &queue, &wgsl, &entry, side);
+        let (lambda_us, solve_us) = measure_pbf_density(&device, &queue, &wgsl, &entry, side);
+        let total_us = lambda_us + solve_us;
         eprintln!(
-            "water PBF density solve budget @ {count} particles (side {side}): solve = {solve_us:.2} us (measured, median of {TIMED_RUNS})"
+            "water PBF density solve budget @ {count} particles (side {side}): lambda = {lambda_us:.2} us, solve = {solve_us:.2} us, total = {total_us:.2} us (measured, median of {TIMED_RUNS})"
+        );
+        assert!(
+            lambda_us.is_finite() && lambda_us > 0.0 && lambda_us < MAX_PASS_MICROS,
+            "pbf compute-lambda @ {count} particles measured {lambda_us} us is not a healthy bounded timing"
         );
         assert!(
             solve_us.is_finite() && solve_us > 0.0 && solve_us < MAX_PASS_MICROS,

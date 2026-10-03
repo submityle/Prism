@@ -43,7 +43,7 @@ fn bind_group_for<'a>(
     match kernel {
         WaterKernel::SpectrumIfft | WaterKernel::GerstnerDisplace => &groups.ocean,
         WaterKernel::SurfaceReconstruct => &groups.surface_reconstruct,
-        WaterKernel::PbfDensitySolve => &groups.pbf,
+        WaterKernel::PbfComputeLambda | WaterKernel::PbfDensitySolve => &groups.pbf,
         WaterKernel::SprayEmit => &groups.spray,
         WaterKernel::SweStep => &groups.swe,
         WaterKernel::FoamAdvect => &groups.foam,
@@ -286,7 +286,7 @@ mod tests {
         match kernel {
             WaterKernel::SpectrumIfft | WaterKernel::GerstnerDisplace => 0,
             WaterKernel::SurfaceReconstruct => 17,
-            WaterKernel::PbfDensitySolve => 2,
+            WaterKernel::PbfComputeLambda | WaterKernel::PbfDensitySolve => 2,
             WaterKernel::SprayEmit => 3,
             WaterKernel::SweStep => 4,
             WaterKernel::FoamAdvect => 5,

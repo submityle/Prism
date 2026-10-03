@@ -303,6 +303,7 @@ pub(crate) struct WaterBodyGpuBuffers {
     pub(crate) pbf_positions_out: Buffer,
     pub(crate) pbf_hash: Buffer,
     pub(crate) pbf_params: Buffer,
+    pub(crate) pbf_lambdas: Buffer,
     // Spray buffers.
     pub(crate) spray_sources: Buffer,
     pub(crate) spray_spawn: Buffer,
@@ -547,6 +548,13 @@ impl WaterBodyGpuBuffers {
             u64::from(upload.pbf_hash_entries) * u64::from(GRID_SCALAR_STRIDE),
         );
         let pbf_params = uniform(device, "prism water pbf params", &upload.pbf_params);
+        // One `f32` XPBD scaling factor per particle, written by the
+        // `pbf_compute_lambda` pass and read by `water_pbf_density_solve`.
+        let pbf_lambdas = zeroed_storage(
+            device,
+            "prism water pbf lambdas",
+            (upload.pbf_positions.len() as u64) * 4,
+        );
 
         // ---- Spray ----
         let spray_sources =
@@ -787,6 +795,7 @@ impl WaterBodyGpuBuffers {
             pbf_positions_out,
             pbf_hash,
             pbf_params,
+            pbf_lambdas,
             spray_sources,
             spray_spawn,
             spray_params,
@@ -864,7 +873,8 @@ pub(crate) struct WaterBodyBindGroups {
     /// splatted depth + thickness buffers, the reconstructed-normal storage
     /// texture, and the filter/projection uniform).
     pub(crate) surface_reconstruct: BindGroup,
-    /// `@group(0)` for `pbf_density_solve`.
+    /// `@group(0)` shared by both `water_pbf.wesl` density passes
+    /// (`pbf_compute_lambda` + `water_pbf_density_solve`, five bindings).
     pub(crate) pbf: BindGroup,
     /// `@group(0)` for `spray_emit`.
     pub(crate) spray: BindGroup,
@@ -960,6 +970,7 @@ impl WaterBodyBindGroups {
                 buffers.pbf_positions_out.as_entire_binding(),
                 buffers.pbf_hash.as_entire_binding(),
                 buffers.pbf_params.as_entire_binding(),
+                buffers.pbf_lambdas.as_entire_binding(),
             )),
         );
         let spray = device.create_bind_group(

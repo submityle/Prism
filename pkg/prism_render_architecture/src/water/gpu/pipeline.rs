@@ -411,6 +411,17 @@ pub fn prepare(extract: &WaterGpuExtract) -> WaterGpuPrepare {
         }
         if extract.pbf {
             for iteration in 0..extract.solver_iterations {
+                // Two-pass `PBF`: every iteration first recomputes each
+                // particle's `lambda_i` from the current positions, then the
+                // solve pass reads neighbour `lambda_j` straight from the
+                // shared buffer (no per-neighbour re-gather).
+                push(
+                    &mut dispatches,
+                    extract,
+                    WaterKernel::PbfComputeLambda,
+                    step,
+                    Some(iteration),
+                );
                 push(
                     &mut dispatches,
                     extract,

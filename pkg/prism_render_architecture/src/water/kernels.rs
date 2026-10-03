@@ -167,6 +167,12 @@ pub enum WaterKernel {
     GerstnerDisplace,
     /// One Shallow-Water Equations step over the height/velocity grid.
     SweStep,
+    /// Pre-pass for `PBF`: one invocation per particle computes and stores its
+    /// `XPBD` scaling factor `lambda_i` into the shared `lambdas` buffer, so the
+    /// density-solve pass can read each neighbour's `lambda_j` directly instead
+    /// of re-gathering it (`Macklin` 2013 two-pass; removes the `O(n*k^2)` hot
+    /// spot in the single-pass solve).
+    PbfComputeLambda,
     /// The `PBF` density-constraint (`XPBD`) projection iteration.
     PbfDensitySolve,
     /// Face-centered `MAC` particle-to-grid scatter (`P2G`): accumulate particle
@@ -224,10 +230,11 @@ pub enum WaterKernel {
 impl WaterKernel {
     /// Every kernel, in a stable order, for descriptor-table iteration and
     /// exhaustiveness tests.
-    pub const ALL: [WaterKernel; 25] = [
+    pub const ALL: [WaterKernel; 26] = [
         WaterKernel::SpectrumIfft,
         WaterKernel::GerstnerDisplace,
         WaterKernel::SweStep,
+        WaterKernel::PbfComputeLambda,
         WaterKernel::PbfDensitySolve,
         WaterKernel::FlipMacP2G,
         WaterKernel::FlipMacFacesNormalize,
@@ -263,6 +270,7 @@ impl WaterKernel {
             WaterKernel::SpectrumIfft => "water_spectrum_ifft",
             WaterKernel::GerstnerDisplace => "water_gerstner_displace",
             WaterKernel::SweStep => "water_swe_step",
+            WaterKernel::PbfComputeLambda => "pbf_compute_lambda",
             WaterKernel::PbfDensitySolve => "water_pbf_density_solve",
             WaterKernel::FlipMacP2G => "water_flip_mac_p2g",
             WaterKernel::FlipMacFacesNormalize => "water_flip_mac_faces_normalize",
@@ -328,7 +336,20 @@ impl WaterKernel {
                 WorkgroupSize { x: 8, y: 8, z: 1 },
                 DispatchDomain::Grid2d,
             ),
-            WaterKernel::PbfDensitySolve | WaterKernel::FlipMacP2G | WaterKernel::FlipMacG2P => (
+            // The two `PBF` passes share one bind group: `positions_in`,
+            // `positions_out`, the neighbour `hash`, and the `lambdas` scratch
+            // buffer the compute-lambda pass fills (four storage buffers).
+            WaterKernel::PbfComputeLambda | WaterKernel::PbfDensitySolve => (
+                BindGroupLayout {
+                    storage_buffers: 4,
+                    uniform_buffers: 1,
+                    storage_textures: 0,
+                    sampled_textures: 0,
+                },
+                WorkgroupSize { x: 64, y: 1, z: 1 },
+                DispatchDomain::Particle,
+            ),
+            WaterKernel::FlipMacP2G | WaterKernel::FlipMacG2P => (
                 BindGroupLayout {
                     storage_buffers: 3,
                     uniform_buffers: 1,

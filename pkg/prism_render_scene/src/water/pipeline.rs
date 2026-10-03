@@ -82,7 +82,10 @@ pub(crate) struct WaterComputePipelines {
     /// the write-only reconstructed-normal storage texture, and the
     /// filter/projection uniform).
     pub(crate) surface_reconstruct_layout: BindGroupLayout,
-    /// `@group(0)` for the `water_pbf_density_solve` pass (four bindings).
+    /// `@group(0)` shared by both `water_pbf.wesl` density passes
+    /// (`pbf_compute_lambda` + `water_pbf_density_solve`, five bindings: the
+    /// input/output positions, the neighbour hash, the `PBF` uniform, and the
+    /// shared `lambdas` scratch buffer).
     pub(crate) pbf_layout: BindGroupLayout,
     /// `@group(0)` for the `water_spray_emit` pass (three bindings).
     pub(crate) spray_layout: BindGroupLayout,
@@ -128,6 +131,9 @@ pub(crate) struct WaterComputePipelines {
     pub(crate) gerstner_displace: CachedComputePipelineId,
     /// `water_swe_step`: one Shallow-Water Equations height/velocity step.
     pub(crate) swe_step: CachedComputePipelineId,
+    /// `pbf_compute_lambda`: per-particle `XPBD` scaling-factor pre-pass that
+    /// fills the shared `lambdas` buffer the density solve reads.
+    pub(crate) pbf_compute_lambda: CachedComputePipelineId,
     /// `water_pbf_density_solve`: one `PBF` density-constraint iteration.
     pub(crate) pbf_density_solve: CachedComputePipelineId,
     /// `water_flip_mac_p2g`: face-centered `MAC` particle-to-grid momentum sum.
@@ -189,6 +195,7 @@ impl WaterComputePipelines {
             WaterKernel::SpectrumIfft => self.spectrum_ifft,
             WaterKernel::GerstnerDisplace => self.gerstner_displace,
             WaterKernel::SweStep => self.swe_step,
+            WaterKernel::PbfComputeLambda => self.pbf_compute_lambda,
             WaterKernel::PbfDensitySolve => self.pbf_density_solve,
             WaterKernel::FlipMacP2G => self.mac_p2g,
             WaterKernel::FlipMacFacesNormalize => self.mac_faces_normalize,
@@ -229,7 +236,7 @@ impl WaterComputePipelines {
             | WaterKernel::FlipMacPressure
             | WaterKernel::FlipMacProject => &self.mac_solve_layout,
             WaterKernel::FlipMacG2P => &self.mac_g2p_layout,
-            WaterKernel::PbfDensitySolve => &self.pbf_layout,
+            WaterKernel::PbfComputeLambda | WaterKernel::PbfDensitySolve => &self.pbf_layout,
             WaterKernel::SprayEmit => &self.spray_layout,
             WaterKernel::SweStep => &self.swe_layout,
             WaterKernel::FoamAdvect => &self.foam_layout,
@@ -267,6 +274,7 @@ pub(crate) fn wesl_group(kernel: WaterKernel) -> u32 {
         WaterKernel::SpectrumIfft
         | WaterKernel::GerstnerDisplace
         | WaterKernel::SweStep
+        | WaterKernel::PbfComputeLambda
         | WaterKernel::PbfDensitySolve
         | WaterKernel::FlipMacP2G
         | WaterKernel::FlipMacFacesNormalize
@@ -376,10 +384,12 @@ fn mac_g2p_layout_entries() -> BindGroupLayoutEntries<4> {
     )
 }
 
-/// Builds the `water_pbf_density_solve` `@group(0)` layout entries (four
+/// Builds the shared `water_pbf.wesl` density `@group(0)` layout entries (five
 /// bindings): the read-only input positions, the read-write output positions,
-/// the read-only spatial-hash table, and the `PBF` uniform.
-fn pbf_layout_entries() -> BindGroupLayoutEntries<4> {
+/// the read-only spatial-hash table, the `PBF` uniform, and the read-write
+/// `lambdas` scratch buffer the `pbf_compute_lambda` pass fills and the
+/// `water_pbf_density_solve` pass reads. Both passes bind this one layout.
+fn pbf_layout_entries() -> BindGroupLayoutEntries<5> {
     BindGroupLayoutEntries::sequential(
         ShaderStages::COMPUTE,
         (
@@ -387,6 +397,7 @@ fn pbf_layout_entries() -> BindGroupLayoutEntries<4> {
             storage_buffer_sized(false, None),
             storage_buffer_read_only_sized(false, None),
             uniform_buffer_sized(false, None),
+            storage_buffer_sized(false, None),
         ),
     )
 }
@@ -761,6 +772,12 @@ pub(crate) fn init_water_compute_pipelines(
         &surface_shader,
         WaterKernel::SweStep,
     );
+    let pbf_compute_lambda = queue(
+        "prism water pbf compute lambda",
+        vec![pbf_descriptor.clone()],
+        &pbf_shader,
+        WaterKernel::PbfComputeLambda,
+    );
     let pbf_density_solve = queue(
         "prism water pbf density solve",
         vec![pbf_descriptor.clone()],
@@ -921,6 +938,7 @@ pub(crate) fn init_water_compute_pipelines(
         spectrum_ifft,
         gerstner_displace,
         swe_step,
+        pbf_compute_lambda,
         pbf_density_solve,
         surface_reconstruct,
         caustics_project,
@@ -991,7 +1009,7 @@ mod tests {
     #[test]
     fn layout_entries_match_the_declared_binding_counts() {
         assert_eq!(ocean_layout_entries().len(), 9);
-        assert_eq!(pbf_layout_entries().len(), 4);
+        assert_eq!(pbf_layout_entries().len(), 5);
         assert_eq!(spray_layout_entries().len(), 3);
         assert_eq!(swe_layout_entries().len(), 8);
         assert_eq!(foam_layout_entries().len(), 6);
@@ -1030,10 +1048,15 @@ mod tests {
                 "{kernel:?} ocean layout expects two storage textures"
             );
         }
-        // The `PBF` density solve binds three storage buffers and one uniform
+        // The `PBF` density solve binds four storage buffers (positions in/out,
+        // the neighbour hash, and the shared `lambdas` scratch) and one uniform
         // with no sampled textures.
         let pbf = WaterKernel::PbfDensitySolve;
-        assert_eq!(pbf.descriptor().layout.storage_buffers, 3);
+        assert_eq!(pbf.descriptor().layout.storage_buffers, 4);
         assert_eq!(pbf.descriptor().layout.sampled_textures, 0);
+        // The lambda pre-pass shares the exact same four-storage interface.
+        let lambda = WaterKernel::PbfComputeLambda;
+        assert_eq!(lambda.descriptor().layout.storage_buffers, 4);
+        assert_eq!(lambda.descriptor().layout.sampled_textures, 0);
     }
 }

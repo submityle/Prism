@@ -1021,9 +1021,71 @@ fn dispatch_pbf(
         label: Some("water_pbf_parity"),
         source: ShaderSource::Wgsl(wgsl.into()),
     });
+
+    // One explicit five-binding group-0 layout shared by both PBF passes. The
+    // `pbf_compute_lambda` pre-pass fills `lambdas[i]` and the
+    // `water_pbf_density_solve` pass reads `lambdas[j]`; an auto-derived layout
+    // would omit, per entry point, the bindings that entry happens not to touch
+    // and the two subsets would be incompatible for a shared bind group.
+    let storage = |read_only: bool| BindGroupLayoutEntry {
+        binding: 0,
+        visibility: ShaderStages::COMPUTE,
+        ty: BindingType::Buffer {
+            ty: BufferBindingType::Storage { read_only },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    };
+    let bind_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+        label: Some("water_pbf_parity_layout"),
+        entries: &[
+            BindGroupLayoutEntry {
+                binding: 0,
+                ..storage(true)
+            },
+            BindGroupLayoutEntry {
+                binding: 1,
+                ..storage(false)
+            },
+            BindGroupLayoutEntry {
+                binding: 2,
+                ..storage(true)
+            },
+            BindGroupLayoutEntry {
+                binding: 3,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            BindGroupLayoutEntry {
+                binding: 4,
+                ..storage(false)
+            },
+        ],
+    });
+    let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+        label: Some("water_pbf_parity_pipeline_layout"),
+        bind_group_layouts: &[Some(&bind_layout)],
+        ..Default::default()
+    });
+
+    let lambda_entry = find_entry_point(wgsl, "pbf_compute_lambda");
+    let lambda_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("pbf_compute_lambda_parity"),
+        layout: Some(&pipeline_layout),
+        module: &module,
+        entry_point: Some(&lambda_entry),
+        compilation_options: PipelineCompilationOptions::default(),
+        cache: None,
+    });
     let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
         label: Some("water_pbf_density_solve_parity"),
-        layout: None,
+        layout: Some(&pipeline_layout),
         module: &module,
         entry_point: Some(entry),
         compilation_options: PipelineCompilationOptions::default(),
@@ -1051,11 +1113,16 @@ fn dispatch_pbf(
         contents: bytemuck::bytes_of(params),
         usage: BufferUsages::UNIFORM,
     });
+    let lambdas = device.create_buffer(&BufferDescriptor {
+        label: Some("pbf_lambdas"),
+        size: (count as u64) * 4,
+        usage: BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    });
 
-    let layout = pipeline.get_bind_group_layout(0);
     let bind_group = device.create_bind_group(&BindGroupDescriptor {
         label: Some("pbf_group0"),
-        layout: &layout,
+        layout: &bind_layout,
         entries: &[
             BindGroupEntry {
                 binding: 0,
@@ -1072,6 +1139,10 @@ fn dispatch_pbf(
             BindGroupEntry {
                 binding: 3,
                 resource: param_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 4,
+                resource: lambdas.as_entire_binding(),
             },
         ],
     });
@@ -1091,8 +1162,13 @@ fn dispatch_pbf(
             label: Some("pbf_parity_pass"),
             timestamp_writes: None,
         });
-        pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
+        // Pass 1: every particle writes its own `lambda_i` scaling factor.
+        pass.set_pipeline(&lambda_pipeline);
+        pass.dispatch_workgroups((count as u32).div_ceil(64), 1, 1);
+        // Pass 2: density projection reads the precomputed `lambda_j` of each
+        // neighbour instead of re-deriving it, so neighbour cost is O(n * k).
+        pass.set_pipeline(&pipeline);
         pass.dispatch_workgroups((count as u32).div_ceil(64), 1, 1);
     }
     encoder.copy_buffer_to_buffer(&pos_out, 0, &out_stage, 0, vec4_bytes);
