@@ -50,6 +50,9 @@ pub use heightfield::{HeightField, HeightFieldRayHit};
 pub mod sdf;
 
 pub use sdf::{MeshSdf, SdfBuildParams};
+pub mod weld;
+
+pub use weld::{weld_mesh, WeldParams, WeldedMesh};
 
 /// A handle into a [`ShapeRegistry`].
 ///
