@@ -78,6 +78,7 @@ pub mod late_lateral_sound_level;
 pub mod material_library;
 pub mod material_spectrum;
 pub mod multi_position;
+pub mod multiband_spectrum;
 pub mod nfc;
 pub mod occlusion;
 pub mod octave_reverb;
@@ -167,6 +168,9 @@ pub use material_library::{
 pub use material_spectrum::{BandedAcousticMaterial, transmission_from_loss_db};
 pub use multi_position::{
     MAX_POSITIONS, MultiPositionMode, PositionInput, resolve_multi,
+};
+pub use multiband_spectrum::{
+    MAX_BAND_FREQUENCY_HZ, MIN_BAND_FREQUENCY_HZ, MultibandGains, MultibandLayout,
 };
 pub use nfc::{MAX_NFC_ORDER, NfcCoeffs, NfcFilter};
 pub use occlusion::{
