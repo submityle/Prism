@@ -1,0 +1,16 @@
+[package]
+name = "prism_motion_gpu"
+version = "0.1.0"
+edition = "2024"
+description = "Optional wgpu compute backend for Prism's motion-vector dilation. A real-device twin of the prism_render_architecture motion::dilation CPU golden: a compute kernel reproduces the closest-depth neighborhood velocity dilation (per output pixel, scan the clamped square neighborhood in row-major order and adopt the velocity of the strictly-nearest neighbor under the chosen depth ordering). The output velocity is always a whole-vector copy of some input velocity and the kernel does only depth comparisons, so the device output equals the golden dilate_closest_depth bit-for-bit; parity asserts exact equality. Contains no Unreal Engine source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_render_architecture = { path = "../prism_render_architecture" }
+wgpu = { version = "30", default-features = false, features = ["wgsl", "metal"] }
+bytemuck = { version = "1.5", features = ["derive"] }
+futures-lite = "2"
+
+[lints]
+workspace = true
