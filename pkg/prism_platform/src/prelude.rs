@@ -13,3 +13,9 @@ pub use crate::thread::{
     self, affinity_supported, hardware_concurrency, set_current_thread_affinity, spawn,
     yield_now, AffinityError, Backoff, JoinHandle, Once, Parker, SpinLock, ThreadLocal, Unparker,
 };
+
+#[cfg(feature = "std")]
+pub use crate::vm::{
+    self, huge_pages_supported as vm_huge_pages_supported, memory_info as vm_memory_info,
+    page_size as vm_page_size, MemoryInfo, Protection, Reservation, VmError,
+};

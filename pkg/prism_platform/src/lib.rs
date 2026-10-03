@@ -22,6 +22,13 @@
 //!   lock + backoff + one-time init, and a token-based parker, all gated behind
 //!   the `std` feature.
 //!
+//! ## M3 scope — virtual memory
+//! - [`vm`]: page-level reserve/commit/decommit/release, aligned reservations,
+//!   guard pages, optional large (huge) pages (Linux/Windows; honest
+//!   `Unsupported` on macOS), page protection, and physical-memory info, gated
+//!   behind the `std` feature. This is the page substrate under the
+//!   `prism_utils` allocators.
+//!
 //! Later milestones add virtual memory, dynamic libraries, process control,
 //! and crash/minidump backends per OS.
 //!
@@ -29,8 +36,9 @@
 //! no `bevy_*` crate.
 //!
 //! The crate uses no `unsafe` except narrowly scoped, documented FFI in
-//! [`thread::affinity`]; the workspace-level `unsafe_code = "deny"` lint stays
-//! in force and is overridden only there via `#[expect(unsafe_code, reason)]`.
+//! [`thread::affinity`] and the [`vm`] virtual-memory backends; the
+//! workspace-level `unsafe_code = "deny"` lint stays in force and is overridden
+//! only there via `#[expect(unsafe_code, reason)]` sites.
 
 pub mod atomics;
 pub mod clock;
@@ -47,6 +55,13 @@ pub mod prelude;
 /// Requires the `std` feature; absent in `no_std` builds.
 #[cfg(feature = "std")]
 pub mod thread;
+/// Virtual memory: reserve/commit/decommit/release, aligned reservations,
+/// guard pages, optional large (huge) pages, page protection, and physical
+/// memory information.
+///
+/// Requires the `std` feature; absent in `no_std` builds.
+#[cfg(feature = "std")]
+pub mod vm;
 
 pub use clock::{now, MonotonicNanos};
 pub use cpu::CpuInfo;
@@ -59,6 +74,11 @@ pub use thread::{
     set_current_thread_affinity_mask, sleep as thread_sleep, spawn, yield_now, AffinityError,
     Backoff, Builder as ThreadBuilder, JoinHandle, Once, Parker, SpinLock, SpinLockGuard,
     ThreadId, ThreadLocal, Unparker,
+};
+#[cfg(feature = "std")]
+pub use vm::{
+    huge_pages_supported, large_page_size, memory_info, page_size, virtual_memory_supported,
+    MemoryInfo, Protection, Reservation, VmError,
 };
 
 #[cfg(test)]
