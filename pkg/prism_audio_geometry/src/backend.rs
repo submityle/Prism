@@ -35,6 +35,7 @@ use prism_audio_spatial::propagation::{PropagationBackend, PropagationPath, Prop
 use crate::config::GeometricConfig;
 use crate::diffraction_path::resolve_diffraction;
 use crate::direct_path::resolve_direct;
+use crate::higher_order_diffraction::resolve_higher_order_diffraction;
 use crate::higher_order_reflection::resolve_higher_order_reflections;
 use crate::reflection_path::resolve_reflections;
 use crate::scene::AcousticScene;
@@ -123,6 +124,15 @@ impl PropagationBackend for GeometricBackend {
                 &self.config,
                 base_distance,
             ));
+            if self.config.max_diffraction_order >= 2 {
+                secondary.extend(resolve_higher_order_diffraction(
+                    &self.scene,
+                    listener,
+                    emitter,
+                    &self.config,
+                    base_distance,
+                ));
+            }
         }
         secondary.sort_by(|lhs, rhs| rhs.gain.partial_cmp(&lhs.gain).unwrap_or(Ordering::Equal));
 

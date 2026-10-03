@@ -55,6 +55,20 @@ pub const MAX_SUPPORTED_REFLECTION_ORDER: usize = 4;
 /// keep the original single-bounce behaviour.
 pub const DEFAULT_MAX_REFLECTION_ORDER: usize = 1;
 
+/// Hard ceiling on the diffraction order the backend will trace. Each extra
+/// edge in a bent route multiplies the number of candidate edge sequences and
+/// adds another attenuating wedge, so the multi-edge resolver in
+/// [`crate::higher_order_diffraction`] is clamped to this depth regardless of
+/// the configured [`GeometricConfig::max_diffraction_order`]. Steam Audio's
+/// path tracer likewise keeps real-time diffraction to a low single-digit order.
+pub const MAX_SUPPORTED_DIFFRACTION_ORDER: usize = 3;
+
+/// Default diffraction order: single-edge only. Higher orders (sequential
+/// bends around two or more edges, as in an L-shaped corridor) are opt-in
+/// through [`GeometricConfig::with_max_diffraction_order`] so existing callers
+/// keep the original single-edge behaviour.
+pub const DEFAULT_MAX_DIFFRACTION_ORDER: usize = 1;
+
 /// Which edge-diffraction model the backend evaluates for shadowed arrivals.
 ///
 /// Both models consume the same resolved detour geometry (the least-detour
@@ -96,6 +110,11 @@ pub struct GeometricConfig {
     pub max_reflection_order: usize,
     /// Maximum diffraction edges retained per query (least-detour kept).
     pub max_diffractions: usize,
+    /// Maximum diffraction order traced (`1` = single-edge only; `2` or more
+    /// enables the sequential multi-edge bends from
+    /// [`crate::higher_order_diffraction`], clamped to
+    /// [`MAX_SUPPORTED_DIFFRACTION_ORDER`]).
+    pub max_diffraction_order: usize,
     /// Linear-gain floor below which an arrival is dropped.
     pub min_gain: Sample,
     /// Surface offset (metres) applied when re-launching rays off geometry.
@@ -122,6 +141,7 @@ impl GeometricConfig {
             max_reflections: DEFAULT_MAX_REFLECTIONS,
             max_reflection_order: DEFAULT_MAX_REFLECTION_ORDER,
             max_diffractions: DEFAULT_MAX_DIFFRACTIONS,
+            max_diffraction_order: DEFAULT_MAX_DIFFRACTION_ORDER,
             min_gain: DEFAULT_MIN_GAIN,
             surface_epsilon_m: DEFAULT_SURFACE_EPSILON_M,
             sample_rate,
@@ -171,6 +191,17 @@ impl GeometricConfig {
     #[must_use]
     pub fn with_max_diffractions(mut self, max: usize) -> Self {
         self.max_diffractions = max;
+        self
+    }
+
+    /// Returns a copy with the maximum diffraction order set to `order`
+    /// (clamped at query time to [`MAX_SUPPORTED_DIFFRACTION_ORDER`]). An order
+    /// of `1` keeps only single-edge bends; `2` or more enables the sequential
+    /// multi-edge diffractions from [`crate::higher_order_diffraction`].
+    #[inline]
+    #[must_use]
+    pub fn with_max_diffraction_order(mut self, order: usize) -> Self {
+        self.max_diffraction_order = order;
         self
     }
 
@@ -258,5 +289,15 @@ mod tests {
         );
         let cfg = GeometricConfig::new(48_000).with_max_reflection_order(3);
         assert_eq!(cfg.max_reflection_order, 3);
+    }
+
+    #[test]
+    fn diffraction_order_defaults_to_single_edge_and_is_selectable() {
+        assert_eq!(
+            GeometricConfig::new(48_000).max_diffraction_order,
+            super::DEFAULT_MAX_DIFFRACTION_ORDER
+        );
+        let cfg = GeometricConfig::new(48_000).with_max_diffraction_order(2);
+        assert_eq!(cfg.max_diffraction_order, 2);
     }
 }

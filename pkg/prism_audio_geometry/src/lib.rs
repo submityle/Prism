@@ -39,9 +39,15 @@
 //!   bounces with the recursive image-source method, complementing (never
 //!   duplicating) the single bounce from [`reflection_path`]; enabled by
 //!   [`config::GeometricConfig::with_max_reflection_order`].
+//! - [`diffraction_edges`] distils a mesh into its diffracting edges and the
+//!   least-detour and wedge primitives shared by the diffraction resolvers.
 //! - [`diffraction_path`] resolves edge diffraction when the direct path is
 //!   shadowed: it finds the least-detour silhouette edge and applies the
 //!   Maekawa barrier model via the spatial crate's Fresnel helpers.
+//! - [`higher_order_diffraction`] traces multi-edge (two-or-more) sequential
+//!   bends with taut-path relaxation, complementing (never duplicating) the
+//!   single-edge bend; enabled by
+//!   [`config::GeometricConfig::with_max_diffraction_order`].
 //! - [`backend`] assembles the above into [`backend::GeometricBackend`], the
 //!   [`PropagationBackend`](prism_audio_spatial::propagation::PropagationBackend)
 //!   implementation that fills the caller's bounded path buffer.
@@ -74,8 +80,10 @@ extern crate alloc;
 
 pub mod backend;
 pub mod config;
+pub mod diffraction_edges;
 pub mod diffraction_path;
 pub mod direct_path;
+pub mod higher_order_diffraction;
 pub mod higher_order_reflection;
 pub mod material_map;
 pub mod reflection_path;
