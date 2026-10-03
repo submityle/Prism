@@ -1,0 +1,43 @@
+[package]
+name = "prism_audio_conditioning"
+version = "0.1.0"
+edition = "2024"
+description = "Offline asset conditioning and authoring pipeline for Prism's next-generation audio engine (design section 51): decode-matrix orchestration to f32 PCM, BS.1770 offline loudness/true-peak/LRA analysis, zero-crossing + autocorrelation seamless loop-point detection, spectral-flux transient and autocorrelation tempo/beat/marker extraction, high-quality offline polyphase-sinc resampling, codec-tier classification, SOFA HRIR conditioning, bank authoring layout, offline lip-sync/viseme analysis, and content-addressed caching. Pure classic DSP/MIR, runs off the audio thread, no AI/ML. Contains no Unreal Engine, Unity, Godot, Wwise, FMOD, Steam Audio, Dolby, or Google Resonance Audio source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_audio_core = { path = "../prism_audio_core" }
+prism_audio_assets = { path = "../prism_audio_assets" }
+prism_audio_resample = { path = "../prism_audio_resample" }
+prism_audio_hrtf = { path = "../prism_audio_hrtf" }
+bevy_math = { path = "../../crates/bevy_math", default-features = false, features = [
+  "nostd-libm",
+] }
+serde = { version = "1", default-features = false, features = [
+  "derive",
+], optional = true }
+
+[dev-dependencies]
+prism_audio_conditioning = { path = ".", features = ["serialize"] }
+
+[features]
+default = ["std"]
+std = [
+  "prism_audio_core/std",
+  "prism_audio_assets/std",
+  "prism_audio_resample/std",
+  "prism_audio_hrtf/std",
+  "bevy_math/std",
+]
+serialize = [
+  "dep:serde",
+  "prism_audio_core/serialize",
+  "prism_audio_assets/serialize",
+  "prism_audio_resample/serialize",
+  "prism_audio_hrtf/serialize",
+  "bevy_math/serialize",
+]
+
+[lints]
+workspace = true
