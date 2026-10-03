@@ -421,8 +421,14 @@ pub mod voxel_traversal;
 pub mod water_breaking_classify;
 pub mod water_caustics_intensity;
 pub mod water_dispersion_offsets;
+pub mod water_foam_decay;
+pub mod water_optics_plan;
+pub mod water_pbf_kernels;
 pub mod water_shading_npr;
 pub mod water_shading_pbr;
+pub mod water_underwater_depth_color;
+pub mod water_underwater_scatter;
+pub mod water_underwater_transmittance;
 pub mod water_waterline_weight;
 pub mod water_wetness_response;
 pub mod welzl_min_sphere;
@@ -966,8 +972,21 @@ pub use water_caustics_intensity::{
 pub use water_dispersion_offsets::{
     GpuWaterDispersionOffsets, WaterDispersionOffsetsQuery, WaterDispersionOffsetsResult,
 };
+pub use water_foam_decay::{GpuWaterFoamDecay, WaterFoamDecayQuery, WaterFoamDecayResult};
+pub use water_optics_plan::{GpuWaterOpticsPlan, WaterOpticsPlanQuery, WaterOpticsPlanResult};
+pub use water_pbf_kernels::{GpuWaterPbfKernels, WaterPbfKernelsQuery, WaterPbfKernelsResult};
 pub use water_shading_npr::{GpuWaterShadingNpr, WaterShadingNprQuery, WaterShadingNprResult};
 pub use water_shading_pbr::{GpuWaterShadingPbr, WaterShadingPbrQuery, WaterShadingPbrResult};
+pub use water_underwater_depth_color::{
+    GpuWaterUnderwaterDepthColor, WaterUnderwaterDepthColorQuery, WaterUnderwaterDepthColorResult,
+};
+pub use water_underwater_scatter::{
+    GpuWaterUnderwaterScatter, WaterUnderwaterScatterQuery, WaterUnderwaterScatterResult,
+};
+pub use water_underwater_transmittance::{
+    GpuWaterUnderwaterTransmittance, WaterUnderwaterTransmittanceQuery,
+    WaterUnderwaterTransmittanceResult,
+};
 pub use water_waterline_weight::{
     GpuWaterWaterlineWeight, WaterWaterlineWeightQuery, WaterWaterlineWeightResult,
 };

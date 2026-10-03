@@ -48,8 +48,8 @@
 // The full module list is completed incrementally as each solver/render
 // module lands (see the water engine design doc, roadmap M0-M9); every
 // intermediate state keeps the crate compiling and its gates green.
-pub mod asset;
 pub mod assembly;
+pub mod asset;
 pub mod breaking;
 pub mod budget;
 pub mod cascade;
@@ -602,6 +602,9 @@ pub struct WaterBudget {
     /// Two-way coupling field read-back queries admitted per frame.
     pub coupling_queries_per_frame: u32,
 }
+
+#[cfg(test)]
+mod frame_golden;
 
 #[cfg(test)]
 mod tests {
