@@ -14,6 +14,10 @@ prism_tasks = { path = "../prism_tasks", optional = true }
 [features]
 default = ["std"]
 std = ["prism_math/std", "dep:prism_tasks"]
+# Big-world precision: f64 world coordinates + grid-cell origin rebasing (design doc §9).
+f64 = []
+# Deterministic fixed-point propagation for rollback/lockstep netcode (design doc §12).
+determinism = []
 
 [lints]
 workspace = true

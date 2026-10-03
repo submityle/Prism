@@ -52,7 +52,24 @@
 //!   smearing across the jump. Pure `alloc` math — no threads, no clock — and the
 //!   authoritative simulation state is never mutated; interpolation only produces
 //!   display poses.
-//! - **M5+ (planned):** big-world/deterministic paths and GPU upload.
+//! - **M5 (this update, done):** big-world precision and deterministic
+//!   propagation, each behind its own feature. The [`large_world`] module
+//!   (`f64` feature) adds [`large_world::TransformHp`] /
+//!   [`large_world::GlobalTransformHp`] — an `f64` translation with `f32`
+//!   rotation/scale, accumulated in an exact [`prism_math::DAffine3`] — plus
+//!   [`large_world::propagate_hp`] and a [`large_world::FloatingOrigin`] that
+//!   rebases a grid-cell origin to follow the camera, so the `f32` value sent
+//!   to the GPU is always a small difference against a nearby reference and
+//!   geometry stops jittering 100 km from the world origin (design §9). The
+//!   [`determinism`] module (`determinism` feature) adds a pure fixed-point
+//!   [`determinism::FxAffine3`]/[`determinism::FxMat3`] algebra and
+//!   [`determinism::propagate_fixed`]: no float anywhere, a fixed
+//!   parent-before-child order, so world transforms are bit-identical across
+//!   platforms and reproduce exactly on a re-run, with
+//!   [`determinism::hash_globals`] folding a world into a 64-bit desync digest
+//!   (design §12). Both default OFF.
+//! - **M6 (planned):** GPU transform-column upload, 2D variants, and bevy
+//!   compatibility prelude.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
@@ -64,9 +81,13 @@ use alloc::vec::Vec;
 use prism_math::{Affine3, Mat4, Quat, Vec3};
 
 pub mod change;
+#[cfg(feature = "determinism")]
+pub mod determinism;
 pub mod dirty;
 pub mod hierarchy;
 pub mod interpolation;
+#[cfg(feature = "f64")]
+pub mod large_world;
 #[cfg(feature = "std")]
 pub mod parallel;
 pub mod propagation;
@@ -516,6 +537,12 @@ pub mod prelude {
     #[cfg(feature = "std")]
     pub use crate::parallel::{LevelPlan, propagate_parallel, propagate_parallel_with_plan};
     pub use crate::interpolation::InterpolationBuffer;
+    #[cfg(feature = "f64")]
+    pub use crate::large_world::{
+        FloatingOrigin, GlobalTransformHp, TransformHp, propagate_hp,
+    };
+    #[cfg(feature = "determinism")]
+    pub use crate::determinism::{FxAffine3, FxMat3, hash_globals, propagate_fixed};
     pub use crate::{GlobalTransform, Transform, TransformGraph};
 }
 
@@ -533,3 +560,9 @@ mod tests_m3;
 
 #[cfg(test)]
 mod tests_m4;
+
+#[cfg(all(test, feature = "f64"))]
+mod tests_m5_large_world;
+
+#[cfg(all(test, feature = "determinism"))]
+mod tests_m5_determinism;
