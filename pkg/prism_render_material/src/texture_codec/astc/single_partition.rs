@@ -20,7 +20,9 @@
 use super::block_mode::decode_block_mode_2d;
 use super::cem::cem_is_ldr;
 use super::endpoints::decode_cem_endpoints;
-use super::infill::{infill_dual_plane_4x4, infill_weights_4x4};
+use super::infill::{
+    infill_dual_plane, infill_dual_plane_4x4, infill_weights, infill_weights_4x4, MAX_TEXELS,
+};
 use super::AstcError;
 
 /// Interpolate one 8-bit LDR colour component between endpoints `e0` and `e1`
@@ -49,17 +51,45 @@ pub(super) fn lerp_component(e0: u8, e1: u8, w: u32) -> u8 {
 pub(super) fn decode_single_partition_4x4_ldr(
     block: &[u8; 16],
 ) -> Result<[[u8; 4]; 16], AstcError> {
+    let mut out = [[0u8; 4]; 16];
+    decode_single_partition_ldr(block, 4, 4, &mut out)?;
+    Ok(out)
+}
+
+/// Decode a single-partition LDR ASTC `block` for an arbitrary 2D footprint
+/// `bx` x `by` (4..=12 per axis), writing `bx * by` RGBA8 texels into
+/// `out[..bx*by]` in row-major order (`texel = y * bx + x`).
+///
+/// The weight grid is resampled to the footprint by the Khronos bilinear
+/// infill; the identity 4x4 grid on a 4x4 footprint is the degenerate case the
+/// GPU-proven path already exercises. Any of the ten LDR Colour Endpoint Modes
+/// decode here; the six HDR CEMs and multi-partition blocks return an
+/// [`AstcError`] so no path silently produces wrong pixels.
+///
+/// # Errors
+/// Returns an [`AstcError`] for any block outside the supported subset, for an
+/// out-of-range footprint, for a weight grid larger than the footprint
+/// (illegal per the ASTC block-mode legality rule), or if `out` is too short.
+pub(super) fn decode_single_partition_ldr(
+    block: &[u8; 16],
+    bx: u32,
+    by: u32,
+    out: &mut [[u8; 4]],
+) -> Result<(), AstcError> {
+    let texels = (bx as usize) * (by as usize);
+    if texels == 0 || texels > MAX_TEXELS || out.len() < texels {
+        return Err(AstcError::Reserved);
+    }
+
     let mode = (u16::from(block[1]) << 8 | u16::from(block[0])) & 0x07FF;
     let bm = decode_block_mode_2d(mode).ok_or(AstcError::UnsupportedBlockMode)?;
 
-    // The weight grid must fit inside the 4x4 texel footprint. A block mode
-    // whose grid exceeds the block dimensions is illegal for this footprint and
-    // is rejected by conformant hardware (the Metal decoder returns its error
-    // colour). Matching that, we refuse to synthesise pixels for such a mode
-    // rather than silently resampling an over-sized grid. See the ASTC spec
-    // block-mode legality rule (astcenc `init_block_size_descriptor`:
-    // `weights_x > texels_x || weights_y > texels_y` => skip).
-    if bm.weights_x > 4 || bm.weights_y > 4 {
+    // Block-mode legality: the weight grid may not exceed the texel footprint
+    // on either axis. A mode whose grid is larger is illegal for this footprint
+    // and rejected by conformant hardware (astcenc `init_block_size_descriptor`:
+    // `weights_x > texels_x || weights_y > texels_y` => skip). We refuse rather
+    // than resample an over-sized grid into bogus pixels.
+    if bm.weights_x > bx || bm.weights_y > by {
         return Err(AstcError::UnsupportedBlockMode);
     }
 
@@ -79,7 +109,6 @@ pub(super) fn decode_single_partition_4x4_ldr(
 
     let endpoints = decode_cem_endpoints(block, bm.weight_bits, cem, bm.dual_plane)?;
 
-    let mut out = [[0u8; 4]; 16];
     if bm.dual_plane {
         // Dual plane: two independent weight planes plus a 2-bit colour
         // component selector (CCS) that names the channel driven by plane 1;
@@ -88,9 +117,19 @@ pub(super) fn decode_single_partition_4x4_ldr(
         // orientation (astcenc `read_bits(block, below_weights_pos - 2, 2)`).
         let below_weights_pos = 128 - bm.weight_bits;
         let ccs = super::block_reader::read_bits(block, below_weights_pos - 2, 2);
-        let (plane0, plane1) =
-            infill_dual_plane_4x4(block, bm.weights_x, bm.weights_y, bm.weight_levels)?;
-        for texel in 0..16usize {
+        let mut plane0 = [0u8; MAX_TEXELS];
+        let mut plane1 = [0u8; MAX_TEXELS];
+        infill_dual_plane(
+            block,
+            bm.weights_x,
+            bm.weights_y,
+            bm.weight_levels,
+            bx,
+            by,
+            &mut plane0[..texels],
+            &mut plane1[..texels],
+        )?;
+        for (texel, slot) in out[..texels].iter_mut().enumerate() {
             let mut px = [0u8; 4];
             for (c, p) in px.iter_mut().enumerate() {
                 let w = u32::from(if c as u32 == ccs {
@@ -100,13 +139,22 @@ pub(super) fn decode_single_partition_4x4_ldr(
                 });
                 *p = lerp_component(endpoints.e0[c], endpoints.e1[c], w);
             }
-            out[texel] = px;
+            *slot = px;
         }
     } else {
-        let weights = infill_weights_4x4(block, bm.weights_x, bm.weights_y, bm.weight_levels)?;
-        for (texel, w) in weights.iter().enumerate() {
+        let mut weights = [0u8; MAX_TEXELS];
+        infill_weights(
+            block,
+            bm.weights_x,
+            bm.weights_y,
+            bm.weight_levels,
+            bx,
+            by,
+            &mut weights[..texels],
+        )?;
+        for (slot, w) in out[..texels].iter_mut().zip(weights[..texels].iter()) {
             let w = u32::from(*w);
-            out[texel] = [
+            *slot = [
                 lerp_component(endpoints.e0[0], endpoints.e1[0], w),
                 lerp_component(endpoints.e0[1], endpoints.e1[1], w),
                 lerp_component(endpoints.e0[2], endpoints.e1[2], w),
@@ -114,7 +162,7 @@ pub(super) fn decode_single_partition_4x4_ldr(
             ];
         }
     }
-    Ok(out)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -207,5 +255,76 @@ mod tests {
         for texel in out {
             assert_eq!(texel, [10, 20, 30, 255]);
         }
+    }
+
+    /// Build the mode-67 constant-weight block used above (every texel == e0).
+    fn mode67_endpoint0_block() -> [u8; 16] {
+        let mut block = [0u8; 16];
+        let mode = 67u16;
+        block[0] = mode as u8;
+        block[1] = (mode >> 8) as u8;
+        block[2] |= 1; // CEM 8 high bit
+        for (i, v) in [10u8, 200, 20, 210, 30, 220].iter().enumerate() {
+            let base = 17 + i as u32 * 8;
+            for b in 0..8u32 {
+                if (v >> b) & 1 == 1 {
+                    let pos = base + b;
+                    block[(pos >> 3) as usize] |= 1 << (pos & 7);
+                }
+            }
+        }
+        block
+    }
+
+    /// The footprint-generic entry point must agree with the fixed 4x4 wrapper
+    /// on the 4x4 footprint for the GPU-proven mode-67 constant block.
+    #[test]
+    fn generic_4x4_matches_fixed_wrapper() {
+        let block = mode67_endpoint0_block();
+        let fixed = decode_single_partition_4x4_ldr(&block).expect("4x4 decodes");
+        let mut generic = [[0u8; 4]; 16];
+        decode_single_partition_ldr(&block, 4, 4, &mut generic).expect("generic 4x4 decodes");
+        assert_eq!(fixed, generic);
+    }
+
+    /// On a larger footprint the all-zero-weight mode-67 block must select
+    /// endpoint 0 for every texel (constant grid resamples to the constant).
+    #[test]
+    fn larger_footprint_constant_weight_is_endpoint0() {
+        let block = mode67_endpoint0_block();
+        for (bx, by) in [
+            (5u32, 5u32),
+            (6, 6),
+            (8, 8),
+            (10, 10),
+            (12, 12),
+            (8, 5),
+            (12, 10),
+        ] {
+            let texels = (bx * by) as usize;
+            let mut out = [[0u8; 4]; MAX_TEXELS];
+            decode_single_partition_ldr(&block, bx, by, &mut out[..texels])
+                .unwrap_or_else(|_| panic!("mode 67 decodes on {bx}x{by}"));
+            for (i, texel) in out[..texels].iter().enumerate() {
+                assert_eq!(*texel, [10, 20, 30, 255], "{bx}x{by} texel {i}");
+            }
+        }
+    }
+
+    /// Footprints out of the 4..=12 envelope and short output slices are
+    /// rejected rather than mis-decoded.
+    #[test]
+    fn generic_rejects_bad_footprint_and_short_slice() {
+        let block = mode67_endpoint0_block();
+        let mut out = [[0u8; 4]; MAX_TEXELS];
+        assert_eq!(
+            decode_single_partition_ldr(&block, 13, 8, &mut out),
+            Err(AstcError::Reserved)
+        );
+        let mut tiny = [[0u8; 4]; 4];
+        assert_eq!(
+            decode_single_partition_ldr(&block, 8, 8, &mut tiny),
+            Err(AstcError::Reserved)
+        );
     }
 }
