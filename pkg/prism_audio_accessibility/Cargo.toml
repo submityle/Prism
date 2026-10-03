@@ -1,0 +1,34 @@
+[package]
+name = "prism_audio_accessibility"
+version = "0.1.0"
+edition = "2024"
+description = "Accessibility layer for Prism's next-generation audio engine (aligned with bevy_a11y): caption/description metadata reported through the telemetry ring, one-touch mono downmix for single-sided hearing, dialogue-priority ducking boost for intelligibility, visual sound cues (direction/type) for key events, and night/hard-of-hearing dynamic-range compression profiles. Classic data-driven control, no AI/ML. Contains no Unreal Engine, Unity, Godot, Wwise, FMOD, Steam Audio, Dolby, or Google Resonance Audio source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_audio_core = { path = "../prism_audio_core" }
+bevy_math = { path = "../../crates/bevy_math", default-features = false, features = [
+  "nostd-libm",
+] }
+serde = { version = "1", default-features = false, features = [
+  "derive",
+], optional = true }
+
+[dev-dependencies]
+prism_audio_accessibility = { path = ".", features = ["serialize"] }
+
+[features]
+default = ["std"]
+std = [
+  "prism_audio_core/std",
+  "bevy_math/std",
+]
+serialize = [
+  "dep:serde",
+  "prism_audio_core/serialize",
+  "bevy_math/serialize",
+]
+
+[lints]
+workspace = true
