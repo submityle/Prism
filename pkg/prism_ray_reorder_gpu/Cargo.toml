@@ -1,0 +1,16 @@
+[package]
+name = "prism_ray_reorder_gpu"
+version = "0.1.0"
+edition = "2024"
+description = "Optional wgpu compute backend for Prism's Shader-Execution-Reordering (SER) ray-coherence sort. A stable 64-bit LSD radix sort of CoherenceKey/ray-index pairs whose device output is validated element-for-element against the prism_render_architecture CPU golden (radix_order / plan_reorder_radix). Contains no Unreal Engine source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_render_architecture = { path = "../prism_render_architecture" }
+wgpu = { version = "30", default-features = false, features = ["wgsl", "metal"] }
+bytemuck = { version = "1.5", features = ["derive"] }
+futures-lite = "2"
+
+[lints]
+workspace = true
