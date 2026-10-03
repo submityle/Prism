@@ -38,6 +38,9 @@ pub use kdop::{DopKind, KDop};
 pub mod obb;
 
 pub use obb::{fit_obb, Obb};
+pub mod bounding_sphere;
+
+pub use bounding_sphere::{mesh_bounding_sphere, minimal_bounding_sphere, BoundingSphere};
 
 /// A handle into a [`ShapeRegistry`].
 ///
