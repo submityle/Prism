@@ -12,9 +12,20 @@
 //!   [`FileSink`](sink::FileSink), and an in-memory
 //!   [`CaptureSink`](sink::CaptureSink).
 //!
-//! Later milestones add CPU/GPU timing scopes, counters/histograms, lock-free
-//! ring buffers, Tracy/Chrome/Perfetto sinks, crash/minidump capture, and the
-//! on-screen HUD.
+//! ## M2 scope (this build) — counters + frame statistics
+//! - Metric instruments in [`metrics`]: [`Gauge`](metrics::Gauge) (last value),
+//!   [`Counter`](metrics::Counter)/[`Sum`](metrics::Sum) (monotonic add), and
+//!   [`Histogram`](metrics::Histogram) (configurable buckets with
+//!   percentile/mean/min/max), all behind a name-keyed
+//!   [`MetricRegistry`](metrics::MetricRegistry).
+//! - Built-in [`FrameTimer`](metrics::FrameTimer) frame statistics (delta, FPS,
+//!   sliding-window min/avg/max) plus per-frame named counters (drawcalls,
+//!   triangles, ...).
+//! - A [`Hud`](metrics::Hud) data provider that formats metrics + frame stats
+//!   into overlay text lines; this crate performs no rendering.
+//!
+//! Later milestones add GPU timing scopes, lock-free Tracy/Perfetto sinks, and
+//! crash/minidump capture.
 //!
 //! Depends on `prism_utils` (containers) and `prism_platform` (clock). Contains
 //! no Unreal Engine source or derived code and depends on no `bevy_*` crate.
@@ -24,6 +35,7 @@
 pub mod filter;
 pub mod fmt;
 pub mod macros;
+pub mod metrics;
 pub mod model;
 pub mod prelude;
 pub mod sink;
@@ -31,6 +43,10 @@ pub mod span;
 pub mod trace;
 
 pub use filter::{max_level, set_max_level};
+pub use metrics::{
+    hud_lines, Counter, FrameStatsSnapshot, FrameTimer, Gauge, Histogram, HistogramSnapshot, Hud,
+    HudSnapshot, MetricRegistry, RegistrySnapshot, Sum,
+};
 pub use model::{Event, Field, FieldValue, Level};
 pub use sink::{clear_sink, set_sink, CaptureSink, ConsoleSink, FileSink, Sink};
 pub use span::Scope;

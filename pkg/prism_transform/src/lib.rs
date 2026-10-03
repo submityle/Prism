@@ -23,9 +23,16 @@
 //!   subtrees). [`TransformGraph`] ties them together. The hierarchy here is a
 //!   self-contained computational core; binding it to `prism_ecs` `ChildOf`
 //!   relations is deferred to M6.
-//! - **M2+ (planned):** dirty-subtree incremental updates, parallel propagation
-//!   via `prism_tasks`, fixed-step interpolation, big-world/deterministic
-//!   paths, and GPU upload.
+//! - **M2 (this update, done):** dirty-subtree *incremental* propagation. The
+//!   [`dirty`] module adds a [`dirty::DirtyPropagator`] that reads the M1 change
+//!   ticks, collects the minimal set of dirty roots (changed nodes with no
+//!   changed ancestor), and sweeps only those subtrees in parent-before-child
+//!   order, reusing cached globals for untouched nodes. [`TransformGraph::propagate_incremental`]
+//!   wires this in and returns [`dirty::DirtyStats`] so a static scene can be
+//!   asserted to recompute nothing. Results are identical to the full M1 pass;
+//!   only the work differs.
+//! - **M3+ (planned):** parallel propagation via `prism_tasks`, fixed-step
+//!   interpolation, big-world/deterministic paths, and GPU upload.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
@@ -37,10 +44,12 @@ use alloc::vec::Vec;
 use prism_math::{Affine3, Mat4, Quat, Vec3};
 
 pub mod change;
+pub mod dirty;
 pub mod hierarchy;
 pub mod propagation;
 
 use change::ChangeTicks;
+use dirty::{DirtyPropagator, DirtyStats};
 use hierarchy::{Hierarchy, HierarchyError, NodeId};
 
 /// A node's local transform: translation, rotation, and scale relative to its
@@ -273,6 +282,7 @@ pub struct TransformGraph {
     locals: Vec<Transform>,
     globals: Vec<GlobalTransform>,
     ticks: ChangeTicks,
+    dirty: DirtyPropagator,
 }
 
 impl TransformGraph {
@@ -284,6 +294,7 @@ impl TransformGraph {
             locals: Vec::new(),
             globals: Vec::new(),
             ticks: ChangeTicks::new(),
+            dirty: DirtyPropagator::new(),
         }
     }
 
@@ -383,6 +394,34 @@ impl TransformGraph {
         self.ticks.end_pass();
     }
 
+    /// Run an **incremental** propagation pass (M2): recompute only the world
+    /// transforms inside dirty subtrees, skip clean subtrees entirely, then
+    /// close the change epoch so all nodes read as clean until the next edit.
+    ///
+    /// Which nodes are dirty is decided by the M1 [`ChangeTicks`]: editing a
+    /// local via [`TransformGraph::set_local`] (or topology edits that call
+    /// [`ChangeTicks::mark`], such as [`TransformGraph::reparent`]) marks the
+    /// affected node, and this pass recomputes that node's whole subtree
+    /// because every descendant composes through it.
+    ///
+    /// After any sequence of edits, the resulting world transforms are
+    /// identical to those [`TransformGraph::propagate`] would produce; the
+    /// difference is only the work done. For a static scene (nothing changed
+    /// since the last pass) this performs no world-matrix compositions and
+    /// returns [`DirtyStats`] with `recomputed == 0`.
+    ///
+    /// # Panics
+    /// Panics only if the internal buffers desynchronize from the hierarchy,
+    /// which cannot happen through this type's safe API.
+    pub fn propagate_incremental(&mut self) -> DirtyStats {
+        let stats = self
+            .dirty
+            .propagate(&self.hierarchy, &self.ticks, &self.locals, &mut self.globals)
+            .expect("TransformGraph buffers stay in sync with the hierarchy");
+        self.ticks.end_pass();
+        stats
+    }
+
     /// Re-parent `child` under `new_parent` (or detach to a root with `None`),
     /// keeping its *local* transform unchanged. The world pose generally moves;
     /// call [`TransformGraph::propagate`] to recompute it.
@@ -448,6 +487,7 @@ impl TransformGraph {
 /// Common imports.
 pub mod prelude {
     pub use crate::change::{ChangeTicks, Tick};
+    pub use crate::dirty::{DirtyPropagator, DirtyStats};
     pub use crate::hierarchy::{Hierarchy, HierarchyError, NodeId};
     pub use crate::propagation::propagate;
     pub use crate::{GlobalTransform, Transform, TransformGraph};
@@ -458,3 +498,6 @@ mod tests;
 
 #[cfg(test)]
 mod tests_m1;
+
+#[cfg(test)]
+mod tests_m2;
