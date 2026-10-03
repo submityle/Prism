@@ -14,3 +14,6 @@ mod shader_tests;
 
 #[cfg(test)]
 mod reservoir_tests;
+
+#[cfg(test)]
+mod brdf_mis_tests;
