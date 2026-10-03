@@ -29,6 +29,7 @@
 
 use hashbrown::HashMap;
 
+use crate::diagnostics::profiler::SystemInstrument;
 use crate::schedule::graph::Schedule;
 use crate::schedule::set::SystemSetId;
 use crate::world::World;
@@ -53,6 +54,39 @@ impl SingleThreadedExecutor {
     /// schedule's lower-level fields rather than calling back into
     /// [`Schedule::run`], which would recurse forever.
     pub fn run(schedule: &mut Schedule, world: &mut World) {
+        Self::run_inner(schedule, world, &mut ());
+    }
+
+    /// Run every system in `schedule` once against `world`, in dependency
+    /// order, timing each system through `recorder` so the caller can build a
+    /// [`FlameGraph`](crate::diagnostics::profiler::FlameGraph) and hotspot
+    /// report (design §16.6 "系统火焰图").
+    ///
+    /// This is identical to [`run`](SingleThreadedExecutor::run) except that a
+    /// span is opened around each system that actually runs (gated-off systems
+    /// are not timed), so a flame graph reflects the systems whose bodies
+    /// executed. It is `std`-gated because [`SpanRecorder`] measures wall-clock
+    /// time with [`Instant`](std::time::Instant).
+    ///
+    /// [`SpanRecorder`]: crate::diagnostics::profiler::SpanRecorder
+    #[cfg(feature = "std")]
+    pub fn run_instrumented(
+        schedule: &mut Schedule,
+        world: &mut World,
+        recorder: &mut crate::diagnostics::profiler::SpanRecorder,
+    ) {
+        Self::run_inner(schedule, world, recorder);
+    }
+
+    /// The shared run loop, generic over the [`SystemInstrument`] so the
+    /// uninstrumented path (`instrument: &mut ()`) and the profiled path
+    /// (`instrument: &mut SpanRecorder`) share one implementation with no logic
+    /// duplication. The no-op `()` instrument monomorphises to zero overhead.
+    fn run_inner<I: SystemInstrument>(
+        schedule: &mut Schedule,
+        world: &mut World,
+        instrument: &mut I,
+    ) {
         // Set-condition results are memoised for the whole run so a set's
         // shared conditions are evaluated at most once even when many members
         // reference the same set.
@@ -94,8 +128,81 @@ impl SingleThreadedExecutor {
             }
 
             if should_run {
-                schedule.nodes[idx].system.run(world);
+                let system = &mut schedule.nodes[idx].system;
+                // `name()` is a shared reborrow that ends before `run` takes
+                // the exclusive borrow, so the instrument sees the system label
+                // without aliasing the subsequent mutable run.
+                instrument.begin(system.name());
+                system.run(world);
+                instrument.end();
             }
         }
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod tests {
+    use super::SingleThreadedExecutor;
+    use crate::resource::Resource;
+    use crate::schedule::{IntoSystemConfigs, Schedule};
+    use crate::system::ResMut;
+    use crate::world::World;
+
+    /// Execution log so the test can confirm the instrumented path still runs
+    /// each system body exactly once, in order.
+    #[derive(Debug, Default, PartialEq)]
+    struct Log(alloc::vec::Vec<u32>);
+    impl Resource for Log {}
+
+    fn first(mut log: ResMut<Log>) {
+        log.0.push(1);
+    }
+    fn second(mut log: ResMut<Log>) {
+        log.0.push(2);
+    }
+
+    #[test]
+    fn run_instrumented_records_one_span_per_system() {
+        let mut world = World::new();
+        world.insert_resource(Log::default());
+
+        let mut schedule = Schedule::new();
+        schedule.add_systems((first, second).chain());
+        schedule.initialize(&mut world);
+
+        let mut recorder = crate::diagnostics::profiler::SpanRecorder::new();
+        SingleThreadedExecutor::run_instrumented(&mut schedule, &mut world, &mut recorder);
+
+        // Both bodies ran, in order, exactly once.
+        assert_eq!(world.resource::<Log>().0, alloc::vec![1, 2]);
+
+        // Every `begin` was matched by an `end`, and one root span per system.
+        assert!(recorder.is_balanced());
+        assert_eq!(recorder.roots().len(), 2);
+
+        // The flame graph exports one folded line per span (both are leaves),
+        // and the hotspots are ordered by descending self time.
+        let graph = recorder.flame_graph();
+        let folded = graph.folded();
+        assert_eq!(folded.len(), 2);
+        assert!(!graph.is_empty());
+
+        let hot = graph.hotspots();
+        assert_eq!(hot.len(), 2);
+        for pair in hot.windows(2) {
+            assert!(pair[0].1 >= pair[1].1, "hotspots must be descending");
+        }
+    }
+
+    #[test]
+    fn uninstrumented_run_is_unaffected() {
+        let mut world = World::new();
+        world.insert_resource(Log::default());
+
+        let mut schedule = Schedule::new();
+        schedule.add_systems((first, second).chain());
+        schedule.run(&mut world);
+
+        assert_eq!(world.resource::<Log>().0, alloc::vec![1, 2]);
     }
 }

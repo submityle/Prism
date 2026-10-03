@@ -10,6 +10,8 @@
 //! * [`inspector`] — archetype / chunk occupancy snapshots.
 //! * [`change_volume`] — dirty-chunk and changed/added-cell accounting that
 //!   quantifies the design headline "成本 ∝ 变化量".
+//! * [`profiler`] — nested system-span timing and flame-graph export
+//!   (design §16.6 "系统火焰图").
 //! * [`time_travel`] — frame-indexed world snapshot record/seek (`std` only).
 //!
 //! All occupancy and change-volume figures describe the chunked Table-backed
@@ -18,10 +20,14 @@
 
 pub mod change_volume;
 pub mod inspector;
+pub mod profiler;
 #[cfg(feature = "std")]
 pub mod time_travel;
 
 pub use change_volume::{ArchetypeChangeReport, ChangeReport};
 pub use inspector::{ArchetypeReport, OccupancyStats, WorldReport};
+pub use profiler::{FlameGraph, SpanNode, SystemInstrument};
+#[cfg(feature = "std")]
+pub use profiler::SpanRecorder;
 #[cfg(feature = "std")]
 pub use time_travel::TimeTravel;
