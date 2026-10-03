@@ -1,5 +1,5 @@
 //! Spatial queries against a [`PhysicsWorld`]: raycasts, sphere sweeps,
-//! nearest-point projection, and overlap tests.
+//! general convex shape-casts, nearest-point projection, and overlap tests.
 //!
 //! These queries are *read-only*: they never mutate world state, so gameplay
 //! code can freely probe geometry (line-of-sight checks, character-controller
@@ -9,12 +9,14 @@
 //!
 //! - [`ray`] holds ray/shape intersection primitives.
 //! - [`shape`] holds swept-sphere (spherecast) primitives.
+//! - [`convex_sweep`] holds general convex shape-cast (box/capsule/sphere
+//!   sweep) primitives.
 //! - [`project`] holds closest-point projection.
 //! - [`overlap`] holds overlap predicates and world-space bounding boxes.
 //!
 //! Every query accepts a [`QueryFilter`] that selects which bodies participate,
-//! and returns the nearest result (raycast, spherecast, projection) or the full
-//! set of matches (overlap).
+//! and returns the nearest result (raycast, spherecast, shapecast, projection)
+//! or the full set of matches (overlap).
 //!
 //! # Provenance
 //!
@@ -26,6 +28,7 @@ pub(crate) mod overlap;
 pub(crate) mod project;
 pub(crate) mod ray;
 pub(crate) mod shape;
+pub(crate) mod convex_sweep;
 
 use crate::collider::{ColliderHandle, ColliderShape};
 use crate::math::transform::Isometry;
@@ -214,6 +217,46 @@ impl PhysicsWorld {
         let mut best: Option<SweepHit> = None;
         for body in self.query_bodies(filter) {
             if let Some(hit) = shape::spherecast_shape(body.shape, &body.pose, ray, radius) {
+                let candidate = SweepHit {
+                    body: body.handle,
+                    collider: body.collider,
+                    time_of_impact: hit.time_of_impact,
+                    point: hit.point,
+                    normal: hit.normal,
+                };
+                if best.is_none_or(|b| candidate.time_of_impact < b.time_of_impact) {
+                    best = Some(candidate);
+                }
+            }
+        }
+        best
+    }
+
+    /// Sweeps an arbitrary bounded convex `shape` (sphere, box, or capsule)
+    /// posed at `pose` along `motion` and returns the nearest contact.
+    ///
+    /// Unlike [`spherecast`](Self::spherecast), which can only sweep a sphere,
+    /// this respects the mover's and every target's true shape and orientation,
+    /// so swept box/capsule character controllers, cameras, and projectiles do
+    /// not tunnel. `motion` is the full world-space displacement to test; the
+    /// returned [`SweepHit::time_of_impact`] is the distance the mover's origin
+    /// travels before contact.
+    ///
+    /// A [`ColliderShape::Plane`] mover is rejected (returns [`None`]): a plane
+    /// is an unbounded half-space and can only be swept *into*, never swept.
+    #[must_use]
+    pub fn shapecast(
+        &self,
+        shape: &ColliderShape,
+        pose: Isometry,
+        motion: Vec3,
+        filter: &QueryFilter,
+    ) -> Option<SweepHit> {
+        let mut best: Option<SweepHit> = None;
+        for body in self.query_bodies(filter) {
+            if let Some(hit) =
+                convex_sweep::shapecast_shape(shape, &pose, body.shape, &body.pose, motion)
+            {
                 let candidate = SweepHit {
                     body: body.handle,
                     collider: body.collider,
