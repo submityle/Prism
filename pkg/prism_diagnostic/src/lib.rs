@@ -51,6 +51,26 @@
 //!   validation is deferred to that backend (the ingestion seam makes it
 //!   non-blocking).
 //!
+//! ## M5 scope (this build) — Tracy + remote observability
+//! - A backend-neutral real-time profiling surface in [`profiler`]: the
+//!   [`Profiler`](profiler::Profiler) backend trait, a global slot, the
+//!   [`ProfiledZone`](profiler::ProfiledZone) `RAII` guard
+//!   ([`profiled_zone!`]), and free functions ([`profiler::zone`],
+//!   [`profiler::frame_mark`], [`profiler::plot`], [`profiler::message`],
+//!   [`profiler::gpu_zone`]) that feed zones/frames/plots/messages/GPU zones to
+//!   the installed backend. The default backend is the no-op
+//!   [`NoopProfiler`](profiler::NoopProfiler); a self-contained Tracy-compatible
+//!   emitter ([`profiler::tracy`]) lives behind the `tracy` feature (no external
+//!   `tracy-client` dependency).
+//! - A remote observability transport in [`remote`] (behind the `remote`
+//!   feature): a serializable [`RemoteEvent`](remote::RemoteEvent)/
+//!   [`RemoteCommand`](remote::RemoteCommand) protocol with a hand-rolled binary
+//!   codec ([`wire`]), shared lock-free
+//!   [`RuntimeControls`](remote::RuntimeControls) for runtime tuning (log level,
+//!   sink toggle, sampling, capture), and a loopback
+//!   [`RemoteServer`](remote::RemoteServer)/[`RemoteClient`](remote::RemoteClient)
+//!   over `std::net`.
+//!
 //! Later milestones add GPU timing scopes, lock-free Tracy/Perfetto sinks, and
 //! crash/minidump capture.
 //!
@@ -68,9 +88,14 @@ pub mod macros;
 pub mod metrics;
 pub mod model;
 pub mod prelude;
+pub mod profiler;
+#[cfg(feature = "remote")]
+pub mod remote;
 pub mod sink;
 pub mod span;
 pub mod trace;
+#[cfg(any(feature = "tracy", feature = "remote"))]
+pub mod wire;
 
 pub use filter::{max_level, set_max_level};
 pub use instrument::{
@@ -90,12 +115,22 @@ pub use gpu::{
 };
 pub use sink::{clear_sink, set_sink, CaptureSink, ConsoleSink, FileSink, Sink};
 pub use span::Scope;
+pub use profiler::{
+    clear_profiler, emit_span, frame_mark, gpu_zone, is_active as profiler_active, message, plot,
+    set_profiler, zone as profile_zone, FrameMark, GpuZone, NoopProfiler, PlotValue, ProfiledZone,
+    Profiler, Zone,
+};
 pub use trace::{
     export_chrome_string, export_chrome_to_file, FlowPhase, FlowRecord, RingBuffer, SpanRecord,
     ThreadTrace,
 };
 #[cfg(feature = "gpu")]
 pub use trace::export_chrome_with_gpu;
+#[cfg(feature = "remote")]
+pub use remote::{
+    CommandOutcome, FrameSummary, RemoteClient, RemoteCommand, RemoteEvent, RemoteServer,
+    RemoteServerHandle, RuntimeControls,
+};
 
 /// Macro support: build and dispatch an event from `format_args!` output.
 /// Not part of the stable surface; call the logging macros instead.

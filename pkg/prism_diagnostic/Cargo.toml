@@ -17,6 +17,13 @@ std = []
 # GPU timing: timestamp-query scopes + CPU/GPU timeline alignment. Backend-neutral
 # ingestion API (no GPU backend dependency); a future RHI backend feeds raw ticks.
 gpu = []
+# Tracy real-time profiling: a self-contained Tracy-compatible emitter backend
+# for the backend-neutral `profiler` surface. No external `tracy-client` crate;
+# the default profiler backend stays a no-op.
+tracy = []
+# Remote observability: stream events/metrics to a panel over a localhost socket
+# and accept runtime-tuning commands. Uses `std::net`/`std::thread`.
+remote = ["std"]
 # Compile-time maximum verbosity floors (anything more verbose is removed).
 max_level_off = []
 max_level_error = []
