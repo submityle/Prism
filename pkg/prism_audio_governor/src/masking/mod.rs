@@ -11,6 +11,8 @@
 //! - [`masking_model`] spreads each masker's energy across neighbouring bands
 //!   with an asymmetric triangular function and declares a probe masked when it
 //!   sits below the combined masking profile by a margin.
+//! - [`virtualization`] unions the masking and HDR-gate verdicts into the
+//!   single force-virtualise set the governor consumes.
 //!
 //! The margin is the single knob the [`crate::governor`] turns: a tight budget
 //! shrinks it so more voices count as masked and virtualise, while a relaxed
@@ -32,3 +34,4 @@
 pub mod critical_bands;
 pub mod hdr_gate;
 pub mod masking_model;
+pub mod virtualization;
