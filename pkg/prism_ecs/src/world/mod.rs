@@ -18,9 +18,10 @@ use alloc::vec::Vec;
 use crate::archetype::Archetypes;
 use crate::bundle::Bundle;
 use crate::change::Tick;
-use crate::component::{Component, ComponentId, ComponentSet, Components};
+use crate::component::{Component, ComponentId, ComponentSet, Components, StorageType};
 use crate::entity::{Entities, Entity, EntityLocation};
 use crate::query::{QueryData, QueryFilter, QueryState, ReadOnlyQueryData};
+use crate::storage::SparseSets;
 use crate::resource::{Resource, Resources};
 
 /// The authoritative container of all ECS state.
@@ -28,6 +29,9 @@ pub struct World {
     entities: Entities,
     components: Components,
     archetypes: Archetypes,
+    /// Out-of-band columns for sparse-declared components (design §6); keyed
+    /// by [`Entity`], never fragmenting the archetype graph.
+    sparse_sets: SparseSets,
     resources: Resources,
     /// Monotonically increasing change counter (design §10). Stamped onto
     /// component writes and compared against each system's `last_run` to drive
@@ -55,6 +59,7 @@ impl World {
             entities: Entities::new(),
             components: Components::new(),
             archetypes: Archetypes::new(),
+            sparse_sets: SparseSets::new(),
             resources: Resources::new(),
             change_tick: Tick::new(1),
             last_change_tick: Tick::ZERO,
@@ -98,6 +103,7 @@ impl World {
         for arch in self.archetypes.iter_mut() {
             arch.table_mut().check_change_ticks(this_run);
         }
+        self.sparse_sets.check_change_ticks(this_run);
         self.last_change_tick.check_tick(this_run);
     }
 
@@ -255,30 +261,61 @@ impl World {
         let change_tick = self.change_tick;
         let mut ids = Vec::new();
         B::component_ids(&mut self.components, &mut ids);
-        let set = ComponentSet::from_ids(ids.iter().copied());
+
+        // Uniqueness is checked over the whole bundle (table + sparse ids).
+        let set_all = ComponentSet::from_ids(ids.iter().copied());
         assert_eq!(
-            set.len(),
+            set_all.len(),
             ids.len(),
             "a bundle may not contain the same component type twice"
         );
-        let archetype_id = self.archetypes.get_or_create(&set, &self.components);
+
+        // Classify each id by storage; pre-create any sparse sets so the fill
+        // closure only has to look them up.
+        let storages = self.classify_storages(&ids);
+        self.ensure_sparse_sets(&ids, &storages);
+
+        // Only table components fragment the archetype; sparse ones are routed
+        // out of band (design §6).
+        let table_set = ComponentSet::from_ids(
+            ids.iter()
+                .zip(&storages)
+                .filter(|(_, s)| **s == StorageType::Table)
+                .map(|(id, _)| *id),
+        );
+        let archetype_id = self.archetypes.get_or_create(&table_set, &self.components);
 
         let row = {
-            let arch = self
-                .archetypes
+            let World {
+                archetypes,
+                sparse_sets,
+                ..
+            } = &mut *self;
+            let table = archetypes
                 .get_mut(archetype_id)
-                .expect("archetype just created");
-            let table = arch.table_mut();
+                .expect("archetype just created")
+                .table_mut();
             let row = table.allocate(entity);
             let mut i = 0usize;
             // SAFETY: `get_components` yields one pointer per id in `ids` order,
-            // and each pointer is a valid, owned component value moved into its
-            // matching column exactly once, restoring the table invariant.
+            // each a valid owned component value routed exactly once into its
+            // matching table column or sparse set, restoring both invariants.
             unsafe {
                 bundle.get_components(&mut |ptr| {
                     let id = ids[i];
+                    let storage = storages[i];
                     i += 1;
-                    table.column_for_fill(id).push(ptr, change_tick);
+                    match storage {
+                        StorageType::Table => {
+                            table.column_for_fill(id).push(ptr, change_tick);
+                        }
+                        StorageType::SparseSet => {
+                            sparse_sets
+                                .get_mut(id)
+                                .expect("sparse set pre-created")
+                                .insert(entity, ptr, change_tick);
+                        }
+                    }
                 });
             }
             debug_assert_eq!(i, ids.len());
@@ -292,6 +329,31 @@ impl World {
                 row: row as u32,
             },
         );
+    }
+
+    /// The declared [`StorageType`] of each id in `ids`, in order.
+    fn classify_storages(&self, ids: &[ComponentId]) -> Vec<StorageType> {
+        ids.iter()
+            .map(|&id| {
+                self.components
+                    .info(id)
+                    .expect("registered component")
+                    .storage()
+            })
+            .collect()
+    }
+
+    /// Lazily create the backing sparse set for every sparse id in
+    /// `ids` (paired with its storage classification), so later writes can
+    /// assume the set exists.
+    fn ensure_sparse_sets(&mut self, ids: &[ComponentId], storages: &[StorageType]) {
+        for (&id, &storage) in ids.iter().zip(storages) {
+            if storage == StorageType::SparseSet {
+                let info = self.components.info(id).expect("registered component");
+                let (layout, drop) = (info.layout(), info.drop_fn());
+                self.sparse_sets.get_or_init(id, layout, drop);
+            }
+        }
     }
 
     /// Insert the components of `bundle` onto an existing `entity`.
@@ -314,9 +376,14 @@ impl World {
                 "a bundle may not contain the same component type twice"
             );
         }
+        // Liveness is resolved before any sparse set is touched.
         let Some(loc) = self.entities.location(entity) else {
             return false;
         };
+
+        let storages = self.classify_storages(&ids);
+        self.ensure_sparse_sets(&ids, &storages);
+
         let src_id = loc.archetype_id;
         let current = self
             .archetypes
@@ -325,38 +392,59 @@ impl World {
             .components()
             .clone();
 
+        // Only *table* components the entity lacks force an archetype move;
+        // sparse components are routed out of band and never fragment (§6).
         let add_ids: Vec<ComponentId> = ids
             .iter()
             .copied()
-            .filter(|id| !current.contains(*id))
+            .zip(&storages)
+            .filter(|(id, s)| **s == StorageType::Table && !current.contains(*id))
+            .map(|(id, _)| id)
             .collect();
 
         if add_ids.is_empty() {
-            // Pure overwrite — no structural move needed.
-            let table = self
-                .archetypes
+            // No new table column: overwrite existing table columns in place
+            // and insert/overwrite sparse components out of band — no move.
+            let World {
+                archetypes,
+                sparse_sets,
+                ..
+            } = &mut *self;
+            let table = archetypes
                 .get_mut(src_id)
                 .expect("live entity archetype")
                 .table_mut();
             let row = loc.row as usize;
             let mut i = 0usize;
-            // SAFETY: every id is already a column of this table (add_ids empty),
-            // `row` is in-bounds, and each pointer is a valid owned value that
-            // `replace` moves in while dropping the previous value exactly once.
+            // SAFETY: `get_components` yields one owned pointer per id in `ids`
+            // order; table ids are existing columns overwritten in place at the
+            // in-bounds `row`, sparse ids are moved into their pre-created set.
+            // Each value is consumed exactly once.
             unsafe {
                 bundle.get_components(&mut |ptr| {
                     let id = ids[i];
+                    let storage = storages[i];
                     i += 1;
-                    table
-                        .column_mut(id)
-                        .expect("overwrite column exists")
-                        .replace(row, ptr, change_tick);
+                    match storage {
+                        StorageType::Table => {
+                            table
+                                .column_mut(id)
+                                .expect("overwrite column exists")
+                                .replace(row, ptr, change_tick);
+                        }
+                        StorageType::SparseSet => {
+                            sparse_sets
+                                .get_mut(id)
+                                .expect("sparse set pre-created")
+                                .insert(entity, ptr, change_tick);
+                        }
+                    }
                 });
             }
             return true;
         }
 
-        // Structural move into the archetype that is `current ∪ add_ids`.
+        // At least one new table component: move into `current ∪ table add_ids`.
         let mut new_set = current.clone();
         for &id in &add_ids {
             new_set = new_set.with(id);
@@ -382,26 +470,41 @@ impl World {
         }
 
         {
-            let table = self
-                .archetypes
+            let World {
+                archetypes,
+                sparse_sets,
+                ..
+            } = &mut *self;
+            let table = archetypes
                 .get_mut(dst_id)
                 .expect("dst archetype")
                 .table_mut();
             let mut i = 0usize;
-            // SAFETY: ids present in `current` were just relocated to `dst_row`
-            // and are overwritten in place; genuinely new ids fill their (so far
-            // empty) column at `dst_row`. Each value is owned and consumed once.
+            // SAFETY: sparse ids move into their pre-created set; table ids in
+            // `current` were relocated to `dst_row` and are overwritten in place;
+            // genuinely new table ids fill their (empty) column at `dst_row`.
+            // Each owned value is consumed exactly once.
             unsafe {
                 bundle.get_components(&mut |ptr| {
                     let id = ids[i];
+                    let storage = storages[i];
                     i += 1;
-                    if current.contains(id) {
-                        table
-                            .column_mut(id)
-                            .expect("moved column exists")
-                            .replace(dst_row, ptr, change_tick);
-                    } else {
-                        table.column_for_fill(id).push(ptr, change_tick);
+                    match storage {
+                        StorageType::SparseSet => {
+                            sparse_sets
+                                .get_mut(id)
+                                .expect("sparse set pre-created")
+                                .insert(entity, ptr, change_tick);
+                        }
+                        StorageType::Table if current.contains(id) => {
+                            table
+                                .column_mut(id)
+                                .expect("moved column exists")
+                                .replace(dst_row, ptr, change_tick);
+                        }
+                        StorageType::Table => {
+                            table.column_for_fill(id).push(ptr, change_tick);
+                        }
                     }
                 });
             }
@@ -421,6 +524,17 @@ impl World {
         let Some(loc) = self.entities.location(entity) else {
             return false;
         };
+
+        let storages = self.classify_storages(&ids);
+
+        // Sparse components are removed out of band with no archetype move.
+        let mut removed_any = false;
+        for (&id, &storage) in ids.iter().zip(&storages) {
+            if storage == StorageType::SparseSet && self.sparse_sets.remove(id, entity) {
+                removed_any = true;
+            }
+        }
+
         let src_id = loc.archetype_id;
         let current = self
             .archetypes
@@ -429,13 +543,17 @@ impl World {
             .components()
             .clone();
 
+        // Only *table* components present in the current archetype move it.
         let to_remove: Vec<ComponentId> = ids
             .iter()
             .copied()
-            .filter(|id| current.contains(*id))
+            .zip(&storages)
+            .filter(|(id, s)| **s == StorageType::Table && current.contains(*id))
+            .map(|(id, _)| id)
             .collect();
         if to_remove.is_empty() {
-            return false;
+            // No structural change; success iff a sparse component was removed.
+            return removed_any;
         }
 
         let mut new_set = current.clone();
@@ -474,6 +592,9 @@ impl World {
         let Some(loc) = self.entities.free(entity) else {
             return false;
         };
+        // Drop out-of-band sparse components regardless of archetype shape; even
+        // an empty-archetype entity may still hold sparse components (§6).
+        self.sparse_sets.remove_entity_from_all(entity);
         if loc.is_empty() {
             return true;
         }
@@ -533,6 +654,10 @@ impl World {
     pub fn get<T: Component>(&self, entity: Entity) -> Option<&T> {
         let id = self.components.id_of::<T>()?;
         let loc = self.entities.location(entity)?;
+        if self.components.info(id)?.storage() == StorageType::SparseSet {
+            // SAFETY: `T` is exactly the type registered for `id`.
+            return unsafe { self.sparse_sets.get(id)?.get::<T>(entity) };
+        }
         let arch = self.archetypes.get(loc.archetype_id)?;
         let col = arch.table().column(id)?;
         let row = loc.row as usize;
@@ -550,6 +675,15 @@ impl World {
         let change_tick = self.change_tick;
         let id = self.components.id_of::<T>()?;
         let loc = self.entities.location(entity)?;
+        if self.components.info(id)?.storage() == StorageType::SparseSet {
+            let set = self.sparse_sets.get_mut(id)?;
+            // Handing out `&mut T` is an unconditional write for change-detection
+            // purposes; stamp the changed tick (no-op if the entity is absent).
+            set.set_changed_tick(entity, change_tick);
+            // SAFETY: `T` matches `id` and `&mut self` gives exclusive access,
+            // so the formed `&mut T` cannot alias.
+            return unsafe { set.get_mut::<T>(entity) };
+        }
         let arch = self.archetypes.get_mut(loc.archetype_id)?;
         let col = arch.table_mut().column_mut(id)?;
         let row = loc.row as usize;
@@ -570,6 +704,9 @@ impl World {
     pub fn get_ticks<T: Component>(&self, entity: Entity) -> Option<crate::change::ComponentTicks> {
         let id = self.components.id_of::<T>()?;
         let loc = self.entities.location(entity)?;
+        if self.components.info(id)?.storage() == StorageType::SparseSet {
+            return self.sparse_sets.get(id)?.component_ticks(entity);
+        }
         let arch = self.archetypes.get(loc.archetype_id)?;
         let col = arch.table().column(id)?;
         let row = loc.row as usize;
@@ -587,6 +724,13 @@ impl World {
         let Some(loc) = self.entities.location(entity) else {
             return false;
         };
+        if self
+            .components
+            .info(id)
+            .is_some_and(|i| i.storage() == StorageType::SparseSet)
+        {
+            return self.sparse_sets.contains(id, entity);
+        }
         self.archetypes
             .get(loc.archetype_id)
             .is_some_and(|a| a.contains(id))
@@ -833,5 +977,153 @@ mod tests {
         assert_eq!(w.remove_resource::<FrameCount>(), Some(FrameCount(100)));
         assert!(!w.contains_resource::<FrameCount>());
         assert_eq!(w.remove_resource::<FrameCount>(), None);
+    }
+
+    // --- SparseSet storage integration (design §6) ---
+
+    #[derive(Debug, PartialEq)]
+    struct Selected;
+    impl Component for Selected {
+        const STORAGE: StorageType = StorageType::SparseSet;
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct Charge(u32);
+    impl Component for Charge {
+        const STORAGE: StorageType = StorageType::SparseSet;
+    }
+
+    /// The archetype id the entity currently lives in.
+    fn arch_of(w: &World, e: Entity) -> crate::archetype::ArchetypeId {
+        w.entities.location(e).unwrap().archetype_id
+    }
+
+    #[test]
+    fn spawn_with_sparse_excludes_it_from_archetype() {
+        let mut w = World::new();
+        let e = w.spawn((Position(1.0, 2.0), Selected, Charge(7)));
+        // Both table and sparse components are readable.
+        assert_eq!(w.get::<Position>(e), Some(&Position(1.0, 2.0)));
+        assert!(w.has::<Selected>(e));
+        assert_eq!(w.get::<Charge>(e), Some(&Charge(7)));
+        // The archetype only tracks the TABLE component; sparse ids are routed
+        // out of band and never appear in the archetype's component set.
+        let sel_id = w.components.id_of::<Selected>().unwrap();
+        let charge_id = w.components.id_of::<Charge>().unwrap();
+        let pos_id = w.components.id_of::<Position>().unwrap();
+        let arch = w.archetypes.get(arch_of(&w, e)).unwrap();
+        assert!(arch.contains(pos_id));
+        assert!(!arch.contains(sel_id));
+        assert!(!arch.contains(charge_id));
+    }
+
+    #[test]
+    fn toggling_sparse_does_not_change_archetype() {
+        let mut w = World::new();
+        let e = w.spawn(Position(1.0, 1.0));
+        let a0 = arch_of(&w, e);
+        // Insert a sparse component: no structural move.
+        assert!(w.insert(e, Selected));
+        assert_eq!(arch_of(&w, e), a0, "sparse insert must not fragment");
+        assert!(w.has::<Selected>(e));
+        // Insert another sparse with data: still no move.
+        assert!(w.insert(e, Charge(3)));
+        assert_eq!(arch_of(&w, e), a0, "second sparse insert must not fragment");
+        // Remove them: still the same archetype.
+        assert!(w.remove::<Selected>(e));
+        assert_eq!(arch_of(&w, e), a0, "sparse remove must not fragment");
+        assert!(!w.has::<Selected>(e));
+        assert!(w.remove::<Charge>(e));
+        assert_eq!(arch_of(&w, e), a0);
+        assert!(!w.has::<Charge>(e));
+        // Table data is untouched throughout.
+        assert_eq!(w.get::<Position>(e), Some(&Position(1.0, 1.0)));
+    }
+
+    #[test]
+    fn sparse_entities_with_different_toggles_share_one_archetype() {
+        let mut w = World::new();
+        let a = w.spawn(Position(1.0, 0.0));
+        let b = w.spawn(Position(2.0, 0.0));
+        w.insert(a, Selected);
+        // `a` has a sparse tag, `b` does not, yet both share the Position-only
+        // archetype — the hallmark of non-fragmenting sparse storage.
+        assert_eq!(arch_of(&w, a), arch_of(&w, b));
+        assert!(w.has::<Selected>(a));
+        assert!(!w.has::<Selected>(b));
+    }
+
+    #[test]
+    fn sparse_get_mut_mutates_and_stamps_changed() {
+        use crate::change::Tick;
+        let mut w = World::new();
+        let e = w.spawn(Charge(1));
+        w.increment_change_tick(); // -> 2
+        w.increment_change_tick(); // -> 3
+        w.get_mut::<Charge>(e).unwrap().0 = 42;
+        assert_eq!(w.get::<Charge>(e), Some(&Charge(42)));
+        let ticks = w.get_ticks::<Charge>(e).unwrap();
+        assert_eq!(ticks.added, Tick::new(1), "added preserved");
+        assert_eq!(ticks.changed, Tick::new(3), "changed bumped to current");
+    }
+
+    #[test]
+    fn sparse_insert_overwrite_preserves_added_tick() {
+        use crate::change::Tick;
+        let mut w = World::new();
+        let e = w.spawn(Charge(1)); // added=changed=1
+        w.increment_change_tick(); // -> 2
+        assert!(w.insert(e, Charge(9))); // sparse overwrite
+        assert_eq!(w.get::<Charge>(e), Some(&Charge(9)));
+        let t = w.get_ticks::<Charge>(e).unwrap();
+        assert_eq!(t.added, Tick::new(1), "overwrite preserves the added tick");
+        assert_eq!(t.changed, Tick::new(2), "overwrite bumps the changed tick");
+    }
+
+    #[test]
+    fn despawn_clears_sparse_components() {
+        let mut w = World::new();
+        let e = w.spawn((Position(1.0, 1.0), Charge(5)));
+        let charge_id = w.components.id_of::<Charge>().unwrap();
+        assert!(w.sparse_sets.contains(charge_id, e));
+        assert!(w.despawn(e));
+        // The sparse column no longer holds the despawned entity.
+        assert!(!w.sparse_sets.contains(charge_id, e));
+        assert!(!w.contains(e));
+    }
+
+    #[test]
+    fn despawn_empty_archetype_entity_clears_sparse() {
+        let mut w = World::new();
+        // Entity with ONLY a sparse component lives in the empty archetype.
+        let e = w.spawn(Selected);
+        let sel_id = w.components.id_of::<Selected>().unwrap();
+        assert!(w.sparse_sets.contains(sel_id, e));
+        assert!(w.despawn(e));
+        assert!(!w.sparse_sets.contains(sel_id, e));
+    }
+
+    #[test]
+    fn remove_returns_true_only_when_sparse_present() {
+        let mut w = World::new();
+        let e = w.spawn(Position(0.0, 0.0));
+        // Nothing sparse yet: removing a sparse component is a no-op.
+        assert!(!w.remove::<Selected>(e));
+        w.insert(e, Selected);
+        assert!(w.remove::<Selected>(e));
+        assert!(!w.remove::<Selected>(e));
+    }
+
+    #[test]
+    fn sparse_check_change_ticks_clamps_stale() {
+        use crate::change::Tick;
+        let mut w = World::new();
+        let e = w.spawn(Charge(1)); // added=changed=1
+        w.set_last_change_tick(Tick::new(1));
+        w.change_tick = Tick::new(Tick::MAX_CHANGE_AGE.wrapping_add(100));
+        w.check_change_ticks();
+        let ticks = w.get_ticks::<Charge>(e).unwrap();
+        assert_eq!(ticks.added.age_since(w.change_tick()), Tick::MAX_CHANGE_AGE);
+        assert_eq!(ticks.changed.age_since(w.change_tick()), Tick::MAX_CHANGE_AGE);
     }
 }
