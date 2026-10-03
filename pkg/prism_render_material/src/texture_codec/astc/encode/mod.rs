@@ -723,10 +723,70 @@ pub fn encode_astc_single_partition_8x6_ldr(texels: &[[u8; 4]; 48]) -> [u8; 16] 
     w.into_block()
 }
 
+/// Encode sixty `RGBA8` texels (row-major, `texel = y * 10 + x`, 10 wide x 6
+/// tall) into a single **10x6** ASTC LDR block (`AstcBlock::B10x6`), extending
+/// the non-square footprint family with the identity-colour recipe.
+///
+/// Configuration (verified against the authoritative block-mode scan,
+/// footprint (10, 6) -- the *only* single-plane CEM-8 full-grid mode here):
+/// * **block mode 420** (`0b0110100100`): a 10x6 weight grid, single plane,
+///   weight range **QUANT_2** (one bit -> two interpolation levels, 60*1 = 60
+///   weight bits);
+/// * **single partition**, **CEM 8** (RGB direct, alpha forced to 255);
+/// * **QUANT_256 colour**: with `color_bits = 111 - 60 = 51` and six CEM-8
+///   integers the colour quant level is QUANT_256 (8-bit identity), so the six
+///   endpoint bytes decode back bit-for-bit -- the endpoints are *exact*.
+///
+/// Same identity-colour, single-bit-weight trade as the 8x6 mode-324 encoder
+/// with `N = 60`: each texel snaps to the nearer of the two exact endpoints.
+/// Because the 10x6 weight grid equals the footprint there is **no bilinear
+/// infill** -- weight `t` maps 1:1 to texel `t` in row-major order.
+///
+/// The weight stream is a plain 1-bit range packed with the bit-only
+/// `bits::BlockWriter::write_weights_reversed`; the colour is six direct 8-bit
+/// values at block bit 17 (colour 17..65 and weights 68..128 do not overlap).
+///
+/// CEM 8 carries no alpha, so the decoded block has alpha 255 for every texel
+/// and the input alpha channel is ignored.
+#[must_use]
+pub fn encode_astc_single_partition_10x6_ldr(texels: &[[u8; 4]; 60]) -> [u8; 16] {
+    const BLOCK_MODE: u32 = 420;
+    const CEM_RGB_DIRECT: u32 = 8;
+    const WEIGHT_BITS: u32 = 1; // QUANT_2, bit-only (two levels)
+
+    // Fit the principal-axis RGB endpoints over all sixty texels. The fit
+    // orders them so `hadd(e0) <= hadd(e1)`, which with QUANT_256 identity
+    // colour means the CEM-8 decoder reproduces them without its
+    // blue-contraction swap -- so the raw bytes are also the decoded endpoints.
+    let (e0, e1) = endpoint_fit::fit_rgb_endpoints(texels);
+
+    // Fit the sixty 1-bit weights against the exact endpoints (no infill on a
+    // full grid): each texel snaps to the nearer endpoint.
+    let raw = weight_fit::quantize_weights_bits(texels, e0, e1, WEIGHT_BITS);
+
+    let mut w = bits::BlockWriter::new();
+    // Block mode occupies block bits 0..11; single partition leaves the
+    // partition-count field (bits 11,12) at 0.
+    w.write_bits(0, 11, BLOCK_MODE);
+    // CEM field: 4 bits at block bit 13. CEM 8 sets only block bit 16.
+    w.write_bits(13, 4, CEM_RGB_DIRECT);
+    // Six 8-bit identity colour values at block bit 17, LSB-first, in the
+    // decoder's read order [e0.r, e1.r, e0.g, e1.g, e0.b, e1.b].
+    let vals = [e0[0], e1[0], e0[1], e1[1], e0[2], e1[2]];
+    for (i, v) in vals.iter().enumerate() {
+        w.write_bits(17 + i as u32 * 8, 8, u32::from(*v));
+    }
+    // Sixty 1-bit weights packed bit-reversed from the top of the block
+    // (bits 68..128).
+    w.write_weights_reversed(&raw, WEIGHT_BITS);
+    w.into_block()
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::decode_astc_4x4_ldr;
     use super::super::decode_astc_ldr;
+    use super::encode_astc_single_partition_10x6_ldr;
     use super::encode_astc_single_partition_4x4_ldr;
     use super::encode_astc_single_partition_4x4_ldr_q192;
     use super::encode_astc_single_partition_4x4_ldr_quality;
@@ -1419,6 +1479,65 @@ mod tests {
         assert!(
             max_rgb_err_48(&src, &dec) <= 128,
             "8x6 gradient error exceeds the two-level budget"
+        );
+    }
+
+    fn max_rgb_err_60(src: &[[u8; 4]; 60], dec: &[[u8; 4]; 60]) -> i32 {
+        let mut m = 0;
+        for (s, d) in src.iter().zip(dec.iter()) {
+            for c in 0..3 {
+                m = m.max((i32::from(s[c]) - i32::from(d[c])).abs());
+            }
+        }
+        m
+    }
+
+    #[test]
+    fn ten_by_six_constant_block_round_trips_exactly() {
+        let src = [[41u8, 173, 98, 255]; 60];
+        let blk = encode_astc_single_partition_10x6_ldr(&src);
+        let (dec144, count) = decode_astc_ldr(&blk, 10, 6).expect("decode 10x6 constant");
+        assert_eq!(count, 60, "10x6 footprint must decode 60 texels");
+        let dec: [[u8; 4]; 60] = core::array::from_fn(|t| dec144[t]);
+        assert_eq!(
+            max_rgb_err_60(&src, &dec),
+            0,
+            "10x6 constant block must round-trip exactly with identity colour"
+        );
+        for d in &dec {
+            assert_eq!(d[3], 255, "CEM 8 forces alpha 255");
+        }
+    }
+
+    #[test]
+    fn ten_by_six_two_colour_endpoints_are_exact() {
+        let a = [15u8, 35, 55, 255];
+        let b = [210u8, 190, 170, 255];
+        let src: [[u8; 4]; 60] = core::array::from_fn(|t| if t % 2 == 0 { a } else { b });
+        let blk = encode_astc_single_partition_10x6_ldr(&src);
+        let (dec144, count) = decode_astc_ldr(&blk, 10, 6).expect("decode 10x6 two-colour");
+        assert_eq!(count, 60);
+        let dec: [[u8; 4]; 60] = core::array::from_fn(|t| dec144[t]);
+        assert_eq!(
+            max_rgb_err_60(&src, &dec),
+            0,
+            "10x6 two-colour block must hit both exact endpoints"
+        );
+    }
+
+    #[test]
+    fn ten_by_six_rgb_gradient_round_trips_within_tolerance() {
+        let src: [[u8; 4]; 60] = core::array::from_fn(|t| {
+            let v = (t * 4) as u8;
+            [v, 255 - v, (v / 2).wrapping_add(40), 255]
+        });
+        let blk = encode_astc_single_partition_10x6_ldr(&src);
+        let (dec144, count) = decode_astc_ldr(&blk, 10, 6).expect("decode 10x6 gradient");
+        assert_eq!(count, 60);
+        let dec: [[u8; 4]; 60] = core::array::from_fn(|t| dec144[t]);
+        assert!(
+            max_rgb_err_60(&src, &dec) <= 160,
+            "10x6 gradient error exceeds the two-level budget"
         );
     }
 }
