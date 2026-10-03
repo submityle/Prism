@@ -11,9 +11,11 @@
 //!
 //! - [`run_once`] / [`ScheduleRunnerOnce`] — exactly one frame.
 //! - [`HeadlessRunner`] — loop until exit (optionally bounded by a frame
-//!   cap, and optionally paced to a [`FrameLimit`](crate::pacing::FrameLimit)
+#![cfg_attr(feature = "std", doc = "  cap, and optionally paced to a [`FrameLimit`](crate::pacing::FrameLimit)")]
+#![cfg_attr(not(feature = "std"), doc = "  cap, and optionally paced to a `FrameLimit`")]
 //!   under `std`, design §13).
-//! - [`DedicatedServerRunner`] — an authoritative fixed-tickrate, deterministic
+#![cfg_attr(feature = "std", doc = "- [`DedicatedServerRunner`] — an authoritative fixed-tickrate, deterministic")]
+#![cfg_attr(not(feature = "std"), doc = "- `DedicatedServerRunner` — an authoritative fixed-tickrate, deterministic")]
 //!   simulation heartbeat with no rendering (design §10 / §24.4, `std`-only).
 //!
 //! # Honestly deferred

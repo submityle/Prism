@@ -70,16 +70,20 @@
 //!   an [`Events<E>`](prism_ecs::event::Events) resource and rotates its double
 //!   buffer once per frame in [`First`], so events are readable for the frame
 //!   they are sent and the frame after (design §22 M1).
-//! - A drift-free [frame pacer](crate::pacing) (design §13, §22 M4): the
-//!   [`FramePacer`] caps the loop to a [`FrameLimit`] (unlimited / target
+#![cfg_attr(feature = "std", doc = "- A drift-free [frame pacer](crate::pacing) (design §13, §22 M4): the")]
+#![cfg_attr(not(feature = "std"), doc = "- A drift-free frame pacer (design §13, §22 M4): the")]
+#![cfg_attr(feature = "std", doc = "  [`FramePacer`] caps the loop to a [`FrameLimit`] (unlimited / target")]
+#![cfg_attr(not(feature = "std"), doc = "  `FramePacer` caps the loop to a `FrameLimit` (unlimited / target")]
 //!   FPS / explicit period) by pacing to a *moving* cadence
 //!   (`deadline += period`, never `now + period`) so rounding error cannot
 //!   accumulate, with an anti-death-spiral clamp that resyncs after a hitch
-//!   and rolling [`FrameStats`] for the design §16 diagnostics. Present-
+#![cfg_attr(feature = "std", doc = "  and rolling [`FrameStats`] for the design §16 diagnostics. Present-")]
+#![cfg_attr(not(feature = "std"), doc = "  and rolling `FrameStats` for the design §16 diagnostics. Present-")]
 //!   timestamp / VRR alignment stays deferred until `prism_window`/RHI can
 //!   supply a present estimate (documented in the module). The
 //!   [`HeadlessRunner`] can opt into a cap via
-//!   [`with_frame_limit`](crate::runner::HeadlessRunner::with_frame_limit)
+#![cfg_attr(feature = "std", doc = "  [`with_frame_limit`](crate::runner::HeadlessRunner::with_frame_limit)")]
+#![cfg_attr(not(feature = "std"), doc = "  `with_frame_limit`")]
 //!   for a mobile frame limiter or a server tickrate; the default stays
 //!   uncapped.
 //! - Platform [lifecycle] events (design §12, §22 M4):
@@ -97,14 +101,19 @@
 //!   [`cleanup`](crate::plugin::Plugin::cleanup). The runners invoke it once the
 //!   frame loop ends.
 //! - Platform-free runners: [`HeadlessRunner`], [`ScheduleRunnerOnce`],
-//!   and the [`DedicatedServerRunner`] (design §10 / §24.4, M5): an
+#![cfg_attr(feature = "std", doc = "  and the [`DedicatedServerRunner`] (design §10 / §24.4, M5): an")]
+#![cfg_attr(not(feature = "std"), doc = "  and the `DedicatedServerRunner` (design §10 / §24.4, M5): an")]
 //!   authoritative fixed-tickrate, deterministic simulation heartbeat with
-//!   no rendering, publishing live [`ServerTickDiagnostics`] so server
+#![cfg_attr(feature = "std", doc = "  no rendering, publishing live [`ServerTickDiagnostics`] so server")]
+#![cfg_attr(not(feature = "std"), doc = "  no rendering, publishing live `ServerTickDiagnostics` so server")]
 //!   systems can detect tick overload. Networking stays in the
 //!   `prism_replication` layer (injected as a plugin), not this runner.
-//! - Opt-in [observability](crate::diagnostics) (design §16, §22 M6): rolling
-//!   [`FrameDiagnostics`] (whole-frame work time, per-phase timing, and the
-//!   fixed-step substep count) plus per-plugin [`StartupDiagnostics`]
+#![cfg_attr(feature = "std", doc = "- Opt-in [observability](crate::diagnostics) (design §16, §22 M6): rolling")]
+#![cfg_attr(not(feature = "std"), doc = "- Opt-in observability (design §16, §22 M6): rolling")]
+#![cfg_attr(feature = "std", doc = "  [`FrameDiagnostics`] (whole-frame work time, per-phase timing, and the")]
+#![cfg_attr(not(feature = "std"), doc = "  `FrameDiagnostics` (whole-frame work time, per-phase timing, and the")]
+#![cfg_attr(feature = "std", doc = "  fixed-step substep count) plus per-plugin [`StartupDiagnostics`]")]
+#![cfg_attr(not(feature = "std"), doc = "  fixed-step substep count) plus per-plugin `StartupDiagnostics`")]
 //!   (`build`/`finish` wall time). Neither is installed by default, so an
 //!   un-observed frame pays only a single resource-presence check. Extract
 //!   cost, pipeline-overlap rate, and present latency are honestly deferred.

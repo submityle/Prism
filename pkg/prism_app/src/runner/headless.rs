@@ -17,9 +17,11 @@ use crate::pacing::{FrameLimit, FramePacer};
 ///
 /// By default the loop runs as fast as the machine allows (`FrameLimit::Off`),
 /// which is what tests and CI want. With the `std` feature a caller can opt
-/// into a cap via [`with_frame_limit`](HeadlessRunner::with_frame_limit) — a
+#[cfg_attr(feature = "std", doc = "into a cap via [`with_frame_limit`](HeadlessRunner::with_frame_limit) — a")]
+#[cfg_attr(not(feature = "std"), doc = "into a cap via `with_frame_limit` — a")]
 /// mobile-style frame limiter to save power/heat, or a dedicated-server
-/// tickrate. The cap is applied by a drift-free [`FramePacer`] built inside
+#[cfg_attr(feature = "std", doc = "tickrate. The cap is applied by a drift-free [`FramePacer`] built inside")]
+#[cfg_attr(not(feature = "std"), doc = "tickrate. The cap is applied by a drift-free `FramePacer` built inside")]
 /// [`run`](HeadlessRunner::run); it paces to a moving cadence so the achieved
 /// rate does not drift (design §13).
 #[derive(Clone, Copy, Debug, Default)]
@@ -67,9 +69,8 @@ impl HeadlessRunner {
     ///
     /// Returns the requested [`AppExit`] if a system asked to stop, otherwise
     /// [`AppExit::Success`] when the frame cap is reached. When a
-    /// [`FrameLimit`] is set (via
-    /// [`with_frame_limit`](HeadlessRunner::with_frame_limit)) the loop is
-    /// paced to it with a drift-free [`FramePacer`].
+    #[cfg_attr(feature = "std", doc = "[`FrameLimit`] is set (via [`with_frame_limit`](HeadlessRunner::with_frame_limit)) the loop is paced to it with a drift-free [`FramePacer`].")]
+    #[cfg_attr(not(feature = "std"), doc = "`FrameLimit` is set (via `with_frame_limit`) the loop is paced to it with a drift-free `FramePacer`.")]
     pub fn run(self, mut app: App) -> AppExit {
         #[cfg(feature = "std")]
         let mut pacer = FramePacer::new(self.frame_limit);
