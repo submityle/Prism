@@ -4268,3 +4268,205 @@ fn astc_single_partition_hdr_larger_footprint_parity_against_gpu_hardware_decode
         HDR_CEMS.len()
     );
 }
+
+// ---------------------------------------------------------------------------
+// ASTC multi-partition LDR parity on LARGER FOOTPRINTS (5x5 .. 12x12).
+//
+// The committed `astc_multi_partition_single_plane_parity` test proves the
+// 2/3/4-partition decode on the 4x4 footprint only. This test reuses the exact
+// same hand-built block layout (partition count/seed, shared-class CEM, forward
+// QUANT_256 colour integers, bit-reversed grid weight stream) but decodes each
+// block under larger footprint formats through the footprint-generic
+// `decode_astc_ldr(block, bx, by)` entry point. All seven MULTI_PART_MODES have
+// weight-grid dims <= 4 on each axis, so the grid fits every footprint >= 4.
+// The reference is the native hardware decoder via
+// `BlockOracle::decode_raw_footprint`. This proves per-texel partition
+// selection + weight-infill decimation on non-4x4 (and non-square) footprints
+// bit-for-bit against hardware for the multi-partition path -- in particular
+// that the >=32-texel footprints correctly disable the small-block partition
+// hash bias, matching the Khronos spec and hardware.
+// ---------------------------------------------------------------------------
+#[test]
+fn astc_multi_partition_larger_footprint_parity_against_gpu_hardware_decode() {
+    let Some(oracle) = BlockOracle::try_new() else {
+        eprintln!("no GPU adapter; skipping ASTC multi-partition larger-footprint parity");
+        return;
+    };
+    if !oracle
+        .features()
+        .contains(Features::TEXTURE_COMPRESSION_ASTC)
+    {
+        eprintln!(
+            "adapter lacks ASTC support; skipping ASTC multi-partition larger-footprint parity"
+        );
+        return;
+    }
+
+    const FOOTPRINTS: [(u32, u32); 8] = [
+        (5, 5),
+        (6, 6),
+        (8, 8),
+        (10, 10),
+        (12, 12),
+        (8, 5),
+        (10, 6),
+        (12, 10),
+    ];
+    const PER_COMBO: u32 = 48;
+    let mut rng = Rng(0x3BE1_72A9);
+    let mut compared = 0u64;
+
+    for (bx, by) in FOOTPRINTS {
+        let format = TextureFormat::Astc {
+            block: astc_block_for_footprint(bx, by),
+            channel: wgpu::AstcChannel::Unorm,
+        };
+        let texels = (bx * by) as usize;
+        for (mode, wx, wy, levels, _wb_doc, pc, cem, n_int) in MULTI_PART_MODES {
+            let (form, bits) = levels_to_grid_form(levels);
+            let weight_count = (wx * wy) as usize;
+            for _ in 0..PER_COMBO {
+                let mut blk = [0u8; 16];
+                astc_set_bits(&mut blk, 0, 11, mode);
+                astc_set_bits(&mut blk, 11, 2, pc - 1); // partition count minus one
+                astc_set_bits(&mut blk, 13, 10, rng.next_u32() & 0x3FF); // partition seed
+                astc_set_bits(&mut blk, 23, 6, cem << 2); // shared CEM class
+                for i in 0..n_int {
+                    astc_set_bits(&mut blk, 29 + i * 8, 8, rng.byte() as u32);
+                }
+                let mut weights = [0u8; 64];
+                for w in weights.iter_mut().take(weight_count) {
+                    *w = rand_grid_weight(&mut rng, form, bits);
+                }
+                astc_set_grid_weights(&mut blk, form, bits, &weights[..weight_count]);
+
+                let (cpu, count) = decode_astc_ldr(&blk, bx, by).unwrap_or_else(|e| {
+                    panic!(
+                        "mp {bx}x{by} mode {mode} (pc {pc}, cem {cem}) block {blk:02x?} rejected: {e:?}"
+                    )
+                });
+                assert_eq!(count, texels, "{bx}x{by} texel count");
+                let gpu = oracle.decode_raw_footprint(format, &blk, bx, by);
+                assert_eq!(gpu.len(), texels, "{bx}x{by} GPU texel count");
+
+                for t in 0..texels {
+                    for c in 0..4 {
+                        let gv = (gpu[t][c].clamp(0.0, 1.0) * 255.0 + 0.5) as i32;
+                        let d = (cpu[t][c] as i32 - gv).abs();
+                        assert!(
+                            d <= 1,
+                            "ASTC mp {bx}x{by} mode {mode} (pc {pc}, cem {cem}) block={blk:02x?} texel {t} chan {c}: cpu={} gpu={gv} (|d|={d})",
+                            cpu[t][c]
+                        );
+                        compared += 1;
+                    }
+                }
+            }
+        }
+    }
+    eprintln!(
+        "ASTC multi-partition larger-footprint parity: {compared} RGBA lanes match hardware across {} footprints x {} modes x {PER_COMBO} blocks",
+        FOOTPRINTS.len(),
+        MULTI_PART_MODES.len()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ASTC multi-partition HDR parity on LARGER FOOTPRINTS (5x5 .. 12x12).
+//
+// Mirrors the LDR multi-partition larger-footprint proof on the HDR profile.
+// It reuses the committed MULTI_PART_HDR_SINGLE_PLANE configs (per-partition
+// HDR CEMs, shared class) and decodes under larger footprint formats via the
+// footprint-generic `decode_astc_hdr(block, bx, by)` entry point. The reference
+// is the native hardware HDR decoder. This proves per-partition HDR endpoint
+// unpack + logarithmic interpolation + the partition hash + weight-infill
+// decimation on non-4x4 footprints bit-for-bit against hardware.
+// ---------------------------------------------------------------------------
+#[test]
+fn astc_multi_partition_hdr_larger_footprint_parity_against_gpu_hardware_decode() {
+    let Some(oracle) = BlockOracle::try_new() else {
+        eprintln!("no GPU adapter; skipping ASTC multi-partition HDR larger-footprint parity");
+        return;
+    };
+    if !oracle
+        .features()
+        .contains(Features::TEXTURE_COMPRESSION_ASTC_HDR)
+    {
+        eprintln!(
+            "adapter lacks ASTC HDR support; skipping ASTC multi-partition HDR larger-footprint parity"
+        );
+        return;
+    }
+
+    const FOOTPRINTS: [(u32, u32); 8] = [
+        (5, 5),
+        (6, 6),
+        (8, 8),
+        (10, 10),
+        (12, 12),
+        (8, 5),
+        (10, 6),
+        (12, 10),
+    ];
+    const PER_COMBO: u32 = 32;
+    let mut rng = Rng(0x7C44_19ED);
+    let mut compared = 0u64;
+    let mut skipped = 0u64;
+
+    for (bx, by) in FOOTPRINTS {
+        let format = TextureFormat::Astc {
+            block: astc_block_for_footprint(bx, by),
+            channel: wgpu::AstcChannel::Hdr,
+        };
+        let texels = (bx * by) as usize;
+        for (mode, wx, wy, levels_doc, _wb_doc, pc, cem, n_int) in MULTI_PART_HDR_SINGLE_PLANE {
+            let (form, bits) = levels_to_grid_form(levels_doc);
+            let weight_count = (wx * wy) as usize;
+            for _ in 0..PER_COMBO {
+                let mut blk = [0u8; 16];
+                astc_set_bits(&mut blk, 0, 11, mode);
+                astc_set_bits(&mut blk, 11, 2, pc - 1); // partition count minus one
+                astc_set_bits(&mut blk, 13, 10, rng.next_u32() & 0x3FF); // partition seed
+                astc_set_bits(&mut blk, 23, 6, cem << 2); // shared CEM class
+                for i in 0..n_int {
+                    astc_set_bits(&mut blk, 29 + i * 8, 8, rng.byte() as u32);
+                }
+                let mut weights = [0u8; 64];
+                for w in weights.iter_mut().take(weight_count) {
+                    *w = rand_grid_weight(&mut rng, form, bits);
+                }
+                astc_set_grid_weights(&mut blk, form, bits, &weights[..weight_count]);
+
+                let (cpu, count) = decode_astc_hdr(&blk, bx, by).unwrap_or_else(|e| {
+                    panic!(
+                        "mp HDR {bx}x{by} mode {mode} (pc {pc}, cem {cem}) block {blk:02x?} rejected: {e:?}"
+                    )
+                });
+                assert_eq!(count, texels, "{bx}x{by} texel count");
+                let gpu = oracle.decode_raw_footprint(format, &blk, bx, by);
+                assert_eq!(gpu.len(), texels, "{bx}x{by} GPU texel count");
+
+                for t in 0..texels {
+                    for c in 0..3 {
+                        let (cv, gv) = (cpu[t][c], gpu[t][c]);
+                        if !cv.is_finite() || !gv.is_finite() || cv.abs() >= 6.5e4 {
+                            skipped += 1;
+                            continue;
+                        }
+                        let tol = cv.abs() * 1e-3 + 1e-3;
+                        assert!(
+                            (cv - gv).abs() <= tol,
+                            "ASTC mp HDR {bx}x{by} mode {mode} (pc {pc}, cem {cem}) block={blk:02x?} texel {t} chan {c}: cpu={cv} gpu={gv}"
+                        );
+                        compared += 1;
+                    }
+                }
+            }
+        }
+    }
+    eprintln!(
+        "ASTC multi-partition HDR larger-footprint parity: {compared} RGB lanes match hardware across {} footprints x {} configs x {PER_COMBO} blocks ({skipped} saturated lanes skipped)",
+        FOOTPRINTS.len(),
+        MULTI_PART_HDR_SINGLE_PLANE.len()
+    );
+}
