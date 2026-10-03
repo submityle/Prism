@@ -29,6 +29,7 @@ const COLLIDER_SPHERE: u32 = 0u;
 const COLLIDER_CAPSULE: u32 = 1u;
 const COLLIDER_HALF_SPACE: u32 = 2u;
 const COLLIDER_OBB: u32 = 3u;
+const COLLIDER_CONVEX: u32 = 4u;
 
 const WORKGROUP: u32 = 64u;
 
@@ -72,6 +73,15 @@ struct Backstop {
 @group(0) @binding(3) var<storage, read> prev_positions: array<vec4<f32>>;
 @group(0) @binding(4) var<storage, read> colliders: array<Collider>;
 @group(0) @binding(5) var<storage, read> backstops: array<Backstop>;
+// One face plane of a convex-hull body collider: xyz = outward unit normal,
+// w = plane offset so the face is `normal.dot(x) == w`. A COLLIDER_CONVEX
+// record indexes a contiguous run here via `pad0` (plane_offset) and `pad1`
+// (plane_count); see `GpuConvexPlane` / `pack_body_scene` on the host.
+struct ConvexPlane {
+    plane: vec4<f32>,
+};
+
+@group(0) @binding(6) var<storage, read> convex_planes: array<ConvexPlane>;
 
 // Projects `pos` out to the surface of the sphere `(center, radius)`.
 //
@@ -178,6 +188,43 @@ fn project_out_of_obb(
     return center + quat_rotate(orientation, local_out);
 }
 
+// Projects `pos` out to the nearest face of the convex solid whose face
+// planes occupy `convex_planes[plane_offset .. plane_offset + plane_count]`
+// when it lies strictly inside every face, otherwise returns `pos`. This is
+// the real-device twin of `ConvexProxy::project_out` in prism_physics_core:
+// a point interior to a convex polytope is closest to its least-penetrating
+// face, and any face with a non-negative signed distance proves the point is
+// outside the solid. Degenerate (near-zero-normal) faces never constrain the
+// solid, and an empty run is inert.
+fn project_out_of_convex(pos: vec3<f32>, plane_offset: u32, plane_count: u32) -> vec3<f32> {
+    var best_pen = 0.0;
+    var best_normal = vec3<f32>(0.0, 0.0, 0.0);
+    var found = false;
+    for (var i = 0u; i < plane_count; i = i + 1u) {
+        let plane = convex_planes[plane_offset + i].plane;
+        let normal = plane.xyz;
+        if (dot(normal, normal) <= EPS_LEN_SQ) {
+            continue;
+        }
+        let signed = dot(normal, pos) - plane.w;
+        if (signed >= 0.0) {
+            // Outside (or exactly on) this face => outside the convex solid.
+            return pos;
+        }
+        let pen = -signed;
+        if (!found || pen < best_pen) {
+            best_pen = pen;
+            best_normal = normal;
+            found = true;
+        }
+    }
+    if (!found) {
+        return pos;
+    }
+    // Unit face normals => stepping `best_pen` lands on the shallowest face.
+    return pos + best_normal * best_pen;
+}
+
 // Dispatches one collider's projection by discriminant.
 fn project_collider(c: Collider, pos: vec3<f32>) -> vec3<f32> {
     if (c.kind == COLLIDER_SPHERE) {
@@ -189,6 +236,10 @@ fn project_collider(c: Collider, pos: vec3<f32>) -> vec3<f32> {
     }
     if (c.kind == COLLIDER_OBB) {
         return project_out_of_obb(pos, c.p0.xyz, c.p2, c.p1.xyz);
+    }
+    if (c.kind == COLLIDER_CONVEX) {
+        // `pad0`/`pad1` carry the convex plane-run offset/count.
+        return project_out_of_convex(pos, c.pad0, c.pad1);
     }
     // COLLIDER_HALF_SPACE
     return project_out_of_half_space(pos, c.p0.xyz, c.radius);

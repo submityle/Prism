@@ -290,5 +290,6 @@ fn translate_collider(collider: BodyCollider, delta: Vec3) -> BodyCollider {
             orientation,
             half_extents,
         },
+        BodyCollider::ConvexHull(proxy) => BodyCollider::ConvexHull(proxy.translated(delta)),
     }
 }

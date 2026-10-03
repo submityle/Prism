@@ -18,7 +18,7 @@
 //! projection is Macklin et al. (2014). No Unreal Engine source or derived code.
 
 use glam::Vec3;
-use prism_physics_core::{Backstop, BodyCollider};
+use prism_physics_core::{Backstop, BodyCollider, ConvexProxy, Plane};
 use prism_physics_gpu::context::GpuContext;
 use prism_physics_gpu::{cpu_cloth_backstops, cpu_cloth_body_collision, GpuClothBodyCollision};
 
@@ -300,6 +300,160 @@ fn pinned_and_empty_match_cpu() {
     // Empty colliders: identity on both sides.
     let gpu_empty = kernel.solve(&ctx, &positions, &inverse_masses, &positions, &[], 0.5);
     assert_fields_match(&positions, &gpu_empty);
+}
+
+/// A convex box proxy must project identically to its oriented-box twin and to
+/// the CPU golden, exercising the new COLLIDER_CONVEX shader arm end to end.
+#[test]
+fn convex_box_projection_matches_cpu() {
+    let Some(ctx) = headless() else { return };
+    let kernel = GpuClothBodyCollision::new(&ctx);
+    let proxy = ConvexProxy::from_box(
+        Vec3::new(0.2, -0.1, 0.3),
+        glam::Quat::from_rotation_y(0.6) * glam::Quat::from_rotation_x(0.3),
+        Vec3::new(0.8, 0.5, 0.6),
+    );
+    let colliders = [BodyCollider::ConvexHull(proxy)];
+    let mut rng = Rng::new(0x00c0_ffee);
+    // A spread of points, many driven deep inside the box so the projection
+    // actually fires, plus a few comfortably outside to check the early-out.
+    let positions: Vec<Vec3> = (0..64)
+        .map(|_| {
+            Vec3::new(
+                rng.range(-1.2, 1.2),
+                rng.range(-1.2, 1.2),
+                rng.range(-1.2, 1.2),
+            )
+        })
+        .collect();
+    let inverse_masses = vec![1.0f32; positions.len()];
+    let cpu = cpu_cloth_body_collision(&positions, &inverse_masses, &positions, &colliders, 0.0);
+    let gpu = kernel.solve(
+        &ctx,
+        &positions,
+        &inverse_masses,
+        &positions,
+        &colliders,
+        0.0,
+    );
+    assert_fields_match(&cpu, &gpu);
+}
+
+/// A bevelled (non-box) convex built from explicit planes stresses the
+/// least-penetration tie-break across more than six faces.
+#[test]
+fn convex_bevelled_projection_matches_cpu() {
+    let Some(ctx) = headless() else { return };
+    let kernel = GpuClothBodyCollision::new(&ctx);
+    // A unit box with its +X+Y+Z corner shaved off: six axis faces plus one
+    // diagonal bevel, eight live faces total.
+    let planes = [
+        Plane {
+            normal: Vec3::X,
+            offset: 1.0,
+        },
+        Plane {
+            normal: -Vec3::X,
+            offset: 1.0,
+        },
+        Plane {
+            normal: Vec3::Y,
+            offset: 1.0,
+        },
+        Plane {
+            normal: -Vec3::Y,
+            offset: 1.0,
+        },
+        Plane {
+            normal: Vec3::Z,
+            offset: 1.0,
+        },
+        Plane {
+            normal: -Vec3::Z,
+            offset: 1.0,
+        },
+        Plane {
+            normal: Vec3::new(1.0, 1.0, 1.0),
+            offset: 2.2,
+        },
+    ];
+    let proxy = ConvexProxy::from_planes(Vec3::ZERO, 1.8, &planes)
+        .expect("bevelled hull is within the plane budget");
+    let colliders = [BodyCollider::ConvexHull(proxy)];
+    let mut rng = Rng::new(0xfeed_face);
+    let positions: Vec<Vec3> = (0..96)
+        .map(|_| {
+            Vec3::new(
+                rng.range(-1.4, 1.4),
+                rng.range(-1.4, 1.4),
+                rng.range(-1.4, 1.4),
+            )
+        })
+        .collect();
+    let inverse_masses = vec![1.0f32; positions.len()];
+    let cpu = cpu_cloth_body_collision(&positions, &inverse_masses, &positions, &colliders, 0.0);
+    let gpu = kernel.solve(
+        &ctx,
+        &positions,
+        &inverse_masses,
+        &positions,
+        &colliders,
+        0.0,
+    );
+    assert_fields_match(&cpu, &gpu);
+}
+
+/// A mixed scene with two distinct convex hulls (plus analytic primitives)
+/// checks that the host packs each hull's face run at the right plane offset
+/// and the shader indexes the correct slice per collider.
+#[test]
+fn convex_mixed_scene_matches_cpu() {
+    let Some(ctx) = headless() else { return };
+    let kernel = GpuClothBodyCollision::new(&ctx);
+    let box_a = ConvexProxy::from_box(
+        Vec3::new(-0.6, 0.0, 0.0),
+        glam::Quat::IDENTITY,
+        Vec3::new(0.4, 0.4, 0.4),
+    );
+    let box_b = ConvexProxy::from_box(
+        Vec3::new(0.7, 0.1, -0.2),
+        glam::Quat::from_rotation_z(0.9),
+        Vec3::new(0.5, 0.3, 0.6),
+    );
+    let colliders = [
+        BodyCollider::Sphere {
+            center: Vec3::new(0.0, -0.9, 0.0),
+            radius: 0.5,
+        },
+        BodyCollider::ConvexHull(box_a),
+        BodyCollider::HalfSpace {
+            normal: Vec3::Y,
+            offset: -1.5,
+        },
+        BodyCollider::ConvexHull(box_b),
+    ];
+    let mut rng = Rng::new(0x1234_5678);
+    let positions: Vec<Vec3> = (0..80)
+        .map(|_| {
+            Vec3::new(
+                rng.range(-1.5, 1.5),
+                rng.range(-1.5, 1.5),
+                rng.range(-1.5, 1.5),
+            )
+        })
+        .collect();
+    let mut inverse_masses = vec![1.0f32; positions.len()];
+    inverse_masses[3] = 0.0; // a pinned particle to exercise the skip path
+    let cpu = cpu_cloth_body_collision(&positions, &inverse_masses, &positions, &colliders, 0.3);
+    let gpu = kernel.solve(
+        &ctx,
+        &positions,
+        &inverse_masses,
+        &positions,
+        &colliders,
+        0.3,
+    );
+    assert_fields_match(&cpu, &gpu);
 }
 
 #[test]

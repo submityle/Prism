@@ -38,7 +38,9 @@ use crate::buffer;
 use crate::cloth::layout::{buffer_entry, entry};
 use crate::context::GpuContext;
 
-use super::collider::{pack_backstops, pack_body_colliders, GpuBackstop, GpuBodyCollider};
+use super::collider::{
+    pack_backstops, pack_body_scene, GpuBackstop, GpuBodyCollider, GpuConvexPlane,
+};
 
 /// Scalar type shared with [`prism_physics_core`] (`f32`).
 type Real = f32;
@@ -102,6 +104,7 @@ impl GpuClothBodyCollision {
                 buffer_entry(3, read),
                 buffer_entry(4, read),
                 buffer_entry(5, read),
+                buffer_entry(6, read),
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
@@ -168,7 +171,16 @@ impl GpuClothBodyCollision {
             })
             .collect();
 
-        let colliders_packed = pack_body_colliders(colliders);
+        let scene = pack_body_scene(colliders);
+        let colliders_packed = scene.records;
+        // A zero-length storage buffer is invalid; feed a one-element dummy
+        // when no convex hull contributed any face planes.
+        let convex_dummy = [GpuConvexPlane::zeroed()];
+        let convex_planes: &[GpuConvexPlane] = if scene.planes.is_empty() {
+            &convex_dummy
+        } else {
+            &scene.planes
+        };
         let mu_clamped = if mu.is_finite() {
             mu.clamp(0.0, 1.0)
         } else {
@@ -192,6 +204,7 @@ impl GpuClothBodyCollision {
             &prev_packed,
             &colliders_packed,
             &backstops_dummy,
+            convex_planes,
             &params,
         )
     }
@@ -228,6 +241,7 @@ impl GpuClothBodyCollision {
         // dummies so neither storage buffer is zero-length.
         let prev_dummy = [[0.0f32; 4]];
         let colliders_dummy = [GpuBodyCollider::zeroed()];
+        let convex_dummy = [GpuConvexPlane::zeroed()];
         self.dispatch(
             ctx,
             &self.backstop_pass,
@@ -236,6 +250,7 @@ impl GpuClothBodyCollision {
             &prev_dummy,
             &colliders_dummy,
             &backstops_packed,
+            &convex_dummy,
             &params,
         )
     }
@@ -255,6 +270,7 @@ impl GpuClothBodyCollision {
         prev_packed: &[[f32; 4]],
         colliders_packed: &[GpuBodyCollider],
         backstops_packed: &[GpuBackstop],
+        convex_planes: &[GpuConvexPlane],
         params: &Params,
     ) -> Vec<Vec3> {
         let device = ctx.device();
@@ -270,6 +286,7 @@ impl GpuClothBodyCollision {
             buffer::storage_read(device, "prism_cloth_body_colliders", colliders_packed);
         let backstops_buf =
             buffer::storage_read(device, "prism_cloth_body_backstops", backstops_packed);
+        let convex_buf = buffer::storage_read(device, "prism_cloth_body_convex", convex_planes);
         let pos_stage = buffer::staging(device, "prism_cloth_body_stage", pos_bytes);
 
         let bind = device.create_bind_group(&BindGroupDescriptor {
@@ -282,6 +299,7 @@ impl GpuClothBodyCollision {
                 entry(3, &prev_buf),
                 entry(4, &colliders_buf),
                 entry(5, &backstops_buf),
+                entry(6, &convex_buf),
             ],
         });
 
