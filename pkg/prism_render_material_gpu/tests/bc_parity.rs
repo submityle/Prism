@@ -3727,3 +3727,124 @@ fn astc_multi_partition_hdr_dual_plane_parity_against_gpu_hardware_decode() {
         MULTI_PART_HDR_DUAL_PLANE.len()
     );
 }
+
+// --- Mixed LDR/HDR multi-partition ASTC (M#12) --------------------------------
+//
+// A multi-partition block decoded under the HDR profile may mix LDR and HDR
+// Colour Endpoint Modes across its partitions. Each HDR partition unpacks to
+// native logarithmic 16-bit lanes; each LDR partition unpacks to 8-bit UNORM
+// endpoints that the HDR-profile decode widens into the 16-bit *linear* domain
+// (`value * 257`, `lns = false`), exactly the reference `unpack_color_endpoints`
+// expansion `output_scale = select(257, 1, hdr_lanes)` for `ASTCENC_PRF_HDR`.
+// The per-channel `lns` mask then routes each lane through the logarithmic or
+// linear FP16 conversion, so a single block interpolates both kinds correctly.
+//
+// Mixed CEMs force the per-partition colour-endpoint-mode form (base class != 0)
+// because the two formats differ; `set_cem_per_partition` encodes classes that
+// differ by at most one step. Every config keeps colour_integer_count*8 <=
+// color_bits (COLOR_BITS_ARR[pc] - weight_bits - (3*pc - 4) high-part bits) so
+// the colour ISE stays at QUANT_256 (raw bytes) and the endpoint run never
+// reaches the CEM high part or the weight region. The oracle drops alpha (RGB
+// only) and FP16 saturates near 65504; lanes at/above that clamp are counted and
+// skipped rather than asserted.
+
+/// Mixed LDR/HDR single-plane multi-partition configs:
+/// `(block_mode, weights_x, weights_y, weight_levels, partition_count, cem0..cem3)`.
+/// Modes/grids are the GPU-proven single-plane multi-partition set
+/// (weight_bits == 24). Partitions pair LDR and HDR CEMs of equal or adjacent
+/// endpoint class: class 0 (LDR 0/1 lum, HDR 2/3 lum) across 2/3/4 partitions,
+/// and class 1 (LDR 4/5/6, HDR 7 RGB-scale) across 2 partitions.
+const MULTI_PART_MIXED: [(u32, u32, u32, u32, u32, [u32; 4]); 7] = [
+    (19, 4, 2, 8, 2, [0, 2, 0, 0]),   // LDR lum + HDR lum-large
+    (814, 2, 3, 16, 2, [3, 1, 0, 0]), // HDR lum-small + LDR lum
+    (431, 3, 3, 6, 3, [0, 2, 1, 0]),  // LDR + HDR + LDR, 3 partitions
+    (462, 3, 4, 4, 4, [2, 0, 3, 1]),  // alternating LDR/HDR, 4 partitions
+    (34, 4, 3, 4, 2, [4, 7, 0, 0]),   // LDR lum+alpha + HDR RGB-scale (class 1)
+    (351, 2, 4, 8, 2, [7, 6, 0, 0]),  // HDR RGB-scale + LDR RGB-scale (class 1)
+    (910, 3, 2, 16, 2, [5, 7, 0, 0]), // LDR lum+alpha offset + HDR RGB-scale
+];
+
+/// GPU parity for mixed LDR/HDR single-plane multi-partition blocks: proves the
+/// per-partition branch (HDR unpack vs LDR unpack widened x257 into the linear
+/// HDR domain) plus the per-channel `lns` interpolation matches the Metal
+/// ASTC-HDR hardware decoder across 2/3/4 partitions and both endpoint classes.
+#[test]
+fn astc_multi_partition_mixed_ldr_hdr_parity_against_gpu_hardware_decode() {
+    let Some(oracle) = BlockOracle::try_new() else {
+        eprintln!("no GPU adapter; skipping ASTC mixed LDR/HDR multi-partition parity");
+        return;
+    };
+    if !oracle
+        .features()
+        .contains(Features::TEXTURE_COMPRESSION_ASTC_HDR)
+    {
+        eprintln!("adapter lacks ASTC HDR support; skipping ASTC mixed LDR/HDR parity");
+        return;
+    }
+    let format = TextureFormat::Astc {
+        block: wgpu::AstcBlock::B4x4,
+        channel: wgpu::AstcChannel::Hdr,
+    };
+    let mut rng = Rng(0x6D1A_C3F7);
+    const PER_MODE: u32 = 128;
+    const WEIGHT_BITS: u32 = 24;
+    let mut compared = 0u64;
+    let mut skipped = 0u64;
+    for (mode, wx, wy, levels, pc, cems) in MULTI_PART_MIXED {
+        let (form, bits) = levels_to_grid_form(levels);
+        let weight_count = (wx * wy) as usize;
+        let cem_slice = &cems[..pc as usize];
+        let ic: u32 = cem_slice.iter().map(|&c| cem_int_count(c)).sum();
+        // Per-partition form steals 3*pc - 4 high-part bits; keep ic*8 within the
+        // colour budget so the colour ISE stays at QUANT_256 (raw bytes).
+        let highpart = 3 * pc - 4;
+        let color_bits = 99 - WEIGHT_BITS - highpart;
+        assert!(
+            ic * 8 <= color_bits,
+            "config mode {mode} pc {pc} ic {ic} exceeds QUANT_256 budget {color_bits}"
+        );
+        for _ in 0..PER_MODE {
+            let mut blk = [0u8; 16];
+            astc_set_bits(&mut blk, 0, 11, mode);
+            astc_set_bits(&mut blk, 11, 2, pc - 1);
+            astc_set_bits(&mut blk, 13, 10, rng.next_u32() & 0x3FF); // partition seed
+            set_cem_per_partition(&mut blk, cem_slice, WEIGHT_BITS);
+            // Raw 8-bit (QUANT_256) colour integers forward from bit 29, in the
+            // concatenated per-partition order the decoder reads them back.
+            for i in 0..ic {
+                astc_set_bits(&mut blk, 29 + i * 8, 8, rng.byte() as u32);
+            }
+            let mut weights = [0u8; 64];
+            for w in weights.iter_mut().take(weight_count) {
+                *w = rand_grid_weight(&mut rng, form, bits);
+            }
+            astc_set_grid_weights(&mut blk, form, bits, &weights[..weight_count]);
+
+            let cpu = decode_astc_4x4_hdr(&blk).unwrap_or_else(|e| {
+                panic!(
+                    "mixed mp mode {mode} ({wx}x{wy}, pc {pc}, cems {cem_slice:?}) block {blk:02x?} rejected: {e:?}"
+                )
+            });
+            let gpu = oracle.decode_rgb_f32(format, &blk);
+            for t in 0..16 {
+                for c in 0..3 {
+                    let (cv, gv) = (cpu[t][c], gpu[t][c]);
+                    if !cv.is_finite() || !gv.is_finite() || cv.abs() >= 6.5e4 {
+                        skipped += 1;
+                        continue;
+                    }
+                    let tol = cv.abs() * 1e-3 + 1e-3;
+                    assert!(
+                        (cv - gv).abs() <= tol,
+                        "ASTC mixed mp mode {mode} ({wx}x{wy}, pc {pc}, cems {cem_slice:?}) block={blk:02x?} texel {t} chan {c}: cpu={cv} gpu={gv}"
+                    );
+                    compared += 1;
+                }
+            }
+        }
+    }
+    eprintln!(
+        "ASTC mixed LDR/HDR multi-partition parity: {compared} RGB lanes match hardware across {} configs x {PER_MODE} blocks ({skipped} saturated lanes skipped)",
+        MULTI_PART_MIXED.len()
+    );
+}
