@@ -50,7 +50,9 @@ pub mod bundle;
 pub mod command;
 pub mod component;
 pub mod entity;
+pub mod event;
 pub mod query;
+pub mod resource;
 pub mod storage;
 pub mod world;
 
@@ -61,6 +63,8 @@ pub mod prelude {
     pub use crate::command::{CommandQueue, Commands};
     pub use crate::component::Component;
     pub use crate::entity::Entity;
+    pub use crate::event::{Event, EventCursor, EventId, Events};
+    pub use crate::resource::{Resource, ResourceId, Resources};
     pub use crate::query::{With, Without};
     pub use crate::world::World;
 }

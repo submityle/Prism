@@ -20,6 +20,7 @@ use crate::bundle::Bundle;
 use crate::component::{Component, ComponentId, ComponentSet, Components};
 use crate::entity::{Entities, Entity, EntityLocation};
 use crate::query::{QueryData, QueryFilter, QueryState, ReadOnlyQueryData};
+use crate::resource::{Resource, Resources};
 
 /// The authoritative container of all ECS state.
 #[derive(Default)]
@@ -27,6 +28,7 @@ pub struct World {
     entities: Entities,
     components: Components,
     archetypes: Archetypes,
+    resources: Resources,
 }
 
 impl World {
@@ -36,6 +38,7 @@ impl World {
             entities: Entities::new(),
             components: Components::new(),
             archetypes: Archetypes::new(),
+            resources: Resources::new(),
         }
     }
 
@@ -55,6 +58,71 @@ impl World {
     #[inline]
     pub fn archetypes(&self) -> &Archetypes {
         &self.archetypes
+    }
+
+    /// The global resource registry.
+    #[inline]
+    pub fn resources(&self) -> &Resources {
+        &self.resources
+    }
+
+    /// Insert `value` as the world-global resource `R`, returning the previous
+    /// value if one was present.
+    #[inline]
+    pub fn insert_resource<R: Resource>(&mut self, value: R) -> Option<R> {
+        self.resources.insert(value)
+    }
+
+    /// Ensure a value for `R` exists, inserting `R::default()` if absent.
+    #[inline]
+    pub fn init_resource<R: Resource + Default>(&mut self) {
+        self.resources.init::<R>();
+    }
+
+    /// Borrow resource `R`, or `None` if it has not been inserted.
+    #[inline]
+    pub fn get_resource<R: Resource>(&self) -> Option<&R> {
+        self.resources.get::<R>()
+    }
+
+    /// Mutably borrow resource `R`, or `None` if it has not been inserted.
+    #[inline]
+    pub fn get_resource_mut<R: Resource>(&mut self) -> Option<&mut R> {
+        self.resources.get_mut::<R>()
+    }
+
+    /// Borrow resource `R`, panicking if it is absent.
+    ///
+    /// # Panics
+    /// Panics if resource `R` has not been inserted.
+    #[inline]
+    pub fn resource<R: Resource>(&self) -> &R {
+        self.resources
+            .get::<R>()
+            .expect("requested resource does not exist in the world")
+    }
+
+    /// Mutably borrow resource `R`, panicking if it is absent.
+    ///
+    /// # Panics
+    /// Panics if resource `R` has not been inserted.
+    #[inline]
+    pub fn resource_mut<R: Resource>(&mut self) -> &mut R {
+        self.resources
+            .get_mut::<R>()
+            .expect("requested resource does not exist in the world")
+    }
+
+    /// Whether a value for resource `R` is currently present.
+    #[inline]
+    pub fn contains_resource<R: Resource>(&self) -> bool {
+        self.resources.contains::<R>()
+    }
+
+    /// Remove and return resource `R`, if present.
+    #[inline]
+    pub fn remove_resource<R: Resource>(&mut self) -> Option<R> {
+        self.resources.remove::<R>()
     }
 
     /// Number of currently-live entities.
@@ -553,5 +621,36 @@ mod tests {
         assert_eq!(w.get::<Name>(e).map(|n| n.0.as_str()), Some("hello"));
         // Despawn must drop the String without leaking (miri/asan would catch).
         assert!(w.despawn(e));
+    }
+
+    #[derive(Debug, PartialEq, Default)]
+    struct FrameCount(u32);
+    impl Resource for FrameCount {}
+
+    #[test]
+    fn world_resource_lifecycle() {
+        let mut w = World::new();
+        assert!(!w.contains_resource::<FrameCount>());
+        assert_eq!(w.get_resource::<FrameCount>(), None);
+
+        // init_resource constructs via Default and is idempotent.
+        w.init_resource::<FrameCount>();
+        assert!(w.contains_resource::<FrameCount>());
+        assert_eq!(w.resource::<FrameCount>(), &FrameCount(0));
+        w.init_resource::<FrameCount>();
+        assert_eq!(w.resource::<FrameCount>(), &FrameCount(0));
+
+        // Mutation through the world flows to the stored value.
+        w.resource_mut::<FrameCount>().0 = 7;
+        assert_eq!(w.resource::<FrameCount>(), &FrameCount(7));
+
+        // insert overwrites and returns the previous value.
+        assert_eq!(w.insert_resource(FrameCount(100)), Some(FrameCount(7)));
+        assert_eq!(w.get_resource::<FrameCount>(), Some(&FrameCount(100)));
+
+        // remove returns the value and leaves the type registered.
+        assert_eq!(w.remove_resource::<FrameCount>(), Some(FrameCount(100)));
+        assert!(!w.contains_resource::<FrameCount>());
+        assert_eq!(w.remove_resource::<FrameCount>(), None);
     }
 }
