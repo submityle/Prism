@@ -9,8 +9,9 @@
 //!
 //! * isotropic strain limiting
 //!   ([`project_strain_limits`]) — the bulk stretch band,
-//! * orthotropic fiber strain limiting
-//!   ([`project_orthotropic_strain_limits`]) — one or more fiber families,
+//! * response-aware fiber strain limiting
+//!   ([`project_fiber_response_strain_limits`]) — one or more fiber families,
+//!   each tension-only or bidirectional,
 //! * volume preservation
 //!   ([`project_volume`]) — near-incompressibility.
 //!
@@ -37,13 +38,14 @@
 //!
 //! # Attribution
 //!
-//! Clean-room composition over the crate's own isotropic, orthotropic, and
-//! volume projection primitives. No Unreal Engine source or derived code.
+//! Clean-room composition over the crate's own isotropic, response-aware
+//! fiber, and volume projection primitives. No Unreal Engine source or
+//! derived code.
 
 use super::tet_fem_anisotropic::FiberDirection;
 use super::tet_fem_basis::TetFemBasis;
-use super::tet_fem_orthotropic_strain_limit::{
-    project_orthotropic_strain_limits, OrthotropicStrainLimitParams, OrthotropicStrainLimitReport,
+use super::tet_fem_fiber_response_limit::{
+    project_fiber_response_strain_limits, FiberResponseLimitParams, FiberResponseLimitReport,
 };
 use super::tet_fem_strain_limit::{project_strain_limits, StrainLimitParams, StrainLimitReport};
 use super::tet_fem_volume_projection::{
@@ -56,7 +58,7 @@ use glam::Vec3;
 pub enum AnisotropicStage {
     /// Isotropic (bulk) strain-limiting band.
     IsotropicStrain,
-    /// Orthotropic fiber-aligned strain limiting.
+    /// Response-aware (tension-only / bidirectional) fiber-aligned strain limiting.
     FiberStrain,
     /// Volume / incompressibility preservation.
     Volume,
@@ -73,14 +75,13 @@ impl AnisotropicStage {
 
 /// Parameters controlling a unified anisotropic projection pass.
 ///
-/// Not `Copy`: [`OrthotropicStrainLimitParams`] owns a per-family `Vec` of
-/// bands.
+/// Not `Copy`: [`FiberResponseLimitParams`] owns a per-family `Vec` of bands.
 #[derive(Clone, Debug)]
 pub struct AnisotropicProjectionParams {
     /// Isotropic strain band, or `None` to skip bulk strain limiting.
     pub isotropic: Option<StrainLimitParams>,
-    /// Orthotropic fiber bands, or `None` to skip fiber strain limiting.
-    pub fiber: Option<OrthotropicStrainLimitParams>,
+    /// Response-aware fiber bands, or `None` to skip fiber strain limiting.
+    pub fiber: Option<FiberResponseLimitParams>,
     /// Volume constraint, or `None` to skip volume preservation.
     pub volume: Option<VolumeProjectionParams>,
     /// Intra-iteration stage order; must be a permutation of the three stages.
@@ -99,7 +100,7 @@ impl AnisotropicProjectionParams {
     #[must_use]
     pub fn new(
         isotropic: Option<StrainLimitParams>,
-        fiber: Option<OrthotropicStrainLimitParams>,
+        fiber: Option<FiberResponseLimitParams>,
         volume: Option<VolumeProjectionParams>,
         order: [AnisotropicStage; 3],
         outer_iterations: u32,
@@ -127,7 +128,7 @@ impl AnisotropicProjectionParams {
     #[must_use]
     pub fn with_default_order(
         isotropic: Option<StrainLimitParams>,
-        fiber: Option<OrthotropicStrainLimitParams>,
+        fiber: Option<FiberResponseLimitParams>,
         volume: Option<VolumeProjectionParams>,
         outer_iterations: u32,
     ) -> Option<Self> {
@@ -154,7 +155,7 @@ pub struct AnisotropicProjectionReport {
     /// First-iteration isotropic report, if that stage was enabled.
     pub isotropic: Option<StrainLimitReport>,
     /// First-iteration fiber report, if that stage was enabled.
-    pub fiber: Option<OrthotropicStrainLimitReport>,
+    pub fiber: Option<FiberResponseLimitReport>,
     /// First-iteration volume report, if that stage was enabled.
     pub volume: Option<VolumeProjectionReport>,
     /// Number of outer iterations actually run (equals
@@ -191,7 +192,7 @@ pub fn run_anisotropic_projection_pass(
     let mut work = positions.to_vec();
 
     let mut isotropic_report: Option<StrainLimitReport> = None;
-    let mut fiber_report: Option<OrthotropicStrainLimitReport> = None;
+    let mut fiber_report: Option<FiberResponseLimitReport> = None;
     let mut volume_report: Option<VolumeProjectionReport> = None;
 
     for outer in 0..params.outer_iterations {
@@ -282,11 +283,11 @@ fn run_fiber(
     pinned: Option<&[bool]>,
     params: &AnisotropicProjectionParams,
     capture: bool,
-    sink: &mut Option<OrthotropicStrainLimitReport>,
+    sink: &mut Option<FiberResponseLimitReport>,
 ) -> Option<()> {
     if let Some(ref p) = params.fiber {
         let report =
-            project_orthotropic_strain_limits(basis, tets, fibers, work, inv_mass, pinned, p)?;
+            project_fiber_response_strain_limits(basis, tets, fibers, work, inv_mass, pinned, p)?;
         if capture {
             *sink = Some(report);
         }
@@ -322,7 +323,7 @@ fn run_volume(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::collider::tet_fem_anisotropic::FiberDirection;
+    use crate::collider::tet_fem_anisotropic::{FiberDirection, FiberResponse};
     use crate::collider::tet_fem_basis::{build_tet_fem_basis, TetFemBasisParams};
 
     fn two_tets() -> (Vec<Vec3>, Vec<[u32; 4]>) {
@@ -370,8 +371,14 @@ mod tests {
         StrainLimitParams::new(min, max, iters).unwrap()
     }
 
-    fn fib(pct: f32, families: usize, iters: u32) -> OrthotropicStrainLimitParams {
-        OrthotropicStrainLimitParams::symmetric_uniform(pct, families, iters).unwrap()
+    fn fib(pct: f32, families: usize, iters: u32) -> FiberResponseLimitParams {
+        FiberResponseLimitParams::symmetric_uniform(
+            pct,
+            FiberResponse::Bidirectional,
+            families,
+            iters,
+        )
+        .unwrap()
     }
 
     fn vol(ratio: f32, stiffness: f32, iters: u32) -> VolumeProjectionParams {
@@ -640,5 +647,85 @@ mod tests {
                 .unwrap();
         assert_eq!(report.outer_iterations_run, 2);
         assert!(report.isotropic.is_some() && report.fiber.is_some() && report.volume.is_some());
+    }
+
+    /// A tension-only fiber family must ignore compression: when the mesh is
+    /// uniformly compressed (fiber stretch `lambda < min_stretch`), a
+    /// `FiberResponse::TensionOnly` family reports zero violation and leaves
+    /// positions untouched, whereas the otherwise-identical `Bidirectional`
+    /// band projects the compression away.
+    #[test]
+    fn tension_only_fiber_ignores_compression_in_pass() {
+        let (verts, tets) = single_tet();
+        let basis = basis_of(&verts, &tets);
+        // 1 element, 1 family => 1 fiber aligned with X.
+        let fibers = vec![FiberDirection::new(Vec3::X).unwrap()];
+
+        let mut compressed = verts.clone();
+        inflate(&mut compressed, 0.6); // uniform shrink => fiber stretch < 1.
+
+        // Tension-only: compression (lambda < min) is never projected.
+        let tension_params = AnisotropicProjectionParams::with_default_order(
+            None,
+            Some(
+                FiberResponseLimitParams::new(&[(0.9, 1.1, FiberResponse::TensionOnly)], 6)
+                    .unwrap(),
+            ),
+            None,
+            3,
+        )
+        .unwrap();
+        let mut pos_t = compressed.clone();
+        let report_t = run_anisotropic_projection_pass(
+            &basis,
+            &tets,
+            &fibers,
+            &mut pos_t,
+            None,
+            None,
+            &tension_params,
+        )
+        .unwrap();
+        let fiber_t = report_t.fiber.expect("fiber stage enabled");
+        assert_eq!(
+            fiber_t.max_violation, 0.0,
+            "tension-only must see no violation under compression"
+        );
+        assert_eq!(
+            pos_t, compressed,
+            "tension-only compression must leave positions untouched"
+        );
+
+        // Bidirectional with the same band DOES clamp the lower bound.
+        let bidir_params = AnisotropicProjectionParams::with_default_order(
+            None,
+            Some(
+                FiberResponseLimitParams::new(&[(0.9, 1.1, FiberResponse::Bidirectional)], 6)
+                    .unwrap(),
+            ),
+            None,
+            3,
+        )
+        .unwrap();
+        let mut pos_b = compressed.clone();
+        let report_b = run_anisotropic_projection_pass(
+            &basis,
+            &tets,
+            &fibers,
+            &mut pos_b,
+            None,
+            None,
+            &bidir_params,
+        )
+        .unwrap();
+        let fiber_b = report_b.fiber.expect("fiber stage enabled");
+        assert!(
+            fiber_b.max_violation > 0.0,
+            "bidirectional must register the compression as a violation"
+        );
+        assert_ne!(
+            pos_b, compressed,
+            "bidirectional must move positions to satisfy the lower bound"
+        );
     }
 }
