@@ -124,7 +124,12 @@ impl CrosstalkParams {
         shadow_cutoff_hz: Sample,
         sample_rate: Sample,
     ) -> Self {
-        Self { contralateral_gain, delay_samples, shadow_cutoff_hz, sample_rate }
+        Self {
+            contralateral_gain,
+            delay_samples,
+            shadow_cutoff_hz,
+            sample_rate,
+        }
     }
 
     /// Derives the crosstalk path from a symmetric two-speaker layout.
@@ -330,11 +335,7 @@ impl CrosstalkCanceller {
         out_l: &mut [Sample],
         out_r: &mut [Sample],
     ) -> usize {
-        let frames = in_l
-            .len()
-            .min(in_r.len())
-            .min(out_l.len())
-            .min(out_r.len());
+        let frames = in_l.len().min(in_r.len()).min(out_l.len()).min(out_r.len());
         for n in 0..frames {
             // Speaker outputs from `delay` samples ago (the slot about to be
             // overwritten holds exactly s[n - delay]).
@@ -384,8 +385,16 @@ mod tests {
         let mut e_l = vec![0.0; n];
         let mut e_r = vec![0.0; n];
         for i in 0..n {
-            let cross_l = if i >= delay { gain * s_r[i - delay] } else { 0.0 };
-            let cross_r = if i >= delay { gain * s_l[i - delay] } else { 0.0 };
+            let cross_l = if i >= delay {
+                gain * s_r[i - delay]
+            } else {
+                0.0
+            };
+            let cross_r = if i >= delay {
+                gain * s_l[i - delay]
+            } else {
+                0.0
+            };
             e_l[i] = s_l[i] + cross_l;
             e_r[i] = s_r[i] + cross_r;
         }

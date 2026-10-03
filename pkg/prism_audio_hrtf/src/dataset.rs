@@ -70,7 +70,11 @@ impl Measurement {
     #[must_use]
     #[inline]
     pub const fn new(azimuth: Sample, elevation: Sample, distance: Sample) -> Self {
-        Self { azimuth, elevation, distance }
+        Self {
+            azimuth,
+            elevation,
+            distance,
+        }
     }
 }
 
@@ -168,12 +172,24 @@ impl HrtfDataset {
         }
         let expected = measurements.len() * hrir_len;
         if left.len() != expected {
-            return Err(DatasetError::LeftLengthMismatch { expected, actual: left.len() });
+            return Err(DatasetError::LeftLengthMismatch {
+                expected,
+                actual: left.len(),
+            });
         }
         if right.len() != expected {
-            return Err(DatasetError::RightLengthMismatch { expected, actual: right.len() });
+            return Err(DatasetError::RightLengthMismatch {
+                expected,
+                actual: right.len(),
+            });
         }
-        Ok(Self { sample_rate, hrir_len, measurements, left, right })
+        Ok(Self {
+            sample_rate,
+            hrir_len,
+            measurements,
+            left,
+            right,
+        })
     }
 
     /// The sample rate of the stored HRIRs, in Hz.
@@ -300,13 +316,25 @@ mod tests {
 
     #[test]
     fn rejects_zero_sample_rate() {
-        let err = HrtfDataset::from_samples(0, 1, vec![Measurement::new(0.0, 0.0, 1.0)], vec![0.0], vec![0.0]);
+        let err = HrtfDataset::from_samples(
+            0,
+            1,
+            vec![Measurement::new(0.0, 0.0, 1.0)],
+            vec![0.0],
+            vec![0.0],
+        );
         assert_eq!(err.unwrap_err(), DatasetError::ZeroSampleRate);
     }
 
     #[test]
     fn rejects_empty_hrir() {
-        let err = HrtfDataset::from_samples(48_000, 0, vec![Measurement::new(0.0, 0.0, 1.0)], vec![], vec![]);
+        let err = HrtfDataset::from_samples(
+            48_000,
+            0,
+            vec![Measurement::new(0.0, 0.0, 1.0)],
+            vec![],
+            vec![],
+        );
         assert_eq!(err.unwrap_err(), DatasetError::EmptyHrir);
     }
 
@@ -327,7 +355,10 @@ mod tests {
         );
         assert_eq!(
             err.unwrap_err(),
-            DatasetError::LeftLengthMismatch { expected: 3, actual: 2 }
+            DatasetError::LeftLengthMismatch {
+                expected: 3,
+                actual: 2
+            }
         );
     }
 

@@ -86,7 +86,7 @@ use alloc::vec::Vec;
 use bevy_math::Vec3;
 
 use prism_audio_core::math::Sample;
-use prism_audio_spatial::{MAX_HOA_CHANNELS, MAX_HOA_ORDER, encode_hoa, hoa_channel_count};
+use prism_audio_spatial::{encode_hoa, hoa_channel_count, MAX_HOA_CHANNELS, MAX_HOA_ORDER};
 
 use crate::binaural::BinauralRenderer;
 use crate::dataset::HrtfDataset;
@@ -126,7 +126,10 @@ impl VirtualSpeakerLayout {
     #[inline]
     #[must_use]
     pub const fn new() -> Self {
-        Self { directions: [Vec3::ZERO; MAX_VIRTUAL_SPEAKERS], count: 0 }
+        Self {
+            directions: [Vec3::ZERO; MAX_VIRTUAL_SPEAKERS],
+            count: 0,
+        }
     }
 
     /// Builds a layout from a slice of directions, normalising each and keeping
@@ -188,7 +191,14 @@ impl VirtualSpeakerLayout {
     pub fn cube26() -> Self {
         let mut layout = Self::new();
         // 6 face centres.
-        for &v in &[Vec3::X, Vec3::NEG_X, Vec3::Y, Vec3::NEG_Y, Vec3::Z, Vec3::NEG_Z] {
+        for &v in &[
+            Vec3::X,
+            Vec3::NEG_X,
+            Vec3::Y,
+            Vec3::NEG_Y,
+            Vec3::Z,
+            Vec3::NEG_Z,
+        ] {
             layout.push(v);
         }
         // 12 edge midpoints.
@@ -455,10 +465,10 @@ mod tests {
     /// dependent HRIRs so interpolation is well defined everywhere.
     fn test_dataset(hrir_len: usize) -> HrtfDataset {
         let dirs = [
-            (0.0, 0.0),           // front
-            (PI, 0.0),            // back
-            (PI / 2.0, 0.0),      // right
-            (-PI / 2.0, 0.0),     // left
+            (0.0, 0.0),             // front
+            (PI, 0.0),              // back
+            (PI / 2.0, 0.0),        // right
+            (-PI / 2.0, 0.0),       // left
             (0.0, PI / 2.0 * 0.9),  // up-ish
             (0.0, -PI / 2.0 * 0.9), // down-ish
         ];
@@ -577,8 +587,18 @@ mod tests {
         }
 
         for t in 0..hrir_len {
-            assert!(approx(out_l[t], ref_l[t]), "L[{t}] {} != {}", out_l[t], ref_l[t]);
-            assert!(approx(out_r[t], ref_r[t]), "R[{t}] {} != {}", out_r[t], ref_r[t]);
+            assert!(
+                approx(out_l[t], ref_l[t]),
+                "L[{t}] {} != {}",
+                out_l[t],
+                ref_l[t]
+            );
+            assert!(
+                approx(out_r[t], ref_r[t]),
+                "R[{t}] {} != {}",
+                out_r[t],
+                ref_r[t]
+            );
         }
     }
 

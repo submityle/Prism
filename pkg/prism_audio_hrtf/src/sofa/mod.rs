@@ -25,11 +25,22 @@
 //!   listener-local azimuth/elevation convention.
 //! - [`build_dataset`]: the shared assembly + validation path.
 //!
-//! Binary HDF5/netCDF-4 decoding into [`SofaRecord`]s is intentionally **left
-//! as a follow-up** (it belongs behind the `std` feature and an optional HDF5
-//! dependency). Everything downstream of the decoded records - conversion,
-//! assembly, interpolation, convolution - is fully implemented and testable
-//! here. This is an honest boundary, not a stub of the DSP core.
+//! Binary HDF5/netCDF-4 decoding into [`SofaRecord`]s lives in two
+//! `std`-gated submodules:
+//!
+//! - [`hdf5`]: a self-contained, dependency-free reader and writer for the
+//!   subset of the HDF5 container that `SimpleFreeFieldHRIR` files use
+//!   (contiguous and uncompressed chunked storage, IEEE little-endian
+//!   float32/float64, root string attributes). The matching writer lets the
+//!   reader be exercised with byte-exact round-trip tests.
+//! - [`decode`]: turns a decoded [`hdf5::H5File`] into [`SofaRecords`] by
+//!   reading `Data.IR`, `SourcePosition`, and `Data.SamplingRate`.
+//!
+//! Both honestly report unsupported inputs (gzip-filtered chunks, newer
+//! superblock/object-header versions, unexpected shapes) as typed errors
+//! rather than returning wrong data. Everything downstream of the decoded
+//! records - conversion, assembly, interpolation, convolution - is fully
+//! implemented and testable here.
 //!
 //! # Real-time contract
 //!
@@ -43,6 +54,19 @@
 //! spherical-to-local angle conversion and dataset assembly are implemented
 //! from the publicly documented SOFA/AES69 specification using only standard
 //! collections and [`bevy_math::ops`].
+//!
+//! # Relationship
+//!
+//! Sits above [`crate::dataset`] (assembling the flat [`HrtfDataset`]) and
+//! feeds [`crate::interpolation`] / [`crate::binaural`]. The `std`-gated
+//! [`hdf5`] and [`decode`] submodules provide the on-disk SOFA path; the
+//! decoded [`SofaRecords`] source reuses [`aes69_to_local`] so loaded data
+//! matches the rest of the spatial pipeline bit-for-bit.
+
+#[cfg(feature = "std")]
+pub mod decode;
+#[cfg(feature = "std")]
+pub mod hdf5;
 
 use alloc::vec::Vec;
 use bevy_math::ops;
@@ -136,7 +160,10 @@ pub fn build_dataset<S: HrirSource>(source: S) -> Result<HrtfDataset, LoadError>
 
     for (i, record) in records.into_iter().enumerate() {
         if record.left.len() != hrir_len || record.right.len() != hrir_len {
-            return Err(LoadError::InconsistentHrirLength { expected: hrir_len, record: i });
+            return Err(LoadError::InconsistentHrirLength {
+                expected: hrir_len,
+                record: i,
+            });
         }
         measurements.push(record.measurement);
         left.extend_from_slice(&record.left);
@@ -197,7 +224,11 @@ impl SofaRecords {
     #[must_use]
     #[inline]
     pub fn new(sample_rate: u32, convention: SofaConvention, records: Vec<SofaRecord>) -> Self {
-        Self { sample_rate, convention, records }
+        Self {
+            sample_rate,
+            convention,
+            records,
+        }
     }
 
     /// The convention these records were measured under.
@@ -319,7 +350,10 @@ mod tests {
         };
         assert_eq!(
             build_dataset(source).unwrap_err(),
-            LoadError::InconsistentHrirLength { expected: 2, record: 1 }
+            LoadError::InconsistentHrirLength {
+                expected: 2,
+                record: 1
+            }
         );
     }
 
@@ -334,7 +368,10 @@ mod tests {
         };
         assert_eq!(
             build_dataset(source).unwrap_err(),
-            LoadError::InconsistentHrirLength { expected: 2, record: 0 }
+            LoadError::InconsistentHrirLength {
+                expected: 2,
+                record: 0
+            }
         );
     }
 

@@ -46,8 +46,8 @@
 //! implemented from standard, publicly documented acoustics knowledge
 //! (spherical-head near-field model).
 
-use bevy_math::{Vec3, ops};
-use prism_audio_core::math::{Sample, db_to_linear, linear_to_db};
+use bevy_math::{ops, Vec3};
+use prism_audio_core::math::{db_to_linear, linear_to_db, Sample};
 
 /// Default head radius in metres (average adult, the value used by most
 /// spherical-head models).
@@ -68,7 +68,9 @@ pub struct HeadGeometry {
 impl Default for HeadGeometry {
     #[inline]
     fn default() -> Self {
-        Self { radius: DEFAULT_HEAD_RADIUS }
+        Self {
+            radius: DEFAULT_HEAD_RADIUS,
+        }
     }
 }
 
@@ -78,7 +80,9 @@ impl HeadGeometry {
     #[must_use]
     #[inline]
     pub fn new(radius: Sample) -> Self {
-        Self { radius: radius.max(1.0e-4) }
+        Self {
+            radius: radius.max(1.0e-4),
+        }
     }
 
     /// Local-frame position of the left ear (`-radius` on `X`).
@@ -197,7 +201,11 @@ fn resolve_ear(
 ) -> NearFieldEar {
     let v = source - ear;
     let dist = ops::sqrt(v.dot(v));
-    let dir = if dist <= DIR_EPSILON { fallback_dir } else { v / dist };
+    let dir = if dist <= DIR_EPSILON {
+        fallback_dir
+    } else {
+        v / dist
+    };
 
     let azimuth = ops::atan2(dir.x, -dir.z);
     let horizontal = ops::sqrt(dir.x * dir.x + dir.z * dir.z);
@@ -220,7 +228,14 @@ fn resolve_ear(
     let gain_db = dist_gain_db + shadow_db;
     let gain_linear = db_to_linear(gain_db);
 
-    NearFieldEar { direction: dir, distance: dist, azimuth, elevation, gain_db, gain_linear }
+    NearFieldEar {
+        direction: dir,
+        distance: dist,
+        azimuth,
+        elevation,
+        gain_db,
+        gain_linear,
+    }
 }
 
 /// Proximity weight in `[0, 1]`: `1` at the head surface (`rho = 1`), falling
@@ -235,7 +250,11 @@ fn proximity_factor(rho: Sample, far_field_radii: Sample) -> Sample {
 #[inline]
 fn normalize_or(v: Vec3, fallback: Vec3) -> Vec3 {
     let len = ops::sqrt(v.dot(v));
-    if len <= DIR_EPSILON { fallback } else { v / len }
+    if len <= DIR_EPSILON {
+        fallback
+    } else {
+        v / len
+    }
 }
 
 #[cfg(test)]
@@ -256,7 +275,12 @@ mod tests {
 
     #[test]
     fn front_source_is_symmetric() {
-        let res = resolve(Vec3::NEG_Z, 0.5, HeadGeometry::default(), NearFieldParams::default());
+        let res = resolve(
+            Vec3::NEG_Z,
+            0.5,
+            HeadGeometry::default(),
+            NearFieldParams::default(),
+        );
         // Equal distances and mirror-image azimuths, so ILD ~ 0.
         assert!(approx(res.left.distance, res.right.distance, 1e-6));
         assert!(approx(res.ild_db(), 0.0, 1e-5));
@@ -270,22 +294,46 @@ mod tests {
     #[test]
     fn right_source_favors_right_ear() {
         // Source to the right (+X) at 30 cm.
-        let res = resolve(Vec3::X, 0.3, HeadGeometry::default(), NearFieldParams::default());
+        let res = resolve(
+            Vec3::X,
+            0.3,
+            HeadGeometry::default(),
+            NearFieldParams::default(),
+        );
         assert!(res.right.distance < res.left.distance);
-        assert!(res.ild_db() > 0.0, "expected right-favoured ILD, got {}", res.ild_db());
+        assert!(
+            res.ild_db() > 0.0,
+            "expected right-favoured ILD, got {}",
+            res.ild_db()
+        );
         assert!(res.right.gain_linear > res.left.gain_linear);
     }
 
     #[test]
     fn near_source_has_larger_ild_than_far() {
-        let near = resolve(Vec3::X, 0.2, HeadGeometry::default(), NearFieldParams::default());
-        let far = resolve(Vec3::X, 3.0, HeadGeometry::default(), NearFieldParams::default());
+        let near = resolve(
+            Vec3::X,
+            0.2,
+            HeadGeometry::default(),
+            NearFieldParams::default(),
+        );
+        let far = resolve(
+            Vec3::X,
+            3.0,
+            HeadGeometry::default(),
+            NearFieldParams::default(),
+        );
         assert!(near.ild_db() > far.ild_db());
     }
 
     #[test]
     fn far_source_parallax_is_negligible() {
-        let res = resolve(Vec3::X, 50.0, HeadGeometry::default(), NearFieldParams::default());
+        let res = resolve(
+            Vec3::X,
+            50.0,
+            HeadGeometry::default(),
+            NearFieldParams::default(),
+        );
         // Both ears nearly agree on azimuth (~+pi/2) for a distant right source.
         assert!(approx(res.left.azimuth, FRAC_PI_2, 1e-2));
         assert!(approx(res.right.azimuth, FRAC_PI_2, 1e-2));
@@ -296,7 +344,12 @@ mod tests {
     fn shadow_attenuates_contralateral_ear() {
         // Source hard right against the head: left ear is contralateral and
         // should receive shadow attenuation on top of the distance loss.
-        let res = resolve(Vec3::X, 0.12, HeadGeometry::default(), NearFieldParams::default());
+        let res = resolve(
+            Vec3::X,
+            0.12,
+            HeadGeometry::default(),
+            NearFieldParams::default(),
+        );
         // Left (contralateral) gain in dB should be below its pure 1/r value.
         let v = res.left.distance;
         let pure_db = linear_to_db(1.0 / v);
@@ -314,7 +367,12 @@ mod tests {
 
     #[test]
     fn degenerate_direction_falls_back_without_panic() {
-        let res = resolve(Vec3::ZERO, 1.0, HeadGeometry::default(), NearFieldParams::default());
+        let res = resolve(
+            Vec3::ZERO,
+            1.0,
+            HeadGeometry::default(),
+            NearFieldParams::default(),
+        );
         // Falls back to forward; still symmetric and finite.
         assert!(res.left.gain_linear.is_finite());
         assert!(res.right.gain_linear.is_finite());
@@ -322,7 +380,12 @@ mod tests {
 
     #[test]
     fn zero_distance_is_finite() {
-        let res = resolve(Vec3::X, 0.0, HeadGeometry::default(), NearFieldParams::default());
+        let res = resolve(
+            Vec3::X,
+            0.0,
+            HeadGeometry::default(),
+            NearFieldParams::default(),
+        );
         assert!(res.left.gain_linear.is_finite());
         assert!(res.right.gain_linear.is_finite());
         assert!(res.left.distance > 0.0 && res.right.distance > 0.0);
@@ -330,8 +393,18 @@ mod tests {
 
     #[test]
     fn results_are_deterministic() {
-        let a = resolve(Vec3::new(0.3, 0.1, -0.9), 0.4, HeadGeometry::default(), NearFieldParams::default());
-        let b = resolve(Vec3::new(0.3, 0.1, -0.9), 0.4, HeadGeometry::default(), NearFieldParams::default());
+        let a = resolve(
+            Vec3::new(0.3, 0.1, -0.9),
+            0.4,
+            HeadGeometry::default(),
+            NearFieldParams::default(),
+        );
+        let b = resolve(
+            Vec3::new(0.3, 0.1, -0.9),
+            0.4,
+            HeadGeometry::default(),
+            NearFieldParams::default(),
+        );
         assert_eq!(a, b);
     }
 }

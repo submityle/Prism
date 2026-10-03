@@ -43,8 +43,8 @@
 //! spherical direction geometry are implemented from standard, publicly
 //! documented DSP and scattered-data-interpolation knowledge.
 
-use bevy_math::{Vec3, ops};
-use prism_audio_core::math::{MIN_AUDIBLE_GAIN, Sample};
+use bevy_math::{ops, Vec3};
+use prism_audio_core::math::{Sample, MIN_AUDIBLE_GAIN};
 
 use crate::dataset::HrtfDataset;
 
@@ -152,10 +152,7 @@ pub fn interpolate(
     out_left: &mut [Sample],
     out_right: &mut [Sample],
 ) -> Option<InterpolationInfo> {
-    let len = dataset
-        .hrir_len()
-        .min(out_left.len())
-        .min(out_right.len());
+    let len = dataset.hrir_len().min(out_left.len()).min(out_right.len());
     if len == 0 || dataset.is_empty() {
         return None;
     }
@@ -196,7 +193,11 @@ pub fn interpolate(
     let left_delay = blend_ear(dataset, Ear::Left, &idx, &weight, count, len, out_left);
     let right_delay = blend_ear(dataset, Ear::Right, &idx, &weight, count, len, out_right);
 
-    Some(InterpolationInfo { neighbors_used: count, left_delay, right_delay })
+    Some(InterpolationInfo {
+        neighbors_used: count,
+        left_delay,
+        right_delay,
+    })
 }
 
 /// Inserts `(candidate, distance)` into the ascending-sorted neighbour set,

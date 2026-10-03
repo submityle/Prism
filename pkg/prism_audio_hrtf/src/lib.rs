@@ -95,31 +95,39 @@
 extern crate alloc;
 
 pub mod binaural;
+pub mod calibration;
 pub mod dataset;
 pub mod headtracked;
 pub mod hoa_binaural;
 pub mod interpolation;
 pub mod nearfield;
+pub mod personalization;
 pub mod sofa;
 pub mod transaural;
 
 pub use binaural::BinauralRenderer;
+pub use calibration::{
+    CalibrationState, ElevationCalibration, DEFAULT_ELEVATION_EPSILON, DEFAULT_STEP,
+};
 pub use dataset::{DatasetError, HrtfDataset, Measurement};
 pub use headtracked::{
-    HeadLocalAngles, HeadPose, HeadTracker, MAX_PREDICTION_SECONDS, local_azimuth,
-    local_elevation, predicted_local_angles, world_to_local_direction,
+    local_azimuth, local_elevation, predicted_local_angles, world_to_local_direction,
+    HeadLocalAngles, HeadPose, HeadTracker, MAX_PREDICTION_SECONDS,
 };
-pub use hoa_binaural::{HoaBinauralDecoder, MAX_VIRTUAL_SPEAKERS, VirtualSpeakerLayout};
+pub use hoa_binaural::{HoaBinauralDecoder, VirtualSpeakerLayout, MAX_VIRTUAL_SPEAKERS};
 pub use interpolation::{
-    InterpolationInfo, MAX_NEIGHBORS, angular_distance, direction_from_angles,
-    estimate_onset_delay, interpolate,
+    angular_distance, direction_from_angles, estimate_onset_delay, interpolate, InterpolationInfo,
+    MAX_NEIGHBORS,
 };
 pub use nearfield::{
-    DEFAULT_HEAD_RADIUS, HeadGeometry, NearFieldEar, NearFieldParams, NearFieldResult, resolve,
+    resolve, HeadGeometry, NearFieldEar, NearFieldParams, NearFieldResult, DEFAULT_HEAD_RADIUS,
+};
+pub use personalization::{
+    measured_distance_bounds, select_best, Anthropometry, HrtfCandidate, Selection,
 };
 pub use sofa::{
-    HrirRecord, HrirSource, LoadError, SofaConvention, SofaRecord, SofaRecords, aes69_to_local,
-    build_dataset,
+    aes69_to_local, build_dataset, HrirRecord, HrirSource, LoadError, SofaConvention, SofaRecord,
+    SofaRecords,
 };
 pub use transaural::{
     CrosstalkCanceller, CrosstalkParams, DEFAULT_CONTRALATERAL_GAIN, DEFAULT_SOUND_SPEED,

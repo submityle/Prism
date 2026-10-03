@@ -56,7 +56,7 @@
 //! azimuth/elevation geometry are implemented from standard, publicly
 //! documented rotation and signal-processing knowledge.
 
-use bevy_math::{Quat, Vec3, ops};
+use bevy_math::{ops, Quat, Vec3};
 use prism_audio_core::math::Sample;
 
 /// Upper bound on the look-ahead used for pose prediction, in seconds.
@@ -98,7 +98,10 @@ pub struct HeadPose {
 impl Default for HeadPose {
     #[inline]
     fn default() -> Self {
-        Self { orientation: Quat::IDENTITY, angular_velocity: Vec3::ZERO }
+        Self {
+            orientation: Quat::IDENTITY,
+            angular_velocity: Vec3::ZERO,
+        }
     }
 }
 
@@ -110,7 +113,10 @@ impl HeadPose {
     #[must_use]
     #[inline]
     pub fn new(orientation: Quat, angular_velocity: Vec3) -> Self {
-        Self { orientation: normalize_quat_or_identity(orientation), angular_velocity }
+        Self {
+            orientation: normalize_quat_or_identity(orientation),
+            angular_velocity,
+        }
     }
 
     /// Creates a stationary pose (zero angular velocity) from `orientation`.
@@ -422,7 +428,10 @@ mod tests {
         // Head yawed +90 about +Y (local->world). A world-front source (-Z)
         // should land on the right ear (+X, azimuth +pi/2) in the head frame.
         let mut tracker = HeadTracker::new(Quat::from_rotation_y(FRAC_PI_2), 0.0, 0.0);
-        tracker.update(HeadPose::from_orientation(Quat::from_rotation_y(FRAC_PI_2)), 0.01);
+        tracker.update(
+            HeadPose::from_orientation(Quat::from_rotation_y(FRAC_PI_2)),
+            0.01,
+        );
         let local = tracker.local_direction(Vec3::NEG_Z);
         assert!(approx(local.x, 1.0, 1e-5));
         assert!(approx(local.z, 0.0, 1e-5));
@@ -462,7 +471,11 @@ mod tests {
         assert!(approx(clamped.azimuth, at_max.azimuth, 1e-6));
         // Setter clamps too.
         let mut tracker = HeadTracker::new(Quat::IDENTITY, 100.0, -5.0);
-        assert!(approx(tracker.prediction_seconds(), MAX_PREDICTION_SECONDS, 1e-9));
+        assert!(approx(
+            tracker.prediction_seconds(),
+            MAX_PREDICTION_SECONDS,
+            1e-9
+        ));
         assert!(approx(tracker.smoothing_time_constant(), 0.0, 1e-9));
         tracker.set_prediction_seconds(-1.0);
         assert!(approx(tracker.prediction_seconds(), 0.0, 1e-9));
@@ -508,7 +521,11 @@ mod tests {
     fn non_unit_pose_is_normalized() {
         // A scaled quaternion must be normalised to a valid rotation.
         let pose = HeadPose::new(Quat::from_xyzw(0.0, 0.0, 0.0, 4.0), Vec3::ZERO);
-        assert!(approx(ops::abs(pose.orientation.dot(Quat::IDENTITY)), 1.0, 1e-6));
+        assert!(approx(
+            ops::abs(pose.orientation.dot(Quat::IDENTITY)),
+            1.0,
+            1e-6
+        ));
         // A near-zero quaternion falls back to identity without producing NaN.
         let degenerate = HeadPose::from_orientation(Quat::from_xyzw(0.0, 0.0, 0.0, 0.0));
         let local = world_to_local_direction(degenerate.orientation, Vec3::NEG_Z);
@@ -569,8 +586,14 @@ mod tests {
         let angles = tracker.local_angles(Vec3::NEG_Z);
         let mut out_l = [0.0 as Sample; 4];
         let mut out_r = [0.0 as Sample; 4];
-        let info = interpolate(&dataset, angles.azimuth, angles.elevation, &mut out_l, &mut out_r)
-            .expect("interpolation succeeds");
+        let info = interpolate(
+            &dataset,
+            angles.azimuth,
+            angles.elevation,
+            &mut out_l,
+            &mut out_r,
+        )
+        .expect("interpolation succeeds");
         assert!(info.neighbors_used >= 1);
     }
 }

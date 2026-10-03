@@ -193,8 +193,7 @@ impl BinauralRenderer {
             let end = base + i;
             let (al, ar) = convolve_pair(&self.work, end, &self.active_l, &self.active_r, m);
             if self.crossfade_pos < self.crossfade_len {
-                let (tl, tr) =
-                    convolve_pair(&self.work, end, &self.target_l, &self.target_r, m);
+                let (tl, tr) = convolve_pair(&self.work, end, &self.target_l, &self.target_r, m);
                 let t = (((self.crossfade_pos + 1) as Sample) * inv_fade).min(1.0);
                 out_l[i] = al + (tl - al) * t;
                 out_r[i] = ar + (tr - ar) * t;
@@ -310,7 +309,9 @@ mod tests {
     fn convolution_is_continuous_across_blocks() {
         let hl = [0.5, 0.25, -0.5, 0.75, 0.1];
         let hr = [0.1, 0.2, 0.3, 0.4, 0.5];
-        let x: Vec<f32> = (0..20).map(|i| bevy_math::ops::sin((i as f32) * 0.37)).collect();
+        let x: Vec<f32> = (0..20)
+            .map(|i| bevy_math::ops::sin((i as f32) * 0.37))
+            .collect();
         let mut r = BinauralRenderer::new(hl.len(), 8);
         r.set_hrir_immediate(&hl, &hr);
         // Render in irregular chunks and stitch.
@@ -349,7 +350,7 @@ mod tests {
         let mut r = BinauralRenderer::new(1, 16);
         r.set_crossfade_len(8);
         r.set_hrir_immediate(&[1.0], &[1.0]); // active gain 1.0
-        // DC input so output equals the effective gain each sample.
+                                              // DC input so output equals the effective gain each sample.
         let x = [1.0; 16];
         let mut l = [0.0; 16];
         let mut rr = [0.0; 16];
@@ -418,7 +419,9 @@ mod tests {
     #[test]
     fn output_is_deterministic() {
         let hl = [0.3, -0.6, 0.2, 0.9];
-        let x: Vec<f32> = (0..32).map(|i| ((i * 7 % 13) as f32 / 13.0) - 0.5).collect();
+        let x: Vec<f32> = (0..32)
+            .map(|i| ((i * 7 % 13) as f32 / 13.0) - 0.5)
+            .collect();
         let run = || {
             let mut r = BinauralRenderer::new(hl.len(), 16);
             r.set_hrir_immediate(&hl, &hl);
