@@ -247,6 +247,10 @@ pub use tet_fem_integrator::{
 };
 pub mod tet_fem_body;
 pub use tet_fem_body::TetFemBody;
+pub mod tet_fem_newmark;
+pub use tet_fem_newmark::{
+    initial_acceleration, step_newmark, NewmarkParams, NewmarkState, NewmarkStepResult,
+};
 
 /// A handle into a [`ShapeRegistry`].
 ///
