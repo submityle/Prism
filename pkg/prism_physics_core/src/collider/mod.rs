@@ -85,6 +85,10 @@ pub mod topology;
 
 pub use topology::{analyze_topology, MeshTopology};
 
+pub mod winding_number;
+
+pub use winding_number::{generalized_winding_number, point_is_inside, winding_numbers};
+
 /// A handle into a [`ShapeRegistry`].
 ///
 /// This is a plain index handle; shapes are immutable once inserted, so no
