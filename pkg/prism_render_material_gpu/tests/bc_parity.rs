@@ -3848,3 +3848,101 @@ fn astc_multi_partition_mixed_ldr_hdr_parity_against_gpu_hardware_decode() {
         MULTI_PART_MIXED.len()
     );
 }
+
+// ---------------------------------------------------------------------------
+// ASTC single-partition HDR *alpha* parity (Milestone #13: alpha GPU-proof).
+//
+// The RGB lanes of every HDR CEM are already hardware-proven above, but those
+// tests read `decode_rgb_f32`, which drops the alpha lane. The two HDR CEMs
+// that carry an explicit alpha endpoint are CEM 14 (HDR RGB + *linear LDR*
+// alpha, `value * 257` UNORM16) and CEM 15 (HDR RGB + *logarithmic HDR* alpha,
+// via the spec `hdr_alpha_unpack`). This test reads the full `vec4<f32>` the
+// GPU decodes (`decode_raw`) and asserts all four channels — including the
+// alpha lane the earlier tests skipped — against the Metal ASTC-HDR hardware
+// decoder, closing the honest alpha coverage gap for single-partition HDR.
+//
+// Block mode 67 (trit weights, 1 low bit, 6 levels) gives a single-partition
+// colour budget `color_bits = 111 - 42 = 69`, mapping to QUANT_256 for the
+// 8 HDR integers, so the colour integers are the raw 8-bit values laid at bit
+// 17. For each CEM we emit random 8-bit endpoint integers (the last two are the
+// alpha endpoints) and random trit weights. FP16 saturates at 65504; lanes that
+// reach that clamp (common for the HDR alpha of CEM 15) are counted and skipped
+// rather than asserted, so the proof covers the representable range.
+// ---------------------------------------------------------------------------
+#[test]
+fn astc_single_partition_hdr_alpha_parity_against_gpu_hardware_decode() {
+    let Some(oracle) = BlockOracle::try_new() else {
+        eprintln!("no GPU adapter; skipping ASTC single-partition HDR alpha parity");
+        return;
+    };
+    if !oracle
+        .features()
+        .contains(Features::TEXTURE_COMPRESSION_ASTC_HDR)
+    {
+        eprintln!(
+            "adapter lacks ASTC HDR support; skipping ASTC single-partition HDR alpha parity"
+        );
+        return;
+    }
+    let format = TextureFormat::Astc {
+        block: wgpu::AstcBlock::B4x4,
+        channel: wgpu::AstcChannel::Hdr,
+    };
+    // The two alpha-carrying HDR CEMs: 14 = HDR RGB + LDR alpha, 15 = HDR RGB +
+    // HDR alpha. Both use 8 colour integers (6 RGB + 2 alpha).
+    const ALPHA_CEMS: [u32; 2] = [14, 15];
+    const INT_COUNT: usize = 8;
+    const BM: u32 = 67; // trit weights, 1 low bit, 6 levels
+    const PER_CEM: u32 = 128;
+    let mut rng = Rng(0x5A1_7B33);
+    let mut compared = 0u64;
+    let mut alpha_compared = 0u64;
+    let mut skipped = 0u64;
+    for cem in ALPHA_CEMS {
+        for _ in 0..PER_CEM {
+            let mut ep = [0u8; INT_COUNT];
+            for e in ep.iter_mut() {
+                *e = (rng.next_u32() & 0xFF) as u8;
+            }
+            let mut blk = astc_hdr_block(BM, cem, &ep);
+            let mut raw = [0u8; 16];
+            for r in raw.iter_mut() {
+                *r = (rng.next_u32() % 6) as u8;
+            }
+            astc_set_weights_ise(&mut blk, WeightForm::Trit, 1, &raw);
+
+            let cpu =
+                decode_astc_4x4_hdr(&blk).expect("supported single-partition HDR alpha block");
+            let gpu = oracle.decode_raw(format, &blk);
+            for t in 0..16 {
+                for c in 0..4 {
+                    let (cv, gv) = (cpu[t][c], gpu[t][c]);
+                    // Skip the FP16 saturation boundary: at/above ~65504 the CPU
+                    // clamps to the max finite half while hardware may emit +Inf.
+                    if !cv.is_finite() || !gv.is_finite() || cv.abs() >= 6.5e4 {
+                        skipped += 1;
+                        continue;
+                    }
+                    let tol = cv.abs() * 1e-3 + 1e-3;
+                    assert!(
+                        (cv - gv).abs() <= tol,
+                        "ASTC HDR-alpha cem={cem} bm={BM} block={blk:02x?} texel {t} chan {c}: ep={ep:?} raw_w={} cpu={cv} gpu={gv}",
+                        raw[t]
+                    );
+                    compared += 1;
+                    if c == 3 {
+                        alpha_compared += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        alpha_compared > 0,
+        "expected at least one finite alpha lane to be hardware-proven"
+    );
+    eprintln!(
+        "ASTC single-partition HDR alpha parity: {compared} RGBA lanes match hardware ({alpha_compared} alpha lanes) across {} CEMs x {PER_CEM} blocks ({skipped} saturated lanes skipped)",
+        ALPHA_CEMS.len()
+    );
+}
