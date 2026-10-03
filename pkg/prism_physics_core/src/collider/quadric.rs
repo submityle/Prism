@@ -108,6 +108,26 @@ impl Quadric {
         }
     }
 
+    /// Returns this quadric scaled by `s` (every coefficient multiplied by `s`).
+    /// Scaling a plane quadric by a positive weight makes that plane's squared
+    /// distance count `s` times as much, which is how boundary edges are pinned
+    /// during decimation.
+    #[must_use]
+    pub fn scaled(&self, s: f32) -> Self {
+        Self {
+            a2: self.a2 * s,
+            ab: self.ab * s,
+            ac: self.ac * s,
+            ad: self.ad * s,
+            b2: self.b2 * s,
+            bc: self.bc * s,
+            bd: self.bd * s,
+            c2: self.c2 * s,
+            cd: self.cd * s,
+            d2: self.d2 * s,
+        }
+    }
+
     /// The quadratic form `v^T Q v`: the summed squared distance from `v` to the
     /// accumulated planes. Clamped at zero so floating-point round-off never
     /// yields a spuriously negative cost.
@@ -247,6 +267,14 @@ mod tests {
         // A single plane does not pin a unique minimiser.
         let q = Quadric::from_plane(Vec3::Z, 0.0);
         assert!(q.optimal_point().is_none());
+    }
+
+    #[test]
+    fn scaling_multiplies_the_error() {
+        let q = Quadric::from_plane(Vec3::Z, 0.0);
+        let p = Vec3::new(0.0, 0.0, 3.0); // squared distance 9 from z = 0
+        let base = q.error(p);
+        assert!((q.scaled(4.0).error(p) - 4.0 * base).abs() < 1e-4);
     }
 
     #[test]
