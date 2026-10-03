@@ -24,8 +24,8 @@ use prism_render_material::{
     decode_bc6h_mode8_unsigned, decode_bc6h_mode9_signed, decode_bc6h_mode9_unsigned,
     decode_bc6h_signed, decode_bc6h_unsigned, decode_bc7, decode_bc7_mode0, decode_bc7_mode1,
     decode_bc7_mode2, decode_bc7_mode3, decode_bc7_mode7, encode_astc_single_partition_4x4_ldr,
-    encode_bc1, encode_bc3, encode_bc6h_mode11_unsigned, encode_bc7_mode4, encode_bc7_mode5,
-    encode_bc7_mode6,
+    encode_astc_single_partition_4x4_ldr_q192, encode_bc1, encode_bc3, encode_bc6h_mode11_unsigned,
+    encode_bc7_mode4, encode_bc7_mode5, encode_bc7_mode6,
 };
 use prism_render_material_gpu::BlockOracle;
 use wgpu::{Features, TextureFormat};
@@ -4988,5 +4988,103 @@ fn astc_encoder_round_trip_parity_against_gpu_hardware_decode() {
     }
     eprintln!(
         "ASTC encoder round-trip parity: {compared} single-axis tiles decode within 1 LSB of hardware (CEM8 mode-83 QUANT_8 weights)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ASTC encoder round-trip parity, Milestone #2: mode-578 (4x4, QUANT_16 4-bit
+// bit-only weights, 64 weight bits) + CEM 8 (direct LDR RGB) + QUANT_192 trit
+// colour. `encode_astc_single_partition_4x4_ldr_q192` fits principal-axis
+// endpoints, quantizes them to QUANT_192, pre-swaps to dodge the decoder's
+// blue-contraction branch, and fits sixteen 4-bit weights against the decoded
+// endpoints. We prove the emitted bitstream decodes identically on the Metal
+// hardware decoder (within 1 LSB) and that the reconstruction stays within the
+// mode's quantisation budget of the source. The 16 weight levels let this mode
+// track gradients far more tightly than the mode-83 (3-bit) encoder above.
+// ---------------------------------------------------------------------------
+#[test]
+fn astc_encoder_q192_round_trip_parity_against_gpu_hardware_decode() {
+    let Some(oracle) = BlockOracle::try_new() else {
+        eprintln!("no GPU adapter; skipping ASTC QUANT_192 encoder parity");
+        return;
+    };
+    if !oracle
+        .features()
+        .contains(Features::TEXTURE_COMPRESSION_ASTC)
+    {
+        eprintln!("adapter lacks ASTC support; skipping ASTC QUANT_192 encoder parity");
+        return;
+    }
+    let format = TextureFormat::Astc {
+        block: wgpu::AstcBlock::B4x4,
+        channel: wgpu::AstcChannel::Unorm,
+    };
+
+    let mut tiles: Vec<([[u8; 4]; 16], i32)> = Vec::new();
+    // Constant colours: coincident endpoints, QUANT_192 within 2 LSB.
+    for &rgb in &[[0u8, 0, 0], [255, 255, 255], [73, 150, 211], [12, 240, 90]] {
+        tiles.push(([[rgb[0], rgb[1], rgb[2], 255]; 16], 3));
+    }
+    // Gray ramp: sixteen weight levels over sixteen steps -> near exact.
+    tiles.push((
+        core::array::from_fn(|t| [(t * 17) as u8, (t * 17) as u8, (t * 17) as u8, 255]),
+        5,
+    ));
+    // Axis-aligned RGB gradient along the R/G/B diagonal.
+    tiles.push((
+        core::array::from_fn(|t| {
+            let f = t as u8 * 16;
+            [f, 255 - f, (f / 2) + 40, 255]
+        }),
+        8,
+    ));
+    // Random single-axis tiles: pick two endpoints and spread texels along the
+    // segment, so the 4-bit weights track them to a handful of LSB.
+    let mut rng = Rng(0x0A5C_1192);
+    for _ in 0..16 {
+        let a = [rng.byte(), rng.byte(), rng.byte()];
+        let b = [rng.byte(), rng.byte(), rng.byte()];
+        let tile: [[u8; 4]; 16] = core::array::from_fn(|t| {
+            let num = (t as u32 * 64 + 7) / 15; // 0..=64 spread
+            let mix = |x: u8, y: u8| -> u8 {
+                ((u32::from(x) * (64 - num) + u32::from(y) * num + 32) / 64) as u8
+            };
+            [mix(a[0], b[0]), mix(a[1], b[1]), mix(a[2], b[2]), 255]
+        });
+        tiles.push((tile, 10));
+    }
+
+    let mut compared = 0u32;
+    for (src, quality_tol) in &tiles {
+        let blk = encode_astc_single_partition_4x4_ldr_q192(src);
+        let cpu = decode_astc_4x4_ldr(&blk).expect("mode-578 encoder emits a decodable block");
+        let gpu = oracle.decode_unorm8(format, &blk);
+        for t in 0..16 {
+            // (1) CPU/GPU bitstream parity on all four channels.
+            for c in 0..4 {
+                let d = (cpu[t][c] as i32 - gpu[t][c] as i32).abs();
+                assert!(
+                    d <= 1,
+                    "ASTC q192 encoder block={blk:02x?} texel {t} chan {c}: cpu={} gpu={} (|d|={d})",
+                    cpu[t][c],
+                    gpu[t][c]
+                );
+            }
+            // (2) Encoder faithfulness: GPU RGB within the quantisation budget.
+            for c in 0..3 {
+                let d = (gpu[t][c] as i32 - src[t][c] as i32).abs();
+                assert!(
+                    d <= *quality_tol,
+                    "ASTC q192 quality block={blk:02x?} texel {t} chan {c}: src={} gpu={} (|d|={d} > {quality_tol})",
+                    src[t][c],
+                    gpu[t][c]
+                );
+            }
+            assert_eq!(gpu[t][3], 255, "CEM 8 alpha must be 255");
+        }
+        compared += 1;
+    }
+    eprintln!(
+        "ASTC q192 encoder round-trip parity: {compared} tiles decode within 1 LSB of hardware (CEM8 mode-578 QUANT_192 colour + QUANT_16 weights)"
     );
 }
