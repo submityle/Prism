@@ -20,5 +20,9 @@ math = ["dep:prism_math"]
 # bevy_reflect-compatible aliases + prelude (no bevy_* dependency).
 compat-bevy = []
 
+[[bench]]
+name = "path_access"
+harness = false
+
 [lints]
 workspace = true
