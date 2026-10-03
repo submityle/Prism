@@ -140,4 +140,10 @@ pub(super) fn restore(world: &mut World, snapshot: &WorldSnapshot) {
             },
         );
     }
+
+    // 7. Owning groups survive the restore as declarations, but their packed
+    //    prefixes referenced the torn-down entities; rebuild each group's
+    //    membership against the freshly re-materialised storage so iteration is
+    //    correct post-rollback (design §6 / §14). No-op without groups.
+    world.rebuild_all_owning_groups();
 }

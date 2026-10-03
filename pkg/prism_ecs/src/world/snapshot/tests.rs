@@ -260,3 +260,37 @@ fn rollback_ring_overwrites_reconfirmed_frame() {
     assert_eq!(ring.oldest().map(|(f, _)| f), Some(10));
     assert_eq!(ring.latest().map(|(f, _)| f), Some(11));
 }
+
+#[test]
+fn restore_rebuilds_owning_group_membership() {
+    // A `restore` replaces archetype/sparse storage wholesale; the owning-group
+    // registry survives as declarations but its packed prefix must be rebuilt
+    // against the re-materialised entities (design §6 / §14).
+    let mut w = world_with_glue();
+    let pos = w.register_component::<Pos>();
+    let vel = w.register_component::<Vel>();
+    let group = w.register_owning_group(&[pos, vel]).unwrap();
+
+    let member = w.spawn((Pos { x: 1, y: 2 }, Vel(3)));
+    let _partial = w.spawn(Pos { x: 9, y: 9 });
+    assert!(w.owning_group(group).unwrap().contains(member));
+    assert_eq!(w.owning_group(group).unwrap().len(), 1);
+
+    let snap = w.snapshot();
+
+    // Diverge: despawn the member and add a post-snapshot full member so the
+    // live group no longer matches the snapshot.
+    w.despawn(member);
+    let other = w.spawn((Pos { x: 5, y: 5 }, Vel(6)));
+    assert!(!w.owning_group(group).unwrap().contains(member));
+    assert!(w.owning_group(group).unwrap().contains(other));
+
+    // Restore: storage and the allocator revert exactly, so the rebuilt group
+    // must contain the restored `member` and nothing else (`other`'s slot is
+    // no longer live).
+    w.restore(&snap);
+    let g = w.owning_group(group).unwrap();
+    assert_eq!(g.len(), 1);
+    assert!(g.contains(member));
+    assert!(!g.contains(other));
+}

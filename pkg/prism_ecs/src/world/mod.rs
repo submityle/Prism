@@ -1183,6 +1183,14 @@ impl World {
         // Drop out-of-band sparse components regardless of archetype shape; even
         // an empty-archetype entity may still hold sparse components (§6).
         self.sparse_sets.remove_entity_from_all(entity);
+        // Second owning-group drop *after* the free: the up-front
+        // `remove_entity` ran before lifecycle hooks, and a group-completing
+        // hook (e.g. one that `insert`s the final owned component) could have
+        // re-tracked this still-live entity. Dropping it again once it is truly
+        // freed guarantees no dead handle lingers in a packed prefix.
+        if !self.owning_groups.is_empty() {
+            self.owning_groups.remove_entity(entity);
+        }
         if loc.is_empty() {
             return true;
         }
@@ -1419,18 +1427,27 @@ impl World {
         let id = self.owning_groups.register(owned)?;
         // Retroactively pack entities that already satisfy the whole group so
         // the member prefix is correct even when the group is declared after
-        // spawn. A non-empty owned set can only be satisfied by an entity that
-        // lives in some archetype table (an entity with zero table components
-        // can still hold sparse ones, but then it is still enumerated here only
-        // if it occupies a table row; a purely-sparse entity with no table
-        // components has an empty-archetype row and is covered too, since even
-        // the empty archetype's table tracks its entities).
-        let owned_set: Vec<ComponentId> = self
-            .owning_groups
-            .get(id)
-            .expect("just-registered group")
-            .owned()
-            .to_vec();
+        // spawn.
+        self.repack_owning_group(id);
+        Ok(id)
+    }
+
+    /// Rebuild one owning group's packed membership from scratch by scanning
+    /// every live entity's archetype row and re-inserting the full members.
+    ///
+    /// Shared by [`World::register_owning_group`] (group declared after the
+    /// matching entities already exist) and [`World::rebuild_all_owning_groups`]
+    /// (storage replaced wholesale by a `restore`), so both reach the same
+    /// hole-free packed prefix. The scan enumerates `archetypes.iter()` tables:
+    /// a non-empty owned set is only satisfiable by an entity occupying a table
+    /// row, and even a purely-sparse entity holds an empty-archetype row, so no
+    /// member is missed. [`OwningGroup::clear`] first makes this idempotent on a
+    /// group that already has (possibly stale) membership.
+    fn repack_owning_group(&mut self, id: OwningGroupId) {
+        let owned_set: Vec<ComponentId> = match self.owning_groups.get(id) {
+            Some(group) => group.owned().to_vec(),
+            None => return,
+        };
         let mut members: Vec<Entity> = Vec::new();
         for archetype in self.archetypes.iter() {
             for &entity in archetype.table().entities() {
@@ -1443,11 +1460,27 @@ impl World {
             }
         }
         if let Some(group) = self.owning_groups.get_mut(id) {
+            group.clear();
             for entity in members {
                 group.insert(entity);
             }
         }
-        Ok(id)
+    }
+
+    /// Rebuild every declared owning group's membership from current storage.
+    ///
+    /// Called after a `restore` (design §14) replaces `archetypes`/`sparse_sets`
+    /// wholesale: the group registry itself survives the restore, but its packed
+    /// prefixes reference the pre-restore entities, so each group is re-scanned
+    /// against the freshly re-materialised world. No-op on a world with no
+    /// groups.
+    pub(crate) fn rebuild_all_owning_groups(&mut self) {
+        if self.owning_groups.is_empty() {
+            return;
+        }
+        for id in self.owning_groups.ids() {
+            self.repack_owning_group(id);
+        }
     }
 
     /// Borrow the owning group with id `id`, or `None` if `id` was never

@@ -144,6 +144,15 @@ impl OwningGroupRegistry {
             group.remove(entity);
         }
     }
+
+    /// The ids of every declared group, in registration order. Collected into a
+    /// `Vec` so the caller can re-borrow the registry mutably per id (e.g. to
+    /// rebuild each group's membership after a `restore` replaces storage).
+    pub(crate) fn ids(&self) -> Vec<OwningGroupId> {
+        (0..self.groups.len() as u32)
+            .map(OwningGroupId::new)
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -298,5 +307,39 @@ mod tests {
         world.remove::<C>(e);
         world.despawn(e);
         assert_eq!(world.owning_group_count(), 0);
+    }
+
+    /// An `on_remove` hook that re-inserts the final owned component, completing
+    /// the `[A, B]` group on the still-live entity midway through its own
+    /// despawn — exercising the re-entrancy window closed by the post-free
+    /// second `remove_entity`.
+    fn readd_b_on_remove(ctx: crate::component_hooks::HookContext<'_>) {
+        ctx.world.insert(ctx.entity, B(0));
+    }
+
+    #[test]
+    fn despawn_hook_reinsertion_leaves_no_dead_entity_packed() {
+        let mut world = World::new();
+        let a = world.register_component::<A>();
+        let b = world.register_component::<B>();
+        let _c = world.register_component::<C>();
+        let group = world.register_owning_group(&[a, b]).unwrap();
+
+        // Hook C's removal (which fires during despawn) to re-add B.
+        world.register_component_hooks::<C>(
+            crate::component_hooks::ComponentHooks::new().with_on_remove(readd_b_on_remove),
+        );
+
+        // `e` owns A and C but not B, so it starts outside the group.
+        let e = world.spawn((A(1), C(2)));
+        assert!(!world.owning_group(group).unwrap().contains(e));
+
+        // Despawn fires C's on_remove, which re-inserts B and re-tracks the
+        // still-live `e`; the free that follows must drop it again.
+        world.despawn(e);
+
+        let g = world.owning_group(group).unwrap();
+        assert!(g.is_empty(), "dead entity must not linger packed");
+        assert!(!g.contains(e));
     }
 }
