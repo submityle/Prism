@@ -11,3 +11,6 @@
 
 #[cfg(test)]
 mod reproject_tests;
+
+#[cfg(test)]
+mod spatial_tests;
