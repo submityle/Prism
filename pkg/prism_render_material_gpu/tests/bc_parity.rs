@@ -29,10 +29,12 @@ use prism_render_material::{
     encode_astc_single_partition_4x4_ldr_quality, encode_astc_single_partition_4x4_ldr_rgba,
     encode_astc_single_partition_4x4_ldr_rgba_q6, encode_astc_single_partition_5x4_ldr,
     encode_astc_single_partition_5x5_ldr, encode_astc_single_partition_6x5_ldr,
-    encode_astc_single_partition_6x5_ldr_mode369, encode_astc_single_partition_6x5_ldr_mode371,
-    encode_astc_single_partition_6x6_ldr, encode_astc_single_partition_8x5_ldr,
+    encode_astc_single_partition_6x5_ldr_mode355, encode_astc_single_partition_6x5_ldr_mode369,
+    encode_astc_single_partition_6x5_ldr_mode371, encode_astc_single_partition_6x6_ldr,
+    encode_astc_single_partition_8x5_ldr,
     encode_astc_single_partition_8x6_ldr, encode_astc_single_partition_8x8_ldr, encode_bc1,
-    encode_bc3, encode_bc6h_mode11_unsigned, encode_bc7_mode4, encode_bc7_mode5, encode_bc7_mode6,
+    encode_bc3, encode_bc6h_mode11_signed, encode_bc6h_mode11_unsigned, encode_bc7_mode4,
+    encode_bc7_mode5, encode_bc7_mode6,
 };
 use prism_render_material_gpu::BlockOracle;
 use wgpu::{Features, TextureFormat};
@@ -78,6 +80,19 @@ fn hdr_tile(rng: &mut Rng) -> [[u16; 3]; 16] {
         texel[0] = rng.half_bits();
         texel[1] = rng.half_bits();
         texel[2] = rng.half_bits();
+    }
+    tile
+}
+
+/// Random **signed** HDR tile: like `hdr_tile` but each channel's sign bit is
+/// randomised so negative half values exercise the signed mode-11 encoder.
+fn hdr_tile_signed(rng: &mut Rng) -> [[u16; 3]; 16] {
+    let mut tile = [[0u16; 3]; 16];
+    for texel in &mut tile {
+        for c in 0..3 {
+            let sign = ((rng.next_u32() & 1) as u16) << 15;
+            texel[c] = sign | rng.half_bits();
+        }
     }
     tile
 }
@@ -849,6 +864,37 @@ fn bc6h_single_subset_delta_signed_parity_against_gpu() {
             let gpu = oracle.decode_rgb_f32(TextureFormat::Bc6hRgbFloat, &block);
             assert_rgb_f32_close(&cpu, &gpu, &format!("signed mode {mode_bits:#07b}"));
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BC6H mode 11 **signed** single-subset HDR encoder GPU parity. The unsigned
+// mode-11 encoder is already proven above; this independently proves the signed
+// encoder emits a hardware-valid block whose Metal decode matches the CPU
+// decoder, exercising the sign-magnitude unquantize + finished-space index
+// selection (`finished_signed_linear`) across both polarities.
+// ---------------------------------------------------------------------------
+#[test]
+fn bc6h_mode11_signed_encoder_parity_against_gpu() {
+    let Some(oracle) = BlockOracle::try_new() else {
+        #[expect(
+            clippy::print_stderr,
+            reason = "test diagnostic: GPU adapter unreachable in sandbox, graceful skip"
+        )]
+        {
+            eprintln!("no GPU adapter with BC support reachable; skipping BC6H mode11 signed encoder");
+        }
+        return;
+    };
+    assert!(oracle.features().contains(Features::TEXTURE_COMPRESSION_BC));
+
+    let mut rng = Rng(0x5157_9ED3);
+    for _ in 0..64 {
+        let tile = hdr_tile_signed(&mut rng);
+        let block = encode_bc6h_mode11_signed(&tile);
+        let cpu = decode_bc6h_signed(&block).expect("signed mode-11 block decodes");
+        let gpu = oracle.decode_rgb_f32(TextureFormat::Bc6hRgbFloat, &block);
+        assert_rgb_f32_close(&cpu, &gpu, "signed mode 11 encoder");
     }
 }
 
@@ -6601,6 +6647,114 @@ fn astc_encoder_6x5_mode371_round_trip_parity_against_gpu_hardware_decode() {
 }
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// ASTC 6x5 mode 355 encoder parity (recipe family 6: QUANT_40 quint colour +
+// QUANT_6 trit-plus-one-bit weight stream). This is the first encoder whose
+// *both* streams are mixed-radix BISE with low bits: the six QUANT_40 endpoint
+// values are packed as a quint BISE via `encode_quint_sequence` (three low
+// bits) while the thirty QUANT_6 weights ride a trit BISE via
+// `encode_trit_sequence` (one low bit) mirrored into the top of the block.
+// Proven against the Metal hardware decoder via `decode_raw_footprint(.., 6, 5)`
+// within 1 LSB.
+// ---------------------------------------------------------------------------
+#[test]
+fn astc_encoder_6x5_mode355_round_trip_parity_against_gpu_hardware_decode() {
+    let Some(oracle) = BlockOracle::try_new() else {
+        eprintln!("no GPU adapter; skipping ASTC 6x5 mode355 encoder parity");
+        return;
+    };
+    if !oracle
+        .features()
+        .contains(Features::TEXTURE_COMPRESSION_ASTC)
+    {
+        eprintln!("adapter lacks ASTC support; skipping ASTC 6x5 mode355 encoder parity");
+        return;
+    }
+    let format = TextureFormat::Astc {
+        block: wgpu::AstcBlock::B6x5,
+        channel: wgpu::AstcChannel::Unorm,
+    };
+
+    // Four constant + two two-colour (incl red/blue) + one six-level ramp. The
+    // QUANT_40 quint colour quantises endpoints to a forty-level ramp (step
+    // ~255/39), so the constant/two-colour colour tolerances are tight (8); the
+    // ramp has only six weight levels, so its tolerance is looser (48).
+    let mut tiles: Vec<([[u8; 4]; 30], i32)> = Vec::new();
+    for &rgb in &[[0u8, 0, 0], [255, 255, 255], [41, 173, 98], [240, 12, 90]] {
+        tiles.push(([[rgb[0], rgb[1], rgb[2], 255]; 30], 8));
+    }
+    for &(a, b) in &[
+        ([15u8, 35, 55], [210u8, 190, 170]),
+        ([255u8, 0, 0], [0u8, 0, 255]),
+    ] {
+        tiles.push((
+            core::array::from_fn(|t| {
+                if t % 2 == 0 {
+                    [a[0], a[1], a[2], 255]
+                } else {
+                    [b[0], b[1], b[2], 255]
+                }
+            }),
+            8,
+        ));
+    }
+    let a = [10u8, 20, 30];
+    let b = [220u8, 210, 200];
+    tiles.push((
+        core::array::from_fn(|t| {
+            let x = (t % 6) as u16; // 0..5 across the row
+            [
+                (a[0] as u16 + (b[0] as u16 - a[0] as u16) * x / 5) as u8,
+                (a[1] as u16 + (b[1] as u16 - a[1] as u16) * x / 5) as u8,
+                (a[2] as u16 + (b[2] as u16 - a[2] as u16) * x / 5) as u8,
+                255,
+            ]
+        }),
+        48,
+    ));
+
+    let mut compared = 0u32;
+    for (src, quality_tol) in &tiles {
+        let blk = encode_astc_single_partition_6x5_ldr_mode355(src);
+        let (cpu, count) = decode_astc_ldr(&blk, 6, 5).expect("encoder emits a decodable block");
+        assert_eq!(count, 30, "6x5 footprint must decode 30 texels");
+        let gpu = oracle.decode_raw_footprint(format, &blk, 6, 5);
+        assert_eq!(gpu.len(), 30, "6x5 GPU texel count");
+        for t in 0..30 {
+            let gpu_u8: [i32; 4] =
+                core::array::from_fn(|c| (gpu[t][c].clamp(0.0, 1.0) * 255.0 + 0.5) as i32);
+            for c in 0..4 {
+                let d = (cpu[t][c] as i32 - gpu_u8[c]).abs();
+                assert!(
+                    d <= 1,
+                    "ASTC 6x5 mode355 block={blk:02x?} texel {t} chan {c}: cpu={} gpu={} (|d|={d})",
+                    cpu[t][c],
+                    gpu_u8[c]
+                );
+            }
+            for c in 0..3 {
+                let d = (gpu_u8[c] - src[t][c] as i32).abs();
+                assert!(
+                    d <= *quality_tol,
+                    "ASTC 6x5 mode355 quality block={blk:02x?} texel {t} chan {c}: src={} gpu={} (|d|={d} > {quality_tol})",
+                    src[t][c],
+                    gpu_u8[c]
+                );
+            }
+            assert_eq!(gpu_u8[3], 255, "CEM 8 alpha must be 255");
+        }
+        compared += 1;
+    }
+    assert!(
+        compared >= 7,
+        "expected all 6x5 mode355 tiles to be compared"
+    );
+    eprintln!(
+        "ASTC 6x5 mode355 encoder round-trip parity: {compared} tiles decode within 1 LSB of hardware (QUANT_6 trit+1bit weights, QUANT_40 quint colour BISE via encode_quint_sequence, both streams mixed-radix BISE, non-square legal B6x5 full grid)"
+    );
+}
+
+
 // ASTC 10x5 mode 373 encoder parity (recipe family 4: QUANT_32 bit colour +
 // QUANT_3 one-trit weight stream). This is the first encoder fusing the
 // bit-colour endpoint path (quantise/unquant/pre-swap) with the trit BISE
