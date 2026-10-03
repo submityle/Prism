@@ -223,6 +223,10 @@ pub mod tet_lumped_mass;
 pub use tet_lumped_mass::{
     build_lumped_mass, build_lumped_mass_from_mesh, LumpedMass,
 };
+pub mod tet_fem_cg;
+pub use tet_fem_cg::{
+    conjugate_gradient, solve_implicit_system, CgParams, CgReport,
+};
 
 /// A handle into a [`ShapeRegistry`].
 ///
