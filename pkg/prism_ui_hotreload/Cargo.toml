@@ -9,10 +9,12 @@ publish = false
 [dependencies]
 prism_ui = { path = "../prism_ui" }
 prism_ui_style = { path = "../prism_ui_style" }
+prism_platform = { path = "../prism_platform", optional = true, default-features = false, features = ["watch"] }
 
 [features]
 default = ["std"]
 std = ["prism_ui/std", "prism_ui_style/std"]
+watch = ["std", "dep:prism_platform"]
 
 [lints]
 workspace = true

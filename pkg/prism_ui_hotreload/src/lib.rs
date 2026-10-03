@@ -79,9 +79,13 @@ pub mod plan;
 pub mod reload;
 pub mod statestore;
 pub mod style_reload;
+#[cfg(feature = "watch")]
+pub mod watch;
 
 pub use identity::{paths_of, NodeIdent, NodePath};
 pub use plan::{plan, NodeChange, PlanCounts, Recreated, ReloadPlan};
 pub use reload::HotReloader;
 pub use statestore::{ReloadReport, StateStore};
 pub use style_reload::{diff_classes, ClassChange, PropValue, StyleDiff};
+#[cfg(feature = "watch")]
+pub use watch::{classify, ChangeKind, Coalescer, LoomWatcher, ReloadRequest, ReloadTarget};
