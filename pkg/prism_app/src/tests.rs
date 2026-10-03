@@ -12,7 +12,7 @@ use crate::app::{App, PluginsState};
 use crate::exit::{AppExit, AppExitRequest};
 use crate::plugin::Plugin;
 use crate::runner::HeadlessRunner;
-use crate::schedule_label::CoreSchedule;
+use crate::schedule::{First, Last, PostUpdate, PreUpdate, Startup, Update};
 
 /// `HeadlessRunner` with a frame cap runs `Update` exactly `cap` times.
 #[test]
@@ -21,7 +21,7 @@ fn headless_runner_drives_requested_frames() {
     let f = frames.clone();
 
     let mut app = App::new();
-    app.add_systems(CoreSchedule::Update, move || {
+    app.add_systems(Update, move || {
         f.fetch_add(1, Ordering::Relaxed);
     });
     app.set_runner(|app| HeadlessRunner::with_max_frames(5).run(app));
@@ -40,10 +40,10 @@ fn startup_runs_once_update_runs_each_frame() {
     let fr = frames.clone();
 
     let mut app = App::new();
-    app.add_systems(CoreSchedule::Startup, move || {
+    app.add_systems(Startup, move || {
         s.fetch_add(1, Ordering::Relaxed);
     });
-    app.add_systems(CoreSchedule::Update, move || {
+    app.add_systems(Update, move || {
         fr.fetch_add(1, Ordering::Relaxed);
     });
     app.set_runner(|app| HeadlessRunner::with_max_frames(3).run(app));
@@ -60,15 +60,25 @@ fn frame_phases_run_in_order() {
     let order = Arc::new(Mutex::new(Vec::<&'static str>::new()));
 
     let mut app = App::new();
-    for (label, name) in [
-        (CoreSchedule::First, "first"),
-        (CoreSchedule::PreUpdate, "pre"),
-        (CoreSchedule::Update, "update"),
-        (CoreSchedule::PostUpdate, "post"),
-        (CoreSchedule::Last, "last"),
-    ] {
+    {
         let o = order.clone();
-        app.add_systems(label, move || o.lock().unwrap().push(name));
+        app.add_systems(First, move || o.lock().unwrap().push("first"));
+    }
+    {
+        let o = order.clone();
+        app.add_systems(PreUpdate, move || o.lock().unwrap().push("pre"));
+    }
+    {
+        let o = order.clone();
+        app.add_systems(Update, move || o.lock().unwrap().push("update"));
+    }
+    {
+        let o = order.clone();
+        app.add_systems(PostUpdate, move || o.lock().unwrap().push("post"));
+    }
+    {
+        let o = order.clone();
+        app.add_systems(Last, move || o.lock().unwrap().push("last"));
     }
     app.set_runner(|app| HeadlessRunner::with_max_frames(1).run(app));
     app.run();
@@ -87,7 +97,7 @@ fn app_exit_request_stops_headless_runner() {
     let c = count.clone();
 
     let mut app = App::new();
-    app.add_systems(CoreSchedule::Update, move |mut exit: ResMut<AppExitRequest>| {
+    app.add_systems(Update, move |mut exit: ResMut<AppExitRequest>| {
         let n = c.fetch_add(1, Ordering::Relaxed) + 1;
         if n == 3 {
             exit.send_error();
@@ -107,7 +117,7 @@ fn default_runner_runs_single_frame() {
     let f = frames.clone();
 
     let mut app = App::new();
-    app.add_systems(CoreSchedule::Update, move || {
+    app.add_systems(Update, move || {
         f.fetch_add(1, Ordering::Relaxed);
     });
 

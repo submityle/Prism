@@ -1,22 +1,30 @@
-//! A [`SubApp`]: one [`World`] plus its label-keyed [`Schedules`].
+//! A [`SubApp`]: one [`World`] whose world-owned
+//! [`Schedules`](prism_ecs::schedule::Schedules) resource holds the phase
+//! schedules that drive it.
 //!
-//! An [`App`](crate::app::App) owns a *main* `SubApp` and (in later milestones)
-//! named secondary sub-apps such as a render sub-app driven by a one-way
-//! extract step. M0 ships only the main sub-app and the variable-step frame
-//! loop over it.
+//! An [`App`](crate::app::App) owns a *main* `SubApp` and (in later
+//! milestones) named secondary sub-apps such as a render sub-app driven by a
+//! one-way extract step. M1 ships only the main sub-app and the variable-step
+//! frame loop over it.
+//!
+//! Per design §5 the sub-app **reuses the `prism_ecs` scheduling graph**: the
+//! schedules live inside the world (not a separate hand-rolled registry), and
+//! each phase is run by label through
+//! [`World::run_schedule`](prism_ecs::world::World::run_schedule).
 
+use prism_ecs::schedule::{ScheduleLabel, Schedules};
 use prism_ecs::world::World;
 
-use crate::schedule_label::{CoreSchedule, ScheduleLabel};
-use crate::schedules::Schedules;
+use crate::schedule::{
+    First, Last, PostStartup, PostUpdate, PreStartup, PreUpdate, StateTransition, Startup, Update,
+};
 
-/// A self-contained unit of simulation: a [`World`] and the [`Schedules`] that
-/// drive it.
+/// A self-contained unit of simulation: a [`World`] whose
+/// [`Schedules`](prism_ecs::schedule::Schedules) resource drives it.
 pub struct SubApp {
-    /// The ECS world this sub-app simulates.
+    /// The ECS world this sub-app simulates. Its [`Schedules`] resource owns
+    /// the phase schedules.
     pub world: World,
-    /// The label-keyed schedules run against [`world`](SubApp::world).
-    pub schedules: Schedules,
 }
 
 impl Default for SubApp {
@@ -26,38 +34,46 @@ impl Default for SubApp {
 }
 
 impl SubApp {
-    /// Create a sub-app with a fresh [`World`] and no schedules.
+    /// Create a sub-app with a fresh [`World`] holding an empty
+    /// [`Schedules`] resource.
     pub fn new() -> Self {
-        Self {
-            world: World::new(),
-            schedules: Schedules::new(),
-        }
+        let mut world = World::new();
+        world.init_resource::<Schedules>();
+        Self { world }
     }
 
     /// Run the schedule registered under `label` against this sub-app's world.
     ///
-    /// A missing label is a no-op: a phase with no systems simply does nothing.
-    /// This keeps the frame loop total even when a user never adds systems to,
-    /// say, `PreUpdate`.
+    /// A missing label is a no-op: a phase with no schedule simply does
+    /// nothing. This keeps the frame loop total even when a user never adds
+    /// systems to, say, `PreUpdate`.
     pub fn run_schedule(&mut self, label: impl ScheduleLabel) {
-        if let Some(schedule) = self.schedules.get_mut(label) {
-            schedule.run(&mut self.world);
-        }
+        self.world.run_schedule(label);
     }
 
-    /// Run one variable-step frame: the M0 subset of the design-doc main-frame
-    /// order (§7), `First → PreUpdate → Update → PostUpdate → Last`.
+    /// Run the startup phases exactly once, in order
+    /// (`PreStartup → Startup → PostStartup`, design §7).
+    pub fn run_startup(&mut self) {
+        self.run_schedule(PreStartup);
+        self.run_schedule(Startup);
+        self.run_schedule(PostStartup);
+    }
+
+    /// Run one variable-step frame: the M1 main-frame order (design §7),
+    /// `First → PreUpdate → StateTransition → Update → PostUpdate → Last`.
     ///
     /// # Honestly deferred
     ///
-    /// The full order also interleaves `RunFixedMainLoop` (fixed-timestep inner
-    /// loop, M2) between `First` and `PreUpdate`, and `StateTransition` (the
-    /// state machine, M1) between `PreUpdate` and `Update`. Those phases are
-    /// absent here, not stubbed, and land with the milestones that implement
-    /// their behavior.
+    /// The full order also interleaves `RunFixedMainLoop` (the fixed-timestep
+    /// inner loop, M2) between `First` and `PreUpdate`. That phase is absent
+    /// here, not stubbed, and lands with the milestone that implements its
+    /// accumulator behavior.
     pub fn update(&mut self) {
-        for label in CoreSchedule::FRAME_ORDER {
-            self.run_schedule(label);
-        }
+        self.run_schedule(First);
+        self.run_schedule(PreUpdate);
+        self.run_schedule(StateTransition);
+        self.run_schedule(Update);
+        self.run_schedule(PostUpdate);
+        self.run_schedule(Last);
     }
 }

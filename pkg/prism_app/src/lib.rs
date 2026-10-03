@@ -16,13 +16,15 @@
 //!
 //! - [`App`] with a monotonic [`PluginsState`] assembly
 //!   state machine and a swappable [runner].
-//! - A single main [`SubApp`] = one [`World`](prism_ecs::world::World) +
-//!   label-keyed [`Schedules`].
+//! - A single main [`SubApp`] = one [`World`](prism_ecs::world::World) whose
+//!   world-owned [`Schedules`](prism_ecs::schedule::Schedules) resource holds
+//!   the phase schedules (design §5: reuse the `prism_ecs` scheduling graph).
 //! - The [`Plugin`] trait (`build` / `ready` / `finish` / `cleanup`) and a
 //!   minimal [`PluginGroup`].
-//! - The built-in [`CoreSchedule`]s and the variable-step main-frame loop
-//!   (`First → PreUpdate → Update → PostUpdate → Last`), plus a one-time
-//!   startup (`PreStartup → Startup → PostStartup`).
+//! - The built-in core [phase labels](crate::schedule) and the variable-step
+//!   main-frame loop
+//!   (`First → PreUpdate → StateTransition → Update → PostUpdate → Last`), plus
+//!   a one-time startup (`PreStartup → Startup → PostStartup`).
 //! - Platform-free runners: [`HeadlessRunner`] and
 //!   [`ScheduleRunnerOnce`].
 //!
@@ -50,8 +52,7 @@ pub mod exit;
 pub mod plugin;
 pub mod plugin_group;
 pub mod runner;
-pub mod schedule_label;
-pub mod schedules;
+pub mod schedule;
 pub mod sub_app;
 
 #[cfg(test)]
@@ -62,8 +63,9 @@ pub use exit::{AppExit, AppExitRequest};
 pub use plugin::Plugin;
 pub use plugin_group::{PluginGroup, PluginGroupBuilder};
 pub use runner::{HeadlessRunner, ScheduleRunnerOnce, run_once};
-pub use schedule_label::{CoreSchedule, ScheduleLabel, ScheduleLabelId};
-pub use schedules::Schedules;
+pub use schedule::{
+    First, Last, PostStartup, PostUpdate, PreStartup, PreUpdate, StateTransition, Startup, Update,
+};
 pub use sub_app::SubApp;
 
 /// Commonly used exports. Mirrors `bevy_app::prelude` ergonomics to keep the
@@ -75,7 +77,10 @@ pub mod prelude {
     pub use crate::plugin::Plugin;
     pub use crate::plugin_group::{PluginGroup, PluginGroupBuilder};
     pub use crate::runner::{HeadlessRunner, ScheduleRunnerOnce};
-    pub use crate::schedule_label::{CoreSchedule, ScheduleLabel};
+    pub use crate::schedule::{
+        First, Last, PostStartup, PostUpdate, PreStartup, PreUpdate, StateTransition, Startup,
+        Update,
+    };
     pub use crate::sub_app::SubApp;
 
     pub use prism_ecs::prelude::*;

@@ -9,21 +9,23 @@
 //! use prism_app::prelude::*;
 //!
 //! App::new()
-//!     .add_systems(CoreSchedule::Startup, || { /* setup */ })
-//!     .add_systems(CoreSchedule::Update, || { /* per-frame */ })
+//!     .add_systems(Startup, || { /* setup */ })
+//!     .add_systems(Update, || { /* per-frame */ })
 //!     .run();
 //! ```
 
 use std::collections::HashSet;
 
-use prism_ecs::schedule::IntoSystemConfigs;
 use prism_ecs::resource::Resource;
+use prism_ecs::schedule::{IntoSystemConfigs, Schedule, ScheduleLabel, Schedules};
 use prism_ecs::world::World;
 
 use crate::exit::{AppExit, AppExitRequest};
 use crate::plugin::Plugin;
 use crate::plugin_group::PluginGroup;
-use crate::schedule_label::{CoreSchedule, ScheduleLabel};
+use crate::schedule::{
+    First, Last, PostStartup, PostUpdate, PreStartup, PreUpdate, StateTransition, Startup, Update,
+};
 use crate::sub_app::SubApp;
 
 /// The monotonic plugin-assembly state machine (design §21).
@@ -63,21 +65,33 @@ impl Default for App {
 }
 
 impl App {
-    /// Create an app with a main sub-app, the built-in [`CoreSchedule`]s
+    /// Create an app with a main sub-app, the built-in core phase schedules
     /// installed (empty), and the [`AppExitRequest`] resource ready for systems
     /// to signal shutdown.
     pub fn new() -> Self {
         let mut app = Self::empty();
-        // Install every core schedule up front so the phase labels always
-        // resolve, even before a user adds systems to them.
-        for label in CoreSchedule::STARTUP_ORDER {
-            app.main.schedules.entry(label);
-        }
-        for label in CoreSchedule::FRAME_ORDER {
-            app.main.schedules.entry(label);
-        }
+        app.init_core_schedules();
         app.main.world.insert_resource(AppExitRequest::default());
         app
+    }
+
+    /// Install an empty [`Schedule`] for every core phase so the phase labels
+    /// always resolve, even before a user adds systems to them.
+    ///
+    /// The schedules live in the main world's
+    /// [`Schedules`](prism_ecs::schedule::Schedules) resource (design §5), run
+    /// by label through [`World::run_schedule`](prism_ecs::world::World::run_schedule).
+    fn init_core_schedules(&mut self) {
+        let schedules = self.main.world.resource_mut::<Schedules>();
+        schedules.insert(PreStartup, Schedule::new());
+        schedules.insert(Startup, Schedule::new());
+        schedules.insert(PostStartup, Schedule::new());
+        schedules.insert(First, Schedule::new());
+        schedules.insert(PreUpdate, Schedule::new());
+        schedules.insert(StateTransition, Schedule::new());
+        schedules.insert(Update, Schedule::new());
+        schedules.insert(PostUpdate, Schedule::new());
+        schedules.insert(Last, Schedule::new());
     }
 
     /// Create a bare app: a main sub-app with no schedules, no plugins, and no
@@ -132,10 +146,17 @@ impl App {
     /// does not yet exist).
     pub fn add_systems<M>(
         &mut self,
-        label: impl ScheduleLabel,
+        label: impl ScheduleLabel + Clone,
         systems: impl IntoSystemConfigs<M>,
     ) -> &mut Self {
-        self.main.schedules.entry(label).add_systems(systems);
+        let schedules = self.main.world.resource_mut::<Schedules>();
+        if !schedules.contains(label.clone()) {
+            schedules.insert(label.clone(), Schedule::new());
+        }
+        schedules
+            .get_mut(label)
+            .expect("schedule was just ensured to exist")
+            .add_systems(systems);
         self
     }
 
@@ -219,9 +240,7 @@ impl App {
     /// Run the startup schedules exactly once, in order
     /// (`PreStartup → Startup → PostStartup`).
     fn run_startup(&mut self) {
-        for label in CoreSchedule::STARTUP_ORDER {
-            self.main.run_schedule(label);
-        }
+        self.main.run_startup();
     }
 
     /// Run one variable-step frame of the main sub-app (design §7 M0 subset).
