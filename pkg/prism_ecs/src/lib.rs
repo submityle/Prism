@@ -84,8 +84,15 @@ pub mod prelude {
     pub use crate::observer::{
         EventContext, LifecycleEvent, ObserverContext, ObserverId, Observers,
     };
+    pub use crate::partition::cell::{
+        CellCoord, CellState, CellStreamer, StreamingDelta, WorldPartitionCell,
+    };
+    pub use crate::partition::dormant::{Dormant, DormancySet};
     pub use crate::partition::floating_origin::{
         FloatingOrigin, GridCell, LocalPos, WorldPos,
+    };
+    pub use crate::partition::lod::{
+        distance_sq, LodBand, LodDecision, LodLevel, LodSchedule, OutOfRange,
     };
     pub use crate::prefab::IsA;
     pub use crate::reaction::{NodeId, ReactionGraph};
