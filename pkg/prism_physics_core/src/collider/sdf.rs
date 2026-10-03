@@ -20,17 +20,21 @@
 //!
 //! # Method
 //!
-//! Each grid node stores the exact unsigned distance to the nearest triangle
-//! (closed-form point/triangle distance, Ericson, *Real-Time Collision
-//! Detection*). The sign is resolved by ray parity: a ray cast from the node
-//! crosses a closed surface an odd number of times when the node is inside. To
-//! stay robust against rays grazing shared edges, three axis-aligned rays are
-//! cast and the inside/outside decision is a majority vote.
+//! A midphase triangle BVH accelerates both queries so the build is
+//! `O(nodes * log tris)` rather than `O(nodes * tris)`. Each grid node stores
+//! the exact unsigned distance to the nearest triangle (closed-form
+//! point/triangle distance, Ericson, *Real-Time Collision Detection*), fetched
+//! via a branch-and-bound closest-point descent of the BVH. The sign is
+//! resolved by ray parity: a ray cast from the node crosses a closed surface an
+//! odd number of times when the node is inside. To stay robust against rays
+//! grazing shared edges, three skewed (non-axis-aligned) rays are cast and the
+//! inside/outside decision is a majority vote.
 //!
 //! Everything here is standard computational geometry (point/triangle distance,
 //! Moller-Trumbore ray/triangle intersection, trilinear interpolation); nothing
 //! is derived from Unreal Engine source.
 
+use super::mesh_bvh::MeshBvh;
 use glam::Vec3;
 
 /// Minimum number of nodes along each grid axis.
@@ -38,8 +42,6 @@ const MIN_NODES: usize = 2;
 /// Hard cap on total nodes, to keep an accidental tiny `cell_size` from
 /// allocating an unbounded grid.
 const MAX_NODES_TOTAL: usize = 1 << 24; // ~16.7M nodes.
-/// Degenerate-triangle area threshold (squared double-area).
-const MIN_TRI_AREA2_SQ: f32 = 1e-20;
 
 /// Parameters controlling how a [`MeshSdf`] is discretised.
 #[derive(Clone, Copy, Debug)]
@@ -100,20 +102,12 @@ impl MeshSdf {
             return None;
         }
 
-        // Gather the valid (non-degenerate, in-range) triangles once.
-        let tris = collect_triangles(vertices, indices);
-        if tris.is_empty() {
-            return None;
-        }
+        // Build a midphase BVH over the mesh so the per-node nearest-triangle
+        // and inside/outside queries are logarithmic rather than linear.
+        let bvh = MeshBvh::build(vertices, indices)?;
 
-        // Local bounds of the triangles, then pad.
-        let (mut min, mut max) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
-        for t in &tris {
-            for v in &t.v {
-                min = min.min(*v);
-                max = max.max(*v);
-            }
-        }
+        // Pad the mesh bounds to leave a positive-distance shell outside.
+        let (mut min, mut max) = bvh.local_aabb();
         min -= Vec3::splat(params.padding);
         max += Vec3::splat(params.padding);
 
@@ -135,8 +129,8 @@ impl MeshSdf {
             for j in 0..dims[1] {
                 for i in 0..dims[0] {
                     let p = min + Vec3::new(i as f32, j as f32, k as f32) * cell;
-                    let unsigned = nearest_distance(p, &tris).sqrt();
-                    let sign = if point_is_inside(p, &tris) { -1.0 } else { 1.0 };
+                    let unsigned = bvh.closest_point(p).map_or(0.0, |c| c.distance_sq.sqrt());
+                    let sign = if point_is_inside(&bvh, p) { -1.0 } else { 1.0 };
                     let idx = i + dims[0] * (j + dims[1] * k);
                     data[idx] = sign * unsigned;
                 }
@@ -266,51 +260,12 @@ impl MeshSdf {
     }
 }
 
-/// A single triangle of the collision mesh.
-struct Tri {
-    v: [Vec3; 3],
-}
-
-/// Collects every in-range, non-degenerate triangle from the soup.
-fn collect_triangles(vertices: &[Vec3], indices: &[[u32; 3]]) -> Vec<Tri> {
-    let n = vertices.len() as u32;
-    let mut out = Vec::with_capacity(indices.len());
-    for tri in indices {
-        if tri[0] >= n || tri[1] >= n || tri[2] >= n {
-            continue;
-        }
-        let a = vertices[tri[0] as usize];
-        let b = vertices[tri[1] as usize];
-        let c = vertices[tri[2] as usize];
-        let double_area_sq = (b - a).cross(c - a).length_squared();
-        if double_area_sq <= MIN_TRI_AREA2_SQ {
-            continue;
-        }
-        out.push(Tri { v: [a, b, c] });
-    }
-    out
-}
-
-/// Squared distance from `p` to the nearest triangle in `tris`.
-fn nearest_distance(p: Vec3, tris: &[Tri]) -> f32 {
-    let mut best = f32::INFINITY;
-    for t in tris {
-        let d = point_triangle_distance_sq(p, t.v[0], t.v[1], t.v[2]);
-        if d < best {
-            best = d;
-        }
-    }
-    best
-}
-
-/// Majority-vote ray-parity inside test: casts three axis rays and counts
-/// surface crossings; an odd count means the ray started inside the solid.
-fn point_is_inside(p: Vec3, tris: &[Tri]) -> bool {
-    // Generic (non-axis-aligned) ray directions. Perfectly axis-aligned rays
-    // systematically strike shared triangle edges/diagonals on symmetric meshes
-    // (e.g. a quad split along its diagonal), which parity cannot classify;
-    // slightly skewed directions avoid that degeneracy, and the majority vote
-    // absorbs the rare remaining grazing case.
+/// Majority-vote ray-parity inside test over a mesh BVH: casts three skewed
+/// rays and counts surface crossings; an odd count means the point started
+/// inside the solid. Three generic (non-axis-aligned) directions plus the
+/// majority vote keep the test stable when a ray grazes a shared edge of a
+/// symmetric mesh.
+fn point_is_inside(bvh: &MeshBvh, p: Vec3) -> bool {
     let dirs = [
         Vec3::new(1.0, 0.1100, 0.0700).normalize(),
         Vec3::new(0.0900, 1.0, 0.1300).normalize(),
@@ -318,44 +273,11 @@ fn point_is_inside(p: Vec3, tris: &[Tri]) -> bool {
     ];
     let mut inside_votes = 0u32;
     for dir in dirs {
-        let mut crossings = 0u32;
-        for t in tris {
-            if ray_triangle_forward_hit(p, dir, t) {
-                crossings += 1;
-            }
-        }
-        if crossings & 1 == 1 {
+        if bvh.count_forward_crossings(p, dir) & 1 == 1 {
             inside_votes += 1;
         }
     }
     inside_votes >= 2
-}
-
-/// Moller-Trumbore ray/triangle test counting only strictly-forward hits
-/// (`t > eps`). Grazing hits (parallel ray or barycentric on the boundary) are
-/// rejected so parity stays stable across the three axis rays.
-fn ray_triangle_forward_hit(origin: Vec3, dir: Vec3, tri: &Tri) -> bool {
-    const EPS: f32 = 1e-7;
-    let e1 = tri.v[1] - tri.v[0];
-    let e2 = tri.v[2] - tri.v[0];
-    let pvec = dir.cross(e2);
-    let det = e1.dot(pvec);
-    if det.abs() < EPS {
-        return false;
-    }
-    let inv_det = 1.0 / det;
-    let tvec = origin - tri.v[0];
-    let u = tvec.dot(pvec) * inv_det;
-    if u <= EPS || u >= 1.0 - EPS {
-        return false;
-    }
-    let qvec = tvec.cross(e1);
-    let v = dir.dot(qvec) * inv_det;
-    if v <= EPS || u + v >= 1.0 - EPS {
-        return false;
-    }
-    let t = e2.dot(qvec) * inv_det;
-    t > EPS
 }
 
 /// Shortest squared distance from point `p` to triangle `abc`.

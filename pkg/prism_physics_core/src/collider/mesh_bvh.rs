@@ -265,6 +265,44 @@ impl MeshBvh {
         result
     }
 
+    /// Counts how many triangles the ray `origin + t * dir` crosses strictly
+    /// ahead of the origin (`t > eps`), using interior-only barycentric bounds
+    /// so a ray grazing a shared edge is not double-counted. This is the parity
+    /// primitive an inside/outside test needs for a closed mesh.
+    #[must_use]
+    pub fn count_forward_crossings(&self, origin: Vec3, dir: Vec3) -> u32 {
+        let inv_dir = Vec3::new(safe_inv(dir.x), safe_inv(dir.y), safe_inv(dir.z));
+        let mut crossings = 0u32;
+        let mut stack = [0u32; 64];
+        let mut sp = 0usize;
+        stack[sp] = 0;
+        sp += 1;
+
+        while sp > 0 {
+            sp -= 1;
+            let node = &self.nodes[stack[sp] as usize];
+            if !slab_hit(node.bmin, node.bmax, origin, inv_dir, f32::INFINITY) {
+                continue;
+            }
+            if node.tri_count > 0 {
+                let start = node.first as usize;
+                for local in 0..node.tri_count as usize {
+                    let idx = start + local;
+                    let [a, b, c] = self.tris[idx];
+                    if ray_triangle_interior_forward(origin, dir, a, b, c) {
+                        crossings += 1;
+                    }
+                }
+            } else if sp + 2 <= stack.len() {
+                stack[sp] = node.first;
+                sp += 1;
+                stack[sp] = node.first + 1;
+                sp += 1;
+            }
+        }
+        crossings
+    }
+
     /// Appends the original indices of every triangle whose axis-aligned bounds
     /// overlap the query box `[qmin, qmax]`.
     pub fn overlapping_triangles(&self, qmin: Vec3, qmax: Vec3, out: &mut Vec<u32>) {
@@ -529,6 +567,32 @@ fn ray_triangle(origin: Vec3, dir: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Option<f3
         return None;
     }
     Some(e2.dot(qvec) * inv_det)
+}
+
+/// Like [`ray_triangle`] but only reports a hit when it is strictly ahead of
+/// the origin and strictly interior to the triangle (open barycentric and
+/// `t > eps`), so parity counting is stable across grazing edges.
+fn ray_triangle_interior_forward(origin: Vec3, dir: Vec3, a: Vec3, b: Vec3, c: Vec3) -> bool {
+    const EPS: f32 = 1e-7;
+    let e1 = b - a;
+    let e2 = c - a;
+    let pvec = dir.cross(e2);
+    let det = e1.dot(pvec);
+    if det.abs() < EPS {
+        return false;
+    }
+    let inv_det = 1.0 / det;
+    let tvec = origin - a;
+    let u = tvec.dot(pvec) * inv_det;
+    if u <= EPS || u >= 1.0 - EPS {
+        return false;
+    }
+    let qvec = tvec.cross(e1);
+    let v = dir.dot(qvec) * inv_det;
+    if v <= EPS || u + v >= 1.0 - EPS {
+        return false;
+    }
+    e2.dot(qvec) * inv_det > EPS
 }
 
 /// Squared distance from a point to an AABB (0 when inside).
