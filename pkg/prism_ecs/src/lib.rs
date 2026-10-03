@@ -56,7 +56,9 @@ pub mod component_hooks;
 mod component_hooks_tests;
 pub mod entity;
 pub mod event;
+pub mod gpu_resident;
 pub mod observer;
+pub mod partition;
 pub mod prefab;
 pub mod query;
 pub mod reaction;
@@ -78,8 +80,12 @@ pub mod prelude {
     pub use crate::component_hooks::{ComponentHook, ComponentHooks, HookContext};
     pub use crate::entity::Entity;
     pub use crate::event::{Event, EventCursor, EventId, Events};
+    pub use crate::gpu_resident::{DirtyBlock, GpuResidentColumn, GpuResidentColumns};
     pub use crate::observer::{
         EventContext, LifecycleEvent, ObserverContext, ObserverId, Observers,
+    };
+    pub use crate::partition::floating_origin::{
+        FloatingOrigin, GridCell, LocalPos, WorldPos,
     };
     pub use crate::prefab::IsA;
     pub use crate::reaction::{NodeId, ReactionGraph};
