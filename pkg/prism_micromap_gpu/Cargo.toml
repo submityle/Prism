@@ -1,0 +1,16 @@
+[package]
+name = "prism_micromap_gpu"
+version = "0.1.0"
+edition = "2024"
+description = "Optional wgpu compute backend for Prism's Opacity Micromap (OMM) baker. Classifies and packs tri-state micro-triangle opacity on the GPU and is validated element-for-element against the prism_micromap CPU golden. Contains no Unreal Engine source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_micromap = { path = "../prism_micromap" }
+wgpu = { version = "30", default-features = false, features = ["wgsl", "metal"] }
+bytemuck = { version = "1.5", features = ["derive"] }
+futures-lite = "2"
+
+[lints]
+workspace = true
