@@ -4,10 +4,10 @@
 //! M0 ships a scalar reference backend only; SIMD backends (M1) will mirror
 //! these semantics within documented tolerances.
 
-#![allow(missing_docs)]
+#![allow(missing_docs, reason = "scalar helpers are documented at module level; per-fn docs land with M1+ API stabilization")]
 // Some helpers are the reference backend for later milestones (M1+ SIMD,
 // M2 curves) and are not all exercised yet by the M0 facade.
-#![allow(dead_code)]
+#![allow(dead_code, reason = "reference backend helpers for later milestones (M1+ SIMD, M2 curves) not yet exercised by the facade")]
 
 /// `f32` scalar math used by the facade. Kept in one place so the SIMD
 /// backends can be audited against a single reference.

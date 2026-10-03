@@ -11,23 +11,38 @@
 //! - A single-threaded synchronous fallback (the `single` feature, or a pool
 //!   built with zero threads) that runs jobs inline on spawn.
 //!
-//! Later milestones add structured parallelism (`scope`/`parallel_for`),
-//! fibers (wait-without-blocking-a-worker), an async executor, named threads,
-//! NUMA/affinity, and deterministic replay.
+//! ## M1 scope (this build) — structured parallelism
+//! Built on the M0 pool and its help-on-wait join barrier:
+//! - [`TaskPool::scope`] / [`Scope`]: structured scopes that spawn *borrowed*
+//!   tasks and join them all before returning.
+//! - [`TaskPool::parallel_for`] / [`TaskPool::par_for_each`] /
+//!   [`TaskPool::par_for_each_mut`] / chunked variants: adaptive-grain data
+//!   parallelism.
+//! - [`TaskPool::reduce`]: parallel reduction with a deterministic tree-shaped
+//!   combine order.
+//! - [`TaskPool::prefix_sum`]: parallel inclusive scan.
+//!
+//! Later milestones add fibers (wait-without-blocking-a-worker), an async
+//! executor, named threads, NUMA/affinity, and deterministic replay.
 //!
 //! The crate contains no Unreal Engine source or derived code and depends on
 //! no `bevy_*` crate.
 
-#![forbid(unsafe_code)]
+// This crate is safe except for one audited lifetime erasure in `scope`; see
+// `scope.rs` for the soundness argument. The workspace denies `unsafe_code`, so
+// that single site carries a local `#[expect(unsafe_code, reason = ...)]`.
 
 mod counter;
 mod job;
+mod parallel;
 mod scheduler;
+mod scope;
 
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
 pub use counter::Counter;
+pub use scope::Scope;
 use scheduler::Shared;
 
 /// Configuration for a [`TaskPool`].
@@ -170,6 +185,12 @@ impl TaskPool {
         self.wait(&counter);
         let rb = rb_slot.lock().unwrap().take().expect("b did not complete");
         (ra, rb)
+    }
+
+    /// Push an already-boxed job directly onto the pool, waking a worker. Used
+    /// by the structured-parallelism scope, which manages its own counter.
+    pub(crate) fn push_job(&self, job: job::Job) {
+        self.shared.push(job);
     }
 }
 

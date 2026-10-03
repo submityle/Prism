@@ -4,6 +4,7 @@
 //! transformed with `m * v` and composition reads right-to-left (`a * b`
 //! applies `b` first).
 
+use crate::backend;
 use crate::quat::Quat;
 use crate::vec::{Vec2, Vec3, Vec4};
 use core::ops::{Add, Mul, Sub};
@@ -256,7 +257,13 @@ impl Mat4 {
     /// Transform a homogeneous 4D vector.
     #[inline]
     pub fn mul_vec4(self, v: Vec4) -> Vec4 {
-        self.x_axis * v.x + self.y_axis * v.y + self.z_axis * v.z + self.w_axis * v.w
+        let cols = [
+            self.x_axis.to_array(),
+            self.y_axis.to_array(),
+            self.z_axis.to_array(),
+            self.w_axis.to_array(),
+        ];
+        Vec4::from_array(backend::mat4_mul_vec4(&cols, v.to_array()))
     }
     /// Transform a point (implicit `w = 1`, perspective divide applied).
     #[inline]
@@ -404,11 +411,24 @@ impl Mul for Mat4 {
     type Output = Mat4;
     #[inline]
     fn mul(self, r: Mat4) -> Mat4 {
+        let a = [
+            self.x_axis.to_array(),
+            self.y_axis.to_array(),
+            self.z_axis.to_array(),
+            self.w_axis.to_array(),
+        ];
+        let b = [
+            r.x_axis.to_array(),
+            r.y_axis.to_array(),
+            r.z_axis.to_array(),
+            r.w_axis.to_array(),
+        ];
+        let m = backend::mat4_mul(&a, &b);
         Mat4::from_cols(
-            self.mul_vec4(r.x_axis),
-            self.mul_vec4(r.y_axis),
-            self.mul_vec4(r.z_axis),
-            self.mul_vec4(r.w_axis),
+            Vec4::from_array(m[0]),
+            Vec4::from_array(m[1]),
+            Vec4::from_array(m[2]),
+            Vec4::from_array(m[3]),
         )
     }
 }

@@ -4,6 +4,7 @@
 //! Column vectors; matrices multiply on the left (`m * v`). The M0 backend is
 //! scalar and is the behavioural reference for later SIMD backends.
 
+use crate::backend;
 use crate::float::f32 as mf;
 use core::ops::{Add, AddAssign, Div, DivAssign, Index, IndexMut, Mul, MulAssign, Neg, Sub, SubAssign};
 
@@ -387,7 +388,7 @@ impl Vec3A {
     /// Dot product.
     #[inline]
     pub fn dot(self, rhs: Self) -> f32 {
-        self.x * rhs.x + self.y * rhs.y + self.z * rhs.z
+        backend::vec3_dot(self.to_simd(), rhs.to_simd())
     }
     /// Cross product.
     #[inline]
@@ -402,12 +403,22 @@ impl Vec3A {
     /// Euclidean length.
     #[inline]
     pub fn length(self) -> f32 {
-        mf::sqrt(self.length_squared())
+        backend::vec3_length(self.to_simd())
     }
     /// Normalize to unit length.
     #[inline]
     pub fn normalize(self) -> Self {
-        Self::from_vec3(self.to_vec3().normalize())
+        Self::from_simd(backend::vec3_normalize(self.to_simd()))
+    }
+    /// Pack into SIMD lane order `[x, y, z, 0]` (padding lane cleared).
+    #[inline]
+    fn to_simd(self) -> [f32; 4] {
+        [self.x, self.y, self.z, 0.0]
+    }
+    /// Rebuild from SIMD lanes `[x, y, z, _]` (padding lane dropped).
+    #[inline]
+    fn from_simd(a: [f32; 4]) -> Self {
+        Self { x: a[0], y: a[1], z: a[2] }
     }
     /// Linear interpolation.
     #[inline]
@@ -443,7 +454,7 @@ impl Vec4 {
     /// Dot product.
     #[inline]
     pub fn dot(self, rhs: Self) -> f32 {
-        self.x * rhs.x + self.y * rhs.y + self.z * rhs.z + self.w * rhs.w
+        backend::vec4_dot(self.to_simd(), rhs.to_simd())
     }
     /// Squared length.
     #[inline]
@@ -453,12 +464,22 @@ impl Vec4 {
     /// Euclidean length.
     #[inline]
     pub fn length(self) -> f32 {
-        mf::sqrt(self.length_squared())
+        backend::vec4_length(self.to_simd())
     }
     /// Normalize to unit length.
     #[inline]
     pub fn normalize(self) -> Self {
-        self * (1.0 / self.length())
+        Self::from_simd(backend::vec4_normalize(self.to_simd()))
+    }
+    /// Pack into SIMD lane order `[x, y, z, w]`.
+    #[inline]
+    fn to_simd(self) -> [f32; 4] {
+        [self.x, self.y, self.z, self.w]
+    }
+    /// Rebuild from SIMD lanes `[x, y, z, w]`.
+    #[inline]
+    fn from_simd(a: [f32; 4]) -> Self {
+        Self { x: a[0], y: a[1], z: a[2], w: a[3] }
     }
     /// True if all components are finite.
     #[inline]
@@ -552,8 +573,97 @@ macro_rules! impl_vec_ops {
 
 impl_vec_ops!(Vec2 { x, y });
 impl_vec_ops!(Vec3 { x, y, z });
-impl_vec_ops!(Vec3A { x, y, z });
-impl_vec_ops!(Vec4 { x, y, z, w });
+
+// `Vec3A` and `Vec4` route their hot operators through the SIMD backend. The
+// componentwise ops operate on 4 lanes (`Vec3A` keeps lane 3 at `0.0`), while
+// the per-scalar / assignment helpers reuse those routed operators.
+macro_rules! impl_simd_vec_ops {
+    ($ty:ty) => {
+        impl Add for $ty {
+            type Output = $ty;
+            #[inline]
+            fn add(self, r: $ty) -> $ty {
+                Self::from_simd(backend::vec4_add(self.to_simd(), r.to_simd()))
+            }
+        }
+        impl Sub for $ty {
+            type Output = $ty;
+            #[inline]
+            fn sub(self, r: $ty) -> $ty {
+                Self::from_simd(backend::vec4_sub(self.to_simd(), r.to_simd()))
+            }
+        }
+        impl Mul for $ty {
+            type Output = $ty;
+            #[inline]
+            fn mul(self, r: $ty) -> $ty {
+                Self::from_simd(backend::vec4_mul(self.to_simd(), r.to_simd()))
+            }
+        }
+        impl Div for $ty {
+            type Output = $ty;
+            #[inline]
+            fn div(self, r: $ty) -> $ty {
+                Self::from_simd(backend::vec4_div(self.to_simd(), r.to_simd()))
+            }
+        }
+        impl Mul<f32> for $ty {
+            type Output = $ty;
+            #[inline]
+            fn mul(self, s: f32) -> $ty {
+                Self::from_simd(backend::vec4_scale(self.to_simd(), s))
+            }
+        }
+        impl Mul<$ty> for f32 {
+            type Output = $ty;
+            #[inline]
+            fn mul(self, v: $ty) -> $ty {
+                v * self
+            }
+        }
+        impl Div<f32> for $ty {
+            type Output = $ty;
+            #[inline]
+            fn div(self, s: f32) -> $ty {
+                Self::from_simd(backend::vec4_div(self.to_simd(), [s, s, s, s]))
+            }
+        }
+        impl Neg for $ty {
+            type Output = $ty;
+            #[inline]
+            fn neg(self) -> $ty {
+                Self::from_simd(backend::vec4_scale(self.to_simd(), -1.0))
+            }
+        }
+        impl AddAssign for $ty {
+            #[inline]
+            fn add_assign(&mut self, r: $ty) {
+                *self = *self + r;
+            }
+        }
+        impl SubAssign for $ty {
+            #[inline]
+            fn sub_assign(&mut self, r: $ty) {
+                *self = *self - r;
+            }
+        }
+        impl MulAssign<f32> for $ty {
+            #[inline]
+            fn mul_assign(&mut self, s: f32) {
+                *self = *self * s;
+            }
+        }
+        impl DivAssign<f32> for $ty {
+            #[inline]
+            fn div_assign(&mut self, s: f32) {
+                *self = *self / s;
+            }
+        }
+    };
+}
+
+impl_simd_vec_ops!(Vec3A);
+impl_simd_vec_ops!(Vec4);
 
 impl Index<usize> for Vec3 {
     type Output = f32;

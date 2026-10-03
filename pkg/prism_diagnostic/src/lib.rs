@@ -27,10 +27,16 @@ pub mod macros;
 pub mod model;
 pub mod prelude;
 pub mod sink;
+pub mod span;
+pub mod trace;
 
 pub use filter::{max_level, set_max_level};
 pub use model::{Event, Field, FieldValue, Level};
 pub use sink::{clear_sink, set_sink, CaptureSink, ConsoleSink, FileSink, Sink};
+pub use span::Scope;
+pub use trace::{
+    export_chrome_string, export_chrome_to_file, RingBuffer, SpanRecord, ThreadTrace,
+};
 
 /// Macro support: build and dispatch an event from `format_args!` output.
 /// Not part of the stable surface; call the logging macros instead.

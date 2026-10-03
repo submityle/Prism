@@ -3,6 +3,7 @@
 //! Stored as `(x, y, z, w)` with `w` the scalar part. Rotations compose with
 //! `a * b` meaning "apply `b` then `a`", matching the matrix convention.
 
+use crate::backend;
 use crate::float::f32 as mf;
 use crate::vec::Vec3;
 use core::ops::{Mul, MulAssign, Neg};
@@ -117,10 +118,10 @@ impl Quat {
     /// Rotate a vector by this quaternion.
     #[inline]
     pub fn mul_vec3(self, v: Vec3) -> Vec3 {
-        // v + 2w(q x v) + 2 q x (q x v)
-        let u = Vec3::new(self.x, self.y, self.z);
-        let t = u.cross(v) * 2.0;
-        v + t * self.w + u.cross(t)
+        // Routed through the SIMD backend as `q * v * q^-1` (equivalent to the
+        // `v + 2w(q x v) + 2 q x (q x v)` form for unit quaternions).
+        let r = backend::quat_mul_vec3(self.to_array(), [v.x, v.y, v.z, 0.0]);
+        Vec3::new(r[0], r[1], r[2])
     }
 
     /// Normalized linear interpolation (cheap, approximate).
@@ -175,12 +176,8 @@ impl Mul for Quat {
     /// Hamilton product. `a * b` = apply `b` then `a`.
     #[inline]
     fn mul(self, r: Quat) -> Quat {
-        Quat {
-            w: self.w * r.w - self.x * r.x - self.y * r.y - self.z * r.z,
-            x: self.w * r.x + self.x * r.w + self.y * r.z - self.z * r.y,
-            y: self.w * r.y - self.x * r.z + self.y * r.w + self.z * r.x,
-            z: self.w * r.z + self.x * r.y - self.y * r.x + self.z * r.w,
-        }
+        let p = backend::quat_mul(self.to_array(), r.to_array());
+        Quat::from_xyzw(p[0], p[1], p[2], p[3])
     }
 }
 impl MulAssign for Quat {

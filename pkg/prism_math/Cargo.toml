@@ -9,11 +9,16 @@ publish = false
 
 [dependencies]
 libm = "0.2"
+# Sibling L1 crate reused for CPU feature probing (MathCaps backend detection).
+# default-features disabled so a no_std prism_math does not drag std into the
+# platform probe; the `std` feature below forwards through to it.
+prism_platform = { path = "../prism_platform", default-features = false }
 
 [features]
 default = ["std"]
-# Light up std-only conveniences and tests. The core facade is no_std.
-std = []
+# Light up std-only conveniences and runtime SIMD feature detection. The core
+# facade is no_std and falls back to compile-time `cfg(target_feature=...)`.
+std = ["prism_platform/std"]
 
 [lints]
 workspace = true

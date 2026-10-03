@@ -1,8 +1,9 @@
-//! # prism_time
+//! # `prism_time`
 //!
-//! Prism's time kernel. M0 provides the monotonic time source and the generic
-//! [`Time<T>`] clock with `delta`/`elapsed` accessors, plus the real-time
-//! context [`Real`].
+//! Prism's time kernel. It provides the monotonic time source and the generic
+//! [`Time<T>`] clock with `delta`/`elapsed` accessors, plus the three clock
+//! contexts [`Real`], [`Virtual`], and [`Fixed`] and a default-context switch
+//! ([`Clocks`]).
 //!
 //! ## Design
 //! A single generic [`Time<T>`] reuses one set of `delta`/`elapsed` accessors;
@@ -10,20 +11,40 @@
 //! a frame) and `f64` (long-session precision) deltas are exposed so long runs
 //! do not accumulate `f32` error.
 //!
+//! The three clocks mirror the design doc's separation:
+//! - [`Time<Real>`]: monotonic wall-clock time, unaffected by pause/scale.
+//! - [`Time<Virtual>`]: game time with time dilation (scale) and pause, plus a
+//!   max-delta clamp that guards against the fixed-step spiral of death.
+//! - [`Time<Fixed>`]: a deterministic fixed-timestep accumulator driven by the
+//!   virtual delta; it exposes how many fixed steps to run and the leftover
+//!   `overstep` (interpolation alpha).
+//!
+//! [`Clocks`] bundles all three and exposes a context-less default [`Time<()>`]
+//! that the app points at `Virtual` during variable update and at `Fixed`
+//! around the fixed-update schedule, so a system can call `delta_secs()` and
+//! get the correct value without naming a context.
+//!
 //! ## Milestone status (per the design-doc roadmap)
-//! - **M0 (this crate, done):** monotonic [`Instant`]/[`Duration`], unit
-//!   conversions, and [`Time<Real>`] with monotonic/advancement tests.
-//! - **M1+ (planned):** `Time<Virtual>` (scale/pause) and `Time<Fixed>`,
-//!   fixed-step accumulator with death-spiral clamping, timers/stopwatch,
-//!   rational/fixed-point deterministic stepping, and network clocks.
+//! - **M0 (done):** monotonic [`Instant`]/[`Duration`], unit conversions, and
+//!   [`Time<Real>`] with monotonic/advancement tests.
+//! - **M1 (this crate, done):** [`Time<Virtual>`] (scale/pause/clamp),
+//!   [`Time<Fixed>`] (accumulator + overstep), and the default-context switch.
+//! - **M2+ (planned):** timers/stopwatch, rational/fixed-point deterministic
+//!   stepping, smoothing, and network clocks.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
 
+mod clock;
+mod fixed;
 mod instant;
+mod virtual_time;
 
+pub use clock::{Clocks, DefaultSource};
 pub use core::time::Duration;
+pub use fixed::Fixed;
 pub use instant::Instant;
+pub use virtual_time::Virtual;
 
 /// Marker for a time context, selecting advancement semantics.
 pub trait TimeKind: Default {}
@@ -36,6 +57,10 @@ pub struct Real {
 }
 
 impl TimeKind for Real {}
+
+/// The context-less default clock. Its readings are copied from whichever
+/// context [`Clocks`] has made active (see [`Clocks::set_source`]).
+impl TimeKind for () {}
 
 /// A clock. The context `T` decides how it advances; the accessors below are
 /// shared across all clock kinds.
@@ -103,9 +128,10 @@ impl<T: TimeKind> Time<T> {
     }
 
     /// Advance the shared accessors by `delta`. Used by every context after it
-    /// has computed its own step.
+    /// has computed its own step. Private so each context exposes its own
+    /// semantic entry point (e.g. [`Time::<Virtual>::advance_by`]).
     #[inline]
-    fn advance_by(&mut self, delta: Duration) {
+    fn advance_generic(&mut self, delta: Duration) {
         self.delta = delta;
         self.elapsed = self.elapsed.saturating_add(delta);
         self.delta_secs = delta.as_secs_f32();
@@ -143,13 +169,13 @@ impl Time<Real> {
             }
         };
         self.context.last_update = Some(instant);
-        self.advance_by(delta);
+        self.advance_generic(delta);
     }
 
     /// Advance by an explicit delta (e.g. for a headless/fixed feeder).
     #[inline]
     pub fn update_with_delta(&mut self, delta: Duration) {
-        self.advance_by(delta);
+        self.advance_generic(delta);
     }
 
     /// The instant of the first update, if any.
@@ -161,7 +187,7 @@ impl Time<Real> {
 
 /// Common imports.
 pub mod prelude {
-    pub use crate::{Duration, Instant, Real, Time};
+    pub use crate::{Clocks, DefaultSource, Duration, Fixed, Instant, Real, Time, Virtual};
 }
 
 #[cfg(test)]
