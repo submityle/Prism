@@ -19,9 +19,11 @@
 //!                      form is used,
 //! * top of the block   the shared weight integer sequence (bit-reversed).
 //!
-//! Only the single-plane LDR subset is handled here; multi-partition dual-plane
-//! and any HDR colour format return an [`AstcError`] so no unsupported block is
-//! decoded to approximate pixels. Those are later milestones.
+//! Both single-plane and dual-plane LDR blocks are handled here (dual-plane is
+//! legal only for two and three partitions -- the ASTC spec forbids four-way
+//! dual-plane, which astcenc also rejects). Any HDR colour format returns an
+//! [`AstcError`] so no unsupported block is decoded to approximate pixels; HDR
+//! endpoints are a later milestone.
 //!
 //! Decode is pure integer arithmetic -- no AI/ML path.
 
@@ -31,7 +33,7 @@ use super::block_reader::read_bits;
 use super::cem::{cem_integer_count, cem_is_ldr, unpack_endpoints};
 use super::color_unquant::{color_quant_num_levels, unquant_color};
 use super::endpoints::Endpoints;
-use super::infill::infill_weights_4x4;
+use super::infill::{infill_dual_plane_4x4, infill_weights_4x4};
 use super::quant_mode::{color_quant_level, QUANT_6};
 use super::single_partition::lerp_component;
 use super::AstcError;
@@ -49,10 +51,10 @@ const COLOR_BITS_ARR: [i32; 5] = [-1, 111, 99, 99, 99];
 ///
 /// # Errors
 /// Returns an [`AstcError`] for any block outside the supported subset: a
-/// single-partition block (handled elsewhere), a dual-plane block, an
-/// oversized weight grid, an HDR colour format, or any encoding whose derived
-/// colour quant level is below QUANT_6. No unsupported block is decoded to
-/// approximate pixels.
+/// single-partition block (handled elsewhere), a four-partition dual-plane
+/// block (forbidden by the spec), an oversized weight grid, an HDR colour
+/// format, or any encoding whose derived colour quant level is below QUANT_6.
+/// No unsupported block is decoded to approximate pixels.
 pub(super) fn decode_multi_partition_4x4_ldr(block: &[u8; 16]) -> Result<[[u8; 4]; 16], AstcError> {
     let mode = (u16::from(block[1]) << 8 | u16::from(block[0])) & 0x07FF;
     let bm = decode_block_mode_2d(mode).ok_or(AstcError::UnsupportedBlockMode)?;
@@ -63,14 +65,15 @@ pub(super) fn decode_multi_partition_4x4_ldr(block: &[u8; 16]) -> Result<[[u8; 4
         return Err(AstcError::UnsupportedBlockMode);
     }
 
-    // Multi-partition dual-plane is a later milestone; reject it rather than
-    // mis-decode. (astcenc also forbids dual-plane with four partitions.)
-    if bm.dual_plane {
+    let partition_count = (read_bits(block, 11, 2) + 1) as i32;
+    if !(2..=4).contains(&partition_count) {
         return Err(AstcError::UnsupportedBlockMode);
     }
 
-    let partition_count = (read_bits(block, 11, 2) + 1) as i32;
-    if !(2..=4).contains(&partition_count) {
+    // Dual-plane weights with four partitions are forbidden by the ASTC spec
+    // (astcenc returns an error block for this combination). Two- and
+    // three-partition dual-plane are valid and handled below.
+    if bm.dual_plane && partition_count == 4 {
         return Err(AstcError::UnsupportedBlockMode);
     }
 
@@ -129,7 +132,13 @@ pub(super) fn decode_multi_partition_4x4_ldr(block: &[u8; 16]) -> Result<[[u8; 4
         return Err(AstcError::Reserved);
     }
 
-    let color_bits = COLOR_BITS_ARR[pc] - bits_for_weights as i32 - effective_highpart_size as i32;
+    let mut color_bits =
+        COLOR_BITS_ARR[pc] - bits_for_weights as i32 - effective_highpart_size as i32;
+    if bm.dual_plane {
+        // The dual-plane colour component selector steals two bits from the
+        // colour budget (astcenc `color_bits -= 2`).
+        color_bits -= 2;
+    }
     if color_bits < 0 {
         return Err(AstcError::Reserved);
     }
@@ -173,21 +182,55 @@ pub(super) fn decode_multi_partition_4x4_ldr(block: &[u8; 16]) -> Result<[[u8; 4
 
     // --- Per-texel partition dispatch + interpolation ----------------------
     // 4x4 has 16 texels (< 32) so the small-block coordinate bias is active.
-    let weights = infill_weights_4x4(block, bm.weights_x, bm.weights_y, bm.weight_levels)?;
     let mut out = [[0u8; 4]; 16];
-    for y in 0..4i32 {
-        for x in 0..4i32 {
-            let texel = (y * 4 + x) as usize;
-            let part =
-                super::partition::select_partition(seed, x, y, 0, partition_count, true) as usize;
-            let ep = &endpoints[part];
-            let w = u32::from(weights[texel]);
-            out[texel] = [
-                lerp_component(ep.e0[0], ep.e1[0], w),
-                lerp_component(ep.e0[1], ep.e1[1], w),
-                lerp_component(ep.e0[2], ep.e1[2], w),
-                lerp_component(ep.e0[3], ep.e1[3], w),
-            ];
+    if bm.dual_plane {
+        // Two interleaved weight planes plus a 2-bit colour component selector
+        // (CCS). The CCS sits immediately below the weight region and, when the
+        // per-partition CEM form is used, below its high part as well -- this is
+        // astcenc's final `below_weights_pos - 2`
+        // (`128 - bits_for_weights - effective_highpart_size - 2`). The selected
+        // channel interpolates with plane 1; the other three use plane 0.
+        let ccs = read_bits(
+            block,
+            128 - bits_for_weights - effective_highpart_size - 2,
+            2,
+        );
+        let (plane0, plane1) =
+            infill_dual_plane_4x4(block, bm.weights_x, bm.weights_y, bm.weight_levels)?;
+        for y in 0..4i32 {
+            for x in 0..4i32 {
+                let texel = (y * 4 + x) as usize;
+                let part = super::partition::select_partition(seed, x, y, 0, partition_count, true)
+                    as usize;
+                let ep = &endpoints[part];
+                let mut px = [0u8; 4];
+                for (c, p) in px.iter_mut().enumerate() {
+                    let w = u32::from(if c as u32 == ccs {
+                        plane1[texel]
+                    } else {
+                        plane0[texel]
+                    });
+                    *p = lerp_component(ep.e0[c], ep.e1[c], w);
+                }
+                out[texel] = px;
+            }
+        }
+    } else {
+        let weights = infill_weights_4x4(block, bm.weights_x, bm.weights_y, bm.weight_levels)?;
+        for y in 0..4i32 {
+            for x in 0..4i32 {
+                let texel = (y * 4 + x) as usize;
+                let part = super::partition::select_partition(seed, x, y, 0, partition_count, true)
+                    as usize;
+                let ep = &endpoints[part];
+                let w = u32::from(weights[texel]);
+                out[texel] = [
+                    lerp_component(ep.e0[0], ep.e1[0], w),
+                    lerp_component(ep.e0[1], ep.e1[1], w),
+                    lerp_component(ep.e0[2], ep.e1[2], w),
+                    lerp_component(ep.e0[3], ep.e1[3], w),
+                ];
+            }
         }
     }
     Ok(out)
@@ -213,16 +256,18 @@ mod tests {
     }
 
     #[test]
-    fn dual_plane_multi_partition_is_rejected() {
-        // Mode 583 is a dual-plane 4x4 mode; with two partitions this is out of
-        // scope for the single-plane milestone and must error rather than
-        // mis-decode.
+    fn dual_plane_four_partition_is_rejected() {
+        // Mode 1089 is a legal dual-plane 4x4 grid. Two- and three-partition
+        // dual-plane are supported, but four-partition dual-plane is forbidden
+        // by the ASTC spec (astcenc returns an error block), so it must be
+        // rejected rather than mis-decoded.
         let mut block = [0u8; 16];
-        let mode = 583u16;
+        let mode = 1089u16;
         block[0] = mode as u8;
         block[1] = (mode >> 8) as u8;
-        block[1] |= 1 << 3; // partition count field => 2 partitions
+        // Partition-count field (bits 11-12) = 0b11 => four partitions.
+        block[1] |= 0b11 << 3;
         let r = decode_multi_partition_4x4_ldr(&block);
-        assert!(matches!(r, Err(AstcError::UnsupportedBlockMode)), "{r:?}");
+        assert_eq!(r, Err(AstcError::UnsupportedBlockMode), "{r:?}");
     }
 }
