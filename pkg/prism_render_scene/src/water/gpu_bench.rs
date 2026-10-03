@@ -45,7 +45,7 @@ use wgpu::{
     TextureViewDescriptor,
 };
 
-use super::abi::{GpuWaterSpectrumParams, GpuWaterSweParams};
+use super::abi::{GpuWaterFoamParams, GpuWaterSpectrumParams, GpuWaterSweParams};
 
 /// Generous upper bound (microseconds) for a single water compute pass over the
 /// benchmarked tile sizes. A real dispatch over an `N <= 512` grid completes far
@@ -506,6 +506,28 @@ fn time_dispatch(
     groups_y: u32,
     timer: &PassTimer,
 ) -> f64 {
+    // The common case: the kernel declares its resources on `group(0)`.
+    time_dispatch_at_group(
+        device, queue, pipeline, bind_group, 0, groups_x, groups_y, timer,
+    )
+}
+
+/// Warms then times a single compute dispatch whose single bind group is set
+/// at `group_index`. Kernels that declare their resources on a non-zero group
+/// (for example `water_foam_advect` on `@group(1)`) bind there while the
+/// auto-derived lower groups stay empty and unreferenced. Otherwise identical
+/// to [`time_dispatch`]: warm up untimed, then report the median of the timed
+/// runs bracketed by `timer`'s two timestamp slots.
+fn time_dispatch_at_group(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    pipeline: &wgpu::ComputePipeline,
+    bind_group: &wgpu::BindGroup,
+    group_index: u32,
+    groups_x: u32,
+    groups_y: u32,
+    timer: &PassTimer,
+) -> f64 {
     // Untimed warm-up so first-use compilation never lands in a sample.
     for _ in 0..WARMUP_RUNS {
         let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
@@ -517,7 +539,7 @@ fn time_dispatch(
                 timestamp_writes: None,
             });
             pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, bind_group, &[]);
+            pass.set_bind_group(group_index, bind_group, &[]);
             pass.dispatch_workgroups(groups_x, groups_y, 1);
         }
         queue.submit([encoder.finish()]);
@@ -537,7 +559,7 @@ fn time_dispatch(
                 timestamp_writes: Some(timer.writes()),
             });
             pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, bind_group, &[]);
+            pass.set_bind_group(group_index, bind_group, &[]);
             pass.dispatch_workgroups(groups_x, groups_y, 1);
         }
         encoder.resolve_query_set(&timer.query_set, 0..2, &timer.resolve, 0);
@@ -812,6 +834,206 @@ fn swe_step_pass_gpu_budget_is_measured() {
         assert!(
             step_us.is_finite() && step_us > 0.0 && step_us < MAX_PASS_MICROS,
             "SWE step @ {n}x{n} measured {step_us} us is not a healthy bounded timing"
+        );
+    }
+}
+
+// ===========================================================================
+// Foam advection + decay (`water_foam_advect`, water_surface.wesl @group(1))
+// ===========================================================================
+
+/// Builds a deterministic, non-trivial foam step for an `N x N` tile: a raised
+/// algebraic coverage bump over a low ambient sheet, a sheared surface-flow
+/// field (so the semi-Lagrangian backtrace lands on fractional cells and
+/// exercises the bilinear resample), and two additive reactive sources. This
+/// drives every branch of the step (advection, flow-aware decay, source
+/// injection, `0..=1` clamp) so the timed dispatch does the same work a
+/// production frame would. Timing depends only on the full domain being
+/// exercised, not on the exact amplitudes. Mirrors the shape of the parity
+/// suite's `gpu_tests::build_initial_foam`.
+fn foam_bench_state(n: u32) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
+    let nx = n as usize;
+    let nz = n as usize;
+    let count = nx * nz;
+    let mut density = vec![0.0_f32; count];
+    let mut u = vec![0.0_f32; count];
+    let mut v = vec![0.0_f32; count];
+    let cx = (nx as f32 - 1.0) * 0.5;
+    let cz = (nz as f32 - 1.0) * 0.5;
+    let mut z = 0usize;
+    while z < nz {
+        let mut x = 0usize;
+        while x < nx {
+            let i = z * nx + x;
+            let fx = x as f32 - cx;
+            let fz = z as f32 - cz;
+            let r2 = fx * fx + fz * fz;
+            let bump = (1.0 - r2 * 0.002).max(0.0);
+            density[i] = 0.15 + 0.7 * bump;
+            u[i] = 0.3 + 0.004 * fx;
+            v[i] = -0.2 + 0.003 * fz;
+            x += 1;
+        }
+        z += 1;
+    }
+    let mut sources = vec![0.0_f32; count];
+    sources[(nz / 2) * nx + (nx / 2)] = 0.4;
+    sources[(nz / 4) * nx + (nx / 4)] = 0.25;
+    (density, u, v, sources)
+}
+
+/// Times one `water_foam_advect` pass over an `N x N` tile and returns the
+/// median measured microseconds across [`TIMED_RUNS`] runs. The kernel declares
+/// its six resources on `@group(1)`, so the bind group is built from the
+/// pipeline's reflected `group(1)` layout and set at binding index `1` (the
+/// auto-derived `group(0)` is empty and referenced by nothing). The binding
+/// order matches the shader declaration exactly, so the timed pass is the same
+/// dispatch the sibling parity test (`gpu_tests::dispatch_foam`) already proved
+/// numerically faithful.
+fn measure_foam_advect(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    wgsl: &str,
+    entry: &str,
+    n: u32,
+) -> f64 {
+    let (density, u, v, sources) = foam_bench_state(n);
+    let scalar_bytes = (density.len() * size_of::<f32>()) as u64;
+
+    let module = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("bench_foam_advect"),
+        source: ShaderSource::Wgsl(wgsl.into()),
+    });
+    let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("bench_foam_advect"),
+        layout: None,
+        module: &module,
+        entry_point: Some(entry),
+        compilation_options: PipelineCompilationOptions::default(),
+        cache: None,
+    });
+
+    let storage_read = BufferUsages::STORAGE;
+    let foam_in = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("bench_foam_in"),
+        contents: bytemuck::cast_slice(&density),
+        usage: storage_read,
+    });
+    let foam_u = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("bench_foam_u"),
+        contents: bytemuck::cast_slice(&u),
+        usage: storage_read,
+    });
+    let foam_v = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("bench_foam_v"),
+        contents: bytemuck::cast_slice(&v),
+        usage: storage_read,
+    });
+    let foam_sources = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("bench_foam_sources"),
+        contents: bytemuck::cast_slice(&sources),
+        usage: storage_read,
+    });
+    let foam_out = device.create_buffer(&BufferDescriptor {
+        label: Some("bench_foam_out"),
+        size: scalar_bytes,
+        usage: BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    });
+
+    let params = GpuWaterFoamParams {
+        nx: n,
+        nz: n,
+        dx: 0.5,
+        dt: 0.016,
+        base_decay: 0.8,
+        persistence_floor: 0.1,
+        reference_speed: 2.0,
+        _pad: 0,
+    };
+    let param_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("bench_foam_params"),
+        contents: bytemuck::bytes_of(&params),
+        usage: BufferUsages::UNIFORM,
+    });
+
+    let layout = pipeline.get_bind_group_layout(1);
+    let bind_group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("bench_foam_bind_group"),
+        layout: &layout,
+        entries: &[
+            BindGroupEntry {
+                binding: 0,
+                resource: foam_in.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 1,
+                resource: foam_u.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 2,
+                resource: foam_v.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 3,
+                resource: foam_sources.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 4,
+                resource: foam_out.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 5,
+                resource: param_buf.as_entire_binding(),
+            },
+        ],
+    });
+
+    let groups = n.div_ceil(8);
+    let timer = PassTimer::new(device);
+    time_dispatch_at_group(
+        device,
+        queue,
+        &pipeline,
+        &bind_group,
+        1,
+        groups,
+        groups,
+        &timer,
+    )
+}
+
+/// Measures the foam advection + decay kernel (`water_foam_advect`) on a real
+/// device across [`BENCH_GRIDS`] and asserts each pass takes a finite, strictly
+/// positive, bounded time. The design doc (`docs/prism_water_engine_design_zh.md`
+/// §12) budgets dynamic foam advection at `<= 0.3 ms` as a **design target, not
+/// a measured value**; this turns that line into an actual on-device
+/// measurement. The printed medians are the numbers the design-target budget
+/// should be re-tuned against.
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the measured budget (and the skip notice) must reach the test log so it can be captured"
+)]
+fn foam_advect_pass_gpu_budget_is_measured() {
+    let Some((device, queue)) = try_timing_device() else {
+        eprintln!(
+            "foam_advect_pass_gpu_budget_is_measured: no timestamp-capable wgpu adapter, skipping on-device timing"
+        );
+        return;
+    };
+
+    let wgsl = compile_surface_wgsl();
+    let entry = find_entry_point(&wgsl, "foam_advect");
+
+    for n in BENCH_GRIDS {
+        let advect_us = measure_foam_advect(&device, &queue, &wgsl, &entry, n);
+        eprintln!(
+            "water foam advect budget @ {n}x{n}: advect = {advect_us:.2} us (measured, median of {TIMED_RUNS})"
+        );
+        assert!(
+            advect_us.is_finite() && advect_us > 0.0 && advect_us < MAX_PASS_MICROS,
+            "foam advect @ {n}x{n} measured {advect_us} us is not a healthy bounded timing"
         );
     }
 }
