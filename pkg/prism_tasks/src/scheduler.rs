@@ -24,6 +24,7 @@ use std::time::Duration;
 
 use crate::async_exec::RunnableTask;
 use crate::job::Job;
+use crate::priority::{PriorityCell, PriorityInbox};
 
 #[cfg(feature = "fibers")]
 use crate::fiber::stack::StackPool;
@@ -42,6 +43,9 @@ pub(crate) struct Shared {
     deques: Vec<Mutex<VecDeque<Job>>>,
     /// Global MPMC injection queue for jobs spawned off-pool.
     injector: Mutex<VecDeque<Job>>,
+    /// Priority-ordered inbox for jobs spawned into a [`crate::PriorityGroup`];
+    /// drained highest-priority-first ahead of the ordinary deques.
+    priority_inbox: PriorityInbox,
     /// Ready-to-poll async task harnesses for the single-threaded fallback,
     /// drained by [`crate::TaskPool::block_on`] (multi-threaded pools re-enqueue
     /// harnesses as ordinary jobs instead).
@@ -82,6 +86,7 @@ impl Shared {
         let shared = Self {
             deques,
             injector: Mutex::new(VecDeque::new()),
+            priority_inbox: PriorityInbox::new(),
             async_ready: Mutex::new(VecDeque::new()),
             queued: AtomicUsize::new(0),
             shutdown: AtomicBool::new(false),
@@ -112,6 +117,16 @@ impl Shared {
         core::ptr::from_ref::<Shared>(self) as usize
     }
 
+    /// Enqueue a prioritized job into the priority inbox under its group's
+    /// shared priority `cell`, then wake one idle worker. Drained ahead of the
+    /// ordinary deques by [`Self::find_task`], giving high-priority groups
+    /// precedence and letting in-place boosts implement priority inheritance.
+    pub(crate) fn push_prioritized(&self, cell: Arc<PriorityCell>, job: Job) {
+        self.priority_inbox.push(cell, job);
+        self.queued.fetch_add(1, Ordering::Release);
+        self.cvar.notify_one();
+    }
+
     /// Push a job onto the local worker deque if the caller is a worker of this
     /// pool, otherwise onto the global injector. Wakes one idle worker.
     pub(crate) fn push(&self, job: Job) {
@@ -130,6 +145,11 @@ impl Shared {
 
     /// Try to obtain one job: local LIFO, then injector FIFO, then steal.
     pub(crate) fn find_task(&self, hint: Option<usize>) -> Option<Job> {
+        // Highest-priority groups run first and may preempt ordinary work.
+        if let Some(job) = self.priority_inbox.pop_highest() {
+            self.queued.fetch_sub(1, Ordering::Release);
+            return Some(job);
+        }
         if let Some(idx) = hint
             && let Some(dq) = self.deques.get(idx)
             && let Some(job) = dq.lock().unwrap().pop_back()

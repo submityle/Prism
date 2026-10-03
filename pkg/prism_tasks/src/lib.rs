@@ -31,7 +31,28 @@
 //! - [`NamedThreads`] / [`ThreadCategory`]: Main / Render / IO / `AsyncCompute`
 //!   lanes dispatched independently of the compute pool.
 //!
-//! Later milestones add NUMA/affinity and deterministic replay.
+//! ## M4 scope (this build) — memory & NUMA
+//! - [`FrameArenas`] / [`FrameArena`]: per-worker bump arenas for zero-lock
+//!   frame allocation, placed on each worker's NUMA node when known.
+//! - [`CoreClassPolicy`] / [`TaskPool::new_frame_arenas`] / affinity planning:
+//!   best-effort worker pinning and NUMA-aware steal ordering.
+//!
+//! ## M5 scope (this build) — determinism & advanced control
+//! - [`FixedPartition`]: worker-count-independent, stable work partitioning,
+//!   the backbone of the deterministic primitives.
+//! - [`TaskPool::deterministic_reduce`] / [`tree_combine`]: a parallel reduce
+//!   whose result is **bit-identical** regardless of worker count or steal
+//!   order (fixed split + fixed-order combine tree).
+//! - [`DeterministicSession`] / [`ReplayRecord`]: record a run's split
+//!   decisions (seeded, serializable) and replay them to reproduce results.
+//! - [`Priority`] / [`PriorityGroup`] / [`TaskPool::wait_inherited`]: priority
+//!   lanes with priority inheritance on joins to avoid priority inversion.
+//! - [`CancelToken`] / [`TaskPool::par_for_each_cancellable`]: cooperative,
+//!   tree-structured cancellation that propagates through children.
+//! - [`Throttle`] / [`TaskPool::spawn_throttled`]: concurrency/rate throttling
+//!   of job submission.
+//! - [`JobHandle`] / [`TaskPool::spawn_catch`]: panic propagation — a panicking
+//!   job is caught and re-raised at the join point without poisoning the pool.
 //!
 //! The crate contains no Unreal Engine source or derived code and depends on
 //! no `bevy_*` crate.
@@ -47,15 +68,22 @@ extern crate alloc;
 mod affinity;
 mod arena;
 mod async_exec;
+mod cancel;
 mod counter;
 #[cfg(feature = "fibers")]
 mod fiber;
 mod job;
 mod named;
 mod numa;
+mod panic;
 mod parallel;
+mod partition;
+mod priority;
+mod reduce;
+mod replay;
 mod scheduler;
 mod scope;
+mod throttle;
 
 use alloc::sync::Arc;
 use std::thread::JoinHandle;
@@ -73,7 +101,14 @@ pub use numa::{
 };
 pub use prism_platform::AffinityError;
 pub use named::{NamedThreads, NamedThreadsConfig, ThreadCategory};
+pub use cancel::{CancelOutcome, CancelToken, Cancelled};
+pub use panic::JobHandle;
+pub use partition::{FixedPartition, DEFAULT_TARGET_CHUNKS};
+pub use priority::{Priority, PriorityCell, PriorityGroup};
+pub use reduce::tree_combine;
+pub use replay::{DeterministicSession, ReplayError, ReplayRecord, SplitEvent};
 pub use scope::Scope;
+pub use throttle::{Permit, Throttle};
 use scheduler::Shared;
 
 /// Configuration for a [`TaskPool`].
