@@ -73,6 +73,10 @@ pub use lod::{
     build_lod_chain, LodChainParams, LodSchedule, MeshLod, MeshLodChain, MIN_LOD_TRIANGLES,
 };
 
+pub mod connectivity;
+
+pub use connectivity::{split_connected_components, ConnectivityParams, MeshComponent};
+
 /// A handle into a [`ShapeRegistry`].
 ///
 /// This is a plain index handle; shapes are immutable once inserted, so no
