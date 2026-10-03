@@ -24,8 +24,8 @@
 //! # Honestly deferred
 //!
 //! The parallel conflict-graph executor and fiber job graph (§8.2–§8.3, which
-//! need `prism_tasks`) and the `States` state machine (§8.2/§14) are future
-//! milestones. They are absent, not stubbed; the per-system
+//! need `prism_tasks`) are future milestones. They are absent, not stubbed; the
+//! per-system
 //! [`Access`](crate::query::Access) recorded by the system layer already
 //! carries the information a parallel executor will need.
 
@@ -33,8 +33,11 @@ pub mod condition;
 pub mod config;
 pub mod executor;
 pub mod graph;
+pub mod label;
 pub mod phase;
+pub mod schedules;
 pub mod set;
+pub mod state;
 
 pub use condition::{
     and, not, or, resource_equals, resource_exists, run_once, BoxedCondition, Condition,
@@ -42,8 +45,11 @@ pub use condition::{
 pub use config::{IntoSystemConfigs, SetConfig, SystemConfig, SystemConfigs};
 pub use executor::SingleThreadedExecutor;
 pub use graph::Schedule;
+pub use label::{BoxedScheduleLabel, ScheduleLabel};
 pub use phase::Phase;
+pub use schedules::Schedules;
 pub use set::{SystemSet, SystemSetId};
+pub use state::{apply_state_transition, in_state, NextState, OnEnter, OnExit, State, States};
 
 #[cfg(test)]
 mod tests;

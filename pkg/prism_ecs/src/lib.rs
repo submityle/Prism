@@ -69,8 +69,9 @@ pub mod prelude {
     pub use crate::resource::{Resource, ResourceId, Resources};
     pub use crate::query::{With, Without};
     pub use crate::schedule::{
-        resource_equals, resource_exists, run_once, IntoSystemConfigs, Phase, Schedule, SetConfig,
-        SystemConfigs, SystemSet,
+        apply_state_transition, in_state, resource_equals, resource_exists, run_once,
+        IntoSystemConfigs, NextState, OnEnter, OnExit, Phase, Schedule, ScheduleLabel, Schedules,
+        SetConfig, State, States, SystemConfigs, SystemSet,
     };
     pub use crate::system::{
         IntoSystem, Local, Query, Res, ResMut, System, SystemParam,
