@@ -122,6 +122,27 @@ fn assert_parity(
                     "body[{k}].halfspace.offset"
                 );
             }
+            (
+                BodyCollider::Obb {
+                    center: cc,
+                    orientation: cq,
+                    half_extents: che,
+                },
+                BodyCollider::Obb {
+                    center: gc,
+                    orientation: gq,
+                    half_extents: ghe,
+                },
+            ) => {
+                assert_vec_close(cc, gc, &format!("body[{k}].obb.center"));
+                assert_vec_close(che, ghe, &format!("body[{k}].obb.half_extents"));
+                assert_vec_close(
+                    cq.xyz(),
+                    gq.xyz(),
+                    &format!("body[{k}].obb.orientation.xyz"),
+                );
+                assert!((cq.w - gq.w).abs() <= TOL, "body[{k}].obb.orientation.w");
+            }
             (c_other, g_other) => {
                 panic!("body[{k}] collider kind diverged: cpu={c_other:?} gpu={g_other:?}");
             }
@@ -174,6 +195,38 @@ fn capsule_matches_cpu() {
             p0: Vec3::new(-1.0, 0.0, 0.0),
             p1: Vec3::new(1.0, 0.0, 0.0),
             radius: 0.5,
+        },
+        1.0,
+    )];
+    assert_parity(
+        &ctx,
+        &kernel,
+        &positions,
+        &inverse_masses,
+        &bodies,
+        1.0 / 90.0,
+    );
+}
+
+#[test]
+fn obb_matches_cpu() {
+    let Some(ctx) = headless() else { return };
+    let kernel = GpuClothCoupling::new(&ctx);
+    // Particles inside and around an oriented box; two-way coupling moves both
+    // the particles and the (dynamic) body, so the correction must match the
+    // CPU golden for the `OBB` projection on both ends.
+    let orientation = glam::Quat::from_euler(glam::EulerRot::XYZ, 0.2, -0.5, 0.8);
+    let positions = [
+        Vec3::new(0.1, 0.05, -0.03),
+        Vec3::new(-0.2, 0.15, 0.1),
+        Vec3::new(0.9, 0.6, 0.5), // outside, untouched
+    ];
+    let inverse_masses = [1.0, 0.7, 1.2];
+    let bodies = [CouplingBody::new(
+        BodyCollider::Obb {
+            center: Vec3::ZERO,
+            orientation,
+            half_extents: Vec3::new(0.6, 0.4, 0.5),
         },
         1.0,
     )];

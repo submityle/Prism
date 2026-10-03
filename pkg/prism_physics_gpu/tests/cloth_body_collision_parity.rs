@@ -163,6 +163,41 @@ fn half_space_projection_matches_cpu() {
 }
 
 #[test]
+fn obb_projection_matches_cpu() {
+    let Some(ctx) = headless() else { return };
+    let kernel = GpuClothBodyCollision::new(&ctx);
+    let orientation = glam::Quat::from_euler(glam::EulerRot::XYZ, 0.3, -0.7, 1.1);
+    let colliders = [BodyCollider::Obb {
+        center: Vec3::new(0.2, -0.1, 0.4),
+        orientation,
+        half_extents: Vec3::new(0.8, 0.4, 0.6),
+    }];
+    let mut rng = Rng::new(0x0bb_face1);
+    // A mix of deep-interior, near-surface, and clearly-outside points so both
+    // the push-to-least-penetration face and the outside early-out are hit.
+    let positions: Vec<Vec3> = (0..96)
+        .map(|_| {
+            Vec3::new(
+                rng.range(-1.2, 1.2),
+                rng.range(-1.2, 1.2),
+                rng.range(-1.2, 1.2),
+            ) + Vec3::new(0.2, -0.1, 0.4)
+        })
+        .collect();
+    let inverse_masses = vec![1.0f32; positions.len()];
+    let cpu = cpu_cloth_body_collision(&positions, &inverse_masses, &positions, &colliders, 0.0);
+    let gpu = kernel.solve(
+        &ctx,
+        &positions,
+        &inverse_masses,
+        &positions,
+        &colliders,
+        0.0,
+    );
+    assert_fields_match(&cpu, &gpu);
+}
+
+#[test]
 fn multiple_colliders_last_wins_matches_cpu() {
     let Some(ctx) = headless() else { return };
     let kernel = GpuClothBodyCollision::new(&ctx);

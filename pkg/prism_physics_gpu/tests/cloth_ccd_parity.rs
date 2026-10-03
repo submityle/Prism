@@ -113,6 +113,14 @@ fn half_space(normal: Vec3, offset: f32) -> BodyCollider {
     BodyCollider::HalfSpace { normal, offset }
 }
 
+fn obb(center: Vec3, orientation: glam::Quat, half_extents: Vec3) -> BodyCollider {
+    BodyCollider::Obb {
+        center,
+        orientation,
+        half_extents,
+    }
+}
+
 const DT: f32 = 1.0 / 60.0;
 
 #[test]
@@ -181,6 +189,31 @@ fn tunnelling_through_half_space_is_caught() {
         &velocities,
         &inv_mass,
         &[half_space(Vec3::Y, 0.0)],
+        CcdParams::default(),
+        DT,
+        0.0,
+    );
+}
+
+#[test]
+fn tunnelling_through_obb_is_caught() {
+    let Some(ctx) = headless() else { return };
+    let kernel = GpuClothCcd::new(&ctx);
+    // Sweeps clean through an oriented box in one step; the swept segment must
+    // register the earliest slab entry exactly as the CPU golden does.
+    let orientation = glam::Quat::from_euler(glam::EulerRot::XYZ, 0.4, 0.9, -0.3);
+    let positions = [Vec3::new(2.4, 0.15, -0.1)];
+    let prev = [Vec3::new(-2.2, 0.15, -0.1)];
+    let velocities = [Vec3::ZERO];
+    let inv_mass = [1.0];
+    assert_parity(
+        &ctx,
+        &kernel,
+        &positions,
+        &prev,
+        &velocities,
+        &inv_mass,
+        &[obb(Vec3::ZERO, orientation, Vec3::new(0.7, 0.5, 0.6))],
         CcdParams::default(),
         DT,
         0.0,

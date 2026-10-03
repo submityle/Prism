@@ -27,14 +27,19 @@ const NO_HIT: f32 = 1.0e30;
 const COLLIDER_SPHERE: u32 = 0u;
 const COLLIDER_CAPSULE: u32 = 1u;
 const COLLIDER_HALF_SPACE: u32 = 2u;
+const COLLIDER_OBB: u32 = 3u;
 
 struct Collider {
     kind: u32,
     radius: f32,
     pad0: u32,
     pad1: u32,
+    // sphere center / capsule endpoint 0 / half-space normal / box center.
     p0: vec4<f32>,
+    // capsule endpoint 1 / box half-extents.
     p1: vec4<f32>,
+    // box orientation quaternion (x, y, z, w); unused for other primitives.
+    p2: vec4<f32>,
 };
 
 struct Params {
@@ -210,12 +215,74 @@ fn capsule_toi(
 }
 
 // Dispatches the swept TOI test by collider discriminant.
+// Rotates `v` by the unit quaternion `q` (xyzw). Scalar Hamilton form.
+fn quat_rotate(q: vec4<f32>, v: vec3<f32>) -> vec3<f32> {
+    let b = q.xyz;
+    let w = q.w;
+    return v * (w * w - dot(b, b)) + b * (2.0 * dot(v, b)) + cross(b, v) * (2.0 * w);
+}
+
+// Rotates `v` by the inverse (conjugate) of the unit quaternion `q`
+// (world -> box-local).
+fn quat_rotate_inv(q: vec4<f32>, v: vec3<f32>) -> vec3<f32> {
+    return quat_rotate(vec4<f32>(-q.xyz, q.w), v);
+}
+
+// Earliest time in [0, 1] at which the segment `prev -> curr` enters the
+// oriented box `(center, orientation, half_extents)`, or `NO_HIT`. Standard
+// three-slab ray/box clip in the box-local frame. Mirrors `obb_toi` in
+// prism_physics_core: any non-positive half extent makes the box inert.
+fn obb_toi(
+    prev: vec3<f32>,
+    curr: vec3<f32>,
+    center: vec3<f32>,
+    orientation: vec4<f32>,
+    half_extents: vec3<f32>,
+) -> f32 {
+    if (half_extents.x <= 0.0 || half_extents.y <= 0.0 || half_extents.z <= 0.0) {
+        return NO_HIT;
+    }
+    let p = quat_rotate_inv(orientation, prev - center);
+    let d = quat_rotate_inv(orientation, curr - prev);
+    var t_enter = -3.4028235e38;
+    var t_exit = 3.4028235e38;
+    for (var axis = 0; axis < 3; axis = axis + 1) {
+        let he = half_extents[axis];
+        let pa = p[axis];
+        let da = d[axis];
+        if (abs(da) <= EPS_COEF) {
+            // Parallel to this slab: a start outside the slab can never enter.
+            if (pa < -he || pa > he) {
+                return NO_HIT;
+            }
+            continue;
+        }
+        let inv_d = 1.0 / da;
+        let t1 = (-he - pa) * inv_d;
+        let t2 = (he - pa) * inv_d;
+        let t_near = min(t1, t2);
+        let t_far = max(t1, t2);
+        t_enter = max(t_enter, t_near);
+        t_exit = min(t_exit, t_far);
+        if (t_enter > t_exit) {
+            return NO_HIT;
+        }
+    }
+    if (t_exit < 0.0 || t_enter < 0.0 || t_enter > 1.0) {
+        return NO_HIT;
+    }
+    return t_enter;
+}
+
 fn collider_toi(c: Collider, prev: vec3<f32>, curr: vec3<f32>) -> f32 {
     if (c.kind == COLLIDER_SPHERE) {
         return sphere_toi(prev, curr, c.p0.xyz, c.radius);
     }
     if (c.kind == COLLIDER_CAPSULE) {
         return capsule_toi(prev, curr, c.p0.xyz, c.p1.xyz, c.radius);
+    }
+    if (c.kind == COLLIDER_OBB) {
+        return obb_toi(prev, curr, c.p0.xyz, c.p2, c.p1.xyz);
     }
     return half_space_toi(prev, curr, c.p0.xyz, c.radius);
 }
@@ -259,6 +326,83 @@ fn project_out_of_half_space(pos: vec3<f32>, normal: vec3<f32>, offset: f32) -> 
     return pos + normal * t;
 }
 
+// Projects `pos` out to the nearest face of the oriented box when strictly
+// inside, otherwise returns `pos`. Mirrors `project_out_of_obb` in
+// prism_physics_core.
+fn project_out_of_obb(
+    pos: vec3<f32>,
+    center: vec3<f32>,
+    orientation: vec4<f32>,
+    half_extents: vec3<f32>,
+) -> vec3<f32> {
+    if (half_extents.x <= 0.0 && half_extents.y <= 0.0 && half_extents.z <= 0.0) {
+        return pos;
+    }
+    let local = quat_rotate_inv(orientation, pos - center);
+    let a = abs(local);
+    if (a.x >= half_extents.x || a.y >= half_extents.y || a.z >= half_extents.z) {
+        return pos;
+    }
+    let pen = half_extents - a;
+    var local_out = local;
+    if (pen.x <= pen.y && pen.x <= pen.z) {
+        if (local.x >= 0.0) {
+            local_out.x = half_extents.x;
+        } else {
+            local_out.x = -half_extents.x;
+        }
+    } else if (pen.y <= pen.z) {
+        if (local.y >= 0.0) {
+            local_out.y = half_extents.y;
+        } else {
+            local_out.y = -half_extents.y;
+        }
+    } else {
+        if (local.z >= 0.0) {
+            local_out.z = half_extents.z;
+        } else {
+            local_out.z = -half_extents.z;
+        }
+    }
+    return center + quat_rotate(orientation, local_out);
+}
+
+// Outward normal of the oriented box face the surface point `surf` lies on, or
+// the zero vector when the box is degenerate. Mirrors `obb_face_normal` in
+// prism_physics_core: the face is the local axis whose `|local| / he` ratio is
+// largest among positive-extent axes.
+fn obb_face_normal(
+    center: vec3<f32>,
+    orientation: vec4<f32>,
+    half_extents: vec3<f32>,
+    surf: vec3<f32>,
+) -> vec3<f32> {
+    let local = quat_rotate_inv(orientation, surf - center);
+    var best_axis = -1;
+    var best_ratio = -3.4028235e38;
+    for (var axis = 0; axis < 3; axis = axis + 1) {
+        let he = half_extents[axis];
+        if (he <= 0.0) {
+            continue;
+        }
+        let ratio = abs(local[axis]) / he;
+        if (ratio > best_ratio) {
+            best_ratio = ratio;
+            best_axis = axis;
+        }
+    }
+    if (best_axis < 0) {
+        return vec3<f32>(0.0, 0.0, 0.0);
+    }
+    var local_normal = vec3<f32>(0.0, 0.0, 0.0);
+    if (local[best_axis] >= 0.0) {
+        local_normal[best_axis] = 1.0;
+    } else {
+        local_normal[best_axis] = -1.0;
+    }
+    return quat_rotate(orientation, local_normal);
+}
+
 // Projects `pos` onto the collider surface (the nearest feasible point).
 fn project_collider(c: Collider, pos: vec3<f32>) -> vec3<f32> {
     if (c.kind == COLLIDER_SPHERE) {
@@ -267,6 +411,9 @@ fn project_collider(c: Collider, pos: vec3<f32>) -> vec3<f32> {
     if (c.kind == COLLIDER_CAPSULE) {
         let closest = closest_point_on_segment(c.p0.xyz, c.p1.xyz, pos);
         return project_out_of_sphere(pos, closest, c.radius);
+    }
+    if (c.kind == COLLIDER_OBB) {
+        return project_out_of_obb(pos, c.p0.xyz, c.p2, c.p1.xyz);
     }
     return project_out_of_half_space(pos, c.p0.xyz, c.radius);
 }
@@ -280,6 +427,8 @@ fn outward_normal(c: Collider, surf: vec3<f32>) -> vec3<f32> {
     } else if (c.kind == COLLIDER_CAPSULE) {
         let closest = closest_point_on_segment(c.p0.xyz, c.p1.xyz, surf);
         n = surf - closest;
+    } else if (c.kind == COLLIDER_OBB) {
+        n = obb_face_normal(c.p0.xyz, c.p2, c.p1.xyz, surf);
     } else {
         n = c.p0.xyz;
     }

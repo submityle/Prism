@@ -28,6 +28,7 @@ const EPS_FRICTION: f32 = 1.0e-12;
 const COLLIDER_SPHERE: u32 = 0u;
 const COLLIDER_CAPSULE: u32 = 1u;
 const COLLIDER_HALF_SPACE: u32 = 2u;
+const COLLIDER_OBB: u32 = 3u;
 
 const WORKGROUP: u32 = 64u;
 
@@ -44,8 +45,10 @@ struct Params {
 
 // kind: COLLIDER_* discriminant.
 // radius: sphere/capsule radius, or half-space offset.
-// p0: sphere center / capsule endpoint 0 / half-space normal (w unused).
-// p1: capsule endpoint 1 (unused for sphere/half-space).
+// p0: sphere center / capsule endpoint 0 / half-space normal / box center
+//     (w unused).
+// p1: capsule endpoint 1 / box half-extents (unused for sphere/half-space).
+// p2: box orientation quaternion (x, y, z, w); unused for the other primitives.
 struct Collider {
     kind: u32,
     radius: f32,
@@ -53,6 +56,7 @@ struct Collider {
     pad1: u32,
     p0: vec4<f32>,
     p1: vec4<f32>,
+    p2: vec4<f32>,
 };
 
 // origin: xyz anchor point, w max behind-plane distance.
@@ -119,6 +123,61 @@ fn project_out_of_half_space(pos: vec3<f32>, normal: vec3<f32>, offset: f32) -> 
     return pos + normal * t;
 }
 
+// Rotates `v` by the unit quaternion `q` (xyzw). Scalar Hamilton form:
+// v' = v*(w*w - dot(b,b)) + b*(2*dot(v,b)) + cross(b,v)*(2*w), b = q.xyz.
+fn quat_rotate(q: vec4<f32>, v: vec3<f32>) -> vec3<f32> {
+    let b = q.xyz;
+    let w = q.w;
+    return v * (w * w - dot(b, b)) + b * (2.0 * dot(v, b)) + cross(b, v) * (2.0 * w);
+}
+
+// Rotates `v` by the inverse (conjugate, negated xyz) of the unit quaternion
+// `q`, i.e. maps world -> box-local.
+fn quat_rotate_inv(q: vec4<f32>, v: vec3<f32>) -> vec3<f32> {
+    return quat_rotate(vec4<f32>(-q.xyz, q.w), v);
+}
+
+// Projects `pos` out to the nearest face of the oriented box
+// `(center, orientation, half_extents)` when it lies strictly inside, otherwise
+// returns `pos` unchanged. Mirrors `project_out_of_obb` in prism_physics_core.
+fn project_out_of_obb(
+    pos: vec3<f32>,
+    center: vec3<f32>,
+    orientation: vec4<f32>,
+    half_extents: vec3<f32>,
+) -> vec3<f32> {
+    if (half_extents.x <= 0.0 && half_extents.y <= 0.0 && half_extents.z <= 0.0) {
+        return pos;
+    }
+    let local = quat_rotate_inv(orientation, pos - center);
+    let a = abs(local);
+    if (a.x >= half_extents.x || a.y >= half_extents.y || a.z >= half_extents.z) {
+        return pos;
+    }
+    let pen = half_extents - a;
+    var local_out = local;
+    if (pen.x <= pen.y && pen.x <= pen.z) {
+        if (local.x >= 0.0) {
+            local_out.x = half_extents.x;
+        } else {
+            local_out.x = -half_extents.x;
+        }
+    } else if (pen.y <= pen.z) {
+        if (local.y >= 0.0) {
+            local_out.y = half_extents.y;
+        } else {
+            local_out.y = -half_extents.y;
+        }
+    } else {
+        if (local.z >= 0.0) {
+            local_out.z = half_extents.z;
+        } else {
+            local_out.z = -half_extents.z;
+        }
+    }
+    return center + quat_rotate(orientation, local_out);
+}
+
 // Dispatches one collider's projection by discriminant.
 fn project_collider(c: Collider, pos: vec3<f32>) -> vec3<f32> {
     if (c.kind == COLLIDER_SPHERE) {
@@ -127,6 +186,9 @@ fn project_collider(c: Collider, pos: vec3<f32>) -> vec3<f32> {
     if (c.kind == COLLIDER_CAPSULE) {
         let closest = closest_point_on_segment(c.p0.xyz, c.p1.xyz, pos);
         return project_out_of_sphere(pos, closest, c.radius);
+    }
+    if (c.kind == COLLIDER_OBB) {
+        return project_out_of_obb(pos, c.p0.xyz, c.p2, c.p1.xyz);
     }
     // COLLIDER_HALF_SPACE
     return project_out_of_half_space(pos, c.p0.xyz, c.radius);

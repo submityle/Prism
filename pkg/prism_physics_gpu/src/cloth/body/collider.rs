@@ -25,16 +25,21 @@ pub const COLLIDER_SPHERE: u32 = 0;
 pub const COLLIDER_CAPSULE: u32 = 1;
 /// Discriminant for a packed half-space collider.
 pub const COLLIDER_HALF_SPACE: u32 = 2;
+/// Discriminant for a packed oriented-box (`OBB`) collider.
+pub const COLLIDER_OBB: u32 = 3;
 
 /// A body collider flattened for the `GPU`, mirroring the `WGSL` `Collider`
-/// struct (48 bytes, 16-byte aligned).
+/// struct (64 bytes, 16-byte aligned).
 ///
 /// The `kind` discriminant selects how the slots are read:
-/// - [`COLLIDER_SPHERE`]: `p0.xyz` = center, `radius` = radius, `p1` unused.
+/// - [`COLLIDER_SPHERE`]: `p0.xyz` = center, `radius` = radius, `p1`/`p2`
+///   unused.
 /// - [`COLLIDER_CAPSULE`]: `p0.xyz`/`p1.xyz` = segment endpoints, `radius` =
-///   inflation radius.
+///   inflation radius, `p2` unused.
 /// - [`COLLIDER_HALF_SPACE`]: `p0.xyz` = plane normal, `radius` = plane offset,
-///   `p1` unused.
+///   `p1`/`p2` unused.
+/// - [`COLLIDER_OBB`]: `p0.xyz` = center, `p1.xyz` = half-extents, `p2.xyzw` =
+///   orientation quaternion `(x, y, z, w)`, `radius` unused.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct GpuBodyCollider {
@@ -46,11 +51,18 @@ pub struct GpuBodyCollider {
     pub _pad0: u32,
     /// Padding to a 16-byte word.
     pub _pad1: u32,
-    /// Sphere center / capsule endpoint 0 / half-space normal (`w` unused).
+    /// Sphere center / capsule endpoint 0 / half-space normal / box center
+    /// (`w` unused).
     pub p0: [f32; 4],
-    /// Capsule endpoint 1 (`w` unused; unused for sphere/half-space).
+    /// Capsule endpoint 1 / box half-extents (`w` unused; unused for
+    /// sphere/half-space).
     pub p1: [f32; 4],
+    /// Box orientation quaternion `(x, y, z, w)`; unused (zeroed) for the other
+    /// primitives.
+    pub p2: [f32; 4],
 }
+
+const _: () = assert!(size_of::<GpuBodyCollider>() == 64);
 
 impl GpuBodyCollider {
     /// Flattens one authored [`BodyCollider`] into its `GPU` record.
@@ -64,6 +76,7 @@ impl GpuBodyCollider {
                 _pad1: 0,
                 p0: [center.x, center.y, center.z, 0.0],
                 p1: [0.0; 4],
+                p2: [0.0; 4],
             },
             BodyCollider::Capsule { p0, p1, radius } => GpuBodyCollider {
                 kind: COLLIDER_CAPSULE,
@@ -72,6 +85,7 @@ impl GpuBodyCollider {
                 _pad1: 0,
                 p0: [p0.x, p0.y, p0.z, 0.0],
                 p1: [p1.x, p1.y, p1.z, 0.0],
+                p2: [0.0; 4],
             },
             BodyCollider::HalfSpace { normal, offset } => GpuBodyCollider {
                 kind: COLLIDER_HALF_SPACE,
@@ -80,6 +94,20 @@ impl GpuBodyCollider {
                 _pad1: 0,
                 p0: [normal.x, normal.y, normal.z, 0.0],
                 p1: [0.0; 4],
+                p2: [0.0; 4],
+            },
+            BodyCollider::Obb {
+                center,
+                orientation,
+                half_extents,
+            } => GpuBodyCollider {
+                kind: COLLIDER_OBB,
+                radius: 0.0,
+                _pad0: 0,
+                _pad1: 0,
+                p0: [center.x, center.y, center.z, 0.0],
+                p1: [half_extents.x, half_extents.y, half_extents.z, 0.0],
+                p2: [orientation.x, orientation.y, orientation.z, orientation.w],
             },
         }
     }
@@ -173,6 +201,25 @@ mod tests {
         assert_eq!(c.kind, COLLIDER_HALF_SPACE);
         assert_eq!(c.radius, -2.0);
         assert_eq!(c.p0, [0.0, 1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn obb_packs_center_half_extents_and_orientation() {
+        use glam::Quat;
+        let orientation = Quat::from_rotation_z(core::f32::consts::FRAC_PI_2);
+        let c = GpuBodyCollider::from_collider(BodyCollider::Obb {
+            center: Vec3::new(1.0, 2.0, 3.0),
+            orientation,
+            half_extents: Vec3::new(0.5, 0.25, 0.75),
+        });
+        assert_eq!(c.kind, COLLIDER_OBB);
+        assert_eq!(c.radius, 0.0);
+        assert_eq!(c.p0, [1.0, 2.0, 3.0, 0.0]);
+        assert_eq!(c.p1, [0.5, 0.25, 0.75, 0.0]);
+        assert_eq!(
+            c.p2,
+            [orientation.x, orientation.y, orientation.z, orientation.w]
+        );
     }
 
     #[test]

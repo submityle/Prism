@@ -59,14 +59,14 @@ const WORKGROUP: usize = 64;
 const EPS_LEN_SQ: Real = 1.0e-12;
 
 /// Uniform parameters shared with `Params` in `shaders/cloth_coupling.wgsl`
-/// (64 bytes / 4 words plus the 48-byte collider record).
+/// (16 bytes / 4 words plus the 64-byte collider record).
 ///
 /// The field order mirrors the `WGSL` struct exactly; reordering silently
 /// corrupts the solve.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Params {
-    /// The body's current pose for this dispatch (48 bytes, 16-byte aligned).
+    /// The body's current pose for this dispatch (64 bytes, 16-byte aligned).
     collider: GpuBodyCollider,
     /// Number of addressable particles (positions length).
     particle_count: u32,
@@ -262,8 +262,9 @@ impl GpuClothCoupling {
 /// Returns `collider` translated by `delta`.
 ///
 /// Mirrors the private `translate_collider` in
-/// [`prism_physics_core`]'s coupling pass: spheres and capsules move their
-/// centers/endpoints rigidly, and a half-space shifts its `offset` along the
+/// [`prism_physics_core`]'s coupling pass: spheres, capsules, and oriented
+/// boxes move their centers/endpoints rigidly (an `OBB` keeps its orientation
+/// and half-extents), and a half-space shifts its `offset` along the
 /// (unchanged) normal by `normal.dot(delta)`.
 fn translate_collider(collider: BodyCollider, delta: Vec3) -> BodyCollider {
     match collider {
@@ -279,6 +280,15 @@ fn translate_collider(collider: BodyCollider, delta: Vec3) -> BodyCollider {
         BodyCollider::HalfSpace { normal, offset } => BodyCollider::HalfSpace {
             normal,
             offset: offset + normal.dot(delta),
+        },
+        BodyCollider::Obb {
+            center,
+            orientation,
+            half_extents,
+        } => BodyCollider::Obb {
+            center: center + delta,
+            orientation,
+            half_extents,
         },
     }
 }
