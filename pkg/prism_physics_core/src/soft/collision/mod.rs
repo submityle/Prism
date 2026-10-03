@@ -36,6 +36,7 @@
 mod body;
 mod ccd;
 mod convex;
+mod convex_mesh;
 mod coupling;
 mod friction;
 mod layers;
@@ -54,6 +55,7 @@ pub use body::{
 };
 pub use ccd::{capsule_toi, half_space_toi, resolve_ccd, sphere_toi, CcdParams};
 pub use convex::{ConvexProxy, Plane, MAX_CONVEX_PLANES};
+pub use convex_mesh::ConvexMesh;
 pub use coupling::{
     couple_particle_against_body, resolve_two_way_coupling, CouplingBody, CouplingContribution,
 };
