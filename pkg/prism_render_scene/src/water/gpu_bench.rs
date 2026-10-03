@@ -45,7 +45,9 @@ use wgpu::{
     TextureViewDescriptor,
 };
 
-use super::abi::{GpuPbfParams, GpuWaterFoamParams, GpuWaterSpectrumParams, GpuWaterSweParams};
+use super::abi::{
+    GpuMacParams, GpuPbfParams, GpuWaterFoamParams, GpuWaterSpectrumParams, GpuWaterSweParams,
+};
 
 /// Generous upper bound (microseconds) for a single water compute pass over the
 /// benchmarked tile sizes. A real dispatch over an `N <= 512` grid completes far
@@ -1296,5 +1298,380 @@ fn pbf_density_solve_pass_gpu_budget_is_measured() {
             solve_us.is_finite() && solve_us > 0.0 && solve_us < MAX_PASS_MICROS,
             "pbf density solve @ {count} particles measured {solve_us} us is not a healthy bounded timing"
         );
+    }
+}
+
+/// Cubic grid resolutions (`dim = [D, D, D]`) the staggered-`MAC` pressure
+/// projection is timed at. `16^3 = 4096` cells is a coarse interactive splash,
+/// `32^3 = 32768` cells (packing `~1e5` staggered faces) a production-scale
+/// `FLIP` pressure domain — the `~1e5` figure the design doc
+/// (`docs/prism_water_engine_design_zh.md` §12) budgets the `FLIP`/`PBF`
+/// solver against. Timing all three resolutions shows how each projection
+/// stage scales with the cell/face count the kernel launches over.
+const MAC_BENCH_DIMS: [u32; 3] = [16, 24, 32];
+
+/// Compiles `water_flip_mac.wesl` (the staggered-`MAC` projection kernels) and
+/// returns its `Wgsl` translation, mirroring [`compile_pbf_wgsl`].
+fn compile_flip_mac_wgsl() -> String {
+    let mut cache = ShaderCache::new((), keep_wgsl);
+    let id = AssetId::Uuid {
+        uuid: Uuid::from_u128(0x5052_4953_4d5f_4245_4e43_464d_4143_0001),
+    };
+    cache.set_shader(
+        id,
+        Shader::from_wesl(
+            include_str!("../shaders/water_flip_mac.wesl"),
+            "embedded://prism_render_scene/shaders/water_flip_mac.wesl",
+        ),
+    );
+    let module = cache
+        .get(0, id, &[])
+        .unwrap_or_else(|error| panic!("water_flip_mac.wesl failed to compile: {error}"));
+    (*module).clone()
+}
+
+/// `u`-face element count `(nx+1)*ny*nz`, mirroring `mac_u_count` in the shader.
+fn mac_u_count(dim: [u32; 3]) -> u32 {
+    (dim[0] + 1) * dim[1] * dim[2]
+}
+
+/// `v`-face element count `nx*(ny+1)*nz`.
+fn mac_v_count(dim: [u32; 3]) -> u32 {
+    dim[0] * (dim[1] + 1) * dim[2]
+}
+
+/// `w`-face element count `nx*ny*(nz+1)`.
+fn mac_w_count(dim: [u32; 3]) -> u32 {
+    dim[0] * dim[1] * (dim[2] + 1)
+}
+
+/// Total packed face count over the `[u | v | w]` blocks the shader indexes.
+fn mac_face_count(dim: [u32; 3]) -> u32 {
+    mac_u_count(dim) + mac_v_count(dim) + mac_w_count(dim)
+}
+
+/// Linear `u`-face index for `i in 0..=nx`, mirroring `mac_u_index`.
+fn mac_u_index(i: u32, j: u32, k: u32, dim: [u32; 3]) -> u32 {
+    (k * dim[1] + j) * (dim[0] + 1) + i
+}
+
+/// Linear `v`-face index for `j in 0..=ny`, mirroring `mac_v_index`.
+fn mac_v_index(i: u32, j: u32, k: u32, dim: [u32; 3]) -> u32 {
+    mac_u_count(dim) + (k * (dim[1] + 1) + j) * dim[0] + i
+}
+
+/// Linear `w`-face index for `k in 0..=nz`, mirroring `mac_w_index`.
+fn mac_w_index(i: u32, j: u32, k: u32, dim: [u32; 3]) -> u32 {
+    mac_u_count(dim) + mac_v_count(dim) + (k * dim[1] + j) * dim[0] + i
+}
+
+/// Seeds a staggered face field with a smooth low-frequency divergent flow plus
+/// a strong interior checkerboard component, mirroring `seed_mac_faces` in the
+/// parity suite. Boundary faces stay zero (the solid tank wall). Timing does not
+/// depend on the exact values, only on every interior face carrying real work
+/// for the divergence and projection sweeps to touch.
+fn mac_bench_faces(dim: [u32; 3]) -> Vec<f32> {
+    let mut faces = vec![0.0_f32; mac_face_count(dim) as usize];
+    let checker = 0.7_f32;
+    // u-faces.
+    let mut k = 0u32;
+    while k < dim[2] {
+        let mut j = 0u32;
+        while j < dim[1] {
+            let mut i = 0u32;
+            while i <= dim[0] {
+                if i != 0 && i != dim[0] {
+                    let smooth = 0.05 * (2.0 * i as f32 - j as f32 + 0.5 * k as f32);
+                    let sign = if (i + j + k) % 2 == 0 { 1.0 } else { -1.0 };
+                    faces[mac_u_index(i, j, k, dim) as usize] = smooth + sign * checker;
+                }
+                i += 1;
+            }
+            j += 1;
+        }
+        k += 1;
+    }
+    // v-faces.
+    k = 0;
+    while k < dim[2] {
+        let mut i = 0u32;
+        while i < dim[0] {
+            let mut j = 0u32;
+            while j <= dim[1] {
+                if j != 0 && j != dim[1] {
+                    let smooth = 0.04 * (i as f32 - 2.0 * j as f32 + k as f32);
+                    let sign = if (i + j + k) % 2 == 0 { 1.0 } else { -1.0 };
+                    faces[mac_v_index(i, j, k, dim) as usize] = smooth + sign * checker;
+                }
+                j += 1;
+            }
+            i += 1;
+        }
+        k += 1;
+    }
+    // w-faces.
+    let mut j = 0u32;
+    while j < dim[1] {
+        let mut i = 0u32;
+        while i < dim[0] {
+            let mut kk = 0u32;
+            while kk <= dim[2] {
+                if kk != 0 && kk != dim[2] {
+                    let smooth = 0.03 * (i as f32 + j as f32 - 2.0 * kk as f32);
+                    let sign = if (i + j + kk) % 2 == 0 { 1.0 } else { -1.0 };
+                    faces[mac_w_index(i, j, kk, dim) as usize] = smooth + sign * checker;
+                }
+                kk += 1;
+            }
+            i += 1;
+        }
+        j += 1;
+    }
+    faces
+}
+
+/// Builds the host-side [`GpuMacParams`] uniform for a cubic bench domain. The
+/// scalar grid spacing is unit (`dx = inv_dx = 1`) and the damped-`Jacobi`
+/// factor is a representative `0.8`; the measured dispatch time is independent
+/// of these values, only of the grid dimensions driving the launch size.
+fn mac_bench_params(dim: [u32; 3]) -> GpuMacParams {
+    let cell_count = dim[0] * dim[1] * dim[2];
+    GpuMacParams {
+        dim: [dim[0], dim[1], dim[2], cell_count],
+        inv_dx: 1.0,
+        dx: 1.0,
+        jacobi_omega: 0.8,
+        _pad: 0.0,
+    }
+}
+
+/// Warms then times a single compute dispatch over a three-dimensional
+/// workgroup grid, bound at `group(0)`. The staggered-`MAC` `mac_divergence`
+/// and `mac_pressure` kernels launch one invocation per cell on a
+/// `workgroup_size(4, 4, 4)` tile, so they need the `z` dispatch dimension that
+/// [`time_dispatch`] (fixed at `z = 1`) does not expose. Otherwise identical:
+/// untimed warm-up, then the median of [`TIMED_RUNS`] timed runs bracketed by
+/// `timer`'s two timestamp slots.
+fn time_dispatch_3d(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    pipeline: &wgpu::ComputePipeline,
+    bind_group: &wgpu::BindGroup,
+    groups_x: u32,
+    groups_y: u32,
+    groups_z: u32,
+    timer: &PassTimer,
+) -> f64 {
+    for _ in 0..WARMUP_RUNS {
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("bench_warmup_encoder"),
+        });
+        {
+            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: Some("bench_warmup_pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, bind_group, &[]);
+            pass.dispatch_workgroups(groups_x, groups_y, groups_z);
+        }
+        queue.submit([encoder.finish()]);
+    }
+    device
+        .poll(PollType::wait_indefinitely())
+        .expect("device poll should drain the warm-up submissions");
+
+    let mut samples = Vec::with_capacity(TIMED_RUNS);
+    for _ in 0..TIMED_RUNS {
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("bench_timed_encoder"),
+        });
+        {
+            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: Some("bench_timed_pass"),
+                timestamp_writes: Some(timer.writes()),
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, bind_group, &[]);
+            pass.dispatch_workgroups(groups_x, groups_y, groups_z);
+        }
+        encoder.resolve_query_set(&timer.query_set, 0..2, &timer.resolve, 0);
+        encoder.copy_buffer_to_buffer(&timer.resolve, 0, &timer.read, 0, timer.resolve.size());
+        queue.submit([encoder.finish()]);
+        samples.push(timer.elapsed_micros(device, queue));
+    }
+    median(samples)
+}
+
+/// Times the three staggered-`MAC` projection stages (`mac_divergence`,
+/// `mac_pressure` one `Jacobi` sweep, `mac_project`) over a cubic `dim` domain,
+/// returning their measured medians in microseconds. The three kernels share one
+/// bind group layout (`faces`, `divergence`, `pressure_in`, `pressure_out`,
+/// `mac_params` on `group(0)`); the cell-local stages dispatch over the
+/// `4x4x4`-tiled grid while the face-local projection dispatches linearly over
+/// the packed `[u | v | w]` faces at `workgroup_size(64)`.
+fn measure_mac_projection(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    wgsl: &str,
+    dim: [u32; 3],
+) -> (f64, f64, f64) {
+    let faces = mac_bench_faces(dim);
+    let cell_count = (dim[0] * dim[1] * dim[2]) as usize;
+    let cell_zeros = vec![0.0_f32; cell_count];
+    let params = mac_bench_params(dim);
+
+    let faces_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("bench_mac_faces"),
+        contents: bytemuck::cast_slice(&faces),
+        usage: BufferUsages::STORAGE,
+    });
+    let divergence_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("bench_mac_divergence"),
+        contents: bytemuck::cast_slice(&cell_zeros),
+        usage: BufferUsages::STORAGE,
+    });
+    let pressure_in = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("bench_mac_pressure_in"),
+        contents: bytemuck::cast_slice(&cell_zeros),
+        usage: BufferUsages::STORAGE,
+    });
+    let pressure_out = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("bench_mac_pressure_out"),
+        contents: bytemuck::cast_slice(&cell_zeros),
+        usage: BufferUsages::STORAGE,
+    });
+    let param_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("bench_mac_params"),
+        contents: bytemuck::bytes_of(&params),
+        usage: BufferUsages::UNIFORM,
+    });
+
+    let build = |entry: &str| {
+        let module = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("bench_flip_mac"),
+            source: ShaderSource::Wgsl(wgsl.into()),
+        });
+        let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some("bench_flip_mac"),
+            layout: None,
+            module: &module,
+            entry_point: Some(entry),
+            compilation_options: PipelineCompilationOptions::default(),
+            cache: None,
+        });
+        let layout = pipeline.get_bind_group_layout(0);
+        let bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("bench_flip_mac_bind_group"),
+            layout: &layout,
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: faces_buf.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: divergence_buf.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 2,
+                    resource: pressure_in.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 3,
+                    resource: pressure_out.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 4,
+                    resource: param_buf.as_entire_binding(),
+                },
+            ],
+        });
+        (pipeline, bind_group)
+    };
+
+    let timer = PassTimer::new(device);
+    let gx = dim[0].div_ceil(4);
+    let gy = dim[1].div_ceil(4);
+    let gz = dim[2].div_ceil(4);
+
+    let div_entry = find_entry_point(wgsl, "mac_divergence");
+    let (div_pipeline, div_bind) = build(&div_entry);
+    let divergence_us =
+        time_dispatch_3d(device, queue, &div_pipeline, &div_bind, gx, gy, gz, &timer);
+
+    let pressure_entry = find_entry_point(wgsl, "mac_pressure");
+    let (pressure_pipeline, pressure_bind) = build(&pressure_entry);
+    let pressure_us = time_dispatch_3d(
+        device,
+        queue,
+        &pressure_pipeline,
+        &pressure_bind,
+        gx,
+        gy,
+        gz,
+        &timer,
+    );
+
+    let project_entry = find_entry_point(wgsl, "mac_project");
+    let (project_pipeline, project_bind) = build(&project_entry);
+    let face_groups = mac_face_count(dim).div_ceil(64);
+    let project_us = time_dispatch(
+        device,
+        queue,
+        &project_pipeline,
+        &project_bind,
+        face_groups,
+        1,
+        &timer,
+    );
+
+    (divergence_us, pressure_us, project_us)
+}
+
+/// Measures the staggered-`MAC` incompressible pressure projection
+/// (`mac_divergence` -> `mac_pressure` -> `mac_project` in `water_flip_mac.wesl`)
+/// on a real device across [`MAC_BENCH_DIMS`] and asserts each stage takes a
+/// finite, strictly positive, bounded time. The design doc
+/// (`docs/prism_water_engine_design_zh.md` §12) budgets the `FLIP`/`PBF` sim at
+/// `<= 2-4 ms` for a local `~1e5`-element domain as a **design target, not a
+/// measured value**; this turns that line into an actual on-device measurement
+/// of the pressure solve — the hottest, least cache-friendly part of a `FLIP`
+/// step. The printed medians are the numbers the design-target budget should be
+/// re-tuned against.
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the measured budget (and the skip notice) must reach the test log so it can be captured"
+)]
+fn mac_projection_pass_gpu_budget_is_measured() {
+    let Some((device, queue)) = try_timing_device() else {
+        eprintln!(
+            "mac_projection_pass_gpu_budget_is_measured: no timestamp-capable wgpu adapter, skipping on-device timing"
+        );
+        return;
+    };
+
+    let wgsl = compile_flip_mac_wgsl();
+
+    for side in MAC_BENCH_DIMS {
+        let dim = [side, side, side];
+        let cells = side * side * side;
+        let faces = mac_face_count(dim);
+        let (divergence_us, pressure_us, project_us) =
+            measure_mac_projection(&device, &queue, &wgsl, dim);
+        eprintln!(
+            "water FLIP staggered-MAC projection budget @ {cells} cells / {faces} faces (dim {side}^3): divergence = {divergence_us:.2} us, pressure(1 Jacobi sweep) = {pressure_us:.2} us, project = {project_us:.2} us (measured, median of {TIMED_RUNS})"
+        );
+        for (label, micros) in [
+            ("mac_divergence", divergence_us),
+            ("mac_pressure", pressure_us),
+            ("mac_project", project_us),
+        ] {
+            assert!(
+                micros.is_finite() && micros > 0.0 && micros < MAX_PASS_MICROS,
+                "flip {label} @ {cells} cells measured {micros} us is not a healthy bounded timing"
+            );
+        }
     }
 }
