@@ -45,3 +45,6 @@ pub use world_cell::UnsafeWorldCell;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod change_detection_tests;

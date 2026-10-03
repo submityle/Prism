@@ -50,9 +50,13 @@ pub struct UnsafeWorldCell<'w> {
 }
 
 impl<'w> UnsafeWorldCell<'w> {
-    /// Wrap an exclusive `&mut World`. This is the entry point used by the
-    /// sequential schedule and the parallel executor, both of which own the one
-    /// live `&mut World`.
+    /// Wrap an exclusive `&mut World`, reading the world-global change ticks.
+    ///
+    /// Used by the parallel executor to build a per-wave base cell (later
+    /// retargeted per system via [`with_ticks`](Self::with_ticks)) and by unit
+    /// tests; the per-system executors thread explicit windows through
+    /// [`new_mutable_with_ticks`](Self::new_mutable_with_ticks) instead.
+    #[cfg(any(test, feature = "multi_thread"))]
     #[inline]
     pub(crate) fn new_mutable(world: &'w mut World) -> Self {
         let last_run = world.last_change_tick();
@@ -65,6 +69,44 @@ impl<'w> UnsafeWorldCell<'w> {
         }
     }
 
+    /// Wrap an exclusive `&mut World` with an explicit change-detection window.
+    ///
+    /// Used by both executors to thread a *per-system* `last_run` (the tick the
+    /// running system last completed) and `this_run` (a fresh world tick for
+    /// this run) rather than the world-global ticks `new_mutable` reads. This
+    /// is what makes `Added`/`Changed` observe exactly the writes a given system
+    /// has not yet seen (design §10).
+    #[inline]
+    pub(crate) fn new_mutable_with_ticks(
+        world: &'w mut World,
+        last_run: Tick,
+        this_run: Tick,
+    ) -> Self {
+        Self {
+            ptr: world as *mut World,
+            last_run,
+            this_run,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Return a copy of this cell retargeted to a different change-detection
+    /// window, keeping the same world pointer and lifetime.
+    ///
+    /// The parallel executor builds one base cell per wave and then hands each
+    /// concurrent system its own `(last_run, this_run)` view via this method, so
+    /// every system still sees a per-system change window even though the bodies
+    /// share one `&mut World` borrow.
+    #[cfg(feature = "multi_thread")]
+    #[inline]
+    pub(crate) fn with_ticks(self, last_run: Tick, this_run: Tick) -> Self {
+        Self {
+            ptr: self.ptr,
+            last_run,
+            this_run,
+            _marker: PhantomData,
+        }
+    }
 
     /// Start of the running system's change-detection window (exclusive).
     #[inline]
@@ -105,7 +147,7 @@ impl<'w> UnsafeWorldCell<'w> {
     /// The caller must guarantee that this is the *only* live borrow of the
     /// world for the whole of `'w`. Only exclusive systems (which the scheduler
     /// runs with no other system in flight) may call this, and only on a cell
-    /// created via [`new_mutable`](UnsafeWorldCell::new_mutable).
+    /// created via `new_mutable` / `new_mutable_with_ticks`.
     #[inline]
     pub unsafe fn world_mut(self) -> &'w mut World {
         // SAFETY: the caller guarantees this is the unique live borrow of the

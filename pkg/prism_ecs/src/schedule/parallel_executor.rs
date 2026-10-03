@@ -47,6 +47,7 @@ use alloc::vec::Vec;
 use hashbrown::HashMap;
 use prism_tasks::TaskPool;
 
+use crate::change::Tick;
 use crate::query::Access;
 use crate::schedule::ambiguity;
 use crate::schedule::graph::Schedule;
@@ -119,16 +120,35 @@ impl MultiThreadedExecutor {
                 should_run.push(eval_should_run(schedule, idx, &mut set_cache, world));
             }
 
+            // Assign each passing system its own change-detection window, in
+            // topological within-wave order, incrementing the world tick exactly
+            // as the single-threaded executor's `System::run` does. This keeps
+            // the per-system `(last_run, this_run)` values identical across both
+            // executors for an ambiguity-free schedule, so change detection is
+            // single-threaded-equivalent. Gated-off systems get an unused
+            // placeholder window and never increment the tick.
+            let mut windows: Vec<(Tick, Tick)> = Vec::with_capacity(wave.len());
+            for (slot, &idx) in wave.iter().enumerate() {
+                if should_run[slot] {
+                    let last_run = schedule.nodes[idx].system.get_last_run();
+                    let this_run = world.increment_change_tick();
+                    windows.push((last_run, this_run));
+                } else {
+                    windows.push((Tick::ZERO, Tick::ZERO));
+                }
+            }
+
             // Collect a raw pointer to each wave member's system. Distinct
             // indices make the pointers non-aliasing; we only ever hold the raw
             // pointers (not references) across the dispatch.
-            let mut tasks: Vec<(SendSystem, bool)> = Vec::with_capacity(wave.len());
+            let mut tasks: Vec<(SendSystem, bool, Tick, Tick)> = Vec::with_capacity(wave.len());
             for (slot, &idx) in wave.iter().enumerate() {
                 let system: *mut (dyn System<Out = ()> + 'static) = {
                     let boxed: &mut BoxedSystem = &mut schedule.nodes[idx].system;
                     &mut **boxed
                 };
-                tasks.push((SendSystem(system), should_run[slot]));
+                let (last_run, this_run) = windows[slot];
+                tasks.push((SendSystem(system), should_run[slot], last_run, this_run));
             }
 
             // --- Dispatch the passing bodies in parallel. The `&mut World`
@@ -137,11 +157,13 @@ impl MultiThreadedExecutor {
             {
                 let cell = UnsafeWorldCell::new_mutable(world);
                 pool.scope(|scope| {
-                    for (system, run) in &tasks {
+                    for (system, run, last_run, this_run) in &tasks {
                         if !*run {
                             continue;
                         }
-                        let cell = SendCell(cell);
+                        // Retarget the shared base cell to this system's own
+                        // change window before wrapping it for the task.
+                        let cell = SendCell(cell.with_ticks(*last_run, *this_run));
                         let system = SendSystem(system.0);
                         scope.spawn(move || {
                             // Re-bind the whole wrappers so the closure captures
@@ -164,10 +186,11 @@ impl MultiThreadedExecutor {
                 });
             }
 
-            // --- Sync point: flush deferred commands for the systems that ran,
-            // in topological order within the wave.
+            // --- Sync point: record each ran system's new `last_run` and flush
+            // its deferred commands, in topological order within the wave.
             for (slot, &idx) in wave.iter().enumerate() {
                 if should_run[slot] {
+                    schedule.nodes[idx].system.set_last_run(windows[slot].1);
                     schedule.nodes[idx].system.apply_deferred(world);
                 }
             }

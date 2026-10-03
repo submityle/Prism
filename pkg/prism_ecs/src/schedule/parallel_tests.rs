@@ -239,3 +239,71 @@ fn single_threaded_pool_runs_correctly() {
     schedule.run_parallel(&pool, &mut world);
     assert_eq!(world.resource::<Log>().0, alloc::vec![1, 2, 3]);
 }
+
+/// The multi-threaded executor must thread the same *per-system* change window
+/// as the single-threaded one: running an identical chained writer→observer
+/// schedule under `run` and `run_parallel` on two fresh worlds must produce
+/// byte-identical observations (design §10, M2 commit C2 — change detection is
+/// executor-independent).
+#[test]
+fn parallel_change_detection_matches_sequential() {
+    use crate::entity::Entity;
+    use crate::query::Changed;
+    use crate::system::{Local, Query};
+
+    #[derive(Debug, PartialEq, Clone, Copy)]
+    struct Cd(i32);
+    impl Component for Cd {}
+
+    #[derive(Debug, Default, PartialEq)]
+    struct Seen(Vec<usize>);
+    impl Resource for Seen {}
+
+    fn mutate_once(mut q: Query<&mut Cd>, mut done: Local<bool>) {
+        if !*done {
+            for mut c in q.iter_mut() {
+                c.0 += 1;
+            }
+            *done = true;
+        }
+    }
+    fn observe(q: Query<Entity, Changed<Cd>>, mut seen: ResMut<Seen>) {
+        seen.0.push(q.iter().count());
+    }
+
+    fn seed() -> World {
+        let mut world = World::new();
+        world.insert_resource(Seen::default());
+        world.spawn(Cd(0));
+        world.spawn(Cd(0));
+        world
+    }
+
+    // Single-threaded reference.
+    let mut seq_world = seed();
+    let mut seq = Schedule::new();
+    seq.add_systems((mutate_once, observe).chain());
+    seq.run(&mut seq_world);
+    seq.run(&mut seq_world);
+    seq.run(&mut seq_world);
+
+    // Parallel executor on an identically-seeded world.
+    let pool = TaskPool::with_threads(4);
+    let mut par_world = seed();
+    let mut par = Schedule::new();
+    par.add_systems((mutate_once, observe).chain());
+    par.run_parallel(&pool, &mut par_world);
+    par.run_parallel(&pool, &mut par_world);
+    par.run_parallel(&pool, &mut par_world);
+
+    assert_eq!(
+        seq_world.resource::<Seen>().0,
+        par_world.resource::<Seen>().0,
+        "per-system change window is identical under both executors"
+    );
+    assert_eq!(
+        par_world.resource::<Seen>().0,
+        alloc::vec![2, 0, 0],
+        "writer's mutation seen once, then stale"
+    );
+}

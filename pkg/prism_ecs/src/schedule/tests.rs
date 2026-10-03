@@ -297,3 +297,54 @@ fn assert_no_ambiguities_panics_on_conflict() {
     schedule.add_systems(push_b);
     schedule.assert_no_ambiguities(&mut world);
 }
+
+/// A chained writer→observer schedule proves per-system change windows under
+/// the single-threaded executor: the observer's `Changed<Cd>` filter sees the
+/// writer's mutation on the run it happens, then — once the writer stops
+/// writing — the observer's `last_run` advances and the change goes stale
+/// (design §10, M2 commit C2).
+#[test]
+fn chained_writer_observer_change_detection_is_per_system() {
+    use crate::component::Component;
+    use crate::entity::Entity;
+    use crate::query::Changed;
+    use crate::system::{Local, Query};
+
+    #[derive(Debug, PartialEq, Clone, Copy)]
+    struct Cd(i32);
+    impl Component for Cd {}
+
+    #[derive(Debug, Default, PartialEq)]
+    struct Seen(Vec<usize>);
+    impl Resource for Seen {}
+
+    fn mutate_once(mut q: Query<&mut Cd>, mut done: Local<bool>) {
+        if !*done {
+            for mut c in q.iter_mut() {
+                c.0 += 1;
+            }
+            *done = true;
+        }
+    }
+    fn observe(q: Query<Entity, Changed<Cd>>, mut seen: ResMut<Seen>) {
+        seen.0.push(q.iter().count());
+    }
+
+    let mut world = World::new();
+    world.insert_resource(Seen::default());
+    world.spawn(Cd(0));
+    world.spawn(Cd(0));
+
+    let mut schedule = Schedule::new();
+    schedule.add_systems((mutate_once, observe).chain());
+
+    schedule.run(&mut world);
+    schedule.run(&mut world);
+    schedule.run(&mut world);
+
+    assert_eq!(
+        world.resource::<Seen>().0,
+        alloc::vec![2, 0, 0],
+        "both entities seen once (writer's run), then stale"
+    );
+}

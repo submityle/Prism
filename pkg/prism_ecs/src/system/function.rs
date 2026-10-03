@@ -10,6 +10,7 @@ use alloc::boxed::Box;
 use core::any::type_name;
 use core::marker::PhantomData;
 
+use crate::change::Tick;
 use crate::query::Access;
 use crate::system::param::{SystemParam, SystemParamItem};
 use crate::system::world_cell::UnsafeWorldCell;
@@ -45,6 +46,19 @@ pub trait System: Send + Sync + 'static {
         false
     }
 
+    /// The tick this system last completed a run at (the exclusive lower bound
+    /// of its change-detection window). Defaults to [`Tick::ZERO`] for systems
+    /// that do not track change detection; [`FunctionSystem`] overrides it.
+    #[inline]
+    fn get_last_run(&self) -> Tick {
+        Tick::ZERO
+    }
+
+    /// Record the tick this system just ran at, so its next run observes only
+    /// writes made since. Called by the executors after a run completes.
+    #[inline]
+    fn set_last_run(&mut self, _last_run: Tick) {}
+
     /// Run the system body, fetching its params from `world`.
     ///
     /// # Safety
@@ -62,13 +76,19 @@ pub trait System: Send + Sync + 'static {
     /// deferred effects. This is the simple, always-sound entry point used by
     /// the sequential schedule.
     fn run(&mut self, world: &mut World) -> Self::Out {
+        // Per-system change window: `last_run` is where this system left off,
+        // `this_run` is a fresh world tick so writes made during this run (and
+        // by systems that ran since) land inside `(last_run, this_run]`.
+        let last_run = self.get_last_run();
+        let this_run = world.increment_change_tick();
         let out = {
-            let cell = UnsafeWorldCell::new_mutable(world);
+            let cell = UnsafeWorldCell::new_mutable_with_ticks(world, last_run, this_run);
             // SAFETY: `cell` is the only handle to `world` for this scope and no
             // other system runs concurrently here, so nothing aliases the
             // system's access.
             unsafe { self.run_unsafe(cell) }
         };
+        self.set_last_run(this_run);
         self.apply_deferred(world);
         out
     }
@@ -145,6 +165,8 @@ where
     param_state: Option<<F::Param as SystemParam>::State>,
     access: Access,
     name: &'static str,
+    /// Tick this system last completed at; threaded into its change window.
+    last_run: Tick,
     _marker: PhantomData<fn() -> Marker>,
 }
 
@@ -161,6 +183,7 @@ where
             param_state: None,
             access: Access::new(),
             name: type_name::<F>(),
+            last_run: Tick::ZERO,
             _marker: PhantomData,
         }
     }
@@ -190,6 +213,16 @@ where
     #[inline]
     fn access(&self) -> &Access {
         &self.access
+    }
+
+    #[inline]
+    fn get_last_run(&self) -> Tick {
+        self.last_run
+    }
+
+    #[inline]
+    fn set_last_run(&mut self, last_run: Tick) {
+        self.last_run = last_run;
     }
 
     #[inline]
