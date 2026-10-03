@@ -2869,3 +2869,393 @@ mod determinism_tests {
         assert!(app.input_recording::<i8>().is_none());
     }
 }
+
+// ---- state-machine depth (§11): computed / sub / scoped --------------------
+
+/// Integration tests for the design §11 state-machine depth features layered on
+/// the `prism_ecs` base states: computed states (derived each frame), sub-states
+/// (exist only while a parent mode is active), and state-scoped entities
+/// (auto-despawned when their owning mode leaves). All drive the real
+/// `StateTransition` phase through `App::update`, so they also pin the
+/// `Apply`-then-`Compute` ordering.
+mod state_depth_tests {
+    use super::*;
+
+    use prism_ecs::entity::Entity;
+
+    use crate::state::{ComputedStates, StateScoped, SubStates};
+
+    /// Shared edge log: records `OnEnter`/`OnExit` tags in the order they fire.
+    type Log = Arc<Mutex<Vec<&'static str>>>;
+
+    fn log() -> Log {
+        Arc::new(Mutex::new(Vec::new()))
+    }
+
+    fn drain(log: &Log) -> Vec<&'static str> {
+        core::mem::take(&mut *log.lock().unwrap())
+    }
+
+    /// Three-mode base state the depth features derive from.
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+    enum AppState {
+        #[default]
+        Menu,
+        InGame,
+        Paused,
+    }
+    impl States for AppState {}
+
+    /// A computed state derived from [`AppState`]: it exists only while the app
+    /// is actually in a session, and changes value between playing and paused.
+    /// `Menu` yields `None` (the computed state does not exist).
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+    enum Activity {
+        Playing,
+        Halted,
+    }
+    impl States for Activity {}
+    impl ComputedStates for Activity {
+        type SourceStates = AppState;
+        fn compute(source: &AppState) -> Option<Self> {
+            match source {
+                AppState::Menu => None,
+                AppState::InGame => Some(Activity::Playing),
+                AppState::Paused => Some(Activity::Halted),
+            }
+        }
+    }
+
+    fn log_activity_edges(app: &mut App, log: &Log) {
+        for (value, enter, exit) in [
+            (Activity::Playing, "enter:playing", "exit:playing"),
+            (Activity::Halted, "enter:halted", "exit:halted"),
+        ] {
+            let l = log.clone();
+            app.add_systems(OnEnter(value), move || l.lock().unwrap().push(enter));
+            let l = log.clone();
+            app.add_systems(OnExit(value), move || l.lock().unwrap().push(exit));
+        }
+    }
+
+    /// A computed state appears when its source enters a qualifying mode, runs
+    /// the matching `OnEnter`, changes value (exit-old then enter-new) when the
+    /// source moves between two qualifying modes, and disappears (exit-old then
+    /// resource removed) when the source leaves all qualifying modes.
+    #[test]
+    fn computed_state_appears_changes_and_disappears() {
+        let log = log();
+        let mut app = App::new();
+        app.insert_state(AppState::Menu)
+            .add_computed_state::<Activity>();
+        log_activity_edges(&mut app, &log);
+
+        // Frame 1: enter Menu. Activity does not exist, no edges fire.
+        app.update();
+        assert!(
+            app.world().get_resource::<State<Activity>>().is_none(),
+            "Activity must not exist while in Menu"
+        );
+        assert!(drain(&log).is_empty(), "no Activity edge while in Menu");
+
+        // Menu -> InGame: Activity appears as Playing.
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::InGame);
+        app.update();
+        assert_eq!(
+            app.world()
+                .get_resource::<State<Activity>>()
+                .map(|s| *s.get()),
+            Some(Activity::Playing),
+        );
+        assert_eq!(drain(&log), vec!["enter:playing"]);
+
+        // InGame -> Paused: Activity changes Playing -> Halted (exit then enter).
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::Paused);
+        app.update();
+        assert_eq!(
+            app.world()
+                .get_resource::<State<Activity>>()
+                .map(|s| *s.get()),
+            Some(Activity::Halted),
+        );
+        assert_eq!(drain(&log), vec!["exit:playing", "enter:halted"]);
+
+        // Paused -> Menu: Activity disappears (exit then resource removed).
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::Menu);
+        app.update();
+        assert!(
+            app.world().get_resource::<State<Activity>>().is_none(),
+            "Activity must be removed once source leaves all qualifying modes"
+        );
+        assert_eq!(drain(&log), vec!["exit:halted"]);
+    }
+
+    /// An unchanged source leaves a computed state untouched: no redundant
+    /// exit/enter edges fire on a frame where the derived value is identical.
+    #[test]
+    fn computed_state_is_stable_when_source_unchanged() {
+        let log = log();
+        let mut app = App::new();
+        app.insert_state(AppState::InGame)
+            .add_computed_state::<Activity>();
+        log_activity_edges(&mut app, &log);
+
+        app.update(); // enter InGame -> Activity::Playing appears
+        assert_eq!(drain(&log), vec!["enter:playing"]);
+
+        // No transition queued: Activity recomputes to the same value, silently.
+        app.update();
+        app.update();
+        assert_eq!(
+            app.world()
+                .get_resource::<State<Activity>>()
+                .map(|s| *s.get()),
+            Some(Activity::Playing),
+        );
+        assert!(
+            drain(&log).is_empty(),
+            "a stable computed state fires no edges"
+        );
+    }
+
+    /// A two-mode base state with a nested sub-machine scoped to `InGame`.
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+    enum Shell {
+        #[default]
+        Menu,
+        InGame,
+    }
+    impl States for Shell {}
+
+    /// Sub-state scoped to [`Shell::InGame`]; activates into `Explore`.
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+    enum InGameMode {
+        Explore,
+        Combat,
+    }
+    impl States for InGameMode {}
+    impl SubStates for InGameMode {
+        type SourceStates = Shell;
+        fn should_exist(source: &Shell) -> Option<Self> {
+            matches!(source, Shell::InGame).then_some(InGameMode::Explore)
+        }
+    }
+
+    fn log_ingame_edges(app: &mut App, log: &Log) {
+        for (value, enter, exit) in [
+            (InGameMode::Explore, "enter:explore", "exit:explore"),
+            (InGameMode::Combat, "enter:combat", "exit:combat"),
+        ] {
+            let l = log.clone();
+            app.add_systems(OnEnter(value), move || l.lock().unwrap().push(enter));
+            let l = log.clone();
+            app.add_systems(OnExit(value), move || l.lock().unwrap().push(exit));
+        }
+    }
+
+    /// A sub-state activates (entering its parent-provided initial) when the
+    /// parent enters the gating mode, honors queued transitions while active,
+    /// and fully deactivates (exit + resource removed) when the parent leaves.
+    #[test]
+    fn sub_state_activates_transitions_and_deactivates() {
+        let log = log();
+        let mut app = App::new();
+        app.insert_state(Shell::Menu).add_sub_state::<InGameMode>();
+        log_ingame_edges(&mut app, &log);
+
+        // Frame 1: Menu. Sub-state does not exist.
+        app.update();
+        assert!(
+            app.world().get_resource::<State<InGameMode>>().is_none(),
+            "sub-state must not exist while parent is Menu"
+        );
+        assert!(drain(&log).is_empty());
+
+        // Menu -> InGame: sub activates into its initial Explore.
+        app.world_mut()
+            .resource_mut::<NextState<Shell>>()
+            .set(Shell::InGame);
+        app.update();
+        assert_eq!(
+            app.world()
+                .get_resource::<State<InGameMode>>()
+                .map(|s| *s.get()),
+            Some(InGameMode::Explore),
+        );
+        assert_eq!(drain(&log), vec!["enter:explore"]);
+
+        // Queued transition while active: Explore -> Combat (exit then enter).
+        app.world_mut()
+            .resource_mut::<NextState<InGameMode>>()
+            .set(InGameMode::Combat);
+        app.update();
+        assert_eq!(
+            app.world()
+                .get_resource::<State<InGameMode>>()
+                .map(|s| *s.get()),
+            Some(InGameMode::Combat),
+        );
+        assert_eq!(drain(&log), vec!["exit:explore", "enter:combat"]);
+
+        // InGame -> Menu: parent leaves, whole sub-machine exits and is removed.
+        app.world_mut()
+            .resource_mut::<NextState<Shell>>()
+            .set(Shell::Menu);
+        app.update();
+        assert!(
+            app.world().get_resource::<State<InGameMode>>().is_none(),
+            "sub-state resource removed when parent leaves"
+        );
+        assert_eq!(drain(&log), vec!["exit:combat"]);
+    }
+
+    /// If gameplay pre-queues a specific entry value before the sub-state
+    /// activates, activation honors that queued value instead of the
+    /// parent-provided initial.
+    #[test]
+    fn sub_state_activation_honors_pre_queued_entry() {
+        let log = log();
+        let mut app = App::new();
+        app.insert_state(Shell::Menu).add_sub_state::<InGameMode>();
+        log_ingame_edges(&mut app, &log);
+
+        app.update(); // Menu; sub inactive.
+
+        // Pre-queue Combat and switch the parent into InGame in the same frame.
+        app.world_mut()
+            .resource_mut::<NextState<InGameMode>>()
+            .set(InGameMode::Combat);
+        app.world_mut()
+            .resource_mut::<NextState<Shell>>()
+            .set(Shell::InGame);
+        app.update();
+
+        assert_eq!(
+            app.world()
+                .get_resource::<State<InGameMode>>()
+                .map(|s| *s.get()),
+            Some(InGameMode::Combat),
+            "activation enters the pre-queued value, not the default initial",
+        );
+        assert_eq!(drain(&log), vec!["enter:combat"]);
+    }
+
+    /// A stale queued sub-state request made while the sub-state is inactive is
+    /// dropped, so it cannot leak into a later, unrelated activation.
+    #[test]
+    fn sub_state_clears_stale_request_while_inactive() {
+        let mut app = App::new();
+        app.insert_state(Shell::Menu).add_sub_state::<InGameMode>();
+
+        app.update(); // Menu; sub inactive.
+
+        // Queue a transition while inactive: it must be discarded, not retained.
+        app.world_mut()
+            .resource_mut::<NextState<InGameMode>>()
+            .set(InGameMode::Combat);
+        app.update(); // still Menu: the stale request is cleared.
+
+        // Now activate: should enter the parent-provided initial (Explore), not
+        // the stale Combat request from while it was inactive.
+        app.world_mut()
+            .resource_mut::<NextState<Shell>>()
+            .set(Shell::InGame);
+        app.update();
+        assert_eq!(
+            app.world()
+                .get_resource::<State<InGameMode>>()
+                .map(|s| *s.get()),
+            Some(InGameMode::Explore),
+            "stale inactive request must not survive to the next activation",
+        );
+    }
+
+    /// Count live entities carrying a `StateScoped<Shell>` tag.
+    fn scoped_entities(app: &mut App, entities: &[Entity]) -> usize {
+        entities
+            .iter()
+            .filter(|&&e| app.world().contains(e))
+            .count()
+    }
+
+    /// A state-scoped entity survives while its owning mode is current and is
+    /// despawned on the first `StateTransition` after that mode is no longer
+    /// current. Entities tagged for other modes are removed immediately.
+    #[test]
+    fn state_scoped_entity_despawns_when_mode_leaves() {
+        let mut app = App::new();
+        app.insert_state(Shell::Menu)
+            .enable_state_scoped_entities::<Shell>();
+
+        app.update(); // current mode settles to Menu.
+
+        // Tag one entity for Menu (current) and one for InGame (not current).
+        let menu_entity = app.world_mut().spawn(StateScoped(Shell::Menu));
+        let game_entity = app.world_mut().spawn(StateScoped(Shell::InGame));
+        assert!(app.world().contains(menu_entity));
+        assert!(app.world().contains(game_entity));
+
+        // No transition queued: cleanup runs against the current mode (Menu).
+        // The Menu-tagged entity survives; the InGame-tagged entity is removed
+        // because its owning mode is not current.
+        app.update();
+        assert!(
+            app.world().contains(menu_entity),
+            "entity tagged for the current mode survives"
+        );
+        assert!(
+            !app.world().contains(game_entity),
+            "entity tagged for a non-current mode is despawned"
+        );
+
+        // Switch into InGame: the Menu-tagged entity's mode is no longer current
+        // and it is despawned on this frame's StateTransition. A freshly tagged
+        // InGame entity (current mode now) survives.
+        let game_entity_2 = app.world_mut().spawn(StateScoped(Shell::InGame));
+        app.world_mut()
+            .resource_mut::<NextState<Shell>>()
+            .set(Shell::InGame);
+        app.update();
+        assert!(
+            !app.world().contains(menu_entity),
+            "entity tagged for the mode just left is despawned"
+        );
+        assert!(
+            app.world().contains(game_entity_2),
+            "entity tagged for the newly current mode survives"
+        );
+    }
+
+    /// With cleanup enabled but no current `State<S>` yet (the state machine has
+    /// not run its first transition), tagged entities are left untouched.
+    #[test]
+    fn state_scoped_is_inert_before_first_transition() {
+        let mut app = App::new();
+        app.insert_state(Shell::Menu)
+            .enable_state_scoped_entities::<Shell>();
+
+        // Spawn a tagged entity before any frame: no State<Shell> exists yet.
+        let entity = app.world_mut().spawn(StateScoped(Shell::InGame));
+        assert!(
+            app.world().get_resource::<State<Shell>>().is_none(),
+            "no current mode before the first StateTransition"
+        );
+
+        // The very first frame installs State(Menu) in Apply and then runs the
+        // scoped cleanup in Compute, which now despawns the InGame-tagged entity
+        // (its mode is not the newly-current Menu).
+        let live = [entity];
+        assert_eq!(scoped_entities(&mut app, &live), 1);
+        app.update();
+        assert!(
+            !app.world().contains(entity),
+            "once the first mode settles, mismatched tags are cleaned up"
+        );
+    }
+}

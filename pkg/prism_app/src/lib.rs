@@ -60,7 +60,12 @@
 //!   [`App::init_state`] wire a [`States`](prism_ecs::schedule::States) type
 //!   into the [`StateTransition`] phase, with
 //!   `OnEnter`/`OnExit` edges and the [`in_state`](prism_ecs::schedule::in_state)
-//!   run condition (design §11).
+//!   run condition. Depth features layer on top: [computed states](crate::state::computed)
+//!   ([`App::add_computed_state`]) derive a mode from another each frame,
+//!   [sub-states](crate::state::sub) ([`App::add_sub_state`]) exist only while a
+//!   parent mode is active, and [state-scoped entities](crate::state::scoped)
+//!   ([`App::enable_state_scoped_entities`]) auto-despawn when their owning mode
+//!   leaves (design §11).
 //! - Buffered cross-frame [events](crate::event): [`App::add_event`] installs
 //!   an [`Events<E>`](prism_ecs::event::Events) resource and rotates its double
 //!   buffer once per frame in [`First`], so events are readable for the frame
@@ -177,6 +182,7 @@ pub use schedule::{
     Update,
 };
 pub use settings::{SettingChange, SettingChanged, SettingValue, Settings, SettingsLayer};
+pub use state::{ComputedStates, StateScoped, StateTransitionSet, SubStates};
 #[cfg(feature = "pipelined")]
 pub use pipelined::PipelinedExecutor;
 pub use sub_app::{ExtractFn, SubApp, SubApps};
@@ -216,6 +222,7 @@ pub mod prelude {
     pub use crate::settings::{
         SettingChange, SettingChanged, SettingValue, Settings, SettingsLayer,
     };
+    pub use crate::state::{ComputedStates, StateScoped, StateTransitionSet, SubStates};
     #[cfg(feature = "pipelined")]
     pub use crate::pipelined::PipelinedExecutor;
     pub use crate::sub_app::{ExtractFn, SubApp, SubApps};
