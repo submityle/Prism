@@ -128,6 +128,11 @@ pub use hole_fill::{fill_boundary_loops, FillHolesParams, HoleFill};
 pub mod solidity;
 
 pub use solidity::{measure_solidity, MeshSolidity, DEFAULT_CONVEX_TOLERANCE};
+pub mod shell_thickness;
+
+pub use shell_thickness::{
+    estimate_shell_thickness, ShellThickness, ShellThicknessParams, ThicknessSample,
+};
 
 /// A handle into a [`ShapeRegistry`].
 ///
