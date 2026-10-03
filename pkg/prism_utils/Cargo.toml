@@ -16,6 +16,13 @@ std = []
 # capability flag: the determinism tier is pure safe code with no extra cost
 # when unused, so it is always compiled (mirroring the crate's `std` feature).
 determinism = []
+# M5 lock-free / sharded concurrent containers (MPMC/SPSC queues, a sharded
+# concurrent hash map, an epoch-based reclaimer and a lock-free Treiber stack
+# built on it). These need real atomics and OS synchronization primitives, so
+# the tier pulls in `std`. It is OFF by default: lock-free code is only paid
+# for when a consumer explicitly opts in (the conservative default from the
+# design doc §11/§24.2).
+concurrent = ["std"]
 
 [lints]
 workspace = true

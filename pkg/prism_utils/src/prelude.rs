@@ -3,6 +3,11 @@
 pub use crate::array_vec::ArrayVec;
 pub use crate::arena::{Arena, ArenaIndex};
 pub use crate::bit_set::BitSet;
+#[cfg(feature = "concurrent")]
+pub use crate::concurrent::{
+    Collector, ConcurrentHashMap, Guard, MpmcQueue, SpscConsumer, SpscProducer, SpscQueue,
+    TreiberStack,
+};
 pub use crate::determinism::{OrderedMap, OrderedSet};
 pub use crate::hash::{
     stable_hash, stable_hash_bytes, stable_hash_str, ContentHash, FxBuildHasher, FxHasher,

@@ -47,8 +47,23 @@
 //!   the existing [`FrameAllocator`](alloc_::FrameAllocator)/[`Arena`](arena::Arena)
 //!   already provide deterministic allocation.
 //!
-//! Later milestones add concurrent containers (M5) and advanced layout/migration
-//! helpers (M6).
+//! ## M5 scope (this build): concurrent containers (`concurrent` feature)
+//! - [`SpscQueue`](concurrent::SpscQueue): bounded, lock-free single-producer
+//!   single-consumer ring with cache-line-padded cursors.
+//! - [`MpmcQueue`](concurrent::MpmcQueue): bounded, lock-free multi-producer
+//!   multi-consumer queue (Vyukov per-slot sequence numbers).
+//! - [`ConcurrentHashMap`](concurrent::ConcurrentHashMap): a sharded concurrent
+//!   hash map with a per-shard reader-writer-locked read path.
+//! - [`Collector`](concurrent::Collector)/[`Guard`](concurrent::Guard):
+//!   epoch-based reclamation for safe memory reclamation of the lock-free
+//!   structures (defeats use-after-free and `ABA`), demonstrated by the
+//!   lock-free [`TreiberStack`](concurrent::TreiberStack).
+//!
+//! See the [`concurrent`] module for the full correctness posture. The whole
+//! tier is gated behind the `concurrent` feature so a single-threaded build
+//! pays nothing for it (the conservative default from the design doc §11/§23).
+//!
+//! Later milestones add advanced layout/migration helpers (M6).
 //!
 //! The crate contains no Unreal Engine source or derived code and depends on
 //! no `bevy_*` crate.
@@ -65,6 +80,8 @@ pub mod alloc_;
 pub mod array_vec;
 pub mod arena;
 pub mod bit_set;
+#[cfg(feature = "concurrent")]
+pub mod concurrent;
 pub mod determinism;
 pub mod hash;
 pub mod intern;
@@ -77,6 +94,11 @@ pub use alloc_::{AllocBox, AllocError, Allocator, FrameAllocator, Global, Pool};
 pub use array_vec::ArrayVec;
 pub use arena::{Arena, ArenaIndex};
 pub use bit_set::BitSet;
+#[cfg(feature = "concurrent")]
+pub use concurrent::{
+    Collector, ConcurrentHashMap, Guard, LocalHandle, MpmcQueue, SpscConsumer, SpscProducer,
+    SpscQueue, TreiberStack,
+};
 pub use determinism::{OrderedMap, OrderedSet};
 pub use hash::{
     stable_hash, stable_hash_bytes, stable_hash_str, ContentHash, FxBuildHasher, FxHasher,
