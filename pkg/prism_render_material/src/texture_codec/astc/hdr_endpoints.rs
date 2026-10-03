@@ -483,7 +483,7 @@ pub(super) fn unpack_hdr_endpoints(cem: u32, vals: &[u8]) -> HdrEndpoints {
 /// logarithmic (`lns`) lane through [`lns_to_sf16`] and a linear lane through
 /// [`unorm16_to_sf16`] before expanding the FP16 bit pattern to `f32`.
 #[inline]
-fn lerp_hdr_lane(e0: i32, e1: i32, w: u32, lns: bool) -> f32 {
+pub(super) fn lerp_hdr_lane(e0: i32, e1: i32, w: u32, lns: bool) -> f32 {
     let w = w as i32;
     let color = (e0 * (64 - w) + e1 * w + 32) >> 6;
     let half = if lns {

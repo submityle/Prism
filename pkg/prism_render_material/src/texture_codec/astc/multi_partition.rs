@@ -1,4 +1,4 @@
-//! Full multi-partition 4x4 LDR ASTC decode (single weight plane).
+//! Full multi-partition 4x4 ASTC decode (shared header parse + LDR decode).
 //!
 //! A multi-partition block splits the 4x4 footprint into 2, 3 or 4 regions,
 //! each with its own endpoint pair, and assigns every texel to a region with
@@ -19,16 +19,21 @@
 //!                      form is used,
 //! * top of the block   the shared weight integer sequence (bit-reversed).
 //!
-//! Both single-plane and dual-plane LDR blocks are handled here (dual-plane is
-//! legal only for two and three partitions -- the ASTC spec forbids four-way
-//! dual-plane, which astcenc also rejects). Any HDR colour format returns an
-//! [`AstcError`] so no unsupported block is decoded to approximate pixels; HDR
-//! endpoints are a later milestone.
+//! The CEM-field parse, colour quantisation and endpoint integer-sequence
+//! decode are identical for LDR and HDR colour formats, so they live in the
+//! shared [`parse_multi_partition_color`] helper. The LDR decoder below adds
+//! the LDR endpoint expansion and integer interpolation; the HDR decoder (see
+//! [`super::multi_partition_hdr`]) adds the HDR endpoint unpack and the
+//! logarithmic FP16 interpolation.
+//!
+//! Both single-plane and dual-plane blocks are handled (dual-plane is legal
+//! only for two and three partitions -- the ASTC spec forbids four-way
+//! dual-plane, which astcenc also rejects).
 //!
 //! Decode is pure integer arithmetic -- no AI/ML path.
 
 use super::bise::{decode_ise, IseRange};
-use super::block_mode::decode_block_mode_2d;
+use super::block_mode::{decode_block_mode_2d, BlockMode2d};
 use super::block_reader::read_bits;
 use super::cem::{cem_integer_count, cem_is_ldr, unpack_endpoints};
 use super::color_unquant::{color_quant_num_levels, unquant_color};
@@ -46,16 +51,42 @@ const PARTITION_INDEX_BITS: u32 = 10;
 /// are `113 - 4 - PARTITION_INDEX_BITS`.
 const COLOR_BITS_ARR: [i32; 5] = [-1, 111, 99, 99, 99];
 
-/// Decode a multi-partition (2/3/4) single-plane 4x4 LDR ASTC `block` to
-/// sixteen RGBA8 texels in row-major order (`texel = y * 4 + x`).
+/// The profile-agnostic result of parsing a multi-partition block header: the
+/// block mode, partition geometry and the unquantized colour endpoint integers
+/// (one run per partition, concatenated in `vals`). The caller expands `vals`
+/// into endpoint pairs with the LDR or HDR unpack appropriate to each
+/// partition's colour format.
+pub(super) struct MultiPartitionColor {
+    /// The decoded weight-grid block mode (shared across partitions).
+    pub(super) bm: BlockMode2d,
+    /// Partition count, always `2..=4` here.
+    pub(super) partition_count: i32,
+    /// 10-bit partition hash seed.
+    pub(super) seed: i32,
+    /// Per-partition colour endpoint mode (CEM); only the first
+    /// `partition_count` entries are meaningful.
+    pub(super) color_formats: [u32; 4],
+    /// Size in bits of the CEM high part actually consumed below the weights
+    /// (`0` for the shared-class form). The dual-plane CCS sits two bits below
+    /// `128 - weight_bits - effective_highpart_size`.
+    pub(super) effective_highpart_size: u32,
+    /// Unquantized colour endpoint integers, concatenated per partition.
+    pub(super) vals: [u8; 18],
+}
+
+/// Parse a multi-partition (2/3/4) 4x4 block header and decode its colour
+/// endpoint integer sequence, independent of LDR/HDR colour profile.
 ///
 /// # Errors
 /// Returns an [`AstcError`] for any block outside the supported subset: a
 /// single-partition block (handled elsewhere), a four-partition dual-plane
-/// block (forbidden by the spec), an oversized weight grid, an HDR colour
-/// format, or any encoding whose derived colour quant level is below QUANT_6.
-/// No unsupported block is decoded to approximate pixels.
-pub(super) fn decode_multi_partition_4x4_ldr(block: &[u8; 16]) -> Result<[[u8; 4]; 16], AstcError> {
+/// block (forbidden by the spec), an oversized weight grid, or any encoding
+/// whose derived colour quant level is below QUANT_6 or whose integer count
+/// exceeds 18. No colour-profile (LDR vs HDR) check is applied here; the caller
+/// enforces it per partition.
+pub(super) fn parse_multi_partition_color(
+    block: &[u8; 16],
+) -> Result<MultiPartitionColor, AstcError> {
     let mode = (u16::from(block[1]) << 8 | u16::from(block[0])) & 0x07FF;
     let bm = decode_block_mode_2d(mode).ok_or(AstcError::UnsupportedBlockMode)?;
 
@@ -116,13 +147,6 @@ pub(super) fn decode_multi_partition_4x4_ldr(block: &[u8; 16]) -> Result<[[u8; 4
         effective_highpart_size = highpart_size;
     }
 
-    // Every partition must use an LDR colour format for this milestone.
-    for &fmt in color_formats.iter().take(pc) {
-        if !cem_is_ldr(fmt) {
-            return Err(AstcError::UnsupportedHdr);
-        }
-    }
-
     // --- Colour quantisation level -----------------------------------------
     let mut color_integer_count = 0u32;
     for &fmt in color_formats.iter().take(pc) {
@@ -168,6 +192,45 @@ pub(super) fn decode_multi_partition_4x4_ldr(block: &[u8; 16]) -> Result<[[u8; 4
         *v = unquant_color(level_index, *p);
     }
 
+    Ok(MultiPartitionColor {
+        bm,
+        partition_count,
+        seed,
+        color_formats,
+        effective_highpart_size,
+        vals,
+    })
+}
+
+/// Decode a multi-partition (2/3/4) 4x4 **LDR** ASTC `block` to sixteen RGBA8
+/// texels in row-major order (`texel = y * 4 + x`). Both single- and dual-plane
+/// weights are handled.
+///
+/// # Errors
+/// Returns an [`AstcError`] for any block outside the supported subset: a
+/// single-partition block (handled elsewhere), a four-partition dual-plane
+/// block (forbidden by the spec), an oversized weight grid, an HDR colour
+/// format in any partition, or any encoding whose derived colour quant level is
+/// below QUANT_6. No unsupported block is decoded to approximate pixels.
+pub(super) fn decode_multi_partition_4x4_ldr(block: &[u8; 16]) -> Result<[[u8; 4]; 16], AstcError> {
+    let parsed = parse_multi_partition_color(block)?;
+    let MultiPartitionColor {
+        bm,
+        partition_count,
+        seed,
+        color_formats,
+        effective_highpart_size,
+        vals,
+    } = parsed;
+    let pc = partition_count as usize;
+
+    // Every partition must use an LDR colour format on this (LDR) path.
+    for &fmt in color_formats.iter().take(pc) {
+        if !cem_is_ldr(fmt) {
+            return Err(AstcError::UnsupportedHdr);
+        }
+    }
+
     // Split the integer run per partition and assemble each endpoint pair.
     let mut endpoints = [Endpoints {
         e0: [0; 4],
@@ -190,11 +253,7 @@ pub(super) fn decode_multi_partition_4x4_ldr(block: &[u8; 16]) -> Result<[[u8; 4
         // astcenc's final `below_weights_pos - 2`
         // (`128 - bits_for_weights - effective_highpart_size - 2`). The selected
         // channel interpolates with plane 1; the other three use plane 0.
-        let ccs = read_bits(
-            block,
-            128 - bits_for_weights - effective_highpart_size - 2,
-            2,
-        );
+        let ccs = read_bits(block, 128 - bm.weight_bits - effective_highpart_size - 2, 2);
         let (plane0, plane1) =
             infill_dual_plane_4x4(block, bm.weights_x, bm.weights_y, bm.weight_levels)?;
         for y in 0..4i32 {
