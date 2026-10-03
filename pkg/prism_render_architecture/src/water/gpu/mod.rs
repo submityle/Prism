@@ -37,6 +37,7 @@ pub mod fft_bitrev_kernel;
 pub mod fft_normalize_kernel;
 pub mod fft_plan;
 pub mod fft_stage_kernel;
+pub mod pbf_density_kernel;
 pub mod pipeline;
 pub mod render_fx_kernel;
 pub mod spectral_plan;
@@ -128,3 +129,8 @@ pub use fft_normalize_kernel::{
 };
 
 pub use fft_stage_kernel::{dispatch_fft_stage, FftStageParams, WATER_FFT_STAGE_WESL};
+
+pub use pbf_density_kernel::{
+    dispatch_pbf_compute_lambda, dispatch_pbf_density_solve, PbfDensityParams, PBF_POSITION_FLOATS,
+    WATER_PBF_DENSITY_WESL,
+};
