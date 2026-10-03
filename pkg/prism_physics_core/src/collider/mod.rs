@@ -122,6 +122,9 @@ pub use curvature::{estimate_curvature, CurvatureParams, CurvatureReport, Vertex
 pub mod boundary_loops;
 
 pub use boundary_loops::{extract_boundary_loops, BoundaryLoopParams, BoundaryLoops};
+pub mod hole_fill;
+
+pub use hole_fill::{fill_boundary_loops, FillHolesParams, HoleFill};
 
 /// A handle into a [`ShapeRegistry`].
 ///
