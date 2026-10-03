@@ -3531,8 +3531,8 @@ mod determinism_tests {
     use super::*;
 
     use crate::determinism::{
-        DeterministicRng, FrameHash, HashDivergence, InputRecording, RecordedInput, ReplayMode,
-        DEFAULT_HASH_HISTORY,
+        DeterministicRng, FrameHash, HashDivergence, InputRecording, RecordedInput, ReplayLog,
+        ReplayMode, DEFAULT_HASH_HISTORY,
     };
 
     // ---- DeterministicRng -------------------------------------------------
@@ -4053,6 +4053,63 @@ mod determinism_tests {
 
         // A different frame type is tracked independently.
         assert!(app.input_recording::<i8>().is_none());
+    }
+
+    // ---- ReplayLog --------------------------------------------------------
+
+    /// A `ReplayLog` is a self-contained repro: it carries the seed *and* the
+    /// recorded frames, and `into_replay` hands back exactly the `(rng,
+    /// recording)` pair that reproduces the session.
+    #[test]
+    fn replay_log_round_trips_seed_and_frames() {
+        let mut rec = InputRecording::<u32>::recording();
+        for live in [7u32, 8, 9] {
+            assert_eq!(rec.advance(live), live);
+        }
+
+        let log = ReplayLog::from_recording(0xABCD, rec);
+        assert_eq!(log.seed(), 0xABCD);
+        assert_eq!(log.len(), 3);
+        assert!(!log.is_empty());
+        let steps: Vec<u64> = log.frames().iter().map(|f| f.step).collect();
+        assert_eq!(steps, [0, 1, 2]);
+
+        let (rng, mut replay) = log.into_replay();
+        assert_eq!(rng.seed(), 0xABCD);
+        assert_eq!(replay.mode(), ReplayMode::Replay);
+        // Replaying ignores the live input and reproduces the recorded frames.
+        assert_eq!(replay.advance(0), 7);
+        assert_eq!(replay.advance(0), 8);
+        assert_eq!(replay.advance(0), 9);
+        assert!(replay.is_exhausted());
+    }
+
+    /// `App::init_replay` is authoritative, not idempotent: it overwrites any
+    /// existing RNG seed and recorder so the run matches the log exactly, while
+    /// leaving a `FrameHash` installed for divergence checks.
+    #[test]
+    fn init_replay_installs_authoritative_seed_and_frames() {
+        let mut app = App::new();
+        app.init_determinism(1);
+        assert_eq!(app.deterministic_rng().unwrap().seed(), 1);
+
+        let log = ReplayLog::new(
+            0x5EED,
+            vec![
+                RecordedInput { step: 0, frame: 100u32 },
+                RecordedInput { step: 1, frame: 200u32 },
+            ],
+        );
+        app.init_replay(log);
+
+        // RNG re-seeded to the log's authoritative seed (overwrites the 1 above).
+        assert_eq!(app.deterministic_rng().unwrap().seed(), 0x5EED);
+        // Recorder installed in Replay mode primed with the two frames.
+        let rec = app.input_recording::<u32>().unwrap();
+        assert_eq!(rec.mode(), ReplayMode::Replay);
+        assert_eq!(rec.len(), 2);
+        // FrameHash available for divergence detection.
+        assert!(app.frame_hash().is_some());
     }
 }
 

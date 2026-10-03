@@ -614,6 +614,93 @@ impl<F: Clone> InputRecording<F> {
     }
 }
 
+/// A complete, replayable recording of a deterministic session (design §15): a
+/// seed paired with the per-step input frames captured under it.
+///
+/// Record/replay needs *both* halves to reproduce a run bit-for-bit: the
+/// [`DeterministicRng`] seed (so every "random" draw repeats) and the ordered
+/// [`RecordedInput`] frames (so every fixed step consumes the same input). An
+/// [`InputRecording`] alone carries only the frames; pairing it with the seed
+/// here makes a self-contained artifact — the thing you save as a bug repro and
+/// hand back to [`App::init_replay`](crate::app::App::init_replay) to re-run.
+///
+/// This is the in-memory envelope. Persisting it to disk is a thin
+/// serialization layer left to the application: the frame type `F` is the
+/// app's own and `prism_app` does not own a serialization format (see the
+/// module docs), so a stable on-disk format is honestly out of this crate's
+/// scope rather than faked here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReplayLog<F> {
+    seed: u64,
+    frames: Vec<RecordedInput<F>>,
+}
+
+impl<F> ReplayLog<F> {
+    /// Pair a `seed` with already-captured `frames`.
+    #[inline]
+    #[must_use]
+    pub fn new(seed: u64, frames: Vec<RecordedInput<F>>) -> Self {
+        Self { seed, frames }
+    }
+
+    /// The seed the session ran under; a replay must re-seed its
+    /// [`DeterministicRng`] with exactly this value.
+    #[inline]
+    #[must_use]
+    pub fn seed(&self) -> u64 {
+        self.seed
+    }
+
+    /// The recorded per-step input frames, in capture order.
+    #[inline]
+    #[must_use]
+    pub fn frames(&self) -> &[RecordedInput<F>] {
+        &self.frames
+    }
+
+    /// Number of recorded frames in the log.
+    #[inline]
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.frames.len()
+    }
+
+    /// Whether the log holds no recorded frames.
+    #[inline]
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.frames.is_empty()
+    }
+}
+
+impl<F: Clone> ReplayLog<F> {
+    /// Seal a finished [`InputRecording`] (whatever mode it ended in) together
+    /// with the `seed` its [`DeterministicRng`] ran under into a replayable
+    /// log. Typically called after a [`Record`](ReplayMode::Record) session to
+    /// capture a repro.
+    #[inline]
+    #[must_use]
+    pub fn from_recording(seed: u64, recording: InputRecording<F>) -> Self {
+        Self {
+            seed,
+            frames: recording.into_frames(),
+        }
+    }
+
+    /// Reconstruct the exact `(rng, recording)` pair needed to replay this log:
+    /// a [`DeterministicRng`] re-seeded to [`seed`](ReplayLog::seed) and an
+    /// [`InputRecording`] in [`Replay`](ReplayMode::Replay) mode primed with the
+    /// recorded frames. Driving a run with these two reproduces the session.
+    #[inline]
+    #[must_use]
+    pub fn into_replay(self) -> (DeterministicRng, InputRecording<F>) {
+        (
+            DeterministicRng::seeded(self.seed),
+            InputRecording::replaying(self.frames),
+        )
+    }
+}
+
 impl crate::app::App {
     /// Install the determinism basics: a [`DeterministicRng`] seeded with
     /// `seed` (if absent) and a [`FrameHash`] with its per-frame finalize
@@ -668,6 +755,29 @@ impl crate::app::App {
         if self.world().get_resource::<InputRecording<F>>().is_none() {
             self.insert_resource(recording);
         }
+        self
+    }
+
+    /// Prime the app from a [`ReplayLog`] so the next run reproduces the
+    /// recorded session bit-for-bit: re-seed the [`DeterministicRng`] to the
+    /// log's [`seed`](ReplayLog::seed) and install an [`InputRecording<F>`] in
+    /// [`Replay`](ReplayMode::Replay) mode primed with the recorded frames.
+    ///
+    /// Unlike the idempotent [`init_determinism`](crate::app::App::init_determinism)
+    /// and [`init_input_recording`](crate::app::App::init_input_recording),
+    /// this is *authoritative*: a replay must run under exactly the log's seed
+    /// and frames, so both resources are **overwritten** if already present.
+    /// The [`FrameHash`] install stays idempotent (via
+    /// [`init_frame_hash`](crate::app::App::init_frame_hash)) so divergence
+    /// checks are available without disturbing any accumulated history.
+    pub fn init_replay<F: Clone + Send + Sync + 'static>(
+        &mut self,
+        log: ReplayLog<F>,
+    ) -> &mut Self {
+        let (rng, recording) = log.into_replay();
+        self.insert_resource(rng);
+        self.insert_resource(recording);
+        self.init_frame_hash();
         self
     }
 
