@@ -174,12 +174,58 @@ pub fn encode_astc_single_partition_4x4_ldr_quality(texels: &[[u8; 4]; 16]) -> [
     best
 }
 
+/// Encode sixteen `RGBA8` texels (row-major, `texel = y * 4 + x`) into a single
+/// 4x4 ASTC LDR block that carries a **real per-endpoint alpha** via CEM 12
+/// (RGBA direct), unlike the CEM-8 encoders above which force alpha to 255.
+///
+/// Configuration:
+/// * **block mode 66**: 4x4 weight grid, single plane, weight range QUANT_4
+///   (2-bit, bit-only) -- 32 weight bits;
+/// * **single partition**, **CEM 12** (RGBA direct, eight colour integers);
+/// * **QUANT_256 colour**: `color_bits = 111 - 32 = 79` with eight CEM-12
+///   integers gives colour quant level QUANT_256 (8-bit identity), so the eight
+///   endpoint bytes -- including both alphas -- are written straight into the
+///   block and decode back bit-for-bit.
+///
+/// The two bits of weight resolution give only four interpolation levels, so
+/// smooth gradients reconstruct coarsely; the *endpoints* (and therefore the
+/// alpha extremes) are exact. This is the first honest alpha-carrying ASTC
+/// milestone -- finer-weight CEM-12 variants land later.
+#[must_use]
+pub fn encode_astc_single_partition_4x4_ldr_rgba(texels: &[[u8; 4]; 16]) -> [u8; 16] {
+    const BLOCK_MODE: u32 = 66;
+    const CEM_RGBA_DIRECT: u32 = 12;
+    const WEIGHT_BITS: u32 = 2; // QUANT_4, bit-only
+
+    // Fit RGBA endpoints ordered so hadd_rgb(e0) <= hadd_rgb(e1); the CEM-12
+    // decoder then takes its plain (no blue-contraction swap) path and, with
+    // QUANT_256 identity colour, reconstructs these bytes exactly. Weights are
+    // fitted against the same endpoints over all four channels.
+    let (e0, e1) = endpoint_fit::fit_rgba_endpoints(texels);
+    let raw = weight_fit::quantize_weights_bits_rgba(texels, e0, e1, WEIGHT_BITS);
+
+    let mut w = bits::BlockWriter::new();
+    w.write_bits(0, 11, BLOCK_MODE);
+    // CEM field (4 bits at block bit 13): value 12 sets block bits 15 and 16.
+    w.write_bits(13, 4, CEM_RGBA_DIRECT);
+    // Eight 8-bit colour values at block bit 17, LSB-first, in the decoder's
+    // read order [e0.r, e1.r, e0.g, e1.g, e0.b, e1.b, e0.a, e1.a].
+    let vals = [e0[0], e1[0], e0[1], e1[1], e0[2], e1[2], e0[3], e1[3]];
+    for (i, v) in vals.iter().enumerate() {
+        w.write_bits(17 + i as u32 * 8, 8, u32::from(*v));
+    }
+    // Sixteen 2-bit weights packed bit-reversed from the top of the block.
+    w.write_weights_reversed(&raw, WEIGHT_BITS);
+    w.into_block()
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::decode_astc_4x4_ldr;
     use super::encode_astc_single_partition_4x4_ldr;
     use super::encode_astc_single_partition_4x4_ldr_q192;
     use super::encode_astc_single_partition_4x4_ldr_quality;
+    use super::encode_astc_single_partition_4x4_ldr_rgba;
 
     /// Max per-channel RGB error over the sixteen texels after a round trip.
     fn max_rgb_err(src: &[[u8; 4]; 16], dec: &[[u8; 4]; 16]) -> i32 {
@@ -362,6 +408,67 @@ mod tests {
         assert_eq!(
             blkq, blk578,
             "gray ramp should select the mode-578 candidate"
+        );
+    }
+
+    /// Max per-channel error over *all four* channels (RGBA) after a round trip.
+    fn max_rgba_err(src: &[[u8; 4]; 16], dec: &[[u8; 4]; 16]) -> i32 {
+        let mut m = 0i32;
+        for (s, d) in src.iter().zip(dec.iter()) {
+            for c in 0..4 {
+                m = m.max((i32::from(s[c]) - i32::from(d[c])).abs());
+            }
+        }
+        m
+    }
+
+    #[test]
+    fn rgba_constant_block_round_trips_exactly_incl_alpha() {
+        // Coincident endpoints => QUANT_256 identity reproduces the colour and
+        // the real alpha exactly, proving CEM 12 carries alpha (not forced 255).
+        let src = [[73u8, 150, 211, 128]; 16];
+        let blk = encode_astc_single_partition_4x4_ldr_rgba(&src);
+        let dec = decode_astc_4x4_ldr(&blk).expect("decode constant RGBA block");
+        assert_eq!(max_rgba_err(&src, &dec), 0, "constant RGBA block mismatch");
+        for d in &dec {
+            assert_eq!(d[3], 128, "CEM 12 must carry the real alpha, not 255");
+        }
+    }
+
+    #[test]
+    fn rgba_alpha_gradient_is_carried_not_forced() {
+        // Fixed RGB with a linear alpha ramp 0..255. The two 2-bit weight levels
+        // only reach four alpha steps, but the decoded alpha must *vary* and
+        // track the source -- it must never collapse to a constant 255.
+        let src: [[u8; 4]; 16] = core::array::from_fn(|t| [40, 90, 160, (t * 17) as u8]);
+        let blk = encode_astc_single_partition_4x4_ldr_rgba(&src);
+        let dec = decode_astc_4x4_ldr(&blk).expect("decode alpha gradient");
+
+        // Endpoints bracket the alpha range, so texel 0 (~0) and texel 15 (255)
+        // land near the extremes.
+        assert!(dec[0][3] <= 32, "low alpha not carried: {}", dec[0][3]);
+        assert!(dec[15][3] >= 223, "high alpha not carried: {}", dec[15][3]);
+
+        // Alpha must genuinely vary across the block.
+        let mut amin = 255i32;
+        let mut amax = 0i32;
+        for d in &dec {
+            amin = amin.min(i32::from(d[3]));
+            amax = amax.max(i32::from(d[3]));
+        }
+        assert!(
+            amax - amin >= 128,
+            "alpha did not vary across the block (min {amin}, max {amax})"
+        );
+
+        // The low end must land well below 255: a CEM-8 encoder would force
+        // every texel to 255, so a sub-255 texel proves alpha is really stored.
+        // (Mid/high texels may legitimately snap to the 255 weight level under
+        // 2-bit quantisation, so only the low end is asserted here; the
+        // constant-128 test above is the decisive "not forced" proof.)
+        assert!(
+            dec.iter().any(|d| d[3] < 200),
+            "every decoded alpha was >= 200 -- alpha looks forced, not carried"
         );
     }
 }

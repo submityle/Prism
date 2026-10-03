@@ -48,3 +48,42 @@ pub(super) fn quantize_weights_bits(
         best_raw
     })
 }
+
+/// Choose the best raw weight level per texel for a bit-only range of `bits`
+/// bits, given fitted **RGBA** endpoints `e0`/`e1` (CEM 12, single plane).
+///
+/// Identical in spirit to [`quantize_weights_bits`] but the squared error is
+/// summed over all four channels, so the alpha carried by the CEM-12 endpoints
+/// participates in the fit instead of being ignored. On a 4x4 footprint the
+/// weight grid is the identity, so the chosen levels decode back exactly.
+pub(super) fn quantize_weights_bits_rgba(
+    texels: &[[u8; 4]; 16],
+    e0: [u8; 4],
+    e1: [u8; 4],
+    bits: u32,
+) -> [u8; 16] {
+    let levels = 1u32 << bits;
+    core::array::from_fn(|t| {
+        let texel = texels[t];
+        let mut best_raw = 0u8;
+        let mut best_err = u32::MAX;
+        for v in 0..levels {
+            let w = u32::from(unquant_weight_bits(v, bits));
+            let mut err = 0u32;
+            for c in 0..4 {
+                let got = i32::from(lerp_component(e0[c], e1[c], w));
+                let want = i32::from(texel[c]);
+                let d = got - want;
+                err += (d * d) as u32;
+            }
+            if err < best_err {
+                best_err = err;
+                best_raw = v as u8;
+                if err == 0 {
+                    break;
+                }
+            }
+        }
+        best_raw
+    })
+}

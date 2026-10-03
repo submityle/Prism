@@ -81,6 +81,105 @@ pub(super) fn fit_rgb_endpoints(texels: &[[u8; 4]; 16]) -> ([u8; 3], [u8; 3]) {
     }
 }
 
+/// Fit two RGBA endpoints for a single-partition CEM-12 (RGBA direct) block.
+///
+/// Mirrors [`fit_rgb_endpoints`] but on the full 4D RGBA point cloud: power
+/// iteration on the 4x4 covariance finds the principal axis, every texel is
+/// projected onto it, and the extreme projections become the endpoints. The
+/// pair is ordered so `hadd_rgb(e0) <= hadd_rgb(e1)` (`hadd_rgb = r + g + b`,
+/// alpha excluded), the orientation the CEM-12 decoder (`cem::rgba_unpack`)
+/// reads back directly without its blue-contraction swap. Alpha is carried
+/// through unquantized -- CEM 12 stores a real per-endpoint alpha.
+///
+/// Pure analytic `f64` arithmetic -- no AI/ML path.
+pub(super) fn fit_rgba_endpoints(texels: &[[u8; 4]; 16]) -> ([u8; 4], [u8; 4]) {
+    let points: [[f64; 4]; 16] =
+        core::array::from_fn(|t| core::array::from_fn(|c| f64::from(texels[t][c])));
+
+    // Mean colour.
+    let mut mean = [0.0f64; 4];
+    for p in &points {
+        for c in 0..4 {
+            mean[c] += p[c];
+        }
+    }
+    for m in &mut mean {
+        *m /= 16.0;
+    }
+
+    // 4x4 covariance.
+    let mut cov = [[0.0f64; 4]; 4];
+    for p in &points {
+        let d: [f64; 4] = core::array::from_fn(|c| p[c] - mean[c]);
+        for (i, row) in cov.iter_mut().enumerate() {
+            for (j, cell) in row.iter_mut().enumerate() {
+                *cell += d[i] * d[j];
+            }
+        }
+    }
+
+    // Dominant eigenvector via power iteration; a degenerate (constant) block
+    // yields a near-zero `next`, so we fall back to the current axis.
+    let mut axis = [1.0f64, 1.0, 1.0, 1.0];
+    for _ in 0..24 {
+        let next: [f64; 4] =
+            core::array::from_fn(|i| (0..4).map(|j| cov[i][j] * axis[j]).sum::<f64>());
+        let norm = (next.iter().map(|v| v * v).sum::<f64>()).sqrt();
+        if norm < 1e-9 {
+            break;
+        }
+        axis = core::array::from_fn(|c| next[c] / norm);
+    }
+
+    // Project onto the axis and take the extreme texels as endpoints.
+    let mut min_proj = f64::INFINITY;
+    let mut max_proj = f64::NEG_INFINITY;
+    let mut lo = points[0];
+    let mut hi = points[0];
+    for p in &points {
+        let proj = (0..4).map(|c| (p[c] - mean[c]) * axis[c]).sum::<f64>();
+        if proj < min_proj {
+            min_proj = proj;
+            lo = *p;
+        }
+        if proj > max_proj {
+            max_proj = proj;
+            hi = *p;
+        }
+    }
+
+    let a = round_rgba(lo);
+    let b = round_rgba(hi);
+
+    // Orient so hadd_rgb(e0) <= hadd_rgb(e1): the CEM-12 decoder uncontracts
+    // and swaps otherwise. Alpha does not participate in the ordering key.
+    if hadd_rgba(a) > hadd_rgba(b) {
+        (b, a)
+    } else {
+        (a, b)
+    }
+}
+
+/// Round and clamp an `f64` RGBA quad to 8-bit UNORM.
+fn round_rgba(c: [f64; 4]) -> [u8; 4] {
+    core::array::from_fn(|i| {
+        let v = c[i].round();
+        if v <= 0.0 {
+            0
+        } else if v >= 255.0 {
+            255
+        } else {
+            v as u8
+        }
+    })
+}
+
+/// `r + g + b` of an RGBA endpoint (alpha excluded), the ordering key the
+/// CEM-12 decoder uses for its blue-contraction swap.
+fn hadd_rgba(c: [u8; 4]) -> u32 {
+    u32::from(c[0]) + u32::from(c[1]) + u32::from(c[2])
+}
+
 /// Round and clamp an `f64` RGB triple to 8-bit UNORM.
 fn round_rgb(c: [f64; 3]) -> [u8; 3] {
     core::array::from_fn(|i| {
