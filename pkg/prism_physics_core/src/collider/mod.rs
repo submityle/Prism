@@ -171,6 +171,8 @@ pub mod mesh_offset;
 pub use mesh_offset::{offset_mesh, MeshOffsetParams, OffsetMesh};
 pub mod orientation;
 pub use orientation::{orient_outward, OrientedMesh};
+pub mod tetrahedralize;
+pub use tetrahedralize::{tetrahedralize, TetMesh, TetMeshParams};
 
 /// A handle into a [`ShapeRegistry`].
 ///
