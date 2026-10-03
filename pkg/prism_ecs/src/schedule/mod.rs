@@ -29,6 +29,7 @@
 //! [`Access`](crate::query::Access) recorded by the system layer already
 //! carries the information a parallel executor will need.
 
+pub mod ambiguity;
 pub mod condition;
 pub mod config;
 pub mod executor;
@@ -39,6 +40,7 @@ pub mod schedules;
 pub mod set;
 pub mod state;
 
+pub use ambiguity::{Ambiguities, Ambiguity};
 pub use condition::{
     and, not, or, resource_equals, resource_exists, run_once, BoxedCondition, Condition,
 };

@@ -30,10 +30,13 @@
 //! on top later without changing this API; the per-system
 //! [`Access`](crate::query::Access) is already recorded for them.
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use hashbrown::HashMap;
 
+use crate::query::Access;
+use crate::schedule::ambiguity::{self, Ambiguities};
 use crate::schedule::condition::BoxedCondition;
 use crate::schedule::config::{IntoSystemConfigs, SetConfig, SystemConfig, SystemConfigs};
 use crate::schedule::phase::Phase;
@@ -245,14 +248,13 @@ impl Schedule {
         result
     }
 
-    /// Topologically sort the systems, honoring phase/set/chain edges with
-    /// insertion order as the deterministic tie-break. Panics on a cycle.
-    fn compute_order(&self) -> Vec<usize> {
-        use alloc::collections::BinaryHeap;
-        use core::cmp::Reverse;
+    /// Build the full set of ordering edges `(from, to)` implied by phase,
+    /// set-membership `before`/`after`, and chain constraints. Deduplicated;
+    /// self-edges are dropped. Shared by [`compute_order`](Self::compute_order)
+    /// and [`ambiguities`](Self::ambiguities) so both see exactly the same
+    /// ordering relation.
+    fn build_edges(&self) -> hashbrown::HashSet<(usize, usize)> {
         use hashbrown::HashSet;
-
-        let n = self.nodes.len();
 
         // Membership: set id -> member node indices.
         let mut members: HashMap<SystemSetId, Vec<usize>> = HashMap::new();
@@ -315,6 +317,18 @@ impl Schedule {
             }
         }
 
+        edges
+    }
+
+    /// Topologically sort the systems, honoring phase/set/chain edges with
+    /// insertion order as the deterministic tie-break. Panics on a cycle.
+    fn compute_order(&self) -> Vec<usize> {
+        use alloc::collections::BinaryHeap;
+        use core::cmp::Reverse;
+
+        let n = self.nodes.len();
+        let edges = self.build_edges();
+
         // Kahn's algorithm with a min-heap on node index for determinism.
         let mut indegree = alloc::vec![0usize; n];
         let mut adj: Vec<Vec<usize>> = alloc::vec![Vec::new(); n];
@@ -351,5 +365,30 @@ impl Schedule {
             order.len()
         );
         order
+    }
+
+    /// Analyse the schedule for *ambiguities*: pairs of systems whose
+    /// [`Access`](crate::query::Access) conflicts yet have no ordering edge
+    /// (directly or transitively) fixing their relative order (design §23.4).
+    ///
+    /// Initialises the schedule first, because a system's access set is only
+    /// meaningful after [`System::initialize`](crate::system::System::initialize)
+    /// has run (function systems compute their access there). The result is
+    /// deterministic: pairs are reported in ascending node-index order.
+    pub fn ambiguities(&mut self, world: &mut World) -> Ambiguities {
+        self.initialize(world);
+        let accesses: Vec<&Access> = self.nodes.iter().map(|n| n.system.access()).collect();
+        let names: Vec<String> = self.nodes.iter().map(|n| n.system.name().into()).collect();
+        let edges: Vec<(usize, usize)> = self.build_edges().into_iter().collect();
+        ambiguity::detect(&accesses, &names, &edges)
+    }
+
+    /// Initialise the schedule and panic if it contains any ambiguity, printing
+    /// the full [`Ambiguities::report`]. The deterministic analogue of the
+    /// cycle panic in [`compute_order`](Self::compute_order); suitable as a CI
+    /// hard gate (design §23.4).
+    pub fn assert_no_ambiguities(&mut self, world: &mut World) {
+        let ambiguities = self.ambiguities(world);
+        assert!(ambiguities.is_empty(), "{}", ambiguities.report());
     }
 }

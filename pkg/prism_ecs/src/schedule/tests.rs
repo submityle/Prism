@@ -176,3 +176,124 @@ fn contradictory_order_panics() {
     schedule.add_systems(push_b.before(Physics).after(Physics));
     schedule.run(&mut world);
 }
+
+// --- Ambiguity detection (§23.4) -------------------------------------------
+
+use crate::system::Res;
+
+/// Read-only accessors of `Log`: two of these never conflict.
+fn read_log_x(_log: Res<Log>) {}
+fn read_log_y(_log: Res<Log>) {}
+
+/// An exclusive system borrows the whole world, so it conflicts with every
+/// other system that is not ordered relative to it.
+fn exclusive_noop(_world: &mut World) {}
+
+#[test]
+fn conflicting_writers_without_order_are_ambiguous() {
+    let mut world = fresh();
+    let mut schedule = Schedule::new();
+    // Both write `Log` (ResMut) and share the default Update phase with no
+    // explicit order between them.
+    schedule.add_systems(push_a);
+    schedule.add_systems(push_b);
+
+    let ambiguities = schedule.ambiguities(&mut world);
+    assert_eq!(ambiguities.len(), 1, "one unordered write/write pair expected");
+    let pair = &ambiguities.pairs()[0];
+    assert!(!pair.whole_world, "neither system is exclusive");
+    assert!(
+        !pair.resources.is_empty(),
+        "the conflict must name the shared Log resource"
+    );
+    assert!(pair.components.is_empty(), "the systems touch no components");
+}
+
+#[test]
+fn chaining_removes_the_ambiguity() {
+    let mut world = fresh();
+    let mut schedule = Schedule::new();
+    schedule.add_systems((push_a, push_b).chain());
+
+    let ambiguities = schedule.ambiguities(&mut world);
+    assert!(
+        ambiguities.is_empty(),
+        "an explicit chain fixes the order: {}",
+        ambiguities.report()
+    );
+}
+
+#[test]
+fn before_after_removes_the_ambiguity() {
+    let mut world = fresh();
+    let mut schedule = Schedule::new();
+    schedule.add_systems(push_a.in_set(Physics));
+    schedule.add_systems(push_b.after(Physics));
+
+    let ambiguities = schedule.ambiguities(&mut world);
+    assert!(
+        ambiguities.is_empty(),
+        "an explicit after(..) fixes the order: {}",
+        ambiguities.report()
+    );
+}
+
+#[test]
+fn read_only_pair_is_not_ambiguous() {
+    let mut world = fresh();
+    let mut schedule = Schedule::new();
+    // Two concurrent readers of the same resource are compatible.
+    schedule.add_systems(read_log_x);
+    schedule.add_systems(read_log_y);
+
+    let ambiguities = schedule.ambiguities(&mut world);
+    assert!(
+        ambiguities.is_empty(),
+        "shared reads do not conflict: {}",
+        ambiguities.report()
+    );
+}
+
+#[test]
+fn systems_in_different_phases_are_never_ambiguous() {
+    let mut world = fresh();
+    let mut schedule = Schedule::new();
+    // Both write `Log`, but the phases are totally chained, so there is always
+    // an ordering edge between them.
+    schedule.add_systems(push_a.in_phase(Phase::First));
+    schedule.add_systems(push_b.in_phase(Phase::Last));
+
+    let ambiguities = schedule.ambiguities(&mut world);
+    assert!(
+        ambiguities.is_empty(),
+        "phase ordering already fixes the order: {}",
+        ambiguities.report()
+    );
+}
+
+#[test]
+fn exclusive_system_conflicts_with_whole_world() {
+    let mut world = fresh();
+    let mut schedule = Schedule::new();
+    // The exclusive system borrows the whole world; the writer shares the
+    // Update phase with no explicit order.
+    schedule.add_systems(push_a);
+    schedule.add_systems(exclusive_noop);
+
+    let ambiguities = schedule.ambiguities(&mut world);
+    assert_eq!(ambiguities.len(), 1, "exclusive vs writer is one ambiguity");
+    assert!(
+        ambiguities.pairs()[0].whole_world,
+        "the exclusive system is flagged as whole-world access"
+    );
+}
+
+#[test]
+#[should_panic(expected = "ambiguit")]
+fn assert_no_ambiguities_panics_on_conflict() {
+    let mut world = fresh();
+    let mut schedule = Schedule::new();
+    schedule.add_systems(push_a);
+    schedule.add_systems(push_b);
+    schedule.assert_no_ambiguities(&mut world);
+}
