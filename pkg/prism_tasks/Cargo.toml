@@ -38,5 +38,9 @@ trace = []
 # adds no scheduling, only re-shapes the existing pool API.
 compat-bevy = []
 
+[[bench]]
+name = "parallel_scaling"
+harness = false
+
 [lints]
 workspace = true
