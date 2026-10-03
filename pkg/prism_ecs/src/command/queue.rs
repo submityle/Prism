@@ -1,29 +1,13 @@
-//! Deferred structural changes: the [`CommandQueue`] and the ergonomic
-//! [`Commands`] / [`EntityCommands`] builders layered on top of it (design §9).
-//!
-//! Immediate structural operations on a [`World`] (spawn / insert / remove /
-//! despawn) require `&mut World`, which a running system does not hold while it
-//! is iterating queries. [`Commands`] record those same operations as closures
-//! in a [`CommandQueue`] and hand back [`Entity`] handles *immediately* (via the
-//! lock-free [`Entities::reserve_entity`] reservation path), so a system can
-//! queue spawns and edits without taking an exclusive world borrow. The queue
-//! is drained and applied later at a synchronization point by
-//! [`CommandQueue::apply`].
-//!
-//! This M0 queue is single-threaded and preserves insertion order. The parallel
-//! per-thread buffers with deterministic merge-sort replay described in design
-//! §9 are an M2 refinement that layers on top of this type without changing its
-//! public surface.
+//! The single-threaded, insertion-ordered [`CommandQueue`] and its ergonomic
+//! [`Commands`] / [`EntityCommands`] builders (design §9, M0 layer).
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
+use super::Command;
 use crate::bundle::Bundle;
 use crate::entity::{Entities, Entity};
 use crate::world::World;
-
-/// A boxed, type-erased structural mutation applied to a [`World`].
-type Command = Box<dyn FnOnce(&mut World) + Send + Sync>;
 
 /// An ordered buffer of deferred structural changes.
 ///
