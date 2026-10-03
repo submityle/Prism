@@ -1,10 +1,22 @@
-//! Physical storage for component data.
+//! Physical storage for component data (design §6 存储模型).
 //!
-//! The M0 storage model is columnar (Structure-of-Arrays): each archetype owns
-//! a [`Table`] holding one type-erased [`BlobVec`] column per component type,
-//! kept in lockstep with a parallel entity vector. This is the cache-friendly
-//! layout that later milestones extend with fixed-size chunks, per-chunk
-//! change-versions, SparseSet columns, and SIMD iteration (design §6).
+//! The primary model is columnar (Structure-of-Arrays): each archetype owns a
+//! [`Table`] of type-erased [`BlobVec`] columns, one per component type, split
+//! into fixed-size chunks carrying per-chunk [`ChunkVersions`] so change
+//! detection and iteration can skip untouched chunks (design §6, §10).
+//!
+//! Of the design's four storage states this module implements:
+//!
+//! * **Table** — the default columnar/chunked layout above ([`Table`],
+//!   [`Column`], and the private `chunk` splitting).
+//! * **SparseSet** — out-of-band per-entity columns ([`ComponentSparseSet`],
+//!   [`SparseSets`]) that toggle without an archetype move.
+//! * **OwningGroup** — EnTT-style perfectly-packed membership for a super-hot
+//!   query ([`OwningGroup`]); the packing structure and its O(1)
+//!   pack/unpack transitions are complete and tested here.
+//!
+//! The fourth state, Unity-style *SharedComponent* value-clustering (design
+//! §6), is not yet present; it is honestly absent rather than stubbed.
 
 mod blob_vec;
 mod chunk;

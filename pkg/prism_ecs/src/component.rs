@@ -35,12 +35,16 @@ pub trait Component: Send + Sync + 'static {
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum StorageType {
     /// Columnar Structure-of-Arrays within the archetype's table. Fastest to
-    /// iterate and SIMD-friendly; this is the default and the only strategy
-    /// wired up in M0.
+    /// iterate and SIMD-friendly; this is the default and backs chunked,
+    /// change-tracked, SIMD-iterable component columns (design §6).
     Table,
-    /// A sparse set keyed by entity index. Insert/remove is O(1) without an
-    /// archetype move. Reserved for M2; registered components may declare it
-    /// but the M0 storage treats every component as [`StorageType::Table`].
+    /// A sparse set keyed by entity index, stored out-of-band in the world's
+    /// [`SparseSets`](crate::storage::SparseSets) registry rather than in an
+    /// archetype table. Insert/remove is O(1) and never moves the entity
+    /// between archetypes, so it suits tags and components toggled extremely
+    /// frequently (design §6 "增删不搬迁 archetype"). Spawn/insert/remove,
+    /// `contains`, change detection, and every query path (fetch, iter, filter,
+    /// `par_iter`) route sparse components through that registry.
     SparseSet,
 }
 
