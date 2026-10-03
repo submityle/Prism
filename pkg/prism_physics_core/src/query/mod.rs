@@ -11,6 +11,8 @@
 //! - [`shape`] holds swept-sphere (spherecast) primitives.
 //! - [`convex_sweep`] holds general convex shape-cast (box/capsule/sphere
 //!   sweep) primitives.
+//! - [`multi`] holds the multi-hit `*_all` collectors (every body a probe
+//!   touches, sorted near to far).
 //! - [`project`] holds closest-point projection.
 //! - [`overlap`] holds overlap predicates and world-space bounding boxes.
 //!
@@ -29,6 +31,7 @@ pub(crate) mod project;
 pub(crate) mod ray;
 pub(crate) mod shape;
 pub(crate) mod convex_sweep;
+pub(crate) mod multi;
 
 use crate::collider::{ColliderHandle, ColliderShape};
 use crate::math::transform::Isometry;
