@@ -3,7 +3,16 @@
 //! Prism's diagnostic kernel: a cross-cutting logging/observability surface
 //! that every subsystem depends on by "instrumenting" itself.
 //!
-//! ## M0 scope (this build) — the logging skeleton
+//! ## Milestone status
+//! - M0 logging skeleton — done.
+//! - M1 scope timing / Chrome Trace — done.
+//! - M2 counters + frame statistics — done.
+//! - M3 ECS/tasks integration — done.
+//! - M4 `GPU` timing + unified timeline (`gpu`) — done.
+//! - M5 Tracy + remote observability (`tracy`/`remote`) — done.
+//! - M6 crash + memory profiling + hitch — done (this build).
+//!
+//! ## M0 scope — the logging skeleton
 //! - [`Level`] + [`Event`]/[`Field`] structured model.
 //! - Logging macros ([`info!`], [`warn!`], [`error!`], [`debug!`], [`trace!`],
 //!   [`event!`]) with compile-time (`max_level_*` features) and runtime level
@@ -12,7 +21,7 @@
 //!   [`FileSink`](sink::FileSink), and an in-memory
 //!   [`CaptureSink`](sink::CaptureSink).
 //!
-//! ## M2 scope (this build) — counters + frame statistics
+//! ## M2 scope — counters + frame statistics
 //! - Metric instruments in [`metrics`]: [`Gauge`](metrics::Gauge) (last value),
 //!   [`Counter`](metrics::Counter)/[`Sum`](metrics::Sum) (monotonic add), and
 //!   [`Histogram`](metrics::Histogram) (configurable buckets with
@@ -24,7 +33,7 @@
 //! - A [`Hud`](metrics::Hud) data provider that formats metrics + frame stats
 //!   into overlay text lines; this crate performs no rendering.
 //!
-//! ## M3 scope (this build) — ECS/tasks integration
+//! ## M3 scope — ECS/tasks integration
 //! - Automatic instrumentation in [`instrument`]:
 //!   [`SystemScope`](instrument::SystemScope)/[`instrument_system`] time an ECS
 //!   system's per-frame work, and [`JobFlow`](instrument::JobFlow)/
@@ -37,52 +46,73 @@
 //! - Load visualization: [`LoadProfile`](metrics::LoadProfile) rolls recorded
 //!   spans up into per-thread utilization and per-system totals.
 //!
-//! ## M4 scope (this build, `gpu` feature) — GPU timing + unified timeline
-//! - Backend-neutral GPU timing in [`gpu`]: a timestamp-query model
+//! ## M4 scope (`gpu` feature) — `GPU` timing + unified timeline
+//! - Backend-neutral `GPU` timing in [`gpu`]: a timestamp-query model
 //!   ([`GpuSpan`](gpu::GpuSpan)/[`GpuTick`](gpu::GpuTick)), CPU↔GPU affine
 //!   calibration ([`GpuClockCalibration`](gpu::GpuClockCalibration)), an
 //!   N-frame readback correlation ring ([`GpuReadbackRing`](gpu::GpuReadbackRing)),
 //!   cross-queue correlation tokens ([`CorrelationId`](gpu::CorrelationId)), and a
 //!   [`UnifiedTimeline`](gpu::UnifiedTimeline) that projects CPU and GPU spans
-//!   onto one axis. The Chrome exporter can emit an aligned GPU track via
+//!   onto one axis. The Chrome exporter can emit an aligned `GPU` track via
 //!   [`export_chrome_with_gpu`](trace::export_chrome_with_gpu).
-//! - This is implemented as a pure ingestion API with no GPU-backend
-//!   dependency; a future RHI backend feeds raw ticks in. Live multi-driver GPU
-//!   validation is deferred to that backend (the ingestion seam makes it
-//!   non-blocking).
 //!
-//! ## M5 scope (this build) — Tracy + remote observability
+//! ## M5 scope — Tracy + remote observability
 //! - A backend-neutral real-time profiling surface in [`profiler`]: the
 //!   [`Profiler`](profiler::Profiler) backend trait, a global slot, the
 //!   [`ProfiledZone`](profiler::ProfiledZone) `RAII` guard
-//!   ([`profiled_zone!`]), and free functions ([`profiler::zone`],
-//!   [`profiler::frame_mark`], [`profiler::plot`], [`profiler::message`],
-//!   [`profiler::gpu_zone`]) that feed zones/frames/plots/messages/GPU zones to
-//!   the installed backend. The default backend is the no-op
-//!   [`NoopProfiler`](profiler::NoopProfiler); a self-contained Tracy-compatible
-//!   emitter ([`profiler::tracy`]) lives behind the `tracy` feature (no external
-//!   `tracy-client` dependency).
+//!   ([`profiled_zone!`]), and free functions that feed
+//!   zones/frames/plots/messages/GPU zones to the installed backend. The default
+//!   backend is the no-op [`NoopProfiler`](profiler::NoopProfiler); a
+//!   self-contained Tracy-compatible emitter ([`profiler::tracy`]) lives behind
+//!   the `tracy` feature (no external `tracy-client` dependency).
 //! - A remote observability transport in [`remote`] (behind the `remote`
-//!   feature): a serializable [`RemoteEvent`](remote::RemoteEvent)/
-//!   [`RemoteCommand`](remote::RemoteCommand) protocol with a hand-rolled binary
-//!   codec ([`wire`]), shared lock-free
-//!   [`RuntimeControls`](remote::RuntimeControls) for runtime tuning (log level,
-//!   sink toggle, sampling, capture), and a loopback
+//!   feature): a serializable protocol with a hand-rolled binary codec
+//!   ([`wire`]), shared lock-free
+//!   [`RuntimeControls`](remote::RuntimeControls), and a loopback
 //!   [`RemoteServer`](remote::RemoteServer)/[`RemoteClient`](remote::RemoteClient)
 //!   over `std::net`.
 //!
-//! Later milestones add GPU timing scopes, lock-free Tracy/Perfetto sinks, and
-//! crash/minidump capture.
+//! ## M6 scope — crash + memory profiling + hitch
+//! - Crash reporting in [`crash`] (behind the `crash` feature): a self-contained,
+//!   serializable [`CrashContext`](crash::CrashContext) model (crashing-thread
+//!   backtrace + [`RegisterSnapshot`](crash::RegisterSnapshot), module list,
+//!   reason/signal, timestamp, build id) and a deterministic binary
+//!   [`CrashReport`](crash::CrashReport) writer built on [`wire`]. `OS`
+//!   signal/exception capture is intentionally left to `prism_platform`; this
+//!   crate owns the report *format* and accepts a synthetic or real context.
+//! - Allocation tracking in [`alloc_track`] (behind the `alloc-track` feature):
+//!   a [`TrackingAllocator`](alloc_track::TrackingAllocator) `GlobalAlloc`
+//!   wrapper that accounts live/peak bytes, alloc/free counts, and optional
+//!   per-callsite tags, with enable/disable and a
+//!   [`snapshot`](alloc_track::snapshot)/[`tag_report`](alloc_track::tag_report)
+//!   API. This is the one module that uses `unsafe`.
+//! - Hitch detection in [`hitch`]: a [`HitchDetector`](hitch::HitchDetector)
+//!   frame-time monitor flagging frames over a budget or a rolling-percentile
+//!   spike threshold as [`HitchEvent`](hitch::HitchEvent)s.
+//! - Deterministic replay markers in [`replay`]: a
+//!   [`ReplayTimeline`](replay::ReplayTimeline) of tagged
+//!   [`ReplayMarker`](replay::ReplayMarker)s that
+//!   [`compare_timelines`](replay::compare_timelines) matches across runs to
+//!   localize the first divergence.
 //!
 //! Depends on `prism_utils` (containers) and `prism_platform` (clock). Contains
 //! no Unreal Engine source or derived code and depends on no `bevy_*` crate.
 
-#![forbid(unsafe_code)]
+// The crate is `unsafe`-free except for the `alloc-track` `GlobalAlloc` wrapper,
+// which inherently requires `unsafe`. `forbid` cannot be relaxed locally, so it
+// is downgraded to the workspace `deny` only when that feature is enabled; the
+// single unsafe module then carries an `#[expect(unsafe_code, reason = ...)]`.
+#![cfg_attr(not(feature = "alloc-track"), forbid(unsafe_code))]
 
+#[cfg(feature = "alloc-track")]
+pub mod alloc_track;
+#[cfg(feature = "crash")]
+pub mod crash;
 pub mod filter;
 pub mod fmt;
 #[cfg(feature = "gpu")]
 pub mod gpu;
+pub mod hitch;
 pub mod instrument;
 pub mod macros;
 pub mod metrics;
@@ -91,10 +121,11 @@ pub mod prelude;
 pub mod profiler;
 #[cfg(feature = "remote")]
 pub mod remote;
+pub mod replay;
 pub mod sink;
 pub mod span;
 pub mod trace;
-#[cfg(any(feature = "tracy", feature = "remote"))]
+#[cfg(any(feature = "tracy", feature = "remote", feature = "crash"))]
 pub mod wire;
 
 pub use filter::{max_level, set_max_level};
@@ -112,6 +143,10 @@ pub use gpu::{
     next_correlation_id, AffineFit, CalibrationSample, CorrelationId, GpuClockCalibration,
     GpuQueryId, GpuQueueId, GpuReadbackRing, GpuSpan, GpuTick, PendingQuery, ProjectedGpuSpan,
     TimelineEntry, TimelineTrack, UnifiedTimeline,
+};
+pub use hitch::{HitchConfig, HitchDetector, HitchEvent};
+pub use replay::{
+    compare_timelines, fnv1a_64, ReplayDivergence, ReplayMarker, ReplayTimeline,
 };
 pub use sink::{clear_sink, set_sink, CaptureSink, ConsoleSink, FileSink, Sink};
 pub use span::Scope;
@@ -131,6 +166,16 @@ pub use remote::{
     CommandOutcome, FrameSummary, RemoteClient, RemoteCommand, RemoteEvent, RemoteServer,
     RemoteServerHandle, RuntimeControls,
 };
+#[cfg(feature = "alloc-track")]
+pub use alloc_track::{
+    register_tag, reset_all, reset_peak, set_enabled, snapshot as alloc_snapshot, tag_report,
+    tag_scope, AllocSnapshot, TagId, TagScope, TagStat, TrackingAllocator,
+};
+#[cfg(feature = "crash")]
+pub use crash::{
+    CrashContext, CrashReason, CrashReport, ModuleEntry, RegisterSnapshot, StackFrame,
+    ThreadContext, CRASH_REPORT_MAGIC, CRASH_REPORT_VERSION,
+};
 
 /// Macro support: build and dispatch an event from `format_args!` output.
 /// Not part of the stable surface; call the logging macros instead.
@@ -145,3 +190,11 @@ extern crate alloc;
 
 #[cfg(test)]
 mod tests;
+#[cfg(all(test, feature = "alloc-track"))]
+mod tests_m6_alloc;
+#[cfg(all(test, feature = "crash"))]
+mod tests_m6_crash;
+#[cfg(test)]
+mod tests_m6_hitch;
+#[cfg(test)]
+mod tests_m6_replay;

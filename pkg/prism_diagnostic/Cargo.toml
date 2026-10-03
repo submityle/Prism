@@ -3,7 +3,7 @@ name = "prism_diagnostic"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.96.0"
-description = "Prism diagnostic kernel: structured logging/event model with Level, logging macros, pluggable sinks (console/file/capture), and compile-time + runtime level filtering. M0 delivers the logging skeleton; CPU/GPU timing scopes, counters, Tracy/Chrome sinks, crash/minidump, and the on-screen HUD land in later milestones. Depends on prism_utils + prism_platform; contains no Unreal Engine source or derived code and depends on no bevy_* crate."
+description = "Prism diagnostic kernel: structured logging/event model with Level, logging macros, pluggable sinks (console/file/capture), CPU/GPU timing scopes, counters/frame stats, Tracy + remote observability, and the M6 crash-report writer + allocation tracker + hitch detector + deterministic replay markers. Depends on prism_utils + prism_platform; contains no Unreal Engine source or derived code and depends on no bevy_* crate."
 license = "MIT OR Apache-2.0"
 publish = false
 
@@ -24,6 +24,15 @@ tracy = []
 # Remote observability: stream events/metrics to a panel over a localhost socket
 # and accept runtime-tuning commands. Uses `std::net`/`std::thread`.
 remote = ["std"]
+# Crash reporting (M6): a self-contained, serializable minidump-style crash
+# REPORT model + deterministic binary writer built on the hand-rolled `wire`
+# codec. OS signal/exception capture lives in prism_platform; this crate only
+# owns the report format + writer and accepts a synthetic/real CrashContext.
+crash = []
+# Allocation tracking (M6): a GlobalAlloc wrapper accounting live/peak bytes,
+# alloc/free counts, and optional per-callsite tags. Needs `std` for the System
+# allocator + thread-local tag scope; this is the only module that uses `unsafe`.
+alloc-track = ["std"]
 # Compile-time maximum verbosity floors (anything more verbose is removed).
 max_level_off = []
 max_level_error = []
