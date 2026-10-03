@@ -4101,6 +4101,98 @@ mod state_depth_tests {
         );
     }
 
+    /// A computed state derived from *another* computed state (depth 2): it
+    /// exists only while [`Activity`] is `Playing`, i.e. two derivation hops
+    /// away from the base [`AppState`] being `InGame`. Its
+    /// [`DEPENDENCY_DEPTH`](ComputedStates::DEPENDENCY_DEPTH) is computed from
+    /// the source so the chain stays consistent under refactors.
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+    struct Simulating;
+    impl States for Simulating {}
+    impl ComputedStates for Simulating {
+        type SourceStates = Activity;
+        const DEPENDENCY_DEPTH: usize = <Activity as ComputedStates>::DEPENDENCY_DEPTH + 1;
+        fn compute(source: &Activity) -> Option<Self> {
+            matches!(source, Activity::Playing).then_some(Simulating)
+        }
+    }
+
+    fn log_sim_edges(app: &mut App, log: &Log) {
+        let l = log.clone();
+        app.add_systems(OnEnter(Simulating), move || l.lock().unwrap().push("enter:sim"));
+        let l = log.clone();
+        app.add_systems(OnExit(Simulating), move || l.lock().unwrap().push("exit:sim"));
+    }
+
+    /// A computed-of-computed chain settles in a single frame. When the base
+    /// state moves, the depth-1 source ([`Activity`]) and the depth-2 derived
+    /// state ([`Simulating`]) both recompute within the same
+    /// [`StateTransition`], and the depth-1 edges fire strictly before the
+    /// depth-2 edges. Without the [`ComputeDepth`] ordering, `Simulating` would
+    /// read a stale `Activity` and lag one frame behind. Registration order is
+    /// deliberately source-last to prove only the depth edges fix the order.
+    #[test]
+    fn computed_of_computed_settles_in_one_frame() {
+        let log = log();
+        let mut app = App::new();
+        app.insert_state(AppState::Menu)
+            .add_computed_state::<Simulating>()
+            .add_computed_state::<Activity>();
+        log_activity_edges(&mut app, &log);
+        log_sim_edges(&mut app, &log);
+
+        // Frame 1: Menu. Neither derived state exists; no edges fire.
+        app.update();
+        assert!(
+            app.world().get_resource::<State<Activity>>().is_none(),
+            "Activity must not exist in Menu"
+        );
+        assert!(
+            app.world().get_resource::<State<Simulating>>().is_none(),
+            "Simulating must not exist while its source is absent"
+        );
+        assert!(drain(&log).is_empty(), "no edges while in Menu");
+
+        // Menu -> InGame: Activity becomes Playing AND Simulating appears in the
+        // SAME frame, with the depth-1 enter firing before the depth-2 enter.
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::InGame);
+        app.update();
+        assert_eq!(
+            app.world()
+                .get_resource::<State<Activity>>()
+                .map(|s| *s.get()),
+            Some(Activity::Playing),
+        );
+        assert!(
+            app.world().get_resource::<State<Simulating>>().is_some(),
+            "depth-2 Simulating must settle the same frame its depth-1 source does"
+        );
+        assert_eq!(drain(&log), vec!["enter:playing", "enter:sim"]);
+
+        // InGame -> Paused: Activity -> Halted, so Simulating vanishes, again in
+        // one frame. Depth-1 exit/enter fire before the depth-2 exit.
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::Paused);
+        app.update();
+        assert_eq!(
+            app.world()
+                .get_resource::<State<Activity>>()
+                .map(|s| *s.get()),
+            Some(Activity::Halted),
+        );
+        assert!(
+            app.world().get_resource::<State<Simulating>>().is_none(),
+            "Simulating must vanish the same frame Activity leaves Playing"
+        );
+        assert_eq!(
+            drain(&log),
+            vec!["exit:playing", "enter:halted", "exit:sim"]
+        );
+    }
+
     /// A two-mode base state with a nested sub-machine scoped to `InGame`.
     #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
     enum Shell {

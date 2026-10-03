@@ -232,7 +232,9 @@ pub use schedule::{
 };
 pub use platform_tier::PlatformTierProfile;
 pub use settings::{SettingChange, SettingChanged, SettingValue, Settings, SettingsLayer};
-pub use state::{ComputedStates, OnTransition, StateScoped, StateTransitionSet, SubStates};
+pub use state::{
+    ComputeDepth, ComputedStates, OnTransition, StateScoped, StateTransitionSet, SubStates,
+};
 #[cfg(feature = "pipelined")]
 pub use pipelined::PipelinedExecutor;
 pub use sub_app::{ExtractFn, SubApp, SubApps};
@@ -289,7 +291,9 @@ pub mod prelude {
     pub use crate::settings::{
         SettingChange, SettingChanged, SettingValue, Settings, SettingsLayer,
     };
-    pub use crate::state::{ComputedStates, OnTransition, StateScoped, StateTransitionSet, SubStates};
+    pub use crate::state::{
+        ComputeDepth, ComputedStates, OnTransition, StateScoped, StateTransitionSet, SubStates,
+    };
     #[cfg(feature = "pipelined")]
     pub use crate::pipelined::PipelinedExecutor;
     pub use crate::sub_app::{ExtractFn, SubApp, SubApps};

@@ -100,7 +100,7 @@ pub mod scoped;
 pub mod sub;
 pub mod transition;
 
-pub use computed::ComputedStates;
+pub use computed::{ComputeDepth, ComputedStates};
 pub use scoped::StateScoped;
 pub use sub::SubStates;
 pub use transition::OnTransition;
