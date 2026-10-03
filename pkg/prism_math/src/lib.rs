@@ -21,8 +21,12 @@
 //! - **M3 (this crate, done):** `f64` big-world types ([`f64`] module:
 //!   `DVec*/DMat*/DQuat/DAffine3`) plus grid-cell origin rebasing
 //!   ([`bigworld`]) for jitter-free coordinates out to ±100 km.
-//! - **M4+ (planned):** `fixed` determinism and the color/rand/noise
-//!   toolboxes.
+//! - **M4 (this crate, done):** `fixed` determinism ([`fixed`] module:
+//!   `Fixed` Q32.32 + `I16F16` Q16.16 scalars, integer-only
+//!   `sqrt`/`sin`/`cos`/`atan2`/`exp`/`ln`, `FxVec*` vectors,
+//!   `StateHasher`, and `KahanSum`/`NeumaierSum` compensated reduction),
+//!   with cross-platform bit-exact golden-hash tests.
+//! - **M5+ (planned):** the color/rand/noise toolboxes.
 //!
 //! The scalar backend here is the behavioural reference that later SIMD
 //! backends must match within documented tolerances.
@@ -38,6 +42,7 @@ mod affine;
 mod backend;
 mod bigworld;
 mod f64;
+pub mod fixed;
 mod float;
 mod mat;
 mod quat;
@@ -59,6 +64,10 @@ pub use intersect::{Containment, RayHit};
 pub use self::bigworld::{GridCell, GridPosition};
 pub use self::f64::{
     DAffine3, DMat2, DMat3, DMat4, DQuat, DVec2, DVec3, DVec4, dvec2, dvec3, dvec4,
+};
+pub use self::fixed::{
+    CompensableFloat, Fixed, FxVec2, FxVec3, FxVec4, I16F16, KahanSum, NeumaierSum, StateHasher,
+    fxvec2, fxvec3, fxvec4, kahan_sum, neumaier_sum,
 };
 
 /// Mathematical constant helpers (`f32`).
@@ -157,10 +166,12 @@ fn detect_wasm_simd() -> bool {
 /// Glob-import the common types and helpers.
 pub mod prelude {
     pub use crate::{
-        Aabb3, Affine3, Backend, BoundingSphere, Containment, DAffine3, DMat2, DMat3, DMat4, DQuat,
-        DVec2, DVec3, DVec4, Frustum, GridCell, GridPosition, Mat2, Mat3, Mat4, MathCaps, Plane,
-        Quat, Ray3, RayHit, Segment3, Vec2, Vec3, Vec3A, Vec4, consts, curve, dvec2, dvec3, dvec4,
-        geom, intersect, lerp, to_degrees, to_radians, vec2, vec3, vec3a, vec4,
+        Aabb3, Affine3, Backend, BoundingSphere, CompensableFloat, Containment, DAffine3, DMat2,
+        DMat3, DMat4, DQuat, DVec2, DVec3, DVec4, Fixed, Frustum, FxVec2, FxVec3, FxVec4, GridCell,
+        GridPosition, I16F16, KahanSum, Mat2, Mat3, Mat4, MathCaps, NeumaierSum, Plane, Quat, Ray3,
+        RayHit, Segment3, StateHasher, Vec2, Vec3, Vec3A, Vec4, consts, curve, dvec2, dvec3, dvec4,
+        fxvec2, fxvec3, fxvec4, geom, intersect, kahan_sum, lerp, neumaier_sum, to_degrees,
+        to_radians, vec2, vec3, vec3a, vec4,
     };
 }
 
@@ -170,3 +181,5 @@ mod tests;
 mod m2_tests;
 #[cfg(test)]
 mod m3_tests;
+#[cfg(test)]
+mod m4_tests;

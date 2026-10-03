@@ -38,6 +38,7 @@ use core::cmp::Ordering;
 use bevy_math::ops;
 use bevy_math::Vec3;
 use prism_audio_core::math::Sample;
+use prism_audio_spatial::BandGains;
 use prism_audio_spatial::doppler::SPEED_OF_SOUND_MPS;
 use prism_audio_spatial::geometry::{Emitter, Listener};
 use prism_audio_spatial::propagation::{
@@ -114,11 +115,15 @@ pub fn resolve_diffraction(
         }
 
         let local = listener.localize(&Emitter::point(corner, Vec3::ZERO));
+        // The edge low-passes the shadowed arrival; carry both the scalar
+        // corner (legacy single-pole consumers) and its three-band form.
+        let cutoff_hz = diffraction_cutoff_hz(delta, config.sample_rate);
         let candidate = PropagationPath {
             kind: PathKind::Diffraction,
             delay_seconds: path_length / SPEED_OF_SOUND_MPS,
             gain,
-            cutoff_hz: diffraction_cutoff_hz(delta, config.sample_rate),
+            cutoff_hz,
+            bands: BandGains::from_lowpass_cutoff(cutoff_hz),
             direction: local.direction,
         };
         if !is_duplicate(&paths, &candidate) {

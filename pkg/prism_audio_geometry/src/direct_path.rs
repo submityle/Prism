@@ -30,6 +30,7 @@
 //! assembled by [`crate::backend::GeometricBackend`].
 
 use prism_audio_core::math::Sample;
+use prism_audio_spatial::BandGains;
 use prism_audio_spatial::doppler::SPEED_OF_SOUND_MPS;
 use prism_audio_spatial::geometry::{Emitter, Listener};
 use prism_audio_spatial::occlusion::OcclusionFactors;
@@ -95,6 +96,7 @@ pub fn resolve_direct(
                 delay_seconds,
                 gain: 1.0,
                 cutoff_hz: FULL_BAND_CUTOFF_HZ,
+                bands: BandGains::UNITY,
                 direction: local.direction,
             },
             occlusion: OcclusionFactors::OPEN,
@@ -115,6 +117,7 @@ pub fn resolve_direct(
             delay_seconds,
             gain: if audible { transmitted } else { 0.0 },
             cutoff_hz: FULL_BAND_CUTOFF_HZ,
+            bands: BandGains::UNITY,
             direction: local.direction,
         },
         occlusion,

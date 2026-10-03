@@ -31,6 +31,8 @@
 
 pub mod exclusive;
 pub mod function;
+#[cfg(feature = "multi_thread")]
+pub mod job_graph;
 pub mod param;
 pub mod query_param;
 pub mod world_cell;
@@ -43,8 +45,14 @@ pub use param::{Local, Res, ResMut, SystemParam, SystemParamItem};
 pub use query_param::Query;
 pub use world_cell::UnsafeWorldCell;
 
+#[cfg(feature = "multi_thread")]
+pub use job_graph::{ComputeTaskPool, JobGraph};
+
 #[cfg(test)]
 mod tests;
 
 #[cfg(test)]
 mod change_detection_tests;
+
+#[cfg(all(test, feature = "multi_thread"))]
+mod job_graph_tests;

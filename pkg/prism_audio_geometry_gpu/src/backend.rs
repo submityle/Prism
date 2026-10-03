@@ -42,6 +42,7 @@ use core::cmp::Ordering;
 
 use bevy_math::Vec3;
 use prism_audio_geometry::GeometricConfig;
+use prism_audio_spatial::BandGains;
 use prism_audio_spatial::doppler::SPEED_OF_SOUND_MPS;
 use prism_audio_spatial::geometry::{Emitter, Listener};
 use prism_audio_spatial::occlusion::OcclusionFactors;
@@ -239,6 +240,7 @@ fn assemble(
                     delay_seconds: candidate.delay_seconds,
                     gain: candidate.gain,
                     cutoff_hz: FULL_BAND_CUTOFF_HZ,
+                    bands: BandGains::UNITY,
                     direction: Vec3::new(
                         candidate.direction[0],
                         candidate.direction[1],
@@ -266,6 +268,7 @@ fn assemble(
                 delay_seconds: direct.delay_seconds,
                 gain: direct.gain,
                 cutoff_hz: direct.cutoff_hz,
+                bands: BandGains::from_lowpass_cutoff(direct.cutoff_hz),
                 direction: Vec3::new(
                     direct.direction[0],
                     direct.direction[1],
@@ -460,6 +463,7 @@ mod tests {
                 delay_seconds: candidate.delay_seconds,
                 gain: candidate.gain,
                 cutoff_hz: FULL_BAND_CUTOFF_HZ,
+                bands: BandGains::UNITY,
                 direction: Vec3::new(
                     candidate.direction[0],
                     candidate.direction[1],

@@ -225,6 +225,61 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         }
     }
 
+    /// Dispatch `func` over every matched row in parallel from a raw
+    /// `*mut World` (design §7 par_iter / §8.3).
+    ///
+    /// This is the entry point used by the scheduler's
+    /// [`Query`](crate::system::query_param::Query) system parameter and
+    /// [`JobGraph`](crate::system::job_graph::JobGraph), which only ever hold a
+    /// `*mut World` (never a `&mut World`). The mutable-vs-shared distinction is
+    /// enforced by the caller: a read-only entry forms the pointer from a shared
+    /// borrow and bounds `D: ReadOnlyQueryData`, while a mutable entry forms it
+    /// from an exclusive borrow. Rows are partitioned into disjoint batches of
+    /// at most `batch_size` (clamped to `>= 1`) and dispatched onto `pool`; the
+    /// call returns only after every batch completes.
+    ///
+    /// # Safety
+    /// `world` must point to a live [`World`] that stays valid for the whole
+    /// call, and the caller must guarantee that no other live borrow aliases the
+    /// component columns this query's `D`/`F` terms touch for the duration of
+    /// the dispatch (upheld by the per-system access set plus the scheduler's
+    /// conflict analysis, or by an exclusive `&mut World`).
+    #[cfg(feature = "multi_thread")]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) unsafe fn par_for_each_from_ptr<Func>(
+        &self,
+        world: *mut World,
+        last_run: Tick,
+        this_run: Tick,
+        pool: &prism_tasks::TaskPool,
+        batch_size: usize,
+        func: &Func,
+    ) where
+        Func: Fn(D::Item<'_>) + Send + Sync,
+    {
+        // SAFETY: the caller guarantees `world` is live for the call; forming a
+        // shared `&World` (never `&mut`) is all that is needed to enumerate the
+        // matched archetypes.
+        let world_ref: &World = unsafe { &*world };
+        let archetypes = self.matched_archetypes(world_ref);
+        // SAFETY: every id in `archetypes` came from `matched_archetypes`, so it
+        // satisfies `D::matches`/`F::matches`; the caller upholds non-aliasing
+        // of the fetched columns for the whole (scope-joined) dispatch.
+        unsafe {
+            crate::query::par::par_for_each_raw::<D, F, Func>(
+                world,
+                &self.data_state,
+                &self.filter_state,
+                &archetypes,
+                last_run,
+                this_run,
+                pool,
+                batch_size,
+                func,
+            );
+        }
+    }
+
     /// Visit every matched row in parallel over a shared view of `world`
     /// (design §7 par_iter), calling `func` once per row.
     ///
@@ -246,25 +301,12 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
     {
         let last_run = world.last_change_tick();
         let this_run = world.change_tick();
-        let archetypes = self.matched_archetypes(world);
         let world_ptr = (world as *const World).cast_mut();
         // SAFETY: `D: ReadOnlyQueryData`, so no `&mut` term is ever formed and
-        // the shared `&World` borrow is sufficient for every batch task; the
-        // pointer stays valid for the whole (scope-joined) call. Every id in
-        // `archetypes` came from `matched_archetypes`, satisfying the match
-        // contract required by the driver.
+        // the shared `&World` borrow keeps the world live for the whole
+        // (scope-joined) call; several read-only passes may coexist.
         unsafe {
-            crate::query::par::par_for_each_raw::<D, F, Func>(
-                world_ptr,
-                &self.data_state,
-                &self.filter_state,
-                &archetypes,
-                last_run,
-                this_run,
-                pool,
-                batch_size,
-                &func,
-            );
+            self.par_for_each_from_ptr(world_ptr, last_run, this_run, pool, batch_size, &func);
         }
     }
 
@@ -287,25 +329,12 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
     {
         let last_run = world.last_change_tick();
         let this_run = world.change_tick();
-        let archetypes = self.matched_archetypes(world);
         let world_ptr = world as *mut World;
         // SAFETY: `world` is exclusively borrowed, so the raw pointer is the
         // sole route to the world for the whole dispatch; disjoint batches make
-        // each `&mut` term unique. Every id in `archetypes` came from
-        // `matched_archetypes`, satisfying the match contract required by the
-        // driver.
+        // each `&mut` term unique across threads.
         unsafe {
-            crate::query::par::par_for_each_raw::<D, F, Func>(
-                world_ptr,
-                &self.data_state,
-                &self.filter_state,
-                &archetypes,
-                last_run,
-                this_run,
-                pool,
-                batch_size,
-                &func,
-            );
+            self.par_for_each_from_ptr(world_ptr, last_run, this_run, pool, batch_size, &func);
         }
     }
 }

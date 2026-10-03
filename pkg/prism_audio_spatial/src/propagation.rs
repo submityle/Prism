@@ -70,6 +70,7 @@
 use bevy_math::{Vec3, ops};
 use prism_audio_core::math::{Sample, db_to_linear};
 
+use crate::band_spectrum::BandGains;
 use crate::doppler::SPEED_OF_SOUND_MPS;
 use crate::geometry::{Emitter, Listener};
 use crate::occlusion::OcclusionFactors;
@@ -210,6 +211,19 @@ pub struct PropagationPath {
     /// Low-pass corner (Hz) colouring this arrival. [`FULL_BAND_CUTOFF_HZ`]
     /// means "unfiltered"; consumers clamp to Nyquist.
     pub cutoff_hz: Sample,
+    /// Per-band linear gains (low / mid / high) giving the frequency-dependent
+    /// spectral shape of this arrival, each in `[0, 1]`.
+    ///
+    /// This is the richer, three-band sibling of [`Self::cutoff_hz`]: where
+    /// `cutoff_hz` describes a single first-order low-pass corner, `bands`
+    /// captures the full propagation colour -- material-filtered reflection,
+    /// partition transmission, frequency-dependent air absorption, and edge
+    /// diffraction -- that the real-time voice renders with a three-band
+    /// crossover. [`BandGains::UNITY`] is spectrally flat ("unfiltered").
+    ///
+    /// The gains are *relative* shaping applied on top of the broadband
+    /// [`Self::gain`]; use [`Self::effective_bands`] for the combined product.
+    pub bands: BandGains,
     /// Listener-local unit direction the arrival comes from.
     pub direction: Vec3,
 }
@@ -221,6 +235,7 @@ impl PropagationPath {
         delay_seconds: 0.0,
         gain: 0.0,
         cutoff_hz: FULL_BAND_CUTOFF_HZ,
+        bands: BandGains::SILENT,
         direction: Vec3::NEG_Z,
     };
 
@@ -229,6 +244,18 @@ impl PropagationPath {
     #[must_use]
     pub fn delay_samples(&self, sample_rate: u32) -> Sample {
         self.delay_seconds.max(0.0) * (sample_rate as Sample)
+    }
+
+    /// The effective per-band linear gains of this arrival: the broadband
+    /// [`Self::gain`] scaled into each band of [`Self::bands`].
+    ///
+    /// This is the value the real-time voice applies to the three-band split
+    /// of the signal, combining distance/level attenuation (the scalar
+    /// [`Self::gain`]) with the propagation colour ([`Self::bands`]).
+    #[inline]
+    #[must_use]
+    pub fn effective_bands(&self) -> BandGains {
+        self.bands.scaled(self.gain)
     }
 }
 
@@ -307,6 +334,7 @@ impl PropagationBackend for FreeFieldBackend {
             delay_seconds: local.distance / SPEED_OF_SOUND_MPS,
             gain: 1.0,
             cutoff_hz: FULL_BAND_CUTOFF_HZ,
+            bands: BandGains::UNITY,
             direction: local.direction,
         };
 

@@ -34,6 +34,7 @@ use core::cmp::Ordering;
 use bevy_math::ops;
 use bevy_math::Vec3;
 use prism_audio_core::math::Sample;
+use prism_audio_spatial::BandGains;
 use prism_audio_spatial::doppler::SPEED_OF_SOUND_MPS;
 use prism_audio_spatial::geometry::{Emitter, Listener};
 use prism_audio_spatial::propagation::{PathKind, PropagationPath, FULL_BAND_CUTOFF_HZ};
@@ -123,6 +124,7 @@ pub fn resolve_reflections(
             delay_seconds: path_length / SPEED_OF_SOUND_MPS,
             gain,
             cutoff_hz: FULL_BAND_CUTOFF_HZ,
+            bands: BandGains::UNITY,
             direction: local.direction,
         };
         if !is_duplicate(&paths, &candidate) {

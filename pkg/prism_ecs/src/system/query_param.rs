@@ -110,6 +110,73 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
     {
         self.iter().next().is_none()
     }
+
+    /// Visit every matched row in parallel with shared access, dispatching
+    /// disjoint row batches onto `pool`'s work-stealing threads (design §7
+    /// par_iter / §8.3 system-internal chunk parallelism).
+    ///
+    /// Available only when every data term is read-only (`D: `[`ReadOnlyQueryData`]),
+    /// so several parallel passes may coexist. Rows are partitioned into batches
+    /// of at most `batch_size` (clamped to `>= 1`); the call returns only after
+    /// every batch has completed. `func` runs concurrently and must be
+    /// `Send + Sync`.
+    #[cfg(feature = "multi_thread")]
+    #[inline]
+    pub fn par_for_each<Func>(&self, pool: &prism_tasks::TaskPool, batch_size: usize, func: Func)
+    where
+        D: ReadOnlyQueryData,
+        Func: Fn(D::Item<'_>) + Send + Sync,
+    {
+        // SAFETY: `self.world` is live for `'w`; `D: ReadOnlyQueryData` means no
+        // `&mut` term is ever formed, and this system's declared read access
+        // (upheld by the scheduler's conflict analysis) guarantees nothing
+        // writes the columns we read for the duration of the dispatch.
+        unsafe {
+            self.state.par_for_each_from_ptr(
+                self.world.as_ptr(),
+                self.world.last_run(),
+                self.world.this_run(),
+                pool,
+                batch_size,
+                &func,
+            );
+        }
+    }
+
+    /// Visit every matched row in parallel with exclusive access, permitting
+    /// `&mut T` data terms (design §7 par_iter / §8.3 chunk 子作业).
+    ///
+    /// Takes `&mut self`, so the borrow checker forbids a second concurrent
+    /// dispatch of the same query. Rows are partitioned into disjoint batches of
+    /// at most `batch_size` (clamped to `>= 1`); because the batches never
+    /// overlap, the `&mut` references different threads form never alias the
+    /// same column slot. The call returns only after every batch has completed.
+    #[cfg(feature = "multi_thread")]
+    #[inline]
+    pub fn par_for_each_mut<Func>(
+        &mut self,
+        pool: &prism_tasks::TaskPool,
+        batch_size: usize,
+        func: Func,
+    ) where
+        Func: Fn(D::Item<'_>) + Send + Sync,
+    {
+        // SAFETY: `self.world` is live for `'w`; `&mut self` makes this the sole
+        // live dispatch of this query, and the system's declared write access
+        // (upheld by the scheduler's conflict analysis) guarantees nothing else
+        // touches the columns we write; disjoint batches keep each `&mut` term
+        // unique across threads for the duration of the dispatch.
+        unsafe {
+            self.state.par_for_each_from_ptr(
+                self.world.as_ptr(),
+                self.world.last_run(),
+                self.world.this_run(),
+                pool,
+                batch_size,
+                &func,
+            );
+        }
+    }
 }
 
 impl<'w, 's, D: ReadOnlyQueryData, F: QueryFilter> IntoIterator for &Query<'w, 's, D, F> {

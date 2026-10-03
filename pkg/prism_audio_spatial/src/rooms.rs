@@ -73,6 +73,7 @@
 use bevy_math::{Vec3, ops};
 use prism_audio_core::math::{MIN_AUDIBLE_GAIN, Sample};
 
+use crate::band_spectrum::BandGains;
 use crate::doppler::SPEED_OF_SOUND_MPS;
 use crate::geometry::{Emitter, Listener};
 use crate::occlusion::OcclusionFactors;
@@ -461,6 +462,7 @@ impl PropagationBackend for RoomNetwork<'_> {
                 delay_seconds: local.distance / SPEED_OF_SOUND_MPS,
                 gain: 1.0,
                 cutoff_hz: FULL_BAND_CUTOFF_HZ,
+                bands: BandGains::UNITY,
                 direction: local.direction,
             };
             return PropagationSummary {
@@ -479,6 +481,7 @@ impl PropagationBackend for RoomNetwork<'_> {
             delay_seconds: local.distance / SPEED_OF_SOUND_MPS,
             gain: wall_gain.clamp(0.0, 1.0),
             cutoff_hz: FULL_BAND_CUTOFF_HZ,
+            bands: BandGains::UNITY,
             direction: local.direction,
         };
         count += 1;
@@ -507,6 +510,7 @@ impl PropagationBackend for RoomNetwork<'_> {
                 delay_seconds: (leg_in + leg_out) / SPEED_OF_SOUND_MPS,
                 gain,
                 cutoff_hz: FULL_BAND_CUTOFF_HZ,
+                bands: BandGains::UNITY,
                 direction,
             };
             count += 1;
