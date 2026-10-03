@@ -1,0 +1,19 @@
+[package]
+name = "prism_window"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.0"
+description = "Prism window kernel: the backend-agnostic model of window configuration, per-window runtime state, display/monitor info, present mode, and window-level events. M0 delivers physical/logical geometry with scale-factor conversions, window resolution with resize constraints, window attributes/state with event application, cursor options, monitor/video-mode descriptors, and a unified Copy WindowEvent stream. Pure, deterministic, no_std + alloc, no unsafe; OS/windowing backends (winit, SDL, native) live in separate crates and feed events in and apply commands out. Borrows the shape of mature window layers without copying their source."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+
+[features]
+default = ["std"]
+# `std` is reserved for host-side backends and helpers; the M0 state model,
+# geometry math, constraint clamping, and event types are fully no_std + alloc.
+std = []
+
+[lints]
+workspace = true
