@@ -205,6 +205,10 @@ pub mod tet_vertex_reorder;
 pub use tet_vertex_reorder::{
     reorder_tet_vertex_graph, reorder_tet_vertices, vertex_bandwidth, TetVertexReorder,
 };
+pub mod tet_fem_basis;
+pub use tet_fem_basis::{
+    build_tet_fem_basis, TetFemBasis, TetFemBasisParams, TetFemElement,
+};
 
 /// A handle into a [`ShapeRegistry`].
 ///
