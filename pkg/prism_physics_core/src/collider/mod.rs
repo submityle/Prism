@@ -183,6 +183,8 @@ pub mod tet_boundary;
 pub use tet_boundary::{extract_tet_boundary, TetBoundary};
 pub mod tet_conform;
 pub use tet_conform::{conform_tet_boundary, TetConformParams, TetConformResult};
+pub mod tet_mass;
+pub use tet_mass::{compute_tet_mass_properties, TetMassParams, TetMassProperties};
 
 /// A handle into a [`ShapeRegistry`].
 ///
