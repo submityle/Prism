@@ -45,7 +45,7 @@ use wgpu::{
     TextureViewDescriptor,
 };
 
-use super::abi::{GpuWaterFoamParams, GpuWaterSpectrumParams, GpuWaterSweParams};
+use super::abi::{GpuPbfParams, GpuWaterFoamParams, GpuWaterSpectrumParams, GpuWaterSweParams};
 
 /// Generous upper bound (microseconds) for a single water compute pass over the
 /// benchmarked tile sizes. A real dispatch over an `N <= 512` grid completes far
@@ -1034,6 +1034,267 @@ fn foam_advect_pass_gpu_budget_is_measured() {
         assert!(
             advect_us.is_finite() && advect_us > 0.0 && advect_us < MAX_PASS_MICROS,
             "foam advect @ {n}x{n} measured {advect_us} us is not a healthy bounded timing"
+        );
+    }
+}
+
+/// Compiles `water_pbf.wesl` and returns its `Wgsl` translation. The
+/// position-based-fluids density solve (`water_pbf_density_solve`) lives in this
+/// module; the bench shares one compiled translation with any sibling pass.
+fn compile_pbf_wgsl() -> String {
+    let mut cache = ShaderCache::new((), keep_wgsl);
+    let id = AssetId::Uuid {
+        uuid: Uuid::from_u128(0x5052_4953_4d5f_4245_4e43_4850_4246_0001),
+    };
+    cache.set_shader(
+        id,
+        Shader::from_wesl(
+            include_str!("../shaders/water_pbf.wesl"),
+            "embedded://prism_render_scene/shaders/water_pbf.wesl",
+        ),
+    );
+    let module = cache
+        .get(0, id, &[])
+        .unwrap_or_else(|error| panic!("water_pbf.wesl failed to compile: {error}"));
+    (*module).clone()
+}
+
+/// Particle-cube side lengths the `PBF` density solve is timed at. A side `s`
+/// packs `s^3` particles (`16^3 = 4096`, `25^3 = 15625`, `40^3 = 64000`),
+/// bracketing the design doc's "local ~1e5 particle" `PBF`/`FLIP` budget
+/// (`docs/prism_water_engine_design_zh.md` §12). Timing all three shows how the
+/// per-particle solve scales with the particle population and its neighbourhood
+/// density.
+const PBF_BENCH_SIDES: [u32; 3] = [16, 25, 40];
+
+/// Packs a deterministic particle set into the shader's single `hash` storage
+/// buffer. The layout mirrors `water_pbf.wesl` (and the parity test's
+/// `build_pbf_hash`): `hash[2*c]` is cell `c`'s start offset into the index
+/// region, `hash[2*c + 1]` its particle count, and the index region
+/// (`hash[2*cell_count + start + s]`) lists the binned particle indices in
+/// cell-major, ascending-index order. Binning here (rather than reaching into
+/// the architecture crate) keeps the bench self-contained; the particle layout
+/// is chosen so every cell the solve gathers is populated, so the timed pass
+/// does the same 27-cell neighbourhood work a production frame would.
+fn pbf_bench_hash(
+    positions: &[[f32; 4]],
+    origin: [f32; 3],
+    cell_size: f32,
+    nx: u32,
+    ny: u32,
+    nz: u32,
+) -> Vec<u32> {
+    let cell_count = (nx * ny * nz) as usize;
+    let mut cells: Vec<Vec<u32>> = vec![Vec::new(); cell_count];
+    let mut p = 0usize;
+    while p < positions.len() {
+        let pos = positions[p];
+        let lx = pos[0] - origin[0];
+        let ly = pos[1] - origin[1];
+        let lz = pos[2] - origin[2];
+        if lx >= 0.0 && ly >= 0.0 && lz >= 0.0 {
+            let cx = (lx / cell_size) as u32;
+            let cy = (ly / cell_size) as u32;
+            let cz = (lz / cell_size) as u32;
+            if cx < nx && cy < ny && cz < nz {
+                let flat = (cz * nx * ny + cy * nx + cx) as usize;
+                cells[flat].push(p as u32);
+            }
+        }
+        p += 1;
+    }
+    let mut hash = vec![0u32; 2 * cell_count];
+    let mut index_region: Vec<u32> = Vec::new();
+    let mut flat = 0usize;
+    while flat < cell_count {
+        hash[2 * flat] = index_region.len() as u32;
+        hash[2 * flat + 1] = cells[flat].len() as u32;
+        for &idx in &cells[flat] {
+            index_region.push(idx);
+        }
+        flat += 1;
+    }
+    hash.extend_from_slice(&index_region);
+    hash
+}
+
+/// Builds a deterministic, compressed `PBF` particle cube of `side^3` particles
+/// plus its spatial hash and solve parameters. Particles sit on a lattice at
+/// half the smoothing radius, so every particle is over-dense (a non-trivial
+/// constraint) and its 27-cell neighbourhood is populated — the solve walks the
+/// same heavy gather a production incompressibility step would. The grid is
+/// sized with a one-cell margin so no particle lands on or past the far
+/// boundary. The `w` lane carries a distinct per-particle payload. Timing does
+/// not depend on the exact positions, only on the full population being
+/// exercised with real neighbours.
+fn pbf_bench_state(side: u32) -> (Vec<[f32; 4]>, Vec<u32>, GpuPbfParams) {
+    let cell_size = 1.0_f32;
+    let spacing = 0.5_f32;
+    let origin = [0.0_f32, 0.0, 0.0];
+    let s = side as usize;
+    let count = s * s * s;
+    let base = 0.25_f32;
+
+    let mut positions: Vec<[f32; 4]> = Vec::with_capacity(count);
+    let mut z = 0usize;
+    while z < s {
+        let mut y = 0usize;
+        while y < s {
+            let mut x = 0usize;
+            while x < s {
+                let px = base + x as f32 * spacing;
+                let py = base + y as f32 * spacing;
+                let pz = base + z as f32 * spacing;
+                let w = positions.len() as f32 + 0.5;
+                positions.push([px, py, pz, w]);
+                x += 1;
+            }
+            y += 1;
+        }
+        z += 1;
+    }
+
+    let max_coord = base + (side as f32 - 1.0) * spacing;
+    let cells_per_axis = (max_coord / cell_size) as u32 + 2;
+    let grid_nx = cells_per_axis;
+    let grid_ny = cells_per_axis;
+    let grid_nz = cells_per_axis;
+
+    let hash = pbf_bench_hash(&positions, origin, cell_size, grid_nx, grid_ny, grid_nz);
+
+    let params = GpuPbfParams {
+        grid_origin: origin,
+        cell_size,
+        rest_density: 20.0,
+        particle_mass: 1.0,
+        smoothing_radius: cell_size,
+        relaxation_epsilon: 0.01,
+        artificial_pressure_k: 0.1,
+        artificial_pressure_delta_q: 0.2,
+        artificial_pressure_n: 4,
+        particle_count: count as u32,
+        grid_nx,
+        grid_ny,
+        grid_nz,
+        _pad: 0,
+    };
+    (positions, hash, params)
+}
+
+/// Times one `water_pbf_density_solve` pass over a `side^3` particle cube and
+/// returns the median measured microseconds across [`TIMED_RUNS`] runs. The
+/// kernel declares its four resources on `@group(0)` (`positions_in`,
+/// `positions_out`, `hash`, `params`) and runs one invocation per particle at
+/// `@workgroup_size(64)`, so the dispatch is `ceil(count / 64)` workgroups — the
+/// same launch the sibling parity test (`gpu_tests::dispatch_pbf`) already
+/// proved numerically faithful.
+fn measure_pbf_density(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    wgsl: &str,
+    entry: &str,
+    side: u32,
+) -> f64 {
+    let (positions, hash, params) = pbf_bench_state(side);
+    let vec4_bytes = (positions.len() * size_of::<[f32; 4]>()) as u64;
+
+    let module = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("bench_pbf_density_solve"),
+        source: ShaderSource::Wgsl(wgsl.into()),
+    });
+    let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: Some("bench_pbf_density_solve"),
+        layout: None,
+        module: &module,
+        entry_point: Some(entry),
+        compilation_options: PipelineCompilationOptions::default(),
+        cache: None,
+    });
+
+    let positions_in = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("bench_pbf_positions_in"),
+        contents: bytemuck::cast_slice(&positions),
+        usage: BufferUsages::STORAGE,
+    });
+    let positions_out = device.create_buffer(&BufferDescriptor {
+        label: Some("bench_pbf_positions_out"),
+        size: vec4_bytes,
+        usage: BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    });
+    let hash_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("bench_pbf_hash"),
+        contents: bytemuck::cast_slice(&hash),
+        usage: BufferUsages::STORAGE,
+    });
+    let param_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("bench_pbf_params"),
+        contents: bytemuck::bytes_of(&params),
+        usage: BufferUsages::UNIFORM,
+    });
+
+    let layout = pipeline.get_bind_group_layout(0);
+    let bind_group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("bench_pbf_bind_group"),
+        layout: &layout,
+        entries: &[
+            BindGroupEntry {
+                binding: 0,
+                resource: positions_in.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 1,
+                resource: positions_out.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 2,
+                resource: hash_buf.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 3,
+                resource: param_buf.as_entire_binding(),
+            },
+        ],
+    });
+
+    let groups = params.particle_count.div_ceil(64);
+    let timer = PassTimer::new(device);
+    time_dispatch(device, queue, &pipeline, &bind_group, groups, 1, &timer)
+}
+
+/// Measures the `PBF` density-constraint solve (`water_pbf_density_solve`) on a
+/// real device across [`PBF_BENCH_SIDES`] and asserts each pass takes a finite,
+/// strictly positive, bounded time. The design doc
+/// (`docs/prism_water_engine_design_zh.md` §12) budgets the `FLIP`/`PBF` sim at
+/// `<= 2-4 ms` for a local `~1e5` particle domain as a **design target, not a
+/// measured value**; this turns that line into an actual on-device measurement
+/// of the solve kernel. The printed medians are the numbers the design-target
+/// budget should be re-tuned against.
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the measured budget (and the skip notice) must reach the test log so it can be captured"
+)]
+fn pbf_density_solve_pass_gpu_budget_is_measured() {
+    let Some((device, queue)) = try_timing_device() else {
+        eprintln!(
+            "pbf_density_solve_pass_gpu_budget_is_measured: no timestamp-capable wgpu adapter, skipping on-device timing"
+        );
+        return;
+    };
+
+    let wgsl = compile_pbf_wgsl();
+    let entry = find_entry_point(&wgsl, "pbf_density_solve");
+
+    for side in PBF_BENCH_SIDES {
+        let count = side * side * side;
+        let solve_us = measure_pbf_density(&device, &queue, &wgsl, &entry, side);
+        eprintln!(
+            "water PBF density solve budget @ {count} particles (side {side}): solve = {solve_us:.2} us (measured, median of {TIMED_RUNS})"
+        );
+        assert!(
+            solve_us.is_finite() && solve_us > 0.0 && solve_us < MAX_PASS_MICROS,
+            "pbf density solve @ {count} particles measured {solve_us} us is not a healthy bounded timing"
         );
     }
 }
