@@ -38,6 +38,7 @@ pub mod surface_bindings;
 pub mod surface_mesh;
 pub mod surface_pass;
 pub mod swe_kernel;
+pub mod waterline_kernel;
 
 pub use buffers::{
     AsyncFrameState, BufferParity, FrameSlot, PipelineError, SlotState, WaterBufferCounts,
@@ -64,6 +65,10 @@ pub use render_fx_kernel::{
 
 pub use swe_kernel::{
     dispatch_swe_step, SweStepOutput, SWE_VEL_FLOATS, SWE_VEL_STRIDE, WATER_SWE_WESL,
+};
+
+pub use waterline_kernel::{
+    dispatch_waterline_mask, WATERLINE_OUT_FLOATS, WATERLINE_SCENE_FLOATS, WATER_WATERLINE_WESL,
 };
 
 pub use spectral_plan::{
