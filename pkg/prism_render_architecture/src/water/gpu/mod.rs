@@ -39,6 +39,7 @@ pub mod fft_plan;
 pub mod fft_stage_kernel;
 pub mod flip_mac_divergence_kernel;
 pub mod flip_mac_faces_normalize_kernel;
+pub mod flip_mac_g2p_kernel;
 pub mod flip_mac_p2g_kernel;
 pub mod flip_mac_pressure_kernel;
 pub mod flip_mac_project_kernel;
@@ -142,6 +143,8 @@ pub use flip_mac_divergence_kernel::{
 pub use flip_mac_faces_normalize_kernel::{
     dispatch_mac_faces_normalize, FacesNormalizeParams, WATER_FLIP_MAC_FACES_NORMALIZE_WESL,
 };
+
+pub use flip_mac_g2p_kernel::{dispatch_mac_g2p, FlipG2PParams, WATER_FLIP_MAC_G2P_WESL};
 
 pub use flip_mac_p2g_kernel::{
     dispatch_mac_p2g, FlipP2GParams, FLIP_P2G_PARTICLE_FLOATS, WATER_FLIP_MAC_P2G_WESL,
